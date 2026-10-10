@@ -2,6 +2,7 @@
 import { LoaderCircle, RefreshCw } from 'lucide-react';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
+import { cn } from '../lib/utils';
 import { Button } from './ui/button';
 
 export function RefreshBar({
@@ -9,11 +10,13 @@ export function RefreshBar({
   isFetching,
   dataUpdatedAt,
   staleAfterMs,
+  className,
 }: {
   onRefresh: () => void;
   isFetching: boolean;
   dataUpdatedAt: number;
   staleAfterMs: number;
+  className?: string;
 }) {
   const now = useNow();
   const never = dataUpdatedAt === 0;
@@ -21,14 +24,14 @@ export function RefreshBar({
   const shownAt = dataUpdatedAt > now ? now : dataUpdatedAt;
   const stale = !never && now - dataUpdatedAt > staleAfterMs;
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className={cn('flex flex-wrap items-center gap-2', className)}>
       <Button
         type="button"
         variant="outline"
         size="sm"
         aria-disabled={isFetching}
         aria-busy={isFetching}
-        className="aria-disabled:cursor-default aria-disabled:opacity-50"
+        className="aria-disabled:cursor-default aria-disabled:opacity-50 max-md:h-10"
         onClick={() => {
           if (!isFetching) onRefresh();
         }}

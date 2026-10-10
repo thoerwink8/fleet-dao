@@ -171,7 +171,7 @@ describe('推送断了：顶栏照实说，手机上也看得见', () => {
     renderApp(
       <>
         <LiveSync />
-        <Topbar onMenu={() => {}} onSearch={() => {}} />
+        <Topbar onSearch={() => {}} />
       </>,
       { api },
     );

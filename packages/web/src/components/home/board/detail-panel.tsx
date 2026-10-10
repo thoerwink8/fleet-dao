@@ -47,7 +47,7 @@ export function DetailPanel({
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: 28 }}
       transition={{ type: 'spring', stiffness: 420, damping: 38 }}
-      className="absolute top-3 right-3 bottom-3 z-20 flex w-98 max-w-full flex-col overflow-hidden rounded-2xl border bg-popover/95 shadow-2xl backdrop-blur-xl"
+      className="absolute top-14 right-3 bottom-3 z-20 flex w-98 max-w-full flex-col overflow-hidden rounded-2xl border bg-popover/95 shadow-2xl backdrop-blur-xl"
       aria-label="详情"
       data-board-detail
     >

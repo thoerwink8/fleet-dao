@@ -64,7 +64,7 @@ describe('读不到时照实说，不冒充「没有」', () => {
   });
 
   test('顶栏的铃：没读成显示「!」，不显示成 0 条', async () => {
-    renderApp(<Topbar onMenu={() => undefined} onSearch={() => undefined} />, {
+    renderApp(<Topbar onSearch={() => undefined} />, {
       api: failing('notifications'),
     });
     expect(await screen.findByRole('button', { name: '提醒没读成' })).toBeTruthy();

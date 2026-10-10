@@ -11,22 +11,31 @@ import type { HomeHealth } from './types';
 
 type Kind = 'ok' | 'warn' | 'muted' | 'bad';
 
+/**
+ * 每格的详情句怎么露：always 一直写；wide 只在 ≥1536 写（顶栏里地方紧，窄一点只留名字和颜色）；never 不写。
+ * 不写的时候整格的悬停提示（title）里仍带着这句，颜色（提示黄、失败红）不受影响，问题照样一眼看得见。
+ */
+export type DetailShow = 'always' | 'wide' | 'never';
+
 function Chip({
   icon: Icon,
   label,
   detail,
   kind,
+  detailShow,
 }: {
   icon: typeof Gauge;
   label: string;
   detail: string;
   kind: Kind;
+  detailShow: DetailShow;
 }) {
   return (
     <span
       data-health-chip={kind}
+      title={detailShow === 'always' ? undefined : `${label}：${detail}`}
       className={cn(
-        'inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs',
+        'inline-flex max-w-full shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs',
         kind === 'ok' && 'border-border text-muted-foreground',
         kind === 'warn' && 'border-st-wait/45 bg-st-wait/10 text-ink-wait',
         kind === 'bad' && 'border-st-fail/50 bg-st-fail/10 text-ink-fail',
@@ -43,7 +52,14 @@ function Chip({
       <Icon className="size-3 opacity-70" aria-hidden />
       <span className="shrink-0 font-medium whitespace-nowrap">{label}</span>
       {/* 详情宽度、字号换成 max-w-health-detail、text-caption。 */}
-      <span className="min-w-0 max-w-health-detail truncate text-caption opacity-90" title={detail}>
+      <span
+        className={cn(
+          'min-w-0 max-w-health-detail truncate text-caption opacity-90',
+          detailShow === 'wide' && 'hidden 2xl:inline',
+          detailShow === 'never' && 'hidden',
+        )}
+        title={detail}
+      >
         {detail}
       </span>
     </span>
@@ -89,26 +105,42 @@ function engineWords(engine: HomeHealth['engine']): { label: string; detail: str
   }
 }
 
-export function HealthStrip({ health, className }: { health: HomeHealth; className?: string }) {
+export function HealthStrip({
+  health,
+  className,
+  detail = 'always',
+}: {
+  health: HomeHealth;
+  className?: string;
+  detail?: DetailShow;
+}) {
   return (
     <div
       role="status"
       aria-label="持续状态"
       data-health-strip
-      className={cn('flex flex-wrap items-center gap-2', className)}
+      className={cn('flex items-center gap-2', detail === 'wide' ? 'flex-nowrap' : 'flex-wrap', className)}
     >
-      <Chip icon={Gauge} label="额度" detail={health.quota.detail} kind={kindOfQuota(health.quota.state)} />
+      <Chip
+        icon={Gauge}
+        label="额度"
+        detail={health.quota.detail}
+        kind={kindOfQuota(health.quota.state)}
+        detailShow={detail}
+      />
       <Chip
         icon={Waypoints}
         label="中转"
         detail={health.routes.detail}
         kind={kindOfRoutes(health.routes.state)}
+        detailShow={detail}
       />
       <Chip
         icon={Power}
         label={engineWords(health.engine).label}
         detail={engineWords(health.engine).detail}
         kind={kindOfEngine(health.engine.state)}
+        detailShow={detail}
       />
     </div>
   );

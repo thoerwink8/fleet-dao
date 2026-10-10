@@ -85,7 +85,10 @@ test.describe('看板多机', () => {
     );
     expect(await page.locator('main a[href^="/tasks/"]').count()).toBe(0);
     expect(await page.locator('main a[href^="/notifications"]').count()).toBe(0);
-    // 要你拍的：去答不是链接、置灰
+    // 要你拍的在右上角抽屉里（≥1920 本来就开着，更窄要点开；已经开着的再点就收起了）：去答不是链接、置灰
+    if (!(await page.locator('[data-home-drawer]').count())) {
+      await page.getByRole('button', { name: /^要你拍的 \d+ 条/ }).click();
+    }
     expect(await page.locator('[data-decision-card] a').count()).toBe(0);
     for (const b of await page.locator('[data-remote-disabled]').all()) await expect(b).toBeDisabled();
     // 提醒铃铛是本台（法国）的数据：看远程环境时不露出来

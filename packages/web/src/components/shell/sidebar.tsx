@@ -60,9 +60,11 @@ function Item({
       // 别的导航项挂在它下面时（/routing 和 /routing/status）只在正好是它时亮，不然两项一起亮
       end={item.to === '/' || NAV_ITEMS.some((o) => o.to.startsWith(`${item.to}/`))}
       onClick={onNavigate}
+      // 收成图标栏时没有字：名字交给读屏（悬停提示照旧）
+      aria-label={collapsed ? item.label : undefined}
       className={({ isActive }) =>
         cn(
-          'group relative flex h-8 items-center gap-2.5 rounded-lg px-2.5 text-sub text-muted-foreground transition-colors',
+          'group relative flex h-10 items-center md:h-8 gap-2.5 rounded-lg px-2.5 text-sub text-muted-foreground transition-colors',
           'hover:bg-accent hover:text-foreground',
           isActive && 'bg-accent font-medium text-foreground',
           collapsed && 'justify-center px-0',

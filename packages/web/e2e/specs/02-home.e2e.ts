@@ -31,13 +31,29 @@ async function midZoom(page: import('@playwright/test').Page) {
   await page.getByRole('button', { name: /^中景/ }).click();
 }
 
+/**
+ * 要你拍的、做完的收在画布右上角的抽屉里（#1801）：≥1920 停靠成右侧一列、本来就开着；更窄浮在画布上、要点按钮开；
+ * 手机是列表顶上一条横条，点开是底部抽屉。统一在这里开：已经开着的不再点（再点就收起了）。
+ */
+async function openDrawer(page: import('@playwright/test').Page, tab: '要你拍的' | '做完的' = '要你拍的') {
+  const phone = (page.viewportSize()?.width ?? 1920) < 768;
+  const opened = phone ? page.getByRole('dialog') : page.locator('[data-home-drawer]');
+  if (!(await opened.count())) {
+    if (phone) await page.locator('[data-home-strip]').click();
+    else await page.getByRole('button', { name: new RegExp(`^${tab}.*打开抽屉`) }).click();
+  }
+  await page.getByRole('tab', { name: new RegExp(`^${tab}`) }).click();
+}
+
 test.describe('主页', () => {
   test.beforeEach(async ({ login }) => login());
 
   test('三块都显示真库里的东西，条数和后端 /api/home 一致', async ({ page, api, shot }) => {
     const home = (await api.get('/api/home')) as Home;
     await page.goto('/');
-    await expect(page.getByRole('heading', { name: '要你拍的' })).toBeVisible();
+    // 画布右上角的抽屉按钮写着要你拍的条数
+    await expect(page.getByRole('button', { name: /^要你拍的 \d+ 条/ })).toBeVisible();
+    await openDrawer(page);
 
     // 要你拍的：一条待批（库里 approval 通知）和 decision 级通知。页面上最多 3 条，剩下的写「还有 N 条」
     expect(home.decisions.map((d) => d.kind)).toContain('approval');
@@ -49,7 +65,8 @@ test.describe('主页', () => {
     await expect(page.locator('[data-flow-board]')).toBeVisible();
     await expect(page.locator('.react-flow__node[data-id^="ticket:"]')).toHaveCount(home.running.length);
 
-    // 做完的：合进去的 PR #39，标题是它挂的那张单的标题
+    // 做完的（抽屉的另一页）：合进去的 PR #39，标题是它挂的那张单的标题
+    await openDrawer(page, '做完的');
     await expect(page.getByRole('link', { name: /PR #39 README 加一行当前时间/ })).toBeVisible();
     expect(home.done.map((d) => d.prNumber)).toContain(39);
 
@@ -92,18 +109,22 @@ test.describe('主页', () => {
     await expect(page.getByRole('heading', { name: /登录页加验证码/ })).toBeVisible();
   });
 
-  // xl（1280）起就左右分栏（指挥官 2026-10-07 定：1366×768 一进来就要看到看板），1920、1366 两个视口都是
-  test('宽屏和笔记本上「要你拍的」「做完的」在左列、看板在右，看板一进来就在首屏里', async ({ page }) => {
+  // 画布为主体（#1801，创始人 2026-10-11「空间以画布为主体」）：正文区整块是画布，没有左列，
+  // 「要你拍的」「做完的」收在右上角的抽屉里；1920、1366 两个视口都一样
+  test('画布占满正文区、一进来就在首屏里；要你拍的、做完的在右上角抽屉里', async ({ page }) => {
     await page.goto('/');
-    const decisions = await page.getByRole('heading', { name: '要你拍的' }).boundingBox();
-    const done = await page.getByRole('heading', { name: '做完的' }).boundingBox();
-    const flow = await page.getByRole('heading', { name: '在跑的' }).boundingBox();
-    expect(decisions && done && flow && decisions.x < flow.x && done.x < flow.x).toBe(true);
+    const main = await page.getByRole('main').boundingBox();
+    const canvas = await page.locator('[data-home-canvas]').boundingBox();
+    expect(main && canvas, '画布和正文区都量得到').toBeTruthy();
+    if (!main || !canvas) return;
+    expect(canvas.x, '画布左边贴着正文区，没有左列').toBeLessThanOrEqual(main.x + 1);
+    expect(canvas.y, '画布顶边贴着正文区，没有标题行').toBeLessThanOrEqual(main.y + 1);
+    expect(canvas.height, '画布占满正文区高度').toBeGreaterThanOrEqual(main.height - 2);
     // 看板的画布和第一张单不用滚就看得见
     await expect(page.locator('.react-flow__node[data-id^="ticket:"]').first()).toBeInViewport();
-    const viewport = page.viewportSize();
-    const canvas = await page.locator('[data-flow-board]').first().boundingBox();
-    expect(canvas && viewport && canvas.y < viewport.height / 2).toBe(true);
+    // 抽屉按钮在画布右上角
+    const button = await page.getByRole('button', { name: /^要你拍的 \d+ 条/ }).boundingBox();
+    expect(button && button.x > canvas.x + canvas.width / 2 && button.y < canvas.y + 80).toBe(true);
   });
 
   // 缺陷 D2（#902）在 #914 之后已经不成立：停滞（超时没交活）的 #14 现在落在「动手」、画成红色「出问题了」并写明「动手超时」，
@@ -211,22 +232,32 @@ test.describe('主页：深色主题和手机宽度', () => {
     await shot(page, '02-主页-深色');
   });
 
-  test('手机宽度（390×844）：导航收起、不出现横向滚动条、三块都读得到', async ({ page, shot }) => {
+  test('手机宽度（390×844）：底部导航、不出现横向滚动条、要你拍的在顶上横条里、看板一屏里就有', async ({
+    page,
+    shot,
+  }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto('/');
-    await expect(page.getByRole('heading', { name: '要你拍的' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '在跑的' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '做完的' })).toBeVisible();
-    // 侧边导航在手机上收成抽屉：常驻的那一列看不见
-    await expect(page.locator('aside')).toBeHidden();
+    await expect(page.locator('[data-home-strip]')).toBeVisible();
+    await expect(page.locator('[data-board-tree]')).toBeVisible();
+    // 常驻侧栏在手机上不渲染，换成底部导航；顶栏没有汉堡按钮
+    await expect(page.locator('aside')).toHaveCount(0);
+    await expect(page.getByRole('navigation', { name: '底部导航' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '打开导航' })).toHaveCount(0);
+    // 顶栏总开关状态点看得见
+    await expect(page.locator('header [data-engine-master]')).toBeVisible();
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     expect(overflow, '页面不该比屏幕宽').toBeLessThanOrEqual(1);
+    const main = await page.evaluate(() => {
+      const el = document.querySelector('main');
+      return el ? el.scrollWidth - el.clientWidth : -1;
+    });
+    expect(main, '正文区不横向溢出').toBeLessThanOrEqual(0);
     await shot(page, '02-主页-手机');
-    // 看板在折叠线下面：滚到它再截一张（手机上是树形列表，不是画布）
-    await page.getByRole('heading', { name: '在跑的' }).scrollIntoViewIfNeeded();
-    await page.locator('[data-board-tree]').scrollIntoViewIfNeeded();
-    await expect(page.locator('[data-running-card]').first()).toBeVisible();
-    await shot(page, '02-主页-手机-看板');
+    // 点开横条：底部抽屉里有要你拍的和做完的
+    await openDrawer(page);
+    await expect(page.getByRole('tab', { name: /^做完的/ })).toBeVisible();
+    await shot(page, '02-主页-手机-抽屉');
   });
 
   // 原来 D11（#902）钉的是「手机上要横拖、和页面竖向滚动抢手势」。初版看板在手机上本来就不放画布：
@@ -244,9 +275,13 @@ test.describe('主页：深色主题和手机宽度', () => {
     await expect(page.locator('.react-flow')).toHaveCount(0);
     await expect(page.getByRole('button', { name: '放大' })).toHaveCount(0);
     await expect(tree.locator('[data-flow-lane]')).toHaveCount(3);
-    await expect(tree.locator('[data-running-card]')).toHaveCount(home.running.length);
+    // 一张单一行摘要，默认不展开；点开才有整张卡
+    await expect(tree.locator('[data-ticket-row]')).toHaveCount(home.running.length);
+    await expect(tree.locator('[data-running-card]')).toHaveCount(0);
+    await tree.locator('[data-ticket-toggle]').first().click();
+    await expect(tree.locator('[data-running-card]')).toHaveCount(1);
     const cards = await page.evaluate(() =>
-      [...document.querySelectorAll('[data-board-tree] [data-running-card]')].map((n) => {
+      [...document.querySelectorAll('[data-board-tree] [data-ticket-row]')].map((n) => {
         const r = n.getBoundingClientRect();
         return { left: r.left, right: r.right };
       }),

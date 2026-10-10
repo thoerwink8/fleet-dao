@@ -5,7 +5,6 @@ import {
   Check,
   ChevronsUpDown,
   LogOut,
-  Menu,
   Monitor,
   Moon,
   Search,
@@ -49,28 +48,34 @@ import { Kbd } from '../ui/kbd';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
 import { PaletteSwatch } from './palette-swatch';
+import { TopbarSlot } from './topbar-slot';
 
-export function Topbar({ onMenu, onSearch }: { onMenu(): void; onSearch(): void }) {
+export function Topbar({ onSearch }: { onSearch(): void }) {
   // 选了远程环境：提醒铃铛是本台（法国）的数据，不顶着远程环境的名字露出来
   const { nodeId } = useNodeSelection();
   return (
     <header className="flex h-topbar shrink-0 items-center gap-2 border-b bg-panel/80 px-3 backdrop-blur md:px-4">
-      <Button size="icon" variant="ghost" className="size-8 md:hidden" onClick={onMenu} aria-label="打开导航">
-        <Menu />
-      </Button>
       <EnvSwitcher />
       <EngineMasterBadge />
       <button
         type="button"
         onClick={onSearch}
-        className="ml-1 hidden h-8 w-full max-w-search items-center gap-2 rounded-lg border bg-background/60 px-2.5 text-sub text-muted-foreground transition-colors hover:border-border-strong sm:flex"
+        className="ml-1 hidden h-8 w-full max-w-search items-center gap-2 rounded-lg border bg-background/60 px-2.5 text-sub text-muted-foreground transition-colors hover:border-border-strong 2xl:flex"
       >
         <Search className="size-3.5" aria-hidden />
         <span className="flex-1 text-left">搜任务、页面、操作…</span>
         <Kbd>⌘K</Kbd>
       </button>
+      {/* 页面（主页）放进顶栏的状态条和刷新条；没页面用时是空的 */}
+      <TopbarSlot />
       <div className="ml-auto flex items-center gap-1">
-        <Button size="icon" variant="ghost" className="size-8 sm:hidden" onClick={onSearch} aria-label="搜索">
+        <Button
+          size="icon"
+          variant="ghost"
+          className="size-10 md:size-8 2xl:hidden"
+          onClick={onSearch}
+          aria-label="搜索"
+        >
           <Search />
         </Button>
         <LiveIndicator />
@@ -108,13 +113,13 @@ function EnvSwitcher() {
           variant="ghost"
           data-env-switcher={nodeId ?? 'local'}
           className={cn(
-            'h-8 shrink-0 gap-1.5 px-2 text-sub',
+            'h-10 shrink-0 gap-1.5 px-2 text-sub md:h-8',
             problem || state !== 'fresh' ? 'text-ink-stall' : undefined,
           )}
           aria-label={`现在看的是${label}，点开切换环境`}
         >
           <ServerCog className="size-3.5 opacity-70" aria-hidden />
-          <span className="num max-w-32 truncate font-semibold">{label}</span>
+          <span className="num max-w-24 truncate font-semibold md:max-w-32">{label}</span>
           {nodeId !== null ? (
             <span
               className={cn(
@@ -243,7 +248,7 @@ function NotificationBell() {
         <Button
           size="icon"
           variant="ghost"
-          className="relative size-8"
+          className="relative size-10 md:size-8"
           aria-label={error && !data ? '提醒没读成' : `提醒，${urgent} 条待处理`}
         >
           {urgent ? <BellRing /> : <Bell />}
@@ -361,7 +366,7 @@ function ThemeMenu() {
       <Tooltip>
         <TooltipTrigger asChild>
           <PopoverTrigger asChild>
-            <Button size="icon" variant="ghost" className="size-8" aria-label="主题">
+            <Button size="icon" variant="ghost" className="hidden size-8 md:inline-flex" aria-label="主题">
               <Icon />
             </Button>
           </PopoverTrigger>
@@ -412,7 +417,7 @@ function UserMenu() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="size-8 rounded-full p-0" aria-label="我的账号">
+        <Button variant="ghost" className="size-10 rounded-full p-0 md:size-8" aria-label="我的账号">
           {user?.avatarUrl ? (
             <img src={user.avatarUrl} alt="" className="size-7 rounded-full object-cover" />
           ) : (

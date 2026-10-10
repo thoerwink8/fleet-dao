@@ -9,9 +9,6 @@ import type { HomeFlowStage, HomeHealth, HomeRunning, HomeSlots } from './types'
 // 画布（React Flow + ELK）按需加载：手机上只用树形列表，不必下载它。
 const BoardCanvas = lazy(() => import('./board/board-canvas').then((m) => ({ default: m.BoardCanvas })));
 
-/** 画布高度：宽屏上把「在跑的」那块撑到首屏底边（顶栏、标题区和面板头约 14rem），再矮也留 32rem 看得清。 */
-const CANVAS_HEIGHT = 'max(32rem, calc(100dvh - 14rem))';
-
 function BoardSkeleton() {
   return (
     <div className="grid h-full place-items-center" aria-busy>
@@ -37,8 +34,9 @@ export function RunningBoard({
 }) {
   const mobile = useMediaQuery('(max-width: 767px)');
   if (mobile) return <BoardTree running={running} flow={flow} />;
+  // 画布占满父容器（主页给它正文区的全部高宽），不再自己定高
   return (
-    <div className="relative overflow-hidden rounded-b-xl" style={{ height: CANVAS_HEIGHT }}>
+    <div className="relative h-full min-h-0 w-full overflow-hidden" data-home-canvas>
       <Suspense fallback={<BoardSkeleton />}>
         <BoardCanvas running={running} flow={flow} health={health} slots={slots} />
       </Suspense>
