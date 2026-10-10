@@ -4,7 +4,10 @@
 // 真的接进来**（不是 fake invoke），逐条制造它的每一条明确失败路径，断言最后贴在 GitHub 上的那条状态是
 // failure、而且描述里写明卡在哪一步。少一条这样的测试，「读不到就当过了」就会悄悄回来——它是本切片最贵的错。
 
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 import { runColdVerifyAndPost } from '../src/cold-verify-post.ts';
 import type { RunRecord, RunsWriter } from '../src/runner/not-wired.ts';
 import type { OneShotDeps, SpawnOutcome } from '../src/runner/one-shot.ts';
@@ -34,6 +37,10 @@ const INPUT: VerifierInvokeInput = {
 const MODEL_PASS = ['## 问题', '（没有）', '', 'verdict: pass'].join('\n');
 const MODEL_FAIL = ['## 问题', '- 没做到验收条：单子要 A、代码做了 B', '', 'verdict: fail'].join('\n');
 
+// 一次性调用把 stdout / stderr 落在 tmpDir 下：放系统临时目录，测完删掉，别在当前目录留垃圾。
+const TMP_DIR = mkdtempSync(join(tmpdir(), 'fleet-555-2-test-'));
+afterAll(() => rmSync(TMP_DIR, { recursive: true, force: true }));
+
 function fakeOneShot(scripted: SpawnOutcome): OneShotDeps {
   const runs: RunsWriter = {
     async start() {},
@@ -43,7 +50,7 @@ function fakeOneShot(scripted: SpawnOutcome): OneShotDeps {
     spawn: async () => scripted,
     buildCommand: (input) => ({ argv: ['fake-executor', '--model', input.modelId], cwd: input.cwd }),
     runs,
-    tmpDir: 'C:/temp/fleet-555-2-test',
+    tmpDir: TMP_DIR,
   };
 }
 
