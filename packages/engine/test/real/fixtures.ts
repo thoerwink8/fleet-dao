@@ -1135,6 +1135,8 @@ export function cursorKeyRig(root: string): CursorKeyRig {
       `{ echo '--- run'; for a in "$@"; do printf '%s\\n' "$a"; done; } >>'${argvLog}'`,
       `if [ -e '${rejectFlag}' ]; then printf '\\033[33m⚠ Warning: The provided API key is invalid.\\033[0m\\nThe API key was loaded from the CURSOR_API_KEY environment variable.\\nPlease check you have the right key, create a new one, or authenticate without it.\\n' >&2; exit 1; fi`,
       `if ! printenv CURSOR_API_KEY >/dev/null; then a=NO_KEY; elif [ "$CURSOR_API_KEY" = "$(cat '${keyFile}')" ]; then a=OK; else a=KEY_MISMATCH; fi`,
+      // 对上了才像真的那样答对题（第二、三行；JSON 里的换行是字面的 \n）
+      `if [ "$a" = OK ]; then a="OK\\n答案：${TEST_Q.answer}\\n模型：fake-cursor"; fi`,
       `printf '%s\\n' '{"type":"system","subtype":"init","apiKeySource":"env","cwd":"/w","session_id":"${sid}","model":"Auto","permissionMode":"default"}'`,
       `printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]},"session_id":"${sid}"}\\n' "$a"`,
       `printf '{"type":"result","subtype":"success","duration_ms":1,"duration_api_ms":1,"is_error":false,"result":"%s","session_id":"${sid}","request_id":"r","usage":{"inputTokens":1,"outputTokens":1,"cacheReadTokens":0,"cacheWriteTokens":0}}\\n' "$a"`,
