@@ -131,6 +131,24 @@ describe('立即探测（runRouteProbeRequests）', () => {
     expect(h.done[0]?.results.map((r) => r.routeId)).toEqual([a.routeId, b.routeId]);
   });
 
+  it('带来源的自动请求（任务断链，#1636）照常接手、探；不带来源的老请求同样照常', async () => {
+    const t = target();
+    const auto: RouteProbeAuditRow = {
+      ...request('auto', [t.routeId]),
+      actorId: 'engine:route-probe-now',
+      after: {
+        requestId: 'auto',
+        routeIds: [t.routeId],
+        source: { kind: 'task-route-broken', issueNumber: 1621 },
+      },
+    };
+    const h = harness([auto, request('old', [t.routeId])], [t]);
+    expect(await runRouteProbeRequests(h.deps)).toBe(2);
+    expect(h.started.sort()).toEqual(['auto', 'old']);
+    expect(h.done.map((d) => d.requestId).sort()).toEqual(['auto', 'old']);
+    expect(h.probes()).toBeGreaterThan(0);
+  });
+
   it('没人点：不接、不探', async () => {
     const h = harness([], [target()]);
     expect(await runRouteProbeRequests(h.deps)).toBe(0);

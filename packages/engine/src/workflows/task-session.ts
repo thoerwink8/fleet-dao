@@ -178,6 +178,7 @@ export async function writeSession(
           channelId: route.channelId,
           routeId: route.routeId,
           modelId: route.modelId,
+          issueNumber: rt.input.issueNumber,
           reason: `${next.reason}（上游原文：${failure.message.slice(0, 300)}）`,
         };
         counters = { ...counters, retries: 0 };
