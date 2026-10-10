@@ -102,6 +102,9 @@
   --max-height-routing-pane: calc(100dvh - 16rem);
   /* 开关轨道高 1.15rem。h-* 只认 --height / --spacing。 */
   --height-switch: 1.15rem;
+  /* 基础件聚焦圈宽 3px（button、input、select、textarea、badge、toggle、switch 的聚焦圈）。
+   * ring-* 只认 --ring-width。和自带的 ring-3 同是 3px，主题里只留这一档。 */
+  --ring-width-focus: 3px;
   /* 逾期竖线宽 3px。w-* 认 --width。 */
   --width-rail: 3px;
   /* 时间线左侧标签列 172px，md 起用作左内边距。padding 认 --spacing。 */
