@@ -14,12 +14,13 @@
 // 改这里之前必须知道：
 // - 这是读别人家的文件：格式变了要能认出来——整份读不了、一行认不出都照实说「没读成」，不当成「没有」。目录不存在（这台没装
 //   Mirasim、或会话不是它起的）才是真的「没有」，不出声。
-// - 对账只按「话的开头 + 时间相近」认：同一句话 15 分钟内发过两次、只收到一次，算丢了一次（一条收到的只能对掉一条发的）。
+// - 对账认同一条：① 同一个 Claude 会话后来收到了开头一样的话（不限 15 分钟）；② MATCH_MS 以内、同一个会话收到的话以丢的那句开头
+//   （带下文重发）。一条收到的在「时间最近」配对里只对掉一条发的；「之后重发已收到」可以清掉更早的同句/短句。
 // - 对账范围是「上一轮（含）以来」（创始人 2026-10-10 14:37「你读到我的引导吗？」：一轮跑了 95 分钟，开头发的引导丢了，下一轮开头
-//   已过 60 分钟窗口，没报出来）：同一个 Mirasim 会话里，把 turns.jsonl 按 startedAt 排，倒数第二轮（上一轮；最后一轮是刚开的这一轮）
-//   的开始时刻往后的 prompt 和 steers 都对，不管那一轮多长。只有一轮的会话没有「上一轮」，按固定窗口。各会话的范围取并集。
-//   固定窗口 RECENT_MS 是下限（上一轮短于它时仍看最近 RECENT_MS），MAX_LOOKBACK_MS 是上限（上一轮再早也不回头超过它，更早的他早重发
-//   或放弃了，列出来只会让会话去办已经办过的事）。返回的 since 就是这个范围的起点，收到的账也要读到它。
+//   已过 60 分钟窗口，没报出来）：每一个 Mirasim 会话各自算——把该目录 turns.jsonl 按 startedAt 排，倒数第二轮（上一轮；最后一轮是刚开的
+//   这一轮）的开始时刻往后的 prompt 和 steers 都对，不管那一轮多长。只有一轮的会话没有「上一轮」，按固定窗口。不再把各会话的范围取并集
+//   （#1733：并集会让别的会话一天内丢的话进每个会话的账）。固定窗口 RECENT_MS 是下限（上一轮短于它时仍看最近 RECENT_MS），
+//   MAX_LOOKBACK_MS 是上限（上一轮再早也不回头超过它）。返回的 since 是各会话范围起点的最早值，收到的账也要读到它。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isMachineOpening, isMachineSession } from './unattended.mjs';
@@ -87,6 +88,7 @@ export function sentByFounder({ home, now = Date.now(), env = process.env }) {
   const entries = [];
   /** @type {string[]} */
   const problems = [];
+  // 各 Mirasim 会话各自截范围；这里只记最早的起点，给收到的账读多远用
   let since = now - RECENT_MS;
   let dirs;
   try {
@@ -115,6 +117,8 @@ export function sentByFounder({ home, now = Date.now(), env = process.env }) {
     let bad = 0;
     /** @type {number[]} 这个会话每一轮的开始时刻 */
     const starts = [];
+    /** @type {Sent[]} 这个 Mirasim 目录里读到的全部，再用它自己的上一轮起点截 */
+    const mine = [];
     for (const row of text.split(/\r?\n/)) {
       if (!row.trim()) continue;
       let turn;
@@ -132,22 +136,33 @@ export function sentByFounder({ home, now = Date.now(), env = process.env }) {
       const startedAt = Number(turn.startedAt);
       if (Number.isFinite(startedAt) && startedAt > 0 && startedAt <= now + 60_000) starts.push(startedAt);
       if (isFounderText(turn.prompt) && Number.isFinite(startedAt) && startedAt > 0)
-        entries.push({ at: startedAt, text: turn.prompt, sessionId, kind: 'prompt' });
+        mine.push({ at: startedAt, text: turn.prompt, sessionId, kind: 'prompt' });
       for (const s of Array.isArray(turn.steers) ? turn.steers : []) {
         const at = Number(s?.at);
         if (isFounderText(s?.text) && Number.isFinite(at) && at > 0)
-          entries.push({ at, text: s.text, sessionId, kind: 'steer' });
+          mine.push({ at, text: s.text, sessionId, kind: 'steer' });
       }
     }
-    // 上一轮 = 倒数第二轮；它的开始时刻比固定窗口还早，范围就往前放到它（但不超过 MAX_LOOKBACK_MS）
+    // 上一轮 = 倒数第二轮；只截本目录，不拿别的 Mirasim 会话的起点拉长本目录的窗口
     starts.sort((a, b) => a - b);
+    let dirSince = now - RECENT_MS;
     const previous = starts[starts.length - 2];
-    if (previous !== undefined) since = Math.min(since, Math.max(previous, now - MAX_LOOKBACK_MS));
+    if (previous !== undefined) dirSince = Math.min(dirSince, Math.max(previous, now - MAX_LOOKBACK_MS));
+    since = Math.min(since, dirSince);
+    for (const e of mine) if (e.at >= dirSince && e.at <= now + 60_000) entries.push(e);
     if (bad > 0) problems.push(`${file} 里有 ${bad} 行认不出（Mirasim 换格式了？）`);
   }
-  const recent = entries.filter((e) => e.at >= since && e.at <= now + 60_000);
-  recent.sort((a, b) => a.at - b.at);
-  return { absent: false, entries: recent, problems, since };
+  entries.sort((a, b) => a.at - b.at);
+  return { absent: false, entries, problems, since };
+}
+
+/**
+ * 发了的和收到的是不是同一个 Claude 原生会话（对账、重发识别都按会话各算各的）
+ * @param {{ sessionId: string | null }} a
+ * @param {{ sessionId: string | null }} b
+ */
+function sameSession(a, b) {
+  return typeof a.sessionId === 'string' && a.sessionId === b.sessionId;
 }
 
 /**
@@ -168,7 +183,7 @@ export function reconcile(sent, received) {
   for (const s of sentRows)
     for (const r of recv) {
       const gap = Math.abs(r.at - s.at);
-      if (r.key === s.key && gap <= MATCH_MS) pairs.push({ s, r, gap });
+      if (sameSession(s, r) && r.key === s.key && gap <= MATCH_MS) pairs.push({ s, r, gap });
     }
   pairs.sort((a, b) => a.gap - b.gap);
   for (const { s, r } of pairs) {
@@ -176,6 +191,13 @@ export function reconcile(sent, received) {
     s.hit = r;
     r.used = true;
   }
+  /** 丢了、但同会话之后重发并收到了：① 原话（不限 15 分钟）；② MATCH_MS 内带下文（收到的以丢句开头） */
+  const coveredLater = (/** @type {(typeof sentRows)[number]} */ s) =>
+    recv.some((r) => {
+      if (!sameSession(s, r) || r.at < s.at) return false;
+      if (r.key === s.key) return true;
+      return r.at - s.at <= MATCH_MS && r.key.startsWith(s.key);
+    });
   /** @type {Array<Sent & { receivedBy: string | null }>} */
   const matched = [];
   /** @type {Sent[]} */
@@ -189,9 +211,7 @@ export function reconcile(sent, received) {
         kind: s.kind,
         receivedBy: s.hit.sessionId ?? null,
       });
-    // 丢了、但他之后原话重发并收到了：那条已经办了，不再当丢的列
-    else if (!recv.some((r) => r.key === s.key && r.at >= s.at && r.at - s.at <= MATCH_MS))
-      lost.push({ at: s.at, text: s.text, sessionId: s.sessionId, kind: s.kind });
+    else if (!coveredLater(s)) lost.push({ at: s.at, text: s.text, sessionId: s.sessionId, kind: s.kind });
   }
   return { lost, matched };
 }
