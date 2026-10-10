@@ -50,3 +50,7 @@ jobs:
       - run: node packages/conventions/src/bin/debt-check.ts --live --comment
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      # 规矩字数账累计增长超阈值（agents/rules-budget.json）：开一张瘦身单，已开着不再开；只开单、不挡 PR。
+      - run: node packages/conventions/src/bin/rules-budget.ts --open
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

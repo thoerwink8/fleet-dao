@@ -185,8 +185,9 @@ describe('按改动算要跑什么', () => {
     ).toBe(true);
   });
 
-  it('改了 conventions：直接依赖它的 api、engine、github 都测，store 经 github 传上来（store 依赖 github）', () => {
+  it('改了 conventions：直接依赖它的 api、engine、github 都测，store 经 github 传上来（store 依赖 github），读 rules-budget.ts 的 agents 也测', () => {
     expect(units(pr('packages/conventions/src/ci-plan.ts'))).toEqual([
+      'agents',
       'api',
       'conventions',
       'engine',
