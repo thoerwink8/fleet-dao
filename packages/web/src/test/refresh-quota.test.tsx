@@ -31,11 +31,8 @@ test('点刷新按钮，调用额度页主查询的 refetch', async () => {
   const api = createMockApi({ live: false });
   const pools = vi.spyOn(api, 'pools');
   renderApp(<QuotaPage />, { api });
-  // 读取中不再写 disabled（一写浏览器就把键盘焦点丢到 body），用 aria-disabled 判断还在不在读。
   await waitFor(() =>
-    expect(
-      (screen.getByRole('button', { name: '刷新' }) as HTMLButtonElement).getAttribute('aria-disabled'),
-    ).not.toBe('true'),
+    expect((screen.getByRole('button', { name: '刷新' }) as HTMLButtonElement).disabled).toBe(false),
   );
   refetch.mockClear();
   const before = pools.mock.calls.length;
