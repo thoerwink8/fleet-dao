@@ -42,6 +42,7 @@ function Chip({
       )}
       <Icon className="size-3 opacity-70" aria-hidden />
       <span className="shrink-0 font-medium whitespace-nowrap">{label}</span>
+      {/* 详情宽度、字号换成 max-w-health-detail、text-caption。 */}
       <span className="min-w-0 max-w-health-detail truncate text-caption opacity-90" title={detail}>
         {detail}
       </span>
