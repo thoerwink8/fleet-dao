@@ -23,6 +23,7 @@
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
 
 import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
@@ -34,6 +35,7 @@ import {
   ENGINE_MASTER_ENABLE,
   NodeIdSchema,
   orphanReleasePause,
+  releasePauseStillActive,
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertWorkPort } from '@fleet-dao/store';
@@ -45,6 +47,7 @@ import {
   readEngineMaster,
   setEngineMaster,
 } from './engine-switch.ts';
+import { defaultPidAlive, parseTrainState, TRAIN_DIR } from './france-release.ts';
 import { INTENT_USAGE, IntentCliError, parseIntentArgs, runIntent } from './intent-cli.ts';
 import type { IntentStore } from './intent-store.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
@@ -592,16 +595,50 @@ function describeMasterChange(entry: AuditRecord | undefined, more = false): str
  * heal-orphan 只在断链时开回；on、off 已经是要的状态就不改，不然经 setEngineMaster 改
  * （putSetting：开关和操作记录同一事务）；版本冲突（刚被别处改过）报出来让重跑。
  */
+/** 法国发版暂停标记是否还在挡自动开回（给 status 旁证；读盘失败不挡命令）。 */
+function describeFrancePauseBlock(): string {
+  const markerPath = `${TRAIN_DIR}/release-train.paused`;
+  const statePath = `${TRAIN_DIR}/release-train.json`;
+  const markerPresent = existsSync(markerPath);
+  if (!markerPresent) return '发版暂停标记：不在（不挡自动开回）';
+  let train: { status: string; pid: number | null } | null = null;
+  if (existsSync(statePath)) {
+    try {
+      const parsed = parseTrainState(readFileSync(statePath, 'utf8'));
+      if (parsed.ok) train = { status: parsed.status, pid: parsed.pid };
+    } catch {
+      train = null;
+    }
+  }
+  const blocking = releasePauseStillActive({
+    markerPresent: true,
+    train,
+    pidAlive: defaultPidAlive,
+  });
+  if (blocking) {
+    return `发版暂停标记：在，驱动仍算在走（pid ${train?.pid ?? '无'}）——巡检不会自动开回`;
+  }
+  return `发版暂停标记：在，但驱动已死或进度已收尾——不挡自动开回（#1739）`;
+}
+
 export async function engine(input: { store: Store; args: EngineArgs; operator: string }): Promise<string> {
   const { store, args, operator } = input;
   if (args.action === 'status') {
     const state = await dbStep('没查成：', () => readEngineMaster(store));
     const page = await dbStep('没查成：读操作记录时', () => listEngineMasterAudits(store, RECENT_AUDITS));
     const last = page.items.find(isMasterSwitchEntry);
-    const lines = [`引擎总开关：${describeEngineMaster(state)}`, describeMasterChange(last, page.more)];
+    const lines = [
+      `引擎总开关：${describeEngineMaster(state)}`,
+      describeMasterChange(last, page.more),
+      describeFrancePauseBlock(),
+    ];
     if (!state.on && orphanReleasePause(page.items)) {
       lines.push(
         '断链：最近一次关上是发版前暂停，之后没有开回（#1739）。不是有意关着；跑 fleet-api engine heal-orphan 或等巡检跳过时自动开回',
+      );
+    } else if (!state.on && last?.action === ENGINE_MASTER_DISABLE) {
+      lines.push(
+        '总开关关着，且最近一次关上不是「发版前暂停」前缀——按有意关着处理；要开回用 engine on，并在原因里写预计重开时间',
       );
     }
     return lines.join('\n');

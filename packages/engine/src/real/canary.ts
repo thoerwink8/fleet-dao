@@ -5,7 +5,7 @@
 // 客户端（taskStatus 查询），收前几轮留下的单发的是驾驶舱「放弃」同一个信号（taskAbandon）；「驾驶舱显示」读的是驾驶舱后端的
 // Store（主页「做完的」那一栏读的同一份：任务行、PR 镜像）。
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import {
   canaryDbFacts,
   canaryPullRequestNumber,
@@ -28,6 +28,7 @@ import {
   ENGINE_MASTER_SETTING,
   engineMasterOf,
   orphanReleasePause,
+  releasePauseStillActive,
 } from '@fleet-dao/shared';
 import { asRecord, errMessage } from '@fleet-dao/shared/util';
 import { createPgStore } from '@fleet-dao/store';
@@ -151,8 +152,65 @@ export interface CanaryWiring {
   log?: CanaryDeps['log'];
 }
 
-/** 驾驶舱接活在法国落的暂停标记（与 deploy/france/release-request/lib.mjs 的 MARKER_FILE 同路径）。还在就说明发版还在走，别开回。 */
+/** 驾驶舱接活在法国落的暂停标记 / 进度（与 deploy/france/release-request/lib.mjs 同路径）。 */
 const FRANCE_PAUSE_MARKER = '/srv/fleet-dao-releases/.train/release-train.paused';
+const FRANCE_TRAIN_STATE = '/srv/fleet-dao-releases/.train/release-train.json';
+
+/** 进度记录里的驱动 pid 还在不在（与 packages/api france-release.defaultPidAlive 同判）。 */
+function trainPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * 读法国发版进度：只要 status 和可选 pid。认不出或没有文件 → null。
+ * 抽出供单测钉「驱动死了、标记还在」时仍应开回（#1739 返工）。
+ */
+export function readFranceTrainSlice(
+  statePath: string = FRANCE_TRAIN_STATE,
+): { status: string; pid: number | null } | null {
+  if (!existsSync(statePath)) return null;
+  let raw: string;
+  try {
+    raw = readFileSync(statePath, 'utf8');
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object') return null;
+  const o = parsed as { status?: unknown; pid?: unknown };
+  if (typeof o.status !== 'string' || o.status === '') return null;
+  const pid = typeof o.pid === 'number' && Number.isInteger(o.pid) && o.pid > 0 ? o.pid : null;
+  return { status: o.status, pid };
+}
+
+/**
+ * 发版暂停标记是否仍应挡住自动开回（#1739）。
+ * 标记在且驱动还活着 → 挡；驱动死了 / 进度已收尾 / 没有进度 → 不挡（断链，巡检可开回）。
+ */
+export function franceReleasePauseBlocksHeal(input?: {
+  markerPath?: string;
+  statePath?: string;
+  pidAlive?: (pid: number) => boolean;
+}): boolean {
+  const markerPath = input?.markerPath ?? FRANCE_PAUSE_MARKER;
+  const statePath = input?.statePath ?? FRANCE_TRAIN_STATE;
+  const pidAlive = input?.pidAlive ?? trainPidAlive;
+  return releasePauseStillActive({
+    markerPresent: existsSync(markerPath),
+    train: readFranceTrainSlice(statePath),
+    pidAlive,
+  });
+}
 
 /** 给 EngineJobs.canary 用的工厂。 */
 export function canaryJob(w: CanaryWiring): (client: Client) => CanaryDeps {
@@ -171,7 +229,8 @@ export function canaryJob(w: CanaryWiring): (client: Client) => CanaryDeps {
     return {
       repo,
       async healOrphanMaster() {
-        if (existsSync(FRANCE_PAUSE_MARKER)) return null;
+        // 有暂停标记但驱动已死 / 进度已收尾：不算「发版还在走」，继续开回（#1739；旧逻辑见标记就 return，驱动死后永远不开）
+        if (franceReleasePauseBlocksHeal()) return null;
         const rows = await store.listSettings();
         const master = engineMasterOf(rows.find((s) => s.key === ENGINE_MASTER_SETTING));
         if (master.on) return null;

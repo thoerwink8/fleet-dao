@@ -122,6 +122,23 @@ describe('status', () => {
     expect(text).toContain('不是发版暂停后未恢复');
     expect(t.row()?.value).toBe(false);
   });
+
+  it('有意关着但原因提到发版前暂停字样：heal-orphan 不动，status 写明按有意关（#1739 返工）', async () => {
+    const t = setup();
+    await engine({ store: t.store, args: { action: 'on' }, operator: 'root' });
+    await engine({
+      store: t.store,
+      args: { action: 'off', reason: '排查发版前暂停问题，预计明日重开' },
+      operator: 'root',
+    });
+    const status = await engine({ store: t.store, args: { action: 'status' }, operator: 'root' });
+    expect(status).toContain('按有意关着处理');
+    expect(status).not.toContain('断链');
+    expect(status).toContain('发版暂停标记');
+    const text = await engine({ store: t.store, args: { action: 'heal-orphan' }, operator: 'root' });
+    expect(text).toContain('不是发版暂停后未恢复');
+    expect(t.row()?.value).toBe(false);
+  });
 });
 
 describe('on/off', () => {

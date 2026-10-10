@@ -539,6 +539,8 @@ test('上一回进度还写 running、驱动进程已死、发版前开着（#17
   });
   setMaster('off'); // 上一回关的，还关着；若不带 before，会记成「本来就关着」发完保持关
   assert.equal(await runRequest(io), EXIT.done);
+  assert.ok(log.cleared >= 1, '驱动死了先清孤儿暂停标记');
+  assert.ok(log.out.some((l) => l.includes('已经不在了') && l.includes('暂停标记')));
   assert.equal(engineOffs(log).length, 0, '已经是关的，不再关');
   assert.equal(engineOns(log).length, 1, '发完开回');
   assert.equal(log.states.at(-1).before.master, true);

@@ -489,6 +489,11 @@ export async function runRequest(io) {
   ) {
     state.before = prev.before;
   }
+  // 驱动死了留下的暂停标记：这一趟会重新走暂停/恢复，先清掉，免得巡检见标记以为还在发版而不开回（#1739）
+  if (prevDeadRunning) {
+    io.clearMarker();
+    say(io, `上一趟驱动（pid ${prev.pid}）已经不在了：已清掉留下的暂停标记，这一趟重新暂停/恢复`);
+  }
   io.writeLast({ v: 1, at: iso(io), outcome: 'accepted', sha: req.sha, by: req.by, why: null });
   say(io, `收到驾驶舱的发布请求：${req.sha.slice(0, 12)}，${req.by} 在 ${req.at} 点的`);
   for (let p = 0; p < PHASE_FUNCS.length; p++) {

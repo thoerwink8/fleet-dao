@@ -75,6 +75,7 @@ export type EngineMasterAuditSlice = {
  * 最近一条总开关操作记录是不是「发版前暂停」关着、还没有后来的打开（#1739）。
  * 真：发版车/驾驶舱接活关了总开关，驱动中途死掉或发完误记「本来就关着」，没人开回——应开回，不该当成有意关着。
  * 条目按 at 从新到旧；同秒多条时保持传入顺序（新的在前）。没有开关记录、最近一条是打开、或关的原因不是发版暂停 → 假。
+ * 原因必须以 `ENGINE_PAUSE_REASON_PREFIX` 开头（发版脚本写的原文如此）；用 includes 会把「排查发版前暂停问题…」这类有意关也当成断链。
  */
 export function orphanReleasePause(audits: readonly EngineMasterAuditSlice[]): boolean {
   const switches = audits.filter(
@@ -92,7 +93,29 @@ export function orphanReleasePause(audits: readonly EngineMasterAuditSlice[]): b
   const last = sorted[0];
   if (last === undefined || last.action !== ENGINE_MASTER_DISABLE) return false;
   const reason = typeof last.reason === 'string' ? last.reason : '';
-  return reason.includes(ENGINE_PAUSE_REASON_PREFIX);
+  return reason.startsWith(ENGINE_PAUSE_REASON_PREFIX);
+}
+
+/**
+ * 发版暂停标记还在、且驱动这一趟仍算「在走」时，巡检不得自动开回总开关（#1739）。
+ * - 没有标记 → 不挡。
+ * - 有标记但没有进度记录、或已是 blocked/failed/done/aborted → 不挡（驱动死掉或收尾失败留下的孤儿标记）。
+ * - status=running 且记下了 pid、进程已死 → 不挡（与发版卡 staleDead 同判）。
+ * - status=running 且 pid 还活着、或老记录没写 pid → 挡（不敢在真发版中途开回）。
+ */
+export function releasePauseStillActive(input: {
+  markerPresent: boolean;
+  /** 进度记录里的 status / pid；没有文件或认不出时传 null。 */
+  train: { status: string; pid: number | null } | null;
+  pidAlive: (pid: number) => boolean;
+}): boolean {
+  if (!input.markerPresent) return false;
+  if (input.train === null) return false;
+  const { status, pid } = input.train;
+  if (status === 'blocked' || status === 'failed' || status === 'done' || status === 'aborted') return false;
+  if (status !== 'running') return false;
+  if (pid === null) return true;
+  return input.pidAlive(pid);
 }
 
 /**
