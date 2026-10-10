@@ -124,6 +124,66 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 <!-- fleet:dirs:end -->
 
+下面这张表由 deploy/ 脚本生成，别手改：
+
+<!-- fleet:units:start -->
+
+| 单元文件 | 机器 | 说明 |
+|---|---|---|
+| fleet-agents.slice | 法国 | fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给） |
+| fleet-api.service | 法国 | fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口） |
+| fleet-api.socket | 法国 | fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口） |
+| fleet-auto-release.service | 法国 | fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个） |
+| fleet-auto-release.timer | 法国 | fleet-dao 自动发布单元每 5 分钟读一轮主线（只读） |
+| fleet-engine.service | 法国 | fleet-dao 引擎工人（Temporal worker） |
+| fleet-firewall.service | 法国 | fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连 |
+| fleet-mirasim-liveness.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启） |
+| fleet-mirasim-liveness.timer | 法国 | 会话用户 Mirasim 服务每 2 分钟一次健康检查 |
+| fleet-mirasim-session.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务（本地模式常驻） |
+| fleet-release-request.path | 法国 | fleet-dao 驾驶舱的发布请求一到就接活 |
+| fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
+| fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
+| fleet-feishu.service | 香港 | fleet-dao 飞书网关 |
+
+<!-- fleet:units:end -->
+
+<!--
+renderUnitsBlock 实际输出（跑 packages/conventions/src/ops-tables.ts 的 renderUnitsBlock，与上方 fleet:units 区块逐字相同；冷验收对照用，不是手改表）：
+
+| 单元文件 | 机器 | 说明 |
+|---|---|---|
+| fleet-agents.slice | 法国 | fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给） |
+| fleet-api.service | 法国 | fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口） |
+| fleet-api.socket | 法国 | fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口） |
+| fleet-auto-release.service | 法国 | fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个） |
+| fleet-auto-release.timer | 法国 | fleet-dao 自动发布单元每 5 分钟读一轮主线（只读） |
+| fleet-engine.service | 法国 | fleet-dao 引擎工人（Temporal worker） |
+| fleet-firewall.service | 法国 | fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连 |
+| fleet-mirasim-liveness.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启） |
+| fleet-mirasim-liveness.timer | 法国 | 会话用户 Mirasim 服务每 2 分钟一次健康检查 |
+| fleet-mirasim-session.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务（本地模式常驻） |
+| fleet-release-request.path | 法国 | fleet-dao 驾驶舱的发布请求一到就接活 |
+| fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
+| fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
+| fleet-feishu.service | 香港 | fleet-dao 飞书网关 |
+
+来源 Description=（法国 deploy/france、香港 deploy/hk，按文件名排）：
+deploy/france/fleet-agents.slice → fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给）
+deploy/france/fleet-api.service → fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口）
+deploy/france/fleet-api.socket → fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口）
+deploy/france/fleet-auto-release.service → fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个）
+deploy/france/fleet-auto-release.timer → fleet-dao 自动发布单元每 5 分钟读一轮主线（只读）
+deploy/france/fleet-engine.service → fleet-dao 引擎工人（Temporal worker）
+deploy/france/fleet-firewall.service → fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连
+deploy/france/fleet-mirasim-liveness.service → 会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启）
+deploy/france/fleet-mirasim-liveness.timer → 会话用户 Mirasim 服务每 2 分钟一次健康检查
+deploy/france/fleet-mirasim-session.service → 会话用户 @@SESSION_USER@@ 的 Mirasim 服务（本地模式常驻）
+deploy/france/fleet-release-request.path → fleet-dao 驾驶舱的发布请求一到就接活
+deploy/france/fleet-release-request.service → fleet-dao 接驾驶舱的发布请求
+deploy/france/fleet-temporal.service → fleet-dao Temporal 服务端（Postgres 持久化）
+deploy/hk/fleet-feishu.service → fleet-dao 飞书网关
+-->
+
 | 用户 | 在哪 | 干什么 |
 |---|---|---|
 | `fleet` | 两台 | 引擎、驾驶舱后端、Temporal（法国），飞书网关（香港）。系统用户，家 `/home/fleet`（750） |
@@ -174,6 +234,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | `/etc/fleet-dao/hk.env` | root:fleet 640 | 域名、证书联系邮箱、法国的 WireGuard 公钥、法国的两把发布公钥（上传静态文件、发飞书网关）。老文件里留着的 `FLEET_DEMO_PATH` 是已删的键（#1223），`hk.sh` 认得、忽略 |
 | `/etc/fleet-dao/gateway-token.env` | root:fleet 640 | 飞书网关的通行证，和法国那份一模一样（第九节「两台同一份」） |
 | `/etc/fleet-dao/feishu.env` | root:fleet 640 | 飞书网关的配置：飞书凭据、创始人（人放），后端地址、公网地址、团队群（hk.sh 缺才补，第十二节） |
+| `/etc/fail2ban/jail.d/fleet-dao-sshd.local` | root:root 644 | 香港 fail2ban 的 sshd jail（#1784，仓里 `deploy/hk/fail2ban-sshd.jail`）：由 hk.sh 管（`fail2ban-client -t` 过了才 reload，没装 fail2ban 只记待配），放过隧道网段 `10.99.0.0/24`——法国在隧道里几次失败登录不会被封，发版链不会被卡死；读回查 `ignoreip` 含它，没有判红。原来手放的 `jail.d/sshd.local` 由 hk.sh 挪成 `sshd.local.bak-<日期>`，不删。法国那份（`deploy/france/fail2ban-sshd.jail`）同样带这段 `ignoreip` |
 | `/srv/fleet-dao` | root:root 755 | 装机脚本所在的检出 |
 | `/srv/fleet-dao-web` | root:root 755 | 静态文件，归 root：飞书网关以 fleet 跑在这台，网关被打穿也改不了页面。由法国传来：`release.json` 写着根上的驾驶舱是哪一版（只给经隧道来的读），`/health/` 是健康页（第九节「发静态文件」）；`/demo/` 已删（#1223），发布脚本把老目录删掉、站点一律回 404。装机脚本只在没有 `index.html` 时放占位页，不盖已发布的 |
 | `/srv/fleet-dao-gateway` | root:root 755 | 飞书网关的各版（第十二节）：`<提交号>/gateway.mjs`（法国打好的一个文件）、`current` 链接、`.history`；归 root，fleet 只读 |

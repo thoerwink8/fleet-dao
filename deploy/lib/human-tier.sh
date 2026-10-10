@@ -186,18 +186,20 @@ readback_sshd_hardening() {
 
 # fail2ban 的 sshd jail（人工档，#1348）：装法同上，先 fail2ban-client -t 验、过了才放着并 reload，不过就撤掉这份、判红。
 # 没装 fail2ban 只记待配，不装软件包（装包是另一件事）。内容和为什么见 deploy/france/fail2ban-sshd.jail。
+# 参数：jail 文件在仓里的路径（默认法国这份；香港 hk.sh 传 deploy/hk/fail2ban-sshd.jail，装到同名的 $FAIL2BAN_SSHD_JAIL）
 setup_fail2ban_sshd() {
+  local src=${1:-$DEPLOY_DIR/france/fail2ban-sshd.jail}
   step "fail2ban 的 sshd jail（$FAIL2BAN_SSHD_JAIL：3 次失败封 1 小时、反复来的越封越长；没装 fail2ban 就只记待配，不装软件包）"
   local err
   if ! command -v fail2ban-client >/dev/null; then
-    pending "这台没装 fail2ban（没有 fail2ban-client）：sshd 的封禁配置没放，装好后再跑一遍 france.sh"
+    pending "这台没装 fail2ban（没有 fail2ban-client）：sshd 的封禁配置没放，装好后再跑一遍装机脚本"
     return 0
   fi
   if [[ ! -d "${FAIL2BAN_SSHD_JAIL%/*}" ]]; then
     red "${FAIL2BAN_SSHD_JAIL%/*} 不是目录：fail2ban 装了但没有 jail.d，不放"
     return 1
   fi
-  put_file "$FAIL2BAN_SSHD_JAIL" root:root 644 "$(<"$DEPLOY_DIR/france/fail2ban-sshd.jail")"
+  put_file "$FAIL2BAN_SSHD_JAIL" root:root 644 "$(<"$src")"
   if ((WROTE == 0)); then return 0; fi
   if ! err=$(fail2ban-client -t 2>&1); then
     rm -f -- "$FAIL2BAN_SSHD_JAIL"
@@ -205,7 +207,7 @@ setup_fail2ban_sshd() {
     return 1
   fi
   if [[ "$(systemctl is-active fail2ban.service 2>/dev/null)" != active ]]; then
-    pending "fail2ban.service 没在跑：$FAIL2BAN_SSHD_JAIL 已放好，它起来时会读到；起来后再跑一遍 france.sh 读回"
+    pending "fail2ban.service 没在跑：$FAIL2BAN_SSHD_JAIL 已放好，它起来时会读到；起来后再跑一遍装机脚本读回"
     return 0
   fi
   if ! err=$(fail2ban-client reload 2>&1); then
@@ -217,14 +219,15 @@ setup_fail2ban_sshd() {
 
 # 读回：文件和仓里一样；在跑的 sshd jail 四项（maxretry、findtime、bantime、bantime.increment）就是要的值。
 # 没装、没在跑是待配；jail 不在（enabled 没生效）和值不对是红；fail2ban-client 自己答不出的也是待配，不当成对了
+# 参数：jail 文件在仓里的路径（默认法国这份）；可选第二个参数：ignoreip 里必须有的一段（香港传 10.99.0.0/24，没有判红）
 readback_fail2ban_sshd() {
-  local spec key got want rc
+  local src=${1:-$DEPLOY_DIR/france/fail2ban-sshd.jail} want_ignore=${2:-} spec key got want rc
   if ! command -v fail2ban-client >/dev/null; then
     pending "没装 fail2ban：sshd 的封禁（maxretry 3、封 1 小时）没查"
     return 0
   fi
-  if [[ "$(cat -- "$FAIL2BAN_SSHD_JAIL" 2>/dev/null)" != "$(<"$DEPLOY_DIR/france/fail2ban-sshd.jail")" ]]; then
-    red "$FAIL2BAN_SSHD_JAIL 不在或和仓里 deploy/france/fail2ban-sshd.jail 不一样：重跑 france.sh"
+  if [[ "$(cat -- "$FAIL2BAN_SSHD_JAIL" 2>/dev/null)" != "$(<"$src")" ]]; then
+    red "$FAIL2BAN_SSHD_JAIL 不在或和仓里 deploy/${src#"$DEPLOY_DIR"/} 不一样：重跑装机脚本"
   fi
   if [[ "$(systemctl is-active fail2ban.service 2>/dev/null)" != active ]]; then
     pending "fail2ban.service 没在跑：sshd jail 的有效值没查"
@@ -249,6 +252,17 @@ readback_fail2ban_sshd() {
       red "fail2ban sshd jail $key = 「${got:-没读到}」，应为 $want（被别的 jail 配置盖了，或没 reload）"
     fi
   done
+  if [[ -n "$want_ignore" ]]; then
+    rc=0
+    got=$(fail2ban-client get sshd ignoreip 2>&1) || rc=$?
+    if ((rc != 0)); then
+      pending "fail2ban-client get sshd ignoreip 没答出来，没核对：${got:0:120}"
+    elif [[ "$got" == *"$want_ignore"* ]]; then
+      ok "fail2ban sshd jail ignoreip 含 $want_ignore"
+    else
+      red "fail2ban sshd jail ignoreip 里没有 $want_ignore（读到「$(tr '\n' ' ' <<<"$got" | cut -c1-120)」）：这段地址的失败登录会被封"
+    fi
+  fi
 }
 
 # 驾驶舱「发布到法国」按钮的接活（人工档，不在自动档里）：驾驶舱后端（fleet，没有 root）往 $RELEASE_REQUEST_DIR 写一份请求文件，

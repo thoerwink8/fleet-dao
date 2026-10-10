@@ -147,7 +147,7 @@ check "没碰端口、认证方式、没写 9.6 认不得的 PerSourcePenalties"
   "$(grep -cEi '^[[:space:]]*(Port|PasswordAuthentication|PubkeyAuthentication|PermitRootLogin|PerSourcePenalties)\b' "$SSHD_CONF" || true)" 0
 has "注释里写明了没写 PerSourcePenalties 的原因" "$(<"$SSHD_CONF")" 'PerSourcePenalties.*9\.8'
 f2b=$(grep -vE '^[[:space:]]*(#|$)' "$F2B_CONF" | tr -d '\r')
-check "fail2ban jail：只有 [sshd] 一段、五项设置" "$f2b" $'[sshd]\nenabled = true\nmaxretry = 3\nfindtime = 10m\nbantime = 1h\nbantime.increment = true'
+check "fail2ban jail：只有 [sshd] 一段、六项设置（含 ignoreip）" "$f2b" $'[sshd]\nenabled = true\nmaxretry = 3\nfindtime = 10m\nbantime = 1h\nbantime.increment = true\nignoreip = 127.0.0.1/8 ::1 10.99.0.0/24'
 
 echo "== 2. sshd：首次装 → 放文件、sshd -t、reload；再跑一遍什么都不动"
 fresh
@@ -313,6 +313,34 @@ printf '%s\n' '[sshd]' 'maxretry = 99' >"$FAIL2BAN_SSHD_JAIL"
 fresh
 readback_fail2ban_sshd >/dev/null
 has "判红：和仓里不一样" "${REDS[*]}" "不在或和仓里 deploy/france/fail2ban-sshd.jail 不一样"
+
+echo "== 6. 隧道网段不封（#1784）：两份 jail 都放过 10.99.0.0/24；香港读回查 ignoreip"
+HK_F2B_CONF=$DEPLOY_DIR/hk/fail2ban-sshd.jail
+for f in "$F2B_CONF" "$HK_F2B_CONF"; do
+  has "${f#"$DEPLOY_DIR"/} 的 ignoreip 行含 10.99.0.0/24" "$(grep -E '^ignoreip = ' "$f")" "10.99.0.0/24"
+done
+check "香港 jail 的设置和法国那份一样" \
+  "$(grep -vE '^[[:space:]]*(#|$)' "$HK_F2B_CONF" | tr -d '\r')" \
+  "$(grep -vE '^[[:space:]]*(#|$)' "$F2B_CONF" | tr -d '\r')"
+rm -f -- "$FAIL2BAN_SSHD_JAIL"
+fresh
+setup_fail2ban_sshd "$HK_F2B_CONF" >/dev/null
+check "香港：放的是香港那份、先 -t 再 reload" \
+  "$(cmp -s -- "$FAIL2BAN_SSHD_JAIL" "$HK_F2B_CONF" && echo 一样 || echo 不一样) $(calls)" "一样 fail2ban-client -t fail2ban-client reload"
+F2B_GET[ignoreip]="127.0.0.1/8 ::1 10.99.0.0/24"
+fresh
+readback_fail2ban_sshd "$HK_F2B_CONF" 10.99.0.0/24 >/dev/null
+check "香港读回：ignoreip 含隧道网段 → 全绿" "${#REDS[@]} ${#PENDING[@]}" "0 0"
+echo "== 6b.【故意造出的失败】ignoreip 里没有隧道网段（手放的旧 sshd.local 盖了）：判红"
+F2B_GET[ignoreip]="127.0.0.1/8 ::1"
+fresh
+readback_fail2ban_sshd "$HK_F2B_CONF" 10.99.0.0/24 >/dev/null
+has "判红：ignoreip 里没有 10.99.0.0/24" "${REDS[*]}" "ignoreip 里没有 10.99.0.0/24"
+echo "== 6c. ignoreip 读不出：待配，不当成对了"
+unset 'F2B_GET[ignoreip]'
+fresh
+readback_fail2ban_sshd "$HK_F2B_CONF" 10.99.0.0/24 >/dev/null
+check "一条待配、没有红" "${#PENDING[@]} ${#REDS[@]}" "1 0"
 
 if ((fail)); then
   echo "sshd-hardening：不通过"
