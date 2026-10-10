@@ -277,6 +277,8 @@ function EnvColumn({
       className={cn(
         'row-span-7 grid min-w-0 grid-rows-subgrid gap-0 overflow-hidden rounded-xl border bg-card shadow-card-edge',
         selected && 'border-brand/60 ring-1 ring-brand/30',
+        // 失联 / 没数据：整块置灰，别让旧的「在跑」「N 项红」看起来像现在的状态
+        tone === 'stale' && 'bg-muted/40 text-muted-foreground opacity-70 shadow-none',
       )}
     >
       <header className="px-4 py-3">
@@ -396,6 +398,7 @@ function RemoteColumn({
   const f = freshnessNow(n, now);
   const error = useShownError(n.id, { error: snap?.error, data: snap?.data });
   const age = nodeAgeText(n, now);
+  const stale = f !== 'fresh';
   const body =
     f === 'never' || snap === undefined ? (
       <Whole>
@@ -413,8 +416,15 @@ function RemoteColumn({
         <LoadError what={`${n.name}的快照`} error={error} onRetry={() => void snap.refetch()} />
       </Whole>
     ) : snap.data ? (
-      <div className={cn('contents', f !== 'fresh' && '[&>*]:opacity-70')}>
-        {factCells({ facts: snap.data.env.facts, now, kind: 'env', look, engineNote })}
+      <div className="contents">
+        {factCells({
+          facts: snap.data.env.facts,
+          now,
+          kind: 'env',
+          look,
+          engineNote,
+          muted: stale,
+        })}
       </div>
     ) : (
       <Whole>
@@ -427,14 +437,16 @@ function RemoteColumn({
       name={snap?.data?.name ?? n.name}
       badge="远程"
       age={f === 'fresh' ? `上报于 ${age}` : age}
-      tone={f === 'fresh' ? 'ok' : 'stale'}
+      tone={stale ? 'stale' : 'ok'}
       selected={selected}
       note={
         f === 'stale'
-          ? '下面是它最后一次报的样子，不是现在的；要看现在的请去那台上看。'
-          : f === 'fresh'
-            ? '只读快照：写操作（暂停派活、叫停）要去那台上做。'
-            : undefined
+          ? '失联，以下是旧数据。下面是它最后一次报的样子，不是现在的；要看现在的请去那台上看。'
+          : f === 'never'
+            ? '失联，以下是旧数据'
+            : f === 'fresh'
+              ? '只读快照：写操作（暂停派活、叫停）要去那台上做。'
+              : undefined
       }
     >
       {body}
