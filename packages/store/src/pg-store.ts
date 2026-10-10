@@ -163,6 +163,7 @@ function toPullRequest(r: typeof pullRequests.$inferSelect): PullRequestRecord {
     openedAt: isoOpt(r.openedAt),
     mergedAt: isoOpt(r.mergedAt),
     issueRefs: r.issueRefs,
+    ...(r.title === null ? {} : { title: r.title }),
   };
 }
 
