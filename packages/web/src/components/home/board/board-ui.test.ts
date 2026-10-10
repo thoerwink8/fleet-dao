@@ -46,6 +46,8 @@ describe('此刻「在做什么」列', () => {
   test('单行截断：超出用省略号，不用折行', () => {
     const { className } = doingCell();
     const tokens = className.split(/\s+/);
+    // table-fixed 下靠 w-48 定宽；truncate = 单行 + 省略号
+    expect(tokens).toContain('w-48');
     expect(tokens).toContain('truncate');
     expect(tokens).not.toContain('break-words');
     expect(tokens).not.toContain('whitespace-normal');
@@ -56,13 +58,14 @@ describe('此刻「在做什么」列', () => {
     expect(attrs).toMatch(/\btitle=\{full\}/);
   });
 
-  test('列有最小宽度，不被相邻列挤成窄条', () => {
+  test('列有固定宽度，不被相邻列挤成窄条', () => {
     expect(nowPanel, '找不到 NowPanel').not.toBe('');
-    // colgroup 第三列（在做什么）要带够用的宽度类；面板加宽给它留空间
+    // table-fixed 只认 w-*；只写 min-w-* 挡不住窄条，所以必须钉 w-48
     const colgroup = nowPanel.match(/<colgroup>([\s\S]*?)<\/colgroup>/)?.[1] ?? '';
     const cols = [...colgroup.matchAll(/<col\b([^>]*)\/>/g)].map((m) => m[1] ?? '');
     expect(cols).toHaveLength(4);
-    expect(cols[2]).toMatch(/className="[^"]*(?:^|\s)(?:min-w-48|w-48)(?:\s|")/);
+    expect(cols[2]).toMatch(/\bw-48\b/);
+    expect(cols[2]).not.toMatch(/\bmin-w-/);
     // 面板本体：32rem 给四列留宽，max-w-full 窄画布不溢出（勿用 \b 贴在 ] 后，词边界对不上）
     const panelClass = nowPanel.match(/data-board-now[\s\S]*?className="([^"]*)"/)?.[1] ?? '';
     expect(panelClass.split(/\s+/)).toEqual(expect.arrayContaining(['w-[32rem]', 'max-w-full']));

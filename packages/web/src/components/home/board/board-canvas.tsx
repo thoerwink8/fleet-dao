@@ -929,7 +929,7 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
     );
   const working = rows.filter((r) => !r.queued).length;
   const queued = rows.length - working;
-  // 32rem：四列（含「在做什么」min 12rem）并排后仍读得下；max-w-full 保证窄画布不溢出
+  // 32rem：四列定宽合计 30.5rem（6+3.5+12+9），「在做什么」占 12rem；max-w-full 窄画布不溢出
   return (
     <div
       data-board-now
@@ -962,8 +962,8 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
             <colgroup>
               <col className="w-24" />
               <col className="w-14" />
-              {/* 12rem：状态+标题单行省略后仍有可读宽度，不被「谁在做 / 分钟」挤成窄条 */}
-              <col className="min-w-48 w-48" />
+              {/* table-fixed 认 w-48（12rem），别用 min-w：固定布局下 min-width 不生效 */}
+              <col className="w-48" />
               {/* 9rem：表头「分钟」和「1 小时 33 分」都放得下，不从「分钟」中间断开 */}
               <col className="w-36" />
             </colgroup>
@@ -975,7 +975,7 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
                 <th scope="col" className="w-14 px-1 py-1 font-normal whitespace-nowrap">
                   单
                 </th>
-                <th scope="col" className="min-w-48 w-48 px-1 py-1 font-normal whitespace-nowrap">
+                <th scope="col" className="w-48 px-1 py-1 font-normal whitespace-nowrap">
                   在做什么
                 </th>
                 <th scope="col" className="w-36 px-3 py-1 text-right font-normal whitespace-nowrap">
@@ -1018,7 +1018,7 @@ function NowRow({ item, queued, onPick }: { item: HomeRunning; queued: boolean; 
         <span className="num">{item.worker ?? '排队'}</span>
       </td>
       <td className="num w-14 px-1 py-1.5 whitespace-nowrap text-muted-foreground">#{item.issueNumber}</td>
-      <td className="min-w-48 w-48 max-w-48 truncate px-1 py-1.5 text-muted-foreground" title={full}>
+      <td className="w-48 max-w-48 truncate px-1 py-1.5 text-muted-foreground" title={full}>
         {status} · {item.title}
       </td>
       <td
