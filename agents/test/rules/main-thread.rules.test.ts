@@ -2,9 +2,9 @@
 // 1. 引导先回：创始人在一轮中途打的字（Claude Code 的 transcript 里是 attachment.type=queued_command、commandMode=prompt），
 //    附在下一次工具结果后面送进主对话。本机 178 条送到的引导里，AI 第一反应直接再调工具 107 条、先写话 45 条、本轮随即结束 26 条，
 //    创始人觉得「石沉大海」。所以最后一条引导之后主对话还没写过一段非空文字，就拒这次工具调用，理由里带上引导的前 200 字。
-// 2. 子代理一律后台跑：主对话前台等子代理时整段卡住，引导送不进来；Mirasim 一轮结束会杀掉还在跑的后台子代理，
-//    界面也只在派它的那一轮显示每一步。所以主对话调 Agent/Task 写了 run_in_background: false 就拒；不写不拦（不写就是后台：
-//    本机 transcript 里不写的 39 次全是后台起的）。
+// 2. 子代理一律后台跑：主对话前台等子代理时整段不调工具，引导转不进来，界面也只在派它的那一轮显示每一步
+//    （一轮结束不会杀掉后台子代理，2026-10-11 实测；进程重开会）。所以主对话调 Agent/Task 写了 run_in_background: false 就拒；
+//    不写不拦（不写就是后台：本机 transcript 里不写的 39 次全是后台起的）。
 // 子代理里的调用（输入带 agent_id）两条都不管。transcript 读不了：放行，但用 systemMessage 明说没查成，不当成没有引导。
 // 创始人 2026-10-10 13:02 选定（「都按你的推荐来。」）。
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -250,7 +250,8 @@ describe('子代理一律后台跑', () => {
     expect(v.deny).toContain('子代理一律后台跑');
     expect(v.deny).toContain('去掉 run_in_background: false');
     expect(v.deny).toContain('60 秒');
-    expect(v.deny).toContain('Mirasim 一轮结束会杀掉后台子代理');
+    expect(v.deny).toContain('一轮结束不会杀掉后台子代理（2026-10-11 实测），进程重开（插队、重启）会');
+    expect(v.deny).not.toContain('一轮结束会杀掉');
   });
 
   it('不写 run_in_background（默认就是后台）、写 true：放行', () => {

@@ -1,16 +1,26 @@
-// 钉住「Mirasim 的引导在等，就让这一轮先结束」（#1743，补决定 0078；改标准：agents/test/rules/ 在 standard-paths.json 里）。
-// 事实（2026-10-10 17:25 实测，会话 a1138385）：Mirasim 的「引导」（turn.steer）要等这一轮结束才交给 Claude Code，
-// 两次工具调用之间送不进来：09:25:23.876Z 发出，之后又调了 4 次工具都没收到，09:26:46Z 这一轮结束、0.4 秒后才作为新的一轮进来。
-// 无人值守让一轮几小时不结束，引导就卡几小时（10-10 11:47 发的等了 3 小时 14 分）。所以：
-// 1. 主对话每次调工具前（agents/hooks/main-thread.mjs），读 ~/.mirasim/diag/ 当前和上一小时的 ev-<UTC 年月日时>.ndjson，
-//    找 sessionId 等于本会话号的 turn.steer；会话记录里那之后没收到创始人的话（不是任务通知的 queue-operation enqueue、
-//    创始人的 queued_command、新一轮的用户消息），就拒这次调用，叫它写一句收到、马上结束这一轮。
-// 2. 这时无人值守的 Stop 钩子（agents/hooks/stop.mjs）放行收尾，不挡。
-// 3. 子代理的调用（输入带 agent_id）不管。
-// 4. diag 读不了（不在、读不了、认不出）：不拦，systemMessage 写「引导检查没查成：<原因>」，不当成没有引导。
-//    整个 ~/.mirasim 都不在（这台机器没装 Mirasim）：不会有 Mirasim 的引导，不说话。
+// 钉住「Mirasim 的引导由钩子取原文、当场转给模型」（#1743，补决定 0078；改标准：agents/test/rules/ 在 standard-paths.json 里）。
+// 事实（指挥官 2026-10-11 03:05–03:58 四轮真 Mirasim 会话实测）：Mirasim 收到引导当场就写进 Claude Code 的 stdin
+// （steers[].at = 03:37:01），是 Claude Code 要等后台子代理都跑完才读进来（03:39:39 子代理收场后才进会话）。
+// 叫这一轮结束没用：结束了引导照样等子代理（晚 2 分 05 秒）；后台子代理一轮结束也不会被杀。所以：
+// 1. 主对话每次调工具前（agents/hooks/main-thread.mjs）读 ~/.mirasim/diag/ 当前和上一小时的 ev-<UTC 年月日时>.ndjson，
+//    找本会话的 turn.steer；会话记录里那之后没收到创始人的话，就从 Mirasim 取引导原文（ui-cli raw 订阅这个会话，snapshot.steers），
+//    拒这次调用、理由带原文，叫它先回一句、接着干活、不用结束这一轮；记下转过的（steer-shown/<会话号>.json），同一条不再拦。
+// 2. 收尾钩子（agents/hooks/stop.mjs）收尾时有没转过的引导：decision block，reason 带原文（写最后一段话时到的，调工具前钩子没机会拦）。
+//    PR 原来「有引导在等就放行收尾」那段删了：开着无人值守照旧挡。
+// 3. 取不到原文（ui-cli 起不来、回的认不出、这一轮里没有它）：不拦，systemMessage 写「引导检查没查成：…读不到原文（原因）」。
+// 4. 后台任务完成通知（<task-notification>）开的新一轮、Stop 钩子挡回来的「Stop hook feedback:」不是创始人的话，不算送到。
+// 5. 子代理的调用（输入带 agent_id）不管；diag 读不了明说没查成；没装 Mirasim 不说话。
+// 测试不起真 ui-cli、不读真 ~/.mirasim、不写真 ~/.fleet-dao：取原文那一步在进程内换成假的，从命令行进来时换成临时目录里的假 server.cjs。
 // 每种各配一条故意造出的失败。
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -21,19 +31,31 @@ interface Verdict {
   deny?: string;
   notice?: string;
 }
-type Steer = { kind: 'none' } | { kind: 'pending'; at: number } | { kind: 'unknown'; why: string };
-interface MainThreadLib {
-  check(
-    raw: string,
-    opts?: { settleMs?: number; sleep?: (ms: number) => void; now?: number; mirasim?: string },
-  ): Verdict;
-  diagFile(root: string, ms: number): string;
-  pendingSteer(o: { root: string; sessionId: unknown; transcriptPath: unknown; now: number }): Steer;
-  steerDeny(at: number): string;
+interface SteerText {
+  text: string;
+  at: number;
 }
-const HOOK = fileURLToPath(new URL('../../hooks/main-thread.mjs', import.meta.url));
-const STOP = fileURLToPath(new URL('../../hooks/stop.mjs', import.meta.url));
-const UNATTENDED = fileURLToPath(new URL('../../hooks/unattended.mjs', import.meta.url));
+type Fetch = (root: string, sessionId: string) => SteerText[];
+interface Opts {
+  settleMs?: number;
+  sleep?: (ms: number) => void;
+  now?: number;
+  mirasim?: string;
+  fetchSteers?: Fetch;
+  shownDir?: string;
+}
+interface MainThreadLib {
+  check(raw: string, opts?: Opts): Verdict;
+  diagFile(root: string, ms: number): string;
+  fetchSteers: Fetch;
+  mirasimServer(root: string): string;
+  shownFile(dir: string, sessionId: string): string;
+  steerRelay(steers: SteerText[]): string;
+}
+const HOOKS = fileURLToPath(new URL('../../hooks/', import.meta.url));
+const HOOK = join(HOOKS, 'main-thread.mjs');
+const STOP = join(HOOKS, 'stop.mjs');
+const UNATTENDED = join(HOOKS, 'unattended.mjs');
 const lib = (await import(pathToFileURL(HOOK).href)) as MainThreadLib;
 
 const dir = mkdtempSync(join(tmpdir(), 'mirasim-steer-'));
@@ -46,16 +68,17 @@ const fresh = (name: string) => {
   return d;
 };
 
-/** 17:25 那次实测的会话号和时刻（UTC） */
+/** 10-11 实测那一轮（UTC）：03:37:01 发引导、03:37:21 回了 PONG；diag 记的时刻和 Mirasim steers[].at 差几毫秒 */
 const SID = 'a1138385-f089-4c63-8a4d-3baca0ae42fc';
 const OTHER = 'a8378600-7dde-49ad-a8cf-4ab8e3c66d8d';
-const SUBMIT = '2026-10-10T09:25:22.018Z';
-const STEER = '2026-10-10T09:25:23.876Z';
-/** 引导发出后它又调了一次工具：这次就该被拒 */
-const NOW = Date.parse('2026-10-10T09:25:40.000Z');
+const STEER = '2026-10-10T19:37:01.200Z';
+const STEER_AT = Date.parse('2026-10-10T19:37:01.180Z');
+const PROBE = 'STEER-PROBE：收到这句马上回复 PONG';
+/** 引导发出后它又要调一次工具：这次就该转 */
+const NOW = Date.parse('2026-10-10T19:37:15.000Z');
 
 type Row = Record<string, unknown>;
-/** Mirasim diag 的几种行，照本机 ~/.mirasim/diag/ev-2026101009.ndjson 的真形状造 */
+/** Mirasim diag 的几种行，照本机 ~/.mirasim/diag/ev-<UTC 年月日时>.ndjson 的真形状造 */
 const ev = {
   steer: (ts: string, sessionId = SID): Row => ({
     ts,
@@ -75,15 +98,6 @@ const ev = {
     frame: 'steer',
     sessionKey: `claude:${sessionId}`,
   }),
-  submit: (ts: string, sessionId = SID): Row => ({
-    ts,
-    bootId: '8053f523dc6c',
-    seq: 37247,
-    kind: 'event',
-    name: 'turn.submit',
-    sessionId,
-    surface: 'desktop',
-  }),
   noise: (ts: string): Row => ({ ts, bootId: '8053f523dc6c', seq: 1, kind: 'frame.in', frame: 'getConfig' }),
 };
 
@@ -97,7 +111,7 @@ function writeDiag(root: string, hourMs: number, rows: Row[], tail = ''): string
 
 /** 会话记录（transcript）的几种行，照 ~/.claude/projects/D--frank-fleet-dao/<会话号>.jsonl 的真形状造 */
 const tr = {
-  prompt: (ts: string, text = '做 6 次 sleep 15'): Row => ({
+  prompt: (ts: string, text = '做 12 次 sleep 15'): Row => ({
     type: 'user',
     isSidechain: false,
     message: { role: 'user', content: [{ type: 'text', text }] },
@@ -145,17 +159,6 @@ const tr = {
     },
     timestamp: ts,
   }),
-  notification: (ts: string): Row => ({
-    type: 'attachment',
-    isSidechain: false,
-    attachment: {
-      type: 'queued_command',
-      prompt: '<task-notification>子代理跑完了</task-notification>',
-      commandMode: 'task-notification',
-      origin: { kind: 'task-notification' },
-    },
-    timestamp: ts,
-  }),
   stopSummary: (ts: string): Row => ({
     type: 'system',
     subtype: 'stop_hook_summary',
@@ -164,14 +167,15 @@ const tr = {
   }),
 };
 
-/** 17:25 那一轮：09:25:22 开口，第 1、2 次 sleep；引导 09:25:23.876 发出；之后还在调工具 */
+/** 10-11 那一轮：开口、起后台子代理、sleep 15 循环；引导 19:37:01 发出之后还在调工具 */
 const turnRows = (): Row[] => [
-  tr.enqueue('2026-10-10T09:25:22.030Z'),
-  tr.dequeue('2026-10-10T09:25:22.031Z'),
-  tr.prompt('2026-10-10T09:25:22.040Z'),
-  tr.toolUse('2026-10-10T09:25:23.000Z', 't1'),
-  tr.result('2026-10-10T09:25:38.100Z', 't1'),
-  tr.toolUse('2026-10-10T09:25:39.000Z', 't2'),
+  tr.enqueue('2026-10-10T19:36:30.030Z'),
+  tr.dequeue('2026-10-10T19:36:30.031Z'),
+  tr.prompt('2026-10-10T19:36:30.040Z'),
+  tr.toolUse('2026-10-10T19:36:40.000Z', 't1'),
+  tr.result('2026-10-10T19:36:55.100Z', 't1'),
+  tr.toolUse('2026-10-10T19:36:56.000Z', 't2'),
+  tr.result('2026-10-10T19:37:11.100Z', 't2'),
 ];
 
 function transcript(rows: Row[]): string {
@@ -181,12 +185,23 @@ function transcript(rows: Row[]): string {
   return file;
 }
 
-/** 一份 Mirasim 家目录：当前这一小时的 diag 里有 17:25 那条引导 */
-function mirasimWithSteer(rows: Row[] = [ev.submit(SUBMIT), ev.steerFrame(STEER), ev.steer(STEER)]): string {
+/** 一份 Mirasim 家目录：当前这一小时的 diag 里有 10-11 那条引导 */
+function mirasimWithSteer(rows: Row[] = [ev.steerFrame(STEER), ev.steer(STEER)]): string {
   const root = fresh('mirasim');
-  writeDiag(root, NOW - 3_600_000, [ev.noise('2026-10-10T08:59:59.000Z')]);
-  writeDiag(root, NOW, [ev.noise('2026-10-10T09:00:01.000Z'), ...rows]);
+  writeDiag(root, NOW - 3_600_000, [ev.noise('2026-10-10T18:59:59.000Z')]);
+  writeDiag(root, NOW, [ev.noise('2026-10-10T19:00:01.000Z'), ...rows]);
   return root;
+}
+
+/** 进程内替掉取原文那一步：记下被叫了几次、叫的哪个会话 */
+function fakeFetch(answer: SteerText[] | Error = [{ text: PROBE, at: STEER_AT }]) {
+  const calls: string[] = [];
+  const fn: Fetch = (_root, sessionId) => {
+    calls.push(sessionId);
+    if (answer instanceof Error) throw answer;
+    return answer;
+  };
+  return { fn, calls };
 }
 
 const input = (path: unknown, extra: Row = {}) =>
@@ -201,124 +216,333 @@ const input = (path: unknown, extra: Row = {}) =>
     ...extra,
   });
 
-const check = (raw: string, mirasim: string, now = NOW) => lib.check(raw, { settleMs: 0, now, mirasim });
+interface Env {
+  mirasim: string;
+  fetch: Fetch;
+  shown: string;
+  now?: number;
+}
+const check = (raw: string, e: Env, l: MainThreadLib = lib) =>
+  l.check(raw, {
+    settleMs: 0,
+    now: e.now ?? NOW,
+    mirasim: e.mirasim,
+    fetchSteers: e.fetch,
+    shownDir: e.shown,
+  });
+/** 一套全新的：带引导的 Mirasim 家目录、假的取原文、空的 steer-shown 目录 */
+const setup = (answer?: SteerText[] | Error, rows?: Row[]) => {
+  const f = fakeFetch(answer);
+  return { env: { mirasim: mirasimWithSteer(rows), fetch: f.fn, shown: fresh('shown') }, calls: f.calls };
+};
 
-describe('引导还没送进来：拒这次调用，叫它马上结束这一轮', () => {
-  it('17:25 那次：引导发出后又要调工具，拒；理由写明北京时刻、写一句收到、马上结束这一轮、后台子代理不受影响', () => {
-    const v = check(input(transcript(turnRows())), mirasimWithSteer());
-    expect(v.deny).toBe(
-      '创始人 10-10 17:25 在 Mirasim 发了一条引导，要等这一轮结束才送进来：写一句收到、马上结束这一轮，不要再调工具；后台子代理不受影响。',
-    );
-    expect(v.deny).toBe(lib.steerDeny(Date.parse(STEER)));
+describe('有没转过的引导：拒这次调用，理由带原文，叫它先回、接着干、不用结束这一轮', () => {
+  it('10-11 那次：引导发出后又要调工具，拒；理由带北京时刻和原文、先回一句、不用结束这一轮、稍后再送进来说前面已回', () => {
+    const { env, calls } = setup();
+    const v = check(input(transcript(turnRows())), env);
+    expect(v.deny).toBe(lib.steerRelay([{ text: PROBE, at: STEER_AT }]));
+    expect(v.deny).toContain(`10-11 03:37『${PROBE}』`);
+    expect(v.deny).toContain('先用一句话回它');
+    expect(v.deny).toContain('不用结束这一轮');
+    expect(v.deny).toContain('这条前面已回');
+    expect(v.deny).not.toContain('马上结束这一轮');
     expect(v.notice).toBeUndefined();
+    expect(calls).toEqual([SID]);
+    expect(JSON.parse(readFileSync(lib.shownFile(env.shown, SID), 'utf8'))).toEqual({
+      at: Date.parse(STEER),
+    });
   });
 
-  it('整点刚过、当前这一小时的文件还没开写：上一小时里的引导照样认', () => {
+  it('转过一次后：同一条不再拦、也不再去 Mirasim 取', () => {
+    const { env, calls } = setup();
+    const t = transcript(turnRows());
+    expect(check(input(t), env).deny).toContain(PROBE);
+    expect(check(input(t), env)).toEqual({});
+    expect(check(input(t), { ...env, now: NOW + 30_000 })).toEqual({});
+    expect(calls).toEqual([SID]);
+  });
+
+  it('转过之后又来一条：只转新的那条', () => {
+    const second = '2026-10-10T19:38:05.000Z';
+    /** Mirasim 这一轮记着的引导：第二条到了才加进去 */
+    const steers: SteerText[] = [{ text: PROBE, at: STEER_AT }];
+    const { env } = setup(steers);
+    const t = transcript(turnRows());
+    expect(check(input(t), env).deny).toContain(PROBE);
+    steers.push({ text: '再加一句：子代理别停', at: Date.parse(second) });
+    writeDiag(env.mirasim, NOW, [ev.steer(STEER), ev.steer(second)]);
+    const v = check(input(t), { ...env, now: Date.parse('2026-10-10T19:38:10.000Z') });
+    expect(v.deny).toContain('再加一句：子代理别停');
+    expect(v.deny).not.toContain(PROBE);
+  });
+
+  it('diag 里没有这个会话的引导：不去 Mirasim 取（ui-cli 只在有引导在等时才起）', () => {
+    const f = fakeFetch();
+    const env = {
+      mirasim: mirasimWithSteer([ev.steer(STEER, OTHER), ev.steerFrame(STEER)]),
+      fetch: f.fn,
+      shown: fresh('shown'),
+    };
+    expect(check(input(transcript(turnRows())), env)).toEqual({});
+    expect(f.calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】把「转过的不再拦」那句去掉：同一条每次调工具都拦，第二条查得出来', async () => {
+    const src = readFileSync(HOOK, 'utf8');
+    const want = "if (steer.at <= shownAt) return { kind: 'none' };";
+    expect(src).toContain(want);
+    const mutant = join(dir, 'main-thread-no-shown.mjs');
+    writeFileSync(mutant, src.replace(want, ''));
+    const bad = (await import(pathToFileURL(mutant).href)) as MainThreadLib;
+    // Mirasim 每次都回一条比上次转过的更晚的（真的 Mirasim 回的是同一条，这里只为让变种走到「转过的不再拦」被去掉的那一步）
+    let n = 0;
+    const fetch: Fetch = () => {
+      n += 1;
+      return [{ text: PROBE, at: STEER_AT + n * 1_000 }];
+    };
+    const env = { mirasim: mirasimWithSteer(), fetch, shown: fresh('shown') };
+    const t = transcript(turnRows());
+    expect(check(input(t), env, bad).deny).toContain(PROBE);
+    expect(check(input(t), env, bad).deny).toContain(PROBE);
+    // 同一个取法给原版：第二次不拦、也不去取
+    const real = { ...env, shown: fresh('shown') };
+    expect(check(input(t), real).deny).toContain(PROBE);
+    const before = n;
+    expect(check(input(t), real)).toEqual({});
+    expect(n).toBe(before);
+  });
+});
+
+describe('取不到原文：不拦，明说没查成（不当成没有）', () => {
+  it.each([
+    ['ui-cli 起不来', new Error('connect ECONNREFUSED 127.0.0.1:4970'), 'ECONNREFUSED', null],
+    ['这一轮里没有记着它', [], '没有记着它的原文', null],
+    [
+      '只有上次转过的那条（这条新的还没记进来）',
+      [{ text: '老的', at: STEER_AT - 600_000 }],
+      '没有记着它的原文',
+      STEER_AT - 600_000,
+    ],
+  ])('%s', (_name, answer, why, shownBefore) => {
+    const { env, calls } = setup(answer as SteerText[] | Error);
+    const file = lib.shownFile(env.shown, SID);
+    if (shownBefore !== null) writeFileSync(file, JSON.stringify({ at: shownBefore }));
+    const before = existsSync(file) ? readFileSync(file, 'utf8') : null;
+    const t = transcript(turnRows());
+    const v = check(input(t), env);
+    expect(v.deny).toBeUndefined();
+    expect(v.notice).toMatch(/^引导检查没查成：创始人 10-11 03:37 在 Mirasim 发了一条引导，读不到原文（/);
+    expect(v.notice).toContain(why);
+    // 没转成就不记：下一次调工具再取一遍
+    expect(existsSync(file) ? readFileSync(file, 'utf8') : null).toBe(before);
+    check(input(t), env);
+    expect(calls).toEqual([SID, SID]);
+  });
+
+  it('记不下转过的（steer-shown 位置是个文件）：不拦，明说没查成，免得同一条每次都拦', () => {
+    const f = fakeFetch();
+    const blocker = join(fresh('shown'), 'not-a-dir');
+    writeFileSync(blocker, '');
+    const v = check(input(transcript(turnRows())), {
+      mirasim: mirasimWithSteer(),
+      fetch: f.fn,
+      shown: blocker,
+    });
+    expect(v.deny).toBeUndefined();
+    expect(v.notice).toMatch(/^引导检查没查成：.*记不下转过的/);
+  });
+
+  it('【故意造出的失败】把「读不到原文」吞成「没有引导」：ui-cli 起不来那条就不报没查成了', async () => {
+    const src = readFileSync(HOOK, 'utf8');
+    const want = 'miss = why(e);';
+    expect(src).toContain(want);
+    const mutant = join(dir, 'main-thread-swallow-fetch.mjs');
+    writeFileSync(mutant, src.replace(want, "return { kind: 'none' };"));
+    const bad = (await import(pathToFileURL(mutant).href)) as MainThreadLib;
+    const { env } = setup(new Error('connect ECONNREFUSED'));
+    expect(check(input(transcript(turnRows())), env, bad)).toEqual({});
+  });
+});
+
+describe('真的取原文那一步：读 ui-cli raw 订阅回的 snapshot.steers（临时目录里的假 server.cjs，不起真 ui-cli）', () => {
+  /** 在 <root>/app/<版本>/ 放一个假 server.cjs：记下参数，stdout 回 body */
+  function fakeServer(root: string, version: string, body: string, exit = 0) {
+    const d = join(root, 'app', version);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(
+      join(d, 'server.cjs'),
+      `require('node:fs').writeFileSync(${JSON.stringify(join(d, 'args.json'))}, JSON.stringify(process.argv.slice(2)));\n` +
+        `process.stdout.write(${JSON.stringify(body)});\nprocess.exit(${exit});\n`,
+    );
+    return d;
+  }
+  const reply = (frames: unknown[]) => JSON.stringify({ responses: frames });
+  const snapshot = (steers: unknown) => ({ type: 'snapshot', snapshot: { phase: 'running', steers } });
+
+  it('挑最新版本的 server.cjs，订阅 claude:<会话号>、等 snapshot，取出 [{ text, at }]', () => {
     const root = fresh('mirasim');
-    writeDiag(root, Date.parse('2026-10-10T09:59:50.000Z'), [ev.steer('2026-10-10T09:59:50.000Z')]);
-    const v = check(input(transcript(turnRows())), root, Date.parse('2026-10-10T10:00:05.000Z'));
-    expect(v.deny).toContain('创始人 10-10 17:59 在 Mirasim 发了一条引导');
+    fakeServer(root, '0.0.9', reply([]));
+    const d = fakeServer(
+      root,
+      '0.0.465',
+      reply([{ type: 'state' }, snapshot([{ text: PROBE, at: STEER_AT }, { text: 7 }])]),
+    );
+    expect(lib.mirasimServer(root)).toBe(join(d, 'server.cjs'));
+    expect(lib.fetchSteers(root, SID)).toEqual([{ text: PROBE, at: STEER_AT }]);
+    const args = JSON.parse(readFileSync(join(d, 'args.json'), 'utf8')) as string[];
+    expect(args.slice(0, 2)).toEqual(['ui-cli', '--port']);
+    expect(args).toContain('raw');
+    expect(JSON.parse(args[args.indexOf('raw') + 1] ?? '')).toEqual({
+      type: 'subscribe',
+      sessionKey: `claude:${SID}`,
+    });
+    expect(args.slice(args.indexOf('--await'), args.indexOf('--await') + 2)).toEqual(['--await', 'snapshot']);
   });
 
-  it('引导之后只来了任务通知（enqueue 带 <task-notification>、queued_command 是 task-notification）、子代理交回的话、引导之前的开口：都不算送到，照拒', () => {
-    const after = [
-      tr.enqueue(
-        '2026-10-10T09:25:30.000Z',
-        '<task-notification>\n<status>completed</status>\n</task-notification>',
-      ),
-      tr.notification('2026-10-10T09:25:30.001Z'),
-      tr.directive('2026-10-10T09:25:31.000Z', '子代理交回的报告', { kind: 'peer' }),
+  it.each([
+    ['没有 app 目录', null],
+    ['回的不是 JSON', 'oops'],
+    ['回的不是 { responses: [] }', JSON.stringify({ ok: true })],
+    ['没有 snapshot 帧', reply([{ type: 'state' }])],
+    ['steers 不是数组', reply([snapshot('x')])],
+  ])('【故意造出的失败】%s：抛出，不当成没有引导', (_name, body) => {
+    const root = fresh('mirasim');
+    if (body !== null) fakeServer(root, '0.0.1', body);
+    expect(() => lib.fetchSteers(root, SID)).toThrow();
+  });
+
+  it('ui-cli 退出码不是 0：抛出', () => {
+    const root = fresh('mirasim');
+    fakeServer(root, '0.0.1', reply([snapshot([{ text: PROBE, at: STEER_AT }])]), 3);
+    expect(() => lib.fetchSteers(root, SID)).toThrow();
+  });
+});
+
+describe('什么算引导已经送到', () => {
+  it.each([
+    [
+      '这一轮结束后作为新的一轮进来（enqueue 不带内容 + 用户消息）',
+      [
+        tr.stopSummary('2026-10-10T19:39:39.400Z'),
+        tr.enqueue('2026-10-10T19:39:39.407Z'),
+        tr.prompt('2026-10-10T19:39:39.420Z', PROBE),
+      ],
+    ],
+    ['只有 enqueue（还没写用户消息）', [tr.enqueue('2026-10-10T19:39:39.407Z')]],
+    [
+      '两次工具调用之间作为 queued_command 送进来（命令行的送法）',
+      [tr.directive('2026-10-10T19:37:11.101Z', PROBE)],
+    ],
+  ])('送到了 —— %s：不转、不去 Mirasim 取', (_name, after) => {
+    const { env, calls } = setup();
+    const v = check(input(transcript([...turnRows(), ...after])), env);
+    expect(v.deny ?? '').not.toContain('钩子先转给你');
+    expect(v.notice).toBeUndefined();
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    [
+      '后台任务完成通知开的新一轮（用户消息以 <task-notification> 开头）',
+      [
+        tr.prompt(
+          '2026-10-10T19:37:12.000Z',
+          '<task-notification>\n<status>completed</status>\n</task-notification>',
+        ),
+      ],
+    ],
+    [
+      '同上、content 是字符串',
+      [
+        {
+          type: 'user',
+          isSidechain: false,
+          message: { role: 'user', content: '<task-notification>子代理跑完了</task-notification>' },
+          timestamp: '2026-10-10T19:37:12.000Z',
+        },
+      ],
+    ],
+    [
+      'Stop 钩子挡回来的「Stop hook feedback:」',
+      [tr.prompt('2026-10-10T19:37:12.000Z', 'Stop hook feedback:\n继续盯工人')],
+    ],
+    [
+      '带 <task-notification> 的 enqueue',
+      [
+        tr.enqueue(
+          '2026-10-10T19:37:12.000Z',
+          '<task-notification>\n<status>completed</status>\n</task-notification>',
+        ),
+      ],
+    ],
+    [
+      '带 Stop hook feedback 的 enqueue',
+      [tr.enqueue('2026-10-10T19:37:12.000Z', 'Stop hook feedback:\n继续盯工人')],
+    ],
+    [
+      '子代理交回的报告（origin.kind: peer）',
+      [tr.directive('2026-10-10T19:37:12.000Z', '子代理交回的报告', { kind: 'peer' })],
+    ],
+    [
+      '引导之前的开口（早于引导时刻）',
+      [tr.enqueue('2026-10-10T19:37:00.000Z'), tr.prompt('2026-10-10T19:37:00.100Z', '更早的话')],
+    ],
+  ])('不算送到 —— %s：照转', (_name, after) => {
+    const { env } = setup();
+    const rows =
+      (after[0]?.timestamp as string) < STEER
+        ? [...turnRows().slice(0, 3), ...after, ...turnRows().slice(3)]
+        : [...turnRows(), ...after];
+    expect(check(input(transcript(rows)), env).deny).toContain(PROBE);
+  });
+
+  it('【故意造出的失败】把「机器开的一轮」认法去掉：任务通知开的新一轮就当成送到了，不转', async () => {
+    const src = readFileSync(HOOK, 'utf8');
+    const want = "return t.startsWith('<task-notification>') || t.startsWith('Stop hook feedback:');";
+    expect(src).toContain(want);
+    const mutant = join(dir, 'main-thread-machine-turn.mjs');
+    writeFileSync(mutant, src.replace(want, 'return false;'));
+    const bad = (await import(pathToFileURL(mutant).href)) as MainThreadLib;
+    const { env } = setup();
+    const rows = [
+      ...turnRows(),
+      tr.prompt('2026-10-10T19:37:12.000Z', '<task-notification>子代理跑完了</task-notification>'),
     ];
-    const v = check(input(transcript([...turnRows(), ...after])), mirasimWithSteer());
-    expect(v.deny).toContain('马上结束这一轮');
+    expect(check(input(transcript(rows)), env, bad)).toEqual({});
   });
 
-  it('【故意造出的失败】把「那之后」的时刻比较去掉（任何一条 enqueue 都当送到）：17:25 那次就放过去了，第一条查得出来', async () => {
+  it('【故意造出的失败】把「那之后」的时刻比较去掉：这一轮开头那次开口就当成送到了，不转', async () => {
     const src = readFileSync(HOOK, 'utf8');
     const want = 'if (ts < since) return false;';
     expect(src).toContain(want);
     const mutant = join(dir, 'main-thread-no-since.mjs');
     writeFileSync(mutant, src.replace(want, ''));
     const bad = (await import(pathToFileURL(mutant).href)) as MainThreadLib;
-    const v = bad.check(input(transcript(turnRows())), {
-      settleMs: 0,
-      now: NOW,
-      mirasim: mirasimWithSteer(),
-    });
-    expect(v.deny).toBeUndefined();
-  });
-});
-
-describe('引导已经送进来了：不拦', () => {
-  it.each([
-    [
-      '这一轮结束后作为新的一轮进来（enqueue 不带内容 + 用户消息）',
-      [
-        tr.stopSummary('2026-10-10T09:26:46.400Z'),
-        tr.enqueue('2026-10-10T09:26:46.407Z'),
-        tr.dequeue('2026-10-10T09:26:46.408Z'),
-        tr.prompt('2026-10-10T09:26:46.420Z', '你是什么时候看到这条的？'),
-      ],
-    ],
-    ['只有 enqueue（还没写用户消息）', [tr.enqueue('2026-10-10T09:26:46.407Z')]],
-    [
-      '两次工具调用之间作为 queued_command 送进来（命令行的送法）',
-      [
-        tr.result('2026-10-10T09:25:38.100Z', 't2'),
-        tr.directive('2026-10-10T09:25:38.101Z', '你是什么时候看到这条的？'),
-      ],
-    ],
-  ])('%s：不再叫它结束这一轮', (_name, after) => {
-    const v = check(input(transcript([...turnRows(), ...after])), mirasimWithSteer());
-    expect(v.deny ?? '').not.toContain('马上结束这一轮');
-    expect(v.notice).toBeUndefined();
-  });
-
-  it('送到之后：新一轮开头直接放行；中途作为 queued_command 送进来的，照第 1 条先回一句', () => {
-    const asNewTurn = [
-      tr.enqueue('2026-10-10T09:26:46.407Z'),
-      tr.prompt('2026-10-10T09:26:46.420Z', '几点看到的？'),
-    ];
-    expect(check(input(transcript([...turnRows(), ...asNewTurn])), mirasimWithSteer())).toEqual({});
-    const midTurn = [
-      tr.result('2026-10-10T09:25:38.100Z', 't2'),
-      tr.directive('2026-10-10T09:25:38.101Z', '几点看到的？'),
-    ];
-    expect(check(input(transcript([...turnRows(), ...midTurn])), mirasimWithSteer()).deny).toContain(
-      '先用一句话回它',
-    );
-  });
-
-  it('diag 里的引导是别的会话的、或者只有 steer 帧没有 turn.steer 事件：不算这个会话的引导', () => {
-    expect(check(input(transcript(turnRows())), mirasimWithSteer([ev.steer(STEER, OTHER)]))).toEqual({});
-    expect(check(input(transcript(turnRows())), mirasimWithSteer([ev.steerFrame(STEER)]))).toEqual({});
-  });
-
-  it('【故意造出的失败】送到的那条早于引导（是这一轮开头那次开口）：不算，照拒', () => {
-    const before = [
-      tr.enqueue('2026-10-10T09:25:23.000Z'),
-      tr.prompt('2026-10-10T09:25:23.100Z', '更早的话'),
-    ];
-    const rows = [...turnRows().slice(0, 3), ...before, ...turnRows().slice(3)];
-    expect(check(input(transcript(rows)), mirasimWithSteer()).deny).toContain('马上结束这一轮');
+    const { env } = setup();
+    expect(check(input(transcript(turnRows())), env, bad).deny).toBeUndefined();
   });
 });
 
 describe('子代理的调用：不管', () => {
-  it('输入带 agent_id：有没送进来的引导也放行', () => {
-    expect(check(input(transcript(turnRows()), { agent_id: 'a1b2' }), mirasimWithSteer())).toEqual({});
+  it('输入带 agent_id：有没转过的引导也放行、不去取', () => {
+    const { env, calls } = setup();
+    expect(check(input(transcript(turnRows()), { agent_id: 'a1b2' }), env)).toEqual({});
+    expect(calls).toEqual([]);
   });
 
-  it('【故意造出的失败】agent_id 是空串、不是字符串：不算子代理，照拒', () => {
+  it('【故意造出的失败】agent_id 是空串、不是字符串：不算子代理，照转', () => {
     for (const bad of ['', 7, null]) {
-      const v = check(input(transcript(turnRows()), { agent_id: bad }), mirasimWithSteer());
-      expect(v.deny, JSON.stringify(bad)).toContain('马上结束这一轮');
+      const { env } = setup();
+      const v = check(input(transcript(turnRows()), { agent_id: bad }), env);
+      expect(v.deny, JSON.stringify(bad)).toContain(PROBE);
     }
   });
 });
 
 describe('diag 读不了：不拦，明说「引导检查没查成」', () => {
   const t = () => transcript(turnRows());
+  const run = (mirasim: string) =>
+    check(input(t()), { mirasim, fetch: fakeFetch().fn, shown: fresh('shown') });
 
   it.each([
     ['diag 目录不在', () => fresh('mirasim')],
@@ -345,35 +569,52 @@ describe('diag 读不了：不拦，明说「引导检查没查成」', () => {
         mkdirSync(join(root, 'diag'), { recursive: true });
         writeFileSync(
           lib.diagFile(root, NOW),
-          'ts=2026-10-10T09:25:23Z name=turn.steer\nts=… name=turn.finish\n',
+          'ts=2026-10-10T19:37:01Z name=turn.steer\nts=… name=turn.finish\n',
         );
         return root;
       },
     ],
     ['本会话的 turn.steer 时刻认不出', () => mirasimWithSteer([{ ...ev.steer(STEER), ts: '昨天' }])],
   ])('%s', (_name, make) => {
-    const v = check(input(t()), make());
+    const v = run(make());
     expect(v.deny).toBeUndefined();
     expect(v.notice).toMatch(/^引导检查没查成：.+/);
   });
 
   it('有引导、但会话记录读不了：判不了送没送到，也明说没查成、不拦', () => {
-    const v = check(input(join(dir, 'gone.jsonl')), mirasimWithSteer());
+    const v = check(input(join(dir, 'gone.jsonl')), {
+      mirasim: mirasimWithSteer(),
+      fetch: fakeFetch().fn,
+      shown: fresh('shown'),
+    });
     expect(v.deny).toBeUndefined();
     expect(v.notice).toMatch(/^引导检查没查成：/);
   });
 
+  it('整点刚过、当前这一小时的文件还没开写：上一小时里的引导照样认', () => {
+    const root = fresh('mirasim');
+    writeDiag(root, Date.parse('2026-10-10T19:59:50.000Z'), [ev.steer('2026-10-10T19:59:50.000Z')]);
+    const f = fakeFetch([{ text: PROBE, at: Date.parse('2026-10-10T19:59:50.000Z') }]);
+    const v = check(input(t()), {
+      mirasim: root,
+      fetch: f.fn,
+      shown: fresh('shown'),
+      now: Date.parse('2026-10-10T20:00:05.000Z'),
+    });
+    expect(v.deny).toContain(`10-11 03:59『${PROBE}』`);
+  });
+
   it('最后一行还没写完：跳过它，不算认不出', () => {
     const root = fresh('mirasim');
-    writeDiag(root, NOW, [ev.steer(STEER)], '{"ts":"2026-10-10T09:25:39.000Z","kind":"fr');
-    expect(check(input(t()), root).deny).toContain('马上结束这一轮');
+    writeDiag(root, NOW, [ev.steer(STEER)], '{"ts":"2026-10-10T19:37:09.000Z","kind":"fr');
+    expect(run(root).deny).toContain(PROBE);
   });
 
   it('整个 Mirasim 家目录都不在（这台机器没装 Mirasim）：不会有它的引导，不说话', () => {
-    expect(check(input(t()), join(dir, 'no-mirasim-here'))).toEqual({});
+    expect(run(join(dir, 'no-mirasim-here'))).toEqual({});
   });
 
-  it('【故意造出的失败】把「认不出」吞成「没有引导」：格式坏了那条就不报没查成了', async () => {
+  it('【故意造出的失败】把 diag「认不出」吞成「没有引导」：格式坏了那条就不报没查成了', async () => {
     const src = readFileSync(HOOK, 'utf8');
     // 钩子源码里那一句是模板字符串：这里按原文找，$ 和 { 拆开写，免得被当成这边的占位符
     const tail = '$' + '{file} 的格式认不出';
@@ -384,75 +625,116 @@ describe('diag 读不了：不拦，明说「引导检查没查成」', () => {
     const bad = (await import(pathToFileURL(mutant).href)) as MainThreadLib;
     const root = fresh('mirasim');
     mkdirSync(join(root, 'diag'), { recursive: true });
-    writeFileSync(lib.diagFile(root, NOW), 'ts=2026-10-10T09:25:23Z name=turn.steer\n');
-    const v = bad.check(input(t()), { settleMs: 0, now: NOW, mirasim: root });
-    expect(v.notice).toBeUndefined();
+    writeFileSync(lib.diagFile(root, NOW), 'ts=2026-10-10T19:37:01Z name=turn.steer\n');
+    expect(
+      check(input(t()), { mirasim: root, fetch: fakeFetch().fn, shown: fresh('shown') }, bad).notice,
+    ).toBeUndefined();
   });
 });
 
-describe('无人值守的 Stop 钩子：有引导在等就放行收尾', { timeout: 0 }, () => {
-  /** 真起 stop.mjs：无人值守开着（这个会话自己跑过 on），一个工人都没有；Mirasim 家目录指到临时目录 */
-  function setup(steerSession: string, received: boolean) {
-    const state = fresh('state');
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      FLEET_UNATTENDED_DIR: state,
-      FLEET_WORKERS_DIR: fresh('workers'),
-      FLEET_WORKER: '',
-      CLAUDE_CODE_SESSION_ID: SID,
-      FLEET_MIRASIM_DIR: fresh('mirasim'),
-    };
-    expect(runChild(process.execPath, [UNATTENDED, 'on'], { env }).status).toBe(0);
-    const steerMs = Date.now() - 30_000;
-    const steerIso = new Date(steerMs).toISOString();
-    writeDiag(String(env.FLEET_MIRASIM_DIR), steerMs, [ev.steer(steerIso, steerSession)]);
-    const rows = [tr.prompt(new Date(steerMs - 60_000).toISOString())];
-    if (received) rows.push(tr.enqueue(new Date(steerMs + 1_000).toISOString()));
-    const stdin = JSON.stringify({
+/** 真起钩子用的一套：Mirasim 家目录里带假 server.cjs（回 10-11 那条引导的原文）、diag 里 20 秒前有这个会话的引导 */
+function cliSetup(opts: { server?: 'ok' | 'fail' | 'none'; steerSession?: string } = {}) {
+  const root = fresh('mirasim');
+  const steerMs = Date.now() - 20_000;
+  writeDiag(root, steerMs, [ev.steer(new Date(steerMs).toISOString(), opts.steerSession ?? SID)]);
+  if (opts.server !== 'none') {
+    const d = join(root, 'app', '0.0.465');
+    mkdirSync(d, { recursive: true });
+    const body = JSON.stringify({
+      responses: [{ type: 'snapshot', snapshot: { steers: [{ text: PROBE, at: steerMs }] } }],
+    });
+    writeFileSync(
+      join(d, 'server.cjs'),
+      opts.server === 'fail'
+        ? "process.stderr.write('connect ECONNREFUSED 127.0.0.1:4970');\nprocess.exit(1);\n"
+        : `process.stdout.write(${JSON.stringify(body)});\n`,
+    );
+  }
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    FLEET_MIRASIM_DIR: root,
+    FLEET_STEER_SHOWN_DIR: fresh('shown'),
+    FLEET_UNATTENDED_DIR: fresh('state'),
+    FLEET_WORKERS_DIR: fresh('workers'),
+    FLEET_WORKER: '',
+    CLAUDE_CODE_SESSION_ID: SID,
+  };
+  const t = transcript([tr.prompt(new Date(steerMs - 60_000).toISOString())]);
+  return { env, t };
+}
+
+describe('收尾钩子 stop.mjs：收尾时有没转过的引导就挡回去、reason 带原文', { timeout: 0 }, () => {
+  const stopInput = (t: string) =>
+    JSON.stringify({
       session_id: SID,
-      transcript_path: transcript(rows),
+      transcript_path: t,
       cwd: fresh('cwd'),
       hook_event_name: 'Stop',
-      stop_hook_active: true,
+      stop_hook_active: false,
     });
-    return runChild(process.execPath, [STOP], { input: stdin, env });
-  }
-
-  it('无人值守开着、Mirasim 里有这个会话没送进来的引导：不挡（没有 decision），systemMessage 说明为什么放行', () => {
-    const r = setup(SID, false);
+  const run = (hook: string, env: NodeJS.ProcessEnv, t: string) => {
+    const r = runChild(process.execPath, [hook], { input: stopInput(t), env });
     expect(r.status).toBe(0);
-    expect(r.stdout).not.toContain('"decision"');
-    expect((JSON.parse(r.stdout) as { systemMessage?: string }).systemMessage).toContain('引导');
+    return r.stdout.trim() === ''
+      ? {}
+      : (JSON.parse(r.stdout) as { decision?: string; reason?: string; systemMessage?: string });
+  };
+
+  it('没开无人值守、写最后一段话时来了引导：decision block，reason 带原文；再收尾一次（转过了）不挡', () => {
+    const { env, t } = cliSetup();
+    const first = run(STOP, env, t);
+    expect(first.decision).toBe('block');
+    expect(first.reason).toContain(PROBE);
+    expect(first.reason).toContain('不用结束这一轮');
+    expect(run(STOP, env, t).decision).toBeUndefined();
   });
 
-  it('【故意造出的失败】引导已经送到了、或者引导是别的会话的：照旧挡（证明放行只因为有引导在等）', () => {
-    for (const [sid, received] of [
-      [SID, true],
-      [OTHER, false],
-    ] as const) {
-      const r = setup(sid, received);
-      expect(r.status).toBe(0);
-      expect((JSON.parse(r.stdout) as { decision?: string }).decision, `${sid} ${received}`).toBe('block');
-    }
+  it('开着无人值守、引导转过了：照旧按无人值守挡（「有引导在等就放行收尾」已删）', () => {
+    const { env, t } = cliSetup();
+    expect(runChild(process.execPath, [UNATTENDED, 'on'], { env }).status).toBe(0);
+    expect(run(STOP, env, t).reason).toContain(PROBE);
+    const again = run(STOP, env, t);
+    expect(again.decision).toBe('block');
+    expect(again.reason).not.toContain(PROBE);
+  });
+
+  it('取不到原文：不挡，systemMessage 写明读不到原文和原因', () => {
+    const { env, t } = cliSetup({ server: 'fail' });
+    const out = run(STOP, env, t);
+    expect(out.decision).toBeUndefined();
+    expect(out.systemMessage).toMatch(/引导检查没查成：.*读不到原文/);
+  });
+
+  it('没装 Mirasim、或引导是别的会话的：不说话', () => {
+    const { env, t } = cliSetup({ steerSession: OTHER });
+    expect(run(STOP, env, t)).toEqual({});
+    expect(run(STOP, { ...env, FLEET_MIRASIM_DIR: join(dir, 'no-mirasim-here') }, t)).toEqual({});
+  });
+
+  it('【故意造出的失败】收尾钩子不转引导：写最后一段话时来的引导就没人转了，第一条查得出来', () => {
+    const copy = fresh('hooks');
+    for (const f of ['stop.mjs', 'main-thread.mjs', 'unattended.mjs', 'git-run.mjs'])
+      copyFileSync(join(HOOKS, f), join(copy, f));
+    const src = readFileSync(STOP, 'utf8');
+    const want = "if (steer.kind === 'relay') {";
+    expect(src).toContain(want);
+    writeFileSync(join(copy, 'stop.mjs'), src.replace(want, 'if (false) {'));
+    const { env, t } = cliSetup();
+    expect(run(join(copy, 'stop.mjs'), env, t).decision).toBeUndefined();
   });
 });
 
-describe('从命令行进来', { timeout: 0 }, () => {
-  it('有没送进来的引导：stdout 是 permissionDecision deny、退出码 0', () => {
-    // 命令行里用真时钟：引导写在「现在」前 20 秒
-    const root = fresh('mirasim');
-    const steerMs = Date.now() - 20_000;
-    writeDiag(root, steerMs, [ev.steer(new Date(steerMs).toISOString())]);
-    const t = transcript([tr.prompt(new Date(steerMs - 60_000).toISOString())]);
-    const r = runChild(process.execPath, [HOOK], {
-      input: input(t),
-      env: { ...process.env, FLEET_MIRASIM_DIR: root },
-    });
+describe('调工具前钩子从命令行进来', { timeout: 0 }, () => {
+  it('有没转过的引导：stdout 是 permissionDecision deny、理由带原文、退出码 0；再调一次不拦', () => {
+    const { env, t } = cliSetup();
+    const r = runChild(process.execPath, [HOOK], { input: input(t), env });
     expect(r.status).toBe(0);
     const out = JSON.parse(r.stdout) as {
       hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string };
     };
     expect(out.hookSpecificOutput?.permissionDecision).toBe('deny');
-    expect(out.hookSpecificOutput?.permissionDecisionReason).toContain('马上结束这一轮');
+    expect(out.hookSpecificOutput?.permissionDecisionReason).toContain(PROBE);
+    const again = runChild(process.execPath, [HOOK], { input: input(t), env });
+    expect([again.status, again.stdout]).toEqual([0, '']);
   });
 });
