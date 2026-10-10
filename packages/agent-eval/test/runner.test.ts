@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -486,7 +486,7 @@ describe('真题 + 假会话（会话在临时目录里把活干了）', () => {
       command: 'reclaude',
       launch: async (req) => {
         dir = req.cwd;
-        expect(req.cwd.startsWith(tmpdir())).toBe(true);
+        expect(req.cwd.startsWith(realpathSync.native(tmpdir()))).toBe(true);
         expect(req.cwd.startsWith(REPO_ROOT)).toBe(false);
         cpSync(join(caseDirOf(fixer), 'hidden', 'fix', 'src'), join(req.cwd, 'src'), { recursive: true });
         return ok(recorded('改好了'));
@@ -513,6 +513,26 @@ describe('真题 + 假会话（会话在临时目录里把活干了）', () => {
       expect(() => readFileSync(join(ws.dir, 'extra.test.ts'))).toThrow();
     } finally {
       ws.cleanup();
+    }
+  });
+
+  it('给会话的工作目录是真路径：临时根经过链接（Windows 上 8.3 短名同理）也展开，不然 dontAsk 下会话改不了这个目录里的文件', () => {
+    const base = mkdtempSync(join(tmpdir(), 'agent-eval-link-'));
+    try {
+      const real = join(base, 'real');
+      mkdirSync(real);
+      const link = join(base, 'link');
+      symlinkSync(real, link, 'junction');
+      const ws = prepareFixture(fixer, link);
+      try {
+        expect(ws.dir).toBe(realpathSync.native(ws.dir));
+        expect(ws.dir.startsWith(realpathSync.native(real))).toBe(true);
+        expect(ws.dir).not.toContain('~');
+      } finally {
+        ws.cleanup();
+      }
+    } finally {
+      rmSync(base, { recursive: true, force: true });
     }
   });
 });

@@ -76,11 +76,20 @@ export const VerifierInvokeInputSchema = z
     otherAuthorFamilies: z.array(z.string().min(1)).optional(),
     /** 这是第几轮：默认 1 轮、最多 2 轮（specs/555 第 3 条）；本模块不判上限，只透传。 */
     round: z.union([z.literal(1), z.literal(2)]),
+    /**
+     * 要求两家都验（两个不同的族各验一遍，都过才算过）：作者族认不出时由调用方设为 true。
+     * 为 true 时 modelFamiliesAvoid 和 otherAuthorFamilies 可以都为空。不为 true 时，别家一家都派不出也会改成两家都验。
+     */
+    requireTwoFamilies: z.boolean().optional(),
   })
-  .refine((v) => v.modelFamiliesAvoid.length + (v.otherAuthorFamilies?.length ?? 0) > 0, {
-    message: '作者族一个都没有：不知道该避开谁，没法保证换了家族',
-    path: ['modelFamiliesAvoid'],
-  });
+  .refine(
+    (v) =>
+      v.requireTwoFamilies === true || v.modelFamiliesAvoid.length + (v.otherAuthorFamilies?.length ?? 0) > 0,
+    {
+      message: '作者族一个都没有：不知道该避开谁，没法保证换了家族',
+      path: ['modelFamiliesAvoid'],
+    },
+  );
 export type VerifierInvokeInput = z.infer<typeof VerifierInvokeInputSchema>;
 
 /** 输出 zod：pass / fail + 问题清单。 */
@@ -575,11 +584,24 @@ export async function invokeVerifier(
   const named = await loadNamedFiles(parsed, diff.changedFiles, deps.fetchNamedFiles);
   const prompt = renderPrompt(parsed, diff, spec.specDir, named);
 
-  for (const family of FAMILY_ORDER) {
-    if (avoid.has(family)) continue;
+  /** 一个族试完的结果：终局（直接回给调用方）、有结论、或这一族挑不出可用模型。 */
+  type FamilyOutcome =
+    | { kind: 'final'; out: VerifierInvokeOutput }
+    | {
+        kind: 'verdict';
+        family: ModelFamily;
+        modelId: string;
+        passed: boolean;
+        problems: string[];
+        notes: string[];
+        session: NonNullable<VerifierInvokeOutput['session']>;
+      }
+    | { kind: 'none' };
+
+  const tryFamily = async (family: ModelFamily): Promise<FamilyOutcome> => {
     while (true) {
       const m = await deps.chooseModelForFamily(family);
-      if (m === undefined) break;
+      if (m === undefined) return { kind: 'none' };
       const picked: PickedVerifier = {
         family,
         modelId: m.modelId,
@@ -587,7 +609,7 @@ export async function invokeVerifier(
         ...(m.routeId !== undefined ? { routeId: m.routeId } : {}),
       };
       const label = routeLabel(picked);
-      if (seenRoutes.has(label)) break;
+      if (seenRoutes.has(label)) return { kind: 'none' };
       seenRoutes.add(label);
 
       const prepared = deps.prepareCwd ? await deps.prepareCwd(picked) : undefined;
@@ -640,12 +662,15 @@ export async function invokeVerifier(
           const klass = classOfFailed(oneShotResult);
           if (klass.kind === 'blip') {
             return {
-              pass: false,
-              problems: [],
-              notes: who,
-              round: parsed.round,
-              session,
-              upstreamRetry: { reason: klass.reason, afterSeconds: klass.afterSeconds },
+              kind: 'final',
+              out: {
+                pass: false,
+                problems: [],
+                notes: who,
+                round: parsed.round,
+                session,
+                upstreamRetry: { reason: klass.reason, afterSeconds: klass.afterSeconds },
+              },
             };
           }
           if (klass.kind === 'unknown') {
@@ -654,11 +679,14 @@ export async function invokeVerifier(
           }
         }
         return {
-          pass: false,
-          problems: [coldCallFailed(verdict, oneShotResult)],
-          notes: who,
-          round: parsed.round,
-          session,
+          kind: 'final',
+          out: {
+            pass: false,
+            problems: [coldCallFailed(verdict, oneShotResult)],
+            notes: who,
+            round: parsed.round,
+            session,
+          },
         };
       }
 
@@ -666,13 +694,16 @@ export async function invokeVerifier(
       const word = readVerdict(stdoutPieces.verdictLine);
       if (word === null) {
         return {
-          pass: false,
-          problems: [
-            `冷调用没跑成：结论行不是固定写法「verdict: pass」或「verdict: fail」（最后一行是：${stdoutPieces.verdictLine.slice(0, 120)}）`,
-          ],
-          notes: who,
-          round: parsed.round,
-          session,
+          kind: 'final',
+          out: {
+            pass: false,
+            problems: [
+              `冷调用没跑成：结论行不是固定写法「verdict: pass」或「verdict: fail」（最后一行是：${stdoutPieces.verdictLine.slice(0, 120)}）`,
+            ],
+            notes: who,
+            round: parsed.round,
+            session,
+          },
         };
       }
       const notes: string[] = [who];
@@ -684,17 +715,20 @@ export async function invokeVerifier(
       if (word === 'fail' && stdoutPieces.problems.length === 0) {
         // 说没过却一条算挡的都没写：不当成过（模型明明说了不行），也不能把空问题表丢回给写代码的会话白改——要人看
         return {
-          pass: false,
-          problems: [
-            `冷调用没跑成：结论写了 fail，但「## 问题」里没有一条以「${BLOCKER_KINDS.join('」「')}」开头的（${
-              stdoutPieces.droppedStyleNotes > 0
-                ? `它写了 ${stdoutPieces.droppedStyleNotes} 条不算挡的意见`
-                : '它一条都没写'
-            }）`,
-          ],
-          notes: notes.join('；'),
-          round: parsed.round,
-          session,
+          kind: 'final',
+          out: {
+            pass: false,
+            problems: [
+              `冷调用没跑成：结论写了 fail，但「## 问题」里没有一条以「${BLOCKER_KINDS.join('」「')}」开头的（${
+                stdoutPieces.droppedStyleNotes > 0
+                  ? `它写了 ${stdoutPieces.droppedStyleNotes} 条不算挡的意见`
+                  : '它一条都没写'
+              }）`,
+            ],
+            notes: notes.join('；'),
+            round: parsed.round,
+            session,
+          },
         };
       }
       if (word === 'pass' && stdoutPieces.problems.length > 0) {
@@ -703,33 +737,84 @@ export async function invokeVerifier(
         );
       }
       return {
-        pass: word === 'pass' && stdoutPieces.problems.length === 0,
+        kind: 'verdict',
+        family: picked.family,
+        modelId: picked.modelId,
+        passed: word === 'pass' && stdoutPieces.problems.length === 0,
         problems: stdoutPieces.problems,
-        notes: notes.join('；'),
-        round: parsed.round,
+        notes,
         session,
+      };
+    }
+  };
+
+  // 4. 一家验：不要求两家、且有不在避开族里的族给了结论时，和一直以来一样。
+  if (parsed.requireTwoFamilies !== true) {
+    for (const family of FAMILY_ORDER) {
+      if (avoid.has(family)) continue;
+      const r = await tryFamily(family);
+      if (r.kind === 'final') return r.out;
+      if (r.kind === 'verdict') {
+        return {
+          pass: r.passed,
+          problems: r.problems,
+          notes: r.notes.join('；'),
+          round: parsed.round,
+          session: r.session,
+        };
+      }
+    }
+  }
+
+  // 5. 两家都验：认不出作者（requireTwoFamilies），或别家一家都派不出。候选族先排不在避开族里的，再排避开族里的，
+  // 各挑一个模型，凑够两个不同的族各给出结论为止。同一族只算一家。
+  if (misses.length === 0) {
+    const candidates = [
+      ...FAMILY_ORDER.filter((f) => !avoid.has(f)),
+      ...FAMILY_ORDER.filter((f) => avoid.has(f)),
+    ];
+    const verdicts: Extract<FamilyOutcome, { kind: 'verdict' }>[] = [];
+    for (const family of candidates) {
+      if (parsed.requireTwoFamilies !== true && !avoid.has(family)) continue; // 一家验时已经试过、没挑出来
+      const r = await tryFamily(family);
+      if (r.kind === 'final') return r.out;
+      if (r.kind === 'verdict') {
+        verdicts.push(r);
+        if (verdicts.length >= 2) break;
+      }
+    }
+    if (verdicts.length >= 2) {
+      const failed = verdicts.filter((v) => !v.passed);
+      const names = verdicts.map((v) => `${v.family}（model ${v.modelId}）`).join('、');
+      return {
+        pass: failed.length === 0,
+        problems: failed.flatMap((v) => v.problems.map((p) => `${v.family}：${p}`)),
+        notes: [
+          `两家都验：${names}`,
+          ...verdicts.flatMap((v) => v.notes.slice(1).map((n) => `${v.family}：${n}`)),
+        ].join('；'),
+        round: parsed.round,
+        session: verdicts[1]!.session,
+      };
+    }
+    if (misses.length === 0) {
+      return {
+        pass: false,
+        problems: [
+          `没讨论成：两家都验要两个不同的族，只派得出 ${verdicts.length} 家（避开的族 ${[...avoid].join('、') || '无'}）`,
+        ],
+        notes: '0006：不同家族凑不齐 = 没讨论成，不许默认模型顶上、更不许拿它当 pass',
+        round: parsed.round,
       };
     }
   }
 
-  if (misses.length > 0) {
-    const listed = misses.map((item) => `${item.route}：${item.tail}`).join('；');
-    return {
-      pass: false,
-      problems: [`冷调用没跑成：认不出原因，试过的路由都没验成：${listed}`],
-      notes: '认不出原因，验收用途里还能派的路由都试过了',
-      round: parsed.round,
-      ...(lastSession === undefined ? {} : { session: lastSession }),
-    };
-  }
-
-  const familiesLeft = FAMILY_ORDER.filter((f) => !avoid.has(f)).join('、');
+  const listed = misses.map((item) => `${item.route}：${item.tail}`).join('；');
   return {
     pass: false,
-    problems: [
-      `没讨论成：避开的族 ${[...avoid].join('、')}，${familiesLeft ? `剩下的 ${familiesLeft}` : '一个能换的族都不剩'} 全挑不出可用模型`,
-    ],
-    notes: '0006：所有不同家族都不可用 = 没讨论成，不许默认模型顶上、更不许拿它当 pass',
+    problems: [`冷调用没跑成：认不出原因，试过的路由都没验成：${listed}`],
+    notes: '认不出原因，验收用途里还能派的路由都试过了',
     round: parsed.round,
+    ...(lastSession === undefined ? {} : { session: lastSession }),
   };
 }

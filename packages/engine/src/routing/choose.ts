@@ -1,5 +1,7 @@
 // 选路（设计 §九「选路」五条 + §十二「一条路由报繁忙，所有任务一起避开」由熔断判定带进来）。
 // 纯函数、确定性：同样输入同样输出；不取时钟、不随机——现在几点、试探用的随机数都由调用方给，引擎记进历史。
+// 模型之间严格按用途顺序：往后挑只因额度用完（含留量线）、人关了或钉住别的、报错（探测不通、熔断）；
+// 不因为作者族、不因为本单之前用过哪一家而改顺序（冷验收验不了由冷验收自己兜，见 verifier-invoke.ts 的两家都验）。
 
 import {
   probeCadenceMinutes,
@@ -98,16 +100,9 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
   const verdicts = judged.map((j, i) => verdictOf(j, i));
 
   const ready = judged.filter((j) => j.group.kind === 'ready');
-  const preferredFamilies = (input.preferFamilies ?? []).map((family) => family.trim()).filter(Boolean);
-  const preferredFamilyKeys = new Set(preferredFamilies.map(familyKey));
-  const preferredReady =
-    preferredFamilyKeys.size > 0
-      ? ready.filter((j) => preferredFamilyKeys.has(familyKey(j.item.route.family)))
-      : [];
-  const first = preferredReady[0] ?? ready[0];
+  const first = ready[0];
   if (first) {
-    const fellBackToOtherFamily = preferredFamilyKeys.size > 0 && preferredReady.length === 0;
-    const explore = preferredFamilyKeys.size > 0 ? null : pickTrial(input, ready, policy);
+    const explore = pickTrial(input, ready, policy);
     const chosen = explore ?? first;
     const route = chosen.item.route;
     const breakerTrial = route.breaker.admit === 'trial';
@@ -118,13 +113,7 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
           quotaNote(route),
           breakerTrial ? BREAKER_TRIAL : null,
         )
-      : withNotes(
-          whyFirst(stageName, chosen, judged),
-          fellBackToOtherFamily
-            ? `本单已有作者族 ${preferredFamilies.join('、')} 都派不出，换到 ${familyKey(route.family)} 族`
-            : null,
-          breakerTrial ? BREAKER_TRIAL : null,
-        );
+      : withNotes(whyFirst(stageName, chosen, judged), breakerTrial ? BREAKER_TRIAL : null);
     return dispatch(route, why, trial, null, verdicts, now);
   }
 

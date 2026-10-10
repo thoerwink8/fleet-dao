@@ -154,13 +154,35 @@ function gradeGroomer(expected: Record<number, string>) {
 
 // —— researcher ——
 
+// 「--agents 高于项目 .claude/agents/」认三种说法：直说（高于、优先于、赢过…）、排序（… > --agents > 项目 .claude/agents/ > …）、
+// 编号（--agents 是 2、项目是 3）。直说那种，--agents 和动词之间不能先提到项目，免得「--agents 输给项目」「被项目覆盖」也算对。
+// 先前只认直说里的「高于、优先于」，Opus、Haiku 写「赢」「> 排序」答对了也被判错（#1641）。
+const AGENTS_ABOVE_SAID =
+  /--agents`?(?:(?!项目|project|\.claude\/agents)[^。\n]){0,40}?(?:高于|优先于|先于|赢|胜过|胜出|压过|overrides?|takes? precedence|higher|wins|beats)/i;
+const AGENTS_RANK_2 = /--agents[^。\n]{0,40}?(?:[(（]\s*2\s*[)）]|是\s*2|第\s*2|②)/;
+const PROJECT_RANK_3 =
+  /(?:(?<!~\/)\.claude\/agents\/?`?|项目)[^。\n]{0,20}?(?:[(（]\s*3\s*[)）]|是\s*3|第\s*3|③)/;
+const OTHER_PLACE = /托管|managed|用户|user|插件|plugin|~\//i;
+
+/** 同一行按 > 切开：只写 --agents 的那一格排在只写项目 .claude/agents/ 的那一格前面。 */
+function agentsOrderedAbove(a: string): boolean {
+  const isAgents = (p: string) =>
+    p.includes('--agents') && !/项目|project|\.claude\/agents/i.test(p) && !OTHER_PLACE.test(p);
+  const isProject = (p: string) =>
+    /(?<!~\/)\.claude\/agents|项目|project/i.test(p) && !p.includes('--agents') && !OTHER_PLACE.test(p);
+  return a.split('\n').some((line) => {
+    const parts = line.split(/[>＞]/);
+    const ia = parts.findIndex(isAgents);
+    const ip = parts.findIndex(isProject);
+    return ia >= 0 && ip >= 0 && ia < ip;
+  });
+}
+
 async function gradeAgentsPriority(ctx: GradeContext): Promise<Verdict> {
   const a = ctx.answer;
   const second = /第\s*2|第二|\bsecond\b|\b2nd\b|priority\s*2|\b2\s*[.)、]/i.test(a);
   const above =
-    /(--agents)[^。\n]{0,80}(高于|优先于|先于|overrid|take precedence|higher)|(高于|优先于)[^。\n]{0,40}\.claude\/agents/i.test(
-      a,
-    );
+    AGENTS_ABOVE_SAID.test(a) || agentsOrderedAbove(a) || (AGENTS_RANK_2.test(a) && PROJECT_RANK_3.test(a));
   const link = /https?:\/\/(?:code\.claude\.com|docs\.claude\.com|docs\.anthropic\.com)\/\S+/.test(a);
   const dated = /20\d\d[-/年.]\s*\d{1,2}/.test(a);
   const problems: string[] = [];
