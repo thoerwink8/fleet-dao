@@ -269,8 +269,17 @@ export function ActionButtons({ target, className }: { target: ActionTarget; cla
   const { trigger } = useTaskActions();
   const offers = taskActionButtons(target);
   if (!offers.length) return null;
+  // 叫停与暂停、右侧「回主页」之间加竖线/间距，降低误点（#1751）
+  const hasStop = offers.some((o) => o.action === 'stop');
   return (
-    <div className={cn('flex flex-wrap items-center gap-1.5', className)} data-task-actions>
+    <div
+      className={cn(
+        'flex flex-wrap items-center gap-1.5',
+        hasStop && 'mr-2 border-r border-border pr-3',
+        className,
+      )}
+      data-task-actions
+    >
       {offers.map(({ action, disabledReason }) => {
         const def = ACTIONS[action];
         const Icon = def.icon;
@@ -292,7 +301,14 @@ export function ActionButtons({ target, className }: { target: ActionTarget; cla
         );
         // 置灰按钮自己不收悬停（disabled 关掉了指针），原因写在包着它的这一层上，鼠标停上去才看得到。
         return (
-          <span key={action} title={disabledReason} className="inline-flex">
+          <span key={action} className="inline-flex items-center gap-1.5" title={disabledReason}>
+            {action === 'stop' && offers.length > 1 ? (
+              <span
+                className="mx-0.5 h-5 w-px shrink-0 bg-border"
+                aria-hidden
+                data-action-sep="before-stop"
+              />
+            ) : null}
             {button}
           </span>
         );

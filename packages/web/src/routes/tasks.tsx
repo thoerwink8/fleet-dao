@@ -43,18 +43,32 @@ const TASKS_STALE_AFTER_MS = 5 * TIME.MIN;
 const SEARCH_DEBOUNCE_MS = 300;
 
 function Cost({ cost }: { cost: TaskListRow['cost'] }) {
+  // 读不到留空：仍挂悬停说明，不写「没读到」（叫停、已结束的单同样；#1751）
   if (cost.usd === null) {
-    return (
-      <span className="text-muted-foreground" title={cost.note}>
-        没读到
-      </span>
-    );
+    return <span className="inline-block min-h-[1em] min-w-[1em]" title={cost.note} data-cost-empty />;
   }
   return (
     <span className="num" title={cost.note}>
       {formatUsd(cost.usd)}
       {cost.note ? <span className="whitespace-nowrap text-ink-stall"> 偏低</span> : null}
     </span>
+  );
+}
+
+/** 桌面十二栏表头：和 Row 同一套 col-span，手机上不画（每行卡片自己带上下文）。 */
+function ListHeader() {
+  return (
+    <li
+      className="hidden border-b px-4 py-2 text-caption text-muted-foreground md:grid md:grid-cols-12 md:items-center md:gap-x-4"
+      aria-hidden
+      data-list-header
+    >
+      <span className="md:col-span-4">单</span>
+      <span className="md:col-span-2">状态</span>
+      <span className="md:col-span-2">模型</span>
+      <span className="text-right md:col-span-2">花费</span>
+      <span className="text-right md:col-span-2">更新</span>
+    </li>
   );
 }
 
@@ -287,6 +301,7 @@ export default function TasksPage() {
           />
         ) : (
           <ul className="divide-y">
+            <ListHeader />
             {rows.map((row) => (
               <Row key={row.taskId} row={row} from={from} now={now} />
             ))}
