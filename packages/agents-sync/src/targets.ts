@@ -247,7 +247,7 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
         timeout: 10,
       },
       { event: 'PreToolUse', matcher: '^(exec|read|grep)$', script: 'pretool.mjs', timeout: 10 },
-      // 主对话的两条（决定 0077）：引导先回、子代理一律后台跑。不写 matcher，每次工具调用都过；
+      // 主对话的两条（决定 0078）：引导先回、子代理一律后台跑。不写 matcher，每次工具调用都过；
       // 判断、为什么、Grok 借道时怎么办写在 agents/hooks/main-thread.mjs 开头。
       { event: 'PreToolUse', script: 'main-thread.mjs', timeout: 10 },
       { event: 'Stop', script: 'stop.mjs', timeout: 10 },

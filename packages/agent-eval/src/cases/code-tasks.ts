@@ -1,6 +1,7 @@
 // 要改代码的题：fixer、builder、debugger、standard-editor。夹具是 cases/<场景>/<题>/workspace 下的小 node 包（node:test），
 // 判分在临时目录里真跑 `node --test`：先拷进 hidden/ 里藏起来的验收测试，再比文件有没有被改。
-import { cpSync } from 'node:fs';
+import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { changedLineCount, compareDirs, readText, runNodeTests } from '../grade-util.ts';
 import type { EvalCase, GradeContext, Verdict } from '../types.ts';
@@ -83,6 +84,41 @@ function gradeDebugger(maxChangedLines: number) {
 
 // —— standard-editor ——
 
+/** test('…')、it('…')、describe('…') 的标题。 */
+function testTitles(source: string): string[] {
+  return [...source.matchAll(/\b(?:test|it|describe)(?:\.\w+)?\(\s*(['"`])((?:\\.|(?!\1).)*)\1/g)].map(
+    (m) => m[2] ?? '',
+  );
+}
+
+/**
+ * 标题还在说旧规矩（「最多 3 轮」「超过 3 轮按交接处理」）。说 3 轮已经没了的不算：Sonnet、Opus 新加的
+ * 「规矩里不再有 3 轮的旧说法」「旧的 3 轮说法已清干净」被当成残留判错过（#1641）。
+ */
+function isStaleRoundsTitle(title: string): boolean {
+  return (
+    title.includes('3 轮') &&
+    !/不再|没有|没了|不能|不许|不该|不会|旧|残留|清|去掉|删|改成|改为|→|->|no longer|\bnot\b|\bold\b|stale|legacy|removed/i.test(
+      title,
+    )
+  );
+}
+
+/** 改过的测试放回原来的规矩文档上跑：真钉住了 2 轮就该红。 */
+function passesOnOriginalRules(ctx: GradeContext): boolean {
+  const dir = mkdtempSync(join(tmpdir(), 'agent-eval-revert-'));
+  try {
+    cpSync(ctx.workDir, dir, { recursive: true });
+    cpSync(join(workspaceOf(ctx), 'rules', 'pr-rules.md'), join(dir, 'rules', 'pr-rules.md'));
+    return runNodeTests(dir).ok;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// 测试那一侧按行为判：在改过的规矩上过、放回原来「3 轮」的规矩上红，标题不再写 3 轮。
+// 不数测试里的字面「3 轮」：「旧说法不在了」的反向断言（!includes('…3 轮')、doesNotMatch(/3 轮/)）是更好的钉法，
+// 先前数字面把 Sonnet、Opus 这样写的判成「还钉着 3 轮」（#1641）。
 async function gradeRuleEdit(ctx: GradeContext): Promise<Verdict> {
   const orig = workspaceOf(ctx);
   const md = readText(ctx.workDir, 'rules/pr-rules.md');
@@ -98,15 +134,21 @@ async function gradeRuleEdit(ctx: GradeContext): Promise<Verdict> {
     };
   if (!md.includes('连续失败不超过 3 次'))
     return { pass: false, reason: '误改了「连续失败不超过 3 次」（那是失败次数，不是 PR 轮数）' };
-  if (count(test, '3 轮') > 0) return { pass: false, reason: '钉规矩的测试里还钉着「3 轮」' };
+  const staleTitles = testTitles(test).filter(isStaleRoundsTitle);
+  if (staleTitles.length > 0)
+    return { pass: false, reason: `测试标题里还写着「3 轮」：${staleTitles.join('、')}` };
   if (!test.includes('2 轮')) return { pass: false, reason: '钉规矩的测试没跟着改成「2 轮」' };
   if (count(test, 'assert.') < count(origTest, 'assert.'))
     return { pass: false, reason: '测试里的断言变少了' };
   if (/\.skip|\.only|todo/.test(test)) return { pass: false, reason: '测试里有 skip、only 或 todo' };
   const r = runNodeTests(ctx.workDir);
-  return r.ok
-    ? { pass: true, reason: '规矩和钉它的测试同时改成 2 轮，失败次数没误改，测试全过' }
-    : { pass: false, reason: `测试没过：${tail(r.output)}` };
+  if (!r.ok) {
+    const pinned = count(test, '3 轮') > 0 ? '钉规矩的测试里还钉着「3 轮」，' : '';
+    return { pass: false, reason: `${pinned}测试没过：${tail(r.output)}` };
+  }
+  if (passesOnOriginalRules(ctx))
+    return { pass: false, reason: '改过的测试放回原来「3 轮」的规矩上也能过：没钉住 2 轮' };
+  return { pass: true, reason: '规矩和钉它的测试同时改成 2 轮，失败次数没误改，测试全过、放回旧规矩会红' };
 }
 
 export const CODE_TASK_CASES: EvalCase[] = [

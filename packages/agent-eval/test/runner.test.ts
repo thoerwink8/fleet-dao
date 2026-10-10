@@ -1,7 +1,17 @@
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ALL_CASES } from '../src/cases/index.ts';
 import { type AgentDefinition, parseAgentDefinition } from '../src/definitions.ts';
 import {
@@ -18,7 +28,7 @@ import { OUTPUT_LIMIT, runCase } from '../src/runner.ts';
 import { parseStream, StreamFormatError } from '../src/stream.ts';
 import type { EvalCase } from '../src/types.ts';
 import { REPO_ROOT, UngradableError } from '../src/types.ts';
-import { caseDirOf, prepareFixture, type Workspace } from '../src/workspace.ts';
+import { caseDirOf, prepareFixture, removeTree, type Workspace } from '../src/workspace.ts';
 
 const DEF_TEXT = `---
 name: fleet-demo
@@ -204,6 +214,30 @@ describe('起会话的参数', () => {
       '--append-system-prompt',
       '你是 fleet-demo，只读。',
     ]);
+  });
+
+  it('定义写了 effort 就带 --effort（子代理真跑时按定义的档）；命令行给的盖过定义；都没有不带', () => {
+    const withEffort: AgentDefinition = { ...DEF, effort: 'medium' };
+    const a = buildSessionArgs(withEffort, 'claude-haiku-5-5');
+    expect(a.slice(0, 5)).toEqual(['-p', '--model', 'claude-haiku-5-5', '--effort', 'medium']);
+    expect(buildSessionArgs(withEffort, 'claude-haiku-5-5', 'high')).toContain('high');
+    expect(buildSessionArgs(withEffort, 'claude-haiku-5-5', 'high')).not.toContain('medium');
+    expect(buildSessionArgs(DEF, 'claude-haiku-5-5')).not.toContain('--effort');
+  });
+
+  it('结果里记下给会话的 effort', async () => {
+    const r = await runCase({ ...ALL_CASES[0], agent: 'fleet-demo' } as EvalCase, 'haiku', {
+      defs: new Map([['fleet-demo', { ...DEF, effort: 'medium' }]]),
+      command: 'reclaude',
+      prepare: () => ({ dir: tmpdir(), cleanup: () => {} }),
+      launch: async (req) => {
+        expect(req.args).toContain('--effort');
+        return { exitCode: 1, stdout: '', stderr: '不跑', timedOut: false, spawnError: '不跑' };
+      },
+      effort: 'low',
+    });
+    expect(r.effort).toBe('low');
+    expect(r.status).toBe('not-run');
   });
 
   it('裁判会话固定 claude-sonnet-5-5，不给工具', () => {
@@ -534,6 +568,33 @@ describe('真题 + 假会话（会话在临时目录里把活干了）', () => {
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
+  });
+
+  it('临时目录删不掉（Windows 上会话刚退出，目录还被占着报 EPERM）：重试过还不行就报出路径、返回 false，不抛错把整轮崩掉', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const rm = vi.fn(() => {
+        throw Object.assign(new Error('EPERM, Permission denied'), { code: 'EPERM' });
+      });
+      expect(removeTree('C:/tmp/agent-eval-Jb4Ucr', rm as unknown as typeof rmSync)).toBe(false);
+      expect(rm).toHaveBeenCalledWith(
+        'C:/tmp/agent-eval-Jb4Ucr',
+        expect.objectContaining({ recursive: true, force: true, maxRetries: expect.any(Number) }),
+      );
+      expect(err).toHaveBeenCalledTimes(1);
+      expect(String(err.mock.calls[0]?.[0])).toContain('C:/tmp/agent-eval-Jb4Ucr');
+      expect(String(err.mock.calls[0]?.[0])).toContain('EPERM');
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it('临时目录删得掉就删干净、返回 true', () => {
+    const d = mkdtempSync(join(tmpdir(), 'agent-eval-rm-'));
+    mkdirSync(join(d, 'work'));
+    writeFileSync(join(d, 'work', 'a.txt'), 'x');
+    expect(removeTree(d)).toBe(true);
+    expect(existsSync(d)).toBe(false);
   });
 });
 

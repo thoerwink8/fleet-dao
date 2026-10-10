@@ -34,7 +34,7 @@ const PRETOOL_MATCHERS = HOOK_TARGETS.flatMap((t) => t.hooks)
 
 /**
  * 装好以后 PreToolUse 下该有的几组：照 Claude 那份登记的顺序一条一组——pretool.mjs 一个 matcher 一组，
- * 再加不写 matcher、每次工具调用都过的 main-thread.mjs（决定 0077）。cmd 把脚本名换成这台机器上登记的命令。
+ * 再加不写 matcher、每次工具调用都过的 main-thread.mjs（决定 0078）。cmd 把脚本名换成这台机器上登记的命令。
  */
 const pretoolGroups = (cmd: (script: string) => string): Group[] =>
   (HOOK_TARGETS.find((t) => t.format === 'claude')?.hooks ?? [])

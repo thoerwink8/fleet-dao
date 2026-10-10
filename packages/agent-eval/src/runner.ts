@@ -8,6 +8,7 @@ import {
   buildJudgeArgs,
   buildSessionArgs,
   DEFAULT_MAX_TURNS,
+  effortOf,
   MODEL_IDS,
   type ModelKey,
   SESSION_TIMEOUT_MS,
@@ -28,6 +29,8 @@ export interface CaseResult {
   agent: string;
   model: ModelKey;
   modelId: string;
+  /** 给会话的 effort（命令行 --effort 或定义的）；都没有是 null，用的是 claude 的默认档。 */
+  effort: string | null;
   status: Status;
   /** 过没过；没跑成是 null。 */
   pass: boolean | null;
@@ -84,6 +87,8 @@ export interface RunDeps {
   outDir?: string;
   /** 第几遍，默认 1。 */
   attempt?: number;
+  /** 命令行 --effort：盖过定义里的 effort（换档之前先试 effort 用）。 */
+  effort?: string;
 }
 
 export function truncateOutput(text: string): { text: string; truncated: boolean } {
@@ -132,6 +137,7 @@ export async function runCase(c: EvalCase, model: ModelKey, deps: RunDeps): Prom
     agent: c.agent,
     model,
     modelId,
+    effort: def ? effortOf(def, deps.effort) : (deps.effort ?? null),
     status: 'not-run',
     pass: null,
     reason: '',
@@ -169,7 +175,7 @@ export async function runCase(c: EvalCase, model: ModelKey, deps: RunDeps): Prom
     const t0 = now();
     const r = await deps.launch({
       command: deps.command,
-      args: buildSessionArgs(def, modelId),
+      args: buildSessionArgs(def, modelId, deps.effort),
       stdin: c.prompt,
       cwd: ws.dir,
       timeoutMs: deps.timeoutMs ?? SESSION_TIMEOUT_MS,

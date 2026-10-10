@@ -39,6 +39,18 @@ interface Failure {
   assertion: string;
 }
 
+/**
+ * 一行回答里引的那句断言：从 AssertionError 起，到反引号或行尾为止，去掉行尾的出处（「（ci-output.txt:22）」「(:22)」）和引号。
+ * 先前一直截到行尾，Haiku 写成「`AssertionError: …`（:22）」——引得一字不差、还带了出处——被判成「不在原文里」（#1641）。
+ */
+function evidenceOf(line: string): string | undefined {
+  return /AssertionError[^`\n]*/
+    .exec(line)?.[0]
+    ?.replace(/\s*[（(][^（()）]*:\d+(?:-\d+)?[)）]\s*$/, '')
+    .replace(/[`'"]+$/, '')
+    .trim();
+}
+
 function gradeLogDigest(failures: readonly Failure[], retried: readonly string[]) {
   return async (ctx: GradeContext): Promise<Verdict> => {
     const log = readFileSync(join(ctx.caseDir, 'workspace', 'ci-output.txt'), 'utf8');
@@ -57,12 +69,7 @@ function gradeLogDigest(failures: readonly Failure[], retried: readonly string[]
     // 编造：回答里每一行以 AssertionError 起头的内容必须在原文里找得到。
     const invented = ctx.answer
       .split('\n')
-      .map((l) =>
-        /AssertionError.*$/
-          .exec(l)?.[0]
-          ?.replace(/[`'"]+$/, '')
-          .trim(),
-      )
+      .map(evidenceOf)
       .filter((s): s is string => Boolean(s) && !log.includes(s as string));
     if (invented.length > 0) return { pass: false, reason: `证据行不在原文里：${invented[0]}` };
     // 重试后过了的不算失败：提到它的行必须同时说明它过了。

@@ -2,9 +2,19 @@
 // 判法全在 patrol-lib.mjs；这里只接 ssh、本机时钟和基线文件。最后一行是 VERDICT，退出码 0 OK、1 ALERT、2 BROKEN。
 // 用 exitCode 不用 process.exit：输出接到管道上时，exit 可能把没写完的截掉。
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { DEFAULT_BASELINE, fetchFrance, runPatrol, selftest } from './patrol-lib.mjs';
+import { trainAlertNote } from './train-state-lib.mjs';
+
+const isAlive = (/** @type {number} */ pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e instanceof Error && 'code' in e && e.code === 'EPERM';
+  }
+};
 
 const USAGE = `用法：node patrol.mjs [--baseline <文件>]   一次 ssh 只读收齐法国盘面，判不变量，和基线比出变化
       node patrol.mjs --selftest              拿一份固定的假输出验 ALERT、BROKEN 的判法还灵（不连 ssh）
@@ -34,6 +44,7 @@ async function main(argv) {
     fetchRaw: () =>
       fetchFrance({ home: homedir(), env: process.env, readText: (f) => readFileSync(f, 'utf8') }),
     now: () => new Date(),
+    trainNote: () => trainAlertNote({ home: homedir(), now: new Date(), isAlive, host: hostname() }),
     loadBaseline: () => {
       try {
         return readFileSync(file, 'utf8');

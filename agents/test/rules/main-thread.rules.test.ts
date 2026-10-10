@@ -1,4 +1,4 @@
-// 钉住主对话的两条（agents/hooks/main-thread.mjs，决定 0077；改标准：agents/test/rules/ 在 standard-paths.json 里）。
+// 钉住主对话的两条（agents/hooks/main-thread.mjs，决定 0078；改标准：agents/test/rules/ 在 standard-paths.json 里）。
 // 1. 引导先回：创始人在一轮中途打的字（Claude Code 的 transcript 里是 attachment.type=queued_command、commandMode=prompt），
 //    附在下一次工具结果后面送进主对话。本机 178 条送到的引导里，AI 第一反应直接再调工具 107 条、先写话 45 条、本轮随即结束 26 条，
 //    创始人觉得「石沉大海」。所以最后一条引导之后主对话还没写过一段非空文字，就拒这次工具调用，理由里带上引导的前 200 字。

@@ -1,4 +1,4 @@
-# 0077 引导先回、子代理一律后台跑（创始人 2026-10-10 13:02 选定）
+# 0078 引导先回、子代理一律后台跑（创始人 2026-10-10 13:02 选定）
 
 - 日期：2026-10-10（北京时间 13:02）
 - 谁拍的：创始人。指挥官给了三条方案（改标准），问他「你回一句『同意』我就开 PR」，他回「都按你的推荐来。」
@@ -24,13 +24,13 @@
    - 后台任务的完成通知、子代理交回的报告也走 queued_command，不算引导。创始人开了新的一轮，之前没回的引导就不再拿来拦。
    - 读不了 transcript（没给路径、文件不在、读出错），不拦，用 systemMessage 明说「引导检查没查成：原因」。
 2. **子代理一律后台跑。** 主对话调 Agent、Task 而 `run_in_background` 不是 true，同一个钩子拒，理由说明为什么。子代理里再派子代理不管。
-3. **通用段补三句**（`agents/shared-rules.md`「怎么跟我说话」）：中途收到引导，下一句先回它；涉及在跑的子代理，用 `SendMessage` 转给它，并告诉他已转。子代理一律后台跑；主对话留在这一轮，单次前台等待不超过 60 秒，等它跑完再收尾。commander 技能「派活」同步改，删掉「它活在聊天这一轮里，轮次结束就跟着死」的旧说法。
+3. **通用段补上**（`agents/shared-rules.md`「怎么跟我说话」）：中途的引导下一句先回，涉及子代理就用 `SendMessage` 转它并告诉他。子代理一律后台跑，主对话留在本轮等它跑完，单次前台等待不超过 60 秒。commander 技能「派活」同步改，删掉「它活在聊天这一轮里，轮次结束就跟着死」的旧说法。
 
 ## 落在哪
 
 - 钩子：`agents/hooks/main-thread.mjs`；登记：`packages/agents-sync/src/targets.ts`（Claude 那份设置）。
 - 钉住的测试：`agents/test/rules/main-thread.rules.test.ts`、`agents/test/rules/mid-turn-answer.rules.test.ts`。
-- 通用段字数上限从 2000 放到 2080（`agents/test/agents-md-budget.test.ts` 写了为什么）：Codex、Gemini 这些家没有这个钩子，只能照文字做。
+- 通用段字数上限 2000 不放宽（`agents/test/agents-md-budget.test.ts`）：这几句压短以后，通用段仍是 2054 字、超 54 字，怎么腾地方等创始人定。
 
 ## 没验证完的
 
