@@ -3,9 +3,9 @@
 # 发布构建的沙箱（#79）。
 # 抓住的错：沙箱命令不在、起不来、读回确认 /etc/fleet-dao 仍然可见时，发布仍往下走、或退回用 as_fleet_in
 #   以 fleet 直接构建（那样第三方代码读得到密钥）；沙箱没挡住时，构建读得到 /etc/fleet-dao 下的诱饵、
-#   或连得上本机库的 unix socket。
-# 前三段不需要 root（systemd-run 换成桩）。独占创建和「不覆盖已有文件」在临时目录里演练，也不需要 root。
-# 真沙箱那两段要 root；不是 root 就记没跑成、退出 2。
+#   或连得上本机库的 unix socket；只遮三个目录、仍看主机 /proc 时，同 UID 经 /proc/<pid>/root 绕路读密钥。
+# 前几段不需要 root（systemd-run 换成桩）。独占创建和「不覆盖已有文件」在临时目录里演练，也不需要 root。
+# 真沙箱那几段要 root；不是 root 就记没跑成、退出 2。
 # 诱饵不用固定文件名：在目录里独占创建一个临时文件，退出只删本次这一个（设备号和 inode 都对上才删）。
 # 已有同名文件、已有符号链接都不写。这台没有 fleet 账号时，家目录放在本次临时目录里，退出只删账号、不碰 /home/fleet。
 # 用法：sudo bash deploy/test/build-isolation.test.sh。退出码：0 通过，1 不通过，2 有没跑成的。
@@ -46,11 +46,16 @@ CREATED_FLEET=0
 EXCL_PATH=""
 EXCL_ID=""
 NODE_BIN=""
+HOLDER_PID=""
 fail=0
 skipped=0
 
 cleanup() {
   set +e
+  if [[ -n "$HOLDER_PID" ]]; then
+    kill "$HOLDER_PID" 2>/dev/null || true
+    wait "$HOLDER_PID" 2>/dev/null || true
+  fi
   if [[ -n "$SERVER_PID" ]]; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
@@ -293,6 +298,33 @@ check "没有调用 as_fleet_in" "$(bare_n)" 0
 check "没有切版本、也没走到迁移" "$(later_n)" 0
 check "current 没指到这一版" "$(current_sha)" ""
 
+echo "== 没有 unshare：发布失败，不调用 as_fleet_in"
+: >"$BARE_CALLS"
+: >"$LATER"
+: >"$SRUN"
+cat >"$TMP/bin/systemd-run" <<'EOF'
+#!/bin/bash
+echo "stub systemd-run should not run when unshare is missing" >&2
+exit 1
+EOF
+chmod 755 "$TMP/bin/systemd-run"
+BUILD_SANDBOX_STATE=""
+(
+  set -e
+  unset -f systemd-run
+  PATH=$TMP/bin
+  hash -r
+  do_release "$SHA"
+) >"$OUT" 2>&1
+REL_RC=$?
+out=$(cat -- "$OUT")
+check "退出码不是 0" "$([[ "$REL_RC" != 0 ]] && echo fail || echo ok)" fail
+check "红里写没有 unshare" "$(grep -c '没有 unshare' <<<"$out" | tr -d ' ')" 1
+check "红里写不退回" "$(grep -c '不退回' <<<"$out" | tr -d ' ')" 1
+check "没有调用 as_fleet_in" "$(bare_n)" 0
+check "没有切版本" "$(later_n)" 0
+rm -f -- "$TMP/bin/systemd-run"
+
 echo "== 沙箱起不来：发布失败，不调用 as_fleet_in"
 STUB_MODE=down
 BUILD_SANDBOX_STATE=""
@@ -304,6 +336,9 @@ check "红里写不退回" "$(grep -c '不退回' <<<"$out" | tr -d ' ')" 1
 check "没有调用 as_fleet_in" "$(bare_n)" 0
 check "没有切版本" "$(later_n)" 0
 check "探针之后没有跑 pnpm 或 tar" "$(grep -cE 'pnpm|tar -x' <<<"$(srun_text)" || true)" 0
+srun=$(srun_text)
+check "沙箱带 PrivateUsers" "$([[ "$srun" == *'PrivateUsers=true'* ]] && echo ok || echo bad)" ok
+check "沙箱经 unshare 自建 PID 命名空间" "$([[ "$srun" == *'unshare'* && "$srun" == *'--pid'* && "$srun" == *'--mount-proc'* ]] && echo ok || echo bad)" ok
 
 echo "== 读回确认 /etc/fleet-dao 仍然可见：发布失败，不调用 as_fleet_in"
 STUB_MODE=visible
@@ -576,6 +611,67 @@ JS
       check "连 socket 时没有调用 as_fleet_in" "$(bare_n)" 0
     fi
   fi
+fi
+
+echo "== 真沙箱：经 /proc/<pid>/root 绕路读诱饵失败（同 UID 主机进程）"
+if ((EUID == 0)) && ((skipped == 0)) && [[ -n "$BAIT" && -n "$BAIT_ID" ]]; then
+  STAGE=$TMP/stage-proc
+  install -d -o fleet -g fleet -m 750 "$STAGE"
+  runuser -u fleet -- sleep 3600 &
+  HOLDER_PID=$!
+  holder_ok=0
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if [[ -d /proc/$HOLDER_PID ]]; then holder_ok=1; break; fi
+    sleep 0.1
+  done
+  if ((holder_ok == 0)); then
+    echo "  … 没跑成：起不了主机上的 fleet 占位进程"
+    skipped=1
+  else
+    bypass_path="/proc/${HOLDER_PID}/root${BAIT}"
+    outside=$(runuser -u fleet -- cat -- "$bypass_path" 2>&1) || true
+    if [[ "$outside" != "$CANARY" && "$outside" != "$CANARY"$'\n' ]]; then
+      echo "  … 没跑成：沙箱外经 /proc/<pid>/root 也读不到诱饵（${outside//$CANARY/【内容已隐去】}），没法证明是沙箱挡住的"
+      skipped=1
+    else
+      printf '  ✓ 沙箱外同 UID 经 /proc/<pid>/root 能读到诱饵（基线）\n'
+      : >"$BARE_CALLS"
+      BUILD_SANDBOX_STATE=""
+      rc=0
+      text=$(as_build_in "$STAGE" bash -c "cat -- \"$bypass_path\"" 2>&1) || rc=$?
+      check "沙箱里经 /proc/<pid>/root 读诱饵失败" "$([[ "$rc" != 0 ]] && echo fail || echo ok)" fail
+      if [[ "$text" == *"$bypass_path"* || "$text" == *"$BAIT"* || "$text" == *"/proc/${HOLDER_PID}/root"* ]]; then
+        printf '  ✓ 构建输出里有绕路路径\n'
+      else
+        printf '  ✗ 构建输出里没有绕路路径：%s\n' "$(show "$text")"
+        fail=1
+      fi
+      lacks_canary "绕路输出里没有诱饵内容" "$text"
+      # 扫一遍沙箱 /proc：任一 root/etc/fleet-dao 可读都算没隔开
+      scan_rc=0
+      scan=$(as_build_in "$STAGE" bash -c '
+for root in /proc/[0-9]*/root; do
+  [[ -e "$root" ]] || continue
+  if [[ -d "$root/etc/fleet-dao" && -r "$root/etc/fleet-dao" && -x "$root/etc/fleet-dao" ]]; then
+    printf "%s\n" "LEAK $root/etc/fleet-dao"
+    exit 0
+  fi
+done
+printf "%s\n" "NOLEAK"
+exit 1
+' 2>&1) || scan_rc=$?
+      check "沙箱里扫 /proc/*/root 看不到密钥目录" "$([[ "$scan" == *NOLEAK* && "$scan" != *LEAK* ]] && echo ok || echo bad)" ok
+      check "绕路时没有调用 as_fleet_in" "$(bare_n)" 0
+    fi
+  fi
+  if [[ -n "$HOLDER_PID" ]]; then
+    kill "$HOLDER_PID" 2>/dev/null || true
+    wait "$HOLDER_PID" 2>/dev/null || true
+    HOLDER_PID=""
+  fi
+elif ((EUID != 0)); then
+  echo "  … 没跑成：要 root 和 systemd（sudo bash deploy/test/build-isolation.test.sh）"
+  skipped=1
 fi
 
 if ((fail)); then

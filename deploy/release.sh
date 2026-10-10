@@ -225,8 +225,12 @@ build_sandbox_paths() {
   done
 }
 
-# 一次性沙箱里以 fleet 跑命令。root 起 systemd-run：InaccessiblePaths 盖住密钥目录、本机库 socket 目录、引擎状态目录。
-# NoNewPrivileges：构建进程不能再拿到新权限把这层挂载撤掉。--pipe 把调用方的标准输入输出接进去（git archive | tar、日志重定向）。
+# 一次性沙箱里以 fleet 跑命令。root 起 systemd-run：
+# - InaccessiblePaths 盖住密钥目录、本机库 socket 目录、引擎状态目录（直接路径进不去）
+# - PrivateUsers + 里面再 unshare --pid --fork --mount-proc：自建 PID 命名空间并换挂 /proc，
+#   主机上同 UID 的 fleet 进程不出现在沙箱 /proc 里，堵掉经 /proc/<pid>/root/… 绕开 InaccessiblePaths
+# - NoNewPrivileges：构建进程不能再拿到新权限把这层挂载撤掉
+# --pipe 把调用方的标准输入输出接进去（git archive | tar、日志重定向）。
 # --expand-environment=no：命令和代理值里的 $ 不由 systemd 展开。失败不退回 as_fleet_in
 build_sandbox_run() { # 工作目录 命令…
   local dir=$1
@@ -244,18 +248,35 @@ build_sandbox_run() { # 工作目录 命令…
     --working-directory="$dir" \
     -p "InaccessiblePaths=$joined" \
     -p NoNewPrivileges=true \
-    -- /usr/bin/env -i HOME=/home/fleet USER=fleet LOGNAME=fleet \
+    -p PrivateUsers=true \
+    -- /usr/bin/unshare --pid --fork --mount-proc --kill-child -- \
+      /usr/bin/env -i HOME=/home/fleet USER=fleet LOGNAME=fleet \
       "PATH=$path" LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
       "${PROXY_ENVS[@]}" "$@"
 }
 
-# 读回：fleet 在沙箱里还能不能把 /etc/fleet-dao 当目录用。命令只打印一行 visible 或 hidden，不列名字、不读内容。
+# 读回：fleet 在沙箱里还能不能把 /etc/fleet-dao 当目录用（直接路径，或经 /proc/<pid>/root 绕路）。
+# 命令只打印一行 visible 或 hidden，不列名字、不读内容。
 # 750 root:fleet 时 fleet 进得去（-r 且 -x）；挡住之后那一层是 mode 000 的挂载，两个都假。
+# 只遮三个目录、仍看得到主机 /proc 时，同 UID 的主机 fleet 进程可经 /proc/<pid>/root/etc/fleet-dao 绕过——也要抓。
 # 沙箱自己可能在同一段输出里再带一行状态：有一行 visible 就当没挡住；一行都对不上 hidden 就当认不出，不当成已经隔开
 build_sandbox_hidden() { # 工作目录：0 = 挡住了
   local out err rc=0 line token saw=0
   err=$(mktemp)
-  out=$(build_sandbox_run "$1" bash -c 'if [[ -d /etc/fleet-dao && -r /etc/fleet-dao && -x /etc/fleet-dao ]]; then printf "%s\n" visible; else printf "%s\n" hidden; fi' 2>"$err") || rc=$?
+  out=$(build_sandbox_run "$1" bash -c '
+if [[ -d /etc/fleet-dao && -r /etc/fleet-dao && -x /etc/fleet-dao ]]; then
+  printf "%s\n" visible
+  exit 0
+fi
+for root in /proc/[0-9]*/root; do
+  [[ -e "$root" ]] || continue
+  if [[ -d "$root/etc/fleet-dao" && -r "$root/etc/fleet-dao" && -x "$root/etc/fleet-dao" ]]; then
+    printf "%s\n" visible
+    exit 0
+  fi
+done
+printf "%s\n" hidden
+' 2>"$err") || rc=$?
   if ((rc != 0)); then
     line=$(tr '\n' ' ' <"$err")
     BUILD_SANDBOX_WHY="沙箱起不来：${line:0:400}"
@@ -278,13 +299,18 @@ build_sandbox_hidden() { # 工作目录：0 = 挡住了
   return 1
 }
 
-# 沙箱要能起来，并且读回确认密钥目录进不去。同一次构建只探一次；建不成就记在 BUILD_SANDBOX_WHY，不退回 as_fleet_in
+# 沙箱要能起来，并且读回确认密钥目录进不去（含 /proc/<pid>/root 绕路）。同一次构建只探一次；建不成就记在 BUILD_SANDBOX_WHY，不退回 as_fleet_in
 build_sandbox_prepare() {
   if [[ "$BUILD_SANDBOX_STATE" == ok ]]; then return 0; fi
   if [[ "$BUILD_SANDBOX_STATE" == bad ]]; then return 1; fi
   if ! command -v systemd-run >/dev/null 2>&1; then
     BUILD_SANDBOX_STATE=bad
     BUILD_SANDBOX_WHY="没有 systemd-run"
+    return 1
+  fi
+  if ! command -v unshare >/dev/null 2>&1; then
+    BUILD_SANDBOX_STATE=bad
+    BUILD_SANDBOX_WHY="没有 unshare"
     return 1
   fi
   if ! build_sandbox_hidden /tmp; then
@@ -550,7 +576,7 @@ fetch_code() { # 要发的提交（空 = 主线最新）
 
 # 装成一版：构建沙箱里以 fleet 装依赖、构建前端、打包网关（第三方代码不以 root 跑，也读不到密钥目录和本机库）；
 # 构建完整个目录换成 root 的、fleet 只读，再原子地挪到 <提交号>。root 要照着办事的东西（单元文件、完成标记）在换属主之后才由 root 从 git 里取、写，fleet 碰不到。
-# 沙箱建不成（没有 systemd-run、起不来、读回密钥目录仍然可见）就红字停下：不切版本，也不退回 as_fleet_in
+# 沙箱建不成（没有 systemd-run / unshare、起不来、读回密钥目录仍然可见——含 /proc/<pid>/root 绕路）就红字停下：不切版本，也不退回 as_fleet_in
 build_release() { # 提交号
   local sha=$1 dir=$RELEASES/$1 stage=$RELEASES/.build-$1 log u odd n gsum
   step "构建 ${sha:0:12}"
