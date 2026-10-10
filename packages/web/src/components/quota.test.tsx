@@ -5,7 +5,7 @@ import { createMockApi } from '../api/mock/server';
 import type { QuotaWindowView } from '../api/types';
 import QuotaPage from '../routes/quota';
 import { renderApp } from '../test/harness';
-import { QuotaCell } from './quota';
+import { amountPair, QuotaCell } from './quota';
 
 afterEach(cleanup);
 
@@ -116,6 +116,26 @@ describe('额度格', () => {
   test('没读到清零时间就直说', () => {
     cell({ window: 'points', utilization: 0.4, reading: 'measured', readAt: at(-1) });
     expect(screen.getByText('清零时间没读到')).toBeTruthy();
+  });
+
+  test('已用和上限同单位同小数位', () => {
+    // 各自 formatCount 会混成「8,623.515 / 50.0 万」；同一行必须都用万、同一位小数
+    expect(amountPair({ unit: 'points' }, 8_623.515, 500_000)).toBe('0.9 万 / 50.0 万');
+    expect(amountPair({ unit: 'tokens' }, 178_472, 272_000)).toBe('17.8 万 / 27.2 万');
+    expect(amountPair({ unit: 'points' }, 178.472, 272_000)).toBe('0.0 万 / 27.2 万');
+    const el = cell({
+      window: 'points',
+      unit: 'points',
+      used: 8_623.515,
+      limit: 500_000,
+      utilization: 8_623.515 / 500_000,
+      reading: 'measured',
+      readAt: at(-1),
+      source: 'mirasim-relay',
+    });
+    expect(el.textContent).toContain('0.9 万');
+    expect(el.textContent).toContain('/ 50.0 万');
+    expect(el.textContent).not.toContain('8,623');
   });
 
   test('估算窗口写「前算」，不写「前读」', () => {
