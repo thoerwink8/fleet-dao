@@ -43,6 +43,7 @@ describe('路由表', () => {
     const pages = insideShell(table);
     for (const p of [
       '/',
+      '/tasks',
       '/tasks/:taskId',
       '/quota',
       '/schedules',
