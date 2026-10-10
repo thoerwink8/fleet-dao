@@ -17,7 +17,7 @@
 # 切会话用户挂的 reclaude 组织（agent-scope-org-use）、发布取代码、装依赖经期望里登记的会话代理、登记成空就直连（release-proxy，#786）、
 # node 的编译缓存目录归 root、别人放不进（node-cache）、会话用户在本机开的口只许它自己和 root 连（session-ports，#35）、
 # 法国 sshd 抗扫描和 fail2ban 的 sshd jail（sshd-hardening，#1348：sshd -t 不过撤掉文件不重载、有效配置被盖掉判红、fail2ban 没装只记待配）、
-# 香港防火墙基线（hk-firewall：ufw 没开、命令失败或认不出、默认不是拒绝、多开的对公网端口都判红；第二遍不改 ufw；别家 8443 不动）、
+# 香港防火墙基线（hk-firewall：ufw 没开、命令失败或认不出、默认不是拒绝、多开的对公网端口都判红；只有出站 ALLOW OUT 不算已放行；第二遍不改 ufw；别家 8443 不动）、
 # france.sh 读回看板收件口挡不挡得住假通行证（node-report-gate：401 才算通过，503 没配钥匙记待配，200/400 判红）、
 # docs/ops.md 端口表和脚本对得上、docs/ops.md 里放文件的命令收到空的或半截的不换（place-file）、--ops 真跑了这两块（ops-only）、
 # france.sh 读不到 Temporal 表结构的版本号（连不上库）判红、不建不升（temporal-schema），

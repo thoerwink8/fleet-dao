@@ -312,9 +312,10 @@ hk_fw_incoming_policy() {
   printf '%s' "$policy"
 }
 
-# 这一条端口/协议已有 v4 的 ALLOW（「22/tcp (v6)」那行不算：缺 v4 时 ufw allow 会补）
+# 这一条端口/协议已有 v4 的入站 ALLOW IN（「22/tcp (v6)」那行不算：缺 v4 时 ufw allow 会补）。
+# 只认 ALLOW IN：同端口的 ALLOW OUT 是出站，不算已放行。只有出站时仍要补入站，再把默认入站改成拒绝。
 hk_fw_allowed() {
-  grep -qE "^${1}[[:space:]]+ALLOW" <<<"$HK_FW_STATUS"
+  grep -qE "^${1}[[:space:]]+ALLOW IN([[:space:]]|$)" <<<"$HK_FW_STATUS"
 }
 
 hk_fw_comment() {

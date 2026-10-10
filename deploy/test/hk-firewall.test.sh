@@ -8,6 +8,8 @@
 #   4. 【故意造出的失败】ufw 没开 → 读回红，装机红字停下且不执行 ufw enable
 #   5. 【故意造出的失败】ufw 命令失败、输出认不出、默认入站不是拒绝 → 都红（失败记「没查成」，不当成没问题）
 #   6. 缺规则时第一遍补上；第二遍零改动（不调用任何改 ufw 的命令）；别家 8443（注释 self-proxy）原样留着
+#   7. 只有出站 ALLOW OUT（v6 那行的 ALLOW IN 也不算 v4 已放行）→ 不当成已放行：先补入站 ufw allow，
+#      再把默认入站改成拒绝。默认已经是拒绝时也要补。第二遍零改动。别家 8443 不动
 # 用法：bash deploy/test/hk-firewall.test.sh。退出码：0 通过，1 不通过。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -83,14 +85,28 @@ status)
   action=ALLOW
   [[ "${1:-}" == verbose ]] && action="ALLOW IN"
   [[ -s "$FWDIR/rules" ]] || exit 0
-  while IFS=$'\t' read -r spec cmt; do
-    [[ -n "$spec" ]] || continue
+  # 第三列 out：这条只是出站。verbose 下打成 ALLOW OUT，用来核对「出站不算已放行入站」。
+  # read 会把连续的制表符并成一个分隔，空注释的第三列会丢，所以按行拆。
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] || continue
+    spec=${line%%$'\t'*}
+    rest=${line#*$'\t'}
+    cmt= dir=
+    if [[ "$rest" != "$line" ]]; then
+      cmt=${rest%%$'\t'*}
+      [[ "$rest" == *$'\t'* ]] && dir=${rest#*$'\t'}
+    fi
+    act=$action
+    if [[ "$dir" == out ]]; then
+      act=ALLOW
+      [[ "${1:-}" == verbose ]] && act="ALLOW OUT"
+    fi
     if [[ -n "$cmt" ]]; then
-      printf '%s                     %s    Anywhere                   # %s\n' "$spec" "$action" "$cmt"
-      printf '%s (v6)                %s    Anywhere (v6)              # %s\n' "$spec" "$action" "$cmt"
+      printf '%s                     %s    Anywhere                   # %s\n' "$spec" "$act" "$cmt"
+      printf '%s (v6)                %s    Anywhere (v6)              # %s\n' "$spec" "$act" "$cmt"
     else
-      printf '%s                     %s    Anywhere\n' "$spec" "$action"
-      printf '%s (v6)                %s    Anywhere (v6)\n' "$spec" "$action"
+      printf '%s                     %s    Anywhere\n' "$spec" "$act"
+      printf '%s (v6)                %s    Anywhere (v6)\n' "$spec" "$act"
     fi
   done <"$FWDIR/rules"
   ;;
@@ -126,6 +142,15 @@ good_rules() {
     443/tcp '' \
     4500/udp 'fleet-dao wireguard' \
     8443/tcp 'self-proxy' >"$FWDIR/rules"
+}
+# 本仓四条只有出站；别家 8443 仍是入站（注释 self-proxy），不该被改
+out_only_rules() {
+  printf '%s\t%s\t%s\n' \
+    22/tcp '' out \
+    80/tcp '' out \
+    443/tcp '' out \
+    4500/udp 'fleet-dao wireguard' out >"$FWDIR/rules"
+  printf '%s\t%s\n' 8443/tcp self-proxy >>"$FWDIR/rules"
 }
 good_ss() {
   cat >"$FWDIR/ss-out" <<'EOF'
@@ -316,6 +341,53 @@ check "第二遍没有改 ufw 的命令" "$(mutating)" ""
 check "第二遍之后 8443 还在" "$(grep -c $'^8443/tcp\tself-proxy$' "$FWDIR/rules")" 1
 run_readback
 check "补完再读回：没有红" "${#REDS[@]}" 0
+
+echo "== 7. 只有 ALLOW OUT、没有 ALLOW IN：不当成已放行，先补入站再收紧默认"
+yn_allowed() {
+  if hk_fw_allowed "$1"; then printf yes; else printf no; fi
+}
+# v4 是出站，v6 即使是 ALLOW IN 也不算 v4 已放行（缺 v4 时 ufw allow 会补）
+HK_FW_STATUS=$'22/tcp                     ALLOW OUT   Anywhere\n22/tcp (v6)                ALLOW IN    Anywhere (v6)'
+check "v4 的 ALLOW OUT 不算已放行" "$(yn_allowed 22/tcp)" no
+HK_FW_STATUS=$'22/tcp                     ALLOW IN    Anywhere\n22/tcp                     ALLOW OUT   Anywhere'
+check "同一端口有 ALLOW IN 就算已放行" "$(yn_allowed 22/tcp)" yes
+
+out_only_rules
+set_ufw active 0 allow
+good_ss
+run_setup
+check "默认还是放行、只有出站：返回 0" "$RC" 0
+check "先补四条入站，再把默认改成拒绝" "$(mutating)" "$(printf '%s\n' \
+  'allow 22/tcp comment fleet-dao ssh' \
+  'allow 80/tcp comment fleet-dao http' \
+  'allow 443/tcp comment fleet-dao https' \
+  'allow 4500/udp comment fleet-dao wireguard' \
+  'default deny incoming')"
+check "这一遍不碰 8443" "$(grep -c 8443 "$FWDIR/log" || true)" 0
+check "8443 仍是原来那一条" "$(grep -c $'^8443/tcp\tself-proxy$' "$FWDIR/rules")" 1
+fresh
+setup_firewall >"$FWDIR/out" 2>&1
+RC=$?
+check "补上入站之后第二遍返回 0" "$RC" 0
+check "第二遍没有改动记录" "${#CHANGES[@]}" 0
+check "第二遍没有改 ufw 的命令" "$(mutating)" ""
+check "第二遍之后 8443 还在" "$(grep -c $'^8443/tcp\tself-proxy$' "$FWDIR/rules")" 1
+
+echo "== 7b. 默认已经是拒绝、只有出站：仍要补入站，不能报已放行"
+out_only_rules
+set_ufw active 0 deny
+good_ss
+run_setup
+check "返回 0" "$RC" 0
+check "没有红" "${#REDS[@]}" 0
+check "不报白名单都已放行" "$(grep -c '都已放行' <<<"$OUT" || true)" 0
+check "只补四条入站，不再改默认" "$(mutating)" "$(printf '%s\n' \
+  'allow 22/tcp comment fleet-dao ssh' \
+  'allow 80/tcp comment fleet-dao http' \
+  'allow 443/tcp comment fleet-dao https' \
+  'allow 4500/udp comment fleet-dao wireguard')"
+check "不删、不改 8443" "$(grep -c $'^8443/tcp\tself-proxy$' "$FWDIR/rules")" 1
+check "日志里没有 8443" "$(grep -c 8443 "$FWDIR/log" || true)" 0
 
 if ((fail)); then
   echo "hk-firewall：不通过"
