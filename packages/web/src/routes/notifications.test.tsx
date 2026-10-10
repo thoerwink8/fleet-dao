@@ -210,7 +210,8 @@ describe('通知中心日报折叠', () => {
     expect(countOf('卡住报警')).toBe('1');
     expect(countOf('日报')).toBe('2');
 
-    const fold = screen.getByRole('button', { name: /日报\s*2\s*条/ });
+    const fold = screen.getByTestId('daily-fold');
+    expect(fold.textContent).toMatch(/日报\s*2\s*条/);
     expect(fold.getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByText('今日日报甲')).toBeNull();
     expect(screen.queryByText('今日日报乙')).toBeNull();
@@ -221,7 +222,7 @@ describe('通知中心日报折叠', () => {
     expect(screen.getByText('今日日报乙')).toBeTruthy();
 
     fireEvent.click(dailyTab());
-    await waitFor(() => expect(screen.queryByRole('button', { name: /日报\s*\d+\s*条/ })).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId('daily-fold')).toBeNull());
     expect(screen.getByText('今日日报甲')).toBeTruthy();
     expect(screen.getByText('今日日报乙')).toBeTruthy();
     expect(screen.queryByText('等你拍：发不发版')).toBeNull();
@@ -238,7 +239,8 @@ describe('通知中心日报折叠', () => {
 
     const pending = await screen.findByRole('tab', { name: '待处理' });
     expect(pending.getAttribute('aria-selected')).toBe('true');
-    const fold = await screen.findByRole('button', { name: /日报\s*2\s*条/ });
+    const fold = await screen.findByTestId('daily-fold');
+    expect(fold.textContent).toMatch(/日报\s*2\s*条/);
     expect(fold.getAttribute('aria-expanded')).toBe('false');
     expect(screen.getByText('等你拍：发不发版')).toBeTruthy();
     expect(screen.getByText('卡住：测试没过')).toBeTruthy();

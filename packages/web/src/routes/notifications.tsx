@@ -427,6 +427,7 @@ export default function Notifications() {
             <section>
               <button
                 type="button"
+                data-testid="daily-fold"
                 aria-expanded={dailyOpen}
                 onClick={() => setDailyOpen((v) => !v)}
                 className="mb-2 flex w-full items-center gap-1.5 rounded-lg border bg-card px-4 py-3 text-left text-sm text-foreground hover:bg-accent/40"
