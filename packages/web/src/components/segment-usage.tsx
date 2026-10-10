@@ -67,7 +67,25 @@ function wallMs(d: TaskDetail, now: number): number {
   return span(d.task.createdAt, isTaskFinished(d.task) ? last : undefined, now);
 }
 
-/** 顶上四格：已用时、干活合计、输入当量、花费。和下面的表同一份合计（老流程的会话也算在里面）。 */
+/**
+ * 花费顶格读不到、又估不出有用数字时，收成灰字（#1751）：不占大格。
+ * 有估算金额时仍占大格（真有数可看）。
+ */
+function costCollapseLabel(t: UsageTotals): string | undefined {
+  const { metered, subscription, unknown } = t.cost;
+  const pick = metered.runs ? metered : subscription.runs ? subscription : unknown;
+  const r = reading(pick.usd, pick.missing, pick.runs);
+  const e = t.estimate;
+  if (r.kind === 'missing' && (e.runs || e.noPrice || e.noTokens)) {
+    if (e.runs) return undefined;
+    if (e.noPrice) return '花费没有单价';
+    return '花费估不了';
+  }
+  if (r.kind === 'missing') return '花费没读到';
+  return undefined;
+}
+
+/** 顶上几格：已用时、干活合计、输入当量、花费。没读到的不占大格，收成一行灰字（#1751）。 */
 export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
   const t = d.usage.total;
   const live = d.segmentRuns
@@ -84,45 +102,75 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
       : r.kind === 'missing'
         ? `${r.missing} 次都没读到${what}`
         : undefined;
-  // 值是「1 小时 26 分」「折合 $2.28」这种长串，按 28px 大字排：手机上一列一格、四格并排要到 xl 才放得下不折行
-  return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+
+  const cards: ReactNode[] = [
+    <Stat
+      key="wall"
+      label={finished ? '总耗时' : '已用时'}
+      value={formatDuration(wallMs(d, now))}
+      hint={finished ? '从开单到最后一段收场' : '从开单算到现在'}
+    />,
+  ];
+  const collapsed: string[] = [];
+
+  if (work.kind === 'missing') {
+    collapsed.push('干活合计没读到');
+  } else {
+    cards.push(
       <Stat
-        label={finished ? '总耗时' : '已用时'}
-        value={formatDuration(wallMs(d, now))}
-        hint={finished ? '从开单到最后一段收场' : '从开单算到现在'}
-      />
-      <Stat
+        key="work"
         label="干活合计"
         value={
-          work.kind === 'missing'
-            ? '没读到'
-            : work.kind === 'none' && !live
-              ? '—'
-              : formatDuration((work.kind === 'none' ? 0 : work.value) + live)
+          work.kind === 'none' && !live ? '—' : formatDuration((work.kind === 'none' ? 0 : work.value) + live)
         }
-        accent={work.kind === 'missing' ? 'text-ink-stall' : undefined}
         hint={
           missingNote(work, '耗时') ??
           (live ? `含在跑的 ${t.running} 段，算到现在` : work.kind === 'none' ? notYet : '各段起止加起来')
         }
-      />
+      />,
+    );
+  }
+
+  if (equivalent.kind === 'missing') {
+    collapsed.push('输入当量没读到');
+  } else {
+    cards.push(
       <Stat
+        key="equivalent"
         label="输入当量"
-        value={
-          equivalent.kind === 'missing'
-            ? '没读到'
-            : equivalent.kind === 'none'
-              ? '—'
-              : formatCount(equivalent.value)
-        }
-        accent={equivalent.kind === 'missing' ? 'text-ink-stall' : undefined}
+        value={equivalent.kind === 'none' ? '—' : formatCount(equivalent.value)}
         hint={
           missingNote(equivalent, ' token ') ??
           (equivalent.kind === 'none' ? notYet : `按${EQUIVALENT_RULE}折`)
         }
-      />
-      <CostStat t={t} notYet={notYet} />
+      />,
+    );
+  }
+
+  const costCollapsed = costCollapseLabel(t);
+  if (costCollapsed) collapsed.push(costCollapsed);
+  else cards.push(<CostStat key="cost" t={t} notYet={notYet} />);
+
+  // 有几张大格排几栏；手机一列、平板两列，多到四格才四列并排
+  const cols =
+    cards.length >= 4
+      ? 'grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4'
+      : cards.length === 3
+        ? 'grid-cols-1 gap-3 sm:grid-cols-3'
+        : 'grid-cols-1 gap-3 sm:grid-cols-2';
+
+  return (
+    <div data-segment-stats>
+      <div className={cn('grid', cols)}>{cards}</div>
+      {collapsed.length ? (
+        <p
+          className="mt-2 text-caption text-muted-foreground"
+          data-stats-unread
+          title={collapsed.join(' · ')}
+        >
+          {collapsed.join(' · ')}
+        </p>
+      ) : null}
     </div>
   );
 }
