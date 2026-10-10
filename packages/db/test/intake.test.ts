@@ -37,13 +37,27 @@ describe('受管的仓（listIntakeRepos）', () => {
 });
 
 describe('一张单的任务行（taskStateByIssue）', () => {
-  it('有就回编号和状态；同一个号在另一个仓里的不串；没有是 null', async () => {
+  it('有就回编号、状态和阶段；同一个号在另一个仓里的不串；没有是 null', async () => {
     const a = await addRepo(t.db, 'aaa');
     const b = await addRepo(t.db, 'bbb');
     const queued = await addTask(t.db, a.id, { issueNumber: 7, state: 'queued' });
     await addTask(t.db, b.id, { issueNumber: 7, state: 'done' });
-    expect(await taskStateByIssue(t.db, a.id, 7)).toEqual({ id: queued.id, state: 'queued' });
+    const paused = await addTask(t.db, a.id, {
+      issueNumber: 9,
+      state: 'running',
+      phase: 'paused',
+    });
+    expect(await taskStateByIssue(t.db, a.id, 7)).toEqual({
+      id: queued.id,
+      state: 'queued',
+      phase: null,
+    });
     expect(await taskStateByIssue(t.db, b.id, 7)).toMatchObject({ state: 'done' });
     expect(await taskStateByIssue(t.db, a.id, 8)).toBeNull();
+    expect(await taskStateByIssue(t.db, a.id, 9)).toEqual({
+      id: paused.id,
+      state: 'running',
+      phase: 'paused',
+    });
   });
 });

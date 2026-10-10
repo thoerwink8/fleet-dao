@@ -580,7 +580,7 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     const { client, starts } = fakeClient({ runningIds: ids });
     logs.length = 0;
     await runIntakeJob(wire(gh)(client, 'fleet'));
-    expect(logs.join(' | ')).toContain('停下等人 6 条（不占名额）');
+    expect(logs.join(' | ')).toContain('不占名额 6 条（停下/追问/暂停）');
     expect(starts).toHaveLength(1);
   });
 
@@ -613,7 +613,32 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     });
     logs.length = 0;
     await runIntakeJob(wire(gh)(client, 'fleet'));
-    expect(logs.join(' | ')).toContain('开头在干活 5 条、停下等人 1 条（不占名额）');
+    expect(logs.join(' | ')).toContain('开头在干活 5 条、不占名额 1 条（停下/追问/暂停）');
+  });
+
+  it('在跑的数去掉追问和暂停（#1795）：6 条全是 asking / phase=paused，不占名额，照起', async () => {
+    const { repo } = await seedWorld(t.db);
+    const ids: string[] = [];
+    for (let n = 101; n <= 106; n += 1) {
+      const asking = n % 2 === 0;
+      await t.db.insert(tasks).values({
+        repoId: repo.id,
+        issueNumber: n,
+        title: 'x',
+        rawRequest: 'y',
+        requestedBy: 'founder',
+        priority: 1,
+        state: asking ? 'asking' : 'running',
+        phase: asking ? 'implement' : 'paused',
+      });
+      ids.push(`task:acme/demo#${n}`);
+    }
+    const { gh } = fakeGh();
+    const { client, starts } = fakeClient({ runningIds: ids });
+    logs.length = 0;
+    await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(logs.join(' | ')).toContain('不占名额 6 条（停下/追问/暂停）');
+    expect(starts).toHaveLength(1);
   });
 
   it('交代不全：在单子上留言（幂等键由缺的内容算出），不建任务行、不起', async () => {

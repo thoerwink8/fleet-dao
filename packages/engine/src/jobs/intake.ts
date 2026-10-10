@@ -18,8 +18,8 @@
 // 排序（intake-pick.ts 的 comparePick）：版本先后列表里的序号 → 挂当前版本的 → 规模小 → 同档里贴了「交给引擎」的 → 历史失败少 → 开单早。
 // 巡检仓里 canary 开的那张（标题认法 isCanaryIssueTitle，不另贴标签）先于所有仓的普通单，不看上面这几档。
 // 起之前才现读这张单（开着、不是 PR、母单子单和「本机做」再核一遍）：只对真有空位的那几张读，不为每张开着的单读一次。
-// 空位 = 每轮最多 5 条、同时在跑最多 6 条、每小时最多起 20 条、熔断没停拉（最近 6 条结束的任务里失败过半就停，冷却 1 小时后放 1 条试探）。
-// 巡检单不计入每小时那 20 条、也不占名额（#1364：名额满了把巡检单挤掉，巡检会把通的链报成断）；本轮条数、在跑、熔断和其余准入闸照旧。
+// 空位 = 每轮最多 5 条、同时在干活最多 6 条（停下/追问/暂停不占，#1776/#1795）、每小时最多起 20 条、熔断没停拉（最近 6 条结束的任务里失败过半就停，冷却 1 小时后放 1 条试探）。
+// 巡检单不计入每小时那 20 条、也不占每小时名额（#1364：限速满了把巡检单挤掉，巡检会把通的链报成断）；本轮条数、在干活上限、熔断和其余准入闸照旧。
 // 母单子单、本机做、版本这几道的判法是 @fleet-dao/core 的 dispatch.ts 的纯函数（familyGate、localGate），这里只排顺序。
 //
 // 改这里之前必须知道：
@@ -381,8 +381,8 @@ export interface IntakeDeps {
   /** 读主线上的需求文档；文件不在回 null，读失败照抛。 */
   readSpecDoc(input: { repo: IntakeRepo; path: string }): Promise<{ content: string } | null>;
   /**
-   * 现在没结束的任务工作流分两类：working＝真在干活的（占并发名额），stalled＝停下等人的（任务行状态 stalled，
-   * 工作流没结束但不占会话，不占名额，#1776）。读不到照抛：不当成「一条没有」。
+   * 现在没结束的任务工作流分两类：working＝真在干活的（占并发名额），stalled＝不占名额的
+   * （停下等人 / 追问等人 / 被人暂停，见 idleForIntakeCapacity，#1776/#1795）。读不到照抛：不当成「一条没有」。
    */
   runningTasks(): Promise<number | { working: number; stalled: number }>;
   /** 这张单历史上失败过几次（该单任务行的失败记录）。读不到照抛：不当成「没失败过」。 */
@@ -447,9 +447,9 @@ interface Tally {
   /** 开着开关的仓里，列单子就失败了的有几个（全都失败＝这一轮没跑成）。 */
   reposFailed: number;
   reposOn: number;
-  /** 这一轮开头读到的在干活的条数（不含停下等人的），起一条加一。 */
+  /** 这一轮开头读到的在干活的条数（不含不占名额的），起一条加一。 */
   running: number;
-  /** 这一轮开头读到的停下等人的条数（不占名额，只用来写日志和说明）。 */
+  /** 这一轮开头读到的不占名额条数（停下/追问/暂停），只用来写日志和说明。 */
   stalled: number;
   /** 开头读到的在干活条数（running 起一条加一，日志要的是开头的数）。 */
   workingAtStart: number;
@@ -661,6 +661,15 @@ async function admitIssue(
  * 先看便宜的、说得最清楚的：本轮上限 → 在跑上限 → 每小时 → 熔断。
  * hourlyExempt：巡检单不看每小时名额（本轮、在跑、熔断照旧）。
  */
+/**
+ * 不占拉单并发名额（#1776/#1795）：任务行是停下等人、追问等人，或被人暂停（phase=paused，state 仍是 running）。
+ * 这几类都不占会话，#1779 只认了 stalled，暂停和追问仍把 6 个名额占满，巡检会断在「收单」。
+ */
+export function idleForIntakeCapacity(row: { state: string; phase?: string | null }): boolean {
+  if (row.state === 'stalled' || row.state === 'asking') return true;
+  return row.phase === 'paused';
+}
+
 function noRoom(deps: IntakeDeps, t: Tally, opts?: { hourlyExempt?: boolean }): IntakeSkip | null {
   const maxStarts = deps.limits?.maxStartsPerRound ?? MAX_STARTS_PER_ROUND;
   const maxRunning = deps.limits?.maxRunningTasks ?? MAX_RUNNING_TASKS;
@@ -671,7 +680,7 @@ function noRoom(deps: IntakeDeps, t: Tally, opts?: { hourlyExempt?: boolean }): 
   if (t.running >= maxRunning) {
     return {
       reason: 'at_capacity',
-      why: `在干活 ${t.running} 条、停下等人 ${t.stalled} 条（不占名额），在干活的已到上限 ${maxRunning}，等有空的`,
+      why: `在干活 ${t.running} 条、不占名额 ${t.stalled} 条（停下/追问/暂停），在干活的已到上限 ${maxRunning}，等有空的`,
     };
   }
   if (!opts?.hourlyExempt) {
@@ -893,7 +902,7 @@ function milestoneNeedsOrder(m: MilestoneRef, issues: readonly IntakeIssue[]): b
 function summarize(t: Tally): string {
   const skipped = [...t.skipped].map(([reason, n]) => `${reason}×${n}`).join('、') || '无';
   const foreign = t.foreignSkipped > 0 ? `；别的环境的巡检仓跳过 ${t.foreignSkipped} 个` : '';
-  return `起了 ${t.started} 条，留言 ${t.commented} 条；开头在干活 ${t.workingAtStart} 条、停下等人 ${t.stalled} 条（不占名额）；没派的：${skipped}${foreign}`;
+  return `起了 ${t.started} 条，留言 ${t.commented} 条；开头在干活 ${t.workingAtStart} 条、不占名额 ${t.stalled} 条（停下/追问/暂停）；没派的：${skipped}${foreign}`;
 }
 
 async function round(deps: IntakeDeps): Promise<ScheduleResult> {

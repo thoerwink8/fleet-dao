@@ -30,14 +30,14 @@ export async function listIntakeRepos(db: Db): Promise<IntakeRepoRow[]> {
     .orderBy(asc(repos.owner), asc(repos.name));
 }
 
-/** 这张单的任务行（没有是 null）。派出过没有不在这里判。 */
+/** 这张单的任务行（没有是 null）。派出过没有不在这里判。phase 给拉单数并发名额用（暂停的不占，#1795）。 */
 export async function taskStateByIssue(
   db: Db,
   repoId: string,
   issueNumber: number,
-): Promise<{ id: string; state: TaskState } | null> {
+): Promise<{ id: string; state: TaskState; phase: string | null } | null> {
   const [row] = await db
-    .select({ id: tasks.id, state: tasks.state })
+    .select({ id: tasks.id, state: tasks.state, phase: tasks.phase })
     .from(tasks)
     .where(and(eq(tasks.repoId, repoId), eq(tasks.issueNumber, issueNumber)));
   return row ?? null;

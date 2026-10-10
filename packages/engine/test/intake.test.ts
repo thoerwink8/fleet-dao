@@ -14,6 +14,7 @@ import {
   type IntakeIssue,
   type IntakePlan,
   type IntakeRepo,
+  idleForIntakeCapacity,
   incompleteComment,
   incompleteKey,
   MAX_ISSUE_FAILURES,
@@ -852,7 +853,7 @@ describe('runIntakeJob · 一轮', () => {
     expect(h.started).toHaveLength(1);
     const text = h.logs.map((l) => l.text).join(' | ');
     expect(text).not.toContain('at_capacity');
-    expect(text).toContain('停下等人 6 条（不占名额）');
+    expect(text).toContain('不占名额 6 条（停下/追问/暂停）');
   });
 
   it('6 条里 5 条在干活、1 条停下：上限 6 时还能起 1 条（#1776）', async () => {
@@ -868,7 +869,7 @@ describe('runIntakeJob · 一轮', () => {
     expect(h.started.map((s) => s.issueNumber)).toEqual([1]);
   });
 
-  it('6 条都在干活 → at_capacity，说明里写出在干活和停下等人各几条（#1776）', async () => {
+  it('6 条都在干活 → at_capacity，说明里写出在干活和不占名额各几条（#1776）', async () => {
     const h = harness({
       async runningTasks() {
         return { working: MAX_RUNNING_TASKS, stalled: 2 };
@@ -878,7 +879,15 @@ describe('runIntakeJob · 一轮', () => {
     expect(h.started).toEqual([]);
     const text = h.logs.map((l) => l.text).join(' | ');
     expect(text).toContain('at_capacity');
-    expect(text).toContain('开头在干活 6 条、停下等人 2 条（不占名额）');
+    expect(text).toContain('开头在干活 6 条、不占名额 2 条（停下/追问/暂停）');
+  });
+
+  it('idleForIntakeCapacity：停下、追问、暂停不占名额；真在干活的占（#1795）', () => {
+    expect(idleForIntakeCapacity({ state: 'stalled' })).toBe(true);
+    expect(idleForIntakeCapacity({ state: 'asking' })).toBe(true);
+    expect(idleForIntakeCapacity({ state: 'running', phase: 'paused' })).toBe(true);
+    expect(idleForIntakeCapacity({ state: 'running', phase: 'implement' })).toBe(false);
+    expect(idleForIntakeCapacity({ state: 'queued', phase: null })).toBe(false);
   });
 
   it('起了几条就把在跑数加几：上限是 2、已经在跑 1 条，这一轮只起 1 条', async () => {

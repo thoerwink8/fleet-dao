@@ -41,7 +41,7 @@ import { CANARY_ISSUE_TITLE_POSIX } from '../jobs/canary.ts';
 import { normalizeCanarySlug } from '../jobs/canary-scope.ts';
 import { ORPHAN_TASK_ADOPT_NOTE } from '../jobs/dispatch-standing.ts';
 import { requestGroom } from '../jobs/groom-request.ts';
-import { type IntakeDeps, prClaimedIssues } from '../jobs/intake.ts';
+import { type IntakeDeps, idleForIntakeCapacity, prClaimedIssues } from '../jobs/intake.ts';
 import { BREAKER_WINDOW } from '../jobs/intake-pick.ts';
 import { generationLife, readTaskGenerations } from '../jobs/redo.ts';
 import type { TaskWorkflowInput } from '../task-contract.ts';
@@ -187,7 +187,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         return doc ? { content: doc.content } : null;
       },
       async runningTasks() {
-        // 没结束的任务工作流里，任务行是 stalled 的（停下等人）不占名额（#1776）。行读不到照抛；没有行、仓不认识的算在干活。
+        // 没结束的任务工作流里，停下/追问/暂停不占名额（#1776/#1795）。行读不到照抛；没有行、仓不认识的算在干活。
         const repoIds = new Map((await listIntakeRepos(w.db)).map((r) => [`${r.owner}/${r.name}`, r.id]));
         let working = 0;
         let stalled = 0;
@@ -201,7 +201,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
             continue;
           }
           const row = await taskStateByIssue(w.db, repoId, Number(m[2]));
-          if (row?.state === 'stalled') stalled += 1;
+          if (row && idleForIntakeCapacity(row)) stalled += 1;
           else working += 1;
         }
         return { working, stalled };
