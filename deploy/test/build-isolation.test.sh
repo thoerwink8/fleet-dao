@@ -651,7 +651,7 @@ if ((EUID == 0)) && ((skipped == 0)) && [[ -n "$BAIT" && -n "$BAIT_ID" ]]; then
       fi
       lacks_canary "绕路输出里没有诱饵内容" "$text"
       # 扫一遍沙箱 /proc：任一 root/etc/fleet-dao 可读都算没隔开
-      scan_rc=0
+      # shellcheck disable=SC2016 # 单引号里是给沙箱内 bash 跑的脚本，$root、/proc/[0-9]*/root 这些要在里面展开
       scan=$(as_build_in "$STAGE" bash -c '
 for root in /proc/[0-9]*/root; do
   [[ -e "$root" ]] || continue
@@ -662,7 +662,7 @@ for root in /proc/[0-9]*/root; do
 done
 printf "%s\n" "NOLEAK"
 exit 1
-' 2>&1) || scan_rc=$?
+' 2>&1)
       check "沙箱里扫 /proc/*/root 看不到密钥目录" "$([[ "$scan" == *NOLEAK* && "$scan" != *LEAK* ]] && echo ok || echo bad)" ok
       check "绕路时没有调用 as_fleet_in" "$(bare_n)" 0
     fi

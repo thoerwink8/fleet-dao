@@ -263,6 +263,7 @@ build_sandbox_run() { # 工作目录 命令…
 build_sandbox_hidden() { # 工作目录：0 = 挡住了
   local out err rc=0 line token saw=0
   err=$(mktemp)
+  # shellcheck disable=SC2016 # 单引号里是给沙箱内 bash 跑的脚本，$root、/proc/[0-9]*/root 这些要在里面展开
   out=$(build_sandbox_run "$1" bash -c '
 if [[ -d /etc/fleet-dao && -r /etc/fleet-dao && -x /etc/fleet-dao ]]; then
   printf "%s\n" visible
