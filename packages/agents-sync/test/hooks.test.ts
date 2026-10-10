@@ -32,9 +32,17 @@ const PRETOOL_MATCHERS = HOOK_TARGETS.flatMap((t) => t.hooks)
   .filter((h) => h.script === 'pretool.mjs')
   .map((h) => h.matcher ?? '没写 matcher');
 
-/** 装好以后 PreToolUse 下该有的几组：一个 matcher 一组，都跑 pretool.mjs */
-const pretoolGroups = (command: string): Group[] =>
-  PRETOOL_MATCHERS.map((matcher) => ({ matcher, hooks: [{ type: 'command', command, timeout: 10 }] }));
+/**
+ * 装好以后 PreToolUse 下该有的几组：照 Claude 那份登记的顺序一条一组——pretool.mjs 一个 matcher 一组，
+ * 再加不写 matcher、每次工具调用都过的 main-thread.mjs（决定 0078）。cmd 把脚本名换成这台机器上登记的命令。
+ */
+const pretoolGroups = (cmd: (script: string) => string): Group[] =>
+  (HOOK_TARGETS.find((t) => t.format === 'claude')?.hooks ?? [])
+    .filter((h) => h.event === 'PreToolUse')
+    .map((h) => ({
+      ...(h.matcher === undefined ? {} : { matcher: h.matcher }),
+      hooks: [{ type: 'command', command: cmd(h.script), timeout: h.timeout }],
+    }));
 
 function machine(
   installed: AgentId[] = ['claude'],
@@ -109,7 +117,7 @@ describe('装', () => {
     expect(s.hooks.SessionStart).toEqual([
       { hooks: [{ type: 'command', command: m.cmd('session-start.mjs'), timeout: 90 }] },
     ]);
-    expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m.cmd('pretool.mjs')));
+    expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m.cmd));
     expect(s.hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: m.cmd('stop.mjs'), timeout: 10 }] }]);
     if (PLATFORM === 'win32') {
       expect(m.cmd('pretool.mjs')).toMatch(/\/\.fleet-dao\/bin\/quiet-pretool\.exe$/);
@@ -174,7 +182,7 @@ describe('装', () => {
     expect(old?.text).toContain('pretool.mjs 多登记了一条：挂在 PreToolUse 上、matcher 是 "Bash|PowerShell"');
     expectKind(m.apply(), SETTINGS, 'changed');
     const s = m.settings();
-    expect(s.hooks.PreToolUse).toEqual([before.hooks.PreToolUse[1], ...pretoolGroups(m.cmd('pretool.mjs'))]);
+    expect(s.hooks.PreToolUse).toEqual([before.hooks.PreToolUse[1], ...pretoolGroups(m.cmd)]);
     expect(s.hooks.PostToolUse).toEqual(before.hooks.PostToolUse);
     expect(exitCode(m.check())).toBe(0);
   });
@@ -250,7 +258,7 @@ describe('调工具前那条挂在哪些工具上', () => {
     });
     const s = m.settings();
     expect(Object.keys(s.hooks)).toEqual(['PreToolUse', 'Stop', 'UserPromptSubmit']);
-    expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m.cmd('pretool.mjs')));
+    expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m.cmd));
     expect(s.hooks.Stop).toEqual([{ hooks: [{ type: 'command', command: m.cmd('stop.mjs'), timeout: 10 }] }]);
     expect(exitCode(m.check())).toBe(0);
     expect(m.apply().filter((l) => l.kind === 'changed')).toEqual([]);
@@ -274,10 +282,7 @@ describe('别的钩子、别的设置一条不碰', () => {
     expect(s.env).toEqual(before.env);
     expect(s.autoUpdatesChannel).toBe('latest');
     expect(s.hooks.PostToolUse).toEqual(before.hooks.PostToolUse);
-    expect(s.hooks.PreToolUse).toEqual([
-      before.hooks.PreToolUse?.[1],
-      ...pretoolGroups(m.cmd('pretool.mjs')),
-    ]);
+    expect(s.hooks.PreToolUse).toEqual([before.hooks.PreToolUse?.[1], ...pretoolGroups(m.cmd)]);
     expect(s.hooks.SessionStart).toEqual([
       before.hooks.SessionStart?.[1],
       { hooks: [{ type: 'command', command: m.cmd('session-start.mjs'), timeout: 90 }] },
@@ -370,7 +375,7 @@ describe('读不懂、被人改坏：不当成空的重写，报出来', () => {
     expect(drift).toContain('pretool.mjs 登记了 2 次');
     expect(drift).toContain('timeout 是 99，应是 10');
     m.apply();
-    expect(m.settings().hooks.PreToolUse).toEqual(pretoolGroups(m.cmd('pretool.mjs')));
+    expect(m.settings().hooks.PreToolUse).toEqual(pretoolGroups(m.cmd));
     expect(exitCode(m.check())).toBe(0);
   });
 
