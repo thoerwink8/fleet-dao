@@ -14,6 +14,7 @@ import { ChevronRight, LoaderCircle, Search } from 'lucide-react';
 import type { ProbeHistoryCell, ProbeHistoryChannel } from '../api/types';
 import type { ChannelCard } from '../lib/channel-status';
 import { formatAgo, formatClock, formatIn } from '../lib/format';
+import type { PoolProblem } from '../lib/pool-problems';
 import {
   formatAvailability,
   formatProbeMs,
@@ -138,6 +139,7 @@ export function ChannelList({
   cards,
   selected,
   probing,
+  problems,
   now,
   onPick,
 }: {
@@ -145,6 +147,8 @@ export function ChannelList({
   selected: string | undefined;
   /** 此刻有路由在立即探测的渠道。 */
   probing: ReadonlySet<string>;
+  /** 渠道下有毛病的池（额度读不到、凭据过期），按渠道号；没有的渠道不在里面。 */
+  problems: ReadonlyMap<string, readonly PoolProblem[]>;
   now: number;
   onPick: (channelId: string) => void;
 }) {
@@ -157,6 +161,7 @@ export function ChannelList({
           now={now}
           selected={c.channel.id === selected}
           probing={probing.has(c.channel.id)}
+          problems={problems.get(c.channel.id) ?? []}
           onPick={() => onPick(c.channel.id)}
         />
       ))}
@@ -169,20 +174,24 @@ function ChannelRow({
   now,
   selected,
   probing,
+  problems,
   onPick,
 }: {
   card: ChannelCard;
   now: number;
   selected: boolean;
   probing: boolean;
+  problems: readonly PoolProblem[];
   onPick: () => void;
 }) {
   const down = c.state === 'down' && !c.interrupted;
   // 已关、未被用途使用、下架：灰着，不是坏了
   const quiet = c.kind === 'off' || c.kind === 'unused' || c.kind === 'retired';
+  const unreadable = problems.some((p) => p.kind === 'unreadable');
   const summary = [
     countsText(c.counts),
     c.probedAt ? `${formatAgo(c.probedAt, now)}探的` : quiet ? undefined : '探针还没看过',
+    problems.length > 0 ? (unreadable ? '额度读不到，要人处理' : '额度读数过期') : undefined,
   ].filter((x): x is string => x !== undefined);
   return (
     <li
@@ -225,7 +234,7 @@ function ChannelRow({
               </span>
             ) : null}
           </span>
-          <span className="num mt-0.5 block truncate text-caption text-muted-foreground">
+          <span className="num mt-0.5 line-clamp-2 break-words text-caption text-muted-foreground">
             {summary.join(' · ')}
           </span>
         </span>
@@ -269,13 +278,16 @@ export function HistoryStrip({
     );
   }
   const strip = history.channels.find((item) => item.channelId === channelId);
-  const cells = (strip?.cells ?? []).slice(-PROBE_HISTORY_SLOTS);
+  // 色条只画真探的（#1748）：没探的不占格子、不进可用率，在下面「探测记录」里折着
+  const cells = (strip?.cells ?? []).filter((c) => c.result !== 'not_probed').slice(-PROBE_HISTORY_SLOTS);
+  const skippedCount = (strip?.skipped ?? []).length;
   const empties = emptySlotKeys(channelId, PROBE_HISTORY_SLOTS - cells.length);
   return (
     <div data-history="strip" data-channel-history={channelId} className="mb-3">
       <p data-history-stats className="num text-caption text-muted-foreground">
-        近 60 次 · 均耗时 {formatProbeMs(strip?.avgDurationMs ?? null)} · 可用率{' '}
+        近 60 次真探 · 均耗时 {formatProbeMs(strip?.avgDurationMs ?? null)} · 可用率{' '}
         {formatAvailability(strip?.passed ?? 0, strip?.attempted ?? 0)}
+        {skippedCount > 0 ? ` · 另有 ${skippedCount} 条没真探，折在下面` : ''}
       </p>
       <div className="mt-1.5 flex h-5 gap-px">
         {empties.map((slot) => (
@@ -312,8 +324,7 @@ export function HistoryStrip({
         })}
       </div>
       <p className="mt-1 text-micro text-faint">
-        {cells.length === 0 ? '还没有探针历史 · ' : null}绿通过 · 红不通 · 橙疑似降智（探通了但降智题答错） ·
-        黄没探 · 灰按需
+        {cells.length === 0 ? '还没有真探 · ' : null}绿通过 · 红不通 · 橙疑似降智（探通了但降智题答错）
       </p>
     </div>
   );

@@ -50,9 +50,11 @@ describe('探针历史条带', () => {
     ]);
     expect(shaped.channels).toHaveLength(1);
     const strip = shaped.channels[0];
-    expect(strip?.cells.map((c) => c.id)).toEqual([1, 2, 3]);
-    expect(strip?.cells.map((c) => c.result)).toEqual(['passed', 'failed', 'not_probed']);
-    expect(strip?.cells.map((c) => c.routeId)).toEqual(['a', 'b', 'b']);
+    // 色条只放真探的；没探的另放 skipped（#1748）
+    expect(strip?.cells.map((c) => c.id)).toEqual([1, 2]);
+    expect(strip?.cells.map((c) => c.result)).toEqual(['passed', 'failed']);
+    expect(strip?.cells.map((c) => c.routeId)).toEqual(['a', 'b']);
+    expect(strip?.skipped.map((c) => c.id)).toEqual([3]);
     // 没探的不进分母：2 次真探，通过 1 次。耗时只平均量到的（1000 和 3000），第三条的空不当 0。
     expect(strip).toMatchObject({ passed: 1, attempted: 2, avgDurationMs: 2000 });
     expect(shaped.latestByRoute.map((c) => [c.routeId, c.id])).toEqual([
@@ -115,9 +117,43 @@ describe('探针历史条带', () => {
         responseText: null,
       }),
     ]);
-    expect(shaped.channels[0]?.cells.map((c) => c.id)).toEqual([1, 2]);
+    expect(shaped.channels[0]?.cells).toEqual([]);
+    expect(shaped.channels[0]?.skipped.map((c) => c.id)).toEqual([1, 2]);
     expect(shaped.channels[0]).toMatchObject({ passed: 0, attempted: 0, avgDurationMs: null });
     expect(shaped.latestByRoute[0]?.id).toBe(2);
+  });
+
+  it('#1748：最近 60 条全是没探时，真探的那几次仍在色条里，可用率只按真探算', () => {
+    const rows: ProbeHistoryCell[] = [
+      cell({ id: 1, routeId: 'a', probedAt: at(1), durationMs: 2000 }),
+      cell({
+        id: 2,
+        routeId: 'a',
+        probedAt: at(2),
+        result: 'failed',
+        durationMs: 4000,
+        failureReason: '疑似降智',
+      }),
+    ];
+    for (let i = 0; i < PROBE_HISTORY_SLOTS + 5; i++) {
+      rows.push(
+        cell({
+          id: 100 + i,
+          routeId: 'a',
+          probedAt: at(10 + i),
+          result: 'not_probed',
+          durationMs: null,
+          failureReason: '不主动探，要派给它时先探一次。还没真探过',
+          requestText: null,
+          responseText: null,
+        }),
+      );
+    }
+    const strip = probeHistoryStrips(rows).channels[0];
+    expect(strip?.cells.map((c) => c.id)).toEqual([1, 2]);
+    expect(strip).toMatchObject({ passed: 1, attempted: 2, avgDurationMs: 3000 });
+    expect(strip?.skipped).toHaveLength(PROBE_HISTORY_SLOTS);
+    expect(strip?.skipped.every((c) => c.result === 'not_probed')).toBe(true);
   });
 
   it('没有行：两个数组都空，不造格子', () => {

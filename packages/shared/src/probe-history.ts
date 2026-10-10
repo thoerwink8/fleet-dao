@@ -1,5 +1,7 @@
 // 渠道状态页的近 60 次格子（#1139）：把各条路由的探针历史按时间收成一条条带。
-// 条带只留最近 60 次（本渠道所有路由合在一起，旧的在左）。没探的不进可用率，也不把没量到的耗时当成 0。
+// 条带只留最近 60 次真探（通过、不通；本渠道所有路由合在一起，旧的在左）。没探的（按量不探、按需、没用途在用……）
+// 不占格子、不进可用率，单独放在 skipped 里（#1748：Cursor 最近 60 条全是没探，色条全黄、真探被埋在下面）。
+// 也不把没量到的耗时当成 0。
 // 点路由行要看的是那条路由自己最近一次，哪怕它已经挤出这 60 格。
 
 /** 渠道卡上的格子数，也是每条路由在库里留下的条数（db 的 ROUTE_PROBE_HISTORY_KEEP 用同一个数）。 */
@@ -39,10 +41,13 @@ export interface ProbeHistoryCell {
   selfIdentity: string | null;
 }
 
-/** 一个渠道的条带：cells 从旧到新，最多 60 格。可用率的分母是真探过的（通过 + 不通）。 */
+/** 一个渠道的条带：cells 是最近 60 次真探，从旧到新。可用率的分母是 cells 里的（通过 + 不通）。 */
 export interface ProbeHistoryChannel {
   channelId: string;
+  /** 真探（通过、不通），从旧到新，最多 60。没探的不在这里。 */
   cells: ProbeHistoryCell[];
+  /** 没真探的记录（没探、按需），从旧到新，最多 60。页面折起来，不画进色条。 */
+  skipped: ProbeHistoryCell[];
   /** 这 60 格里量到了耗时的那些的平均（毫秒，四舍五入）。一个都没有是 null。 */
   avgDurationMs: number | null;
   passed: number;
@@ -103,11 +108,13 @@ export function probeHistoryStrips(rows: readonly ProbeHistoryCell[]): {
   const channels: ProbeHistoryChannel[] = [];
   for (const [channelId, list] of byChannel) {
     const ordered = [...list].sort(compareAge);
-    const cells = ordered.slice(-PROBE_HISTORY_SLOTS);
+    const cells = ordered.filter((c) => c.result !== 'not_probed').slice(-PROBE_HISTORY_SLOTS);
+    const skipped = ordered.filter((c) => c.result === 'not_probed').slice(-PROBE_HISTORY_SLOTS);
     const { passed, attempted } = counts(cells);
     channels.push({
       channelId,
       cells,
+      skipped,
       avgDurationMs: averageDuration(cells),
       passed,
       attempted,

@@ -1,6 +1,7 @@
 // 路由页判态要的外部事实（渠道开关、模型下架、整池暂停）从目录和整池暂停现读，交给 lib/route-kinds.ts 判。
 // 没读到的不猜（见 KindEnv）。
 
+import { TriangleAlert } from 'lucide-react';
 import { useMemo } from 'react';
 import { usePoolHolds, useRouting } from '../api/client';
 import { useNow } from '../lib/hooks';
@@ -31,7 +32,22 @@ export function useKindEnv(): KindEnv {
 
 /** 状态词的芯片。 */
 export function KindChip({ kind }: { kind: RouteStateKind }) {
+  // 疑似降智和探针记录里的「疑似降智」同一个橙色，和不通的红分开（#1748）
+  if (kind === 'degraded') return <DoubtChip label={routeStateLabel[kind]} title={routeStateWhy[kind]} />;
   return <StatusChip tone={routeStateTone[kind]} label={routeStateLabel[kind]} />;
+}
+
+/** 橙色的「疑似降智」芯片：探通了但降智题答错，不是红的故障。 */
+export function DoubtChip({ label, title }: { label: string; title?: string }) {
+  return (
+    <span
+      title={title}
+      className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-st-doubt/15 px-1.5 text-caption font-medium leading-none whitespace-nowrap text-ink-doubt"
+    >
+      <TriangleAlert className="size-3" aria-hidden />
+      {label}
+    </span>
+  );
 }
 
 /** 状态点：颜色按八态，读屏和悬停写词和一句意思；null = 判不了，不画态（留同样宽的空位，行不跳）。 */
