@@ -17,6 +17,10 @@ source "$DEPLOY_DIR/lib/common.sh"
 source "$DEPLOY_DIR/lib/snapshot.sh"
 # shellcheck source=lib/root-exec-check.sh
 source "$DEPLOY_DIR/lib/root-exec-check.sh"
+# fail2ban 的 sshd jail 装法复用法国的（setup_fail2ban_sshd、readback_fail2ban_sshd）。它顺带带进来同名的 setup_identity、
+# setup_firewall：下面香港自己的同名函数在 source 之后定义，会盖掉它们，所以这一行必须在所有函数定义之前。
+# shellcheck source=lib/human-tier.sh
+source "$DEPLOY_DIR/lib/human-tier.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 约定（改这里要同步 docs/ops.md）──
@@ -32,6 +36,12 @@ HK_FW_OURS=(22/tcp 80/tcp 443/tcp "${WG_PORT}/udp")
 HK_FW_FOREIGN=(8443/tcp)
 WG_ADDR=10.99.0.1/24
 WG_PEER_ADDR=10.99.0.2
+# fail2ban 的 sshd jail（#1784）：内容在 deploy/hk/fail2ban-sshd.jail，放过隧道网段，法国在隧道里几次失败登录不会把发版链封死。
+# 机器上原来手放的 sshd.local 和它同名段叠加，装的时候挪成 sshd.local.bak-<日期>（不删）。
+FAIL2BAN_SSHD_JAIL=/etc/fail2ban/jail.d/fleet-dao-sshd.local
+FAIL2BAN_SSHD_LEGACY=/etc/fail2ban/jail.d/sshd.local
+HK_F2B_JAIL_SRC=$DEPLOY_DIR/hk/fail2ban-sshd.jail
+HK_F2B_IGNORE=10.99.0.0/24
 # 法国驾驶舱后端（packages/api 的 FLEET_COCKPIT_LISTEN）：/api、/auth、/github/webhook、/healthz 经隧道转到这里。
 # 站点里它是 upstream fleet_dao_api 唯一的 server，连接留着复用（nginx-https.conf 开头）；飞书网关直接连它、不经 nginx
 API_UPSTREAM=$WG_PEER_ADDR:8787
@@ -543,8 +553,26 @@ setup_tls() {
   changed "签发证书 $FLEET_DOMAIN（HTTP-01，验证文件放 $ACME_ROOT；续期交给 certbot.timer，续完重载 nginx）"
 }
 
+setup_fail2ban() {
+  local bak
+  if [[ -f "$FAIL2BAN_SSHD_LEGACY" && ! -L "$FAIL2BAN_SSHD_LEGACY" ]]; then
+    bak=$FAIL2BAN_SSHD_LEGACY.bak-$(date +%F)
+    mv -f -- "$FAIL2BAN_SSHD_LEGACY" "$bak"
+    changed "手放的 $FAIL2BAN_SSHD_LEGACY 挪成 $bak（它和 fleet-dao-sshd.local 的 sshd 段叠加，不删）"
+  fi
+  setup_fail2ban_sshd "$HK_F2B_JAIL_SRC"
+}
+
+readback_fail2ban() {
+  readback_fail2ban_sshd "$HK_F2B_JAIL_SRC" "$HK_F2B_IGNORE"
+  if command -v fail2ban-client >/dev/null && [[ -e "$FAIL2BAN_SSHD_LEGACY" ]]; then
+    red "$FAIL2BAN_SSHD_LEGACY 还在：手放的旧 sshd jail 会盖掉 fleet-dao-sshd.local 的值，重跑 hk.sh 挪开它"
+  fi
+}
+
 readback() {
   step "读回"
+  readback_fail2ban
   readback_secrets_dir
   readback_firewall
   readback_wireguard
@@ -849,6 +877,7 @@ main() {
     load_config
     setup_wireguard
     setup_web_upload
+    setup_fail2ban
     setup_node
     setup_gateway
     setup_site
