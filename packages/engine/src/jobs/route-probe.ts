@@ -180,6 +180,7 @@ export function planProbe(
   probers: Partial<Record<HostId, Prober>>,
   live: LiveOrgReading | null,
   now: Date,
+  opts?: { manual?: boolean },
 ): ProbePlan {
   if (t.billing === 'metered') {
     return {
@@ -205,7 +206,8 @@ export function planProbe(
   if (t.modelRetiredAt !== null && t.modelRetiredAt.getTime() <= now.getTime()) {
     return { state: 'skipped', detail: `模型「${t.modelName}」已下架，不探` };
   }
-  if (!t.inUse) {
+  // 人点的立即探测（manual）不看这条：就是要在把路由挂进用途之前先看它通不通（#1630）
+  if (!t.inUse && !opts?.manual) {
     return {
       state: 'skipped',
       detail: '没有哪个阶段在用这条路由（挂着但关着的不算），不花额度去探；哪个阶段用上它，下一轮就探',
@@ -396,7 +398,9 @@ export async function conclude(
   const plan =
     opts?.pace && !opts.bypassPace
       ? planScheduledProbe(t, deps.probers, live, deps.now())
-      : planProbe(opts?.bypassPace ? { ...t, previous: null } : t, deps.probers, live, deps.now());
+      : planProbe(opts?.bypassPace ? { ...t, previous: null } : t, deps.probers, live, deps.now(), {
+          manual: opts?.bypassPace === true,
+        });
   if ('backingOff' in plan) {
     deps.log('info', `路由探针：${plan.backingOff}`, { routeId: t.routeId });
     return {
