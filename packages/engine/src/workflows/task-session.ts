@@ -7,6 +7,8 @@
 // - 别在这里加判断条件：判断经 rt.classify（judgeRetrying），结果进历史。
 // - 会话跑完却没有提交（#1408，patched('avoid-empty-commit-route')）：避让记在这张单的运行时上，下一轮选路带上。
 //   滤光了候选就不再避开，点名原来的路由再选一次；还派不出就照旧用它，不死等。老历史没有这个标记，选路参数和原来一样。
+// - patched('prefer-author-families')：曾让写码返工优先本单已有作者族，现在选路只按用途顺序、不再带这个字段；
+//   调用留着只为带这个标记的老历史重放不报非确定性。
 // - 派之前再探一次选定的那条（#1409，patched('dispatch-probe')）：不通就先放掉这次预占（patched('dispatch-probe-release')，
 //   没进起会话，不能占着池），再换下一条，每轮最多探 3 条；都探不通或都被挡就停下，不起会话。
 //   没提交避让滤光之后改派原来的那条，也先探再派。老历史没有这个标记，不探、不改选路之后的那一步。
@@ -178,6 +180,7 @@ export async function writeSession(
           channelId: route.channelId,
           routeId: route.routeId,
           modelId: route.modelId,
+          issueNumber: rt.input.issueNumber,
           reason: `${next.reason}（上游原文：${failure.message.slice(0, 300)}）`,
         };
         counters = { ...counters, retries: 0 };
@@ -306,6 +309,8 @@ async function pickRoute(
     const merged = useDry ? mergeAvoid(avoid, dry) : avoid;
     const avoidRouteIds = [...merged.routeIds];
     for (const id of probeAvoid) if (!avoidRouteIds.includes(id)) avoidRouteIds.push(id);
+    // 选路不再带「优先本单已有作者族」（选路只按用途顺序）。调用留着、不加字段：带这个标记的老历史重放时命令序列不变。
+    patched('prefer-author-families');
     const got: PickRouteResult = await rt.step('pickRoute', () =>
       rt.acts.pickRoute({
         taskId: rt.input.taskId,

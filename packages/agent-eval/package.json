@@ -1,0 +1,10 @@
+{
+  "name": "@fleet-dao/agent-eval",
+  "version": "0.0.0",
+  "private": true,
+  "description": "子代理能力探查：按定义起无头会话跑真题、代码判分、出 JSON 和 Markdown 报告（#1641）",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

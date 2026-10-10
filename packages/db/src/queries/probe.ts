@@ -1,12 +1,13 @@
 // 路由探针（design 第九节「路由探针」）：读每条路由探得了探不了的事实，写一条路由的结论。
 // routes.alive 只由探针和熔断写：这里是探针那一半。库里约束 alive 为真时结论必须是 ok，不许拿默认值、手改冒充在线。
-import type { BillingKind, HostId, OrgKind, RouteProbeState } from '@fleet-dao/shared';
+import type { BillingKind, HostId, OrgKind, ProbeCheck, RouteProbeState } from '@fleet-dao/shared';
 import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { asc, desc, eq, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { routesInUse } from '../routing-layers.ts';
 import {
+  channelStates,
   channels,
   models,
   pools,
@@ -69,6 +70,11 @@ export interface RouteProbeTarget {
    * （定时探针把 null 当成前 2 位，不放慢）。
    */
   probeRank?: number | null;
+  /**
+   * 它所在的渠道被运行中失败标成 disabled，而这条路由正是引发的那条（或引发的那条已被删）：只有探针探通它才能把渠道改回 ok，
+   * 所以不能转按需（按需不探，渠道被 channel-failed 挡着，派前探测也轮不到它）。
+   */
+  restoresChannel?: boolean;
   /** 上一次的结论；探针还没看过为空。 */
   previous: { state: RouteProbeState; at: Date; detail: string | null } | null;
 }
@@ -144,7 +150,7 @@ async function openRankRows(db: Db): Promise<OpenRankRow[]> {
 
 export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
   const now = new Date();
-  const [rows, used, ranked] = await Promise.all([
+  const [rows, used, ranked, disabled] = await Promise.all([
     db
       .select({ route: routes, pool: pools, channel: channels, model: models })
       .from(routes)
@@ -154,7 +160,12 @@ export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
       .orderBy(asc(routes.id)),
     routesInUse(db),
     openRankRows(db),
+    db
+      .select({ channelId: channelStates.channelId, failedRouteId: channelStates.failedRouteId })
+      .from(channelStates)
+      .where(eq(channelStates.status, 'disabled')),
   ]);
+  const flagged = new Map(disabled.map((d) => [d.channelId, d.failedRouteId]));
   const inUse = new Set(used.map((u) => u.routeId));
   const ranks = bestOpenRanks(ranked, now);
   return rows.map(({ route, pool, channel, model }) => ({
@@ -174,6 +185,7 @@ export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
     modelRetiredAt: model.retiredAt,
     inUse: inUse.has(route.id),
     probeRank: ranks.get(route.id) ?? null,
+    restoresChannel: flagged.has(channel.id) && (flagged.get(channel.id) ?? route.id) === route.id,
     alive: route.alive,
     previous:
       route.probeState === null || route.probedAt === null
@@ -203,6 +215,8 @@ export interface RouteProbeWrite {
   requestText?: string | null;
   /** 响应原文。没拿到不给或给 null。超长截断并标注。 */
   responseText?: string | null;
+  /** 降智检测（#1637）。没带题不给或给 null：五列都写空，不当空串。超长截断并标注。 */
+  check?: ProbeCheck | null;
 }
 
 export interface RouteProbeHistoryRow {
@@ -214,9 +228,14 @@ export interface RouteProbeHistoryRow {
   failureReason: string | null;
   requestText: string | null;
   responseText: string | null;
+  checkQuestion: string | null;
+  checkExpected: string | null;
+  checkAnswer: string | null;
+  checkPassed: boolean | null;
+  selfIdentity: string | null;
 }
 
-/** ok → 通过；failed → 不通；not_wired、skipped → 没探（这一轮没真探）。 */
+/** ok → 通过；failed → 不通；not_wired、skipped、on_demand → 没探（这一轮没真探）。 */
 function historyResultOf(state: RouteProbeState): RouteProbeHistoryResult {
   if (state === 'ok') return 'passed';
   if (state === 'failed') return 'failed';
@@ -265,6 +284,11 @@ export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved
       failureReason: result === 'passed' ? null : clipProbeText(w.detail),
       requestText: clipOrNull(w.requestText),
       responseText: clipOrNull(w.responseText),
+      checkQuestion: clipOrNull(w.check?.question),
+      checkExpected: clipOrNull(w.check?.expected),
+      checkAnswer: clipOrNull(w.check?.answer),
+      checkPassed: w.check?.passed ?? null,
+      selfIdentity: clipOrNull(w.check?.selfIdentity),
     });
     await tx.execute(sql`
       delete from route_probe_history
@@ -291,6 +315,11 @@ export interface ProbeHistoryJoined {
   failureReason: string | null;
   requestText: string | null;
   responseText: string | null;
+  checkQuestion: string | null;
+  checkExpected: string | null;
+  checkAnswer: string | null;
+  checkPassed: boolean | null;
+  selfIdentity: string | null;
 }
 
 /**
@@ -355,6 +384,11 @@ export async function readProbeHistoryJoined(db: Db): Promise<ProbeHistoryJoined
         failureReason: routeProbeHistory.failureReason,
         requestText: routeProbeHistory.requestText,
         responseText: routeProbeHistory.responseText,
+        checkQuestion: routeProbeHistory.checkQuestion,
+        checkExpected: routeProbeHistory.checkExpected,
+        checkAnswer: routeProbeHistory.checkAnswer,
+        checkPassed: routeProbeHistory.checkPassed,
+        selfIdentity: routeProbeHistory.selfIdentity,
       })
       .from(routeProbeHistory)
       .innerJoin(routes, eq(routes.id, routeProbeHistory.routeId))
@@ -388,6 +422,11 @@ export async function readRouteProbeHistory(
         failureReason: routeProbeHistory.failureReason,
         requestText: routeProbeHistory.requestText,
         responseText: routeProbeHistory.responseText,
+        checkQuestion: routeProbeHistory.checkQuestion,
+        checkExpected: routeProbeHistory.checkExpected,
+        checkAnswer: routeProbeHistory.checkAnswer,
+        checkPassed: routeProbeHistory.checkPassed,
+        selfIdentity: routeProbeHistory.selfIdentity,
       })
       .from(routeProbeHistory)
       .where(eq(routeProbeHistory.routeId, routeId))

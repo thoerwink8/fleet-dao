@@ -1,7 +1,7 @@
 // 路由探针的逐次历史（#1139）：routes 只留最近一次结论，渠道状态页要画每次的耗时和问题，得另有一张只追加的表。
 // 不设外键：路由可以被删（探针这一轮里会碰到），历史不该挡住删除，也不该跟着被清掉。迁移只建这张表和索引。
 import { sql } from 'drizzle-orm';
-import { bigint, check, index, integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
+import { bigint, boolean, check, index, integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
 
 const tz = { withTimezone: true, mode: 'date' } as const;
 
@@ -25,6 +25,14 @@ export const routeProbeHistory = pgTable(
     requestText: text('request_text'),
     /** 响应原文。没拿到为空。超长由写入方截断并标注。 */
     responseText: text('response_text'),
+    /** 降智检测（#1637），全部可空，老行不动。题面、标准答案、实答超长由写入方截断并标注。 */
+    checkQuestion: text('check_question'),
+    checkExpected: text('check_expected'),
+    checkAnswer: text('check_answer'),
+    /** 判过：true 答对、false 答错或没写第二行；空 = 没判（没带题、回答里没有第一行 OK）。 */
+    checkPassed: boolean('check_passed'),
+    /** 模型自报的厂家和型号，只记不判。 */
+    selfIdentity: text('self_identity'),
   },
   (t) => [
     index('route_probe_history_route_recent_idx').on(t.routeId, t.probedAt, t.id),

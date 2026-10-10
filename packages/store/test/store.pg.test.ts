@@ -8,6 +8,7 @@ import { seedPg } from '../src/testing/pg-fixtures.ts';
 import { describeStoreContract, type MakeStore } from './store-contract.ts';
 import { describeCredentialsStoreContract } from './store-contract-credentials.ts';
 import { describeNodeStoreContract } from './store-contract-nodes.ts';
+import { describeTaskListContract } from './store-contract-task-list.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -29,3 +30,4 @@ const make: MakeStore = async (data, clock) => {
 describeStoreContract('Postgres 版', make);
 describeCredentialsStoreContract('Postgres 版', make);
 describeNodeStoreContract('Postgres 版', make);
+describeTaskListContract('Postgres 版', make);

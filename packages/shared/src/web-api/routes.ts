@@ -71,12 +71,15 @@ import {
   UpdateSettingResponse,
 } from './settings.ts';
 import {
+  RunTranscriptQuery,
+  RunTranscriptResponse,
   TaskActionRequest,
   TaskActionResponse,
   TaskDetailResponse,
   UpdateTaskRoutePinRequest,
   UpdateTaskRoutePinResponse,
 } from './task.ts';
+import { TaskListQuery, TaskListResponse } from './task-list.ts';
 
 // —— 路由表（前端据此封装请求；路径都在 WEB_API_PREFIX 之下，:xxx 是路径参数）——
 
@@ -132,7 +135,16 @@ export const WebRoutes = {
   /** 一个远程环境最近一次推来的主页、环境页快照（只读展示用）；没推过 404。 */
   node: { method: 'GET', path: '/nodes/:nodeId', response: NodeDetailResponseSchema },
   board: { method: 'GET', path: '/repos/:repoId/board', response: BoardResponse },
+  /** 任务列表页 /tasks（#1639）：按最近更新从新到旧，可按状态、仓、单号或标题筛，游标翻页，带各状态的数。 */
+  tasks: { method: 'GET', path: '/tasks', query: TaskListQuery, response: TaskListResponse },
   task: { method: 'GET', path: '/tasks/:taskId', response: TaskDetailResponse },
+  /** 一段会话的过程记录（run_transcript），按序号增量读。只认登录 Cookie（网关通行证不认）。 */
+  runTranscript: {
+    method: 'GET',
+    path: '/tasks/:taskId/runs/:runId/transcript',
+    query: RunTranscriptQuery,
+    response: RunTranscriptResponse,
+  },
   taskAction: {
     method: 'POST',
     path: '/tasks/:taskId/actions',

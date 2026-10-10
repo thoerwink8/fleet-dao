@@ -157,4 +157,37 @@ describe('动手前并最新主线（#1246）', { timeout: 60_000 }, () => {
     expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
     expect(world.count('syncMainline')).toBe(0);
   });
+
+  it('并出新头后交付核对的起点跟着换（#1582）：会话没提交就走「没有产生新的提交」返工，不把并提交当会话的提交、不推', async () => {
+    const world = createFakeWorld({
+      ...CI_RED_ONCE,
+      sync: (_i, n) => (n === 1 ? { head: fakeHead(900) } : undefined),
+    });
+    const baseShas: string[] = [];
+    const synced = new Set<string>();
+    const { tasks, calls } = scripted({
+      // 像真的读交付：起点之后才算会话的提交；起点是并出来的头，会话没动手就是 0 个。
+      // 只认第一次：起点是并出来的新头（第 2 轮）才算「没动手」，之后再读到同一个头就走有提交这条路。
+      delivery: (n, read) => {
+        baseShas.push(read.baseSha);
+        if (read.baseSha === fakeHead(900) && !synced.has(read.baseSha)) {
+          synced.add(read.baseSha);
+          return { head: fakeHead(900), commits: 0, changedFiles: [] };
+        }
+        return { head: fakeHead(100 + n), commits: 1, changedFiles: ['packages/web/src/pages/a.tsx'] };
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 3 });
+    // 第 2 轮核对交付的起点是并出来的新头（没跟着换的话是第 1 轮推上去的 fakeHead(101)）
+    expect(baseShas[1]).toBe(fakeHead(900));
+    // 第 2 轮没提交：不推，意见写明没有新提交；只有第 1、3 轮推了分支
+    expect(world.count('pushBranch')).toBe(2);
+    expect(calls.segment[2]?.feedback.join('\n')).toContain('没有产生新的提交');
+  });
 });

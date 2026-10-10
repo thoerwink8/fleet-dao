@@ -50,7 +50,7 @@
 | [0044](0044-feishu-and-inbox.md) | 通知：飞书机器人加驾驶舱提醒中心 | 采纳，未复核 |
 | [0045](0045-model-policy.md) | 模型：构建期用 Opus，判断先用 Jev，子代理分三档且永不用 Fable | 采纳，未复核 |
 | [0046](0046-dispatch-mix.md) | 派工模型：渠道、族、模型、执行方式、阶段自由组合，GPT 不碰界面 | 采纳，未复核 |
-| [0047](0047-ranking-with-explore.md) | 推荐：人排先后，额度和战绩微调，大约一成用来试探 | 采纳，未复核 |
+| [0047](0047-ranking-with-explore.md) | 推荐：人排先后，额度和战绩微调，大约一成用来试探 | 部分被 0076 替代：不试探，模型之间不微调 |
 | [0048](0048-idle-must-not-invent-work.md) | 闲置：渠道空了按序找活，不许 AI 自己编活 | 采纳，未复核 |
 | [0049](0049-official-cli-first.md) | 接法：优先官方命令行，够不到再套自己的写码外壳 | 采纳，未复核 |
 | [0050](0050-temporal-postgres-jev.md) | 底座：Temporal、Postgres、Jev | 采纳，未复核 |
@@ -68,6 +68,20 @@
 | [0062](0062-ai-flow-interface.md) | AI 与流程的接口：进度先被动读过程记录，主动部分做成 `fleet` 命令而不是 MCP | 采纳，未复核 |
 | [0063](0063-repo-layout.md) | 仓库结构：全部放在 fleet-dao 一个仓 | 采纳，未复核 |
 | [0064](0064-execution-mode-capacity.md) | 执行模式与容量：无头，每个子任务一个命令行写码助手进程，起步 6 个并发会话 | 采纳，未复核 |
+| [0065](0065-two-machine-split.md) | 两台机器分工：法国干活，香港当门面 | 采纳，未复核 |
+| [0066](0066-quota-read-all.md) | 额度必须全读：驾驶舱和调度都用完整额度数据 | 采纳，未复核 |
+| [0067](0067-supplementary-needs.md) | 补充需求：旧单审计找出的 10 条 | 采纳，未复核 |
+| [0068](0068-jev-integration.md) | Jev 接入：按场景和性价比接入，先只记不拦 | 采纳，未复核 |
+| [0069](0069-secrets-vault-copy.md) | 密钥副本：加密配置副本放私有配套仓 | 采纳，未复核 |
+| [0070](0070-labels-and-milestones.md) | GitHub 上的标签与里程碑 | 采纳，未复核 |
+| [0071](0071-debt-not-lost.md) | 欠账不漏：以后要做的事必须落到 issue | 采纳，未复核 |
+| [0072](0072-projects-and-standards.md) | 项目与标准：项目模型和标准推送机制 | 采纳，未复核 |
+| [0073](0073-test-memory-fix-tests-not-machine.md) | 测试内存先改测试、不加机器 | 采纳，未复核 |
+| [0074](0074-commander-no-seat.md) | 指挥官不设座位、不在库里认领 | 采纳，未复核 |
+| [0075](0075-france-engine-release-by-commit.md) | 法国自家的引擎按主线上的一个提交发布 | 部分被 0032 替代 |
+| [0076](0076-route-strictly-by-order.md) | 选路只按顺序：只因额度用完、人关了、报错往后挑；冷验收验不了由冷验收「两家都验」兜 | 采纳 |
+| [0077](0077-review-screen-effort-high.md) | 评审初筛 `fleet-review-screen` 的 effort 从 medium 调到 high（Haiku 5.5 两道题 medium 10 遍过 8、high 6 遍全过），别的子代理档和 effort 不变（补充 0036） | 采纳 |
+| [0078](0078-steer-reply-and-background-subagents.md) | 引导三条：引导一送到、调工具前先回一句；派 Agent 子代理一律后台跑，主对话留在这一轮等完成通知、单次前台等待不超过 60 秒（不分无人值守与否）；引导涉及在跑的子代理用 `SendMessage` 转 | 采纳 |
 
 ## 第 1–14 条的编号（#1476）
 

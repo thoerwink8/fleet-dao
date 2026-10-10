@@ -17,8 +17,9 @@ import { formatAgo, formatClock, formatIn } from '../lib/format';
 import {
   formatAvailability,
   formatProbeMs,
-  PROBE_RESULT_BG,
-  PROBE_RESULT_WORD,
+  PROBE_KIND_BG,
+  PROBE_KIND_WORD,
+  probeKind,
 } from '../lib/probe-history-view';
 import type { Failover } from '../lib/provider-status';
 import { countsText, STATE_FILTERS, type StateFilter } from '../lib/route-state';
@@ -285,20 +286,21 @@ export function HistoryStrip({
           />
         ))}
         {cells.map((cell) => {
-          const word = PROBE_RESULT_WORD[cell.result];
+          const kind = probeKind(cell);
+          const word = PROBE_KIND_WORD[kind];
           const on = cell.id === activeCellId;
           return (
             <button
               key={cell.id}
               type="button"
-              data-result={cell.result}
+              data-result={kind}
               data-cell={cell.id}
               aria-pressed={on}
               title={`${formatClock(cell.probedAt)} ${cell.routeId} ${word.label} ${formatProbeMs(cell.durationMs, cell.result)}`}
               onClick={() => onPickCell(channelId, cell.id)}
               className={cn(
                 'h-full min-w-0 flex-1 rounded-2', // 原圆角 2px，rounded-2
-                PROBE_RESULT_BG[cell.result],
+                PROBE_KIND_BG[kind],
                 on && 'ring-2 ring-foreground',
               )}
             >
@@ -310,7 +312,8 @@ export function HistoryStrip({
         })}
       </div>
       <p className="mt-1 text-micro text-faint">
-        {cells.length === 0 ? '还没有探针历史 · ' : null}绿通过 · 红不通 · 黄没探
+        {cells.length === 0 ? '还没有探针历史 · ' : null}绿通过 · 红不通 · 橙疑似降智（探通了但降智题答错） ·
+        黄没探 · 灰按需
       </p>
     </div>
   );

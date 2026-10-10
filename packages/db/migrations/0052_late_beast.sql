@@ -1,0 +1,1 @@
+ALTER TYPE "public"."route_probe_state" ADD VALUE 'on_demand';

@@ -56,6 +56,8 @@ import {
   MIN,
   NOW,
   orgListRig,
+  pickTestQuestion,
+  REPLY,
   SOLO_ORG_ID,
   world,
 } from './fixtures.ts';
@@ -70,6 +72,10 @@ let root: string;
 beforeEach(async () => {
   await resetTestDb(t);
   await world(t.db);
+  // 夹具里「5 分钟前探通」落在前 2 位 30 分钟的间隔之内（#1635），这一轮会照旧不探；这里测的是探的行为，把上一次探通挪到间隔之外
+  await t.client.query(
+    "update routes set probed_at = probed_at - interval '35 minutes' where probe_state = 'ok'",
+  );
   // 真实的样子：独享池挂在独享组织上、拼车池挂在拼车组织上
   await t.client.query("update pools set org_kind = 'solo' where id = 'claude-solo'");
   await registerEngineJobs(t.db);
@@ -78,7 +84,7 @@ beforeEach(async () => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 const H = 60 * MIN;
-const answered = (): FakeRunScript => ({ result: { text: 'OK' } });
+const answered = (): FakeRunScript => ({ result: { text: REPLY } });
 
 /** 接口读数的替身：本人额度还宽、拼车和独享各一个可用账号。每次现读都是新的（时刻跟着假钟走）。 */
 const healthyRead = (at: Date): CarpoolApiRead => ({
@@ -172,6 +178,7 @@ function setup(
     log: () => {},
     sleep: async () => {},
     retryDelayMs: 0,
+    pickQuestion: pickTestQuestion,
     run: { 'claude-code': fake.run },
   });
   return {

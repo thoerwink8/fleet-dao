@@ -1,0 +1,36 @@
+commit e4f5a6b
+Author: dev <dev@example.invalid>
+Date:   Wed Oct 8 02:41:10 2026 +0000
+
+    pool: 整理命名
+
+diff --git a/src/pool.ts b/src/pool.ts
+--- a/src/pool.ts
++++ b/src/pool.ts
+@@ -8,12 +8,12 @@ export class Pool {
+   #free: number;
+   #waiters: Array<() => void> = [];
+
+   constructor(size: number) {
+     this.#free = size;
+   }
+
+-  async acquire(): Promise<Slot> {
++  async lease(): Promise<Slot> {
+     if (this.#free > 0) {
+       this.#free -= 1;
+       return new Slot(() => this.#release());
+     }
+diff --git a/test/pool.test.ts b/test/pool.test.ts
+--- a/test/pool.test.ts
++++ b/test/pool.test.ts
+@@ -5,7 +5,7 @@ import { Pool } from '../src/pool.ts';
+ describe('pool', () => {
+   it('hands out slots up to its size', async () => {
+     const pool = new Pool(2);
+-    await pool.acquire();
+-    await pool.acquire();
++    await pool.lease();
++    await pool.lease();
+     expect(pool.free).toBe(0);
+   });

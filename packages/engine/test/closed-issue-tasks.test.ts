@@ -7,6 +7,7 @@ import {
   CLOSED_ISSUE_ABANDON_BY,
   CLOSED_ISSUE_ABANDON_REASON,
   type ClosedIssueTaskDeps,
+  NEVER_DISPATCHED_STOP_REASON,
   parseTaskWorkflowId,
   settleIdleClosedIssueRows,
 } from '../src/jobs/closed-issue-tasks.ts';
@@ -27,7 +28,7 @@ function world(
   const signals: World['signals'] = [];
   const stopped: World['stopped'] = [];
   const logs: string[] = [];
-  const { states = {}, openRows = [], ...port } = over;
+  const { states = {}, openRows = [], openIssueLabels, ...port } = over;
   const deps: ClosedIssueTaskDeps = {
     closedIssueTasks: {
       runningTaskWorkflowIds: async () => [],
@@ -45,6 +46,8 @@ function world(
         signals.push({ workflowId, ...c });
         return 'sent';
       },
+      // 标签读取口子显式转交：没给就不装配（对应「不提供就不收母单、本机做的排队行」）。
+      ...(openIssueLabels && { openIssueLabels }),
       ...port,
     },
     now: () => new Date('2026-10-07T10:00:00.000Z'),
@@ -215,5 +218,118 @@ describe('单已关、没有工作流的遗留任务行（settleIdleClosedIssueR
 
     expect(part.failed).toContain('数据库连不上');
     expect(part.found).toBe(0);
+  });
+
+  describe('单开着、但母单或本机做（引擎不派）', () => {
+    const labelsOf = (labels: string[]) => async () => new Map<number, readonly string[]>([[1, labels]]);
+
+    it('贴母单、没有工作流：stopRows，理由是新常量，found 加一', async () => {
+      const w = world({
+        openRows: [row()],
+        states: { 'acme/demo#1': 'open' },
+        openIssueLabels: labelsOf(['母单', '需求']),
+      });
+
+      const part = await settleIdleClosedIssueRows(w.deps);
+
+      expect(w.stopped).toEqual([{ taskIds: ['task-row-1'], reason: NEVER_DISPATCHED_STOP_REASON }]);
+      expect(part).toEqual({ scanned: 1, found: 1, unchecked: [] });
+    });
+
+    it('贴本机做、没有工作流：同上', async () => {
+      const w = world({
+        openRows: [row()],
+        states: { 'acme/demo#1': 'open' },
+        openIssueLabels: labelsOf(['本机做']),
+      });
+
+      const part = await settleIdleClosedIssueRows(w.deps);
+
+      expect(w.stopped).toEqual([{ taskIds: ['task-row-1'], reason: NEVER_DISPATCHED_STOP_REASON }]);
+      expect(part.found).toBe(1);
+    });
+
+    it('只贴要人拍：不动', async () => {
+      const w = world({
+        openRows: [row()],
+        states: { 'acme/demo#1': 'open' },
+        openIssueLabels: labelsOf(['要人拍']),
+      });
+
+      const part = await settleIdleClosedIssueRows(w.deps);
+
+      expect(w.stopped).toEqual([]);
+      expect(part).toEqual({ scanned: 1, found: 0, unchecked: [] });
+    });
+
+    it('工作流还在跑的母单行：不动、不读标签', async () => {
+      let reads = 0;
+      const w = world({
+        openRows: [row()],
+        runningTaskWorkflowIds: async () => ['task:acme/demo#1'],
+        openIssueLabels: async () => {
+          reads += 1;
+          return new Map([[1, ['母单']]]);
+        },
+      });
+
+      const part = await settleIdleClosedIssueRows(w.deps);
+
+      expect(w.stopped).toEqual([]);
+      expect(reads).toBe(0);
+      expect(part).toEqual({ scanned: 1, found: 0, unchecked: [] });
+    });
+
+    it('读标签抛错：这个仓的行都不改，unchecked 写明，不当成没贴标签', async () => {
+      const w = world({
+        openRows: [row('task-row-1', 1), row('task-row-2', 2)],
+        states: { 'acme/demo#1': 'open', 'acme/demo#2': 'open' },
+        openIssueLabels: async () => {
+          throw new Error('GitHub 502');
+        },
+      });
+
+      const part = await settleIdleClosedIssueRows(w.deps);
+
+      expect(w.stopped).toEqual([]);
+      expect(part).toMatchObject({ scanned: 2, found: 0 });
+      expect(part.unchecked).toHaveLength(2);
+      expect(part.unchecked[0]).toContain('GitHub 502');
+    });
+
+    it('world 把 openIssueLabels 原样转交给装配；不给就没有这个口子', () => {
+      const read = async () => new Map<number, readonly string[]>();
+      expect(world({ openIssueLabels: read }).deps.closedIssueTasks.openIssueLabels).toBe(read);
+      expect(world().deps.closedIssueTasks.openIssueLabels).toBeUndefined();
+    });
+
+    it('没有标签口子：开着的单一律不动', async () => {
+      const w = world({ openRows: [row()], states: { 'acme/demo#1': 'open' } });
+
+      const part = await settleIdleClosedIssueRows(w.deps);
+
+      expect(w.stopped).toEqual([]);
+      expect(part).toEqual({ scanned: 1, found: 0, unchecked: [] });
+    });
+
+    it('同一个仓只读一次标签', async () => {
+      let reads = 0;
+      const w = world({
+        openRows: [row('task-row-1', 1), row('task-row-2', 2)],
+        states: { 'acme/demo#1': 'open', 'acme/demo#2': 'open' },
+        openIssueLabels: async () => {
+          reads += 1;
+          return new Map([
+            [1, ['母单']],
+            [2, ['本机做']],
+          ]);
+        },
+      });
+
+      const part = await settleIdleClosedIssueRows(w.deps);
+
+      expect(reads).toBe(1);
+      expect(part.found).toBe(2);
+    });
   });
 });

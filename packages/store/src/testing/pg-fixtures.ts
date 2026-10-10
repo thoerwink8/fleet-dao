@@ -152,6 +152,8 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         priority: t.priority,
         specDir: t.specDir ?? null,
         acceptance: t.acceptance ?? [],
+        // 暂停的单：引擎写 phase='paused'、doing 是那句话（和 db 的 toTask 读回去一致）
+        ...(t.paused === undefined ? {} : { phase: 'paused', doing: t.paused }),
         createdAt: date(t.createdAt),
       })),
     );

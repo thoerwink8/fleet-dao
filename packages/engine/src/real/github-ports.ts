@@ -25,6 +25,7 @@ import {
   bundleSince,
   changedFilesAgainst,
   fastForward,
+  fastForwardToCommit,
   fetchBundle,
   hasCommit,
   headOf,
@@ -289,10 +290,19 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       // 内容冲突不撤：MERGE_HEAD 和冲突标记留在树里，交回会话解（MC1）。撤掉的话会话看到干净的树，不知道冲突在哪。
       // 会话一个新提交都没有就不并（并出来的只有一个并提交，是空交付）。
       const incoming = await headOfIncoming(t);
+      // 树的头就是起会话前的头：会话一个新提交都没有。远端分支此刻正好在这个头上（PR 已经含着树里的全部），
+      // 没东西可推也不是空交付：回这个头，不推、不抛（#1582）。远端分支不在或在别处才是真的空交付。
+      let remoteAtIncoming = false;
       if (head === incoming) {
-        throw new PortError('EMPTY_DELIVERY', `起会话前的头 ${incoming.slice(0, 7)} 之后没有新提交`, {
-          retryable: false,
-        });
+        const branchState = await mapped(() =>
+          gh.fetchBranchHead({ repo: input.repo, branch: input.branch, signal: ctx.signal }, ctx),
+        );
+        if (branchState.head !== head) {
+          throw new PortError('EMPTY_DELIVERY', `起会话前的头 ${incoming.slice(0, 7)} 之后没有新提交`, {
+            retryable: false,
+          });
+        }
+        remoteAtIncoming = true;
       }
       const main = await mapped(() => gh.fetchMainline({ repo: input.repo, signal: ctx.signal }, ctx));
       if (!(await hasCommit(t, main.head))) {
@@ -306,6 +316,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         );
         await fetchBundle(t, bytes, ref);
       }
+      if (remoteAtIncoming) return { head, changedFiles: await changedFilesAgainst(t, main.head, head) };
       // 最新主线已经在树里：先钉上再并。内容冲突留下合并状态交给会话解；合并没开始的仍让会话自己 git merge。
       // pnpm test:changed 和钉住的主线比。
       await pinMainline(t, input.repo.defaultBranch, main.head);
@@ -366,15 +377,21 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           });
         }
         const freshHead = branchState.head;
-        const { bytes, ref } = await bundleFromMirror(
-          gh,
-          deps.tmpDir,
-          input.repo,
-          freshHead,
-          [incoming],
-          ctx.signal,
-        );
-        await fetchBundle(t, bytes, ref);
+        // 远端头就是起会话前的头、或已经在树里：不用再取，也不能向镜像要「freshHead 减 incoming」的包——那是空包，
+        // git bundle create 拒绝（Refusing to create empty bundle，#1454）。
+        const inTree = freshHead === incoming || (await hasCommit(t, freshHead));
+        let fetchedBundle: { bytes: Buffer; ref: string } | null = null;
+        if (!inTree) {
+          fetchedBundle = await bundleFromMirror(
+            gh,
+            deps.tmpDir,
+            input.repo,
+            freshHead,
+            [incoming],
+            ctx.signal,
+          );
+          await fetchBundle(t, fetchedBundle.bytes, fetchedBundle.ref);
+        }
         if (!(await isAncestor(t, incoming, freshHead))) {
           throw new PortError(
             'DIVERGED',
@@ -382,9 +399,12 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
             { retryable: false, details: { remoteHead: freshHead, incoming, head } },
           );
         }
+        if (freshHead === head) return { head, needsPush: false };
         if (await isAncestor(t, freshHead, head)) return { head, needsPush: true };
         if (await isAncestor(t, head, freshHead)) {
-          const ff = await fastForward(t, bytes, ref, freshHead);
+          const ff = fetchedBundle
+            ? await fastForward(t, fetchedBundle.bytes, fetchedBundle.ref, freshHead)
+            : await fastForwardToCommit(t, freshHead);
           if (ff === 'diverged') {
             throw new PortError(
               'DIVERGED',

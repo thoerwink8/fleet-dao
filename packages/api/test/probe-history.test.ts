@@ -99,4 +99,31 @@ describe('探针历史接口', () => {
     expect(mirasim?.cells.length).toBeGreaterThan(0);
     expect(mirasim?.cells.every((cell) => cell.routeId !== 'rt-claude-opus')).toBe(true);
   });
+
+  it('降智检测的五项（#1637）一路带到接口：有的是值，老行是 null', async () => {
+    current = await pgHarness(t, { probeHistory: pgProbeHistory(t.db) });
+    const { cookie } = await current.login();
+    const before = await history(current, cookie);
+    if (before.state !== 'ok') throw new Error('读不到历史');
+    const old = before.channels.find((c) => c.channelId === 'ch-claude')?.cells[0];
+    if (!old) throw new Error('样例里没有这条路由的老格子');
+    expect(old).toMatchObject({ checkQuestion: null, checkPassed: null, selfIdentity: null });
+    await saveRouteProbe(t.db, {
+      routeId: old.routeId,
+      state: 'failed',
+      at: new Date(Date.parse(old.probedAt) + 60_000),
+      detail: '疑似降智',
+      check: { question: '1+1？', expected: '2', answer: '3', passed: false, selfIdentity: 'GPT' },
+    });
+    const after = await history(current, cookie);
+    if (after.state !== 'ok') throw new Error('读不到历史');
+    const last = after.channels.find((c) => c.channelId === 'ch-claude')?.cells.at(-1);
+    expect(last).toMatchObject({
+      checkQuestion: '1+1？',
+      checkExpected: '2',
+      checkAnswer: '3',
+      checkPassed: false,
+      selfIdentity: 'GPT',
+    });
+  });
 });

@@ -4,6 +4,7 @@ export * from './channels.ts';
 export * from './claude-code/args.ts';
 export * from './claude-code/run.ts';
 export * from './claude-code/stream.ts';
+export * from './claude-code/subagents.ts';
 export type { AgentRunOptions, LineMeta } from './cli-run.ts';
 export * from './cursor/args.ts';
 export * from './cursor/run.ts';

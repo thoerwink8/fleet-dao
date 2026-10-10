@@ -370,6 +370,42 @@ describe('检测中断：上次探超过「探测间隔 + 3 分钟」就不当�
     expect(byId(cards, 'a').interrupted).toBe(false);
   });
 
+  test('前 2 位写了隔 30 分钟再探：33 分钟前不中断，36 分钟前才中断', () => {
+    const detail = '答上了：OK。用途前 2 位，隔 30 分钟再探';
+    const at = (min: number) =>
+      byId(
+        buildChannelCards(
+          { channels: [channel('a')], routes: [], models: [] },
+          layers([{ m1: [layerRoute('a1', 'a', 'live', { probedAt: ago(min), probeDetail: detail })] }]),
+          NOW,
+        ),
+        'a',
+      );
+    expect(at(33).interrupted).toBe(false);
+    expect(at(36).interrupted).toBe(true);
+  });
+
+  test('按需探测的路由：不主动探，放多久都不算检测中断，也不画红；渠道标「按需探测」', () => {
+    const detail = '不主动探，要派给它时先探一次。上一次真探：通，10-05 09:00';
+    const cards = buildChannelCards(
+      { channels: [channel('a')], routes: [], models: [] },
+      layers([
+        {
+          m1: [
+            layerRoute('a1', 'a', 'unknown', {
+              probedAt: ago(600),
+              probeDetail: detail,
+              connect: { verdict: 'unknown', reason: `按需探测（不主动探，派给它时先探一次）：${detail}` },
+            }),
+          ],
+        },
+      ]),
+      NOW,
+    );
+    expect(byId(cards, 'a')).toMatchObject({ interrupted: false, label: '按需探测', tone: 'stop' });
+    expect(byId(cards, 'a').hasFault).toBe(false);
+  });
+
   test('一个渠道有一条路刚探过：不算中断（要每条探过的路都过了才算）', () => {
     const cards = buildChannelCards(
       { channels: [channel('a')], routes: [], models: [] },

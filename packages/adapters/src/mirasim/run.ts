@@ -10,7 +10,7 @@ import { CallbackGate, type LineMeta } from '../cli-run.ts';
 import { assertSessionEffort, SESSION_EFFORTS } from '../effort.ts';
 import type { RunFacts, RunSummary } from '../judge.ts';
 import { looksLikeQuotaExhausted, num, rec, str } from '../stream-kit.ts';
-import type { KillReason } from '../types.ts';
+import type { KillReason, TranscriptEntry } from '../types.ts';
 import {
   type LedgerFs,
   type LedgerReading,
@@ -89,6 +89,11 @@ export interface MirasimRunOptions {
    * 行」这个概念。
    */
   onEvent?: (event: ProgressEvent, meta: LineMeta) => unknown;
+  /**
+   * 会话过程记录（#1640，见 TranscriptEntry）：和 onEvent 同一个节拍。seq 同样只是单调递增、replay 恒为 false
+   * （快照已经被 MirasimSession 去重过）。
+   */
+  onTranscript?: (entry: TranscriptEntry, meta: LineMeta) => unknown;
   /** 服务端接下了：引擎记下 sessionKey，重启后用 stopMirasimSession 收掉它。 */
   onAccepted?: (info: MirasimAccepted) => unknown;
   signal?: AbortSignal;
@@ -231,11 +236,17 @@ export async function runMirasim(
   let control: MirasimWire | undefined;
   let sub: MirasimWire | undefined;
   let eventSeq = -1;
+  let transcriptSeq = -1;
   const deliver = (events: ProgressEvent[]) => {
     for (const event of events) {
       eventSeq += 1;
       const meta: LineMeta = { seq: eventSeq, replay: false };
       gate.call(() => options.onEvent?.(event, meta));
+    }
+    for (const entry of session.drainTranscript()) {
+      transcriptSeq += 1;
+      const meta: LineMeta = { seq: transcriptSeq, replay: false };
+      gate.call(() => options.onTranscript?.(entry, meta));
     }
   };
   const done = async (): Promise<MirasimRunReport> => {
@@ -436,6 +447,8 @@ export async function runMirasim(
     if (report.firstProgressMs === undefined && session.current && phase && !QUEUED.has(phase)) {
       report.firstProgressMs = Date.now() - t0;
     }
+    // 子代理（#1641 的 fleet-* 子代理，可能是 Haiku）跑的时候，Mirasim 会不会把快照里的 model 换成子代理的模型：没查成。
+    // 这里不改判法，留给指挥官发版后按 specs/1641-子代理分档/法国实装.md 第一节第 6 条实测；会换就改成只核第一次读到的 model。
     const model = session.state.model;
     if (!report.killed && session.current && expect && model && !modelMatches(expect, model)) {
       kill('model_mismatch');

@@ -37,6 +37,8 @@ import {
   TaskActionRequest,
   TaskActionResponse,
   TaskDetailResponse,
+  TaskListQuery,
+  TaskListResponse,
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
   UpdateSettingRequest,
@@ -78,9 +80,11 @@ import { registerRouteProbeRoutes } from './route-probe-now.ts';
 import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView } from './routing-efforts.ts';
 import { ROUTING_LAYERS_NOT_HERE, type RoutingLayersPort, routingLayersView } from './routing-layers.ts';
 import { registerRoutingOrderRoutes } from './routing-order.ts';
+import { registerRunTranscriptRoutes } from './run-transcript.ts';
 import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
 import { readEnvSnapshot, readHomeSnapshot, type SnapshotDeps } from './snapshots.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
+import { taskListView } from './task-list.ts';
 import { TASK_ROUTE_PINS_NOT_HERE, taskRoutePinView } from './task-route-pins.ts';
 import { taskWorkflowIdForTask } from './temporal.ts';
 import {
@@ -228,6 +232,32 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       c,
       BoardResponse,
       buildBoard(repo, { tasks, subtasks, activeRuns, plans, route }, deps.now()),
+    );
+  });
+
+  // 任务列表（#1639）：所有仓、所有状态的单子，最近更新在前，游标翻页，带各组的数。每一行的段、模型、花费、PR 号从这一页单子的流水里拼。
+  app.get(WebRoutes.tasks.path, async (c) => {
+    const query = readQuery(c, TaskListQuery);
+    const page = await store.listTasks({
+      group: query.status,
+      repoId: query.repoId,
+      q: query.q,
+      cursor: query.cursor,
+      limit: query.limit,
+    });
+    const taskIds = page.items.map((i) => i.task.id);
+    const [repos, segmentRuns, runs, routes, models, channels] = await Promise.all([
+      store.listRepos(),
+      store.listSegmentRunsForTasks(taskIds),
+      store.listRuns({ taskIds }),
+      store.listRoutes(),
+      store.listModels(),
+      store.listChannels(),
+    ]);
+    return reply(
+      c,
+      TaskListResponse,
+      taskListView({ page, repos, segmentRuns, runs, routes, models, channels }),
     );
   });
 
@@ -811,6 +841,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   registerRoutingOrderRoutes(app, deps, actorOf);
   registerRouteProbeRoutes(app, deps, actorOf, engineProbe);
   registerGroomRoutes(app, deps, actorOf, engineProbe);
+  registerRunTranscriptRoutes(app, deps);
   registerModelRosterRoutes(app, deps, actorOf);
   registerFranceReleaseRoutes(app, deps);
   registerReleaseCardRoutes(app, deps);

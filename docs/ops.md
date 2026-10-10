@@ -86,6 +86,44 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 <!-- fleet:users:end -->
 
+下面这张表由 deploy/ 脚本生成，别手改：
+
+<!-- fleet:dirs:start -->
+
+| 路径 | 属主:组 | 权限 | 来源脚本 |
+|---|---|---|---|
+| /etc/fleet-dao | root:fleet | 750 | deploy/hk.sh |
+| /etc/fleet-dao | root:fleet | 750 | deploy/lib/human-tier.sh |
+| /etc/fleet-dao/github | root:fleet | 750 | deploy/lib/human-tier.sh |
+| /etc/systemd/system/postgresql@16-main.service.d | root:root | 755 | deploy/france.sh |
+| /etc/wireguard | root:root | 700 | deploy/france.sh |
+| /etc/wireguard | root:root | 700 | deploy/hk.sh |
+| /home/fleet | fleet:fleet | 750 | deploy/hk.sh |
+| /home/fleet | fleet:fleet | 750 | deploy/lib/human-tier.sh |
+| /opt/fleet-dao | root:root | 755 | deploy/hk.sh |
+| /opt/fleet-dao | root:root | 755 | deploy/lib/human-tier.sh |
+| /opt/fleet-dao/temporal | root:root | 755 | deploy/france.sh |
+| /opt/fleet-dao/temporal/bin | root:root | 755 | deploy/france.sh |
+| /srv/fleet-dao | root:root | 755 | deploy/lib/human-tier.sh |
+| /srv/fleet-dao-gateway | root:root | 755 | deploy/hk.sh |
+| /srv/fleet-dao-releases | root:root | 755 | deploy/lib/human-tier.sh |
+| /srv/fleet-dao-releases/.auto | root:root | 755 | deploy/france.sh |
+| /srv/fleet-dao-releases/.train | root:root | 755 | deploy/lib/human-tier.sh |
+| /srv/fleet-dao-web | root:root | 755 | deploy/hk.sh |
+| /usr/local/lib/fleet-dao | root:root | 755 | deploy/france.sh |
+| /usr/local/lib/fleet-dao | root:root | 755 | deploy/lib/human-tier.sh |
+| /usr/local/lib/fleet-dao/auto-release | root:root | 755 | deploy/france.sh |
+| /usr/local/lib/fleet-dao/release-request | root:root | 755 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-dao/engine | fleet:fleet | 750 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-dao/release-request | fleet:fleet | 750 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-sessions | fleet:fleet | 711 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-work | root:root | 755 | deploy/lib/human-tier.sh |
+| /var/log/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |
+| /var/www/fleet-dao-acme | root:root | 755 | deploy/hk.sh |
+
+<!-- fleet:dirs:end -->
+
 | 用户 | 在哪 | 干什么 |
 |---|---|---|
 | `fleet` | 两台 | 引擎、驾驶舱后端、Temporal（法国），飞书网关（香港）。系统用户，家 `/home/fleet`（750） |
@@ -334,7 +372,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 
 路由探针（#129，design 第九节「路由探针」）：
 
-- 引擎每 15 分钟（每小时 7、22、37、52 分）以会话用户在 `/var/lib/fleet-work/_route-probe/<会话用户>` 起一次最小的会话（Claude 的路由起 reclaude，Cursor 的起 cursor-agent，Grok 的起 grok，Mirasim 的路由（现在只有 deepseek-flash）经 Mirasim 起会话，模型照路由上写的）、问一句「只回 OK」，结论写进 `routes` 的 `alive`、`probe_state`、`probed_at`、`probe_detail`。Cursor、Grok、Mirasim 的路由探通了隔 2 小时才再真探（一次扣的是订阅或额度里的用量：Cursor 按月的包含用量、Grok 是 SuperGrok 的额度都和创始人自己用的是同一份，Mirasim 探通即代表真打了一次上游、扣的是那份紧张的中转额度，#345），中间那几轮结论照旧；没通的每轮都探。派工只派在线的路由：一上线（换机器、库清空也一样）第一轮探完之前，引擎一条活都派不出去。定时器在引擎进程里（#1072，不再是 Temporal 的 Schedule）：引擎重启后自己恢复，起来时若最近一格（探针是每小时 7、22、37、52 分）之后还没起过一轮就当场补一轮；没有「手动触发一轮」的命令，发布完最多等到下一格。
+- 引擎每 15 分钟（每小时 7、22、37、52 分）以会话用户在 `/var/lib/fleet-work/_route-probe/<会话用户>` 起一次最小的会话（Claude 的路由起 reclaude，Cursor 的起 cursor-agent，Grok 的起 grok，Mirasim 的路由（现在只有 deepseek-flash）经 Mirasim 起会话，模型照路由上写的）、问一句「只回 OK」，结论写进 `routes` 的 `alive`、`probe_state`、`probed_at`、`probe_detail`。Cursor、Grok、Mirasim 的路由探通了隔 2 小时才再真探（一次扣的是订阅或额度里的用量：Cursor 按月的包含用量、Grok 是 SuperGrok 的额度都和创始人自己用的是同一份，Mirasim 探通即代表真打了一次上游、扣的是那份紧张的中转额度，#345），中间那几轮结论照旧；没通的按 15、30、60、120、240 分钟退避（#1424）。用途顺序前 2 位的路由探通了隔 30 分钟才再真探，不在前 2 位的定时那一轮不再主动探，结论写「按需探测」（`probe_state = on_demand`），要派给它时派前探测先探一次（#1635）；钟仍是每 15 分钟一走。派工只派在线的路由：一上线（换机器、库清空也一样）第一轮探完之前，引擎一条活都派不出去。定时器在引擎进程里（#1072，不再是 Temporal 的 Schedule）：引擎重启后自己恢复，起来时若最近一格（探针是每小时 7、22、37、52 分）之后还没起过一轮就当场补一轮；没有「手动触发一轮」的命令，发布完最多等到下一格。
 - 看结论：驾驶舱调度台顶上「路由在线状态」；库里 `runuser -u fleet -- psql -d fleet -c "select id, alive, probe_state, probed_at, probe_detail from routes order by id"`；每一轮的结局在驾驶舱「定时任务」页（库里 `schedule_runs`、`job = 'route-probe'`）。
 - 离线了看 `probe_detail`：登录失效、设备被撤销的，照原因里写的修（Claude 的是上面 reclaude 那节第 2 步重新登录；Cursor 的是换一把密钥或把密钥文件放好，上面「会话用户的 Cursor 密钥」；Grok 的是上面「会话用户的 grok」第 3 步重新登录；Mirasim 的是上面「会话用户的 Mirasim」——多半是服务端本体没装（照第 1 步装一次）或常驻单元没起（`systemctl status fleet-mirasim-session`，照第 2 步的读回看差什么）），下一轮探通就回在线，那条「整池暂停」自动撤掉。按量计费、插头没接、会话用户挂着别的组织的是按规矩不探，不是坏了。
 - 派工理由末尾出现「在线是探针 N 前的结论，之后它没再给新结论（探针可能停了）」：探针连着三轮（45 分钟；Cursor、Grok、Mirasim 的路由是 2 小时 30 分，它们探通了隔 2 小时才再探）没给这条路由写新结论，引擎照上一次的结论接着派（不停工）。看驾驶舱「定时任务」页路由探针那一行（没跑、没跑成还是只写进去一部分，`why` 写了原因），再手动跑一轮（上面那条命令）看它报什么。
@@ -581,7 +619,7 @@ bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、自
 
 平时发版走驾驶舱「发布到法国」按钮（发版车同一趟流程；下一节）：点一下发主线头，发之前先排空引擎（本节末尾「发布前排空」）；自动发布单元只读不发（本节末尾「自动发布」）。上面几条留给人手动发、退回、重试。
 
-发版前先用 `agents/skills/commander/scripts/release-train.mjs` 把手头的活暂停（创始人 2026-10-05 约 21:00 定的流程；用法见它的头注释）：本机写暂停标记、`worker.mjs start` 不再起新工人，法国引擎总开关关掉并等在跑的会话收尾（等收尾只等法国在跑的会话 0、主线 CI 绿；本机在跑的工人、挂了自动合并没合的 PR 只提示、不等，2026-10-06 母单 #1121：它们和法国发版无关），收尾后才发，发完打印当前版本的清单。它的第 2、3 阶段（暂停法国、等收尾）就是法国引擎的排空，在 release.sh 之前做；release.sh 自己的「发布前排空」（本节末尾）照样跑，当最后一道兜底。发版是对外发布，`release-train.mjs start` 必须带创始人这一次发版的原话，发完、健康检查过了，法国引擎总开关和各仓「让 AI 接活」恢复到发版前（开着的开回、关着的保持关，见下面「自动发布」里「发完恢复到发版前的开关状态」）。
+发版前先用 `agents/skills/commander/scripts/release-train.mjs` 把手头的活暂停（创始人 2026-10-05 约 21:00 定的流程；用法见它的头注释）：本机写暂停标记、`worker.mjs start` 不再起新工人，法国引擎总开关关掉并等在跑的会话收尾（等收尾只等法国在跑的会话 0、主线 CI 绿；本机在跑的工人、挂了自动合并没合的 PR 只提示、不等，2026-10-06 母单 #1121：它们和法国发版无关），收尾后才发，发完打印当前版本的清单。它的第 2、3 阶段（暂停法国、等收尾）就是法国引擎的排空，在 release.sh 之前做；release.sh 自己的「发布前排空」（本节末尾）照样跑，当最后一道兜底。发版是对外发布，`release-train.mjs start` 必须带创始人这一次发版的原话，发完、健康检查过了，法国引擎总开关和各仓「让 AI 接活」恢复到发版前（开着的开回、关着的保持关，见下面「自动发布」里「发完恢复到发版前的开关状态」）。驱动进程中途死了（#1674）：状态文件每次落盘都记 pid、机器名、心跳时刻（等收尾、等部署每圈刷新），`status` 见 pid 不在、或心跳比该步上限加 5 分钟余量还老，就写「驱动没了，停在第 N 步」并给出接着走的命令；同一个目标再跑 `start` 当成「没成」从停下的那一步接着走（停在第 4 步的先读法国 `.history` 末行：是目标且事件为 release/recovered 就跳到第 5 步，否则重发；发布锁被占着或读不到历史就不动）。巡查报「引擎总开关关着」时会顺带读这份状态，驱动死了写明「发版车驱动死在第 N 步，没人恢复」。
 
 发布和退回自己交给 systemd 跑（临时服务 `fleet-dao-release-<时间>`），终端只跟着看日志：跳板断线、终端关了，发布照样跑完。日志在 `/srv/fleet-dao-releases/.logs/`（开头会打印路径，留最近 30 份），断了之后 `tail -f` 它接着看。`--check` 就在终端里跑。
 输出与退出码同装机脚本；没过健康检查、已自动退回，也是 1。
@@ -778,8 +816,8 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 - 发布前排空（`packages/engine/src/drain.ts`、`drain-control.ts`；像 k8s 先 cordon 再 drain）：release.sh 取到要发的提交、构建之前就写排空请求 `/srv/fleet-dao-releases/.drain-request`（要切到的提交、截止），引擎每 5 秒看一眼，认了马上不起新会话（选路回「过一会儿再选」，驾驶舱每张单写着在等发布；在等额度、空位、人的单子不受影响）、推一条提醒「在为发布排空：最晚几点照发」；在跑的会话接着做手上这一步，最多再做 10 分钟宽限（和构建一起走），到点没做完的由引擎按切号那一套停下（交回 `engine_stop`，失败分流 KL3 不记账、新引擎起来按编号续同一个会话）。release.sh 等引擎手上没会话了（读 `/var/lib/fleet-dao/engine/drain.json`，进程号对上 systemd 的主进程才信），在迁移之前停引擎、撤请求，迁移、切版本，新引擎起来接着派、撤掉提醒。发布没走到切版本（香港不通、迁移没成……）：撤请求、把停下的引擎照原样起回来，马上接着派。请求只在发布锁占着时算数：release.sh 中途没了，引擎不会一直停着不派。人手动发、退回同样排空；急修、急退加 `--now`（不给宽限，马上停下、按编号续上）；新版没过健康检查自动退回时也不给宽限。停机信号（人手动 `systemctl restart fleet-engine`、关机）同样先排空：`fleet-engine.service` 是 `KillMode=mixed`（停机信号只发给引擎主进程，不经 sudo 转给会话；2026-09-27 19:28:51、20:46:26 两次发布就是这样白杀了在干的活）、`TimeoutStopSec=15min`；再发一次停机信号马上停。
 - 发布不碰会话（现状，#901 修正）：原来老 Fusion 会话端口做过「会话脱开引擎进程跑、重启后接回」（收发目录 `/var/lib/fleet-sessions/`、接回记录 `meta.json`、`session_runs.output_seq`，2026-09-28 凌晨拍），那条端口早已没有调用方，随 #901 删了；三段会话（动手、验收）从来没脱开：它们挂在引擎起的 scope 里，发布前排空到截止会把它们停下（这一段交回 `org_switch`，新引擎起来在原分支上重跑，#957），引擎起来接活之前由 `reapOrphanSessions`（`packages/engine/src/real/orphan-reap.ts`）收上一轮留下的 scope、临时目录、没收场的 runs 行、预占的名额。`packages/adapters/src/detached.ts`（收发目录读写）还在、没人用；要不要给三段会话也做脱开是创始人的事（`docs/goals.md` H 节「发布不打断在跑的会话」那一行）。`/var/lib/fleet-sessions/` 现在是空目录（france.sh 还在建它）；原来「根目录不对」的那条提醒（`engine-session-io`）不再产生，引擎起来时会把库里还开着的撤掉。发布前排空这一段：release.sh 取到要发的提交、构建之前就写排空请求 `/srv/fleet-dao-releases/.drain-request`（要切到的提交、截止），引擎每 5 秒看一眼，认了马上不起新会话（选路回「过一会儿再选」，驾驶舱每张单写着在等发布；在等额度、空位、人的单子不受影响）、推一条提醒「在为发布排空：最晚几点照发」；在跑的会话接着做手上这一步，最多再做 10 分钟宽限（和构建一起走），到点没做完的由引擎按切号那一套停下（交回 `engine_stop`，失败分流 KL3 不记账、新引擎起来按编号续同一个会话）。release.sh 等引擎手上没会话了（读 `/var/lib/fleet-dao/engine/drain.json`，进程号对上 systemd 的主进程才信），在迁移之前停引擎、撤请求，迁移、切版本，新引擎起来接着派、撤掉提醒。发布没走到切版本（香港不通、迁移没成……）：撤请求、把停下的引擎照原样起回来，马上接着派。请求只在发布锁占着时算数：release.sh 中途没了，引擎不会一直停着不派。人手动发、退回同样排空；急修、急退加 `--now`（不给宽限，马上停下、按编号续上）；新版没过健康检查自动退回时也不给宽限。停机信号（人手动 `systemctl restart fleet-engine`、关机）同样先排空：`fleet-engine.service` 是 `KillMode=mixed`（停机信号只发给引擎主进程，不经 sudo 转给会话；2026-09-27 19:28:51、20:46:26 两次发布就是这样白杀了在干的活）、`TimeoutStopSec=15min`；再发一次停机信号马上停。
 - 演示版已删（#1223）：`--auto` 和人手动发布一样，没有「只核对、不发」那一档；香港上老的 `/demo/` 目录按本节发静态文件那一步删、读回 404。驾驶舱静态文件（`web`：明写进 `release.env` 那一步就是对外发布，要先告诉创始人）、飞书网关跟后端同一版。
-- 发完装机的自动档（`deploy/france.sh --auto-tier`；`lib.mjs` 的 `tierStep`，在同步规矩之前）：驾驶舱按钮发完一版，检出和在用的就对上了，下一轮单元看到「在用的版本和检出对上、这个提交还没装过」，就以 root 跑检出里的 `bash deploy/france.sh --auto-tier`——只装自动发布脚本副本（`/usr/local/lib/fleet-dao/auto-release/`）和它的两个单元、`fleet-agents.slice`、清老机器上已删的演示版单元（`retire_old_units`，#1223），每步幂等；**不碰**防火墙、sudoers、建用户、`/etc/fleet-dao` 里的钥匙和环境文件（那是「人工档」，实现都在 `deploy/lib/human-tier.sh`，只在人跑整套 `bash deploy/france.sh` 时做）。没成就记下、报警（`auto-release:tier:<提交号>`），同一个提交最快隔 30 分钟再试，成了的不重跑，成了自动撤警。规矩同步仍由下一条那一步做，不在自动档里。自动档整个落地后，主线上改自动发布脚本、单元文件、slice 不用人重跑 france.sh。**这套第一次生效要人以 root 整套跑一遍 `bash /srv/fleet-dao/deploy/france.sh`**（法国上装着的自动发布副本还是旧的、没有这一步），之后人工档的文件没变就不用再跑。
-- 发完同步规矩（跟着发出去的那个提交走，不跟主线头）：在用的版本和检出对上、这个提交还没同步过，就以 root 对 `fleet-agent-carpool`、`pilot` 各跑一遍 `node /srv/fleet-dao/packages/agents-sync/bin/agents-sync --apply --user <用户>`（和 france.sh 最后那步同一条、同一份名单，第五节）。没成就记下、报警；同一个提交不重跑，下一个提交再来；要马上补就手动跑那条命令。
+- 发完装机的自动档（`deploy/france.sh --auto-tier`；`lib.mjs` 的 `tierStep`，在同步规矩之前）：发完一版，下一轮单元看到「在用的版本和上次装的提交不一样」，先把检出对上在用的（按钮发的检出已经快进过；人手动 `release.sh <提交>` 发的检出没人动，单元自己 `git merge --ff-only` 快进到在用的提交，有没提交的改动、分叉、快进不成就报警；检出比在用的还新就等，#1672），再以 root 跑检出里的 `bash deploy/france.sh --auto-tier`——只装自动发布脚本副本（`/usr/local/lib/fleet-dao/auto-release/`）和它的两个单元、`fleet-agents.slice`、清老机器上已删的演示版单元（`retire_old_units`，#1223），每步幂等；**不碰**防火墙、sudoers、建用户、`/etc/fleet-dao` 里的钥匙和环境文件（那是「人工档」，实现都在 `deploy/lib/human-tier.sh`，只在人跑整套 `bash deploy/france.sh` 时做）。没成就记下、报警（`auto-release:tier:<提交号>`），同一个提交最快隔 30 分钟再试，成了的不重跑，成了自动撤警。规矩同步仍由下一条那一步做，不在自动档里。自动档整个落地后，主线上改自动发布脚本、单元文件、slice 不用人重跑 france.sh。**这套第一次生效要人以 root 整套跑一遍 `bash /srv/fleet-dao/deploy/france.sh`**（法国上装着的自动发布副本还是旧的、没有这一步），之后人工档的文件没变就不用再跑。
+- 发完同步规矩（跟着发出去的那个提交走，不跟主线头）：在用的版本和上次同步的提交不一样，就先把检出对上在用的（同上一条，装机自动档和规矩用同一个判法；#1672 之前检出没人快进就一直不同步，10-08 之后三版都漏了），再以 root 对 `fleet-agent-carpool`、`pilot` 各跑一遍 `node /srv/fleet-dao/packages/agents-sync/bin/agents-sync --apply --user <用户>`（和 france.sh 最后那步同一条、同一份名单，第五节）。没成就记下、报警；同一个提交不重跑，下一个提交再来；要马上补就手动跑那条命令。
 - release.sh 的退出码：0 全绿；1 有红（含「没过健康检查、已自动退回」）；2 切上去了、有待配或没查成；以前还有 75、76（`--auto` 才有：另一个发布在跑、会话在跑，什么都没动；#1272 随 `--auto` 一起删了）和 3（发布成了、只是发布后的收尾没成；#1256 删了发版后置关以后没有调用方），#1258 把 `post_alert` 出口和单元那头的处理（`auto-release:post-off:`）一起删了。
 - 发布没成怎么办：release.sh 退出码是 1（有红，含「没过健康检查、已自动退回」）等其余的：照 release.sh 的日志（`/srv/fleet-dao-releases/.logs/`）和驾驶舱法国页查；修好后再点一次「发布到法国」，或在法国以 root 手动发：`bash /srv/fleet-dao/deploy/release.sh <提交号>`。没有自动重试了（以前的「隔 30 分钟重试最多 2 次」随单元不再发版删了）。
 - 报警（驾驶舱提醒，飞书跟着推）：这个单元当场报的只有：规矩同步没成（`auto-release:rules:<提交号>`）、装机自动档没装成（`auto-release:tier:<提交号>`）、配置和期望不一致（`auto-release:config:<文件>:<键>`，一项一条）、配置没查成（`auto-release:config-unchecked`）、状态文件读不出（`auto-release:state-unreadable`）；好了自动解除；库连不上时留到下一轮再发、再撤，不丢。其余的不对由后端每 5 分钟判一次（和下面 `deploy_lag` 同一个判法），开一条「线上版本跟不上主线：…」，好了解除——单元自己停了、没装、跑崩了，只有后端看得出来。

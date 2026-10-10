@@ -56,6 +56,7 @@ func run() int {
 		return fail("workdir_unreadable", err)
 	}
 	cfg := configuration{target: target, args: args, env: os.Environ(), mirasimHome: ms, cwd: cwd}
+	// Mirasim 把启动命令当 claude 本体：「--version」探版本、「update」升级都原样交给 reclaude，不在这里截。
 	if flagValue(args, "--input-format") != "stream-json" {
 		return runOnce(cfg)
 	}
