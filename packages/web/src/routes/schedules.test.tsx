@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 // 定时任务页顶部摘要卡：说明要完整折行，不能单行省略（#1527）。
-import { cleanup, screen } from '@testing-library/react';
+// 「上次跑成」和「N 分钟前开始」合成一列（#1753）。
+import { cleanup, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { renderApp } from '../test/harness';
 import SchedulesPage from './schedules';
@@ -55,5 +56,32 @@ describe('定时任务摘要卡', () => {
       expect(labelRow.contains(value)).toBe(false);
       expect(labelRow.compareDocumentPosition(value) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     }
+  });
+});
+
+describe('定时任务上次跑成列', () => {
+  test('上次跑成和开始时间在同一列', async () => {
+    renderApp(<SchedulesPage />, { route: '/schedules' });
+    // 窄屏卡片和宽屏表格各有一份，等任意一份出来再盯表格那一列
+    await screen.findAllByText('额度读取');
+    const table = document.querySelector('table');
+    if (!(table instanceof HTMLElement)) throw new Error('找不到表格');
+    const heads = within(table)
+      .getAllByRole('columnheader')
+      .map((h) => h.textContent?.trim());
+    expect(heads).toEqual(['任务', '周期', '上次运行', '上次跑成', '耗时']);
+
+    const row = within(table).getByText('额度读取').closest('tr');
+    if (!(row instanceof HTMLElement)) throw new Error('找不到额度读取那一行');
+    const cells = within(row).getAllByRole('cell');
+    const outcomeCell = cells[2];
+    const successCell = cells[3];
+    if (!outcomeCell || !successCell) throw new Error('列数不对');
+    expect(successCell.textContent).toMatch(/开始/);
+    expect(outcomeCell.textContent).not.toMatch(/开始/);
+    // 主行是上次跑成（相对时间），副行是开始时间——同在一格里
+    const block = successCell.querySelector('[data-last-success]');
+    expect(block).toBeTruthy();
+    expect(within(successCell).getByText(/开始/).closest('[data-last-success]')).toBe(block);
   });
 });
