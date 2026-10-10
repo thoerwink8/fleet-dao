@@ -86,6 +86,44 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 <!-- fleet:users:end -->
 
+下面这张表由 deploy/ 脚本生成，别手改：
+
+<!-- fleet:dirs:start -->
+
+| 路径 | 属主:组 | 权限 | 来源脚本 |
+|---|---|---|---|
+| /etc/fleet-dao | root:fleet | 750 | deploy/hk.sh |
+| /etc/fleet-dao | root:fleet | 750 | deploy/lib/human-tier.sh |
+| /etc/fleet-dao/github | root:fleet | 750 | deploy/lib/human-tier.sh |
+| /etc/systemd/system/postgresql@16-main.service.d | root:root | 755 | deploy/france.sh |
+| /etc/wireguard | root:root | 700 | deploy/france.sh |
+| /etc/wireguard | root:root | 700 | deploy/hk.sh |
+| /home/fleet | fleet:fleet | 750 | deploy/hk.sh |
+| /home/fleet | fleet:fleet | 750 | deploy/lib/human-tier.sh |
+| /opt/fleet-dao | root:root | 755 | deploy/hk.sh |
+| /opt/fleet-dao | root:root | 755 | deploy/lib/human-tier.sh |
+| /opt/fleet-dao/temporal | root:root | 755 | deploy/france.sh |
+| /opt/fleet-dao/temporal/bin | root:root | 755 | deploy/france.sh |
+| /srv/fleet-dao | root:root | 755 | deploy/lib/human-tier.sh |
+| /srv/fleet-dao-gateway | root:root | 755 | deploy/hk.sh |
+| /srv/fleet-dao-releases | root:root | 755 | deploy/lib/human-tier.sh |
+| /srv/fleet-dao-releases/.auto | root:root | 755 | deploy/france.sh |
+| /srv/fleet-dao-releases/.train | root:root | 755 | deploy/lib/human-tier.sh |
+| /srv/fleet-dao-web | root:root | 755 | deploy/hk.sh |
+| /usr/local/lib/fleet-dao | root:root | 755 | deploy/france.sh |
+| /usr/local/lib/fleet-dao | root:root | 755 | deploy/lib/human-tier.sh |
+| /usr/local/lib/fleet-dao/auto-release | root:root | 755 | deploy/france.sh |
+| /usr/local/lib/fleet-dao/release-request | root:root | 755 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-dao/engine | fleet:fleet | 750 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-dao/release-request | fleet:fleet | 750 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-sessions | fleet:fleet | 711 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-work | root:root | 755 | deploy/lib/human-tier.sh |
+| /var/log/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |
+| /var/www/fleet-dao-acme | root:root | 755 | deploy/hk.sh |
+
+<!-- fleet:dirs:end -->
+
 | 用户 | 在哪 | 干什么 |
 |---|---|---|
 | `fleet` | 两台 | 引擎、驾驶舱后端、Temporal（法国），飞书网关（香港）。系统用户，家 `/home/fleet`（750） |

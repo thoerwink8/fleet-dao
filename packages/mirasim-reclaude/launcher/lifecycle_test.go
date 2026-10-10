@@ -62,6 +62,10 @@ func fakeClaude() {
 		fmt.Print("version-probe-output")
 		os.Exit(23)
 	}
+	if os.Getenv("MIRASIM_TEST_ROLE") == "argv" {
+		_ = json.NewEncoder(os.Stdout).Encode(os.Args[1:])
+		os.Exit(0)
+	}
 	if os.Getenv("MIRASIM_TEST_ROLE") == "grandchild" {
 		for {
 			time.Sleep(time.Hour)
@@ -587,6 +591,24 @@ func TestOneShotInputEOFPreservesOutputAndExitCode(t *testing.T) {
 	ee, ok := err.(*exec.ExitError)
 	if !ok || ee.ExitCode() != 23 || string(out) != "version-probe-output" {
 		t.Fatalf("stdin EOF 被误当成要杀目标：out=%q err=%v", out, err)
+	}
+}
+
+// Mirasim 把启动命令当 claude 本体：探版本跑「启动命令 --version」，升级跑「启动命令 update」。
+// 两条都得原样交给 reclaude，版本才是 reclaude 背后那份 claude 的，升级才走 reclaude 自己的命令。
+func TestMirasimVersionProbeAndSelfUpdateReachReclaudeUnchanged(t *testing.T) {
+	self, _ := os.Executable()
+	for _, args := range [][]string{{"--version"}, {"update"}} {
+		c := exec.Command(testLauncher, args...)
+		c.Env = append(os.Environ(), "RECLAUDE_MIRASIM_TARGET="+self, "MIRASIM_LAUNCHER_TEST_CHILD=1", "MIRASIM_TEST_ROLE=argv")
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("%v：启动器没把命令交给 reclaude：%v", args, err)
+		}
+		var got []string
+		if json.Unmarshal(out, &got) != nil || strings.Join(got, " ") != strings.Join(args, " ") {
+			t.Fatalf("%v 到 reclaude 时变成了 %q", args, out)
+		}
 	}
 }
 
