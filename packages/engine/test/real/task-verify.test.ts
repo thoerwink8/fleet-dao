@@ -410,12 +410,12 @@ describe('【故意造出的失败】做不出来：回 unavailable（工作流�
     expect(r.posted.map((p) => p.state)).toEqual(['pending', 'failure']);
   });
 
-  it('作者族认不出（cursor）：unavailable，不硬跑——认不出的可能就是某个已知族的别名', async () => {
+  it('作者族认不出（cursor）：不再停下，改成两家都验；只派得出一家时仍回没讨论成，写明要两个不同的族', async () => {
     const r = rig();
     const got = await r.run(r.input({ authorFamilies: ['cursor'] }), ctx());
-    expect(got.unavailable).toContain('作者族认不出');
-    expect(r.specs).toHaveLength(0);
-    expect(r.asked).toHaveLength(0);
+    expect(got.unavailable).not.toContain('作者族认不出');
+    expect(got.unavailable).toContain('两家都验要两个不同的族');
+    expect(r.asked.length).toBeGreaterThan(0);
   });
 
   it('diff 太大：unavailable，不截断了假装看全；状态 failure', async () => {

@@ -155,8 +155,8 @@ describe('冷调用的每条「读不到」都变成 failure 状态，不许吞�
     });
     expect(s.state).toBe('failure');
     expect(s.description).toContain('没讨论成');
-    // 作者族确实被跳过了（0006 的顺序照旧）
-    expect(asked).toEqual(FAMILY_ORDER.filter((f) => f !== 'gpt'));
+    // 先按 0006 的顺序问别家；都挑不出才改两家都验，轮到被避开的作者族 gpt（也挑不出）
+    expect(asked).toEqual([...FAMILY_ORDER.filter((f) => f !== 'gpt'), 'gpt']);
   });
 
   it('【故意造出的失败】冷调用根本没跑成（进程 exit=1、stdout 空）→ failure', async () => {
