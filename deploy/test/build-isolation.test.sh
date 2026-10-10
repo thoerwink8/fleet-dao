@@ -626,6 +626,7 @@ if ((EUID == 0)) && ((skipped == 0)) && [[ -n "$BAIT" && -n "$BAIT_ID" ]]; then
   # 读进程用 setpriv 成 fleet 后自己起占位再读（yama 只放行祖先）。已是 fleet 就直接 sleep：
   # 再套一层 setpriv --init-groups 没有 CAP_SETGID 会失败；$! 仍是本 shell 的 fleet 子进程，
   # 不是 runuser 那种留下收 PAM 的 root 父进程。
+  # shellcheck disable=SC2016 # 单引号里是给 setpriv 内 bash 跑的脚本，$holder、$bait 要在里面展开
   outside=$(setpriv --reuid=fleet --regid=fleet --init-groups -- bash -c '
 set -uo pipefail
 bait=$1
@@ -712,7 +713,8 @@ done
 printf "%s\n" "NOLEAK"
 exit 1
 ' 2>&1)
-      check "沙箱里扫 /proc/*/root 看不到密钥目录" "$([[ "$scan" == *NOLEAK* && "$scan" != *LEAK* ]] && echo ok || echo bad)" ok
+      # NOLEAK 含 LEAK 子串，不能写 != *LEAK*；泄漏行是「LEAK 路径」，用带空格的前缀区分
+      check "沙箱里扫 /proc/*/root 看不到密钥目录" "$([[ "$scan" == *NOLEAK* && "$scan" != *"LEAK "* ]] && echo ok || echo bad)" ok
       check "绕路时没有调用 as_fleet_in" "$(bare_n)" 0
     fi
   fi
