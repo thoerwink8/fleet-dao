@@ -215,6 +215,8 @@ export interface PullRequestRecord {
   openedAt?: string | undefined;
   mergedAt?: string | undefined;
   issueRefs?: number[] | undefined;
+  /** GitHub 上的 PR 标题；没读到过是 undefined（旧行、事件没带）。 */
+  title?: string | undefined;
 }
 
 /**

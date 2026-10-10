@@ -8,6 +8,7 @@ import type { HomeDone } from './types';
 
 export function DoneCard({ item, className }: { item: HomeDone; className?: string }) {
   const now = useNow();
+  const prLabel = `PR #${item.prNumber}`;
   const body = (
     <>
       <span
@@ -18,7 +19,10 @@ export function DoneCard({ item, className }: { item: HomeDone; className?: stri
       </span>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="num text-xs font-semibold text-muted-foreground">PR #{item.prNumber}</span>
+          {/* 标题就是「PR #号」（没读到 PR 标题的退路）时只显示一次 */}
+          {item.title === prLabel ? null : (
+            <span className="num text-xs font-semibold text-muted-foreground">{prLabel}</span>
+          )}
           <span className="truncate text-sm font-medium">{item.title}</span>
         </div>
         <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs text-muted-foreground">

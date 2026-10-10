@@ -1628,24 +1628,33 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           };
         });
       const flow = flowStages(st.tasks.flatMap(viewsOf), running);
-      const done = st.tasks
-        .flatMap((t) =>
-          t.subtasks
-            .filter((s) => s.subtask.state === 'merged' && s.subtask.prNumber !== undefined)
-            .map((s) => ({
-              prNumber: s.subtask.prNumber as number,
-              title: t.task.title,
-              repo: repoName(t.task.repoId),
-              // 假后端不记每个子任务合并的时刻：日志里「PR #n 已合并」那条就是它，没有再退回「建单时刻」。
-              mergedAt:
-                [...st.logs]
-                  .reverse()
-                  .find(
-                    (l) => l.subtaskId === s.subtask.id && l.kind === 'state' && l.text.endsWith('→ merged'),
-                  )?.at ?? t.task.createdAt,
-              issueNumber: t.task.issueNumber,
-            })),
-        )
+      const taskDone = st.tasks.flatMap((t) =>
+        t.subtasks
+          .filter((s) => s.subtask.state === 'merged' && s.subtask.prNumber !== undefined)
+          .map((s) => ({
+            prNumber: s.subtask.prNumber as number,
+            title: t.task.title,
+            repo: repoName(t.task.repoId),
+            // 假后端不记每个子任务合并的时刻：日志里「PR #n 已合并」那条就是它，没有再退回「建单时刻」。
+            mergedAt:
+              [...st.logs]
+                .reverse()
+                .find(
+                  (l) => l.subtaskId === s.subtask.id && l.kind === 'state' && l.text.endsWith('→ merged'),
+                )?.at ?? t.task.createdAt,
+            issueNumber: t.task.issueNumber,
+          })),
+      );
+      // 本机做的单（分支 local/…）合进去的 PR 没有任务记录：真后端用 GitHub 上的 PR 标题（#1744）
+      const localDone = [
+        { prNumber: 1741, title: '发版车第 6 步只拦新出现的、跟新版有关的异常 (#1741)' },
+        { prNumber: 1742, title: 'PR #1742' }, // 标题也没读到的退路
+      ].map((p) => ({
+        ...p,
+        repo: repoName(st.tasks[0]?.task.repoId ?? ''),
+        mergedAt: new Date().toISOString(),
+      }));
+      const done = [...taskDone, ...localDone]
         .sort((a, b) => b.mergedAt.localeCompare(a.mergedAt))
         .slice(0, 10);
       const quotaPools = st.pools.map((p) => {
