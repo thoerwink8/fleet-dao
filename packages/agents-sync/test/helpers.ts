@@ -60,6 +60,7 @@ export const HOOK_FILES: Record<string, string> = {
   'pretool-gemini.mjs': '// 假的 Gemini CLI 调工具前钩子\n',
   'pretool-agy.mjs': '// 假的 Antigravity 调工具前钩子\n',
   'pretool-kimi.mjs': '// 假的 Kimi Code 调工具前钩子\n',
+  'main-thread.mjs': '// 假的主对话两条（引导先回、子代理后台跑）钩子\n',
   'stop.mjs': '// 假的收尾提醒钩子\n',
   'prompt-log.mjs': '// 假的落盘钩子\n',
 };

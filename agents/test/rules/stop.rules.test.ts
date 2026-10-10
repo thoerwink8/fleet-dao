@@ -438,7 +438,8 @@ describe('规矩的文字：通用段和 commander 技能说「无人值守时�
   const SKILL = read('../../skills/commander/SKILL.md');
   const line = SHARED.split('\n').find((l) => l.startsWith('- 无人值守')) ?? '';
 
-  it('通用段：先 on、起子代理、这一轮不结束、等完成通知、前台等待不超过 60 秒、done / needs-you / off；不再写脱离会话的工人', () => {
+  // 「单次前台等待不超过 60 秒」2026-10-10 挪进「子代理一律后台跑」那句（决定 0077，不分无人值守与否），这里只查它还在通用段里
+  it('通用段：先 on、起子代理、这一轮不结束、等完成通知、done / needs-you / off；前台等待不超过 60 秒在通用段里；不再写脱离会话的工人', () => {
     expect(line).toContain('unattended.mjs on');
     expect(line).toContain('Agent 子代理');
     expect(line).toContain('不脱离会话');
@@ -446,7 +447,7 @@ describe('规矩的文字：通用段和 commander 技能说「无人值守时�
     expect(line).not.toContain('--detached');
     expect(line).toContain('这一轮不结束');
     expect(line).toContain('完成通知');
-    expect(line).toContain('单次前台等待不超过 60 秒');
+    expect(SHARED).toContain('单次前台等待不超过 60 秒');
     for (const k of ['`done`', '`needs-you`', '`off`']) expect(line).toContain(k);
   });
 

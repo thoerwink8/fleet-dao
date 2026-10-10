@@ -80,6 +80,7 @@
 | [0074](0074-commander-no-seat.md) | 指挥官不设座位、不在库里认领 | 采纳，未复核 |
 | [0075](0075-france-engine-release-by-commit.md) | 法国自家的引擎按主线上的一个提交发布 | 部分被 0032 替代 |
 | [0076](0076-route-strictly-by-order.md) | 选路只按顺序：只因额度用完、人关了、报错往后挑；冷验收验不了由冷验收「两家都验」兜 | 采纳 |
+| [0077](0077-reply-to-directives-and-background-subagents.md) | 引导先回：调工具前钩子查 transcript，引导之后没写话就拒；子代理一律后台跑，主对话留在这一轮等它跑完；引导涉及子代理用 `SendMessage` 转（补充 0024、0025、0030） | 采纳 |
 
 ## 第 1–14 条的编号（#1476）
 
