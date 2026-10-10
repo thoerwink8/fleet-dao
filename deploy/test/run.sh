@@ -56,7 +56,7 @@ SHARDS=(
   'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use temporal-schema'
   'lint session-pnpm no-demo gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish'
 )
-NODE_TESTS=(health-page reclaude-old-account-clean auto-release config release-request)
+NODE_TESTS=(health-page reclaude-old-account-clean auto-release config release-request static-child)
 SPECIAL_UNITS=(lint backup node-tests ports)
 
 usage_error() {
@@ -231,6 +231,7 @@ unit_node_tests() {
     if node --test "$HERE/reclaude-old-account-clean.test.mjs"; then echo "被封号邮箱清理：通过"; else fail=1; fi
     if node --test "$HERE/auto-release.test.mjs"; then echo "自动发布的判断和流程：通过"; else fail=1; fi
     if node --test "$HERE/config.test.mjs"; then echo "配置对账（期望进仓、私有值只比指纹）：通过"; else fail=1; fi
+    if node --test "$HERE/static-child.test.mjs"; then echo "测试里不许直接同步起子进程：通过"; else fail=1; fi
   else
     echo "没跑成：这台没有 node，健康页的判定、自动发布没测"
     skipped=1

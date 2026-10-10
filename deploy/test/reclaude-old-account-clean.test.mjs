@@ -1,5 +1,4 @@
 import assert from 'node:assert';
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,6 +13,7 @@ import {
   scrubText,
   stripJson,
 } from '../reclaude-old-account-clean.mjs';
+import { runChild } from './child.mjs';
 
 const OLD_EMAIL = 'old-acct@example.com';
 const NEW_EMAIL = 'current-acct@example.com';
@@ -311,7 +311,7 @@ test('不带 --org 不动会话里的邮箱', () => {
   const session = path.join(home, '.claude', 'projects', 'demo', 'session.jsonl');
   fs.writeFileSync(session, `${JSON.stringify({ userEmail: BANNED })}\n`);
   const before = fs.readFileSync(session);
-  const r = spawnSync(process.execPath, [SCRIPT, '--home', home, '--apply'], { encoding: 'utf8' });
+  const r = runChild(process.execPath, [SCRIPT, '--home', home, '--apply'], {});
   assert.equal(r.status, 0);
   assert.deepEqual(fs.readFileSync(session), before);
 });
@@ -329,10 +329,10 @@ test('点名被封的号：只摘这一串，settings 没有就不重写，现�
   const deviceBefore = fs.readFileSync(path.join(home, '.reclaude', 'device.json'));
   const orgFile = orgListFile(home, `*80\tSolo\tpersonal\t${NEW_EMAIL}\n324\tPool\tteam\t${BANNED}\n`);
 
-  const dry = spawnSync(
+  const dry = runChild(
     process.execPath,
     [SCRIPT, '--home', home, '--org', '324', '--org-list-file', orgFile],
-    { encoding: 'utf8' },
+    {},
   );
   assert.equal(dry.status, 0, dry.stderr);
   assert.match(dry.stdout, /status=dirty/);
@@ -341,10 +341,10 @@ test('点名被封的号：只摘这一串，settings 没有就不重写，现�
   assert.equal(dry.stdout.includes(NEW_EMAIL), false);
   assert.equal(fs.readFileSync(session, 'utf8').includes(BANNED), true);
 
-  const applied = spawnSync(
+  const applied = runChild(
     process.execPath,
     [SCRIPT, '--home', home, '--org', '324', '--org-list-file', orgFile, '--apply'],
-    { encoding: 'utf8' },
+    {},
   );
   assert.equal(applied.status, 0, applied.stderr);
   const after = fs.readFileSync(session, 'utf8');
@@ -357,10 +357,10 @@ test('点名被封的号：只摘这一串，settings 没有就不重写，现�
   const live = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf8'));
   assert.equal(live.oauthAccount.emailAddress, NEW_EMAIL);
 
-  const again = spawnSync(
+  const again = runChild(
     process.execPath,
     [SCRIPT, '--home', home, '--org', '324', '--org-list-file', orgFile],
-    { encoding: 'utf8' },
+    {},
   );
   assert.equal(again.status, 0, again.stderr);
   assert.match(again.stdout, /sessions=none-found/);
@@ -373,10 +373,10 @@ test('点名独享号同样摘，settings 里有这串才改', () => {
   const settings = path.join(home, '.claude', 'settings.json');
   fs.writeFileSync(settings, `${JSON.stringify({ note: `hello ${OTHER}`, keep: 1 })}\n`);
   const orgFile = orgListFile(home, `*80\tSolo\tpersonal\t${OTHER}\n324\tPool\tteam\t${BANNED}\n`);
-  const r = spawnSync(
+  const r = runChild(
     process.execPath,
     [SCRIPT, '--home', home, '--org', '80', '--org-list-file', orgFile, '--apply'],
-    { encoding: 'utf8' },
+    {},
   );
   assert.equal(r.status, 0, r.stderr);
   const afterSession = fs.readFileSync(session, 'utf8');
@@ -393,10 +393,10 @@ test('【故意造出的失败】编号不在 org list 里：一个字节不写'
   fs.writeFileSync(session, `${JSON.stringify({ userEmail: BANNED })}\n`);
   const before = fs.readFileSync(session);
   const orgFile = orgListFile(home, `324\tPool\tteam\t${BANNED}\n`);
-  const r = spawnSync(
+  const r = runChild(
     process.execPath,
     [SCRIPT, '--home', home, '--org', '999', '--org-list-file', orgFile, '--apply'],
-    { encoding: 'utf8' },
+    {},
   );
   assert.equal(r.status, 2);
   assert.deepEqual(fs.readFileSync(session), before);
@@ -405,7 +405,7 @@ test('【故意造出的失败】编号不在 org list 里：一个字节不写'
 
 test('命令行输出不带邮箱和 token', () => {
   const home = homeWith({ oauthEmail: OLD_EMAIL, memory: `note ${OLD_EMAIL}\n` });
-  const r = spawnSync(process.execPath, [SCRIPT, '--home', home], { encoding: 'utf8' });
+  const r = runChild(process.execPath, [SCRIPT, '--home', home], {});
   assert.equal(r.status, 0);
   assert.equal(r.stdout.includes(OLD_EMAIL), false);
   assert.equal(r.stdout.includes(OLD_ACCOUNT), false);
