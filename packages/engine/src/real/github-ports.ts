@@ -291,6 +291,31 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       // 会话一个新提交都没有就不并（并出来的只有一个并提交，是空交付）。
       const incoming = await headOfIncoming(t);
       if (head === incoming) {
+        // 本地没有新提交。远端头若就是 incoming，没有新东西可推；向镜像要这个头的包是空包（tip 被 exclude 掉）。
+        // 认领远端头返回，不推。远端不是这个头，仍是空交付。
+        const branchState = await mapped(() =>
+          gh.fetchBranchHead({ repo: input.repo, branch: input.branch, signal: ctx.signal }, ctx),
+        );
+        if (branchState.head === incoming) {
+          const recovered = await recoverDiverged(
+            new PortError(
+              'REMOTE_AHEAD',
+              `远端分支 ${input.branch} 已在起会话前的头 ${incoming.slice(0, 7)}，本地没有新提交`,
+              { retryable: false, details: { remoteHead: incoming } },
+            ),
+          );
+          if (!recovered.needsPush) {
+            const main = await mapped(() => gh.fetchMainline({ repo: input.repo, signal: ctx.signal }, ctx));
+            if (await hasCommit(t, main.head)) {
+              await pinMainline(t, input.repo.defaultBranch, main.head);
+              return {
+                head: recovered.head,
+                changedFiles: await changedFilesAgainst(t, main.head, recovered.head),
+              };
+            }
+            return { head: recovered.head };
+          }
+        }
         throw new PortError('EMPTY_DELIVERY', `起会话前的头 ${incoming.slice(0, 7)} 之后没有新提交`, {
           retryable: false,
         });
@@ -354,7 +379,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
        * 处）交回去走 MERGE_CONFLICT 现成那条返工路。远端不含 incoming——不是良性前进，是历史被改写过——原样
        * 报出去，交失败分流按 DIVERGED 明确归类（不走「认不出」兜底，见 failure/rules.ts 的 MC3）。
        */
-      const recoverDiverged = async (error: PortError): Promise<{ head: string; needsPush: boolean }> => {
+      async function recoverDiverged(error: PortError): Promise<{ head: string; needsPush: boolean }> {
         const remoteHead = (error.details as { remoteHead?: unknown } | undefined)?.remoteHead;
         if (typeof remoteHead !== 'string' || !/^[0-9a-f]{40}$/.test(remoteHead)) throw error;
         const branchState = await mapped(() =>
@@ -383,8 +408,9 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
             { retryable: false, details: { remoteHead: freshHead, incoming, head } },
           );
         }
-        // freshHead === incoming 也走这几条：本地可能还有没推的提交，不能把远端头当成已经交付。
-        if (await isAncestor(t, freshHead, head)) return { head, needsPush: true };
+        // freshHead === incoming 时本地仍可能有没推的提交：有（远端头更旧）就重推本地头。
+        // 两个头是同一个提交：本地没有新提交，不能重推（再推是空包），落到下面认领远端头。
+        if (head !== freshHead && (await isAncestor(t, freshHead, head))) return { head, needsPush: true };
         if (await isAncestor(t, head, freshHead)) {
           const ff = bundled
             ? await fastForward(t, bundled.bytes, bundled.ref, freshHead)
@@ -411,7 +437,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           );
         }
         return { head: merged.merged, needsPush: true };
-      };
+      }
 
       try {
         const pushed = await doPush(head);

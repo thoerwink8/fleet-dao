@@ -286,7 +286,10 @@ describe('推分支', () => {
   });
 
   it('树的头不是要推的、有没提交的改动、没有新提交、树不在：明确报错，不推', async () => {
-    const { ports, calls, trees } = setup();
+    // 远端分支不在：没有新提交仍是空交付、不推。远端头就是这个提交时认领返回，见下面「不要空包、本地没有新提交」。
+    const { ports, calls, trees } = setup({
+      fetchBranchHead: () => ({ head: null }),
+    });
     const dir = await seededTree(trees);
     await expect(
       ports.pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head: 'f'.repeat(40) }, ctx),
@@ -626,6 +629,47 @@ describe('推被拒（DIVERGED / REMOTE_AHEAD）：先认领远端新头，判�
     expect(tips).not.toContain(remoteHead);
     expect(JSON.stringify(calls.bundleCommits ?? [])).not.toContain('Refusing to create empty bundle');
     expect(calls.pushBranch).toHaveLength(2);
+  });
+
+  it('【不要空包】REMOTE_AHEAD、远端头等于 incoming、本地没有新提交：不打空包，返回远端头', async () => {
+    let remoteHead = '';
+    const { ports, trees, calls } = setup({
+      pushBranch: () => {
+        throw new GitHubError('REMOTE_AHEAD', '远端已经在这个头之上被推进了', {
+          retryable: false,
+          details: { remoteHead },
+        });
+      },
+      fetchBranchHead: () => ({ head: remoteHead }),
+    });
+    const dir = await seededTree(trees);
+    const incoming = git(dir, 'rev-parse', 'refs/fleet/incoming');
+    remoteHead = incoming;
+    // 本地没有新提交：头就是起会话前的头，不往上再交
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(incoming);
+    expect(git(dir, 'rev-list', '--count', `${incoming}..HEAD`)).toBe('0');
+    let caught: unknown;
+    const r = await ports
+      .pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head: incoming }, ctx)
+      .catch((error: unknown) => {
+        caught = error;
+        return undefined;
+      });
+    const message =
+      caught instanceof Error ? `${(caught as { code?: string }).code ?? ''} ${caught.message}` : '';
+    const tips = (calls.bundleCommits ?? []).flatMap((input) => {
+      const listed = (input as { tips?: unknown }).tips;
+      return Array.isArray(listed) ? listed : [];
+    });
+    // 不要空包。去掉「已在树里就不向镜像要包」，会拿 incoming 当 tip 去打包，git 拒空包，抛 GIT_FAILED。
+    expect(message).not.toContain('GIT_FAILED');
+    expect(message).not.toContain('Refusing to create empty bundle');
+    expect(tips).not.toContain(remoteHead);
+    expect(JSON.stringify(calls.bundleCommits ?? [])).not.toContain('Refusing to create empty bundle');
+    // 返回的头是远端头。把「头相同不算还有新提交」去掉，会当成还要推，报 EMPTY_DELIVERY，拿不回这个头。
+    expect(r?.head).toBe(remoteHead);
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(remoteHead);
+    expect(calls.pushBranch ?? []).toHaveLength(0);
   });
 
   it('远端头已经在树里、比本地新：不打包，直接快进，返回的头是远端头', async () => {
