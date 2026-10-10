@@ -87,7 +87,7 @@ describe('canary 项怎么判', () => {
     expect(got).toMatchObject({ ok: false, message: '最近一轮（09-27 20:13 有结论）断在「派活」' });
   });
 
-  it('跳过（巡检仓的「让 AI 接活」关着，#1050）：不红，照实说跳过、没验，不说成通过；跳过的也太旧了：红，说的是「跳过的」', () => {
+  it('跳过（巡检仓的「让 AI 接活」关着，#1050 / #1808）：不当通过，回待定；跳过的也太旧了：红，说的是「跳过的」', () => {
     const skipped = row({
       verdict: 'skipped',
       stage: 'open',
@@ -95,7 +95,7 @@ describe('canary 项怎么判', () => {
       why: '跳过：巡检仓的「让 AI 接活」关着',
     });
     expect(canaryHealth({ finished: skipped, running: null }, NOW)).toEqual({
-      ok: true,
+      ok: 'pending',
       note: '最近一轮 09-27 20:13 跳过：巡检仓的「让 AI 接活」关着，没开单、没验',
     });
     const stale = row({ ...skipped, endedAt: new Date(NOW.getTime() - CANARY_STALE_MS - 60_000) });
@@ -104,6 +104,51 @@ describe('canary 项怎么判', () => {
       code: 'canary_stale',
       message: expect.stringContaining('跳过的'),
     });
+  });
+
+  it('最近一轮结论早于当前部署、断在收单（#1808）：待定，不报 canary_broken', () => {
+    const finished = row({
+      verdict: 'broken',
+      stage: 'intake',
+      endedAt: ago(120),
+      why: '断在「收单」：库里还没有这张单的任务行',
+    });
+    // 部署晚于那轮结论
+    const deployedAt = ago(30);
+    const got = canaryHealth({ finished, running: null }, NOW, undefined, deployedAt);
+    expect(got).toEqual({
+      ok: 'pending',
+      note: '这条结论早于当前部署（09-27 20:00），等新一轮',
+    });
+    expect(got).not.toMatchObject({ code: 'canary_broken' });
+  });
+
+  it('结论晚于部署、断在收单（#1808）：照旧报 canary_broken', () => {
+    const deployedAt = ago(180);
+    const finished = row({
+      verdict: 'broken',
+      stage: 'intake',
+      endedAt: ago(17),
+      why: '断在「收单」：库里还没有这张单的任务行',
+    });
+    expect(canaryHealth({ finished, running: null }, NOW, undefined, deployedAt)).toEqual({
+      ok: false,
+      code: 'canary_broken',
+      message: '最近一轮（09-27 20:13 有结论）断在「收单」',
+      detail: '断在「收单」：库里还没有这张单的任务行',
+    });
+  });
+
+  it('最近一轮是「跳过」（#1808）：不当通过，回待定', () => {
+    const skipped = row({
+      verdict: 'skipped',
+      stage: 'open',
+      issueNumber: null,
+      why: '跳过：巡检仓的「让 AI 接活」关着',
+    });
+    const got = canaryHealth({ finished: skipped, running: null }, NOW);
+    expect(got.ok).toBe('pending');
+    expect(got).not.toMatchObject({ ok: true });
   });
 
   it('【故意造出的失败】巡检自己没跑成：红，和「断了」分开说', () => {
@@ -163,28 +208,28 @@ describe('canary 项怎么判', () => {
     });
   });
 
-  it('总开关关着（#1141）：跳过、不拿断了的旧结论报红，也没跑过什么都不说「最近一轮」；在跑的一轮也没到期限也不说「在跑」', () => {
+  it('总开关关着（#1141 / #1808）：待定（不当通过、不拿断了的旧结论报 canary_broken），也没跑过什么都不说「最近一轮」；在跑的一轮也没到期限也不说「在跑」', () => {
     const broken = row({ verdict: 'broken', stage: 'dispatch', why: '断在「派活」：挂起等人' });
     expect(canaryHealth({ finished: broken, running: null }, NOW, masterOff('never_set'))).toEqual({
-      ok: true,
+      ok: 'pending',
       note: '跳过：引擎总开关从没打开过（默认关），巡检没跑、没验；最近一轮有结论的是 09-27 20:13「派活」',
     });
     expect(canaryHealth({ finished: broken, running: null }, NOW, masterOff('set'))).toMatchObject({
-      ok: true,
+      ok: 'pending',
       note: expect.stringContaining('跳过：引擎总开关关着，巡检没跑、没验'),
     });
     expect(canaryHealth({ finished: broken, running: null }, NOW, masterOff('unreadable'))).toMatchObject({
-      ok: true,
+      ok: 'pending',
       note: expect.stringContaining('跳过：引擎总开关的设置认不出，按关算'),
     });
     expect(canaryHealth({ finished: null, running: null }, NOW, masterOff('never_set'))).toEqual({
-      ok: true,
+      ok: 'pending',
       note: '跳过：引擎总开关从没打开过（默认关），巡检没跑、没验',
     });
     // 过了时限的没收尾的一轮：关着期间也照实说跳过，不说「巡检自己没收尾」
     const lost = running;
     expect(canaryHealth({ finished: broken, running: lost }, NOW, masterOff('never_set'))).toMatchObject({
-      ok: true,
+      ok: 'pending',
       note: expect.stringContaining('跳过：'),
     });
   });
@@ -217,8 +262,14 @@ describe('canary 项怎么判', () => {
         masterOff('never_set'),
       ),
       canaryHealth({ finished: null, running: null }, NOW, masterOff('set')),
-    ].map((h) => (h.ok ? h.note : h.message));
-    expect(said).toHaveLength(11);
+      canaryHealth(
+        { finished: row({ verdict: 'broken', stage: 'intake', endedAt: ago(120), why: 'x' }), running: null },
+        NOW,
+        undefined,
+        ago(30),
+      ),
+    ].map((h) => (h.ok === false ? h.message : h.note));
+    expect(said).toHaveLength(12);
     for (const text of said) expect(scan.scanText('canary', text, scan.BUILTIN_TERMS), text).toEqual([]);
   });
 });
@@ -247,13 +298,15 @@ describe('canary 项读库（真库）', () => {
       at: ago(90),
     });
     const masterOn = async (): Promise<EngineMasterState> => ({ on: true });
-    const err = await canaryHealthCheck(t.db, masterOn, () => NOW)().then(
+    // 部署早于库里各轮结论：这一条测的是「断了 / 通过」本身，不是「早于部署」
+    const boot = ago(24 * 60);
+    const err = await canaryHealthCheck(t.db, masterOn, () => NOW, boot)().then(
       () => null,
       (e: unknown) => e,
     );
     expect(err).toBeInstanceOf(PublicHealthError);
     const report = await runHealthChecks(
-      [{ name: 'canary', check: canaryHealthCheck(t.db, masterOn, () => NOW) }],
+      [{ name: 'canary', check: canaryHealthCheck(t.db, masterOn, () => NOW, boot) }],
       silentLogger,
     );
     expect(report).toEqual({
@@ -268,12 +321,12 @@ describe('canary 项读库（真库）', () => {
       at: ago(60),
     });
     await finishCanaryRun(t.db, pass, { verdict: 'pass', stage: 'board', why: null, steps: [], at: ago(10) });
-    await expect(canaryHealthCheck(t.db, masterOn, () => NOW)()).resolves.toBe(
+    await expect(canaryHealthCheck(t.db, masterOn, () => NOW, boot)()).resolves.toBe(
       '最近一轮 09-27 20:20 通过（用时 50 分钟）',
     );
   });
 
-  it('总开关关着：库里最近一轮就算断了也不红，报跳过和原因；开关开着才照旧红（#1141）', async () => {
+  it('总开关关着：库里最近一轮就算断了也不报 canary_broken，报待定（跳过）；开关开着才照旧红（#1141 / #1808）', async () => {
     await resetTestDb(t);
     await registerScheduledJobs(t.db, [
       { id: 'canary', name: '全流程巡检', schedule: '每 6 小时', expectEveryMinutes: 780 },
@@ -292,10 +345,17 @@ describe('canary 项读库（真库）', () => {
       steps: [],
       at: ago(90),
     });
-    await expect(canaryHealthCheck(t.db, masterOffState, () => NOW)()).resolves.toBe(
-      '跳过：引擎总开关从没打开过（默认关），巡检没跑、没验；最近一轮有结论的是 09-27 19:00「验收」',
+    const boot = ago(24 * 60);
+    const pending = await canaryHealthCheck(t.db, masterOffState, () => NOW, boot)().then(
+      () => null,
+      (e: unknown) => e,
     );
-    const err = await canaryHealthCheck(t.db, masterOn, () => NOW)().then(
+    expect(pending).toBeInstanceOf(PublicHealthError);
+    expect(pending).toMatchObject({
+      code: 'canary_pending',
+      message: '跳过：引擎总开关从没打开过（默认关），巡检没跑、没验；最近一轮有结论的是 09-27 19:00「验收」',
+    });
+    const err = await canaryHealthCheck(t.db, masterOn, () => NOW, boot)().then(
       () => null,
       (e: unknown) => e,
     );

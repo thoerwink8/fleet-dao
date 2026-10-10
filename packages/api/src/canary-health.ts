@@ -3,7 +3,9 @@
 // 一轮都还没跑完：红。「没跑成」和「跑了没问题」分开说（design 第六节「断链怎么被发现」第 5 层）。
 // 公网看得到 /healthz：对外只说哪一步、几点，不带仓名、单号和断的原因原文（原因只进日志，细节在卡住报警里）。
 // 引擎总开关关着时（#1086）巡检的定时任务整个不跑（jobs/timers.ts 的 needsMaster 闸）、连跳过的轮次都不写 canary_runs，
-// 这一项认得出「总开关关着＝跳过」：照实说跳过、不拿断了的旧结论报红（#1141）；开关开着、真的断了才红。
+// 这一项认得出「总开关关着＝跳过」：照实说跳过、回待定、不拿断了的旧结论报 canary_broken、也不当通过（#1141 / #1808）。
+// 最近一轮结论早于当前部署（引擎进程起来的时刻）时同样待定，写明等新一轮——发版装上修复后不再拿修复前的断结论报红（#1808）。
+// 最近一轮是「跳过」也回待定、不当通过（发版期间跳过曾被误判成修好，#1773 / #1808）。
 // 不在正式环境（FLEET_ENV=production，法国是）的（开发、测试）报「未接」。这一项跟着巡检的结论自己变红，发版脚本只标待处理、不退回
 // （deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）。
 
@@ -43,6 +45,8 @@ function masterOffWords(state: MasterOff): string {
 
 export type CanaryHealth =
   | { ok: true; note: string }
+  /** 待定：不当通过、也不报 canary_broken（结论早于部署、跳过、总开关关着）。 */
+  | { ok: 'pending'; note: string }
   | { ok: false; code: string; message: string; detail: string | undefined };
 
 /**
@@ -55,16 +59,21 @@ export function canaryHealth(
   now: Date,
   /** 引擎总开关此刻的状态（#1141）；只在关着时给（读法见 canaryHealthCheck）。开着传 undefined，照旧按各轮结论判。 */
   masterOff?: MasterOff,
+  /**
+   * 引擎当前部署时刻（进程起来的时刻，#1808）。最近一轮结论早于它时回待定。
+   * 不传＝不做「早于部署」判断（旧调用方、测试）。
+   */
+  deployedAt?: Date,
 ): CanaryHealth {
   // 总开关关着：巡检的定时任务整个不跑、跳过的轮次不写 canary_runs，翻到的「最近一轮」可能是很久以前的断结论——
-  // 不拿它报红（#1050 的口径：关着是创始人定的状态，故意不跑不算断），照实说跳过和原因；开关打开后下一轮照常，断了会重新红。
+  // 不拿它报 canary_broken（#1050 的口径：关着是创始人定的状态，故意不跑不算断），照实说跳过和原因、回待定（#1808：不当通过）。
   if (masterOff && !masterOff.on) {
     const { finished } = latest;
     const last =
       finished?.endedAt && finished.verdict
         ? `；最近一轮有结论的是 ${stamp(finished.endedAt)}「${CANARY_STAGE_NAMES[finished.stage] ?? finished.stage}」`
         : '';
-    return { ok: true, note: `跳过：${masterOffWords(masterOff)}，巡检没跑、没验${last}` };
+    return { ok: 'pending', note: `跳过：${masterOffWords(masterOff)}，巡检没跑、没验${last}` };
   }
   const { finished } = latest;
   const running =
@@ -86,6 +95,13 @@ export function canaryHealth(
       code: 'canary_never',
       message: running ? '第一轮还在跑，还没有结论' : '还没跑完过一轮',
       detail: undefined,
+    };
+  }
+  // 结论早于当前部署：那轮是上一版的，等新一轮再判（#1808）。不拿它报 canary_broken，也不当通过。
+  if (deployedAt && finished.endedAt.getTime() < deployedAt.getTime()) {
+    return {
+      ok: 'pending',
+      note: `这条结论早于当前部署（${stamp(deployedAt)}），等新一轮`,
     };
   }
   const when = stamp(finished.endedAt);
@@ -119,9 +135,12 @@ export function canaryHealth(
       detail: undefined,
     };
   }
-  // 跳过（#1050）：巡检仓的「让 AI 接活」关着，故意不跑；不红（关着是创始人定的状态），但照实说这一轮什么都没验
+  // 跳过（#1050 / #1808）：巡检仓的「让 AI 接活」关着，故意不跑；不当通过（发版期间曾被误判成修好），回待定、照实说这一轮什么都没验
   if (finished.verdict === 'skipped') {
-    return { ok: true, note: `最近一轮 ${when} 跳过：巡检仓的「让 AI 接活」关着，没开单、没验${inFlight}` };
+    return {
+      ok: 'pending',
+      note: `最近一轮 ${when} 跳过：巡检仓的「让 AI 接活」关着，没开单、没验${inFlight}`,
+    };
   }
   const minutes = Math.max(
     1,
@@ -133,16 +152,24 @@ export function canaryHealth(
 /**
  * 健康检查：现读库里最近的两轮和引擎总开关（#1141，设置表读不到照抛——报「没查成」，不当成关着、更不当成没问题）；
  * 读不到照抛（报「连不上」，不当成没问题）。好的时候带一句说明。
+ * 待定（结论早于部署、跳过）抛 canary_pending：不当通过、也不报 canary_broken（#1808）。
  */
 export function canaryHealthCheck(
   db: Db,
   readMaster: () => Promise<EngineMasterState>,
   now: () => Date = () => new Date(),
+  /**
+   * 引擎当前部署时刻（#1808）。默认装配时取一次 now()（进程起来的时刻）；
+   * 测试要验「结论晚于部署」时传入更早的时刻。
+   */
+  deployedAt?: Date,
 ): () => Promise<string> {
+  const boot = deployedAt ?? now();
   return async () => {
     const [latest, master] = await Promise.all([latestCanaryRuns(db), readMaster()]);
-    const got = canaryHealth(latest, now(), master.on ? undefined : master);
-    if (!got.ok) throw new PublicHealthError(got.code, got.message, got.detail);
-    return got.note;
+    const got = canaryHealth(latest, now(), master.on ? undefined : master, boot);
+    if (got.ok === true) return got.note;
+    if (got.ok === 'pending') throw new PublicHealthError('canary_pending', got.note);
+    throw new PublicHealthError(got.code, got.message, got.detail);
   };
 }
