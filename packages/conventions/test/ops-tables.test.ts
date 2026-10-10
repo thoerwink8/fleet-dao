@@ -1254,7 +1254,7 @@ describe('五个区块一起认（第十一片）', () => {
     );
     const problems = checkOpsBlocks(repo);
     expect(problems).toHaveLength(1);
-    expect(problems[0]?.notQueried).toBe(false);
+    expect(problems[0]?.notQueried).toBe(true);
     expect(problems[0]?.text).toContain('端口表');
     expect(problems[0]?.text).toContain('docs/ops.md');
     expect(problems[0]?.text).toContain('docs/ops/y.md');
@@ -1271,7 +1271,7 @@ describe('五个区块一起认（第十一片）', () => {
     );
     const problems = checkOpsBlocks(repo);
     expect(problems).toHaveLength(1);
-    expect(problems[0]?.notQueried).toBe(false);
+    expect(problems[0]?.notQueried).toBe(true);
     expect(problems[0]?.text).toContain('目录表');
     expect(problems[0]?.text).toContain('找不到');
   });
@@ -1288,11 +1288,13 @@ describe('五个区块一起认（第十一片）', () => {
     expect(problems[0]?.text).toContain('5433');
   });
 
-  it('一个候选文件都读不到，返回「没查成」，不当成通过', () => {
+  it('一个候选文件都读不到，五个区块各报一条「没查成」并点出区块名', () => {
     const problems = checkOpsBlocks(allNoDoc());
-    expect(problems).toHaveLength(1);
-    expect(problems[0]?.notQueried).toBe(true);
-    expect(problems[0]?.text).toContain('docs/ops.md');
+    expect(problems).toHaveLength(5);
+    expect(problems.every((p) => p.notQueried)).toBe(true);
+    for (const label of ['端口表', '用户表', '目录表', '单元表', '密钥名表']) {
+      expect(problems.some((p) => p.text.includes(label) && p.text.includes('找不到'))).toBe(true);
+    }
   });
 
   it('生成不出来（deploy 脚本读不到），返回「没查成」，不当成通过', () => {
@@ -1353,7 +1355,7 @@ describe('--write 一次换五个区块（第十一片）', () => {
   it('一个候选文件都读不到，problems 非空、changes 是空的', () => {
     const { changes, problems } = writeOpsBlocks(allNoDoc());
     expect(changes).toEqual([]);
-    expect(problems).toHaveLength(1);
-    expect(problems[0]?.notQueried).toBe(true);
+    expect(problems).toHaveLength(5);
+    expect(problems.every((p) => p.notQueried)).toBe(true);
   });
 });

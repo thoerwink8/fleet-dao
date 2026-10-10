@@ -1228,15 +1228,43 @@ function docsWithMarkers(docs: OpsDoc[], name: string): OpsDoc[] {
   return docs.filter((d) => d.text.includes(start) || d.text.includes(end));
 }
 
-/** 一个区块的标记散在几个文件里都不对：报一条点出区块名和文件的问题。 */
-function locateProblem(docs: OpsDoc[], paths: string[], block: OpsBlock): string | undefined {
+interface LocatedOpsBlock {
+  doc?: OpsDoc;
+  problem?: OpsTableProblem;
+}
+
+/** 找一个完整区块的唯一归属；找不到、重复或标记不完整都不能进入核对。 */
+function locateProblem(docs: OpsDoc[], paths: string[], block: OpsBlock): LocatedOpsBlock {
   const found = docsWithMarkers(docs, block.name);
-  if (found.length === 1) return undefined;
   const marker = `${blockMarker(block.name, 'start')} 到 ${blockMarker(block.name, 'end')}`;
   if (found.length === 0) {
-    return `${block.label}区块找不到：${paths.join('、')} 里都没有 ${marker} 这段标记。`;
+    return {
+      problem: {
+        notQueried: true,
+        text: `${block.label}区块找不到：${paths.join('、')} 里都没有 ${marker} 这段标记。`,
+      },
+    };
   }
-  return `${block.label}区块出现了 ${found.length} 次（${found.map((d) => d.path).join('、')}）：${marker} 只许恰好一个文件里有，先删掉多出来的。`;
+  if (found.length > 1) {
+    return {
+      problem: {
+        notQueried: true,
+        text: `${block.label}区块出现了 ${found.length} 次（${found.map((d) => d.path).join('、')}）：${marker} 只许恰好一个文件里有，先删掉多出来的。`,
+      },
+    };
+  }
+  const doc = found[0] as OpsDoc;
+  try {
+    findBlock(doc.text, block.name);
+  } catch (e) {
+    return {
+      problem: {
+        notQueried: true,
+        text: `${block.label}区块没查成（${doc.path}）：${e instanceof Error ? e.message : String(e)}。`,
+      },
+    };
+  }
+  return { doc };
 }
 
 /** --check：五个区块各找恰好一个文件，和 deploy/ 生成的逐字比。
@@ -1244,15 +1272,14 @@ function locateProblem(docs: OpsDoc[], paths: string[], block: OpsBlock): string
  *  一个候选文件都读不到、生成不出来，返回「没查成」问题，不当成通过。 */
 export function checkOpsBlocks(repo: RepoView, only?: string): OpsTableProblem[] {
   const { paths, docs } = readOpsDocs(repo, only);
-  if (docs.length === 0) return [{ notQueried: true, text: `没查成：读不到 ${paths.join('、')}` }];
   const problems: OpsTableProblem[] = [];
   for (const block of OPS_BLOCKS) {
     const located = locateProblem(docs, paths, block);
-    if (located !== undefined) {
-      problems.push({ notQueried: false, text: located });
+    if (located.problem !== undefined) {
+      problems.push(located.problem);
       continue;
     }
-    const doc = docsWithMarkers(docs, block.name)[0] as OpsDoc;
+    const doc = located.doc as OpsDoc;
     problems.push(...block.checkText(repo, doc.text, doc.path));
   }
   return problems;
@@ -1270,9 +1297,18 @@ export interface OpsWriteResult {
  *  changes 是空的——调用方一个字都不许写。 */
 export function writeOpsBlocks(repo: RepoView, only?: string): OpsWriteResult {
   const { paths, docs } = readOpsDocs(repo, only);
-  if (docs.length === 0)
-    return { changes: [], problems: [{ notQueried: true, text: `没查成：读不到 ${paths.join('、')}` }] };
   const problems: OpsTableProblem[] = [];
+  const locatedBlocks = new Map<string, OpsDoc>();
+  for (const block of OPS_BLOCKS) {
+    const located = locateProblem(docs, paths, block);
+    if (located.problem !== undefined) {
+      problems.push(located.problem);
+    } else {
+      locatedBlocks.set(block.name, located.doc as OpsDoc);
+    }
+  }
+  if (problems.length > 0) return { changes: [], problems };
+
   // 先把五个区块该生成什么全算出来：有一个算不出来，一个字都不写。
   const inners = new Map<string, string>();
   for (const block of OPS_BLOCKS) {
@@ -1284,14 +1320,9 @@ export function writeOpsBlocks(repo: RepoView, only?: string): OpsWriteResult {
   }
   const rewritten = new Map<string, string>(docs.map((d) => [d.path, d.text]));
   for (const block of OPS_BLOCKS) {
-    const located = locateProblem(docs, paths, block);
-    if (located !== undefined) {
-      problems.push({ notQueried: true, text: located });
-      continue;
-    }
     const inner = inners.get(block.name);
     if (inner === undefined) continue; // 生成不出来，上面已经记过
-    const doc = docsWithMarkers(docs, block.name)[0] as OpsDoc;
+    const doc = locatedBlocks.get(block.name) as OpsDoc;
     try {
       rewritten.set(doc.path, replaceBlock(rewritten.get(doc.path) ?? '', block.name, inner));
     } catch (e) {
