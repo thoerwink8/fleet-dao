@@ -80,6 +80,7 @@ import {
   type SessionEnvInput,
   type SessionUser,
   type SpawnInfo,
+  type TranscriptEntry,
 } from '@fleet-dao/adapters';
 import {
   DEFAULT_SESSION_EFFORT,
@@ -232,6 +233,8 @@ export interface HostRunHooks {
   /** 接回时：序号小于它的行已经处理过（库里确认过）。 */
   replayUntil?: number;
   onRateLimit?: (reading: RateLimitReading) => unknown;
+  /** 会话过程记录（#1640，adapters 的 TranscriptEntry）：按流里出现的先后一条一条给。只记账，抛了也不影响会话。 */
+  onTranscript?: (entry: TranscriptEntry, meta: LineMeta) => unknown;
   onSpawn?: (info: SpawnInfo) => unknown;
   /** 执行体报出自己的会话号（cursor 的 init 帧）。同步调，别抛。 */
   onSessionId?: (id: string) => void;
@@ -391,6 +394,7 @@ function agentHooks(command: string[], hooks: HostRunHooks): ClaudeCodeRunOption
     ...(hooks.io ? { io: hooks.io } : {}),
     ...(hooks.replayUntil === undefined ? {} : { replayUntil: hooks.replayUntil }),
     ...(hooks.onRateLimit ? { onRateLimit: hooks.onRateLimit } : {}),
+    ...(hooks.onTranscript ? { onTranscript: hooks.onTranscript } : {}),
     ...(hooks.onSpawn ? { onSpawn: hooks.onSpawn } : {}),
   };
 }
@@ -788,6 +792,7 @@ function mirasimDriver(
           ...(hooks.signal ? { signal: hooks.signal } : {}),
           ...(hooks.now ? { now: hooks.now } : {}),
           ...(hooks.onEvent ? { onEvent: hooks.onEvent } : {}),
+          ...(hooks.onTranscript ? { onTranscript: hooks.onTranscript } : {}),
           // 服务端 accepted 帧才给真会话号（和 cursor 的 init 帧一个道理）。accepted 也就是「起来了」：引擎起会话
           // 要等 onSpawn，不报它等满 spawnTimeoutMs 一律判 SPAWN_TIMEOUT（09-28 上线后这条路由一个会话都没起成）。
           // 没有我们 spawn 的进程：pid 记 0（sessions.ts 认 0 是「没有根进程」，不拿它去杀）。

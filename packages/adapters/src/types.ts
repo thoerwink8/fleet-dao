@@ -1,7 +1,7 @@
 // 插头交给引擎的东西：进度事件的载荷、强杀的原因、额度读数。
 // ProgressEvent 本身在 @fleet-dao/shared；这里定 payload 的形状。驾驶舱后端的时间线按字段名读
 // （say.text、tool.name、file.path、test.passed / command），改字段名先对 packages/api 的 describeTimeline。
-import type { QuotaWindowKind } from '@fleet-dao/shared';
+import type { QuotaWindowKind, TranscriptKind } from '@fleet-dao/shared';
 
 /** kind='say'：助手说的一段话。stream = 从过程记录被动读到的；fleet say 主动报的由后端另记。 */
 export interface SayPayload {
@@ -109,4 +109,22 @@ export interface RateLimitReading {
   resetsAt?: string;
   windows: RateLimitWindow[];
   observedAt: string;
+}
+
+/**
+ * 会话过程的一条记录（#1640，任务详情的「会话内容」）。各家读取器从流里抽出来，交给调用方（引擎）按序记进库。
+ * 只有流里真有的才记：哪一家的流里没有某一种（例如 cursor 没有单独的报错帧），就不出那一种，不编。
+ * 这里的文本是原文：打码和截断（TRANSCRIPT_LIMITS）由调用方写库前做。prompt（交给会话的提示词）由引擎记，truncated 由记录器补，
+ * 插头不出这两种。
+ */
+export interface TranscriptEntry {
+  at: string;
+  kind: Exclude<TranscriptKind, 'prompt' | 'truncated'>;
+  text: string;
+  /** 工具名：tool_call、tool_result 才有。 */
+  tool?: string;
+  /** 成没成：tool_result、result 才有。 */
+  ok?: boolean;
+  /** 补充（例如子代理里发起的调用：{ subagent: true }）。 */
+  meta?: Record<string, unknown>;
 }

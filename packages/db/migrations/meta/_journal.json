@@ -351,6 +351,13 @@
       "when": 1791520807696,
       "tag": "0049_sturdy_zarek",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1791601094554,
+      "tag": "0050_abnormal_human_cannonball",
+      "breakpoints": true
     }
   ]
 }

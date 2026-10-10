@@ -69,6 +69,7 @@ import {
   RoutingLayersResponse,
   RoutingResponse,
   type RunOutcome,
+  RunTranscriptResponse,
   readSegmentRun,
   revocationProblem,
   routeEffortChoices,
@@ -108,6 +109,7 @@ import { ApiError, type FleetApi } from '../client';
 import type { AuditEntry, LiveEvent } from '../types';
 import type { MLog, MockState, MSubtask, MTask } from './model';
 import { createSeed, fakeAction, fakeUsage } from './seed';
+import { LIVE_FIRST_REVEAL, LIVE_REVEAL_STEP, transcriptSeed } from './transcripts';
 
 export interface MockOptions {
   /** 是否开模拟器；测试里关掉，手动调 tick()。 */
@@ -117,6 +119,8 @@ export interface MockOptions {
   latencyMs?: number;
   now?: () => number;
   seed?: number;
+  /** 这些段的会话内容读不到（503，演示「没读成」）；不给就都读得到。 */
+  transcriptFail?: readonly string[];
 }
 
 export interface MockApi extends FleetApi {
@@ -345,6 +349,10 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const now = opts.now ?? (() => Date.now());
   const rand = rng(opts.seed ?? 20260925);
   const st = createSeed(now());
+  /** 会话内容（#1640）的演示数据；在跑的段每被读一次多放出几条。mockTranscriptFail 里的段读不到（演示「没读成」）。 */
+  const transcripts = transcriptSeed((min) => new Date(now() + min * 60_000).toISOString());
+  const revealed = new Map<string, number>();
+  const mockTranscriptFail = new Set<string>(opts.transcriptFail ?? []);
   /** 引擎总开关那一格（设置 engine.master，#1086）：读设置里的值，和后端同一个读法（shared 的 engineMasterOf）。 */
   const mockMaster = () => {
     const row = st.settings.find((s) => s.key === ENGINE_MASTER_SETTING);
@@ -1746,6 +1754,31 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             }),
           segmentRuns,
         ),
+      });
+    },
+    async runTranscript(taskId, runId, query) {
+      await wait();
+      const tv = findTask(taskId);
+      const seg = (tv.segmentRuns ?? []).find((r) => r.id === runId);
+      if (!seg) throw new ApiError(404, 'run_not_found', '这张单下没有这一段');
+      if (mockTranscriptFail.has(runId)) {
+        throw new ApiError(503, 'run_transcript_unreadable', '没读成：connection terminated');
+      }
+      const all = transcripts.byRun.get(runId) ?? [];
+      // 在跑的段：先放出一部分，每被读一次多放几条（演示增量刷新）
+      const live = transcripts.live.has(runId);
+      const shown = live ? Math.min(all.length, revealed.get(runId) ?? LIVE_FIRST_REVEAL) : all.length;
+      if (live) revealed.set(runId, Math.min(all.length, shown + LIVE_REVEAL_STEP));
+      const after = query?.after;
+      const limit = query?.limit ?? 200;
+      const rest = all.slice(0, shown).filter((e) => after === undefined || e.seq > after);
+      const entries = rest.slice(0, limit);
+      const ended = seg.endedAt !== undefined;
+      return RunTranscriptResponse.parse({
+        entries,
+        nextAfter: entries.at(-1)?.seq ?? after ?? null,
+        done: ended && rest.length <= limit,
+        noRecord: ended && all.length === 0,
       });
     },
     async updateTaskRoutePin(taskId, raw) {

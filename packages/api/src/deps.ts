@@ -24,6 +24,7 @@ import type { ReleaseRequestPort } from './release-request.ts';
 import type { RoutingEffortsPort } from './routing-efforts.ts';
 import type { RoutingLayersPort } from './routing-layers.ts';
 import type { RoutingOrderPort } from './routing-order.ts';
+import type { RunTranscriptPort } from './run-transcript.ts';
 import type { TaskRoutePinsPort } from './task-route-pins.ts';
 
 /** 驾驶舱点「重做」时交给引擎的那一口（真装配在 temporal.ts，用 Temporal 起下一代）。 */
@@ -113,6 +114,11 @@ export interface Deps {
    * 内存版没有那张表）的任务详情写 unavailable、改接口回 503，不拿空列表冒充「没指定」。
    */
   taskRoutePins?: TaskRoutePinsPort | undefined;
+  /**
+   * 任务详情每一段的「会话内容」（#1640，run-transcript.ts）：读引擎按条记下的 run_transcript。没给（开发、内存版没有那张表）的
+   * 接口回 503 写明原因，不拿空列表冒充「没有记录」。
+   */
+  runTranscript?: RunTranscriptPort | undefined;
   /**
    * 环境页（#820 片 1）的版本那一项：读这台的发布目录（current 链接 + 状态文件）现算。只在正式环境装配
    * （main.ts 的 production；法国是）；别的环境不给，环境页写「没查成 + 原因」，不拿「还没发布过」顶。

@@ -3,6 +3,7 @@
 import { z } from 'zod';
 import type { CostEstimate } from '../model-prices.ts';
 import type { SegmentRunView } from '../segment-runs.ts';
+import { TRANSCRIPT_KINDS, TRANSCRIPT_PAGE_DEFAULT, TRANSCRIPT_PAGE_MAX } from '../transcript.ts';
 import type { TaskUsage } from '../usage.ts';
 import { BoardSubtaskSchema, RepoSchema } from './board.ts';
 import {
@@ -214,6 +215,46 @@ export const TaskDetailResponse = z.object({
   usage: TaskUsageSchema,
   /** 这张单每段指定的模型（动手、验收）。 */
   routePins: TaskRoutePinsSchema,
+});
+
+// —— 一段会话的过程记录（#1640）——
+// 引擎在三段会话跑的时候按条记进 run_transcript（挂在 runs 那一行上）；任务详情每段的「会话内容」按序号往后读。
+// GET /tasks/:taskId/runs/:runId/transcript?after=<seq>&limit=<n>：runId 就是 segmentRuns[].id；after 不给从头读，
+// 给了回序号大于它的；在跑的段拿上一次回的 nextAfter 当 after 增量刷新。读不到（库不通、没接上）回 503，不拿空列表顶。
+
+export const TranscriptKindSchema = z.enum(TRANSCRIPT_KINDS);
+
+export const TranscriptEntrySchema = z.object({
+  /** 这一段里的序号，从 0 起、连续。 */
+  seq: z.number().int().min(0),
+  at: Time,
+  kind: TranscriptKindSchema,
+  /** 内容（提示词、助手的话、工具的输入摘要或结果开头、报错、结论）；已打码、已截断。 */
+  text: z.string(),
+  /** 工具名：tool_call、tool_result 才有。 */
+  tool: z.string().optional(),
+  /** 成没成：tool_result、result 才有。 */
+  ok: z.boolean().optional(),
+  /** 截断了会带 { truncated: true, originalChars }；还可能带别的补充（退出原因……）。 */
+  meta: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const RunTranscriptQuery = z.object({
+  after: z.coerce.number().int().min(0).optional(),
+  limit: z.coerce.number().int().min(1).max(TRANSCRIPT_PAGE_MAX).default(TRANSCRIPT_PAGE_DEFAULT),
+});
+
+export const RunTranscriptResponse = z.object({
+  entries: z.array(TranscriptEntrySchema),
+  /** 下次读从这个序号往后（= 这次最后一条的序号）；这次一条没有时原样回 after（没给 after 就是 null）。 */
+  nextAfter: z.number().int().min(0).nullable(),
+  /** 这一段已经结束、而且 nextAfter 之后没有了：页面可以不再刷新。在跑的段恒为 false。 */
+  done: z.boolean(),
+  /**
+   * true = 这一段已经结束、库里一条都没有：它跑在记录会话内容之前（或一条都没写进去）。和「读不到」不同，读不到回 503。
+   * 在跑的段还没有条目不算（noRecord 为 false，entries 为空，等着刷新）。
+   */
+  noRecord: z.boolean(),
 });
 
 // —— 发给工作流的信号 ——
