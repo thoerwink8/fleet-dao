@@ -29,6 +29,7 @@ import type { Notification } from '../../api/types';
 import { formatAgo } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import { freshnessNow, nodeAgeText, useNodeSelection, withNode } from '../../lib/node';
+import { pendingCount } from '../../lib/notice-count';
 import { noticeLevelMeta } from '../../lib/status';
 import { type ModePref, PALETTES } from '../../lib/theme';
 import { cn } from '../../lib/utils';
@@ -229,7 +230,8 @@ function NotificationBell() {
   const now = useNow();
   const [open, setOpen] = useState(false);
   const items = data?.items ?? [];
-  const urgent = items.filter((n) => n.level !== 'daily').length;
+  const urgent = data ? pendingCount(data.counts) : 0;
+  const daily = data?.counts.daily ?? 0;
   const go = (n: Notification) => {
     setOpen(false);
     if (n.link) navigate(n.link);
@@ -259,13 +261,16 @@ function NotificationBell() {
       <PopoverContent align="end" className="w-notifications p-0">
         <div className="flex items-center justify-between border-b px-3 py-2">
           <span className="text-sm font-semibold">待处理的提醒</span>
-          <span className="num text-xs text-muted-foreground">{data ? items.length : '—'}</span>
+          <span className="num text-xs text-muted-foreground">
+            {data ? urgent : '—'}
+            {daily > 0 ? `，另有日报 ${daily}` : ''}
+          </span>
         </div>
         {error && !data ? (
           <p role="alert" className="px-3 py-6 text-center text-sm text-ink-fail">
             提醒没读成：{errorText(error)}
           </p>
-        ) : data && items.length === 0 ? (
+        ) : data && urgent + daily === 0 ? (
           <p className="px-3 py-6 text-center text-sm text-muted-foreground">没有待处理的提醒</p>
         ) : null}
         <ul className="max-h-notifications-list overflow-y-auto scrollbar-thin">

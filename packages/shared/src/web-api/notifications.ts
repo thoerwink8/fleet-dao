@@ -86,6 +86,15 @@ export const NotificationsQuery = PageQuery.extend({
 export const NotificationsResponse = z.object({
   items: z.array(NotificationSchema),
   nextCursor: Cursor.optional(),
+  /**
+   * 各级别的真实总条数（同 status 口径，不受 limit 截断）。
+   * 「待处理」＝要你拍 + 卡住报警；日报只是看一眼，不算进待处理。铃铛、侧栏角标、通知中心都读这里。
+   */
+  counts: z.object({
+    decision: z.number().int().min(0),
+    alert: z.number().int().min(0),
+    daily: z.number().int().min(0),
+  }),
   /** 这一页「谁在处理」没算成：为什么（没接上、读不到库）。算成了没有这一项。 */
   handlingProblem: z.string().optional(),
 });

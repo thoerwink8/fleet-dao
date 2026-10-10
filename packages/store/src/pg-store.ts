@@ -600,6 +600,16 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         nextCursor: nextCursorOf(last && { at: last.createdAt, id: last.id }, rows.length > limit),
       };
     },
+    async countNotifications({ status }) {
+      const rows = await db
+        .select({ level: notifications.level, n: sql<number>`count(*)::int` })
+        .from(notifications)
+        .where(status === 'open' ? isNull(notifications.resolvedAt) : undefined)
+        .groupBy(notifications.level);
+      const counts = { decision: 0, alert: 0, daily: 0 };
+      for (const r of rows) counts[r.level] = r.n;
+      return counts;
+    },
     async resolveNotification({ id, by }, entry) {
       if (!isUuid(id)) return 'not_found';
       return db.transaction(async (tx) => {
