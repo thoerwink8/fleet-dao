@@ -17,6 +17,7 @@ import {
   latestAlertByPrefix,
   listManagedRepos,
   listOpenAlerts,
+  listOpenTaskRows,
   mergedPrLedgers,
   openSessionTrees,
   prHeadsOfBranch,
@@ -26,6 +27,7 @@ import {
   recordAlertFiling,
   resolveAlertWithReason,
   startScheduleRun,
+  stopTaskRows,
   subtaskTreeRefs,
   taskContext,
   taskStateOf,
@@ -214,6 +216,7 @@ const ABANDON_SIGNAL_TIMEOUT_MS = 5_000;
 function temporalClosedIssueTasks(
   client: Pick<Client, 'workflow' | 'connection'>,
   gh: Pick<GitHub, 'readIssueState'>,
+  db: Db,
 ): HourlyReconcileJobDeps['closedIssueTasks'] {
   return {
     async runningTaskWorkflowIds() {
@@ -225,6 +228,8 @@ function temporalClosedIssueTasks(
       }
       return ids;
     },
+    openTaskRows: () => listOpenTaskRows(db),
+    stopRows: (taskIds, reason) => stopTaskRows(db, taskIds, reason),
     async issueState(repo, issueNumber) {
       return (await gh.readIssueState({ repo, issueNumber })).state;
     },
@@ -418,7 +423,7 @@ export function hourlyReconcileJob(
         return { decision: a.decision, decidedBy: a.decidedBy, waitingWorkflowId };
       },
       workflows: w.workflows ?? temporalWorkflows(client),
-      closedIssueTasks: w.closedIssueTasks ?? temporalClosedIssueTasks(client, w.gh),
+      closedIssueTasks: w.closedIssueTasks ?? temporalClosedIssueTasks(client, w.gh, w.db),
       stageRoutable,
       stageAllOpen,
       handling,

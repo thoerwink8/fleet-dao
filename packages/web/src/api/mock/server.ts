@@ -340,6 +340,11 @@ function mockProbeHistory(
       failureReason: result === 'passed' ? null : reason,
       requestText: result === 'not_probed' ? null : '只回 OK',
       responseText: result === 'passed' ? 'OK' : result === 'failed' ? reason : null,
+      checkQuestion: null,
+      checkExpected: null,
+      checkAnswer: null,
+      checkPassed: null,
+      selfIdentity: null,
     });
   }
   return RouteProbeHistoryResponse.parse({ state: 'ok', ...probeHistoryStrips(cells) });

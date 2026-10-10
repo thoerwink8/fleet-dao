@@ -23,6 +23,11 @@ export function pgProbeHistory(db: Db): ProbeHistoryPort {
         failureReason: row.failureReason,
         requestText: row.requestText,
         responseText: row.responseText,
+        checkQuestion: row.checkQuestion,
+        checkExpected: row.checkExpected,
+        checkAnswer: row.checkAnswer,
+        checkPassed: row.checkPassed,
+        selfIdentity: row.selfIdentity,
       }));
     },
   };

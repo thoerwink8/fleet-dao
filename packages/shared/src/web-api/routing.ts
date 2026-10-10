@@ -545,6 +545,12 @@ export const ProbeHistoryCellSchema = z.object({
   requestText: z.string().nullable(),
   /** 响应原文。没拿到是 null。 */
   responseText: z.string().nullable(),
+  /** 降智检测（#1637）：题、标准答案、实答、判过没过（null = 没判）、自报身份。老行和没带题的探测都是 null。 */
+  checkQuestion: z.string().nullable(),
+  checkExpected: z.string().nullable(),
+  checkAnswer: z.string().nullable(),
+  checkPassed: z.boolean().nullable(),
+  selfIdentity: z.string().nullable(),
 });
 
 export const ProbeHistoryChannelSchema = z.object({

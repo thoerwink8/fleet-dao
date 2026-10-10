@@ -1,6 +1,6 @@
 {
-  "id": "f0b4d29d-349b-477e-9dd1-85e73cdf1211",
-  "prevId": "072d4978-8c06-441e-a30e-20724cc2d622",
+  "id": "4728e00d-6243-4ac2-b489-6a5a0ea10569",
+  "prevId": "f0b4d29d-349b-477e-9dd1-85e73cdf1211",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -4351,6 +4351,91 @@
         "pool_reservations_expires_after_reserved": {
           "name": "pool_reservations_expires_after_reserved",
           "value": "\"pool_reservations\".\"expires_at\" > \"pool_reservations\".\"reserved_at\""
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.run_transcript": {
+      "name": "run_transcript",
+      "schema": "",
+      "columns": {
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "seq": {
+          "name": "seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "at": {
+          "name": "at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "text": {
+          "name": "text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tool": {
+          "name": "tool",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ok": {
+          "name": "ok",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "meta": {
+          "name": "meta",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "run_transcript_run_id_runs_id_fk": {
+          "name": "run_transcript_run_id_runs_id_fk",
+          "tableFrom": "run_transcript",
+          "tableTo": "runs",
+          "columnsFrom": ["run_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "run_transcript_pk": {
+          "name": "run_transcript_pk",
+          "columns": ["run_id", "seq"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "run_transcript_kind_known": {
+          "name": "run_transcript_kind_known",
+          "value": "\"run_transcript\".\"kind\" in ('prompt', 'assistant', 'tool_call', 'tool_result', 'error', 'result', 'truncated')"
+        },
+        "run_transcript_seq_nonneg": {
+          "name": "run_transcript_seq_nonneg",
+          "value": "\"run_transcript\".\"seq\" >= 0"
         }
       },
       "isRLSEnabled": false
