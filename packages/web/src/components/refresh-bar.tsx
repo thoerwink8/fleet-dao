@@ -26,8 +26,9 @@ export function RefreshBar({
         type="button"
         variant="outline"
         size="sm"
-        disabled={isFetching}
+        aria-disabled={isFetching}
         aria-busy={isFetching}
+        className="aria-disabled:cursor-default aria-disabled:opacity-50"
         onClick={() => {
           if (!isFetching) onRefresh();
         }}
@@ -35,13 +36,15 @@ export function RefreshBar({
         {isFetching ? <LoaderCircle className="animate-spin" aria-hidden /> : <RefreshCw aria-hidden />}
         刷新
       </Button>
-      {never ? (
-        <span className="text-caption text-muted-foreground">还没读到过</span>
-      ) : (
-        <span className="text-caption text-muted-foreground">
-          最后更新 <span className="num">{formatAgo(new Date(shownAt).toISOString(), now)}</span>
-        </span>
-      )}
+      <span role="status">
+        {never ? (
+          <span className="text-caption text-muted-foreground">还没读到过</span>
+        ) : (
+          <span className="text-caption text-muted-foreground">
+            最后更新 <span className="num">{formatAgo(new Date(shownAt).toISOString(), now)}</span>
+          </span>
+        )}
+      </span>
       {stale ? (
         <span className="inline-flex h-5 items-center rounded-full bg-st-stall/14 px-1.5 text-caption font-medium text-ink-stall">
           数据已过期

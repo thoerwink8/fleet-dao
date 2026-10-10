@@ -10,6 +10,7 @@ import { agentRoutes } from './agent.ts';
 import { authRoutes } from './auth.ts';
 import { cockpitRoutes } from './cockpit.ts';
 import type { Deps } from './deps.ts';
+import { externalWatchHealthItem, noteExternalWatch, WATCH_HEADER } from './external-watch.ts';
 import { githubRoutes } from './github.ts';
 import { healthHandler } from './health.ts';
 import { errorBody, errorHandler, notFound } from './http.ts';
@@ -38,7 +39,16 @@ export function buildApps(deps: Deps): Apps {
   const cockpit = new Hono();
   cockpit.onError(errorHandler(deps.log));
   cockpit.notFound(notFound);
-  cockpit.get('/healthz', healthHandler(deps.health, deps.log));
+  cockpit.get('/healthz', async (c) => {
+    // 每来一次现读：测试会在装配之后才把「记一轮」接上。
+    await noteExternalWatch({
+      watchId: deps.config.edgeWatchId,
+      header: c.req.header(WATCH_HEADER),
+      record: deps.recordExternalWatchRound,
+      log: deps.log,
+    });
+    return healthHandler([...deps.health, externalWatchHealthItem(deps.config.edgeWatchId)], deps.log)(c);
+  });
   cockpit.use(`${WEB_API_PREFIX}/*`, jsonLimit);
   cockpit.use(`${AUTH_PREFIX}/*`, jsonLimit);
   cockpit.route(AUTH_PREFIX, authRoutes(deps));

@@ -51,6 +51,11 @@ export interface Deps {
   github: GitHubEventSink;
   /** /healthz 逐项探的依赖；空 = 没有外部依赖（内存版）。 */
   health: HealthCheck[];
+  /**
+   * 外部看门狗的编号对上了就记一轮成功（#292）。没给（开发内存版没有登记表）对上了也不记、不报错。
+   * 编号在 config.edgeWatchId；没配时路由不调用它。
+   */
+  recordExternalWatchRound?: (() => Promise<void>) | undefined;
   /** 飞书网关来没来过：飞书接口的门口验过通行证就记一笔，/healthz 的 feishu_gateway 读它。没给就不记（开发、多数测试）。 */
   gatewaySeen?: GatewaySeen | undefined;
   /**

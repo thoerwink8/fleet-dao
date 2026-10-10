@@ -4,6 +4,7 @@ import { silentLogger, sqlState, withStatementTimeout } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { CANARY_NOT_HERE } from '../src/canary-health.ts';
 import { probeDb } from '../src/db-probe.ts';
+import { EXTERNAL_WATCH_NOT_WIRED } from '../src/external-watch.ts';
 import { PublicHealthError, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
 import type { Logger } from '../src/ports.ts';
 import { ENGINE_OFF, notConnectedTemporal } from '../src/temporal.ts';
@@ -13,7 +14,12 @@ describe('健康检查', () => {
   it('没有外部依赖（内存版）：200', async () => {
     const res = await harness().cockpit.request('/healthz');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, checks: {} });
+    expect(await res.json()).toEqual({
+      ok: true,
+      checks: {
+        external_watchdog: { ok: true, status: 'not_wired', message: EXTERNAL_WATCH_NOT_WIRED },
+      },
+    });
   });
 
   it('连不上库、Temporal 没接上：整体 503，逐项如实报红；内部细节（地址等）只进日志不对外', async () => {
@@ -39,6 +45,7 @@ describe('健康检查', () => {
         database: { ok: false, code: 'unreachable', message: '连不上' },
         temporal: { ok: false, code: 'not_connected', message: 'Temporal 客户端还没接上' },
         realtime: { ok: true },
+        external_watchdog: { ok: true, status: 'not_wired', message: EXTERNAL_WATCH_NOT_WIRED },
       },
     });
     expect(h.logs.some((l) => String(l.fields?.error).includes(internal))).toBe(true);
