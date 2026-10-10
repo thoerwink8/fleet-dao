@@ -73,6 +73,18 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 ## 三、用户、目录、库
 
+下面这张表由 deploy/ 脚本生成，别手改：
+
+<!-- fleet:users:start -->
+
+| 用户 | 来源常量 | 来源脚本 |
+|---|---|---|
+| pilot | PILOT_USER | deploy/france.sh |
+| fleet | ensure_service_user | deploy/hk.sh |
+| fleet | ensure_service_user | deploy/lib/human-tier.sh |
+| fleet-agent-carpool | SESSION_USER | deploy/lib/session-user.sh |
+
+<!-- fleet:users:end -->
 | 用户 | 在哪 | 干什么 |
 |---|---|---|
 | `fleet` | 两台 | 引擎、驾驶舱后端、Temporal（法国），飞书网关（香港）。系统用户，家 `/home/fleet`（750） |
