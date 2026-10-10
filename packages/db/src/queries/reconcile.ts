@@ -1,6 +1,7 @@
 // 每小时对账的两处核对要从库里认的事：没结束的单（去问它的需求工作流还在不在跑、投递上记没记为什么不派）、合了的 PR
 // 对上的单记没记账（会话结局、用量、关单）。受管的仓按 repos 表列（listManagedRepos）。
 // 终态的单不在第一份清单里：做完、叫停、没做完都不再要求有一条在跑的工作流。
+// 主页「开着」数的也是这些非终态行。单早已关闭、工作流不在跑的遗留行，对账列出来再改成叫停。
 import type { RunOutcome, TaskState } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gte, inArray, notInArray, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
@@ -68,6 +69,45 @@ export async function activeTaskRefs(db: Db): Promise<ActiveTaskRef[]> {
     .innerJoin(repos, eq(repos.id, tasks.repoId))
     .where(notInArray(tasks.state, [...TERMINAL_TASK_STATES]))
     .orderBy(asc(repos.owner), asc(repos.name), asc(tasks.issueNumber));
+}
+
+/** 库里还没到终态的一行任务：仓、单号、状态。主页「开着」数的就是这些。 */
+export interface OpenTaskRow {
+  taskId: string;
+  owner: string;
+  name: string;
+  issueNumber: number;
+  state: TaskState;
+}
+
+/** 状态不是做完、叫停、失败的任务行，按仓、单号排。给每小时对账收遗留行用。 */
+export async function listOpenTaskRows(db: Db): Promise<OpenTaskRow[]> {
+  return db
+    .select({
+      taskId: tasks.id,
+      owner: repos.owner,
+      name: repos.name,
+      issueNumber: tasks.issueNumber,
+      state: tasks.state,
+    })
+    .from(tasks)
+    .innerJoin(repos, eq(repos.id, tasks.repoId))
+    .where(notInArray(tasks.state, [...TERMINAL_TASK_STATES]))
+    .orderBy(asc(repos.owner), asc(repos.name), asc(tasks.issueNumber));
+}
+
+/**
+ * 把指定 id 里仍不是终态的行改成 stopped，原因写进 last_problem。已经是终态的不动。
+ * 返回实际改了几条。一个 id 都没给就不发 SQL，回 0。状态变化由库的触发器记进 state_changes。
+ */
+export async function stopTaskRows(db: Db, taskIds: readonly string[], reason: string): Promise<number> {
+  if (taskIds.length === 0) return 0;
+  const updated = await db
+    .update(tasks)
+    .set({ state: 'stopped', lastProblem: reason })
+    .where(and(inArray(tasks.id, [...taskIds]), notInArray(tasks.state, [...TERMINAL_TASK_STATES])))
+    .returning({ id: tasks.id });
+  return updated.length;
 }
 
 export interface IssueDeliveryRef {
