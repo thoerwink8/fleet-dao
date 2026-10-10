@@ -431,9 +431,12 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     const strip = await waitFor(historyStrip);
     expect(strip.querySelector('[data-result="passed"]')?.className).toContain('bg-st-done');
     expect(strip.querySelector('[data-result="failed"]')?.className).toContain('bg-st-fail');
-    expect(strip.querySelector('[data-result="not_probed"]')?.className).toContain('bg-st-stall');
-    expect(strip.querySelectorAll('[data-cell]')).toHaveLength(3);
-    expect(strip.querySelectorAll('[data-result="empty"]')).toHaveLength(57);
+    // #1748：没探的不画进色条、不进可用率，折在探测记录下面
+    expect(strip.querySelector('[data-result="not_probed"]')).toBeNull();
+    expect(strip.querySelectorAll('[data-cell]')).toHaveLength(2);
+    expect(strip.querySelectorAll('[data-result="empty"]')).toHaveLength(58);
+    expect(strip.textContent).toContain('另有 1 条没真探');
+    expect(document.querySelector('[data-probe-log="skipped"]')).toBeTruthy();
 
     // 什么都没点：探测记录都折叠着
     const log = () => screen.getByRole('region', { name: '探测记录' });
@@ -492,7 +495,9 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     Object.assign(api, {
       routeProbeHistory: async (): Promise<RouteProbeHistory> => ({
         state: 'ok',
-        channels: [{ channelId: 'ch-cursor', cells, avgDurationMs: 1000, passed: 61, attempted: 61 }],
+        channels: [
+          { channelId: 'ch-cursor', cells, skipped: [], avgDurationMs: 1000, passed: 61, attempted: 61 },
+        ],
         latestByRoute: [cells[60] as ProbeHistoryCell],
       }),
     });
@@ -530,7 +535,7 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-claude', api });
     await screen.findByRole('list', { name: '渠道状态' });
     const strip = await waitFor(historyStrip);
-    expect(strip.textContent).toContain('还没有探针历史');
+    expect(strip.textContent).toContain('还没有真探');
     expect(strip.textContent).toContain('没量到');
     expect(strip.textContent).not.toContain('没查成');
     expect(strip.querySelectorAll('[data-result="empty"]')).toHaveLength(60);
@@ -687,6 +692,12 @@ describe('渠道状态页：探测记录（#1638）', () => {
         }),
       ]),
     );
+    // 全是没真探：列表区写明，记录折在下面，点开才看
+    await waitFor(() => expect(document.querySelector('[data-probe-log="skipped"]')).toBeTruthy());
+    expect(rowOrder()).toEqual([]);
+    fireEvent.click(
+      within(document.querySelector('[data-probe-log="skipped"]') as HTMLElement).getByRole('button'),
+    );
     await waitFor(() => expect(rowOrder()).toEqual(['1', '2']));
     const onDemand = document.querySelector('[data-probe-row="1"]') as HTMLElement;
     expect(onDemand.getAttribute('data-result')).toBe('on_demand');
@@ -694,7 +705,7 @@ describe('渠道状态页：探测记录（#1638）', () => {
     const plain = document.querySelector('[data-probe-row="2"]') as HTMLElement;
     expect(plain.getAttribute('data-result')).toBe('not_probed');
     expect(within(plain).getByText('没探')).toBeTruthy();
-    expect(historyStrip().querySelector('[data-cell="1"]')?.getAttribute('data-result')).toBe('on_demand');
+    expect(historyStrip().querySelector('[data-cell]')).toBeNull();
     expect(document.querySelector('[data-probe-log="legend"]')?.textContent).toContain('按需：');
   });
 
@@ -719,7 +730,9 @@ describe('渠道状态页：探测记录（#1638）', () => {
     });
     renderLog({
       state: 'ok',
-      channels: [{ channelId: 'ch-cursor', cells, avgDurationMs: null, passed: 60, attempted: 60 }],
+      channels: [
+        { channelId: 'ch-cursor', cells, skipped: [], avgDurationMs: null, passed: 60, attempted: 60 },
+      ],
       latestByRoute: [old],
     });
     await waitFor(() => expect(rowOrder()).toHaveLength(61));

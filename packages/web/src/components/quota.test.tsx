@@ -63,7 +63,11 @@ describe('额度格', () => {
     });
     expect(el.dataset.hot).toBeUndefined();
     expect(el.dataset.stale).toBe('true');
-    expect(screen.getByText('42 分钟前').parentElement?.className).toContain('text-ink-stall');
+    // 页脚那一行「42 分钟前读」和过期说明各有一处「42 分钟前」，页脚那处标停滞色
+    expect(
+      screen.getAllByText('42 分钟前').some((n) => n.parentElement?.className.includes('text-ink-stall')),
+    ).toBe(true);
+    expect(el.querySelector('[data-stale-note]')).toBeTruthy();
   });
 
   test('用了九成以上：标「快用完」', () => {
@@ -200,6 +204,36 @@ describe('额度页摘要卡', () => {
   });
 });
 
+describe('读数过期、凭据过期（#1748）', () => {
+  test('过期的实读不显示成「实读」，不喊「快用完」、不画红', () => {
+    const el = cell({ window: '5h', utilization: 0.98, reading: 'measured', readAt: at(-130), stale: true });
+    expect(el.dataset.full).toBeUndefined();
+    expect(el.textContent).not.toContain('快用完');
+    expect(el.textContent).not.toContain('实读');
+    expect(el.textContent).toContain('读数过期');
+    expect(el.querySelector('[data-stale-note]')?.textContent).toContain('不是现值');
+  });
+
+  test('Grok 令牌过期：额度页写原因和要人做什么，旧的 98% 不进「快用完」', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    await screen.findByText('读数过期或没查成');
+    const heading = screen.getByText('快用完');
+    const full = heading.closest('div.rounded-xl') as HTMLElement;
+    expect(full.textContent).not.toContain('supergrok');
+    expect(full.textContent).not.toContain('Grok');
+    const staleBox = screen.getByText('读数过期或没查成').closest('div.rounded-xl') as HTMLElement;
+    const line = staleBox.querySelector('[data-pool-problem="unreadable"]');
+    expect(line?.textContent).toContain('额度读不到');
+    expect(line?.textContent).toContain('登录令牌已过期');
+    expect(line?.textContent).toContain('要人做：在引擎所在的机器（法国）以会话用户重新 grok login');
+    // 同一个池只出现一次：不再逐个列它的过期窗口
+    expect(staleBox.querySelectorAll('[data-pool="supergrok"]')).toHaveLength(1);
+    expect(staleBox.querySelectorAll('li')).toHaveLength(
+      new Set([...staleBox.querySelectorAll('li')].map((li) => li.textContent)).size,
+    );
+  });
+});
+
 describe('额度页金额和窄表', () => {
   test('周期美元金额完整显示，金额元素不带省略号截断', async () => {
     renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
@@ -217,7 +251,8 @@ describe('额度页金额和窄表', () => {
     const month = screen.getByText('$12.50');
     expect(month.parentElement?.className ?? '').not.toContain('truncate');
     expect(month.parentElement?.textContent).toContain('/ $20.00');
-    expect(screen.getAllByText('估算').length).toBeGreaterThan(0);
+    // 这个池的读数过期了：不挂「估算」牌，换成「读数过期」（#1748）；估算的说明仍写在页脚
+    expect(within(month.closest('div.rounded-lg') as HTMLElement).getByText('读数过期')).toBeTruthy();
     expect(screen.getAllByText('18%').length).toBeGreaterThan(0);
   });
 

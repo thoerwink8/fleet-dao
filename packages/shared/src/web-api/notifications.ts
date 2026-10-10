@@ -63,6 +63,11 @@ export const NotificationSchema = z.object({
   /** 点开直达驾驶舱对应页的站内路径。 */
   link: z.string().optional(),
   taskId: Id.optional(),
+  /**
+   * 去重键（「同一件事一条」的认法，如 quota-read:<池>、probe-iq:<路由>）。页面据此把提醒对到具体的池、路由上（#1748）。
+   * 老数据（镜像里没存过的）没有。
+   */
+  dedupeKey: z.string().optional(),
   createdAt: Time,
   resolvedAt: Time.optional(),
   resolvedBy: z.string().optional(),
