@@ -1266,7 +1266,7 @@ export function buildView(snapshot) {
   const unread = SECTIONS.filter((n) => !S[n].ok);
   const dbUnread = unread.filter((n) => DB_SECTIONS.includes(n));
   const sameDbWhy = dbUnread.length === DB_SECTIONS.length && new Set(dbUnread.map(whyOf)).size === 1;
-  /** @type {{ level: 'unread', what: string, where: string }[]} */
+  /** @type {{ level: 'unread', what: string, where: string, kind?: undefined, key?: string }[]} */
   const unreadItems = [];
   if (sameDbWhy)
     unreadItems.push({ level: 'unread', what: `没读到：库（${whyOf('db')}）`, where: WHERE.unread });
