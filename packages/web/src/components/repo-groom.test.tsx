@@ -81,11 +81,14 @@ describe('设置页：指挥官整理待办', () => {
   test('关着的说明是新规则：开着自己挑单，关着只有本机点名派', async () => {
     const api = createMockApi({ live: false });
     renderApp(<SettingsPage />, { api, route: '/settings' });
-    await screen.findByTestId(`groom-${ORBIT}`);
-    const section = document.getElementById('repos');
-    expect(section?.textContent).toContain('引擎每 5 分钟自己按准入和排序挑单');
-    expect(section?.textContent).toContain('老单要指挥官整理过');
-    expect(section?.textContent).toContain('没单可挑会自动叫指挥官整理');
+    const panel = await screen.findByTestId(`groom-${ORBIT}`);
+    // 长说明已从仓库一节常显挪进「指挥官整理待办」折叠块：展开后才有新规则全文。
+    fireEvent.click(within(panel).getByRole('button', { name: '展开' }));
+    await waitFor(() => {
+      expect(panel.textContent).toContain('引擎每 5 分钟自己按准入和排序挑单');
+      expect(panel.textContent).toContain('老单要指挥官整理过');
+      expect(panel.textContent).toContain('没单可挑会自动叫指挥官整理');
+    });
     const off = screen.getByTestId('dispatch-r-canary');
     expect(off.textContent).toContain('fleet-api dispatch-issue');
     expect(off.textContent).not.toContain('只收单、不派活');
@@ -211,5 +214,25 @@ describe('设置页：指挥官整理待办', () => {
     expect(alert.textContent).toContain('整理待办的记录没读成：库连不上');
     expect(panel.textContent).not.toContain('还没整理过');
     expect(panel.textContent).not.toContain('今日剩余');
+  });
+
+  test('长说明默认折叠', async () => {
+    const api = createMockApi({ live: false });
+    renderApp(<SettingsPage />, { api, route: '/settings' });
+    const panel = await screen.findByTestId(`groom-${ORBIT}`);
+    const toggle = await within(panel).findByRole('button', { name: '展开' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    // 折叠时：一行摘要在，长说明正文不露；仓库一节也不再常显那段长文。
+    expect(panel.textContent).toContain('老单要整理过才能进队');
+    expect(panel.textContent).not.toContain('没单可挑会自动叫指挥官整理');
+    const section = document.getElementById('repos');
+    expect(section?.textContent).not.toContain('引擎每 5 分钟自己按准入和排序挑单');
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+      expect(panel.textContent).toContain('没单可挑会自动叫指挥官整理');
+      expect(panel.textContent).toContain('引擎每 5 分钟自己按准入和排序挑单');
+    });
+    expect(within(panel).getByRole('button', { name: '收起' })).toBeTruthy();
   });
 });

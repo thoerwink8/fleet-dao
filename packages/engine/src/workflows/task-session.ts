@@ -369,7 +369,8 @@ async function pickRoute(
         await stopForProbe('', mark);
         continue;
       }
-      // 睡到下一次选路，但路由那边变了（切号切完、切过去的池探通了）会被叫醒当场再选；信号丢了照样按这个时长醒
+      // 睡到下一次选路，但路由那边变了（切号切完、切过去的池探通了）会被叫醒当场再选；信号丢了照样按这个时长醒。
+      // 多张单同时停在这里时，测试不要 await result()（会 unlockTimeSkipping，见 #1764）。
       await rt.pauseForRoute(got.waitFor, got.detail, got.retryAfterSeconds ?? ROUTE_RETRY_SECONDS, mark);
       continue;
     }

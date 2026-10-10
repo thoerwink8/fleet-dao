@@ -421,6 +421,40 @@ function mockProbeHistory(
       },
     );
   }
+  // Cursor（ch-cursor）的按需路由：一次真探判了疑似降智，后面全是「按需」没探（#1748：色条不能全黄、真探不能被埋）
+  const hi = routes.find((r) => r.id === 'r-cursor-hi' && r.probe);
+  if (hi?.probe) {
+    const t0 = Date.parse(hi.probe.at);
+    const base = { routeId: hi.id, channelId: hi.channelId };
+    cells.push({
+      ...base,
+      id: cells.length + 1,
+      probedAt: new Date(t0 - 60 * 60_000).toISOString(),
+      result: 'failed',
+      durationMs: 9_200,
+      failureReason: '疑似降智：题 17 乘 23 等于多少？只回数字。，应为 391，实答 381',
+      requestText: '题：17 乘 23 等于多少？只回数字。\n再说一句你是什么模型。',
+      responseText: '381\nOK\n我是 GPT-4 级别的通用助手。',
+      checkQuestion: '17 乘 23 等于多少？只回数字。',
+      checkExpected: '391',
+      checkAnswer: '381',
+      checkPassed: false,
+      selfIdentity: 'GPT-4 级别的通用助手',
+    });
+    for (let i = 0; i < 12; i++) {
+      cells.push({
+        ...base,
+        id: cells.length + 1,
+        probedAt: new Date(t0 - (50 - i * 4) * 60_000).toISOString(),
+        result: 'not_probed',
+        durationMs: null,
+        failureReason: `${ROUTE_PROBE_ON_DEMAND_MARK}。上一次真探：不通，10-10 09:05（疑似降智：题 17 乘 23 等于多少？只回数字。，应为 391，实答 381）`,
+        requestText: null,
+        responseText: null,
+        ...NO_CHECK,
+      });
+    }
+  }
   return RouteProbeHistoryResponse.parse({ state: 'ok', ...probeHistoryStrips(cells) });
 }
 
@@ -733,6 +767,11 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     else if (model?.retiredAt && Date.parse(model.retiredAt) <= t) connect = fact('dead', '模型已下架');
     else if (r.alive) connect = fact('live', '探针探通了');
     else if (!r.probe) connect = fact('unknown', '探针还没看过这条路由');
+    else if (r.probe.state === 'on_demand')
+      connect = fact(
+        'unknown',
+        `按需探测（不主动探，派给它时先探一次）：${r.probe.detail ?? '探针没写原因'}`,
+      );
     else if (r.probe.state === 'skipped')
       connect = fact('unknown', `探针这一轮没探它（不是探了没通）：${r.probe.detail ?? '探针没写原因'}`);
     else connect = fact('dead', `探针判不在线：${r.probe.detail ?? `探针没写原因（${r.probe.state}）`}`);
@@ -1628,24 +1667,33 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           };
         });
       const flow = flowStages(st.tasks.flatMap(viewsOf), running);
-      const done = st.tasks
-        .flatMap((t) =>
-          t.subtasks
-            .filter((s) => s.subtask.state === 'merged' && s.subtask.prNumber !== undefined)
-            .map((s) => ({
-              prNumber: s.subtask.prNumber as number,
-              title: t.task.title,
-              repo: repoName(t.task.repoId),
-              // 假后端不记每个子任务合并的时刻：日志里「PR #n 已合并」那条就是它，没有再退回「建单时刻」。
-              mergedAt:
-                [...st.logs]
-                  .reverse()
-                  .find(
-                    (l) => l.subtaskId === s.subtask.id && l.kind === 'state' && l.text.endsWith('→ merged'),
-                  )?.at ?? t.task.createdAt,
-              issueNumber: t.task.issueNumber,
-            })),
-        )
+      const taskDone = st.tasks.flatMap((t) =>
+        t.subtasks
+          .filter((s) => s.subtask.state === 'merged' && s.subtask.prNumber !== undefined)
+          .map((s) => ({
+            prNumber: s.subtask.prNumber as number,
+            title: t.task.title,
+            repo: repoName(t.task.repoId),
+            // 假后端不记每个子任务合并的时刻：日志里「PR #n 已合并」那条就是它，没有再退回「建单时刻」。
+            mergedAt:
+              [...st.logs]
+                .reverse()
+                .find(
+                  (l) => l.subtaskId === s.subtask.id && l.kind === 'state' && l.text.endsWith('→ merged'),
+                )?.at ?? t.task.createdAt,
+            issueNumber: t.task.issueNumber,
+          })),
+      );
+      // 本机做的单（分支 local/…）合进去的 PR 没有任务记录：真后端用 GitHub 上的 PR 标题（#1744）
+      const localDone = [
+        { prNumber: 1741, title: '发版车第 6 步只拦新出现的、跟新版有关的异常 (#1741)' },
+        { prNumber: 1742, title: 'PR #1742' }, // 标题也没读到的退路
+      ].map((p) => ({
+        ...p,
+        repo: repoName(st.tasks[0]?.task.repoId ?? ''),
+        mergedAt: new Date().toISOString(),
+      }));
+      const done = [...taskDone, ...localDone]
         .sort((a, b) => b.mergedAt.localeCompare(a.mergedAt))
         .slice(0, 10);
       const quotaPools = st.pools.map((p) => {
@@ -1690,6 +1738,10 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         done,
         health: { quota: quotaState, routes: routesState, engine: mockEngine() },
         flow,
+        slots: {
+          running: st.pools.reduce((n, p) => n + poolRunning(p.id), 0),
+          reserved: st.pools.reduce((n, p) => n + poolReserved(p.id), 0),
+        },
         asOf: iso(),
       });
     },
@@ -1704,13 +1756,15 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async env() {
       await wait();
       const t = now();
-      const activeRuns = allRuns().filter((r) => r.endedAt === undefined);
+      // 在跑的会话只数已开工、连得到池的（和真后端的池占用同一口径）；排着的算已选定还没开跑
+      const activeRuns = allRuns().filter((r) => isRunning(r) && routeInfo(r.routeId).route !== undefined);
       const byStage: Record<string, number> = {};
       for (const r of activeRuns) byStage[r.stage] = (byStage[r.stage] ?? 0) + 1;
       const poolViews = st.pools.map((p) => {
         const windows = st.quota.filter((w) => w.poolId === p.id);
         return {
           running: poolRunning(p.id),
+          reserved: poolReserved(p.id),
           quotaStatus:
             windows.length === 0
               ? 'unread'
@@ -1732,6 +1786,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             value: {
               count: poolViews.length,
               running: poolViews.reduce((n, p) => n + p.running, 0),
+              reserved: poolViews.reduce((n, p) => n + p.reserved, 0),
               unread: poolViews.filter((p) => p.quotaStatus === 'unread').length,
               stale: poolViews.filter((p) => p.quotaStatus === 'stale').length,
             },
@@ -2594,6 +2649,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             billing: ch?.billing ?? null,
             channelEnabled: ch?.enabled ?? false,
             running: poolRunning(p.id),
+            reserved: poolReserved(p.id),
             quotaStatus: windows.length === 0 ? 'unread' : windows.some((w) => w.stale) ? 'stale' : 'fresh',
             windows,
           };
@@ -2631,7 +2687,9 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       const status = query?.status ?? 'open';
       const items = st.notifications.filter((n) => status === 'all' || !n.resolvedAt);
       const res = page(items, (n) => n.createdAt, query?.cursor, query?.limit ?? 50);
-      return NotificationsResponse.parse(res);
+      const counts = { decision: 0, alert: 0, daily: 0 };
+      for (const n of items) counts[n.level] += 1;
+      return NotificationsResponse.parse({ ...res, counts });
     },
     async resolveNotification(id) {
       await wait();

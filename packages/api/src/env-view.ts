@@ -18,11 +18,15 @@ import type {
   EnvVersion,
   HomeHealthSchema,
   PoolViewSchema,
-  SessionRun,
 } from '@fleet-dao/shared';
 import { describeEngineMaster, type EngineMasterState } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { type DeployLagInput, type JobRecord, judgeDeployLag } from '@fleet-dao/store';
+import {
+  type DeployLagInput,
+  type JobRecord,
+  judgeDeployLag,
+  type PoolOccupancyRead,
+} from '@fleet-dao/store';
 import type { z } from 'zod';
 import { type HealthReport, runHealthChecks } from './health.ts';
 import { ENGINE_OFF_DETAIL } from './home-engine.ts';
@@ -82,11 +86,15 @@ export function masterFact(state: EngineMasterState): EnvMaster {
   };
 }
 
-/** 在跑几个会话、各自在哪一段。stage 不在认识的几段里也照数（不丢），页面按 StageKind 显示。 */
-export function sessionsFact(activeRuns: readonly SessionRun[]): EnvSessions {
-  const byStage: Record<string, number> = {};
-  for (const run of activeRuns) byStage[run.stage] = (byStage[run.stage] ?? 0) + 1;
-  return { total: activeRuns.length, byStage };
+/**
+ * 在跑几个会话、各自在哪一段：只数已开工的（选定了还没开跑的是预占，算在池占用的 reserved 里），
+ * 和池占用的在跑合计是同一份数（store.poolOccupancy），两格不会对不上。
+ */
+export function sessionsFact(occupancy: PoolOccupancyRead): EnvSessions {
+  return {
+    total: occupancy.pools.reduce((n, p) => n + p.inFlight, 0),
+    byStage: { ...occupancy.inFlightByStage },
+  };
 }
 
 /** 池占用：现成的 buildPools，不另算一份；只取这一页要的几个数。 */
@@ -94,8 +102,7 @@ export function poolsFact(input: {
   pools: Parameters<typeof buildPools>[0]['pools'];
   channels: Parameters<typeof buildPools>[0]['channels'];
   windows: Parameters<typeof buildPools>[0]['windows'];
-  routes: Parameters<typeof buildPools>[0]['routes'];
-  activeRuns: readonly SessionRun[];
+  occupancy: PoolOccupancyRead;
   now: Date;
   staleAfterMs: number;
 }): EnvPools {
@@ -104,8 +111,7 @@ export function poolsFact(input: {
       pools: input.pools,
       channels: input.channels,
       windows: input.windows,
-      routes: input.routes,
-      activeRuns: [...input.activeRuns],
+      occupancy: input.occupancy,
     },
     input.now,
     input.staleAfterMs,
@@ -113,6 +119,7 @@ export function poolsFact(input: {
   return {
     count: views.length,
     running: views.reduce((n, p) => n + p.running, 0),
+    reserved: views.reduce((n, p) => n + p.reserved, 0),
     unread: views.filter((p) => p.quotaStatus === 'unread').length,
     stale: views.filter((p) => p.quotaStatus === 'stale').length,
   };
@@ -181,7 +188,7 @@ export function versionFact(input: DeployLagInput, now: Date): EnvVersion {
 export async function envFacts(input: {
   engine: EnvFact<EnvEngine>;
   /** 库读法（现成）：在跑的会话、池占用、定时任务。 */
-  readSessions: () => Promise<SessionRun[]>;
+  readSessions: () => Promise<PoolOccupancyRead>;
   readPools: () => Promise<EnvPools>;
   readSchedule: () => Promise<EnvSchedule>;
   /** 引擎总开关（设置 engine.master）此刻的状态。 */

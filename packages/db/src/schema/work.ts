@@ -434,6 +434,8 @@ export const pullRequests = pgTable(
     mergeSha: text('merge_sha'),
     /** 正文挂的单：「需求」栏（没有再看标题）的 #号、关单词（Closes #号），同仓的；认法只有一处（conventions 的 linkedIssue）。 */
     issueRefs: integer('issue_refs').array().notNull().default(sql`'{}'::integer[]`),
+    /** GitHub 上这个 PR 的标题；主页「做完的」没有任务记录（本机做的单）时用它。没读到过是空。 */
+    title: text('title'),
     /** 正文「修提醒」栏写的提醒（键或编号）。 */
     alertRefs: text('alert_refs').array().notNull().default(sql`'{}'::text[]`),
   },

@@ -86,6 +86,7 @@ describe('事件之后的处理', () => {
       openedAt: new Date('2026-09-25T11:50:00Z'),
       mergedAt: null,
       mergeSha: null,
+      title: 'fix: 备份',
       links: { issues: [342, 343], alerts: ['watchdog:job:backup:after-12'] },
     });
     await sink.accept(
@@ -107,6 +108,16 @@ describe('事件之后的处理', () => {
       mergedAt: new Date('2026-09-25T12:10:00Z'),
       mergeSha: B,
     });
+  });
+
+  it('事件里没带标题：镜像里旧标题留着', async () => {
+    const { gh, ledger } = setup();
+    const sink = gh.eventSink({ wake: async () => {} });
+    await sink.accept(event({ event: 'pull_request', payload: prPayload({ title: 'fix: 备份' }) }));
+    await sink.accept(
+      event({ event: 'pull_request', payload: prPayload({ updated_at: '2026-09-25T12:01:00Z' }) }),
+    );
+    expect((await ledger.getPullRequest(REPO_ID, 5))?.title).toBe('fix: 备份');
   });
 
   it('【故意造出的失败】事件里没带正文（只有号和头）：不把镜像里的链接清空', async () => {
@@ -466,6 +477,33 @@ describe('对账与补漏', () => {
       { number: byHuman.number, kind: 'mirror_fixed', text: `#${byHuman.number} 合并了但镜像里没有（已补）` },
     ]);
     expect((await ledger.getPullRequest(REPO_ID, byHuman.number))?.state).toBe('merged');
+    expect((await ledger.getPullRequest(REPO_ID, byHuman.number))?.title).toBe(`PR ${byHuman.number}`);
+  });
+
+  it('镜像里已是合并、只缺标题的旧行：对账补上标题，不记发现（#1744）', async () => {
+    const { gh, fake, ledger } = setup();
+    const pr = fake.addPull({
+      user: fake.human,
+      title: '本机做的单',
+      head: { ref: 'local/9-x', sha: A },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:00:00Z',
+      merge_commit_sha: sha('c'),
+      merged_by: fake.human,
+    });
+    await ledger.upsertPullRequest({
+      repoId: REPO_ID,
+      number: pr.number,
+      state: 'merged',
+      headRef: 'local/9-x',
+      headSha: A,
+      updatedAt: new Date(pr.updated_at),
+    });
+    expect((await ledger.getPullRequest(REPO_ID, pr.number))?.title ?? null).toBeNull();
+    const report = await gh.auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
+    expect(report.findings).toEqual([]);
+    expect((await ledger.getPullRequest(REPO_ID, pr.number))?.title).toBe('本机做的单');
   });
 
   it('自检：两个机器人的权限够不够；「干活的」能改 issue 要标出来；读不到算没查成', async () => {

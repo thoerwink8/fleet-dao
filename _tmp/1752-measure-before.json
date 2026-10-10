@@ -1,0 +1,54 @@
+[
+  {
+    "tag": "before",
+    "viewport": "1366",
+    "panel": {
+      "w": 384,
+      "h": 262,
+      "r": 1023,
+      "b": 733
+    },
+    "canvas": {
+      "w": 706,
+      "h": 544,
+      "r": 1333,
+      "b": 745
+    },
+    "fits": true,
+    "doingThW": 86,
+    "cell": {
+      "w": 86,
+      "whiteSpace": "normal",
+      "textOverflow": "clip",
+      "overflow": "visible",
+      "title": "在对题 · 站内通知 7 天没读就再提醒一次 · 1 小时 33 分",
+      "text": "在对题 · 站内通知 7 天没读就再提醒一次"
+    }
+  },
+  {
+    "tag": "before",
+    "viewport": "1920",
+    "panel": {
+      "w": 384,
+      "h": 262,
+      "r": 1093,
+      "b": 1045
+    },
+    "canvas": {
+      "w": 1190,
+      "h": 856,
+      "r": 1887,
+      "b": 1057
+    },
+    "fits": true,
+    "doingThW": 86,
+    "cell": {
+      "w": 86,
+      "whiteSpace": "normal",
+      "textOverflow": "clip",
+      "overflow": "visible",
+      "title": "在对题 · 站内通知 7 天没读就再提醒一次 · 1 小时 33 分",
+      "text": "在对题 · 站内通知 7 天没读就再提醒一次"
+    }
+  }
+]

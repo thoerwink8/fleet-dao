@@ -215,6 +215,8 @@ export interface PullRequestRecord {
   openedAt?: string | undefined;
   mergedAt?: string | undefined;
   issueRefs?: number[] | undefined;
+  /** GitHub 上的 PR 标题；没读到过是 undefined（旧行、事件没带）。 */
+  title?: string | undefined;
 }
 
 /**
@@ -332,7 +334,18 @@ export interface BoardStore {
   }): Promise<PullRequestRecord[]>;
 }
 
+/**
+ * 账号池占着的名额，一次读出来（#1747，各页「在跑的会话」「池占用」唯一来源）：每个池在跑的（已开工）、已选定还没开跑的分开数，
+ * 加上在跑的会话按段（用途）分的数。在跑数合计 = 各池 inFlight 之和。
+ */
+export interface PoolOccupancyRead {
+  pools: { poolId: string; inFlight: number; reserved: number }[];
+  inFlightByStage: Record<string, number>;
+}
+
 export interface RoutingStore {
+  /** 池占用，见 PoolOccupancyRead。读不到抛，不当 0。 */
+  poolOccupancy(): Promise<PoolOccupancyRead>;
   listChannels(): Promise<Channel[]>;
   /** 渠道近态（#1118）：只有运行中失败出过事的渠道有行；读不到抛错，不给空的顶。 */
   listChannelStates(): Promise<ChannelStateRecord[]>;
@@ -354,6 +367,8 @@ export interface OpsStore {
   listJobs(): Promise<JobRecord[]>;
   /** 按 (建立时刻, id) 倒序。 */
   listNotifications(query: { status: 'open' | 'all' } & PageRequest): Promise<Page<NotificationRecord>>;
+  /** 各级别的真实条数（不受分页上限影响）；status 口径同 listNotifications。 */
+  countNotifications(query: { status: 'open' | 'all' }): Promise<Record<NotificationRecord['level'], number>>;
   resolveNotification(
     input: { id: string; by: Actor },
     audit: NewAuditEntry,

@@ -530,6 +530,23 @@ export function createMemoryStore(
     async listChannelStates() {
       return [...data.channelStates].sort((a, b) => a.channelId.localeCompare(b.channelId));
     },
+    // 内存版只有老流程会话（没有三段的 runs 表和预占表）：开工的算在跑，排着的算已选定还没开跑。
+    async poolOccupancy() {
+      const poolOf = new Map(data.routes.map((r) => [r.id, r.poolId]));
+      const byPool = new Map<string, { poolId: string; inFlight: number; reserved: number }>();
+      const inFlightByStage: Record<string, number> = {};
+      for (const run of data.runs) {
+        const poolId = poolOf.get(run.routeId);
+        if (run.endedAt !== undefined || poolId === undefined) continue;
+        const o = byPool.get(poolId) ?? { poolId, inFlight: 0, reserved: 0 };
+        if (run.startedAt !== undefined) {
+          o.inFlight += 1;
+          inFlightByStage[run.stage] = (inFlightByStage[run.stage] ?? 0) + 1;
+        } else o.reserved += 1;
+        byPool.set(poolId, o);
+      }
+      return { pools: [...byPool.values()], inFlightByStage };
+    },
     async listPools() {
       return [...data.pools].sort((a, b) => a.id.localeCompare(b.id));
     },
@@ -596,6 +613,13 @@ export function createMemoryStore(
         })),
         nextCursor: result.nextCursor,
       };
+    },
+    async countNotifications({ status }) {
+      const counts = { decision: 0, alert: 0, daily: 0 };
+      for (const n of data.notifications) {
+        if (status === 'all' || n.resolvedAt === undefined) counts[n.level] += 1;
+      }
+      return counts;
     },
     async resolveNotification({ id, by }, entry) {
       const n = data.notifications.find((x) => x.id === id);

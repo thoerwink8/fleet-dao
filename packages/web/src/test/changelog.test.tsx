@@ -7,7 +7,7 @@
 // - 页面上没有「发布 v<N>」按钮和弹窗，没有「版本里程碑发版」的说法（发版单位是主线提交，决定 0032）；
 
 import { splitChangelog } from '@fleet-dao/shared';
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
@@ -163,5 +163,24 @@ describe('/changelog 页：故意造出的失败照实说', () => {
     renderApp(<ChangelogPage />, { api: released({ state: 'ok', commits: [], asOf: AS_OF }) });
     expect(await screen.findByText('法国的发布历史里还没有发布记录')).toBeTruthy();
     expect(commitsPanel().textContent).not.toContain('没查成');
+  });
+});
+
+describe('/changelog 页：还没收进版本', () => {
+  test('还没收进版本默认折叠、点开后展开', async () => {
+    renderApp(<ChangelogPage />, {
+      api: released({ state: 'ok', commits: [commit(A)], asOf: AS_OF }),
+    });
+    await screen.findByRole('heading', { name: 'CHANGELOG.md 对照' });
+    const toggle = screen.getByRole('button', { name: /还没收进版本的更新/ });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    // 折叠时不画 Unreleased 正文（仓里真有的一条）
+    expect(screen.queryByText(/Fable 进模型目录了/)).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(await screen.findByText(/Fable 进模型目录了/)).toBeTruthy();
+    // 段首说明为什么还没收进版本
+    expect(screen.getByText(/发版单位已改成主线提交/)).toBeTruthy();
   });
 });

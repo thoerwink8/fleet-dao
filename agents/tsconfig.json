@@ -3,6 +3,7 @@
   "compilerOptions": { "allowJs": true, "checkJs": true },
   "include": ["test"],
   "files": [
+    "../packages/conventions/src/rules-budget.ts",
     "skills/commander/scripts/check-brief.mjs",
     "skills/commander/scripts/france-lib.mjs",
     "skills/commander/scripts/france-query.mjs",

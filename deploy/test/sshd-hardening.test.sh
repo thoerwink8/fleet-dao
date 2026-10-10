@@ -9,6 +9,9 @@
 #   3. sshd 读回：有效配置三项对 → 全绿；【故意造出的失败】值被别处盖掉、sshd -T 读不出、文件被改 → 判红
 #   4. fail2ban：没装 → 只记待配（不放文件、不判红）；装了 → 放文件、-t、reload，再跑一遍不动；
 #      【故意造出的失败】-t 不过 → 文件撤掉、不 reload、判红；没在跑 → 待配、不 reload；reload 失败 → 判红
+#   7. 会话用户的登录口子收口（#1785，setup_session_ssh、readback_session_ssh_scope）：~/.ssh 挪进隔离目录（只挪不删、再来放 -2）、钥匙文件照 pilot 写、
+#      Match User drop-in 放好、sshd -t 过了才 reload、再跑不动；【故意造出的失败】sshd -t 不过撤掉、pilot 那份读不到、没有 sshd；
+#      读回：有效配置里会话用户认 /etc 下那份、Match 段没漏到 pilot，没生效、漏了、读不出、drop-in 被改都判红
 #   5. fail2ban 读回：四项对 → 全绿；【故意造出的失败】值不对、jail 不在 → 判红；fail2ban-client 答不出 → 待配（不当成对了）
 # 用法：bash deploy/test/sshd-hardening.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
@@ -17,6 +20,8 @@ HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/../lib/common.sh"
 # shellcheck source=../lib/human-tier.sh
 source "$HERE/../lib/human-tier.sh"
+# shellcheck source=../lib/session-user.sh
+source "$HERE/../lib/session-user.sh"
 
 DEPLOY_DIR=$(cd -- "$HERE/.." && pwd)
 for f in france/sshd-hardening.conf france/fail2ban-sshd.jail; do
@@ -68,6 +73,7 @@ SSHD_T_ERR_OUT="/etc/ssh/sshd_config.d/50-fleet-dao-hardening.conf line 3: Bad c
 SSHD_RELOAD_RC=0
 SSHD_ABSENT=0
 SSHD_EFFECTIVE_RC=0
+declare -A SSHD_AKF=()
 SSHD_EFFECTIVE=$'port 22\nlogingracetime 20\nmaxauthtries 3\nmaxstartups 30:30:120\npasswordauthentication no'
 F2B_ABSENT=0
 F2B_ACTIVE=active
@@ -90,6 +96,17 @@ sshd() {
     return "$SSHD_T_RC"
     ;;
   -T)
+    if [[ "${2:-}" == -C ]]; then
+      # sshd -T -C user=<用户>,host=…：只回这一个用户认钥匙的文件（SSHD_AKF[用户]）
+      local who=${3#user=}
+      who=${who%%,*}
+      if ((SSHD_EFFECTIVE_RC)); then
+        echo "sshd -T -C 跑不成" >&2
+        return "$SSHD_EFFECTIVE_RC"
+      fi
+      printf 'port 22\nauthorizedkeysfile %s\n' "${SSHD_AKF[$who]:-}"
+      return 0
+    fi
     printf '%s\n' "$SSHD_EFFECTIVE"
     return "$SSHD_EFFECTIVE_RC"
     ;;
@@ -147,7 +164,7 @@ check "没碰端口、认证方式、没写 9.6 认不得的 PerSourcePenalties"
   "$(grep -cEi '^[[:space:]]*(Port|PasswordAuthentication|PubkeyAuthentication|PermitRootLogin|PerSourcePenalties)\b' "$SSHD_CONF" || true)" 0
 has "注释里写明了没写 PerSourcePenalties 的原因" "$(<"$SSHD_CONF")" 'PerSourcePenalties.*9\.8'
 f2b=$(grep -vE '^[[:space:]]*(#|$)' "$F2B_CONF" | tr -d '\r')
-check "fail2ban jail：只有 [sshd] 一段、五项设置" "$f2b" $'[sshd]\nenabled = true\nmaxretry = 3\nfindtime = 10m\nbantime = 1h\nbantime.increment = true'
+check "fail2ban jail：只有 [sshd] 一段、六项设置（含 ignoreip）" "$f2b" $'[sshd]\nenabled = true\nmaxretry = 3\nfindtime = 10m\nbantime = 1h\nbantime.increment = true\nignoreip = 127.0.0.1/8 ::1 10.99.0.0/24'
 
 echo "== 2. sshd：首次装 → 放文件、sshd -t、reload；再跑一遍什么都不动"
 fresh
@@ -314,6 +331,157 @@ fresh
 readback_fail2ban_sshd >/dev/null
 has "判红：和仓里不一样" "${REDS[*]}" "不在或和仓里 deploy/france/fail2ban-sshd.jail 不一样"
 
+echo "== 6. 隧道网段不封（#1784）：两份 jail 都放过 10.99.0.0/24；香港读回查 ignoreip"
+HK_F2B_CONF=$DEPLOY_DIR/hk/fail2ban-sshd.jail
+for f in "$F2B_CONF" "$HK_F2B_CONF"; do
+  has "${f#"$DEPLOY_DIR"/} 的 ignoreip 行含 10.99.0.0/24" "$(grep -E '^ignoreip = ' "$f")" "10.99.0.0/24"
+done
+check "香港 jail 的设置和法国那份一样" \
+  "$(grep -vE '^[[:space:]]*(#|$)' "$HK_F2B_CONF" | tr -d '\r')" \
+  "$(grep -vE '^[[:space:]]*(#|$)' "$F2B_CONF" | tr -d '\r')"
+rm -f -- "$FAIL2BAN_SSHD_JAIL"
+fresh
+setup_fail2ban_sshd "$HK_F2B_CONF" >/dev/null
+check "香港：放的是香港那份、先 -t 再 reload" \
+  "$(cmp -s -- "$FAIL2BAN_SSHD_JAIL" "$HK_F2B_CONF" && echo 一样 || echo 不一样) $(calls)" "一样 fail2ban-client -t fail2ban-client reload"
+F2B_GET[ignoreip]="127.0.0.1/8 ::1 10.99.0.0/24"
+fresh
+readback_fail2ban_sshd "$HK_F2B_CONF" 10.99.0.0/24 >/dev/null
+check "香港读回：ignoreip 含隧道网段 → 全绿" "${#REDS[@]} ${#PENDING[@]}" "0 0"
+echo "== 6b.【故意造出的失败】ignoreip 里没有隧道网段（手放的旧 sshd.local 盖了）：判红"
+F2B_GET[ignoreip]="127.0.0.1/8 ::1"
+fresh
+readback_fail2ban_sshd "$HK_F2B_CONF" 10.99.0.0/24 >/dev/null
+has "判红：ignoreip 里没有 10.99.0.0/24" "${REDS[*]}" "ignoreip 里没有 10.99.0.0/24"
+echo "== 6c. ignoreip 读不出：待配，不当成对了"
+unset 'F2B_GET[ignoreip]'
+fresh
+readback_fail2ban_sshd "$HK_F2B_CONF" 10.99.0.0/24 >/dev/null
+check "一条待配、没有红" "${#PENDING[@]} ${#REDS[@]}" "1 0"
+
+echo "== 7. 会话用户的登录口子收口（#1785）：~/.ssh 挪走、钥匙放 /etc/ssh/authorized_keys/<用户>、Match User 段"
+SESSION_USERS=(fleet-agent-carpool)
+PILOT_USER=pilot
+U=${SESSION_USERS[0]}
+SSHD_SESSION_USER_DROPIN=$TMP/sshd_config.d/51-fleet-dao-session-user.conf
+SESSION_SSH_KEYS_DIR=$TMP/etc-ssh-keys
+SESSION_SSH_ALLOW_FILE=$TMP/pilot-authorized_keys
+SESSION_QUARANTINE_ROOT=$TMP/quarantine
+SESSION_USER_HOME_ROOT=$TMP/home
+session_user_today() { echo 2026-10-11; }
+ensure_dir() { mkdir -p -- "$1"; }
+SSH_BEFORE=$'# founder\nssh-ed25519 AAAAfounder founder'
+printf '%s\n' "$SSH_BEFORE" >"$SESSION_SSH_ALLOW_FILE"
+put_dirty_home() {
+  rm -rf -- "${SESSION_USER_HOME_ROOT:?}/$U"
+  mkdir -p "$SESSION_USER_HOME_ROOT/$U/.ssh"
+  echo 'Host x' >"$SESSION_USER_HOME_ROOT/$U/.ssh/config"
+  echo 'PRIVATE' >"$SESSION_USER_HOME_ROOT/$U/.ssh/fleet_login"
+  printf '%s\n' "$SSH_BEFORE" 'ssh-ed25519 AAAAstranger fleet-login-1773-france-carpool' >"$SESSION_USER_HOME_ROOT/$U/.ssh/authorized_keys"
+}
+echo "-- 7a. 首次装：多余文件和钥匙挪进隔离目录、钥匙文件照 pilot 写、drop-in 放好、sshd -t 后 reload"
+put_dirty_home
+fresh
+setup_session_ssh >/dev/null
+Q=$SESSION_QUARANTINE_ROOT/$U-ssh-2026-10-11/dot-ssh
+check "家里的 .ssh 挪走了" "$([[ -e "$SESSION_USER_HOME_ROOT/$U/.ssh" ]] && echo 在 || echo 没有)" 没有
+check "多出来的文件和钥匙在隔离目录里（没删）" \
+  "$(find "$Q" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ') $(grep -c stranger "$Q/authorized_keys")" "authorized_keys config fleet_login  1"
+has "记了 changed：挪走" "${CHANGES[*]}" "把 $U 的 ~/.ssh（.*）挪到"
+check "钥匙文件内容就是 pilot 那份（多出来的那把不在）" "$(cat "$SESSION_SSH_KEYS_DIR/$U")" "$SSH_BEFORE"
+has "drop-in 里有会话用户的 Match 段" "$(<"$SSHD_SESSION_USER_DROPIN")" "^Match User $U"
+has "drop-in 里认钥匙的文件指到 /etc 下那份（%u）" "$(<"$SSHD_SESSION_USER_DROPIN")" "AuthorizedKeysFile $SESSION_SSH_KEYS_DIR/%u"
+check "没有残留占位符" "$(grep -c '@@' "$SSHD_SESSION_USER_DROPIN" || true)" 0
+check "调用顺序：先 sshd -t 再 reload" "$(calls)" "sshd -t systemctl reload ssh.service"
+check "没有红、没有待配" "${#REDS[@]} ${#PENDING[@]}" "0 0"
+echo "-- 7b. 再跑一遍什么都不动"
+fresh
+setup_session_ssh >/dev/null
+check "没有改动记录、没有任何调用" "${#CHANGES[@]} $(ncalls)" "0 0"
+echo "-- 7c.【故意造出的失败】会话又自己写了 ~/.ssh：这一遍再挪一次，放进 -2，不覆盖上一次"
+put_dirty_home
+fresh
+setup_session_ssh >/dev/null
+check "第二个隔离目录在、第一个没动" "$([[ -f "$SESSION_QUARANTINE_ROOT/$U-ssh-2026-10-11-2/dot-ssh/config" && -f "$Q/config" ]] && echo 都在 || echo 缺)" 都在
+check "只记了挪走这一笔（钥匙文件和 drop-in 没变、没有 sshd 调用）" "${#CHANGES[@]} $(count 'sshd')" "1 0"
+echo "-- 7d.【故意造出的失败】sshd -t 不过：drop-in 撤掉、不 reload、判红（钥匙文件已放好）"
+rm -f -- "$SSHD_SESSION_USER_DROPIN"
+SSHD_T_RC=1
+fresh
+setup_session_ssh >/dev/null
+rc=$?
+check "返回非 0、drop-in 撤掉了、没有 reload、判红一项" \
+  "$rc $([[ -e "$SSHD_SESSION_USER_DROPIN" ]] && echo 还在 || echo 没有) $(count reload) ${#REDS[@]}" "1 没有 0 1"
+has "红里有 sshd -t 不过、已撤掉、没重载" "${REDS[*]}" "sshd -t 不过，已撤掉"
+has "红里说明家里的 .ssh 没挪" "${REDS[*]}" "没挪"
+SSHD_T_RC=0
+echo "-- 7d2.【故意造出的失败】家里有钥匙 + sshd -t 不过：~/.ssh 原地不动（不能先挪走再验，不然会话用户被锁在外面）"
+rm -f -- "$SSHD_SESSION_USER_DROPIN"
+put_dirty_home
+SSHD_T_RC=1
+fresh
+setup_session_ssh >/dev/null
+check "家里的 .ssh 还在、没有挪走记录"   "$([[ -f "$SESSION_USER_HOME_ROOT/$U/.ssh/authorized_keys" ]] && echo 在 || echo 没了) $(grep -c '挪到' <<<"${CHANGES[*]}" || true)" "在 0"
+echo "-- 7d3.【故意造出的失败】sshd -t 不过但有旧版 drop-in：还原旧版，不是删"
+printf '%s
+' '# 旧版' >"$SSHD_SESSION_USER_DROPIN"
+fresh
+setup_session_ssh >/dev/null
+check "drop-in 还原成旧版" "$(cat "$SSHD_SESSION_USER_DROPIN")" "# 旧版"
+SSHD_T_RC=0
+echo "-- 7d4.【故意造出的失败】sshd -t 过但 reload 失败：~/.ssh 原地不动"
+rm -f -- "$SSHD_SESSION_USER_DROPIN"
+SSHD_RELOAD_RC=1
+fresh
+setup_session_ssh >/dev/null
+check "家里的 .ssh 还在、判红" "$([[ -f "$SESSION_USER_HOME_ROOT/$U/.ssh/authorized_keys" ]] && echo 在 || echo 没了) ${#REDS[@]}" "在 1"
+SSHD_RELOAD_RC=0
+echo "-- 7e.【故意造出的失败】pilot 那份读不到：不写钥匙文件、判红，drop-in 照装（会话用户登不进来，比留着家里那个口子强）"
+rm -f -- "$SSHD_SESSION_USER_DROPIN"
+rm -rf -- "${SESSION_SSH_KEYS_DIR:?}"
+SESSION_SSH_ALLOW_FILE_SAVE=$SESSION_SSH_ALLOW_FILE
+SESSION_SSH_ALLOW_FILE=$TMP/no-such-pilot-file
+fresh
+setup_session_ssh >/dev/null
+check "钥匙文件没写、drop-in 放了、判红一项" \
+  "$([[ -e "$SESSION_SSH_KEYS_DIR/$U" ]] && echo 有 || echo 没有) $([[ -e "$SSHD_SESSION_USER_DROPIN" ]] && echo 放了 || echo 没放) ${#REDS[@]}" "没有 放了 1"
+has "红里点名 pilot 那份读不到" "${REDS[*]}" "读不到或是空的"
+SESSION_SSH_ALLOW_FILE=$SESSION_SSH_ALLOW_FILE_SAVE
+echo "-- 7f.【故意造出的失败】没有 sshd 命令：判红、不放文件"
+rm -f -- "$SSHD_SESSION_USER_DROPIN"
+SSHD_ABSENT=1
+fresh
+setup_session_ssh >/dev/null
+rc=$?
+check "返回非 0、判红一项、没放 drop-in" "$rc ${#REDS[@]} $([[ -e "$SSHD_SESSION_USER_DROPIN" ]] && echo 有 || echo 没有)" "1 1 没有"
+SSHD_ABSENT=0
+
+echo "-- 7g. 读回：drop-in 和仓里一样；sshd -T -C 里会话用户认 /etc 下那份、pilot 还是自己家里的"
+fresh
+setup_session_ssh >/dev/null
+SSHD_AKF=([$U]="$SESSION_SSH_KEYS_DIR/%u" [pilot]=".ssh/authorized_keys .ssh/authorized_keys2")
+fresh
+readback_session_ssh_scope >/dev/null
+check "全绿" "${#REDS[@]} ${#PENDING[@]}" "0 0"
+echo "-- 7h.【故意造出的失败】Match 段没生效（有效配置里会话用户还认家里的）：判红"
+SSHD_AKF=([$U]=".ssh/authorized_keys .ssh/authorized_keys2" [pilot]=".ssh/authorized_keys .ssh/authorized_keys2")
+fresh
+readback_session_ssh_scope >/dev/null
+check "判红一项，点名会话用户" "${#REDS[@]} $(grep -c "$U 认钥匙的文件是「.ssh/authorized_keys" <<<"${REDS[*]}")" "1 1"
+echo "-- 7i.【故意造出的失败】Match 段漏到了 pilot：判红"
+SSHD_AKF=([$U]="$SESSION_SSH_KEYS_DIR/%u" [pilot]="$SESSION_SSH_KEYS_DIR/%u")
+fresh
+readback_session_ssh_scope >/dev/null
+has "判红：pilot 也被指到了 /etc 下" "${REDS[*]}" "pilot 认钥匙的文件也成了"
+echo "-- 7j.【故意造出的失败】drop-in 被手改、sshd -T -C 读不出：各判红"
+SSHD_AKF=([$U]="$SESSION_SSH_KEYS_DIR/%u" [pilot]=".ssh/authorized_keys")
+printf '%s\n' 'Match User root' >"$SSHD_SESSION_USER_DROPIN"
+SSHD_EFFECTIVE_RC=1
+fresh
+readback_session_ssh_scope >/dev/null
+has "判红：drop-in 和仓里不一样" "${REDS[*]}" "不在或和仓里 deploy/france/sshd-session-user.conf 不一样"
+check "两个用户的 sshd -T -C 都读不出：再各一条红（共 3）" "${#REDS[@]}" 3
+SSHD_EFFECTIVE_RC=0
 if ((fail)); then
   echo "sshd-hardening：不通过"
   exit 1

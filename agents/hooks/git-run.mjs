@@ -10,9 +10,12 @@
 //   2026-09-30 本机 git 缺 DLL（退出码 3221225781）被说成「不是 git 仓」，把真毛病盖住了。
 
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 /** @typedef {{ status: number | null, stdout: string, stderr: string, error?: (Error & { code?: string }) | undefined, timeoutMs?: number }} GitResult 一次 git 命令的结果 */
-/** @typedef {{ direct?: boolean, timeoutMs?: number }} GitOpts direct：去掉代理跑；timeoutMs：这一次单独的超时 */
+/** @typedef {{ direct?: boolean, proxy?: string, timeoutMs?: number }} GitOpts direct：去掉代理跑；proxy：去掉环境代理、改用这个代理跑；timeoutMs：这一次单独的超时 */
 /** @typedef {(dir: string, args: string[], opts?: GitOpts) => GitResult} Git */
 
 /** 默认超时：Windows 上起一个 git 就要一两秒，读本地的命令给 15 秒 */
@@ -42,7 +45,7 @@ export function withoutProxy(env = process.env) {
 
 /**
  * git 跑法：`git(dir, args, opts)` 在 dir 里跑一条，返回 { status, stdout, stderr, error, timeoutMs }（timeoutMs 是这一次实际用的）。
- * opts.direct 为 true 时去掉代理、超时用 directTimeoutMs；opts.timeoutMs 给了就用它。
+ * opts.direct 为 true 时去掉代理、超时用 directTimeoutMs；opts.proxy 给了就去掉环境代理、加 `-c http.proxy=<它>` 跑；opts.timeoutMs 给了就用它。
  * @param {number} [timeoutMs]
  * @param {number} [directTimeoutMs]
  * @returns {Git}
@@ -50,13 +53,17 @@ export function withoutProxy(env = process.env) {
 export function gitRunner(timeoutMs = GIT_MS, directTimeoutMs = timeoutMs) {
   return (dir, args, opts = {}) => {
     const timeout = opts.timeoutMs ?? (opts.direct ? directTimeoutMs : timeoutMs);
-    const r = spawnSync('git', ['-C', dir, ...args], {
-      ...(opts.direct ? { env: withoutProxy() } : {}),
-      encoding: 'utf8',
-      timeout,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const r = spawnSync(
+      'git',
+      [...(opts.proxy ? ['-c', `http.proxy=${opts.proxy}`] : []), '-C', dir, ...args],
+      {
+        ...(opts.direct || opts.proxy ? { env: withoutProxy() } : {}),
+        encoding: 'utf8',
+        timeout,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
     return {
       status: r.status,
       stdout: r.stdout ?? '',
@@ -65,6 +72,34 @@ export function gitRunner(timeoutMs = GIT_MS, directTimeoutMs = timeoutMs) {
       timeoutMs: timeout,
     };
   };
+}
+
+/**
+ * 备用代理：每台机器在 ~/.fleet-dao/fallback-proxy 配一个（不进仓、不是密钥），第一行 `http://host:port` 或 `socks5://host:port`。
+ * 环境代理和直连都不通时取远端才用它（fresh-main.mjs）。不带用户名密码；认不出的当没配，并让调用方在拦下的话里说一句。
+ * 文件不在、内容是空的：没配（不算认不出）。
+ * @param {string} text 文件内容
+ * @returns {{ proxy?: string, bad?: boolean }}
+ */
+export function parseFallbackProxy(text) {
+  const first = String(text).split(/\r?\n/)[0]?.trim() ?? '';
+  if (!first) return {};
+  return /^(?:http|socks5):\/\/[A-Za-z0-9.-]+:\d{1,5}\/?$/.test(first)
+    ? { proxy: first.replace(/\/$/, '') }
+    : { bad: true };
+}
+
+/**
+ * 读本机的备用代理文件；读不到就是没配。
+ * @param {string} [home]
+ * @returns {{ proxy?: string, bad?: boolean }}
+ */
+export function readFallbackProxy(home = homedir()) {
+  try {
+    return parseFallbackProxy(readFileSync(join(home, '.fleet-dao', 'fallback-proxy'), 'utf8'));
+  } catch {
+    return {};
+  }
 }
 
 /** 一次 git 成没成 */

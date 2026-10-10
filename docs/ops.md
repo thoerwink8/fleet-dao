@@ -64,7 +64,7 @@
 |---|---|---|---|
 | 22/tcp | 0.0.0.0、:: | sshd | 装机和运维登录 |
 | 80/tcp | 0.0.0.0 | nginx | `<驾驶舱域名>`：证书续期的验证路径，其余跳 https |
-| 443/tcp | 0.0.0.0 | nginx | `https://<驾驶舱域名>`：静态页；`/api`、`/auth`、`/github/webhook`、`/healthz` 经隧道转法国 `10.99.0.2:8787`（连接留着复用，第八节），转之前清掉 `Authorization`、`X-Fleet-Acting-Feishu`；`/agent` 不转；`/release.json`（带完整提交号）只给法国经隧道来的（`10.99.0.2`），别处来的回 404 |
+| 443/tcp | 0.0.0.0 | nginx | `https://<驾驶舱域名>`：静态页；`/api`、`/auth`、`/github/webhook`、`/healthz` 经隧道转法国 `10.99.0.2:8787`（连接留着复用，第八节），转之前清掉 `Authorization`、`X-Fleet-Acting-Feishu`；`/agent` 不转；`/release.json`（带完整提交号）只给法国经隧道来的（`10.99.0.2`），别处来的回 404；本站点的文本类回应（含转来的 JSON）gzip 压缩，实时推送 `/api/events` 不压；带哈希的 `/assets/` 让浏览器存一年（#1746） |
 | 8443/tcp | 0.0.0.0、:: | self-proxy（不归本仓管） | `self-proxy-hk.service`：代理入口，ufw 注释 `self-proxy`；它的订阅在 nginx 站点 `self-proxy`（别家站点，同 ai-gateway）。别动 |
 | 4500/udp | 0.0.0.0 | WireGuard 服务端 | 香港上游只放行少数常见 UDP 端口（2026-09-25 从法国实测：53/67/69/123/161/500/1701/4500 能到），51820 进不来 |
 
@@ -124,6 +124,66 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 <!-- fleet:dirs:end -->
 
+下面这张表由 deploy/ 脚本生成，别手改：
+
+<!-- fleet:units:start -->
+
+| 单元文件 | 机器 | 说明 |
+|---|---|---|
+| fleet-agents.slice | 法国 | fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给） |
+| fleet-api.service | 法国 | fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口） |
+| fleet-api.socket | 法国 | fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口） |
+| fleet-auto-release.service | 法国 | fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个） |
+| fleet-auto-release.timer | 法国 | fleet-dao 自动发布单元每 5 分钟读一轮主线（只读） |
+| fleet-engine.service | 法国 | fleet-dao 引擎工人（Temporal worker） |
+| fleet-firewall.service | 法国 | fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连 |
+| fleet-mirasim-liveness.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启） |
+| fleet-mirasim-liveness.timer | 法国 | 会话用户 Mirasim 服务每 2 分钟一次健康检查 |
+| fleet-mirasim-session.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务（本地模式常驻） |
+| fleet-release-request.path | 法国 | fleet-dao 驾驶舱的发布请求一到就接活 |
+| fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
+| fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
+| fleet-feishu.service | 香港 | fleet-dao 飞书网关 |
+
+<!-- fleet:units:end -->
+
+<!--
+renderUnitsBlock 实际输出（跑 packages/conventions/src/ops-tables.ts 的 renderUnitsBlock，与上方 fleet:units 区块逐字相同；冷验收对照用，不是手改表）：
+
+| 单元文件 | 机器 | 说明 |
+|---|---|---|
+| fleet-agents.slice | 法国 | fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给） |
+| fleet-api.service | 法国 | fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口） |
+| fleet-api.socket | 法国 | fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口） |
+| fleet-auto-release.service | 法国 | fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个） |
+| fleet-auto-release.timer | 法国 | fleet-dao 自动发布单元每 5 分钟读一轮主线（只读） |
+| fleet-engine.service | 法国 | fleet-dao 引擎工人（Temporal worker） |
+| fleet-firewall.service | 法国 | fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连 |
+| fleet-mirasim-liveness.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启） |
+| fleet-mirasim-liveness.timer | 法国 | 会话用户 Mirasim 服务每 2 分钟一次健康检查 |
+| fleet-mirasim-session.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务（本地模式常驻） |
+| fleet-release-request.path | 法国 | fleet-dao 驾驶舱的发布请求一到就接活 |
+| fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
+| fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
+| fleet-feishu.service | 香港 | fleet-dao 飞书网关 |
+
+来源 Description=（法国 deploy/france、香港 deploy/hk，按文件名排）：
+deploy/france/fleet-agents.slice → fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给）
+deploy/france/fleet-api.service → fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口）
+deploy/france/fleet-api.socket → fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口）
+deploy/france/fleet-auto-release.service → fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个）
+deploy/france/fleet-auto-release.timer → fleet-dao 自动发布单元每 5 分钟读一轮主线（只读）
+deploy/france/fleet-engine.service → fleet-dao 引擎工人（Temporal worker）
+deploy/france/fleet-firewall.service → fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连
+deploy/france/fleet-mirasim-liveness.service → 会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启）
+deploy/france/fleet-mirasim-liveness.timer → 会话用户 Mirasim 服务每 2 分钟一次健康检查
+deploy/france/fleet-mirasim-session.service → 会话用户 @@SESSION_USER@@ 的 Mirasim 服务（本地模式常驻）
+deploy/france/fleet-release-request.path → fleet-dao 驾驶舱的发布请求一到就接活
+deploy/france/fleet-release-request.service → fleet-dao 接驾驶舱的发布请求
+deploy/france/fleet-temporal.service → fleet-dao Temporal 服务端（Postgres 持久化）
+deploy/hk/fleet-feishu.service → fleet-dao 飞书网关
+-->
+
 | 用户 | 在哪 | 干什么 |
 |---|---|---|
 | `fleet` | 两台 | 引擎、驾驶舱后端、Temporal（法国），飞书网关（香港）。系统用户，家 `/home/fleet`（750） |
@@ -174,6 +234,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | `/etc/fleet-dao/hk.env` | root:fleet 640 | 域名、证书联系邮箱、法国的 WireGuard 公钥、法国的两把发布公钥（上传静态文件、发飞书网关）。老文件里留着的 `FLEET_DEMO_PATH` 是已删的键（#1223），`hk.sh` 认得、忽略 |
 | `/etc/fleet-dao/gateway-token.env` | root:fleet 640 | 飞书网关的通行证，和法国那份一模一样（第九节「两台同一份」） |
 | `/etc/fleet-dao/feishu.env` | root:fleet 640 | 飞书网关的配置：飞书凭据、创始人（人放），后端地址、公网地址、团队群（hk.sh 缺才补，第十二节） |
+| `/etc/fail2ban/jail.d/fleet-dao-sshd.local` | root:root 644 | 香港 fail2ban 的 sshd jail（#1784，仓里 `deploy/hk/fail2ban-sshd.jail`）：由 hk.sh 管（`fail2ban-client -t` 过了才 reload，没装 fail2ban 只记待配），放过隧道网段 `10.99.0.0/24`——法国在隧道里几次失败登录不会被封，发版链不会被卡死；读回查 `ignoreip` 含它，没有判红。原来手放的 `jail.d/sshd.local` 由 hk.sh 挪成 `sshd.local.bak-<日期>`，不删。法国那份（`deploy/france/fail2ban-sshd.jail`）同样带这段 `ignoreip` |
 | `/srv/fleet-dao` | root:root 755 | 装机脚本所在的检出 |
 | `/srv/fleet-dao-web` | root:root 755 | 静态文件，归 root：飞书网关以 fleet 跑在这台，网关被打穿也改不了页面。由法国传来：`release.json` 写着根上的驾驶舱是哪一版（只给经隧道来的读），`/health/` 是健康页（第九节「发静态文件」）；`/demo/` 已删（#1223），发布脚本把老目录删掉、站点一律回 404。装机脚本只在没有 `index.html` 时放占位页，不盖已发布的 |
 | `/srv/fleet-dao-gateway` | root:root 755 | 飞书网关的各版（第十二节）：`<提交号>/gateway.mjs`（法国打好的一个文件）、`current` 链接、`.history`；归 root，fleet 只读 |
@@ -210,6 +271,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 - 法国经跳板登录，长连接会被重置：长命令甩到后台跑再看日志，`nohup setsid bash /srv/fleet-dao/deploy/france.sh > /root/fleet-dao-install.log 2>&1 < /dev/null &`。
 
 - 法国 sshd 抗扫描（人工档，#1348）：公网扫描器占满未认证连接槽，sshd 随机丢新连接，本机和发版车就报 `Connection timed out during banner exchange`。`france.sh` 整套跑时放两份仓里的 drop-in：`deploy/france/sshd-hardening.conf` → `/etc/ssh/sshd_config.d/50-fleet-dao-hardening.conf`（`LoginGraceTime 20`、`MaxStartups 30:30:120`、`MaxAuthTries 3`；不改端口、不改认证方式；没写 `PerSourcePenalties`，它要 OpenSSH 9.8 以上，Ubuntu 24.04 的 9.6 认不得），先 `sshd -t`，过了才 `systemctl reload ssh`（不断已登录的连接），不过就撤掉这份、不重载、判红；`deploy/france/fail2ban-sshd.jail` → `/etc/fail2ban/jail.d/fleet-dao-sshd.local`（3 次失败封 1 小时、反复来的越封越长），先 `fail2ban-client -t` 再 reload，没装 fail2ban 只记待配、不装软件包。读回用 `sshd -T` 和 `fail2ban-client get sshd …` 核对真生效的值。是人工档：改的是登录入口，两份文件登记在 `HUMAN_TIER_PATHS`，改了要人以 root 重跑 `bash /srv/fleet-dao/deploy/france.sh`；`MaxAuthTries 3` 下，agent 里钥匙多于 3 把的客户端要加 `-o IdentitiesOnly=yes`。测试 `deploy/test/sshd-hardening.test.sh`（`sshd -t` 不过撤掉文件不重载等故意造的失败）。
+- 会话用户不许自己搭 ssh 口子、不许往外 ssh（人工档，#1785；#1773 的写码会话在会话用户家里自己生成钥匙、写 `~/.ssh/config`、把自己的公钥加进自己的 `authorized_keys`，再轮着用户名试登香港 `10.99.0.1:22`，触发香港 fail2ban 把隧道封了、发版卡住）。两件事：① 出站：`deploy/france/fleet-dao.nft` 里 `meta skuid <会话用户> tcp dport 22 reject with tcp reset`，会话用户连任何地址的 22/tcp（含香港和公网）都被立刻拒，root 和引擎（fleet）不受影响；读回（`check_session_ssh_egress`）以会话用户身份连一次 `10.99.0.1:22`，连上判红，被拒（`Connection refused`）才绿，路不通、等满时限没答记待配（不当成挡住了）。② 登录口子：见第五节「会话用户的 Mirasim」第 1 步，`~/.ssh` 收口选的是 sshd `Match User` 指到 `/etc/ssh/authorized_keys/%u`，不是把 `~/.ssh` 改归 root:<用户>——StrictModes 认 root 属主，但家目录归会话用户，它能把整个 `~/.ssh` 改名挪开再建一个自己的，拦不住（理由全文在 `deploy/lib/session-user.sh` 注释）。新文件 `deploy/france/sshd-session-user.conf` 登记在 `HUMAN_TIER_PATHS`，`fleet-dao.nft`、`session-user.sh`、`session-ports.sh` 本来就在里面：改了要人以 root 重跑 `bash /srv/fleet-dao/deploy/france.sh`。测试 `deploy/test/session-user.test.sh`（3b–3e）、`deploy/test/sshd-hardening.test.sh`（第 7 节）。
 
 输出与退出码：每步一行，`✓` 本来就对、`↻` 这次改了、`✗` 红、`…` 待配或没查成；自检里别家单元的问题用 `·` 和 `!` 列出（见第六节）。退出码 0 全绿，1 有红，2 没红但有待配。
 
@@ -354,7 +416,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 和 grok、cursor-agent 不一样：Mirasim 没有能自动跑的无头安装脚本，服务端本体不是装机脚本装的——官方给的路是它自己的桌面端以 ssh 远程模式连上服务器现装、现登录，或者指挥官／创始人在本机用 `mirasim ssh connect` 命令行现装（两条路装出来是同一份东西，见下面第 1 步）。这一步装出来的只是「远程模式」：只听 unix socket、ssh 一断就退出，靠不住——要另外让它常驻在「本地模式」（第 2 步），这才是装机脚本管的那一层。引擎经它派 DeepSeek Flash 的活（`packages/adapters/src/mirasim/`，协议与坑见 `docs/reference/adapters.md` 第八节 MS-01…28），选路、失败分流、记账和别家执行方式同一套（`packages/engine/src/real/hosts.ts` 的 `mirasimDriver`）。
 
 1. 装服务端本体（指挥官或创始人做，一次；这条本身是「怎么装」的说明，不是装机脚本的一步）：
-   1. 先给会话用户开一条能连的 ssh 口子（root 做，写法照 pilot 那条；装完留着，以后升级、换账号还要连，创始人 2026-09-29 拍）：`sudo -iu <会话用户> sh -c 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys' < <连接方的公钥>.pub`。只许放创始人登录 pilot 的那几把：`france.sh` 读回照 `/home/pilot/.ssh/authorized_keys` 核对，多一把别人的、`~/.ssh` 里放了私钥或配置、权限不是 700/600、认不出都判红（`deploy/lib/session-user.sh` 的 `check_session_ssh`）
+   1. 会话用户的 ssh 口子（装完留着，以后升级、换账号还要连，创始人 2026-09-29 拍）不用手放了（#1785）：`france.sh` 整套跑时把 `/home/pilot/.ssh/authorized_keys` 里的钥匙写进 `/etc/ssh/authorized_keys/<会话用户>`（root:root 644），并放 sshd 的 `Match User` drop-in（`deploy/france/sshd-session-user.conf`）把它认钥匙的文件指到那里；要加连接方的公钥，加进 pilot 的 `authorized_keys` 再重跑 france.sh。会话用户家里的 `~/.ssh` 不再生效，也不许有东西：装机时有什么就整个挪到 `/root/quarantine/<用户>-ssh-<日期>/`（只挪不删，记 changed），读回里有东西、钥匙文件多一把 pilot 没有的、属主权限不是 root:root 644、认不出都判红（`deploy/lib/session-user.sh` 的 `check_session_ssh`、`check_session_ssh_keys`、`quarantine_session_ssh`）
    2. 装：桌面端新建一条 ssh 远程连接，目标 `<会话用户>@<法国的地址>`；或者在本机命令行 `MIRASIM_SERVER_DL_ROOT=https://cdn-assets.mirasim.ai/mirasim/releases mirasim ssh connect <会话用户>@<法国的地址>`。连上那一下会在它家里自己装起服务端（`~/.mirasim-remote/servers/<版本>/`，`current` 链到在用的那版；数据在 `~/.mirasim/`；服务端要的 `curl`、`tar`、`gzip`、`sha256sum`、`AllowStreamLocalForwarding` 法国上都已具备）。
    3. 这一下装出来的是「远程模式」：只听 unix socket（`~/.mirasim-remote/run/server.sock`），带 `stdinShutdown`——连接一断（ssh 断了、命令行退出）它就跟着退出，引擎靠不住，不算「已经装好常驻服务」，只是把服务端本体和账号放到位。
    4. 创始人在桌面端（登录着要给这份服务用的那个账号）连一次这台主机：这一下把中转账号推进 `~/.mirasim/setting.json`（常驻服务读的是同一份状态目录，账号跟着生效，不用给常驻那份另外登录一次）。
@@ -743,7 +805,7 @@ FLEET_HK_PARTS=gateway                  # 往香港发哪几样：gateway 飞书
 - 后端收 GitHub 事件：原文一次投递一行落进库里的 `github_events`（状态、原因、做了什么都在）。PR、CI 事件要用 `github/` 里两个机器人的凭据写镜像，凭据只在后端启动时读一次：读不到时后端照样起、issue 照收，PR 和 CI 事件记成出错，健康检查的 `github_events` 报红；补上凭据后要重启 `fleet-api` 才读得到。记成出错、等着的投递原文还在，每轮对账（引擎的定时任务 `github-reconcile`，每 15 分钟）按原文重放：出错的最多自动重放 5 次；等着的（重开时上一轮还没结束、这个项目停派）每轮都重放、不占次数。重放到头的没有手动再推的入口，只在健康检查里报红。
 - GitHub 不会自己重投没送到的 webhook：漏收的靠对账调它的重投接口、再按仓轮询补回。
 - 关单对账 #654 删了（原来对账每天顺带扫一遍「做完没关、关了没结果」，判的前提是 结果.md）：它留在提醒中心的四种日报提醒 `close-sweep:<owner>/<仓名>:{due,mother,merged,no-result}`，引擎下一次起来的第一轮由 `retireCloseSweepAlerts` 一次性撤掉（日志：`journalctl -u fleet-engine --since '-2h' | grep 撤了关单对账`）；之后这段连同它的测试可以整个删。
-- 对账每小时顺带一轮单子打标挂版本（design 第七节「标签与里程碑」，#448）：UTC 分钟数 < 15 的那一轮跑（每小时一次，不挑钟点——「新开的一小时内有类别和版本」是相对时长），「引擎」机器人按受管的仓读现状：没有类别标签的新开（或重新打开）issue 问 Jev「issue 归类」题（第十一节），把握够贴需求/缺陷/杂项，把握不够或连不上都不贴（前者进日报，后者记没查成），人摘过的以后不再贴；进门时类别、里程碑都没有的（没走开单脚本漏开的）按创始人开的 / 机器开的分别挂当前版本、留未排期，有类别没里程碑的是有意未排期、不碰；里程碑关了还留着没做完的单挪到（新的）当前版本并留言，没有下一个版本就不挪、记没查成；未排期闲置 `FLEET_ISSUE_GROOM_STALE_DAYS`（默认 30）天贴「过时」，再 `FLEET_ISSUE_GROOM_CLOSE_DAYS`（默认 14）天没动关成「不做了」，贴了「冻结」、母单、已排进当前版本的跳过。这一轮的动静（贴了什么、没把握的、清了哪些）写成一条日报级提醒 `issue-groom:<owner>/<仓名>`，原地更新，不是要人拍的事。当前版本读不出来（没有还开着的 `v<N>` 里程碑）、Jev 没问成、GitHub 写不进去：驾驶舱「定时任务」页那一轮记没查全，`why` 以「单子打标挂版本」开头。日志：`journalctl -u fleet-engine --since '-2h' | grep 单子打标挂版本`。想马上看一遍：没有手动触发一轮的命令（#1072），等下一轮（整点后 15 分钟内的那一轮会带上，不挑北京时间）。PR 不贴类别标签、不挂里程碑（#654 删了 `pr-labels` 工作流：里程碑页的进度只数单子，PR 挂上去会把完成度虚报）。
+- 对账每小时顺带一轮单子打标挂版本（design 第七节「标签与里程碑」，#448）：UTC 分钟数 < 15 的那一轮跑（每小时一次，不挑钟点——「新开的一小时内有类别和版本」是相对时长），「引擎」机器人按受管的仓读现状：没有类别标签的新开（或重新打开）issue 问 Jev「issue 归类」题（见 `docs/design/jev.md`），把握够贴需求/缺陷/杂项，把握不够或连不上都不贴（前者进日报，后者记没查成），人摘过的以后不再贴；进门时类别、里程碑都没有的（没走开单脚本漏开的）按创始人开的 / 机器开的分别挂当前版本、留未排期，有类别没里程碑的是有意未排期、不碰；里程碑关了还留着没做完的单挪到（新的）当前版本并留言，没有下一个版本就不挪、记没查成；未排期闲置 `FLEET_ISSUE_GROOM_STALE_DAYS`（默认 30）天贴「过时」，再 `FLEET_ISSUE_GROOM_CLOSE_DAYS`（默认 14）天没动关成「不做了」，贴了「冻结」、母单、已排进当前版本的跳过。这一轮的动静（贴了什么、没把握的、清了哪些）写成一条日报级提醒 `issue-groom:<owner>/<仓名>`，原地更新，不是要人拍的事。当前版本读不出来（没有还开着的 `v<N>` 里程碑）、Jev 没问成、GitHub 写不进去：驾驶舱「定时任务」页那一轮记没查全，`why` 以「单子打标挂版本」开头。日志：`journalctl -u fleet-engine --since '-2h' | grep 单子打标挂版本`。想马上看一遍：没有手动触发一轮的命令（#1072），等下一轮（整点后 15 分钟内的那一轮会带上，不挑北京时间）。PR 不贴类别标签、不挂里程碑（#654 删了 `pr-labels` 工作流：里程碑页的进度只数单子，PR 挂上去会把完成度虚报）。
 - 接 GitHub 要齐两样，缺一样 GitHub 上的单就进不来（事件、对账补回来的都被门挡掉，投递账上记「不收」、不算出错），健康检查的 `github_events` 会报红（`no_repos`、`no_github_members`）；驾驶舱还没有加仓、改成员的页面，现在在库里加（新机器上两张表都是空的）：
   - 受管的仓：GitHub App 装在哪几个仓上，就给哪几个仓各加一行（`test_command` 先填个占位 `-`，对账读成仓里的配置后会改成里面的测试命令）：`sudo -u fleet psql fleet -c "insert into repos (owner, name, default_branch, test_command) values ('<owner>', '<仓名>', 'main', '-') on conflict (owner, name) do nothing"`。App 装在哪些仓上，在 GitHub 上 App 的安装页看。
   - 测试命令存在 `repos.test_command`（建仓时填；原来每仓仓根的 `.fleet/flow.json` 和对账同步随 #556 删了）。它是写码会话交活要原样跑的那一条（起会话时记进 `session_runs.test_command`，交活核对只认它，`packages/store/src/done-check.ts`），所以只放会话跑得过的——只跑改动影响到的测试，不放全量检查、卫生检查（那两样慢，也不是「这段代码对不对」：卫生检查归推前钩子和引擎推分支时自己的扫描）；fleet-dao 是 `pnpm test:changed`。
@@ -792,7 +854,9 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 - 从公网打开的，健康页和占位页上都不写仓名、GitHub 账号名和地址（设计文档第十四节），也不显示版本号（`release.json` 公网上读不到）。`deploy/test/public-site.test.sh` 拿公开页的禁词名单扫发布脚本生成的这几页；改了文字，下次发 `web` 才到香港。
 - 香港转发时清掉 `Authorization`、`X-Fleet-Acting-Feishu`。france.sh 的读回从公网带着这两个头请求 `/api`，核对法国收到的请求里没有：后端没在跑时在隧道地址上临时起回显直接看，后端在跑时看它答的是「没登录」。
 
-还欠（发布这块）：构建以 fleet 身份跑，构建期间的第三方代码（前端构建工具等）读得到 `/etc/fleet-dao` 里 fleet 能读的全部密钥。换成读不到 `/etc/fleet-dao` 的专用构建用户要动装机（新用户、它的 pnpm、属主交接），留到下一轮（#79）。现在挡着的：pnpm 11 默认不跑依赖的安装脚本，只跑 `pnpm-workspace.yaml` 的 `allowBuilds` 放行的（现在一个都没放行），所以装依赖这一步第三方代码不执行；前端构建那一步照样会执行构建工具的代码。
+发布构建和密钥隔开（#79，已做）：装依赖、构建驾驶舱前端、打包飞书网关这三步不再以 fleet 直接跑，改走同一个构建沙箱。发布脚本以 root 起一次性 `systemd-run`（`InaccessiblePaths` + `NoNewPrivileges`），里面先以 root 跑 `unshare --pid --fork --mount-proc --kill-child`（root 才建得了 PID 命名空间，自建并换挂 `/proc`），再用 `setpriv --reuid=fleet --regid=fleet --init-groups --no-new-privs` 降成 fleet 跑构建命令（不用 `--uid=fleet` + `PrivateUsers`：法国 systemd 255 和 CI 上里面的 `unshare --pid` 报 `Operation not permitted`）。直接路径挡掉三处：`/etc/fleet-dao`（GitHub 机器人私钥、会话密钥、令牌）、本机库的 unix socket 目录（`/var/run/postgresql`；`/var/run` 指到 `/run` 时连实际路径一起挡）、`/var/lib/fleet-dao`。主机上同 UID 的 fleet 进程不出现在沙箱的 `/proc` 里，因此也不能经 `/proc/<pid>/root/…` 绕开那三处（只遮挂载、仍看主机 `/proc` 时这条绕路是通的）。跑之前先读回：直接路径或任一 `/proc/*/root/etc/fleet-dao` 在沙箱里仍可读、或者没有 `systemd-run` / `unshare` / `setpriv`、沙箱起不来、读回认不出，构建这一步红字停下，不切版本，也不退回用 fleet 直接构建。
+
+沙箱里还看得到的：fleet 的家目录（pnpm 和缓存在 `/home/fleet`，构建要用，家目录里 fleet 能读的文件构建时也能读）；出网（装依赖要连 registry.npmjs.org）；本机 TCP `127.0.0.1:5432`（只隔了 unix socket 目录，端口没隔；装机给 fleet 的是 socket 上的 peer、不设口令，TCP 那条要口令）；沙箱起来之后才在主机上挂进这三处下面的新挂载（`InaccessiblePaths` 挡不住后挂上的）；沙箱自己 PID 命名空间里的 `/proc`（能看本沙箱进程的环境与文件描述符，看不到主机上别的进程）。没有新建专用构建用户：构建仍是 fleet 这个 UID，靠挂载隔离 + 私有 PID/`/proc` 把密钥目录和主机同 UID 进程隔开。pnpm 11 默认仍不跑依赖的安装脚本（`pnpm-workspace.yaml` 的 `allowBuilds` 现在一个都没放行），这层还在，但不再是唯一的挡。
 
 ### 自动发布
 

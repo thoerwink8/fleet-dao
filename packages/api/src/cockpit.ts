@@ -665,22 +665,17 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   });
 
   app.get(WebRoutes.pools.path, async (c) => {
-    const [pools, channels, windows, routes, activeRuns, savedSettings] = await Promise.all([
+    const [pools, channels, windows, occupancy, savedSettings] = await Promise.all([
       store.listPools(),
       store.listChannels(),
       store.listQuotaWindows(),
-      store.listRoutes(),
-      store.listRuns({ active: true }),
+      store.poolOccupancy(),
       store.listSettings(),
     ]);
     const now = deps.now();
     // 切号现状（#194）：读不到不拖垮额度页，但要明说没读成（不拿空冒充没事）
     const soloPaused = savedSettings.find((s) => s.key === 'engine.soloPaused')?.value === true;
-    const poolViews = buildPools(
-      { pools, channels, windows, routes, activeRuns },
-      now,
-      config.quotaStaleAfterMs,
-    );
+    const poolViews = buildPools({ pools, channels, windows, occupancy }, now, config.quotaStaleAfterMs);
     // 独享的额度留量线现状（#194 方案 4.8）：选路、切号用同一份判法（shared 的 evaluateReserve）
     const soloReserve = soloReserveView(
       poolViews,
@@ -765,6 +760,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   app.get(WebRoutes.notifications.path, async (c) => {
     const query = readQuery(c, NotificationsQuery);
     const page = await store.listNotifications(query);
+    const counts = await store.countNotifications({ status: query.status });
     // 谁在处理、修到哪（design 15.3）：读的时候现算；没接上、读不到照实写在 handlingProblem，不拿「没人在修」顶
     const handling = deps.alertWork
       ? await handlingOf(
@@ -778,6 +774,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         return { ...notificationView(n), ...(h ? { handling: handlingView(h) } : {}) };
       }),
       nextCursor: page.nextCursor,
+      counts,
       ...(handling.ok ? {} : { handlingProblem: handling.why }),
     });
   });

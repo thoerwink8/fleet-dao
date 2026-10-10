@@ -1,6 +1,37 @@
 // 操作记录的前后值收成人话差异：只留有变化的字段，名字翻成中文，认不出的原样。
 import { describe, expect, test } from 'vitest';
-import { auditChangeLines } from './audit';
+import { actorName, auditChangeLines, targetLabel } from './audit';
+
+describe('targetLabel / actorName', () => {
+  test('索引未到先显示单号', () => {
+    // 只有单号、标题还没进索引：先 #1739；露 UUID 或空等标题，这一条会红。
+    const id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    expect(targetLabel(`task:${id}`, new Map([[id, { issueNumber: 1739 }]]))).toBe('需求 #1739');
+    // 索引到了再补标题。
+    expect(targetLabel(`task:${id}`, new Map([[id, { issueNumber: 1739, title: '修好登录' }]]))).toBe(
+      '需求 #1739 修好登录',
+    );
+    // 索引完全没有：也不把 UUID 摊在页面上。
+    expect(targetLabel(`task:${id}`, new Map())).toBe('需求');
+    expect(targetLabel(`task:${id}`, new Map())).not.toContain(id);
+  });
+
+  test('操作人代号翻译', () => {
+    // engine:hourly-reconcile 仍原样、或乱编一个中文，这一条会红。
+    expect(actorName({ kind: 'engine', id: 'engine:hourly-reconcile' })).toBe('引擎·每小时对账');
+    // 认不出的原样保留。
+    expect(actorName({ kind: 'engine', id: 'engine:not-a-known-job' })).toBe('engine:not-a-known-job');
+    // 后端给了名字就用名字，不盖掉。
+    expect(actorName({ kind: 'engine', id: 'engine:hourly-reconcile', name: '对账工人' })).toBe('对账工人');
+  });
+
+  test('处理了提醒时带上提醒标题', () => {
+    // 有标题还写「一条提醒」，或标题索引对不上，这一条会红。
+    const notes = new Map([['n-6', 'Grok 额度读数 42 分钟没更新']]);
+    expect(targetLabel('notification:n-6', new Map(), notes)).toBe('提醒「Grok 额度读数 42 分钟没更新」');
+    expect(targetLabel('notification:n-gone', new Map(), notes)).toBe('一条提醒');
+  });
+});
 
 describe('auditChangeLines', () => {
   test('字段有变化：名字翻成中文，前后值写成文字', () => {
