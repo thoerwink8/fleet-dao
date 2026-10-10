@@ -570,6 +570,13 @@ describe('readDirEntries', () => {
     expect(() => readDirEntries(r)).toThrow('deploy/hk.sh:2');
   });
 
+  // 故意造出失败：同一个变量有两个不同的字面赋值，挑不出一个，错误要点出调用所在行。
+  it('变量有几个不同的赋值，抛带脚本名和调用行号的错', () => {
+    const r = memRepo(dirsFiles({ 'deploy/hk.sh': 'D=/a\nD=/b\nensure_dir "$D" root:root 755\n' }));
+    expect(() => readDirEntries(r)).toThrow('deploy/hk.sh:3');
+    expect(() => readDirEntries(r)).toThrow('$D');
+  });
+
   it('读不到脚本、脚本里一个 ensure_dir 都没有、参数不足三个，都抛错', () => {
     const { 'deploy/hk.sh': _hk, ...noHk } = dirsFiles();
     expect(() => readDirEntries(memRepo(noHk))).toThrow('读不到 deploy/hk.sh');
@@ -591,13 +598,26 @@ describe('checkDirsBlock', () => {
     expect(checkDirsBlock(dirsDocRepo(dirsFiles()), 'docs/ops.md')).toEqual([]);
   });
 
-  it('文档里没有区块，报一条点出区块的问题（不是没查成）', () => {
+  it('文档里没有区块，报一条点出目录路径的问题（不是没查成）', () => {
     const r = memRepo({ ...dirsFiles(), 'docs/ops.md': '# 运维\n没有区块\n' });
     const problems = checkDirsBlock(r, 'docs/ops.md');
     expect(problems).toHaveLength(1);
     expect(problems[0]?.notQueried).toBe(false);
     expect(problems[0]?.text).toContain('目录区块对不上');
     expect(problems[0]?.text).toContain('fleet:dirs:start');
+    // 缺区块时也点出路径：脚本里的目录在文档区块里都没有。
+    expect(problems[0]?.text).toContain('/etc/fleet-dao');
+  });
+
+  it('文档里只有开始标记、没有结束标记，报一条并点出目录路径', () => {
+    const files = dirsFiles();
+    const block = renderDirsBlock(memRepo(files));
+    const r = memRepo({ ...files, 'docs/ops.md': `# 运维\n${block.split('\n')[0]}\n` });
+    const problems = checkDirsBlock(r, 'docs/ops.md');
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.notQueried).toBe(false);
+    expect(problems[0]?.text).toContain('目录区块对不上');
+    expect(problems[0]?.text).toContain('/etc/fleet-dao');
   });
 
   it('文档区块里多一行，报一条点出路径的问题', () => {

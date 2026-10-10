@@ -532,8 +532,8 @@ function byCodeUnit(a: string, b: string): number {
 
 /** 找变量 name 的字面赋值：先同一脚本，再 deploy/lib/ 下别的脚本；
  *  来源脚本本身在 deploy/lib/ 下（france.sh 和 hk.sh 共用的库，常量写在入口脚本里）时，最后再看 france.sh、hk.sh。
- *  同一档里值不止一个，抛错，不挑一个。找不到返回 undefined。 */
-function lookupAssign(index: AssignIndex, script: string, name: string): string | undefined {
+ *  同一档里值不止一个，抛带调用处（where = 脚本名:行号）的错，不挑一个。找不到返回 undefined。 */
+function lookupAssign(index: AssignIndex, script: string, name: string, where: string): string | undefined {
   const tiers: string[][] = [[script], index.libScripts.filter((s) => s !== script)];
   if (script.startsWith('deploy/lib/')) tiers.push(['deploy/france.sh', 'deploy/hk.sh']);
   for (const tier of tiers) {
@@ -544,7 +544,7 @@ function lookupAssign(index: AssignIndex, script: string, name: string): string 
     const distinct = new Set(hits.map((h) => h.value));
     if (distinct.size > 1) {
       throw new Error(
-        `${script} 用到的变量 $${name} 有几个不同的赋值（${hits.map((h) => `${h.script}: ${h.value}`).join('；')}），挑不出一个`,
+        `${where} 用到的变量 $${name} 有几个不同的赋值（${hits.map((h) => `${h.script}: ${h.value}`).join('；')}），挑不出一个`,
       );
     }
     if (hits[0]) return hits[0].value;
@@ -571,7 +571,7 @@ function expandVars(
     }
     if (seen.includes(name))
       throw new Error(`${where} 的变量 $${name} 赋值绕成了圈（${[...seen, name].join(' → ')}）`);
-    const raw = lookupAssign(index, script, name);
+    const raw = lookupAssign(index, script, name, where);
     if (raw === undefined) {
       bad ??= `${where} 的变量 $${name} 展开不了（同一脚本和 deploy/lib/ 下没有 ${name}=字面路径 的行首赋值）`;
       return '';
@@ -761,7 +761,10 @@ export function checkDirsBlock(repo: RepoView, docPath: string): OpsTableProblem
     span = findBlock(doc, DIRS_NAME);
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
-    return [{ notQueried: false, text: `目录区块对不上：${reason}。` }];
+    // 区块缺失时也点出路径：脚本里有、文档区块里一个都没有的目录，逐条列出来。
+    const missing = [...new Set(parseDirRows(expected).map((r) => r.path))];
+    const hint = missing.length > 0 ? `脚本里的目录（${missing.join('、')}）在文档区块里都没有。` : '';
+    return [{ notQueried: false, text: `目录区块对不上：${reason}。${hint}` }];
   }
   const actual = doc.slice(span.from, span.to);
   if (actual === expected) return [];
