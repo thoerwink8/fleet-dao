@@ -47,6 +47,11 @@ export const LEDGER_GRACE_MS = 30 * 60_000;
 export const MERGED_PR_LOOKBACK_MS = 26 * 60 * 60_000;
 /** 和 hourly-reconcile 的 OPEN_ALERT_LIMIT 同一个上限：多出来的照实记没看全，不当成没有。 */
 const ALERT_LIST_LIMIT = 500;
+/** PR 合并超过这么多天，「没经合并队列合」「记账不全」就是改不了的历史事实：自动收掉，不再复查、不再催。 */
+export const HISTORICAL_FACT_DAYS = 7;
+const HISTORICAL_FACT_MS = HISTORICAL_FACT_DAYS * 24 * 60 * 60_000;
+/** 这两类提醒只对回看窗口里合的 PR 报；提醒开了不到「7 天减回看窗口」的，PR 一定合了不到 7 天，不用读合并时刻。 */
+const SURELY_RECENT_ALERT_MS = HISTORICAL_FACT_MS - MERGED_PR_LOOKBACK_MS;
 
 export function prAlertKey(owner: string, name: string, number: number): string {
   return `${PR_ALERT_PREFIX}${owner}/${name}#${number}`;
@@ -68,6 +73,8 @@ export interface ReconcileCheckDeps extends Pick<AlertSweepDeps, 'alerts' | 'now
    * 不给就当没有。读不到要抛，不许回空列表冒充「这些池都要读」。
    */
   quotaNotRead?: () => Promise<readonly string[]>;
+  /** 一条 PR 的合并时刻（和 alert-sweep 的 prMergedAt 是同一个读法）。读不到照抛；没接上当读不到。 */
+  prMergedAt?(repo: { owner: string; name: string }, number: number): Promise<Date>;
   ledgers(input: {
     since: Date;
     prs: { owner: string; name: string; number: number }[];
@@ -217,9 +224,64 @@ export function ledgerGaps(l: MergedPrLedger): string[] {
   return gaps;
 }
 
-function parseLedgerKey(key: string): { owner: string; name: string; number: number } | null {
-  const m = /^([^/]+)\/(.+)#(\d+)$/.exec(key.slice(LEDGER_ALERT_PREFIX.length));
+function parsePrKey(key: string, prefix: string): { owner: string; name: string; number: number } | null {
+  const m = /^([^/]+)\/(.+)#(\d+)$/.exec(key.slice(prefix.length));
   return m?.[1] && m[2] && m[3] ? { owner: m[1], name: m[2], number: Number(m[3]) } : null;
+}
+
+function parseLedgerKey(key: string): { owner: string; name: string; number: number } | null {
+  return parsePrKey(key, LEDGER_ALERT_PREFIX);
+}
+
+/** 这条 PR 合并是不是超过 7 天。读不到（没接上、抛了、时刻认不出）抛错，由调用方决定怎么记。 */
+async function mergedOverSevenDays(
+  deps: ReconcileCheckDeps,
+  pr: { owner: string; name: string; number: number },
+): Promise<boolean> {
+  if (!deps.prMergedAt) throw new Error('没接上合并时刻的读法');
+  const at = await deps.prMergedAt({ owner: pr.owner, name: pr.name }, pr.number);
+  if (!(at instanceof Date) || !Number.isFinite(at.getTime())) throw new Error('合并时刻认不出');
+  return deps.now().getTime() - at.getTime() > HISTORICAL_FACT_MS;
+}
+
+/**
+ * 撤掉历史事实类提醒：键以 reconcile:pr:、reconcile:ledger: 开头、对应 PR 合并超过 HISTORICAL_FACT_DAYS 天的。
+ * 事实改不了（前者只报一次要人点「处理」，后者老单在记账表之前、永远补不齐），留着只会每天催。
+ * 读不到合并时刻的不撤、记没查成；列不出提醒返回 failed，不当成「没有要收的」。
+ */
+export async function retireHistoricalFactAlerts(deps: ReconcileCheckDeps): Promise<SweepPart> {
+  const part = empty();
+  let listed: Awaited<ReturnType<ReconcileCheckDeps['alerts']['listOpen']>>;
+  try {
+    listed = await deps.alerts.listOpen(ALERT_LIST_LIMIT);
+  } catch (err) {
+    return { ...part, failed: `列没处理的提醒没成，合并超过 7 天的历史提醒这一轮不收：${errMessage(err)}` };
+  }
+  if (listed.truncated) {
+    part.unchecked.push(`没处理的提醒太多，只看了前 ${listed.alerts.length} 条，没看到的历史提醒不收`);
+  }
+  for (const alert of listed.alerts) {
+    const prefix = [PR_ALERT_PREFIX, LEDGER_ALERT_PREFIX].find((p) => alert.dedupeKey.startsWith(p));
+    if (!prefix) continue;
+    part.scanned += 1;
+    const pr = parsePrKey(alert.dedupeKey, prefix);
+    if (!pr) {
+      part.unchecked.push(`提醒 ${alert.dedupeKey} 认不出是哪条 PR，不收`);
+      continue;
+    }
+    if (deps.now().getTime() - alert.createdAt.getTime() < SURELY_RECENT_ALERT_MS) continue;
+    let old: boolean;
+    try {
+      old = await mergedOverSevenDays(deps, pr);
+    } catch (err) {
+      part.unchecked.push(`提醒 ${alert.dedupeKey} 的 PR 合并时刻没查成，不收：${errMessage(err)}`);
+      continue;
+    }
+    if (old) {
+      await resolveOne(deps, part, alert.dedupeKey, '历史事实：PR 已合并超过 7 天，改不了，自动收');
+    }
+  }
+  return part;
 }
 
 /**
@@ -229,7 +291,7 @@ function parseLedgerKey(key: string): { owner: string; name: string; number: num
 export async function checkLedgers(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();
   const now = deps.now();
-  let open: { dedupeKey: string }[] | null = null;
+  let open: { dedupeKey: string; createdAt: Date }[] | null = null;
   try {
     const listed = await deps.alerts.listOpen(ALERT_LIST_LIMIT);
     open = listed.alerts.filter((a) => a.dedupeKey.startsWith(LEDGER_ALERT_PREFIX));
@@ -241,8 +303,19 @@ export async function checkLedgers(deps: ReconcileCheckDeps): Promise<SweepPart>
   } catch (err) {
     part.unchecked.push(`列没处理的提醒没成，记账核对的旧提醒这一轮不复查、不撤：${errMessage(err)}`);
   }
-  const named = (open ?? []).flatMap((a) => {
+  // 合并超过 7 天的不再复查（交给 retireHistoricalFactAlerts 撤）；读不到合并时刻的照原样复查，没查成由它记
+  const historical = new Set<string>();
+  for (const a of open ?? []) {
     const pr = parseLedgerKey(a.dedupeKey);
+    if (!pr || now.getTime() - a.createdAt.getTime() < SURELY_RECENT_ALERT_MS) continue;
+    try {
+      if (await mergedOverSevenDays(deps, pr)) historical.add(a.dedupeKey);
+    } catch {
+      // 不跳过
+    }
+  }
+  const named = (open ?? []).flatMap((a) => {
+    const pr = historical.has(a.dedupeKey) ? null : parseLedgerKey(a.dedupeKey);
     return pr ? [pr] : [];
   });
   let ledgers: MergedPrLedger[];
@@ -295,7 +368,7 @@ export async function checkLedgers(deps: ReconcileCheckDeps): Promise<SweepPart>
   }
 
   for (const alert of open ?? []) {
-    if (hold.has(alert.dedupeKey)) continue;
+    if (hold.has(alert.dedupeKey) || historical.has(alert.dedupeKey)) continue;
     if (clear.has(alert.dedupeKey)) {
       await resolveOne(deps, part, alert.dedupeKey, '会话结局、用量、关单都记齐了');
     } else if (!byPr.has(alert.dedupeKey)) {
