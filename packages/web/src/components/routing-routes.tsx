@@ -23,6 +23,57 @@ import { KindChip, useKindEnv } from './routing-kinds';
 import { StatusDot } from './status';
 import { Badge } from './ui/badge';
 
+/**
+ * 档位配不了的长说明（「没有单独的档位参数……不带方括号」）只留在下拉的悬停 title 里，
+ * 行内不再逐条铺开（#1754）。套在模型行外层：把 membership 写的 data-row-note 藏掉。
+ */
+export const hideEffortRowNoteClass = '[&_[data-row-note]]:hidden';
+
+/**
+ * 模型已关时：路由列表默认折叠，头上保留配置顺序号和「已关 N 条路由」；点开展开（#1754）。
+ * 开着的模型不走这层，直接画 ModelRoutes。
+ */
+export function CollapsibleOffModelRoutes({
+  model,
+  position,
+  now,
+  firstLiveRoute,
+}: {
+  model: RoutingLayerModel;
+  /** 配置里的先后（从 1 起），折叠头上照写，不改号。 */
+  position: number;
+  now: number;
+  firstLiveRoute?: string | undefined;
+}) {
+  const [open, setOpen] = useState(false);
+  const n = model.routes.length;
+  return (
+    <>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={`off-routes-${model.modelId}`}
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 border-b px-3 py-2 text-left text-sub hover:bg-muted/50"
+      >
+        <ChevronRight
+          className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-90')}
+          aria-hidden
+        />
+        <span data-position className="num shrink-0 text-muted-foreground">
+          {position}
+        </span>
+        <span>
+          已关 <span className="num">{n}</span> 条路由
+        </span>
+      </button>
+      <div id={`off-routes-${model.modelId}`} hidden={!open}>
+        {open ? <ModelRoutes model={model} now={now} firstLiveRoute={firstLiveRoute} /> : null}
+      </div>
+    </>
+  );
+}
+
 /** 一个模型下的路由，可拖动改先后（先后不分用途，管这个模型在所有用途里）。 */
 export function ModelRoutes({
   model: m,
