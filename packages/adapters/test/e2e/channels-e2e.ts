@@ -6,7 +6,6 @@
 //   FLEET_ENV=development node packages/adapters/test/e2e/channels-e2e.ts grok <grok 绝对路径> [模型，默认 grok-4.7]
 //   FLEET_ENV=development node packages/adapters/test/e2e/channels-e2e.ts mirasim <执行体> <route> <令牌文件> [期望模型] [账本目录] [点名模型]
 // 只动临时目录（TMPDIR 下），不碰任何配置。
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -25,6 +24,7 @@ import {
 } from '../../src/mirasim/run.ts';
 import { mirasimConnector } from '../../src/mirasim/wire.ts';
 import { sessionProcs } from '../../src/procs.ts';
+import { runChildOk } from '../child.ts';
 
 const [channel, ...rest] = process.argv.slice(2);
 if (!channel || !['cursor', 'grok', 'mirasim'].includes(channel)) {
@@ -33,8 +33,7 @@ if (!channel || !['cursor', 'grok', 'mirasim'].includes(channel)) {
 }
 
 const root = mkdtempSync(join(tmpdir(), 'fleet-p3-e2e-'));
-const git = (cwd: string, ...args: string[]) =>
-  execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const git = (cwd: string, ...args: string[]) => runChildOk('git', args, { cwd, encoding: 'utf8' });
 const origin = join(root, 'origin.git');
 const tree = join(root, 'tree');
 git(root, 'init', '-q', '--bare', '-b', 'main', origin);
