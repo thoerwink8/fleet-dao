@@ -528,6 +528,52 @@ describe('过一会儿再来就行：回 retry，贴的是 pending 不是 failur
     expect(got.retry).toMatchObject({ wait: 'slot', afterSeconds: 45 });
   });
 
+  it('作者族认不出（cursor）、只有 gpt 能派、grok 在等空位：retry（等空位），这一次一个验收会话都没起；gpt 预占的名额收场放掉（#1697）', async () => {
+    const sessions = oneShotSessions();
+    const gpt = okRoute('gpt');
+    if (!gpt.ok) throw new Error('夹具：okRoute 该是派出去的');
+    const r = rig({
+      picks: {
+        gpt: { ...gpt, route: { ...gpt.route, reservationId: 'res-gpt' } },
+        grok: { ok: false, waitFor: 'slot', detail: 'cursor 池并发满了（4/4）', retryAfterSeconds: 25 },
+      },
+      deps: { sessions },
+    });
+    const got = await r.run(r.input({ authorFamilies: ['cursor'] }), ctx());
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry).toMatchObject({ wait: 'slot', afterSeconds: 25 });
+    expect(got.retry?.reason).toContain('grok（cursor 池并发满了（4/4））');
+    expect(r.specs).toHaveLength(0);
+    expect(r.started).toHaveLength(0);
+    expect(r.posted.map((p) => p.state)).toEqual(['pending', 'pending']);
+    expect(r.released).toEqual(['res-gpt']);
+    expect(sessions.live(new Set(['pool-gpt', 'pool-grok']))).toEqual([]);
+  });
+
+  it('两家都验先挑齐两家再起会话：每个会话跑着时，切号登记的是它自己那条路由的池（#1697）', async () => {
+    const sessions = oneShotSessions();
+    const liveAt: { gpt: number; grok: number }[] = [];
+    const r = rig({
+      picks: { gpt: okRoute('gpt'), grok: okRoute('grok') },
+      deps: { sessions },
+      driverRun: async () => {
+        liveAt.push({
+          gpt: sessions.live(new Set(['pool-gpt'])).length,
+          grok: sessions.live(new Set(['pool-grok'])).length,
+        });
+        return report(MODEL_PASS);
+      },
+    });
+    const got = await r.run(r.input({ authorFamilies: ['cursor'] }), ctx());
+    expect(got).toMatchObject({ pass: true });
+    expect(r.recorded.map((row) => row.routeId)).toEqual(['route-gpt', 'route-grok']);
+    expect(liveAt).toEqual([
+      { gpt: 1, grok: 0 },
+      { gpt: 0, grok: 1 },
+    ]);
+    expect(sessions.live(new Set(['pool-gpt', 'pool-grok']))).toEqual([]);
+  });
+
   it('选路没给秒数：用默认的 ROUTE_RETRY_SECONDS', async () => {
     const r = rig({ picks: { gpt: { ok: false, waitFor: 'slot', detail: '没空位' } } });
     const got = await r.run(r.input(), ctx());

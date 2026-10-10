@@ -23,6 +23,7 @@
 // - 单子点名、diff 没改的文件读不到或 fetchNamedFiles 抛错 → **不**走上面这条：提示词里标「读不到」，验收照常问模型。
 //   缺的是核对材料，不是这次验收没跑起来（#1612：缺材料判负会逼写代码的会话来回改）
 // - chooseModelForFamily 对每个可用家族都返回 undefined → problems: ['没讨论成：…']、pass: false
+// - 要派的族有在等的（回 `{ wait }`）、又没有别家给出结论 → 不起会话，routeWait 写明在等谁，调用方过一会儿重来（#1697）
 // - one-shot outcome != 'done' 或结论行不是固定写法 → problems: ['冷调用没跑成：…']、pass: false
 // - 会话失败且失败分流认成上游临时故障（规则表上标了 blip）→ problems 空、upstreamRetry，调用方等一会儿再验
 // - 会话失败但认不出原因 → 换验收用途里下一条家族不同于作者的路由再验；都不行才在 problems 里列出每条路由和报错尾巴
@@ -124,6 +125,16 @@ export const VerifierInvokeOutputSchema = z.object({
       afterSeconds: z.number().positive(),
     })
     .optional(),
+  /**
+   * 没起会话、在等选路（#1697）：要派的族此刻派不出但等得来（chooseModelForFamily 回了 `{ wait }`）。调用方过一会儿重来，
+   * 不报人。families 是在等的族（按问的先后），reason 是「族（在等什么）」用「；」连起来。
+   */
+  routeWait: z
+    .object({
+      families: z.array(ModelFamilySchema).min(1),
+      reason: z.string().min(1),
+    })
+    .optional(),
 });
 export type VerifierInvokeOutput = z.infer<typeof VerifierInvokeOutputSchema>;
 
@@ -215,6 +226,9 @@ export function namedPathsOutsideDiff(
  * routeId：生产的 Spawner 据此在库里查执行方式、会话用户、上游模型串（modelId 只是记账用）；不给，测试里的假 Spawner 也能跑。
  * runId：这一次起会话的编号（runs 主键），挑中时先定下（切号的登记要在起会话之前就知道它，#59）；不给由 one-shot 自己起。
  * reservationId：选路时给这一次验收预占的池的名额（#757）：开跑那一行写进去时换掉；不经选路的不给。
+ * 挑中了没起会话的（两家都验只凑出一家），本模块不放预占：调用方收场时放（real/task-verify.ts 的 finally）。
+ * `{ wait }`：这一族此刻派不出、但等得来（等空位、等额度清零、等熔断到点），wait 写在等什么。和 undefined（没路由、被关、
+ * 硬挡，等也等不来）分开：别家在等时本模块回等待（routeWait），不改成两家都验。
  */
 export type ChooseModelForFamily = (family: ModelFamily) => Promise<
   | {
@@ -224,8 +238,12 @@ export type ChooseModelForFamily = (family: ModelFamily) => Promise<
       runId?: string;
       reservationId?: string;
     }
+  | { wait: string }
   | undefined
 >;
+
+/** chooseModelForFamily 挑中的那种回答（不是 undefined、也不是在等）。 */
+type ChosenModel = Extract<NonNullable<Awaited<ReturnType<ChooseModelForFamily>>>, { modelId: string }>;
 
 /** 挑中的验收方：哪一族、哪个模型、哪条路由。 */
 export interface PickedVerifier {
@@ -233,6 +251,8 @@ export interface PickedVerifier {
   modelId: string;
   channel?: string;
   routeId?: string;
+  /** 挑中时定下的这一次起会话的编号（chooseModelForFamily 给了才有）：调用方在 prepareCwd 里照它登记切号（#59）。 */
+  runId?: string;
 }
 
 export interface VerifierInvokeDeps {
@@ -245,6 +265,7 @@ export interface VerifierInvokeDeps {
   /**
    * 挑中谁之后、起会话之前，为它备会话的工作目录：目录要归这条路由的会话用户，所以只能等挑完才知道备给谁
    * （生产：交给会话用户的一个空目录，验收的会话手上没有仓库检出）。release 在会话收场后调，成败都调；它抛错不改结论。
+   * 两家都验时两家都挑完才起会话，每一家起会话前各调一次：要跟着「这一次起的是谁」的登记（切号）放在这里，不放在挑模型那一下。
    * prepareCwd 本身抛错（路由用不了、目录交不出去）原样往外抛，由调用方记成「没跑起来」。
    */
   prepareCwd?: (picked: PickedVerifier) => Promise<{ cwd: string; release: () => Promise<void> }>;
@@ -598,15 +619,41 @@ export async function invokeVerifier(
       }
     | { kind: 'none' };
 
-  const tryFamily = async (family: ModelFamily): Promise<FamilyOutcome> => {
+  /** 问一族要一个模型：挑中、在等（等得来）、派不出（等不来）。 */
+  type Pick = { kind: 'model'; m: ChosenModel } | { kind: 'wait'; detail: string } | { kind: 'none' };
+  const pickFor = async (family: ModelFamily): Promise<Pick> => {
+    const m = await deps.chooseModelForFamily(family);
+    if (m === undefined) return { kind: 'none' };
+    if ('wait' in m) return { kind: 'wait', detail: m.wait };
+    return { kind: 'model', m };
+  };
+
+  /** 选路说在等的族：别家没有结论时回等待，不起会话（#1697）。 */
+  const waiting: { family: ModelFamily; detail: string }[] = [];
+  const waitOut = (): VerifierInvokeOutput => {
+    const reason = waiting.map((w) => `${w.family}（${w.detail}）`).join('；');
+    return {
+      pass: false,
+      problems: [`没讨论成：要派的族这会儿派不出、等得来（${reason}），这一次没起会话`],
+      notes: '在等选路：过一会儿重来，不改成作者族互验，也不先起一家白跑',
+      round: parsed.round,
+      routeWait: { families: waiting.map((w) => w.family), reason },
+    };
+  };
+
+  /**
+   * 拿挑中的模型起会话。认不出原因的失败换这一族的下一条路由再验（换的那一下挑不出、或在等，这一族就算派不出，
+   * 认不出的报错已经记进 misses）。
+   */
+  const runFamily = async (family: ModelFamily, first: ChosenModel): Promise<FamilyOutcome> => {
+    let m = first;
     while (true) {
-      const m = await deps.chooseModelForFamily(family);
-      if (m === undefined) return { kind: 'none' };
       const picked: PickedVerifier = {
         family,
         modelId: m.modelId,
         ...(m.channel !== undefined ? { channel: m.channel } : {}),
         ...(m.routeId !== undefined ? { routeId: m.routeId } : {}),
+        ...(m.runId !== undefined ? { runId: m.runId } : {}),
       };
       const label = routeLabel(picked);
       if (seenRoutes.has(label)) return { kind: 'none' };
@@ -675,6 +722,9 @@ export async function invokeVerifier(
           }
           if (klass.kind === 'unknown') {
             misses.push({ route: label, tail: klass.tail });
+            const next = await pickFor(family);
+            if (next.kind !== 'model') return { kind: 'none' };
+            m = next.m;
             continue;
           }
         }
@@ -748,11 +798,14 @@ export async function invokeVerifier(
     }
   };
 
-  // 4. 一家验：不要求两家、且有不在避开族里的族给了结论时，和一直以来一样。
+  // 4. 一家验：不要求两家时，按顺序问不在避开族里的族，谁先给出结论就用谁，和一直以来一样。在等的族跳过、记下。
   if (parsed.requireTwoFamilies !== true) {
     for (const family of FAMILY_ORDER) {
       if (avoid.has(family)) continue;
-      const r = await tryFamily(family);
+      const p = await pickFor(family);
+      if (p.kind === 'wait') waiting.push({ family, detail: p.detail });
+      if (p.kind !== 'model') continue;
+      const r = await runFamily(family, p.m);
       if (r.kind === 'final') return r.out;
       if (r.kind === 'verdict') {
         return {
@@ -764,23 +817,34 @@ export async function invokeVerifier(
         };
       }
     }
+    // 别家有在等的、又没有一家给出结论：等它（#1697）。不改成两家都验，那样是作者族互验，没有跨族把关。
+    // 认不出原因的失败（misses）优先：照旧停下列出来，不等了再白跑一遍。
+    if (misses.length === 0 && waiting.length > 0) return waitOut();
   }
 
-  // 5. 两家都验：认不出作者（requireTwoFamilies），或别家一家都派不出。候选族先排不在避开族里的，再排避开族里的，
-  // 各挑一个模型，凑够两个不同的族各给出结论为止。同一族只算一家。
+  // 5. 两家都验：认不出作者（requireTwoFamilies），或别家全都真派不出。候选族先排不在避开族里的，再排避开族里的。
+  // 先把两个不同族的模型都挑出来，挑齐了才起会话（#1697）：只挑到一家时起了它，下一次重来又要把它整个再跑一遍。
+  // 挑到一家、另一家在等：回等待，挑到的那家不起会话，它的预占由调用方收场时放掉。同一族只算一家。
   if (misses.length === 0) {
-    const candidates = [
-      ...FAMILY_ORDER.filter((f) => !avoid.has(f)),
-      ...FAMILY_ORDER.filter((f) => avoid.has(f)),
-    ];
-    const verdicts: Extract<FamilyOutcome, { kind: 'verdict' }>[] = [];
+    const candidates =
+      parsed.requireTwoFamilies === true
+        ? [...FAMILY_ORDER.filter((f) => !avoid.has(f)), ...FAMILY_ORDER.filter((f) => avoid.has(f))]
+        : FAMILY_ORDER.filter((f) => avoid.has(f)); // 不在避开族里的，一家验时已经问过、全都派不出
+    const chosen: { family: ModelFamily; m: ChosenModel }[] = [];
     for (const family of candidates) {
-      if (parsed.requireTwoFamilies !== true && !avoid.has(family)) continue; // 一家验时已经试过、没挑出来
-      const r = await tryFamily(family);
-      if (r.kind === 'final') return r.out;
-      if (r.kind === 'verdict') {
+      if (chosen.length >= 2) break;
+      const p = await pickFor(family);
+      if (p.kind === 'wait') waiting.push({ family, detail: p.detail });
+      if (p.kind === 'model') chosen.push({ family, m: p.m });
+    }
+    if (chosen.length < 2 && waiting.length > 0) return waitOut();
+    const verdicts: Extract<FamilyOutcome, { kind: 'verdict' }>[] = [];
+    if (chosen.length >= 2) {
+      for (const { family, m } of chosen) {
+        const r = await runFamily(family, m);
+        if (r.kind === 'final') return r.out;
+        if (r.kind !== 'verdict') break; // 认不出原因、这一族换不出路由：下面照旧列出试过的路由
         verdicts.push(r);
-        if (verdicts.length >= 2) break;
       }
     }
     if (verdicts.length >= 2) {
@@ -801,7 +865,7 @@ export async function invokeVerifier(
       return {
         pass: false,
         problems: [
-          `没讨论成：两家都验要两个不同的族，只派得出 ${verdicts.length} 家（避开的族 ${[...avoid].join('、') || '无'}）`,
+          `没讨论成：两家都验要两个不同的族，只派得出 ${chosen.length < 2 ? chosen.length : verdicts.length} 家（避开的族 ${[...avoid].join('、') || '无'}）`,
         ],
         notes: '0006：不同家族凑不齐 = 没讨论成，不许默认模型顶上、更不许拿它当 pass',
         round: parsed.round,

@@ -974,3 +974,169 @@ describe('invokeVerifier：两家都验（#1681）', () => {
     ).rejects.toThrow();
   });
 });
+
+describe('invokeVerifier：别家在等先等；两家都验先挑齐再起会话（#1697）', () => {
+  /** 按模型号回脚本里的结局；没写的模型回 pass。models 记下起过会话的模型（按先后）。 */
+  function scriptedOneShot(
+    byModel: Record<string, SpawnOutcome | ((cmd: SpawnCommand) => Promise<SpawnOutcome>)> = {},
+  ): {
+    oneShot: OneShotDeps;
+    models: string[];
+  } {
+    const models: string[] = [];
+    const base = fakeOneShot({ exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false });
+    const oneShot: OneShotDeps = {
+      ...base.oneShot,
+      spawn: async (cmd) => {
+        const model = cmd.argv[cmd.argv.indexOf('--model') + 1] ?? '';
+        models.push(model);
+        const got = byModel[model];
+        if (typeof got === 'function') return got(cmd);
+        return got ?? { exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false };
+      },
+    };
+    return { oneShot, models };
+  }
+  /** 选路剧本：写了模型号的能派，写了 wait 的在等，没写的一条路由都没有。asked 记下问过的族。 */
+  function scriptedChoose(script: Partial<Record<ModelFamily, string | { wait: string }>>): {
+    choose: ChooseModelForFamily;
+    asked: ModelFamily[];
+  } {
+    const asked: ModelFamily[] = [];
+    return {
+      asked,
+      choose: async (family) => {
+        asked.push(family);
+        const got = script[family];
+        if (got === undefined) return undefined;
+        return typeof got === 'string' ? { modelId: got, reservationId: `res-${family}` } : got;
+      },
+    };
+  }
+  const deps = (oneShot: OneShotDeps, choose: ChooseModelForFamily) => ({
+    oneShot,
+    fetchDiff: okFetchDiff(),
+    fetchSpec: okFetchSpec(),
+    chooseModelForFamily: choose,
+    cwd: 'C:/work/x',
+  });
+  const TWO: VerifierInvokeInput = { ...BASE_INPUT, modelFamiliesAvoid: [], requireTwoFamilies: true };
+
+  it('(a) 作者认不出、gpt 能派、grok 在等空位：一个会话都不起，回等待（routeWait 写明在等 grok），不回没讨论成的做不出来', async () => {
+    const { oneShot, models } = scriptedOneShot();
+    const { choose } = scriptedChoose({ gpt: 'gpt-1', grok: { wait: 'cursor 池并发满了（4/4）' } });
+    const out = await invokeVerifier(TWO, deps(oneShot, choose));
+    expect(models).toEqual([]);
+    expect(out.pass).toBe(false);
+    expect(out.session).toBeUndefined();
+    expect(out.routeWait).toEqual({
+      families: ['grok'],
+      reason: expect.stringContaining('cursor 池并发满了'),
+    });
+    expect(out.problems.join('\n')).toMatch(/^没讨论成：/);
+  });
+
+  it('(b) 作者 gpt、claude，别家全在等空位：不起会话、回等待，不去问 gpt、claude（不改成作者族互验）', async () => {
+    const { oneShot, models } = scriptedOneShot();
+    const { choose, asked } = scriptedChoose({
+      gpt: 'gpt-1',
+      claude: 'claude-1',
+      grok: { wait: '没空位' },
+      deepseek: { wait: '没空位' },
+      kimi: { wait: '没空位' },
+    });
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, modelFamiliesAvoid: ['gpt', 'claude'] },
+      deps(oneShot, choose),
+    );
+    expect(models).toEqual([]);
+    expect(asked).toEqual(['grok', 'deepseek', 'kimi']);
+    expect(out.session).toBeUndefined();
+    expect(out.routeWait?.families).toEqual(['grok', 'deepseek', 'kimi']);
+  });
+
+  it('(c) 作者 gpt、claude，别家全都没路由、两家都能派：起两次会话，族是 gpt 和 claude', async () => {
+    const { oneShot, models } = scriptedOneShot();
+    const { choose } = scriptedChoose({ gpt: 'gpt-1', claude: 'claude-1' });
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, modelFamiliesAvoid: ['gpt', 'claude'] },
+      deps(oneShot, choose),
+    );
+    expect(models).toEqual(['gpt-1', 'claude-1']);
+    expect(out.pass).toBe(true);
+    expect(out.routeWait).toBeUndefined();
+    expect(out.session?.family).toBe('claude');
+    expect(out.notes).toContain('两家都验：gpt（model gpt-1）、claude（model claude-1）');
+  });
+
+  it('(d) 两家都验，第一家 pass、第二家撞上游临时故障（429 限流）：回 upstreamRetry，不回 pass', async () => {
+    const { oneShot, models } = scriptedOneShot({
+      'grok-1': {
+        exitCode: 1,
+        stdout: '',
+        stderr: '429 Too Many Requests',
+        killed: false,
+        facts: { detail: '429 Too Many Requests', rawError: '429 Too Many Requests' },
+      },
+    });
+    const { choose } = scriptedChoose({ gpt: 'gpt-1', grok: 'grok-1' });
+    const out = await invokeVerifier(TWO, deps(oneShot, choose));
+    expect(models).toEqual(['gpt-1', 'grok-1']);
+    expect(out.pass).toBe(false);
+    expect(out.upstreamRetry?.afterSeconds).toBeGreaterThan(0);
+    expect(out.session?.family).toBe('grok');
+  });
+
+  it('(e) 两家都验，第一家 pass、第二家会话超时：回 pass: false，写明冷调用没跑成', async () => {
+    // 第二家一直不回，等到限时被杀（限时调到约 30 毫秒）
+    const { oneShot, models } = scriptedOneShot({
+      'grok-1': (cmd) =>
+        new Promise<SpawnOutcome>((resolve) => {
+          cmd.signal.addEventListener(
+            'abort',
+            () => resolve({ exitCode: null, stdout: '', stderr: '', killed: true }),
+            { once: true },
+          );
+        }),
+    });
+    const { choose } = scriptedChoose({ gpt: 'gpt-1', grok: 'grok-1' });
+    const out = await invokeVerifier(TWO, { ...deps(oneShot, choose), timeoutMinutes: 0.0005 });
+    expect(models).toEqual(['gpt-1', 'grok-1']);
+    expect(out.pass).toBe(false);
+    expect(out.session?.outcome).toBe('timeout');
+    expect(out.problems.join('\n')).toContain('冷调用没跑成');
+  });
+
+  it('(f) 两家都验，第一家 pass、第二家结论行写法不对：回 pass: false，写明结论行不是固定写法', async () => {
+    const { oneShot, models } = scriptedOneShot({
+      'grok-1': {
+        exitCode: 0,
+        stdout: ['## 问题', '', 'verdict: not pass'].join('\n'),
+        stderr: '',
+        killed: false,
+      },
+    });
+    const { choose } = scriptedChoose({ gpt: 'gpt-1', grok: 'grok-1' });
+    const out = await invokeVerifier(TWO, deps(oneShot, choose));
+    expect(models).toEqual(['gpt-1', 'grok-1']);
+    expect(out.pass).toBe(false);
+    expect(out.problems.join('\n')).toContain('结论行不是固定写法');
+  });
+
+  it('两家都挑不到、也没有在等的：照旧没讨论成（只派得出 0 家），不带 routeWait', async () => {
+    const { oneShot, models } = scriptedOneShot();
+    const out = await invokeVerifier(TWO, deps(oneShot, scriptedChoose({}).choose));
+    expect(models).toEqual([]);
+    expect(out.routeWait).toBeUndefined();
+    expect(out.problems.join('\n')).toContain('只派得出 0 家');
+  });
+
+  it('一家验：前面的族在等、后面的族能派，照旧派给能派的那家（不为等的那家停下）', async () => {
+    const { oneShot, models } = scriptedOneShot();
+    const { choose } = scriptedChoose({ grok: { wait: '没空位' }, claude: 'claude-1' });
+    const out = await invokeVerifier(BASE_INPUT, deps(oneShot, choose));
+    expect(models).toEqual(['claude-1']);
+    expect(out.pass).toBe(true);
+    expect(out.routeWait).toBeUndefined();
+  });
+});
