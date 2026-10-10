@@ -16,6 +16,9 @@
 //   node-key new <环境编号>（看板多机）：给一个要往这台推快照的环境发一把新通行证：明文只在这一次打印（推送方放进自己的
 //   FLEET_NODE_REPORT_TOKEN），同时打印要贴进这台 api.env 的 FLEET_NODE_KEYS 的那一项（只有哈希）。先写操作记录（不含明文、哈希），
 //   记不成就不打印——发出去的钥匙必须有记录。不改任何配置文件、不重启服务。
+//   session-mint <飞书名或用户 id> --reason "<为什么>" [--ttl <分钟>]（#1800）：发一枚短命的驾驶舱会话 Cookie 给 AI 点验线上用（默认 60 分钟，最多 120）。
+//   先写操作记录（谁、给谁、多久、原因，不含 Cookie 值）再打印两行：Cookie 名、Cookie 值；记不进就不打印、退出 1。
+//   会话里的登录方式记 cli-mint，版本号取此人当前的 sessionVersion（「退出所有设备」能作废它）。只在服务器上跑，不加网络入口。
 //   alert …（design 15.3「谁在处理」）：开着的提醒谁在处理、修到哪；静默。写法和退出码见 alert-cli.ts。
 //   intent …（#553 第 4 条）：指挥官经 ssh 读飞书意图的全部原话、开单时写回归纳和「已开成 #N」、放下。见 intent-cli.ts。
 //   task continue|abandon|redo <owner/仓名> <单号> --note "<为什么>"（#1402）：续、放弃、重做一张单。见 task-cli.ts。
@@ -31,12 +34,13 @@ import { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE, NodeIdSchema } from '@flee
 import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
+import { type Config, loadConfig } from './config.ts';
 import { describeEngineMaster, readEngineMaster, setEngineMaster } from './engine-switch.ts';
 import { INTENT_USAGE, IntentCliError, parseIntentArgs, runIntent } from './intent-cli.ts';
 import type { IntentStore } from './intent-store.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
 import type { AuditRecord, AutoDispatchChange, IntakeRepo, Store, User } from './ports.ts';
-import { isCockpitUser } from './session.ts';
+import { cookieNames, isCockpitUser, signSessionClaims } from './session.ts';
 import {
   type OpenedTaskControl,
   openTaskControl,
@@ -45,6 +49,7 @@ import {
   TASK_USAGE,
   TaskCliError,
 } from './task-cli.ts';
+import { nowSeconds, randomToken } from './tokens.ts';
 
 export class CliError extends Error {
   readonly exitCode: number;
@@ -65,6 +70,8 @@ const DISPATCH_ISSUE_POINTER =
 /** groom（#1338，叫一次临时指挥官整理待办）同样：本体在引擎包（packages/engine/src/bin/groom.ts），由 bin/fleet-api 转过去。 */
 const GROOM_POINTER =
   '用法：fleet-api groom <owner/仓名> [--note "<为什么>"]（叫一次临时指挥官整理待办，只排队、引擎几秒内接手；本体在引擎包，经 packages/api/bin/fleet-api 转过去，完整说明跑 fleet-api groom --help）';
+const SESSION_MINT_USAGE =
+  '用法：fleet-api session-mint <飞书名或用户 id> --reason "<为什么>" [--ttl <分钟，默认 60，最多 120>]（发一枚短命的驾驶舱会话 Cookie 给 AI 点验用：打印两行，Cookie 名和值；先写操作记录，不含 Cookie 值）';
 const NODE_KEY_USAGE =
   '用法：fleet-api node-key new <环境编号>（环境编号：小写字母开头，只许小写字母、数字、短横线；打印一次通行证明文和要贴进 FLEET_NODE_KEYS 的哈希）';
 const DISPATCH_USAGE =
@@ -299,6 +306,122 @@ export async function newNodeKey(input: {
     `2. 推送方那一台：api.env 里 FLEET_NODE_REPORT_TOKEN 填上面那串通行证，FLEET_NODE_REPORT_URL 填这一台的 /api/nodes/report 地址，再重启 fleet-api。`,
     `明文别进聊天、仓库、日志；这一份丢了就重新发一把（旧的从 FLEET_NODE_KEYS 里删掉就作废）。`,
   ].join('\n');
+}
+
+// —— session-mint：给 AI 点验线上驾驶舱发一枚短命会话 Cookie（#1800）——
+
+/** session-mint 的操作记录：和 set-password 一样记成引擎那一类，target 是 cockpit。 */
+export const SESSION_MINT = 'session.mint';
+export const SESSION_MINT_METHOD = 'cli-mint';
+const SESSION_MINT_DEFAULT_TTL = 60;
+const SESSION_MINT_MAX_TTL = 120;
+
+export interface SessionMintArgs {
+  who: string;
+  ttlMinutes: number;
+  reason: string;
+}
+
+/** 认不出的参数一律拒，不猜；--ttl 只收 1 到 120 的整数分钟，--reason 必须有。 */
+export function parseSessionMintArgs(argv: readonly string[]): SessionMintArgs {
+  let who: string | undefined;
+  let ttlRaw: string | undefined;
+  let reason: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i] ?? '';
+    if (arg === '--ttl' || arg === '--reason') {
+      const value = argv[++i];
+      if (value === undefined || (arg === '--ttl' && value.startsWith('--')))
+        throw new CliError(`${arg} 后面要跟值。${SESSION_MINT_USAGE}`, 2);
+      if (arg === '--ttl') ttlRaw = value;
+      else reason = value;
+    } else if (arg.startsWith('-')) {
+      throw new CliError(`认不出参数 ${arg.split('=')[0]}。${SESSION_MINT_USAGE}`, 2);
+    } else if (who === undefined) {
+      who = arg;
+    } else {
+      throw new CliError(`多了参数。${SESSION_MINT_USAGE}`, 2);
+    }
+  }
+  if (!who) throw new CliError(SESSION_MINT_USAGE, 2);
+  if (reason === undefined || reason.trim() === '')
+    throw new CliError(`要带 --reason "<为什么>"（写进操作记录）。${SESSION_MINT_USAGE}`, 2);
+  if (reason.length > MAX_REASON)
+    throw new CliError(`--reason 太长（最多 ${MAX_REASON} 个字）。${SESSION_MINT_USAGE}`, 2);
+  let ttlMinutes = SESSION_MINT_DEFAULT_TTL;
+  if (ttlRaw !== undefined) {
+    ttlMinutes = /^\d+$/.test(ttlRaw) ? Number(ttlRaw) : Number.NaN;
+    if (!Number.isInteger(ttlMinutes) || ttlMinutes < 1 || ttlMinutes > SESSION_MINT_MAX_TTL)
+      throw new CliError(
+        `--ttl 只收 1 到 ${SESSION_MINT_MAX_TTL} 的整数分钟（收到「${ttlRaw}」）。${SESSION_MINT_USAGE}`,
+        2,
+      );
+  }
+  return { who, ttlMinutes, reason: reason.trim() };
+}
+
+/** 读会话密钥等配置。密钥没给就报错：开发环境会临时生成一把随机的，拿它签出来的会话线上认不得，不能用。 */
+function sessionConfig(env: CliEnv): Config {
+  if (!env.FLEET_SESSION_SECRET) {
+    throw new CliError(
+      '没有 FLEET_SESSION_SECRET：要带上 /etc/fleet-dao/api.env 跑（用 packages/api/bin/fleet-api），没发会话',
+      2,
+    );
+  }
+  try {
+    return loadConfig(env);
+  } catch (err) {
+    throw new CliError(`读不出后端配置，没发会话：${errMessage(err)}`, 2);
+  }
+}
+
+/**
+ * 发会话：先写操作记录（谁、给谁、多久、原因；不含 Cookie 值），再签名打印。记录写不进就抛错、什么都不打印。
+ * 会话的版本号取这个人当前的 sessionVersion，「退出所有设备」加 1 就把它作废。输出两行：Cookie 名、Cookie 值。
+ */
+export async function mintSession(input: {
+  store: Store;
+  config: Config;
+  args: SessionMintArgs;
+  operator: string;
+  now: () => Date;
+}): Promise<string> {
+  const { store, config, args } = input;
+  const user = await findTarget(store, args.who);
+  if (!isCockpitUser(user)) {
+    throw new CliError(`「${user.displayName}」不在驾驶舱白名单里（只放行在用的创始人），不发会话`);
+  }
+  const now = input.now();
+  const iat = nowSeconds(now);
+  const exp = iat + args.ttlMinutes * 60;
+  try {
+    await store.appendAudit({
+      actor: { kind: 'engine', id: 'ops:session-mint' },
+      action: SESSION_MINT,
+      target: 'cockpit',
+      after: {
+        userId: user.id,
+        displayName: user.displayName,
+        ttlMinutes: args.ttlMinutes,
+        expiresAt: new Date(exp * 1000).toISOString(),
+        operator: input.operator,
+      },
+      reason: args.reason,
+      via: 'engine',
+      ok: true,
+    });
+  } catch (err) {
+    throw new CliError(`没发成：操作记录写不进（${errMessage(err)}），没有打印会话`);
+  }
+  const value = signSessionClaims(config, {
+    uid: user.id,
+    sid: randomToken(16),
+    iat,
+    exp,
+    m: SESSION_MINT_METHOD,
+    v: user.sessionVersion ?? 0,
+  });
+  return `${cookieNames(config).session}\n${value}`;
 }
 
 // —— dispatch：「让 AI 接活」开关 ——
@@ -711,6 +834,7 @@ const USAGES: Record<string, string> = {
   groom: GROOM_POINTER,
   engine: ENGINE_USAGE,
   'node-key': NODE_KEY_USAGE,
+  'session-mint': SESSION_MINT_USAGE,
   alert: ALERT_USAGE,
   intent: INTENT_USAGE,
   task: TASK_USAGE,
@@ -780,6 +904,17 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
       deps.out(
         await newNodeKey({ store, id: args.id, operator: operatorName(deps.env), token: deps.newToken }),
       );
+      return 0;
+    } finally {
+      await close();
+    }
+  }
+  if (command === 'session-mint') {
+    const args = parseSessionMintArgs(rest);
+    const config = sessionConfig(deps.env);
+    const { store, close } = await deps.openStore(databaseUrl(deps.env));
+    try {
+      deps.out(await mintSession({ store, config, args, operator: operatorName(deps.env), now: deps.now }));
       return 0;
     } finally {
       await close();
