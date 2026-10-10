@@ -617,27 +617,76 @@ JS
 fi
 
 echo "== 真沙箱：经 /proc/<pid>/root 绕路读诱饵失败（同 UID 主机进程）"
+# 对照组：读的进程用 setpriv 成 fleet 后自己起占位再读（yama.ptrace_scope=1 只放行祖先）。
+# 不用 runuser：它的 $! 是 root 的 PAM 父进程，fleet 去读会被拒。沙箱用例的占位用
+# setpriv 直接 exec，$! 就是 fleet 的 sleep；读之前打一行 stat 属主，应是 fleet。
 if ((EUID == 0)) && ((skipped == 0)) && [[ -n "$BAIT" && -n "$BAIT_ID" ]]; then
   STAGE=$TMP/stage-proc
   install -d -o fleet -g fleet -m 750 "$STAGE"
-  runuser -u fleet -- sleep 3600 &
-  HOLDER_PID=$!
-  holder_ok=0
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if [[ -d /proc/$HOLDER_PID ]]; then holder_ok=1; break; fi
-    sleep 0.1
-  done
-  if ((holder_ok == 0)); then
-    echo "  … 没跑成：起不了主机上的 fleet 占位进程"
+  # 读进程用 setpriv 成 fleet 后自己起占位再读（yama 只放行祖先）。已是 fleet 就直接 sleep：
+  # 再套一层 setpriv --init-groups 没有 CAP_SETGID 会失败；$! 仍是本 shell 的 fleet 子进程，
+  # 不是 runuser 那种留下收 PAM 的 root 父进程。
+  outside=$(setpriv --reuid=fleet --regid=fleet --init-groups -- bash -c '
+set -uo pipefail
+bait=$1
+sleep 3600 &
+holder=$!
+ok=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if [[ -d /proc/$holder ]]; then ok=1; break; fi
+  sleep 0.1
+done
+if ((ok == 0)); then
+  printf "%s\n" "NOHOLDER"
+  exit 2
+fi
+printf "HOLDER_USER=%s\n" "$(stat -c "%U" /proc/$holder)"
+bypass="/proc/${holder}/root${bait}"
+if ! content=$(cat -- "$bypass" 2>&1); then
+  printf "%s\n" "READFAIL ${content}"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  exit 3
+fi
+printf "%s" "$content"
+kill "$holder" 2>/dev/null || true
+wait "$holder" 2>/dev/null || true
+exit 0
+' bash "$BAIT" 2>&1) || true
+  holder_user=""
+  if [[ "$outside" == HOLDER_USER=* ]]; then
+    holder_user=${outside#HOLDER_USER=}
+    holder_user=${holder_user%%$'\n'*}
+  fi
+  printf '  … 对照组占位进程属主：%s\n' "${holder_user:-（未打出）}"
+  # 正文在 HOLDER_USER= 行之后；剥掉首行再比诱饵
+  outside_body=${outside#*$'\n'}
+  if [[ "$outside" == *NOHOLDER* ]]; then
+    echo "  … 没跑成：对照组起不了主机上的 fleet 占位进程"
+    skipped=1
+  elif [[ "$holder_user" != fleet ]]; then
+    echo "  … 没跑成：对照组占位进程不是 fleet（${holder_user:-空}），setpriv 起出来的不是 fleet 身份"
+    skipped=1
+  elif [[ "$outside_body" != "$CANARY" && "$outside_body" != "$CANARY"$'\n' ]]; then
+    echo "  … 没跑成：沙箱外经 /proc/<pid>/root 也读不到诱饵（${outside//$CANARY/【内容已隐去】}），没法证明是沙箱挡住的"
     skipped=1
   else
-    bypass_path="/proc/${HOLDER_PID}/root${BAIT}"
-    outside=$(runuser -u fleet -- cat -- "$bypass_path" 2>&1) || true
-    if [[ "$outside" != "$CANARY" && "$outside" != "$CANARY"$'\n' ]]; then
-      echo "  … 没跑成：沙箱外经 /proc/<pid>/root 也读不到诱饵（${outside//$CANARY/【内容已隐去】}），没法证明是沙箱挡住的"
+    printf '  ✓ 沙箱外同 UID 经 /proc/<pid>/root 能读到诱饵（基线）\n'
+    # 沙箱用例：主机上另起一个 fleet 占位（setpriv 直接 exec，$! 就是它），沙箱里去读应被拒
+    setpriv --reuid=fleet --regid=fleet --init-groups -- sleep 3600 &
+    HOLDER_PID=$!
+    holder_ok=0
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      if [[ -d /proc/$HOLDER_PID ]]; then holder_ok=1; break; fi
+      sleep 0.1
+    done
+    sandbox_user=$(stat -c '%U' /proc/$HOLDER_PID 2>/dev/null || true)
+    printf '  … 沙箱用例占位进程属主：%s\n' "${sandbox_user:-（未打出）}"
+    if ((holder_ok == 0)) || [[ "$sandbox_user" != fleet ]]; then
+      echo "  … 没跑成：沙箱用例起不了主机上的 fleet 占位进程（属主 ${sandbox_user:-空}）"
       skipped=1
     else
-      printf '  ✓ 沙箱外同 UID 经 /proc/<pid>/root 能读到诱饵（基线）\n'
+      bypass_path="/proc/${HOLDER_PID}/root${BAIT}"
       : >"$BARE_CALLS"
       BUILD_SANDBOX_STATE=""
       rc=0

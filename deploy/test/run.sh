@@ -123,10 +123,16 @@ check_ports() {
   fi
 }
 
-run_script() { # 脚本的完整路径：0 过、2 没跑成、别的不通过
+run_script() { # 脚本的完整路径 [sudo]：0 过、2 没跑成、别的不通过
   local out rc=0 line
   # 先收齐再打印：退出码 2 时才能把原因写进注解。判定和原来一样，不把没跑成当成通过。
-  out=$(bash "$1" 2>&1) || rc=$?
+  # 第二参数是 sudo：真沙箱那几条要 root（GitHub CI 免密 sudo）。已是 root 就直接跑，不套一层
+  # （有的环境带 no-new-privileges，嵌套 sudo 起不来）。
+  if [[ "${2-}" == sudo ]] && ((EUID != 0)); then
+    out=$(sudo bash "$1" 2>&1) || rc=$?
+  else
+    out=$(bash "$1" 2>&1) || rc=$?
+  fi
   printf '%s\n' "$out"
   case $rc in
   0) ;;
@@ -257,6 +263,8 @@ run_unit() { # 项目名
   backup) run_script "$DEPLOY/backup/test/backup.test.sh" ;;
   node-tests) unit_node_tests ;;
   ports) check_ports ;;
+  # 构建隔离真沙箱要 root：单独 sudo 跑（CI 免密）；建不成红字失败，不跳过
+  build-isolation) run_script "$HERE/build-isolation.test.sh" sudo ;;
   *) run_test "$unit.test.sh" ;;
   esac
   echo "⏱ $unit $((SECONDS - t0)) 秒"
