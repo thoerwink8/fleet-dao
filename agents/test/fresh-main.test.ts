@@ -15,7 +15,9 @@ interface R {
   error?: (Error & { code?: string }) | undefined;
   timeoutMs?: number;
 }
-type Git = (cwd: string, args: string[], opts?: { direct?: boolean }) => R;
+type Opts = { direct?: boolean; proxy?: string; timeoutMs?: number };
+type Git = (cwd: string, args: string[], opts?: Opts) => R;
+type Fallback = { proxy?: string; bad?: boolean };
 interface Lib {
   PROXY_VARS: string[];
   hasProxy(env: Record<string, string | undefined>): boolean;
@@ -24,8 +26,17 @@ interface Lib {
     git: Git,
     cwd: string,
     args: string[],
-    h: { okOf: (r: R) => boolean; whyOf: (r: R) => string; env?: Record<string, string | undefined> },
-  ): { ok: boolean; via: 'env' | 'direct'; why: string };
+    h: {
+      okOf: (r: R) => boolean;
+      whyOf: (r: R) => string;
+      env?: Record<string, string | undefined>;
+      fallbackProxy?: string;
+      budget?: { totalMs: number; directMs: number; fallbackMs: number };
+      clock?: () => number;
+    },
+  ): { ok: boolean; via: 'env' | 'direct' | 'fallback'; why: string };
+  parseFallbackProxy(text: string): Fallback;
+  readFallbackProxy(home?: string): Fallback;
   freshBeforeSubagent(o: {
     tool: unknown;
     toolInput: unknown;
@@ -36,10 +47,13 @@ interface Lib {
     env?: Record<string, string | undefined>;
     home?: string;
     now?: number;
+    fallback?: Fallback;
   }): { block: true; message: string } | null;
   FETCH_QUIET_MS: number;
   SUBAGENT_FETCH_MS: number;
   SUBAGENT_DIRECT_MS: number;
+  SUBAGENT_FALLBACK_MS: number;
+  SUBAGENT_BUDGET_MS: number;
   isRefRace(r: R): boolean;
   gitOk(r: R): boolean;
   gitWhy(r: R): string;
@@ -274,6 +288,176 @@ describe('起子代理前先把 origin/main 取到最新', () => {
     const noOrigin: Git = (_c, args) =>
       args[0] === 'rev-parse' ? good('true\n') : { status: 2, stdout: '', stderr: 'error: No such remote' };
     expect(run(noOrigin, 'Task', worktreeAgent)).toBeNull();
+  });
+});
+
+// 第三条路：备用代理（2026-10-10 会话环境代理死了、直连不通、Clash 口通，子代理全被拦）
+const timedOut = (ms: number): R => ({
+  status: null,
+  stdout: '',
+  stderr: '',
+  error: Object.assign(new Error('t'), { code: 'ETIMEDOUT' }),
+  timeoutMs: ms,
+});
+const CLASH = 'http://127.0.0.1:7890';
+
+/** 按用的路返回结果：环境（无 opts）、直连、备用代理各给一个，记下每次的 opts */
+function byRoute(env: R, direct: R, fallback: R) {
+  const opts: (Opts | undefined)[] = [];
+  const git: Git = (_cwd, args, o) => {
+    if (args[0] !== 'fetch') return good(args[0] === 'rev-parse' ? 'true\n' : 'x\n');
+    opts.push(o);
+    return o?.proxy ? fallback : o?.direct ? direct : env;
+  };
+  return { git, opts };
+}
+
+describe('备用代理文件 ~/.fleet-dao/fallback-proxy', () => {
+  it('认 http:// 和 socks5:// 的 host:port，只看第一行；空的是没配；带账号密码或别的写法认不出', () => {
+    expect(lib.parseFallbackProxy(`${CLASH}\nignored\n`)).toEqual({ proxy: CLASH });
+    expect(lib.parseFallbackProxy('socks5://localhost:1080\r\n')).toEqual({
+      proxy: 'socks5://localhost:1080',
+    });
+    expect(lib.parseFallbackProxy('')).toEqual({});
+    expect(lib.parseFallbackProxy('\n')).toEqual({});
+    for (const bad of [
+      '127.0.0.1:7890',
+      'https://127.0.0.1:7890',
+      ['http://u', 'p@127.0.0.1:7890'].join(':'), // 拼出来，免得被卫生检查当成网址里的密码
+      'http://host',
+    ])
+      expect(lib.parseFallbackProxy(bad)).toEqual({ bad: true });
+  });
+
+  it('文件不在读不到：当没配', () => {
+    expect(lib.readFallbackProxy(join(tmpdir(), 'no-such-home-1777'))).toEqual({});
+  });
+});
+
+describe('取远端：环境代理、直连都没成，再经备用代理取一次', () => {
+  it('(a) 环境代理被拒、直连超时、备用代理成：via 为 fallback，备用代理那次带 proxy', () => {
+    const s = byRoute(refused(), timedOut(3000), good());
+    const r = lib.fetchWithFallback(s.git, '/r', ['fetch'], { ...h(PROXY), fallbackProxy: CLASH });
+    expect(r).toEqual({ ok: true, via: 'fallback', why: '' });
+    expect(s.opts).toEqual([undefined, { direct: true }, { proxy: CLASH }]);
+  });
+
+  it('(b) 三条都不成：ok 为 false，why 写出三次各自的原因', () => {
+    const s = byRoute(refused(), timedOut(3000), timedOut(3000));
+    const r = lib.fetchWithFallback(s.git, '/r', ['fetch'], { ...h(PROXY), fallbackProxy: CLASH });
+    expect(r.ok).toBe(false);
+    expect(r.via).toBe('fallback');
+    expect(r.why).toContain('经环境里的代理没成（fatal: unable to access');
+    expect(r.why).toContain('去掉代理直连也没成（超过 3 秒没完）');
+    expect(r.why).toContain(`经备用代理 ${CLASH} 也没成（超过 3 秒没完）`);
+  });
+
+  it('环境里没设代理、但配了备用代理：直连那次就是第一次，再走备用代理', () => {
+    const s = byRoute(timedOut(3000), good(), good());
+    const r = lib.fetchWithFallback(s.git, '/r', ['fetch'], { ...h({ PATH: '/bin' }), fallbackProxy: CLASH });
+    expect(r).toEqual({ ok: true, via: 'fallback', why: '' });
+    expect(s.opts).toEqual([undefined, { proxy: CLASH }]);
+  });
+
+  it('(c) 没配备用代理：和以前一样，只两次，why 里没有备用代理', () => {
+    const s = byRoute(refused(), timedOut(3000), good());
+    const r = lib.fetchWithFallback(s.git, '/r', ['fetch'], h(PROXY));
+    expect(r.ok).toBe(false);
+    expect(r.via).toBe('direct');
+    expect(r.why).not.toContain('备用代理');
+    expect(s.opts).toEqual([undefined, { direct: true }]);
+  });
+
+  it('预算：环境代理被拒当场失败不占预算，直连和备用代理都拿满；环境代理拖满 6 秒，直连让位、备用代理还有 3 秒', () => {
+    const budget = { totalMs: 9_000, directMs: 3_000, fallbackMs: 3_000 };
+    let t = 0;
+    const slow = byRoute(refused(), timedOut(3000), good());
+    // 被拒：时钟不动
+    lib.fetchWithFallback(slow.git, '/r', ['fetch'], {
+      ...h(PROXY),
+      fallbackProxy: CLASH,
+      budget,
+      clock: () => t,
+    });
+    expect(slow.opts).toEqual([
+      undefined,
+      { direct: true, timeoutMs: 3000 },
+      { proxy: CLASH, timeoutMs: 3000 },
+    ]);
+    // 拖满：第一次花掉 6 秒
+    t = 0;
+    const hung: Git = (_c, _a, o) => {
+      if (!o) t += 6_000;
+      return o?.proxy ? good() : timedOut(6000);
+    };
+    const seen: (Opts | undefined)[] = [];
+    const rec: Git = (c, a, o) => {
+      seen.push(o);
+      return hung(c, a, o);
+    };
+    const r = lib.fetchWithFallback(rec, '/r', ['fetch'], {
+      ...h(PROXY),
+      fallbackProxy: CLASH,
+      budget,
+      clock: () => t,
+    });
+    expect(r.via).toBe('fallback');
+    expect(seen).toEqual([undefined, { proxy: CLASH, timeoutMs: 3000 }]);
+    expect(lib.SUBAGENT_BUDGET_MS).toBeLessThan(10_000);
+    expect(lib.SUBAGENT_FALLBACK_MS).toBe(3_000);
+  });
+});
+
+describe('起子代理前取远端：备用代理', () => {
+  const go = (git: Git, fallback?: Fallback) =>
+    lib.freshBeforeSubagent({
+      tool: 'Agent',
+      toolInput: worktreeAgent,
+      cwd: '/r',
+      git,
+      okOf: lib.gitOk,
+      whyOf: lib.gitWhy,
+      env: PROXY,
+      ...(fallback ? { fallback } : {}),
+    });
+
+  function repo(fetchByRoute: { env: R; direct: R; fallback: R }) {
+    const git: Git = (_cwd, args, o) => {
+      if (args[0] === 'fetch')
+        return o?.proxy ? fetchByRoute.fallback : o?.direct ? fetchByRoute.direct : fetchByRoute.env;
+      if (args[0] === 'rev-parse') return good('true\n');
+      if (args[0] === 'log') return good('abc1234（9 hours ago）\n');
+      return good('https://example/x.git\n');
+    };
+    return git;
+  }
+
+  it('(a) 环境代理被拒、直连超时、备用代理成：不拦', () => {
+    expect(
+      go(repo({ env: refused(), direct: timedOut(3000), fallback: good() }), { proxy: CLASH }),
+    ).toBeNull();
+  });
+
+  it('(b) 三条都不成：要建工作树的拦下，话里有三段原因', () => {
+    const v = go(repo({ env: refused(), direct: timedOut(3000), fallback: timedOut(3000) }), {
+      proxy: CLASH,
+    });
+    expect(v?.block).toBe(true);
+    expect(v?.message).toContain('经环境里的代理没成');
+    expect(v?.message).toContain('去掉代理直连也没成');
+    expect(v?.message).toContain('经备用代理');
+  });
+
+  it('(c) 没配备用代理：和以前一样拦，话里没有备用代理', () => {
+    const v = go(repo({ env: refused(), direct: timedOut(3000), fallback: good() }));
+    expect(v?.block).toBe(true);
+    expect(v?.message).not.toContain('备用代理');
+  });
+
+  it('(d) 备用代理那行认不出：当没配（不去用它），话里写明认不出', () => {
+    const v = go(repo({ env: refused(), direct: timedOut(3000), fallback: good() }), { bad: true });
+    expect(v?.block).toBe(true);
+    expect(v?.message).toContain('备用代理那一行认不出');
   });
 });
 
