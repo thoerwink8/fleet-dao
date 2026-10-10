@@ -501,9 +501,10 @@ function quotaPool(over: Partial<QuotaTablePool> = {}): QuotaTablePool {
 
 describe('历史事实类提醒合并超过 7 天自动收（#1645）', () => {
   const daysAgo = (d: number) => new Date(NOW.getTime() - d * 24 * 60 * 60_000);
+  const aged = (key: string) => openAlert(key, { createdAt: daysAgo(30) });
 
   it('合并 8 天的 reconcile:pr: 提醒被撤，理由写历史事实', async () => {
-    const old = openAlert(prAlertKey('acme', 'widgets', 389));
+    const old = aged(prAlertKey('acme', 'widgets', 389));
     const w = world({ open: [old], prMergedAt: async () => daysAgo(8) });
     const part = await retireHistoricalFactAlerts(w.deps);
     expect(part).toMatchObject({ scanned: 1, found: 1, unchecked: [] });
@@ -513,7 +514,7 @@ describe('历史事实类提醒合并超过 7 天自动收（#1645）', () => {
   });
 
   it('合并 2 天的不撤', async () => {
-    const recent = openAlert(prAlertKey('acme', 'widgets', 5));
+    const recent = aged(prAlertKey('acme', 'widgets', 5));
     const w = world({ open: [recent], prMergedAt: async () => daysAgo(2) });
     const part = await retireHistoricalFactAlerts(w.deps);
     expect(part).toMatchObject({ scanned: 1, found: 0, unchecked: [] });
@@ -521,7 +522,7 @@ describe('历史事实类提醒合并超过 7 天自动收（#1645）', () => {
   });
 
   it('【故意造出的失败】读合并时刻抛错：不撤，unchecked 有一条', async () => {
-    const old = openAlert(prAlertKey('acme', 'widgets', 389));
+    const old = aged(prAlertKey('acme', 'widgets', 389));
     const w = world({
       open: [old],
       prMergedAt: async () => {
@@ -547,7 +548,7 @@ describe('历史事实类提醒合并超过 7 天自动收（#1645）', () => {
 
   it('合并 8 天的 reconcile:ledger: 提醒在 checkLedgers 里不再复查、不再重新报', async () => {
     const key = ledgerAlertKey('acme', 'widgets', 389);
-    const old = openAlert(key);
+    const old = aged(key);
     const w = world({
       open: [old],
       prMergedAt: async () => daysAgo(8),

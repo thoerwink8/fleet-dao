@@ -50,6 +50,8 @@ const ALERT_LIST_LIMIT = 500;
 /** PR 合并超过这么多天，「没经合并队列合」「记账不全」就是改不了的历史事实：自动收掉，不再复查、不再催。 */
 export const HISTORICAL_FACT_DAYS = 7;
 const HISTORICAL_FACT_MS = HISTORICAL_FACT_DAYS * 24 * 60 * 60_000;
+/** 这两类提醒只对回看窗口里合的 PR 报；提醒开了不到「7 天减回看窗口」的，PR 一定合了不到 7 天，不用读合并时刻。 */
+const SURELY_RECENT_ALERT_MS = HISTORICAL_FACT_MS - MERGED_PR_LOOKBACK_MS;
 
 export function prAlertKey(owner: string, name: string, number: number): string {
   return `${PR_ALERT_PREFIX}${owner}/${name}#${number}`;
@@ -267,6 +269,7 @@ export async function retireHistoricalFactAlerts(deps: ReconcileCheckDeps): Prom
       part.unchecked.push(`提醒 ${alert.dedupeKey} 认不出是哪条 PR，不收`);
       continue;
     }
+    if (deps.now().getTime() - alert.createdAt.getTime() < SURELY_RECENT_ALERT_MS) continue;
     let old: boolean;
     try {
       old = await mergedOverSevenDays(deps, pr);
@@ -288,7 +291,7 @@ export async function retireHistoricalFactAlerts(deps: ReconcileCheckDeps): Prom
 export async function checkLedgers(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();
   const now = deps.now();
-  let open: { dedupeKey: string }[] | null = null;
+  let open: { dedupeKey: string; createdAt: Date }[] | null = null;
   try {
     const listed = await deps.alerts.listOpen(ALERT_LIST_LIMIT);
     open = listed.alerts.filter((a) => a.dedupeKey.startsWith(LEDGER_ALERT_PREFIX));
@@ -304,7 +307,7 @@ export async function checkLedgers(deps: ReconcileCheckDeps): Promise<SweepPart>
   const historical = new Set<string>();
   for (const a of open ?? []) {
     const pr = parseLedgerKey(a.dedupeKey);
-    if (!pr) continue;
+    if (!pr || now.getTime() - a.createdAt.getTime() < SURELY_RECENT_ALERT_MS) continue;
     try {
       if (await mergedOverSevenDays(deps, pr)) historical.add(a.dedupeKey);
     } catch {
