@@ -17,7 +17,11 @@ import { errMessage } from '@fleet-dao/shared/util';
 import type { HourlyReconcileRun } from '../contract.ts';
 import { type AlertSweepDeps, sweepAlerts } from './alert-sweep.ts';
 import { type AutoMergeCheckDeps, checkAutoMerges } from './auto-merge-check.ts';
-import { abandonClosedIssueTasks, type ClosedIssueTaskDeps } from './closed-issue-tasks.ts';
+import {
+  abandonClosedIssueTasks,
+  type ClosedIssueTaskDeps,
+  settleIdleClosedIssueRows,
+} from './closed-issue-tasks.ts';
 import { checkGitHubApps, type GitHubAppCheckDeps } from './github-app-check.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 import {
@@ -120,6 +124,8 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   const autoMerges = await checkAutoMerges(deps);
   // 单已关、任务还挂着的撤掉（#1198）：放在提醒之前，撤掉的任务那一轮之后的提醒对账再收拾它留下的提醒
   const closedTasks = await abandonClosedIssueTasks(deps);
+  // 单已关、没有工作流的遗留行也收掉（#1622）：和上面的任务工作流对账合并统计
+  const idleClosedRows = await settleIdleClosedIssueRows(deps);
   let alerts: SweepPart;
   try {
     const now = await listOpen(deps);
@@ -163,6 +169,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     quota,
     autoMerges,
     closedTasks,
+    idleClosedRows,
     alerts,
     apps,
     poolHoldPart,

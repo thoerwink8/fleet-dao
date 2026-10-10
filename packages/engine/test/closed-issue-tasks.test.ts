@@ -1,5 +1,6 @@
 // 单已关、任务还挂着就发放弃信号（jobs/closed-issue-tasks.ts，#1198）：关了的发、开着的不动、读不到的记没查成不动、
 // 已结束的（收信人不在）不算问题。读不到、发不成都故意造一次：不许记成 ok、不许撤任务。
+import type { OpenTaskRow } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import {
   abandonClosedIssueTasks,
@@ -7,29 +8,38 @@ import {
   CLOSED_ISSUE_ABANDON_REASON,
   type ClosedIssueTaskDeps,
   parseTaskWorkflowId,
+  settleIdleClosedIssueRows,
 } from '../src/jobs/closed-issue-tasks.ts';
 
 interface World {
   deps: ClosedIssueTaskDeps;
   signals: { workflowId: string; by: string; reason: string }[];
+  stopped: { taskIds: string[]; reason: string }[];
   logs: string[];
 }
 
 function world(
   over: Partial<ClosedIssueTaskDeps['closedIssueTasks']> & {
     states?: Record<string, 'open' | 'closed'>;
+    openRows?: OpenTaskRow[];
   } = {},
 ): World {
   const signals: World['signals'] = [];
+  const stopped: World['stopped'] = [];
   const logs: string[] = [];
-  const { states = {}, ...port } = over;
+  const { states = {}, openRows = [], ...port } = over;
   const deps: ClosedIssueTaskDeps = {
     closedIssueTasks: {
       runningTaskWorkflowIds: async () => [],
+      openTaskRows: async () => openRows,
       async issueState(repo, n) {
         const s = states[`${repo.owner}/${repo.name}#${n}`];
         if (!s) throw new Error(`用例没给 ${repo.owner}/${repo.name}#${n} 的状态`);
         return s;
+      },
+      async stopRows(taskIds, reason) {
+        stopped.push({ taskIds: [...taskIds], reason });
+        return taskIds.length;
       },
       async abandon(workflowId, c) {
         signals.push({ workflowId, ...c });
@@ -40,7 +50,7 @@ function world(
     now: () => new Date('2026-10-07T10:00:00.000Z'),
     log: (_level, text) => logs.push(text),
   };
-  return { deps, signals, logs };
+  return { deps, signals, stopped, logs };
 }
 
 describe('parseTaskWorkflowId', () => {
@@ -135,5 +145,75 @@ describe('单已关就撤掉还挂着的任务（abandonClosedIssueTasks）', ()
     expect(part.unchecked).toHaveLength(2);
     expect(part.unchecked.join('；')).toContain('信号超时');
     expect(part.unchecked.join('；')).toContain('task:weird');
+  });
+});
+
+describe('单已关、没有工作流的遗留任务行（settleIdleClosedIssueRows）', () => {
+  const row = (taskId = 'task-row-1', issueNumber = 1): OpenTaskRow => ({
+    taskId,
+    owner: 'acme',
+    name: 'demo',
+    issueNumber,
+    state: 'running',
+  });
+
+  it('非终态行、没有工作流、单已关：改成 stopped，found 加一并记日志', async () => {
+    const w = world({ openRows: [row()], states: { 'acme/demo#1': 'closed' } });
+
+    const part = await settleIdleClosedIssueRows(w.deps);
+
+    expect(w.stopped).toEqual([{ taskIds: ['task-row-1'], reason: '单已关闭，没有工作流在跑' }]);
+    expect(part).toEqual({ scanned: 1, found: 1, unchecked: [] });
+    expect(w.logs).toHaveLength(1);
+  });
+
+  it('工作流还在跑的行不查单、不改行', async () => {
+    const w = world({
+      openRows: [row()],
+      runningTaskWorkflowIds: async () => ['task:acme/demo#1'],
+    });
+
+    const part = await settleIdleClosedIssueRows(w.deps);
+
+    expect(w.stopped).toEqual([]);
+    expect(part).toEqual({ scanned: 1, found: 0, unchecked: [] });
+  });
+
+  it('单还开着的行不动', async () => {
+    const w = world({ openRows: [row()], states: { 'acme/demo#1': 'open' } });
+
+    const part = await settleIdleClosedIssueRows(w.deps);
+
+    expect(w.stopped).toEqual([]);
+    expect(part).toEqual({ scanned: 1, found: 0, unchecked: [] });
+  });
+
+  it('读单状态抛错：不改行，记进 unchecked', async () => {
+    const w = world({
+      openRows: [row()],
+      issueState: async () => {
+        throw new Error('GitHub 502');
+      },
+    });
+
+    const part = await settleIdleClosedIssueRows(w.deps);
+
+    expect(w.stopped).toEqual([]);
+    expect(part).toMatchObject({ scanned: 1, found: 0 });
+    expect(part.unchecked).toHaveLength(1);
+    expect(part.unchecked[0]).toContain('GitHub 502');
+  });
+
+  it('列非终态任务行抛错：返回 failed，写明原因', async () => {
+    const w = world({
+      openTaskRows: async () => {
+        throw new Error('数据库连不上');
+      },
+    });
+
+    const part = await settleIdleClosedIssueRows(w.deps);
+
+    expect(part.failed).toContain('数据库连不上');
+    expect(part.found).toBe(0);
   });
 });
