@@ -28,7 +28,7 @@ function world(
   const signals: World['signals'] = [];
   const stopped: World['stopped'] = [];
   const logs: string[] = [];
-  const { states = {}, openRows = [], ...port } = over;
+  const { states = {}, openRows = [], openIssueLabels, ...port } = over;
   const deps: ClosedIssueTaskDeps = {
     closedIssueTasks: {
       runningTaskWorkflowIds: async () => [],
@@ -46,6 +46,8 @@ function world(
         signals.push({ workflowId, ...c });
         return 'sent';
       },
+      // 标签读取口子显式转交：没给就不装配（对应「不提供就不收母单、本机做的排队行」）。
+      ...(openIssueLabels && { openIssueLabels }),
       ...port,
     },
     now: () => new Date('2026-10-07T10:00:00.000Z'),
@@ -293,6 +295,21 @@ describe('单已关、没有工作流的遗留任务行（settleIdleClosedIssueR
       expect(part).toMatchObject({ scanned: 2, found: 0 });
       expect(part.unchecked).toHaveLength(2);
       expect(part.unchecked[0]).toContain('GitHub 502');
+    });
+
+    it('world 把 openIssueLabels 原样转交给装配；不给就没有这个口子', () => {
+      const read = async () => new Map<number, readonly string[]>();
+      expect(world({ openIssueLabels: read }).deps.closedIssueTasks.openIssueLabels).toBe(read);
+      expect(world().deps.closedIssueTasks.openIssueLabels).toBeUndefined();
+    });
+
+    it('没有标签口子：开着的单一律不动', async () => {
+      const w = world({ openRows: [row()], states: { 'acme/demo#1': 'open' } });
+
+      const part = await settleIdleClosedIssueRows(w.deps);
+
+      expect(w.stopped).toEqual([]);
+      expect(part).toEqual({ scanned: 1, found: 0, unchecked: [] });
     });
 
     it('同一个仓只读一次标签', async () => {
