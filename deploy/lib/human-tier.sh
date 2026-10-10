@@ -186,6 +186,19 @@ readback_sshd_hardening() {
 
 # fail2ban 的 sshd jail（人工档，#1348）：装法同上，先 fail2ban-client -t 验、过了才放着并 reload，不过就撤掉这份、判红。
 # 没装 fail2ban 只记待配，不装软件包（装包是另一件事）。内容和为什么见 deploy/france/fail2ban-sshd.jail。
+# ignoreip 加上 10.99.0.0/24 之后，已经封着的隧道对端不会自动解封（#1775）：reload 后扫一遍 ban 列表，落在 WG 网段的一律 unban。
+unban_fail2ban_wg_sshd() {
+  local status ip
+  status=$(fail2ban-client status sshd 2>/dev/null) || return 0
+  # status 里「Banned IP list:」后面空格隔开的 IP；只动 10.99.0.0/24
+  while read -r ip; do
+    [[ "$ip" =~ ^10\.99\.0\.[0-9]+$ ]] || continue
+    if fail2ban-client set sshd unbanip "$ip" >/dev/null 2>&1; then
+      changed "fail2ban unban sshd $ip（WG 网段，#1775）"
+    fi
+  done < <(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' <<<"$status" | sort -u)
+}
+
 setup_fail2ban_sshd() {
   step "fail2ban 的 sshd jail（$FAIL2BAN_SSHD_JAIL：3 次失败封 1 小时、反复来的越封越长；没装 fail2ban 就只记待配，不装软件包）"
   local err
@@ -198,21 +211,26 @@ setup_fail2ban_sshd() {
     return 1
   fi
   put_file "$FAIL2BAN_SSHD_JAIL" root:root 644 "$(<"$DEPLOY_DIR/france/fail2ban-sshd.jail")"
-  if ((WROTE == 0)); then return 0; fi
-  if ! err=$(fail2ban-client -t 2>&1); then
-    rm -f -- "$FAIL2BAN_SSHD_JAIL"
-    red "放上 $FAIL2BAN_SSHD_JAIL 之后 fail2ban-client -t 不过，已撤掉、没重载：${err:0:300}"
-    return 1
-  fi
-  if [[ "$(systemctl is-active fail2ban.service 2>/dev/null)" != active ]]; then
-    pending "fail2ban.service 没在跑：$FAIL2BAN_SSHD_JAIL 已放好，它起来时会读到；起来后再跑一遍 france.sh 读回"
+  if ((WROTE)); then
+    if ! err=$(fail2ban-client -t 2>&1); then
+      rm -f -- "$FAIL2BAN_SSHD_JAIL"
+      red "放上 $FAIL2BAN_SSHD_JAIL 之后 fail2ban-client -t 不过，已撤掉、没重载：${err:0:300}"
+      return 1
+    fi
+    if [[ "$(systemctl is-active fail2ban.service 2>/dev/null)" != active ]]; then
+      pending "fail2ban.service 没在跑：$FAIL2BAN_SSHD_JAIL 已放好，它起来时会读到；起来后再跑一遍 france.sh 读回"
+      return 0
+    fi
+    if ! err=$(fail2ban-client reload 2>&1); then
+      red "fail2ban-client reload 没成（$FAIL2BAN_SSHD_JAIL 已放好，-t 是过的）：${err:0:300}"
+      return 1
+    fi
+    changed "fail2ban-client reload"
+  elif [[ "$(systemctl is-active fail2ban.service 2>/dev/null)" != active ]]; then
     return 0
   fi
-  if ! err=$(fail2ban-client reload 2>&1); then
-    red "fail2ban-client reload 没成（$FAIL2BAN_SSHD_JAIL 已放好，-t 是过的）：${err:0:300}"
-    return 1
-  fi
-  changed "fail2ban-client reload"
+  # 文件已齐或刚 reload：清掉仍封着的 WG 对端（ignoreip 不回溯解封）
+  unban_fail2ban_wg_sshd
 }
 
 # 读回：文件和仓里一样；在跑的 sshd jail 四项（maxretry、findtime、bantime、bantime.increment）就是要的值；

@@ -7,10 +7,10 @@
 #   2. sshd：首次装 → 放文件、sshd -t、reload；再跑一遍什么都不动；
 #      【故意造出的失败】sshd -t 不过 → 文件撤掉、不 reload、判红；reload 失败 → 判红（文件留着）；目录不在、没有 sshd 命令 → 判红
 #   3. sshd 读回：有效配置三项对 → 全绿；【故意造出的失败】值被别处盖掉、sshd -T 读不出、文件被改 → 判红
-#   4. fail2ban：没装 → 只记待配（不放文件、不判红）；装了 → 放文件、-t、reload，再跑一遍不动；
+#   4. fail2ban：没装 → 只记待配（不放文件、不判红）；装了 → 放文件、-t、reload、扫 ban 列表解封 WG；文件已齐再跑仍扫一遍解封；
 #      【故意造出的失败】-t 不过 → 文件撤掉、不 reload、判红；没在跑 → 待配、不 reload；reload 失败 → 判红
 #   5. fail2ban 读回：四项对且 ignoreip 含 10.99.0.0/24 → 全绿；【故意造出的失败】值不对、jail 不在、ignoreip 缺 WG → 判红；fail2ban-client 答不出 → 待配（不当成对了）
-#      jail 正文六项（含 ignoreip，#1775）
+#      jail 正文六项（含 ignoreip，#1775）；已封的 10.99.0.1 会 unban
 # 用法：bash deploy/test/sshd-hardening.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -75,6 +75,8 @@ F2B_ACTIVE=active
 F2B_T_RC=0
 F2B_RELOAD_RC=0
 F2B_STATUS_RC=0
+# status 正文：默认没有封着的 IP；测 unban 时改成带 10.99.0.1
+F2B_STATUS_OUT=$'Status for the jail: sshd\n|- Currently banned: 0\n`- Banned IP list:'
 declare -A F2B_GET=([maxretry]=3 [findtime]=600 [bantime]=3600 [bantime.increment]=True [ignoreip]=$'127.0.0.1/8\n::1\n10.99.0.0/24')
 
 # command -v 找得到函数；要演示「没装」就让它答没有
@@ -119,8 +121,16 @@ fail2ban-client() {
     ;;
   reload) return "$F2B_RELOAD_RC" ;;
   status)
-    if ((F2B_STATUS_RC)); then echo "Sorry but the jail 'sshd' does not exist" >&2; fi
-    return "$F2B_STATUS_RC"
+    if ((F2B_STATUS_RC)); then
+      echo "Sorry but the jail 'sshd' does not exist" >&2
+      return "$F2B_STATUS_RC"
+    fi
+    printf '%s\n' "$F2B_STATUS_OUT"
+    return 0
+    ;;
+  set)
+    # set sshd unbanip <ip>
+    return 0
     ;;
   get)
     if [[ -n "${F2B_GET[$3]:-}" ]]; then
@@ -245,15 +255,25 @@ readback_fail2ban_sshd >/dev/null
 check "读回：没装是待配，不是红" "${#PENDING[@]} ${#REDS[@]}" "1 0"
 F2B_ABSENT=0
 
-echo "== 4b. fail2ban：装了且在跑 → 放文件、-t、reload；再跑一遍不动"
+echo "== 4b. fail2ban：装了且在跑 → 放文件、-t、reload、扫 ban 列表；再跑一遍只扫不改"
 fresh
 setup_fail2ban_sshd >/dev/null
 check "文件放对了" "$(cmp -s -- "$FAIL2BAN_SSHD_JAIL" "$F2B_CONF" && echo 一样 || echo 不一样)" 一样
-check "调用顺序：先 -t 再 reload" "$(calls)" "fail2ban-client -t fail2ban-client reload"
+check "调用顺序：先 -t 再 reload 再 status（解封 WG）" "$(calls)" \
+  "fail2ban-client -t fail2ban-client reload fail2ban-client status sshd"
 check "没有红、没有待配" "${#REDS[@]} ${#PENDING[@]}" "0 0"
 fresh
 setup_fail2ban_sshd >/dev/null
-check "第二遍：没有改动、没有调用" "${#CHANGES[@]} $(ncalls)" "0 0"
+check "第二遍：文件不动，只扫 status 解封" "${#CHANGES[@]} $(ncalls) $(calls)" "0 1 fail2ban-client status sshd"
+echo "== 4b2. 已封的 WG 对端 10.99.0.1：reload 后 unban（公网封着的不动）"
+rm -f -- "$FAIL2BAN_SSHD_JAIL"
+F2B_STATUS_OUT=$'Status for the jail: sshd\n|- Currently banned: 2\n`- Banned IP list:\t203.0.113.9 10.99.0.1'
+fresh
+setup_fail2ban_sshd >/dev/null
+check "unban 只动 WG 对端" "$(calls)" \
+  "fail2ban-client -t fail2ban-client reload fail2ban-client status sshd fail2ban-client set sshd unbanip 10.99.0.1"
+has "记了解封 10.99.0.1" "${CHANGES[*]}" 'fail2ban unban sshd 10.99.0.1'
+F2B_STATUS_OUT=$'Status for the jail: sshd\n|- Currently banned: 0\n`- Banned IP list:'
 
 echo "== 4c.【故意造出的失败】fail2ban-client -t 不过：文件撤掉、不 reload、判红"
 rm -f -- "$FAIL2BAN_SSHD_JAIL"
