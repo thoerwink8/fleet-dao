@@ -18,6 +18,8 @@
 // - 第 4 步发版不跑法国检出里的 release.sh（那份经常还是上一版）。ssh 的是 releaseBootCommand：
 //   把同目录 release-boot.sh 送过去，解开目标提交的 deploy/ 再 exec 那一版（#1294）。没有或读不出就拒，不退回检出里那份。
 //   --check 仍跑检出里那份。
+// - 第 6 步验证只拦「预检基线里没有的、跟新版有关的」异常（服务、健康检查、发布历史、定时任务、探针这类），比 key 不比条数（#1740）。
+//   任务自己停下（kind task-park）是引擎照常干活的结果，不算新版的问题：不拦，只列出来给人看。
 // - 读不到就是读不到：读不到法国会话数、总开关、主线 CI 时不往下走（也不当成 0 或绿），回 { ok: false, why }。
 // - 所有打出来和记下来的字过 scrubText（令牌、邮箱、IP、长串抹掉）；ssh 的名字不进输出。
 // - 退出码：0 做完了（或 abort 做完了）；1 用法不对或被拒（没带 --founder-ok、已有一趟在走）；2 没做成（读不到、命令失败）；
@@ -25,7 +27,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { KIND_ROUTE_STALE, KIND_TASK_IDLE, scrubText } from './france-lib.mjs';
+import { KIND_ROUTE_STALE, KIND_TASK_IDLE, KIND_TASK_PARK, scrubText } from './france-lib.mjs';
 import {
   DEFAULT_LIMITS,
   driverVerdict,
@@ -392,6 +394,8 @@ async function franceHealth(io) {
     return { ok: false, why: `france.mjs --json 的输出里没有 anomalies 列表：${tailOf(r)}` };
   const count = { bad: 0, unread: 0, note: 0 };
   const shown = [];
+  /** 每条没被暂停类别吃掉的异常：key 是稳定标识（france-lib 给；没有就按 kind 加文字顶），验证时拿它比「哪几条是新出现的」。 */
+  const items = [];
   /** @type {Record<string, number>} */
   const paused = {};
   for (const a of view.anomalies) {
@@ -402,7 +406,14 @@ async function franceHealth(io) {
     if (!(a.level in count))
       return { ok: false, why: `france.mjs --json 的异常里有认不出的级别 ${JSON.stringify(a.level)}` };
     count[a.level] += 1;
-    shown.push(`${a.level === 'note' ? '· 留意：' : '⚠ '}${a.what}`);
+    const text = `${a.level === 'note' ? '· 留意：' : '⚠ '}${a.what}`;
+    shown.push(text);
+    items.push({
+      key: typeof a.key === 'string' && a.key !== '' ? a.key : `${a.kind ?? a.level}:${a.what}`,
+      level: a.level,
+      kind: a.kind,
+      text,
+    });
   }
   return {
     ok: true,
@@ -410,6 +421,7 @@ async function franceHealth(io) {
     ...count,
     paused: pausedText(paused),
     text: shown.join('\n'),
+    items,
   };
 }
 
@@ -437,7 +449,12 @@ async function phasePreflight(io, state) {
   const health = await franceHealth(io);
   if (!health.ok) problems.push(health.why);
   else {
-    state.baseline = { bad: health.bad, unread: health.unread, note: health.note };
+    state.baseline = {
+      bad: health.bad,
+      unread: health.unread,
+      note: health.note,
+      keys: health.items.map((x) => x.key),
+    };
     sayTo(
       io,
       `预检：法国现状 ${health.bad} 处异常、${health.unread} 处没读到、${health.note} 处留意（记作基线，验证时只拦新增；暂停期必然出现的不计：${health.paused}）`,
@@ -681,7 +698,9 @@ async function phaseDeploy(io, state) {
 }
 
 /**
- * 6 验证：法国现状比预检基线没有新增异常；总开关读得到。
+ * 6 验证：法国现状比预检基线没有「新出现」的异常（比 key 的集合，不比条数，#1740）；总开关读得到。
+ * 任务停下（kind task-park：挂起提醒、「#N 卡住了」、「#N 最近的问题」）是引擎照常干活的结果，不算新版的问题：不拦，只在通过那行后另起一行列出来。
+ * 旧状态文件的基线没有 keys 时退回按条数比。
  * PAUSE_KINDS 里的类别不算：「单没动、手上没会话」（kind task-idle，#1292）、「路由结论没更新」（kind route-stale，#1520），
  * 都是引擎暂停期必然出现、一恢复就消失的；同一个目标再跑 start 也刷新不了它们（引擎第 7 步才开回），拦了就是死循环。
  */
@@ -689,7 +708,21 @@ async function phaseVerify(io, state) {
   const health = await franceHealth(io);
   if (!health.ok) return failed(health.why);
   const base = state.baseline ?? { bad: 0, unread: 0, note: 0 };
-  if (health.bad + health.unread > base.bad + base.unread)
+  const hasKeys = Array.isArray(base.keys);
+  /** 基线里没有的 key＝发版期间新出现的。旧状态文件没有 keys 时 fresh 不用，下面退回按条数比。 */
+  const known = new Set(hasKeys ? base.keys : []);
+  const fresh = hasKeys ? health.items.filter((x) => !known.has(x.key)) : [];
+  if (hasKeys) {
+    const offending = fresh.filter((x) => x.level !== 'note' && x.kind !== KIND_TASK_PARK);
+    if (offending.length > 0)
+      return blocked(
+        `发完版法国多出了异常（预检时 ${base.bad} 异常 ${base.unread} 没读到，现在 ${health.bad} 异常 ${health.unread} 没读到；新出现的 ${offending.length} 条）：\n${offending
+          .slice(0, 12)
+          .map((x) => x.text)
+          .join('\n')}`,
+        [`新出现 ${offending.length} 条`],
+      );
+  } else if (health.bad + health.unread > base.bad + base.unread)
     return blocked(
       `发完版法国多出了异常（预检时 ${base.bad} 异常 ${base.unread} 没读到，现在 ${health.bad} 异常 ${health.unread} 没读到）：\n${health.text.split('\n').slice(0, 12).join('\n')}`,
       [`异常 ${health.bad}、没读到 ${health.unread}`],
@@ -700,6 +733,17 @@ async function phaseVerify(io, state) {
     io,
     `验证：法国 ${health.bad} 处异常、${health.unread} 处没读到（预检基线 ${base.bad}、${base.unread}；暂停期必然出现的不计：${health.paused}）；${eng.text}`,
   );
+  const parked = fresh.filter((x) => x.kind === KIND_TASK_PARK);
+  if (parked.length > 0) {
+    const more = parked.length > 8 ? `……共 ${parked.length} 条` : '';
+    sayTo(
+      io,
+      `发版期间单子停下的（引擎照常干活的结果，不算新版的问题，只列出来给人看）：${parked
+        .slice(0, 8)
+        .map((x) => x.text.replace(/^(?:· 留意：|⚠ )/, ''))
+        .join('；')}${more}`,
+    );
+  }
   return { ok: true };
 }
 
