@@ -804,8 +804,8 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
     }
   });
 
-  it('认不出时别的渠道照派：派到 Cursor，理由里写明 Claude 池为什么没派', async () => {
-    const { routeId } = await addCursorRoute(t.db, { stages: ['execute'] });
+  it('认不出时别的渠道照派：派到 Grok，理由里写明 Claude 池为什么没派', async () => {
+    const { routeId } = await addGrokRoute(t.db, { stages: ['execute'] });
     rig.answer({ code: 1, stderr: 'not logged in' });
     const r = await pick({ stage: 'execute' }, onRig());
     expect(r).toMatchObject({ ok: true, route: { routeId } });
@@ -1100,10 +1100,16 @@ describe('路由两层选路（#574）：先按用途的模型顺序、再按模
 });
 
 describe('流程配置里这一步的模型顺序（Fusion 的 models）', () => {
-  /** 写码：路由两层里 Opus 排最前（下面 solo、carpool），Cursor Auto 第 9 位，Kimi k3（钉住它的 cursor 路由）第 10 位。 */
+  /** 写码：路由两层里 Opus 排最前（下面 solo、carpool），Cursor 上钉住的 gpt-5.6-luna 第 9 位，Kimi k3（钉住它的 cursor 路由）第 10 位。 */
   async function fusionWorld() {
     await world(t.db, { stages: ['execute'] });
-    const auto = (await addCursorRoute(t.db, { stages: ['execute'] })).routeId;
+    const auto = (
+      await addCursorRoute(t.db, {
+        modelId: 'gpt-5.6-luna',
+        upstreamModel: 'gpt-5.6-luna',
+        stages: ['execute'],
+      })
+    ).routeId;
     const kimi = (await addCursorRoute(t.db, { modelId: 'kimi-k3', upstreamModel: 'kimi-k3' })).routeId;
     await hangRoutes(t.db, ['execute'], [kimi], 10);
     // cursor 池的额度也读成了、还宽（额度未知只在同模型内排后面、不跨模型，这里只看模型顺序）
@@ -1131,11 +1137,11 @@ describe('流程配置里这一步的模型顺序（Fusion 的 models）', () =>
 
   it('只派配置里这几个模型的路由：先按配置的先后（压过路由两层里排在前面的），同一个模型的照路由两层的先后', async () => {
     const { auto, kimi } = await fusionWorld();
-    expect(await pick({ stage: 'execute', models: ['cursor-auto', 'kimi-k3', 'opus-5.5'] })).toMatchObject({
+    expect(await pick({ stage: 'execute', models: ['gpt-5.6-luna', 'kimi-k3', 'opus-5.5'] })).toMatchObject({
       ok: true,
       route: { routeId: auto },
     });
-    expect(await pick({ stage: 'execute', models: ['kimi-k3', 'cursor-auto'] })).toMatchObject({
+    expect(await pick({ stage: 'execute', models: ['kimi-k3', 'gpt-5.6-luna'] })).toMatchObject({
       ok: true,
       route: { routeId: kimi },
     });

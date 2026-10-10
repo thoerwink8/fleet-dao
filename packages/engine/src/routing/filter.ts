@@ -16,6 +16,7 @@ import {
   type StageKind,
   UI_PURPOSE,
 } from '@fleet-dao/shared';
+import { UNVERIFIABLE_AUTHOR_FAMILIES } from '../author-families.ts';
 import {
   duration,
   hostName,
@@ -82,6 +83,8 @@ export function blocksFor(
   if (route.breaker.admit === 'none') out.push(breakerBlock(route, ctx.now));
   const avoided = avoidReason(route, ctx);
   if (avoided) out.push(hard('avoided', avoided));
+  const unverifiable = unverifiableAuthorReason(route, ctx);
+  if (unverifiable) out.push(hard('banned', unverifiable));
   const unregistered = carpoolRegistryBlock(route, ctx);
   if (unregistered) out.push(unregistered);
   const notLive = orgBlock(route, ctx);
@@ -322,6 +325,16 @@ function avoidReason(route: RouteFacts, ctx: FilterContext): string | null {
   if (ctx.avoid.poolIds.has(route.poolId)) return `这个任务要避开${route.poolName}整个池`;
   if (ctx.avoid.modelIds.has(route.modelId)) return `这个任务要换模型，避开 ${route.modelName}`;
   return null;
+}
+
+/**
+ * 写码的两个用途（execute、ui）不派冷验收认不出作者族的路由（#1626）：族名在 UNVERIFIABLE_AUTHOR_FAMILIES 里的，
+ * 或由渠道自己挑模型的（上游串是 auto）。写出来的 PR 冷验收挑不出「不同的族」，只会停在「作者族认不出」。别的阶段不挡。
+ */
+function unverifiableAuthorReason(route: RouteFacts, ctx: FilterContext): string | null {
+  if (ctx.stage !== 'execute' && ctx.stage !== 'ui') return null;
+  if (!UNVERIFIABLE_AUTHOR_FAMILIES.has(familyKey(route.family)) && !routerPicksModel(route)) return null;
+  return `${route.modelName}（${route.family} 族）：这家写的代码冷验收认不出是哪一族、验不了，写码不派`;
 }
 
 /** 比较剩余和所需时的容差：1 − 0.9 算出来是 0.0999…，正好剩一成要算够。 */
