@@ -26,6 +26,7 @@
     "progress:done": "node packages/conventions/src/bin/progress.ts done",
     "progress:read": "node packages/conventions/src/bin/progress.ts read",
     "issue:close": "node packages/conventions/src/bin/issue-close.ts",
+    "rules:budget": "node packages/conventions/src/bin/rules-budget.ts",
     "debt:check": "node packages/conventions/src/bin/debt-check.ts",
     "plan": "node packages/conventions/src/bin/plan.ts",
     "github:audit": "node packages/conventions/src/bin/github-audit.ts",
