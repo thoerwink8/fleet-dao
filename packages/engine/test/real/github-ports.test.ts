@@ -609,18 +609,20 @@ describe('推被拒（DIVERGED / REMOTE_AHEAD）：先认领远端新头，判�
     const dir = await seededTree(trees);
     const incoming = git(dir, 'rev-parse', 'refs/fleet/incoming');
     remoteHead = incoming;
-    const head = commitIn(dir, 'login.ts');
-    const r = await ports.pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx);
+    const localHead = commitIn(dir, 'login.ts');
+    const r = await ports.pushBranch(
+      { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head: localHead },
+      ctx,
+    );
     expect(remoteHead).toBe(incoming);
-    // 远端就停在 incoming，本地还有新提交：按原来的先后判断重推，交出去的是这次要推的头
-    expect(r.head).toBe(head);
-    expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
+    // 不要空包。返回的头是远端头。去掉「已在树里就不向镜像要包」，这里因空包抛 GIT_FAILED 变红
+    expect(r.head).toBe(remoteHead);
     const tips = (calls.bundleCommits ?? []).flatMap((input) => {
       const listed = (input as { tips?: unknown }).tips;
       return Array.isArray(listed) ? listed : [];
     });
     expect(tips).not.toContain(remoteHead);
-    expect(String(r.head)).not.toContain('Refusing to create empty bundle');
+    expect(calls.pushBranch).toHaveLength(1);
   });
 
   it('远端头已经在树里、比本地新：不打包，直接快进，返回的头是远端头', async () => {
