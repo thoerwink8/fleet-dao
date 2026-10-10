@@ -31,8 +31,9 @@ test.describe('手机宽度：三页不横滚', () => {
     const items = page.getByRole('menuitem');
     await expect(items.first()).toBeVisible();
     for (const item of await items.all()) {
-      const box = await item.boundingBox();
-      expect(box?.height ?? 0).toBeGreaterThanOrEqual(40);
+      // 菜单打开有 zoom-in-95 动画，boundingBox 量的是缩放中的框（CI 量到 39.15）；offsetHeight 不受 transform 影响
+      const height = await item.evaluate((el) => (el as HTMLElement).offsetHeight);
+      expect(height).toBeGreaterThanOrEqual(40);
     }
   });
 
