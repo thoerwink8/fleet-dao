@@ -238,6 +238,7 @@ export const keys = {
   groomStatus: (repoId: string) => ['groom-status', repoId] as const,
   board: (repoId: string) => ['board', repoId] as const,
   task: (taskId: string) => ['task', taskId] as const,
+  runTranscript: (taskId: string, runId: string) => ['run-transcript', taskId, runId] as const,
   routing: ['routing'] as const,
   routingLayers: ['routing-layers'] as const,
   routingEfforts: ['routing-efforts'] as const,
@@ -380,6 +381,46 @@ export function useRoutingLayers({ enabled = true }: { enabled?: boolean } = {})
     queryFn: () => api.routingLayers(),
     refetchInterval: 30_000,
     enabled,
+  });
+}
+
+/** 在跑的段每隔多久读一次新的会话内容。 */
+export const TRANSCRIPT_POLL_MS = 3_000;
+/** 一次读多少条：接口单次上限。 */
+const TRANSCRIPT_PAGE = 500;
+
+/**
+ * 一段的会话内容（#1640）：打开才读（enabled）。每次读都从上次的 nextAfter 往后读，把新的接在已读到的后面，
+ * 一页读满就接着读下一页；done 为真就不再读，没 done 的每 3 秒读一次（页面不在前台时 React Query 自己停）。
+ * 读失败：已读到的条目留在 data 里，不清空；失败后不再自动轮询，由页面上的「重试」再读。
+ */
+export function useRunTranscript(taskId: string, runId: string, enabled: boolean) {
+  const api = useApi();
+  const qc = useQueryClient();
+  const key = keys.runTranscript(taskId, runId);
+  return useQuery({
+    queryKey: key,
+    enabled,
+    retry: false,
+    refetchInterval: (q) =>
+      q.state.status === 'error' || q.state.data?.done || q.state.data?.noRecord ? false : TRANSCRIPT_POLL_MS,
+    queryFn: async (): Promise<RunTranscript> => {
+      const prev = qc.getQueryData<RunTranscript>(key);
+      let entries = prev?.entries ?? [];
+      let after = prev?.nextAfter ?? undefined;
+      for (;;) {
+        const page = await api.runTranscript(taskId, runId, {
+          ...(after === undefined ? {} : { after }),
+          limit: TRANSCRIPT_PAGE,
+        });
+        const seen = new Set(entries.map((e) => e.seq));
+        entries = [...entries, ...page.entries.filter((e) => !seen.has(e.seq))];
+        after = page.nextAfter ?? after;
+        if (page.entries.length < TRANSCRIPT_PAGE || page.done) {
+          return { ...page, entries, nextAfter: page.nextAfter ?? prev?.nextAfter ?? null };
+        }
+      }
+    },
   });
 }
 
