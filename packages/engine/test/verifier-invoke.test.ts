@@ -13,9 +13,11 @@ import {
   type ChooseModelForFamily,
   FAMILY_ORDER,
   type FetchDiff,
+  type FetchNamedFiles,
   type FetchSpec,
   invokeVerifier,
   type ModelFamily,
+  namedPathsOutsideDiff,
   readVerdict,
   type VerifierInvokeInput,
 } from '../src/verifier-invoke.ts';
@@ -676,5 +678,188 @@ describe('invokeVerifier：结论不自相矛盾、不含糊（拿不准的一�
     expect(out.problems[0]).toContain('原因码 quota_exhausted');
     expect(out.problems[0]).toContain('这个号的额度用完了');
     expect(out.session?.outcome).toBe('failed');
+  });
+});
+
+const NAMED_HEADING = '## 单子点名但这次没改的文件（只读，当前内容）';
+
+function promptOf(commands: { stdin: string }[]): string {
+  return commands[0]?.stdin ?? '';
+}
+
+/** 「改了哪些文件」之后、diff 之前的那一节。没有这一节就是空串。 */
+function namedSection(prompt: string): string {
+  const start = prompt.indexOf(NAMED_HEADING);
+  const end = prompt.indexOf('## diff（unified patch）');
+  if (start < 0 || end < 0 || end < start) return '';
+  return prompt.slice(start, end);
+}
+
+const PASS_SHOT = { exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false } as const;
+
+describe('invokeVerifier：单子点名但这次没改的文件', () => {
+  it('howToFinish 点名了 deploy/france.sh 而 diff 没改它时，传给模型的 prompt 含这一节和该文件内容', async () => {
+    const { oneShot, commands } = fakeOneShot(PASS_SHOT);
+    const seen: string[][] = [];
+    const fetchNamedFiles: FetchNamedFiles = async (paths) => {
+      seen.push(paths);
+      return paths.map((path) => ({
+        path,
+        kind: 'content',
+        content: path === 'deploy/france.sh' ? 'PORT=2201\n' : 'export const y = 1;\n',
+      }));
+    };
+    const out = await invokeVerifier(
+      {
+        ...BASE_INPUT,
+        what: '对照 deploy/hk.sh（没有反引号）和 `foo.ts`。',
+        howToFinish: ['区块里的端口要和 `deploy/france.sh` 逐行对应，也看 `packages/x/y.ts`'],
+      },
+      { ...DEPS(oneShot), fetchNamedFiles },
+    );
+    expect(out.pass).toBe(true);
+    expect(seen).toEqual([['deploy/france.sh', 'packages/x/y.ts']]);
+    const prompt = promptOf(commands);
+    const filesAt = prompt.indexOf('## 改了哪些文件');
+    const namedAt = prompt.indexOf(NAMED_HEADING);
+    const diffAt = prompt.indexOf('## diff（unified patch）');
+    expect(filesAt).toBeGreaterThan(-1);
+    expect(namedAt).toBeGreaterThan(filesAt);
+    expect(diffAt).toBeGreaterThan(namedAt);
+    const section = namedSection(prompt);
+    expect(section).toContain('deploy/france.sh');
+    expect(section).toContain('PORT=2201');
+    expect(section).toContain('packages/x/y.ts');
+    expect(section).toContain('export const y = 1;');
+    expect(section).not.toContain('deploy/hk.sh');
+    expect(section).not.toContain('foo.ts');
+  });
+
+  it('点名的文件 diff 里已经改了时不重复出现', async () => {
+    const { oneShot, commands } = fakeOneShot(PASS_SHOT);
+    const seen: string[][] = [];
+    const fetchNamedFiles: FetchNamedFiles = async (paths) => {
+      seen.push(paths);
+      return paths.map((path) => ({ path, kind: 'content', content: `${path} 正文\n` }));
+    };
+    await invokeVerifier(
+      {
+        ...BASE_INPUT,
+        what: '要什么',
+        howToFinish: ['端口要和 `deploy/france.sh`、`deploy/hk.sh` 逐行对应'],
+      },
+      {
+        ...DEPS(oneShot),
+        fetchDiff: async () => ({ diffText: FAKE_DIFF_OK.diffText, changedFiles: ['deploy/france.sh'] }),
+        fetchNamedFiles,
+      },
+    );
+    expect(seen).toEqual([['deploy/hk.sh']]);
+    const prompt = promptOf(commands);
+    expect(prompt).toContain('- deploy/france.sh');
+    const section = namedSection(prompt);
+    expect(section).toContain('deploy/hk.sh');
+    expect(section).toContain('deploy/hk.sh 正文');
+    expect(section).not.toContain('deploy/france.sh');
+  });
+
+  it('点名的文件全都已经在 diff 里时，不出这一节', async () => {
+    const { oneShot, commands } = fakeOneShot(PASS_SHOT);
+    let called = 0;
+    await invokeVerifier(
+      { ...BASE_INPUT, what: '要什么', howToFinish: ['对照 `deploy/france.sh`'] },
+      {
+        ...DEPS(oneShot),
+        fetchDiff: async () => ({ diffText: FAKE_DIFF_OK.diffText, changedFiles: ['deploy/france.sh'] }),
+        fetchNamedFiles: async () => {
+          called += 1;
+          return [];
+        },
+      },
+    );
+    expect(called).toBe(0);
+    expect(promptOf(commands)).not.toContain(NAMED_HEADING);
+  });
+
+  it('超过 200 行的文件被截断并写明省略', async () => {
+    const lines = Array.from({ length: 230 }, (_, i) => `line-${String(i + 1).padStart(3, '0')}`);
+    const { oneShot, commands } = fakeOneShot(PASS_SHOT);
+    await invokeVerifier(
+      { ...BASE_INPUT, what: '要什么', howToFinish: ['对照 `deploy/france.sh`'] },
+      {
+        ...DEPS(oneShot),
+        fetchNamedFiles: async () => [
+          { path: 'deploy/france.sh', kind: 'content', content: lines.join('\n') },
+        ],
+      },
+    );
+    const section = namedSection(promptOf(commands));
+    expect(section).toContain('省略');
+    expect(section).toContain('line-001');
+    expect(section).toContain('line-100');
+    expect(section).toContain('line-131');
+    expect(section).toContain('line-230');
+    expect(section).not.toContain('line-101');
+    expect(section).not.toContain('line-115');
+    expect(section).not.toContain('line-130');
+  });
+
+  it('读不到的文件在 prompt 里标「读不到」，没回的路径也不丢掉', async () => {
+    const { oneShot, commands } = fakeOneShot(PASS_SHOT);
+    const out = await invokeVerifier(
+      {
+        ...BASE_INPUT,
+        what: '要什么',
+        howToFinish: ['对照 `deploy/france.sh` 和 `deploy/hk.sh`'],
+      },
+      {
+        ...DEPS(oneShot),
+        fetchNamedFiles: async () => [
+          { path: 'deploy/france.sh', kind: 'unreadable', reason: '镜像里没有这个提交' },
+        ],
+      },
+    );
+    expect(out.pass).toBe(true);
+    const section = namedSection(promptOf(commands));
+    expect(section).toContain('deploy/france.sh');
+    expect(section).toContain('读不到：镜像里没有这个提交');
+    expect(section).toContain('deploy/hk.sh');
+    expect(section).toContain('读不到：没有回这个路径');
+  });
+
+  it('读文件这一步抛错时，验收仍把该文件标成读不到并继续问模型', async () => {
+    const { oneShot, commands } = fakeOneShot(PASS_SHOT);
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, what: '要什么', howToFinish: ['对照 `deploy/france.sh`'] },
+      {
+        ...DEPS(oneShot),
+        fetchNamedFiles: async () => {
+          throw new Error('镜像锁没拿到');
+        },
+      },
+    );
+    expect(out.pass).toBe(true);
+    expect(namedSection(promptOf(commands))).toContain('读不到：镜像锁没拿到');
+  });
+
+  it('从 howToFinish 和 what 的反引号里取仓内路径，去掉 diff 已改的，最多 5 个', () => {
+    expect(
+      namedPathsOutsideDiff(
+        '还有 `packages/a/b.ts`，以及没包反引号的 deploy/hk.sh、`foo.ts`',
+        ['对照 `deploy/france.sh`', '以及 `packages/x/y.ts` 和 `foo.ts`'],
+        ['deploy/france.sh'],
+      ),
+    ).toEqual(['packages/x/y.ts', 'packages/a/b.ts']);
+    expect(namedPathsOutsideDiff('`deploy/france.sh`', ['`deploy/france.sh`'], [])).toEqual([
+      'deploy/france.sh',
+    ]);
+    const many = Array.from({ length: 6 }, (_, i) => `pkg/f${i}.ts`);
+    expect(
+      namedPathsOutsideDiff(
+        'x',
+        many.map((p) => `看 \`${p}\``),
+        [],
+      ),
+    ).toEqual(many.slice(0, 5));
   });
 });
