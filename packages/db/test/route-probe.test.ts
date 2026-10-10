@@ -2,6 +2,7 @@
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { toRoute } from '../src/domain-map.ts';
+import { markChannelDisabled } from '../src/queries/channel-fallback.ts';
 import {
   backfillProbeHistoryFromRoutes,
   ROUTE_PROBE_HISTORY_KEEP,
@@ -154,6 +155,22 @@ describe('读：每条路由探得了探不了的事实', () => {
     expect(rank.get('k3')).toBeNull();
     expect(rank.get('idle')).toBeNull();
   });
+
+  it('渠道运行中失败被标 disabled：引发的那条路由 restoresChannel 为真，别的路由为假（#1635：它不能转按需）', async () => {
+    await addRoute(t.db, { id: 'relay-opus', poolId: 'relay-a', modelId: 'opus-5.5', hostId: 'mirasim' });
+    await addRoute(t.db, { id: 'k3', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
+    const before = new Map((await routeProbeTargets(t.db)).map((row) => [row.routeId, row.restoresChannel]));
+    expect(before.get('relay-opus')).toBe(false);
+    await markChannelDisabled(t.db, {
+      channelId: 'relay',
+      routeId: 'relay-opus',
+      reason: '运行中失败',
+      now: NOW,
+    });
+    const after = new Map((await routeProbeTargets(t.db)).map((row) => [row.routeId, row.restoresChannel]));
+    expect(after.get('relay-opus')).toBe(true);
+    expect(after.get('k3')).toBe(false);
+  });
 });
 
 describe('写：一条路由的结论', () => {
@@ -183,7 +200,7 @@ describe('写：一条路由的结论', () => {
   it('不是 ok 的一律不在线：探通过的路由下一轮没探通就下线，原因照写', async () => {
     await saveRouteProbe(t.db, { routeId: 'car', state: 'ok', at: NOW, detail: '答上了：OK' });
     const later = new Date(NOW.getTime() + 15 * MIN);
-    for (const state of ['failed', 'not_wired', 'skipped'] as const) {
+    for (const state of ['failed', 'not_wired', 'skipped', 'on_demand'] as const) {
       await saveRouteProbe(t.db, { routeId: 'car', state, at: later, detail: `原因：${state}` });
       expect(await routeRow('car')).toMatchObject({
         alive: false,

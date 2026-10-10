@@ -351,6 +351,13 @@
       "when": 1791520807696,
       "tag": "0049_sturdy_zarek",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1791601191278,
+      "tag": "0050_chief_frank_castle",
+      "breakpoints": true
     }
   ]
 }

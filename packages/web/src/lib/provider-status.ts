@@ -21,7 +21,7 @@ export interface Failover {
   /** 顺延到谁（渠道名和模型名）；还没派出去、或没有别的渠道可顺延为 undefined。 */
   fallback: { channelName: string; modelName: string } | undefined;
   /**
-   * 探针下一次大约几点再看引发失败的那条路由：上次通了的按执行方式（结论写了隔 60 分钟再探的按 60 分钟和执行方式里更长的），
+   * 探针下一次大约几点再看引发失败的那条路由：上次通了的按执行方式（结论写了隔 30 分钟再探的按 30 分钟和执行方式里更长的），
    * 不通且写了连着几次的按退避那一档，没写次数的仍按每轮。算不出（那条路由没探过 / 已被删）为 undefined，页面写「下一轮探针」。
    */
   nextProbeAt: string | undefined;

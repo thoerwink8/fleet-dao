@@ -7,6 +7,7 @@ import { asc, desc, eq, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { routesInUse } from '../routing-layers.ts';
 import {
+  channelStates,
   channels,
   models,
   pools,
@@ -69,6 +70,11 @@ export interface RouteProbeTarget {
    * （定时探针把 null 当成前 2 位，不放慢）。
    */
   probeRank?: number | null;
+  /**
+   * 它所在的渠道被运行中失败标成 disabled，而这条路由正是引发的那条（或引发的那条已被删）：只有探针探通它才能把渠道改回 ok，
+   * 所以不能转按需（按需不探，渠道被 channel-failed 挡着，派前探测也轮不到它）。
+   */
+  restoresChannel?: boolean;
   /** 上一次的结论；探针还没看过为空。 */
   previous: { state: RouteProbeState; at: Date; detail: string | null } | null;
 }
@@ -144,7 +150,7 @@ async function openRankRows(db: Db): Promise<OpenRankRow[]> {
 
 export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
   const now = new Date();
-  const [rows, used, ranked] = await Promise.all([
+  const [rows, used, ranked, disabled] = await Promise.all([
     db
       .select({ route: routes, pool: pools, channel: channels, model: models })
       .from(routes)
@@ -154,7 +160,12 @@ export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
       .orderBy(asc(routes.id)),
     routesInUse(db),
     openRankRows(db),
+    db
+      .select({ channelId: channelStates.channelId, failedRouteId: channelStates.failedRouteId })
+      .from(channelStates)
+      .where(eq(channelStates.status, 'disabled')),
   ]);
+  const flagged = new Map(disabled.map((d) => [d.channelId, d.failedRouteId]));
   const inUse = new Set(used.map((u) => u.routeId));
   const ranks = bestOpenRanks(ranked, now);
   return rows.map(({ route, pool, channel, model }) => ({
@@ -174,6 +185,7 @@ export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
     modelRetiredAt: model.retiredAt,
     inUse: inUse.has(route.id),
     probeRank: ranks.get(route.id) ?? null,
+    restoresChannel: flagged.has(channel.id) && (flagged.get(channel.id) ?? route.id) === route.id,
     alive: route.alive,
     previous:
       route.probeState === null || route.probedAt === null
@@ -216,7 +228,7 @@ export interface RouteProbeHistoryRow {
   responseText: string | null;
 }
 
-/** ok → 通过；failed → 不通；not_wired、skipped → 没探（这一轮没真探）。 */
+/** ok → 通过；failed → 不通；not_wired、skipped、on_demand → 没探（这一轮没真探）。 */
 function historyResultOf(state: RouteProbeState): RouteProbeHistoryResult {
   if (state === 'ok') return 'passed';
   if (state === 'failed') return 'failed';
