@@ -65,6 +65,8 @@ export const HUMAN_TIER_PATHS = [
   'deploy/france/fail2ban-sshd.jail',
   // 会话用户的登录口子收口（#1785，setup_session_ssh）：sshd 的 Match User 段 + 动会话用户家里的钥匙；出站 22 的拒绝在上面的 fleet-dao.nft
   'deploy/france/sshd-session-user.conf',
+  // #1795：仓里的会话登录公钥（与 pilot 家里那份并进 /etc/ssh/authorized_keys/<用户>）
+  'deploy/france/session-login.pub',
 ];
 /**
  * 这边发的报警都以它开头：规矩同步没成 `auto-release:rules:<提交号>`，装机自动档没装成 `auto-release:tier:<提交号>`，

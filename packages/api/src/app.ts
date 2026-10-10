@@ -63,6 +63,17 @@ export function buildApps(deps: Deps): Apps {
   const agent = new Hono();
   agent.onError(errorHandler(deps.log));
   agent.notFound(notFound);
+  // #1795：和驾驶舱同一份 /healthz。只听本机回环（8788），会话用户被 nft 拦住连不了 8787 时仍能旁证 canary。
+  // 公网本来就打得开驾驶舱那份，这里不另加鉴权、不带令牌。
+  agent.get('/healthz', async (c) => {
+    await noteExternalWatch({
+      watchId: deps.config.edgeWatchId,
+      header: c.req.header(WATCH_HEADER),
+      record: deps.recordExternalWatchRound,
+      log: deps.log,
+    });
+    return healthHandler([...deps.health, externalWatchHealthItem(deps.config.edgeWatchId)], deps.log)(c);
+  });
   agent.use(`${AGENT_API_PREFIX}/*`, jsonLimit);
   agent.route(AGENT_API_PREFIX, agentRoutes(deps));
 

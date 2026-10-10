@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "issue": 1795,
+  "capturedAt": "2026-10-11T02:35:04.747142+08:00",
+  "france": {
+    "hostname": "vmi3551059",
+    "wgAddress": "10.99.0.2",
+    "deployedSha": "40ff88c5b4f5f0d09c07765d91029334e5c3d4f6",
+    "deployHistory1779": "2026-10-10T15:56:59Z 9c069129fd33a61958dd5fc3a199f82c4039ae62 release",
+    "deployHistoryCurrent": "2026-10-10T16:32:27Z 40ff88c5b4f5f0d09c07765d91029334e5c3d4f6 release"
+  },
+  "rootCause": {
+    "kind": "stale_conclusion_plus_false_close",
+    "summary": "20:46 是第27轮收单超时结论；#1779 于 23:56 CST 已发但下一巡检槽是 02:26；#1773 在 00:49 关单时 healthz 200 来自总开关关着的跳过文案，不是巡检通过。",
+    "round27": {
+      "issue83Created": "2026-10-10T20:26:02+0800",
+      "intakeDeadline": "2026-10-10T20:46:00+0800",
+      "issue84PrCreated": "2026-10-10T20:48:00+0800",
+      "pr84Merged": "2026-10-10T20:50:32+0800"
+    },
+    "issue1773": {
+      "closedAt": "2026-10-10T16:49:42Z",
+      "comment2359MentionsMasterOffSkip": true,
+      "comment0049ClaimsFixed": true
+    }
+  },
+  "round28Pass": {
+    "issue85Created": "2026-10-10T18:26:02Z",
+    "pr86Merged": "2026-10-10T18:30:12Z",
+    "issue85Closed": "2026-10-10T18:30:18Z",
+    "canaryLogLine": "- 第 28 轮 2026-10-10T18:26:00Z",
+    "canaryLogUrl": "https://raw.githubusercontent.com/thoerwink8/fleet-dao-canary/main/巡检记录.md"
+  },
+  "ssh": {
+    "sessionAuthorizedKeysFingerprints": [
+      "SHA256:jGF0jPb1smqw9FG0wcvX3ouPTcTA+qTY/Uzl1QN44e0",
+      "SHA256:+W2XnLuoM6r0sqFJ+HxZHoPfhcCuJMggzr3iBUuNDTI"
+    ],
+    "loginUser": "fleet-agent-carpool",
+    "notRoot": true,
+    "note": "监督曾 ssh root@ 公钥拒绝；会话用户钥匙在 /etc/ssh/authorized_keys/fleet-agent-carpool，须 IdentitiesOnly + 匹配指纹的私钥。",
+    "liveMatchesRepoPub": true,
+    "liveFingerprints": [
+      "SHA256:jGF0jPb1smqw9FG0wcvX3ouPTcTA+qTY/Uzl1QN44e0",
+      "SHA256:+W2XnLuoM6r0sqFJ+HxZHoPfhcCuJMggzr3iBUuNDTI"
+    ]
+  },
+  "github": {
+    "issue83": {
+      "state": "closed",
+      "created_at": "2026-10-10T12:26:02Z",
+      "closed_at": "2026-10-10T12:50:38Z",
+      "title": "巡检第 27 轮：往巡检记录追加一行"
+    },
+    "issue84": {
+      "state": "closed",
+      "created_at": "2026-10-10T12:48:50Z",
+      "closed_at": "2026-10-10T12:50:32Z",
+      "title": "巡检第 27 轮：往巡检记录追加一行"
+    },
+    "issue85": {
+      "state": "closed",
+      "created_at": "2026-10-10T18:26:02Z",
+      "closed_at": "2026-10-10T18:30:18Z",
+      "title": "巡检第 28 轮：往巡检记录追加一行"
+    },
+    "pr86": {
+      "state": "closed",
+      "merged_at": "2026-10-10T18:30:12Z",
+      "created_at": "2026-10-10T18:28:30Z",
+      "title": "巡检第 28 轮：往巡检记录追加一行"
+    },
+    "pr84": {
+      "state": "closed",
+      "merged_at": "2026-10-10T12:50:32Z",
+      "created_at": "2026-10-10T12:48:50Z",
+      "title": "巡检第 27 轮：往巡检记录追加一行"
+    }
+  }
+}

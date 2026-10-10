@@ -182,19 +182,19 @@ describe('canary 项怎么判', () => {
     });
     expect(stuck.ok === false && stuck.message.includes('这一轮在跑')).toBe(false);
 
-    const passedAt = new Date('2026-10-10T18:40:00.000Z'); // 北京 02:40 新一轮通过
+    // 第 28 轮真实时刻（巡检仓 #85/#86）：02:26 开单、02:30 合 PR 关单 → healthz 应回绿
     const passed = row({
       id: 9,
       verdict: 'pass',
       stage: 'board',
-      startedAt: new Date('2026-10-10T18:26:00.000Z'),
-      endedAt: passedAt,
+      startedAt: new Date('2026-10-10T18:26:02.000Z'),
+      endedAt: new Date('2026-10-10T18:30:18.000Z'),
       why: null,
     });
-    const after = canaryHealth({ finished: passed, running: null }, new Date('2026-10-10T18:50:00.000Z'));
+    const after = canaryHealth({ finished: passed, running: null }, new Date('2026-10-10T18:33:00.000Z'));
     expect(after).toEqual({
       ok: true,
-      note: '最近一轮 10-11 02:40 通过（用时 14 分钟）',
+      note: '最近一轮 10-11 02:30 通过（用时 4 分钟）',
     });
   });
 

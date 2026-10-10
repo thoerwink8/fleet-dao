@@ -166,14 +166,23 @@ has "注释里写明了没写 PerSourcePenalties 的原因" "$(<"$SSHD_CONF")" '
 f2b=$(grep -vE '^[[:space:]]*(#|$)' "$F2B_CONF" | tr -d '\r')
 check "fail2ban jail：只有 [sshd] 一段、六项设置（含 ignoreip）" "$f2b" $'[sshd]\nenabled = true\nmaxretry = 3\nfindtime = 10m\nbantime = 1h\nbantime.increment = true\nignoreip = 127.0.0.1/8 ::1 10.99.0.0/24'
 
-echo "== 1b. 指挥官 SSH 片段（#1775/#1795）：IdentitiesOnly + 会话用户"
+echo "== 1b. 指挥官 SSH 片段（#1775/#1795）：会话用户 + IdentitiesOnly + 多把 IdentityFile（不强制先有 fleet_login）"
 CMD_SSH=$DEPLOY_DIR/france/commander-ssh.config
+SESSION_PUB=$DEPLOY_DIR/france/session-login.pub
 has "直连 Host 用会话用户" "$(<"$CMD_SSH")" 'Host fleet-fr-carpool'
-has "User 是 fleet-agent-carpool" "$(<"$CMD_SSH")" 'User fleet-agent-carpool'
+has "User 是 fleet-agent-carpool（不是 root）" "$(<"$CMD_SSH")" 'User fleet-agent-carpool'
 has "IdentitiesOnly yes（MaxAuthTries 3）" "$(<"$CMD_SSH")" 'IdentitiesOnly yes'
-has "指定 IdentityFile" "$(<"$CMD_SSH")" 'IdentityFile ~/.ssh/fleet_login'
+has "仍认 fleet_login 别名" "$(<"$CMD_SSH")" 'IdentityFile ~/.ssh/fleet_login'
+has "也认本机 id_ed25519（DESKTOP 常见路径）" "$(<"$CMD_SSH")" 'IdentityFile ~/.ssh/id_ed25519'
+has "也认本机 id_rsa" "$(<"$CMD_SSH")" 'IdentityFile ~/.ssh/id_rsa'
 has "经香港跳板的 Host" "$(<"$CMD_SSH")" 'Host fleet-fr-carpool-via-hk'
 has "跳板 ProxyJump myserver" "$(<"$CMD_SSH")" 'ProxyJump myserver'
+check "session-login.pub 在仓里" "$([[ -s "$SESSION_PUB" ]] && echo 有 || echo 没有)" 有
+has "install-commander-login.sh 对照指纹" "$(<"$DEPLOY_DIR/france/install-commander-login.sh")" 'ssh-keygen -lf'
+# 法国现网两把指纹（公开钥匙，#1795 从 /etc/ssh/authorized_keys/fleet-agent-carpool 收进仓；+ 要转义，has 用的是 grep -E）
+fps=$(ssh-keygen -lf "$SESSION_PUB" | awk '{print $2}' | sort | tr '\n' ' ')
+has "含 DESKTOP RSA 指纹" "$fps" 'SHA256:jGF0jPb1smqw9FG0wcvX3ouPTcTA\+qTY/Uzl1QN44e0'
+has "含 DESKTOP ed25519 指纹" "$fps" 'SHA256:\+W2XnLuoM6r0sqFJ\+HxZHoPfhcCuJMggzr3iBUuNDTI'
 
 echo "== 2. sshd：首次装 → 放文件、sshd -t、reload；再跑一遍什么都不动"
 fresh
@@ -375,6 +384,8 @@ U=${SESSION_USERS[0]}
 SSHD_SESSION_USER_DROPIN=$TMP/sshd_config.d/51-fleet-dao-session-user.conf
 SESSION_SSH_KEYS_DIR=$TMP/etc-ssh-keys
 SESSION_SSH_ALLOW_FILE=$TMP/pilot-authorized_keys
+# 本节默认不并真实 session-login.pub，免得 fixture 钥匙和 DESKTOP 公钥搅在一起；7e2 再打开
+SESSION_SSH_REPO_PUB=$TMP/no-session-login.pub
 SESSION_QUARANTINE_ROOT=$TMP/quarantine
 SESSION_USER_HOME_ROOT=$TMP/home
 session_user_today() { echo 2026-10-11; }
@@ -445,17 +456,30 @@ fresh
 setup_session_ssh >/dev/null
 check "家里的 .ssh 还在、判红" "$([[ -f "$SESSION_USER_HOME_ROOT/$U/.ssh/authorized_keys" ]] && echo 在 || echo 没了) ${#REDS[@]}" "在 1"
 SSHD_RELOAD_RC=0
-echo "-- 7e.【故意造出的失败】pilot 那份读不到：不写钥匙文件、判红，drop-in 照装（会话用户登不进来，比留着家里那个口子强）"
+echo "-- 7e.【故意造出的失败】pilot 与 session-login.pub 都读不到：不写钥匙文件、判红，drop-in 照装"
 rm -f -- "$SSHD_SESSION_USER_DROPIN"
 rm -rf -- "${SESSION_SSH_KEYS_DIR:?}"
 SESSION_SSH_ALLOW_FILE_SAVE=$SESSION_SSH_ALLOW_FILE
+SESSION_SSH_REPO_PUB_SAVE=${SESSION_SSH_REPO_PUB-}
 SESSION_SSH_ALLOW_FILE=$TMP/no-such-pilot-file
+SESSION_SSH_REPO_PUB=$TMP/no-such-session-login.pub
 fresh
 setup_session_ssh >/dev/null
 check "钥匙文件没写、drop-in 放了、判红一项" \
   "$([[ -e "$SESSION_SSH_KEYS_DIR/$U" ]] && echo 有 || echo 没有) $([[ -e "$SSHD_SESSION_USER_DROPIN" ]] && echo 放了 || echo 没放) ${#REDS[@]}" "没有 放了 1"
-has "红里点名 pilot 那份读不到" "${REDS[*]}" "读不到或是空的"
+has "红里点名两份都读不到" "${REDS[*]}" "都读不到或是空的"
 SESSION_SSH_ALLOW_FILE=$SESSION_SSH_ALLOW_FILE_SAVE
+SESSION_SSH_REPO_PUB=$SESSION_SSH_REPO_PUB_SAVE
+echo "-- 7e2. pilot 读不到但仓里有 session-login.pub：照样写钥匙（#1795）"
+rm -f -- "$SSHD_SESSION_USER_DROPIN"
+rm -rf -- "${SESSION_SSH_KEYS_DIR:?}"
+SESSION_SSH_ALLOW_FILE=$TMP/no-such-pilot-file
+SESSION_SSH_REPO_PUB=$DEPLOY_DIR/france/session-login.pub
+fresh
+setup_session_ssh >/dev/null
+check "钥匙文件按 session-login.pub 写了" "$([[ -s "$SESSION_SSH_KEYS_DIR/$U" ]] && cmp -s "$SESSION_SSH_KEYS_DIR/$U" "$SESSION_SSH_REPO_PUB" && echo 一样 || echo 不一样)" 一样
+SESSION_SSH_ALLOW_FILE=$SESSION_SSH_ALLOW_FILE_SAVE
+SESSION_SSH_REPO_PUB=$SESSION_SSH_REPO_PUB_SAVE
 echo "-- 7f.【故意造出的失败】没有 sshd 命令：判红、不放文件"
 rm -f -- "$SSHD_SESSION_USER_DROPIN"
 SSHD_ABSENT=1

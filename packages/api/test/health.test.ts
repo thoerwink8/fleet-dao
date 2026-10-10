@@ -22,6 +22,18 @@ describe('健康检查', () => {
     });
   });
 
+  it('#1795：agent 口（本机 8788）也挂同一份 /healthz，会话用户被 nft 拦住 8787 时仍能旁证', async () => {
+    const h = harness();
+    const res = await h.agent.request('/healthz');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      checks: {
+        external_watchdog: { ok: true, status: 'not_wired', message: EXTERNAL_WATCH_NOT_WIRED },
+      },
+    });
+  });
+
   it('连不上库、Temporal 没接上：整体 503，逐项如实报红；内部细节（地址等）只进日志不对外', async () => {
     const internal = 'db.internal.example:5432';
     const h = harness({

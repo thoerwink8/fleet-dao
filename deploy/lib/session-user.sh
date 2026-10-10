@@ -99,13 +99,14 @@ check_session_ssh() { # 用户 家目录
   fi
 }
 
-# /etc/ssh/authorized_keys/<用户>：普通文件、root:root 644、每把钥匙 pilot 家里都有。没有这个文件记待配（会话用户登不进来，
-# 不是漏洞）。返回的问题写进 SSH_BAD，没放的写进 SSH_PENDING
+# /etc/ssh/authorized_keys/<用户>：普通文件、root:root 644；每把钥匙须在 pilot 家里或仓里 session-login.pub（#1795）。
+# 没有这个文件记待配（会话用户登不进来，不是漏洞）。返回的问题写进 SSH_BAD，没放的写进 SSH_PENDING
 check_session_ssh_keys() { # 用户
-  local u=$1 f="$SESSION_SSH_KEYS_DIR/$1" keys allow stray
+  local u=$1 f="$SESSION_SSH_KEYS_DIR/$1" keys allow allow_pilot allow_repo stray repo_pub
+  repo_pub=${SESSION_SSH_REPO_PUB:-${DEPLOY_DIR:-}/france/session-login.pub}
   SSH_BAD="" SSH_PENDING=""
   if [[ ! -e "$f" && ! -L "$f" ]]; then
-    SSH_PENDING="$f 还没放（桌面端连不进 $u；重跑 france.sh，它照 $SESSION_SSH_ALLOW_FILE 写）；"
+    SSH_PENDING="$f 还没放（桌面端连不进 $u；重跑 france.sh，它照 $SESSION_SSH_ALLOW_FILE 与 session-login.pub 写）；"
     return 0
   fi
   if [[ -L "$f" || ! -f "$f" ]]; then
@@ -120,13 +121,19 @@ check_session_ssh_keys() { # 用户
     return 0
   fi
   if [[ -z "$keys" ]]; then return 0; fi
-  if ! allow=$(ssh_key_fingerprints "$SESSION_SSH_ALLOW_FILE") || [[ -z "$allow" ]]; then
-    SSH_BAD+="$f 有钥匙，可 $SESSION_SSH_ALLOW_FILE 读不了、认不出或是空的，核对不了是不是创始人的；"
+  allow_pilot=$(ssh_key_fingerprints "$SESSION_SSH_ALLOW_FILE" 2>/dev/null || true)
+  allow_repo=
+  if [[ -n "$repo_pub" && -s "$repo_pub" ]]; then
+    allow_repo=$(ssh_key_fingerprints "$repo_pub" 2>/dev/null || true)
+  fi
+  allow=$(printf '%s\n%s\n' "$allow_pilot" "$allow_repo" | awk 'NF' | sort -u)
+  if [[ -z "$allow" ]]; then
+    SSH_BAD+="$f 有钥匙，可 $SESSION_SSH_ALLOW_FILE 与 session-login.pub 都读不了、认不出或是空的，核对不了是不是创始人的；"
     return 0
   fi
   stray=$(comm -23 <(printf '%s\n' "$keys") <(printf '%s\n' "$allow") | grep -c .) || true
   if ((stray > 0)); then
-    SSH_BAD+="$f 里有 $stray 把钥匙不在 $SESSION_SSH_ALLOW_FILE 里（只许放创始人登录 pilot 用的）；"
+    SSH_BAD+="$f 里有 $stray 把钥匙不在 pilot 家里也不在 session-login.pub 里（只许放创始人登录用的）；"
   fi
 }
 

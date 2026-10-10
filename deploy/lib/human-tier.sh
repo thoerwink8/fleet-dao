@@ -204,11 +204,22 @@ setup_session_ssh() {
     return 1
   fi
   ensure_dir "$SESSION_SSH_KEYS_DIR" root:root 755 || return 1
-  # 钥匙文件先于 drop-in 放好；pilot 那份读不到就不写，已有的不动，红由读回再报一次（会话用户登不进来，不是漏洞）
-  if keys=$(cat -- "$SESSION_SSH_ALLOW_FILE" 2>/dev/null) && [[ -n "$keys" ]]; then
-    put_file "$SESSION_SSH_KEYS_DIR/$u" root:root 644 "$keys"
+  # 钥匙文件先于 drop-in 放好：pilot 家里那份 ∪ 仓里 session-login.pub（#1795：box 对得上指纹的私钥，不必先有 fleet_login 这个文件名）。
+  # 两份都读不到就不写，已有的不动，红由读回再报一次（会话用户登不进来，不是漏洞）。
+  local repo_pub=${SESSION_SSH_REPO_PUB:-$DEPLOY_DIR/france/session-login.pub} merged="" line
+  merged=$(cat -- "$SESSION_SSH_ALLOW_FILE" 2>/dev/null || true)
+  if [[ -s "$repo_pub" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+      if ! grep -qxF -- "$line" <<<"$merged"; then
+        merged=${merged:+$merged$'\n'}$line
+      fi
+    done <"$repo_pub"
+  fi
+  if [[ -n "$merged" ]]; then
+    put_file "$SESSION_SSH_KEYS_DIR/$u" root:root 644 "$merged"
   else
-    red "$SESSION_SSH_ALLOW_FILE 读不到或是空的：$SESSION_SSH_KEYS_DIR/$u 没写，桌面端连不进 $u"
+    red "$SESSION_SSH_ALLOW_FILE 与 $repo_pub 都读不到或是空的：$SESSION_SSH_KEYS_DIR/$u 没写，桌面端连不进 $u"
   fi
   render "$DEPLOY_DIR/france/sshd-session-user.conf" SESSION_USER="$u" KEYS_DIR="$SESSION_SSH_KEYS_DIR" || return 1
   # 先读旧版：sshd -t 不过时有旧版就还原旧版，没有才删
