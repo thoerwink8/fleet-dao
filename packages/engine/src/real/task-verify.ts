@@ -6,12 +6,13 @@
 // 改这里之前必须知道：
 // - 结论只有引擎机器人贴的 cold-verify 才算数：没贴上、贴在旧头上都等于没验。所以开跑前先贴 pending（贴不上就不起会话），
 //   会话跑完贴 success / failure；贴不上抛错，工作流按失败分流处理，不当成验过。
-// - 「做不出来」和「没过」是两回事：读不到 PR 或 diff、diff 太大、没有别家的模型、认得出原因的会话失败（额度用完、登录失效）、
-//   结论认不出，回 unavailable（工作流停下报人，不让写代码的会话白改一轮）；只有会话跑成、写出了算挡的问题才回 pass: false 加 problems。
-//   认不出原因的会话失败先换验收用途里下一条家族不同于作者的路由再验，都不行才 unavailable，说明里列出试过的路由和报错尾巴。
-// - 过一会儿就行的（没空位、内存放不下、额度要等、引擎在停机、上游临时故障）回 retry，工作流隔一会儿再来，不算一轮、不报人。
-//   上游临时故障认的是失败分流规则表上标了 blip 的那些（容量满、503、限流、连接被重置），不在这里另写关键词。
-//   选路回「一条能用的都没有」（waitFor 为 none）不算这一类：等也等不来。
+// - 「做不出来」和「没过」是两回事：读不到 PR 或 diff、diff 太大、所有候选（含作者族的同族兜底验）都试过还没验成，
+//   回 unavailable（工作流停下报人，不让写代码的会话白改一轮）；只有会话跑成、写出了算挡的问题才回 pass: false 加 problems。
+//   会话没跑成（额度用完、超时、结论认不出……）先换下一条路由、下一族再验（verifier-invoke.ts，#1731），试遍了才 unavailable，
+//   说明里列出试过的路由和原因。
+// - 过一会儿就行的（没空位、内存放不下、额度要等、引擎在停机、上游临时故障、一个验收模型都派不出）回 retry，工作流隔一会儿再来，
+//   不算一轮、不报人。上游临时故障认的是失败分流规则表上标了 blip 的那些（容量满、503、限流、连接被重置），不在这里另写关键词。
+//   一个模型都派不出（每一族选路都回「一条能用的都没有」，#1731）也按这一类：隔 ROUTE_RETRY_SECONDS 再来，不停下等人。
 // - PR 的头不是要验的那个了（有人推过新提交）回 headMoved，工作流对新的头重走一遍。
 // - 读 GitHub 先于一切、在 runColdVerifyForPr 外面做：GitHub 一时不通是 PortError（工作流按失败分流重试），不是「读不到 PR」那种要报人的结论。
 // - 验收会话手上没有仓库的检出：只给一个空的临时目录（归那条路由的会话用户，会话收场就删），diff 全在提示词里。
@@ -271,6 +272,8 @@ interface Seen {
   admission?: boolean;
   /** 切号停下了这一次验收（#59）。 */
   orgSwitch?: boolean;
+  /** 一个验收模型都派不出（#1731）：过一会儿重来。 */
+  noModel?: boolean;
 }
 
 export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<EngineTasks['coldVerify']> {
@@ -345,6 +348,9 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     const retryFor = (reason: string): NonNullable<ColdVerifyResult['retry']> => {
       if (seen.orgSwitch) return { wait: 'slot', reason, afterSeconds: VERIFY_ORG_SWITCH_RETRY_SECONDS };
       if (seen.admission) return { wait: 'slot', reason, afterSeconds: VERIFY_ADMISSION_RETRY_SECONDS };
+      // 一个模型都派不出：选路没给过秒数，用默认的那一档
+      if (seen.noModel || waits.length === 0)
+        return { wait: 'slot', reason, afterSeconds: ROUTE_RETRY_SECONDS };
       const slot = waits.filter((w) => w.waitFor === 'slot');
       const pool = slot.length > 0 ? slot : waits;
       return {
@@ -421,6 +427,8 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
         },
         oneShot,
         chooseModelForFamily: async (family) => {
+          // 叫停了：验不成的会话不再换下一个候选起新的（#1731 会换候选重试），取消由下面原样抛出去
+          if (ctx.signal.aborted) return undefined;
           const before = waits.length;
           const route = await picker.pickRouteForFamily(family);
           if (route === undefined) {
@@ -484,6 +492,11 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             return '机器内存放不下新会话';
           }
           if (verdict.upstreamRetry) return verdict.upstreamRetry.reason;
+          // 一个模型都派不出（#1731，routeWait 里没有在等的族）：没起会话，这会儿验不了、过一会儿重来，不停下等人
+          if (verdict.session === undefined && verdict.routeWait?.families.length === 0) {
+            seen.noModel = true;
+            return `这会儿验不了：${verdict.routeWait.reason}`;
+          }
           // 要派的族在等选路（#1697）：没起会话，过一会儿重来
           if (verdict.session === undefined && verdict.routeWait !== undefined) {
             return `这会儿没有能派的验收路由：${verdict.routeWait.reason}`;
@@ -525,7 +538,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           retry: { wait: 'slot', reason: again.reason, afterSeconds: again.afterSeconds },
         };
       }
-      return { pass: false, problems: [], round, retry: retryFor(run.wait) };
+      return withUiNote({ pass: false, problems: [], round, retry: retryFor(run.wait) });
     }
     const verdict = run.verdict;
     if (verdict === undefined) {
