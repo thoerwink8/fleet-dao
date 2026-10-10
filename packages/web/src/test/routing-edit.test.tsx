@@ -358,6 +358,10 @@ describe('路由页：调先后和开关', () => {
           .getAttribute('aria-checked'),
       ).toBe('false'),
     );
+    // 已关模型的路由默认折叠（#1754）：先点开展开再核每条开关（Opus 5.5 下 3 条）
+    const fold = await screen.findByRole('button', { name: /已关 3 条路由/ });
+    expect(fold.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(fold);
     expect(within(routeItem('r-ca-opus')).getByRole('switch').getAttribute('aria-checked')).toBe('false');
     expect(within(routeItem('r-cb-opus')).getByRole('switch').getAttribute('aria-checked')).toBe('false');
     expect(spy).toHaveBeenCalledExactlyOnceWith('opus-5.5', {
