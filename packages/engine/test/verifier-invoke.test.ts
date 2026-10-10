@@ -5,7 +5,10 @@
 // problems 写明哪一步查不到（不许拿「查不到」当「没挡的」、不许拿默认模型顶上）。这是 specs/555 第 3 条
 // （只有三种能挡）和第 4 条（读不到 PR 必填栏就明确失败）的钉子。
 
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 import type { RunRecord, RunStart, RunsWriter } from '../src/runner/not-wired.ts';
 import type { OneShotDeps, SpawnCommand, SpawnOutcome } from '../src/runner/one-shot.ts';
 import {
@@ -78,6 +81,10 @@ const FAKE_DIFF_OK = {
   changedFiles: ['foo.ts'],
 };
 
+// 一次性调用把 stdout / stderr 落在 tmpDir 下：放系统临时目录，测完删掉，别在当前目录留垃圾。
+const TMP_DIR = mkdtempSync(join(tmpdir(), 'fleet-555-1-test-'));
+afterAll(() => rmSync(TMP_DIR, { recursive: true, force: true }));
+
 function fakeOneShot(scripted: SpawnOutcome): {
   oneShot: OneShotDeps;
   recorded: RunRecord[];
@@ -108,7 +115,7 @@ function fakeOneShot(scripted: SpawnOutcome): {
       cwd: input.cwd,
     }),
     runs,
-    tmpDir: 'C:/temp/fleet-555-1-test',
+    tmpDir: TMP_DIR,
   };
   return { oneShot, recorded, started, spawnedArgv, commands };
 }

@@ -7,7 +7,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { type ColdVerifySpec, runColdVerifyForPr } from '../src/cold-verify-run.ts';
 import type { RunRecord, RunsWriter } from '../src/runner/not-wired.ts';
 import type { OneShotDeps, SpawnOutcome } from '../src/runner/one-shot.ts';
@@ -25,13 +25,17 @@ const TASK_ID = '5f0c2a8e-3b1d-4c6e-9a7f-1e2d3c4b5a69';
 
 const MODEL_PASS = ['## 问题', '（没有）', '', 'verdict: pass'].join('\n');
 
+// 一次性调用把 stdout / stderr 落在 tmpDir 下：放系统临时目录，测完删掉，别在当前目录留垃圾。
+const TMP_DIR = mkdtempSync(join(tmpdir(), 'fleet-555-2-run-test-'));
+afterAll(() => rmSync(TMP_DIR, { recursive: true, force: true }));
+
 function fakeOneShot(scripted: SpawnOutcome): OneShotDeps {
   const runs: RunsWriter = { async start() {}, async record(_r: RunRecord) {} };
   return {
     spawn: async () => scripted,
     buildCommand: (input) => ({ argv: ['fake-executor', '--model', input.modelId], cwd: input.cwd }),
     runs,
-    tmpDir: 'C:/temp/fleet-555-2-run-test',
+    tmpDir: TMP_DIR,
   };
 }
 
