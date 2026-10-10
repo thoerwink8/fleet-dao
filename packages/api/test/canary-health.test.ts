@@ -87,7 +87,7 @@ describe('canary 项怎么判', () => {
     expect(got).toMatchObject({ ok: false, message: '最近一轮（09-27 20:13 有结论）断在「派活」' });
   });
 
-  it('跳过（巡检仓的「让 AI 接活」关着，#1050 / #1808）：不当通过，回待定；跳过的也太旧了：红，说的是「跳过的」', () => {
+  it('跳过（巡检仓的「让 AI 接活」关着，#1050 / #1808）：不当通过，回待定；过期的跳过也一样待定，不报 canary_stale', () => {
     const skipped = row({
       verdict: 'skipped',
       stage: 'open',
@@ -99,10 +99,12 @@ describe('canary 项怎么判', () => {
       note: '最近一轮 09-27 20:13 跳过：巡检仓的「让 AI 接活」关着，没开单、没验',
     });
     const stale = row({ ...skipped, endedAt: new Date(NOW.getTime() - CANARY_STALE_MS - 60_000) });
-    expect(canaryHealth({ finished: stale, running: null }, NOW)).toMatchObject({
-      ok: false,
+    expect(canaryHealth({ finished: stale, running: null }, NOW)).toEqual({
+      ok: 'pending',
+      note: expect.stringMatching(/^最近一轮 .+ 跳过：巡检仓的「让 AI 接活」关着，没开单、没验$/),
+    });
+    expect(canaryHealth({ finished: stale, running: null }, NOW)).not.toMatchObject({
       code: 'canary_stale',
-      message: expect.stringContaining('跳过的'),
     });
   });
 
@@ -139,7 +141,7 @@ describe('canary 项怎么判', () => {
     });
   });
 
-  it('最近一轮是「跳过」（#1808）：不当通过，回待定', () => {
+  it('最近一轮是「跳过」（#1808）：不当通过，回待定（含过期跳过）', () => {
     const skipped = row({
       verdict: 'skipped',
       stage: 'open',
@@ -149,6 +151,11 @@ describe('canary 项怎么判', () => {
     const got = canaryHealth({ finished: skipped, running: null }, NOW);
     expect(got.ok).toBe('pending');
     expect(got).not.toMatchObject({ ok: true });
+    const stale = row({ ...skipped, endedAt: new Date(NOW.getTime() - CANARY_STALE_MS - 60_000) });
+    const staleGot = canaryHealth({ finished: stale, running: null }, NOW);
+    expect(staleGot.ok).toBe('pending');
+    expect(staleGot).not.toMatchObject({ ok: true });
+    expect(staleGot).not.toMatchObject({ code: 'canary_stale' });
   });
 
   it('【故意造出的失败】巡检自己没跑成：红，和「断了」分开说', () => {

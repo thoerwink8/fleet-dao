@@ -114,7 +114,15 @@ export function canaryHealth(
       detail: finished.why ?? undefined,
     };
   }
-  if (finished.verdict !== 'pass' && finished.verdict !== 'skipped') {
+  // 跳过（#1050 / #1808）：巡检仓的「让 AI 接活」关着，故意不跑；不当通过（发版期间曾被误判成修好），
+  // 也不因太旧改报 canary_stale——一律待定、照实说这一轮什么都没验。
+  if (finished.verdict === 'skipped') {
+    return {
+      ok: 'pending',
+      note: `最近一轮 ${when} 跳过：巡检仓的「让 AI 接活」关着，没开单、没验${inFlight}`,
+    };
+  }
+  if (finished.verdict !== 'pass') {
     return {
       ok: false,
       code: 'canary_not_run',
@@ -128,18 +136,8 @@ export function canaryHealth(
     return {
       ok: false,
       code: 'canary_stale',
-      message:
-        finished.verdict === 'skipped'
-          ? `最近一轮是 ${when} 跳过的，之后 ${hours} 小时没跑完一轮${inFlight}`
-          : `最近一次通过是 ${when}，之后 ${hours} 小时没跑完一轮${inFlight}`,
+      message: `最近一次通过是 ${when}，之后 ${hours} 小时没跑完一轮${inFlight}`,
       detail: undefined,
-    };
-  }
-  // 跳过（#1050 / #1808）：巡检仓的「让 AI 接活」关着，故意不跑；不当通过（发版期间曾被误判成修好），回待定、照实说这一轮什么都没验
-  if (finished.verdict === 'skipped') {
-    return {
-      ok: 'pending',
-      note: `最近一轮 ${when} 跳过：巡检仓的「让 AI 接活」关着，没开单、没验${inFlight}`,
     };
   }
   const minutes = Math.max(
