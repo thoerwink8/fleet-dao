@@ -321,6 +321,28 @@ describe('researcher', () => {
       ).pass,
     ).toBe(false);
   });
+  const tail = '\n来源：https://code.claude.com/docs/en/sub-agents，查文档日期：2026-10-09';
+  it('对的说法不止「高于」：赢过、> 排序、编号 2 对 3 都认（前两条是 Haiku、Opus 2026-10-10 的实答）', async () => {
+    for (const a of [
+      '托管设置(1) > `--agents` 命令行参数(2) > 项目 `.claude/agents/`(3) > 用户 `~/.claude/agents/`(4) > 插件 `agents/` 目录(5)。`--agents` 排第 2，所以同名时它赢过项目里的 `.claude/agents/` 定义，只输给托管设置。',
+      '从高到低：①托管设置（组织级）> ②命令行 `--agents` > ③项目 `.claude/agents/` > ④用户 `~/.claude/agents/`。\n2. `--agents` 排第 2，只比托管设置低。\n3. 和项目 `.claude/agents/` 里的同名定义比，`--agents` 赢，因为它是 2、项目是 3。',
+      '`--agents` 排第 2。\n托管设置 > `--agents` > 项目 `.claude/agents/`',
+      '`--agents` 排第 2，只比托管设置低。\n编号：`--agents` 是 2、项目是 3。',
+    ]) {
+      expect((await judge('researcher/agents-priority', a + tail)).pass, a).toBe(true);
+    }
+  });
+  it('错的：排第 2 但说输给项目、被项目覆盖、排序里项目在前，都不算「高于」', async () => {
+    for (const a of [
+      '`--agents` 排第 2，同名时输给项目 `.claude/agents/`。',
+      '`--agents` 排第 2，同名时会被项目 `.claude/agents/` 覆盖。',
+      '`--agents` 排第 2：托管设置 > 项目 `.claude/agents/` > `--agents` > 用户 `~/.claude/agents/`。',
+    ]) {
+      const v = await judge('researcher/agents-priority', a + tail);
+      expect(v.pass, a).toBe(false);
+      expect(v.reason).toContain('没说 --agents 高于项目');
+    }
+  });
 });
 
 describe('brief-drafter（调 check-brief.mjs）', () => {
