@@ -4,7 +4,7 @@
 // - 不知道（探针没看过、额度没读成）不画成活，也不画成死：用停滞色，原因照写。
 // - 渠道已关时这条路由不画开关，写「渠道已关」；整池暂停、整池暂停没读成时开关置灰并写原因。
 
-import { probeBackoffNotice } from '@fleet-dao/shared';
+import { type HostId, probeBackoffNotice, routeEffortChoices } from '@fleet-dao/shared';
 import { ChevronRight } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { Link } from 'react-router';
@@ -14,6 +14,7 @@ import { formatAgo, formatIn } from '../lib/format';
 import { poolIsHeld } from '../lib/pool-holds';
 import { routeKind } from '../lib/route-kinds';
 import { probeStale, routeHost, routeSlots, routeTitle } from '../lib/routing';
+import { supportedPurposeEfforts } from '../lib/routing-browse';
 import { actualRanks, routeSlotState, type SlotState, slotWord, summarizeOrder } from '../lib/routing-order';
 import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
@@ -23,6 +24,75 @@ import { PoolHoldControl } from './routing-hold';
 import { KindChip, useKindEnv } from './routing-kinds';
 import { StatusDot } from './status';
 import { Badge } from './ui/badge';
+
+/**
+ * 档位配不了时的长说明（「没有单独的档位参数……不带方括号」等）：行内不铺开，
+ * 悬停看全文（#1754）。和 membership 里下拉置灰用的同一句话。
+ */
+export function effortBlockedTitle(
+  modelId: string,
+  routes: readonly { hostId: HostId; upstreamModel?: string | undefined }[],
+): string | undefined {
+  // 和 membership 的 effortBlockedWhy 同一套话：先看有没有共同认的档，没有再取 fixed 原因。
+  if (supportedPurposeEfforts(modelId, routes).length > 0) return undefined;
+  for (const route of routes) {
+    const choices = routeEffortChoices(route.hostId, modelId);
+    if (choices.kind === 'fixed') return choices.why;
+  }
+  if (routes.length === 0) return '一条路由都没有，没有能配的档位';
+  return '这几条路由没有共同认的档位';
+}
+
+/**
+ * 套在模型行外层：把 membership 写在行内的 data-row-note 藏掉；
+ * 全文改由 ModelRow 操作区的 title={effortBlockedTitle(...)} 悬停给出。
+ */
+export const hideEffortRowNoteClass = '[&_[data-row-note]]:hidden';
+
+/**
+ * 模型已关时：路由列表默认折叠，头上保留配置顺序号和「已关 N 条路由」；点开展开（#1754）。
+ * 开着的模型不走这层，直接画 ModelRoutes。
+ */
+export function CollapsibleOffModelRoutes({
+  model,
+  position,
+  now,
+  firstLiveRoute,
+}: {
+  model: RoutingLayerModel;
+  /** 配置里的先后（从 1 起），折叠头上照写，不改号。 */
+  position: number;
+  now: number;
+  firstLiveRoute?: string | undefined;
+}) {
+  const [open, setOpen] = useState(false);
+  const n = model.routes.length;
+  return (
+    <>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={`off-routes-${model.modelId}`}
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 border-b px-3 py-2 text-left text-sub hover:bg-muted/50"
+      >
+        <ChevronRight
+          className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-90')}
+          aria-hidden
+        />
+        <span data-position className="num shrink-0 text-muted-foreground">
+          {position}
+        </span>
+        <span>
+          已关 <span className="num">{n}</span> 条路由
+        </span>
+      </button>
+      <div id={`off-routes-${model.modelId}`} hidden={!open}>
+        {open ? <ModelRoutes model={model} now={now} firstLiveRoute={firstLiveRoute} /> : null}
+      </div>
+    </>
+  );
+}
 
 /** 一个模型下的路由，可拖动改先后（先后不分用途，管这个模型在所有用途里）。 */
 export function ModelRoutes({

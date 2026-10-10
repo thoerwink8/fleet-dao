@@ -60,13 +60,11 @@ describe('路由页：每一层现在活着吗', () => {
     expect(page).toContain('不算故障');
   });
 
-  test('点名验收：首选模型不行时写明顺位第一条活的在第几个模型，不知道的原因照写，顺位第一条活的那条标出来', async () => {
+  test('点名验收：首选不可用时写人话「实际派谁」，不知道的原因照写，顺位第一条活的那条标出来', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=verify' });
     await purposeLinks();
     // 用途按钮上只有名字和个数（这句话在按钮的悬停提示里），详情标题旁写一遍
-    expect(
-      screen.getAllByText('首选模型不行，顺位第一条活的在第 2 个模型：GPT 5.6 luna（中转站 · relay）'),
-    ).toHaveLength(1);
+    expect(screen.getAllByText('首选 Grok 4.7 不可用，实际派 GPT 5.6 luna')).toHaveLength(1);
     // 默认展开顺位第一条活的所在的模型
     expect(routeItem('r-rl-gpt').textContent).toContain('顺位第一条活的');
     // Grok 的额度读数是 42 分钟前的：额度不知道，整条不知道（不画成活）
@@ -77,6 +75,149 @@ describe('路由页：每一层现在活着吗', () => {
     expect(grok.textContent).not.toContain('顺位第一条活的');
   });
 
+  test('已关模型默认折叠且顺序号不变', async () => {
+    const now = Date.now();
+    const fact = (verdict: 'live' | 'dead' | 'unknown', reason: string) => ({ verdict, reason });
+    const offRoute = (routeId: string, poolId: string) => ({
+      routeId,
+      channelId: 'ch-claude',
+      channelName: 'Claude 订阅',
+      poolId,
+      hostId: 'claude-code' as const,
+      enabled: false,
+      verdict: 'dead' as const,
+      connect: fact('dead', '开关关着（这条路由在它的模型下关着）'),
+      quota: fact('live', '额度读数新、窗口有余'),
+      ban: fact('dead', '开关关着（这条路由在它的模型下关着）'),
+      exhausted: [],
+      inFlight: 0,
+      reserved: 0,
+      maxConcurrency: 2,
+    });
+    const api = withLayers({
+      asOf: new Date(now).toISOString(),
+      purposes: [
+        {
+          purpose: 'execute',
+          version: 0,
+          verdict: 'live',
+          problems: [],
+          models: [
+            {
+              modelId: 'grok-4.7',
+              displayName: 'Grok 4.7',
+              family: 'grok',
+              verdict: 'dead',
+              routes: [offRoute('rt-off-1', 'p1'), offRoute('rt-off-2', 'p2'), offRoute('rt-off-3', 'p3')],
+            },
+            {
+              modelId: 'cursor-auto',
+              displayName: 'Cursor Auto',
+              family: 'cursor',
+              verdict: 'live',
+              routes: [
+                {
+                  routeId: 'rt-live',
+                  channelId: 'ch-cursor',
+                  channelName: 'Cursor',
+                  poolId: 'cursor-pro',
+                  hostId: 'cursor-agent',
+                  enabled: true,
+                  verdict: 'live',
+                  connect: fact('live', '探针探通了'),
+                  quota: fact('live', '额度读数新、窗口有余'),
+                  ban: fact('live', '没有禁令、开关开着'),
+                  probedAt: new Date(now - 60_000).toISOString(),
+                  exhausted: [],
+                  inFlight: 0,
+                  reserved: 0,
+                  maxConcurrency: 2,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api });
+    await purposeLinks();
+    // 左边顺序号仍是配置先后：Grok 第 1、Cursor 第 2
+    const grokBtn = await screen.findByRole('button', { name: '查看 Grok 4.7 的路由' });
+    expect(grokBtn.closest('[data-model]')?.querySelector('[data-position]')?.textContent).toBe('1');
+    expect(
+      (await screen.findByRole('button', { name: '查看 Cursor Auto 的路由' }))
+        .closest('[data-model]')
+        ?.querySelector('[data-position]')?.textContent,
+    ).toBe('2');
+    await pickModel('Grok 4.7');
+    const fold = await screen.findByRole('button', { name: /已关 3 条路由/ });
+    expect(fold.getAttribute('aria-expanded')).toBe('false');
+    expect(fold.textContent).toMatch(/1/);
+    expect(document.querySelector('[data-route="rt-off-1"]')).toBeNull();
+    fireEvent.click(fold);
+    expect(fold.getAttribute('aria-expanded')).toBe('true');
+    expect(routeItem('rt-off-1').textContent).toContain('关着');
+    expect(routeItem('rt-off-3').textContent).toContain('关着');
+  });
+
+  test('档位配不了的说明收进悬停，行内不铺开', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
+    await purposeLinks();
+    const row = document.querySelector('[data-model="cursor-auto"]');
+    if (!(row instanceof HTMLElement)) throw new Error('没有 Cursor Auto 行');
+    expect(row.querySelector('[data-effort-tip]')?.getAttribute('title')).toMatch(
+      /没有单独的档位参数.*不带方括号/,
+    );
+    // membership 仍写出 data-row-note；行壳带 hideEffortRowNoteClass，行内不铺开
+    expect(row.querySelector('[class*="data-row-note"]')).toBeTruthy();
+    expect(row.querySelector('[data-row-note]')?.textContent).toMatch(/不带方括号/);
+  });
+
+  test('Jev 用途显示不用处理的说明', async () => {
+    const now = Date.now();
+    const fact = (verdict: 'live' | 'dead' | 'unknown', reason: string) => ({ verdict, reason });
+    const api = withLayers({
+      asOf: new Date(now).toISOString(),
+      purposes: [
+        {
+          purpose: 'judge',
+          version: 0,
+          verdict: 'unknown',
+          problems: [],
+          models: [
+            {
+              modelId: 'deepseek-v4.1-flash',
+              displayName: 'DeepSeek v4.1 flash',
+              family: 'deepseek',
+              verdict: 'unknown',
+              routes: [
+                {
+                  routeId: 'rt-ds',
+                  channelId: 'ch-ds',
+                  channelName: 'DeepSeek 接口',
+                  poolId: 'deepseek',
+                  hostId: 'api-shell',
+                  enabled: true,
+                  verdict: 'unknown',
+                  connect: fact('unknown', '探针还没看过'),
+                  quota: fact('unknown', '额度没读成'),
+                  ban: fact('live', '没有禁令、开关开着'),
+                  exhausted: [],
+                  inFlight: 0,
+                  reserved: 0,
+                  maxConcurrency: 4,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    renderApp(<RoutingPage />, { route: '/routing?purpose=judge', api });
+    await purposeLinks();
+    expect(screen.getByText('不知道', { selector: 'span' })).toBeTruthy();
+    expect(screen.getByText('按量计费，不自动探，不用处理')).toBeTruthy();
+  });
   test('写码：探了没通、模型下架、开关关着的都列出来，死因写全', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await purposeLinks();
