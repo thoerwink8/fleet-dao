@@ -71,6 +71,8 @@ import {
   UpdateSettingResponse,
 } from './settings.ts';
 import {
+  RunTranscriptQuery,
+  RunTranscriptResponse,
   TaskActionRequest,
   TaskActionResponse,
   TaskDetailResponse,
@@ -133,6 +135,13 @@ export const WebRoutes = {
   node: { method: 'GET', path: '/nodes/:nodeId', response: NodeDetailResponseSchema },
   board: { method: 'GET', path: '/repos/:repoId/board', response: BoardResponse },
   task: { method: 'GET', path: '/tasks/:taskId', response: TaskDetailResponse },
+  /** 一段会话的过程记录（run_transcript），按序号增量读。只认登录 Cookie（网关通行证不认）。 */
+  runTranscript: {
+    method: 'GET',
+    path: '/tasks/:taskId/runs/:runId/transcript',
+    query: RunTranscriptQuery,
+    response: RunTranscriptResponse,
+  },
   taskAction: {
     method: 'POST',
     path: '/tasks/:taskId/actions',

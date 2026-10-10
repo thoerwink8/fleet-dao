@@ -17,8 +17,16 @@ import {
   relPath,
   str,
   testRun,
+  transcriptEntry,
 } from '../stream-kit.ts';
-import type { FilePayload, SayPayload, TestPayload, ToolAction, ToolPayload } from '../types.ts';
+import type {
+  FilePayload,
+  SayPayload,
+  TestPayload,
+  ToolAction,
+  ToolPayload,
+  TranscriptEntry,
+} from '../types.ts';
 
 export interface MirasimToolCall {
   id: string;
@@ -108,6 +116,10 @@ export class MirasimSession {
   readonly #files = new Set<string>();
   readonly #testRuns: TestPayload[] = [];
   #said = 0;
+  /** 攒着还没交出去的会话过程记录，见 drainTranscript。 */
+  #transcript: TranscriptEntry[] = [];
+  /** 结论（和报错）已经记过了：一轮只记一次。 */
+  #concluded = false;
   #toolErrors = 0;
   #snapshots = 0;
   #patches = 0;
@@ -261,6 +273,20 @@ export class MirasimSession {
     return this.#settle();
   }
 
+  /**
+   * 取走自上次以来攒下的会话过程记录（#1640）：助手的话、工具调用和结果、报错、结论，和进度事件同一个节拍产生。
+   * 快照里没有的不编：工具结果没有输出就写（无输出）。
+   */
+  drainTranscript(): TranscriptEntry[] {
+    const out = this.#transcript;
+    this.#transcript = [];
+    return out;
+  }
+
+  #tx(kind: TranscriptEntry['kind'], text: string, extra?: Parameters<typeof transcriptEntry>[3]): void {
+    this.#transcript.push(transcriptEntry(this.#now(), kind, text, extra));
+  }
+
   /** 会话结束时把还没发的话发出去。 */
   flush(): ProgressEvent[] {
     const events: ProgressEvent[] = [];
@@ -307,7 +333,10 @@ export class MirasimSession {
     if (text.length < this.#said) this.#said = 0; // 服务端换了一份更短的正文：从头算
     const fresh = text.slice(this.#said).trim();
     this.#said = text.length;
-    if (fresh) this.#emit(events, 'say', { text: cut(fresh, 2000), source: 'stream' } satisfies SayPayload);
+    if (fresh) {
+      this.#emit(events, 'say', { text: cut(fresh, 2000), source: 'stream' } satisfies SayPayload);
+      this.#tx('assistant', fresh);
+    }
   }
 
   #diff(): ProgressEvent[] {
@@ -316,7 +345,8 @@ export class MirasimSession {
       const command = this.#commandOf(tool);
       if (command) this.#commands.set(tool.id, command);
       const action = toolAction(tool.name);
-      const summary = cut(this.#commands.get(tool.id) ?? this.#pathOf(tool) ?? tool.summary ?? '', 200);
+      const rawSummary = this.#commands.get(tool.id) ?? this.#pathOf(tool) ?? tool.summary ?? '';
+      const summary = cut(rawSummary, 200);
       if (!this.#started.has(tool.id)) {
         this.#flushText(events);
         this.#started.add(tool.id);
@@ -327,6 +357,7 @@ export class MirasimSession {
           action,
           summary,
         } satisfies ToolPayload);
+        this.#tx('tool_call', cut(rawSummary, 2000), { tool: tool.name });
       }
       if (!isFinal(tool.status) || this.#ended.has(tool.id)) continue;
       this.#ended.add(tool.id);
@@ -345,6 +376,7 @@ export class MirasimSession {
               error: cut(`${tool.status}${typeof tool.result === 'string' ? `：${tool.result}` : ''}`, 500),
             }),
       } satisfies ToolPayload);
+      this.#tx('tool_result', toolResultText(tool, ok), { tool: tool.name, ok });
       const path = this.#pathOf(tool);
       if (ok && action === 'edit' && path) {
         const rel = relPath(path, this.#cwd);
@@ -368,7 +400,15 @@ export class MirasimSession {
         this.#emit(events, 'test', run);
       }
     }
-    if (this.terminal()) this.#flushText(events);
+    const end = this.terminal();
+    if (end) {
+      this.#flushText(events);
+      if (!this.#concluded) {
+        this.#concluded = true;
+        if (this.#state.error) this.#tx('error', this.#state.error);
+        this.#tx('result', end.detail, { ok: !end.isError });
+      }
+    }
     return events;
   }
 
@@ -384,6 +424,15 @@ export class MirasimSession {
     const input = parseInput(tool.input);
     return str(input?.path) ?? str(input?.file_path) ?? str(input?.filePath) ?? str(input?.target_file);
   }
+}
+
+/** 工具结果的正文：result 是字符串就用它，是对象就转成 JSON；没有就（无输出）；失败的前面带上状态。 */
+function toolResultText(tool: MirasimToolCall, ok: boolean): string {
+  const r = tool.result;
+  const body =
+    typeof r === 'string' ? r : r === undefined || r === null ? '' : cut(JSON.stringify(r) ?? '', 2000);
+  if (ok) return body || '（无输出）';
+  return `${tool.status ?? '失败'}${body ? `：${body}` : ''}`;
 }
 
 function isFinal(status: string | undefined): boolean {

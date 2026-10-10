@@ -9,5 +9,6 @@ export * from './ci-history.ts';
 export * from './diff.ts';
 export * from './history.ts';
 export * from './prepush.ts';
+export * from './redact.ts';
 export * from './rules.ts';
 export * from './scan.ts';

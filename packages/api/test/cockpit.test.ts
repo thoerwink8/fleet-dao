@@ -52,6 +52,8 @@ describe('约定与实现对得上', () => {
       if (route.method !== 'GET' || !('response' in route)) continue;
       // 远程环境的快照要先有环境推来过才有 200：在 node-report.test.ts 里先推再读、按同一份 schema 认
       if (name === 'node') continue;
+      // 会话内容要这张单真有那一段、且接上了 run_transcript 才有 200：在 run-transcript.test.ts 里先建段再读、按同一份 schema 认
+      if (name === 'runTranscript') continue;
       const res = await h.cockpit.request(fill(route.path), { headers: { cookie } });
       expect(res.status, name).toBe(200);
       const parsed = route.response.safeParse(await res.json());
