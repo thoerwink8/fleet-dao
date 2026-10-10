@@ -50,7 +50,7 @@
 | [0044](0044-feishu-and-inbox.md) | 通知：飞书机器人加驾驶舱提醒中心 | 采纳，未复核 |
 | [0045](0045-model-policy.md) | 模型：构建期用 Opus，判断先用 Jev，子代理分三档且永不用 Fable | 采纳，未复核 |
 | [0046](0046-dispatch-mix.md) | 派工模型：渠道、族、模型、执行方式、阶段自由组合，GPT 不碰界面 | 采纳，未复核 |
-| [0047](0047-ranking-with-explore.md) | 推荐：人排先后，额度和战绩微调，大约一成用来试探 | 采纳，未复核 |
+| [0047](0047-ranking-with-explore.md) | 推荐：人排先后，额度和战绩微调，大约一成用来试探 | 部分被 0076 替代：不试探，模型之间不微调 |
 | [0048](0048-idle-must-not-invent-work.md) | 闲置：渠道空了按序找活，不许 AI 自己编活 | 采纳，未复核 |
 | [0049](0049-official-cli-first.md) | 接法：优先官方命令行，够不到再套自己的写码外壳 | 采纳，未复核 |
 | [0050](0050-temporal-postgres-jev.md) | 底座：Temporal、Postgres、Jev | 采纳，未复核 |
@@ -79,6 +79,7 @@
 | [0073](0073-test-memory-fix-tests-not-machine.md) | 测试内存先改测试、不加机器 | 采纳，未复核 |
 | [0074](0074-commander-no-seat.md) | 指挥官不设座位、不在库里认领 | 采纳，未复核 |
 | [0075](0075-france-engine-release-by-commit.md) | 法国自家的引擎按主线上的一个提交发布 | 部分被 0032 替代 |
+| [0076](0076-route-strictly-by-order.md) | 选路只按顺序：只因额度用完、人关了、报错往后挑；冷验收验不了由冷验收「两家都验」兜 | 采纳 |
 
 ## 第 1–14 条的编号（#1476）
 

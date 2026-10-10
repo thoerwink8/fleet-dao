@@ -37,7 +37,7 @@
 | 7 | 通知 | 采纳，未复核：`docs/decisions/0044-feishu-and-inbox.md` |
 | 8 | 模型 | 采纳，未复核：`docs/decisions/0045-model-policy.md` |
 | 9 | 派工模型 | 采纳，未复核：`docs/decisions/0046-dispatch-mix.md` |
-| 10 | 推荐 | 采纳，未复核：`docs/decisions/0047-ranking-with-explore.md` |
+| 10 | 推荐 | 部分被 0076 替代：`docs/decisions/0047-ranking-with-explore.md` |
 | 11 | 闲置 | 采纳，未复核：`docs/decisions/0048-idle-must-not-invent-work.md` |
 | 12 | 接法 | 采纳，未复核：`docs/decisions/0049-official-cli-first.md` |
 | 13 | 底座 | 采纳，未复核：`docs/decisions/0050-temporal-postgres-jev.md` |
