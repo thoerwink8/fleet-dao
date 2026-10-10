@@ -1,9 +1,16 @@
-import { Bell, Check, ExternalLink, Send, TriangleAlert } from 'lucide-react';
+import { Bell, Check, ChevronDown, ExternalLink, Send, TriangleAlert } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { brand } from '#brand';
-import { errorText, useMe, useNotifications, useResolveNotification } from '../api/client';
-import type { Notification, NotificationLevel } from '../api/types';
+import {
+  errorText,
+  NOTIFICATIONS_PAGE,
+  useMe,
+  useNotifications,
+  useResolveNotification,
+} from '../api/client';
+import type { Me, Notification, NotificationLevel } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RefreshBar } from '../components/refresh-bar';
 import { RepoLink } from '../components/repo-link';
@@ -12,6 +19,7 @@ import { Button } from '../components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import { formatAgo, formatClock, formatDateTime, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
+import { pendingCount } from '../lib/notice-count';
 import { isMine, noticeLevelMeta, type Tone } from '../lib/status';
 import { cn } from '../lib/utils';
 
@@ -156,6 +164,132 @@ function HandlingRow({ h, now }: { h: Handling; now: number }) {
   );
 }
 
+function groupByDay(items: Notification[], now: number): Map<string, Notification[]> {
+  const groups = new Map<string, Notification[]>();
+  for (const n of items) {
+    const k = dayOf(n.createdAt, now);
+    groups.set(k, [...(groups.get(k) ?? []), n]);
+  }
+  return groups;
+}
+
+function NotificationRow({
+  n,
+  now,
+  me,
+  resolvePending,
+  resolveId,
+  onOpen,
+  onDone,
+}: {
+  n: Notification;
+  now: number;
+  me: Me | undefined;
+  resolvePending: boolean;
+  resolveId: string | undefined;
+  onOpen: (link: string) => void;
+  onDone: (n: Notification) => void;
+}) {
+  const resolved = Boolean(n.resolvedAt);
+  return (
+    <li
+      className={cn(
+        'flex flex-col gap-3 border-b px-4 py-3 last:border-b-0 md:flex-row md:items-center',
+        !resolved && n.level !== 'daily' && 'bg-accent/40',
+      )}
+    >
+      <div className="flex min-w-0 flex-1 gap-3">
+        <StatusDot tone={noticeLevelMeta[n.level].tone} className={cn('mt-1.5', resolved && 'opacity-40')} />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={cn('text-sm', !resolved && 'font-semibold')}>{n.title}</span>
+            <span className="rounded bg-muted px-1.5 text-caption text-muted-foreground">
+              {noticeLevelMeta[n.level].label}
+            </span>
+          </div>
+          <p className="mt-0.5 text-sub whitespace-pre-wrap text-muted-foreground">{n.body}</p>
+          {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
+          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="num text-caption text-faint" title={formatClock(n.createdAt)}>
+              {formatAgo(n.createdAt, now)}
+            </span>
+            <Deliveries n={n} />
+            {resolved && n.resolvedAt ? (
+              <span className="inline-flex items-center gap-1 text-caption text-muted-foreground">
+                <Check className="size-3" aria-hidden />
+                {n.resolvedBy ? (isMine(n.resolvedBy, me) ? '我' : n.resolvedBy) : ''}处理于{' '}
+                <span className="num">{formatAgo(n.resolvedAt, now)}</span>
+              </span>
+            ) : null}
+          </div>
+        </div>
+      </div>
+      <div className="flex shrink-0 flex-wrap gap-1.5 pl-5 md:pl-0">
+        {n.link ? (
+          <Button size="sm" variant="ghost" onClick={() => onOpen(n.link ?? '/')}>
+            打开
+          </Button>
+        ) : null}
+        {!resolved ? (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={resolvePending && resolveId === n.id}
+            onClick={() => onDone(n)}
+          >
+            <Check />
+            处理了
+          </Button>
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
+/** 按天分组的通知列表。 */
+function DayGroups({
+  items,
+  now,
+  me,
+  resolvePending,
+  resolveId,
+  onOpen,
+  onDone,
+}: {
+  items: Notification[];
+  now: number;
+  me: Me | undefined;
+  resolvePending: boolean;
+  resolveId: string | undefined;
+  onOpen: (link: string) => void;
+  onDone: (n: Notification) => void;
+}) {
+  const groups = groupByDay(items, now);
+  return (
+    <>
+      {[...groups.entries()].map(([day, dayItems]) => (
+        <section key={day}>
+          <h2 className="mb-2 text-xs font-medium text-muted-foreground">{day}</h2>
+          <ul className="overflow-hidden rounded-xl border bg-card">
+            {dayItems.map((n) => (
+              <NotificationRow
+                key={n.id}
+                n={n}
+                now={now}
+                me={me}
+                resolvePending={resolvePending}
+                resolveId={resolveId}
+                onOpen={onOpen}
+                onDone={onDone}
+              />
+            ))}
+          </ul>
+        </section>
+      ))}
+    </>
+  );
+}
+
 /** 通知靠推送更新，没有定时重拉。这份快照超过 5 分钟还没再读成，刷新条标「数据已过期」。 */
 const NOTIFICATIONS_STALE_AFTER_MS = 5 * TIME.MIN;
 
@@ -163,14 +297,26 @@ export default function Notifications() {
   const [params, setParams] = useSearchParams();
   const status = params.get('status') === 'all' ? 'all' : 'open';
   const level = (LEVELS.find((l) => l.id === params.get('level'))?.id ?? 'all') as 'all' | NotificationLevel;
-  const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useNotifications(status);
+  const [limit, setLimit] = useState(NOTIFICATIONS_PAGE);
+  const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useNotifications(status, limit);
   const { data: me } = useMe();
   const resolve = useResolveNotification();
   const navigate = useNavigate();
   const now = useNow();
+  // 「全部」视图里日报默认收成一行；切回「全部」时重新折叠，避免上次展开还挂着。
+  const [dailyOpen, setDailyOpen] = useState(false);
+  useEffect(() => {
+    if (level === 'all') setDailyOpen(false);
+  }, [level]);
 
   const all = data?.items ?? [];
+  const totalCount = data ? data.counts.decision + data.counts.alert + data.counts.daily : 0;
+  const shownTotal = level === 'all' ? totalCount : (data?.counts[level] ?? 0);
   const list = all.filter((n) => level === 'all' || n.level === level);
+  // 只在「全部」级别视图折叠日报；「日报」标签页直接铺开。待处理/连已处理只影响接口过滤，不改折叠。
+  const foldDaily = level === 'all';
+  const actionItems = foldDaily ? list.filter((n) => n.level !== 'daily') : list;
+  const dailyItems = foldDaily ? list.filter((n) => n.level === 'daily') : [];
 
   const set = (key: string, value: string | null) => {
     const p = new URLSearchParams(params);
@@ -179,17 +325,14 @@ export default function Notifications() {
     setParams(p, { replace: true });
   };
 
-  const groups = new Map<string, Notification[]>();
-  for (const n of list) {
-    const k = dayOf(n.createdAt, now);
-    groups.set(k, [...(groups.get(k) ?? []), n]);
-  }
-
   const done = (n: Notification) =>
     resolve.mutate(n.id, {
       onSuccess: () => toast.success('处理了', { description: n.title }),
       onError: (e) => toast.error('没处理成', { description: errorText(e) }),
     });
+
+  const open = (link: string) => navigate(link);
+  const listEmpty = foldDaily ? actionItems.length === 0 && dailyItems.length === 0 : list.length === 0;
 
   return (
     <Page
@@ -221,9 +364,10 @@ export default function Notifications() {
         </div>
         <div className={segmentTrack}>
           {LEVELS.map((l) => {
-            const n = all.filter((x) => l.id === 'all' || x.level === l.id).length;
-            // 没读到就写「—」，不拿 0 冒充「没有提醒」。真的没有（读成功且列表空）才写 0。
-            const shown = data ? n : '—';
+            // 数字是接口给的真实总数，不是这一页取回的条数（只取了前 N 条时也不会封顶）。
+            // 没读到就写「—」，不拿 0 冒充「没有提醒」。真的没有（读成功且总数 0）才写 0。
+            const n = data ? (l.id === 'all' ? totalCount : data.counts[l.id]) : null;
+            const shown = n ?? '—';
             return (
               <button
                 key={l.id}
@@ -240,6 +384,18 @@ export default function Notifications() {
           })}
         </div>
       </div>
+      {data && status === 'open' ? (
+        <p className="mb-3 text-xs text-muted-foreground" data-testid="pending-rule">
+          待处理 <span className="num">{pendingCount(data.counts)}</span>{' '}
+          条（要你拍加卡住报警），铃铛和侧栏角标同数。
+          {data.counts.daily > 0 ? (
+            <>
+              {' '}
+              日报 <span className="num">{data.counts.daily}</span> 条只是看一眼，不算待处理。
+            </>
+          ) : null}
+        </p>
+      ) : null}
       {error ? <LoadError what="提醒" error={error} /> : null}
       {data?.handlingProblem ? (
         <p className="mb-3 text-xs text-ink-fail" role="status">
@@ -248,7 +404,7 @@ export default function Notifications() {
       ) : null}
       {isLoading ? (
         <LoadingRows rows={5} />
-      ) : !data ? null : list.length === 0 ? (
+      ) : !data ? null : listEmpty ? (
         <Panel>
           <Empty
             icon={Bell}
@@ -258,77 +414,66 @@ export default function Notifications() {
         </Panel>
       ) : (
         <div className="space-y-5">
-          {[...groups.entries()].map(([day, items]) => (
-            <section key={day}>
-              <h2 className="mb-2 text-xs font-medium text-muted-foreground">{day}</h2>
-              <ul className="overflow-hidden rounded-xl border bg-card">
-                {items.map((n) => {
-                  const resolved = Boolean(n.resolvedAt);
-                  return (
-                    <li
-                      key={n.id}
-                      className={cn(
-                        'flex flex-col gap-3 border-b px-4 py-3 last:border-b-0 md:flex-row md:items-center',
-                        !resolved && n.level !== 'daily' && 'bg-accent/40',
-                      )}
-                    >
-                      <div className="flex min-w-0 flex-1 gap-3">
-                        <StatusDot
-                          tone={noticeLevelMeta[n.level].tone}
-                          className={cn('mt-1.5', resolved && 'opacity-40')}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className={cn('text-sm', !resolved && 'font-semibold')}>{n.title}</span>
-                            <span className="rounded bg-muted px-1.5 text-caption text-muted-foreground">
-                              {noticeLevelMeta[n.level].label}
-                            </span>
-                          </div>
-                          <p className="mt-0.5 text-sub whitespace-pre-wrap text-muted-foreground">
-                            {n.body}
-                          </p>
-                          {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
-                          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-                            <span className="num text-caption text-faint" title={formatClock(n.createdAt)}>
-                              {formatAgo(n.createdAt, now)}
-                            </span>
-                            <Deliveries n={n} />
-                            {resolved && n.resolvedAt ? (
-                              <span className="inline-flex items-center gap-1 text-caption text-muted-foreground">
-                                <Check className="size-3" aria-hidden />
-                                {n.resolvedBy ? (isMine(n.resolvedBy, me) ? '我' : n.resolvedBy) : ''}处理于{' '}
-                                <span className="num">{formatAgo(n.resolvedAt, now)}</span>
-                              </span>
-                            ) : null}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex shrink-0 flex-wrap gap-1.5 pl-5 md:pl-0">
-                        {n.link ? (
-                          <Button size="sm" variant="ghost" onClick={() => navigate(n.link ?? '/')}>
-                            打开
-                          </Button>
-                        ) : null}
-                        {!resolved ? (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={resolve.isPending && resolve.variables === n.id}
-                            onClick={() => done(n)}
-                          >
-                            <Check />
-                            处理了
-                          </Button>
-                        ) : null}
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
+          <DayGroups
+            items={actionItems}
+            now={now}
+            me={me}
+            resolvePending={resolve.isPending}
+            resolveId={resolve.variables}
+            onOpen={open}
+            onDone={done}
+          />
+          {foldDaily && dailyItems.length > 0 ? (
+            <section>
+              <button
+                type="button"
+                data-testid="daily-fold"
+                aria-expanded={dailyOpen}
+                onClick={() => setDailyOpen((v) => !v)}
+                className="mb-2 flex w-full items-center gap-1.5 rounded-lg border bg-card px-4 py-3 text-left text-sm text-foreground hover:bg-accent/40"
+              >
+                <ChevronDown
+                  className={cn(
+                    'size-4 shrink-0 text-muted-foreground transition-transform',
+                    dailyOpen && 'rotate-180',
+                  )}
+                  aria-hidden
+                />
+                <StatusDot tone={noticeLevelMeta.daily.tone} className="size-1.5" />
+                <span>
+                  日报 <span className="num">{dailyItems.length}</span> 条
+                </span>
+              </button>
+              {dailyOpen ? (
+                <DayGroups
+                  items={dailyItems}
+                  now={now}
+                  me={me}
+                  resolvePending={resolve.isPending}
+                  resolveId={resolve.variables}
+                  onOpen={open}
+                  onDone={done}
+                />
+              ) : null}
             </section>
-          ))}
+          ) : null}
           {data?.nextCursor ? (
-            <p className="text-center text-xs text-muted-foreground">只显示最近 {all.length} 条。</p>
+            <div className="flex flex-col items-center gap-2 text-xs text-muted-foreground">
+              <p>
+                只取回了最近 <span className="num">{all.length}</span> 条，共{' '}
+                <span className="num">{totalCount}</span> 条
+                {level === 'all' ? '' : `（${LEVELS.find((l) => l.id === level)?.label}共 ${shownTotal} 条）`}
+                。
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={isFetching}
+                onClick={() => setLimit((v) => v + NOTIFICATIONS_PAGE)}
+              >
+                再多看 {NOTIFICATIONS_PAGE} 条
+              </Button>
+            </div>
           ) : null}
           <p className="text-center text-xs text-muted-foreground">
             飞书的免打扰时段在{' '}

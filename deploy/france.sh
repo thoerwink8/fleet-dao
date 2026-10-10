@@ -130,6 +130,9 @@ NFT_FILE=/etc/fleet-dao/nftables.nft
 # 放的位置；内容在 deploy/france/sshd-hardening.conf、fail2ban-sshd.jail。sshd 的 drop-in 数字小的先生效，50- 排在 cloud-init 的 50-cloud-init.conf 之后
 SSHD_HARDENING_DROPIN=/etc/ssh/sshd_config.d/50-fleet-dao-hardening.conf
 FAIL2BAN_SSHD_JAIL=/etc/fail2ban/jail.d/fleet-dao-sshd.local
+# 会话用户的登录口子收到 /etc/ssh/authorized_keys/<用户>（人工档，lib/human-tier.sh 的 setup_session_ssh，#1785）：
+# sshd 的 Match User drop-in 放这里，内容在 deploy/france/sshd-session-user.conf；51- 排在 50-fleet-dao-hardening.conf 之后
+SSHD_SESSION_USER_DROPIN=/etc/ssh/sshd_config.d/51-fleet-dao-session-user.conf
 # 会话用户自己的 Mirasim 服务，本地模式常驻用的固定端口（deploy/france/fleet-mirasim-session.service，#424）：
 # 避开旧系统仍留着共用的 4316（wire.ts 的 assertNotRealMirasimInTests 连测试里都拒它）和同机可能还没清干净的
 # 4315、4317（docs/reference/deploy.md §1.2）。引擎自己认端口靠现读 local-<端口>.token 的文件名，不认这个常量。
@@ -938,7 +941,8 @@ readback() {
   readback_wireguard
   readback_firewall
   readback_sshd_hardening
-  readback_fail2ban_sshd
+  readback_session_ssh_scope
+  readback_fail2ban_sshd "$DEPLOY_DIR/france/fail2ban-sshd.jail" 10.99.0.0/24
   readback_session_ports
   readback_app_config
   readback_web_upload
@@ -1269,6 +1273,8 @@ readback_firewall() {
 # 判据在 lib/session-ports.sh
 readback_session_ports() {
   check_session_ports "${SESSION_USERS[0]}" fleet "$PILOT_USER"
+  # 会话用户出站不许连 22（#1785）：以它的身份连香港 sshd，要被立刻拒
+  check_session_ssh_egress "${SESSION_USERS[0]}" "$WG_HK_ADDR"
 }
 
 readback_dirs() {
@@ -1555,7 +1561,8 @@ main() {
     setup_sudoers
     setup_firewall
     setup_sshd_hardening
-    setup_fail2ban_sshd
+    setup_session_ssh
+    setup_fail2ban_sshd "$DEPLOY_DIR/france/fail2ban-sshd.jail"
     setup_pnpm
     setup_session_pnpm
     setup_cursor_agent

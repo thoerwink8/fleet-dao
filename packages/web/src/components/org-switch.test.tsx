@@ -1,10 +1,16 @@
 // @vitest-environment happy-dom
 // 额度页顶上的切号现状（#194）：挂着哪个、拼车几点恢复、渠道不可用、只剩 1 个账号、读不到、账本认不出、人叫停——都明说。
 import { cleanup, render, screen } from '@testing-library/react';
+import type { ReactElement } from 'react';
+import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { OrgSwitchView } from '../api/types';
 import { formatClock } from '../lib/format';
 import { OrgSwitchBanner, orgSwitchSummary } from './org-switch';
+
+function renderBanner(ui: ReactElement) {
+  return render(<MemoryRouter>{ui}</MemoryRouter>);
+}
 
 afterEach(cleanup);
 
@@ -123,12 +129,34 @@ describe('orgSwitchSummary', () => {
     expect(down.tone).toBe('fail');
     expect(down.headline).toContain('渠道不可用');
     expect(down.details[0]).toContain('明确可用 0 个');
-    const single = orgSwitchSummary(known({ channel: { state: 'single', since: T, why: '共 2 个账号' } }));
+    // 标题只写一次「只剩 1 个可用账号」；why 里若已带同句只把原因放小字，不再括号套括号
+    const single = orgSwitchSummary(
+      known({
+        channel: {
+          state: 'single',
+          since: T,
+          why: '只剩 1 个可用账号，没得选（共 2 个账号，明确可用 1 个）',
+        },
+      }),
+    );
     expect(single.tone).toBe('stall');
-    expect(single.details[0]).toContain('只剩 1 个可用账号');
+    expect(single.headline).toContain('只剩 1 个可用账号');
+    expect(single.headline.match(/只剩 1 个可用账号/g)?.length).toBe(1);
+    expect(single.details[0]).toBe('共 2 个账号，明确可用 1 个');
+    expect(single.details[0]).not.toContain('只剩 1 个可用账号');
     const unknown = orgSwitchSummary(known({ channel: { state: 'unknown', since: T, why: '接口 503' } }));
     expect(unknown.tone).toBe('stall');
     expect(unknown.details[0]).toContain('读不到账号状态，不切号');
+  });
+
+  test('挂着独享、没有拼车恢复条件：一句人话，并链到设置页整池暂停', () => {
+    const s = orgSwitchSummary(known({ live: 'solo' }));
+    expect(s.headline).toContain('拼车账号被封');
+    expect(s.headline).toContain('目前只剩独享');
+    expect(s.headline).toContain('要你换新拼车账号');
+    expect(s.headline).not.toContain('没有记着的');
+    expect(s.headline).not.toContain('恢复条件');
+    expect(s.action).toEqual({ to: '/settings#run', label: '整池暂停' });
   });
 
   test('【故意造出失败】连着白切 3 次、最近一次读接口没成、人叫停了：都列出来', () => {
@@ -162,13 +190,19 @@ describe('orgSwitchSummary', () => {
 
 describe('OrgSwitchBanner', () => {
   test('老后端没给这一项：什么都不画', () => {
-    const { container } = render(<OrgSwitchBanner view={undefined} />);
+    const { container } = renderBanner(<OrgSwitchBanner view={undefined} />);
     expect(container.firstChild).toBeNull();
   });
 
   test('画出一句话和小字', () => {
-    render(<OrgSwitchBanner view={known({ whites: 1 })} />);
-    expect(screen.getByTestId('org-switch').textContent).toContain('挂着独享');
+    renderBanner(<OrgSwitchBanner view={known({ whites: 1 })} />);
+    expect(screen.getByTestId('org-switch').textContent).toContain('拼车账号被封');
     expect(screen.getByText(/白切）连着 1 次/)).toBeTruthy();
+  });
+
+  test('没有拼车恢复条件时画出整池暂停链接', () => {
+    renderBanner(<OrgSwitchBanner view={known({ live: 'solo' })} />);
+    const link = screen.getByRole('link', { name: '整池暂停' });
+    expect(link.getAttribute('href')).toBe('/settings#run');
   });
 });

@@ -2,12 +2,13 @@ import type { LucideIcon } from 'lucide-react';
 import { Flame, Gauge, TimerOff, TriangleAlert } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { brand } from '#brand';
-import { usePools } from '../api/client';
+import { errorText, usePools } from '../api/client';
 import type { PoolView, QuotaWindowKind, QuotaWindowView } from '../api/types';
 import { CarpoolReconcileBanner } from '../components/carpool-reconcile';
 import { OrgSwitchBanner } from '../components/org-switch';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
-import { QuotaCell, quotaValue, readingVerb } from '../components/quota';
+import { PoolProblemLine, usePoolProblems } from '../components/pool-problem';
+import { ExpiredQuotaLine, isExpiredWindow, QuotaCell, quotaValue, readingVerb } from '../components/quota';
 import { RefreshBar } from '../components/refresh-bar';
 import { Badge } from '../components/ui/badge';
 import {
@@ -23,6 +24,8 @@ import {
 } from '../lib/catalog';
 import { formatAgo, formatDate, formatIn, formatInDays, formatPercent } from '../lib/format';
 import { useNow } from '../lib/hooks';
+import type { PoolProblem } from '../lib/pool-problems';
+import { routeSlots } from '../lib/routing';
 import { cn } from '../lib/utils';
 
 export function meta() {
@@ -77,6 +80,7 @@ function SummaryName({ pool, w }: { pool: PoolView; w?: QuotaWindowView }) {
 export default function Quota() {
   const { data, error, isLoading, refetch, isFetching, dataUpdatedAt } = usePools();
   const now = useNow();
+  const poolProblems = usePoolProblems();
   const staleMinutes = data?.staleAfterMinutes ?? 30;
   const refresh = (
     <RefreshBar
@@ -103,14 +107,17 @@ export default function Quota() {
     return !c.w.stale && util !== undefined && isUseItOrLoseIt(c.w, now) ? [{ ...c, util }] : [];
   });
   const full = cells.filter(({ w }) => isNearlyExhausted(w));
-  const stale = cells.filter(({ w }) => w.stale);
+  // 有提醒说读不到、凭据过期的池（#1748）：原因和要人做什么写在这一栏，它的旧窗口不再逐个列一遍（同一个池只出现一次）
+  const problems = poolProblems.problems;
+  const withProblem = pools.filter((p) => problems.has(p.id));
+  const stale = cells.filter(({ pool, w }) => w.stale && !problems.has(pool.id));
   // 读成了但没有用量比例（只报了清零时间，或只有已用没有上限）：不参与「先用它」和排序，但要列出来。
   const unknownUse = cells.filter(
     ({ w }) => !w.stale && !w.staleSince && !isUpstreamFull(w) && utilOf(w) === undefined,
   );
   // 读成过、但上游这次没再报：数是之前的，照样列出来。
   const unreported = cells.filter(({ w }) => !w.stale && w.staleSince);
-  const unread = pools.filter((p) => p.quotaStatus === 'unread');
+  const unread = pools.filter((p) => p.quotaStatus === 'unread' && !problems.has(p.id));
   const kinds = [...new Set(cells.map(({ w }) => w.window))].sort((a, b) => windowRank[a] - windowRank[b]);
 
   return (
@@ -159,6 +166,16 @@ export default function Quota() {
               hint={`超过 ${staleMinutes} 分钟没读到新数的不能当现值用；一条都没读到的是「没查成」，不是「没用量」；只读到清零时间的是「用量没读到」`}
               tone="text-ink-stall"
               items={[
+                ...withProblem.map((p) => (
+                  <li key={`problem-${p.id}`} className="min-w-0">
+                    <SummaryName pool={p} />
+                    <PoolProblemLine
+                      problem={problems.get(p.id) as PoolProblem}
+                      now={now}
+                      className="mt-0.5"
+                    />
+                  </li>
+                )),
                 ...unread.map((p) => (
                   <li key={`unread-${p.id}`} className="flex items-start gap-2">
                     <SummaryName pool={p} />
@@ -199,15 +216,31 @@ export default function Quota() {
               <Empty icon={Gauge} title="还没有账号池" />
             </Panel>
           ) : (
-            <Matrix pools={pools} kinds={kinds} now={now} />
+            <Matrix pools={pools} kinds={kinds} now={now} problems={problems} />
           )}
+          {poolProblems.error ? (
+            <p data-pool-problems="unreadable" className="mt-2 text-caption text-ink-stall">
+              账号池的毛病（额度读不到、凭据过期）没读成：{errorText(poolProblems.error)}
+              。表里没写不代表没有。
+            </p>
+          ) : null}
         </>
       )}
     </Page>
   );
 }
 
-function Matrix({ pools, kinds, now }: { pools: PoolView[]; kinds: QuotaWindowKind[]; now: number }) {
+function Matrix({
+  pools,
+  kinds,
+  now,
+  problems,
+}: {
+  pools: PoolView[];
+  kinds: QuotaWindowKind[];
+  now: number;
+  problems: ReadonlyMap<string, PoolProblem>;
+}) {
   const channels = [...new Map(pools.map((p) => [p.channelId, p])).values()];
   return (
     <div className="quota-matrix">
@@ -267,20 +300,42 @@ function Matrix({ pools, kinds, now }: { pools: PoolView[]; kinds: QuotaWindowKi
                           )}
                         </div>
                         <div className="mt-0.5 text-caption text-muted-foreground">
-                          在跑 <span className="num">{p.running}</span>/
-                          <span className="num">{p.maxConcurrency}</span>
+                          {
+                            routeSlots({
+                              inFlight: p.running,
+                              reserved: p.reserved,
+                              maxConcurrency: p.maxConcurrency,
+                            }).text
+                          }
                         </div>
+                        {problems.has(p.id) ? (
+                          <PoolProblemLine
+                            problem={problems.get(p.id) as PoolProblem}
+                            className="mt-1 font-normal"
+                          />
+                        ) : null}
                       </th>
                       {kinds.map((k) => {
                         const ws = p.windows.filter((x) => x.window === k);
+                        // 同一池同一类窗有新旧两张时：过期的收成一行灰字，不与新读数并排占大格
+                        const expired = ws.filter((w) => isExpiredWindow(w, now));
+                        const current = ws.filter((w) => !isExpiredWindow(w, now));
+                        const collapseExpired = expired.length > 0 && current.length > 0;
+                        const showFull = collapseExpired ? current : ws;
                         return (
                           <td key={k} className="p-2">
                             {ws.length ? (
                               <div className="space-y-2">
-                                {ws.map((w, i) => (
+                                {showFull.map((w, i) => (
                                   // biome-ignore lint/suspicious/noArrayIndexKey: 同一种窗可能有好几个（按模型组），契约里没有区分它们的字段。
                                   <QuotaCell key={i} w={w} now={now} />
                                 ))}
+                                {collapseExpired
+                                  ? expired.map((_, i) => (
+                                      // biome-ignore lint/suspicious/noArrayIndexKey: 同上，过期旧读数没有稳定主键。
+                                      <ExpiredQuotaLine key={`expired-${i}`} />
+                                    ))
+                                  : null}
                               </div>
                             ) : (
                               <div

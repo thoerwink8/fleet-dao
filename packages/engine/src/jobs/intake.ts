@@ -380,8 +380,11 @@ export interface IntakeDeps {
   markLocal(input: { repo: IntakeRepo; issueNumber: number }): Promise<void>;
   /** 读主线上的需求文档；文件不在回 null，读失败照抛。 */
   readSpecDoc(input: { repo: IntakeRepo; path: string }): Promise<{ content: string } | null>;
-  /** 现在在跑的任务工作流有几条。读不到照抛：不当成「一条没有」。 */
-  runningTasks(): Promise<number>;
+  /**
+   * 现在没结束的任务工作流分两类：working＝真在干活的（占并发名额），stalled＝停下等人的（任务行状态 stalled，
+   * 工作流没结束但不占会话，不占名额，#1776）。读不到照抛：不当成「一条没有」。
+   */
+  runningTasks(): Promise<number | { working: number; stalled: number }>;
   /** 这张单历史上失败过几次（该单任务行的失败记录）。读不到照抛：不当成「没失败过」。 */
   failures(repo: IntakeRepo, issueNumber: number): Promise<number>;
   /** 从 since 起建出的任务行有几条（滚动一小时限速）。读不到照抛：不当成「一条没起」。 */
@@ -444,8 +447,12 @@ interface Tally {
   /** 开着开关的仓里，列单子就失败了的有几个（全都失败＝这一轮没跑成）。 */
   reposFailed: number;
   reposOn: number;
-  /** 这一轮开头读到的在跑条数，起一条加一。 */
+  /** 这一轮开头读到的在干活的条数（不含停下等人的），起一条加一。 */
   running: number;
+  /** 这一轮开头读到的停下等人的条数（不占名额，只用来写日志和说明）。 */
+  stalled: number;
+  /** 开头读到的在干活条数（running 起一条加一，日志要的是开头的数）。 */
+  workingAtStart: number;
   /** 这一轮开头读到的滚动一小时内已起的条数，起一条加一。 */
   hourStarted: number;
   /** 熔断这一轮还允许起几条（正常是 Infinity，起一条减一）和为什么。 */
@@ -662,7 +669,10 @@ function noRoom(deps: IntakeDeps, t: Tally, opts?: { hourlyExempt?: boolean }): 
     return { reason: 'round_cap', why: `这一轮已经起了 ${maxStarts} 条，其余下一轮` };
   }
   if (t.running >= maxRunning) {
-    return { reason: 'at_capacity', why: `在跑的任务已经 ${t.running} 条（上限 ${maxRunning}），等有空的` };
+    return {
+      reason: 'at_capacity',
+      why: `在干活 ${t.running} 条、停下等人 ${t.stalled} 条（不占名额），在干活的已到上限 ${maxRunning}，等有空的`,
+    };
   }
   if (!opts?.hourlyExempt) {
     const hourly = hourlyRemaining(t.hourStarted, maxHourly);
@@ -883,7 +893,7 @@ function milestoneNeedsOrder(m: MilestoneRef, issues: readonly IntakeIssue[]): b
 function summarize(t: Tally): string {
   const skipped = [...t.skipped].map(([reason, n]) => `${reason}×${n}`).join('、') || '无';
   const foreign = t.foreignSkipped > 0 ? `；别的环境的巡检仓跳过 ${t.foreignSkipped} 个` : '';
-  return `起了 ${t.started} 条，留言 ${t.commented} 条；没派的：${skipped}${foreign}`;
+  return `起了 ${t.started} 条，留言 ${t.commented} 条；开头在干活 ${t.workingAtStart} 条、停下等人 ${t.stalled} 条（不占名额）；没派的：${skipped}${foreign}`;
 }
 
 async function round(deps: IntakeDeps): Promise<ScheduleResult> {
@@ -917,6 +927,8 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     reposFailed: 0,
     reposOn: 0,
     running: 0,
+    stalled: 0,
+    workingAtStart: 0,
     hourStarted: 0,
     breakerAllow: Number.POSITIVE_INFINITY,
     breakerWhy: '',
@@ -933,7 +945,11 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     let whitelist: GithubWhitelist | undefined;
     try {
       whitelist = await deps.whitelist();
-      t.running = await deps.runningTasks();
+      const counts = await deps.runningTasks();
+      // 回单个数＝全算在干活（老写法）
+      t.running = typeof counts === 'number' ? counts : counts.working;
+      t.stalled = typeof counts === 'number' ? 0 : counts.stalled;
+      t.workingAtStart = t.running;
     } catch (err) {
       return {
         outcome: 'failed',

@@ -571,8 +571,10 @@ export const ProbeHistoryCellSchema = z.object({
 
 export const ProbeHistoryChannelSchema = z.object({
   channelId: Id,
-  /** 从旧到新，最多 60。不够不补假格子（页面自己补空位）。 */
+  /** 最近 60 次真探（通过、不通），从旧到新。不够不补假格子（页面自己补空位）；没探的不在这里。 */
   cells: z.array(ProbeHistoryCellSchema).max(60),
+  /** 没真探的记录（没探、按需），从旧到新，最多 60：页面折起来，不进色条、不进可用率。 */
+  skipped: z.array(ProbeHistoryCellSchema).max(60),
   /** 量到了耗时的那些的平均（毫秒）。一个都没有是 null。 */
   avgDurationMs: z.number().int().nonnegative().nullable(),
   passed: z.number().int().nonnegative(),

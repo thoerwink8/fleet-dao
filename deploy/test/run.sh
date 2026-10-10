@@ -15,6 +15,7 @@
 # （mirasim-session，#424：服务端本体没装待配、不装单元；装了单元不活或 /api/health 不通判红）、
 # 自动档也装这个单元（mirasim-auto-tier，#1274：没变不重启、变了才重启、本体不在待配不算红、单元缺 MIRASIM_NO_AGENT_EGRESS=1 判红）、
 # 切会话用户挂的 reclaude 组织（agent-scope-org-use）、发布取代码、装依赖经期望里登记的会话代理、登记成空就直连（release-proxy，#786）、
+# 发布构建在沙箱里跑、读不到密钥目录和本机库 socket，沙箱建不成就不发、不退回用 fleet 直接构建（build-isolation，#79）、
 # node 的编译缓存目录归 root、别人放不进（node-cache）、会话用户在本机开的口只许它自己和 root 连（session-ports，#35）、
 # 法国 sshd 抗扫描和 fail2ban 的 sshd jail（sshd-hardening，#1348：sshd -t 不过撤掉文件不重载、有效配置被盖掉判红、fail2ban 没装只记待配）、
 # 香港防火墙基线（hk-firewall：ufw 没开、命令失败或认不出、默认不是拒绝、多开的对公网端口都判红；只有出站 ALLOW OUT 不算已放行；第二遍不改 ufw；别家 8443 不动）、
@@ -55,7 +56,7 @@ SKIP_WHY=""
 SHARDS=(
   'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards session-proxy session-ports release-proxy node-report-gate release-boot sshd-hardening hk-firewall'
   'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use temporal-schema'
-  'lint session-pnpm no-demo gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish'
+  'lint session-pnpm no-demo gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish build-isolation'
 )
 NODE_TESTS=(health-page reclaude-old-account-clean auto-release config release-request static-child)
 SPECIAL_UNITS=(lint backup node-tests ports)
@@ -122,10 +123,16 @@ check_ports() {
   fi
 }
 
-run_script() { # 脚本的完整路径：0 过、2 没跑成、别的不通过
+run_script() { # 脚本的完整路径 [sudo]：0 过、2 没跑成、别的不通过
   local out rc=0 line
   # 先收齐再打印：退出码 2 时才能把原因写进注解。判定和原来一样，不把没跑成当成通过。
-  out=$(bash "$1" 2>&1) || rc=$?
+  # 第二参数是 sudo：真沙箱那几条要 root（GitHub CI 免密 sudo）。已是 root 就直接跑，不套一层
+  # （有的环境带 no-new-privileges，嵌套 sudo 起不来）。
+  if [[ "${2-}" == sudo ]] && ((EUID != 0)); then
+    out=$(sudo bash "$1" 2>&1) || rc=$?
+  else
+    out=$(bash "$1" 2>&1) || rc=$?
+  fi
   printf '%s\n' "$out"
   case $rc in
   0) ;;
@@ -256,6 +263,8 @@ run_unit() { # 项目名
   backup) run_script "$DEPLOY/backup/test/backup.test.sh" ;;
   node-tests) unit_node_tests ;;
   ports) check_ports ;;
+  # 构建隔离真沙箱要 root：单独 sudo 跑（CI 免密）；建不成红字失败，不跳过
+  build-isolation) run_script "$HERE/build-isolation.test.sh" sudo ;;
   *) run_test "$unit.test.sh" ;;
   esac
   echo "⏱ $unit $((SECONDS - t0)) 秒"

@@ -106,3 +106,63 @@ describe('设置页主题色卡的英文名', () => {
     }
   });
 });
+
+describe('设置页谁改的、额度窗名、仓名悬停', () => {
+  test('谁改的显示人名、other 显示其他窗口、仓名带悬停全名', async () => {
+    const api = createMockApi({ live: false });
+    const me = (await api.me()).user;
+    const before = (await api.settings()).settings.find((s) => s.key === 'engine.quotaReserve');
+    if (!before) throw new Error('假数据缺留量线');
+    // 留量线里写上 other，界面上要出「其他窗口」；同时由自己改过，谁改的应是「我」。
+    await api.updateSetting('engine.quotaReserve', {
+      value: { 'claude-a': { other: 0.5 } },
+      version: before.version,
+    });
+    // 别人改过的「同时跑的会话上限」假数据是 u-zhou / 老周：要显示人名，不露编号。
+    renderApp(<SettingsPage />, { api: api as unknown as FleetApi, route: '/settings' });
+
+    const concurrent = await screen.findByText('同时跑的会话上限');
+    const concurrentCard = concurrent.closest('form');
+    if (!concurrentCard) throw new Error('同时跑的会话上限没有表单');
+    await waitFor(() => {
+      expect(concurrentCard.textContent).toContain('老周');
+      expect(concurrentCard.textContent).not.toContain('u-zhou');
+    });
+
+    const reserve = await screen.findByTestId('reserve-source');
+    const reserveForm = reserve.closest('form');
+    if (!reserveForm) throw new Error('留量线没有表单');
+    await waitFor(() => {
+      expect(reserveForm.textContent).toContain('其他窗口');
+      expect(reserveForm.textContent).not.toMatch(/额度窗\s*other|\bother\b/);
+      expect(reserveForm.textContent).toContain('我');
+    });
+    // 是自己改的：写「我」，不露自己的用户编号。
+    expect(reserveForm.textContent).not.toContain(me.id);
+
+    const canary = await screen.findByText('acme/orbit-canary');
+    expect(canary.getAttribute('title')).toBe('acme/orbit-canary');
+    expect(canary.className.split(/\s+/)).toContain('truncate');
+  });
+
+  test('查不到人名时缩短 uuid，悬停给全文', async () => {
+    const api = createMockApi({ live: false });
+    const unknown = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const list = await api.settings();
+    api.settings = async () => ({
+      settings: list.settings.map((s) =>
+        s.key === 'sessions.maxConcurrent' ? { ...s, updatedBy: unknown } : s,
+      ),
+    });
+    renderApp(<SettingsPage />, { api: api as unknown as FleetApi, route: '/settings' });
+    const concurrent = await screen.findByText('同时跑的会话上限');
+    const card = concurrent.closest('form');
+    if (!card) throw new Error('同时跑的会话上限没有表单');
+    await waitFor(() => {
+      expect(card.textContent).toContain('aaaaaaaa…');
+      expect(card.textContent).not.toContain(unknown);
+    });
+    const short = within(card).getByTitle(unknown);
+    expect(short.textContent).toBe('aaaaaaaa…');
+  });
+});

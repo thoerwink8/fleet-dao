@@ -58,7 +58,7 @@ import { Kbd } from '../../ui/kbd';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../ui/tooltip';
 import { statusTextOf } from '../running-card';
-import type { HomeFlowStage, HomeHealth, HomeRunning } from '../types';
+import type { HomeFlowStage, HomeHealth, HomeRunning, HomeSlots } from '../types';
 import {
   BoardUiContext,
   createBoardView,
@@ -89,6 +89,8 @@ export interface BoardCanvasProps {
   running: readonly HomeRunning[];
   flow: readonly HomeFlowStage[];
   health?: HomeHealth | undefined;
+  /** 此刻在跑的会话数、已选定还没开跑数（后端池占用，各页同一个来源）；老后端没有。 */
+  slots?: HomeSlots | undefined;
 }
 
 export function BoardCanvas(props: BoardCanvasProps) {
@@ -205,7 +207,7 @@ function neighbour(graph: Graph, pos: Positions, current: string | null, key: st
   return layer[key === 'ArrowDown' ? i + 1 : i - 1] ?? null;
 }
 
-function Canvas({ running, flow, health }: BoardCanvasProps) {
+function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
   const navigate = useNavigate();
   const remote = useRemoteView() !== null;
   const [params, setParams] = useSearchParams();
@@ -621,6 +623,7 @@ function Canvas({ running, flow, health }: BoardCanvasProps) {
           />
           <NowPanel
             running={running}
+            slots={slots}
             onPick={(id) => {
               select(id);
               center(id);
@@ -909,7 +912,15 @@ function Legend() {
 
 // ---------- 此刻：哪个模型正在干哪张单 ----------
 
-function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick(id: string): void }) {
+function NowPanel({
+  running,
+  slots,
+  onPick,
+}: {
+  running: readonly HomeRunning[];
+  slots?: HomeSlots | undefined;
+  onPick(id: string): void;
+}) {
   // 矮屏（笔记本）默认收起，只留一行，免得盖住卡片；点开过、收起过就记住这个选择。
   const tall = useMediaQuery('(min-height: 940px)');
   const [stored, setStored] = useLocalState<boolean | null>(
@@ -927,12 +938,14 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
           b.item.stageSince ?? b.item.waitingSince ?? '',
         ),
     );
-  const working = rows.filter((r) => !r.queued).length;
-  const queued = rows.length - working;
+  // 在干活的会话数读后端池占用（和法国页、额度页、路由页同一个数）；老后端没给才退回数表里有人在做的单
+  const working = slots?.running ?? rows.filter((r) => !r.queued).length;
+  const queued = rows.filter((r) => r.queued).length;
+  // w-lg（32rem）：四列定宽合计 30.5rem（6+3.5+12+9），「在做什么」占 12rem；max-w-full 窄画布不溢出
   return (
     <div
       data-board-now
-      className="pointer-events-auto absolute bottom-3 left-3 z-10 w-96 max-w-full overflow-hidden rounded-xl border bg-popover/92 shadow-lg backdrop-blur"
+      className="pointer-events-auto absolute bottom-3 left-3 z-10 w-lg max-w-full overflow-hidden rounded-xl border bg-popover/92 shadow-lg backdrop-blur"
     >
       <button
         type="button"
@@ -961,7 +974,8 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
             <colgroup>
               <col className="w-24" />
               <col className="w-14" />
-              <col />
+              {/* table-fixed 认 w-48（12rem），别用 min-w：固定布局下 min-width 不生效 */}
+              <col className="w-48" />
               {/* 9rem：表头「分钟」和「1 小时 33 分」都放得下，不从「分钟」中间断开 */}
               <col className="w-36" />
             </colgroup>
@@ -973,7 +987,7 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
                 <th scope="col" className="w-14 px-1 py-1 font-normal whitespace-nowrap">
                   单
                 </th>
-                <th scope="col" className="px-1 py-1 font-normal whitespace-nowrap">
+                <th scope="col" className="w-48 px-1 py-1 font-normal whitespace-nowrap">
                   在做什么
                 </th>
                 <th scope="col" className="w-36 px-3 py-1 text-right font-normal whitespace-nowrap">
@@ -993,7 +1007,7 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
   );
 }
 
-/** 此刻表的一行。状态可以换行；表头和分钟列不换行。 */
+/** 此刻表的一行。「在做什么」单行省略、悬停看全文；表头和分钟列不换行。 */
 function NowRow({ item, queued, onPick }: { item: HomeRunning; queued: boolean; onPick(id: string): void }) {
   const now = useNow();
   const since = queued ? item.waitingSince : item.stageSince;
@@ -1016,7 +1030,7 @@ function NowRow({ item, queued, onPick }: { item: HomeRunning; queued: boolean; 
         <span className="num">{item.worker ?? '排队'}</span>
       </td>
       <td className="num w-14 px-1 py-1.5 whitespace-nowrap text-muted-foreground">#{item.issueNumber}</td>
-      <td className="px-1 py-1.5 break-words whitespace-normal text-muted-foreground" title={full}>
+      <td className="w-48 max-w-48 truncate px-1 py-1.5 text-muted-foreground" title={full}>
         {status} · {item.title}
       </td>
       <td

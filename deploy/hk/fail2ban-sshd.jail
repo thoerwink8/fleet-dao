@@ -1,0 +1,13 @@
+# deploy/hk.sh 的 setup_fail2ban_sshd 写的（装到 /etc/fail2ban/jail.d/fleet-dao-sshd.local），别在机器上手改，改这份再重跑 hk.sh。
+# 参数和法国那份（deploy/france/fail2ban-sshd.jail）一样：3 次失败就封，封一小时，反复来的一次比一次封得长（bantime.increment）。
+# 为什么放过隧道网段 10.99.0.0/24（#1784）：2026-10-11 法国（10.99.0.2）用 root、ubuntu、admin 等用户名试登香港 10.99.0.1，
+# 失败超过 maxretry，被这个 jail 封了，发版车第 4 步（rsync 静态文件、发网关）连不上香港 22 口，发版卡死。隧道两头互相信任，别让它被封。
+# 仓里叫 .jail 是因为 .gitignore 挡着 *.local；装到机器上的名字必须是 .local（fail2ban 的 jail.d 只读 .conf 和 .local）。
+# 只管 sshd 这一个 jail，别的 jail 不动；fail2ban 没装时只记待配，不装软件包。
+[sshd]
+enabled = true
+maxretry = 3
+findtime = 10m
+bantime = 1h
+bantime.increment = true
+ignoreip = 127.0.0.1/8 ::1 10.99.0.0/24

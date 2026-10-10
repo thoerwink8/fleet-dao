@@ -202,6 +202,7 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
         kind: 'session',
         queuedAt: running.queuedAt,
         startedAt: running.startedAt,
+        stage: 'execute',
       },
       {
         runId: queued.id,
@@ -210,6 +211,7 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
         kind: 'session',
         queuedAt: queued.queuedAt,
         startedAt: null,
+        stage: 'execute',
       },
     ]);
   });
@@ -251,6 +253,7 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
         kind: 'session',
         queuedAt: fusion.queuedAt,
         startedAt: fusion.startedAt,
+        stage: 'execute',
       },
       {
         runId: oneShot,
@@ -259,6 +262,7 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
         kind: 'oneShot',
         queuedAt: ago(5 * MIN),
         startedAt: ago(5 * MIN),
+        stage: 'execute',
       },
     ]);
     // 收场补完那一行（同一个编号）：不再算

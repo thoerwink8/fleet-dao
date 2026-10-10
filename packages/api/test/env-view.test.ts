@@ -153,7 +153,7 @@ describe('/api/env（内存版）', () => {
   it('引擎总开关那一项（#1086）：开着/关着、谁什么时候改的都带；没设过 = 默认关；读库抛了只有这一项红', async () => {
     const base = {
       engine: { ok: true as const, value: { state: 'on' as const } },
-      readSessions: async () => [],
+      readSessions: async () => ({ pools: [], inFlightByStage: {} }),
       readPools: async () => ({ count: 0, running: 0, unread: 0, stale: 0 }),
       readSchedule: async () => ({ status: 'never' as const }),
       readVersion: null,

@@ -300,6 +300,43 @@ describe('/api/home（内存版）', () => {
     expect(done?.issueNumber).toBe(13);
   });
 
+  it('本机做的单合进去的 PR 没有任务记录：用 GitHub 上的 PR 标题，不显示成「PR #号」（#1744）', async () => {
+    const h = harness({ data: devFixtures(T0) });
+    h.store.data.pullRequests.push(
+      {
+        repoId: IDS.repo,
+        number: 1741,
+        state: 'merged',
+        headRef: 'local/1745-notif-count',
+        headSha: 'd'.repeat(40),
+        checks: 'success',
+        updatedAt: T0.toISOString(),
+        openedAt: new Date(T0.getTime() - 60_000).toISOString(),
+        mergedAt: T0.toISOString(),
+        issueRefs: [],
+        title: '发版车第 6 步只拦新出现的异常 (#1741)',
+      },
+      {
+        repoId: IDS.repo,
+        number: 1742,
+        state: 'merged',
+        headRef: 'local/x',
+        headSha: 'e'.repeat(40),
+        checks: 'success',
+        updatedAt: T0.toISOString(),
+        openedAt: new Date(T0.getTime() - 120_000).toISOString(),
+        mergedAt: new Date(T0.getTime() - 30_000).toISOString(),
+        issueRefs: [],
+      },
+    );
+    const res = await getHome(h);
+    const home = HomeResponseSchema.parse(await res.json());
+    expect(home.done.find((d) => d.prNumber === 1741)?.title).toBe('发版车第 6 步只拦新出现的异常 (#1741)');
+    // 任务记录有时仍用任务标题；标题都没读到才退成 PR 号
+    expect(home.done.find((d) => d.prNumber === 39)?.title).toBe('README 加一行当前时间');
+    expect(home.done.find((d) => d.prNumber === 1742)?.title).toBe('PR #1742');
+  });
+
   it('没登录 401', async () => {
     const h = harness();
     const res = await h.cockpit.request(HOME_PATH);

@@ -109,6 +109,8 @@ export interface PrMirror {
   openedAt?: Date | null | undefined;
   mergedAt?: Date | null | undefined;
   mergeSha?: string | null | undefined;
+  /** GitHub 上的 PR 标题；这次没读到（undefined）库里旧值留着。 */
+  title?: string | null | undefined;
   /** 正文挂的单（需求栏、关单词）和「修提醒」栏写的提醒（@fleet-dao/conventions 的 prLinks）。 */
   links?: { issues: number[]; alerts: string[] } | undefined;
 }
@@ -162,6 +164,7 @@ export function memoryLedger(init: { repos?: (RepoRef & { id: string })[] } = {}
         openedAt: row.openedAt === undefined ? (old?.openedAt ?? null) : row.openedAt,
         mergedAt: row.mergedAt === undefined ? (old?.mergedAt ?? null) : row.mergedAt,
         mergeSha: row.mergeSha === undefined ? (old?.mergeSha ?? null) : row.mergeSha,
+        title: row.title === undefined ? (old?.title ?? null) : row.title,
         links: row.links === undefined ? old?.links : row.links,
       });
       return 'written';

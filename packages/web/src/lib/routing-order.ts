@@ -5,24 +5,26 @@
 // 已下架的模型不占实际顺位（目录 retiredAt 已过），哪怕下面还有开着的路由；行上写「已下架」，不写名次。
 // 读不到的不猜：渠道开关没读到（undefined）当开着，不凭空把一行判成被跳过。下架没读到当没下架。
 
+import { isDegradedDetail } from '@fleet-dao/shared';
 import type { RoutingLayerRoute } from '../api/types';
 
 /**
  * on = 引擎会考虑它；off = 关着；closed = 开着的路由全在已关的渠道下面（模型层才有）；empty = 下面一条路由都没有（模型层才有）；
- * retired = 模型已下架（模型层才有）。
- * off、closed、empty、retired 都被引擎跳过、顺延给下一个，不占实际顺位。
+ * retired = 模型已下架（模型层才有）；degraded = 降智检测没过、已按不在线处理（路由层才有，#1748）。
+ * off、closed、empty、retired、degraded 都被引擎跳过、顺延给下一个，不占实际顺位。
  */
-export type SlotState = 'on' | 'off' | 'closed' | 'empty' | 'retired';
+export type SlotState = 'on' | 'off' | 'closed' | 'empty' | 'retired' | 'degraded';
 
 export type ChannelOpen = (channelId: string) => boolean | undefined;
 
-/** 一条路由：开关关着 = off；渠道读到了且关着 = closed；其余 on。 */
+/** 一条路由：开关关着 = off；渠道读到了且关着 = closed；降智检测没过 = degraded；其余 on。 */
 export function routeSlotState(
-  r: Pick<RoutingLayerRoute, 'enabled' | 'channelId'>,
+  r: Pick<RoutingLayerRoute, 'enabled' | 'channelId'> & Partial<Pick<RoutingLayerRoute, 'probeDetail'>>,
   channelOpen: ChannelOpen,
 ): SlotState {
   if (!r.enabled) return 'off';
-  return channelOpen(r.channelId) === false ? 'closed' : 'on';
+  if (channelOpen(r.channelId) === false) return 'closed';
+  return isDegradedDetail(r.probeDetail) ? 'degraded' : 'on';
 }
 
 /**
@@ -30,14 +32,17 @@ export function routeSlotState(
  * 开着的都在已关的渠道下 = closed；否则 on。
  */
 export function modelSlotState(
-  m: { routes: readonly Pick<RoutingLayerRoute, 'enabled' | 'channelId'>[] },
+  m: {
+    routes: readonly (Pick<RoutingLayerRoute, 'enabled' | 'channelId'> &
+      Partial<Pick<RoutingLayerRoute, 'probeDetail'>>)[];
+  },
   channelOpen: ChannelOpen,
   retired = false,
 ): SlotState {
   if (retired) return 'retired';
   if (m.routes.length === 0) return 'empty';
   const states = m.routes.map((r) => routeSlotState(r, channelOpen));
-  if (states.every((s) => s === 'off')) return 'off';
+  if (states.every((s) => s === 'off' || s === 'degraded')) return 'off';
   if (!states.includes('on')) return 'closed';
   return 'on';
 }
@@ -56,6 +61,7 @@ export function slotWord(state: SlotState, rank: number | null, unit: '模型' |
   }
   if (state === 'retired') return '已下架';
   if (state === 'off') return '关着，已跳过';
+  if (state === 'degraded') return '疑似降智，已跳过';
   if (state === 'closed') return unit === '模型' ? '渠道都关着，没有可用路由，已跳过' : '渠道已关，已跳过';
   return '没有可用路由，已跳过';
 }
@@ -75,7 +81,7 @@ export function summarizeOrder(states: readonly SlotState[], noun: '模型' | '�
         states.length === 0
           ? `无可用：一个${noun}都没有`
           : noun === '路由'
-            ? `无可用：${states.length} 个路由全都关着或渠道已关。没有可用路由，已跳过这个模型`
+            ? `无可用：${states.length} 个路由全都关着、渠道已关或疑似降智。没有可用路由，已跳过这个模型`
             : `无可用：${states.length} 个模型全都被跳过（关着、已下架或没有可用路由），引擎一个也派不到`,
     };
   }

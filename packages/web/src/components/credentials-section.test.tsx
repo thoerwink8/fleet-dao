@@ -236,3 +236,31 @@ test('【故意造出的失败】读不到账密状态：写没读成和原因�
   fireEvent.click(screen.getByRole('button', { name: '重试' }));
   expect(await screen.findByRole('form', { name: '设账密' })).toBeTruthy();
 });
+
+describe('密码表单可访问性', () => {
+  test('密码表单带用户名字段', async () => {
+    setup();
+    await screen.findByText(/还没设过账密/);
+    const f = form('设账密');
+    // 密码管理器要认的隐藏用户名：autocomplete=username，不挡看得见的那一栏。
+    const hidden = f.querySelector(
+      'input[autocomplete="username"][hidden], input[autocomplete="username"].sr-only',
+    );
+    expect(hidden).toBeTruthy();
+    expect((hidden as HTMLInputElement).getAttribute('autocomplete')).toBe('username');
+    expect(f.querySelector('input[type="password"], input[autocomplete="new-password"]')).toBeTruthy();
+  });
+
+  test('已设账密时密码表单仍带隐藏用户名字段', async () => {
+    const api = createMockApi({ live: false });
+    await api.updateCredentials({ username: 'founder', newPassword: GOOD });
+    renderApp(<CredentialsSection />, { api });
+    await screen.findByText(/已设账密：用户名/);
+    const f = form('改账密');
+    const hidden = f.querySelector(
+      'input[autocomplete="username"][hidden], input[autocomplete="username"].sr-only',
+    );
+    expect(hidden).toBeTruthy();
+    expect((hidden as HTMLInputElement).value).toBe('founder');
+  });
+});

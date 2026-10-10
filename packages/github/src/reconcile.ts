@@ -307,6 +307,18 @@ export async function auditMergedPrs(
         scanned += 1;
         try {
           const mirror = await ledger.getPullRequest(repoId, item.number);
+          if (mirror?.state === 'merged' && mirror.title == null) {
+            // 旧行（加标题列之前合的）补标题：主页「做完的」没有任务记录时要用；不算「镜像不对」，不记发现
+            await ledger.upsertPullRequest({
+              repoId,
+              number: item.number,
+              state: 'merged',
+              headRef: item.head.ref,
+              headSha: item.head.sha,
+              updatedAt: new Date(item.updated_at),
+              ...mirrorExtrasOf(item, true, slug),
+            });
+          }
           if (mirror?.state !== 'merged') {
             await ledger.upsertPullRequest({
               repoId,

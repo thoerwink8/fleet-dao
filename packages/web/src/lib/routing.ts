@@ -18,9 +18,8 @@ import type {
 } from '../api/types';
 import { hostLabel, stageLabel } from './catalog';
 import { TIME } from './format';
-import { actualRanks, type ChannelOpen, modelSlotState } from './routing-order';
+import { type ChannelOpen, modelSlotState } from './routing-order';
 import type { Tone } from './status';
-
 /** 活 = 完成色；死 = 失败色；不知道 = 停滞色（要人看，但不是坏了）。 */
 export const verdictTone: Record<LivenessVerdict, Tone> = { live: 'done', dead: 'fail', unknown: 'stall' };
 
@@ -93,25 +92,14 @@ export interface PurposeLineEnv {
   channelOpen?: ChannelOpen;
 }
 
-/**
- * 顺位第一条活的模型，在「只数开着、没下架」里排第几。
- * 和 routing-order 的 actualRanks 是同一个数：关着的、已下架的都不占位。
- * 这条活的自己不在这套顺位里（不该发生）：明确抛，不拿配置下标冒充。
- */
-function liveModelRank(
-  p: Pick<RoutingLayerPurpose, 'models'>,
-  modelIndex: number,
-  env: PurposeLineEnv,
-): number {
+/** 首选模型为什么派不到：关着写「已关」，其余（不知道、死、下架、渠道都关着）写「不可用」。 */
+function preferredUnavailableWord(preferred: RoutingLayerModel, env: PurposeLineEnv): '已关' | '不可用' {
   const channelOpen = env.channelOpen ?? (() => undefined);
-  const retired = env.retired ?? (() => false);
-  const states = p.models.map((m) => modelSlotState(m, channelOpen, retired(m.modelId)));
-  const rank = actualRanks(states)[modelIndex];
-  if (rank == null) throw new Error('顺位第一条活的模型不在开着且没下架的顺位里');
-  return rank;
+  const retired = env.retired?.(preferred.modelId) ?? false;
+  return modelSlotState(preferred, channelOpen, retired) === 'off' ? '已关' : '不可用';
 }
 
-/** 用途一句话：走的是不是首选；不是首选，顺位上第一条活的是哪条；派不出去为什么。 */
+/** 用途一句话：走的是不是首选；不是首选，写首选已关/不可用和实际派谁；派不出去为什么。 */
 export function purposeLine(p: RoutingLayerPurpose, env: PurposeLineEnv = {}): { text: string; tone: Tone } {
   const first = firstLive(p);
   if (first) {
@@ -123,9 +111,11 @@ export function purposeLine(p: RoutingLayerPurpose, env: PurposeLineEnv = {}): {
         tone: 'stall',
       };
     }
-    const n = liveModelRank(p, first.modelIndex, env);
+    const preferred = p.models[0];
+    if (!preferred) throw new Error('有后备活路时用途里至少有一个模型');
+    const why = preferredUnavailableWord(preferred, env);
     return {
-      text: `首选模型不行，顺位第一条活的在第 ${n} 个模型：${where}`,
+      text: `首选 ${preferred.displayName} ${why}，实际派 ${first.model.displayName}`,
       tone: 'stall',
     };
   }
@@ -136,7 +126,6 @@ export function purposeLine(p: RoutingLayerPurpose, env: PurposeLineEnv = {}): {
   if (p.models.length === 0) return { text: p.problems[0] ?? '这个用途没有模型，派不了', tone: 'fail' };
   return { text: '一条活的都没有：下面逐条写了为什么', tone: 'fail' };
 }
-
 /** 一个模型下几条路、几条活。 */
 export function modelSummary(m: Pick<RoutingLayerModel, 'routes'>): string {
   if (m.routes.length === 0) return '一条路由都没有';

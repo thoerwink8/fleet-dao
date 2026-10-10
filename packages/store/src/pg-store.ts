@@ -20,6 +20,7 @@ import {
   nodeReports,
   notificationDeliveries,
   notifications,
+  openPoolRuns,
   pools,
   progressEvents,
   pullRequests,
@@ -163,6 +164,7 @@ function toPullRequest(r: typeof pullRequests.$inferSelect): PullRequestRecord {
     openedAt: isoOpt(r.openedAt),
     mergedAt: isoOpt(r.mergedAt),
     issueRefs: r.issueRefs,
+    ...(r.title === null ? {} : { title: r.title }),
   };
 }
 
@@ -486,6 +488,19 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .sort((a, b) => a.channelId.localeCompare(b.channelId))
         .map(toChannelState);
     },
+    async poolOccupancy() {
+      const byPool = new Map<string, { poolId: string; inFlight: number; reserved: number }>();
+      const inFlightByStage: Record<string, number> = {};
+      for (const r of await openPoolRuns(db, { now: now() })) {
+        const o = byPool.get(r.poolId) ?? { poolId: r.poolId, inFlight: 0, reserved: 0 };
+        if (r.startedAt !== null) {
+          o.inFlight += 1;
+          if (r.stage !== null) inFlightByStage[r.stage] = (inFlightByStage[r.stage] ?? 0) + 1;
+        } else o.reserved += 1;
+        byPool.set(r.poolId, o);
+      }
+      return { pools: [...byPool.values()], inFlightByStage };
+    },
     async listPools() {
       return (await db.select().from(pools).orderBy(asc(pools.id))).map(toPool);
     },
@@ -599,6 +614,16 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         items,
         nextCursor: nextCursorOf(last && { at: last.createdAt, id: last.id }, rows.length > limit),
       };
+    },
+    async countNotifications({ status }) {
+      const rows = await db
+        .select({ level: notifications.level, n: sql<number>`count(*)::int` })
+        .from(notifications)
+        .where(status === 'open' ? isNull(notifications.resolvedAt) : undefined)
+        .groupBy(notifications.level);
+      const counts = { decision: 0, alert: 0, daily: 0 };
+      for (const r of rows) counts[r.level] = r.n;
+      return counts;
     },
     async resolveNotification({ id, by }, entry) {
       if (!isUuid(id)) return 'not_found';

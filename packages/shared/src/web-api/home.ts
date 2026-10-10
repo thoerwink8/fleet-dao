@@ -125,5 +125,7 @@ export const HomeResponseSchema = z.object({
   health: HomeHealthSchema,
   /** 三段流水线图头上的数：固定对题 → 动手 → 验收三项，按这个先后。 */
   flow: z.array(HomeFlowStageSchema).length(3),
+  /** 此刻在跑的会话数、已选定还没开跑的数：和法国页、额度页、路由页同一个来源（池占用）。老后端没有这一项。 */
+  slots: z.object({ running: z.number().int().min(0), reserved: z.number().int().min(0) }).optional(),
   asOf: Time,
 });
