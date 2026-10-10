@@ -15,6 +15,11 @@ function cell(over: Partial<ProbeHistoryCell> & Pick<ProbeHistoryCell, 'id' | 'r
     failureReason: null,
     requestText: '只回 OK',
     responseText: 'OK',
+    checkQuestion: null,
+    checkExpected: null,
+    checkAnswer: null,
+    checkPassed: null,
+    selfIdentity: null,
     ...over,
   };
 }

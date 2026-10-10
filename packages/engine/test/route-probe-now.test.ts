@@ -3,7 +3,7 @@
 import type { RouteProbeTarget } from '@fleet-dao/db';
 import { ROUTE_PROBE_ACTION, ROUTE_PROBE_REQUEST_TTL_MS, type RouteProbeAuditRow } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import type { RouteProbeJobDeps } from '../src/jobs/route-probe.ts';
+import { conclude, type RouteProbeJobDeps } from '../src/jobs/route-probe.ts';
 import {
   createProbeLock,
   type RouteProbeNowDeps,
@@ -147,6 +147,43 @@ describe('立即探测（runRouteProbeRequests）', () => {
       detail: expect.stringContaining('按量计费'),
     });
     expect(h.done[0]?.results[0]?.durationMs).toBeUndefined();
+  });
+
+  it('没有用途在用的路由：立即探测照样真探（#1630），同一条走定时那一轮不探', async () => {
+    const t = target({ inUse: false, previous: null });
+    let calls = 0;
+    const answering: Partial<RouteProbeJobDeps> = {
+      probers: {
+        mirasim: async () => {
+          calls += 1;
+          return { kind: 'answered', detail: '答上了：OK' };
+        },
+      },
+    };
+    const h = harness([request('a', [t.routeId])], [t], answering);
+    await runRouteProbeRequests(h.deps);
+    expect(calls).toBe(1);
+    expect(h.done[0]?.results[0]).toMatchObject({ outcome: 'ok' });
+    expect(h.saved).toEqual([{ routeId: t.routeId, state: 'ok', detail: expect.any(String) }]);
+
+    calls = 0;
+    const scheduled = await conclude(h.deps.probe(), t, { pace: true });
+    expect(calls).toBe(0);
+    expect(scheduled).toMatchObject({
+      state: 'skipped',
+      detail: expect.stringContaining('没有哪个阶段在用'),
+    });
+  });
+
+  it('没用途在用、又是按量计费的：立即探测也不探', async () => {
+    const t = target({ inUse: false, billing: 'metered' });
+    const h = harness([request('a', [t.routeId])], [t]);
+    await runRouteProbeRequests(h.deps);
+    expect(h.probes()).toBe(0);
+    expect(h.done[0]?.results[0]).toMatchObject({
+      outcome: 'skipped',
+      detail: expect.stringContaining('按量计费'),
+    });
   });
 
   it('退避还没到点也照探：次数接着加，不从 1 重新数', async () => {

@@ -15,6 +15,7 @@ import type { RouteProbeTarget, ScheduleResult } from '@fleet-dao/db';
 import {
   type HostId,
   type OrgKind,
+  type ProbeCheck,
   probeBackoffMinutes,
   probeBackoffPhrase,
   probeFailStreak,
@@ -73,6 +74,8 @@ interface ProbeCapture {
   requestText?: string | null;
   /** 响应原文。 */
   responseText?: string | null;
+  /** 降智检测（#1637）：这一次问的题和判的结果。没带题（没问到、不是真探）不给。 */
+  check?: ProbeCheck | null;
 }
 
 export type ProbeAttempt =
@@ -120,6 +123,8 @@ export interface RouteProbeJobDeps {
     requestText: string | null;
     /** 没拿到响应为 null。 */
     responseText: string | null;
+    /** 降智检测的题和判的结果；没带题为空。 */
+    check?: ProbeCheck | null;
   }): Promise<'saved' | 'route_not_found'>;
   /** 一条路由真探完（写库之前）：真实现里接整池暂停的报警和撤销。抛了只记日志，不改结论。 */
   afterProbe?(target: ProbeTarget, attempt: ProbeAttempt): Promise<void>;
@@ -180,6 +185,7 @@ export function planProbe(
   probers: Partial<Record<HostId, Prober>>,
   live: LiveOrgReading | null,
   now: Date,
+  opts?: { manual?: boolean },
 ): ProbePlan {
   if (t.billing === 'metered') {
     return {
@@ -205,7 +211,8 @@ export function planProbe(
   if (t.modelRetiredAt !== null && t.modelRetiredAt.getTime() <= now.getTime()) {
     return { state: 'skipped', detail: `模型「${t.modelName}」已下架，不探` };
   }
-  if (!t.inUse) {
+  // 人点的立即探测（manual）不看这条：就是要在把路由挂进用途之前先看它通不通（#1630）
+  if (!t.inUse && !opts?.manual) {
     return {
       state: 'skipped',
       detail: '没有哪个阶段在用这条路由（挂着但关着的不算），不花额度去探；哪个阶段用上它，下一轮就探',
@@ -358,6 +365,7 @@ export interface Conclusion {
   durationMs: number | null;
   requestText: string | null;
   responseText: string | null;
+  check?: ProbeCheck | null;
 }
 
 const NO_CAPTURE = { durationMs: null, requestText: null, responseText: null } as const;
@@ -366,11 +374,13 @@ function captureOf(attempt: ProbeAttempt): {
   durationMs: number | null;
   requestText: string | null;
   responseText: string | null;
+  check: ProbeCheck | null;
 } {
   return {
     durationMs: attempt.durationMs ?? null,
     requestText: attempt.requestText ?? null,
     responseText: attempt.responseText ?? null,
+    check: attempt.check ?? null,
   };
 }
 
@@ -396,7 +406,9 @@ export async function conclude(
   const plan =
     opts?.pace && !opts.bypassPace
       ? planScheduledProbe(t, deps.probers, live, deps.now())
-      : planProbe(opts?.bypassPace ? { ...t, previous: null } : t, deps.probers, live, deps.now());
+      : planProbe(opts?.bypassPace ? { ...t, previous: null } : t, deps.probers, live, deps.now(), {
+          manual: opts?.bypassPace === true,
+        });
   if ('backingOff' in plan) {
     deps.log('info', `路由探针：${plan.backingOff}`, { routeId: t.routeId });
     return {
@@ -664,6 +676,7 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
         durationMs: c.durationMs,
         requestText: c.requestText,
         responseText: c.responseText,
+        check: c.check ?? null,
       });
     } catch (err) {
       unsaved.push(`${c.target.routeId}：${errMessage(err)}`);

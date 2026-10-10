@@ -73,6 +73,11 @@ const probeCell = (
   failureReason: over.result === 'passed' ? null : '原因',
   requestText: null,
   responseText: null,
+  checkQuestion: null,
+  checkExpected: null,
+  checkAnswer: null,
+  checkPassed: null,
+  selfIdentity: null,
   ...over,
 });
 
@@ -576,6 +581,31 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
     });
     return api;
   };
+
+  test('没用途在用的路由点完立即探测：灰的「未被用途使用」不变，旁边写这一次通不通（#1630）', async () => {
+    const api = semanticsApi();
+    const routing = api.routing.bind(api);
+    Object.assign(api, {
+      routing: async () => {
+        const data = await routing();
+        return {
+          ...data,
+          routes: data.routes.map((r) =>
+            r.id === 'r-dry'
+              ? { ...r, probe: { state: 'ok' as const, at: new Date().toISOString(), detail: '答上了：OK' } }
+              : r,
+          ),
+        };
+      },
+    });
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-dry', api });
+    await waitFor(() => routeRow('r-dry'));
+    const row = routeRow('r-dry');
+    expect(row.getAttribute('data-kind')).toBe('unused');
+    expect(row.textContent).toContain('未被用途使用');
+    expect(row.textContent).toContain('探过：通');
+    expect(row.textContent).not.toContain('故障');
+  });
 
   test('已关、未被用途使用不显示成故障（不画红、不进故障数）；只有探不通的才是故障', async () => {
     renderApp(<RoutingStatus />, { route: '/routing/status', api: semanticsApi() });
