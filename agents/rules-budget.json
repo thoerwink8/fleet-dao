@@ -1,6 +1,17 @@
 {
   "说明": "规矩字数账（agents/test/agents-md-budget.test.ts 对账）。chars=现字数（通用段：agents/shared-rules.md 两个标记之间；本仓段：仓根 AGENTS.md「## 本仓（fleet-dao）」起），baseline=上次瘦身后的字数，log=每次增减的明细{date,delta,why,ref}。改了规矩就在对应段的 log 记一笔并改 chars；delta 之和必须等于 chars-baseline。累计增长超 threshold 不让 CI 红，每天的定时任务（debt.yml）开一张瘦身单；瘦身 PR 把 baseline 设成新字数、log 清空。历史：2026-09-27 约 6000 字涨到约 11000 字；10-05、10-06 创始人选定精简，通用段 4597 压到 2063（10-10 含决定 0078 引导三条）。",
   "threshold": { "general": 150, "repo": 300 },
-  "general": { "chars": 2063, "baseline": 2063, "log": [] },
+  "general": {
+    "chars": 2110,
+    "baseline": 2063,
+    "log": [
+      {
+        "date": "2026-10-11",
+        "delta": 47,
+        "why": "Mirasim 的引导要等后台子代理跑完才读进来：钩子取原文先转，照样先回、不用结束这一轮，同一条稍后再送进来说一句前面已回（2026-10-11 实测）",
+        "ref": "#1743，补决定 0078"
+      }
+    ]
+  },
   "repo": { "chars": 4355, "baseline": 4355, "log": [] }
 }
