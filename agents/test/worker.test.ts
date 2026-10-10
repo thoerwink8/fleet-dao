@@ -1754,6 +1754,31 @@ describe('clean', () => {
     expect(w.gitCalls).toEqual([]);
   });
 
+  it('工作树早就不在了（目录没有、git 说不是工作树）、分支也没了：照样记 cleanedAt，退出码 0', async () => {
+    const w = world();
+    w.writeMeta('c11', validMeta(w, 'c11'));
+    w.setRunning(9001, false);
+    const tree = join(w.repo, '.claude', 'worktrees', 'w-c11');
+    w.gitReplies.push(
+      bad(`fatal: '${tree}' is not a working tree`, 128),
+      bad("error: branch 'w/c11' not found.", 1),
+    );
+    expect(await w.run(['clean', '--name', 'c11', '--force'])).toBe(0);
+    expect(w.meta('c11').cleanedAt).toBe(NOW.toISOString());
+  });
+
+  it('【故意造出的失败】git 说不是工作树、目录却还在：不当成删过，退出码 2', async () => {
+    const w = world();
+    w.writeMeta('c12', validMeta(w, 'c12'));
+    w.setRunning(9001, false);
+    const tree = join(w.repo, '.claude', 'worktrees', 'w-c12');
+    mkdirSync(tree, { recursive: true });
+    w.gitReplies.push(bad(`fatal: '${tree}' is not a working tree`, 128));
+    expect(await w.run(['clean', '--name', 'c12', '--force'])).toBe(2);
+    expect(w.err.at(-1)).toContain('git worktree remove 没成');
+    expect(w.meta('c12').cleanedAt).toBeNull();
+  });
+
   it('pidUncertain 带 --force：照样能删（跳过 isRunning 检查，因为没有真 pid）', async () => {
     const w = world();
     w.writeMeta(
