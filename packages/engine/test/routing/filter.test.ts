@@ -789,21 +789,18 @@ describe('拼车并发登记核对不上：不往拼车池派（#896，方案第
   });
 });
 
-describe('写码不派冷验收认不出作者族的路由（#1626）', () => {
+describe('写码阶段不再因作者族认不出而挡（撤 #1626，选路只按用途顺序）', () => {
   const cursor = route('cur', { family: 'cursor', modelName: 'Cursor Auto' });
-  it('execute 阶段 cursor 族被挡，文字写明验不了', () => {
+  it('execute 阶段 cursor 族不挡', () => {
     const blocks = blocksFor(cursor, entry('cur', 0), ctx({ stage: 'execute' }));
-    expect(blocks.map((b) => b.code)).toEqual(['banned']);
-    expect(blocks[0]?.text).toContain('验不了');
+    expect(blocks.map((b) => b.text).join()).not.toContain('验不了');
+    expect(blocks).toEqual([]);
   });
-  it('ui 阶段上游串是 auto 的被挡', () => {
+  it('ui 阶段上游串是 auto 的不挡', () => {
     const auto = route('auto', { family: 'other', upstreamModel: 'cursor:auto' });
     const blocks = blocksFor(auto, entry('auto', 0), ctx({ stage: 'ui' }));
-    expect(blocks.map((b) => b.text).join()).toContain('验不了');
-  });
-  it('triage 阶段同一条 cursor 路由不被这条挡', () => {
-    const blocks = blocksFor(cursor, entry('cur', 0), ctx({ stage: 'triage' }));
     expect(blocks.map((b) => b.text).join()).not.toContain('验不了');
+    expect(blocks).toEqual([]);
   });
   it('execute 阶段 grok 族不受影响', () => {
     expect(codes(route('g', { family: 'grok' }), ctx({ stage: 'execute' }))).toEqual([]);

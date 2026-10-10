@@ -18,9 +18,7 @@ function problems(file: string, code: string): string[] {
   const out: string[] = [];
   for (const m of code.matchAll(/^\s*(?:import|export)[^'"]*from\s+'([^']+)'/gm)) {
     const source = m[1] ?? '';
-    // 例外：../author-families.ts 是纯常量（写码不派冷验收认不出作者族的路由，#1626），不引任何模块
-    const allowed =
-      source.startsWith('./') || source === '@fleet-dao/shared' || source === '../author-families.ts';
+    const allowed = source.startsWith('./') || source === '@fleet-dao/shared';
     if (!allowed) out.push(`${file} 引了 ${source}`);
   }
   for (const [label, re] of IMPURE) if (re.test(code)) out.push(`${file}：${label}`);

@@ -215,8 +215,8 @@ describe('invokeVerifier：happy path', () => {
     );
     expect(out.pass).toBe(false);
     expect(out.problems.join('\n')).toContain('没讨论成');
-    // kimi 跳过了；其余四个按 FAMILY_ORDER 顺序都问了一遍
-    expect(chosen).toEqual(FAMILY_ORDER.filter((f) => f !== 'kimi'));
+    // 其余四个按 FAMILY_ORDER 顺序都问了一遍；都挑不出才改两家都验，轮到避开的 kimi（也挑不出）
+    expect(chosen).toEqual([...FAMILY_ORDER.filter((f) => f !== 'kimi'), 'kimi']);
   });
 });
 
@@ -437,15 +437,15 @@ describe('invokeVerifier：写过这张单的族不止一个、路由编号、�
     await expect(invokeVerifier({ ...BASE_INPUT, modelFamiliesAvoid: [] }, DEPS(oneShot))).rejects.toThrow();
   });
 
-  it('剩下的族全被避开 → 没讨论成，写明一个能换的族都不剩', async () => {
+  it('剩下的族全被避开、且一家都派不出 → 没讨论成，写明只派得出 0 家', async () => {
     const { oneShot } = fakeOneShot({ exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false });
     const out = await invokeVerifier(
       { ...BASE_INPUT, modelFamiliesAvoid: [...FAMILY_ORDER] },
-      DEPS(oneShot, async () => ({ modelId: 'never' })),
+      DEPS(oneShot, async () => undefined),
     );
     expect(out.pass).toBe(false);
     expect(out.problems[0]).toContain('没讨论成');
-    expect(out.problems[0]).toContain('一个能换的族都不剩');
+    expect(out.problems[0]).toContain('只派得出 0 家');
     expect(out.session).toBeUndefined(); // 没起会话
   });
 
@@ -861,5 +861,109 @@ describe('invokeVerifier：单子点名但这次没改的文件', () => {
         [],
       ),
     ).toEqual(many.slice(0, 5));
+  });
+});
+
+describe('invokeVerifier：两家都验（#1681）', () => {
+  /** 按模型号回不同的结论：model 名在 failModels 里的那家判 fail，其余 pass。 */
+  function perModelOneShot(failModels: string[] = []): { oneShot: OneShotDeps; models: string[] } {
+    const models: string[] = [];
+    const base = fakeOneShot({ exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false });
+    const oneShot: OneShotDeps = {
+      ...base.oneShot,
+      spawn: async (cmd) => {
+        const model = cmd.argv[cmd.argv.indexOf('--model') + 1] ?? '';
+        models.push(model);
+        return {
+          exitCode: 0,
+          stdout: failModels.includes(model) ? MODEL_STDOUT_FAIL_NOT_DONE : MODEL_STDOUT_PASS,
+          stderr: '',
+          killed: false,
+        };
+      },
+    };
+    return { oneShot, models };
+  }
+  const deps = (oneShot: OneShotDeps, choose: ChooseModelForFamily) => ({
+    oneShot,
+    fetchDiff: okFetchDiff(),
+    fetchSpec: okFetchSpec(),
+    chooseModelForFamily: choose,
+    cwd: 'C:/work/x',
+  });
+  const THREE_AVOID: ModelFamily[] = ['gpt', 'claude', 'deepseek'];
+  const ONLY_GPT_CLAUDE = fixedChoose({ gpt: { modelId: 'gpt-1' }, claude: { modelId: 'claude-1' } });
+
+  it('(a) 别家全派不出：gpt、claude 各验一遍，两家都 pass → pass=true，notes 写明两家都验', async () => {
+    const { oneShot, models } = perModelOneShot();
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, modelFamiliesAvoid: THREE_AVOID },
+      deps(oneShot, ONLY_GPT_CLAUDE),
+    );
+    expect(models).toEqual(['gpt-1', 'claude-1']);
+    expect(out.pass).toBe(true);
+    expect(out.problems).toEqual([]);
+    expect(out.notes).toContain('两家都验');
+    expect(out.notes).toContain('gpt');
+    expect(out.notes).toContain('claude-1');
+  });
+
+  it('(b) 同样设置，claude 那家 fail → pass=false，problems 每条以「claude：」开头', async () => {
+    const { oneShot } = perModelOneShot(['claude-1']);
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, modelFamiliesAvoid: THREE_AVOID },
+      deps(oneShot, ONLY_GPT_CLAUDE),
+    );
+    expect(out.pass).toBe(false);
+    expect(out.problems.length).toBeGreaterThan(0);
+    expect(out.problems.every((p) => p.startsWith('claude：'))).toBe(true);
+  });
+
+  it('(c) requireTwoFamilies、避让为空：起两次会话、两个族不同，两家都 pass 才过', async () => {
+    const { oneShot, models } = perModelOneShot();
+    const choose: ChooseModelForFamily = async (family) => ({ modelId: `${family}-m` });
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, modelFamiliesAvoid: [], requireTwoFamilies: true },
+      deps(oneShot, choose),
+    );
+    expect(models).toEqual(['gpt-m', 'grok-m']);
+    expect(out.pass).toBe(true);
+
+    const second = perModelOneShot(['grok-m']);
+    const bad = await invokeVerifier(
+      { ...BASE_INPUT, modelFamiliesAvoid: [], requireTwoFamilies: true },
+      deps(second.oneShot, choose),
+    );
+    expect(bad.pass).toBe(false);
+    expect(bad.problems.every((p) => p.startsWith('grok：'))).toBe(true);
+  });
+
+  it('(d) 只有一个族挑得出模型 → 没讨论成，原因含「只派得出 1 家」，不当成过', async () => {
+    const { oneShot } = perModelOneShot();
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, modelFamiliesAvoid: THREE_AVOID },
+      deps(oneShot, fixedChoose({ gpt: { modelId: 'gpt-1' } })),
+    );
+    expect(out.pass).toBe(false);
+    expect(out.problems.join('\n')).toContain('没讨论成');
+    expect(out.problems.join('\n')).toContain('只派得出 1 家');
+  });
+
+  it('(e) 有别家可挑：照旧一家验，只起一次会话', async () => {
+    const { oneShot, models } = perModelOneShot();
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, modelFamiliesAvoid: ['gpt'] },
+      deps(oneShot, fixedChoose({ grok: { modelId: 'grok-1' }, claude: { modelId: 'claude-1' } })),
+    );
+    expect(models).toEqual(['grok-1']);
+    expect(out.pass).toBe(true);
+    expect(out.notes ?? '').not.toContain('两家都验');
+  });
+
+  it('没有 requireTwoFamilies、避让和别的作者族都为空 → 照旧在入参校验就抛', async () => {
+    const { oneShot } = perModelOneShot();
+    await expect(
+      invokeVerifier({ ...BASE_INPUT, modelFamiliesAvoid: [] }, deps(oneShot, ONLY_GPT_CLAUDE)),
+    ).rejects.toThrow();
   });
 });

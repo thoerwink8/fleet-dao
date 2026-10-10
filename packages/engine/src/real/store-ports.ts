@@ -630,7 +630,6 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           routes: facts.routes,
           now: now.toISOString(),
           draw: drawn,
-          ...(input.preferFamilies !== undefined ? { preferFamilies: input.preferFamilies } : {}),
           ...orgFacts,
           ...(input.uiWork ? { uiWork: true } : {}),
           ...policy,
