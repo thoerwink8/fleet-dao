@@ -547,10 +547,17 @@ describe('过一会儿再来就行：回 retry，贴的是 pending 不是 failur
   it('两家都验先挑齐两家再起会话：每个会话跑着时，切号登记的是它自己那条路由的池（#1697）', async () => {
     const sessions = oneShotSessions();
     const liveAt: { gpt: number; grok: number }[] = [];
+    // 两家并行（#1704）：等两个会话都在跑了再看，每个池各一条登记
+    let release: () => void = () => {};
+    const both = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const r = rig({
       picks: { gpt: okRoute('gpt'), grok: okRoute('grok') },
       deps: { sessions },
-      driverRun: async () => {
+      driverRun: async (_spec, _hooks, n) => {
+        if (n === 2) release();
+        await both;
         liveAt.push({
           gpt: sessions.live(new Set(['pool-gpt'])).length,
           grok: sessions.live(new Set(['pool-grok'])).length,
@@ -560,10 +567,10 @@ describe('过一会儿再来就行：回 retry，贴的是 pending 不是 failur
     });
     const got = await r.run(r.input({ authorFamilies: ['cursor'] }), ctx());
     expect(got).toMatchObject({ pass: true });
-    expect(r.recorded.map((row) => row.routeId)).toEqual(['route-gpt', 'route-grok']);
+    expect(r.recorded.map((row) => row.routeId).sort()).toEqual(['route-gpt', 'route-grok']);
     expect(liveAt).toEqual([
-      { gpt: 1, grok: 0 },
-      { gpt: 0, grok: 1 },
+      { gpt: 1, grok: 1 },
+      { gpt: 1, grok: 1 },
     ]);
     expect(sessions.live(new Set(['pool-gpt', 'pool-grok']))).toEqual([]);
   });
@@ -777,6 +784,41 @@ describe('按族选路时给这一次验收预占池的名额（#757）', { time
     expect(err).toMatchObject({ code: 'VERIFY_NO_SLOT', retryable: true });
     expect(r.specs).toHaveLength(0);
     expect(r.released).toEqual(['res-gpt']);
+  });
+
+  it('【故意造出的失败】两家都验时第二家开跑撞上名额没了（NO_SLOT）：这一次回等待（VERIFY_NO_SLOT，可重试），第一家的会话照样跑完、收场记进 runs，两家的预占都放（#1704）', async () => {
+    const gpt = okRoute('gpt');
+    const grok = okRoute('grok');
+    if (!gpt.ok || !grok.ok) throw new Error('夹具：okRoute 该是派出去的');
+    let startCalls = 0;
+    const startedRuns: string[] = [];
+    const r = rig({
+      picks: {
+        gpt: { ...gpt, route: { ...gpt.route, reservationId: 'res-gpt' } },
+        grok: { ...grok, route: { ...grok.route, reservationId: 'res-grok' } },
+      },
+      deps: {
+        runs: {
+          async start(row) {
+            startCalls += 1;
+            if (row.routeId === 'route-grok') throw new NoSlotError('池 pool-grok 的名额满了');
+            startedRuns.push(row.routeId ?? '');
+          },
+          async record(row) {
+            r.recorded.push(row);
+          },
+        },
+      },
+    });
+    const err = await r.run(r.input({ authorFamilies: ['cursor'] }), ctx()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({ code: 'VERIFY_NO_SLOT', retryable: true });
+    expect(startCalls).toBe(2);
+    expect(startedRuns).toEqual(['route-gpt']);
+    // 第一家照样收场：会话跑完、结局记进 runs
+    expect(r.specs).toHaveLength(1);
+    expect(r.recorded.map((row) => [row.routeId, row.outcome])).toEqual([['route-gpt', 'done']]);
+    expect([...r.released].sort()).toEqual(['res-gpt', 'res-grok']);
   });
 
   it('【故意造出的失败】预占放不掉（库一时不通）：只记日志、写明放不掉，结论照旧（名额到点自己过期）', async () => {

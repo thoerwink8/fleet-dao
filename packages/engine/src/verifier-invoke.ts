@@ -269,10 +269,15 @@ export interface VerifierInvokeDeps {
   /**
    * 挑中谁之后、起会话之前，为它备会话的工作目录：目录要归这条路由的会话用户，所以只能等挑完才知道备给谁
    * （生产：交给会话用户的一个空目录，验收的会话手上没有仓库检出）。release 在会话收场后调，成败都调；它抛错不改结论。
-   * 两家都验时两家都挑完才起会话，每一家起会话前各调一次：要跟着「这一次起的是谁」的登记（切号）放在这里，不放在挑模型那一下。
+   * 两家都验时两家都挑完才并行起会话，每一家起会话前各调一次：要跟着「这一次起的是谁」的登记（切号）放在这里，不放在挑模型那一下。
    * prepareCwd 本身抛错（路由用不了、目录交不出去）原样往外抛，由调用方记成「没跑起来」。
    */
-  prepareCwd?: (picked: PickedVerifier) => Promise<{ cwd: string; release: () => Promise<void> }>;
+  prepareCwd?: (picked: PickedVerifier) => Promise<{
+    cwd: string;
+    release: () => Promise<void>;
+    /** 两家并行时每个会话各用各的（切号登记的停止信号、起进程前的标记都是按会话的）；不给用 deps.oneShot。 */
+    oneShot?: OneShotDeps;
+  }>;
   /** 超时（分钟），默认 60。 */
   timeoutMinutes?: number;
   /**
@@ -692,7 +697,7 @@ export async function invokeVerifier(
       };
       let oneShotResult: OneShotResult;
       try {
-        oneShotResult = await runOneShot(oneShotInput, deps.oneShot);
+        oneShotResult = await runOneShot(oneShotInput, prepared?.oneShot ?? deps.oneShot);
       } finally {
         // 备的目录会话收场后就还回去（成败都还）；还不掉不改结论，备目录的那一侧自己记日志
         await prepared?.release().catch(() => undefined);
@@ -838,10 +843,17 @@ export async function invokeVerifier(
   }
   if (chosen.length < 2 && waiting.length > 0) return waitOut();
   const verdicts: Extract<FamilyOutcome, { kind: 'verdict' }>[] = [];
-  for (const { family, m } of chosen) {
-    const r = await runFamily(family, m);
-    if (r.kind === 'final') return r.out;
-    if (r.kind === 'verdict') verdicts.push(r);
+  // 两家的会话并行起，不串着等第一家跑完。都收场了再看：一家起不来（NO_SLOT 等抛错）不取消另一家，另一家照常跑完、
+  // 结论已记进 runs，这一次把那个错原样往外抛（调用方判成等待）；没有抛错的，有终局的先回终局，其余按挑族顺序收结论。
+  const settled = await Promise.allSettled(chosen.map(({ family, m }) => runFamily(family, m)));
+  const failure = settled.find((s): s is PromiseRejectedResult => s.status === 'rejected');
+  if (failure !== undefined) throw failure.reason;
+  for (const s of settled) {
+    if (s.status !== 'fulfilled') continue;
+    if (s.value.kind === 'final') return s.value.out;
+  }
+  for (const s of settled) {
+    if (s.status === 'fulfilled' && s.value.kind === 'verdict') verdicts.push(s.value);
   }
   // 挑出来的有没验成的：按挑族的顺序接着问后面的族，凑够两家结论为止
   while (verdicts.length < 2) {
