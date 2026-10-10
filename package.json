@@ -32,7 +32,8 @@
     "branch:hygiene": "node packages/conventions/src/bin/branch-hygiene.ts",
     "drill": "node packages/engine/src/bin/drill.ts",
     "release:onekey": "node agents/skills/commander/scripts/release-onekey.mjs",
-    "pr:open": "node packages/conventions/src/bin/pr-open.ts"
+    "pr:open": "node packages/conventions/src/bin/pr-open.ts",
+    "agent-eval": "node packages/agent-eval/src/bin/agent-eval.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",

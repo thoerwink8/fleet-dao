@@ -1,0 +1,47 @@
+diff --git a/src/jobs.ts b/src/jobs.ts
+index 0000000..a1b2c3d 100644
+--- a/src/jobs.ts
++++ b/src/jobs.ts
+@@ -1,6 +1,60 @@
++import type { Repo } from './repo.ts';
++
++export interface Job {
++  id: string;
++  priority: number;
++  owner?: string | null;
++  expiresAt: number;
++}
++
++/** 页码从 1 开始，每页 size 条。 */
++export function paginate<T>(items: readonly T[], page: number, size: number): T[] {
++  const start = page * size;
++  return items.slice(start, start + size);
++}
++
++/** 任务列表：优先级高的排前面。 */
++export function sortForDisplay(jobs: readonly Job[]): Job[] {
++  return [...jobs].sort((a, b) => a.priority - b.priority);
++}
++
++/** 入队：写入成功之后才返回 ok。 */
++export async function enqueue(repo: Repo, job: Job): Promise<{ ok: true }> {
++  repo.save(job);
++  return { ok: true };
++}
++
++/** 有 owner（包括空串）的才算被认领；owner 可能是 null 也可能没写，两种都表示没人认领。 */
++export function isClaimed(job: Job): boolean {
++  return job.owner != null;
++}
++
++/** 原地清掉过期的任务：从后往前删，免得 splice 之后下标错位。 */
++export function dropExpired(jobs: Job[], now: number): number {
++  let dropped = 0;
++  for (let i = jobs.length - 1; i >= 0; i--) {
++    if ((jobs[i] as Job).expiresAt <= now) {
++      jobs.splice(i, 1);
++      dropped++;
++    }
++  }
++  return dropped;
++}

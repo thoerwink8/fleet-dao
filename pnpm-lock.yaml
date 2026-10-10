@@ -36,6 +36,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
+  packages/agent-eval: {}
+
   packages/agents-sync:
     dependencies:
       '@fleet-dao/mirasim-reclaude':
