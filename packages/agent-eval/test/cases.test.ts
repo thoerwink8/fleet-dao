@@ -619,6 +619,19 @@ describe('standard-editor', () => {
     });
     expect(noMatch).toMatchObject({ pass: true });
   });
+  it('新加测试的标题说「3 轮已经没了」不算残留（Sonnet、Opus 2026-10-10 重跑的实答标题）：过', async () => {
+    for (const t of ['规矩里不再有 3 轮的旧说法', '旧的 3 轮说法已清干净', '旧的 3 轮说法已全部清掉']) {
+      const v = await judge(id, '改了', (d) => {
+        fix(d);
+        edit(
+          d,
+          'test/rules.test.ts',
+          (s) => `${s}\ntest('${t}', () => {\n  assert.ok(!rules.includes('最多 3 轮'));\n});\n`,
+        );
+      });
+      expect(v, t).toMatchObject({ pass: true });
+    }
+  });
   it('标题还写着 3 轮；测试没钉住 2 轮（放回原来的规矩也过）：都不过', async () => {
     const title = await judge(id, '改了', (d) => {
       fix(d);
