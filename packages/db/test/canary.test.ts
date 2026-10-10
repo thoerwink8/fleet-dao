@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   canaryDbFacts,
+  canaryIntakeLaterDone,
   canaryPullRequestNumber,
   canaryRunById,
   concludeAbandonedCanaryRuns,
@@ -346,6 +347,19 @@ describe('巡检每一回从库里读的事实', () => {
     expect(facts.runs).toEqual({ total: 3, ended: 2, manual: 2, verify: 1, withUsage: 1 });
     expect(facts.timings).toBe(1);
     expect(facts.openAlerts).toEqual([{ dedupeKey: 'task:acme/canary#1:park:1', title: '没有可用的路由' }]);
+  });
+});
+
+describe('canaryIntakeLaterDone：收单超时后链仍跑通（#1773）', () => {
+  it('任务做完了：true；还在跑、没有任务行、仓不在、仓名认不出：false', async () => {
+    const repo = await addRepo(t.db, 'canary');
+    await addTask(t.db, repo.id, { issueNumber: 83, state: 'done' });
+    await addTask(t.db, repo.id, { issueNumber: 84, state: 'running' });
+    expect(await canaryIntakeLaterDone(t.db, { repo: 'acme/canary', issueNumber: 83 })).toBe(true);
+    expect(await canaryIntakeLaterDone(t.db, { repo: 'acme/canary', issueNumber: 84 })).toBe(false);
+    expect(await canaryIntakeLaterDone(t.db, { repo: 'acme/canary', issueNumber: 99 })).toBe(false);
+    expect(await canaryIntakeLaterDone(t.db, { repo: 'acme/missing', issueNumber: 83 })).toBe(false);
+    expect(await canaryIntakeLaterDone(t.db, { repo: 'not-a-slug', issueNumber: 83 })).toBe(false);
   });
 });
 

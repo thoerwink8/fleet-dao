@@ -19,7 +19,8 @@
 // 巡检仓里 canary 开的那张（标题认法 isCanaryIssueTitle，不另贴标签）先于所有仓的普通单，不看上面这几档。
 // 起之前才现读这张单（开着、不是 PR、母单子单和「本机做」再核一遍）：只对真有空位的那几张读，不为每张开着的单读一次。
 // 空位 = 每轮最多 5 条、同时在跑最多 6 条、每小时最多起 20 条、熔断没停拉（最近 6 条结束的任务里失败过半就停，冷却 1 小时后放 1 条试探）。
-// 巡检单不计入每小时那 20 条、也不占名额（#1364：名额满了把巡检单挤掉，巡检会把通的链报成断）；本轮条数、在跑、熔断和其余准入闸照旧。
+// 巡检单不计入每小时那 20 条、也不占名额，在跑满了也照样起（#1364、#1773：名额或在跑满了把巡检单挤掉，巡检会把通的链报成断）；
+// 本轮条数、熔断和其余准入闸照旧。
 // 母单子单、本机做、版本这几道的判法是 @fleet-dao/core 的 dispatch.ts 的纯函数（familyGate、localGate），这里只排顺序。
 //
 // 改这里之前必须知道：
@@ -32,8 +33,9 @@
 // - 交代不全的单只留一次言：留言的幂等键由缺的内容算出来，同一处缺法不会每 5 分钟再留一条；缺的变了才是新的一条。
 // - 每轮最多起 MAX_STARTS_PER_ROUND 条、同时在跑的任务工作流不超过 MAX_RUNNING_TASKS 条、每小时最多起 MAX_STARTS_PER_HOUR 条：
 //   开关刚打开、一堆单同时合格时，一批一批地起，不一次把机器的内存和额度吃满；没起的下一轮（5 分钟后）自然再来。
-//   巡检单不进每小时这 20 条（本轮、在跑照样占）。库里数「一小时起了几条」时也把它剔出去（real/intake.ts）：
-//   新建的数任务行建出时刻，接手没有工作流的老行另数这一小时里成功的 task.adopt（建出时刻已在这一小时的不重复数）。
+//   巡检单不进每小时这 20 条、也不看在跑上限（本轮条数照样占；起了之后在跑数仍 +1，后面的普通单按加过的数拦）。
+//   库里数「一小时起了几条」时也把它剔出去（real/intake.ts）：新建的数任务行建出时刻，接手没有工作流的老行另数这一小时里成功的
+//   task.adopt（建出时刻已在这一小时的不重复数）。
 // - 熔断（intake-pick.ts 的 decideBreaker）：最近 6 条结束的任务里失败 4 条以上就整个停拉；冷却 1 小时后只放 1 条试探，试探成功才恢复，
 //   试探失败再冷却 1 小时。进入和恢复各推一条通知。状态在设置表 engine.intakeBreaker 一行；读不到、认不出，这一轮一张单都不拉。
 // - 排序只在准入之后：先过完不用现读 GitHub 的关，排好序、有空位才现读这张单（screenPlan）再起，免得开着的老单每轮各读一次。
@@ -652,16 +654,20 @@ async function admitIssue(
 /**
  * 空位：每轮条数、同时在跑、每小时、熔断，哪一个先用完就按哪一个的原因不起。回 null＝还有位子。
  * 先看便宜的、说得最清楚的：本轮上限 → 在跑上限 → 每小时 → 熔断。
- * hourlyExempt：巡检单不看每小时名额（本轮、在跑、熔断照旧）。
+ * hourlyExempt / capacityExempt：巡检单不看每小时名额、不看在跑上限（本轮、熔断照旧；#1364、#1773）。
  */
-function noRoom(deps: IntakeDeps, t: Tally, opts?: { hourlyExempt?: boolean }): IntakeSkip | null {
+function noRoom(
+  deps: IntakeDeps,
+  t: Tally,
+  opts?: { hourlyExempt?: boolean; capacityExempt?: boolean },
+): IntakeSkip | null {
   const maxStarts = deps.limits?.maxStartsPerRound ?? MAX_STARTS_PER_ROUND;
   const maxRunning = deps.limits?.maxRunningTasks ?? MAX_RUNNING_TASKS;
   const maxHourly = deps.limits?.maxStartsPerHour;
   if (t.started >= maxStarts) {
     return { reason: 'round_cap', why: `这一轮已经起了 ${maxStarts} 条，其余下一轮` };
   }
-  if (t.running >= maxRunning) {
+  if (!opts?.capacityExempt && t.running >= maxRunning) {
     return { reason: 'at_capacity', why: `在跑的任务已经 ${t.running} 条（上限 ${maxRunning}），等有空的` };
   }
   if (!opts?.hourlyExempt) {
@@ -681,7 +687,7 @@ function noRoom(deps: IntakeDeps, t: Tally, opts?: { hourlyExempt?: boolean }): 
 async function startCandidate(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, t: Tally): Promise<boolean> {
   const slug = `${repo.owner}/${repo.name}`;
   const { issue } = c;
-  const full = noRoom(deps, t, { hourlyExempt: c.canary });
+  const full = noRoom(deps, t, { hourlyExempt: c.canary, capacityExempt: c.canary });
   if (full) {
     skip(t, slug, issue.number, full);
     return false;

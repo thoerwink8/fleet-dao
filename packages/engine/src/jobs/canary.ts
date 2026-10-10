@@ -10,9 +10,9 @@
 // 改这里之前必须知道：
 // - 收单靠引擎自己拉（jobs/intake.ts，每 5 分钟一轮）：巡检单要过拉单的每一道关——开单的「引擎」机器人在白名单里、
 //   交代齐（场景、原话、已知的模块、怎么算做完，runner/task-brief.ts）、规模不是最重档，熔断没停拉、本轮和在跑还有空位。
-//   每小时那 20 个名额不算它、它也不占（#1364：名额满了把巡检单挤掉，巡检会把通的链报成断）。认法是标题（isCanaryIssueTitle），
-//   不另贴标签。canaryIssue 的正文由测试拿真的 buildTaskBrief 核过，改正文要让那条测试照样过；「怎么算做完」下面只放验收条，
-//   别的话会被当成一条。
+//   每小时那 20 个名额不算它、它也不占；在跑满了也照样起（#1364、#1773：名额或在跑满了把巡检单挤掉，巡检会把通的链报成断）。
+//   认法是标题（isCanaryIssueTitle），不另贴标签。canaryIssue 的正文由测试拿真的 buildTaskBrief 核过，改正文要让那条测试照样过；
+//   「怎么算做完」下面只放验收条，别的话会被当成一条。
 // - 任务工作流走到哪只有 Temporal 一份（taskStatus 查询）；库里的任务行只在开工、停下等人、做完、放弃时写，工作流不在跑了才拿它兜。
 // - 判走到哪一步只在 canaryNext（纯函数），读东西只在 observe。
 
@@ -311,7 +311,7 @@ function intakeWords(last: CanaryDbFacts['lastIntake']): string {
   const when = `最近一轮拉单 ${stamp(last.startedAt)} 开始`;
   if (last.outcome === null) return `${when}，还没跑完`;
   if (last.outcome === 'ok') {
-    return `${when}，跑成了却没拉起这张单（每张单没派的原因在引擎日志「拉单这一轮」那行：作者不在白名单、交代不全、熔断停拉、在跑满了……；巡检单不占每小时名额）`;
+    return `${when}，跑成了却没拉起这张单（每张单没派的原因在引擎日志「拉单这一轮」那行：作者不在白名单、交代不全、熔断停拉……；巡检单不占每小时名额、也不占在跑上限）`;
   }
   return `${when}，记的是 ${last.outcome}${last.why ? `：${last.why}` : ''}`;
 }

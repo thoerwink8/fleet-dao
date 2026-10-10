@@ -5,8 +5,11 @@ import {
   type CanaryRunRow,
   finishCanaryRun,
   registerScheduledJobs,
+  repos,
+  saveCanaryProgress,
   startCanaryRun,
   startScheduleRun,
+  tasks,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import type { EngineMasterState } from '@fleet-dao/shared';
@@ -301,5 +304,50 @@ describe('canary 项读库（真库）', () => {
     );
     expect(err).toBeInstanceOf(PublicHealthError);
     expect(err).toMatchObject({ code: 'canary_broken' });
+  });
+
+  it('断在「收单」但巡检单后来做完了：不红，说收单超时后链仍跑通（#1773）', async () => {
+    await resetTestDb(t);
+    await registerScheduledJobs(t.db, [
+      { id: 'canary', name: '全流程巡检', schedule: '每 6 小时', expectEveryMinutes: 780 },
+    ]);
+    const [repo] = await t.db
+      .insert(repos)
+      .values({ owner: 'acme', name: 'fleet-canary', testCommand: 'pnpm check' })
+      .returning();
+    if (!repo) throw new Error('repo 没写进去');
+    await t.db.insert(tasks).values({
+      repoId: repo.id,
+      issueNumber: 83,
+      title: '巡检第 27 轮：往巡检记录追加一行',
+      rawRequest: '巡检',
+      requestedBy: 'engine',
+      priority: 10,
+      state: 'done',
+      createdAt: ago(40),
+    });
+    const broken = await startCanaryRun(t.db, {
+      scheduleRunId: await startScheduleRun(t.db, 'canary', ago(40)),
+      repo: 'acme/fleet-canary',
+      at: ago(40),
+    });
+    await saveCanaryProgress(t.db, broken, {
+      stage: 'intake',
+      steps: [{ stage: 'open', at: ago(40).toISOString() }],
+      issueNumber: 83,
+      at: ago(39),
+    });
+    await finishCanaryRun(t.db, broken, {
+      verdict: 'broken',
+      stage: 'intake',
+      why: '超过期限 20 分钟还没走完：库里还没有这张单的任务行',
+      steps: [{ stage: 'open', at: ago(40).toISOString() }],
+      issueNumber: 83,
+      at: ago(20),
+    });
+    const masterOn = async (): Promise<EngineMasterState> => ({ on: true });
+    await expect(canaryHealthCheck(t.db, masterOn, () => NOW)()).resolves.toBe(
+      '最近一轮（09-27 20:10）收单超时后链仍跑通',
+    );
   });
 });

@@ -1338,7 +1338,7 @@ describe('巡检单不占每小时名额，并排在所有候选最前', () => {
    */
   function across(
     rows: { repo: IntakeRepo; issues: IntakeIssue[]; description?: string }[],
-    data: { hourStarted?: number } = {},
+    data: { hourStarted?: number; runningTasks?: number } = {},
   ): Harness {
     return harness(
       {
@@ -1357,6 +1357,13 @@ describe('巡检单不占每小时名额，并排在所有候选最前', () => {
               : { ...V1, ...(found?.description === undefined ? {} : { description: found.description }) };
           return { issues: found?.issues ?? [], openMilestones: [milestone, V2] };
         },
+        ...(typeof data.runningTasks === 'number'
+          ? {
+              async runningTasks() {
+                return data.runningTasks as number;
+              },
+            }
+          : {}),
       },
       {
         issues: [],
@@ -1464,6 +1471,19 @@ describe('巡检单不占每小时名额，并排在所有候选最前', () => {
     await runIntakeJob(h.deps);
     expect(h.started.map((s) => s.issueNumber)).toEqual([70]);
     expect(h.logs.some((l) => l.text.includes('hourly_cap×2'))).toBe(true);
+  });
+
+  it('在跑已满时巡检单仍起：普通单记 at_capacity，巡检单豁免在跑上限（#1773）', async () => {
+    const h = across(
+      [
+        { repo: REPO, issues: [issue({ number: 1, body: FAST })] },
+        { repo: CANARY_REPO, issues: [canaryTicket()] },
+      ],
+      { runningTasks: MAX_RUNNING_TASKS },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([70]);
+    expect(h.logs.some((l) => l.text.includes('at_capacity×1'))).toBe(true);
   });
 });
 

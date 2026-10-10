@@ -281,6 +281,30 @@ export interface CanaryDbFacts {
 }
 
 /**
+ * 收单超时判断之后，这张巡检单后来有没有被拉起并做完（#1773：在跑满把巡检挤出 20 分钟窗口，链仍通、healthz 假红）。
+ * repo 是 owner/name；仓不在库、没有任务行、任务不是 done：false。读不到照抛。
+ */
+export async function canaryIntakeLaterDone(
+  db: Db,
+  input: { repo: string; issueNumber: number },
+): Promise<boolean> {
+  const slash = input.repo.indexOf('/');
+  if (slash <= 0 || slash === input.repo.length - 1) return false;
+  const owner = input.repo.slice(0, slash);
+  const name = input.repo.slice(slash + 1);
+  const [repo] = await db
+    .select({ id: repos.id })
+    .from(repos)
+    .where(and(eq(repos.owner, owner), eq(repos.name, name)));
+  if (!repo) return false;
+  const [task] = await db
+    .select({ state: tasks.state })
+    .from(tasks)
+    .where(and(eq(tasks.repoId, repo.id), eq(tasks.issueNumber, input.issueNumber)));
+  return task?.state === 'done';
+}
+
+/**
  * since：这一轮巡检开单的时刻。runs 的行没有仓和任务编号，只能按单号加「开单以后起的」认这张单的账——
  * 别的仓同一个单号、同一段时间里跑的会话会混进来；要认准得让 runs 写上 task_id。
  * intakeJob：拉单在 scheduled_jobs 里的编号（引擎的 INTAKE_JOB.id）。

@@ -4,6 +4,7 @@
 // 公网看得到 /healthz：对外只说哪一步、几点，不带仓名、单号和断的原因原文（原因只进日志，细节在卡住报警里）。
 // 引擎总开关关着时（#1086）巡检的定时任务整个不跑（jobs/timers.ts 的 needsMaster 闸）、连跳过的轮次都不写 canary_runs，
 // 这一项认得出「总开关关着＝跳过」：照实说跳过、不拿断了的旧结论报红（#1141）；开关开着、真的断了才红。
+// 断在「收单」但那张巡检单后来任务做完了：不红（#1773：在跑满把巡检挤出 20 分钟窗口，链仍通）。
 // 不在正式环境（FLEET_ENV=production，法国是）的（开发、测试）报「未接」。这一项跟着巡检的结论自己变红，发版脚本只标待处理、不退回
 // （deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）。
 
@@ -11,6 +12,7 @@ import {
   CANARY_RUN_TIMEOUT_MINUTES,
   CANARY_STAGE_NAMES,
   type CanaryRunRow,
+  canaryIntakeLaterDone,
   type Db,
   latestCanaryRuns,
 } from '@fleet-dao/db';
@@ -133,6 +135,7 @@ export function canaryHealth(
 /**
  * 健康检查：现读库里最近的两轮和引擎总开关（#1141，设置表读不到照抛——报「没查成」，不当成关着、更不当成没问题）；
  * 读不到照抛（报「连不上」，不当成没问题）。好的时候带一句说明。
+ * 最近一轮断在「收单」、但那张巡检单后来任务做完了：不红（#1773：在跑满把巡检挤出窗口的假红，链其实通了）。
  */
 export function canaryHealthCheck(
   db: Db,
@@ -142,7 +145,18 @@ export function canaryHealthCheck(
   return async () => {
     const [latest, master] = await Promise.all([latestCanaryRuns(db), readMaster()]);
     const got = canaryHealth(latest, now(), master.on ? undefined : master);
-    if (!got.ok) throw new PublicHealthError(got.code, got.message, got.detail);
-    return got.note;
+    if (got.ok) return got.note;
+    const finished = latest.finished;
+    if (
+      got.code === 'canary_broken' &&
+      finished?.stage === 'intake' &&
+      finished.endedAt &&
+      finished.repo &&
+      finished.issueNumber !== null &&
+      (await canaryIntakeLaterDone(db, { repo: finished.repo, issueNumber: finished.issueNumber }))
+    ) {
+      return `最近一轮（${stamp(finished.endedAt)}）收单超时后链仍跑通`;
+    }
+    throw new PublicHealthError(got.code, got.message, got.detail);
   };
 }
