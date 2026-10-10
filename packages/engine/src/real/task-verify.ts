@@ -22,12 +22,12 @@
 // - 迁移工具生成的快照（packages/db/migrations/meta/*_snapshot.json）按生成文件处理：不逐行给，只写同一 PR 里有没有
 //   对得上的迁移 sql、_journal.json、schema 改动，让验收核对对不对得上。
 // - 叫停（工作流放弃、活动被取消）：ctx.signal 接进会话的看守，会话被杀；随后把取消原样抛出去。
-// - 切号叫停（#59）不是叫停：挑中路由就登记（sessions.enter），切号把这一次验收停下，回 retry（不贴 failure、不算一轮），
+// - 切号叫停（#59）不是叫停：起会话前（prepareCwd 那一下）登记（sessions.enter），切号把这一次验收停下，回 retry（不贴 failure、不算一轮），
 //   工作流隔一会儿再验，选路照常选到切过去的那个池。
 // - runs 里这一次验收记到这张单名下（#216）：tasks.id、单号、工作流编号经单子那一样（spec）交给 invokeVerifier，PR 号、分支
 //   它本来就有；验收不分档，不带派工档。
 // - 按族选路时给这一次验收预占池的名额（#757，pickRoute 的 reserve）：开跑那一行写进去时换掉；挑中了又没用上的（选路交回的
-//   族对不上）、没开跑就收场的，收场时一个个放掉，放不掉只记日志（到点自己过期）。开跑时名额已经没了抛 VERIFY_NO_SLOT，
+//   族对不上；两家都验只挑到一家、另一家在等，#1697）、没开跑就收场的，收场时一个个放掉，放不掉只记日志（到点自己过期）。开跑时名额已经没了抛 VERIFY_NO_SLOT，
 //   可以重试。
 
 import { randomUUID } from 'node:crypto';
@@ -326,8 +326,10 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       },
       ui.uiWork,
     )(input.taskId);
-    // 挑中路由就登记（#59）：切号照它停下这一次验收；收场（下面的 finally）走
+    // 起会话前登记（#59，prepareCwd 里）：切号照它停下这一次验收；收场（下面的 finally）走
     let ticket: OneShotTicket | undefined;
+    // 挑中时定下的编号 → 那条路由的池：登记要知道这一次跑在哪个池上
+    const poolOfRun = new Map<string, string>();
     // 挑中路由时补上切号叫停的信号（挑之前不知道跑在哪个池）
     const oneShot: OneShotDeps = {
       spawn: (cmd) => {
@@ -419,21 +421,16 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
         },
         oneShot,
         chooseModelForFamily: async (family) => {
+          const before = waits.length;
           const route = await picker.pickRouteForFamily(family);
-          if (route === undefined) return undefined;
-          // 这一次的编号挑中时就定下、交给登记：起会话之前（备目录那一下）被切号停下，操作记录 stopped 里写的就是
-          // 随后记成 org_switch 的那一行
-          const runId = randomUUID();
-          if (deps.sessions) {
-            ticket?.leave();
-            ticket = deps.sessions.enter({
-              poolId: route.poolId,
-              stage: SEGMENT_STAGE.verify,
-              taskId: input.taskId,
-            });
-            ticket.attempt(runId);
-            oneShot.stop = ticket.signal;
+          if (route === undefined) {
+            // 选路说这一族等得来（等空位、等额度）：告诉 invokeVerifier 在等，别家没有结论时它回等待（#1697）
+            const waited = waits.slice(before).find((w) => w.family === family);
+            return waited === undefined ? undefined : { wait: waited.detail };
           }
+          // 这一次的编号挑中时就定下，起会话前（prepareCwd）照它登记切号
+          const runId = randomUUID();
+          poolOfRun.set(runId, route.poolId);
           return {
             modelId: route.modelId,
             ...(route.poolId ? { channel: route.poolId } : {}),
@@ -445,6 +442,15 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
         // 会话的工作目录由 prepareCwd 备（挑完路由才知道归哪个会话用户）；这个只是占个位，不会被用到
         cwd: deps.runsDir,
         prepareCwd: async (picked) => {
+          // 起会话前登记（#59）：两家都验时两家先挑齐再起会话，登记要跟着这一次起的那一家，不能在挑的那一下。
+          // 备目录那一下被切号停下，操作记录 stopped 里写的就是随后记成 org_switch 的那一行
+          const poolId = picked.runId === undefined ? undefined : poolOfRun.get(picked.runId);
+          if (deps.sessions && picked.runId !== undefined && poolId !== undefined) {
+            ticket?.leave();
+            ticket = deps.sessions.enter({ poolId, stage: SEGMENT_STAGE.verify, taskId: input.taskId });
+            ticket.attempt(picked.runId);
+            oneShot.stop = ticket.signal;
+          }
           const { user } = await resolveSegmentRoute(deps.spawner, picked.routeId);
           const dir = deps.spawner.trees.tmpFor(`verify-${newRunId()}`);
           await deps.spawner.trees.adopt(dir, user);
@@ -478,12 +484,9 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             return '机器内存放不下新会话';
           }
           if (verdict.upstreamRetry) return verdict.upstreamRetry.reason;
-          if (
-            verdict.session === undefined &&
-            waits.length > 0 &&
-            verdict.problems.some((p) => p.startsWith('没讨论成：'))
-          ) {
-            return `这会儿没有能派的验收路由：${waits.map((w) => `${w.family}（${w.detail}）`).join('；')}`;
+          // 要派的族在等选路（#1697）：没起会话，过一会儿重来
+          if (verdict.session === undefined && verdict.routeWait !== undefined) {
+            return `这会儿没有能派的验收路由：${verdict.routeWait.reason}`;
           }
           return undefined;
         },
