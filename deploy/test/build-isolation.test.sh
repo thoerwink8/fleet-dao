@@ -4,11 +4,22 @@
 # 抓住的错：沙箱命令不在、起不来、读回确认 /etc/fleet-dao 仍然可见时，发布仍往下走、或退回用 as_fleet_in
 #   以 fleet 直接构建（那样第三方代码读得到密钥）；沙箱没挡住时，构建读得到 /etc/fleet-dao 下的诱饵、
 #   或连得上本机库的 unix socket。
-# 前三段不需要 root（systemd-run 换成桩）。后两段用真的 systemd-run，要 root；不是 root 就记没跑成、退出 2。
+# 前三段不需要 root（systemd-run 换成桩）。独占创建和「不覆盖已有文件」在临时目录里演练，也不需要 root。
+# 真沙箱那两段要 root；不是 root 就记没跑成、退出 2。
+# 诱饵不用固定文件名：在目录里独占创建一个临时文件，退出只删本次这一个（设备号和 inode 都对上才删）。
+# 已有同名文件、已有符号链接都不写。这台没有 fleet 账号时，家目录放在本次临时目录里，退出只删账号、不碰 /home/fleet。
 # 用法：sudo bash deploy/test/build-isolation.test.sh。退出码：0 通过，1 不通过，2 有没跑成的。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-TMP=$(mktemp -d)
+TMP=$(mktemp -d) || exit 1
+# 只删 mktemp 交出来的这一份。空路径、根、家目录、密钥目录、本机库目录都不碰；符号链接不跟。
+rm_tmp() {
+  case "$TMP" in
+  "" | / | /tmp | /var/tmp | /etc | /etc/* | /home | /home/* | /var/run | /var/run/* | /run | /run/*) return 0 ;;
+  esac
+  if [[ -d "$TMP" && ! -L "$TMP" ]]; then rm -rf -- "$TMP"; fi
+}
+trap rm_tmp EXIT
 NOBIN=$TMP/nobin
 mkdir -p "$NOBIN" "$TMP/bin" "$TMP/releases"
 chmod 755 "$TMP" "$TMP/bin" "$NOBIN"
@@ -22,34 +33,44 @@ SRUN=$TMP/srun
 OUT=$TMP/out
 SHA=$(printf 'a%.0s' {1..40})
 CANARY=fleet-build-isolation-canary-9f3a
-BAIT=/etc/fleet-dao/fleet-build-isolation-bait
+BAIT=""
+BAIT_ID=""
 SOCK=""
+SOCK_ID=""
 SOCK_REAL=""
+SOCK_DIR_ID=""
+SOCK_LINK_ID=""
+ETC_ID=""
 SERVER_PID=""
 CREATED_FLEET=0
-CREATED_ETC=0
-CREATED_BAIT=0
-CREATED_SOCK_DIR=0
-CREATED_SOCK_LINK=0
-STUB_MODE=""
+EXCL_PATH=""
+EXCL_ID=""
+NODE_BIN=""
 fail=0
 skipped=0
 
 cleanup() {
+  set +e
   if [[ -n "$SERVER_PID" ]]; then
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
-  if [[ "$SOCK" == *fleet-build-isolation* ]]; then rm -f -- "$SOCK" || true; fi
-  if ((CREATED_SOCK_LINK)); then rm -f /var/run/postgresql || true; fi
-  if ((CREATED_SOCK_DIR)) && [[ -n "$SOCK_REAL" ]]; then rmdir -- "$SOCK_REAL" 2>/dev/null || true; fi
-  if ((CREATED_BAIT)); then rm -f -- "$BAIT" || true; fi
-  if ((CREATED_ETC)); then rmdir /etc/fleet-dao 2>/dev/null || true; fi
-  if ((CREATED_FLEET)); then userdel --remove fleet >/dev/null 2>&1 || true; fi
-  rm -rf -- "$TMP"
+  remove_if_inode "$SOCK" "$SOCK_ID" socket
+  if [[ -n "$SOCK_LINK_ID" && -L /var/run/postgresql ]]; then
+    local now="" target=""
+    now=$(stat -c '%d:%i' -- /var/run/postgresql 2>/dev/null || true)
+    target=$(readlink -- /var/run/postgresql 2>/dev/null || true)
+    if [[ "$now" == "$SOCK_LINK_ID" && "$target" == "$SOCK_REAL" ]]; then
+      rm -f -- /var/run/postgresql
+    fi
+  fi
+  remove_if_inode "$SOCK_REAL" "$SOCK_DIR_ID" dir
+  remove_if_inode "$BAIT" "$BAIT_ID" file
+  remove_if_inode /etc/fleet-dao "$ETC_ID" dir
+  cleanup_fleet_user
+  rm_tmp
   true
 }
-trap cleanup EXIT
 
 check() { # 说明 实际 期望
   if [[ "$2" == "$3" ]]; then
@@ -71,6 +92,136 @@ lacks_canary() { # 说明 文本
 show() { # 文本：诱饵正文换成占位，截一段
   local t=${1//$CANARY/【内容已隐去】}
   printf '%.500s' "$t"
+}
+
+# 只删本次创建的那一个：符号链接不跟、inode 对不上不删。目录用 rmdir，不空就留着
+remove_if_inode() { # 路径 设备:inode 种类 file|socket|dir
+  local path=$1 id=$2 kind=$3 dir="" base="" ino="" now="" found=""
+  if [[ -z "$path" || -z "$id" ]]; then return 0; fi
+  if [[ ! -e "$path" && ! -L "$path" ]]; then return 0; fi
+  if [[ -L "$path" ]]; then return 0; fi
+  now=$(stat -c '%d:%i' -- "$path" 2>/dev/null || true)
+  if [[ "$now" != "$id" ]]; then return 0; fi
+  if [[ "$kind" == dir ]]; then
+    rmdir -- "$path" 2>/dev/null || true
+    return 0
+  fi
+  dir=$(dirname -- "$path")
+  base=$(basename -- "$path")
+  ino=${id#*:}
+  found=$(find "$dir" -xdev -mindepth 1 -maxdepth 1 -inum "$ino" -name "$base" -print -quit 2>/dev/null || true)
+  if [[ "$found" != "$path" ]]; then return 0; fi
+  case "$kind" in
+  file)
+    if [[ -f "$path" && ! -L "$path" ]]; then rm -f -- "$path"; fi
+    ;;
+  socket)
+    if [[ -S "$path" && ! -L "$path" ]]; then rm -f -- "$path"; fi
+    ;;
+  esac
+}
+
+# 写入已独占创建的普通文件。符号链接直接失败，不跟着写到链接目标。属组留空则不改属主
+write_nofollow() { # 路径 设备:inode 正文 [属组 gid]
+  "$NODE_BIN" "$TMP/write-nofollow.mjs" "$1" "$2" "$3" "${4:-}"
+}
+
+# 在目录里独占建一个临时文件并写入。成功时 EXCL_PATH、EXCL_ID 是本次这一个。失败不留下半截文件
+exclusive_file() { # 目录 正文 [属组 gid]
+  local dir=$1 body=$2 gid=${3:-} path="" id="" now=""
+  EXCL_PATH=""
+  EXCL_ID=""
+  path=$(mktemp "$dir/fleet-build-isolation.XXXXXX") || return 1
+  id=$(stat -c '%d:%i' -- "$path" 2>/dev/null || true)
+  if [[ -z "$id" || -L "$path" ]]; then
+    if [[ -n "$id" ]]; then remove_if_inode "$path" "$id" file; else rm -f -- "$path"; fi
+    return 1
+  fi
+  if ! write_nofollow "$path" "$id" "$body" "$gid"; then
+    remove_if_inode "$path" "$id" file
+    return 1
+  fi
+  now=$(stat -c '%d:%i' -- "$path" 2>/dev/null || true)
+  if [[ "$now" != "$id" || -L "$path" || ! -f "$path" ]]; then
+    remove_if_inode "$path" "$id" file
+    return 1
+  fi
+  EXCL_PATH=$path
+  EXCL_ID=$id
+}
+
+# 缺账号时的家目录。只许落在本次临时目录里，计算偏了就拒绝往下建
+new_fleet_home() { printf '%s\n' "$TMP/fleet-home"; }
+
+prepare_fleet_user() {
+  local home=""
+  if id fleet >/dev/null 2>&1; then return 0; fi
+  home=$(new_fleet_home)
+  if [[ "$home" == /home/fleet || "$home" == /home/fleet/* || "$home" != "$TMP/"* ]]; then
+    echo "  … 没跑成：临时家目录算到了不该碰的地方，停下，避免清掉已有数据"
+    return 1
+  fi
+  if [[ -e "$home" || -L "$home" ]]; then
+    echo "  … 没跑成：临时家目录已经被占了"
+    return 1
+  fi
+  if ! mkdir -- "$home"; then
+    echo "  … 没跑成：建不了临时家目录"
+    return 1
+  fi
+  chmod 755 -- "$home" || return 1
+  if ! useradd --system --user-group --no-create-home --home-dir "$home" --shell /usr/sbin/nologin fleet; then
+    echo "  … 没跑成：建不了用户 fleet"
+    rmdir -- "$home" 2>/dev/null || true
+    return 1
+  fi
+  CREATED_FLEET=1
+  chown --no-dereference fleet:fleet -- "$home" || true
+}
+
+# 只有本次 useradd 出来的账号才删。不带会把家目录一起删掉的选项；家目录在临时目录里，随临时目录收掉
+cleanup_fleet_user() {
+  local line="" members=""
+  if ((CREATED_FLEET == 0)); then return 0; fi
+  pkill -KILL -u fleet >/dev/null 2>&1 || true
+  userdel fleet >/dev/null 2>&1 || true
+  if id fleet >/dev/null 2>&1; then return 0; fi
+  if ! line=$(getent group fleet 2>/dev/null); then return 0; fi
+  members=${line##*:}
+  if [[ -z "$members" ]]; then groupdel fleet >/dev/null 2>&1 || true; fi
+}
+
+trap cleanup EXIT
+
+cat >"$TMP/write-nofollow.mjs" <<'JS'
+import fs from "node:fs";
+const [path, ident, body, gid] = process.argv.slice(2);
+const before = fs.lstatSync(path);
+if (before.isSymbolicLink()) process.exit(3);
+if (`${before.dev}:${before.ino}` !== ident || !before.isFile()) process.exit(2);
+let fd = -1;
+try {
+  fd = fs.openSync(path, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW);
+  const st = fs.fstatSync(fd);
+  if (`${st.dev}:${st.ino}` !== ident || !st.isFile()) process.exit(2);
+  const text = body.endsWith("\n") ? body : `${body}\n`;
+  fs.ftruncateSync(fd, 0);
+  fs.writeFileSync(fd, text);
+  if (gid) {
+    fs.fchownSync(fd, 0, Number(gid));
+    fs.fchmodSync(fd, 0o640);
+  }
+} finally {
+  if (fd >= 0) fs.closeSync(fd);
+}
+JS
+
+find_node() {
+  local n=""
+  for n in "$(command -v node 2>/dev/null || true)" /opt/hostedtoolcache/node/*/x64/bin/node /usr/bin/node /usr/local/bin/node; do
+    if [[ -n "$n" && -x "$n" ]]; then NODE_BIN=$n; return 0; fi
+  done
+  return 1
 }
 
 # 桩：发布后半段一旦被叫到就记一笔。构建没走完不该碰这些
@@ -166,98 +317,209 @@ check "没有调用 as_fleet_in" "$(bare_n)" 0
 check "没有切版本" "$(later_n)" 0
 check "探针之后没有跑 pnpm 或 tar" "$(grep -cE 'pnpm|tar -x' <<<"$(srun_text)" || true)" 0
 
+echo "== 独占创建：已有文件和符号链接都不动，清理只删本次这一个；家目录不放 /home/fleet"
+home=$(new_fleet_home)
+check "缺账号时家目录在本次临时目录里" "$([[ "$home" == "$TMP/fleet-home" ]] && echo ok || echo bad)" ok
+check "缺账号时家目录不是 /home/fleet" "$([[ "$home" == /home/fleet || "$home" == /home/fleet/* ]] && echo bad || echo ok)" ok
+useradd_line=$(declare -f prepare_fleet_user | grep -F useradd || true)
+useradd_stripped=${useradd_line//--no-create-home/}
+clean_src=$(declare -f cleanup_fleet_user)
+check "useradd 不把家目录指到 /home/fleet" "$([[ "$useradd_line" == *'/home/fleet'* ]] && echo bad || echo ok)" ok
+check "useradd 不带会照着已有家目录创建的选项" "$([[ "$useradd_stripped" == *'--create-home'* ]] && echo bad || echo ok)" ok
+check "清理账号不会把家目录一起删掉" "$([[ "$clean_src" == *'--remove'* || "$clean_src" == *'userdel -r'* || "$clean_src" == *'userdel -rf'* ]] && echo bad || echo ok)" ok
+check "清理函数里不出现 /home/fleet" "$([[ "$clean_src" == *'/home/fleet'* ]] && echo bad || echo ok)" ok
+
+if ! find_node; then
+  echo "  … 没跑成：找不到 node，独占写入演练和连 socket 都试不了"
+  skipped=1
+else
+  REH=$TMP/rehearsal
+  mkdir -p "$REH/dir"
+  printf '%s\n' 'KEEP-FILE' >"$REH/dir/fleet-build-isolation-bait"
+  printf '%s\n' 'KEEP-TARGET' >"$REH/secret"
+  ln -s -- "$REH/secret" "$REH/dir/already-link"
+  keep_file=$REH/keep-file
+  keep_target=$REH/keep-target
+  cp -- "$REH/dir/fleet-build-isolation-bait" "$keep_file"
+  cp -- "$REH/secret" "$keep_target"
+  if ! exclusive_file "$REH/dir" 'REH-BODY'; then
+    printf '  ✗ 在临时目录里独占建文件失败\n'
+    fail=1
+  else
+    check "新建的是另一个临时文件" "$([[ "$EXCL_PATH" != "$REH/dir/fleet-build-isolation-bait" && "$EXCL_PATH" == "$REH/dir"/fleet-build-isolation.* ]] && echo ok || echo bad)" ok
+    check "已有同名文件还在" "$(cmp -s "$REH/dir/fleet-build-isolation-bait" "$keep_file" && echo ok || echo bad)" ok
+    check "已有符号链接的目标没被写" "$([[ -L "$REH/dir/already-link" ]] && cmp -s "$REH/secret" "$keep_target" && echo ok || echo bad)" ok
+    printf '%s\n' 'REH-BODY' >"$REH/expect-body"
+    check "独占文件里是本次写的正文" "$(cmp -s "$EXCL_PATH" "$REH/expect-body" && echo ok || echo bad)" ok
+    created=$EXCL_PATH
+    created_id=$EXCL_ID
+    remove_if_inode "$created" "$created_id" file
+    check "清理删掉了本次这一个" "$([[ -e "$created" || -L "$created" ]] && echo still || echo gone)" gone
+    check "清理后已有文件还在" "$(cmp -s "$REH/dir/fleet-build-isolation-bait" "$keep_file" && echo ok || echo bad)" ok
+    # 原文件先挪走（inode 还占着，不会马上被复用），原路径再放一个新文件。按旧 inode 清理不得删掉新的
+    swap=$(mktemp "$REH/dir/fleet-build-isolation.XXXXXX")
+    swap_id=$(stat -c '%d:%i' -- "$swap")
+    mv -- "$swap" "$swap.moved"
+    printf '%s\n' 'THEIRS' >"$swap"
+    remove_if_inode "$swap" "$swap_id" file
+    printf '%s\n' 'THEIRS' >"$REH/expect-theirs"
+    check "inode 对不上就不删后来的文件" "$(cmp -s "$swap" "$REH/expect-theirs" && echo ok || echo bad)" ok
+    check "旧 inode 那个文件还在挪走的位置" "$([[ -f "$swap.moved" ]] && echo ok || echo bad)" ok
+    rm -f -- "$swap" "$swap.moved"
+    # 同名换成符号链接再写：必须失败，链接目标保持原样
+    held=$(mktemp "$REH/dir/fleet-build-isolation.XXXXXX")
+    held_id=$(stat -c '%d:%i' -- "$held")
+    rm -f -- "$held"
+    ln -s -- "$REH/secret" "$held"
+    if write_nofollow "$held" "$held_id" 'PWNED'; then
+      printf '  ✗ 往符号链接上写竟然成功了\n'
+      fail=1
+    else
+      printf '  ✓ 往符号链接上写被拒绝\n'
+    fi
+    check "拒绝之后链接目标没变" "$(cmp -s "$REH/secret" "$keep_target" && echo ok || echo bad)" ok
+    if [[ -L "$held" && "$(readlink -- "$held")" == "$REH/secret" ]]; then rm -f -- "$held"; fi
+  fi
+fi
+
 echo "== 真沙箱：构建环境里读诱饵失败并报出路径；连本机库 socket 被拒"
 if ((EUID != 0)) || [[ ! -d /run/systemd/system ]] || ! command -v runuser >/dev/null; then
   echo "  … 没跑成：要 root 和 systemd（sudo bash deploy/test/build-isolation.test.sh）"
   skipped=1
-else
+elif ((skipped == 0)); then
   unset -f systemd-run
   hash -r
-  if ! id fleet >/dev/null 2>&1; then
-    if useradd --system --user-group --create-home --home-dir /home/fleet --shell /usr/sbin/nologin fleet; then
-      CREATED_FLEET=1
+  if ! prepare_fleet_user; then skipped=1; fi
+fi
+if ((EUID == 0)) && ((skipped == 0)); then
+  if [[ -L /etc/fleet-dao ]]; then
+    echo "  … 没跑成：/etc/fleet-dao 是符号链接，不往链接目标里放诱饵"
+    skipped=1
+  elif [[ ! -d /etc/fleet-dao ]]; then
+    if mkdir --mode=750 -- /etc/fleet-dao; then
+      ETC_ID=$(stat -c '%d:%i' -- /etc/fleet-dao)
+      chown --no-dereference root:fleet -- /etc/fleet-dao || skipped=1
     else
-      echo "  … 没跑成：建不了用户 fleet"
+      echo "  … 没跑成：建不了 /etc/fleet-dao"
       skipped=1
     fi
   fi
 fi
 if ((EUID == 0)) && ((skipped == 0)); then
-  if [[ ! -d /etc/fleet-dao ]]; then
-    install -d -o root -g fleet -m 750 /etc/fleet-dao
-    CREATED_ETC=1
-  fi
-  printf '%s\n' "$CANARY" >"$BAIT"
-  chown root:fleet -- "$BAIT"
-  chmod 640 -- "$BAIT"
-  CREATED_BAIT=1
-  if ! runuser -u fleet -- cat -- "$BAIT" >/dev/null; then
-    echo "  … 没跑成：沙箱外 fleet 读不到诱饵，没法证明是沙箱挡住的"
+  gid=$(id -g fleet 2>/dev/null || true)
+  if [[ -z "$gid" ]]; then
+    echo "  … 没跑成：读不到 fleet 的属组"
     skipped=1
+  elif ! exclusive_file /etc/fleet-dao "$CANARY" "$gid"; then
+    echo "  … 没跑成：在 /etc/fleet-dao 里独占建不了诱饵"
+    skipped=1
+  else
+    BAIT=$EXCL_PATH
+    BAIT_ID=$EXCL_ID
+    printf '%s\n' "$CANARY" >"$TMP/bait.expected"
+    got=$TMP/bait.got
+    if ! runuser -u fleet -- cat -- "$BAIT" >"$got"; then
+      echo "  … 没跑成：沙箱外 fleet 读不到诱饵，没法证明是沙箱挡住的"
+      skipped=1
+    elif ! cmp -s "$got" "$TMP/bait.expected"; then
+      echo "  … 没跑成：沙箱外读到的不是这次写的诱饵"
+      skipped=1
+    fi
+    rm -f -- "$got"
   fi
 fi
 if ((EUID == 0)) && ((skipped == 0)); then
-  cat >"$TMP/bin/pnpm" <<'SH'
-#!/bin/bash
-target=/etc/fleet-dao/fleet-build-isolation-bait
+  if [[ ! "$BAIT" =~ ^/etc/fleet-dao/fleet-build-isolation\.[A-Za-z0-9]+$ ]]; then
+    echo "  … 没跑成：诱饵路径不是这次独占创建的临时文件"
+    skipped=1
+  else
+    "$NODE_BIN" - "$TMP/bin/pnpm" "$BAIT" <<'JS'
+const fs = require("node:fs");
+const [out, target] = process.argv.slice(2);
+const src = `#!/bin/bash
+target=${JSON.stringify(target)}
 if content=$(cat -- "$target" 2>&1); then
-  printf '%s\n' "$content"
+  printf '%s\\n' "$content"
   exit 0
 fi
-printf '%s\n' "$content" >&2
+printf '%s\\n' "$content" >&2
 exit 1
-SH
-  chmod 755 "$TMP/bin/pnpm"
-  CACHE=$RELEASES/.repo.git
-  git init -q "$CACHE"
-  echo x >"$CACHE/README"
-  git -C "$CACHE" add README
-  git -C "$CACHE" -c user.email=test@example.com -c user.name=test -c commit.gpgsign=false commit -q -m test
-  SHA=$(git -C "$CACHE" rev-parse HEAD)
-  FLEET_BUILD_PATH_PREFIX=$TMP/bin
-  BUILD_SANDBOX_STATE=""
-  STUB_MODE=""
-  run_release live >"$OUT" 2>&1
-  out=$(cat -- "$OUT")
-  FLEET_BUILD_PATH_PREFIX=""
-  check "读诱饵时构建失败" "$([[ "$REL_RC" != 0 ]] && echo fail || echo ok)" fail
-  if [[ "$out" == *"/etc/fleet-dao/fleet-build-isolation-bait"* ]]; then
-    printf '  ✓ 构建输出里有诱饵路径\n'
-  else
-    printf '  ✗ 构建输出里没有诱饵路径：%s\n' "$(show "$out")"
-    fail=1
-  fi
-  lacks_canary "构建输出里没有诱饵内容" "$out"
-  check "读诱饵时没有调用 as_fleet_in" "$(bare_n)" 0
-  check "读诱饵时没有切版本" "$(later_n)" 0
+`;
+fs.writeFileSync(out, src);
+JS
+    chmod 755 "$TMP/bin/pnpm"
+    CACHE=$RELEASES/.repo.git
+    git init -q "$CACHE"
+    echo x >"$CACHE/README"
+    git -C "$CACHE" add README
+    git -C "$CACHE" -c user.email=test@example.com -c user.name=test -c commit.gpgsign=false commit -q -m test
+    SHA=$(git -C "$CACHE" rev-parse HEAD)
+    FLEET_BUILD_PATH_PREFIX=$TMP/bin
+    BUILD_SANDBOX_STATE=""
+    STUB_MODE=""
+    run_release live >"$OUT" 2>&1
+    out=$(cat -- "$OUT")
+    FLEET_BUILD_PATH_PREFIX=""
+    check "读诱饵时构建失败" "$([[ "$REL_RC" != 0 ]] && echo fail || echo ok)" fail
+    if [[ "$out" == *"$BAIT"* ]]; then
+      printf '  ✓ 构建输出里有诱饵路径\n'
+    else
+      printf '  ✗ 构建输出里没有诱饵路径：%s\n' "$(show "$out")"
+      fail=1
+    fi
+    lacks_canary "构建输出里没有诱饵内容" "$out"
+    check "读诱饵时没有调用 as_fleet_in" "$(bare_n)" 0
+    check "读诱饵时没有切版本" "$(later_n)" 0
 
-  SOCK_REAL=$(readlink -f /var/run/postgresql 2>/dev/null || true)
-  if [[ -z "$SOCK_REAL" ]]; then SOCK_REAL=/run/postgresql; fi
-  if [[ ! -d "$SOCK_REAL" ]]; then
-    install -d -m 755 "$SOCK_REAL"
-    CREATED_SOCK_DIR=1
-  fi
-  if [[ ! -e /var/run/postgresql ]]; then
-    ln -s "$SOCK_REAL" /var/run/postgresql
-    CREATED_SOCK_LINK=1
-  fi
-  # sudo 会换掉 PATH，CI 里 setup-node 装的 node 不在 /usr/bin。用绝对路径，沙箱里的 fleet 也执行得到
-  NODE_BIN=""
-  for n in "$(command -v node 2>/dev/null || true)" /opt/hostedtoolcache/node/*/x64/bin/node /usr/bin/node /usr/local/bin/node; do
-    if [[ -n "$n" && -x "$n" ]]; then NODE_BIN=$n; break; fi
-  done
-  if [[ -z "$NODE_BIN" ]]; then
-    echo "  … 没跑成：找不到 node，没法试连本机库 socket"
-    skipped=1
+    SOCK_REAL=$(readlink -f /var/run/postgresql 2>/dev/null || true)
+    if [[ -z "$SOCK_REAL" ]]; then SOCK_REAL=/run/postgresql; fi
+    if [[ -L "$SOCK_REAL" ]]; then
+      echo "  … 没跑成：本机库 socket 目录解析完仍是符号链接"
+      skipped=1
+    elif [[ ! -d "$SOCK_REAL" ]]; then
+      if mkdir --mode=755 -- "$SOCK_REAL"; then
+        SOCK_DIR_ID=$(stat -c '%d:%i' -- "$SOCK_REAL")
+      else
+        echo "  … 没跑成：建不了本机库 socket 目录"
+        skipped=1
+      fi
+    fi
+    if ((skipped == 0)) && [[ ! -e /var/run/postgresql && ! -L /var/run/postgresql ]]; then
+      if ln -s -- "$SOCK_REAL" /var/run/postgresql; then
+        SOCK_LINK_ID=$(stat -c '%d:%i' -- /var/run/postgresql)
+      else
+        echo "  … 没跑成：建不了 /var/run/postgresql 链接"
+        skipped=1
+      fi
+    fi
   fi
 fi
 if ((EUID == 0)) && ((skipped == 0)); then
-  SOCK=$SOCK_REAL/.fleet-build-isolation-$$.sock
+  sock_hold=$(mktemp "$SOCK_REAL/.fleet-build-isolation.XXXXXX") || sock_hold=""
+  if [[ -z "$sock_hold" ]]; then
+    echo "  … 没跑成：在本机库目录里独占建不了 socket 用的名字"
+    skipped=1
+  else
+    sock_hold_id=$(stat -c '%d:%i' -- "$sock_hold")
+    remove_if_inode "$sock_hold" "$sock_hold_id" file
+    SOCK=$sock_hold
+  fi
+fi
+if ((EUID == 0)) && ((skipped == 0)); then
   cat >"$TMP/sock-server.mjs" <<'JS'
 import net from "node:net";
 import fs from "node:fs";
 const p = process.argv[2];
-try { fs.unlinkSync(p); } catch { /* 没有旧的 */ }
+try {
+  fs.lstatSync(p);
+  console.error("socket path already exists");
+  process.exit(1);
+} catch (e) {
+  if (e.code !== "ENOENT") {
+    console.error(e.message);
+    process.exit(1);
+  }
+}
 process.umask(0);
 net.createServer((c) => { c.end("OPEN-MARKER"); }).listen(p);
 JS
@@ -281,6 +543,7 @@ JS
     echo "  … 没跑成：本机库目录里没建起测试用的 socket"
     skipped=1
   else
+    SOCK_ID=$(stat -c '%d:%i' -- "$SOCK")
     outside=$(runuser -u fleet -- "$NODE_BIN" "$TMP/sock-client.mjs" "/var/run/postgresql/${SOCK##*/}" 2>&1) || true
     if [[ "$outside" != OPEN\ OPEN-MARKER* && "$outside" != *OPEN-MARKER* ]]; then
       echo "  … 没跑成：沙箱外连测试 socket 也不通（${outside//OPEN-MARKER/标记}），没法证明是沙箱挡住的"
