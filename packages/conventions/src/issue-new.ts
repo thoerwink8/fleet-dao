@@ -242,6 +242,7 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   let createBodyPath = bodyPath;
   if (prBodyHits.length > 0) {
     if (o.allowPrBodyAcceptance === undefined) {
+      // 拒开：issueNewCli / bin 捕到后退出码 1（冷验收要在 diff 里看见这条规矩，#1792）
       throw new Error(
         `「怎么算做完」里有条目提到 PR 正文（冷验收只看 diff 和单子，看不到 PR 正文，按没做到算）：\n` +
           `${prBodyHits.join('\n')}\n` +
@@ -310,6 +311,26 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
       ? undefined
       : await orderIntoVersion(deps.gh, { number, url, version, after: o.orderAfter });
   return { number, url, milestone, parent, local, order, similar };
+}
+
+export interface IssueNewCliDeps extends IssueNewDeps {
+  /** 拒开／失败时把报错写到哪（CLI 默认 stderr）；测试可接数组。 */
+  err?: ((line: string) => void) | undefined;
+}
+
+/**
+ * CLI 出口：开成返回 0；拒开或失败（含「怎么算做完」提 PR 正文且没带豁免）返回 1。
+ * bin/issue-new.ts 捕错后设 process.exitCode = 1，和这里同一条；冷验收只看这两份文件的 diff，
+ * 所以把「错误 → 退出码 1」写在可测的函数里（#1792 返工）。
+ */
+export async function issueNewCli(argv: readonly string[], deps: IssueNewCliDeps): Promise<number> {
+  try {
+    await issueNew(argv, deps);
+    return 0;
+  } catch (e) {
+    deps.err?.(e instanceof Error ? e.message : String(e));
+    return 1;
+  }
 }
 
 interface Options {

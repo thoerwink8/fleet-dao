@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { type GhResult, ghRunner, issueNew, prBodyAcceptanceItems } from '../src/issue-new.ts';
+import { type GhResult, ghRunner, issueNew, issueNewCli, prBodyAcceptanceItems } from '../src/issue-new.ts';
 import { parseOrder } from '../src/plan-view.ts';
 import { order } from './fake-github.ts';
 
@@ -105,8 +105,15 @@ function setup(
     if (args[0] === 'api') return opts.milestones ?? ok(MILESTONES);
     return opts.create ?? ok(`${URL36}\n`);
   };
-  const run = (...argv: string[]) => issueNew(argv, { gh, cwd: root, similar: opts.similar });
-  return { root, calls, run };
+  const deps = { gh, cwd: root, similar: opts.similar };
+  const run = (...argv: string[]) => issueNew(argv, deps);
+  /** CLI 出口：退出码 + 捕到的报错（拒开时退出码 1，#1792）。 */
+  const runCli = async (...argv: string[]) => {
+    const errs: string[] = [];
+    const code = await issueNewCli(argv, { ...deps, err: (line) => errs.push(line) });
+    return { code, errs };
+  };
+  return { root, calls, run, runCli };
 }
 
 const base = ['--kind', '需求', '--milestone', 'P1', '--title', '登录页加验证码', '--body-file', 'body.md'];
@@ -892,23 +899,24 @@ describe('开单脚本：怎么算做完里提 PR 正文就拦（冷验收看不
     });
   });
 
-  it('【故意造出的失败】怎么算做完里写「PR 正文」：拒开，gh 一次也不调，报错点明哪一条和冷验收看不到', async () => {
-    const { calls, run } = setup({
+  it('【故意造出的失败】怎么算做完里写「PR 正文」：拒开，退出码 1，gh 一次也不调，报错点明哪一条和冷验收看不到', async () => {
+    const { calls, runCli } = setup({
       body: withDone('- PR 正文写清根因\n- 测试：过期的验证码被拒。'),
     });
-    await expect(run(...base)).rejects.toThrow(
+    const { code, errs } = await runCli(...base);
+    expect(code).toBe(1);
+    expect(errs.join('\n')).toMatch(
       /怎么算做完[\s\S]*看不到 PR 正文[\s\S]*PR 正文写清根因[\s\S]*注释、文档或测试名[\s\S]*单没开/,
     );
     expect(calls).toEqual([]);
   });
 
-  it('带 --allow-pr-body-acceptance：照开，理由追加进怎么算做完末尾', async () => {
-    const { calls, run } = setup({
+  it('带 --allow-pr-body-acceptance：照开（退出码 0），理由追加进怎么算做完末尾', async () => {
+    const { calls, runCli } = setup({
       body: `${withDone('- PR 正文写清根因\n- 测试：过期的验证码被拒。')}## 现状\n\n未开工。\n`,
     });
-    await expect(
-      run(...base, '--allow-pr-body-acceptance', '这张单人手验 PR 正文，不进引擎'),
-    ).resolves.toMatchObject({ number: 36 });
+    const { code } = await runCli(...base, '--allow-pr-body-acceptance', '这张单人手验 PR 正文，不进引擎');
+    expect(code).toBe(0);
     const create = calls.find((c) => c[0] === 'issue' && c[1] === 'create');
     const bodyFile = create?.[create.indexOf('--body-file') + 1];
     if (typeof bodyFile !== 'string') throw new Error('没把 --body-file 交给 gh');
