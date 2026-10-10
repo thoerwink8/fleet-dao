@@ -2,9 +2,9 @@
 // 1. 引导先回：创始人在一轮中途打的字（Claude Code 的 transcript 里是 attachment.type=queued_command、commandMode=prompt），
 //    附在下一次工具结果后面送进主对话。本机 178 条送到的引导里，AI 第一反应直接再调工具 107 条、先写话 45 条、本轮随即结束 26 条，
 //    创始人觉得「石沉大海」。所以最后一条引导之后主对话还没写过一段非空文字，就拒这次工具调用，理由里带上引导的前 200 字。
-// 2. 子代理一律后台跑：主对话前台等子代理时整段卡住，引导送不进来；Mirasim 一轮结束会杀掉还在跑的后台子代理，
-//    界面也只在派它的那一轮显示每一步。所以主对话调 Agent/Task 写了 run_in_background: false 就拒；不写不拦（不写就是后台：
-//    本机 transcript 里不写的 39 次全是后台起的）。
+// 2. 子代理一律后台跑：主对话前台等子代理时整段不调工具，引导转不进来，界面也只在派它的那一轮显示每一步
+//    （一轮结束不会杀掉后台子代理，2026-10-11 实测；进程重开会）。所以主对话调 Agent/Task 写了 run_in_background: false 就拒；
+//    不写不拦（不写就是后台：本机 transcript 里不写的 39 次全是后台起的）。
 // 子代理里的调用（输入带 agent_id）两条都不管。transcript 读不了：放行，但用 systemMessage 明说没查成，不当成没有引导。
 // 创始人 2026-10-10 13:02 选定（「都按你的推荐来。」）。
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -19,7 +19,10 @@ interface Verdict {
   notice?: string;
 }
 interface MainThreadLib {
-  check(raw: string, opts?: { settleMs?: number; sleep?: (ms: number) => void }): Verdict;
+  check(
+    raw: string,
+    opts?: { settleMs?: number; sleep?: (ms: number) => void; now?: number; mirasim?: string },
+  ): Verdict;
   hookOutput(v: Verdict): string;
   DIRECTIVE_SHOWN_CHARS: number;
 }
@@ -113,7 +116,10 @@ const input = (path: unknown, extra: Row = {}, tool = 'Bash', toolInput: Row = {
     ...extra,
   });
 
-const check = (raw: string) => lib.check(raw, { settleMs: 0 });
+/** Mirasim 的引导那一条（#1743）在 mirasim-steer.rules.test.ts 钉；这里指到一个不在的家目录，不读跑测试这台机器上的真 diag */
+const NO_MIRASIM = join(dir, 'no-mirasim');
+const NO_MIRASIM_ENV = { ...process.env, FLEET_MIRASIM_DIR: NO_MIRASIM };
+const check = (raw: string) => lib.check(raw, { settleMs: 0, mirasim: NO_MIRASIM });
 
 describe('引导先回', () => {
   it('引导之后直接调工具：拒，理由带引导原文、说怎么回、涉及子代理用 SendMessage 转', () => {
@@ -186,6 +192,7 @@ describe('引导先回', () => {
     const t = transcript([...turnStart(), row.directive('先别动数据库')]);
     const v = lib.check(input(t), {
       settleMs: 1,
+      mirasim: NO_MIRASIM,
       sleep: () => appendFileSync(t, `${JSON.stringify(row.text('m2', '收到。'))}\n`),
     });
     expect(v).toEqual({});
@@ -243,7 +250,8 @@ describe('子代理一律后台跑', () => {
     expect(v.deny).toContain('子代理一律后台跑');
     expect(v.deny).toContain('去掉 run_in_background: false');
     expect(v.deny).toContain('60 秒');
-    expect(v.deny).toContain('Mirasim 一轮结束会杀掉后台子代理');
+    expect(v.deny).toContain('一轮结束不会杀掉后台子代理（2026-10-11 实测），进程重开（插队、重启）会');
+    expect(v.deny).not.toContain('一轮结束会杀掉');
   });
 
   it('不写 run_in_background（默认就是后台）、写 true：放行', () => {
@@ -265,9 +273,9 @@ describe('子代理一律后台跑', () => {
     const mutant = join(dir, 'main-thread-mutant.mjs');
     writeFileSync(mutant, src.replace(want, "prop(toolInput, 'run_in_background') !== true"));
     const bad = (await import(pathToFileURL(mutant).href)) as MainThreadLib;
-    expect(bad.check(input(clean(), {}, 'Agent', { prompt: '干活' }), { settleMs: 0 }).deny).toContain(
-      '子代理一律后台跑',
-    );
+    expect(
+      bad.check(input(clean(), {}, 'Agent', { prompt: '干活' }), { settleMs: 0, mirasim: NO_MIRASIM }).deny,
+    ).toContain('子代理一律后台跑');
   });
 });
 
@@ -345,7 +353,7 @@ describe('登记和真跑', () => {
     timeout: 0,
   }, () => {
     const t = transcript([...turnStart(), row.directive('先别动数据库')]);
-    const r = runChild(process.execPath, [HOOK], { input: input(t) });
+    const r = runChild(process.execPath, [HOOK], { input: input(t), env: NO_MIRASIM_ENV });
     expect(r.status).toBe(0);
     const out = JSON.parse(r.stdout) as {
       hookSpecificOutput?: {
@@ -358,13 +366,19 @@ describe('登记和真跑', () => {
     expect(out.hookSpecificOutput?.permissionDecision).toBe('deny');
     expect(out.hookSpecificOutput?.permissionDecisionReason).toContain('先别动数据库');
 
-    const lost = runChild(process.execPath, [HOOK], { input: input(join(dir, 'gone.jsonl')) });
+    const lost = runChild(process.execPath, [HOOK], {
+      input: input(join(dir, 'gone.jsonl')),
+      env: NO_MIRASIM_ENV,
+    });
     expect(lost.status).toBe(0);
     expect((JSON.parse(lost.stdout) as { systemMessage?: string }).systemMessage).toMatch(
       /^引导检查没查成：/,
     );
 
-    const ok = runChild(process.execPath, [HOOK], { input: input(transcript(turnStart())) });
+    const ok = runChild(process.execPath, [HOOK], {
+      input: input(transcript(turnStart())),
+      env: NO_MIRASIM_ENV,
+    });
     expect([ok.status, ok.stdout]).toEqual([0, '']);
   });
 });

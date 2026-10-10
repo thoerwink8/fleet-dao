@@ -5,13 +5,18 @@
 // 仓根临时文件那一条只提醒、不拦、不删——只用 systemMessage。
 // 无人值守（决定 0028，创始人 2026-10-07 约 02:27 推翻 0026 的「收尾不拦」）：只有这个会话自己跑过 `unattended.mjs on`
 // 才输出 decision:block（理由里说清继续盯工人、有进展记进度），起子代理、后台活不自动开；放行条件和防死循环的上限见 unattended.mjs。
+// Mirasim 的引导（#1743，补决定 0078）：收尾这一刻有还没转过的（写最后一段话时到的，调工具前钩子没机会拦），就 decision:block、
+// reason 带原文叫它先回（判法、取原文、记转过的同 main-thread.mjs 的 takeSteers）；取不到原文不挡，systemMessage 明说没查成。
+// 只看 Claude Code 的输入（带 session_id）：Mirasim 的会话号是 claude:<会话号>，借道的几家不会有。
 // 决定 0026：起后台活不再自动开。决定 0027：不再读、不再清欠账文件。
 // 退出码恒为 0：Stop 上 exit 2 也是「不许停」。
-// 规矩本身由 agents/test/rules/stop.rules.test.ts 钉住：没开无人值守时输出里出现 decision 或 hookSpecificOutput 会红。
+// 规矩本身由 agents/test/rules/stop.rules.test.ts 钉住：没开无人值守时输出里出现 decision 或 hookSpecificOutput 会红
+// （转 Mirasim 引导那一条除外，钉在 agents/test/rules/mirasim-steer.rules.test.ts）。
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitRunner, gitOk as ok } from './git-run.mjs';
+import { mirasimDir, steerRelay, takeSteers } from './main-thread.mjs';
 import { cleanId, decideStop, isMachineSession, runningWorkers, stateDir } from './unattended.mjs';
 
 /** 仓根里一眼像临时文件的：截图、导出的数据、日志（AGENTS.md 通用段「放 _tmp/」那条列的几类） */
@@ -82,6 +87,24 @@ if (isMain()) {
   // 无人值守：只有这个会话自己跑过 `unattended.mjs on` 才挡（决定 0028）；先判，它自己防空转，不看 stop_hook_active
   // （我们自己挡回去之后那个标志就一直是真的）。机器派的会话（工人、反方）不挡。
   const notes = [];
+  // 收尾这一刻还有没转过的 Mirasim 引导：挡回去、把原文转给它先回（先于无人值守判：转过一次就不再挡，不会空转）
+  if (typeof input?.session_id === 'string') {
+    try {
+      const steer = takeSteers({
+        root: mirasimDir(),
+        sessionId: input.session_id,
+        transcriptPath: input.transcript_path,
+        now: Date.now(),
+      });
+      if (steer.kind === 'relay') {
+        process.stdout.write(`${JSON.stringify({ decision: 'block', reason: steerRelay(steer.steers) })}\n`);
+        process.exit(0);
+      }
+      if (steer.kind === 'unknown') notes.push(`引导检查没查成：${steer.why}`);
+    } catch (e) {
+      notes.push(`引导检查没查成：钩子自己出错了（${e instanceof Error ? e.message : String(e)}）`);
+    }
+  }
   try {
     const sessionId = cleanId(input?.session_id) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
     if (sessionId && !isMachineSession({ env: process.env })) {
