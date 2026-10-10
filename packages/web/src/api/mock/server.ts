@@ -57,6 +57,7 @@ import {
   RepoDispatchResponse,
   ReposResponse,
   ROUTE_PROBE_ACTION,
+  ROUTE_PROBE_ON_DEMAND_MARK,
   ROUTE_PROBE_TARGET,
   ROUTING_PURPOSE_IDS,
   type Route,
@@ -318,6 +319,22 @@ function durationMsFromDetail(detail: string | undefined): number | null {
   return ms;
 }
 
+const NO_CHECK = {
+  checkQuestion: null,
+  checkExpected: null,
+  checkAnswer: null,
+  checkPassed: null,
+  selfIdentity: null,
+} as const;
+
+const MOCK_CHECK_PASSED = {
+  checkQuestion: '17 乘 23 等于多少？只回数字。',
+  checkExpected: '391',
+  checkAnswer: '391',
+  checkPassed: true,
+  selfIdentity: 'Claude Opus 5.5',
+} as const;
+
 /** 假数据里每条路由的最近一次结论收成一条探针历史，页面开发时格子不是空的。 */
 function mockProbeHistory(
   routes: readonly {
@@ -342,12 +359,67 @@ function mockProbeHistory(
       failureReason: result === 'passed' ? null : reason,
       requestText: result === 'not_probed' ? null : '只回 OK',
       responseText: result === 'passed' ? 'OK' : result === 'failed' ? reason : null,
-      checkQuestion: null,
-      checkExpected: null,
-      checkAnswer: null,
-      checkPassed: null,
-      selfIdentity: null,
+      ...(result === 'passed' ? MOCK_CHECK_PASSED : NO_CHECK),
     });
+  }
+  // 中转站（ch-relay）补几次更早的探测，页面上能看到每种结论：疑似降智、不通、没探、通过
+  const relay = routes.find((r) => r.id === 'r-rl-opus' && r.probe);
+  if (relay?.probe) {
+    const at = (minutesAgo: number) =>
+      new Date(Date.parse(relay.probe?.at ?? '') - minutesAgo * 60_000).toISOString();
+    const base = { routeId: relay.id, channelId: relay.channelId };
+    cells.push(
+      {
+        ...base,
+        id: cells.length + 1,
+        probedAt: at(20),
+        result: 'failed',
+        durationMs: 8_400,
+        failureReason: '降智题答错了：问 17 乘 23，标准答案 391，实答 381；自报身份与路由不符',
+        requestText:
+          '先回答下面的题，答案单独一行；再用一行 OK 收尾。\n题：17 乘 23 等于多少？只回数字。\n再说一句你是什么模型。',
+        responseText: '381\nOK\n我是 GPT-4 级别的通用助手。',
+        checkQuestion: '17 乘 23 等于多少？只回数字。',
+        checkExpected: '391',
+        checkAnswer: '381',
+        checkPassed: false,
+        selfIdentity: 'GPT-4 级别的通用助手',
+      },
+      {
+        ...base,
+        id: cells.length + 2,
+        probedAt: at(35),
+        result: 'failed',
+        durationMs: null,
+        failureReason: '连探两次都没通：503 容量满，上游没给原文\n（假数据）',
+        requestText: '只回 OK',
+        responseText: '503 Service Unavailable\n{"error":{"type":"overloaded","message":"capacity full"}}',
+        ...NO_CHECK,
+      },
+      {
+        ...base,
+        id: cells.length + 3,
+        probedAt: at(50),
+        result: 'not_probed',
+        durationMs: null,
+        failureReason: `${ROUTE_PROBE_ON_DEMAND_MARK}。上一次真探：通，10-10 11:00`,
+        requestText: null,
+        responseText: null,
+        ...NO_CHECK,
+      },
+      {
+        ...base,
+        id: cells.length + 4,
+        probedAt: at(65),
+        result: 'passed',
+        durationMs: 12_100,
+        failureReason: null,
+        requestText:
+          '先回答下面的题，答案单独一行；再用一行 OK 收尾。\n题：17 乘 23 等于多少？只回数字。\n再说一句你是什么模型。',
+        responseText: '391\nOK\n我是 Claude Opus 5.5。',
+        ...MOCK_CHECK_PASSED,
+      },
+    );
   }
   return RouteProbeHistoryResponse.parse({ state: 'ok', ...probeHistoryStrips(cells) });
 }
