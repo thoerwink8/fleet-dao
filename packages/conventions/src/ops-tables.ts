@@ -846,10 +846,16 @@ export function readUnitEntries(repo: RepoView): UnitEntry[] {
   return entries.sort((a, b) => rank(a.machine) - rank(b.machine) || compareText(a.file, b.file));
 }
 
+/** markdown 表格单元格里的 `|` 写成 `\|`；核对时两边都按这个写法比。 */
+function escapeCell(text: string): string {
+  return text.replace(/\|/g, '\\|');
+}
+
 /** 区块标记之间那一段：前后各一个空行、中间一张三列表，行按机器（法国、香港）、再按文件名排。 */
 export function unitsTableInner(repo: RepoView): string {
   const lines = ['| 单元文件 | 机器 | 说明 |', '|---|---|---|'];
-  for (const e of readUnitEntries(repo)) lines.push(`| ${e.file} | ${e.machine} | ${e.description} |`);
+  for (const e of readUnitEntries(repo))
+    lines.push(`| ${e.file} | ${e.machine} | ${escapeCell(e.description)} |`);
   return `\n\n${lines.join('\n')}\n\n`;
 }
 

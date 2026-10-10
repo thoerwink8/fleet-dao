@@ -836,6 +836,16 @@ describe('单元表（第七片）', () => {
     expect(checkUnitsBlock(memRepo({ ...files, 'docs/ops.md': unitsDoc(files) }), 'docs/ops.md')).toEqual([]);
   });
 
+  it('说明带 | 时，表格里写成 \\|，核对按同样写法比，写成没转义的会被报出来', () => {
+    const files = unitsFiles({ 'deploy/hk/fleet-feishu.service': 'Description=a | b\n' });
+    const block = renderUnitsBlock(memRepo(files));
+    expect(block).toContain('| fleet-feishu.service | 香港 | a \\| b |');
+    expect(block).not.toContain('| 香港 | a | b |');
+    const raw = unitsDoc(files).replace('a \\| b', 'a | b');
+    const problems = checkUnitsBlock(memRepo({ ...files, 'docs/ops.md': raw }), 'docs/ops.md');
+    expect(problems.some((p) => p.text.includes('fleet-feishu.service'))).toBe(true);
+  });
+
   it('故意失败：两个目录都列不出来、或下面一个单元文件都没有，抛错，不当成空表', () => {
     expect(() => readUnitEntries(memRepo({ 'README.md': 'x' }))).toThrow('列不出');
     expect(() => readUnitEntries(memRepo({ 'deploy/france/': '', 'deploy/hk/': '' }))).toThrow(
