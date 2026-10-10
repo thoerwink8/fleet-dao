@@ -171,8 +171,10 @@ function dispatch(
  */
 function probeNote(route: RouteFacts, now: number): string | null {
   // 在线的一定有时刻（validate.ts 已拦）；派得出去的都在线。
-  // 退避、或结论写了隔 60 分钟再探：过期线按那一档加两轮，不把故意放慢写成探针停了。没写原文的仍按执行方式。
+  // 退避、或结论写了隔 30 分钟再探：过期线按那一档加两轮，不把故意放慢写成探针停了。没写原文的仍按执行方式。
   if (route.probedAt === null) return null;
+  // 按需探测的路由没有「在线」结论可过期：不主动探，派前探一次（#1635）
+  if (route.probeState === 'on_demand') return '按需，派前探一次';
   const age = now - Date.parse(route.probedAt);
   const limit = route.probeDetail
     ? (probeCadenceMinutes(route.hostId, route.probeDetail) +

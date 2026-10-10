@@ -97,7 +97,7 @@ async function probeOne(
     return { routeId: target.routeId, outcome: 'unsettled', detail: c.detail, at: c.at.toISOString() };
   }
   // 和定时那一轮同一份写法：结论里除了这三样，余下的字段原样交给 save（探针结论以后多了字段，这里不用跟着改）
-  const { target: _t, kept: _k, unsettled: _u, backingOff: _b, ...rest } = c;
+  const { target: _t, kept: _k, unsettled: _u, backingOff: _b, onDemand: _o, ...rest } = c;
   try {
     const saved = await probe.save({ routeId: target.routeId, ...rest });
     if (saved === 'route_not_found') {

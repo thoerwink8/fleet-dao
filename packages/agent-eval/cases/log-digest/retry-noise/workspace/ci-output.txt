@@ -1,0 +1,38 @@
+2026-10-08T05:40:11.002Z ##[group]Run pnpm test:units
+2026-10-08T05:40:11.020Z > vitest run --retry=1
+2026-10-08T05:40:12.300Z  RUN  v5.0.1 /home/runner/work/demo/demo
+2026-10-08T05:40:12.900Z  ✓ packages/store/test/keys.test.ts (4 tests) 6ms
+2026-10-08T05:40:12.950Z  ✓ packages/store/test/ttl.test.ts (3 tests) 9ms
+2026-10-08T05:40:13.010Z  stderr | packages/api/test/health.test.ts > health > answers within 50ms
+2026-10-08T05:40:13.011Z  (node:2141) Warning: Closing file descriptor 21 on garbage collection
+2026-10-08T05:40:13.040Z  ✓ packages/api/test/health.test.ts (2 tests | 1 retried) 61ms
+2026-10-08T05:40:13.041Z    ↻ health > answers within 50ms (retry x1) passed on retry
+2026-10-08T05:40:13.100Z  ✓ packages/api/test/routes.test.ts (9 tests) 33ms
+2026-10-08T05:40:13.180Z  ✓ packages/web/test/format.test.ts (7 tests) 12ms
+2026-10-08T05:40:13.260Z  ❯ packages/web/test/cache.test.ts (5 tests | 1 failed) 40ms
+2026-10-08T05:40:13.261Z    ✗ cache > evicts the least recently used entry
+2026-10-08T05:40:13.270Z  ✓ packages/web/test/theme.test.ts (3 tests) 4ms
+2026-10-08T05:40:13.330Z  ❯ packages/web/test/export.test.ts (6 tests | 1 failed) 52ms
+2026-10-08T05:40:13.331Z    ✗ export > writes the header row first
+2026-10-08T05:40:13.400Z  ✓ packages/engine/test/queue.test.ts (12 tests) 88ms
+2026-10-08T05:40:13.470Z  ✓ packages/engine/test/lease.test.ts (8 tests) 71ms
+2026-10-08T05:40:13.480Z  lint warning: packages/web/src/legacy.ts:12 unused variable 'tmp' (not part of this job)
+2026-10-08T05:40:13.600Z
+2026-10-08T05:40:13.600Z  FAIL  packages/web/test/cache.test.ts > cache > evicts the least recently used entry
+2026-10-08T05:40:13.601Z  AssertionError: expected 'b' to be 'a' // Object.is equality
+2026-10-08T05:40:13.602Z   ❯ packages/web/test/cache.test.ts:33:20
+2026-10-08T05:40:13.603Z       32|     cache.set('c', 3);
+2026-10-08T05:40:13.603Z       33|     expect(cache.oldest()).toBe('a');
+2026-10-08T05:40:13.603Z         |                            ^
+2026-10-08T05:40:13.603Z
+2026-10-08T05:40:13.610Z  FAIL  packages/web/test/export.test.ts > export > writes the header row first
+2026-10-08T05:40:13.611Z  AssertionError: expected 'id,name\r\n1,x' to be 'id,name\n1,x' // Object.is equality
+2026-10-08T05:40:13.612Z   ❯ packages/web/test/export.test.ts:19:24
+2026-10-08T05:40:13.612Z       18|     const csv = toCsv([{ id: 1, name: 'x' }]);
+2026-10-08T05:40:13.612Z       19|     expect(csv).toBe('id,name\n1,x');
+2026-10-08T05:40:13.612Z         |                        ^
+2026-10-08T05:40:13.612Z
+2026-10-08T05:40:13.700Z  Test Files  2 failed | 6 passed (8)
+2026-10-08T05:40:13.700Z       Tests  2 failed | 58 passed (60)
+2026-10-08T05:40:13.701Z    Duration  1.70s
+2026-10-08T05:40:13.750Z ##[error]Process completed with exit code 1.

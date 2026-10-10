@@ -1,0 +1,69 @@
+2026-10-08T03:12:01.114Z ##[group]Run pnpm --filter @demo/scheduler test
+2026-10-08T03:12:01.130Z > @demo/scheduler@0.0.0 test /home/runner/work/demo/demo/packages/scheduler
+2026-10-08T03:12:01.131Z > vitest run
+2026-10-08T03:12:02.402Z
+2026-10-08T03:12:02.402Z  RUN  v5.0.1 /home/runner/work/demo/demo/packages/scheduler
+2026-10-08T03:12:02.911Z
+2026-10-08T03:12:03.420Z  ✓ test/window.test.ts > window > accepts a same-day range (3ms)
+2026-10-08T03:12:03.421Z  ✓ test/window.test.ts > window > accepts a range crossing midnight (1ms)
+2026-10-08T03:12:03.422Z  ✓ test/window.test.ts > window > rounds to the minute (1ms)
+2026-10-08T03:12:03.423Z  ✓ test/cooldown.test.ts > cooldown > starts at zero (1ms)
+2026-10-08T03:12:03.424Z  ✓ test/cooldown.test.ts > cooldown > grows by the step (2ms)
+2026-10-08T03:12:03.425Z  ✓ test/cooldown.test.ts > cooldown > caps at the maximum (1ms)
+2026-10-08T03:12:03.490Z  stderr | test/schedule.test.ts > schedule > logs skipped orgs
+2026-10-08T03:12:03.490Z  [scheduler] skipping org-b: cooldown until 2026-10-08T03:30:00.000Z
+2026-10-08T03:12:03.512Z  ✓ test/schedule.test.ts > schedule > picks the oldest idle org first (4ms)
+2026-10-08T03:12:03.513Z  ✓ test/schedule.test.ts > schedule > logs skipped orgs (2ms)
+2026-10-08T03:12:03.540Z  ✗ test/schedule.test.ts > schedule > skips orgs on cooldown
+2026-10-08T03:12:03.541Z  ✓ test/schedule.test.ts > schedule > returns nothing for an empty pool (1ms)
+2026-10-08T03:12:03.601Z  ✓ test/quota.test.ts > quota > reads the remaining count (2ms)
+2026-10-08T03:12:03.602Z  ✓ test/quota.test.ts > quota > treats missing as unknown (1ms)
+2026-10-08T03:12:03.640Z  ✗ test/quota.test.ts > quota > clamps negative remaining to zero
+2026-10-08T03:12:03.641Z  ✓ test/quota.test.ts > quota > formats the reset time (3ms)
+2026-10-08T03:12:03.690Z  ✓ test/parse.test.ts > parseWindow > parses HH:MM-HH:MM (1ms)
+2026-10-08T03:12:03.691Z  ✓ test/parse.test.ts > parseWindow > trims spaces (1ms)
+2026-10-08T03:12:03.692Z  ✗ test/parse.test.ts > parseWindow > rejects reversed range
+2026-10-08T03:12:03.693Z  ✓ test/parse.test.ts > parseWindow > rejects garbage (1ms)
+2026-10-08T03:12:03.750Z
+2026-10-08T03:12:03.750Z  FAIL  test/schedule.test.ts > schedule > skips orgs on cooldown
+2026-10-08T03:12:03.751Z  AssertionError: expected [ 'org-b' ] to deeply equal []
+2026-10-08T03:12:03.751Z
+2026-10-08T03:12:03.751Z  - Expected
+2026-10-08T03:12:03.751Z  + Received
+2026-10-08T03:12:03.751Z
+2026-10-08T03:12:03.751Z  - []
+2026-10-08T03:12:03.751Z  + [
+2026-10-08T03:12:03.751Z  +   "org-b",
+2026-10-08T03:12:03.751Z  + ]
+2026-10-08T03:12:03.751Z
+2026-10-08T03:12:03.752Z   ❯ test/schedule.test.ts:41:22
+2026-10-08T03:12:03.752Z       39|     const pool = [org('org-b', { cooldownUntil: later })];
+2026-10-08T03:12:03.752Z       40|     const picked = pickOrgs(pool, now);
+2026-10-08T03:12:03.752Z       41|     expect(picked).toEqual([]);
+2026-10-08T03:12:03.752Z         |                      ^
+2026-10-08T03:12:03.752Z       42|   });
+2026-10-08T03:12:03.752Z
+2026-10-08T03:12:03.760Z  FAIL  test/quota.test.ts > quota > clamps negative remaining to zero
+2026-10-08T03:12:03.760Z  AssertionError: expected -3 to be +0 // Object.is equality
+2026-10-08T03:12:03.761Z   ❯ test/quota.test.ts:27:35
+2026-10-08T03:12:03.761Z       25|   it('clamps negative remaining to zero', () => {
+2026-10-08T03:12:03.761Z       26|     const q = readQuota({ remaining: -3, limit: 10 });
+2026-10-08T03:12:03.761Z       27|     expect(q.remaining).toBe(0);
+2026-10-08T03:12:03.761Z         |                         ^
+2026-10-08T03:12:03.761Z       28|   });
+2026-10-08T03:12:03.761Z
+2026-10-08T03:12:03.770Z  FAIL  test/parse.test.ts > parseWindow > rejects reversed range
+2026-10-08T03:12:03.770Z  AssertionError: expected function to throw an error, but it didn't
+2026-10-08T03:12:03.771Z   ❯ test/parse.test.ts:18:5
+2026-10-08T03:12:03.771Z       16|   it('rejects reversed range', () => {
+2026-10-08T03:12:03.771Z       17|     expect(() => parseWindow('22:00-06:00x')).toThrow();
+2026-10-08T03:12:03.771Z         |     ^
+2026-10-08T03:12:03.771Z       18|   });
+2026-10-08T03:12:03.771Z
+2026-10-08T03:12:03.800Z
+2026-10-08T03:12:03.800Z  Test Files  3 failed | 2 passed (5)
+2026-10-08T03:12:03.800Z       Tests  3 failed | 15 passed (18)
+2026-10-08T03:12:03.800Z    Start at  03:12:02
+2026-10-08T03:12:03.800Z    Duration  1.40s
+2026-10-08T03:12:03.850Z  ELIFECYCLE  Test failed. See above for more details.
+2026-10-08T03:12:03.860Z ##[error]Process completed with exit code 1.

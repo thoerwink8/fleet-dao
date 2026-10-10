@@ -51,6 +51,9 @@
     },
     {
       "path": "packages/mirasim-reclaude"
+    },
+    {
+      "path": "packages/agent-eval"
     }
   ]
 }

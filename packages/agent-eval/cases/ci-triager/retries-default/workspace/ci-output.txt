@@ -1,0 +1,25 @@
+##[group]Run pnpm test
+> demo@0.0.0 test
+> vitest run
+
+ RUN  v5.0.1 /home/runner/work/demo/demo
+
+ ✓ test/config.test.ts (3 tests) 5ms
+ ✓ test/backoff.test.ts (4 tests) 6ms
+ ❯ test/retry.test.ts (3 tests | 1 failed) 22ms
+   ✓ retry > gives up after the last attempt
+   ✗ retry > makes retries + 1 attempts with the default config
+   ✓ retry > stops early on success
+
+ FAIL  test/retry.test.ts > retry > makes retries + 1 attempts with the default config
+ AssertionError: expected 3 to be 4 // Object.is equality
+  ❯ test/retry.test.ts:18:24
+      16|     const calls = await runAlwaysFailing(loadConfig());
+      17|     // 默认 3 次重试，加首次一共 4 次
+      18|     expect(calls).toBe(4);
+        |                        ^
+      19|   });
+
+ Test Files  1 failed | 2 passed (3)
+      Tests  1 failed | 9 passed (10)
+##[error]Process completed with exit code 1.

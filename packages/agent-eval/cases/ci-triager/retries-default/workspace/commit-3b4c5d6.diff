@@ -1,0 +1,18 @@
+commit 3b4c5d6
+Author: dev <dev@example.invalid>
+Date:   Wed Oct 8 06:10:02 2026 +0000
+
+    test: 整理 retry 测试的描述和变量名
+
+diff --git a/test/retry.test.ts b/test/retry.test.ts
+--- a/test/retry.test.ts
++++ b/test/retry.test.ts
+@@ -12,8 +12,8 @@ describe('retry', () => {
+-  it('retries with the default config', async () => {
+-    const n = await runAlwaysFailing(loadConfig());
++  it('makes retries + 1 attempts with the default config', async () => {
++    const calls = await runAlwaysFailing(loadConfig());
+     // 默认 3 次重试，加首次一共 4 次
+-    expect(n).toBe(4);
++    expect(calls).toBe(4);
+   });

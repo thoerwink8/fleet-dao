@@ -535,6 +535,21 @@ describe('探针结论过期：照上一次的结论派，理由里写明', () =
     );
   });
 
+  it('按需探测的路由：派得出去，理由写「按需，派前探一次」，不写成探针停了', () => {
+    const r = chooseRoute(
+      input([
+        route('a', {
+          probedAt: at(-30),
+          probeState: 'on_demand',
+          probeDetail: '不主动探，要派给它时先探一次。还没真探过',
+        }),
+      ]),
+    );
+    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'a' });
+    expect(r.kind === 'dispatch' && r.why).toContain('按需，派前探一次');
+    expect(r.kind === 'dispatch' && r.why).not.toContain('探针可能停了');
+  });
+
   it('过期线和驾驶舱同一条：整 45 分钟不算过期，多 1 分钟就算', () => {
     const edge = chooseRoute(input([route('a', { probedAt: minutesAgo(ROUTE_PROBE_STALE_MINUTES) })]));
     expect(edge.kind === 'dispatch' && edge.why).not.toContain('探针');
