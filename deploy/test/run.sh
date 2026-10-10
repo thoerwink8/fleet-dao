@@ -93,24 +93,33 @@ if ((shard_i)); then
   if ((shard_i > shard_n)); then usage_error "--shard 第 $shard_i 台，可是只有 $shard_n 台"; fi
 fi
 
-# 端口表：脚本里定的每个端口号都要出现在 docs/ops.md 里（改了端口忘了改文档，这里会红）
+# 端口表：脚本里定的每个端口号都要出现在 ports 区块里（docs/ops.md，拆文件后也可能在 docs/ops/*.md；区块外出现不算）
 check_ports() {
-  local ports missing p
+  local ports missing p f block=""
   ports=$(grep -hoE '^[A-Z_]*PORT=[0-9]+' "$DEPLOY/france.sh" "$DEPLOY/hk.sh" | cut -d= -f2 | sort -u)
   if [[ -z "$ports" ]]; then
     echo "没跑成：脚本里一个端口都没读到"
     skipped=1
     return
   fi
+  for f in "$OPS" "$DEPLOY"/../docs/ops/*.md; do
+    [[ -f "$f" ]] || continue
+    block+=$(sed -n '/<!-- fleet:ports:start -->/,/<!-- fleet:ports:end -->/p' "$f")$'\n'
+  done
+  if [[ -z "${block//[$' \t\n']/}" ]]; then
+    echo "不通过：找不到端口表区块（docs/ops.md、docs/ops/*.md 里没有 fleet:ports:start 到 fleet:ports:end 之间的内容）"
+    fail=1
+    return
+  fi
   missing=""
   for p in $ports; do
-    if ! grep -qw -- "$p" "$OPS"; then missing+=" $p"; fi
+    if ! grep -qw -- "$p" <<<"$block"; then missing+=" $p"; fi
   done
   if [[ -n "$missing" ]]; then
     echo "不通过：docs/ops.md 的端口表里没有$missing"
     fail=1
   else
-    echo "端口表：$(wc -w <<<"$ports") 个端口都在 docs/ops.md 里"
+    echo "端口表：$(wc -w <<<"$ports") 个端口都在 ports 区块里"
   fi
 }
 

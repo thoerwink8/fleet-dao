@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run.sh --ops（CI 里只改了 docs/ops.md 时跑的那条路，ci-plan.ts 的 deploy=ops）：真跑了读 ops.md 的两块（端口表、place-file），
 # 不是空跑冒充通过。把 deploy/ 和 docs/ops.md 拷进临时目录，在拷贝上改 ops.md 再跑 --ops：
-# 原样的过、端口表删掉一个端口的红、放文件那一行删掉的红（没跑成）、参数认不出的退出 2；并且 --ops 不跑全套（没有语法那项）。
+# 原样的过、端口表删掉一个端口的红、ports 区块删掉的红、端口号只在区块外的红、放文件那一行删掉的红（没跑成）、参数认不出的退出 2；并且 --ops 不跑全套（没有语法那项）。
 # 用法：bash deploy/test/ops-only.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -56,6 +56,22 @@ echo "== 端口表删掉 $PORT：红"
 sed -E "s/(^|[^0-9])$PORT([^0-9]|$)/\1____\2/g" "$OPS" >"$TMP/ops-no-port.md"
 check "拷贝里真删掉了" "$(grep -cw -- "$PORT" "$TMP/ops-no-port.md" | tr -d ' ')" 0
 run_ops "$TMP/ops-no-port.md"
+check "退出码" "$RC" 1
+check "说了缺哪个端口" "$(grep -c "端口表里没有.* $PORT\b" "$OUT" | tr -d ' ')" 1
+
+echo "== ports 区块整段删掉：红（找不到端口表区块，不当成通过也不当成跳过）"
+sed '/<!-- fleet:ports:start -->/,/<!-- fleet:ports:end -->/d' "$OPS" >"$TMP/ops-no-block.md"
+check "拷贝里真没有区块标记" "$(grep -c 'fleet:ports:' "$TMP/ops-no-block.md" | tr -d ' ')" 0
+run_ops "$TMP/ops-no-block.md"
+check "退出码" "$RC" 1
+check "说了找不到端口表区块" "$(has '不通过：找不到端口表区块')" 1
+
+echo "== 端口号只在区块之外出现：红"
+sed -E '/<!-- fleet:ports:start -->/,/<!-- fleet:ports:end -->/ s/(^|[^0-9])'"$PORT"'([^0-9]|$)/\1____\2/g' "$OPS" >"$TMP/ops-port-outside.md"
+printf '\n区块外提到 %s 不算。\n' "$PORT" >>"$TMP/ops-port-outside.md"
+check "拷贝里区块内没有它" "$(sed -n '/<!-- fleet:ports:start -->/,/<!-- fleet:ports:end -->/p' "$TMP/ops-port-outside.md" | grep -cw -- "$PORT" | tr -d ' ')" 0
+check "拷贝里区块外有它" "$(sed '/<!-- fleet:ports:start -->/,/<!-- fleet:ports:end -->/d' "$TMP/ops-port-outside.md" | grep -cw -- "$PORT" | tr -d ' ' | grep -qv '^0$' && echo 有 || echo 没有)" 有
+run_ops "$TMP/ops-port-outside.md"
 check "退出码" "$RC" 1
 check "说了缺哪个端口" "$(grep -c "端口表里没有.* $PORT\b" "$OUT" | tr -d ' ')" 1
 
