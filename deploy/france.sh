@@ -938,7 +938,7 @@ readback() {
   readback_wireguard
   readback_firewall
   readback_sshd_hardening
-  readback_fail2ban_sshd
+  readback_fail2ban_sshd "$DEPLOY_DIR/france/fail2ban-sshd.jail" 10.99.0.0/24
   readback_session_ports
   readback_app_config
   readback_web_upload
@@ -1555,7 +1555,7 @@ main() {
     setup_sudoers
     setup_firewall
     setup_sshd_hardening
-    setup_fail2ban_sshd
+    setup_fail2ban_sshd "$DEPLOY_DIR/france/fail2ban-sshd.jail"
     setup_pnpm
     setup_session_pnpm
     setup_cursor_agent

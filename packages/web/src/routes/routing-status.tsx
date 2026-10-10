@@ -42,8 +42,10 @@ import {
   HistoryStrip,
 } from '../components/channel-status';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { PoolProblemLine, usePoolProblems } from '../components/pool-problem';
 import { ProbeLog } from '../components/probe-log';
 import { RefreshBar } from '../components/refresh-bar';
+import { KindChip } from '../components/routing-kinds';
 import { StatusChip, StatusDot } from '../components/status';
 import { Button } from '../components/ui/button';
 import {
@@ -56,6 +58,7 @@ import {
 import { formatAgo, formatClock, formatIn, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { poolIsHeld } from '../lib/pool-holds';
+import type { PoolProblem } from '../lib/pool-problems';
 import {
   activeFor,
   activityText,
@@ -147,6 +150,7 @@ export default function RoutingStatus() {
   const historyQuery = useProbeHistory();
   const probeNow = useRouteProbeNow();
   const holds = usePoolHolds();
+  const { problems: poolProblems, error: problemsError } = usePoolProblems();
   const now = useNow();
   const [params, setParams] = useSearchParams();
   const [manualPick, setManualPick] = useState<string | null>(null);
@@ -245,6 +249,14 @@ export default function RoutingStatus() {
     setParams({ p: channelId }, { replace: true, preventScrollReset: true });
   };
   const allRoutes = routing.data.routes;
+  // 每个渠道下有毛病的池（额度读不到、凭据过期）：渠道的路由是在这些池上跑的
+  const channelProblems = new Map<string, PoolProblem[]>();
+  for (const r of allRoutes) {
+    const p = poolProblems.get(r.poolId);
+    if (!p) continue;
+    const list = channelProblems.get(r.channelId) ?? [];
+    if (!list.includes(p)) channelProblems.set(r.channelId, [...list, p]);
+  }
   const probing = new Set(allRoutes.filter((r) => activeFor(requests, r.id)).map((r) => r.channelId));
   // 三样分开数：在线、故障（该修）、待查（还没探到、按量不探、检测中断）；已关、未被用途使用另数，不算坏
   const open = cards.filter((c) => c.state !== 'off' && c.state !== 'idle');
@@ -319,6 +331,7 @@ export default function RoutingStatus() {
                 cards={visible}
                 selected={picked ?? undefined}
                 probing={probing}
+                problems={channelProblems}
                 now={now}
                 onPick={pickChannel}
               />
@@ -355,6 +368,8 @@ export default function RoutingStatus() {
                 routes={allRoutes.filter((r) => r.channelId === current.channel.id)}
                 models={routing.data.models}
                 kinds={kinds}
+                problems={poolProblems}
+                problemsError={problemsError}
                 requests={requests}
                 blocked={blocked}
                 busy={probeNow.isPending}
@@ -470,6 +485,7 @@ function ProbeBanner({
 /** 路由行的先后：该修的在前，要看一眼的其次，在线的，最后是已关、没用的。同一档里探过的在前、再按编号。 */
 const KIND_ORDER: readonly RouteStateKind[] = [
   'fault',
+  'degraded',
   'blocked',
   'unknown',
   'unprobed',
@@ -486,6 +502,8 @@ function ChannelDetail({
   routes,
   models,
   kinds,
+  problems,
+  problemsError,
   requests,
   blocked,
   busy,
@@ -500,6 +518,9 @@ function ChannelDetail({
   routes: readonly Route[];
   models: readonly Model[];
   kinds: ReadonlyMap<string, RouteStateKind>;
+  /** 每个池的毛病（额度读不到、凭据过期）；提醒没读成时是空的，看 problemsError。 */
+  problems: ReadonlyMap<string, PoolProblem>;
+  problemsError: unknown;
   requests: readonly RouteProbeRequest[];
   blocked: string | undefined;
   busy: boolean;
@@ -532,6 +553,10 @@ function ChannelDetail({
       a.id.localeCompare(b.id),
   );
   const idle = sorted.filter((r) => !activeFor(requests, r.id)).map((r) => r.id);
+  const channelPools = [...new Set(routes.map((r) => r.poolId))].flatMap((id) => {
+    const p = problems.get(id);
+    return p ? [p] : [];
+  });
   return (
     <Panel
       title={
@@ -569,6 +594,20 @@ function ChannelDetail({
       ) : null}
       {card.fallback ? <p className="mb-3 text-sub text-ink-fail">{card.fallback}</p> : null}
       {card.failover ? <FailoverNote failover={card.failover} now={now} /> : null}
+      {channelPools.length > 0 ? (
+        <div
+          data-pool-problems
+          className="mb-3 space-y-1 rounded-md border border-st-stall/50 bg-st-stall/10 px-3 py-2"
+        >
+          {channelPools.map((p) => (
+            <PoolProblemLine key={p.poolId} problem={{ ...p }} now={now} />
+          ))}
+        </div>
+      ) : problemsError ? (
+        <p data-pool-problems="unreadable" className="mb-3 text-caption text-ink-stall">
+          账号池的毛病（额度读不到、凭据过期）没读成：{errorText(problemsError)}。这里没写不代表没有。
+        </p>
+      ) : null}
       <HistoryStrip
         channelId={card.channel.id}
         history={history}
@@ -596,6 +635,7 @@ function ChannelDetail({
               route={r}
               kind={kindOf(r)}
               model={models.find((m) => m.id === r.modelId)}
+              problem={problems.get(r.poolId)}
               requests={requests}
               blocked={blocked}
               busy={busy}
@@ -620,6 +660,7 @@ function RouteRow({
   route: r,
   kind,
   model,
+  problem,
   requests,
   blocked,
   busy,
@@ -633,6 +674,8 @@ function RouteRow({
   route: Route;
   kind: RouteStateKind;
   model: Model | undefined;
+  /** 这条路由的账号池有没有要人动手的毛病（额度读不到、凭据过期）。 */
+  problem: PoolProblem | undefined;
   requests: readonly RouteProbeRequest[];
   blocked: string | undefined;
   busy: boolean;
@@ -696,7 +739,7 @@ function RouteRow({
             {active.state === 'running' ? '探测中' : '排队中'}
           </span>
         ) : (
-          <StatusChip tone={routeStateTone[kind]} label={routeStateLabel[kind]} />
+          <KindChip kind={kind} />
         )}
         {kind === 'unused' && !active && (probe?.state === 'ok' || probe?.state === 'failed') ? (
           // 没用途在用的路由点立即探测（#1630）：灰的「未被用途使用」不变，结论在旁边写出来，不画红
@@ -717,6 +760,12 @@ function RouteRow({
       {notice && !active ? (
         <p data-probe-backoff className="px-3 pb-1.5 text-caption text-ink-stall">
           {notice}
+        </p>
+      ) : null}
+      {problem ? <PoolProblemLine problem={problem} className="px-3 pb-1.5" /> : null}
+      {kind === 'degraded' && probe?.detail && !open ? (
+        <p className="truncate px-3 pb-2 text-caption text-ink-doubt" title={probe.detail}>
+          {probe.detail}
         </p>
       ) : null}
       {failed && probe?.detail && !open ? (

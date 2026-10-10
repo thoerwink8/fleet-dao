@@ -30,6 +30,45 @@ const STATE_WORD: Record<GroomRequest['state'], string> = {
   expired: '作废了',
 };
 
+/** 长说明默认折叠时露在外面的一行摘要（原仓库一节常显长文的压缩版）。 */
+const GROOM_HELP_SUMMARY = '老单要整理过才能进队；同一时刻一次，每仓每天最多 3 次。';
+
+/**
+ * 点「展开」后才露的说明。正文是原 settings「仓库」一节 description 里铺满首屏的那段
+ * （「让 AI 接活」开着/关着与整理准入），从常显挪进这里，默认不占屏。
+ */
+const GROOM_HELP_DETAIL =
+  '「让 AI 接活」开着：引擎每 5 分钟自己按准入和排序挑单（老单要指挥官整理过），没单可挑会自动叫指挥官整理。关着：只有本机 fleet-api dispatch-issue 点名派。开单早于接活开关的老单要贴了「整理过」或「交给引擎」才进队。点下面按钮会记一条操作记录，引擎几秒内接手。';
+
+/** 「指挥官整理待办」的长说明：默认一行摘要 +「展开」，点开才铺全文。 */
+function GroomHelp() {
+  const [open, setOpen] = useState(false);
+  const bodyId = useId();
+  return (
+    <div className="mt-1.5 text-xs text-muted-foreground" data-testid="groom-help">
+      <div className="flex min-w-0 items-start gap-2">
+        <p className="min-w-0 flex-1 truncate" title={GROOM_HELP_SUMMARY}>
+          {GROOM_HELP_SUMMARY}
+        </p>
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => setOpen((v) => !v)}
+          className="shrink-0 underline-offset-2 hover:underline"
+        >
+          {open ? '收起' : '展开'}
+        </button>
+      </div>
+      {open ? (
+        <p id={bodyId} className="mt-1 break-words">
+          {GROOM_HELP_DETAIL}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function whenOf(row: GroomRequest): string {
   return row.finishedAt ?? row.startedAt ?? row.requestedAt;
 }
@@ -140,6 +179,7 @@ export function RepoGroomControl({
         ) : null}
         {busy ? <span className="text-xs font-medium text-ink-stall">整理中</span> : null}
       </div>
+      <GroomHelp />
 
       {query.isLoading ? <p className="mt-1 text-xs text-muted-foreground">在读…</p> : null}
       {query.error ? (

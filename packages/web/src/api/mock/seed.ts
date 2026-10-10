@@ -10,6 +10,7 @@ import type {
   SubtaskState,
   TaskState,
 } from '@fleet-dao/shared';
+import { onDemandDetail } from '@fleet-dao/shared';
 import type { AuditEntry, Notification, Setting } from '../types';
 import type { MJob, MLog, MockState, MSubtask, MTask, PlanTemplate } from './model';
 
@@ -1314,6 +1315,17 @@ export function createSeed(now: number): MockState {
       deliveries: delivered(-47),
     },
     {
+      // 引擎额度读取任务报的（#1748）：Grok 登录令牌过期，读不到额度。去重键和正文都是引擎真写的格式
+      id: 'n-9',
+      level: 'alert',
+      title: '额度读不到：supergrok',
+      body: 'supergrok（grok-billing）这一轮没读成：auth——Grok 的登录令牌已过期：读取器不自己续期（会把 CLI 手里的 refresh_token 轮换掉），等 grok 下次运行自己续，或手动跑一次 grok。这种要人动手（补凭据、重新登录、改配置），不会自己好。旧读数留着、没改；读不到的池选路按「额度没读成」排在后面。',
+      link: '/quota',
+      dedupeKey: 'quota-read:supergrok',
+      createdAt: at(-46),
+      deliveries: delivered(-46),
+    },
+    {
       id: 'n-8',
       level: 'daily',
       title: '昨日日报',
@@ -1682,6 +1694,24 @@ export function createSeed(now: number): MockState {
         },
       },
       {
+        // 降智检测没过（#1748）：真探判了疑似降智，之后不在用途前 2 位，结论改成按需探测，原文里还带着那次降智结论
+        id: 'r-cursor-hi',
+        channelId: 'ch-cursor',
+        poolId: 'cursor-pro',
+        modelId: 'cursor-auto',
+        hostId: 'cursor-agent',
+        alive: false,
+        probe: {
+          state: 'on_demand',
+          at: at(-4),
+          detail: onDemandDetail({
+            state: 'failed',
+            at: new Date(now - 60 * MIN),
+            detail: '疑似降智：题 17 乘 23 等于多少？只回数字。，应为 391，实答 381',
+          }),
+        },
+      },
+      {
         id: 'r-grok',
         channelId: 'ch-grok',
         poolId: 'supergrok',
@@ -1727,7 +1757,7 @@ export function createSeed(now: number): MockState {
       'gpt-5.6-luna': ['r-rl-gpt'],
       'kimi-k3': ['r-rl-kimi'],
       'deepseek-v4.1-flash': ['r-ds'],
-      'cursor-auto': ['r-cursor'],
+      'cursor-auto': ['r-cursor', 'r-cursor-hi'],
       'grok-4.7': ['r-grok'],
     },
     // 两条全局禁令写死在 shared/bans.ts；库里只放另外加的（这条是样例）。
@@ -1825,18 +1855,19 @@ export function createSeed(now: number): MockState {
         limit: 20,
         resetsAt: at(17 * 1440),
         reading: 'estimated',
-        readAt: at(-2),
+        readAt: at(-42),
       },
       {
         poolId: 'supergrok',
         window: '5h',
         label: '5h',
         unit: 'percent',
-        source: 'estimate',
-        utilization: 0.35,
+        // 令牌过期前最后一次实读的 98%（#1748）：现在读数已经过期，不能当现值
+        source: 'grok-billing',
+        utilization: 0.98,
         resetsAt: at(200),
-        reading: 'estimated',
-        readAt: at(-42),
+        reading: 'measured',
+        readAt: at(-130),
       },
       {
         poolId: 'supergrok',

@@ -672,6 +672,7 @@ function homeDataOf(data: HomeResponse): HomeData {
     }),
     health: data.health,
     flow: data.flow,
+    slots: data.slots,
   };
 }
 

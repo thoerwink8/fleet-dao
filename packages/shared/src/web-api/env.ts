@@ -71,8 +71,10 @@ export const EnvSessionsSchema = z.object({
 
 export const EnvPoolsSchema = z.object({
   count: z.number().int().min(0),
-  /** 正在跑的会话数合计（各池相加）。 */
+  /** 正在跑的会话数合计（各池相加，已开工的）。 */
   running: z.number().int().min(0),
+  /** 已选定还没开跑的名额合计（各池相加）。别的环境是老版本推来的快照没有这一项。 */
+  reserved: z.number().int().min(0).optional(),
   /** 一次都没读成额度的池数：没查成，不是「没用量」。 */
   unread: z.number().int().min(0),
   /** 读成过、但读数已过期的池数。 */

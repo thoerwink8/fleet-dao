@@ -20,6 +20,7 @@ import {
   nodeReports,
   notificationDeliveries,
   notifications,
+  openPoolRuns,
   pools,
   progressEvents,
   pullRequests,
@@ -486,6 +487,19 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       return [...(await readChannelStates(db)).values()]
         .sort((a, b) => a.channelId.localeCompare(b.channelId))
         .map(toChannelState);
+    },
+    async poolOccupancy() {
+      const byPool = new Map<string, { poolId: string; inFlight: number; reserved: number }>();
+      const inFlightByStage: Record<string, number> = {};
+      for (const r of await openPoolRuns(db, { now: now() })) {
+        const o = byPool.get(r.poolId) ?? { poolId: r.poolId, inFlight: 0, reserved: 0 };
+        if (r.startedAt !== null) {
+          o.inFlight += 1;
+          if (r.stage !== null) inFlightByStage[r.stage] = (inFlightByStage[r.stage] ?? 0) + 1;
+        } else o.reserved += 1;
+        byPool.set(r.poolId, o);
+      }
+      return { pools: [...byPool.values()], inFlightByStage };
     },
     async listPools() {
       return (await db.select().from(pools).orderBy(asc(pools.id))).map(toPool);

@@ -187,13 +187,24 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         return doc ? { content: doc.content } : null;
       },
       async runningTasks() {
-        let n = 0;
-        for await (const _ of client.workflow.list({
+        // 没结束的任务工作流里，任务行是 stalled 的（停下等人）不占名额（#1776）。行读不到照抛；没有行、仓不认识的算在干活。
+        const repoIds = new Map((await listIntakeRepos(w.db)).map((r) => [`${r.owner}/${r.name}`, r.id]));
+        let working = 0;
+        let stalled = 0;
+        for await (const wf of client.workflow.list({
           query: `WorkflowType = '${WORKFLOW_TYPES.task}' AND ExecutionStatus = 'Running'`,
         })) {
-          n += 1;
+          const m = /^task:([^/]+\/[^#]+)#(\d+)(?::r\d+)?$/.exec(wf.workflowId);
+          const repoId = m?.[1] === undefined ? undefined : repoIds.get(m[1]);
+          if (m?.[2] === undefined || repoId === undefined) {
+            working += 1;
+            continue;
+          }
+          const row = await taskStateByIssue(w.db, repoId, Number(m[2]));
+          if (row?.state === 'stalled') stalled += 1;
+          else working += 1;
         }
-        return n;
+        return { working, stalled };
       },
       failures: (repo, issueNumber) => taskFailureCount(w.db, repo.id, issueNumber),
       async startedSince(since) {

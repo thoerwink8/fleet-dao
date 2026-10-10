@@ -49,16 +49,29 @@ export function formatAvailability(passed: number, attempted: number): string {
 }
 
 /**
- * 渠道详情里「探测记录」那份列表：本渠道近 60 格，加上每条路由自己的最近一次（挤出 60 格的也补上），
+ * 渠道详情里「探测记录」那份列表：本渠道近 60 次真探，加上每条路由自己的最近一次（挤出 60 格的也补上）和没真探的记录，
  * 按 id 去重，从新到旧（时刻晚的在前；同一时刻 id 大的在前）。
  */
 export function probeLogRows(
   cells: readonly ProbeHistoryCell[],
   latestByRoute: readonly ProbeHistoryCell[],
   channelId: string,
+  skipped: readonly ProbeHistoryCell[] = [],
 ): ProbeHistoryCell[] {
   const byId = new Map<number, ProbeHistoryCell>();
+  for (const cell of skipped) byId.set(cell.id, cell);
   for (const cell of cells) byId.set(cell.id, cell);
   for (const cell of latestByRoute) if (cell.channelId === channelId) byId.set(cell.id, cell);
   return [...byId.values()].sort((a, b) => Date.parse(b.probedAt) - Date.parse(a.probedAt) || b.id - a.id);
+}
+
+/** 探测记录分两堆（#1748）：真探的（通过、不通、疑似降智）摆在上面，没真探的（没探、按需）折起来，不把真探埋在下面。 */
+export function splitProbeRows(rows: readonly ProbeHistoryCell[]): {
+  real: ProbeHistoryCell[];
+  skipped: ProbeHistoryCell[];
+} {
+  return {
+    real: rows.filter((c) => c.result !== 'not_probed'),
+    skipped: rows.filter((c) => c.result === 'not_probed'),
+  };
 }

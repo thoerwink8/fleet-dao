@@ -9,3 +9,5 @@ maxretry = 3
 findtime = 10m
 bantime = 1h
 bantime.increment = true
+# 隧道网段不封（#1784）：香港那头同样放过 10.99.0.0/24（deploy/hk/fail2ban-sshd.jail），隧道里几次失败登录不该把发版链封死。
+ignoreip = 127.0.0.1/8 ::1 10.99.0.0/24

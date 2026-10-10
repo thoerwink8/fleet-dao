@@ -80,6 +80,22 @@ export function isOnDemandDetail(detail: string | null | undefined): boolean {
   return !!detail && detail.includes(ROUTE_PROBE_ON_DEMAND_MARK);
 }
 
+/** 降智检测没过的原文起头那一句（引擎 real/route-probe.ts 的 probeVerdict 写的）。 */
+export const ROUTE_PROBE_DEGRADED_MARK = '疑似降智';
+
+/**
+ * 这份探针原文说的是「疑似降智」（降智题答错、已按不在线处理）吗（#1748）。
+ * 两种写法都认：直接是不通的结论（原文以「疑似降智」起头）；或按需探测接手后，原文里「上一次真探：不通，时刻（疑似降智……」。
+ * 上一次真探是通的、或只是原文别处提到这四个字，都不算。
+ */
+export function isDegradedDetail(detail: string | null | undefined): boolean {
+  if (!detail) return false;
+  const text = detail.trim();
+  if (text.startsWith(ROUTE_PROBE_DEGRADED_MARK)) return true;
+  if (!text.includes(ROUTE_PROBE_ON_DEMAND_MARK)) return false;
+  return new RegExp(`上一次真探：不通，[^（]*（${ROUTE_PROBE_DEGRADED_MARK}`).test(text);
+}
+
 /** 北京时间的「MM-DD HH:MM」；时间无效就抛，不编一个。 */
 function shanghaiStamp(at: Date): string {
   const t = at.getTime();
