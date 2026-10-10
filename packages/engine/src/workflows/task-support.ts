@@ -319,10 +319,20 @@ export const ALERT_FILING_PR_NOTES = [
   'PR 说明 #1230：2026-10-07 fleet-dao-engine 自动合并耗时表，没有合并队列幂等账。这条是 reconcile:pr（缺记录、对账不撤），还开着就立案；同号的 reconcile:ledger 条件已不成立，核对在立案前撤掉。',
 ] as const;
 
-/** 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，其余单子仍是原来两句。 */
+/**
+ * #1733 的 PR 说明。正文只收 taskPrDid，会话最后一句和代码注释都进不去。
+ * 验收要写清：别的会话丢话选不列；四条新用例各自改前红、改后绿怎么验的。
+ */
+export const FOUNDERS_INBOX_PR_NOTES = [
+  'PR 说明：取舍——别的会话丢的话不进「先答这些」，也不另起一行（避免误答）；只列本会话 sessionId 的丢失话。',
+  'PR 说明：验法——四条新用例各在父提交 hooks 下改前红、本分支 hooks 下改后绿：①别的会话丢话不进先答 ②21:17 短句加 21:27 带下文重发不报 ③11:47 丢、15:01 同句收到不报 ④本会话真丢仍报。命令：npx vitest run agents/test/session-start.test.ts -t 「别的会话丢的话|21:17|11:47|故意造出的失败」。',
+] as const;
+
+/** 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，#1733 多写取舍和验法，其余单子仍是原来两句。 */
 export function taskPrDid(issueNumber: number, round: number, fileCount: number): string[] {
   const did = [`按 #${issueNumber} 的要求动手（第 ${round} 轮）`, `改了 ${fileCount} 个文件`];
   if (issueNumber === 1303) did.push(CONFLICT_HANDOFF_CAUSE);
   if (issueNumber === 1406) did.push(...ALERT_FILING_PR_NOTES);
+  if (issueNumber === 1733) did.push(...FOUNDERS_INBOX_PR_NOTES);
   return did;
 }

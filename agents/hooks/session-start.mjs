@@ -551,13 +551,15 @@ export function recentPrompts({ home, now = Date.now(), dir = null, sessionId = 
   }
   const lines = [];
   // 发了的账和收到的账对一遍：发了、没收到的就是丢在 Mirasim「引导」里的那种（founder-inbox.mjs 开头）
+  // 「先答这些」只列发给本会话的（#1733：别的会话丢的不进这一行；取舍：也不另起一行，避免误答）
   if (!sent.absent) {
     for (const p of sent.problems) lines.push(`创始人在 Mirasim 里发的话没读全：${p}；有没有丢的核不了。`);
     const { lost } = reconcile(sent.entries, received);
-    if (lost.length > 0) {
-      const shown = packNewestFirst(lost);
+    const mine = sessionId ? lost.filter((e) => e.sessionId === sessionId) : [];
+    if (mine.length > 0) {
+      const shown = packNewestFirst(mine);
       lines.push(
-        `创始人发了、但 Claude Code 没收到的话（Mirasim 的「引导」在那一轮被打断或出错时丢了，他以为你看到了；共 ${lost.length} 条${shown.omitted}）：${shown.items.join(' ')} 先答这些，答完再接着干。`,
+        `创始人发了、但 Claude Code 没收到的话（Mirasim 的「引导」在那一轮被打断或出错时丢了，他以为你看到了；共 ${mine.length} 条${shown.omitted}）：${shown.items.join(' ')} 先答这些，答完再接着干。`,
       );
     }
   }
