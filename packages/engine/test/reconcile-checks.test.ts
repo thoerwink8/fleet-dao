@@ -12,9 +12,11 @@ import {
   LEDGER_GRACE_MS,
   ledgerAlertKey,
   MERGED_PR_LOOKBACK_MS,
+  prAlertKey,
   QUOTA_ALERT_PREFIX,
   quotaAlertKey,
   type ReconcileCheckDeps,
+  retireHistoricalFactAlerts,
   retireWorkflowAlerts,
   WORKFLOW_ALERT_PREFIX,
 } from '../src/jobs/reconcile-checks.ts';
@@ -62,6 +64,7 @@ function world(
     ledgers?: ReconcileCheckDeps['ledgers'];
     quotaPools?: ReconcileCheckDeps['quotaPools'];
     quotaNotRead?: ReconcileCheckDeps['quotaNotRead'];
+    prMergedAt?: ReconcileCheckDeps['prMergedAt'];
   } = {},
 ): World {
   const raised: Raised[] = [];
@@ -73,6 +76,7 @@ function world(
     repos: over.reposFn ?? (async () => over.repos ?? []),
     auditMergedPrs: over.audit ?? (async () => audit([])),
     quotaPools: over.quotaPools ?? (async () => []),
+    ...(over.prMergedAt ? { prMergedAt: over.prMergedAt } : {}),
     ...(over.quotaNotRead ? { quotaNotRead: over.quotaNotRead } : {}),
     async ledgers(input) {
       ledgerCalls.push(input);
@@ -494,6 +498,87 @@ function quotaPool(over: Partial<QuotaTablePool> = {}): QuotaTablePool {
     ...over,
   } as QuotaTablePool;
 }
+
+describe('历史事实类提醒合并超过 7 天自动收（#1645）', () => {
+  const daysAgo = (d: number) => new Date(NOW.getTime() - d * 24 * 60 * 60_000);
+  const aged = (key: string) => openAlert(key, { createdAt: daysAgo(30) });
+
+  it('合并 8 天的 reconcile:pr: 提醒被撤，理由写历史事实', async () => {
+    const old = aged(prAlertKey('acme', 'widgets', 389));
+    const w = world({ open: [old], prMergedAt: async () => daysAgo(8) });
+    const part = await retireHistoricalFactAlerts(w.deps);
+    expect(part).toMatchObject({ scanned: 1, found: 1, unchecked: [] });
+    expect(w.resolved).toHaveLength(1);
+    expect(w.resolved[0]?.why).toContain('历史事实');
+    expect(old.resolvedAt).not.toBeNull();
+  });
+
+  it('合并 2 天的不撤', async () => {
+    const recent = aged(prAlertKey('acme', 'widgets', 5));
+    const w = world({ open: [recent], prMergedAt: async () => daysAgo(2) });
+    const part = await retireHistoricalFactAlerts(w.deps);
+    expect(part).toMatchObject({ scanned: 1, found: 0, unchecked: [] });
+    expect(w.resolved).toEqual([]);
+  });
+
+  it('【故意造出的失败】读合并时刻抛错：不撤，unchecked 有一条', async () => {
+    const old = aged(prAlertKey('acme', 'widgets', 389));
+    const w = world({
+      open: [old],
+      prMergedAt: async () => {
+        throw new Error('GitHub 连不上');
+      },
+    });
+    const part = await retireHistoricalFactAlerts(w.deps);
+    expect(part.found).toBe(0);
+    expect(part.unchecked).toHaveLength(1);
+    expect(part.unchecked[0]).toContain('GitHub 连不上');
+    expect(old.resolvedAt).toBeNull();
+  });
+
+  it('【故意造出的失败】列提醒失败：failed 写明原因', async () => {
+    const w = world({
+      listOpen: async () => {
+        throw new Error('库连不上');
+      },
+    });
+    const part = await retireHistoricalFactAlerts(w.deps);
+    expect(part.failed).toContain('库连不上');
+  });
+
+  it('合并 8 天的 reconcile:ledger: 提醒在 checkLedgers 里不再复查、不再重新报', async () => {
+    const key = ledgerAlertKey('acme', 'widgets', 389);
+    const old = aged(key);
+    const w = world({
+      open: [old],
+      prMergedAt: async () => daysAgo(8),
+      ledgers: async (input) =>
+        input.prs.length === 0
+          ? []
+          : [
+              {
+                owner: 'acme',
+                name: 'widgets',
+                prNumber: 389,
+                prUpdatedAt: daysAgo(8),
+                headRef: 'fleet/160-abc',
+                taskId: TASK,
+                issueNumber: 160,
+                taskState: 'failed',
+                sessions: [],
+              },
+            ],
+    });
+    const part = await checkLedgers(w.deps);
+    expect(w.ledgerCalls[0]?.prs).toEqual([]);
+    expect(w.raised).toEqual([]);
+    expect(w.resolved).toEqual([]);
+    expect(part).toMatchObject({ found: 0, unchecked: [] });
+    // 交给历史事实那一步撤
+    await retireHistoricalFactAlerts(w.deps);
+    expect(old.resolvedAt).not.toBeNull();
+  });
+});
 
 describe('额度读数新不新鲜（checkQuotaFreshness，#76）', () => {
   it('都读新了：不报，扫了几个池照实记', async () => {

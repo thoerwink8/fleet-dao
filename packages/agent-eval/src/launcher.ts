@@ -55,12 +55,26 @@ const COMMON_ARGS = [
   'dontAsk',
 ];
 
-/** 一道题里被测会话的参数：定义的工具（去掉 mcp__）、定义的正文当附加系统提示。提示词走 stdin，不在这里。 */
-export function buildSessionArgs(def: AgentDefinition, modelId: string): string[] {
+/** `claude --effort` 认的几档（2.1.292 的 --help）。 */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+/** 被测会话实际用的 effort：命令行 --effort 给了用它，没给用定义的，都没有是 null（不传，用 claude 的默认）。 */
+export function effortOf(def: AgentDefinition, override?: string): string | null {
+  return override ?? def.effort ?? null;
+}
+
+/**
+ * 一道题里被测会话的参数：定义的工具（去掉 mcp__）、定义的正文当附加系统提示、定义的 effort。提示词走 stdin，不在这里。
+ * effort 要带：子代理真跑时按定义的 effort，先前没带，探出来的是 claude 默认档的本事；换档之前先试 effort 也靠它（#1641）。
+ */
+export function buildSessionArgs(def: AgentDefinition, modelId: string, effortOverride?: string): string[] {
+  const effort = effortOf(def, effortOverride);
   return [
     '-p',
     '--model',
     modelId,
+    ...(effort === null ? [] : ['--effort', effort]),
     ...COMMON_ARGS,
     '--allowedTools',
     allowedToolsOf(def).join(','),

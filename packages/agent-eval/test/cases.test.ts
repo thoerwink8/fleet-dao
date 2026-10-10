@@ -154,6 +154,17 @@ describe('log-digest', () => {
     const invented = [...three, 'AssertionError: expected 5 to be 6'];
     expect((await judge('log-digest/three-failures', invented.join('\n'))).reason).toContain('不在原文里');
   });
+  it('证据行用反引号括起来、后面带出处（Haiku 2026-10-10 实答写法）：过；括起来的是编的照样不过', async () => {
+    const cited = [
+      "- schedule > skips orgs on cooldown：`AssertionError: expected [ 'org-b' ] to deeply equal []`（ci-output.txt:29）",
+      '- quota > clamps negative remaining to zero：`AssertionError: expected -3 to be +0 // Object.is equality`（ci-output.txt:47）',
+      "- parseWindow > rejects reversed range：`AssertionError: expected function to throw an error, but it didn't`（:56）",
+    ];
+    expect(await judge('log-digest/three-failures', cited.join('\n'))).toMatchObject({ pass: true });
+    const fake = cited.map((l) => l.replace('expected -3 to be +0', 'expected -3 to be 0'));
+    const v = await judge('log-digest/three-failures', fake.join('\n'));
+    expect(v.pass).toBe(false);
+  });
   const two = [
     "- evicts the least recently used entry — AssertionError: expected 'b' to be 'a' // Object.is equality",
     "- writes the header row first — AssertionError: expected 'id,name\\r\\n1,x' to be 'id,name\\n1,x' // Object.is equality",
@@ -536,6 +547,15 @@ describe('debugger（先看根因再看 diff 大小）', () => {
     expect(big.pass).toBe(false);
     expect(big.reason).toContain('超过上限');
   });
+  it('week-start-tz：根因修法整份写回成 CRLF（Windows 上 Python 文本模式那样）照样过，换行符不算改动', async () => {
+    const id = 'debugger/week-start-tz';
+    const crlf = await judge(id, '根因', (d, cd) => {
+      copyHiddenDir('fix')(d, cd);
+      edit(d, 'src/week.ts', (s) => s.replace(/\r?\n/g, '\r\n'));
+      edit(d, 'test/week.test.ts', (s) => s.replace(/\r?\n/g, '\r\n'));
+    });
+    expect(crlf).toMatchObject({ pass: true });
+  });
   it('merge-config：改 mergeConfig 过；只在 loadConfig 里克隆（治症状）不过', async () => {
     const id = 'debugger/merge-config';
     expect((await judge(id, '根因', copyHiddenDir('fix'))).pass).toBe(true);
@@ -587,5 +607,62 @@ describe('standard-editor', () => {
       edit(d, 'rules/pr-rules.md', (s) => s.replace('超过 2 轮没合进去的 PR', '超过 5 次没合进去的 PR'));
     });
     expect(onlyOne.pass).toBe(false);
+  });
+  it('测试里加「旧说法不在了」的反向断言（Sonnet、Opus 2026-10-10 的实答写法）：过', async () => {
+    const negated = await judge(id, '改了', (d) => {
+      fix(d);
+      edit(d, 'test/rules.test.ts', (s) =>
+        s.replace(
+          "assert.ok(rules.includes('一个 PR 最多 2 轮'));",
+          "assert.ok(rules.includes('一个 PR 最多 2 轮'));\n  assert.ok(!rules.includes('一个 PR 最多 3 轮'));",
+        ),
+      );
+    });
+    expect(negated).toMatchObject({ pass: true });
+    const noMatch = await judge(id, '改了', (d) => {
+      fix(d);
+      edit(
+        d,
+        'test/rules.test.ts',
+        (s) =>
+          `${s}\ntest('旧的 PR 轮数说法没有残留', () => {\n  assert.doesNotMatch(rules, /(?<![0-9])3 轮/);\n});\n`,
+      );
+    });
+    expect(noMatch).toMatchObject({ pass: true });
+  });
+  it('新加测试的标题说「3 轮已经没了」不算残留（Sonnet、Opus 2026-10-10 重跑的实答标题）：过', async () => {
+    for (const t of ['规矩里不再有 3 轮的旧说法', '旧的 3 轮说法已清干净', '旧的 3 轮说法已全部清掉']) {
+      const v = await judge(id, '改了', (d) => {
+        fix(d);
+        edit(
+          d,
+          'test/rules.test.ts',
+          (s) => `${s}\ntest('${t}', () => {\n  assert.ok(!rules.includes('最多 3 轮'));\n});\n`,
+        );
+      });
+      expect(v, t).toMatchObject({ pass: true });
+    }
+  });
+  it('标题还写着 3 轮；测试没钉住 2 轮（放回原来的规矩也过）：都不过', async () => {
+    const title = await judge(id, '改了', (d) => {
+      fix(d);
+      edit(d, 'test/rules.test.ts', (s) =>
+        s.replace("test('规矩写明一个 PR 最多 2 轮'", "test('规矩写明一个 PR 最多 3 轮'"),
+      );
+    });
+    expect(title.pass).toBe(false);
+    expect(title.reason).toContain('标题');
+    const loose = await judge(id, '改了', (d) => {
+      edit(d, 'rules/pr-rules.md', (s) => s.replaceAll('3 轮', '2 轮'));
+      edit(d, 'test/rules.test.ts', (s) =>
+        s
+          .replace("test('规矩写明一个 PR 最多 3 轮'", "test('规矩写明一个 PR 最多几轮'")
+          .replace("rules.includes('一个 PR 最多 3 轮')", "rules.includes('一个 PR 最多') /* 2 轮 */")
+          .replace("test('超过 3 轮按交接处理'", "test('超过上限按交接处理'")
+          .replace("rules.includes('超过 3 轮没合进去的 PR')", "rules.includes('没合进去的 PR')"),
+      );
+    });
+    expect(loose.pass).toBe(false);
+    expect(loose.reason).toContain('没钉住');
   });
 });
