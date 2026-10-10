@@ -29,6 +29,13 @@ if (!tokenFile || !ledgerDir || !agentsSource) {
   console.error('用法见文件头');
   process.exit(2);
 }
+// 端口从令牌文件名 local-<端口>.token 读，和引擎 discoverMirasimEndpoint（engine/src/real/index.ts）同一个认法。
+// 先前写死 4316：法国 fleet-agent-carpool 的服务在 4318，连不上，整次「没查成」（#1641，2026-10-10）。
+const port = Number(/local-(\d+)\.token$/.exec(tokenFile)?.[1]);
+if (!Number.isInteger(port)) {
+  console.error(`令牌文件名认不出端口：${tokenFile}（该是 <家>/.mirasim/run/local-<端口>.token）`);
+  process.exit(2);
+}
 
 type Verdict = '过' | '没过' | '没查成';
 const results: { name: string; verdict: Verdict; evidence: string }[] = [];
@@ -91,7 +98,7 @@ try {
     '最后把每个子代理的回话各一行列出，格式「<子代理名>: <回话或被挡的原话>」，共五行。',
   ].join('\n');
   const events: ProgressEvent[] = [];
-  const connect = mirasimConnector({ port: 4316, tokenFile });
+  const connect = mirasimConnector({ port, tokenFile });
   const runId = `e2e-subagents-${randomUUID().slice(0, 8)}`;
   const report = await runMirasim(
     {
