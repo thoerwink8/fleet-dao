@@ -52,11 +52,15 @@ function cell(rs: CaseResult[]): string {
 
 export function renderReport(
   results: readonly CaseResult[],
-  meta: { startedAt: string; models: readonly ModelKey[] },
+  meta: { startedAt: string; models: readonly ModelKey[]; effort?: string | null },
 ): string {
   const out: string[] = [];
   out.push('# 子代理能力探查报告', '');
-  out.push(`开始时间：${meta.startedAt}；模型：${meta.models.join('、')}；共 ${results.length} 条结果。`, '');
+  const effort = meta.effort ? `effort 一律 ${meta.effort}（命令行盖过定义）` : 'effort 照各定义';
+  out.push(
+    `开始时间：${meta.startedAt}；模型：${meta.models.join('、')}；${effort}；共 ${results.length} 条结果。`,
+    '',
+  );
   out.push(
     '格式：过 x / 跑 y 遍（题数 × 每题跑几遍，不含没跑成的）；均用时；均 token（输入含缓存，加输出）。没跑成的不算过也不算没过。',
     '',
@@ -88,7 +92,7 @@ export function renderReport(
   for (const r of results) {
     const mark = markOf(r);
     out.push(`<details><summary>${r.caseId} · ${r.model} · 第 ${r.attempt} 遍 · ${mark}</summary>`, '');
-    out.push(`- 子代理：${r.agent}；模型：${r.modelId}`);
+    out.push(`- 子代理：${r.agent}；模型：${r.modelId}；effort：${r.effort ?? '没给（claude 默认）'}`);
     if (r.streamFile) out.push(`- 原始会话流：${r.streamFile}`);
     for (const f of r.judgeStreamFiles) out.push(`- 裁判会话流：${f}`);
     out.push(`- 理由：${r.reason.replace(/\n/g, ' ')}`);

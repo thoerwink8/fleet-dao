@@ -206,6 +206,30 @@ describe('起会话的参数', () => {
     ]);
   });
 
+  it('定义写了 effort 就带 --effort（子代理真跑时按定义的档）；命令行给的盖过定义；都没有不带', () => {
+    const withEffort: AgentDefinition = { ...DEF, effort: 'medium' };
+    const a = buildSessionArgs(withEffort, 'claude-haiku-5-5');
+    expect(a.slice(0, 5)).toEqual(['-p', '--model', 'claude-haiku-5-5', '--effort', 'medium']);
+    expect(buildSessionArgs(withEffort, 'claude-haiku-5-5', 'high')).toContain('high');
+    expect(buildSessionArgs(withEffort, 'claude-haiku-5-5', 'high')).not.toContain('medium');
+    expect(buildSessionArgs(DEF, 'claude-haiku-5-5')).not.toContain('--effort');
+  });
+
+  it('结果里记下给会话的 effort', async () => {
+    const r = await runCase({ ...ALL_CASES[0], agent: 'fleet-demo' } as EvalCase, 'haiku', {
+      defs: new Map([['fleet-demo', { ...DEF, effort: 'medium' }]]),
+      command: 'reclaude',
+      prepare: () => ({ dir: tmpdir(), cleanup: () => {} }),
+      launch: async (req) => {
+        expect(req.args).toContain('--effort');
+        return { exitCode: 1, stdout: '', stderr: '不跑', timedOut: false, spawnError: '不跑' };
+      },
+      effort: 'low',
+    });
+    expect(r.effort).toBe('low');
+    expect(r.status).toBe('not-run');
+  });
+
   it('裁判会话固定 claude-sonnet-5-5，不给工具', () => {
     const a = buildJudgeArgs();
     expect(a.slice(0, 3)).toEqual(['-p', '--model', 'claude-sonnet-5-5']);
