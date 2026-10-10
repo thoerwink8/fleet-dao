@@ -21,7 +21,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { deployedAtFromHistory, RELEASES_DIR, readDeployLagInput } from '@fleet-dao/store';
 import type { Hono } from 'hono';
 import type { Deps } from './deps.ts';
-import { type FranceReleasePort, parseTrainState } from './france-release.ts';
+import { defaultPidAlive, type FranceReleasePort, parseTrainState } from './france-release.ts';
 import { reply } from './http.ts';
 import type { Store } from './ports.ts';
 import type { ReleaseRequestPort } from './release-request.ts';
@@ -319,7 +319,13 @@ async function readLast(
   } catch (e) {
     lastWhy = `读最近一次请求的结果失败：${errMessage(e)}`;
   }
-  const running = parsed?.ok === true && parsed.status === 'running';
+  // status=running 且记下了 pid、进程已死：不算在走（#1739）。没写 pid 的老记录仍按在走（不敢放行）。
+  const alive = franceRelease?.pidAlive ?? defaultPidAlive;
+  const staleDead =
+    parsed?.ok === true && parsed.status === 'running' && parsed.pid !== null && !alive(parsed.pid)
+      ? parsed
+      : null;
+  const running = parsed?.ok === true && parsed.status === 'running' && staleDead === null;
   const busyWhy = pending ? '上一份发布请求还没被法国接走' : running ? '已有发版在走' : trainWhy;
   const busy = pending || running || trainWhy !== null;
   if (pending) return { last: { ...NO_LAST, state: 'pending' }, busy, busyWhy };
@@ -329,6 +335,21 @@ async function readLast(
   ) {
     return {
       last: { state: 'refused', target: refused.sha, at: refused.at, why: refused.why, phase: null },
+      busy,
+      busyWhy,
+    };
+  }
+  if (staleDead !== null) {
+    return {
+      last: {
+        state: 'failed',
+        target: staleDead.target,
+        at: staleDead.updatedAt,
+        why:
+          staleDead.why ??
+          `发版驱动（pid ${staleDead.pid}）已经不在了，进度停在${staleDead.phase}；再点一次会接着走并按发版前状态恢复总开关`,
+        phase: staleDead.phase,
+      },
       busy,
       busyWhy,
     };

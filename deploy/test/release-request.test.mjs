@@ -520,6 +520,27 @@ test('上一回点发布停在「卡住」（会话没收完、引擎是我们�
   assert.equal(log.states.at(-1).before.master, true);
 });
 
+test('上一回进度还写 running、驱动进程已死、发版前开着（#1739）：再点一次带过来，发完开回，不当成「本来就关着」', async () => {
+  const dead = {
+    schema: 1,
+    status: 'running',
+    phase: 5,
+    pid: 777,
+    before: { master: true, repos: null, recordedAt: '2026-10-10T07:00:00.000Z' },
+    target: { kind: 'sha', value: 'b'.repeat(40) },
+  };
+  const { io, log, setMaster } = fakeIo({
+    readState: () => ({ ok: true, state: dead }),
+    pidAlive: () => false,
+  });
+  setMaster('off'); // 上一回关的，还关着；若不带 before，会记成「本来就关着」发完保持关
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(engineOffs(log).length, 0, '已经是关的，不再关');
+  assert.equal(engineOns(log).length, 1, '发完开回');
+  assert.equal(log.states.at(-1).before.master, true);
+  assert.ok(log.out.some((l) => l.includes('上一回停下时关的') || l.includes('总开关已开回')));
+});
+
 test('【故意造出的失败】上一回是做完了的（done）、这一回引擎发版前是关着：不带上一回的「开着」，发完保持关', async () => {
   const { io, log, setMaster } = fakeIo();
   io.readState = () => ({

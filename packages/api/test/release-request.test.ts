@@ -233,6 +233,30 @@ describe('POST /france/release：点「确认发布」', () => {
     expect((b.req as ReturnType<typeof request>).written).toEqual([]);
   });
 
+  it('进度记录说在走、但驱动 pid 已死（#1739）：不算在走，可以再发；卡片 last 写成 failed', async () => {
+    const france = trainState('running', { pid: 777 });
+    france.pidAlive = () => false;
+    const { h, req } = setup({ france });
+    const r = await post(h, { sha: HEAD });
+    expect(r.status).toBe(200);
+    expect(req.written).toHaveLength(1);
+    const c = await readCard(h);
+    expect(c.action.state).toBe('ready');
+    expect(c.action.reasons.join()).not.toContain('已有发版在走');
+    expect(c.action.last.state).toBe('failed');
+    expect(c.action.last.why).toMatch(/已经不在了|pid 777/);
+  });
+
+  it('进度记录说在走、驱动 pid 还活着：仍算在走，409', async () => {
+    const france = trainState('running', { pid: 777 });
+    france.pidAlive = () => true;
+    const { h, req } = setup({ france });
+    const r = await post(h, { sha: HEAD });
+    expect(r.status).toBe(409);
+    expect(r.body.error?.message).toContain('已有发版在走');
+    expect(req.written).toEqual([]);
+  });
+
   it('上一趟卡住、没成、做完了：不算在走，可以再发', async () => {
     for (const status of ['blocked', 'failed', 'done', 'aborted']) {
       const { h, req } = setup({ france: trainState(status) });

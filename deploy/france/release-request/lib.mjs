@@ -464,10 +464,17 @@ export async function runRequest(io) {
   if (why !== null) return refuse(io, req, why);
 
   const state = newState(io, req);
-  // 上一回停在「卡住」「没成」、发版前总开关是开着的：带过来（见 phasePauseFrance）；做完的、撤销的不带，这一回重新读
+  // 上一回停在「卡住」「没成」、或进度还写 running 但驱动进程已死（#1739：驾驶舱路径没有 release-train 的 resumeDead），
+  // 且发版前总开关是开着的：带过来（见 phasePauseFrance）。只认 blocked/failed 时，死掉的 running 会让下一趟把已经关着的总开关
+  // 记成「本来就关着」，发完保持关。做完的、撤销的、驱动还活着的不带，这一回重新读。
   const prevRead = io.readState();
   const prev = prevRead.ok ? prevRead.state : null;
-  if ((prev?.status === 'blocked' || prev?.status === 'failed') && prev.before?.master === true) {
+  const prevDeadRunning =
+    prev?.status === 'running' && Number.isInteger(prev.pid) && prev.pid !== io.pid && !io.pidAlive(prev.pid);
+  if (
+    (prev?.status === 'blocked' || prev?.status === 'failed' || prevDeadRunning) &&
+    prev.before?.master === true
+  ) {
     state.before = prev.before;
   }
   io.writeLast({ v: 1, at: iso(io), outcome: 'accepted', sha: req.sha, by: req.by, why: null });

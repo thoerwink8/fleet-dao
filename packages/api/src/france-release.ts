@@ -57,6 +57,11 @@ export interface FranceReleasePort {
     stderr: string;
     timedOut: boolean;
   }>;
+  /**
+   * 进度记录里的驱动 pid 还在不在（#1739）。驾驶舱接活落顶层 `pid`；没给时 release-card 用 process.kill(pid, 0)。
+   * 测试注入假的，避免真碰本机进程表。
+   */
+  pidAlive?(pid: number): boolean;
 }
 
 interface ReleaseTrainStateFile {
@@ -68,6 +73,8 @@ interface ReleaseTrainStateFile {
   updatedAt?: string;
   phase?: number;
   target?: { kind?: string; value?: string };
+  /** 驾驶舱接活脚本落的驱动进程号（release-request/lib.mjs）；没有或不认得出当 null。 */
+  pid?: unknown;
   // 真文件里字段不止这些（marker、france、release、verify、restore、changes、warn 等），但页面现在只用这几样；
   // 少写没用到的字段，将来的字段自然装进 extra，不在这里约束。
 }
@@ -103,6 +110,16 @@ function describeTarget(target: ReleaseTrainStateFile['target']): string {
 const TRAIN_STATUSES = ['running', 'blocked', 'failed', 'done', 'aborted'] as const;
 export type TrainStatus = (typeof TRAIN_STATUSES)[number];
 
+/** 进度记录里的驱动 pid 还在不在：能发信号或 EPERM（别的用户的进程）都算在；ESRCH 等才算死了。 */
+export function defaultPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 /** 一份进度记录读成这一趟的样子；认不出（不是 JSON、没写 status、status 不认识）回 { ok: false }，不猜、不当成没在走。 */
 export function parseTrainState(json: string):
   | {
@@ -112,6 +129,8 @@ export function parseTrainState(json: string):
       target: string;
       why: string | null;
       updatedAt: string | null;
+      /** 驾驶舱接活落的驱动 pid；没有或不认得出是 null（老记录、发版车 driver 对象那条路不在这里认）。 */
+      pid: number | null;
     }
   | { ok: false; why: string } {
   let parsed: ReleaseTrainStateFile;
@@ -130,6 +149,8 @@ export function parseTrainState(json: string):
       why: `状态文件里的 status 认不出（${String(parsed.status).slice(0, 20)}）：不猜这一趟是在走还是做完了`,
     };
   }
+  const pid =
+    typeof parsed.pid === 'number' && Number.isInteger(parsed.pid) && parsed.pid > 0 ? parsed.pid : null;
   return {
     ok: true,
     status,
@@ -137,6 +158,7 @@ export function parseTrainState(json: string):
     target: describeTarget(parsed.target),
     why: typeof parsed.why === 'string' ? parsed.why : null,
     updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null,
+    pid,
   };
 }
 
