@@ -35,6 +35,7 @@ import { probeDb } from './db-probe.ts';
 import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
 import { readEngineMaster } from './engine-switch.ts';
+import { recordExternalWatchRound } from './external-watch.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { memoryCockpitAlerts, pgCockpitAlerts } from './feishu-alerts.ts';
 import { liveFranceReleasePort } from './france-release.ts';
@@ -253,6 +254,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     ...(production ? { releaseCard: liveReleaseCardPort(github.releaseFacts) } : {}),
     // /france 页「发布到法国」按钮（#1232）：写请求文件，法国上 root 的单元接活（人工档）；后端自己不起带 root 的进程
     ...(production ? { releaseRequest: liveReleaseRequestPort() } : {}),
+    // 外部看门狗（#292）来查 /healthz 且编号对上：给登记表记一轮成功。登记行由引擎在配了编号时写入。
+    recordExternalWatchRound: () => recordExternalWatchRound(db, now()),
     health: serviceHealthChecks({
       probeDb: () => probeDb(db),
       feed,
