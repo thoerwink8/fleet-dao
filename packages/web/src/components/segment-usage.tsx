@@ -26,6 +26,7 @@ import { costParts, EQUIVALENT_RULE, type Reading, reading } from '../lib/usage'
 import { cn } from '../lib/utils';
 import { Panel, Stat } from './page';
 import { RepoLink } from './repo-link';
+import { RunTranscript } from './run-transcript';
 import { StatusChip } from './status';
 
 /** 一项读数怎么写：全读到照写；读到一部分照写、写明几次没读到；全没读到写「没读到」；没有结束了的写 empty。 */
@@ -492,11 +493,13 @@ function estimateGap(run: SegmentRunView): string | undefined {
 
 function RunRow({
   run,
+  taskId,
   repo,
   now,
   nth,
 }: {
   run: SegmentRunView;
+  taskId: string;
   repo: Repo;
   now: number;
   /** 这一段的第几次（按起跑先后）。 */
@@ -590,6 +593,7 @@ function RunRow({
           ))}
         </ul>
       ) : null}
+      <RunTranscript taskId={taskId} runId={run.id} running={run.running} />
     </li>
   );
 }
@@ -607,6 +611,7 @@ export function SegmentRunList({ d, now }: { d: TaskDetail; now: number }) {
           <RunRow
             key={run.id}
             run={run}
+            taskId={d.task.id}
             repo={d.repo}
             now={now}
             nth={d.segmentRuns.slice(0, i + 1).filter((r) => r.segment === run.segment).length}
