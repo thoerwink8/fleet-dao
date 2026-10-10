@@ -814,6 +814,11 @@ describe('单元表（第七片）', () => {
     ]);
   });
 
+  it('Description 值末尾的空格和制表符原样保留', () => {
+    const r = memRepo({ 'deploy/hk/fleet-feishu.service': 'Description=飞书网关 \t\n' });
+    expect(readUnitEntries(r)[0]?.description).toBe('飞书网关 \t');
+  });
+
   it('故意失败：单元文件没有 Description 行，抛带文件名的错', () => {
     const r = memRepo(unitsFiles({ 'deploy/france/fleet-api.timer': '[Unit]\nAfter=network.target\n' }));
     expect(() => renderUnitsBlock(r)).toThrow('deploy/france/fleet-api.timer');

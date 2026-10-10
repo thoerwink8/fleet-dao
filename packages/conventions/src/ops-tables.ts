@@ -830,12 +830,12 @@ export function readUnitEntries(repo: RepoView): UnitEntry[] {
       for (const line of text.split('\n')) {
         const m = DESCRIPTION_LINE.exec(line.replace(/\r$/, ''));
         if (m) {
-          description = (m[1] ?? '').trimEnd();
+          description = m[1] ?? '';
           break;
         }
       }
       if (description === undefined) throw new Error(`${path} 里没有 Description= 这一行`);
-      if (description === '') throw new Error(`${path} 的 Description= 是空的`);
+      if (description.trim() === '') throw new Error(`${path} 的 Description= 是空的`);
       if (description.includes('|'))
         throw new Error(`${path} 的 Description= 里有 |，放不进表格：${description}`);
       entries.push({ file: name, machine: src.machine, description });
