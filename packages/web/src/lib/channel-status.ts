@@ -3,7 +3,7 @@
 // 几条路由并成一句话，再按路由两层里的先后给渠道排顺位。探针报错 = 这条路暂不可用（探针写 alive=false，选路本来就不派），
 // 这里只显示，不改选路。没排进任何用途的渠道（干粉）探针不花额度去探，卡片照列、写「没在配的路由里，未探」。
 
-import { probeCadenceMinutes, routeProbeEveryMinutes } from '@fleet-dao/shared';
+import { isOnDemandDetail, probeCadenceMinutes, routeProbeEveryMinutes } from '@fleet-dao/shared';
 import type {
   Channel,
   ChannelState as ChannelStateRow,
@@ -88,12 +88,14 @@ export function probeLatency(detail: string | undefined): string | undefined {
 
 /**
  * 这条路最近一次结论过没过「这一档间隔 + 3 分钟」。
- * detail 里写了退避或隔 60 分钟再探时按那一档，不把故意放慢当成检测中断。不给 detail 就按执行方式。
+ * detail 里写了退避或隔 30 分钟再探时按那一档，不把故意放慢当成检测中断。不给 detail 就按执行方式。
  */
 export function channelProbeInterrupted(
   route: { probedAt: string; hostId: string; detail?: string | null | undefined },
   now: number,
 ): boolean {
+  // 按需探测的不主动探：结论放多久都不算检测中断（#1635）
+  if (isOnDemandDetail(route.detail)) return false;
   const every = route.detail
     ? probeCadenceMinutes(route.hostId, route.detail)
     : routeProbeEveryMinutes(route.hostId);
@@ -271,7 +273,9 @@ export function buildChannelCards(
 
     const dead = mine.filter((r) => r.connect.verdict === 'dead');
     const live = mine.filter((r) => r.connect.verdict === 'live');
-    const probed = mine.filter((r) => r.probedAt !== undefined) as (RoutingLayerRoute & {
+    const probed = mine.filter(
+      (r) => r.probedAt !== undefined && !isOnDemandDetail(r.probeDetail),
+    ) as (RoutingLayerRoute & {
       probedAt: string;
     })[];
     const newest = probed.reduce<(RoutingLayerRoute & { probedAt: string }) | undefined>(
@@ -312,8 +316,9 @@ export function buildChannelCards(
       tone = 'fail';
     } else {
       state = 'unknown';
-      label = channel.billing === 'metered' ? '按量计费，不自动探' : '还没探到';
-      tone = 'stall';
+      const onDemand = mine.length > 0 && mine.every((r) => isOnDemandDetail(r.probeDetail));
+      label = channel.billing === 'metered' ? '按量计费，不自动探' : onDemand ? '按需探测' : '还没探到';
+      tone = onDemand ? 'stop' : 'stall';
     }
     const firstDead = dead[0];
     const firstUnknown = mine.find((r) => r.connect.verdict === 'unknown');

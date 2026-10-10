@@ -74,6 +74,7 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     expect(env.BASH_DEFAULT_TIMEOUT_MS).toBe(String(DEFAULT_BASH_TIMEOUT_MS));
     expect(Number(env.BASH_DEFAULT_TIMEOUT_MS)).toBeGreaterThanOrEqual(6 * 60_000);
     expect(env.BASH_MAX_TIMEOUT_MS).toBe(String(30 * 60_000));
+    expect(env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS).toBe('2');
     expect(env.FLEET_RUN_ID).toBe(s.runId);
     expect(
       Object.keys(env).filter((k) =>

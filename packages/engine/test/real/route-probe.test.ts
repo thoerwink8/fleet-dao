@@ -19,7 +19,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { ROUTE_PROBE_JOB, runRouteProbeJob } from '../../src/jobs/route-probe.ts';
 import { CURSOR_KEY_BAD, CURSOR_KEY_EXIT, CURSOR_MISSING, GROK_MISSING } from '../../src/real/hosts.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
-import { PROBE_DIR, PROBE_PROMPT, routeProbeJob } from '../../src/real/route-probe.ts';
+import { probePrompt } from '../../src/real/probe-iq.ts';
+import { iqAlertKey, PROBE_DIR, routeProbeJob } from '../../src/real/route-probe.ts';
 import { poolHoldKey } from '../../src/real/store-ports.ts';
 import {
   addCursorRoute,
@@ -49,6 +50,9 @@ import {
   grokAnswered,
   grokRefused,
   NOW,
+  pickTestQuestion,
+  REPLY,
+  TEST_Q,
   world,
 } from './fixtures.ts';
 
@@ -62,6 +66,10 @@ let root: string;
 beforeEach(async () => {
   await resetTestDb(t);
   await world(t.db);
+  // 夹具里「5 分钟前探通」落在前 2 位 30 分钟的间隔之内（#1635），这一轮会照旧不探；这里测的是探的行为，把上一次探通挪到间隔之外
+  await t.client.query(
+    "update routes set probed_at = probed_at - interval '35 minutes' where probe_state = 'ok'",
+  );
   // 真实的样子：独享池挂在独享组织上（这里的会话用户挂着拼车，setup 的 sessionOrg，这个池不探）
   await t.client.query("update pools set org_kind = 'solo' where id = 'claude-solo'");
   await registerEngineJobs(t.db);
@@ -122,6 +130,7 @@ function setup(
     log: rig ? (level, text, fields) => void logs.push(JSON.stringify([level, text, fields])) : quiet,
     sleep: async () => {},
     retryDelayMs: 0,
+    pickQuestion: pickTestQuestion,
     run: over.runThrows
       ? { 'claude-code': thrower, 'cursor-agent': thrower, grok: thrower, mirasim: thrower }
       : rig
@@ -146,7 +155,7 @@ function setup(
 const row = async (id: string) => (await t.db.select().from(routes)).find((r) => r.id === id);
 const hold = async () =>
   (await t.db.select().from(notifications)).find((n) => n.dedupeKey === poolHoldKey('claude-carpool'));
-const answered = (): FakeRunScript => ({ result: { text: 'OK' } });
+const answered = (): FakeRunScript => ({ result: { text: REPLY } });
 
 describe('探通：在线，结论和时刻写进库，定时任务页那一行对得上', () => {
   it('拼车池的路由探通在线；独享池因为会话用户挂着拼车没探、codex 插头没接，都不在线且写明原因', async () => {
@@ -156,7 +165,7 @@ describe('探通：在线，结论和时刻写进库，定时任务页那一行�
 
     const carpool = await row('carpool');
     expect(carpool).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
-    expect(carpool?.probeDetail).toMatch(/^答上了：OK · 用时 \d+ 秒/);
+    expect(carpool?.probeDetail).toMatch(/^答上了：OK · 降智检测通过（.*） · 用时 \d+ 秒/);
     expect(toRoute(carpool as typeof routes.$inferSelect).probe).toMatchObject({
       state: 'ok',
       at: NOW.toISOString(),
@@ -171,8 +180,8 @@ describe('探通：在线，结论和时刻写进库，定时任务页那一行�
     expect(carpoolHistory[0]).toMatchObject({
       result: 'passed',
       durationMs: 1,
-      requestText: PROBE_PROMPT,
-      responseText: 'OK',
+      requestText: probePrompt(TEST_Q),
+      responseText: REPLY,
       failureReason: null,
     });
     const soloHistory = await readRouteProbeHistory(t.db, 'solo', 10);
@@ -204,7 +213,7 @@ describe('探通：在线，结论和时刻写进库，定时任务页那一行�
     const [options] = s.fake.options;
     const dir = join(root, 'work').replaceAll('\\', '/');
     expect(spec).toMatchObject({
-      prompt: PROBE_PROMPT,
+      prompt: probePrompt(TEST_Q),
       model: 'claude-opus-5-5',
       permissionMode: 'dontAsk',
       persistSession: false,
@@ -336,6 +345,100 @@ describe('额度用满被拒：算通（在线），额度读数记账，派不�
   });
 });
 
+describe('降智检测（#1637）', () => {
+  const iqAlert = async () =>
+    (await t.db.select().from(notifications)).find((n) => n.dedupeKey === iqAlertKey('carpool'));
+
+  it('答对：通过，历史里记下题、标准答案、实答、自报身份，不推提醒', async () => {
+    const s = setup(answered);
+    await s.round();
+    const up = await row('carpool');
+    expect(up).toMatchObject({ alive: true, probeState: 'ok' });
+    expect(up?.probeDetail).toContain('降智检测通过（(37+58)×12-205=935）');
+    const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
+    expect(h).toMatchObject({
+      result: 'passed',
+      checkQuestion: TEST_Q.text,
+      checkExpected: '935',
+      checkAnswer: '935',
+      checkPassed: true,
+      selfIdentity: 'Anthropic Claude Opus 5.5',
+    });
+    expect(await iqAlert()).toBeUndefined();
+  });
+
+  it('答错：判疑似降智，不在线，推「路由疑似降智」；同一条路由再降智不重复推；下一次答对撤掉', async () => {
+    let good = false;
+    const s = setup(() => ({ result: { text: good ? REPLY : 'OK\n答案：1000\n模型：某小模型' } }));
+    await s.round();
+    const down = await row('carpool');
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain(`疑似降智：题 ${TEST_Q.text}，应为 935，实答 1000`);
+    const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
+    expect(h).toMatchObject({
+      result: 'failed',
+      checkExpected: '935',
+      checkAnswer: '1000',
+      checkPassed: false,
+      selfIdentity: '某小模型',
+    });
+    const alert = await iqAlert();
+    expect(alert).toMatchObject({ title: '路由疑似降智', resolvedAt: null });
+    expect(alert?.body).toContain('935');
+    expect(alert?.body).toContain('1000');
+    expect(alert?.body).toContain('某小模型');
+
+    s.advance(60);
+    await s.round();
+    const same = (await t.db.select().from(notifications)).filter(
+      (n) => n.dedupeKey === iqAlertKey('carpool'),
+    );
+    expect(same).toHaveLength(1);
+
+    good = true;
+    s.advance(60);
+    await s.round();
+    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
+    expect((await iqAlert())?.resolvedAt).not.toBeNull();
+  });
+
+  it('只有第一行 OK、没写答案：判疑似降智，实答写「没写」', async () => {
+    const s = setup(() => ({ result: { text: 'OK' } }));
+    await s.round();
+    const down = await row('carpool');
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('疑似降智');
+    expect(down?.probeDetail).toContain('实答 没写');
+    const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
+    expect(h).toMatchObject({ checkAnswer: null, checkPassed: false });
+    expect(await iqAlert()).toBeDefined();
+  });
+
+  it('没有第一行 OK：照旧是回答认不出，不判降智、不推提醒', async () => {
+    const s = setup(() => ({ result: { text: '答案：935' } }));
+    await s.round();
+    const down = await row('carpool');
+    expect(down?.probeDetail).toContain('回答认不出');
+    expect(down?.probeDetail).not.toContain('疑似降智');
+    const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
+    expect(h?.checkPassed).toBeNull();
+    expect(await iqAlert()).toBeUndefined();
+  });
+
+  it('额度用满被拒：照旧算通，不判降智、没有降智记录', async () => {
+    const s = setup(() => ({
+      result: { isError: true, terminalReason: 'api_error', text: '拼车 5 小时额度已用完，约 20 分钟后重置' },
+      exitCode: 1,
+    }));
+    await s.round();
+    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
+    const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
+    expect(h?.checkPassed).toBeNull();
+    expect(h?.checkQuestion).toBeNull();
+    expect(await iqAlert()).toBeUndefined();
+  });
+});
+
 describe('没探通的：离线，写明是哪一种（不许拿默认值、上一轮的在线冒充）', () => {
   it('答了、但答的不是 OK（输出认不出）：隔一会儿再探一次，还不对就离线', async () => {
     const s = setup(() => ({ result: { text: '你好！有什么可以帮你？' } }));
@@ -348,26 +451,28 @@ describe('没探通的：离线，写明是哪一种（不许拿默认值、上�
   });
 
   // 只要「含 OK」就算通，会把这几种也写成在线（#148 合并后补审）：整句必须就是 OK
-  it.each(['Not OK', 'OK, but I cannot run tools here', 'ok.', 'OK OK', '`OK`'])(
+  it.each(['Not OK', 'OK, but I cannot run tools here', 'ok.', 'OK OK', 'OK 好的\n答案：935'])(
     '回答「%s」不是只回 OK：不算探通，离线、原因里带着原话',
     async (reply) => {
       const s = setup(() => ({ result: { text: reply } }));
       await s.round();
       const down = await row('carpool');
       expect(down).toMatchObject({ alive: false, probeState: 'failed' });
-      expect(down?.probeDetail).toContain('回答认不出（要的是只回 OK）');
+      expect(down?.probeDetail).toContain('回答认不出（要的是第一行只写 OK）');
       expect(down?.probeDetail).toContain(reply);
     },
   );
 
-  it.each(['OK', 'ok', '  OK\n'])(
-    '回答「%s」（去掉首尾空白后整句是 OK，不分大小写）：探通',
-    async (reply) => {
-      const s = setup(() => ({ result: { text: reply } }));
-      await s.round();
-      expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
-    },
-  );
+  it.each([
+    'OK\n答案：935',
+    'ok\n答案:935。',
+    '  OK\n\n答案：**935**\n模型：x\n',
+    '```\nOK\n答案：`935`\n```',
+  ])('回答「%s」（第一行是 OK、答案对；粗体、反引号、代码块围栏、半角冒号都认）：探通', async (reply) => {
+    const s = setup(() => ({ result: { text: reply } }));
+    await s.round();
+    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
+  });
 
   // 超时三种（插头强杀）：迟迟没有第一帧（reclaude 卡在同步配置上）、总时长到顶、长时间没动静。都不是要人修的整池问题：
   // 隔一会儿同一轮再探一次，还不通才离线，原因写明是哪种超时和执行体最后说的话；不写「整池暂停」。
@@ -441,7 +546,7 @@ describe('没探通的：离线，写明是哪一种（不许拿默认值、上�
 describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动探，判法同一套', () => {
   let routeId: string;
   beforeEach(async () => {
-    ({ routeId } = await addCursorRoute(t.db, { stages: ['execute'] }));
+    ({ routeId } = await addCursorRoute(t.db, { stages: ['verify'] }));
     // 上一次探通是 3 小时前：cursor 探通了隔 2 小时再探，这一轮到点了
     await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
       routeId,
@@ -451,7 +556,7 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
   const cursorHold = async () =>
     (await t.db.select().from(notifications)).find((n) => n.dedupeKey === poolHoldKey('cursor'));
   /** 法国真跑夹具的 init 帧，接一个只回 text 的终帧。 */
-  const replied = (text = 'OK'): FakeCursorScript => ({
+  const replied = (text = REPLY): FakeCursorScript => ({
     replay: 'cursor-edit-commit',
     replayLines: 1,
     frames: [
@@ -466,11 +571,11 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
     expect(run.online).toEqual(expect.arrayContaining(['carpool', routeId]));
     const up = await row(routeId);
     expect(up).toMatchObject({ alive: true, probeState: 'ok' });
-    expect(up?.probeDetail).toMatch(/^答上了：OK · 用时 \d+ 秒$/);
+    expect(up?.probeDetail).toMatch(/^答上了：OK · 降智检测通过（.*） · 用时 \d+ 秒$/);
     expect(s.cursor.count()).toBe(1);
     const [spec] = s.cursor.specs;
     expect(spec).toMatchObject({
-      prompt: PROBE_PROMPT,
+      prompt: probePrompt(TEST_Q),
       model: 'auto',
       force: false,
       session: { mode: 'new' },
@@ -495,8 +600,8 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
     expect(s.cursor.count()).toBe(1);
     expect(second.online).toContain(routeId);
     expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
-    // Claude 的路由照样每轮探
-    expect(s.fake.count()).toBe(2);
+    // Claude 的路由在前 2 位：探通了隔 30 分钟才再真探（#1635），15 分钟后这一轮也不探
+    expect(s.fake.count()).toBe(1);
 
     s.advance(105);
     await s.round();
@@ -641,7 +746,7 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
     await s.round();
     const down = await row(routeId);
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
-    expect(down?.probeDetail).toContain('回答认不出（要的是只回 OK）');
+    expect(down?.probeDetail).toContain('回答认不出（要的是第一行只写 OK）');
   });
 });
 
@@ -657,7 +762,7 @@ describe('grok 的路由（#266）：和干活的会话同一个驱动探，判�
   });
   const grokHold = async () =>
     (await t.db.select().from(notifications)).find((n) => n.dedupeKey === poolHoldKey('grok'));
-  const replied = (text = 'OK', model = 'grok-4.7-build'): FakeGrokScript => ({
+  const replied = (text = REPLY, model = 'grok-4.7-build'): FakeGrokScript => ({
     frames: grokAnswered(text, model),
   });
 
@@ -667,11 +772,11 @@ describe('grok 的路由（#266）：和干活的会话同一个驱动探，判�
     expect(run.online).toEqual(expect.arrayContaining(['carpool', routeId]));
     const up = await row(routeId);
     expect(up).toMatchObject({ alive: true, probeState: 'ok' });
-    expect(up?.probeDetail).toMatch(/^答上了：OK · 用时 \d+ 秒$/);
+    expect(up?.probeDetail).toMatch(/^答上了：OK · 降智检测通过（.*） · 用时 \d+ 秒$/);
     expect(s.grok.count()).toBe(1);
     const [spec] = s.grok.specs;
     expect(spec).toMatchObject({
-      prompt: PROBE_PROMPT,
+      prompt: probePrompt(TEST_Q),
       model: 'grok-4.7',
       alwaysApprove: false,
       session: { mode: 'new' },
@@ -762,7 +867,7 @@ describe('grok 的路由（#266）：和干活的会话同一个驱动探，判�
   });
 
   it('答了 OK、回话的却是别的一代（点名 grok-4.7、回 grok-4.6-build）：不算探通，写明点名和实际', async () => {
-    const s = setup(answered, { grok: () => replied('OK', 'grok-4.6-build') });
+    const s = setup(answered, { grok: () => replied(REPLY, 'grok-4.6-build') });
     await s.round();
     const down = await row(routeId);
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
@@ -802,14 +907,14 @@ describe('grok 的路由（#266）：和干活的会话同一个驱动探，判�
     await s.round();
     const down = await row(routeId);
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
-    expect(down?.probeDetail).toContain('回答认不出（要的是只回 OK）');
+    expect(down?.probeDetail).toContain('回答认不出（要的是第一行只写 OK）');
   });
 });
 
 describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，判法同一套', () => {
   let routeId: string;
   beforeEach(async () => {
-    ({ routeId } = await addMirasimRoute(t.db, { stages: ['execute'] }));
+    ({ routeId } = await addMirasimRoute(t.db, { stages: ['verify'] }));
     // 上一次探通是 3 小时前：Mirasim 探通了隔 2 小时再探（额度紧，#345），这一轮到点了
     await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
       routeId,
@@ -818,16 +923,16 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
   });
 
   it('探通：在线；以唯一的会话用户、route=cloud、模型串按路由上的、执行体按上游串前缀（deepseek-flash → dsh）', async () => {
-    const s = setup(answered, { mirasim: () => ({ state: { text: 'OK' } }) });
+    const s = setup(answered, { mirasim: () => ({ state: { text: REPLY } }) });
     const run = await s.round();
     expect(run.online).toEqual(expect.arrayContaining(['carpool', routeId]));
     const up = await row(routeId);
     expect(up).toMatchObject({ alive: true, probeState: 'ok' });
-    expect(up?.probeDetail).toMatch(/^答上了：OK · 用时 \d+ 秒$/);
+    expect(up?.probeDetail).toMatch(/^答上了：OK · 降智检测通过（.*） · 用时 \d+ 秒$/);
     expect(s.mirasim.count()).toBe(1);
     const [spec] = s.mirasim.specs;
     expect(spec).toMatchObject({
-      prompt: PROBE_PROMPT,
+      prompt: probePrompt(TEST_Q),
       agent: 'dsh',
       route: 'cloud',
       model: 'deepseek-flash',
@@ -838,7 +943,7 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
   });
 
   it('探通了：15 分钟后那一轮不再真探、不重写，结论照旧（还在线）；到 2 小时再真探（一次扣的是那份紧张的中转额度，#345）', async () => {
-    const s = setup(answered, { mirasim: () => ({ state: { text: 'OK' } }) });
+    const s = setup(answered, { mirasim: () => ({ state: { text: REPLY } }) });
     await s.round();
     expect(s.mirasim.count()).toBe(1);
     s.advance(15);
@@ -856,7 +961,7 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
     const bad = await addMirasimRoute(t.db, {
       modelId: 'glm-6',
       upstreamModel: 'glm-6',
-      stages: ['review'],
+      stages: ['research'],
     });
     // 这条也是现插的种子（上一次「探通」是 5 分钟前）：不推到 3 小时前，2 小时的冷却会把这一轮当成「还没到点」整个跳过，
     // 到不了「起会话之前就被拦下」这条判断——和 beforeEach 里那条同一个道理。
@@ -864,7 +969,7 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
       bad.routeId,
       new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString(),
     ]);
-    const s = setup(answered, { mirasim: () => ({ state: { text: 'OK' } }) });
+    const s = setup(answered, { mirasim: () => ({ state: { text: REPLY } }) });
     await s.round();
     const down = await row(bad.routeId);
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
@@ -902,7 +1007,7 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
 
   it('快照说 done，但账本没给目录：中转到底走没走上游没查成，不当成探通（DL3）', async () => {
     const s = setup(answered, {
-      mirasim: () => ({ state: { text: 'OK' }, report: { ledger: undefined } }),
+      mirasim: () => ({ state: { text: REPLY }, report: { ledger: undefined } }),
     });
     await s.round();
     const down = await row(routeId);
@@ -914,7 +1019,7 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
   it('快照说 done，账本读到了、但起针之后没有一次 2xx：中转没真干活，不算探通', async () => {
     const s = setup(answered, {
       mirasim: () => ({
-        state: { text: 'OK' },
+        state: { text: REPLY },
         report: {
           ledger: { state: 'read', rows: [{ status: 500, upstreamHost: 'x' }], unparsed: 0 },
         },
@@ -935,7 +1040,7 @@ describe.skipIf(process.platform === 'win32')(
     let routeId: string;
     let rig: CursorKeyRig;
     beforeEach(async () => {
-      ({ routeId } = await addCursorRoute(t.db, { stages: ['execute'] }));
+      ({ routeId } = await addCursorRoute(t.db, { stages: ['verify'] }));
       // 上一次探通是 3 小时前：cursor 探通了隔 2 小时再探，这一轮到点了
       await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
         routeId,

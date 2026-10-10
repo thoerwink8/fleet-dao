@@ -118,16 +118,22 @@ export {
   statusByContext,
 } from './merge-gates.ts';
 // ops 表格由 deploy/ 生成（#140 第一片）：端口表纯函数 + 命令行（bin/ops-tables.ts）。
+// 第十一片：五个区块一起认的口子（checkOpsBlocks、writeOpsBlocks、opsDocPaths）。
 export {
   BLOCK_NAME_PORTS,
+  checkOpsBlocks,
   checkPortsBlock,
   extractBlock,
+  OPS_BLOCK_NAMES,
   type OpsTableProblem,
+  type OpsWriteResult,
+  opsDocPaths,
   type PortEntry,
   portsTableInner,
   readPortEntries,
   renderPortsBlock,
   replaceBlock,
+  writeOpsBlocks,
 } from './ops-tables.ts';
 export { type PlanPhase, type PlanRef, parsePlanRefs, planPhases } from './plan.ts';
 export {

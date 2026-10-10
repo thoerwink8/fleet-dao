@@ -1,6 +1,6 @@
 // 任务工作流的动手会话（real/task-segment.ts，#632 S2-4b-2）：备树（真 git、本地镜像）→ 提示词 → 一次性会话（假驱动，
 // 不起真执行体）→ 结局整理。每条没跑成、起不来、被叫停、内存放不下的路径故意造一次。
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RunFacts, SessionUser } from '@fleet-dao/adapters';
@@ -981,6 +981,99 @@ describe('选路时预占的池的名额（#757）', { timeout: 60_000 }, () => 
     });
     expect(await r.run(reserved(r), ctx())).toMatchObject({ ok: true });
     expect(logs.filter((l) => l.includes('没放掉'))).toEqual([expect.stringContaining('connection refused')]);
+  });
+});
+
+describe('子代理（#1641）：树里的本地设置和提示词那一句', { timeout: 60_000 }, () => {
+  const GUARD = { names: ['fleet-builder', 'fleet-scout'], isolated: ['fleet-builder'] };
+  const mirasimRoute = (over: Partial<RouteLaunchFacts> = {}) =>
+    route({ hostId: 'mirasim', modelId: 'deepseek-flash', upstreamModel: 'deepseek-flash', ...over });
+  const settingsOf = (dir: string) =>
+    JSON.parse(readFileSync(join(dir, '.claude', 'settings.local.json'), 'utf8')) as {
+      env: Record<string, string>;
+      permissions: { deny: string[] };
+    };
+
+  it('Mirasim 的会话：建好树后、起会话之前，树里有 settings.local.json；非 Claude 模型挡全部子代理，并发上限 2', async () => {
+    let seen: ReturnType<typeof settingsOf> | undefined;
+    const r = rig({
+      route: mirasimRoute(),
+      deps: { subagentGuard: async () => GUARD },
+      driverRun: async (spec) => {
+        seen = settingsOf(spec.cwd);
+        commitInTree(spec);
+        return report({ hostId: 'mirasim' });
+      },
+    });
+    await r.run(r.input(), ctx());
+    expect(seen).toEqual({
+      env: { CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: '2' },
+      permissions: { deny: ['Agent(fleet-builder)', 'Agent(fleet-scout)'] },
+    });
+  });
+
+  it('Mirasim 的会话、Claude 模型：只挡带 isolation 的', async () => {
+    let seen: ReturnType<typeof settingsOf> | undefined;
+    const r = rig({
+      route: mirasimRoute({ modelId: 'claude-sonnet-5-5', upstreamModel: 'claude-sonnet-5-5' }),
+      deps: { subagentGuard: async () => GUARD },
+      driverRun: async (spec) => {
+        seen = settingsOf(spec.cwd);
+        commitInTree(spec);
+        return report({ hostId: 'mirasim' });
+      },
+    });
+    await r.run(r.input(), ctx());
+    expect(seen?.permissions.deny).toEqual(['Agent(fleet-builder)']);
+  });
+
+  it('claude-code 的会话不写这个文件（它带 --setting-sources project，不读本地这一层）', async () => {
+    let wrote = true;
+    const r = rig({
+      deps: { subagentGuard: async () => GUARD },
+      driverRun: async (spec) => {
+        wrote = existsSync(join(spec.cwd, '.claude', 'settings.local.json'));
+        commitInTree(spec);
+        return report();
+      },
+    });
+    await r.run(r.input(), ctx());
+    expect(wrote).toBe(false);
+  });
+
+  it('【故意造出的失败】Mirasim 的会话读不到子代理清单：这一段不起会话（deny 写不上，不带着没挡的状态起）', async () => {
+    const r = rig({
+      route: mirasimRoute(),
+      deps: {
+        subagentGuard: async () => {
+          throw new Error('子代理定义读不到');
+        },
+      },
+    });
+    await expect(r.run(r.input(), ctx())).rejects.toMatchObject({ code: 'SEGMENT_SUBAGENT_GUARD' });
+    expect(r.specs).toHaveLength(0);
+  });
+
+  it('提示词那一句由设置项开关：关着（读到 false、没给、读不了）不加；开着加', async () => {
+    const promptWith = async (readSubagentHint?: () => Promise<boolean>) => {
+      const r = rig({
+        driverRun: async (spec) => {
+          commitInTree(spec);
+          return report();
+        },
+        ...(readSubagentHint ? { deps: { readSubagentHint } } : {}),
+      });
+      await r.run(r.input(), ctx());
+      return r.specs[0]?.prompt ?? '';
+    };
+    expect(await promptWith()).not.toContain('fleet-scout');
+    expect(await promptWith(async () => false)).not.toContain('fleet-scout');
+    expect(
+      await promptWith(async () => {
+        throw new Error('库读不了');
+      }),
+    ).not.toContain('fleet-scout');
+    expect(await promptWith(async () => true)).toContain('`fleet-scout`');
   });
 });
 

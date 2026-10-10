@@ -6,7 +6,8 @@
 //   立即探测先记「接手」，等它跑完再探（页面看得到已接手、在等）。
 // - 人点的就真探：按一次的成本放慢、上一次探通还没到再探的时候（kept）、不通之后的退避，这里也照探
 //   （节奏上把上一次当没有交给 planProbe；连着不通的次数还留着）。
-//   按量计费、插头没接、渠道或模型下架、没有用途在用的，照规矩不探，结论写明为什么（不是「通」）。
+//   没有用途在用的也真探（#1630：就是要在挂进用途之前先看它通不通）。
+//   按量计费、整池暂停、插头没接、渠道或模型下架，照规矩不探，结论写明为什么（不是「通」）。
 // - 不判切号：切号只在定时那一轮里判（jobs/org-switch.ts），立即探测只探。
 // - 总开关关着也接（探针是看家检查，#1086：关着也要看到渠道通不通）。
 
@@ -96,7 +97,7 @@ async function probeOne(
     return { routeId: target.routeId, outcome: 'unsettled', detail: c.detail, at: c.at.toISOString() };
   }
   // 和定时那一轮同一份写法：结论里除了这三样，余下的字段原样交给 save（探针结论以后多了字段，这里不用跟着改）
-  const { target: _t, kept: _k, unsettled: _u, backingOff: _b, ...rest } = c;
+  const { target: _t, kept: _k, unsettled: _u, backingOff: _b, onDemand: _o, ...rest } = c;
   try {
     const saved = await probe.save({ routeId: target.routeId, ...rest });
     if (saved === 'route_not_found') {

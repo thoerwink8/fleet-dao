@@ -7,7 +7,7 @@
 // - 认不出的记录（字段对不上）不当没有：数进 unreadable，调用方写日志、页面写明有几条没读懂。
 
 import { z } from 'zod';
-import { RouteProbeResultSchema } from './web-api/routing.ts';
+import { RouteProbeResultSchema, RouteProbeSourceSchema } from './web-api/routing.ts';
 
 export const ROUTE_PROBE_TARGET = 'routing:probe';
 export const ROUTE_PROBE_ACTION = {
@@ -43,7 +43,10 @@ export const RouteProbeRequestRecord = z.object({
   requestId: z.string().min(1),
   /** null = 全部路由。 */
   routeIds: z.array(z.string().min(1)).nullable(),
+  /** 引擎自动排的才带（任务断链后探一次）；人点的、老记录没有。 */
+  source: RouteProbeSourceSchema.optional(),
 });
+export type RouteProbeSource = z.infer<typeof RouteProbeSourceSchema>;
 export const RouteProbeStartRecord = z.object({ requestId: z.string().min(1) });
 export const RouteProbeDoneRecord = z.object({
   requestId: z.string().min(1),
@@ -55,6 +58,7 @@ export interface RouteProbeRequestView {
   requestedAt: string;
   by: string;
   routeIds?: string[];
+  source?: RouteProbeSource;
   state: 'queued' | 'running' | 'done' | 'failed' | 'expired';
   startedAt?: string;
   finishedAt?: string;
@@ -84,6 +88,7 @@ export function foldRouteProbeRequests(
       requestedAt: Date;
       by: string;
       routeIds: string[] | null;
+      source?: RouteProbeSource;
       startedAt?: Date;
       done?: { at: Date; ok: boolean; error: string | null; results: RouteProbeResult[] };
     }
@@ -99,6 +104,7 @@ export function foldRouteProbeRequests(
         requestedAt: row.at,
         by: row.actorId,
         routeIds: parsed.data.routeIds,
+        ...(parsed.data.source ? { source: parsed.data.source } : {}),
       });
     } else if (row.action === ROUTE_PROBE_ACTION.start) {
       const parsed = RouteProbeStartRecord.safeParse(row.after);
@@ -137,6 +143,7 @@ export function foldRouteProbeRequests(
       requestedAt: r.requestedAt.toISOString(),
       by: r.by,
       ...(r.routeIds ? { routeIds: r.routeIds } : {}),
+      ...(r.source ? { source: r.source } : {}),
       ...(r.startedAt ? { startedAt: r.startedAt.toISOString() } : {}),
     };
     if (r.done) {

@@ -16,6 +16,7 @@ import {
   type SessionRun,
   type Subtask,
   type Task,
+  taskListGroupOf,
   taskWorkflowId,
 } from '@fleet-dao/shared';
 import {
@@ -72,9 +73,12 @@ import {
   autoDispatchUnchanged,
   boardCutoffMs,
   canStopTask,
+  emptyTaskGroupCounts,
   isAutoDispatchUnchanged,
   isRequestUnchanged,
   keepOnBoard,
+  lastTaskChangeAt,
+  matchesTaskSearch,
   NEW_TASK_STATE,
   nextTaskPriority,
   segmentRunMatch,
@@ -434,6 +438,26 @@ export function createMemoryStore(
     },
     async getTask(id) {
       return data.tasks.find((t) => t.id === id) ?? null;
+    },
+    async listTasks({ group, repoId, q, cursor: raw, limit }) {
+      const matching = data.tasks.filter(
+        (t) => (repoId === undefined || t.repoId === repoId) && matchesTaskSearch(t, q),
+      );
+      const counts = emptyTaskGroupCounts();
+      for (const t of matching) counts[taskListGroupOf(t)] += 1;
+      const rows = matching
+        .filter((t) => group === undefined || taskListGroupOf(t) === group)
+        .map((task) => ({
+          task,
+          at: lastTaskChangeAt(task, data.stateChanges),
+          id: task.id,
+        }));
+      const page = paginate(rows, { cursor: raw, limit }, isUuid);
+      return {
+        items: page.items.map(({ task, at }) => ({ task, updatedAt: at })),
+        counts,
+        nextCursor: page.nextCursor,
+      };
     },
     async listSubtasks(taskIds) {
       return data.subtasks

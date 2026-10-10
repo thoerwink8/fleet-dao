@@ -2,6 +2,7 @@
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { toRoute } from '../src/domain-map.ts';
+import { markChannelDisabled } from '../src/queries/channel-fallback.ts';
 import {
   backfillProbeHistoryFromRoutes,
   ROUTE_PROBE_HISTORY_KEEP,
@@ -154,6 +155,22 @@ describe('读：每条路由探得了探不了的事实', () => {
     expect(rank.get('k3')).toBeNull();
     expect(rank.get('idle')).toBeNull();
   });
+
+  it('渠道运行中失败被标 disabled：引发的那条路由 restoresChannel 为真，别的路由为假（#1635：它不能转按需）', async () => {
+    await addRoute(t.db, { id: 'relay-opus', poolId: 'relay-a', modelId: 'opus-5.5', hostId: 'mirasim' });
+    await addRoute(t.db, { id: 'k3', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
+    const before = new Map((await routeProbeTargets(t.db)).map((row) => [row.routeId, row.restoresChannel]));
+    expect(before.get('relay-opus')).toBe(false);
+    await markChannelDisabled(t.db, {
+      channelId: 'relay',
+      routeId: 'relay-opus',
+      reason: '运行中失败',
+      now: NOW,
+    });
+    const after = new Map((await routeProbeTargets(t.db)).map((row) => [row.routeId, row.restoresChannel]));
+    expect(after.get('relay-opus')).toBe(true);
+    expect(after.get('k3')).toBe(false);
+  });
 });
 
 describe('写：一条路由的结论', () => {
@@ -183,7 +200,7 @@ describe('写：一条路由的结论', () => {
   it('不是 ok 的一律不在线：探通过的路由下一轮没探通就下线，原因照写', async () => {
     await saveRouteProbe(t.db, { routeId: 'car', state: 'ok', at: NOW, detail: '答上了：OK' });
     const later = new Date(NOW.getTime() + 15 * MIN);
-    for (const state of ['failed', 'not_wired', 'skipped'] as const) {
+    for (const state of ['failed', 'not_wired', 'skipped', 'on_demand'] as const) {
       await saveRouteProbe(t.db, { routeId: 'car', state, at: later, detail: `原因：${state}` });
       expect(await routeRow('car')).toMatchObject({
         alive: false,
@@ -415,6 +432,52 @@ describe('探针历史', () => {
       expect(text?.length).toBeLessThanOrEqual(ROUTE_PROBE_HISTORY_TEXT_MAX);
       expect(text).not.toBe(raw);
     }
+  });
+
+  it('降智检测五列（#1637）：写得进、读得回；没带题的和老行是 null，不是空串；超长截断并标注', async () => {
+    await saveRouteProbe(t.db, { routeId: 'car', state: 'failed', at: at(1), detail: '连不上' });
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'ok',
+      at: at(2),
+      detail: '答上了',
+      check: { question: '1+1？', expected: '2', answer: '2', passed: true, selfIdentity: 'Claude' },
+    });
+    const long = `答${'y'.repeat(ROUTE_PROBE_HISTORY_TEXT_MAX)}`;
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'failed',
+      at: at(3),
+      detail: '疑似降智',
+      check: { question: '1+1？', expected: '2', answer: long, passed: false, selfIdentity: null },
+    });
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'failed',
+      at: at(4),
+      detail: '回答认不出',
+      check: { question: '1+1？', expected: '2', answer: null, passed: null, selfIdentity: null },
+    });
+    const [none, ok, wrong, unjudged] = (await readRouteProbeHistory(t.db, 'car', 10)).reverse();
+    expect(none).toMatchObject({
+      checkQuestion: null,
+      checkExpected: null,
+      checkAnswer: null,
+      checkPassed: null,
+      selfIdentity: null,
+    });
+    expect(ok).toMatchObject({
+      checkQuestion: '1+1？',
+      checkExpected: '2',
+      checkAnswer: '2',
+      checkPassed: true,
+      selfIdentity: 'Claude',
+    });
+    expect(wrong?.checkPassed).toBe(false);
+    expect(wrong?.selfIdentity).toBeNull();
+    expect(wrong?.checkAnswer).toContain('已截断');
+    expect(wrong?.checkAnswer?.length).toBeLessThanOrEqual(ROUTE_PROBE_HISTORY_TEXT_MAX);
+    expect(unjudged).toMatchObject({ checkAnswer: null, checkPassed: null });
   });
 
   it('【故意造出的失败】历史表读不到：抛错，不回空数组冒充没有历史', async () => {

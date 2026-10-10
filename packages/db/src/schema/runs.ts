@@ -26,10 +26,12 @@
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  boolean,
   check,
   foreignKey,
   index,
   integer,
+  jsonb,
   numeric,
   pgTable,
   primaryKey,
@@ -229,5 +231,50 @@ export const taskRoutePins = pgTable(
       columns: [t.routeId, t.modelId],
       foreignColumns: [routes.id, routes.modelId],
     }),
+  ],
+);
+
+/** 过程记录的条目种类：和 shared 的 TRANSCRIPT_KINDS 一致（测试钉着两边一致）。 */
+export const RUN_TRANSCRIPT_KINDS = [
+  'prompt',
+  'assistant',
+  'tool_call',
+  'tool_result',
+  'error',
+  'result',
+  'truncated',
+] as const;
+export type RunTranscriptKind = (typeof RUN_TRANSCRIPT_KINDS)[number];
+
+/**
+ * 三段会话的过程记录（#1640）：引擎边跑边按条记（提示词、助手的话、工具调用和结果、报错、结论），驾驶舱任务详情按段读。
+ * 一条一行，挂在 runs 那一行上；seq 从 0 起，(run_id, seq) 联合主键，所以引擎重启后接回、从头重读输出时重复写同一条会被
+ * 挡掉（on conflict do nothing），不会写两遍。text 写进来之前已经截断、打过码（引擎侧，上限在 shared 的 TRANSCRIPT_LIMITS）。
+ * 老流程 session_runs 不记。runs 行删了跟着删。
+ */
+export const runTranscript = pgTable(
+  'run_transcript',
+  {
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => runs.id, { onDelete: 'cascade' }),
+    seq: integer('seq').notNull(),
+    at: timestamp('at', tz).notNull(),
+    kind: text('kind').$type<RunTranscriptKind>().notNull(),
+    text: text('text').notNull(),
+    /** 工具名：tool_call、tool_result 才有。 */
+    tool: text('tool'),
+    /** 成没成：tool_result、result 才有；读不到不写。 */
+    ok: boolean('ok'),
+    /** 补充：截断了带 { truncated, originalChars }，等等。 */
+    meta: jsonb('meta').$type<Record<string, unknown>>(),
+  },
+  (t) => [
+    primaryKey({ name: 'run_transcript_pk', columns: [t.runId, t.seq] }),
+    check(
+      'run_transcript_kind_known',
+      sql`${t.kind} in ('prompt', 'assistant', 'tool_call', 'tool_result', 'error', 'result', 'truncated')`,
+    ),
+    check('run_transcript_seq_nonneg', sql`${t.seq} >= 0`),
   ],
 );

@@ -1264,7 +1264,7 @@ describe('计时、快照', () => {
     ).rejects.toMatchObject({ code: 'TASK_NOT_FOUND' });
   });
 
-  it('先挂起提醒、后任务做完：撤掉 task: 挂起提醒；叫停或仍挂着不撤', async () => {
+  it('先挂起提醒、后任务做完：撤掉 task: 挂起提醒；叫停只撤这一代、别的代和仍挂着不撤', async () => {
     await world(t.db);
     const done = await addTask(t.db);
     const park = `task:${done.repo.owner}/${done.repo.name}#${done.task.issueNumber}:park:1`;
@@ -1313,13 +1313,22 @@ describe('计时、快照', () => {
     expect((await alertByKey(t.db, other))?.resolvedAt).toBeNull();
 
     const stopped = await addTask(t.db);
-    const stoppedKey = `task:${stopped.repo.owner}/${stopped.repo.name}#${stopped.task.issueNumber}:park:1`;
+    const stoppedWf = `task:${stopped.repo.owner}/${stopped.repo.name}#${stopped.task.issueNumber}`;
+    const stoppedKey = `${stoppedWf}:park:1`;
+    const stoppedLaterGen = `${stoppedWf}:r2:park:1`;
     await upsertAlert(t.db, {
       dedupeKey: stoppedKey,
       level: 'alert',
       taskId: stopped.task.id,
-      title: '自动合并没挂上',
-      body: '还停着',
+      title: '验收做不出来',
+      body: '这一代挂起过',
+    });
+    await upsertAlert(t.db, {
+      dedupeKey: stoppedLaterGen,
+      level: 'alert',
+      taskId: stopped.task.id,
+      title: '验收做不出来',
+      body: '重做出来的那一代还开着',
     });
     await ports().saveTaskState(
       {
@@ -1332,12 +1341,18 @@ describe('计时、快照', () => {
         lastProblem: null,
         subtasks: [],
       },
-      ctx,
+      { ...ctx, workflowId: stoppedWf },
     );
-    expect((await alertByKey(t.db, stoppedKey))?.resolvedAt).toBeNull();
+    const stoppedWithdrawn = await alertByKey(t.db, stoppedKey);
+    expect(stoppedWithdrawn?.body).toMatch(/^已撤：任务已经叫停了，这条挂起不再成立/);
+    expect(stoppedWithdrawn?.body).toContain('这一代挂起过');
+    expect(stoppedWithdrawn?.resolvedBy).toBe('engine:task-workflow');
+    expect(stoppedWithdrawn?.resolvedAt).not.toBeNull();
+    expect((await alertByKey(t.db, stoppedLaterGen))?.resolvedAt).toBeNull();
 
     const parked = await addTask(t.db);
-    const parkedKey = `task:${parked.repo.owner}/${parked.repo.name}#${parked.task.issueNumber}:park:1`;
+    const parkedWf = `task:${parked.repo.owner}/${parked.repo.name}#${parked.task.issueNumber}`;
+    const parkedKey = `${parkedWf}:park:1`;
     await upsertAlert(t.db, {
       dedupeKey: parkedKey,
       level: 'alert',
@@ -1356,7 +1371,7 @@ describe('计时、快照', () => {
         lastProblem: '自动合并没挂上',
         subtasks: [],
       },
-      ctx,
+      { ...ctx, workflowId: parkedWf },
     );
     expect((await alertByKey(t.db, parkedKey))?.resolvedAt).toBeNull();
   });

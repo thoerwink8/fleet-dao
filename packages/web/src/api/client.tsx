@@ -52,6 +52,8 @@ import type {
   Routing,
   RoutingEfforts,
   RoutingLayers,
+  RunTranscript,
+  RunTranscriptQuery,
   SetChannelEnabledBody,
   SetChannelEnabledResult,
   SetModelEnabledBody,
@@ -62,6 +64,8 @@ import type {
   Settings,
   TaskActionBody,
   TaskDetail,
+  TaskList,
+  TaskListFilter,
   TaskRoutePin,
   UpdateCredentialsBody,
   UpdatedModelRoute,
@@ -117,7 +121,14 @@ export interface FleetApi {
   /** 一个远程环境最近一次推来的主页、环境页快照加新鲜度（只读展示用）；没推过 404（node_never_reported）。 */
   node(nodeId: string): Promise<NodeDetail>;
   board(repoId: string): Promise<Board>;
+  /** 任务列表页（#1639）：所有仓、所有状态，最近更新在前，游标翻页，带各状态的数。 */
+  tasks(query?: TaskListFilter & { cursor?: string | undefined; limit?: number }): Promise<TaskList>;
   task(taskId: string): Promise<TaskDetail>;
+  /**
+   * 一段会话的过程记录（#1640），按序号增量读：after 不给从头，给了回序号更大的；在跑的段拿上次回的 nextAfter 接着读。
+   * 读不到（库不通、没接上）抛 ApiError（503），这一段跑在记录之前是 noRecord:true，两者分开。
+   */
+  runTranscript(taskId: string, runId: string, query?: RunTranscriptQuery): Promise<RunTranscript>;
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
   /** 给这张单的一段（动手、验收）指定模型或清掉（引擎下一次给这一段选路就照它）。 */
   updateTaskRoutePin(taskId: string, body: UpdateTaskRoutePinBody): Promise<TaskRoutePin>;
@@ -231,6 +242,9 @@ export const keys = {
   groomStatus: (repoId: string) => ['groom-status', repoId] as const,
   board: (repoId: string) => ['board', repoId] as const,
   task: (taskId: string) => ['task', taskId] as const,
+  taskList: (filter: TaskListFilter) =>
+    ['task-list', filter.status ?? '', filter.repoId ?? '', filter.q ?? ''] as const,
+  runTranscript: (taskId: string, runId: string) => ['run-transcript', taskId, runId] as const,
   routing: ['routing'] as const,
   routingLayers: ['routing-layers'] as const,
   routingEfforts: ['routing-efforts'] as const,
@@ -352,6 +366,20 @@ export function useTaskDetail(taskId: string | undefined) {
   });
 }
 
+/** 任务列表每次读多少行。 */
+export const TASK_LIST_PAGE_SIZE = 30;
+
+/** 任务列表按筛选条件翻页（往下滚或点「加载更多」读下一页）。任务一变（tasks 表的推送）就整份重拉。 */
+export function useTaskList(filter: TaskListFilter) {
+  const api = useApi();
+  return useInfiniteQuery({
+    queryKey: keys.taskList(filter),
+    queryFn: ({ pageParam }) => api.tasks({ ...filter, cursor: pageParam, limit: TASK_LIST_PAGE_SIZE }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.nextCursor,
+  });
+}
+
 /**
  * 路由的在线状态由探针写、不推送，所以定时重拉。探针 15 分钟一轮，但驾驶舱「渠道状态」要看半分钟内的新读数
  * （#1087），这里 30 秒拉一次（和定时任务、主页近况同档），多页共用同一份缓存。
@@ -373,6 +401,46 @@ export function useRoutingLayers({ enabled = true }: { enabled?: boolean } = {})
     queryFn: () => api.routingLayers(),
     refetchInterval: 30_000,
     enabled,
+  });
+}
+
+/** 在跑的段每隔多久读一次新的会话内容。 */
+export const TRANSCRIPT_POLL_MS = 3_000;
+/** 一次读多少条：接口单次上限。 */
+const TRANSCRIPT_PAGE = 500;
+
+/**
+ * 一段的会话内容（#1640）：打开才读（enabled）。每次读都从上次的 nextAfter 往后读，把新的接在已读到的后面，
+ * 一页读满就接着读下一页；done 为真就不再读，没 done 的每 3 秒读一次（页面不在前台时 React Query 自己停）。
+ * 读失败：已读到的条目留在 data 里，不清空；失败后不再自动轮询，由页面上的「重试」再读。
+ */
+export function useRunTranscript(taskId: string, runId: string, enabled: boolean) {
+  const api = useApi();
+  const qc = useQueryClient();
+  const key = keys.runTranscript(taskId, runId);
+  return useQuery({
+    queryKey: key,
+    enabled,
+    retry: false,
+    refetchInterval: (q) =>
+      q.state.status === 'error' || q.state.data?.done || q.state.data?.noRecord ? false : TRANSCRIPT_POLL_MS,
+    queryFn: async (): Promise<RunTranscript> => {
+      const prev = qc.getQueryData<RunTranscript>(key);
+      let entries = prev?.entries ?? [];
+      let after = prev?.nextAfter ?? undefined;
+      for (;;) {
+        const page = await api.runTranscript(taskId, runId, {
+          ...(after === undefined ? {} : { after }),
+          limit: TRANSCRIPT_PAGE,
+        });
+        const seen = new Set(entries.map((e) => e.seq));
+        entries = [...entries, ...page.entries.filter((e) => !seen.has(e.seq))];
+        after = page.nextAfter ?? after;
+        if (page.entries.length < TRANSCRIPT_PAGE || page.done) {
+          return { ...page, entries, nextAfter: page.nextAfter ?? prev?.nextAfter ?? null };
+        }
+      }
+    },
   });
 }
 
@@ -955,11 +1023,11 @@ export function useUpdateCredentials() {
  * 切回窗口也不重拉（root.tsx），漏写一张，那一块就停在打开页面时的样子。
  */
 const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
-  tasks: [['board'], ['task'], keys.home],
+  tasks: [['board'], ['task'], ['task-list'], keys.home],
   subtasks: [['board'], ['task']],
-  session_runs: [['board'], ['task'], ['pools'], keys.home],
-  // 三段流水（scope / manual / verify）：主页的流水线图和任务详情的流水都读它
-  runs: [keys.home, ['task']],
+  session_runs: [['board'], ['task'], ['task-list'], ['pools'], keys.home],
+  // 三段流水（scope / manual / verify）：主页的流水线图、任务详情的流水、任务列表的段和花费都读它
+  runs: [keys.home, ['task'], ['task-list']],
   progress_events: [['board'], ['task']],
   // asks 表留着（删表要创始人点头，#939），没有读它的页面：变了不用重拉任何东西
   asks: [],

@@ -4,7 +4,8 @@
 // → 结局记进 schedule_runs。按一次的成本放慢的执行方式（cursor-agent、grok），上一次探通了、还没到再探的
 // 时候，这一轮不探、不重写，结论照旧（它的过期线也跟着放宽，routeProbeStaleMinutes）。定时这一轮另外两档也省额度
 // （#1424，只这一轮，派前探测和人点的立即探测不看）：连着不通按 15、30、60、120、240 分钟退避，封顶 240，探通回到原节奏；
-// 已探通、又不在用途顺序前 2 位的，隔 60 分钟再探（本来更久的不改短）。会话用户挂的组织这会儿定不下来
+// 用途顺序前 2 位探通的，隔 30 分钟再探（本来更久的不改短）；不在前 2 位的这一轮不再主动探，结论写成按需探测
+// （on_demand，#1635）：要派给它时派前探测先探一次，退避没到期的先等退避到期。会话用户挂的组织这会儿定不下来
 // （读数刚变、引擎没切过号，real/session-org.ts）：Claude 订阅池这一轮也不探、结论照旧，这一轮记 partial、写明为什么。
 // 窗口已重置、这一轮没发过探测的组织，用现有探法补发一次最小请求，把下一个窗口开起来（#49）。已探过的不重复发，
 // 也不改写路由结论。派前探测和人点的立即探测不补发。
@@ -15,12 +16,15 @@ import type { RouteProbeTarget, ScheduleResult } from '@fleet-dao/db';
 import {
   type HostId,
   type OrgKind,
+  onDemandDetail,
+  type ProbeCheck,
   probeBackoffMinutes,
   probeBackoffPhrase,
   probeFailStreak,
-  ROUTE_PROBE_DEFER_MINUTES,
   ROUTE_PROBE_EVERY_MINUTES,
   ROUTE_PROBE_PRIMARY_COUNT,
+  ROUTE_PROBE_PRIMARY_EVERY_MINUTES,
+  ROUTE_PROBE_PRIMARY_NOTE,
   type RouteProbeState,
   routeProbeEveryMinutes,
 } from '@fleet-dao/shared';
@@ -73,6 +77,8 @@ interface ProbeCapture {
   requestText?: string | null;
   /** 响应原文。 */
   responseText?: string | null;
+  /** 降智检测（#1637）：这一次问的题和判的结果。没带题（没问到、不是真探）不给。 */
+  check?: ProbeCheck | null;
 }
 
 export type ProbeAttempt =
@@ -120,6 +126,8 @@ export interface RouteProbeJobDeps {
     requestText: string | null;
     /** 没拿到响应为 null。 */
     responseText: string | null;
+    /** 降智检测的题和判的结果；没带题为空。 */
+    check?: ProbeCheck | null;
   }): Promise<'saved' | 'route_not_found'>;
   /** 一条路由真探完（写库之前）：真实现里接整池暂停的报警和撤销。抛了只记日志，不改结论。 */
   afterProbe?(target: ProbeTarget, attempt: ProbeAttempt): Promise<void>;
@@ -180,6 +188,7 @@ export function planProbe(
   probers: Partial<Record<HostId, Prober>>,
   live: LiveOrgReading | null,
   now: Date,
+  opts?: { manual?: boolean },
 ): ProbePlan {
   if (t.billing === 'metered') {
     return {
@@ -205,7 +214,8 @@ export function planProbe(
   if (t.modelRetiredAt !== null && t.modelRetiredAt.getTime() <= now.getTime()) {
     return { state: 'skipped', detail: `模型「${t.modelName}」已下架，不探` };
   }
-  if (!t.inUse) {
+  // 人点的立即探测（manual）不看这条：就是要在把路由挂进用途之前先看它通不通（#1630）
+  if (!t.inUse && !opts?.manual) {
     return {
       state: 'skipped',
       detail: '没有哪个阶段在用这条路由（挂着但关着的不算），不花额度去探；哪个阶段用上它，下一轮就探',
@@ -250,48 +260,61 @@ function stillWaiting(ageMs: number, everyMinutes: number): boolean {
   return ageMs >= 0 && ageMs < (everyMinutes - ROUTE_PROBE_EVERY_MINUTES / 2) * 60_000;
 }
 
+type PaceWait =
+  | { kind: 'backoff' | 'defer'; detail: string }
+  /** 不在用途前 2 位：定时这一轮不探，结论写成按需探测。rewrite=false：上一次已经是按需，不重写（保住上一次真探的结果）。 */
+  | { kind: 'on_demand'; detail: string; rewrite: boolean };
+
 /**
- * 定时这一轮还没到再探的时候。回 null = 到期该探。
+ * 定时这一轮还没到再探的时候（或不探，转按需）。回 null = 到期该探。
  * 读不到上一次的时刻（不是有效时间）、时刻在未来：按到期该探，不跳过。
  * 名次没给（读不到排第几）：不当成排在后面，保持原间隔。
+ * 先看退避（任何名次都一样）；退避到期之后，不在前 2 位的转按需，前 2 位的按 30 分钟隔。
  */
-function paceWait(t: ProbeTarget, now: Date): { kind: 'backoff' | 'defer'; detail: string } | null {
+function paceWait(t: ProbeTarget, now: Date): PaceWait | null {
   const last = t.previous;
-  if (!last) return null;
-  const at = last.at instanceof Date ? last.at.getTime() : Number.NaN;
-  if (!Number.isFinite(at)) return null;
-  const age = now.getTime() - at;
-  if (age < 0) return null;
+  const at = last && last.at instanceof Date ? last.at.getTime() : Number.NaN;
+  const valid = last !== null && Number.isFinite(at) && now.getTime() - at >= 0;
+  const age = valid ? now.getTime() - at : 0;
 
-  if (last.state === 'failed') {
+  if (valid && last.state === 'failed') {
     // 原文没写次数：算已经不通 1 次（15 分钟），不把「没写」当成可以一直不探
     const streak = probeFailStreak(last.detail) ?? 1;
     const every = probeBackoffMinutes(streak);
-    if (!stillWaiting(age, every)) return null;
-    const next = new Date(at + every * 60_000);
-    return { kind: 'backoff', detail: `${probeBackoffPhrase(next)}（连着不通 ${streak} 次）` };
+    if (stillWaiting(age, every)) {
+      const next = new Date(at + every * 60_000);
+      return { kind: 'backoff', detail: `${probeBackoffPhrase(next)}（连着不通 ${streak} 次）` };
+    }
   }
 
-  if (last.state === 'ok' && t.alive) {
-    const rank = t.probeRank;
-    if (rank == null || rank <= ROUTE_PROBE_PRIMARY_COUNT) return null;
+  const rank = t.probeRank;
+  if (rank != null && rank > ROUTE_PROBE_PRIMARY_COUNT && !t.restoresChannel) {
+    if (last?.state === 'on_demand') {
+      return { kind: 'on_demand', detail: last.detail ?? onDemandDetail(null), rewrite: false };
+    }
+    return { kind: 'on_demand', detail: onDemandDetail(valid ? last : null), rewrite: true };
+  }
+
+  // 名次读不到（没排进任何用途、或算不出）：不当成前 2 位也不当成后面，照每轮的原间隔探（切号核对、老夹具都靠它）
+  if (valid && last.state === 'ok' && t.alive && rank != null) {
     const hostEvery = routeProbeEveryMinutes(t.hostId);
-    const every = Math.max(hostEvery, ROUTE_PROBE_DEFER_MINUTES);
+    const every = Math.max(hostEvery, ROUTE_PROBE_PRIMARY_EVERY_MINUTES);
     // 这种执行方式本来就隔得更久：planProbe 已经按那个间隔放慢，这里不改短
     if (every <= hostEvery) return null;
     if (!stillWaiting(age, every)) return null;
     return {
       kind: 'defer',
-      detail: `不在用途顺序前 ${ROUTE_PROBE_PRIMARY_COUNT} 位，探通了隔 ${every} 分钟再真探；上一次探通是 ${Math.round(age / 60_000)} 分钟前`,
+      detail: `用途前 ${ROUTE_PROBE_PRIMARY_COUNT} 位，探通了隔 ${every} 分钟再真探；上一次探通是 ${Math.round(age / 60_000)} 分钟前`,
     };
   }
   return null;
 }
 
-export type ScheduledProbePlan = ProbePlan | { backingOff: string };
+export type ScheduledProbePlan = ProbePlan | { backingOff: string } | { onDemand: string; rewrite: boolean };
 
 /**
- * 定时这一轮探不探。先走 planProbe（按量、没启用、下架、放慢的执行方式），再看退避和前 2 位以外的放慢。
+ * 定时这一轮探不探。先走 planProbe（按量、没启用、下架、放慢的执行方式），再看退避、前 2 位的 30 分钟、前 2 位以外的按需。
+ * 放慢的执行方式没到点（kept）、本来要探的（probe）才继续往下看；按需的比 kept 优先（不在前 2 位就是按需，不管执行方式）。
  * 派前探测不走这里。
  */
 export function planScheduledProbe(
@@ -301,11 +324,12 @@ export function planScheduledProbe(
   now: Date,
 ): ScheduledProbePlan {
   const plan = planProbe(t, probers, live, now);
-  if (!('probe' in plan)) return plan;
+  if (!('probe' in plan) && !('kept' in plan)) return plan;
   const wait = paceWait(t, now);
   if (!wait) return plan;
-  if (wait.kind === 'backoff') return { backingOff: wait.detail };
-  return { kept: wait.detail };
+  if (wait.kind === 'backoff') return 'kept' in plan ? plan : { backingOff: wait.detail };
+  if (wait.kind === 'on_demand') return { onDemand: wait.detail, rewrite: wait.rewrite };
+  return 'kept' in plan ? plan : { kept: wait.detail };
 }
 
 /** 这一次没探通之后，下一次定时探针隔多久。上一次不是不通从 1 次数；原文没写次数的不通算已经 1 次。 */
@@ -316,11 +340,11 @@ function nextFailureNote(t: ProbeTarget, now: Date): string {
   return `${probeBackoffPhrase(next)}（连着不通 ${streak} 次）`;
 }
 
-/** 探通、又不在前 2 位、这种执行方式本来不到 60 分钟一探：结论里写明下次隔 60 分钟。本来更久的不写这句。 */
-function deferNote(t: ProbeTarget): string | null {
-  if (t.probeRank == null || t.probeRank <= ROUTE_PROBE_PRIMARY_COUNT) return null;
-  if (routeProbeEveryMinutes(t.hostId) >= ROUTE_PROBE_DEFER_MINUTES) return null;
-  return `不在用途前 ${ROUTE_PROBE_PRIMARY_COUNT} 位，隔 ${ROUTE_PROBE_DEFER_MINUTES} 分钟再探`;
+/** 探通、又在前 2 位、这种执行方式本来不到 30 分钟一探：结论里写明下次隔 30 分钟。本来更久的不写这句。 */
+function primaryNote(t: ProbeTarget): string | null {
+  if (t.probeRank == null || t.probeRank > ROUTE_PROBE_PRIMARY_COUNT) return null;
+  if (routeProbeEveryMinutes(t.hostId) >= ROUTE_PROBE_PRIMARY_EVERY_MINUTES) return null;
+  return ROUTE_PROBE_PRIMARY_NOTE;
 }
 
 /** 原因太长时先截原因，退避那句留在末尾，整段仍不超过 ROUTE_PROBE_DETAIL_MAX。 */
@@ -354,10 +378,16 @@ export interface Conclusion {
   backingOff?: boolean;
   /** 会话用户挂的组织这会儿定不下来：不写库，上一次的结论照旧（在不在线照库里那样算）。 */
   unsettled?: boolean;
+  /**
+   * 不在用途前 2 位，定时这一轮没探（#1635）：state 是 on_demand。write = 写这条按需结论；keep = 上一次已经是按需，不重写。
+   * 按需的不算不在线（选路不挡，派前探一次）。
+   */
+  onDemand?: 'write' | 'keep';
   /** 没真探、没量到为 null。同一轮重试只留最终那一次的耗时和原文，第一次的原因已经写进 detail。 */
   durationMs: number | null;
   requestText: string | null;
   responseText: string | null;
+  check?: ProbeCheck | null;
 }
 
 const NO_CAPTURE = { durationMs: null, requestText: null, responseText: null } as const;
@@ -366,11 +396,13 @@ function captureOf(attempt: ProbeAttempt): {
   durationMs: number | null;
   requestText: string | null;
   responseText: string | null;
+  check: ProbeCheck | null;
 } {
   return {
     durationMs: attempt.durationMs ?? null,
     requestText: attempt.requestText ?? null,
     responseText: attempt.responseText ?? null,
+    check: attempt.check ?? null,
   };
 }
 
@@ -396,7 +428,9 @@ export async function conclude(
   const plan =
     opts?.pace && !opts.bypassPace
       ? planScheduledProbe(t, deps.probers, live, deps.now())
-      : planProbe(opts?.bypassPace ? { ...t, previous: null } : t, deps.probers, live, deps.now());
+      : planProbe(opts?.bypassPace ? { ...t, previous: null } : t, deps.probers, live, deps.now(), {
+          manual: opts?.bypassPace === true,
+        });
   if ('backingOff' in plan) {
     deps.log('info', `路由探针：${plan.backingOff}`, { routeId: t.routeId });
     return {
@@ -406,6 +440,18 @@ export async function conclude(
       at: deps.now(),
       org,
       backingOff: true,
+      ...NO_CAPTURE,
+    };
+  }
+  if ('onDemand' in plan) {
+    deps.log('info', '路由探针：不在用途前 2 位，不主动探，按需探测', { routeId: t.routeId });
+    return {
+      target: t,
+      state: 'on_demand',
+      detail: plan.onDemand,
+      at: deps.now(),
+      org,
+      onDemand: plan.rewrite ? 'write' : 'keep',
       ...NO_CAPTURE,
     };
   }
@@ -446,7 +492,7 @@ export async function conclude(
     // 定时、派前、人点的都写上：驾驶舱和通知看的是这条结论，免得退避看起来像探针停了
     attempt = { ...attempt, detail: withNote(attempt.detail, nextFailureNote(t, deps.now())) };
   } else if (opts?.pace) {
-    const note = deferNote(t);
+    const note = primaryNote(t);
     if (note) attempt = { ...attempt, detail: withNote(attempt.detail, note) };
   }
   if (deps.afterProbe) {
@@ -613,7 +659,7 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
   if (deps.orgSwitch) {
     // 真探了的才算读回（放慢没真探、组织定不下来没探的，结论照旧，都不算）
     const probed = conclusions
-      .filter((c) => !c.kept && !c.unsettled && !c.backingOff)
+      .filter((c) => !c.kept && !c.unsettled && !c.backingOff && !c.onDemand)
       .map((c) => ({
         routeId: c.target.routeId,
         orgKind: c.target.orgKind,
@@ -634,7 +680,13 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
   let offline = 0;
   let kept = 0;
   let backingOff = 0;
+  let keptOnDemand = 0;
   for (const c of conclusions) {
+    if (c.onDemand === 'keep') {
+      // 上一次已经是按需，不重写：算看过，不算不在线
+      keptOnDemand += 1;
+      continue;
+    }
     if (c.backingOff) {
       // 不重写：上一次的不通结论里已经写着下次大约几点。算看过、算不在线
       backingOff += 1;
@@ -664,6 +716,7 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
         durationMs: c.durationMs,
         requestText: c.requestText,
         responseText: c.responseText,
+        check: c.check ?? null,
       });
     } catch (err) {
       unsaved.push(`${c.target.routeId}：${errMessage(err)}`);
@@ -675,12 +728,12 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
     }
     written += 1;
     if (c.state === 'ok') online.push(c.target.routeId);
-    else offline += 1;
+    else if (c.state !== 'on_demand') offline += 1;
   }
   // 结论先落库，再补发：补发不改这一轮的在线结论，失败也不把这一轮改成没跑成
   await openResetWindows(deps, targets, sentOrgs);
   const goneNote = gone.length > 0 ? `；探的时候被删掉的路由：${gone.join('、')}` : '';
-  if (written === 0 && (kept + backingOff + unsettled.length === 0 || unsaved.length > 0)) {
+  if (written === 0 && (kept + backingOff + keptOnDemand + unsettled.length === 0 || unsaved.length > 0)) {
     return {
       result:
         unsaved.length > 0
@@ -690,7 +743,7 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
     };
   }
   // 结论照旧的也算看过了（放慢的上一次探通、在线；组织定不下来的照上一次的算），不在线的算进 found
-  const scanned = written + kept + backingOff + unsettled.length;
+  const scanned = written + kept + backingOff + keptOnDemand + unsettled.length;
   const problems = [
     ...(unsaved.length > 0
       ? [`${unsaved.length} 条路由的结论没写进库（它们还是上一轮的样子）：${unsaved.join('；')}`]
@@ -753,7 +806,7 @@ export async function probeOrgNow(deps: RouteProbeJobDeps, kind: OrgKind): Promi
   );
   const probed: ProbedRoute[] = [];
   for (const c of conclusions) {
-    if (c.kept || c.unsettled || c.backingOff) continue;
+    if (c.kept || c.unsettled || c.backingOff || c.onDemand) continue;
     try {
       await deps.save({
         routeId: c.target.routeId,

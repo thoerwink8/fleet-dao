@@ -4,7 +4,10 @@
 // 真的接进来**（不是 fake invoke），逐条制造它的每一条明确失败路径，断言最后贴在 GitHub 上的那条状态是
 // failure、而且描述里写明卡在哪一步。少一条这样的测试，「读不到就当过了」就会悄悄回来——它是本切片最贵的错。
 
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 import { runColdVerifyAndPost } from '../src/cold-verify-post.ts';
 import type { RunRecord, RunsWriter } from '../src/runner/not-wired.ts';
 import type { OneShotDeps, SpawnOutcome } from '../src/runner/one-shot.ts';
@@ -34,6 +37,10 @@ const INPUT: VerifierInvokeInput = {
 const MODEL_PASS = ['## 问题', '（没有）', '', 'verdict: pass'].join('\n');
 const MODEL_FAIL = ['## 问题', '- 没做到验收条：单子要 A、代码做了 B', '', 'verdict: fail'].join('\n');
 
+// 一次性调用把 stdout / stderr 落在 tmpDir 下：放系统临时目录，测完删掉，别在当前目录留垃圾。
+const TMP_DIR = mkdtempSync(join(tmpdir(), 'fleet-555-2-test-'));
+afterAll(() => rmSync(TMP_DIR, { recursive: true, force: true }));
+
 function fakeOneShot(scripted: SpawnOutcome): OneShotDeps {
   const runs: RunsWriter = {
     async start() {},
@@ -43,7 +50,7 @@ function fakeOneShot(scripted: SpawnOutcome): OneShotDeps {
     spawn: async () => scripted,
     buildCommand: (input) => ({ argv: ['fake-executor', '--model', input.modelId], cwd: input.cwd }),
     runs,
-    tmpDir: 'C:/temp/fleet-555-2-test',
+    tmpDir: TMP_DIR,
   };
 }
 
@@ -148,8 +155,8 @@ describe('冷调用的每条「读不到」都变成 failure 状态，不许吞�
     });
     expect(s.state).toBe('failure');
     expect(s.description).toContain('没讨论成');
-    // 作者族确实被跳过了（0006 的顺序照旧）
-    expect(asked).toEqual(FAMILY_ORDER.filter((f) => f !== 'gpt'));
+    // 先按 0006 的顺序问别家；都挑不出才改两家都验，轮到被避开的作者族 gpt（也挑不出）
+    expect(asked).toEqual([...FAMILY_ORDER.filter((f) => f !== 'gpt'), 'gpt']);
   });
 
   it('【故意造出的失败】冷调用根本没跑成（进程 exit=1、stdout 空）→ failure', async () => {

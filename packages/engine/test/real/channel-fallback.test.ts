@@ -2,8 +2,9 @@
 // 选路带着 failedChannel 来 → 先在 channel_states 标 disabled 写原因，选到别的渠道就记顺到谁；
 // disabled 的渠道不被选；全部渠道都不能用就派不出去（停下报人）；channel_states 读不到明确失败，不当成全 ok。
 import { randomUUID } from 'node:crypto';
-import { readChannelStates } from '@fleet-dao/db';
+import { readChannelStates, routeProbeAuditRows } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { foldRouteProbeRequests } from '@fleet-dao/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FailedChannel, PickRouteInput } from '../../src/ports.ts';
 import type { SessionOrgReader } from '../../src/real/session-org.ts';
@@ -133,5 +134,67 @@ describe('选路：渠道运行中失败换渠道', () => {
     } finally {
       await t.client.exec('alter table channel_states_unreadable rename to channel_states');
     }
+  });
+});
+
+describe('选路：渠道运行中失败后当场排立即探测（#1636）', () => {
+  const probeRows = () => routeProbeAuditRows(t.db, new Date(NOW.getTime() - 60 * 60_000));
+
+  it('判了换渠道的失败：排一次 routing.probe.request，点那一条路由、带单号来源、actor 是引擎', async () => {
+    await secondChannel();
+    const got = await pick({ failedChannel: failed({ issueNumber: 1621 }), avoidRouteIds: ['solo'] });
+    expect(got).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    const rows = await probeRows();
+    expect(rows.map((r) => r.action)).toEqual(['routing.probe.request']);
+    const { requests } = foldRouteProbeRequests(rows, NOW);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      state: 'queued',
+      by: 'engine:route-probe-now',
+      routeIds: ['solo'],
+      source: { kind: 'task-route-broken', issueNumber: 1621 },
+    });
+  });
+
+  it('同一条路由 10 分钟里又断（另一张单）：不再排', async () => {
+    await secondChannel();
+    await pick({ failedChannel: failed({ issueNumber: 1621 }), avoidRouteIds: ['solo'] });
+    await pick({ failedChannel: failed({ issueNumber: 1622 }), avoidRouteIds: ['solo'] });
+    expect(await probeRows()).toHaveLength(1);
+  });
+
+  it('不是路由的错（选路没带 failedChannel）：不排；老历史重放没带单号：也不排', async () => {
+    await pick();
+    await pick({ failedChannel: failed(), avoidRouteIds: ['solo'] });
+    expect(await probeRows()).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】排探测抛错：选路照样标 disabled、派到下一个渠道，不抛', async () => {
+    await secondChannel();
+    const logs: string[] = [];
+    const broken = createStorePorts({
+      db: t.db,
+      now: () => NOW,
+      draw: () => 0.5,
+      log: (m) => logs.push(m),
+      sessionOrg: onCarpool,
+      scheduleBreakProbe: async () => {
+        throw new Error('写不进库');
+      },
+    });
+    const got = await broken.pickRoute(
+      {
+        taskId: randomUUID(),
+        stage: 'triage',
+        avoidRouteIds: ['solo'],
+        avoidPoolIds: [],
+        avoidModelIds: [],
+        failedChannel: failed({ issueNumber: 1621 }),
+      },
+      ctx,
+    );
+    expect(got).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    expect((await readChannelStates(t.db)).get('claude-subscription')).toMatchObject({ status: 'disabled' });
+    expect(logs.some((m) => m.includes('排立即探测没成'))).toBe(true);
   });
 });

@@ -135,6 +135,10 @@ FAIL2BAN_SSHD_JAIL=/etc/fail2ban/jail.d/fleet-dao-sshd.local
 # 4315、4317（docs/reference/deploy.md §1.2）。引擎自己认端口靠现读 local-<端口>.token 的文件名，不认这个常量。
 MIRASIM_SESSION_PORT=4318
 MIRASIM_SESSION_UNIT_FILE=/etc/systemd/system/fleet-mirasim-session.service
+# 它的健康检查（#1676）：定时器每 2 分钟读 /api/health，连续 3 次不是 ok:true 就重启它（deploy/lib/mirasim-liveness.sh）。
+# 脚本放 /usr/local/lib 下的副本（全链归 root），不从检出直接跑
+MIRASIM_LIVENESS_SCRIPT=/usr/local/lib/fleet-dao/mirasim-liveness.sh
+MIRASIM_LIVENESS_UNITS=(fleet-mirasim-liveness.service fleet-mirasim-liveness.timer)
 # AI 会话跑在一个专用用户下（lib/session-user.sh：reclaude 设备上限，法国只占 1 台）；引擎（fleet）经 sudo 只能调
 # fleet-agent-scope 起会话。会话用户：没有 sudo、不能提权、家目录干净、没有 GitHub 凭据、读不到 /etc/fleet-dao。
 # 旧系统的会话用户不用、不碰；停用的 fleet-agent-dedicated 不建、不查（已删）。
@@ -697,6 +701,22 @@ setup_mirasim_session() {
   unit_changed=$WROTE
   if ((unit_changed)); then systemctl daemon-reload; fi
   ensure_unit_running fleet-mirasim-session.service "$unit_changed"
+  setup_mirasim_liveness "$u"
+}
+
+# 常驻单元的健康检查（#1676）：Restart=on-failure 管不到「进程在、单元 active、不干活」。只在常驻单元装了之后才走到这里，
+# 会话 Mirasim 没装时这两个单元也不装。
+setup_mirasim_liveness() { # 会话用户
+  local u=$1 f unit_changed=0
+  ensure_dir /usr/local/lib/fleet-dao root:root 755
+  put_file "$MIRASIM_LIVENESS_SCRIPT" root:root 755 "$(<"$DEPLOY_DIR/lib/mirasim-liveness.sh")"
+  for f in "${MIRASIM_LIVENESS_UNITS[@]}"; do
+    render "$DEPLOY_DIR/france/$f" SESSION_USER="$u"
+    put_file "/etc/systemd/system/$f" root:root 644 "$RENDERED"
+    if ((WROTE)); then unit_changed=1; fi
+  done
+  if ((unit_changed)); then systemctl daemon-reload; fi
+  ensure_unit_running fleet-mirasim-liveness.timer "$unit_changed"
 }
 
 setup_app_config() {

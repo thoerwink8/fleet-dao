@@ -42,6 +42,7 @@ interface PatrolLib {
     now: () => Date;
     loadBaseline: () => string | null;
     saveBaseline: (text: string) => void;
+    trainNote?: () => string;
   }): Promise<{ code: number; lines: string[]; report: Report }>;
   fetchFrance(opts: {
     home: string;
@@ -223,5 +224,49 @@ describe('巡查脚本：只读、读不到 ssh 名字明确失败', () => {
     expect(raw.ok).toBe(false);
     const r = await patrol(raw, null);
     expect(r.code).toBe(2);
+  });
+});
+
+describe('巡查脚本：总开关关着时带上发版车状态（#1674）', () => {
+  const closed = () => lib.sampleRaw({ at: NOW, master: 'false' });
+  const run = (raw: Raw, trainNote?: () => string) =>
+    lib.runPatrol({
+      fetchRaw: async () => raw,
+      now: () => NOW,
+      loadBaseline: () => null,
+      saveBaseline: () => {},
+      ...(trainNote ? { trainNote } : {}),
+    });
+
+  it('总开关关着：那条 ALERT 后面接发版车的一句话，条数不变', async () => {
+    const r = await run(ok(closed()), () => '发版车驱动死在第 4 步「发版」，没人恢复');
+    expect(r.code).toBe(1);
+    const line = r.report.alerts.find((a) => a.startsWith('引擎总开关关着'));
+    expect(line).toContain('发版车：发版车驱动死在第 4 步「发版」，没人恢复');
+    expect(r.report.alerts.length).toBe(1);
+    expect(r.lines.join('\n')).toContain('没人恢复');
+  });
+
+  it('总开关开着：不去读发版车状态', async () => {
+    let called = 0;
+    const r = await run(ok(good()), () => {
+      called += 1;
+      return 'x';
+    });
+    expect(r.code).toBe(0);
+    expect(called).toBe(0);
+  });
+
+  it('【故意造出的失败】读发版车状态抛错：照样报总开关关着，并写明读不了，不吞掉', async () => {
+    const r = await run(ok(closed()), () => {
+      throw new Error('磁盘坏了');
+    });
+    expect(r.code).toBe(1);
+    expect(r.report.alerts[0]).toContain('发版车状态读不了（磁盘坏了）');
+  });
+
+  it('没接 trainNote：和以前一样', async () => {
+    const r = await run(ok(closed()));
+    expect(r.report.alerts[0]).toBe('引擎总开关关着（engine.master 是 false）');
   });
 });

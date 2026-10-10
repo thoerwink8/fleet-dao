@@ -70,3 +70,25 @@ Fleet 接收 Mirasim 的平台成功结果前核账本：至少有计费模型�
 测试 runner 上的 Mac 协议与进程树验证不等于用户 Mac 的 GUI 接入或服务端账单验收。实际完成程度始终以 [归档页](archive/progress-2026-10-02.md) 里 2026-10-02 那几节的证据和之后的 PR 为准。
 
 诊断日志在 Windows `%LOCALAPPDATA%\reclaude-mirasim\launch.log`、Mac `~/Library/Caches/reclaude-mirasim/launch.log`、Linux `~/.cache/reclaude-mirasim/launch.log`，只记录版本、会话 ID、来源、generation 与失败原因，不记录认证字段，不占 stdout。
+
+## 6. Mirasim 提示「Claude Code 升级失败」
+
+现象：设置里 `cli.claude.minVersion` 比 reclaude 背后那份 claude 新，Mirasim 想升级，提示写「claude runs from …\mirasim-reclaude.exe, pinned by the launch command in Settings → Agents → Claude, and that copy is still 〈版本〉」（#1669，Windows、Mirasim v0.0.454）。
+
+结论：Mirasim 按启动命令找 claude，不按 PATH。下面是读 Mirasim 服务端 0.0.425 的 `server.cjs` 查到的，提示原文和截图一致：
+
+- 找哪份：设置里填了启动命令（迁移后就是本启动器），就用它；没填才按 PATH 找 `claude`。
+- 探版本：跑「启动命令 `--version`」，取 stdout 第一行里的版本号，限时 5 秒（升级后最后复核一次 45 秒）。
+- 升级：启动命令被钉住时，不跑 npm，只试两步：先跑「启动命令 `update`」，再跑 Claude 官方安装脚本（Windows 是 `irm https://claude.ai/install.ps1 | iex`）。之后再探一次启动命令的版本，没变就报上面那条失败。
+- 官方安装脚本另装一份 claude，reclaude 不用它，所以这一步动不了版本。
+
+启动器的做法：`--version` 和 `update` 都原样交给 reclaude，不截、不改（`launcher/main.go`，测试 `TestMirasimVersionProbeAndSelfUpdateReachReclaudeUnchanged`）。
+
+- Mirasim 看到的版本，就是 reclaude 背后那份 claude 的真实版本。
+- Mirasim 的「升级」，实际跑的就是 `reclaude update`。
+
+怎么升级：走 reclaude 自己的升级命令 `reclaude update`。reclaude 跑哪份 claude 由 reclaude 定：配置目录里 `claude.path` 写的那份，或 reclaude 自带的 CLI。自带的 CLI 手换会被 reclaude 覆盖回去（[adapters 参考](reference/adapters.md) CC-13）。
+
+- reclaude 还没发到 `minVersion` 那一版时，`reclaude update` 后版本不变，Mirasim 照样报这条失败。这时只能等 reclaude 出新版。
+- 不要照提示清掉启动命令：清了就不经 reclaude，自有额度没有了。
+- 不要拿装了另一份 claude 冒充升级成功。

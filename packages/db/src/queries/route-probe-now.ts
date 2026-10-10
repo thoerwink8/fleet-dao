@@ -6,6 +6,7 @@ import {
   ROUTE_PROBE_TARGET,
   type RouteProbeAuditRow,
   type RouteProbeResult,
+  type RouteProbeSource,
 } from '@fleet-dao/shared';
 import { and, eq, gte } from 'drizzle-orm';
 import type { Db } from '../client.ts';
@@ -40,6 +41,25 @@ export function recordRouteProbeStart(db: Db, requestId: string, at: Date): Prom
     after: { requestId },
     ok: true,
     at,
+  });
+}
+
+/**
+ * 引擎自己排一次立即探测（任务在路由上断了，#1636）：和驾驶舱点一下同一条记录（routing.probe.request），
+ * 只是 actor 是引擎、after 里带 source 说明是谁要的。写不进原样抛。
+ */
+export function recordRouteProbeRequest(
+  db: Db,
+  input: { requestId: string; routeIds: string[]; source: RouteProbeSource; reason: string; at: Date },
+): Promise<void> {
+  return recordEngineAudit(db, {
+    action: ROUTE_PROBE_ACTION.request,
+    target: ROUTE_PROBE_TARGET,
+    actorId: ROUTE_PROBE_NOW_ACTOR,
+    after: { requestId: input.requestId, routeIds: input.routeIds, source: input.source },
+    reason: input.reason,
+    ok: true,
+    at: input.at,
   });
 }
 

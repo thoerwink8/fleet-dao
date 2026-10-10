@@ -679,8 +679,9 @@ function spec(over: Partial<HostRunSpec> = {}): HostRunSpec {
   };
 }
 
-function drivers(run: HostRunners, sessionProxy?: string) {
+function drivers(run: HostRunners, sessionProxy?: string, agentsFile?: () => Promise<string>) {
   return hostDrivers({
+    ...(agentsFile ? { agentsFile } : {}),
     claudeCommand: (user) => [`/opt/fake/${user}/reclaude`],
     cursorCommand: (user) => [`/opt/fake/${user}/cursor-agent`],
     grokCommand: (user) => [`/opt/fake/${user}/grok`],
@@ -1016,6 +1017,45 @@ describe('Claude Code 的驱动', () => {
     expect(fake.specs[0]).not.toHaveProperty('persistSession');
     expect(fake.specs[1]).toMatchObject({ permissionMode: 'dontAsk', persistSession: false });
     expect(fake.options[0]?.command).toEqual(['/opt/fake/fleet-agent-carpool/reclaude']);
+  });
+});
+
+describe('Claude Code 的驱动：子代理定义文件（#1641）', () => {
+  const id = () => randomUUID();
+
+  it('干活的会话带 agentsFile，路由探针不带（探针一问一答，不派子代理）', async () => {
+    const fake = fakeRun(() => ({ result: { text: 'OK' } }));
+    const driver = drivers(
+      { 'claude-code': fake.run },
+      undefined,
+      async () => '/srv/agents/subagents-1.json',
+    )['claude-code'];
+    await driver.run(spec({ purpose: 'work', session: { mode: 'new', id: id() } }), {});
+    await driver.run(spec({ purpose: 'probe', session: { mode: 'new', id: id() } }), {});
+    expect(fake.specs[0]?.agentsFile).toBe('/srv/agents/subagents-1.json');
+    expect(fake.specs[1]).not.toHaveProperty('agentsFile');
+  });
+
+  it('没配生成函数（测试、只起一次的工具）：不带', async () => {
+    const fake = fakeRun(() => ({ result: { text: 'OK' } }));
+    const driver = drivers({ 'claude-code': fake.run })['claude-code'];
+    await driver.run(spec({ purpose: 'work', session: { mode: 'new', id: id() } }), {});
+    expect(fake.specs[0]).not.toHaveProperty('agentsFile');
+  });
+
+  it('【故意造出的失败】生成不成：干活的会话起不来、报错写清原因、插头一次都没被叫到；探针照跑（它不用）', async () => {
+    const fake = fakeRun(() => ({ result: { text: 'OK' } }));
+    const driver = drivers({ 'claude-code': fake.run }, undefined, async () => {
+      throw new Error('子代理定义文件生成不成（/x → /y）：磁盘满了');
+    })['claude-code'];
+    await expect(
+      driver.run(spec({ purpose: 'work', session: { mode: 'new', id: id() } }), {}),
+    ).rejects.toThrow(
+      'claude-code 会话起不来：子代理定义文件没生成成（#1641）：子代理定义文件生成不成（/x → /y）：磁盘满了',
+    );
+    expect(fake.specs).toHaveLength(0);
+    await driver.run(spec({ purpose: 'probe', session: { mode: 'new', id: id() } }), {});
+    expect(fake.specs).toHaveLength(1);
   });
 });
 

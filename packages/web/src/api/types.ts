@@ -77,6 +77,7 @@ import type {
   RoutingLayersResponse,
   RoutingResponse,
   RunSchema,
+  RunTranscriptResponse,
   SetChannelEnabledRequest,
   SetChannelEnabledResponse,
   SetModelEnabledRequest,
@@ -86,6 +87,9 @@ import type {
   SettingsResponse,
   TaskActionRequest,
   TaskDetailResponse,
+  TaskListQuery,
+  TaskListResponse,
+  TaskListRowSchema,
   UpdateCredentialsRequest,
   UpdateModelRouteRequest,
   UpdateModelRouteResponse,
@@ -134,6 +138,15 @@ export type Activity = z.infer<typeof ActivitySchema>;
 export type NowItem = z.infer<typeof NowItemSchema>;
 
 export type TaskDetail = z.infer<typeof TaskDetailResponse>;
+/** 任务列表页（/tasks，#1639）：一页行、各状态的数、下一页游标。 */
+export type TaskList = z.infer<typeof TaskListResponse>;
+export type TaskListRow = z.infer<typeof TaskListRowSchema>;
+/** 读一页的条件：不给的键 = 不筛。 */
+export type TaskListFilter = Pick<z.input<typeof TaskListQuery>, 'status' | 'repoId' | 'q'>;
+/** 一段会话的过程记录（#1640）：一页条目、下次从哪读、读完没有、有没有记录。 */
+export type RunTranscript = z.infer<typeof RunTranscriptResponse>;
+export type TranscriptEntry = RunTranscript['entries'][number];
+export type RunTranscriptQuery = { after?: number | undefined; limit?: number | undefined };
 export type Run = z.infer<typeof RunSchema>;
 export type TaskActionBody = z.input<typeof TaskActionRequest>;
 

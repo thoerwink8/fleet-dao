@@ -101,4 +101,19 @@ describe('foldRouteProbeRequests', () => {
     expect(requests).toEqual([]);
     expect(unreadable).toBe(3);
   });
+
+  it('自动排的请求带来源（任务断链，#1636）：并进视图；老请求不带也照常读', () => {
+    const source = { kind: 'task-route-broken', issueNumber: 1621 };
+    const { requests, unreadable } = foldRouteProbeRequests(
+      [
+        row(ROUTE_PROBE_ACTION.request, { requestId: 'auto', routeIds: ['r1'], source }),
+        row(ROUTE_PROBE_ACTION.request, { requestId: 'old', routeIds: ['r1'] }, at(1)),
+        row(ROUTE_PROBE_ACTION.request, { requestId: 'bad', routeIds: ['r1'], source: { kind: '?' } }, at(2)),
+      ],
+      T0,
+    );
+    expect(unreadable).toBe(1);
+    expect(requests.find((r) => r.requestId === 'auto')?.source).toEqual(source);
+    expect(requests.find((r) => r.requestId === 'old')).not.toHaveProperty('source');
+  });
 });

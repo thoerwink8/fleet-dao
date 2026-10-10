@@ -23,8 +23,16 @@ import type {
   Step,
   Subtask,
   Task,
+  TaskListGroup,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
+
+/** 任务列表的一页：行、各组的数、下一页游标。 */
+export interface TaskListPage {
+  items: { task: Task; updatedAt: string }[];
+  counts: Record<TaskListGroup, number>;
+  nextCursor?: string | undefined;
+}
 
 /** 一张单的三段流水（库里的 runs 表）一笔，加上它是怎么和这张单对上的。 */
 export type SegmentRunRecord = SegmentRun & { matchedBy: SegmentMatch };
@@ -279,6 +287,19 @@ export interface BoardStore {
   /** 看板上的需求：没结束的，加上进入终态不到 7 天的。按优先级、再按建单先后排。 */
   listBoardTasks(repoId: string): Promise<Task[]>;
   getTask(id: string): Promise<Task | null>;
+  /**
+   * 任务列表页（#1639）：所有仓的需求（不限 7 天窗口，做完、失败、叫停的都在），按最近更新（开单、快照写入、状态最近一次变化三者最晚）倒序翻页，
+   * 同一毫秒的按编号倒序。分组规则在 shared 的 taskListGroupOf。仓编号不是 uuid（库版）或不存在，回空页、各组都是 0。
+   * q：全是数字（可带 #）= 单号精确，也找标题里带这串数字的；其余 = 标题包含，不分大小写。counts 受仓和 q 影响、不受 group 影响。
+   * 游标看不懂抛 InvalidCursorError。
+   */
+  listTasks(
+    query: {
+      group?: TaskListGroup | undefined;
+      repoId?: string | undefined;
+      q?: string | undefined;
+    } & PageRequest,
+  ): Promise<TaskListPage>;
   listSubtasks(taskIds: readonly string[]): Promise<Subtask[]>;
   /** taskIds 给了就只要这些需求的会话（不属于任何需求的会话不在其中）；active=true 只要没结束的。 */
   listRuns(filter: {
