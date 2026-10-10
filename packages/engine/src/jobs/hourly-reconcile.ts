@@ -1,7 +1,7 @@
 // 每小时对账（design 第六节「断链怎么被发现」第 4 层）：一轮 = 记下开始 → 工作树（jobs/worktree-sweep.ts：没有在跑的任务
 // 在用的树，什么都不剩的删掉，剩着没推的东西的报要人拍）→ 核对（jobs/reconcile-checks.ts：合了的
 // PR 都记了账、撤掉随 Fusion 删了的那一处核对留下的旧提醒；额度读数那处等 #76）→ 提醒（jobs/alert-sweep.ts：条件没了的撤掉、卡住报警超过 24 小时没人处理的再推一次、同一条立案）
-// → 单已关、任务工作流还挂着的发放弃信号（jobs/closed-issue-tasks.ts，#1198）
+// → 单已关且停下等人的发放弃信号并撤挂起提醒（jobs/closed-issue-tasks.ts，#1198 / #1816）
 // → GitHub 两个机器人的权限自检（jobs/github-app-check.ts：缺的、没查成的报提醒，好了自己撤）
 // → 整池暂停到期的飞书（jobs/pool-hold-push.ts：没配、没推成记没查成，不当成推过；不给 poolHoldPush 的单测这一项跳过）
 // → 主线红的飞书（jobs/main-red-push.ts：变红推一次、转绿推已恢复；没配、没推成、运行列表读不到记没查成，不当成推过；不给 mainRedPush 的单测这一项跳过）
@@ -124,7 +124,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   const historical = await retireHistoricalFactAlerts(deps);
   const quota = await checkQuotaFreshness(deps);
   const autoMerges = await checkAutoMerges(deps);
-  // 单已关、任务还挂着的撤掉（#1198）：放在提醒之前，撤掉的任务那一轮之后的提醒对账再收拾它留下的提醒
+  // 单已关且停下等人的撤掉（#1816）：当场发放弃并撤挂起提醒；放在提醒清扫之前
   const closedTasks = await abandonClosedIssueTasks(deps);
   // 单已关、没有工作流的遗留行也收掉（#1622）：和上面的任务工作流对账合并统计
   const idleClosedRows = await settleIdleClosedIssueRows(deps);

@@ -626,6 +626,8 @@ function reconcileHarness(mainRedPush: () => Promise<SweepPart>): {
     },
     closedIssueTasks: {
       runningTaskWorkflowIds: async () => [],
+      isParked: async () => false,
+      resolveParkAlerts: async () => 0,
       issueState: async () => 'open',
       abandon: async () => 'gone',
     },
