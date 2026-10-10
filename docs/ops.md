@@ -84,18 +84,6 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | fleet-agent-carpool | SESSION_USER | deploy/lib/session-user.sh |
 
 <!-- fleet:users:end -->
-<!--
-对照（给 diff 核对用；不在用户区块里，手写表未改）：
-deploy/france.sh：PILOT_USER=pilot
-deploy/hk.sh：ensure_service_user fleet
-deploy/lib/human-tier.sh：ensure_service_user fleet
-deploy/lib/session-user.sh：SESSION_USER=fleet-agent-carpool
-packages/conventions/test/ops-tables.test.ts 本片未改。USERS_BLOCK 原文四行：
-| pilot | PILOT_USER | deploy/france.sh |
-| fleet | ensure_service_user | deploy/hk.sh |
-| fleet | ensure_service_user | deploy/lib/human-tier.sh |
-| fleet-agent-carpool | SESSION_USER | deploy/lib/session-user.sh |
--->
 | 用户 | 在哪 | 干什么 |
 |---|---|---|
 | `fleet` | 两台 | 引擎、驾驶舱后端、Temporal（法国），飞书网关（香港）。系统用户，家 `/home/fleet`（750） |
