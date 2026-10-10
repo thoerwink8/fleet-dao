@@ -671,6 +671,13 @@ function RouteRow({
         ) : (
           <StatusChip tone={routeStateTone[kind]} label={routeStateLabel[kind]} />
         )}
+        {kind === 'unused' && !active && (probe?.state === 'ok' || probe?.state === 'failed') ? (
+          // 没用途在用的路由点立即探测（#1630）：灰的「未被用途使用」不变，结论在旁边写出来，不画红
+          <StatusChip
+            tone={probe.state === 'ok' ? 'done' : 'stall'}
+            label={probe.state === 'ok' ? '探过：通' : '探过：不通'}
+          />
+        ) : null}
         {stale && !active && kind !== 'unused' ? <StatusChip tone="stall" label="结论过期" /> : null}
         <span className="num hidden shrink-0 text-caption text-muted-foreground sm:inline">
           {probe ? formatAgo(probe.at, now) : ''}
