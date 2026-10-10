@@ -438,7 +438,8 @@ describe('规矩的文字：通用段和 commander 技能说「无人值守时�
   const SKILL = read('../../skills/commander/SKILL.md');
   const line = SHARED.split('\n').find((l) => l.startsWith('- 无人值守')) ?? '';
 
-  it('通用段：先 on、起子代理、这一轮不结束、等完成通知、前台等待不超过 60 秒、done / needs-you / off；不再写脱离会话的工人', () => {
+  // 「单次前台等待不超过 60 秒」2026-10-10 挪到不分无人值守与否的「派 Agent 子代理」那条（决定 0078，钉在 steer-and-subagents.rules.test.ts），这里不再重写一遍
+  it('通用段：先 on、起子代理、这一轮不结束、等完成通知、done / needs-you / off；不再写脱离会话的工人；等待上限照「派 Agent 子代理」那条、不另写', () => {
     expect(line).toContain('unattended.mjs on');
     expect(line).toContain('Agent 子代理');
     expect(line).toContain('不脱离会话');
@@ -446,7 +447,10 @@ describe('规矩的文字：通用段和 commander 技能说「无人值守时�
     expect(line).not.toContain('--detached');
     expect(line).toContain('这一轮不结束');
     expect(line).toContain('完成通知');
-    expect(line).toContain('单次前台等待不超过 60 秒');
+    expect(line).not.toContain('前台等待');
+    expect(SHARED.split('\n').find((l) => l.startsWith('- 派 Agent 子代理')) ?? '').toContain(
+      '单次前台等待不超过 60 秒',
+    );
     for (const k of ['`done`', '`needs-you`', '`off`']) expect(line).toContain(k);
   });
 
