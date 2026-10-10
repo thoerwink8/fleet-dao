@@ -167,7 +167,6 @@ export async function runColdVerifyForPr(
     return await post(pr.head, status, { sourceProblem: `读不到单子：${why}` });
   }
 
-  // 作者族必须个个都是我们认得的：认不出就挑不出「不同的族」，硬跑就可能是同族自审。一个都没有也一样。
   // 认得 = 0006 的验收族（FAMILY_ORDER，进避让名单）+ 目录里别的真实存在的族（glm、gemini、muse，不进避让：
   // 验收人只从 FAMILY_ORDER 里挑，必然和它们不同族）。cursor（背后是哪家不知道）、unclassified、jev 不算认得。
   const known = new Set<string>(FAMILY_ORDER);
@@ -185,16 +184,8 @@ export async function runColdVerifyForPr(
       if (!otherAuthors.includes(family)) otherAuthors.push(family);
     } else unknown.push(raw);
   }
-  if (avoid.length + otherAuthors.length === 0 || unknown.length > 0) {
-    const status = coldVerifyNotRun(
-      avoid.length + otherAuthors.length === 0 && unknown.length === 0
-        ? `PR #${prNumber} 没有记下是哪一族写的：没法保证换了家族`
-        : `认不出 PR #${prNumber} 的作者族「${unknown.join('、')}」（认得的是 0006 的 ${FAMILY_ORDER.join('、')}，加上目录里的 ${[...authorOnly].join('、')}）：认不出就挑不出别家`,
-    );
-    return await post(pr.head, status, {
-      sourceProblem: `作者族认不出：${unknown.length > 0 ? unknown.join('、') : '没有记录'}`,
-    });
-  }
+  // 认不出、或一个都没有：不停下，改成两家都验（两个不同的族各验一遍，都过才算过；verifier-invoke 的 requireTwoFamilies）。
+  const requireTwoFamilies = unknown.length > 0 || avoid.length + otherAuthors.length === 0;
 
   // 3. 起一次冷调用。diff / specDir 都注入进去（verifier-invoke 不自己调 git）。
   // 点名但没改的文件在这里读：引擎镜像里 PR 头上的内容。读失败留在提示词里，不从这一层抛出去。
@@ -210,6 +201,7 @@ export async function runColdVerifyForPr(
     modelFamiliesAvoid: avoid,
     ...(otherAuthors.length > 0 ? { otherAuthorFamilies: otherAuthors } : {}),
     round,
+    ...(requireTwoFamilies ? { requireTwoFamilies: true } : {}),
   };
   const invokeDeps: ColdVerifyInvokeDeps = {
     oneShot: deps.oneShot,

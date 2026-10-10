@@ -321,6 +321,28 @@ describe('researcher', () => {
       ).pass,
     ).toBe(false);
   });
+  const tail = '\n来源：https://code.claude.com/docs/en/sub-agents，查文档日期：2026-10-09';
+  it('对的说法不止「高于」：赢过、> 排序、编号 2 对 3 都认（前两条是 Haiku、Opus 2026-10-10 的实答）', async () => {
+    for (const a of [
+      '托管设置(1) > `--agents` 命令行参数(2) > 项目 `.claude/agents/`(3) > 用户 `~/.claude/agents/`(4) > 插件 `agents/` 目录(5)。`--agents` 排第 2，所以同名时它赢过项目里的 `.claude/agents/` 定义，只输给托管设置。',
+      '从高到低：①托管设置（组织级）> ②命令行 `--agents` > ③项目 `.claude/agents/` > ④用户 `~/.claude/agents/`。\n2. `--agents` 排第 2，只比托管设置低。\n3. 和项目 `.claude/agents/` 里的同名定义比，`--agents` 赢，因为它是 2、项目是 3。',
+      '`--agents` 排第 2。\n托管设置 > `--agents` > 项目 `.claude/agents/`',
+      '`--agents` 排第 2，只比托管设置低。\n编号：`--agents` 是 2、项目是 3。',
+    ]) {
+      expect((await judge('researcher/agents-priority', a + tail)).pass, a).toBe(true);
+    }
+  });
+  it('错的：排第 2 但说输给项目、被项目覆盖、排序里项目在前，都不算「高于」', async () => {
+    for (const a of [
+      '`--agents` 排第 2，同名时输给项目 `.claude/agents/`。',
+      '`--agents` 排第 2，同名时会被项目 `.claude/agents/` 覆盖。',
+      '`--agents` 排第 2：托管设置 > 项目 `.claude/agents/` > `--agents` > 用户 `~/.claude/agents/`。',
+    ]) {
+      const v = await judge('researcher/agents-priority', a + tail);
+      expect(v.pass, a).toBe(false);
+      expect(v.reason).toContain('没说 --agents 高于项目');
+    }
+  });
 });
 
 describe('brief-drafter（调 check-brief.mjs）', () => {
@@ -514,6 +536,15 @@ describe('debugger（先看根因再看 diff 大小）', () => {
     expect(big.pass).toBe(false);
     expect(big.reason).toContain('超过上限');
   });
+  it('week-start-tz：根因修法整份写回成 CRLF（Windows 上 Python 文本模式那样）照样过，换行符不算改动', async () => {
+    const id = 'debugger/week-start-tz';
+    const crlf = await judge(id, '根因', (d, cd) => {
+      copyHiddenDir('fix')(d, cd);
+      edit(d, 'src/week.ts', (s) => s.replace(/\r?\n/g, '\r\n'));
+      edit(d, 'test/week.test.ts', (s) => s.replace(/\r?\n/g, '\r\n'));
+    });
+    expect(crlf).toMatchObject({ pass: true });
+  });
   it('merge-config：改 mergeConfig 过；只在 loadConfig 里克隆（治症状）不过', async () => {
     const id = 'debugger/merge-config';
     expect((await judge(id, '根因', copyHiddenDir('fix'))).pass).toBe(true);
@@ -565,5 +596,49 @@ describe('standard-editor', () => {
       edit(d, 'rules/pr-rules.md', (s) => s.replace('超过 2 轮没合进去的 PR', '超过 5 次没合进去的 PR'));
     });
     expect(onlyOne.pass).toBe(false);
+  });
+  it('测试里加「旧说法不在了」的反向断言（Sonnet、Opus 2026-10-10 的实答写法）：过', async () => {
+    const negated = await judge(id, '改了', (d) => {
+      fix(d);
+      edit(d, 'test/rules.test.ts', (s) =>
+        s.replace(
+          "assert.ok(rules.includes('一个 PR 最多 2 轮'));",
+          "assert.ok(rules.includes('一个 PR 最多 2 轮'));\n  assert.ok(!rules.includes('一个 PR 最多 3 轮'));",
+        ),
+      );
+    });
+    expect(negated).toMatchObject({ pass: true });
+    const noMatch = await judge(id, '改了', (d) => {
+      fix(d);
+      edit(
+        d,
+        'test/rules.test.ts',
+        (s) =>
+          `${s}\ntest('旧的 PR 轮数说法没有残留', () => {\n  assert.doesNotMatch(rules, /(?<![0-9])3 轮/);\n});\n`,
+      );
+    });
+    expect(noMatch).toMatchObject({ pass: true });
+  });
+  it('标题还写着 3 轮；测试没钉住 2 轮（放回原来的规矩也过）：都不过', async () => {
+    const title = await judge(id, '改了', (d) => {
+      fix(d);
+      edit(d, 'test/rules.test.ts', (s) =>
+        s.replace("test('规矩写明一个 PR 最多 2 轮'", "test('规矩写明一个 PR 最多 3 轮'"),
+      );
+    });
+    expect(title.pass).toBe(false);
+    expect(title.reason).toContain('标题');
+    const loose = await judge(id, '改了', (d) => {
+      edit(d, 'rules/pr-rules.md', (s) => s.replaceAll('3 轮', '2 轮'));
+      edit(d, 'test/rules.test.ts', (s) =>
+        s
+          .replace("test('规矩写明一个 PR 最多 3 轮'", "test('规矩写明一个 PR 最多几轮'")
+          .replace("rules.includes('一个 PR 最多 3 轮')", "rules.includes('一个 PR 最多') /* 2 轮 */")
+          .replace("test('超过 3 轮按交接处理'", "test('超过上限按交接处理'")
+          .replace("rules.includes('超过 3 轮没合进去的 PR')", "rules.includes('没合进去的 PR')"),
+      );
+    });
+    expect(loose.pass).toBe(false);
+    expect(loose.reason).toContain('没钉住');
   });
 });
