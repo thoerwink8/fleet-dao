@@ -1,7 +1,8 @@
 // Cloudflare 定时 Worker（#292 第 1 片）：每 5 分钟从外面查香港、法国，挂了推飞书。
 // 真域名、飞书 webhook、认人用的请求头都只从 env 读。wrangler.toml 里只有占位。
 // 读不到密钥这一轮记没查成、写日志、抛出去，不当成没挂。
-// 法国把「它来查了」记成一轮是后一片；这里每次探测带上 x-fleet-watch，值是 FLEET_EDGE_WATCH_ID。
+// 法国 /healthz 见到 x-fleet-watch 和 api.env 的 FLEET_EDGE_WATCH_ID 一致就记一轮
+// （packages/api/src/external-watch.ts）。这里每次探测带上这个头，值从 env 的 FLEET_EDGE_WATCH_ID 读。
 import {
   judgeRound,
   type MachineState,
