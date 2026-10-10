@@ -167,9 +167,11 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
       resolve: async () => 'not_found',
       listOpenByPrefix: async () => [],
     },
-    // 单已关就撤任务（#1198）在本文件不走到 Temporal / GitHub：默认空装（这里的假客户端也列不了工作流）
+    // 单已关且停下等人就撤任务（#1816）在本文件不走到 Temporal / GitHub：默认空装（这里的假客户端也列不了工作流）
     closedIssueTasks: {
       runningTaskWorkflowIds: async () => [],
+      isParked: async () => false,
+      resolveParkAlerts: async () => 0,
       issueState: async () => 'open',
       abandon: async () => 'gone',
     },
