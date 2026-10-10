@@ -411,3 +411,248 @@ export function checkUsersBlock(repo: RepoView, docPath: string): OpsTableProble
     },
   ];
 }
+
+// 目录表（#140 第 5 片）：从三个部署脚本读 ensure_dir，放进 dirs 区块。
+// 路径写成 $NAME 或 "$NAME" 的，用同一批脚本或 deploy/lib/ 下 NAME=/字面路径 的赋值展开；
+// 路径里带按用户变化的小写变量（如 /home/$u）的行不进表；展开不了的其他变量抛带脚本名和行号的错。
+// 读不到脚本、或哪个脚本里一个目录都没有，抛错。本片不进文档、不接命令行、不接 CI。
+
+/** 读的顺序不影响输出：读完按路径、再按来源脚本排。 */
+const DIR_SCRIPTS = ['deploy/france.sh', 'deploy/hk.sh', 'deploy/lib/human-tier.sh'] as const;
+
+/** 允许行首缩进。三参：路径、属主:组、权限（三位或四位八进制）。 */
+const ENSURE_DIR_LINE = /^[ \t]*ensure_dir[ \t]+(.+)$/;
+
+/** 字面路径赋值：NAME=/…，值里不能有 $（带变量的不算字面）。行尾注释可有。 */
+const PATH_ASSIGN_LINE = /^[ \t]*([A-Z_][A-Z0-9_]*)=(\/[^ \t#$]*)(?:[ \t]*(?:#.*)?)?$/;
+
+/** 表里一行：| 路径 | 属主:组 | 权限 | 来源脚本 |。从文档区块里回读数据行用。 */
+const DIR_ROW =
+  /^\| (\S+) \| ([A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+) \| ([0-7]{3,4}) \| (deploy\/[A-Za-z0-9_./-]+\.sh) \|$/;
+
+const DIRS_NAME = 'dirs';
+/** 目录区块名字的对外写法（和端口、用户同一路，不各写各的字符串）。 */
+export const BLOCK_NAME_DIRS = DIRS_NAME;
+
+export interface DirEntry {
+  /** 展开后的绝对路径，如 /etc/fleet-dao。 */
+  path: string;
+  /** 属主:组，如 root:fleet。 */
+  owner: string;
+  /** 权限，三位或四位八进制。 */
+  mode: string;
+  /** 来源脚本，仓内路径。 */
+  script: string;
+  /** 脚本里的行号，1 起。 */
+  line: number;
+}
+
+interface DirRow {
+  path: string;
+  owner: string;
+  mode: string;
+  script: string;
+}
+
+/** 路径里带按用户变化的小写变量（$u、${user} 等）→ 不进表。大写常量走展开，展开不了就抛错。 */
+function isUserVaryingPath(pathInner: string): boolean {
+  return /\$\{?[a-z][A-Za-z0-9_]*\}?/.test(pathInner);
+}
+
+function unquoteToken(tok: string): string {
+  if (tok.length >= 2 && tok.startsWith('"') && tok.endsWith('"')) return tok.slice(1, -1);
+  return tok;
+}
+
+function takeShellToken(s: string, from: number): { tok: string; next: number } | undefined {
+  let i = from;
+  while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++;
+  if (i >= s.length || s[i] === '#') return undefined;
+  if (s[i] === '"') {
+    let j = i + 1;
+    while (j < s.length && s[j] !== '"') j++;
+    if (j >= s.length) return undefined;
+    return { tok: s.slice(i, j + 1), next: j + 1 };
+  }
+  let j = i;
+  while (j < s.length && s[j] !== ' ' && s[j] !== '\t' && s[j] !== '#') j++;
+  return { tok: s.slice(i, j), next: j };
+}
+
+function parseEnsureDirArgs(rest: string): { pathTok: string; owner: string; mode: string } | undefined {
+  const path = takeShellToken(rest, 0);
+  if (!path) return undefined;
+  const owner = takeShellToken(rest, path.next);
+  if (!owner) return undefined;
+  const mode = takeShellToken(rest, owner.next);
+  if (!mode || !/^[0-7]{3,4}$/.test(mode.tok)) return undefined;
+  return { pathTok: path.tok, owner: unquoteToken(owner.tok), mode: mode.tok };
+}
+
+/** 收字面路径赋值：三个目录脚本 + deploy/lib/ 下其它 .sh（同一脚本里的、或 lib 里的 NAME=/字面路径）。 */
+function readPathAssignments(repo: RepoView): Map<string, string> {
+  const files = new Set<string>(DIR_SCRIPTS);
+  for (const name of repo.list('deploy/lib') ?? []) {
+    if (name.endsWith('.sh')) files.add(`deploy/lib/${name}`);
+  }
+  const assigns = new Map<string, string>();
+  for (const file of files) {
+    const text = repo.read(file);
+    if (text === undefined) continue;
+    for (const line of text.split('\n')) {
+      const m = PATH_ASSIGN_LINE.exec(line);
+      if (!m) continue;
+      assigns.set(m[1] ?? '', m[2] ?? '');
+    }
+  }
+  return assigns;
+}
+
+/** 把路径 token 收成字面绝对路径。按用户变化的行返回 undefined（调用方跳过）；
+ *  其它展开不了的变量抛带脚本名和行号的错。 */
+function resolveDirPath(
+  pathTok: string,
+  assigns: Map<string, string>,
+  script: string,
+  line: number,
+): string | undefined {
+  const inner = unquoteToken(pathTok);
+  if (isUserVaryingPath(inner)) return undefined;
+  const onlyVar = /^\$([A-Z_][A-Z0-9_]*)$/.exec(inner);
+  if (onlyVar) {
+    const name = onlyVar[1] ?? '';
+    const val = assigns.get(name);
+    if (val === undefined) {
+      throw new Error(`${script}:${line} 里的变量 $${name} 展开不了（没有 ${name}=/字面路径 的赋值）`);
+    }
+    return val;
+  }
+  if (inner.includes('$')) {
+    throw new Error(`${script}:${line} 里的路径「${inner}」有展开不了的变量`);
+  }
+  if (!inner.startsWith('/')) {
+    throw new Error(`${script}:${line} 里的路径「${inner}」不是绝对路径`);
+  }
+  return inner;
+}
+
+/** 读三个脚本里的 ensure_dir。路径写成 $NAME 或 "$NAME" 的，用同一批脚本或 deploy/lib/
+ *  下 NAME=/字面路径 的赋值展开；路径里带按用户变化的变量（如 /home/$u）的行不进表；
+ *  展开不了的其他变量抛带脚本名和行号的错，不静默跳过。
+ *  读不到脚本、或哪个脚本里一个目录都没有，抛带脚本名的错。 */
+export function readDirEntries(repo: RepoView): DirEntry[] {
+  const assigns = readPathAssignments(repo);
+  const entries: DirEntry[] = [];
+  for (const script of DIR_SCRIPTS) {
+    const text = repo.read(script);
+    if (text === undefined) throw new Error(`读不到 ${script}`);
+    let found = 0;
+    for (const [i, line] of text.split('\n').entries()) {
+      const head = ENSURE_DIR_LINE.exec(line);
+      if (!head) continue;
+      const args = parseEnsureDirArgs(head[1] ?? '');
+      if (!args) continue;
+      const path = resolveDirPath(args.pathTok, assigns, script, i + 1);
+      if (path === undefined) continue;
+      if (args.owner.includes('$')) {
+        throw new Error(`${script}:${i + 1} 里的属主「${args.owner}」有展开不了的变量`);
+      }
+      found++;
+      entries.push({ path, owner: args.owner, mode: args.mode, script, line: i + 1 });
+    }
+    if (found === 0) throw new Error(`${script} 里一个目录都没读到`);
+  }
+  // 先按路径、再按来源脚本排：同一个仓怎么读输出都一样。
+  return entries.sort((a, b) => a.path.localeCompare(b.path) || a.script.localeCompare(b.script));
+}
+
+/** 区块标记之间那一段：前后各一个空行、中间一张四列表。 */
+export function dirsTableInner(repo: RepoView): string {
+  const lines = ['| 路径 | 属主:组 | 权限 | 来源脚本 |', '|---|---|---|---|'];
+  for (const e of readDirEntries(repo)) {
+    lines.push(`| ${e.path} | ${e.owner} | ${e.mode} | ${e.script} |`);
+  }
+  return `\n\n${lines.join('\n')}\n\n`;
+}
+
+/** 整个区块（含两个标记行）：开头 `<!-- fleet:dirs:start -->`，一张四列表（路径、属主:组、权限、来源脚本），
+ *  结尾 `<!-- fleet:dirs:end -->`。同一个仓两次调用逐字相同。 */
+export function renderDirsBlock(repo: RepoView): string {
+  return `${blockMarker(DIRS_NAME, 'start')}${dirsTableInner(repo)}${blockMarker(DIRS_NAME, 'end')}`;
+}
+
+function parseDirRows(text: string): Map<string, DirRow> {
+  const rows = new Map<string, DirRow>();
+  for (const line of text.split('\n')) {
+    const m = DIR_ROW.exec(line.trimEnd());
+    if (!m) continue;
+    const row: DirRow = {
+      path: m[1] ?? '',
+      owner: m[2] ?? '',
+      mode: m[3] ?? '',
+      script: m[4] ?? '',
+    };
+    rows.set(`${row.path}\0${row.script}`, row);
+  }
+  return rows;
+}
+
+function dirRowProblems(actual: string, expected: string): OpsTableProblem[] {
+  const want = parseDirRows(expected);
+  const got = parseDirRows(actual);
+  const problems: OpsTableProblem[] = [];
+  for (const [key, w] of want) {
+    const g = got.get(key);
+    if (g === undefined) {
+      problems.push({
+        notQueried: false,
+        text: `目录 ${w.path} 少了：脚本里是 ${w.owner} ${w.mode}（${w.script}），文档区块里没有。`,
+      });
+    } else if (g.owner !== w.owner || g.mode !== w.mode) {
+      problems.push({
+        notQueried: false,
+        text: `目录 ${w.path} 变了：文档区块里是 ${g.owner} ${g.mode}（${g.script}），脚本里是 ${w.owner} ${w.mode}（${w.script}）。`,
+      });
+    }
+  }
+  for (const [key, g] of got) {
+    if (!want.has(key)) {
+      problems.push({
+        notQueried: false,
+        text: `目录 ${g.path} 多了：文档区块里有 ${g.owner} ${g.mode}（${g.script}），脚本里没有。`,
+      });
+    }
+  }
+  return problems;
+}
+
+/** 读 docPath，取目录区块，和 renderDirsBlock 逐字比。一致返回空数组；
+ *  不一致返回点出哪个路径多了、少了、属主/权限变了的问题；
+ *  读不到文档、读不到脚本、脚本里一个目录都没读到、变量展开不了，返回「没查成」问题，不当成通过。 */
+export function checkDirsBlock(repo: RepoView, docPath: string): OpsTableProblem[] {
+  const doc = repo.read(docPath);
+  if (doc === undefined) return [{ notQueried: true, text: `没查成：读不到 ${docPath}` }];
+  let expected: string;
+  try {
+    expected = renderDirsBlock(repo);
+  } catch (e) {
+    return [{ notQueried: true, text: `没查成：${e instanceof Error ? e.message : String(e)}` }];
+  }
+  let span: BlockSpan;
+  try {
+    span = findBlock(doc, DIRS_NAME);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return [{ notQueried: false, text: `目录区块对不上：${reason}。` }];
+  }
+  const actual = doc.slice(span.from, span.to);
+  if (actual === expected) return [];
+  const problems = dirRowProblems(actual, expected);
+  if (problems.length > 0) return problems;
+  return [
+    {
+      notQueried: false,
+      text: '目录区块对不上：目录行都对，但区块和生成的内容不是逐字一致（排序、空白或表头格式被改过）。',
+    },
+  ];
+}

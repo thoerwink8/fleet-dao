@@ -1,11 +1,14 @@
-// ops-tables 的测试（#140 第一片端口、第三片用户）：全用内存假仓，不读盘上的 docs/ops.md 和 deploy/。
+// ops-tables 的测试（#140 第一片端口、第三片用户、第 5 片目录）：全用内存假仓，不读盘上的 docs/ops.md 和 deploy/。
 import { describe, expect, it } from 'vitest';
 import {
   BLOCK_NAME_PORTS,
+  checkDirsBlock,
   checkPortsBlock,
   checkUsersBlock,
   extractBlock,
+  readDirEntries,
   readUserEntries,
+  renderDirsBlock,
   renderPortsBlock,
   renderUsersBlock,
 } from '../src/ops-tables.ts';
@@ -438,5 +441,165 @@ describe('checkUsersBlock', () => {
     expect(problems.length).toBeGreaterThan(0);
     expect(problems.every((p) => p.notQueried === false)).toBe(true);
     expect(problems.some((p) => p.text.includes('pilot') && p.text.includes('founder'))).toBe(true);
+  });
+});
+
+// 目录表（#140 第 5 片）：三个脚本里的 ensure_dir；假仓里夹进按用户变化的行和待展开的变量。
+const FRANCE_D = [
+  '#!/usr/bin/env bash',
+  'TEMPORAL_HOME=/opt/fleet-dao/temporal',
+  'ensure_dir /etc/wireguard root:root 700',
+  'ensure_dir "$TEMPORAL_HOME" root:root 755',
+].join('\n');
+const HK_D = [
+  '#!/usr/bin/env bash',
+  '  ensure_dir /etc/fleet-dao root:fleet 750',
+  'ensure_dir /home/fleet fleet:fleet 750',
+].join('\n');
+const HUMAN_D = [
+  '#!/usr/bin/env bash',
+  'RELEASES_DIR=/srv/fleet-dao-releases',
+  'ensure_dir "$RELEASES_DIR" root:root 755',
+  'ensure_dir /var/lib/fleet-dao fleet:fleet 750',
+  '  ensure_dir "/home/$u" "$u:$u" 750',
+].join('\n');
+
+function dirsFiles(over: Record<string, string> = {}): Record<string, string> {
+  return {
+    'deploy/france.sh': FRANCE_D,
+    'deploy/hk.sh': HK_D,
+    'deploy/lib/human-tier.sh': HUMAN_D,
+    ...over,
+  };
+}
+
+function dirsRepoWithoutDoc(): RepoView {
+  return memRepo(dirsFiles());
+}
+
+function dirsRepo(): RepoView {
+  return memRepo(
+    dirsFiles({
+      'docs/ops.md': ['# 运维', '', '做法写在 deploy/。', renderDirsBlock(dirsRepoWithoutDoc()), ''].join(
+        '\n',
+      ),
+    }),
+  );
+}
+
+const DIRS_BLOCK = [
+  '<!-- fleet:dirs:start -->',
+  '',
+  '| 路径 | 属主:组 | 权限 | 来源脚本 |',
+  '|---|---|---|---|',
+  '| /etc/fleet-dao | root:fleet | 750 | deploy/hk.sh |',
+  '| /etc/wireguard | root:root | 700 | deploy/france.sh |',
+  '| /home/fleet | fleet:fleet | 750 | deploy/hk.sh |',
+  '| /opt/fleet-dao/temporal | root:root | 755 | deploy/france.sh |',
+  '| /srv/fleet-dao-releases | root:root | 755 | deploy/lib/human-tier.sh |',
+  '| /var/lib/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |',
+  '',
+  '<!-- fleet:dirs:end -->',
+].join('\n');
+
+describe('renderDirsBlock', () => {
+  it('两次调用逐字相同', () => {
+    const r = dirsRepoWithoutDoc();
+    expect(renderDirsBlock(r)).toBe(renderDirsBlock(r));
+  });
+
+  it('字面路径 ensure_dir 生成表行，含路径、属主:组、权限、来源脚本', () => {
+    const block = renderDirsBlock(dirsRepoWithoutDoc());
+    expect(block).toContain('| /etc/fleet-dao | root:fleet | 750 | deploy/hk.sh |');
+    expect(block).toBe(DIRS_BLOCK);
+  });
+
+  it('"$RELEASES_DIR" 在有 RELEASES_DIR=/字面路径 赋值时展开成字面路径', () => {
+    const paths = readDirEntries(dirsRepoWithoutDoc()).map((e) => e.path);
+    expect(paths).toContain('/srv/fleet-dao-releases');
+    expect(paths).not.toContain('$RELEASES_DIR');
+    expect(renderDirsBlock(dirsRepoWithoutDoc())).toContain(
+      '| /srv/fleet-dao-releases | root:root | 755 | deploy/lib/human-tier.sh |',
+    );
+  });
+
+  it('按用户变化的 /home/$u 不进表', () => {
+    const paths = readDirEntries(dirsRepoWithoutDoc()).map((e) => e.path);
+    expect(paths.some((p) => p.includes('$u') || p.includes('/home/u'))).toBe(false);
+  });
+
+  // 故意造出失败：变量没有字面赋值，必须抛带脚本名和行号的错，不能静默跳过。
+  it('变量展开不了时 readDirEntries 抛带脚本名和行号的错', () => {
+    const r = memRepo(
+      dirsFiles({
+        'deploy/lib/human-tier.sh': 'ensure_dir "$MISSING_DIR" root:root 755\n',
+      }),
+    );
+    expect(() => readDirEntries(r)).toThrow(/deploy\/lib\/human-tier\.sh:1.*MISSING_DIR/);
+  });
+
+  it('读不到脚本，抛带脚本名的错', () => {
+    const missing = memRepo({
+      'deploy/france.sh': FRANCE_D,
+      'deploy/hk.sh': HK_D,
+    });
+    expect(() => readDirEntries(missing)).toThrow('读不到 deploy/lib/human-tier.sh');
+  });
+});
+
+describe('checkDirsBlock', () => {
+  it('区块和生成的一致，返回空数组', () => {
+    expect(checkDirsBlock(dirsRepo(), 'docs/ops.md')).toEqual([]);
+  });
+
+  it('区块标记被删（缺失），报一条点出目录区块的问题', () => {
+    const problems = checkDirsBlock(
+      memRepo(dirsFiles({ 'docs/ops.md': '# 运维\n没有区块\n' })),
+      'docs/ops.md',
+    );
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.notQueried).toBe(false);
+    expect(problems[0]?.text).toContain('目录区块');
+    expect(problems[0]?.text).toContain('开始标记');
+  });
+
+  it('文档多一行，报一条点出路径的问题', () => {
+    const r = dirsRepo();
+    const doc = `${r.read('docs/ops.md') ?? ''}`.replace(
+      '| /var/lib/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |',
+      '| /var/lib/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |\n| /tmp/extra | root:root | 755 | deploy/hk.sh |',
+    );
+    const problems = checkDirsBlock(memRepo(dirsFiles({ 'docs/ops.md': doc })), 'docs/ops.md');
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.notQueried).toBe(false);
+    expect(problems[0]?.text).toContain('/tmp/extra');
+    expect(problems[0]?.text).toContain('多了');
+  });
+
+  it('文档少一行，报一条点出路径的问题', () => {
+    const r = dirsRepo();
+    const doc = (r.read('docs/ops.md') ?? '').replace(
+      '| /etc/fleet-dao | root:fleet | 750 | deploy/hk.sh |\n',
+      '',
+    );
+    const problems = checkDirsBlock(memRepo(dirsFiles({ 'docs/ops.md': doc })), 'docs/ops.md');
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.notQueried).toBe(false);
+    expect(problems[0]?.text).toContain('/etc/fleet-dao');
+    expect(problems[0]?.text).toContain('少了');
+  });
+
+  it('属主写错，报一条点出路径的问题', () => {
+    const r = dirsRepo();
+    const doc = (r.read('docs/ops.md') ?? '').replace(
+      '| /etc/fleet-dao | root:fleet | 750 | deploy/hk.sh |',
+      '| /etc/fleet-dao | root:root | 750 | deploy/hk.sh |',
+    );
+    const problems = checkDirsBlock(memRepo(dirsFiles({ 'docs/ops.md': doc })), 'docs/ops.md');
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.notQueried).toBe(false);
+    expect(problems[0]?.text).toContain('/etc/fleet-dao');
+    expect(problems[0]?.text).toContain('root:fleet');
+    expect(problems[0]?.text).toContain('root:root');
   });
 });
