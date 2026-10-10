@@ -6,7 +6,18 @@
 // - 一条助手消息按内容块拆成多帧（同一个 message.id），用量以终帧为准；
 // - 2.1.281 给 opus-5-5 的工具表里没有步骤清单工具（haiku 有 TaskCreate 一类），步骤只能靠 fleet plan 主动报。
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
-import { cleanTestCommands, cut, num, numbers, optional, rec, relPath, str, testRun } from '../stream-kit.ts';
+import {
+  cleanTestCommands,
+  cut,
+  num,
+  numbers,
+  optional,
+  rec,
+  relPath,
+  str,
+  testRun,
+  transcriptEntry,
+} from '../stream-kit.ts';
 import type {
   FilePayload,
   RateLimitReading,
@@ -15,6 +26,7 @@ import type {
   TestPayload,
   ToolAction,
   ToolPayload,
+  TranscriptEntry,
 } from '../types.ts';
 
 export { exitStatusUntrusted } from '../stream-kit.ts';
@@ -103,6 +115,8 @@ export interface ClaudeStreamSummary {
 /** 读一行带来的变化，给起进程的那一层用。 */
 export interface ClaudeLineEffect {
   events: ProgressEvent[];
+  /** 这一行带来的会话过程记录（#1640）：助手的话、工具调用和结果、报错、结论。 */
+  transcript: TranscriptEntry[];
   /** 这一行说明会话在干活（助手、工具、思考帧）；重试、额度、init 不算。 */
   activity: boolean;
   init?: { sessionId?: string; model?: string; cliVersion?: string };
@@ -143,6 +157,8 @@ interface PendingTool {
   name: string;
   input: Record<string, unknown>;
   subagent: boolean;
+  /** 子代理里发起的调用：它所属的那次 Agent 工具调用的 id（parent_tool_use_id）。 */
+  parent?: string;
 }
 
 export class ClaudeStreamReader {
@@ -151,6 +167,8 @@ export class ClaudeStreamReader {
   readonly #testCommands: string[];
   readonly #now: () => Date;
   readonly #pending = new Map<string, PendingTool>();
+  /** 主会话里每次 Agent / Task 工具调用派的是哪个子代理（tool_use id → subagent_type）。 */
+  readonly #agents = new Map<string, string>();
   readonly #files = new Set<string>();
   readonly #s: ClaudeStreamSummary = {
     startedWork: false,
@@ -183,7 +201,7 @@ export class ClaudeStreamReader {
   }
 
   read(raw: string): ClaudeLineEffect {
-    const effect: ClaudeLineEffect = { events: [], activity: false };
+    const effect: ClaudeLineEffect = { events: [], transcript: [], activity: false };
     const line = raw.trim();
     if (!line) return effect;
     let parsed: unknown;
@@ -226,6 +244,21 @@ export class ClaudeStreamReader {
     effect.events.push({ runId: this.#runId, at: this.#now().toISOString(), kind, payload });
   }
 
+  #tx(
+    effect: ClaudeLineEffect,
+    kind: TranscriptEntry['kind'],
+    text: string,
+    extra?: Parameters<typeof transcriptEntry>[3],
+  ): void {
+    effect.transcript.push(transcriptEntry(this.#now(), kind, text, extra));
+  }
+
+  /** 子代理里的条目标注：meta.subagent = 它所属那次 Agent 调用的 id，有就带上子代理名（Agent 调用输入里的 subagent_type）。 */
+  #subagentMeta(parent: string | undefined): Record<string, unknown> {
+    const type = parent ? this.#agents.get(parent) : undefined;
+    return { subagent: parent ?? true, ...(type ? { subagentType: type } : {}) };
+  }
+
   #system(frame: Record<string, unknown>, effect: ClaudeLineEffect): void {
     switch (str(frame.subtype)) {
       case 'init': {
@@ -262,6 +295,15 @@ export class ClaudeStreamReader {
           ...optional('toolUseId', str(frame.tool_use_id)),
           ...optional('reason', str(frame.decision_reason)),
         });
+        this.#tx(
+          effect,
+          'error',
+          cut(
+            `权限被拒：${str(frame.tool_name) ?? '?'}${str(frame.decision_reason) ? `（${str(frame.decision_reason)}）` : ''}`,
+            500,
+          ),
+          { tool: str(frame.tool_name) },
+        );
         break;
       default:
         break;
@@ -274,6 +316,7 @@ export class ClaudeStreamReader {
     if (frame.is_api_error_message === true || str(frame.error)) {
       const text = blocks.map((b) => str(rec(b)?.text) ?? '').join('');
       this.#s.apiError = { ...optional('code', str(frame.error)), text: cut(text, 1000) };
+      this.#tx(effect, 'error', [str(frame.error), text].filter((x) => x).join('：') || '接口报错');
       return;
     }
     const model = str(message.model);
@@ -282,7 +325,9 @@ export class ClaudeStreamReader {
       effect.observedModel = model;
     }
     effect.activity = true;
-    const subagent = Boolean(str(frame.parent_tool_use_id));
+    const parent = str(frame.parent_tool_use_id);
+    const subagent = Boolean(parent);
+    const subMeta = this.#subagentMeta(parent);
     // 子代理是另一个上下文窗口，不算进「主会话最后一条消息」；没有 usage 的帧（这条消息还没跑完 API 调用）不覆盖
     const usage = subagent ? undefined : rec(message.usage);
     if (usage) {
@@ -296,14 +341,21 @@ export class ClaudeStreamReader {
       if (!block) continue;
       if (block.type === 'text') {
         const text = (str(block.text) ?? '').trim();
-        if (!text || subagent) continue;
+        if (!text) continue;
+        // 子代理的话不进进度事件（老行为），但会话内容里要记、并标出是哪个子代理说的，不和主会话的话混在一起
+        if (subagent) {
+          this.#tx(effect, 'assistant', text, { meta: subMeta });
+          continue;
+        }
         this.#s.startedWork = true;
         this.#emit(effect, 'say', { text: cut(text, 2000), source: 'stream' } satisfies SayPayload);
+        this.#tx(effect, 'assistant', text);
       } else if (block.type === 'tool_use') {
         const id = str(block.id) ?? '';
         const name = str(block.name) ?? 'unknown';
         const input = rec(block.input) ?? {};
-        this.#pending.set(id, { name, input, subagent });
+        this.#pending.set(id, { name, input, subagent, ...(parent ? { parent } : {}) });
+        if (name === 'Agent' || name === 'Task') this.#agents.set(id, str(input.subagent_type) ?? '');
         this.#s.startedWork = true;
         this.#s.toolCalls++;
         this.#emit(effect, 'tool', {
@@ -315,6 +367,10 @@ export class ClaudeStreamReader {
           ...optional('description', name === 'Bash' ? str(input.description) : undefined),
           ...(subagent ? { subagent: true } : {}),
         } satisfies ToolPayload);
+        this.#tx(effect, 'tool_call', callText(name, input, this.#cwd), {
+          tool: name,
+          ...(subagent ? { meta: subMeta } : {}),
+        });
       }
     }
   }
@@ -345,6 +401,11 @@ export class ClaudeStreamReader {
         ...optional('error', ok ? undefined : cut(resultText(block.content), 500)),
         ...(pending?.subagent ? { subagent: true } : {}),
       } satisfies ToolPayload);
+      this.#tx(effect, 'tool_result', resultText(block.content), {
+        tool: name,
+        ok,
+        ...(pending?.subagent ? { meta: this.#subagentMeta(pending.parent) } : {}),
+      });
       if (ok) {
         const paths: string[] = [];
         if (EDIT_TOOLS.has(name)) {
@@ -409,6 +470,13 @@ export class ClaudeStreamReader {
       models: modelUsage ? Object.keys(modelUsage) : [],
       permissionDenials: denials,
     };
+    const result = this.#s.result;
+    this.#tx(
+      effect,
+      'result',
+      result.text ?? [result.terminalReason, result.subtype].filter((x) => x).join(' · '),
+      { ok: !result.isError },
+    );
     const sessionId = str(frame.session_id);
     if (sessionId && !this.#s.sessionId) this.#s.sessionId = sessionId;
   }
@@ -473,7 +541,21 @@ export function versionAtLeast(version: string, min: string): boolean | undefine
   return true;
 }
 
-function toolSummary(name: string, input: Record<string, unknown>, cwd: string): string {
+/**
+ * 工具调用在会话内容里怎么写：Agent / Task 派子代理的写「派了 <子代理名>：<交代的头一句>」，别的是工具输入摘要。
+ */
+function callText(name: string, input: Record<string, unknown>, cwd: string): string {
+  if (name === 'Agent' || name === 'Task') {
+    const first = (str(input.prompt) ?? str(input.description) ?? '').trim().split('\n')[0] ?? '';
+    return `派了 ${str(input.subagent_type) ?? '子代理'}：${cut(first, 200)}`;
+  }
+  return toolSummary(name, input, cwd, TRANSCRIPT_SUMMARY_MAX);
+}
+
+/** 会话过程记录里工具输入摘要先取多长（调用方写库前再按上限截）。 */
+const TRANSCRIPT_SUMMARY_MAX = 2000;
+
+function toolSummary(name: string, input: Record<string, unknown>, cwd: string, max = 200): string {
   const pick = (key: string) => str(input[key]);
   let text: string | undefined;
   switch (name) {
@@ -510,7 +592,7 @@ function toolSummary(name: string, input: Record<string, unknown>, cwd: string):
     default:
       text = Object.values(input).find((v): v is string => typeof v === 'string');
   }
-  return cut(text ?? '', 200);
+  return cut(text ?? '', max);
 }
 
 function resultText(content: unknown): string {

@@ -21,8 +21,17 @@ import {
   relPath,
   str,
   testRun,
+  transcriptEntry,
 } from '../stream-kit.ts';
-import type { FilePayload, PlanStep, SayPayload, TestPayload, ToolAction, ToolPayload } from '../types.ts';
+import type {
+  FilePayload,
+  PlanStep,
+  SayPayload,
+  TestPayload,
+  ToolAction,
+  ToolPayload,
+  TranscriptEntry,
+} from '../types.ts';
 
 export interface GrokStreamOptions {
   runId: string;
@@ -104,6 +113,8 @@ export class GrokStreamReader {
   readonly #pending = new Map<string, PendingTool>();
   readonly #files = new Set<string>();
   #text = '';
+  /** 收场时（没遇到下一帧）还没交出去的过程记录，见 drainTranscript。 */
+  #tailTranscript: TranscriptEntry[] = [];
   readonly #s: GrokStreamSummary = {
     startedWork: false,
     toolCalls: 0,
@@ -135,13 +146,21 @@ export class GrokStreamReader {
 
   /** 进程结束时调用：没遇到下一帧的正文也要发出去。 */
   flush(): ProgressEvent[] {
-    const effect: LineEffect = { events: [], activity: false };
+    const effect: LineEffect = { events: [], transcript: [], activity: false };
     this.#flushText(effect);
+    this.#tailTranscript = effect.transcript ?? [];
     return effect.events;
   }
 
+  /** flush 时攒下的最后一句话的过程记录（先调 flush）。 */
+  drainTranscript(): TranscriptEntry[] {
+    const tail = this.#tailTranscript;
+    this.#tailTranscript = [];
+    return tail;
+  }
+
   read(raw: string): LineEffect {
-    const effect: LineEffect = { events: [], activity: false };
+    const effect: LineEffect = { events: [], transcript: [], activity: false };
     const line = raw.trim();
     if (!line) return effect;
     const frame = parseFrame(line);
@@ -179,11 +198,15 @@ export class GrokStreamReader {
       case 'end':
         this.#end(frame, effect);
         break;
-      case 'error':
-        this.#s.errors.push(cut(str(frame.message) ?? JSON.stringify(frame), 1000));
+      case 'error': {
+        const message = cut(str(frame.message) ?? JSON.stringify(frame), 1000);
+        this.#s.errors.push(message);
+        this.#tx(effect, 'error', message);
         break;
+      }
       case 'max_turns_reached':
         this.#s.maxTurnsReached = true;
+        this.#tx(effect, 'error', '到了轮数上限');
         break;
       case 'available_commands':
         break;
@@ -197,6 +220,15 @@ export class GrokStreamReader {
     effect.events.push(progressEvent(this.#runId, this.#now(), kind, payload));
   }
 
+  #tx(
+    effect: LineEffect,
+    kind: TranscriptEntry['kind'],
+    text: string,
+    extra?: Parameters<typeof transcriptEntry>[3],
+  ): void {
+    effect.transcript?.push(transcriptEntry(this.#now(), kind, text, extra));
+  }
+
   #flushText(effect: LineEffect): void {
     const text = this.#text.trim();
     this.#text = '';
@@ -204,6 +236,7 @@ export class GrokStreamReader {
     this.#s.startedWork = true;
     this.#s.answer = cut(text, 2000);
     this.#emit(effect, 'say', { text: this.#s.answer, source: 'stream' } satisfies SayPayload);
+    this.#tx(effect, 'assistant', text);
   }
 
   #toolCall(frame: Record<string, unknown>, effect: LineEffect): void {
@@ -225,6 +258,7 @@ export class GrokStreamReader {
       summary: toolSummary(tool, this.#cwd),
       ...optional('description', tool.kind === 'execute' ? str(tool.input.description) : undefined),
     } satisfies ToolPayload);
+    this.#tx(effect, 'tool_call', toolSummary(tool, this.#cwd, TRANSCRIPT_SUMMARY_MAX), { tool: tool.name });
   }
 
   #toolUpdate(frame: Record<string, unknown>, effect: LineEffect): void {
@@ -251,6 +285,7 @@ export class GrokStreamReader {
       ok,
       ...optional('error', ok ? undefined : failureText(status, output, frame.content)),
     } satisfies ToolPayload);
+    this.#tx(effect, 'tool_result', resultTextOf(status, output, frame.content, ok), { tool: tool.name, ok });
     if (ok && EDIT_KINDS.has(tool.kind)) {
       for (const path of editedPaths(tool, output, frame.content)) {
         const rel = relPath(path, this.#cwd);
@@ -302,10 +337,16 @@ export class GrokStreamReader {
         : {}),
       models: Object.keys(rec(frame.modelUsage) ?? {}),
     };
+    // 终帧没有回答正文（回答已经作为助手的话记过），结论只有停止原因
+    const stop = this.#s.end.stopReason;
+    this.#tx(effect, 'result', stop ? `结束：${stop}` : '结束', { ok: stop === 'end_turn' });
   }
 }
 
-function toolSummary(tool: PendingTool, cwd: string): string {
+/** 会话过程记录里工具输入摘要先取多长（调用方写库前再按上限截）。 */
+const TRANSCRIPT_SUMMARY_MAX = 2000;
+
+function toolSummary(tool: PendingTool, cwd: string, max = 200): string {
   const pick = (k: string) => str(tool.input[k]);
   const path = pick('file_path') ?? pick('target_file') ?? pick('target_directory') ?? pick('path');
   let text: string | undefined;
@@ -318,7 +359,21 @@ function toolSummary(tool: PendingTool, cwd: string): string {
       .join(' @ ');
   else if (path) text = relPath(path, cwd);
   else text = Object.values(tool.input).find((v): v is string => typeof v === 'string');
-  return cut(text ?? '', 200);
+  return cut(text ?? '', max);
+}
+
+/** 工具结果给人看的正文：失败照 failureText；成功的取命令的输出或工具回的文字，都没有就写（无输出）。 */
+function resultTextOf(
+  status: string,
+  output: Record<string, unknown>,
+  content: unknown,
+  ok: boolean,
+): string {
+  if (!ok) return failureText(status, output, content);
+  const texts = Array.isArray(content)
+    ? content.map((c) => str(rec(rec(c)?.content)?.text)).filter((t): t is string => Boolean(t))
+    : [];
+  return texts.join('\n') || str(output.output_for_prompt)?.trim() || '（无输出）';
 }
 
 function editedPaths(tool: PendingTool, output: Record<string, unknown>, content: unknown): string[] {

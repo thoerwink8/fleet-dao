@@ -52,6 +52,8 @@ import type {
   Routing,
   RoutingEfforts,
   RoutingLayers,
+  RunTranscript,
+  RunTranscriptQuery,
   SetChannelEnabledBody,
   SetChannelEnabledResult,
   SetModelEnabledBody,
@@ -118,6 +120,11 @@ export interface FleetApi {
   node(nodeId: string): Promise<NodeDetail>;
   board(repoId: string): Promise<Board>;
   task(taskId: string): Promise<TaskDetail>;
+  /**
+   * 一段会话的过程记录（#1640），按序号增量读：after 不给从头，给了回序号更大的；在跑的段拿上次回的 nextAfter 接着读。
+   * 读不到（库不通、没接上）抛 ApiError（503），这一段跑在记录之前是 noRecord:true，两者分开。
+   */
+  runTranscript(taskId: string, runId: string, query?: RunTranscriptQuery): Promise<RunTranscript>;
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
   /** 给这张单的一段（动手、验收）指定模型或清掉（引擎下一次给这一段选路就照它）。 */
   updateTaskRoutePin(taskId: string, body: UpdateTaskRoutePinBody): Promise<TaskRoutePin>;

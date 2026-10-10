@@ -21,8 +21,17 @@ import {
   relPath,
   str,
   testRun,
+  transcriptEntry,
 } from '../stream-kit.ts';
-import type { FilePayload, PlanStep, SayPayload, TestPayload, ToolAction, ToolPayload } from '../types.ts';
+import type {
+  FilePayload,
+  PlanStep,
+  SayPayload,
+  TestPayload,
+  ToolAction,
+  ToolPayload,
+  TranscriptEntry,
+} from '../types.ts';
 
 export interface CursorStreamOptions {
   runId: string;
@@ -140,7 +149,7 @@ export class CursorStreamReader {
   }
 
   read(raw: string): CursorLineEffect {
-    const effect: CursorLineEffect = { events: [], activity: false };
+    const effect: CursorLineEffect = { events: [], transcript: [], activity: false };
     const line = raw.trim();
     if (!line) return effect;
     const frame = parseFrame(line);
@@ -188,6 +197,15 @@ export class CursorStreamReader {
     effect.events.push(progressEvent(this.#runId, this.#now(), kind, payload) satisfies ProgressEvent);
   }
 
+  #tx(
+    effect: CursorLineEffect,
+    kind: TranscriptEntry['kind'],
+    text: string,
+    extra?: Parameters<typeof transcriptEntry>[3],
+  ): void {
+    effect.transcript?.push(transcriptEntry(this.#now(), kind, text, extra));
+  }
+
   #assistant(frame: Record<string, unknown>, effect: CursorLineEffect): void {
     effect.activity = true;
     const blocks = rec(frame.message)?.content;
@@ -197,6 +215,7 @@ export class CursorStreamReader {
       if (rec(block)?.type !== 'text' || !text) continue;
       this.#s.startedWork = true;
       this.#emit(effect, 'say', { text: cut(text, 2000), source: 'stream' } satisfies SayPayload);
+      this.#tx(effect, 'assistant', text);
     }
   }
 
@@ -224,6 +243,9 @@ export class CursorStreamReader {
         summary,
         ...optional('description', key === 'shellToolCall' ? str(args.description) : undefined),
       } satisfies ToolPayload);
+      this.#tx(effect, 'tool_call', toolSummary(key, args, this.#cwd, TRANSCRIPT_SUMMARY_MAX), {
+        tool: name,
+      });
       return;
     }
     if (frame.subtype !== 'completed') return;
@@ -242,6 +264,7 @@ export class CursorStreamReader {
       ok,
       ...optional('error', ok ? undefined : failureText(result, success)),
     } satisfies ToolPayload);
+    this.#tx(effect, 'tool_result', resultTextOf(result, success, ok), { tool: name, ok });
     if (ok && kind?.edits) {
       const path = str(success?.path) ?? str(args.path);
       if (path) {
@@ -298,12 +321,22 @@ export class CursorStreamReader {
           }
         : {}),
     };
+    const done = this.#s.result;
+    this.#tx(
+      effect,
+      'result',
+      done.text ?? [done.subtype, done.isError ? '报错' : ''].filter((x) => x).join(' · '),
+      { ok: !done.isError },
+    );
     const sessionId = str(frame.session_id);
     if (sessionId && !this.#s.sessionId) this.#s.sessionId = sessionId;
   }
 }
 
-function toolSummary(key: string, args: Record<string, unknown>, cwd: string): string {
+/** 会话过程记录里工具输入摘要先取多长（调用方写库前再按上限截）。 */
+const TRANSCRIPT_SUMMARY_MAX = 2000;
+
+function toolSummary(key: string, args: Record<string, unknown>, cwd: string, max = 200): string {
   const pick = (k: string) => str(args[k]);
   let text: string | undefined;
   switch (key) {
@@ -332,7 +365,23 @@ function toolSummary(key: string, args: Record<string, unknown>, cwd: string): s
         pick('toolName') ??
         Object.values(args).find((v): v is string => typeof v === 'string');
   }
-  return cut(text ?? '', 200);
+  return cut(text ?? '', max);
+}
+
+/** 工具结果给人看的正文：失败照 failureText；成功的取命令的输出、读到的内容或工具自己的话，都没有就只说成功。 */
+function resultTextOf(
+  result: Record<string, unknown>,
+  success: Record<string, unknown> | undefined,
+  ok: boolean,
+): string {
+  if (!ok) return failureText(result, success);
+  const out =
+    str(success?.stdout)?.trim() ??
+    str(success?.content) ??
+    str(success?.message) ??
+    str(success?.diffString) ??
+    str(success?.interleavedOutput)?.trim();
+  return out ?? '（无输出）';
 }
 
 function failureText(result: Record<string, unknown>, success: Record<string, unknown> | undefined): string {

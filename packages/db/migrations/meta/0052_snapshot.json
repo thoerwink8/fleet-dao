@@ -1,6 +1,6 @@
 {
-  "id": "4728e00d-6243-4ac2-b489-6a5a0ea10569",
-  "prevId": "f0b4d29d-349b-477e-9dd1-85e73cdf1211",
+  "id": "99fdaf5c-42fd-488c-95eb-39ffec289bc8",
+  "prevId": "4728e00d-6243-4ac2-b489-6a5a0ea10569",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -6447,7 +6447,7 @@
     "public.route_probe_state": {
       "name": "route_probe_state",
       "schema": "public",
-      "values": ["ok", "failed", "not_wired", "skipped"]
+      "values": ["ok", "failed", "not_wired", "skipped", "on_demand"]
     },
     "public.run_outcome": {
       "name": "run_outcome",
