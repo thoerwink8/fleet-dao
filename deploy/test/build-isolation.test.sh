@@ -337,7 +337,10 @@ check "没有调用 as_fleet_in" "$(bare_n)" 0
 check "没有切版本" "$(later_n)" 0
 check "探针之后没有跑 pnpm 或 tar" "$(grep -cE 'pnpm|tar -x' <<<"$(srun_text)" || true)" 0
 srun=$(srun_text)
-check "沙箱带 PrivateUsers" "$([[ "$srun" == *'PrivateUsers=true'* ]] && echo ok || echo bad)" ok
+check "沙箱不带 PrivateUsers" "$([[ "$srun" == *'PrivateUsers'* ]] && echo bad || echo ok)" ok
+check "沙箱不带 --uid" "$([[ "$srun" == *'--uid'* ]] && echo bad || echo ok)" ok
+check "沙箱里用 setpriv 降成 fleet" "$([[ "$srun" == *'setpriv --reuid=fleet --regid=fleet --init-groups --no-new-privs'* ]] && echo ok || echo bad)" ok
+check "沙箱带 NoNewPrivileges 和 InaccessiblePaths" "$([[ "$srun" == *'NoNewPrivileges=true'* && "$srun" == *'InaccessiblePaths=-/etc/fleet-dao'* ]] && echo ok || echo bad)" ok
 check "沙箱经 unshare 自建 PID 命名空间" "$([[ "$srun" == *'unshare'* && "$srun" == *'--pid'* && "$srun" == *'--mount-proc'* ]] && echo ok || echo bad)" ok
 
 echo "== 读回确认 /etc/fleet-dao 仍然可见：发布失败，不调用 as_fleet_in"

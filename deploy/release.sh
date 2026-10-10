@@ -227,8 +227,9 @@ build_sandbox_paths() {
 
 # 一次性沙箱里以 fleet 跑命令。root 起 systemd-run：
 # - InaccessiblePaths 盖住密钥目录、本机库 socket 目录、引擎状态目录（直接路径进不去）
-# - PrivateUsers + 里面再 unshare --pid --fork --mount-proc：自建 PID 命名空间并换挂 /proc，
+# - 沙箱里先以 root 跑 unshare --pid --fork --mount-proc --kill-child（root 才建得了 PID 命名空间）：自建 PID 命名空间并换挂 /proc，
 #   主机上同 UID 的 fleet 进程不出现在沙箱 /proc 里，堵掉经 /proc/<pid>/root/… 绕开 InaccessiblePaths
+# - 再用 setpriv 降成 fleet 跑构建命令。不用 --uid=fleet 加私有用户命名空间：那样里面的 unshare --pid 在法国和 CI 上都报 Operation not permitted
 # - NoNewPrivileges：构建进程不能再拿到新权限把这层挂载撤掉
 # --pipe 把调用方的标准输入输出接进去（git archive | tar、日志重定向）。
 # --expand-environment=no：命令和代理值里的 $ 不由 systemd 展开。失败不退回 as_fleet_in
@@ -244,12 +245,11 @@ build_sandbox_run() { # 工作目录 命令…
   systemd-run --wait --pipe --collect --quiet \
     --service-type=exec \
     --expand-environment=no \
-    --uid=fleet --gid=fleet \
     --working-directory="$dir" \
     -p "InaccessiblePaths=$joined" \
     -p NoNewPrivileges=true \
-    -p PrivateUsers=true \
     -- /usr/bin/unshare --pid --fork --mount-proc --kill-child -- \
+      /usr/bin/setpriv --reuid=fleet --regid=fleet --init-groups --no-new-privs -- \
       /usr/bin/env -i HOME=/home/fleet USER=fleet LOGNAME=fleet \
       "PATH=$path" LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
       "${PROXY_ENVS[@]}" "$@"
@@ -311,6 +311,11 @@ build_sandbox_prepare() {
   if ! command -v unshare >/dev/null 2>&1; then
     BUILD_SANDBOX_STATE=bad
     BUILD_SANDBOX_WHY="没有 unshare"
+    return 1
+  fi
+  if ! command -v setpriv >/dev/null 2>&1; then
+    BUILD_SANDBOX_STATE=bad
+    BUILD_SANDBOX_WHY="没有 setpriv"
     return 1
   fi
   if ! build_sandbox_hidden /tmp; then
