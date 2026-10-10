@@ -81,6 +81,8 @@ export function livenessOf(c: RouteCandidate, options: { hold?: string } = {}): 
   const hard = c.blockers.find((b) => b in BLOCKER_WORDS);
   let connect: LivenessFact;
   if (hard) connect = dead(BLOCKER_WORDS[hard] ?? hard);
+  else if (c.probeState === 'on_demand')
+    connect = unknown(`按需探测（不主动探，派给它时先探一次）：${c.probeDetail || '探针没写原因'}`);
   else if (!c.blockers.includes('offline')) connect = live('探针探通了');
   else if (c.probeState === null) connect = unknown('探针还没看过这条路由');
   else if (c.probeState === 'skipped')
