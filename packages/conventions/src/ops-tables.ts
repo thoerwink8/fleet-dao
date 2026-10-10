@@ -547,7 +547,9 @@ interface ExpandCtx {
   script: string;
   line: number;
   reader: DirReader;
-  /** 展开中碰到「按用户变化」的循环变量。 */
+  /** 只在展开路径时为 true：只有路径里的循环变量才算「按用户变化」。 */
+  inPath: boolean;
+  /** 展开路径时碰到了循环变量。 */
   varies: boolean;
 }
 
@@ -566,7 +568,7 @@ function expandText(text: string, ctx: ExpandCtx, chain: string[]): string {
 
 function expandVar(name: string, ctx: ExpandCtx, chain: string[]): string {
   const where = `${ctx.script}:${ctx.line}`;
-  if (ctx.reader.index(ctx.script)?.loopVars.has(name)) {
+  if (ctx.inPath && ctx.reader.index(ctx.script)?.loopVars.has(name)) {
     ctx.varies = true;
     return '';
   }
@@ -606,8 +608,9 @@ function compareText(a: string, b: string): number {
 }
 
 /** 读三个脚本里的 `ensure_dir <路径> <属主:组> <权限>`，路径、属主、权限里的变量按上面的规则展开。
- *  「按用户变化」的判法不写死变量名：三个词里用到的变量是同一脚本里某个 `for NAME in` 循环的循环变量
+ *  「按用户变化」的判法不写死变量名，只看路径：路径里用到的变量是同一脚本里某个 `for NAME in` 循环的循环变量
  *  （例如 human-tier.sh 的 `for u in "${SESSION_USERS[@]}"` 里的 `u`），每个用户一份、不是固定目录，这一行不进表。
+ *  属主、权限里的循环变量不算：路径固定的行照样进表，属主、权限里的循环变量按普通变量找赋值，找不到就抛错。
  *  其余找不到赋值、赋值值里有 `$(` 命令替换、少于三个词的，抛带脚本名和行号的错，不静默跳过。
  *  读不到脚本、或哪个脚本里一个目录都没读到，也抛错（调用方落成「没查成」）。 */
 export function readDirEntries(repo: RepoView): DirEntry[] {
@@ -634,9 +637,12 @@ export function readDirEntries(repo: RepoView): DirEntry[] {
       }
       if (words.length < 3)
         throw new Error(`${where} 的 ensure_dir 不足三个参数（路径 属主:组 权限）：${line.trim()}`);
-      const ctx: ExpandCtx = { script, line: i + 1, reader, varies: false };
-      const [path, owner, mode] = words.map((w) => expandWord(w, ctx)) as [string, string, string];
+      const ctx: ExpandCtx = { script, line: i + 1, reader, inPath: true, varies: false };
+      const path = expandWord(words[0] ?? [], ctx);
       if (ctx.varies) continue;
+      ctx.inPath = false;
+      const owner = expandWord(words[1] ?? [], ctx);
+      const mode = expandWord(words[2] ?? [], ctx);
       entries.push({ path, owner, mode, script, line: i + 1 });
     }
     if (found === 0) throw new Error(`${script} 里一个目录都没读到`);

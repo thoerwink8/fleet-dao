@@ -634,6 +634,17 @@ describe('readDirEntries / renderDirsBlock', () => {
     expect(paths.some((p) => p.includes('$') || p.startsWith('/home/'))).toBe(false);
   });
 
+  it('只看路径判循环：路径固定、属主里有循环变量的行不被丢，展开不了就抛错；属主有赋值则进表', () => {
+    const noAssign = memRepo(
+      dirsFiles({ 'deploy/hk.sh': 'for u in a b; do\n  ensure_dir /shared "$u:$u" 750\ndone\n' }),
+    );
+    expect(() => readDirEntries(noAssign)).toThrow('deploy/hk.sh:2');
+    const withAssign = memRepo(
+      dirsFiles({ 'deploy/hk.sh': 'u=root\nfor u in a b; do\n  ensure_dir /shared "$u:$u" 750\ndone\n' }),
+    );
+    expect(readDirEntries(withAssign).find((e) => e.path === '/shared')?.owner).toBe('root:root');
+  });
+
   it('真仓库的 deploy/ 读得出来：有 .train，没有带 $ 的路径', () => {
     const root = fileURLToPath(new URL('../../../', import.meta.url));
     const entries = readDirEntries(fsRepo(root));
