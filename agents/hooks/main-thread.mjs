@@ -63,7 +63,10 @@ function sleepSync(ms) {
 function* linesFromEnd(path) {
   const fd = openSync(path, 'r');
   try {
-    let pos = fstatSync(fd).size;
+    const st = fstatSync(fd);
+    // Windows 上目录也打得开、大小是 0，不先判就会读出「一行都没有」，被当成没有引导放过去（Linux 上 readSync 才报 EISDIR）。
+    if (!st.isFile()) throw new Error('不是普通文件');
+    let pos = st.size;
     let back = 0;
     let rest = Buffer.alloc(0);
     while (pos > 0) {

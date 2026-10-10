@@ -52,7 +52,7 @@ done
 ORIGINAL=$'# 原来的规矩\n- 一条\n'
 printf '%s' "$ORIGINAL" >"$H/.codex/AGENTS.md"
 chown "$U:$U" "$H/.codex/AGENTS.md"
-# 假仓：真的 AGENTS.md 和通用段原件（agents/shared-rules.md）加一个 skill、三个假钩子脚本（和 HOOK_TARGETS 登记的名字对上，缺一个就会被 missingScript
+# 假仓：真的 AGENTS.md 和通用段原件（agents/shared-rules.md）加一个 skill、几个假钩子脚本（和 HOOK_TARGETS 登记的名字对上，缺一个就会被 missingScript
 # 拦下、settings.json 整份不写——只有 root 读得到，换身份之后才读原件的话，这里就读不到
 R=$T/repo
 mkdir -p "$R/agents/skills/demo" "$R/agents/hooks" "$R/agents/subagents"
@@ -66,6 +66,7 @@ printf '// 假的 Codex 调工具前钩子\n' >"$R/agents/hooks/pretool-codex.mj
 printf '// 假的开会话钩子\n' >"$R/agents/hooks/session-start.mjs"
 printf '// 假的收尾提醒钩子\n' >"$R/agents/hooks/stop.mjs"
 printf '// 假的落盘钩子\n' >"$R/agents/hooks/prompt-log.mjs"
+printf '// 假的主对话两条（引导先回、子代理后台跑）钩子\n' >"$R/agents/hooks/main-thread.mjs"
 chmod -R go-rwx "$R"
 
 fail=0
@@ -98,6 +99,8 @@ check "haiku55 子代理定义装进了 ~/.claude/agents、和仓里一样" \
 # Stop 不需要会话、不用等自动发布），开会话那条不登记（它要在他自己能拉、能写的检出里快进、同步，法国的检出跟着自动发布走）
 check "钩子脚本拷进了他家" "$(cat "$H/.fleet-dao/hooks/pretool.mjs")" "// 假的调工具前钩子"
 check "Stop 钩子脚本也拷进了他家" "$(cat "$H/.fleet-dao/hooks/stop.mjs")" "// 假的收尾提醒钩子"
+check "主对话钩子脚本也拷进了他家（决定 0078）" "$(cat "$H/.fleet-dao/hooks/main-thread.mjs")" \
+  "// 假的主对话两条（引导先回、子代理后台跑）钩子"
 check "Claude 的设置里登记了调工具前、Stop、UserPromptSubmit 三条" \
   "$("$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(Object.keys(s.hooks).join(","))' "$H/.claude/settings.json")" \
   PreToolUse,Stop,UserPromptSubmit
