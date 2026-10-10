@@ -7,7 +7,7 @@
 // - 同步的 spawnSync：每条命令都带超时，超时当场杀。pnpm 在 Windows 上是 .cmd 套壳，走 cmd.exe（同 worker.mjs 的 runViaCmd）。
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readTarget, sshArgs } from './france-lib.mjs';
@@ -84,8 +84,21 @@ async function franceRepos() {
   return { ok: true, rows: repos.rows };
 }
 
+/** pid 还在不在：kill 0 不发信号只查；没权限（EPERM）也是在。 */
+const isAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code === 'EPERM';
+  }
+};
+
 process.exitCode = await runTrain(process.argv.slice(2), {
   home,
+  pid: process.pid,
+  host: hostname(),
+  isAlive,
   env: process.env,
   now: () => new Date(),
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
