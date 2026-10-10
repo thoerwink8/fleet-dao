@@ -1,9 +1,10 @@
-import { Bell, Check, ExternalLink, Send, TriangleAlert } from 'lucide-react';
+import { Bell, Check, ChevronDown, ExternalLink, Send, TriangleAlert } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { brand } from '#brand';
 import { errorText, useMe, useNotifications, useResolveNotification } from '../api/client';
-import type { Notification, NotificationLevel } from '../api/types';
+import type { Me, Notification, NotificationLevel } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RefreshBar } from '../components/refresh-bar';
 import { RepoLink } from '../components/repo-link';
@@ -156,6 +157,132 @@ function HandlingRow({ h, now }: { h: Handling; now: number }) {
   );
 }
 
+function groupByDay(items: Notification[], now: number): Map<string, Notification[]> {
+  const groups = new Map<string, Notification[]>();
+  for (const n of items) {
+    const k = dayOf(n.createdAt, now);
+    groups.set(k, [...(groups.get(k) ?? []), n]);
+  }
+  return groups;
+}
+
+function NotificationRow({
+  n,
+  now,
+  me,
+  resolvePending,
+  resolveId,
+  onOpen,
+  onDone,
+}: {
+  n: Notification;
+  now: number;
+  me: Me | undefined;
+  resolvePending: boolean;
+  resolveId: string | undefined;
+  onOpen: (link: string) => void;
+  onDone: (n: Notification) => void;
+}) {
+  const resolved = Boolean(n.resolvedAt);
+  return (
+    <li
+      className={cn(
+        'flex flex-col gap-3 border-b px-4 py-3 last:border-b-0 md:flex-row md:items-center',
+        !resolved && n.level !== 'daily' && 'bg-accent/40',
+      )}
+    >
+      <div className="flex min-w-0 flex-1 gap-3">
+        <StatusDot tone={noticeLevelMeta[n.level].tone} className={cn('mt-1.5', resolved && 'opacity-40')} />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={cn('text-sm', !resolved && 'font-semibold')}>{n.title}</span>
+            <span className="rounded bg-muted px-1.5 text-caption text-muted-foreground">
+              {noticeLevelMeta[n.level].label}
+            </span>
+          </div>
+          <p className="mt-0.5 text-sub whitespace-pre-wrap text-muted-foreground">{n.body}</p>
+          {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
+          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="num text-caption text-faint" title={formatClock(n.createdAt)}>
+              {formatAgo(n.createdAt, now)}
+            </span>
+            <Deliveries n={n} />
+            {resolved && n.resolvedAt ? (
+              <span className="inline-flex items-center gap-1 text-caption text-muted-foreground">
+                <Check className="size-3" aria-hidden />
+                {n.resolvedBy ? (isMine(n.resolvedBy, me) ? '我' : n.resolvedBy) : ''}处理于{' '}
+                <span className="num">{formatAgo(n.resolvedAt, now)}</span>
+              </span>
+            ) : null}
+          </div>
+        </div>
+      </div>
+      <div className="flex shrink-0 flex-wrap gap-1.5 pl-5 md:pl-0">
+        {n.link ? (
+          <Button size="sm" variant="ghost" onClick={() => onOpen(n.link ?? '/')}>
+            打开
+          </Button>
+        ) : null}
+        {!resolved ? (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={resolvePending && resolveId === n.id}
+            onClick={() => onDone(n)}
+          >
+            <Check />
+            处理了
+          </Button>
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
+/** 按天分组的通知列表。 */
+function DayGroups({
+  items,
+  now,
+  me,
+  resolvePending,
+  resolveId,
+  onOpen,
+  onDone,
+}: {
+  items: Notification[];
+  now: number;
+  me: Me | undefined;
+  resolvePending: boolean;
+  resolveId: string | undefined;
+  onOpen: (link: string) => void;
+  onDone: (n: Notification) => void;
+}) {
+  const groups = groupByDay(items, now);
+  return (
+    <>
+      {[...groups.entries()].map(([day, dayItems]) => (
+        <section key={day}>
+          <h2 className="mb-2 text-xs font-medium text-muted-foreground">{day}</h2>
+          <ul className="overflow-hidden rounded-xl border bg-card">
+            {dayItems.map((n) => (
+              <NotificationRow
+                key={n.id}
+                n={n}
+                now={now}
+                me={me}
+                resolvePending={resolvePending}
+                resolveId={resolveId}
+                onOpen={onOpen}
+                onDone={onDone}
+              />
+            ))}
+          </ul>
+        </section>
+      ))}
+    </>
+  );
+}
+
 /** 通知靠推送更新，没有定时重拉。这份快照超过 5 分钟还没再读成，刷新条标「数据已过期」。 */
 const NOTIFICATIONS_STALE_AFTER_MS = 5 * TIME.MIN;
 
@@ -168,9 +295,18 @@ export default function Notifications() {
   const resolve = useResolveNotification();
   const navigate = useNavigate();
   const now = useNow();
+  // 「全部」视图里日报默认收成一行；切回「全部」时重新折叠，避免上次展开还挂着。
+  const [dailyOpen, setDailyOpen] = useState(false);
+  useEffect(() => {
+    if (level === 'all') setDailyOpen(false);
+  }, [level]);
 
   const all = data?.items ?? [];
   const list = all.filter((n) => level === 'all' || n.level === level);
+  // 只在「全部」级别视图折叠日报；「日报」标签页直接铺开。待处理/连已处理只影响接口过滤，不改折叠。
+  const foldDaily = level === 'all';
+  const actionItems = foldDaily ? list.filter((n) => n.level !== 'daily') : list;
+  const dailyItems = foldDaily ? list.filter((n) => n.level === 'daily') : [];
 
   const set = (key: string, value: string | null) => {
     const p = new URLSearchParams(params);
@@ -179,17 +315,14 @@ export default function Notifications() {
     setParams(p, { replace: true });
   };
 
-  const groups = new Map<string, Notification[]>();
-  for (const n of list) {
-    const k = dayOf(n.createdAt, now);
-    groups.set(k, [...(groups.get(k) ?? []), n]);
-  }
-
   const done = (n: Notification) =>
     resolve.mutate(n.id, {
       onSuccess: () => toast.success('处理了', { description: n.title }),
       onError: (e) => toast.error('没处理成', { description: errorText(e) }),
     });
+
+  const open = (link: string) => navigate(link);
+  const listEmpty = foldDaily ? actionItems.length === 0 && dailyItems.length === 0 : list.length === 0;
 
   return (
     <Page
@@ -248,7 +381,7 @@ export default function Notifications() {
       ) : null}
       {isLoading ? (
         <LoadingRows rows={5} />
-      ) : !data ? null : list.length === 0 ? (
+      ) : !data ? null : listEmpty ? (
         <Panel>
           <Empty
             icon={Bell}
@@ -258,75 +391,48 @@ export default function Notifications() {
         </Panel>
       ) : (
         <div className="space-y-5">
-          {[...groups.entries()].map(([day, items]) => (
-            <section key={day}>
-              <h2 className="mb-2 text-xs font-medium text-muted-foreground">{day}</h2>
-              <ul className="overflow-hidden rounded-xl border bg-card">
-                {items.map((n) => {
-                  const resolved = Boolean(n.resolvedAt);
-                  return (
-                    <li
-                      key={n.id}
-                      className={cn(
-                        'flex flex-col gap-3 border-b px-4 py-3 last:border-b-0 md:flex-row md:items-center',
-                        !resolved && n.level !== 'daily' && 'bg-accent/40',
-                      )}
-                    >
-                      <div className="flex min-w-0 flex-1 gap-3">
-                        <StatusDot
-                          tone={noticeLevelMeta[n.level].tone}
-                          className={cn('mt-1.5', resolved && 'opacity-40')}
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className={cn('text-sm', !resolved && 'font-semibold')}>{n.title}</span>
-                            <span className="rounded bg-muted px-1.5 text-caption text-muted-foreground">
-                              {noticeLevelMeta[n.level].label}
-                            </span>
-                          </div>
-                          <p className="mt-0.5 text-sub whitespace-pre-wrap text-muted-foreground">
-                            {n.body}
-                          </p>
-                          {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
-                          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-                            <span className="num text-caption text-faint" title={formatClock(n.createdAt)}>
-                              {formatAgo(n.createdAt, now)}
-                            </span>
-                            <Deliveries n={n} />
-                            {resolved && n.resolvedAt ? (
-                              <span className="inline-flex items-center gap-1 text-caption text-muted-foreground">
-                                <Check className="size-3" aria-hidden />
-                                {n.resolvedBy ? (isMine(n.resolvedBy, me) ? '我' : n.resolvedBy) : ''}处理于{' '}
-                                <span className="num">{formatAgo(n.resolvedAt, now)}</span>
-                              </span>
-                            ) : null}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex shrink-0 flex-wrap gap-1.5 pl-5 md:pl-0">
-                        {n.link ? (
-                          <Button size="sm" variant="ghost" onClick={() => navigate(n.link ?? '/')}>
-                            打开
-                          </Button>
-                        ) : null}
-                        {!resolved ? (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={resolve.isPending && resolve.variables === n.id}
-                            onClick={() => done(n)}
-                          >
-                            <Check />
-                            处理了
-                          </Button>
-                        ) : null}
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
+          <DayGroups
+            items={actionItems}
+            now={now}
+            me={me}
+            resolvePending={resolve.isPending}
+            resolveId={resolve.variables}
+            onOpen={open}
+            onDone={done}
+          />
+          {foldDaily && dailyItems.length > 0 ? (
+            <section>
+              <button
+                type="button"
+                aria-expanded={dailyOpen}
+                onClick={() => setDailyOpen((v) => !v)}
+                className="mb-2 flex w-full items-center gap-1.5 rounded-lg border bg-card px-4 py-3 text-left text-sm text-foreground hover:bg-accent/40"
+              >
+                <ChevronDown
+                  className={cn(
+                    'size-4 shrink-0 text-muted-foreground transition-transform',
+                    dailyOpen && 'rotate-180',
+                  )}
+                  aria-hidden
+                />
+                <StatusDot tone={noticeLevelMeta.daily.tone} className="size-1.5" />
+                <span>
+                  日报 <span className="num">{dailyItems.length}</span> 条
+                </span>
+              </button>
+              {dailyOpen ? (
+                <DayGroups
+                  items={dailyItems}
+                  now={now}
+                  me={me}
+                  resolvePending={resolve.isPending}
+                  resolveId={resolve.variables}
+                  onOpen={open}
+                  onDone={done}
+                />
+              ) : null}
             </section>
-          ))}
+          ) : null}
           {data?.nextCursor ? (
             <p className="text-center text-xs text-muted-foreground">只显示最近 {all.length} 条。</p>
           ) : null}
