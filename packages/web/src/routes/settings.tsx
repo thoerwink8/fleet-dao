@@ -555,7 +555,7 @@ export default function Settings() {
         id="repos"
         icon={FolderGit2}
         title="仓库"
-        description="接进来的仓。一个仓接进来要满足：测试能跑、有一页 AGENTS.md。「让 AI 接活」开着：引擎每 5 分钟自己按准入和排序挑单（老单要指挥官整理过），没单可挑会自动叫指挥官整理。关着：只有本机 fleet-api dispatch-issue 点名派。"
+        description="接进来的仓。一个仓接进来要满足：测试能跑、有一页 AGENTS.md。接活和整理的细则在每个仓旁边，默认折叠。"
       >
         {/* 总开关和按项目开关的关系（#1086）：总开关关＝全停，开＝只有接活开着的项目才派 */}
         <EngineMasterRelation />
