@@ -68,6 +68,17 @@
 | [0062](0062-ai-flow-interface.md) | AI 与流程的接口：进度先被动读过程记录，主动部分做成 `fleet` 命令而不是 MCP | 采纳，未复核 |
 | [0063](0063-repo-layout.md) | 仓库结构：全部放在 fleet-dao 一个仓 | 采纳，未复核 |
 | [0064](0064-execution-mode-capacity.md) | 执行模式与容量：无头，每个子任务一个命令行写码助手进程，起步 6 个并发会话 | 采纳，未复核 |
+| [0065](0065-two-machine-split.md) | 两台机器分工：法国干活，香港当门面 | 采纳，未复核 |
+| [0066](0066-quota-read-all.md) | 额度必须全读：驾驶舱和调度都用完整额度数据 | 采纳，未复核 |
+| [0067](0067-supplementary-needs.md) | 补充需求：旧单审计找出的 10 条 | 采纳，未复核 |
+| [0068](0068-jev-integration.md) | Jev 接入：按场景和性价比接入，先只记不拦 | 采纳，未复核 |
+| [0069](0069-secrets-vault-copy.md) | 密钥副本：加密配置副本放私有配套仓 | 采纳，未复核 |
+| [0070](0070-labels-and-milestones.md) | GitHub 上的标签与里程碑 | 采纳，未复核 |
+| [0071](0071-debt-not-lost.md) | 欠账不漏：以后要做的事必须落到 issue | 采纳，未复核 |
+| [0072](0072-projects-and-standards.md) | 项目与标准：项目模型和标准推送机制 | 采纳，未复核 |
+| [0073](0073-test-memory-fix-tests-not-machine.md) | 测试内存先改测试、不加机器 | 采纳，未复核 |
+| [0074](0074-commander-no-seat.md) | 指挥官不设座位、不在库里认领 | 采纳，未复核 |
+| [0075](0075-france-engine-release-by-commit.md) | 法国自家的引擎按主线上的一个提交发布 | 部分被 0032 替代 |
 
 ## 第 1–14 条的编号（#1476）
 
