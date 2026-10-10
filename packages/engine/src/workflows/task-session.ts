@@ -7,6 +7,7 @@
 // - 别在这里加判断条件：判断经 rt.classify（judgeRetrying），结果进历史。
 // - 会话跑完却没有提交（#1408，patched('avoid-empty-commit-route')）：避让记在这张单的运行时上，下一轮选路带上。
 //   滤光了候选就不再避开，点名原来的路由再选一次；还派不出就照旧用它，不死等。老历史没有这个标记，选路参数和原来一样。
+// - 写码返工优先本单已有作者族（patched('prefer-author-families')）：老历史重放时不带这个字段，避免多走新分支。
 // - 派之前再探一次选定的那条（#1409，patched('dispatch-probe')）：不通就先放掉这次预占（patched('dispatch-probe-release')，
 //   没进起会话，不能占着池），再换下一条，每轮最多探 3 条；都探不通或都被挡就停下，不起会话。
 //   没提交避让滤光之后改派原来的那条，也先探再派。老历史没有这个标记，不探、不改选路之后的那一步。
@@ -318,6 +319,9 @@ async function pickRoute(
         avoidModelIds: merged.modelIds,
         ...(stickTo ? { stickRouteId: stickTo } : {}),
         ...(prefer ? { preferRouteId: prefer } : {}),
+        ...(patched('prefer-author-families') && rt.families.size > 0
+          ? { preferFamilies: [...rt.families] }
+          : {}),
         ...(failedChannel ? { failedChannel } : {}),
         reserve: { segment: 'manual' },
       }),

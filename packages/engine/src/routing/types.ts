@@ -187,6 +187,10 @@ export interface ChooseRouteInput {
    * 也不派：认不出这次是哪一家在答。
    */
   avoid?: { routeIds?: string[]; poolIds?: string[]; modelIds?: string[]; families?: string[] };
+  /**
+   * 这张单已经有的作者族：写码返工时先在这几族里挑，免得作者族越攒越多、冷验收挑不出别家。
+   */
+  preferFamilies?: string[];
   /** 这一步算界面类的活（改到了页面代码，例如验证一个改了页面的改动）：禁令按 UI 判（GPT 不做界面，含审界面）。 */
   uiWork?: boolean;
   /**
