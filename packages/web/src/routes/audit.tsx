@@ -1,8 +1,8 @@
 import { Bot, Cog, ScrollText, Search, Terminal, X } from 'lucide-react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
-import { useAllBoards, useAudit, useMe, useRouting } from '../api/client';
+import { useAllBoards, useAudit, useMe, useNotifications, useRouting } from '../api/client';
 import type { AuditEntry, Me } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RefreshBar } from '../components/refresh-bar';
@@ -14,8 +14,10 @@ import {
   actorKindLabel,
   actorName,
   auditChangeLines,
+  notificationIndex,
   routeModelNames,
   targetLabel,
+  taskHintsFromAudit,
   taskIndex,
   viaLabel,
 } from '../lib/audit';
@@ -139,21 +141,29 @@ export default function Audit() {
   const audit = useAudit(target);
   const { boards } = useAllBoards();
   const { data: me } = useMe();
+  const notices = useNotifications('all');
   const now = useNow();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]['id']>('all');
   const [q, setQ] = useState('');
   const routing = useRouting();
   const routeNames = routeModelNames(routing.data);
-  const tasks = taskIndex(boards.flatMap((b) => b.tasks));
   const all = audit.data?.pages.flatMap((p) => p.items) ?? [];
+  // 看板索引还没到时，先用记录里自带的单号占位；看板到了盖上标题。提醒标题另从通知列表对。
+  const tasks = useMemo(() => {
+    const merged = taskHintsFromAudit(all);
+    for (const [id, ref] of taskIndex(boards.flatMap((b) => b.tasks))) merged.set(id, ref);
+    return merged;
+  }, [all, boards]);
+  const notifications = useMemo(() => notificationIndex(notices.data?.items ?? []), [notices.data?.items]);
+  const query = q.trim();
   const list = all
     .filter((a) => filter === 'all' || a.actor.kind === filter)
     .filter(
       (a) =>
-        !q ||
-        `${actorName(a.actor, me)} ${actorName(a.actor)} ${actionLabel(a.action)} ${a.action} ${targetLabel(a.target, tasks)} ${a.reason ?? ''} ${a.error ?? ''}`
+        !query ||
+        `${actorName(a.actor, me)} ${actorName(a.actor)} ${actionLabel(a.action)} ${a.action} ${targetLabel(a.target, tasks, notifications)} ${a.reason ?? ''} ${a.error ?? ''}`
           .toLowerCase()
-          .includes(q.toLowerCase()),
+          .includes(query.toLowerCase()),
     );
 
   const setTarget = (t: string | null) => {
@@ -164,9 +174,16 @@ export default function Audit() {
   };
   const hasOlder = Boolean(audit.hasNextPage);
   const loadOlder = () => void audit.fetchNextPage();
-  // 已加载的都被滤掉才提换条件；没有更早的就不写「往前翻」。
+  const searching = query.length > 0;
+  // 搜索无结果且还有更早的：说清只搜了已加载的，点了继续往前翻。过滤空了才提换条件。
   const emptyHint =
-    all.length === 0 ? undefined : hasOlder ? '换个过滤条件，或往前翻更早的。' : '换个过滤条件。';
+    all.length === 0
+      ? undefined
+      : searching
+        ? undefined
+        : hasOlder
+          ? '换个过滤条件，或往前翻更早的。'
+          : '换个过滤条件。';
 
   return (
     <Page
@@ -206,7 +223,7 @@ export default function Audit() {
         </div>
         {target ? (
           <span className="inline-flex h-8 items-center gap-1.5 rounded-full border bg-card pr-1 pl-3 text-sub">
-            只看 {targetLabel(target, tasks)}
+            只看 {targetLabel(target, tasks, notifications)}
             <button
               type="button"
               onClick={() => setTarget(null)}
@@ -250,7 +267,18 @@ export default function Audit() {
             icon={ScrollText}
             title="没有符合条件的记录"
             hint={
-              emptyHint || hasOlder ? (
+              searching && hasOlder ? (
+                <button
+                  type="button"
+                  onClick={loadOlder}
+                  disabled={audit.isFetchingNextPage}
+                  className="text-foreground underline-offset-2 hover:underline disabled:opacity-60"
+                >
+                  {audit.isFetchingNextPage
+                    ? '正在读更早的…'
+                    : `只搜了已加载的 ${all.length} 条，点这里再往前翻`}
+                </button>
+              ) : emptyHint || hasOlder ? (
                 <>
                   {emptyHint ? <p>{emptyHint}</p> : null}
                   {hasOlder ? (
@@ -259,6 +287,8 @@ export default function Audit() {
                     </div>
                   ) : null}
                 </>
+              ) : searching ? (
+                <p>换个过滤条件。</p>
               ) : undefined
             }
           />
@@ -281,7 +311,7 @@ export default function Audit() {
                       className="min-w-0 truncate text-left text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
                       title="只看这个对象的记录"
                     >
-                      {targetLabel(a.target, tasks)}
+                      {targetLabel(a.target, tasks, notifications)}
                     </button>
                     {!a.ok ? (
                       <Badge variant="outline" className="h-5 border-st-fail/50 text-caption text-ink-fail">
