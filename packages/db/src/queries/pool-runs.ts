@@ -12,7 +12,7 @@
 // 3. 没开跑就收场了（建树失败、内存一直放不下、被叫停、切号停下、换了路由）由引擎放掉（releaseReservation）；
 // 4. 都没赶上的到 expires_at 自己不算（卡死了不一直占着），这一段要是后来又开跑，开跑时按当时的空位重新排、满了就不让起；
 // 5. 引擎重启时整表清掉（clearReservations）：上一轮的会话一个都起不来了。
-import type { StageKind } from '@fleet-dao/shared';
+import { SEGMENT_STAGE, type StageKind } from '@fleet-dao/shared';
 import { and, eq, gt, gte, inArray, isNotNull, isNull, lte } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import {
@@ -46,6 +46,11 @@ export interface OpenPoolRun {
    * 预占着名额在建树、等内存），或起之前就没了下文。
    */
   startedAt: Date | null;
+  /**
+   * 这一次是哪一段（用途）：Fusion 是会话登记的 stage；三段的一次性会话按 shared 的 SEGMENT_STAGE 换（动手 execute、验收 verify）。
+   * null = 对不上用途（对题段不选路，正常不会带路由）。驾驶舱「在跑的会话」按它分段显示。
+   */
+  stage: StageKind | null;
 }
 
 /**
@@ -68,13 +73,20 @@ export async function openPoolRuns(
         routeId: routes.id,
         queuedAt: sessionRuns.queuedAt,
         startedAt: sessionRuns.startedAt,
+        stage: sessionRuns.stage,
       })
       .from(sessionRuns)
       .innerJoin(routes, eq(routes.id, sessionRuns.routeId))
       .innerJoin(pools, eq(pools.id, routes.poolId))
       .where(and(isNull(sessionRuns.endedAt), ...orgOnly)),
     db
-      .select({ runId: runs.id, poolId: routes.poolId, routeId: routes.id, startedAt: runs.startedAt })
+      .select({
+        runId: runs.id,
+        poolId: routes.poolId,
+        routeId: routes.id,
+        startedAt: runs.startedAt,
+        segment: runs.segment,
+      })
       .from(runs)
       .innerJoin(routes, eq(routes.id, runs.routeId))
       .innerJoin(pools, eq(pools.id, routes.poolId))
@@ -85,6 +97,7 @@ export async function openPoolRuns(
         poolId: routes.poolId,
         routeId: routes.id,
         reservedAt: poolReservations.reservedAt,
+        segment: poolReservations.segment,
       })
       .from(poolReservations)
       .innerJoin(routes, eq(routes.id, poolReservations.routeId))
@@ -100,6 +113,7 @@ export async function openPoolRuns(
       kind: 'oneShot' as const,
       queuedAt: r.startedAt,
       startedAt: r.startedAt,
+      stage: stageOfSegment(r.segment),
     })),
     ...reservations.map((h) => ({
       runId: h.runId,
@@ -108,8 +122,14 @@ export async function openPoolRuns(
       kind: 'oneShot' as const,
       queuedAt: h.reservedAt,
       startedAt: null,
+      stage: stageOfSegment(h.segment),
     })),
   ].sort((a, b) => a.queuedAt.getTime() - b.queuedAt.getTime() || byId(a.runId, b.runId));
+}
+
+/** 三段的一段对应的用途（shared 的 SEGMENT_STAGE）；对题段不选路，没有。 */
+function stageOfSegment(segment: RunSegment): StageKind | null {
+  return segment === 'manual' || segment === 'verify' ? SEGMENT_STAGE[segment] : null;
 }
 
 /** 一条预占：引擎重启清掉的、预占时顺手收掉的过期的（别的单占着没开跑、也没放掉，那一段多半卡住了）交回给调用方记日志。 */
