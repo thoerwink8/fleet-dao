@@ -792,7 +792,9 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 - 从公网打开的，健康页和占位页上都不写仓名、GitHub 账号名和地址（设计文档第十四节），也不显示版本号（`release.json` 公网上读不到）。`deploy/test/public-site.test.sh` 拿公开页的禁词名单扫发布脚本生成的这几页；改了文字，下次发 `web` 才到香港。
 - 香港转发时清掉 `Authorization`、`X-Fleet-Acting-Feishu`。france.sh 的读回从公网带着这两个头请求 `/api`，核对法国收到的请求里没有：后端没在跑时在隧道地址上临时起回显直接看，后端在跑时看它答的是「没登录」。
 
-还欠（发布这块）：构建以 fleet 身份跑，构建期间的第三方代码（前端构建工具等）读得到 `/etc/fleet-dao` 里 fleet 能读的全部密钥。换成读不到 `/etc/fleet-dao` 的专用构建用户要动装机（新用户、它的 pnpm、属主交接），留到下一轮（#79）。现在挡着的：pnpm 11 默认不跑依赖的安装脚本，只跑 `pnpm-workspace.yaml` 的 `allowBuilds` 放行的（现在一个都没放行），所以装依赖这一步第三方代码不执行；前端构建那一步照样会执行构建工具的代码。
+发布构建和密钥隔开（#79，已做）：装依赖、构建驾驶舱前端、打包飞书网关这三步不再以 fleet 直接跑，改走同一个构建沙箱。发布脚本以 root 起一次性 `systemd-run`（`InaccessiblePaths` + `NoNewPrivileges`），里面先以 root 跑 `unshare --pid --fork --mount-proc --kill-child`（root 才建得了 PID 命名空间，自建并换挂 `/proc`），再用 `setpriv --reuid=fleet --regid=fleet --init-groups --no-new-privs` 降成 fleet 跑构建命令（不用 `--uid=fleet` + `PrivateUsers`：法国 systemd 255 和 CI 上里面的 `unshare --pid` 报 `Operation not permitted`）。直接路径挡掉三处：`/etc/fleet-dao`（GitHub 机器人私钥、会话密钥、令牌）、本机库的 unix socket 目录（`/var/run/postgresql`；`/var/run` 指到 `/run` 时连实际路径一起挡）、`/var/lib/fleet-dao`。主机上同 UID 的 fleet 进程不出现在沙箱的 `/proc` 里，因此也不能经 `/proc/<pid>/root/…` 绕开那三处（只遮挂载、仍看主机 `/proc` 时这条绕路是通的）。跑之前先读回：直接路径或任一 `/proc/*/root/etc/fleet-dao` 在沙箱里仍可读、或者没有 `systemd-run` / `unshare` / `setpriv`、沙箱起不来、读回认不出，构建这一步红字停下，不切版本，也不退回用 fleet 直接构建。
+
+沙箱里还看得到的：fleet 的家目录（pnpm 和缓存在 `/home/fleet`，构建要用，家目录里 fleet 能读的文件构建时也能读）；出网（装依赖要连 registry.npmjs.org）；本机 TCP `127.0.0.1:5432`（只隔了 unix socket 目录，端口没隔；装机给 fleet 的是 socket 上的 peer、不设口令，TCP 那条要口令）；沙箱起来之后才在主机上挂进这三处下面的新挂载（`InaccessiblePaths` 挡不住后挂上的）；沙箱自己 PID 命名空间里的 `/proc`（能看本沙箱进程的环境与文件描述符，看不到主机上别的进程）。没有新建专用构建用户：构建仍是 fleet 这个 UID，靠挂载隔离 + 私有 PID/`/proc` 把密钥目录和主机同 UID 进程隔开。pnpm 11 默认仍不跑依赖的安装脚本（`pnpm-workspace.yaml` 的 `allowBuilds` 现在一个都没放行），这层还在，但不再是唯一的挡。
 
 ### 自动发布
 
