@@ -5,6 +5,8 @@
 // 仓根临时文件那一条只提醒、不拦、不删——只用 systemMessage。
 // 无人值守（决定 0028，创始人 2026-10-07 约 02:27 推翻 0026 的「收尾不拦」）：只有这个会话自己跑过 `unattended.mjs on`
 // 才输出 decision:block（理由里说清继续盯工人、有进展记进度），起子代理、后台活不自动开；放行条件和防死循环的上限见 unattended.mjs。
+// Mirasim 的引导要等这一轮结束才送进来（#1743，补决定 0078）：这个会话有没送进来的引导（判法同 main-thread.mjs 的 pendingSteer），
+// 无人值守也放行收尾，让引导作为下一轮送进来。
 // 决定 0026：起后台活不再自动开。决定 0027：不再读、不再清欠账文件。
 // 退出码恒为 0：Stop 上 exit 2 也是「不许停」。
 // 规矩本身由 agents/test/rules/stop.rules.test.ts 钉住：没开无人值守时输出里出现 decision 或 hookSpecificOutput 会红。
@@ -12,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitRunner, gitOk as ok } from './git-run.mjs';
+import { beijing, mirasimDir, pendingSteer } from './main-thread.mjs';
 import { cleanId, decideStop, isMachineSession, runningWorkers, stateDir } from './unattended.mjs';
 
 /** 仓根里一眼像临时文件的：截图、导出的数据、日志（AGENTS.md 通用段「放 _tmp/」那条列的几类） */
@@ -84,7 +87,21 @@ if (isMain()) {
   const notes = [];
   try {
     const sessionId = cleanId(input?.session_id) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
-    if (sessionId && !isMachineSession({ env: process.env })) {
+    // Mirasim 的引导要等这一轮结束才送进来（#1743）：有这个会话没送进来的引导，就放行收尾，不挡（调工具前钩子已经叫它收尾了）。
+    // 查不成照旧按无人值守判，不把「没查成」当成「有引导」。
+    const steer = sessionId
+      ? pendingSteer({
+          root: mirasimDir(),
+          sessionId,
+          transcriptPath: input?.transcript_path,
+          now: Date.now(),
+        })
+      : { kind: 'none' };
+    if (steer.kind === 'pending') {
+      notes.push(
+        `创始人 ${beijing(steer.at)} 在 Mirasim 发的引导在等这一轮结束：收尾不挡（开着无人值守也放行，无人值守不关），引导随即作为下一轮送进来`,
+      );
+    } else if (sessionId && !isMachineSession({ env: process.env })) {
       const dir = stateDir();
       const un = decideStop({ dir, sessionId, running: runningWorkers() });
       if (un.block) {

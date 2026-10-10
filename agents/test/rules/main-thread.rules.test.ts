@@ -19,7 +19,10 @@ interface Verdict {
   notice?: string;
 }
 interface MainThreadLib {
-  check(raw: string, opts?: { settleMs?: number; sleep?: (ms: number) => void }): Verdict;
+  check(
+    raw: string,
+    opts?: { settleMs?: number; sleep?: (ms: number) => void; now?: number; mirasim?: string },
+  ): Verdict;
   hookOutput(v: Verdict): string;
   DIRECTIVE_SHOWN_CHARS: number;
 }
@@ -113,7 +116,10 @@ const input = (path: unknown, extra: Row = {}, tool = 'Bash', toolInput: Row = {
     ...extra,
   });
 
-const check = (raw: string) => lib.check(raw, { settleMs: 0 });
+/** Mirasim 的引导那一条（#1743）在 mirasim-steer.rules.test.ts 钉；这里指到一个不在的家目录，不读跑测试这台机器上的真 diag */
+const NO_MIRASIM = join(dir, 'no-mirasim');
+const NO_MIRASIM_ENV = { ...process.env, FLEET_MIRASIM_DIR: NO_MIRASIM };
+const check = (raw: string) => lib.check(raw, { settleMs: 0, mirasim: NO_MIRASIM });
 
 describe('引导先回', () => {
   it('引导之后直接调工具：拒，理由带引导原文、说怎么回、涉及子代理用 SendMessage 转', () => {
@@ -186,6 +192,7 @@ describe('引导先回', () => {
     const t = transcript([...turnStart(), row.directive('先别动数据库')]);
     const v = lib.check(input(t), {
       settleMs: 1,
+      mirasim: NO_MIRASIM,
       sleep: () => appendFileSync(t, `${JSON.stringify(row.text('m2', '收到。'))}\n`),
     });
     expect(v).toEqual({});
@@ -265,9 +272,9 @@ describe('子代理一律后台跑', () => {
     const mutant = join(dir, 'main-thread-mutant.mjs');
     writeFileSync(mutant, src.replace(want, "prop(toolInput, 'run_in_background') !== true"));
     const bad = (await import(pathToFileURL(mutant).href)) as MainThreadLib;
-    expect(bad.check(input(clean(), {}, 'Agent', { prompt: '干活' }), { settleMs: 0 }).deny).toContain(
-      '子代理一律后台跑',
-    );
+    expect(
+      bad.check(input(clean(), {}, 'Agent', { prompt: '干活' }), { settleMs: 0, mirasim: NO_MIRASIM }).deny,
+    ).toContain('子代理一律后台跑');
   });
 });
 
@@ -345,7 +352,7 @@ describe('登记和真跑', () => {
     timeout: 0,
   }, () => {
     const t = transcript([...turnStart(), row.directive('先别动数据库')]);
-    const r = runChild(process.execPath, [HOOK], { input: input(t) });
+    const r = runChild(process.execPath, [HOOK], { input: input(t), env: NO_MIRASIM_ENV });
     expect(r.status).toBe(0);
     const out = JSON.parse(r.stdout) as {
       hookSpecificOutput?: {
@@ -358,13 +365,19 @@ describe('登记和真跑', () => {
     expect(out.hookSpecificOutput?.permissionDecision).toBe('deny');
     expect(out.hookSpecificOutput?.permissionDecisionReason).toContain('先别动数据库');
 
-    const lost = runChild(process.execPath, [HOOK], { input: input(join(dir, 'gone.jsonl')) });
+    const lost = runChild(process.execPath, [HOOK], {
+      input: input(join(dir, 'gone.jsonl')),
+      env: NO_MIRASIM_ENV,
+    });
     expect(lost.status).toBe(0);
     expect((JSON.parse(lost.stdout) as { systemMessage?: string }).systemMessage).toMatch(
       /^引导检查没查成：/,
     );
 
-    const ok = runChild(process.execPath, [HOOK], { input: input(transcript(turnStart())) });
+    const ok = runChild(process.execPath, [HOOK], {
+      input: input(transcript(turnStart())),
+      env: NO_MIRASIM_ENV,
+    });
     expect([ok.status, ok.stdout]).toEqual([0, '']);
   });
 });
