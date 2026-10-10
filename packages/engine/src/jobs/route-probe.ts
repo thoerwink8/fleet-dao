@@ -295,7 +295,8 @@ function paceWait(t: ProbeTarget, now: Date): PaceWait | null {
     return { kind: 'on_demand', detail: onDemandDetail(valid ? last : null), rewrite: true };
   }
 
-  if (valid && last.state === 'ok' && t.alive) {
+  // 名次读不到（没排进任何用途、或算不出）：不当成前 2 位也不当成后面，照每轮的原间隔探（切号核对、老夹具都靠它）
+  if (valid && last.state === 'ok' && t.alive && rank != null) {
     const hostEvery = routeProbeEveryMinutes(t.hostId);
     const every = Math.max(hostEvery, ROUTE_PROBE_PRIMARY_EVERY_MINUTES);
     // 这种执行方式本来就隔得更久：planProbe 已经按那个间隔放慢，这里不改短
