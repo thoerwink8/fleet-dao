@@ -234,7 +234,7 @@ describe('思考档位页：折叠（#1756）', () => {
     expect(document.querySelector('[data-route="r-uncat-gpt"]')).toBeNull();
     expect(document.querySelector('[data-route="r-uncat-claude"]')).toBeNull();
 
-    const fixedBtn = screen.getByRole('button', { name: /配不了 3 条/ });
+    const fixedBtn = screen.getByRole('button', { name: /配不了 4 条/ });
     expect(fixedBtn.getAttribute('aria-expanded')).toBe('false');
     const uncatBtn = screen.getByRole('button', { name: /未分类 2 条/ });
     expect(uncatBtn.getAttribute('aria-expanded')).toBe('false');
