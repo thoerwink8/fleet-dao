@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { CATALOG_NAMED_FAMILIES } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
+import { UNVERIFIABLE_AUTHOR_FAMILIES } from './author-families.ts';
 import {
   type ColdVerifyStatus,
   coldVerifyNotRun,
@@ -46,12 +47,6 @@ import {
   type VerifierInvokeInput,
   type VerifierInvokeOutput,
 } from './verifier-invoke.ts';
-
-/**
- * 目录里有、但不能当「认得的作者族」的：cursor（Cursor Auto 背后到底是哪家不知道，不能当成和验收人不同族）、
- * unclassified（拆不出的串）、jev（不是写代码的模型）。再加上拼写不认识的串，都按「认不出」停。
- */
-const NOT_A_KNOWN_AUTHOR_FAMILY: ReadonlySet<string> = new Set(['cursor', 'unclassified', 'jev']);
 
 /** 这张 PR 对着的单子：是哪张（验收这一笔记进 runs 挂在它名下，#216）、要什么、怎么算做完。 */
 export interface ColdVerifySpec {
@@ -177,7 +172,7 @@ export async function runColdVerifyForPr(
   // 验收人只从 FAMILY_ORDER 里挑，必然和它们不同族）。cursor（背后是哪家不知道）、unclassified、jev 不算认得。
   const known = new Set<string>(FAMILY_ORDER);
   const authorOnly = new Set<string>(
-    CATALOG_NAMED_FAMILIES.filter((f) => !known.has(f) && !NOT_A_KNOWN_AUTHOR_FAMILY.has(f)),
+    CATALOG_NAMED_FAMILIES.filter((f) => !known.has(f) && !UNVERIFIABLE_AUTHOR_FAMILIES.has(f)),
   );
   const avoid: ModelFamily[] = [];
   const unknown: string[] = [];
