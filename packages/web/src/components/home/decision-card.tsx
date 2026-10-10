@@ -4,7 +4,7 @@
 import { ArrowRight, ScrollText, Send } from 'lucide-react';
 import { Link } from 'react-router';
 import { formatAgo } from '../../lib/format';
-import { useNow } from '../../lib/hooks';
+import { useSlowNow } from '../../lib/hooks';
 import { cn } from '../../lib/utils';
 import { useRemoteView } from '../node-notice';
 import { Button } from '../ui/button';
@@ -16,7 +16,7 @@ const KIND_META: Record<HomeDecision['kind'], { icon: typeof Send; label: string
 };
 
 export function DecisionCard({ decision, className }: { decision: HomeDecision; className?: string }) {
-  const now = useNow();
+  const now = useSlowNow();
   const remote = useRemoteView();
   const meta = KIND_META[decision.kind];
   const Icon = meta.icon;

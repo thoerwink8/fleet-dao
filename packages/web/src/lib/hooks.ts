@@ -1,35 +1,46 @@
 import { useCallback, useState, useSyncExternalStore } from 'react';
 
-// 全页共用一个秒表：几十个倒计时不各开一个定时器。
-const clockListeners = new Set<() => void>();
-let clockTimer: ReturnType<typeof setInterval> | undefined;
-let clockNow = Date.now();
-
-function subscribeClock(cb: () => void) {
-  clockListeners.add(cb);
-  if (!clockTimer) {
-    clockNow = Date.now();
-    clockTimer = setInterval(() => {
-      clockNow = Date.now();
-      for (const l of clockListeners) l();
-    }, 1000);
-  }
-  return () => {
-    clockListeners.delete(cb);
-    if (!clockListeners.size && clockTimer) {
-      clearInterval(clockTimer);
-      clockTimer = undefined;
-    }
+// 全页共用的钟：几十个倒计时不各开一个定时器。按走一步的时长各一个（秒钟、半分钟钟）。
+function createClock(stepMs: number) {
+  const listeners = new Set<() => void>();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let now = Date.now();
+  return {
+    subscribe(cb: () => void) {
+      listeners.add(cb);
+      if (!timer) {
+        now = Date.now();
+        timer = setInterval(() => {
+          now = Date.now();
+          for (const l of listeners) l();
+        }, stepMs);
+      }
+      return () => {
+        listeners.delete(cb);
+        if (!listeners.size && timer) {
+          clearInterval(timer);
+          timer = undefined;
+        }
+      };
+    },
+    read: () => now,
   };
 }
 
+const secondClock = createClock(1000);
+
+/** 慢钟走一步的时长：只显示到「分钟」的相对时间（合于 N 分钟前）每 30 秒重算一次，不靠重拉数据。 */
+export const SLOW_CLOCK_MS = 30_000;
+const slowClock = createClock(SLOW_CLOCK_MS);
+
 /** 每秒刷新一次的「现在」。 */
 export function useNow(): number {
-  return useSyncExternalStore(
-    subscribeClock,
-    () => clockNow,
-    () => clockNow,
-  );
+  return useSyncExternalStore(secondClock.subscribe, secondClock.read, secondClock.read);
+}
+
+/** 每 30 秒刷新一次的「现在」：给只精确到分钟的相对时间用，省得几十张卡每秒重绘。 */
+export function useSlowNow(): number {
+  return useSyncExternalStore(slowClock.subscribe, slowClock.read, slowClock.read);
 }
 
 export function useMediaQuery(query: string): boolean {

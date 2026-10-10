@@ -265,6 +265,29 @@ export const keys = {
   node: (nodeId: string) => ['node', nodeId] as const,
 };
 
+// ---------- 兜底轮询（#1799） ----------
+
+/** 主页的兜底轮询：推送正常时 30 秒。 */
+export const HOME_POLL_MS = 30_000;
+/** 其余读页（任务列表、通知、渠道状态、额度）的兜底轮询：推送正常时 60 秒。 */
+export const READ_POLL_MS = 60_000;
+/** 推送不是 open（连接中、断了）时所有读页都缩到 10 秒：推送靠不住，轮询顶上。 */
+export const DOWN_POLL_MS = 10_000;
+
+/**
+ * 推送为主、轮询兜底：推送只覆盖部分表，也可能被网关缓冲、悄悄断开。可见时按 openMs 重拉；推送不是 open 就 10 秒；
+ * 页面在后台不拉，切回窗口重拉一次（根上全局关了窗口焦点重拉，这里按查询单开）。
+ * 间隔取自推送状态的值而不是函数，状态一变观察者当场换定时器，不用等上一个 openMs 走完。
+ */
+export function useLivePoll(openMs: number) {
+  const { status } = useLiveState();
+  return {
+    refetchInterval: status === 'open' ? openMs : DOWN_POLL_MS,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+  } as const;
+}
+
 // ---------- 读 ----------
 
 export function useMe() {
@@ -377,6 +400,7 @@ export function useTaskList(filter: TaskListFilter) {
     queryFn: ({ pageParam }) => api.tasks({ ...filter, cursor: pageParam, limit: TASK_LIST_PAGE_SIZE }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.nextCursor,
+    ...useLivePoll(READ_POLL_MS),
   });
 }
 
@@ -386,7 +410,8 @@ export function useTaskList(filter: TaskListFilter) {
  */
 export function useRouting({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
-  return useQuery({ queryKey: keys.routing, queryFn: () => api.routing(), refetchInterval: 30_000, enabled });
+  const poll = useLivePoll(30_000);
+  return useQuery({ queryKey: keys.routing, queryFn: () => api.routing(), ...poll, enabled });
 }
 
 /**
@@ -396,10 +421,11 @@ export function useRouting({ enabled = true }: { enabled?: boolean } = {}) {
  */
 export function useRoutingLayers({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
+  const poll = useLivePoll(30_000);
   return useQuery({
     queryKey: keys.routingLayers,
     queryFn: () => api.routingLayers(),
-    refetchInterval: 30_000,
+    ...poll,
     enabled,
   });
 }
@@ -514,7 +540,8 @@ export function useRoutingEfforts() {
 
 export function usePools({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
-  return useQuery({ queryKey: keys.pools, queryFn: () => api.pools(), enabled });
+  const poll = useLivePoll(READ_POLL_MS);
+  return useQuery({ queryKey: keys.pools, queryFn: () => api.pools(), ...poll, enabled });
 }
 
 /** 整池暂停现状（#746）：到期是按日期现算的，不靠推送，每分钟重拉；改设置、改提醒时另外作废（useUpdateSetting）。 */
@@ -538,10 +565,12 @@ export const NOTIFICATIONS_PAGE = 200;
 /** limit 是这一页最多取几条；总数看返回的 counts，不看 items.length。 */
 export function useNotifications(status: 'open' | 'all' = 'open', limit: number = NOTIFICATIONS_PAGE) {
   const api = useApi();
+  const poll = useLivePoll(READ_POLL_MS);
   return useQuery({
     queryKey:
       limit === NOTIFICATIONS_PAGE ? keys.notifications(status) : [...keys.notifications(status), limit],
     queryFn: () => api.notifications({ status, limit }),
+    ...poll,
     // 只有「多看几条」（同一状态、limit 变大）才留着上一份，切到另一个状态不拿旧列表顶。
     placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === status ? prev : undefined),
   });
@@ -651,7 +680,9 @@ export function useHome({ enabled = true }: { enabled?: boolean } = {}): {
   dataUpdatedAt: number;
 } {
   const api = useApi();
-  const query = useQuery({ queryKey: keys.home, queryFn: () => api.home(), enabled });
+  // 推送不覆盖主页读的几样（合并了的 PR 镜像、路由探针结论、引擎健康），所以主页自己兜底轮询（#1799）
+  const poll = useLivePoll(HOME_POLL_MS);
+  const query = useQuery({ queryKey: keys.home, queryFn: () => api.home(), ...poll, enabled });
   return {
     data: homeStateOf(query),
     refetch: () => query.refetch(),
@@ -706,10 +737,11 @@ export function useNodes() {
  */
 export function useNode(nodeId: string | null) {
   const api = useApi();
+  const poll = useLivePoll(HOME_POLL_MS);
   return useQuery({
     queryKey: keys.node(nodeId ?? ''),
     queryFn: () => api.node(nodeId ?? ''),
-    refetchInterval: 30_000,
+    ...poll,
     enabled: nodeId !== null,
     retry: retryUnlessMissing,
   });
@@ -1026,8 +1058,8 @@ export function useUpdateCredentials() {
  * 推送只说「哪张表的哪一行变了」，前端按表名决定重拉什么。表名单在 shared/realtime.ts：
  * 名单里加了表而这里没写，tsc 当场报错。认不出的表一律全量重拉——宁可多拉一次，也不把「漏收」当成「没变化」。
  * 不在名单里的表（定时任务、路由、模型……）没有推送，对应页面靠定时重拉。
- * 主页（keys.home）一份读取聚齐了需求、通知、在跑的会话、三段流水、额度和渠道：这几张表哪张变了都要作废它——主页不定时重拉、
- * 切回窗口也不重拉（root.tsx），漏写一张，那一块就停在打开页面时的样子。
+ * 主页（keys.home）一份读取聚齐了需求、通知、在跑的会话、三段流水、额度和渠道：这几张表哪张变了都要作废它。
+ * 漏写一张或推送断了，由 useHome 的兜底轮询（useLivePoll，30 秒 / 断了 10 秒）和切回窗口重拉顶上。
  */
 const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   tasks: [['board'], ['task'], ['task-list'], keys.home],
