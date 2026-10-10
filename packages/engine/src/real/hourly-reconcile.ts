@@ -17,6 +17,7 @@ import {
   latestAlertByPrefix,
   listManagedRepos,
   listOpenAlerts,
+  listOpenTaskRows,
   mergedPrLedgers,
   openSessionTrees,
   prHeadsOfBranch,
@@ -26,6 +27,7 @@ import {
   recordAlertFiling,
   resolveAlertWithReason,
   startScheduleRun,
+  stopTaskRows,
   subtaskTreeRefs,
   taskContext,
   taskStateOf,
@@ -210,10 +212,11 @@ export interface HourlyReconcileWiring {
 /** 发「放弃」信号最多等多久（毫秒）：到点由连接取消调用，不在本地空等。 */
 const ABANDON_SIGNAL_TIMEOUT_MS = 5_000;
 
-/** 「单已关就撤任务」的真口子：在跑的任务工作流问 Temporal 的可见性，单状态经「引擎」机器人现读，放弃走现成的 taskAbandonSignal。 */
+/** 「单已关就撤任务」的真口子：在跑的任务工作流问 Temporal 的可见性，单状态经「引擎」机器人现读，放弃走现成的 taskAbandonSignal；遗留行问库的 listOpenTaskRows / stopTaskRows（#1622）。 */
 function temporalClosedIssueTasks(
   client: Pick<Client, 'workflow' | 'connection'>,
   gh: Pick<GitHub, 'readIssueState'>,
+  db: Db,
 ): HourlyReconcileJobDeps['closedIssueTasks'] {
   return {
     async runningTaskWorkflowIds() {
@@ -239,6 +242,8 @@ function temporalClosedIssueTasks(
         throw err;
       }
     },
+    openTaskRows: () => listOpenTaskRows(db),
+    stopRows: (taskIds, reason) => stopTaskRows(db, taskIds, reason),
   };
 }
 
@@ -418,7 +423,7 @@ export function hourlyReconcileJob(
         return { decision: a.decision, decidedBy: a.decidedBy, waitingWorkflowId };
       },
       workflows: w.workflows ?? temporalWorkflows(client),
-      closedIssueTasks: w.closedIssueTasks ?? temporalClosedIssueTasks(client, w.gh),
+      closedIssueTasks: w.closedIssueTasks ?? temporalClosedIssueTasks(client, w.gh, w.db),
       stageRoutable,
       stageAllOpen,
       handling,

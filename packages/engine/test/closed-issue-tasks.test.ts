@@ -1,28 +1,35 @@
 // 单已关、任务还挂着就发放弃信号（jobs/closed-issue-tasks.ts，#1198）：关了的发、开着的不动、读不到的记没查成不动、
 // 已结束的（收信人不在）不算问题。读不到、发不成都故意造一次：不许记成 ok、不许撤任务。
+// 单已关、没有工作流的遗留行收成 stopped（#1622）：有工作流的跳过、单还开着的不动、读不到/列行失败记没查成。
 import { describe, expect, it } from 'vitest';
 import {
   abandonClosedIssueTasks,
   CLOSED_ISSUE_ABANDON_BY,
   CLOSED_ISSUE_ABANDON_REASON,
+  CLOSED_ISSUE_IDLE_STOP_REASON,
+  type ClosedIssueOpenTaskRow,
   type ClosedIssueTaskDeps,
   parseTaskWorkflowId,
+  settleIdleClosedIssueRows,
 } from '../src/jobs/closed-issue-tasks.ts';
 
 interface World {
   deps: ClosedIssueTaskDeps;
   signals: { workflowId: string; by: string; reason: string }[];
+  stopped: { taskIds: string[]; reason: string }[];
   logs: string[];
 }
 
 function world(
   over: Partial<ClosedIssueTaskDeps['closedIssueTasks']> & {
     states?: Record<string, 'open' | 'closed'>;
+    rows?: ClosedIssueOpenTaskRow[];
   } = {},
 ): World {
   const signals: World['signals'] = [];
+  const stopped: World['stopped'] = [];
   const logs: string[] = [];
-  const { states = {}, ...port } = over;
+  const { states = {}, rows = [], ...port } = over;
   const deps: ClosedIssueTaskDeps = {
     closedIssueTasks: {
       runningTaskWorkflowIds: async () => [],
@@ -35,12 +42,17 @@ function world(
         signals.push({ workflowId, ...c });
         return 'sent';
       },
+      openTaskRows: async () => rows,
+      async stopRows(taskIds, reason) {
+        stopped.push({ taskIds: [...taskIds], reason });
+        return taskIds.length;
+      },
       ...port,
     },
     now: () => new Date('2026-10-07T10:00:00.000Z'),
     log: (_level, text) => logs.push(text),
   };
-  return { deps, signals, logs };
+  return { deps, signals, stopped, logs };
 }
 
 describe('parseTaskWorkflowId', () => {
@@ -135,5 +147,75 @@ describe('单已关就撤掉还挂着的任务（abandonClosedIssueTasks）', ()
     expect(part.unchecked).toHaveLength(2);
     expect(part.unchecked.join('；')).toContain('信号超时');
     expect(part.unchecked.join('；')).toContain('task:weird');
+  });
+});
+
+describe('单已关、没有工作流的遗留行收成 stopped（settleIdleClosedIssueRows）', () => {
+  const row = (
+    over: Partial<ClosedIssueOpenTaskRow> & Pick<ClosedIssueOpenTaskRow, 'taskId' | 'issueNumber'>,
+  ): ClosedIssueOpenTaskRow => ({
+    owner: 'acme',
+    name: 'demo',
+    ...over,
+  });
+
+  it('非终态行、无工作流、单已关：调用 stopRows，found 加一', async () => {
+    const w = world({
+      rows: [row({ taskId: 't-1', issueNumber: 1 })],
+      states: { 'acme/demo#1': 'closed' },
+    });
+    const part = await settleIdleClosedIssueRows(w.deps);
+    expect(w.stopped).toEqual([{ taskIds: ['t-1'], reason: CLOSED_ISSUE_IDLE_STOP_REASON }]);
+    expect(CLOSED_ISSUE_IDLE_STOP_REASON).toBe('单已关闭，没有工作流在跑');
+    expect(part).toEqual({ scanned: 1, found: 1, unchecked: [] });
+    expect(w.logs.some((t) => t.includes('没有工作流在跑'))).toBe(true);
+  });
+
+  it('工作流还在跑的行不被这一步改', async () => {
+    const w = world({
+      rows: [row({ taskId: 't-1', issueNumber: 1 }), row({ taskId: 't-2', issueNumber: 2 })],
+      runningTaskWorkflowIds: async () => ['task:acme/demo#1:r2'],
+      states: { 'acme/demo#1': 'closed', 'acme/demo#2': 'closed' },
+    });
+    const part = await settleIdleClosedIssueRows(w.deps);
+    expect(w.stopped).toEqual([{ taskIds: ['t-2'], reason: CLOSED_ISSUE_IDLE_STOP_REASON }]);
+    expect(part).toEqual({ scanned: 2, found: 1, unchecked: [] });
+  });
+
+  it('单还开着的行不动', async () => {
+    const w = world({
+      rows: [row({ taskId: 't-1', issueNumber: 1 })],
+      states: { 'acme/demo#1': 'open' },
+    });
+    const part = await settleIdleClosedIssueRows(w.deps);
+    expect(w.stopped).toEqual([]);
+    expect(part).toEqual({ scanned: 1, found: 0, unchecked: [] });
+  });
+
+  it('读单状态抛错：不改行，unchecked 里有这一条', async () => {
+    const w = world({
+      rows: [row({ taskId: 't-1', issueNumber: 1 })],
+      issueState: async () => {
+        throw new Error('GitHub 502');
+      },
+    });
+    const part = await settleIdleClosedIssueRows(w.deps);
+    expect(w.stopped).toEqual([]);
+    expect(part.found).toBe(0);
+    expect(part.unchecked).toHaveLength(1);
+    expect(part.unchecked[0]).toContain('GitHub 502');
+  });
+
+  it('列行抛错：返回 failed 并写明原因，不当成「没有要收的」', async () => {
+    const w = world({
+      openTaskRows: async () => {
+        throw new Error('库连不上');
+      },
+    });
+    const part = await settleIdleClosedIssueRows(w.deps);
+    expect(part.failed).toContain('库连不上');
+    expect(part.scanned).toBe(0);
+    expect(part.found).toBe(0);
+    expect(w.stopped).toEqual([]);
   });
 });

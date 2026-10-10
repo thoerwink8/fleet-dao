@@ -1,6 +1,9 @@
 // 每小时对账的一部分（#1198）：单已经关了、任务工作流还在跑或停着，就给它发现成的「放弃」信号（走 taskAbandonSignal，不新造）。
 // 起因：#1182 被 PR 关掉了，它的任务还挂在「卡住了」，占着并发位（MAX_RUNNING_TASKS）、驾驶舱一直当异常报。
 // 只有一条规则：单关了才撤。读不到单的状态记「没查成」，不撤、不当成单还开着也不当成已关；工作流已经结束的收不到信号，不算问题。
+//
+// 另一部分（#1622）：库里非终态任务行、对应工作流已经不在跑、单也关了——收成 stopped。#1198 只给还在跑的工作流发信号，
+// 管不到这些遗留行，它们一直占着主页「开着」数。
 
 import type { RepoRef } from '@fleet-dao/github';
 import type { AbandonCommand } from '@fleet-dao/shared/task-signals';
@@ -14,6 +17,17 @@ export { parseTaskWorkflowId };
 export const CLOSED_ISSUE_ABANDON_BY = 'engine:hourly-reconcile';
 export const CLOSED_ISSUE_ABANDON_REASON = '单已关闭';
 
+/** 把没有工作流的遗留行收成 stopped 时写进 last_problem 的原因。 */
+export const CLOSED_ISSUE_IDLE_STOP_REASON = '单已关闭，没有工作流在跑';
+
+/** 库里一条还没到终态的任务行（对账收遗留行只用得到这些字段）。 */
+export interface ClosedIssueOpenTaskRow {
+  taskId: string;
+  owner: string;
+  name: string;
+  issueNumber: number;
+}
+
 export interface ClosedIssueTaskDeps {
   closedIssueTasks: {
     /** 在跑（含停着等人）的任务工作流编号，形如 task:<owner>/<repo>#<号> 或重做后的 :r2。列不出来照抛。 */
@@ -22,6 +36,13 @@ export interface ClosedIssueTaskDeps {
     issueState(repo: RepoRef, issueNumber: number): Promise<'open' | 'closed'>;
     /** 发放弃信号；收信人不在（刚结束）回 'gone'；别的错照抛。 */
     abandon(workflowId: string, command: AbandonCommand): Promise<'sent' | 'gone'>;
+    /**
+     * 库里还没到终态的任务行。列不出来照抛。
+     * 真装配（real/hourly-reconcile）必接；只跑外壳的单测可以不接，这一步就跳过。
+     */
+    openTaskRows?(): Promise<ClosedIssueOpenTaskRow[]>;
+    /** 把指定 id 里仍不是终态的行改成 stopped。返回实际改了几条；别的错照抛。真装配必接。 */
+    stopRows?(taskIds: readonly string[], reason: string): Promise<number>;
   };
   now: () => Date;
   log: ReconcileLog;
@@ -63,6 +84,72 @@ export async function abandonClosedIssueTasks(deps: ClosedIssueTaskDeps): Promis
       }
     } catch (err) {
       part.unchecked.push(`${slug} 单已关闭，放弃信号没发成：${errMessage(err)}`);
+    }
+  }
+  return part;
+}
+
+/** 一张单对应的在跑工作流键：owner/name#号（代数不进键，:r2 也算还在跑）。 */
+function issueKey(owner: string, name: string, issueNumber: number): string {
+  return `${owner}/${name}#${issueNumber}`;
+}
+
+/**
+ * 库里非终态行、没有任务工作流在跑、单已关 → 收成 stopped。
+ * 工作流还在跑的跳过（留给 abandonClosedIssueTasks 发信号）；单还开着的不动；读不到单的记没查成。
+ */
+export async function settleIdleClosedIssueRows(deps: ClosedIssueTaskDeps): Promise<SweepPart> {
+  const part: SweepPart = { scanned: 0, found: 0, unchecked: [] };
+  const port = deps.closedIssueTasks;
+  const openTaskRows = port.openTaskRows;
+  const stopRows = port.stopRows;
+  if (!openTaskRows || !stopRows) return part;
+  let rows: ClosedIssueOpenTaskRow[];
+  try {
+    rows = await openTaskRows();
+  } catch (err) {
+    return {
+      ...part,
+      failed: `列非终态任务行没成，单已关没工作流的遗留行这一轮没收：${errMessage(err)}`,
+    };
+  }
+  let runningIds: string[];
+  try {
+    runningIds = await port.runningTaskWorkflowIds();
+  } catch (err) {
+    return {
+      ...part,
+      failed: `列在跑的任务工作流没成，单已关没工作流的遗留行这一轮没收：${errMessage(err)}`,
+    };
+  }
+  const runningIssues = new Set<string>();
+  for (const id of runningIds) {
+    const ref = parseTaskWorkflowId(id);
+    if (ref) runningIssues.add(issueKey(ref.repo.owner, ref.repo.name, ref.issueNumber));
+  }
+  for (const row of rows) {
+    part.scanned += 1;
+    const slug = issueKey(row.owner, row.name, row.issueNumber);
+    if (runningIssues.has(slug)) continue;
+    let state: 'open' | 'closed';
+    try {
+      state = await port.issueState({ owner: row.owner, name: row.name }, row.issueNumber);
+    } catch (err) {
+      part.unchecked.push(`${slug} 单现在开没开着没读成，任务行不动：${errMessage(err)}`);
+      continue;
+    }
+    if (state !== 'closed') continue;
+    try {
+      const n = await stopRows([row.taskId], CLOSED_ISSUE_IDLE_STOP_REASON);
+      if (n > 0) {
+        part.found += n;
+        deps.log('info', '每小时对账：单已关闭，没有工作流在跑，遗留任务行收成 stopped', {
+          taskId: row.taskId,
+          issue: slug,
+        });
+      }
+    } catch (err) {
+      part.unchecked.push(`${slug} 单已关闭，遗留任务行没收成：${errMessage(err)}`);
     }
   }
   return part;
