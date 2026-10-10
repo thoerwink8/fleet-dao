@@ -10,6 +10,7 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { CANARY_NOT_HERE } from '../src/canary-health.ts';
 import { probeDb } from '../src/db-probe.ts';
+import { EXTERNAL_WATCH_NOT_WIRED } from '../src/external-watch.ts';
 import { createGatewaySeen } from '../src/gateway-seen.ts';
 import { githubAppMissing } from '../src/github.ts';
 import { githubAppHealthCheck } from '../src/github-app-health.ts';
@@ -198,6 +199,7 @@ describe('接口跑在真库上', () => {
         canary: { ok: true, status: 'not_wired', message: CANARY_NOT_HERE },
         watchdog: { ok: true, status: 'not_wired', message: WATCHDOG_NOT_HERE },
         node_report: { ok: true, status: 'not_wired', message: NODE_REPORT_NOT_WIRED },
+        external_watchdog: { ok: true, status: 'not_wired', message: EXTERNAL_WATCH_NOT_WIRED },
       },
     });
     await h.feed.stop();
