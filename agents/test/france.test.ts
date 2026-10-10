@@ -1295,6 +1295,78 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
     expect(whats(v).some((w) => w.includes('提醒 5'))).toBe(false);
   });
 
+  it('单子停下的三类异常带 kind task-park 和稳定的 key；其余照旧（#1740）', () => {
+    const notif = (key: string, title: string, minutesAgo: number) => ({
+      level: 'alert',
+      dedupe_key: key,
+      title,
+      body: '',
+      link: null,
+      created_at: ago(minutesAgo),
+      updated_at: null,
+      n: null,
+    });
+    const build = (minutesAgo: number) =>
+      viewOf((s) => {
+        s.notifications = {
+          ok: true,
+          count: 4,
+          rows: [
+            notif('task:o/fleet-dao#1707:review-fail', '#1707 验收 2 轮都没过', minutesAgo),
+            notif('', '#79 动手 3 轮都没过', minutesAgo),
+            notif('task:o/fleet-dao#5:other', '别的挂起', minutesAgo),
+            notif('sys:other', '规矩同步没成', minutesAgo),
+          ],
+        };
+        s.tasks = {
+          ok: true,
+          rows: [
+            {
+              repo: 'o/fleet-dao',
+              n: 21,
+              title: '单 21',
+              state: 'stalled',
+              phase: 'x',
+              doing: null,
+              last_problem: '派不出路由',
+              created_at: ago(500),
+              updated_at: ago(5),
+            },
+            {
+              repo: 'o/fleet-dao',
+              n: 26,
+              title: '单 26',
+              state: 'running',
+              phase: 'x',
+              doing: null,
+              last_problem: '上次失败',
+              created_at: ago(500),
+              updated_at: ago(2),
+            },
+          ],
+        };
+      });
+    type A = { what: string; kind?: string; key?: string };
+    const find = (v: ReturnType<typeof build>, part: string) =>
+      (v.anomalies as A[]).find((a) => a.what.includes(part));
+    const v1 = build(10);
+    const v2 = build(40);
+    expect(find(v1, '验收 2 轮都没过')?.kind).toBe('task-park');
+    expect(find(v1, '动手 3 轮都没过')?.kind).toBe('task-park');
+    expect(find(v1, '别的挂起')?.kind).toBe('task-park');
+    expect(find(v1, '规矩同步没成')?.kind).toBeUndefined();
+    expect(find(v1, '#21 卡住了')?.kind).toBe('task-park');
+    expect(find(v1, '#26 最近的问题')?.kind).toBe('task-park');
+    expect(find(v1, '#21 卡住了')?.key).toBe('task:o/fleet-dao#21:stalled');
+    expect(find(v1, '#26 最近的问题')?.key).toBe('task:o/fleet-dao#26:problem');
+    expect(find(v1, '验收 2 轮都没过')?.key).toBe('task:o/fleet-dao#1707:review-fail');
+    for (const a of v1.anomalies as A[]) expect(typeof a.key, a.what).toBe('string');
+    // 同一个事实前后两次（时间字样不同）key 相同
+    const keys = (v: ReturnType<typeof build>) => (v.anomalies as A[]).map((a) => a.key).sort();
+    expect(find(v1, '验收 2 轮都没过')?.what).not.toBe(find(v2, '验收 2 轮都没过')?.what);
+    expect(keys(v1)).toEqual(keys(v2));
+  });
+
   it('定时任务：从没跑过、最近一轮没跑成、一个都没扫到、过期了；只查了一部分是留意', () => {
     const v = viewOf((s) => {
       s.jobs = {
@@ -1413,7 +1485,7 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
       (v.anomalies as { what: string; kind?: string }[]).find((a) => a.what.startsWith(prefix))?.kind;
     expect(kindOf('#22 ')).toBe('task-idle');
     expect(kindOf('#24 ')).toBe('task-idle');
-    expect(kindOf('#21 ')).toBeUndefined();
+    expect(kindOf('#21 ')).toBe('task-park');
     for (const quiet of ['#23 ', '#25 ', '#26 '])
       expect(
         whats(v).some((w) => w.startsWith(quiet)),
