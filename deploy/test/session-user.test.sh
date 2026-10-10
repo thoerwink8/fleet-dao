@@ -5,7 +5,11 @@
 #   1. 只有一个会话用户 fleet-agent-carpool；france.sh 不建、不查停用的 fleet-agent-dedicated（重新加回来这里会红）
 #   2. 干净的家 + 登录过：两条都绿，没有红和待配
 #   3. 故意造错：家目录不在 /home/<用户>、是符号链接、属主或权限不对、有 sudo 条目、多一个组、用户不在——都判红，不当成没事
-#   3b. ~/.ssh：只放创始人登录 pilot 的钥匙判绿；多一把别人的、放了私钥或配置、权限不对、认不出、pilot 那份读不了——都判红
+#   3b. ~/.ssh（#1785）：不在或是空目录判绿；里面有任何东西（#1773 那几样）、是链接或文件都判红
+#   3c. 登录口子 /etc/ssh/authorized_keys/<用户>：只放创始人登录 pilot 的钥匙、root:root 644 判绿；多一把别人的、认不出、权限或属主不对、
+#       pilot 那份读不了——都判红；还没放记待配
+#   3d. 装机收口 quarantine_session_ssh：多余文件和钥匙挪进隔离目录（只挪不删）、记 changed、再跑不动、挪不成判红
+#   3e. 出站 22：读回认「被立刻拒」才绿，连上判红，路不通记待配；渲染后的 nft 里有只限会话用户的 22 拒绝
 #   4. 没装 reclaude：红（france.sh 该装，引擎起不了会话）；装了没登录：记「待配」，不判绿
 #   5. pilot 不登录 reclaude：它的判据（lib/login-user.sh）不看登没登录
 # 用法：bash deploy/test/session-user.test.sh。退出码：0 通过，1 不通过。
@@ -21,6 +25,9 @@ T=$(mktemp -d)
 trap 'rm -rf -- "$T"' EXIT
 fail=0
 pass() { echo "  ✓ $*"; }
+eq() { # 说明 实际 期望
+  if [[ "$2" == "$3" ]]; then pass "$1"; else flunk "$1：实际「$2」，应为「$3」"; fi
+}
 flunk() {
   echo "  ✗ $*"
   fail=1
@@ -38,8 +45,15 @@ session_user_home_meta() { printf '%s' "$FAKE_META"; }
 session_user_sudo_list() { printf '%s' "$FAKE_SUDO"; }
 session_user_groups() { printf '%s' "$FAKE_GROUPS"; }
 # 属主换成假的（测试不是 root，建不出归会话用户的文件），权限照真的读
-FAKE_SSH_OWNER=""
-session_user_path_meta() { printf '%s %s' "${FAKE_SSH_OWNER:-$SESSION_USER:$SESSION_USER}" "$(stat -c %a -- "$1")"; }
+FAKE_SSH_OWNER="root:root"
+session_user_path_meta() { printf '%s %s' "$FAKE_SSH_OWNER" "$(stat -c %a -- "$1")"; }
+# 登录口子（/etc/ssh/authorized_keys）和隔离目录都换成临时目录；默认放一份空的钥匙文件（root:root 644），免得每一条都带「还没放」的待配
+SESSION_SSH_KEYS_DIR=$T/etc-ssh-keys
+SESSION_QUARANTINE_ROOT=$T/quarantine
+session_user_today() { echo 2026-10-11; }
+mkdir -p "$SESSION_SSH_KEYS_DIR"
+: >"$SESSION_SSH_KEYS_DIR/$SESSION_USER"
+chmod 644 "$SESSION_SSH_KEYS_DIR/$SESSION_USER"
 
 U=$SESSION_USER
 clean_home() { # 家目录 登录过没有（1/0）
@@ -123,9 +137,40 @@ FAKE_GROUPS="$U fleet"
 check "多在一个组里：红" 1 0 1 "附加组「$U fleet」"
 FAKE_GROUPS=$U
 
-echo "== 3b. ~/.ssh 只许放创始人登录 pilot 的钥匙"
+echo "== 3b. ~/.ssh：不在或是空目录才对；里面有任何东西都判红"
+mkdir -p "$FAKE_HOME"
+rm -rf -- "$FAKE_HOME/.ssh"
+check "没有 ~/.ssh：绿" 0 0 2
+mkdir -p "$FAKE_HOME/.ssh"
+chmod 700 "$FAKE_HOME/.ssh"
+check "空的 ~/.ssh：绿" 0 0 2
+put_ssh_dir() { # 文件名… （都放成内容随便的普通文件）
+  rm -rf -- "$FAKE_HOME/.ssh"
+  mkdir -p "$FAKE_HOME/.ssh"
+  local n
+  for n in "$@"; do echo x >"$FAKE_HOME/.ssh/$n"; done
+}
+put_ssh_dir config fleet_login fleet_login.pub known_hosts authorized_keys
+check "【故意造出的失败】#1773 那几样（config、私钥、known_hosts、authorized_keys）：红，点名" 1 0 1 "有 authorized_keys config fleet_login"
+put_ssh_dir authorized_keys
+check "【故意造出的失败】只剩 authorized_keys 也是红（登录口子不在家里）：红" 1 0 1 "有 authorized_keys"
+put_ssh_dir .hidden
+check "【故意造出的失败】只有隐藏文件：红" 1 0 1 "有 .hidden"
+rm -rf -- "$FAKE_HOME/.ssh"
+ln -s "$T/elsewhere" "$FAKE_HOME/.ssh" 2>/dev/null
+if [[ -L "$FAKE_HOME/.ssh" ]]; then
+  check "【故意造出的失败】~/.ssh 是链接：红" 1 0 1 "不是目录"
+else
+  echo "  （这台建不了真的符号链接，跳过这一条；CI 的 Linux 上会跑）"
+fi
+rm -rf -- "$FAKE_HOME/.ssh"
+printf 'x' >"$FAKE_HOME/.ssh"
+check "【故意造出的失败】~/.ssh 是个文件：红" 1 0 1 "不是目录"
+rm -rf -- "$FAKE_HOME/.ssh"
+
+echo "== 3c. 登录口子 /etc/ssh/authorized_keys/<用户>：只许放创始人登录 pilot 的钥匙，root:root 644"
 if ! command -v ssh-keygen >/dev/null; then
-  flunk "这台没有 ssh-keygen，3b 没跑成（读回在法国上要用它认钥匙）"
+  flunk "这台没有 ssh-keygen，3c 没跑成（读回在法国上要用它认钥匙）"
 else
   ssh-keygen -q -t ed25519 -N '' -C founder -f "$T/founder" >/dev/null
   ssh-keygen -q -t ed25519 -N '' -C stranger -f "$T/stranger" >/dev/null
@@ -133,44 +178,47 @@ else
   SESSION_SSH_ALLOW_FILE=$T/pilot-ssh/authorized_keys
   cp "$T/founder.pub" "$SESSION_SSH_ALLOW_FILE"
   put_keys() { # 公钥文件…（一个不给就是空文件）
-    rm -rf -- "$FAKE_HOME/.ssh"
-    mkdir -p "$FAKE_HOME/.ssh"
-    chmod 700 "$FAKE_HOME/.ssh"
-    : >"$FAKE_HOME/.ssh/authorized_keys"
+    mkdir -p "$SESSION_SSH_KEYS_DIR"
+    rm -f -- "$SESSION_SSH_KEYS_DIR/$U" # 上一条可能把它做成了链接，不能顺链接清空别的文件
+    : >"$SESSION_SSH_KEYS_DIR/$U"
     local k
-    for k in "$@"; do cat -- "$k" >>"$FAKE_HOME/.ssh/authorized_keys"; done
-    chmod 600 "$FAKE_HOME/.ssh/authorized_keys"
+    for k in "$@"; do cat -- "$k" >>"$SESSION_SSH_KEYS_DIR/$U"; done
+    chmod 644 "$SESSION_SSH_KEYS_DIR/$U"
   }
-  mkdir -p "$FAKE_HOME/.ssh"
-  chmod 700 "$FAKE_HOME/.ssh"
-  check "只有空的 ~/.ssh：绿" 0 0 2
+  rm -rf -- "$SESSION_SSH_KEYS_DIR"
+  check "钥匙文件还没放：待配，不判红" 0 1 2 "还没放"
   put_keys "$T/founder.pub"
   check "只放了创始人登录 pilot 的那把：绿" 0 0 2
   put_keys
-  check "authorized_keys 是空的：绿" 0 0 2
-  { echo '# 注释'; echo 'restrict,port-forwarding '"$(cat "$T/founder.pub")"; } >"$FAKE_HOME/.ssh/authorized_keys"
+  check "文件是空的：绿" 0 0 2
+  {
+    echo '# 注释'
+    echo 'restrict,port-forwarding '"$(cat "$T/founder.pub")"
+  } >"$SESSION_SSH_KEYS_DIR/$U"
   check "那把钥匙前面带了限制选项、还有注释行：照样认得，绿" 0 0 2
   put_keys "$T/founder.pub" "$T/stranger.pub"
   check "【故意造出的失败】多了一把 pilot 家里没有的：红" 1 0 1 "有 1 把钥匙不在"
   put_keys "$T/founder.pub"
-  echo 'ssh-ed25519 这不是钥匙 x' >>"$FAKE_HOME/.ssh/authorized_keys"
+  echo 'ssh-ed25519 这不是钥匙 x' >>"$SESSION_SSH_KEYS_DIR/$U"
   check "【故意造出的失败】有一行认不出：红，不当成只有认得的那几把" 1 0 1 "认不全"
   put_keys "$T/founder.pub"
-  cp "$T/stranger" "$FAKE_HOME/.ssh/id_ed25519"
-  check "【故意造出的失败】会话用户有了自己的私钥：红" 1 0 1 "还有 id_ed25519"
+  chmod 664 "$SESSION_SSH_KEYS_DIR/$U"
+  if [[ "$(stat -c %a "$SESSION_SSH_KEYS_DIR/$U")" == 664 ]]; then
+    check "【故意造出的失败】钥匙文件是 664（会话用户若在组里能改）：红" 1 0 1 "要 root:root 644"
+  else
+    echo "  （这台的文件系统不认 chmod 664，跳过这一条；CI 的 Linux 上会跑）"
+  fi
   put_keys "$T/founder.pub"
-  chmod 644 "$FAKE_HOME/.ssh/authorized_keys"
-  check "【故意造出的失败】authorized_keys 是 644：红" 1 0 1 "要 $U:$U 600"
-  put_keys "$T/founder.pub"
-  chmod 755 "$FAKE_HOME/.ssh"
-  check "【故意造出的失败】~/.ssh 是 755：红" 1 0 1 "要 $U:$U 700"
-  put_keys "$T/founder.pub"
+  FAKE_SSH_OWNER="$U:$U"
+  check "【故意造出的失败】钥匙文件归会话用户自己（它改得了）：红" 1 0 1 "要 root:root 644"
   FAKE_SSH_OWNER="root:root"
-  check "【故意造出的失败】authorized_keys 归 root：红" 1 0 1 "要 $U:$U 600"
-  FAKE_SSH_OWNER=""
-  rm -f -- "$FAKE_HOME/.ssh/authorized_keys"
-  ln -s "$T/founder.pub" "$FAKE_HOME/.ssh/authorized_keys"
-  check "【故意造出的失败】authorized_keys 是链接：红" 1 0 1 "是链接"
+  rm -f -- "$SESSION_SSH_KEYS_DIR/$U"
+  ln -s "$T/founder.pub" "$SESSION_SSH_KEYS_DIR/$U" 2>/dev/null
+  if [[ -L "$SESSION_SSH_KEYS_DIR/$U" ]]; then
+    check "【故意造出的失败】钥匙文件是链接：红" 1 0 1 "是链接"
+  else
+    echo "  （这台建不了真的符号链接，跳过这一条；CI 的 Linux 上会跑）"
+  fi
   put_keys "$T/founder.pub"
   SESSION_SSH_ALLOW_FILE=$T/nowhere/authorized_keys
   check "【故意造出的失败】pilot 那份读不到：红，核对不了不当成对" 1 0 1 "核对不了"
@@ -178,11 +226,117 @@ else
   : >"$SESSION_SSH_ALLOW_FILE"
   check "【故意造出的失败】pilot 那份是空的：红" 1 0 1 "核对不了"
   cp "$T/founder.pub" "$SESSION_SSH_ALLOW_FILE"
-  rm -rf -- "$FAKE_HOME/.ssh"
-  printf 'x' >"$FAKE_HOME/.ssh"
-  check "【故意造出的失败】~/.ssh 是个文件：红" 1 0 1 "不是目录"
-  rm -f -- "$FAKE_HOME/.ssh"
+  put_keys
 fi
+
+echo "== 3d. 装机时收口：~/.ssh 里的东西挪进 /root/quarantine/<用户>-ssh-<日期>/，只挪不删，记 changed"
+FAKE_HOME=$SESSION_USER_HOME_ROOT/$U
+clean_home "$FAKE_HOME" 1
+put_ssh_dir config fleet_login fleet_login.pub known_hosts authorized_keys
+echo 'ssh-ed25519 AAAA 多出来的钥匙' >"$FAKE_HOME/.ssh/authorized_keys"
+CHANGES=() REDS=()
+quarantine_session_ssh "$U" "$FAKE_HOME" >/dev/null
+Q=$SESSION_QUARANTINE_ROOT/$U-ssh-2026-10-11
+eq "家里的 .ssh 没了" "$([[ -e "$FAKE_HOME/.ssh" ]] && echo 在 || echo 没有)" 没有
+eq "整份进了隔离目录（五个文件一个没少）" "$(find "$Q/dot-ssh" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')" "authorized_keys config fleet_login fleet_login.pub known_hosts "
+eq "多出来的钥匙原样在隔离目录里（没删）" "$(cat "$Q/dot-ssh/authorized_keys" 2>/dev/null)" 'ssh-ed25519 AAAA 多出来的钥匙'
+(umask 077 && mkdir -p "$T/umask-ref")
+if [[ "$(stat -c %a "$T/umask-ref")" == 700 ]]; then
+  eq "隔离目录 700（里面是会话用户的私钥）" "$(stat -c %a "$Q" 2>/dev/null)" 700
+else
+  echo "  （这台的文件系统不认 umask，跳过隔离目录权限这一条；CI 的 Linux 上会跑）"
+fi
+eq "记了一笔 changed，点名这几个文件和去处" "${#CHANGES[@]} $(grep -c "config.*$Q/dot-ssh" <<<"${CHANGES[*]}")" "1 1"
+eq "没有红" "${#REDS[@]}" 0
+CHANGES=()
+quarantine_session_ssh "$U" "$FAKE_HOME" >/dev/null
+eq "再跑一遍：~/.ssh 已经不在，什么都不动、不记 changed" "${#CHANGES[@]}" 0
+mkdir -p "$FAKE_HOME/.ssh"
+quarantine_session_ssh "$U" "$FAKE_HOME" >/dev/null
+eq "空的 ~/.ssh：不动、不记 changed" "${#CHANGES[@]} $([[ -d "$FAKE_HOME/.ssh" ]] && echo 在 || echo 没有)" "0 在"
+put_ssh_dir authorized_keys
+quarantine_session_ssh "$U" "$FAKE_HOME" >/dev/null
+eq "同一天再来一次：不覆盖上一次的，放进 -2" "$([[ -f "$Q-2/dot-ssh/authorized_keys" && -f "$Q/dot-ssh/config" ]] && echo 都在 || echo 缺)" 都在
+rm -rf -- "$FAKE_HOME/.ssh"
+ln -s "$T/elsewhere" "$FAKE_HOME/.ssh" 2>/dev/null
+if [[ -L "$FAKE_HOME/.ssh" ]]; then
+  quarantine_session_ssh "$U" "$FAKE_HOME" >/dev/null
+  eq "家里的 .ssh 是链接：链接本身挪走（不跟着它去动别处）" "$([[ -L "$Q-3/dot-ssh" && -d "$T/elsewhere" ]] && echo 是 || echo 否)" 是
+else
+  echo "  （这台建不了真的符号链接，跳过这一条；CI 的 Linux 上会跑）"
+  rm -rf -- "$FAKE_HOME/.ssh"
+fi
+eq "挪完 check_session_ssh 不报" "$(
+  check_session_ssh "$U" "$FAKE_HOME"
+  echo "[$SSH_BAD]"
+)" "[]"
+put_ssh_dir authorized_keys
+SESSION_QUARANTINE_ROOT=/proc/不可写
+REDS=()
+rc=0
+quarantine_session_ssh "$U" "$FAKE_HOME" >/dev/null 2>&1 || rc=$?
+eq "【故意造出的失败】挪不成（隔离目录建不了）：返回 1、判红、原件还在" "$rc ${#REDS[@]} $([[ -f "$FAKE_HOME/.ssh/authorized_keys" ]] && echo 在 || echo 没了)" "1 1 在"
+SESSION_QUARANTINE_ROOT=$T/quarantine
+rm -rf -- "$FAKE_HOME/.ssh"
+
+echo "== 3e. 出站 22：会话用户连香港 sshd 要被立刻拒（读回），nft 规则文本里有 22 的拒绝"
+# shellcheck source=../lib/session-ports.sh
+source "$DEPLOY/lib/session-ports.sh"
+PROBE_OUT="" PROBE_RC=0
+session_ssh_probe() {
+  printf '%s' "$PROBE_OUT"
+  return "$PROBE_RC"
+}
+id() {
+  if [[ "$1" == -u && "$2" == -- && "$3" == nobody-here ]]; then return 1; fi
+  return 0
+}
+egress() { # 说明 红 待配 绿 [要出现的字]
+  local what=$1 r=$2 p=$3 o=$4 want=${5:-} out oks all
+  REDS=()
+  PENDING=()
+  out=$(check_session_ssh_egress "$U" 10.99.0.1)
+  check_session_ssh_egress "$U" 10.99.0.1 >/dev/null
+  oks=$(grep -c '✓' <<<"$out")
+  all="${REDS[*]} ${PENDING[*]}"
+  if ((${#REDS[@]} == r && ${#PENDING[@]} == p && oks == o)) && [[ -z "$want" || "$all" == *"$want"* ]]; then
+    pass "$what"
+  else
+    flunk "$what：红 ${#REDS[@]}（要 $r）、待配 ${#PENDING[@]}（要 $p）、绿 $oks（要 $o）；输出「$out」"
+  fi
+}
+PROBE_OUT=$'ran\nbash: connect: Connection refused\nbash: /dev/tcp/10.99.0.1/22: Connection refused' PROBE_RC=1
+egress "被立刻拒（Connection refused）：绿" 0 0 1
+PROBE_OUT=$'ran' PROBE_RC=0
+egress "【故意造出的失败】连上了：红" 1 0 0 "连得上 10.99.0.1:22"
+PROBE_OUT=$'ran' PROBE_RC=124
+egress "【故意造出的失败】等满时限没答（可能路不通）：待配，不当成挡住了" 0 1 0 "不是被拒"
+PROBE_OUT=$'ran\nbash: connect: Network is unreachable' PROBE_RC=1
+egress "【故意造出的失败】Network is unreachable：待配，不当成挡住了" 0 1 0 "不是被拒"
+PROBE_OUT='' PROBE_RC=1
+egress "【故意造出的失败】没以会话用户的身份跑起来：待配" 0 1 0 "没以"
+REDS=()
+PENDING=()
+check_session_ssh_egress nobody-here 10.99.0.1 >/dev/null
+eq "【故意造出的失败】查不到会话用户：待配" "${#REDS[@]} ${#PENDING[@]}" "0 1"
+render "$DEPLOY/france/fleet-dao.nft" PORTS=5432 FLEET_UID=1001 SESSION_UID=1002
+NFT_TEXT=$RENDERED
+if grep -qE '^[[:space:]]*meta skuid 1002 tcp dport 22 reject' <<<"$NFT_TEXT"; then
+  pass "渲染后的 nft 里有「meta skuid <会话用户> tcp dport 22 reject」"
+else
+  flunk "渲染后的 fleet-dao.nft 里没有会话用户出站 22 的拒绝"
+fi
+if grep -E 'tcp dport 22 ' <<<"$NFT_TEXT" | grep -v '^[[:space:]]*#' | grep -vq 'meta skuid 1002'; then
+  flunk "22 的拒绝没限定在会话用户上（会挡到 root 和引擎）"
+else
+  pass "22 的拒绝只限定会话用户（root、fleet 不受影响）"
+fi
+if grep -E 'dport 22 ' <<<"$NFT_TEXT" | grep -v '^[[:space:]]*#' | grep -qE 'skuid (!=|\{)'; then
+  flunk "22 的拒绝写成了「不是某某」，会连带别人"
+else
+  pass "22 的拒绝按「就是会话用户」写，不是按「不是谁」排除"
+fi
+unset -f id
 FAKE_HOME=""
 check "用户不在（getent 查不到）：红，不当成没事" 1 0 0 "不在"
 

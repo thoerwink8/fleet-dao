@@ -184,6 +184,95 @@ readback_sshd_hardening() {
   done
 }
 
+# 会话用户的登录口子收口（人工档，#1785）。为什么是人工档：改的是 sshd 的认证入口（Match User 配错了会影响别的用户登录）、
+# 动的是会话用户家里的钥匙，和 sshd 抗扫描、建用户一个性质，要人以 root 整套跑一次、看着结论。三步：
+#   1. 会话用户家里的 ~/.ssh 有任何东西，整个挪到 /root/quarantine/<用户>-ssh-<日期>/（只挪不删，记 changed）；
+#   2. /etc/ssh/authorized_keys/<用户>（root:root 644，目录 root:root 755）照 pilot 家里的 authorized_keys 写；
+#   3. sshd 的 Match User drop-in（deploy/france/sshd-session-user.conf）把它认钥匙的文件指到上一步那份：sshd -t 过了才 reload，
+#      不过就撤掉这份、不重载、判红。
+# 为什么不是把 ~/.ssh 改归 root:<用户>（750/640）：StrictModes 认 root 属主，这样 sshd 肯认；但家目录归会话用户、它有写权限，
+# 能把 root 属主的 ~/.ssh 整个改名挪开再建一个自己的，拦不住。认钥匙的文件放到它写不到的 /etc 下才收得住。
+setup_session_ssh() {
+  local u=${SESSION_USERS[0]} keys err old have_old
+  step "会话用户 $u 的登录口子（~/.ssh 挪到 $SESSION_QUARANTINE_ROOT；钥匙放 $SESSION_SSH_KEYS_DIR/$u；sshd 的 Match User 段指过去）"
+  if ! command -v sshd >/dev/null; then
+    red "这台没有 sshd 命令：会话用户的 Match User 段没法验，不装"
+    return 1
+  fi
+  if [[ ! -d "${SSHD_SESSION_USER_DROPIN%/*}" ]]; then
+    red "${SSHD_SESSION_USER_DROPIN%/*} 不是目录：这台的 sshd 不是按 sshd_config.d 的写法配的，不装"
+    return 1
+  fi
+  ensure_dir "$SESSION_SSH_KEYS_DIR" root:root 755 || return 1
+  # 钥匙文件先于 drop-in 放好；pilot 那份读不到就不写，已有的不动，红由读回再报一次（会话用户登不进来，不是漏洞）
+  if keys=$(cat -- "$SESSION_SSH_ALLOW_FILE" 2>/dev/null) && [[ -n "$keys" ]]; then
+    put_file "$SESSION_SSH_KEYS_DIR/$u" root:root 644 "$keys"
+  else
+    red "$SESSION_SSH_ALLOW_FILE 读不到或是空的：$SESSION_SSH_KEYS_DIR/$u 没写，桌面端连不进 $u"
+  fi
+  render "$DEPLOY_DIR/france/sshd-session-user.conf" SESSION_USER="$u" KEYS_DIR="$SESSION_SSH_KEYS_DIR" || return 1
+  # 先读旧版：sshd -t 不过时有旧版就还原旧版，没有才删
+  old=""
+  have_old=0
+  if [[ -f "$SSHD_SESSION_USER_DROPIN" ]]; then
+    old=$(<"$SSHD_SESSION_USER_DROPIN")
+    have_old=1
+  fi
+  put_file "$SSHD_SESSION_USER_DROPIN" root:root 644 "$RENDERED"
+  if ((WROTE == 0)); then
+    # drop-in 没变（已装好、已重载过）：Match 段在生效，可以挪家里的 ~/.ssh
+    quarantine_session_ssh "$u" "$SESSION_USER_HOME_ROOT/$u" || true
+    return 0
+  fi
+  # 挪 ~/.ssh 放在 drop-in 装好、sshd -t 过、reload 成功之后：之前的顺序下 sshd -t 不过或 reload 不成，
+  # 家里的口子没了、/etc 下的口子又没生效，会话用户（桌面端要连它）就被锁在外面
+  if ! err=$(sshd -t 2>&1); then
+    if ((have_old)); then
+      put_file "$SSHD_SESSION_USER_DROPIN" root:root 644 "$old"
+    else
+      rm -f -- "$SSHD_SESSION_USER_DROPIN"
+    fi
+    red "加上 $SSHD_SESSION_USER_DROPIN 之后 sshd -t 不过，已撤掉（有旧版则还原）、没重载、~/.ssh 没挪：${err:0:300}"
+    return 1
+  fi
+  if ! err=$(systemctl reload ssh.service 2>&1); then
+    red "sshd -t 过了，但 systemctl reload ssh.service 没成（配置文件已放好，下次 sshd 重启生效；~/.ssh 没挪，重跑 france.sh）：${err:0:300}"
+    return 1
+  fi
+  changed "重载 sshd（已登录的连接不受影响）"
+  quarantine_session_ssh "$u" "$SESSION_USER_HOME_ROOT/$u" || true
+}
+
+# 读回：drop-in 和渲染后的仓里一样；sshd 的有效配置（sshd -T -C user=…，看真生效的）里，会话用户认钥匙的文件是
+# /etc/ssh/authorized_keys/<用户>，pilot 的不是（Match 段没漏到别的用户）。钥匙文件和 ~/.ssh 的核对在 readback_session_user
+readback_session_ssh_scope() {
+  local u=${SESSION_USERS[0]} who cfg got
+  render "$DEPLOY_DIR/france/sshd-session-user.conf" SESSION_USER="$u" KEYS_DIR="$SESSION_SSH_KEYS_DIR" || return 0
+  if [[ "$(cat -- "$SSHD_SESSION_USER_DROPIN" 2>/dev/null)" != "$RENDERED" ]]; then
+    red "$SSHD_SESSION_USER_DROPIN 不在或和仓里 deploy/france/sshd-session-user.conf 不一样：重跑 france.sh"
+  fi
+  for who in "$u" "$PILOT_USER"; do
+    if ! cfg=$(sshd -T -C "user=$who,host=localhost,addr=127.0.0.1,laddr=127.0.0.1,lport=22" 2>&1); then
+      red "sshd -T -C user=$who 读不出有效配置，$who 认钥匙的文件没核对：${cfg:0:200}"
+      continue
+    fi
+    got=$(awk '$1 == "authorizedkeysfile" { $1 = ""; sub(/^ /, ""); print; exit }' <<<"$cfg")
+    if [[ "$who" == "$u" ]]; then
+      if [[ "$got" == "$SESSION_SSH_KEYS_DIR/%u" || "$got" == "$SESSION_SSH_KEYS_DIR/$u" ]]; then
+        ok "sshd 有效配置：$u 认钥匙的文件是 $got（不看它家里的 ~/.ssh）"
+      else
+        red "sshd 有效配置：$u 认钥匙的文件是「${got:-没读到}」，应为 $SESSION_SSH_KEYS_DIR/%u（Match 段没生效或被盖了，它家里的 authorized_keys 还认）"
+      fi
+    elif [[ -z "$got" ]]; then
+      red "sshd 有效配置：$who 认钥匙的文件没读到，Match 段有没有漏到别的用户没核对成"
+    elif [[ "$got" == *"$SESSION_SSH_KEYS_DIR"* ]]; then
+      red "sshd 有效配置：$who 认钥匙的文件也成了「$got」：Match 段漏到了别的用户，他的 ~/.ssh/authorized_keys 不认了"
+    else
+      ok "sshd 有效配置：$who 认钥匙的文件还是「$got」，Match 段只管 $u"
+    fi
+  done
+}
+
 # fail2ban 的 sshd jail（人工档，#1348）：装法同上，先 fail2ban-client -t 验、过了才放着并 reload，不过就撤掉这份、判红。
 # 没装 fail2ban 只记待配，不装软件包（装包是另一件事）。内容和为什么见 deploy/france/fail2ban-sshd.jail。
 # 参数：jail 文件在仓里的路径（默认法国这份；香港 hk.sh 传 deploy/hk/fail2ban-sshd.jail，装到同名的 $FAIL2BAN_SSHD_JAIL）

@@ -305,3 +305,35 @@ nft_table_same_as_file() { # 表族 表名 文件
   if [[ "$have" == "$want" ]]; then return 0; fi
   return 1
 }
+
+# 会话用户不许出站连任何地址的 22/tcp（#1785，规则在 deploy/france/fleet-dao.nft 第三道）：读回以它的身份往香港 sshd 连一次，
+# 要被立刻拒（规则是 reject with tcp reset，bash 报 Connection refused）。判法：
+#   连上了 → 红（规则没生效，会话能往外 ssh）；报 Connection refused → 绿；
+#   等满时限没答、报别的错（Network is unreachable、No route…）→ 待配：路不通时拒不拒都看不出，不当成挡住了；
+#   没以它的身份跑起来 → 待配。
+# 探针是一次裸 TCP 连接（连上就关，不发 ssh 报文）；规则没生效时对面 sshd 会记一条 preauth 断开，隧道网段在两头 fail2ban 的 ignoreip 里（#1784）。
+# session_ssh_probe 单拎出来，测试换成假的：输出第一行 ran 证明真以它的身份跑起来了，后面是 bash 的报错；返回 connect 的退出码
+session_ssh_probe() { # 用户 地址 端口
+  local user=$1
+  shift
+  (cd / && runuser -u "$user" -- env -i PATH=/usr/bin:/bin LC_ALL=C timeout "$SESSION_PORTS_WAIT" bash -c \
+    'echo ran; exec 3<>"/dev/tcp/$1/$2"' _ "$1" "$2" 2>&1)
+}
+
+check_session_ssh_egress() { # 会话用户 目标地址
+  local user=$1 target=$2 out rc=0
+  if ! id -u -- "$user" >/dev/null 2>&1; then
+    pending "查不到会话用户 $user，它能不能往外连 22 没查"
+    return 0
+  fi
+  out=$(session_ssh_probe "$user" "$target" 22) || rc=$?
+  if [[ "$out" != ran* ]]; then
+    pending "没以 $user 的身份跑起来（runuser 没成），它连 $target:22 被不被拒没查成"
+  elif ((rc == 0)); then
+    red "$user 连得上 $target:22：nft 表 inet fleet_dao 里会话用户出站 22 的拒绝没生效，会话能往外 ssh（#1785）"
+  elif [[ "$out" == *"Connection refused"* ]]; then
+    ok "$user 连 $target:22 被立刻拒绝（会话用户不许出站连 22）"
+  else
+    pending "$user 连 $target:22 没连上，但不是被拒（退出码 $rc：$(tr '\n' ' ' <<<"${out#ran}" | cut -c1-100)），路不通时看不出规则在不在，没查成"
+  fi
+}
