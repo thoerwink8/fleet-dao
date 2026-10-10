@@ -61,6 +61,52 @@ describe('派给某条路由', () => {
     const make = () => input(soloAndCarpool({}, { windows: [win({ used: 0.3, resetsAt: at(20) })] }));
     expect(chooseRoute(make())).toEqual(chooseRoute(make()));
   });
+
+  it('返工优先派给本单已有作者族，即使它排在别家后面', () => {
+    const r = chooseRoute(
+      input([route('other', { family: 'gpt' }), route('same', { family: 'claude' })], {
+        preferFamilies: ['claude'],
+      }),
+    );
+    expect(picked(r)).toBe('same');
+  });
+
+  it('返工有作者族时不因试探比例抽到非首选族', () => {
+    const r = chooseRoute(
+      input([route('other', { family: 'gpt' }), route('same', { family: 'claude' })], {
+        preferFamilies: ['claude'],
+        draw: 0,
+        policy: { trialEnabled: true, trialRatio: 1 },
+      }),
+    );
+    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'same', trial: null });
+  });
+
+  it('本单已有作者族都派不出时才换到别家，并在理由里说明', () => {
+    const r = chooseRoute(
+      input(
+        [
+          route('same', { family: 'claude', blockers: ['no-slot'], inFlight: 5 }),
+          route('other', { family: 'kimi', modelId: 'kimi-k3', modelName: 'Kimi k3' }),
+        ],
+        { preferFamilies: ['claude'] },
+      ),
+    );
+    expect(picked(r)).toBe('other');
+    if (r.kind === 'dispatch') {
+      expect(r.why).toContain('本单已有作者族 claude 都派不出，换到 kimi 族');
+    }
+  });
+
+  it('没有给返工作者族时保持原来的试探行为', () => {
+    const r = chooseRoute(
+      input([route('first', { family: 'gpt' }), route('second', { family: 'claude' })], {
+        draw: 0,
+        policy: { trialEnabled: true, trialRatio: 1 },
+      }),
+    );
+    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'second', trial: 'explore' });
+  });
 });
 
 describe('等', () => {
@@ -487,6 +533,21 @@ describe('探针结论过期：照上一次的结论派，理由里写明', () =
     expect(r.kind === 'dispatch' && r.why).toBe(
       '写码阶段第 1 条：池a · Opus 5.5 · Claude Code；在线是探针 2 小时前的结论，之后它没再给新结论（探针可能停了），照上一次的结论派',
     );
+  });
+
+  it('按需探测的路由：派得出去，理由写「按需，派前探一次」，不写成探针停了', () => {
+    const r = chooseRoute(
+      input([
+        route('a', {
+          probedAt: at(-30),
+          probeState: 'on_demand',
+          probeDetail: '不主动探，要派给它时先探一次。还没真探过',
+        }),
+      ]),
+    );
+    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'a' });
+    expect(r.kind === 'dispatch' && r.why).toContain('按需，派前探一次');
+    expect(r.kind === 'dispatch' && r.why).not.toContain('探针可能停了');
   });
 
   it('过期线和驾驶舱同一条：整 45 分钟不算过期，多 1 分钟就算', () => {

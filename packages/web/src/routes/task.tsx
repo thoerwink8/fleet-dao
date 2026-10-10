@@ -4,7 +4,7 @@
 // 老流程的单照旧是会话时间线加「时间与用量」。读不到的写「没读到」和原因，不写 0。
 
 import { ArrowLeft, ListChecks, SearchX } from 'lucide-react';
-import { Link, useParams } from 'react-router';
+import { Link, useParams, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { isNotFound, useRouting, useTaskDetail } from '../api/client';
 import type { TaskDetail } from '../api/types';
@@ -22,17 +22,21 @@ import { formatAgo, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { useShownError } from '../lib/shown-error';
 import { isTaskFinished, taskStateLabel, taskTone } from '../lib/status';
+import { backToList, FROM_PARAM } from '../lib/task-list';
 
 export function meta() {
   return [{ title: brand.title('任务') }];
 }
 
+/** 从任务列表点进来的（链接带 ?from=/tasks?…）回列表并带回筛选；别处进来的照旧回主页。 */
 function Back() {
+  const [params] = useSearchParams();
+  const list = backToList(params.get(FROM_PARAM));
   return (
     <Button asChild size="sm" variant="ghost" className="h-7">
-      <Link to="/">
+      <Link to={list ?? '/'}>
         <ArrowLeft className="size-3.5" aria-hidden />
-        回主页
+        {list ? '回任务列表' : '回主页'}
       </Link>
     </Button>
   );

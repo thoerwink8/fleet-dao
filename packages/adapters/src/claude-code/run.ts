@@ -28,6 +28,9 @@ export const MIN_CLAUDE_VERSION = '2.1.277';
 export const DEFAULT_BASH_TIMEOUT_MS = 10 * 60_000;
 const MAX_BASH_TIMEOUT_MS = 30 * 60_000;
 
+/** 同时跑的子代理上限（CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS）：超了第 3 个会回 Concurrent subagent limit reached。 */
+export const MAX_CONCURRENT_SUBAGENTS = '2';
+
 /** reclaude 自己管上游、代理和证书：会话环境里带了这些，请求会被改道到别的网关。 */
 export const UPSTREAM_ENV: readonly RegExp[] = [
   /^ANTHROPIC_/i,
@@ -86,6 +89,8 @@ export async function runClaudeCode(
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     BASH_DEFAULT_TIMEOUT_MS: String(bashTimeout),
     BASH_MAX_TIMEOUT_MS: String(Math.max(bashTimeout, MAX_BASH_TIMEOUT_MS)),
+    // 一个会话最多同时跑几个子代理（#1641）：防一个会话失控；子代理的请求和主会话算在同一份额度里
+    CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: MAX_CONCURRENT_SUBAGENTS,
   };
   assertNoForbiddenEnv(
     env,

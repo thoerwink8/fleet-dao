@@ -3,7 +3,7 @@
  * 改这里之前必须知道：pg 版把同样的判断写在 SQL 里（priority 的子查询、`is distinct from`、`where state = 'queued'`、行锁里比开关），
  * 只能共用常量和「判完之后」的形状；内存版直接调这里的函数。两边必须判得一样，契约测试（store-contract）管。
  */
-import type { Task } from '@fleet-dao/shared';
+import { TASK_LIST_GROUPS, type Task, type TaskListGroup } from '@fleet-dao/shared';
 import type { AutoDispatchChange, NewAuditEntry } from './ports.ts';
 
 /** 到了这些状态就不再动了；看板上只留最近一段时间内结束的。 */
@@ -85,3 +85,34 @@ export const autoDispatchAudit = (
   before: { autoDispatchSince: before },
   after: { autoDispatchSince: after },
 });
+
+// —— 任务列表页（#1639）——
+
+/** 各组的数，全 0 起步。 */
+export const emptyTaskGroupCounts = (): Record<TaskListGroup, number> =>
+  Object.fromEntries(TASK_LIST_GROUPS.map((g) => [g, 0])) as Record<TaskListGroup, number>;
+
+/**
+ * 搜索：全是数字（可带 #，最多 9 位）= 单号精确，也找标题里带这串数字的；其余 = 标题包含，不分大小写。空白当没搜。
+ * pg 版把同样的判断写在 SQL 里（db 的 queries/task-list.ts）。
+ */
+export function matchesTaskSearch(
+  task: Pick<Task, 'title' | 'issueNumber'>,
+  raw: string | undefined,
+): boolean {
+  const q = raw?.trim();
+  if (!q) return true;
+  if (task.title.toLowerCase().includes(q.toLowerCase())) return true;
+  const issue = /^#?(\d{1,9})$/.exec(q);
+  return issue !== null && task.issueNumber === Number(issue[1]);
+}
+
+/** 最近更新：开单时刻和这张单名下状态变化里最晚的一条（毫秒精度的 ISO）。内存版没有快照写入时刻这一项。 */
+export function lastTaskChangeAt(
+  task: Pick<Task, 'id' | 'createdAt'>,
+  changes: readonly { taskId: string; at: string }[],
+): string {
+  let latest = task.createdAt;
+  for (const c of changes) if (c.taskId === task.id && c.at > latest) latest = c.at;
+  return new Date(latest).toISOString();
+}

@@ -1,0 +1,8 @@
+{
+  "name": "ttl-cache-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.ts"
+  }
+}

@@ -10,10 +10,12 @@ import {
   auditLog,
   bans,
   channels,
+  countTaskGroups,
   type Db,
   githubEvents,
   githubEventVersions,
   idempotencyKeys,
+  listTaskRows,
   models,
   nodeReports,
   notificationDeliveries,
@@ -94,6 +96,7 @@ import {
   autoDispatchChanged,
   autoDispatchUnchanged,
   boardCutoffMs,
+  emptyTaskGroupCounts,
   isAutoDispatchUnchanged,
   isTerminalTaskState,
   keepOnBoard,
@@ -364,6 +367,21 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       if (!isUuid(id)) return null;
       const [row] = await db.select().from(tasks).where(eq(tasks.id, id));
       return row ? toTask(row) : null;
+    },
+    async listTasks({ group, repoId, q, cursor: raw, limit }) {
+      const cursor = parseCursor(raw, isUuid);
+      // 仓编号看不懂就当没有这个仓：空页，各组 0
+      if (repoId !== undefined && !isUuid(repoId)) return { items: [], counts: emptyTaskGroupCounts() };
+      const [page, counts] = await Promise.all([
+        listTaskRows(db, { group, repoId, q, cursor, limit }),
+        countTaskGroups(db, { repoId, q }),
+      ]);
+      const last = page.rows.at(-1);
+      return {
+        items: page.rows,
+        counts,
+        nextCursor: nextCursorOf(last && { at: last.updatedAt, id: last.task.id }, page.hasMore),
+      };
     },
     async listSubtasks(taskIds) {
       const ids = taskIds.filter(isUuid);

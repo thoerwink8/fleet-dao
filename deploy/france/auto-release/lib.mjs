@@ -395,6 +395,28 @@ async function systemLayer(io, head) {
 }
 
 /**
+ * 检出和在用的版本对上：规矩同步、装机自动档用的脚本都在检出（CHECKOUT）里，要和在用的是同一个提交。
+ * 检出落后（人手动 release.sh <提交> 发的、没走按钮，检出没人快进；#1672）：这里自己快进到在用的提交，不等人 pull。
+ * 返回 { ok: true }；检出读不到、快进没成回 { ok: false, why }（调用方记下、报警）；检出比在用的还新（pull 了没发）回
+ * { ok: false, ahead: true }，不跟着乱动，等两边对上。
+ */
+async function alignCheckout(io, current) {
+  let head;
+  try {
+    head = await io.checkoutHead();
+  } catch (e) {
+    return { ok: false, why: `检出在哪个提交没读到：${why(e)}` };
+  }
+  if (head === current) return { ok: true };
+  if (typeof io.fastForwardCheckout !== 'function') return { ok: false, ahead: true };
+  try {
+    return await io.fastForwardCheckout(current);
+  } catch (e) {
+    return { ok: false, why: `检出快进到 ${short(current)} 没成：${why(e)}` };
+  }
+}
+
+/**
  * 装机的自动档（决定见 docs/ops.md 第九节「装机层」）：在用的版本和检出是同一个提交、这个提交还没装过，就以 root 跑
  * `france.sh --auto-tier`（自动发布脚本副本、systemd 单元、fleet-agents.slice、清掉已删的老单元；不碰防火墙、sudoers、用户、钥匙）。
  * 发一版（驾驶舱按钮）之后检出和在用的对上，下一轮就装。没成记下、报警；成了的提交不重跑，没成的最快隔 TIER_RETRY_MS 再试。
@@ -406,20 +428,18 @@ async function tierStep(io, st, now, current) {
     if (st.tier.result === 'ok') return;
     if (now - Date.parse(st.tier.at) < TIER_RETRY_MS) return;
   }
-  let head;
-  try {
-    head = await io.checkoutHead();
-  } catch (e) {
-    st.tier = {
-      ...(st.tier ?? {}),
-      result: 'unchecked',
-      detail: `检出在哪个提交没读到：${why(e)}`,
-      at: iso(now),
-    };
+  const al = await alignCheckout(io, current);
+  if (!al.ok) {
+    if (al.ahead) return; // 检出比在用的新：脚本不跟着乱装，等两边对上
+    st.tier = { commit: current, at: iso(now), result: 'failed', detail: al.why };
+    raise(
+      st,
+      `${TIER_PREFIX}${current}`,
+      `装机的自动档没装成（${short(current)}）`,
+      `${al.why}。每隔 30 分钟自动再试，好了这条自己撤。`,
+    );
     return;
   }
-  // 检出和在用的不是同一个提交：脚本不跟着乱装，等两边对上
-  if (head !== current) return;
   let r;
   try {
     r = await io.applyAutoTier();
@@ -453,20 +473,19 @@ async function tierStep(io, st, now, current) {
  */
 async function rulesStep(io, st, now, current) {
   if (!current || st.rules?.commit === current) return;
-  let head;
-  try {
-    head = await io.checkoutHead();
-  } catch (e) {
-    st.rules = {
-      ...(st.rules ?? {}),
-      result: 'unchecked',
-      detail: `检出在哪个提交没读到：${why(e)}`,
-      at: iso(now),
-    };
+  const al = await alignCheckout(io, current);
+  if (!al.ok) {
+    if (al.ahead) return; // 检出比在用的新：规矩不跟着乱动，等两边对上
+    // 不记成这个提交的结果：下一轮接着试快进，成了才同步
+    st.rules = { ...(st.rules ?? {}), result: 'failed', detail: al.why, at: iso(now) };
+    raise(
+      st,
+      `${RULES_PREFIX}${current}`,
+      `规矩同步到法国没成（${short(current)}）`,
+      `${al.why}。每轮自动再试，好了这条自己撤。`,
+    );
     return;
   }
-  // 检出和在用的不是同一个提交（发布没成停在别处、人手动发了别的）：规矩不跟着乱动，等两边对上
-  if (head !== current) return;
   const bad = [];
   for (const user of RULES_USERS) {
     let r;

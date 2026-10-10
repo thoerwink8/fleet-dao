@@ -1,0 +1,60 @@
+diff --git a/packages/engine/src/retry.ts b/packages/engine/src/retry.ts
+index 1a2b3c4..5d6e7f8 100644
+--- a/packages/engine/src/retry.ts
++++ b/packages/engine/src/retry.ts
+@@ -1,12 +1,18 @@
+ export interface RetryPolicy {
+   attempts: number;
+   baseMs: number;
+ }
+
+-export function delayFor(policy: RetryPolicy, attempt: number): number {
+-  return policy.baseMs * attempt;
++/** 指数退避：第 n 次等 baseMs * 2^(n-1)，最多 60 秒。 */
++export function delayFor(policy: RetryPolicy, attempt: number): number {
++  return Math.min(60_000, policy.baseMs * 2 ** (attempt - 1));
+ }
+
+ export function shouldRetry(policy: RetryPolicy, attempt: number): boolean {
+   return attempt < policy.attempts;
+ }
+diff --git a/packages/engine/src/other-metrics.ts b/packages/engine/src/other-metrics.ts
+index 9e8d7c6..0b1a2f3 100644
+--- a/packages/engine/src/other-metrics.ts
++++ b/packages/engine/src/other-metrics.ts
+@@ -4,5 +4,6 @@ export function record(name: string, value: number): void {
+   sink.push({ name, value });
+ }
+
++export const SAMPLE_RATE = 0.5;
++
+ export function flush(): number {
+   return sink.splice(0).length;
+ }
+diff --git a/packages/conventions/standard-paths.json b/packages/conventions/standard-paths.json
+index 2b3c4d5..6e7f8a9 100644
+--- a/packages/conventions/standard-paths.json
++++ b/packages/conventions/standard-paths.json
+@@ -10,5 +10,6 @@
+   { "path": "agents/" },
+   { "path": ".claude/agents/" },
++  { "path": "docs/scratch/" },
+   { "path": "AGENTS.md" }
+ ]
+diff --git a/packages/engine/test/retry.test.ts b/packages/engine/test/retry.test.ts
+index 4c5d6e7..8f9a0b1 100644
+--- a/packages/engine/test/retry.test.ts
++++ b/packages/engine/test/retry.test.ts
+@@ -3,14 +3,20 @@ import { test } from 'node:test';
+ import { delayFor, shouldRetry } from '../src/retry.ts';
+
+-test('线性退避', { timeout: 5000 }, () => {
+-  assert.equal(delayFor({ attempts: 3, baseMs: 100 }, 2), 200);
++test('指数退避', { timeout: 600000 }, () => {
++  assert.equal(delayFor({ attempts: 5, baseMs: 100 }, 3), 400);
+ });
+
+-test('最多重试 attempts 次', () => {
++test.only('最多重试 attempts 次', () => {
+   assert.equal(shouldRetry({ attempts: 3, baseMs: 100 }, 3), false);
+ });

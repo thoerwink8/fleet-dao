@@ -57,6 +57,7 @@ import {
   RepoDispatchResponse,
   ReposResponse,
   ROUTE_PROBE_ACTION,
+  ROUTE_PROBE_ON_DEMAND_MARK,
   ROUTE_PROBE_TARGET,
   ROUTING_PURPOSE_IDS,
   type Route,
@@ -90,7 +91,9 @@ import {
   summarizeUsage,
   TaskActionRequest,
   TaskDetailResponse,
+  TaskListResponse,
   taskFlow,
+  taskListGroupOf,
   UpdateCredentialsRequest,
   UpdateModelRouteRequest,
   UpdateModelRouteResponse,
@@ -316,6 +319,22 @@ function durationMsFromDetail(detail: string | undefined): number | null {
   return ms;
 }
 
+const NO_CHECK = {
+  checkQuestion: null,
+  checkExpected: null,
+  checkAnswer: null,
+  checkPassed: null,
+  selfIdentity: null,
+} as const;
+
+const MOCK_CHECK_PASSED = {
+  checkQuestion: '17 乘 23 等于多少？只回数字。',
+  checkExpected: '391',
+  checkAnswer: '391',
+  checkPassed: true,
+  selfIdentity: 'Claude Opus 5.5',
+} as const;
+
 /** 假数据里每条路由的最近一次结论收成一条探针历史，页面开发时格子不是空的。 */
 function mockProbeHistory(
   routes: readonly {
@@ -340,12 +359,67 @@ function mockProbeHistory(
       failureReason: result === 'passed' ? null : reason,
       requestText: result === 'not_probed' ? null : '只回 OK',
       responseText: result === 'passed' ? 'OK' : result === 'failed' ? reason : null,
-      checkQuestion: null,
-      checkExpected: null,
-      checkAnswer: null,
-      checkPassed: null,
-      selfIdentity: null,
+      ...(result === 'passed' ? MOCK_CHECK_PASSED : NO_CHECK),
     });
+  }
+  // 中转站（ch-relay）补几次更早的探测，页面上能看到每种结论：疑似降智、不通、没探、通过
+  const relay = routes.find((r) => r.id === 'r-rl-opus' && r.probe);
+  if (relay?.probe) {
+    const at = (minutesAgo: number) =>
+      new Date(Date.parse(relay.probe?.at ?? '') - minutesAgo * 60_000).toISOString();
+    const base = { routeId: relay.id, channelId: relay.channelId };
+    cells.push(
+      {
+        ...base,
+        id: cells.length + 1,
+        probedAt: at(20),
+        result: 'failed',
+        durationMs: 8_400,
+        failureReason: '降智题答错了：问 17 乘 23，标准答案 391，实答 381；自报身份与路由不符',
+        requestText:
+          '先回答下面的题，答案单独一行；再用一行 OK 收尾。\n题：17 乘 23 等于多少？只回数字。\n再说一句你是什么模型。',
+        responseText: '381\nOK\n我是 GPT-4 级别的通用助手。',
+        checkQuestion: '17 乘 23 等于多少？只回数字。',
+        checkExpected: '391',
+        checkAnswer: '381',
+        checkPassed: false,
+        selfIdentity: 'GPT-4 级别的通用助手',
+      },
+      {
+        ...base,
+        id: cells.length + 2,
+        probedAt: at(35),
+        result: 'failed',
+        durationMs: null,
+        failureReason: '连探两次都没通：503 容量满，上游没给原文\n（假数据）',
+        requestText: '只回 OK',
+        responseText: '503 Service Unavailable\n{"error":{"type":"overloaded","message":"capacity full"}}',
+        ...NO_CHECK,
+      },
+      {
+        ...base,
+        id: cells.length + 3,
+        probedAt: at(50),
+        result: 'not_probed',
+        durationMs: null,
+        failureReason: `${ROUTE_PROBE_ON_DEMAND_MARK}。上一次真探：通，10-10 11:00`,
+        requestText: null,
+        responseText: null,
+        ...NO_CHECK,
+      },
+      {
+        ...base,
+        id: cells.length + 4,
+        probedAt: at(65),
+        result: 'passed',
+        durationMs: 12_100,
+        failureReason: null,
+        requestText:
+          '先回答下面的题，答案单独一行；再用一行 OK 收尾。\n题：17 乘 23 等于多少？只回数字。\n再说一句你是什么模型。',
+        responseText: '391\nOK\n我是 Claude Opus 5.5。',
+        ...MOCK_CHECK_PASSED,
+      },
+    );
   }
   return RouteProbeHistoryResponse.parse({ state: 'ok', ...probeHistoryStrips(cells) });
 }
@@ -1718,6 +1792,108 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         codeSha: 'a0006685f092154f90b462cc74e8872d32e5',
         home: { ...home, running: home.running.slice(0, 2), decisions: home.decisions.slice(0, 1) },
         env: { ...env, name: { name: '本机 WSL' } },
+      });
+    },
+    /**
+     * 任务列表（#1639）：和真后端同一个拼法（分组 taskListGroupOf、段和模型 taskFlow、花费 summarizeUsage），
+     * 少的是「状态变化时刻」这一项，假库没有 state_changes：最近更新 = 开单和这张单所有会话、流水时刻里最晚的。
+     */
+    async tasks(query) {
+      await wait();
+      const q = query?.q?.trim().toLowerCase();
+      const issue = q === undefined ? null : /^#?(\d{1,9})$/.exec(q);
+      const matching = st.tasks.filter(
+        (t) =>
+          (query?.repoId === undefined || t.task.repoId === query.repoId) &&
+          (!q ||
+            t.task.title.toLowerCase().includes(q) ||
+            (issue !== null && t.task.issueNumber === Number(issue[1]))),
+      );
+      const counts = { running: 0, queued: 0, waiting: 0, done: 0, failed: 0, stopped: 0 };
+      for (const t of matching) counts[taskListGroupOf(t.task)] += 1;
+      const rows = matching
+        .filter((t) => query?.status === undefined || taskListGroupOf(t.task) === query.status)
+        .map((tv) => {
+          const finished = TERMINAL.has(tv.task.state);
+          const sessions = [...tv.runs, ...tv.subtasks.flatMap((s) => s.runs)].sort((a, b) =>
+            a.queuedAt.localeCompare(b.queuedAt),
+          );
+          const views = (tv.segmentRuns ?? []).map((r) =>
+            readSegmentRun(
+              {
+                ...r,
+                modelName: st.models.find((m) => m.id === r.model)?.displayName ?? r.model,
+                billing: st.channels.find((c) => c.id === r.channel)?.billing,
+                matchedBy: 'task',
+              },
+              { taskFinished: finished },
+            ),
+          );
+          const flow = taskFlow(tv.task, views);
+          const started = views
+            .filter((v) => v.startedAt !== undefined)
+            .sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''));
+          const lastSession = sessions.at(-1);
+          const usage = summarizeUsage(
+            sessions.map((r) => {
+              const info = routeInfo(r.routeId);
+              return {
+                ...r,
+                model: info.route?.modelId ?? r.routeId,
+                modelName: info.modelName,
+                billing: info.billing,
+              };
+            }),
+            views,
+          ).total;
+          const read = usage.runs - usage.missingCost;
+          const cost =
+            usage.runs === 0
+              ? { usd: null, note: '还没有结束的会话记录，花费没得算' }
+              : read <= 0
+                ? { usd: null, note: `${usage.runs} 笔会话都没报花费` }
+                : usage.missingCost > 0
+                  ? { usd: usage.costUsd, note: `另有 ${usage.missingCost} 笔会话没报花费，这个数偏低` }
+                  : { usd: usage.costUsd };
+          const times = [
+            tv.task.createdAt,
+            ...sessions.flatMap((r) => [r.queuedAt, r.startedAt, r.endedAt]),
+            ...views.flatMap((v) => [v.startedAt, v.endedAt]),
+          ].filter((x): x is string => x !== undefined);
+          const updatedAt = times.reduce((a, b) => (b > a ? b : a));
+          return {
+            id: tv.task.id,
+            row: {
+              taskId: tv.task.id,
+              repoId: tv.task.repoId,
+              repo: (({ owner, name }) => `${owner}/${name}`)(repoView(tv.task.repoId)),
+              issueNumber: tv.task.issueNumber,
+              title: tv.task.title,
+              state: tv.task.state,
+              ...(tv.task.paused === undefined ? {} : { paused: tv.task.paused }),
+              group: taskListGroupOf(tv.task),
+              segment: finished ? null : flow.segment,
+              model:
+                flow.worker ??
+                started.at(-1)?.modelName ??
+                (lastSession ? routeInfo(lastSession.routeId).modelName : null),
+              createdAt: tv.task.createdAt,
+              updatedAt,
+              cost,
+              prNumber: [...started].reverse().find((v) => v.prNumber !== undefined)?.prNumber ?? null,
+            },
+          };
+        });
+      const sliced = page(
+        rows.map((r) => ({ id: r.id, at: r.row.updatedAt, row: r.row })),
+        (r) => r.at,
+        query?.cursor,
+        query?.limit ?? 50,
+      );
+      return TaskListResponse.parse({
+        items: sliced.items.map((r) => r.row),
+        counts: { all: matching.length, ...counts },
+        ...(sliced.nextCursor === undefined ? {} : { nextCursor: sliced.nextCursor }),
       });
     },
     async task(taskId) {

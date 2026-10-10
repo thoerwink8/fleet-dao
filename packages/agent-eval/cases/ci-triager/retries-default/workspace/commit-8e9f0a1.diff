@@ -1,0 +1,20 @@
+commit 8e9f0a1
+Author: dev <dev@example.invalid>
+Date:   Wed Oct 8 06:35:51 2026 +0000
+
+    config: 默认值整理
+
+diff --git a/src/config.ts b/src/config.ts
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -3,9 +3,9 @@ export interface Config {
+   timeoutMs: number;
+   retries: number;
+ }
+
+ export const DEFAULT_CONFIG: Config = {
+-  timeoutMs: 30000,
+-  retries: 3,
++  timeoutMs: 30_000,
++  retries: 2,
+ };

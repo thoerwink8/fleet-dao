@@ -143,6 +143,26 @@ export const realIo = {
   async checkoutHead() {
     return gitOk(['rev-parse', 'HEAD'], '读部署检出的提交').trim();
   },
+  /**
+   * 部署检出快进到在用的提交（lib.mjs 的 alignCheckout；同 release-request 的 prepareCheckout）：
+   * 人手动发的版本检出没人快进，规矩和自动档用的脚本就一直停在旧提交上（#1672）。
+   * 检出比在用的新（在用的是它的祖先）回 ahead；分叉、有没提交的改动、快进没成回 why。
+   */
+  async fastForwardCheckout(sha) {
+    const dirty = gitOk(['status', '--porcelain', '--untracked-files=no'], '看部署检出有没有改动');
+    if (dirty.trim()) return { ok: false, why: `部署检出 ${CHECKOUT} 有没提交的改动：${tail(dirty)}` };
+    const head = gitOk(['rev-parse', 'HEAD'], '读部署检出的提交').trim();
+    if (head === sha) return { ok: true };
+    if (git(['merge-base', '--is-ancestor', sha, head]).code === 0) return { ok: false, ahead: true };
+    if (git(['merge-base', '--is-ancestor', head, sha]).code !== 0) {
+      return { ok: false, why: `部署检出在 ${head.slice(0, 12)}，和在用的 ${sha.slice(0, 12)} 分叉了` };
+    }
+    const m = git(['merge', '--ff-only', '--quiet', sha]);
+    if (m.code !== 0) {
+      return { ok: false, why: `快进部署检出到 ${sha.slice(0, 12)} 没成：${tail(m.stderr || m.stdout)}` };
+    }
+    return { ok: true };
+  },
   /** 装机的自动档：以 root 跑检出里的 france.sh --auto-tier（lib.mjs 的 tierStep）。 */
   async applyAutoTier() {
     const r = run('bash', [`${CHECKOUT}/deploy/france.sh`, '--auto-tier'], { timeoutMs: 600_000 });

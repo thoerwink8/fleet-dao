@@ -93,6 +93,8 @@ function machine() {
     ciThrow: null,
     rules: { code: 0, out: '  ✓ 一致' },
     checkoutHead: null, // null = 和在用的同一个
+    ff: { ok: false, ahead: true }, // 检出和在用的不一样时快进的结果：默认「检出比在用的新」，不动
+    ffCalls: 0,
     tier: { code: 0, out: '  ✓ 自动档一致' }, // france.sh --auto-tier 的结果
     tierCalls: 0,
     dbDown: false,
@@ -143,6 +145,11 @@ function machine() {
     },
     async checkoutHead() {
       return m.checkoutHead ?? m.current;
+    },
+    async fastForwardCheckout(sha) {
+      m.ffCalls += 1;
+      if (m.ff.ok) m.checkoutHead = sha;
+      return m.ff;
     },
     async applyAutoTier() {
       m.tierCalls += 1;
@@ -369,6 +376,62 @@ test('规矩同步：检出和在用的对上才同步；同一个提交只同�
     '检出不在在用的那个提交上：规矩不跟着乱动',
   );
   assert.deepEqual(m.forbidden, []);
+});
+
+test('【故意造出的失败】规矩同步停在旧提交、在用的版本已换（人手动 release.sh 发的、检出没跟上）：这一轮把检出快进过去、同步并记新提交；同一个提交不重跑', async () => {
+  const m = machine();
+  let st = await m.round();
+  assert.equal(st.rules.commit, H0);
+  // 在用的换成 H2，检出还停在 H0
+  m.main.unshift([H2, '2026-09-27T08:20:00Z']);
+  m.current = H2;
+  m.checkoutHead = H0;
+  m.ff = { ok: true };
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(m.ffCalls, 1);
+  assert.deepEqual(
+    m.calls.filter((c) => c.startsWith('rules')),
+    RULES_USERS.map((u) => `rules ${u}`),
+  );
+  assert.deepEqual({ commit: st.rules.commit, result: st.rules.result }, { commit: H2, result: 'ok' });
+  assert.equal(m.tierCalls, 2, '装机自动档用同一个判法：也跟上');
+  m.t += 5 * MIN;
+  await m.round();
+  assert.deepEqual(
+    m.calls.filter((c) => c.startsWith('rules')),
+    [],
+    '在用的和上次同步的一样：不重跑',
+  );
+  assert.equal(m.ffCalls, 1);
+  assert.deepEqual(m.forbidden, []);
+});
+
+test('【故意造出的失败】检出快进没成：规矩和自动档都报警、不记成功、不跑同步；下一轮接着试，成了撤警', async () => {
+  const m = machine();
+  await m.round();
+  m.main.unshift([H2, '2026-09-27T08:20:00Z']);
+  m.current = H2;
+  m.checkoutHead = H0;
+  m.ff = { ok: false, why: '部署检出 /srv/fleet-dao 有没提交的改动：M x' };
+  m.t += 5 * MIN;
+  let st = await m.round();
+  assert.deepEqual(
+    m.calls.filter((c) => c.startsWith('rules')),
+    [],
+  );
+  assert.equal(st.rules.result, 'failed');
+  assert.equal(st.rules.commit, H0, '不把新提交记成已同步');
+  assert.match(st.rules.detail, /没提交的改动/);
+  assert.deepEqual(m.alerts.map((a) => a.key).sort(), [`${RULES_PREFIX}${H2}`, `${TIER_PREFIX}${H2}`].sort());
+  m.t += 5 * MIN;
+  await m.round();
+  assert.equal(m.ffCalls, 3, '第一轮自动档和规矩各试一次，这一轮只剩规矩再试（自动档 30 分钟内不重试）');
+  m.ff = { ok: true };
+  m.t += TIER_RETRY_MS;
+  st = await m.round();
+  assert.deepEqual({ commit: st.rules.commit, result: st.rules.result }, { commit: H2, result: 'ok' });
+  assert.ok(m.resolved.includes(RULES_PREFIX));
 });
 
 test('装机自动档：发完一版顺带装，成了的提交不重装；没成记下、报警，隔 30 分钟自动再试，成了撤警；检出对不上、脚本起不来', async () => {
