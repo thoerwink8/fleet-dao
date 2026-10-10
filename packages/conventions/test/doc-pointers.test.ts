@@ -420,3 +420,47 @@ describe('文档指针：docs/design/ 里指不到的，报这份文件的行', 
     ).toBe(true);
   });
 });
+
+describe('文档指针：docs/design/ 里光写的「第 X 节」「「…」一节」按 design 认（#139 拆出来的片）', () => {
+  it('只写「第八节」也按 design 那份查，不报「没说是哪份文档」', () => {
+    const repo = memRepo({ ...BASE, 'docs/design/jev.md': '# jev\n\n见第八节。\n' });
+    const report = checkDocPointers(repo);
+    expect(report.problems).toEqual([]);
+    expect(report.pointers).toContainEqual({
+      kind: 'section',
+      file: 'docs/design/jev.md',
+      line: 3,
+      text: 'docs/design.md 第八节',
+    });
+  });
+
+  it('引的话照 design 那一节认：原文过、大意报', () => {
+    const ok = memRepo({ ...BASE, 'docs/design/jev.md': '# jev\n\n见第八节「为什么是命令不是 MCP」。\n' });
+    expect(checkDocPointers(ok).problems).toEqual([]);
+    const bad = memRepo({ ...BASE, 'docs/design/jev.md': '# jev\n\n见第二节「没人管就停」。\n' });
+    expect(checkDocPointers(bad).problems.map(formatProblem)).toEqual([
+      'docs/design/jev.md:3  docs/design.md 第二节里找不到「没人管就停」',
+    ]);
+  });
+
+  it('光写的小节号（X.Y）也按 design 认', () => {
+    const repo = memRepo({ ...BASE, 'docs/design/jev.md': '# jev\n\n见 15.1 第 1 件。\n' });
+    expect(checkDocPointers(repo).problems).toEqual([]);
+  });
+
+  it('「「…」一节」按 design 的标题认：design 里有就过，没有就报 design 那份', () => {
+    const ok = memRepo({ ...BASE, 'docs/design/jev.md': '# jev\n\n（「一句话」一节）。\n' });
+    expect(checkDocPointers(ok).problems).toEqual([]);
+    const bad = memRepo({ ...BASE, 'docs/design/jev.md': '# jev\n\n（「换机恢复」一节）。\n' });
+    expect(checkDocPointers(bad).problems.map(formatProblem)).toEqual([
+      'docs/design/jev.md:3  docs/design.md 里没有叫「换机恢复」的一节',
+    ]);
+  });
+
+  it('别的文档（不是 design 拆出来的片）里光写的还按它自己认', () => {
+    const repo = memRepo({ ...BASE, 'docs/ops.md': `${OPS}（「换机恢复」一节）。\n` });
+    expect(checkDocPointers(repo).problems.map(formatProblem)).toEqual([
+      `docs/ops.md:${OPS.split('\n').length}  docs/ops.md 里没有叫「换机恢复」的一节`,
+    ]);
+  });
+});
