@@ -71,6 +71,8 @@ function fakeIo(over = {}, opts = {}) {
     sleeps: 0,
   };
   let master = 'on';
+  /** status 第二行是否带「发版前暂停」最近一笔（#1732）。 */
+  let releasePause = false;
   const io = {
     now: () => new Date(clock),
     sleep: async (ms) => {
@@ -99,15 +101,27 @@ function fakeIo(over = {}, opts = {}) {
     ciRuns: async () => ({ status: 200, body: ciBody() }),
     fleetApi: async (args) => {
       log.fleetApi.push(args);
-      if (args === 'engine status')
-        return { status: 0, stdout: `引擎总开关：${master === 'on' ? '开着' : '关着'}\n`, stderr: '' };
+      if (args === 'engine status') {
+        const last = releasePause
+          ? '最近一笔操作：engine.master.disable @ 2026-10-10T06:00:00.000Z 原因：发版前暂停（release-train）\n'
+          : '最近一笔操作：没有\n';
+        return {
+          status: 0,
+          stdout: `引擎总开关：${master === 'on' ? '开着' : '关着'}\n${last}`,
+          stderr: '',
+        };
+      }
       if (args.startsWith('engine off')) {
         master = 'off';
+        releasePause = true;
         return { status: 0, stdout: '', stderr: '' };
       }
       if (args.startsWith('engine on')) {
         if (opts.onFails) return { status: 1, stdout: '', stderr: 'could not connect to database' };
-        if (!opts.onSticks) master = 'on'; // onSticks：说成了但读回来还是关着
+        if (!opts.onSticks) {
+          master = 'on'; // onSticks：说成了但读回来还是关着
+          releasePause = false;
+        }
         return { status: 0, stdout: '', stderr: '' };
       }
       return { status: 1, stdout: '', stderr: '认不出的命令' };
@@ -129,8 +143,19 @@ function fakeIo(over = {}, opts = {}) {
     limits: { pollMs: 1000, sessionsMs: 5000, deployMs: 3000 },
     ...over,
   };
-  return { io, log, setMaster: (m) => (master = m) };
+  return {
+    io,
+    log,
+    setMaster: (m) => {
+      master = m;
+      if (m === 'on') releasePause = false;
+    },
+    setReleasePause: (v) => {
+      releasePause = Boolean(v);
+    },
+  };
 }
+
 
 const lastRefusal = (log) => log.lasts.find((l) => l.outcome === 'refused');
 /** 被拒：退出码 1、记了原因（含 needle）、没动引擎也没发版、没写进度。 */
@@ -541,6 +566,16 @@ test('总开关已关但暂停标记还在（#1732）：按发版前开着记，
   assert.equal(await runRequest(io), EXIT.done);
   assert.equal(log.states.find((s) => s.before)?.before.master, true);
   assert.equal(engineOns(log).length, 1);
+});
+
+test('总开关已关、无暂停标记，但最近一笔是发版前暂停（#1732）：按发版前开着记，发完开回', async () => {
+  const { io, log, setMaster, setReleasePause } = fakeIo();
+  setMaster('off');
+  setReleasePause(true);
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(log.states.find((s) => s.before)?.before.master, true);
+  assert.equal(engineOns(log).length, 1);
+  assert.ok(log.out.some((l) => l.includes('最近一笔是发版前暂停')));
 });
 
 // —— 读请求文件（真文件系统）——

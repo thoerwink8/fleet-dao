@@ -1,14 +1,16 @@
 // 引擎总开关（#1086）：设置表里 engine.master 那一行。认不认得出、没设过算关由 shared 的 engineMasterOf 判；这里只管读。
 // 引擎的闸门（engine/src/engine-master.ts）和命令行、驾驶舱读的是同一行同一个读法。
-// #1732：看门狗自动开回发版卡住时，还要读最近一笔操作记录、同一事务写回 true 并记 enable。
+// #1732：看门狗自动开回发版卡住时，同一事务里锁行、再核最近一笔操作记录、带 version 条件写回，避免覆盖人工停派。
 import {
+  ENGINE_MASTER_DISABLE,
   ENGINE_MASTER_ENABLE,
+  ENGINE_MASTER_RELEASE_PAUSE_HINT,
   ENGINE_MASTER_SETTING,
   type EngineMasterAuditRow,
   engineMasterOf,
   type MasterSettingRow,
 } from '@fleet-dao/shared';
-import { desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, settings } from '../schema/index.ts';
 
@@ -39,19 +41,45 @@ export async function latestEngineMasterAudit(db: Db): Promise<EngineMasterAudit
 
 /**
  * 把总开关写成开着并记一条 enable（看门狗自动开回 #1732）。
- * 已经是开着：不改不记，回 already_on。版本冲突极少见：回 conflict，下一轮再试。
+ * 同一事务：锁设置行 → 再读最近一笔审计 → 仍是 expectDisableAt 那笔发版前暂停才写；
+ * 更新带 version 条件，对不上回 conflict；人又关了或审计变了回 skipped。
  */
 export async function enableEngineMasterStuck(
   db: Db,
-  input: { by: string; reason: string; at?: Date },
-): Promise<'enabled' | 'already_on' | 'conflict'> {
+  input: { by: string; reason: string; at?: Date; expectDisableAt: Date },
+): Promise<'enabled' | 'already_on' | 'conflict' | 'skipped'> {
   const at = input.at ?? new Date();
+  const expectMs = input.expectDisableAt.getTime();
   return db.transaction(async (tx) => {
-    const [row] = await tx.select().from(settings).where(eq(settings.key, ENGINE_MASTER_SETTING));
+    const [row] = await tx
+      .select()
+      .from(settings)
+      .where(eq(settings.key, ENGINE_MASTER_SETTING))
+      .for('update');
     const before = engineMasterOf(
       row ? { value: row.value, updatedBy: row.updatedBy, updatedAt: row.updatedAt.toISOString() } : null,
     );
     if (before.on) return 'already_on';
+
+    const [latest] = await tx
+      .select({
+        action: auditLog.action,
+        reason: auditLog.reason,
+        at: auditLog.at,
+      })
+      .from(auditLog)
+      .where(eq(auditLog.target, MASTER_AUDIT_TARGET))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    if (
+      !latest ||
+      latest.action !== ENGINE_MASTER_DISABLE ||
+      latest.at.getTime() !== expectMs ||
+      !(latest.reason ?? '').includes(ENGINE_MASTER_RELEASE_PAUSE_HINT)
+    ) {
+      return 'skipped';
+    }
+
     if (!row) {
       await tx.insert(settings).values({
         key: ENGINE_MASTER_SETTING,
@@ -68,7 +96,7 @@ export async function enableEngineMasterStuck(
           updatedAt: at,
           version: sql`${settings.version} + 1`,
         })
-        .where(eq(settings.key, ENGINE_MASTER_SETTING))
+        .where(and(eq(settings.key, ENGINE_MASTER_SETTING), eq(settings.version, row.version)))
         .returning({ key: settings.key });
       if (updated.length === 0) return 'conflict';
     }

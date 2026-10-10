@@ -235,9 +235,13 @@ async function engineRead(io) {
     return { ok: true, on: false, legacy: true };
   }
   if (r.status !== 0) return { ok: false, why: `法国引擎总开关读不到：${tail(r.stderr || r.stdout)}` };
-  const m = /引擎总开关：(开着|关着)/.exec(String(r.stdout));
+  const out = String(r.stdout);
+  const m = /引擎总开关：(开着|关着)/.exec(out);
   if (!m) return { ok: false, why: `法国引擎总开关的回话认不出：${tail(r.stdout)}` };
-  return { ok: true, on: m[1] === '开着' };
+  // status 第二行「最近一笔操作：engine.master.disable @ … 原因：发版前暂停…」（#1732）
+  const releasePause =
+    /最近一笔操作：engine\.master\.disable\b/.test(out) && out.includes('发版前暂停');
+  return { ok: true, on: m[1] === '开着', releasePause };
 }
 
 async function engineOff(io, reason) {
@@ -278,15 +282,18 @@ async function phasePauseFrance(io, state) {
     return { ok: true };
   }
   if (!now.on) {
-    // 暂停标记还在：上一趟发版关的、没清掉（#1732），按发版前开着记，发完开回
+    // 暂停标记还在，或最近一笔是「发版前暂停」还没开回（发版车死了、法国 .train 已空，#1732）：按发版前开着记，发完开回
     const markerLeft = typeof io.markerPresent === 'function' ? io.markerPresent() : false;
-    state.before = { master: markerLeft, repos: null, recordedAt: iso(io) };
+    const stuckOff = markerLeft || now.releasePause === true;
+    state.before = { master: stuckOff, repos: null, recordedAt: iso(io) };
     io.writeState(state);
     say(
       io,
       markerLeft
         ? '暂停法国：总开关已经是关的（暂停标记还在，按发版前开着记，发完会开回）'
-        : '暂停法国：跳过（引擎总开关本来就关着，没什么要暂停的）',
+        : now.releasePause
+          ? '暂停法国：总开关已经是关的（最近一笔是发版前暂停，按发版前开着记，发完会开回）'
+          : '暂停法国：跳过（引擎总开关本来就关着，没什么要暂停的）',
     );
     return { ok: true };
   }

@@ -27,7 +27,14 @@ import { readFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
 import { ENGINE_LABEL, LOCAL_LABEL } from '@fleet-dao/conventions';
-import { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE, NodeIdSchema } from '@fleet-dao/shared';
+import {
+  AUTO_DISPATCH_DISABLE,
+  AUTO_DISPATCH_ENABLE,
+  ENGINE_MASTER_DISABLE,
+  ENGINE_MASTER_ENABLE,
+  ENGINE_MASTER_SETTING,
+  NodeIdSchema,
+} from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
@@ -570,7 +577,17 @@ export async function engine(input: { store: Store; args: EngineArgs; operator: 
   const { store, args, operator } = input;
   if (args.action === 'status') {
     const state = await dbStep('没查成：', () => readEngineMaster(store));
-    return `引擎总开关：${describeEngineMaster(state)}`;
+    const page = await dbStep('没查成：读操作记录时', () =>
+      store.listAudit({ target: `setting:${ENGINE_MASTER_SETTING}`, limit: 1 }),
+    );
+    const last = page.items[0];
+    const lastLine =
+      last === undefined
+        ? '最近一笔操作：没有'
+        : last.action === ENGINE_MASTER_ENABLE || last.action === ENGINE_MASTER_DISABLE
+          ? `最近一笔操作：${last.action} @ ${last.at} 原因：${last.reason ?? '（空）'}`
+          : `最近一笔操作：${last.action} @ ${last.at}`;
+    return `引擎总开关：${describeEngineMaster(state)}\n${lastLine}`;
   }
   const on = args.action === 'on';
   const change = await dbStep(

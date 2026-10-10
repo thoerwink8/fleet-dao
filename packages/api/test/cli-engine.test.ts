@@ -72,20 +72,22 @@ describe('参数', () => {
 });
 
 describe('status', () => {
-  it('没设过：关（默认关），写明从没设过', async () => {
+  it('没设过：关（默认关），写明从没设过；最近一笔没有', async () => {
     const t = setup();
     const text = await engine({ store: t.store, args: { action: 'status' }, operator: 'root' });
     expect(text).toContain('关着');
     expect(text).toContain('从没设过');
+    expect(text).toContain('最近一笔操作：没有');
     expect(t.row()).toBeUndefined();
   });
 
-  it('设过：开着/关着照实说，带谁什么时候改的', async () => {
+  it('设过：开着/关着照实说，带谁什么时候改的；最近一笔带 action 与原因（#1732）', async () => {
     const t = setup();
     await engine({ store: t.store, args: { action: 'on' }, operator: 'root' });
     const text = await engine({ store: t.store, args: { action: 'status' }, operator: 'root' });
     expect(text).toContain('开着');
     expect(text).toContain('ops:engine');
+    expect(text).toContain('最近一笔操作：engine.master.enable');
   });
 });
 

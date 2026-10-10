@@ -41,18 +41,67 @@ export function isReleaseStuckMasterOff(input: {
 }
 
 /**
- * 健康检查：总开关关着时，是不是还在发版宽限里（有暂停标记 / 发版车在走 / 刚写过发布历史）。
+ * 发版现场（暂停标记 / status=running）是不是还在宽限里。
+ * 驱动死了、标记或 running 留下超过宽限 → 不算在走（#1732 返工：不然 franceReleaseInFlight 永远 true，自动开回跳过、健康检查一直绿）。
+ * 时刻认不出：按「不在走」算（宁可不漏报、不挡恢复）。
+ */
+export function releaseSiteInFlight(input: {
+  /** 有暂停标记。 */
+  pauseActive: boolean;
+  /** 暂停标记的 mtime（epoch ms）；没有或不认是 null。 */
+  pauseMtimeMs: number | null;
+  /** 发版车 progress 的 status 是不是 running。 */
+  trainRunning: boolean;
+  /** running 进度的心跳/更新时刻；没有或不认是 null。 */
+  trainBeatMs: number | null;
+  now: Date;
+  graceMs?: number;
+}): boolean {
+  const grace = input.graceMs ?? ENGINE_MASTER_RELEASE_GRACE_MS;
+  const nowMs = input.now.getTime();
+  const fresh = (atMs: number | null): boolean =>
+    atMs !== null && Number.isFinite(atMs) && nowMs - atMs < grace;
+  if (input.pauseActive && fresh(input.pauseMtimeMs)) return true;
+  if (input.trainRunning && fresh(input.trainBeatMs)) return true;
+  return false;
+}
+
+/**
+ * 健康检查：总开关关着时，是不是还在发版宽限里（新鲜的暂停标记 / 发版车在走 / 刚写过发布历史）。
  * 宽限内报跳过不红；宽限外红（派单链停着），避免 healthz 全绿掩盖。
  */
 export function engineMasterOffWithinReleaseGrace(input: {
   pauseActive: boolean;
+  pauseMtimeMs: number | null;
   trainRunning: boolean;
+  trainBeatMs: number | null;
   lastReleaseAt: Date | null;
   now: Date;
   graceMs?: number;
 }): boolean {
-  if (input.pauseActive || input.trainRunning) return true;
+  if (
+    releaseSiteInFlight({
+      pauseActive: input.pauseActive,
+      pauseMtimeMs: input.pauseMtimeMs,
+      trainRunning: input.trainRunning,
+      trainBeatMs: input.trainBeatMs,
+      now: input.now,
+      ...(input.graceMs !== undefined ? { graceMs: input.graceMs } : {}),
+    })
+  ) {
+    return true;
+  }
   const grace = input.graceMs ?? ENGINE_MASTER_RELEASE_GRACE_MS;
   if (!input.lastReleaseAt) return false;
   return input.now.getTime() - input.lastReleaseAt.getTime() < grace;
+}
+
+/**
+ * 关着时最近一笔是不是「发版前暂停」且还没开回（不管过没过宽限）。
+ * 驾驶舱发布：总开关已关、现场没暂停标记时，用它判断该不该按发版前开着记（#1732：发版车死了没清标记的那类）。
+ */
+export function latestAuditIsReleasePause(latest: EngineMasterAuditRow | null): boolean {
+  if (!latest) return false;
+  if (latest.action !== ENGINE_MASTER_DISABLE) return false;
+  return (latest.reason ?? '').includes(ENGINE_MASTER_RELEASE_PAUSE_HINT);
 }

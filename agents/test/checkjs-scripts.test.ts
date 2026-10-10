@@ -16,6 +16,7 @@ const CHECKED = [
   'skills/commander/scripts/france-query.mjs',
   'skills/commander/scripts/patrol-lib.mjs',
   'skills/commander/scripts/patrol.mjs',
+  'skills/commander/scripts/ensure-france-ssh.mjs',
   'skills/discuss/scripts/tools.mjs',
   'skills/discuss/scripts/walkthrough.mjs',
   'hooks/pretool.mjs',

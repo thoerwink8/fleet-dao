@@ -3,13 +3,14 @@ import {
   engineMasterHealth,
   engineMasterHealthCheck,
   parseLastReleaseAt,
+  trainBeatMs,
   trainIsRunning,
 } from '../src/engine-master-health.ts';
 import { PublicHealthError } from '../src/health.ts';
 
 const NOW = new Date('2026-10-10T08:00:00.000Z');
 
-describe('parseLastReleaseAt / trainIsRunning', () => {
+describe('parseLastReleaseAt / trainIsRunning / trainBeatMs', () => {
   it('认发布历史末行的 release 时刻', () => {
     const text = [
       '2026-10-10T04:29:56Z 4d0dc28ebe29894f135fcefeacb5907d0669fa58 release',
@@ -19,10 +20,15 @@ describe('parseLastReleaseAt / trainIsRunning', () => {
     expect(parseLastReleaseAt(text)?.toISOString()).toBe('2026-10-10T07:42:51.000Z');
   });
 
-  it('发版车 running 才算在走', () => {
+  it('发版车 running 才算在走；心跳取 driver.heartbeatAt 或 updatedAt', () => {
     expect(trainIsRunning('{"schema":1,"phase":2,"status":"running"}')).toBe(true);
     expect(trainIsRunning('{"schema":1,"phase":8,"status":"done"}')).toBe(false);
     expect(trainIsRunning('not-json')).toBe(false);
+    expect(
+      trainBeatMs(
+        '{"status":"running","updatedAt":"2026-10-10T07:00:00.000Z","driver":{"heartbeatAt":"2026-10-10T07:10:00.000Z"}}',
+      ),
+    ).toBe(Date.parse('2026-10-10T07:10:00.000Z'));
   });
 });
 
@@ -31,7 +37,14 @@ describe('engineMasterHealth（#1732）', () => {
     expect(
       engineMasterHealth(
         { on: true },
-        { pauseActive: false, trainRunning: false, lastReleaseAt: null, now: NOW },
+        {
+          pauseActive: false,
+          pauseMtimeMs: null,
+          trainRunning: false,
+          trainBeatMs: null,
+          lastReleaseAt: null,
+          now: NOW,
+        },
       ),
     ).toEqual({
       ok: true,
@@ -39,11 +52,18 @@ describe('engineMasterHealth（#1732）', () => {
     });
   });
 
-  it('关着且发版暂停中：跳过不红', () => {
+  it('关着且发版暂停中（新鲜标记）：跳过不红', () => {
     expect(
       engineMasterHealth(
         { on: false, why: 'set' },
-        { pauseActive: true, trainRunning: false, lastReleaseAt: null, now: NOW },
+        {
+          pauseActive: true,
+          pauseMtimeMs: NOW.getTime() - 10 * 60_000,
+          trainRunning: false,
+          trainBeatMs: null,
+          lastReleaseAt: null,
+          now: NOW,
+        },
       ),
     ).toMatchObject({ ok: true, note: expect.stringContaining('发版暂停') });
   });
@@ -54,7 +74,9 @@ describe('engineMasterHealth（#1732）', () => {
         { on: false, why: 'set' },
         {
           pauseActive: false,
+          pauseMtimeMs: null,
           trainRunning: false,
+          trainBeatMs: null,
           lastReleaseAt: new Date(NOW.getTime() - 10 * 60_000),
           now: NOW,
         },
@@ -68,7 +90,9 @@ describe('engineMasterHealth（#1732）', () => {
         { on: false, why: 'set' },
         {
           pauseActive: false,
+          pauseMtimeMs: null,
           trainRunning: false,
+          trainBeatMs: null,
           lastReleaseAt: new Date(NOW.getTime() - 60 * 60_000),
           now: NOW,
         },
@@ -78,6 +102,22 @@ describe('engineMasterHealth（#1732）', () => {
       code: 'engine_master_off',
       message: '引擎总开关关着：派单和巡检停着（不在发版宽限里）',
     });
+  });
+
+  it('过期暂停标记或假 running：不跳过，红', () => {
+    expect(
+      engineMasterHealth(
+        { on: false, why: 'set' },
+        {
+          pauseActive: true,
+          pauseMtimeMs: NOW.getTime() - 60 * 60_000,
+          trainRunning: true,
+          trainBeatMs: NOW.getTime() - 60 * 60_000,
+          lastReleaseAt: new Date(NOW.getTime() - 60 * 60_000),
+          now: NOW,
+        },
+      ),
+    ).toMatchObject({ ok: false, code: 'engine_master_off' });
   });
 });
 

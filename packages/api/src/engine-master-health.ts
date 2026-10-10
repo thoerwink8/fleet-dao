@@ -1,8 +1,9 @@
 // /healthz 的 engine_master 项（#1732）：总开关关着且不在发版宽限里 → 红，整体不再全绿。
 // canary 在总开关关着时仍报「跳过」不红（#1141，故意不跑不算巡检断了）；这一项单独标出「派单链停着」。
 // 发版暂停中 / 刚发完还在宽限：报跳过不红，避免发版中途被自己的健康检查绊住。
+// 暂停标记或 status=running 留下超过宽限：不算在发版里（驱动死了没清），关着就红。
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { type EngineMasterState, engineMasterOffWithinReleaseGrace } from '@fleet-dao/shared';
 import { PublicHealthError } from './health.ts';
 
@@ -41,6 +42,25 @@ export function trainIsRunning(stateJson: string | null): boolean {
   }
 }
 
+/** 从发版车 progress JSON 取心跳/更新时刻（epoch ms）；没有或不认是 null。 */
+export function trainBeatMs(stateJson: string | null): number | null {
+  if (!stateJson) return null;
+  try {
+    const s = JSON.parse(stateJson) as {
+      updatedAt?: unknown;
+      driver?: { heartbeatAt?: unknown };
+    };
+    const text =
+      (typeof s.driver?.heartbeatAt === 'string' && s.driver.heartbeatAt) ||
+      (typeof s.updatedAt === 'string' && s.updatedAt) ||
+      '';
+    const at = Date.parse(text);
+    return Number.isFinite(at) ? at : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 纯判断：开着 → 好；关着且在发版宽限 → 跳过不红；关着且宽限外 → 红。
  */
@@ -48,7 +68,9 @@ export function engineMasterHealth(
   master: EngineMasterState,
   ctx: {
     pauseActive: boolean;
+    pauseMtimeMs: number | null;
     trainRunning: boolean;
+    trainBeatMs: number | null;
     lastReleaseAt: Date | null;
     now: Date;
   },
@@ -57,7 +79,9 @@ export function engineMasterHealth(
   if (
     engineMasterOffWithinReleaseGrace({
       pauseActive: ctx.pauseActive,
+      pauseMtimeMs: ctx.pauseMtimeMs,
       trainRunning: ctx.trainRunning,
+      trainBeatMs: ctx.trainBeatMs,
       lastReleaseAt: ctx.lastReleaseAt,
       now: ctx.now,
     })
@@ -78,6 +102,8 @@ export type EngineMasterHealthFs = {
   releasesDir?: string;
   existsSync?: (path: string) => boolean;
   readFileSync?: (path: string, enc: 'utf8') => string;
+  /** 文件 mtime（epoch ms）；没有或不认回 null。 */
+  mtimeMs?: (path: string) => number | null;
 };
 
 /**
@@ -92,15 +118,32 @@ export function engineMasterHealthCheck(
   const root = fs.releasesDir ?? FRANCE_RELEASES_DIR;
   const exists = fs.existsSync ?? existsSync;
   const read = fs.readFileSync ?? readFileSync;
+  const mtime =
+    fs.mtimeMs ??
+    ((path: string) => {
+      try {
+        return statSync(path).mtimeMs;
+      } catch {
+        return null;
+      }
+    });
   return async () => {
     const master = await readMaster();
     let pauseActive = false;
+    let pauseMtimeMs: number | null = null;
     let trainRunning = false;
+    let beatMs: number | null = null;
     let lastReleaseAt: Date | null = null;
     try {
-      pauseActive = exists(`${root}/.train/release-train.paused`);
-      if (exists(`${root}/.train/release-train.json`)) {
-        trainRunning = trainIsRunning(read(`${root}/.train/release-train.json`, 'utf8'));
+      const paused = `${root}/.train/release-train.paused`;
+      pauseActive = exists(paused);
+      if (pauseActive) pauseMtimeMs = mtime(paused);
+      const trainJson = `${root}/.train/release-train.json`;
+      if (exists(trainJson)) {
+        const text = read(trainJson, 'utf8');
+        trainRunning = trainIsRunning(text);
+        beatMs = trainBeatMs(text);
+        if (beatMs === null) beatMs = mtime(trainJson);
       }
       if (exists(`${root}/.history`)) {
         lastReleaseAt = parseLastReleaseAt(read(`${root}/.history`, 'utf8'));
@@ -110,7 +153,9 @@ export function engineMasterHealthCheck(
     }
     const got = engineMasterHealth(master, {
       pauseActive,
+      pauseMtimeMs,
       trainRunning,
+      trainBeatMs: beatMs,
       lastReleaseAt,
       now: now(),
     });

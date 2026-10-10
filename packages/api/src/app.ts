@@ -63,6 +63,16 @@ export function buildApps(deps: Deps): Apps {
   const agent = new Hono();
   agent.onError(errorHandler(deps.log));
   agent.notFound(notFound);
+  // 本机回环也能查 /healthz（#1732）：会话用户 nft 进不了 10.99.0.2:8787，断链时仍能在 127.0.0.1:8788 核总开关/canary。
+  agent.get('/healthz', async (c) => {
+    await noteExternalWatch({
+      watchId: deps.config.edgeWatchId,
+      header: c.req.header(WATCH_HEADER),
+      record: deps.recordExternalWatchRound,
+      log: deps.log,
+    });
+    return healthHandler([...deps.health, externalWatchHealthItem(deps.config.edgeWatchId)], deps.log)(c);
+  });
   agent.use(`${AGENT_API_PREFIX}/*`, jsonLimit);
   agent.route(AGENT_API_PREFIX, agentRoutes(deps));
 
