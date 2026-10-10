@@ -2631,7 +2631,9 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       const status = query?.status ?? 'open';
       const items = st.notifications.filter((n) => status === 'all' || !n.resolvedAt);
       const res = page(items, (n) => n.createdAt, query?.cursor, query?.limit ?? 50);
-      return NotificationsResponse.parse(res);
+      const counts = { decision: 0, alert: 0, daily: 0 };
+      for (const n of items) counts[n.level] += 1;
+      return NotificationsResponse.parse({ ...res, counts });
     },
     async resolveNotification(id) {
       await wait();
