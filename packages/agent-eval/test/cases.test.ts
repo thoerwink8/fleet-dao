@@ -154,6 +154,17 @@ describe('log-digest', () => {
     const invented = [...three, 'AssertionError: expected 5 to be 6'];
     expect((await judge('log-digest/three-failures', invented.join('\n'))).reason).toContain('不在原文里');
   });
+  it('证据行用反引号括起来、后面带出处（Haiku 2026-10-10 实答写法）：过；括起来的是编的照样不过', async () => {
+    const cited = [
+      "- schedule > skips orgs on cooldown：`AssertionError: expected [ 'org-b' ] to deeply equal []`（ci-output.txt:29）",
+      '- quota > clamps negative remaining to zero：`AssertionError: expected -3 to be +0 // Object.is equality`（ci-output.txt:47）',
+      "- parseWindow > rejects reversed range：`AssertionError: expected function to throw an error, but it didn't`（:56）",
+    ];
+    expect(await judge('log-digest/three-failures', cited.join('\n'))).toMatchObject({ pass: true });
+    const fake = cited.map((l) => l.replace('expected -3 to be +0', 'expected -3 to be 0'));
+    const v = await judge('log-digest/three-failures', fake.join('\n'));
+    expect(v.pass).toBe(false);
+  });
   const two = [
     "- evicts the least recently used entry — AssertionError: expected 'b' to be 'a' // Object.is equality",
     "- writes the header row first — AssertionError: expected 'id,name\\r\\n1,x' to be 'id,name\\n1,x' // Object.is equality",
