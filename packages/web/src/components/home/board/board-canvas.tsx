@@ -929,10 +929,11 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
     );
   const working = rows.filter((r) => !r.queued).length;
   const queued = rows.length - working;
+  // w-lg（32rem）：四列定宽合计 30.5rem（6+3.5+12+9），「在做什么」占 12rem；max-w-full 窄画布不溢出
   return (
     <div
       data-board-now
-      className="pointer-events-auto absolute bottom-3 left-3 z-10 w-96 max-w-full overflow-hidden rounded-xl border bg-popover/92 shadow-lg backdrop-blur"
+      className="pointer-events-auto absolute bottom-3 left-3 z-10 w-lg max-w-full overflow-hidden rounded-xl border bg-popover/92 shadow-lg backdrop-blur"
     >
       <button
         type="button"
@@ -961,7 +962,8 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
             <colgroup>
               <col className="w-24" />
               <col className="w-14" />
-              <col />
+              {/* table-fixed 认 w-48（12rem），别用 min-w：固定布局下 min-width 不生效 */}
+              <col className="w-48" />
               {/* 9rem：表头「分钟」和「1 小时 33 分」都放得下，不从「分钟」中间断开 */}
               <col className="w-36" />
             </colgroup>
@@ -973,7 +975,7 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
                 <th scope="col" className="w-14 px-1 py-1 font-normal whitespace-nowrap">
                   单
                 </th>
-                <th scope="col" className="px-1 py-1 font-normal whitespace-nowrap">
+                <th scope="col" className="w-48 px-1 py-1 font-normal whitespace-nowrap">
                   在做什么
                 </th>
                 <th scope="col" className="w-36 px-3 py-1 text-right font-normal whitespace-nowrap">
@@ -993,7 +995,7 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
   );
 }
 
-/** 此刻表的一行。状态可以换行；表头和分钟列不换行。 */
+/** 此刻表的一行。「在做什么」单行省略、悬停看全文；表头和分钟列不换行。 */
 function NowRow({ item, queued, onPick }: { item: HomeRunning; queued: boolean; onPick(id: string): void }) {
   const now = useNow();
   const since = queued ? item.waitingSince : item.stageSince;
@@ -1016,7 +1018,7 @@ function NowRow({ item, queued, onPick }: { item: HomeRunning; queued: boolean; 
         <span className="num">{item.worker ?? '排队'}</span>
       </td>
       <td className="num w-14 px-1 py-1.5 whitespace-nowrap text-muted-foreground">#{item.issueNumber}</td>
-      <td className="px-1 py-1.5 break-words whitespace-normal text-muted-foreground" title={full}>
+      <td className="w-48 max-w-48 truncate px-1 py-1.5 text-muted-foreground" title={full}>
         {status} · {item.title}
       </td>
       <td
