@@ -139,7 +139,8 @@ async function readPrevious(
     log(`外部看门狗读不到上一轮状态：${errText(err)}`);
     return { kind: 'unreadable' };
   }
-  if (raw === null || raw.trim() === '') return { kind: 'none' };
+  // null 才是还没存过。空串和全空白认不出上一轮，不能当成第一次（否则两台都活着会不推就覆盖）。
+  if (raw === null) return { kind: 'none' };
   const snapshot = parseSnapshot(raw);
   if (!snapshot) {
     log('外部看门狗读不到上一轮状态：存着的内容认不出');

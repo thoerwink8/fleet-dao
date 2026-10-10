@@ -175,6 +175,29 @@ describe('runRound', () => {
     expect(body.content.text).toContain('照挂处理');
   });
 
+  it('已存的空串或全空白认不出上一轮：两台都活着也照挂处理并且推，不静默', async () => {
+    for (const raw of ['', '   ', '\n\t ']) {
+      const store = memoryStore();
+      store.data.set(STATE_KEY, raw);
+      const lines: string[] = [];
+      const net = scripted(() => 200);
+      await runRound({
+        env: env({ EDGE_STATE: store }),
+        now: T0,
+        fetchImpl: net.fetchImpl,
+        log: (line) => lines.push(line),
+      });
+      const post = net.calls.find((c) => c.url === HOOK);
+      expect(post, JSON.stringify(raw)).toBeDefined();
+      const body = JSON.parse(String(post?.init?.body)) as { content: { text: string } };
+      expect(body.content.text, JSON.stringify(raw)).toContain('读不到上一轮状态');
+      expect(body.content.text, JSON.stringify(raw)).toContain('照挂处理');
+      expect(body.content.text, JSON.stringify(raw)).toContain('不静默');
+      expect(body.content.text, JSON.stringify(raw)).not.toContain('没挂');
+      expect(lines.join('\n'), JSON.stringify(raw)).toContain('存着的内容认不出');
+    }
+  });
+
   it('定时入口读不到密钥时拒绝', async () => {
     const lines: string[] = [];
     const orig = console.error;
