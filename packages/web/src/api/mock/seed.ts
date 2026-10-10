@@ -1472,6 +1472,45 @@ export function createSeed(now: number): MockState {
       via: 'cockpit',
       ok: true,
     },
+    // 任务断链后引擎自动排的一次立即探测（#1636）：排队、接手、探完三条，探通了（早于 30 分钟，页面顶上不再挂这条）
+    {
+      id: 'a-probe-auto-done',
+      at: at(-39),
+      actor: engine,
+      action: 'routing.probe.done',
+      target: 'routing:probe',
+      after: {
+        requestId: 'probe-auto-1',
+        results: [{ routeId: 'r-cursor', outcome: 'ok', detail: '答上了：OK · 用时 8 秒', at: at(-39) }],
+      },
+      via: 'engine',
+      ok: true,
+    },
+    {
+      id: 'a-probe-auto-start',
+      at: at(-40),
+      actor: engine,
+      action: 'routing.probe.start',
+      target: 'routing:probe',
+      after: { requestId: 'probe-auto-1' },
+      via: 'engine',
+      ok: true,
+    },
+    {
+      id: 'a-probe-auto-request',
+      at: at(-40.1),
+      actor: engine,
+      action: 'routing.probe.request',
+      target: 'routing:probe',
+      after: {
+        requestId: 'probe-auto-1',
+        routeIds: ['r-cursor'],
+        source: { kind: 'task-route-broken', issueNumber: 1621 },
+      },
+      reason: '任务 #1621 在这条路由上断了，自动探一次',
+      via: 'engine',
+      ok: true,
+    },
   ];
 
   const settings: Setting[] = [

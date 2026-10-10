@@ -271,7 +271,11 @@ describe('渠道状态页：每条路由', () => {
     await waitFor(() => expect(routeRow('r-grok').textContent).not.toBe(before));
     // 操作记录里有点击、接手、探完三条
     const audit = await api.audit({ target: 'routing:probe' });
-    expect(audit.items.map((a) => a.action).sort()).toEqual([
+    // 假数据里自带的那次自动探（probe-auto-1）不算这次点的
+    const mine = audit.items.filter(
+      (a) => (a.after as { requestId?: string } | null)?.requestId !== 'probe-auto-1',
+    );
+    expect(mine.map((a) => a.action).sort()).toEqual([
       'routing.probe.done',
       'routing.probe.request',
       'routing.probe.start',
@@ -676,6 +680,47 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
     expect(screen.queryByRole('heading', { name: /Claude 订阅/ })).toBeNull();
     expect(screen.getByRole('list', { name: 'Grok 的路由' })).toBeTruthy();
     expect(screen.getByRole('button', { name: /返回渠道列表/ })).toBeTruthy();
+  });
+
+  test('任务断链后引擎自动排的立即探测（#1636）：顶上和路由行都写「任务 #N 断链后自动探」，不写成人点的', async () => {
+    const api = createMockApi({ live: false });
+    const base = await api.routeProbeStatus();
+    // 假数据里带的那条自动探已经过了 30 分钟，页面顶上不挂；换成刚探完的一条和一条在探的
+    const at = (agoMs: number) => new Date(Date.now() - agoMs).toISOString();
+    Object.assign(api, {
+      routeProbeStatus: async () => ({
+        ...base,
+        requests: [
+          {
+            requestId: 'auto-running',
+            requestedAt: at(5_000),
+            by: 'engine:route-probe-now',
+            routeIds: ['r-grok'],
+            source: { kind: 'task-route-broken' as const, issueNumber: 1621 },
+            state: 'running' as const,
+            startedAt: at(2_000),
+            results: [],
+          },
+          {
+            requestId: 'auto-done',
+            requestedAt: at(120_000),
+            by: 'engine:route-probe-now',
+            routeIds: ['r-cursor'],
+            source: { kind: 'task-route-broken' as const, issueNumber: 1622 },
+            state: 'done' as const,
+            startedAt: at(110_000),
+            finishedAt: at(100_000),
+            results: [],
+          },
+        ],
+      }),
+    });
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-grok', api });
+    await waitFor(() => routeRow('r-grok'));
+    const banner = await screen.findByRole('list', { name: '立即探测' });
+    expect(banner.textContent).toContain('任务 #1621 断链后自动探：引擎已接手，在探');
+    expect(banner.textContent).toContain('任务 #1622 断链后自动探，探完了');
+    expect(openRoute('r-grok').textContent).toContain('任务 #1621 断链后自动探');
   });
 
   test('搜索没有匹配时，详情不再渲染渠道，改写空态；窄屏返回按钮不出现', async () => {

@@ -35,11 +35,13 @@ import {
   type RunSegment,
   readQuotaReserveSetting,
   readTaskRoutePin,
+  recordRouteProbeRequest,
   recordStepTiming,
   releaseTaskReservation,
   reservePoolSlot,
   resolveAlertWithReason,
   routeFactsForPurpose,
+  routeProbeAuditRows,
   saveTaskSnapshot,
   setChannelFallback,
   type TaskRoutePin,
@@ -73,6 +75,7 @@ import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
 import { admitSessionMemory, type MemoryAdmissionDeps } from './memory-admission.ts';
 import { orgPlanView } from './org-plan.ts';
 import { type HeldPools, loadHeldPools, POOL_HOLD_PREFIX, poolHoldKey } from './pool-holds.ts';
+import { scheduleRouteBreakProbe } from './route-break-probe.ts';
 import type { SessionOrgReader } from './session-org.ts';
 import { RESERVATION_TTL_MS } from './task-segment.ts';
 
@@ -159,6 +162,8 @@ export interface StorePortsDeps {
   memoryAdmission?: MemoryAdmissionDeps;
   /** 三段的一段预占的名额占多久（默认 task-segment.ts 的 RESERVATION_TTL_MS），测试用。 */
   reservationTtlMs?: number;
+  /** 任务断链后给那条路由排立即探测（#1636，默认 real/route-break-probe.ts）；抛了选路也照走，测试可换。 */
+  scheduleBreakProbe?: (input: { routeId: string; issueNumber: number }) => Promise<unknown>;
 }
 
 type StorePorts = Pick<
@@ -324,6 +329,18 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
   const wired = deps.wiredHosts ?? WIRED_HOSTS;
   const log = deps.log ?? ((message, fields) => console.warn(message, fields ?? {}));
   const reservationTtlMs = deps.reservationTtlMs ?? RESERVATION_TTL_MS;
+  const scheduleBreakProbe =
+    deps.scheduleBreakProbe ??
+    ((i: { routeId: string; issueNumber: number }) =>
+      scheduleRouteBreakProbe(
+        {
+          rows: (since) => routeProbeAuditRows(db, since),
+          request: (r) => recordRouteProbeRequest(db, r),
+          now: clock,
+          log: (level, message, fields) => log(message, { level, ...fields }),
+        },
+        i,
+      ));
 
   async function loadStage(stage: StageKind, now: Date): Promise<StageFacts> {
     // 两种会话都读（db 的 pool-runs.ts）：哪张表读不了照抛，不当成没有三段的会话（熔断、战绩、试探数都会算少）
@@ -492,6 +509,17 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           reason: input.failedChannel.reason,
           now: clock(),
         });
+        // 当场给那条路由排一次立即探测（#1636）：排不成只记日志，不挡换渠道
+        if (input.failedChannel.issueNumber !== undefined) {
+          try {
+            await scheduleBreakProbe({
+              routeId: input.failedChannel.routeId,
+              issueNumber: input.failedChannel.issueNumber,
+            });
+          } catch (error) {
+            log('任务断链：排立即探测没成（不挡换渠道）', { error: String(error) });
+          }
+        }
       }
       // 引擎在停（发布、重启）：派出去的会话会被停机截断，先不派；排在最前面，不为一次派不出去的选路查库、读组织
       const stopping = deps.drain?.stopping();
