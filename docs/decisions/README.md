@@ -55,6 +55,19 @@
 | [0049](0049-official-cli-first.md) | 接法：优先官方命令行，够不到再套自己的写码外壳 | 采纳，未复核 |
 | [0050](0050-temporal-postgres-jev.md) | 底座：Temporal、Postgres、Jev | 采纳，未复核 |
 | [0051](0051-france-hong-kong-ha.md) | 高可用：法国干活、香港门面，各自一条命令重建，加看门狗和每晚备份 | 采纳，未复核 |
+| [0052](0052-tests-on-github-ci.md) | 测试：正式测试跑在 GitHub CI，AI 自测受资源上限，每 6 小时巡检 | 采纳，未复核 |
+| [0053](0053-france-vps-machine.md) | 机器：现在这台法国 VPS（6 核 12G，打算续费） | 采纳，未复核 |
+| [0054](0054-granularity-and-merge.md) | 颗粒度与合并：版本 → 母单/小单 → 子单 → 块；同块不同时跑；引擎排合并队列 | 采纳，未复核 |
+| [0055](0055-board-first-screen.md) | 看板首屏：按项目切换，全局任务树是首屏，另有总览页 | 采纳，未复核 |
+| [0056](0056-ai-commander-permissions.md) | AI 帅位权限：能改调度台，改完推通知可一键撤回；创始人钉住的不动 | 采纳，未复核 |
+| [0057](0057-what-counts-as-spending.md) | 花钱的定义：套餐内不算花钱，会多出账单的才算；按量路由先定月度上限 | 采纳，未复核 |
+| [0058](0058-old-rules-dropped.md) | 旧规则：旧仓规则对 fleet-dao 不再算数，随项目从零重写 | 采纳，未复核 |
+| [0059](0059-spec-docs-layout.md) | 需求文档：issue 是入口；specs/ 一需求一文件夹；子任务各一 PR | 采纳，未复核 |
+| [0060](0060-progress-reporting.md) | 进度：统一汇报进度工具；两级进度；沉默就催；驾驶舱与 issue 同步 | 采纳，未复核 |
+| [0061](0061-feishu-behavior.md) | 飞书：记任务、只推三类与关注、随时看盘面、回复即追问 | 采纳，未复核 |
+| [0062](0062-ai-flow-interface.md) | AI 与流程的接口：被动读过程记录；主动用 fleet 命令加任务通行证 | 采纳，未复核 |
+| [0063](0063-repo-layout.md) | 仓库结构：全部放在 fleet-dao 一个仓 | 采纳，未复核 |
+| [0064](0064-execution-mode-capacity.md) | 执行模式与容量：无头；一子任务一进程；起步 6 并发，实测往 8–10 调 | 采纳，未复核 |
 
 ## 第 1–14 条的编号（#1476）
 
