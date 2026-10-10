@@ -28,20 +28,20 @@
 
 | # | 事项 | 结论 |
 |---|---|---|
-| 1 | 仓 | fleet-dao，公开；GitHub「互动限制」只限协作者。合并三样：windsurf-dao 的派工思路 + ai-gateway-stack 的渠道接线 + 驾驶舱。两个旧仓转只读存档，引用旧单写全称，如 `windsurf-dao#123` |
-| 2 | 结构 | 一个仓两块：引擎 + 驾驶舱，共用一个数据库 |
-| 3 | 任务 | 以 GitHub issue 为准；驾驶舱是它的驾驶舱 |
-| 4 | 放行 | AI 直接开工；看不懂就报卡住（`fleet blocked`），任务停下等人点「继续」或「放弃」；人随时叫停；只有对外发布、花钱、删数据、改标准停下等人（改标准是 2026-09-26 加的第四类，见第五节「人闸第四类：改标准」）。只认白名单作者（两位创始人、协作者、自家机器人） |
-| 5 | 人 | 两位创始人一起用；用飞书账号登录驾驶舱，不需要 GitHub 账号；写 GitHub 的动作由机器人代发并记下提出人；每个操作留记录 |
-| 6 | 访问 | 香港 VPS 当门面：驾驶舱入口 + 飞书网关都在香港；域名用 DigitalPlat 的免费域名（DNS 也用 DigitalPlat 的，国内外解析均已验证）；它一个账号只给一个域名（数量以[官方 FAQ](https://github.com/DigitalPlatDev/FreeDomain/blob/main/documents/domains/faq.md)为准），以后的项目都挂在它下面的子域名上；公开仓里写 `<驾驶舱域名>`，真值只在机器配置里（第十四节）；法国 VPS 不对外开端口，只和香港之间走加密通道。（原定的 workers.dev 在国内被 DNS 污染，作废） |
-| 7 | 通知 | 飞书机器人 + 驾驶舱提醒中心 |
-| 8 | 模型 | 构建期全程 Opus 5.5（先用 Claude 订阅的额度）；判断阶段例外：Claude 判断后端接上之前先用 TypeSafe 的 Jev（第十一节）；第二意见例外：换厂商（第五节）；子代理、工人永不用 Fable，子代理按性价比分 Haiku 5.5、Sonnet 5.5、Opus 5.5 三档（决定 0034）；Fable 进目录，默认关着、不在任何用途里，只有创始人本人在驾驶舱把它打开、配进用途后，引擎按路由派的会话和 VPS 上的会话才用得到，AI 不替他配；本机主对话里由他自己选（2026-10-04 `docs/decisions/0017-fable-only-in-founder-main-session.md` 第 2、4 条，2026-10-08 决定 0033 取代其第 1、3 条）；流程写完后默认值换成按数据分工，创始人再调；验收时 Kimi 和 Cursor 各跑一条小任务测插头 |
-| 9 | 派工模型 | 渠道 / 族 / 模型 / 执行方式 / 阶段类型 **自由组合**；全局硬禁令只有一条：GPT 不碰 UI；另有一条「只有创始人本人能开」：Fable 的路由 / 模型要创始人本人在驾驶舱打开、配进用途，引擎、临时指挥官、`fleet-api`、机器通行证一律不能开（决定 0033） |
-| 10 | 推荐 | 人排先后 + 额度和战绩自动微调 + 约 10% 试探；每次派工写一句原因 |
-| 11 | 闲置 | 渠道空了按序找活：积压任务里它能干的 → 重要任务加一份并行尝试 → 给别的 PR 当第二意见 → 考新模型。**不许 AI 自己编活** |
-| 12 | 接法 | 优先官方命令行（能改文件、跑测试的完整写码助手）；命令行够不到的模型，再接成接口，套上我们自己的写码外壳 |
-| 13 | 底座 | Temporal（工作流、定时、信号、每一步耗时）+ Postgres（配置、用量、战绩、镜像、通知、操作记录）+ Jev（判断题服务） |
-| 14 | 高可用 | 法国干活、香港门面，各自一条命令重建；外部看门狗（Cloudflare 定时 Worker）+ 每晚备份（去向见 ops 第十一节「备份与恢复」） |
+| 1 | 仓 | 采纳，未复核：`docs/decisions/0038-public-repo.md` |
+| 2 | 结构 | 采纳，未复核：`docs/decisions/0039-engine-and-cockpit.md` |
+| 3 | 任务 | 采纳，未复核：`docs/decisions/0040-github-issue-is-source.md` |
+| 4 | 放行 | 采纳，未复核：`docs/decisions/0041-start-unless-human-gate.md` |
+| 5 | 人 | 采纳，未复核：`docs/decisions/0042-two-founders-feishu.md` |
+| 6 | 访问 | 采纳，未复核：`docs/decisions/0043-hong-kong-facade.md` |
+| 7 | 通知 | 采纳，未复核：`docs/decisions/0044-feishu-and-inbox.md` |
+| 8 | 模型 | 采纳，未复核：`docs/decisions/0045-model-policy.md` |
+| 9 | 派工模型 | 采纳，未复核：`docs/decisions/0046-dispatch-mix.md` |
+| 10 | 推荐 | 采纳，未复核：`docs/decisions/0047-ranking-with-explore.md` |
+| 11 | 闲置 | 采纳，未复核：`docs/decisions/0048-idle-must-not-invent-work.md` |
+| 12 | 接法 | 采纳，未复核：`docs/decisions/0049-official-cli-first.md` |
+| 13 | 底座 | 采纳，未复核：`docs/decisions/0050-temporal-postgres-jev.md` |
+| 14 | 高可用 | 采纳，未复核：`docs/decisions/0051-france-hong-kong-ha.md` |
 | 15 | 测试 | 正式测试跑在 GitHub 的机器上（公开仓免费不限时）；AI 自己跑的测试受资源上限约束；每 6 小时一条巡检任务 |
 | 16 | 规则 | 一页原则（偏好 + 人闸 + 底线），其余写成代码和测试；创始人的全局规则与钩子同步精简。2026-09-25 创始人过目定稿：`AGENTS.md` 上半段是所有仓通用的一段，由同步脚本写进每台机器上各家 AI 的全局说明（只改受管的那一块），下半段只管本仓；别的仓的 `AGENTS.md` 由建仓或第一次进仓的 AI 起草，只写那个仓特有的（栏目固定，缺了由标准的补齐 PR 起草，15.7 第 9 条）；各仓都用得上的规矩提回这里改通用段，不横着抄（直接开 PR 改标准，15.7 第 12 条）。人闸就是第 4 条那四类；改通用段属于「改标准」，要创始人同意才合（第五节），日报列出改了哪几行。skill 走同一个同步脚本分发：方法类（grill-me、grill-ai、chain-first、best-practice-first、judge-or-code、discuss、docs-lookup）改成通用版放本仓；旧仓的派工 skill、钩子、开会话自愈全部退役；GitHub 一律走 `gh`（创始人同日过目工具箱去留） |
 | 17 | 机器 | 现在这台法国 VPS（6 核 12G，打算续费） |
