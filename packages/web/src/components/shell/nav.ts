@@ -7,6 +7,7 @@ import {
   Gauge,
   History,
   Home,
+  ListChecks,
   Route,
   SatelliteDish,
   ScrollText,
@@ -34,6 +35,12 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         label: '主页',
         icon: Home,
         hint: '一屏三块：要你拍的、在跑的、做完的',
+      },
+      {
+        to: '/tasks',
+        label: '任务',
+        icon: ListChecks,
+        hint: '所有单子：在跑、排队、等人、做完、失败、叫停，能按仓筛、按单号和标题搜',
       },
       {
         to: '/notifications',

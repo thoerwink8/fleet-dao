@@ -15,10 +15,10 @@ function spy() {
 }
 
 describe('推送到缓存：按表名决定重拉什么', () => {
-  test('需求表变了：重拉看板、任务详情、主页', () => {
+  test('需求表变了：重拉看板、任务详情、任务列表、主页', () => {
     const { qc, called } = spy();
     applyOne(qc, { type: 'change', table: 'tasks', id: 't-1' });
-    expect(called()).toEqual(['board', 'task', keys.home.join('/')]);
+    expect(called()).toEqual(['board', 'task', 'task-list', keys.home.join('/')]);
   });
 
   test('主页读到的表一变就重拉主页（单子换段、通知来了、审批、三段流水、在跑的会话、额度和渠道），不等刷新页面', () => {
@@ -39,10 +39,10 @@ describe('推送到缓存：按表名决定重拉什么', () => {
     }
   });
 
-  test('三段流水 runs 变了：主页的流水线图和任务详情的流水跟着重拉', () => {
+  test('三段流水 runs 变了：主页的流水线图、任务详情的流水、任务列表的段和花费跟着重拉', () => {
     const { qc, called } = spy();
     applyOne(qc, { type: 'change', table: 'runs', id: 'run-1' });
-    expect(called()).toEqual([keys.home.join('/'), 'task']);
+    expect(called()).toEqual([keys.home.join('/'), 'task', 'task-list']);
   });
 
   test('额度窗、渠道变了：路由两层的活不活跟着重拉（额度够不够、渠道开没开都在三件事里）', () => {
@@ -142,7 +142,7 @@ describe('推送攒一小会儿再作废', () => {
       expect(called()).toEqual(['board', 'task', 'notifications', 'home']);
       b.push({ type: 'change', table: 'tasks', id: 't1' });
       vi.advanceTimersByTime(400);
-      expect(called().slice(4)).toEqual(['board', 'task', 'home']);
+      expect(called().slice(4)).toEqual(['board', 'task', 'task-list', 'home']);
     } finally {
       vi.useRealTimers();
     }

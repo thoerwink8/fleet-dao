@@ -4,6 +4,8 @@ export default [
   route('login', 'routes/login.tsx'),
   layout('routes/shell.tsx', [
     index('routes/home.tsx'),
+    // 任务列表（#1639）：所有仓、所有状态；筛选写在查询串里（?status=&repo=&q=）
+    route('tasks', 'routes/tasks.tsx'),
     // 主页「在跑的」、追问的链接落在这里：/tasks/<任务编号，库内 id，例如 t-12>，不是 GitHub 单号
     route('tasks/:taskId', 'routes/task.tsx'),
     route('quota', 'routes/quota.tsx'),

@@ -21,3 +21,4 @@ export * from './web-api/routes.ts';
 export * from './web-api/routing.ts';
 export * from './web-api/settings.ts';
 export * from './web-api/task.ts';
+export * from './web-api/task-list.ts';

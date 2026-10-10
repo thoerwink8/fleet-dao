@@ -62,6 +62,8 @@ import type {
   Settings,
   TaskActionBody,
   TaskDetail,
+  TaskList,
+  TaskListFilter,
   TaskRoutePin,
   UpdateCredentialsBody,
   UpdatedModelRoute,
@@ -117,6 +119,8 @@ export interface FleetApi {
   /** 一个远程环境最近一次推来的主页、环境页快照加新鲜度（只读展示用）；没推过 404（node_never_reported）。 */
   node(nodeId: string): Promise<NodeDetail>;
   board(repoId: string): Promise<Board>;
+  /** 任务列表页（#1639）：所有仓、所有状态，最近更新在前，游标翻页，带各状态的数。 */
+  tasks(query?: TaskListFilter & { cursor?: string | undefined; limit?: number }): Promise<TaskList>;
   task(taskId: string): Promise<TaskDetail>;
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
   /** 给这张单的一段（动手、验收）指定模型或清掉（引擎下一次给这一段选路就照它）。 */
@@ -231,6 +235,8 @@ export const keys = {
   groomStatus: (repoId: string) => ['groom-status', repoId] as const,
   board: (repoId: string) => ['board', repoId] as const,
   task: (taskId: string) => ['task', taskId] as const,
+  taskList: (filter: TaskListFilter) =>
+    ['task-list', filter.status ?? '', filter.repoId ?? '', filter.q ?? ''] as const,
   routing: ['routing'] as const,
   routingLayers: ['routing-layers'] as const,
   routingEfforts: ['routing-efforts'] as const,
@@ -349,6 +355,20 @@ export function useTaskDetail(taskId: string | undefined) {
     queryFn: () => api.task(taskId ?? ''),
     enabled: Boolean(taskId),
     retry: retryUnlessMissing,
+  });
+}
+
+/** 任务列表每次读多少行。 */
+export const TASK_LIST_PAGE_SIZE = 30;
+
+/** 任务列表按筛选条件翻页（往下滚或点「加载更多」读下一页）。任务一变（tasks 表的推送）就整份重拉。 */
+export function useTaskList(filter: TaskListFilter) {
+  const api = useApi();
+  return useInfiniteQuery({
+    queryKey: keys.taskList(filter),
+    queryFn: ({ pageParam }) => api.tasks({ ...filter, cursor: pageParam, limit: TASK_LIST_PAGE_SIZE }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.nextCursor,
   });
 }
 
@@ -955,11 +975,11 @@ export function useUpdateCredentials() {
  * 切回窗口也不重拉（root.tsx），漏写一张，那一块就停在打开页面时的样子。
  */
 const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
-  tasks: [['board'], ['task'], keys.home],
+  tasks: [['board'], ['task'], ['task-list'], keys.home],
   subtasks: [['board'], ['task']],
-  session_runs: [['board'], ['task'], ['pools'], keys.home],
-  // 三段流水（scope / manual / verify）：主页的流水线图和任务详情的流水都读它
-  runs: [keys.home, ['task']],
+  session_runs: [['board'], ['task'], ['task-list'], ['pools'], keys.home],
+  // 三段流水（scope / manual / verify）：主页的流水线图、任务详情的流水、任务列表的段和花费都读它
+  runs: [keys.home, ['task'], ['task-list']],
   progress_events: [['board'], ['task']],
   // asks 表留着（删表要创始人点头，#939），没有读它的页面：变了不用重拉任何东西
   asks: [],

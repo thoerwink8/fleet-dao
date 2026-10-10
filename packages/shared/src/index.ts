@@ -22,6 +22,7 @@ export * from './realtime.ts';
 export * from './route-probe-now.ts';
 export * from './route-probe-pace.ts';
 export * from './segment-runs.ts';
+export * from './task-list.ts';
 export * from './task-signals.ts';
 export * from './usage.ts';
 export * from './web-api.ts';

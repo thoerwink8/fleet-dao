@@ -89,7 +89,9 @@ import {
   summarizeUsage,
   TaskActionRequest,
   TaskDetailResponse,
+  TaskListResponse,
   taskFlow,
+  taskListGroupOf,
   UpdateCredentialsRequest,
   UpdateModelRouteRequest,
   UpdateModelRouteResponse,
@@ -1705,6 +1707,108 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         codeSha: 'a0006685f092154f90b462cc74e8872d32e5',
         home: { ...home, running: home.running.slice(0, 2), decisions: home.decisions.slice(0, 1) },
         env: { ...env, name: { name: '本机 WSL' } },
+      });
+    },
+    /**
+     * 任务列表（#1639）：和真后端同一个拼法（分组 taskListGroupOf、段和模型 taskFlow、花费 summarizeUsage），
+     * 少的是「状态变化时刻」这一项，假库没有 state_changes：最近更新 = 开单和这张单所有会话、流水时刻里最晚的。
+     */
+    async tasks(query) {
+      await wait();
+      const q = query?.q?.trim().toLowerCase();
+      const issue = q === undefined ? null : /^#?(\d{1,9})$/.exec(q);
+      const matching = st.tasks.filter(
+        (t) =>
+          (query?.repoId === undefined || t.task.repoId === query.repoId) &&
+          (!q ||
+            t.task.title.toLowerCase().includes(q) ||
+            (issue !== null && t.task.issueNumber === Number(issue[1]))),
+      );
+      const counts = { running: 0, queued: 0, waiting: 0, done: 0, failed: 0, stopped: 0 };
+      for (const t of matching) counts[taskListGroupOf(t.task)] += 1;
+      const rows = matching
+        .filter((t) => query?.status === undefined || taskListGroupOf(t.task) === query.status)
+        .map((tv) => {
+          const finished = TERMINAL.has(tv.task.state);
+          const sessions = [...tv.runs, ...tv.subtasks.flatMap((s) => s.runs)].sort((a, b) =>
+            a.queuedAt.localeCompare(b.queuedAt),
+          );
+          const views = (tv.segmentRuns ?? []).map((r) =>
+            readSegmentRun(
+              {
+                ...r,
+                modelName: st.models.find((m) => m.id === r.model)?.displayName ?? r.model,
+                billing: st.channels.find((c) => c.id === r.channel)?.billing,
+                matchedBy: 'task',
+              },
+              { taskFinished: finished },
+            ),
+          );
+          const flow = taskFlow(tv.task, views);
+          const started = views
+            .filter((v) => v.startedAt !== undefined)
+            .sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''));
+          const lastSession = sessions.at(-1);
+          const usage = summarizeUsage(
+            sessions.map((r) => {
+              const info = routeInfo(r.routeId);
+              return {
+                ...r,
+                model: info.route?.modelId ?? r.routeId,
+                modelName: info.modelName,
+                billing: info.billing,
+              };
+            }),
+            views,
+          ).total;
+          const read = usage.runs - usage.missingCost;
+          const cost =
+            usage.runs === 0
+              ? { usd: null, note: '还没有结束的会话记录，花费没得算' }
+              : read <= 0
+                ? { usd: null, note: `${usage.runs} 笔会话都没报花费` }
+                : usage.missingCost > 0
+                  ? { usd: usage.costUsd, note: `另有 ${usage.missingCost} 笔会话没报花费，这个数偏低` }
+                  : { usd: usage.costUsd };
+          const times = [
+            tv.task.createdAt,
+            ...sessions.flatMap((r) => [r.queuedAt, r.startedAt, r.endedAt]),
+            ...views.flatMap((v) => [v.startedAt, v.endedAt]),
+          ].filter((x): x is string => x !== undefined);
+          const updatedAt = times.reduce((a, b) => (b > a ? b : a));
+          return {
+            id: tv.task.id,
+            row: {
+              taskId: tv.task.id,
+              repoId: tv.task.repoId,
+              repo: (({ owner, name }) => `${owner}/${name}`)(repoView(tv.task.repoId)),
+              issueNumber: tv.task.issueNumber,
+              title: tv.task.title,
+              state: tv.task.state,
+              ...(tv.task.paused === undefined ? {} : { paused: tv.task.paused }),
+              group: taskListGroupOf(tv.task),
+              segment: finished ? null : flow.segment,
+              model:
+                flow.worker ??
+                started.at(-1)?.modelName ??
+                (lastSession ? routeInfo(lastSession.routeId).modelName : null),
+              createdAt: tv.task.createdAt,
+              updatedAt,
+              cost,
+              prNumber: [...started].reverse().find((v) => v.prNumber !== undefined)?.prNumber ?? null,
+            },
+          };
+        });
+      const sliced = page(
+        rows.map((r) => ({ id: r.id, at: r.row.updatedAt, row: r.row })),
+        (r) => r.at,
+        query?.cursor,
+        query?.limit ?? 50,
+      );
+      return TaskListResponse.parse({
+        items: sliced.items.map((r) => r.row),
+        counts: { all: matching.length, ...counts },
+        ...(sliced.nextCursor === undefined ? {} : { nextCursor: sliced.nextCursor }),
       });
     },
     async task(taskId) {
