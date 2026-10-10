@@ -1,4 +1,5 @@
 // 开单脚本：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]
+// [--allow-pr-body-acceptance "<理由>"]
 // 缺类别、里程碑，或正文里没有写了字的「## 怎么算做完」就不开（design 第三节第 35 条：以后要做的事得是一张
 // 带怎么算做完和里程碑的 issue）。经 gh 开单时一次带上标签和里程碑（gh 先把名字换成编号再建单，对不上就一张也不建）。
 // 里程碑＝版本（创始人 2026-09-26 拍，替代 P 阶段）：--milestone 认全名、v<N> 简写、旧的 P<N> 简写，或「未排期」——
@@ -7,6 +8,8 @@
 // 再挂里程碑——接活派的是独立单（design 第九节「在哪能做与接活开关」，母单、子单不派），带着当前版本先建、
 // 事后再挂到母单下面的，中间那一下是一张独立单，开关开着就可能被派走。--local 给这张单多贴「本机做」标签
 // （帅位留给本机做的，接活不自动派）：和类别标签在同一次建单里贴上，不事后补——开单那个事件一到，没贴的已经被派走了。
+// 「怎么算做完」里写「PR 正文 / PR 描述 / PR body」就拒开（#1792 / #1764）：冷验收只看 diff 和单子，看不到 PR 正文，
+// 写进去引擎永远验不过、白跑两轮。要硬开带 --allow-pr-body-acceptance "<理由>"，理由追加进那一节末尾。
 // 单子正文就是需求的唯一的家（#654）：整份正文原样进 issue，不再另写一份 specs/<号>-<短名>/需求.md 镜像（两份各改各的，
 // 对账、检查的活全是它引出来的）。正文放不下 GitHub 的上限的：需求一页以内，长的方案另放 specs/<号>-<短名>/方案.md，单上只留链接。
 // 挂版本的母单、单独的单开好就排进那个版本里程碑说明的先后（<!-- fleet:order --> 之间，#807）：每天的 GitHub 对账查「挂在版本里
@@ -16,8 +19,9 @@
 // gh 出错原样报出来，退出码非 0。
 // 帅位座位整张删掉（#531）：开单时替帅位认领那一步（claimLocal）一并删——本机不再在库里认领。
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { doneSection } from './debt.ts';
 import { type MilestoneDetail, toMilestoneDetail } from './github-api.ts';
@@ -68,10 +72,12 @@ export interface IssueNewResult {
 
 export const USAGE =
   '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone v1 --title "一句话" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]' +
+  ' [--allow-pr-body-acceptance "<理由>"]' +
   '（--milestone 认全名、v<N>、旧的 P<N>，或「未排期」；正文要带写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节，' +
   '涉及面一律不写（那是算出来的、不是知道的）；--mother 多贴「母单」标签；' +
   '--parent 开子单：先挂到那张母单下面再挂里程碑；--local 多贴「本机做」：帅位留给本机做，接活不自动派；' +
-  '挂版本的母单、单独的单开完自动排进版本里程碑说明的先后末尾，--order-after 插在那张后面；子单、未排期不排）';
+  '挂版本的母单、单独的单开完自动排进版本里程碑说明的先后末尾，--order-after 插在那张后面；子单、未排期不排；' +
+  '「怎么算做完」里写「PR 正文 / PR 描述 / PR body」默认拒开（冷验收看不到），要硬开带 --allow-pr-body-acceptance）';
 
 /** --milestone 写这个值：这张单没有版本（未排期）。不去查 GitHub 的里程碑列表，建单也不带 --milestone。 */
 const UNSCHEDULED = '未排期';
@@ -163,6 +169,56 @@ export function sectionText(doc: MdDoc, name: string): string | undefined {
     .trim();
 }
 
+/** 「怎么算做完」里提到 PR 正文的写法（冷验收看不到，#1792 / #1764）。不分大小写。 */
+const PR_BODY_IN_DONE = /PR\s*(?:正文|描述|body)/i;
+
+/**
+ * 「怎么算做完」一节正文里，哪些条目提到了 PR 正文／PR 描述／PR body。
+ * 入参是这一节的原文（不含标题）；按列表项（`-` / `*` / `1.`）或空行分段，返回命中的条目原文（trim 后）。
+ * 别的节（比如「场景」里复述往事）不进这里——调用方只传这一节。
+ */
+export function prBodyAcceptanceItems(doneSectionBody: string): string[] {
+  return splitAcceptanceItems(doneSectionBody).filter((item) => PR_BODY_IN_DONE.test(item));
+}
+
+/** 验收条：列表项各成一条；非列表的连续非空行合成一段；空行切开。 */
+function splitAcceptanceItems(text: string): string[] {
+  const items: string[] = [];
+  let current: string[] = [];
+  const flush = () => {
+    const t = current.join('\n').trim();
+    if (t) items.push(t);
+    current = [];
+  };
+  for (const raw of text.replace(/\r\n?/g, '\n').split('\n')) {
+    if (/^\s*(?:[-*]|\d+[.)])\s+\S/.test(raw)) {
+      flush();
+      current.push(raw.trim());
+    } else if (raw.trim() === '') {
+      flush();
+    } else {
+      current.push(raw.trim());
+    }
+  }
+  flush();
+  return items;
+}
+
+/** 把一行说明追加进「怎么算做完」节末（下一节标题之前）；没有这一节就附在文末。 */
+function appendNoteToDoneSection(body: string, note: string): string {
+  const doc = parseMd('body.md', body);
+  const h = doc.headings.find((x) => norm(x.title).startsWith('怎么算做完'));
+  if (!h) return `${body.replace(/\s*$/, '')}\n\n${note}\n`;
+  const { end } = sectionRange(doc, h);
+  const lines = [...doc.lines];
+  const insert: string[] = [];
+  if (end > 0 && (lines[end - 1] ?? '').trim() !== '') insert.push('');
+  insert.push(note);
+  if (end < lines.length && (lines[end] ?? '').trim() !== '') insert.push('');
+  lines.splice(end, 0, ...insert);
+  return lines.join('\n');
+}
+
 export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Promise<IssueNewResult> {
   const o = parse(argv);
   const bodyPath = isAbsolute(o.bodyFile) ? o.bodyFile : resolve(deps.cwd, o.bodyFile);
@@ -180,6 +236,24 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     throw new Error(
       `正文里${done === 'missing' ? '没有「## 怎么算做完」一节' : '「怎么算做完」一节是空的'}，单没开：以后要做的事得写清怎么算做完（测试名、脚本、真机上看到什么）。`,
     );
+  }
+  const doneText = sectionText(doc, '怎么算做完') ?? '';
+  const prBodyHits = prBodyAcceptanceItems(doneText);
+  let createBodyPath = bodyPath;
+  if (prBodyHits.length > 0) {
+    if (o.allowPrBodyAcceptance === undefined) {
+      throw new Error(
+        `「怎么算做完」里有条目提到 PR 正文（冷验收只看 diff 和单子，看不到 PR 正文，按没做到算）：\n` +
+          `${prBodyHits.join('\n')}\n` +
+          `改成 diff 里看得见的写法（注释、文档或测试名），或带 --allow-pr-body-acceptance "<理由>"。单没开。`,
+      );
+    }
+    body = appendNoteToDoneSection(
+      body,
+      `（开单时带了 --allow-pr-body-acceptance：${o.allowPrBodyAcceptance}）`,
+    );
+    createBodyPath = join(tmpdir(), `fleet-issue-new-body-${process.pid}-${Date.now()}.md`);
+    writeFileSync(createBodyPath, body, 'utf8');
   }
   if (body.length > BODY_LIMIT) {
     throw new Error(
@@ -205,7 +279,7 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     '--title',
     o.title,
     '--body-file',
-    bodyPath,
+    createBodyPath,
     '--label',
     o.kind,
     ...(o.mother ? ['--label', MOTHER_LABEL] : []),
@@ -251,6 +325,11 @@ interface Options {
   local: boolean;
   /** 排进版本先后时插在这张后面；没给排末尾。 */
   orderAfter: number | undefined;
+  /**
+   * 「怎么算做完」里写了 PR 正文仍要开单时的理由（#1792）。
+   * 没给且命中就拒开；给了就照开并把这句话追加进那一节末尾。
+   */
+  allowPrBodyAcceptance: string | undefined;
 }
 
 function parse(argv: readonly string[]): Options {
@@ -268,6 +347,7 @@ function parse(argv: readonly string[]): Options {
         parent: { type: 'string' },
         local: { type: 'boolean' },
         'order-after': { type: 'string' },
+        'allow-pr-body-acceptance': { type: 'string' },
       },
       strict: true,
       allowPositionals: false,
@@ -306,7 +386,22 @@ function parse(argv: readonly string[]): Options {
   if (orderAfter !== undefined && milestone === UNSCHEDULED) {
     throw new Error(`--order-after 和 --milestone ${UNSCHEDULED} 不能一起用：未排期的单没有先后。${USAGE}`);
   }
-  return { kind, milestone, title, bodyFile, mother, parent, local: values.local === true, orderAfter };
+  const allowRaw = values['allow-pr-body-acceptance'];
+  const allowPrBodyAcceptance = allowRaw === undefined ? undefined : str(allowRaw);
+  if (allowRaw !== undefined && !allowPrBodyAcceptance) {
+    throw new Error(`--allow-pr-body-acceptance 要写理由（非空），单没开。${USAGE}`);
+  }
+  return {
+    kind,
+    milestone,
+    title,
+    bodyFile,
+    mother,
+    parent,
+    local: values.local === true,
+    orderAfter,
+    allowPrBodyAcceptance,
+  };
 }
 
 /** 挂子单之前先看母单：开着的 issue、贴了「母单」标签（design 第七节：有子单的必须带）。不对就不开单。 */
