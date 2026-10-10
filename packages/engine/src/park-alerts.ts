@@ -9,5 +9,8 @@ export function isTaskParkAlertKey(dedupeKey: string): boolean {
 /** 撤掉时正文「已撤：」后面这一句。 */
 export const TASK_DONE_PARK_WHY = '任务已经做完了，这条挂起不再成立';
 
-/** 收尾写快照当时撤的。对账补撤仍记 engine:hourly-reconcile。 */
+/** 任务被叫停时撤的：只撤这一代报的挂起，重做出来的别的代不动。 */
+export const TASK_STOPPED_PARK_WHY = '任务已经叫停了，这条挂起不再成立';
+
+/** 收尾或叫停时写快照当时撤的，处理人都是它。对账补撤仍记 engine:hourly-reconcile。 */
 export const TASK_DONE_PARK_ACTOR = 'engine:task-workflow';

@@ -51,7 +51,12 @@ import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
 import { DRAIN_ROUTE_RETRY_SECONDS, type EngineDrain, stoppingNote } from '../drain.ts';
 import { type EngineMasterGate, MASTER_ROUTE_RETRY_SECONDS, masterOffNote } from '../engine-master.ts';
 import { routeBreaker } from '../failure/breaker.ts';
-import { isTaskParkAlertKey, TASK_DONE_PARK_ACTOR, TASK_DONE_PARK_WHY } from '../park-alerts.ts';
+import {
+  isTaskParkAlertKey,
+  TASK_DONE_PARK_ACTOR,
+  TASK_DONE_PARK_WHY,
+  TASK_STOPPED_PARK_WHY,
+} from '../park-alerts.ts';
 import { type EnginePorts, type PickRouteResult, PortError, type RouteChoice } from '../ports.ts';
 import {
   type AllOpenCheck,
@@ -318,6 +323,21 @@ async function resolveDoneTaskParkAlerts(
       dedupeKey,
       by: TASK_DONE_PARK_ACTOR,
       why: TASK_DONE_PARK_WHY,
+    });
+  }
+}
+
+/**
+ * 任务被叫停：只撤这一代（ctx.workflowId）报的 task:…:park: 提醒。别的代（重做出来的 :r2）还开着，不动。
+ * 叫停当场就撤，不等每小时对账的提醒清扫（#1643）；没有这一代的编号（活动测试不经 Temporal）就什么都不撤。
+ */
+async function resolveStoppedTaskParkAlerts(db: Db, workflowId: string | undefined): Promise<void> {
+  if (!workflowId?.startsWith('task:')) return;
+  for (const row of await openAlertsByPrefix(db, `${workflowId}:park:`)) {
+    await resolveAlertWithReason(db, {
+      dedupeKey: row.dedupeKey,
+      by: TASK_DONE_PARK_ACTOR,
+      why: TASK_STOPPED_PARK_WHY,
     });
   }
 }
@@ -911,8 +931,9 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           retryable: false,
         });
       }
-      // 做完才撤。叫停、仍挂着（stalled / phase parked）留着：条件还在。撤失败照抛，活动重试；快照已经写下。
+      // 做完撤这张单所有的挂起提醒；叫停只撤这一代报的（别的代还开着）。撤失败照抛，活动重试；快照已经写下。
       if (input.state === 'done') await resolveDoneTaskParkAlerts(db, input.taskId, ctx.workflowId);
+      else if (input.state === 'stopped') await resolveStoppedTaskParkAlerts(db, ctx.workflowId);
     },
   };
 }
