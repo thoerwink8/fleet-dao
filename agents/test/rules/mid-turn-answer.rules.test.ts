@@ -32,12 +32,12 @@ describe('规矩：引导没进来就等下一轮补上，说过的不重说（�
 
   it('紧跟在「我问了问题，答案放在这一轮的最后一条」那条后面', () => {
     expect(RULES).toMatch(
-      /- 我问了问题，答案放在这一轮的最后一条[^\n]*\n- 我中途的引导只在两次工具调用之间送到[^\n]*这一轮没进到你这里的/,
+      /- 我问了问题，答案放在这一轮的最后一条[^\n]*\n- 我中途的引导一送到[^\n]*这一轮没进到你这里的/,
     );
   });
 
   it('【故意造出的失败】整条删掉：三样都查得出缺', () => {
-    const cut = RULES.replace(/- 我中途的引导只在两次工具调用之间送到[^\n]*\n/, '');
+    const cut = RULES.replace(/- 我中途的引导一送到[^\n]*\n/, '');
     expect(cut).not.toBe(RULES);
     expect(missing(MID_TURN_RULES, cut)).toEqual(Object.keys(MID_TURN_RULES));
   });

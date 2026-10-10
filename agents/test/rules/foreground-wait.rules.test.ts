@@ -23,7 +23,7 @@ describe('前台等待上限', () => {
     expect(lib.MAX_FOREGROUND_WAIT_SECONDS).toBe(60);
   });
 
-  // 决定 0078：通用段「派 Agent 子代理」那条和 commander 技能写的等待上限，跟钩子卡的是同一个数
+  // 决定 0078：通用段「Agent 子代理」那条和 commander 技能写的等待上限，跟钩子卡的是同一个数（通用段只写这一处，steer-and-subagents 钉着）
   it('通用段和 commander 技能写的上限就是钩子卡的这个数', () => {
     const read = (rel: string) =>
       readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
