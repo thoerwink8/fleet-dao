@@ -1438,6 +1438,35 @@ describe('巡检单不占每小时名额，并排在所有候选最前', () => {
     expect(h.logs.some((l) => l.text.includes('hourly_cap×1'))).toBe(true);
   });
 
+  it('在干活已满时巡检单仍起，普通单仍 at_capacity（#1795：#1364 同理，别把通的链报成断在收单）', async () => {
+    const rows = [
+      { repo: REPO, issues: [issue({ number: 1, body: FAST })] },
+      { repo: CANARY_REPO, issues: [canaryTicket()] },
+    ];
+    const h = harness(
+      {
+        canaryRepo: CANARY_SLUG,
+        async repos() {
+          return rows.map((r) => r.repo);
+        },
+        async openIssues(repo) {
+          const found = rows.find((r) => r.repo.id === repo.id);
+          const milestone = repo.id === CANARY_REPO.id ? V_CANARY : V1;
+          return { issues: found?.issues ?? [], openMilestones: [milestone, V2] };
+        },
+        async runningTasks() {
+          return { working: MAX_RUNNING_TASKS, stalled: 0 };
+        },
+      },
+      { issues: [] },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([70]);
+    const text = h.logs.map((l) => l.text).join(' | ');
+    expect(text).toContain('at_capacity×1');
+    expect(text).toContain('开头在干活 6 条');
+  });
+
   it('巡检仓的里程碑没有先后标记时不打警告；别的仓缺仍打', async () => {
     const h = across([
       { repo: REPO, issues: [issue({ number: 1, body: FAST })] },

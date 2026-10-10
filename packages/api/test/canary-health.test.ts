@@ -163,6 +163,41 @@ describe('canary 项怎么判', () => {
     });
   });
 
+  it('#1795：旧结论未刷新——断在收单且无「这一轮在跑」时文案钉死有结论时刻；新一轮通过后整体回绿', () => {
+    const brokenAt = new Date('2026-10-10T12:46:00.000Z'); // 北京 20:46
+    const supervision = new Date('2026-10-10T17:48:00.000Z'); // 北京 01:48（次日）
+    const broken = row({
+      verdict: 'broken',
+      stage: 'intake',
+      startedAt: new Date('2026-10-10T12:26:00.000Z'),
+      endedAt: brokenAt,
+      why: '断在「收单」（这一步走了 20 分 0 秒）：库里还没有这张单的任务行',
+    });
+    const stuck = canaryHealth({ finished: broken, running: null }, supervision);
+    expect(stuck).toEqual({
+      ok: false,
+      code: 'canary_broken',
+      message: '最近一轮（10-10 20:46 有结论）断在「收单」',
+      detail: broken.why,
+    });
+    expect(stuck.ok === false && stuck.message.includes('这一轮在跑')).toBe(false);
+
+    const passedAt = new Date('2026-10-10T18:40:00.000Z'); // 北京 02:40 新一轮通过
+    const passed = row({
+      id: 9,
+      verdict: 'pass',
+      stage: 'board',
+      startedAt: new Date('2026-10-10T18:26:00.000Z'),
+      endedAt: passedAt,
+      why: null,
+    });
+    const after = canaryHealth({ finished: passed, running: null }, new Date('2026-10-10T18:50:00.000Z'));
+    expect(after).toEqual({
+      ok: true,
+      note: '最近一轮 10-11 02:40 通过（用时 14 分钟）',
+    });
+  });
+
   it('总开关关着（#1141）：跳过、不拿断了的旧结论报红，也没跑过什么都不说「最近一轮」；在跑的一轮也没到期限也不说「在跑」', () => {
     const broken = row({ verdict: 'broken', stage: 'dispatch', why: '断在「派活」：挂起等人' });
     expect(canaryHealth({ finished: broken, running: null }, NOW, masterOff('never_set'))).toEqual({

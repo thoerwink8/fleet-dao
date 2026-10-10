@@ -24,7 +24,7 @@ source "$HERE/../lib/human-tier.sh"
 source "$HERE/../lib/session-user.sh"
 
 DEPLOY_DIR=$(cd -- "$HERE/.." && pwd)
-for f in france/sshd-hardening.conf france/fail2ban-sshd.jail; do
+for f in france/sshd-hardening.conf france/fail2ban-sshd.jail france/commander-ssh.config; do
   if [[ ! -s "$DEPLOY_DIR/$f" ]]; then
     echo "sshd-hardening：没跑成：仓里没有 deploy/$f"
     exit 2
@@ -165,6 +165,15 @@ check "没碰端口、认证方式、没写 9.6 认不得的 PerSourcePenalties"
 has "注释里写明了没写 PerSourcePenalties 的原因" "$(<"$SSHD_CONF")" 'PerSourcePenalties.*9\.8'
 f2b=$(grep -vE '^[[:space:]]*(#|$)' "$F2B_CONF" | tr -d '\r')
 check "fail2ban jail：只有 [sshd] 一段、六项设置（含 ignoreip）" "$f2b" $'[sshd]\nenabled = true\nmaxretry = 3\nfindtime = 10m\nbantime = 1h\nbantime.increment = true\nignoreip = 127.0.0.1/8 ::1 10.99.0.0/24'
+
+echo "== 1b. 指挥官 SSH 片段（#1775/#1795）：IdentitiesOnly + 会话用户"
+CMD_SSH=$DEPLOY_DIR/france/commander-ssh.config
+has "直连 Host 用会话用户" "$(<"$CMD_SSH")" 'Host fleet-fr-carpool'
+has "User 是 fleet-agent-carpool" "$(<"$CMD_SSH")" 'User fleet-agent-carpool'
+has "IdentitiesOnly yes（MaxAuthTries 3）" "$(<"$CMD_SSH")" 'IdentitiesOnly yes'
+has "指定 IdentityFile" "$(<"$CMD_SSH")" 'IdentityFile ~/.ssh/fleet_login'
+has "经香港跳板的 Host" "$(<"$CMD_SSH")" 'Host fleet-fr-carpool-via-hk'
+has "跳板 ProxyJump myserver" "$(<"$CMD_SSH")" 'ProxyJump myserver'
 
 echo "== 2. sshd：首次装 → 放文件、sshd -t、reload；再跑一遍什么都不动"
 fresh

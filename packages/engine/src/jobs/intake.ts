@@ -19,7 +19,8 @@
 // 巡检仓里 canary 开的那张（标题认法 isCanaryIssueTitle，不另贴标签）先于所有仓的普通单，不看上面这几档。
 // 起之前才现读这张单（开着、不是 PR、母单子单和「本机做」再核一遍）：只对真有空位的那几张读，不为每张开着的单读一次。
 // 空位 = 每轮最多 5 条、同时在干活最多 6 条（停下/追问/暂停不占，#1776/#1795）、每小时最多起 20 条、熔断没停拉（最近 6 条结束的任务里失败过半就停，冷却 1 小时后放 1 条试探）。
-// 巡检单不计入每小时那 20 条、也不占每小时名额（#1364：限速满了把巡检单挤掉，巡检会把通的链报成断）；本轮条数、在干活上限、熔断和其余准入闸照旧。
+// 巡检单不计入每小时那 20 条、也不占每小时名额，也不受「在干活上限」挡（#1364/#1795：限速或名额满了把巡检单挤掉，
+// 巡检会把通的链报成断在「收单」）；本轮条数、熔断和其余准入闸照旧。
 // 母单子单、本机做、版本这几道的判法是 @fleet-dao/core 的 dispatch.ts 的纯函数（familyGate、localGate），这里只排顺序。
 //
 // 改这里之前必须知道：
@@ -659,7 +660,7 @@ async function admitIssue(
 /**
  * 空位：每轮条数、同时在跑、每小时、熔断，哪一个先用完就按哪一个的原因不起。回 null＝还有位子。
  * 先看便宜的、说得最清楚的：本轮上限 → 在跑上限 → 每小时 → 熔断。
- * hourlyExempt：巡检单不看每小时名额（本轮、在跑、熔断照旧）。
+ * hourlyExempt / capacityExempt：巡检单不看每小时名额、也不看在干活上限（本轮、熔断照旧；#1364/#1795）。
  */
 /**
  * 不占拉单并发名额（#1776/#1795）：任务行是停下等人、追问等人，或被人暂停（phase=paused，state 仍是 running）。
@@ -670,14 +671,18 @@ export function idleForIntakeCapacity(row: { state: string; phase?: string | nul
   return row.phase === 'paused';
 }
 
-function noRoom(deps: IntakeDeps, t: Tally, opts?: { hourlyExempt?: boolean }): IntakeSkip | null {
+function noRoom(
+  deps: IntakeDeps,
+  t: Tally,
+  opts?: { hourlyExempt?: boolean; capacityExempt?: boolean },
+): IntakeSkip | null {
   const maxStarts = deps.limits?.maxStartsPerRound ?? MAX_STARTS_PER_ROUND;
   const maxRunning = deps.limits?.maxRunningTasks ?? MAX_RUNNING_TASKS;
   const maxHourly = deps.limits?.maxStartsPerHour;
   if (t.started >= maxStarts) {
     return { reason: 'round_cap', why: `这一轮已经起了 ${maxStarts} 条，其余下一轮` };
   }
-  if (t.running >= maxRunning) {
+  if (!opts?.capacityExempt && t.running >= maxRunning) {
     return {
       reason: 'at_capacity',
       why: `在干活 ${t.running} 条、不占名额 ${t.stalled} 条（停下/追问/暂停），在干活的已到上限 ${maxRunning}，等有空的`,
@@ -700,7 +705,7 @@ function noRoom(deps: IntakeDeps, t: Tally, opts?: { hourlyExempt?: boolean }): 
 async function startCandidate(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, t: Tally): Promise<boolean> {
   const slug = `${repo.owner}/${repo.name}`;
   const { issue } = c;
-  const full = noRoom(deps, t, { hourlyExempt: c.canary });
+  const full = noRoom(deps, t, { hourlyExempt: c.canary, capacityExempt: c.canary });
   if (full) {
     skip(t, slug, issue.number, full);
     return false;
