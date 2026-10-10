@@ -140,7 +140,12 @@ export function checkPortsBlock(repo: RepoView, docPath: string): OpsTableProble
   try {
     expected = renderPortsBlock(repo);
   } catch (e) {
-    return [{ notQueried: true, text: `没查成：${e instanceof Error ? e.message : String(e)}` }];
+    return [
+      {
+        notQueried: true,
+        text: `没查成：${e instanceof Error ? e.message : String(e)}`,
+      },
+    ];
   }
   let span: BlockSpan;
   try {
@@ -391,7 +396,12 @@ export function checkUsersBlock(repo: RepoView, docPath: string): OpsTableProble
   try {
     expected = renderUsersBlock(repo);
   } catch (e) {
-    return [{ notQueried: true, text: `没查成：${e instanceof Error ? e.message : String(e)}` }];
+    return [
+      {
+        notQueried: true,
+        text: `没查成：${e instanceof Error ? e.message : String(e)}`,
+      },
+    ];
   }
   let span: BlockSpan;
   try {
@@ -637,7 +647,13 @@ export function readDirEntries(repo: RepoView): DirEntry[] {
       }
       if (words.length < 3)
         throw new Error(`${where} 的 ensure_dir 不足三个参数（路径 属主:组 权限）：${line.trim()}`);
-      const ctx: ExpandCtx = { script, line: i + 1, reader, inPath: true, varies: false };
+      const ctx: ExpandCtx = {
+        script,
+        line: i + 1,
+        reader,
+        inPath: true,
+        varies: false,
+      };
       const path = expandWord(words[0] ?? [], ctx);
       if (ctx.varies) continue;
       ctx.inPath = false;
@@ -691,7 +707,13 @@ function parseDirRows(text: string): DirRow[] {
   const rows: DirRow[] = [];
   for (const line of text.split('\n')) {
     const m = DIR_ROW.exec(line.trimEnd());
-    if (m) rows.push({ path: m[1] ?? '', owner: m[2] ?? '', mode: m[3] ?? '', script: m[4] ?? '' });
+    if (m)
+      rows.push({
+        path: m[1] ?? '',
+        owner: m[2] ?? '',
+        mode: m[3] ?? '',
+        script: m[4] ?? '',
+      });
   }
   return rows;
 }
@@ -760,7 +782,12 @@ export function checkDirsBlock(repo: RepoView, docPath: string): OpsTableProblem
   try {
     expected = renderDirsBlock(repo);
   } catch (e) {
-    return [{ notQueried: true, text: `没查成：${e instanceof Error ? e.message : String(e)}` }];
+    return [
+      {
+        notQueried: true,
+        text: `没查成：${e instanceof Error ? e.message : String(e)}`,
+      },
+    ];
   }
   let span: BlockSpan;
   try {
@@ -870,7 +897,11 @@ function parseUnitRows(text: string): Map<string, UnitEntry> {
   for (const line of text.split('\n')) {
     const m = UNIT_ROW.exec(line.trimEnd());
     if (!m) continue;
-    const entry = { file: m[1] ?? '', machine: m[2] ?? '', description: m[3] ?? '' };
+    const entry = {
+      file: m[1] ?? '',
+      machine: m[2] ?? '',
+      description: m[3] ?? '',
+    };
     rows.set(`${entry.machine}\0${entry.file}`, entry);
   }
   return rows;
@@ -915,7 +946,12 @@ export function checkUnitsBlock(repo: RepoView, docPath: string): OpsTableProble
   try {
     expected = renderUnitsBlock(repo);
   } catch (e) {
-    return [{ notQueried: true, text: `没查成：${e instanceof Error ? e.message : String(e)}` }];
+    return [
+      {
+        notQueried: true,
+        text: `没查成：${e instanceof Error ? e.message : String(e)}`,
+      },
+    ];
   }
   let span: BlockSpan;
   try {
@@ -932,6 +968,151 @@ export function checkUnitsBlock(repo: RepoView, docPath: string): OpsTableProble
     {
       notQueried: false,
       text: '单元区块对不上：单元行都对，但区块和生成的内容不是逐字一致（排序、空白或表头格式被改过）。',
+    },
+  ];
+}
+
+// 密钥名表（#140 第九片）：部署配置里 `files.<文件名>.<键>` 的值是对象且带 private 字段的键才是私有值
+// （域名、账号、密钥）。表里只出文件名和键名，不出 private 指纹、不出任何 value。
+// 本片不进文档、不接命令行、不接 CI。
+
+const SECRETS_CONFIG = 'deploy/france/desired-config.json';
+
+/** 表里一行：| 文件 | 键名 |。从文档区块里回读数据行用。 */
+const SECRET_ROW = /^\| ([^ |]+) \| ([^ |]+) \|$/;
+
+/** 文件名、键名进表前的写法限制：再宽的字符会让表格行读不回来。 */
+const SECRET_FILE_NAME = /^[A-Za-z0-9_.-]+$/;
+const SECRET_KEY_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+const SECRETS_NAME = 'secrets';
+/** 密钥名区块名字的对外写法（和端口、用户、目录、单元的同一路，不各写各的字符串）。 */
+export const BLOCK_NAME_SECRETS = SECRETS_NAME;
+
+export interface SecretEntry {
+  /** 环境文件名，如 api.env。 */
+  file: string;
+  /** 键名，如 FLEET_PUBLIC_URL。 */
+  key: string;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** 读部署配置，返回私有键的（文件名、键名），按文件名、再按键名排。只返回名字，不碰值和指纹。
+ *  读不到文件、JSON 坏了、`files` 缺失或不是对象、某个文件的内容不是对象、名字写法进不了表、
+ *  一个密钥名都没有，抛带文件名的错，不返回空表。 */
+export function readSecretEntries(repo: RepoView): SecretEntry[] {
+  const text = repo.read(SECRETS_CONFIG);
+  if (text === undefined) throw new Error(`读不到 ${SECRETS_CONFIG}`);
+  let config: unknown;
+  try {
+    config = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`${SECRETS_CONFIG} 不是合法的 JSON：${e instanceof Error ? e.message : String(e)}`);
+  }
+  const files = isPlainObject(config) ? config.files : undefined;
+  if (!isPlainObject(files)) throw new Error(`${SECRETS_CONFIG} 里没有 files 对象`);
+  const entries: SecretEntry[] = [];
+  for (const [file, keys] of Object.entries(files)) {
+    if (!isPlainObject(keys)) throw new Error(`${SECRETS_CONFIG} 的 files.${file} 不是对象`);
+    for (const [key, spec] of Object.entries(keys)) {
+      if (!isPlainObject(spec) || !('private' in spec)) continue;
+      if (!SECRET_FILE_NAME.test(file) || !SECRET_KEY_NAME.test(key)) {
+        throw new Error(`${SECRETS_CONFIG} 的 files.${file}.${key}：文件名或键名的写法进不了表格`);
+      }
+      entries.push({ file, key });
+    }
+  }
+  if (entries.length === 0) throw new Error(`${SECRETS_CONFIG} 里一个密钥名（带 private 的键）都没读到`);
+  return entries.sort((a, b) => compareText(a.file, b.file) || compareText(a.key, b.key));
+}
+
+/** 区块标记之间那一段：前后各一个空行、中间一张两列表（文件、键名），行按文件名、再按键名排。 */
+export function secretsTableInner(repo: RepoView): string {
+  const lines = ['| 文件 | 键名 |', '|---|---|'];
+  for (const e of readSecretEntries(repo)) lines.push(`| ${e.file} | ${e.key} |`);
+  return `\n\n${lines.join('\n')}\n\n`;
+}
+
+/** 整个区块（含两个标记行）：开头 `<!-- fleet:secrets:start -->`，一张两列表（文件、键名），
+ *  结尾 `<!-- fleet:secrets:end -->`。只有名字，没有值和指纹。同一个仓两次调用逐字相同。 */
+export function renderSecretsBlock(repo: RepoView): string {
+  return `${blockMarker(SECRETS_NAME, 'start')}${secretsTableInner(repo)}${blockMarker(SECRETS_NAME, 'end')}`;
+}
+
+function parseSecretRows(text: string): Map<string, SecretEntry> {
+  const rows = new Map<string, SecretEntry>();
+  for (const line of text.split('\n')) {
+    const m = SECRET_ROW.exec(line.trimEnd());
+    if (!m || m[1] === '文件') continue;
+    const entry = { file: m[1] ?? '', key: m[2] ?? '' };
+    rows.set(`${entry.file}\0${entry.key}`, entry);
+  }
+  return rows;
+}
+
+function secretRowProblems(actual: string, expected: string): OpsTableProblem[] {
+  const want = parseSecretRows(expected);
+  const got = parseSecretRows(actual);
+  const problems: OpsTableProblem[] = [];
+  for (const [id, w] of want) {
+    if (!got.has(id)) {
+      problems.push({
+        notQueried: false,
+        text: `密钥名 ${w.file} 的 ${w.key} 少了：部署配置里是私有键，文档区块里没有。`,
+      });
+    }
+  }
+  for (const [id, g] of got) {
+    if (!want.has(id)) {
+      problems.push({
+        notQueried: false,
+        text: `密钥名 ${g.file} 的 ${g.key} 多了：文档区块里有，部署配置里没有这个私有键。`,
+      });
+    }
+  }
+  return problems;
+}
+
+/** 读 docPath，取密钥名区块，和 renderSecretsBlock 逐字比。一致返回空数组；
+ *  不一致返回点出哪个键名多了、少了的问题；
+ *  读不到文档、读不到或读不懂部署配置，返回「没查成」问题，不当成通过。 */
+export function checkSecretsBlock(repo: RepoView, docPath: string): OpsTableProblem[] {
+  const doc = repo.read(docPath);
+  if (doc === undefined) return [{ notQueried: true, text: `没查成：读不到 ${docPath}` }];
+  let expected: string;
+  try {
+    expected = renderSecretsBlock(repo);
+  } catch (e) {
+    return [
+      {
+        notQueried: true,
+        text: `没查成：${e instanceof Error ? e.message : String(e)}`,
+      },
+    ];
+  }
+  let span: BlockSpan;
+  try {
+    span = findBlock(doc, SECRETS_NAME);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return [
+      {
+        notQueried: false,
+        text: `密钥名区块对不上（${docPath}）：${reason}。`,
+      },
+    ];
+  }
+  const actual = doc.slice(span.from, span.to);
+  if (actual === expected) return [];
+  const problems = secretRowProblems(actual, expected);
+  if (problems.length > 0) return problems;
+  return [
+    {
+      notQueried: false,
+      text: '密钥名区块对不上：键名行都对，但区块和生成的内容不是逐字一致（排序、空白或表头格式被改过）。',
     },
   ];
 }
