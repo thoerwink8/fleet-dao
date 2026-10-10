@@ -19,7 +19,7 @@ import {
   taskRouteWakeSignal,
   taskStatusQuery,
 } from '../src/task-contract.ts';
-import { freshRepo, pollQuery, useEnv, withWorker } from './helpers.ts';
+import { freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.ts';
 import { scripted } from './task-script.ts';
 
 const currentEnv = useEnv();
@@ -206,16 +206,31 @@ describe('叫醒等路由的活 · 任务工作流', { timeout: 60_000 }, () => 
       env,
       world,
       async (q) => {
-        const a = await start(q, input());
-        const b = await start(q, input());
+        const ia = input();
+        const ib = input();
+        const a = await start(q, ia);
+        const b = await start(q, ib);
         await waitingSlot(a);
         await waitingSlot(b);
         listed = [a.workflowId, b.workflowId];
         const t0 = await env.currentTimeMs();
         const result = await waker.wake('切号完成');
         expect(result).toMatchObject({ total: 2, sent: 2, gone: 0, failed: [] });
-        await world.until(() => world.count('pickRoute') >= 4, '两张单都又选了一次');
+        // 按单等重选：全局 pickRoute>=4 可能被一张单的多次选路凑满，另一张还停在 pauseForRoute 等 taskRouteWake
+        const picks = (taskId: string) =>
+          world.callsOf('pickRoute').filter((c) => c.input.taskId === taskId).length;
+        await world.until(() => picks(ia.taskId) >= 2 && picks(ib.taskId) >= 2, '两张单都又选了一次');
         expect((await env.currentTimeMs()) - t0).toBeLessThan((CAP_SECONDS * 1000) / 2);
+        // 不用 result() 等收场：可跳时间的测试服务端在等结果时会 unlockTimeSkipping（全局），
+        // 两张单并发时可能把还在跑的活动直接跳到 START_TO_CLOSE（CI run 38043069632 / PR #1763
+        // test (6/8)：WorkflowFailedError timeoutType START_TO_CLOSE，并伴随 Task not found when completing）。
+        // 同 #1242：先等库里写进 done（查询不解锁跳时间），再取 result。
+        await waitUntil(
+          () =>
+            world.states.filter((x) => x.taskId === ia.taskId).at(-1)?.state === 'done' &&
+            world.states.filter((x) => x.taskId === ib.taskId).at(-1)?.state === 'done',
+          '两张单都写进 done',
+        );
         const [ra, rb] = (await Promise.all([a.result(), b.result()])) as TaskRun[];
         expect([ra?.outcome, rb?.outcome]).toEqual(['merged', 'merged']);
       },
