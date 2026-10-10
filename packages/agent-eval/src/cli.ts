@@ -1,4 +1,4 @@
-// 命令行：pnpm agent-eval [--case <名>] [--scenario <名>] [--model haiku|sonnet|opus|all] [--dry-run] [--out <目录>]
+// 命令行：pnpm agent-eval [--case <名>] [--scenario <名>] [--model haiku|sonnet|opus|all] [--repeat N] [--dry-run] [--out <目录>]
 // 退出码：全跑成了是 0（不管过不过）；有没跑成的是 2；参数不对、没选出题是 1。一次只跑一个会话，不并行。
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -20,13 +20,14 @@ import type { EvalCase } from './types.ts';
 import { REPO_ROOT, SKIPPED_SCENARIOS } from './types.ts';
 
 export const USAGE =
-  '用法：pnpm agent-eval [--case <名>] [--scenario <名>] [--model haiku|sonnet|opus|all] [--dry-run] [--out <目录>]';
+  '用法：pnpm agent-eval [--case <名>] [--scenario <名>] [--model haiku|sonnet|opus|all] [--repeat N] [--dry-run] [--out <目录>]';
 
 export interface CliArgs {
   caseName: string | undefined;
   scenario: string | undefined;
   models: ModelKey[];
   dryRun: boolean;
+  repeat: number;
   out: string | undefined;
   help: boolean;
 }
@@ -44,6 +45,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     scenario: undefined,
     models: [...MODEL_KEYS],
     dryRun: false,
+    repeat: 1,
     out: undefined,
     help: false,
   };
@@ -57,7 +59,11 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     if (flag === '--case') a.caseName = value();
     else if (flag === '--scenario') a.scenario = value();
     else if (flag === '--out') a.out = value();
-    else if (flag === '--dry-run') a.dryRun = true;
+    else if (flag === '--repeat') {
+      const v = value();
+      if (!/^[1-9][0-9]*$/.test(v)) throw new UsageError(`--repeat 要正整数：${v}`);
+      a.repeat = Number(v);
+    } else if (flag === '--dry-run') a.dryRun = true;
     else if (flag === '--help' || flag === '-h') a.help = true;
     else if (flag === '--model') {
       const v = value();
@@ -84,10 +90,11 @@ export function selectCases(all: readonly EvalCase[], a: Pick<CliArgs, 'caseName
 export function sessionCount(
   cases: readonly EvalCase[],
   models: readonly ModelKey[],
+  repeat = 1,
 ): { run: number; judge: number } {
   return {
-    run: cases.length * models.length,
-    judge: cases.filter((c) => c.usesJudge).length * models.length,
+    run: cases.length * models.length * repeat,
+    judge: cases.filter((c) => c.usesJudge).length * models.length * repeat,
   };
 }
 
@@ -96,6 +103,7 @@ export function dryRunLines(
   models: readonly ModelKey[],
   defs: ReadonlyMap<string, AgentDefinition>,
   command: string,
+  repeat = 1,
 ): string[] {
   const lines = ['子代理能力探查（--dry-run：只列，不起会话）', `命令：${command}`];
   const total = cases.length * models.length;
@@ -118,9 +126,9 @@ export function dryRunLines(
       lines.push(`  stdin：提示词 ${c.prompt.length} 字；限时 10 分钟`);
     }
   }
-  const s = sessionCount(cases, models);
+  const s = sessionCount(cases, models, repeat);
   lines.push(
-    `合计：${cases.length} 道题 × ${models.length} 个模型 = ${s.run} 次被测会话，加 ${s.judge} 次裁判会话，共 ${s.run + s.judge} 次，一次一个、不并行`,
+    `合计：${cases.length} 道题 × ${models.length} 个模型${repeat > 1 ? ` × ${repeat} 遍` : ''} = ${s.run} 次被测会话，加 ${s.judge} 次裁判会话，共 ${s.run + s.judge} 次，一次一个、不并行`,
   );
   for (const k of SKIPPED_SCENARIOS) lines.push(`不做：${k.scenario}（${k.agent}）：${k.reason}`);
   return lines;
@@ -175,7 +183,7 @@ export async function main(argv: readonly string[], deps: CliDeps = {}): Promise
   }
   const command = claudeCommand();
   if (args.dryRun) {
-    for (const l of dryRunLines(cases, args.models, defs, command)) log(l);
+    for (const l of dryRunLines(cases, args.models, defs, command, args.repeat)) log(l);
     return 0;
   }
 
@@ -194,16 +202,26 @@ export async function main(argv: readonly string[], deps: CliDeps = {}): Promise
       renderReport(results, { startedAt: startedAt.toISOString(), models: args.models }),
     );
   };
-  const total = cases.length * args.models.length;
+  const total = cases.length * args.models.length * args.repeat;
   for (const c of cases) {
     for (const m of args.models) {
-      log(`[${results.length + 1}/${total}] ${c.id} · ${MODEL_IDS[m]} …`);
-      const r = await runCase(c, m, { launch: deps.launch ?? realLauncher, defs, command });
-      results.push(r);
-      log(
-        `  ${r.status === 'pass' ? '过' : r.status === 'fail' ? '没过' : r.status === 'model-mismatch' ? '模型对不上' : '没跑成'}：${r.reason.slice(0, 200)}`,
-      );
-      write();
+      for (let attempt = 1; attempt <= args.repeat; attempt++) {
+        log(
+          `[${results.length + 1}/${total}] ${c.id} · ${MODEL_IDS[m]}${args.repeat > 1 ? ` · 第 ${attempt} 遍` : ''} …`,
+        );
+        const r = await runCase(c, m, {
+          launch: deps.launch ?? realLauncher,
+          defs,
+          command,
+          outDir,
+          attempt,
+        });
+        results.push(r);
+        log(
+          `  ${r.status === 'pass' ? '过' : r.status === 'fail' ? '没过' : r.status === 'model-mismatch' ? '模型对不上' : '没跑成'}：${r.reason.slice(0, 200)}`,
+        );
+        write();
+      }
     }
   }
   write();

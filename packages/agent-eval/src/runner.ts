@@ -1,5 +1,7 @@
 // 跑一道题（一个场景 × 一个模型）：备临时目录 → 起无头会话 → 读 stream-json → 判分 → 记一条结果。
 // 起不来、超时、读不到、格式认不出、判分自己判不了：记「没跑成」和原因，不当没过、也不当过。
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { AgentDefinition } from './definitions.ts';
 import type { Launcher } from './launcher.ts';
 import {
@@ -48,6 +50,25 @@ export interface CaseResult {
   observedModel: string | null;
   initModel: string | null;
   assistantModel: string | null;
+  /** 第几遍（从 1 起；--repeat N 每题每模型跑 N 遍）。 */
+  attempt: number;
+  /** 被测会话 stream-json 原样存的文件，相对 --out 目录（用 / 分隔）；没给 outDir 是 null。 */
+  streamFile: string | null;
+  /** 裁判会话的 stream-json 文件（每次打分一个），同上。 */
+  judgeStreamFiles: string[];
+}
+
+/** 题号、模型、遍数拼成 streams/ 下的文件名：题号里的 / 换成 __。 */
+export function streamFileName(caseId: string, model: string, attempt: number, suffix = ''): string {
+  return `${caseId.replace(/[\\/]/g, '__')}__${model}__${attempt}${suffix}.jsonl`;
+}
+
+/** 把一次会话的 stdout 原样落盘；写不了就抛错，不悄悄丢。返回相对 outDir 的路径。 */
+function saveStream(deps: RunDeps, name: string, stdout: string): string | null {
+  if (!deps.outDir) return null;
+  mkdirSync(join(deps.outDir, 'streams'), { recursive: true });
+  writeFileSync(join(deps.outDir, 'streams', name), stdout);
+  return `streams/${name}`;
 }
 
 export interface RunDeps {
@@ -59,6 +80,10 @@ export interface RunDeps {
   now?: () => number;
   /** 测试里换掉备临时目录这一步。 */
   prepare?: (c: EvalCase) => Workspace;
+  /** 结果目录（--out）：给了就把每次会话的 stream-json 原样写到 <outDir>/streams/。 */
+  outDir?: string;
+  /** 第几遍，默认 1。 */
+  attempt?: number;
 }
 
 export function truncateOutput(text: string): { text: string; truncated: boolean } {
@@ -70,7 +95,12 @@ export function truncateOutput(text: string): { text: string; truncated: boolean
 }
 
 /** 一次 LLM 打分：裁判会话没返回可用结果就抛 UngradableError。 */
-async function askJudge(deps: RunDeps, cwd: string, prompt: string): Promise<string> {
+async function askJudge(
+  deps: RunDeps,
+  cwd: string,
+  prompt: string,
+  save: (stdout: string) => void,
+): Promise<string> {
   const r = await deps.launch({
     command: deps.command,
     args: buildJudgeArgs(),
@@ -78,6 +108,7 @@ async function askJudge(deps: RunDeps, cwd: string, prompt: string): Promise<str
     cwd,
     timeoutMs: deps.timeoutMs ?? SESSION_TIMEOUT_MS,
   });
+  save(r.stdout);
   if (r.spawnError) throw new UngradableError(`裁判会话起不来：${r.spawnError}`);
   if (r.timedOut) throw new UngradableError('裁判会话超时');
   try {
@@ -94,6 +125,7 @@ export async function runCase(c: EvalCase, model: ModelKey, deps: RunDeps): Prom
   const now = deps.now ?? Date.now;
   const def = deps.defs.get(c.agent);
   const modelId = MODEL_IDS[model];
+  const attempt = deps.attempt ?? 1;
   const base: CaseResult = {
     caseId: c.id,
     scenario: c.scenario,
@@ -116,6 +148,9 @@ export async function runCase(c: EvalCase, model: ModelKey, deps: RunDeps): Prom
     observedModel: null,
     initModel: null,
     assistantModel: null,
+    attempt,
+    streamFile: null,
+    judgeStreamFiles: [],
   };
   const notRun = (reason: string, extra: Partial<CaseResult> = {}): CaseResult => ({
     ...base,
@@ -140,6 +175,7 @@ export async function runCase(c: EvalCase, model: ModelKey, deps: RunDeps): Prom
       timeoutMs: deps.timeoutMs ?? SESSION_TIMEOUT_MS,
     });
     const durationMs = now() - t0;
+    base.streamFile = saveStream(deps, streamFileName(c.id, model, attempt), r.stdout);
     if (r.spawnError) return notRun(`会话起不来：${r.spawnError}`, { durationMs });
     if (r.timedOut)
       return notRun(`超过 ${(deps.timeoutMs ?? SESSION_TIMEOUT_MS) / 60_000} 分钟限时，被杀掉`, {
@@ -189,7 +225,11 @@ export async function runCase(c: EvalCase, model: ModelKey, deps: RunDeps): Prom
         caseDir: caseDirOf(c),
         judge: (p) => {
           judgeUsed = true;
-          return askJudge(deps, ws.dir, p);
+          return askJudge(deps, ws.dir, p, (stdout) => {
+            const n = base.judgeStreamFiles.length + 1;
+            const f = saveStream(deps, streamFileName(c.id, model, attempt, `__judge${n}`), stdout);
+            if (f) base.judgeStreamFiles.push(f);
+          });
         },
       });
     } catch (e) {
