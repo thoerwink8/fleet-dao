@@ -53,6 +53,8 @@ export async function syncMainlineBeforeImplement(rt: TaskRuntime): Promise<Sync
     }
     const merged = sync.head !== head;
     rt.head = sync.head;
+    // 工作树此时已快进到 sync.head：交付核对的起点跟着换，引擎自己并进来的合并提交不算会话的提交（#1582）。老历史没有这个标记。
+    if (merged && patched('since-follows-sync')) rt.since = sync.head;
     if (rt.status.lastProblem?.startsWith(SYNC_UNREAD)) rt.status.lastProblem = null;
     return merged ? 'merged' : 'current';
   } catch (error) {

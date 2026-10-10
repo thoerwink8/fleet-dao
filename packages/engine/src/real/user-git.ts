@@ -475,6 +475,17 @@ export async function fastForward(
       },
     );
   }
+  return fastForwardToCommit(t, newHead);
+}
+
+/** 提交已经在树里（不用再取 bundle）：能快进就 merge --ff-only 过去；树在它之外还有提交回 diverged。 */
+export async function fastForwardToCommit(
+  t: UserTree,
+  newHead: string,
+): Promise<'fast-forwarded' | 'already' | 'diverged'> {
+  assertSha(newHead, '新头');
+  const current = await headOf(t);
+  if (current === newHead) return 'already';
   if (!(await isAncestor(t, current, newHead))) return 'diverged';
   const dirty = await uncommittedTracked(t);
   if (dirty.length > 0) {

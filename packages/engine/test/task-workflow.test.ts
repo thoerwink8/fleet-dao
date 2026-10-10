@@ -401,9 +401,9 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     expect(guard.seen.map((i) => i.approved !== undefined)).toEqual([false, true, false, true]);
   });
 
-  it('CI 连着红 3 轮：动手 3 轮不过，停下；点「继续」再给一整轮', async () => {
+  it('CI 连着红 3 轮：动手 3 轮不过，停下；点「继续」先看 PR 现在的 CI，还红就再给一整轮', async () => {
     const world = createFakeWorld({
-      ci: (_i, n) => (n <= 3 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
+      ci: (_i, n) => (n <= 4 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
     });
     const { tasks, calls } = scripted();
     const run = await withWorker(
@@ -421,6 +421,37 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     );
     expect(run.outcome).toBe('merged');
     expect(calls.segment).toHaveLength(4);
+  });
+
+  it('动手 3 轮不过停下时 PR 已开、头已记录（CI 台基础设施问题）：点「继续」先等 CI 和验收，不再起动手会话（#1582）', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) => (n <= 3 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
+    });
+    const { tasks, calls } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '动手 3 轮都不过，停下');
+        expect(s.waiting?.detail).toContain('动手 3 轮都没过');
+        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS);
+        expect(world.count('waitCi')).toBe(3);
+        expect(calls.verify).toHaveLength(0);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    // 继续之后没有新会话：会话次数还是停下前的 3 次，推分支和开 PR 也没有再来一遍
+    expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS);
+    expect(world.count('pushBranch')).toBe(MAX_IMPLEMENT_ROUNDS);
+    expect(world.count('openPr')).toBe(1);
+    // 直接去看 PR 现在的 CI：第 4 次问回 green，然后冷验收，再挂自动合并
+    expect(world.count('waitCi')).toBe(4);
+    expect(calls.verify).toHaveLength(1);
+    expect(calls.order.slice(-4)).toEqual(['verify', 'guarded', 'arm', 'merged']);
   });
 
   it('等合并时 PR 被关了：停下；重开后点「继续」，重新挂再等', async () => {

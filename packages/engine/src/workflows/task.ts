@@ -19,6 +19,7 @@
 // 动手或验收轮数用尽后再点「继续」（patched('continue-resets-rounds')，#1404）：两轮计数都从 0 再计，并重读单子正文，
 // 下一次验收用新正文。同一次继续里上限仍在。这样继续累计超过 3 次就不再清零，停下交给指挥官。老历史没有这个标记，
 // 仍只把用尽的那一个计数清掉。
+// 停下前 PR 已开、头已记录，点「继续」先走 deliver（等 CI、验收、挂自动合并），不先起动手会话（patched('continue-redelivers-open-pr')，#1582）。
 // 动手一轮会话跑完但没有提交（#1408，patched('avoid-empty-commit-route')）：下一轮选路避开这条路由；连着第二轮仍没提交，
 // 再避开这个模型。避开只在这张单里。没有别的候选就照旧用原来的路由，lastProblem 写「没有别的路由可换」，不死等。
 // 轮数用尽后点「继续」把避开清掉（和上面的轮数清零同一处）。老历史没有这个标记，下一轮仍不避开。
@@ -101,6 +102,13 @@ class TaskFlow {
           `最近的返工意见：${problems}。点「继续」后动手和验收轮数都从 0 再计；或「放弃」。`,
         );
         if (mode === 'legacy') rt.round = 0;
+        // 停下前 PR 已开、头已记录：代码多半已经完整（停下常是 CI 台的基础设施问题）。点「继续」先看这个 PR 现在的 CI 和验收，
+        // 不再起一轮没东西可交的动手会话。老历史没有这个标记，照旧先起会话。
+        if (rt.prNumber !== null && rt.head !== null && patched('continue-redelivers-open-pr')) {
+          const redelivered = await this.deliver(brief);
+          if (redelivered !== 'rework') return this.finish(redelivered.commit);
+          continue;
+        }
       }
       rt.round += 1;
       if (!(await this.implement(brief, tier))) continue;
