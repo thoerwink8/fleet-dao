@@ -6,6 +6,7 @@ import {
   ALERT_FILING_PR_NOTES,
   CONFLICT_HANDOFF_CAUSE,
   conflictFilesForHandoff,
+  FOUNDERS_INBOX_PR_NOTES,
   taskPrDid,
 } from '../src/workflows/task-support.ts';
 
@@ -61,6 +62,20 @@ describe('PR 正文里的根因', () => {
     for (const line of ALERT_FILING_PR_NOTES) expect(body).toContain(line);
     expect(body).toContain('条件早已不成立');
     expect(body).toContain('仍成立的立案');
+    expect(taskPrDid(12, 1, 1)).toEqual(['按 #12 的要求动手（第 1 轮）', '改了 1 个文件']);
+  });
+
+  it('#1733 的正文写上「先答这些」取舍和四条用例改前红改后绿的验法，别的单子不带', () => {
+    const body = renderPrBody({
+      requirement: 1733,
+      did: taskPrDid(1733, 2, 3),
+      verified: ['相关测试'],
+    });
+    expect(body).not.toContain('另有');
+    for (const line of FOUNDERS_INBOX_PR_NOTES) expect(body).toContain(line);
+    expect(body).toContain('不另起一行');
+    expect(body).toContain('改前红');
+    expect(body).toContain('改后绿');
     expect(taskPrDid(12, 1, 1)).toEqual(['按 #12 的要求动手（第 1 轮）', '改了 1 个文件']);
   });
 });
