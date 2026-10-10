@@ -1,7 +1,7 @@
 import { type QuotaWindowKind, quotaWindowName, SETTING_SCHEMAS } from '@fleet-dao/shared';
 import type { LucideIcon } from 'lucide-react';
 import { BellRing, FolderGit2, Info, KeyRound, Palette, SlidersHorizontal } from 'lucide-react';
-import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
+import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import type { z } from 'zod';
 import { brand } from '#brand';
@@ -9,13 +9,14 @@ import {
   ApiError,
   errorText,
   useApi,
+  useAudit,
   useMe,
   usePools,
   useRepoDispatch,
   useSettings,
   useUpdateSetting,
 } from '../api/client';
-import type { Setting, SettingKey } from '../api/types';
+import type { Me, Setting, SettingKey } from '../api/types';
 import { CredentialsSection } from '../components/credentials-section';
 import { EngineMasterRelation } from '../components/engine-master';
 import { LoadError, LoadingRows, Page } from '../components/page';
@@ -32,8 +33,8 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Switch } from '../components/ui/switch';
-import { settingLabel } from '../lib/audit';
-import { poolTitle } from '../lib/catalog';
+import { actorName, settingLabel } from '../lib/audit';
+import { poolTitle, windowLabel } from '../lib/catalog';
 import { formatAgo, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import {
@@ -45,6 +46,49 @@ import {
 } from '../lib/reserve';
 import { isMine, TONES, toneLabel } from '../lib/status';
 import { PALETTES } from '../lib/theme';
+
+/** 设置行里的「谁改的」：去 user: 前缀，方便和 /me、操作记录对上。 */
+function settingActorId(raw: string): string {
+  return raw.startsWith('user:') ? raw.slice('user:'.length) : raw;
+}
+
+/**
+ * 设置项「谁改的」展示：是自己写「我」；操作记录里能对上人名就用人名；
+ * 引擎等认得出的代号翻成人话；否则缩短 uuid，悬停给全文。
+ */
+function whoChangedLabel(
+  updatedBy: string,
+  me: Me | undefined,
+  names: ReadonlyMap<string, string>,
+): { text: string; title?: string } {
+  const id = settingActorId(updatedBy);
+  if (isMine(id, me) || isMine(updatedBy, me)) return { text: '我' };
+  const fromAudit = names.get(id) ?? names.get(updatedBy);
+  if (fromAudit) return { text: fromAudit };
+  const fromCode = actorName({ kind: 'user', id }, me);
+  if (fromCode !== id && fromCode !== '我') return { text: fromCode };
+  const engine = actorName({ kind: 'engine', id }, me);
+  if (engine !== id) return { text: engine };
+  if (id.length > 12) return { text: `${id.slice(0, 8)}…`, title: id };
+  if (id !== updatedBy) return { text: id, title: updatedBy };
+  return { text: id };
+}
+
+/** 从已加载的操作记录里抠用户编号 → 人名，给设置项「谁改的」用。 */
+function useActorNames(): Map<string, string> {
+  const audit = useAudit();
+  return useMemo(() => {
+    const m = new Map<string, string>();
+    for (const page of audit.data?.pages ?? []) {
+      for (const e of page.items) {
+        if (e.actor.kind !== 'user' || !e.actor.name) continue;
+        m.set(e.actor.id, e.actor.name);
+        m.set(settingActorId(e.actor.id), e.actor.name);
+      }
+    }
+    return m;
+  }, [audit.data]);
+}
 
 export function meta() {
   return [{ title: brand.title('设置') }];
@@ -96,12 +140,19 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 function SettingMeta({ s }: { s: Setting | undefined }) {
   const now = useNow();
   const { data: me } = useMe();
+  const names = useActorNames();
   if (!s || s.version === 0)
     return <p className="mt-1.5 text-xs text-muted-foreground">还没设过，用的是默认值</p>;
+  const who = s.updatedBy ? whoChangedLabel(s.updatedBy, me, names) : null;
   return (
     <p className="mt-1.5 text-xs text-muted-foreground">
       第 <span className="num">{s.version}</span> 版
-      {s.updatedBy ? ` · ${isMine(s.updatedBy, me) ? '我' : s.updatedBy}` : ''}
+      {who ? (
+        <>
+          {' '}
+          · <span title={who.title}>{who.text}</span>
+        </>
+      ) : null}
       {s.updatedAt ? (
         <>
           {' '}
@@ -273,7 +324,11 @@ function SoloPaused({ s }: { s: Setting | undefined }) {
   const on = current.success ? current.data : false;
   const { save, pending } = useSaveSetting();
   return (
-    <div className="rounded-xl border bg-card p-4">
+    <form
+      className="rounded-xl border bg-card p-4"
+      onSubmit={(e) => e.preventDefault()}
+      aria-label={settingLabel['engine.soloPaused']}
+    >
       <div className="flex items-center justify-between gap-4">
         <div>
           <div className="text-sm font-medium">{settingLabel['engine.soloPaused']}</div>
@@ -289,18 +344,19 @@ function SoloPaused({ s }: { s: Setting | undefined }) {
         />
       </div>
       <SettingMeta s={s} />
-    </div>
+    </form>
   );
 }
 
 /**
- * 留量线一行的窗口名。7d_model 没有组名时不要把字段名漏出来（「7d_model 周额度」），写成「单模型周额度」；
- * 这个池的读数带了组名就写在后面。别的窗口沿用 quotaWindowName，名字不变。
+ * 留量线一行的窗口名。other →「其他窗口」；7d_model 没有组名时不要把字段名漏出来（「7d_model 周额度」），
+ * 写成「单模型周额度」；这个池的读数带了组名就写在后面。别的窗口沿用 quotaWindowName，名字不变。
  */
 function reserveKindLabel(
   kind: QuotaWindowKind,
   windows: readonly { window: QuotaWindowKind; scope?: string | undefined }[],
 ): string {
+  if (kind === 'other') return windowLabel.other;
   if (kind !== '7d_model') return quotaWindowName({ window: kind, label: kind });
   const groups: string[] = [];
   for (const w of windows) {
@@ -332,6 +388,8 @@ function repoReadFailure(reposError: unknown, dispatchError: unknown): string | 
  */
 function QuotaReserve({ s }: { s: Setting | undefined }) {
   const pools = usePools();
+  const { data: meForReserve } = useMe();
+  const namesForReserve = useActorNames();
   const { save, pending } = useSaveSetting();
   const stored = s && s.version > 0 ? SETTING_SCHEMAS['engine.quotaReserve'].safeParse(s.value) : null;
   const saved = stored?.success ? stored.data : {};
@@ -391,7 +449,9 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
           </span>
         ) : (
           <span className="text-muted-foreground">
-            {`现在的线是人在${brand.product}改过的${source.by ? `（${source.by}）` : ''}，发布时的种子不会覆盖它`}
+            {`现在的线是人在${brand.product}改过的${
+              source.by ? `（${whoChangedLabel(source.by, meForReserve, namesForReserve).text}）` : ''
+            }，发布时的种子不会覆盖它`}
           </span>
         )}
       </p>
@@ -514,7 +574,7 @@ export default function Settings() {
               <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
                 <FolderGit2 className="size-4 text-muted-foreground" aria-hidden />
                 <div className="min-w-0 flex-1 basis-40">
-                  <div className="num truncate text-sm font-medium">
+                  <div className="num truncate text-sm font-medium" title={`${r.owner}/${r.name}`}>
                     {r.owner}/{r.name}
                   </div>
                   <div className="text-xs text-muted-foreground">

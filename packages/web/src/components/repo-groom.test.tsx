@@ -212,4 +212,21 @@ describe('设置页：指挥官整理待办', () => {
     expect(panel.textContent).not.toContain('还没整理过');
     expect(panel.textContent).not.toContain('今日剩余');
   });
+
+  test('长说明默认折叠', async () => {
+    const api = createMockApi({ live: false });
+    renderApp(<SettingsPage />, { api, route: '/settings' });
+    const panel = await screen.findByTestId(`groom-${ORBIT}`);
+    const toggle = await within(panel).findByRole('button', { name: '展开' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    // 折叠时：一行摘要在，长说明正文不露。
+    expect(panel.textContent).toContain('老单要整理过才能进队');
+    expect(panel.textContent).not.toContain('没单可挑会自动叫指挥官整理');
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+      expect(panel.textContent).toContain('没单可挑会自动叫指挥官整理');
+    });
+    expect(within(panel).getByRole('button', { name: '收起' })).toBeTruthy();
+  });
 });
