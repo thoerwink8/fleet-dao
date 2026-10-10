@@ -2,6 +2,7 @@
 // 规矩（创始人 2026-10-04「选 1」）：单次前台等待不超过 60 秒，不分无人值守与否——他在我干活时发的话只在两次工具调用的间隙送到，
 // 一条长前台等待中间没有间隙，话卡在那儿，进程一断还会丢。长的用 run_in_background，后台跑的不受限。
 // 脚本改了这条判断，这里会红；【故意造出的失败】那条证明拦得住、而且认不出的输入不会被当成超了。
+import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { runChild } from '../child.ts';
@@ -20,6 +21,15 @@ const run = (tool: string, input: Record<string, unknown>) =>
 describe('前台等待上限', () => {
   it('上限是 60 秒', () => {
     expect(lib.MAX_FOREGROUND_WAIT_SECONDS).toBe(60);
+  });
+
+  // 决定 0078：通用段「Agent 子代理」那条和 commander 技能写的等待上限，跟钩子卡的是同一个数（通用段只写这一处，steer-and-subagents 钉着）
+  it('通用段和 commander 技能写的上限就是钩子卡的这个数', () => {
+    const read = (rel: string) =>
+      readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
+    const n = lib.MAX_FOREGROUND_WAIT_SECONDS;
+    expect(read('../../shared-rules.md')).toContain(`单次前台等待不超过 ${n} 秒`);
+    expect(read('../../skills/commander/SKILL.md')).toContain(`前台单次等待不超过 ${n} 秒`);
   });
 
   it.each([

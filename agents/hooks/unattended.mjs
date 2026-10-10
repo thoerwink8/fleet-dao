@@ -223,7 +223,7 @@ export function sessionLines({ dir, sessionId, now = Date.now() }) {
   if (s === null || s.auto === true || now > Date.parse(s.expiresAt)) return [];
   if (s.state === 'on')
     return [
-      `无人值守开着（到 ${fmt(s.expiresAt)}）：这一轮不要结束。等子代理的完成通知（不脱离会话，前台单次不超过 55 秒），有进展就 pnpm progress:note 记一句；全做完 node ${SCRIPT} done "做完了什么"，要创始人拍板 needs-you，他说停 off。`,
+      `无人值守开着（到 ${fmt(s.expiresAt)}）：这一轮不要结束。等子代理的完成通知（不脱离会话，前台单次不超过 60 秒），有进展就 pnpm progress:note 记一句；全做完 node ${SCRIPT} done "做完了什么"，要创始人拍板 needs-you，他说停 off。`,
     ];
   if (s.state === 'paused' && s.note) return [`无人值守暂停着（${s.note}）。这一轮可以结束。`];
   return [];
@@ -239,7 +239,7 @@ export function blockReason(state, now, running) {
   const left = Math.max(0, Math.round((Date.parse(state.expiresAt) - now) / 60_000));
   const watching =
     running === 0
-      ? '现在没有在跑的工人（脱离会话的那种；无人值守不再起它）：还有子代理在跑就等它们的完成通知（要等就起 run_in_background 的循环或 Monitor，前台单次不超过 55 秒）；队列里还有活就用 Agent 子代理派（写代码的 model: "sonnet"，能脚本核对的先给 subagent_type: "haiku55"，档位见决定 0034、0035）；盯法国跑 node ~/.claude/skills/commander/scripts/patrol.mjs，报 ALERT 且 DELTA 不为 0 才叫一个短命的 haiku55 子代理摘证据；子代理都收口、队列空了才跑 done 收尾。'
+      ? '现在没有在跑的工人（脱离会话的那种；无人值守不再起它）：还有子代理在跑就等它们的完成通知（要等就起 run_in_background 的循环或 Monitor，前台单次不超过 60 秒）；队列里还有活就用 Agent 子代理派（写代码的 model: "sonnet"，能脚本核对的先给 subagent_type: "haiku55"，档位见决定 0034、0035）；盯法国跑 node ~/.claude/skills/commander/scripts/patrol.mjs，报 ALERT 且 DELTA 不为 0 才叫一个短命的 haiku55 子代理摘证据；子代理都收口、队列空了才跑 done 收尾。'
       : '继续盯工人：node ~/.claude/skills/commander/scripts/worker.mjs watch --wait 55（单次前台等待不超过 60 秒；法国那边的活用 france.mjs）。';
   return (
     `无人值守开着（还剩约 ${left} 分钟，在跑的工人 ${running ?? '没数成'} 个）：不要结束这一轮。${watching}` +

@@ -1,7 +1,17 @@
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ALL_CASES } from '../src/cases/index.ts';
 import { type AgentDefinition, parseAgentDefinition } from '../src/definitions.ts';
 import {
@@ -18,7 +28,7 @@ import { OUTPUT_LIMIT, runCase } from '../src/runner.ts';
 import { parseStream, StreamFormatError } from '../src/stream.ts';
 import type { EvalCase } from '../src/types.ts';
 import { REPO_ROOT, UngradableError } from '../src/types.ts';
-import { caseDirOf, prepareFixture, type Workspace } from '../src/workspace.ts';
+import { caseDirOf, prepareFixture, removeTree, type Workspace } from '../src/workspace.ts';
 
 const DEF_TEXT = `---
 name: fleet-demo
@@ -558,6 +568,33 @@ describe('真题 + 假会话（会话在临时目录里把活干了）', () => {
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
+  });
+
+  it('临时目录删不掉（Windows 上会话刚退出，目录还被占着报 EPERM）：重试过还不行就报出路径、返回 false，不抛错把整轮崩掉', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const rm = vi.fn(() => {
+        throw Object.assign(new Error('EPERM, Permission denied'), { code: 'EPERM' });
+      });
+      expect(removeTree('C:/tmp/agent-eval-Jb4Ucr', rm as unknown as typeof rmSync)).toBe(false);
+      expect(rm).toHaveBeenCalledWith(
+        'C:/tmp/agent-eval-Jb4Ucr',
+        expect.objectContaining({ recursive: true, force: true, maxRetries: expect.any(Number) }),
+      );
+      expect(err).toHaveBeenCalledTimes(1);
+      expect(String(err.mock.calls[0]?.[0])).toContain('C:/tmp/agent-eval-Jb4Ucr');
+      expect(String(err.mock.calls[0]?.[0])).toContain('EPERM');
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it('临时目录删得掉就删干净、返回 true', () => {
+    const d = mkdtempSync(join(tmpdir(), 'agent-eval-rm-'));
+    mkdirSync(join(d, 'work'));
+    writeFileSync(join(d, 'work', 'a.txt'), 'x');
+    expect(removeTree(d)).toBe(true);
+    expect(existsSync(d)).toBe(false);
   });
 });
 

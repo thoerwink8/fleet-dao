@@ -80,6 +80,8 @@
 | [0074](0074-commander-no-seat.md) | 指挥官不设座位、不在库里认领 | 采纳，未复核 |
 | [0075](0075-france-engine-release-by-commit.md) | 法国自家的引擎按主线上的一个提交发布 | 部分被 0032 替代 |
 | [0076](0076-route-strictly-by-order.md) | 选路只按顺序：只因额度用完、人关了、报错往后挑；冷验收验不了由冷验收「两家都验」兜 | 采纳 |
+| [0077](0077-review-screen-effort-high.md) | 评审初筛 `fleet-review-screen` 的 effort 从 medium 调到 high（Haiku 5.5 两道题 medium 10 遍过 8、high 6 遍全过），别的子代理档和 effort 不变（补充 0036） | 采纳 |
+| [0078](0078-steer-reply-and-background-subagents.md) | 引导三条：引导一送到、调工具前先回一句；派 Agent 子代理一律后台跑，主对话留在这一轮等完成通知、单次前台等待不超过 60 秒（不分无人值守与否）；引导涉及在跑的子代理用 `SendMessage` 转 | 采纳 |
 
 ## 第 1–14 条的编号（#1476）
 
