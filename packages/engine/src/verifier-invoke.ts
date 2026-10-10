@@ -20,6 +20,8 @@
 // - 入参没单号、taskId 不是库里 tasks.id 的样子 → 一进来就抛（zod），不起会话：这一次验收记进 runs 要挂得上单（#216）
 // - fetchDiff 抛错 / 返回空 diff / 返回空 changedFiles → problems: ['读不到 diff：…']、pass: false
 // - fetchSpec 抛错 → problems: ['读不到单子：…']、pass: false
+// - 单子点名、diff 没改的文件读不到或 fetchNamedFiles 抛错 → **不**走上面这条：提示词里标「读不到」，验收照常问模型。
+//   缺的是核对材料，不是这次验收没跑起来（#1612：缺材料判负会逼写代码的会话来回改）
 // - chooseModelForFamily 对每个可用家族都返回 undefined → problems: ['没讨论成：…']、pass: false
 // - one-shot outcome != 'done' 或结论行不是固定写法 → problems: ['冷调用没跑成：…']、pass: false
 // - 会话失败且失败分流认成上游临时故障（规则表上标了 blip）→ problems 空、upstreamRetry，调用方等一会儿再验
@@ -131,6 +133,75 @@ export type FetchDiff = (args: {
 export type FetchSpec = (args: { taskId: string }) => Promise<{ specDir?: string }>;
 
 /**
+ * PR 头上一个路径的读回。三选一：正文、这个路径在头上不存在、这一步没读成。
+ * 没读成要把原因带回，提示词里写「读不到：原因」，不能当成「没这个文件」悄悄丢掉。
+ */
+export type NamedHeadFile =
+  | { path: string; kind: 'content'; content: string }
+  | { path: string; kind: 'missing' }
+  | { path: string; kind: 'unreadable'; reason: string };
+
+/**
+ * 读 PR 头提交上这些路径的当前内容。本模块不调 git，调用方（冷验收装配）从引擎镜像读。
+ * 抛错由本模块接住，改写成每个路径「读不到」，不许因此让整次验收失败。
+ */
+export type FetchNamedFiles = (paths: string[]) => Promise<NamedHeadFile[]>;
+
+/** 单子点名、又不在这次 diff 里的文件，最多带几个进提示词。再多一次看不完。 */
+const MAX_NAMED_FILES = 5;
+/** 单个文件超过这么多行，只给头尾，中间写明省略。 */
+const NAMED_FILE_MAX_LINES = 200;
+const NAMED_FILE_EDGE_LINES = 100;
+
+const BACKTICK_PATH = /`([^`\n]+)`/g;
+
+/**
+ * 仓内相对路径：至少一段目录、文件名带后缀，只含常见路径字符。
+ * 不认绝对路径、`..`、网址、没有目录的 `foo.ts`。验收条里的例子是 `deploy/france.sh`、`packages/x/y.ts`。
+ */
+export function isNamedRepoPath(raw: string): boolean {
+  if (raw.length === 0 || raw.length > 400) return false;
+  if (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/.test(raw)) return false;
+  const segments = raw.split('/');
+  if (segments.some((seg) => seg === '.' || seg === '..')) return false;
+  const file = segments.at(-1) ?? '';
+  const dot = file.lastIndexOf('.');
+  return dot > 0 && dot < file.length - 1;
+}
+
+function pathsInBackticks(text: string): string[] {
+  const out: string[] = [];
+  for (const match of text.matchAll(BACKTICK_PATH)) {
+    const raw = match[1]?.trim() ?? '';
+    if (isNamedRepoPath(raw)) out.push(raw);
+  }
+  return out;
+}
+
+/**
+ * 从「怎么算做完」和「要什么」的反引号里取出仓内相对路径，去掉 diff 已经改过的，最多 5 个。
+ * 先扫怎么算做完（验收条点名的优先），再扫要什么；同一个路径只留第一次。
+ */
+export function namedPathsOutsideDiff(
+  what: string,
+  howToFinish: readonly string[],
+  changedFiles: readonly string[],
+): string[] {
+  const changed = new Set(changedFiles);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const text of [...howToFinish, what]) {
+    for (const path of pathsInBackticks(text)) {
+      if (changed.has(path) || seen.has(path)) continue;
+      seen.add(path);
+      out.push(path);
+      if (out.length >= MAX_NAMED_FILES) return out;
+    }
+  }
+  return out;
+}
+
+/**
  * 按家族挑一个能跑的 model：注入。「挑不出」调用方返回 undefined。
  * routeId：生产的 Spawner 据此在库里查执行方式、会话用户、上游模型串（modelId 只是记账用）；不给，测试里的假 Spawner 也能跑。
  * runId：这一次起会话的编号（runs 主键），挑中时先定下（切号的登记要在起会话之前就知道它，#59）；不给由 one-shot 自己起。
@@ -170,11 +241,111 @@ export interface VerifierInvokeDeps {
   prepareCwd?: (picked: PickedVerifier) => Promise<{ cwd: string; release: () => Promise<void> }>;
   /** 超时（分钟），默认 60。 */
   timeoutMinutes?: number;
+  /**
+   * 单子点名、这次 diff 没改的文件，按 PR 头读当前内容。不给就不加那一节（没有这份依赖的调用方照旧只看 diff）。
+   * 读不到、或者这一步抛错，都不让验收失败：提示词里标「读不到」。
+   */
+  fetchNamedFiles?: FetchNamedFiles;
 }
 
 /** 三种能挡的问题前缀（specs/555 第 3 条）。problems 里每条必须以这三种之一开头；风格意见不许进。 */
 export const BLOCKER_KINDS = ['没做到验收条', '弄坏了原有功能', '安全或丢数据'] as const;
 export type BlockerKind = (typeof BLOCKER_KINDS)[number];
+
+/** 行数按人看到的行算：文件末尾那个换行不算多出来的一行。 */
+function fileLines(content: string): string[] {
+  if (content === '') return [];
+  const parts = content.split('\n');
+  if (content.endsWith('\n')) parts.pop();
+  return parts;
+}
+
+/** 超过 200 行只留头 100 行和尾 100 行，并写明中间省略了多少。不到这个行数原样给。 */
+function clipNamedFile(content: string): { text: string; note?: string } {
+  const lines = fileLines(content);
+  if (lines.length <= NAMED_FILE_MAX_LINES) return { text: lines.join('\n') };
+  const head = lines.slice(0, NAMED_FILE_EDGE_LINES);
+  const tail = lines.slice(-NAMED_FILE_EDGE_LINES);
+  const omitted = lines.length - NAMED_FILE_EDGE_LINES * 2;
+  return {
+    note: `（这个文件共 ${lines.length} 行，超过 ${NAMED_FILE_MAX_LINES} 行，只给头 ${NAMED_FILE_EDGE_LINES} 行和尾 ${NAMED_FILE_EDGE_LINES} 行，中间省略 ${omitted} 行。）`,
+    text: `${head.join('\n')}\n…（省略 ${omitted} 行）…\n${tail.join('\n')}`,
+  };
+}
+
+/** 文件正文里若有反引号，围栏要比最长的那一串再长一格，免得正文把围栏截断。 */
+function fenceFor(content: string): string {
+  let width = 3;
+  for (const run of content.match(/`+/g) ?? []) width = Math.max(width, run.length + 1);
+  return '`'.repeat(width);
+}
+
+/** 没有点名且没改的文件时返回空，调用方就不输出这一节。 */
+function renderNamedFiles(files: readonly NamedHeadFile[]): string[] {
+  if (files.length === 0) return [];
+  const lines = [
+    '',
+    '## 单子点名但这次没改的文件（只读，当前内容）',
+    '这些文件不在这次的 diff 里。下面是 PR 头上的当前内容，用来核对验收条点到、这次没改的文件。标了「读不到」的是这一步没读成。',
+    '',
+  ];
+  for (const file of files) {
+    lines.push(`### \`${file.path}\``);
+    if (file.kind === 'missing') {
+      lines.push('这个路径在 PR 头上不存在。', '');
+      continue;
+    }
+    if (file.kind === 'unreadable') {
+      lines.push(`读不到：${file.reason}`, '');
+      continue;
+    }
+    const clipped = clipNamedFile(file.content);
+    if (clipped.note !== undefined) lines.push(clipped.note);
+    const fence = fenceFor(clipped.text);
+    lines.push(`${fence}text`, clipped.text, fence, '');
+  }
+  return lines;
+}
+
+function alignNamedFiles(paths: readonly string[], got: readonly NamedHeadFile[]): NamedHeadFile[] {
+  const byPath = new Map<string, NamedHeadFile>();
+  for (const item of got) {
+    if (typeof item?.path === 'string' && !byPath.has(item.path)) byPath.set(item.path, item);
+  }
+  return paths.map((path) => {
+    const item = byPath.get(path);
+    if (item === undefined) return { path, kind: 'unreadable', reason: '没有回这个路径' };
+    if (item.kind === 'content' && typeof item.content === 'string') {
+      return { path, kind: 'content', content: item.content };
+    }
+    if (item.kind === 'missing') return { path, kind: 'missing' };
+    if (item.kind === 'unreadable') {
+      const reason = typeof item.reason === 'string' ? item.reason.trim() : '';
+      return { path, kind: 'unreadable', reason: reason === '' ? '没有原因' : reason };
+    }
+    return { path, kind: 'unreadable', reason: '回的样子认不出' };
+  });
+}
+
+/** 点名的路径一个都没有、或者调用方没接读取时，不加这一节。读取抛错改写成每个路径「读不到」。 */
+async function loadNamedFiles(
+  input: VerifierInvokeInput,
+  changedFiles: readonly string[],
+  fetchNamedFiles: FetchNamedFiles | undefined,
+): Promise<NamedHeadFile[]> {
+  const paths = namedPathsOutsideDiff(input.what, input.howToFinish, changedFiles);
+  if (paths.length === 0 || fetchNamedFiles === undefined) return [];
+  try {
+    const got = await fetchNamedFiles(paths);
+    if (!Array.isArray(got)) {
+      return paths.map((path) => ({ path, kind: 'unreadable', reason: '回的不是一份清单' }));
+    }
+    return alignNamedFiles(paths, got);
+  } catch (err) {
+    const why = errMessage(err);
+    return paths.map((path) => ({ path, kind: 'unreadable', reason: why }));
+  }
+}
 
 /**
  * 渲染喂给冷调用模型的 prompt（不走 runner/brief.ts 的 VerifyBrief——那一份要求调用方带 headSha，
@@ -183,7 +354,8 @@ export type BlockerKind = (typeof BLOCKER_KINDS)[number];
 function renderPrompt(
   input: VerifierInvokeInput,
   diff: { diffText: string; changedFiles: string[] },
-  specDir?: string,
+  specDir: string | undefined,
+  named: readonly NamedHeadFile[],
 ): string {
   return [
     `# 任务：验收 PR #${input.prNumber}（第 ${input.round} 轮）`,
@@ -198,13 +370,16 @@ function renderPrompt(
     '## 验什么',
     `PR：#${input.prNumber}`,
     `分支：\`${input.branch}\`  基线：\`${input.baseSha}\``,
-    '你手上没有仓库的检出（当前目录是空的），只能看下面的 diff 和上面的需求原文。某一条在 diff 里看不出做没做，按没做到算，',
+    named.length > 0
+      ? '你手上没有仓库的检出（当前目录是空的）。能看的是下面的 diff、上面的需求原文，还有「单子点名但这次没改的文件」里的当前内容。某一条在这些材料里看不出做没做，按没做到算，'
+      : '你手上没有仓库的检出（当前目录是空的），只能看下面的 diff 和上面的需求原文。某一条在 diff 里看不出做没做，按没做到算，',
     '不要凭想象放行；CI、测试跑没跑过不归你管（CI 另外要求必过），你只看这次改动对不对得上单子。不要改文件、不要提交、不要开 PR。',
     'diff 里标了「这个文件太大，只给了摘要」的文件，摘要里看不到的部分不算没做到，别拿它挡；标了「生成文件」的（迁移快照）不逐行看，',
     '只核对它和同一 PR 里的迁移 sql、schema 改动对得上。',
     '',
     '## 改了哪些文件',
     ...diff.changedFiles.map((f) => `- ${f}`),
+    ...renderNamedFiles(named),
     '',
     '## diff（unified patch）',
     '```diff',
@@ -397,7 +572,8 @@ export async function invokeVerifier(
   const seenRoutes = new Set<string>();
   const misses: { route: string; tail: string }[] = [];
   let lastSession: VerifierInvokeOutput['session'];
-  const prompt = renderPrompt(parsed, diff, spec.specDir);
+  const named = await loadNamedFiles(parsed, diff.changedFiles, deps.fetchNamedFiles);
+  const prompt = renderPrompt(parsed, diff, spec.specDir, named);
 
   for (const family of FAMILY_ORDER) {
     if (avoid.has(family)) continue;
