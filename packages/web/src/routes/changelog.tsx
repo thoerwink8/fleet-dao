@@ -3,8 +3,8 @@
 // 每条写提交号、标题、发于何时；读不到写没查成和原因，不拿空列表冒充「没发过」。发布入口不在这一页：在「法国」页「在用版本」那一行。
 // CHANGELOG 对照的数据来源是仓根 CHANGELOG.md 在打包时被内联进来的字符串（lib/changelog.ts 用 vite 的 ?raw 取），
 // 格式解析共用 packages/shared/src/changelog.ts——和发布那条线是同一个实现，格式变了两边一样认不出。
-import { CalendarClock, GitCommitHorizontal, ScrollText } from 'lucide-react';
-import { useState } from 'react';
+import { CalendarClock, ChevronDown, GitCommitHorizontal, ScrollText } from 'lucide-react';
+import { useId, useState } from 'react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
 import { useFranceReleasedCommits } from '../api/client';
@@ -25,6 +25,9 @@ const EVENT_TEXT = { release: '发布', rollback: '回滚', 'auto-rollback': '�
 
 /** 已发布的提交每 5 分钟重拉一次。这份快照超过 5 分钟还没再读成，刷新条标「数据已过期」。 */
 const CHANGELOG_STALE_AFTER_MS = 5 * TIME.MIN;
+
+/** 还没收进版本：发版单位改成主线提交后，这些条目不再收进 vN 小节（#1753）。 */
+const UNRELEASED_WHY = '发版单位已改成主线提交，这些条目不再收进「vN」小节；对照用，不等于还没上线。';
 
 type Commits = Extract<ReleasedCommits, { state: 'ok' }>['commits'];
 
@@ -114,6 +117,57 @@ function ReleasedCommitsPanel({ query }: { query: ReturnType<typeof useFranceRel
   );
 }
 
+/** 还没收进版本：默认折叠长篇正文，标题行带箭头；段首说明为什么还没收进版本（#1753）。 */
+function UnreleasedPanel({ section, hasContent }: { section: string; hasContent: boolean }) {
+  const [open, setOpen] = useState(false);
+  const bodyId = useId();
+  return (
+    <section className="rounded-xl border bg-card text-card-foreground shadow-card-edge">
+      <header className="border-b">
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => setOpen((v) => !v)}
+          className="flex w-full items-center gap-2 px-4 py-3 text-left hover:bg-accent/40"
+        >
+          <h2 className="min-w-0 flex-1 text-sm font-semibold">还没收进版本的更新</h2>
+          <ChevronDown
+            className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')}
+            aria-hidden
+          />
+        </button>
+        <p className="px-4 pb-3 text-xs text-muted-foreground" data-unreleased-why>
+          {UNRELEASED_WHY}
+        </p>
+      </header>
+      {open ? (
+        <div id={bodyId} className="p-4">
+          {hasContent ? (
+            <MarkdownLite source={section} />
+          ) : (
+            <Empty
+              icon={CalendarClock}
+              title="还什么都没写"
+              hint="CHANGELOG.md 的 Unreleased 段现在是空的。"
+            />
+          )}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+/** 目录入口：选中白底带阴影，未选中灰字——像可点的页签（#1753）。 */
+function tocClass(on: boolean): string {
+  return cn(
+    'flex w-full items-baseline justify-between gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors',
+    on
+      ? 'bg-card font-medium text-foreground shadow-sm'
+      : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
+  );
+}
+
 export default function Changelog() {
   // 对照区看哪一段：null = 还没收进版本的那段（默认）；否则是 CHANGELOG 里的某一版
   const [picked, setPicked] = useState<string | null>(null);
@@ -159,53 +213,41 @@ export default function Changelog() {
       <div className="grid items-start gap-4 xl:grid-cols-4">
         <div className="min-w-0 xl:col-span-3">
           {picked === null ? (
-            <Panel title="还没收进版本的更新">
-              {hasContent ? (
-                <MarkdownLite source={section} />
-              ) : (
-                <Empty
-                  icon={CalendarClock}
-                  title="还什么都没写"
-                  hint="CHANGELOG.md 的 Unreleased 段现在是空的。"
-                />
-              )}
-            </Panel>
+            <UnreleasedPanel section={section} hasContent={hasContent} />
           ) : (
             <RecordedPanel version={picked} date={released.find((r) => r.version === picked)?.date} />
           )}
         </div>
 
         <nav aria-label="CHANGELOG 目录" className="rounded-xl border bg-card p-2 shadow-card-edge">
-          <button
-            type="button"
-            onClick={() => setPicked(null)}
-            aria-current={picked === null ? 'true' : undefined}
-            className={cn(
-              'flex w-full items-baseline justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm hover:bg-accent',
-              picked === null && 'bg-accent font-medium',
-            )}
-          >
-            <span>还没收进版本</span>
-          </button>
+          <div className="rounded-lg bg-muted p-1">
+            <button
+              type="button"
+              onClick={() => setPicked(null)}
+              aria-current={picked === null ? 'true' : undefined}
+              className={tocClass(picked === null)}
+            >
+              <span>还没收进版本</span>
+            </button>
+          </div>
           <h3 className="mt-2 px-3 pt-2 pb-1 text-xs font-medium text-muted-foreground">按版本写的记录</h3>
           {released.length === 0 ? (
             <Empty icon={ScrollText} title="一条都没有" hint="CHANGELOG.md 里没有按版本写的记录。" />
           ) : (
-            released.map((r) => (
-              <button
-                key={`${r.version}-${r.date}`}
-                type="button"
-                onClick={() => setPicked(r.version)}
-                aria-current={picked === r.version ? 'true' : undefined}
-                className={cn(
-                  'flex w-full items-baseline justify-between gap-3 rounded-lg px-3 py-2 text-left hover:bg-accent',
-                  picked === r.version && 'bg-accent',
-                )}
-              >
-                <span className="num text-sm font-medium">{r.version}</span>
-                <span className="num text-xs text-muted-foreground">{r.date}</span>
-              </button>
-            ))
+            <div className="space-y-0.5 rounded-lg bg-muted p-1">
+              {released.map((r) => (
+                <button
+                  key={`${r.version}-${r.date}`}
+                  type="button"
+                  onClick={() => setPicked(r.version)}
+                  aria-current={picked === r.version ? 'true' : undefined}
+                  className={tocClass(picked === r.version)}
+                >
+                  <span className="num font-medium">{r.version}</span>
+                  <span className="num text-xs opacity-80">{r.date}</span>
+                </button>
+              ))}
+            </div>
           )}
         </nav>
       </div>
