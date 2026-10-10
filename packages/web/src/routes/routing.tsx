@@ -34,7 +34,13 @@ import {
 } from '../components/routing-edit';
 import { KindDot, useKindEnv } from '../components/routing-kinds';
 import { AddPurposeModel, PurposeModelControls } from '../components/routing-membership';
-import { ModelRoutes, OrderSummaryLine } from '../components/routing-routes';
+import {
+  CollapsibleOffModelRoutes,
+  effortBlockedTitle,
+  hideEffortRowNoteClass,
+  ModelRoutes,
+  OrderSummaryLine,
+} from '../components/routing-routes';
 import { StatusChip, StatusDot } from '../components/status';
 import { formatClock, TIME } from '../lib/format';
 import { useMediaQuery, useNow } from '../lib/hooks';
@@ -326,8 +332,8 @@ function PurposeItem({
   );
 }
 
-/** 调整顺序用的行高（桌面）。第一行是名字和操作，第二行是档位配不了时的长说明，所以比单行高。区域仍占满页面主体高度。手机沿用 MOBILE_ROW_HEIGHT。 */
-const ORDER_ROW_HEIGHT = 56;
+/** 调整顺序用的行高（桌面）。档位配不了的长说明已收进悬停，单行即可；区域仍占满页面主体高度。手机沿用 MOBILE_ROW_HEIGHT。 */
+const ORDER_ROW_HEIGHT = 40;
 /** 不到 xl 宽（平板）时模型清单没有父元素给高度：固定放得下 13 行。 */
 const ORDER_LIST_HEIGHT = ORDER_ROW_HEIGHT * 13;
 const WIDE_MQ = '(min-width: 1280px)';
@@ -340,12 +346,27 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   const edit = useRoutingEdit();
   const holds = usePoolHolds();
   const [membershipError, setMembershipError] = useState<string | null>(null);
+  const modelIsOff = (m: RoutingLayerModel) =>
+    modelSlotState(m, env.channelEnabled, env.modelRetired(m.modelId)) === 'off';
   // 选中看路由的模型：点过的优先；没点过，进来那一刻看顺位第一条活的所在的模型，没有就第一个。
   // 进来时定下来就不跟着变：开关一关、先后一调，顺位第一条活的会换，不能让下面的路由跟着跳到别的模型。
   const [picked, setPicked] = useState<string | null>(
     () => first?.model.modelId ?? p.models[0]?.modelId ?? null,
   );
+  // 点选已关模型时默认折叠；看着开着的模型被关掉则不叠折叠层，好当场核开关（#1754）。
+  const [foldOffRoutes, setFoldOffRoutes] = useState(() => {
+    const id = first?.model.modelId ?? p.models[0]?.modelId;
+    const m = id ? p.models.find((x) => x.modelId === id) : undefined;
+    return m ? modelIsOff(m) : false;
+  });
+  const selectModel = (modelId: string) => {
+    setPicked(modelId);
+    const m = p.models.find((x) => x.modelId === modelId);
+    setFoldOffRoutes(m ? modelIsOff(m) : false);
+  };
   const current = p.models.find((m) => m.modelId === picked) ?? p.models[0];
+  const currentPosition = current ? p.models.findIndex((m) => m.modelId === current.modelId) + 1 : 0;
+  const currentOff = current !== undefined && modelIsOff(current);
   return (
     <section aria-label={`${purposeLabel(p.purpose)}的调整顺序`} className="flex flex-col gap-3">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -354,6 +375,9 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
           <span className="num text-caption font-normal text-muted-foreground">{p.purpose}</span>
         </h2>
         <StatusChip tone={verdictTone[p.verdict]} label={purposeVerdictLabel[p.verdict]} />
+        {p.purpose === 'judge' && p.verdict === 'unknown' ? (
+          <span className="text-caption text-muted-foreground">按量计费，不自动探，不用处理</span>
+        ) : null}
         {/* 一个模型都没排：那句话就是缺口本身，下面缺口栏已经写了，不在这里再写一遍 */}
         {p.models.length > 0 ? (
           <span className={cn('min-w-0 text-sub', lineInk(line.tone))}>{line.text}</span>
@@ -397,7 +421,7 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
           <ModelPriority
             purpose={p}
             selectedId={current?.modelId}
-            onSelect={setPicked}
+            onSelect={selectModel}
             onError={setMembershipError}
           />
           {current ? (
@@ -413,12 +437,22 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
                 </span>
               </header>
               <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-                <ModelRoutes
-                  key={current.modelId}
-                  model={current}
-                  now={now}
-                  firstLiveRoute={first?.model === current ? first.route.routeId : undefined}
-                />
+                {currentOff && foldOffRoutes ? (
+                  <CollapsibleOffModelRoutes
+                    key={current.modelId}
+                    model={current}
+                    position={currentPosition}
+                    now={now}
+                    firstLiveRoute={first?.model === current ? first.route.routeId : undefined}
+                  />
+                ) : (
+                  <ModelRoutes
+                    key={current.modelId}
+                    model={current}
+                    now={now}
+                    firstLiveRoute={first?.model === current ? first.route.routeId : undefined}
+                  />
+                )}
               </div>
             </section>
           ) : null}
@@ -580,8 +614,15 @@ function ModelRow({
   const enabledRouteIds = m.routes.filter((r) => r.enabled).map((r) => r.routeId);
   const kind = modelKind(m, useKindEnv());
   const skipped = slot.state !== 'on';
+  // 档位配不了的长说明：行内藏掉，悬停操作区看全文（#1754）
+  const effortTitle = effortBlockedTitle(m.modelId, m.routes);
   return (
-    <div className="flex h-full flex-col justify-center gap-0.5 py-1 pr-2 pl-1.5 md:flex-row md:flex-wrap md:items-center md:justify-start md:gap-x-1.5 md:gap-y-0.5 md:py-0">
+    <div
+      className={cn(
+        'flex h-full flex-col justify-center gap-0.5 py-1 pr-2 pl-1.5 md:flex-row md:flex-wrap md:items-center md:justify-start md:gap-x-1.5 md:gap-y-0.5 md:py-0',
+        hideEffortRowNoteClass,
+      )}
+    >
       <div className="flex min-w-0 items-center gap-1.5 md:h-auto md:min-w-min md:grow md:shrink-0">
         {controls.grip}
         <span
@@ -632,7 +673,14 @@ function ModelRow({
         </button>
       </div>
       <div data-row-actions className="flex flex-wrap items-center justify-end gap-0.5 md:contents">
-        <PurposeModelControls purpose={purpose} model={m} onError={onError} />
+        {/* md:contents 时外层不占盒，title 挂在这层才能悬停看到档位说明（#1754） */}
+        <span
+          data-effort-tip={effortTitle ? '' : undefined}
+          title={effortTitle}
+          className="inline-flex flex-wrap items-center gap-0.5"
+        >
+          <PurposeModelControls purpose={purpose} model={m} onError={onError} />
+        </span>
         <ModelSwitch
           modelId={m.modelId}
           modelName={m.displayName}

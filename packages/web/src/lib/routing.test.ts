@@ -109,7 +109,7 @@ describe('走的是不是首选', () => {
     });
   });
 
-  test('首选模型整个不行（不知道也算不行）：写明顺位第一条活的在第几个模型', () => {
+  test('首选模型整个不行（不知道也算不行）：写首选不可用、实际派谁，不写第几个模型', () => {
     const p = purpose(
       'review',
       [model('grok', [route('g', 'unknown')]), model('gpt', [route('x', 'dead'), route('y', 'live')])],
@@ -117,12 +117,27 @@ describe('走的是不是首选', () => {
     );
     expect(firstLive(p)).toMatchObject({ modelIndex: 1, routeIndex: 1 });
     expect(purposeLine(p)).toEqual({
-      text: '首选模型不行，顺位第一条活的在第 2 个模型：GPT（Claude 订阅 · pool-y）',
+      text: '首选 GROK 不可用，实际派 GPT',
       tone: 'stall',
     });
   });
 
-  test('前面有一个已下架的：顶部第 N 个和这一行的实际第几位是同一个数，下架的不占名次', () => {
+  test('首选已关：写首选已关、实际派谁', () => {
+    const p = purpose(
+      'execute',
+      [
+        model('grok', [route('g', 'dead', { enabled: false }), route('h', 'dead', { enabled: false })]),
+        model('cursor', [route('c', 'live')]),
+      ],
+      'live',
+    );
+    expect(purposeLine(p)).toEqual({
+      text: '首选 GROK 已关，实际派 CURSOR',
+      tone: 'stall',
+    });
+  });
+
+  test('前面有一个已下架的：顶部实际第几位和下架不占名次照旧；说明写首选已关', () => {
     const off = model('kimi', [route('k', 'dead', { enabled: false })]);
     const retired = model('opus-5', [route('old', 'dead')]);
     const live = model('opus', [route('a', 'live')]);
@@ -139,11 +154,10 @@ describe('走的是不是首选', () => {
     expect(liveRank).toBe(1);
     expect(slotWord(states[2] ?? 'on', liveRank ?? null, '模型')).toBe('实际第 1 位');
     expect(purposeLine(p, env)).toEqual({
-      text: '首选模型不行，顺位第一条活的在第 1 个模型：OPUS（Claude 订阅 · pool-a）',
+      text: '首选 KIMI 已关，实际派 OPUS',
       tone: 'stall',
     });
   });
-
   test('一条活的都没有、有不知道的：说没有确定活着的、几条不知道，不说派不出去', () => {
     const p = purpose(
       'review',
