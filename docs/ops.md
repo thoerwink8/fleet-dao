@@ -10,7 +10,7 @@
 |---|---|---|
 | 系统 | Ubuntu 24.04，6 核 12G | Ubuntu 22.04，2 核 2G |
 | 跑什么 | Temporal、PostgreSQL、引擎工人、驾驶舱后端、AI 会话 | nginx（驾驶舱静态文件、证书、往法国转接口）、WireGuard 服务端、飞书网关（只出站，不听端口） |
-| 公网入站（ufw） | 只放 22/tcp；另在隧道网卡上给香港开 8787 | 只放 22/tcp、80/tcp、443/tcp（nginx）、4500/udp（WireGuard） |
+| 公网入站（ufw） | 只放 22/tcp；另在隧道网卡上给香港开 8787 | 本仓只放 22/tcp、80/tcp、443/tcp（nginx）、4500/udp（WireGuard）；另登记别家的 8443/tcp（self-proxy，不归本仓管）。白名单在 `deploy/hk.sh` 顶部「约定」（`HK_FW_OURS`、`HK_FW_FOREIGN`） |
 | 装机脚本 | `deploy/france.sh` | `deploy/hk.sh` |
 | 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
 
@@ -58,8 +58,11 @@
 
 香港：
 
+对公网的端口白名单和第一节「公网入站」是同一份。本仓管的在 `deploy/hk.sh` 顶部「约定」的 `HK_FW_OURS`（22/tcp、80/tcp、443/tcp、4500/udp），别家登记的在 `HK_FW_FOREIGN`（8443/tcp，不归本仓管）。改白名单改那里，并同步本节和第一节「公网入站」。
+
 | 端口 | 绑在 | 是谁 | 说明 |
 |---|---|---|---|
+| 22/tcp | 0.0.0.0、:: | sshd | 装机和运维登录 |
 | 80/tcp | 0.0.0.0 | nginx | `<驾驶舱域名>`：证书续期的验证路径，其余跳 https |
 | 443/tcp | 0.0.0.0 | nginx | `https://<驾驶舱域名>`：静态页；`/api`、`/auth`、`/github/webhook`、`/healthz` 经隧道转法国 `10.99.0.2:8787`（连接留着复用，第八节），转之前清掉 `Authorization`、`X-Fleet-Acting-Feishu`；`/agent` 不转；`/release.json`（带完整提交号）只给法国经隧道来的（`10.99.0.2`），别处来的回 404 |
 | 8443/tcp | 0.0.0.0、:: | self-proxy（不归本仓管） | `self-proxy-hk.service`：代理入口，ufw 注释 `self-proxy`；它的订阅在 nginx 站点 `self-proxy`（别家站点，同 ai-gateway）。别动 |

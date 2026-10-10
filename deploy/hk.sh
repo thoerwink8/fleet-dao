@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
 # 香港机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：系统用户 fleet 与 /etc/fleet-dao、
-# WireGuard 服务端、nginx 上 fleet-dao 这一个站点（驾驶舱静态文件 + Let's Encrypt 证书与自动续期；/api、/auth、
+# 防火墙基线（ufw 已经开着才收口：默认拒绝入站，只放白名单）、WireGuard 服务端、nginx 上 fleet-dao 这一个站点（驾驶舱静态文件 + Let's Encrypt 证书与自动续期；/api、/auth、
 # /github/webhook、/healthz 经隧道转法国）、法国发布脚本用的两把钥匙（都只许经隧道来：一把只能往 /srv/fleet-dao-web
 # 写静态文件，一把只能跑 fleet-gateway-deploy 发飞书网关）、飞书网关要的固定版本 node、单元、配置里缺的几项。
 # 飞书网关的代码由法国 deploy/release.sh 发来。别家的站点和服务一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
@@ -24,6 +24,12 @@ WG_IF=wg-fleet
 # UDP，香港唯一新开的公网入站端口。这台的上游只放行少数常见 UDP 端口：2026-09-25 从法国实测，
 # 53/67/69/123/161/500/1701/4500 进得来，51820 和其余高端口都到不了网卡。4500（IPsec NAT-T）空着，WireGuard 在上面握得上手。
 WG_PORT=4500
+# 对公网入站白名单。改这份名单要同步 docs/ops.md 第一节「公网入站」和第二节香港端口表。
+# 本仓管的（缺了才 ufw allow）：22/tcp、80/tcp、443/tcp、4500/udp（4500 就是上面的 WG_PORT）。
+HK_FW_OURS=(22/tcp 80/tcp 443/tcp "${WG_PORT}/udp")
+# 别家登记：8443/tcp 不归本仓管（self-proxy-hk.service，ufw 注释 self-proxy，「别动」）。
+# 见 docs/ops.md 第二节香港端口表。setup_firewall 不添加、不删除它的 ufw 规则，读回时认它不算多开。
+HK_FW_FOREIGN=(8443/tcp)
 WG_ADDR=10.99.0.1/24
 WG_PEER_ADDR=10.99.0.2
 # 法国驾驶舱后端（packages/api 的 FLEET_COCKPIT_LISTEN）：/api、/auth、/github/webhook、/healthz 经隧道转到这里。
@@ -274,6 +280,140 @@ load_config() {
   ok "本机配置 $ENV_FILE：域名 ${FLEET_DOMAIN:-（未配）}，法国公钥$(filled "$FLEET_WG_FRANCE_PUBLIC_KEY")"
 }
 
+# 读 ufw status verbose。成功时正文在 HK_FW_STATUS、第一行在 HK_FW_STATUS_LINE。
+# 命令失败或第一行不是 Status: active / inactive：红「没查成」，返回 1（不当成没开、也不当成没事）。
+hk_fw_read_status() {
+  local rc=0
+  HK_FW_STATUS=""
+  HK_FW_STATUS_LINE=""
+  if ! command -v ufw >/dev/null 2>&1; then
+    red "ufw 状态没查成：没有 ufw 命令"
+    return 1
+  fi
+  HK_FW_STATUS=$(ufw status verbose 2>&1) || rc=$?
+  if ((rc != 0)); then
+    red "ufw 状态没查成：命令失败（${HK_FW_STATUS:0:200}）"
+    return 1
+  fi
+  HK_FW_STATUS_LINE=${HK_FW_STATUS%%$'\n'*}
+  case "$HK_FW_STATUS_LINE" in
+  "Status: active" | "Status: inactive") return 0 ;;
+  esac
+  red "ufw 状态没查成：输出认不出"
+  return 1
+}
+
+# 默认入站策略（deny / allow / reject）。verbose 里没有 Default 行就空
+hk_fw_incoming_policy() {
+  local policy=""
+  if [[ "$HK_FW_STATUS" =~ Default:[[:space:]]*([a-z]+)[[:space:]]*\(incoming\) ]]; then
+    policy=${BASH_REMATCH[1]}
+  fi
+  printf '%s' "$policy"
+}
+
+# 这一条端口/协议已有 v4 的入站 ALLOW IN（「22/tcp (v6)」那行不算：缺 v4 时 ufw allow 会补）。
+# 只认 ALLOW IN：同端口的 ALLOW OUT 是出站，不算已放行。只有出站时仍要补入站，再把默认入站改成拒绝。
+hk_fw_allowed() {
+  grep -qE "^${1}[[:space:]]+ALLOW IN([[:space:]]|$)" <<<"$HK_FW_STATUS"
+}
+
+hk_fw_comment() {
+  case $1 in
+  22/tcp) printf '%s' 'fleet-dao ssh' ;;
+  80/tcp) printf '%s' 'fleet-dao http' ;;
+  443/tcp) printf '%s' 'fleet-dao https' ;;
+  "${WG_PORT}/udp") printf '%s' 'fleet-dao wireguard' ;;
+  *) printf '%s' "fleet-dao $1" ;;
+  esac
+}
+
+# 在白名单（本仓的或别家登记的）里
+hk_fw_listed() {
+  local x
+  for x in "${HK_FW_OURS[@]}" "${HK_FW_FOREIGN[@]}"; do
+    [[ "$x" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+# ss -Hltunp 的一行。对公网：打印「端口/协议<TAB>进程名」并返回 0。
+# 回环（127.0.0.0/8、::1，地址上的 %区 先剥掉）和隧道地址 10.99.0.1：返回 1。认不出：返回 2。
+hk_fw_public_line() {
+  local line=$1 proto local_spec addr port proc
+  proto=${line%%[[:space:]]*}
+  case "$proto" in
+  tcp | udp) ;;
+  *) return 2 ;;
+  esac
+  local_spec=$(awk '{ print $5 }' <<<"$line")
+  [[ -n "$local_spec" && "$local_spec" != "$proto" ]] || return 2
+  if [[ "$local_spec" == "["*"]:"* ]]; then
+    addr=${local_spec#\[}
+    addr=${addr%%\]:*}
+    port=${local_spec##*:}
+  elif [[ "$local_spec" == *:* ]]; then
+    addr=${local_spec%:*}
+    port=${local_spec##*:}
+  else
+    return 2
+  fi
+  addr=${addr%%%*}
+  [[ "$port" =~ ^[0-9]+$ ]] || return 2
+  if [[ "$addr" == 127.* || "$addr" == "::1" || "$addr" == "0:0:0:0:0:0:0:1" ]]; then
+    return 1
+  fi
+  if [[ "$addr" == "${WG_ADDR%%/*}" ]]; then
+    return 1
+  fi
+  proc="-"
+  if [[ "$line" =~ users:\(\(\"([^\"]+)\" ]]; then
+    proc=${BASH_REMATCH[1]}
+  fi
+  printf '%s/%s\t%s\n' "$port" "$proto" "$proc"
+}
+
+hk_fw_join_lines() {
+  awk 'BEGIN { s = "" } { s = s (NR > 1 ? "、" : "") $0 } END { printf "%s", s }'
+}
+
+# ufw 没开就停下，不执行 ufw enable（开防火墙可能断 SSH）。已开着：默认不是拒绝才改成拒绝；
+# 本仓白名单里缺的才 ufw allow。别家已有的规则（含 8443 上注释 self-proxy 的那条）一律不添加、不删除。
+# 先补放行再收紧默认：免得默认一改成拒绝、22 还没放行，把自己关在门外。已经是这个样子时一条改 ufw 的命令都不发。
+setup_firewall() {
+  step "防火墙（默认拒绝入站；本仓只放白名单，别家的规则不动）"
+  local spec cmt policy touched=0
+  if ! hk_fw_read_status; then return 1; fi
+  if [[ "$HK_FW_STATUS_LINE" == "Status: inactive" ]]; then
+    red "ufw 没开：不替人开（开防火墙可能断 SSH）"
+    return 1
+  fi
+  for spec in "${HK_FW_OURS[@]}"; do
+    if hk_fw_allowed "$spec"; then continue; fi
+    cmt=$(hk_fw_comment "$spec")
+    if ! ufw allow "$spec" comment "$cmt" >/dev/null; then
+      red "ufw 放行 $spec 没做成"
+      return 1
+    fi
+    changed "ufw 放行 $spec"
+    touched=1
+  done
+  policy=$(hk_fw_incoming_policy)
+  if [[ -z "$policy" ]]; then
+    red "ufw 状态没查成：默认入站策略认不出"
+    return 1
+  fi
+  if [[ "$policy" != deny ]]; then
+    if ! ufw default deny incoming >/dev/null; then
+      red "ufw 默认拒绝入站没做成"
+      return 1
+    fi
+    changed "ufw 默认拒绝入站（原来是 $policy）"
+    touched=1
+  fi
+  if ((touched == 0)); then ok "ufw 开着，默认拒绝入站，白名单都已放行"; fi
+}
+
 setup_wireguard() {
   step "WireGuard 服务端（UDP $WG_PORT）"
   ensure_pkgs wireguard-tools
@@ -283,15 +423,7 @@ setup_wireguard() {
     red "UDP $WG_PORT 已被别的程序占着：$(ss -Hlunp "sport = :$WG_PORT")"
     return 1
   fi
-  # 这是香港唯一新开的公网入站端口。ufw 开着才要放行；这台没开 ufw 时 iptables 默认放行
-  local fw
-  if command -v ufw >/dev/null; then
-    fw=$(ufw status 2>/dev/null || true)
-    if [[ "$fw" == "Status: active"* && "$fw" != *"$WG_PORT/udp"*ALLOW* ]]; then
-      ufw allow "$WG_PORT/udp" comment 'fleet-dao wireguard' >/dev/null
-      changed "ufw 放行 UDP $WG_PORT"
-    fi
-  fi
+  # 公网放行不在这里：setup_firewall 的白名单含 UDP $WG_PORT。这里只起接口。
   ensure_wg_key "$WG_IF"
   local key_changed=$WROTE conf
   echo "  香港公钥：$WG_PUBLIC_KEY"
@@ -414,6 +546,7 @@ setup_tls() {
 readback() {
   step "读回"
   readback_secrets_dir
+  readback_firewall
   readback_wireguard
   readback_site
   readback_upstream
@@ -553,6 +686,76 @@ readback_upstream() {
   fi
 }
 
+# 对公网多开了口才红，并点名端口和进程。白名单里有、机器上还没在听（证书没签时的 443）只记一行 ok。
+# ss 失败或有认不出的行：红「没查成」，不当成「没有多开」。
+hk_fw_readback_ports() {
+  local out="" rc=0 line parsed st key proc spec
+  local -A seen=()
+  local bad="" extras=() missing=() shown joined
+  if ! command -v ss >/dev/null 2>&1; then
+    red "对公网的端口没查成：没有 ss 命令"
+    return 0
+  fi
+  # -H 不要表头，-l 只看监听，-tu tcp 和 udp，-n 数字地址，-p 才有进程名
+  out=$(ss -Hltunp 2>&1) || rc=$?
+  if ((rc != 0)); then
+    red "对公网的端口没查成：ss 失败（${out:0:200}）"
+    return 0
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" ]] && continue
+    parsed=$(hk_fw_public_line "$line") && st=0 || st=$?
+    if ((st == 1)); then continue; fi
+    if ((st != 0)); then
+      bad+="${bad:+ }${line:0:120}"
+      continue
+    fi
+    key=${parsed%%$'\t'*}
+    proc=${parsed#*$'\t'}
+    if [[ -z "${seen[$key]:-}" ]]; then
+      seen[$key]=$proc
+    elif [[ ",${seen[$key]}," != *",$proc,"* ]]; then
+      seen[$key]+=",$proc"
+    fi
+  done <<<"$out"
+  if [[ -n "$bad" ]]; then red "对公网的端口没查成：ss 有认不出的行（$bad）"; fi
+  for key in "${!seen[@]}"; do
+    if hk_fw_listed "$key"; then continue; fi
+    extras+=("${key}（进程 ${seen[$key]}）")
+  done
+  if ((${#extras[@]})); then
+    shown=$(printf '%s\n' "${extras[@]}" | LC_ALL=C sort | hk_fw_join_lines)
+    red "对公网多开了端口：$shown"
+  fi
+  for spec in "${HK_FW_OURS[@]}"; do
+    if [[ -z "${seen[$spec]:-}" ]]; then missing+=("$spec"); fi
+  done
+  if ((${#missing[@]})); then
+    joined=$(printf '%s\n' "${missing[@]}" | hk_fw_join_lines)
+    ok "白名单里还没在听：${joined}（没在听不算红，例如证书没签时 443）"
+  fi
+  if ((${#extras[@]} == 0)) && [[ -z "$bad" ]]; then ok "对公网在听的端口都在白名单里"; fi
+}
+
+readback_firewall() {
+  local policy=""
+  if hk_fw_read_status; then
+    if [[ "$HK_FW_STATUS_LINE" == "Status: inactive" ]]; then
+      red "ufw 没开"
+    else
+      policy=$(hk_fw_incoming_policy)
+      if [[ -z "$policy" ]]; then
+        red "ufw 状态没查成：默认入站策略认不出"
+      elif [[ "$policy" != deny ]]; then
+        red "ufw 默认入站不是拒绝（现在是 $policy）"
+      else
+        ok "ufw 开着，默认拒绝入站"
+      fi
+    fi
+  fi
+  hk_fw_readback_ports
+}
+
 readback_wireguard() {
   local port latest age
   if [[ "$(systemctl is-active "wg-quick@$WG_IF.service" 2>/dev/null)" != active ]]; then
@@ -639,6 +842,8 @@ main() {
   local before=""
   preflight
   if ((CHECK_ONLY == 0)); then
+    # 先收防火墙：没开就停下，不往下装。放在快照前，补白名单不算「装机碰了旧系统」；别家规则这一步也不改。
+    setup_firewall
     before=$(snapshot_others)
     setup_identity
     load_config
@@ -659,4 +864,4 @@ main() {
   finish
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
