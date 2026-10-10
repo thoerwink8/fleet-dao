@@ -23,7 +23,7 @@ import { WINDOW_MIN_ROWS, windowRange } from '../lib/list-window';
 import { purposeLabel } from '../lib/routing';
 import { supportedPurposeEfforts } from '../lib/routing-browse';
 import { cn } from '../lib/utils';
-import { TAP, useRoutingEdit } from './routing-edit';
+import { RowMenu, type RowMoves, TAP, useRoutingEdit } from './routing-edit';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -284,15 +284,24 @@ function effortBlockedWhy(modelId: string, routes: readonly { hostId: HostId }[]
   return '这几条路由没有共同认的档位';
 }
 
-/** 用途里这一行的档位和「移出」。档位只列这个模型的路由都认的。 */
+/**
+ * 用途里这一行的档位和「移出」。档位只列这个模型的路由都认的。
+ * 给了 menu（手机）：「移出」不再单独一个按钮，和开关、上移、下移一起收进行尾「⋯」菜单（#1806）；档位下拉留在行里。
+ */
 export function PurposeModelControls({
   purpose,
   model,
   onError,
+  menu,
 }: {
   purpose: RoutingLayerPurpose;
   model: RoutingLayerModel;
   onError: (message: string | null) => void;
+  menu?: {
+    moves: RowMoves;
+    /** 模型开关此刻的样子；一条路由都没有时 unavailable 为 true，菜单里这一项置灰。 */
+    toggle: { enabled: boolean; expectedEnabled: string[]; unavailable: boolean };
+  };
 }) {
   const edit = useRoutingEdit();
   const setEffort = useSetPurposeModelEffort();
@@ -374,18 +383,49 @@ export function PurposeModelControls({
           {blockedWhy}
         </span>
       ) : null}
-      <Button
-        type="button"
-        size="xs"
-        variant="ghost"
-        className={TAP}
-        disabled={locked !== null}
-        title={locked ?? `把 ${model.displayName} 移出${purposeLabel(purpose.purpose)}`}
-        aria-label={`把 ${model.displayName} 移出用途`}
-        onClick={() => setConfirm(true)}
-      >
-        移出
-      </Button>
+      {menu ? (
+        <RowMenu
+          moves={menu.moves}
+          leading={[
+            {
+              key: 'toggle',
+              label: menu.toggle.enabled ? '关闭这个模型' : '开启这个模型',
+              disabled: locked !== null || menu.toggle.unavailable,
+              title: locked ?? (menu.toggle.unavailable ? '这个模型下一条路由都没有' : undefined),
+              onSelect: () =>
+                edit.toggleModel({
+                  modelId: model.modelId,
+                  modelName: model.displayName,
+                  enabled: menu.toggle.enabled,
+                  expectedEnabled: menu.toggle.expectedEnabled,
+                }),
+            },
+          ]}
+          trailing={[
+            {
+              key: 'remove',
+              label: `移出${purposeLabel(purpose.purpose)}`,
+              destructive: true,
+              disabled: locked !== null,
+              title: locked ?? `把 ${model.displayName} 移出${purposeLabel(purpose.purpose)}`,
+              onSelect: () => setConfirm(true),
+            },
+          ]}
+        />
+      ) : (
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost"
+          className={TAP}
+          disabled={locked !== null}
+          title={locked ?? `把 ${model.displayName} 移出${purposeLabel(purpose.purpose)}`}
+          aria-label={`把 ${model.displayName} 移出用途`}
+          onClick={() => setConfirm(true)}
+        >
+          移出
+        </Button>
+      )}
       <AlertDialog open={confirm} onOpenChange={(open) => !open && !remove.isPending && setConfirm(false)}>
         <AlertDialogContent>
           <AlertDialogHeader>

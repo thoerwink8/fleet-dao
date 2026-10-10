@@ -70,7 +70,7 @@ describe('LoadError', () => {
 
 // #1588：1024 宽时页头 flex-wrap，标题块不能收缩，描述一长就把右侧操作区挤到下一行。
 describe('Page 页头', () => {
-  test('带操作和长描述时，md 及以上页头不换行，描述在标题块里折行', () => {
+  test('带操作和长描述时，lg（1024）及以上页头不换行，描述在标题块里折行；窄一点整排操作掉到标题下面（#1806）', () => {
     const { container } = render(
       <Page
         title="操作记录"
@@ -83,15 +83,15 @@ describe('Page 页头', () => {
     const header = container.querySelector('header');
     expect(header).toBeTruthy();
     expect(header?.className).toContain('flex-wrap');
-    expect(header?.className).toContain('md:flex-nowrap');
+    expect(header?.className).toContain('lg:flex-nowrap');
     const titleBlock = screen.getByRole('heading', { level: 1 }).parentElement;
     expect(titleBlock).toBe(header?.firstElementChild);
     expect(titleBlock?.className).toContain('min-w-0');
-    expect(titleBlock?.className).toContain('md:flex-1');
+    expect(titleBlock?.className).toContain('lg:flex-1');
     const actions = screen.getByRole('button', { name: '刷新' }).parentElement;
     expect(actions).toBeTruthy();
     expect(actions?.parentElement).toBe(header);
-    expect(actions?.className).toContain('shrink-0');
+    expect(actions?.className).toContain('lg:shrink-0');
   });
 
   test('不带操作时不渲染操作区容器', () => {

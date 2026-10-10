@@ -25,6 +25,7 @@ import {
   revealOnMobile,
 } from '../components/routing-browse';
 import {
+  COMPACT_MQ,
   FounderOnlyBadge,
   ModelSwitch,
   RoutingEditProvider,
@@ -273,7 +274,8 @@ function PurposeList({
   const aside = purposes.filter((p) => routingPurposeOf(p.purpose)?.aside === true);
   return (
     <nav aria-label="用途" className="min-w-0">
-      <ul className="flex items-center gap-1.5 overflow-x-auto pb-1 md:flex-wrap md:overflow-visible">
+      {/* relative：横滑条里的 sr-only 文字是绝对定位，不套 relative 会跑到滚动区外撑宽页面（#1806） */}
+      <ul className="relative flex items-center gap-1.5 overflow-x-auto pb-1 md:flex-wrap md:overflow-visible">
         {flow.map((p) => (
           <PurposeItem key={p.purpose} purpose={p} selected={selected} params={params} />
         ))}
@@ -612,6 +614,7 @@ function ModelRow({
   controls: RowControls;
 }) {
   const enabledRouteIds = m.routes.filter((r) => r.enabled).map((r) => r.routeId);
+  const compact = useMediaQuery(COMPACT_MQ);
   const kind = modelKind(m, useKindEnv());
   const skipped = slot.state !== 'on';
   // 档位配不了的长说明：行内藏掉，悬停操作区看全文（#1754）
@@ -679,16 +682,37 @@ function ModelRow({
           title={effortTitle}
           className="inline-flex flex-wrap items-center gap-0.5"
         >
-          <PurposeModelControls purpose={purpose} model={m} onError={onError} />
+          <PurposeModelControls
+            purpose={purpose}
+            model={m}
+            onError={onError}
+            {...(compact
+              ? {
+                  menu: {
+                    moves: controls.moves,
+                    toggle: {
+                      enabled: enabledRouteIds.length > 0,
+                      expectedEnabled: enabledRouteIds,
+                      unavailable: m.routes.length === 0,
+                    },
+                  },
+                }
+              : {})}
+          />
         </span>
-        <ModelSwitch
-          modelId={m.modelId}
-          modelName={m.displayName}
-          enabled={enabledRouteIds.length > 0}
-          expectedEnabled={enabledRouteIds}
-          unavailable={m.routes.length === 0}
-        />
-        {controls.pins}
+        {/* 不到 lg：开关和上移、下移、置顶、置底、移出都在「⋯」菜单里（#1806），行里只留档位和菜单按钮 */}
+        {compact ? null : (
+          <>
+            <ModelSwitch
+              modelId={m.modelId}
+              modelName={m.displayName}
+              enabled={enabledRouteIds.length > 0}
+              expectedEnabled={enabledRouteIds}
+              unavailable={m.routes.length === 0}
+            />
+            {controls.pins}
+          </>
+        )}
       </div>
     </div>
   );
