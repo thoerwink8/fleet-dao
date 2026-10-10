@@ -1,6 +1,7 @@
 // 任务详情的「时间与用量」和会话时间线里的用量那几段。数都出自 shared 的 summarizeUsage（任务用后端算好的
 // usage，一次会话用 lib/usage 的 runUsage 现算）；还在跑的会话只把排队、干活时长算到现在加上去，用量要等它结束才有。
 // 读到的照数写；有没读到的标「不全」、写明几次；全没读到写「没读到」，不写 0（说法在 lib/usage.ts）。
+// 尺寸 token：不全标 text-micro（10px）；说明、花费明细、分开看、额度提示 text-caption（11px）；花费行 grid-cols-usage（标签 3.5rem、剩余）。
 import type { UsageTotals } from '@fleet-dao/shared';
 import { type ReactNode, useState } from 'react';
 import type { Run, TaskDetail } from '../api/types';
@@ -15,6 +16,7 @@ import { Panel } from './page';
 function Incomplete() {
   return (
     <span className="rounded border border-st-stall/50 px-1 text-micro leading-4 font-medium text-ink-stall">
+      {/* 原 10px，text-micro */}
       不全
     </span>
   );
@@ -109,15 +111,22 @@ function Total({
         )}
         {r.kind === 'partial' ? (
           <p className="mt-0.5 text-caption font-normal text-ink-stall">
+            {/* 原 11px，text-caption */}
             另有 {r.missing} 次{why}，没算进来
           </p>
         ) : null}
         {r.kind === 'missing' ? (
           <p className="mt-0.5 text-caption font-normal text-ink-stall">
+            {/* 原 11px，text-caption */}
             {r.missing} 次会话都{why}
           </p>
         ) : null}
-        {note ? <p className="mt-0.5 text-caption font-normal text-muted-foreground">{note}</p> : null}
+        {note ? (
+          <p className="mt-0.5 text-caption font-normal text-muted-foreground">
+            {/* 原 11px，text-caption */}
+            {note}
+          </p>
+        ) : null}
       </dd>
     </div>
   );
@@ -149,6 +158,7 @@ function CostRow({
   const r = reading(share.usd, share.missing, share.runs);
   return (
     <div className="grid grid-cols-usage gap-x-2">
+      {/* 原标签列 3.5rem，grid-cols-usage */}
       <dt className="text-xs leading-5 text-muted-foreground">{label}</dt>
       <dd className="min-w-0 text-sm">
         {r.kind === 'none' ? (
@@ -166,6 +176,7 @@ function CostRow({
         )}
         {r.kind !== 'none' ? (
           <p className="text-caption text-muted-foreground">
+            {/* 原 11px，text-caption */}
             {r.kind === 'partial' ? (
               <span className="text-ink-stall">另有 {r.missing} 次没读到，没算进来 · </span>
             ) : null}
@@ -258,6 +269,7 @@ function Breakdown({ usage }: { usage: TaskDetail['usage'] }) {
                 </span>
               </div>
               <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-caption text-muted-foreground">
+                {/* 原 11px，text-caption */}
                 {parts.length ? <UsageParts parts={parts} /> : <span>在跑，用量等它结束才有</span>}
               </div>
             </li>
@@ -322,6 +334,7 @@ export function UsagePanel({ d, now }: { d: TaskDetail; now: number }) {
       <Section title="额度">
         {t.running && t.runs ? (
           <p className="mb-2 text-caption text-muted-foreground">
+            {/* 原 11px，text-caption */}
             另有 {t.running} 个会话在跑：用量等它结束才算进来。
           </p>
         ) : null}
