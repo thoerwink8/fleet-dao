@@ -1,11 +1,39 @@
 // 按需探测的结论原文和认法（#1635）：固定那一句 + 上一次真探的结果和北京时间时刻；没真探过的写「还没真探过」，不编。
 import { describe, expect, it } from 'vitest';
 import {
+  isDegradedDetail,
   isOnDemandDetail,
   onDemandDetail,
   probeCadenceMinutes,
   ROUTE_PROBE_PRIMARY_NOTE,
 } from '../src/route-probe-pace.ts';
+
+describe('疑似降智的原文（#1748）', () => {
+  it('不通的结论直接以「疑似降智」起头：认', () => {
+    expect(isDegradedDetail('疑似降智：题 17 乘 23，应为 391，实答 381')).toBe(true);
+  });
+  it('按需探测接手后，上一次真探是疑似降智：也认（路由页、渠道状态页不能只写按需）', () => {
+    const text = onDemandDetail({
+      state: 'failed',
+      at: new Date('2026-10-10T01:05:00Z'),
+      detail: '疑似降智：题 17 乘 23，应为 391，实答 381',
+    });
+    expect(isOnDemandDetail(text)).toBe(true);
+    expect(isDegradedDetail(text)).toBe(true);
+  });
+  it('上一次真探是通的、普通不通、没真探过、空：不认', () => {
+    expect(isDegradedDetail(onDemandDetail({ state: 'ok', at: new Date(), detail: '答上了：OK' }))).toBe(
+      false,
+    );
+    expect(isDegradedDetail(onDemandDetail({ state: 'failed', at: new Date(), detail: '网络不通' }))).toBe(
+      false,
+    );
+    expect(isDegradedDetail(onDemandDetail(null))).toBe(false);
+    expect(isDegradedDetail('答上了：OK · 降智检测通过（17*23=391）')).toBe(false);
+    expect(isDegradedDetail(null)).toBe(false);
+    expect(isDegradedDetail(undefined)).toBe(false);
+  });
+});
 
 describe('按需探测的原文', () => {
   it('上一次真探通：写通和北京时间时刻（UTC 01:05 = 北京 09:05）', () => {

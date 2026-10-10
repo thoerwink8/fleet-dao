@@ -8,7 +8,7 @@
 
 import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
 import { ChevronDown, TriangleAlert } from 'lucide-react';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Model, ProbeHistoryCell, Route } from '../api/types';
 import { formatDateTime } from '../lib/format';
 import {
@@ -18,6 +18,7 @@ import {
   type ProbeKind,
   probeKind,
   probeLogRows,
+  splitProbeRows,
 } from '../lib/probe-history-view';
 import { cn } from '../lib/utils';
 import type { ChannelHistory } from './channel-status';
@@ -72,16 +73,22 @@ export function ProbeLog({
     );
   }
   const strip = history.channels.find((item) => item.channelId === channelId);
-  const rows = probeLogRows(
-    (strip?.cells ?? []).slice(-PROBE_HISTORY_SLOTS),
-    history.latestByRoute,
-    channelId,
+  const { real, skipped } = splitProbeRows(
+    probeLogRows(
+      (strip?.cells ?? []).slice(-PROBE_HISTORY_SLOTS),
+      history.latestByRoute,
+      channelId,
+      strip?.skipped ?? [],
+    ),
   );
+  const rows = real;
+  const modelNameOf = (cell: ProbeHistoryCell) =>
+    models.find((m) => m.id === routes.find((r) => r.id === cell.routeId)?.modelId)?.displayName;
   return (
     <section aria-label="探测记录" className="mb-4">
       <h3 className="text-sub font-semibold">探测记录</h3>
       <p className="mb-2 text-caption text-muted-foreground">
-        最近 60 次，从新到旧；每条路由自己的最近一次也在里面。点一行看请求和响应原文。
+        最近 60 次真探，从新到旧；每条路由自己的最近一次也在里面。点一行看请求和响应原文。没真探的另折在下面。
       </p>
       <ul
         data-probe-log="legend"
@@ -102,7 +109,9 @@ export function ProbeLog({
           data-probe-log="empty"
           className="rounded-lg border border-dashed px-3 py-6 text-center text-sub text-muted-foreground"
         >
-          还没有探测记录
+          {skipped.length > 0
+            ? `最近没有真探过：只有 ${skipped.length} 条没探的记录，折在下面`
+            : '还没有探测记录'}
         </p>
       ) : (
         <ol
@@ -114,16 +123,65 @@ export function ProbeLog({
             <ProbeLogRow
               key={cell.id}
               cell={cell}
-              modelName={
-                models.find((m) => m.id === routes.find((r) => r.id === cell.routeId)?.modelId)?.displayName
-              }
+              modelName={modelNameOf(cell)}
               open={cell.id === openId}
               onToggle={() => onToggle(cell.id)}
             />
           ))}
         </ol>
       )}
+      {skipped.length > 0 ? (
+        <SkippedFold skipped={skipped} openId={openId} modelNameOf={modelNameOf} onToggle={onToggle} />
+      ) : null}
     </section>
+  );
+}
+
+/** 没真探的记录（没探、按需）折起来：点开才看；从格子或「看最近一次」点进来的恰好是其中一条时自动展开。 */
+function SkippedFold({
+  skipped,
+  openId,
+  modelNameOf,
+  onToggle,
+}: {
+  skipped: readonly ProbeHistoryCell[];
+  openId: number | undefined;
+  modelNameOf: (cell: ProbeHistoryCell) => string | undefined;
+  onToggle: (cellId: number) => void;
+}) {
+  const wanted = openId !== undefined && skipped.some((c) => c.id === openId);
+  const [shown, setShown] = useState(false);
+  const expanded = shown || wanted;
+  return (
+    <div data-probe-log="skipped" className="mt-2">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-controls="probe-log-skipped"
+        onClick={() => setShown(!expanded)}
+        className="inline-flex min-h-8 items-center gap-1 rounded-md px-2 text-caption text-muted-foreground hover:bg-muted hover:text-foreground"
+      >
+        <ChevronDown className={cn('size-3.5 transition-transform', expanded && 'rotate-180')} aria-hidden />
+        {skipped.length} 条没真探的记录（没探、按需），{expanded ? '收起' : '点开看'}
+      </button>
+      {expanded ? (
+        <ol
+          id="probe-log-skipped"
+          aria-label="没真探的记录"
+          className="mt-1.5 max-h-routing-pane space-y-1.5 overflow-y-auto pr-1"
+        >
+          {skipped.map((cell) => (
+            <ProbeLogRow
+              key={cell.id}
+              cell={cell}
+              modelName={modelNameOf(cell)}
+              open={cell.id === openId}
+              onToggle={() => onToggle(cell.id)}
+            />
+          ))}
+        </ol>
+      ) : null}
+    </div>
   );
 }
 

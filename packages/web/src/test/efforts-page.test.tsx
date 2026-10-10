@@ -100,7 +100,7 @@ describe('思考档位页：看', () => {
     expect(row('r-ca-opus').textContent).toContain('起会话用 high（没配，用默认）');
     // 关着的路由照样列出来，也能先配
     expect(row('r-rl-opus').textContent).toContain('关着');
-    expect(screen.getByText(/条配了/).textContent).toMatch(/^1 条配了 · \d+ 条用默认 high · 3 条配不了$/);
+    expect(screen.getByText(/条配了/).textContent).toMatch(/^1 条配了 · \d+ 条用默认 high · 4 条配不了$/);
   });
 
   test('这家认哪几档就给哪几格：Claude Code 五档都有，Grok 没有 max', async () => {
