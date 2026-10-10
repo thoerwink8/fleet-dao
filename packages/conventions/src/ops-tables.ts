@@ -812,7 +812,7 @@ export interface UnitEntry {
   description: string;
 }
 
-/** 读两个目录下的单元文件。有文件没有 Description 行（或值是空的、值里有表格分隔符 `|`）抛带文件名的错；
+/** 读两个目录下的单元文件。有文件没有 Description 行抛带文件名的错；值原样返回（空值、含 `|` 也不拦）；
  *  两个目录都列不出来、或一个单元文件都没读到，也抛错（调用方落成「没查成」，不当成空表）。 */
 export function readUnitEntries(repo: RepoView): UnitEntry[] {
   const entries: UnitEntry[] = [];
@@ -835,9 +835,6 @@ export function readUnitEntries(repo: RepoView): UnitEntry[] {
         }
       }
       if (description === undefined) throw new Error(`${path} 里没有 Description= 这一行`);
-      if (description.trim() === '') throw new Error(`${path} 的 Description= 是空的`);
-      if (description.includes('|'))
-        throw new Error(`${path} 的 Description= 里有 |，放不进表格：${description}`);
       entries.push({ file: name, machine: src.machine, description });
     }
   }

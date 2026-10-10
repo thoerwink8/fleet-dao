@@ -825,13 +825,15 @@ describe('单元表（第七片）', () => {
     expect(() => readUnitEntries(r)).toThrow('Description=');
   });
 
-  it('故意失败：Description 是空的、或带 |，抛带文件名的错', () => {
-    expect(() =>
-      readUnitEntries(memRepo(unitsFiles({ 'deploy/hk/fleet-feishu.service': 'Description=\n' }))),
-    ).toThrow('deploy/hk/fleet-feishu.service');
-    expect(() =>
-      readUnitEntries(memRepo(unitsFiles({ 'deploy/hk/fleet-feishu.service': 'Description=a | b\n' }))),
-    ).toThrow('deploy/hk/fleet-feishu.service');
+  it('Description 值空着、或带 |，也原样返回，生成的区块和核对一致', () => {
+    const files = unitsFiles({
+      'deploy/hk/fleet-feishu.service': 'Description=a | b\n',
+      'deploy/france/fleet-api.timer': 'Description=\n',
+    });
+    const entries = readUnitEntries(memRepo(files));
+    expect(entries.find((e) => e.file === 'fleet-feishu.service')?.description).toBe('a | b');
+    expect(entries.find((e) => e.file === 'fleet-api.timer')?.description).toBe('');
+    expect(checkUnitsBlock(memRepo({ ...files, 'docs/ops.md': unitsDoc(files) }), 'docs/ops.md')).toEqual([]);
   });
 
   it('故意失败：两个目录都列不出来、或下面一个单元文件都没有，抛错，不当成空表', () => {
