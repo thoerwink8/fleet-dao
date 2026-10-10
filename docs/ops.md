@@ -757,6 +757,14 @@ FLEET_HK_PARTS=gateway                  # 往香港发哪几样：gateway 飞书
   ```
   它换成 fleet、带上 `api.env` 连库（和 `fleet-api.service` 同一份环境），密码从终端读两遍、不回显；不收命令行参数传密码（会进 shell 历史）。标准输入是管道时按行读两行（脚本里用：`printf '%s\n%s\n' "$pw" "$pw" | bash …/fleet-api set-password …`）。只能给在用的创始人设，别的人拒；这个人还没有用户名的，要带 `--username` 或按提示输一个。设完输错计数和锁清零、他所有设备上已登的会话作废（要重新登录），操作记录里记一条 `credentials.set`（来源记成 engine，reason 写明是这条命令）。退出码：0 设上了；1 被拒（不在白名单、两遍不一样、太短、用户名被占……，一句话说原因）；2 参数不对或没带上库连接。
   核对（只看有没有，不看值）：`runuser -u fleet -- psql -d fleet -Atc "select display_name, username is not null, password_hash is not null, locked_until from users where role = 'founder'"`。
+- **AI 点验登录**（#1800，母单 #1798）：驾驶舱只认飞书和账密，本机的无头浏览器没有登录态，点验线上页面前在法国以 root 发一枚短命会话 Cookie（和 `set-password` 同一个入口、同一个信任边界，不加任何网络入口）：
+
+  ```
+  bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api session-mint <飞书显示名或用户 id> --reason "<为什么>" [--ttl <分钟>]
+  ```
+  `--reason` 必带；`--ttl` 默认 60、最多 120 分钟，超了拒（退出码 2）。只能发给在用的创始人，别的人拒（退出码 1）。它读 `api.env` 里的会话密钥（没有就报错退出，不拿别的密钥签），先写一条操作记录（`session.mint`，目标 `cockpit`，记给谁、多久、原因、谁跑的；不含 Cookie 值）再打印；记不进就什么都不打印、退出码 1。打印两行：第一行 Cookie 名（https 下是 `__Host-fleet_session`），第二行值，脚本好读（`ssh <法国> "bash …/fleet-api session-mint …" | { read -r name; read -r value; }`）。会话里登录方式记 `cli-mint`，版本号取此人当前的会话版本。
+  塞进无头浏览器（playwright）：`await context.addCookies([{ name, value, domain: '<驾驶舱域名>', path: '/', secure: true, httpOnly: true, sameSite: 'Lax' }])`，然后打开驾驶舱页面；`__Host-` 前缀的 Cookie 浏览器要求 `secure`、`path` 为 `/`、且不能带 `Domain` 属性；playwright 报这一条时，把 `domain` + `path` 换成 `url: 'https://<驾驶舱域名>/'`。Cookie 值别进聊天、仓库、日志。
+  用完不用撤，到期即失效；要提前作废，用驾驶舱的「退出所有设备」（会话版本加 1，这枚也跟着失效）。
 - **引擎待命**（创始人 2026-10-05 约 19:10：「关闭」＝引擎进程开着但不接活，不是进程停着；原话「2 3 4 6 7 按照你推荐」，推荐＝待命）：法国期望 `FLEET_SERVICES=fleet-engine fleet-api`（`deploy/france/desired-config.json`），引擎和后端都开着；各项目的「让 AI 接活」新导入的默认关（发版前后保持原样，发完恢复到发版前，见自动发布一节），点开才拉单、派活（驾驶舱「设置 → 仓库」，或下面的命令）。关着时引擎只收单、显示、不派，但**路由探针每 15 分钟仍会起一次最短的模型会话**、读额度每 15 分钟照读、会判要不要切拼车/独享号——这是创始人知情同意的代价（要连探针也不花，只能把进程停掉，那就是看板点不动、开启要 root）。全流程巡检在巡检仓开关关着时记「跳过」、不报警（第五节）。上线这一版（发布一轮，引擎起来）之后不用再手动恢复定时任务：8 个定时任务是引擎进程里的定时器（#1072），起来自己恢复；Temporal 上老的 Schedule（含当初被手动暂停的那四个）引擎起来时自动删，读回 `fleet-temporal schedule list` 应是空的。撤回「待命」（回到进程停着）要改期望、发布一轮，是创始人拍的事。
 - 「让 AI 接活」开关（design 第九节「在哪能做与接活开关」，库里是 `repos.auto_dispatch_since`）：驾驶舱的开关页面（#131）做好之前，在法国以 root 用同一个管理命令开关；页面做好以后这条命令留作运维的后备，两边写的是同一份数据、走同一个写入口（`Store.setAutoDispatch`）。
 
