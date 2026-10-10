@@ -101,6 +101,10 @@ export interface PickRouteInput extends Scope {
    * 不拿同族顶。
    */
   avoidFamilies?: string[];
+  /**
+   * 这张单已经有的作者族：写码返工时先在这几族里挑，免得作者族越攒越多、冷验收挑不出别家。
+   */
+  preferFamilies?: string[];
   /** 这一步算界面类的活（改到了页面代码）：禁令按 UI 判，GPT 不派（含审界面）。 */
   uiWork?: boolean;
   /**

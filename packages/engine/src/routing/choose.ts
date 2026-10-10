@@ -98,9 +98,16 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
   const verdicts = judged.map((j, i) => verdictOf(j, i));
 
   const ready = judged.filter((j) => j.group.kind === 'ready');
-  const first = ready[0];
+  const preferredFamilies = (input.preferFamilies ?? []).map((family) => family.trim()).filter(Boolean);
+  const preferredFamilyKeys = new Set(preferredFamilies.map(familyKey));
+  const preferredReady =
+    preferredFamilyKeys.size > 0
+      ? ready.filter((j) => preferredFamilyKeys.has(familyKey(j.item.route.family)))
+      : [];
+  const first = preferredReady[0] ?? ready[0];
   if (first) {
-    const explore = pickTrial(input, ready, policy);
+    const fellBackToOtherFamily = preferredFamilyKeys.size > 0 && preferredReady.length === 0;
+    const explore = preferredFamilyKeys.size > 0 ? null : pickTrial(input, ready, policy);
     const chosen = explore ?? first;
     const route = chosen.item.route;
     const breakerTrial = route.breaker.admit === 'trial';
@@ -111,7 +118,13 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
           quotaNote(route),
           breakerTrial ? BREAKER_TRIAL : null,
         )
-      : withNotes(whyFirst(stageName, chosen, judged), breakerTrial ? BREAKER_TRIAL : null);
+      : withNotes(
+          whyFirst(stageName, chosen, judged),
+          fellBackToOtherFamily
+            ? `本单已有作者族 ${preferredFamilies.join('、')} 都派不出，换到 ${familyKey(route.family)} 族`
+            : null,
+          breakerTrial ? BREAKER_TRIAL : null,
+        );
     return dispatch(route, why, trial, null, verdicts, now);
   }
 
