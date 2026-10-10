@@ -22,7 +22,7 @@ E2E_PG_ADMIN_URL=postgres://postgres:<密码>@127.0.0.1:5432/postgres pnpm --fil
 
 ## 在 CI 里怎么跑（#930）
 
-`.github/workflows/ci.yml` 的 `e2e` job：Linux、容器里的 `postgres:16-alpine`（取自 `public.ecr.aws/docker/library/`，避开 Docker Hub 匿名限速）（`E2E_PG_ADMIN_URL` 指向它）、Playwright 的 Chromium（`E2E_BROWSER_CHANNEL=chromium`，`playwright install --with-deps chromium`，浏览器按 Playwright 版本缓存）。
+`.github/workflows/ci.yml` 的 `e2e` job：Linux、容器里的 `postgres:16-alpine`（由 `.github/scripts/start-pg.sh` 多源带重试地拉：`public.ecr.aws`、`mirror.gcr.io`，避开单一源限速）（`E2E_PG_ADMIN_URL` 指向它）、Playwright 的 Chromium（`E2E_BROWSER_CHANNEL=chromium`，`playwright install --with-deps chromium`，浏览器按 Playwright 版本缓存）。
 - 只在改到 `packages/web`、`api`、`db`、`shared`、依赖文件（`package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`）、`ci.yml` 自己，或认不出改了什么时才跑（判法 `packages/conventions/src/ci-plan.ts` 的 `touchesE2e`），别的 PR 跳过。
 - 红了挡合并：必过检查 `check` 等它，该跑的它必须绿（`ciVerdict`）。不管成败，报告、截图、各进程日志都当 artifact 上传、留 7 天（`e2e-<运行号>`，#1061）。
 - 和本机的差别：本机是 Windows + 本机 Chrome + 自己起的 Windows 版 PG；CI 是 Linux + 下载的 Chromium + 容器 PG。库名、端口、用例顺序一样。

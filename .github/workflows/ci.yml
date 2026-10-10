@@ -316,19 +316,21 @@ jobs:
         include: ${{ fromJSON(needs.changes.outputs.tests) }}
     steps:
       # postgres:16 只给 pg 台用，所以不用 services（services 每台都起、起一次约 12 秒，别的台白等），
-      # 改成这一台自己 docker run。镜像用 AWS 公共镜像库里的官方 postgres（public.ecr.aws/docker/library/postgres:16-alpine），不用 Docker Hub：
-      # 后者对匿名拉取限速，GitHub 共享出口 IP 常撞（toomanyrequests）。整条 docker run（含拉镜像）放后台跑，这一步当场结束；装依赖之后再等它起来：
+      # 改成这一台自己 docker run。镜像不用 Docker Hub（匿名拉取限速，GitHub 共享出口 IP 常撞 toomanyrequests）；
+      # AWS 公共镜像库也会限速（#1664），所以多源带重试，见下面脚本。整条 docker run（含拉镜像）放后台跑，这一步当场结束；装依赖之后再等它起来：
       # 原来单独等的那 14 秒和装依赖叠在一起，不串着等。后台进程活到 job 结束（Actions 在 job 末尾才清孤儿进程）。
-      - name: 起 postgres:16（只 pg 台，后台）
-        if: matrix.pg
-        run: |
-          set -euo pipefail
-          nohup docker run -d --name fleet-test-pg -p 5432:5432 \
-            -e POSTGRES_USER=fleet_test -e POSTGRES_PASSWORD=fleet_test -e POSTGRES_DB=fleet_test_admin \
-            public.ecr.aws/docker/library/postgres:16-alpine > "$RUNNER_TEMP/fleet-test-pg-start.log" 2>&1 &
+      # 拉镜像走 .github/scripts/start-pg.sh（#1664）：public.ecr.aws 和 mirror.gcr.io 依次试，每源最多 3 次、退避 5/15/30 秒；
+      # 脚本在仓里，所以先 checkout（约 2 秒）再后台起。pg 台的 docker run 和拉镜像都在脚本里，后台跑。
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: 起 postgres:16（只 pg 台，后台）
+        if: matrix.pg
+        env:
+          PG_ENV: POSTGRES_USER=fleet_test POSTGRES_PASSWORD=fleet_test POSTGRES_DB=fleet_test_admin
+        run: |
+          set -euo pipefail
+          nohup bash .github/scripts/start-pg.sh fleet-test-pg "$RUNNER_TEMP/fleet-test-pg-start.log" > /dev/null 2>&1 &
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -511,15 +513,15 @@ jobs:
       E2E_PG_ADMIN_URL: postgres://postgres@127.0.0.1:5432/postgres
       E2E_BROWSER_CHANNEL: chromium
     steps:
-      - name: 起 postgres:16（后台）
-        run: |
-          set -euo pipefail
-          nohup docker run -d --name fleet-e2e-pg -p 5432:5432 \
-            -e POSTGRES_USER=postgres -e POSTGRES_HOST_AUTH_METHOD=trust \
-            public.ecr.aws/docker/library/postgres:16-alpine > "$RUNNER_TEMP/fleet-e2e-pg-start.log" 2>&1 &
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: 起 postgres:16（后台）
+        env:
+          PG_ENV: POSTGRES_USER=postgres POSTGRES_HOST_AUTH_METHOD=trust
+        run: |
+          set -euo pipefail
+          nohup bash .github/scripts/start-pg.sh fleet-e2e-pg "$RUNNER_TEMP/fleet-e2e-pg-start.log" > /dev/null 2>&1 &
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
