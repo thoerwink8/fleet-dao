@@ -4,6 +4,9 @@
 // 三条故意造出失败的路都单独测：读不到 PR、读不到单子、认不出作者族——读不到 PR 连头都没有（贴不了，照实报）；
 // 后两种头是有的，**必须贴上 failure**（不贴 = 合并闸判「还没验」，人一直等一个不会来的结论）。
 
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { type ColdVerifySpec, runColdVerifyForPr } from '../src/cold-verify-run.ts';
 import type { RunRecord, RunsWriter } from '../src/runner/not-wired.ts';
@@ -14,6 +17,7 @@ import {
   type VerifierInvokeInput,
   type VerifierInvokeOutput,
 } from '../src/verifier-invoke.ts';
+import { runChildOk } from './child.ts';
 
 const BASE = 'b'.repeat(40);
 const HEAD = 'a'.repeat(40);
@@ -563,5 +567,122 @@ describe('runColdVerifyForPr：作者族是一张表；开跑前先贴 pending�
     });
     expect(r.status.state).toBe('failure');
     expect(r.wait).toBeUndefined();
+  });
+});
+
+const NAMED_HEADING = '## 单子点名但这次没改的文件（只读，当前内容）';
+
+function capturingShot() {
+  const prompts: string[] = [];
+  const base = fakeOneShot({ exitCode: 0, stdout: MODEL_PASS, stderr: '', killed: false });
+  return {
+    prompts,
+    oneShot: {
+      ...base,
+      spawn: async (cmd: Parameters<typeof base.spawn>[0]) => {
+        prompts.push(cmd.stdin);
+        return base.spawn(cmd);
+      },
+    },
+  };
+}
+
+async function withStateDir(dir: string, run: () => Promise<void>): Promise<void> {
+  const prev = process.env.FLEET_GITHUB_STATE_DIR;
+  process.env.FLEET_GITHUB_STATE_DIR = dir;
+  try {
+    await run();
+  } finally {
+    if (prev === undefined) delete process.env.FLEET_GITHUB_STATE_DIR;
+    else process.env.FLEET_GITHUB_STATE_DIR = prev;
+  }
+}
+
+describe('runColdVerifyForPr：单子点名的文件从引擎镜像读', () => {
+  it('生产接线下点名文件读失败时，验收仍返回结论而不是抛错', async () => {
+    const empty = mkdtempSync(join(tmpdir(), 'fleet-named-missing-'));
+    const shot = capturingShot();
+    try {
+      await withStateDir(empty, async () => {
+        const r = await runColdVerifyForPr(42, {
+          sources: sources({
+            spec: async () => ({
+              taskId: TASK_ID,
+              issueNumber: 12,
+              workflowId: 'task:acme/demo#12',
+              what: '核对端口',
+              howToFinish: ['区块里的端口要和 `deploy/france.sh` 逐行对应'],
+            }),
+          }),
+          invoke: invokeVerifier,
+          oneShot: shot.oneShot,
+          chooseModelForFamily: PICK_CLAUDE,
+          cwd: 'C:/work/x',
+        });
+        expect(r.verdict?.pass).toBe(true);
+        expect(r.status.state).toBe('success');
+        expect(r.sourceProblem).toBeUndefined();
+        const prompt = shot.prompts[0] ?? '';
+        expect(prompt).toContain(NAMED_HEADING);
+        expect(prompt).toContain('deploy/france.sh');
+        expect(prompt).toContain('读不到');
+      });
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  it('生产接线读得到 PR 头上的文件时，内容进 prompt；头上没有的路径标不存在', async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), 'fleet-named-mirror-'));
+    const work = join(stateDir, 'work');
+    const mirror = join(stateDir, 'mirrors', 'acme', 'demo.git');
+    mkdirSync(work, { recursive: true });
+    mkdirSync(join(stateDir, 'mirrors', 'acme'), { recursive: true });
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: 't',
+      GIT_AUTHOR_EMAIL: 'fleet-test@localhost',
+      GIT_COMMITTER_NAME: 't',
+      GIT_COMMITTER_EMAIL: 'fleet-test@localhost',
+      GIT_CONFIG_NOSYSTEM: '1',
+    };
+    const git = (cwd: string, args: string[]) =>
+      runChildOk('git', args, { cwd, env, encoding: 'utf8' }).trim();
+    try {
+      git(work, ['init', '-q', '-b', 'main']);
+      mkdirSync(join(work, 'deploy'));
+      writeFileSync(join(work, 'deploy', 'france.sh'), 'PORT=2201\n');
+      git(work, ['add', 'deploy/france.sh']);
+      git(work, ['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'add']);
+      const head = git(work, ['rev-parse', 'HEAD']);
+      git(work, ['clone', '--bare', '-q', work, mirror]);
+      const shot = capturingShot();
+      await withStateDir(stateDir, async () => {
+        const r = await runColdVerifyForPr(42, {
+          sources: sources({
+            pr: async () => ({ head, baseSha: BASE, branch: 'feat/x' }),
+            spec: async () => ({
+              taskId: TASK_ID,
+              issueNumber: 12,
+              workflowId: 'task:acme/demo#12',
+              what: '核对端口',
+              howToFinish: ['对照 `deploy/france.sh` 和 `deploy/hk.sh`'],
+            }),
+          }),
+          invoke: invokeVerifier,
+          oneShot: shot.oneShot,
+          chooseModelForFamily: PICK_CLAUDE,
+          cwd: 'C:/work/x',
+        });
+        expect(r.verdict?.pass).toBe(true);
+        const prompt = shot.prompts[0] ?? '';
+        expect(prompt).toContain(NAMED_HEADING);
+        expect(prompt).toContain('PORT=2201');
+        expect(prompt).toContain('deploy/hk.sh');
+        expect(prompt).toContain('这个路径在 PR 头上不存在');
+      });
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 });
