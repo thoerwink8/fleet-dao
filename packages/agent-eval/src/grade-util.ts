@@ -52,7 +52,13 @@ export function runNodeTests(dir: string, env: Record<string, string> = {}): Tes
   return { ok: r.status === 0, output: `${r.stdout}\n${r.stderr}`.trim() };
 }
 
-/** 夹具原件（orig）和现在的目录（work）逐文件比，列出改了、新增、删了的。 */
+/**
+ * 换行统一成 LF 再比：Windows 上会话用 Python 文本模式、PowerShell 写回文件，整份会换成 CRLF，
+ * 内容没变也被算成每行都改了（Sonnet 修 week-start-tz 只动了 6 行，被判成 49 行，#1641）。
+ */
+const lf = (s: string): string => s.replace(/\r\n/g, '\n');
+
+/** 夹具原件（orig）和现在的目录（work）逐文件比，列出改了、新增、删了的。只差换行符的不算改了。 */
 export function compareDirs(
   orig: string,
   work: string,
@@ -61,7 +67,7 @@ export function compareDirs(
   const b = new Set(listFiles(work));
   const changed: string[] = [];
   for (const f of a) {
-    if (b.has(f) && readFileSync(join(orig, f), 'utf8') !== readFileSync(join(work, f), 'utf8'))
+    if (b.has(f) && lf(readFileSync(join(orig, f), 'utf8')) !== lf(readFileSync(join(work, f), 'utf8')))
       changed.push(f);
   }
   return {
@@ -71,11 +77,11 @@ export function compareDirs(
   };
 }
 
-/** 两份文本改了多少行（按行多重集合的对称差，粗算「diff 有多大」）。 */
+/** 两份文本改了多少行（按行多重集合的对称差，粗算「diff 有多大」）。只差换行符的行不算。 */
 export function changedLineCount(before: string, after: string): number {
   const count = new Map<string, number>();
-  for (const l of before.split('\n')) count.set(l, (count.get(l) ?? 0) + 1);
-  for (const l of after.split('\n')) count.set(l, (count.get(l) ?? 0) - 1);
+  for (const l of lf(before).split('\n')) count.set(l, (count.get(l) ?? 0) + 1);
+  for (const l of lf(after).split('\n')) count.set(l, (count.get(l) ?? 0) - 1);
   let n = 0;
   for (const v of count.values()) n += Math.abs(v);
   return n;
