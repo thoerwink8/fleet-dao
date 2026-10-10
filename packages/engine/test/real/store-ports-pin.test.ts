@@ -26,7 +26,7 @@ beforeEach(async () => {
   await resetTestDb(t);
   // 写码用途：opus-5.5（solo、carpool 两条）排前面，经 Cursor 的 gpt-5.6-luna 排后面
   await world(t.db);
-  await addCursorRoute(t.db, { modelId: 'gpt-5.6-luna', stages: ['execute'] });
+  await addCursorRoute(t.db, { modelId: 'gpt-5.6-luna', upstreamModel: 'gpt-5.6-luna', stages: ['execute'] });
   taskId = (await addTask(t.db)).task.id;
 });
 
