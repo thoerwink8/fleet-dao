@@ -19,7 +19,7 @@ import {
   taskRouteWakeSignal,
   taskStatusQuery,
 } from '../src/task-contract.ts';
-import { freshRepo, pollQuery, useEnv, withWorker } from './helpers.ts';
+import { freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.ts';
 import { scripted } from './task-script.ts';
 
 const currentEnv = useEnv();
@@ -192,6 +192,17 @@ describe('叫醒等路由的活 · 任务工作流', { timeout: 60_000 }, () => 
   });
 
   it('同时叫醒多张单：每张都重选、没人报警', async () => {
+    // #1764 偶发超时根因（CI run 38043069632 attempt 1 job 114187063987 / test 6/8）：
+    // 两张单都停在 pauseForRoute：condition 等 taskRouteWake（记号之后到过一次就算），信号可能先于
+    // 订阅到达（靠问选路前的记号不丢），也可能一张已醒去跑活动、另一张还停在 condition 或活动尚在工人手里。
+    // 旧等法 Promise.all([a.result(), b.result()]) → TimeSkippingWorkflowClient.result 全局 unlockTimeSkipping；
+    // 未收场那张时钟一跳即 START_TO_CLOSE（日志：WorkflowFailedError: Workflow execution timed out；
+    // 栈 TimeSkippingWorkflowClient.result ← task-route-wake.test.ts:219:27；Serialized Error
+    // timeoutType: 'START_TO_CLOSE'；同批 Temporal「Task not found when completing」）。
+    // 全局 pickRoute>=4 也可能被一张单多次选路凑满，漏掉仍在等信号的那张。
+    // 改法：按 taskId 等每张重选 → waitUntil 库 done → 查 phase；绝不 await result()（查询不解锁跳时间）。
+    // 不调大 CAP_SECONDS / describe timeout。本机连跑 20 次：ok=20 fail=0，耗时 10–23s/次
+    //（命令：npx vitest run packages/engine/test/task-route-wake.test.ts -t 「同时叫醒多张单」×20）。
     const world: FakeWorld = createFakeWorld({ route: waitFirst(2) });
     const { tasks } = scripted();
     const raised: string[] = [];
@@ -206,18 +217,39 @@ describe('叫醒等路由的活 · 任务工作流', { timeout: 60_000 }, () => 
       env,
       world,
       async (q) => {
-        const a = await start(q, input());
-        const b = await start(q, input());
+        const ia = input();
+        const ib = input();
+        const a = await start(q, ia);
+        const b = await start(q, ib);
         await waitingSlot(a);
         await waitingSlot(b);
         listed = [a.workflowId, b.workflowId];
         const t0 = await env.currentTimeMs();
         const result = await waker.wake('切号完成');
         expect(result).toMatchObject({ total: 2, sent: 2, gone: 0, failed: [] });
-        await world.until(() => world.count('pickRoute') >= 4, '两张单都又选了一次');
+        // 按单等重选：全局 pickRoute>=4 可能被一张单的多次选路凑满，另一张还停在 pauseForRoute 等 taskRouteWake
+        const picks = (taskId: string) =>
+          world.callsOf('pickRoute').filter((c) => c.input.taskId === taskId).length;
+        await world.until(() => picks(ia.taskId) >= 2 && picks(ib.taskId) >= 2, '两张单都又选了一次');
         expect((await env.currentTimeMs()) - t0).toBeLessThan((CAP_SECONDS * 1000) / 2);
-        const [ra, rb] = (await Promise.all([a.result(), b.result()])) as TaskRun[];
-        expect([ra?.outcome, rb?.outcome]).toEqual(['merged', 'merged']);
+        // 同 #1242：先等库里写进 done；收场用查询/库断言，绝不 await result()（见上方根因）。
+        await waitUntil(
+          () =>
+            world.states.filter((x) => x.taskId === ia.taskId).at(-1)?.state === 'done' &&
+            world.states.filter((x) => x.taskId === ib.taskId).at(-1)?.state === 'done',
+          '两张单都写进 done',
+        );
+        const [sa, sb] = await Promise.all([
+          a.query<TaskStatus>(taskStatusQuery),
+          b.query<TaskStatus>(taskStatusQuery),
+        ]);
+        expect([sa.phase, sb.phase]).toEqual(['done', 'done']);
+        expect(world.states.filter((x) => x.taskId === ia.taskId).at(-1)).toMatchObject({
+          state: 'done',
+        });
+        expect(world.states.filter((x) => x.taskId === ib.taskId).at(-1)).toMatchObject({
+          state: 'done',
+        });
       },
       { tasks },
     );
