@@ -1,4 +1,5 @@
 // 「思考档位」页（#470）的白话和计数：页面只管摆，判法（能配哪几档）在后端照 shared 的 effort.ts 给好的 choices / fixed。
+// 分组（#1756）：能配顶上展开；配不了、未分类默认折叠。未分类＝目录没厂家（family）。
 import type { EffortModel, RouteEffort, SessionEffort } from '../api/types';
 
 /** 每一档的一句白话（悬停看）；页面上的字照命令行的叫法写，和 claude --effort、grok --reasoning-effort 对得上。 */
@@ -31,4 +32,68 @@ export function effortCounts(models: readonly EffortModel[]): {
   const fixed = routes.filter((r) => r.fixed !== undefined).length;
   const configured = routes.filter((r) => r.fixed === undefined && r.effort !== undefined).length;
   return { configured, byDefault: routes.length - fixed - configured, fixed };
+}
+
+/** 目录里没有厂家（family）＝未分类：展示用人读名，原始编号放悬停。 */
+export function isUncategorizedModel(model: Pick<EffortModel, 'family'>): boolean {
+  return !model.family;
+}
+
+/**
+ * 从模型编号拼一句人能读的名字（目录没有 displayName 时用）。
+ * gpt-5.5-none-fast → GPT 5.5 none fast；claude-4-sonnet → Claude 4 sonnet。
+ */
+export function readableModelName(modelId: string): string {
+  return modelId
+    .split('-')
+    .map((part, i) => {
+      if (/^\d/.test(part)) return part;
+      if (part.toLowerCase() === 'gpt') return 'GPT';
+      if (i === 0) return part.charAt(0).toUpperCase() + part.slice(1);
+      return part;
+    })
+    .join(' ');
+}
+
+/** 一条配不了的路由，带着它所属的模型（行上要写渠道、模型名）。 */
+export type FixedEffortItem = { model: EffortModel; route: RouteEffort };
+
+/** 按原因归堆：同一句原因只在分组头写一次。 */
+export type FixedEffortReasonGroup = { reason: string; items: FixedEffortItem[] };
+
+/**
+ * 把路由分成三组（#1756）：
+ * - configurable：目录里有的、能配档位的（按模型聚好，只留能配的路）
+ * - fixed：所有配不了的路，按原因归堆；total 与顶上「配不了」一致
+ * - uncategorized：未分类模型下能配的路（配不了的进 fixed）
+ */
+export function groupEffortRoutes(models: readonly EffortModel[]): {
+  configurable: EffortModel[];
+  fixed: { total: number; byReason: FixedEffortReasonGroup[] };
+  uncategorized: EffortModel[];
+} {
+  const configurable: EffortModel[] = [];
+  const uncategorized: EffortModel[] = [];
+  const byReason = new Map<string, FixedEffortItem[]>();
+
+  for (const model of models) {
+    const configRoutes = model.routes.filter((r) => r.fixed === undefined);
+    const fixedRoutes = model.routes.filter((r) => r.fixed !== undefined);
+
+    for (const route of fixedRoutes) {
+      const reason = route.fixed ?? '';
+      const list = byReason.get(reason) ?? [];
+      list.push({ model, route });
+      byReason.set(reason, list);
+    }
+
+    if (configRoutes.length === 0) continue;
+    const slice: EffortModel = { ...model, routes: configRoutes };
+    if (isUncategorizedModel(model)) uncategorized.push(slice);
+    else configurable.push(slice);
+  }
+
+  const groups = [...byReason.entries()].map(([reason, items]) => ({ reason, items }));
+  const total = groups.reduce((n, g) => n + g.items.length, 0);
+  return { configurable, fixed: { total, byReason: groups }, uncategorized };
 }
