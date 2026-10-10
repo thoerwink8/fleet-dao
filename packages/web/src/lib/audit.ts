@@ -58,10 +58,35 @@ export const actorKindLabel: Record<AuditEntry['actor']['kind'], string> = {
   agent: '会话里的 AI',
 };
 
-/** 谁做的：是自己就写「我」；后端没给名字时只能写编号。 */
+/**
+ * 引擎等内部代号 → 人话。只收已经认得出的；认不出的原样保留，不猜。
+ * 例：engine:hourly-reconcile → 引擎·每小时对账。
+ */
+const ACTOR_ID_LABEL: Record<string, string> = {
+  'engine:hourly-reconcile': '引擎·每小时对账',
+  'engine:watchdog': '引擎·看门狗',
+  'engine:intake': '引擎·接单',
+  'engine:groom': '引擎·整理待办',
+  'engine:route-probe-now': '引擎·立刻探测',
+  'engine:task-workflow': '引擎·任务工作流',
+  'engine:canary': '引擎·金丝雀',
+  'engine:sessions': '引擎·会话',
+  'engine:org-switch': '引擎·切号',
+  'engine:session-org': '引擎·会话账号',
+  'engine:drain': '引擎·排空',
+  'engine:github-reconcile': '引擎·GitHub 对账',
+  'engine:retire-schedules': '引擎·收定时',
+  'engine:route-wake': '引擎·路由唤醒',
+  'engine:startup': '引擎·启动',
+  'engine:pick-route': '引擎·选路',
+  'engine:alert-dispatch': '引擎·派提醒',
+};
+
+/** 谁做的：是自己就写「我」；有名字用名字；否则把认得出的代号翻成人话，认不出的原样。 */
 export function actorName(a: AuditEntry['actor'], me?: Me): string {
   if (me && a.kind === 'user' && a.id === me.user.id) return '我';
-  return a.name ?? a.id;
+  if (a.name) return a.name;
+  return ACTOR_ID_LABEL[a.id] ?? a.id;
 }
 
 export const settingLabel: Record<SettingKey, string> = {
@@ -79,10 +104,15 @@ function isStage(s: string): s is StageKind {
   return s in stageLabel;
 }
 
+/** 任务索引里的一行：单号必有；标题可以后到（没到就先只显示 #单号）。 */
+export type TaskLabelRef = { issueNumber: number; title?: string };
+
 /** 对象编号的白话：stage:execute →「写码」阶段；task:… → 需求 #12；其余原样。 */
 export function targetLabel(
   target: string,
-  tasks: ReadonlyMap<string, Pick<BoardTask, 'issueNumber' | 'title'>>,
+  tasks: ReadonlyMap<string, TaskLabelRef>,
+  /** 提醒 id → 标题；给「处理了提醒」带上是哪一条。 */
+  notifications?: ReadonlyMap<string, string>,
 ): string {
   const i = target.indexOf(':');
   if (i < 0) return target === 'cockpit' ? brand.product : target;
@@ -93,7 +123,13 @@ export function targetLabel(
       return isStage(id) ? `「${stageLabel[id]}」阶段` : `阶段 ${id}`;
     case 'task': {
       const t = tasks.get(id);
-      return t ? `需求 #${t.issueNumber} ${t.title}` : `需求 ${id}`;
+      if (t) {
+        const title = t.title?.trim();
+        return title ? `需求 #${t.issueNumber} ${title}` : `需求 #${t.issueNumber}`;
+      }
+      // 索引没到：数字编号当单号；UUID 等不摊在页面上（过一会儿索引到了再补 #单号和标题）。
+      if (/^\d+$/.test(id)) return `需求 #${id}`;
+      return '需求';
     }
     case 'channel':
       return `渠道 ${id}`;
@@ -105,16 +141,61 @@ export function targetLabel(
       return id in settingLabel ? `设置「${settingLabel[id as SettingKey]}」` : `设置 ${id}`;
     case 'user':
       return '账号的登录方式';
-    case 'notification':
-      return '一条提醒';
+    case 'notification': {
+      const title = notifications?.get(id)?.trim();
+      return title ? `提醒「${title}」` : '一条提醒';
+    }
     default:
       return target;
   }
 }
 
 /** 需求编号 → 编号和标题，给 targetLabel 用。 */
-export function taskIndex(tasks: BoardTask[]): Map<string, Pick<BoardTask, 'issueNumber' | 'title'>> {
+export function taskIndex(tasks: BoardTask[]): Map<string, TaskLabelRef> {
   return new Map(tasks.map((t) => [t.id, { issueNumber: t.issueNumber, title: t.title }]));
+}
+
+/**
+ * 从已加载的操作记录里抠单号（after/before 带了 issueNumber 的，例如 task.create）。
+ * 看板索引还没到时先用它占位显示 #单号，不露 UUID；看板到了再由 taskIndex 盖上标题。
+ */
+export function taskHintsFromAudit(
+  entries: readonly { target: string; before?: unknown; after?: unknown }[],
+): Map<string, TaskLabelRef> {
+  const out = new Map<string, TaskLabelRef>();
+  for (const e of entries) {
+    if (!e.target.startsWith('task:')) continue;
+    const id = e.target.slice('task:'.length);
+    const issueNumber = readPositiveInt(e.after, 'issueNumber') ?? readPositiveInt(e.before, 'issueNumber');
+    if (issueNumber === undefined) continue;
+    const title = readTrimmedString(e.after, 'title') ?? readTrimmedString(e.before, 'title');
+    const prev = out.get(id);
+    // 后到的带标题的盖过只有单号的；不把已有标题抹掉。
+    if (prev?.title && !title) continue;
+    out.set(id, title ? { issueNumber, title } : { issueNumber });
+  }
+  return out;
+}
+
+/** 提醒 id → 标题，给 targetLabel 用。 */
+export function notificationIndex(items: readonly { id: string; title: string }[]): Map<string, string> {
+  return new Map(items.map((n) => [n.id, n.title]));
+}
+
+function readPositiveInt(v: unknown, key: string): number | undefined {
+  const obj = plainObject(v);
+  if (!obj) return undefined;
+  const n = obj[key];
+  return typeof n === 'number' && Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+function readTrimmedString(v: unknown, key: string): string | undefined {
+  const obj = plainObject(v);
+  if (!obj) return undefined;
+  const s = obj[key];
+  if (typeof s !== 'string') return undefined;
+  const t = s.trim();
+  return t ? t : undefined;
 }
 
 /**
