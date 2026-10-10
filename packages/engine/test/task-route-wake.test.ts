@@ -200,7 +200,7 @@ describe('叫醒等路由的活 · 任务工作流', { timeout: 60_000 }, () => 
     // Serialized Error timeoutType START_TO_CLOSE；同批 Task not found when completing）。
     // 全局 pickRoute>=4 也可能被一张单多次选路凑满，漏掉仍在等信号的那张。
     // 改法：按 taskId 等每张重选 → waitUntil 库 done → 查 phase；绝不 await result()。不调大超时。
-    // 本机连跑 20 次全过：ok=20 fail=0，耗时 8–20s/次。
+    // 本机连跑 20 次全过：ok=20 fail=0，耗时 11–18s/次（详见 taskPrDid / TASK_ROUTE_WAKE_PR_NOTES）。
     const world: FakeWorld = createFakeWorld({ route: waitFirst(2) });
     const { tasks } = scripted();
     const raised: string[] = [];
