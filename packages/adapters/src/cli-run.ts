@@ -16,7 +16,7 @@ import {
   type SpawnInfo,
 } from './process.ts';
 import type { CgroupScope } from './procs.ts';
-import type { RateLimitReading } from './types.ts';
+import type { RateLimitReading, TranscriptEntry } from './types.ts';
 
 /** 读一行带来的变化。 */
 export interface LineEffect {
@@ -24,6 +24,8 @@ export interface LineEffect {
   /** 这一行说明会话在干活（模型在说、在想、工具在跑）；停滞计时从这里重来。 */
   activity: boolean;
   rateLimit?: RateLimitReading;
+  /** 这一行带来的会话过程记录（#1640）；没有就不带。 */
+  transcript?: TranscriptEntry[];
 }
 
 /** 一个事件出自输出的哪一行：seq 从 0 起；replay = 重读的、上一个引擎已经处理过的行（只重建状态，别再写库）。 */
@@ -39,6 +41,11 @@ export interface AgentRunOptions {
   /** 可以是 async 的：被拒不会炸进程，记进 hookError；交报告之前会等它们落定。 */
   onEvent?: (event: ProgressEvent, meta: LineMeta) => unknown;
   onRateLimit?: (reading: RateLimitReading) => unknown;
+  /**
+   * 会话过程记录（提示词之外的几种，见 TranscriptEntry）：按流里出现的先后一条一条给，meta 同 onEvent（重放的行也给，
+   * 调用方靠序号去重）。和 onEvent 一样可以是 async：被拒记进 hookError，不炸进程。
+   */
+  onTranscript?: (entry: TranscriptEntry, meta: LineMeta) => unknown;
   /** 进程起来了：引擎记下进程号和 scope，重启后用 reapSession 收旧会话。 */
   onSpawn?: (info: SpawnInfo) => unknown;
   signal?: AbortSignal;
@@ -68,6 +75,8 @@ export interface CliRunPlan<E extends LineEffect> {
   inspect?(effect: E, control: ProcessControl): void;
   /** 进程结束后读取器手里还攒着的事件（例如按增量拼的最后一句话）。 */
   drain?(): ProgressEvent[];
+  /** 进程结束后读取器手里还攒着的会话过程记录（例如按增量拼的最后一句话）。 */
+  drainTranscript?(): TranscriptEntry[];
 }
 
 /** 起会话前的公共检查：测试里不许起真执行体、提示词不空、工作目录在。 */
@@ -128,6 +137,7 @@ export async function runCliAgent<E extends LineEffect>(
           plan.inspect?.(effect, control);
         }
         for (const event of effect.events) gate.call(() => options.onEvent?.(event, meta));
+        for (const entry of effect.transcript ?? []) gate.call(() => options.onTranscript?.(entry, meta));
         const reading = effect.rateLimit;
         if (reading && !meta.replay) gate.call(() => options.onRateLimit?.(reading));
       },
@@ -140,6 +150,8 @@ export async function runCliAgent<E extends LineEffect>(
   const tailSeq = lastSeq + 1;
   const tailMeta: LineMeta = { seq: tailSeq, replay: tailSeq < (options.replayUntil ?? 0) };
   for (const event of plan.drain?.() ?? []) gate.call(() => options.onEvent?.(event, tailMeta));
+  for (const entry of plan.drainTranscript?.() ?? [])
+    gate.call(() => options.onTranscript?.(entry, tailMeta));
   const callbackError = await gate.settle();
   const hookError = result.hookError ?? callbackError;
   return { ...result, ...(hookError === undefined ? {} : { hookError }) };

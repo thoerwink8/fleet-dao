@@ -59,6 +59,7 @@ import { liveReleaseRequestPort } from './release-request.ts';
 import { pgRoutingEfforts } from './routing-efforts.ts';
 import { pgRoutingLayers } from './routing-layers.ts';
 import { pgRoutingOrder } from './routing-order.ts';
+import { pgRunTranscript } from './run-transcript.ts';
 import { sessionOrgHealthCheck } from './session-org-health.ts';
 import { closeConnectionWhenStopping, gracefulShutdown } from './shutdown.ts';
 import { readEnvSnapshot, readHomeSnapshot } from './snapshots.ts';
@@ -245,6 +246,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     routingOrder: pgRoutingOrder(db, now),
     // 按单指定模型（驾驶舱改版 2026-10-07）：引擎给这张单的一段选路时现读的就是这张表，改了下一次选路照新的
     taskRoutePins: pgTaskRoutePins(db, now),
+    // 任务详情每段的会话内容（#1640）：读引擎按条记下的 run_transcript
+    runTranscript: pgRunTranscript(db),
     // 环境页（#820 片 1）的版本那一项：正式环境读发布目录现算；别处不给，页面写「没查成」
     ...(production ? { deployLag: () => readDeployLagInput() } : {}),
     // /france 页发版一键（#618）：读 ~/.fleet-dao/release-train.*、起 pnpm release:onekey preflight。

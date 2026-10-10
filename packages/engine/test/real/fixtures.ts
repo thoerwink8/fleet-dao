@@ -47,6 +47,7 @@ import type { ProgressEvent, StageKind } from '@fleet-dao/shared';
 import type { CarpoolApiRead } from '../../src/jobs/carpool-outage.ts';
 import type { UserCommand, UserCommandResult, UserExec } from '../../src/real/exec.ts';
 import { cursorLaunchCommand } from '../../src/real/hosts.ts';
+import type { IqQuestion } from '../../src/real/probe-iq.ts';
 import { type SessionOrgControl, type SessionOrgDeps, sessionOrgReader } from '../../src/real/session-org.ts';
 import { layout, SESSION_TMP_DIR, type WorkTrees } from '../../src/real/worktrees.ts';
 import { runChildOk } from '../child.ts';
@@ -1134,6 +1135,8 @@ export function cursorKeyRig(root: string): CursorKeyRig {
       `{ echo '--- run'; for a in "$@"; do printf '%s\\n' "$a"; done; } >>'${argvLog}'`,
       `if [ -e '${rejectFlag}' ]; then printf '\\033[33m⚠ Warning: The provided API key is invalid.\\033[0m\\nThe API key was loaded from the CURSOR_API_KEY environment variable.\\nPlease check you have the right key, create a new one, or authenticate without it.\\n' >&2; exit 1; fi`,
       `if ! printenv CURSOR_API_KEY >/dev/null; then a=NO_KEY; elif [ "$CURSOR_API_KEY" = "$(cat '${keyFile}')" ]; then a=OK; else a=KEY_MISMATCH; fi`,
+      // 对上了才像真的那样答对题（第二、三行；JSON 里的换行是字面的 \n）
+      `if [ "$a" = OK ]; then a="OK\\n答案：${TEST_Q.answer}\\n模型：fake-cursor"; fi`,
       `printf '%s\\n' '{"type":"system","subtype":"init","apiKeySource":"env","cwd":"/w","session_id":"${sid}","model":"Auto","permissionMode":"default"}'`,
       `printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]},"session_id":"${sid}"}\\n' "$a"`,
       `printf '{"type":"result","subtype":"success","duration_ms":1,"duration_api_ms":1,"is_error":false,"result":"%s","session_id":"${sid}","request_id":"r","usage":{"inputTokens":1,"outputTokens":1,"cacheReadTokens":0,"cacheWriteTokens":0}}\\n' "$a"`,
@@ -1259,3 +1262,14 @@ export async function dumpDb(client: TestDb['client']): Promise<string> {
   }
   return parts.join('\n');
 }
+
+/** 探针测试固定问的那道降智题（经 routeProbeJob 的 pickQuestion 注入）和一份答对的三行回复。 */
+export const TEST_Q: IqQuestion = {
+  id: 'test-1',
+  text: '算一下 (37 + 58) × 12 - 205 等于多少？答案只写最终的数字。',
+  short: '(37+58)×12-205',
+  answer: '935',
+  kind: 'number',
+};
+export const pickTestQuestion = () => TEST_Q;
+export const REPLY = 'OK\n答案：935\n模型：Anthropic Claude Opus 5.5';

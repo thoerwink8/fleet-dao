@@ -52,6 +52,8 @@ import type {
   Routing,
   RoutingEfforts,
   RoutingLayers,
+  RunTranscript,
+  RunTranscriptQuery,
   SetChannelEnabledBody,
   SetChannelEnabledResult,
   SetModelEnabledBody,
@@ -122,6 +124,11 @@ export interface FleetApi {
   /** 任务列表页（#1639）：所有仓、所有状态，最近更新在前，游标翻页，带各状态的数。 */
   tasks(query?: TaskListFilter & { cursor?: string | undefined; limit?: number }): Promise<TaskList>;
   task(taskId: string): Promise<TaskDetail>;
+  /**
+   * 一段会话的过程记录（#1640），按序号增量读：after 不给从头，给了回序号更大的；在跑的段拿上次回的 nextAfter 接着读。
+   * 读不到（库不通、没接上）抛 ApiError（503），这一段跑在记录之前是 noRecord:true，两者分开。
+   */
+  runTranscript(taskId: string, runId: string, query?: RunTranscriptQuery): Promise<RunTranscript>;
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
   /** 给这张单的一段（动手、验收）指定模型或清掉（引擎下一次给这一段选路就照它）。 */
   updateTaskRoutePin(taskId: string, body: UpdateTaskRoutePinBody): Promise<TaskRoutePin>;
@@ -237,6 +244,7 @@ export const keys = {
   task: (taskId: string) => ['task', taskId] as const,
   taskList: (filter: TaskListFilter) =>
     ['task-list', filter.status ?? '', filter.repoId ?? '', filter.q ?? ''] as const,
+  runTranscript: (taskId: string, runId: string) => ['run-transcript', taskId, runId] as const,
   routing: ['routing'] as const,
   routingLayers: ['routing-layers'] as const,
   routingEfforts: ['routing-efforts'] as const,
@@ -393,6 +401,46 @@ export function useRoutingLayers({ enabled = true }: { enabled?: boolean } = {})
     queryFn: () => api.routingLayers(),
     refetchInterval: 30_000,
     enabled,
+  });
+}
+
+/** 在跑的段每隔多久读一次新的会话内容。 */
+export const TRANSCRIPT_POLL_MS = 3_000;
+/** 一次读多少条：接口单次上限。 */
+const TRANSCRIPT_PAGE = 500;
+
+/**
+ * 一段的会话内容（#1640）：打开才读（enabled）。每次读都从上次的 nextAfter 往后读，把新的接在已读到的后面，
+ * 一页读满就接着读下一页；done 为真就不再读，没 done 的每 3 秒读一次（页面不在前台时 React Query 自己停）。
+ * 读失败：已读到的条目留在 data 里，不清空；失败后不再自动轮询，由页面上的「重试」再读。
+ */
+export function useRunTranscript(taskId: string, runId: string, enabled: boolean) {
+  const api = useApi();
+  const qc = useQueryClient();
+  const key = keys.runTranscript(taskId, runId);
+  return useQuery({
+    queryKey: key,
+    enabled,
+    retry: false,
+    refetchInterval: (q) =>
+      q.state.status === 'error' || q.state.data?.done || q.state.data?.noRecord ? false : TRANSCRIPT_POLL_MS,
+    queryFn: async (): Promise<RunTranscript> => {
+      const prev = qc.getQueryData<RunTranscript>(key);
+      let entries = prev?.entries ?? [];
+      let after = prev?.nextAfter ?? undefined;
+      for (;;) {
+        const page = await api.runTranscript(taskId, runId, {
+          ...(after === undefined ? {} : { after }),
+          limit: TRANSCRIPT_PAGE,
+        });
+        const seen = new Set(entries.map((e) => e.seq));
+        entries = [...entries, ...page.entries.filter((e) => !seen.has(e.seq))];
+        after = page.nextAfter ?? after;
+        if (page.entries.length < TRANSCRIPT_PAGE || page.done) {
+          return { ...page, entries, nextAfter: page.nextAfter ?? prev?.nextAfter ?? null };
+        }
+      }
+    },
   });
 }
 

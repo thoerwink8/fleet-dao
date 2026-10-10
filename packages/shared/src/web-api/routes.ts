@@ -71,6 +71,8 @@ import {
   UpdateSettingResponse,
 } from './settings.ts';
 import {
+  RunTranscriptQuery,
+  RunTranscriptResponse,
   TaskActionRequest,
   TaskActionResponse,
   TaskDetailResponse,
@@ -136,6 +138,13 @@ export const WebRoutes = {
   /** 任务列表页 /tasks（#1639）：按最近更新从新到旧，可按状态、仓、单号或标题筛，游标翻页，带各状态的数。 */
   tasks: { method: 'GET', path: '/tasks', query: TaskListQuery, response: TaskListResponse },
   task: { method: 'GET', path: '/tasks/:taskId', response: TaskDetailResponse },
+  /** 一段会话的过程记录（run_transcript），按序号增量读。只认登录 Cookie（网关通行证不认）。 */
+  runTranscript: {
+    method: 'GET',
+    path: '/tasks/:taskId/runs/:runId/transcript',
+    query: RunTranscriptQuery,
+    response: RunTranscriptResponse,
+  },
   taskAction: {
     method: 'POST',
     path: '/tasks/:taskId/actions',

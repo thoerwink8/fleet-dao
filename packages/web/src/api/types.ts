@@ -77,6 +77,7 @@ import type {
   RoutingLayersResponse,
   RoutingResponse,
   RunSchema,
+  RunTranscriptResponse,
   SetChannelEnabledRequest,
   SetChannelEnabledResponse,
   SetModelEnabledRequest,
@@ -142,6 +143,10 @@ export type TaskList = z.infer<typeof TaskListResponse>;
 export type TaskListRow = z.infer<typeof TaskListRowSchema>;
 /** 读一页的条件：不给的键 = 不筛。 */
 export type TaskListFilter = Pick<z.input<typeof TaskListQuery>, 'status' | 'repoId' | 'q'>;
+/** 一段会话的过程记录（#1640）：一页条目、下次从哪读、读完没有、有没有记录。 */
+export type RunTranscript = z.infer<typeof RunTranscriptResponse>;
+export type TranscriptEntry = RunTranscript['entries'][number];
+export type RunTranscriptQuery = { after?: number | undefined; limit?: number | undefined };
 export type Run = z.infer<typeof RunSchema>;
 export type TaskActionBody = z.input<typeof TaskActionRequest>;
 

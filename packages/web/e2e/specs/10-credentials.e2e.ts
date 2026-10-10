@@ -106,7 +106,13 @@ test.describe('设置页：账密登录', () => {
       expect(JSON.stringify(audit)).not.toContain(NEW_PASSWORD);
       await page.goto('/audit');
       await expect(page.getByText('改了账密登录').first()).toBeVisible();
+      // 收尾要先把页面导走（见 finally）：先等这一页的读取、推送连上后攒的那次重拉都落地，导走时就没有被掐断的请求
+      await page.waitForLoadState('networkidle');
     } finally {
+      // 先把页面导走，再改回去：这一下 PUT 走的是测试自己的接口，不是页面的表单，页面不知道会话要换 Cookie。
+      // 页面还开着时，PUT 一提交推送就让页面整页重拉，这几条重拉还带着刚作废的旧 Cookie，回 401，页面当成掉线跳登录页，
+      // 被「页面上不该出现失败的请求」那一条抓到（2026-10-10 在 #1651、#1656 上连红）。真人用的是页面表单，碰不到这个窗口。
+      await page.goto('about:blank');
       // 改回备库给的密码（走接口；没改成时这一步会被拒，忽略）
       await api.send('PUT', '/api/me/credentials', {
         newPassword: stack.facts.password,

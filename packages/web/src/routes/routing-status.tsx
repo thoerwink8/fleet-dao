@@ -55,7 +55,14 @@ import { formatAgo, formatClock, formatDateTime, formatIn, TIME } from '../lib/f
 import { useNow } from '../lib/hooks';
 import { poolIsHeld } from '../lib/pool-holds';
 import { formatProbeMs, PROBE_RESULT_BG, PROBE_RESULT_WORD } from '../lib/probe-history-view';
-import { activeFor, activityText, isActive, lastFailureFor, probeSeconds } from '../lib/route-probe';
+import {
+  activeFor,
+  activityText,
+  isActive,
+  lastFailureFor,
+  probeSeconds,
+  sourceText,
+} from '../lib/route-probe';
 import {
   type RouteStateKind,
   routeStateLabel,
@@ -407,12 +414,14 @@ function ProbeBanner({
   }
   if (recent) {
     const at = formatClock(recent.finishedAt ?? recent.requestedAt);
+    const from = sourceText(recent);
+    const label = from ? `${from}，` : '立即探测';
     if (recent.state === 'done') {
       const count = (o: string[]) => recent.results.filter((x) => o.includes(x.outcome)).length;
       lines.push({
         key: recent.requestId,
         tone: count(['failed']) > 0 ? 'fail' : 'done',
-        text: `${at} 的立即探测探完了：通过 ${count(['ok'])} · 不通 ${count(['failed'])} · 没探 ${count([
+        text: `${at} 的${label}探完了：通过 ${count(['ok'])} · 不通 ${count(['failed'])} · 没探 ${count([
           'skipped',
           'not_wired',
           'unsettled',
@@ -423,7 +432,7 @@ function ProbeBanner({
       lines.push({
         key: recent.requestId,
         tone: 'fail',
-        text: `${at} 的立即探测没成：${recent.why ?? '没写原因'}`,
+        text: `${at} 的${label}没成：${recent.why ?? '没写原因'}`,
       });
     }
   }
@@ -671,6 +680,13 @@ function RouteRow({
         ) : (
           <StatusChip tone={routeStateTone[kind]} label={routeStateLabel[kind]} />
         )}
+        {kind === 'unused' && !active && (probe?.state === 'ok' || probe?.state === 'failed') ? (
+          // 没用途在用的路由点立即探测（#1630）：灰的「未被用途使用」不变，结论在旁边写出来，不画红
+          <StatusChip
+            tone={probe.state === 'ok' ? 'done' : 'stall'}
+            label={probe.state === 'ok' ? '探过：通' : '探过：不通'}
+          />
+        ) : null}
         {stale && !active && kind !== 'unused' ? <StatusChip tone="stall" label="结论过期" /> : null}
         <span className="num hidden shrink-0 text-caption text-muted-foreground sm:inline">
           {probe ? formatAgo(probe.at, now) : ''}
@@ -700,7 +716,8 @@ function RouteRow({
           ) : null}
           {failure ? (
             <p role="alert" className="mb-2 text-caption text-ink-fail">
-              {formatClock(failure.requestedAt)} 点的立即探测没成：{failure.why ?? '没写原因'}
+              {formatClock(failure.requestedAt)} {sourceText(failure) ?? '点的立即探测'}没成：
+              {failure.why ?? '没写原因'}
             </p>
           ) : null}
           <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-caption sm:grid-cols-4">
