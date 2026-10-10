@@ -49,6 +49,8 @@ function isolatedEnv(stateDir: string, sessionId = '', workersDir?: string): Nod
     FLEET_WORKERS_DIR: workersDir ?? temp('workers-default'),
     FLEET_WORKER: '',
     CLAUDE_CODE_SESSION_ID: sessionId,
+    // Mirasim 的引导那一条（#1743）在 mirasim-steer.rules.test.ts 钉；这里指到不在的目录，不读这台机器上的真 diag
+    FLEET_MIRASIM_DIR: join(stateDir, 'no-mirasim'),
   };
 }
 
