@@ -401,9 +401,10 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     expect(guard.seen.map((i) => i.approved !== undefined)).toEqual([false, true, false, true]);
   });
 
-  it('CI 连着红 3 轮：动手 3 轮不过，停下；点「继续」再给一整轮', async () => {
+  it('CI 连着红：动手 3 轮不过，停下；点「继续」先再看已开的 PR，CI 仍红才再给一整轮', async () => {
     const world = createFakeWorld({
-      ci: (_i, n) => (n <= 3 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
+      // 第 4 次是「继续」后的再交付。仍红才回到动手；再早变绿就会在再交付里收尾，不再起会话
+      ci: (_i, n) => (n <= 4 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
     });
     const { tasks, calls } = scripted();
     const run = await withWorker(
@@ -421,6 +422,42 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     );
     expect(run.outcome).toBe('merged');
     expect(calls.segment).toHaveLength(4);
+  });
+
+  it('动手 3 轮都没过、PR 已开且头已记下：点「继续」不再起会话，先等 CI，绿了就冷验收，最后合并', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) => (n <= 3 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
+    });
+    const { tasks, calls } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await statusUntil(
+          h,
+          (s) => parked(s) && (s.waiting?.detail.includes('动手 3 轮都没过') ?? false),
+          '动手 3 轮都不过，停下',
+        );
+        expect(world.count('openPr')).toBe(1);
+        expect(world.count('pushBranch')).toBe(3);
+        const sessions = calls.segment.length;
+        expect(sessions).toBe(3);
+        const waitCiBefore = world.count('waitCi');
+        expect(calls.verify).toHaveLength(0);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        const result = (await h.result()) as TaskRun;
+        // 继续后没有新会话。去掉「先 deliver」那一行，这里会再起一轮动手
+        expect(calls.segment).toHaveLength(sessions);
+        expect(world.count('waitCi')).toBeGreaterThan(waitCiBefore);
+        expect(calls.verify.length).toBeGreaterThan(0);
+        return result;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.verify).toHaveLength(1);
+    expect(world.callsOf('waitCi').at(-1)?.input).toMatchObject({ prNumber: run.prNumber });
   });
 
   it('等合并时 PR 被关了：停下；重开后点「继续」，重新挂再等', async () => {

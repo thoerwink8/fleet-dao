@@ -490,6 +490,31 @@ export async function fastForward(
   return 'fast-forwarded';
 }
 
+/**
+ * 要快进的提交已经在树里（不用再从镜像取，取了反而是空包）：直接 git merge --ff-only。
+ * 已经是这个头回 already；当前头不是它的祖先回 diverged。快进时把 refs/fleet/incoming 指到该头，和从 bundle 取进来一样。
+ */
+export async function fastForwardExisting(
+  t: UserTree,
+  newHead: string,
+): Promise<'fast-forwarded' | 'already' | 'diverged'> {
+  assertSha(newHead, '新头');
+  const current = await headOf(t);
+  if (current === newHead) return 'already';
+  if (!(await isAncestor(t, current, newHead))) return 'diverged';
+  const dirty = await uncommittedTracked(t);
+  if (dirty.length > 0) {
+    throw new PortError(
+      'WORKTREE_DIRTY',
+      `工作树里有没提交的改动，快进不了：${dirty.slice(0, 5).join('；')}`,
+      { retryable: false },
+    );
+  }
+  await git(t, ['update-ref', 'refs/fleet/incoming', newHead], '把取进来的头记成这个提交');
+  await git(t, ['merge', '--ff-only', '-q', newHead], '快进到新头');
+  return 'fast-forwarded';
+}
+
 /** 推没成、主线又动过、再并一层：顺着第一个父提交最多认这么多层并提交（再多就不是「只是重推」了）。 */
 const MAX_MERGE_CHAIN = 20;
 

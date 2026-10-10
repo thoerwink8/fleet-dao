@@ -157,4 +157,50 @@ describe('动手前并最新主线（#1246）', { timeout: 60_000 }, () => {
     expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
     expect(world.count('syncMainline')).toBe(0);
   });
+
+  it('并出新头后交付起点跟着走：会话没有提交就走返工，不推', async () => {
+    const synced = fakeHead(900);
+    const seen: { baseSha: string; commits: number }[] = [];
+    const pushesAtSegment: number[] = [];
+    const world = createFakeWorld({
+      ...CI_RED_ONCE,
+      sync: (_i, n) => (n === 1 ? { head: synced } : undefined),
+    });
+    const { tasks, calls } = scripted({
+      segment: async () => {
+        pushesAtSegment.push(world.count('pushBranch'));
+        return OK_SEGMENT;
+      },
+      // 会话没再提交。起点已是并出来的头 → 0 个提交；起点还是老头 → 并进来的那次被算成 1 个
+      delivery: (n, input) => {
+        if (n === 1) {
+          seen.push({ baseSha: input.baseSha, commits: 1 });
+          return { head: fakeHead(101), commits: 1, changedFiles: ['a.ts'] };
+        }
+        if (n === 2) {
+          const commits = input.baseSha === synced ? 0 : 1;
+          seen.push({ baseSha: input.baseSha, commits });
+          return {
+            head: commits === 0 ? synced : fakeHead(202),
+            commits,
+            changedFiles: commits === 0 ? [] : ['a.ts'],
+          };
+        }
+        seen.push({ baseSha: input.baseSha, commits: 1 });
+        return { head: fakeHead(103), commits: 1, changedFiles: ['a.ts'] };
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(seen[1]).toEqual({ baseSha: synced, commits: 0 });
+    // 没提交走返工、不推。去掉 rt.since = sync.head，第二轮会把并提交当成交付推上去，走不到第三轮
+    expect(pushesAtSegment).toEqual([0, 1, 1]);
+    expect(calls.segment[2]?.feedback.join('\n')).toContain('没有产生新的提交');
+    expect(world.count('pushBranch')).toBe(2);
+    expect(run).toMatchObject({ outcome: 'merged' });
+  });
 });

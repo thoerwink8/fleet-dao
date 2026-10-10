@@ -590,6 +590,67 @@ describe('推被拒（DIVERGED / REMOTE_AHEAD）：先认领远端新头，判�
     expect(calls.pushBranch).toHaveLength(1);
   });
 
+  it('【不要空包】REMOTE_AHEAD、远端头等于 incoming：不抛 GIT_FAILED，不对这个头打包', async () => {
+    let remoteHead = '';
+    let pushes = 0;
+    const { ports, trees, calls } = setup({
+      pushBranch: (input: { head: string }) => {
+        pushes += 1;
+        if (pushes === 1) {
+          throw new GitHubError('REMOTE_AHEAD', '远端已经在这个头之上被推进了', {
+            retryable: false,
+            details: { remoteHead },
+          });
+        }
+        return { head: input.head, pushed: true };
+      },
+      fetchBranchHead: () => ({ head: remoteHead }),
+    });
+    const dir = await seededTree(trees);
+    const incoming = git(dir, 'rev-parse', 'refs/fleet/incoming');
+    remoteHead = incoming;
+    const head = commitIn(dir, 'login.ts');
+    const r = await ports.pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx);
+    expect(remoteHead).toBe(incoming);
+    // 远端就停在 incoming，本地还有新提交：按原来的先后判断重推，交出去的是这次要推的头
+    expect(r.head).toBe(head);
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
+    const tips = (calls.bundleCommits ?? []).flatMap((input) => {
+      const listed = (input as { tips?: unknown }).tips;
+      return Array.isArray(listed) ? listed : [];
+    });
+    expect(tips).not.toContain(remoteHead);
+    expect(String(r.head)).not.toContain('Refusing to create empty bundle');
+  });
+
+  it('远端头已经在树里、比本地新：不打包，直接快进，返回的头是远端头', async () => {
+    let remoteHead = '';
+    const { ports, trees, calls } = setup({
+      pushBranch: () => {
+        throw new GitHubError('REMOTE_AHEAD', '远端已经在这个头之上被推进了', {
+          retryable: false,
+          details: { remoteHead },
+        });
+      },
+      fetchBranchHead: () => ({ head: remoteHead }),
+    });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const ahead = commitIn(dir, 'ahead.ts');
+    git(dir, 'branch', 'keep-ahead', ahead);
+    git(dir, 'reset', '--hard', head);
+    remoteHead = ahead;
+    const r = await ports.pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx);
+    expect(r.head).toBe(remoteHead);
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(remoteHead);
+    const tips = (calls.bundleCommits ?? []).flatMap((input) => {
+      const listed = (input as { tips?: unknown }).tips;
+      return Array.isArray(listed) ? listed : [];
+    });
+    expect(tips).not.toContain(remoteHead);
+    expect(calls.pushBranch).toHaveLength(1);
+  });
+
   it('【故意造出的失败】DIVERGED、远端不含起会话前的头（历史被改写过）：不试着并，原样报出去，明确写「不含」', async () => {
     const remoteHead = commitRewrittenHistory('force-pushed.ts', 'export const f = 1;\n');
     const { ports, trees } = setup({

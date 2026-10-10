@@ -8,6 +8,8 @@
 //   不当成已经是最新；真正的把关还是推分支时并主线（pushBranch）和等 CI 遇冲突时并主线。
 // - 冲突不自己解、不新造停下状态：冲突文件名进返工意见，由这一轮的动手会话解（走现有的「回动手」带意见的路）。
 // - 验收（冷调用）开始前不并：并了头就变、验收白跑。
+// - 并出了新头（patched('since-follows-sync')，#1582）：工作树已经快进到该头，交付起点跟着走。不跟着走的话，
+//   下一轮读交付会把引擎自己并进来的提交算成会话交的。老历史没有这个标记，起点不动。
 
 import { isCancellation, log, patched } from '@temporalio/workflow';
 import type { TaskRuntime } from './task-runtime.ts';
@@ -53,6 +55,10 @@ export async function syncMainlineBeforeImplement(rt: TaskRuntime): Promise<Sync
     }
     const merged = sync.head !== head;
     rt.head = sync.head;
+    if (merged && patched('since-follows-sync')) {
+      // 工作树此时已快进到该头：交付起点跟着走，并进来的提交不算这一轮会话交的
+      rt.since = sync.head;
+    }
     if (rt.status.lastProblem?.startsWith(SYNC_UNREAD)) rt.status.lastProblem = null;
     return merged ? 'merged' : 'current';
   } catch (error) {

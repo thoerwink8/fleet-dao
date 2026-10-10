@@ -22,6 +22,8 @@
 // 动手一轮会话跑完但没有提交（#1408，patched('avoid-empty-commit-route')）：下一轮选路避开这条路由；连着第二轮仍没提交，
 // 再避开这个模型。避开只在这张单里。没有别的候选就照旧用原来的路由，lastProblem 写「没有别的路由可换」，不死等。
 // 轮数用尽后点「继续」把避开清掉（和上面的轮数清零同一处）。老历史没有这个标记，下一轮仍不避开。
+// 动手轮数用尽后点「继续」，PR 已经开着、头也记下了（patched('continue-redelivers-open-pr')，#1582）：先再看这个 PR 的
+// CI 和冷验收，不先起一轮动手会话。交付要返工才往下起会话。老历史没有这个标记，照旧先起会话。
 //
 // 改这里之前必须知道：
 // - 挂自动合并一定在冷验收通过之后。合并闸认引擎任务流程的 PR（分支 fleet/<单号>-t<8 位>）头上通过的 cold-verify（#555-2、#625），
@@ -101,6 +103,11 @@ class TaskFlow {
           `最近的返工意见：${problems}。点「继续」后动手和验收轮数都从 0 再计；或「放弃」。`,
         );
         if (mode === 'legacy') rt.round = 0;
+        // PR 已开、头已记下：先交付（等 CI、冷验收）。要返工才往下起会话。老历史没有标记，照旧先起会话。
+        if (rt.prNumber !== null && rt.head !== null && patched('continue-redelivers-open-pr')) {
+          const delivered = await this.deliver(brief);
+          if (delivered !== 'rework') return this.finish(delivered.commit);
+        }
       }
       rt.round += 1;
       if (!(await this.implement(brief, tier))) continue;

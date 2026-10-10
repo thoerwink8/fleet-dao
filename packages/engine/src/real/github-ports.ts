@@ -25,6 +25,7 @@ import {
   bundleSince,
   changedFilesAgainst,
   fastForward,
+  fastForwardExisting,
   fetchBundle,
   hasCommit,
   headOf,
@@ -366,15 +367,15 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           });
         }
         const freshHead = branchState.head;
-        const { bytes, ref } = await bundleFromMirror(
-          gh,
-          deps.tmpDir,
-          input.repo,
-          freshHead,
-          [incoming],
-          ctx.signal,
-        );
-        await fetchBundle(t, bytes, ref);
+        // 远端头就是起会话前的头，或这个提交已经在树里：再向镜像要包是空包（git 拒：Refusing to create empty bundle）。
+        // 直接用树里已有的提交判断先后；要快进就 git merge --ff-only，不再打包。
+        const alreadyHere = freshHead === incoming || (await hasCommit(t, freshHead));
+        let bundled: { bytes: Buffer; ref: string } | undefined;
+        if (!alreadyHere) {
+          const made = await bundleFromMirror(gh, deps.tmpDir, input.repo, freshHead, [incoming], ctx.signal);
+          await fetchBundle(t, made.bytes, made.ref);
+          bundled = made;
+        }
         if (!(await isAncestor(t, incoming, freshHead))) {
           throw new PortError(
             'DIVERGED',
@@ -384,7 +385,9 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         }
         if (await isAncestor(t, freshHead, head)) return { head, needsPush: true };
         if (await isAncestor(t, head, freshHead)) {
-          const ff = await fastForward(t, bytes, ref, freshHead);
+          const ff = bundled
+            ? await fastForward(t, bundled.bytes, bundled.ref, freshHead)
+            : await fastForwardExisting(t, freshHead);
           if (ff === 'diverged') {
             throw new PortError(
               'DIVERGED',

@@ -12,6 +12,7 @@ import type {
   DeliveryRead,
   GuardedPaths,
   MergeWait,
+  ReadDeliveryInput,
   RunSegmentInput,
   RunSegmentResult,
 } from '../src/task-contract.ts';
@@ -49,7 +50,7 @@ export interface Script {
     signal: AbortSignal,
     beat: () => void,
   ) => Promise<RunSegmentResult>;
-  delivery: (n: number) => DeliveryRead;
+  delivery: (n: number, input: ReadDeliveryInput) => DeliveryRead;
   verify: (input: ColdVerifyInput, n: number) => ColdVerifyResult;
   guarded: (n: number) => GuardedPaths;
   arm: (n: number, input: ArmAutoMergeInput) => ArmAutoMergeResult;
@@ -116,10 +117,10 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
         clearInterval(beat);
       }
     },
-    async readDelivery() {
+    async readDelivery(input) {
       calls.order.push('delivery');
       calls.delivery += 1;
-      return script.delivery(calls.delivery);
+      return script.delivery(calls.delivery, input);
     },
     async coldVerify(input) {
       calls.order.push('verify');
