@@ -343,3 +343,81 @@ describe('【故意造出的失败】对不上 runs 约束的：写进库之前�
     expect(await t.db.select().from(runs)).toEqual([]);
   });
 });
+
+describe('收场记账 fail 时排断链探测（#1809）', { timeout: 60_000 }, () => {
+  const base = {
+    runId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    segment: 'manual' as const,
+    model: 'opus-5.5',
+    routeId: 'carpool',
+    startedAt: '2026-10-11T01:00:00Z',
+    endedAt: '2026-10-11T01:10:00Z',
+    outcome: 'failed' as const,
+  };
+
+  it('routeOutcome 为 fail 且带 routeId：排一次探测；neutral 不排', async () => {
+    await world(t.db);
+    const calls: unknown[] = [];
+    const writer = realRuns({
+      db: t.db,
+      scheduleBreakProbe: async (input) => {
+        calls.push(input);
+      },
+    });
+    await writer.record({ ...base, routeOutcome: 'fail', issueNumber: 1809 });
+    expect(calls).toEqual([{ routeId: 'carpool', segment: 'manual', issueNumber: 1809 }]);
+    expect(await getRun(t.db, base.runId)).toMatchObject({ routeOutcome: 'fail', routeId: 'carpool' });
+
+    calls.length = 0;
+    await writer.record({
+      ...base,
+      runId: 'b2c3d4e5-f6a7-8901-bcde-f12345678901',
+      routeOutcome: 'neutral',
+      issueNumber: 1809,
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it('ok 不排；没有 routeId 也不排', async () => {
+    await world(t.db);
+    const calls: unknown[] = [];
+    const writer = realRuns({
+      db: t.db,
+      scheduleBreakProbe: async (input) => {
+        calls.push(input);
+      },
+    });
+    await writer.record({
+      ...base,
+      runId: 'c3d4e5f6-a7b8-9012-cdef-123456789012',
+      routeOutcome: 'ok',
+      outcome: 'done',
+    });
+    const { routeId: _drop, ...noRoute } = base;
+    await writer.record({
+      ...noRoute,
+      runId: 'd4e5f6a7-b8c9-0123-def0-234567890123',
+      routeOutcome: 'fail',
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】排探测抛错：record 照样写成功，不向外抛', async () => {
+    await world(t.db);
+    const logs: { level: string; message: string }[] = [];
+    const writer = realRuns({
+      db: t.db,
+      scheduleBreakProbe: async () => {
+        throw new Error('写不进库');
+      },
+      log: (level, message) => logs.push({ level, message }),
+    });
+    await expect(
+      writer.record({ ...base, runId: 'e5f6a7b8-c9d0-1234-ef01-345678901234', routeOutcome: 'fail' }),
+    ).resolves.toBeUndefined();
+    expect(await getRun(t.db, 'e5f6a7b8-c9d0-1234-ef01-345678901234')).toMatchObject({
+      routeOutcome: 'fail',
+    });
+    expect(logs).toEqual([{ level: 'warn', message: expect.stringContaining('没成') }]);
+  });
+});

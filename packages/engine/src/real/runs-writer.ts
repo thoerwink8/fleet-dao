@@ -10,6 +10,7 @@
 //   抛 PoolFullError，这里换成合约的 NoSlotError）。不带路由的（不经选路）照老样子直接写，不数名额——它连不到池。
 // - 预占谁来放：没开跑就收场的那一段（runSegment、coldVerify 收场时调 realReservations 的 release）；开跑了的已经在 start 里
 //   换掉了，放一次什么都不做。
+// - 收场那一笔 routeOutcome 为 fail 且带 routeId 时，排一次断链探测（#1636 / #1809）：三段都经这里，排不成只记日志不挡记账。
 
 import type { Db, RunInsert } from '@fleet-dao/db';
 import {
@@ -30,10 +31,19 @@ import {
   RunStartSchema,
   type RunsWriter,
 } from '../runner/not-wired.ts';
+import type { RouteBreakProbeInput } from './route-break-probe.ts';
 
 export type { RunsWriter };
 
-export function realRuns(deps: { db: Db }): RunsWriter {
+export interface RealRunsDeps {
+  db: Db;
+  /** 真干活失败后排立即探测（#1809）；装配在 real/index.ts。不给就不排（单测记账本身时）。 */
+  scheduleBreakProbe?: (input: RouteBreakProbeInput) => Promise<unknown>;
+  log?: (level: 'info' | 'warn', message: string, fields?: Record<string, unknown>) => void;
+}
+
+export function realRuns(deps: RealRunsDeps): RunsWriter {
+  const log = deps.log ?? ((level, message, fields) => console[level](message, fields ?? {}));
   return {
     async start(input: RunStart, options: { reservationId?: string } = {}) {
       const run = parsed(RunStartSchema.safeParse(input), 'runs 开跑那一行');
@@ -73,6 +83,23 @@ export function realRuns(deps: { db: Db }): RunsWriter {
         },
         'runs 写入失败',
       );
+      // 算路由的账为 fail 且带了路由：当场排一次探测。ok / neutral 不排；排不成不挡记账。
+      if (run.routeOutcome === 'fail' && run.routeId !== undefined && deps.scheduleBreakProbe) {
+        try {
+          await deps.scheduleBreakProbe({
+            routeId: run.routeId,
+            segment: run.segment,
+            ...(run.issueNumber !== undefined ? { issueNumber: run.issueNumber } : {}),
+          });
+        } catch (error) {
+          log('warn', '任务断链：排立即探测没成（不挡记账）', {
+            routeId: run.routeId,
+            segment: run.segment,
+            issueNumber: run.issueNumber,
+            error: errMessage(error),
+          });
+        }
+      }
     },
   };
 }
