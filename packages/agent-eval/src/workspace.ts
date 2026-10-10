@@ -1,4 +1,5 @@
-// 临时目录：在系统临时目录下，不在仓里。夹具拷进去；要真仓的题，用 git archive <固定提交> 导一份快照（不带 .git，不建工作树）。
+// 临时目录：在系统临时目录下，不在仓里。夹具拷进去；要真仓的题，用 git archive <固定提交> 导一份快照（不带 .git，不建工作树），
+// 题目录下有 workspace/ 的（评审题的 change.diff、当时 PR 里已经写好的文件）再盖到快照上。
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -71,7 +72,9 @@ export function prepareRepoSnapshot(
 }
 
 export function prepareWorkspace(c: EvalCase, tmpRoot?: string): Workspace {
-  return c.source.kind === 'repo'
-    ? prepareRepoSnapshot(c.source.commit, REPO_ROOT, tmpRoot)
-    : prepareFixture(c, tmpRoot);
+  if (c.source.kind === 'fixture') return prepareFixture(c, tmpRoot);
+  const w = prepareRepoSnapshot(c.source.commit, REPO_ROOT, tmpRoot);
+  const overlay = join(caseDirOf(c), 'workspace');
+  if (existsSync(overlay)) cpSync(overlay, w.dir, { recursive: true });
+  return w;
 }

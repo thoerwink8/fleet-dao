@@ -1,11 +1,15 @@
 // 每道题的判分函数：拿造好的「对的产出」和「错的产出」各判一遍，前者过、后者不过。要改代码的题真在临时目录里跑测试。
+import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ARCHITECT_CASES, judgePrompt, parseJudgeAnswer } from '../src/cases/architect.ts';
+import { PROMPT_LOG_EDITS } from '../src/cases/code-tasks.ts';
 import { ALL_CASES } from '../src/cases/index.ts';
-import { SKIPPED_SCENARIOS, UngradableError, type Verdict } from '../src/types.ts';
+import { GRADING_ISSUES, type RealIssue, TWO_FAMILY_ISSUES } from '../src/cases/review.ts';
+import { baseFiles, writeBase } from '../src/grade-util.ts';
+import { REPO_ROOT, SKIPPED_SCENARIOS, UngradableError, type Verdict } from '../src/types.ts';
 import { caseDirOf, prepareFixture } from '../src/workspace.ts';
 
 const cleanups: (() => void)[] = [];
@@ -78,6 +82,20 @@ describe('登记表', () => {
       if (c.source.kind === 'fixture') expect(existsSync(join(caseDirOf(c), 'workspace')), c.id).toBe(true);
     }
     expect(SKIPPED_SCENARIOS.map((s) => s.scenario)).toEqual(['ui-builder', 'ui-verifier']);
+  });
+
+  it('Opus 档 4 种场景各有 2 道以上真题：固定提交的仓快照，why 写明当时谁栽在哪（#1714）', () => {
+    for (const s of ['standard-editor', 'architect', 'debugger', 'reviewer']) {
+      const real = ALL_CASES.filter((c) => c.scenario === s && c.source.kind === 'repo');
+      expect(real.length, s).toBeGreaterThanOrEqual(2);
+      for (const c of real) {
+        expect(
+          c.source.kind === 'repo' && /^[0-9a-f]{40}$/.test(c.source.commit),
+          `${c.id} 要写完整提交号`,
+        ).toBe(true);
+        expect(c.why, c.id).toMatch(/真事|当时/);
+      }
+    }
   });
 
   it('标准答案（hidden/）只在包里，题面和夹具目录里没有', () => {
@@ -429,11 +447,12 @@ describe('brief-drafter（调 check-brief.mjs）', () => {
 
 describe('architect（LLM 打分，裁判注入）', () => {
   const c = ARCHITECT_CASES[0];
-  it('裁判提示词带题目、评分标准和待评的方案', () => {
+  it('裁判提示词带题目、评分标准和待评的方案，要逐条得分', () => {
     const p = judgePrompt('我的方案');
     expect(p).toContain('我的方案');
     expect(p).toContain('评分标准');
     expect(p).toContain('只回一个 JSON');
+    expect(p).toContain('"items": [<8 个数');
   });
   it('分数 ≥ 0.7 过，低于不过；以代码按分数判，不信裁判自己写的 pass', async () => {
     const high = await judge(
@@ -458,7 +477,46 @@ describe('architect（LLM 打分，裁判注入）', () => {
     ).rejects.toThrow(UngradableError);
     expect(() => parseJudgeAnswer('{"score": 7}')).toThrow(UngradableError);
     expect(() => parseJudgeAnswer('{score: 1}')).toThrow(UngradableError);
+    expect(() => parseJudgeAnswer('{"items": [1, 1]}')).toThrow(UngradableError);
+    expect(() => parseJudgeAnswer('{"items": [1, 1, 1, 1, 1, 1, 1, 0.7]}')).toThrow(UngradableError);
   });
+  it('给了逐条得分：分数按逐条平均算，不信裁判自己写的 score', () => {
+    expect(
+      parseJudgeAnswer('{"items": [1, 1, 1, 1, 0.5, 0.5, 0, 1], "score": 1, "reason": "x"}'),
+    ).toMatchObject({
+      score: 0.75,
+      items: [1, 1, 1, 1, 0.5, 0.5, 0, 1],
+    });
+  });
+});
+
+describe('architect 真题（必须满分的几条：当时真栽在那里）', () => {
+  const allFull = '{"items": [1, 1, 1, 1, 1, 1, 1, 1], "reason": "齐"}';
+  for (const id of ['architect/two-family-verify', 'architect/release-restore-switch']) {
+    it(`${id}：逐条满分过；总分够线但必须那几条只拿一半不过；只给总分判不了`, async () => {
+      const c = find(id);
+      expect(c.usesJudge).toBe(true);
+      let asked = '';
+      const full = await judge(id, '方案', undefined, async (p) => {
+        asked = p;
+        return allFull;
+      });
+      expect(full).toMatchObject({ pass: true, score: 1 });
+      expect(asked).toContain('必须写明');
+      // 当时的错法：方案四平八稳，独独没想到返工补上的那两条（只泛泛提到，裁判给一半）
+      const half = await judge(
+        id,
+        '方案',
+        undefined,
+        async () => '{"items": [1, 1, 0.5, 0.5, 1, 1, 1, 1], "reason": "第 3、4 条只泛泛提到"}',
+      );
+      expect(half.pass).toBe(false);
+      expect(half.score).toBe(0.875);
+      expect(half.reason).toContain('第 3、4 条没拿满');
+      const scoreOnly = judge(id, '方案', undefined, async () => '{"score": 0.95, "reason": "好"}');
+      await expect(scoreOnly).rejects.toThrow(UngradableError);
+    });
+  }
 });
 
 describe('fixer（真跑夹具里的测试）', () => {
@@ -664,5 +722,343 @@ describe('standard-editor', () => {
     });
     expect(loose.pass).toBe(false);
     expect(loose.reason).toContain('没钉住');
+  });
+});
+
+// —— 真题（#1714）：仓快照题在测试里不 git archive（CI 是浅克隆，固定提交不在），拿 hidden/base 存的原件搭一个小快照判 ——
+
+/** 搭小快照：hidden/base 的原件写进去，再按 setup 改。 */
+const fromBase = (setup: (dir: string) => void) => (dir: string, caseDir: string) => {
+  writeBase(caseDir, dir);
+  setup(dir);
+};
+
+/** 照当时合进去的修法改一处原文：找不到要改的原文就是测试自己写错了。 */
+const swap = (dir: string, rel: string, from: string, to: string) =>
+  edit(dir, rel, (s) => {
+    if (!s.includes(from)) throw new Error(`${rel} 里找不到要换的原文：${from}`);
+    return s.replace(from, to);
+  });
+
+describe('debugger 真题（仓快照：藏起来的验收在原件上跑）', () => {
+  const E2E = 'packages/conventions/src/ci-plan.ts';
+  const STRICT = '  if (n.changes?.outputs?.e2e !== e2eOutput(plan.e2e))';
+  it('e2e-output-omitted：#1207 的一行修法过；当时 #1200 的原样不过；删掉核对、让空清单输出占位值、碰别的文件都不过', async () => {
+    const id = 'debugger/e2e-output-omitted';
+    const fixed = await judge(
+      id,
+      '根因',
+      fromBase((d) => swap(d, E2E, STRICT, "  if ((n.changes?.outputs?.e2e ?? '') !== e2eOutput(plan.e2e))")),
+    );
+    expect(fixed).toMatchObject({ pass: true });
+    // 当时的错法：#1200 合进去的严格比较，GitHub 不给空串输出就判红
+    const asShipped = await judge(
+      id,
+      '根因',
+      fromBase(() => {}),
+    );
+    expect(asShipped.pass).toBe(false);
+    expect(asShipped.reason).toContain('验收没过');
+    // 顺着症状把核对删掉：plan 要跑 e2e 而开关缺了也放过
+    const dropped = await judge(
+      id,
+      '根因',
+      fromBase((d) => swap(d, E2E, STRICT, '  if (false)')),
+    );
+    expect(dropped.pass).toBe(false);
+    // 让空清单输出个占位值：ci.yml 的 e2e job 靠空串跳过，题面说了不改 ci.yml
+    const placeholder = await judge(
+      id,
+      '根因',
+      fromBase((d) =>
+        swap(
+          d,
+          E2E,
+          "  return e === 'all' ? 'all' :",
+          "  if (e !== 'all' && e.length === 0) return 'none';\n  return e === 'all' ? 'all' :",
+        ),
+      ),
+    );
+    expect(placeholder.pass).toBe(false);
+    const stray = await judge(
+      id,
+      '根因',
+      fromBase((d) => {
+        swap(d, E2E, STRICT, "  if ((n.changes?.outputs?.e2e ?? '') !== e2eOutput(plan.e2e))");
+        edit(d, 'packages/conventions/src/repo.ts', (s) => `${s}\n// 顺手改一下\n`);
+      }),
+    );
+    expect(stray.reason).toContain('交代以外');
+  });
+
+  it('pr-fields-heading：#66 两处一起修过；只修正则、只截小标题、放宽存在性检查都不过', async () => {
+    const id = 'debugger/pr-fields-heading';
+    const PF = 'packages/conventions/src/pr-fields.ts';
+    const LOOP = "  for (const line of stripComments(body.replace(/\\r\\n?/g, '\\n')).split('\\n')) {";
+    const heading = (d: string) =>
+      swap(
+        d,
+        PF,
+        LOOP,
+        `${LOOP}\n    if (/^\\s{0,3}#{1,6}(?:\\s|$)/.test(line)) {\n      flush();\n      current = undefined;\n      buf = [];\n      continue;\n    }`,
+      );
+    const colon = (d: string) =>
+      swap(d, PF, '[^\\s、，,；;()（）[\\]「」]+/g', '[^\\s、，,；;：:。()（）[\\]「」]+/g');
+    expect(
+      await judge(
+        id,
+        '根因',
+        fromBase((d) => {
+          heading(d);
+          colon(d);
+        }),
+      ),
+    ).toMatchObject({ pass: true });
+    // 当时的样子：两回都判红
+    expect(
+      (
+        await judge(
+          id,
+          '根因',
+          fromBase(() => {}),
+        )
+      ).pass,
+    ).toBe(false);
+    // 只修看得见的那一处：另一种写法照样红
+    expect((await judge(id, '根因', fromBase(colon))).pass).toBe(false);
+    expect((await judge(id, '根因', fromBase(heading))).pass).toBe(false);
+    // 放宽存在性检查：报错没了，写错的目录也不报了
+    const loose = await judge(
+      id,
+      '根因',
+      fromBase((d) => swap(d, PF, "|| !repo.exists(p.replace(/\\/+$/, ''))", '|| false')),
+    );
+    expect(loose.pass).toBe(false);
+  });
+});
+
+describe('standard-editor 真题', () => {
+  const OLD = '不用 Fable（出比 5.1 更高的版本之前）';
+  const NEW = '不用 Fable（创始人定）';
+  /** 小快照里 bans.ts 等是原件；candidates.test.ts、AGENTS.md 只放钉文案的那几行（够判分读）。 */
+  const fable = (opts: { demo: boolean; tests?: boolean; agents?: boolean; scan?: boolean }) =>
+    fromBase((d) => {
+      mkdirSync(join(d, 'packages/db/test'), { recursive: true });
+      const r = opts.tests === false ? OLD : NEW;
+      writeFileSync(
+        join(d, 'packages/db/test/candidates.test.ts'),
+        `      ['fable51', ['banned'], ['${r}']],\n      ['fable52', ['banned'], ['${r}']],\n`,
+      );
+      writeFileSync(
+        join(d, 'AGENTS.md'),
+        opts.agents === false
+          ? '- GPT 系不做界面类的活（包括审界面）；Fable 不用，出比 5.1 更高的版本前也别推荐。\n'
+          : '- GPT 系不做界面类的活（包括审界面）；Fable 不用（创始人 2026-10-03 拍，永久，不挂版本号）。\n',
+      );
+      swap(d, 'packages/shared/src/bans.ts', `reason: '${OLD}'`, `reason: '${NEW}'`);
+      if (opts.demo)
+        swap(
+          d,
+          'packages/web/src/build/demo-renames.ts',
+          '/不用 Fable（出比 5\\.1 更高的版本之前）/g',
+          '/不用 Fable（创始人定）/g',
+        );
+      if (opts.scan) edit(d, 'packages/web/src/build/scan.ts', (s) => s.replace("  '不用 Fable',\n", ''));
+    });
+  it('fable-ban-permanent：#669 合进去的四处都改过；当时漏 demo-renames.ts 的那版不过；没改测试、没改通用段、删扫描词都不过', async () => {
+    const id = 'standard-editor/fable-ban-permanent';
+    expect(await judge(id, '改了', fable({ demo: true }))).toMatchObject({ pass: true });
+    // 当时的错法：#669 第一个提交改了 bans.ts、AGENTS.md、candidates.test.ts，漏了 demo-renames.ts（CI 的 web、test rest 红）
+    const missedDemo = await judge(id, '改了', fable({ demo: false }));
+    expect(missedDemo.pass).toBe(false);
+    expect(missedDemo.reason).toContain('样例说法');
+    expect((await judge(id, '改了', fable({ demo: true, tests: false }))).pass).toBe(false);
+    expect((await judge(id, '改了', fable({ demo: true, agents: false }))).pass).toBe(false);
+    const scan = await judge(id, '改了', fable({ demo: false, scan: true }));
+    expect(scan.reason).toContain('不该动');
+  });
+
+  /** 小快照里只放判分读的几行：每处给「当时的原样」或「补齐之后」。 */
+  const promptLog = (fixed: ReadonlySet<string>) => (dir: string, caseDir: string) => {
+    writeBase(caseDir, dir);
+    const put = (rel: string, before: string, after: string) => {
+      mkdirSync(join(dir, rel, '..'), { recursive: true });
+      writeFileSync(join(dir, rel), fixed.has(rel) ? after : before);
+    };
+    put(
+      'packages/agents-sync/src/targets.ts',
+      "      { event: 'Stop', script: 'stop.mjs', timeout: 10 },\n",
+      "      { event: 'Stop', script: 'stop.mjs', timeout: 10 },\n      { event: 'UserPromptSubmit', script: 'prompt-log.mjs', timeout: 30000 },\n",
+    );
+    put(
+      'packages/agents-sync/test/helpers.ts',
+      "  'stop.mjs': '// 假的收尾提醒钩子\\n',\n",
+      "  'stop.mjs': '// 假的收尾提醒钩子\\n',\n  'prompt-log.mjs': '// 假的落盘钩子\\n',\n",
+    );
+    for (const rel of ['packages/agents-sync/test/cli.test.ts', 'packages/agents-sync/test/hooks.test.ts'])
+      put(
+        rel,
+        "    expect(Object.keys(s.hooks)).toEqual(['PreToolUse', 'Stop']);\n",
+        "    expect(Object.keys(s.hooks)).toEqual(['PreToolUse', 'Stop', 'UserPromptSubmit']);\n",
+      );
+    put(
+      'deploy/test/agents-sync.test.sh',
+      'printf \'// 假的收尾提醒钩子\\n\' >"$R/agents/hooks/stop.mjs"\n  PreToolUse,Stop\n',
+      'printf \'// 假的收尾提醒钩子\\n\' >"$R/agents/hooks/stop.mjs"\nprintf \'// 假的落盘钩子\\n\' >"$R/agents/hooks/prompt-log.mjs"\n  PreToolUse,Stop,UserPromptSubmit\n',
+    );
+    put(
+      'packages/conventions/src/ci-plan.ts',
+      "  db: ['core'],\n  [AGENTS_UNIT]: ['db'],\n",
+      "  db: ['core'],\n  [AGENTS_UNIT]: ['db', 'agents-sync'],\n",
+    );
+    put(
+      'packages/conventions/test/ci-cache.test.ts',
+      "    expect(sourceClosure(GRAPH, ['agents'])).toEqual(['db', 'shared']);\n",
+      "    expect(sourceClosure(GRAPH, ['agents'])).toEqual(['agents-sync', 'db', 'shared']);\n",
+    );
+  };
+  const ALL = new Set(PROMPT_LOG_EDITS.map((e) => e.file));
+  it('prompt-log-hook：七处都改齐过；当时第一版只改 targets.ts 不过；补了两回、还差 CI 判法那两处也不过', async () => {
+    const id = 'standard-editor/prompt-log-hook';
+    expect(await judge(id, '改了', promptLog(ALL))).toMatchObject({ pass: true });
+    // 当时的错法：#823 第一版只登记了 targets.ts，CI 红了三回才补齐
+    const first = await judge(id, '改了', promptLog(new Set(['packages/agents-sync/src/targets.ts'])));
+    expect(first.pass).toBe(false);
+    expect(first.reason).toContain('漏了 6/7 处');
+    const almost = new Set([...ALL].filter((f) => !f.startsWith('packages/conventions/')));
+    const second = await judge(id, '改了', promptLog(almost));
+    expect(second.reason).toContain('漏了 2/7 处');
+    expect(second.reason).toContain('TEST_READS');
+    // 登记写了 matcher、超时按秒写：规矩测试钉着的两条
+    const matcher = await judge(id, '改了', (d, cd) => {
+      promptLog(ALL)(d, cd);
+      edit(d, 'packages/agents-sync/src/targets.ts', (s) =>
+        s.replace(
+          "script: 'prompt-log.mjs', timeout: 30000",
+          "matcher: '*', script: 'prompt-log.mjs', timeout: 30",
+        ),
+      );
+    });
+    expect(matcher.pass).toBe(false);
+    // 改了已经写好的规矩测试
+    const rules = await judge(id, '改了', (d, cd) => {
+      promptLog(ALL)(d, cd);
+      edit(d, 'agents/test/rules/prompt-log.rules.test.ts', (s) =>
+        s.replace('timeout:\\s*30000', 'timeout:\\s*\\d+'),
+      );
+    });
+    expect(rules.reason).toContain('已经写好');
+  });
+  it('prompt-log-hook 的原件就是 #823 合进去的那两份（钩子脚本和规矩测试），夹具里的和原件一样', () => {
+    const c = find('standard-editor/prompt-log-hook');
+    const base = baseFiles(caseDirOf(c));
+    expect([...base.keys()].sort()).toEqual([
+      'agents/hooks/prompt-log.mjs',
+      'agents/test/rules/prompt-log.rules.test.ts',
+    ]);
+    for (const [rel, text] of base)
+      expect(readFileSync(join(caseDirOf(c), 'workspace', rel), 'utf8'), rel).toBe(text);
+  });
+});
+
+describe('reviewer 真题（行号窗口写死：快照、change.diff 都是固定的）', () => {
+  const commitOf = (id: string) => {
+    const c = find(id);
+    if (c.source.kind !== 'repo') throw new Error(`${id} 不是仓快照题`);
+    return c.source.commit;
+  };
+  /** 读快照里的一个文件：本地有这个提交才读（CI 是浅克隆，读不到就只核 change.diff 那一侧）。 */
+  const atCommit = (commit: string, rel: string): string | undefined => {
+    const r = spawnSync('git', ['-C', REPO_ROOT, 'show', `${commit}:${rel}`], {
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    return r.status === 0 ? r.stdout : undefined;
+  };
+  const cases: [string, readonly RealIssue[], RegExp[]][] = [
+    [
+      'reviewer/two-family-verify',
+      TWO_FAMILY_ISSUES,
+      [
+        /verdicts\.push\(r\)|只派得出/,
+        /[cC]hooseModelForFamily|m === undefined|两家都验|avoid\.has|route === undefined|没有能派的验收路由|没讨论成/,
+        /sessions\.enter|ticket|runId/,
+      ],
+    ],
+    [
+      'reviewer/agent-eval-grading',
+      GRADING_ISSUES,
+      [
+        /readFileSync\(join\(orig|split\('\\n'\)|changedLineCount/,
+        /count\(test, '3 轮'\)/,
+        /runNodeTests|includes\('2 轮'\)|assert\./,
+        /mkdtempSync/,
+      ],
+    ],
+  ];
+  for (const [id, issues, mustSee] of cases) {
+    it(`${id}：每个窗口里真是那一处的代码`, () => {
+      const c = find(id);
+      const diff = readFileSync(join(caseDirOf(c), 'workspace', 'change.diff'), 'utf8').split('\n');
+      issues.forEach((issue, i) => {
+        for (const spot of issue.spots) {
+          const text = spot.file === 'change.diff' ? diff.join('\n') : atCommit(commitOf(id), spot.file);
+          if (text === undefined) continue;
+          const lines = text
+            .split('\n')
+            .slice(spot.from - 1, spot.to)
+            .join('\n');
+          expect(lines, `${issue.kind} @ ${spot.file}:${spot.from}-${spot.to}`).toMatch(mustSee[i] as RegExp);
+        }
+      });
+    });
+  }
+
+  it('two-family-verify：返工改掉的两处都报出过；当时评审只挑局部写法的不过；误报超过 2 条不过', async () => {
+    const id = 'reviewer/two-family-verify';
+    const right = [
+      'packages/engine/src/verifier-invoke.ts:779 — 两家都验挑到一家就起会话，凑不齐第二家时白跑，下次重来又整个跑一遍',
+      'packages/engine/src/real/task-verify.ts:423 — 选路在等额度时也回 undefined，和派不出分不开，落到第 5 步把作者族拉进来互验',
+    ].join('\n');
+    expect(await judge(id, right)).toMatchObject({ pass: true });
+    // 按 change.diff 的行号报一样认
+    expect(
+      await judge(id, 'change.diff:399 — 挑到一家就跑了\nchange.diff:230 — 在等和派不出不分'),
+    ).toMatchObject({ pass: true });
+    // 当时的错法：CI 绿、评审只挑了局部（session 只留第二家的、notes 拼接），两处都没看出来
+    const local = await judge(
+      id,
+      'packages/engine/src/verifier-invoke.ts:797 — 只记了第二家的 session\npackages/engine/src/verifier-invoke.ts:794 — notes 去掉了第一条',
+    );
+    expect(local.pass).toBe(false);
+    expect(local.reason).toContain('没找到');
+    const onlyOne = await judge(id, 'packages/engine/src/verifier-invoke.ts:782 — 挑到一家就起会话');
+    expect(onlyOne.pass).toBe(false);
+    const noisy = await judge(
+      id,
+      [
+        right,
+        'packages/engine/src/verifier-invoke.ts:85 — x',
+        'packages/engine/src/verifier-invoke.ts:90 — y',
+        'packages/engine/src/routing/filter.ts:85 — z',
+      ].join('\n'),
+    );
+    expect(noisy.pass).toBe(false);
+    expect(noisy.reason).toContain('误报 3 条');
+  });
+
+  it('agent-eval-grading：CRLF 和数字面「3 轮」两处都报出过；只报了 8.3 短路径那类的不过', async () => {
+    const id = 'reviewer/agent-eval-grading';
+    const right = [
+      'packages/agent-eval/src/grade-util.ts:64 — 比内容不管换行符，Windows 上整份写回 CRLF 就算改了',
+      'packages/agent-eval/src/cases/code-tasks.ts:101 — 数测试里的「3 轮」，反向断言会被判成还钉着',
+    ].join('\n');
+    expect(await judge(id, right)).toMatchObject({ pass: true });
+    const withExtra = await judge(id, `${right}\npackages/agent-eval/src/workspace.ts:19 — 8.3 短名`);
+    expect(withExtra).toMatchObject({ pass: true });
+    expect(withExtra.reason).toContain('另找到');
+    // 当时的错法：单测全绿就合了，判分里这两处谁也没看出来
+    expect((await judge(id, 'packages/agent-eval/src/workspace.ts:19 — 8.3 短名')).pass).toBe(false);
+    expect((await judge(id, '没问题')).pass).toBe(false);
   });
 });

@@ -1,0 +1,934 @@
+diff --git a/packages/engine/src/author-families.ts b/packages/engine/src/author-families.ts
+index ef57de9a..23bc70b9 100644
+--- a/packages/engine/src/author-families.ts
++++ b/packages/engine/src/author-families.ts
+@@ -1,5 +1,5 @@
+ // 冷验收认不出作者是哪一族的几个族名（纯常量：routing/filter.ts 会被打进工作流，这里不引任何模块）。
+ // 为什么：冷验收要换一个「不同的族」来验，作者族认不出就挑不出不同的族、验不了。
+ // cursor：Cursor Auto 背后到底是哪家不知道；unclassified：拆不出的串；jev：不是写代码的模型。
+-// 写码阶段不派这几家（routing/filter.ts），冷验收遇到它们按「认不出」停（cold-verify-run.ts）。
++// 冷验收遇到它们走「两家都验」（cold-verify-run.ts）。
+ export const UNVERIFIABLE_AUTHOR_FAMILIES: ReadonlySet<string> = new Set(['cursor', 'unclassified', 'jev']);
+diff --git a/packages/engine/src/cold-verify-run.ts b/packages/engine/src/cold-verify-run.ts
+index 86e4919b..380f551c 100644
+--- a/packages/engine/src/cold-verify-run.ts
++++ b/packages/engine/src/cold-verify-run.ts
+@@ -167,7 +167,6 @@ export async function runColdVerifyForPr(
+     return await post(pr.head, status, { sourceProblem: `读不到单子：${why}` });
+   }
+ 
+-  // 作者族必须个个都是我们认得的：认不出就挑不出「不同的族」，硬跑就可能是同族自审。一个都没有也一样。
+   // 认得 = 0006 的验收族（FAMILY_ORDER，进避让名单）+ 目录里别的真实存在的族（glm、gemini、muse，不进避让：
+   // 验收人只从 FAMILY_ORDER 里挑，必然和它们不同族）。cursor（背后是哪家不知道）、unclassified、jev 不算认得。
+   const known = new Set<string>(FAMILY_ORDER);
+@@ -185,16 +184,8 @@ export async function runColdVerifyForPr(
+       if (!otherAuthors.includes(family)) otherAuthors.push(family);
+     } else unknown.push(raw);
+   }
+-  if (avoid.length + otherAuthors.length === 0 || unknown.length > 0) {
+-    const status = coldVerifyNotRun(
+-      avoid.length + otherAuthors.length === 0 && unknown.length === 0
+-        ? `PR #${prNumber} 没有记下是哪一族写的：没法保证换了家族`
+-        : `认不出 PR #${prNumber} 的作者族「${unknown.join('、')}」（认得的是 0006 的 ${FAMILY_ORDER.join('、')}，加上目录里的 ${[...authorOnly].join('、')}）：认不出就挑不出别家`,
+-    );
+-    return await post(pr.head, status, {
+-      sourceProblem: `作者族认不出：${unknown.length > 0 ? unknown.join('、') : '没有记录'}`,
+-    });
+-  }
++  // 认不出、或一个都没有：不停下，改成两家都验（两个不同的族各验一遍，都过才算过；verifier-invoke 的 requireTwoFamilies）。
++  const requireTwoFamilies = unknown.length > 0 || avoid.length + otherAuthors.length === 0;
+ 
+   // 3. 起一次冷调用。diff / specDir 都注入进去（verifier-invoke 不自己调 git）。
+   // 点名但没改的文件在这里读：引擎镜像里 PR 头上的内容。读失败留在提示词里，不从这一层抛出去。
+@@ -210,6 +201,7 @@ export async function runColdVerifyForPr(
+     modelFamiliesAvoid: avoid,
+     ...(otherAuthors.length > 0 ? { otherAuthorFamilies: otherAuthors } : {}),
+     round,
++    ...(requireTwoFamilies ? { requireTwoFamilies: true } : {}),
+   };
+   const invokeDeps: ColdVerifyInvokeDeps = {
+     oneShot: deps.oneShot,
+diff --git a/packages/engine/src/ports.ts b/packages/engine/src/ports.ts
+index 6a0acd66..d7241f9f 100644
+--- a/packages/engine/src/ports.ts
++++ b/packages/engine/src/ports.ts
+@@ -101,10 +101,6 @@ export interface PickRouteInput extends Scope {
+    * 不拿同族顶。
+    */
+   avoidFamilies?: string[];
+-  /**
+-   * 这张单已经有的作者族：写码返工时先在这几族里挑，免得作者族越攒越多、冷验收挑不出别家。
+-   */
+-  preferFamilies?: string[];
+   /** 这一步算界面类的活（改到了页面代码）：禁令按 UI 判，GPT 不派（含审界面）。 */
+   uiWork?: boolean;
+   /**
+diff --git a/packages/engine/src/real/store-ports.ts b/packages/engine/src/real/store-ports.ts
+index ba41aec9..c425964b 100644
+--- a/packages/engine/src/real/store-ports.ts
++++ b/packages/engine/src/real/store-ports.ts
+@@ -650,7 +650,6 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
+           routes: facts.routes,
+           now: now.toISOString(),
+           draw: drawn,
+-          ...(input.preferFamilies !== undefined ? { preferFamilies: input.preferFamilies } : {}),
+           ...orgFacts,
+           ...(input.uiWork ? { uiWork: true } : {}),
+           ...policy,
+diff --git a/packages/engine/src/routing/choose.ts b/packages/engine/src/routing/choose.ts
+index 6c00dd84..1d5e4d93 100644
+--- a/packages/engine/src/routing/choose.ts
++++ b/packages/engine/src/routing/choose.ts
+@@ -1,5 +1,7 @@
+ // 选路（设计 §九「选路」五条 + §十二「一条路由报繁忙，所有任务一起避开」由熔断判定带进来）。
+ // 纯函数、确定性：同样输入同样输出；不取时钟、不随机——现在几点、试探用的随机数都由调用方给，引擎记进历史。
++// 模型之间严格按用途顺序：往后挑只因额度用完（含留量线）、人关了或钉住别的、报错（探测不通、熔断）；
++// 不因为作者族、不因为本单之前用过哪一家而改顺序（冷验收验不了由冷验收自己兜，见 verifier-invoke.ts 的两家都验）。
+ 
+ import {
+   probeCadenceMinutes,
+@@ -98,16 +100,9 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
+   const verdicts = judged.map((j, i) => verdictOf(j, i));
+ 
+   const ready = judged.filter((j) => j.group.kind === 'ready');
+-  const preferredFamilies = (input.preferFamilies ?? []).map((family) => family.trim()).filter(Boolean);
+-  const preferredFamilyKeys = new Set(preferredFamilies.map(familyKey));
+-  const preferredReady =
+-    preferredFamilyKeys.size > 0
+-      ? ready.filter((j) => preferredFamilyKeys.has(familyKey(j.item.route.family)))
+-      : [];
+-  const first = preferredReady[0] ?? ready[0];
++  const first = ready[0];
+   if (first) {
+-    const fellBackToOtherFamily = preferredFamilyKeys.size > 0 && preferredReady.length === 0;
+-    const explore = preferredFamilyKeys.size > 0 ? null : pickTrial(input, ready, policy);
++    const explore = pickTrial(input, ready, policy);
+     const chosen = explore ?? first;
+     const route = chosen.item.route;
+     const breakerTrial = route.breaker.admit === 'trial';
+@@ -118,13 +113,7 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
+           quotaNote(route),
+           breakerTrial ? BREAKER_TRIAL : null,
+         )
+-      : withNotes(
+-          whyFirst(stageName, chosen, judged),
+-          fellBackToOtherFamily
+-            ? `本单已有作者族 ${preferredFamilies.join('、')} 都派不出，换到 ${familyKey(route.family)} 族`
+-            : null,
+-          breakerTrial ? BREAKER_TRIAL : null,
+-        );
++      : withNotes(whyFirst(stageName, chosen, judged), breakerTrial ? BREAKER_TRIAL : null);
+     return dispatch(route, why, trial, null, verdicts, now);
+   }
+ 
+diff --git a/packages/engine/src/routing/filter.ts b/packages/engine/src/routing/filter.ts
+index 4efbb795..4084a6c2 100644
+--- a/packages/engine/src/routing/filter.ts
++++ b/packages/engine/src/routing/filter.ts
+@@ -16,7 +16,6 @@ import {
+   type StageKind,
+   UI_PURPOSE,
+ } from '@fleet-dao/shared';
+-import { UNVERIFIABLE_AUTHOR_FAMILIES } from '../author-families.ts';
+ import {
+   duration,
+   hostName,
+@@ -83,8 +82,6 @@ export function blocksFor(
+   if (route.breaker.admit === 'none') out.push(breakerBlock(route, ctx.now));
+   const avoided = avoidReason(route, ctx);
+   if (avoided) out.push(hard('avoided', avoided));
+-  const unverifiable = unverifiableAuthorReason(route, ctx);
+-  if (unverifiable) out.push(hard('banned', unverifiable));
+   const unregistered = carpoolRegistryBlock(route, ctx);
+   if (unregistered) out.push(unregistered);
+   const notLive = orgBlock(route, ctx);
+@@ -327,16 +324,6 @@ function avoidReason(route: RouteFacts, ctx: FilterContext): string | null {
+   return null;
+ }
+ 
+-/**
+- * 写码的两个用途（execute、ui）不派冷验收认不出作者族的路由（#1626）：族名在 UNVERIFIABLE_AUTHOR_FAMILIES 里的，
+- * 或由渠道自己挑模型的（上游串是 auto）。写出来的 PR 冷验收挑不出「不同的族」，只会停在「作者族认不出」。别的阶段不挡。
+- */
+-function unverifiableAuthorReason(route: RouteFacts, ctx: FilterContext): string | null {
+-  if (ctx.stage !== 'execute' && ctx.stage !== 'ui') return null;
+-  if (!UNVERIFIABLE_AUTHOR_FAMILIES.has(familyKey(route.family)) && !routerPicksModel(route)) return null;
+-  return `${route.modelName}（${route.family} 族）：这家写的代码冷验收认不出是哪一族、验不了，写码不派`;
+-}
+-
+ /** 比较剩余和所需时的容差：1 − 0.9 算出来是 0.0999…，正好剩一成要算够。 */
+ const EPSILON = 1e-9;
+ 
+diff --git a/packages/engine/src/routing/types.ts b/packages/engine/src/routing/types.ts
+index a7ed37d7..16a8604d 100644
+--- a/packages/engine/src/routing/types.ts
++++ b/packages/engine/src/routing/types.ts
+@@ -187,10 +187,6 @@ export interface ChooseRouteInput {
+    * 也不派：认不出这次是哪一家在答。
+    */
+   avoid?: { routeIds?: string[]; poolIds?: string[]; modelIds?: string[]; families?: string[] };
+-  /**
+-   * 这张单已经有的作者族：写码返工时先在这几族里挑，免得作者族越攒越多、冷验收挑不出别家。
+-   */
+-  preferFamilies?: string[];
+   /** 这一步算界面类的活（改到了页面代码，例如验证一个改了页面的改动）：禁令按 UI 判（GPT 不做界面，含审界面）。 */
+   uiWork?: boolean;
+   /**
+diff --git a/packages/engine/src/verifier-invoke.ts b/packages/engine/src/verifier-invoke.ts
+index 062a6de3..d6cc93f7 100644
+--- a/packages/engine/src/verifier-invoke.ts
++++ b/packages/engine/src/verifier-invoke.ts
+@@ -76,11 +76,20 @@ export const VerifierInvokeInputSchema = z
+     otherAuthorFamilies: z.array(z.string().min(1)).optional(),
+     /** 这是第几轮：默认 1 轮、最多 2 轮（specs/555 第 3 条）；本模块不判上限，只透传。 */
+     round: z.union([z.literal(1), z.literal(2)]),
++    /**
++     * 要求两家都验（两个不同的族各验一遍，都过才算过）：作者族认不出时由调用方设为 true。
++     * 为 true 时 modelFamiliesAvoid 和 otherAuthorFamilies 可以都为空。不为 true 时，别家一家都派不出也会改成两家都验。
++     */
++    requireTwoFamilies: z.boolean().optional(),
+   })
+-  .refine((v) => v.modelFamiliesAvoid.length + (v.otherAuthorFamilies?.length ?? 0) > 0, {
+-    message: '作者族一个都没有：不知道该避开谁，没法保证换了家族',
+-    path: ['modelFamiliesAvoid'],
+-  });
++  .refine(
++    (v) =>
++      v.requireTwoFamilies === true || v.modelFamiliesAvoid.length + (v.otherAuthorFamilies?.length ?? 0) > 0,
++    {
++      message: '作者族一个都没有：不知道该避开谁，没法保证换了家族',
++      path: ['modelFamiliesAvoid'],
++    },
++  );
+ export type VerifierInvokeInput = z.infer<typeof VerifierInvokeInputSchema>;
+ 
+ /** 输出 zod：pass / fail + 问题清单。 */
+@@ -575,11 +584,24 @@ export async function invokeVerifier(
+   const named = await loadNamedFiles(parsed, diff.changedFiles, deps.fetchNamedFiles);
+   const prompt = renderPrompt(parsed, diff, spec.specDir, named);
+ 
+-  for (const family of FAMILY_ORDER) {
+-    if (avoid.has(family)) continue;
++  /** 一个族试完的结果：终局（直接回给调用方）、有结论、或这一族挑不出可用模型。 */
++  type FamilyOutcome =
++    | { kind: 'final'; out: VerifierInvokeOutput }
++    | {
++        kind: 'verdict';
++        family: ModelFamily;
++        modelId: string;
++        passed: boolean;
++        problems: string[];
++        notes: string[];
++        session: NonNullable<VerifierInvokeOutput['session']>;
++      }
++    | { kind: 'none' };
++
++  const tryFamily = async (family: ModelFamily): Promise<FamilyOutcome> => {
+     while (true) {
+       const m = await deps.chooseModelForFamily(family);
+-      if (m === undefined) break;
++      if (m === undefined) return { kind: 'none' };
+       const picked: PickedVerifier = {
+         family,
+         modelId: m.modelId,
+@@ -587,7 +609,7 @@ export async function invokeVerifier(
+         ...(m.routeId !== undefined ? { routeId: m.routeId } : {}),
+       };
+       const label = routeLabel(picked);
+-      if (seenRoutes.has(label)) break;
++      if (seenRoutes.has(label)) return { kind: 'none' };
+       seenRoutes.add(label);
+ 
+       const prepared = deps.prepareCwd ? await deps.prepareCwd(picked) : undefined;
+@@ -640,12 +662,15 @@ export async function invokeVerifier(
+           const klass = classOfFailed(oneShotResult);
+           if (klass.kind === 'blip') {
+             return {
+-              pass: false,
+-              problems: [],
+-              notes: who,
+-              round: parsed.round,
+-              session,
+-              upstreamRetry: { reason: klass.reason, afterSeconds: klass.afterSeconds },
++              kind: 'final',
++              out: {
++                pass: false,
++                problems: [],
++                notes: who,
++                round: parsed.round,
++                session,
++                upstreamRetry: { reason: klass.reason, afterSeconds: klass.afterSeconds },
++              },
+             };
+           }
+           if (klass.kind === 'unknown') {
+@@ -654,11 +679,14 @@ export async function invokeVerifier(
+           }
+         }
+         return {
+-          pass: false,
+-          problems: [coldCallFailed(verdict, oneShotResult)],
+-          notes: who,
+-          round: parsed.round,
+-          session,
++          kind: 'final',
++          out: {
++            pass: false,
++            problems: [coldCallFailed(verdict, oneShotResult)],
++            notes: who,
++            round: parsed.round,
++            session,
++          },
+         };
+       }
+ 
+@@ -666,13 +694,16 @@ export async function invokeVerifier(
+       const word = readVerdict(stdoutPieces.verdictLine);
+       if (word === null) {
+         return {
+-          pass: false,
+-          problems: [
+-            `冷调用没跑成：结论行不是固定写法「verdict: pass」或「verdict: fail」（最后一行是：${stdoutPieces.verdictLine.slice(0, 120)}）`,
+-          ],
+-          notes: who,
+-          round: parsed.round,
+-          session,
++          kind: 'final',
++          out: {
++            pass: false,
++            problems: [
++              `冷调用没跑成：结论行不是固定写法「verdict: pass」或「verdict: fail」（最后一行是：${stdoutPieces.verdictLine.slice(0, 120)}）`,
++            ],
++            notes: who,
++            round: parsed.round,
++            session,
++          },
+         };
+       }
+       const notes: string[] = [who];
+@@ -684,17 +715,20 @@ export async function invokeVerifier(
+       if (word === 'fail' && stdoutPieces.problems.length === 0) {
+         // 说没过却一条算挡的都没写：不当成过（模型明明说了不行），也不能把空问题表丢回给写代码的会话白改——要人看
+         return {
+-          pass: false,
+-          problems: [
+-            `冷调用没跑成：结论写了 fail，但「## 问题」里没有一条以「${BLOCKER_KINDS.join('」「')}」开头的（${
+-              stdoutPieces.droppedStyleNotes > 0
+-                ? `它写了 ${stdoutPieces.droppedStyleNotes} 条不算挡的意见`
+-                : '它一条都没写'
+-            }）`,
+-          ],
+-          notes: notes.join('；'),
+-          round: parsed.round,
+-          session,
++          kind: 'final',
++          out: {
++            pass: false,
++            problems: [
++              `冷调用没跑成：结论写了 fail，但「## 问题」里没有一条以「${BLOCKER_KINDS.join('」「')}」开头的（${
++                stdoutPieces.droppedStyleNotes > 0
++                  ? `它写了 ${stdoutPieces.droppedStyleNotes} 条不算挡的意见`
++                  : '它一条都没写'
++              }）`,
++            ],
++            notes: notes.join('；'),
++            round: parsed.round,
++            session,
++          },
+         };
+       }
+       if (word === 'pass' && stdoutPieces.problems.length > 0) {
+@@ -703,33 +737,84 @@ export async function invokeVerifier(
+         );
+       }
+       return {
+-        pass: word === 'pass' && stdoutPieces.problems.length === 0,
++        kind: 'verdict',
++        family: picked.family,
++        modelId: picked.modelId,
++        passed: word === 'pass' && stdoutPieces.problems.length === 0,
+         problems: stdoutPieces.problems,
+-        notes: notes.join('；'),
+-        round: parsed.round,
++        notes,
+         session,
+       };
+     }
++  };
++
++  // 4. 一家验：不要求两家、且有不在避开族里的族给了结论时，和一直以来一样。
++  if (parsed.requireTwoFamilies !== true) {
++    for (const family of FAMILY_ORDER) {
++      if (avoid.has(family)) continue;
++      const r = await tryFamily(family);
++      if (r.kind === 'final') return r.out;
++      if (r.kind === 'verdict') {
++        return {
++          pass: r.passed,
++          problems: r.problems,
++          notes: r.notes.join('；'),
++          round: parsed.round,
++          session: r.session,
++        };
++      }
++    }
+   }
+ 
+-  if (misses.length > 0) {
+-    const listed = misses.map((item) => `${item.route}：${item.tail}`).join('；');
+-    return {
+-      pass: false,
+-      problems: [`冷调用没跑成：认不出原因，试过的路由都没验成：${listed}`],
+-      notes: '认不出原因，验收用途里还能派的路由都试过了',
+-      round: parsed.round,
+-      ...(lastSession === undefined ? {} : { session: lastSession }),
+-    };
++  // 5. 两家都验：认不出作者（requireTwoFamilies），或别家一家都派不出。候选族先排不在避开族里的，再排避开族里的，
++  // 各挑一个模型，凑够两个不同的族各给出结论为止。同一族只算一家。
++  if (misses.length === 0) {
++    const candidates = [
++      ...FAMILY_ORDER.filter((f) => !avoid.has(f)),
++      ...FAMILY_ORDER.filter((f) => avoid.has(f)),
++    ];
++    const verdicts: Extract<FamilyOutcome, { kind: 'verdict' }>[] = [];
++    for (const family of candidates) {
++      if (parsed.requireTwoFamilies !== true && !avoid.has(family)) continue; // 一家验时已经试过、没挑出来
++      const r = await tryFamily(family);
++      if (r.kind === 'final') return r.out;
++      if (r.kind === 'verdict') {
++        verdicts.push(r);
++        if (verdicts.length >= 2) break;
++      }
++    }
++    if (verdicts.length >= 2) {
++      const failed = verdicts.filter((v) => !v.passed);
++      const names = verdicts.map((v) => `${v.family}（model ${v.modelId}）`).join('、');
++      return {
++        pass: failed.length === 0,
++        problems: failed.flatMap((v) => v.problems.map((p) => `${v.family}：${p}`)),
++        notes: [
++          `两家都验：${names}`,
++          ...verdicts.flatMap((v) => v.notes.slice(1).map((n) => `${v.family}：${n}`)),
++        ].join('；'),
++        round: parsed.round,
++        session: verdicts[1]!.session,
++      };
++    }
++    if (misses.length === 0) {
++      return {
++        pass: false,
++        problems: [
++          `没讨论成：两家都验要两个不同的族，只派得出 ${verdicts.length} 家（避开的族 ${[...avoid].join('、') || '无'}）`,
++        ],
++        notes: '0006：不同家族凑不齐 = 没讨论成，不许默认模型顶上、更不许拿它当 pass',
++        round: parsed.round,
++      };
++    }
+   }
+ 
+-  const familiesLeft = FAMILY_ORDER.filter((f) => !avoid.has(f)).join('、');
++  const listed = misses.map((item) => `${item.route}：${item.tail}`).join('；');
+   return {
+     pass: false,
+-    problems: [
+-      `没讨论成：避开的族 ${[...avoid].join('、')}，${familiesLeft ? `剩下的 ${familiesLeft}` : '一个能换的族都不剩'} 全挑不出可用模型`,
+-    ],
+-    notes: '0006：所有不同家族都不可用 = 没讨论成，不许默认模型顶上、更不许拿它当 pass',
++    problems: [`冷调用没跑成：认不出原因，试过的路由都没验成：${listed}`],
++    notes: '认不出原因，验收用途里还能派的路由都试过了',
+     round: parsed.round,
++    ...(lastSession === undefined ? {} : { session: lastSession }),
+   };
+ }
+diff --git a/packages/engine/src/workflows/task-session.ts b/packages/engine/src/workflows/task-session.ts
+index fece20e2..8516f34e 100644
+--- a/packages/engine/src/workflows/task-session.ts
++++ b/packages/engine/src/workflows/task-session.ts
+@@ -7,7 +7,8 @@
+ // - 别在这里加判断条件：判断经 rt.classify（judgeRetrying），结果进历史。
+ // - 会话跑完却没有提交（#1408，patched('avoid-empty-commit-route')）：避让记在这张单的运行时上，下一轮选路带上。
+ //   滤光了候选就不再避开，点名原来的路由再选一次；还派不出就照旧用它，不死等。老历史没有这个标记，选路参数和原来一样。
+-// - 写码返工优先本单已有作者族（patched('prefer-author-families')）：老历史重放时不带这个字段，避免多走新分支。
++// - patched('prefer-author-families')：曾让写码返工优先本单已有作者族，现在选路只按用途顺序、不再带这个字段；
++//   调用留着只为带这个标记的老历史重放不报非确定性。
+ // - 派之前再探一次选定的那条（#1409，patched('dispatch-probe')）：不通就先放掉这次预占（patched('dispatch-probe-release')，
+ //   没进起会话，不能占着池），再换下一条，每轮最多探 3 条；都探不通或都被挡就停下，不起会话。
+ //   没提交避让滤光之后改派原来的那条，也先探再派。老历史没有这个标记，不探、不改选路之后的那一步。
+@@ -308,6 +309,8 @@ async function pickRoute(
+     const merged = useDry ? mergeAvoid(avoid, dry) : avoid;
+     const avoidRouteIds = [...merged.routeIds];
+     for (const id of probeAvoid) if (!avoidRouteIds.includes(id)) avoidRouteIds.push(id);
++    // 选路不再带「优先本单已有作者族」（选路只按用途顺序）。调用留着、不加字段：带这个标记的老历史重放时命令序列不变。
++    patched('prefer-author-families');
+     const got: PickRouteResult = await rt.step('pickRoute', () =>
+       rt.acts.pickRoute({
+         taskId: rt.input.taskId,
+@@ -319,9 +322,6 @@ async function pickRoute(
+         avoidModelIds: merged.modelIds,
+         ...(stickTo ? { stickRouteId: stickTo } : {}),
+         ...(prefer ? { preferRouteId: prefer } : {}),
+-        ...(patched('prefer-author-families') && rt.families.size > 0
+-          ? { preferFamilies: [...rt.families] }
+-          : {}),
+         ...(failedChannel ? { failedChannel } : {}),
+         reserve: { segment: 'manual' },
+       }),
+diff --git a/packages/engine/test/cold-verify-post.test.ts b/packages/engine/test/cold-verify-post.test.ts
+index cdaf2327..7973cb14 100644
+--- a/packages/engine/test/cold-verify-post.test.ts
++++ b/packages/engine/test/cold-verify-post.test.ts
+@@ -155,8 +155,8 @@ describe('冷调用的每条「读不到」都变成 failure 状态，不许吞
+     });
+     expect(s.state).toBe('failure');
+     expect(s.description).toContain('没讨论成');
+-    // 作者族确实被跳过了（0006 的顺序照旧）
+-    expect(asked).toEqual(FAMILY_ORDER.filter((f) => f !== 'gpt'));
++    // 先按 0006 的顺序问别家；都挑不出才改两家都验，轮到被避开的作者族 gpt（也挑不出）
++    expect(asked).toEqual([...FAMILY_ORDER.filter((f) => f !== 'gpt'), 'gpt']);
+   });
+ 
+   it('【故意造出的失败】冷调用根本没跑成（进程 exit=1、stdout 空）→ failure', async () => {
+diff --git a/packages/engine/test/cold-verify-run.test.ts b/packages/engine/test/cold-verify-run.test.ts
+index db4379dc..75c5e08f 100644
+--- a/packages/engine/test/cold-verify-run.test.ts
++++ b/packages/engine/test/cold-verify-run.test.ts
+@@ -89,6 +89,24 @@ function recorder() {
+   };
+ }
+ 
++/** 用假的 invoke 记下交给冷调用的入参：看作者族怎么翻成避让和 requireTwoFamilies。 */
++async function invokeWithAuthors(authors: string[]) {
++  const rec = recorder();
++  const seen: VerifierInvokeInput[] = [];
++  const r = await runColdVerifyForPr(42, {
++    sources: sources({ authors: async () => authors }),
++    invoke: async (input) => {
++      seen.push(input);
++      return { pass: true, problems: [], round: input.round } as VerifierInvokeOutput;
++    },
++    oneShot: ONE_SHOT,
++    chooseModelForFamily: PICK_CLAUDE,
++    cwd: 'C:/work/x',
++    writeStatus: rec.writeStatus,
++  });
++  return { r, seen, rec };
++}
++
+ describe('runColdVerifyForPr：跑通一路', () => {
+   it('三样都读得到、挑得出别家、模型说 pass → 贴上 success（贴在 PR 的头上）', async () => {
+     const rec = recorder();
+@@ -251,26 +269,26 @@ describe('runColdVerifyForPr：【故意造出的失败】每条「读不到」
+     expect(rec.posted.at(-1)?.state).toBe('failure');
+   });
+ 
+-  it('作者族认不出（cursor 背后是哪家不知道，不能当不同族）→ 贴 failure，写明原因，不硬跑', async () => {
+-    const rec = recorder();
+-    let invoked = 0;
+-    const r = await runColdVerifyForPr(42, {
+-      sources: sources({ authors: async () => ['cursor'] }),
+-      invoke: async (input, deps) => {
+-        invoked += 1;
+-        return await invokeVerifier(input, deps);
+-      },
+-      oneShot: ONE_SHOT,
+-      chooseModelForFamily: PICK_CLAUDE,
+-      cwd: 'C:/work/x',
+-      writeStatus: rec.writeStatus,
+-    });
+-    expect(r.status.state).toBe('failure');
+-    expect(r.status.description).toContain('认不出');
+-    expect(r.status.description).toContain('cursor');
+-    expect(r.sourceProblem).toBe('作者族认不出：cursor');
+-    expect(invoked).toBe(0); // 压根没起调用
+-    expect(rec.posted.at(-1)?.state).toBe('failure');
++  it('(f) 作者族认不出（cursor）→ 不停下，照常调用，requireTwoFamilies 为 true、避让族为空', async () => {
++    const { r, seen, rec } = await invokeWithAuthors(['cursor']);
++    expect(seen).toHaveLength(1);
++    expect(seen[0]?.requireTwoFamilies).toBe(true);
++    expect(seen[0]?.modelFamiliesAvoid).toEqual([]);
++    expect(r.status.description).not.toContain('作者族认不出');
++    expect(r.sourceProblem).toBeUndefined();
++    expect(rec.posted.at(-1)?.state).toBe('success');
++  });
++
++  it('(g) 作者族是 grok 加 cursor → 避让只放 grok，requireTwoFamilies 为 true', async () => {
++    const { seen } = await invokeWithAuthors(['grok', 'cursor']);
++    expect(seen[0]?.modelFamiliesAvoid).toEqual(['grok']);
++    expect(seen[0]?.requireTwoFamilies).toBe(true);
++  });
++
++  it('(h) 作者族是 grok → 不带 requireTwoFamilies，和以前一样', async () => {
++    const { seen } = await invokeWithAuthors(['grok']);
++    expect(seen[0]?.modelFamiliesAvoid).toEqual(['grok']);
++    expect(seen[0]?.requireTwoFamilies).toBeUndefined();
+   });
+ 
+   it('【故意造出的失败】拉 diff 时炸了 → 贴 failure、算「没验成」（sourceProblem 有值）', async () => {
+@@ -358,44 +376,19 @@ describe('runColdVerifyForPr：作者族是一张表；开跑前先贴 pending
+     expect(asked).toEqual(['grok', 'deepseek']);
+   });
+ 
+-  it('【故意造出的失败】一个作者族都没记下 → 贴 failure、不起调用（不知道该避开谁，就没法保证换了家族）', async () => {
+-    const rec = recorder();
+-    let invoked = 0;
+-    const r = await runColdVerifyForPr(42, {
+-      sources: sources({ authors: async () => [] }),
+-      invoke: async (input, deps) => {
+-        invoked += 1;
+-        return await invokeVerifier(input, deps);
+-      },
+-      oneShot: ONE_SHOT,
+-      chooseModelForFamily: PICK_CLAUDE,
+-      cwd: 'C:/work/x',
+-      writeStatus: rec.writeStatus,
+-    });
+-    expect(r.status.state).toBe('failure');
+-    expect(r.status.description).toContain('没有记下是哪一族写的');
+-    expect(r.sourceProblem).toContain('作者族认不出');
+-    expect(invoked).toBe(0);
+-    expect(rec.posted.at(-1)?.state).toBe('failure');
++  it('一个作者族都没记下 → 不停下，照常调用，requireTwoFamilies 为 true', async () => {
++    const { r, seen } = await invokeWithAuthors([]);
++    expect(seen).toHaveLength(1);
++    expect(seen[0]?.requireTwoFamilies).toBe(true);
++    expect(seen[0]?.modelFamiliesAvoid).toEqual([]);
++    expect(r.sourceProblem).toBeUndefined();
+   });
+ 
+-  it('【故意造出的失败】作者族里有一个认不出（claude + cursor）→ 贴 failure、不起调用：认不出的可能就是某个已知族的别名', async () => {
+-    const rec = recorder();
+-    let invoked = 0;
+-    const r = await runColdVerifyForPr(42, {
+-      sources: sources({ authors: async () => ['claude', 'cursor'] }),
+-      invoke: async (input, deps) => {
+-        invoked += 1;
+-        return await invokeVerifier(input, deps);
+-      },
+-      oneShot: ONE_SHOT,
+-      chooseModelForFamily: PICK_CLAUDE,
+-      cwd: 'C:/work/x',
+-      writeStatus: rec.writeStatus,
+-    });
+-    expect(r.status.state).toBe('failure');
+-    expect(r.status.description).toContain('cursor');
+-    expect(invoked).toBe(0);
++  it('作者族里有一个认不出（claude + cursor）→ 避让只放 claude，两家都验', async () => {
++    const { r, seen } = await invokeWithAuthors(['claude', 'cursor']);
++    expect(seen[0]?.modelFamiliesAvoid).toEqual(['claude']);
++    expect(seen[0]?.requireTwoFamilies).toBe(true);
++    expect(r.status.state).toBe('success');
+   });
+ 
+   it('作者是 glm（目录里有、不是验收族）→ 起得了验收，验收人不是 glm，避让名单里没有 glm 也没崩', async () => {
+@@ -461,39 +454,19 @@ describe('runColdVerifyForPr：作者族是一张表；开跑前先贴 pending
+     expect(asked).toEqual(['grok']); // gpt 被跳过，直接问 grok
+   });
+ 
+-  it('glm + cursor 混合 → 仍停（cursor 认不出），不起调用', async () => {
+-    let invoked = 0;
+-    const r = await runColdVerifyForPr(42, {
+-      sources: sources({ authors: async () => ['glm', 'cursor'] }),
+-      invoke: async (input, deps) => {
+-        invoked += 1;
+-        return await invokeVerifier(input, deps);
+-      },
+-      oneShot: ONE_SHOT,
+-      chooseModelForFamily: PICK_CLAUDE,
+-      cwd: 'C:/work/x',
+-    });
+-    expect(r.status.state).toBe('failure');
+-    expect(r.sourceProblem).toBe('作者族认不出：cursor');
+-    expect(invoked).toBe(0);
++  it('glm + cursor 混合 → 照常调用，otherAuthorFamilies 带 glm，requireTwoFamilies 为 true', async () => {
++    const { seen } = await invokeWithAuthors(['glm', 'cursor']);
++    expect(seen[0]?.otherAuthorFamilies).toEqual(['glm']);
++    expect(seen[0]?.requireTwoFamilies).toBe(true);
+   });
+ 
+-  it('unclassified、jev、拼写不认识的串仍然认不出 → 停', async () => {
++  it('unclassified、jev、拼写不认识的串也走两家都验，不停下', async () => {
+     for (const author of ['unclassified', 'jev', 'gpt5']) {
+-      let invoked = 0;
+-      const r = await runColdVerifyForPr(42, {
+-        sources: sources({ authors: async () => [author] }),
+-        invoke: async (input, deps) => {
+-          invoked += 1;
+-          return await invokeVerifier(input, deps);
+-        },
+-        oneShot: ONE_SHOT,
+-        chooseModelForFamily: PICK_CLAUDE,
+-        cwd: 'C:/work/x',
+-      });
+-      expect(r.status.state).toBe('failure');
+-      expect(r.sourceProblem).toBe(`作者族认不出：${author}`);
+-      expect(invoked).toBe(0);
++      const { r, seen } = await invokeWithAuthors([author]);
++      expect(seen).toHaveLength(1);
++      expect(seen[0]?.requireTwoFamilies).toBe(true);
++      expect(seen[0]?.modelFamiliesAvoid).toEqual([]);
++      expect(r.sourceProblem).toBeUndefined();
+     }
+   });
+ 
+diff --git a/packages/engine/test/real/task-verify.test.ts b/packages/engine/test/real/task-verify.test.ts
+index 64f6dc8b..9de38402 100644
+--- a/packages/engine/test/real/task-verify.test.ts
++++ b/packages/engine/test/real/task-verify.test.ts
+@@ -410,12 +410,12 @@ describe('【故意造出的失败】做不出来：回 unavailable（工作流
+     expect(r.posted.map((p) => p.state)).toEqual(['pending', 'failure']);
+   });
+ 
+-  it('作者族认不出（cursor）：unavailable，不硬跑——认不出的可能就是某个已知族的别名', async () => {
++  it('作者族认不出（cursor）：不再停下，改成两家都验；只派得出一家时仍回没讨论成，写明要两个不同的族', async () => {
+     const r = rig();
+     const got = await r.run(r.input({ authorFamilies: ['cursor'] }), ctx());
+-    expect(got.unavailable).toContain('作者族认不出');
+-    expect(r.specs).toHaveLength(0);
+-    expect(r.asked).toHaveLength(0);
++    expect(got.unavailable).not.toContain('作者族认不出');
++    expect(got.unavailable).toContain('两家都验要两个不同的族');
++    expect(r.asked.length).toBeGreaterThan(0);
+   });
+ 
+   it('diff 太大：unavailable，不截断了假装看全；状态 failure', async () => {
+diff --git a/packages/engine/test/routing/choose.test.ts b/packages/engine/test/routing/choose.test.ts
+index 6def87d2..119780e8 100644
+--- a/packages/engine/test/routing/choose.test.ts
++++ b/packages/engine/test/routing/choose.test.ts
+@@ -62,43 +62,12 @@ describe('派给某条路由', () => {
+     expect(chooseRoute(make())).toEqual(chooseRoute(make()));
+   });
+ 
+-  it('返工优先派给本单已有作者族，即使它排在别家后面', () => {
+-    const r = chooseRoute(
+-      input([route('other', { family: 'gpt' }), route('same', { family: 'claude' })], {
+-        preferFamilies: ['claude'],
+-      }),
+-    );
+-    expect(picked(r)).toBe('same');
+-  });
+-
+-  it('返工有作者族时不因试探比例抽到非首选族', () => {
+-    const r = chooseRoute(
+-      input([route('other', { family: 'gpt' }), route('same', { family: 'claude' })], {
+-        preferFamilies: ['claude'],
+-        draw: 0,
+-        policy: { trialEnabled: true, trialRatio: 1 },
+-      }),
+-    );
+-    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'same', trial: null });
+-  });
+-
+-  it('本单已有作者族都派不出时才换到别家，并在理由里说明', () => {
+-    const r = chooseRoute(
+-      input(
+-        [
+-          route('same', { family: 'claude', blockers: ['no-slot'], inFlight: 5 }),
+-          route('other', { family: 'kimi', modelId: 'kimi-k3', modelName: 'Kimi k3' }),
+-        ],
+-        { preferFamilies: ['claude'] },
+-      ),
+-    );
+-    expect(picked(r)).toBe('other');
+-    if (r.kind === 'dispatch') {
+-      expect(r.why).toContain('本单已有作者族 claude 都派不出，换到 kimi 族');
+-    }
++  it('顺序第 1 条是别的族、可派时就选它，不因本单之前的会话都是第 2 条的族而改', () => {
++    const r = chooseRoute(input([route('first', { family: 'gpt' }), route('second', { family: 'claude' })]));
++    expect(r).toMatchObject({ kind: 'dispatch', routeId: 'first', trial: null });
+   });
+ 
+-  it('没有给返工作者族时保持原来的试探行为', () => {
++  it('开了试探时照旧按试探比例抽非首选', () => {
+     const r = chooseRoute(
+       input([route('first', { family: 'gpt' }), route('second', { family: 'claude' })], {
+         draw: 0,
+diff --git a/packages/engine/test/routing/filter.test.ts b/packages/engine/test/routing/filter.test.ts
+index 1923b6a5..32a34b08 100644
+--- a/packages/engine/test/routing/filter.test.ts
++++ b/packages/engine/test/routing/filter.test.ts
+@@ -789,21 +789,18 @@ describe('拼车并发登记核对不上：不往拼车池派（#896，方案第
+   });
+ });
+ 
+-describe('写码不派冷验收认不出作者族的路由（#1626）', () => {
++describe('写码阶段不再因作者族认不出而挡（撤 #1626，选路只按用途顺序）', () => {
+   const cursor = route('cur', { family: 'cursor', modelName: 'Cursor Auto' });
+-  it('execute 阶段 cursor 族被挡，文字写明验不了', () => {
++  it('execute 阶段 cursor 族不挡', () => {
+     const blocks = blocksFor(cursor, entry('cur', 0), ctx({ stage: 'execute' }));
+-    expect(blocks.map((b) => b.code)).toEqual(['banned']);
+-    expect(blocks[0]?.text).toContain('验不了');
++    expect(blocks.map((b) => b.text).join()).not.toContain('验不了');
++    expect(blocks).toEqual([]);
+   });
+-  it('ui 阶段上游串是 auto 的被挡', () => {
++  it('ui 阶段上游串是 auto 的不挡', () => {
+     const auto = route('auto', { family: 'other', upstreamModel: 'cursor:auto' });
+     const blocks = blocksFor(auto, entry('auto', 0), ctx({ stage: 'ui' }));
+-    expect(blocks.map((b) => b.text).join()).toContain('验不了');
+-  });
+-  it('triage 阶段同一条 cursor 路由不被这条挡', () => {
+-    const blocks = blocksFor(cursor, entry('cur', 0), ctx({ stage: 'triage' }));
+     expect(blocks.map((b) => b.text).join()).not.toContain('验不了');
++    expect(blocks).toEqual([]);
+   });
+   it('execute 阶段 grok 族不受影响', () => {
+     expect(codes(route('g', { family: 'grok' }), ctx({ stage: 'execute' }))).toEqual([]);
+diff --git a/packages/engine/test/routing/structure.test.ts b/packages/engine/test/routing/structure.test.ts
+index 06855115..a73f7d1d 100644
+--- a/packages/engine/test/routing/structure.test.ts
++++ b/packages/engine/test/routing/structure.test.ts
+@@ -18,9 +18,7 @@ function problems(file: string, code: string): string[] {
+   const out: string[] = [];
+   for (const m of code.matchAll(/^\s*(?:import|export)[^'"]*from\s+'([^']+)'/gm)) {
+     const source = m[1] ?? '';
+-    // 例外：../author-families.ts 是纯常量（写码不派冷验收认不出作者族的路由，#1626），不引任何模块
+-    const allowed =
+-      source.startsWith('./') || source === '@fleet-dao/shared' || source === '../author-families.ts';
++    const allowed = source.startsWith('./') || source === '@fleet-dao/shared';
+     if (!allowed) out.push(`${file} 引了 ${source}`);
+   }
+   for (const [label, re] of IMPURE) if (re.test(code)) out.push(`${file}：${label}`);
+diff --git a/packages/engine/test/verifier-invoke.test.ts b/packages/engine/test/verifier-invoke.test.ts
+index ee31b989..f41eafc0 100644
+--- a/packages/engine/test/verifier-invoke.test.ts
++++ b/packages/engine/test/verifier-invoke.test.ts
+@@ -222,8 +222,8 @@ describe('invokeVerifier：happy path', () => {
+     );
+     expect(out.pass).toBe(false);
+     expect(out.problems.join('\n')).toContain('没讨论成');
+-    // kimi 跳过了；其余四个按 FAMILY_ORDER 顺序都问了一遍
+-    expect(chosen).toEqual(FAMILY_ORDER.filter((f) => f !== 'kimi'));
++    // 其余四个按 FAMILY_ORDER 顺序都问了一遍；都挑不出才改两家都验，轮到避开的 kimi（也挑不出）
++    expect(chosen).toEqual([...FAMILY_ORDER.filter((f) => f !== 'kimi'), 'kimi']);
+   });
+ });
+ 
+@@ -444,15 +444,15 @@ describe('invokeVerifier：写过这张单的族不止一个、路由编号、
+     await expect(invokeVerifier({ ...BASE_INPUT, modelFamiliesAvoid: [] }, DEPS(oneShot))).rejects.toThrow();
+   });
+ 
+-  it('剩下的族全被避开 → 没讨论成，写明一个能换的族都不剩', async () => {
++  it('剩下的族全被避开、且一家都派不出 → 没讨论成，写明只派得出 0 家', async () => {
+     const { oneShot } = fakeOneShot({ exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false });
+     const out = await invokeVerifier(
+       { ...BASE_INPUT, modelFamiliesAvoid: [...FAMILY_ORDER] },
+-      DEPS(oneShot, async () => ({ modelId: 'never' })),
++      DEPS(oneShot, async () => undefined),
+     );
+     expect(out.pass).toBe(false);
+     expect(out.problems[0]).toContain('没讨论成');
+-    expect(out.problems[0]).toContain('一个能换的族都不剩');
++    expect(out.problems[0]).toContain('只派得出 0 家');
+     expect(out.session).toBeUndefined(); // 没起会话
+   });
+ 
+@@ -870,3 +870,107 @@ describe('invokeVerifier：单子点名但这次没改的文件', () => {
+     ).toEqual(many.slice(0, 5));
+   });
+ });
++
++describe('invokeVerifier：两家都验（#1681）', () => {
++  /** 按模型号回不同的结论：model 名在 failModels 里的那家判 fail，其余 pass。 */
++  function perModelOneShot(failModels: string[] = []): { oneShot: OneShotDeps; models: string[] } {
++    const models: string[] = [];
++    const base = fakeOneShot({ exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false });
++    const oneShot: OneShotDeps = {
++      ...base.oneShot,
++      spawn: async (cmd) => {
++        const model = cmd.argv[cmd.argv.indexOf('--model') + 1] ?? '';
++        models.push(model);
++        return {
++          exitCode: 0,
++          stdout: failModels.includes(model) ? MODEL_STDOUT_FAIL_NOT_DONE : MODEL_STDOUT_PASS,
++          stderr: '',
++          killed: false,
++        };
++      },
++    };
++    return { oneShot, models };
++  }
++  const deps = (oneShot: OneShotDeps, choose: ChooseModelForFamily) => ({
++    oneShot,
++    fetchDiff: okFetchDiff(),
++    fetchSpec: okFetchSpec(),
++    chooseModelForFamily: choose,
++    cwd: 'C:/work/x',
++  });
++  const THREE_AVOID: ModelFamily[] = ['gpt', 'claude', 'deepseek'];
++  const ONLY_GPT_CLAUDE = fixedChoose({ gpt: { modelId: 'gpt-1' }, claude: { modelId: 'claude-1' } });
++
++  it('(a) 别家全派不出：gpt、claude 各验一遍，两家都 pass → pass=true，notes 写明两家都验', async () => {
++    const { oneShot, models } = perModelOneShot();
++    const out = await invokeVerifier(
++      { ...BASE_INPUT, modelFamiliesAvoid: THREE_AVOID },
++      deps(oneShot, ONLY_GPT_CLAUDE),
++    );
++    expect(models).toEqual(['gpt-1', 'claude-1']);
++    expect(out.pass).toBe(true);
++    expect(out.problems).toEqual([]);
++    expect(out.notes).toContain('两家都验');
++    expect(out.notes).toContain('gpt');
++    expect(out.notes).toContain('claude-1');
++  });
++
++  it('(b) 同样设置，claude 那家 fail → pass=false，problems 每条以「claude：」开头', async () => {
++    const { oneShot } = perModelOneShot(['claude-1']);
++    const out = await invokeVerifier(
++      { ...BASE_INPUT, modelFamiliesAvoid: THREE_AVOID },
++      deps(oneShot, ONLY_GPT_CLAUDE),
++    );
++    expect(out.pass).toBe(false);
++    expect(out.problems.length).toBeGreaterThan(0);
++    expect(out.problems.every((p) => p.startsWith('claude：'))).toBe(true);
++  });
++
++  it('(c) requireTwoFamilies、避让为空：起两次会话、两个族不同，两家都 pass 才过', async () => {
++    const { oneShot, models } = perModelOneShot();
++    const choose: ChooseModelForFamily = async (family) => ({ modelId: `${family}-m` });
++    const out = await invokeVerifier(
++      { ...BASE_INPUT, modelFamiliesAvoid: [], requireTwoFamilies: true },
++      deps(oneShot, choose),
++    );
++    expect(models).toEqual(['gpt-m', 'grok-m']);
++    expect(out.pass).toBe(true);
++
++    const second = perModelOneShot(['grok-m']);
++    const bad = await invokeVerifier(
++      { ...BASE_INPUT, modelFamiliesAvoid: [], requireTwoFamilies: true },
++      deps(second.oneShot, choose),
++    );
++    expect(bad.pass).toBe(false);
++    expect(bad.problems.every((p) => p.startsWith('grok：'))).toBe(true);
++  });
++
++  it('(d) 只有一个族挑得出模型 → 没讨论成，原因含「只派得出 1 家」，不当成过', async () => {
++    const { oneShot } = perModelOneShot();
++    const out = await invokeVerifier(
++      { ...BASE_INPUT, modelFamiliesAvoid: THREE_AVOID },
++      deps(oneShot, fixedChoose({ gpt: { modelId: 'gpt-1' } })),
++    );
++    expect(out.pass).toBe(false);
++    expect(out.problems.join('\n')).toContain('没讨论成');
++    expect(out.problems.join('\n')).toContain('只派得出 1 家');
++  });
++
++  it('(e) 有别家可挑：照旧一家验，只起一次会话', async () => {
++    const { oneShot, models } = perModelOneShot();
++    const out = await invokeVerifier(
++      { ...BASE_INPUT, modelFamiliesAvoid: ['gpt'] },
++      deps(oneShot, fixedChoose({ grok: { modelId: 'grok-1' }, claude: { modelId: 'claude-1' } })),
++    );
++    expect(models).toEqual(['grok-1']);
++    expect(out.pass).toBe(true);
++    expect(out.notes ?? '').not.toContain('两家都验');
++  });
++
++  it('没有 requireTwoFamilies、避让和别的作者族都为空 → 照旧在入参校验就抛', async () => {
++    const { oneShot } = perModelOneShot();
++    await expect(
++      invokeVerifier({ ...BASE_INPUT, modelFamiliesAvoid: [] }, deps(oneShot, ONLY_GPT_CLAUDE)),
++    ).rejects.toThrow();
++  });
++});

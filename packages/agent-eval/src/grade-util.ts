@@ -1,7 +1,7 @@
 // 判分的小工具：跑夹具里的测试、比文件有没有被改、读回答里的 `文件:行`。
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
 import { REPO_ROOT, UngradableError } from './types.ts';
 
 /** 目录下所有文件（相对路径、正斜杠、排好序）。跳过 node_modules 和 .git。 */
@@ -52,11 +52,23 @@ export function runNodeTests(dir: string, env: Record<string, string> = {}): Tes
   return { ok: r.status === 0, output: `${r.stdout}\n${r.stderr}`.trim() };
 }
 
+/** 在目录里跑一个测试文件 `node --test <rel>`（仓快照的题：根上没有 test/，验收测试拷到根上跑）。node 起不来：判不了。 */
+export function runNodeTestFile(dir: string, rel: string): TestRun {
+  const r = spawnSync(process.execPath, ['--test', rel], {
+    cwd: dir,
+    encoding: 'utf8',
+    timeout: 120_000,
+    windowsHide: true,
+  });
+  if (r.error) throw new UngradableError(`node --test 起不来：${r.error.message}`);
+  return { ok: r.status === 0, output: `${r.stdout}\n${r.stderr}`.trim() };
+}
+
 /**
  * 换行统一成 LF 再比：Windows 上会话用 Python 文本模式、PowerShell 写回文件，整份会换成 CRLF，
  * 内容没变也被算成每行都改了（Sonnet 修 week-start-tz 只动了 6 行，被判成 49 行，#1641）。
  */
-const lf = (s: string): string => s.replace(/\r\n/g, '\n');
+export const lf = (s: string): string => s.replace(/\r\n/g, '\n');
 
 /** 夹具原件（orig）和现在的目录（work）逐文件比，列出改了、新增、删了的。只差换行符的不算改了。 */
 export function compareDirs(
@@ -104,6 +116,8 @@ export interface Planted {
   anchor: RegExp;
   before?: number;
   after?: number;
+  /** 别的位置也算报出了这一处（同一个错在 diff 里落在几行上，比如判断写在一处、后果落在另一处）。 */
+  alt?: readonly { anchor: RegExp; before?: number; after?: number }[];
 }
 
 /** 在文本里找锚点行（1 起的行号）；找不到是判分自己出了问题：判不了。 */
@@ -129,18 +143,20 @@ export function gradeCitations(
   decoyHits: string[];
   falsePositives: number[];
 } {
-  const real = planted.map((p) => locate(diffText, p));
-  const bait = decoys.map((p) => locate(diffText, p));
+  const windows = (p: Planted) =>
+    [p, ...(p.alt ?? []).map((a) => ({ ...a, kind: p.kind }))].map((w) => locate(diffText, w));
+  const real = planted.flatMap(windows);
+  const bait = decoys.flatMap(windows);
   const cited = refsOf(answer)
     .filter((r) => r.file === file || r.file.endsWith(`/${file}`))
     .map((r) => r.line);
   const inWin = (n: number, w: { from: number; to: number }) => n >= w.from && n <= w.to;
-  const found = real.filter((w) => cited.some((n) => inWin(n, w))).map((w) => w.kind);
-  const decoyHits = bait.filter((w) => cited.some((n) => inWin(n, w))).map((w) => w.kind);
+  const found = [...new Set(real.filter((w) => cited.some((n) => inWin(n, w))).map((w) => w.kind))];
+  const decoyHits = [...new Set(bait.filter((w) => cited.some((n) => inWin(n, w))).map((w) => w.kind))];
   const falsePositives = [...new Set(cited)].filter((n) => ![...real, ...bait].some((w) => inWin(n, w)));
   return {
     found,
-    missed: real.map((w) => w.kind).filter((k) => !found.includes(k)),
+    missed: planted.map((p) => p.kind).filter((k) => !found.includes(k)),
     decoyHits,
     falsePositives,
   };
@@ -171,4 +187,45 @@ export function fileExists(dir: string, rel: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * 仓快照的题把要用到的原件存在 hidden/base/ 下，路径照仓里、文件名多一个 .snap（免得被 biome、vitest、tsc 当成本仓的源码）。
+ * 判分拿它当「改之前」：比改了哪些、改了多少行，不靠 git 历史（CI 是浅克隆）。返回 仓里的相对路径 → 原文。
+ */
+export function baseFiles(caseDir: string): Map<string, string> {
+  const root = join(caseDir, 'hidden', 'base');
+  if (!existsSync(root)) throw new UngradableError(`${root} 不存在：这道题没存原件`);
+  const out = new Map<string, string>();
+  for (const f of listFiles(root)) {
+    if (!f.endsWith('.snap')) throw new UngradableError(`hidden/base 里的 ${f} 不是 .snap 原件`);
+    out.set(f.slice(0, -'.snap'.length), readFileSync(join(root, f), 'utf8'));
+  }
+  return out;
+}
+
+/** 原件写进目录（去掉 .snap）：测试里拿它搭一个只有这几样文件的快照。 */
+export function writeBase(caseDir: string, destDir: string): void {
+  for (const [rel, text] of baseFiles(caseDir)) {
+    mkdirSync(dirname(join(destDir, rel)), { recursive: true });
+    writeFileSync(join(destDir, rel), text);
+  }
+}
+
+/** 原件逐个和目录里的比（只差换行符的不算改了）：改了的带改动行数，没了的单列。 */
+export function changesFromBase(
+  caseDir: string,
+  workDir: string,
+): { changed: { file: string; lines: number }[]; removed: string[] } {
+  const changed: { file: string; lines: number }[] = [];
+  const removed: string[] = [];
+  for (const [rel, before] of baseFiles(caseDir)) {
+    if (!existsSync(join(workDir, rel))) {
+      removed.push(rel);
+      continue;
+    }
+    const after = readFileSync(join(workDir, rel), 'utf8');
+    if (lf(after) !== lf(before)) changed.push({ file: rel, lines: changedLineCount(before, after) });
+  }
+  return { changed, removed };
 }

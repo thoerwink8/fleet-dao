@@ -3,7 +3,7 @@
 import type { EvalCase } from '../types.ts';
 import { ARCHITECT_CASES } from './architect.ts';
 import { BRIEF_CASES } from './brief.ts';
-import { CODE_TASK_CASES } from './code-tasks.ts';
+import { CODE_TASK_CASES, REAL_CODE_TASK_CASES } from './code-tasks.ts';
 import { READING_CASES } from './reading.ts';
 import { REVIEW_CASES } from './review.ts';
 
@@ -29,5 +29,6 @@ export const ALL_CASES: readonly EvalCase[] = [
   ...REVIEW_CASES,
   ...BRIEF_CASES,
   ...CODE_TASK_CASES,
+  ...REAL_CODE_TASK_CASES,
   ...ARCHITECT_CASES,
 ].sort((a, b) => ORDER.indexOf(a.scenario) - ORDER.indexOf(b.scenario));
