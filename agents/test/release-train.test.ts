@@ -120,7 +120,7 @@ function makeWorld() {
     lockBusy: false,
     franceHealthExit: 0,
     franceBad: 0,
-    franceExtra: [] as { level: string; what: string; where: string; kind?: string }[], // 额外的异常，带不带 kind 都行
+    franceExtra: [] as { level: string; what: string; where: string; kind?: string; key?: string }[], // 额外的异常，带不带 kind 都行
     engineOn: true,
     engineStatusFails: false,
     engineLegacy: false, // 在用的版本还没有 engine 子命令：fleet-api 打用法、退出 1
@@ -973,6 +973,96 @@ describe('整趟走完', () => {
     expect(existsSync(markerFile(home))).toBe(true);
   });
 
+  // #1740：第 6 步比「哪几条是新出现的」，只拦跟新版有关的；任务自己停下（kind task-park）只列出来
+  type Extra = { level: string; what: string; where: string; kind?: string; key?: string };
+  const parkStalled: Extra = {
+    level: 'bad',
+    what: '#1707 卡住了：验收 2 轮都没过',
+    where: 'x',
+    kind: 'task-park',
+    key: 'task:o/fleet-dao#1707:stalled',
+  };
+  const parkAlert: Extra = {
+    level: 'bad',
+    what: '没处理的提醒：#79 动手 3 轮都没过（12 分钟前）',
+    where: 'x',
+    kind: 'task-park',
+    key: 'task:o/fleet-dao#79:code-fail',
+  };
+  const jobFailing: Extra = {
+    level: 'bad',
+    what: '定时任务「巡查」最近一轮没跑成：超时',
+    where: 'x',
+    key: 'job:巡查',
+  };
+  const jobOld: Extra = { level: 'bad', what: '规矩同步没成：x', where: 'y', key: 'sync:rules' };
+  /** 预检读到 before、验证读到 after；预检基线 franceBad 条（带 key 的假异常）。 */
+  async function verifyWith(before: Extra[], after: Extra[], bad = 4) {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = io(home);
+    let healthCalls = 0;
+    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
+      ...base,
+      run: (c, a) => {
+        if (c === NODE && String(a[0]).endsWith('france.mjs')) {
+          healthCalls += 1;
+          w.franceBad = bad;
+          w.franceExtra = healthCalls === 1 ? before : after;
+          w.franceHealthExit = 1;
+        }
+        return base.run(c, a);
+      },
+    });
+    return { code, w, home };
+  }
+
+  it('预检 4 条，验证时多出「#1707 卡住了」和一条 task: 开头的提醒：第 6 步通过，另起一行列出单子停下的', async () => {
+    const { code, w, home } = await verifyWith([], [parkStalled, parkAlert]);
+    expect(code).toBe(0);
+    expect(text(w.err)).not.toContain('多出了异常');
+    const out = text(w.out);
+    const line = out.split('\n').find((l) => l.includes('发版期间单子停下的'));
+    expect(line).toBeDefined();
+    expect(line).toContain('#1707 卡住了');
+    expect(line).toContain('#79 动手 3 轮都没过');
+    expect(out.indexOf('验证：法国')).toBeLessThan(out.indexOf('发版期间单子停下的'));
+    expect(existsSync(markerFile(home))).toBe(false);
+  });
+
+  it('验证时多出一条定时任务没跑成（不是 task-park）：拦下，说明里只列这一条，不列单子停下的', async () => {
+    const { code, w, home } = await verifyWith([], [parkStalled, jobFailing]);
+    expect(code).toBe(3);
+    const err = text(w.err);
+    expect(err).toContain('多出了异常');
+    expect(err).toContain('定时任务「巡查」最近一轮没跑成');
+    expect(err).not.toContain('#1707 卡住了');
+    expect(existsSync(markerFile(home))).toBe(true);
+  });
+
+  it('条数不变但换了一条（旧的消失、新的非 task-park 出现）：拦下', async () => {
+    const { code, w } = await verifyWith([jobOld], [jobFailing]);
+    expect(code).toBe(3);
+    expect(text(w.err)).toContain('定时任务「巡查」最近一轮没跑成');
+    expect(text(w.err)).not.toContain('规矩同步没成');
+  });
+
+  it('预检就有的异常验证时还在：不算新出现；单子停下的超过 8 条只列 8 条并写共几条', async () => {
+    const many = Array.from({ length: 10 }, (_, i) => ({
+      ...parkStalled,
+      what: `#${2000 + i} 卡住了：x`,
+      key: `task:o/fleet-dao#${2000 + i}:stalled`,
+    }));
+    const { code, w } = await verifyWith([jobOld], [jobOld, ...many]);
+    expect(code).toBe(0);
+    const line = text(w.out)
+      .split('\n')
+      .find((l) => l.includes('发版期间单子停下的'));
+    expect(line).toContain('共 10 条');
+    expect(line).toContain('#2007 卡住了');
+    expect(line).not.toContain('#2008 卡住了');
+  });
+
   // #1292：暂停期单必然「没动」，按异常类别 kind 过滤，不看文案
   const idleIssue = {
     level: 'bad',
@@ -1270,6 +1360,22 @@ describe('驱动死了：认得出、接着走（#1674）', () => {
     w.engineOn = false;
   }
   const startArgs = ['start', '--sha', SHA, '--founder-ok', FOUNDER];
+
+  it('旧状态文件的 baseline 没有 keys：按条数比较，行为和以前一样', async () => {
+    for (const [bad, expected] of [
+      [0, 0],
+      [1, 3],
+    ] as const) {
+      const home = freshHome();
+      const { w, io } = makeWorld();
+      w.history += `\n2026-10-05T13:50:00Z ${SHA} release`;
+      deadAt4(home, w, 30);
+      w.franceBad = bad;
+      w.franceHealthExit = bad ? 1 : 0;
+      const code = await train.runTrain(startArgs, withDriver(io(home, LIMITS), { pid: 5555 }));
+      expect(code, `bad=${bad}`).toBe(expected);
+    }
+  });
 
   it('每次落盘都写 pid、机器名、心跳时刻；等收尾的轮询里心跳在走', async () => {
     const home = freshHome();

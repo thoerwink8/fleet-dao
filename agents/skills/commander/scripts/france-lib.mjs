@@ -90,10 +90,19 @@ import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
  * 异常的类别（可选，稳定的英文名，给程序按类别过滤用，不要去匹配 what 的文案）。现在有两种，都是引擎总开关关着（发版车暂停期）时必然出现、开回来就消失的：
  * `task-idle`＝单在跑、手上没有会话、N 分钟没动。
  * `route-stale`＝路由算在线，但结论过了该探的时候没更新（或从没探过）：路由探针要引擎开着才跑（#1520）。
- * @typedef {{ level: 'bad' | 'note', what: string, where: string, kind?: 'task-idle' | 'route-stale' }} Issue
+ * @typedef {{ level: 'bad' | 'note', what: string, where: string, kind?: 'task-idle' | 'route-stale' | 'task-park', key?: string }} Issue
  */
 export const KIND_TASK_IDLE = 'task-idle';
 export const KIND_ROUTE_STALE = 'route-stale';
+/** 由单的状态生成的异常（挂在任务上的提醒、「#N 卡住了」、「#N 最近的问题」）：任务自己停下，不是服务、发布这类基础设施的问题（#1740）。 */
+export const KIND_TASK_PARK = 'task-park';
+
+/** 提醒标题里的挂起话术；只在读不到 dedupe_key 时才用它认。 */
+const PARK_TITLE = /验收 \d+ 轮都没过|动手 \d+ 轮都没过|验收做不出来/;
+
+/** 异常文字去掉「N 分钟前」「N 分钟没更新」这类时间字样：同一个事实前后两次文字不同，也认得出是同一条。 */
+const stripTimeWords = (/** @type {string} */ what) =>
+  what.replace(/\d+\s*(?:秒|分钟|小时|天)(?:前|内|没更新|没动)?/g, 'N');
 
 export const ENV_NAME = 'FLEET_FRANCE_SSH';
 /** 页面开着时多久从法国读一次。没人看就不读（不白连 ssh）。 */
@@ -1235,14 +1244,18 @@ export function buildView(snapshot) {
    * @param {string} what
    * @param {string} where
    * @param {Issue['kind']} [kind]
+   * @param {string} [id] 稳定标识（同一个事实前后两次一样）；不给就按 kind 加去掉时间字样的文字生成
    */
-  const bad = (what, where, kind) => issues.push({ level: 'bad', what, where, ...(kind ? { kind } : {}) });
+  const bad = (what, where, kind, id) =>
+    issues.push({ level: 'bad', what, where, ...(kind ? { kind } : {}), ...(id ? { key: id } : {}) });
   /**
    * @param {string} what
    * @param {string} where
    * @param {Issue['kind']} [kind]
+   * @param {string} [id] 同 bad
    */
-  const note = (what, where, kind) => issues.push({ level: 'note', what, where, ...(kind ? { kind } : {}) });
+  const note = (what, where, kind, id) =>
+    issues.push({ level: 'note', what, where, ...(kind ? { kind } : {}), ...(id ? { key: id } : {}) });
 
   // 没读到的块：库的几块常是同一个原因，并成一条
   /** 没读到的那一块的原因（读到了的没有）。 */
@@ -1282,12 +1295,22 @@ export function buildView(snapshot) {
   if (S.notifications.ok && S.notifications.count > 0) {
     for (const x of S.notifications.rows.slice(0, 5)) {
       const task = x.n && !x.title.includes(`#${x.n}`) ? `#${x.n} ` : '';
+      // 挂在任务上的提醒以 dedupe_key 为准（task: 开头）；读不到 key 才按标题认
+      const park = x.dedupe_key ? x.dedupe_key.startsWith('task:') : PARK_TITLE.test(x.title);
       (x.level === 'daily' ? note : bad)(
         `没处理的提醒：${task}${x.title}（${agoText(x.created_at, at)}）`,
         WHERE.notifications,
+        park ? KIND_TASK_PARK : undefined,
+        x.dedupe_key || `notification:${stripTimeWords(x.title)}`,
       );
     }
-    if (S.notifications.count > 5) bad(`还有 ${S.notifications.count - 5} 条提醒没处理`, WHERE.notifications);
+    if (S.notifications.count > 5)
+      bad(
+        `还有 ${S.notifications.count - 5} 条提醒没处理`,
+        WHERE.notifications,
+        undefined,
+        'notifications:more',
+      );
   }
 
   // 定时任务
@@ -1455,9 +1478,20 @@ export function buildView(snapshot) {
     const rows = S.tasks.rows.map(taskRow);
     for (const t of rows) {
       if (t.state === 'stalled')
-        bad(`#${t.n} 卡住了${t.lastProblem ? `：${t.lastProblem}` : ''}`, WHERE.task(t.repo, t.n));
+        bad(
+          `#${t.n} 卡住了${t.lastProblem ? `：${t.lastProblem}` : ''}`,
+          WHERE.task(t.repo, t.n),
+          KIND_TASK_PARK,
+          `task:${t.repo}#${t.n}:stalled`,
+        );
       else if (!TERMINAL.includes(t.state) && t.state !== 'queued') {
-        if (t.lastProblem) note(`#${t.n} 最近的问题：${t.lastProblem}`, WHERE.task(t.repo, t.n));
+        if (t.lastProblem)
+          note(
+            `#${t.n} 最近的问题：${t.lastProblem}`,
+            WHERE.task(t.repo, t.n),
+            KIND_TASK_PARK,
+            `task:${t.repo}#${t.n}:problem`,
+          );
         const quiet = minutesBetween(t.updatedAt ?? t.createdAt, at);
         const idle = `#${t.n} ${quiet} 分钟没动，手上也没有会话（${t.stateName}${t.phase ? ` · ${t.phase}` : ''}）`;
         if (S.runs.ok && t.openRuns === 0) {
@@ -1511,7 +1545,7 @@ export function buildView(snapshot) {
   const anomalies = [...issues, ...unreadItems]
     .map((x, i) => ({ ...x, i }))
     .sort((a, b) => order[a.level] - order[b.level] || a.i - b.i)
-    .map(({ i, ...x }) => x);
+    .map(({ i, ...x }) => ({ ...x, key: x.key ?? `${x.kind ?? x.level}:${stripTimeWords(x.what)}` }));
 
   return {
     at,
