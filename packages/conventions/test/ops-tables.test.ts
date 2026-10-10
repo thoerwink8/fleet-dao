@@ -921,4 +921,27 @@ describe('单元表（第七片）', () => {
     expect(entries.map((e) => e.file)).toContain('fleet-api.socket');
     for (const e of entries) expect(e.description).not.toBe('');
   });
+
+  // 第 8 片：docs/ops.md 里那一块是不是逐字照生成器写的，只有把真文档和生成器的输出当场比一遍才说得清
+  // （核对函数据此返回空，CI 只改文档也拦得住手改）。
+  it('本仓 docs/ops.md 的单元区块逐字等于 renderUnitsBlock 的输出', () => {
+    const root = fileURLToPath(new URL('../../../', import.meta.url));
+    const repo = fsRepo(root);
+    const doc = repo.read('docs/ops.md');
+    expect(doc).toBeDefined();
+    const block = renderUnitsBlock(repo);
+    expect(doc).toContain(block);
+    // 表头加五条点名的数据行逐字在区块里（验收条第 1 条点名的单元：法国四条、香港一条）。
+    for (const row of [
+      '| 单元文件 | 机器 | 说明 |',
+      '| fleet-engine.service | 法国 | fleet-dao 引擎工人（Temporal worker） |',
+      '| fleet-api.socket | 法国 | fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口） |',
+      '| fleet-auto-release.timer | 法国 | fleet-dao 自动发布单元每 5 分钟读一轮主线（只读） |',
+      '| fleet-agents.slice | 法国 | fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给） |',
+      '| fleet-feishu.service | 香港 | fleet-dao 飞书网关 |',
+    ]) {
+      expect(block).toContain(row);
+    }
+    expect(checkUnitsBlock(repo, 'docs/ops.md')).toEqual([]);
+  });
 });
