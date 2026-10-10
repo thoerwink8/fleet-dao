@@ -77,8 +77,10 @@ function scanFileVirtual(source: string) {
   }
 }
 
-// 放在最后：故意写一个任意尺寸值，扫描器必须报出来。
-test('故意写入 text-[13px]，扫描器要报出来', () => {
+// 放在最后。前一条断言放行 data-[spacing=0]；最后一条故意写 text-[13px]，扫描器必须报出来。
+test('data-[spacing=0] 放行、text-[13px] 仍报', () => {
+  const allowed = scanFileVirtual(`<div className="data-[spacing=0]:rounded-none">hi</div>`);
+  expect(allowed).toEqual([]);
   const hits = scanFileVirtual(`<div className="data-[spacing=0]:rounded-none text-[13px]">hi</div>`);
   expect(hits.map((h) => h.match)).toEqual(['text-[13px]']);
 });

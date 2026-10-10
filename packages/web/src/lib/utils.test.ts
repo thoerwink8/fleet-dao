@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { cn, FONT_SIZE_TOKENS } from './utils';
+import { cn, FONT_SIZE_TOKENS, RING_WIDTH_TOKENS } from './utils';
 
 describe('cn 认得自定义字号档位', () => {
   test('【故意造出的失败】字号档位 + 颜色：字号不被当成颜色吞掉（额度页用满的大数字、带颜色的指标卡丢过字号）', () => {
@@ -26,5 +26,19 @@ describe('cn 认得自定义字号档位', () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'app.css'), 'utf8');
     const inCss = [...css.matchAll(/^\s*--text-([a-z][a-z0-9-]*):/gm)].map((m) => m[1]);
     expect([...inCss].sort()).toEqual([...FONT_SIZE_TOKENS].sort());
+  });
+
+  test('聚焦圈 token 和数字档位冲突时后写的赢，和颜色不互相吞', () => {
+    expect(cn('focus-visible:ring-focus', 'focus-visible:ring-2')).toBe('focus-visible:ring-2');
+    expect(cn('focus-visible:ring-3', 'focus-visible:ring-focus')).toBe('focus-visible:ring-focus');
+    expect(cn('focus-visible:ring-focus', 'focus-visible:ring-ring/50')).toBe(
+      'focus-visible:ring-focus focus-visible:ring-ring/50',
+    );
+  });
+
+  test('聚焦圈档位和 app.css 的 --ring-width-* 一致（忘了登记 cn() 会红）', () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'app.css'), 'utf8');
+    const inCss = [...css.matchAll(/^\s*--ring-width-([a-z][a-z0-9-]*):/gm)].map((m) => m[1]);
+    expect([...inCss].sort()).toEqual([...RING_WIDTH_TOKENS].sort());
   });
 });
