@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 import { errorText, useUpdateRepoDispatch } from '../api/client';
 import type { RepoDispatch } from '../api/types';
 import { formatDateTime } from '../lib/format';
+import { StatusDot } from './status';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -34,6 +35,8 @@ export function RepoDispatchControl({
 
   if (!row) return <span className="text-xs text-muted-foreground">开关没读到</span>;
 
+  const noteText =
+    row.on && row.since ? `${formatDateTime(row.since)} 开的` : '只有本机 fleet-api dispatch-issue 点名派';
   const target = !row.on;
   const verb = target ? '开启' : '关闭';
   const confirm = () => {
@@ -55,15 +58,15 @@ export function RepoDispatchControl({
   };
 
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5" data-testid={`dispatch-${repoId}`}>
-      <div className="min-w-0 text-xs text-muted-foreground">
+    <div className="flex items-center gap-x-2 self-center" data-testid={`dispatch-${repoId}`}>
+      <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+        <StatusDot tone={row.on ? 'done' : 'stop'} />
         <span className="font-medium text-foreground" data-testid={`dispatch-state-${repoId}`}>
           {row.on ? '接活中' : '关着'}
         </span>
-        <span className="ml-2" data-testid={`dispatch-note-${repoId}`}>
-          {row.on && row.since
-            ? `${formatDateTime(row.since)} 开的`
-            : '只有本机 fleet-api dispatch-issue 点名派'}
+        {/* 说明收进悬停；宽屏才在行里写出来，窄屏不占行。 */}
+        <span className="hidden 2xl:inline" data-testid={`dispatch-note-${repoId}`} title={noteText}>
+          {noteText}
         </span>
       </div>
       <>
