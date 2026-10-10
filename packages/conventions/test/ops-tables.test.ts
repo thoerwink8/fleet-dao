@@ -1,23 +1,31 @@
-// ops-tables 的测试（#140 第一片端口、第三片用户、第五片目录、第七片单元）：除一条读本仓 deploy/ 的用例外，全用内存假仓。
+// ops-tables 的测试（#140 第一片端口、第三片用户、第五片目录、第七片单元、第九片密钥名）：除两条读本仓 deploy/ 的用例外，全用内存假仓。
 
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   BLOCK_NAME_DIRS,
   BLOCK_NAME_PORTS,
+  BLOCK_NAME_SECRETS,
   BLOCK_NAME_UNITS,
   checkDirsBlock,
+  checkOpsBlocks,
   checkPortsBlock,
+  checkSecretsBlock,
   checkUnitsBlock,
   checkUsersBlock,
   extractBlock,
+  OPS_BLOCK_NAMES,
+  opsDocPaths,
   readDirEntries,
+  readSecretEntries,
   readUnitEntries,
   readUserEntries,
   renderDirsBlock,
   renderPortsBlock,
+  renderSecretsBlock,
   renderUnitsBlock,
   renderUsersBlock,
+  writeOpsBlocks,
 } from '../src/ops-tables.ts';
 import { fsRepo, type RepoView } from '../src/repo.ts';
 import { memRepo } from './helpers.ts';
@@ -186,7 +194,11 @@ describe('checkPortsBlock', () => {
   });
 
   it('脚本里一个端口常量都没有，返回「没查成」问题，不是空数组', () => {
-    const r = memRepo({ 'deploy/france.sh': 'echo hi\n', 'deploy/hk.sh': HK, 'docs/ops.md': 'x' });
+    const r = memRepo({
+      'deploy/france.sh': 'echo hi\n',
+      'deploy/hk.sh': HK,
+      'docs/ops.md': 'x',
+    });
     const problems = checkPortsBlock(r, 'docs/ops.md');
     expect(problems.length).toBeGreaterThan(0);
     expect(problems[0]?.notQueried).toBe(true);
@@ -349,7 +361,11 @@ describe('renderUsersBlock', () => {
   });
 
   it('某个脚本一个用户都没读到，抛错', () => {
-    const r = memRepo(usersFiles({ 'deploy/lib/human-tier.sh': 'ensure_service_user "$u" "/home/$u"\n' }));
+    const r = memRepo(
+      usersFiles({
+        'deploy/lib/human-tier.sh': 'ensure_service_user "$u" "/home/$u"\n',
+      }),
+    );
     expect(() => readUserEntries(r)).toThrow('deploy/lib/human-tier.sh 里一个用户都没读到');
   });
 });
@@ -565,20 +581,30 @@ describe('readDirEntries / renderDirsBlock', () => {
 
   // 故意造出失败：变量展开不了，必须抛错，不能静默跳过这一行。
   it('变量找不到赋值，抛带脚本名和行号的错', () => {
-    const r = memRepo(dirsFiles({ 'deploy/hk.sh': 'echo hi\nensure_dir "$NOPE" root:root 755\n' }));
+    const r = memRepo(
+      dirsFiles({
+        'deploy/hk.sh': 'echo hi\nensure_dir "$NOPE" root:root 755\n',
+      }),
+    );
     expect(() => readDirEntries(r)).toThrow('deploy/hk.sh:2');
     expect(() => readDirEntries(r)).toThrow('NOPE');
   });
 
   it('赋值值里有 $( 命令替换，抛带赋值所在脚本和行号的错', () => {
     const r = memRepo(
-      dirsFiles({ 'deploy/hk.sh': 'CMD_DIR=$(mktemp -d)\nensure_dir "$CMD_DIR" root:root 755\n' }),
+      dirsFiles({
+        'deploy/hk.sh': 'CMD_DIR=$(mktemp -d)\nensure_dir "$CMD_DIR" root:root 755\n',
+      }),
     );
     expect(() => readDirEntries(r)).toThrow('deploy/hk.sh:1');
   });
 
   it('变量互相引用绕成圈，抛错', () => {
-    const r = memRepo(dirsFiles({ 'deploy/hk.sh': 'A=$B\nB=$A\nensure_dir "$A" root:root 755\n' }));
+    const r = memRepo(
+      dirsFiles({
+        'deploy/hk.sh': 'A=$B\nB=$A\nensure_dir "$A" root:root 755\n',
+      }),
+    );
     expect(() => readDirEntries(r)).toThrow('绕成了圈');
   });
 
@@ -640,11 +666,15 @@ describe('readDirEntries / renderDirsBlock', () => {
 
   it('只看路径判循环：路径固定、属主里有循环变量的行不被丢，展开不了就抛错；属主有赋值则进表', () => {
     const noAssign = memRepo(
-      dirsFiles({ 'deploy/hk.sh': 'for u in a b; do\n  ensure_dir /shared "$u:$u" 750\ndone\n' }),
+      dirsFiles({
+        'deploy/hk.sh': 'for u in a b; do\n  ensure_dir /shared "$u:$u" 750\ndone\n',
+      }),
     );
     expect(() => readDirEntries(noAssign)).toThrow('deploy/hk.sh:2');
     const withAssign = memRepo(
-      dirsFiles({ 'deploy/hk.sh': 'u=root\nfor u in a b; do\n  ensure_dir /shared "$u:$u" 750\ndone\n' }),
+      dirsFiles({
+        'deploy/hk.sh': 'u=root\nfor u in a b; do\n  ensure_dir /shared "$u:$u" 750\ndone\n',
+      }),
     );
     expect(readDirEntries(withAssign).find((e) => e.path === '/shared')?.owner).toBe('root:root');
   });
@@ -808,19 +838,31 @@ describe('单元表（第七片）', () => {
   });
 
   it('只有一个目录在、另一个列不出来，照样生成', () => {
-    const r = memRepo({ 'deploy/hk/fleet-feishu.service': 'Description=fleet-dao 飞书网关\n' });
+    const r = memRepo({
+      'deploy/hk/fleet-feishu.service': 'Description=fleet-dao 飞书网关\n',
+    });
     expect(readUnitEntries(r)).toEqual([
-      { file: 'fleet-feishu.service', machine: '香港', description: 'fleet-dao 飞书网关' },
+      {
+        file: 'fleet-feishu.service',
+        machine: '香港',
+        description: 'fleet-dao 飞书网关',
+      },
     ]);
   });
 
   it('Description 值末尾的空格和制表符原样保留', () => {
-    const r = memRepo({ 'deploy/hk/fleet-feishu.service': 'Description=飞书网关 \t\n' });
+    const r = memRepo({
+      'deploy/hk/fleet-feishu.service': 'Description=飞书网关 \t\n',
+    });
     expect(readUnitEntries(r)[0]?.description).toBe('飞书网关 \t');
   });
 
   it('故意失败：单元文件没有 Description 行，抛带文件名的错', () => {
-    const r = memRepo(unitsFiles({ 'deploy/france/fleet-api.timer': '[Unit]\nAfter=network.target\n' }));
+    const r = memRepo(
+      unitsFiles({
+        'deploy/france/fleet-api.timer': '[Unit]\nAfter=network.target\n',
+      }),
+    );
     expect(() => renderUnitsBlock(r)).toThrow('deploy/france/fleet-api.timer');
     expect(() => readUnitEntries(r)).toThrow('Description=');
   });
@@ -837,7 +879,9 @@ describe('单元表（第七片）', () => {
   });
 
   it('说明带 | 时，表格里写成 \\|，核对按同样写法比，写成没转义的会被报出来', () => {
-    const files = unitsFiles({ 'deploy/hk/fleet-feishu.service': 'Description=a | b\n' });
+    const files = unitsFiles({
+      'deploy/hk/fleet-feishu.service': 'Description=a | b\n',
+    });
     const block = renderUnitsBlock(memRepo(files));
     expect(block).toContain('| fleet-feishu.service | 香港 | a \\| b |');
     expect(block).not.toContain('| 香港 | a | b |');
@@ -906,7 +950,11 @@ describe('单元表（第七片）', () => {
     expect(noBlock[0]?.notQueried).toBe(false);
     expect(noBlock[0]?.text).toContain('缺开始标记');
     const bad = checkUnitsBlock(
-      memRepo({ ...files, 'deploy/hk/fleet-feishu.service': '[Unit]\n', 'docs/ops.md': unitsDoc(files) }),
+      memRepo({
+        ...files,
+        'deploy/hk/fleet-feishu.service': '[Unit]\n',
+        'docs/ops.md': unitsDoc(files),
+      }),
       'docs/ops.md',
     );
     expect(bad).toHaveLength(1);
@@ -920,5 +968,394 @@ describe('单元表（第七片）', () => {
     expect(entries.map((e) => e.file)).toContain('fleet-feishu.service');
     expect(entries.map((e) => e.file)).toContain('fleet-api.socket');
     for (const e of entries) expect(e.description).not.toBe('');
+  });
+});
+
+const FINGERPRINT = 'abc123def4567890feedface0000111122223333444455556666777788889999';
+const PUBLIC_MARKER = 'PUBLIC-VALUE-MARKER-xyz';
+
+function secretsConfig(over: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    说明: '假配置',
+    formatVersion: 1,
+    files: {
+      'engine.env': {
+        FLEET_ENGINE_PORTS: { value: PUBLIC_MARKER, 说明: '公开值' },
+        TEMPORAL_NAMESPACE: 'fleet',
+      },
+      'api.env': {
+        FLEET_PUBLIC_URL: { private: FINGERPRINT, 说明: '私有值' },
+        FLEET_ENV: 'production',
+        FLEET_MACHINE_NAME: { value: '法国' },
+        FLEET_ADMIN_TOKEN: { private: null },
+      },
+      ...over,
+    },
+  });
+}
+
+function secretsFiles(config: string = secretsConfig()): Record<string, string> {
+  return { 'deploy/france/desired-config.json': config };
+}
+
+function secretsDoc(files: Record<string, string>): string {
+  return ['# 运维', '', renderSecretsBlock(memRepo(files)), ''].join('\n');
+}
+
+describe('密钥名表（第九片）', () => {
+  it('带 private 的键生成「| 文件 | 键名 |」行，private 为 null 也算，行按文件名、键名排', () => {
+    const block = renderSecretsBlock(memRepo(secretsFiles()));
+    expect(BLOCK_NAME_SECRETS).toBe('secrets');
+    expect(block).toContain('| api.env | FLEET_PUBLIC_URL |');
+    expect(block).toBe(
+      [
+        '<!-- fleet:secrets:start -->',
+        '',
+        '| 文件 | 键名 |',
+        '|---|---|',
+        '| api.env | FLEET_ADMIN_TOKEN |',
+        '| api.env | FLEET_PUBLIC_URL |',
+        '',
+        '<!-- fleet:secrets:end -->',
+      ].join('\n'),
+    );
+    expect(renderSecretsBlock(memRepo(secretsFiles()))).toBe(block);
+  });
+
+  it('带 value 的公开键和字符串值的键不进表', () => {
+    expect(readSecretEntries(memRepo(secretsFiles()))).toEqual([
+      { file: 'api.env', key: 'FLEET_ADMIN_TOKEN' },
+      { file: 'api.env', key: 'FLEET_PUBLIC_URL' },
+    ]);
+    const block = renderSecretsBlock(memRepo(secretsFiles()));
+    for (const name of [
+      'FLEET_ENGINE_PORTS',
+      'TEMPORAL_NAMESPACE',
+      'FLEET_ENV',
+      'FLEET_MACHINE_NAME',
+      'engine.env',
+    ])
+      expect(block).not.toContain(name);
+  });
+
+  it('渲染结果里没有 private 指纹，也没有任何 value 的内容', () => {
+    const block = renderSecretsBlock(memRepo(secretsFiles()));
+    expect(block).not.toContain(FINGERPRINT);
+    expect(block).not.toContain('abc123');
+    expect(block).not.toContain(PUBLIC_MARKER);
+    expect(block).not.toContain('法国');
+    expect(block).not.toContain('private');
+  });
+
+  it('故意失败：JSON 坏了抛带文件名的错，不返回空表', () => {
+    const r = memRepo(secretsFiles('{ "files": '));
+    expect(() => readSecretEntries(r)).toThrow('deploy/france/desired-config.json');
+    expect(() => renderSecretsBlock(r)).toThrow('JSON');
+  });
+
+  it('故意失败：读不到文件、files 缺失、文件内容不是对象、一个密钥名都没有，各抛带文件名的错', () => {
+    expect(() => readSecretEntries(memRepo({ 'README.md': 'x' }))).toThrow(
+      '读不到 deploy/france/desired-config.json',
+    );
+    expect(() => readSecretEntries(memRepo(secretsFiles('{"formatVersion":1}')))).toThrow('files');
+    expect(() => readSecretEntries(memRepo(secretsFiles('[]')))).toThrow('deploy/france/desired-config.json');
+    expect(() => readSecretEntries(memRepo(secretsFiles(secretsConfig({ 'bad.env': 'oops' }))))).toThrow(
+      'files.bad.env',
+    );
+    expect(() => readSecretEntries(memRepo(secretsFiles('{"files":{"a.env":{"X":{"value":"1"}}}}')))).toThrow(
+      '一个密钥名',
+    );
+  });
+
+  it('键名写法进不了表格时抛带文件名和键名的错', () => {
+    const cfg = secretsConfig({ 'x.env': { 'BAD KEY': { private: 'p' } } });
+    expect(() => readSecretEntries(memRepo(secretsFiles(cfg)))).toThrow('x.env.BAD KEY');
+  });
+
+  it('文档和生成一致，没有问题', () => {
+    const files = secretsFiles();
+    expect(checkSecretsBlock(memRepo({ ...files, 'docs/ops.md': secretsDoc(files) }), 'docs/ops.md')).toEqual(
+      [],
+    );
+  });
+
+  it('少一行、多一行，各报一条点出键名的问题', () => {
+    const files = secretsFiles();
+    const check = (doc: string) =>
+      checkSecretsBlock(memRepo({ ...files, 'docs/ops.md': doc }), 'docs/ops.md');
+
+    const missing = check(secretsDoc(files).replace('| api.env | FLEET_PUBLIC_URL |\n', ''));
+    expect(missing).toHaveLength(1);
+    expect(missing[0]?.notQueried).toBe(false);
+    expect(missing[0]?.text).toContain('FLEET_PUBLIC_URL');
+    expect(missing[0]?.text).toContain('少了');
+
+    const extra = check(
+      secretsDoc(files).replace(
+        '| api.env | FLEET_ADMIN_TOKEN |',
+        '| api.env | FLEET_GHOST_KEY |\n| api.env | FLEET_ADMIN_TOKEN |',
+      ),
+    );
+    expect(extra).toHaveLength(1);
+    expect(extra[0]?.notQueried).toBe(false);
+    expect(extra[0]?.text).toContain('FLEET_GHOST_KEY');
+    expect(extra[0]?.text).toContain('多了');
+  });
+
+  it('行都对但顺序被改，返回问题、不当成通过', () => {
+    const files = secretsFiles();
+    const lines = secretsDoc(files).split('\n');
+    const a = lines.findIndex((l) => l.startsWith('| api.env | FLEET_ADMIN_TOKEN'));
+    const b = lines.findIndex((l) => l.startsWith('| api.env | FLEET_PUBLIC_URL'));
+    [lines[a], lines[b]] = [lines[b] ?? '', lines[a] ?? ''];
+    const problems = checkSecretsBlock(memRepo({ ...files, 'docs/ops.md': lines.join('\n') }), 'docs/ops.md');
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.text).toContain('逐字一致');
+  });
+
+  it('读不到文档、区块缺失、配置坏了，各返回问题，不当成通过', () => {
+    const files = secretsFiles();
+    const noDoc = checkSecretsBlock(memRepo(files), 'docs/ops.md');
+    expect(noDoc).toHaveLength(1);
+    expect(noDoc[0]?.notQueried).toBe(true);
+    const noBlock = checkSecretsBlock(memRepo({ ...files, 'docs/ops.md': '# 运维\n' }), 'docs/ops.md');
+    expect(noBlock).toHaveLength(1);
+    expect(noBlock[0]?.notQueried).toBe(false);
+    expect(noBlock[0]?.text).toContain('缺开始标记');
+    const bad = checkSecretsBlock(
+      memRepo({
+        ...secretsFiles('not json'),
+        'docs/ops.md': secretsDoc(files),
+      }),
+      'docs/ops.md',
+    );
+    expect(bad).toHaveLength(1);
+    expect(bad[0]?.notQueried).toBe(true);
+    expect(bad[0]?.text).toContain('deploy/france/desired-config.json');
+  });
+
+  it('本仓部署配置能生成：只出名字，不含任何长十六进制指纹', () => {
+    const root = fileURLToPath(new URL('../../../', import.meta.url));
+    const real = fsRepo(root);
+    const names = readSecretEntries(real).map((e) => `${e.file}:${e.key}`);
+    expect(names).toContain('api.env:FLEET_PUBLIC_URL');
+    expect(renderSecretsBlock(real)).not.toMatch(/[0-9a-f]{32,}/);
+  });
+});
+
+// 五个区块一起认（#140 第十一片）：命令行 --check / --write 一次核对全五张表，区块可以散在 docs/ops.md 和 docs/ops/*.md 里。
+// 假仓里的一套 deploy/ 文件同时够五个区块用：既出端口、用户、目录，也出单元、密钥名。
+const ALL_FRANCE = [
+  '#!/usr/bin/env bash',
+  'PG_PORT=5432',
+  'PILOT_USER=pilot',
+  'ensure_dir /srv/a root:root 755',
+].join('\n');
+const ALL_HK = [
+  '#!/usr/bin/env bash',
+  'WG_PORT=4500',
+  'ensure_service_user fleet /home/fleet',
+  'ensure_dir /etc/fleet-dao root:fleet 750',
+].join('\n');
+const ALL_HUMAN = ['ensure_service_user fleet /home/fleet', 'ensure_dir /opt/fleet-dao root:root 755'].join(
+  '\n',
+);
+const ALL_UNITS: Record<string, string> = {
+  'deploy/france/fleet-api.service': '[Unit]\nDescription=驾驶舱后端\n',
+  'deploy/hk/fleet-feishu.service': '[Unit]\nDescription=fleet-dao 飞书网关\n',
+};
+const ALL_SECRETS = JSON.stringify({
+  formatVersion: 1,
+  files: { 'api.env': { FLEET_PUBLIC_URL: { private: FINGERPRINT } } },
+});
+
+/** 五个区块齐、不带文档的假仓：生成五张表用它。 */
+function allFiles(over: Record<string, string> = {}): Record<string, string> {
+  return {
+    'deploy/france.sh': ALL_FRANCE,
+    'deploy/hk.sh': ALL_HK,
+    'deploy/lib/human-tier.sh': ALL_HUMAN,
+    'deploy/lib/session-user.sh': 'SESSION_USER=fleet-agent-carpool',
+    ...ALL_UNITS,
+    'deploy/france/desired-config.json': ALL_SECRETS,
+    ...over,
+  };
+}
+
+const allNoDoc = () => memRepo(allFiles());
+
+/** 五个区块各生成一段，按给定顺序拼成一段文字。 */
+function blocksText(names: readonly string[], repo: RepoView = allNoDoc()): string {
+  const of: Record<string, string> = {
+    ports: renderPortsBlock(repo),
+    users: renderUsersBlock(repo),
+    dirs: renderDirsBlock(repo),
+    units: renderUnitsBlock(repo),
+    secrets: renderSecretsBlock(repo),
+  };
+  return names.map((n) => of[n] ?? '').join('\n\n');
+}
+
+/** 分散的仓：ports、users 在 docs/ops.md，dirs、units、secrets 在 docs/ops/x.md。 */
+function splitRepo(over: Record<string, string> = {}): RepoView {
+  const base = allNoDoc();
+  return memRepo(
+    allFiles({
+      'docs/ops.md': `# 运维\n\n${blocksText(['ports', 'users'], base)}\n`,
+      'docs/ops/x.md': `# 拆出来的\n\n${blocksText(['dirs', 'units', 'secrets'], base)}\n`,
+      ...over,
+    }),
+  );
+}
+
+describe('五个区块一起认（第十一片）', () => {
+  it('区块名字对外是 ports、users、dirs、units、secrets，按这个顺序核对', () => {
+    expect(OPS_BLOCK_NAMES).toEqual(['ports', 'users', 'dirs', 'units', 'secrets']);
+  });
+
+  it('不给路径时：docs/ops.md 加 docs/ops/*.md 都算候选，按路径排', () => {
+    const repo = splitRepo({ 'docs/ops/b.md': 'x\n', 'docs/ops/a.md': 'x\n' });
+    expect(opsDocPaths(repo)).toEqual(['docs/ops.md', 'docs/ops/a.md', 'docs/ops/b.md', 'docs/ops/x.md']);
+    expect(opsDocPaths(repo, 'docs/one.md')).toEqual(['docs/one.md']);
+  });
+
+  it('五个区块散在两个文件里，核对通过、返回空数组', () => {
+    expect(checkOpsBlocks(splitRepo())).toEqual([]);
+  });
+
+  it('同一个文件里放全五个区块，核对通过', () => {
+    const base = allNoDoc();
+    const repo = memRepo(allFiles({ 'docs/ops.md': `# 运维\n\n${blocksText(OPS_BLOCK_NAMES, base)}\n` }));
+    expect(checkOpsBlocks(repo)).toEqual([]);
+  });
+
+  it('给了文档路径就只在这一个文件里找五个区块：别处再有一份也不管', () => {
+    const base = allNoDoc();
+    const repo = memRepo(
+      allFiles({
+        'docs/ops.md': `# 运维\n\n${blocksText(OPS_BLOCK_NAMES, base)}\n`,
+        // 另一个文件里也有 ports 标记：给了路径就只认 docs/ops.md，这份不算重复。
+        'docs/ops/other.md': `# 别的\n\n${renderPortsBlock(base)}\n`,
+      }),
+    );
+    expect(checkOpsBlocks(repo, 'docs/ops.md')).toEqual([]);
+  });
+
+  // 故意造出的失败：某个区块在两个文件里各有一份，必须报一条点出区块名和文件的问题。
+  it('某区块在两个文件里重复出现，报一条点出区块名的问题，不当成通过', () => {
+    const base = allNoDoc();
+    const repo = memRepo(
+      allFiles({
+        'docs/ops.md': `# 运维\n\n${blocksText(['ports', 'users'], base)}\n`,
+        'docs/ops/x.md': `# 拆出来的\n\n${blocksText(['dirs', 'units', 'secrets'], base)}\n`,
+        // 第二份 ports：docs/ops.md 里已经有一份了。
+        'docs/ops/y.md': `# 多出来的\n\n${renderPortsBlock(base)}\n`,
+      }),
+    );
+    const problems = checkOpsBlocks(repo);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.notQueried).toBe(true);
+    expect(problems[0]?.text).toContain('端口表');
+    expect(problems[0]?.text).toContain('docs/ops.md');
+    expect(problems[0]?.text).toContain('docs/ops/y.md');
+  });
+
+  // 故意造出的失败：少一个区块，必须报一条点出是哪个区块。
+  it('缺一个区块（dirs 没放进去），报一条点出区块名的问题', () => {
+    const base = allNoDoc();
+    const repo = memRepo(
+      allFiles({
+        'docs/ops.md': `# 运维\n\n${blocksText(['ports', 'users'], base)}\n`,
+        'docs/ops/x.md': `# 拆出来的\n\n${blocksText(['units', 'secrets'], base)}\n`,
+      }),
+    );
+    const problems = checkOpsBlocks(repo);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.notQueried).toBe(true);
+    expect(problems[0]?.text).toContain('目录表');
+    expect(problems[0]?.text).toContain('找不到');
+  });
+
+  it('一行内容被手改（端口号），报一条点出变量的问题', () => {
+    const base = allNoDoc();
+    const repo = splitRepo({
+      'docs/ops.md': `# 运维\n\n${blocksText(['ports', 'users'], base).replace('| 5432 |', '| 5433 |')}\n`,
+    });
+    const problems = checkOpsBlocks(repo);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.notQueried).toBe(false);
+    expect(problems[0]?.text).toContain('PG_PORT');
+    expect(problems[0]?.text).toContain('5433');
+  });
+
+  it('一个候选文件都读不到，五个区块各报一条「没查成」并点出区块名', () => {
+    const problems = checkOpsBlocks(allNoDoc());
+    expect(problems).toHaveLength(5);
+    expect(problems.every((p) => p.notQueried)).toBe(true);
+    for (const label of ['端口表', '用户表', '目录表', '单元表', '密钥名表']) {
+      expect(problems.some((p) => p.text.includes(label) && p.text.includes('找不到'))).toBe(true);
+    }
+  });
+
+  it('生成不出来（deploy 脚本读不到），返回「没查成」，不当成通过', () => {
+    const base = allNoDoc();
+    const { 'deploy/hk.sh': _hk, ...noHk } = allFiles({
+      'docs/ops.md': `# 运维\n\n${blocksText(['ports', 'users'], base)}\n`,
+    });
+    const problems = checkOpsBlocks(memRepo(noHk));
+    expect(problems.length).toBeGreaterThan(0);
+    // 端口、用户、目录都要读 hk.sh，读不到就是「没查成」，不当成通过。
+    expect(problems.some((p) => p.notQueried && p.text.includes('deploy/hk.sh'))).toBe(true);
+  });
+});
+
+describe('--write 一次换五个区块（第十一片）', () => {
+  it('散在两个文件里：两处都换，内容本来就新则不改', () => {
+    const result = writeOpsBlocks(splitRepo());
+    expect(result.problems).toEqual([]);
+    expect(result.changes).toEqual([]);
+  });
+
+  it('手改过一行：只改回到生成的，区块外的字原样', () => {
+    const base = allNoDoc();
+    const docText = `# 运维\n\n${blocksText(['ports', 'users'], base).replace('| 5432 |', '| 5433 |')}\n`;
+    const repo = memRepo(
+      allFiles({
+        'docs/ops.md': docText,
+        'docs/ops/x.md': `# 拆出来的\n\n${blocksText(['dirs', 'units', 'secrets'], base)}\n`,
+      }),
+    );
+    const { changes, problems } = writeOpsBlocks(repo);
+    expect(problems).toEqual([]);
+    expect(changes.map((c) => c.path)).toEqual(['docs/ops.md']);
+    const out = changes[0]?.text ?? '';
+    expect(out).toContain('| PG_PORT | 5432 |');
+    expect(out).not.toContain('| 5433 |');
+    expect(out.startsWith('# 运维\n\n')).toBe(true);
+    expect(out.endsWith('\n')).toBe(true);
+  });
+
+  // 故意造出的失败：标记缺失，必须报出来，一个字都不写。
+  it('缺一个区块的标记，problems 非空、changes 是空的（一个字都不写）', () => {
+    const base = allNoDoc();
+    const repo = memRepo(
+      allFiles({
+        'docs/ops.md': `# 运维\n\n${blocksText(['ports', 'users'], base)}\n`,
+        // units、secrets 都放了，唯独没有 dirs。
+        'docs/ops/x.md': `# 拆出来的\n\n${blocksText(['units', 'secrets'], base)}\n`,
+      }),
+    );
+    const { changes, problems } = writeOpsBlocks(repo);
+    expect(changes).toEqual([]);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.notQueried).toBe(true);
+    expect(problems[0]?.text).toContain('目录表');
+  });
+
+  it('一个候选文件都读不到，problems 非空、changes 是空的', () => {
+    const { changes, problems } = writeOpsBlocks(allNoDoc());
+    expect(changes).toEqual([]);
+    expect(problems).toHaveLength(5);
+    expect(problems.every((p) => p.notQueried)).toBe(true);
   });
 });

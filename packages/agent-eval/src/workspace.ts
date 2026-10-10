@@ -16,13 +16,33 @@ export function caseDirOf(c: Pick<EvalCase, 'scenario' | 'name'>): string {
   return join(PACKAGE_DIR, 'cases', c.scenario, c.name);
 }
 
+/**
+ * 删临时目录。Windows 上会话刚退出时，它起的子进程或杀毒扫描可能还占着目录，删会报 EPERM、EBUSY：
+ * 让 Node 隔一会儿重试；还删不掉就报出路径、返回 false。这一题的结果已经判完，不为一个临时目录把整轮崩掉（#1641）。
+ */
+export function removeTree(path: string, rm: typeof rmSync = rmSync): boolean {
+  try {
+    rm(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    return true;
+  } catch (e) {
+    console.error(`临时目录删不掉，要手删：${path}（${(e as NodeJS.ErrnoException).code ?? String(e)}）`);
+    return false;
+  }
+}
+
 function newRoot(tmpRoot: string | undefined): { root: string; dir: string; cleanup: () => void } {
   // 先转成真路径再交给会话当工作目录：Windows 的 tmpdir() 是 8.3 短名（C:\Users\ADMINI~1\…），
   // claude 认它不是自己的工作目录，dontAsk 下 Edit、Write 和带这个路径的 Bash 一律拒，要改文件的题就全白跑（#1641）。
   const root = realpathSync.native(mkdtempSync(join(tmpRoot ?? tmpdir(), 'agent-eval-')));
   const dir = join(root, 'work');
   mkdirSync(dir);
-  return { root, dir, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return {
+    root,
+    dir,
+    cleanup: () => {
+      removeTree(root);
+    },
+  };
 }
 
 /** 把 cases/<场景>/<题>/workspace 拷进临时目录。hidden/ 不拷。 */
