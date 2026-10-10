@@ -411,3 +411,372 @@ export function checkUsersBlock(repo: RepoView, docPath: string): OpsTableProble
     },
   ];
 }
+
+// 目录表（#140 第五片）：从三个部署脚本里行首（允许缩进）的 `ensure_dir <路径> <属主:组> <权限>` 读目录，放进 dirs 区块。
+// 路径里的 `$NAME`、`${NAME}` 按「同一脚本 → deploy/lib/*.sh → deploy/france.sh → deploy/hk.sh」的先后，
+// 找行首（允许缩进）的 `NAME=值` 赋值，取第一处；值里再有变量照同样规则递归展开。
+// 本片不进文档、不接命令行、不接 CI。
+
+const DIR_SCRIPTS = ['deploy/france.sh', 'deploy/hk.sh', 'deploy/lib/human-tier.sh'] as const;
+/** 找赋值时 deploy/lib/*.sh 之后的两个脚本，按这个顺序。 */
+const ASSIGN_TAIL = ['deploy/france.sh', 'deploy/hk.sh'] as const;
+
+const ENSURE_DIR_LINE = /^[ \t]*ensure_dir[ \t]+(.*)$/;
+const ASSIGN_LINE = /^[ \t]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+const FOR_LINE = /^[ \t]*for[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+in(?![A-Za-z0-9_])/;
+const VAR_REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
+
+/** 表里一行：| 路径 | 属主:组 | 权限 | 来源脚本 |。从文档区块里回读数据行用。 */
+const DIR_ROW = /^\| (.+?) \| ([^ |]+) \| ([^ |]+) \| (deploy\/[A-Za-z0-9_./-]+\.sh) \|$/;
+
+const DIRS_NAME = 'dirs';
+/** 目录区块名字的对外写法（和端口、用户的同一路，不各写各的字符串）。 */
+export const BLOCK_NAME_DIRS = DIRS_NAME;
+
+export interface DirEntry {
+  /** 展开变量之后的路径。 */
+  path: string;
+  /** 属主:组，如 root:fleet。 */
+  owner: string;
+  /** 权限，如 750，原样抄。 */
+  mode: string;
+  /** 来源脚本，仓内路径。 */
+  script: string;
+  /** 脚本里的行号，1 起。 */
+  line: number;
+}
+
+interface DirRow {
+  path: string;
+  owner: string;
+  mode: string;
+  script: string;
+}
+
+interface WordPart {
+  text: string;
+  /** 单引号里的字原样，不展开变量。 */
+  literal: boolean;
+}
+
+/** 从 s[at] 起读一个 shell 词：双引号、单引号、反斜杠转义、裸字可以连着写。裸字到空白或 `;` 为止。 */
+function readWord(s: string, at: number): { parts: WordPart[]; end: number } {
+  const parts: WordPart[] = [];
+  let i = at;
+  while (i < s.length) {
+    const c = s[i] ?? '';
+    if (c === '"') {
+      let buf = '';
+      i++;
+      while (i < s.length && s[i] !== '"') {
+        if (s[i] === '\\' && i + 1 < s.length && '"$\\`'.includes(s[i + 1] ?? '')) {
+          parts.push({ text: buf, literal: false }, { text: s[i + 1] ?? '', literal: true });
+          buf = '';
+          i += 2;
+        } else buf += s[i++];
+      }
+      parts.push({ text: buf, literal: false });
+      i++;
+    } else if (c === "'") {
+      const close = s.indexOf("'", i + 1);
+      const stop = close === -1 ? s.length : close;
+      parts.push({ text: s.slice(i + 1, stop), literal: true });
+      i = stop + 1;
+    } else if (c === '\\' && i + 1 < s.length) {
+      parts.push({ text: s[i + 1] ?? '', literal: true });
+      i += 2;
+    } else if (/[ \t;]/.test(c)) {
+      break;
+    } else {
+      let j = i;
+      while (j < s.length && !/[ \t;"'\\]/.test(s[j] ?? '')) j++;
+      parts.push({ text: s.slice(i, j), literal: false });
+      i = j;
+    }
+  }
+  return { parts, end: i };
+}
+
+interface ScriptIndex {
+  assigns: Map<string, { line: number; rest: string }>;
+  loopVars: Set<string>;
+}
+
+/** 整次读目录共用的脚本索引：每个脚本只读、只扫一遍。 */
+class DirReader {
+  private readonly cache = new Map<string, ScriptIndex | null>();
+  private libScripts: string[] | undefined;
+
+  private readonly repo: RepoView;
+
+  constructor(repo: RepoView) {
+    this.repo = repo;
+  }
+
+  index(script: string): ScriptIndex | undefined {
+    const hit = this.cache.get(script);
+    if (hit !== undefined) return hit ?? undefined;
+    const text = this.repo.read(script);
+    if (text === undefined) {
+      this.cache.set(script, null);
+      return undefined;
+    }
+    const idx: ScriptIndex = { assigns: new Map(), loopVars: new Set() };
+    for (const [i, line] of text.split('\n').entries()) {
+      const a = ASSIGN_LINE.exec(line);
+      if (a && !idx.assigns.has(a[1] ?? '')) idx.assigns.set(a[1] ?? '', { line: i + 1, rest: a[2] ?? '' });
+      const f = FOR_LINE.exec(line);
+      if (f) idx.loopVars.add(f[1] ?? '');
+    }
+    this.cache.set(script, idx);
+    return idx;
+  }
+
+  /** 找赋值的先后：同一脚本 → deploy/lib/*.sh → france.sh → hk.sh，同一个脚本只看一次。 */
+  searchOrder(script: string): string[] {
+    this.libScripts ??= (this.repo.list('deploy/lib') ?? [])
+      .filter((n) => n.endsWith('.sh'))
+      .sort()
+      .map((n) => `deploy/lib/${n}`);
+    return [...new Set([script, ...this.libScripts, ...ASSIGN_TAIL])];
+  }
+}
+
+interface ExpandCtx {
+  /** ensure_dir 所在的脚本和行号：报错、找赋值、判循环变量都以它为准。 */
+  script: string;
+  line: number;
+  reader: DirReader;
+  /** 只在展开路径时为 true：只有路径里的循环变量才算「按用户变化」。 */
+  inPath: boolean;
+  /** 展开路径时碰到了循环变量。 */
+  varies: boolean;
+}
+
+function expandText(text: string, ctx: ExpandCtx, chain: string[]): string {
+  const where = `${ctx.script}:${ctx.line}`;
+  if (text.includes('$(') || text.includes('`')) {
+    throw new Error(`${where} 的目录写法里有命令替换，生成不了：${text}`);
+  }
+  const out = text.replace(VAR_REF, (_m, braced: string | undefined, bare: string | undefined) => {
+    const name = braced ?? bare ?? '';
+    return expandVar(name, ctx, chain);
+  });
+  if (out.includes('$')) throw new Error(`${where} 的目录写法里有认不出的变量写法：${text}`);
+  return out;
+}
+
+function expandVar(name: string, ctx: ExpandCtx, chain: string[]): string {
+  const where = `${ctx.script}:${ctx.line}`;
+  if (ctx.inPath && ctx.reader.index(ctx.script)?.loopVars.has(name)) {
+    ctx.varies = true;
+    return '';
+  }
+  if (chain.includes(name)) {
+    throw new Error(`${where} 的变量 ${name} 展开时绕成了圈：${[...chain, name].join(' -> ')}`);
+  }
+  for (const script of ctx.reader.searchOrder(ctx.script)) {
+    const hit = ctx.reader.index(script)?.assigns.get(name);
+    if (!hit) continue;
+    const at = `${script}:${hit.line}`;
+    if (hit.rest.trimStart().startsWith('(')) {
+      throw new Error(`${at} 的 ${name} 是数组赋值，${where} 的目录路径展开不了`);
+    }
+    const word = readWord(hit.rest, 0);
+    const value = word.parts
+      .map((p) => {
+        if (p.literal) return p.text;
+        if (p.text.includes('$(') || p.text.includes('`')) {
+          throw new Error(`${at} 的 ${name} 赋值里有命令替换，${where} 的目录路径展开不了`);
+        }
+        return expandText(p.text, ctx, [...chain, name]);
+      })
+      .join('');
+    return value;
+  }
+  throw new Error(
+    `${where} 的变量 $${name} 找不到赋值（找过：${ctx.reader.searchOrder(ctx.script).join('、')}），目录路径展开不了`,
+  );
+}
+
+function expandWord(parts: WordPart[], ctx: ExpandCtx): string {
+  return parts.map((p) => (p.literal ? p.text : expandText(p.text, ctx, []))).join('');
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** 读三个脚本里的 `ensure_dir <路径> <属主:组> <权限>`，路径、属主、权限里的变量按上面的规则展开。
+ *  「按用户变化」的判法不写死变量名，只看路径：路径里用到的变量是同一脚本里某个 `for NAME in` 循环的循环变量
+ *  （例如 human-tier.sh 的 `for u in "${SESSION_USERS[@]}"` 里的 `u`），每个用户一份、不是固定目录，这一行不进表。
+ *  属主、权限里的循环变量不算：路径固定的行照样进表，属主、权限里的循环变量按普通变量找赋值，找不到就抛错。
+ *  其余找不到赋值、赋值值里有 `$(` 命令替换、少于三个词的，抛带脚本名和行号的错，不静默跳过。
+ *  读不到脚本、或哪个脚本里一个目录都没读到，也抛错（调用方落成「没查成」）。 */
+export function readDirEntries(repo: RepoView): DirEntry[] {
+  const reader = new DirReader(repo);
+  const entries: DirEntry[] = [];
+  for (const script of DIR_SCRIPTS) {
+    const text = repo.read(script);
+    if (text === undefined) throw new Error(`读不到 ${script}`);
+    let found = 0;
+    for (const [i, line] of text.split('\n').entries()) {
+      const m = ENSURE_DIR_LINE.exec(line);
+      if (!m) continue;
+      found++;
+      const where = `${script}:${i + 1}`;
+      const args = m[1] ?? '';
+      const words: WordPart[][] = [];
+      let at = 0;
+      while (words.length < 3) {
+        while (at < args.length && /[ \t]/.test(args[at] ?? '')) at++;
+        if (at >= args.length || args[at] === '#' || args[at] === ';') break;
+        const w = readWord(args, at);
+        words.push(w.parts);
+        at = w.end;
+      }
+      if (words.length < 3)
+        throw new Error(`${where} 的 ensure_dir 不足三个参数（路径 属主:组 权限）：${line.trim()}`);
+      const ctx: ExpandCtx = { script, line: i + 1, reader, inPath: true, varies: false };
+      const path = expandWord(words[0] ?? [], ctx);
+      if (ctx.varies) continue;
+      ctx.inPath = false;
+      const owner = expandWord(words[1] ?? [], ctx);
+      const mode = expandWord(words[2] ?? [], ctx);
+      entries.push({ path, owner, mode, script, line: i + 1 });
+    }
+    if (found === 0) throw new Error(`${script} 里一个目录都没读到`);
+  }
+  return entries.sort(
+    (a, b) =>
+      compareText(a.path, b.path) ||
+      compareText(a.script, b.script) ||
+      compareText(a.owner, b.owner) ||
+      compareText(a.mode, b.mode) ||
+      a.line - b.line,
+  );
+}
+
+function dirRows(repo: RepoView): DirRow[] {
+  const rows: DirRow[] = [];
+  const seen = new Set<string>();
+  for (const e of readDirEntries(repo)) {
+    const key = dirRowKey(e);
+    // 同一脚本里同一条（路径、属主、权限都一样）写了两遍，表里只留一行。
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({ path: e.path, owner: e.owner, mode: e.mode, script: e.script });
+  }
+  return rows;
+}
+
+function dirRowKey(row: DirRow): string {
+  return `${row.path}\0${row.owner}\0${row.mode}\0${row.script}`;
+}
+
+/** 区块标记之间那一段：前后各一个空行、中间一张四列表，行按路径、再按来源脚本排。 */
+export function dirsTableInner(repo: RepoView): string {
+  const lines = ['| 路径 | 属主:组 | 权限 | 来源脚本 |', '|---|---|---|---|'];
+  for (const r of dirRows(repo)) lines.push(`| ${r.path} | ${r.owner} | ${r.mode} | ${r.script} |`);
+  return `\n\n${lines.join('\n')}\n\n`;
+}
+
+/** 整个区块（含两个标记行）：开头 `<!-- fleet:dirs:start -->`，一张四列表（路径、属主:组、权限、来源脚本），
+ *  结尾 `<!-- fleet:dirs:end -->`。同一个仓两次调用逐字相同。 */
+export function renderDirsBlock(repo: RepoView): string {
+  return `${blockMarker(DIRS_NAME, 'start')}${dirsTableInner(repo)}${blockMarker(DIRS_NAME, 'end')}`;
+}
+
+function parseDirRows(text: string): DirRow[] {
+  const rows: DirRow[] = [];
+  for (const line of text.split('\n')) {
+    const m = DIR_ROW.exec(line.trimEnd());
+    if (m) rows.push({ path: m[1] ?? '', owner: m[2] ?? '', mode: m[3] ?? '', script: m[4] ?? '' });
+  }
+  return rows;
+}
+
+function groupDirRows(rows: DirRow[]): Map<string, DirRow[]> {
+  const groups = new Map<string, DirRow[]>();
+  for (const row of rows) {
+    const key = `${row.path}\0${row.script}`;
+    const list = groups.get(key);
+    if (list) list.push(row);
+    else groups.set(key, [row]);
+  }
+  return groups;
+}
+
+function diffDirGroup(want: DirRow[], got: DirRow[]): OpsTableProblem[] {
+  const unmatchedGot = [...got];
+  const unmatchedWant: DirRow[] = [];
+  for (const w of want) {
+    const at = unmatchedGot.findIndex((g) => g.owner === w.owner && g.mode === w.mode);
+    if (at === -1) unmatchedWant.push(w);
+    else unmatchedGot.splice(at, 1);
+  }
+  const problems: OpsTableProblem[] = [];
+  const n = Math.min(unmatchedWant.length, unmatchedGot.length);
+  for (let i = 0; i < n; i++) {
+    const w = unmatchedWant[i];
+    const g = unmatchedGot[i];
+    if (!w || !g) continue;
+    problems.push({
+      notQueried: false,
+      text: `目录 ${w.path} 变了：文档区块里是 ${g.owner} ${g.mode}（${g.script}），脚本里是 ${w.owner} ${w.mode}。`,
+    });
+  }
+  for (const w of unmatchedWant.slice(n)) {
+    problems.push({
+      notQueried: false,
+      text: `目录 ${w.path} 少了：脚本里是 ${w.owner} ${w.mode}（${w.script}），文档区块里没有。`,
+    });
+  }
+  for (const g of unmatchedGot.slice(n)) {
+    problems.push({
+      notQueried: false,
+      text: `目录 ${g.path} 多了：文档区块里有 ${g.owner} ${g.mode}（${g.script}），脚本里没有。`,
+    });
+  }
+  return problems;
+}
+
+function dirRowProblems(actual: string, expected: string): OpsTableProblem[] {
+  const want = groupDirRows(parseDirRows(expected));
+  const got = groupDirRows(parseDirRows(actual));
+  const problems: OpsTableProblem[] = [];
+  for (const [key, wRows] of want) problems.push(...diffDirGroup(wRows, got.get(key) ?? []));
+  for (const [key, gRows] of got) if (!want.has(key)) problems.push(...diffDirGroup([], gRows));
+  return problems;
+}
+
+/** 读 docPath，取目录区块，和 renderDirsBlock 逐字比。一致返回空数组；
+ *  不一致返回点出哪个路径多了、少了、变了的问题；
+ *  读不到文档、读不到脚本、变量展开不了、脚本里一个目录都没读到，返回「没查成」问题，不当成通过。 */
+export function checkDirsBlock(repo: RepoView, docPath: string): OpsTableProblem[] {
+  const doc = repo.read(docPath);
+  if (doc === undefined) return [{ notQueried: true, text: `没查成：读不到 ${docPath}` }];
+  let expected: string;
+  try {
+    expected = renderDirsBlock(repo);
+  } catch (e) {
+    return [{ notQueried: true, text: `没查成：${e instanceof Error ? e.message : String(e)}` }];
+  }
+  let span: BlockSpan;
+  try {
+    span = findBlock(doc, DIRS_NAME);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return [{ notQueried: false, text: `目录区块对不上（${docPath}）：${reason}。` }];
+  }
+  const actual = doc.slice(span.from, span.to);
+  if (actual === expected) return [];
+  const problems = dirRowProblems(actual, expected);
+  if (problems.length > 0) return problems;
+  return [
+    {
+      notQueried: false,
+      text: '目录区块对不上：目录行都对，但区块和生成的内容不是逐字一致（排序、空白或表头格式被改过）。',
+    },
+  ];
+}
