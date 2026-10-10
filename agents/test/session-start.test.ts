@@ -1630,10 +1630,10 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
   const T = (iso: string) => Date.parse(iso);
   const recent = (o: { home: string; now?: number; sessionId?: string | null }) =>
     (hook as unknown as { recentPrompts(o: unknown): string[] }).recentPrompts(o);
-  const received = (home: string, rows: unknown[]) => {
+  const received = (home: string, rows: unknown[], day = '2026-10-06') => {
     const dir = join(home, '.fleet-dao', 'prompt-log');
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, '2026-10-06.jsonl'), rows.map((r) => `${JSON.stringify(r)}\n`).join(''));
+    writeFileSync(join(dir, `${day}.jsonl`), rows.map((r) => `${JSON.stringify(r)}\n`).join(''));
   };
   const mirasim = (
     home: string,
@@ -1756,6 +1756,78 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
     const lines = recent({ home: bare, now: NOW });
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatch(/^创始人最近 60 分钟落盘的话/);
+  });
+
+  it('一轮跑了 95 分钟、引导在开头丢了：下一轮开头对账从上一轮开始算，过了 60 分钟照样报（#1725，10-10 05:04「我确定了，可见」）', () => {
+    const home = temp('inbox-long');
+    const now = T('2026-10-10T06:37:30Z');
+    mirasim(home, 'm1', [
+      { sessionId: 's0', startedAt: T('2026-10-10T03:40:00Z'), prompt: '更早一轮的话', steers: [] },
+      {
+        sessionId: 's1',
+        startedAt: T('2026-10-10T05:02:00Z'),
+        prompt: '把可见范围定一下',
+        steers: [{ text: '我确定了，可见', at: T('2026-10-10T05:04:07Z') }],
+      },
+      { sessionId: 's1', startedAt: T('2026-10-10T06:37:00Z'), prompt: '下一轮的话', steers: [] },
+    ]);
+    // 收到的账里没有那条引导；开这一轮的提问 95 分钟前收到过，也得对得上，不能当成丢了
+    received(
+      home,
+      [
+      { at: '2026-10-10T03:40:01Z', sessionId: 's0', prompt: '更早一轮的话' },
+      { at: '2026-10-10T05:02:01Z', sessionId: 's1', prompt: '把可见范围定一下' },
+        { at: '2026-10-10T06:37:01Z', sessionId: 's1', prompt: '下一轮的话' },
+      ],
+      '2026-10-10',
+    );
+    const lines = recent({ home, now, sessionId: 's1' });
+    expect(lines[0]).toMatch(/^创始人发了、但 Claude Code 没收到的话/);
+    expect(lines[0]).toContain('共 1 条');
+    expect(lines[0]).toContain('［13:04］我确定了，可见');
+    expect(lines[0]).not.toContain('把可见范围定一下');
+    // 「落盘的话」那行仍只列最近 60 分钟
+    expect(lines.join('\n')).not.toContain('更早一轮的话');
+  });
+
+  it('对账范围：上一轮刚开 10 分钟也至少看 60 分钟；上一轮开在 24 小时以前只看 24 小时；丢了之后过了 15 分钟才原话重发收到的也不再列', () => {
+    const home = temp('inbox-bounds');
+    mirasim(home, 'm1', [
+      { sessionId: 's1', startedAt: T('2026-10-06T03:00:00Z'), prompt: '开工', steers: [{ text: '四十分钟前丢的', at: T('2026-10-06T03:05:00Z') }] },
+      { sessionId: 's1', startedAt: T('2026-10-06T03:35:00Z'), prompt: '上一轮' },
+      { sessionId: 's1', startedAt: T('2026-10-06T03:44:00Z'), prompt: '这一轮' },
+    ]);
+    received(home, [
+      { at: '2026-10-06T03:00:01Z', sessionId: 's1', prompt: '开工' },
+      { at: '2026-10-06T03:35:01Z', sessionId: 's1', prompt: '上一轮' },
+      { at: '2026-10-06T03:44:01Z', sessionId: 's1', prompt: '这一轮' },
+    ]);
+    const lines = recent({ home, now: NOW, sessionId: 's1' });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('［11:05］四十分钟前丢的');
+
+    const old = temp('inbox-cap');
+    mirasim(old, 'm1', [
+      { sessionId: 's1', startedAt: T('2026-10-04T03:00:00Z'), prompt: '两天前那一轮', steers: [{ text: '两天前丢的', at: T('2026-10-04T03:01:00Z') }] },
+      { sessionId: 's1', startedAt: T('2026-10-05T05:00:00Z'), prompt: '昨天那一轮', steers: [{ text: '昨天丢的', at: T('2026-10-05T05:01:00Z') }] },
+      { sessionId: 's1', startedAt: T('2026-10-06T03:44:00Z'), prompt: '这一轮' },
+    ]);
+    received(old, [{ at: '2026-10-05T05:00:01Z', sessionId: 's1', prompt: '昨天那一轮' }], '2026-10-05');
+    received(old, [{ at: '2026-10-06T03:44:01Z', sessionId: 's1', prompt: '这一轮' }]);
+    // 两天前那一轮是倒数第三轮、也在 24 小时以外：不看；昨天那一轮的提问在前一天的落盘文件里收到过，不算丢
+    const capped = recent({ home: old, now: NOW, sessionId: 's1' });
+    expect(capped).toHaveLength(1);
+    expect(capped[0]).toContain('共 1 条');
+    expect(capped[0]).toContain('昨天丢的');
+    expect(capped[0]).not.toContain('两天前');
+    expect(capped[0]).not.toContain('昨天那一轮');
+
+    // 昨天丢的那条，他 03:30（隔了 22 个小时）原话重发并收到了：不再列
+    received(old, [
+      { at: '2026-10-06T03:30:00Z', sessionId: 's1', prompt: '昨天丢的' },
+      { at: '2026-10-06T03:44:01Z', sessionId: 's1', prompt: '这一轮' },
+    ]);
+    expect(recent({ home: old, now: NOW, sessionId: 's1' }).some((l) => l.includes('没收到的话'))).toBe(false);
   });
 
   it('【故意造出的失败】Mirasim 的记录读不了、有行认不出：明说没读全，不当成「没丢」', () => {
