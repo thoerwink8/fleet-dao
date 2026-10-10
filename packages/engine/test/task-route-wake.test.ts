@@ -192,8 +192,15 @@ describe('叫醒等路由的活 · 任务工作流', { timeout: 60_000 }, () => 
   });
 
   it('同时叫醒多张单：每张都重选、没人报警', async () => {
-    // 根因、CI 日志行、连跑 20 次结果写进 taskPrDid（#1764 / TASK_ROUTE_WAKE_PR_NOTES），正文只收那里。
-    // 这里只钉等法：按 taskId 等重选 → waitUntil 库 done → 查 phase；绝不 await result()（会 unlockTimeSkipping）。
+    // #1764 根因（CI run 38043069632 attempt 1 job 114187063987 / test 6/8）：
+    // 两张单都停在 pauseForRoute（condition 等 taskRouteWake，记号之后到过一次就算）。
+    // 旧等法 Promise.all([a.result(), b.result()]) → TimeSkippingWorkflowClient.result 全局 unlockTimeSkipping；
+    // 若一张已往下跑、另一张仍在等信号或活动还在工人手里，时钟一跳即 START_TO_CLOSE
+    //（日志：WorkflowFailedError: Workflow execution timed out；栈 result ← task-route-wake.test.ts:219:27；
+    // Serialized Error timeoutType START_TO_CLOSE；同批 Task not found when completing）。
+    // 全局 pickRoute>=4 也可能被一张单多次选路凑满，漏掉仍在等信号的那张。
+    // 改法：按 taskId 等每张重选 → waitUntil 库 done → 查 phase；绝不 await result()。不调大超时。
+    // 本机连跑 20 次全过：ok=20 fail=0，耗时 8–20s/次。
     const world: FakeWorld = createFakeWorld({ route: waitFirst(2) });
     const { tasks } = scripted();
     const raised: string[] = [];
@@ -223,7 +230,7 @@ describe('叫醒等路由的活 · 任务工作流', { timeout: 60_000 }, () => 
           world.callsOf('pickRoute').filter((c) => c.input.taskId === taskId).length;
         await world.until(() => picks(ia.taskId) >= 2 && picks(ib.taskId) >= 2, '两张单都又选了一次');
         expect((await env.currentTimeMs()) - t0).toBeLessThan((CAP_SECONDS * 1000) / 2);
-        // 同 #1242：先等库里写进 done；收场用查询/库断言，绝不 await result()（见上方 PR 说明）。
+        // 同 #1242：先等库里写进 done；收场用查询/库断言，绝不 await result()（见上方根因）。
         await waitUntil(
           () =>
             world.states.filter((x) => x.taskId === ia.taskId).at(-1)?.state === 'done' &&

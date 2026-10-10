@@ -287,7 +287,8 @@ export class TaskRuntime {
   /**
    * 等路由：睡 seconds 秒，但路由那边变了（叫醒信号，记号之后到过一次就算）当场醒、放弃了马上醒（抛 Abandoned）。
    * 返回是不是被叫醒的（日志、测试看）；醒了调用方照旧重新选一次，选不到会拿新记号再来等，不空转。
-   * 多张单同时等这里时，测试不要对未收场的工作流 await result()（会 unlockTimeSkipping，见 #1764 / TASK_ROUTE_WAKE_PR_NOTES）。
+   * 多张单同时等这里时，测试不要对未收场的工作流 await result()：TimeSkippingWorkflowClient.result
+   * 会全局 unlockTimeSkipping，另一张若仍停在本条件上等 taskRouteWake、或活动尚在工人手里，时钟一跳即判 START_TO_CLOSE（#1764）。
    */
   async pauseForRoute(
     kind: TaskWait['kind'],
