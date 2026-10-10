@@ -78,10 +78,11 @@ export function mirrorExtras(
   pr: Pick<PullFields, 'created_at' | 'merged_at' | 'merge_commit_sha' | 'title' | 'body'>,
   merged: boolean,
   repo: string,
-): Pick<PrMirror, 'openedAt' | 'mergedAt' | 'mergeSha' | 'links'> {
+): Pick<PrMirror, 'openedAt' | 'mergedAt' | 'mergeSha' | 'links' | 'title'> {
   const sha = pr.merge_commit_sha;
   return {
     openedAt: dateOf(pr.created_at),
+    title: pr.title,
     // 没合的 PR 也带着 merge_commit_sha（GitHub 算的试合提交）：只有合了的才记，没合的清空（合了的不会再变回没合，
     // 晚到的旧事件由 updated_at 挡住）
     mergedAt: merged ? dateOf(pr.merged_at) : null,
@@ -103,7 +104,7 @@ export function mirrorExtrasOf(
   item: unknown,
   merged: boolean,
   repo: string,
-): Pick<PrMirror, 'openedAt' | 'mergedAt' | 'mergeSha' | 'links'> {
+): Pick<PrMirror, 'openedAt' | 'mergedAt' | 'mergeSha' | 'links' | 'title'> {
   const p = PullExtras.safeParse(item);
   return p.success ? mirrorExtras(p.data, merged, repo) : {};
 }

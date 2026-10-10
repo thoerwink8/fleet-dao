@@ -508,12 +508,12 @@ export function homeDone(input: {
   for (const p of input.merged) {
     if (!p.mergedAt) continue;
     const repo = input.repoOf(p.repoId);
-    // 挂的单反查标题；一篇 PR 挂几张单时取第一张（镜像的认法）。一个都没挂上只显示 PR 号。
+    // 挂的单反查标题；一篇 PR 挂几张单时取第一张（镜像的认法）。查不到任务（本机做的单没有任务记录）用 GitHub 上的 PR 标题；标题也没读到才显示 PR 号。
     const issue = p.issueRefs?.[0];
     const task = issue === undefined ? undefined : input.taskOfIssue(p.repoId, issue);
     out.push({
       prNumber: p.number,
-      title: task?.title ?? `PR #${p.number}`,
+      title: task?.title ?? p.title ?? `PR #${p.number}`,
       repo: repo ? `${repo.owner}/${repo.name}` : '（仓不在库里）',
       mergedAt: p.mergedAt,
       ...(issue === undefined ? {} : { issueNumber: issue }),
