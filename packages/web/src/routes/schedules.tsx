@@ -124,6 +124,7 @@ export default function Schedules() {
                         <span
                           aria-hidden
                           className={cn(
+                            // 左侧竖线用 w-rail。
                             'absolute inset-y-0 left-0 w-rail',
                             tone === 'fail' ? 'bg-st-fail' : 'bg-st-stall',
                           )}
@@ -134,6 +135,7 @@ export default function Schedules() {
                     </TableCell>
                     <TableCell className="text-xs">
                       <div className="num">{j.schedule}</div>
+                      {/* 周期说明换成 text-caption。 */}
                       <div className="text-caption text-muted-foreground">
                         期望{everyText(j.expectEveryMinutes)}成功一次
                       </div>
@@ -152,6 +154,7 @@ export default function Schedules() {
                         {outcomeText(j)}
                       </span>
                       {r ? (
+                        // 开始时间换成 text-caption。
                         <span className="num text-caption text-faint">{formatAgo(r.startedAt, now)}开始</span>
                       ) : null}
                     </TableCell>
@@ -174,6 +177,7 @@ export default function Schedules() {
                         <span className="text-xs text-ink-stall">{jobStatusLabel.never}</span>
                       )}
                       {j.status === 'overdue' ? (
+                        // 过期说明换成 text-caption。
                         <div className="text-caption text-ink-stall">{jobStatusLabel.overdue}</div>
                       ) : null}
                     </TableCell>

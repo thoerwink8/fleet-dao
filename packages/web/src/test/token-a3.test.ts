@@ -1,7 +1,6 @@
-// #1445：健康条、决定卡、定时任务、渠道状态、更新日志这五处的任意尺寸，
-// 已由 #1446（#1555）收成同像素 token。整份 src 的 0 处扫描盖得住「没有写死值」，
-// 盖不住「换上去的 token 类名还在」。这里按当时那 12 处钉住类名，并钉住 app.css 里
-// 对应档位的注释还在（依据不能被删成没说明的数字）。
+// #1445：健康条 2、决定卡 2、定时任务 4、渠道状态 3、更新日志 1，共 12 处任意尺寸。
+// 同像素档位在 app.css（#1555 先落过一版）。这里钉住换上的 token 类名还在，
+// 原先的方括号写死值不在这五个文件里，并且 app.css 里对应档位的注释写了依据。
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -54,6 +53,16 @@ const TIERS: { name: string; why: string }[] = [
   { name: '--grid-template-columns-changelog:', why: '8.5rem' },
 ];
 
+/** 这 12 处换掉之前的写死类名。五个文件里不能再出现。 */
+const GONE = [
+  'max-w-[320px]',
+  'text-[11px]',
+  'w-[3px]',
+  'xl:max-h-[calc(100dvh-16rem)]',
+  'rounded-[2px]',
+  'grid-cols-[8.5rem_minmax(0,1fr)_auto]',
+] as const;
+
 function source(rel: string): string {
   return readFileSync(join(srcDir, rel), 'utf8');
 }
@@ -62,6 +71,15 @@ describe('#1445 五文件的尺寸 token', () => {
   test('五个文件 0 处任意尺寸值', () => {
     const hits = FILES.flatMap((rel) => scanFile(join(srcDir, rel), rel));
     expect(hits).toEqual([]);
+  });
+
+  test('原先 12 处写死类名不在这五个文件里', () => {
+    for (const rel of FILES) {
+      const text = source(rel);
+      for (const old of GONE) {
+        expect(text, `${rel} 还留着 ${old}`).not.toContain(old);
+      }
+    }
   });
 
   test('12 处写死值对应的 token 类名还在', () => {

@@ -303,6 +303,7 @@ export default function RoutingStatus() {
               {filter !== 'all' ? `，筛选在「${STATE_FILTERS.find((f) => f.id === filter)?.label}」` : ''}
             </p>
           ) : (
+            // 桌面下列表最高换成 max-h-routing-pane。
             <div className="xl:max-h-routing-pane xl:overflow-y-auto xl:pr-1">
               <ChannelList
                 cards={visible}
@@ -662,6 +663,7 @@ function RouteRow({
           {r.id}
         </span>
         {active ? (
+          // 探测中换成 text-caption。
           <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-st-run/10 px-1.5 text-caption font-medium leading-5 text-ink-run">
             <LoaderCircle className="size-3 animate-spin" aria-hidden />
             {active.state === 'running' ? '探测中' : '排队中'}
@@ -830,6 +832,7 @@ function ProbeFocus({
                     item.id === cell?.id && 'bg-muted',
                   )}
                 >
+                  {/* 探针点圆角换成 rounded-2。 */}
                   <span className={cn('size-2 shrink-0 rounded-2', PROBE_RESULT_BG[item.result])} />
                   <span className="num">{formatDateTime(item.probedAt)}</span>
                   <span className="min-w-0 flex-1 truncate">{item.routeId}</span>
