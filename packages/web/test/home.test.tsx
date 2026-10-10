@@ -32,9 +32,36 @@ MotionGlobalConfig.skipAnimations = true;
 // 画布按需加载，ELK 排完版才挂节点。findBy / waitFor 默认只等 1 秒，CI 上第一次排版会超过。
 configure({ asyncUtilTimeout: 10_000 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
-function renderHome(state: HomeState) {
+const openDrawer = (name: RegExp = /要你拍的/) => fireEvent.click(screen.getByRole('button', { name }));
+
+/** 假装屏宽：happy-dom 的 matchMedia 不认我们的断点，按宽度手算 min-width / max-width。 */
+function viewport(width: number) {
+  vi.spyOn(window, 'matchMedia').mockImplementation(
+    (query: string) =>
+      ({
+        matches: [...query.matchAll(/\((min|max)-width:\s*(\d+)px\)/g)].every(([, kind, px]) =>
+          kind === 'min' ? width >= Number(px) : width <= Number(px),
+        ),
+        media: query,
+        onchange: null,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {},
+        dispatchEvent: () => false,
+      }) as MediaQueryList,
+  );
+}
+
+/** 默认 1366×768（笔记本）：不是手机、不到 1920，抽屉是浮的、默认关着。 */
+function renderHome(state: HomeState, width = 1366) {
+  viewport(width);
+  localStorage.clear();
   vi.mocked(useHome).mockReturnValue({
     data: state,
     refetch: () => Promise.resolve(undefined),
@@ -164,29 +191,85 @@ describe('home（/）：四种状态', () => {
       flow: SAMPLE.flow,
     };
     renderHome({ status: 'data', data: empty });
-    expect(screen.getByText(/没有要你拍的/)).toBeTruthy();
     expect(screen.getByText(/现在没有在跑的单/)).toBeTruthy();
+    // 抽屉里两页各自写「没有」；按钮上的数是 0，不拿空白冒充
+    openDrawer();
+    expect(screen.getByText(/没有要你拍的/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('tab', { name: /做完的/ }));
     expect(screen.getByText(/最近没有合进的 PR/)).toBeTruthy();
     // 状态条是持续显示的，空了三块也还是它。
     expect(screen.getByText(/2 个池快清零/)).toBeTruthy();
   });
 
-  test('要你拍的单列通栏，时间不换行；xl 起左右分栏还在', () => {
+  test('1366 宽：画布占满正文区，没有左列；抽屉默认收着，按钮上写要你拍的条数（#1801）', () => {
     renderHome({ status: 'data', data: SAMPLE });
+    const body = document.querySelector('[data-home-body]');
+    const wrap = document.querySelector('[data-home-canvas-wrap]');
+    // 画布容器是正文区里唯一的一栏：撑满（flex-1），前面没有「要你拍的」「做完的」左列
+    expect(wrap?.parentElement).toBe(body);
+    expect(wrap?.className).toContain('flex-1');
+    expect(body?.firstElementChild).toBe(wrap);
+    expect(document.querySelector('[data-home-drawer]')).toBeNull();
+    expect(document.querySelector('[data-decision-card]')).toBeNull();
+    expect(document.querySelector('[class*="xl:grid-cols-3"]')).toBeNull();
+    expect(document.querySelector('[class*="xl:col-start-1"]')).toBeNull();
+    // 页面标题行去掉了，标题只留给读屏
+    expect(document.querySelector('h1')?.className).toContain('sr-only');
+    // 抽屉按钮：要你拍的 2 条（醒目色），旁边是做完的
+    const button = screen.getByRole('button', { name: /要你拍的 2 条/ });
+    expect(button.textContent).toContain('2');
+    expect(button.className).toContain('text-ink-human');
+    expect(screen.getByRole('button', { name: /做完的/ })).toBeTruthy();
+  });
+
+  test('没有要你拍的：按钮写 0、不用醒目色', () => {
+    renderHome({ status: 'data', data: { ...SAMPLE, decisions: [] } });
+    const button = screen.getByRole('button', { name: /要你拍的 0 条/ });
+    expect(button.className).not.toContain('text-ink-human');
+  });
+
+  test('点按钮开抽屉：两个分页签，要你拍的单列通栏、时间不换行；Esc 关', () => {
+    renderHome({ status: 'data', data: SAMPLE });
+    openDrawer();
+    const drawer = document.querySelector('[data-home-drawer]');
+    expect(drawer?.getAttribute('data-home-drawer')).toBe('floating');
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['要你拍的2', '做完的1']);
     const card = document.querySelector('[data-decision-card]');
     expect(card).toBeTruthy();
     const list = card?.parentElement;
     expect(list?.tagName).toBe('UL');
     expect(list?.className).toBe('grid grid-cols-1 gap-2');
+    // 抽屉窄：卡片一直上文下按钮，不随屏宽改成左右排
+    expect(card?.className).not.toContain('sm:flex-row');
     const time = card?.querySelector('.whitespace-nowrap');
     expect(time?.className).toContain('text-caption');
-    const split = Array.from(document.querySelectorAll('div')).find(
-      (el) => el.className.includes('xl:grid-cols-3') && el.className.includes('2xl:grid-cols-'),
-    );
-    expect(split).toBeTruthy();
-    const done = document.querySelector('[data-done-card]')?.parentElement;
-    expect(done?.className).toContain('md:grid-cols-2');
-    expect(done?.className).toContain('xl:grid-cols-1');
+    fireEvent.click(screen.getByRole('tab', { name: /做完的/ }));
+    expect(document.querySelector('[data-done-card]')).toBeTruthy();
+    expect(document.querySelector('[data-decision-card]')).toBeNull();
+    fireEvent.keyDown(drawer as Element, { key: 'Escape' });
+    expect(document.querySelector('[data-home-drawer]')).toBeNull();
+  });
+
+  test('点画布空白处关抽屉；点抽屉按钮本身是切换', () => {
+    renderHome({ status: 'data', data: SAMPLE });
+    openDrawer();
+    expect(document.querySelector('[data-home-drawer]')).toBeTruthy();
+    fireEvent.pointerDown(document.querySelector('[data-home-canvas-wrap]') as Element);
+    expect(document.querySelector('[data-home-drawer]')).toBeNull();
+    openDrawer();
+    openDrawer();
+    expect(document.querySelector('[data-home-drawer]')).toBeNull();
+  });
+
+  test('≥1920：抽屉停靠成右侧一列（不盖画布），默认展开；折叠状态记在 localStorage', () => {
+    renderHome({ status: 'data', data: SAMPLE }, 1920);
+    const drawer = document.querySelector('[data-home-drawer]');
+    expect(drawer?.getAttribute('data-home-drawer')).toBe('docked');
+    expect(drawer?.className).not.toContain('absolute');
+    expect(document.querySelector('[data-decision-card]')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '收起抽屉' }));
+    expect(document.querySelector('[data-home-drawer]')).toBeNull();
+    expect(localStorage.getItem('fleet-dao.home-drawer-collapsed')).toBe('true');
   });
 
   test('做完的：有标题显示「PR #号」加标题；标题就是「PR #号」时只显示一次（#1744）', () => {
@@ -196,6 +279,7 @@ describe('home（/）：四种状态', () => {
       status: 'data',
       data: { ...SAMPLE, done: [first, { ...first, prNumber: 1741, title: 'PR #1741' }] },
     });
+    openDrawer(/做完的/);
     const cards = document.querySelectorAll('[data-done-card]');
     expect(cards).toHaveLength(2);
     expect(cards[0]?.textContent).toContain('PR #421');
@@ -207,7 +291,8 @@ describe('home（/）：四种状态', () => {
     renderHome({ status: 'data', data: SAMPLE });
     // 「在跑的」画布按需加载、排完版才有卡片
     await screen.findByText('清理：删编排层、删 Fusion');
-    // 决策块
+    // 决策块（在抽屉里）
+    openDrawer();
     expect(screen.getByText(/PR #421「把路由配置改两层」要审/)).toBeTruthy();
     expect(screen.getByText(/#509：v3 第三阶段要不要先开演练场/)).toBeTruthy();
     // 在跑的块
@@ -216,7 +301,8 @@ describe('home（/）：四种状态', () => {
     // 验证 verify_pending 和 founder_decision 可见
     expect(document.querySelector('[data-running-card="verify_pending"]')?.textContent).toContain('还没验');
     expect(document.querySelector('[data-running-card="scoping"]')?.textContent).toContain('等你拍');
-    // 做完的块
+    // 做完的块（抽屉里的另一页）
+    fireEvent.click(screen.getByRole('tab', { name: /做完的/ }));
     expect(screen.getByText(/feat\(routing\): 把路由配置拆成两层/)).toBeTruthy();
     // 状态条
     expect(screen.getByText(/2 个池快清零/)).toBeTruthy();
@@ -523,53 +609,79 @@ describe('home（/）：引擎那一格（#902 D7）', () => {
   });
 });
 
-describe('home（/）：手机上看板退化成可折叠的树形列表', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-  const phone = () => {
-    vi.spyOn(window, 'matchMedia').mockImplementation(
-      (query: string) =>
-        ({
-          matches: query.includes('max-width: 767px'),
-          media: query,
-          onchange: null,
-          addEventListener() {},
-          removeEventListener() {},
-          addListener() {},
-          removeListener() {},
-          dispatchEvent: () => false,
-        }) as MediaQueryList,
-    );
-  };
+describe('home（/）：手机上看板退化成树形列表，一张单一行（#1801）', () => {
+  const PHONE = 390;
+  const rows = () => Array.from(document.querySelectorAll('[data-ticket-row]'));
 
-  test('手机宽度：没有画布，一段一组、组里每张单一张卡（整张卡点进单子详情）', () => {
-    phone();
-    renderHome({ status: 'data', data: SAMPLE });
+  test('手机宽度：没有画布，一段一组、每张单一行摘要，默认不展开细节', () => {
+    renderHome({ status: 'data', data: SAMPLE }, PHONE);
     expect(document.querySelector('[data-board-tree]')).toBeTruthy();
     expect(document.querySelector('.react-flow')).toBeNull();
     expect(
       Array.from(document.querySelectorAll('[data-flow-lane]')).map((l) => l.getAttribute('data-flow-lane')),
     ).toEqual(['scope', 'manual', 'verify']);
-    expect(document.querySelectorAll('[data-running-card]').length).toBe(SAMPLE.running.length);
-    expect(document.querySelector('[data-running-card="doing"] a')?.getAttribute('href')).toBe('/home3');
+    expect(rows()).toHaveLength(SAMPLE.running.length);
+    // 默认不展开：整张卡（谁在做、最近事件）一张都没渲染
+    expect(document.querySelector('[data-running-card]')).toBeNull();
+    // 一行摘要：单号、标题、所处段
+    const doing = document.querySelector('[data-ticket-row="556"]');
+    expect(doing?.textContent).toContain('#556');
+    expect(doing?.textContent).toContain('清理：删编排层、删 Fusion');
+    expect(doing?.textContent).toContain('在动手');
+    expect(doing?.querySelector('[data-ticket-toggle]')?.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  test('点一行原地展开成整张卡（进详情的链接在里面），再点收回；别的行不受影响', () => {
+    renderHome({ status: 'data', data: SAMPLE }, PHONE);
+    const toggle = document.querySelector('[data-ticket-row="556"] [data-ticket-toggle]') as Element;
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(document.querySelectorAll('[data-running-card]')).toHaveLength(1);
+    const card = document.querySelector('[data-ticket-row="556"] [data-running-card="doing"]');
+    expect(card?.textContent).toContain('Opus 5.5');
+    expect(card?.querySelector('a')?.getAttribute('href')).toBe('/home3');
+    fireEvent.click(toggle);
+    expect(document.querySelector('[data-running-card]')).toBeNull();
+  });
+
+  test('手机上要你拍的是列表顶上一条横条（有才写件数），点开是底部抽屉；顶上没有画布右上角的按钮', async () => {
+    renderHome({ status: 'data', data: SAMPLE }, PHONE);
+    expect(screen.queryByRole('button', { name: /打开抽屉/ })).toBeNull();
+    const strip = document.querySelector('[data-home-strip]') as HTMLElement;
+    expect(strip.textContent).toContain('2 件要你拍的');
+    fireEvent.click(strip);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    expect(document.querySelector('[data-decision-card]')).toBeTruthy();
+    cleanup();
+    renderHome({ status: 'data', data: { ...SAMPLE, decisions: [] } }, PHONE);
+    expect((document.querySelector('[data-home-strip]') as HTMLElement).textContent).not.toContain(
+      '件要你拍的',
+    );
+  });
+
+  test('手机上的按钮都不小于 40×40（diff 里看得见尺寸类）', () => {
+    renderHome({ status: 'data', data: SAMPLE }, PHONE);
+    for (const el of document.querySelectorAll(
+      '[data-ticket-toggle], [data-home-strip], [data-board-tree] > div > button',
+    )) {
+      expect(el.className, el.textContent ?? '').toMatch(/\bmin-h-11\b|\bh-10\b/);
+    }
   });
 
   test('手机上「只看卡住的」不含等你拍；「只看等你的」只留等你拍', () => {
-    phone();
     const running = [
       ...SAMPLE.running,
       ticket(14, {
         lastEvent: { text: '动手超时', at: '2026-10-02T08:00:00Z', tone: 'trouble' },
       }),
     ];
-    renderHome({ status: 'data', data: { ...SAMPLE, running } });
+    renderHome({ status: 'data', data: { ...SAMPLE, running } }, PHONE);
     fireEvent.click(screen.getByRole('button', { name: /只看卡住的/ }));
-    expect(document.querySelectorAll('[data-running-card]').length).toBe(1);
-    expect(document.querySelector('[data-running-card]')?.textContent).toContain('#14');
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]?.textContent).toContain('#14');
     fireEvent.click(screen.getByRole('button', { name: /只看卡住的/ }));
     fireEvent.click(screen.getByRole('button', { name: /只看等你的/ }));
-    expect(document.querySelectorAll('[data-running-card]').length).toBe(1);
-    expect(document.querySelector('[data-running-card]')?.textContent).toContain('#450');
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0]?.textContent).toContain('#450');
   });
 });

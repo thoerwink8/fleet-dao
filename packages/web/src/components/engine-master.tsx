@@ -16,6 +16,8 @@ import { errorText, useNodeSnapshots, useSettings } from '../api/client';
 import type { EnvMaster, Setting } from '../api/types';
 import { useNodeSelection, withNode } from '../lib/node';
 import { cn } from '../lib/utils';
+import { usePhone } from '../lib/viewport';
+import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
 /** 现在这个页面看的那个环境的总开关：本台读设置，远程环境读它推来的快照。 */
@@ -71,6 +73,7 @@ export function useMasterView(): { view: MasterView; remote: boolean; nodeId: st
  */
 export function EngineMasterBadge() {
   const { view, remote, nodeId } = useMasterView();
+  const phone = usePhone();
   const label =
     view.kind === 'ok'
       ? view.master.on
@@ -91,18 +94,65 @@ export function EngineMasterBadge() {
         : view.kind === 'error'
           ? `引擎总开关没读成：${view.reason}`
           : '正在读引擎总开关';
+  const tone = cn(
+    on && 'border-st-done/40 text-ink-done',
+    off && 'border-st-stall/50 text-ink-stall',
+    !on && !off && 'border-dashed text-muted-foreground',
+  );
+  const state = view.kind === 'ok' ? (view.master.on ? 'on' : 'off') : view.kind;
+  if (phone) {
+    // 手机顶栏放不下整颗胶囊：留一个 40×40 的状态点，点开是一张小卡（状态、说明、去法国页开关）
+    return (
+      <Popover>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            data-engine-master={state}
+            aria-label={`${label}${remote ? '（远程环境，只读）' : ''}，点开看详情`}
+            className={cn(
+              'relative grid size-10 shrink-0 place-items-center rounded-lg border transition-colors hover:bg-accent',
+              tone,
+            )}
+          >
+            <Power className="size-4" aria-hidden />
+            <span
+              aria-hidden
+              className={cn(
+                'absolute top-1.5 right-1.5 size-2 rounded-full',
+                on ? 'bg-st-done' : off ? 'bg-st-stall' : 'bg-muted-foreground/60',
+              )}
+            />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-72" data-engine-master-card>
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <Power className="size-4 text-muted-foreground" aria-hidden />
+            {label}
+          </div>
+          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+            {detail}
+            {remote ? '（远程环境只读：要开关请到那台上操作，说明在法国页）' : null}
+          </p>
+          <Link
+            to={withNode('/france', nodeId)}
+            className="mt-3 flex h-10 items-center justify-center rounded-lg border text-sm hover:bg-accent"
+          >
+            去法国页看开关
+          </Link>
+        </PopoverContent>
+      </Popover>
+    );
+  }
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <Link
           to={withNode('/france', nodeId)}
-          data-engine-master={view.kind === 'ok' ? (view.master.on ? 'on' : 'off') : view.kind}
+          data-engine-master={state}
           aria-label={`${label}${remote ? '（远程环境，只读）' : ''}，去法国页`}
           className={cn(
             'hidden h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2 text-xs whitespace-nowrap transition-colors hover:bg-accent sm:flex',
-            on && 'border-st-done/40 text-ink-done',
-            off && 'border-st-stall/50 text-ink-stall',
-            !on && !off && 'border-dashed text-muted-foreground',
+            tone,
           )}
         >
           <Power className="size-3.5" aria-hidden />

@@ -3,6 +3,9 @@
 import { ChevronRight, EllipsisVertical, MessageCircleQuestion, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import { useSearchParams } from 'react-router';
+import { formatAgo } from '../../../lib/format';
+import { useSlowNow } from '../../../lib/hooks';
+import { toneText } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
 import { useRemoteView } from '../../node-notice';
 import { StatusDot } from '../../status';
@@ -14,7 +17,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '../../ui/dropdown-menu';
-import { RunningCard } from '../running-card';
+import { RunningCard, statusTextOf, toneOf } from '../running-card';
 import type { HomeFlowStage, HomeRunning } from '../types';
 import { targetOfItem } from './board-ui';
 import { countTones, groupSegments, nodeId, type SegmentGroup, segmentKeyOf, worstTone } from './model';
@@ -52,7 +55,7 @@ export function BoardTree({
           title="出问题了（不含等你）"
           onClick={() => toggle('stuck', stuck)}
           className={cn(
-            'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-sub transition-colors',
+            'inline-flex h-10 items-center gap-1.5 rounded-full border px-3 text-sub transition-colors',
             stuck ? 'border-foreground bg-foreground text-background' : 'bg-card text-muted-foreground',
           )}
         >
@@ -66,7 +69,7 @@ export function BoardTree({
           title="等你拍（不含出问题）"
           onClick={() => toggle('you', needsYou)}
           className={cn(
-            'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-sub transition-colors',
+            'inline-flex h-10 items-center gap-1.5 rounded-full border px-3 text-sub transition-colors',
             needsYou ? 'border-foreground bg-foreground text-background' : 'bg-card text-muted-foreground',
           )}
         >
@@ -135,14 +138,55 @@ function SegmentRow({ group, running }: { group: SegmentGroup; running: readonly
         </span>
       </button>
       {open && group.items.length ? (
-        <ul className="space-y-1.5 border-t bg-muted/40 p-2">
+        <ul className="divide-y border-t bg-muted/40">
           {group.items.map((it) => (
-            <li key={nodeId.ticket(it)} className="flex items-stretch gap-1">
-              <RunningCard item={it} className="min-w-0 flex-1" />
-              <ActionsMenu item={it} />
-            </li>
+            <TicketRow key={nodeId.ticket(it)} item={it} />
           ))}
         </ul>
+      ) : null}
+    </li>
+  );
+}
+
+/**
+ * 手机上一张单压成一行：状态点、单号、标题（截成一行）、所处段、相对时间。点一下原地展开成整张卡（谁在做、本段多久、
+ * 在等什么、最近事件、进详情的链接），再点收回。展开前不渲染卡片，一屏能放下十几张单。
+ */
+function TicketRow({ item }: { item: HomeRunning }) {
+  const [open, setOpen] = useState(false);
+  const now = useSlowNow();
+  const { tone } = toneOf(item);
+  const stamp = item.lastEvent?.at ?? item.stageSince ?? item.taskSince;
+  return (
+    <li data-ticket-row={item.issueNumber} data-open={open}>
+      <div className="flex items-center">
+        <button
+          type="button"
+          data-ticket-toggle
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+          className="flex min-h-11 min-w-0 flex-1 items-center gap-2 py-1.5 pr-1 pl-3 text-left"
+        >
+          <StatusDot tone={tone} />
+          <span className="num shrink-0 text-xs font-semibold text-muted-foreground">
+            #{item.issueNumber}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-sm">{item.title}</span>
+          <span className={cn('max-w-24 shrink-0 truncate text-xs font-medium', toneText[tone])}>
+            {statusTextOf(item)}
+          </span>
+          {stamp ? (
+            <span className="num w-16 shrink-0 text-right text-caption text-muted-foreground">
+              {formatAgo(stamp, now)}
+            </span>
+          ) : null}
+        </button>
+        <ActionsMenu item={item} />
+      </div>
+      {open ? (
+        <div className="px-2 pb-2">
+          <RunningCard item={item} />
+        </div>
       ) : null}
     </li>
   );
@@ -158,7 +202,7 @@ function ActionsMenu({ item }: { item: HomeRunning }) {
         <Button
           size="icon"
           variant="ghost"
-          className="size-8 shrink-0 self-center"
+          className="size-10 shrink-0 self-center"
           aria-label={`#${item.issueNumber} 的操作`}
         >
           <EllipsisVertical />

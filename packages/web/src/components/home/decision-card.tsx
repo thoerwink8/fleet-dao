@@ -15,7 +15,16 @@ const KIND_META: Record<HomeDecision['kind'], { icon: typeof Send; label: string
   approval: { icon: ScrollText, label: '待批' },
 };
 
-export function DecisionCard({ decision, className }: { decision: HomeDecision; className?: string }) {
+export function DecisionCard({
+  decision,
+  className,
+  stacked = false,
+}: {
+  decision: HomeDecision;
+  className?: string;
+  /** 放在窄容器（右侧抽屉）里：不随屏宽改成左右排，一直上文下按钮。 */
+  stacked?: boolean;
+}) {
   const now = useSlowNow();
   const remote = useRemoteView();
   const meta = KIND_META[decision.kind];
@@ -24,7 +33,8 @@ export function DecisionCard({ decision, className }: { decision: HomeDecision; 
     <li
       data-decision-card={decision.kind}
       className={cn(
-        'flex flex-col gap-3 rounded-lg border border-st-human/40 bg-st-human/6 p-4 sm:flex-row sm:items-start',
+        'flex flex-col gap-3 rounded-lg border border-st-human/40 bg-st-human/6 p-4',
+        !stacked && 'sm:flex-row sm:items-start',
         className,
       )}
     >
@@ -51,7 +61,12 @@ export function DecisionCard({ decision, className }: { decision: HomeDecision; 
       </div>
       {remote ? (
         // 看的是别的环境的快照：这条决定要在那台上答，这里只读，按钮置灰并说明
-        <div className="flex shrink-0 flex-col items-start gap-1 self-start sm:items-end sm:self-center">
+        <div
+          className={cn(
+            'flex shrink-0 flex-col items-start gap-1 self-start',
+            !stacked && 'sm:items-end sm:self-center',
+          )}
+        >
           <Button size="sm" variant="outline" disabled data-remote-disabled>
             去答
             <ArrowRight aria-hidden />
@@ -59,7 +74,12 @@ export function DecisionCard({ decision, className }: { decision: HomeDecision; 
           <span className="text-caption text-muted-foreground">要去{remote.name}那台上答</span>
         </div>
       ) : (
-        <Button asChild size="sm" variant="outline" className="shrink-0 self-start sm:self-center">
+        <Button
+          asChild
+          size="sm"
+          variant="outline"
+          className={cn('shrink-0 self-start max-md:h-10', !stacked && 'sm:self-center')}
+        >
           <Link to={decision.link}>
             去答
             <ArrowRight aria-hidden />
