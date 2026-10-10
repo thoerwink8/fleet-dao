@@ -66,8 +66,8 @@ describe('此刻「在做什么」列', () => {
     expect(cols).toHaveLength(4);
     expect(cols[2]).toMatch(/\bw-48\b/);
     expect(cols[2]).not.toMatch(/\bmin-w-/);
-    // 面板本体：32rem 给四列留宽，max-w-full 窄画布不溢出（勿用 \b 贴在 ] 后，词边界对不上）
+    // 面板本体：w-lg（container-lg = 32rem）给四列留宽，max-w-full 窄画布不溢出；勿用任意值 w-[32rem]（lint-arbitrary）
     const panelClass = nowPanel.match(/data-board-now[\s\S]*?className="([^"]*)"/)?.[1] ?? '';
-    expect(panelClass.split(/\s+/)).toEqual(expect.arrayContaining(['w-[32rem]', 'max-w-full']));
+    expect(panelClass.split(/\s+/)).toEqual(expect.arrayContaining(['w-lg', 'max-w-full']));
   });
 });
