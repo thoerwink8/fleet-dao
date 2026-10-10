@@ -531,13 +531,14 @@ describe('readDirEntries', () => {
     expect(readDirEntries(r).map((e) => e.path)).toContain('/srv/fleet-dao-releases');
   });
 
-  it('路径带按用户变化的变量（/home/$u、"$home"）的行不进表', () => {
+  it('路径带任意按用户变化的循环变量的行不进表', () => {
     const r = memRepo(
       dirsFiles({
         'deploy/lib/human-tier.sh': [
           'ensure_dir /opt/fleet-dao root:root 755',
-          '  ensure_dir "/home/$u" "$u:$u" 750',
-          '  ensure_dir "$home" "$user:$user" 750',
+          '  for account in "$SESSION_USERS"; do',
+          '    ensure_dir "/home/$account" "$account:$account" 750',
+          '  done',
           '',
         ].join('\n'),
       }),
@@ -545,6 +546,24 @@ describe('readDirEntries', () => {
     const paths = readDirEntries(r).map((e) => e.path);
     expect(paths.some((p) => p.includes('home'))).toBe(false);
     expect(paths).toContain('/opt/fleet-dao');
+  });
+
+  it('带缩进的字面赋值也能展开', () => {
+    const r = memRepo(
+      dirsFiles({
+        'deploy/france.sh': 'ensure_dir /etc/wireguard root:root 700\n',
+        'deploy/lib/human-tier.sh':
+          '  RELEASES_DIR=/srv/fleet-dao-releases\nensure_dir "$RELEASES_DIR" root:root 755\n',
+      }),
+    );
+    expect(readDirEntries(r)).toContainEqual(
+      expect.objectContaining({
+        path: '/srv/fleet-dao-releases',
+        owner: 'root:root',
+        mode: '755',
+        script: 'deploy/lib/human-tier.sh',
+      }),
+    );
   });
 
   it('注释里的 ensure_dir 不读', () => {

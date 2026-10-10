@@ -421,14 +421,14 @@ const DIR_SCRIPTS = ['deploy/france.sh', 'deploy/hk.sh', 'deploy/lib/human-tier.
 /** 行首（允许缩进）的 ensure_dir 调用，捕获它后面的参数串。 */
 const ENSURE_DIR_LINE = /^[ \t]*ensure_dir[ \t]+(.*)$/;
 
-/** 行首（不缩进，缩进的是函数里的 local）的赋值，可带 readonly / export。 */
-const ASSIGN_LINE = /^(?:(?:readonly|export)[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+/** 允许缩进的字面赋值，可带 readonly / export。 */
+const ASSIGN_LINE = /^[ \t]*(?:(?:readonly|export)[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 
 /** 变量引用：`$NAME` 或 `${NAME}`。 */
 const VAR_REF = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
 
-/** 按用户变化的变量（循环里的 `$u`、登录用户脚本里的 `$user`、`$home`）：这些路径一个用户一份，不进表。 */
-const PER_USER_VARS = new Set(['u', 'user', 'home']);
+/** shell 循环变量：循环体里的目录通常是一人一份，不进固定目录表。 */
+const FOR_VAR_LINE = /^[ \t]*for[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+(?:in\b|;)/;
 
 /** 表里一行：| 路径 | 属主:组 | 权限 | 来源脚本 |。从文档区块里回读数据行用。 */
 const DIR_ROW = /^\| ([^|\s]+) \| ([^|\s]+) \| ([^|\s]+) \| (deploy\/[A-Za-z0-9_./-]+\.sh) \|$/;
@@ -499,6 +499,8 @@ interface AssignIndex {
   byScript: Map<string, Map<string, string[]>>;
   /** deploy/lib/ 下的脚本路径，按名字排。 */
   libScripts: string[];
+  /** 脚本路径 → 该脚本 shell 循环里的变量名；这些变量随循环中的用户变化。 */
+  perUserVars: Map<string, Set<string>>;
 }
 
 function buildAssignIndex(repo: RepoView): AssignIndex {
@@ -507,11 +509,15 @@ function buildAssignIndex(repo: RepoView): AssignIndex {
     .map((n) => `deploy/lib/${n}`)
     .sort(byCodeUnit);
   const byScript = new Map<string, Map<string, string[]>>();
+  const perUserVars = new Map<string, Set<string>>();
   for (const script of new Set<string>([...DIR_SCRIPTS, ...libScripts])) {
     const text = repo.read(script);
     if (text === undefined) continue;
     const vars = new Map<string, string[]>();
+    const userVars = new Set<string>();
     for (const line of text.split('\n')) {
+      const loop = FOR_VAR_LINE.exec(line);
+      if (loop?.[1]) userVars.add(loop[1]);
       const m = ASSIGN_LINE.exec(line);
       if (!m) continue;
       const value = literalAssignValue(m[2] ?? '');
@@ -522,8 +528,9 @@ function buildAssignIndex(repo: RepoView): AssignIndex {
       vars.set(name, list);
     }
     byScript.set(script, vars);
+    perUserVars.set(script, userVars);
   }
-  return { byScript, libScripts };
+  return { byScript, libScripts, perUserVars };
 }
 
 function byCodeUnit(a: string, b: string): number {
@@ -560,12 +567,13 @@ function expandVars(
   where: string,
   text: string,
   seen: readonly string[],
+  perUserVars: ReadonlySet<string>,
 ): string | undefined {
   let perUser = false;
   let bad: string | undefined;
   const out = text.replace(VAR_REF, (_all, braced: string | undefined, plain: string | undefined) => {
     const name = braced ?? plain ?? '';
-    if (PER_USER_VARS.has(name)) {
+    if (perUserVars.has(name)) {
       perUser = true;
       return '';
     }
@@ -576,7 +584,7 @@ function expandVars(
       bad ??= `${where} 的变量 $${name} 展开不了（同一脚本和 deploy/lib/ 下没有 ${name}=字面路径 的行首赋值）`;
       return '';
     }
-    const inner = expandVars(index, script, where, raw, [...seen, name]);
+    const inner = expandVars(index, script, where, raw, [...seen, name], perUserVars);
     if (inner === undefined) {
       perUser = true;
       return '';
@@ -612,8 +620,9 @@ export function readDirEntries(repo: RepoView): DirEntry[] {
         throw new Error(`${where} 的 ensure_dir 不足三个参数（路径 属主:组 权限）：${line.trim()}`);
       const values: string[] = [];
       let perUser = false;
+      const perUserVars = index.perUserVars.get(script) ?? new Set<string>();
       for (const w of words.slice(0, 3)) {
-        const v = w.quote === "'" ? w.text : expandVars(index, script, where, w.text, []);
+        const v = w.quote === "'" ? w.text : expandVars(index, script, where, w.text, [], perUserVars);
         if (v === undefined) perUser = true;
         else values.push(v);
       }
