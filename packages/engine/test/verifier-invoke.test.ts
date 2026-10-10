@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import type { RunRecord, RunStart, RunsWriter } from '../src/runner/not-wired.ts';
+import { NoSlotError, type RunRecord, type RunStart, type RunsWriter } from '../src/runner/not-wired.ts';
 import type { OneShotDeps, SpawnCommand, SpawnOutcome } from '../src/runner/one-shot.ts';
 import {
   BLOCKER_KINDS,
@@ -938,7 +938,7 @@ describe('invokeVerifier：两家都验（#1681）', () => {
       { ...BASE_INPUT, modelFamiliesAvoid: [], requireTwoFamilies: true },
       deps(oneShot, choose),
     );
-    expect(models).toEqual(['gpt-m', 'grok-m']);
+    expect([...models].sort()).toEqual(['gpt-m', 'grok-m']);
     expect(out.pass).toBe(true);
 
     const second = perModelOneShot(['grok-m']);
@@ -1088,7 +1088,7 @@ describe('invokeVerifier：别家在等先等；两家都验先挑齐再起会�
     });
     const { choose } = scriptedChoose({ gpt: 'gpt-1', grok: 'grok-1' });
     const out = await invokeVerifier(TWO, deps(oneShot, choose));
-    expect(models).toEqual(['gpt-1', 'grok-1']);
+    expect([...models].sort()).toEqual(['gpt-1', 'grok-1']);
     expect(out.pass).toBe(false);
     expect(out.upstreamRetry?.afterSeconds).toBeGreaterThan(0);
     expect(out.session?.family).toBe('grok');
@@ -1108,7 +1108,7 @@ describe('invokeVerifier：别家在等先等；两家都验先挑齐再起会�
     });
     const { choose } = scriptedChoose({ gpt: 'gpt-1', grok: 'grok-1' });
     const out = await invokeVerifier(TWO, { ...deps(oneShot, choose), timeoutMinutes: 0.0005 });
-    expect(models).toEqual(['gpt-1', 'grok-1']);
+    expect([...models].sort()).toEqual(['gpt-1', 'grok-1']);
     expect(out.pass).toBe(true);
     expect(out.session?.family).toBe('gpt');
     expect(out.notes?.startsWith('同族兜底验：')).toBe(true);
@@ -1227,5 +1227,84 @@ describe('invokeVerifier：别家在等先等；两家都验先挑齐再起会�
       expect(out.problems[0]).toContain('gpt/gpt-1');
       expect(out.routeWait).toBeUndefined();
     });
+  });
+});
+
+describe('invokeVerifier：两家都验时两家的会话并行起（#1704）', () => {
+  const TWO: VerifierInvokeInput = { ...BASE_INPUT, modelFamiliesAvoid: [], requireTwoFamilies: true };
+  const choose: ChooseModelForFamily = async (family) => ({ modelId: `${family}-m` });
+
+  /** 假 one-shot：每个会话起时记 start、收场时记 end；两家都起了才放行（串着跑的实现在这里会卡死，测试超时变红）。 */
+  function gatedOneShot(stdoutOf: (model: string) => string) {
+    const events: string[] = [];
+    let started = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const base = fakeOneShot({ exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false });
+    const oneShot: OneShotDeps = {
+      ...base.oneShot,
+      spawn: async (cmd) => {
+        const model = cmd.argv[cmd.argv.indexOf('--model') + 1] ?? '';
+        events.push(`start:${model}`);
+        started += 1;
+        if (started === 2) release();
+        await gate;
+        events.push(`end:${model}`);
+        return { exitCode: 0, stdout: stdoutOf(model), stderr: '', killed: false };
+      },
+    };
+    return { oneShot, events };
+  }
+  const depsOf = (oneShot: OneShotDeps) => ({
+    oneShot,
+    fetchDiff: okFetchDiff(),
+    fetchSpec: okFetchSpec(),
+    chooseModelForFamily: choose,
+    cwd: 'C:/work/x',
+  });
+
+  it('两家都在任何一家收场前起；都 pass 才过', async () => {
+    const { oneShot, events } = gatedOneShot(() => MODEL_STDOUT_PASS);
+    const out = await invokeVerifier(TWO, depsOf(oneShot));
+    expect(out.pass).toBe(true);
+    expect(events.slice(0, 2).sort()).toEqual(['start:gpt-m', 'start:grok-m']);
+    expect(events.slice(2).every((e) => e.startsWith('end:'))).toBe(true);
+  });
+
+  it('一 pass 一 fail：回 pass:false，problems 带「〈族名〉：」前缀', async () => {
+    const { oneShot, events } = gatedOneShot((m) =>
+      m === 'grok-m' ? MODEL_STDOUT_FAIL_NOT_DONE : MODEL_STDOUT_PASS,
+    );
+    const out = await invokeVerifier(TWO, depsOf(oneShot));
+    expect(events.slice(0, 2).every((e) => e.startsWith('start:'))).toBe(true);
+    expect(out.pass).toBe(false);
+    expect(out.problems.length).toBeGreaterThan(0);
+    expect(out.problems.every((p) => p.startsWith('grok：'))).toBe(true);
+  });
+
+  it('一家起不来（NO_SLOT）：另一家照常跑完、记进 runs，错原样往外抛', async () => {
+    const base = fakeOneShot({ exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false });
+    const finished: string[] = [];
+    const oneShot: OneShotDeps = {
+      ...base.oneShot,
+      // 开跑那一行写不进去、池的名额满了：grok 那家起不来
+      runs: {
+        ...base.oneShot.runs,
+        async start(row: RunStart) {
+          if (row.model === 'grok-m') throw new NoSlotError('池满了');
+        },
+      },
+      spawn: async (cmd) => {
+        const model = cmd.argv[cmd.argv.indexOf('--model') + 1] ?? '';
+        await new Promise((r) => setTimeout(r, 20));
+        finished.push(model);
+        return { exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false };
+      },
+    };
+    await expect(invokeVerifier(TWO, depsOf(oneShot))).rejects.toMatchObject({ code: 'NO_SLOT' });
+    expect(finished).toEqual(['gpt-m']);
+    expect(base.recorded.map((r) => r.outcome)).toContain('done');
   });
 });

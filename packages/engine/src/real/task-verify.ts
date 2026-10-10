@@ -329,12 +329,13 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       },
       ui.uiWork,
     )(input.taskId);
-    // 起会话前登记（#59，prepareCwd 里）：切号照它停下这一次验收；收场（下面的 finally）走
-    let ticket: OneShotTicket | undefined;
+    // 起会话前登记（#59，prepareCwd 里）：切号照它停下这一次验收；收场（下面的 finally）走。
+    // 两家并行起会话，各有各的登记：按族记最新一份（同一族换路由重验时，上一份先走），收场时全部走掉
+    const tickets = new Map<string, OneShotTicket>();
     // 挑中时定下的编号 → 那条路由的池：登记要知道这一次跑在哪个池上
     const poolOfRun = new Map<string, string>();
-    // 挑中路由时补上切号叫停的信号（挑之前不知道跑在哪个池）
-    const oneShot: OneShotDeps = {
+    // 每个会话各用一份依赖：切号叫停的信号、起进程前的标记都跟着它自己的登记（挑之前不知道跑在哪个池，登记在 prepareCwd 里）
+    const oneShotFor = (ticket?: OneShotTicket): OneShotDeps => ({
       spawn: (cmd) => {
         ticket?.running();
         return spawn({ ...cmd, signal: AbortSignal.any([cmd.signal, ctx.signal]) });
@@ -343,7 +344,9 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       tmpDir: deps.runsDir,
       runs: deps.runs,
       now,
-    };
+      ...(ticket ? { stop: ticket.signal } : {}),
+    });
+    const oneShot = oneShotFor();
 
     const retryFor = (reason: string): NonNullable<ColdVerifyResult['retry']> => {
       if (seen.orgSwitch) return { wait: 'slot', reason, afterSeconds: VERIFY_ORG_SWITCH_RETRY_SECONDS };
@@ -453,17 +456,19 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           // 起会话前登记（#59）：两家都验时两家先挑齐再起会话，登记要跟着这一次起的那一家，不能在挑的那一下。
           // 备目录那一下被切号停下，操作记录 stopped 里写的就是随后记成 org_switch 的那一行
           const poolId = picked.runId === undefined ? undefined : poolOfRun.get(picked.runId);
+          let ticket: OneShotTicket | undefined;
           if (deps.sessions && picked.runId !== undefined && poolId !== undefined) {
-            ticket?.leave();
+            tickets.get(picked.family)?.leave();
             ticket = deps.sessions.enter({ poolId, stage: SEGMENT_STAGE.verify, taskId: input.taskId });
             ticket.attempt(picked.runId);
-            oneShot.stop = ticket.signal;
+            tickets.set(picked.family, ticket);
           }
           const { user } = await resolveSegmentRoute(deps.spawner, picked.routeId);
           const dir = deps.spawner.trees.tmpFor(`verify-${newRunId()}`);
           await deps.spawner.trees.adopt(dir, user);
           return {
             cwd: dir,
+            ...(ticket ? { oneShot: oneShotFor(ticket) } : {}),
             release: async () => {
               await deps.spawner.trees.remove(dir).catch((error: unknown) => {
                 log('验收会话的空目录没删掉（引擎下次起来时的清理会收）', { dir, error: errMessage(error) });
@@ -506,7 +511,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       });
     } finally {
       clearInterval(beat);
-      ticket?.leave();
+      for (const t of tickets.values()) t.leave();
       for (const reservationId of reservations) {
         await deps.reservations.release(reservationId).catch((error: unknown) => {
           log('选路时给验收预占的池的名额没放掉（最多占到预占过期，到点自己不算）', {
