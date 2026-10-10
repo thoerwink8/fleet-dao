@@ -1,5 +1,5 @@
 // 路由探针的读写（#129）：读出每条路由探得了探不了的事实；写结论时只有 ok 让它在线、写不进去的明确报错。
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { toRoute } from '../src/domain-map.ts';
 import { markChannelDisabled } from '../src/queries/channel-fallback.ts';
@@ -12,7 +12,7 @@ import {
   routeProbeTargets,
   saveRouteProbe,
 } from '../src/queries/probe.ts';
-import { channels, models, pools, routes, routingCatalog } from '../src/schema/index.ts';
+import { channels, models, pools, routes, routingCatalog, runs } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRoute, catalog, MIN, NOW, setRoutingLayers } from './helpers.ts';
 
@@ -78,6 +78,7 @@ describe('读：每条路由探得了探不了的事实', () => {
       channelName: 'Claude 订阅',
       billing: 'subscription',
       channelEnabled: true,
+      identityCheck: false,
       poolId: 'claude-carpool',
       runAsUser: 'fleet-agent-carpool',
       orgKind: 'carpool',
@@ -86,6 +87,8 @@ describe('读：每条路由探得了探不了的事实', () => {
       modelRetiredAt: null,
       inUse: true,
       alive: false,
+      lastRunAt: null,
+      failStreak: 0,
       previous: null,
     });
     expect(meter).toMatchObject({ billing: 'metered', channelEnabled: false, inUse: false, runAsUser: null });
@@ -538,5 +541,119 @@ describe('探针历史', () => {
         failureReason: '按量计费，不自动探',
       },
     ]);
+  });
+});
+
+describe('节奏和种类列（#1798 片 2，只加列）', () => {
+  beforeEach(async () => {
+    await addRoute(t.db, {
+      id: 'car',
+      channelId: 'claude-subscription',
+      poolId: 'claude-carpool',
+      modelId: 'opus-5.5',
+      alive: false,
+    });
+  });
+
+  it('写了 tier、nextAt、failStreak、kind、trigger 就读得回；不给的字段不写', async () => {
+    const nextAt = new Date(NOW.getTime() + 60 * MIN);
+    expect(
+      await saveRouteProbe(t.db, {
+        routeId: 'car',
+        state: 'failed',
+        at: NOW,
+        detail: '连着不通 2 次，退避中',
+        tier: 'active',
+        nextAt,
+        failStreak: 2,
+        kind: 'ping',
+        trigger: 'scheduled',
+      }),
+    ).toBe('saved');
+    expect(await routeRow('car')).toMatchObject({
+      probeTier: 'active',
+      probeNextAt: nextAt,
+      probeFailStreak: 2,
+      probeKind: 'ping',
+    });
+    expect(await readRouteProbeHistory(t.db, 'car', 1)).toMatchObject([
+      { kind: 'ping', trigger: 'scheduled', result: 'failed' },
+    ]);
+    const [target] = await routeProbeTargets(t.db);
+    expect(target).toMatchObject({ failStreak: 2, identityCheck: false });
+
+    // 不给节奏字段：路由上原值保留；历史上 kind/trigger 为空
+    const later = new Date(NOW.getTime() + MIN);
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'ok',
+      at: later,
+      detail: '答上了：OK',
+    });
+    expect(await routeRow('car')).toMatchObject({
+      probeTier: 'active',
+      probeNextAt: nextAt,
+      probeFailStreak: 2,
+      probeKind: 'ping',
+      probeState: 'ok',
+    });
+    expect(await readRouteProbeHistory(t.db, 'car', 1)).toMatchObject([
+      { kind: null, trigger: null, result: 'passed' },
+    ]);
+  });
+
+  it('lastRunAt 取该路由 runs.started_at 的最大值；没有会话为空', async () => {
+    const older = new Date(NOW.getTime() - 2 * MIN);
+    const newer = new Date(NOW.getTime() - MIN);
+    await t.db.insert(runs).values([
+      {
+        segment: 'manual',
+        model: 'opus-5.5',
+        routeId: 'car',
+        startedAt: older,
+        endedAt: older,
+        outcome: 'done',
+      },
+      {
+        segment: 'verify',
+        model: 'opus-5.5',
+        routeId: 'car',
+        startedAt: newer,
+        endedAt: newer,
+        outcome: 'done',
+      },
+      // 没挂路由的会话不进 lastRunAt
+      {
+        segment: 'manual',
+        model: 'opus-5.5',
+        startedAt: new Date(NOW.getTime() + MIN),
+        endedAt: new Date(NOW.getTime() + 2 * MIN),
+        outcome: 'done',
+      },
+    ]);
+    const [car] = await routeProbeTargets(t.db);
+    expect(car?.lastRunAt).toEqual(newer);
+  });
+
+  it('迁移同款 SQL：从 probe_detail「连着不通 N 次」回填 probe_fail_streak', async () => {
+    await t.db
+      .update(routes)
+      .set({
+        probeState: 'failed',
+        probedAt: NOW,
+        probeDetail: '连着不通 3 次，退避中，下次约 14:00 再探',
+        probeFailStreak: 0,
+      })
+      .where(eq(routes.id, 'car'));
+    await t.db.execute(sql`
+      UPDATE "routes"
+      SET "probe_fail_streak" = COALESCE(
+        (regexp_match("probe_detail", '连着不通[[:space:]]*([0-9]+)[[:space:]]*次'))[1]::integer,
+        0
+      )
+    `);
+    expect(await routeRow('car')).toMatchObject({ probeFailStreak: 3 });
+    const [target] = await routeProbeTargets(t.db);
+    expect(target?.failStreak).toBe(3);
   });
 });
