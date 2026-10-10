@@ -3,8 +3,9 @@
 // 1. 引导先回。创始人在一轮中途打的字叫「引导」：transcript 里是一行 attachment（type: queued_command，commandMode: prompt），
 //    附在下一次工具结果后面送进主对话。本机 178 条送到的引导里，AI 第一反应直接再调工具 107 条、先写话 45 条、本轮随即结束 26 条，
 //    创始人觉得「石沉大海」。所以最后一条引导之后，主对话还没写过一段非空文字，就拒这次工具调用。
-// 2. 子代理一律后台跑。主对话前台等子代理（Agent/Task 不带 run_in_background: true）时整段卡住，引导送不进来；
+// 2. 子代理一律后台跑。主对话前台等子代理（Agent/Task 写了 run_in_background: false）时整段卡住，引导送不进来；
 //    Mirasim 一轮结束会杀掉还在跑的后台子代理，界面也只在派它的那一轮显示每一步。所以主对话里前台派子代理就拒，
+//    不写 run_in_background 不拦：本机 transcript 里不写的 39 次全是后台起的（结果是「Async agent launched」），不写就是后台。
 //    让它后台跑、主对话留在这一轮每次最多等 60 秒，跑完再收尾。
 // 子代理里的调用（输入带 agent_id）两条都不管：子代理不和创始人对话，收不到引导；子代理里再派子代理也不管。
 // 读不了 transcript：不拦（拦死所有工具代价太大），但用 systemMessage 明说「引导检查没查成：原因」，不当成没有引导静默过去。
@@ -192,7 +193,7 @@ const replyFirst = (text) => {
   return `你刚收到创始人的引导『${shown}』：先用一句话回它（问题就答，指令就说改成什么；涉及在跑的子代理就用 SendMessage 转给它并说已转），再接着调工具。`;
 };
 const BACKGROUND_ONLY =
-  '子代理一律后台跑：Agent 工具带上 run_in_background: true 再派。主对话留在本轮、每次最多等 60 秒，等它跑完再收尾（Mirasim 一轮结束会杀掉后台子代理，界面也只在派它的那一轮显示每一步；前台等子代理时创始人的引导送不进来）。';
+  '子代理一律后台跑：去掉 run_in_background: false 再派（不写就是后台）。主对话留在本轮、每次最多等 60 秒，等它跑完再收尾（Mirasim 一轮结束会杀掉后台子代理，界面也只在派它的那一轮显示每一步；前台等子代理时创始人的引导送不进来）。';
 
 /**
  * 这次工具调用要不要拒。
@@ -240,7 +241,11 @@ export function check(raw, { settleMs = SETTLE_MS, sleep = sleepSync } = {}) {
 
   const tool = input.tool_name;
   const toolInput = input.tool_input;
-  if (typeof tool === 'string' && SUBAGENT_TOOLS.has(tool) && prop(toolInput, 'run_in_background') !== true) {
+  if (
+    typeof tool === 'string' &&
+    SUBAGENT_TOOLS.has(tool) &&
+    prop(toolInput, 'run_in_background') === false
+  ) {
     reasons.push(BACKGROUND_ONLY);
   }
   /** @type {Verdict} */

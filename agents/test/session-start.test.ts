@@ -1691,7 +1691,8 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
       { sessionId: 's2', startedAt: T('2026-10-06T03:20:00Z'), prompt: '还剩下什么任务', steers: [] },
     ]);
     received(home, [{ at: '2026-10-06T03:20:01Z', sessionId: 's2', prompt: '还剩下什么任务' }]);
-    const lines = recent({ home, now: NOW, sessionId: 'me' });
+    // 本会话是 s1：丢的提问进「先答这些」；s2 收到的进「落盘的话」
+    const lines = recent({ home, now: NOW, sessionId: 's1' });
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain('没收到的话');
     expect(lines[0]).toContain('重新用k3');
@@ -1758,19 +1759,243 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
     expect(lines[0]).toMatch(/^创始人最近 60 分钟落盘的话/);
   });
 
+  it('上一轮跑了 95 分钟、开头那条引导丢了：下一轮开头（已过 60 分钟）照样报出来；已重发收到的、更早一轮的不报（#1721 引导「我确定了，可见」）', () => {
+    const home = temp('inbox');
+    const now = T('2026-10-10T06:37:30Z');
+    mirasim(home, 'm1', [
+      {
+        sessionId: 's0',
+        startedAt: T('2026-10-10T01:00:00Z'),
+        prompt: '更早一轮的提问',
+        steers: [{ text: '更早一轮丢的引导', at: T('2026-10-10T01:05:00Z') }],
+      },
+      {
+        sessionId: 's1',
+        startedAt: T('2026-10-10T05:03:00Z'),
+        prompt: '长任务开工',
+        steers: [
+          { text: '我确定了，可见', at: T('2026-10-10T05:04:07Z') },
+          {
+            text: '另一条引导，之后重发并收到了',
+            at: T('2026-10-10T05:10:00Z'),
+          },
+        ],
+      },
+      {
+        sessionId: 's1',
+        startedAt: T('2026-10-10T06:37:00Z'),
+        prompt: '你读到我的引导吗？',
+      },
+    ]);
+    const dir = join(home, '.fleet-dao', 'prompt-log');
+    mkdirSync(dir, { recursive: true });
+    const rows = [
+      { at: '2026-10-10T05:03:01Z', sessionId: 's1', prompt: '长任务开工' },
+      { at: '2026-10-10T06:37:01Z', sessionId: 's1', prompt: '你读到我的引导吗？' },
+      {
+        at: '2026-10-10T05:12:00Z',
+        sessionId: 's1',
+        prompt: '另一条引导，之后重发并收到了',
+      },
+    ];
+    writeFileSync(join(dir, '2026-10-10.jsonl'), rows.map((r) => `${JSON.stringify(r)}\n`).join(''));
+    const lines = recent({ home, now, sessionId: 's1' });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^创始人发了、但 Claude Code 没收到的话/);
+    expect(lines[0]).toContain('共 1 条');
+    expect(lines[0]).toContain('［13:04］我确定了，可见');
+    expect(lines[0]).not.toContain('更早一轮');
+    expect(lines[0]).not.toContain('之后重发');
+  });
+
   it('【故意造出的失败】Mirasim 的记录读不了、有行认不出：明说没读全，不当成「没丢」', () => {
     const home = temp('inbox');
     const dir = join(home, '.mirasim', 'sessions', 'claude', 'm1');
     mkdirSync(join(dir, 'turns.jsonl'), { recursive: true }); // 路径是个目录：读不了
-    const lines = recent({ home, now: NOW });
+    const lines = recent({ home, now: NOW, sessionId: 's' });
     expect(lines[0]).toMatch(/创始人在 Mirasim 里发的话没读全：.*读不了/);
     mirasim(home, 'm2', [{ sessionId: 's', startedAt: T('2026-10-06T03:40:00Z'), prompt: '好的那条' }]);
     writeFileSync(join(home, '.mirasim', 'sessions', 'claude', 'm2', 'turns.jsonl'), '{坏了\n', {
       flag: 'a',
     });
-    const again = recent({ home, now: NOW });
+    const again = recent({ home, now: NOW, sessionId: 's' });
     expect(again.some((l) => /1 行认不出/.test(l))).toBe(true);
     expect(again.some((l) => /没收到的话.*好的那条/.test(l))).toBe(true);
+  });
+
+  // #1733：2026-10-10 15:4x 会话 802f14bb 开场误报——别的会话的丢话、已重发办完的引导都进了「先答这些」
+  it('别的会话丢的话不进「先答这些」（取舍：别的会话丢的也不另起一行，避免误答）', () => {
+    const home = temp('inbox');
+    const now = T('2026-10-10T07:45:00Z'); // 北京 15:45
+    // 别的会话 c2296074：昨晚丢了一句，本会话开场时仍在其「上一轮以来」窗口内
+    mirasim(home, 'other', [
+      {
+        sessionId: 'c2296074',
+        startedAt: T('2026-10-09T13:00:00Z'),
+        prompt: '别的会话昨晚的提问',
+        steers: [
+          {
+            text: '都按照你推荐，不要小修，要改彻底',
+            at: T('2026-10-09T13:17:00Z'),
+          },
+        ],
+      },
+      {
+        sessionId: 'c2296074',
+        startedAt: T('2026-10-10T07:40:00Z'),
+        prompt: '别的会话今天接着干',
+      },
+    ]);
+    // 本会话 802f14bb：只有刚开的一轮，没有丢话
+    mirasim(home, 'me', [
+      {
+        sessionId: '802f14bb',
+        startedAt: T('2026-10-10T07:44:00Z'),
+        prompt: '本会话开场',
+      },
+    ]);
+    const dir = join(home, '.fleet-dao', 'prompt-log');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, '2026-10-10.jsonl'),
+      [
+        { at: '2026-10-10T07:40:01Z', sessionId: 'c2296074', prompt: '别的会话今天接着干' },
+        { at: '2026-10-10T07:44:01Z', sessionId: '802f14bb', prompt: '本会话开场' },
+      ]
+        .map((r) => `${JSON.stringify(r)}\n`)
+        .join(''),
+    );
+    const lines = recent({ home, now, sessionId: '802f14bb' });
+    expect(lines.some((l) => /没收到的话/.test(l))).toBe(false);
+    expect(lines.join('\n')).not.toContain('都按照你推荐');
+    expect(lines.join('\n')).not.toContain('先答这些');
+  });
+
+  it('21:17 短句加 21:27 带下文重发：同会话 MATCH_MS 内以丢句开头收到，不报', () => {
+    const home = temp('inbox');
+    const now = T('2026-10-09T13:40:00Z'); // 北京 21:40
+    const short = '都按照你推荐，不要小修，要改彻底';
+    const withContext = `${short}\n\n另外把相关测试和文档一并改掉，别留半套。`;
+    mirasim(home, 'm1', [
+      {
+        sessionId: 'c2296074',
+        startedAt: T('2026-10-09T13:00:00Z'),
+        prompt: '昨晚那轮',
+        steers: [{ text: short, at: T('2026-10-09T13:17:00Z') }],
+        error: 'Interrupted by user.',
+        incomplete: true,
+      },
+      {
+        sessionId: 'c2296074',
+        startedAt: T('2026-10-09T13:27:00Z'),
+        prompt: withContext,
+      },
+    ]);
+    const dir = join(home, '.fleet-dao', 'prompt-log');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, '2026-10-09.jsonl'),
+      [
+        { at: '2026-10-09T13:00:01Z', sessionId: 'c2296074', prompt: '昨晚那轮' },
+        { at: '2026-10-09T13:27:01Z', sessionId: 'c2296074', prompt: withContext },
+      ]
+        .map((r) => `${JSON.stringify(r)}\n`)
+        .join(''),
+    );
+    const lines = recent({ home, now, sessionId: 'c2296074' });
+    expect(lines.some((l) => /没收到的话/.test(l))).toBe(false);
+    expect(lines.join('\n')).not.toContain('不要小修');
+  });
+
+  it('11:47 丢、15:01 同句收到：同会话 promptKey 一样不限 15 分钟，不报', () => {
+    const home = temp('inbox');
+    const now = T('2026-10-10T07:45:00Z'); // 北京 15:45
+    const text = '进展怎么样了';
+    // 只有两轮：上一轮起点在 11:47 之前，丢的引导仍在对账窗口内；15:01 只在 prompt-log 里收到（隔了 3 小时）
+    mirasim(home, 'm1', [
+      {
+        sessionId: '802f14bb',
+        startedAt: T('2026-10-10T03:00:00Z'),
+        prompt: '上午那轮',
+        steers: [{ text, at: T('2026-10-10T03:47:00Z') }],
+        error: 'Interrupted by user.',
+        incomplete: true,
+      },
+      {
+        sessionId: '802f14bb',
+        startedAt: T('2026-10-10T07:44:00Z'),
+        prompt: '接着开场',
+      },
+    ]);
+    const dir = join(home, '.fleet-dao', 'prompt-log');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, '2026-10-10.jsonl'),
+      [
+        { at: '2026-10-10T03:00:01Z', sessionId: '802f14bb', prompt: '上午那轮' },
+        { at: '2026-10-10T07:01:01Z', sessionId: '802f14bb', prompt: text },
+        { at: '2026-10-10T07:44:01Z', sessionId: '802f14bb', prompt: '接着开场' },
+      ]
+        .map((r) => `${JSON.stringify(r)}\n`)
+        .join(''),
+    );
+    const lines = recent({ home, now, sessionId: '802f14bb' });
+    expect(lines.some((l) => /没收到的话/.test(l))).toBe(false);
+    expect(lines.join('\n')).not.toContain('进展怎么样了');
+  });
+
+  it('【故意造出的失败】本会话丢了、之后没重发的引导，照样报在「先答这些」里', () => {
+    const home = temp('inbox');
+    const now = T('2026-10-10T07:45:00Z');
+    mirasim(home, 'm1', [
+      {
+        sessionId: '802f14bb',
+        startedAt: T('2026-10-10T07:00:00Z'),
+        prompt: '本会话提问',
+        steers: [{ text: '就改这一处，别动别的', at: T('2026-10-10T07:10:00Z') }],
+        error: 'Interrupted by user.',
+        incomplete: true,
+      },
+      {
+        sessionId: '802f14bb',
+        startedAt: T('2026-10-10T07:44:00Z'),
+        prompt: '开场接着干',
+      },
+    ]);
+    // 别的会话也丢了一句：不得进本会话的「先答这些」
+    mirasim(home, 'other', [
+      {
+        sessionId: 'c2296074',
+        startedAt: T('2026-10-10T07:05:00Z'),
+        prompt: '别的会话',
+        steers: [{ text: '别的会话丢的引导不要报给我', at: T('2026-10-10T07:12:00Z') }],
+      },
+      {
+        sessionId: 'c2296074',
+        startedAt: T('2026-10-10T07:40:00Z'),
+        prompt: '别的会话开场',
+      },
+    ]);
+    const dir = join(home, '.fleet-dao', 'prompt-log');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, '2026-10-10.jsonl'),
+      [
+        { at: '2026-10-10T07:00:01Z', sessionId: '802f14bb', prompt: '本会话提问' },
+        { at: '2026-10-10T07:44:01Z', sessionId: '802f14bb', prompt: '开场接着干' },
+        { at: '2026-10-10T07:05:01Z', sessionId: 'c2296074', prompt: '别的会话' },
+        { at: '2026-10-10T07:40:01Z', sessionId: 'c2296074', prompt: '别的会话开场' },
+      ]
+        .map((r) => `${JSON.stringify(r)}\n`)
+        .join(''),
+    );
+    const lines = recent({ home, now, sessionId: '802f14bb' });
+    const inbox = lines.find((l) => /没收到的话/.test(l));
+    expect(inbox).toBeTruthy();
+    expect(inbox).toContain('先答这些');
+    expect(inbox).toContain('就改这一处，别动别的');
+    expect(inbox).toContain('共 1 条');
+    expect(inbox).not.toContain('别的会话丢的引导');
   });
 });
 

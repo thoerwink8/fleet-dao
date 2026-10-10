@@ -438,17 +438,22 @@ describe('规矩的文字：通用段和 commander 技能说「无人值守时�
   const SKILL = read('../../skills/commander/SKILL.md');
   const line = SHARED.split('\n').find((l) => l.startsWith('- 无人值守')) ?? '';
 
-  // 「单次前台等待不超过 60 秒」2026-10-10 挪进「子代理一律后台跑」那句（决定 0078，不分无人值守与否），这里只查它还在通用段里
-  it('通用段：先 on、起子代理、这一轮不结束、等完成通知、done / needs-you / off；前台等待不超过 60 秒在通用段里；不再写脱离会话的工人', () => {
+  // 2026-10-10（决定 0078）：「用 Agent 子代理、不脱离会话、这一轮不结束、等完成通知、单次前台等待不超过 60 秒」挪到不分无人值守与否的
+  // 「Agent 子代理」那条（也钉在 steer-and-subagents.rules.test.ts），无人值守那条只写它多出来的：子代理都收口了也不结束、从队列头派下一件
+  it('通用段：先 on、子代理收口了这一轮也不结束、从队列头派下一件、done / needs-you / off；用子代理不脱离会话、等完成通知写在「Agent 子代理」那条；不再写脱离会话的工人', () => {
+    const sub = SHARED.split('\n').find((l) => l.startsWith('- Agent 子代理')) ?? '';
     expect(line).toContain('unattended.mjs on');
-    expect(line).toContain('Agent 子代理');
-    expect(line).toContain('不脱离会话');
+    expect(line).toContain('这一轮也不结束');
+    expect(line).toContain('从队列头派下一件');
     expect(line).not.toContain('worker.mjs');
     expect(line).not.toContain('--detached');
-    expect(line).toContain('这一轮不结束');
-    expect(line).toContain('完成通知');
-    expect(SHARED).toContain('单次前台等待不超过 60 秒');
+    expect(line).not.toContain('前台等待');
     for (const k of ['`done`', '`needs-you`', '`off`']) expect(line).toContain(k);
+    expect(sub).toContain('不脱离会话');
+    expect(sub).toContain('这一轮不结束');
+    expect(sub).toContain('完成通知');
+    expect(sub).toContain('单次前台等待不超过 60 秒');
+    expect(SHARED).not.toContain('worker.mjs');
   });
 
   it('commander 技能：无人值守照子代理一道派活、等完成通知、不结束这一轮；脱离的工人只在创始人明说时用，旧说法（这一轮就结束、不循环 watch、无人值守起脱离工人）已删', () => {

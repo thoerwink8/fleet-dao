@@ -145,7 +145,7 @@ describe('冷调用的每条「读不到」都变成 failure 状态，不许吞�
     expect(s.description).toContain('db down');
   });
 
-  it('【故意造出的失败】跳过作者族之后一家都没有 → failure，写明没讨论成（不许拿默认模型顶上）', async () => {
+  it('【故意造出的失败】一家都没有、也没接等待 → failure，写明一个模型都派不出（不许拿默认模型顶上，#1731）', async () => {
     const asked: string[] = [];
     const s = await postWith({
       choose: async (family) => {
@@ -154,7 +154,7 @@ describe('冷调用的每条「读不到」都变成 failure 状态，不许吞�
       },
     });
     expect(s.state).toBe('failure');
-    expect(s.description).toContain('没讨论成');
+    expect(s.description).toContain('一个模型都派不出');
     // 先按 0006 的顺序问别家；都挑不出才改两家都验，轮到被避开的作者族 gpt（也挑不出）
     expect(asked).toEqual([...FAMILY_ORDER.filter((f) => f !== 'gpt'), 'gpt']);
   });

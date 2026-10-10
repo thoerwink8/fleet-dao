@@ -3,7 +3,8 @@
 //    附在下一次工具结果后面送进主对话。本机 178 条送到的引导里，AI 第一反应直接再调工具 107 条、先写话 45 条、本轮随即结束 26 条，
 //    创始人觉得「石沉大海」。所以最后一条引导之后主对话还没写过一段非空文字，就拒这次工具调用，理由里带上引导的前 200 字。
 // 2. 子代理一律后台跑：主对话前台等子代理时整段卡住，引导送不进来；Mirasim 一轮结束会杀掉还在跑的后台子代理，
-//    界面也只在派它的那一轮显示每一步。所以主对话调 Agent/Task 不带 run_in_background: true 就拒。
+//    界面也只在派它的那一轮显示每一步。所以主对话调 Agent/Task 写了 run_in_background: false 就拒；不写不拦（不写就是后台：
+//    本机 transcript 里不写的 39 次全是后台起的）。
 // 子代理里的调用（输入带 agent_id）两条都不管。transcript 读不了：放行，但用 systemMessage 明说没查成，不当成没有引导。
 // 创始人 2026-10-10 13:02 选定（「都按你的推荐来。」）。
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -225,7 +226,7 @@ describe('读不了 transcript：放行，但明说没查成', () => {
   });
 
   it('transcript 读不了也照样管前台子代理', () => {
-    const v = check(input(undefined, {}, 'Agent', { prompt: '干活' }));
+    const v = check(input(undefined, {}, 'Agent', { prompt: '干活', run_in_background: false }));
     expect(v.deny).toContain('子代理一律后台跑');
     expect(v.notice).toMatch(/^引导检查没查成：/);
   });
@@ -235,34 +236,38 @@ describe('子代理一律后台跑', () => {
   const clean = () => transcript(turnStart());
 
   it.each([
-    ['Agent', { prompt: '干活', subagent_type: 'fleet-builder' }],
-    ['Task', { prompt: '干活' }],
-    ['Agent', { prompt: '干活', run_in_background: false }],
-  ])('主对话里 %s %j 不在后台：拒，并说清为什么', (tool, toolInput) => {
+    ['Agent', { prompt: '干活', subagent_type: 'fleet-builder', run_in_background: false }],
+    ['Task', { prompt: '干活', run_in_background: false }],
+  ])('主对话里 %s %j 写明前台：拒，并说清为什么', (tool, toolInput) => {
     const v = check(input(clean(), {}, tool, toolInput));
     expect(v.deny).toContain('子代理一律后台跑');
-    expect(v.deny).toContain('run_in_background: true');
+    expect(v.deny).toContain('去掉 run_in_background: false');
     expect(v.deny).toContain('60 秒');
     expect(v.deny).toContain('Mirasim 一轮结束会杀掉后台子代理');
   });
 
-  it('run_in_background: true：放行', () => {
+  it('不写 run_in_background（默认就是后台）、写 true：放行', () => {
+    expect(check(input(clean(), {}, 'Agent', { prompt: '干活' }))).toEqual({});
     expect(check(input(clean(), {}, 'Agent', { prompt: '干活', run_in_background: true }))).toEqual({});
   });
 
   it('引导没回、又前台派子代理：两条理由一起给，一次改对', () => {
     const t = transcript([...turnStart(), row.directive('换个做法')]);
-    const v = check(input(t, {}, 'Agent', { prompt: '干活' }));
+    const v = check(input(t, {}, 'Agent', { prompt: '干活', run_in_background: false }));
     expect(v.deny).toContain('『换个做法』');
     expect(v.deny).toContain('子代理一律后台跑');
   });
 
-  it('【故意造出的失败】run_in_background 写成字符串 "true"、1：不算后台，照拦', () => {
-    for (const bad of ['true', 1]) {
-      expect(check(input(clean(), {}, 'Agent', { prompt: '干活', run_in_background: bad })).deny).toContain(
-        '子代理一律后台跑',
-      );
-    }
+  it('【故意造出的失败】把判法改成「不是 true 就拦」：不写的那次被误拦，上一条就会红', async () => {
+    const src = readFileSync(HOOK, 'utf8');
+    const want = "prop(toolInput, 'run_in_background') === false";
+    expect(src).toContain(want);
+    const mutant = join(dir, 'main-thread-mutant.mjs');
+    writeFileSync(mutant, src.replace(want, "prop(toolInput, 'run_in_background') !== true"));
+    const bad = (await import(pathToFileURL(mutant).href)) as MainThreadLib;
+    expect(bad.check(input(clean(), {}, 'Agent', { prompt: '干活' }), { settleMs: 0 }).deny).toContain(
+      '子代理一律后台跑',
+    );
   });
 });
 
@@ -270,13 +275,17 @@ describe('子代理里的调用两条都不管', () => {
   it('输入带 agent_id：引导没回也放行，前台派子代理也放行', () => {
     const t = transcript([...turnStart(), row.directive('先别动数据库')]);
     expect(check(input(t, { agent_id: 'a1b2' }))).toEqual({});
-    expect(check(input(t, { agent_id: 'a1b2' }, 'Agent', { prompt: '再派一个' }))).toEqual({});
+    expect(
+      check(input(t, { agent_id: 'a1b2' }, 'Agent', { prompt: '再派一个', run_in_background: false })),
+    ).toEqual({});
   });
 
   it('没有 agent_id 但 transcript 是子代理的（每行 isSidechain: true）：不查', () => {
     const side = [...turnStart(), row.directive('先别动数据库')].map((r) => ({ ...r, isSidechain: true }));
     expect(check(input(transcript(side)))).toEqual({});
-    expect(check(input(transcript(side), {}, 'Agent', { prompt: '再派一个' }))).toEqual({});
+    expect(
+      check(input(transcript(side), {}, 'Agent', { prompt: '再派一个', run_in_background: false })),
+    ).toEqual({});
   });
 
   it('【故意造出的失败】agent_id 空串、不是字符串：不算子代理，照拦', () => {
@@ -357,33 +366,5 @@ describe('登记和真跑', () => {
 
     const ok = runChild(process.execPath, [HOOK], { input: input(transcript(turnStart())) });
     expect([ok.status, ok.stdout]).toEqual([0, '']);
-  });
-});
-
-describe('commander 技能「派活」跟上：子代理后台派、引导先回、转给子代理', () => {
-  const SKILL = readFileSync(
-    fileURLToPath(new URL('../../skills/commander/SKILL.md', import.meta.url)),
-    'utf8',
-  );
-  const RULES: Record<string, RegExp> = {
-    后台派: /Agent 工具起子代理（[^）]*），一律带 `run_in_background: true`/,
-    留在这一轮: /派完主对话留在这一轮，单次前台等待不超过 60 秒，等它跑完再收尾/,
-    引导先回: /收到了，下一句先回它/,
-    转给子代理: /引导涉及在跑的子代理，用 `SendMessage` 转给它，并告诉他已转/,
-  };
-  const missing = (text: string) =>
-    Object.entries(RULES)
-      .filter(([, re]) => !re.test(text))
-      .map(([k]) => k);
-
-  it('这几样都在；旧说法「它活在聊天这一轮里，轮次结束或进程重开就跟着死」已删', () => {
-    expect(missing(SKILL)).toEqual([]);
-    expect(SKILL).not.toContain('它活在聊天这一轮里');
-  });
-
-  it('【故意造出的失败】把 run_in_background 那半句拿掉：查得出来', () => {
-    const cut = SKILL.replace('，一律带 `run_in_background: true`', '');
-    expect(cut).not.toBe(SKILL);
-    expect(missing(cut)).toEqual(['后台派']);
   });
 });

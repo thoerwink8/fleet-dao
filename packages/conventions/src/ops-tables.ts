@@ -136,6 +136,11 @@ export interface OpsTableProblem {
 export function checkPortsBlock(repo: RepoView, docPath: string): OpsTableProblem[] {
   const doc = repo.read(docPath);
   if (doc === undefined) return [{ notQueried: true, text: `没查成：读不到 ${docPath}` }];
+  return checkPortsText(repo, doc, docPath);
+}
+
+/** 端口区块的核对本体：拿一段已知的文档文本比，不读盘（命令行一次认五个区块时，文字已经读过一遍了）。 */
+function checkPortsText(repo: RepoView, doc: string, _docPath: string): OpsTableProblem[] {
   let expected: string;
   try {
     expected = renderPortsBlock(repo);
@@ -392,6 +397,11 @@ function userRowProblems(actual: string, expected: string): OpsTableProblem[] {
 export function checkUsersBlock(repo: RepoView, docPath: string): OpsTableProblem[] {
   const doc = repo.read(docPath);
   if (doc === undefined) return [{ notQueried: true, text: `没查成：读不到 ${docPath}` }];
+  return checkUsersText(repo, doc, docPath);
+}
+
+/** 用户区块的核对本体：拿一段已知的文档文本比，不读盘（命令行一次认五个区块时，文字已经读过一遍了）。 */
+function checkUsersText(repo: RepoView, doc: string, _docPath: string): OpsTableProblem[] {
   let expected: string;
   try {
     expected = renderUsersBlock(repo);
@@ -778,6 +788,11 @@ function dirRowProblems(actual: string, expected: string): OpsTableProblem[] {
 export function checkDirsBlock(repo: RepoView, docPath: string): OpsTableProblem[] {
   const doc = repo.read(docPath);
   if (doc === undefined) return [{ notQueried: true, text: `没查成：读不到 ${docPath}` }];
+  return checkDirsText(repo, doc, docPath);
+}
+
+/** 目录区块的核对本体：拿一段已知的文档文本比，不读盘（命令行一次认五个区块时，文字已经读过一遍了）。 */
+function checkDirsText(repo: RepoView, doc: string, docPath: string): OpsTableProblem[] {
   let expected: string;
   try {
     expected = renderDirsBlock(repo);
@@ -942,6 +957,11 @@ function unitRowProblems(actual: string, expected: string): OpsTableProblem[] {
 export function checkUnitsBlock(repo: RepoView, docPath: string): OpsTableProblem[] {
   const doc = repo.read(docPath);
   if (doc === undefined) return [{ notQueried: true, text: `没查成：读不到 ${docPath}` }];
+  return checkUnitsText(repo, doc, docPath);
+}
+
+/** 单元区块的核对本体：拿一段已知的文档文本比，不读盘（命令行一次认五个区块时，文字已经读过一遍了）。 */
+function checkUnitsText(repo: RepoView, doc: string, docPath: string): OpsTableProblem[] {
   let expected: string;
   try {
     expected = renderUnitsBlock(repo);
@@ -1082,6 +1102,11 @@ function secretRowProblems(actual: string, expected: string): OpsTableProblem[] 
 export function checkSecretsBlock(repo: RepoView, docPath: string): OpsTableProblem[] {
   const doc = repo.read(docPath);
   if (doc === undefined) return [{ notQueried: true, text: `没查成：读不到 ${docPath}` }];
+  return checkSecretsText(repo, doc, docPath);
+}
+
+/** 密钥名区块的核对本体：拿一段已知的文档文本比，不读盘（命令行一次认五个区块时，文字已经读过一遍了）。 */
+function checkSecretsText(repo: RepoView, doc: string, docPath: string): OpsTableProblem[] {
   let expected: string;
   try {
     expected = renderSecretsBlock(repo);
@@ -1115,4 +1140,201 @@ export function checkSecretsBlock(repo: RepoView, docPath: string): OpsTableProb
       text: '密钥名区块对不上：键名行都对，但区块和生成的内容不是逐字一致（排序、空白或表头格式被改过）。',
     },
   ];
+}
+
+// 五个区块一起认（#140 第十一片）：命令行 --check / --write 一次核对、生成全五张表。
+// 区块可以在 docs/ops.md 里，也可以在 docs/ops/*.md 里（第十二片按主题拆文件时区块跟着所在小节搬走）。
+// 每个区块只许恰好一个文件有它的标记：找不到、或两个文件都有，各报一条点出区块名的问题。
+// 传了文档路径就只在这一个文件里找全部五个区块（第一片旧的单路径入口照旧）。
+
+/** 区块名，按核对、生成的先后。 */
+export const OPS_BLOCK_NAMES = ['ports', 'users', 'dirs', 'units', 'secrets'] as const;
+
+/** 一个区块的对外名字、中文说法，拿一段文档文本核对 / 生成标记之间的内容。 */
+interface OpsBlock {
+  name: string;
+  /** 报问题时的说法，如「端口表」。 */
+  label: string;
+  /** 标记之间该生成什么。 */
+  inner(repo: RepoView): string;
+  /** 拿一段文档文本核对，和各自的 checkXxxBlock 同一套判法。 */
+  checkText(repo: RepoView, doc: string, docPath: string): OpsTableProblem[];
+}
+
+const OPS_BLOCKS: readonly OpsBlock[] = [
+  {
+    name: BLOCK_NAME_PORTS,
+    label: '端口表',
+    inner: portsTableInner,
+    checkText: checkPortsText,
+  },
+  {
+    name: BLOCK_NAME_USERS,
+    label: '用户表',
+    inner: usersTableInner,
+    checkText: checkUsersText,
+  },
+  {
+    name: BLOCK_NAME_DIRS,
+    label: '目录表',
+    inner: dirsTableInner,
+    checkText: checkDirsText,
+  },
+  {
+    name: BLOCK_NAME_UNITS,
+    label: '单元表',
+    inner: unitsTableInner,
+    checkText: checkUnitsText,
+  },
+  {
+    name: BLOCK_NAME_SECRETS,
+    label: '密钥名表',
+    inner: secretsTableInner,
+    checkText: checkSecretsText,
+  },
+];
+
+/** 该读哪些文档文件：不给路径就是 docs/ops.md 加 docs/ops/*.md（按路径排）；给了路径就只有它一个。
+ *  路径是「候选」——不存在的不算；写回时只为存在的候选里的区块找家。 */
+export function opsDocPaths(repo: RepoView, only?: string): string[] {
+  if (only !== undefined) return [only];
+  const inOps = (repo.list('docs/ops') ?? [])
+    .filter((n) => n.endsWith('.md'))
+    .sort()
+    .map((n) => `docs/ops/${n}`);
+  return ['docs/ops.md', ...inOps];
+}
+
+interface OpsDoc {
+  path: string;
+  text: string;
+}
+
+/** 读候选文件里读得到的那些（读不到就当它不在，不报错——「一个文件都不存在」由调用方落成没查成）。 */
+function readOpsDocs(repo: RepoView, only?: string): { paths: string[]; docs: OpsDoc[] } {
+  const paths = opsDocPaths(repo, only);
+  const docs: OpsDoc[] = [];
+  for (const path of paths) {
+    const text = repo.read(path);
+    if (text !== undefined) docs.push({ path, text });
+  }
+  return { paths, docs };
+}
+
+/** 含有该区块标记（开始或结束任一个）的文件。 */
+function docsWithMarkers(docs: OpsDoc[], name: string): OpsDoc[] {
+  const start = blockMarker(name, 'start');
+  const end = blockMarker(name, 'end');
+  return docs.filter((d) => d.text.includes(start) || d.text.includes(end));
+}
+
+interface LocatedOpsBlock {
+  doc?: OpsDoc;
+  problem?: OpsTableProblem;
+}
+
+/** 找一个完整区块的唯一归属；找不到、重复或标记不完整都不能进入核对。 */
+function locateProblem(docs: OpsDoc[], paths: string[], block: OpsBlock): LocatedOpsBlock {
+  const found = docsWithMarkers(docs, block.name);
+  const marker = `${blockMarker(block.name, 'start')} 到 ${blockMarker(block.name, 'end')}`;
+  if (found.length === 0) {
+    return {
+      problem: {
+        notQueried: true,
+        text: `${block.label}区块找不到：${paths.join('、')} 里都没有 ${marker} 这段标记。`,
+      },
+    };
+  }
+  if (found.length > 1) {
+    return {
+      problem: {
+        notQueried: true,
+        text: `${block.label}区块出现了 ${found.length} 次（${found.map((d) => d.path).join('、')}）：${marker} 只许恰好一个文件里有，先删掉多出来的。`,
+      },
+    };
+  }
+  const doc = found[0] as OpsDoc;
+  try {
+    findBlock(doc.text, block.name);
+  } catch (e) {
+    return {
+      problem: {
+        notQueried: true,
+        text: `${block.label}区块没查成（${doc.path}）：${e instanceof Error ? e.message : String(e)}。`,
+      },
+    };
+  }
+  return { doc };
+}
+
+/** --check：五个区块各找恰好一个文件，和 deploy/ 生成的逐字比。
+ *  一致返回空数组；不一致返回点出区块名、变量 / 路径 / 单元 / 键名的问题；
+ *  一个候选文件都读不到、生成不出来，返回「没查成」问题，不当成通过。 */
+export function checkOpsBlocks(repo: RepoView, only?: string): OpsTableProblem[] {
+  const { paths, docs } = readOpsDocs(repo, only);
+  const problems: OpsTableProblem[] = [];
+  for (const block of OPS_BLOCKS) {
+    const located = locateProblem(docs, paths, block);
+    if (located.problem !== undefined) {
+      problems.push(located.problem);
+      continue;
+    }
+    const doc = located.doc as OpsDoc;
+    problems.push(...block.checkText(repo, doc.text, doc.path));
+  }
+  return problems;
+}
+
+export interface OpsWriteResult {
+  /** 内容真的变了的文件（新全文）；标记缺失、生成不出来、哪个区块的家找不到，这里是空的。 */
+  changes: { path: string; text: string }[];
+  /** 出错时的问题；非空就一个字都不写。 */
+  problems: OpsTableProblem[];
+}
+
+/** --write：把五个区块标记之间的内容换成生成的，标记之外一字不动。
+ *  标记缺失、某个区块的家找不到（0 个或不止一个文件）、生成不出来，都在 problems 里，
+ *  changes 是空的——调用方一个字都不许写。 */
+export function writeOpsBlocks(repo: RepoView, only?: string): OpsWriteResult {
+  const { paths, docs } = readOpsDocs(repo, only);
+  const problems: OpsTableProblem[] = [];
+  const locatedBlocks = new Map<string, OpsDoc>();
+  for (const block of OPS_BLOCKS) {
+    const located = locateProblem(docs, paths, block);
+    if (located.problem !== undefined) {
+      problems.push(located.problem);
+    } else {
+      locatedBlocks.set(block.name, located.doc as OpsDoc);
+    }
+  }
+  if (problems.length > 0) return { changes: [], problems };
+
+  // 先把五个区块该生成什么全算出来：有一个算不出来，一个字都不写。
+  const inners = new Map<string, string>();
+  for (const block of OPS_BLOCKS) {
+    try {
+      inners.set(block.name, block.inner(repo));
+    } catch (e) {
+      problems.push({ notQueried: true, text: `没查成：${e instanceof Error ? e.message : String(e)}` });
+    }
+  }
+  const rewritten = new Map<string, string>(docs.map((d) => [d.path, d.text]));
+  for (const block of OPS_BLOCKS) {
+    const inner = inners.get(block.name);
+    if (inner === undefined) continue; // 生成不出来，上面已经记过
+    const doc = locatedBlocks.get(block.name) as OpsDoc;
+    try {
+      rewritten.set(doc.path, replaceBlock(rewritten.get(doc.path) ?? '', block.name, inner));
+    } catch (e) {
+      problems.push({
+        notQueried: true,
+        text: `没查成：${doc.path} 的${block.label}换不了：${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+  }
+  if (problems.length > 0) return { changes: [], problems };
+  const changes = docs
+    .filter((d) => rewritten.get(d.path) !== d.text)
+    .map((d) => ({ path: d.path, text: rewritten.get(d.path) ?? d.text }));
+  return { changes, problems: [] };
 }
