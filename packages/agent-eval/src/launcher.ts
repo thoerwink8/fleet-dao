@@ -82,6 +82,17 @@ export function displayArgs(args: string[]): string[] {
   return out;
 }
 
+/**
+ * 给被测会话的环境：继承当前环境，去掉会把它引回仓里的变量。
+ * 从 Claude 会话里起这个工具时，环境里可能带着 CLAUDE_PROJECT_DIR（指到 fleet-dao 仓根），
+ * 子会话会拿它当项目目录，相对路径、项目设置、CLAUDE.md 都可能解析到仓里去，而不是临时目录。
+ */
+export function sessionEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out = { ...env };
+  for (const k of Object.keys(out)) if (k.toUpperCase() === 'CLAUDE_PROJECT_DIR') delete out[k];
+  return out;
+}
+
 export const realLauncher: Launcher = (req) =>
   new Promise((resolve) => {
     let stdout = '';
@@ -99,6 +110,7 @@ export const realLauncher: Launcher = (req) =>
     try {
       child = spawn(req.command, req.args, {
         cwd: req.cwd,
+        env: sessionEnv(),
         windowsHide: true,
         stdio: ['pipe', 'pipe', 'pipe'],
       });

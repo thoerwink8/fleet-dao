@@ -38,10 +38,15 @@ function cell(rs: CaseResult[]): string {
     const pass = ran.filter((r) => r.status === 'pass').length;
     const avgMs = ran.reduce((s, r) => s + r.durationMs, 0) / ran.length;
     const avgTok = ran.reduce((s, r) => s + (r.inputTokens ?? 0) + (r.outputTokens ?? 0), 0) / ran.length;
-    parts.push(`${pass} / ${ran.length}`, `均 ${fmtSeconds(avgMs)}`, `均 ${fmtTokens(avgTok)} token`);
+    parts.push(
+      `过 ${pass} / 跑 ${ran.length} 遍`,
+      `均 ${fmtSeconds(avgMs)}`,
+      `均 ${fmtTokens(avgTok)} token`,
+    );
   }
   if (notRun > 0) parts.push(`${notRun} 道没跑成`);
   if (mismatch > 0) parts.push(`${mismatch} 道模型对不上`);
+  parts.push(rs.every((r) => r.status === 'pass') ? '全过' : '没全过');
   return parts.join('；');
 }
 
@@ -53,7 +58,9 @@ export function renderReport(
   out.push('# 子代理能力探查报告', '');
   out.push(`开始时间：${meta.startedAt}；模型：${meta.models.join('、')}；共 ${results.length} 条结果。`, '');
   out.push(
-    '格式：过几道 / 共几道（不含没跑成的）；均用时；均 token（输入含缓存，加输出）。没跑成的不算过也不算没过。',
+    '格式：过 x / 跑 y 遍（题数 × 每题跑几遍，不含没跑成的）；均用时；均 token（输入含缓存，加输出）。没跑成的不算过也不算没过。',
+    '',
+    '定档按方案第四节：通过率 ≥ 80% 的最便宜那一档；题少于 3 道时要全过。多跑几遍时「全过」指每一遍都过：有一遍没过、没跑成或模型对不上，这一格就写「没全过」。',
     '',
   );
   out.push(`| 场景 | ${MODEL_KEYS.join(' | ')} |`, `|---|${MODEL_KEYS.map(() => '---').join('|')}|`);
@@ -63,10 +70,10 @@ export function renderReport(
     out.push(`| ${s} | ${row.join(' | ')} |`);
   }
   out.push('');
-  out.push('| 题 | 点名的模型 | 实际模型 | 结果 | 用时 |', '|---|---|---|---|---|');
+  out.push('| 题 | 第几遍 | 点名的模型 | 实际模型 | 结果 | 用时 |', '|---|---|---|---|---|---|');
   for (const r of results) {
     out.push(
-      `| ${r.caseId} | ${r.modelId} | ${r.observedModel ?? '没读到'} | ${markOf(r)} | ${fmtSeconds(r.durationMs)} |`,
+      `| ${r.caseId} | ${r.attempt} | ${r.modelId} | ${r.observedModel ?? '没读到'} | ${markOf(r)} | ${fmtSeconds(r.durationMs)} |`,
     );
   }
   out.push('');
@@ -80,8 +87,10 @@ export function renderReport(
   out.push('', '## 每道题', '');
   for (const r of results) {
     const mark = markOf(r);
-    out.push(`<details><summary>${r.caseId} · ${r.model} · ${mark}</summary>`, '');
+    out.push(`<details><summary>${r.caseId} · ${r.model} · 第 ${r.attempt} 遍 · ${mark}</summary>`, '');
     out.push(`- 子代理：${r.agent}；模型：${r.modelId}`);
+    if (r.streamFile) out.push(`- 原始会话流：${r.streamFile}`);
+    for (const f of r.judgeStreamFiles) out.push(`- 裁判会话流：${f}`);
     out.push(`- 理由：${r.reason.replace(/\n/g, ' ')}`);
     if (r.score !== undefined) out.push(`- 打分：${r.score}`);
     out.push(

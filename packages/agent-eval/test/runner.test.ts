@@ -12,6 +12,7 @@ import {
   type LaunchRequest,
   type LaunchResult,
   realLauncher,
+  sessionEnv,
 } from '../src/launcher.ts';
 import { OUTPUT_LIMIT, runCase } from '../src/runner.ts';
 import { parseStream, StreamFormatError } from '../src/stream.ts';
@@ -88,6 +89,62 @@ function fakeWorkspace(): Workspace {
   tmpDirs.push(dir);
   return { dir, cleanup: () => {} };
 }
+
+describe('会话流落盘', () => {
+  it('被测会话和裁判会话的 stdout 原样写到 streams/，文件名里的 / 换成 __，路径记进结果；没给 outDir 不写', async () => {
+    const outDir = mkdtempSync(join(tmpdir(), 'agent-eval-streams-'));
+    tmpDirs.push(outDir);
+    const mainRaw = `${recorded('答案')}\n`;
+    const judgeRaw = recorded('0.9');
+    let n = 0;
+    const c = demoCase(async (ctx) => {
+      await ctx.judge('打分');
+      return { pass: true, reason: '好' };
+    });
+    const r = await runCase(c, 'haiku', {
+      defs: DEFS,
+      command: 'reclaude',
+      prepare: fakeWorkspace,
+      outDir,
+      attempt: 2,
+      launch: async () => ok(++n === 1 ? mainRaw : judgeRaw),
+    });
+    expect(r).toMatchObject({
+      attempt: 2,
+      streamFile: 'streams/demo__one__haiku__2.jsonl',
+      judgeStreamFiles: ['streams/demo__one__haiku__2__judge1.jsonl'],
+    });
+    expect(readFileSync(join(outDir, 'streams', 'demo__one__haiku__2.jsonl'), 'utf8')).toBe(mainRaw);
+    expect(readFileSync(join(outDir, 'streams', 'demo__one__haiku__2__judge1.jsonl'), 'utf8')).toBe(judgeRaw);
+    const bare = await runCase(
+      demoCase(async () => ({ pass: true, reason: '好' })),
+      'haiku',
+      { defs: DEFS, command: 'reclaude', prepare: fakeWorkspace, launch: async () => ok(mainRaw) },
+    );
+    expect(bare).toMatchObject({ attempt: 1, streamFile: null, judgeStreamFiles: [] });
+  });
+
+  it('没跑成（输出认不出）也把拿到的原文存下来，方便查', async () => {
+    const outDir = mkdtempSync(join(tmpdir(), 'agent-eval-streams-'));
+    tmpDirs.push(outDir);
+    const r = await runCase(
+      demoCase(async () => ({ pass: true, reason: '好' })),
+      'haiku',
+      { defs: DEFS, command: 'reclaude', prepare: fakeWorkspace, outDir, launch: async () => ok('半截') },
+    );
+    expect(r.status).toBe('not-run');
+    expect(r.streamFile).toBe('streams/demo__one__haiku__1.jsonl');
+    expect(readFileSync(join(outDir, r.streamFile as string), 'utf8')).toBe('半截');
+  });
+});
+
+describe('sessionEnv', () => {
+  it('去掉 CLAUDE_PROJECT_DIR（不分大小写），别的原样留', () => {
+    expect(sessionEnv({ CLAUDE_PROJECT_DIR: 'D:/repo', Claude_Project_Dir: 'x', PATH: 'p' })).toEqual({
+      PATH: 'p',
+    });
+  });
+});
 
 describe('parseStream', () => {
   it('读出最终回答、token（输入含缓存）、回合数', () => {

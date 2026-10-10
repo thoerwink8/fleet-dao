@@ -146,12 +146,57 @@ describe('跑完写 results.json 和 report.md；退出码', () => {
     expect(json.skipped.map((s) => s.scenario)).toEqual(['ui-builder', 'ui-verifier']);
     const md = readFileSync(join(out, 'report.md'), 'utf8');
     expect(md).toContain('| 场景 | haiku | sonnet | opus |');
-    expect(md).toMatch(/\| groomer \| 1 \/ 1；均 .* 秒；均 15 token \|/);
-    expect(md).toMatch(/\| log-digest \| 0 \/ 1；/);
-    expect(md).toContain('<details><summary>groomer/four-issues-a · haiku · 过</summary>');
+    expect(md).toMatch(/\| groomer \| 过 1 \/ 跑 1 遍；均 .* 秒；均 15 token；全过 \|/);
+    expect(md).toMatch(/\| log-digest \| 过 0 \/ 跑 1 遍；/);
+    expect(md).toContain('<details><summary>groomer/four-issues-a · haiku · 第 1 遍 · 过</summary>');
     expect(md).toContain('提示词：');
     expect(md).toContain('ui-builder（fleet-ui-builder）：要浏览器，自动探查不做');
     expect(log.at(-1)).toContain('没跑成 0');
+  });
+
+  it('会话流原样存到 streams/<场景>__<题>__<模型>__<第几次>.jsonl，路径记进 results.json', async () => {
+    const out = join(tmp(), 'os');
+    const raw = stream('#101: 做完\n#102: 没做完\n#103: 过期\n#104: 没做完').stdout;
+    await main(['--model', 'haiku', '--case', 'groomer/four-issues-a', '--out', out], {
+      cases,
+      log: () => {},
+      launch: async () => ({ exitCode: 0, stdout: raw, stderr: '', timedOut: false }),
+    });
+    const file = join(out, 'streams', 'groomer__four-issues-a__haiku__1.jsonl');
+    expect(readFileSync(file, 'utf8')).toBe(raw);
+    const json = JSON.parse(readFileSync(join(out, 'results.json'), 'utf8')) as { results: CaseResult[] };
+    expect(json.results[0]).toMatchObject({
+      attempt: 1,
+      streamFile: 'streams/groomer__four-issues-a__haiku__1.jsonl',
+    });
+  });
+
+  it('--repeat 2：每题每模型跑两遍，attempt 1、2，报表写「过 x / 跑 y 遍」；某遍没过「全过」判否', async () => {
+    const out = join(tmp(), 'or');
+    let n = 0;
+    await main(['--model', 'haiku', '--case', 'groomer/four-issues-a', '--repeat', '2', '--out', out], {
+      cases,
+      log: () => {},
+      launch: async () => stream(++n === 1 ? '#101: 做完\n#102: 没做完\n#103: 过期\n#104: 没做完' : '没有'),
+    });
+    expect(n).toBe(2);
+    const json = JSON.parse(readFileSync(join(out, 'results.json'), 'utf8')) as { results: CaseResult[] };
+    expect(json.results.map((r) => [r.attempt, r.status, r.streamFile])).toEqual([
+      [1, 'pass', 'streams/groomer__four-issues-a__haiku__1.jsonl'],
+      [2, 'fail', 'streams/groomer__four-issues-a__haiku__2.jsonl'],
+    ]);
+    expect(existsSync(join(out, 'streams', 'groomer__four-issues-a__haiku__2.jsonl'))).toBe(true);
+    const md = readFileSync(join(out, 'report.md'), 'utf8');
+    expect(md).toMatch(/\| groomer \| 过 1 \/ 跑 2 遍；.*没全过 \|/);
+    expect(md).toContain('| groomer/four-issues-a | 2 |');
+  });
+
+  it('--repeat 要正整数；dry-run 合计带遍数', () => {
+    expect(parseArgs([]).repeat).toBe(1);
+    expect(parseArgs(['--repeat', '3']).repeat).toBe(3);
+    expect(() => parseArgs(['--repeat', '0'])).toThrow(UsageError);
+    expect(() => parseArgs(['--repeat', 'x'])).toThrow(UsageError);
+    expect(sessionCount(cases, ['haiku'], 2).run).toBe(4);
   });
 
   it('有没跑成的是 2，结果里记「没跑成」', async () => {
@@ -229,12 +274,15 @@ describe('renderReport', () => {
       observedModel: 'claude-haiku-5-5',
       initModel: 'claude-haiku-5-5',
       assistantModel: 'claude-haiku-5-5',
+      attempt: 1,
+      streamFile: null,
+      judgeStreamFiles: [],
     };
     const md = renderReport([r], { startedAt: 't', models: ['haiku'] });
     expect(md).toContain('````text\n```ts\nx\n```\n````');
     expect(md).toContain('产出（已截断）');
-    expect(md).toContain('| a | 1 / 1；均 1.5 秒；均 1.5k token | — | — |');
-    expect(md).toContain('| a/b | claude-haiku-5-5 | claude-haiku-5-5 | 过 | 1.5 秒 |');
+    expect(md).toContain('| a | 过 1 / 跑 1 遍；均 1.5 秒；均 1.5k token；全过 | — | — |');
+    expect(md).toContain('| a/b | 1 | claude-haiku-5-5 | claude-haiku-5-5 | 过 | 1.5 秒 |');
   });
 
   it('模型对不上的单列，不算进过几道，读不到的写没读到', () => {
@@ -256,6 +304,9 @@ describe('renderReport', () => {
       judgeUsed: false,
       initModel: null,
       assistantModel: null,
+      attempt: 1,
+      streamFile: null,
+      judgeStreamFiles: [] as string[],
     } as const;
     const mism: CaseResult = {
       ...base,
@@ -274,8 +325,45 @@ describe('renderReport', () => {
     };
     const md = renderReport([mism, unknown], { startedAt: 't', models: ['haiku'] });
     expect(md).toContain('## 模型对不上（不算过也不算没过）');
-    expect(md).toContain('| a | 1 / 1；均 1.0 秒；均 2 token；1 道模型对不上 | — | — |');
-    expect(md).toContain('| a/c | claude-haiku-5-5 | 没读到 | 过 | 1.0 秒 |');
+    expect(md).toContain('| a | 过 1 / 跑 1 遍；均 1.0 秒；均 2 token；1 道模型对不上；没全过 | — | — |');
+    expect(md).toContain('| a/c | 1 | claude-haiku-5-5 | 没读到 | 过 | 1.0 秒 |');
+  });
+
+  it('多遍：场景表写「过 x / 跑 y 遍」，某一遍没过「全过」判否，单题行每遍一行，写明全过的含义', () => {
+    const mk = (attempt: number, pass: boolean): CaseResult => ({
+      caseId: 'a/b',
+      scenario: 'a',
+      agent: 'x',
+      model: 'haiku',
+      modelId: 'claude-haiku-5-5',
+      status: pass ? 'pass' : 'fail',
+      pass,
+      reason: pass ? '好' : '差',
+      durationMs: 1000,
+      inputTokens: 1,
+      outputTokens: 1,
+      maxTurns: null,
+      turnBudget: 40,
+      numTurns: 1,
+      prompt: 'p',
+      output: 'o',
+      outputTruncated: false,
+      judgeUsed: false,
+      observedModel: 'claude-haiku-5-5',
+      initModel: null,
+      assistantModel: null,
+      attempt,
+      streamFile: `streams/a__b__haiku__${attempt}.jsonl`,
+      judgeStreamFiles: [],
+    });
+    const md = renderReport([mk(1, true), mk(2, false)], { startedAt: 't', models: ['haiku'] });
+    expect(md).toContain('| a | 过 1 / 跑 2 遍；均 1.0 秒；均 2 token；没全过 | — | — |');
+    expect(md).toContain('| a/b | 1 | claude-haiku-5-5 | claude-haiku-5-5 | 过 | 1.0 秒 |');
+    expect(md).toContain('| a/b | 2 | claude-haiku-5-5 | claude-haiku-5-5 | 没过 | 1.0 秒 |');
+    expect(md).toContain('多跑几遍时「全过」指每一遍都过');
+    expect(md).toContain('- 原始会话流：streams/a__b__haiku__2.jsonl');
+    const all = renderReport([mk(1, true), mk(2, true)], { startedAt: 't', models: ['haiku'] });
+    expect(all).toContain('过 2 / 跑 2 遍；均 1.0 秒；均 2 token；全过');
   });
 });
 
