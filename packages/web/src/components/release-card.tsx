@@ -1,6 +1,7 @@
 // /france 页的「发版」卡（#1231）：主线最新提交和 CI、法国在用的提交、差几个（最近合进去的 PR）、最近做完的一个任务。
 // 只读展示：每一行各自带「查成了 / 没查成 + 原因」，没查成的行写明原因，不拿空、0 或「已是最新」顶。
 // 发布入口（#1255）：「发布到法国」按钮和弹窗放在「在用版本」那一行（ReleaseEntry，env-facts 的 versionExtra 挂上去），发版卡本身只读。
+// 尺寸 token：每一行 grid-cols-release（标签原来写死 4.5rem、剩余）。
 import { type ReactNode, useState } from 'react';
 import { toast } from 'sonner';
 import { errorText, useFranceRelease } from '../api/client';
@@ -22,6 +23,7 @@ import { Button } from './ui/button';
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="grid grid-cols-release gap-x-3 py-2.5 first:pt-0 last:pb-0">
+      {/* 原标签列 4.5rem，grid-cols-release */}
       <dt className="pt-px text-xs text-muted-foreground">{label}</dt>
       <dd className="min-w-0 text-sm">{children}</dd>
     </div>

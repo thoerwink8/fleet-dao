@@ -1,3 +1,4 @@
+// 尺寸 token：暂停明细 grid-cols-auto-fr（标签原来 auto、剩余 1fr）。
 import { DEFAULT_POOL_HOLD_OWNER, SETTING_SCHEMAS } from '@fleet-dao/shared';
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -170,6 +171,7 @@ export function PoolHoldsPanel() {
           </span>
         </div>
         <dl className="mt-1.5 grid grid-cols-auto-fr gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+          {/* 原标签列 auto、剩余 1fr，grid-cols-auto-fr */}
           <dt>为什么停</dt>
           <dd className="text-foreground">{h.reason}</dd>
           <dt>负责人</dt>

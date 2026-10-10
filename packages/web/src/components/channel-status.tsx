@@ -7,6 +7,7 @@
 //   lib/route-state.ts：这里只画，不再判。只有故障画红；已关、未使用、池暂停不是坏了，不画红。
 // - 渠道名用目录里公开的名字；渠道下的上游模型串不露。
 // - 库读不到写「没查成」，不画空格子冒充没有历史。空格子只在读成了、次数不够 60 时补位。
+// - 尺寸 token：故障说明 grid-cols-auto-fr（标签 auto、剩余）；探针格圆角 rounded-2（原来 2px）。
 
 import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
 import { ChevronRight, LoaderCircle, Search } from 'lucide-react';
@@ -48,7 +49,7 @@ export function FailoverNote({
     <dl
       data-failover
       className={cn(
-        'grid grid-cols-auto-fr gap-x-2 gap-y-0.5 text-caption',
+        'grid grid-cols-auto-fr gap-x-2 gap-y-0.5 text-caption', // 原标签列 auto、剩余 1fr，grid-cols-auto-fr
         compact ? 'mt-2 text-muted-foreground' : 'mb-3 rounded-md border bg-muted/40 px-3 py-2.5 text-sub',
       )}
     >
@@ -280,7 +281,7 @@ export function HistoryStrip({
           <span
             key={slot}
             data-result="empty"
-            className="h-full min-w-0 flex-1 rounded-2 border border-dashed border-foreground/15"
+            className="h-full min-w-0 flex-1 rounded-2 border border-dashed border-foreground/15" // 原圆角 2px，rounded-2
           />
         ))}
         {cells.map((cell) => {
@@ -296,7 +297,7 @@ export function HistoryStrip({
               title={`${formatClock(cell.probedAt)} ${cell.routeId} ${word.label} ${formatProbeMs(cell.durationMs, cell.result)}`}
               onClick={() => onPickCell(channelId, cell.id)}
               className={cn(
-                'h-full min-w-0 flex-1 rounded-2',
+                'h-full min-w-0 flex-1 rounded-2', // 原圆角 2px，rounded-2
                 PROBE_RESULT_BG[cell.result],
                 on && 'ring-2 ring-foreground',
               )}

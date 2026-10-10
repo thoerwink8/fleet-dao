@@ -1,3 +1,4 @@
+// 尺寸 token：状态芯片字号 text-caption（原来 11px）。
 import { type Tone, toneBg, toneIcon, toneSoft, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
 
@@ -7,7 +8,7 @@ export function StatusChip({ tone, label, className }: { tone: Tone; label: stri
   return (
     <span
       className={cn(
-        'inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-1.5 text-caption font-medium leading-none whitespace-nowrap',
+        'inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-1.5 text-caption font-medium leading-none whitespace-nowrap', // 原 11px，text-caption
         toneSoft[tone],
         toneText[tone],
         className,

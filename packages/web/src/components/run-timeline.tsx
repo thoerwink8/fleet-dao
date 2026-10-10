@@ -7,6 +7,8 @@ import { cn } from '../lib/utils';
 import { RouteLabel } from './route-label';
 import { UsageParts } from './usage';
 
+// 尺寸 token：时间刻度和阶段角标 text-micro（10px）；md 起左内边距 pl-timeline-label（172px）、列 grid-cols-timeline（左 160px、剩余）；时长行 text-caption（11px）。
+
 function runTone(run: Run): Tone {
   if (!run.endedAt) return run.startedAt ? 'run' : 'wait';
   switch (run.outcome) {
@@ -59,6 +61,7 @@ export function RunTimeline({
   return (
     <div>
       <div className="mb-1 flex justify-between text-micro text-muted-foreground md:pl-timeline-label">
+        {/* 原 10px，text-micro；左内边距原 172px，pl-timeline-label */}
         <span className="num">{formatClock(new Date(start).toISOString())}</span>
         <span className="num">{live ? '现在' : formatClock(new Date(end).toISOString())}</span>
       </div>
@@ -72,12 +75,13 @@ export function RunTimeline({
           const usage = r.endedAt ? runUsage(r) : undefined;
           return (
             <li key={r.id} className="grid gap-x-3 gap-y-1 md:grid-cols-timeline">
+              {/* 原左列 160px，grid-cols-timeline */}
               <div className="min-w-0 text-xs">
                 <div className="flex items-center gap-1.5">
                   <span className="text-muted-foreground">{stageLabel[r.stage]}</span>
                   <span
                     className={cn(
-                      'rounded px-1 text-micro',
+                      'rounded px-1 text-micro', // 原 10px，text-micro
                       running ? 'bg-st-run/15 text-ink-run' : 'bg-muted text-muted-foreground',
                     )}
                   >
@@ -107,6 +111,7 @@ export function RunTimeline({
                   ) : null}
                 </div>
                 <div className="mt-1 flex flex-wrap gap-x-3 text-caption text-muted-foreground">
+                  {/* 原 11px，text-caption */}
                   {usage?.missingTime ? (
                     <span className="text-ink-stall">时刻认不出，时长没读到</span>
                   ) : (
