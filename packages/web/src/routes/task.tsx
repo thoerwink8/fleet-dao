@@ -4,7 +4,8 @@
 // 老流程的单照旧是会话时间线加「时间与用量」。读不到的写「没读到」和原因，不写 0。
 
 import { ArrowLeft, ListChecks, SearchX } from 'lucide-react';
-import { Link, useParams, useSearchParams } from 'react-router';
+import { useRef } from 'react';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { isNotFound, useRouting, useTaskDetail } from '../api/client';
 import type { TaskDetail } from '../api/types';
@@ -12,6 +13,7 @@ import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RefreshBar } from '../components/refresh-bar';
 import { RepoLink } from '../components/repo-link';
 import { RunTimeline } from '../components/run-timeline';
+import { RunTranscriptDrawer } from '../components/run-transcript';
 import { SegmentBreakdown, SegmentRunList, SegmentStats } from '../components/segment-usage';
 import { StatusChip } from '../components/status';
 import { ActionButtons } from '../components/task-actions';
@@ -20,7 +22,7 @@ import { Button } from '../components/ui/button';
 import { UsagePanel } from '../components/usage';
 import { formatAgo, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
-import { liveMs, segmentLabel } from '../lib/segments';
+import { liveMs, runNth, segmentLabel } from '../lib/segments';
 import { useShownError } from '../lib/shown-error';
 import { isTaskFinished, taskStateLabel, taskTone } from '../lib/status';
 import { backToList, FROM_PARAM } from '../lib/task-list';
@@ -161,6 +163,59 @@ function NowBanner({ d, now }: { d: TaskDetail; now: number }) {
   );
 }
 
+/** 网址里开着哪一笔的会话抽屉。 */
+export const RUN_PARAM = 'run';
+
+/**
+ * 「每一笔」加右侧的会话抽屉（#1802）：点「看会话」把 ?run=<笔号> 推进网址（保留别的参数），抽屉开；网址可分享，
+ * 浏览器后退就关。直接打开带 ?run= 的链接，关的时候不后退（后退会离开本页），只把参数去掉。网址里的笔号对不上这张单的任何一笔就不开。
+ */
+function RunsWithDrawer({ d, now }: { d: TaskDetail; now: number }) {
+  const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
+  const pushed = useRef(false);
+  const runId = params.get(RUN_PARAM);
+  const active = runId ? d.segmentRuns.find((r) => r.id === runId) : undefined;
+  const open = (id: string) => {
+    pushed.current = true;
+    setParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set(RUN_PARAM, id);
+      return next;
+    });
+  };
+  const close = () => {
+    if (pushed.current) {
+      pushed.current = false;
+      void navigate(-1);
+      return;
+    }
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete(RUN_PARAM);
+        return next;
+      },
+      { replace: true },
+    );
+  };
+  return (
+    <>
+      <SegmentRunList d={d} now={now} onViewTranscript={open} />
+      {active ? (
+        <RunTranscriptDrawer
+          key={active.id}
+          taskId={d.task.id}
+          run={active}
+          nth={runNth(d.segmentRuns, active.id) ?? 1}
+          now={now}
+          onClose={close}
+        />
+      ) : null}
+    </>
+  );
+}
+
 function Body({ d, now }: { d: TaskDetail; now: number }) {
   if (!d.segmentRuns.length && !d.runs.length) {
     return (
@@ -193,7 +248,7 @@ function Body({ d, now }: { d: TaskDetail; now: number }) {
       <Pins d={d} now={now} />
       <div className="mt-4 space-y-4">
         <SegmentBreakdown d={d} now={now} />
-        <SegmentRunList d={d} now={now} />
+        <RunsWithDrawer d={d} now={now} />
       </div>
       {d.runs.length ? <SessionPart d={d} now={now} mixed /> : null}
     </>

@@ -10,7 +10,7 @@
 // - 长列表（超过 50 行）只画窗口里的行；拖到容器上下沿时容器自己滚（lib/list-window.ts）。窗口化的行是定高的，行高由调用方给定。
 
 import { founderOnlyFor } from '@fleet-dao/shared';
-import { ArrowDownToLine, ArrowUpToLine, ChevronDown, ChevronUp, GripVertical } from 'lucide-react';
+import { ArrowDownToLine, ArrowUpToLine, ChevronDown, ChevronUp, Ellipsis, GripVertical } from 'lucide-react';
 import {
   createContext,
   type DragEvent,
@@ -55,6 +55,13 @@ import {
 } from './ui/alert-dialog';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from './ui/dropdown-menu';
 import { Switch } from './ui/switch';
 
 interface Ask {
@@ -277,6 +284,108 @@ export const SWITCH_TAP = 'relative after:absolute after:-inset-x-1.5 after:-ins
 export interface RowControls {
   grip: ReactNode;
   pins: ReactNode;
+  /** 手机上把这一行的上移、下移、置顶、置底收进「⋯」菜单时用（RowMenu）；宽屏仍用 grip、pins。 */
+  moves: RowMoves;
+}
+
+/** 一行能做的挪动：菜单项照它画、点了走和置顶 / 置底按钮同一条保存路径。 */
+export interface RowMoves {
+  /** 这一行的名字（带「里的先后」），菜单按钮的无障碍名字用。 */
+  label: string;
+  /** 不能挪的原因（远程环境）；null = 能挪。 */
+  why: string | null;
+  /** 正在保存、别的写还在进行：先后暂时点不动。 */
+  off: boolean;
+  atTop: boolean;
+  atBottom: boolean;
+  move: (to: 'up' | 'down' | 'top' | 'bottom') => void;
+}
+
+/** 菜单里除了挪动之外的一项（开关、移出）。 */
+export interface RowMenuAction {
+  key: string;
+  label: string;
+  onSelect: () => void;
+  disabled?: boolean;
+  /** 置灰时的原因，悬停可见。 */
+  title?: string | undefined;
+  destructive?: boolean;
+}
+
+/** 不到 lg（1024）：一行放不下开关加四个挪动按钮，操作改收进「⋯」菜单（RowMenu）。 */
+export const COMPACT_MQ = '(max-width: 1023px)';
+
+/** 手机上菜单项的高度（Tailwind 的 10 = 40px）：和按钮一样要点得准。 */
+const MENU_ITEM = 'min-h-10 px-3';
+
+/**
+ * 手机上一行的操作都收进行尾一个「⋯」菜单（#1806）：开关、上移、下移、置顶、置底，以及调用方给的别的项（移出）。
+ * 一行里不再并排五六个小按钮。置灰的项悬停写原因：到头了、远程环境、正在保存。
+ */
+export function RowMenu({
+  moves,
+  leading = [],
+  trailing = [],
+}: {
+  moves: RowMoves;
+  leading?: readonly RowMenuAction[];
+  trailing?: readonly RowMenuAction[];
+}) {
+  const reason = (edge: string | null) => moves.why ?? (moves.off ? '正在保存，稍等' : edge) ?? undefined;
+  const moveItems: { key: 'up' | 'down' | 'top' | 'bottom'; label: string; edge: string | null }[] = [
+    { key: 'up', label: '上移一位', edge: moves.atTop ? '已经在最前' : null },
+    { key: 'down', label: '下移一位', edge: moves.atBottom ? '已经在最后' : null },
+    { key: 'top', label: '置顶', edge: moves.atTop ? '已经在最前' : null },
+    { key: 'bottom', label: '置底', edge: moves.atBottom ? '已经在最后' : null },
+  ];
+  const action = (a: RowMenuAction) => (
+    <DropdownMenuItem
+      key={a.key}
+      className={MENU_ITEM}
+      disabled={a.disabled ?? false}
+      title={a.title}
+      variant={a.destructive ? 'destructive' : 'default'}
+      onSelect={a.onSelect}
+    >
+      {a.label}
+    </DropdownMenuItem>
+  );
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          className="min-h-10 min-w-10 shrink-0"
+          aria-label={`更多操作：${moves.label}`}
+          title="开关、上移、下移、置顶、置底、移出"
+        >
+          <Ellipsis aria-hidden />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-44">
+        {leading.map(action)}
+        {leading.length > 0 ? <DropdownMenuSeparator /> : null}
+        {moveItems.map((m) => {
+          const why = reason(m.edge);
+          return (
+            <DropdownMenuItem
+              key={m.key}
+              className={MENU_ITEM}
+              disabled={why !== undefined}
+              title={why}
+              onSelect={() => moves.move(m.key)}
+            >
+              {m.label}
+            </DropdownMenuItem>
+          );
+        })}
+        {trailing.length > 0 ? <DropdownMenuSeparator /> : null}
+        {trailing.map(action)}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 }
 
 /**
@@ -489,6 +598,18 @@ export function SortableList<T>({
     const atBottom = at === shownIds.length - 1;
     const pinClass = 'shrink-0 aria-disabled:pointer-events-none aria-disabled:opacity-40';
     return {
+      moves: {
+        label,
+        why: disabledWhy,
+        off: saving || busy,
+        atTop,
+        atBottom,
+        move: (to) => {
+          if (to === 'up') step(-1);
+          else if (to === 'down') step(1);
+          else pin(to);
+        },
+      },
       grip: (
         <Button
           type="button"

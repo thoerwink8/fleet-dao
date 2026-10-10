@@ -81,6 +81,14 @@ export function liveMs(run: SegmentRunView, now: number): number | undefined {
   return Math.max(0, now - Date.parse(run.startedAt));
 }
 
+/** 这一笔是它那一段的第几次（按起跑先后，runs 已经是这个顺序）；找不到这一笔返回 undefined。 */
+export function runNth(runs: readonly SegmentRunView[], id: string): number | undefined {
+  const i = runs.findIndex((r) => r.id === id);
+  const run = runs[i];
+  if (!run) return undefined;
+  return runs.slice(0, i + 1).filter((r) => r.segment === run.segment).length;
+}
+
 /** 这一段用过的派工档怎么说：动手段全没记写「没记」，记了一部分写明几次没记；对题、验收写不分档 / 冷调用。 */
 export function tierText(
   segment: SegmentKind | null,

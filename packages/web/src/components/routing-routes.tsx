@@ -11,6 +11,7 @@ import { Link } from 'react-router';
 import { usePoolHolds, useRouting } from '../api/client';
 import type { LivenessFact, RoutingLayerModel, RoutingLayerRoute } from '../api/types';
 import { formatAgo, formatIn } from '../lib/format';
+import { useMediaQuery } from '../lib/hooks';
 import { poolIsHeld } from '../lib/pool-holds';
 import { routeKind } from '../lib/route-kinds';
 import { probeStale, routeHost, routeSlots, routeTitle } from '../lib/routing';
@@ -19,7 +20,14 @@ import { actualRanks, routeSlotState, type SlotState, slotWord, summarizeOrder }
 import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
 import { PoolProblemLine, usePoolProblems } from './pool-problem';
-import { RouteSwitch, SortableList, useRoutingEdit } from './routing-edit';
+import {
+  COMPACT_MQ,
+  RouteSwitch,
+  type RowControls,
+  RowMenu,
+  SortableList,
+  useRoutingEdit,
+} from './routing-edit';
 import { PoolHoldControl } from './routing-hold';
 import { KindChip, useKindEnv } from './routing-kinds';
 import { StatusDot } from './status';
@@ -147,6 +155,7 @@ export function ModelRoutes({
                 {controls.grip}
               </span>
             }
+            rowControls={controls}
             now={now}
             firstLive={r.routeId === firstLiveRoute}
             {...(slotOf.has(r.routeId) ? { slot: slotOf.get(r.routeId) } : {})}
@@ -194,6 +203,7 @@ export function RouteItem({
   modelName,
   modelLabel,
   controls,
+  rowControls,
   now,
   firstLive: isFirst,
   slot,
@@ -207,12 +217,16 @@ export function RouteItem({
   modelLabel?: string;
   /** 置顶 / 置底 / 拖动；不给就没有（渠道页里不调先后）。 */
   controls?: ReactNode;
+  /** 手机上把开关和先后收进「⋯」菜单用；给了 controls 的调用方一起给。 */
+  rowControls?: RowControls;
   now: number;
   firstLive?: boolean;
   /** 在顺序里的实际顺位和是否被跳过（lib/routing-order.ts）；不给就不写（渠道页里的路由不分先后）。 */
   slot?: { state: SlotState; rank: number | null } | undefined;
 }) {
   const [open, setOpen] = useState(false);
+  // 不到 lg 且这一行能调先后（模型下的路由）：操作收进「⋯」菜单。渠道页里的路由只有一个开关，不收。
+  const menuMode = useMediaQuery(COMPACT_MQ) && rowControls !== undefined;
   const stale = probeStale(r, now);
   const backoff = probeBackoffNotice(r.probeDetail ?? r.connect.reason);
   const slots = routeSlots(r);
@@ -261,7 +275,7 @@ export function RouteItem({
             <span className="text-caption text-muted-foreground" title="渠道关了，这里不能单独开">
               渠道已关
             </span>
-          ) : (
+          ) : menuMode ? null : (
             <RouteSwitch
               label={name}
               enabled={r.enabled}
@@ -277,7 +291,34 @@ export function RouteItem({
               }
             />
           )}
-          {controls}
+          {menuMode && rowControls ? (
+            // 手机：开关和上移、下移、置顶、置底收进「⋯」菜单（#1806），一行不再挤一排小按钮
+            <RowMenu
+              moves={rowControls.moves}
+              leading={
+                channelOff
+                  ? []
+                  : [
+                      {
+                        key: 'toggle',
+                        label: r.enabled ? '关闭这条路由' : '开启这条路由',
+                        disabled: (edit.disabledWhy ?? lockWhy) !== null,
+                        title: edit.disabledWhy ?? lockWhy ?? undefined,
+                        onSelect: () =>
+                          edit.toggleRoute({
+                            modelId,
+                            modelName,
+                            routeId: r.routeId,
+                            routeName: name,
+                            enabled: r.enabled,
+                          }),
+                      },
+                    ]
+              }
+            />
+          ) : (
+            controls
+          )}
           <button
             type="button"
             aria-expanded={open}

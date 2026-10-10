@@ -41,7 +41,7 @@ const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
   { file: 'components/job-row.tsx', snippet: 'text-caption text-muted-foreground' },
   { file: 'components/job-row.tsx', snippet: 'num text-caption text-faint' },
   { file: 'components/job-row.tsx', snippet: 'text-caption text-ink-stall' },
-  { file: 'routes/routing-status.tsx', snippet: 'xl:max-h-routing-pane' },
+  { file: 'routes/routing-status.tsx', snippet: 'lg:max-h-routing-pane' },
   { file: 'routes/routing-status.tsx', snippet: 'text-caption font-medium leading-5 text-ink-run' },
   { file: 'components/probe-log.tsx', snippet: 'size-2 shrink-0 rounded-2' },
   { file: 'routes/changelog.tsx', snippet: 'grid grid-cols-changelog items-baseline' },
