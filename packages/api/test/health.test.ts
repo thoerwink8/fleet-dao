@@ -64,6 +64,7 @@ describe('健康检查', () => {
       sessionOrg: async () => {},
       githubApp: async () => {},
       canary: { check: async () => {} },
+      engineMaster: { check: async () => {} },
       watchdog: { check: async () => {} },
       nodeReport: { check: async () => {} },
       ...extra,
@@ -198,6 +199,7 @@ describe('健康检查', () => {
       sessionOrg: async () => {},
       githubApp: async () => {},
       canary: { check: async () => {} },
+      engineMaster: { check: async () => {} },
       watchdog: { check: async () => {} },
       nodeReport: { check: async () => {} },
     }).map((c) => c.name);

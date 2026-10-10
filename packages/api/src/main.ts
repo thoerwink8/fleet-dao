@@ -34,6 +34,7 @@ import { ConfigError, engineEnabled, loadConfig } from './config.ts';
 import { probeDb } from './db-probe.ts';
 import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
+import { ENGINE_MASTER_NOT_HERE, engineMasterHealthCheck } from './engine-master-health.ts';
 import { readEngineMaster } from './engine-switch.ts';
 import { recordExternalWatchRound } from './external-watch.ts';
 import { createFeishuAuth } from './feishu.ts';
@@ -279,6 +280,10 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       canary: production
         ? { check: canaryHealthCheck(db, () => readEngineMaster(store), now) }
         : { check: async () => {}, notWired: CANARY_NOT_HERE },
+      // 引擎总开关（#1732）：关着且不在发版宽限就红；只在正式环境接
+      engineMaster: production
+        ? { check: engineMasterHealthCheck(() => readEngineMaster(store), now) }
+        : { check: async () => {}, notWired: ENGINE_MASTER_NOT_HERE },
       // 看门狗（#203）：引擎每 5 分钟跑一轮、记在登记表上；只在正式环境接
       watchdog: production
         ? { check: watchdogHealthCheck(db, now) }

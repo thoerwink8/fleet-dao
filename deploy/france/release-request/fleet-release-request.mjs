@@ -3,7 +3,7 @@
 // deploy/france.sh（人工档，deploy/lib/human-tier.sh）把本目录装到 /usr/local/lib/fleet-dao/release-request/，别在机器上手改。
 // 手动看一趟：journalctl -u fleet-release-request -n 100；进度在 /srv/fleet-dao-releases/.train/release-train.json。
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import {
@@ -94,6 +94,7 @@ export const realIo = {
   clearMarker() {
     rmSync(MARKER_FILE, { force: true });
   },
+  markerPresent: () => existsSync(MARKER_FILE),
   async releaseBusy() {
     const r = run('flock', ['-n', `${RELEASES}/.lock`, 'true'], { timeoutMs: 10_000 });
     if (r.status === 0) return false;

@@ -87,10 +87,13 @@ function fakeIo(over = {}, opts = {}) {
     writeLast: (o) => log.lasts.push(o),
     writeMarker: () => {
       log.markers += 1;
+      log.markerPresent = true;
     },
     clearMarker: () => {
       log.cleared += 1;
+      log.markerPresent = false;
     },
+    markerPresent: () => Boolean(log.markerPresent),
     releaseBusy: async () => false,
     mainline: async () => ({ ok: true, onMain: true, at: '2026-10-07T11:00:00Z' }),
     ciRuns: async () => ({ status: 200, body: ciBody() }),
@@ -529,6 +532,15 @@ test('【故意造出的失败】上一回是做完了的（done）、这一回�
   setMaster('off');
   assert.equal(await runRequest(io), EXIT.done);
   assert.equal(engineOns(log).length, 0);
+});
+
+test('总开关已关但暂停标记还在（#1732）：按发版前开着记，发完开回，不当成本来就关着', async () => {
+  const { io, log, setMaster } = fakeIo();
+  setMaster('off');
+  log.markerPresent = true;
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(log.states.find((s) => s.before)?.before.master, true);
+  assert.equal(engineOns(log).length, 1);
 });
 
 // —— 读请求文件（真文件系统）——

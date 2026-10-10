@@ -17,6 +17,7 @@ import { FLEET_CHANGES_CHANNEL, IntentRoutes } from '@fleet-dao/shared';
 import { DEPLOY_LAG_NOT_HERE, silentLogger } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { CANARY_NOT_HERE, canaryHealthCheck } from '../src/canary-health.ts';
+import { engineMasterHealthCheck } from '../src/engine-master-health.ts';
 import { startPgChangeFeed } from '../src/changes.ts';
 import { probeDb } from '../src/db-probe.ts';
 import { deployLagCheck } from '../src/deploy-lag-check.ts';
@@ -203,6 +204,14 @@ async function publicFailures(log: Logger) {
     await run('canary', true, async () => {
       await canaryHealthCheck(judgeDb.db, async () => ({ on: true }))();
     });
+    // 引擎总开关（#1732）：关着且不在发版宽限；engine-master-health.test.ts 覆盖说法
+    await run('engine-master', true, async () => {
+      await engineMasterHealthCheck(
+        async () => ({ on: false, why: 'set' }),
+        () => new Date('2026-10-10T08:00:00.000Z'),
+        { existsSync: () => false },
+      )();
+    });
     // 看门狗：只有一处 new PublicHealthError（说法有几种），这里造一种（还没登记）；每一种说法都在 watchdog-health.test.ts 用同一份名单扫
     await run('watchdog', true, async () => {
       await watchdogHealthCheck(judgeDb.db)();
@@ -316,6 +325,7 @@ describe('公开的健康报告', () => {
           sessionOrg: async () => {},
           githubApp: async () => {},
           canary: { check: async () => {}, notWired: CANARY_NOT_HERE },
+          engineMaster: { check: async () => {}, notWired: '只在正式环境查' },
           watchdog: { check: async () => {}, notWired: WATCHDOG_NOT_HERE },
           nodeReport: nodeReportPart(null),
         }),

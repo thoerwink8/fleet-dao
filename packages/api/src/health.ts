@@ -117,6 +117,12 @@ export function serviceHealthChecks(parts: {
   /** 全流程巡检（canary-health.ts，#223）：最近一轮的结论和时间；不在正式环境报「未接」。 */
   // biome-ignore lint/suspicious/noConfusingVoidType: 同上，没说明的检查是 async () => {}
   canary: { check(): Promise<void | string>; readonly notWired?: string };
+  /**
+   * 引擎总开关（engine-master-health.ts，#1732）：关着且不在发版宽限里就红，避免 healthz 全绿掩盖派单停着。
+   * 不在正式环境报「未接」。
+   */
+  // biome-ignore lint/suspicious/noConfusingVoidType: 同上，没说明的检查是 async () => {}
+  engineMaster: { check(): Promise<void | string>; readonly notWired?: string };
   /** 看门狗（watchdog-health.ts，#203）：它自己最近一轮几点跑完、有没有过期；不在正式环境报「未接」。 */
   // biome-ignore lint/suspicious/noConfusingVoidType: 同上，没说明的检查是 async () => {}
   watchdog: { check(): Promise<void | string>; readonly notWired?: string };
@@ -148,6 +154,12 @@ export function serviceHealthChecks(parts: {
     { name: 'github_app', check: parts.githubApp },
     // 巡检断了、没跑成会跟着巡检的结论自己变红（和这一版好不好无关）：发版脚本同样只标待处理、不退回
     { name: 'canary', check: () => parts.canary.check(), ...notWired(parts.canary.notWired) },
+    // 总开关关着（且不在发版宽限）派单停着：自己变红（#1732）；发版暂停中 / 刚发完宽限内报跳过不红
+    {
+      name: 'engine_master',
+      check: () => parts.engineMaster.check(),
+      ...notWired(parts.engineMaster.notWired),
+    },
     // 看门狗停了、没跑成会跟着引擎自己变红（和这一版好不好无关）：发版脚本同样只标待处理、不退回
     { name: 'watchdog', check: () => parts.watchdog.check(), ...notWired(parts.watchdog.notWired) },
     // 推不成跟着网络、对方自己变红（和这一版好不好无关）：要接上别的环境之前，发版脚本的 DRIFTING_HEALTH_ITEMS 要加上它

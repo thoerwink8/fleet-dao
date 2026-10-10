@@ -278,9 +278,16 @@ async function phasePauseFrance(io, state) {
     return { ok: true };
   }
   if (!now.on) {
-    state.before = { master: false, repos: null, recordedAt: iso(io) };
+    // 暂停标记还在：上一趟发版关的、没清掉（#1732），按发版前开着记，发完开回
+    const markerLeft = typeof io.markerPresent === 'function' ? io.markerPresent() : false;
+    state.before = { master: markerLeft, repos: null, recordedAt: iso(io) };
     io.writeState(state);
-    say(io, '暂停法国：跳过（引擎总开关本来就关着，没什么要暂停的）');
+    say(
+      io,
+      markerLeft
+        ? '暂停法国：总开关已经是关的（暂停标记还在，按发版前开着记，发完会开回）'
+        : '暂停法国：跳过（引擎总开关本来就关着，没什么要暂停的）',
+    );
     return { ok: true };
   }
   state.before = { master: true, repos: null, recordedAt: iso(io) };
@@ -464,7 +471,8 @@ export async function runRequest(io) {
   if (why !== null) return refuse(io, req, why);
 
   const state = newState(io, req);
-  // 上一回停在「卡住」「没成」、发版前总开关是开着的：带过来（见 phasePauseFrance）；做完的、撤销的不带，这一回重新读
+  // 上一回停在「卡住」「没成」、发版前总开关是开着的：带过来（见 phasePauseFrance）；做完的、撤销的不带，这一回重新读。
+  // 做完后仍关着的，由看门狗按操作记录自动开回（#1732），不在这里把「做完了又有意关」误当成要开回。
   const prevRead = io.readState();
   const prev = prevRead.ok ? prevRead.state : null;
   if ((prev?.status === 'blocked' || prev?.status === 'failed') && prev.before?.master === true) {

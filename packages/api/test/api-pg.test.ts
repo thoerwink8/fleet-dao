@@ -167,6 +167,8 @@ describe('接口跑在真库上', () => {
         githubApp: githubAppHealthCheck(t.db),
         // 和 main.ts 在非正式环境的装配一样：全流程巡检只在正式环境跑
         canary: { check: async () => {}, notWired: CANARY_NOT_HERE },
+        // 和 main.ts 在非正式环境的装配一样：总开关健康项只在正式环境查
+        engineMaster: { check: async () => {}, notWired: '只在正式环境查' },
         // 和 main.ts 在非正式环境的装配一样：看门狗只在正式环境跑
         watchdog: { check: async () => {}, notWired: WATCHDOG_NOT_HERE },
         // 和 main.ts 没配推送地址时的装配一样
@@ -197,6 +199,7 @@ describe('接口跑在真库上', () => {
         session_org: { ok: true },
         github_app: { ok: true },
         canary: { ok: true, status: 'not_wired', message: CANARY_NOT_HERE },
+        engine_master: { ok: true, status: 'not_wired', message: '只在正式环境查' },
         watchdog: { ok: true, status: 'not_wired', message: WATCHDOG_NOT_HERE },
         node_report: { ok: true, status: 'not_wired', message: NODE_REPORT_NOT_WIRED },
         external_watchdog: { ok: true, status: 'not_wired', message: EXTERNAL_WATCH_NOT_WIRED },

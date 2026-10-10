@@ -8,14 +8,18 @@
 import {
   alertByKey,
   type Db,
+  enableEngineMasterStuck,
   finishScheduleRun,
   latestAlertByPrefix,
+  latestEngineMasterAudit,
   openAlertsByPrefix,
+  readEngineMasterRow,
   resolveAlertWithReason,
   scheduleHealth,
   startScheduleRun,
   upsertAlert,
 } from '@fleet-dao/db';
+import { franceReleaseInFlight, tryRestoreStuckEngineMaster } from '../jobs/engine-master-restore.ts';
 import { RETIRED_SCHEDULE_IDS } from '../jobs/retired-schedules.ts';
 import { WATCHDOG_ACTOR, type WatchdogDeps } from '../jobs/watchdog.ts';
 
@@ -60,5 +64,15 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
     },
     now,
     log,
+    // 发版暂停后总开关一直关着：过了宽限自动开回（#1732）。失败只记日志，不挡看门狗本职。
+    beforeRound: () =>
+      tryRestoreStuckEngineMaster({
+        readMasterRow: () => readEngineMasterRow(w.db),
+        latestAudit: () => latestEngineMasterAudit(w.db),
+        enable: (input) => enableEngineMasterStuck(w.db, input),
+        releaseInFlight: () => franceReleaseInFlight(),
+        now,
+        log,
+      }),
   });
 }

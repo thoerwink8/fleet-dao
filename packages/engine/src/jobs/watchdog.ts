@@ -69,6 +69,11 @@ export interface WatchdogDeps {
   runs: ScheduleRunLog;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
+  /**
+   * 本职开始前顺手做的事（#1732：发版卡住的总开关自动开回）。抛错由 runWatchdogJob 吞掉记日志，不挡看门狗。
+   * 测试不给就跳过。
+   */
+  beforeRound?: () => Promise<void>;
 }
 
 /** 这一轮没跑成：结局已经记进 schedule_runs，活动照样报失败，Temporal 里也看得见。 */
@@ -325,6 +330,13 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
  * 没跑成（读不到登记表、推撤提醒没写进去）：记成 failed 再抛 WatchdogFailedError。记结局失败：原样抛出。
  */
 export async function runWatchdogJob(deps: WatchdogDeps): Promise<WatchdogRun> {
+  if (deps.beforeRound) {
+    try {
+      await deps.beforeRound();
+    } catch (err) {
+      deps.log('error', '看门狗：本职前的顺手活没做成', { error: errMessage(err) });
+    }
+  }
   const runId = await deps.runs.start(WATCHDOG_JOB.id, deps.now());
   let result: ScheduleResult;
   try {
