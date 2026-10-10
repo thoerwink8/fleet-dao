@@ -590,7 +590,7 @@ describe('推被拒（DIVERGED / REMOTE_AHEAD）：先认领远端新头，判�
     expect(calls.pushBranch).toHaveLength(1);
   });
 
-  it('【不要空包】REMOTE_AHEAD、远端头等于 incoming：不抛 GIT_FAILED，不对这个头打包', async () => {
+  it('【不要空包】REMOTE_AHEAD、远端头等于 incoming、本地还有新提交：不打空包，按先后判断重推本地头', async () => {
     let remoteHead = '';
     let pushes = 0;
     const { ports, trees, calls } = setup({
@@ -615,14 +615,17 @@ describe('推被拒（DIVERGED / REMOTE_AHEAD）：先认领远端新头，判�
       ctx,
     );
     expect(remoteHead).toBe(incoming);
-    // 不要空包。返回的头是远端头。去掉「已在树里就不向镜像要包」，这里因空包抛 GIT_FAILED 变红
-    expect(r.head).toBe(remoteHead);
+    // 不要空包。远端仍是 incoming、本地有新提交：原来的 isAncestor 判本地更新，重推这个头。
+    // 在 isAncestor 前直接认领远端头，这里变红；去掉「已在树里就不向镜像要包」，空包抛 GIT_FAILED，也变红。
+    expect(r.head).toBe(localHead);
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(localHead);
     const tips = (calls.bundleCommits ?? []).flatMap((input) => {
       const listed = (input as { tips?: unknown }).tips;
       return Array.isArray(listed) ? listed : [];
     });
     expect(tips).not.toContain(remoteHead);
-    expect(calls.pushBranch).toHaveLength(1);
+    expect(JSON.stringify(calls.bundleCommits ?? [])).not.toContain('Refusing to create empty bundle');
+    expect(calls.pushBranch).toHaveLength(2);
   });
 
   it('远端头已经在树里、比本地新：不打包，直接快进，返回的头是远端头', async () => {

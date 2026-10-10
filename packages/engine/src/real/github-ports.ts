@@ -383,8 +383,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
             { retryable: false, details: { remoteHead: freshHead, incoming, head } },
           );
         }
-        // 远端头就是起会话前的头：树里已经有它，没有更新的远端提交可快进。认领结果就是这个远端头，不再重推。
-        if (freshHead === incoming) return { head: freshHead, needsPush: false };
+        // freshHead === incoming 也走这几条：本地可能还有没推的提交，不能把远端头当成已经交付。
         if (await isAncestor(t, freshHead, head)) return { head, needsPush: true };
         if (await isAncestor(t, head, freshHead)) {
           const ff = bundled
