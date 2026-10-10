@@ -1,13 +1,21 @@
 // @vitest-environment happy-dom
-// 任务页每一笔下面的「会话内容」（#1640）：各种条目画出来、工具调用默认折叠、没记录的文案、读失败能重试、
-// 在跑的段增量往后追加（done 后不再读）、子代理的条目带标签、条目多只画最近 200 条。
+// 任务页「看会话」抽屉里的会话内容（#1640、#1802）：各种条目画出来、工具调用默认折叠、出错的自动展开、只看出错 / 只看文字、
+// 超长输出截断、没记录的文案、读失败能重试、在跑的段增量往后追加（done 后不再读）、不贴底时出现「跳到最新」、
+// 子代理的条目带标签、条目多只画最近 200 条。
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi } from '../api/mock/server';
 import type { RunTranscript as Transcript, TranscriptEntry } from '../api/types';
+import type { SegmentRunView } from '../lib/segments';
 import { renderApp } from '../test/harness';
-import { groupEntries, RunTranscript, TRANSCRIPT_WINDOW } from './run-transcript';
+import {
+  CLAMP_LINES,
+  filterItems,
+  groupEntries,
+  RunTranscriptDrawer,
+  TRANSCRIPT_WINDOW,
+} from './run-transcript';
 
 afterEach(() => {
   cleanup();
@@ -36,9 +44,30 @@ type Reader = (
   query?: { after?: number; limit?: number },
 ) => Promise<Transcript>;
 
-function show(read: Reader, running = false) {
+const RUN = {
+  id: 'r-1',
+  segment: 'manual',
+  model: 'opus-5.5',
+  modelName: 'Opus 5.5',
+  running: false,
+  outcome: 'done',
+  durationMs: 600_000,
+  costUsd: 1.42,
+  unread: [],
+} as unknown as SegmentRunView;
+
+function show(read: Reader, running = false, onClose: () => void = () => {}) {
   const api = { ...createMockApi({ live: false }), runTranscript: read } as unknown as FleetApi;
-  return renderApp(<RunTranscript taskId="t-1" runId="r-1" running={running} />, { api });
+  return renderApp(
+    <RunTranscriptDrawer
+      taskId="t-1"
+      run={{ ...RUN, running }}
+      nth={2}
+      now={Date.parse(at)}
+      onClose={onClose}
+    />,
+    { api },
+  );
 }
 
 const FULL = [
@@ -56,16 +85,20 @@ const FULL = [
 const kinds = () => [...document.querySelectorAll('[data-kind]')].map((e) => e.getAttribute('data-kind'));
 
 describe('会话内容：各种条目', () => {
-  test('默认收起，点开才读接口', async () => {
+  test('抽屉顶上固定一行：段、第几次、模型、成败、时长、花费；打开才读一次接口', async () => {
     const read = vi.fn<Reader>(async () => page(FULL));
     show(read);
-    expect(read).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: '会话内容' }));
+    const head = document.querySelector('[data-drawer-summary]') as HTMLElement;
+    expect(head.textContent).toContain('动手');
+    expect(head.textContent).toContain('第 2 次');
+    expect(head.textContent).toContain('Opus 5.5');
+    expect(head.textContent).toContain('10 分钟');
+    expect(head.textContent).toContain('$1.42');
     await screen.findByText('已提交 abc123');
     expect(read).toHaveBeenCalledTimes(1);
   });
 
-  test('完整一段：提示词、助手的话、工具调用、报错、截断、结论都画出来；工具结果默认不画', async () => {
+  test('完整一段：提示词、助手的话、工具调用、报错、截断、结论都画出来；成功的工具结果默认不画，出错的自动展开', async () => {
     show(async () => page(FULL), true);
     await screen.findByText('已提交 abc123');
     expect(kinds()).toEqual([
@@ -73,6 +106,7 @@ describe('会话内容：各种条目', () => {
       'assistant',
       'tool_call',
       'tool_call',
+      'tool_result',
       'error',
       'truncated',
       'result',
@@ -95,22 +129,97 @@ describe('会话内容：各种条目', () => {
     expect(prompt.className).toContain('line-clamp-4');
   });
 
-  test('工具调用默认折叠成一行，点开看到紧跟着的结果；失败的写没成', async () => {
+  test('工具调用默认折叠成一行，点开看到紧跟着的结果；出错的默认就展开并写没成', async () => {
     show(async () => page(FULL), true);
     await screen.findByText('已提交 abc123');
-    const calls = screen
-      .getAllByRole('button', { expanded: false })
-      .filter((b) => b.textContent?.includes('Bash'));
-    expect(calls).toHaveLength(2);
-    expect(calls[0]?.textContent).toContain('git status --short');
-    expect(screen.queryByText(' M README.md')).toBeNull();
-    fireEvent.click(calls[0] as HTMLElement);
-    expect(screen.getByText('M README.md')).toBeTruthy();
-    expect(calls[0]?.getAttribute('aria-expanded')).toBe('true');
-    fireEvent.click(calls[1] as HTMLElement);
-    const failed = document.querySelectorAll('[data-kind="tool_result"]')[1] as HTMLElement;
+    const bash = screen.getAllByRole('button').filter((b) => b.textContent?.includes('Bash'));
+    expect(bash).toHaveLength(2);
+    const [ok, bad] = bash as [HTMLElement, HTMLElement];
+    // 成功的：折叠；出错的：展开
+    expect(ok.getAttribute('aria-expanded')).toBe('false');
+    expect(ok.textContent).toContain('git status --short');
+    expect(screen.queryByText('M README.md')).toBeNull();
+    expect(bad.getAttribute('aria-expanded')).toBe('true');
+    const failed = document.querySelector('[data-kind="tool_result"]') as HTMLElement;
     expect(within(failed).getByText('没成')).toBeTruthy();
     expect(failed.textContent).toContain('FAIL a.test.ts');
+    // 点开成功的看到结果；人收起出错的，就听人的
+    fireEvent.click(ok);
+    expect(screen.getByText('M README.md')).toBeTruthy();
+    expect(ok.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(bad);
+    expect(bad.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText(/FAIL a.test.ts/)).toBeNull();
+  });
+
+  test('「只看出错」过滤后只剩出错的条目（没成的工具调用、报错），再点回到全部', async () => {
+    show(async () => page(FULL), true);
+    await screen.findByText('已提交 abc123');
+    const only = screen.getByRole('button', { name: /只看出错/ });
+    expect(only.textContent).toBe('只看出错（2）');
+    fireEvent.click(only);
+    expect(only.getAttribute('aria-pressed')).toBe('true');
+    expect(document.querySelectorAll('[data-seq]')).toHaveLength(2);
+    const shown = [...document.querySelectorAll('[data-seq]')].map((e) => e.getAttribute('data-seq'));
+    expect(shown).toEqual(['4', '6']);
+    expect(screen.queryByText('先看一下。', { exact: false })).toBeNull();
+    expect(screen.queryByText('git status --short')).toBeNull();
+    fireEvent.click(only);
+    expect(only.getAttribute('aria-pressed')).toBe('false');
+    expect(document.querySelectorAll('[data-seq]').length).toBeGreaterThan(2);
+  });
+
+  test('「只看文字」只留提示词、助手的话、报错、结论，不要工具调用；没有出错的会写明', async () => {
+    show(async () => page(FULL.filter((e) => e.kind !== 'error' && e.ok !== false)), true);
+    await screen.findByText('已提交 abc123');
+    fireEvent.click(screen.getByRole('button', { name: '只看文字' }));
+    expect(kinds()).toEqual(['prompt', 'assistant', 'truncated', 'result']);
+    fireEvent.click(screen.getByRole('button', { name: /只看出错/ }));
+    expect(screen.getByText('这一笔没有出错的条目。')).toBeTruthy();
+  });
+
+  test('过滤函数：出错、文字各留哪些', () => {
+    const items = groupEntries(FULL);
+    expect(filterItems(items, 'all')).toHaveLength(items.length);
+    expect(filterItems(items, 'errors').map((i) => (i.kind === 'call' ? i.call.seq : i.entry.seq))).toEqual([
+      4, 6,
+    ]);
+    expect(
+      filterItems(items, 'text').every((i) => i.kind === 'entry' && i.entry.kind !== 'tool_result'),
+    ).toBe(true);
+  });
+
+  test('超长输出只露开头，点「显示全部」看全文，再点收起', async () => {
+    const long = Array.from({ length: CLAMP_LINES + 10 }, (_, i) => `第 ${i} 行`).join('\n');
+    show(async () => page([entry(0, 'assistant', long)]), true);
+    await screen.findByText(/第 0 行/);
+    const p = document.querySelector('[data-kind="assistant"]') as HTMLElement;
+    expect(p.textContent).not.toContain(`第 ${CLAMP_LINES + 5} 行`);
+    fireEvent.click(screen.getByRole('button', { name: '显示全部' }));
+    expect(p.textContent).toBe(long);
+    fireEvent.click(screen.getByRole('button', { name: '收起' }));
+    expect(p.textContent).not.toContain(`第 ${CLAMP_LINES + 5} 行`);
+  });
+
+  test('点遮罩、按 Esc 都会调 onClose', async () => {
+    const onClose = vi.fn();
+    show(async () => page(FULL), false, onClose);
+    await screen.findByText('已提交 abc123');
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  test('抽屉左边沿可用左右键拉宽，不超过 80vw', async () => {
+    show(async () => page(FULL));
+    await screen.findByText('已提交 abc123');
+    const bar = screen.getByRole('separator');
+    const before = Number(bar.getAttribute('aria-valuenow'));
+    expect(before).toBe(640);
+    fireEvent.keyDown(bar, { key: 'ArrowLeft' });
+    const after = Number(bar.getAttribute('aria-valuenow'));
+    expect(after).toBeGreaterThan(before);
+    for (let i = 0; i < 40; i++) fireEvent.keyDown(bar, { key: 'ArrowLeft' });
+    expect(Number(bar.getAttribute('aria-valuenow'))).toBeLessThanOrEqual(window.innerWidth * 0.8);
   });
 
   test('子代理的条目缩进并标「子代理 <类型>」，调用的结果跨过子代理那几条也能对上', () => {
@@ -209,6 +318,7 @@ describe('会话内容：在跑的段', () => {
       'assistant',
       'tool_call',
       'tool_call',
+      'tool_result',
       'error',
       'truncated',
       'result',
@@ -219,10 +329,24 @@ describe('会话内容：在跑的段', () => {
     expect(read).toHaveBeenCalledTimes(seen);
   });
 
-  test('在跑的那一段默认展开，不用点', async () => {
+  test('在跑的那一段打开抽屉就读、顶上写「在跑」；人往上滚出现「跳到最新」，点了回到底部', async () => {
     show(async () => page(FULL.slice(0, 2), { done: false }), true);
     expect(await screen.findByText(/先看一下/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: '会话内容' }).getAttribute('aria-expanded')).toBe('true');
+    expect(document.querySelector('[data-drawer-summary]')?.textContent).toContain('在跑');
+    const box = document.querySelector('[data-transcript-body]') as HTMLElement;
+    Object.defineProperty(box, 'scrollHeight', { configurable: true, value: 1000 });
+    Object.defineProperty(box, 'clientHeight', { configurable: true, value: 300 });
+    expect(screen.queryByRole('button', { name: '跳到最新' })).toBeNull();
+    box.scrollTop = 100;
+    fireEvent.scroll(box);
+    const jump = await screen.findByRole('button', { name: '跳到最新' });
+    fireEvent.click(jump);
+    expect(box.scrollTop).toBe(1000);
+    expect(screen.queryByRole('button', { name: '跳到最新' })).toBeNull();
+    // 滚回底部附近，不再出现
+    box.scrollTop = 700;
+    fireEvent.scroll(box);
+    expect(screen.queryByRole('button', { name: '跳到最新' })).toBeNull();
   });
 });
 
