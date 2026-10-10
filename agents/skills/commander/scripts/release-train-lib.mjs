@@ -7,6 +7,10 @@
 // - 阶段（方案 4.2，每阶段有上限，到点停下列出拖后腿的，不硬来）：0 预检（只读）→1 暂停本机→2 暂停法国→3 等收尾→
 //   4 发版（对外发布，必须带 --founder-ok）→5 等部署→6 验证→7 恢复→8 派清单。状态记在 ~/.fleet-dao/release-train.json，
 //   停在「卡住」（blocked）或「没成」（failed）时再跑一次 start（同一个目标）从停下的那一步接着走；换目标要先 abort。
+// - 驱动活着的证据（#1674）：每次落盘都把 driver { pid, host, heartbeatAt } 写进状态，等收尾、等部署的轮询里每圈也落一次。
+//   status、start 判「驱动死了」：同一台机器上 pid 不在，或心跳比该步上限（phaseBudgetMs）加余量（deadMarginMs）还老。
+//   start 同一个目标遇到驱动已死的 running，当成「没成」从停下的那一步接着走；停在第 4 步的先读法国 .history 判发没发成。
+//   巡查报总开关关着时读这份状态（trainAlertNote），写明是「发版车驱动死了没人恢复」还是别的。
 // - 暂停本机＝写 ~/.fleet-dao/release-train.paused，worker.mjs start 见标记就不起新工人（worker-lib.mjs 的 readPauseMarker）。
 // - 暂停法国＝fleet-api engine off（关着时不拉单、不派活、不起干活的会话；在跑的做完当前一步）。第 2 步先记下总开关和各仓接活开关，
 //   第 7 步发完、健康检查过了，按记下的恢复：开着的开回、关着的保持关，恢复不成功就是没成（退出码 2，不当成成功）。
@@ -22,9 +26,19 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { KIND_ROUTE_STALE, KIND_TASK_IDLE, scrubText } from './france-lib.mjs';
+import {
+  DEFAULT_LIMITS,
+  driverVerdict,
+  PHASES,
+  readState,
+  STATE_REL,
+  stateFile,
+  trainAlertNote,
+} from './train-state-lib.mjs';
 import { pauseMarkerPath } from './worker-lib.mjs';
 
-export const STATE_REL = join('.fleet-dao', 'release-train.json');
+export { DEFAULT_LIMITS, driverVerdict, PHASES, STATE_REL, trainAlertNote };
+
 export const RELEASES = '/srv/fleet-dao-releases';
 /** 法国上的管理命令入口和发布脚本（docs/ops.md 第九节）。 */
 export const FLEET_API = `bash ${RELEASES}/current/packages/api/bin/fleet-api`;
@@ -43,25 +57,6 @@ export const HISTORY_FILE = `${RELEASES}/.history`;
 export const LOCK_FILE = `${RELEASES}/.lock`;
 /** flock -E：另一个发布占着锁时回这个码（75，是这里自己给 flock 指定的，release.sh 没有这个码）。 */
 const BUSY = 75;
-
-/**
- * 各阶段的上限（毫秒）和轮询间隔；测试里整份换小。等收尾只等两样：主线 CI 20 分钟、法国在跑的会话 13 分钟（沿用排空上限）；
- * 本机在跑的工人、自动合并的 PR 两项只提示不等（创始人 2026-10-06「不合理的想法你自由决定，都改掉」，母单 #1121：它们和法国发版无关，
- * 会把无关的事卡住；release.sh 自己还会排空一遍）。数值写在 agents/test/release-train.test.ts。
- */
-export const DEFAULT_LIMITS = {
-  preflightMs: 2 * 60_000,
-  pauseMs: 60_000,
-  ciMs: 20 * 60_000,
-  franceMs: 13 * 60_000,
-  releaseMs: 15 * 60_000,
-  deployMs: 20 * 60_000,
-  verifyMs: 5 * 60_000,
-  restoreMs: 60_000,
-  pollMs: 30_000,
-};
-
-export const PHASES = ['预检', '暂停本机', '暂停法国', '等收尾', '发版', '等部署', '验证', '恢复', '派清单'];
 
 export const USAGE = `用法：node release-train.mjs <命令>（在项目仓的检出里跑；发版会等很久，用 run_in_background 起）
   start --sha <提交> --founder-ok "<创始人原话>" [--restore]
@@ -113,31 +108,11 @@ const minutes = (ms) => Math.round(ms / 60_000);
 
 // —— 状态文件 ——
 
-const stateFile = (home) => join(home, STATE_REL);
-
-/** 读状态：没有是 { ok: true, state: null }；在但读不了、认不出是 { ok: false, why }（不覆盖它）。 */
-function readState(io) {
-  const file = stateFile(io.home);
-  let text;
-  try {
-    text = readFileSync(file, 'utf8');
-  } catch (e) {
-    if (e.code === 'ENOENT') return { ok: true, state: null };
-    return { ok: false, why: `${file} 读不了（${e.code ?? e.message}）` };
-  }
-  try {
-    const s = JSON.parse(text);
-    if (s === null || typeof s !== 'object' || s.schema !== 1 || !Number.isInteger(s.phase))
-      return { ok: false, why: `${file} 认不出（不是这个脚本写的）：确认没有发版在走后删掉它再来` };
-    return { ok: true, state: s };
-  } catch (e) {
-    return { ok: false, why: `${file} 不是 JSON（${e.message}）：确认没有发版在走后删掉它再来` };
-  }
-}
-
 /** 落盘：先写临时文件再换名，半截的文件不会留下。 */
 function saveState(io, state) {
   state.updatedAt = iso(io);
+  if (Number.isInteger(io.pid))
+    state.driver = { pid: io.pid, ...(io.host ? { host: io.host } : {}), heartbeatAt: state.updatedAt };
   const file = stateFile(io.home);
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
@@ -164,6 +139,24 @@ const clearMarker = (io) => {
 function targetText(t) {
   return t.kind === 'sha' ? `${t.value.slice(0, 12)}` : t.value;
 }
+
+// —— 驱动死活（判法在 train-state-lib.mjs） ——
+
+const verdictOf = (io, s) =>
+  driverVerdict(s, { now: io.now(), isAlive: io.isAlive, host: io.host, limits: io.limits });
+
+/** 同一个目标：种类相同，提交号一个是另一个的前缀（接着走的命令只写前 12 位，状态里可能是整串 40 位）。 */
+const sameTarget = (a, b) =>
+  a.kind === b.kind && (a.value.startsWith(b.value) || b.value.startsWith(a.value));
+/** 接着走时目标取两边较长的那个提交号，不把整串换成短的。 */
+const mergedTarget = (prev, target) => ({
+  ...prev,
+  value: target.value.length > prev.value.length ? target.value : prev.value,
+});
+
+/** 接着走的命令（原话用上一趟记下的，换成要的话自己改；提交号只写前 12 位，整串 40 位会被 scrubText 抹成「长串」）。 */
+const resumeCommand = (s) =>
+  `node release-train.mjs start --sha ${s.target.value.slice(0, 12)} --founder-ok "${scrubText(String(s.founderOk ?? '<创始人原话>')).replace(/"/g, "'")}"`;
 
 // —— 命令行参数 ——
 
@@ -544,6 +537,7 @@ async function phaseWait(io, state) {
   let lastLine = '';
   let lastHints = '';
   for (;;) {
+    saveState(io, state); // 心跳
     const at = io.now().getTime();
     const status = [];
     const w = await localWorkers(io);
@@ -623,7 +617,12 @@ async function releaseBySha(io, state) {
     io,
     `发版：ssh 到法国，用目标提交 ${sha.slice(0, 12)} 自带的 release.sh（检出里那份不跑；创始人原话：「${state.founderOk}」）`,
   );
-  const r = await io.ssh(releaseBootCommand(sha), { timeoutMs: io.limits.releaseMs });
+  // 发版 ssh 最长 releaseMs：期间每 pollMs 由外壳回调刷一次心跳（外壳在等 ssh 时事件循环是空的，定时器能跑）
+  const r = await io.ssh(releaseBootCommand(sha), {
+    timeoutMs: io.limits.releaseMs,
+    tickMs: io.limits.pollMs,
+    onTick: () => saveState(io, state),
+  });
   state.target.sha = sha;
   if (didNotRun(r))
     return failed(
@@ -638,9 +637,10 @@ async function releaseBySha(io, state) {
 }
 
 /** 每 pollMs 试一次 check()，done 就回；到点回 { ok: false, why: 最后一次的原因 }。check 回 fatal 立刻带出去。 */
-async function waitFor(io, limitMs, check) {
+async function waitFor(io, state, limitMs, check) {
   const started = io.now().getTime();
   for (;;) {
+    saveState(io, state); // 心跳
     const r = await check();
     if (r.done) return { ok: true, value: r.value, fatal: r.fatal };
     if (io.now().getTime() - started >= limitMs) return { ok: false, why: r.why };
@@ -648,15 +648,23 @@ async function waitFor(io, limitMs, check) {
   }
 }
 
+/** 法国发布历史末行：{ ok: true, sha, event } 或 { ok: false, why }。 */
+async function historyTail(io) {
+  const r = await io.ssh(`tail -n 1 ${HISTORY_FILE}`, { timeoutMs: 60_000 });
+  if (didNotRun(r) || r.status !== 0) return { ok: false, why: `法国发布历史读不到：${tailOf(r)}` };
+  const [, sha, event] = String(r.stdout).trim().split(/\s+/);
+  if (!sha || !event) return { ok: false, why: '法国发布历史末行认不出' };
+  return { ok: true, sha, event };
+}
+
 /** 5 等部署：发布历史末行＝目标提交，release.sh --check 没有红。 */
 async function phaseDeploy(io, state) {
   const sha = state.target.sha;
   if (!sha) return failed('不知道目标提交是哪个（发版那一步没记上），没法核对部署');
-  const hit = await waitFor(io, io.limits.deployMs, async () => {
-    const r = await io.ssh(`tail -n 1 ${HISTORY_FILE}`, { timeoutMs: 60_000 });
-    if (didNotRun(r) || r.status !== 0) return { done: false, why: `法国发布历史读不到：${tailOf(r)}` };
-    const [, got, event] = String(r.stdout).trim().split(/\s+/);
-    if (!got || !event) return { done: false, why: '法国发布历史末行认不出' };
+  const hit = await waitFor(io, state, io.limits.deployMs, async () => {
+    const h = await historyTail(io);
+    if (!h.ok) return { done: false, why: h.why };
+    const { sha: got, event } = h;
     if (!(got.startsWith(sha) || sha.startsWith(got)))
       return { done: false, why: `在用的还是 ${got.slice(0, 12)}，目标 ${sha.slice(0, 12)} 还没上` };
     if (event === 'release' || event === 'recovered') return { done: true };
@@ -931,23 +939,32 @@ async function cmdStart(p, io) {
   const prev = read.state;
   // 停在第 0 步（预检没过）的什么都没动过，不算「没了结」：换目标直接重来
   if (prev && (prev.status === 'blocked' || prev.status === 'failed') && prev.phase > 0) {
-    if (prev.target.kind !== target.kind || prev.target.value !== target.value)
+    if (!sameTarget(prev.target, target))
       return refuse(
         io,
         `上一趟（目标 ${targetText(prev.target)}，停在第 ${prev.phase} 步）还没了结：同一个目标再跑 start 接着走，或者先 node release-train.mjs abort`,
       );
-    const state = { ...prev, founderOk, restore };
+    const state = { ...prev, target: mergedTarget(prev.target, target), founderOk, restore };
     sayTo(
       io,
       `接着上一趟走：从第 ${state.phase} 步「${PHASES[state.phase]}」起（${state.status === 'blocked' ? '上次卡住' : '上次没成'}）`,
     );
     return runFrom(io, state);
   }
-  if (prev && prev.status === 'running')
-    return refuse(
-      io,
-      `有一趟正在走（第 ${prev.phase} 步「${PHASES[prev.phase]}」，${prev.startedAt} 起）：看 node release-train.mjs status；确认它已经死了就 abort`,
-    );
+  if (prev && prev.status === 'running') {
+    const v = verdictOf(io, prev);
+    if (!v.dead)
+      return refuse(
+        io,
+        `有一趟正在走（第 ${prev.phase} 步「${PHASES[prev.phase]}」，${prev.startedAt} 起；驱动还活着：${v.why}）：看 node release-train.mjs status`,
+      );
+    if (!sameTarget(prev.target, target))
+      return refuse(
+        io,
+        `上一趟（目标 ${targetText(prev.target)}）驱动没了，停在第 ${prev.phase} 步「${PHASES[prev.phase]}」（${v.why}）：同一个目标再跑 start 接着走，或者先 node release-train.mjs abort`,
+      );
+    return resumeDead(io, { ...prev, target: mergedTarget(prev.target, target), founderOk, restore }, v);
+  }
   const state = {
     schema: 1,
     status: 'running',
@@ -963,6 +980,44 @@ async function cmdStart(p, io) {
     laggards: [],
     release: {},
   };
+  return runFrom(io, state);
+}
+
+/**
+ * 驱动死了的那一趟，当成「没成」从停下的那一步接着走。停在第 4 步（发版）的：先看法国有没有别的发布占着锁，
+ * 再读 .history 末行判发没发成——发成了（末行是目标提交、事件 release 或 recovered）跳到第 5 步，没发成从第 4 步重发（同一个提交重发什么都不变）。
+ * 锁占着、读不到历史都不往下走（不猜）。
+ */
+async function resumeDead(io, state, v) {
+  sayTo(
+    io,
+    `上一趟驱动没了，停在第 ${state.phase} 步「${PHASES[state.phase]}」（${v.why}）：当成「没成」，接着走`,
+  );
+  if (state.phase === 4) {
+    const lock = await io.ssh(`flock -n -E ${BUSY} ${LOCK_FILE} -c true`, { timeoutMs: 60_000 });
+    if (didNotRun(lock)) return fail(io, `驱动死在发版那一步，法国读不到（看发布锁）：${tailOf(lock)}`);
+    if (lock.status === BUSY)
+      return fail(io, '驱动死在发版那一步，法国上发布还在跑（.lock 被占着）：等它跑完再 start');
+    if (lock.status !== 0) return fail(io, `驱动死在发版那一步，看发布锁没成：${tailOf(lock)}`);
+    const h = await historyTail(io);
+    if (!h.ok) return fail(io, `驱动死在发版那一步，不知道发成没有，不敢猜：${h.why}`);
+    const sha = state.target.value;
+    const hit = h.sha.startsWith(sha) || sha.startsWith(h.sha);
+    if (hit && (h.event === 'release' || h.event === 'recovered')) {
+      state.target.sha = sha;
+      state.release = { ...(state.release ?? {}), started: true };
+      state.phase = 5;
+      sayTo(
+        io,
+        `法国发布历史末行已是目标 ${sha.slice(0, 12)}（${h.event}）：发版发成了，从第 5 步「${PHASES[5]}」起`,
+      );
+    } else
+      sayTo(
+        io,
+        `法国发布历史末行${hit ? `是目标 ${sha.slice(0, 12)} 但事件是 ${h.event}` : `还是 ${h.sha.slice(0, 12)}，目标没上`}：当没发成，从第 4 步「${PHASES[4]}」重发`,
+      );
+  }
+  if (state.phase >= 5) state.target.sha ??= state.target.value;
   return runFrom(io, state);
 }
 
@@ -988,9 +1043,10 @@ async function cmdStatus(io) {
     return 0;
   }
   const words = { running: '在走', blocked: '卡住了', failed: '没成', done: '做完了', aborted: '已撤销' };
+  const verdict = s.status === 'running' ? verdictOf(io, s) : null;
   sayTo(
     io,
-    `发版（${targetText(s.target)}，发完恢复发版前的开关）：${words[s.status] ?? s.status}，第 ${s.phase} 步「${PHASES[s.phase] ?? '？'}」，${s.startedAt} 起，${s.updatedAt} 更新`,
+    `发版（${targetText(s.target)}，发完恢复发版前的开关）：${verdict?.dead ? '驱动没了' : (words[s.status] ?? s.status)}，第 ${s.phase} 步「${PHASES[s.phase] ?? '？'}」，${s.startedAt} 起，${s.updatedAt} 更新`,
   );
   sayTo(
     io,
@@ -998,6 +1054,17 @@ async function cmdStatus(io) {
   );
   if (s.why) sayTo(io, `停下的原因：${s.why}`);
   for (const l of s.laggards ?? []) sayTo(io, `  拖后腿：${l}`);
+  if (verdict?.dead) {
+    sayTo(
+      io,
+      `驱动没了，停在第 ${s.phase} 步「${PHASES[s.phase] ?? '？'}」：${verdict.why}。没人在恢复，法国引擎总开关可能还关着`,
+    );
+    sayTo(
+      io,
+      `接着走（同一个目标，从停下的那一步起${s.phase === 4 ? '；第 4 步会先读法国发布历史判发没发成' : ''}）：${resumeCommand(s)}`,
+    );
+    sayTo(io, '不走了：node release-train.mjs abort');
+  } else if (verdict) sayTo(io, `驱动还活着：${verdict.why}`);
   return 0;
 }
 
@@ -1050,8 +1117,10 @@ async function cmdAbort(io) {
  * 入口。io = {
  *   home, env, now(), sleep(ms), cwd(), nodePath, scriptsDir, limits（可省，默认 DEFAULT_LIMITS）, out(text), err(text),
  *   run(command, args, {cwd, timeoutMs}) → {status, stdout, stderr, error}   gh、git、pnpm、node（worker.mjs、france.mjs）,
- *   ssh(remoteCommand, {timeoutMs}) → 同上   到法国跑一条命令（名字读不到、连不上都在返回里：error 或 status 255）,
+ *   ssh(remoteCommand, {timeoutMs, tickMs?, onTick?}) → 同上（可返回 Promise）   到法国跑一条命令（名字读不到、连不上都在返回里：error 或 status 255）；
+ *     给了 onTick 的（第 4 步发版）外壳在等 ssh 期间每 tickMs 调一次，用来刷驱动心跳,
  *   runningSessions() → Promise<{ok: true, running, rows} | {ok: false, kind, why}>   france-sessions-lib.mjs 的 fetchRunningSessions,
+ *   pid?, host?, isAlive?(pid) → boolean   驱动自己的进程号、机器名、查某个 pid 在不在（都可省：省了就只靠心跳时刻判死活）,
  *   franceRepos() → Promise<{ok: true, rows: [{repo, auto_dispatch_since}]} | {ok: false, why}>   法国各仓的「让 AI 接活」开关,
  * }。返回退出码。
  */

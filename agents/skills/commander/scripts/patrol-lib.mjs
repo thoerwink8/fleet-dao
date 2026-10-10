@@ -320,7 +320,8 @@ export const baselineText = (facts) => `${JSON.stringify({ schema: BASELINE_SCHE
 
 /**
  * 跑一次巡查：取、判、打、写基线。io 全部可换（测试不碰 ssh、不碰真文件）。
- * @param {{ fetchRaw: () => Promise<{ ok: true, stdout: string } | Failure>, now: () => Date, loadBaseline: () => string | null, saveBaseline: (text: string) => void }} io
+ * trainNote（可省）：总开关关着时现读发版车状态，回一句话接在那条 ALERT 后面（驱动死了、没人恢复要写明）。
+ * @param {{ fetchRaw: () => Promise<{ ok: true, stdout: string } | Failure>, now: () => Date, loadBaseline: () => string | null, saveBaseline: (text: string) => void, trainNote?: () => string }} io
  * @returns {Promise<{ code: number, lines: string[], report: Report }>}
  */
 export async function runPatrol(io) {
@@ -335,6 +336,15 @@ export async function runPatrol(io) {
     extra.push(`基线 读不了（${e instanceof Error ? e.message : String(e)}）：这次照没有基线算`);
   }
   const report = judge({ raw: await io.fetchRaw(), now: io.now(), base });
+  if (report.facts && report.facts.master !== 'true' && io.trainNote) {
+    let note;
+    try {
+      note = io.trainNote();
+    } catch (e) {
+      note = `发版车状态读不了（${e instanceof Error ? e.message : String(e)}）`;
+    }
+    report.alerts = report.alerts.map((a) => (a.startsWith('引擎总开关关着') ? `${a}；发版车：${note}` : a));
+  }
   if (report.facts) {
     try {
       io.saveBaseline(baselineText(report.facts));
