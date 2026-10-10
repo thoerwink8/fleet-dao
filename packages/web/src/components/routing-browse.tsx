@@ -238,6 +238,7 @@ const PROBE_WORD: Record<NonNullable<Route['probe']>['state'], string> = {
   failed: '不通',
   skipped: '没探',
   not_wired: '插头没接',
+  on_demand: '按需探测',
 };
 
 // —— 模型目录 ——

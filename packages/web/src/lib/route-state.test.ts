@@ -10,6 +10,7 @@ import {
   matchesFilter,
   type RouteStateKind,
   rollupKind,
+  routeStateLabel,
   routeStateTone,
 } from './route-state';
 
@@ -70,6 +71,32 @@ describe('classifyRoute', () => {
     expect(classifyRoute({ ...base, verdict: 'dead', ban: { verdict: 'dead', reason: '命中禁令' } })).toBe(
       'blocked',
     );
+  });
+});
+
+describe('按需探测（#1635）', () => {
+  const onDemand = '不主动探，要派给它时先探一次。上一次真探：通，10-10 09:00';
+  test('原文写了按需：不是故障、不进告警、不画红，也不是「不知道」', () => {
+    const k = classifyRoute({
+      ...base,
+      verdict: 'unknown',
+      connect: { verdict: 'unknown', reason: `按需探测：${onDemand}` },
+      probedAt: '2026-10-08T00:00:00Z',
+      probeDetail: onDemand,
+    });
+    expect(k).toBe('on_demand');
+    expect(isAlert(k)).toBe(false);
+    expect(routeStateTone[k]).not.toBe('fail');
+    expect(routeStateLabel[k]).toBe('按需探测');
+  });
+  test('渠道状态页里没排进用途的路由：探针结论 on_demand 也是按需', () => {
+    expect(classifyProbe({ state: 'on_demand' })).toBe('on_demand');
+    expect(classifyProbe({ state: 'on_demand' }, { usedByPurpose: false })).toBe('unused');
+  });
+  test('一组里有在线的还是在线；全是按需的是按需；摘要写「按需」', () => {
+    expect(rollupKind(['on_demand', 'live'])).toBe('live');
+    expect(rollupKind(['on_demand', 'off'])).toBe('on_demand');
+    expect(countsText(countKinds(['live', 'on_demand', 'on_demand']))).toBe('1 在线 · 2 按需');
   });
 });
 

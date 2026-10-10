@@ -1,0 +1,24 @@
+commit 9c8d7e6
+Author: dev <dev@example.invalid>
+Date:   Wed Oct 8 02:58:44 2026 +0000
+
+    runner: 整理缩进、去掉没用的 import
+
+diff --git a/src/runner.ts b/src/runner.ts
+--- a/src/runner.ts
++++ b/src/runner.ts
+@@ -1,9 +1,8 @@
+ import type { Job } from './job.ts';
+ import type { Pool } from './pool.ts';
+-import { log } from './log.ts';
+
+ export function createRunner(deps: { pool: Pool }) {
+-    async function runJob(job: Job) {
+-        const pool = deps.pool;
+-        const slot = await pool.acquire();
++  async function runJob(job: Job) {
++    const pool = deps.pool;
++    const slot = await pool.acquire();
+       try {
+         return await job.run();
+       } finally {

@@ -104,6 +104,43 @@ describe('派前探测', () => {
     }
   });
 
+  it('按需探测的路由（上一次结论 on_demand、alive 为 false）：派前探一次，探通就派，写回通（#1635）', async () => {
+    const t = target({
+      alive: false,
+      probeRank: 5,
+      previous: {
+        state: 'on_demand',
+        at: new Date(NOW.getTime() - 3 * 3_600_000),
+        detail: '不主动探，要派给它时先探一次。上一次真探：通，10-09 08:00',
+      },
+    });
+    const h = harness([t]);
+    const got = await probeAssignedRoute(h.deps, createProbeLock(), { routeId: t.routeId, label: t.modelId });
+    expect(h.probes()).toBe(1);
+    expect(got).toMatchObject({ kind: 'pass', probed: true });
+    expect(h.saved).toEqual([{ routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了') }]);
+  });
+
+  it('按需探测的路由探不通：记成不通（退避照现在的规矩），本轮换下一条', async () => {
+    const t = target({
+      alive: false,
+      probeRank: 5,
+      previous: {
+        state: 'on_demand',
+        at: new Date(NOW.getTime() - 3_600_000),
+        detail: '不主动探，要派给它时先探一次。还没真探过',
+      },
+    });
+    const h = harness([t], {
+      probers: { 'claude-code': async () => ({ kind: 'failed', detail: '网络不通' }) },
+    });
+    const got = await probeAssignedRoute(h.deps, createProbeLock(), { routeId: t.routeId, label: t.modelId });
+    expect(got).toMatchObject({ kind: 'fail', counted: true });
+    expect(h.saved).toEqual([
+      { routeId: t.routeId, state: 'failed', detail: expect.stringContaining('连着不通 1 次') },
+    ]);
+  });
+
   it('探不通：记成不通，本轮换下一条', async () => {
     const t = target({ previous: null, modelId: 'glm-5.3-flash' });
     const h = harness([t], {

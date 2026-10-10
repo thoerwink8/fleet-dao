@@ -90,6 +90,7 @@ const STATE_WORD: Record<NonNullable<Route['probe']>['state'], { label: string; 
   failed: { label: '不通', tone: 'fail' },
   skipped: { label: '没探', tone: 'stall' },
   not_wired: { label: '插头没接', tone: 'stall' },
+  on_demand: { label: '按需探测', tone: 'stop' },
 };
 
 /** 引擎此刻能不能接立即探测：不能就一句话说清是哪样，按钮跟着置灰。 */
@@ -473,6 +474,7 @@ const KIND_ORDER: readonly RouteStateKind[] = [
   'unknown',
   'unprobed',
   'live',
+  'on_demand',
   'held',
   'off',
   'retired',
@@ -758,7 +760,13 @@ function RouteRow({
             </Fact>
             <Fact label="执行方式">{r.hostId}</Fact>
             <Fact label="下一轮定时探">
-              {nextAt ? <span className="num">{formatIn(nextAt, now)}</span> : '上线后第一轮'}
+              {probe?.state === 'on_demand' ? (
+                '不定时探，派前探一次'
+              ) : nextAt ? (
+                <span className="num">{formatIn(nextAt, now)}</span>
+              ) : (
+                '上线后第一轮'
+              )}
             </Fact>
           </dl>
           <div className="mt-2.5">

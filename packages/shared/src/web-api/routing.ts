@@ -160,9 +160,9 @@ export const RoutingLayerRouteSchema = z.object({
   connect: LivenessFactSchema,
   quota: LivenessFactSchema,
   ban: LivenessFactSchema,
-  /** 探针最近一次下结论的时刻；没有 = 探针还没看过。过没过期按执行方式判（routeProbeStaleMinutes）；退避、隔 60 分钟再探的按那一档。 */
+  /** 探针最近一次下结论的时刻；没有 = 探针还没看过。过没过期按执行方式判（routeProbeStaleMinutes）；退避、隔 30 分钟再探的按那一档；按需探测的不算过期。 */
   probedAt: Time.optional(),
-  /** 探针原文（routes.probe_detail）。退避、隔 60 分钟再探都写在这里，驾驶舱据此放宽「探针可能停了」。 */
+  /** 探针原文（routes.probe_detail）。退避、隔 30 分钟再探、按需探测都写在这里，驾驶舱据此放宽「探针可能停了」。 */
   probeDetail: z.string().optional(),
   /** 挡着这条路由的、用满了的额度窗：哪一个、几点清零（读数里没有清零时刻就不给）。 */
   exhausted: z.array(z.object({ label: z.string(), resetsAt: Time.optional() })),
@@ -477,7 +477,15 @@ export const SetPurposeModelEffortRequest = z.object({
 // 探完记 routing.probe.done（带每条路由的结论）。状态不另存：读的时候从这三种记录现算（shared 的 route-probe-now.ts）。
 
 /** 一条路由这一次的结论：探针的四种，加上 unsettled（会话用户挂的组织这会儿定不下来，没探）、gone（路由已经不在了）。 */
-export const RouteProbeOutcomeSchema = z.enum(['ok', 'failed', 'not_wired', 'skipped', 'unsettled', 'gone']);
+export const RouteProbeOutcomeSchema = z.enum([
+  'ok',
+  'failed',
+  'not_wired',
+  'skipped',
+  'on_demand',
+  'unsettled',
+  'gone',
+]);
 
 export const RouteProbeResultSchema = z.object({
   routeId: Id,
