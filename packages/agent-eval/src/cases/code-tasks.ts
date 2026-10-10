@@ -91,6 +91,19 @@ function testTitles(source: string): string[] {
   );
 }
 
+/**
+ * 标题还在说旧规矩（「最多 3 轮」「超过 3 轮按交接处理」）。说 3 轮已经没了的不算：Sonnet、Opus 新加的
+ * 「规矩里不再有 3 轮的旧说法」「旧的 3 轮说法已清干净」被当成残留判错过（#1641）。
+ */
+function isStaleRoundsTitle(title: string): boolean {
+  return (
+    title.includes('3 轮') &&
+    !/不再|没有|没了|不能|不许|不该|不会|旧|残留|清|去掉|删|改成|改为|→|->|no longer|\bnot\b|\bold\b|stale|legacy|removed/i.test(
+      title,
+    )
+  );
+}
+
 /** 改过的测试放回原来的规矩文档上跑：真钉住了 2 轮就该红。 */
 function passesOnOriginalRules(ctx: GradeContext): boolean {
   const dir = mkdtempSync(join(tmpdir(), 'agent-eval-revert-'));
@@ -121,7 +134,7 @@ async function gradeRuleEdit(ctx: GradeContext): Promise<Verdict> {
     };
   if (!md.includes('连续失败不超过 3 次'))
     return { pass: false, reason: '误改了「连续失败不超过 3 次」（那是失败次数，不是 PR 轮数）' };
-  const staleTitles = testTitles(test).filter((t) => t.includes('3 轮'));
+  const staleTitles = testTitles(test).filter(isStaleRoundsTitle);
   if (staleTitles.length > 0)
     return { pass: false, reason: `测试标题里还写着「3 轮」：${staleTitles.join('、')}` };
   if (!test.includes('2 轮')) return { pass: false, reason: '钉规矩的测试没跟着改成「2 轮」' };
