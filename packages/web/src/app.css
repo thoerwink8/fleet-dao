@@ -63,16 +63,25 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  /* 进度条、探针点、tooltip 箭头的圆角钉死 2px。默认 rounded-xs 是 0.125rem，不是 2px。 */
+  /* 圆角钉死 2px。依据：channel-status 探针格、routing-status 探针点原来写死 2px（rounded-2）；进度条、tooltip 箭头同一档。默认 rounded-xs 是 0.125rem，不是 2px。 */
   --radius-2: 2px;
 
   /*
    * 字号档位（#182 设计 token）：页面代码一律从这里取，不再写 text-[Npx]。
    * 名字按用途：micro（角标、徽标）、caption（辅助信息、时间戳）、sub（卡片正文、列表条目）、
    * label（侧栏品牌名）、strong（小标）、stat-num（额度大数字）、title（页面标题）、stat（顶栏大数字）。
+   * 每一档就是原来写死的那一档像素：
+   * micro 10px：角标（#587）；usage 的「不全」标，run-timeline 的时间刻度和阶段角标（#1444）。
+   * caption 11px：辅助信息、时间戳（#587）；usage 的说明、花费明细、分开看和额度提示，run-timeline 的时长行，status 芯片（#1444）。
+   * sub 13px：卡片正文、列表条目（#587，原来写死 13px：侧栏项、通知标题）。
+   * label 14px：侧栏品牌名（#587，原来写死 14px）。
+   * strong 15px：页头小标（#587，原来写死 15px）。
+   * stat-num 17px：额度大数字（#587，原来写死 17px）。
+   * title 22px：页面标题（#587，原来写死 22px）。
+   * stat 28px：页头大数字（#587，原来写死 28px）。
    */
   --text-micro: 10px;
-  --text-caption: 11px;
+  --text-caption: 11px; /* 依据：健康条、决定卡、定时任务、渠道状态的辅助字。caption（辅助信息、时间戳） */
   --text-sub: 13px;
   --text-label: 14px;
   --text-strong: 15px;
@@ -98,16 +107,16 @@
   --max-height-command-list: 440px;
   /* 命令面板列表最高 300px，和上面 command-list 的 440px 不是一档。max-h-* 认 --max-height。 */
   --max-height-menu: 300px;
-  /* 路由页渠道列表在 xl 下的最高：视口高减去 16rem。 */
+  /* 路由页渠道列表在 xl 下的最高：视口高减去 16rem。依据：渠道状态左侧列表（max-h-routing-pane）。 */
   --max-height-routing-pane: calc(100dvh - 16rem);
   /* 开关轨道高 1.15rem。h-* 只认 --height / --spacing。 */
   --height-switch: 1.15rem;
   /* 基础件聚焦圈宽 3px（button、input、select、textarea、badge、toggle、switch 的聚焦圈）。
    * ring-* 只认 --ring-width。和自带的 ring-3 同是 3px，主题里只留这一档。 */
   --ring-width-focus: 3px;
-  /* 逾期竖线宽 3px。w-* 认 --width。 */
+  /* 逾期竖线宽 3px。依据：定时任务失败、过期行左侧竖线（w-rail）。w-* 认 --width。 */
   --width-rail: 3px;
-  /* 时间线左侧标签列 172px，md 起用作左内边距。padding 认 --spacing。 */
+  /* run-timeline 在 md 的刻度左内边距，原来写死 172px。padding 认 --spacing。 */
   --spacing-timeline-label: 172px;
   /* 表格勾选标记下移 2px。translate 认 --translate。 */
   --translate-check: 2px;
@@ -129,18 +138,18 @@
   --container-notifications: 380px;
   --container-usage: 340px;
   --container-routing-list: 360px;
-  /* 健康条详情截断宽 320px。max-w 认 --container。 */
+  /* 健康条详情截断宽 320px。依据：首页健康条详情（max-w-health-detail）。max-w 认 --container。 */
   --container-health-detail: 320px;
   /* 菜单弹层最短宽 8rem。min-w 认 --container。 */
   --container-menu: 8rem;
   /* 窄屏弹层宽：两侧各留 1rem，即 calc(100% - 2rem)。 */
   --container-dialog: calc(100% - 2rem);
   /* 网格列 / 行。grid-cols / grid-rows 认这两个命名空间，值就是原先方括号里的轨道。 */
-  --grid-template-columns-auto-fr: auto 1fr; /* 轨道 auto、1fr */
-  --grid-template-columns-release: 4.5rem minmax(0, 1fr); /* 轨道 4.5rem、剩余 */
-  --grid-template-columns-usage: 3.5rem minmax(0, 1fr); /* 轨道 3.5rem、剩余 */
-  --grid-template-columns-changelog: 8.5rem minmax(0, 1fr) auto; /* 轨道 8.5rem、剩余、自动 */
-  --grid-template-columns-timeline: 160px 1fr; /* md 起：160px、剩余 */
+  --grid-template-columns-auto-fr: auto 1fr; /* channel-status 故障说明、pool-holds 暂停明细：原来写死 auto、1fr */
+  --grid-template-columns-release: 4.5rem minmax(0, 1fr); /* release-card 每一行：原来写死 4.5rem、剩余 */
+  --grid-template-columns-usage: 3.5rem minmax(0, 1fr); /* usage 花费行：原来写死 3.5rem、剩余 */
+  --grid-template-columns-changelog: 8.5rem minmax(0, 1fr) auto; /* 依据：更新日志提交行原来写死 8.5rem、剩余、自动 */
+  --grid-template-columns-timeline: 160px 1fr; /* run-timeline 在 md：原来写死 160px、剩余 */
   --grid-template-columns-board: minmax(0, 26rem) minmax(0, 1fr); /* 2xl 起：最宽 26rem、剩余 */
   --grid-template-rows-stack: auto 1fr; /* 行：自动、剩余 */
   --grid-template-rows-media: auto auto 1fr; /* 行：自动、自动、剩余 */

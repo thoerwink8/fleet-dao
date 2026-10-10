@@ -10,7 +10,7 @@
 |---|---|---|
 | 系统 | Ubuntu 24.04，6 核 12G | Ubuntu 22.04，2 核 2G |
 | 跑什么 | Temporal、PostgreSQL、引擎工人、驾驶舱后端、AI 会话 | nginx（驾驶舱静态文件、证书、往法国转接口）、WireGuard 服务端、飞书网关（只出站，不听端口） |
-| 公网入站（ufw） | 只放 22/tcp；另在隧道网卡上给香港开 8787 | 只放 22/tcp、80/tcp、443/tcp（nginx）、4500/udp（WireGuard） |
+| 公网入站（ufw） | 只放 22/tcp；另在隧道网卡上给香港开 8787 | 本仓只放 22/tcp、80/tcp、443/tcp（nginx）、4500/udp（WireGuard）；另登记别家的 8443/tcp（self-proxy，不归本仓管）。白名单在 `deploy/hk.sh` 顶部「约定」（`HK_FW_OURS`、`HK_FW_FOREIGN`） |
 | 装机脚本 | `deploy/france.sh` | `deploy/hk.sh` |
 | 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
 
@@ -58,8 +58,11 @@
 
 香港：
 
+对公网的端口白名单和第一节「公网入站」是同一份。本仓管的在 `deploy/hk.sh` 顶部「约定」的 `HK_FW_OURS`（22/tcp、80/tcp、443/tcp、4500/udp），别家登记的在 `HK_FW_FOREIGN`（8443/tcp，不归本仓管）。改白名单改那里，并同步本节和第一节「公网入站」。
+
 | 端口 | 绑在 | 是谁 | 说明 |
 |---|---|---|---|
+| 22/tcp | 0.0.0.0、:: | sshd | 装机和运维登录 |
 | 80/tcp | 0.0.0.0 | nginx | `<驾驶舱域名>`：证书续期的验证路径，其余跳 https |
 | 443/tcp | 0.0.0.0 | nginx | `https://<驾驶舱域名>`：静态页；`/api`、`/auth`、`/github/webhook`、`/healthz` 经隧道转法国 `10.99.0.2:8787`（连接留着复用，第八节），转之前清掉 `Authorization`、`X-Fleet-Acting-Feishu`；`/agent` 不转；`/release.json`（带完整提交号）只给法国经隧道来的（`10.99.0.2`），别处来的回 404 |
 | 8443/tcp | 0.0.0.0、:: | self-proxy（不归本仓管） | `self-proxy-hk.service`：代理入口，ufw 注释 `self-proxy`；它的订阅在 nginx 站点 `self-proxy`（别家站点，同 ai-gateway）。别动 |
@@ -371,6 +374,34 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
   - 开着的：`runuser -u fleet -- psql -d fleet -c "select created_at, dedupe_key, title from notifications where resolved_at is null and (dedupe_key like 'watchdog%') order by created_at"`
   - 日志：`journalctl -u fleet-engine --since '-1h' | grep 看门狗`、`journalctl -u fleet-api --since '-1h' | grep 看门狗`
 - 定时器在引擎进程里（#1072），重启后自己恢复，没有要人手恢复的「暂停」；引擎停了超过 15 分钟后端就推「看门狗停了」，要停引擎得先说好。
+
+### 外部看门狗
+
+外部看门狗（#292，design 第六节第 5 层、design 第十三节）：Cloudflare 定时 Worker 每 5 分钟从外面查香港和法国，挂了推飞书。代码在 `packages/edge`，不跑在法国或香港上。这一片只把判法和 Worker 进仓，不部署。部署要创始人在 Cloudflare 上授权一次（免费、不绑卡）。
+
+判法在 `packages/edge/src/judge.ts`。香港：公网驾驶舱首页回得来（任何 HTTP 状态码都算 nginx 活着），连不上算挂。法国：公网 `/healthz` 回 200，或回 503 但回得来（后端活着、某一项不好，交给健康页和引擎自己报），连不上、502、504 算挂，别的状态码也按挂报。香港连不上时只报香港，不连带报法国。同一次挂着每小时最多再推一次。恢复推「恢复了，挂了多久」。读不到上一轮状态照挂处理并且推一条，不静默。真域名、飞书 webhook、请求头 `x-fleet-watch` 的值只从 Worker 的 secret 读（`packages/edge/wrangler.toml` 里只有占位）。读不到密钥这一轮记没查成、写日志，不当成没挂。
+
+每次探测带请求头 `x-fleet-watch`，值是 secret `FLEET_EDGE_WATCH_ID`（送出去之前去掉首尾空白）。法国 `fleet-api` 的 `/healthz` 见到这个头和 `/etc/fleet-dao/api.env` 里的 `FLEET_EDGE_WATCH_ID` 是同一串，就给 `external-watchdog` 记一轮成功（`packages/api/src/external-watch.ts`）。对不上、没带头：不记，响应跟平时一样。记不上（登记行还没有、库写失败）只写日志，不把 `/healthz` 打成 500，免得这一轮被判成法国挂了。
+
+法国 `fleet-engine` 只在 `/etc/fleet-dao/engine.env` 里这个键非空时，才把 `external-watchdog` 登记进定时任务（期限 15 分钟，`packages/engine/src/jobs/external-watchdog.ts`，要不要登记在 `packages/engine/src/real/jobs.ts`）。两份环境文件要放同一串，放完重启 `fleet-engine` 和 `fleet-api`。只放引擎、不放后端：登记了却记不上一轮，超过 15 分钟引擎里的看门狗会报停。Worker 还没在 Cloudflare 上跑起来就先配：同样会按「登记了还没跑过」报停。这个键还不在 `deploy/france/desired-config.json` 里（部署那一片再收）。人手加进去之后，对账会报这两项多出来（第九节「配置进仓对账」）。先留着，别为了消报警把键删掉。
+
+部署（在仓根，先 `npx wrangler login`，或设好 Cloudflare 的 API 令牌）：
+
+1. 建 KV：`npx wrangler kv namespace create EDGE_STATE`。把返回的 id 换进 `packages/edge/wrangler.toml` 里的占位 `<kv-namespace-id>`。只换这个 id，别把域名和密钥写进这个文件。
+2. 放密钥，都用 secret，不进仓。下面每条都在仓根执行，配置指到 `packages/edge/wrangler.toml`：
+   - `npx wrangler secret put FLEET_EDGE_HK_URL --config packages/edge/wrangler.toml`，值是 `https://<驾驶舱域名>/`
+   - `npx wrangler secret put FLEET_EDGE_FR_URL --config packages/edge/wrangler.toml`，值是 `https://<驾驶舱域名>/healthz`
+   - `npx wrangler secret put FLEET_FEISHU_WEBHOOK --config packages/edge/wrangler.toml`，值是飞书群机器人的 webhook
+   - `npx wrangler secret put FLEET_EDGE_WATCH_ID --config packages/edge/wrangler.toml`，值自己生成一串，不进仓
+3. 部署命令：`npx wrangler deploy --config packages/edge/wrangler.toml`
+
+换密钥：对要换的那一个重跑上面的 `npx wrangler secret put FLEET_FEISHU_WEBHOOK --config packages/edge/wrangler.toml`（另外三个键同样，把名字换成要换的那个）。不必重新部署，新值马上生效。`FLEET_EDGE_WATCH_ID` 换了，`engine.env` 和 `api.env` 里的同一个键要一起换成同一串，再重启 `fleet-engine` 和 `fleet-api`，否则对不上。
+
+停用：
+
+- 整个停掉：`npx wrangler delete --config packages/edge/wrangler.toml`（删掉这个 Worker，定时不再跑）。
+- 只停定时、先留着 Worker：Cloudflare 控制台打开 Workers & Pages 里这个 Worker 的 Triggers，删掉那条 cron。用配置文件管的话，把 `packages/edge/wrangler.toml` 的 crons 改成空数组，再执行上面的部署命令。空数组会清掉已部署的 cron；配置里不写 triggers，原来的 cron 还在。
+- 法国如果已经配了 `FLEET_EDGE_WATCH_ID`：从 `engine.env` 和 `api.env` 里删掉这个键，重启 `fleet-engine` 和 `fleet-api`。引擎那边没配或是空的，登记行会被摘掉（`packages/engine/src/real/jobs.ts`），避免「登记了还没跑过」误报。
 
 拉单（#632，替掉 webhook 接活加认领；`packages/engine/src/jobs/intake.ts`、`real/intake.ts`）：
 - 引擎每 5 分钟（每小时 3、8、13……分，定时任务 `intake`）自己到 GitHub 读该做的单，自己挑（创始人 2026-10-08「让ai自己挑挺好的」「按推荐」，#1336；规则全文见 design 第九节「开着的项目，引擎自己挑单」）：对每个「让 AI 接活」打开的项目（`repos.auto_dispatch_since` 不空，现在只当开关用），读开着的单，**准入**——作者在白名单里、不是母单子单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准，原因里写明）、还没派过、历史失败不超过 2 次、正文没写工作流路径、没有开着的 PR 挂着、交代齐（`readTaskBrief`；缺则留一次言）、规模不是最重档（「已知的模块」列了超过 50 个路径）；没贴「待补」「要人拍」（整理会话贴的，贴着一律不拉）；未排期的单、别的版本的单和其余单一样进候选，不看里程碑；开单早于「让 AI 接活」打开那一刻的老单要贴了「整理过」（临时指挥官的整理会话判为仍成立后贴）或「交给引擎」才进候选，开关之后新开的单不需要（#1338；#1342 发到法国后引擎第一轮拉了两张前提已过期的老单）。每个仓走完以后，有从没整理过的老单、或有空位却一条都没起且待办还有候选，就叫一次临时指挥官整理待办（下面「叫临时指挥官整理待办」）。过了准入的**排序**（版本先后列表序号 → 挂当前版本 → 规模小 → 同规模里贴了「交给引擎」的 → 失败少 → 开单早），再按空位从前往后**起**：同时在跑的任务工作流 ≤ 6、一轮最多 5 条、**每小时最多 20 条**（滚动一小时，数任务行建出时刻）、熔断没停拉；起之前才现读一遍这张单（开着、不是 PR、母单子单和「本机做」再核一遍）。起的建任务行、起任务工作流（编号 `task:<owner>/<name>#<号>`，`REJECT_DUPLICATE`：同一张单任何时候最多一条，做完、停下的不会自己重来，要人在驾驶舱点「继续」）。交代不全的在单子上留一条言写清缺什么（同一处缺法只留一次）。拉单本身不动单子。#282（驾驶舱「交给 fleet」按钮）被「交给引擎」取代（2026-10-08）：按钮不做，`fleet-api handover` 已删，没有这条命令。
