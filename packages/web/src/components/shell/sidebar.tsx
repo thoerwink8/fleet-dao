@@ -3,6 +3,7 @@ import { NavLink } from 'react-router';
 import { brand } from '#brand';
 import { useApi, useNotifications } from '../../api/client';
 import { useNodeSelection, withNode } from '../../lib/node';
+import { pendingCount } from '../../lib/notice-count';
 import { cn } from '../../lib/utils';
 import { LogoMark } from '../logo';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
@@ -12,11 +13,7 @@ import { NAV, NAV_ITEMS, type NavItem } from './nav';
 function useBadges(): Record<string, number | '!'> {
   const notices = useNotifications('open');
   return {
-    '/notifications': notices.data
-      ? notices.data.items.filter((n) => n.level !== 'daily').length
-      : notices.error
-        ? '!'
-        : 0,
+    '/notifications': notices.data ? pendingCount(notices.data.counts) : notices.error ? '!' : 0,
   };
 }
 

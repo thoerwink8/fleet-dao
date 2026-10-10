@@ -861,6 +861,35 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
     expect(audit.items.map((a) => a.action)).toEqual(['notification.resolve']);
   });
 
+  it('通知：counts 是各级别真实总数，limit 截断列表时也不跟着变小（#1745）', async () => {
+    const h = harness();
+    const s = await h.login();
+    const get = async (qs: string) =>
+      NotificationsResponse.parse(
+        await (await h.cockpit.request(`/api/notifications${qs}`, { headers: { cookie: s.cookie } })).json(),
+      );
+    const before = await get('?status=open');
+    for (let i = 0; i < 5; i += 1) {
+      h.store.data.notifications.push({
+        id: `n-d${i}`,
+        level: 'daily',
+        title: '日报',
+        body: '看一眼',
+        createdAt: h.clock.now.toISOString(),
+        deliveries: [],
+      });
+    }
+    const cut = await get('?status=open&limit=2');
+    expect(cut.items).toHaveLength(2);
+    expect(cut.nextCursor).toBeDefined();
+    expect(cut.counts.daily).toBe(before.counts.daily + 5);
+    expect(cut.counts.decision + cut.counts.alert).toBe(before.counts.decision + before.counts.alert);
+    // 已处理的只在 status=all 里算
+    await h.cockpit.request(`/api/notifications/n-d0/resolve`, write('POST', s));
+    expect((await get('?status=open')).counts.daily).toBe(before.counts.daily + 4);
+    expect((await get('?status=all')).counts.daily).toBe(before.counts.daily + 5);
+  });
+
   it('设置：只收表里有的键、值要合规、版本对不上 409；改了留记录', async () => {
     const h = harness();
     const s = await h.login();

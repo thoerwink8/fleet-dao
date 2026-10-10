@@ -645,6 +645,13 @@ export function describeStoreContract(name: string, make: MakeStore): void {
       it('通知：只看未处理的；处理掉之后不在里面；送达记录跟着；翻页不重不漏', async () => {
         const open = await store.listNotifications({ status: 'open', limit: 10 });
         expect(open.items.map((n) => n.id)).toEqual([IDS.notification2, IDS.notification1]);
+        // 各级别真实总数：和不分页的列表一致，处理掉的只在 all 里算
+        const tally = (items: { level: 'decision' | 'alert' | 'daily' }[]) => ({
+          decision: items.filter((n) => n.level === 'decision').length,
+          alert: items.filter((n) => n.level === 'alert').length,
+          daily: items.filter((n) => n.level === 'daily').length,
+        });
+        expect(await store.countNotifications({ status: 'open' })).toEqual(tally(open.items));
         expect(open.items[1]?.deliveries).toEqual([
           {
             channel: 'feishu',
@@ -665,6 +672,10 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           [IDS.notification2],
         );
         const all = await store.listNotifications({ status: 'all', limit: 10 });
+        expect(await store.countNotifications({ status: 'all' })).toEqual(tally(all.items));
+        expect(await store.countNotifications({ status: 'open' })).toEqual(
+          tally((await store.listNotifications({ status: 'open', limit: 10 })).items),
+        );
         // 刚处理掉的 notification1 带上了处理人和处理时刻；notification2（approval 那条）还开着、没这两条。
         expect(all.items.find((n) => n.id === IDS.notification1)).toMatchObject({
           resolvedBy: DEV_USER_ID,

@@ -354,6 +354,8 @@ export interface OpsStore {
   listJobs(): Promise<JobRecord[]>;
   /** 按 (建立时刻, id) 倒序。 */
   listNotifications(query: { status: 'open' | 'all' } & PageRequest): Promise<Page<NotificationRecord>>;
+  /** 各级别的真实条数（不受分页上限影响）；status 口径同 listNotifications。 */
+  countNotifications(query: { status: 'open' | 'all' }): Promise<Record<NotificationRecord['level'], number>>;
   resolveNotification(
     input: { id: string; by: Actor },
     audit: NewAuditEntry,
