@@ -52,5 +52,5 @@ test('【故意造出的失败】主页没读成：仍显示 LoadError', async (
   expect(alert.textContent).toContain('主页没读成');
   expect(alert.textContent).toContain('后端出错了');
   expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
-  expect(screen.queryByRole('heading', { name: '要你拍的' })).toBeNull();
+  expect(screen.queryByRole('button', { name: /要你拍的/ })).toBeNull();
 });

@@ -131,7 +131,9 @@ export function RunTimeline({
                     </>
                   )}
                   {usage ? <UsageParts parts={[...tokenParts(usage), ...costParts(usage)]} /> : null}
-                  <span className="min-w-0 truncate">为什么派给它：{r.whyRoute}</span>
+                  <span className="min-w-0 break-words" data-why-route>
+                    为什么派给它：{r.whyRoute}
+                  </span>
                 </div>
               </div>
             </li>

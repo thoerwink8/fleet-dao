@@ -8,6 +8,7 @@ import { formatClock, formatCount, formatDateTime, formatDuration, formatUsd, sp
 import {
   liveMs,
   noTierText,
+  runNth,
   SEGMENT_ORDER,
   SEGMENT_UNMETERED,
   type SegmentRunView,
@@ -26,8 +27,8 @@ import { costParts, EQUIVALENT_RULE, type Reading, reading } from '../lib/usage'
 import { cn } from '../lib/utils';
 import { Panel, Stat } from './page';
 import { RepoLink } from './repo-link';
-import { RunTranscript } from './run-transcript';
 import { StatusChip } from './status';
+import { Button } from './ui/button';
 
 /** 一项读数怎么写：全读到照写；读到一部分照写、写明几次没读到；全没读到写「没读到」；没有结束了的写 empty。 */
 function Read({ r, empty = '—', children }: { r: Reading; empty?: ReactNode; children: ReactNode }) {
@@ -151,13 +152,13 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
   if (costCollapsed) collapsed.push(costCollapsed);
   else cards.push(<CostStat key="cost" t={t} notYet={notYet} />);
 
-  // 有几张大格排几栏；手机一列、平板两列，多到四格才四列并排
+  // 有几张大格排几栏；四格手机就是 2×2（#1802，一行一张页面太长），电脑宽屏四列并排；三格手机一列
   const cols =
     cards.length >= 4
-      ? 'grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4'
+      ? 'grid-cols-2 gap-3 xl:grid-cols-4'
       : cards.length === 3
         ? 'grid-cols-1 gap-3 sm:grid-cols-3'
-        : 'grid-cols-1 gap-3 sm:grid-cols-2';
+        : 'grid-cols-2 gap-3';
 
   return (
     <div data-segment-stats>
@@ -363,13 +364,45 @@ function timesText(t: UsageTotals): string {
     .join(' · ');
 }
 
-/** 一段的那一行，加它下面按模型的几行；只用了一个模型的，模型名写在段名旁边，不再重复一行同样的数。 */
+/** 手机上一段只占一行的摘要：段、模型、次数、耗时、token、花费；没读到的写明没读到，不写 0。 */
+function segmentSummary(s: SegmentTotals, live: number | undefined): string {
+  const work = reading(s.runMs, s.missingTime, s.runs);
+  const tokens = reading(s.inputTokens + s.outputTokens, s.missingTokens, s.runs);
+  const cost = costParts(s).map((p) => (p.missing ? `${p.label ?? '花费'}没读到` : `${p.label} ${p.value}`));
+  return [
+    s.segment ? segmentLabel[s.segment] : UNKNOWN_SEGMENT,
+    s.byModel.length === 1
+      ? s.byModel[0]?.modelName
+      : s.byModel.length > 1
+        ? `${s.byModel.length} 个模型`
+        : '',
+    timesText(s),
+    work.kind === 'full' || work.kind === 'partial'
+      ? formatDuration(work.value + (live ?? 0))
+      : work.kind === 'missing'
+        ? '耗时没读到'
+        : live !== undefined
+          ? `在跑 ${formatDuration(live)}`
+          : '',
+    tokens.kind === 'full' || tokens.kind === 'partial'
+      ? `${formatCount(s.inputTokens)} / ${formatCount(s.outputTokens)} token`
+      : tokens.kind === 'missing'
+        ? 'token 没读到'
+        : '',
+    cost.join('，'),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+/** 一段的那一行，加它下面按模型的几行；只用了一个模型的，模型名写在段名旁边，不再重复一行同样的数。手机上只留一行摘要。 */
 function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) => number | undefined }) {
   const tier = tierText(s.segment, s);
   const only = s.byModel.length === 1 ? s.byModel[0] : undefined;
+  const summary = segmentSummary(s, live());
   return (
     <li className="py-3" data-segment={s.segment ?? 'unknown'}>
-      <div className={ROW}>
+      <div className={cn('hidden md:grid', COLUMNS)}>
         <div className="col-span-2 min-w-0 md:col-span-1">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
             <span className={cn('font-medium', s.segment === null && 'text-ink-stall')}>
@@ -409,8 +442,14 @@ function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) =>
         </Cell>
         <Figures t={s} live={live()} />
       </div>
+      <p
+        className={cn('text-sub break-words md:hidden', s.segment === null && 'text-ink-stall')}
+        data-segment-summary
+      >
+        {summary}
+      </p>
       {s.byModel.length > 1 ? (
-        <ul className="mt-2 space-y-2">
+        <ul className="mt-2 hidden space-y-2 md:block">
           {s.byModel.map((m) => (
             <li key={m.model} className={ROW} data-model={m.model}>
               <div className="col-span-2 min-w-0 border-l-2 pl-2 md:col-span-1">
@@ -541,15 +580,16 @@ function estimateGap(run: SegmentRunView): string | undefined {
 
 function RunRow({
   run,
-  taskId,
   repo,
   now,
   nth,
+  onView,
 }: {
   run: SegmentRunView;
-  taskId: string;
   repo: Repo;
   now: number;
+  /** 点「看会话」：由页面把 ?run=<笔号> 写进网址、开右侧抽屉。 */
+  onView: (runId: string) => void;
   /** 这一段的第几次（按起跑先后）。 */
   nth: number;
 }) {
@@ -585,7 +625,7 @@ function RunRow({
             按单号兜底
           </span>
         ) : null}
-        <span className="num w-full text-caption text-muted-foreground sm:ml-auto sm:w-auto">
+        <span className="num order-3 w-full text-caption text-muted-foreground sm:order-2 sm:ml-auto sm:w-auto">
           {run.startedAt ? clockOf(run.startedAt, now) : '开始没读到'}
           {run.running
             ? ' 起'
@@ -603,6 +643,17 @@ function RunRow({
             '—'
           )}
         </span>
+        <Button
+          type="button"
+          size="xs"
+          variant="outline"
+          className="order-2 ml-auto sm:order-3 sm:ml-0"
+          aria-label={`看会话：${run.segment ? segmentLabel[run.segment] : UNKNOWN_SEGMENT}第 ${nth} 次`}
+          data-view-transcript={run.id}
+          onClick={() => onView(run.id)}
+        >
+          看会话
+        </Button>
       </div>
       {figures.length || run.prNumber !== undefined || run.branch ? (
         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-caption text-muted-foreground">
@@ -641,28 +692,35 @@ function RunRow({
           ))}
         </ul>
       ) : null}
-      <RunTranscript taskId={taskId} runId={run.id} running={run.running} />
     </li>
   );
 }
 
 /** 每一笔：按起跑先后，段、模型、派工档、结局、起止和耗时、用量、PR；按单号兜底对上的、没读到的都写明。 */
-export function SegmentRunList({ d, now }: { d: TaskDetail; now: number }) {
+export function SegmentRunList({
+  d,
+  now,
+  onViewTranscript,
+}: {
+  d: TaskDetail;
+  now: number;
+  onViewTranscript: (runId: string) => void;
+}) {
   return (
     <Panel
       title="每一笔"
-      description="三段每跑一次一笔，按起跑先后。没记 task_id、按单号对上的标「按单号兜底」；没读到的写明为什么。"
+      description="三段每跑一次一笔，按起跑先后。没记 task_id、按单号对上的标「按单号兜底」；没读到的写明为什么。会话内容点「看会话」在右侧抽屉里看。"
       bodyClassName="px-4 py-1"
     >
       <ol className="divide-y">
-        {d.segmentRuns.map((run, i) => (
+        {d.segmentRuns.map((run) => (
           <RunRow
             key={run.id}
             run={run}
-            taskId={d.task.id}
             repo={d.repo}
             now={now}
-            nth={d.segmentRuns.slice(0, i + 1).filter((r) => r.segment === run.segment).length}
+            nth={runNth(d.segmentRuns, run.id) ?? 1}
+            onView={onViewTranscript}
           />
         ))}
       </ol>

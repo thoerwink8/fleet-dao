@@ -101,6 +101,10 @@
   --spacing-sidebar: 232px;
   --spacing-sidebar-collapsed: 60px;
   --spacing-sidebar-sheet: 260px;
+  /* 主页右侧抽屉（要你拍的 / 做完的）宽 360px；≥1920 时停靠成一列、其余浮在画布上。 */
+  --spacing-drawer: 360px;
+  /* 主页画布右上角抽屉按钮占的宽（含边距），画布工具条的右端让出这一块，免得压在一起。 */
+  --spacing-drawer-button: 14rem;
   /* 模型目录桌面下列表定高，和 routing-browse 的 LIST_HEIGHT（440）同一数。手机上不用，列表随页面滚。 */
   --spacing-routing-window: 440px;
   /* 路由页「调整顺序」区域桌面（xl）下的高度：视口高减去顶栏、页头、页签、用途按钮和这一用途的标题（约 22rem，含底部留白），内部自己滚。 */
@@ -666,6 +670,11 @@
 /* 路由页（/routing）：左列用途清单、右边选中用途的详情（xl 以上）。左列宽从 --container-routing-list 取。 */
 @utility grid-cols-routing {
   grid-template-columns: var(--container-routing-list) minmax(0, 1fr);
+}
+
+/* 思考档位表（/efforts）的一行：模型 | 路由 | 当前档位 | 改档位下拉（md 以上）。 */
+@utility grid-cols-efforts {
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.5fr) minmax(0, 8rem) 10rem;
 }
 
 /* 路由页「调整顺序」：左边模型先后、右边选中模型下的路由先后，并排（xl 以上）。左边略宽，一行要放下序号、名字、状态、开关和四个移动键。 */
