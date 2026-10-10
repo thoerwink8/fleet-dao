@@ -2,7 +2,7 @@
 name: fleet-review-screen
 description: 评审初筛（Haiku 5.5，只读）：一份 diff 或 PR 过清单——越出范围、碰标准路径、疑似密钥、删断言、测试没点名。清单式附行号，结论仍由 fleet-reviewer 或指挥官下。
 model: claude-haiku-5-5
-effort: medium
+effort: high
 maxTurns: 15
 omitClaudeMd: true
 tools: Read, Grep, Glob, Bash
