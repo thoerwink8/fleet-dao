@@ -3,6 +3,7 @@
 // 只认本仓文档在用的写法。故意不查的：围栏代码块和 HTML 注释（示例、占位）、别的仓的路径（「windsurf-dao 仓 `docs/…`」）、
 // 不以仓里现有的顶层目录或文件开头的路径（/etc/…、~/…、标签名 model/ 这类）、所在文档没有小节编号时的小数（版本号）。
 // 不查 specs/ 和 docs/decisions/（#654）：那是历史记录，后来的改名、删文件不该逼人回头改它们；指到还没有的东西不报这一类宽限也就用不着了。
+// docs/design/<模块>.md 是从 docs/design.md 拆出来的一片（#139）：里面光写的「第 X 节」「X.Y」「「…」一节」按 design 那份认，别的文档按它自己认。
 // 有误报就收窄这里的规则，不往文档里加豁免。pnpm check 里由 test/doc-pointers.test.ts 对全仓跑一遍。
 import { posix } from 'node:path';
 import {
@@ -20,6 +21,15 @@ import type { RepoView } from './repo.ts';
 
 /** 固定要查的三份活文档。docs/design/ 下的模块文件由 docFiles 加上。 */
 export const DOCS = ['docs/design.md', 'docs/ops.md', 'README.md'] as const;
+
+/**
+ * docs/design/<模块>.md 是从 docs/design.md 拆出来的一片（#139）：正文整段搬过去，一个字没改。
+ * 里面光写的「第 X 节」「X.Y」「「…」一节」指的是 design 那份，不是这份（它自己没有编号的节）；
+ * 别的文档光写的按它自己认。
+ */
+export function bareDoc(file: string): string {
+  return file.startsWith('docs/design/') ? 'docs/design.md' : file;
+}
 
 /** 这次要查的文件：上面三份，加上 docs/design/ 下按名字排的 .md。目录不存在就只有三份。 */
 export function docFiles(repo: RepoView): string[] {
@@ -264,7 +274,7 @@ class Checker {
         i = end ?? i + alias[0].length;
         continue;
       }
-      const here = context ?? file;
+      const here = context ?? bareDoc(file);
       const end =
         this.bareChapter(file, line, text, here, i) ??
         this.bareSub(file, line, text, here, i) ??
