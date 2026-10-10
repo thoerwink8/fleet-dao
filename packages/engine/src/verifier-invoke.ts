@@ -8,8 +8,8 @@
 // 1. **喂三样**：diff + 单子的「要什么」+「怎么算做完」。diff 不由本模块自己拼 `git diff`——**注入**进来
 //    （FetchDiff / FetchSpec），调用方（组装层）自己决定从哪读（GitHub、git 工作树、fake）。
 // 2. **换家族**：docs/decisions/0006-discussion-model-order.md 钉的顺序 gpt → grok → claude → deepseek → kimi（2026-10-05 起）；
-//    modelFamiliesAvoid（写过这张单的所有族）要全部跳过。所有不同家族都挑不出 → 明确失败（**没讨论成**），不许
-//    拿默认模型顶上、不许假装 pass。
+//    modelFamiliesAvoid（写过这张单的所有族）要全部跳过。别家都挑不出 → 两家都验 → 只派得出一家就「同族兜底验」
+//    （#1731：用挑出来的那一家起一次全新的冷会话，结论照常算）→ 一家都派不出就回等待。不许拿默认模型顶上、不许假装 pass。
 // 3. **只有三种能挡**：没做到验收条 / 有证据弄坏原有功能 / 安全或丢数据（specs/555 第 3 条）。
 //    模型提到的风格意见不算挡，从 problems 里滤掉、但不允许反过来把「算挡的」藏起来。
 //
@@ -22,12 +22,15 @@
 // - fetchSpec 抛错 → problems: ['读不到单子：…']、pass: false
 // - 单子点名、diff 没改的文件读不到或 fetchNamedFiles 抛错 → **不**走上面这条：提示词里标「读不到」，验收照常问模型。
 //   缺的是核对材料，不是这次验收没跑起来（#1612：缺材料判负会逼写代码的会话来回改）
-// - chooseModelForFamily 对每个可用家族都返回 undefined → problems: ['没讨论成：…']、pass: false
-// - 要派的族有在等的（回 `{ wait }`）、又没有别家给出结论 → 不起会话，routeWait 写明在等谁，调用方过一会儿重来（#1697）
-// - one-shot outcome != 'done' 或结论行不是固定写法 → problems: ['冷调用没跑成：…']、pass: false
+// - 没讨论成：只剩「要派的族有在等的（回 `{ wait }`）、又没有别家给出结论」这一种 → 不起会话，routeWait 写明在等谁，
+//   调用方过一会儿重来（#1697）。两家都验只派得出一家不再算没讨论成，改走同族兜底验（#1731，notes 以「同族兜底验：」开头）。
+// - 一个模型都派不出（每一族都回 undefined、也没有在等的）→ 不起会话，回 routeWait（families 为空，reason 写「一个模型都派不出，
+//   过一会儿重来」），调用方过一会儿重来，不停下等人（#1731）
+// - 会话没跑成（one-shot outcome 不是 done、结论行不是固定写法、结论写 fail 却没有一条属于三种能挡的问题）→ 不当场回失败：
+//   先记下，换下一个候选（这一族的下一条路由，再下一族，顺序和挑族一样，最后是作者族的同族兜底验）。**只有全部候选都试过还没有
+//   结论**，才回 problems: ['冷调用没跑成：试过的路由都没验成：…']、pass: false，列出每条路由和原因（#1731）
 // - 会话失败且失败分流认成上游临时故障（规则表上标了 blip）→ problems 空、upstreamRetry，调用方等一会儿再验
-// - 会话失败但认不出原因 → 换验收用途里下一条家族不同于作者的路由再验；都不行才在 problems 里列出每条路由和报错尾巴
-// - 结论写 fail 却没有一条属于三种能挡的问题 → 同样是「冷调用没跑成」（要人看，不当成过，也不让写代码的会话白改）
+// - 内存放不下没派出去（admission_blocked）、切号停下（org_switch）→ 照旧回这一次的结局，调用方认结局过一会儿重来
 // - 结论写 pass 但问题清单里还有算挡的 → pass: false（自相矛盾的结论不放行）
 
 import { errMessage } from '@fleet-dao/shared/util';
@@ -128,10 +131,11 @@ export const VerifierInvokeOutputSchema = z.object({
   /**
    * 没起会话、在等选路（#1697）：要派的族此刻派不出但等得来（chooseModelForFamily 回了 `{ wait }`）。调用方过一会儿重来，
    * 不报人。families 是在等的族（按问的先后），reason 是「族（在等什么）」用「；」连起来。
+   * 一个模型都派不出（#1731）也回这个：families 为空，reason 写「一个模型都派不出，过一会儿重来」。
    */
   routeWait: z
     .object({
-      families: z.array(ModelFamilySchema).min(1),
+      families: z.array(ModelFamilySchema),
       reason: z.string().min(1),
     })
     .optional(),
@@ -642,11 +646,20 @@ export async function invokeVerifier(
   };
 
   /**
-   * 拿挑中的模型起会话。认不出原因的失败换这一族的下一条路由再验（换的那一下挑不出、或在等，这一族就算派不出，
-   * 认不出的报错已经记进 misses）。
+   * 拿挑中的模型起会话。会话没跑成（结局不是 done、结论行写法不对、写 fail 却没有算挡的问题）先记进 misses，
+   * 换这一族的下一条路由再验；换的那一下挑不出、或在等，这一族就算没验成（none），调用方换下一族（#1731）。
+   * 上游临时故障、内存放不下、切号是「过一会儿再来」，原样回给调用方（final），不换。
    */
   const runFamily = async (family: ModelFamily, first: ChosenModel): Promise<FamilyOutcome> => {
     let m = first;
+    /** 这一条路由没验成：记下，换这一族的下一条路由；换不出就回 none。 */
+    const missAndNext = async (route: string, why: string): Promise<boolean> => {
+      misses.push({ route, tail: why });
+      const next = await pickFor(family);
+      if (next.kind !== 'model') return false;
+      m = next.m;
+      return true;
+    };
     while (true) {
       const picked: PickedVerifier = {
         family,
@@ -704,7 +717,21 @@ export async function invokeVerifier(
       const verdict: SegmentVerdict = judgeVerify(oneShotResult, { verdictLine: lastLineOfStdout });
 
       if (verdict.kind !== 'ok') {
-        // 只有「跑了、退出失败」才看分流。超时、被杀、切号、内存放不下保持原来的停下或等待，不换路由。
+        // 内存放不下没派出去、切号停下：这一次的结局原样回去，调用方认结局过一会儿重来，不换路由
+        if (oneShotResult.outcome === 'admission_blocked' || oneShotResult.outcome === 'org_switch') {
+          return {
+            kind: 'final',
+            out: {
+              pass: false,
+              problems: [coldCallFailed(verdict, oneShotResult)],
+              notes: who,
+              round: parsed.round,
+              session,
+            },
+          };
+        }
+        // 跑了、退出失败的看分流：上游临时故障等一会儿再验，不换家
+        let why = coldCallFailed(verdict, oneShotResult).replace(/^冷调用没跑成：/, '');
         if (oneShotResult.outcome === 'failed') {
           const klass = classOfFailed(oneShotResult);
           if (klass.kind === 'blip') {
@@ -720,41 +747,19 @@ export async function invokeVerifier(
               },
             };
           }
-          if (klass.kind === 'unknown') {
-            misses.push({ route: label, tail: klass.tail });
-            const next = await pickFor(family);
-            if (next.kind !== 'model') return { kind: 'none' };
-            m = next.m;
-            continue;
-          }
+          if (klass.kind === 'unknown') why = `认不出原因：${klass.tail}`;
         }
-        return {
-          kind: 'final',
-          out: {
-            pass: false,
-            problems: [coldCallFailed(verdict, oneShotResult)],
-            notes: who,
-            round: parsed.round,
-            session,
-          },
-        };
+        // 其余（超时、被杀、起不来、认得出的失败）：记下，换下一个候选
+        if (await missAndNext(label, why)) continue;
+        return { kind: 'none' };
       }
 
       const stdoutPieces = parseStdout(oneShotResult.stdout);
       const word = readVerdict(stdoutPieces.verdictLine);
       if (word === null) {
-        return {
-          kind: 'final',
-          out: {
-            pass: false,
-            problems: [
-              `冷调用没跑成：结论行不是固定写法「verdict: pass」或「verdict: fail」（最后一行是：${stdoutPieces.verdictLine.slice(0, 120)}）`,
-            ],
-            notes: who,
-            round: parsed.round,
-            session,
-          },
-        };
+        const why = `结论行不是固定写法「verdict: pass」或「verdict: fail」（最后一行是：${stdoutPieces.verdictLine.slice(0, 120)}）`;
+        if (await missAndNext(label, why)) continue;
+        return { kind: 'none' };
       }
       const notes: string[] = [who];
       if (stdoutPieces.droppedStyleNotes > 0) {
@@ -763,23 +768,14 @@ export async function invokeVerifier(
         );
       }
       if (word === 'fail' && stdoutPieces.problems.length === 0) {
-        // 说没过却一条算挡的都没写：不当成过（模型明明说了不行），也不能把空问题表丢回给写代码的会话白改——要人看
-        return {
-          kind: 'final',
-          out: {
-            pass: false,
-            problems: [
-              `冷调用没跑成：结论写了 fail，但「## 问题」里没有一条以「${BLOCKER_KINDS.join('」「')}」开头的（${
-                stdoutPieces.droppedStyleNotes > 0
-                  ? `它写了 ${stdoutPieces.droppedStyleNotes} 条不算挡的意见`
-                  : '它一条都没写'
-              }）`,
-            ],
-            notes: notes.join('；'),
-            round: parsed.round,
-            session,
-          },
-        };
+        // 说没过却一条算挡的都没写：不当成过（模型明明说了不行），也不能把空问题表丢回给写代码的会话白改——算这一条没验成，换下一个候选
+        const why = `结论写了 fail，但「## 问题」里没有一条以「${BLOCKER_KINDS.join('」「')}」开头的（${
+          stdoutPieces.droppedStyleNotes > 0
+            ? `它写了 ${stdoutPieces.droppedStyleNotes} 条不算挡的意见`
+            : '它一条都没写'
+        }）`;
+        if (await missAndNext(label, why)) continue;
+        return { kind: 'none' };
       }
       if (word === 'pass' && stdoutPieces.problems.length > 0) {
         notes.push(
@@ -818,66 +814,92 @@ export async function invokeVerifier(
       }
     }
     // 别家有在等的、又没有一家给出结论：等它（#1697）。不改成两家都验，那样是作者族互验，没有跨族把关。
-    // 认不出原因的失败（misses）优先：照旧停下列出来，不等了再白跑一遍。
-    if (misses.length === 0 && waiting.length > 0) return waitOut();
+    // 别家有没验成的（misses）也一样等：等来的那一族可能验得成，比停下等人好（#1731）。
+    if (waiting.length > 0) return waitOut();
   }
 
-  // 5. 两家都验：认不出作者（requireTwoFamilies），或别家全都真派不出。候选族先排不在避开族里的，再排避开族里的。
+  // 5. 两家都验：认不出作者（requireTwoFamilies），或别家全都派不出、没验成。候选族先排不在避开族里的，再排避开族里的。
   // 先把两个不同族的模型都挑出来，挑齐了才起会话（#1697）：只挑到一家时起了它，下一次重来又要把它整个再跑一遍。
   // 挑到一家、另一家在等：回等待，挑到的那家不起会话，它的预占由调用方收场时放掉。同一族只算一家。
-  if (misses.length === 0) {
-    const candidates =
-      parsed.requireTwoFamilies === true
-        ? [...FAMILY_ORDER.filter((f) => !avoid.has(f)), ...FAMILY_ORDER.filter((f) => avoid.has(f))]
-        : FAMILY_ORDER.filter((f) => avoid.has(f)); // 不在避开族里的，一家验时已经问过、全都派不出
-    const chosen: { family: ModelFamily; m: ChosenModel }[] = [];
-    for (const family of candidates) {
-      if (chosen.length >= 2) break;
-      const p = await pickFor(family);
-      if (p.kind === 'wait') waiting.push({ family, detail: p.detail });
-      if (p.kind === 'model') chosen.push({ family, m: p.m });
-    }
-    if (chosen.length < 2 && waiting.length > 0) return waitOut();
-    const verdicts: Extract<FamilyOutcome, { kind: 'verdict' }>[] = [];
-    if (chosen.length >= 2) {
-      for (const { family, m } of chosen) {
-        const r = await runFamily(family, m);
-        if (r.kind === 'final') return r.out;
-        if (r.kind !== 'verdict') break; // 认不出原因、这一族换不出路由：下面照旧列出试过的路由
-        verdicts.push(r);
-      }
-    }
-    if (verdicts.length >= 2) {
-      const failed = verdicts.filter((v) => !v.passed);
-      const names = verdicts.map((v) => `${v.family}（model ${v.modelId}）`).join('、');
-      return {
-        pass: failed.length === 0,
-        problems: failed.flatMap((v) => v.problems.map((p) => `${v.family}：${p}`)),
-        notes: [
-          `两家都验：${names}`,
-          ...verdicts.flatMap((v) => v.notes.slice(1).map((n) => `${v.family}：${n}`)),
-        ].join('；'),
-        round: parsed.round,
-        session: verdicts[1]!.session,
-      };
-    }
-    if (misses.length === 0) {
-      return {
-        pass: false,
-        problems: [
-          `没讨论成：两家都验要两个不同的族，只派得出 ${chosen.length < 2 ? chosen.length : verdicts.length} 家（避开的族 ${[...avoid].join('、') || '无'}）`,
-        ],
-        notes: '0006：不同家族凑不齐 = 没讨论成，不许默认模型顶上、更不许拿它当 pass',
-        round: parsed.round,
-      };
-    }
+  // 一家没验成（#1731）：接着问后面的候选族；只凑出一家的结论就按「同族兜底验」用它；一家都没有：没模型就等，试遍了才算没跑成。
+  const candidates =
+    parsed.requireTwoFamilies === true
+      ? [...FAMILY_ORDER.filter((f) => !avoid.has(f)), ...FAMILY_ORDER.filter((f) => avoid.has(f))]
+      : FAMILY_ORDER.filter((f) => avoid.has(f)); // 不在避开族里的，一家验时已经问过、全都派不出或没验成
+  const chosen: { family: ModelFamily; m: ChosenModel }[] = [];
+  // 候选族按挑族顺序只问一次：先挑齐两家，没验成的再从这里接着往后拿
+  const rest = [...candidates];
+  while (chosen.length < 2) {
+    const family = rest.shift();
+    if (family === undefined) break;
+    const p = await pickFor(family);
+    if (p.kind === 'wait') waiting.push({ family, detail: p.detail });
+    if (p.kind === 'model') chosen.push({ family, m: p.m });
   }
-
+  if (chosen.length < 2 && waiting.length > 0) return waitOut();
+  const verdicts: Extract<FamilyOutcome, { kind: 'verdict' }>[] = [];
+  for (const { family, m } of chosen) {
+    const r = await runFamily(family, m);
+    if (r.kind === 'final') return r.out;
+    if (r.kind === 'verdict') verdicts.push(r);
+  }
+  // 挑出来的有没验成的：按挑族的顺序接着问后面的族，凑够两家结论为止
+  while (verdicts.length < 2) {
+    const family = rest.shift();
+    if (family === undefined) break;
+    const p = await pickFor(family);
+    if (p.kind === 'wait') waiting.push({ family, detail: p.detail });
+    if (p.kind !== 'model') continue;
+    const r = await runFamily(family, p.m);
+    if (r.kind === 'final') return r.out;
+    if (r.kind === 'verdict') verdicts.push(r);
+  }
+  if (verdicts.length >= 2) {
+    const failed = verdicts.filter((v) => !v.passed);
+    const names = verdicts.map((v) => `${v.family}（model ${v.modelId}）`).join('、');
+    return {
+      pass: failed.length === 0,
+      problems: failed.flatMap((v) => v.problems.map((p) => `${v.family}：${p}`)),
+      notes: [
+        `两家都验：${names}`,
+        ...verdicts.flatMap((v) => v.notes.slice(1).map((n) => `${v.family}：${n}`)),
+      ].join('；'),
+      round: parsed.round,
+      session: verdicts[1]!.session,
+    };
+  }
   const listed = misses.map((item) => `${item.route}：${item.tail}`).join('；');
+  const only = verdicts[0];
+  // 只凑出一家的结论：它说没过就是没过（两家都验本来就要都过）；它说过、但还有族在等，等那一族来再验
+  if (only !== undefined && (!only.passed || waiting.length === 0)) {
+    return {
+      pass: only.passed,
+      problems: only.problems,
+      notes: [
+        `同族兜底验：族 ${only.family}（model ${only.modelId}），别家派不出或没验成，用它起了一次全新的冷会话`,
+        ...(misses.length > 0 ? [`没验成的路由：${listed}`] : []),
+        ...only.notes.slice(1),
+      ].join('；'),
+      round: parsed.round,
+      session: only.session,
+    };
+  }
+  if (waiting.length > 0) return waitOut();
+  if (misses.length === 0) {
+    // 一个族都派不出、也没有在等的：不停下等人，回等待，过一会儿重来（#1731）
+    const reason = `一个模型都派不出，过一会儿重来（避开的族 ${[...avoid].join('、') || '无'}）`;
+    return {
+      pass: false,
+      problems: [`这会儿验不了：${reason}`],
+      notes: '没有能派的验收模型：过一会儿重来，不许默认模型顶上、更不许拿它当 pass',
+      round: parsed.round,
+      routeWait: { families: [], reason },
+    };
+  }
   return {
     pass: false,
-    problems: [`冷调用没跑成：认不出原因，试过的路由都没验成：${listed}`],
-    notes: '认不出原因，验收用途里还能派的路由都试过了',
+    problems: [`冷调用没跑成：试过的路由都没验成：${listed}`],
+    notes: '验收用途里还能派的路由（含作者族的同族兜底验）都试过了',
     round: parsed.round,
     ...(lastSession === undefined ? {} : { session: lastSession }),
   };
