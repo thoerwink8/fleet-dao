@@ -5,7 +5,8 @@
 #   以 fleet 直接构建（那样第三方代码读得到密钥）；沙箱没挡住时，构建读得到 /etc/fleet-dao 下的诱饵、
 #   或连得上本机库的 unix socket；只遮三个目录、仍看主机 /proc 时，同 UID 经 /proc/<pid>/root 绕路读密钥。
 # 前几段不需要 root（systemd-run 换成桩）。独占创建和「不覆盖已有文件」在临时目录里演练，也不需要 root。
-# 真沙箱那几段要 root；不是 root 就记没跑成、退出 2。
+# 真沙箱那几段要 root；不是 root 就记没跑成、退出 2（run.sh 用 sudo 再跑）。
+# 已经是 root 但沙箱建不成（没有 /run/systemd/system 等）：照验收第 3/8 条走构建失败红字路径并断言，不跳过。
 # 诱饵不用固定文件名：在目录里独占创建一个临时文件，退出只删本次这一个（设备号和 inode 都对上才删）。
 # 已有同名文件、已有符号链接都不写。这台没有 fleet 账号时，家目录放在本次临时目录里，退出只删账号、不碰 /home/fleet。
 # 用法：sudo bash deploy/test/build-isolation.test.sh。退出码：0 通过，1 不通过，2 有没跑成的。
@@ -420,16 +421,73 @@ else
   fi
 fi
 
+echo "== 验收第 8 条钉死：root 下没有 /run/systemd/system 不得 skipped=1"
+# 只扫本文件「真沙箱：构建环境」到「真沙箱：经 /proc」这一段里、碰到无 systemd 目录之后到下一个 elif 之前：
+# 必须出现构建失败红字路径（run_release / 构建环境建不成），且不得把 skipped 设成 1。
+gate_chunk=$(awk '
+  /真沙箱：构建环境里读诱饵/ { on=1 }
+  on { print }
+  on && /真沙箱：经 \/proc/ { exit }
+' "$HERE/build-isolation.test.sh")
+no_sys_chunk=$(awk '
+  /! -d \/run\/systemd\/system/ { on=1; next }
+  on && /^elif / { exit }
+  on { print }
+' <<<"$gate_chunk")
+if [[ -z "$no_sys_chunk" ]]; then
+  printf '  ✗ 找不到「没有 /run/systemd/system」分支\n'
+  fail=1
+elif grep -q 'skipped=1' <<<"$no_sys_chunk"; then
+  printf '  ✗ 无 systemd 目录分支里还有 skipped=1（应红字失败、不跳过）\n'
+  fail=1
+elif ! grep -qE 'run_release|构建环境建不成|没有 systemd-run|沙箱起不来' <<<"$no_sys_chunk"; then
+  printf '  ✗ 无 systemd 目录分支没有走构建失败红字路径\n'
+  fail=1
+else
+  printf '  ✓ 无 systemd 目录分支红字失败、不跳过\n'
+fi
+
 echo "== 真沙箱：构建环境里读诱饵失败并报出路径；连本机库 socket 被拒"
-if ((EUID != 0)) || [[ ! -d /run/systemd/system ]] || ! command -v runuser >/dev/null; then
-  echo "  … 没跑成：要 root 和 systemd（sudo bash deploy/test/build-isolation.test.sh）"
+# do_real=1：具备 root+systemd+runuser，后面真沙箱用例要跑。
+# root 但沙箱基础设施没有：不设 skipped，改为当场走「构建环境建不成」红字失败（验收第 8 条）。
+do_real=0
+if ((EUID != 0)); then
+  echo "  … 没跑成：要 root（sudo bash deploy/test/build-isolation.test.sh）"
+  skipped=1
+elif [[ ! -d /run/systemd/system ]]; then
+  echo "== 没有 systemd（/run/systemd/system 不存在）：发布失败，不调用 as_fleet_in"
+  unset -f systemd-run
+  hash -r
+  BUILD_SANDBOX_STATE=""
+  STUB_MODE=""
+  # 本机若仍有 systemd-run 二进制，挡住它，确保走到「建不成」而不是误建成
+  PATH=$NOBIN
+  hash -r
+  run_release live >"$OUT" 2>&1
+  out=$(cat -- "$OUT")
+  check "沙箱不可用时退出码不是 0" "$([[ "$REL_RC" != 0 ]] && echo fail || echo ok)" fail
+  if grep -qE '没有 systemd-run|沙箱起不来|构建环境建不成' <<<"$out"; then
+    printf '  ✓ 红里写沙箱建不成\n'
+  else
+    printf '  ✗ 红里没有沙箱建不成：%s\n' "$(show "$out")"
+    fail=1
+  fi
+  check "沙箱不可用时红里写不退回" "$(grep -c '不退回' <<<"$out" | tr -d ' ')" 1
+  check "沙箱不可用时没有调用 as_fleet_in" "$(bare_n)" 0
+  check "沙箱不可用时没有切版本" "$(later_n)" 0
+elif ! command -v runuser >/dev/null; then
+  echo "  … 没跑成：没有 runuser，对照读诱饵试不了"
   skipped=1
 elif ((skipped == 0)); then
   unset -f systemd-run
   hash -r
-  if ! prepare_fleet_user; then skipped=1; fi
+  if prepare_fleet_user; then
+    do_real=1
+  else
+    skipped=1
+  fi
 fi
-if ((EUID == 0)) && ((skipped == 0)); then
+if ((do_real == 1)) && ((skipped == 0)); then
   if [[ -L /etc/fleet-dao ]]; then
     echo "  … 没跑成：/etc/fleet-dao 是符号链接，不往链接目标里放诱饵"
     skipped=1
@@ -443,7 +501,7 @@ if ((EUID == 0)) && ((skipped == 0)); then
     fi
   fi
 fi
-if ((EUID == 0)) && ((skipped == 0)); then
+if ((do_real == 1)) && ((skipped == 0)); then
   gid=$(id -g fleet 2>/dev/null || true)
   if [[ -z "$gid" ]]; then
     echo "  … 没跑成：读不到 fleet 的属组"
@@ -466,7 +524,7 @@ if ((EUID == 0)) && ((skipped == 0)); then
     rm -f -- "$got"
   fi
 fi
-if ((EUID == 0)) && ((skipped == 0)); then
+if ((do_real == 1)) && ((skipped == 0)); then
   if [[ ! "$BAIT" =~ ^/etc/fleet-dao/fleet-build-isolation\.[A-Za-z0-9]+$ ]]; then
     echo "  … 没跑成：诱饵路径不是这次独占创建的临时文件"
     skipped=1
@@ -532,7 +590,7 @@ JS
     fi
   fi
 fi
-if ((EUID == 0)) && ((skipped == 0)); then
+if ((do_real == 1)) && ((skipped == 0)); then
   sock_hold=$(mktemp "$SOCK_REAL/.fleet-build-isolation.XXXXXX") || sock_hold=""
   if [[ -z "$sock_hold" ]]; then
     echo "  … 没跑成：在本机库目录里独占建不了 socket 用的名字"
@@ -543,7 +601,7 @@ if ((EUID == 0)) && ((skipped == 0)); then
     SOCK=$sock_hold
   fi
 fi
-if ((EUID == 0)) && ((skipped == 0)); then
+if ((do_real == 1)) && ((skipped == 0)); then
   cat >"$TMP/sock-server.mjs" <<'JS'
 import net from "node:net";
 import fs from "node:fs";
@@ -620,7 +678,7 @@ echo "== 真沙箱：经 /proc/<pid>/root 绕路读诱饵失败（同 UID 主机
 # 对照组：读的进程用 setpriv 成 fleet 后自己起占位再读（yama.ptrace_scope=1 只放行祖先）。
 # 不用 runuser：它的 $! 是 root 的 PAM 父进程，fleet 去读会被拒。沙箱用例的占位用
 # setpriv 直接 exec，$! 就是 fleet 的 sleep；读之前打一行 stat 属主，应是 fleet。
-if ((EUID == 0)) && ((skipped == 0)) && [[ -n "$BAIT" && -n "$BAIT_ID" ]]; then
+if ((do_real == 1)) && ((skipped == 0)) && [[ -n "$BAIT" && -n "$BAIT_ID" ]]; then
   STAGE=$TMP/stage-proc
   install -d -o fleet -g fleet -m 750 "$STAGE"
   # 读进程用 setpriv 成 fleet 后自己起占位再读（yama 只放行祖先）。已是 fleet 就直接 sleep：
@@ -724,7 +782,7 @@ exit 1
     HOLDER_PID=""
   fi
 elif ((EUID != 0)); then
-  echo "  … 没跑成：要 root 和 systemd（sudo bash deploy/test/build-isolation.test.sh）"
+  echo "  … 没跑成：要 root（sudo bash deploy/test/build-isolation.test.sh）"
   skipped=1
 fi
 
