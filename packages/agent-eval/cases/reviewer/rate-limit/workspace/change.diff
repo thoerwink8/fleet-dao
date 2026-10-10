@@ -1,0 +1,58 @@
+diff --git a/src/limiter.ts b/src/limiter.ts
+index 0000000..d4e5f6a 100644
+--- a/src/limiter.ts
++++ b/src/limiter.ts
+@@ -1,6 +1,66 @@
++import type { Store } from './store.ts';
++
++/** 令牌桶：容量 capacity，每秒补 ratePerSec 个，不会超过容量。 */
++export class TokenBucket {
++  #tokens: number;
++  #last: number;
++  readonly #capacity: number;
++  readonly #ratePerSec: number;
++
++  constructor(capacity: number, ratePerSec: number, now: number) {
++    this.#capacity = capacity;
++    this.#ratePerSec = ratePerSec;
++    this.#tokens = capacity;
++    this.#last = now;
++  }
++
++  take(now: number): boolean {
++    const elapsedSec = (now - this.#last) / 1000;
++    this.#tokens = Math.max(this.#capacity, this.#tokens + elapsedSec * this.#ratePerSec);
++    this.#last = now;
++    if (this.#tokens < 1) return false;
++    this.#tokens -= 1;
++    return true;
++  }
++}
++
++/** 多进程共用的计数：每个 key 每个窗口最多 limit 次。 */
++export async function takeShared(store: Store, key: string, limit: number): Promise<boolean> {
++  const used = await store.get(key);
++  if (used >= limit) return false;
++  await store.set(key, used + 1);
++  return true;
++}
++
++/** 窗口到期时间，单位毫秒。 */
++export function resetAt(nowMs: number, windowSec: number): number {
++  return nowMs + windowSec;
++}
++
++const MAX_RETRIES = 3;
++
++/** 首次加最多 MAX_RETRIES 次重试，所以最多试 MAX_RETRIES + 1 次。 */
++export async function takeWithRetry(store: Store, key: string, limit: number): Promise<boolean> {
++  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
++    try {
++      return await takeShared(store, key, limit);
++    } catch {
++      // 存储暂时读不到：重试；最后一次也失败就放行（产品要求：限流挂了不能挡住正常请求）
++      if (attempt === MAX_RETRIES) return true;
++    }
++  }
++  return true;
++}
