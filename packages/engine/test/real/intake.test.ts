@@ -169,6 +169,8 @@ interface StartCall {
 function fakeClient(
   opts: {
     running?: number;
+    /** 在跑的工作流编号（写了就不用 running 造的编号）。 */
+    runningIds?: string[];
     listFails?: boolean;
     startFails?: (n: number) => Error | undefined;
     /** describe 抛这个。不是 WorkflowNotFoundError 才算问不清。 */
@@ -209,6 +211,10 @@ function fakeClient(
         return {
           async *[Symbol.asyncIterator]() {
             if (opts.listFails) throw new Error('可见性存储连不上');
+            if (opts.runningIds) {
+              for (const workflowId of opts.runningIds) yield { workflowId };
+              return;
+            }
             for (let i = 0; i < (opts.running ?? 0); i += 1) yield { workflowId: `task:x/y#${i}` };
           },
         };
@@ -553,6 +559,61 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     expect(await t.db.select().from(tasks)).toHaveLength(0);
     const runs = await t.db.select().from(scheduleRuns);
     expect(runs[0]).toMatchObject({ outcome: 'failed' });
+  });
+
+  it('在跑的数去掉任务行是 stalled 的（#1776）：6 条在跑里 6 条停下等人，不占名额，照起', async () => {
+    const { repo } = await seedWorld(t.db);
+    const ids: string[] = [];
+    for (let n = 101; n <= 106; n += 1) {
+      await t.db.insert(tasks).values({
+        repoId: repo.id,
+        issueNumber: n,
+        title: 'x',
+        rawRequest: 'y',
+        requestedBy: 'founder',
+        priority: 1,
+        state: 'stalled',
+      });
+      ids.push(`task:acme/demo#${n}`);
+    }
+    const { gh } = fakeGh();
+    const { client, starts } = fakeClient({ runningIds: ids });
+    logs.length = 0;
+    await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(logs.join(' | ')).toContain('停下等人 6 条（不占名额）');
+    expect(starts).toHaveLength(1);
+  });
+
+  it('在跑的数：一条停下、其余在干活（含没有任务行的、二代编号）→ 只去掉停下的那条', async () => {
+    const { repo } = await seedWorld(t.db);
+    for (const [n, state] of [
+      [101, 'stalled'],
+      [102, 'running'],
+    ] as const) {
+      await t.db.insert(tasks).values({
+        repoId: repo.id,
+        issueNumber: n,
+        title: 'x',
+        rawRequest: 'y',
+        requestedBy: 'founder',
+        priority: 1,
+        state,
+      });
+    }
+    const { gh } = fakeGh();
+    const { client } = fakeClient({
+      runningIds: [
+        'task:acme/demo#101:r2',
+        'task:acme/demo#102',
+        'task:acme/demo#103',
+        'task:other/x#1',
+        'task:acme/demo#104',
+        'task:acme/demo#105',
+      ],
+    });
+    logs.length = 0;
+    await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(logs.join(' | ')).toContain('开头在干活 5 条、停下等人 1 条（不占名额）');
   });
 
   it('交代不全：在单子上留言（幂等键由缺的内容算出），不建任务行、不起', async () => {

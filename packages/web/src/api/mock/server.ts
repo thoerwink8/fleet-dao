@@ -421,6 +421,40 @@ function mockProbeHistory(
       },
     );
   }
+  // Cursor（ch-cursor）的按需路由：一次真探判了疑似降智，后面全是「按需」没探（#1748：色条不能全黄、真探不能被埋）
+  const hi = routes.find((r) => r.id === 'r-cursor-hi' && r.probe);
+  if (hi?.probe) {
+    const t0 = Date.parse(hi.probe.at);
+    const base = { routeId: hi.id, channelId: hi.channelId };
+    cells.push({
+      ...base,
+      id: cells.length + 1,
+      probedAt: new Date(t0 - 60 * 60_000).toISOString(),
+      result: 'failed',
+      durationMs: 9_200,
+      failureReason: '疑似降智：题 17 乘 23 等于多少？只回数字。，应为 391，实答 381',
+      requestText: '题：17 乘 23 等于多少？只回数字。\n再说一句你是什么模型。',
+      responseText: '381\nOK\n我是 GPT-4 级别的通用助手。',
+      checkQuestion: '17 乘 23 等于多少？只回数字。',
+      checkExpected: '391',
+      checkAnswer: '381',
+      checkPassed: false,
+      selfIdentity: 'GPT-4 级别的通用助手',
+    });
+    for (let i = 0; i < 12; i++) {
+      cells.push({
+        ...base,
+        id: cells.length + 1,
+        probedAt: new Date(t0 - (50 - i * 4) * 60_000).toISOString(),
+        result: 'not_probed',
+        durationMs: null,
+        failureReason: `${ROUTE_PROBE_ON_DEMAND_MARK}。上一次真探：不通，10-10 09:05（疑似降智：题 17 乘 23 等于多少？只回数字。，应为 391，实答 381）`,
+        requestText: null,
+        responseText: null,
+        ...NO_CHECK,
+      });
+    }
+  }
   return RouteProbeHistoryResponse.parse({ state: 'ok', ...probeHistoryStrips(cells) });
 }
 
@@ -733,6 +767,11 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     else if (model?.retiredAt && Date.parse(model.retiredAt) <= t) connect = fact('dead', '模型已下架');
     else if (r.alive) connect = fact('live', '探针探通了');
     else if (!r.probe) connect = fact('unknown', '探针还没看过这条路由');
+    else if (r.probe.state === 'on_demand')
+      connect = fact(
+        'unknown',
+        `按需探测（不主动探，派给它时先探一次）：${r.probe.detail ?? '探针没写原因'}`,
+      );
     else if (r.probe.state === 'skipped')
       connect = fact('unknown', `探针这一轮没探它（不是探了没通）：${r.probe.detail ?? '探针没写原因'}`);
     else connect = fact('dead', `探针判不在线：${r.probe.detail ?? `探针没写原因（${r.probe.state}）`}`);

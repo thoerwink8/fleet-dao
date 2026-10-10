@@ -680,6 +680,7 @@ export function notificationView(n: NotificationRecord): z.input<typeof Notifica
     body: n.body,
     link: n.link,
     taskId: n.taskId,
+    dedupeKey: n.dedupeKey,
     createdAt: n.createdAt,
     resolvedAt: n.resolvedAt,
     resolvedBy: n.resolvedBy,

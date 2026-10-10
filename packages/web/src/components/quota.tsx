@@ -48,6 +48,23 @@ export function readingVerb(reading: QuotaWindowView['reading']): '读' | '算' 
 /** 每个额度数字都要标明来源：实读（接口读到的）还是估算（按我们自己的用量算的），悬停看读法（reclaude-carpool……）。 */
 export function ReadingBadge({ w, className }: { w: QuotaWindowView; className?: string }) {
   const measured = w.reading === 'measured';
+  // 读数过期（#1748）：旧数不能挂「实读」的牌子，换成「读数过期」，颜色和「读数过期」那一栏对上
+  if (w.stale) {
+    return (
+      <span
+        title={`${measured ? '从官方或网页接口读到的' : '按我们自己的用量估的'}，但读数太旧，不是现值（读法 ${w.source}）`}
+        data-source={w.source}
+        data-stale-badge="true"
+        className={cn(
+          'inline-flex h-4 shrink-0 items-center gap-1 rounded bg-st-stall/14 px-1 text-micro leading-none whitespace-nowrap text-ink-stall',
+          className,
+        )}
+      >
+        <span className="size-1.5 rounded-full bg-st-stall" />
+        读数过期
+      </span>
+    );
+  }
   return (
     <span
       title={`${measured ? '从官方或网页接口读到的' : '读不到，按我们自己的用量估的'}（读法 ${w.source}）`}
@@ -165,11 +182,25 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
       <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
         {pair ? (
           <span className="num whitespace-normal">
-            <span className={cn('text-stat-num font-semibold', full && 'text-ink-fail')}>{pair[0]}</span>
+            <span
+              className={cn(
+                'text-stat-num font-semibold',
+                full && 'text-ink-fail',
+                w.stale && 'text-muted-foreground',
+              )}
+            >
+              {pair[0]}
+            </span>
             <span className="text-xs text-muted-foreground"> / {pair[1]}</span>
           </span>
         ) : util !== undefined ? (
-          <span className={cn('num text-stat-num font-semibold', full && 'text-ink-fail')}>
+          <span
+            className={cn(
+              'num text-stat-num font-semibold',
+              full && 'text-ink-fail',
+              w.stale && 'text-muted-foreground',
+            )}
+          >
             {formatPercent(util)}
           </span>
         ) : upstreamFull ? (
@@ -189,7 +220,10 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
           <ReadingBadge w={w} />
         </span>
       </div>
-      <QuotaBar util={util ?? (upstreamFull ? 1 : undefined)} className="mt-1.5" />
+      <QuotaBar
+        util={util ?? (upstreamFull ? 1 : undefined)}
+        className={cn('mt-1.5', w.stale && 'opacity-40')}
+      />
       <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 text-caption text-muted-foreground">
         {w.resetsAt ? (
           <span className={cn(hot && 'font-medium text-foreground')}>
@@ -224,6 +258,12 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
           title={w.statusRaw ? `上游原话：${w.statusRaw}` : undefined}
         >
           {upstreamStatusLabel[w.upstreamStatus]}
+        </div>
+      ) : null}
+      {w.stale ? (
+        <div data-stale-note className="mt-1.5 text-caption font-medium text-ink-stall">
+          读数过期，上面是 <span className="num">{formatAgo(w.readAt, now)}</span>
+          {readingVerb(w.reading)}到的旧数，不是现值，不参与排序
         </div>
       ) : null}
       {w.staleSince ? (
