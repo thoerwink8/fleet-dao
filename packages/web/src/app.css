@@ -101,6 +101,10 @@
   --spacing-sidebar: 232px;
   --spacing-sidebar-collapsed: 60px;
   --spacing-sidebar-sheet: 260px;
+  /* 主页右侧抽屉（要你拍的 / 做完的）宽 360px；≥1920 时停靠成一列、其余浮在画布上。 */
+  --spacing-drawer: 360px;
+  /* 主页画布右上角抽屉按钮占的宽（含边距），画布工具条的右端让出这一块，免得压在一起。 */
+  --spacing-drawer-button: 14rem;
   /* 模型目录桌面下列表定高，和 routing-browse 的 LIST_HEIGHT（440）同一数。手机上不用，列表随页面滚。 */
   --spacing-routing-window: 440px;
   /* 路由页「调整顺序」区域桌面（xl）下的高度：视口高减去顶栏、页头、页签、用途按钮和这一用途的标题（约 22rem，含底部留白），内部自己滚。 */

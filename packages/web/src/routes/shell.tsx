@@ -7,15 +7,18 @@ import { loginPath } from '../api/index';
 import { LogoMark } from '../components/logo';
 import { isRemotePage, OnlyLocalNotice } from '../components/node-notice';
 import { RepoProvider } from '../components/repo-context';
+import { BottomNav } from '../components/shell/bottom-nav';
 import { CommandMenu } from '../components/shell/command-menu';
 import { SidebarNav } from '../components/shell/sidebar';
 import { Topbar } from '../components/shell/topbar';
+import { TopbarSlotProvider } from '../components/shell/topbar-slot';
 import { TaskActionsProvider } from '../components/task-actions';
 import { Button } from '../components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '../components/ui/sheet';
 import { useLocalState } from '../lib/hooks';
 import { useNodeSelection } from '../lib/node';
 import { cn } from '../lib/utils';
+import { useNavRoom, usePhone } from '../lib/viewport';
 
 function Screen({ children }: { children: ReactNode }) {
   return (
@@ -106,7 +109,11 @@ function skipToContent(event: { preventDefault(): void }) {
 
 function Frame() {
   const location = useLocation();
-  const [collapsed, setCollapsed] = useLocalState(`${brand.storagePrefix}sidebar-collapsed`, false);
+  // 侧栏收不收：人手动选过就按人选的；没选过按屏宽，≥1280 展开、768–1279 收成图标栏
+  const [picked, setPicked] = useLocalState<boolean | null>(`${brand.storagePrefix}sidebar-collapsed`, null);
+  const navRoom = useNavRoom();
+  const collapsed = picked ?? !navRoom;
+  const phone = usePhone();
   const [mobileNav, setMobileNav] = useState(false);
   const [cmdk, setCmdk] = useState(false);
   // 推送等确认登录之后再连：连上时的全量重拉不和首屏的读取挤在一起，没登录也不去连
@@ -126,20 +133,23 @@ function Frame() {
       </a>
       <div className="flex h-dvh flex-col overflow-hidden bg-background">
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          <aside
-            className={cn(
-              'hidden shrink-0 border-r bg-panel transition-[width] duration-200 md:block',
-              collapsed ? 'w-sidebar-collapsed' : 'w-sidebar',
-            )}
-          >
-            <SidebarNav collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
-          </aside>
+          {phone ? null : (
+            <aside
+              className={cn(
+                'shrink-0 border-r bg-panel transition-[width] duration-200',
+                collapsed ? 'w-sidebar-collapsed' : 'w-sidebar',
+              )}
+            >
+              <SidebarNav collapsed={collapsed} onToggle={() => setPicked(!collapsed)} />
+            </aside>
+          )}
           <div className="flex min-w-0 flex-1 flex-col">
-            <Topbar onMenu={() => setMobileNav(true)} onSearch={() => setCmdk(true)} />
+            <Topbar onSearch={() => setCmdk(true)} />
+            {/* min-w-0 + overflow-x-hidden：任何一页的内容比正文区宽，都只在自己里面处理，不把整页撑出横向滚动（点验 audit.md，390/768 宽主页被切） */}
             <main
               id={CONTENT_ID}
               tabIndex={-1}
-              className="skip-target relative min-h-0 flex-1 overflow-y-auto scrollbar-thin"
+              className="skip-target relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto scrollbar-thin"
               onMouseDown={(event) => {
                 // 点空白不该把焦点抢走：只有「跳到正文」才聚焦正文区本身。
                 if (event.target === event.currentTarget) event.preventDefault();
@@ -149,7 +159,8 @@ function Frame() {
             </main>
           </div>
         </div>
-        <Sheet open={mobileNav} onOpenChange={setMobileNav}>
+        {phone ? <BottomNav onMore={() => setMobileNav(true)} /> : null}
+        <Sheet open={mobileNav && phone} onOpenChange={setMobileNav}>
           <SheetContent side="left" className="w-sidebar-sheet bg-panel p-0">
             <SheetTitle className="sr-only">导航</SheetTitle>
             <SheetDescription className="sr-only">{brand.product}的全部页面</SheetDescription>
@@ -167,7 +178,9 @@ export default function Shell() {
     <AuthGate>
       <RepoProvider>
         <TaskActionsProvider>
-          <Frame />
+          <TopbarSlotProvider>
+            <Frame />
+          </TopbarSlotProvider>
         </TaskActionsProvider>
       </RepoProvider>
     </AuthGate>

@@ -183,7 +183,7 @@ describe('退出登录', () => {
   function topbar(api: FleetApi) {
     return renderApp(
       <>
-        <Topbar onMenu={() => undefined} onSearch={() => undefined} />
+        <Topbar onSearch={() => undefined} />
         <Routes>
           <Route path="/login" element={<p>登录页占位</p>} />
           <Route path="*" element={null} />

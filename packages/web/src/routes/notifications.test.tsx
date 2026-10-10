@@ -167,7 +167,7 @@ describe('通知数同一口径（#1745）', () => {
       });
     renderApp(
       <>
-        <Topbar onMenu={() => {}} onSearch={() => {}} />
+        <Topbar onSearch={() => {}} />
         <SidebarNav />
         <NotificationsPage />
       </>,
