@@ -9,6 +9,8 @@
 #   （临时目录、本机回环上的临时端口、自签证书）打请求：带完整提交号的 release.json 只给隧道那头（这里拿 127.0.0.2 当法国），
 #   别处来的 404；每种回应都带 noindex；robots.txt 不禁抓（禁抓了爬虫就看不到 noindex）。这台没有 nginx、openssl、curl
 #   就记「没跑成」。
+#   另外查访问日志：名字带 fleet_ 的 log_format 含 $host，每个 server 的 access_log 引用它，路径仍是
+#   /var/log/nginx/access.log。装了 nginx 就对渲染结果跑 nginx -t；没装记「没跑成」，不当通过。
 # 用法：bash deploy/test/public-site.test.sh（不用 root）。退出码：0 通过，1 不通过，2 有没跑成的。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -239,6 +241,111 @@ robots_rule() {
   '
 }
 
+# 访问日志按站点分得开：http 层一条名字带 fleet_ 的 log_format，里面有 $host；每个 server 的 access_log 引用它，
+# 路径仍是 /var/log/nginx/access.log。写在 http 层（文件顶上、server 外面）的 access_log 会记进别家站点，也算不合格。
+# 缺了什么一行一条，齐了什么都不打印。文件读不到照实说，不当成齐了。注释掉的不算。
+host_log_gaps() { # 站点文件
+  if [[ ! -f "$1" || ! -r "$1" ]]; then
+    printf '读不到站点配置 %s\n' "$1"
+    return 0
+  fi
+  awk '
+    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    {
+      line = $0
+      sub(/#.*/, "", line)
+      line = trim(line)
+      if (line == "") next
+      if (line ~ /\{$/) {
+        depth++
+        if (depth == 1 && line ~ /^server([ \t{]|$)/) { in_server = 1; saw = 0 }
+        next
+      }
+      if (line == "}") {
+        if (depth == 1 && in_server) {
+          servers++
+          if (!saw) missing++
+          in_server = 0
+        }
+        if (depth > 0) depth--
+        next
+      }
+      if (depth == 0 && line ~ /^log_format[ \t]+/) {
+        name = line
+        sub(/^log_format[ \t]+/, "", name)
+        sub(/[ \t].*/, "", name)
+        if (name ~ /^fleet_/) {
+          fleet++
+          fname = name
+          fbody = line
+          sub(/^log_format[ \t]+[^ \t]+[ \t]+/, "", fbody)
+          sub(/;[ \t]*$/, "", fbody)
+        }
+      }
+      if (line ~ /^access_log[ \t]/) {
+        if (depth == 0) http_logs++
+        else if (depth == 1 && in_server) {
+          if (line ~ /^access_log[ \t]+\/var\/log\/nginx\/access\.log[ \t]+[^ \t;]+;[ \t]*$/) {
+            used = line
+            sub(/^access_log[ \t]+\/var\/log\/nginx\/access\.log[ \t]+/, "", used)
+            sub(/;[ \t]*$/, "", used)
+            saw = 1
+            if (used_name == "") used_name = used
+            else if (used_name != used) mixed = 1
+          } else {
+            saw = 1
+            bad_path = line
+          }
+        }
+      }
+    }
+    END {
+      if (fleet != 1) print "应有一条名字带 fleet_ 的 log_format，实际 " fleet + 0 " 条"
+      else if (fbody !~ /\$host/) print "log_format " fname " 里没有 $host"
+      if (http_logs > 0) print "access_log 写在 http 层：别家站点的请求也会记"
+      if (servers == 0) print "一个 server 都没有：认不出这份站点配置"
+      else if (missing > 0) print "有 server 的 access_log 没引用 " (fname == "" ? "fleet_ 格式" : fname)
+      if (bad_path != "") print "access_log 路径不是 /var/log/nginx/access.log：" bad_path
+      if (mixed) print "各 server 的 access_log 没用同一个格式"
+      else if (fname != "" && used_name != "" && used_name != fname && bad_path == "") print "access_log 没引用 " fname
+    }
+  ' "$1"
+}
+
+# 渲染结果喂给 nginx -t。证书、listen、access_log 换成临时的：生产配置里的路径和端口不改，测试进程写不了
+# /var/log/nginx、也绑不上 80/443。过了什么都不打印；不过打印 nginx 的最后几行。
+nginx_t_rendered() { # 渲染后的配置 工作目录 证书 私钥
+  local s="$1" dir="$2" out p1 p2
+  # -t 也会去绑 listen。80/443 非 root 绑不上，换成回环上的空闲高端口；生产配置里的 listen 不改。
+  p1=$(free_port)
+  p2=$(free_port)
+  mkdir -p "$dir"
+  s=${s//"listen 80;"/"listen 127.0.0.1:$p1;"}
+  s=${s//"listen 443 ssl;"/"listen 127.0.0.1:$p2 ssl;"}
+  s=${s//"/etc/letsencrypt/live/cockpit.example.test/fullchain.pem"/"$3"}
+  s=${s//"/etc/letsencrypt/live/cockpit.example.test/privkey.pem"/"$4"}
+  s=${s//"access_log /var/log/nginx/access.log "/"access_log $dir/access.log "}
+  printf '%s\n' "$s" >"$dir/site.conf"
+  cat >"$dir/nginx.conf" <<EOF
+pid $dir/nginx.pid;
+error_log $dir/error.log;
+events {}
+http {
+    access_log off;
+    client_body_temp_path $dir/body;
+    proxy_temp_path $dir/proxy;
+    fastcgi_temp_path $dir/fastcgi;
+    uwsgi_temp_path $dir/uwsgi;
+    scgi_temp_path $dir/scgi;
+    include $dir/site.conf;
+}
+EOF
+  if ! out=$(nginx -t -p "$dir/" -c "$dir/nginx.conf" 2>&1); then
+    tail -3 <<<"$out" | tr '\n' ' '
+    printf '\n'
+  fi
+}
+
 # 按 hk.sh 的样子渲染一份站点模板（占位和 hk.sh 传的一样多：少给一个，render 就报红）
 render_site() { # 模板 隧道那头的地址
   render "$HERE/../hk/$1" SERVER_NAME=cockpit.example.test WEB_ROOT="$SITE" ACME_ROOT="$ACME" \
@@ -355,6 +462,100 @@ check "一处 proxy_pass 都没有（只开 80 的模板）：说认不出，不
   "$(site_keepalive_gaps "$TMP/ka-bad.conf" | grep -c '一处 proxy_pass 都没有')" 1
 check "文件读不到：说读不到，不说齐了" "$(site_keepalive_gaps "$TMP/nowhere.conf")" "读不到站点配置 $TMP/nowhere.conf"
 
+echo "== 访问日志带上 \$host（两份模板）：log_format 含 \$host，每个 server 的 access_log 引用它，路径仍是 /var/log/nginx/access.log"
+for tpl in nginx-http.conf nginx-https.conf; do
+  reset
+  render_site "$tpl" 10.99.0.2 >/dev/null
+  check "$tpl：占位都换掉了" "${#REDS[@]}" 0
+  printf '%s\n' "$RENDERED" >"$TMP/hl-$tpl"
+  check "$tpl：log_format 含 \$host，access_log 引用它，路径没换" "$(host_log_gaps "$TMP/hl-$tpl")" ""
+done
+
+echo "== 这道查法本身：没带 \$host、没引用这个格式、换了路径、写到 http 层、注释掉，都查得出；文件读不到不当成齐了"
+cat >"$TMP/hl-ok.conf" <<'EOF'
+log_format fleet_host '$remote_addr - $remote_user [$time_local] "$request" "$host"';
+server {
+    access_log /var/log/nginx/access.log fleet_host;
+}
+server {
+    access_log /var/log/nginx/access.log fleet_host;
+}
+EOF
+check "两个 server 都引用带 \$host 的格式、路径没换：过" "$(host_log_gaps "$TMP/hl-ok.conf")" ""
+cat >"$TMP/hl-nohost.conf" <<'EOF'
+log_format fleet_host '$remote_addr';
+server {
+    access_log /var/log/nginx/access.log fleet_host;
+}
+EOF
+check "格式里没有 \$host：查得出" "$(host_log_gaps "$TMP/hl-nohost.conf")" "log_format fleet_host 里没有 \$host"
+cat >"$TMP/hl-fmt.conf" <<'EOF'
+log_format fleet_host '$host';
+server {
+    access_log /var/log/nginx/access.log combined;
+}
+EOF
+check "access_log 没用这个格式：查得出" "$(host_log_gaps "$TMP/hl-fmt.conf")" "access_log 没引用 fleet_host"
+cat >"$TMP/hl-path.conf" <<'EOF'
+log_format fleet_host '$host';
+server {
+    access_log /var/log/nginx/fleet-dao.log fleet_host;
+}
+EOF
+check "换了日志路径：查得出" "$(host_log_gaps "$TMP/hl-path.conf")" \
+  "access_log 路径不是 /var/log/nginx/access.log：access_log /var/log/nginx/fleet-dao.log fleet_host;"
+cat >"$TMP/hl-http.conf" <<'EOF'
+log_format fleet_host '$host';
+access_log /var/log/nginx/access.log fleet_host;
+server {
+    access_log /var/log/nginx/access.log fleet_host;
+}
+EOF
+check "access_log 写在 http 层：查得出（会记进别家站点）" "$(host_log_gaps "$TMP/hl-http.conf")" \
+  "access_log 写在 http 层：别家站点的请求也会记"
+cat >"$TMP/hl-miss.conf" <<'EOF'
+log_format fleet_host '$host';
+server {
+    access_log /var/log/nginx/access.log fleet_host;
+}
+server {
+}
+EOF
+check "有的 server 没写 access_log：查得出" "$(host_log_gaps "$TMP/hl-miss.conf")" "有 server 的 access_log 没引用 fleet_host"
+cat >"$TMP/hl-cmt.conf" <<'EOF'
+# log_format fleet_host '$host';
+server {
+    access_log /var/log/nginx/access.log fleet_host;
+}
+EOF
+check "注释掉的 log_format 不算" "$(host_log_gaps "$TMP/hl-cmt.conf")" "应有一条名字带 fleet_ 的 log_format，实际 0 条"
+check "文件读不到：说读不到，不说齐了" "$(host_log_gaps "$TMP/nowhere-host.conf")" "读不到站点配置 $TMP/nowhere-host.conf"
+
+echo "== 装了 nginx 时，带这份日志格式的两份站点 nginx -t 仍过"
+if ! command -v nginx >/dev/null; then
+  echo "  … 没跑成：这台没有 nginx"
+  skipped=1
+elif [[ -z "$NODE" ]]; then
+  echo "  … 没跑成：这台没有 node，分不到临时端口，nginx -t 没跑"
+  skipped=1
+else
+  HT=$TMP/host-nginx-t
+  mkdir -p "$HT"
+  if ! command -v openssl >/dev/null; then
+    echo "  … 没跑成：这台没有 openssl，签不出测试证书，nginx -t 没跑"
+    skipped=1
+  elif ! openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=cockpit.example.test \
+    -keyout "$HT/key.pem" -out "$HT/cert.pem" >"$HT/openssl.log" 2>&1; then
+    check "自签证书做出来了" "$(tail -2 "$HT/openssl.log" | tr '\n' ' ')" "（做出来了）"
+  else
+    for tpl in nginx-http.conf nginx-https.conf; do
+      reset
+      render_site "$tpl" 10.99.0.2 >/dev/null
+      check "$tpl：nginx -t 过" "$(nginx_t_rendered "$RENDERED" "$HT/$tpl" "$HT/cert.pem" "$HT/key.pem")" ""
+    done
+  fi
+fi
+
 echo "== 真起一个 nginx：release.json 只给隧道那头（127.0.0.2 当法国）、别处来的 404；每种回应都带 noindex；robots.txt 不禁抓"
 no_tools=""
 for c in nginx openssl curl; do
@@ -384,9 +585,16 @@ else
     s=${s//"listen 443 ssl;"/"listen 127.0.0.1:$P2 ssl;"}
     s=${s//"/etc/letsencrypt/live/cockpit.example.test/fullchain.pem"/"$NG/cert.pem"}
     s=${s//"/etc/letsencrypt/live/cockpit.example.test/privkey.pem"/"$NG/key.pem"}
+    # 生产路径不动。测试进程写不了 /var/log/nginx，换成临时文件，nginx -t 才开得了日志。
+    s=${s//"access_log /var/log/nginx/access.log "/"access_log $NG/access.log "}
     printf '%s\n' "$s" >"$NG/site-https.conf"
     render_site nginx-http.conf 127.0.0.2 >/dev/null
-    printf '%s\n' "${RENDERED//"listen 80;"/"listen 127.0.0.1:$P3;"}" >"$NG/site-http.conf"
+    s=${RENDERED//"listen 80;"/"listen 127.0.0.1:$P3;"}
+    s=${s//"access_log /var/log/nginx/access.log "/"access_log $NG/access.log "}
+    # 生产只装这两份里的一份。测试把两份引进同一个 http，同名 log_format nginx 会拒。
+    # 定义留在先引入的 https 那份；http 这份删掉定义（可能跨行，删到分号），access_log 仍引用它。
+    s=$(awk 'skip { if ($0 ~ /;/) skip = 0; next } /^log_format fleet_/ { if ($0 !~ /;/) skip = 1; next } { print }' <<<"$s")
+    printf '%s\n' "$s" >"$NG/site-http.conf"
   }
   respin_ng_ports() { P1=$(free_port); P2=$(free_port); P3=$(free_port); render_ng_ports; }
   started=0
@@ -547,6 +755,8 @@ else
     s=${s//"listen 443 ssl;"/"listen 127.0.0.1:$4 ssl;"}
     s=${s//"/etc/letsencrypt/live/cockpit.example.test/fullchain.pem"/"$KA/cert.pem"}
     s=${s//"/etc/letsencrypt/live/cockpit.example.test/privkey.pem"/"$KA/key.pem"}
+    # 同上：测试进程写不了 /var/log/nginx，路径只在这一份临时配置里换成可写的。
+    s=${s//"access_log /var/log/nginx/access.log "/"access_log $dir/access.log "}
     printf '%s\n' "$s" >"$dir/site.conf"
     cat >"$dir/nginx.conf" <<EOF
 pid $dir/nginx.pid;
