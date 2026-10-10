@@ -14,9 +14,17 @@
 // **不自己判「要不要验」**：那是合并闸按分支名判的事（merge-gates.ts 的 coldVerifyNeed：引擎任务工作流开的 PR 才要）。
 // 这一层只要被调了就跑；谁调它、什么时候调，见调用方（任务工作流在挂自动合并之前调）。重复贴同一条状态没有害处
 // （同一 context 同一头只留最新一条），所以「该验的没验」这件事由合并闸拦住、不由这一层猜。
+//
+// **点名但没改的文件**（#1612）：验收条点了 diff 以外的路径时，从引擎镜像读 PR 头上的当前内容，交给 verifier-invoke
+// 放进提示词。读不到（镜像没有这个仓、提交不在、git 失败）标「读不到：原因」，验收照常进行。这一步不许抛出去——
+// 抛了会变成「冷调用没跑起来」，写代码的会话改不出能过的 diff。
 
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { CATALOG_NAMED_FAMILIES } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
+import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import {
   type ColdVerifyStatus,
   coldVerifyNotRun,
@@ -30,7 +38,10 @@ import type { OneShotDeps } from './runner/one-shot.ts';
 import {
   type ChooseModelForFamily,
   FAMILY_ORDER,
+  type FetchNamedFiles,
+  isNamedRepoPath,
   type ModelFamily,
+  type NamedHeadFile,
   type VerifierInvokeDeps,
   type VerifierInvokeInput,
   type VerifierInvokeOutput,
@@ -191,6 +202,7 @@ export async function runColdVerifyForPr(
   }
 
   // 3. 起一次冷调用。diff / specDir 都注入进去（verifier-invoke 不自己调 git）。
+  // 点名但没改的文件在这里读：引擎镜像里 PR 头上的内容。读失败留在提示词里，不从这一层抛出去。
   const input: VerifierInvokeInput = {
     prNumber,
     branch: pr.branch,
@@ -208,6 +220,7 @@ export async function runColdVerifyForPr(
     oneShot: deps.oneShot,
     fetchDiff: async ({ baseSha }) => deps.sources.diff({ prNumber, baseSha }),
     fetchSpec: async () => ({ ...(spec.specDir !== undefined ? { specDir: spec.specDir } : {}) }),
+    fetchNamedFiles: readNamedFilesAtHead({ head: pr.head, workflowId: spec.workflowId }),
     chooseModelForFamily: deps.chooseModelForFamily,
     cwd: deps.cwd,
     ...(deps.prepareCwd === undefined ? {} : { prepareCwd: deps.prepareCwd }),
@@ -245,6 +258,157 @@ export async function runColdVerifyForPr(
  * （它那几条明确失败的 problems 都以这几个词开头，见 verifier-invoke.ts 顶部注释）。
  */
 const SOURCE_PREFIXES = ['读不到 diff：', '读不到单子：', '没讨论成：', '冷调用没跑成：'] as const;
+
+const SHA40 = /^[0-9a-f]{40}$/i;
+/** 镜像目录名只收这种段：工作流编号拆出来的 owner/name 若是 `..` 就不能拿去拼路径。 */
+const MIRROR_SEGMENT = /^[A-Za-z0-9._-]+$/;
+
+interface GitText {
+  code: number;
+  stdout: Buffer;
+  stderr: string;
+}
+
+/** 读镜像时不带令牌、不读用户的 git 配置。safe.directory 放开：镜像有时属另一个系统用户，只读 cat-file。 */
+function gitReadEnv(): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH ?? '',
+    LC_ALL: 'C',
+    LANG: 'C',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+  };
+}
+
+function runGit(cwd: string, args: string[]): Promise<GitText> {
+  return new Promise((resolve) => {
+    execFile(
+      'git',
+      ['--no-pager', '-c', 'safe.directory=*', '-c', 'core.quotePath=false', ...args],
+      {
+        cwd,
+        encoding: 'buffer',
+        timeout: 15_000,
+        maxBuffer: 8 * 1024 * 1024,
+        windowsHide: true,
+        env: gitReadEnv(),
+      },
+      (error, stdout, stderr) => {
+        const out = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout ?? '');
+        const errBuf = Buffer.isBuffer(stderr) ? stderr : Buffer.from(stderr ?? '');
+        const errText = errBuf.toString('utf8');
+        const code = error === null ? 0 : typeof error.code === 'number' ? error.code : -1;
+        const extra = error !== null && errText.trim() === '' ? error.message : '';
+        resolve({ code, stdout: out, stderr: extra === '' ? errText : `${errText}\n${extra}` });
+      },
+    );
+  });
+}
+
+function oneLine(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (flat === '') return '没有原因';
+  return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
+}
+
+function classifyShowFailure(stderr: string): { kind: 'missing' } | { kind: 'unreadable'; reason: string } {
+  const text = stderr.replace(/\s+/g, ' ').trim();
+  if (/maxBuffer/i.test(text)) return { kind: 'unreadable', reason: '文件太大，读的时候超了上限' };
+  if (/does not exist in|exists on disk, but not in/i.test(text)) return { kind: 'missing' };
+  if (/invalid object name|bad object|not a valid object name|ambiguous argument/i.test(text)) {
+    return { kind: 'unreadable', reason: '镜像里没有这个提交' };
+  }
+  if (/not a git repository|dubious ownership|detected dubious/i.test(text)) {
+    return { kind: 'unreadable', reason: '引擎镜像读不了' };
+  }
+  return { kind: 'unreadable', reason: oneLine(text) };
+}
+
+/**
+ * 引擎镜像的裸仓：`<FLEET_GITHUB_STATE_DIR>/mirrors/<owner>/<name>.git`（和 github 包的 mirrorPath 同一条路径）。
+ * 对不上就带回原因，不抛。
+ */
+function mirrorDir(
+  workflowId: string | undefined,
+): { ok: true; dir: string } | { ok: false; reason: string } {
+  if (workflowId === undefined || workflowId.trim() === '') {
+    return { ok: false, reason: '没有工作流编号，对不上引擎镜像' };
+  }
+  const parsed = parseTaskWorkflowId(workflowId);
+  if (parsed === null) return { ok: false, reason: '工作流编号对不上仓，没有引擎镜像可查' };
+  const { owner, name } = parsed.repo;
+  if (
+    !MIRROR_SEGMENT.test(owner) ||
+    !MIRROR_SEGMENT.test(name) ||
+    owner === '.' ||
+    owner === '..' ||
+    name === '.' ||
+    name === '..'
+  ) {
+    return { ok: false, reason: '工作流编号里的仓名不合规，没有拿去对镜像' };
+  }
+  const state = process.env.FLEET_GITHUB_STATE_DIR?.trim() || '/var/lib/fleet-dao/github';
+  return { ok: true, dir: join(state, 'mirrors', owner.toLowerCase(), `${name.toLowerCase()}.git`) };
+}
+
+async function readOne(mirror: string, head: string, path: string): Promise<NamedHeadFile> {
+  if (!isNamedRepoPath(path)) return { path, kind: 'unreadable', reason: '路径不合规，没有拿去读' };
+  const rev = `${head}:${path}`;
+  const typed = await runGit(mirror, ['cat-file', '-t', rev]);
+  if (typed.code !== 0) {
+    const why = classifyShowFailure(typed.stderr);
+    return why.kind === 'missing'
+      ? { path, kind: 'missing' }
+      : { path, kind: 'unreadable', reason: why.reason };
+  }
+  const type = typed.stdout.toString('utf8').trim();
+  if (type === 'tree') return { path, kind: 'unreadable', reason: '这个路径是目录，不是文件' };
+  if (type !== 'blob') return { path, kind: 'unreadable', reason: `不是普通文件（${oneLine(type)}）` };
+  const blob = await runGit(mirror, ['cat-file', '-p', rev]);
+  if (blob.code !== 0) {
+    const why = classifyShowFailure(blob.stderr);
+    return why.kind === 'missing'
+      ? { path, kind: 'missing' }
+      : { path, kind: 'unreadable', reason: why.reason };
+  }
+  if (blob.stdout.includes(0)) return { path, kind: 'unreadable', reason: '不是文本文件' };
+  return { path, kind: 'content', content: blob.stdout.toString('utf8') };
+}
+
+/**
+ * 生产用的读取：引擎镜像里、PR 头提交上的文件。推分支时对象进过镜像，这里只读、不再抓远端。
+ * 任何一个路径失败都变成「读不到」，整份函数不抛。
+ */
+function readNamedFilesAtHead(args: { head: string; workflowId: string | undefined }): FetchNamedFiles {
+  return async (paths) => {
+    const head = args.head.trim();
+    if (!SHA40.test(head)) {
+      return paths.map((path) => ({ path, kind: 'unreadable' as const, reason: 'PR 的头不是完整的提交号' }));
+    }
+    const mirror = mirrorDir(args.workflowId);
+    if (!mirror.ok) {
+      return paths.map((path) => ({ path, kind: 'unreadable' as const, reason: mirror.reason }));
+    }
+    if (!existsSync(mirror.dir)) {
+      return paths.map((path) => ({
+        path,
+        kind: 'unreadable' as const,
+        reason: '引擎镜像里没有这个仓，读不了 PR 头上的文件',
+      }));
+    }
+    const out: NamedHeadFile[] = [];
+    for (const path of paths) {
+      try {
+        out.push(await readOne(mirror.dir, head, path));
+      } catch (err) {
+        out.push({ path, kind: 'unreadable', reason: oneLine(errMessage(err)) });
+      }
+    }
+    return out;
+  };
+}
 
 function isSourceProblem(problem: string | undefined): boolean {
   return problem !== undefined && SOURCE_PREFIXES.some((p) => problem.startsWith(p));
