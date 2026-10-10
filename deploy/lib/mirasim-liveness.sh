@@ -27,6 +27,11 @@ note() { logger -t "$TAG" -- "$*"; }
 
 clear_count() { rm -f -- "$COUNT_FILE"; }
 
+save_count() { # 次数；写不了返回非 0
+  if ! mkdir -p -- "${COUNT_FILE%/*}"; then return 1; fi
+  printf '%s\n' "$1" >"$COUNT_FILE"
+}
+
 if [[ ! -f "$UNIT_FILE" ]]; then
   clear_count
   exit 0
@@ -70,10 +75,10 @@ fi
 count=$((count + 1))
 
 if ((count < THRESHOLD)); then
-  mkdir -p -- "${COUNT_FILE%/*}" && printf '%s\n' "$count" >"$COUNT_FILE" || {
+  if ! save_count "$count"; then
     echo "mirasim-liveness：写不了计数文件 $COUNT_FILE" >&2
     exit 1
-  }
+  fi
   note "$UNIT 健康检查失败（连续第 $count 次，满 $THRESHOLD 次才重启，端口 $port）：$reason"
   exit 0
 fi
@@ -81,7 +86,7 @@ fi
 note "$UNIT 连续 $count 次健康检查失败，重启（端口 $port）：$reason"
 if ! systemctl restart "$UNIT"; then
   note "$UNIT 重启失败，计数保留，下一轮再试"
-  mkdir -p -- "${COUNT_FILE%/*}" && printf '%s\n' "$count" >"$COUNT_FILE" || true
+  save_count "$count" || true
   echo "mirasim-liveness：systemctl restart $UNIT 失败" >&2
   exit 1
 fi
