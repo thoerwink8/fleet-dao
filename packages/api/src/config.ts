@@ -76,6 +76,11 @@ export interface Config {
    * 没配是 {}——这一台不收快照（写口回 503，不回 401 冒充「通行证不对」）。
    */
   nodeKeys: Readonly<Record<string, string>>;
+  /**
+   * 外部看门狗来查 /healthz 时要带的编号（FLEET_EDGE_WATCH_ID，#292）。没配、空的、只有空白是 null：不启用，
+   * 健康页写「未接」，请求也不记。值不进 /healthz 的响应。
+   */
+  edgeWatchId: string | null;
 }
 
 export class ConfigError extends Error {
@@ -134,6 +139,14 @@ export function engineEnabled(env: Env): boolean {
 export function machineName(env: Env): string | null {
   const name = env.FLEET_MACHINE_NAME?.trim();
   return name ? name : null;
+}
+
+/**
+ * 外部看门狗的编号（FLEET_EDGE_WATCH_ID）。没配、空的、只有空白都是没启用；配了就原样返回（首尾空白也算编号的一部分）。
+ */
+export function readEdgeWatchId(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string' || raw.trim() === '') return null;
+  return raw;
 }
 
 export function loadConfig(env: Env): Config {
@@ -254,6 +267,7 @@ export function loadConfig(env: Env): Config {
     machineName: machineName(env),
     nodeReport,
     nodeKeys,
+    edgeWatchId: readEdgeWatchId(env.FLEET_EDGE_WATCH_ID),
   };
 }
 
