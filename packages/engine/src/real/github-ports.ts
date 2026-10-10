@@ -291,29 +291,66 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       // 会话一个新提交都没有就不并（并出来的只有一个并提交，是空交付）。
       const incoming = await headOfIncoming(t);
       if (head === incoming) {
-        // 本地没有新提交。远端头若就是 incoming，没有新东西可推；向镜像要这个头的包是空包（tip 被 exclude 掉）。
-        // 认领远端头返回，不推。远端不是这个头，仍是空交付。
+        // 本地没有新提交：bundleSince 打不出包。远端头若就是 incoming，没有新东西可交——仍调一层推
+        // （github 包在 remote===head 时直接认领、不读包）；被拒就进 recoverDiverged。
+        // 不在本地造 REMOTE_AHEAD：要覆盖真实拒推后的恢复路径（#1582）。远端不是这个头，仍是空交付。
         const branchState = await mapped(() =>
           gh.fetchBranchHead({ repo: input.repo, branch: input.branch, signal: ctx.signal }, ctx),
         );
         if (branchState.head === incoming) {
-          const recovered = await recoverDiverged(
-            new PortError(
-              'REMOTE_AHEAD',
-              `远端分支 ${input.branch} 已在起会话前的头 ${incoming.slice(0, 7)}，本地没有新提交`,
-              { retryable: false, details: { remoteHead: incoming } },
-            ),
-          );
-          if (!recovered.needsPush) {
-            const main = await mapped(() => gh.fetchMainline({ repo: input.repo, signal: ctx.signal }, ctx));
-            if (await hasCommit(t, main.head)) {
-              await pinMainline(t, input.repo.defaultBranch, main.head);
-              return {
-                head: recovered.head,
-                changedFiles: await changedFilesAgainst(t, main.head, recovered.head),
-              };
+          await mkdir(deps.tmpDir, { recursive: true, mode: 0o700 });
+          const bundlePath = join(deps.tmpDir, `push-${randomUUID()}.bundle`);
+          try {
+            // 占位：remote===head 时 github 包不读包；被拒走下面 catch，也不读。
+            await writeFile(bundlePath, Buffer.alloc(0), { mode: 0o600 });
+            try {
+              const pushed = await mapped(() =>
+                gh.pushBranch(
+                  {
+                    repo: input.repo,
+                    bundlePath,
+                    branch: input.branch,
+                    head: incoming,
+                    signal: ctx.signal,
+                  },
+                  ctx,
+                ),
+              );
+              const main = await mapped(() =>
+                gh.fetchMainline({ repo: input.repo, signal: ctx.signal }, ctx),
+              );
+              if (await hasCommit(t, main.head)) {
+                await pinMainline(t, input.repo.defaultBranch, main.head);
+                return {
+                  head: pushed.head,
+                  changedFiles: await changedFilesAgainst(t, main.head, pushed.head),
+                };
+              }
+              return { head: pushed.head };
+            } catch (error) {
+              if (
+                !(error instanceof PortError) ||
+                (error.code !== 'DIVERGED' && error.code !== 'REMOTE_AHEAD')
+              ) {
+                throw error;
+              }
+              const recovered = await recoverDiverged(error);
+              if (!recovered.needsPush) {
+                const main = await mapped(() =>
+                  gh.fetchMainline({ repo: input.repo, signal: ctx.signal }, ctx),
+                );
+                if (await hasCommit(t, main.head)) {
+                  await pinMainline(t, input.repo.defaultBranch, main.head);
+                  return {
+                    head: recovered.head,
+                    changedFiles: await changedFilesAgainst(t, main.head, recovered.head),
+                  };
+                }
+                return { head: recovered.head };
+              }
             }
-            return { head: recovered.head };
+          } finally {
+            await rm(bundlePath, { force: true });
           }
         }
         throw new PortError('EMPTY_DELIVERY', `起会话前的头 ${incoming.slice(0, 7)} 之后没有新提交`, {

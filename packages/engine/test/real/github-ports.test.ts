@@ -661,6 +661,8 @@ describe('推被拒（DIVERGED / REMOTE_AHEAD）：先认领远端新头，判�
       const listed = (input as { tips?: unknown }).tips;
       return Array.isArray(listed) ? listed : [];
     });
+    // 真推被拒后进 recoverDiverged。本地造 REMOTE_AHEAD、不调 pushBranch，这条例子会绿但盖不住拒推恢复路。
+    expect(calls.pushBranch).toHaveLength(1);
     // 不要空包。去掉「已在树里就不向镜像要包」，会拿 incoming 当 tip 去打包，git 拒空包，抛 GIT_FAILED。
     expect(message).not.toContain('GIT_FAILED');
     expect(message).not.toContain('Refusing to create empty bundle');
@@ -669,7 +671,6 @@ describe('推被拒（DIVERGED / REMOTE_AHEAD）：先认领远端新头，判�
     // 返回的头是远端头。把「头相同不算还有新提交」去掉，会当成还要推，报 EMPTY_DELIVERY，拿不回这个头。
     expect(r?.head).toBe(remoteHead);
     expect(git(dir, 'rev-parse', 'HEAD')).toBe(remoteHead);
-    expect(calls.pushBranch ?? []).toHaveLength(0);
   });
 
   it('远端头已经在树里、比本地新：不打包，直接快进，返回的头是远端头', async () => {
