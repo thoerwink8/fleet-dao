@@ -780,3 +780,155 @@ export function checkDirsBlock(repo: RepoView, docPath: string): OpsTableProblem
     },
   ];
 }
+
+// systemd 单元表（#140 第七片）：deploy/france/ 和 deploy/hk/ 下的单元文件才是单元的事实，
+// 从文件里 `Description=` 那一行读说明，放进 units 区块。本片不进文档、不接命令行、不接 CI。
+
+/** 机器和它的单元目录、认哪些后缀。表里按这个顺序排（法国在前、香港在后）。 */
+const UNIT_SOURCES = [
+  {
+    machine: '法国',
+    dir: 'deploy/france',
+    suffixes: ['.service', '.socket', '.timer', '.path', '.slice'],
+  },
+  { machine: '香港', dir: 'deploy/hk', suffixes: ['.service'] },
+] as const;
+
+const DESCRIPTION_LINE = /^[ \t]*Description=(.*)$/;
+
+/** 表里一行：| 单元文件 | 机器 | 说明 |。从文档区块里回读数据行用。 */
+const UNIT_ROW = /^\| (\S+) \| (法国|香港) \| (.*) \|$/;
+
+const UNITS_NAME = 'units';
+/** 单元区块名字的对外写法（和端口、用户、目录的同一路，不各写各的字符串）。 */
+export const BLOCK_NAME_UNITS = UNITS_NAME;
+
+export interface UnitEntry {
+  /** 单元文件名，如 fleet-api.service。 */
+  file: string;
+  /** 法国或香港。 */
+  machine: string;
+  /** `Description=` 的值，原样（`@@SESSION_USER@@` 这类占位符不替换）。 */
+  description: string;
+}
+
+/** 读两个目录下的单元文件。有文件没有 Description 行（或值是空的、值里有表格分隔符 `|`）抛带文件名的错；
+ *  两个目录都列不出来、或一个单元文件都没读到，也抛错（调用方落成「没查成」，不当成空表）。 */
+export function readUnitEntries(repo: RepoView): UnitEntry[] {
+  const entries: UnitEntry[] = [];
+  let listed = 0;
+  for (const src of UNIT_SOURCES) {
+    const names = repo.list(src.dir);
+    if (names === undefined) continue;
+    listed++;
+    for (const name of names) {
+      if (!src.suffixes.some((s) => name.endsWith(s))) continue;
+      const path = `${src.dir}/${name}`;
+      const text = repo.read(path);
+      if (text === undefined) throw new Error(`读不到 ${path}`);
+      let description: string | undefined;
+      for (const line of text.split('\n')) {
+        const m = DESCRIPTION_LINE.exec(line.replace(/\r$/, ''));
+        if (m) {
+          description = (m[1] ?? '').trimEnd();
+          break;
+        }
+      }
+      if (description === undefined) throw new Error(`${path} 里没有 Description= 这一行`);
+      if (description === '') throw new Error(`${path} 的 Description= 是空的`);
+      if (description.includes('|'))
+        throw new Error(`${path} 的 Description= 里有 |，放不进表格：${description}`);
+      entries.push({ file: name, machine: src.machine, description });
+    }
+  }
+  if (listed === 0) {
+    throw new Error(`列不出 ${UNIT_SOURCES.map((s) => s.dir).join('、')} 下的文件`);
+  }
+  if (entries.length === 0) throw new Error('deploy/ 下一个单元文件都没读到');
+  const rank = (machine: string) => UNIT_SOURCES.findIndex((s) => s.machine === machine);
+  return entries.sort((a, b) => rank(a.machine) - rank(b.machine) || compareText(a.file, b.file));
+}
+
+/** 区块标记之间那一段：前后各一个空行、中间一张三列表，行按机器（法国、香港）、再按文件名排。 */
+export function unitsTableInner(repo: RepoView): string {
+  const lines = ['| 单元文件 | 机器 | 说明 |', '|---|---|---|'];
+  for (const e of readUnitEntries(repo)) lines.push(`| ${e.file} | ${e.machine} | ${e.description} |`);
+  return `\n\n${lines.join('\n')}\n\n`;
+}
+
+/** 整个区块（含两个标记行）：开头 `<!-- fleet:units:start -->`，一张三列表（单元文件、机器、说明），
+ *  结尾 `<!-- fleet:units:end -->`。同一个仓两次调用逐字相同。 */
+export function renderUnitsBlock(repo: RepoView): string {
+  return `${blockMarker(UNITS_NAME, 'start')}${unitsTableInner(repo)}${blockMarker(UNITS_NAME, 'end')}`;
+}
+
+function parseUnitRows(text: string): Map<string, UnitEntry> {
+  const rows = new Map<string, UnitEntry>();
+  for (const line of text.split('\n')) {
+    const m = UNIT_ROW.exec(line.trimEnd());
+    if (!m) continue;
+    const entry = { file: m[1] ?? '', machine: m[2] ?? '', description: m[3] ?? '' };
+    rows.set(`${entry.machine}\0${entry.file}`, entry);
+  }
+  return rows;
+}
+
+function unitRowProblems(actual: string, expected: string): OpsTableProblem[] {
+  const want = parseUnitRows(expected);
+  const got = parseUnitRows(actual);
+  const problems: OpsTableProblem[] = [];
+  for (const [key, w] of want) {
+    const g = got.get(key);
+    if (g === undefined) {
+      problems.push({
+        notQueried: false,
+        text: `单元 ${w.file} 少了：${w.machine}的 deploy/ 里有（${w.description}），文档区块里没有。`,
+      });
+    } else if (g.description !== w.description) {
+      problems.push({
+        notQueried: false,
+        text: `单元 ${w.file} 的说明变了：文档区块里是「${g.description}」，${w.machine}的单元文件里是「${w.description}」。`,
+      });
+    }
+  }
+  for (const [key, g] of got) {
+    if (!want.has(key)) {
+      problems.push({
+        notQueried: false,
+        text: `单元 ${g.file} 多了：文档区块里有（${g.machine}，${g.description}），deploy/ 里没有这个单元文件。`,
+      });
+    }
+  }
+  return problems;
+}
+
+/** 读 docPath，取单元区块，和 renderUnitsBlock 逐字比。一致返回空数组；
+ *  不一致返回点出哪个单元文件多了、少了、说明变了的问题；
+ *  读不到文档、列不出单元目录、单元文件缺 Description 行，返回「没查成」问题，不当成通过。 */
+export function checkUnitsBlock(repo: RepoView, docPath: string): OpsTableProblem[] {
+  const doc = repo.read(docPath);
+  if (doc === undefined) return [{ notQueried: true, text: `没查成：读不到 ${docPath}` }];
+  let expected: string;
+  try {
+    expected = renderUnitsBlock(repo);
+  } catch (e) {
+    return [{ notQueried: true, text: `没查成：${e instanceof Error ? e.message : String(e)}` }];
+  }
+  let span: BlockSpan;
+  try {
+    span = findBlock(doc, UNITS_NAME);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return [{ notQueried: false, text: `单元区块对不上（${docPath}）：${reason}。` }];
+  }
+  const actual = doc.slice(span.from, span.to);
+  if (actual === expected) return [];
+  const problems = unitRowProblems(actual, expected);
+  if (problems.length > 0) return problems;
+  return [
+    {
+      notQueried: false,
+      text: '单元区块对不上：单元行都对，但区块和生成的内容不是逐字一致（排序、空白或表头格式被改过）。',
+    },
+  ];
+}

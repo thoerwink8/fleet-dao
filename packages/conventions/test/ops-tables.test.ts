@@ -1,18 +1,22 @@
-// ops-tables 的测试（#140 第一片端口、第三片用户、第五片目录）：除一条读本仓 deploy/ 的用例外，全用内存假仓。
+// ops-tables 的测试（#140 第一片端口、第三片用户、第五片目录、第七片单元）：除一条读本仓 deploy/ 的用例外，全用内存假仓。
 
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   BLOCK_NAME_DIRS,
   BLOCK_NAME_PORTS,
+  BLOCK_NAME_UNITS,
   checkDirsBlock,
   checkPortsBlock,
+  checkUnitsBlock,
   checkUsersBlock,
   extractBlock,
   readDirEntries,
+  readUnitEntries,
   readUserEntries,
   renderDirsBlock,
   renderPortsBlock,
+  renderUnitsBlock,
   renderUsersBlock,
 } from '../src/ops-tables.ts';
 import { fsRepo, type RepoView } from '../src/repo.ts';
@@ -735,5 +739,169 @@ describe('checkDirsBlock', () => {
     const problems = checkDirsBlock(memRepo({ ...files, 'docs/ops.md': lines.join('\n') }), 'docs/ops.md');
     expect(problems).toHaveLength(1);
     expect(problems[0]?.text).toContain('逐字一致');
+  });
+});
+
+// 单元表（#140 第七片）
+function unitsFiles(over: Record<string, string> = {}): Record<string, string> {
+  return {
+    'deploy/hk/fleet-feishu.service':
+      '[Unit]\nDescription=fleet-dao 飞书网关\n\n[Service]\nExecStart=/bin/true\n',
+    'deploy/hk/hk.env.example': 'DESCRIPTION=不是单元\n',
+    'deploy/france/fleet-api.socket': '[Unit]\nDescription=驾驶舱后端的监听套接字\n',
+    'deploy/france/fleet-api.service': '[Unit]\nDescription=驾驶舱后端\n',
+    'deploy/france/fleet-auto-release.timer': '[Unit]\nDescription=每 5 分钟读一轮主线\n',
+    'deploy/france/fleet-mirasim-session.service':
+      '[Unit]\nDescription=会话用户 @@SESSION_USER@@ 的 Mirasim 服务\n',
+    'deploy/france/fleet-agents.slice': '[Unit]\nDescription=AI 会话资源池\n',
+    'deploy/france/fleet-release-request.path': '[Unit]\nDescription=发布请求一到就接活\n',
+    'deploy/france/france.env.example': 'Description=不是单元\n',
+    'deploy/france/fleet-dao.nft': 'Description=不是单元\n',
+    ...over,
+  };
+}
+
+function unitsDoc(files: Record<string, string>): string {
+  return ['# 运维', '', renderUnitsBlock(memRepo(files)), '', '后面的字。', ''].join('\n');
+}
+
+describe('单元表（第七片）', () => {
+  it('deploy/hk/fleet-feishu.service 生成「香港」行，说明原样', () => {
+    const block = renderUnitsBlock(memRepo(unitsFiles()));
+    expect(block).toContain('| fleet-feishu.service | 香港 | fleet-dao 飞书网关 |');
+    expect(BLOCK_NAME_UNITS).toBe('units');
+  });
+
+  it('.socket、.timer、.path、.slice 都进表，占位符不替换，非单元文件不进表', () => {
+    const block = renderUnitsBlock(memRepo(unitsFiles()));
+    expect(block).toContain('| fleet-api.socket | 法国 | 驾驶舱后端的监听套接字 |');
+    expect(block).toContain('| fleet-auto-release.timer | 法国 | 每 5 分钟读一轮主线 |');
+    expect(block).toContain('| fleet-release-request.path | 法国 | 发布请求一到就接活 |');
+    expect(block).toContain('| fleet-agents.slice | 法国 | AI 会话资源池 |');
+    expect(block).toContain(
+      '| fleet-mirasim-session.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务 |',
+    );
+    expect(block).not.toContain('env.example');
+    expect(block).not.toContain('.nft');
+  });
+
+  it('整个区块：标记、固定表头，行按机器（法国、香港）再按文件名排，两次生成逐字相同', () => {
+    const r = memRepo(unitsFiles());
+    expect(renderUnitsBlock(r)).toBe(renderUnitsBlock(r));
+    expect(renderUnitsBlock(r)).toBe(
+      [
+        '<!-- fleet:units:start -->',
+        '',
+        '| 单元文件 | 机器 | 说明 |',
+        '|---|---|---|',
+        '| fleet-agents.slice | 法国 | AI 会话资源池 |',
+        '| fleet-api.service | 法国 | 驾驶舱后端 |',
+        '| fleet-api.socket | 法国 | 驾驶舱后端的监听套接字 |',
+        '| fleet-auto-release.timer | 法国 | 每 5 分钟读一轮主线 |',
+        '| fleet-mirasim-session.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务 |',
+        '| fleet-release-request.path | 法国 | 发布请求一到就接活 |',
+        '| fleet-feishu.service | 香港 | fleet-dao 飞书网关 |',
+        '',
+        '<!-- fleet:units:end -->',
+      ].join('\n'),
+    );
+  });
+
+  it('只有一个目录在、另一个列不出来，照样生成', () => {
+    const r = memRepo({ 'deploy/hk/fleet-feishu.service': 'Description=fleet-dao 飞书网关\n' });
+    expect(readUnitEntries(r)).toEqual([
+      { file: 'fleet-feishu.service', machine: '香港', description: 'fleet-dao 飞书网关' },
+    ]);
+  });
+
+  it('故意失败：单元文件没有 Description 行，抛带文件名的错', () => {
+    const r = memRepo(unitsFiles({ 'deploy/france/fleet-api.timer': '[Unit]\nAfter=network.target\n' }));
+    expect(() => renderUnitsBlock(r)).toThrow('deploy/france/fleet-api.timer');
+    expect(() => readUnitEntries(r)).toThrow('Description=');
+  });
+
+  it('故意失败：Description 是空的、或带 |，抛带文件名的错', () => {
+    expect(() =>
+      readUnitEntries(memRepo(unitsFiles({ 'deploy/hk/fleet-feishu.service': 'Description=\n' }))),
+    ).toThrow('deploy/hk/fleet-feishu.service');
+    expect(() =>
+      readUnitEntries(memRepo(unitsFiles({ 'deploy/hk/fleet-feishu.service': 'Description=a | b\n' }))),
+    ).toThrow('deploy/hk/fleet-feishu.service');
+  });
+
+  it('故意失败：两个目录都列不出来、或下面一个单元文件都没有，抛错，不当成空表', () => {
+    expect(() => readUnitEntries(memRepo({ 'README.md': 'x' }))).toThrow('列不出');
+    expect(() => readUnitEntries(memRepo({ 'deploy/france/': '', 'deploy/hk/': '' }))).toThrow(
+      '一个单元文件都没读到',
+    );
+  });
+
+  it('文档和生成一致，没有问题', () => {
+    const files = unitsFiles();
+    expect(checkUnitsBlock(memRepo({ ...files, 'docs/ops.md': unitsDoc(files) }), 'docs/ops.md')).toEqual([]);
+  });
+
+  it('少一行、多一行、说明被手改，各报一条点出文件名的问题', () => {
+    const files = unitsFiles();
+    const check = (doc: string) => checkUnitsBlock(memRepo({ ...files, 'docs/ops.md': doc }), 'docs/ops.md');
+
+    const missing = check(unitsDoc(files).replace('| fleet-api.service | 法国 | 驾驶舱后端 |\n', ''));
+    expect(missing).toHaveLength(1);
+    expect(missing[0]?.notQueried).toBe(false);
+    expect(missing[0]?.text).toContain('fleet-api.service');
+    expect(missing[0]?.text).toContain('少了');
+
+    const extra = check(
+      unitsDoc(files).replace(
+        '| fleet-agents.slice',
+        '| fleet-ghost.service | 法国 | 不存在 |\n| fleet-agents.slice',
+      ),
+    );
+    expect(extra).toHaveLength(1);
+    expect(extra[0]?.text).toContain('fleet-ghost.service');
+    expect(extra[0]?.text).toContain('多了');
+
+    const edited = check(unitsDoc(files).replace('fleet-dao 飞书网关', '手改的说明'));
+    expect(edited).toHaveLength(1);
+    expect(edited[0]?.text).toContain('fleet-feishu.service');
+    expect(edited[0]?.text).toContain('手改的说明');
+    expect(edited[0]?.text).toContain('fleet-dao 飞书网关');
+  });
+
+  it('行都对但顺序被改，返回问题、不当成通过', () => {
+    const files = unitsFiles();
+    const lines = unitsDoc(files).split('\n');
+    const a = lines.findIndex((l) => l.startsWith('| fleet-api.service'));
+    const b = lines.findIndex((l) => l.startsWith('| fleet-feishu.service'));
+    [lines[a], lines[b]] = [lines[b] ?? '', lines[a] ?? ''];
+    const problems = checkUnitsBlock(memRepo({ ...files, 'docs/ops.md': lines.join('\n') }), 'docs/ops.md');
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.text).toContain('逐字一致');
+  });
+
+  it('读不到文档、区块缺失、单元文件缺 Description，各返回问题，不当成通过', () => {
+    const files = unitsFiles();
+    const noDoc = checkUnitsBlock(memRepo(files), 'docs/ops.md');
+    expect(noDoc).toHaveLength(1);
+    expect(noDoc[0]?.notQueried).toBe(true);
+    const noBlock = checkUnitsBlock(memRepo({ ...files, 'docs/ops.md': '# 运维\n' }), 'docs/ops.md');
+    expect(noBlock).toHaveLength(1);
+    expect(noBlock[0]?.notQueried).toBe(false);
+    expect(noBlock[0]?.text).toContain('缺开始标记');
+    const bad = checkUnitsBlock(
+      memRepo({ ...files, 'deploy/hk/fleet-feishu.service': '[Unit]\n', 'docs/ops.md': unitsDoc(files) }),
+      'docs/ops.md',
+    );
+    expect(bad).toHaveLength(1);
+    expect(bad[0]?.notQueried).toBe(true);
+    expect(bad[0]?.text).toContain('fleet-feishu.service');
+  });
+
+  it('本仓 deploy/ 能生成：每个单元都有说明', () => {
+    const root = fileURLToPath(new URL('../../../', import.meta.url));
+    const entries = readUnitEntries(fsRepo(root));
+    expect(entries.map((e) => e.file)).toContain('fleet-feishu.service');
+    expect(entries.map((e) => e.file)).toContain('fleet-api.socket');
+    for (const e of entries) expect(e.description).not.toBe('');
   });
 });
