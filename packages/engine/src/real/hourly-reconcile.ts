@@ -216,6 +216,31 @@ export interface HourlyReconcileWiring {
 /** 发「放弃」信号最多等多久（毫秒）：到点由连接取消调用，不在本地空等。 */
 const ABANDON_SIGNAL_TIMEOUT_MS = 5_000;
 
+/**
+ * 撤掉这个任务工作流还开着的挂起提醒（task:…:park:N）：标已处理，同一事务写操作记录（reason = why）。
+ * 对账「单已关且停下等人」那一支用（#1816）；by 默认 engine:hourly-reconcile。
+ */
+export async function resolveClosedIssueParkAlerts(
+  db: Db,
+  workflowId: string,
+  why: string,
+  opts: { by?: string; at?: Date } = {},
+): Promise<number> {
+  const by = opts.by ?? CLOSED_ISSUE_ABANDON_BY;
+  const at = opts.at ?? new Date();
+  let n = 0;
+  for (const row of await openAlertsByPrefix(db, `${workflowId}:park:`)) {
+    const done = await resolveAlertWithReason(db, {
+      dedupeKey: row.dedupeKey,
+      by,
+      why,
+      at,
+    });
+    if (done === 'ok') n += 1;
+  }
+  return n;
+}
+
 /** 「单已关且停下等人就撤任务」的真口子（#1816）：在跑的问 Temporal，停没停着问 taskStatus，单状态现读，放弃走 taskAbandonSignal，挂起提醒当场撤。 */
 function temporalClosedIssueTasks(
   client: Pick<Client, 'workflow' | 'connection'>,
@@ -238,19 +263,7 @@ function temporalClosedIssueTasks(
       const handle = client.workflow.getHandle(workflowId);
       return taskViewOf(await handle.query(taskStatusQuery), workflowId).parked;
     },
-    async resolveParkAlerts(workflowId, why) {
-      let n = 0;
-      for (const row of await openAlertsByPrefix(db, `${workflowId}:park:`)) {
-        const done = await resolveAlertWithReason(db, {
-          dedupeKey: row.dedupeKey,
-          by: CLOSED_ISSUE_ABANDON_BY,
-          why,
-          at: now(),
-        });
-        if (done === 'ok') n += 1;
-      }
-      return n;
-    },
+    resolveParkAlerts: (workflowId, why) => resolveClosedIssueParkAlerts(db, workflowId, why, { at: now() }),
     openTaskRows: () => listOpenTaskRows(db),
     stopRows: (taskIds, reason) => stopTaskRows(db, taskIds, reason),
     async issueState(repo, issueNumber) {

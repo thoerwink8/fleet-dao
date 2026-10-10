@@ -1,6 +1,7 @@
 // 单已关且停下等人就发放弃信号、撤挂起提醒（jobs/closed-issue-tasks.ts，#1198 / #1816）：
 // 停下等人的发、还在跑的不动、读不到的记没查成不动、已结束的（收信人不在）不算问题。
 // 读不到、发不成、撤提醒不成都故意造一次：不许记成 ok、不许拿「没读到」当「已关」。
+// 操作记录真写入（resolveAlertWithReason → auditLog）见 test/real/closed-issue-tasks.test.ts。
 import type { OpenTaskRow } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import {
