@@ -8,6 +8,18 @@ export const PROBE_HISTORY_SLOTS = 60;
 export const PROBE_HISTORY_RESULTS = ['passed', 'failed', 'not_probed'] as const;
 export type ProbeHistoryResult = (typeof PROBE_HISTORY_RESULTS)[number];
 
+/**
+ * 一次探测带的降智检测（#1637）：问的题、标准答案、实答、判过没过（null = 没判：回答里没有第一行 OK）、自报的身份。
+ * 实答、自报身份回答里没写就是 null，不当空串。
+ */
+export interface ProbeCheck {
+  question: string;
+  expected: string;
+  answer: string | null;
+  passed: boolean | null;
+  selfIdentity: string | null;
+}
+
 /** 一次探针。probedAt 是带时区的时刻（ISO）。耗时、失败原因、原文没有就是 null，不当 0 或空串。 */
 export interface ProbeHistoryCell {
   id: number;
@@ -19,6 +31,12 @@ export interface ProbeHistoryCell {
   failureReason: string | null;
   requestText: string | null;
   responseText: string | null;
+  /** 降智检测的五项；老行、没带题的探测都是 null，不当空串。 */
+  checkQuestion: string | null;
+  checkExpected: string | null;
+  checkAnswer: string | null;
+  checkPassed: boolean | null;
+  selfIdentity: string | null;
 }
 
 /** 一个渠道的条带：cells 从旧到新，最多 60 格。可用率的分母是真探过的（通过 + 不通）。 */

@@ -1,6 +1,7 @@
 // 路由探针（#129）的一轮：定探不探（插头没接、按量、下架、没阶段开着、会话用户挂着别的组织）、真探、没通隔一会儿再探、
 // 写结论、记结局。读不到路由、写不进库、探针自己出错，每条路径都故意造一次，都不许记成 ok、也不许把路由写成在线。
 import type { RouteProbeTarget, ScheduleResult } from '@fleet-dao/db';
+import type { ProbeCheck } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
   type ProbeAttempt,
@@ -71,6 +72,7 @@ interface Harness {
     durationMs: number | null;
     requestText: string | null;
     responseText: string | null;
+    check?: ProbeCheck | null;
   }[];
   finished: { id: number; result: ScheduleResult }[];
   sleeps: number[];
@@ -301,6 +303,15 @@ describe('一轮里读会话用户挂的组织', () => {
       requestText: null,
       responseText: null,
     });
+  });
+
+  it('降智检测的题和判的结果（#1637）原样交给写入；没真探的是空', async () => {
+    const check = { question: '1+1？', expected: '2', answer: '3', passed: false, selfIdentity: 'x' };
+    const meter = target({ routeId: 'meter', billing: 'metered', orgKind: null, poolId: 'meter' });
+    const h = harness([carpool, meter], async () => ({ kind: 'failed', detail: '疑似降智', check }));
+    await runRouteProbeJob(h.deps);
+    expect(h.saved.find((s) => s.routeId === carpool.routeId)).toMatchObject({ state: 'failed', check });
+    expect(h.saved.find((s) => s.routeId === 'meter')?.check ?? null).toBeNull();
   });
 
   it('读法自己抛了：按认不出记（写明原因），这一轮照样跑完', async () => {
