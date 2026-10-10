@@ -1,7 +1,7 @@
 // 路由探针的真装配（#129，design 第九节「路由探针」）：路由从库里读（routeProbeTargets）、结论写回库（saveRouteProbe）、
 // 结局记进 schedule_runs。
 // 探法按执行方式分派给和干活的会话同一个驱动（real/hosts.ts）：以会话用户的身份，经 fleet-agent-scope 在自己的 scope 里
-// 起一次极小的无头会话，问一句「只回 OK」——同一个插头、同一份执行体、同一个模型串（路由上写的），所以探通了就说明会话
+// 起一次极小的无头会话，问一道降智题（#1637，要它第一行回 OK、第二行给答案、第三行自报模型）——同一个插头、同一份执行体、同一个模型串（路由上写的），所以探通了就说明会话
 // 起得来、答得上；判法也是同一套（judgeRun + 失败分流的规则表）。什么命令都不许跑（Claude 用 dontAsk，cursor 不带 --force），
 // Claude 还不存会话记录（每 15 分钟一次，不往会话用户家里攒；cursor 没有这个开关）。
 // 要人修的整池问题（登录失效、设备被撤销、封号、欠费）和会话同一个做法：写 pool-hold:<池> 那条「要人拍」，选路整池避开；
@@ -44,12 +44,17 @@ import {
   WIRED_HOSTS,
 } from './hosts.ts';
 import { loadHeldPools } from './pool-holds.ts';
+import {
+  type IqQuestion,
+  iqAnswerMatches,
+  parseProbeReply,
+  pickIqQuestion,
+  probePrompt,
+} from './probe-iq.ts';
 import type { SessionOrgControl, SessionOrgReader } from './session-org.ts';
 import { poolHoldKey } from './store-ports.ts';
 import type { WorkTrees } from './worktrees.ts';
 
-/** 问的那一句：最短的输出，用不着任何工具。 */
-export const PROBE_PROMPT = '这是路由探针的连通性测试。只回复两个大写字母 OK，不要调用任何工具，也不要解释。';
 /** 探针会话的工作目录：<工作树的根>/_route-probe/<会话用户>（GitHub 的用户名不以 _ 开头，撞不上仓的目录）。 */
 export const PROBE_DIR = '_route-probe';
 /**
@@ -80,12 +85,9 @@ export interface ProbeContext {
   now: Date;
   /** 这种执行方式登录失效时人该怎么修（规则表里通用的登录失效 AU2 没写修法）。 */
   loginFix: string;
+  /** 这一次问的降智题（#1637）。 */
+  question: IqQuestion;
 }
-
-/**
- * 探通的回答：去掉首尾空白后整句就是 OK（不分大小写）。只要「含 OK」会把「Not OK」「OK, but…」这类回答也当成探通。
- */
-const PROBE_ANSWER = /^ok$/i;
 
 /** 响应原文：回答、插头收下的报错、stderr 里还没被前两段盖住的部分。一段都没有就是没拿到。 */
 function responseTextOf(report: HostReport): string | null {
@@ -100,14 +102,17 @@ function responseTextOf(report: HostReport): string | null {
 }
 
 /** 有报告才算真探过：耗时照插头量的（含 0），请求就是问出去的那一句，响应是原文。 */
-function probeCapture(report: HostReport): {
+function probeCapture(
+  report: HostReport,
+  question: IqQuestion,
+): {
   durationMs: number;
   requestText: string;
   responseText: string | null;
 } {
   return {
     durationMs: report.wallMs,
-    requestText: PROBE_PROMPT,
+    requestText: probePrompt(question),
     responseText: responseTextOf(report),
   };
 }
@@ -119,21 +124,43 @@ function probeCapture(report: HostReport): {
 export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeContext): ProbeAttempt {
   const verdict = judgeRun(report.facts);
   const text = (report.answer ?? '').trim();
-  const captured = probeCapture(report);
+  const q = ctx.question;
+  const captured = probeCapture(report, q);
   if (verdict.outcome === 'ok') {
-    if (!PROBE_ANSWER.test(text)) {
+    // 降智检测（#1637）：第一行是 OK 才算答上了，再看第二行的答案对不对；第三行自报身份只记不判
+    const reply = parseProbeReply(text);
+    const base = { question: q.text, expected: q.answer };
+    if (!reply.ok) {
       return {
         kind: 'failed',
-        detail: `回答认不出（要的是只回 OK）：${text ? clip(withoutQueries(text), 80) : '回答是空的'}`,
+        detail: `回答认不出（要的是第一行只写 OK）：${text ? clip(withoutQueries(text), 80) : '回答是空的'}`,
         ...captured,
+        check: { ...base, answer: reply.answer, passed: null, selfIdentity: reply.identity },
+      };
+    }
+    const check = {
+      ...base,
+      answer: reply.answer,
+      passed: iqAnswerMatches(q, reply.answer),
+      selfIdentity: reply.identity,
+    };
+    if (!check.passed) {
+      return {
+        kind: 'failed',
+        detail: withoutQueries(
+          `疑似降智：题 ${q.text}，应为 ${q.answer}，实答 ${reply.answer === null ? '没写' : clip(reply.answer, 80)}`,
+        ),
+        ...captured,
+        check,
       };
     }
     const secs = Math.max(1, Math.round(report.wallMs / 1000));
     const cost = report.sessionCostUsd;
     return {
       kind: 'answered',
-      detail: `答上了：${clip(text, 40)} · 用时 ${secs} 秒${cost === undefined ? '' : ` · 按 API 价折合 $${cost.toFixed(3)}`}`,
+      detail: `答上了：OK · 降智检测通过（${q.short}=${q.answer}） · 用时 ${secs} 秒${cost === undefined ? '' : ` · 按 API 价折合 $${cost.toFixed(3)}`}`,
       ...captured,
+      check,
     };
   }
   // 执行体最后说的话；reclaude 没登录的那一句在整段 stderr 里找（它后面还会打几行，可能挤出最后三行）。
@@ -200,6 +227,8 @@ export interface ProberDeps {
   helper?: string;
   sudo?: readonly string[];
   limits?: Partial<typeof PROBE_LIMITS>;
+  /** 这一次问哪道降智题；不给按时刻轮换（pickIqQuestion）。 */
+  pickQuestion?: (now: Date) => IqQuestion;
 }
 
 /**
@@ -220,6 +249,8 @@ export function sessionProber(driver: HostDriver, deps: ProberDeps): Prober {
       return { kind: 'failed', detail: `探针的工作目录 ${dir} 没交给 ${user}：${errMessage(err)}` };
     }
     const runId = `probe-${randomUUID()}`;
+    const now = deps.now();
+    const question = (deps.pickQuestion ?? pickIqQuestion)(now);
     let report: HostReport;
     try {
       report = await driver.run(
@@ -227,7 +258,7 @@ export function sessionProber(driver: HostDriver, deps: ProberDeps): Prober {
           runId,
           user,
           cwd: dir,
-          prompt: PROBE_PROMPT,
+          prompt: probePrompt(question),
           // 探针不用 fleet 命令：不给后端地址、不签通行证
           env: { base: deps.baseEnv ?? process.env, fleetApi: '', fleetToken: '' },
           limits: { ...PROBE_LIMITS, ...deps.limits },
@@ -252,8 +283,9 @@ export function sessionProber(driver: HostDriver, deps: ProberDeps): Prober {
     return probeVerdict(report, t, {
       machine: deps.machine,
       user,
-      now: deps.now(),
+      now,
       loginFix: driver.loginFix(deps.machine, user),
+      question,
     });
   };
 }
@@ -277,6 +309,38 @@ export async function poolHoldAfterProbe(db: Db, t: ProbeTarget, a: ProbeAttempt
     return;
   }
   await resolveAlertByKey(db, { dedupeKey, by: 'engine' });
+}
+
+/** 降智提醒的去重键：一条路由一条。 */
+export const iqAlertKey = (routeId: string) => `probe-iq:${routeId}`;
+
+/**
+ * 降智检测的提醒（#1637）：判了疑似降智推一条「路由疑似降智」（同一条路由原地更新，不重复推）；
+ * 同一条路由降智检测通过就撤。没判的（没拿到 OK、额度用满、登录失效这类）不动它。
+ */
+export async function iqAlertAfterProbe(db: Db, t: ProbeTarget, a: ProbeAttempt): Promise<void> {
+  const check = a.check;
+  if (!check || check.passed === null) return;
+  const dedupeKey = iqAlertKey(t.routeId);
+  if (check.passed) {
+    await resolveAlertByKey(db, { dedupeKey, by: 'engine' });
+    return;
+  }
+  await upsertAlert(db, {
+    dedupeKey,
+    level: 'alert',
+    taskId: null,
+    title: '路由疑似降智',
+    body: withoutQueries(
+      `路由 ${t.routeId} 的降智检测没过。题：${check.question}；标准答案：${check.expected}；实答：${check.answer ?? '没写'}；自报身份：${check.selfIdentity ?? '没写'}。这条路由已按不在线处理，下一轮探针再探，通过了自动撤掉这条提醒。`,
+    ),
+  });
+}
+
+/** 一条路由真探完之后的两类提醒：整池暂停、降智。一个写不进去不挡另一个，抛第一个错。 */
+async function afterProbeAlerts(db: Db, t: ProbeTarget, a: ProbeAttempt): Promise<void> {
+  const done = await Promise.allSettled([poolHoldAfterProbe(db, t, a), iqAlertAfterProbe(db, t, a)]);
+  for (const r of done) if (r.status === 'rejected') throw r.reason;
 }
 
 /**
@@ -331,6 +395,7 @@ export interface RouteProbeWiring {
   helper?: string;
   sudo?: readonly string[];
   baseEnv?: Readonly<Record<string, string | undefined>>;
+  pickQuestion?: (now: Date) => IqQuestion;
 }
 
 /** 读到窗口已重置的组织（quota-read 写进库的，和切号同一个 sessionOrgFacts）。一个组织一行。 */
@@ -438,6 +503,7 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
     ...(w.helper ? { helper: w.helper } : {}),
     ...(w.sudo ? { sudo: w.sudo } : {}),
     ...(w.baseEnv ? { baseEnv: w.baseEnv } : {}),
+    ...(w.pickQuestion ? { pickQuestion: w.pickQuestion } : {}),
   };
   // 接上的执行方式各一个探法（和干活的会话同一个驱动）；没接上的由 planProbe 记 not_wired。
   const probers: Partial<Record<HostId, Prober>> = Object.fromEntries(
@@ -450,7 +516,7 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
     sessionOrg: () => w.sessionOrg({ by: '路由探针' }),
     ...(w.orgSwitch ? { orgSwitch: w.orgSwitch } : {}),
     save: (x) => saveRouteProbe(w.db, x),
-    afterProbe: (t, a) => poolHoldAfterProbe(w.db, t, a),
+    afterProbe: (t, a) => afterProbeAlerts(w.db, t, a),
     runs: {
       start: (job, at) => startScheduleRun(w.db, job, at),
       finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),

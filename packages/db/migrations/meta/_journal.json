@@ -351,6 +351,13 @@
       "when": 1791520807696,
       "tag": "0049_sturdy_zarek",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1791600822773,
+      "tag": "0050_sloppy_maelstrom",
+      "breakpoints": true
     }
   ]
 }

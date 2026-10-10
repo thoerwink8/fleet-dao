@@ -4,6 +4,7 @@
 // 组织认不出是该探却探不了：这一轮当不通，同样不改写。探不通写成 failed（不在线），探通后由原来的恢复路径拉起来。
 // 探通但结论写不进 routes：不能当通过去起会话（库里没有这一次的结论，5 分钟内不重复探也保不住），按不通换下一条。
 
+import type { ProbeCheck } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { LiveOrgReading } from '../routing/types.ts';
 import type { ProbeAssignedResult } from '../task-contract.ts';
@@ -47,6 +48,7 @@ async function writeConclusion(
     durationMs: number | null;
     requestText: string | null;
     responseText: string | null;
+    check?: ProbeCheck | null;
   },
 ): Promise<Written> {
   try {

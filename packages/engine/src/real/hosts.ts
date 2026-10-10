@@ -41,7 +41,7 @@
 //   一个同样以那个会话用户身份跑的桥接进程（adapters 的 bridge.ts + bridge-connect.ts），帧经它的 stdin/stdout 转，
 //   引擎自己的进程不直连端口、不直接读令牌文件（real/index.ts 的 mirasimDepsFor）。
 //   协议没有「探针模式」这种权限旗标（不像 Claude 的 dontAsk、cursor 的 --force、grok 的 --always-approve）：探针能不能
-//   不跑工具全靠 PROBE_PROMPT 那句「不要调用任何工具」，服务端那边会不会听不是我们控制得了的——这是协议本身的限制，
+//   不跑工具全靠 探针提示词（probePrompt）那句「不要调用任何工具」，服务端那边会不会听不是我们控制得了的——这是协议本身的限制，
 //   不是漏接了什么。
 import { randomUUID } from 'node:crypto';
 import {
