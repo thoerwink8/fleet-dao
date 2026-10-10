@@ -2,6 +2,7 @@
 // 起因：#1182 被 PR 关掉了，它的任务还挂在「卡住了」，占着并发位（MAX_RUNNING_TASKS）、驾驶舱一直当异常报。
 // 只有一条规则：单关了才撤。读不到单的状态记「没查成」，不撤、不当成单还开着也不当成已关；工作流已经结束的收不到信号，不算问题。
 
+import { LOCAL_LABEL, MOTHER_LABEL } from '@fleet-dao/conventions';
 import type { OpenTaskRow } from '@fleet-dao/db';
 import type { RepoRef } from '@fleet-dao/github';
 import type { AbandonCommand } from '@fleet-dao/shared/task-signals';
@@ -15,6 +16,7 @@ export { parseTaskWorkflowId };
 export const CLOSED_ISSUE_ABANDON_BY = 'engine:hourly-reconcile';
 export const CLOSED_ISSUE_ABANDON_REASON = '单已关闭';
 export const CLOSED_ISSUE_IDLE_STOP_REASON = '单已关闭，没有工作流在跑';
+export const NEVER_DISPATCHED_STOP_REASON = '单是母单或本机做，引擎不派';
 
 export interface ClosedIssueTaskDeps {
   closedIssueTasks: {
@@ -26,6 +28,8 @@ export interface ClosedIssueTaskDeps {
     stopRows?(taskIds: readonly string[], reason: string): Promise<number>;
     /** 这张单此刻开没开着。读不到、是 PR 都照抛。 */
     issueState(repo: RepoRef, issueNumber: number): Promise<'open' | 'closed'>;
+    /** 这个仓开着的单「号 → 标签」。可不提供（不提供就不收母单、本机做的排队行）；读不到照抛。 */
+    openIssueLabels?(repo: RepoRef): Promise<ReadonlyMap<number, readonly string[]>>;
     /** 发放弃信号；收信人不在（刚结束）回 'gone'；别的错照抛。 */
     abandon(workflowId: string, command: AbandonCommand): Promise<'sent' | 'gone'>;
   };
@@ -74,7 +78,10 @@ export async function abandonClosedIssueTasks(deps: ClosedIssueTaskDeps): Promis
   return part;
 }
 
-/** 收掉单已关、但没有任务工作流在跑的非终态任务行，避免主页把遗留行算成开着。 */
+/**
+ * 收掉没有任务工作流在跑的非终态任务行，避免主页把遗留行算成开着：单已关的；单开着但贴了母单、本机做的
+ * （引擎按规矩永远不派，行会一直排着）。
+ */
 export async function settleIdleClosedIssueRows(deps: ClosedIssueTaskDeps): Promise<SweepPart> {
   const part: SweepPart = { scanned: 0, found: 0, unchecked: [] };
   const port = deps.closedIssueTasks;
@@ -101,6 +108,27 @@ export async function settleIdleClosedIssueRows(deps: ClosedIssueTaskDeps): Prom
     }),
   );
 
+  // 一仓只读一次开着的单的标签；读不到的记下错，这个仓的这类行都不动。
+  const labelsByRepo = new Map<
+    string,
+    Promise<{ labels: ReadonlyMap<number, readonly string[]> } | { error: string }>
+  >();
+  const readLabels = (repo: RepoRef) => {
+    const key = `${repo.owner}/${repo.name}`;
+    let hit = labelsByRepo.get(key);
+    if (!hit) {
+      const read = port.openIssueLabels;
+      hit = read
+        ? read.call(port, repo).then(
+            (labels) => ({ labels }),
+            (err: unknown) => ({ error: errMessage(err) }),
+          )
+        : Promise.resolve({ error: '没有读标签的口子' });
+      labelsByRepo.set(key, hit);
+    }
+    return hit;
+  };
+
   for (const row of rows) {
     const slug = `${row.owner}/${row.name}#${row.issueNumber}`;
     if (runningIssues.has(slug)) continue;
@@ -112,7 +140,34 @@ export async function settleIdleClosedIssueRows(deps: ClosedIssueTaskDeps): Prom
       part.unchecked.push(`${slug} 单现在开没开着没读成，任务行不动：${errMessage(err)}`);
       continue;
     }
-    if (state !== 'closed') continue;
+    if (state !== 'closed') {
+      if (!port.openIssueLabels) continue;
+      const repo = { owner: row.owner, name: row.name };
+      const read = await readLabels(repo);
+      if ('error' in read) {
+        part.unchecked.push(`${slug} 单开着，读这个仓开着的单的标签没成，任务行不动：${read.error}`);
+        continue;
+      }
+      const labels = read.labels.get(row.issueNumber);
+      if (!labels) {
+        part.unchecked.push(`${slug} 单开着，但在这个仓开着的单里没找到，任务行不动`);
+        continue;
+      }
+      if (!labels.includes(MOTHER_LABEL) && !labels.includes(LOCAL_LABEL)) continue;
+      try {
+        const stopped = await port.stopRows([row.taskId], NEVER_DISPATCHED_STOP_REASON);
+        if (stopped > 0) {
+          part.found += stopped;
+          deps.log('info', '每小时对账：单是母单或本机做、引擎不派，收掉排队的任务行', {
+            taskId: row.taskId,
+            issue: slug,
+          });
+        }
+      } catch (err) {
+        part.unchecked.push(`${slug} 单是母单或本机做，任务行没收成：${errMessage(err)}`);
+      }
+      continue;
+    }
 
     try {
       const stopped = await port.stopRows([row.taskId], CLOSED_ISSUE_IDLE_STOP_REASON);

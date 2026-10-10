@@ -180,7 +180,9 @@ export const STANDARD_PATHS_FILE = 'packages/conventions/standard-paths.json';
 export interface HourlyReconcileWiring {
   db: Db;
   /** 和对账补漏同一个：审最近合了的 PR（镜像、合并人、合并记录）；补拉经接活那道门时现读挂在哪个版本；自动合并兜底用它列 PR、读文件、挂自动合并。 */
-  gh: Pick<GitHub, 'auditMergedPrs' | 'readIssueState' | 'openIssue'> & AutoMergeWiringGitHub;
+  gh: Pick<GitHub, 'auditMergedPrs' | 'readIssueState' | 'openIssue'> &
+    Partial<Pick<GitHub, 'readGroomFacts'>> &
+    AutoMergeWiringGitHub;
   trees: WorkTrees;
   exec: UserExec;
   /** 会话用户此刻挂的组织（real/session-org.ts）：判阶段派不派得出去和选路同一套，也要它。 */
@@ -215,9 +217,10 @@ const ABANDON_SIGNAL_TIMEOUT_MS = 5_000;
 /** 「单已关就撤任务」的真口子：在跑的任务工作流问 Temporal 的可见性，单状态经「引擎」机器人现读，放弃走现成的 taskAbandonSignal。 */
 function temporalClosedIssueTasks(
   client: Pick<Client, 'workflow' | 'connection'>,
-  gh: Pick<GitHub, 'readIssueState'>,
+  gh: Pick<GitHub, 'readIssueState'> & Partial<Pick<GitHub, 'readGroomFacts'>>,
   db: Db,
 ): HourlyReconcileJobDeps['closedIssueTasks'] {
+  const { readGroomFacts } = gh;
   return {
     async runningTaskWorkflowIds() {
       const ids: string[] = [];
@@ -233,6 +236,12 @@ function temporalClosedIssueTasks(
     async issueState(repo, issueNumber) {
       return (await gh.readIssueState({ repo, issueNumber })).state;
     },
+    ...(readGroomFacts && {
+      async openIssueLabels(repo: RepoRef) {
+        const facts = await readGroomFacts.call(gh, { repo });
+        return new Map(facts.issues.map((i) => [i.number, i.labels] as const));
+      },
+    }),
     async abandon(workflowId, command) {
       try {
         await client.connection.withDeadline(Date.now() + ABANDON_SIGNAL_TIMEOUT_MS, () =>
