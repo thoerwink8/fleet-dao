@@ -1350,9 +1350,15 @@ async function cmdClean(p, io) {
   }
 
   const removed = io.git(['worktree', 'remove', m.worktree, '--force'], { cwd: m.mainRepo });
-  if (removed.status !== 0) return fail(io, `git worktree remove 没成：${reasonOf(removed)}`);
+  // 工作树早就不在了（别处删过、prune 过）：git 说「不是工作树」、目录也真没有，才当已经删了，接着收分支、记清理；
+  // 目录还在却不是工作树的照样报没成，不当成删过
+  const gone =
+    removed.status !== 0 && /is not a working tree/i.test(removed.stderr ?? '') && !existsSync(m.worktree);
+  if (removed.status !== 0 && !gone) return fail(io, `git worktree remove 没成：${reasonOf(removed)}`);
   const branchDeleted = io.git(['branch', '-D', m.branch], { cwd: m.mainRepo });
-  if (branchDeleted.status !== 0)
+  // 工作树已经不在时分支多半也跟着删过了：分支不存在不算没成
+  const branchGone = gone && /not found/i.test(branchDeleted.stderr ?? '');
+  if (branchDeleted.status !== 0 && !branchGone)
     return fail(
       io,
       `工作树删了，但分支 ${m.branch} 没删成（手动 git branch -D ${m.branch}）：${reasonOf(branchDeleted)}`,
