@@ -1,5 +1,5 @@
 #!/usr/sbin/nft -f
-# fleet-dao 在法国本机上的两道隔离，都按套接字的属主（skuid）拦。deploy/france.sh 把 @@…@@ 换好后装到
+# fleet-dao 在法国本机上的三道隔离，都按套接字的属主（skuid）拦。deploy/france.sh 把 @@…@@ 换好后装到
 # /etc/fleet-dao/nftables.nft，由 fleet-firewall.service 载入（先 nft -c 验过）；读回核对内核里的表就是这份文件。
 # 自己一张表、自己一个单元：不启用 nftables.service——它的默认配置开头是 flush ruleset，会把 ufw 的规则一起冲掉。
 # 前两行让整张表先删后建、在一个事务里换掉，重载时不会有空窗。
@@ -19,12 +19,19 @@
 #     root 不拦（root 本来什么都拿得到）；fleet 本来就能经 sudo 以会话用户起命令（引擎起会话就这么起），挡它直连只是少
 #     一条路。只写得下一个会话用户：要是再加一个，它借另一个的口这里挡不住（标记只记「是不是 root 或会话用户发起的」）。
 #     连接跟踪标记只动这两位（按位或进去、按位与出来），别的程序用别的位互不干扰。
+#
+# 三、会话用户不许出站连任何地址的 22/tcp（#1785）：含隧道那头的香港 10.99.0.1 和公网。#1773 的写码会话在会话用户家里自己生成钥匙、
+#     把自己的公钥写进自己的 authorized_keys，再轮着用户名试登香港 sshd，触发 fail2ban 把隧道封了、发版卡住。AI 会话没有
+#     正当理由用 ssh 往外连（git 走 HTTPS）。按套接字属主拦，只管会话用户：root、fleet（引擎）不受影响；别人连会话用户这头的
+#     22 是入站，不经这条。reject with tcp reset：被拒是立刻的，deploy/lib/session-ports.sh 的 check_session_ssh_egress
+#     靠「Connection refused」认它生效（等满时限没答不算：那可能是路不通，不是这条规则）。
 table inet fleet_dao
 delete table inet fleet_dao
 table inet fleet_dao {
 	chain output {
 		type filter hook output priority filter; policy accept;
 		oifname "lo" tcp dport { @@PORTS@@ } meta skuid != { 0, @@FLEET_UID@@ } reject with tcp reset
+		meta skuid @@SESSION_UID@@ tcp dport 22 reject with tcp reset
 		oifname "lo" tcp flags & (fin | syn | rst | ack) == syn ct state new meta skuid != { 0, @@SESSION_UID@@ } ct mark set ct mark | 0x10000000
 		oifname "lo" ct direction reply ct mark & 0x10000000 == 0x10000000 meta skuid @@SESSION_UID@@ reject with tcp reset
 		oifname "lo" ct direction reply ct mark & 0x10000000 == 0x10000000 meta skuid != @@SESSION_UID@@ ct mark set ct mark | 0x20000000

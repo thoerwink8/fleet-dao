@@ -19,10 +19,21 @@ session_user_sudo_list() { sudo -l -U "$1" 2>&1; }
 session_user_groups() { id -nG "$1" 2>&1; }
 session_user_path_meta() { stat -c '%U:%G %a' -- "$1" 2>/dev/null; } # 属主:组 权限
 
-# 会话用户的 ~/.ssh 只许放创始人登录 pilot 用的那几把钥匙（创始人 2026-09-29 拍「留着改检查」）：装 Mirasim 服务端、
-# 以后升级和换账号，都要从 Mirasim 桌面端 ssh 连 <会话用户>@法国（docs/ops.md 第五节「会话用户的 Mirasim」第 1 步），
-# 删了每次都得 root 重开口子。认钥匙照 pilot 家里那份，不另记一份名单（公开仓里不写钥匙，机器上也少一份要对齐的）。
+# 会话用户的登录口子不放在它自己家里（#1785）。#1773 的写码会话在 ~/.ssh 里自己生成钥匙、把自己的公钥写进自己的 authorized_keys，
+# 再轮着用户名试登香港；借自己的 authorized_keys 还能 ssh localhost 登成自己，跳出 setpriv --no-new-privs 和 fleet-agents.slice。
+# 收口的办法有两个，选了第二个：
+#   A. ~/.ssh 和 authorized_keys 改归 root:<用户>（750/640）。sshd 的 StrictModes 认 root 属主、只要不被别人写就行，这条路通；
+#      但家目录归会话用户，它对家目录有写权限，能把 root 属主的 ~/.ssh 整个改名挪开、再建一个自己的，StrictModes 照样放行。拦不住。
+#   B. sshd 的 Match User 段把这个用户的 AuthorizedKeysFile 指到 /etc/ssh/authorized_keys/%u（root:root 644，目录 root:root 755），
+#      家里的 ~/.ssh 不再有任何作用；装机时把它挪走（只挪不删），读回要求它不在或是空的，有东西就是有人又在摸路。
+#      钥匙文件的内容照 pilot 家里那份写（SESSION_SSH_ALLOW_FILE，不另记一份名单）。
+# 装 Mirasim 服务端、升级、换账号都要从桌面端 ssh 连 <会话用户>@法国（docs/ops.md 第五节「会话用户的 Mirasim」第 1 步），
+# 所以钥匙文件要留着，只是由 root 写、会话用户读得到改不了。
 SESSION_SSH_ALLOW_FILE=/home/pilot/.ssh/authorized_keys
+SESSION_SSH_KEYS_DIR=/etc/ssh/authorized_keys
+# 挪走的东西放这里：<目录>/<用户>-ssh-<日期>/（root 700，只挪不删）
+SESSION_QUARANTINE_ROOT=/root/quarantine
+session_user_today() { date +%F; }
 
 # 一份 authorized_keys 里每把钥匙的指纹，一行一个、排好序；有钥匙却认不全（ssh-keygen 读不了、认出的比写的少）返回 1
 ssh_key_fingerprints() { # 文件
@@ -35,11 +46,39 @@ ssh_key_fingerprints() { # 文件
   printf '%s\n' "$out"
 }
 
-# 会话用户家里的 ~/.ssh：不在最好；在的话只许一份 authorized_keys（目录 700、文件 600、都归它自己、都不是链接），
-# 里面每把钥匙 pilot 家里都有。认不出、核对不了一律算不对，不当成没事。返回的问题写进 SSH_BAD
+# 装机时收口：会话用户家里的 ~/.ssh 里有任何东西（钥匙、config、known_hosts、authorized_keys）、或它本身是文件/链接，
+# 整个挪到 $SESSION_QUARANTINE_ROOT/<用户>-ssh-<日期>/（日子里已有就加 -2、-3…），记一笔 changed。不在、是空目录就不动。
+# 要先 source common.sh（changed / red）。返回 1 是挪不成（已判红）
+quarantine_session_ssh() { # 用户 家目录
+  local u=$1 d="$2/.ssh" dest n=1 what
+  if [[ ! -e "$d" && ! -L "$d" ]]; then return 0; fi
+  if [[ -d "$d" && ! -L "$d" ]] && [[ -z "$(ls -A -- "$d" 2>/dev/null)" ]]; then return 0; fi
+  what=$(
+    shopt -s nullglob dotglob
+    if [[ -L "$d" || ! -d "$d" ]]; then
+      printf '%s' "（不是目录）"
+    else
+      for e in "$d"/*; do printf '%s ' "${e##*/}"; done
+    fi
+  )
+  dest="$SESSION_QUARANTINE_ROOT/$u-ssh-$(session_user_today)"
+  while [[ -e "$dest" || -L "$dest" ]]; do
+    n=$((n + 1))
+    dest="$SESSION_QUARANTINE_ROOT/$u-ssh-$(session_user_today)-$n"
+  done
+  # umask 077：隔离目录建出来就是 700（里面是会话用户的私钥，别人读不到）
+  if ! (umask 077 && mkdir -p -- "$SESSION_QUARANTINE_ROOT" "$dest") || ! mv -- "$d" "$dest/dot-ssh"; then
+    red "$u 的 ~/.ssh 里有东西（${what% }），挪到 $dest 没成：手动挪走，会话用户不该有自己的钥匙和 ssh 配置"
+    return 1
+  fi
+  changed "把 $u 的 ~/.ssh（${what% }）挪到 $dest/dot-ssh（只挪不删）"
+}
+
+# 会话用户家里的 ~/.ssh：不在、或是空目录才对（登录口子在 /etc/ssh/authorized_keys/<用户>，家里的 authorized_keys 不生效，
+# 家里有任何东西都是会话在自己生成钥匙、写 ssh 配置）。认不出、核对不了一律算不对。返回的问题写进 SSH_BAD
 # shellcheck disable=SC2088 # 报错里的 ~/.ssh 是给人看的文字，不是要展开的路径
 check_session_ssh() { # 用户 家目录
-  local u=$1 d="$2/.ssh" f extra keys allow stray
+  local d="$2/.ssh" extra
   SSH_BAD=""
   if [[ ! -e "$d" && ! -L "$d" ]]; then return 0; fi
   if [[ -L "$d" || ! -d "$d" ]]; then
@@ -50,42 +89,50 @@ check_session_ssh() { # 用户 家目录
     SSH_BAD="~/.ssh 读不了，里面放了什么没法核对；"
     return 0
   fi
-  f=$d/authorized_keys
   # 用通配不用 find：find 在读不了的当前目录下（runuser 换了身份、cwd 还是 /root）会退出非 0
   extra=$(
     shopt -s nullglob dotglob
-    for e in "$d"/*; do [[ "${e##*/}" == authorized_keys ]] || printf '%s ' "${e##*/}"; done
+    for e in "$d"/*; do printf '%s ' "${e##*/}"; done
   )
-  if [[ -n "$extra" ]]; then SSH_BAD+="~/.ssh 里除了 authorized_keys 还有 ${extra% }（会话用户不该有自己的钥匙和 ssh 配置）；"; fi
-  if [[ "$(session_user_path_meta "$d")" != "$u:$u 700" ]]; then
-    SSH_BAD+="~/.ssh 是「$(session_user_path_meta "$d")」（要 $u:$u 700）；"
+  if [[ -n "$extra" ]]; then
+    SSH_BAD="~/.ssh 里有 ${extra% }（会话用户不该有自己的钥匙和 ssh 配置；登录口子在 $SESSION_SSH_KEYS_DIR，重跑 france.sh 会挪走）；"
   fi
-  if [[ ! -e "$f" && ! -L "$f" ]]; then return 0; fi
-  if [[ -L "$f" || ! -f "$f" ]]; then
-    SSH_BAD+="~/.ssh/authorized_keys 不是普通文件（或是链接）；"
+}
+
+# /etc/ssh/authorized_keys/<用户>：普通文件、root:root 644、每把钥匙 pilot 家里都有。没有这个文件记待配（会话用户登不进来，
+# 不是漏洞）。返回的问题写进 SSH_BAD，没放的写进 SSH_PENDING
+check_session_ssh_keys() { # 用户
+  local u=$1 f="$SESSION_SSH_KEYS_DIR/$1" keys allow stray
+  SSH_BAD="" SSH_PENDING=""
+  if [[ ! -e "$f" && ! -L "$f" ]]; then
+    SSH_PENDING="$f 还没放（桌面端连不进 $u；重跑 france.sh，它照 $SESSION_SSH_ALLOW_FILE 写）；"
     return 0
   fi
-  if [[ "$(session_user_path_meta "$f")" != "$u:$u 600" ]]; then
-    SSH_BAD+="~/.ssh/authorized_keys 是「$(session_user_path_meta "$f")」（要 $u:$u 600）；"
+  if [[ -L "$f" || ! -f "$f" ]]; then
+    SSH_BAD="$f 不是普通文件（或是链接）；"
+    return 0
+  fi
+  if [[ "$(session_user_path_meta "$f")" != "root:root 644" ]]; then
+    SSH_BAD+="$f 是「$(session_user_path_meta "$f")」（要 root:root 644：会话用户读得到、改不了）；"
   fi
   if ! keys=$(ssh_key_fingerprints "$f"); then
-    SSH_BAD+="~/.ssh/authorized_keys 里的钥匙认不全（ssh-keygen 读不了），没法核对是谁的；"
+    SSH_BAD+="$f 里的钥匙认不全（ssh-keygen 读不了），没法核对是谁的；"
     return 0
   fi
   if [[ -z "$keys" ]]; then return 0; fi
   if ! allow=$(ssh_key_fingerprints "$SESSION_SSH_ALLOW_FILE") || [[ -z "$allow" ]]; then
-    SSH_BAD+="~/.ssh/authorized_keys 有钥匙，可 $SESSION_SSH_ALLOW_FILE 读不了、认不出或是空的，核对不了是不是创始人的；"
+    SSH_BAD+="$f 有钥匙，可 $SESSION_SSH_ALLOW_FILE 读不了、认不出或是空的，核对不了是不是创始人的；"
     return 0
   fi
   stray=$(comm -23 <(printf '%s\n' "$keys") <(printf '%s\n' "$allow") | grep -c .) || true
   if ((stray > 0)); then
-    SSH_BAD+="~/.ssh/authorized_keys 里有 $stray 把钥匙不在 $SESSION_SSH_ALLOW_FILE 里（只许放创始人登录 pilot 用的）；"
+    SSH_BAD+="$f 里有 $stray 把钥匙不在 $SESSION_SSH_ALLOW_FILE 里（只许放创始人登录 pilot 用的）；"
   fi
 }
 
 # 读回一个会话用户：家目录就是 /home/<用户>、不是符号链接、归它自己、750（别人读得到的话，reclaude 的登录态
 # ~/.reclaude 就漏了）；没有 sudo、只在自己的组里、家里没有 GitHub 凭据和 ssh 钥匙；reclaude 登录要创始人在
-# 浏览器里点，没登录记「待配」。~/.ssh 只许放创始人登录 pilot 的钥匙（check_session_ssh）。用户不在记红（france.sh 建过它，不在就是状态不对，不当成没事）。
+# 浏览器里点，没登录记「待配」。~/.ssh 里不许有东西（check_session_ssh）、登录口子 /etc/ssh/authorized_keys/<用户> 只许放创始人登录 pilot 的钥匙（check_session_ssh_keys）。用户不在记红（france.sh 建过它，不在就是状态不对，不当成没事）。
 readback_session_user() { # 用户
   local u=$1 home bad="" f meta
   home=$(session_user_home "$u")
@@ -112,11 +159,14 @@ readback_session_user() { # 用户
   done
   check_session_ssh "$u" "$home"
   bad+=$SSH_BAD
+  check_session_ssh_keys "$u"
+  bad+=$SSH_BAD
   if [[ -n "$bad" ]]; then
     red "$u：$bad"
   else
-    ok "$u：没有 sudo、只在自己的组里、家里没有 GitHub 凭据，~/.ssh 里只有创始人登录 pilot 的钥匙（或没有）"
+    ok "$u：没有 sudo、只在自己的组里、家里没有 GitHub 凭据，~/.ssh 里没有东西，登录口子只有创始人登录 pilot 的钥匙（或还没放）"
   fi
+  if [[ -n "$SSH_PENDING" ]]; then pending "$u：$SSH_PENDING"; fi
   if [[ ! -x "$home/.local/bin/reclaude" ]]; then
     red "$u 没有 reclaude 二进制（~/.local/bin/reclaude）：引擎起不了 Claude 会话；重跑 bash deploy/france.sh 装上"
   elif [[ ! -s "$home/.reclaude/device.json" ]]; then
