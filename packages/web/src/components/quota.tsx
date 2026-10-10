@@ -82,15 +82,51 @@ export function amount(w: Pick<QuotaWindowView, 'unit'>, n: number): string {
   }
 }
 
+/**
+ * 同一行的已用 / 上限：token、点数用同一个单位、同一位小数（都用「万」或都用整数），
+ * 避免各自 formatCount 混成「8,623.515 / 50.0 万」。
+ */
+export function amountPair(w: Pick<QuotaWindowView, 'unit'>, used: number, limit: number): string {
+  if (w.unit === 'usd') return `${formatUsd(used)} / ${formatUsd(limit)}`;
+  if (w.unit === 'percent') return `${Math.round(used)}% / ${Math.round(limit)}%`;
+  const scale = Math.max(Math.abs(used), Math.abs(limit));
+  if (scale < 10_000) {
+    return `${formatCount(used)} / ${formatCount(limit)}`;
+  }
+  if (scale < 100_000_000) {
+    return `${(used / 10_000).toFixed(1)} 万 / ${(limit / 10_000).toFixed(1)} 万`;
+  }
+  return `${(used / 100_000_000).toFixed(1)} 亿 / ${(limit / 100_000_000).toFixed(1)} 亿`;
+}
+
 /** 一句话的用量：「已用满」「$3.20 / $10.00」「40%」「已用 812，上限没读到」「用量没读到」。 */
 export function quotaValue(w: QuotaWindowView): string {
   const util = utilOf(w);
   // 上游说已用满以它为准，排在数字前面说；有比例就顺带写上。
   if (isUpstreamFull(w)) return util === undefined ? '已用满' : `已用满 · ${formatPercent(util)}`;
-  if (w.used !== undefined && w.limit !== undefined) return `${amount(w, w.used)} / ${amount(w, w.limit)}`;
+  if (w.used !== undefined && w.limit !== undefined) return amountPair(w, w.used, w.limit);
   if (util !== undefined) return formatPercent(util);
   if (w.used !== undefined) return `已用 ${amount(w, w.used)}，上限没读到`;
   return '用量没读到';
+}
+
+/** 清零时刻已过，或上游这次没再报：算过期的旧读数。 */
+export function isExpiredWindow(w: Pick<QuotaWindowView, 'staleSince' | 'resetsAt'>, now: number): boolean {
+  if (w.staleSince) return true;
+  if (w.resetsAt && Date.parse(w.resetsAt) <= now) return true;
+  return false;
+}
+
+/** 同一格里新旧两张卡时，过期那张收成一行灰字，不占大格。 */
+export function ExpiredQuotaLine() {
+  return (
+    <div
+      className="rounded-lg border border-dashed bg-muted/40 px-2.5 py-1.5 text-caption text-muted-foreground"
+      data-expired="true"
+    >
+      旧读数，已过期
+    </div>
+  );
 }
 
 /** 一个时间窗的一格：用量、条、清零倒计时、来源和读数新鲜度（stale 由后端按 30 分钟判）。 */
@@ -102,6 +138,8 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
   // 上游说满了、却没给比例（Claude 撞限额时就这样）：照「已用满」写，条画满，不算「用量没读到」。
   const upstreamFull = isUpstreamFull(w);
   const known = util !== undefined || upstreamFull;
+  const pair =
+    w.used !== undefined && w.limit !== undefined ? amountPair(w, w.used, w.limit).split(' / ') : null;
   return (
     <div
       className={cn(
@@ -125,12 +163,10 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
       ) : null}
       {/* 金额放得下就跟百分比、来源同一行；放不下就换行，不单行截成「$61.…」。 */}
       <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
-        {w.used !== undefined && w.limit !== undefined ? (
+        {pair ? (
           <span className="num whitespace-normal">
-            <span className={cn('text-stat-num font-semibold', full && 'text-ink-fail')}>
-              {amount(w, w.used)}
-            </span>
-            <span className="text-xs text-muted-foreground"> / {amount(w, w.limit)}</span>
+            <span className={cn('text-stat-num font-semibold', full && 'text-ink-fail')}>{pair[0]}</span>
+            <span className="text-xs text-muted-foreground"> / {pair[1]}</span>
           </span>
         ) : util !== undefined ? (
           <span className={cn('num text-stat-num font-semibold', full && 'text-ink-fail')}>

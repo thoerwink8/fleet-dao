@@ -7,7 +7,7 @@ import type { PoolView, QuotaWindowKind, QuotaWindowView } from '../api/types';
 import { CarpoolReconcileBanner } from '../components/carpool-reconcile';
 import { OrgSwitchBanner } from '../components/org-switch';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
-import { QuotaCell, quotaValue, readingVerb } from '../components/quota';
+import { ExpiredQuotaLine, isExpiredWindow, QuotaCell, quotaValue, readingVerb } from '../components/quota';
 import { RefreshBar } from '../components/refresh-bar';
 import { Badge } from '../components/ui/badge';
 import {
@@ -273,14 +273,25 @@ function Matrix({ pools, kinds, now }: { pools: PoolView[]; kinds: QuotaWindowKi
                       </th>
                       {kinds.map((k) => {
                         const ws = p.windows.filter((x) => x.window === k);
+                        // 同一池同一类窗有新旧两张时：过期的收成一行灰字，不与新读数并排占大格
+                        const expired = ws.filter((w) => isExpiredWindow(w, now));
+                        const current = ws.filter((w) => !isExpiredWindow(w, now));
+                        const collapseExpired = expired.length > 0 && current.length > 0;
+                        const showFull = collapseExpired ? current : ws;
                         return (
                           <td key={k} className="p-2">
                             {ws.length ? (
                               <div className="space-y-2">
-                                {ws.map((w, i) => (
+                                {showFull.map((w, i) => (
                                   // biome-ignore lint/suspicious/noArrayIndexKey: 同一种窗可能有好几个（按模型组），契约里没有区分它们的字段。
                                   <QuotaCell key={i} w={w} now={now} />
                                 ))}
+                                {collapseExpired
+                                  ? expired.map((_, i) => (
+                                      // biome-ignore lint/suspicious/noArrayIndexKey: 同上，过期旧读数没有稳定主键。
+                                      <ExpiredQuotaLine key={`expired-${i}`} />
+                                    ))
+                                  : null}
                               </div>
                             ) : (
                               <div

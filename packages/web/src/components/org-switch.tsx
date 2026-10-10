@@ -1,4 +1,5 @@
 import { ArrowLeftRight } from 'lucide-react';
+import { Link } from 'react-router';
 import { brand } from '#brand';
 import type { OrgSwitchView } from '../api/types';
 import { formatClock } from '../lib/format';
@@ -25,6 +26,18 @@ function reserveLine(r: NonNullable<Extract<OrgSwitchView, { state: 'known' }>['
   return `${solo()}额度留量线判不了，按额度未知照派：${r.why}`;
 }
 
+/** 渠道 why 里若已带「只剩 1 个可用账号」标题，只留括号里的原因，避免标题套标题。 */
+function singleChannelDetail(why: string): string {
+  const wrapped = why.match(/^只剩 1 个可用账号，没得选（(.+)）$/);
+  if (wrapped?.[1]) return wrapped[1];
+  const prefixed = why.match(/^只剩 1 个可用账号，没得选[：:]\s*(.+)$/);
+  if (prefixed?.[1]) {
+    const inner = prefixed[1].match(/^（(.+)）$/);
+    return inner?.[1] ?? prefixed[1];
+  }
+  return why;
+}
+
 export type OrgSwitchTone = 'muted' | 'ok' | 'stall' | 'fail';
 
 export interface OrgSwitchSummary {
@@ -33,6 +46,8 @@ export interface OrgSwitchSummary {
   headline: string;
   /** 往下的几条小字（每条一件事）。 */
   details: string[];
+  /** 指向设置页等后续动作（例如整池暂停）。 */
+  action?: { to: string; label: string };
 }
 
 /**
@@ -54,6 +69,7 @@ export function orgSwitchSummary(v: OrgSwitchView): OrgSwitchSummary {
   }
   const details: string[] = [];
   let tone: OrgSwitchTone = 'ok';
+  let action: OrgSwitchSummary['action'];
   const raise = (t: OrgSwitchTone) => {
     const order: OrgSwitchTone[] = ['muted', 'ok', 'stall', 'fail'];
     if (order.indexOf(t) > order.indexOf(tone)) tone = t;
@@ -63,15 +79,17 @@ export function orgSwitchSummary(v: OrgSwitchView): OrgSwitchSummary {
     headline = '还没读到会话用户现在挂的是哪个组织';
     raise('stall');
   } else if (v.live === 'solo') {
-    headline = `挂着${solo()}`;
     if (v.outage) {
+      headline = `挂着${solo()}`;
       const when = v.outage.resetsAt
         ? `预计 ${formatClock(v.outage.resetsAt)} 恢复（来源：${v.outage.resetsFrom === 'api' ? '接口' : '被拒原文'}）`
         : '几点恢复不知道';
       headline += `；${outageName(v.outage.kind)}，${when}`;
       details.push(`凭什么：${v.outage.evidence}`);
     } else {
-      headline += `；没有记着的${carpool()}恢复条件（多半是人手动切的）`;
+      // 内部话「没有记着的拼车恢复条件」改成人话，并指到设置页整池暂停换账号
+      headline = `${carpool()}账号被封，目前只剩${solo()}，要你换新${carpool()}账号`;
+      action = { to: '/settings#run', label: '整池暂停' };
     }
     if (v.backPendingSince) {
       details.push(
@@ -92,7 +110,9 @@ export function orgSwitchSummary(v: OrgSwitchView): OrgSwitchSummary {
       details.unshift(v.channel.why);
       raise('fail');
     } else if (v.channel.state === 'single') {
-      details.unshift(`只剩 1 个可用账号，没得选：${v.channel.why}`);
+      // 标题只写一次；原因放小字（why 里若已带同句就剥掉）
+      headline = `只剩 1 个可用账号；${headline}`;
+      details.unshift(singleChannelDetail(v.channel.why));
       raise('stall');
     } else if (v.channel.state === 'unknown') {
       details.unshift(`读不到账号状态，不切号：${v.channel.why}`);
@@ -143,7 +163,7 @@ export function orgSwitchSummary(v: OrgSwitchView): OrgSwitchSummary {
   }
   details.push(...paused);
   if (v.soloPaused) raise('stall');
-  return { tone, headline, details };
+  return { tone, headline, details, ...(action ? { action } : {}) };
 }
 
 const TONE_CLASS: Record<OrgSwitchTone, string> = {
@@ -163,11 +183,18 @@ export function OrgSwitchBanner({ view }: { view: OrgSwitchView | undefined }) {
         <ArrowLeftRight className={cn('size-4 shrink-0', TONE_CLASS[s.tone])} aria-hidden />
         <span className={cn('text-sm font-medium', TONE_CLASS[s.tone])}>{s.headline}</span>
       </div>
-      {s.details.length ? (
+      {s.details.length || s.action ? (
         <ul className="mt-1.5 space-y-0.5 pl-6 text-xs text-muted-foreground">
           {s.details.map((d) => (
             <li key={d}>{d}</li>
           ))}
+          {s.action ? (
+            <li>
+              <Link to={s.action.to} className="underline underline-offset-2">
+                {s.action.label}
+              </Link>
+            </li>
+          ) : null}
         </ul>
       ) : null}
     </div>
