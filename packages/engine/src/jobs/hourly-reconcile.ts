@@ -29,6 +29,7 @@ import {
   checkMergedPrs,
   checkQuotaFreshness,
   type ReconcileCheckDeps,
+  retireHistoricalFactAlerts,
   retireWorkflowAlerts,
 } from './reconcile-checks.ts';
 import { clip, type SweepPart } from './reconcile-common.ts';
@@ -120,6 +121,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   const retired = await retireWorkflowAlerts(deps);
   const merged = await checkMergedPrs(deps);
   const ledgers = await checkLedgers(deps);
+  const historical = await retireHistoricalFactAlerts(deps);
   const quota = await checkQuotaFreshness(deps);
   const autoMerges = await checkAutoMerges(deps);
   // 单已关、任务还挂着的撤掉（#1198）：放在提醒之前，撤掉的任务那一轮之后的提醒对账再收拾它留下的提醒
@@ -166,6 +168,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     retired,
     merged,
     ledgers,
+    historical,
     quota,
     autoMerges,
     closedTasks,
