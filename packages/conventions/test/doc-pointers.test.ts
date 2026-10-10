@@ -1,3 +1,5 @@
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { checkDocPointers, DOCS, docFiles, formatProblem, type PointerKind } from '../src/doc-pointers.ts';
@@ -351,8 +353,15 @@ describe('文档指针：读不到的明确报「没查成」，不当成「没�
 describe('全仓的文档（main 上现有的，加上本 PR 改的）', () => {
   const report = checkDocPointers(fsRepo(ROOT));
 
-  it('只查 design、ops、README 这几份活文档，specs/ 和 docs/decisions/ 是历史记录不查（#654）', () => {
-    expect(report.files).toEqual([...DOCS]);
+  it('只查 design、ops、README 和 docs/design/ 下的模块文件，specs/ 和 docs/decisions/ 是历史记录不查（#654）', () => {
+    // 按盘上真实的 docs/design/*.md 独立算一遍（#139 起每片往里加一个模块文件），不是拿 docFiles 自己对自己
+    const modules = readdirSync(join(ROOT, 'docs/design'))
+      .filter((name) => name.endsWith('.md'))
+      .sort()
+      .map((name) => `docs/design/${name}`);
+    expect(modules).toContain('docs/design/jev.md');
+    expect(report.files).toEqual([...DOCS, ...modules]);
+    expect(report.files.filter((f) => f.startsWith('specs/') || f.startsWith('docs/decisions/'))).toEqual([]);
   });
 
   // 每一类先断言「认出了至少一个」：规则认不出了，和「全都指得到」看起来一样是绿的，得分开。
