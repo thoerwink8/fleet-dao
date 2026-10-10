@@ -41,8 +41,8 @@ describe('操作记录页', () => {
     expect(screen.queryByRole('button', { name: '看更早的记录' })).toBeNull();
   });
 
-  test('过滤后没有记录、还有更早的：按钮在空态里，点了继续往前读', async () => {
-    // 按钮留在列表底部、或点了不读下一页，这一条会红。
+  test('搜索无结果时提示只搜了已加载的', async () => {
+    // 仍写「没有」却不说只搜了已加载的，或点了不读下一页，这一条会红。
     const api = createMockApi({ live: false });
     const first = await api.audit({ limit: 100 });
     const sample = first.items[0];
@@ -66,8 +66,47 @@ describe('操作记录页', () => {
       );
     renderApp(<AuditPage />, { api });
     await screen.findAllByText('派了会话');
-    expect(screen.getByRole('button', { name: '看更早的记录' })).toBeTruthy();
     fireEvent.change(search(), { target: { value: '更早的人' } });
+    const title = await screen.findByText('没有符合条件的记录');
+    const box = title.parentElement;
+    if (!box) throw new Error('空态没有外框');
+    const loaded = first.items.length;
+    const button = within(box).getByRole('button', {
+      name: `只搜了已加载的 ${loaded} 条，点这里再往前翻`,
+    });
+    expect(screen.queryByRole('button', { name: '看更早的记录' })).toBeNull();
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.getByText('更早的人')).toBeTruthy());
+  });
+
+  test('过滤后没有记录、还有更早的：按钮在空态里，点了继续往前读', async () => {
+    // 按钮留在列表底部、或点了不读下一页，这一条会红。
+    const api = createMockApi({ live: false });
+    const first = await api.audit({ limit: 100 });
+    const sample = first.items[0];
+    if (!sample) throw new Error('假数据没有操作记录');
+    const older: AuditEntry = {
+      ...sample,
+      id: 'a-older',
+      actor: { kind: 'agent', id: 'agent-older', name: '更早的会话' },
+      action: 'run.start',
+      target: 'task:t-12',
+      before: undefined,
+      after: { stage: 'triage', routeId: 'r-ca-sonnet' },
+      reason: undefined,
+      error: undefined,
+    };
+    api.audit = (query) =>
+      Promise.resolve(
+        query?.cursor
+          ? { items: [older] }
+          : { items: first.items, nextCursor: '2099-01-01T00:00:00.000Z|a-more' },
+      );
+    renderApp(<AuditPage />, { api });
+    await screen.findAllByText('派了会话');
+    expect(screen.getByRole('button', { name: '看更早的记录' })).toBeTruthy();
+    // 假数据第一页没有「会话」操作人；下一页有。
+    fireEvent.click(screen.getByRole('tab', { name: '会话' }));
     const title = await screen.findByText('没有符合条件的记录');
     const box = title.parentElement;
     if (!box) throw new Error('空态没有外框');
@@ -75,6 +114,6 @@ describe('操作记录页', () => {
     const button = within(box).getByRole('button', { name: '看更早的记录' });
     expect(screen.getAllByRole('button', { name: '看更早的记录' })).toHaveLength(1);
     fireEvent.click(button);
-    await waitFor(() => expect(screen.getByText('更早的人')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('更早的会话')).toBeTruthy());
   });
 });

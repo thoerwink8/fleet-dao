@@ -147,9 +147,12 @@ export function isUseItOrLoseIt(w: QuotaWindowView, now: number): boolean {
   return left < length * 0.2 && util < 0.7;
 }
 
-/** 快用完：上游自己说用满了（以它为准，实测 99% 就可能已经满了），或者用了九成以上。上游这次没报的不算。 */
+/**
+ * 快用完：上游自己说用满了（以它为准，实测 99% 就可能已经满了），或者用了九成以上。上游这次没报的不算；
+ * 读数本身过期（stale）的也不算：旧数不能当现值喊「快用完」，它只进「读数过期」那一栏（#1748）。
+ */
 export function isNearlyExhausted(w: QuotaWindowView): boolean {
-  if (w.staleSince) return false;
+  if (w.staleSince || w.stale) return false;
   if (isUpstreamFull(w)) return true;
   const util = utilOf(w);
   return util !== undefined && util >= 0.9;

@@ -18,6 +18,7 @@ import { supportedPurposeEfforts } from '../lib/routing-browse';
 import { actualRanks, routeSlotState, type SlotState, slotWord, summarizeOrder } from '../lib/routing-order';
 import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
+import { PoolProblemLine, usePoolProblems } from './pool-problem';
 import { RouteSwitch, SortableList, useRoutingEdit } from './routing-edit';
 import { PoolHoldControl } from './routing-hold';
 import { KindChip, useKindEnv } from './routing-kinds';
@@ -177,7 +178,7 @@ export function OrderSummaryLine({
         ? `引擎按这个先后试：开着的 ${summary.active} 个${noun}，${
             summary.skipped > 0
               ? `跳过 ${summary.skipped} 个（${
-                  noun === '模型' ? '关着、已下架或没有可用路由' : '关着或没有可用路由'
+                  noun === '模型' ? '关着、已下架或没有可用路由' : '关着、疑似降智或没有可用路由'
                 }），`
               : ''
           }排头的是配置里第 ${summary.firstPosition} 个`
@@ -225,6 +226,7 @@ export function RouteItem({
   const channelOff = routing.data
     ? routing.data.channels.find((c) => c.id === r.channelId)?.enabled === false
     : false;
+  const poolProblem = usePoolProblems().problems.get(r.poolId);
   const poolLocked = Boolean(holds.data && poolIsHeld(holds.data, r.poolId));
   const lockWhy = holds.error
     ? '整池暂停没读成，先不能开这条路由'
@@ -314,6 +316,7 @@ export function RouteItem({
             {backoff}
           </span>
         ) : null}
+        {poolProblem ? <PoolProblemLine problem={poolProblem} now={now} className="basis-full" /> : null}
       </div>
       <div
         id={`facts-${r.routeId}`}

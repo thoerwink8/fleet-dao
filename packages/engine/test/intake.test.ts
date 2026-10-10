@@ -216,7 +216,7 @@ function harness(
       return null;
     },
     async runningTasks() {
-      return 0;
+      return { working: 0, stalled: 0 };
     },
     async start({ issueNumber, title, body, author }) {
       started.push({ issueNumber, title, body, author });
@@ -834,7 +834,7 @@ describe('runIntakeJob · 一轮', () => {
   it('在跑的任务已经到上限 → 一条都不起（不是丢，下一轮再来）', async () => {
     const h = harness({
       async runningTasks() {
-        return MAX_RUNNING_TASKS;
+        return { working: MAX_RUNNING_TASKS, stalled: 0 };
       },
     });
     const run = await runIntakeJob(h.deps);
@@ -842,11 +842,50 @@ describe('runIntakeJob · 一轮', () => {
     expect(run.outcome).toBe('ok');
   });
 
+  it('6 条在跑工作流全停下等人 → 不占名额，这一轮照起 1 条，不报 at_capacity（#1776）', async () => {
+    const h = harness({
+      async runningTasks() {
+        return { working: 0, stalled: MAX_RUNNING_TASKS };
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started).toHaveLength(1);
+    const text = h.logs.map((l) => l.text).join(' | ');
+    expect(text).not.toContain('at_capacity');
+    expect(text).toContain('停下等人 6 条（不占名额）');
+  });
+
+  it('6 条里 5 条在干活、1 条停下：上限 6 时还能起 1 条（#1776）', async () => {
+    const h = harness(
+      {
+        async runningTasks() {
+          return { working: MAX_RUNNING_TASKS - 1, stalled: 1 };
+        },
+      },
+      { issues: [issue({ number: 1 }), issue({ number: 2 })] },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([1]);
+  });
+
+  it('6 条都在干活 → at_capacity，说明里写出在干活和停下等人各几条（#1776）', async () => {
+    const h = harness({
+      async runningTasks() {
+        return { working: MAX_RUNNING_TASKS, stalled: 2 };
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    const text = h.logs.map((l) => l.text).join(' | ');
+    expect(text).toContain('at_capacity');
+    expect(text).toContain('开头在干活 6 条、停下等人 2 条（不占名额）');
+  });
+
   it('起了几条就把在跑数加几：上限是 2、已经在跑 1 条，这一轮只起 1 条', async () => {
     const h = harness(
       {
         async runningTasks() {
-          return 1;
+          return { working: 1, stalled: 0 };
         },
         limits: { maxRunningTasks: 2 },
       },

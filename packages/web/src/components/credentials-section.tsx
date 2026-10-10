@@ -121,6 +121,17 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
       className="mt-4 max-w-md space-y-4"
       aria-label={first ? '设账密' : '改账密'}
     >
+      {/* 密码管理器 / 无障碍：密码表单要有 autocomplete=username 的用户名字段；看得见的那一栏另写，这里藏一份兜底。 */}
+      <input
+        type="text"
+        name="username"
+        autoComplete="username"
+        value={name || (c.username ?? '')}
+        readOnly
+        hidden
+        tabIndex={-1}
+        aria-hidden
+      />
       {blocked ? (
         <p role="status" className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
           第一次设账密要在飞书登录后 10 分钟内设：请先退出，用飞书重新登录一次，再回到这里。
@@ -144,7 +155,7 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
         <Label htmlFor="cred-username">{first ? '用户名' : '用户名（不改就别动）'}</Label>
         <Input
           id="cred-username"
-          name="username"
+          name="username-visible"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
           autoComplete="username"

@@ -7,8 +7,14 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { freshBeforeSubagent, SUBAGENT_DIRECT_MS, SUBAGENT_FETCH_MS } from './fresh-main.mjs';
-import { gitOk, gitRunner, gitWhy } from './git-run.mjs';
+import {
+  freshBeforeSubagent,
+  SUBAGENT_BUDGET_MS,
+  SUBAGENT_DIRECT_MS,
+  SUBAGENT_FALLBACK_MS,
+  SUBAGENT_FETCH_MS,
+} from './fresh-main.mjs';
+import { gitOk, gitRunner, gitWhy, readFallbackProxy } from './git-run.mjs';
 import { cleanId, stateDir, touchTool } from './unattended.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
@@ -2122,6 +2128,8 @@ export function subagentFreshness(raw, { fresh = freshBeforeSubagent, cwd = proc
       git: gitRunner(SUBAGENT_FETCH_MS, SUBAGENT_DIRECT_MS),
       okOf: gitOk,
       whyOf: gitWhy,
+      fallback: readFallbackProxy(),
+      budget: { totalMs: SUBAGENT_BUDGET_MS, directMs: SUBAGENT_DIRECT_MS, fallbackMs: SUBAGENT_FALLBACK_MS },
     });
   } catch (err) {
     return {

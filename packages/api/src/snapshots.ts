@@ -63,26 +63,34 @@ export async function readHomeSnapshot(deps: SnapshotDeps): Promise<z.input<type
     }
   }
   const taskIds = tasks.map((t) => t.id);
-  const [notifications, activeRuns, pools, channels, windows, routes, models, segmentRuns, engine] =
-    await Promise.all([
-      store.listNotifications({ status: 'open', limit: 200 }),
-      store.listRuns({ taskIds, active: true }),
-      store.listPools(),
-      store.listChannels(),
-      store.listQuotaWindows(),
-      store.listRoutes(),
-      store.listModels(),
-      // 三段流水线图的数（在哪一段、谁在做、平均耗时）：看板窗口里全部单的流水一次读完
-      store.listSegmentRunsForTasks(taskIds),
-      // 引擎那一格读真实健康（#902 D7）：开着的要真探到在线的工人，不只看配置里开没开
-      deps.engineProbe(),
-    ]);
+  const [
+    notifications,
+    activeRuns,
+    pools,
+    channels,
+    windows,
+    routes,
+    models,
+    segmentRuns,
+    occupancy,
+    engine,
+  ] = await Promise.all([
+    store.listNotifications({ status: 'open', limit: 200 }),
+    store.listRuns({ taskIds, active: true }),
+    store.listPools(),
+    store.listChannels(),
+    store.listQuotaWindows(),
+    store.listRoutes(),
+    store.listModels(),
+    // 三段流水线图的数（在哪一段、谁在做、平均耗时）：看板窗口里全部单的流水一次读完
+    store.listSegmentRunsForTasks(taskIds),
+    // 在跑数、池占用：和法国页、额度页同一份
+    store.poolOccupancy(),
+    // 引擎那一格读真实健康（#902 D7）：开着的要真探到在线的工人，不只看配置里开没开
+    deps.engineProbe(),
+  ]);
   const now = deps.now();
-  const poolViews = buildPools(
-    { pools, channels, windows, routes, activeRuns },
-    now,
-    config.quotaStaleAfterMs,
-  );
+  const poolViews = buildPools({ pools, channels, windows, occupancy }, now, config.quotaStaleAfterMs);
   return buildHome({
     notifications: notifications.items,
     tasks,
@@ -109,31 +117,30 @@ export async function readEnvSnapshot(deps: SnapshotDeps): Promise<z.input<typeo
   const now = deps.now();
   const engineProbeResult = await deps.engineProbe();
   const engine = engineProbeResult.state === 'off' ? engineOffFact() : engineFact(engineProbeResult);
-  // 在跑的会话和池占用要的是同一份「在跑的 runs」：只读一次、两项共用。读失败两项都照实写「没查成」（本来就是同一处没读到）
-  let activeRunsRead: ReturnType<typeof store.listRuns> | undefined;
-  const readActiveRuns = () => {
-    activeRunsRead ??= store.listRuns({ active: true });
-    return activeRunsRead;
+  // 在跑的会话和池占用要的是同一份池占用（store.poolOccupancy，和主页、额度页、路由页同源）：只读一次、两项共用。
+  // 读失败两项都照实写「没查成」（本来就是同一处没读到）
+  let occupancyRead: ReturnType<typeof store.poolOccupancy> | undefined;
+  const readOccupancy = () => {
+    occupancyRead ??= store.poolOccupancy();
+    return occupancyRead;
   };
   // 版本那一项只在正式环境（main.ts 的 production）装配：别处 deps.deployLag 没有，照实写「没查成」
   const readDeployLag = deps.deployLag;
   const facts = await envFacts({
     engine,
-    readSessions: readActiveRuns,
+    readSessions: readOccupancy,
     readPools: async () => {
-      const [pools, channels, windows, routes, activeRuns] = await Promise.all([
+      const [pools, channels, windows, occupancy] = await Promise.all([
         store.listPools(),
         store.listChannels(),
         store.listQuotaWindows(),
-        store.listRoutes(),
-        readActiveRuns(),
+        readOccupancy(),
       ]);
       return poolsFact({
         pools,
         channels,
         windows,
-        routes,
-        activeRuns,
+        occupancy,
         now,
         staleAfterMs: config.quotaStaleAfterMs,
       });

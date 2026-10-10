@@ -64,7 +64,7 @@
 |---|---|---|---|
 | 22/tcp | 0.0.0.0、:: | sshd | 装机和运维登录 |
 | 80/tcp | 0.0.0.0 | nginx | `<驾驶舱域名>`：证书续期的验证路径，其余跳 https |
-| 443/tcp | 0.0.0.0 | nginx | `https://<驾驶舱域名>`：静态页；`/api`、`/auth`、`/github/webhook`、`/healthz` 经隧道转法国 `10.99.0.2:8787`（连接留着复用，第八节），转之前清掉 `Authorization`、`X-Fleet-Acting-Feishu`；`/agent` 不转；`/release.json`（带完整提交号）只给法国经隧道来的（`10.99.0.2`），别处来的回 404 |
+| 443/tcp | 0.0.0.0 | nginx | `https://<驾驶舱域名>`：静态页；`/api`、`/auth`、`/github/webhook`、`/healthz` 经隧道转法国 `10.99.0.2:8787`（连接留着复用，第八节），转之前清掉 `Authorization`、`X-Fleet-Acting-Feishu`；`/agent` 不转；`/release.json`（带完整提交号）只给法国经隧道来的（`10.99.0.2`），别处来的回 404；本站点的文本类回应（含转来的 JSON）gzip 压缩，实时推送 `/api/events` 不压；带哈希的 `/assets/` 让浏览器存一年（#1746） |
 | 8443/tcp | 0.0.0.0、:: | self-proxy（不归本仓管） | `self-proxy-hk.service`：代理入口，ufw 注释 `self-proxy`；它的订阅在 nginx 站点 `self-proxy`（别家站点，同 ai-gateway）。别动 |
 | 4500/udp | 0.0.0.0 | WireGuard 服务端 | 香港上游只放行少数常见 UDP 端口（2026-09-25 从法国实测：53/67/69/123/161/500/1701/4500 能到），51820 进不来 |
 

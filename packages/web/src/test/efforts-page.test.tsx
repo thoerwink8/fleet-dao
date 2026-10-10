@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 // 思考档位页（#470）：每个模型下每条路一格，点一下就改、改完照库里的值显示；这家不认的档不给点，配不了的写为什么；
 // 后端不认、别人刚改过就退回库里的值并写明原因；没接上、没读成都照实写，不画空表冒充「都没配」。
+// 能配的顶上展开；配不了、未分类默认折叠（#1756）。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ApiError } from '../api/client';
@@ -33,6 +34,61 @@ const opened = async () => {
   await screen.findByText('Opus 5.5');
 };
 
+/** 点开「配不了」折叠（默认不在 DOM 里画路由行）。 */
+const openFixedFold = async () => {
+  const btn = await screen.findByRole('button', { name: /配不了 \d+ 条/ });
+  if (btn.getAttribute('aria-expanded') !== 'true') fireEvent.click(btn);
+  return btn;
+};
+
+/** 种子上叠两条未分类（目录没厂家）：能配的 gpt-5.5-none-fast、claude-4-sonnet。 */
+const withUncategorized = (): MockApi => {
+  const api = createMockApi({ live: false });
+  const base = api.routingEfforts.bind(api);
+  api.routingEfforts = async () => {
+    const data = await base();
+    return {
+      ...data,
+      models: [
+        ...data.models,
+        {
+          modelId: 'gpt-5.5-none-fast',
+          displayName: 'gpt-5.5-none-fast',
+          routes: [
+            {
+              routeId: 'r-uncat-gpt',
+              channelId: 'ch-relay',
+              channelName: '中转站',
+              poolId: 'relay',
+              hostId: 'mirasim',
+              model: 'gpt-5.5-none-fast',
+              enabled: true,
+              choices: ['low', 'medium', 'high', 'xhigh', 'max'],
+            },
+          ],
+        },
+        {
+          modelId: 'claude-4-sonnet',
+          displayName: 'claude-4-sonnet',
+          routes: [
+            {
+              routeId: 'r-uncat-claude',
+              channelId: 'ch-claude',
+              channelName: 'Claude 订阅',
+              poolId: 'claude-a',
+              hostId: 'claude-code',
+              model: 'claude-4-sonnet',
+              enabled: true,
+              choices: ['low', 'medium', 'high', 'xhigh', 'max'],
+            },
+          ],
+        },
+      ],
+    };
+  };
+  return api;
+};
+
 describe('思考档位页：看', () => {
   test('每个模型一块、每条路一格；配过的亮着配的那档，没配的亮「默认」并写明起会话用 high；顶上数清', async () => {
     renderApp(<EffortsPage />, { route: '/efforts' });
@@ -44,7 +100,7 @@ describe('思考档位页：看', () => {
     expect(row('r-ca-opus').textContent).toContain('起会话用 high（没配，用默认）');
     // 关着的路由照样列出来，也能先配
     expect(row('r-rl-opus').textContent).toContain('关着');
-    expect(screen.getByText(/条配了/).textContent).toMatch(/^1 条配了 · \d+ 条用默认 high · 3 条配不了$/);
+    expect(screen.getByText(/条配了/).textContent).toMatch(/^1 条配了 · \d+ 条用默认 high · 4 条配不了$/);
   });
 
   test('这家认哪几档就给哪几格：Claude Code 五档都有，Grok 没有 max', async () => {
@@ -57,12 +113,13 @@ describe('思考档位页：看', () => {
   test('配不了的不给格子，写为什么：cursor 整串模型名、Codex 没接上、判断题外壳', async () => {
     renderApp(<EffortsPage />, { route: '/efforts' });
     await opened();
+    await openFixedFold();
     expect(within(row('r-cursor')).queryAllByRole('radio')).toEqual([]);
-    expect(row('r-cursor').textContent).toContain(
-      '配不了：没有单独的档位参数，模型串 cursor-auto 不带方括号（是上游目录里的整串，档位已经在名字里）',
-    );
-    expect(row('r-rl-gpt').textContent).toContain('配不了：引擎还没接上，起不了会话');
-    expect(row('r-ds').textContent).toContain('配不了：跑的是判断题小模型，不起会话');
+    // 同一句原因只在分组头写一次，行上不再重复「配不了：」
+    expect(screen.getByText(/没有单独的档位参数，模型串 cursor-auto/)).toBeTruthy();
+    expect(row('r-cursor').textContent).not.toContain('配不了：');
+    expect(screen.getByText('引擎还没接上，起不了会话')).toBeTruthy();
+    expect(screen.getByText('跑的是判断题小模型，不起会话')).toBeTruthy();
   });
 });
 
@@ -164,18 +221,54 @@ describe('【故意造出的失败】没接上、没读成：照实写，不画�
   });
 });
 
-describe('思考档位页：先后（驾驶舱改版 2026-10-07）', () => {
-  test('有路能配的模型排前面，一条都配不了的（cursor 整串、判断题小模型、没接上的）放最后，照列、写明为什么', async () => {
+describe('思考档位页：折叠（#1756）', () => {
+  test('默认只显示能配的路由，配不了和未分类折叠、点开可见', async () => {
+    renderApp(<EffortsPage />, { api: withUncategorized(), route: '/efforts' });
+    await opened();
+
+    // 顶上能配的直接在
+    expect(row('r-ca-opus')).toBeTruthy();
+    expect(row('r-grok')).toBeTruthy();
+    // 配不了、未分类默认不画路由行
+    expect(document.querySelector('[data-route="r-cursor"]')).toBeNull();
+    expect(document.querySelector('[data-route="r-uncat-gpt"]')).toBeNull();
+    expect(document.querySelector('[data-route="r-uncat-claude"]')).toBeNull();
+
+    const fixedBtn = screen.getByRole('button', { name: /配不了 4 条/ });
+    expect(fixedBtn.getAttribute('aria-expanded')).toBe('false');
+    const uncatBtn = screen.getByRole('button', { name: /未分类 2 条/ });
+    expect(uncatBtn.getAttribute('aria-expanded')).toBe('false');
+
+    fireEvent.click(fixedBtn);
+    expect(fixedBtn.getAttribute('aria-expanded')).toBe('true');
+    expect(row('r-cursor')).toBeTruthy();
+    expect(row('r-rl-gpt')).toBeTruthy();
+    expect(row('r-ds')).toBeTruthy();
+
+    fireEvent.click(uncatBtn);
+    expect(uncatBtn.getAttribute('aria-expanded')).toBe('true');
+    expect(row('r-uncat-gpt')).toBeTruthy();
+    expect(row('r-uncat-claude')).toBeTruthy();
+    // 用人能读的名字，原始编号在标题悬停（行上 route 的 title 也可能是同一串，只认标题里的）
+    const gptHeading = screen.getByRole('heading', { name: 'GPT 5.5 none fast' });
+    const claudeHeading = screen.getByRole('heading', { name: 'Claude 4 sonnet' });
+    expect(within(gptHeading).getByTitle('gpt-5.5-none-fast')).toBeTruthy();
+    expect(within(claudeHeading).getByTitle('claude-4-sonnet')).toBeTruthy();
+    // 不把原始编号当标题露出来
+    expect(screen.queryByRole('heading', { name: 'gpt-5.5-none-fast' })).toBeNull();
+  });
+
+  test('有路能配的模型在顶上展开；配不了收进折叠，点开后照列', async () => {
     renderApp(<EffortsPage />, { route: '/efforts' });
     await opened();
     const order = Array.from(document.querySelectorAll('[data-model]')).map((el) =>
       el.getAttribute('data-model'),
     );
-    const fixedOnly = ['cursor-auto', 'deepseek-v4.1-flash', 'gpt-5.6-luna'];
-    const firstFixed = order.findIndex((id) => fixedOnly.includes(id ?? ''));
-    expect(firstFixed).toBeGreaterThan(0);
-    // 配不了的都在能配的后面
-    expect(order.slice(firstFixed).every((id) => fixedOnly.includes(id ?? ''))).toBe(true);
-    expect(row('r-cursor').textContent).toContain('配不了');
+    expect(order).toContain('opus-5.5');
+    expect(order).not.toContain('cursor-auto');
+    expect(order).not.toContain('deepseek-v4.1-flash');
+    expect(order).not.toContain('gpt-5.6-luna');
+    await openFixedFold();
+    expect(row('r-cursor')).toBeTruthy();
   });
 });
