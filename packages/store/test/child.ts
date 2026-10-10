@@ -1,16 +1,14 @@
-// 从 packages/github/test/child.ts 的 runChild 抄来（#264 第 3 片，只在 packages/adapters 收口）：测试里真起子进程
-// 一律走这里：同步地跑，每个子进程自己带上限。
+// 测试里真起子进程（git）一律走这里：同步地跑，每个子进程自己带上限。从 packages/engine/test/child.ts 抄来（#264）。
 //
-// 用这里的用例都是同步的：vitest 的超时对同步用例打断不了，只能等它跑完再量用了多久（vitest-dev/vitest#2920）——
-// 真卡死的子进程照样卡住整轮测试，机器一忙、起进程变慢，它又把「慢」报成失败。所以卡死由这里管：子进程超过上限
-// 没退出就杀掉，抛出是哪条命令卡住。起不来、被信号杀掉也抛，不拿 null 退出码冒充「命令失败」——不然期望「失败」的
-// 用例会因为根本没跑而通过。
-// 同样的一份在 packages/conventions、packages/hygiene、packages/api、packages/engine、packages/github、
-// packages/agents-sync 的 test/child.ts：各包的测试自成一体，改这份时看一眼那几份（收成一份见 #264）。
-// runChildOk：退出码不是 0 就抛（带上 stderr），成功返回去掉首尾空白的标准输出。runChild 的签名和行为不动。
+// 用这里的调用都是同步的，不设 vitest 的超时（describe / it 上 timeout: 0）：vitest 的超时对同步用例打断不了，只能等它
+// 跑完再量用了多久（vitest-dev/vitest#2920）——真卡死的子进程照样卡住整轮测试，机器一忙、起进程变慢，它又把「慢」报成
+// 失败。所以卡死由这里管：子进程超过上限没退出就杀掉，抛出是哪条命令卡住。起不来、被信号杀掉也抛，不拿 null 退出码
+// 冒充「命令失败」。
+// 同样的一份在 packages/engine 的 test/child.ts：各包的测试自成一体，改这份时看一眼那份。
+// runChildOk：退出码不是 0 就抛（带上 stderr），成功返回去掉首尾空白的标准输出。runChild 的签名和行为照 engine 那份。
 import { spawnSync } from 'node:child_process';
 
-/** 一个子进程最多跑多久。只防卡死、不量快慢：正常起一个 git 几十毫秒，满载的机器上也就几秒。 */
+/** 一个子进程最多跑多久。只防卡死、不量快慢：正常起一个 node 或 sh 不到一秒，满载的机器上也就几秒。 */
 export const CHILD_LIMIT_MS = 60_000;
 
 export interface ChildOptions {

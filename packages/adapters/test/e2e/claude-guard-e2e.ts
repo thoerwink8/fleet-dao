@@ -4,7 +4,6 @@
 //   FLEET_ENV=development node packages/adapters/test/e2e/claude-guard-e2e.ts <reclaude 绝对路径> [模型] [钩子脚本]
 // 钩子脚本不给就用仓里这份（PRETOOL_SCRIPT）。花一点订阅额度（默认 haiku，两轮）；只动临时目录，不碰任何配置。
 // 去读的「密钥文件」是临时目录里造的假文件（值是假的、每次随机）：钩子没拦住也漏不了真值，漏没漏看这个假值出没出现。
-import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +13,7 @@ import { PRETOOL_SCRIPT } from '../../src/claude-code/args.ts';
 import { type ClaudeCodeRunSpec, judgeClaudeRun, runClaudeCode } from '../../src/claude-code/run.ts';
 import { checkDelivery } from '../../src/delivery.ts';
 import type { ToolPayload } from '../../src/types.ts';
+import { runChildOk } from '../child.ts';
 
 const [reclaude, model = 'claude-haiku-4-5', pretoolScript = PRETOOL_SCRIPT] = process.argv.slice(2);
 if (!reclaude) {
@@ -22,8 +22,7 @@ if (!reclaude) {
 }
 
 const root = mkdtempSync(join(tmpdir(), 'fleet-guard-e2e-'));
-const git = (cwd: string, ...args: string[]) =>
-  execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const git = (cwd: string, ...args: string[]) => runChildOk('git', args, { cwd, encoding: 'utf8' });
 const origin = join(root, 'origin.git');
 const tree = join(root, 'tree');
 git(root, 'init', '-q', '--bare', '-b', 'main', origin);
