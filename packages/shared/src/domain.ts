@@ -263,7 +263,7 @@ export interface Route {
  * skipped = 这一轮没探（按量计费、渠道下架、会话用户挂着别的组织……原因写在 detail），不算探过。
  * 只有 ok 让 alive 为真，其余一律不在线。
  */
-export type RouteProbeState = 'ok' | 'failed' | 'not_wired' | 'skipped';
+export type RouteProbeState = 'ok' | 'failed' | 'not_wired' | 'skipped' | 'on_demand';
 
 export interface RouteProbe {
   state: RouteProbeState;

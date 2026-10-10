@@ -7,7 +7,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { type ColdVerifySpec, runColdVerifyForPr } from '../src/cold-verify-run.ts';
 import type { RunRecord, RunsWriter } from '../src/runner/not-wired.ts';
 import type { OneShotDeps, SpawnOutcome } from '../src/runner/one-shot.ts';
@@ -25,13 +25,17 @@ const TASK_ID = '5f0c2a8e-3b1d-4c6e-9a7f-1e2d3c4b5a69';
 
 const MODEL_PASS = ['## 问题', '（没有）', '', 'verdict: pass'].join('\n');
 
+// 一次性调用把 stdout / stderr 落在 tmpDir 下：放系统临时目录，测完删掉，别在当前目录留垃圾。
+const TMP_DIR = mkdtempSync(join(tmpdir(), 'fleet-555-2-run-test-'));
+afterAll(() => rmSync(TMP_DIR, { recursive: true, force: true }));
+
 function fakeOneShot(scripted: SpawnOutcome): OneShotDeps {
   const runs: RunsWriter = { async start() {}, async record(_r: RunRecord) {} };
   return {
     spawn: async () => scripted,
     buildCommand: (input) => ({ argv: ['fake-executor', '--model', input.modelId], cwd: input.cwd }),
     runs,
-    tmpDir: 'C:/temp/fleet-555-2-run-test',
+    tmpDir: TMP_DIR,
   };
 }
 
@@ -83,6 +87,24 @@ function recorder() {
       posted.push({ prNumber, head, state: status.state, description: status.description });
     },
   };
+}
+
+/** 用假的 invoke 记下交给冷调用的入参：看作者族怎么翻成避让和 requireTwoFamilies。 */
+async function invokeWithAuthors(authors: string[]) {
+  const rec = recorder();
+  const seen: VerifierInvokeInput[] = [];
+  const r = await runColdVerifyForPr(42, {
+    sources: sources({ authors: async () => authors }),
+    invoke: async (input) => {
+      seen.push(input);
+      return { pass: true, problems: [], round: input.round } as VerifierInvokeOutput;
+    },
+    oneShot: ONE_SHOT,
+    chooseModelForFamily: PICK_CLAUDE,
+    cwd: 'C:/work/x',
+    writeStatus: rec.writeStatus,
+  });
+  return { r, seen, rec };
 }
 
 describe('runColdVerifyForPr：跑通一路', () => {
@@ -247,26 +269,26 @@ describe('runColdVerifyForPr：【故意造出的失败】每条「读不到」�
     expect(rec.posted.at(-1)?.state).toBe('failure');
   });
 
-  it('作者族认不出（cursor 背后是哪家不知道，不能当不同族）→ 贴 failure，写明原因，不硬跑', async () => {
-    const rec = recorder();
-    let invoked = 0;
-    const r = await runColdVerifyForPr(42, {
-      sources: sources({ authors: async () => ['cursor'] }),
-      invoke: async (input, deps) => {
-        invoked += 1;
-        return await invokeVerifier(input, deps);
-      },
-      oneShot: ONE_SHOT,
-      chooseModelForFamily: PICK_CLAUDE,
-      cwd: 'C:/work/x',
-      writeStatus: rec.writeStatus,
-    });
-    expect(r.status.state).toBe('failure');
-    expect(r.status.description).toContain('认不出');
-    expect(r.status.description).toContain('cursor');
-    expect(r.sourceProblem).toBe('作者族认不出：cursor');
-    expect(invoked).toBe(0); // 压根没起调用
-    expect(rec.posted.at(-1)?.state).toBe('failure');
+  it('(f) 作者族认不出（cursor）→ 不停下，照常调用，requireTwoFamilies 为 true、避让族为空', async () => {
+    const { r, seen, rec } = await invokeWithAuthors(['cursor']);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.requireTwoFamilies).toBe(true);
+    expect(seen[0]?.modelFamiliesAvoid).toEqual([]);
+    expect(r.status.description).not.toContain('作者族认不出');
+    expect(r.sourceProblem).toBeUndefined();
+    expect(rec.posted.at(-1)?.state).toBe('success');
+  });
+
+  it('(g) 作者族是 grok 加 cursor → 避让只放 grok，requireTwoFamilies 为 true', async () => {
+    const { seen } = await invokeWithAuthors(['grok', 'cursor']);
+    expect(seen[0]?.modelFamiliesAvoid).toEqual(['grok']);
+    expect(seen[0]?.requireTwoFamilies).toBe(true);
+  });
+
+  it('(h) 作者族是 grok → 不带 requireTwoFamilies，和以前一样', async () => {
+    const { seen } = await invokeWithAuthors(['grok']);
+    expect(seen[0]?.modelFamiliesAvoid).toEqual(['grok']);
+    expect(seen[0]?.requireTwoFamilies).toBeUndefined();
   });
 
   it('【故意造出的失败】拉 diff 时炸了 → 贴 failure、算「没验成」（sourceProblem 有值）', async () => {
@@ -354,44 +376,19 @@ describe('runColdVerifyForPr：作者族是一张表；开跑前先贴 pending�
     expect(asked).toEqual(['grok', 'deepseek']);
   });
 
-  it('【故意造出的失败】一个作者族都没记下 → 贴 failure、不起调用（不知道该避开谁，就没法保证换了家族）', async () => {
-    const rec = recorder();
-    let invoked = 0;
-    const r = await runColdVerifyForPr(42, {
-      sources: sources({ authors: async () => [] }),
-      invoke: async (input, deps) => {
-        invoked += 1;
-        return await invokeVerifier(input, deps);
-      },
-      oneShot: ONE_SHOT,
-      chooseModelForFamily: PICK_CLAUDE,
-      cwd: 'C:/work/x',
-      writeStatus: rec.writeStatus,
-    });
-    expect(r.status.state).toBe('failure');
-    expect(r.status.description).toContain('没有记下是哪一族写的');
-    expect(r.sourceProblem).toContain('作者族认不出');
-    expect(invoked).toBe(0);
-    expect(rec.posted.at(-1)?.state).toBe('failure');
+  it('一个作者族都没记下 → 不停下，照常调用，requireTwoFamilies 为 true', async () => {
+    const { r, seen } = await invokeWithAuthors([]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.requireTwoFamilies).toBe(true);
+    expect(seen[0]?.modelFamiliesAvoid).toEqual([]);
+    expect(r.sourceProblem).toBeUndefined();
   });
 
-  it('【故意造出的失败】作者族里有一个认不出（claude + cursor）→ 贴 failure、不起调用：认不出的可能就是某个已知族的别名', async () => {
-    const rec = recorder();
-    let invoked = 0;
-    const r = await runColdVerifyForPr(42, {
-      sources: sources({ authors: async () => ['claude', 'cursor'] }),
-      invoke: async (input, deps) => {
-        invoked += 1;
-        return await invokeVerifier(input, deps);
-      },
-      oneShot: ONE_SHOT,
-      chooseModelForFamily: PICK_CLAUDE,
-      cwd: 'C:/work/x',
-      writeStatus: rec.writeStatus,
-    });
-    expect(r.status.state).toBe('failure');
-    expect(r.status.description).toContain('cursor');
-    expect(invoked).toBe(0);
+  it('作者族里有一个认不出（claude + cursor）→ 避让只放 claude，两家都验', async () => {
+    const { r, seen } = await invokeWithAuthors(['claude', 'cursor']);
+    expect(seen[0]?.modelFamiliesAvoid).toEqual(['claude']);
+    expect(seen[0]?.requireTwoFamilies).toBe(true);
+    expect(r.status.state).toBe('success');
   });
 
   it('作者是 glm（目录里有、不是验收族）→ 起得了验收，验收人不是 glm，避让名单里没有 glm 也没崩', async () => {
@@ -457,39 +454,19 @@ describe('runColdVerifyForPr：作者族是一张表；开跑前先贴 pending�
     expect(asked).toEqual(['grok']); // gpt 被跳过，直接问 grok
   });
 
-  it('glm + cursor 混合 → 仍停（cursor 认不出），不起调用', async () => {
-    let invoked = 0;
-    const r = await runColdVerifyForPr(42, {
-      sources: sources({ authors: async () => ['glm', 'cursor'] }),
-      invoke: async (input, deps) => {
-        invoked += 1;
-        return await invokeVerifier(input, deps);
-      },
-      oneShot: ONE_SHOT,
-      chooseModelForFamily: PICK_CLAUDE,
-      cwd: 'C:/work/x',
-    });
-    expect(r.status.state).toBe('failure');
-    expect(r.sourceProblem).toBe('作者族认不出：cursor');
-    expect(invoked).toBe(0);
+  it('glm + cursor 混合 → 照常调用，otherAuthorFamilies 带 glm，requireTwoFamilies 为 true', async () => {
+    const { seen } = await invokeWithAuthors(['glm', 'cursor']);
+    expect(seen[0]?.otherAuthorFamilies).toEqual(['glm']);
+    expect(seen[0]?.requireTwoFamilies).toBe(true);
   });
 
-  it('unclassified、jev、拼写不认识的串仍然认不出 → 停', async () => {
+  it('unclassified、jev、拼写不认识的串也走两家都验，不停下', async () => {
     for (const author of ['unclassified', 'jev', 'gpt5']) {
-      let invoked = 0;
-      const r = await runColdVerifyForPr(42, {
-        sources: sources({ authors: async () => [author] }),
-        invoke: async (input, deps) => {
-          invoked += 1;
-          return await invokeVerifier(input, deps);
-        },
-        oneShot: ONE_SHOT,
-        chooseModelForFamily: PICK_CLAUDE,
-        cwd: 'C:/work/x',
-      });
-      expect(r.status.state).toBe('failure');
-      expect(r.sourceProblem).toBe(`作者族认不出：${author}`);
-      expect(invoked).toBe(0);
+      const { r, seen } = await invokeWithAuthors([author]);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.requireTwoFamilies).toBe(true);
+      expect(seen[0]?.modelFamiliesAvoid).toEqual([]);
+      expect(r.sourceProblem).toBeUndefined();
     }
   });
 

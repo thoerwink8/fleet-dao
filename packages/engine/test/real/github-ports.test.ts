@@ -286,7 +286,8 @@ describe('推分支', () => {
   });
 
   it('树的头不是要推的、有没提交的改动、没有新提交、树不在：明确报错，不推', async () => {
-    const { ports, calls, trees } = setup();
+    // 远端分支还不在（第一次推）：树的头就是起会话前的头才是真的空交付
+    const { ports, calls, trees } = setup({ fetchBranchHead: () => ({ head: null }) });
     const dir = await seededTree(trees);
     await expect(
       ports.pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head: 'f'.repeat(40) }, ctx),
@@ -587,6 +588,88 @@ describe('推被拒（DIVERGED / REMOTE_AHEAD）：先认领远端新头，判�
     expect(r.head).toBe(remoteHead);
     expect(git(dir, 'rev-parse', 'HEAD')).toBe(remoteHead);
     // 认领不用重推：pushBranch（低层的推）总共只被真调用了一次（那一次就是报 REMOTE_AHEAD 的那次）
+    expect(calls.pushBranch).toHaveLength(1);
+  });
+
+  it('推之前远端分支就在起会话前的头上、树里没有新提交（#1554）：不推、不抛，回远端头', async () => {
+    const { ports, calls, trees } = setup({ fetchBranchHead: () => ({ head: m.head }) });
+    const dir = await seededTree(trees);
+    const r = await ports.pushBranch(
+      { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head: m.head },
+      ctx,
+    );
+    expect(r.head).toBe(m.head);
+    expect(r.changedFiles).toEqual([]);
+    expect(calls.pushBranch ?? []).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】推被拒、再看远端头就是起会话前的头（#1454）：不向镜像要空包，不报 GIT_FAILED；本地有新提交就带 needsPush 重推本地头', async () => {
+    let first = true;
+    const { ports, calls, trees } = setup({
+      pushBranch: (input: { head: string }) => {
+        if (first) {
+          first = false;
+          throw new GitHubError('REMOTE_AHEAD', '远端已经在这个头之上被推进了', {
+            retryable: false,
+            details: { remoteHead: m.head },
+          });
+        }
+        return { head: input.head, pushed: true };
+      },
+      fetchBranchHead: () => ({ head: m.head }),
+    });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const err = await ports
+      .pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx)
+      .catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(Error);
+    expect(JSON.stringify(err)).not.toContain('Refusing to create empty bundle');
+    expect(err).toMatchObject({ head });
+    // 没有向镜像要「远端头减起会话前的头」的空包：只有推前并主线那一次不会要（主线已在树里）
+    expect(
+      (calls.bundleCommits ?? []).filter((c) => (c as { tips: string[] }).tips.includes(m.head)),
+    ).toHaveLength(0);
+    expect(calls.pushBranch).toHaveLength(2);
+  });
+
+  it('推被拒、远端头已经在树里且就是要推的头：不再取包、不再推，回这个头', async () => {
+    let remoteHead = '';
+    const { ports, calls, trees } = setup({
+      pushBranch: () => {
+        throw new GitHubError('REMOTE_AHEAD', '远端已经在这个头之上被推进了', {
+          retryable: false,
+          details: { remoteHead },
+        });
+      },
+      fetchBranchHead: () => ({ head: remoteHead }),
+    });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    remoteHead = head;
+    const r = await ports.pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx);
+    expect(r.head).toBe(head);
+    expect(calls.pushBranch).toHaveLength(1);
+  });
+
+  it('推被拒、远端头已经在树里（树的头在它之前）：不取包，merge --ff-only 快进过去，不再推', async () => {
+    let remoteHead = '';
+    const { ports, calls, trees } = setup({
+      pushBranch: () => {
+        throw new GitHubError('REMOTE_AHEAD', '远端已经在这个头之上被推进了', {
+          retryable: false,
+          details: { remoteHead },
+        });
+      },
+      fetchBranchHead: () => ({ head: remoteHead }),
+    });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    remoteHead = commitIn(dir, 'extra.ts');
+    git(dir, 'reset', '-q', '--hard', head);
+    const r = await ports.pushBranch({ taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head }, ctx);
+    expect(r.head).toBe(remoteHead);
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(remoteHead);
     expect(calls.pushBranch).toHaveLength(1);
   });
 

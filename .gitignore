@@ -8,6 +8,8 @@ coverage/
 # 本机工具和临时文件：临时目录、Claude Code 的工作树、Mirasim 的本机定时任务、codegraph 的本机索引（每个仓 codegraph init 建，不进仓）
 _tmp/
 .claude/worktrees/
+# 会话的本地设置（引擎往任务工作树里写：挡子代理、并发上限，#1641）：法国上没有本机的全局 gitignore，不列的话 git add -A 会带进 PR
+.claude/settings.local.json
 .mirasim/
 .codegraph/
 # 误落在仓根的临时文件（约定放 _tmp/，见通用段）：根上的 _tmp_* 和日志不该被 git add 带上

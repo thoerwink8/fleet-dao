@@ -1,5 +1,7 @@
 // 选路（设计 §九「选路」五条 + §十二「一条路由报繁忙，所有任务一起避开」由熔断判定带进来）。
 // 纯函数、确定性：同样输入同样输出；不取时钟、不随机——现在几点、试探用的随机数都由调用方给，引擎记进历史。
+// 模型之间严格按用途顺序：往后挑只因额度用完（含留量线）、人关了或钉住别的、报错（探测不通、熔断）；
+// 不因为作者族、不因为本单之前用过哪一家而改顺序（冷验收验不了由冷验收自己兜，见 verifier-invoke.ts 的两家都验）。
 
 import {
   probeCadenceMinutes,
@@ -158,8 +160,10 @@ function dispatch(
  */
 function probeNote(route: RouteFacts, now: number): string | null {
   // 在线的一定有时刻（validate.ts 已拦）；派得出去的都在线。
-  // 退避、或结论写了隔 60 分钟再探：过期线按那一档加两轮，不把故意放慢写成探针停了。没写原文的仍按执行方式。
+  // 退避、或结论写了隔 30 分钟再探：过期线按那一档加两轮，不把故意放慢写成探针停了。没写原文的仍按执行方式。
   if (route.probedAt === null) return null;
+  // 按需探测的路由没有「在线」结论可过期：不主动探，派前探一次（#1635）
+  if (route.probeState === 'on_demand') return '按需，派前探一次';
   const age = now - Date.parse(route.probedAt);
   const limit = route.probeDetail
     ? (probeCadenceMinutes(route.hostId, route.probeDetail) +

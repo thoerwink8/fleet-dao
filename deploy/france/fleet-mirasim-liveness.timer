@@ -1,0 +1,16 @@
+# 每 2 分钟查一次会话用户 Mirasim 服务的 /api/health（fleet-mirasim-liveness.service，#1676）：连续 3 次失败才重启，
+# 卡死最多拖 6 分钟左右。france.sh 装。停它：systemctl disable --now fleet-mirasim-liveness.timer。
+[Unit]
+Description=会话用户 Mirasim 服务每 2 分钟一次健康检查
+
+[Timer]
+# 开机 5 分钟后先查一轮（给 Mirasim 服务起来的时间）
+OnBootSec=5min
+# 装上后（没重启）也要有第一次：2 分钟后；之后上一轮跑完 2 分钟再来，不叠着跑
+OnActiveSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=10s
+Unit=fleet-mirasim-liveness.service
+
+[Install]
+WantedBy=timers.target

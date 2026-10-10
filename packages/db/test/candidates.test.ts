@@ -102,6 +102,42 @@ describe('某个用途的候选路由', () => {
     ]);
   });
 
+  it('按需探测（on_demand）的路由不出 offline 那条挡：alive 仍是 false，靠 probe_state 区分（#1635）', async () => {
+    await addRoute(t.db, { id: 'hot', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await addRoute(t.db, { id: 'cold', poolId: 'relay-b', modelId: 'opus-5.5', alive: false });
+    await addRoute(t.db, {
+      id: 'dead',
+      poolId: 'relay-b',
+      modelId: 'opus-5.5',
+      hostId: 'mirasim',
+      alive: false,
+    });
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-5.5'] },
+      models: { 'opus-5.5': ['hot', 'cold', 'dead'] },
+    });
+    await addWindow(t.db, { poolId: 'relay-a', window: '7d', utilization: 0.1, ...fresh });
+    await addWindow(t.db, { poolId: 'relay-b', window: '7d', utilization: 0.1, ...fresh });
+    await t.db
+      .update(routes)
+      .set({
+        probeState: 'on_demand',
+        probedAt: ago(3 * HOUR),
+        probeDetail: '不主动探，要派给它时先探一次。还没真探过',
+      })
+      .where(eq(routes.id, 'cold'));
+    await t.db
+      .update(routes)
+      .set({ probeState: 'failed', probedAt: ago(HOUR), probeDetail: '没通' })
+      .where(eq(routes.id, 'dead'));
+    expect(await summary('execute')).toEqual([
+      ['hot', []],
+      ['cold', []],
+      ['dead', ['offline']],
+    ]);
+    expect((await t.db.select().from(routes).where(eq(routes.id, 'cold')))[0]?.alive).toBe(false);
+  });
+
   it('探针下结论的时刻原样给（在线的有，探针还没看过的为空）；过没过期由选路判，候选查询不因此挡', async () => {
     await addRoute(t.db, { id: 'probed', poolId: 'relay-a', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'never', poolId: 'relay-b', modelId: 'opus-5.5', alive: false });

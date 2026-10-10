@@ -148,6 +148,8 @@ export interface HarnessOptions {
   routingOrder?: Deps['routingOrder'];
   /** 按单指定模型（驾驶舱改版 2026-10-07）；不给就是没接上（内存版、开发环境一样）。 */
   taskRoutePins?: Deps['taskRoutePins'];
+  /** 会话内容（#1640）；不给就是没接上（内存版、开发环境一样）。 */
+  runTranscript?: Deps['runTranscript'];
   /** 被撤的任务重做；不给就是没接上（开发环境一样，重做回 503）。 */
   taskRedo?: Deps['taskRedo'];
   /** 会话用户切号的现状（#194，额度页顶上一行）；不给就是没接上（内存版、开发环境一样）。 */
@@ -204,6 +206,7 @@ function wire<S extends Store>(
     ...(options.routingEfforts ? { routingEfforts: options.routingEfforts } : {}),
     ...(options.routingOrder ? { routingOrder: options.routingOrder } : {}),
     ...(options.taskRoutePins ? { taskRoutePins: options.taskRoutePins } : {}),
+    ...(options.runTranscript ? { runTranscript: options.runTranscript } : {}),
     ...(options.taskRedo ? { taskRedo: options.taskRedo } : {}),
     ...(options.orgSwitch ? { orgSwitch: options.orgSwitch } : {}),
     ...(options.carpoolReconcile ? { carpoolReconcile: options.carpoolReconcile } : {}),

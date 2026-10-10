@@ -20,6 +20,7 @@
     "@fleet-dao/core": "workspace:*",
     "@fleet-dao/db": "workspace:*",
     "@fleet-dao/github": "workspace:*",
+    "@fleet-dao/hygiene": "workspace:*",
     "@fleet-dao/jev": "workspace:*",
     "@fleet-dao/shared": "workspace:*",
     "@fleet-dao/store": "workspace:*",

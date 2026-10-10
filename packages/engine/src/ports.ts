@@ -127,6 +127,8 @@ export interface FailedChannel {
   routeId: string;
   modelId: string;
   reason: string;
+  /** 哪张单的会话断的（GitHub 单号）：给了就当场排一次立即探测那条路由（#1636）；不给（老历史重放）就不排。 */
+  issueNumber?: number;
 }
 
 export type PickRouteResult =

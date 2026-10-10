@@ -59,8 +59,19 @@ export function probeSeconds(route: Route, requests: readonly RouteProbeRequest[
   return m?.[1] !== undefined ? Number.parseInt(m[1], 10) : undefined;
 }
 
-/** 点下去之后一句话：在等谁、等了多久。 */
+/** 引擎自动排的（任务断链后）写来源，不写成人点的；人点的返回 undefined。 */
+export function sourceText(r: RouteProbeRequest): string | undefined {
+  return r.source ? `任务 #${r.source.issueNumber} 断链后自动探` : undefined;
+}
+
+/** 点下去之后一句话：在等谁、等了多久。自动排的前面写来源。 */
 export function activityText(r: RouteProbeRequest, now: number): string {
+  const body = activityBody(r, now);
+  const from = sourceText(r);
+  return from ? `${from}：${body}` : body;
+}
+
+function activityBody(r: RouteProbeRequest, now: number): string {
   if (r.state === 'running') {
     const since = r.startedAt ? Math.max(0, Math.round((now - Date.parse(r.startedAt)) / 1000)) : 0;
     return `引擎已接手，在探（${since} 秒）`;

@@ -1,6 +1,7 @@
 // 渠道状态页（#1087；近 60 次真历史 #1139；重做 #1366）：左边一列折叠的渠道摘要行，右边（手机上是整页）点开的渠道详情。
 // 默认全部折叠：一行只写名字、状态、几条在线/故障/已关、最近一次探测。故障的渠道置顶；顶上有搜索和状态筛选。
-// 详情里才有每条路由（手风琴，一次只开一条）、原文、立即探测；格子点开看那一次的耗时和原文。
+// 详情里才有每条路由（手风琴，一次只开一条）、原文、立即探测；再下面是「探测记录」（components/probe-log.tsx，#1638）：
+// 每一次探测一行，新的在上，点一行（或点上面的格子）展开请求、响应原文。
 // 改这里之前必须知道：
 // - 通不通、排第几、运行中失败、检测中断都在 lib/channel-status.ts 判，和路由页顶上那一行同一份；这里只画。
 // - 状态种类（在线、故障、已关、未被用途使用、池暂停、已下架、未探）在 lib/route-state.ts：只有「该在线却探不通」才是故障、画红。
@@ -41,6 +42,7 @@ import {
   HistoryStrip,
 } from '../components/channel-status';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { ProbeLog } from '../components/probe-log';
 import { RefreshBar } from '../components/refresh-bar';
 import { StatusChip, StatusDot } from '../components/status';
 import { Button } from '../components/ui/button';
@@ -51,11 +53,17 @@ import {
   channelProbeInterrupted,
   routeKindMap,
 } from '../lib/channel-status';
-import { formatAgo, formatClock, formatDateTime, formatIn, TIME } from '../lib/format';
+import { formatAgo, formatClock, formatIn, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { poolIsHeld } from '../lib/pool-holds';
-import { formatProbeMs, PROBE_RESULT_BG, PROBE_RESULT_WORD } from '../lib/probe-history-view';
-import { activeFor, activityText, isActive, lastFailureFor, probeSeconds } from '../lib/route-probe';
+import {
+  activeFor,
+  activityText,
+  isActive,
+  lastFailureFor,
+  probeSeconds,
+  sourceText,
+} from '../lib/route-probe';
 import {
   type RouteStateKind,
   routeStateLabel,
@@ -82,6 +90,7 @@ const STATE_WORD: Record<NonNullable<Route['probe']>['state'], { label: string; 
   failed: { label: '不通', tone: 'fail' },
   skipped: { label: '没探', tone: 'stall' },
   not_wired: { label: '插头没接', tone: 'stall' },
+  on_demand: { label: '按需探测', tone: 'stop' },
 };
 
 /** 引擎此刻能不能接立即探测：不能就一句话说清是哪样，按钮跟着置灰。 */
@@ -127,7 +136,8 @@ function resolveProbe(
     );
     return { cell, routeMissing: cell === undefined };
   }
-  return { cell: cells[cells.length - 1], routeMissing: false };
+  // 什么都没点：探测记录都折叠着，不替人选
+  return { cell: undefined, routeMissing: false };
 }
 
 export default function RoutingStatus() {
@@ -407,12 +417,14 @@ function ProbeBanner({
   }
   if (recent) {
     const at = formatClock(recent.finishedAt ?? recent.requestedAt);
+    const from = sourceText(recent);
+    const label = from ? `${from}，` : '立即探测';
     if (recent.state === 'done') {
       const count = (o: string[]) => recent.results.filter((x) => o.includes(x.outcome)).length;
       lines.push({
         key: recent.requestId,
         tone: count(['failed']) > 0 ? 'fail' : 'done',
-        text: `${at} 的立即探测探完了：通过 ${count(['ok'])} · 不通 ${count(['failed'])} · 没探 ${count([
+        text: `${at} 的${label}探完了：通过 ${count(['ok'])} · 不通 ${count(['failed'])} · 没探 ${count([
           'skipped',
           'not_wired',
           'unsettled',
@@ -423,7 +435,7 @@ function ProbeBanner({
       lines.push({
         key: recent.requestId,
         tone: 'fail',
-        text: `${at} 的立即探测没成：${recent.why ?? '没写原因'}`,
+        text: `${at} 的${label}没成：${recent.why ?? '没写原因'}`,
       });
     }
   }
@@ -462,6 +474,7 @@ const KIND_ORDER: readonly RouteStateKind[] = [
   'unknown',
   'unprobed',
   'live',
+  'on_demand',
   'held',
   'off',
   'retired',
@@ -499,6 +512,18 @@ function ChannelDetail({
 }) {
   // 手风琴：一次只展开一条路由
   const [openRoute, setOpenRoute] = useState<string | null>(null);
+  // 探测记录里展开哪一行：页面选中的那一格（点格子、点「看最近一次」）就是展开的那行；点开着的那行再点一下折起来
+  const [dismissed, setDismissed] = useState<number | null>(null);
+  const focusId = focus?.cell?.id;
+  const openId = focusId !== undefined && focusId !== dismissed ? focusId : undefined;
+  const pickCell = (cellId: number) => {
+    setDismissed(null);
+    onPickCell(cellId);
+  };
+  const toggleCell = (cellId: number) => {
+    if (cellId === openId) setDismissed(cellId);
+    else pickCell(cellId);
+  };
   const kindOf = (r: Route): RouteStateKind => kinds.get(r.id) ?? 'unused';
   const sorted = [...routes].sort(
     (a, b) =>
@@ -549,18 +574,17 @@ function ChannelDetail({
         history={history}
         activeCellId={focus?.cell?.id}
         onPickCell={(channelId, cellId) => {
-          if (channelId === card.channel.id) onPickCell(cellId);
+          if (channelId === card.channel.id) pickCell(cellId);
         }}
       />
-      <ProbeFocus
+      <ProbeLog
         history={history}
         channelId={card.channel.id}
         routes={routes}
         models={models}
-        cell={focus?.cell}
+        openId={openId}
         routeMissing={focus?.routeMissing ?? false}
-        now={now}
-        onPickCell={onPickCell}
+        onToggle={toggleCell}
       />
       {sorted.length === 0 ? (
         <p className="text-sub text-muted-foreground">这个渠道下一条路由都没有。</p>
@@ -579,7 +603,10 @@ function ChannelDetail({
               open={openRoute === r.id}
               picked={focus?.cell?.routeId === r.id}
               onToggle={() => setOpenRoute((cur) => (cur === r.id ? null : r.id))}
-              onPick={() => onPickRoute(r.id)}
+              onPick={() => {
+                setDismissed(null);
+                onPickRoute(r.id);
+              }}
               onProbe={() => onProbe([r.id])}
             />
           ))}
@@ -707,7 +734,8 @@ function RouteRow({
           ) : null}
           {failure ? (
             <p role="alert" className="mb-2 text-caption text-ink-fail">
-              {formatClock(failure.requestedAt)} 点的立即探测没成：{failure.why ?? '没写原因'}
+              {formatClock(failure.requestedAt)} {sourceText(failure) ?? '点的立即探测'}没成：
+              {failure.why ?? '没写原因'}
             </p>
           ) : null}
           <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-caption sm:grid-cols-4">
@@ -732,7 +760,13 @@ function RouteRow({
             </Fact>
             <Fact label="执行方式">{r.hostId}</Fact>
             <Fact label="下一轮定时探">
-              {nextAt ? <span className="num">{formatIn(nextAt, now)}</span> : '上线后第一轮'}
+              {probe?.state === 'on_demand' ? (
+                '不定时探，派前探一次'
+              ) : nextAt ? (
+                <span className="num">{formatIn(nextAt, now)}</span>
+              ) : (
+                '上线后第一轮'
+              )}
             </Fact>
           </dl>
           <div className="mt-2.5">
@@ -778,167 +812,6 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
     <div className="min-w-0">
       <dt className="text-muted-foreground">{label}</dt>
       <dd className="mt-0.5 truncate text-sub">{children}</dd>
-    </div>
-  );
-}
-
-/** 详情里：正在看的那一次，和这条带上最近 60 次（新的在上，折在一个「展开」里）。 */
-function ProbeFocus({
-  history,
-  channelId,
-  routes,
-  models,
-  cell,
-  routeMissing,
-  now,
-  onPickCell,
-}: {
-  history: ChannelHistory;
-  channelId: string;
-  routes: readonly Route[];
-  models: readonly Model[];
-  cell: ProbeHistoryCell | undefined;
-  routeMissing: boolean;
-  now: number;
-  onPickCell: (cellId: number) => void;
-}) {
-  if (history.state !== 'ok') return null;
-  const strip = history.channels.find((item) => item.channelId === channelId);
-  const cells = (strip?.cells ?? []).slice(-PROBE_HISTORY_SLOTS);
-  return (
-    <div className="mb-4">
-      <section
-        aria-label="这一次"
-        data-probe-detail={cell?.id ?? 'none'}
-        className="rounded-lg border px-3.5 py-3"
-      >
-        {routeMissing ? (
-          <p>这条路由还没有探针历史</p>
-        ) : cell ? (
-          <ProbeOnce cell={cell} routes={routes} models={models} now={now} />
-        ) : (
-          <p>还没有探针历史</p>
-        )}
-      </section>
-      {cells.length > 0 ? (
-        <details className="mt-2">
-          <summary className="cursor-pointer text-caption text-muted-foreground hover:text-foreground">
-            近 60 次逐条列表
-          </summary>
-          <ol aria-label="最近状态（60）" className="mt-1 max-h-52 space-y-0.5 overflow-auto">
-            {[...cells].reverse().map((item) => (
-              <li key={item.id}>
-                <button
-                  type="button"
-                  data-cell={item.id}
-                  data-result={item.result}
-                  aria-current={item.id === cell?.id ? 'true' : undefined}
-                  onClick={() => onPickCell(item.id)}
-                  className={cn(
-                    'flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-caption hover:bg-muted',
-                    item.id === cell?.id && 'bg-muted',
-                  )}
-                >
-                  {/* 探针点圆角换成 rounded-2。 */}
-                  <span className={cn('size-2 shrink-0 rounded-2', PROBE_RESULT_BG[item.result])} />
-                  <span className="num">{formatDateTime(item.probedAt)}</span>
-                  <span className="min-w-0 flex-1 truncate">{item.routeId}</span>
-                  <span className="num">{formatProbeMs(item.durationMs, item.result)}</span>
-                  <span>{PROBE_RESULT_WORD[item.result].label}</span>
-                </button>
-              </li>
-            ))}
-          </ol>
-        </details>
-      ) : null}
-    </div>
-  );
-}
-
-function ProbeOnce({
-  cell,
-  routes,
-  models,
-  now,
-}: {
-  cell: ProbeHistoryCell;
-  routes: readonly Route[];
-  models: readonly Model[];
-  now: number;
-}) {
-  const route = routes.find((item) => item.id === cell.routeId);
-  const model = models.find((item) => item.id === route?.modelId);
-  const who = model ? `${model.displayName} · ${cell.routeId}` : cell.routeId;
-  const word = PROBE_RESULT_WORD[cell.result];
-  const resultText =
-    cell.result === 'passed' ? word.label : `${word.label}：${cell.failureReason ?? '（没写原因）'}`;
-  return (
-    <>
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-caption sm:grid-cols-3">
-        <Fact label="时刻">
-          <span className="num">
-            {formatDateTime(cell.probedAt)}（{formatAgo(cell.probedAt, now)}）
-          </span>
-        </Fact>
-        <Fact label="路由">{who}</Fact>
-        <Fact label="耗时">
-          <span className="num">{formatProbeMs(cell.durationMs, cell.result)}</span>
-        </Fact>
-      </dl>
-      <p
-        data-field="result"
-        className={cn('mt-2 break-words text-sub', cell.result === 'failed' && 'text-ink-fail')}
-      >
-        {resultText}
-      </p>
-      <details className="mt-1" open={cell.result === 'failed'}>
-        <summary className="cursor-pointer text-caption text-muted-foreground hover:text-foreground">
-          请求、响应原文
-        </summary>
-        <ProbeText
-          label="请求原文（REQUEST）"
-          field="request"
-          text={cell.requestText}
-          empty="（没发出去）"
-          failed={false}
-        />
-        <ProbeText
-          label="响应原文（RESPONSE）"
-          field="response"
-          text={cell.responseText}
-          empty="（没拿到）"
-          failed={cell.result === 'failed'}
-        />
-      </details>
-    </>
-  );
-}
-
-function ProbeText({
-  label,
-  field,
-  text,
-  empty,
-  failed,
-}: {
-  label: string;
-  field: string;
-  text: string | null;
-  empty: string;
-  failed: boolean;
-}) {
-  return (
-    <div className="mt-2.5">
-      <div className="mb-1 text-caption text-muted-foreground">{label}</div>
-      <pre
-        data-field={field}
-        className={cn(
-          'max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/40 px-2.5 py-2 font-mono text-micro',
-          failed ? 'text-ink-fail' : 'text-muted-foreground',
-        )}
-      >
-        {text ?? empty}
-      </pre>
     </div>
   );
 }

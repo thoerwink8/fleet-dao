@@ -16,6 +16,8 @@ const FILES = [
   'routes/schedules.tsx',
   'routes/routing-status.tsx',
   'routes/changelog.tsx',
+  // #1638：渠道状态那处探针色点（size-2 shrink-0 rounded-2）随「探测记录」挪进这个组件，类名没变，所以也在这里钉
+  'components/probe-log.tsx',
 ] as const;
 
 /**
@@ -39,7 +41,7 @@ const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
   { file: 'routes/schedules.tsx', snippet: 'text-caption text-ink-stall' },
   { file: 'routes/routing-status.tsx', snippet: 'xl:max-h-routing-pane' },
   { file: 'routes/routing-status.tsx', snippet: 'text-caption font-medium leading-5 text-ink-run' },
-  { file: 'routes/routing-status.tsx', snippet: 'size-2 shrink-0 rounded-2' },
+  { file: 'components/probe-log.tsx', snippet: 'size-2 shrink-0 rounded-2' },
   { file: 'routes/changelog.tsx', snippet: 'grid grid-cols-changelog items-baseline' },
 ];
 

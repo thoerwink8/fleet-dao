@@ -80,6 +80,7 @@ import {
   type SessionEnvInput,
   type SessionUser,
   type SpawnInfo,
+  type TranscriptEntry,
 } from '@fleet-dao/adapters';
 import {
   DEFAULT_SESSION_EFFORT,
@@ -232,6 +233,8 @@ export interface HostRunHooks {
   /** 接回时：序号小于它的行已经处理过（库里确认过）。 */
   replayUntil?: number;
   onRateLimit?: (reading: RateLimitReading) => unknown;
+  /** 会话过程记录（#1640，adapters 的 TranscriptEntry）：按流里出现的先后一条一条给。只记账，抛了也不影响会话。 */
+  onTranscript?: (entry: TranscriptEntry, meta: LineMeta) => unknown;
   onSpawn?: (info: SpawnInfo) => unknown;
   /** 执行体报出自己的会话号（cursor 的 init 帧）。同步调，别抛。 */
   onSessionId?: (id: string) => void;
@@ -327,6 +330,11 @@ export interface HostDriverDeps {
    * 必须写（直连写 undefined）：起驱动的每一处都得想清楚带不带，漏传一处，那条路上的会话就悄悄直连、出不了网。
    */
   sessionProxy: string | undefined;
+  /**
+   * 子代理定义文件的路径（#1641，引擎启动时生成一次，real/subagents-file.ts）：claude-code 的干活会话带 `--agents`。
+   * 不给 = 不带（测试、只起一次的工具）；给了但生成失败，会让 claude-code 的干活会话起不来。
+   */
+  agentsFile?: () => Promise<string>;
   run?: HostRunners;
 }
 
@@ -337,7 +345,11 @@ function withProxy(env: SessionEnvInput, proxy: string | undefined): SessionEnvI
 
 export function hostDrivers(deps: HostDriverDeps): Record<WiredHost, HostDriver> {
   return {
-    'claude-code': claudeDriver(deps.claudeCommand, deps.run?.['claude-code'] ?? runClaudeCode),
+    'claude-code': claudeDriver(
+      deps.claudeCommand,
+      deps.run?.['claude-code'] ?? runClaudeCode,
+      deps.agentsFile,
+    ),
     'cursor-agent': cursorDriver(
       deps.cursorCommand,
       deps.run?.['cursor-agent'] ?? runCursorAgent,
@@ -391,6 +403,7 @@ function agentHooks(command: string[], hooks: HostRunHooks): ClaudeCodeRunOption
     ...(hooks.io ? { io: hooks.io } : {}),
     ...(hooks.replayUntil === undefined ? {} : { replayUntil: hooks.replayUntil }),
     ...(hooks.onRateLimit ? { onRateLimit: hooks.onRateLimit } : {}),
+    ...(hooks.onTranscript ? { onTranscript: hooks.onTranscript } : {}),
     ...(hooks.onSpawn ? { onSpawn: hooks.onSpawn } : {}),
   };
 }
@@ -400,6 +413,7 @@ function agentHooks(command: string[], hooks: HostRunHooks): ClaudeCodeRunOption
 function claudeDriver(
   command: (user: SessionUser) => string[],
   run: NonNullable<HostRunners['claude-code']>,
+  agentsFile?: () => Promise<string>,
 ): HostDriver {
   return {
     hostId: 'claude-code',
@@ -408,6 +422,17 @@ function claudeDriver(
     newSessionId: () => ({ id: randomUUID(), known: true }),
     async run(spec, hooks) {
       const effort = applySessionEffort('claude-code', spec);
+      // 子代理定义（#1641）：只给干活的会话；生成不成就起不来、写清原因，不悄悄不带（路由探针不派子代理，不用它）
+      let agents: string | undefined;
+      if (agentsFile && spec.purpose !== 'probe') {
+        try {
+          agents = await agentsFile();
+        } catch (error) {
+          throw new Error(
+            `claude-code 会话起不来：子代理定义文件没生成成（#1641）：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       const report = await run(
         {
           runId: spec.runId,
@@ -420,6 +445,7 @@ function claudeDriver(
           model: effort.model,
           ...(effort.pass ? { effort: effort.pass } : {}),
           session: spec.session,
+          ...(agents ? { agentsFile: agents } : {}),
           // 探针一个工具都不给（dontAsk）、不存会话记录（每 15 分钟一次，不往会话用户家里攒）
           ...(spec.purpose === 'probe'
             ? { permissionMode: 'dontAsk' as const, persistSession: false }
@@ -788,6 +814,7 @@ function mirasimDriver(
           ...(hooks.signal ? { signal: hooks.signal } : {}),
           ...(hooks.now ? { now: hooks.now } : {}),
           ...(hooks.onEvent ? { onEvent: hooks.onEvent } : {}),
+          ...(hooks.onTranscript ? { onTranscript: hooks.onTranscript } : {}),
           // 服务端 accepted 帧才给真会话号（和 cursor 的 init 帧一个道理）。accepted 也就是「起来了」：引擎起会话
           // 要等 onSpawn，不报它等满 spawnTimeoutMs 一律判 SPAWN_TIMEOUT（09-28 上线后这条路由一个会话都没起成）。
           // 没有我们 spawn 的进程：pid 记 0（sessions.ts 认 0 是「没有根进程」，不拿它去杀）。

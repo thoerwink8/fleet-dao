@@ -1,0 +1,15 @@
+# 会话用户 @@SESSION_USER@@ 的 Mirasim 本地服务（fleet-mirasim-session.service）的健康检查：由 fleet-mirasim-liveness.timer
+# 每 2 分钟拉起一次，读 /api/health，连续 3 次不是 ok:true（连不上、超时、回得不对）就 systemctl restart 它（#1676）。
+# Restart=on-failure 只管进程退出，管不到「进程在、单元 active、不干活」（2026-10-10 11:47 卡了 34 分钟）。
+# deploy/france.sh 的 setup_mirasim_session 装，只在会话 Mirasim 装了常驻单元时才装；脚本放 /usr/local/lib/fleet-dao/ 下
+# 的副本（deploy/lib/mirasim-liveness.sh，全链归 root）。要 root：重启另一个用户的单元。别在机器上手改。
+[Unit]
+Description=会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+ConditionPathExists=/etc/systemd/system/fleet-mirasim-session.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/fleet-dao/mirasim-liveness.sh @@SESSION_USER@@
+# 一轮最长：curl 10 秒；重启时 systemctl 等单元起来（默认最多 90 秒）
+TimeoutStartSec=3min

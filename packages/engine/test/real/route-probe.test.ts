@@ -66,6 +66,10 @@ let root: string;
 beforeEach(async () => {
   await resetTestDb(t);
   await world(t.db);
+  // 夹具里「5 分钟前探通」落在前 2 位 30 分钟的间隔之内（#1635），这一轮会照旧不探；这里测的是探的行为，把上一次探通挪到间隔之外
+  await t.client.query(
+    "update routes set probed_at = probed_at - interval '35 minutes' where probe_state = 'ok'",
+  );
   // 真实的样子：独享池挂在独享组织上（这里的会话用户挂着拼车，setup 的 sessionOrg，这个池不探）
   await t.client.query("update pools set org_kind = 'solo' where id = 'claude-solo'");
   await registerEngineJobs(t.db);
@@ -542,7 +546,7 @@ describe('没探通的：离线，写明是哪一种（不许拿默认值、上�
 describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动探，判法同一套', () => {
   let routeId: string;
   beforeEach(async () => {
-    ({ routeId } = await addCursorRoute(t.db, { stages: ['execute'] }));
+    ({ routeId } = await addCursorRoute(t.db, { stages: ['verify'] }));
     // 上一次探通是 3 小时前：cursor 探通了隔 2 小时再探，这一轮到点了
     await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
       routeId,
@@ -596,8 +600,8 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
     expect(s.cursor.count()).toBe(1);
     expect(second.online).toContain(routeId);
     expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
-    // Claude 的路由照样每轮探
-    expect(s.fake.count()).toBe(2);
+    // Claude 的路由在前 2 位：探通了隔 30 分钟才再真探（#1635），15 分钟后这一轮也不探
+    expect(s.fake.count()).toBe(1);
 
     s.advance(105);
     await s.round();
@@ -910,7 +914,7 @@ describe('grok 的路由（#266）：和干活的会话同一个驱动探，判�
 describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，判法同一套', () => {
   let routeId: string;
   beforeEach(async () => {
-    ({ routeId } = await addMirasimRoute(t.db, { stages: ['execute'] }));
+    ({ routeId } = await addMirasimRoute(t.db, { stages: ['verify'] }));
     // 上一次探通是 3 小时前：Mirasim 探通了隔 2 小时再探（额度紧，#345），这一轮到点了
     await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
       routeId,
@@ -957,7 +961,7 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
     const bad = await addMirasimRoute(t.db, {
       modelId: 'glm-6',
       upstreamModel: 'glm-6',
-      stages: ['review'],
+      stages: ['research'],
     });
     // 这条也是现插的种子（上一次「探通」是 5 分钟前）：不推到 3 小时前，2 小时的冷却会把这一轮当成「还没到点」整个跳过，
     // 到不了「起会话之前就被拦下」这条判断——和 beforeEach 里那条同一个道理。
@@ -1036,7 +1040,7 @@ describe.skipIf(process.platform === 'win32')(
     let routeId: string;
     let rig: CursorKeyRig;
     beforeEach(async () => {
-      ({ routeId } = await addCursorRoute(t.db, { stages: ['execute'] }));
+      ({ routeId } = await addCursorRoute(t.db, { stages: ['verify'] }));
       // 上一次探通是 3 小时前：cursor 探通了隔 2 小时再探，这一轮到点了
       await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
         routeId,

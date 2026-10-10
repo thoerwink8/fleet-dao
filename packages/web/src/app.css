@@ -50,6 +50,8 @@
   --color-st-fail: var(--st-fail);
   --color-st-done: var(--st-done);
   --color-st-stop: var(--st-stop);
+  /* 疑似降智（#1638）：黄多红少调成橙，跟着每套主题走，不另配一套色。 */
+  --color-st-doubt: color-mix(in oklab, var(--st-stall) 62%, var(--st-fail));
   /* 状态色的字：text-ink-*（色块、边框、圆点仍用 st-*）。 */
   --color-ink-run: var(--st-run-ink);
   --color-ink-wait: var(--st-wait-ink);
@@ -58,6 +60,7 @@
   --color-ink-fail: var(--st-fail-ink);
   --color-ink-done: var(--st-done-ink);
   --color-ink-stop: var(--st-stop-ink);
+  --color-ink-doubt: color-mix(in oklab, var(--st-stall-ink) 62%, var(--st-fail-ink));
 
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);

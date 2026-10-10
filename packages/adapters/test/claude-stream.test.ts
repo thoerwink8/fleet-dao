@@ -301,6 +301,37 @@ describe('ClaudeStreamReader · 夹具里没有的帧（手造，依据写在用
     expect(effect.activity).toBe(false);
   });
 
+  it('模型核对只认主会话的帧：子代理（haiku）的帧先到，不算观测到的模型，也不触发 model_mismatch 的依据（#1641）', () => {
+    const reader = new ClaudeStreamReader({ runId: 'r', cwd: '/w' });
+    const sub = reader.read(
+      JSON.stringify({
+        type: 'assistant',
+        parent_tool_use_id: 'toolu_agent_1',
+        message: { model: 'claude-haiku-5-5', content: [{ type: 'text', text: '侦察结果' }] },
+      }),
+    );
+    expect(sub.observedModel).toBeUndefined();
+    expect(reader.summary().observedModel).toBeUndefined();
+    const main = reader.read(
+      JSON.stringify({
+        type: 'assistant',
+        message: { model: 'claude-opus-5-5', content: [{ type: 'text', text: '收到' }] },
+      }),
+    );
+    expect(main.observedModel).toBe('claude-opus-5-5');
+    expect(reader.summary().observedModel).toBe('claude-opus-5-5');
+    // 之后子代理再来也不改
+    const later = reader.read(
+      JSON.stringify({
+        type: 'assistant',
+        parent_tool_use_id: 'toolu_agent_2',
+        message: { model: 'claude-haiku-5-5', content: [] },
+      }),
+    );
+    expect(later.observedModel).toBeUndefined();
+    expect(reader.summary().observedModel).toBe('claude-opus-5-5');
+  });
+
   it('子代理（Task 工具）的助手消息不进 lastContextTokens：它是另一个上下文窗口，不是要 fork 续跑的主会话', () => {
     const reader = new ClaudeStreamReader({ runId: 'r', cwd: '/w' });
     reader.read(

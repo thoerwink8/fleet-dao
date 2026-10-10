@@ -7,7 +7,7 @@ const WINDOW_STATES = ['ok', 'exhausted', 'stale', 'reset'];
 const QUOTA_STATES = ['ok', 'exhausted', 'unknown'];
 const ADMITS = ['all', 'trial', 'none'];
 const ORGS = ['solo', 'carpool'];
-const PROBE_STATES = ['ok', 'failed', 'not_wired', 'skipped'];
+const PROBE_STATES = ['ok', 'failed', 'not_wired', 'skipped', 'on_demand'];
 
 export function time(iso: unknown, what: string): number {
   const ms = typeof iso === 'string' ? Date.parse(iso) : Number.NaN;

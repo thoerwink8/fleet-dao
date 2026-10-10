@@ -22,6 +22,7 @@ import {
   type Db,
   finishScheduleRun,
   readEngineMasterRow,
+  readSubagentHint,
   recordRouteProbeDone,
   recordRouteProbeStart,
   routeProbeAuditRows,
@@ -90,6 +91,7 @@ import { realChannelAttempts, realReservations, realRuns } from './runs-writer.t
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { SESSION_ORG_TIMEOUT_MS, type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
+import { lazyOnSuccess, prepareSubagents, readSubagentGuard, subagentsOnce } from './subagents-file.ts';
 import { createTaskActivities } from './task-activities.ts';
 import { createRunSegment } from './task-segment.ts';
 import { createColdVerify, mirrorFileDiff } from './task-verify.ts';
@@ -791,6 +793,13 @@ export function realPortsFromEnv(
     ciTimings: ciTimingsJob({ db, github: gh }),
   };
   const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});
+  // 子代理（#1641）：claude-code 的干活会话带的 --agents 文件，引擎起来时从发布目录的 .claude/agents/ 生成一次；生成不成时
+  // claude-code 的干活会话起不来（hosts.ts 写清原因），这里先记一条日志。Mirasim 的会话靠工作树里的 settings.local.json 挡子代理，
+  // 要的是名字清单，现读现用（读不到就不起会话，不带着没挡的状态起）。
+  const subagents = subagentsOnce(prepareSubagents, (error) =>
+    taskLog('子代理定义文件生成不成', { error: error.message }),
+  );
+  const subagentGuard = lazyOnSuccess(readSubagentGuard);
   // 动手会话（#632 S2-4b-2）和冷验收会话（S2-5b）：和 Fusion 的会话用同一份执行方式驱动，但自己一份（驱动没有状态，只是包着各家的
   // run 函数）；内存准入、会话的资源上限、runs 记账都用生产的那份，两种会话共用同一个 Spawner 装配。
   const segmentSpawner: SegmentSpawnerDeps = {
@@ -803,6 +812,7 @@ export function realPortsFromEnv(
       mirasimLedgerDir: mirasim.ledgerDir,
       mirasimLedgerFs: mirasim.ledgerFs,
       sessionProxy: config.sessionProxy,
+      agentsFile: async () => (await subagents()).file,
     }),
     trees,
     baseEnv: env,
@@ -832,6 +842,8 @@ export function realPortsFromEnv(
       memoryAdmission: realMemoryAdmission(),
       runsDir,
       sessions: oneShots,
+      subagentGuard,
+      readSubagentHint: () => readSubagentHint(db),
       log: taskLog,
     }),
     coldVerify: createColdVerify({

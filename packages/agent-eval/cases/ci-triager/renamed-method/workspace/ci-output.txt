@@ -1,0 +1,33 @@
+##[group]Run pnpm test
+> demo@0.0.0 test
+> vitest run
+
+ RUN  v5.0.1 /home/runner/work/demo/demo
+
+ ✓ test/format.test.ts (6 tests) 8ms
+ ✓ test/pool.test.ts (5 tests) 14ms
+ ❯ test/runner.test.ts (4 tests | 2 failed) 31ms
+   ✓ runner > runs a single job
+   ✗ runner > runs jobs in parallel up to the pool size
+   ✗ runner > releases the slot after a job fails
+   ✓ runner > reports empty queue
+
+ FAIL  test/runner.test.ts > runner > runs jobs in parallel up to the pool size
+ TypeError: pool.acquire is not a function
+  ❯ runJob src/runner.ts:23:31
+      21|   async function runJob(job: Job) {
+      22|     const pool = deps.pool;
+      23|     const slot = await pool.acquire();
+        |                               ^
+      24|     try {
+      25|       return await job.run();
+  ❯ test/runner.test.ts:12:5
+
+ FAIL  test/runner.test.ts > runner > releases the slot after a job fails
+ TypeError: pool.acquire is not a function
+  ❯ runJob src/runner.ts:23:31
+  ❯ test/runner.test.ts:30:5
+
+ Test Files  1 failed | 2 passed (3)
+      Tests  2 failed | 13 passed (15)
+##[error]Process completed with exit code 1.

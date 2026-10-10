@@ -75,6 +75,7 @@ export async function runGrok(spec: GrokRunSpec, options: AgentRunOptions): Prom
       read: (line) => reader.read(line),
       busy: () => reader.toolsInFlight > 0,
       drain: () => reader.flush(),
+      drainTranscript: () => reader.drainTranscript(),
     },
     { ...options, command: viaStdinPipe(options.command, spec.promptFile) },
   );

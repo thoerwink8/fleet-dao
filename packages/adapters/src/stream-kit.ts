@@ -1,7 +1,7 @@
 // 各家过程记录解析共用的小工具：取字段、截断、相对路径、步骤清单、认测试、认额度用满。
 // 只放「每家都一样」的判法；某一家特有的形状留在那一家的读取器里。
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
-import type { PlanPayload, PlanStep, TestPayload } from './types.ts';
+import type { PlanPayload, PlanStep, TestPayload, TranscriptEntry } from './types.ts';
 
 export function rec(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -61,6 +61,29 @@ export function parseFrame(line: string): Record<string, unknown> | undefined {
 
 export function progressEvent(runId: string, at: Date, kind: ProgressKind, payload: unknown): ProgressEvent {
   return { runId, at: at.toISOString(), kind, payload };
+}
+
+/**
+ * 一条会话过程记录。可选字段读不到就不带键（不拿空串、false 冒充）。文本原文给，不截断：截断和打码在调用方写库前做。
+ */
+export function transcriptEntry(
+  at: Date,
+  kind: TranscriptEntry['kind'],
+  text: string,
+  extra: {
+    tool?: string | undefined;
+    ok?: boolean | undefined;
+    meta?: Record<string, unknown> | undefined;
+  } = {},
+): TranscriptEntry {
+  return {
+    at: at.toISOString(),
+    kind,
+    text,
+    ...optional('tool', extra.tool),
+    ...optional('ok', extra.ok),
+    ...optional('meta', extra.meta),
+  };
 }
 
 const PLAN_LIMIT = 30;

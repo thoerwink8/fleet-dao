@@ -9,6 +9,7 @@
 // - 已关 / 未被用途使用 / 下架 / 池暂停是人或配置的结果，不是坏了：用灰（stop）或停滞色，不画红，不算「0 条活」的告警。
 // - 判的先后写死：下架 → 已关 → 池暂停 → 未被用途使用 → 再看探针和额度。同一条路由只落一种。
 
+import { isOnDemandDetail } from '@fleet-dao/shared';
 import type { RoutingLayerRoute } from '../api/types';
 import type { Tone } from './status';
 
@@ -27,6 +28,8 @@ export type RouteStateKind =
   | 'held'
   /** 未探：探针还没看过。 */
   | 'unprobed'
+  /** 按需探测：不在用途前 2 位，定时探针不主动探；要派给它时派前先探一次（#1635）。不是坏了，不画红。 */
+  | 'on_demand'
   /** 暂时挡着：额度用满、命中禁令、引擎暂不往它派；不是坏了，等清零或撤禁令。 */
   | 'blocked'
   /** 不知道：探针这一轮没探它、额度没读成。 */
@@ -37,6 +40,7 @@ export const ROUTE_STATE_KINDS: readonly RouteStateKind[] = [
   'fault',
   'blocked',
   'unknown',
+  'on_demand',
   'unprobed',
   'off',
   'unused',
@@ -52,6 +56,7 @@ export const routeStateLabel: Record<RouteStateKind, string> = {
   retired: '已下架',
   held: '池暂停',
   unprobed: '未探',
+  on_demand: '按需探测',
   blocked: '暂时挡着',
   unknown: '不知道',
 };
@@ -65,6 +70,7 @@ export const routeStateTone: Record<RouteStateKind, Tone> = {
   retired: 'stop',
   held: 'stall',
   unprobed: 'stall',
+  on_demand: 'stop',
   blocked: 'stall',
   unknown: 'stall',
 };
@@ -78,6 +84,7 @@ export const routeStateWhy: Record<RouteStateKind, string> = {
   retired: '模型已下架：派不到，不算坏',
   held: '账号池整池暂停：要人撤了暂停才派',
   unprobed: '探针还没看过：不知道通不通',
+  on_demand: '不主动探，要派给它时先探一次：不算坏，不算过期',
   blocked: '额度用满、命中禁令或引擎暂不往它派：不是坏了',
   unknown: '探针这一轮没探它，或额度没读成：不当活，也不当坏',
 };
@@ -116,13 +123,17 @@ export interface RouteStateContext {
 
 /** 后端给的三件事 + 路由开关，加上外部事实 → 这条路由是哪一种。 */
 export function classifyRoute(
-  r: Pick<RoutingLayerRoute, 'enabled' | 'verdict' | 'connect' | 'quota' | 'ban' | 'probedAt'>,
+  r: Pick<
+    RoutingLayerRoute,
+    'enabled' | 'verdict' | 'connect' | 'quota' | 'ban' | 'probedAt' | 'probeDetail'
+  >,
   ctx: RouteStateContext = {},
 ): RouteStateKind {
   if (ctx.modelRetired) return 'retired';
   if (ctx.channelEnabled === false || !r.enabled) return 'off';
   if (ctx.poolHeld) return 'held';
   if (ctx.usedByPurpose === false) return 'unused';
+  if (isOnDemandDetail(r.probeDetail)) return 'on_demand';
   if (r.connect.verdict === 'dead') return 'fault';
   if (r.connect.verdict === 'unknown') return r.probedAt === undefined ? 'unprobed' : 'unknown';
   if (r.quota.verdict === 'dead' || r.ban.verdict === 'dead') return 'blocked';
@@ -132,7 +143,7 @@ export function classifyRoute(
 
 /** 没有结构化事实、只有探针原始结论的路由（渠道状态页里没排进用途的路由）：开关、下架、暂停、有没有用途在用，再看探针。 */
 export function classifyProbe(
-  probe: { state: 'ok' | 'failed' | 'skipped' | 'not_wired' } | undefined,
+  probe: { state: 'ok' | 'failed' | 'skipped' | 'not_wired' | 'on_demand' } | undefined,
   ctx: RouteStateContext = {},
 ): RouteStateKind {
   if (ctx.modelRetired) return 'retired';
@@ -140,6 +151,7 @@ export function classifyProbe(
   if (ctx.poolHeld) return 'held';
   if (ctx.usedByPurpose === false) return 'unused';
   if (!probe) return 'unprobed';
+  if (probe.state === 'on_demand') return 'on_demand';
   if (probe.state === 'ok') return 'live';
   if (probe.state === 'failed') return 'fault';
   return 'unknown';
@@ -164,6 +176,7 @@ export function rollupKind(kinds: readonly RouteStateKind[]): RouteStateKind {
     'fault',
     'blocked',
     'unknown',
+    'on_demand',
     'unprobed',
     'held',
     'off',
@@ -178,9 +191,11 @@ export function rollupKind(kinds: readonly RouteStateKind[]): RouteStateKind {
 export function countsText(counts: KindCounts): string {
   const off = counts.off + counts.retired + counts.held;
   const other = counts.blocked + counts.unknown + counts.unprobed;
+  const onDemand = counts.on_demand;
   const parts = [
     counts.live > 0 ? `${counts.live} 在线` : undefined,
     counts.fault > 0 ? `${counts.fault} 故障` : undefined,
+    onDemand > 0 ? `${onDemand} 按需` : undefined,
     other > 0 ? `${other} 待查` : undefined,
     off > 0 ? `${off} 已关` : undefined,
     counts.unused > 0 ? `${counts.unused} 未使用` : undefined,

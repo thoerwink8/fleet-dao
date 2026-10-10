@@ -4,7 +4,7 @@
 // 「立即探测」，点了马上看到排队 / 探测中，探完自己刷新。
 // 故意造出的失败：引擎关着（按钮置灰、写明，历史照样在）、点了被拒（写明是哪样）、立即探测的记录读不到（写没读成）、
 // 探针历史读不到（写没查成、不画格子）、运行中失败的渠道顺到谁没有。
-import { type ProbeHistoryCell, probeHistoryStrips } from '@fleet-dao/shared';
+import { type ProbeHistoryCell, probeHistoryStrips, ROUTE_PROBE_ON_DEMAND_MARK } from '@fleet-dao/shared';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError } from '../api/client';
@@ -271,7 +271,11 @@ describe('渠道状态页：每条路由', () => {
     await waitFor(() => expect(routeRow('r-grok').textContent).not.toBe(before));
     // 操作记录里有点击、接手、探完三条
     const audit = await api.audit({ target: 'routing:probe' });
-    expect(audit.items.map((a) => a.action).sort()).toEqual([
+    // 假数据里自带的那次自动探（probe-auto-1）不算这次点的
+    const mine = audit.items.filter(
+      (a) => (a.after as { requestId?: string } | null)?.requestId !== 'probe-auto-1',
+    );
+    expect(mine.map((a) => a.action).sort()).toEqual([
       'routing.probe.done',
       'routing.probe.request',
       'routing.probe.start',
@@ -431,25 +435,31 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     expect(strip.querySelectorAll('[data-cell]')).toHaveLength(3);
     expect(strip.querySelectorAll('[data-result="empty"]')).toHaveLength(57);
 
-    const detail = () => screen.getByRole('region', { name: '这一次' });
-    await waitFor(() => expect(within(detail()).getByText(/上游断了/)).toBeTruthy());
-    expect(within(detail()).getByText('PING')).toBeTruthy();
-    expect(within(detail()).getByText('boom')).toBeTruthy();
-    expect(within(detail()).getByText('4.0 秒')).toBeTruthy();
+    // 什么都没点：探测记录都折叠着
+    const log = () => screen.getByRole('region', { name: '探测记录' });
+    expect(log().querySelector('[data-field="request"]')).toBeNull();
+
+    const failed = strip.querySelector('[data-result="failed"]');
+    if (!(failed instanceof HTMLElement)) throw new Error('没有不通的格子');
+    fireEvent.click(failed);
+    await waitFor(() => expect(within(log()).getByText(/上游断了/)).toBeTruthy());
+    expect(within(log()).getByText('PING')).toBeTruthy();
+    expect(within(log()).getByText('boom')).toBeTruthy();
+    expect(within(log()).getByText('4.0 秒')).toBeTruthy();
 
     const passed = strip.querySelector('[data-result="passed"]');
     if (!(passed instanceof HTMLElement)) throw new Error('没有通过的格子');
     fireEvent.click(passed);
-    await waitFor(() => expect(within(detail()).getByText('只回 OK')).toBeTruthy());
-    expect(within(detail()).getByText('OK')).toBeTruthy();
-    expect(within(detail()).getByText('2.0 秒')).toBeTruthy();
-    expect(within(detail()).queryByText(/上游断了/)).toBeNull();
+    await waitFor(() => expect(within(log()).getByText('只回 OK')).toBeTruthy());
+    expect(within(log()).getByText('OK')).toBeTruthy();
+    expect(within(log()).getByText('2.0 秒')).toBeTruthy();
+    expect(within(log()).queryByText(/上游断了/)).toBeNull();
 
     fireEvent.click(within(openRoute('r-cursor')).getByRole('button', { name: '看最近一次' }));
-    await waitFor(() => expect(within(detail()).getByText(/按规矩没探/)).toBeTruthy());
-    expect(within(detail()).getByText('没真探')).toBeTruthy();
-    expect(within(detail()).getByText('（没发出去）')).toBeTruthy();
-    expect(within(detail()).getByText('（没拿到）')).toBeTruthy();
+    await waitFor(() => expect(within(log()).getByText(/按规矩没探/)).toBeTruthy());
+    expect(within(log()).getByText('没真探')).toBeTruthy();
+    expect(within(log()).getByText('（没发出去）')).toBeTruthy();
+    expect(within(log()).getByText('（没拿到）')).toBeTruthy();
   });
 
   test('卡片头部的均耗时、可用率按这 60 次算：没探不进可用率，没量到的耗时不当 0', async () => {
@@ -492,7 +502,7 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     expect(strip.querySelector('[data-cell="1"]')).toBeNull();
     expect(strip.querySelector('[data-cell="61"]')).toBeTruthy();
     expect(strip.querySelector('[data-result="empty"]')).toBeNull();
-    expect(within(screen.getByRole('list', { name: '最近状态（60）' })).getAllByRole('button')).toHaveLength(
+    expect(within(screen.getByRole('list', { name: '探测记录列表' })).getAllByRole('button')).toHaveLength(
       60,
     );
   });
@@ -525,6 +535,195 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     expect(strip.textContent).not.toContain('没查成');
     expect(strip.querySelectorAll('[data-result="empty"]')).toHaveLength(60);
     expect(strip.querySelector('[data-cell]')).toBeNull();
+  });
+});
+
+describe('渠道状态页：探测记录（#1638）', () => {
+  const t = Date.parse('2026-10-07T00:00:00.000Z');
+  const mins = (n: number) => new Date(t - n * 60_000).toISOString();
+  const logHistory = (): RouteProbeHistory =>
+    historyOf([
+      probeCell({
+        id: 1,
+        routeId: 'r-cursor',
+        channelId: 'ch-cursor',
+        probedAt: mins(30),
+        result: 'passed',
+        durationMs: 2000,
+        failureReason: null,
+        requestText: '只回 OK\n第二行',
+        responseText: 'OK',
+      }),
+      probeCell({
+        id: 2,
+        routeId: 'r-cursor',
+        channelId: 'ch-cursor',
+        probedAt: mins(10),
+        result: 'failed',
+        durationMs: 8000,
+        failureReason: '降智题答错：实答 381',
+        requestText: '请求原文 A\n请求原文 B',
+        responseText: '响应原文 X\n响应原文 Y',
+        checkQuestion: '17 乘 23 等于多少？',
+        checkExpected: '391',
+        checkAnswer: '381',
+        checkPassed: false,
+        selfIdentity: '某个小模型',
+      }),
+      probeCell({
+        id: 3,
+        routeId: 'r-cursor',
+        channelId: 'ch-cursor',
+        probedAt: mins(20),
+        result: 'failed',
+        failureReason: '上游 503',
+        requestText: 'PING',
+        responseText: 'boom',
+      }),
+    ]);
+  const rowOrder = () =>
+    [...document.querySelectorAll('[data-probe-row]')].map((el) => el.getAttribute('data-probe-row'));
+  const open = (id: number) => {
+    const row = document.querySelector(`[data-probe-row="${id}"]`);
+    const button = row?.querySelector('button[aria-expanded]');
+    if (!(button instanceof HTMLElement)) throw new Error(`探测记录里没有第 ${id} 行`);
+    fireEvent.click(button);
+  };
+  const renderLog = (history: unknown) => {
+    const api = createMockApi({ live: false });
+    Object.assign(api, { routeProbeHistory: async () => history });
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
+  };
+
+  test('从新到旧列出；疑似降智那一行写题、标准答案、实答和自报身份，格子单独一种颜色', async () => {
+    renderLog(logHistory());
+    await waitFor(() => expect(rowOrder()).toEqual(['2', '3', '1']));
+    const row = document.querySelector('[data-probe-row="2"]') as HTMLElement;
+    expect(row.getAttribute('data-result')).toBe('doubt');
+    expect(within(row).getByText('疑似降智')).toBeTruthy();
+    expect(within(row).getByText('17 乘 23 等于多少？')).toBeTruthy();
+    expect(row.querySelector('[data-field="expected"]')?.textContent).toBe('391');
+    expect(row.querySelector('[data-field="answer"]')?.textContent).toBe('381');
+    expect(row.querySelector('[data-field="identity"]')?.textContent).toBe('某个小模型');
+    // 不通的那行没有题，不画题
+    expect(document.querySelector('[data-probe-row="3"] [data-field="check"]')).toBeNull();
+    const cell = historyStrip().querySelector('[data-cell="2"]');
+    expect(cell?.getAttribute('data-result')).toBe('doubt');
+    expect(cell?.className).toContain('bg-st-doubt');
+    expect(historyStrip().textContent).toContain('橙疑似降智');
+  });
+
+  test('点一行展开请求和响应原文；不通的另起一块写失败原因；点格子打开的是同一行', async () => {
+    renderLog(logHistory());
+    await waitFor(() => expect(rowOrder()).toHaveLength(3));
+    expect(document.querySelector('[data-field="request"]')).toBeNull();
+    open(3);
+    const row = document.querySelector('[data-probe-row="3"]') as HTMLElement;
+    expect(row.querySelector('[data-field="failure"]')?.textContent).toBe('失败原因：上游 503');
+    expect(row.querySelector('[data-field="request"]')?.textContent).toBe('PING');
+    expect(row.querySelector('[data-field="response"]')?.textContent).toBe('boom');
+    // 点格子 1：展开的换成第 1 行（同一个详情）
+    fireEvent.click(historyStrip().querySelector('[data-cell="1"]') as HTMLElement);
+    await waitFor(() =>
+      expect(document.querySelector('[data-probe-row="1"] [data-field="request"]')?.textContent).toBe(
+        '只回 OK\n第二行',
+      ),
+    );
+    expect(document.querySelector('[data-probe-row="3"] [data-field="request"]')).toBeNull();
+    // 再点一下这一行折起来
+    open(1);
+    expect(document.querySelector('[data-probe-row="1"] [data-field="request"]')).toBeNull();
+    // 疑似降智的行展开：原文保留换行
+    open(2);
+    expect(document.querySelector('[data-probe-row="2"] [data-field="request"]')?.textContent).toBe(
+      '请求原文 A\n请求原文 B',
+    );
+    expect(document.querySelector('[data-probe-row="2"] [data-field="failure"]')?.textContent).toContain(
+      '疑似降智',
+    );
+  });
+
+  test('【故意造出的失败】读不到：写没读成和原因，不画空列表', async () => {
+    renderLog({ state: 'unreadable', why: '没查成：连不上库' });
+    const alert = await waitFor(() => {
+      const el = document.querySelector('[data-probe-log="unreadable"]');
+      if (!(el instanceof HTMLElement)) throw new Error('还没有没读成');
+      return el;
+    });
+    expect(alert.textContent).toContain('没读成');
+    expect(alert.textContent).toContain('连不上库');
+    expect(document.querySelector('[data-probe-log="list"]')).toBeNull();
+    expect(document.querySelector('[data-probe-log="empty"]')).toBeNull();
+  });
+
+  test('读成了但真没有记录：写还没有探测记录', async () => {
+    renderLog({ state: 'ok', channels: [], latestByRoute: [] });
+    const empty = await waitFor(() => {
+      const el = document.querySelector('[data-probe-log="empty"]');
+      if (!(el instanceof HTMLElement)) throw new Error('还没有空态');
+      return el;
+    });
+    expect(empty.textContent).toBe('还没有探测记录');
+  });
+
+  test('没探里原文带「按需」那一句的标「按需」，别的没探还是「没探」；图例一起写', async () => {
+    renderLog(
+      historyOf([
+        probeCell({
+          id: 1,
+          routeId: 'r-cursor',
+          channelId: 'ch-cursor',
+          probedAt: mins(10),
+          result: 'not_probed',
+          failureReason: `${ROUTE_PROBE_ON_DEMAND_MARK}。还没真探过`,
+        }),
+        probeCell({
+          id: 2,
+          routeId: 'r-cursor',
+          channelId: 'ch-cursor',
+          probedAt: mins(20),
+          result: 'not_probed',
+          failureReason: '没有用途在用，不花额度去探',
+        }),
+      ]),
+    );
+    await waitFor(() => expect(rowOrder()).toEqual(['1', '2']));
+    const onDemand = document.querySelector('[data-probe-row="1"]') as HTMLElement;
+    expect(onDemand.getAttribute('data-result')).toBe('on_demand');
+    expect(within(onDemand).getByText('按需')).toBeTruthy();
+    const plain = document.querySelector('[data-probe-row="2"]') as HTMLElement;
+    expect(plain.getAttribute('data-result')).toBe('not_probed');
+    expect(within(plain).getByText('没探')).toBeTruthy();
+    expect(historyStrip().querySelector('[data-cell="1"]')?.getAttribute('data-result')).toBe('on_demand');
+    expect(document.querySelector('[data-probe-log="legend"]')?.textContent).toContain('按需：');
+  });
+
+  test('挤出 60 格的路由，它自己的最近一次也列出来', async () => {
+    const cells = Array.from({ length: 60 }, (_, i) =>
+      probeCell({
+        id: i + 10,
+        routeId: 'r-cursor',
+        channelId: 'ch-cursor',
+        probedAt: mins(i),
+        result: 'passed',
+        failureReason: null,
+      }),
+    );
+    const old = probeCell({
+      id: 1,
+      routeId: 'r-other',
+      channelId: 'ch-cursor',
+      probedAt: mins(500),
+      result: 'passed',
+      failureReason: null,
+    });
+    renderLog({
+      state: 'ok',
+      channels: [{ channelId: 'ch-cursor', cells, avgDurationMs: null, passed: 60, attempted: 60 }],
+      latestByRoute: [old],
+    });
+    await waitFor(() => expect(rowOrder()).toHaveLength(61));
+    expect(rowOrder().at(-1)).toBe('1');
   });
 });
 
@@ -676,6 +875,47 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
     expect(screen.queryByRole('heading', { name: /Claude 订阅/ })).toBeNull();
     expect(screen.getByRole('list', { name: 'Grok 的路由' })).toBeTruthy();
     expect(screen.getByRole('button', { name: /返回渠道列表/ })).toBeTruthy();
+  });
+
+  test('任务断链后引擎自动排的立即探测（#1636）：顶上和路由行都写「任务 #N 断链后自动探」，不写成人点的', async () => {
+    const api = createMockApi({ live: false });
+    const base = await api.routeProbeStatus();
+    // 假数据里带的那条自动探已经过了 30 分钟，页面顶上不挂；换成刚探完的一条和一条在探的
+    const at = (agoMs: number) => new Date(Date.now() - agoMs).toISOString();
+    Object.assign(api, {
+      routeProbeStatus: async () => ({
+        ...base,
+        requests: [
+          {
+            requestId: 'auto-running',
+            requestedAt: at(5_000),
+            by: 'engine:route-probe-now',
+            routeIds: ['r-grok'],
+            source: { kind: 'task-route-broken' as const, issueNumber: 1621 },
+            state: 'running' as const,
+            startedAt: at(2_000),
+            results: [],
+          },
+          {
+            requestId: 'auto-done',
+            requestedAt: at(120_000),
+            by: 'engine:route-probe-now',
+            routeIds: ['r-cursor'],
+            source: { kind: 'task-route-broken' as const, issueNumber: 1622 },
+            state: 'done' as const,
+            startedAt: at(110_000),
+            finishedAt: at(100_000),
+            results: [],
+          },
+        ],
+      }),
+    });
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-grok', api });
+    await waitFor(() => routeRow('r-grok'));
+    const banner = await screen.findByRole('list', { name: '立即探测' });
+    expect(banner.textContent).toContain('任务 #1621 断链后自动探：引擎已接手，在探');
+    expect(banner.textContent).toContain('任务 #1622 断链后自动探，探完了');
+    expect(openRoute('r-grok').textContent).toContain('任务 #1621 断链后自动探');
   });
 
   test('搜索没有匹配时，详情不再渲染渠道，改写空态；窄屏返回按钮不出现', async () => {
