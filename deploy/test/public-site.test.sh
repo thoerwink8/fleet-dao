@@ -573,6 +573,9 @@ else
   printf '<html>首页</html>\n' >"$SITE/index.html"
   printf '{"commit":"%s"}\n' "$COMMIT" >"$SITE/release.json"
   printf '<html>健康页</html>\n' >"$SITE/health/index.html"
+  # 构建出来的带哈希文件（超过 1 KB，够得上压缩的下限）
+  mkdir -p "$SITE/assets"
+  printf 'console.log(1);%.0s' {1..100} >"$SITE/assets/app-0a1b2c3d.js"
   # 老的演示版目录（#1223 删了）故意还摆在盘上：站点配置要一律回 404，不能因为文件在就给出去
   printf '<html>演示版</html>\n' >"$SITE/demo/index.html"
   printf '{}\n' >"$SITE/demo/scopes/a.json"
@@ -658,9 +661,17 @@ EOF
     HTTPS=https://cockpit.example.test:$P2
     for pc in "/ 200" "/index.html 200" "/tasks/deep-link 200" "/release.json 404" "/health/ 200" "/health/nope 404" \
       "/robots.txt 200" "/demo 404" "/demo/ 404" "/demo/index.html 404" "/demo/tasks/x 404" "/demo/scopes/a.json 404" \
-      "/demo/scopes/nope.json 404" "/healthz 502" "/api/x 502" "/auth/x 502" "/github/webhook 502"; do
+      "/demo/scopes/nope.json 404" "/healthz 502" "/api/x 502" "/auth/x 502" "/github/webhook 502" \
+      "/assets/app-0a1b2c3d.js 200" "/assets/nope-00000000.js 404"; do
       check "https ${pc% *}（隧道外来的）：${pc#* }，带 noindex" "$(probe "${TLS[@]}" "$HTTPS${pc% *}")" "${pc#* } 1"
     done
+    # #1746：带哈希的前端文件存一年不再回来问；文本类按浏览器要的压缩
+    asset_head=$(curl -s -o /dev/null -D - -H 'Accept-Encoding: gzip' "${TLS[@]}" "$HTTPS/assets/app-0a1b2c3d.js" | tr -d '\r')
+    check "带哈希的前端文件：浏览器存一年、不回来问" \
+      "$(grep -ci '^cache-control: public, max-age=31536000, immutable$' <<<"$asset_head")" 1
+    check "带哈希的前端文件：浏览器要压缩就压缩" "$(grep -ci '^content-encoding: gzip$' <<<"$asset_head")" 1
+    check "首页外壳照旧不让浏览器凭猜缓存（存一年只给 /assets/）" \
+      "$(curl -s -o /dev/null -D - "${TLS[@]}" "$HTTPS/index.html" | tr -d '\r' | grep -ci '^cache-control: no-cache$')" 1
     check "https /release.json（隧道那头来的）：200，带 noindex" \
       "$(probe "${TLS[@]}" --interface 127.0.0.2 "$HTTPS/release.json")" "200 1"
     check "隧道那头拿到的就是版本标记" "$(curl -s "${TLS[@]}" --interface 127.0.0.2 "$HTTPS/release.json")" \
@@ -720,6 +731,11 @@ else
         if (req.url === "/api/events") {
           res.writeHead(200, { "Content-Type": "text/event-stream" });
           res.write("event: ready\ndata: {}\n\n");
+          return;
+        }
+        if (req.url === "/api/big") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ items: Array.from({ length: 200 }, (_, i) => ({ id: i, title: "提醒" })) }));
           return;
         }
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -820,6 +836,12 @@ EOF
     check "实时推送：后端发的第一条事件当场转到（不攒着等连接结束）" "$(grep -cx 'event: ready' <<<"$out")" 1
     check "实时推送的连接留着没断（curl 是自己到点才停的）" \
       "$(curl -s -o /dev/null -N --max-time 2 "${TLS[@]}" "https://cockpit.example.test:$K2/api/events" >/dev/null 2>&1; echo $?)" 28
+    # #1746：接口的 JSON 压缩；实时推送不压（压了 nginx 攒够一块才发），浏览器说要压缩也照样当场转到原文
+    big_head=$(curl -s -o /dev/null -D - -H 'Accept-Encoding: gzip' "${TLS[@]}" "https://cockpit.example.test:$K2/api/big" | tr -d '\r')
+    check "接口的 JSON：浏览器要压缩就压缩" "$(grep -ci '^content-encoding: gzip$' <<<"$big_head")" 1
+    out=$(curl -s -N -D - --max-time 2 -H 'Accept-Encoding: gzip' "${TLS[@]}" "https://cockpit.example.test:$K2/api/events" 2>/dev/null | tr -d '\r')
+    check "实时推送：要压缩也不压、第一条事件当场转到原文" \
+      "$(grep -ci '^content-encoding:' <<<"$out") $(grep -cx 'event: ready' <<<"$out")" "0 1"
     if ! retry_on_port_conflict start_bad respin_bad; then
       check "测试用的 nginx（去掉 keepalive 的）起来了" "$(tail -3 <<<"$RETRY_WHY" | tr '\n' ' ')" "（起来了）"
     else
