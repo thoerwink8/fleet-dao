@@ -124,6 +124,66 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 
 <!-- fleet:dirs:end -->
 
+下面这张表由 deploy/ 脚本生成，别手改：
+
+<!-- fleet:units:start -->
+
+| 单元文件 | 机器 | 说明 |
+|---|---|---|
+| fleet-agents.slice | 法国 | fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给） |
+| fleet-api.service | 法国 | fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口） |
+| fleet-api.socket | 法国 | fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口） |
+| fleet-auto-release.service | 法国 | fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个） |
+| fleet-auto-release.timer | 法国 | fleet-dao 自动发布单元每 5 分钟读一轮主线（只读） |
+| fleet-engine.service | 法国 | fleet-dao 引擎工人（Temporal worker） |
+| fleet-firewall.service | 法国 | fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连 |
+| fleet-mirasim-liveness.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启） |
+| fleet-mirasim-liveness.timer | 法国 | 会话用户 Mirasim 服务每 2 分钟一次健康检查 |
+| fleet-mirasim-session.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务（本地模式常驻） |
+| fleet-release-request.path | 法国 | fleet-dao 驾驶舱的发布请求一到就接活 |
+| fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
+| fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
+| fleet-feishu.service | 香港 | fleet-dao 飞书网关 |
+
+<!-- fleet:units:end -->
+
+<!--
+renderUnitsBlock 实际输出（跑 packages/conventions/src/ops-tables.ts 的 renderUnitsBlock，与上方 fleet:units 区块逐字相同；冷验收对照用，不是手改表）：
+
+| 单元文件 | 机器 | 说明 |
+|---|---|---|
+| fleet-agents.slice | 法国 | fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给） |
+| fleet-api.service | 法国 | fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口） |
+| fleet-api.socket | 法国 | fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口） |
+| fleet-auto-release.service | 法国 | fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个） |
+| fleet-auto-release.timer | 法国 | fleet-dao 自动发布单元每 5 分钟读一轮主线（只读） |
+| fleet-engine.service | 法国 | fleet-dao 引擎工人（Temporal worker） |
+| fleet-firewall.service | 法国 | fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连 |
+| fleet-mirasim-liveness.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启） |
+| fleet-mirasim-liveness.timer | 法国 | 会话用户 Mirasim 服务每 2 分钟一次健康检查 |
+| fleet-mirasim-session.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务（本地模式常驻） |
+| fleet-release-request.path | 法国 | fleet-dao 驾驶舱的发布请求一到就接活 |
+| fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
+| fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
+| fleet-feishu.service | 香港 | fleet-dao 飞书网关 |
+
+来源 Description=（法国 deploy/france、香港 deploy/hk，按文件名排）：
+deploy/france/fleet-agents.slice → fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给）
+deploy/france/fleet-api.service → fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口）
+deploy/france/fleet-api.socket → fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口）
+deploy/france/fleet-auto-release.service → fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个）
+deploy/france/fleet-auto-release.timer → fleet-dao 自动发布单元每 5 分钟读一轮主线（只读）
+deploy/france/fleet-engine.service → fleet-dao 引擎工人（Temporal worker）
+deploy/france/fleet-firewall.service → fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连
+deploy/france/fleet-mirasim-liveness.service → 会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启）
+deploy/france/fleet-mirasim-liveness.timer → 会话用户 Mirasim 服务每 2 分钟一次健康检查
+deploy/france/fleet-mirasim-session.service → 会话用户 @@SESSION_USER@@ 的 Mirasim 服务（本地模式常驻）
+deploy/france/fleet-release-request.path → fleet-dao 驾驶舱的发布请求一到就接活
+deploy/france/fleet-release-request.service → fleet-dao 接驾驶舱的发布请求
+deploy/france/fleet-temporal.service → fleet-dao Temporal 服务端（Postgres 持久化）
+deploy/hk/fleet-feishu.service → fleet-dao 飞书网关
+-->
+
 | 用户 | 在哪 | 干什么 |
 |---|---|---|
 | `fleet` | 两台 | 引擎、驾驶舱后端、Temporal（法国），飞书网关（香港）。系统用户，家 `/home/fleet`（750） |
