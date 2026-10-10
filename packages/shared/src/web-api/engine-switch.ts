@@ -53,3 +53,68 @@ export function describeEngineMaster(state: EngineMasterState): string {
   const who = state.by !== undefined && state.at !== undefined ? `，${state.at} 由 ${state.by} 关上` : '';
   return `关着${who}：不拉单、不派活、不起干活的会话；探针和健康检查照跑`;
 }
+
+/**
+ * 发版车 / 驾驶舱接活在第 2 步关总开关时写进操作记录的原因前缀（#1256 / #1739）。
+ * 后头会带目标提交；这里只认前缀，别拿别的「关」当成发版暂停。
+ */
+export const ENGINE_PAUSE_REASON_PREFIX = '发版前暂停';
+
+/** 第 7 步开回时写进操作记录的原因前缀。有这一条就说明暂停已收尾，不算断链。 */
+export const ENGINE_RESTORE_REASON_PREFIX = '发版后恢复发版前的状态';
+
+/** 判「发版暂停后未恢复」时只用开关这一对操作记录（别的 setting 改动不算）。 */
+export type EngineMasterAuditSlice = {
+  action: string;
+  /** ISO 或能 Date.parse 的时间；缺了或认不出的条目跳过。 */
+  at?: string | undefined;
+  reason?: string | null | undefined;
+};
+
+/**
+ * 最近一条总开关操作记录是不是「发版前暂停」关着、还没有后来的打开（#1739）。
+ * 真：发版车/驾驶舱接活关了总开关，驱动中途死掉或发完误记「本来就关着」，没人开回——应开回，不该当成有意关着。
+ * 条目按 at 从新到旧；同秒多条时保持传入顺序（新的在前）。没有开关记录、最近一条是打开、或关的原因不是发版暂停 → 假。
+ */
+export function orphanReleasePause(audits: readonly EngineMasterAuditSlice[]): boolean {
+  const switches = audits.filter(
+    (a) => a.action === ENGINE_MASTER_ENABLE || a.action === ENGINE_MASTER_DISABLE,
+  );
+  if (switches.length === 0) return false;
+  const sorted = [...switches].sort((a, b) => {
+    const ta = a.at !== undefined && a.at !== '' ? Date.parse(a.at) : Number.NaN;
+    const tb = b.at !== undefined && b.at !== '' ? Date.parse(b.at) : Number.NaN;
+    if (Number.isNaN(ta) && Number.isNaN(tb)) return 0;
+    if (Number.isNaN(ta)) return 1;
+    if (Number.isNaN(tb)) return -1;
+    return tb - ta;
+  });
+  const last = sorted[0];
+  if (last === undefined || last.action !== ENGINE_MASTER_DISABLE) return false;
+  const reason = typeof last.reason === 'string' ? last.reason : '';
+  return reason.includes(ENGINE_PAUSE_REASON_PREFIX);
+}
+
+/**
+ * 法国 `.history` 末几行（`时间戳 sha 事件`）里，在 `sinceIso` 之后有没有成功发出去的版本（#1739 旁证）。
+ * 用来核对「总开关又关着」是不是跟某次发版叠在一起：有 → 高度像发版暂停链；没有 → 更像中途死掉的暂停（还没跑到 release.sh）。
+ */
+export function releaseHistoryAfter(
+  lines: readonly string[],
+  sinceIso: string,
+): { at: string; sha: string; event: string }[] {
+  const since = Date.parse(sinceIso);
+  if (Number.isNaN(since)) return [];
+  const out: { at: string; sha: string; event: string }[] = [];
+  for (const line of lines) {
+    const m = /^(\S+)\s+([0-9a-f]{7,40})\s+(\S+)\s*$/.exec(line.trim());
+    if (!m) continue;
+    const at = m[1] ?? '';
+    const t = Date.parse(at);
+    if (Number.isNaN(t) || t <= since) continue;
+    const event = m[3] ?? '';
+    if (event !== 'release' && event !== 'recovered') continue;
+    out.push({ at, sha: m[2] ?? '', event });
+  }
+  return out;
+}

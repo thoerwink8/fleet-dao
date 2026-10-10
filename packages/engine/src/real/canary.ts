@@ -5,6 +5,7 @@
 // 客户端（taskStatus 查询），收前几轮留下的单发的是驾驶舱「放弃」同一个信号（taskAbandon）；「驾驶舱显示」读的是驾驶舱后端的
 // Store（主页「做完的」那一栏读的同一份：任务行、PR 镜像）。
 
+import { existsSync } from 'node:fs';
 import {
   canaryDbFacts,
   canaryPullRequestNumber,
@@ -22,6 +23,12 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import type { ClaimsGitHub, GitHub } from '@fleet-dao/github';
+import {
+  ENGINE_MASTER_ENABLE,
+  ENGINE_MASTER_SETTING,
+  engineMasterOf,
+  orphanReleasePause,
+} from '@fleet-dao/shared';
 import { asRecord, errMessage } from '@fleet-dao/shared/util';
 import { createPgStore } from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
@@ -144,6 +151,9 @@ export interface CanaryWiring {
   log?: CanaryDeps['log'];
 }
 
+/** 驾驶舱接活在法国落的暂停标记（与 deploy/france/release-request/lib.mjs 的 MARKER_FILE 同路径）。还在就说明发版还在走，别开回。 */
+const FRANCE_PAUSE_MARKER = '/srv/fleet-dao-releases/.train/release-train.paused';
+
 /** 给 EngineJobs.canary 用的工厂。 */
 export function canaryJob(w: CanaryWiring): (client: Client) => CanaryDeps {
   const now = w.now ?? (() => new Date());
@@ -160,6 +170,36 @@ export function canaryJob(w: CanaryWiring): (client: Client) => CanaryDeps {
     };
     return {
       repo,
+      async healOrphanMaster() {
+        if (existsSync(FRANCE_PAUSE_MARKER)) return null;
+        const rows = await store.listSettings();
+        const master = engineMasterOf(rows.find((s) => s.key === ENGINE_MASTER_SETTING));
+        if (master.on) return null;
+        const page = await store.listAudit({ target: `setting:${ENGINE_MASTER_SETTING}`, limit: 50 });
+        if (!orphanReleasePause(page.items)) return null;
+        const row = rows.find((s) => s.key === ENGINE_MASTER_SETTING);
+        const by = { kind: 'engine' as const, id: 'canary' };
+        const result = await store.putSetting(
+          {
+            key: ENGINE_MASTER_SETTING,
+            value: true,
+            expectedVersion: row?.version ?? 0,
+            by,
+          },
+          {
+            actor: by,
+            action: ENGINE_MASTER_ENABLE,
+            target: `setting:${ENGINE_MASTER_SETTING}`,
+            before: row?.value ?? null,
+            after: true,
+            reason: '发版暂停后未恢复，巡检跳过时自动开回（#1739）',
+            via: 'engine',
+            ok: true,
+          },
+        );
+        if (result === 'conflict') return '发版暂停断链开回没成：总开关刚被别处改过';
+        return '发版暂停后未恢复，已自动开回总开关（#1739）';
+      },
       runs: {
         start: (job, at) => startScheduleRun(w.db, job, at),
         finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),

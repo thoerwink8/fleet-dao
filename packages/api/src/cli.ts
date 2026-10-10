@@ -9,10 +9,10 @@
 // 写入口和页面同一个（Store.setAutoDispatch）；改了记一条操作记录，改完从库里读回开关和那条记录再打印。
 // --all off：把库里所有仓都关上（发版 release.sh 在里程碑新 tag 发布成功后调，#1050）；只许 off，不许一键全开；
 // 逐个仓走上面同一条路，已经关着的不改不记；有一个没关成就整条退出 1，说清哪几个。
-//   engine on|off|status [--reason <原因>]
+//   engine on|off|status|heal-orphan [--reason <原因>]
 // 引擎总开关（设置 engine.master，#1086）：on 打开引擎接活，off 全停（不拉单、不派活、不起干活的会话；探针照跑），
-// status 只看。没设过是关。和按项目的「让 AI 接活」串联：总开关开着、项目的开关也开着才派。发版脚本每次发版成功后
-// 经 engine off 置关（#1050）；本机 WSL 的小版本更新不碰它。
+// status 只看（带最近一条操作记录；若是发版暂停后未恢复会写明）。heal-orphan：仅当操作记录显示「发版前暂停」后没开回时开回（#1739）。
+// 没设过是关。和按项目的「让 AI 接活」串联：总开关开着、项目的开关也开着才派。发版暂停/恢复在发版车和驾驶舱接活里，不在 release.sh。
 //   node-key new <环境编号>（看板多机）：给一个要往这台推快照的环境发一把新通行证：明文只在这一次打印（推送方放进自己的
 //   FLEET_NODE_REPORT_TOKEN），同时打印要贴进这台 api.env 的 FLEET_NODE_KEYS 的那一项（只有哈希）。先写操作记录（不含明文、哈希），
 //   记不成就不打印——发出去的钥匙必须有记录。不改任何配置文件、不重启服务。
@@ -27,11 +27,24 @@ import { readFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
 import { ENGINE_LABEL, LOCAL_LABEL } from '@fleet-dao/conventions';
-import { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE, NodeIdSchema } from '@fleet-dao/shared';
+import {
+  AUTO_DISPATCH_DISABLE,
+  AUTO_DISPATCH_ENABLE,
+  ENGINE_MASTER_DISABLE,
+  ENGINE_MASTER_ENABLE,
+  NodeIdSchema,
+  orphanReleasePause,
+} from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
-import { describeEngineMaster, readEngineMaster, setEngineMaster } from './engine-switch.ts';
+import {
+  describeEngineMaster,
+  healOrphanReleasePause,
+  listEngineMasterAudits,
+  readEngineMaster,
+  setEngineMaster,
+} from './engine-switch.ts';
 import { INTENT_USAGE, IntentCliError, parseIntentArgs, runIntent } from './intent-cli.ts';
 import type { IntentStore } from './intent-store.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
@@ -58,7 +71,7 @@ export class CliError extends Error {
 const USAGE =
   '用法：fleet-api set-password <飞书名或用户 id> [--username <用户名>]（密码从标准输入读，不收参数）';
 const ENGINE_USAGE =
-  '用法：fleet-api engine on|off|status [--reason <原因>]（引擎总开关：on 打开，off 关上，status 只看；没设过是关。开关写进操作记录，本来就是要的状态就不改不记）';
+  '用法：fleet-api engine on|off|status|heal-orphan [--reason <原因>]（引擎总开关：on 打开，off 关上，status 只看并带最近操作记录；heal-orphan 仅在「发版前暂停」后未开回时开回；没设过是关。开关写进操作记录，本来就是要的状态就不改不记）';
 /** dispatch-issue（#1337）的本体在引擎包（packages/engine/src/bin/dispatch-issue.ts）：后端不依赖引擎包，由 bin/fleet-api 按命令名转过去。这里只管 --help 列得出来。 */
 const DISPATCH_ISSUE_POINTER =
   '用法：fleet-api dispatch-issue <owner/仓名> <单号> [--force --note "<为什么>"]（开关关着时点名把一张单交给引擎；本体在引擎包，经 packages/api/bin/fleet-api 转过去，完整说明跑 fleet-api dispatch-issue --help）';
@@ -538,15 +551,15 @@ export async function dispatchAll(input: {
 // —— engine：引擎总开关（#1086，设置 engine.master）——
 
 export interface EngineArgs {
-  action: 'on' | 'off' | 'status';
+  action: 'on' | 'off' | 'status' | 'heal-orphan';
   reason?: string | undefined;
 }
 
 /** 恰好一个动作，可选 --reason <原因>；别的写法一律拒，不猜。 */
 export function parseEngineArgs(argv: readonly string[]): EngineArgs {
   const [action = '', ...rest] = argv;
-  if (action !== 'on' && action !== 'off' && action !== 'status')
-    throw new CliError(`认不出「${action}」：只收 on、off、status。${ENGINE_USAGE}`, 2);
+  if (action !== 'on' && action !== 'off' && action !== 'status' && action !== 'heal-orphan')
+    throw new CliError(`认不出「${action}」：只收 on、off、status、heal-orphan。${ENGINE_USAGE}`, 2);
   let reason: string | undefined;
   if (rest.length > 0) {
     if (rest.length !== 2 || rest[0] !== '--reason' || rest[1] === undefined || rest[1].trim() === '')
@@ -562,15 +575,53 @@ export function parseEngineArgs(argv: readonly string[]): EngineArgs {
 /** 操作记录没有「服务器上的管理命令」这一种来源：和 dispatch 一样记成引擎那一类，reason 写明谁跑的哪条命令。 */
 const OPS_ENGINE = { kind: 'engine', id: 'ops:engine' } as const;
 
+const isMasterSwitchEntry = (a: AuditRecord) =>
+  a.action === ENGINE_MASTER_ENABLE || a.action === ENGINE_MASTER_DISABLE;
+
+function describeMasterChange(entry: AuditRecord | undefined, more = false): string {
+  if (!entry)
+    return more
+      ? `最近 ${RECENT_AUDITS} 条和总开关有关的操作记录里没有开关它的（更早的没翻）`
+      : '操作记录里还没有开关总开关的记录';
+  const what = entry.action === ENGINE_MASTER_ENABLE ? '打开' : '关上';
+  return `最近一次开关：${entry.at} ${what}，${entry.reason ?? `${entry.actor.kind}:${entry.actor.id}`}（操作记录 ${entry.id}，actor ${entry.actor.kind}:${entry.actor.id}）`;
+}
+
 /**
- * fleet-api engine 本身（#1086）。status 只读打印；on、off 已经是要的状态就不改，不然经 setEngineMaster 改
+ * fleet-api engine 本身（#1086）。status 只读打印（带操作记录；发版暂停未恢复会写明）；
+ * heal-orphan 只在断链时开回；on、off 已经是要的状态就不改，不然经 setEngineMaster 改
  * （putSetting：开关和操作记录同一事务）；版本冲突（刚被别处改过）报出来让重跑。
  */
 export async function engine(input: { store: Store; args: EngineArgs; operator: string }): Promise<string> {
   const { store, args, operator } = input;
   if (args.action === 'status') {
     const state = await dbStep('没查成：', () => readEngineMaster(store));
-    return `引擎总开关：${describeEngineMaster(state)}`;
+    const page = await dbStep('没查成：读操作记录时', () => listEngineMasterAudits(store, RECENT_AUDITS));
+    const last = page.items.find(isMasterSwitchEntry);
+    const lines = [`引擎总开关：${describeEngineMaster(state)}`, describeMasterChange(last, page.more)];
+    if (!state.on && orphanReleasePause(page.items)) {
+      lines.push(
+        '断链：最近一次关上是发版前暂停，之后没有开回（#1739）。不是有意关着；跑 fleet-api engine heal-orphan 或等巡检跳过时自动开回',
+      );
+    }
+    return lines.join('\n');
+  }
+  if (args.action === 'heal-orphan') {
+    const reason =
+      args.reason === undefined
+        ? `发版暂停后未恢复，自动开回（#1739；服务器上 ${operator} 跑的 fleet-api engine heal-orphan）`
+        : `${args.reason}（服务器上 ${operator} 跑的 fleet-api engine heal-orphan）`;
+    const got = await dbStep('没改成（什么都没改）：', () =>
+      healOrphanReleasePause(store, { by: OPS_ENGINE, reason, via: 'engine' }),
+    );
+    if (got.healed) return `已打开（发版暂停后未恢复）：引擎总开关：${describeEngineMaster(got.state)}`;
+    if (got.why === 'already_on')
+      return `没改：总开关本来就开着（现在是「${describeEngineMaster(got.state)}」）`;
+    if (got.why === 'conflict')
+      throw new CliError(
+        `没改成：总开关刚被别处改过（现在是「${describeEngineMaster(got.state)}」），再跑一遍或跑 status 核对`,
+      );
+    return `没改：不是发版暂停后未恢复（现在是「${describeEngineMaster(got.state)}」）；有意关着请用 engine on，或先跑 status 看操作记录`;
   }
   const on = args.action === 'on';
   const change = await dbStep(

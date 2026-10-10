@@ -13,13 +13,31 @@ import {
   ENGINE_MASTER_SETTING,
   type EngineMasterState,
   engineMasterOf,
+  orphanReleasePause,
 } from '@fleet-dao/shared';
-import type { Actor, NewAuditEntry, Store } from './ports.ts';
+import type { Actor, AuditRecord, NewAuditEntry, Store } from './ports.ts';
 
 /** 读总开关此刻的状态；设置表读不到照抛（调用方自己包一层「没查成」）。 */
 export async function readEngineMaster(store: Store): Promise<EngineMasterState> {
   const rows = await store.listSettings();
   return engineMasterOf(rows.find((s) => s.key === ENGINE_MASTER_SETTING));
+}
+
+const MASTER_AUDIT_TARGET = `setting:${ENGINE_MASTER_SETTING}`;
+
+/** 最近与总开关有关的操作记录（新的在前）；库读不到照抛。 */
+export async function listEngineMasterAudits(
+  store: Store,
+  limit = 50,
+): Promise<{ items: AuditRecord[]; more: boolean }> {
+  const page = await store.listAudit({ target: MASTER_AUDIT_TARGET, limit });
+  return { items: page.items, more: page.nextCursor !== undefined };
+}
+
+/** 总开关关着且最近一次关是「发版前暂停」、还没开回（#1739）。 */
+export async function isOrphanReleasePause(store: Store): Promise<boolean> {
+  const { items } = await listEngineMasterAudits(store);
+  return orphanReleasePause(items);
 }
 
 export type EngineMasterChange =
@@ -61,6 +79,30 @@ export async function setEngineMaster(
   const after = await readEngineMaster(store);
   if (result === 'conflict') return { changed: false, conflict: true, state: after };
   return { changed: true, state: after };
+}
+
+/**
+ * 发版暂停后未恢复：开回总开关（#1739）。不是断链就不动。
+ * actor/reason 由调用方填（命令行 ops:engine、巡检跳过时的引擎机器人）。
+ */
+export async function healOrphanReleasePause(
+  store: Store,
+  input: { by: Actor; reason: string; via: NewAuditEntry['via'] },
+): Promise<
+  | { healed: true; state: EngineMasterState }
+  | { healed: false; why: 'not_orphan' | 'already_on' | 'conflict'; state: EngineMasterState }
+> {
+  const state = await readEngineMaster(store);
+  if (state.on) return { healed: false, why: 'already_on', state };
+  if (!(await isOrphanReleasePause(store))) return { healed: false, why: 'not_orphan', state };
+  const change = await setEngineMaster(
+    store,
+    { on: true, by: input.by },
+    { actor: input.by, reason: input.reason, via: input.via, ok: true },
+  );
+  if ('conflict' in change) return { healed: false, why: 'conflict', state: change.state };
+  if (!change.changed) return { healed: false, why: 'already_on', state: change.state };
+  return { healed: true, state: change.state };
 }
 
 export { describeEngineMaster };

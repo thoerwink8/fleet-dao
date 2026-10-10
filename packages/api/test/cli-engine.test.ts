@@ -68,6 +68,7 @@ describe('参数', () => {
       reason: '发版 v4 自动置关',
     });
     expect(parseEngineArgs(['status'])).toEqual({ action: 'status' });
+    expect(parseEngineArgs(['heal-orphan'])).toEqual({ action: 'heal-orphan' });
   });
 });
 
@@ -80,12 +81,46 @@ describe('status', () => {
     expect(t.row()).toBeUndefined();
   });
 
-  it('设过：开着/关着照实说，带谁什么时候改的', async () => {
+  it('设过：开着/关着照实说，带谁什么时候改的，并带操作记录', async () => {
     const t = setup();
     await engine({ store: t.store, args: { action: 'on' }, operator: 'root' });
     const text = await engine({ store: t.store, args: { action: 'status' }, operator: 'root' });
     expect(text).toContain('开着');
     expect(text).toContain('ops:engine');
+    expect(text).toContain('最近一次开关');
+    expect(text).toContain('打开');
+  });
+
+  it('发版前暂停后未开回（#1739）：status 写明断链，heal-orphan 开回', async () => {
+    const t = setup();
+    await engine({ store: t.store, args: { action: 'on' }, operator: 'root' });
+    await engine({
+      store: t.store,
+      args: { action: 'off', reason: '发版前暂停（驾驶舱点击发布，目标 45401408114c）' },
+      operator: 'root',
+    });
+    const status = await engine({ store: t.store, args: { action: 'status' }, operator: 'root' });
+    expect(status).toContain('断链');
+    expect(status).toContain('发版前暂停');
+    expect(status).toContain('ops:engine');
+    const healed = await engine({ store: t.store, args: { action: 'heal-orphan' }, operator: 'root' });
+    expect(healed).toContain('已打开');
+    expect(t.row()?.value).toBe(true);
+    const again = await engine({ store: t.store, args: { action: 'heal-orphan' }, operator: 'root' });
+    expect(again).toContain('没改');
+  });
+
+  it('人手关着：heal-orphan 不动', async () => {
+    const t = setup();
+    await engine({ store: t.store, args: { action: 'on' }, operator: 'root' });
+    await engine({
+      store: t.store,
+      args: { action: 'off', reason: '有意关着，预计明日重开' },
+      operator: 'root',
+    });
+    const text = await engine({ store: t.store, args: { action: 'heal-orphan' }, operator: 'root' });
+    expect(text).toContain('不是发版暂停后未恢复');
+    expect(t.row()?.value).toBe(false);
   });
 });
 
@@ -160,7 +195,7 @@ describe('入口（退出码和故意造出的失败）', () => {
   it('参数不对：退出码 2、不连库；没带库连接也是 2', async () => {
     const t = setup();
     expect(await t.run(['enable'])).toBe(2);
-    expect(t.err.at(-1)).toContain('只收 on、off、status');
+    expect(t.err.at(-1)).toContain('只收 on、off、status、heal-orphan');
     expect(await main(['engine', 'on'], t.deps(t.store, { DATABASE_URL: undefined }))).toBe(2);
     expect(t.err.at(-1)).toContain('DATABASE_URL');
     expect(t.row()).toBeUndefined();

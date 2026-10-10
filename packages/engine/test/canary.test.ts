@@ -1261,6 +1261,19 @@ describe('总开关关着跳过的轮次也收前面断轮留下的东西（swee
     expect(h.alerts.resolvedKeys).toEqual([undefined]);
     expect(notes).toEqual([]);
   });
+
+  it('发版暂停后未恢复（#1739）：跳过时先 healOrphanMaster，备注写明已开回', async () => {
+    let healed = 0;
+    const h = harness({
+      healOrphanMaster: async () => {
+        healed += 1;
+        return '发版暂停后未恢复，已自动开回总开关（#1739）';
+      },
+    });
+    const notes = await sweepCanaryLeftovers(h.deps);
+    expect(healed).toBe(1);
+    expect(notes.join('；')).toContain('已自动开回总开关');
+  });
 });
 
 // —— 真库上的装配 ——

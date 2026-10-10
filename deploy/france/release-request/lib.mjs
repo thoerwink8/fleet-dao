@@ -235,9 +235,12 @@ async function engineRead(io) {
     return { ok: true, on: false, legacy: true };
   }
   if (r.status !== 0) return { ok: false, why: `法国引擎总开关读不到：${tail(r.stderr || r.stdout)}` };
-  const m = /引擎总开关：(开着|关着)/.exec(String(r.stdout));
+  const text = String(r.stdout);
+  const m = /引擎总开关：(开着|关着)/.exec(text);
   if (!m) return { ok: false, why: `法国引擎总开关的回话认不出：${tail(r.stdout)}` };
-  return { ok: true, on: m[1] === '开着' };
+  // status 第二段会写「断链：最近一次关上是发版前暂停…」（#1739）；进度文件丢了也能认出不该当成「本来就关着」
+  const orphanPause = /断链：.*发版前暂停/.test(text);
+  return { ok: true, on: m[1] === '开着', orphanPause };
 }
 
 async function engineOff(io, reason) {
@@ -275,6 +278,15 @@ async function phasePauseFrance(io, state) {
     state.marker = true;
     io.writeState(state);
     say(io, '暂停法国：总开关已经是关的（上一回停下时关的），发版前是开着的，已记');
+    return { ok: true };
+  }
+  if (!now.on && now.orphanPause) {
+    // 进度文件丢了/空了，但操作记录仍是「发版前暂停」后未开回（#1739）：按发版前开着记，发完开回
+    state.before = { master: true, repos: null, recordedAt: iso(io) };
+    io.writeMarker({ since: iso(io), target: state.target.value.slice(0, 12), by: 'release-request' });
+    state.marker = true;
+    io.writeState(state);
+    say(io, '暂停法国：总开关关着，操作记录是发版前暂停后未开回（#1739），按发版前开着记，发完开回');
     return { ok: true };
   }
   if (!now.on) {

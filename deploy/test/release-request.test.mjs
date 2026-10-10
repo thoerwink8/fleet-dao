@@ -96,8 +96,12 @@ function fakeIo(over = {}, opts = {}) {
     ciRuns: async () => ({ status: 200, body: ciBody() }),
     fleetApi: async (args) => {
       log.fleetApi.push(args);
-      if (args === 'engine status')
-        return { status: 0, stdout: `引擎总开关：${master === 'on' ? '开着' : '关着'}\n`, stderr: '' };
+      if (args === 'engine status') {
+        const lines = [`引擎总开关：${master === 'on' ? '开着' : '关着'}`];
+        if (master === 'off' && opts.orphanPause)
+          lines.push('断链：最近一次关上是发版前暂停，之后没有开回（#1739）');
+        return { status: 0, stdout: `${lines.join('\n')}\n`, stderr: '' };
+      }
       if (args.startsWith('engine off')) {
         master = 'off';
         return { status: 0, stdout: '', stderr: '' };
@@ -539,6 +543,16 @@ test('上一回进度还写 running、驱动进程已死、发版前开着（#17
   assert.equal(engineOns(log).length, 1, '发完开回');
   assert.equal(log.states.at(-1).before.master, true);
   assert.ok(log.out.some((l) => l.includes('上一回停下时关的') || l.includes('总开关已开回')));
+});
+
+test('进度文件空了、操作记录仍是发版前暂停未开回（#1739）：按发版前开着记，发完开回', async () => {
+  const { io, log, setMaster } = fakeIo({}, { orphanPause: true });
+  setMaster('off');
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(engineOffs(log).length, 0, '已经是关的，不再关');
+  assert.equal(engineOns(log).length, 1, '发完开回');
+  assert.equal(log.states.at(-1).before.master, true);
+  assert.ok(log.out.some((l) => l.includes('发版前暂停后未开回') || l.includes('总开关已开回')));
 });
 
 test('【故意造出的失败】上一回是做完了的（done）、这一回引擎发版前是关着：不带上一回的「开着」，发完保持关', async () => {

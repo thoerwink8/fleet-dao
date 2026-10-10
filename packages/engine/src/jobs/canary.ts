@@ -570,6 +570,11 @@ export interface CanaryDeps {
     /** 撤掉一条（没开着的不管）；不给 key 撤的是断了的那条（CANARY_ALERT_KEY）。 */
     resolve(why: string, key?: string): Promise<void>;
   };
+  /**
+   * 发版暂停后未恢复时开回总开关（#1739）。巡检因总开关关着跳过时顺带做：回一句备注或 null（不是断链、法国暂停标记还在）。
+   * 不给 = 旧装配，只收留单。
+   */
+  healOrphanMaster?: () => Promise<string | null>;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
@@ -809,7 +814,16 @@ async function syncLeftoverPullAlert(
  */
 export async function sweepCanaryLeftovers(deps: CanaryDeps): Promise<string[]> {
   const at = deps.now();
-  const notes = await concludeAbandoned(deps, at);
+  const notes: string[] = [];
+  if (deps.healOrphanMaster) {
+    try {
+      const healed = await deps.healOrphanMaster();
+      if (healed) notes.push(healed);
+    } catch (err) {
+      notes.push(`发版暂停断链开回没成：${errMessage(err)}`);
+    }
+  }
+  notes.push(...(await concludeAbandoned(deps, at)));
   const repo = 'error' in deps.repo ? null : deps.repo;
   if (repo) notes.push(...(await cleanLeftovers(deps, repo, at)));
   try {
