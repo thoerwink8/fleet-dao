@@ -1431,6 +1431,75 @@ describe('驱动死了：认得出、接着走（#1674）', () => {
     expect(releaseCalls(w.sshCalls)).toEqual([]);
   });
 
+  it('第 4 步发版 ssh 期间定时刷新心跳：外壳每 tickMs 回调 onTick，状态里的心跳跟着走', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    const base = withDriver(io(home));
+    const beats: string[] = [];
+    let sawTick: { tickMs: unknown; hasTick: boolean } | undefined;
+    const code = await train.runTrain(startArgs, {
+      ...base,
+      ssh: (c, opts) => {
+        const r = base.ssh(c);
+        if (!c.includes('fleet-release-boot ')) return r;
+        const o = opts as { tickMs?: number; onTick?: () => void } | undefined;
+        sawTick = { tickMs: o?.tickMs, hasTick: typeof o?.onTick === 'function' };
+        for (let i = 0; i < 3; i++) {
+          w.t += 60_000; // 假的 ssh 里过了 3 分钟，外壳每分钟回调一次
+          o?.onTick?.();
+          beats.push(driverOf(home)?.heartbeatAt ?? '');
+        }
+        return r;
+      },
+    });
+    expect(code).toBe(0);
+    expect(sawTick).toEqual({ tickMs: 1000, hasTick: true });
+    expect(new Set(beats).size).toBe(3);
+    expect(Date.parse(beats[2] ?? '')).toBeGreaterThan(Date.parse(beats[0] ?? ''));
+  });
+
+  it('status 给出的接着走命令（提交号只写前 12 位）原样拿去 start：认得是同一个目标，接着走、不被拒', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.history += `\n2026-10-05T13:50:00Z ${SHA} release`;
+    deadAt4(home, w, 30);
+    expect(await train.runTrain(['status'], withDriver(io(home, LIMITS)))).toBe(0);
+    const line = text(w.out)
+      .split('\n')
+      .find((l) => l.includes('node release-train.mjs start --sha'));
+    const m = /start --sha (\S+) --founder-ok "([^"]*)"/.exec(line ?? '');
+    expect(m).not.toBeNull();
+    expect(m?.[1]).toHaveLength(12);
+    const code = await train.runTrain(['start', '--sha', m?.[1] ?? '', '--founder-ok', m?.[2] ?? ''], {
+      ...withDriver(io(home, LIMITS), { pid: 5555 }),
+    });
+    expect(code).toBe(0);
+    expect(text(w.out)).toContain('发版发成了，从第 5 步');
+    expect(stateOf(home).status).toBe('done');
+    expect(
+      (JSON.parse(readFileSync(stateFile(home), 'utf8')) as { target: { value: string } }).target.value,
+    ).toBe(SHA); // 整串不被短的盖掉
+    expect(w.engineOn).toBe(true);
+  });
+
+  it('接着走（卡住、没成）也认前 12 位；换成别的提交仍拒', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    deadAt4(home, w, 2, { status: 'blocked' });
+    const code = await train.runTrain(
+      ['start', '--sha', OLD.slice(0, 12), '--founder-ok', FOUNDER],
+      withDriver(io(home, LIMITS)),
+    );
+    expect(code).toBe(1);
+    expect(releaseCalls(w.sshCalls)).toEqual([]);
+    const ok2 = await train.runTrain(
+      ['start', '--sha', SHA.slice(0, 12), '--founder-ok', FOUNDER],
+      withDriver(io(home, LIMITS)),
+    );
+    expect(ok2).toBe(0);
+    expect(text(w.out)).toContain('接着上一趟走');
+  });
+
   it('trainAlertNote：驱动死了写明「死在第 N 步，没人恢复」；没有状态、卡住、读不了也各写各的', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();

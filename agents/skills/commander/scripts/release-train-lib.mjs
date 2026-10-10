@@ -145,6 +145,15 @@ function targetText(t) {
 const verdictOf = (io, s) =>
   driverVerdict(s, { now: io.now(), isAlive: io.isAlive, host: io.host, limits: io.limits });
 
+/** 同一个目标：种类相同，提交号一个是另一个的前缀（接着走的命令只写前 12 位，状态里可能是整串 40 位）。 */
+const sameTarget = (a, b) =>
+  a.kind === b.kind && (a.value.startsWith(b.value) || b.value.startsWith(a.value));
+/** 接着走时目标取两边较长的那个提交号，不把整串换成短的。 */
+const mergedTarget = (prev, target) => ({
+  ...prev,
+  value: target.value.length > prev.value.length ? target.value : prev.value,
+});
+
 /** 接着走的命令（原话用上一趟记下的，换成要的话自己改；提交号只写前 12 位，整串 40 位会被 scrubText 抹成「长串」）。 */
 const resumeCommand = (s) =>
   `node release-train.mjs start --sha ${s.target.value.slice(0, 12)} --founder-ok "${scrubText(String(s.founderOk ?? '<创始人原话>')).replace(/"/g, "'")}"`;
@@ -608,7 +617,12 @@ async function releaseBySha(io, state) {
     io,
     `发版：ssh 到法国，用目标提交 ${sha.slice(0, 12)} 自带的 release.sh（检出里那份不跑；创始人原话：「${state.founderOk}」）`,
   );
-  const r = await io.ssh(releaseBootCommand(sha), { timeoutMs: io.limits.releaseMs });
+  // 发版 ssh 最长 releaseMs：期间每 pollMs 由外壳回调刷一次心跳（外壳在等 ssh 时事件循环是空的，定时器能跑）
+  const r = await io.ssh(releaseBootCommand(sha), {
+    timeoutMs: io.limits.releaseMs,
+    tickMs: io.limits.pollMs,
+    onTick: () => saveState(io, state),
+  });
   state.target.sha = sha;
   if (didNotRun(r))
     return failed(
@@ -925,12 +939,12 @@ async function cmdStart(p, io) {
   const prev = read.state;
   // 停在第 0 步（预检没过）的什么都没动过，不算「没了结」：换目标直接重来
   if (prev && (prev.status === 'blocked' || prev.status === 'failed') && prev.phase > 0) {
-    if (prev.target.kind !== target.kind || prev.target.value !== target.value)
+    if (!sameTarget(prev.target, target))
       return refuse(
         io,
         `上一趟（目标 ${targetText(prev.target)}，停在第 ${prev.phase} 步）还没了结：同一个目标再跑 start 接着走，或者先 node release-train.mjs abort`,
       );
-    const state = { ...prev, founderOk, restore };
+    const state = { ...prev, target: mergedTarget(prev.target, target), founderOk, restore };
     sayTo(
       io,
       `接着上一趟走：从第 ${state.phase} 步「${PHASES[state.phase]}」起（${state.status === 'blocked' ? '上次卡住' : '上次没成'}）`,
@@ -944,12 +958,12 @@ async function cmdStart(p, io) {
         io,
         `有一趟正在走（第 ${prev.phase} 步「${PHASES[prev.phase]}」，${prev.startedAt} 起；驱动还活着：${v.why}）：看 node release-train.mjs status`,
       );
-    if (prev.target.kind !== target.kind || prev.target.value !== target.value)
+    if (!sameTarget(prev.target, target))
       return refuse(
         io,
         `上一趟（目标 ${targetText(prev.target)}）驱动没了，停在第 ${prev.phase} 步「${PHASES[prev.phase]}」（${v.why}）：同一个目标再跑 start 接着走，或者先 node release-train.mjs abort`,
       );
-    return resumeDead(io, { ...prev, founderOk, restore }, v);
+    return resumeDead(io, { ...prev, target: mergedTarget(prev.target, target), founderOk, restore }, v);
   }
   const state = {
     schema: 1,
@@ -1103,7 +1117,8 @@ async function cmdAbort(io) {
  * 入口。io = {
  *   home, env, now(), sleep(ms), cwd(), nodePath, scriptsDir, limits（可省，默认 DEFAULT_LIMITS）, out(text), err(text),
  *   run(command, args, {cwd, timeoutMs}) → {status, stdout, stderr, error}   gh、git、pnpm、node（worker.mjs、france.mjs）,
- *   ssh(remoteCommand, {timeoutMs}) → 同上   到法国跑一条命令（名字读不到、连不上都在返回里：error 或 status 255）,
+ *   ssh(remoteCommand, {timeoutMs, tickMs?, onTick?}) → 同上（可返回 Promise）   到法国跑一条命令（名字读不到、连不上都在返回里：error 或 status 255）；
+ *     给了 onTick 的（第 4 步发版）外壳在等 ssh 期间每 tickMs 调一次，用来刷驱动心跳,
  *   runningSessions() → Promise<{ok: true, running, rows} | {ok: false, kind, why}>   france-sessions-lib.mjs 的 fetchRunningSessions,
  *   pid?, host?, isAlive?(pid) → boolean   驱动自己的进程号、机器名、查某个 pid 在不在（都可省：省了就只靠心跳时刻判死活）,
  *   franceRepos() → Promise<{ok: true, rows: [{repo, auto_dispatch_since}]} | {ok: false, why}>   法国各仓的「让 AI 接活」开关,
