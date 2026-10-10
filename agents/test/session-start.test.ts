@@ -1847,6 +1847,55 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
     );
   });
 
+  it('上一轮跑了 95 分钟、开头那条引导丢了：下一轮开头（已过 60 分钟）照样报出来；已重发收到的、更早一轮的不报（#1721 引导「我确定了，可见」）', () => {
+    const home = temp('inbox');
+    const now = T('2026-10-10T06:37:30Z');
+    mirasim(home, 'm1', [
+      {
+        sessionId: 's0',
+        startedAt: T('2026-10-10T01:00:00Z'),
+        prompt: '更早一轮的提问',
+        steers: [{ text: '更早一轮丢的引导', at: T('2026-10-10T01:05:00Z') }],
+      },
+      {
+        sessionId: 's1',
+        startedAt: T('2026-10-10T05:03:00Z'),
+        prompt: '长任务开工',
+        steers: [
+          { text: '我确定了，可见', at: T('2026-10-10T05:04:07Z') },
+          {
+            text: '另一条引导，之后重发并收到了',
+            at: T('2026-10-10T05:10:00Z'),
+          },
+        ],
+      },
+      {
+        sessionId: 's1',
+        startedAt: T('2026-10-10T06:37:00Z'),
+        prompt: '你读到我的引导吗？',
+      },
+    ]);
+    const dir = join(home, '.fleet-dao', 'prompt-log');
+    mkdirSync(dir, { recursive: true });
+    const rows = [
+      { at: '2026-10-10T05:03:01Z', sessionId: 's1', prompt: '长任务开工' },
+      { at: '2026-10-10T06:37:01Z', sessionId: 's1', prompt: '你读到我的引导吗？' },
+      {
+        at: '2026-10-10T05:12:00Z',
+        sessionId: 's1',
+        prompt: '另一条引导，之后重发并收到了',
+      },
+    ];
+    writeFileSync(join(dir, '2026-10-10.jsonl'), rows.map((r) => `${JSON.stringify(r)}\n`).join(''));
+    const lines = recent({ home, now, sessionId: 's1' });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^创始人发了、但 Claude Code 没收到的话/);
+    expect(lines[0]).toContain('共 1 条');
+    expect(lines[0]).toContain('［13:04］我确定了，可见');
+    expect(lines[0]).not.toContain('更早一轮');
+    expect(lines[0]).not.toContain('之后重发');
+  });
+
   it('【故意造出的失败】Mirasim 的记录读不了、有行认不出：明说没读全，不当成「没丢」', () => {
     const home = temp('inbox');
     const dir = join(home, '.mirasim', 'sessions', 'claude', 'm1');
