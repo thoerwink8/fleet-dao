@@ -19,6 +19,7 @@ import {
   listOpenAlerts,
   listOpenTaskRows,
   mergedPrLedgers,
+  openAlertsByPrefix,
   openSessionTrees,
   prHeadsOfBranch,
   pullMergedAt,
@@ -41,6 +42,7 @@ import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
 import { alertRepoFromText } from '../jobs/alert-sweep.ts';
 import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
+import { CLOSED_ISSUE_ABANDON_BY } from '../jobs/closed-issue-tasks.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import {
@@ -214,11 +216,37 @@ export interface HourlyReconcileWiring {
 /** 发「放弃」信号最多等多久（毫秒）：到点由连接取消调用，不在本地空等。 */
 const ABANDON_SIGNAL_TIMEOUT_MS = 5_000;
 
-/** 「单已关就撤任务」的真口子：在跑的任务工作流问 Temporal 的可见性，单状态经「引擎」机器人现读，放弃走现成的 taskAbandonSignal。 */
+/**
+ * 撤掉这个任务工作流还开着的挂起提醒（task:…:park:N）：标已处理，同一事务写操作记录（reason = why）。
+ * 对账「单已关且停下等人」那一支用（#1816）；by 默认 engine:hourly-reconcile。
+ */
+export async function resolveClosedIssueParkAlerts(
+  db: Db,
+  workflowId: string,
+  why: string,
+  opts: { by?: string; at?: Date } = {},
+): Promise<number> {
+  const by = opts.by ?? CLOSED_ISSUE_ABANDON_BY;
+  const at = opts.at ?? new Date();
+  let n = 0;
+  for (const row of await openAlertsByPrefix(db, `${workflowId}:park:`)) {
+    const done = await resolveAlertWithReason(db, {
+      dedupeKey: row.dedupeKey,
+      by,
+      why,
+      at,
+    });
+    if (done === 'ok') n += 1;
+  }
+  return n;
+}
+
+/** 「单已关且停下等人就撤任务」的真口子（#1816）：在跑的问 Temporal，停没停着问 taskStatus，单状态现读，放弃走 taskAbandonSignal，挂起提醒当场撤。 */
 function temporalClosedIssueTasks(
   client: Pick<Client, 'workflow' | 'connection'>,
   gh: Pick<GitHub, 'readIssueState'> & Partial<Pick<GitHub, 'readGroomFacts'>>,
   db: Db,
+  now: () => Date,
 ): HourlyReconcileJobDeps['closedIssueTasks'] {
   const { readGroomFacts } = gh;
   return {
@@ -231,6 +259,11 @@ function temporalClosedIssueTasks(
       }
       return ids;
     },
+    async isParked(workflowId) {
+      const handle = client.workflow.getHandle(workflowId);
+      return taskViewOf(await handle.query(taskStatusQuery), workflowId).parked;
+    },
+    resolveParkAlerts: (workflowId, why) => resolveClosedIssueParkAlerts(db, workflowId, why, { at: now() }),
     openTaskRows: () => listOpenTaskRows(db),
     stopRows: (taskIds, reason) => stopTaskRows(db, taskIds, reason),
     async issueState(repo, issueNumber) {
@@ -432,7 +465,7 @@ export function hourlyReconcileJob(
         return { decision: a.decision, decidedBy: a.decidedBy, waitingWorkflowId };
       },
       workflows: w.workflows ?? temporalWorkflows(client),
-      closedIssueTasks: w.closedIssueTasks ?? temporalClosedIssueTasks(client, w.gh, w.db),
+      closedIssueTasks: w.closedIssueTasks ?? temporalClosedIssueTasks(client, w.gh, w.db, now),
       stageRoutable,
       stageAllOpen,
       handling,
