@@ -88,12 +88,17 @@ render_firewall() {
     red "查不到 fleet 或 ${SESSION_USERS[0]} 的 uid：nft 表写不出来"
     return 1
   fi
+  if [[ -z "${WG_HK_ADDR-}" ]]; then
+    red "WG_HK_ADDR 空着：nft 表第三道（会话用户不许连香港 22）写不出目的地址"
+    return 1
+  fi
   ports=$(printf '%s, ' "${PROTECTED_PORTS[@]}")
-  render "$DEPLOY_DIR/france/fleet-dao.nft" PORTS="${ports%, }" FLEET_UID="$fleet_uid" SESSION_UID="$session_uid"
+  render "$DEPLOY_DIR/france/fleet-dao.nft" PORTS="${ports%, }" FLEET_UID="$fleet_uid" SESSION_UID="$session_uid" \
+    HK_ADDR="$WG_HK_ADDR"
 }
 
 setup_firewall() {
-  step "防火墙（隧道上放行香港访问驾驶舱后端；本机上 Temporal、库、后端只许 root 和 fleet 连；会话用户在本机开的口只许它自己连）"
+  step "防火墙（隧道上放行香港访问驾驶舱后端；本机上 Temporal、库、后端只许 root 和 fleet 连；会话用户在本机开的口只许它自己连；会话用户不许直连香港 22）"
   # 驾驶舱后端的端口只对隧道那头的香港开：规则挂在隧道网卡上，公网照旧一个入站端口都不开
   local rule="allow in on $WG_IF from $WG_HK_ADDR to ${WG_ADDR%/*} port $API_PORT proto tcp" tmp err file_changed unit_changed
   if command -v ufw >/dev/null && [[ "$(ufw status 2>/dev/null | head -1)" == "Status: active" ]]; then

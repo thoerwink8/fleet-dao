@@ -1,5 +1,5 @@
 #!/usr/sbin/nft -f
-# fleet-dao 在法国本机上的两道隔离，都按套接字的属主（skuid）拦。deploy/france.sh 把 @@…@@ 换好后装到
+# fleet-dao 在法国本机上的三道隔离，都按套接字的属主（skuid）拦。deploy/france.sh 把 @@…@@ 换好后装到
 # /etc/fleet-dao/nftables.nft，由 fleet-firewall.service 载入（先 nft -c 验过）；读回核对内核里的表就是这份文件。
 # 自己一张表、自己一个单元：不启用 nftables.service——它的默认配置开头是 flush ruleset，会把 ufw 的规则一起冲掉。
 # 前两行让整张表先删后建、在一个事务里换掉，重载时不会有空窗。
@@ -19,6 +19,10 @@
 #     root 不拦（root 本来什么都拿得到）；fleet 本来就能经 sudo 以会话用户起命令（引擎起会话就这么起），挡它直连只是少
 #     一条路。只写得下一个会话用户：要是再加一个，它借另一个的口这里挡不住（标记只记「是不是 root 或会话用户发起的」）。
 #     连接跟踪标记只动这两位（按位或进去、按位与出来），别的程序用别的位互不干扰。
+#
+# 三、会话用户不许直连香港隧道地址的 22（#1785）。引擎任务 / 指挥官会话以会话用户跑时，曾轮着用户名试登香港 sshd，
+#     触发香港 fail2ban 把法国隧道地址封掉、发版车卡死。root 和 fleet 照旧能连（发版、备份钥匙是它们的事）；只拦会话用户。
+#     @@HK_ADDR@@ 是法国 france.sh 的 WG_HK_ADDR（10.99.0.1）。
 table inet fleet_dao
 delete table inet fleet_dao
 table inet fleet_dao {
@@ -29,5 +33,6 @@ table inet fleet_dao {
 		oifname "lo" ct direction reply ct mark & 0x10000000 == 0x10000000 meta skuid @@SESSION_UID@@ reject with tcp reset
 		oifname "lo" ct direction reply ct mark & 0x10000000 == 0x10000000 meta skuid != @@SESSION_UID@@ ct mark set ct mark | 0x20000000
 		oifname "lo" ct direction original tcp dport >= 32768 tcp flags & (syn | rst) == 0 ct mark & 0x30000000 == 0x10000000 reject with tcp reset
+		ip daddr @@HK_ADDR@@ tcp dport 22 meta skuid @@SESSION_UID@@ reject with tcp reset
 	}
 }

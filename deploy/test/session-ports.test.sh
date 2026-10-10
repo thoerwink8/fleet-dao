@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
 # shellcheck disable=SC2016,SC2317,SC2329 # 单引号里是给 node 的代码；替身函数由被测代码间接调用，shellcheck 看不出来（CI 上的旧版报的是 2317）
-# 会话用户在本机开的口只许它自己和 root 连（#35）：拿真模板 deploy/france/fleet-dao.nft 在一次性的网络命名空间里载入，
-# 以三个临时用户（扮会话用户、fleet、pilot）真连一遍、内核真判，再拿 deploy/lib/session-ports.sh 的读回判一遍：
+# 会话用户在本机开的口只许它自己和 root 连（#35）；会话用户不许直连香港 22（#1785）：拿真模板
+# deploy/france/fleet-dao.nft 在一次性的网络命名空间里载入，以三个临时用户（扮会话用户、fleet、pilot）真连一遍、
+# 内核真判，再拿 deploy/lib/session-ports.sh 的读回判一遍：
 #   1. 规则在：别人连不上会话用户的口（127.0.0.1、::1 都试），会话用户和 root 连得上，别人之间照常通，Temporal 这类
 #      固定端口照旧只许 root 和 fleet；被挡的连接一个都没到会话用户那头
 #   2. 强制 syncookie（SYN 洪水下内核就这么做）：别人照样连不上、一个连接都到不了会话用户那头；同一场景拿掉第 4 条规则，
@@ -12,6 +13,7 @@
 #      文件载不进去、表不在记没查成
 #   4. 规则载上之前就连着的连接（#343 审查第 1 轮）：规则管不到、照样通；读回判红写清是谁；装的时候断掉，断不掉、
 #      ss 跑不成判红；断完读回全绿
+#   5. 第三道：会话用户连不上扮香港的地址:22，fleet 和 root 连得上；会话用户连同一地址的别的口照常通
 # 不碰宿主的防火墙和连接：全在 unshare --net 起的命名空间里（回环是新的，宿主的 nft 表、连接跟踪都看不到）。
 # 要 root（建临时用户、载 nft、换身份）。用法：sudo bash deploy/test/session-ports.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 # 在已有账号上验（不建临时用户，比如在法国真机上拿真的三个账号验规则）：
@@ -25,6 +27,8 @@ source "$DEPLOY/lib/common.sh"
 source "$DEPLOY/lib/session-ports.sh"
 
 FIXED_PORT=7243 # 扮 Temporal 前端：规则第一道只许 root 和 fleet 连的固定端口
+HK_ADDR=10.99.0.1 # 扮香港隧道地址（france.sh 的 WG_HK_ADDR）；第三道只拦会话用户连它的 22
+HK_SSH_PORT=22
 
 fail=0
 check() { # 说明 实际 期望
@@ -128,8 +132,10 @@ inner() { # 会话用户 扮fleet 扮pilot node
     skip "查不到 $S、$F、$P 的 uid"
   fi
   ip link set lo up || skip "起不了新命名空间里的回环"
+  ip addr add "$HK_ADDR/32" dev lo || skip "回环上加不上扮香港的 $HK_ADDR"
   sysctl -qw net.ipv4.tcp_syncookies=1 || skip "改不了新命名空间里的 net.ipv4.tcp_syncookies"
-  render "$DEPLOY/france/fleet-dao.nft" PORTS="$FIXED_PORT" FLEET_UID="$f_uid" SESSION_UID="$s_uid" >/dev/null || skip "模板渲染不了"
+  render "$DEPLOY/france/fleet-dao.nft" PORTS="$FIXED_PORT" FLEET_UID="$f_uid" SESSION_UID="$s_uid" \
+    HK_ADDR="$HK_ADDR" >/dev/null || skip "模板渲染不了"
   NFT_FILE=$T/nftables.nft
   printf '%s\n' "$RENDERED" >"$NFT_FILE"
   load() { nft -f "$NFT_FILE"; }
@@ -315,6 +321,25 @@ inner() { # 会话用户 扮fleet 扮pilot node
   nft_table_same_as_file inet fleet_dao "$NFT_FILE"
   check "内核里没这张表：没查成（返回 2）" "$?" 2
   has "内核里没这张表：写清原因" "$NFT_SAME_WHY" "列不出内核里的表"
+  load
+
+  echo "== 5. 第三道：会话用户不许直连香港 $HK_ADDR:$HK_SSH_PORT（#1785）"
+  # 以 root 在扮香港的地址上听 22 和另一个口：会话用户连 22 被挡，连别的口通；fleet/root 连 22 通
+  session_ports_listen root "$HK_ADDR" "$HK_SSH_PORT" || skip "起不了扮香港 $HK_ADDR:$HK_SSH_PORT 的监听：$(cat "$PROBE_LOG")"
+  check "会话用户连不上香港 22" "$(greet "$S" "$HK_ADDR" "$HK_SSH_PORT")" no
+  check "扮 fleet 的连得上香港 22（备份/发版不是会话用户）" "$(greet "$F" "$HK_ADDR" "$HK_SSH_PORT")" yes
+  check "root 连得上香港 22" "$(greet root "$HK_ADDR" "$HK_SSH_PORT")" yes
+  check "被挡的会话连接没到香港 22 那头（只接了 fleet、root）" "$(accepts_settle 2)" 2
+  session_ports_stop
+  session_ports_listen root "$HK_ADDR" || skip "起不了扮香港临时口的监听"
+  check "第三道只拦 22：会话用户连香港别的口照常通" "$(greet "$S" "$HK_ADDR" "$PROBE_PORT")" yes
+  session_ports_stop
+  grep -v 'ip daddr' "$NFT_FILE" >"$T/no-hk22.nft"
+  nft -f "$T/no-hk22.nft"
+  session_ports_listen root "$HK_ADDR" "$HK_SSH_PORT" || skip "起不了扮香港 22 的监听"
+  check "对照：拿掉第三道，会话用户连得上香港 22" "$(greet "$S" "$HK_ADDR" "$HK_SSH_PORT")" yes
+  session_ports_stop
+  load
 
   if ((fail)); then
     echo "session-ports：不通过"

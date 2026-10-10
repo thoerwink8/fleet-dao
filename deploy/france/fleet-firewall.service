@@ -1,7 +1,7 @@
-# fleet-dao 的 nft 表（/etc/fleet-dao/nftables.nft）：Temporal、库、驾驶舱后端的端口在本机只许 root 和 fleet 连；会话用户在本机开的口只许它自己和 root 连（#35）。
+# fleet-dao 的 nft 表（/etc/fleet-dao/nftables.nft）：Temporal、库、驾驶舱后端的端口在本机只许 root 和 fleet 连；会话用户在本机开的口只许它自己和 root 连（#35）；会话用户不许直连香港 22（#1785）。
 # deploy/france.sh 装到 /etc/systemd/system/；改这份、再跑一遍装机脚本，别在机器上手改。停掉它就是撤掉这张表。
 [Unit]
-Description=fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连
+Description=fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连，会话用户不许直连香港 22
 Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
 DefaultDependencies=no
 Wants=network-pre.target
