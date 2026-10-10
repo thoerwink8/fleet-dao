@@ -929,10 +929,10 @@ function NowPanel({ running, onPick }: { running: readonly HomeRunning[]; onPick
     );
   const working = rows.filter((r) => !r.queued).length;
   const queued = rows.length - working;
+  // 32rem：四列（含「在做什么」min 12rem）并排后仍读得下；max-w-full 保证窄画布不溢出
   return (
     <div
       data-board-now
-      // 32rem：四列（含「在做什么」min 12rem）并排后仍读得下；max-w-full 保证窄画布不溢出
       className="pointer-events-auto absolute bottom-3 left-3 z-10 w-[32rem] max-w-full overflow-hidden rounded-xl border bg-popover/92 shadow-lg backdrop-blur"
     >
       <button
