@@ -334,7 +334,18 @@ export interface BoardStore {
   }): Promise<PullRequestRecord[]>;
 }
 
+/**
+ * 账号池占着的名额，一次读出来（#1747，各页「在跑的会话」「池占用」唯一来源）：每个池在跑的（已开工）、已选定还没开跑的分开数，
+ * 加上在跑的会话按段（用途）分的数。在跑数合计 = 各池 inFlight 之和。
+ */
+export interface PoolOccupancyRead {
+  pools: { poolId: string; inFlight: number; reserved: number }[];
+  inFlightByStage: Record<string, number>;
+}
+
 export interface RoutingStore {
+  /** 池占用，见 PoolOccupancyRead。读不到抛，不当 0。 */
+  poolOccupancy(): Promise<PoolOccupancyRead>;
   listChannels(): Promise<Channel[]>;
   /** 渠道近态（#1118）：只有运行中失败出过事的渠道有行；读不到抛错，不给空的顶。 */
   listChannelStates(): Promise<ChannelStateRecord[]>;

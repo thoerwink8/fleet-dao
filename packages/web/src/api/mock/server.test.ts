@@ -316,3 +316,33 @@ describe('假后端：实时推送', () => {
     await expect(api.jobs()).resolves.toBeTruthy();
   });
 });
+
+describe('假后端：在跑数、池占用各页同源（#1747）', () => {
+  test('同一份假数据：主页、法国页、额度页、路由页读到的在跑数和已选定数相同', async () => {
+    const api = fresh();
+    const [home, env, pools, layers] = await Promise.all([
+      api.home(),
+      api.env(),
+      api.pools(),
+      api.routingLayers(),
+    ]);
+    const running = pools.pools.reduce((n, p) => n + p.running, 0);
+    const reserved = pools.pools.reduce((n, p) => n + p.reserved, 0);
+    expect(running).toBeGreaterThan(0);
+    expect(home.slots).toEqual({ running, reserved });
+    expect(env.facts.sessions.ok && env.facts.sessions.value.total).toBe(running);
+    expect(env.facts.pools.ok && env.facts.pools.value.running).toBe(running);
+    expect(env.facts.pools.ok && env.facts.pools.value.reserved).toBe(reserved);
+    // 路由页：每条路由的在跑、已选定数和它所在池在额度页的数一样
+    const byPool = new Map(pools.pools.map((p) => [p.id, p]));
+    const routes = layers.purposes.flatMap((p) => p.models.flatMap((m) => m.routes));
+    expect(routes.length).toBeGreaterThan(0);
+    for (const r of routes) {
+      expect([r.poolId, r.inFlight, r.reserved]).toEqual([
+        r.poolId,
+        byPool.get(r.poolId)?.running,
+        byPool.get(r.poolId)?.reserved,
+      ]);
+    }
+  });
+});

@@ -23,6 +23,7 @@ import {
 } from '../lib/catalog';
 import { formatAgo, formatDate, formatIn, formatInDays, formatPercent } from '../lib/format';
 import { useNow } from '../lib/hooks';
+import { routeSlots } from '../lib/routing';
 import { cn } from '../lib/utils';
 
 export function meta() {
@@ -267,8 +268,13 @@ function Matrix({ pools, kinds, now }: { pools: PoolView[]; kinds: QuotaWindowKi
                           )}
                         </div>
                         <div className="mt-0.5 text-caption text-muted-foreground">
-                          在跑 <span className="num">{p.running}</span>/
-                          <span className="num">{p.maxConcurrency}</span>
+                          {
+                            routeSlots({
+                              inFlight: p.running,
+                              reserved: p.reserved,
+                              maxConcurrency: p.maxConcurrency,
+                            }).text
+                          }
                         </div>
                       </th>
                       {kinds.map((k) => {

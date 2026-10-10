@@ -11,6 +11,7 @@ import type {
   HomeDoneSchema,
   HomeFlowStageSchema,
   HomeHealthSchema,
+  HomeResponseSchema,
   HomeRunningSchema,
   NotWired,
 } from '@fleet-dao/shared';
@@ -18,6 +19,9 @@ import type { z } from 'zod';
 
 /** 「要你拍的」一条：谁发起的、等什么、去哪答。 */
 export type HomeDecision = z.infer<typeof HomeDecisionSchema>;
+
+/** 此刻在跑几个会话、已选定还没开跑几个（后端池占用，各页同一个来源）。 */
+export type HomeSlots = NonNullable<z.infer<typeof HomeResponseSchema>['slots']>;
 
 /** 「在跑的」一张单。 */
 export type HomeRunning = z.infer<typeof HomeRunningSchema>;
@@ -39,6 +43,8 @@ export interface HomeData {
   health: HomeHealth;
   /** 对题 → 动手 → 验收三格（固定三项、按这个先后）。 */
   flow: HomeFlowStage[];
+  /** 此刻在跑的会话数、已选定还没开跑数；老后端没有。 */
+  slots?: HomeSlots | undefined;
 }
 
 /**
