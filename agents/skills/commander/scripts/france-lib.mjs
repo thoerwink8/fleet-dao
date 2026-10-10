@@ -1488,7 +1488,12 @@ export function buildView(snapshot) {
   };
   let tasks;
   // 全流程巡检最近一轮断了（#1773）：healthz 公网不带 why，这里把阶段和原因原文挂上
-  if (S.canary.ok && !('empty' in S.canary && S.canary.empty === true) && 'verdict' in S.canary && S.canary.verdict === 'broken') {
+  if (
+    S.canary.ok &&
+    !('empty' in S.canary && S.canary.empty === true) &&
+    'verdict' in S.canary &&
+    S.canary.verdict === 'broken'
+  ) {
     const stage = typeof S.canary.stage === 'string' ? S.canary.stage : '?';
     const why = typeof S.canary.why === 'string' && S.canary.why ? S.canary.why : '（没写原因）';
     bad(`全流程巡检断在「${stage}」：${why}`, '库 canary_runs / 健康检查 canary', undefined, 'canary:broken');

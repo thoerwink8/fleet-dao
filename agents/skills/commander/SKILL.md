@@ -14,7 +14,6 @@ description: 当指挥官（旧称帅位）时读：和创始人讨论需求、�
 脚本在本技能 `scripts/` 下，下面写成 `$S`（Claude Code 是 `~/.claude/skills/commander/scripts`，别家是 `~/.agents/skills/commander/scripts`）：
 
 - `node $S/france.mjs [--json]`：经 ssh 只读看法国引擎（在跑的单、版本、异常）。要这台配好登法国的 ssh，别名写进 `~/.fleet-dao/france-ssh`。页面版：`node $S/server.mjs` 起本机页面，看 `/france`。
-- `node $S/ensure-france-ssh.mjs [--check]`：装 `Host fleet-fr-wg`（经 myserver→WG，要 `~/.ssh/fleet_login`）和可选的 `Host fleet-fr-carpool`（`FLEET_FRANCE_HOST` 直连会话用户，local-exec 离线时的恢复路，#1773）；并写 `~/.fleet-dao/france-ssh`。
 - `node $S/worker.mjs start|status|stop|clean|watch`：本机起脱离会话的工人（Claude、Grok、Codex，各用各的工作树）。它不挂在会话上、会话重开照跑，所以**不显示在 Mirasim 面板里**，只在创始人明说要脱离时用（决定 0030，见「派活」）；`start` 必须带 `--detached "<为什么必须脱离>"`，缺了拒起。不带参数看用法。
 - `node $S/release-train.mjs start|status|abort`：发版火车，见「发版」。
 - `node $S/patrol.mjs [--selftest]`：无人值守时盯法国的只读巡查，最后一行是 `VERDICT: OK|ALERT <n>|BROKEN`，见「无人值守」。
