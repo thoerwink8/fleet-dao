@@ -1,0 +1,12 @@
+# 外部看门狗（#292）。真域名、飞书 webhook、FLEET_EDGE_WATCH_ID 用 wrangler secret 放，不写在这里。
+name = "fleet-edge-watch"
+main = "src/worker.ts"
+compatibility_date = "2026-10-10"
+workers_dev = false
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[kv_namespaces]]
+binding = "EDGE_STATE"
+id = "<kv-namespace-id>"
