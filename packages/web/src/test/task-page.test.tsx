@@ -195,8 +195,11 @@ describe('【失败】读不到的都写明，不写 0', () => {
     ]);
     expect(within(manual).queryByText('0 / 0')).toBeNull();
     expect(within(manual).queryByText('0')).toBeNull();
-    // 合计四格里的当量、花费写「没读到」
-    expect(screen.getAllByText('没读到').length).toBeGreaterThanOrEqual(2);
+    // 合计顶格没读到的收成一行灰字，不再各占大格（#1751）
+    const unread = document.querySelector('[data-stats-unread]');
+    expect(unread?.textContent).toMatch(/输入当量没读到/);
+    expect(unread?.textContent).toMatch(/花费/);
+    expect(document.querySelector('[data-segment-stats] .text-stat')?.textContent).not.toBe('没读到');
   });
 
   test('动手段没记派工档：写「没记」，不猜成哪一档；没跑过的段写明没有记录', async () => {
@@ -248,6 +251,22 @@ describe('【失败】读不到的都写明，不写 0', () => {
   });
 });
 
+describe('在跑任务详情首屏（#1751）', () => {
+  test('在跑任务详情首屏先出现状态和 PR 号', async () => {
+    const { endedAt: _e, outcome: _o, ...live } = base;
+    open('/tasks/t-x', apiWith(detailWith([{ ...live, id: 'x-run', prNumber: 1730, costUsd: undefined }])));
+    await waitFor(() => expect(document.querySelector('[data-now-banner]')).not.toBeNull());
+    const nowBanner = document.querySelector('[data-now-banner]') as HTMLElement;
+    expect(nowBanner.textContent).toContain('在干活');
+    expect(nowBanner.textContent).toMatch(/已跑/);
+    expect(nowBanner.textContent).toContain('PR #1730');
+    const stats = document.querySelector('[data-segment-stats]');
+    expect(stats).toBeTruthy();
+    // 首屏：当前状态条在花费/当量合计之前
+    expect(nowBanner.compareDocumentPosition(stats as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
 describe('任务页上的暂停、继续、叫停（#820 片 3，#856 第 1 处）', () => {
   const actionBox = async () => {
     await screen.findByRole('heading', { level: 1 });
@@ -270,7 +289,8 @@ describe('任务页上的暂停、继续、叫停（#820 片 3，#856 第 1 处�
     fireEvent.click(within((await actionBox()) as HTMLElement).getByRole('button', { name: '暂停' }));
     fireEvent.click(await screen.findByRole('button', { name: '做完这一段再停' }));
     await waitFor(() => expect(document.querySelector('[data-paused-note]')).not.toBeNull());
-    expect(screen.getByText('已暂停')).toBeTruthy();
+    // 标题说明和首屏状态条各有一枚「已暂停」芯片（#1751）
+    expect(screen.getAllByText('已暂停').length).toBeGreaterThanOrEqual(1);
     expect(document.querySelector('[data-paused-note]')?.textContent).toContain('已暂停：被人暂停');
     const box = (await actionBox()) as HTMLElement;
     expect([...box.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['继续', '叫停']);

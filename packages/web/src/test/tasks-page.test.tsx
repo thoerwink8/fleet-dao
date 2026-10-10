@@ -214,7 +214,7 @@ describe('任务列表页', () => {
     expect(screen.getByText('任务 2')).toBeTruthy();
   });
 
-  test('一行里写清：状态、段、模型、花费（读不到写没读到、部分没读到标偏低）、PR 号；暂停的单写已暂停', async () => {
+  test('一行里写清：状态、段、模型、花费（读不到留空、部分没读到标偏低）、PR 号；暂停的单写已暂停', async () => {
     const api = createMockApi({ live: false });
     api.tasks = async () => ({
       items: [
@@ -233,12 +233,47 @@ describe('任务列表页', () => {
     expect(ok.getByText('Opus 5.5')).toBeTruthy();
     expect(ok.getByText('动手')).toBeTruthy();
     const none = within(await find('没花费数据'));
-    expect(none.getByText('没读到')).toBeTruthy();
+    expect(none.queryByText('没读到')).toBeNull();
     expect(none.getByText('没记模型')).toBeTruthy();
     expect(none.queryByText('$0.00')).toBeNull();
     expect(within(await find('花费偏低')).getByText('偏低')).toBeTruthy();
     const paused = within(await find('被暂停的'));
     expect(paused.getByText('已暂停')).toBeTruthy();
     expect(paused.getByText('验收')).toBeTruthy();
+  });
+
+  test('花费读不到的行不出现没读到、有表头', async () => {
+    const api = createMockApi({ live: false });
+    api.tasks = async () => ({
+      items: [
+        row(1, { title: '在跑有花费', cost: { usd: 0.8 } }),
+        row(2, {
+          title: '花费读不到',
+          cost: { usd: null, note: '3 笔会话都没报花费' },
+          state: 'stopped',
+          group: 'stopped',
+          segment: null,
+        }),
+        row(3, {
+          title: '已结束没花费',
+          cost: { usd: null, note: '没有会话' },
+          state: 'done',
+          group: 'done',
+          segment: null,
+        }),
+      ],
+      counts: counts({ all: 3, running: 1, stopped: 1, done: 1 }),
+    });
+    open('/tasks', api);
+    await screen.findByText('在跑有花费');
+    const header = document.querySelector('[data-list-header]');
+    expect(header?.textContent).toContain('单');
+    expect(header?.textContent).toContain('状态');
+    expect(header?.textContent).toContain('花费');
+    expect(screen.queryByText('没读到')).toBeNull();
+    const empty = (await screen.findByText('花费读不到')).closest('a');
+    expect(empty?.querySelector('[data-cost-empty]')?.getAttribute('title')).toBe('3 笔会话都没报花费');
+    const done = (await screen.findByText('已结束没花费')).closest('a');
+    expect(done?.querySelector('[data-cost-empty]')?.getAttribute('title')).toBe('没有会话');
   });
 });
