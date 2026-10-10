@@ -447,9 +447,16 @@ describe('checkUsersBlock', () => {
 // 目录表（#140 第 5 片）：三个脚本里的 ensure_dir；假仓里夹进按用户变化的行和待展开的变量。
 const FRANCE_D = [
   '#!/usr/bin/env bash',
+  'PG_MAJOR=16 # 注释',
+  'PG_UNIT=postgresql@$PG_MAJOR-main.service',
   'TEMPORAL_HOME=/opt/fleet-dao/temporal',
+  'RELEASES_DIR=/srv/fleet-dao-releases',
+  'AUTO_DIR=$RELEASES_DIR/.auto',
   'ensure_dir /etc/wireguard root:root 700',
+  'ensure_dir "/etc/systemd/system/$PG_UNIT.d" root:root 755',
   'ensure_dir "$TEMPORAL_HOME" root:root 755',
+  'ensure_dir "$TEMPORAL_HOME/bin" root:root 755',
+  'ensure_dir "$AUTO_DIR" root:root 755',
 ].join('\n');
 const HK_D = [
   '#!/usr/bin/env bash',
@@ -459,7 +466,9 @@ const HK_D = [
 const HUMAN_D = [
   '#!/usr/bin/env bash',
   'RELEASES_DIR=/srv/fleet-dao-releases',
+  'TRAIN_DIR=$RELEASES_DIR/.train',
   'ensure_dir "$RELEASES_DIR" root:root 755',
+  'ensure_dir "$TRAIN_DIR" root:root 755',
   'ensure_dir /var/lib/fleet-dao fleet:fleet 750',
   '  ensure_dir "/home/$u" "$u:$u" 750',
 ].join('\n');
@@ -493,10 +502,14 @@ const DIRS_BLOCK = [
   '| 路径 | 属主:组 | 权限 | 来源脚本 |',
   '|---|---|---|---|',
   '| /etc/fleet-dao | root:fleet | 750 | deploy/hk.sh |',
+  '| /etc/systemd/system/postgresql@16-main.service.d | root:root | 755 | deploy/france.sh |',
   '| /etc/wireguard | root:root | 700 | deploy/france.sh |',
   '| /home/fleet | fleet:fleet | 750 | deploy/hk.sh |',
   '| /opt/fleet-dao/temporal | root:root | 755 | deploy/france.sh |',
+  '| /opt/fleet-dao/temporal/bin | root:root | 755 | deploy/france.sh |',
   '| /srv/fleet-dao-releases | root:root | 755 | deploy/lib/human-tier.sh |',
+  '| /srv/fleet-dao-releases/.auto | root:root | 755 | deploy/france.sh |',
+  '| /srv/fleet-dao-releases/.train | root:root | 755 | deploy/lib/human-tier.sh |',
   '| /var/lib/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |',
   '',
   '<!-- fleet:dirs:end -->',
@@ -520,6 +533,26 @@ describe('renderDirsBlock', () => {
     expect(paths).not.toContain('$RELEASES_DIR');
     expect(renderDirsBlock(dirsRepoWithoutDoc())).toContain(
       '| /srv/fleet-dao-releases | root:root | 755 | deploy/lib/human-tier.sh |',
+    );
+  });
+
+  it('"$TEMPORAL_HOME/bin" 展开变量后再拼后缀', () => {
+    expect(renderDirsBlock(dirsRepoWithoutDoc())).toContain(
+      '| /opt/fleet-dao/temporal/bin | root:root | 755 | deploy/france.sh |',
+    );
+  });
+
+  it('AUTO_DIR=$RELEASES_DIR/.auto、TRAIN_DIR=$RELEASES_DIR/.train 链式展开成字面路径', () => {
+    const block = renderDirsBlock(dirsRepoWithoutDoc());
+    expect(block).toContain('| /srv/fleet-dao-releases/.auto | root:root | 755 | deploy/france.sh |');
+    expect(block).toContain(
+      '| /srv/fleet-dao-releases/.train | root:root | 755 | deploy/lib/human-tier.sh |',
+    );
+  });
+
+  it('路径里的 $PG_UNIT 经 PG_MAJOR 字面赋值展开成字面路径', () => {
+    expect(renderDirsBlock(dirsRepoWithoutDoc())).toContain(
+      '| /etc/systemd/system/postgresql@16-main.service.d | root:root | 755 | deploy/france.sh |',
     );
   });
 

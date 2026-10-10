@@ -413,7 +413,8 @@ export function checkUsersBlock(repo: RepoView, docPath: string): OpsTableProble
 }
 
 // 目录表（#140 第 5 片）：从三个部署脚本读 ensure_dir，放进 dirs 区块。
-// 路径写成 $NAME 或 "$NAME" 的，用同一批脚本或 deploy/lib/ 下 NAME=/字面路径 的赋值展开；
+// 路径写成 $NAME、"$NAME"、"$NAME/后缀" 或夹着大写常量的，用同一批脚本或 deploy/lib/
+// 下能收成字面值的赋值展开（含 NAME=/字面、NAME=$OTHER/.suffix、PG_UNIT=…$PG_MAJOR…）；
 // 路径里带按用户变化的小写变量（如 /home/$u）的行不进表；展开不了的其他变量抛带脚本名和行号的错。
 // 读不到脚本、或哪个脚本里一个目录都没有，抛错。本片不进文档、不接命令行、不接 CI。
 
@@ -423,12 +424,15 @@ const DIR_SCRIPTS = ['deploy/france.sh', 'deploy/hk.sh', 'deploy/lib/human-tier.
 /** 允许行首缩进。三参：路径、属主:组、权限（三位或四位八进制）。 */
 const ENSURE_DIR_LINE = /^[ \t]*ensure_dir[ \t]+(.+)$/;
 
-/** 字面路径赋值：NAME=/…，值里不能有 $（带变量的不算字面）。行尾注释可有。 */
-const PATH_ASSIGN_LINE = /^[ \t]*([A-Z_][A-Z0-9_]*)=(\/[^ \t#$]*)(?:[ \t]*(?:#.*)?)?$/;
+/** 大写常量赋值：NAME=值。值可带 $ 待多轮展开；行尾「空白+#」当注释剥掉。不收数组、命令替换。 */
+const ASSIGN_LINE = /^[ \t]*([A-Z_][A-Z0-9_]*)=([^#\n]*?)(?:[ \t]+#.*)?$/;
 
 /** 表里一行：| 路径 | 属主:组 | 权限 | 来源脚本 |。从文档区块里回读数据行用。 */
 const DIR_ROW =
   /^\| (\S+) \| ([A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+) \| ([0-7]{3,4}) \| (deploy\/[A-Za-z0-9_./-]+\.sh) \|$/;
+
+/** 替换路径/赋值里的大写 `$NAME` / `${NAME}`（已解析表里有的才换）。 */
+const UPPER_VAR = /\$\{([A-Z_][A-Z0-9_]*)\}|\$([A-Z_][A-Z0-9_]*)/g;
 
 const DIRS_NAME = 'dirs';
 /** 目录区块名字的对外写法（和端口、用户同一路，不各写各的字符串）。 */
@@ -489,23 +493,48 @@ function parseEnsureDirArgs(rest: string): { pathTok: string; owner: string; mod
   return { pathTok: path.tok, owner: unquoteToken(owner.tok), mode: mode.tok };
 }
 
-/** 收字面路径赋值：三个目录脚本 + deploy/lib/ 下其它 .sh（同一脚本里的、或 lib 里的 NAME=/字面路径）。 */
+/** 用已解析的大写常量表替换文本里的 `$NAME` / `${NAME}`；缺的不动，留给调用方判。 */
+function substituteUpperVars(text: string, resolved: Map<string, string>): string {
+  return text.replace(UPPER_VAR, (whole, braced: string | undefined, bare: string | undefined) => {
+    const name = braced ?? bare ?? '';
+    return resolved.has(name) ? (resolved.get(name) ?? '') : whole;
+  });
+}
+
+/** 收三个目录脚本 + deploy/lib/ 下其它 .sh 的大写赋值，多轮展开到不含 $ 的字面值。
+ *  收得进 `/字面`、`$OTHER/.suffix`、`postgresql@$PG_MAJOR-…`；数组、命令替换、展开不完的丢掉。 */
 function readPathAssignments(repo: RepoView): Map<string, string> {
   const files = new Set<string>(DIR_SCRIPTS);
   for (const name of repo.list('deploy/lib') ?? []) {
     if (name.endsWith('.sh')) files.add(`deploy/lib/${name}`);
   }
-  const assigns = new Map<string, string>();
+  const raw = new Map<string, string>();
   for (const file of files) {
     const text = repo.read(file);
     if (text === undefined) continue;
     for (const line of text.split('\n')) {
-      const m = PATH_ASSIGN_LINE.exec(line);
+      const m = ASSIGN_LINE.exec(line);
       if (!m) continue;
-      assigns.set(m[1] ?? '', m[2] ?? '');
+      const name = m[1] ?? '';
+      let val = (m[2] ?? '').trimEnd();
+      if (val === '' || val.includes('$(') || val.includes('`') || val.startsWith('(')) continue;
+      val = unquoteToken(val);
+      raw.set(name, val);
     }
   }
-  return assigns;
+  const resolved = new Map<string, string>();
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const [name, val] of raw) {
+      if (resolved.has(name)) continue;
+      const expanded = substituteUpperVars(val, resolved);
+      if (expanded.includes('$')) continue;
+      resolved.set(name, expanded);
+      progressed = true;
+    }
+  }
+  return resolved;
 }
 
 /** 把路径 token 收成字面绝对路径。按用户变化的行返回 undefined（调用方跳过）；
@@ -518,26 +547,24 @@ function resolveDirPath(
 ): string | undefined {
   const inner = unquoteToken(pathTok);
   if (isUserVaryingPath(inner)) return undefined;
-  const onlyVar = /^\$([A-Z_][A-Z0-9_]*)$/.exec(inner);
-  if (onlyVar) {
-    const name = onlyVar[1] ?? '';
-    const val = assigns.get(name);
-    if (val === undefined) {
+  const expanded = substituteUpperVars(inner, assigns);
+  if (expanded.includes('$')) {
+    const leftover = [...expanded.matchAll(UPPER_VAR)].map((m) => m[1] ?? m[2] ?? '').filter(Boolean);
+    const name = leftover[0];
+    if (name && /^\$([A-Z_][A-Z0-9_]*)$/.test(inner)) {
       throw new Error(`${script}:${line} 里的变量 $${name} 展开不了（没有 ${name}=/字面路径 的赋值）`);
     }
-    return val;
-  }
-  if (inner.includes('$')) {
     throw new Error(`${script}:${line} 里的路径「${inner}」有展开不了的变量`);
   }
-  if (!inner.startsWith('/')) {
-    throw new Error(`${script}:${line} 里的路径「${inner}」不是绝对路径`);
+  if (!expanded.startsWith('/')) {
+    throw new Error(`${script}:${line} 里的路径「${expanded}」不是绝对路径`);
   }
-  return inner;
+  return expanded;
 }
 
-/** 读三个脚本里的 ensure_dir。路径写成 $NAME 或 "$NAME" 的，用同一批脚本或 deploy/lib/
- *  下 NAME=/字面路径 的赋值展开；路径里带按用户变化的变量（如 /home/$u）的行不进表；
+/** 读三个脚本里的 ensure_dir。路径写成 $NAME、"$NAME"、"$NAME/后缀" 或夹着大写常量的，
+ *  用同一批脚本或 deploy/lib/ 下能收成字面值的赋值展开（含 NAME=/字面、链式 $OTHER/后缀）；
+ *  路径里带按用户变化的变量（如 /home/$u）的行不进表；
  *  展开不了的其他变量抛带脚本名和行号的错，不静默跳过。
  *  读不到脚本、或哪个脚本里一个目录都没有，抛带脚本名的错。 */
 export function readDirEntries(repo: RepoView): DirEntry[] {
