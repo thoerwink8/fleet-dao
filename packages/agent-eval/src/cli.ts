@@ -201,13 +201,13 @@ export async function main(argv: readonly string[], deps: CliDeps = {}): Promise
       const r = await runCase(c, m, { launch: deps.launch ?? realLauncher, defs, command });
       results.push(r);
       log(
-        `  ${r.status === 'pass' ? '过' : r.status === 'fail' ? '没过' : '没跑成'}：${r.reason.slice(0, 200)}`,
+        `  ${r.status === 'pass' ? '过' : r.status === 'fail' ? '没过' : r.status === 'model-mismatch' ? '模型对不上' : '没跑成'}：${r.reason.slice(0, 200)}`,
       );
       write();
     }
   }
   write();
-  const notRun = results.filter((r) => r.status === 'not-run').length;
+  const notRun = results.filter((r) => r.status === 'not-run' || r.status === 'model-mismatch').length;
   log(
     `跑完：${results.length} 条，过 ${results.filter((r) => r.pass).length}，没过 ${results.filter((r) => r.status === 'fail').length}，没跑成 ${notRun}。结果在 ${outDir}`,
   );

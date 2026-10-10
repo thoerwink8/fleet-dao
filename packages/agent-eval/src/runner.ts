@@ -10,14 +10,15 @@ import {
   type ModelKey,
   SESSION_TIMEOUT_MS,
 } from './launcher.ts';
-import { parseStream, StreamFormatError } from './stream.ts';
+import { modelMatches, parseStream, StreamFormatError } from './stream.ts';
 import type { EvalCase, Verdict } from './types.ts';
 import { UngradableError } from './types.ts';
 import { caseDirOf, prepareWorkspace, type Workspace } from './workspace.ts';
 
 export const OUTPUT_LIMIT = 20_000;
 
-export type Status = 'pass' | 'fail' | 'not-run';
+/** model-mismatch：会话实际用的模型和点名的对不上，不算过也不算没过。 */
+export type Status = 'pass' | 'fail' | 'not-run' | 'model-mismatch';
 
 export interface CaseResult {
   caseId: string;
@@ -43,6 +44,10 @@ export interface CaseResult {
   output: string;
   outputTruncated: boolean;
   judgeUsed: boolean;
+  /** 会话实际用的模型：取第一条主会话 assistant 帧的，读不到退 init 帧的，都没有是 null。 */
+  observedModel: string | null;
+  initModel: string | null;
+  assistantModel: string | null;
 }
 
 export interface RunDeps {
@@ -108,6 +113,9 @@ export async function runCase(c: EvalCase, model: ModelKey, deps: RunDeps): Prom
     output: '',
     outputTruncated: false,
     judgeUsed: false,
+    observedModel: null,
+    initModel: null,
+    assistantModel: null,
   };
   const notRun = (reason: string, extra: Partial<CaseResult> = {}): CaseResult => ({
     ...base,
@@ -149,6 +157,7 @@ export async function runCase(c: EvalCase, model: ModelKey, deps: RunDeps): Prom
         },
       );
     }
+    const observedModel = summary.assistantModel ?? summary.initModel;
     const out = truncateOutput(summary.answer);
     const seen = {
       durationMs,
@@ -157,8 +166,19 @@ export async function runCase(c: EvalCase, model: ModelKey, deps: RunDeps): Prom
       numTurns: summary.numTurns ?? null,
       output: out.text,
       outputTruncated: out.truncated,
+      observedModel,
+      initModel: summary.initModel,
+      assistantModel: summary.assistantModel,
     };
     if (summary.isError) return notRun(`会话自己报错：${summary.subtype ?? '未知'}`, seen);
+    if (observedModel !== null && !modelMatches(modelId, observedModel)) {
+      return {
+        ...base,
+        ...seen,
+        status: 'model-mismatch',
+        reason: `点名 ${modelId}，实际用的是 ${observedModel}，没判分`,
+      };
+    }
 
     let judgeUsed = false;
     let verdict: Verdict;
@@ -181,7 +201,7 @@ export async function runCase(c: EvalCase, model: ModelKey, deps: RunDeps): Prom
       ...seen,
       status: verdict.pass ? 'pass' : 'fail',
       pass: verdict.pass,
-      reason: verdict.reason,
+      reason: observedModel === null ? `${verdict.reason}；没读到实际模型` : verdict.reason,
       ...(verdict.score === undefined ? {} : { score: verdict.score }),
       judgeUsed,
     };

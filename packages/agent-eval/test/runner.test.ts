@@ -40,10 +40,15 @@ function recorded(
     cache_creation_input_tokens: 10,
     cache_read_input_tokens: 200,
   },
+  model = 'claude-haiku-5-5',
 ) {
   return [
-    JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-haiku-5-5' }),
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'thinking' }] } }),
+    JSON.stringify({ type: 'system', subtype: 'init', model }),
+    JSON.stringify({
+      type: 'assistant',
+      parent_tool_use_id: null,
+      message: { model, content: [{ type: 'text', text: 'thinking' }] },
+    }),
     '(这一行不是 JSON，要被跳过)',
     JSON.stringify({
       type: 'result',
@@ -218,7 +223,7 @@ describe('runCase：注入假的起会话函数', () => {
         defs: new Map([['fleet-demo', def]]),
         command: 'reclaude',
         prepare: fakeWorkspace,
-        launch: async () => ok(recorded('x')),
+        launch: async () => ok(recorded('x', undefined, 'claude-opus-5-5')),
       },
     );
     expect(r).toMatchObject({ maxTurns: null, turnBudget: 40, modelId: 'claude-opus-5-5' });
@@ -232,7 +237,7 @@ describe('runCase：注入假的起会话函数', () => {
         defs: DEFS,
         command: 'reclaude',
         prepare: fakeWorkspace,
-        launch: async () => ok(recorded('错的')),
+        launch: async () => ok(recorded('错的', undefined, 'claude-sonnet-5-5')),
       },
     );
     expect(r).toMatchObject({ status: 'fail', pass: false, reason: '答错了' });
@@ -334,13 +339,74 @@ describe('runCase：注入假的起会话函数', () => {
         ...base,
         launch: async (req) => {
           launches.push(req.args);
-          return ok(recorded(req.stdin === '评一下' ? '0.9' : '方案'));
+          return ok(recorded(req.stdin === '评一下' ? '0.9' : '方案', undefined, 'claude-opus-5-5'));
         },
       },
     );
     expect(launches).toHaveLength(2);
     expect(launches[1]?.slice(0, 3)).toEqual(['-p', '--model', 'claude-sonnet-5-5']);
     expect(r).toMatchObject({ status: 'pass', score: 0.9, judgeUsed: true });
+  });
+});
+
+describe('实际模型（observedModel）', () => {
+  const frames = (lines: object[]) =>
+    ok(
+      [
+        ...lines,
+        { type: 'result', is_error: false, result: 'x', usage: { input_tokens: 1, output_tokens: 1 } },
+      ]
+        .map((l) => JSON.stringify(l))
+        .join('\n'),
+    );
+  const run = (stdout: LaunchResult) =>
+    runCase(
+      demoCase(async () => ({ pass: true, reason: '好' })),
+      'haiku',
+      {
+        defs: DEFS,
+        command: 'reclaude',
+        prepare: fakeWorkspace,
+        launch: async () => stdout,
+      },
+    );
+
+  it('对得上：取 assistant 帧的，两个都记；子代理帧（有 parent_tool_use_id）不算', async () => {
+    const r = await run(
+      frames([
+        { type: 'system', subtype: 'init', model: 'claude-haiku-5-5[1m]' },
+        { type: 'assistant', parent_tool_use_id: 'toolu_1', message: { model: 'claude-opus-5-5' } },
+        { type: 'assistant', parent_tool_use_id: null, message: { model: 'claude-haiku-5-5' } },
+      ]),
+    );
+    expect(r).toMatchObject({
+      status: 'pass',
+      observedModel: 'claude-haiku-5-5',
+      initModel: 'claude-haiku-5-5[1m]',
+      assistantModel: 'claude-haiku-5-5',
+    });
+  });
+
+  it('init 帧带 [1m] 后缀、没有 assistant 帧：退到 init 的，剥后缀后对得上', async () => {
+    const r = await run(frames([{ type: 'system', subtype: 'init', model: 'claude-haiku-5-5[1m]' }]));
+    expect(r).toMatchObject({ status: 'pass', observedModel: 'claude-haiku-5-5[1m]', assistantModel: null });
+  });
+
+  it('对不上：model-mismatch，不判分，不算过也不算没过', async () => {
+    const r = await run(
+      frames([
+        { type: 'system', subtype: 'init', model: 'claude-haiku-5-5' },
+        { type: 'assistant', parent_tool_use_id: null, message: { model: 'claude-sonnet-5-5' } },
+      ]),
+    );
+    expect(r).toMatchObject({ status: 'model-mismatch', pass: null, observedModel: 'claude-sonnet-5-5' });
+    expect(r.reason).toContain('实际用的是 claude-sonnet-5-5');
+  });
+
+  it('读不到：observedModel 是 null，照常判分，reason 里写没读到实际模型', async () => {
+    const r = await run(frames([{ type: 'assistant', parent_tool_use_id: null, message: { content: [] } }]));
+    expect(r).toMatchObject({ status: 'pass', observedModel: null, initModel: null, assistantModel: null });
+    expect(r.reason).toContain('没读到实际模型');
   });
 });
 

@@ -226,11 +226,56 @@ describe('renderReport', () => {
       output: '```ts\nx\n```',
       outputTruncated: true,
       judgeUsed: false,
+      observedModel: 'claude-haiku-5-5',
+      initModel: 'claude-haiku-5-5',
+      assistantModel: 'claude-haiku-5-5',
     };
     const md = renderReport([r], { startedAt: 't', models: ['haiku'] });
     expect(md).toContain('````text\n```ts\nx\n```\n````');
     expect(md).toContain('产出（已截断）');
     expect(md).toContain('| a | 1 / 1；均 1.5 秒；均 1.5k token | — | — |');
+    expect(md).toContain('| a/b | claude-haiku-5-5 | claude-haiku-5-5 | 过 | 1.5 秒 |');
+  });
+
+  it('模型对不上的单列，不算进过几道，读不到的写没读到', () => {
+    const base = {
+      caseId: 'a/b',
+      scenario: 'a',
+      agent: 'x',
+      model: 'haiku',
+      modelId: 'claude-haiku-5-5',
+      durationMs: 1000,
+      inputTokens: 1,
+      outputTokens: 1,
+      maxTurns: null,
+      turnBudget: 40,
+      numTurns: 1,
+      prompt: 'p',
+      output: 'o',
+      outputTruncated: false,
+      judgeUsed: false,
+      initModel: null,
+      assistantModel: null,
+    } as const;
+    const mism: CaseResult = {
+      ...base,
+      status: 'model-mismatch',
+      pass: null,
+      reason: '点名 haiku，实际 sonnet',
+      observedModel: 'claude-sonnet-5-5',
+    };
+    const unknown: CaseResult = {
+      ...base,
+      caseId: 'a/c',
+      status: 'pass',
+      pass: true,
+      reason: '好；没读到实际模型',
+      observedModel: null,
+    };
+    const md = renderReport([mism, unknown], { startedAt: 't', models: ['haiku'] });
+    expect(md).toContain('## 模型对不上（不算过也不算没过）');
+    expect(md).toContain('| a | 1 / 1；均 1.0 秒；均 2 token；1 道模型对不上 | — | — |');
+    expect(md).toContain('| a/c | claude-haiku-5-5 | 没读到 | 过 | 1.0 秒 |');
   });
 });
 

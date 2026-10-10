@@ -41,7 +41,7 @@ interface Failure {
 
 function gradeLogDigest(failures: readonly Failure[], retried: readonly string[]) {
   return async (ctx: GradeContext): Promise<Verdict> => {
-    const log = readFileSync(join(ctx.caseDir, 'workspace', 'ci.log'), 'utf8');
+    const log = readFileSync(join(ctx.caseDir, 'workspace', 'ci-output.txt'), 'utf8');
     for (const f of failures) {
       if (!log.includes(f.name) || !log.includes(f.assertion)) {
         throw new UngradableError(`标准答案不在夹具日志里：${f.name} / ${f.assertion}`);
@@ -207,7 +207,7 @@ export const READING_CASES: EvalCase[] = [
     name: 'three-failures',
     agent: 'fleet-log-digest',
     prompt:
-      `${PREAMBLE}当前目录里的 \`ci.log\` 是一次红灯的 CI 日志。把红的那几条缩成证据行：每个失败的用例，` +
+      `${PREAMBLE}当前目录里的 \`ci-output.txt\` 是一次红灯的 CI 日志。把红的那几条缩成证据行：每个失败的用例，` +
       '摘出它的完整用例名（`文件 > 组 > 名字` 那一串里的最后两段即可）和原文里那行 `AssertionError…`。不写原因、不写怎么修。',
     source: { kind: 'fixture' },
     planted:
@@ -235,7 +235,7 @@ export const READING_CASES: EvalCase[] = [
     name: 'retry-noise',
     agent: 'fleet-log-digest',
     prompt:
-      `${PREAMBLE}当前目录里的 \`ci.log\` 是一次红灯的 CI 日志（跑测试时带了 --retry=1）。把真正红的那几条缩成证据行：` +
+      `${PREAMBLE}当前目录里的 \`ci-output.txt\` 是一次红灯的 CI 日志（跑测试时带了 --retry=1）。把真正红的那几条缩成证据行：` +
       '每个最终失败的用例，摘出它的完整用例名（`组 > 名字`）和原文里那行 `AssertionError…`。不写原因、不写怎么修。',
     source: { kind: 'fixture' },
     planted:
@@ -290,7 +290,7 @@ export const READING_CASES: EvalCase[] = [
     name: 'renamed-method',
     agent: 'fleet-ci-triager',
     prompt:
-      `${PREAMBLE}当前目录里有一次红灯的 CI 日志 \`ci.log\`、提交清单 \`commits.md\`，和两个提交的 diff（另一个提交只改了文档，没附 diff）。` +
+      `${PREAMBLE}当前目录里有一次红灯的 CI 日志 \`ci-output.txt\`、提交清单 \`commits.md\`，和两个提交的 diff（另一个提交只改了文档，没附 diff）。` +
       '问：哪个提交弄红的、根因是什么。\n回答格式（两行就够，后面可以补证据）：\n罪魁: <7 位提交号>\n根因: <一句话>',
     source: { kind: 'fixture' },
     planted:
@@ -304,7 +304,7 @@ export const READING_CASES: EvalCase[] = [
     name: 'retries-default',
     agent: 'fleet-ci-triager',
     prompt:
-      `${PREAMBLE}当前目录里有一次红灯的 CI 日志 \`ci.log\`、提交清单 \`commits.md\`，和两个提交的 diff（第三个提交只改了文档，没附 diff）。` +
+      `${PREAMBLE}当前目录里有一次红灯的 CI 日志 \`ci-output.txt\`、提交清单 \`commits.md\`，和两个提交的 diff（第三个提交只改了文档，没附 diff）。` +
       '问：哪个提交弄红的、根因是什么。\n回答格式（两行就够，后面可以补证据）：\n罪魁: <7 位提交号>\n根因: <一句话>',
     source: { kind: 'fixture' },
     planted:
