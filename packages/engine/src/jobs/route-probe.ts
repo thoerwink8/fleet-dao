@@ -17,6 +17,7 @@ import {
   type HostId,
   type OrgKind,
   onDemandDetail,
+  type ProbeCheck,
   probeBackoffMinutes,
   probeBackoffPhrase,
   probeFailStreak,
@@ -76,6 +77,8 @@ interface ProbeCapture {
   requestText?: string | null;
   /** 响应原文。 */
   responseText?: string | null;
+  /** 降智检测（#1637）：这一次问的题和判的结果。没带题（没问到、不是真探）不给。 */
+  check?: ProbeCheck | null;
 }
 
 export type ProbeAttempt =
@@ -123,6 +126,8 @@ export interface RouteProbeJobDeps {
     requestText: string | null;
     /** 没拿到响应为 null。 */
     responseText: string | null;
+    /** 降智检测的题和判的结果；没带题为空。 */
+    check?: ProbeCheck | null;
   }): Promise<'saved' | 'route_not_found'>;
   /** 一条路由真探完（写库之前）：真实现里接整池暂停的报警和撤销。抛了只记日志，不改结论。 */
   afterProbe?(target: ProbeTarget, attempt: ProbeAttempt): Promise<void>;
@@ -381,6 +386,7 @@ export interface Conclusion {
   durationMs: number | null;
   requestText: string | null;
   responseText: string | null;
+  check?: ProbeCheck | null;
 }
 
 const NO_CAPTURE = { durationMs: null, requestText: null, responseText: null } as const;
@@ -389,11 +395,13 @@ function captureOf(attempt: ProbeAttempt): {
   durationMs: number | null;
   requestText: string | null;
   responseText: string | null;
+  check: ProbeCheck | null;
 } {
   return {
     durationMs: attempt.durationMs ?? null,
     requestText: attempt.requestText ?? null,
     responseText: attempt.responseText ?? null,
+    check: attempt.check ?? null,
   };
 }
 
@@ -707,6 +715,7 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
         durationMs: c.durationMs,
         requestText: c.requestText,
         responseText: c.responseText,
+        check: c.check ?? null,
       });
     } catch (err) {
       unsaved.push(`${c.target.routeId}：${errMessage(err)}`);

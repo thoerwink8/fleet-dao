@@ -434,6 +434,52 @@ describe('探针历史', () => {
     }
   });
 
+  it('降智检测五列（#1637）：写得进、读得回；没带题的和老行是 null，不是空串；超长截断并标注', async () => {
+    await saveRouteProbe(t.db, { routeId: 'car', state: 'failed', at: at(1), detail: '连不上' });
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'ok',
+      at: at(2),
+      detail: '答上了',
+      check: { question: '1+1？', expected: '2', answer: '2', passed: true, selfIdentity: 'Claude' },
+    });
+    const long = `答${'y'.repeat(ROUTE_PROBE_HISTORY_TEXT_MAX)}`;
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'failed',
+      at: at(3),
+      detail: '疑似降智',
+      check: { question: '1+1？', expected: '2', answer: long, passed: false, selfIdentity: null },
+    });
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'failed',
+      at: at(4),
+      detail: '回答认不出',
+      check: { question: '1+1？', expected: '2', answer: null, passed: null, selfIdentity: null },
+    });
+    const [none, ok, wrong, unjudged] = (await readRouteProbeHistory(t.db, 'car', 10)).reverse();
+    expect(none).toMatchObject({
+      checkQuestion: null,
+      checkExpected: null,
+      checkAnswer: null,
+      checkPassed: null,
+      selfIdentity: null,
+    });
+    expect(ok).toMatchObject({
+      checkQuestion: '1+1？',
+      checkExpected: '2',
+      checkAnswer: '2',
+      checkPassed: true,
+      selfIdentity: 'Claude',
+    });
+    expect(wrong?.checkPassed).toBe(false);
+    expect(wrong?.selfIdentity).toBeNull();
+    expect(wrong?.checkAnswer).toContain('已截断');
+    expect(wrong?.checkAnswer?.length).toBeLessThanOrEqual(ROUTE_PROBE_HISTORY_TEXT_MAX);
+    expect(unjudged).toMatchObject({ checkAnswer: null, checkPassed: null });
+  });
+
   it('【故意造出的失败】历史表读不到：抛错，不回空数组冒充没有历史', async () => {
     expect(await readRouteProbeHistory(t.db, 'car', 10)).toEqual([]);
     await t.client.exec('alter table route_probe_history rename to route_probe_history_unreadable');

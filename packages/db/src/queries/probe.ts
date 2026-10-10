@@ -1,6 +1,6 @@
 // 路由探针（design 第九节「路由探针」）：读每条路由探得了探不了的事实，写一条路由的结论。
 // routes.alive 只由探针和熔断写：这里是探针那一半。库里约束 alive 为真时结论必须是 ok，不许拿默认值、手改冒充在线。
-import type { BillingKind, HostId, OrgKind, RouteProbeState } from '@fleet-dao/shared';
+import type { BillingKind, HostId, OrgKind, ProbeCheck, RouteProbeState } from '@fleet-dao/shared';
 import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { asc, desc, eq, sql } from 'drizzle-orm';
@@ -215,6 +215,8 @@ export interface RouteProbeWrite {
   requestText?: string | null;
   /** 响应原文。没拿到不给或给 null。超长截断并标注。 */
   responseText?: string | null;
+  /** 降智检测（#1637）。没带题不给或给 null：五列都写空，不当空串。超长截断并标注。 */
+  check?: ProbeCheck | null;
 }
 
 export interface RouteProbeHistoryRow {
@@ -226,6 +228,11 @@ export interface RouteProbeHistoryRow {
   failureReason: string | null;
   requestText: string | null;
   responseText: string | null;
+  checkQuestion: string | null;
+  checkExpected: string | null;
+  checkAnswer: string | null;
+  checkPassed: boolean | null;
+  selfIdentity: string | null;
 }
 
 /** ok → 通过；failed → 不通；not_wired、skipped、on_demand → 没探（这一轮没真探）。 */
@@ -277,6 +284,11 @@ export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved
       failureReason: result === 'passed' ? null : clipProbeText(w.detail),
       requestText: clipOrNull(w.requestText),
       responseText: clipOrNull(w.responseText),
+      checkQuestion: clipOrNull(w.check?.question),
+      checkExpected: clipOrNull(w.check?.expected),
+      checkAnswer: clipOrNull(w.check?.answer),
+      checkPassed: w.check?.passed ?? null,
+      selfIdentity: clipOrNull(w.check?.selfIdentity),
     });
     await tx.execute(sql`
       delete from route_probe_history
@@ -303,6 +315,11 @@ export interface ProbeHistoryJoined {
   failureReason: string | null;
   requestText: string | null;
   responseText: string | null;
+  checkQuestion: string | null;
+  checkExpected: string | null;
+  checkAnswer: string | null;
+  checkPassed: boolean | null;
+  selfIdentity: string | null;
 }
 
 /**
@@ -367,6 +384,11 @@ export async function readProbeHistoryJoined(db: Db): Promise<ProbeHistoryJoined
         failureReason: routeProbeHistory.failureReason,
         requestText: routeProbeHistory.requestText,
         responseText: routeProbeHistory.responseText,
+        checkQuestion: routeProbeHistory.checkQuestion,
+        checkExpected: routeProbeHistory.checkExpected,
+        checkAnswer: routeProbeHistory.checkAnswer,
+        checkPassed: routeProbeHistory.checkPassed,
+        selfIdentity: routeProbeHistory.selfIdentity,
       })
       .from(routeProbeHistory)
       .innerJoin(routes, eq(routes.id, routeProbeHistory.routeId))
@@ -400,6 +422,11 @@ export async function readRouteProbeHistory(
         failureReason: routeProbeHistory.failureReason,
         requestText: routeProbeHistory.requestText,
         responseText: routeProbeHistory.responseText,
+        checkQuestion: routeProbeHistory.checkQuestion,
+        checkExpected: routeProbeHistory.checkExpected,
+        checkAnswer: routeProbeHistory.checkAnswer,
+        checkPassed: routeProbeHistory.checkPassed,
+        selfIdentity: routeProbeHistory.selfIdentity,
       })
       .from(routeProbeHistory)
       .where(eq(routeProbeHistory.routeId, routeId))
