@@ -4,7 +4,7 @@
 # shellcheck disable=SC2034 # REDS、CHANGES、PENDING 是给 source 进来的 release.sh（common.sh）里的函数读写的
 # 从公网看得到的几样不带仓名、GitHub 账号名和地址（创始人 2026-09-25，#54 第 4 条），也不让搜索引擎收录：
 # - 发布脚本生成的静态目录（这一版没有 packages/web 时：占位页当首页 + 健康页）拿公开页的禁词名单扫
-#   （packages/web/src/build/scan.ts 的 BUILTIN_TERMS）。构建用的是 release.sh 里的真代码 build_web，只把「以 fleet 身份跑」换成原地跑。
+#   （packages/web/src/build/scan.ts 的 BUILTIN_TERMS）。构建用的是 release.sh 里的真代码 build_web，只把构建沙箱换成原地跑。
 # - 香港站点配置（deploy/hk/nginx-*.conf 渲染出来的）：先按 nginx 的继承规则查每一层都带 X-Robots-Tag；再真起一个 nginx
 #   （临时目录、本机回环上的临时端口、自签证书）打请求：带完整提交号的 release.json 只给隧道那头（这里拿 127.0.0.2 当法国），
 #   别处来的 404；每种回应都带 noindex；robots.txt 不禁抓（禁抓了爬虫就看不到 noindex）。这台没有 nginx、openssl、curl
@@ -250,7 +250,7 @@ if [[ -z "$NODE" ]]; then
   echo "  … 没跑成：这台没有 node"
   skipped=1
 else
-  as_fleet_in() { # 目录 命令…：release.sh 里是切成 fleet 跑，这里原地跑（不用 root）
+  as_build_in() { # 目录 命令…：release.sh 里是沙箱里以 fleet 跑，这里原地跑（不用 root、不用沙箱）
     local dir=$1
     shift
     (cd -- "$dir" && "$@")

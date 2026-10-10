@@ -77,7 +77,7 @@ CONFIG_REDS=() # config.mjs 这一次说的 red（调用方合成一条红）
 
 # 期望里登记的会话代理（#786）：法国登记的 FLEET_SESSION_PROXY 是空＝直连；登记成 http://主机:端口 就经它出网。
 # 发布里有两处要出网、环境都是清干净的——取代码（systemd 临时服务里以 root 跑
-# git fetch，环境里只有 HOME）和装依赖（以 fleet 的 env -i 跑 pnpm install），两处都拿不到 /etc/environment 里的
+# git fetch，环境里只有 HOME）和装依赖（构建沙箱里以 fleet 的 env -i 跑 pnpm install），两处都拿不到 /etc/environment 里的
 # 代理，所以由这里读期望、显式带上。只认期望里
 # 登记的那一项，不认调用者环境里的同名变量（同 #731）：root 的登录 shell 里碰巧有代理，法国照样直连。
 # 读一次记下来（session_proxy_load 要在当前 shell 里叫，在 $(...) 里叫记不住），读不出就不发（不拿直连顶）。
@@ -193,13 +193,113 @@ kv_get() { # 文件 键：「键=值」一行一项的文件里这一项的值�
 
 # 以 fleet 身份、在给定目录里跑命令（环境清空，同 as_user）。期望里登记了代理就在出网时带上（#786：装依赖
 # pnpm install 要连 registry.npmjs.org）；法国登记的代理是空，一个字都不加。读代理之前（PROXY_READY=0）
-# 不带：下面前提那一步读不出会判红、不发版，走到这里就一定是读过了
+# 不带：下面前提那一步读不出会判红、不发版，走到这里就一定是读过了。
+# 构建三步不用这个：它看得到 /etc/fleet-dao。构建走 as_build_in。这里留给不隔密钥的调用（迁移不经它，测试会直接叫）
 as_fleet_in() { # 目录 命令…
   local dir=$1
   shift
   (cd -- "$dir" && runuser -u fleet -- env -i HOME=/home/fleet USER=fleet LOGNAME=fleet \
     PATH=/home/fleet/.local/bin:/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     "${PROXY_ENVS[@]}" "$@")
+}
+
+# 构建沙箱挡住的目录。每次现算：/var/run 常常是指向 /run 的符号链接，只挡其中一条，另一条还指着同一个目录。
+# 路径交给 InaccessiblePaths 时加 - 前缀：这处不存在就跳过（没什么可挡），存在就挡住。
+BUILD_SANDBOX_STATE="" # 空：还没试过；ok：读回确认挡住了；bad：建不成（原因在 BUILD_SANDBOX_WHY）
+BUILD_SANDBOX_WHY=""
+# 只有测试会改：接到构建环境 PATH 最前面，用来放故意去读密钥的假 pnpm。正式发布不设，PATH 和以前一样
+FLEET_BUILD_PATH_PREFIX=${FLEET_BUILD_PATH_PREFIX:-}
+build_sandbox_paths() {
+  local p phys have=" "
+  BUILD_SANDBOX_PATHS=()
+  for p in /etc/fleet-dao /var/run/postgresql /var/lib/fleet-dao; do
+    if [[ "$have" != *" $p "* ]]; then
+      BUILD_SANDBOX_PATHS+=("$p")
+      have+="$p "
+    fi
+    phys=$(readlink -f -- "$p" 2>/dev/null || true)
+    if [[ -n "$phys" && "$phys" != / && "$have" != *" $phys "* ]]; then
+      BUILD_SANDBOX_PATHS+=("$phys")
+      have+="$phys "
+    fi
+  done
+}
+
+# 一次性沙箱里以 fleet 跑命令。root 起 systemd-run：InaccessiblePaths 盖住密钥目录、本机库 socket 目录、引擎状态目录。
+# NoNewPrivileges：构建进程不能再拿到新权限把这层挂载撤掉。--pipe 把调用方的标准输入输出接进去（git archive | tar、日志重定向）。
+# --expand-environment=no：命令和代理值里的 $ 不由 systemd 展开。失败不退回 as_fleet_in
+build_sandbox_run() { # 工作目录 命令…
+  local dir=$1
+  shift
+  local joined="" p path=/home/fleet/.local/bin:/usr/local/bin:/usr/bin:/bin
+  build_sandbox_paths
+  for p in "${BUILD_SANDBOX_PATHS[@]}"; do
+    joined+="${joined:+ }-$p"
+  done
+  if [[ -n "$FLEET_BUILD_PATH_PREFIX" ]]; then path=$FLEET_BUILD_PATH_PREFIX:$path; fi
+  systemd-run --wait --pipe --collect --quiet \
+    --service-type=exec \
+    --expand-environment=no \
+    --uid=fleet --gid=fleet \
+    --working-directory="$dir" \
+    -p "InaccessiblePaths=$joined" \
+    -p NoNewPrivileges=true \
+    -- /usr/bin/env -i HOME=/home/fleet USER=fleet LOGNAME=fleet \
+      "PATH=$path" LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+      "${PROXY_ENVS[@]}" "$@"
+}
+
+# 读回：fleet 在沙箱里还能不能把 /etc/fleet-dao 当目录用。命令只打印一行 visible 或 hidden，不列名字、不读内容。
+# 750 root:fleet 时 fleet 进得去（-r 且 -x）；挡住之后那一层是 mode 000 的挂载，两个都假。
+# 沙箱自己可能在同一段输出里再带一行状态：有一行 visible 就当没挡住；一行都对不上 hidden 就当认不出，不当成已经隔开
+build_sandbox_hidden() { # 工作目录：0 = 挡住了
+  local out err rc=0 line token saw=0
+  err=$(mktemp)
+  out=$(build_sandbox_run "$1" bash -c 'if [[ -d /etc/fleet-dao && -r /etc/fleet-dao && -x /etc/fleet-dao ]]; then printf "%s\n" visible; else printf "%s\n" hidden; fi' 2>"$err") || rc=$?
+  if ((rc != 0)); then
+    line=$(tr '\n' ' ' <"$err")
+    BUILD_SANDBOX_WHY="沙箱起不来：${line:0:400}"
+    rm -f -- "$err"
+    return 1
+  fi
+  rm -f -- "$err"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    token=${line//[[:space:]]/}
+    if [[ "$token" == visible ]]; then
+      BUILD_SANDBOX_WHY="读回确认 /etc/fleet-dao 在构建环境里仍然可见"
+      return 1
+    fi
+    if [[ "$token" == hidden ]]; then saw=1; fi
+  done <<<"$out"
+  if ((saw)); then return 0; fi
+  token=${out//[[:space:]]/}
+  token=${token:0:80}
+  BUILD_SANDBOX_WHY="沙箱读回认不出（${token:-空}），不当成已经隔开"
+  return 1
+}
+
+# 沙箱要能起来，并且读回确认密钥目录进不去。同一次构建只探一次；建不成就记在 BUILD_SANDBOX_WHY，不退回 as_fleet_in
+build_sandbox_prepare() {
+  if [[ "$BUILD_SANDBOX_STATE" == ok ]]; then return 0; fi
+  if [[ "$BUILD_SANDBOX_STATE" == bad ]]; then return 1; fi
+  if ! command -v systemd-run >/dev/null 2>&1; then
+    BUILD_SANDBOX_STATE=bad
+    BUILD_SANDBOX_WHY="没有 systemd-run"
+    return 1
+  fi
+  if ! build_sandbox_hidden /tmp; then
+    BUILD_SANDBOX_STATE=bad
+    return 1
+  fi
+  BUILD_SANDBOX_STATE=ok
+}
+
+# 构建三步用的入口：目录里以 fleet 跑，但沙箱挡着密钥、本机库 socket、引擎状态。沙箱没建好就失败，调用方报红
+as_build_in() { # 目录 命令…
+  local dir=$1
+  shift
+  if ! build_sandbox_prepare; then return 1; fi
+  build_sandbox_run "$dir" "$@"
 }
 
 pg_admin() { (cd / && runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -tA "$@"); }
@@ -448,8 +548,9 @@ fetch_code() { # 要发的提交（空 = 主线最新）
   fi
 }
 
-# 装成一版：fleet 在临时目录里装依赖、构建前端（第三方代码不以 root 跑）；构建完整个目录换成 root 的、fleet 只读，
-# 再原子地挪到 <提交号>。root 要照着办事的东西（单元文件、完成标记）在换属主之后才由 root 从 git 里取、写，fleet 碰不到。
+# 装成一版：构建沙箱里以 fleet 装依赖、构建前端、打包网关（第三方代码不以 root 跑，也读不到密钥目录和本机库）；
+# 构建完整个目录换成 root 的、fleet 只读，再原子地挪到 <提交号>。root 要照着办事的东西（单元文件、完成标记）在换属主之后才由 root 从 git 里取、写，fleet 碰不到。
+# 沙箱建不成（没有 systemd-run、起不来、读回密钥目录仍然可见）就红字停下：不切版本，也不退回 as_fleet_in
 build_release() { # 提交号
   local sha=$1 dir=$RELEASES/$1 stage=$RELEASES/.build-$1 log u odd n gsum
   step "构建 ${sha:0:12}"
@@ -461,16 +562,21 @@ build_release() { # 提交号
     red "$dir 在但没有构建完成的标记——不是发布脚本放的？停下等人看"
     return 1
   fi
+  BUILD_SANDBOX_STATE=""
+  if ! build_sandbox_prepare; then
+    red "构建环境建不成（$BUILD_SANDBOX_WHY）：没切版本，也不退回用 fleet 直接构建"
+    return 1
+  fi
   rm -rf -- "$stage"
   install -d -o fleet -g fleet -m 750 "$stage"
   log=$stage/.fleet-build.log
-  if ! git -C "$CACHE" archive --format=tar "$sha" | as_fleet_in "$stage" tar -x -f -; then
+  if ! git -C "$CACHE" archive --format=tar "$sha" | as_build_in "$stage" tar -x -f -; then
     red "把 ${sha:0:12} 的代码解到 $stage 失败"
     return 1
   fi
   echo "  装依赖（pnpm install --frozen-lockfile，日志 $dir/.fleet-build.log）"
   # copy：依赖整份拷进这一版，不和 fleet 的 pnpm 仓库共用文件（共用的话，换属主会连带改掉仓库里的文件）
-  if ! as_fleet_in "$stage" pnpm install --frozen-lockfile --package-import-method=copy --reporter=append-only >>"$log" 2>&1; then
+  if ! as_build_in "$stage" pnpm install --frozen-lockfile --package-import-method=copy --reporter=append-only >>"$log" 2>&1; then
     red "pnpm install --frozen-lockfile 失败（没切版本）：$(tail -5 "$log" | tr '\n' ' ')"
     return 1
   fi
@@ -518,14 +624,14 @@ stage_units() { # 提交号 暂存目录
   done
 }
 
-# 飞书网关：这一版有 packages/feishu，就连同依赖打成一个文件 gateway/gateway.mjs（打包、冒烟都以 fleet 跑）。
+# 飞书网关：这一版有 packages/feishu，就连同依赖打成一个文件 gateway/gateway.mjs（打包、冒烟都在构建沙箱里以 fleet 跑）。
 # 香港上只放这一个文件和固定版本的 node：不放仓库、不装依赖、不连 GitHub
 build_gateway() { # 临时目录 日志
   local stage=$1 log=$2
   if [[ ! -f "$stage/packages/feishu/src/main.ts" || ! -f "$stage/deploy/france/bundle-gateway.sh" ]]; then return 0; fi
   echo "  打包飞书网关（packages/feishu → gateway/gateway.mjs，打完冒烟跑一次）"
-  as_fleet_in "$stage" mkdir -p gateway
-  if ! as_fleet_in "$stage" env FLEET_BUNDLE_NODE="$NODE" bash deploy/france/bundle-gateway.sh "$stage" \
+  as_build_in "$stage" mkdir -p gateway
+  if ! as_build_in "$stage" env FLEET_BUNDLE_NODE="$NODE" bash deploy/france/bundle-gateway.sh "$stage" \
     "$stage/gateway/gateway.mjs" >>"$log" 2>&1; then
     red "飞书网关没打成（没切版本）：$(tail -5 "$log" | tr '\n' ' ')"
     return 1
@@ -544,7 +650,7 @@ build_web() { # 临时目录 日志
   local stage=$1 log=$2
   if web_script "$stage" build; then
     echo "  构建驾驶舱前端（packages/web）"
-    if ! as_fleet_in "$stage" pnpm --filter ./packages/web run build >>"$log" 2>&1; then
+    if ! as_build_in "$stage" pnpm --filter ./packages/web run build >>"$log" 2>&1; then
       red "驾驶舱前端构建失败（没切版本）：$(tail -5 "$log" | tr '\n' ' ')"
       return 1
     fi
@@ -552,18 +658,18 @@ build_web() { # 临时目录 日志
       red "驾驶舱前端构建完没有 packages/web/dist/client/index.html"
       return 1
     fi
-    as_fleet_in "$stage" cp -R packages/web/dist/client web
+    as_build_in "$stage" cp -R packages/web/dist/client web
     WEB_KIND="驾驶舱前端（packages/web）+ 健康页"
   else
-    as_fleet_in "$stage" mkdir web
-    as_fleet_in "$stage" cp deploy/hk/placeholder.html web/index.html
+    as_build_in "$stage" mkdir web
+    as_build_in "$stage" cp deploy/hk/placeholder.html web/index.html
     WEB_KIND="占位页（这一版还没有驾驶舱前端）+ 健康页"
   fi
   if [[ -e "$stage/web/health" ]]; then
     red "驾驶舱前端自己带了 /health/，和健康页撞了"
     return 1
   fi
-  as_fleet_in "$stage" cp -R deploy/web/health web/health
+  as_build_in "$stage" cp -R deploy/web/health web/health
   if [[ ! -f "$stage/web/index.html" || ! -f "$stage/web/health/index.html" || ! -f "$stage/web/health/health.js" ]]; then
     red "静态文件不全：要有 index.html、health/index.html、health/health.js"
     return 1
