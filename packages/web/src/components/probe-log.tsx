@@ -13,6 +13,7 @@ import type { Model, ProbeHistoryCell, Route } from '../api/types';
 import { formatDateTime } from '../lib/format';
 import {
   formatProbeMs,
+  PROBE_KIND_BG,
   PROBE_KIND_WORD,
   type ProbeKind,
   probeKind,
@@ -21,6 +22,14 @@ import {
 import { cn } from '../lib/utils';
 import type { ChannelHistory } from './channel-status';
 import { StatusChip } from './status';
+
+const LEGEND: readonly (readonly [ProbeKind, string])[] = [
+  ['passed', '探通了'],
+  ['failed', '没探通'],
+  ['doubt', '探通了但降智题答错'],
+  ['not_probed', '这轮没真探'],
+  ['on_demand', '不主动探，要派给它时才探'],
+];
 
 /** 结论标签。疑似降智没有状态色，用橙色（st-doubt）。 */
 export function ProbeKindChip({ kind }: { kind: ProbeKind }) {
@@ -74,6 +83,18 @@ export function ProbeLog({
       <p className="mb-2 text-caption text-muted-foreground">
         最近 60 次，从新到旧；每条路由自己的最近一次也在里面。点一行看请求和响应原文。
       </p>
+      <ul
+        data-probe-log="legend"
+        aria-label="图例"
+        className="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-micro text-faint"
+      >
+        {LEGEND.map(([kind, hint]) => (
+          <li key={kind} className="inline-flex items-center gap-1">
+            <span aria-hidden className={cn('size-2 shrink-0 rounded-2', PROBE_KIND_BG[kind])} />
+            {PROBE_KIND_WORD[kind].label}：{hint}
+          </li>
+        ))}
+      </ul>
       {routeMissing ? <p className="mb-2 text-caption text-ink-stall">这条路由还没有探针历史</p> : null}
       {rows.length === 0 ? (
         <p
@@ -207,9 +228,9 @@ function ProbeLogRow({
               疑似降智：{cell.failureReason ?? '降智题答错了'}
             </p>
           ) : null}
-          {kind === 'not_probed' ? (
+          {kind === 'not_probed' || kind === 'on_demand' ? (
             <p data-field="failure" className="break-words text-caption text-muted-foreground">
-              没探：{cell.failureReason ?? '（没写原因）'}
+              {PROBE_KIND_WORD[kind].label}：{cell.failureReason ?? '（没写原因）'}
             </p>
           ) : null}
           <ProbeText

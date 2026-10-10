@@ -4,7 +4,7 @@
 // 「立即探测」，点了马上看到排队 / 探测中，探完自己刷新。
 // 故意造出的失败：引擎关着（按钮置灰、写明，历史照样在）、点了被拒（写明是哪样）、立即探测的记录读不到（写没读成）、
 // 探针历史读不到（写没查成、不画格子）、运行中失败的渠道顺到谁没有。
-import { type ProbeHistoryCell, probeHistoryStrips } from '@fleet-dao/shared';
+import { type ProbeHistoryCell, probeHistoryStrips, ROUTE_PROBE_ON_DEMAND_MARK } from '@fleet-dao/shared';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError } from '../api/client';
@@ -664,6 +664,38 @@ describe('渠道状态页：探测记录（#1638）', () => {
       return el;
     });
     expect(empty.textContent).toBe('还没有探测记录');
+  });
+
+  test('没探里原文带「按需」那一句的标「按需」，别的没探还是「没探」；图例一起写', async () => {
+    renderLog(
+      historyOf([
+        probeCell({
+          id: 1,
+          routeId: 'r-cursor',
+          channelId: 'ch-cursor',
+          probedAt: mins(10),
+          result: 'not_probed',
+          failureReason: `${ROUTE_PROBE_ON_DEMAND_MARK}。还没真探过`,
+        }),
+        probeCell({
+          id: 2,
+          routeId: 'r-cursor',
+          channelId: 'ch-cursor',
+          probedAt: mins(20),
+          result: 'not_probed',
+          failureReason: '没有用途在用，不花额度去探',
+        }),
+      ]),
+    );
+    await waitFor(() => expect(rowOrder()).toEqual(['1', '2']));
+    const onDemand = document.querySelector('[data-probe-row="1"]') as HTMLElement;
+    expect(onDemand.getAttribute('data-result')).toBe('on_demand');
+    expect(within(onDemand).getByText('按需')).toBeTruthy();
+    const plain = document.querySelector('[data-probe-row="2"]') as HTMLElement;
+    expect(plain.getAttribute('data-result')).toBe('not_probed');
+    expect(within(plain).getByText('没探')).toBeTruthy();
+    expect(historyStrip().querySelector('[data-cell="1"]')?.getAttribute('data-result')).toBe('on_demand');
+    expect(document.querySelector('[data-probe-log="legend"]')?.textContent).toContain('按需：');
   });
 
   test('挤出 60 格的路由，它自己的最近一次也列出来', async () => {

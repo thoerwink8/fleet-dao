@@ -1,13 +1,17 @@
 // 渠道状态页上探针历史怎么说（#1139、#1638）。格子的颜色和这几句在页面上对得上：
 // 绿通过、红不通、橙疑似降智、黄没探。
-import type { ProbeHistoryCell, ProbeHistoryResult } from '@fleet-dao/shared';
+import { isOnDemandDetail, type ProbeHistoryCell, type ProbeHistoryResult } from '@fleet-dao/shared';
 import type { Tone } from './status';
 
 /** 一次探测的结论。疑似降智 = 探通了，但降智题答错了（checkPassed === false）；它不是不通，颜色单独一种。 */
-export type ProbeKind = ProbeHistoryResult | 'doubt';
+export type ProbeKind = ProbeHistoryResult | 'doubt' | 'on_demand';
 
-export function probeKind(cell: Pick<ProbeHistoryCell, 'result' | 'checkPassed'>): ProbeKind {
+/** 没探里「按需」的：探针不主动探、要派给它时才先探一次（#1635）。认法是 shared 的 isOnDemandDetail（原文带固定那一句）。 */
+export function probeKind(
+  cell: Pick<ProbeHistoryCell, 'result' | 'checkPassed' | 'failureReason'>,
+): ProbeKind {
   if (cell.result === 'failed' && cell.checkPassed === false) return 'doubt';
+  if (cell.result === 'not_probed' && isOnDemandDetail(cell.failureReason)) return 'on_demand';
   return cell.result;
 }
 
@@ -17,6 +21,7 @@ export const PROBE_KIND_WORD: Record<ProbeKind, { label: string; tone: Tone | 'd
   failed: { label: '不通', tone: 'fail' },
   doubt: { label: '疑似降智', tone: 'doubt' },
   not_probed: { label: '没探', tone: 'stall' },
+  on_demand: { label: '按需', tone: 'stop' },
 };
 
 /** 格子的底色。没探用停滞黄，不通用失败红，疑似降智用橙，三色分开。 */
@@ -25,6 +30,7 @@ export const PROBE_KIND_BG: Record<ProbeKind, string> = {
   failed: 'bg-st-fail',
   doubt: 'bg-st-doubt',
   not_probed: 'bg-st-stall',
+  on_demand: 'bg-st-stop',
 };
 
 /** 耗时。没量到不写 0；没探的写「没真探」。 */
