@@ -66,21 +66,38 @@ function shell(kind: FactKind, state: 'ok' | 'unread', look: FactLook, extra?: s
   };
 }
 
-/** 没查成的一格：明说原因，等待色虚线（不是红、不是 0）。 */
+/** 没查成的一格：明说原因，等待色虚线（不是红、不是 0）。失联列 muted 时「没查成」也改成灰色小字。 */
 function NotRead({
   kind,
   look,
   reason,
+  muted,
   children,
   ...head
-}: Head & { kind: FactKind; look: FactLook; reason: string; children?: ReactNode }) {
+}: Head & {
+  kind: FactKind;
+  look: FactLook;
+  reason: string;
+  muted?: boolean | undefined;
+  children?: ReactNode;
+}) {
   return (
     <div {...shell(kind, 'unread', look, 'text-muted-foreground')}>
       <FactHead {...head} />
       <div className={look === 'row' ? 'mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5' : 'mt-1.5'}>
         <div className="flex items-center gap-1.5">
-          <CircleDashed className="size-4 shrink-0 text-ink-stall" aria-hidden />
-          <span className="text-title leading-tight font-semibold tracking-tight text-ink-stall">没查成</span>
+          <CircleDashed
+            className={cn('shrink-0', muted ? 'size-3.5 text-muted-foreground' : 'size-4 text-ink-stall')}
+            aria-hidden
+          />
+          <span
+            className={cn(
+              'leading-tight tracking-tight',
+              muted ? 'text-sm font-normal text-muted-foreground' : 'text-title font-semibold text-ink-stall',
+            )}
+          >
+            没查成
+          </span>
         </div>
         <p className={cn('text-xs', look === 'tile' && 'mt-1')}>{reason}</p>
       </div>
@@ -89,13 +106,14 @@ function NotRead({
   );
 }
 
-/** 查成了的一格：值 + 一句白话；tone 只给真正要提醒的那几种。 */
+/** 查成了的一格：值 + 一句白话；tone 只给真正要提醒的那几种。失联列 muted 时值改成灰色小字、不用醒目色。 */
 function Read({
   kind,
   look,
   value,
   sub,
   tone,
+  muted,
   children,
   ...head
 }: Head & {
@@ -104,6 +122,7 @@ function Read({
   value: ReactNode;
   sub?: ReactNode;
   tone?: Tone | undefined;
+  muted?: boolean | undefined;
   children?: ReactNode;
 }) {
   return (
@@ -113,9 +132,11 @@ function Read({
       <div className={look === 'row' ? 'mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5' : 'mt-1.5'}>
         <div
           className={cn(
-            'num text-title leading-tight font-semibold tracking-tight',
+            'num leading-tight tracking-tight',
             look === 'tile' && 'truncate',
-            tone ? TONE_CLASS[tone] : undefined,
+            muted
+              ? 'text-sm font-normal text-muted-foreground'
+              : cn('text-title font-semibold', tone ? TONE_CLASS[tone] : undefined),
           )}
         >
           {value}
@@ -161,7 +182,7 @@ const HEADS = {
   sessions: { label: '在跑的会话', hint: '几个、各在哪一段', icon: Activity },
   pools: { label: '池占用', hint: '几块池、在跑合计', icon: Gauge },
   health: { label: '健康', hint: '几项红、哪几项', icon: HeartPulse },
-  version: { label: '在用版本', hint: '落后主线没有', icon: Tag },
+  version: { label: '在用版本', hint: '落后主线几个提交', icon: Tag },
   schedule: { label: '最近拉单', hint: '引擎上一轮拉单成没成', icon: CalendarClock },
 } satisfies Record<string, Head>;
 
@@ -177,6 +198,7 @@ export function factCells({
   jobCount,
   versionExtra,
   engineNote,
+  muted,
 }: {
   facts: EnvFacts;
   now: number;
@@ -187,8 +209,11 @@ export function factCells({
   versionExtra?: ReactNode;
   /** 挂在「引擎」那一格底下：总开关关着、进程仍在跑时，说明这两件不是一回事。 */
   engineNote?: ReactNode;
+  /** 失联 / 没数据：状态值改成灰色小字，不再用醒目色（法国页远程列）。 */
+  muted?: boolean | undefined;
 }): ReactNode[] {
-  const base = { kind, look };
+  // exactOptionalPropertyTypes：没有 muted 时别塞 undefined
+  const base = muted ? { kind, look, muted: true as const } : { kind, look };
   const cells: ReactNode[] = [];
 
   if (facts.engine.ok) {
