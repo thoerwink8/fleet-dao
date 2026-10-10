@@ -13,7 +13,8 @@ const gpt = HARD_BANS.find((b) => b.id === 'gpt-no-ui');
 
 test('Fable 禁令改成永久：理由里不再挂版本号；GPT 那条不动', () => {
   assert.ok(fable, 'no-fable 这条禁令不见了');
-  assert.doesNotMatch(fable.reason, /5\.1|版本/);
+  // 只拦版本号和撤回条件；「不分版本」「与版本无关」这类说法正是永久的意思，不算挂版本号（#1714 真跑时 Sonnet、Opus 都这么写）
+  assert.doesNotMatch(fable.reason, /\d|之前|更高/, `理由里还挂着版本号或撤回条件：${fable.reason}`);
   assert.match(fable.reason, /Fable/);
   assert.equal(gpt?.reason, 'GPT 不做 UI 类活');
 });

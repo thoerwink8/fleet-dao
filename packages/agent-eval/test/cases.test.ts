@@ -841,10 +841,17 @@ describe('standard-editor 真题', () => {
   const OLD = '不用 Fable（出比 5.1 更高的版本之前）';
   const NEW = '不用 Fable（创始人定）';
   /** 小快照里 bans.ts 等是原件；candidates.test.ts、AGENTS.md 只放钉文案的那几行（够判分读）。 */
-  const fable = (opts: { demo: boolean; tests?: boolean; agents?: boolean; scan?: boolean }) =>
+  const fable = (opts: {
+    demo: boolean;
+    tests?: boolean;
+    agents?: boolean;
+    scan?: boolean;
+    reason?: string;
+  }) =>
     fromBase((d) => {
+      const reason = opts.reason ?? NEW;
       mkdirSync(join(d, 'packages/db/test'), { recursive: true });
-      const r = opts.tests === false ? OLD : NEW;
+      const r = opts.tests === false ? OLD : reason;
       writeFileSync(
         join(d, 'packages/db/test/candidates.test.ts'),
         `      ['fable51', ['banned'], ['${r}']],\n      ['fable52', ['banned'], ['${r}']],\n`,
@@ -855,19 +862,26 @@ describe('standard-editor 真题', () => {
           ? '- GPT 系不做界面类的活（包括审界面）；Fable 不用，出比 5.1 更高的版本前也别推荐。\n'
           : '- GPT 系不做界面类的活（包括审界面）；Fable 不用（创始人 2026-10-03 拍，永久，不挂版本号）。\n',
       );
-      swap(d, 'packages/shared/src/bans.ts', `reason: '${OLD}'`, `reason: '${NEW}'`);
+      swap(d, 'packages/shared/src/bans.ts', `reason: '${OLD}'`, `reason: '${reason}'`);
       if (opts.demo)
         swap(
           d,
           'packages/web/src/build/demo-renames.ts',
           '/不用 Fable（出比 5\\.1 更高的版本之前）/g',
-          '/不用 Fable（创始人定）/g',
+          `/${reason.replace(/\./g, '\\.')}/g`,
         );
       if (opts.scan) edit(d, 'packages/web/src/build/scan.ts', (s) => s.replace("  '不用 Fable',\n", ''));
     });
   it('fable-ban-permanent：#669 合进去的四处都改过；当时漏 demo-renames.ts 的那版不过；没改测试、没改通用段、删扫描词都不过', async () => {
     const id = 'standard-editor/fable-ban-permanent';
     expect(await judge(id, '改了', fable({ demo: true }))).toMatchObject({ pass: true });
+    // 真跑时 Sonnet、Opus 写的理由：「不看版本」正是永久的意思，不算挂版本号（#1714 先前把它判错了）
+    const anyVersion = fable({ demo: true, reason: '不用 Fable（整个模型族，不看版本）' });
+    expect(await judge(id, '改了', anyVersion)).toMatchObject({ pass: true });
+    // 只把版本号换成另一个：撤回条件还在
+    const bumped = await judge(id, '改了', fable({ demo: true, reason: '不用 Fable（出 6.0 之前）' }));
+    expect(bumped.pass).toBe(false);
+    expect(bumped.reason).toContain('理由里不再挂版本号');
     // 当时的错法：#669 第一个提交改了 bans.ts、AGENTS.md、candidates.test.ts，漏了 demo-renames.ts（CI 的 web、test rest 红）
     const missedDemo = await judge(id, '改了', fable({ demo: false }));
     expect(missedDemo.pass).toBe(false);
