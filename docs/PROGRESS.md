@@ -1,6 +1,6 @@
 # 进度
 
-> 进度和创始人中途给的引导记在 GitHub 置顶单 **#1055「进度与创始人引导」**，不再写进这个文件：接手先 `pnpm progress:read`；记进度 `pnpm progress:note "一句话"`；记引导 `pnpm progress:directive "原话" --at "时间"`，办完 `pnpm progress:done <评论号>`。开会话钩子读那张单、报没处理的引导。计划和先后看 `pnpm plan`，做成了什么看 PR 和单子评论。
+> 进度和创始人中途给的引导记在 GitHub 置顶单 **#1055「进度与创始人引导」**，不再写进这个文件：接手先 `pnpm progress:read`；记进度 `pnpm progress:note "一句话"`；记引导 `pnpm progress:directive "原话" --at "时间"`，办完 `pnpm progress:done <评论号>`。引导记着主人（记它的 Mirasim 会话），开会话钩子读那张单，只叫主人那个会话办，无主的先 `pnpm progress:claim <评论号>` 认领（决定 0080）。计划和先后看 `pnpm plan`，做成了什么看 PR 和单子评论。
 > 这个文件只留下面「生效中的临时调整」表（开会话钩子读它、到期问创始人）；搬走前的状态、引导和归档目录在 `docs/archive/progress-2026-10-05-final.md`（更早的归档页也在 `docs/archive/` 下，目录在那一页末尾）。
 
 ## 生效中的临时调整
