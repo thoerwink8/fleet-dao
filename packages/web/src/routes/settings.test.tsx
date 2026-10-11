@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
 // 设置页两处难看：仓库一节仓列表和「让 AI 接活」都读失败时叠两条红横幅，合成一条；
 // 留量线窗口名把字段名 7d_model 漏到界面上，改成中文。
-import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { ApiError, type FleetApi } from '../api/client';
+import { ApiError, type FleetApi, keys } from '../api/client';
 import { createMockApi } from '../api/mock/server';
 import SettingsPage from '../routes/settings';
 import { renderApp } from '../test/harness';
@@ -126,6 +126,92 @@ describe('设置页留量线：未配置显示占位，点了才变输入框（#
     expect(key).toBe('engine.quotaReserve');
     expect(typeof (body as { version: number }).version).toBe('number');
     expect(JSON.stringify((body as { value: unknown }).value)).toContain('0.8');
+  });
+});
+
+describe('设置页留量线：后台刷新池数据不清用户正在填的（#1871）', () => {
+  const placeholder = 'button[title="未配置（不限），点一下填写"]';
+
+  async function openAndType(api: FleetApi) {
+    const view = renderApp(<SettingsPage />, { api, route: '/settings' });
+    const form = (await screen.findByTestId('reserve-source')).closest('form');
+    if (!form) throw new Error('留量线没有表单');
+    await waitFor(() => expect(form.querySelectorAll(placeholder).length).toBeGreaterThan(0));
+    const boxes = within(form).queryAllByRole('textbox').length;
+    fireEvent.click(form.querySelector(placeholder) as HTMLButtonElement);
+    await waitFor(() => expect(within(form).queryAllByRole('textbox')).toHaveLength(boxes + 1));
+    fireEvent.change(within(form).queryAllByRole('textbox')[0] as HTMLInputElement, {
+      target: { value: '77' },
+    });
+    await waitFor(() =>
+      expect(
+        within(form)
+          .queryAllByRole('textbox')
+          .map((i) => (i as HTMLInputElement).value),
+      ).toContain('77'),
+    );
+    return { ...view, form, boxes };
+  }
+
+  const values = (form: HTMLElement) =>
+    within(form)
+      .queryAllByRole('textbox')
+      .map((i) => (i as HTMLInputElement).value);
+
+  test('池数据只是用量数字变、换了新引用：输入框还在，填的数还在', async () => {
+    const api = createMockApi({ live: false });
+    const orig = api.pools.bind(api);
+    let calls = 0;
+    api.pools = async () => {
+      const r = await orig();
+      calls += 1;
+      return {
+        ...r,
+        asOf: `2026-10-11T00:00:${String(calls).padStart(2, '0')}.000Z`,
+        pools: r.pools.map((p) => ({ ...p, running: p.running + calls })),
+      };
+    };
+    const { form, boxes, qc } = await openAndType(api as unknown as FleetApi);
+    const seen = calls;
+    await act(async () => {
+      await qc.invalidateQueries({ queryKey: keys.pools });
+    });
+    await waitFor(() => expect(calls).toBeGreaterThan(seen));
+    expect(within(form).queryAllByRole('textbox')).toHaveLength(boxes + 1);
+    expect(values(form)).toContain('77');
+  });
+
+  test('池集合真变了（新增一个池）才重置草稿', async () => {
+    const api = createMockApi({ live: false });
+    const orig = api.pools.bind(api);
+    let extra = false;
+    api.pools = async () => {
+      const r = await orig();
+      const first = r.pools[0];
+      if (!extra || !first) return r;
+      return { ...r, pools: [...r.pools, { ...first, id: `${first.id}-new` }] };
+    };
+    const { form, qc } = await openAndType(api as unknown as FleetApi);
+    extra = true;
+    await act(async () => {
+      await qc.invalidateQueries({ queryKey: keys.pools });
+    });
+    await waitFor(() => expect(values(form)).not.toContain('77'));
+  });
+
+  test('服务端版本号变了才重置草稿', async () => {
+    const api = createMockApi({ live: false });
+    const { form, qc } = await openAndType(api as unknown as FleetApi);
+    const cur = (await api.settings()).settings.find((x) => x.key === 'engine.quotaReserve');
+    if (!cur) throw new Error('假数据缺留量线');
+    await api.updateSetting('engine.quotaReserve', {
+      value: { 'claude-a': { other: 0.5 } },
+      version: cur.version,
+    });
+    await act(async () => {
+      await qc.invalidateQueries({ queryKey: keys.settings });
+    });
+    await waitFor(() => expect(values(form)).not.toContain('77'));
   });
 });
 
