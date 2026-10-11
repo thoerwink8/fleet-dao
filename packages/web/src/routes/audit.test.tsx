@@ -117,3 +117,38 @@ describe('操作记录页', () => {
     await waitFor(() => expect(screen.getByText('更早的会话')).toBeTruthy());
   });
 });
+
+describe('操作记录页：事件名翻成中文（#1821）', () => {
+  test('routing.probe.done 显示成「探针探完」，原名只在悬停里；没收录的显示原名加灰字「（没翻译）」', async () => {
+    // 把事件名直接露出来，或没收录的也被硬翻成一句话，这一条会红。
+    const api = createMockApi({ live: false });
+    const first = await api.audit({ limit: 100 });
+    const sample = first.items[0];
+    if (!sample) throw new Error('假数据没有操作记录');
+    const unknown: AuditEntry = {
+      ...sample,
+      id: 'a-unknown',
+      action: 'zzz.never.heard',
+      target: 'cockpit',
+      before: undefined,
+      after: undefined,
+      reason: undefined,
+      error: undefined,
+    };
+    api.audit = () => Promise.resolve({ items: [unknown, ...first.items] });
+    renderApp(<AuditPage />, { api });
+    const done = (await screen.findAllByText('探针探完'))[0];
+    expect(done?.getAttribute('title')).toBe('routing.probe.done');
+    expect(screen.queryByText('routing.probe.done')).toBeNull();
+    const raw = (await screen.findAllByText(/zzz\.never\.heard/))[0];
+    expect(raw?.textContent).toContain('（没翻译）');
+    expect(done?.textContent).not.toContain('（没翻译）');
+  });
+
+  test('有对照的行能点进对应的单：task 对象旁有「打开」链接去任务页', async () => {
+    renderApp(<AuditPage />);
+    await screen.findAllByText('派了会话');
+    const links = screen.getAllByRole('link', { name: '打开' });
+    expect(links.some((a) => a.getAttribute('href')?.startsWith('/tasks/'))).toBe(true);
+  });
+});
