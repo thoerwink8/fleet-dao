@@ -28,14 +28,14 @@ const FILES = [
  */
 const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
   { file: 'components/home/health-strip.tsx', snippet: 'max-w-health-detail' },
-  { file: 'components/home/health-strip.tsx', snippet: 'max-w-health-detail truncate text-caption' },
+  { file: 'components/home/health-strip.tsx', snippet: 'max-w-health-detail truncate text-meta' },
   {
     file: 'components/home/decision-card.tsx',
-    snippet: 'text-caption font-medium uppercase tracking-wide text-ink-human',
+    snippet: '<Tag tone="human">',
   },
   {
     file: 'components/home/decision-card.tsx',
-    snippet: 'num shrink-0 whitespace-nowrap text-caption text-muted-foreground',
+    snippet: 'num shrink-0 whitespace-nowrap text-meta text-muted-foreground',
   },
   { file: 'components/layout/list.tsx', snippet: 'absolute inset-y-0 left-0 w-rail' },
   { file: 'components/job-row.tsx', snippet: 'text-caption text-muted-foreground' },
