@@ -7,7 +7,7 @@
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task continue|abandon|redo <owner/仓名> <单号> --note "<为什么>"   续、放弃、重做一张单
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api seat|claim …   帅位只一个（#299）：本机经 ssh 调，写法见 seat --help
 # 换成 fleet 身份、带上 fleet-api.service 同一份 /etc/fleet-dao/api.env（连库用的 DATABASE_URL、PGHOST 这些）去跑：
-# 库只认 fleet 这个本机用户（peer 认证），环境文件按 systemd 的读法读，和服务里生效的一模一样。
+# 库只认 fleet 这个本机用户（peer 认证），环境文件按 systemd 的读法读、和服务读同一组（清单取自 deploy/france/fleet-api.service）。
 # 标准输入是终端就给它一个伪终端（--pty：密码不回显），是管道就原样接过去（--pipe：脚本里用）。
 # 换了身份就看不出是谁跑的了：先把 root（经 sudo 跑的记 sudo 前的用户）交给命令，写进操作记录。
 set -euo pipefail
@@ -28,7 +28,20 @@ elif [[ "${1:-}" == "groom" ]]; then
   entry="$root/packages/engine/src/bin/groom.ts"
   shift
 fi
+# 环境文件照同一版的 fleet-api.service 一行行搬过来（顺序、「-」都照抄）：只写 api.env 时，session-mint 读不到
+# session-secret.env 里的会话密钥（#1800 上线后第一次跑就碰上）。单元文件读不到、一条都没有就停，不拿半份环境去跑。
+unit="$root/deploy/france/fleet-api.service"
+env_args=()
+if [[ -r "$unit" ]]; then
+  while IFS= read -r line; do
+    env_args+=(-p "$line")
+  done < <(grep -E '^EnvironmentFile=' "$unit")
+fi
+if [[ ${#env_args[@]} -eq 0 ]]; then
+  echo "读不到 $unit 里的 EnvironmentFile=，没跑" >&2
+  exit 1
+fi
 exec systemd-run --quiet --wait --collect "$io" --uid=fleet --gid=fleet \
-  -p EnvironmentFile=/etc/fleet-dao/api.env -p WorkingDirectory="$root" \
+  "${env_args[@]}" -p WorkingDirectory="$root" \
   -E FLEET_OPS_OPERATOR="${SUDO_USER:-root}" \
   /usr/bin/node "$entry" "$@"

@@ -364,7 +364,7 @@ export function parseSessionMintArgs(argv: readonly string[]): SessionMintArgs {
 function sessionConfig(env: CliEnv): Config {
   if (!env.FLEET_SESSION_SECRET) {
     throw new CliError(
-      '没有 FLEET_SESSION_SECRET：要带上 /etc/fleet-dao/api.env 跑（用 packages/api/bin/fleet-api），没发会话',
+      '没有 FLEET_SESSION_SECRET：要带上 fleet-api.service 那组环境文件跑（用 packages/api/bin/fleet-api），没发会话',
       2,
     );
   }
