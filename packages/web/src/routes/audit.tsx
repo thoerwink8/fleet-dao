@@ -4,6 +4,7 @@ import { Link, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { useAllBoards, useAudit, useMe, useNotifications, useRouting } from '../api/client';
 import type { AuditEntry, Me } from '../api/types';
+import { FilterTrack, filterTabClass } from '../components/filter-tabs';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RefreshBar } from '../components/refresh-bar';
 import { Badge } from '../components/ui/badge';
@@ -110,7 +111,9 @@ function ChangeDetails({
   const lines = auditChangeLines(before, after, routeNames);
   return (
     <details className="mt-1 text-xs text-muted-foreground">
-      <summary className="cursor-pointer select-none hover:text-foreground">看改了什么</summary>
+      <summary className="cursor-pointer select-none hover:text-foreground max-md:flex max-md:min-h-10 max-md:items-center">
+        看改了什么
+      </summary>
       {lines.length > 0 ? (
         <ul className="mt-1.5 space-y-0.5 text-sub">
           {lines.map((line) => (
@@ -123,7 +126,9 @@ function ChangeDetails({
         <p className="mt-1.5 text-sub">这些字段都没变</p>
       )}
       <details className="mt-1.5">
-        <summary className="cursor-pointer select-none hover:text-foreground">看原始数据</summary>
+        <summary className="cursor-pointer select-none hover:text-foreground max-md:flex max-md:min-h-10 max-md:items-center">
+          看原始数据
+        </summary>
         <div className="mt-1.5 grid gap-2 md:grid-cols-2">
           {before !== undefined ? (
             <div>
@@ -212,11 +217,7 @@ export default function Audit() {
       }
     >
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div
-          className="flex max-w-full overflow-x-auto rounded-lg bg-muted p-1"
-          role="tablist"
-          aria-label="按谁做的"
-        >
+        <FilterTrack role="tablist" aria-label="按谁做的">
           {FILTERS.map((f) => (
             <button
               key={f.id}
@@ -224,15 +225,12 @@ export default function Audit() {
               role="tab"
               aria-selected={filter === f.id}
               onClick={() => setFilter(f.id)}
-              className={cn(
-                'h-7 shrink-0 rounded-md px-3 text-sub text-muted-foreground transition-colors',
-                filter === f.id ? 'bg-card font-medium text-foreground shadow-sm' : 'hover:text-foreground',
-              )}
+              className={filterTabClass(filter === f.id)}
             >
               {f.label}
             </button>
           ))}
-        </div>
+        </FilterTrack>
         {target ? (
           <span className="inline-flex h-8 items-center gap-1.5 rounded-full border bg-card pr-1 pl-3 text-sub">
             只看 {targetLabel(target, tasks, notifications)}
@@ -318,7 +316,7 @@ export default function Audit() {
                     <button
                       type="button"
                       onClick={() => setTarget(a.target)}
-                      className="min-w-0 truncate text-left text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                      className="min-w-0 truncate text-left text-muted-foreground underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10"
                       title="只看这个对象的记录"
                     >
                       {targetLabel(a.target, tasks, notifications)}
@@ -326,7 +324,7 @@ export default function Audit() {
                     {describeAction(a.action).translated && targetHref(a.target) ? (
                       <Link
                         to={targetHref(a.target) ?? '/'}
-                        className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                        className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground max-md:inline-flex max-md:min-h-10 max-md:items-center"
                       >
                         打开
                       </Link>

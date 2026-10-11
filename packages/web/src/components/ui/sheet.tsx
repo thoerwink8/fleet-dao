@@ -3,9 +3,19 @@
 import { XIcon } from 'lucide-react';
 import { Dialog as SheetPrimitive } from 'radix-ui';
 import type * as React from 'react';
+import { useBackClose } from '../../lib/use-back-close';
 import { cn } from '../../lib/utils';
 
-function Sheet({ ...props }: React.ComponentProps<typeof SheetPrimitive.Root>) {
+/**
+ * 抽屉。打开时压一条历史记录，手机后退键只关这一层、留在本页（lib/use-back-close.ts，#1820）。
+ * historyEntry={false}：这个抽屉的打开本身已经压了历史（地址参数 ?run=），不再重复压。
+ */
+function Sheet({
+  historyEntry = true,
+  ...props
+}: React.ComponentProps<typeof SheetPrimitive.Root> & { historyEntry?: boolean }) {
+  const { open, onOpenChange } = props;
+  useBackClose(historyEntry && open === true, () => onOpenChange?.(false));
   return <SheetPrimitive.Root data-slot="sheet" {...props} />;
 }
 

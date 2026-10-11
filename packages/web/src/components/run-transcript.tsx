@@ -560,6 +560,8 @@ export function RunTranscriptDrawer({
   return (
     <Sheet
       open
+      // 打开这个抽屉时地址已经压了一条 ?run=（routes/task.tsx），后退本来就关它；再压一条会多按一次后退（#1820）
+      historyEntry={false}
       onOpenChange={(o) => {
         if (!o) onClose();
       }}

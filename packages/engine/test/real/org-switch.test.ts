@@ -56,7 +56,6 @@ import {
   MIN,
   NOW,
   orgListRig,
-  pickTestQuestion,
   REPLY,
   SOLO_ORG_ID,
   world,
@@ -178,7 +177,6 @@ function setup(
     log: () => {},
     sleep: async () => {},
     retryDelayMs: 0,
-    pickQuestion: pickTestQuestion,
     run: { 'claude-code': fake.run },
   });
   return {

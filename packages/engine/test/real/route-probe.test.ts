@@ -13,14 +13,15 @@ import {
   routes,
   scheduleRuns,
   toRoute,
+  upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ROUTE_PROBE_JOB, runRouteProbeJob } from '../../src/jobs/route-probe.ts';
 import { CURSOR_KEY_BAD, CURSOR_KEY_EXIT, CURSOR_MISSING, GROK_MISSING } from '../../src/real/hosts.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
-import { probePrompt } from '../../src/real/probe-iq.ts';
-import { iqAlertKey, PROBE_DIR, routeProbeJob } from '../../src/real/route-probe.ts';
+import { pingPrompt } from '../../src/real/probe-identity.ts';
+import { identityAlertKey, iqAlertKey, PROBE_DIR, routeProbeJob } from '../../src/real/route-probe.ts';
 import { poolHoldKey } from '../../src/real/store-ports.ts';
 import {
   addCursorRoute,
@@ -49,6 +50,9 @@ import {
   GROK_UNKNOWN_MODEL,
   grokAnswered,
   grokRefused,
+  IDENTITY_REPLY_NEW,
+  IDENTITY_REPLY_OLD,
+  IDENTITY_REPLY_UNKNOWN,
   NOW,
   pickTestQuestion,
   REPLY,
@@ -89,6 +93,8 @@ function setup(
     realCursor?: CursorKeyRig;
     grok?: (n: number) => FakeGrokScript;
     mirasim?: (n: number) => FakeMirasimScript;
+    /** 强制探身份题（默认按 probeKindFor，Claude 订阅走 ping）。 */
+    identity?: boolean;
   } = {},
 ) {
   const fake = fakeRun((_, n) => script(n));
@@ -130,7 +136,7 @@ function setup(
     log: rig ? (level, text, fields) => void logs.push(JSON.stringify([level, text, fields])) : quiet,
     sleep: async () => {},
     retryDelayMs: 0,
-    pickQuestion: pickTestQuestion,
+    ...(over.identity ? { kindFor: () => 'identity' as const, pickQuestion: pickTestQuestion } : {}),
     run: over.runThrows
       ? { 'claude-code': thrower, 'cursor-agent': thrower, grok: thrower, mirasim: thrower }
       : rig
@@ -165,7 +171,8 @@ describe('探通：在线，结论和时刻写进库，定时任务页那一行�
 
     const carpool = await row('carpool');
     expect(carpool).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
-    expect(carpool?.probeDetail).toMatch(/^答上了：OK · 降智检测通过（.*） · 用时 \d+ 秒/);
+    expect(carpool?.probeDetail).toMatch(/^答上了：pong · 用时 \d+ 秒/);
+    expect(carpool?.probeKind).toBe('ping');
     expect(toRoute(carpool as typeof routes.$inferSelect).probe).toMatchObject({
       state: 'ok',
       at: NOW.toISOString(),
@@ -180,9 +187,10 @@ describe('探通：在线，结论和时刻写进库，定时任务页那一行�
     expect(carpoolHistory[0]).toMatchObject({
       result: 'passed',
       durationMs: 1,
-      requestText: probePrompt(TEST_Q),
+      requestText: pingPrompt(),
       responseText: REPLY,
       failureReason: null,
+      kind: 'ping',
     });
     const soloHistory = await readRouteProbeHistory(t.db, 'solo', 10);
     expect(soloHistory[0]).toMatchObject({
@@ -205,7 +213,7 @@ describe('探通：在线，结论和时刻写进库，定时任务页那一行�
     expect(runs.map((r) => [r.outcome, r.scanned, r.found])).toEqual([['ok', 3, 2]]);
   });
 
-  it('起的是和干活的会话同一个插头、同一份 reclaude、同一个模型串：不存记录、什么工具都用不了、问一句 OK', async () => {
+  it('起的是和干活的会话同一个插头、同一份 reclaude、同一个模型串：不存记录、什么工具都用不了、问一句 pong', async () => {
     const s = setup(answered);
     await s.round();
     expect(s.fake.count()).toBe(1);
@@ -213,7 +221,7 @@ describe('探通：在线，结论和时刻写进库，定时任务页那一行�
     const [options] = s.fake.options;
     const dir = join(root, 'work').replaceAll('\\', '/');
     expect(spec).toMatchObject({
-      prompt: probePrompt(TEST_Q),
+      prompt: pingPrompt(),
       model: 'claude-opus-5-5',
       permissionMode: 'dontAsk',
       persistSession: false,
@@ -345,53 +353,63 @@ describe('额度用满被拒：算通（在线），额度读数记账，派不�
   });
 });
 
-describe('降智检测（#1637）', () => {
+describe('身份题（#1798 片 5）', () => {
+  const identityAlert = async () =>
+    (await t.db.select().from(notifications)).find((n) => n.dedupeKey === identityAlertKey('carpool'));
   const iqAlert = async () =>
     (await t.db.select().from(notifications)).find((n) => n.dedupeKey === iqAlertKey('carpool'));
 
-  it('答对：通过，历史里记下题、标准答案、实答、自报身份，不推提醒', async () => {
-    const s = setup(answered);
+  it('答出新答案：通过，历史记下题和实答，写 kind=identity，不推提醒', async () => {
+    const s = setup(() => ({ result: { text: IDENTITY_REPLY_NEW } }), { identity: true });
     await s.round();
     const up = await row('carpool');
-    expect(up).toMatchObject({ alive: true, probeState: 'ok' });
-    expect(up?.probeDetail).toContain('降智检测通过（(37+58)×12-205=935）');
+    expect(up).toMatchObject({ alive: true, probeState: 'ok', probeKind: 'identity' });
+    expect(up?.probeDetail).toContain('身份题通过（日本首相）');
     const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
     expect(h).toMatchObject({
       result: 'passed',
+      kind: 'identity',
       checkQuestion: TEST_Q.text,
-      checkExpected: '935',
-      checkAnswer: '935',
+      checkAnswer: '高市早苗',
       checkPassed: true,
-      selfIdentity: 'Anthropic Claude Opus 5.5',
+      selfIdentity: 'gpt-6-sol',
     });
-    expect(await iqAlert()).toBeUndefined();
+    expect(await identityAlert()).toBeUndefined();
   });
 
-  it('答错：判疑似降智，不在线，推「路由疑似降智」；同一条路由再降智不重复推；下一次答对撤掉', async () => {
+  it('说出旧答案：疑似换成旧模型，下线，推 probe-identity；再探通撤掉，并顺手撤老 probe-iq', async () => {
+    await upsertAlert(t.db, {
+      dedupeKey: iqAlertKey('carpool'),
+      level: 'alert',
+      taskId: null,
+      title: '路由疑似降智',
+      body: '老降智提醒，探通后应一并撤',
+    });
     let good = false;
-    const s = setup(() => ({ result: { text: good ? REPLY : 'OK\n答案：1000\n模型：某小模型' } }));
+    const s = setup(() => ({ result: { text: good ? IDENTITY_REPLY_NEW : IDENTITY_REPLY_OLD } }), {
+      identity: true,
+    });
     await s.round();
     const down = await row('carpool');
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
-    expect(down?.probeDetail).toContain(`疑似降智：题 ${TEST_Q.text}，应为 935，实答 1000`);
+    expect(down?.probeDetail).toContain('疑似换成旧模型');
+    expect(down?.probeDetail).toContain('石破茂');
     const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
     expect(h).toMatchObject({
       result: 'failed',
-      checkExpected: '935',
-      checkAnswer: '1000',
+      checkAnswer: '石破茂',
       checkPassed: false,
-      selfIdentity: '某小模型',
+      selfIdentity: 'gpt-6-astra',
     });
-    const alert = await iqAlert();
-    expect(alert).toMatchObject({ title: '路由疑似降智', resolvedAt: null });
-    expect(alert?.body).toContain('935');
-    expect(alert?.body).toContain('1000');
-    expect(alert?.body).toContain('某小模型');
+    const alert = await identityAlert();
+    expect(alert).toMatchObject({ title: '路由疑似换成旧模型', resolvedAt: null });
+    expect(alert?.body).toContain('石破茂');
+    expect((await iqAlert())?.resolvedAt).toBeNull();
 
     s.advance(60);
     await s.round();
     const same = (await t.db.select().from(notifications)).filter(
-      (n) => n.dedupeKey === iqAlertKey('carpool'),
+      (n) => n.dedupeKey === identityAlertKey('carpool'),
     );
     expect(same).toHaveLength(1);
 
@@ -399,33 +417,52 @@ describe('降智检测（#1637）', () => {
     s.advance(60);
     await s.round();
     expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
+    expect((await identityAlert())?.resolvedAt).not.toBeNull();
     expect((await iqAlert())?.resolvedAt).not.toBeNull();
   });
 
-  it('只有第一行 OK、没写答案：判疑似降智，实答写「没写」', async () => {
-    const s = setup(() => ({ result: { text: 'OK' } }));
+  it('认不出：check_passed 为空，结论照通，不推提醒', async () => {
+    const s = setup(() => ({ result: { text: IDENTITY_REPLY_UNKNOWN } }), { identity: true });
     await s.round();
-    const down = await row('carpool');
-    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
-    expect(down?.probeDetail).toContain('疑似降智');
-    expect(down?.probeDetail).toContain('实答 没写');
+    const up = await row('carpool');
+    expect(up).toMatchObject({ alive: true, probeState: 'ok' });
+    expect(up?.probeDetail).toContain('身份题认不出');
     const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
-    expect(h).toMatchObject({ checkAnswer: null, checkPassed: false });
-    expect(await iqAlert()).toBeDefined();
+    expect(h).toMatchObject({
+      result: 'passed',
+      checkAnswer: '我不确定',
+      checkPassed: null,
+      selfIdentity: '某模型',
+    });
+    expect(await identityAlert()).toBeUndefined();
   });
 
-  it('没有第一行 OK：照旧是回答认不出，不判降智、不推提醒', async () => {
-    const s = setup(() => ({ result: { text: '答案：935' } }));
+  it('连通探测：只回 pong 就通，历史 kind=ping，没有身份题记录', async () => {
+    const s = setup(answered);
+    await s.round();
+    const up = await row('carpool');
+    expect(up).toMatchObject({ alive: true, probeState: 'ok', probeKind: 'ping' });
+    expect(up?.probeDetail).toMatch(/^答上了：pong · 用时 \d+ 秒/);
+    const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
+    expect(h).toMatchObject({
+      result: 'passed',
+      kind: 'ping',
+      checkQuestion: null,
+      checkPassed: null,
+    });
+    expect(await identityAlert()).toBeUndefined();
+  });
+
+  it('没有第一行 pong：回答认不出，不推身份提醒', async () => {
+    const s = setup(() => ({ result: { text: '答案：高市早苗' } }), { identity: true });
     await s.round();
     const down = await row('carpool');
     expect(down?.probeDetail).toContain('回答认不出');
-    expect(down?.probeDetail).not.toContain('疑似降智');
-    const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
-    expect(h?.checkPassed).toBeNull();
-    expect(await iqAlert()).toBeUndefined();
+    expect(down?.probeDetail).not.toContain('疑似换成旧模型');
+    expect(await identityAlert()).toBeUndefined();
   });
 
-  it('额度用满被拒：照旧算通，不判降智、没有降智记录', async () => {
+  it('额度用满被拒：照旧算通，没有身份题记录', async () => {
     const s = setup(() => ({
       result: { isError: true, terminalReason: 'api_error', text: '拼车 5 小时额度已用完，约 20 分钟后重置' },
       exitCode: 1,
@@ -435,12 +472,12 @@ describe('降智检测（#1637）', () => {
     const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
     expect(h?.checkPassed).toBeNull();
     expect(h?.checkQuestion).toBeNull();
-    expect(await iqAlert()).toBeUndefined();
+    expect(await identityAlert()).toBeUndefined();
   });
 });
 
 describe('没探通的：离线，写明是哪一种（不许拿默认值、上一轮的在线冒充）', () => {
-  it('答了、但答的不是 OK（输出认不出）：隔一会儿再探一次，还不对就离线', async () => {
+  it('答了、但答的不是 pong（输出认不出）：隔一会儿再探一次，还不对就离线', async () => {
     const s = setup(() => ({ result: { text: '你好！有什么可以帮你？' } }));
     await s.round();
     expect(s.fake.count()).toBe(2);
@@ -450,29 +487,27 @@ describe('没探通的：离线，写明是哪一种（不许拿默认值、上�
     expect(down?.probeDetail).toContain('连探两次都没通');
   });
 
-  // 只要「含 OK」就算通，会把这几种也写成在线（#148 合并后补审）：整句必须就是 OK
-  it.each(['Not OK', 'OK, but I cannot run tools here', 'ok.', 'OK OK', 'OK 好的\n答案：935'])(
-    '回答「%s」不是只回 OK：不算探通，离线、原因里带着原话',
+  // 只要「含 pong」就算通，会把这几种也写成在线：整句必须就是 pong
+  it.each(['Not pong', 'pong, but I cannot run tools here', 'pong.', 'pong pong', 'pong 好的'])(
+    '回答「%s」不是只回 pong：不算探通，离线、原因里带着原话',
     async (reply) => {
       const s = setup(() => ({ result: { text: reply } }));
       await s.round();
       const down = await row('carpool');
       expect(down).toMatchObject({ alive: false, probeState: 'failed' });
-      expect(down?.probeDetail).toContain('回答认不出（要的是第一行只写 OK）');
+      expect(down?.probeDetail).toContain('回答认不出（要的是第一行只写 pong）');
       expect(down?.probeDetail).toContain(reply);
     },
   );
 
-  it.each([
-    'OK\n答案：935',
-    'ok\n答案:935。',
-    '  OK\n\n答案：**935**\n模型：x\n',
-    '```\nOK\n答案：`935`\n```',
-  ])('回答「%s」（第一行是 OK、答案对；粗体、反引号、代码块围栏、半角冒号都认）：探通', async (reply) => {
-    const s = setup(() => ({ result: { text: reply } }));
-    await s.round();
-    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
-  });
+  it.each(['pong', 'PONG', '  pong\n', '```\npong\n```', '**pong**'])(
+    '回答「%s」（第一行整行是 pong；粗体、代码块围栏都认）：探通',
+    async (reply) => {
+      const s = setup(() => ({ result: { text: reply } }));
+      await s.round();
+      expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
+    },
+  );
 
   // 超时三种（插头强杀）：迟迟没有第一帧（reclaude 卡在同步配置上）、总时长到顶、长时间没动静。都不是要人修的整池问题：
   // 隔一会儿同一轮再探一次，还不通才离线，原因写明是哪种超时和执行体最后说的话；不写「整池暂停」。
@@ -571,11 +606,11 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
     expect(run.online).toEqual(expect.arrayContaining(['carpool', routeId]));
     const up = await row(routeId);
     expect(up).toMatchObject({ alive: true, probeState: 'ok' });
-    expect(up?.probeDetail).toMatch(/^答上了：OK · 降智检测通过（.*） · 用时 \d+ 秒$/);
+    expect(up?.probeDetail).toMatch(/^答上了：pong · 用时 \d+ 秒$/);
     expect(s.cursor.count()).toBe(1);
     const [spec] = s.cursor.specs;
     expect(spec).toMatchObject({
-      prompt: probePrompt(TEST_Q),
+      prompt: pingPrompt(),
       model: 'auto',
       force: false,
       session: { mode: 'new' },
@@ -746,7 +781,7 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
     await s.round();
     const down = await row(routeId);
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
-    expect(down?.probeDetail).toContain('回答认不出（要的是第一行只写 OK）');
+    expect(down?.probeDetail).toContain('回答认不出（要的是第一行只写 pong）');
   });
 });
 
@@ -772,11 +807,11 @@ describe('grok 的路由（#266）：和干活的会话同一个驱动探，判�
     expect(run.online).toEqual(expect.arrayContaining(['carpool', routeId]));
     const up = await row(routeId);
     expect(up).toMatchObject({ alive: true, probeState: 'ok' });
-    expect(up?.probeDetail).toMatch(/^答上了：OK · 降智检测通过（.*） · 用时 \d+ 秒$/);
+    expect(up?.probeDetail).toMatch(/^答上了：pong · 用时 \d+ 秒$/);
     expect(s.grok.count()).toBe(1);
     const [spec] = s.grok.specs;
     expect(spec).toMatchObject({
-      prompt: probePrompt(TEST_Q),
+      prompt: pingPrompt(),
       model: 'grok-4.7',
       alwaysApprove: false,
       session: { mode: 'new' },
@@ -907,7 +942,7 @@ describe('grok 的路由（#266）：和干活的会话同一个驱动探，判�
     await s.round();
     const down = await row(routeId);
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
-    expect(down?.probeDetail).toContain('回答认不出（要的是第一行只写 OK）');
+    expect(down?.probeDetail).toContain('回答认不出（要的是第一行只写 pong）');
   });
 });
 
@@ -928,11 +963,11 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
     expect(run.online).toEqual(expect.arrayContaining(['carpool', routeId]));
     const up = await row(routeId);
     expect(up).toMatchObject({ alive: true, probeState: 'ok' });
-    expect(up?.probeDetail).toMatch(/^答上了：OK · 降智检测通过（.*） · 用时 \d+ 秒$/);
+    expect(up?.probeDetail).toMatch(/^答上了：pong · 用时 \d+ 秒$/);
     expect(s.mirasim.count()).toBe(1);
     const [spec] = s.mirasim.specs;
     expect(spec).toMatchObject({
-      prompt: probePrompt(TEST_Q),
+      prompt: pingPrompt(),
       agent: 'dsh',
       route: 'cloud',
       model: 'deepseek-flash',
@@ -1057,7 +1092,7 @@ describe.skipIf(process.platform === 'win32')(
       const s = setup(answered, { realCursor: rig });
       await s.round();
       const up = await row(routeId);
-      expect(up?.probeDetail).toMatch(/^答上了：OK · /);
+      expect(up?.probeDetail).toMatch(/^答上了：pong · /);
       expect(up).toMatchObject({ alive: true, probeState: 'ok' });
       const argv = rig.traces();
       expect(argv).toContain('--trust');

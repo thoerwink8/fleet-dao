@@ -4,6 +4,7 @@
 // 组织认不出是该探却探不了：这一轮当不通，同样不改写。探不通写成 failed（不在线），探通后由原来的恢复路径拉起来。
 // 探通但结论写不进 routes：不能当通过去起会话（库里没有这一次的结论，5 分钟内不重复探也保不住），按不通换下一条。
 
+import type { RouteProbeKind } from '@fleet-dao/db';
 import type { ProbeCheck } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { LiveOrgReading } from '../routing/types.ts';
@@ -18,7 +19,13 @@ import {
 } from './route-probe.ts';
 import type { ProbeLock } from './route-probe-now.ts';
 
-const NO_CAPTURE = { durationMs: null, requestText: null, responseText: null } as const;
+const NO_CAPTURE = {
+  durationMs: null,
+  requestText: null,
+  responseText: null,
+  check: null,
+  kind: null,
+} as const;
 
 function pass(label: string, detail: string, probed: boolean): ProbeAssignedResult {
   return { kind: 'pass', label, detail, probed };
@@ -52,10 +59,16 @@ async function writeConclusion(
     tier?: Conclusion['tier'];
     nextAt?: Conclusion['nextAt'];
     failStreak?: Conclusion['failStreak'];
+    kind?: RouteProbeKind | null;
   },
 ): Promise<Written> {
   try {
-    const saved = await deps.save({ routeId, ...write });
+    const { kind, ...rest } = write;
+    const saved = await deps.save({
+      routeId,
+      ...rest,
+      ...(kind !== undefined && kind !== null ? { kind } : {}),
+    });
     return saved === 'route_not_found' ? { kind: 'route_not_found' } : { kind: 'saved' };
   } catch (err) {
     return { kind: 'write_failed', error: errMessage(err) };

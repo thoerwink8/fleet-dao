@@ -83,6 +83,7 @@ interface Harness {
     nextAt?: Date | null;
     failStreak?: number;
     trigger?: string | null;
+    kind?: 'ping' | 'identity' | null;
   }[];
   /** 没到期的路由：只更新档和下次探测时刻（savePace）。 */
   savedPace: { routeId: string; tier: string; nextAt: Date | null }[];
@@ -322,12 +323,27 @@ describe('一轮里读会话用户挂的组织', () => {
     });
   });
 
-  it('降智检测的题和判的结果（#1637）原样交给写入；没真探的是空', async () => {
-    const check = { question: '1+1？', expected: '2', answer: '3', passed: false, selfIdentity: 'x' };
+  it('身份题的题和判的结果（#1798）原样交给写入；没真探的是空', async () => {
+    const check = {
+      question: '日本首相？',
+      expected: '高市早苗',
+      answer: '石破茂',
+      passed: false,
+      selfIdentity: 'x',
+    };
     const meter = target({ routeId: 'meter', billing: 'metered', orgKind: null, poolId: 'meter' });
-    const h = harness([carpool, meter], async () => ({ kind: 'failed', detail: '疑似降智', check }));
+    const h = harness([carpool, meter], async () => ({
+      kind: 'failed',
+      detail: '疑似换成旧模型',
+      check,
+      probeKind: 'identity' as const,
+    }));
     await runRouteProbeJob(h.deps);
-    expect(h.saved.find((s) => s.routeId === carpool.routeId)).toMatchObject({ state: 'failed', check });
+    expect(h.saved.find((s) => s.routeId === carpool.routeId)).toMatchObject({
+      state: 'failed',
+      check,
+      kind: 'identity',
+    });
     expect(h.saved.find((s) => s.routeId === 'meter')?.check ?? null).toBeNull();
   });
 

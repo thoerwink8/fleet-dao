@@ -2,7 +2,8 @@
 // 数都是后端算好的（usage.bySegment、segmentRuns，算法在 shared 的 usage.ts、segment-runs.ts），这里只管怎么说：
 // 读到的照数写；读到一部分照数写、写明几次没读到；全没读到写「没读到」，不写 0；每一笔没读到的原因原样列出来。
 import type { SegmentKind, UsageTotals } from '@fleet-dao/shared';
-import type { ReactNode } from 'react';
+import { ChevronDown } from 'lucide-react';
+import { type ReactNode, useState } from 'react';
 import type { Repo, TaskDetail } from '../api/types';
 import { formatClock, formatCount, formatDateTime, formatDuration, formatUsd, span } from '../lib/format';
 import {
@@ -25,6 +26,7 @@ import {
 import { isTaskFinished } from '../lib/status';
 import { costParts, EQUIVALENT_RULE, type Reading, reading } from '../lib/usage';
 import { cn } from '../lib/utils';
+import { usePhone } from '../lib/viewport';
 import { Panel, Stat } from './page';
 import { RepoLink } from './repo-link';
 import { StatusChip } from './status';
@@ -86,8 +88,28 @@ function costCollapseLabel(t: UsageTotals): string | undefined {
   return undefined;
 }
 
+/** 手机一行摘要里的花费：和花费那一格同一套取舍，只留一个短词。 */
+function costBrief(t: UsageTotals): string {
+  const { metered, subscription, unknown } = t.cost;
+  const meteredR = reading(metered.usd, metered.missing, metered.runs);
+  const subR = reading(subscription.usd, subscription.missing, subscription.runs);
+  const pick = metered.runs ? metered : subscription.runs ? subscription : unknown;
+  const r = reading(pick.usd, pick.missing, pick.runs);
+  const e = t.estimate;
+  if (r.kind === 'missing' && (e.runs || e.noPrice || e.noTokens)) {
+    return e.runs ? `估算 ${formatUsd(e.usd)}` : e.noPrice ? '没有单价' : '估不了';
+  }
+  if (r.kind === 'missing') return '花费没读到';
+  if (r.kind === 'none') return '花费 —';
+  if (meteredR.kind === 'full' || meteredR.kind === 'partial') return formatUsd(meteredR.value);
+  if (subR.kind === 'full' || subR.kind === 'partial') return `折合 ${formatUsd(subR.value)}`;
+  return `花费 ${shareText(meteredR)}`;
+}
+
 /** 顶上几格：已用时、干活合计、输入当量、花费。没读到的不占大格，收成一行灰字（#1751）。 */
 export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
+  const phone = usePhone();
+  const [expanded, setExpanded] = useState(false);
   const t = d.usage.total;
   const live = d.segmentRuns
     .map((r) => liveMs(r, now))
@@ -160,9 +182,37 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
         ? 'grid-cols-1 gap-3 sm:grid-cols-3'
         : 'grid-cols-2 gap-3';
 
+  const wallText = formatDuration(wallMs(d, now));
+  const segmentCount = new Set(d.segmentRuns.map((r) => r.segment).filter(Boolean)).size;
+
   return (
     <div data-segment-stats>
-      <div className={cn('grid', cols)}>{cards}</div>
+      {phone ? (
+        // 手机首屏只放一行摘要（耗时 · 花费 · 段），点开才出四张统计卡（#1820）
+        <>
+          <button
+            type="button"
+            data-stats-summary
+            aria-expanded={expanded}
+            onClick={() => setExpanded((v) => !v)}
+            className="flex min-h-10 w-full items-center gap-2 rounded-xl border bg-card px-4 py-2 text-left text-sm shadow-card-edge"
+          >
+            <span className="num min-w-0 flex-1 truncate">
+              {finished ? '共' : '已用'} {wallText} · {costBrief(t)} · {segmentCount} 段
+            </span>
+            <ChevronDown
+              className={cn(
+                'size-4 shrink-0 text-muted-foreground transition-transform',
+                expanded && 'rotate-180',
+              )}
+              aria-hidden
+            />
+          </button>
+          {expanded ? <div className={cn('mt-3 grid', cols)}>{cards}</div> : null}
+        </>
+      ) : (
+        <div className={cn('grid', cols)}>{cards}</div>
+      )}
       {collapsed.length ? (
         <p
           className="mt-2 text-caption text-muted-foreground"
@@ -667,7 +717,7 @@ function RunRow({
               repo={repo}
               kind="pull"
               n={run.prNumber}
-              className="num underline-offset-2 hover:underline"
+              className="num underline-offset-2 hover:underline max-md:inline-flex max-md:min-h-10 max-md:items-center"
             >
               PR #{run.prNumber}
             </RepoLink>

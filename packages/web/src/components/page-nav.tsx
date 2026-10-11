@@ -27,7 +27,7 @@ export function PageNav({
         <a
           key={x.id}
           href={`#${x.id}`}
-          className="shrink-0 rounded-full border bg-card px-3 py-1 text-xs whitespace-nowrap text-muted-foreground hover:border-border-strong hover:text-foreground lg:rounded-md lg:border-transparent lg:bg-transparent lg:px-2.5 lg:py-1.5 lg:text-sm lg:hover:bg-muted"
+          className="inline-flex shrink-0 items-center max-md:min-h-10 rounded-full border bg-card px-3 py-1 text-xs whitespace-nowrap text-muted-foreground hover:border-border-strong hover:text-foreground lg:rounded-md lg:border-transparent lg:bg-transparent lg:px-2.5 lg:py-1.5 lg:text-sm lg:hover:bg-muted"
         >
           {x.label}
         </a>
