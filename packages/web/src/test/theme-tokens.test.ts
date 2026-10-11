@@ -122,6 +122,50 @@ describe('组件令牌和密度（规范 2.7）', () => {
   });
 });
 
+describe('字号两组值：手机在 :root，桌面（48rem 起）参照苹果 macOS HIG（#1882）', () => {
+  const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
+  const FS = ['body', 'heading', 'title', 'display'] as const;
+  const MEDIA = /@media \(width >= 48rem\) \{\s*:root \{\s*--fs-/;
+  const mediaAt = css.search(MEDIA);
+
+  /** 取一段 CSS 里「--fs-名: 值」的字典。 */
+  function fsVars(body: string): Record<string, string> {
+    return Object.fromEntries([...body.matchAll(/--fs-([a-z-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2]]));
+  }
+  const rootAt = css.search(/:root \{\s*--fs-/);
+  const mobile = fsVars(css.slice(rootAt, mediaAt));
+  const desktop = fsVars(css.slice(mediaAt, css.indexOf('\n}\n', mediaAt)));
+  const pairs = (v: Record<string, string>) => FS.map((n) => `${v[n]} / ${v[`${n}-lh`]}`);
+
+  test('手机（<48rem）：正文 14/20、小标题 16/24、页标题 20/28、大数字 28/32', () => {
+    expect(pairs(mobile)).toEqual([
+      '0.875rem / 1.25rem',
+      '1rem / 1.5rem',
+      '1.25rem / 1.75rem',
+      '1.75rem / 2rem',
+    ]);
+  });
+  test('桌面（≥48rem）：正文 13/16、小标题 15/20、页标题 22/28、大数字 26/32', () => {
+    expect(mediaAt, 'app.css 里没有 48rem 的 --fs-* 覆盖块').toBeGreaterThan(-1);
+    expect(pairs(desktop)).toEqual([
+      '0.8125rem / 1rem',
+      '0.9375rem / 1.25rem',
+      '1.375rem / 1.75rem',
+      '1.625rem / 2rem',
+    ]);
+  });
+  test('@theme 的四档读 --fs-*，meta 12/16 和画布 11/14 两组一样、直接写值', () => {
+    for (const n of FS) {
+      expect(css, n).toContain(`--text-${n}: var(--fs-${n});`);
+      expect(css, n).toContain(`--text-${n}--line-height: var(--fs-${n}-lh);`);
+    }
+    expect(css).toContain('--text-meta: 0.75rem;');
+    expect(css).toContain('--text-meta--line-height: 1rem;');
+    expect(css).toContain('--text-canvas: 0.6875rem;');
+    expect(desktop.meta).toBeUndefined();
+  });
+});
+
 describe('收口：@theme 关掉 Tailwind 默认的字号、圆角、阴影（#1855）', () => {
   const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
 
