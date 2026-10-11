@@ -52,6 +52,8 @@ export function prColumns(body: string): Map<string, string> {
 interface ColumnSpan {
   name: string;
   value: string;
+  /** 栏名那行冒号后面的字原样留着（`**需求**：创始人原话：「同意」` 的「创始人原话：「同意」」），withIssueColumn 用。 */
+  head: string;
   /** 这一栏占的行：从栏名那行起，到下一栏（或小标题、正文结尾）前一行止（行号从 0 数，end 不含）。 */
   start: number;
   end: number;
@@ -60,7 +62,7 @@ interface ColumnSpan {
 /** prColumns 和 withIssueColumn 共用的切法：栏的先后、同名的都照出现的顺序全列出来。 */
 function columnSpans(body: string): ColumnSpan[] {
   const spans: ColumnSpan[] = [];
-  let current: { name: string; start: number } | undefined;
+  let current: { name: string; start: number; head: string } | undefined;
   let buf: string[] = [];
   const flush = (end: number) => {
     if (current) spans.push({ ...current, value: buf.join('\n').trim(), end });
@@ -78,7 +80,7 @@ function columnSpans(body: string): ColumnSpan[] {
     const m = bold ?? (plain?.[1] && KNOWN.has(plain[1].toLowerCase()) ? plain : null);
     if (m?.[1] !== undefined) {
       flush(i);
-      current = { name: m[1].trim().toLowerCase(), start: i };
+      current = { name: m[1].trim().toLowerCase(), start: i, head: (m[2] ?? '').trim() };
       buf = [m[2] ?? ''];
     } else if (current !== undefined) {
       buf.push(line);
@@ -90,8 +92,9 @@ function columnSpans(body: string): ColumnSpan[] {
 
 /**
  * `pnpm pr:open --no-issue "<理由>"` 把理由写进「需求」栏：栏名那行换成「**需求**：<value>」，栏里原有的字
- * （创始人原话段、说明、GATE_LINE「人闸：改标准」）按原顺序留在它下面——改标准的 PR 靠原话证明创始人同意过，
- * 吞了就像没同意（#1890）。模板提示（HTML 注释）不算内容，丢掉；没有这一栏就整栏加在正文末尾，别的栏不动。
+ * （栏名那行冒号后面的原话、下面各行的原话段和说明、GATE_LINE「人闸：改标准」）按原顺序留在它下面——改标准的 PR
+ * 靠原话证明创始人同意过，吞了就像没同意（#1890）。模板提示（HTML 注释）不算内容，丢掉；没有这一栏就整栏加在
+ * 正文末尾，别的栏不动。
  */
 export function withIssueColumn(body: string, value: string): string {
   const line = `**${ISSUE_COLUMN}**：${value}`;
@@ -101,10 +104,15 @@ export function withIssueColumn(body: string, value: string): string {
   const lines = text.split('\n');
   let end = span.end;
   while (end > span.start + 1 && !lines[end - 1]?.trim()) end--; // 栏后面隔开下一栏的空行留着
-  // 栏里原有的行留着（空行也留：段与段之间靠它隔着）；只有整行都是模板提示（HTML 注释）的不算内容
-  const kept = lines.slice(span.start + 1, end).filter((l) => !l.trim() || stripComments(l).trim());
+  // 栏里原有的字留着：栏名那行冒号后面的字另起一行（`**需求**：创始人原话：「同意」` 里那段原话不算丢），
+  // 下面各行照旧；空行也留（段与段之间靠它隔着），只有整行都是模板提示（HTML 注释）的不算内容
+  const head = stripComments(span.head).trim();
+  const kept = [
+    ...(head ? [head] : []),
+    ...lines.slice(span.start + 1, end).filter((l) => !l.trim() || stripComments(l).trim()),
+  ];
   while (kept[0] !== undefined && !kept[0].trim()) kept.shift();
-  while (kept[kept.length - 1] !== undefined && !kept[kept.length - 1]?.trim()) kept.pop();
+  while (kept.length > 0 && !kept[kept.length - 1]?.trim()) kept.pop();
   lines.splice(span.start, end - span.start, line, ...kept);
   return lines.join('\n');
 }

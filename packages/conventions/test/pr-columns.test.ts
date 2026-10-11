@@ -165,6 +165,17 @@ describe('需求栏挂单（#1052：pr:open 据此拒开没挂单的 PR）', () 
     expect(issueColumnRefs('**需求**：Closes #12\n人闸：改标准\n')).toEqual({ closes: [12], refs: [] });
   });
 
+  it('withIssueColumn：原话写在栏名那行冒号后面（`**需求**：创始人原话：「同意」`）也不吞（#1890 返工）', () => {
+    const body = '**做了什么**：x\n\n**需求**：创始人原话：「同意」（2026-10-11 03:48）\n';
+    const out = withIssueColumn(body, '无：理由');
+    expect(out).toBe('**做了什么**：x\n\n**需求**：无：理由\n创始人原话：「同意」（2026-10-11 03:48）\n');
+    expect(prColumns(out).get('需求')).toBe('无：理由\n创始人原话：「同意」（2026-10-11 03:48）');
+
+    // 栏名那行既有原话又有模板提示：提示丢掉，原话留着
+    const mixed = withIssueColumn('**需求**：创始人原话：「同意」 <!-- 单号 -->\n', '无：理由');
+    expect(mixed).toBe('**需求**：无：理由\n创始人原话：「同意」\n');
+  });
+
   it('旧模板的「怎么验证的」「还欠什么」（#1066 删）读旧 PR 正文时还认得出栏的边界，不吞进需求栏', () => {
     expect(prColumns('需求：Closes #12\n还欠什么：无').get('需求')).toBe('Closes #12');
     expect(prColumns('做了什么：x\n怎么验证的：跑了\n需求：Refs #7').get('做了什么')).toBe('x');
