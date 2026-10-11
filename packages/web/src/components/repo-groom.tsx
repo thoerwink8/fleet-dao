@@ -214,7 +214,7 @@ export function RepoGroomControl({
           aria-controls={detailId}
           aria-label={`${name} 的整理详情`}
           onClick={() => setOpen((v) => !v)}
-          className="inline-flex items-center gap-0.5 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          className="inline-flex items-center gap-0.5 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10"
         >
           详情
           <ChevronRight className={cn('size-3.5 transition-transform', open && 'rotate-90')} aria-hidden />

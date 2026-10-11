@@ -226,12 +226,12 @@ describe('探针结论过没过期（和引擎同一条线）', () => {
     expect(probeStale(route('a', 'unknown'), NOW)).toBe(false);
   });
 
-  test('放慢的执行方式（cursor-agent 两小时一探）：按它自己的间隔算，一小时前的不算过期', () => {
-    expect(probeStale(route('c', 'live', { hostId: 'cursor-agent', probedAt: ago(60) }), NOW)).toBe(false);
-    expect(probeStale(route('c', 'live', { hostId: 'cursor-agent', probedAt: ago(200) }), NOW)).toBe(true);
+  test('不分执行方式：cursor-agent 和 Claude 同一条过期线（#1798 片 3），一小时前算过期', () => {
+    expect(probeStale(route('c', 'live', { hostId: 'cursor-agent', probedAt: ago(40) }), NOW)).toBe(false);
+    expect(probeStale(route('c', 'live', { hostId: 'cursor-agent', probedAt: ago(60) }), NOW)).toBe(true);
   });
 
-  test('退避中、或写了隔 30 分钟再探：过期线按那一档，不标成探针停了', () => {
+  test('退避中按那一档放宽；旧的「隔 30 分钟再探」原文不再放宽；按需探测仍不算过期', () => {
     const backing = '没通。退避中，下次约 16:07 再探（连着不通 6 次）';
     expect(
       probeStale(
@@ -245,8 +245,8 @@ describe('探针结论过没过期（和引擎同一条线）', () => {
     ).toBe(false);
     expect(probeStale(route('b', 'dead', { probedAt: ago(280), probeDetail: backing }), NOW)).toBe(true);
     const deferred = '答上了：OK。用途前 2 位，隔 30 分钟再探';
-    expect(probeStale(route('d', 'live', { probedAt: ago(60), probeDetail: deferred }), NOW)).toBe(false);
-    expect(probeStale(route('d', 'live', { probedAt: ago(80), probeDetail: deferred }), NOW)).toBe(true);
+    expect(probeStale(route('d', 'live', { probedAt: ago(40), probeDetail: deferred }), NOW)).toBe(false);
+    expect(probeStale(route('d', 'live', { probedAt: ago(60), probeDetail: deferred }), NOW)).toBe(true);
     // 按需探测：不主动探，放多久都不算探针停了
     const onDemand = '不主动探，要派给它时先探一次。上一次真探：通，10-09 08:00';
     expect(probeStale(route('o', 'unknown', { probedAt: ago(5000), probeDetail: onDemand }), NOW)).toBe(

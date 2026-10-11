@@ -14,8 +14,8 @@
 // 版式：只有一台时六格排成卡片（不画对照列）；两台及以上每个环境一列、六项各占一行用 subgrid 对齐。
 // 下面左边定时任务表（出问题的排前面）、右边发版。六格怎么画在 components/env-facts.tsx。
 
-import { ArrowRight, Rocket, SearchX, ServerCog } from 'lucide-react';
-import type { CSSProperties, ReactNode } from 'react';
+import { ArrowRight, ChevronDown, Rocket, SearchX, ServerCog } from 'lucide-react';
+import { type CSSProperties, type ReactNode, useState } from 'react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
 import {
@@ -50,6 +50,7 @@ import { freshnessNow, nodeAgeText, useNodeSelection } from '../lib/node';
 import { useShownError } from '../lib/shown-error';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
+import { usePhone } from '../lib/viewport';
 
 export function meta() {
   return [{ title: brand.title('法国') }];
@@ -204,6 +205,7 @@ function EnvColumn({
   tone,
   selected,
   note,
+  onFold,
   children,
 }: {
   id: string;
@@ -213,6 +215,8 @@ function EnvColumn({
   tone: 'ok' | 'stale';
   selected: boolean;
   note?: ReactNode;
+  /** 有就在头上画「收起」（手机上点开过的失联环境）。 */
+  onFold?: (() => void) | undefined;
   children: ReactNode;
 }) {
   return (
@@ -221,7 +225,8 @@ function EnvColumn({
       data-env-column-state={tone}
       data-env-selected={selected}
       className={cn(
-        'row-span-7 grid min-w-0 grid-rows-subgrid gap-0 overflow-hidden rounded-xl border bg-card shadow-card-edge',
+        // 手机一列上下叠，不用 subgrid 对齐；md 起每台一列、六项各落一行（subgrid）
+        'grid min-w-0 gap-0 overflow-hidden md:row-span-7 md:grid-rows-subgrid rounded-xl border bg-card shadow-card-edge',
         selected && 'border-brand/60 ring-1 ring-brand/30',
         // 失联 / 没数据：整块置灰，别让旧的「在跑」「N 项红」看起来像现在的状态
         tone === 'stale' && 'bg-muted/40 text-muted-foreground opacity-70 shadow-none',
@@ -242,6 +247,16 @@ function EnvColumn({
           {age}
         </p>
         {note ? <p className="mt-0.5 text-xs text-muted-foreground">{note}</p> : null}
+        {onFold ? (
+          <button
+            type="button"
+            aria-expanded
+            onClick={onFold}
+            className="mt-1 inline-flex min-h-10 items-center gap-1 text-xs text-muted-foreground underline underline-offset-2"
+          >
+            收起
+          </button>
+        ) : null}
       </header>
       {children}
     </section>
@@ -250,9 +265,9 @@ function EnvColumn({
 
 /** 一列里占满六行的那一块（没收到快照、读失败、在读）。 */
 function Whole({ children }: { children: ReactNode }) {
-  const style: CSSProperties = { gridRow: `span ${FACT_ROWS}` };
+  const style = { '--fact-rows': FACT_ROWS } as CSSProperties;
   return (
-    <div className="border-t p-4" style={style}>
+    <div className="row-span-env-facts border-t p-4" style={style}>
       {children}
     </div>
   );
@@ -286,6 +301,9 @@ function MissingSnapshot({ nodeId }: { nodeId: string }) {
  * 超过 5 分钟最旧的一块还没再读成，刷新条才标「数据已过期」（正常间隔里不标）。
  */
 const FRANCE_STALE_AFTER_MS = 5 * TIME.MIN;
+
+/** 失联超过这么久，手机上这台默认折成一行。 */
+const LONG_GONE_MS = TIME.DAY;
 
 type ReadBlock = {
   refetch: () => unknown;
@@ -345,6 +363,35 @@ function RemoteColumn({
   const error = useShownError(n.id, { error: snap?.error, data: snap?.data });
   const age = nodeAgeText(n, now);
   const stale = f !== 'fresh';
+  // 手机上失联超过 24 小时的远程环境默认折成一行（#1837）：旧数据占半屏没用，点开才看；选中的那台不折
+  const phone = usePhone();
+  const [unfolded, setUnfolded] = useState(false);
+  const longGone =
+    f === 'stale' && n.receivedAt !== undefined && now - Date.parse(n.receivedAt) > LONG_GONE_MS;
+  if (phone && longGone && !unfolded && !selected) {
+    return (
+      <section
+        data-env-column={n.id}
+        data-env-column-state="stale"
+        data-env-collapsed
+        className="min-w-0 rounded-xl border bg-muted/40 shadow-none"
+      >
+        <button
+          type="button"
+          aria-expanded={false}
+          onClick={() => setUnfolded(true)}
+          className="flex min-h-10 w-full items-center gap-2 px-4 py-2 text-left text-sm text-muted-foreground"
+        >
+          <ServerCog className="size-4 shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1 truncate">
+            {snap?.data?.name ?? n.name} · <span className="text-ink-stall">{age}</span>
+          </span>
+          <span className="shrink-0 text-xs">点开看旧数据</span>
+          <ChevronDown className="size-4 shrink-0" aria-hidden />
+        </button>
+      </section>
+    );
+  }
   const body =
     f === 'never' || snap === undefined ? (
       <Whole>
@@ -385,6 +432,7 @@ function RemoteColumn({
       age={f === 'fresh' ? `上报于 ${age}` : age}
       tone={stale ? 'stale' : 'ok'}
       selected={selected}
+      onFold={phone && longGone && !selected ? () => setUnfolded(false) : undefined}
       note={
         f === 'stale'
           ? '失联，以下是旧数据。下面是它最后一次报的样子，不是现在的；要看现在的请去那台上看。'
@@ -478,8 +526,8 @@ export default function France() {
       ) : comparing ? (
         <div
           data-env-columns={1 + remote.length}
-          className="grid gap-x-4 gap-y-0"
-          style={{ gridTemplateColumns: `repeat(${1 + remote.length}, minmax(0, 1fr))` }}
+          className="grid grid-cols-env-compare gap-x-4 gap-y-3 md:gap-y-0"
+          style={{ '--env-cols': 1 + remote.length } as CSSProperties}
         >
           <EnvColumn
             id="local"
@@ -547,7 +595,7 @@ export default function France() {
 
       <div className="mt-4 grid items-start gap-4 xl:grid-cols-3">
         <Panel
-          className="xl:col-span-2"
+          className="min-w-0 xl:col-span-2"
           title={
             <span className="flex items-center gap-2">
               定时任务
@@ -585,7 +633,7 @@ export default function France() {
           )}
         </Panel>
 
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           <Panel
             title="发版"
             description="主线最新、法国在用、差几个、最近做完的一个任务（只读）；每一行读不到就写没查成和原因。要发布，点上面「在用版本」那一行的「发布到法国」。"

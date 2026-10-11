@@ -246,9 +246,14 @@ function mockEngine() {
 }
 
 /** 看板多机的假环境（wsl）这一次是哪种样子：见 nodes() 的说明；地址上没写就是刚报过（fresh）。 */
-function mockNodeMode(): 'fresh' | 'stale' | 'never' | 'off' {
+function mockNodeMode(): 'fresh' | 'stale' | 'gone' | 'never' | 'off' {
   const v = typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('mockNode');
-  return v === 'stale' || v === 'never' || v === 'off' ? v : 'fresh';
+  return v === 'stale' || v === 'gone' || v === 'never' || v === 'off' ? v : 'fresh';
+}
+
+/** 假环境（wsl）离上次上报多久：失联 12 分钟 / 失联 5 天 2 小时 / 刚报过。 */
+function mockNodeAgo(mode: ReturnType<typeof mockNodeMode>): number {
+  return mode === 'stale' ? 12 * 60_000 : mode === 'gone' ? (5 * 24 + 2) * 60 * 60_000 : 40_000;
 }
 
 /** 新先后必须是现在这一串的重排（多了、少了、重复都不算）。 */
@@ -1800,7 +1805,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     /**
      * 看板多机（切换器）的假数据：一个叫 wsl 的远程环境（本机 WSL）。形状照真后端；快照取自这份假库、环境名换成「本机 WSL」。
-     * 地址上加 ?mockNode=stale（失联 12 分钟）/ never（配了钥匙没推过）/ off（没有远程环境）看另外几种，默认是 1 分钟前刚报过。
+     * 地址上加 ?mockNode=stale（失联 12 分钟）/ gone（失联 5 天 2 小时，法国页手机上默认折成一行）/ never（配了钥匙没推过）/ off（没有远程环境）看另外几种，默认是 1 分钟前刚报过。
      */
     async nodes() {
       await wait();
@@ -1816,9 +1821,9 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
                 : {
                     id: 'wsl',
                     name: '本机 WSL',
-                    freshness: mode === 'stale' ? ('stale' as const) : ('fresh' as const),
-                    receivedAt: new Date(t - (mode === 'stale' ? 12 * 60_000 : 40_000)).toISOString(),
-                    reportedAt: new Date(t - (mode === 'stale' ? 12 * 60_000 : 41_000)).toISOString(),
+                    freshness: mode === 'stale' || mode === 'gone' ? ('stale' as const) : ('fresh' as const),
+                    receivedAt: new Date(t - mockNodeAgo(mode)).toISOString(),
+                    reportedAt: new Date(t - mockNodeAgo(mode) - 1000).toISOString(),
                     codeSha: 'a0006685f092154f90b462cc74e8872d32e5',
                   },
             ];
@@ -1837,13 +1842,13 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       if (mode === 'never')
         throw new ApiError(404, 'node_never_reported', `环境 ${nodeId} 配了通行证，但一次快照都没推来过`);
       const t = now();
-      const ago = mode === 'stale' ? 12 * 60_000 : 40_000;
+      const ago = mockNodeAgo(mode);
       const home = await api.home();
       const env = await api.env();
       return NodeDetailResponseSchema.parse({
         id: 'wsl',
         name: '本机 WSL',
-        freshness: mode === 'stale' ? 'stale' : 'fresh',
+        freshness: mode === 'stale' || mode === 'gone' ? 'stale' : 'fresh',
         receivedAt: new Date(t - ago).toISOString(),
         reportedAt: new Date(t - ago - 1000).toISOString(),
         codeSha: 'a0006685f092154f90b462cc74e8872d32e5',

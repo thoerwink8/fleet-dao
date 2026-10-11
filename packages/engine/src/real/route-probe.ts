@@ -30,6 +30,7 @@ import {
   saveRouteProbe,
   sessionOrgFacts,
   startScheduleRun,
+  updateRouteProbePace,
   upsertAlert,
 } from '@fleet-dao/db';
 import { type HostId, type OrgKind, probeBackoffNotice } from '@fleet-dao/shared';
@@ -580,6 +581,7 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
     sessionOrg: () => w.sessionOrg({ by: '路由探针' }),
     ...(w.orgSwitch ? { orgSwitch: w.orgSwitch } : {}),
     save: (x) => saveRouteProbe(w.db, x),
+    savePace: (x) => updateRouteProbePace(w.db, x),
     afterProbe: (t, a) => afterProbeAlerts(w.db, t, a),
     runs: {
       start: (job, at) => startScheduleRun(w.db, job, at),

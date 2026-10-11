@@ -73,12 +73,12 @@ export interface RouteProbeTarget {
   /**
    * 在各用途里、开着的路由中最靠前的名次（从 1 起）。开着 = 模型下这一行开着、渠道开着、模型没下架。
    * 关着的不占名次。一条路由进了几个用途，取最靠前的那个名次。没排进任何用途、或算不出：null
-   * （定时探针把 null 当成前 2 位，不放慢）。
+   * （定时探针：null 不算活跃名次，还要看 lastRunAt / restoresChannel）。
    */
   probeRank?: number | null;
   /**
    * 它所在的渠道被运行中失败标成 disabled，而这条路由正是引发的那条（或引发的那条已被删）：只有探针探通它才能把渠道改回 ok，
-   * 所以不能转按需（按需不探，渠道被 channel-failed 挡着，派前探测也轮不到它）。
+   * 所以算活跃档（#1798 片 3）。
    */
   restoresChannel?: boolean;
   /** 该路由 runs.started_at 的最大值；没有会话为空（#1798 片 2）。 */
@@ -288,6 +288,22 @@ function clipProbeText(text: string): string {
 function clipOrNull(text: string | null | undefined): string | null {
   if (text == null) return null;
   return clipProbeText(text);
+}
+
+/**
+ * 只改节奏列（档和下次探测时刻），不改结论、不写历史（#1798 片 3：定时轮没到期的也更新）。
+ * 路由已经不在了回 route_not_found。
+ */
+export async function updateRouteProbePace(
+  db: Db,
+  w: { routeId: string; tier: RouteProbeTier; nextAt: Date | null },
+): Promise<'saved' | 'route_not_found'> {
+  const updated = await db
+    .update(routes)
+    .set({ probeTier: w.tier, probeNextAt: w.nextAt })
+    .where(eq(routes.id, w.routeId))
+    .returning({ id: routes.id });
+  return updated.length === 0 ? 'route_not_found' : 'saved';
 }
 
 /**

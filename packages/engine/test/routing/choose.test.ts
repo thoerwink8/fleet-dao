@@ -526,16 +526,16 @@ describe('探针结论过期：照上一次的结论派，理由里写明', () =
     expect(over.kind === 'dispatch' && over.why).toContain('在线是探针 46 分钟前的结论');
   });
 
-  it('放慢的执行方式（cursor-agent 探通了隔 2 小时再探）按它自己的线：2 小时 30 分以内不算过期', () => {
+  it('不分执行方式：cursor-agent 和 Claude 同一条 45 分钟过期线（#1798 片 3，不再按执行方式放宽）', () => {
     const slow = { hostId: 'cursor-agent' as const };
     const stale = routeProbeStaleMinutes('cursor-agent');
-    expect(stale).toBe(150);
-    const fresh = chooseRoute(input([route('a', { ...slow, probedAt: minutesAgo(100) })]));
+    expect(stale).toBe(ROUTE_PROBE_STALE_MINUTES);
+    const fresh = chooseRoute(input([route('a', { ...slow, probedAt: minutesAgo(40) })]));
     expect(fresh.kind === 'dispatch' && fresh.why).not.toContain('探针');
     const edge = chooseRoute(input([route('a', { ...slow, probedAt: minutesAgo(stale) })]));
     expect(edge.kind === 'dispatch' && edge.why).not.toContain('探针');
     const over = chooseRoute(input([route('a', { ...slow, probedAt: minutesAgo(stale + 1) })]));
-    expect(over.kind === 'dispatch' && over.why).toContain('在线是探针 3 小时前的结论');
+    expect(over.kind === 'dispatch' && over.why).toContain('在线是探针 46 分钟前的结论');
   });
 
   it('派出去的每条路径都写：任务指定的路由、试探、全熔断时放的试探', () => {

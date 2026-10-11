@@ -130,10 +130,10 @@ test.describe('其余页面', () => {
     await expect(page.getByRole('heading', { name: '操作记录' })).toBeVisible();
     await expect(page.getByText('登录了驾驶舱').first()).toBeVisible();
     // 动作名翻成白话（lib/audit.ts）：不再露出 credentials.set 这样的代码。
-    // 「设了账密登录」是装库那一刻记的，是最老的几条：前面每个用例都登录一次，主线上两个视口走下来早超过一页（100 条），
-    // 它在「看更早的记录」后面，所以往前翻到它为止（翻完还没有就是真没记，按钮没了再断言会报错）。
+    // 「设了账密登录」是装库那一刻记的，是最老的几条：前面每个用例都登录一次，主线上两个视口走下来早超过一页（50 条），
+    // 它在「再看 50 条」后面，所以往前翻到它为止（翻完还没有就是真没记，按钮没了再断言会报错）。
     const setCredentials = page.getByText('设了账密登录').first();
-    const older = page.getByRole('button', { name: '看更早的记录' });
+    const older = page.getByRole('button', { name: '再看 50 条' });
     while (!(await setCredentials.isVisible()) && (await older.isVisible())) {
       await older.click();
       await expect(page.getByRole('button', { name: '正在读更早的…' })).toHaveCount(0);

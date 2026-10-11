@@ -334,9 +334,9 @@ describe('检测中断：上次探超过「探测间隔 + 3 分钟」就不当�
   test('半小时前的结论：检测中断（e2e 用的就是这个）', () => {
     expect(one(30).interrupted).toBe(true);
   });
-  test('放慢到 2 小时一轮的执行方式用它自己的间隔：30 分钟前不中断，125 分钟前才中断', () => {
-    expect(one(30, 'cursor-agent').interrupted).toBe(false);
-    expect(one(125, 'cursor-agent').interrupted).toBe(true);
+  test('不分执行方式：cursor-agent 和 15 分钟一轮同一条线（#1798 片 3），17 分钟前不中断，19 分钟前中断', () => {
+    expect(one(17, 'cursor-agent').interrupted).toBe(false);
+    expect(one(19, 'cursor-agent').interrupted).toBe(true);
   });
   test('探针报错的渠道检测中断了：不再写「顺延」（那是旧结论）', () => {
     const cards = buildChannelCards(
@@ -370,7 +370,7 @@ describe('检测中断：上次探超过「探测间隔 + 3 分钟」就不当�
     expect(byId(cards, 'a').interrupted).toBe(false);
   });
 
-  test('前 2 位写了隔 30 分钟再探：33 分钟前不中断，36 分钟前才中断', () => {
+  test('旧的「前 2 位隔 30 分钟再探」原文不再放宽中断线：和每轮探同一条（17 不中断、19 中断）', () => {
     const detail = '答上了：OK。用途前 2 位，隔 30 分钟再探';
     const at = (min: number) =>
       byId(
@@ -381,8 +381,8 @@ describe('检测中断：上次探超过「探测间隔 + 3 分钟」就不当�
         ),
         'a',
       );
-    expect(at(33).interrupted).toBe(false);
-    expect(at(36).interrupted).toBe(true);
+    expect(at(17).interrupted).toBe(false);
+    expect(at(19).interrupted).toBe(true);
   });
 
   test('按需探测的路由：不主动探，放多久都不算检测中断，也不画红；渠道标「按需探测」', () => {

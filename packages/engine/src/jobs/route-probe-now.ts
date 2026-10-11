@@ -4,7 +4,7 @@
 // 改这里之前必须知道：
 // - 和定时那一轮共用一把锁（routeProbeLock）：同一时刻引擎里最多一轮在探，不会同一条路由同时起两个会话；定时那一轮在跑，
 //   立即探测先记「接手」，等它跑完再探（页面看得到已接手、在等）。
-// - 人点的就真探：按一次的成本放慢、上一次探通还没到再探的时候（kept）、不通之后的退避，这里也照探
+// - 人点的就真探：三档节奏没到期的、不通之后的退避，这里也照探
 //   （节奏上把上一次当没有交给 planProbe；连着不通的次数还留着）。
 //   没有用途在用的也真探（#1630：就是要在挂进用途之前先看它通不通）。
 //   按量计费、整池暂停、插头没接、渠道或模型下架，照规矩不探，结论写明为什么（不是「通」）。
@@ -79,7 +79,7 @@ async function probeOne(
   now: () => Date,
 ): Promise<RouteProbeResult> {
   const startedAt = now().getTime();
-  // 人点的就真探：节奏上把上一次当没有（放慢、退避都不挡）。次数还留着，探完照旧往上加，不把退避清零。
+  // 人点的就真探：节奏上把上一次当没有（三档、退避都不挡）。次数还留着，探完照旧往上加，不把退避清零。
   let c: Conclusion;
   try {
     c = await conclude(probe, target, { bypassPace: true });
@@ -97,7 +97,7 @@ async function probeOne(
     return { routeId: target.routeId, outcome: 'unsettled', detail: c.detail, at: c.at.toISOString() };
   }
   // 和定时那一轮同一份写法：结论里除了这三样，余下的字段原样交给 save（探针结论以后多了字段，这里不用跟着改）
-  const { target: _t, kept: _k, unsettled: _u, backingOff: _b, onDemand: _o, ...rest } = c;
+  const { target: _t, unsettled: _u, deferred: _d, ...rest } = c;
   try {
     const saved = await probe.save({ routeId: target.routeId, ...rest });
     if (saved === 'route_not_found') {
