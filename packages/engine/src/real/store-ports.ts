@@ -383,6 +383,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       probeState: r.probeState,
       probeOrg: r.probeOrg,
       probeDetail: r.probeDetail,
+      probeNextAt: r.probeNextAt?.toISOString() ?? null,
       quota: r.quota,
       windows: r.windows.map((w) => ({
         label: w.label,

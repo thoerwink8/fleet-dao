@@ -48,6 +48,12 @@ export const ROUTE_PROBE_EVERY_MINUTES = 15;
 /** 结论超过这么久没更新（连着三轮没跑）：驾驶舱标「探测过期」，探针可能停了。 */
 export const ROUTE_PROBE_STALE_MINUTES = 45;
 
+/**
+ * 探针的钟每 15 分钟走一次：`probe_next_at` 之后再加这么久还没探到，才算「检测中断 / 探针可能停了」
+ * （#1798 片 4：选路和页面同一条线，不再按执行方式从头算过期线）。
+ */
+export const ROUTE_PROBE_OVERDUE_MINUTES = 20;
+
 /** 这条路由的结论多久没更新算过期（探针可能停了）。hostId 留着给旧调用方，已不再按执行方式放宽。 */
 export function routeProbeStaleMinutes(_hostId?: string): number {
   return ROUTE_PROBE_STALE_MINUTES;

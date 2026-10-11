@@ -136,11 +136,7 @@ export function RefreshBar({
           </span>
         )}
       </span>
-      {stale ? (
-        <span className="inline-flex h-5 items-center rounded-full bg-st-stall-soft px-1.5 text-meta font-medium text-ink-stall">
-          数据已过期
-        </span>
-      ) : null}
+      {stale ? <StatusBadge tone="stall" label="数据已过期" icon={false} /> : null}
     </div>
   );
 }
