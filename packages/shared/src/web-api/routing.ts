@@ -1,7 +1,6 @@
 // 驾驶舱接口约定（web-api）：调度台：路由与阶段策略、路由两层、思考档位。
 // 入口是 ../web-api.ts（只有 export *），拆分说明见 specs/901-项目瘦身与提速/重构方案.md 第 2 节；内容是从原来一个文件里原样搬来的。
 import { z } from 'zod';
-import type { HostId } from '../domain.ts';
 import { SESSION_EFFORTS } from '../effort.ts';
 import { BillingKindSchema, HostIdSchema, RouteProbeStateSchema, StageKindSchema } from './enums.ts';
 import { Id, Time } from './internal.ts';
@@ -35,36 +34,14 @@ export const ModelSchema = z.object({
   retiredAt: Time.optional(),
 });
 
-/** 探针多久一轮（design 第九节「路由探针」：Claude 订阅起步 15 分钟，和对账补漏错开）。 */
+/** 探针钟多久走一次（design 第九节「路由探针」：和对账补漏错开；真探间隔按活跃三档，见引擎 jobs/route-probe.ts）。 */
 export const ROUTE_PROBE_EVERY_MINUTES = 15;
 /** 结论超过这么久没更新（连着三轮没跑）：驾驶舱标「探测过期」，探针可能停了。 */
 export const ROUTE_PROBE_STALE_MINUTES = 45;
-/**
- * 按一次的成本放慢的执行方式（design 第九节「路由探针」：贵的放慢）：上一次探通了，隔这么久才再真探。
- * 连着不通的按 route-probe-pace 逐级退避（15、30、60、120、240 分钟，封顶 240），不按这个表每轮重探。
- * 没列的每轮都探。cursor-agent：一次最小会话约 1.3 万输入 token
- * （2026-09-27 本机实测），扣的是按月的包含用量、和创始人在编辑器里用的是同一份——每轮都探一个月约 2900 次，2 小时一次约 360 次。
- * grok：同一个道理——SuperGrok 订阅按周的额度、和创始人在 grok.com 上用的是同一份，一次最小会话光系统提示就一万多输入 token
- * （法国真跑的过程记录：一次模型调用约 1.5 万输入、其中 1.2 万走缓存）。mirasim：探通即代表真打了一次上游（MS-27，账本要
- * 见到 2xx），扣的是 Mirasim 那份紧张的中转额度（#345，创始人 2026-09-27「额度不太够」）——15 分钟一轮会一个月探约 2900 次，
- * 和 cursor-agent、grok 一样放慢到 2 小时。
- */
-export const ROUTE_PROBE_HOST_EVERY_MINUTES: Readonly<Partial<Record<HostId, number>>> = {
-  'cursor-agent': 120,
-  grok: 120,
-  mirasim: 120,
-};
 
-/** 这种执行方式探通之后隔多久再真探（分钟）。 */
-export function routeProbeEveryMinutes(hostId: string | undefined): number {
-  const slow =
-    hostId === undefined ? undefined : (ROUTE_PROBE_HOST_EVERY_MINUTES as Record<string, number>)[hostId];
-  return slow ?? ROUTE_PROBE_EVERY_MINUTES;
-}
-
-/** 这条路由的结论多久没更新算过期（探针可能停了）：再探的间隔加两轮。每轮都探的就是 ROUTE_PROBE_STALE_MINUTES。 */
-export function routeProbeStaleMinutes(hostId: string | undefined): number {
-  return routeProbeEveryMinutes(hostId) + ROUTE_PROBE_STALE_MINUTES - ROUTE_PROBE_EVERY_MINUTES;
+/** 这条路由的结论多久没更新算过期（探针可能停了）。hostId 留着给旧调用方，已不再按执行方式放宽。 */
+export function routeProbeStaleMinutes(_hostId?: string): number {
+  return ROUTE_PROBE_STALE_MINUTES;
 }
 
 /** 路由探针最近一次的结论（domain.ts 的 RouteProbe）。 */

@@ -3,7 +3,7 @@
 // 几条路由并成一句话，再按路由两层里的先后给渠道排顺位。探针报错 = 这条路暂不可用（探针写 alive=false，选路本来就不派），
 // 这里只显示，不改选路。没排进任何用途的渠道（干粉）探针不花额度去探，卡片照列、写「没在配的路由里，未探」。
 
-import { isOnDemandDetail, probeCadenceMinutes, routeProbeEveryMinutes } from '@fleet-dao/shared';
+import { isOnDemandDetail, probeCadenceMinutes, ROUTE_PROBE_EVERY_MINUTES } from '@fleet-dao/shared';
 import type {
   Channel,
   ChannelState as ChannelStateRow,
@@ -96,9 +96,7 @@ export function channelProbeInterrupted(
 ): boolean {
   // 按需探测的不主动探：结论放多久都不算检测中断（#1635）
   if (isOnDemandDetail(route.detail)) return false;
-  const every = route.detail
-    ? probeCadenceMinutes(route.hostId, route.detail)
-    : routeProbeEveryMinutes(route.hostId);
+  const every = route.detail ? probeCadenceMinutes(route.hostId, route.detail) : ROUTE_PROBE_EVERY_MINUTES;
   const limit = (every + CHANNEL_INTERRUPT_GRACE_MINUTES) * TIME.MIN;
   return now - Date.parse(route.probedAt) > limit;
 }
