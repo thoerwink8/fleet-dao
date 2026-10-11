@@ -8,6 +8,7 @@ import {
   countsText,
   isAlert,
   matchesFilter,
+  probeInterrupted,
   type RouteStateKind,
   rollupKind,
   routeStateLabel,
@@ -74,29 +75,96 @@ describe('classifyRoute', () => {
   });
 });
 
-describe('按需探测（#1635）', () => {
-  const onDemand = '不主动探，要派给它时先探一次。上一次真探：通，10-10 09:00';
-  test('原文写了按需：不是故障、不进告警、不画红，也不是「不知道」', () => {
-    const k = classifyRoute({
-      ...base,
-      verdict: 'unknown',
-      connect: { verdict: 'unknown', reason: `按需探测：${onDemand}` },
-      probedAt: '2026-10-08T00:00:00Z',
-      probeDetail: onDemand,
-    });
-    expect(k).toBe('on_demand');
-    expect(isAlert(k)).toBe(false);
+// 按 probeTier、probeNextAt 判状态（#1798 片 7）：不从探针原文里抠任何东西
+describe('按节奏列判状态', () => {
+  const NOW = Date.parse('2026-10-10T12:00:00Z');
+  const min = (n: number) => new Date(NOW + n * 60_000).toISOString();
+  const probed = { ...base, probedAt: min(-30) };
+
+  test('在线：活跃、下次还没到', () => {
+    const k = classifyRoute({ ...probed, probeTier: 'active', probeNextAt: min(30) }, { now: NOW });
+    expect(k).toBe('live');
+    expect(routeStateLabel[k]).toBe('在线');
+  });
+
+  test('不通：探不通、下次还没到 = 故障，进告警，画红', () => {
+    const k = classifyRoute(
+      { ...probed, verdict: 'dead', connect: dead, probeTier: 'active', probeNextAt: min(10) },
+      { now: NOW },
+    );
+    expect(k).toBe('fault');
+    expect(isAlert(k)).toBe(true);
+    expect(routeStateTone[k]).toBe('fail');
+  });
+
+  test('疑似换模型：最近一次身份题说出旧答案；橙色那一档，不是故障，也不画红', () => {
+    const k = classifyRoute(
+      { ...probed, verdict: 'dead', connect: dead, probeTier: 'active', probeNextAt: min(10) },
+      { now: NOW, identityMismatch: true },
+    );
+    expect(k).toBe('degraded');
+    expect(routeStateLabel[k]).toBe('疑似换模型·已按不在线处理');
     expect(routeStateTone[k]).not.toBe('fail');
-    expect(routeStateLabel[k]).toBe('按需探测');
+    expect(isAlert(k)).toBe(false);
+    expect(classifyProbe({ state: 'failed' }, { identityMismatch: true })).toBe('degraded');
+    expect(classifyProbe({ state: 'ok' }, { identityMismatch: true })).toBe('live');
   });
-  test('渠道状态页里没排进用途的路由：探针结论 on_demand 也是按需', () => {
-    expect(classifyProbe({ state: 'on_demand' })).toBe('on_demand');
-    expect(classifyProbe({ state: 'on_demand' }, { usedByPurpose: false })).toBe('unused');
+
+  test('没探：探针从没看过 = 未探；就算 probeNextAt 早过了也不是检测中断', () => {
+    const u = {
+      ...base,
+      verdict: 'unknown' as const,
+      connect: unknown,
+      probeTier: 'active' as const,
+      probeNextAt: min(-120),
+    };
+    expect(classifyRoute(u, { now: NOW })).toBe('unprobed');
   });
-  test('一组里有在线的还是在线；全是按需的是按需；摘要写「按需」', () => {
-    expect(rollupKind(['on_demand', 'live'])).toBe('live');
-    expect(rollupKind(['on_demand', 'off'])).toBe('on_demand');
-    expect(countsText(countKinds(['live', 'on_demand', 'on_demand']))).toBe('1 在线 · 2 按需');
+
+  test('未被用途使用：probeTier 是 unused，或没有用途在用；不主动探，放多久都不是检测中断', () => {
+    const old = { ...base, probedAt: min(-3000), probeNextAt: min(-2000) };
+    expect(classifyRoute({ ...old, probeTier: 'unused' }, { now: NOW })).toBe('unused');
+    expect(classifyRoute({ ...old, probeTier: 'idle' }, { now: NOW, usedByPurpose: false })).toBe('unused');
+    expect(
+      classifyProbe({ state: 'ok' }, { now: NOW }, { probeTier: 'unused', probeNextAt: min(-2000) }),
+    ).toBe('unused');
+  });
+
+  test('检测中断：晚于 probeNextAt 加 20 分钟，红，进告警；正好 20 分钟还不算', () => {
+    const route = (nextAt: string) => ({ ...probed, probeTier: 'active' as const, probeNextAt: nextAt });
+    expect(classifyRoute(route(min(-20)), { now: NOW })).toBe('live');
+    expect(classifyRoute(route(min(-19)), { now: NOW })).toBe('live');
+    const k = classifyRoute(route(min(-21)), { now: NOW });
+    expect(k).toBe('interrupted');
+    expect(routeStateLabel[k]).toBe('检测中断');
+    expect(routeStateTone[k]).toBe('fail');
+    expect(isAlert(k)).toBe(true);
+    // 不通的路由也一样：旧结论不当现状
+    expect(classifyRoute({ ...route(min(-21)), verdict: 'dead', connect: dead }, { now: NOW })).toBe(
+      'interrupted',
+    );
+    // 渠道状态页里没排进用途的路由走 classifyProbe，同一条线
+    expect(classifyProbe({ state: 'ok' }, { now: NOW }, { probeTier: 'idle', probeNextAt: min(-21) })).toBe(
+      'interrupted',
+    );
+  });
+
+  test('不给 now 或库里没写 probeNextAt：判不了中断，不猜', () => {
+    const late = { ...probed, probeTier: 'active' as const, probeNextAt: min(-999) };
+    expect(classifyRoute(late)).toBe('live');
+    expect(classifyRoute({ ...probed, probeTier: 'active' }, { now: NOW })).toBe('live');
+    expect(probeInterrupted({ probeTier: 'active' }, NOW)).toBe(false);
+    expect(probeInterrupted({ probeTier: 'active', probeNextAt: min(-21) }, NOW)).toBe(true);
+    expect(probeInterrupted({ probeTier: 'unused', probeNextAt: min(-21) }, NOW)).toBe(false);
+  });
+
+  test('检测中断进摘要、筛选和汇总', () => {
+    expect(countsText(countKinds(['live', 'interrupted', 'degraded']))).toBe(
+      '1 在线 · 1 检测中断 · 1 疑似换模型',
+    );
+    expect(matchesFilter('interrupted', 'fault')).toBe(true);
+    expect(rollupKind(['interrupted', 'off'])).toBe('interrupted');
+    expect(rollupKind(['interrupted', 'live'])).toBe('live');
   });
 });
 

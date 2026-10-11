@@ -64,9 +64,9 @@ describe('额度格', () => {
     expect(el.dataset.hot).toBeUndefined();
     expect(el.dataset.stale).toBe('true');
     // 页脚那一行「42 分钟前读」和过期说明各有一处「42 分钟前」，页脚那处标停滞色
-    expect(
-      screen.getAllByText('42 分钟前').some((n) => n.parentElement?.className.includes('text-ink-stall')),
-    ).toBe(true);
+    expect(screen.getAllByText('42 分钟前').some((n) => n.parentElement?.dataset.tone === 'stall')).toBe(
+      true,
+    );
     expect(el.querySelector('[data-stale-note]')).toBeTruthy();
   });
 

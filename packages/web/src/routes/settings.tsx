@@ -19,8 +19,13 @@ import {
 import type { Me, Setting, SettingKey } from '../api/types';
 import { CredentialsSection } from '../components/credentials-section';
 import { EngineMasterRelation } from '../components/engine-master';
-import { FieldGroup, FieldRow } from '../components/field-row';
-import { LoadError, LoadingRows, Page } from '../components/page';
+import { FieldGroup, FieldRow } from '../components/layout/field-row';
+import { FilterTabs } from '../components/layout/filter-tabs';
+import { KeyValue } from '../components/layout/key-value';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
+import { StatusDot } from '../components/layout/status-badge';
 import { PageNav } from '../components/page-nav';
 import { PoolHoldsPanel } from '../components/pool-holds';
 import { RefreshBar } from '../components/refresh-bar';
@@ -28,7 +33,6 @@ import { useRepo } from '../components/repo-context';
 import { RepoDispatchControl } from '../components/repo-dispatch';
 import { RepoGroomControl } from '../components/repo-groom';
 import { ModeSwitch } from '../components/shell/topbar';
-import { StatusDot } from '../components/status';
 import { useTheme } from '../components/theme-provider';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -46,8 +50,13 @@ import {
   UNLIMITED_WORD,
 } from '../lib/reserve';
 import { isMine, TONES, toneLabel } from '../lib/status';
-import { PALETTES } from '../lib/theme';
+import { type DensityPref, PALETTES } from '../lib/theme';
 import { cn } from '../lib/utils';
+
+const DENSITY_ITEMS: { id: DensityPref; label: string }[] = [
+  { id: 'comfortable', label: '标准' },
+  { id: 'compact', label: '紧凑' },
+];
 
 /** 设置行里的「谁改的」：去 user: 前缀，方便和 /me、操作记录对上。 */
 function settingActorId(raw: string): string {
@@ -97,7 +106,7 @@ export function meta() {
 }
 
 /** 一节：标题下一句说明，下面是这一节的字段。页内导航按 id 跳到这里（吸顶条下面留出位置）。 */
-function Section({
+function SettingsSection({
   id,
   icon: Icon,
   title,
@@ -111,14 +120,20 @@ function Section({
   children: ReactNode;
 }) {
   return (
-    <section id={id} className="scroll-mt-14 border-b py-5 first:pt-0 last:border-b-0 lg:scroll-mt-6">
-      <h2 className="flex items-center gap-2 text-strong font-semibold">
-        <Icon className="size-4 text-muted-foreground" aria-hidden />
-        {title}
-      </h2>
-      <p className="mt-0.5 mb-3 text-xs text-muted-foreground">{description}</p>
-      <div className="min-w-0">{children}</div>
-    </section>
+    <Section
+      id={id}
+      variant="plain"
+      title={
+        <span className="flex items-center gap-2">
+          <Icon className="size-4 text-muted-foreground" aria-hidden />
+          {title}
+        </span>
+      }
+      description={description}
+      className="scroll-mt-14 border-b py-5 first:pt-0 last:border-b-0 lg:scroll-mt-6"
+    >
+      {children}
+    </Section>
   );
 }
 
@@ -128,10 +143,10 @@ function SettingMeta({ s }: { s: Setting | undefined }) {
   const { data: me } = useMe();
   const names = useActorNames();
   if (!s || s.version === 0)
-    return <p className="mt-0.5 text-caption text-muted-foreground">还没设过，用的是默认值</p>;
+    return <p className="mt-0.5 text-meta text-muted-foreground">还没设过，用的是默认值</p>;
   const who = s.updatedBy ? whoChangedLabel(s.updatedBy, me, names) : null;
   return (
-    <p className="mt-0.5 text-caption text-muted-foreground">
+    <p className="mt-0.5 text-meta text-muted-foreground">
       第 <span className="num">{s.version}</span> 版
       {who ? (
         <>
@@ -234,7 +249,7 @@ function NumberSetting({
         onChange={(e) => setDraft(e.target.value.replace(/[^\d]/g, ''))}
         className="num h-8 w-28"
       />
-      <span className="text-sm text-muted-foreground">{unit}</span>
+      <span className="text-body text-muted-foreground">{unit}</span>
       <Button type="submit" size="sm" disabled={pending || draft === shown || draft === ''}>
         保存
       </Button>
@@ -387,11 +402,13 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
   // 「未配置」的格子默认是灰色占位「—」，点一下才变输入框；点开了但没填的，离开输入框就缩回占位。
   const [editing, setEditing] = useState<ReadonlySet<string>>(new Set());
   const [focusKey, setFocusKey] = useState<string | null>(null);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 服务端版本变了、池列表读到了才重置，不跟着输入重置。
+  // 池数据带实时用量，后台每次重拉都换引用；只跟池与窗口的形状走，否则刚点开的格子、没保存的草稿会被打回（#1871）。
+  const shape = rows.map((r) => `${r.pool.id}:${r.kinds.join(',')}`).join(';');
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 服务端版本变了、池与窗口的形状变了才重置，不跟着输入、用量重置。
   useEffect(() => {
     setDraft(initial());
     setEditing(new Set());
-  }, [s?.version, pools.data]);
+  }, [s?.version, shape]);
   useEffect(() => {
     if (focusKey) document.getElementById(`reserve-${focusKey.replace('|', '-')}`)?.focus();
   }, [focusKey]);
@@ -426,102 +443,104 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
     save('engine.quotaReserve', next, s);
   };
   return (
-    <form onSubmit={submit} className="rounded-xl border bg-card px-4 py-3">
-      <div className="text-sm font-medium">{settingLabel['engine.quotaReserve']}</div>
-      <div className="mt-0.5 text-caption text-muted-foreground">
-        每个渠道每个额度窗「最多用到百分之几」，已用到这条线引擎就不再往这个渠道派新活。
-        <details className="mt-0.5">
-          <summary className="cursor-pointer underline-offset-2 hover:underline max-md:flex max-md:min-h-10 max-md:items-center">
-            怎么填
-          </summary>
-          {`${brand.terms.carpool}用不了时也不切过去（在跑的不动），剩下的留给自己用。灰色「—」= 未配置（不限；${brand.terms.carpool}用到被拒为止，一般不设线），点一下才能填；写「${UNLIMITED_WORD}」= 明确不限。`}
-        </details>
-      </div>
-      <p className="mt-1 text-xs" data-testid="reserve-source">
-        {source.kind === 'missing' ? (
-          <span className="text-ink-fail" role="alert">
-            {`库里没有留量线：种子没装进库（发布时装载器没跑成？），引擎对所有渠道一律不派、不切，不当成不限。要现在恢复，在下面填好保存即可。`}
-          </span>
-        ) : source.kind === 'seed' ? (
-          <span className="text-muted-foreground">
-            {`现在的线来自种子（发布时装载器装的，还没人在${brand.product}改过）`}
-          </span>
-        ) : (
-          <span className="text-muted-foreground">
-            {`现在的线是人在${brand.product}改过的${
-              source.by ? `（${whoChangedLabel(source.by, meForReserve, namesForReserve).text}）` : ''
-            }，发布时的种子不会覆盖它`}
-          </span>
-        )}
-      </p>
-      {problem ? (
-        <p className="mt-2 text-xs text-ink-fail" role="alert">
-          {`存着的留量线认不出（${problem}），引擎对所有渠道一律不派、不切，不当成不限；保存会整份换掉。`}
+    <Section>
+      <form onSubmit={submit}>
+        <div className="text-body font-medium">{settingLabel['engine.quotaReserve']}</div>
+        <div className="mt-0.5 text-meta text-muted-foreground">
+          每个渠道每个额度窗「最多用到百分之几」，已用到这条线引擎就不再往这个渠道派新活。
+          <details className="mt-0.5">
+            <summary className="cursor-pointer underline-offset-2 hover:underline max-md:flex max-md:min-h-10 max-md:items-center">
+              怎么填
+            </summary>
+            {`${brand.terms.carpool}用不了时也不切过去（在跑的不动），剩下的留给自己用。灰色「—」= 未配置（不限；${brand.terms.carpool}用到被拒为止，一般不设线），点一下才能填；写「${UNLIMITED_WORD}」= 明确不限。`}
+          </details>
+        </div>
+        <p className="mt-1 text-meta" data-testid="reserve-source">
+          {source.kind === 'missing' ? (
+            <span className="text-ink-fail" role="alert">
+              {`库里没有留量线：种子没装进库（发布时装载器没跑成？），引擎对所有渠道一律不派、不切，不当成不限。要现在恢复，在下面填好保存即可。`}
+            </span>
+          ) : source.kind === 'seed' ? (
+            <span className="text-muted-foreground">
+              {`现在的线来自种子（发布时装载器装的，还没人在${brand.product}改过）`}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">
+              {`现在的线是人在${brand.product}改过的${
+                source.by ? `（${whoChangedLabel(source.by, meForReserve, namesForReserve).text}）` : ''
+              }，发布时的种子不会覆盖它`}
+            </span>
+          )}
         </p>
-      ) : null}
-      {pools.error ? <LoadError what="渠道列表" error={pools.error} /> : null}
-      {!pools.data ? <LoadingRows rows={1} /> : null}
-      <div className="mt-2 divide-y">
-        {rows.map((r) => (
-          <div key={r.pool.id} className="grid gap-x-4 gap-y-1 py-2 md:grid-cols-field md:items-center">
-            {/* 拼车和独享两个池同属一个渠道：只写渠道名会出现两行一模一样的「Claude 订阅」，要带上池编号 */}
-            <div className="text-sm">{poolTitle(r.pool)}</div>
-            {r.kinds.length === 0 ? (
-              <p className="text-xs text-muted-foreground">还没读到额度窗，读到以后在这里配。</p>
-            ) : (
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-                {r.kinds.map((k) => {
-                  const dk = `${r.pool.id}|${k}`;
-                  const id = `reserve-${r.pool.id}-${k}`;
-                  const name = reserveKindLabel(k, r.pool.windows);
-                  const open = (draft[dk] ?? '') !== '' || editing.has(dk);
-                  return (
-                    <div key={k} className="flex items-center gap-1.5">
-                      <Label htmlFor={id} className="text-xs text-muted-foreground">
-                        {name}
-                      </Label>
-                      {open ? (
-                        <>
-                          <Input
+        {problem ? (
+          <p className="mt-2 text-meta text-ink-fail" role="alert">
+            {`存着的留量线认不出（${problem}），引擎对所有渠道一律不派、不切，不当成不限；保存会整份换掉。`}
+          </p>
+        ) : null}
+        {pools.error ? <LoadError what="渠道列表" error={pools.error} /> : null}
+        {!pools.data ? <LoadingRows rows={1} /> : null}
+        <div className="mt-2 divide-y">
+          {rows.map((r) => (
+            <div key={r.pool.id} className="grid gap-x-4 gap-y-1 py-2 md:grid-cols-field md:items-center">
+              {/* 拼车和独享两个池同属一个渠道：只写渠道名会出现两行一模一样的「Claude 订阅」，要带上池编号 */}
+              <div className="text-body">{poolTitle(r.pool)}</div>
+              {r.kinds.length === 0 ? (
+                <p className="text-meta text-muted-foreground">还没读到额度窗，读到以后在这里配。</p>
+              ) : (
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                  {r.kinds.map((k) => {
+                    const dk = `${r.pool.id}|${k}`;
+                    const id = `reserve-${r.pool.id}-${k}`;
+                    const name = reserveKindLabel(k, r.pool.windows);
+                    const open = (draft[dk] ?? '') !== '' || editing.has(dk);
+                    return (
+                      <div key={k} className="flex items-center gap-1.5">
+                        <Label htmlFor={id} className="text-meta text-muted-foreground">
+                          {name}
+                        </Label>
+                        {open ? (
+                          <>
+                            <Input
+                              id={id}
+                              value={draft[dk] ?? ''}
+                              onChange={(e) => setDraft((d) => ({ ...d, [dk]: e.target.value }))}
+                              onBlur={() => {
+                                if ((draft[dk] ?? '') === '') stopEditing(dk);
+                              }}
+                              className="num h-7 w-20 max-md:min-h-10"
+                            />
+                            <span className="text-meta text-muted-foreground">%</span>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
                             id={id}
-                            value={draft[dk] ?? ''}
-                            onChange={(e) => setDraft((d) => ({ ...d, [dk]: e.target.value }))}
-                            onBlur={() => {
-                              if ((draft[dk] ?? '') === '') stopEditing(dk);
+                            title="未配置（不限），点一下填写"
+                            onClick={() => {
+                              setEditing((cur) => new Set(cur).add(dk));
+                              setFocusKey(dk);
                             }}
-                            className="num h-7 w-20 max-md:min-h-10"
-                          />
-                          <span className="text-xs text-muted-foreground">%</span>
-                        </>
-                      ) : (
-                        <button
-                          type="button"
-                          id={id}
-                          title="未配置（不限），点一下填写"
-                          onClick={() => {
-                            setEditing((cur) => new Set(cur).add(dk));
-                            setFocusKey(dk);
-                          }}
-                          className="num h-7 w-20 max-md:min-h-10 rounded-md border border-dashed bg-muted/40 text-xs text-faint outline-none hover:border-border-strong hover:text-muted-foreground focus-visible:ring-focus focus-visible:ring-ring/50"
-                        >
-                          —<span className="sr-only">未配置，点击填写</span>
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-      <div className="mt-2 flex items-end gap-3">
-        <div className="min-w-0 flex-1">{source.kind === 'missing' ? null : <SettingMeta s={s} />}</div>
-        <Button type="submit" size="sm" disabled={pending || !dirty}>
-          保存
-        </Button>
-      </div>
-    </form>
+                            className="num h-7 w-20 max-md:min-h-10 rounded-md border border-dashed bg-muted text-meta text-muted-foreground outline-none hover:border-border-strong hover:text-muted-foreground focus-visible:ring-focus focus-visible:ring-ring"
+                          >
+                            —<span className="sr-only">未配置，点击填写</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="mt-2 flex items-end gap-3">
+          <div className="min-w-0 flex-1">{source.kind === 'missing' ? null : <SettingMeta s={s} />}</div>
+          <Button type="submit" size="sm" disabled={pending || !dirty}>
+            保存
+          </Button>
+        </div>
+      </form>
+    </Section>
   );
 }
 
@@ -565,7 +584,7 @@ export default function Settings() {
       <div className="lg:grid lg:grid-cols-settings-shell lg:gap-8">
         <PageNav label="设置分节" items={SECTIONS} />
         <div className="min-w-0 max-w-4xl">
-          <Section
+          <SettingsSection
             id="repos"
             icon={FolderGit2}
             title="仓库"
@@ -577,41 +596,45 @@ export default function Settings() {
               <div className="mb-3 max-w-xl">
                 <LoadError text={repoFailure} error={reposError ?? dispatch.error} />
                 {reposError && repos.length ? (
-                  <p className="mt-1 text-xs text-muted-foreground">下面是上次读到的，可能不全。</p>
+                  <p className="mt-1 text-meta text-muted-foreground">下面是上次读到的，可能不全。</p>
                 ) : null}
               </div>
             ) : null}
             {reposLoading ? <LoadingRows rows={1} /> : null}
-            <ul className="divide-y rounded-xl border bg-card empty:hidden">
-              {repos.map((r) => (
-                <li key={r.id} className="flex flex-wrap items-start gap-x-4 gap-y-1.5 px-4 py-2.5">
-                  <div className="flex min-w-0 flex-1 basis-52 items-center gap-2 self-center">
-                    <FolderGit2 className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-                    <div className="min-w-0">
-                      <div className="num truncate text-sm font-medium" title={`${r.owner}/${r.name}`}>
-                        {r.owner}/{r.name}
+            {repos.length > 0 || (!reposLoading && !reposError) ? (
+              <Section flush>
+                <ul className="divide-y">
+                  {repos.map((r) => (
+                    <li key={r.id} className="flex flex-wrap items-start gap-x-4 gap-y-1.5 px-4 py-2.5">
+                      <div className="flex min-w-0 flex-1 basis-52 items-center gap-2 self-center">
+                        <FolderGit2 className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                        <div className="min-w-0">
+                          <div className="num truncate text-body font-medium" title={`${r.owner}/${r.name}`}>
+                            {r.owner}/{r.name}
+                          </div>
+                          <div className="text-meta text-muted-foreground">
+                            主线 <span className="num">{r.defaultBranch}</span>
+                          </div>
+                        </div>
                       </div>
-                      <div className="text-caption text-muted-foreground">
-                        主线 <span className="num">{r.defaultBranch}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <RepoDispatchControl
-                    repoId={r.id}
-                    name={`${r.owner}/${r.name}`}
-                    row={dispatch.data?.repos.find((d) => d.repoId === r.id)}
-                  />
-                  <RepoGroomControl repoId={r.id} repo={{ owner: r.owner, name: r.name }} />
-                </li>
-              ))}
-              {/* 只有真读到了一个空列表才说「还没有仓」；没读成、还在读都不算。 */}
-              {repos.length === 0 && !reposLoading && !reposError ? (
-                <li className="px-4 py-3 text-sm text-muted-foreground">还没有仓</li>
-              ) : null}
-            </ul>
-          </Section>
+                      <RepoDispatchControl
+                        repoId={r.id}
+                        name={`${r.owner}/${r.name}`}
+                        row={dispatch.data?.repos.find((d) => d.repoId === r.id)}
+                      />
+                      <RepoGroomControl repoId={r.id} repo={{ owner: r.owner, name: r.name }} />
+                    </li>
+                  ))}
+                  {/* 只有真读到了一个空列表才说「还没有仓」；没读成、还在读都不算。 */}
+                  {repos.length === 0 && !reposLoading && !reposError ? (
+                    <li className="px-4 py-3 text-body text-muted-foreground">还没有仓</li>
+                  ) : null}
+                </ul>
+              </Section>
+            ) : null}
+          </SettingsSection>
 
-          <Section
+          <SettingsSection
             id="run"
             icon={SlidersHorizontal}
             title="运行设置"
@@ -645,9 +668,9 @@ export default function Settings() {
             ) : settings.isFetched ? null : (
               <LoadingRows rows={2} />
             )}
-          </Section>
+          </SettingsSection>
 
-          <Section
+          <SettingsSection
             id="notify"
             icon={BellRing}
             title="提醒"
@@ -663,18 +686,18 @@ export default function Settings() {
             ) : settings.isFetched ? null : (
               <LoadingRows rows={1} />
             )}
-          </Section>
+          </SettingsSection>
 
-          <Section
+          <SettingsSection
             id="account"
             icon={KeyRound}
             title="账密登录"
             description={`设一个用户名和密码，飞书登录出问题时也进得去${brand.product}。`}
           >
             <CredentialsSection />
-          </Section>
+          </SettingsSection>
 
-          <Section
+          <SettingsSection
             id="look"
             icon={Palette}
             title="外观"
@@ -686,24 +709,34 @@ export default function Settings() {
                   <ModeSwitch />
                 </div>
               </FieldRow>
+              <FieldRow label="密度" hint="紧凑把控件、行和区块的留白收小一档，字号不变；手机上不生效。">
+                <FilterTabs
+                  mode="toggle"
+                  aria-label="密度"
+                  items={DENSITY_ITEMS}
+                  value={theme.pref.density}
+                  onChange={theme.setDensity}
+                />
+              </FieldRow>
               <FieldRow label="主题色">
                 {/* 一行小色块 + 名字的单选；每个色块按它自己那套主题上色。 */}
                 <div role="radiogroup" aria-label="主题色" className="flex flex-wrap gap-2">
                   {PALETTES.map((p) => {
                     const active = theme.pref.palette === p.id;
                     return (
-                      // biome-ignore lint/a11y/useSemanticElements: 小色块单选，按钮比原生单选框好点。
-                      <button
+                      <Button
                         key={p.id}
                         type="button"
+                        variant="outline"
+                        size="sm"
                         role="radio"
                         aria-checked={active}
                         aria-label={`主题色：${p.name}`}
                         title={p.blurb}
                         onClick={() => theme.setPalette(p.id)}
                         className={cn(
-                          'inline-flex h-8 items-center gap-2 rounded-lg border bg-card px-2 text-xs outline-none transition-colors hover:border-border-strong focus-visible:ring-focus focus-visible:ring-ring/50',
-                          active && 'border-foreground bg-muted',
+                          'gap-2 px-2 text-meta hover:border-border-strong',
+                          active && 'border-foreground bg-muted dark:bg-muted',
                         )}
                       >
                         <span
@@ -713,14 +746,14 @@ export default function Settings() {
                           aria-hidden
                         >
                           <span className="size-2.5 rounded-full bg-brand" />
-                          <span className="size-2.5 rounded-full bg-foreground/70" />
+                          <span className="size-2.5 rounded-full bg-muted-foreground" />
                           <span className="size-2.5 rounded-full bg-st-done" />
                           <span className="size-2.5 rounded-full bg-st-fail" />
                         </span>
                         <span className="font-medium">{p.name}</span>
-                        <span className="num text-micro text-muted-foreground">{p.en}</span>
+                        <span className="num text-meta text-muted-foreground">{p.en}</span>
                         {active ? <Check className="size-3.5" aria-hidden /> : null}
-                      </button>
+                      </Button>
                     );
                   })}
                 </div>
@@ -728,7 +761,7 @@ export default function Settings() {
               <FieldRow label="状态色" hint="看板上颜色只表达状态。当前主题下的七种状态色。">
                 <div className="flex flex-wrap gap-x-4 gap-y-1">
                   {TONES.map((t) => (
-                    <span key={t} className="inline-flex items-center gap-1.5 text-xs">
+                    <span key={t} className="inline-flex items-center gap-1.5 text-meta">
                       <StatusDot tone={t} />
                       {toneLabel[t]}
                     </span>
@@ -743,22 +776,27 @@ export default function Settings() {
                 />
               </FieldRow>
             </FieldGroup>
-          </Section>
+          </SettingsSection>
 
-          <Section id="about" icon={Info} title="关于" description={`${brand.product}的前端。`}>
-            <dl className="grid max-w-md grid-cols-about gap-y-1.5 text-sm">
-              <dt className="text-muted-foreground">数据</dt>
-              <dd>
-                {api.source === 'http'
-                  ? `${brand.product}后端（/api），推送走 /api/events`
-                  : '假数据（编的，会自己动；页面上的操作只改这份假数据）'}
-              </dd>
-              <dt className="text-muted-foreground">登录</dt>
-              <dd>{me ? `${me.user.displayName}（飞书或账密，只放行创始人）` : '—'}</dd>
-              <dt className="text-muted-foreground">接口约定</dt>
-              <dd className="num text-xs leading-5">packages/shared/src/web-api.ts</dd>
-            </dl>
-          </Section>
+          <SettingsSection id="about" icon={Info} title="关于" description={`${brand.product}的前端。`}>
+            <KeyValue
+              className="max-w-xl"
+              items={[
+                {
+                  label: '数据',
+                  value:
+                    api.source === 'http'
+                      ? `${brand.product}后端（/api），推送走 /api/events`
+                      : '假数据（编的，会自己动；页面上的操作只改这份假数据）',
+                },
+                {
+                  label: '登录',
+                  value: me ? `${me.user.displayName}（飞书或账密，只放行创始人）` : '—',
+                },
+                { label: '接口约定', value: 'packages/shared/src/web-api.ts', mono: true },
+              ]}
+            />
+          </SettingsSection>
         </div>
       </div>
     </Page>

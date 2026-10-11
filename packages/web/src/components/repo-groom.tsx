@@ -8,9 +8,9 @@ import { useNow } from '../lib/hooks';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
 import { useMasterView } from './engine-master';
-import { LoadError } from './page';
+import { LoadError } from './layout/load-state';
+import { StatusDot } from './layout/status-badge';
 import { RepoLink } from './repo-link';
-import { StatusDot } from './status';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -59,7 +59,7 @@ function GroomHelp() {
   const [open, setOpen] = useState(false);
   const bodyId = useId();
   return (
-    <div className="mt-1.5 text-xs text-muted-foreground" data-testid="groom-help">
+    <div className="mt-1.5 text-meta text-muted-foreground" data-testid="groom-help">
       <div className="flex min-w-0 items-start gap-2">
         <p className="min-w-0 flex-1 truncate" title={GROOM_HELP_SUMMARY}>
           {GROOM_HELP_SUMMARY}
@@ -120,7 +120,7 @@ function ResultSummary({
     { label: '贴要人拍', items: result.flagged.map((n) => ({ n })) },
   ];
   return (
-    <ul aria-label="最近一次结果" className="mt-1 space-y-0.5 text-xs">
+    <ul aria-label="最近一次结果" className="mt-1 space-y-0.5 text-meta">
       {lines.map((line) => (
         <li key={line.label}>
           {line.label} {line.items.length} 张{line.items.length > 0 ? '：' : null}
@@ -186,7 +186,7 @@ export function RepoGroomControl({
       {/* 行尾：状态点 + 一句状态 + 今日剩余 + 「详情」+「整理」按钮；整理记录点「详情」才展开。 */}
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 self-center">
         <StatusDot tone={busy ? 'run' : latest ? STATE_TONE[latest.state] : 'stop'} />
-        <span className="text-xs">
+        <span className="text-meta">
           {busy ? (
             <span className="font-medium text-ink-stall">整理中</span>
           ) : latest ? (
@@ -201,20 +201,18 @@ export function RepoGroomControl({
           )}
         </span>
         {status ? (
-          <span className="num text-caption text-muted-foreground" data-testid={`groom-quota-${repoId}`}>
+          <span className="num text-meta text-muted-foreground" data-testid={`groom-quota-${repoId}`}>
             今日剩余 {status.quota.remaining}/{status.quota.max}
           </span>
         ) : null}
-        {masterOff ? (
-          <span className="text-caption text-muted-foreground">引擎总开关关着，不整理</span>
-        ) : null}
+        {masterOff ? <span className="text-meta text-muted-foreground">引擎总开关关着，不整理</span> : null}
         <button
           type="button"
           aria-expanded={open}
           aria-controls={detailId}
           aria-label={`${name} 的整理详情`}
           onClick={() => setOpen((v) => !v)}
-          className="inline-flex items-center gap-0.5 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          className="inline-flex items-center gap-0.5 text-meta text-muted-foreground underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10"
         >
           详情
           <ChevronRight className={cn('size-3.5 transition-transform', open && 'rotate-90')} aria-hidden />
@@ -238,38 +236,40 @@ export function RepoGroomControl({
 
       {open || query.error || writeError || (status && status.unreadable > 0) ? (
         <div id={detailId} className="min-w-0 basis-full rounded-lg border border-dashed px-3 py-2">
-          <h3 className="text-xs font-medium">指挥官整理待办</h3>
+          <h3 className="text-meta font-medium">指挥官整理待办</h3>
           {open ? <GroomHelp /> : null}
-          {query.isLoading ? <p className="mt-1 text-xs text-muted-foreground">在读…</p> : null}
+          {query.isLoading ? <p className="mt-1 text-meta text-muted-foreground">在读…</p> : null}
           {query.error ? (
             <div className="mt-2">
               <LoadError what="指挥官整理待办" error={query.error} />
             </div>
           ) : null}
           {status && status.unreadable > 0 ? (
-            <p className="mt-1 text-xs text-ink-fail">有 {status.unreadable} 条记录没读懂，下面不是全部。</p>
+            <p className="mt-1 text-meta text-ink-fail">
+              有 {status.unreadable} 条记录没读懂，下面不是全部。
+            </p>
           ) : null}
 
           {open && status && latest ? (
             <div className="mt-1.5">
-              <p className="text-xs">
+              <p className="text-meta">
                 最近一次：{STATE_WORD[latest.state]} ·{' '}
                 <span className="num">{formatDateTime(whenOf(latest))}</span>
               </p>
               {latest.why ? (
-                <p className="mt-0.5 break-words text-xs text-muted-foreground">{latest.why}</p>
+                <p className="mt-0.5 break-words text-meta text-muted-foreground">{latest.why}</p>
               ) : null}
               {latest.result ? <ResultSummary result={latest.result} repo={repo} /> : null}
               {!latest.result && (latest.state === 'queued' || latest.state === 'running') ? (
-                <p className="mt-0.5 text-xs text-muted-foreground">还没有结果</p>
+                <p className="mt-0.5 text-meta text-muted-foreground">还没有结果</p>
               ) : null}
             </div>
           ) : open && status ? (
-            <p className="mt-1.5 text-xs text-muted-foreground">还没整理过</p>
+            <p className="mt-1.5 text-meta text-muted-foreground">还没整理过</p>
           ) : null}
 
           {open && older.length > 0 ? (
-            <ul aria-label="更早的整理" className="mt-1.5 space-y-0.5 text-xs text-muted-foreground">
+            <ul aria-label="更早的整理" className="mt-1.5 space-y-0.5 text-meta text-muted-foreground">
               {older.map((row) => (
                 <li key={row.requestId} className="break-words">
                   {STATE_WORD[row.state]} · <span className="num">{formatDateTime(whenOf(row))}</span>
@@ -279,7 +279,7 @@ export function RepoGroomControl({
             </ul>
           ) : null}
           {writeError ? (
-            <p role="alert" className="mt-1.5 break-words text-xs text-ink-fail">
+            <p role="alert" className="mt-1.5 break-words text-meta text-ink-fail">
               {errorText(writeError)}
             </p>
           ) : null}

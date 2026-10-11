@@ -14,7 +14,7 @@ const ITEMS = [
 ] as const;
 
 const cell =
-  'relative flex h-14 min-w-10 flex-1 flex-col items-center justify-center gap-0.5 text-caption text-muted-foreground transition-colors active:bg-accent';
+  'relative flex h-14 min-w-10 flex-1 flex-col items-center justify-center gap-0.5 text-meta text-muted-foreground transition-colors active:bg-accent';
 
 export function BottomNav({ onMore }: { onMore(): void }) {
   const { nodeId } = useNodeSelection();
@@ -41,8 +41,10 @@ export function BottomNav({ onMore }: { onMore(): void }) {
                 {to === '/notifications' && badge !== 0 ? (
                   <span
                     className={cn(
-                      'num absolute -top-1.5 left-3 grid min-w-4 place-items-center rounded-full px-1 text-micro leading-4 font-semibold',
-                      badge === '!' ? 'bg-st-fail text-white' : 'bg-st-human text-white',
+                      'num absolute -top-1.5 left-3 grid min-w-4 place-items-center rounded-full px-1 text-meta font-semibold',
+                      badge === '!'
+                        ? 'bg-destructive text-destructive-foreground'
+                        : 'bg-st-human text-background',
                     )}
                   >
                     {badge}

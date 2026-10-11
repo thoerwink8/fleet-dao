@@ -3,7 +3,6 @@
 // 几条路由并成一句话，再按路由两层里的先后给渠道排顺位。探针报错 = 这条路暂不可用（探针写 alive=false，选路本来就不派），
 // 这里只显示，不改选路。没排进任何用途的渠道（干粉）探针不花额度去探，卡片照列、写「没在配的路由里，未探」。
 
-import { isOnDemandDetail, probeCadenceMinutes, routeProbeEveryMinutes } from '@fleet-dao/shared';
 import type {
   Channel,
   ChannelState as ChannelStateRow,
@@ -12,7 +11,6 @@ import type {
   RoutingLayerRoute,
   RoutingLayers,
 } from '../api/types';
-import { TIME } from './format';
 import { type Failover, failoverOf } from './provider-status';
 import {
   classifyProbe,
@@ -20,6 +18,7 @@ import {
   countKinds,
   type KindCounts,
   matchesFilter,
+  probeInterrupted,
   type RouteStateKind,
   rollupKind,
   routeStateLabel,
@@ -28,9 +27,6 @@ import {
   type StateFilter,
 } from './route-state';
 import type { Tone } from './status';
-
-/** 探针的结论超过「探测间隔 + 这么多分钟」还没更新，卡片就改成「检测中断」（mirastatus 同一个口径：不拿旧绿灯掩盖中断）。 */
-export const CHANNEL_INTERRUPT_GRACE_MINUTES = 3;
 
 export type ChannelState =
   /** 在用的路都探通了。 */
@@ -84,23 +80,6 @@ const LATENCY = /用时\s*(\d+)\s*秒/;
 export function probeLatency(detail: string | undefined): string | undefined {
   const m = detail ? LATENCY.exec(detail) : null;
   return m ? `用时 ${m[1]} 秒` : undefined;
-}
-
-/**
- * 这条路最近一次结论过没过「这一档间隔 + 3 分钟」。
- * detail 里写了退避或隔 30 分钟再探时按那一档，不把故意放慢当成检测中断。不给 detail 就按执行方式。
- */
-export function channelProbeInterrupted(
-  route: { probedAt: string; hostId: string; detail?: string | null | undefined },
-  now: number,
-): boolean {
-  // 按需探测的不主动探：结论放多久都不算检测中断（#1635）
-  if (isOnDemandDetail(route.detail)) return false;
-  const every = route.detail
-    ? probeCadenceMinutes(route.hostId, route.detail)
-    : routeProbeEveryMinutes(route.hostId);
-  const limit = (every + CHANNEL_INTERRUPT_GRACE_MINUTES) * TIME.MIN;
-  return now - Date.parse(route.probedAt) > limit;
 }
 
 interface Seen {
@@ -157,6 +136,8 @@ export function channelMatchesFilter(c: ChannelCard, filter: StateFilter): boole
   return matchesFilter(c.kind, filter);
 }
 
+const NO_ROUTES: ReadonlySet<string> = new Set();
+
 /** 已下架的模型：下架时间已过。 */
 function retiredModelIds(models: readonly Model[], now: number): Set<string> {
   return new Set(
@@ -173,6 +154,8 @@ export function routeKindMap(
   layers: RoutingLayers,
   now: number,
   poolHeld: (poolId: string) => boolean = () => false,
+  /** 最近一次身份题说出旧答案的路由（探测记录里读，probe-history-view 的 identityMismatchRoutes）：这些是疑似换模型。 */
+  identityMismatch: ReadonlySet<string> = NO_ROUTES,
 ): Map<string, RouteStateKind> {
   const retired = retiredModelIds(routing.models, now);
   const enabled = new Map(routing.channels.map((c) => [c.id, c.enabled]));
@@ -189,13 +172,15 @@ export function routeKindMap(
       channelEnabled: enabled.get(r.channelId),
       modelRetired: retired.has(r.modelId),
       poolHeld: poolHeld(r.poolId),
+      now,
+      identityMismatch: identityMismatch.has(r.id),
     };
     const lr = layerRoute.get(r.id);
     out.set(
       r.id,
       lr
         ? classifyRoute(lr, { ...ctx, usedByPurpose: true })
-        : classifyProbe(r.probe, { ...ctx, usedByPurpose: false }),
+        : classifyProbe(r.probe, { ...ctx, usedByPurpose: false }, r),
     );
   }
   return out;
@@ -223,11 +208,13 @@ export function buildChannelCards(
   now: number,
   /** 账号池整池暂停了吗（路由页、渠道状态页从 usePoolHolds 传）；不给当没有暂停。 */
   poolHeld: (poolId: string) => boolean = () => false,
+  /** 最近一次身份题说出旧答案的路由；不给当没有。 */
+  identityMismatch: ReadonlySet<string> = NO_ROUTES,
 ): ChannelCard[] {
   const retired = retiredModelIds(routing.models, now);
   const { seen, routes: active } = collect(layers, retired);
   const rawRoute = new Map(routing.routes.map((r) => [r.id, r]));
-  const kindOf = routeKindMap(routing, layers, now, poolHeld);
+  const kindOf = routeKindMap(routing, layers, now, poolHeld, identityMismatch);
 
   /** 这个渠道下每条路由各是哪一种：「死」拆开，已关、没用、下架、暂停都不是故障。 */
   const kindsOf = (channel: Channel): RouteStateKind[] =>
@@ -273,24 +260,16 @@ export function buildChannelCards(
 
     const dead = mine.filter((r) => r.connect.verdict === 'dead');
     const live = mine.filter((r) => r.connect.verdict === 'live');
-    const probed = mine.filter(
-      (r) => r.probedAt !== undefined && !isOnDemandDetail(r.probeDetail),
-    ) as (RoutingLayerRoute & {
+    const probed = mine.filter((r) => r.probedAt !== undefined) as (RoutingLayerRoute & {
       probedAt: string;
     })[];
     const newest = probed.reduce<(RoutingLayerRoute & { probedAt: string }) | undefined>(
       (a, r) => (!a || r.probedAt > a.probedAt ? r : a),
       undefined,
     );
-    // 每一条探过的路都过了「间隔 + 3 分钟」才算整个渠道检测中断（慢的执行方式用它自己的间隔）
-    const interrupted =
-      probed.length > 0 &&
-      probed.every((r) =>
-        channelProbeInterrupted(
-          { probedAt: r.probedAt, hostId: r.hostId, detail: r.probeDetail ?? r.connect.reason },
-          now,
-        ),
-      );
+    // 在探的路（有下次探测时刻、不是不在用）每一条都晚于 probeNextAt 加 20 分钟，才算整个渠道检测中断
+    const scheduled = probed.filter((r) => r.probeNextAt !== undefined && r.probeTier !== 'unused');
+    const interrupted = scheduled.length > 0 && scheduled.every((r) => probeInterrupted(r, now));
     const latency = probeLatency(
       live
         .map((r) => rawRoute.get(r.routeId)?.probe)
@@ -316,9 +295,8 @@ export function buildChannelCards(
       tone = 'fail';
     } else {
       state = 'unknown';
-      const onDemand = mine.length > 0 && mine.every((r) => isOnDemandDetail(r.probeDetail));
-      label = channel.billing === 'metered' ? '按量计费，不自动探' : onDemand ? '按需探测' : '还没探到';
-      tone = onDemand ? 'stop' : 'stall';
+      label = channel.billing === 'metered' ? '按量计费，不自动探' : '还没探到';
+      tone = 'stall';
     }
     const firstDead = dead[0];
     const firstUnknown = mine.find((r) => r.connect.verdict === 'unknown');
@@ -343,8 +321,8 @@ export function buildChannelCards(
       reason = clip(failover.reason);
     }
     if (interrupted && !failover) {
-      label = '检测中断';
-      tone = 'stall';
+      label = routeStateLabel.interrupted;
+      tone = routeStateTone.interrupted;
     }
     const kind: RouteStateKind =
       state === 'down'

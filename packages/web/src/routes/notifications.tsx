@@ -11,11 +11,16 @@ import {
   useResolveNotification,
 } from '../api/client';
 import type { Me, Notification, NotificationLevel } from '../api/types';
-import { FilterTrack, filterTabClass } from '../components/filter-tabs';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { EmptyState } from '../components/layout/empty-state';
+import { FilterTabs } from '../components/layout/filter-tabs';
+import { List, ListRow } from '../components/layout/list';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
+import { StatusBadge, StatusDot } from '../components/layout/status-badge';
+import { Tag } from '../components/layout/tag';
 import { RefreshBar } from '../components/refresh-bar';
 import { RepoLink } from '../components/repo-link';
-import { StatusChip, StatusDot } from '../components/status';
 import { Button } from '../components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import { formatAgo, formatClock, formatDateTime, formatDuration, TIME } from '../lib/format';
@@ -47,24 +52,17 @@ function dayOf(iso: string, now: number): string {
 
 const DELIVERY_NAME: Record<string, string> = { feishu: '飞书' };
 
-/** 处理状态和级别共用 components/filter-tabs 这一套：灰底轨道，选中是白底卡片，手机上每个标签至少 40 高。 */
-const segmentClass = filterTabClass;
-
 /** 飞书等渠道送没送到：没拿到消息编号就算没送到。 */
 function Deliveries({ n }: { n: Notification }) {
-  if (!n.deliveries.length) return <span className="text-caption text-faint">只在{brand.product}</span>;
+  if (!n.deliveries.length)
+    return <span className="text-meta text-muted-foreground">只在{brand.product}</span>;
   return (
     <span className="flex flex-wrap gap-1.5">
       {n.deliveries.map((d, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: 同一渠道可以发给好几个对象，契约里没有对象编号。
         <Tooltip key={`${d.channel}-${i}`}>
           <TooltipTrigger asChild>
-            <span
-              className={cn(
-                'inline-flex items-center gap-1 rounded px-1.5 text-caption leading-4',
-                d.delivered ? 'bg-muted text-muted-foreground' : 'bg-st-fail/10 text-ink-fail',
-              )}
-            >
+            <Tag tone={d.delivered ? 'neutral' : 'fail'} className="gap-1">
               {d.delivered ? (
                 <Send className="size-2.5" aria-hidden />
               ) : (
@@ -72,7 +70,7 @@ function Deliveries({ n }: { n: Notification }) {
               )}
               {DELIVERY_NAME[d.channel] ?? d.channel}
               {d.delivered ? '已送到' : '没送到'}
-            </span>
+            </Tag>
           </TooltipTrigger>
           <TooltipContent>
             试了 {d.attempts} 次{d.lastAttemptAt ? ` · 最后一次 ${formatDateTime(d.lastAttemptAt)}` : ''}
@@ -114,7 +112,7 @@ function WorkLink({
       repo={repo}
       kind={kind}
       n={n}
-      className="inline-flex items-center gap-0.5 text-caption text-muted-foreground underline-offset-2 max-md:min-h-10 [&[href]]:hover:text-foreground [&[href]]:hover:underline"
+      className="inline-flex items-center gap-0.5 text-meta text-muted-foreground underline-offset-2 max-md:min-h-10 [&[href]]:hover:text-foreground [&[href]]:hover:underline"
       icon={<ExternalLink className="size-2.5" aria-hidden />}
     >
       {label}
@@ -130,8 +128,8 @@ function HandlingRow({ h, now }: { h: Handling; now: number }) {
   const since = formatDuration(now - Date.parse(h.since));
   return (
     <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="alert-handling">
-      <StatusChip tone={STAGE_TONE[h.stage]} label={h.stageText} />
-      {h.who ? <span className="text-xs text-foreground">{h.who}</span> : null}
+      <StatusBadge tone={STAGE_TONE[h.stage]} label={h.stageText} />
+      {h.who ? <span className="text-meta text-foreground">{h.who}</span> : null}
       {h.work ? (
         <WorkLink
           repo={h.work.repo}
@@ -142,15 +140,15 @@ function HandlingRow({ h, now }: { h: Handling; now: number }) {
       ) : null}
       {h.pr ? <WorkLink repo={h.pr.repo} kind="pull" n={h.pr.number} label={`PR #${h.pr.number}`} /> : null}
       {h.silence ? (
-        <span className="text-caption text-muted-foreground">
+        <span className="text-meta text-muted-foreground">
           {h.silence.comment} · 到 {formatDateTime(h.silence.endsAt)}
         </span>
       ) : null}
-      <span className="num text-caption text-faint" title={formatDateTime(h.since)}>
+      <span className="num text-meta text-muted-foreground" title={formatDateTime(h.since)}>
         {since}
       </span>
       {h.problems.map((p) => (
-        <span key={p} className="text-caption text-ink-fail">
+        <span key={p} className="text-meta text-ink-fail">
           {p}
         </span>
       ))}
@@ -186,65 +184,70 @@ function NotificationRow({
 }) {
   const resolved = Boolean(n.resolvedAt);
   return (
-    <li
-      className={cn(
-        // 手机上「打开 / 处理了」是右侧的图标按钮，和标题同一行（#1820）；md 起是文字按钮、垂直居中
-        'flex items-start gap-3 border-b px-4 py-3 last:border-b-0 md:items-center',
-        !resolved && n.level !== 'daily' && 'bg-accent/40',
-      )}
-    >
-      <div className="flex min-w-0 flex-1 gap-3">
-        <StatusDot tone={noticeLevelMeta[n.level].tone} className={cn('mt-1.5', resolved && 'opacity-40')} />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className={cn('text-sm', !resolved && 'font-semibold')}>{n.title}</span>
-            <span className="rounded bg-muted px-1.5 text-caption text-muted-foreground">
-              {noticeLevelMeta[n.level].label}
-            </span>
+    <ListRow
+      data-notice-row
+      data-resolved={resolved || undefined}
+      summary={
+        <>
+          {/* 手机上「打开 / 处理了」是右侧的图标按钮，和标题同一行（#1820）；md 起是文字按钮、垂直居中 */}
+          <div className="flex min-w-0 flex-1 gap-3">
+            <StatusDot
+              tone={noticeLevelMeta[n.level].tone}
+              className={cn('mt-1.5', resolved && 'opacity-40')}
+            />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={cn('text-body', !resolved && 'font-semibold')}>{n.title}</span>
+                <Tag>{noticeLevelMeta[n.level].label}</Tag>
+              </div>
+              <p className="mt-0.5 text-body whitespace-pre-wrap text-muted-foreground">{n.body}</p>
+              {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
+              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="num text-meta text-muted-foreground" title={formatClock(n.createdAt)}>
+                  {formatAgo(n.createdAt, now)}
+                </span>
+                <Deliveries n={n} />
+                {resolved && n.resolvedAt ? (
+                  <span className="inline-flex items-center gap-1 text-meta text-muted-foreground">
+                    <Check className="size-3" aria-hidden />
+                    {n.resolvedBy ? (isMine(n.resolvedBy, me) ? '我' : n.resolvedBy) : ''}处理于{' '}
+                    <span className="num">{formatAgo(n.resolvedAt, now)}</span>
+                  </span>
+                ) : null}
+              </div>
+            </div>
           </div>
-          <p className="mt-0.5 text-sub whitespace-pre-wrap text-muted-foreground">{n.body}</p>
-          {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
-          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span className="num text-caption text-faint" title={formatClock(n.createdAt)}>
-              {formatAgo(n.createdAt, now)}
-            </span>
-            <Deliveries n={n} />
-            {resolved && n.resolvedAt ? (
-              <span className="inline-flex items-center gap-1 text-caption text-muted-foreground">
-                <Check className="size-3" aria-hidden />
-                {n.resolvedBy ? (isMine(n.resolvedBy, me) ? '我' : n.resolvedBy) : ''}处理于{' '}
-                <span className="num">{formatAgo(n.resolvedAt, now)}</span>
-              </span>
+          <div
+            className="flex shrink-0 items-center gap-1.5 max-md:-mt-2 max-md:self-start"
+            data-notice-actions
+          >
+            {n.link ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="max-md:w-10 max-md:px-0"
+                onClick={() => onOpen(n.link ?? '/')}
+              >
+                <ArrowUpRight className="md:hidden" aria-hidden />
+                <span className="max-md:sr-only">打开</span>
+              </Button>
+            ) : null}
+            {!resolved ? (
+              <Button
+                size="sm"
+                variant="outline"
+                className="max-md:w-10 max-md:px-0"
+                disabled={resolvePending && resolveId === n.id}
+                onClick={() => onDone(n)}
+              >
+                <Check />
+                <span className="max-md:sr-only">处理了</span>
+              </Button>
             ) : null}
           </div>
-        </div>
-      </div>
-      <div className="flex shrink-0 items-center gap-1.5 max-md:-mt-2" data-notice-actions>
-        {n.link ? (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="max-md:w-10 max-md:px-0"
-            onClick={() => onOpen(n.link ?? '/')}
-          >
-            <ArrowUpRight className="md:hidden" aria-hidden />
-            <span className="max-md:sr-only">打开</span>
-          </Button>
-        ) : null}
-        {!resolved ? (
-          <Button
-            size="sm"
-            variant="outline"
-            className="max-md:w-10 max-md:px-0"
-            disabled={resolvePending && resolveId === n.id}
-            onClick={() => onDone(n)}
-          >
-            <Check />
-            <span className="max-md:sr-only">处理了</span>
-          </Button>
-        ) : null}
-      </div>
-    </li>
+        </>
+      }
+    />
   );
 }
 
@@ -271,21 +274,23 @@ function DayGroups({
     <>
       {[...groups.entries()].map(([day, dayItems]) => (
         <section key={day}>
-          <h2 className="mb-2 text-xs font-medium text-muted-foreground">{day}</h2>
-          <ul className="overflow-hidden rounded-xl border bg-card">
-            {dayItems.map((n) => (
-              <NotificationRow
-                key={n.id}
-                n={n}
-                now={now}
-                me={me}
-                resolvePending={resolvePending}
-                resolveId={resolveId}
-                onOpen={onOpen}
-                onDone={onDone}
-              />
-            ))}
-          </ul>
+          <h2 className="mb-2 text-meta font-medium text-muted-foreground">{day}</h2>
+          <Section flush>
+            <List>
+              {dayItems.map((n) => (
+                <NotificationRow
+                  key={n.id}
+                  n={n}
+                  now={now}
+                  me={me}
+                  resolvePending={resolvePending}
+                  resolveId={resolveId}
+                  onOpen={onOpen}
+                  onDone={onDone}
+                />
+              ))}
+            </List>
+          </Section>
         </section>
       ))}
     </>
@@ -350,44 +355,32 @@ export default function Notifications() {
       }
     >
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <FilterTrack role="tablist" aria-label="处理状态">
-          {(['open', 'all'] as const).map((s) => (
-            <button
-              key={s}
-              type="button"
-              role="tab"
-              aria-selected={status === s}
-              onClick={() => set('status', s === 'open' ? null : 'all')}
-              className={segmentClass(status === s)}
-            >
-              {s === 'open' ? '待处理' : '连已处理的一起看'}
-            </button>
-          ))}
-        </FilterTrack>
-        <FilterTrack>
-          {LEVELS.map((l) => {
+        <FilterTabs
+          aria-label="处理状态"
+          items={[
+            { id: 'open', label: '待处理' },
+            { id: 'all', label: '连已处理的一起看' },
+          ]}
+          value={status}
+          onChange={(s) => set('status', s === 'open' ? null : 'all')}
+        />
+        <FilterTabs
+          mode="toggle"
+          aria-label="按级别"
+          items={LEVELS.map((l) => ({
+            id: l.id,
+            label: l.label,
             // 数字是接口给的真实总数，不是这一页取回的条数（只取了前 N 条时也不会封顶）。
-            // 没读到就写「—」，不拿 0 冒充「没有提醒」。真的没有（读成功且总数 0）才写 0。
-            const n = data ? (l.id === 'all' ? totalCount : data.counts[l.id]) : null;
-            const shown = n ?? '—';
-            return (
-              <button
-                key={l.id}
-                type="button"
-                aria-pressed={level === l.id}
-                onClick={() => set('level', l.id === 'all' ? null : l.id)}
-                className={segmentClass(level === l.id)}
-              >
-                {l.id !== 'all' ? <StatusDot tone={noticeLevelMeta[l.id].tone} className="size-1.5" /> : null}
-                {l.label}
-                <span className="num text-caption opacity-70">{shown}</span>
-              </button>
-            );
-          })}
-        </FilterTrack>
+            // 没读到就写「—」（count 传 null），不拿 0 冒充「没有提醒」。真的没有（读成功且总数 0）才写 0。
+            count: data ? (l.id === 'all' ? totalCount : data.counts[l.id]) : null,
+            ...(l.id !== 'all' ? { tone: noticeLevelMeta[l.id].tone } : {}),
+          }))}
+          value={level}
+          onChange={(id) => set('level', id === 'all' ? null : id)}
+        />
       </div>
       {data && status === 'open' ? (
-        <p className="mb-3 text-xs text-muted-foreground" data-testid="pending-rule">
+        <p className="mb-3 text-meta text-muted-foreground" data-testid="pending-rule">
           待处理 <span className="num">{pendingCount(data.counts)}</span> 条。
           要你拍的和卡住的，处理了就从这里消失。
           {data.counts.daily > 0 ? (
@@ -400,20 +393,20 @@ export default function Notifications() {
       ) : null}
       {error ? <LoadError what="提醒" error={error} /> : null}
       {data?.handlingProblem ? (
-        <p className="mb-3 text-xs text-ink-fail" role="status">
+        <p className="mb-3 text-meta text-ink-fail" role="status">
           {data.handlingProblem}（提醒照常列出，只是看不出谁在处理）
         </p>
       ) : null}
       {isLoading ? (
         <LoadingRows rows={5} />
       ) : !data ? null : listEmpty ? (
-        <Panel>
-          <Empty
+        <Section>
+          <EmptyState
             icon={Bell}
             title={status === 'open' ? '没有待处理的提醒' : '这里没有提醒'}
             hint="要你拍板或有东西卡住时，这里和飞书会同时提醒。"
           />
-        </Panel>
+        </Section>
       ) : (
         <div className="space-y-5">
           <DayGroups
@@ -427,25 +420,27 @@ export default function Notifications() {
           />
           {foldDaily && dailyItems.length > 0 ? (
             <section>
-              <button
-                type="button"
-                data-testid="daily-fold"
-                aria-expanded={dailyOpen}
-                onClick={() => setDailyOpen((v) => !v)}
-                className="mb-2 flex w-full items-center gap-1.5 rounded-lg border bg-card px-4 py-3 text-left text-sm text-foreground hover:bg-accent/40"
-              >
-                <ChevronDown
-                  className={cn(
-                    'size-4 shrink-0 text-muted-foreground transition-transform',
-                    dailyOpen && 'rotate-180',
-                  )}
-                  aria-hidden
-                />
-                <StatusDot tone={noticeLevelMeta.daily.tone} className="size-1.5" />
-                <span>
-                  日报 <span className="num">{dailyItems.length}</span> 条
-                </span>
-              </button>
+              <Section flush className="mb-2">
+                <button
+                  type="button"
+                  data-testid="daily-fold"
+                  aria-expanded={dailyOpen}
+                  onClick={() => setDailyOpen((v) => !v)}
+                  className="flex min-h-10 w-full items-center gap-1.5 px-4 py-2.5 text-left text-body text-foreground outline-none hover:bg-accent focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-11"
+                >
+                  <ChevronDown
+                    className={cn(
+                      'size-4 shrink-0 text-muted-foreground transition-transform',
+                      dailyOpen && 'rotate-180',
+                    )}
+                    aria-hidden
+                  />
+                  <StatusDot tone={noticeLevelMeta.daily.tone} className="size-1.5" />
+                  <span>
+                    日报 <span className="num">{dailyItems.length}</span> 条
+                  </span>
+                </button>
+              </Section>
               {dailyOpen ? (
                 <DayGroups
                   items={dailyItems}
@@ -460,7 +455,7 @@ export default function Notifications() {
             </section>
           ) : null}
           {data?.nextCursor ? (
-            <div className="flex flex-col items-center gap-2 text-xs text-muted-foreground">
+            <div className="flex flex-col items-center gap-2 text-meta text-muted-foreground">
               <p>
                 只取回了最近 <span className="num">{all.length}</span> 条，共{' '}
                 <span className="num">{totalCount}</span> 条
@@ -477,9 +472,12 @@ export default function Notifications() {
               </Button>
             </div>
           ) : null}
-          <p className="text-center text-xs text-muted-foreground">
+          <p className="text-center text-meta text-muted-foreground">
             飞书的免打扰时段在{' '}
-            <Link to="/settings#notify" className="underline underline-offset-2">
+            <Link
+              to="/settings#notify"
+              className="underline underline-offset-2 max-md:inline-flex max-md:min-h-10 max-md:min-w-10 max-md:items-center max-md:justify-center"
+            >
               设置
             </Link>{' '}
             里改。

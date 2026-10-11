@@ -91,3 +91,52 @@ describe('自定义尺寸 token 放对命名空间', () => {
     );
   });
 });
+
+describe('组件令牌和密度（规范 2.7）', () => {
+  const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
+  const tokens = themeSizeTokens(css);
+  const VARS = ['control-h', 'row-h', 'section-p', 'section-gap', 'stack-gap'] as const;
+
+  /** 取一个选择器块里「--变量: 值」的字典。 */
+  function block(selector: string): Record<string, string | undefined> {
+    const at = css.indexOf(selector);
+    expect(at, `app.css 里没有 ${selector}`).toBeGreaterThan(-1);
+    const body = css.slice(css.indexOf('{', at) + 1, css.indexOf('}', at));
+    return Object.fromEntries([...body.matchAll(/--([a-z-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2]]));
+  }
+
+  test('五个令牌类认得：落在 --spacing-* 下', () => {
+    for (const name of ['control', 'row', 'section', 'section-gap', 'stack']) {
+      expect(tokens.get(name), name).toEqual(new Set(['spacing']));
+    }
+  });
+  test('标准 32/40/16/24/12，紧凑 28/32/12/16/8，紧凑只在桌面（48rem）起生效', () => {
+    const std = block(':root,\n[data-density="comfortable"]');
+    const compact = block('[data-density="compact"]');
+    expect(VARS.map((v) => std[v])).toEqual(['32px', '40px', '16px', '24px', '12px']);
+    expect(VARS.map((v) => compact[v])).toEqual(['28px', '32px', '12px', '16px', '8px']);
+    expect(css).toMatch(/@media \(width >= 48rem\) \{\s*\[data-density="compact"\]/);
+  });
+  test('紧凑不改字号', () => {
+    expect(Object.keys(block('[data-density="compact"]')).filter((k) => k.startsWith('text'))).toEqual([]);
+  });
+});
+
+describe('收口：@theme 关掉 Tailwind 默认的字号、圆角、阴影（#1855）', () => {
+  const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
+
+  test('三行 initial 都在', () => {
+    for (const line of ['--text-*: initial;', '--radius-*: initial;', '--shadow-*: initial;']) {
+      expect(css, line).toContain(line);
+    }
+  });
+  test('#182 的旧字号名和 shadow-card-edge 不再定义，新档位还在', () => {
+    for (const old of ['micro', 'caption', 'sub', 'label', 'strong', 'stat-num', 'stat']) {
+      expect(css, `--text-${old}`).not.toMatch(new RegExp(`--text-${old}\\s*:`));
+    }
+    expect(css).not.toMatch(/--shadow-card-edge\s*:/);
+    for (const name of ['meta', 'body', 'heading', 'title', 'display', 'canvas']) {
+      expect(css, `--text-${name}`).toMatch(new RegExp(`--text-${name}\\s*:`));
+    }
+  });
+});

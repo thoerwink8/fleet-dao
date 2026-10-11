@@ -368,7 +368,7 @@ function healthy(): Snapshot {
             state: 'skipped',
             detail: '会话用户现在挂的是拼车组织：这时探独享池，扣的是拼车的额度、探的也是拼车，不探',
           }),
-          route({ id: 'grok:grok-4.7:grok', host: 'grok', probed: 100 }),
+          route({ id: 'grok:grok-4.7:grok', host: 'grok', probed: 20 }),
         ],
       },
       orgAudit: { ok: true, rows: [] },
@@ -1403,7 +1403,7 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
     expect(lib.jobStatus({ ...running, last_success: null }, AT)).toBe('stale');
   });
 
-  it('路由：在线却过了该探的时候没探——平时 45 分钟，贵的执行方式 150 分钟', () => {
+  it('路由：在线却过了该探的时候没探——不分执行方式都是 45 分钟（#1798 片 3，原先 cursor-agent、grok 放宽到 150）', () => {
     const v = viewOf((s) => {
       s.routes = {
         ok: true,
@@ -1416,8 +1416,9 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
       };
     });
     has(v, 'bad', '路由 a:m:claude-code 算在线，但结论 50 分钟没更新');
+    has(v, 'bad', '路由 g:m:grok 算在线，但结论 140 分钟没更新');
     has(v, 'bad', '路由 c:m:cursor-agent 算在线，但结论 160 分钟没更新');
-    expect(whats(v).some((w) => w.includes('g:m:grok') || w.includes('n:m:claude-code'))).toBe(false);
+    expect(whats(v).some((w) => w.includes('n:m:claude-code'))).toBe(false);
     // 稳定类别（#1520）：发版车暂停期探针不跑，旧结论按它过滤，不匹配文案
     const kindOf = (prefix: string) =>
       (v.anomalies as { what: string; kind?: string }[]).find((a) => a.what.startsWith(prefix))?.kind;

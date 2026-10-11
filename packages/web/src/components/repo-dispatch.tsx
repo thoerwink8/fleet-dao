@@ -3,7 +3,7 @@ import { toast } from 'sonner';
 import { errorText, useUpdateRepoDispatch } from '../api/client';
 import type { RepoDispatch } from '../api/types';
 import { formatDateTime } from '../lib/format';
-import { StatusDot } from './status';
+import { StatusDot } from './layout/status-badge';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -33,7 +33,7 @@ export function RepoDispatchControl({
   const update = useUpdateRepoDispatch();
   const [asking, setAsking] = useState(false);
 
-  if (!row) return <span className="text-xs text-muted-foreground">开关没读到</span>;
+  if (!row) return <span className="text-meta text-muted-foreground">开关没读到</span>;
 
   const noteText =
     row.on && row.since ? `${formatDateTime(row.since)} 开的` : '只有本机 fleet-api dispatch-issue 点名派';
@@ -59,7 +59,7 @@ export function RepoDispatchControl({
 
   return (
     <div className="flex items-center gap-x-2 self-center" data-testid={`dispatch-${repoId}`}>
-      <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+      <div className="flex min-w-0 items-center gap-1.5 text-meta text-muted-foreground">
         <StatusDot tone={row.on ? 'done' : 'stop'} />
         <span className="font-medium text-foreground" data-testid={`dispatch-state-${repoId}`}>
           {row.on ? '接活中' : '关着'}

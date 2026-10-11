@@ -7,8 +7,7 @@ import { Route, Routes } from 'react-router';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { EnvResponse, QuotaWindowView } from '../api/types';
 import { factCells } from '../components/env-facts';
-import { filterTabClass } from '../components/filter-tabs';
-import { Page } from '../components/page';
+import { Page } from '../components/layout/page';
 import { QuotaLine } from '../components/quota';
 import { RefreshBar } from '../components/refresh-bar';
 import NotificationsPage from '../routes/notifications';
@@ -40,11 +39,6 @@ function viewport(width: number) {
 }
 
 describe('筛选标签手机上不小于 40', () => {
-  test('标签类名带 max-md:min-h-10；选中与否都带', () => {
-    expect(filterTabClass(true)).toContain('max-md:min-h-10');
-    expect(filterTabClass(false)).toContain('max-md:min-h-10');
-  });
-
   test('任务列表的状态标签用的就是它，条上带渐隐提示用的类', async () => {
     renderApp(<TasksPage />, { route: '/tasks' });
     const tabs = await screen.findAllByRole('tab');
@@ -177,9 +171,13 @@ describe('通知操作和标题同一行', () => {
       if (!el) throw new Error('还没出通知');
       return el as HTMLElement;
     });
-    const row = actions.closest('li') as HTMLElement;
-    expect(row.className).toContain('items-start');
-    expect(row.className).not.toContain('flex-col');
+    const row = actions.closest('li[data-notice-row]') as HTMLElement;
+    expect(row).toBeTruthy();
+    // 内容块和操作区是同一行里的两个兄弟，操作区在后（右侧），不是上下叠
+    const content = actions.previousElementSibling as HTMLElement;
+    expect(content?.parentElement).toBe(actions.parentElement);
+    expect(content?.textContent).toContain('分钟前');
+    expect(actions.parentElement?.className).not.toContain('flex-col');
     // 按钮的文字手机上只给读屏（sr-only），可见的是图标
     const done = within(actions).getByRole('button', { name: '处理了' });
     expect(done.className).toContain('max-md:w-10');

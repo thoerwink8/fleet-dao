@@ -9,13 +9,16 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { isNotFound, useRouting, useTaskDetail } from '../api/client';
 import type { TaskDetail } from '../api/types';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
-import { RefreshBar } from '../components/refresh-bar';
+import { Code } from '../components/layout/code';
+import { EmptyState } from '../components/layout/empty-state';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
+import { StatusBadge } from '../components/layout/status-badge';
 import { RepoLink } from '../components/repo-link';
 import { RunTimeline } from '../components/run-timeline';
 import { RunTranscriptDrawer } from '../components/run-transcript';
 import { SegmentBreakdown, SegmentRunList, SegmentStats } from '../components/segment-usage';
-import { StatusChip } from '../components/status';
 import { ActionButtons } from '../components/task-actions';
 import { TaskModelPins } from '../components/task-model-pins';
 import { Button } from '../components/ui/button';
@@ -50,10 +53,10 @@ function Header({ d, now }: { d: TaskDetail; now: number }) {
   return (
     <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
       {d.task.paused === undefined ? (
-        <StatusChip tone={taskTone(d.task)} label={taskStateLabel[d.task.state]} />
+        <StatusBadge tone={taskTone(d.task)} label={taskStateLabel[d.task.state]} />
       ) : (
         // 暂停的单 state 仍是「在干活」，但人让它停了：等待色（黄系），不画成失败红（#820 片 3）
-        <StatusChip tone="stall" label="已暂停" />
+        <StatusBadge tone="stall" label="已暂停" />
       )}
       {d.task.paused === undefined ? null : <span data-paused-note>{d.task.paused}</span>}
       <RepoLink
@@ -92,20 +95,20 @@ function SessionPart({ d, now, mixed }: { d: TaskDetail; now: number; mixed: boo
   const { data: routing } = useRouting();
   if (mixed) {
     return (
-      <Panel
+      <Section
         title="老流程的会话"
         description="三段之前按老流程跑的会话；上面的合计和按模型已经把它们算进去了。"
         className="mt-4"
       >
         <RunTimeline runs={d.runs} routing={routing} now={now} />
-      </Panel>
+      </Section>
     );
   }
   return (
     <div className="mt-4 grid gap-4 lg:grid-cols-3">
-      <Panel title="会话时间线" description="斜纹是排队，实色是干活。" className="lg:col-span-2">
+      <Section title="会话时间线" description="斜纹是排队，实色是干活。" className="lg:col-span-2">
         <RunTimeline runs={d.runs} routing={routing} now={now} />
-      </Panel>
+      </Section>
       <UsagePanel d={d} now={now} />
     </div>
   );
@@ -135,31 +138,30 @@ function NowBanner({ d, now }: { d: TaskDetail; now: number }) {
       .filter((n): n is number => n !== undefined)
       .at(-1);
   return (
-    <div
-      data-now-banner
-      className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border bg-card px-4 py-3 shadow-card-edge"
-    >
-      {paused ? (
-        <StatusChip tone="stall" label="已暂停" />
-      ) : (
-        <StatusChip tone={taskTone(d.task)} label={taskStateLabel[d.task.state]} />
-      )}
-      {running?.segment ? <span className="text-sm font-medium">{segmentLabel[running.segment]}</span> : null}
-      {running?.modelName ? (
-        <span className="num text-sub text-muted-foreground">{running.modelName}</span>
-      ) : null}
-      {live !== undefined ? <span className="num text-sm">已跑 {formatDuration(live)}</span> : null}
-      {prNumber !== undefined ? (
-        <RepoLink
-          repo={d.repo}
-          kind="pull"
-          n={prNumber}
-          className="num text-sm underline-offset-2 hover:underline max-md:inline-flex max-md:min-h-10 max-md:items-center"
-        >
-          PR #{prNumber}
-        </RepoLink>
-      ) : null}
-    </div>
+    <Section data-now-banner className="mb-4">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        {paused ? (
+          <StatusBadge tone="stall" label="已暂停" />
+        ) : (
+          <StatusBadge tone={taskTone(d.task)} label={taskStateLabel[d.task.state]} />
+        )}
+        {running?.segment ? (
+          <span className="text-body font-medium">{segmentLabel[running.segment]}</span>
+        ) : null}
+        {running?.modelName ? <Code>{running.modelName}</Code> : null}
+        {live !== undefined ? <span className="num text-body">已跑 {formatDuration(live)}</span> : null}
+        {prNumber !== undefined ? (
+          <RepoLink
+            repo={d.repo}
+            kind="pull"
+            n={prNumber}
+            className="num text-body underline-offset-2 hover:underline max-md:inline-flex max-md:min-h-10 max-md:items-center"
+          >
+            PR #{prNumber}
+          </RepoLink>
+        ) : null}
+      </div>
+    </Section>
   );
 }
 
@@ -221,13 +223,13 @@ function Body({ d, now }: { d: TaskDetail; now: number }) {
     return (
       <>
         <NowBanner d={d} now={now} />
-        <Panel>
-          <Empty
+        <Section>
+          <EmptyState
             icon={ListChecks}
             title="这张单还没跑过"
             hint="三段（对题、动手、验收）跑起来以后，每一笔都记在这里。"
           />
-        </Panel>
+        </Section>
         <Pins d={d} now={now} />
       </>
     );
@@ -266,9 +268,9 @@ function looksLikeIssueNumber(taskId: string | undefined): boolean {
 /** 没有这张单（后端 404）：写明，给回主页的路；不转圈、不给「重试」（重试也不会有）。纯数字再补一句单号和任务编号的区别。 */
 function Missing({ taskId }: { taskId: string | undefined }) {
   return (
-    <Panel>
+    <Section>
       <div role="alert">
-        <Empty
+        <EmptyState
           icon={SearchX}
           title="没有这张单"
           hint={
@@ -285,7 +287,7 @@ function Missing({ taskId }: { taskId: string | undefined }) {
           }
         />
       </div>
-    </Panel>
+    </Section>
   );
 }
 
@@ -312,14 +314,14 @@ export default function TaskPage() {
       }
       description={d ? <Header d={d} now={now} /> : undefined}
       keepDescription
+      refresh={{
+        onRefresh: () => void detail.refetch(),
+        isFetching: detail.isFetching,
+        dataUpdatedAt: detail.dataUpdatedAt,
+        staleAfterMs: TASK_STALE_AFTER_MS,
+      }}
       actions={
         <>
-          <RefreshBar
-            onRefresh={() => void detail.refetch()}
-            isFetching={detail.isFetching}
-            dataUpdatedAt={detail.dataUpdatedAt}
-            staleAfterMs={TASK_STALE_AFTER_MS}
-          />
           {d ? <TaskActionBar d={d} /> : null}
           <Back />
         </>

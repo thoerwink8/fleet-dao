@@ -73,12 +73,12 @@ export interface RouteProbeTarget {
   /**
    * 在各用途里、开着的路由中最靠前的名次（从 1 起）。开着 = 模型下这一行开着、渠道开着、模型没下架。
    * 关着的不占名次。一条路由进了几个用途，取最靠前的那个名次。没排进任何用途、或算不出：null
-   * （定时探针把 null 当成前 2 位，不放慢）。
+   * （定时探针：null 不算活跃名次，还要看 lastRunAt / restoresChannel）。
    */
   probeRank?: number | null;
   /**
    * 它所在的渠道被运行中失败标成 disabled，而这条路由正是引发的那条（或引发的那条已被删）：只有探针探通它才能把渠道改回 ok，
-   * 所以不能转按需（按需不探，渠道被 channel-failed 挡着，派前探测也轮不到它）。
+   * 所以算活跃档（#1798 片 3）。
    */
   restoresChannel?: boolean;
   /** 该路由 runs.started_at 的最大值；没有会话为空（#1798 片 2）。 */
@@ -264,6 +264,7 @@ export interface RouteProbeHistoryRow {
   responseText: string | null;
   checkQuestion: string | null;
   checkExpected: string | null;
+  checkOldAnswer: string | null;
   checkAnswer: string | null;
   checkPassed: boolean | null;
   selfIdentity: string | null;
@@ -291,6 +292,22 @@ function clipOrNull(text: string | null | undefined): string | null {
 }
 
 /**
+ * 只改节奏列（档和下次探测时刻），不改结论、不写历史（#1798 片 3：定时轮没到期的也更新）。
+ * 路由已经不在了回 route_not_found。
+ */
+export async function updateRouteProbePace(
+  db: Db,
+  w: { routeId: string; tier: RouteProbeTier; nextAt: Date | null },
+): Promise<'saved' | 'route_not_found'> {
+  const updated = await db
+    .update(routes)
+    .set({ probeTier: w.tier, probeNextAt: w.nextAt })
+    .where(eq(routes.id, w.routeId))
+    .returning({ id: routes.id });
+  return updated.length === 0 ? 'route_not_found' : 'saved';
+}
+
+/**
  * 写一条路由的结论：只有 ok 让它在线，其余一律不在线（alive、结论、那时挂的组织在同一条语句里写，不会一半）。
  * 同一事务里追加一条历史，并把这条路由多出来的旧历史裁到最近 60 条。路由更新、历史、渠道近态一起成功或一起退回。
  * 路由已经不在了（这一轮当中被删）回 route_not_found，不写历史；别的出错（约束不让写、库连不上）原样抛出。
@@ -312,6 +329,9 @@ export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved
         ...(w.nextAt !== undefined ? { probeNextAt: w.nextAt } : {}),
         ...(w.failStreak !== undefined ? { probeFailStreak: w.failStreak } : {}),
         ...(w.kind !== undefined ? { probeKind: w.kind } : {}),
+        // 疑似换模型和上次触发者（#1846）：身份题判过才写（答中旧答案 true、新答案 false；认不出、没带题不动）；触发者给了才写。
+        ...(w.check?.passed != null ? { suspectedSwap: w.check.passed === false } : {}),
+        ...(w.trigger != null ? { probeTrigger: w.trigger } : {}),
       })
       .where(eq(routes.id, w.routeId))
       .returning({ id: routes.id });
@@ -327,6 +347,7 @@ export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved
       responseText: clipOrNull(w.responseText),
       checkQuestion: clipOrNull(w.check?.question),
       checkExpected: clipOrNull(w.check?.expected),
+      checkOldAnswer: clipOrNull(w.check?.oldAnswer),
       checkAnswer: clipOrNull(w.check?.answer),
       checkPassed: w.check?.passed ?? null,
       selfIdentity: clipOrNull(w.check?.selfIdentity),
@@ -360,6 +381,7 @@ export interface ProbeHistoryJoined {
   responseText: string | null;
   checkQuestion: string | null;
   checkExpected: string | null;
+  checkOldAnswer: string | null;
   checkAnswer: string | null;
   checkPassed: boolean | null;
   selfIdentity: string | null;
@@ -431,6 +453,7 @@ export async function readProbeHistoryJoined(db: Db): Promise<ProbeHistoryJoined
         responseText: routeProbeHistory.responseText,
         checkQuestion: routeProbeHistory.checkQuestion,
         checkExpected: routeProbeHistory.checkExpected,
+        checkOldAnswer: routeProbeHistory.checkOldAnswer,
         checkAnswer: routeProbeHistory.checkAnswer,
         checkPassed: routeProbeHistory.checkPassed,
         selfIdentity: routeProbeHistory.selfIdentity,
@@ -471,6 +494,7 @@ export async function readRouteProbeHistory(
         responseText: routeProbeHistory.responseText,
         checkQuestion: routeProbeHistory.checkQuestion,
         checkExpected: routeProbeHistory.checkExpected,
+        checkOldAnswer: routeProbeHistory.checkOldAnswer,
         checkAnswer: routeProbeHistory.checkAnswer,
         checkPassed: routeProbeHistory.checkPassed,
         selfIdentity: routeProbeHistory.selfIdentity,

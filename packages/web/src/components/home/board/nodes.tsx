@@ -6,9 +6,11 @@ import { memo, type ReactNode } from 'react';
 import { formatAgo, formatDuration } from '../../../lib/format';
 import { useNow } from '../../../lib/hooks';
 import { SEGMENT_UNMETERED, segmentHint } from '../../../lib/segments';
-import { type Tone, toneBg, toneSoft, toneText } from '../../../lib/status';
+import type { Tone } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
-import { StatusChip, StatusDot } from '../../status';
+import { Section } from '../../layout/section';
+import { StatusBadge, StatusDot } from '../../layout/status-badge';
+import { inkClass, softClass, solidClass } from '../../layout/tone';
 import { ACTIONS, type ActionTarget, useTargetActions } from '../../task-actions';
 import { Kbd } from '../../ui/kbd';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../ui/tooltip';
@@ -119,7 +121,10 @@ function Shell({
           position={Position.Top}
           offset={8}
         >
-          <div {...bind} className="flex items-center gap-0.5 rounded-lg border bg-popover p-0.5 shadow-lg">
+          <div
+            {...bind}
+            className="flex items-center gap-0.5 rounded-lg border bg-popover p-0.5 shadow-overlay"
+          >
             {entries.map(({ action, run }) => (
               <QuickButton key={action} action={action} target={target} onRun={run} />
             ))}
@@ -128,14 +133,15 @@ function Shell({
       ) : null}
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <div
+          <Section
             {...bind}
             {...attrs}
-            data-tone={tone}
+            flush
+            tone={tone}
             data-selected={selected || undefined}
             className={cn(
-              'relative h-full w-full overflow-hidden rounded-xl border bg-card text-card-foreground',
-              'shadow-[0_1px_2px_var(--shadow-color),0_8px_24px_-16px_var(--shadow-color)]',
+              // Section 把正文包了一层 div，这里让它撑满节点，里面的 h-full 才有高度
+              'h-full w-full [&>div]:h-full',
               'transition-[opacity,filter,box-shadow] duration-300',
               toneBorder[tone],
               live && 'fd-live',
@@ -144,12 +150,11 @@ function Shell({
               className,
             )}
           >
-            <span aria-hidden className={cn('absolute inset-y-0 left-0 w-0.75', toneBg[tone])} />
             {children}
-          </div>
+          </Section>
         </ContextMenuTrigger>
         <ContextMenuContent className="w-56">
-          <ContextMenuLabel className="truncate text-xs text-muted-foreground">{title}</ContextMenuLabel>
+          <ContextMenuLabel className="truncate text-meta text-muted-foreground">{title}</ContextMenuLabel>
           {entries.map(({ action, def, run }) => {
             const Icon = def.icon;
             return (
@@ -236,10 +241,10 @@ function Handles({ side, source = true, target = true }: { side: Side; source?: 
  * 画布最小缩放 0.15 时屏幕上仍是 12px（32 / 0.4 × 0.15）。
  */
 const FAR_HEAD_PX = farCardFontPx(32, ZOOM_OF.far);
-/** 远档标题：字号名，跟着画布当前缩放，屏幕上不小于 --text-caption（11px）。 */
+/** 远档标题：字号名，跟着画布当前缩放，屏幕上不小于 --text-meta（12px）。 */
 const FAR_TITLE_FONT = farTitleFontSize();
 
-/** 远档单号：比标题小一档（设计字号 13 对 15，下限 10 对 11），缩放到哪里标题都比它大。 */
+/** 远档单号：比标题小一档（设计字号 14 对 16，下限 11 对 12），缩放到哪里标题都比它大。 */
 const FAR_ID_FONT = farIdFontSize();
 
 /**
@@ -247,16 +252,16 @@ const FAR_ID_FONT = farIdFontSize();
  */
 export function FarTicket({ tone, id, title }: { tone: Tone; id: string; title: string }) {
   return (
-    <div className={cn('flex h-full flex-col justify-center gap-1 overflow-hidden px-3', toneSoft[tone])}>
+    <div className={cn('flex h-full flex-col justify-center gap-1 overflow-hidden px-3', softClass[tone])}>
       <div
-        className={cn('num shrink-0 leading-none font-semibold', toneText[tone])}
+        className={cn('num shrink-0 leading-none font-semibold', inkClass[tone])}
         style={{ fontSize: FAR_ID_FONT }}
         data-far-id
       >
         {id}
       </div>
       <div
-        className="line-clamp-2 min-h-0 leading-tight font-bold break-words text-foreground"
+        className="line-clamp-2 min-h-0 leading-tight font-semibold break-words text-foreground"
         style={{ fontSize: FAR_TITLE_FONT }}
         title={title}
         data-far-title
@@ -270,9 +275,9 @@ export function FarTicket({ tone, id, title }: { tone: Tone; id: string; title: 
 /** 远景的段：段名是标题（大、一行写完，不截断；节点宽度按最长段名定），在途张数是小字。 */
 export function FarSegment({ tone, name, count }: { tone: Tone; name: string; count: string }) {
   return (
-    <div className={cn('flex h-full flex-col items-center justify-center gap-1 px-3', toneSoft[tone])}>
+    <div className={cn('flex h-full flex-col items-center justify-center gap-1 px-3', softClass[tone])}>
       <div
-        className={cn('leading-none font-bold whitespace-nowrap', toneText[tone])}
+        className={cn('leading-none font-semibold whitespace-nowrap', inkClass[tone])}
         style={{ fontSize: FAR_TITLE_FONT }}
         data-far-title
       >
@@ -304,13 +309,13 @@ function CountCells({ counts }: { counts: ToneCounts }) {
         <div key={c.label} className="min-w-0">
           <div
             className={cn(
-              'num text-stat-num leading-none font-semibold',
-              c.value ? toneText[c.tone] : 'text-faint',
+              'num text-heading leading-none',
+              c.value ? inkClass[c.tone] : 'text-muted-foreground',
             )}
           >
             {c.value}
           </div>
-          <div className="mt-1 truncate text-micro text-muted-foreground">{c.label}</div>
+          <div className="mt-1 truncate text-canvas text-muted-foreground">{c.label}</div>
         </div>
       ))}
     </div>
@@ -328,16 +333,16 @@ function PhaseStrip({ item, live }: { item: HomeRunning; live: boolean }) {
           <div
             className={cn(
               'h-1.5 rounded-full',
-              p.state === 'pending' ? 'bg-foreground/10' : toneBg[p.tone],
+              p.state === 'pending' ? 'bg-selected' : solidClass[p.tone],
               p.state === 'done' && 'opacity-70',
               p.state === 'active' && live && 'fd-sweep',
             )}
           />
           <div
             className={cn(
-              'mt-1 truncate text-micro',
-              p.state === 'pending' ? 'text-faint' : 'text-muted-foreground',
-              p.state === 'active' && cn('font-medium', toneText[p.tone]),
+              'mt-1 truncate text-canvas',
+              'text-muted-foreground',
+              p.state === 'active' && cn('font-medium', inkClass[p.tone]),
             )}
           >
             {p.label}
@@ -351,7 +356,7 @@ function PhaseStrip({ item, live }: { item: HomeRunning; live: boolean }) {
 /** 「谁在做 · 本段多久 · 共多久」一行。 */
 function WorkerLine({ item }: { item: HomeRunning }) {
   return (
-    <div className="flex min-w-0 items-center gap-x-1.5 text-xs text-muted-foreground">
+    <div className="flex min-w-0 items-center gap-x-1.5 text-canvas text-muted-foreground">
       <Bot className="size-3 shrink-0" aria-hidden />
       <span className={cn('max-w-1/2 shrink-0 truncate', item.worker ? 'text-foreground' : undefined)}>
         {item.worker ?? '没有进程在跑'}
@@ -375,11 +380,13 @@ function WorkerLine({ item }: { item: HomeRunning }) {
  */
 function WaitLine({ item, tone, always }: { item: HomeRunning; tone: Tone; always: boolean }) {
   if (item.waitingReason === 'nothing') {
-    return always ? <div className="truncate text-xs text-muted-foreground">没在等，正常往前走</div> : null;
+    return always ? (
+      <div className="truncate text-canvas text-muted-foreground">没在等，正常往前走</div>
+    ) : null;
   }
   return (
-    <div className="flex min-w-0 items-center gap-x-1.5 text-xs">
-      <span className={cn('shrink-0 font-medium', toneText[tone])}>{WAIT_LABEL[item.waitingReason]}</span>
+    <div className="flex min-w-0 items-center gap-x-1.5 text-canvas">
+      <span className={cn('shrink-0 font-medium', inkClass[tone])}>{WAIT_LABEL[item.waitingReason]}</span>
       {item.waitingSince ? (
         <span className="num truncate text-muted-foreground">
           · 已 <Elapsed since={item.waitingSince} />
@@ -393,7 +400,7 @@ function WaitLine({ item, tone, always }: { item: HomeRunning; tone: Tone; alway
 function LastLine({ item, withAgo }: { item: HomeRunning; withAgo: boolean }) {
   if (needsFounder(item) && item.pendingDecision) {
     return (
-      <div className="truncate text-xs text-ink-human" title={item.pendingDecision}>
+      <div className="truncate text-canvas text-ink-human" title={item.pendingDecision}>
         要你拍：{item.pendingDecision}
       </div>
     );
@@ -402,7 +409,7 @@ function LastLine({ item, withAgo }: { item: HomeRunning; withAgo: boolean }) {
     return (
       <div
         className={cn(
-          'truncate text-xs',
+          'truncate text-canvas',
           item.lastEvent.tone === 'trouble' ? 'text-ink-fail' : 'text-muted-foreground',
         )}
         title={item.lastEvent.text}
@@ -417,7 +424,7 @@ function LastLine({ item, withAgo }: { item: HomeRunning; withAgo: boolean }) {
       </div>
     );
   }
-  return <div className="truncate text-xs text-muted-foreground">最近：还没有三段流水记录</div>;
+  return <div className="truncate text-canvas text-muted-foreground">最近：还没有三段流水记录</div>;
 }
 
 export const TicketNode = memo(function TicketNode({ id, data }: Props) {
@@ -443,14 +450,9 @@ export const TicketNode = memo(function TicketNode({ id, data }: Props) {
       ) : (
         <div className="flex h-full flex-col overflow-hidden py-3 pr-3 pl-4">
           <div className="flex shrink-0 items-center gap-x-2">
-            <span className="num text-sub font-semibold text-muted-foreground">#{item.issueNumber}</span>
-            <StatusChip tone={tone} label={statusTextOf(item)} />
-            {founder ? (
-              <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-ink-human">
-                <span className="size-2 rounded-full bg-st-human" aria-hidden />
-                等你
-              </span>
-            ) : null}
+            <span className="num text-meta font-semibold text-muted-foreground">#{item.issueNumber}</span>
+            <StatusBadge tone={tone} label={statusTextOf(item)} />
+            {founder ? <StatusBadge tone="human" label="等你" variant="dot" /> : null}
             <CardLink
               item={item}
               label={`打开 #${item.issueNumber} 的单子详情`}
@@ -461,7 +463,7 @@ export const TicketNode = memo(function TicketNode({ id, data }: Props) {
           </div>
           <div
             className={cn(
-              'mt-1.5 shrink-0 text-label leading-snug font-semibold',
+              'mt-1.5 shrink-0 text-body leading-snug font-semibold',
               level === 'near' ? 'line-clamp-1' : 'line-clamp-2',
             )}
             title={item.title}
@@ -472,7 +474,7 @@ export const TicketNode = memo(function TicketNode({ id, data }: Props) {
             <WaitLine item={item} tone={tone} always={level === 'near'} />
             <WorkerLine item={item} />
             {level === 'near' ? (
-              <div className="num truncate text-xs text-muted-foreground">{item.repo}</div>
+              <div className="num truncate text-canvas text-muted-foreground">{item.repo}</div>
             ) : null}
             <LastLine item={item} withAgo={level === 'near'} />
           </div>
@@ -494,18 +496,18 @@ export const AskNode = memo(function AskNode({ id, data }: Props) {
     <Shell id={id} data={data} tone="human" live={false} title={`#${data.item.issueNumber} 要你拍`}>
       <Handles side={data.side} source={false} />
       {level === 'far' ? (
-        <div className={cn('flex h-full items-center justify-center', toneSoft.human)}>
-          <span className={cn('font-bold', toneText.human)} style={{ fontSize: FAR_TITLE_FONT }}>
+        <div className={cn('flex h-full items-center justify-center', softClass.human)}>
+          <span className={cn('font-semibold', inkClass.human)} style={{ fontSize: FAR_TITLE_FONT }}>
             等你
           </span>
         </div>
       ) : (
         <div className="flex h-full flex-col justify-center gap-1 py-2 pr-3 pl-4">
           <div className="flex items-center gap-1.5">
-            <MessageCircleQuestion className={cn('size-3.5', toneText.human)} aria-hidden />
-            <span className="text-sub font-semibold text-ink-human">要你拍</span>
+            <MessageCircleQuestion className={cn('size-3.5', inkClass.human)} aria-hidden />
+            <span className="text-body font-semibold text-ink-human">要你拍</span>
           </div>
-          <div className="line-clamp-2 text-xs leading-snug text-muted-foreground" title={data.text}>
+          <div className="line-clamp-2 text-canvas leading-snug text-muted-foreground" title={data.text}>
             {data.text}
           </div>
         </div>
@@ -535,16 +537,16 @@ export const SegmentNode = memo(function SegmentNode({ id, data }: Props) {
       {level === 'far' ? (
         <FarSegment tone={data.total ? tone : 'wait'} name={name} count={`${data.total} 张`} />
       ) : (
-        <div className="flex h-full flex-col py-3 pr-3.5 pl-4">
+        <div className="flex h-full flex-col py-3 pr-3 pl-4">
           <div className="flex items-baseline justify-between gap-2">
-            <span className="truncate text-xl leading-tight font-bold">{name}</span>
-            <span className="shrink-0 text-xs text-muted-foreground">
-              <span className="num text-stat-num font-semibold text-foreground">{data.total}</span> 张在途
+            <span className="truncate text-title leading-tight">{name}</span>
+            <span className="shrink-0 text-canvas text-muted-foreground">
+              <span className="num text-heading text-foreground">{data.total}</span> 张在途
             </span>
           </div>
-          <div className="truncate text-caption text-muted-foreground">{segmentHintOf(data.key)}</div>
+          <div className="truncate text-canvas text-muted-foreground">{segmentHintOf(data.key)}</div>
           <div
-            className="num truncate text-caption text-muted-foreground"
+            className="num truncate text-canvas text-muted-foreground"
             title={`样本取近 ${SAMPLE_DAYS} 天看板窗口里跑完的`}
           >
             {avgText(data.stage, data.key)}
@@ -583,7 +585,7 @@ export const RootNode = memo(function RootNode({ id, data }: Props) {
       <Handle id="l" type="source" position={Position.Left} isConnectable={false} />
       {level === 'far' ? (
         <div className="flex h-full flex-col items-center justify-center gap-1 px-4">
-          <div className="num leading-none font-bold tracking-tight" style={{ fontSize: FAR_HEAD_PX }}>
+          <div className="num leading-none font-semibold" style={{ fontSize: FAR_HEAD_PX }}>
             {data.counts.total}
           </div>
           <div className="text-muted-foreground" style={{ fontSize: FAR_TITLE_FONT }}>
@@ -591,8 +593,8 @@ export const RootNode = memo(function RootNode({ id, data }: Props) {
           </div>
         </div>
       ) : (
-        <div className="flex h-full flex-col py-3 pr-3.5 pl-4">
-          <div className="flex items-center gap-1.5 text-caption text-muted-foreground">
+        <div className="flex h-full flex-col py-3 pr-3 pl-4">
+          <div className="flex items-center gap-1.5 text-canvas text-muted-foreground">
             {engine ? (
               <>
                 <StatusDot tone={engine.tone} className="size-1.5" />
@@ -602,10 +604,10 @@ export const RootNode = memo(function RootNode({ id, data }: Props) {
               '引擎'
             )}
           </div>
-          <div className="text-xl leading-tight font-bold">
+          <div className="text-title leading-tight">
             <span className="num">{data.counts.total}</span> 张在跑
           </div>
-          <div className="num truncate text-caption text-muted-foreground" title={data.repos.join('、')}>
+          <div className="num truncate text-canvas text-muted-foreground" title={data.repos.join('、')}>
             {scope}
           </div>
           <div className="mt-auto pt-2">

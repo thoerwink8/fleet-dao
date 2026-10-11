@@ -7,24 +7,30 @@ import { cn, FONT_SIZE_TOKENS, RING_WIDTH_TOKENS } from './utils';
 
 describe('cn 认得自定义字号档位', () => {
   test('【故意造出的失败】字号档位 + 颜色：字号不被当成颜色吞掉（额度页用满的大数字、带颜色的指标卡丢过字号）', () => {
-    expect(cn('text-stat-num font-semibold', 'text-ink-fail')).toBe(
-      'text-stat-num font-semibold text-ink-fail',
+    expect(cn('text-heading font-semibold', 'text-ink-fail')).toBe(
+      'text-heading font-semibold text-ink-fail',
     );
-    expect(cn('num mt-2 text-stat', 'text-ink-stall')).toBe('num mt-2 text-stat text-ink-stall');
-    expect(cn('mt-1.5 text-caption', 'text-muted-foreground')).toBe(
-      'mt-1.5 text-caption text-muted-foreground',
-    );
+    expect(cn('num mt-2 text-display', 'text-ink-stall')).toBe('num mt-2 text-display text-ink-stall');
+    expect(cn('mt-1.5 text-meta', 'text-muted-foreground')).toBe('mt-1.5 text-meta text-muted-foreground');
   });
 
   test('两个字号：后写的赢；两个颜色：后写的赢', () => {
-    expect(cn('text-caption', 'text-sub')).toBe('text-sub');
-    expect(cn('text-sm', 'text-strong')).toBe('text-strong');
+    expect(cn('text-meta', 'text-title')).toBe('text-title');
+    expect(cn('text-sm', 'text-heading')).toBe('text-heading');
     expect(cn('text-ink-fail', 'text-ink-stall')).toBe('text-ink-stall');
+    expect(cn('text-meta', 'text-body')).toBe('text-body');
+    expect(cn('text-heading', 'text-ink-fail')).toBe('text-heading text-ink-fail');
+  });
+
+  test('阴影档位：后写的赢，不当成阴影颜色', () => {
+    expect(cn('shadow-xs', 'shadow-card')).toBe('shadow-card');
+    expect(cn('shadow-card', 'shadow-overlay')).toBe('shadow-overlay');
   });
 
   test('档位清单和 app.css 的 --text-* 一致（app.css 加减档位忘了改这里会红）', () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'app.css'), 'utf8');
-    const inCss = [...css.matchAll(/^\s*--text-([a-z][a-z0-9-]*):/gm)].map((m) => m[1]);
+    // --text-meta--line-height 这种是字号附带的行高、字重，不算一档。
+    const inCss = [...css.matchAll(/^\s*--text-([a-z][a-z0-9]*(?:-[a-z0-9]+)*):/gm)].map((m) => m[1]);
     expect([...inCss].sort()).toEqual([...FONT_SIZE_TOKENS].sort());
   });
 

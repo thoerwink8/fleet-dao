@@ -24,7 +24,7 @@ function DataSource({ collapsed }: { collapsed: boolean }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-caption text-muted-foreground">
+        <span className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-meta text-muted-foreground">
           <Database className={cn('size-3.5 shrink-0', mock && 'text-ink-stall')} aria-hidden />
           {collapsed ? null : (
             <span className="truncate">{mock ? '假数据（演示）' : `${brand.product}后端`}</span>
@@ -66,7 +66,7 @@ function Item({
       aria-label={collapsed ? item.label : undefined}
       className={({ isActive }) =>
         cn(
-          'group relative flex h-10 items-center md:h-8 gap-2.5 rounded-lg px-2.5 text-sub text-muted-foreground transition-colors',
+          'group relative flex h-10 items-center md:h-8 gap-2.5 rounded-lg px-2.5 text-body text-muted-foreground transition-colors',
           'hover:bg-accent hover:text-foreground',
           isActive && 'bg-accent font-medium text-foreground',
           collapsed && 'justify-center px-0',
@@ -84,8 +84,10 @@ function Item({
             <span
               title={badge === '!' ? '没读成' : undefined}
               className={cn(
-                'num grid min-w-4 place-items-center rounded-full px-1 text-micro leading-4 font-semibold',
-                badge === '!' ? 'bg-st-fail text-white' : 'bg-foreground text-background',
+                'num grid min-w-4 place-items-center rounded-full px-1 text-meta font-semibold',
+                badge === '!'
+                  ? 'bg-destructive text-destructive-foreground'
+                  : 'bg-foreground text-background',
                 collapsed && 'absolute top-0.5 right-1.5',
               )}
             >
@@ -124,9 +126,9 @@ export function SidebarNav({
         <LogoMark className="size-7 shrink-0" />
         {collapsed ? null : (
           <div className="min-w-0 leading-tight">
-            <div className="num text-label font-semibold tracking-tight">{brand.name}</div>
+            <div className="num text-body font-semibold">{brand.name}</div>
             {brand.product === brand.name ? null : (
-              <div className="text-caption text-muted-foreground">{brand.product}</div>
+              <div className="text-meta text-muted-foreground">{brand.product}</div>
             )}
           </div>
         )}
@@ -137,7 +139,7 @@ export function SidebarNav({
             {collapsed ? (
               <div className="mx-auto my-2 h-px w-6 bg-border" />
             ) : (
-              <div className="mb-1 px-2.5 text-caption font-medium text-faint">{g.group}</div>
+              <div className="mb-1 px-2.5 text-meta font-medium text-muted-foreground">{g.group}</div>
             )}
             <div className="space-y-0.5">
               {g.items.map((item) => (

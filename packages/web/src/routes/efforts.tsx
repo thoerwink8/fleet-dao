@@ -8,14 +8,18 @@
 // - 没接上（开发环境内存版）和没读成是两回事：前者整块写 unavailable，后者写「没读成」和原因。都不画空表冒充「都没配」。
 // - 能配的按家族展开；配不了、未分类默认折叠（#1756）。未分类用人读名，原始编号放悬停。
 
-import { Brain, ChevronDown, Info, Search } from 'lucide-react';
+import { Brain, ChevronDown, Info } from 'lucide-react';
 import { type ReactNode, useId, useState } from 'react';
 import { brand } from '#brand';
 import { errorText, useRoutingEfforts, useUpdateRouteEffort } from '../api/client';
 import type { EffortModel, RouteEffort, SessionEffort } from '../api/types';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
-import { RefreshBar } from '../components/refresh-bar';
-import { Badge } from '../components/ui/badge';
+import { EmptyState } from '../components/layout/empty-state';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { SearchInput } from '../components/layout/search-input';
+import { Section } from '../components/layout/section';
+import { Tag } from '../components/layout/tag';
+import { Toolbar } from '../components/layout/toolbar';
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Switch } from '../components/ui/switch';
@@ -53,12 +57,12 @@ const DESCRIPTION = (
         <button
           type="button"
           aria-label="档位怎么生效"
-          className="grid size-6 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="grid size-6 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground max-md:-my-2 max-md:size-10"
         >
           <Info className="size-4" aria-hidden />
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-72 text-sm">
+      <PopoverContent align="start" className="w-72 text-body">
         {DETAILS}
       </PopoverContent>
     </Popover>
@@ -82,39 +86,36 @@ export default function Efforts() {
   const now = useNow();
   const [search, setSearch] = useState('');
   const [onlyConfigured, setOnlyConfigured] = useState(false);
-  const refresh = (
-    <RefreshBar
-      onRefresh={() => void refetch()}
-      isFetching={isFetching}
-      // 共用秒表一拍最多慢 1 秒。刚读成的时间戳比「现在」新时压回这一拍，避免显示成「1 秒后」。
-      dataUpdatedAt={dataUpdatedAt > now ? now : dataUpdatedAt}
-      staleAfterMs={EFFORTS_STALE_AFTER_MS}
-    />
-  );
+  const refresh = {
+    onRefresh: () => void refetch(),
+    isFetching,
+    // 共用秒表一拍最多慢 1 秒。刚读成的时间戳比「现在」新时压回这一拍，避免显示成「1 秒后」。
+    dataUpdatedAt: dataUpdatedAt > now ? now : dataUpdatedAt,
+    staleAfterMs: EFFORTS_STALE_AFTER_MS,
+  };
 
   if (error) {
     return (
-      <Page title="思考档位" description={DESCRIPTION} actions={refresh}>
+      <Page title="思考档位" description={DESCRIPTION} keepDescription refresh={refresh}>
         <LoadError what="思考档位" error={error} />
       </Page>
     );
   }
   if (isLoading || !data) {
     return (
-      <Page title="思考档位" description={DESCRIPTION} actions={refresh}>
+      <Page title="思考档位" description={DESCRIPTION} keepDescription refresh={refresh}>
         <LoadingRows rows={6} />
       </Page>
     );
   }
   if (data.unavailable) {
     return (
-      <Page title="思考档位" description={DESCRIPTION} actions={refresh}>
-        <div
-          role="note"
-          className="rounded-xl border border-dashed bg-card px-6 py-10 text-center text-sm text-muted-foreground"
-        >
-          {data.unavailable}
-        </div>
+      <Page title="思考档位" description={DESCRIPTION} keepDescription refresh={refresh}>
+        <Section flush>
+          <div role="note">
+            <EmptyState size="inline" icon={Info} title={data.unavailable} />
+          </div>
+        </Section>
       </Page>
     );
   }
@@ -128,51 +129,50 @@ export default function Efforts() {
   const filtering = search.trim() !== '' || onlyConfigured;
 
   return (
-    <Page title="思考档位" description={DESCRIPTION} actions={refresh}>
+    <Page title="思考档位" description={DESCRIPTION} keepDescription refresh={refresh}>
       {data.models.length === 0 ? (
-        <Panel>
-          <Empty
+        <Section>
+          <EmptyState
             icon={Brain}
             title="路由两层里一条路由都没有"
             hint="发布时会把仓里的默认骨架装进库；装过了还是空的，去看发布日志（load_routing 那一步）"
           />
-        </Panel>
+        </Section>
       ) : (
         <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
-            <Counts models={data.models} fallback={data.defaultEffort} />
-            <div className="flex w-full flex-wrap items-center gap-x-4 gap-y-2 sm:w-auto">
-              <label className="relative block min-w-0 flex-1 sm:w-64 sm:flex-none">
-                <span className="sr-only">搜索模型或渠道</span>
-                <Search
-                  className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
-                  aria-hidden
-                />
-                <input
-                  type="search"
+          <Toolbar
+            className="mb-0"
+            start={<Counts models={data.models} fallback={data.defaultEffort} />}
+            end={
+              <>
+                <SearchInput
                   value={search}
-                  onChange={(e) => setSearch(e.target.value)}
+                  onChange={setSearch}
                   placeholder="搜模型、渠道、路由号"
                   aria-label="搜索模型或渠道"
-                  className="h-9 w-full rounded-lg border bg-card max-md:min-h-10 pl-8 pr-2.5 text-sub outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+                  className="sm:w-64"
                 />
-              </label>
-              <div className="flex items-center gap-2 text-sub">
-                <Switch
-                  id="efforts-only-configured"
-                  checked={onlyConfigured}
-                  onCheckedChange={setOnlyConfigured}
-                />
-                <label htmlFor="efforts-only-configured">只看配过的</label>
-              </div>
-            </div>
-          </div>
+                {/* 整行是一个 label：手机上这一行 40 高，点字也能开关（开关本身 32×18，可点区域在 ui/switch 里往外撑）。 */}
+                <label
+                  htmlFor="efforts-only-configured"
+                  className="flex items-center gap-2 text-body max-md:min-h-10"
+                >
+                  <Switch
+                    id="efforts-only-configured"
+                    checked={onlyConfigured}
+                    onCheckedChange={setOnlyConfigured}
+                  />
+                  只看配过的
+                </label>
+              </>
+            }
+          />
 
           {families.length > 0 ? (
-            <section className="overflow-hidden rounded-xl border bg-card shadow-card-edge">
+            <Section flush>
               <div
                 aria-hidden
-                className={cn(ROW_GRID, 'border-b py-2 text-caption text-muted-foreground max-md:hidden')}
+                className={cn(ROW_GRID, 'border-b py-2 text-meta text-muted-foreground max-md:hidden')}
               >
                 <span>模型</span>
                 <span>路由</span>
@@ -182,15 +182,16 @@ export default function Efforts() {
               {families.map((g) => (
                 <FamilyGroup key={g.family} label={g.label} rows={g.rows} fallback={data.defaultEffort} />
               ))}
-            </section>
+            </Section>
           ) : groups.configurable.length > 0 ? (
-            <p
-              role="status"
-              className="rounded-lg border border-dashed px-3 py-6 text-center text-sub text-muted-foreground"
-            >
-              没有符合的路由{search.trim() ? `：「${search.trim()}」` : ''}
-              {onlyConfigured ? '，筛选在「只看配过的」' : ''}
-            </p>
+            <Section flush>
+              <div role="status">
+                <EmptyState
+                  size="inline"
+                  title={`没有符合的路由${search.trim() ? `：「${search.trim()}」` : ''}${onlyConfigured ? '，筛选在「只看配过的」' : ''}`}
+                />
+              </div>
+            </Section>
           ) : null}
           {groups.fixed.total > 0 && !onlyConfigured ? (
             <FixedFold total={groups.fixed.total} byReason={groups.fixed.byReason} search={search} />
@@ -211,7 +212,7 @@ export default function Efforts() {
 function Counts({ models, fallback }: { models: EffortModel[]; fallback: SessionEffort }) {
   const c = effortCounts(models);
   return (
-    <p className="text-sub text-muted-foreground">
+    <p className="text-body text-muted-foreground">
       <span className="num font-medium text-foreground">{c.configured}</span> 条配了 ·{' '}
       <span className="num font-medium text-foreground">{c.byDefault}</span> 条用默认 {fallback}
       {c.fixed > 0 ? (
@@ -236,19 +237,21 @@ function FoldButton({
   label: ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      aria-expanded={open}
-      aria-controls={controls}
-      onClick={onToggle}
-      className="flex w-full items-center gap-1.5 rounded-xl border bg-card px-4 py-3 text-left text-sm text-foreground shadow-card-edge hover:bg-accent/40"
-    >
-      <ChevronDown
-        className={cn('size-4 shrink-0 text-muted-foreground transition-transform', !open && '-rotate-90')}
-        aria-hidden
-      />
-      <span>{label}</span>
-    </button>
+    <Section flush>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={controls}
+        onClick={onToggle}
+        className="flex w-full items-center gap-1.5 px-4 py-3 text-left text-body text-foreground hover:bg-accent max-md:min-h-11"
+      >
+        <ChevronDown
+          className={cn('size-4 shrink-0 text-muted-foreground transition-transform', !open && '-rotate-90')}
+          aria-hidden
+        />
+        <span>{label}</span>
+      </button>
+    </Section>
   );
 }
 
@@ -272,14 +275,14 @@ function FamilyGroup({
         aria-expanded={open}
         aria-controls={bodyId}
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 bg-muted/40 px-4 py-2 text-left text-sub font-medium hover:bg-muted/70 max-md:min-h-10"
+        className="flex w-full items-center gap-1.5 bg-muted px-4 py-2 text-left text-body font-medium hover:bg-accent max-md:min-h-10"
       >
         <ChevronDown
           className={cn('size-4 shrink-0 text-muted-foreground transition-transform', !open && '-rotate-90')}
           aria-hidden
         />
         <span>{label}</span>
-        <span className="num text-caption font-normal text-muted-foreground">
+        <span className="num text-meta font-normal text-muted-foreground">
           {rows.length} 条{configured > 0 ? `，已配 ${configured}` : ''}
         </span>
       </button>
@@ -321,7 +324,7 @@ function FixedFold({
         label={
           <>
             配不了 <span className="num">{total}</span> 条
-            <span className="ml-2 text-caption font-normal text-muted-foreground" data-fixed-why>
+            <span className="ml-2 text-meta font-normal text-muted-foreground" data-fixed-why>
               {FIXED_WHY}
             </span>
           </>
@@ -333,17 +336,17 @@ function FixedFold({
             const items = g.items.filter((i) => effortRowMatches(i, search));
             if (items.length === 0) return null;
             return (
-              <Panel
+              <Section
                 key={g.reason}
                 title={<span className="font-normal text-muted-foreground">{g.reason}</span>}
-                bodyClassName="p-0"
+                flush
               >
                 <ul>
                   {items.map(({ model, route }) => (
                     <FixedRouteRow key={route.routeId} model={model} route={route} />
                   ))}
                 </ul>
-              </Panel>
+              </Section>
             );
           })}
         </div>
@@ -382,18 +385,20 @@ function UncategorizedFold({
         }
       />
       {open ? (
-        <ul id={bodyId} className="mt-2 overflow-hidden rounded-xl border bg-card shadow-card-edge">
-          {rows.map(({ model, route }) => (
-            <RouteRow
-              key={route.routeId}
-              modelId={model.modelId}
-              modelName={readableModelName(model.modelId)}
-              rawModelId={model.modelId}
-              route={route}
-              fallback={fallback}
-            />
-          ))}
-        </ul>
+        <Section flush className="mt-2">
+          <ul id={bodyId}>
+            {rows.map(({ model, route }) => (
+              <RouteRow
+                key={route.routeId}
+                modelId={model.modelId}
+                modelName={readableModelName(model.modelId)}
+                rawModelId={model.modelId}
+                route={route}
+                fallback={fallback}
+              />
+            ))}
+          </ul>
+        </Section>
       ) : null}
     </section>
   );
@@ -407,23 +412,19 @@ function FixedRouteRow({ model, route: r }: { model: EffortModel; route: RouteEf
     <li
       data-route={r.routeId}
       data-model={model.modelId}
-      className={cn('border-b px-4 py-3 last:border-b-0', !r.enabled && 'bg-muted/30')}
+      className={cn('border-b px-4 py-3 last:border-b-0', !r.enabled && 'bg-muted')}
     >
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span
-          className="text-sub font-medium"
+          className="text-body font-medium"
           title={isUncategorizedModel(model) ? model.modelId : undefined}
         >
           {name}
         </span>
-        <span className="text-sub text-muted-foreground">{title}</span>
-        <span className="text-caption text-muted-foreground">{hostLabel[r.hostId]}</span>
-        {r.enabled ? null : (
-          <Badge variant="outline" className="h-4 px-1 text-micro font-normal">
-            关着
-          </Badge>
-        )}
-        <span className="num ml-auto truncate text-micro text-faint" title={r.model}>
+        <span className="text-body text-muted-foreground">{title}</span>
+        <span className="text-meta text-muted-foreground">{hostLabel[r.hostId]}</span>
+        {r.enabled ? null : <Tag>关着</Tag>}
+        <span className="num ml-auto truncate text-meta text-muted-foreground" title={r.model}>
           {r.routeId}
         </span>
       </div>
@@ -462,26 +463,22 @@ function RouteRow({
     <li
       data-route={r.routeId}
       data-model={modelId}
-      className={cn('border-t py-2.5 first:border-t-0', !r.enabled && 'bg-muted/30')}
+      className={cn('border-t py-2.5 first:border-t-0', !r.enabled && 'bg-muted')}
     >
       <div className={ROW_GRID}>
-        <span className="min-w-0 truncate text-sub font-medium" title={rawModelId ?? modelName}>
+        <span className="min-w-0 truncate text-body font-medium" title={rawModelId ?? modelName}>
           {modelName}
         </span>
-        <span className="flex min-w-0 items-center gap-1.5 text-sub text-muted-foreground">
+        <span className="flex min-w-0 items-center gap-1.5 text-body text-muted-foreground">
           <span className="truncate" title={`${title} · ${hostLabel[r.hostId]} · ${r.routeId}`}>
             {title}
           </span>
-          <span className="num shrink-0 text-micro text-faint max-md:hidden" title={r.model}>
+          <span className="num shrink-0 text-meta text-muted-foreground max-md:hidden" title={r.model}>
             {r.routeId}
           </span>
-          {r.enabled ? null : (
-            <Badge variant="outline" className="h-4 shrink-0 px-1 text-micro font-normal">
-              关着
-            </Badge>
-          )}
+          {r.enabled ? null : <Tag>关着</Tag>}
         </span>
-        <span className="num text-sub" aria-live="polite">
+        <span className="num text-body" aria-live="polite">
           {update.isPending ? (
             <span className="text-muted-foreground">改着…</span>
           ) : effective?.configured ? (
@@ -507,7 +504,7 @@ function RouteRow({
         </Select>
       </div>
       {update.isError ? (
-        <p role="alert" className="mt-1.5 px-4 text-sub text-ink-fail">
+        <p role="alert" className="mt-1.5 px-4 text-body text-ink-fail">
           没改成：{errorText(update.error)}
         </p>
       ) : null}

@@ -7,10 +7,14 @@
 
 import { CircleAlert, CircleCheck, CircleDashed, Gauge, Power, Waypoints } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { inkClass, type LayoutTone, lineClass, softClass, solidClass } from '../layout/tone';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import type { HomeHealth } from './types';
 
 type Kind = 'ok' | 'warn' | 'muted' | 'bad';
+
+/** 每格的状态色：正常 done、提示 wait（黄系）、真坏了 fail、没查成 stop。 */
+const KIND_TONE: Record<Kind, LayoutTone> = { ok: 'done', warn: 'wait', bad: 'fail', muted: 'stop' };
 
 /**
  * 每格的详情句怎么露：always 一直写；wide 只在 ≥1536 写（顶栏里地方紧，窄一点只留名字和颜色）；never 不写。
@@ -34,12 +38,13 @@ function Chip({
   return (
     <span
       data-health-chip={kind}
+      data-tone={KIND_TONE[kind]}
       title={detailShow === 'always' ? undefined : `${label}：${detail}`}
       className={cn(
-        'inline-flex max-w-full shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs',
+        'inline-flex max-w-full shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-meta',
         kind === 'ok' && 'border-border text-muted-foreground',
-        kind === 'warn' && 'border-st-wait/45 bg-st-wait/10 text-ink-wait',
-        kind === 'bad' && 'border-st-fail/50 bg-st-fail/10 text-ink-fail',
+        kind === 'warn' && cn(lineClass.wait, softClass.wait, inkClass.wait),
+        kind === 'bad' && cn(lineClass.fail, softClass.fail, inkClass.fail),
         kind === 'muted' && 'border-dashed text-muted-foreground',
       )}
     >
@@ -52,10 +57,10 @@ function Chip({
       )}
       <Icon className="size-3 opacity-70" aria-hidden />
       <span className="shrink-0 font-medium whitespace-nowrap">{label}</span>
-      {/* 详情宽度、字号换成 max-w-health-detail、text-caption。 */}
+      {/* 详情宽度用 max-w-health-detail。 */}
       <span
         className={cn(
-          'min-w-0 max-w-health-detail truncate text-caption opacity-90',
+          'min-w-0 max-w-health-detail truncate text-meta opacity-90',
           detailShow === 'wide' && 'hidden 2xl:inline',
           detailShow === 'never' && 'hidden',
         )}
@@ -106,13 +111,6 @@ function engineWords(engine: HomeHealth['engine']): { label: string; detail: str
   }
 }
 
-const dotTone: Record<Kind, string> = {
-  ok: 'bg-st-done',
-  warn: 'bg-st-wait',
-  bad: 'bg-st-fail',
-  muted: 'bg-st-stop',
-};
-
 /**
  * 手机上的写法（#1819）：额度、中转、引擎各一个状态点，三个点合成一个按钮（不小于 40×40），
  * 点开是原来三格的全文。颜色规矩同上：提示黄系不用红，红只给引擎没连上。
@@ -139,7 +137,7 @@ function CompactStrip({ health, className }: { health: HomeHealth; className?: s
               key={i.label}
               data-health-chip={i.kind}
               aria-hidden
-              className={cn('size-3 rounded-full', dotTone[i.kind])}
+              className={cn('size-3 rounded-full', solidClass[KIND_TONE[i.kind]])}
             />
           ))}
         </button>
@@ -147,11 +145,14 @@ function CompactStrip({ health, className }: { health: HomeHealth; className?: s
       <PopoverContent align="start" className="w-72">
         <ul className="space-y-2">
           {items.map((i) => (
-            <li key={i.label} className="flex items-start gap-2 text-sub">
-              <span aria-hidden className={cn('mt-1.5 size-2.5 shrink-0 rounded-full', dotTone[i.kind])} />
+            <li key={i.label} className="flex items-start gap-2 text-body">
+              <span
+                aria-hidden
+                className={cn('mt-1.5 size-2.5 shrink-0 rounded-full', solidClass[KIND_TONE[i.kind]])}
+              />
               <span className="min-w-0">
                 <span className="font-medium">{i.label}</span>
-                <span className="block text-xs text-muted-foreground">{i.detail}</span>
+                <span className="block text-meta text-muted-foreground">{i.detail}</span>
               </span>
             </li>
           ))}

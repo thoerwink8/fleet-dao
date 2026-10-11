@@ -18,8 +18,9 @@ import {
 } from '../lib/credentials';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
-import { FieldRow } from './field-row';
-import { LoadError, LoadingRows } from './page';
+import { FieldRow } from './layout/field-row';
+import { LoadError, LoadingRows } from './layout/load-state';
+import { Notice } from './layout/notice';
 import { PasswordField } from './password-field';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -37,10 +38,10 @@ function passwordLength(p: string): number {
 function Status({ c }: { c: Credentials }) {
   const now = useNow();
   if (!c.hasPassword) {
-    return <p className="text-sm text-muted-foreground">还没设过账密：现在只能用飞书登录。</p>;
+    return <p className="text-body text-muted-foreground">还没设过账密：现在只能用飞书登录。</p>;
   }
   return (
-    <p className="text-sm">
+    <p className="text-body">
       已设账密：用户名 <span className="num font-medium">{c.username ?? '（没有用户名）'}</span>
       {c.passwordChangedAt ? (
         <span className="text-muted-foreground">
@@ -128,7 +129,7 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
         aria-hidden
       />
       {blocked ? (
-        <p role="status" className="mb-2 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
+        <p role="status" className="mb-2 rounded-lg bg-muted px-3 py-2 text-body text-muted-foreground">
           第一次设账密要在飞书登录后 10 分钟内设：请先退出，用飞书重新登录一次，再回到这里。
         </p>
       ) : null}
@@ -195,17 +196,20 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
         layout="row"
       />
       {errors.form ? (
-        <p role="alert" className="mt-2 rounded-lg bg-st-fail/10 px-3 py-2 text-sm text-ink-fail">
+        <Notice tone="fail" className="mt-2">
           {errors.form}
-        </p>
+        </Notice>
       ) : null}
       <div className="flex flex-wrap items-center gap-3 pt-3">
         <Button type="submit" size="sm" disabled={busy || blocked}>
           {busy ? '保存中…' : first ? '设账密' : '保存修改'}
         </Button>
-        <span className="text-xs text-muted-foreground">
+        <span className="text-meta text-muted-foreground">
           改动会记进
-          <Link to="/audit" className="underline underline-offset-2">
+          <Link
+            to="/audit"
+            className="underline underline-offset-2 max-md:inline-flex max-md:min-h-10 max-md:items-center"
+          >
             操作记录
           </Link>
           （只记改了什么，不记密码）。
@@ -227,11 +231,11 @@ export function CredentialsSection() {
   return (
     <div>
       <Status c={c} />
-      <p className="mt-1 text-xs text-muted-foreground">
+      <p className="mt-1 text-meta text-muted-foreground">
         {`用用户名和密码登录${brand.product}，和飞书登录并列；随时可以改。`}
       </p>
       {done ? (
-        <p role="status" className="mt-3 max-w-md rounded-lg bg-muted px-3 py-2 text-sm">
+        <p role="status" className="mt-3 max-w-md rounded-lg bg-muted px-3 py-2 text-body">
           {done}
         </p>
       ) : null}

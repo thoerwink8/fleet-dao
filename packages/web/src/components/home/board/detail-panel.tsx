@@ -7,9 +7,10 @@ import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { formatAgo, formatDuration } from '../../../lib/format';
 import { useNow } from '../../../lib/hooks';
-import { type Tone, toneText } from '../../../lib/status';
+import type { Tone } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
-import { StatusChip, StatusDot } from '../../status';
+import { StatusBadge, StatusDot } from '../../layout/status-badge';
+import { inkClass } from '../../layout/tone';
 import { ActionButtons } from '../../task-actions';
 import { Button } from '../../ui/button';
 import { CardLink, needsFounder, statusTextOf, WAIT_LABEL } from '../running-card';
@@ -47,7 +48,7 @@ export function DetailPanel({
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: 28 }}
       transition={{ type: 'spring', stiffness: 420, damping: 38 }}
-      className="absolute top-14 right-3 bottom-3 z-20 flex w-98 max-w-full flex-col overflow-hidden rounded-2xl border bg-popover/95 shadow-2xl backdrop-blur-xl"
+      className="absolute top-14 right-3 bottom-3 z-20 flex w-98 max-w-full flex-col overflow-hidden rounded-lg border bg-popover shadow-overlay backdrop-blur-xl"
       aria-label="详情"
       data-board-detail
     >
@@ -63,8 +64,8 @@ export function DetailPanel({
         </div>
       </div>
       {item ? (
-        <footer className="flex items-center justify-between gap-2 border-t bg-card/60 px-4 py-2.5">
-          <span className="text-caption text-muted-foreground">
+        <footer className="flex items-center justify-between gap-2 border-t bg-muted px-4 py-2.5">
+          <span className="text-meta text-muted-foreground">
             双击卡片或按 <kbd className="num">O</kbd> 进单子详情
           </span>
           <Button asChild size="sm" variant="secondary">
@@ -93,7 +94,7 @@ function Head({ children, onClose }: { children: ReactNode; onClose(): void }) {
 function Section({ title, children, className }: { title: string; children: ReactNode; className?: string }) {
   return (
     <section className={cn('mt-5', className)}>
-      <h3 className="mb-2 text-caption font-medium tracking-wide text-muted-foreground">{title}</h3>
+      <h3 className="mb-2 text-meta font-medium text-muted-foreground">{title}</h3>
       {children}
     </section>
   );
@@ -101,8 +102,8 @@ function Section({ title, children, className }: { title: string; children: Reac
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex items-baseline gap-3 text-sub">
-      <span className="w-14 shrink-0 text-xs text-muted-foreground">{label}</span>
+    <div className="flex items-baseline gap-3 text-body">
+      <span className="w-14 shrink-0 text-meta text-muted-foreground">{label}</span>
       <span className="min-w-0 flex-1">{children}</span>
     </div>
   );
@@ -121,19 +122,19 @@ function TicketPanel({ item, onClose }: { item: HomeRunning; onClose(): void }) 
   return (
     <div>
       <Head onClose={onClose}>
-        <span className="num text-sm font-semibold text-muted-foreground">#{item.issueNumber}</span>
-        <StatusChip tone={tone} label={statusTextOf(item)} />
+        <span className="num text-body font-semibold text-muted-foreground">#{item.issueNumber}</span>
+        <StatusBadge tone={tone} label={statusTextOf(item)} />
       </Head>
-      <h2 className="mt-2 text-lg leading-snug font-semibold">{item.title}</h2>
-      <p className="num mt-1 text-xs text-muted-foreground">{item.repo}</p>
+      <h2 className="mt-2 text-heading leading-snug font-semibold">{item.title}</h2>
+      <p className="num mt-1 text-meta text-muted-foreground">{item.repo}</p>
       {/* 操作行右边没有别的东西，共用的那根「叫停与右侧按钮之间」的竖线和间距在这里不要（它会孤零零立在行尾，#1819） */}
       {target ? <ActionButtons target={target} className="mt-3 mr-0 border-r-0 pr-0" /> : null}
 
       {founder && item.pendingDecision ? (
         <Section title="要你拍">
-          <div className="rounded-lg border border-st-human/40 bg-st-human/10 px-3 py-2 text-sm">
+          <div className="rounded-lg border border-st-human-line bg-st-human-soft px-3 py-2 text-body">
             {item.pendingDecision}
-            <div className="mt-1 text-xs text-muted-foreground">
+            <div className="mt-1 text-meta text-muted-foreground">
               {ui.remote ? (
                 '要去那台上的通知中心答。'
               ) : (
@@ -149,7 +150,7 @@ function TicketPanel({ item, onClose }: { item: HomeRunning; onClose(): void }) 
       <Section title="现在">
         <div className="space-y-1.5">
           <Row label="在哪一段">
-            <span className={cn('font-medium', toneText[tone])}>{statusTextOf(item)}</span>
+            <span className={cn('font-medium', inkClass[tone])}>{statusTextOf(item)}</span>
           </Row>
           <Row label="谁在做">
             {item.worker ? (
@@ -185,12 +186,14 @@ function TicketPanel({ item, onClose }: { item: HomeRunning; onClose(): void }) 
       <Section title="三段">
         <ol className="space-y-1.5">
           {phasesOf(item).map((p) => (
-            <li key={p.key} className="flex items-center gap-2 text-sub">
+            <li key={p.key} className="flex items-center gap-2 text-body">
               <StatusDot tone={p.state === 'pending' ? 'wait' : p.tone} />
-              <span className={cn('w-12 shrink-0', p.state === 'pending' ? 'text-faint' : undefined)}>
+              <span
+                className={cn('w-12 shrink-0', p.state === 'pending' ? 'text-muted-foreground' : undefined)}
+              >
                 {p.label}
               </span>
-              <span className="text-xs text-muted-foreground">
+              <span className="text-meta text-muted-foreground">
                 {p.state === 'done' ? '走过了' : p.state === 'active' ? '在这一段' : '还没到'}
               </span>
             </li>
@@ -200,14 +203,14 @@ function TicketPanel({ item, onClose }: { item: HomeRunning; onClose(): void }) 
 
       <Section title="最近一次事件">
         {item.lastEvent ? (
-          <p className={cn('text-sm', item.lastEvent.tone === 'trouble' ? 'text-ink-fail' : undefined)}>
+          <p className={cn('text-body', item.lastEvent.tone === 'trouble' ? 'text-ink-fail' : undefined)}>
             {item.lastEvent.text}
-            <span className="num ml-1 text-xs text-muted-foreground">
+            <span className="num ml-1 text-meta text-muted-foreground">
               · {formatAgo(item.lastEvent.at, now)}
             </span>
           </p>
         ) : (
-          <p className="text-sm text-muted-foreground">还没有三段流水记录</p>
+          <p className="text-body text-muted-foreground">还没有三段流水记录</p>
         )}
       </Section>
     </div>
@@ -225,11 +228,11 @@ function TicketButton({ item, onSelect }: { item: HomeRunning; onSelect(id: stri
         className="w-full rounded-lg border px-3 py-2 text-left transition-colors hover:border-border-strong hover:bg-accent"
       >
         <div className="flex items-center gap-2">
-          <span className={cn('num text-xs font-bold', toneText[tone])}>#{item.issueNumber}</span>
-          <span className="min-w-0 flex-1 truncate text-sub font-medium">{item.title}</span>
-          <StatusChip tone={tone} label={statusTextOf(item)} />
+          <span className={cn('num text-meta font-semibold', inkClass[tone])}>#{item.issueNumber}</span>
+          <span className="min-w-0 flex-1 truncate text-body font-medium">{item.title}</span>
+          <StatusBadge tone={tone} label={statusTextOf(item)} />
         </div>
-        <div className="mt-1 truncate text-xs text-muted-foreground">
+        <div className="mt-1 truncate text-meta text-muted-foreground">
           {item.worker ?? '没有进程在跑'}
           {item.waitingReason !== 'nothing' ? ` · ${WAIT_LABEL[item.waitingReason]}` : ''}
         </div>
@@ -253,11 +256,11 @@ function SegmentPanel({
   return (
     <div>
       <Head onClose={onClose}>
-        <span className="text-sm font-semibold text-muted-foreground">流程里的一段</span>
+        <span className="text-body font-semibold text-muted-foreground">流程里的一段</span>
       </Head>
-      <h2 className="mt-2 text-lg leading-snug font-semibold">{segmentName(data.key)}</h2>
-      <p className="mt-1 text-sm text-muted-foreground">{segmentHintOf(data.key)}</p>
-      <p className="num mt-1 text-xs text-muted-foreground">{avgText(data.stage, data.key)}</p>
+      <h2 className="mt-2 text-heading leading-snug font-semibold">{segmentName(data.key)}</h2>
+      <p className="mt-1 text-body text-muted-foreground">{segmentHintOf(data.key)}</p>
+      <p className="num mt-1 text-meta text-muted-foreground">{avgText(data.stage, data.key)}</p>
       <Section title={`在途（${items.length}）`}>
         {items.length ? (
           <ul className="space-y-1.5">
@@ -266,7 +269,7 @@ function SegmentPanel({
             ))}
           </ul>
         ) : (
-          <p className="text-xs text-muted-foreground">这一段现在没有单</p>
+          <p className="text-meta text-muted-foreground">这一段现在没有单</p>
         )}
       </Section>
     </div>
@@ -290,14 +293,14 @@ function RootPanel({
   return (
     <div>
       <Head onClose={onClose}>
-        <span className="text-sm font-semibold text-muted-foreground">在跑的单</span>
+        <span className="text-body font-semibold text-muted-foreground">在跑的单</span>
       </Head>
-      <p className="mt-3 text-sm">
+      <p className="mt-3 text-body">
         <span className="num">{c.total}</span> 张：在跑 {c.run}，在等 {c.wait}，还没验 {c.stall}，等你{' '}
         {c.human}，出问题 {c.fail}。
       </p>
       {data.engine ? (
-        <p className="mt-2 text-xs text-muted-foreground">
+        <p className="mt-2 text-meta text-muted-foreground">
           引擎：
           {data.engine.state === 'on'
             ? '正常'
@@ -310,7 +313,7 @@ function RootPanel({
         </p>
       ) : null}
       {data.repos.length ? (
-        <p className="num mt-1 text-xs text-muted-foreground">项目：{data.repos.join('、')}</p>
+        <p className="num mt-1 text-meta text-muted-foreground">项目：{data.repos.join('、')}</p>
       ) : null}
       <Section title={`等你拍（${waiting.length}）`}>
         {waiting.length ? (
@@ -320,7 +323,7 @@ function RootPanel({
             ))}
           </ul>
         ) : (
-          <p className="text-xs text-muted-foreground">没有等你拍的单</p>
+          <p className="text-meta text-muted-foreground">没有等你拍的单</p>
         )}
       </Section>
       <Section title={`出问题（${failed.length}）`}>
@@ -331,7 +334,7 @@ function RootPanel({
             ))}
           </ul>
         ) : (
-          <p className="text-xs text-muted-foreground">没有出问题的单（不含等你）</p>
+          <p className="text-meta text-muted-foreground">没有出问题的单（不含等你）</p>
         )}
       </Section>
     </div>

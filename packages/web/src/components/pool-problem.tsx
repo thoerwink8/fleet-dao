@@ -35,7 +35,7 @@ export function PoolProblemLine({
       data-pool-problem={problem.kind}
       data-pool={problem.poolId}
       title={problemLine(problem)}
-      className={cn('flex min-w-0 items-start gap-1.5 text-caption text-ink-stall', className)}
+      className={cn('flex min-w-0 items-start gap-1.5 text-meta text-ink-stall', className)}
     >
       <TriangleAlert className="mt-0.5 size-3 shrink-0" aria-hidden />
       <span className="min-w-0 break-words">

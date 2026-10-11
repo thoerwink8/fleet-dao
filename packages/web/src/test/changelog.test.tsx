@@ -150,7 +150,9 @@ describe('/changelog 页：版式与已删的对照区（#1821）', () => {
     const titleCol = row?.querySelector('p')?.parentElement;
     expect(titleCol?.className).toContain('min-w-0');
     expect(titleCol?.className).toContain('flex-1');
-    expect(row?.className).toContain('flex-wrap');
+    expect(row?.querySelector('[data-commit-row]')?.className).toContain('flex-wrap');
+    // 回滚标成状态标签（data-tone），不是手写的小块
+    expect(row?.querySelector('[data-tone="stall"]')?.textContent).toBe('回滚');
     expect(screen.queryByRole('heading', { name: 'CHANGELOG.md 对照' })).toBeNull();
     expect(screen.queryByRole('button', { name: /还没收进版本/ })).toBeNull();
   });

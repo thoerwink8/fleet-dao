@@ -14,8 +14,12 @@ test('点刷新按钮调用该页主查询的 refetch', async () => {
   const routingLayers = vi.spyOn(api, 'routingLayers');
   renderApp(<RoutingPage />, { api });
 
-  const button = await screen.findByRole('button', { name: '刷新' });
-  await waitFor(() => expect(button.hasAttribute('disabled')).toBe(false));
+  await screen.findByRole('button', { name: '刷新' });
+  // 加载骨架页和读好的页里刷新条不是同一个节点，等读完再取按钮，别拿着旧节点点。
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-disabled')).toBe('false'),
+  );
+  const button = screen.getByRole('button', { name: '刷新' });
   expect(screen.getByText(/最后更新/)).toBeTruthy();
   expect(screen.queryByText('数据已过期')).toBeNull();
 

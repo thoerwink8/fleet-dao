@@ -57,7 +57,6 @@ import {
   RepoDispatchResponse,
   ReposResponse,
   ROUTE_PROBE_ACTION,
-  ROUTE_PROBE_ON_DEMAND_MARK,
   ROUTE_PROBE_TARGET,
   ROUTING_PURPOSE_IDS,
   type Route,
@@ -124,6 +123,8 @@ export interface MockOptions {
   seed?: number;
   /** 这些段的会话内容读不到（503，演示「没读成」）；不给就都读得到。 */
   transcriptFail?: readonly string[];
+  /** 给 ch-cursor 多加这么多条没用途在用的路由（演示一个渠道几百条）；不给就不加。 */
+  manyRoutes?: number;
 }
 
 export interface MockApi extends FleetApi {
@@ -245,10 +246,20 @@ function mockEngine() {
   }
 }
 
+/** 地址上写了 ?mockRoutes=many 就多造一批没用途在用的路由。 */
+function mockRoutesMany(): boolean {
+  return typeof location !== 'undefined' && new URLSearchParams(location.search).get('mockRoutes') === 'many';
+}
+
 /** 看板多机的假环境（wsl）这一次是哪种样子：见 nodes() 的说明；地址上没写就是刚报过（fresh）。 */
-function mockNodeMode(): 'fresh' | 'stale' | 'never' | 'off' {
+function mockNodeMode(): 'fresh' | 'stale' | 'gone' | 'never' | 'off' {
   const v = typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('mockNode');
-  return v === 'stale' || v === 'never' || v === 'off' ? v : 'fresh';
+  return v === 'stale' || v === 'gone' || v === 'never' || v === 'off' ? v : 'fresh';
+}
+
+/** 假环境（wsl）离上次上报多久：失联 12 分钟 / 失联 5 天 2 小时 / 刚报过。 */
+function mockNodeAgo(mode: ReturnType<typeof mockNodeMode>): number {
+  return mode === 'stale' ? 12 * 60_000 : mode === 'gone' ? (5 * 24 + 2) * 60 * 60_000 : 40_000;
 }
 
 /** 新先后必须是现在这一串的重排（多了、少了、重复都不算）。 */
@@ -319,23 +330,34 @@ function durationMsFromDetail(detail: string | undefined): number | null {
   return ms;
 }
 
+// 身份题那五项；kind / trigger 没写就是不给（#1798 片 6），不拿 null 顶老行。
 const NO_CHECK = {
   checkQuestion: null,
   checkExpected: null,
   checkAnswer: null,
   checkPassed: null,
   selfIdentity: null,
-  kind: null,
 } as const;
 
 const MOCK_CHECK_PASSED = {
   checkQuestion: '现任日本首相是谁？答案只写人名。',
   checkExpected: '高市早苗/Takaichi',
+  checkOldAnswer: '石破茂/Ishiba/岸田文雄',
   checkAnswer: '高市早苗',
   checkPassed: true,
   selfIdentity: 'gpt-6-sol',
   kind: 'identity' as const,
 };
+
+const MOCK_CHECK_MISMATCH = {
+  ...MOCK_CHECK_PASSED,
+  checkAnswer: '石破茂',
+  checkPassed: false,
+  selfIdentity: 'GPT-4 级别的通用助手',
+};
+
+const MOCK_IDENTITY_REQUEST =
+  '第一行只写 pong\n第二行写「答案：」加这道题的答案\n第三行写「模型：」加你的型号\n题目：现任日本首相是谁？答案只写人名。';
 
 /** 假数据里每条路由的最近一次结论收成一条探针历史，页面开发时格子不是空的。 */
 function mockProbeHistory(
@@ -343,6 +365,7 @@ function mockProbeHistory(
     id: string;
     channelId: string;
     probe?: { state: string; at: string; detail?: string };
+    probeKind?: 'ping' | 'identity';
   }[],
 ) {
   const cells: ProbeHistoryCell[] = [];
@@ -351,6 +374,9 @@ function mockProbeHistory(
     if (!probe) continue;
     const result = probe.state === 'ok' ? 'passed' : probe.state === 'failed' ? 'failed' : 'not_probed';
     const reason = probe.detail?.trim() ? probe.detail : '（假数据没写原因）';
+    // 身份题的路由：通过的记「对上新答案」，不通的（r-cursor-hi）记「说中了旧答案」
+    const identity = route.probeKind === 'identity' && result !== 'not_probed';
+    const mismatch = identity && result === 'failed';
     cells.push({
       id: cells.length + 1,
       routeId: route.id,
@@ -359,9 +385,24 @@ function mockProbeHistory(
       result,
       durationMs: result === 'not_probed' ? null : durationMsFromDetail(probe.detail),
       failureReason: result === 'passed' ? null : reason,
-      requestText: result === 'not_probed' ? null : '只回一个词：pong',
-      responseText: result === 'passed' ? 'pong' : result === 'failed' ? reason : null,
-      ...(result === 'passed' ? { ...NO_CHECK, kind: 'ping' as const } : NO_CHECK),
+      requestText: result === 'not_probed' ? null : identity ? MOCK_IDENTITY_REQUEST : '只回一个词：pong',
+      responseText: mismatch
+        ? 'pong\n答案：石破茂\n模型：GPT-4 级别的通用助手'
+        : identity
+          ? 'pong\n答案：高市早苗\n模型：gpt-6-sol'
+          : result === 'passed'
+            ? 'pong'
+            : result === 'failed'
+              ? reason
+              : null,
+      ...(mismatch
+        ? MOCK_CHECK_MISMATCH
+        : identity
+          ? MOCK_CHECK_PASSED
+          : result !== 'not_probed'
+            ? { ...NO_CHECK, kind: 'ping' as const }
+            : NO_CHECK),
+      trigger: 'scheduled' as const,
     });
   }
   // 中转站（ch-relay）补几次更早的探测，页面上能看到每种结论：疑似换模型、不通、没探、通过
@@ -378,14 +419,10 @@ function mockProbeHistory(
         result: 'failed',
         durationMs: 8_400,
         failureReason: '疑似换成旧模型：题 现任日本首相是谁？，新答案应为 高市早苗，实答 石破茂',
-        requestText: '第一行只写 pong\n第二行写「答案：」……\n题目：现任日本首相是谁？答案只写人名。',
+        requestText: MOCK_IDENTITY_REQUEST,
         responseText: 'pong\n答案：石破茂\n模型：GPT-4 级别的通用助手',
-        checkQuestion: '现任日本首相是谁？答案只写人名。',
-        checkExpected: '高市早苗/Takaichi',
-        checkAnswer: '石破茂',
-        checkPassed: false,
-        selfIdentity: 'GPT-4 级别的通用助手',
-        kind: 'identity',
+        ...MOCK_CHECK_MISMATCH,
+        trigger: 'dispatch',
       },
       {
         ...base,
@@ -394,9 +431,11 @@ function mockProbeHistory(
         result: 'failed',
         durationMs: null,
         failureReason: '连探两次都没通：503 容量满，上游没给原文\n（假数据）',
-        requestText: '只回一个词：pong',
+        requestText: '这是连通性测试。不要调用任何工具，不要解释，只回一个词：pong',
         responseText: '503 Service Unavailable\n{"error":{"type":"overloaded","message":"capacity full"}}',
         ...NO_CHECK,
+        kind: 'ping',
+        trigger: 'break',
       },
       {
         ...base,
@@ -404,10 +443,11 @@ function mockProbeHistory(
         probedAt: at(50),
         result: 'not_probed',
         durationMs: null,
-        failureReason: `${ROUTE_PROBE_ON_DEMAND_MARK}。上一次真探：通，10-10 11:00`,
+        failureReason: '这一轮没探：账号池整池暂停（假数据）',
         requestText: null,
         responseText: null,
         ...NO_CHECK,
+        trigger: 'scheduled',
       },
       {
         ...base,
@@ -416,46 +456,58 @@ function mockProbeHistory(
         result: 'passed',
         durationMs: 12_100,
         failureReason: null,
-        requestText: '第一行只写 pong\n第二行写「答案：」……\n题目：现任日本首相是谁？答案只写人名。',
+        requestText: MOCK_IDENTITY_REQUEST,
         responseText: 'pong\n答案：高市早苗\n模型：gpt-6-sol',
         ...MOCK_CHECK_PASSED,
+        trigger: 'scheduled',
+      },
+      {
+        ...base,
+        id: cells.length + 5,
+        probedAt: at(80),
+        result: 'passed',
+        durationMs: 5_300,
+        failureReason: null,
+        requestText: '这是连通性测试。不要调用任何工具，不要解释，只回一个词：pong',
+        responseText: 'pong',
+        ...NO_CHECK,
+        kind: 'ping',
+        trigger: 'manual',
+      },
+      {
+        // 算术题时代的老记录：没有种类、没有触发者，照原样显示，标「旧版降智题」
+        ...base,
+        id: cells.length + 6,
+        probedAt: at(125),
+        result: 'failed',
+        durationMs: 9_900,
+        failureReason: '疑似降智：题 17 乘 23 等于多少？只回数字。，应为 391，实答 381',
+        requestText: '第一行只回 OK\n第二行：17 乘 23 等于多少？只回数字。',
+        responseText: 'OK\n381',
+        checkQuestion: '17 乘 23 等于多少？只回数字。',
+        checkExpected: '391',
+        checkAnswer: '381',
+        checkPassed: false,
+        selfIdentity: 'gpt-6-sol',
       },
     );
   }
-  // Cursor（ch-cursor）的按需路由：一次真探判了疑似换模型，后面全是「按需」没探（#1748：色条不能全黄、真探不能被埋）
+  // Cursor 的疑似换模型路由：一小时前的身份题还是对的，现在说出了旧答案
   const hi = routes.find((r) => r.id === 'r-cursor-hi' && r.probe);
   if (hi?.probe) {
-    const t0 = Date.parse(hi.probe.at);
-    const base = { routeId: hi.id, channelId: hi.channelId };
     cells.push({
-      ...base,
+      routeId: hi.id,
+      channelId: hi.channelId,
       id: cells.length + 1,
-      probedAt: new Date(t0 - 60 * 60_000).toISOString(),
-      result: 'failed',
+      probedAt: new Date(Date.parse(hi.probe.at) - 60 * 60_000).toISOString(),
+      result: 'passed',
       durationMs: 9_200,
-      failureReason: '疑似换成旧模型：题 现任日本首相是谁？，新答案应为 高市早苗，实答 石破茂',
-      requestText: '题目：现任日本首相是谁？答案只写人名。',
-      responseText: 'pong\n答案：石破茂\n模型：GPT-4 级别的通用助手',
-      checkQuestion: '现任日本首相是谁？答案只写人名。',
-      checkExpected: '高市早苗/Takaichi',
-      checkAnswer: '石破茂',
-      checkPassed: false,
-      selfIdentity: 'GPT-4 级别的通用助手',
-      kind: 'identity',
+      failureReason: null,
+      requestText: MOCK_IDENTITY_REQUEST,
+      responseText: 'pong\n答案：高市早苗\n模型：gpt-6-sol',
+      ...MOCK_CHECK_PASSED,
+      trigger: 'scheduled',
     });
-    for (let i = 0; i < 12; i++) {
-      cells.push({
-        ...base,
-        id: cells.length + 1,
-        probedAt: new Date(t0 - (50 - i * 4) * 60_000).toISOString(),
-        result: 'not_probed',
-        durationMs: null,
-        failureReason: `${ROUTE_PROBE_ON_DEMAND_MARK}。上一次真探：不通，10-10 09:05（疑似降智：题 17 乘 23 等于多少？只回数字。，应为 391，实答 381）`,
-        requestText: null,
-        responseText: null,
-        ...NO_CHECK,
-      });
-    }
   }
   return RouteProbeHistoryResponse.parse({ state: 'ok', ...probeHistoryStrips(cells) });
 }
@@ -464,6 +516,25 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const now = opts.now ?? (() => Date.now());
   const rand = rng(opts.seed ?? 20260925);
   const st = createSeed(now());
+  // 一个渠道下几百条路由（线上 Cursor 订阅 256 条、213 条没用途在用）：测试给 manyRoutes，点验在地址上加 ?mockRoutes=many。公共种子不带，免得别的页的数对不上。
+  const bulk = opts.manyRoutes ?? (mockRoutesMany() ? 213 : 0);
+  for (let i = 1; i <= bulk; i++) {
+    st.routes.push({
+      id: `r-cursor-bulk-${String(i).padStart(3, '0')}`,
+      channelId: 'ch-cursor',
+      poolId: 'cursor-pro',
+      modelId: 'cursor-auto',
+      hostId: 'cursor-agent',
+      alive: false,
+      probe: {
+        state: 'skipped',
+        at: new Date(now() - 5 * 60_000).toISOString(),
+        detail: '没有哪个阶段在用这条路由，不花额度去探',
+      },
+      probeTier: 'unused',
+      probeFailStreak: 0,
+    });
+  }
   /** 会话内容（#1640）的演示数据；在跑的段每被读一次多放出几条。mockTranscriptFail 里的段读不到（演示「没读成」）。 */
   const transcripts = transcriptSeed((min) => new Date(now() + min * 60_000).toISOString());
   const revealed = new Map<string, number>();
@@ -683,6 +754,11 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           const detail = failed ? (route.probe?.detail ?? '没探通') : `答上了：OK · 用时 ${sec} 秒`;
           route.probe = { state: failed ? 'failed' : 'ok', at: iso(), detail };
           route.alive = !failed;
+          // 探完重写下次时刻：活跃 1 小时、不活跃 1 天，不通的按连着不通几次退避（15、30、60、120、240 分钟）
+          route.probeFailStreak = failed ? (route.probeFailStreak ?? 0) + 1 : 0;
+          const backoff = [15, 30, 60, 120, 240][Math.min(route.probeFailStreak, 5) - 1];
+          const waitMin = failed && backoff ? backoff : route.probeTier === 'idle' ? 24 * 60 : 60;
+          if (route.probeTier !== 'unused') route.probeNextAt = new Date(t + waitMin * 60_000).toISOString();
           return {
             routeId: id,
             outcome: failed ? 'failed' : 'ok',
@@ -769,11 +845,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     else if (model?.retiredAt && Date.parse(model.retiredAt) <= t) connect = fact('dead', '模型已下架');
     else if (r.alive) connect = fact('live', '探针探通了');
     else if (!r.probe) connect = fact('unknown', '探针还没看过这条路由');
-    else if (r.probe.state === 'on_demand')
-      connect = fact(
-        'unknown',
-        `按需探测（不主动探，派给它时先探一次）：${r.probe.detail ?? '探针没写原因'}`,
-      );
     else if (r.probe.state === 'skipped')
       connect = fact('unknown', `探针这一轮没探它（不是探了没通）：${r.probe.detail ?? '探针没写原因'}`);
     else connect = fact('dead', `探针判不在线：${r.probe.detail ?? `探针没写原因（${r.probe.state}）`}`);
@@ -831,6 +902,12 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       ban,
       ...(r.probe ? { probedAt: r.probe.at } : {}),
       ...(r.probe?.detail ? { probeDetail: r.probe.detail } : {}),
+      ...(r.probeTier ? { probeTier: r.probeTier } : {}),
+      ...(r.probeNextAt ? { probeNextAt: r.probeNextAt } : {}),
+      ...(r.probeFailStreak !== undefined ? { probeFailStreak: r.probeFailStreak } : {}),
+      ...(r.probeKind ? { probeKind: r.probeKind } : {}),
+      ...(r.suspectedSwap !== undefined ? { suspectedSwap: r.suspectedSwap } : {}),
+      ...(r.probeTrigger ? { probeTrigger: r.probeTrigger } : {}),
       exhausted: full.map((w) => ({
         label: w.label ?? w.window,
         ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}),
@@ -1800,7 +1877,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     /**
      * 看板多机（切换器）的假数据：一个叫 wsl 的远程环境（本机 WSL）。形状照真后端；快照取自这份假库、环境名换成「本机 WSL」。
-     * 地址上加 ?mockNode=stale（失联 12 分钟）/ never（配了钥匙没推过）/ off（没有远程环境）看另外几种，默认是 1 分钟前刚报过。
+     * 地址上加 ?mockNode=stale（失联 12 分钟）/ gone（失联 5 天 2 小时，法国页手机上默认折成一行）/ never（配了钥匙没推过）/ off（没有远程环境）看另外几种，默认是 1 分钟前刚报过。
      */
     async nodes() {
       await wait();
@@ -1816,9 +1893,9 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
                 : {
                     id: 'wsl',
                     name: '本机 WSL',
-                    freshness: mode === 'stale' ? ('stale' as const) : ('fresh' as const),
-                    receivedAt: new Date(t - (mode === 'stale' ? 12 * 60_000 : 40_000)).toISOString(),
-                    reportedAt: new Date(t - (mode === 'stale' ? 12 * 60_000 : 41_000)).toISOString(),
+                    freshness: mode === 'stale' || mode === 'gone' ? ('stale' as const) : ('fresh' as const),
+                    receivedAt: new Date(t - mockNodeAgo(mode)).toISOString(),
+                    reportedAt: new Date(t - mockNodeAgo(mode) - 1000).toISOString(),
                     codeSha: 'a0006685f092154f90b462cc74e8872d32e5',
                   },
             ];
@@ -1837,13 +1914,13 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       if (mode === 'never')
         throw new ApiError(404, 'node_never_reported', `环境 ${nodeId} 配了通行证，但一次快照都没推来过`);
       const t = now();
-      const ago = mode === 'stale' ? 12 * 60_000 : 40_000;
+      const ago = mockNodeAgo(mode);
       const home = await api.home();
       const env = await api.env();
       return NodeDetailResponseSchema.parse({
         id: 'wsl',
         name: '本机 WSL',
-        freshness: mode === 'stale' ? 'stale' : 'fresh',
+        freshness: mode === 'stale' || mode === 'gone' ? 'stale' : 'fresh',
         receivedAt: new Date(t - ago).toISOString(),
         reportedAt: new Date(t - ago - 1000).toISOString(),
         codeSha: 'a0006685f092154f90b462cc74e8872d32e5',

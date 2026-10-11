@@ -1,7 +1,9 @@
 // 数据页共用的一条：刷新、最后更新、过期。dataUpdatedAt 用毫秒时间戳，0 表示从没读成过（不能拿它去算「刚刚」）。
 // 两种写法：默认 text 是「刷新」按钮加一行「最后更新 …」字；dot（主页用，#1819）是一个新鲜度点加图标刷新按钮，
 // 点的颜色看数据年龄和推送：1 分钟内绿、5 分钟内黄、更久或推送断开红；悬停写具体时间。
+
 import { LoaderCircle, RefreshCw } from 'lucide-react';
+import type { ComponentProps } from 'react';
 import type { LiveStatus } from '../api/client';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -35,6 +37,8 @@ const freshWords: Record<Freshness, string> = {
   aging: '数据有点旧',
   stale: '数据已过期',
 };
+
+export type RefreshBarProps = ComponentProps<typeof RefreshBar>;
 
 export function RefreshBar({
   onRefresh,
@@ -119,15 +123,15 @@ export function RefreshBar({
       </Button>
       <span role="status">
         {never ? (
-          <span className="text-caption text-muted-foreground">还没读到过</span>
+          <span className="text-meta text-muted-foreground">还没读到过</span>
         ) : (
-          <span className="text-caption text-muted-foreground">
+          <span className="text-meta text-muted-foreground">
             最后更新 <span className="num">{formatAgo(new Date(shownAt).toISOString(), now)}</span>
           </span>
         )}
       </span>
       {stale ? (
-        <span className="inline-flex h-5 items-center rounded-full bg-st-stall/14 px-1.5 text-caption font-medium text-ink-stall">
+        <span className="inline-flex h-5 items-center rounded-full bg-st-stall-soft px-1.5 text-meta font-medium text-ink-stall">
           数据已过期
         </span>
       ) : null}

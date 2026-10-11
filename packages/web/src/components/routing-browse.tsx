@@ -7,11 +7,11 @@
 // - 开关走 routing-edit.tsx 里现成的确认弹窗和接口；Fable 的「只有创始人在驾驶舱能开」判在后端，这里只标一句。
 
 import { founderOnlyFor } from '@fleet-dao/shared';
-import { ChevronRight, Search } from 'lucide-react';
+import { ChevronRight } from 'lucide-react';
 import { type ReactNode, useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { useRouting } from '../api/client';
-import type { Route, RoutingLayerModel, RoutingLayers } from '../api/types';
+import type { RoutingLayerModel, RoutingLayers } from '../api/types';
 import { hostLabel } from '../lib/catalog';
 import { buildChannelCards, type ChannelCard } from '../lib/channel-status';
 import { useMediaQuery, useNow } from '../lib/hooks';
@@ -42,13 +42,20 @@ import {
   NO_CATALOG_FILTER,
 } from '../lib/routing-browse';
 import { cn } from '../lib/utils';
-import { LoadError, LoadingRows, Panel } from './page';
+import { EmptyState } from './layout/empty-state';
+import { LoadError, LoadingRows } from './layout/load-state';
+import { NativeSelect } from './layout/native-select';
+import { SearchInput } from './layout/search-input';
+import { Section } from './layout/section';
+import { StatusBadge, StatusDot } from './layout/status-badge';
+import { Tag, type TagTone } from './layout/tag';
 import { ChannelSwitch, FounderOnlyBadge, ModelSwitch } from './routing-edit';
 import { KindChip, KindDot, useKindEnv } from './routing-kinds';
 import { isManualChannel, ManualModelForm } from './routing-membership';
 import { ModelRosterNotice } from './routing-roster';
 import { ModelRoutes, RouteItem } from './routing-routes';
-import { StatusChip, StatusDot } from './status';
+import { Button } from './ui/button';
+import { Toggle } from './ui/toggle';
 
 /** 紧凑行的高度（像素）和一屏高度：窗口化按它们算位置。手机宽度两行，用更高的行高。 */
 export const ROW_HEIGHT = 44;
@@ -66,25 +73,6 @@ export function revealOnMobile(id: string) {
 
 function rowHeightNow(mobile: boolean): number {
   return mobile ? MOBILE_ROW_HEIGHT : ROW_HEIGHT;
-}
-
-/** 筛选芯片：按下用深色边框加底，和没按下分开。 */
-function filterChipClass(pressed: boolean): string {
-  return cn(
-    'inline-flex h-7 items-center rounded-full border px-2.5 text-caption transition-colors',
-    pressed
-      ? 'border-foreground bg-foreground/10 font-semibold'
-      : 'border-border bg-background hover:bg-muted',
-  );
-}
-
-function choiceClass(selected: boolean, extra?: string): string {
-  return cn(
-    // h-7 会把「全部厂家」上下切掉。不锁死高度，上下留出内边距，字才能完整落在框里。
-    'min-h-9 rounded-md border px-2 py-1.5 text-caption leading-normal',
-    selected ? 'border-foreground bg-foreground/10 font-medium' : 'border-border bg-background',
-    extra,
-  );
 }
 
 /** 搜索框和「只看已开启」。noun 是这一列叫什么（模型、渠道），给搜索框和读屏用。 */
@@ -109,40 +97,33 @@ export function ListFilterBar({
 }) {
   return (
     <div className="space-y-2 border-b p-3">
-      <label className="relative block">
-        <span className="sr-only">搜索{noun}</span>
-        <Search
-          className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
-          aria-hidden
-        />
-        <input
-          type="search"
-          value={filter.query}
-          onChange={(e) => onChange({ ...filter, query: e.target.value })}
-          placeholder={`搜${noun}的名字、编号`}
-          aria-label={`搜索${noun}`}
-          className="h-9 w-full rounded-lg border bg-background pl-8 pr-2.5 text-sub outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-        />
-      </label>
+      <SearchInput
+        value={filter.query}
+        onChange={(query) => onChange({ ...filter, query })}
+        placeholder={`搜${noun}的名字、编号`}
+        aria-label={`搜索${noun}`}
+        className="md:max-w-none"
+      />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            aria-pressed={filter.onlyEnabled}
-            onClick={() => onChange({ ...filter, onlyEnabled: !filter.onlyEnabled })}
-            className={filterChipClass(filter.onlyEnabled)}
+          <Toggle
+            variant="outline"
+            size="sm"
+            pressed={filter.onlyEnabled}
+            onPressedChange={(onlyEnabled) => onChange({ ...filter, onlyEnabled })}
           >
             只看已开启
-          </button>
-          <button
+          </Toggle>
+          <Button
             type="button"
+            variant="ghost"
+            size="sm"
             onClick={() => (onClear ? onClear() : onChange({ ...filter, query: '', onlyEnabled: false }))}
-            className="inline-flex h-7 items-center rounded-full border border-border bg-background px-2.5 text-caption hover:bg-muted"
           >
             清除筛选
-          </button>
+          </Button>
         </div>
-        <span className="num text-caption text-muted-foreground" aria-live="polite">
+        <span className="num text-meta text-muted-foreground" aria-live="polite">
           {(active ?? filterActive(filter)) ? `显示 ${shown} / 共 ${total} 个` : `共 ${total} 个`}
         </span>
       </div>
@@ -175,7 +156,7 @@ export function WindowedRows<T>({
 }) {
   const [scrollTop, setScrollTop] = useState(0);
   if (items.length === 0) {
-    return <p className="px-3 py-8 text-center text-sub text-muted-foreground">{empty}</p>;
+    return <EmptyState size="inline" title={empty} className="py-6" />;
   }
   const total = items.length * rowHeight;
   if (flow) {
@@ -233,12 +214,12 @@ export function WindowedRows<T>({
   );
 }
 
-const PROBE_WORD: Record<NonNullable<Route['probe']>['state'], string> = {
+/** 库里留着的老状态词（已不再写）按「没探」说。 */
+const PROBE_WORD: Readonly<Record<string, string>> = {
   ok: '探通',
   failed: '不通',
   skipped: '没探',
   not_wired: '插头没接',
-  on_demand: '按需探测',
 };
 
 // —— 模型目录 ——
@@ -289,10 +270,7 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
         </div>
       ) : null}
       <div className="grid items-start gap-4 lg:grid-cols-2">
-        <section
-          aria-label="模型目录"
-          className="min-w-0 overflow-hidden rounded-xl border bg-card shadow-card-edge"
-        >
+        <Section flush aria-label="模型目录">
           <ListFilterBar
             noun="模型"
             filter={filter}
@@ -305,11 +283,10 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
             onClear={() => setFilter(NO_CATALOG_FILTER)}
           />
           <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
-            <select
+            <NativeSelect
               aria-label="按厂家筛选"
               value={filter.vendor}
               onChange={(e) => setFilter((prev) => ({ ...prev, vendor: e.target.value }))}
-              className={choiceClass(filter.vendor !== '')}
             >
               <option value="">全部厂家</option>
               {vendors.map((vendor) => (
@@ -317,12 +294,12 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
                   {vendor}
                 </option>
               ))}
-            </select>
-            <select
+            </NativeSelect>
+            <NativeSelect
               aria-label="按渠道筛选"
               value={filter.channel}
               onChange={(e) => setFilter((prev) => ({ ...prev, channel: e.target.value }))}
-              className={choiceClass(filter.channel !== '', 'max-w-40')}
+              className="max-w-40"
             >
               <option value="">全部渠道</option>
               {(routing.data?.channels ?? []).map((channel) => (
@@ -330,19 +307,19 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
                   {channel.name}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
             {CATALOG_STATUSES.map((status) => {
               const on = filter.statuses.includes(status);
               return (
-                <button
+                <Toggle
                   key={status}
-                  type="button"
-                  aria-pressed={on}
-                  onClick={() => toggleStatus(status)}
-                  className={filterChipClass(on)}
+                  variant="outline"
+                  size="sm"
+                  pressed={on}
+                  onPressedChange={() => toggleStatus(status)}
                 >
                   {STATUS_LABEL[status]}
-                </button>
+                </Toggle>
               );
             })}
           </div>
@@ -365,7 +342,7 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
                 : { 'data-catalog-group': row.group.key }
             }
             rowClassName={(row) =>
-              row.kind === 'entry' && row.entry.modelId === current?.modelId ? 'bg-muted/60' : undefined
+              row.kind === 'entry' && row.entry.modelId === current?.modelId ? 'bg-selected' : undefined
             }
           >
             {(row) => (
@@ -382,7 +359,7 @@ export function ModelCatalogTab({ layers }: { layers: RoutingLayers }) {
               />
             )}
           </WindowedRows>
-        </section>
+        </Section>
         <div id="routing-catalog-detail" className="min-w-0 scroll-mt-4">
           {current ? <CatalogDetail entry={current} now={now} /> : null}
         </div>
@@ -399,10 +376,10 @@ function entrySummary(e: CatalogEntry): string {
 }
 
 const MARK_TONE = {
-  discovered: 'text-ink-done',
-  retired: 'text-ink-stop',
-  locked: 'text-ink-stall',
-} as const;
+  discovered: 'done',
+  retired: 'stop',
+  locked: 'stall',
+} as const satisfies Record<string, TagTone>;
 
 function CatalogMark({
   tone,
@@ -414,15 +391,8 @@ function CatalogMark({
   title?: string | undefined;
 }) {
   return (
-    <span
-      data-catalog-mark={tone}
-      title={title}
-      className={cn(
-        'inline-flex h-4 shrink-0 items-center rounded border border-current px-1 text-micro font-semibold',
-        MARK_TONE[tone],
-      )}
-    >
-      {children}
+    <span data-catalog-mark={tone} title={title} className="inline-flex shrink-0">
+      <Tag tone={MARK_TONE[tone]}>{children}</Tag>
     </span>
   );
 }
@@ -458,13 +428,11 @@ function CatalogVisualRow({
             data-variant-arrow={open ? 'open' : 'closed'}
             className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-90')}
           />
-          <span className="min-w-0 whitespace-normal break-words text-sm font-semibold md:truncate">
+          <span className="min-w-0 whitespace-normal break-words text-body font-semibold md:truncate">
             {row.group.label}
           </span>
-          <span className="shrink-0 text-caption text-muted-foreground">
-            {row.group.members.length} 个变体
-          </span>
-          <span className="shrink-0 text-caption text-muted-foreground">{enabledCount} 个已开</span>
+          <span className="shrink-0 text-meta text-muted-foreground">{row.group.members.length} 个变体</span>
+          <span className="shrink-0 text-meta text-muted-foreground">{enabledCount} 个已开</span>
         </button>
       </div>
     );
@@ -528,7 +496,7 @@ function CatalogRow({
         )}
         <span
           data-row-name
-          className="min-w-0 whitespace-normal break-words text-sm font-semibold leading-snug md:truncate"
+          className="min-w-0 whitespace-normal break-words text-body font-semibold leading-snug md:truncate"
         >
           {e.displayName}
         </span>
@@ -536,7 +504,7 @@ function CatalogRow({
       </button>
       <div data-row-meta className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
         {e.family ? (
-          <span data-vendor className="truncate text-caption text-muted-foreground">
+          <span data-vendor className="truncate text-meta text-muted-foreground">
             {e.family}
           </span>
         ) : null}
@@ -544,7 +512,7 @@ function CatalogRow({
           {kind !== null ? (
             <KindChip kind={kind} />
           ) : (
-            <span className="text-caption text-muted-foreground">
+            <span className="text-meta text-muted-foreground">
               {e.purposes.length === 0 ? '没配进用途' : '一条路由都没有'}
             </span>
           )}
@@ -561,7 +529,7 @@ function CatalogRow({
             锁住
           </CatalogMark>
         ) : null}
-        <span data-route-summary className="min-w-0 truncate text-caption text-muted-foreground">
+        <span data-route-summary className="min-w-0 truncate text-meta text-muted-foreground">
           {entrySummary(e)}
         </span>
         <ModelSwitch
@@ -588,17 +556,17 @@ function CatalogDetail({ entry: e, now }: { entry: CatalogEntry; now: number }) 
   const raw = (routing.data?.routes ?? []).filter((r) => r.modelId === e.modelId);
   const channelName = (id: string) => routing.data?.channels.find((c) => c.id === id)?.name ?? id;
   return (
-    <Panel title={e.displayName} description={entrySummary(e)} bodyClassName="p-0">
+    <Section title={e.displayName} description={entrySummary(e)} flush>
       {e.switchKnown ? (
         <div className="overflow-hidden">
-          <p className="border-b px-3 py-2 text-caption text-muted-foreground">
+          <p className="border-b px-3 py-2 text-meta text-muted-foreground">
             路由的先后管这个模型在所有用途里：拖动、置顶、置底，或聚焦后 Alt+上下键。
           </p>
           <ModelRoutes model={model} now={now} />
         </div>
       ) : (
         <div>
-          <p role="note" className="border-b px-3 py-2.5 text-sub text-muted-foreground">
+          <p role="note" className="border-b px-3 py-2.5 text-body text-muted-foreground">
             {e.purposes.length === 0
               ? '这个模型还没配进任何用途，路由开着没有读不到，开关先置灰；在用途里排上它之后就能开关。'
               : '这个模型下一条路由都没有：排了它也派不到它。'}
@@ -609,22 +577,22 @@ function CatalogDetail({ entry: e, now }: { entry: CatalogEntry; now: number }) 
                 <li
                   key={r.id}
                   data-route={r.id}
-                  className="flex flex-wrap items-center gap-x-2 border-b px-3 py-2 text-sub last:border-b-0"
+                  className="flex flex-wrap items-center gap-x-2 border-b px-3 py-2 text-body last:border-b-0"
                 >
                   <span className="font-medium">
                     {channelName(r.channelId)} · {r.poolId}
                   </span>
-                  <span className="text-caption text-muted-foreground">
-                    {hostLabel[r.hostId]} · {r.probe ? PROBE_WORD[r.probe.state] : '探针还没看过'}
+                  <span className="text-meta text-muted-foreground">
+                    {hostLabel[r.hostId]} · {r.probe ? (PROBE_WORD[r.probe.state] ?? '没探') : '探针还没看过'}
                   </span>
-                  <span className="num ml-auto truncate text-micro text-faint">{r.id}</span>
+                  <span className="num ml-auto truncate text-meta text-muted-foreground">{r.id}</span>
                 </li>
               ))}
             </ul>
           )}
         </div>
       )}
-    </Panel>
+    </Section>
   );
 }
 
@@ -662,10 +630,7 @@ export function ChannelTab({ layers }: { layers: RoutingLayers }) {
   const current = cards.find((c) => c.channel.id === picked) ?? shown[0];
   return (
     <div className="grid items-start gap-4 lg:grid-cols-2">
-      <section
-        aria-label="渠道"
-        className="min-w-0 overflow-hidden rounded-xl border bg-card shadow-card-edge"
-      >
+      <Section flush aria-label="渠道">
         <ListFilterBar
           noun="渠道"
           filter={filter}
@@ -682,7 +647,7 @@ export function ChannelTab({ layers }: { layers: RoutingLayers }) {
             cards.length === 0 ? '目录里一个渠道都没有' : '没有符合的渠道：换个搜索词，或关掉「只看已开启」'
           }
           rowProps={(c) => ({ 'data-channel': c.channel.id, 'data-kind': c.kind })}
-          rowClassName={(c) => (c.channel.id === current?.channel.id ? 'bg-muted/60' : undefined)}
+          rowClassName={(c) => (c.channel.id === current?.channel.id ? 'bg-selected' : undefined)}
         >
           {(c) => (
             <ChannelRow
@@ -695,7 +660,7 @@ export function ChannelTab({ layers }: { layers: RoutingLayers }) {
             />
           )}
         </WindowedRows>
-      </section>
+      </Section>
       <div id="routing-channel-detail" className="min-w-0 scroll-mt-4">
         {current ? <ChannelDetail card={current} layers={layers} now={now} /> : null}
       </div>
@@ -726,7 +691,7 @@ function ChannelRow({
         <span
           data-row-name
           className={cn(
-            'min-w-0 whitespace-normal break-words text-sm font-semibold leading-snug md:truncate',
+            'min-w-0 whitespace-normal break-words text-body font-semibold leading-snug md:truncate',
             quiet && 'text-muted-foreground',
           )}
         >
@@ -735,9 +700,9 @@ function ChannelRow({
       </button>
       <div data-row-meta className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
         <span data-status-word className="shrink-0">
-          <StatusChip tone={c.tone} label={c.label} />
+          <StatusBadge tone={c.tone} label={c.label} />
         </span>
-        <span data-route-summary className="min-w-0 truncate text-caption text-muted-foreground">
+        <span data-route-summary className="min-w-0 truncate text-meta text-muted-foreground">
           {channelRouteLine(c.counts)}
         </span>
         <ChannelSwitch channelId={c.channel.id} name={c.channel.name} enabled={c.channel.enabled} />
@@ -750,16 +715,16 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
   const routing = useRouting();
   const { inLayers, others } = channelRoutes(c.channel.id, layers, routing.data);
   return (
-    <Panel
+    <Section
       title={c.channel.name}
       description={c.reason ?? countsText(c.counts)}
-      actions={<StatusChip tone={c.tone} label={c.label} />}
-      bodyClassName="p-0"
+      actions={<StatusBadge tone={c.tone} label={c.label} />}
+      flush
     >
       {isManualChannel(c.channel.id, c.channel.name, layers.modelRoster?.manual) ? (
         <ManualModelForm channelId={c.channel.id} />
       ) : null}
-      <p className="border-b px-3 py-2 text-caption text-muted-foreground">
+      <p className="border-b px-3 py-2 text-meta text-muted-foreground">
         {countsText(c.counts)} ·{' '}
         <Link
           to={`/routing/status?p=${encodeURIComponent(c.channel.id)}`}
@@ -769,7 +734,7 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
         </Link>
       </p>
       {inLayers.length === 0 && others.length === 0 ? (
-        <p className="px-3 py-6 text-center text-sub text-muted-foreground">这个渠道下一条路由都没有</p>
+        <p className="px-3 py-6 text-center text-body text-muted-foreground">这个渠道下一条路由都没有</p>
       ) : null}
       {inLayers.length > 0 ? (
         <ol aria-label={`${c.channel.name} 的路由`}>
@@ -777,7 +742,7 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
             <li
               key={route.routeId}
               data-route={route.routeId}
-              className={cn('border-b px-3 py-2.5 last:border-b-0', !route.enabled && 'bg-muted/30')}
+              className={cn('border-b px-3 py-2.5 last:border-b-0', !route.enabled && 'bg-muted')}
             >
               <RouteItem
                 route={route}
@@ -792,7 +757,7 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
       ) : null}
       {others.length > 0 ? (
         <div>
-          <p className="border-y bg-muted/30 px-3 py-1.5 text-caption text-muted-foreground">
+          <p className="border-y bg-muted px-3 py-1.5 text-meta text-muted-foreground">
             没配进任何用途的路由（读不到开关）
           </p>
           <ul aria-label={`${c.channel.name} 里没配进用途的路由`}>
@@ -800,21 +765,21 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
               <li
                 key={route.id}
                 data-route={route.id}
-                className="flex flex-wrap items-center gap-x-2 border-b px-3 py-2 text-sub last:border-b-0"
+                className="flex flex-wrap items-center gap-x-2 border-b px-3 py-2 text-body last:border-b-0"
               >
                 <span className="font-medium">
                   {routeTitle({ channelName: c.channel.name, poolId: route.poolId })}
                 </span>
-                <span className="text-caption text-muted-foreground">
+                <span className="text-meta text-muted-foreground">
                   {modelName} · {hostLabel[route.hostId]} ·{' '}
-                  {route.probe ? PROBE_WORD[route.probe.state] : '探针还没看过'}
+                  {route.probe ? (PROBE_WORD[route.probe.state] ?? '没探') : '探针还没看过'}
                 </span>
-                <span className="num ml-auto truncate text-micro text-faint">{route.id}</span>
+                <span className="num ml-auto truncate text-meta text-muted-foreground">{route.id}</span>
               </li>
             ))}
           </ul>
         </div>
       ) : null}
-    </Panel>
+    </Section>
   );
 }

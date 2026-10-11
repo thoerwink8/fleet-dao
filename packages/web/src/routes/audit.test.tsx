@@ -30,6 +30,27 @@ describe('操作记录页', () => {
     expect(raw.contains(within(block).getByText('路由：（无） → Sonnet 5'))).toBe(false);
   });
 
+  test('没做成的记录：行标 fail（竖线）、带「没做成」状态标签，做成的行没有', async () => {
+    // 失败行又退回手写的淡红底、或做成的行也带了标签，这一条会红。
+    const api = createMockApi({ live: false });
+    const sample = (await api.audit({ limit: 1 })).items[0];
+    if (!sample) throw new Error('假数据没有操作记录');
+    api.audit = () =>
+      Promise.resolve({
+        items: [
+          { ...sample, id: 'a-ok', ok: true },
+          { ...sample, id: 'a-bad', ok: false, error: '没权限' },
+        ],
+      });
+    renderApp(<AuditPage />, { api });
+    await screen.findAllByText('没权限');
+    const [good, bad] = document.querySelectorAll('li[data-audit-row]');
+    expect(good?.querySelector('[data-row-rail]')).toBeNull();
+    expect(good?.querySelector('[data-tone="fail"]')).toBeNull();
+    expect(bad?.querySelector('[data-row-rail]')).not.toBeNull();
+    expect(bad?.querySelector('[data-tone="fail"]')?.textContent).toBe('没做成');
+  });
+
   test('过滤后没有记录、也没有更早的：不提往前翻，没有按钮', async () => {
     // 空态仍写「往前翻更早的」或凭空放按钮，这一条会红。
     renderApp(<AuditPage />);
@@ -38,7 +59,7 @@ describe('操作记录页', () => {
     expect(await screen.findByText('没有符合条件的记录')).toBeTruthy();
     expect(screen.getByText('换个过滤条件。')).toBeTruthy();
     expect(screen.queryByText(/往前翻更早的/)).toBeNull();
-    expect(screen.queryByRole('button', { name: '看更早的记录' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '再看 50 条' })).toBeNull();
   });
 
   test('搜索无结果时提示只搜了已加载的', async () => {
@@ -74,7 +95,7 @@ describe('操作记录页', () => {
     const button = within(box).getByRole('button', {
       name: `只搜了已加载的 ${loaded} 条，点这里再往前翻`,
     });
-    expect(screen.queryByRole('button', { name: '看更早的记录' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '再看 50 条' })).toBeNull();
     fireEvent.click(button);
     await waitFor(() => expect(screen.getByText('更早的人')).toBeTruthy());
   });
@@ -104,17 +125,53 @@ describe('操作记录页', () => {
       );
     renderApp(<AuditPage />, { api });
     await screen.findAllByText('派了会话');
-    expect(screen.getByRole('button', { name: '看更早的记录' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '再看 50 条' })).toBeTruthy();
     // 假数据第一页没有「会话」操作人；下一页有。
     fireEvent.click(screen.getByRole('tab', { name: '会话' }));
     const title = await screen.findByText('没有符合条件的记录');
     const box = title.parentElement;
     if (!box) throw new Error('空态没有外框');
     expect(box.textContent).toContain('往前翻更早的');
-    const button = within(box).getByRole('button', { name: '看更早的记录' });
-    expect(screen.getAllByRole('button', { name: '看更早的记录' })).toHaveLength(1);
+    const button = within(box).getByRole('button', { name: '再看 50 条' });
+    expect(screen.getAllByRole('button', { name: '再看 50 条' })).toHaveLength(1);
     fireEvent.click(button);
     await waitFor(() => expect(screen.getByText('更早的会话')).toBeTruthy());
+  });
+});
+
+describe('操作记录页：50 条一页（#1837）', () => {
+  test('默认只读、只画 50 条，点「再看 50 条」再读下一页，读完按钮没了', async () => {
+    // 一次铺全部（手机端近两万像素）、或按钮不接着读下一页，这一条会红。
+    const api = createMockApi({ live: false });
+    const sample = (await api.audit({ limit: 1 })).items[0];
+    if (!sample) throw new Error('假数据没有操作记录');
+    const all: AuditEntry[] = Array.from({ length: 120 }, (_, i) => ({
+      ...sample,
+      id: `a-page-${i}`,
+      target: `cockpit-${i}`,
+      before: undefined,
+      after: undefined,
+    }));
+    const limits: (number | undefined)[] = [];
+    api.audit = (query) => {
+      limits.push(query?.limit);
+      const start = query?.cursor ? Number(query.cursor) : 0;
+      const size = query?.limit ?? all.length;
+      const end = Math.min(start + size, all.length);
+      return Promise.resolve({
+        items: all.slice(start, end),
+        ...(end < all.length ? { nextCursor: String(end) } : {}),
+      });
+    };
+    renderApp(<AuditPage />, { api });
+    const rows = () => document.querySelectorAll('li[data-audit-row]').length;
+    await waitFor(() => expect(rows()).toBe(50));
+    expect(limits).toEqual([50]);
+    fireEvent.click(screen.getByRole('button', { name: '再看 50 条' }));
+    await waitFor(() => expect(rows()).toBe(100));
+    fireEvent.click(screen.getByRole('button', { name: '再看 50 条' }));
+    await waitFor(() => expect(rows()).toBe(120));
+    expect(screen.queryByRole('button', { name: '再看 50 条' })).toBeNull();
   });
 });
 
@@ -150,5 +207,21 @@ describe('操作记录页：事件名翻成中文（#1821）', () => {
     await screen.findAllByText('派了会话');
     const links = screen.getAllByRole('link', { name: '打开' });
     expect(links.some((a) => a.getAttribute('href')?.startsWith('/tasks/'))).toBe(true);
+  });
+
+  test('手机上对象链接自己占一行：不和执行者、动作挤在同一个截断容器里', async () => {
+    // 对象按钮又回到执行者那一行的容器里，被压成几像素宽，这一条会红。
+    renderApp(<AuditPage />);
+    const buttons = await screen.findAllByTitle('只看这个对象的记录');
+    for (const button of buttons) {
+      const what = button.parentElement;
+      expect(what?.hasAttribute('data-audit-what')).toBe(true);
+      expect(what?.className).toContain('max-md:basis-full');
+      expect(button.className).toContain('max-md:min-h-10');
+      const who = what?.previousElementSibling;
+      expect(who?.hasAttribute('data-audit-who')).toBe(true);
+      expect(who?.contains(button)).toBe(false);
+      expect(who?.className).toContain('max-md:basis-full');
+    }
   });
 });

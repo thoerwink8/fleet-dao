@@ -4,26 +4,26 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { scanFile } from '../../scripts/lint-arbitrary.ts';
+import { scanFile } from '../../scripts/lint-design.ts';
 
 const webRoot = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
 /** 一处写死尺寸和换上的 token 类名。from 是原来的任意值类名，to 是现在的 token 类名。 */
 const SITES = [
-  { file: 'src/components/usage.tsx', where: '不全标', from: 'text-[10px]', to: 'text-micro' },
-  { file: 'src/components/usage.tsx', where: '合计只读到一部分', from: 'text-[11px]', to: 'text-caption' },
-  { file: 'src/components/usage.tsx', where: '合计一次都没读到', from: 'text-[11px]', to: 'text-caption' },
-  { file: 'src/components/usage.tsx', where: '合计附注', from: 'text-[11px]', to: 'text-caption' },
+  { file: 'src/components/usage.tsx', where: '不全标', from: 'text-[10px]', to: '<Tag tone="stall">' },
+  { file: 'src/components/usage.tsx', where: '合计只读到一部分', from: 'text-[11px]', to: 'text-meta' },
+  { file: 'src/components/usage.tsx', where: '合计一次都没读到', from: 'text-[11px]', to: 'text-meta' },
+  { file: 'src/components/usage.tsx', where: '合计附注', from: 'text-[11px]', to: 'text-meta' },
   {
     file: 'src/components/usage.tsx',
     where: '花费行',
     from: 'grid-cols-[3.5rem_minmax(0,1fr)]',
     to: 'grid-cols-usage',
   },
-  { file: 'src/components/usage.tsx', where: '花费明细', from: 'text-[11px]', to: 'text-caption' },
-  { file: 'src/components/usage.tsx', where: '分开看', from: 'text-[11px]', to: 'text-caption' },
-  { file: 'src/components/usage.tsx', where: '额度提示', from: 'text-[11px]', to: 'text-caption' },
-  { file: 'src/components/run-timeline.tsx', where: '时间刻度字号', from: 'text-[10px]', to: 'text-micro' },
+  { file: 'src/components/usage.tsx', where: '花费明细', from: 'text-[11px]', to: 'text-meta' },
+  { file: 'src/components/usage.tsx', where: '分开看', from: 'text-[11px]', to: 'text-meta' },
+  { file: 'src/components/usage.tsx', where: '额度提示', from: 'text-[11px]', to: 'text-meta' },
+  { file: 'src/components/run-timeline.tsx', where: '时间刻度字号', from: 'text-[10px]', to: 'text-meta' },
   {
     file: 'src/components/run-timeline.tsx',
     where: '刻度左内边距',
@@ -36,23 +36,16 @@ const SITES = [
     from: 'md:grid-cols-[160px_1fr]',
     to: 'md:grid-cols-timeline',
   },
-  { file: 'src/components/run-timeline.tsx', where: '阶段角标', from: 'text-[10px]', to: 'text-micro' },
-  { file: 'src/components/run-timeline.tsx', where: '时长行', from: 'text-[11px]', to: 'text-caption' },
+  { file: 'src/components/run-timeline.tsx', where: '阶段角标', from: 'text-[10px]', to: 'text-meta' },
+  { file: 'src/components/run-timeline.tsx', where: '时长行', from: 'text-[11px]', to: 'text-meta' },
   {
     file: 'src/components/channel-status.tsx',
     where: '故障说明',
     from: 'grid-cols-[auto_1fr]',
     to: 'grid-cols-auto-fr',
   },
-  { file: 'src/components/channel-status.tsx', where: '空探针格', from: 'rounded-[2px]', to: 'rounded-2' },
-  { file: 'src/components/channel-status.tsx', where: '探针格', from: 'rounded-[2px]', to: 'rounded-2' },
-  { file: 'src/components/status.tsx', where: '状态芯片', from: 'text-[11px]', to: 'text-caption' },
-  {
-    file: 'src/components/release-card.tsx',
-    where: '每一行',
-    from: 'grid-cols-[4.5rem_minmax(0,1fr)]',
-    to: 'grid-cols-release',
-  },
+  { file: 'src/components/channel-status.tsx', where: '空探针格', from: 'rounded-[2px]', to: 'rounded-sm' },
+  { file: 'src/components/channel-status.tsx', where: '探针格', from: 'rounded-[2px]', to: 'rounded-sm' },
   {
     file: 'src/components/pool-holds.tsx',
     where: '暂停明细',
@@ -65,14 +58,13 @@ const COUNTS: Record<string, number> = {
   'src/components/usage.tsx': 8,
   'src/components/run-timeline.tsx': 5,
   'src/components/channel-status.tsx': 3,
-  'src/components/status.tsx': 1,
-  'src/components/release-card.tsx': 1,
   'src/components/pool-holds.tsx': 1,
 };
 
-describe('token A2：19 处写死尺寸换成 token', () => {
-  test('六个组件各对上原来说的处数，加起来 19', () => {
-    expect(SITES).toHaveLength(19);
+// 发版卡的一处（grid-cols-release）在片 7（#1853）改用 KeyValue，不再有写死的标签列宽，这一处不再钉。
+describe('token A2：17 处写死尺寸换成 token', () => {
+  test('五个组件各对上原来说的处数，加起来 17', () => {
+    expect(SITES).toHaveLength(17);
     for (const [file, n] of Object.entries(COUNTS)) {
       expect(SITES.filter((site) => site.file === file)).toHaveLength(n);
     }
@@ -83,7 +75,10 @@ describe('token A2：19 处写死尺寸换成 token', () => {
     for (const file of files) {
       const abs = join(webRoot, file);
       const source = readFileSync(abs, 'utf8');
-      expect(scanFile(abs, file), file).toEqual([]);
+      expect(
+        scanFile(abs, file).filter((h) => h.rule === 'R0'),
+        file,
+      ).toEqual([]);
       for (const site of SITES.filter((item) => item.file === file)) {
         expect(source.includes(site.from), `${file} ${site.where} 还留着 ${site.from}`).toBe(false);
         expect(source.includes(site.to), `${file} ${site.where} 没用 ${site.to}`).toBe(true);

@@ -5,7 +5,7 @@ import { Eye, EyeOff } from 'lucide-react';
 import type { Ref } from 'react';
 import { useState } from 'react';
 import { cn } from '../lib/utils';
-import { FieldRow } from './field-row';
+import { FieldRow } from './layout/field-row';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -96,12 +96,12 @@ export function PasswordField({
       <Label htmlFor={id}>{label}</Label>
       {box}
       {hint ? (
-        <p id={`${id}-hint`} className="text-xs text-muted-foreground">
+        <p id={`${id}-hint`} className="text-meta text-muted-foreground">
           {hint}
         </p>
       ) : null}
       {error ? (
-        <p id={`${id}-error`} role="alert" className="text-xs text-ink-fail">
+        <p id={`${id}-error`} role="alert" className="text-meta text-ink-fail">
           {error}
         </p>
       ) : null}

@@ -1,15 +1,21 @@
-import { Bot, Cog, ScrollText, Search, Terminal, X } from 'lucide-react';
+import { Bot, Cog, ScrollText, Terminal, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { brand } from '#brand';
-import { useAllBoards, useAudit, useMe, useNotifications, useRouting } from '../api/client';
+import { AUDIT_PAGE_SIZE, useAllBoards, useAudit, useMe, useNotifications, useRouting } from '../api/client';
 import type { AuditEntry, Me } from '../api/types';
-import { FilterTrack, filterTabClass } from '../components/filter-tabs';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { EmptyState } from '../components/layout/empty-state';
+import { FilterTabs } from '../components/layout/filter-tabs';
+import { List, ListRow } from '../components/layout/list';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { SearchInput } from '../components/layout/search-input';
+import { Section } from '../components/layout/section';
+import { StatusBadge } from '../components/layout/status-badge';
+import { Tag } from '../components/layout/tag';
+import { Toolbar } from '../components/layout/toolbar';
 import { RefreshBar } from '../components/refresh-bar';
-import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
-import { Input } from '../components/ui/input';
 import {
   actionLabel,
   actorKindLabel,
@@ -63,7 +69,7 @@ function ActorIcon({ actor, me }: { actor: AuditEntry['actor']; me: Me | undefin
   }
   return (
     <span
-      className="grid size-7 shrink-0 place-items-center rounded-full bg-foreground text-caption font-semibold text-background"
+      className="grid size-7 shrink-0 place-items-center rounded-full bg-foreground text-meta font-semibold text-background"
       title={actorKindLabel[actor.kind]}
     >
       {actorName(actor, me).slice(0, 1)}
@@ -72,12 +78,12 @@ function ActorIcon({ actor, me }: { actor: AuditEntry['actor']; me: Me | undefin
 }
 
 /** 事件名：有中文对照显示成一句话（悬停看原名）；没有就显示原名加灰字「（没翻译）」。 */
-function ActionText({ action, ok }: { action: string; ok: boolean }) {
+function ActionText({ action, ok, className }: { action: string; ok: boolean; className?: string }) {
   const { text, translated } = describeAction(action);
   return (
-    <span className={cn(!ok && 'text-ink-fail')} title={action}>
+    <span className={cn(!ok && 'text-ink-fail', className)} title={action}>
       {text}
-      {translated ? null : <span className="ml-1 text-xs text-faint">（没翻译）</span>}
+      {translated ? null : <span className="ml-1 text-meta text-muted-foreground">（没翻译）</span>}
     </span>
   );
 }
@@ -93,7 +99,7 @@ function json(v: unknown): string {
 function OlderRecordsButton({ pending, onClick }: { pending: boolean; onClick: () => void }) {
   return (
     <Button size="sm" variant="ghost" onClick={onClick} disabled={pending}>
-      {pending ? '正在读更早的…' : '看更早的记录'}
+      {pending ? '正在读更早的…' : `再看 ${AUDIT_PAGE_SIZE} 条`}
     </Button>
   );
 }
@@ -110,12 +116,12 @@ function ChangeDetails({
 }) {
   const lines = auditChangeLines(before, after, routeNames);
   return (
-    <details className="mt-1 text-xs text-muted-foreground">
+    <details className="mt-1 text-meta text-muted-foreground">
       <summary className="cursor-pointer select-none hover:text-foreground max-md:flex max-md:min-h-10 max-md:items-center">
         看改了什么
       </summary>
       {lines.length > 0 ? (
-        <ul className="mt-1.5 space-y-0.5 text-sub">
+        <ul className="mt-1.5 space-y-0.5 text-body">
           {lines.map((line) => (
             <li key={line.key === '' ? 'value' : line.key} className="break-words">
               {`${line.label}：${line.before} → ${line.after}`}
@@ -123,7 +129,7 @@ function ChangeDetails({
           ))}
         </ul>
       ) : (
-        <p className="mt-1.5 text-sub">这些字段都没变</p>
+        <p className="mt-1.5 text-body">这些字段都没变</p>
       )}
       <details className="mt-1.5">
         <summary className="cursor-pointer select-none hover:text-foreground max-md:flex max-md:min-h-10 max-md:items-center">
@@ -133,7 +139,7 @@ function ChangeDetails({
           {before !== undefined ? (
             <div>
               <div className="mb-1">之前</div>
-              <pre className="num overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-muted/70 p-2 text-caption scrollbar-thin">
+              <pre className="num overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 text-meta scrollbar-thin">
                 {json(before)}
               </pre>
             </div>
@@ -141,7 +147,7 @@ function ChangeDetails({
           {after !== undefined ? (
             <div>
               <div className="mb-1">之后</div>
-              <pre className="num overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-muted/70 p-2 text-caption scrollbar-thin">
+              <pre className="num overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 text-meta scrollbar-thin">
                 {json(after)}
               </pre>
             </div>
@@ -216,64 +222,50 @@ export default function Audit() {
         />
       }
     >
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <FilterTrack role="tablist" aria-label="按谁做的">
-          {FILTERS.map((f) => (
-            <button
-              key={f.id}
-              type="button"
-              role="tab"
-              aria-selected={filter === f.id}
-              onClick={() => setFilter(f.id)}
-              className={filterTabClass(filter === f.id)}
-            >
-              {f.label}
-            </button>
-          ))}
-        </FilterTrack>
-        {target ? (
-          <span className="inline-flex h-8 items-center gap-1.5 rounded-full border bg-card pr-1 pl-3 text-sub">
-            只看 {targetLabel(target, tasks, notifications)}
-            <button
-              type="button"
-              onClick={() => setTarget(null)}
-              className="grid size-6 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground"
-              aria-label="不再只看这个对象"
-            >
-              <X className="size-3.5" />
-            </button>
-          </span>
-        ) : null}
-        <div className="relative ml-auto w-full sm:w-64">
-          <Search
-            className="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
-            aria-hidden
-          />
-          <Input
+      <Toolbar
+        start={
+          <>
+            <FilterTabs aria-label="按谁做的" items={FILTERS} value={filter} onChange={setFilter} />
+            {target ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-muted pl-3 text-body max-md:h-10 md:h-8 md:pr-1">
+                <span className="min-w-0 truncate">只看 {targetLabel(target, tasks, notifications)}</span>
+                <button
+                  type="button"
+                  onClick={() => setTarget(null)}
+                  className="grid shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground max-md:size-10 md:size-6"
+                  aria-label="不再只看这个对象"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </span>
+            ) : null}
+          </>
+        }
+        end={
+          <SearchInput
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={setQ}
             placeholder="搜人、动作、对象、理由"
-            className="h-8 pl-8"
             aria-label="搜索操作记录"
           />
-        </div>
-      </div>
+        }
+      />
       {audit.error ? (
         <div className="mb-3">
           <LoadError what="操作记录" error={audit.error} />
         </div>
       ) : null}
-      <Panel bodyClassName="p-0">
+      <Section flush>
         {audit.isLoading ? (
           <div className="p-4">
             <LoadingRows rows={6} />
           </div>
         ) : !audit.data ? (
-          <p className="px-4 py-10 text-center text-sm text-ink-fail">
+          <p className="px-4 py-10 text-center text-body text-ink-fail">
             没读到操作记录，这里空着不代表没人操作过
           </p>
         ) : list.length === 0 ? (
-          <Empty
+          <EmptyState
             icon={ScrollText}
             title="没有符合条件的记录"
             hint={
@@ -303,64 +295,95 @@ export default function Audit() {
             }
           />
         ) : (
-          <ol className="divide-y">
+          <List>
             {list.map((a) => (
-              <li key={a.id} className={cn('flex items-start gap-3 px-4 py-3', !a.ok && 'bg-st-fail/[0.05]')}>
-                <ActorIcon actor={a.actor} me={me} />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm">
-                    <span className="font-medium" title={a.actor.id}>
-                      {actorName(a.actor, me)}
-                    </span>
-                    <ActionText action={a.action} ok={a.ok} />
-                    <button
-                      type="button"
-                      onClick={() => setTarget(a.target)}
-                      className="min-w-0 truncate text-left text-muted-foreground underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10"
-                      title="只看这个对象的记录"
-                    >
-                      {targetLabel(a.target, tasks, notifications)}
-                    </button>
-                    {describeAction(a.action).translated && targetHref(a.target) ? (
-                      <Link
-                        to={targetHref(a.target) ?? '/'}
-                        className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground max-md:inline-flex max-md:min-h-10 max-md:items-center"
-                      >
-                        打开
-                      </Link>
-                    ) : null}
-                    {!a.ok ? (
-                      <Badge variant="outline" className="h-5 border-st-fail/50 text-caption text-ink-fail">
-                        没做成
-                      </Badge>
-                    ) : null}
+              <ListRow
+                key={a.id}
+                rail={a.ok ? undefined : 'fail'}
+                data-audit-row
+                summary={
+                  <div className="flex min-w-0 flex-1 items-start gap-3">
+                    <ActorIcon actor={a.actor} me={me} />
+                    <div className="min-w-0 flex-1">
+                      {/* 手机上摘要分两行：谁做了什么一行（长了截断），对象另起一行占满行宽；桌面照旧一行排开（md:contents）。前后值点「看改了什么」才展开 */}
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-body">
+                        <div
+                          data-audit-who
+                          className="flex min-w-0 items-center gap-x-2 max-md:basis-full md:contents"
+                        >
+                          <span
+                            className="font-medium max-md:max-w-32 max-md:shrink-0 max-md:truncate"
+                            title={a.actor.id}
+                          >
+                            {actorName(a.actor, me)}
+                          </span>
+                          <ActionText
+                            action={a.action}
+                            ok={a.ok}
+                            className="max-md:min-w-0 max-md:truncate"
+                          />
+                        </div>
+                        <div
+                          data-audit-what
+                          className="flex min-w-0 items-center gap-x-2 max-md:basis-full md:contents"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => setTarget(a.target)}
+                            className="min-w-0 truncate text-left text-muted-foreground underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10 max-md:flex-1"
+                            title="只看这个对象的记录"
+                          >
+                            {targetLabel(a.target, tasks, notifications)}
+                          </button>
+                          {describeAction(a.action).translated && targetHref(a.target) ? (
+                            <Link
+                              to={targetHref(a.target) ?? '/'}
+                              className="text-meta text-muted-foreground underline underline-offset-2 hover:text-foreground max-md:inline-flex max-md:min-h-10 max-md:min-w-10 max-md:shrink-0 max-md:items-center max-md:justify-center"
+                            >
+                              打开
+                            </Link>
+                          ) : null}
+                          {!a.ok ? (
+                            <StatusBadge
+                              tone="fail"
+                              variant="outline"
+                              icon={false}
+                              label="没做成"
+                              className="max-md:shrink-0"
+                            />
+                          ) : null}
+                        </div>
+                      </div>
+                      {a.reason ? (
+                        <p className="mt-0.5 text-body text-muted-foreground max-md:truncate">
+                          理由：{a.reason}
+                        </p>
+                      ) : null}
+                      {a.error ? (
+                        <p className="mt-0.5 text-body text-ink-fail max-md:truncate">{a.error}</p>
+                      ) : null}
+                      {a.before !== undefined || a.after !== undefined ? (
+                        <ChangeDetails before={a.before} after={a.after} routeNames={routeNames} />
+                      ) : null}
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      <span className="num text-meta text-muted-foreground" title={formatDateTime(a.at)}>
+                        {formatAgo(a.at, now)}
+                      </span>
+                      <Tag>经{viaLabel[a.via]}</Tag>
+                    </div>
                   </div>
-                  {a.reason ? (
-                    <p className="mt-0.5 text-sub text-muted-foreground">理由：{a.reason}</p>
-                  ) : null}
-                  {a.error ? <p className="mt-0.5 text-sub text-ink-fail">{a.error}</p> : null}
-                  {a.before !== undefined || a.after !== undefined ? (
-                    <ChangeDetails before={a.before} after={a.after} routeNames={routeNames} />
-                  ) : null}
-                </div>
-                <div className="flex shrink-0 flex-col items-end gap-1">
-                  <span className="num text-xs text-muted-foreground" title={formatDateTime(a.at)}>
-                    {formatAgo(a.at, now)}
-                  </span>
-                  <span className="rounded bg-muted px-1.5 text-caption leading-4 text-muted-foreground">
-                    经{viaLabel[a.via]}
-                  </span>
-                </div>
-              </li>
+                }
+              />
             ))}
-          </ol>
+          </List>
         )}
         {list.length > 0 && hasOlder ? (
           <div className="border-t p-2 text-center">
             <OlderRecordsButton pending={audit.isFetchingNextPage} onClick={loadOlder} />
           </div>
         ) : null}
-      </Panel>
+      </Section>
     </Page>
   );
 }

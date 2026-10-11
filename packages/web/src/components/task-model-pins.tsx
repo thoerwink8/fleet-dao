@@ -22,19 +22,21 @@ import {
 import { segmentLabel } from '../lib/segments';
 import { isTaskFinished } from '../lib/status';
 import { cn } from '../lib/utils';
-import { Panel } from './page';
+import { Section } from './layout/section';
+import { StatusBadge } from './layout/status-badge';
+import type { LayoutTone } from './layout/tone';
 import { Button } from './ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 
 const LIVE_WORD: Record<Liveness['verdict'], string> = { live: '派得出', dead: '派不出', unknown: '不确定' };
-const LIVE_INK: Record<Liveness['verdict'], string> = {
-  live: 'text-ink-done',
-  dead: 'text-ink-fail',
-  unknown: 'text-ink-stall',
+const LIVE_TONE: Record<Liveness['verdict'], LayoutTone> = {
+  live: 'done',
+  dead: 'fail',
+  unknown: 'stall',
 };
 
 function LiveTag({ l }: { l: Liveness }) {
-  return <span className={cn('text-caption', LIVE_INK[l.verdict])}>{LIVE_WORD[l.verdict]}</span>;
+  return <StatusBadge tone={LIVE_TONE[l.verdict]} label={LIVE_WORD[l.verdict]} />;
 }
 
 /** 「现在」那一句：指定了谁（谁、什么时候、为什么），或自动。 */
@@ -42,8 +44,8 @@ function Current({ pin, models, now }: { pin: ActivePin | undefined; models: Mod
   if (!pin) {
     return (
       <div>
-        <div className="text-sub font-medium">自动</div>
-        <div className="text-caption text-muted-foreground">按路由两层的顺序选，前面的派不出顺延到下一个</div>
+        <div className="text-body font-medium">自动</div>
+        <div className="text-meta text-muted-foreground">按路由两层的顺序选，前面的派不出顺延到下一个</div>
       </div>
     );
   }
@@ -51,13 +53,13 @@ function Current({ pin, models, now }: { pin: ActivePin | undefined; models: Mod
   const route = pin.routeId ? m?.routes.find((r) => r.routeId === pin.routeId) : undefined;
   return (
     <div>
-      <div className="text-sub font-medium" data-pinned={pin.modelId}>
+      <div className="text-body font-medium" data-pinned={pin.modelId}>
         指定 {m?.name ?? pin.modelId}
         {pin.routeId ? (
           <span className="font-normal text-muted-foreground">，只走 {route?.name ?? pin.routeId}</span>
         ) : null}
       </div>
-      <div className="text-caption text-muted-foreground">
+      <div className="text-meta text-muted-foreground">
         {formatAgo(pin.setAt, now)}定的{pin.reason ? `：${pin.reason}` : ''}
       </div>
     </div>
@@ -136,7 +138,7 @@ function SegmentRow({
       <div className="min-w-0 md:col-span-4">
         <Current pin={pin} models={models} now={now} />
         {last ? (
-          <div className="mt-0.5 text-caption text-muted-foreground" data-last-run>
+          <div className="mt-0.5 text-meta text-muted-foreground" data-last-run>
             {last.running ? '这一轮在跑的' : '上一轮用的'}是 {last.modelName}
             {last.running && pin && pin.modelId !== last.model ? '：不打断，下一轮起换' : ''}
           </div>
@@ -162,7 +164,7 @@ function SegmentRow({
             {pin && !chosen ? (
               <SelectItem value={pin.modelId}>
                 <span className="num">{pin.modelId}</span>
-                <span className="text-caption text-ink-fail">不在这个用途里</span>
+                <span className="text-meta text-ink-fail">不在这个用途里</span>
               </SelectItem>
             ) : null}
           </SelectContent>
@@ -209,7 +211,7 @@ function SegmentRow({
       {canRepin && confirming ? (
         <div
           role="alert"
-          className="flex flex-wrap items-center gap-3 rounded-md bg-st-stall/10 px-3 py-2 text-sub text-ink-stall md:col-span-11 md:col-start-2"
+          className="flex flex-wrap items-center gap-3 rounded-md bg-st-stall-soft px-3 py-2 text-body text-ink-stall md:col-span-11 md:col-start-2"
           data-repin-confirm
         >
           <span className="min-w-0 flex-1">
@@ -228,8 +230,8 @@ function SegmentRow({
         <p
           role="alert"
           className={cn(
-            'rounded-md px-3 py-2 text-sub md:col-span-11 md:col-start-2',
-            health.verdict === 'dead' ? 'bg-st-fail/10 text-ink-fail' : 'bg-st-stall/10 text-ink-stall',
+            'rounded-md px-3 py-2 text-body md:col-span-11 md:col-start-2',
+            health.verdict === 'dead' ? 'bg-st-fail-soft text-ink-fail' : 'bg-st-stall-soft text-ink-stall',
           )}
           data-pin-health={health.verdict}
         >
@@ -258,20 +260,20 @@ export function TaskModelPins({ d, now }: { d: TaskDetail; now: number }) {
       : { segment, models: got.models, problem: undefined };
   });
   return (
-    <Panel
+    <Section
       title="用哪个模型"
       description={
         finished
           ? '这张单已经结束，指定只留作记录。'
           : '给这张单的动手、验收指定模型：下一次选路起照它，在跑的这一轮不打断；动手这一轮想当场换，点「现在就换」。指定的派不出时引擎停下等你，不悄悄换别的。'
       }
-      bodyClassName="px-4 py-1"
+      tight
       className="mt-4"
     >
       <ul className="divide-y">
         <li className="grid gap-x-4 gap-y-1 py-3 md:grid-cols-12 md:items-baseline" data-pin-segment="scope">
           <span className="font-medium text-muted-foreground md:col-span-1">{segmentLabel.scope}</span>
-          <span className="text-sub text-muted-foreground md:col-span-11">
+          <span className="text-body text-muted-foreground md:col-span-11">
             在对话里和你一起做，引擎不起会话、不经选路，没有模型可指定
           </span>
         </li>
@@ -287,10 +289,10 @@ export function TaskModelPins({ d, now }: { d: TaskDetail; now: number }) {
         ))}
       </ul>
       {problems.find((p) => p.problem) ? (
-        <p role="alert" className="mb-3 rounded-md bg-st-fail/10 px-3 py-2 text-sub text-ink-fail">
+        <p role="alert" className="mb-3 rounded-md bg-st-fail-soft px-3 py-2 text-body text-ink-fail">
           {problems.find((p) => p.problem)?.problem}
         </p>
       ) : null}
-    </Panel>
+    </Section>
   );
 }

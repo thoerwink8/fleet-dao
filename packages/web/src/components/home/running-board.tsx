@@ -14,7 +14,7 @@ function BoardSkeleton() {
     <div className="grid h-full place-items-center" aria-busy>
       <div className="flex gap-4">
         {[0, 1, 2].map((i) => (
-          <Skeleton key={i} className="h-40 w-64 rounded-xl" />
+          <Skeleton key={i} className="h-40 w-64 rounded-lg" />
         ))}
       </div>
     </div>

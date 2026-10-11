@@ -217,7 +217,7 @@ describe('派前探测', () => {
     expect(got).toMatchObject({ kind: 'pass', probed: false });
   });
 
-  it('放慢的执行方式上一次探通还没到再探的时候：不探、不改写，按上一次结论派', async () => {
+  it('不分执行方式：mirasim 上一次探通超过 5 分钟，派前照样真探，探通写回', async () => {
     const t = target({
       routeId: 'mirasim-relay:glm-5.3-flash:mirasim',
       hostId: 'mirasim',
@@ -229,14 +229,44 @@ describe('派前探测', () => {
       probers: {
         mirasim: async () => {
           called += 1;
-          return { kind: 'answered', detail: '不该探到' };
+          return { kind: 'answered', detail: '答上了：OK' };
         },
       },
     });
     const got = await probeAssignedRoute(h.deps, createProbeLock(), { routeId: t.routeId, label: t.modelId });
-    expect(called).toBe(0);
-    expect(h.saved).toEqual([]);
-    expect(got).toMatchObject({ kind: 'pass', probed: false, label: 'glm-5.3-flash' });
+    expect(called).toBe(1);
+    expect(h.saved).toEqual([{ routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了') }]);
+    expect(got).toMatchObject({ kind: 'pass', probed: true, label: 'glm-5.3-flash' });
+  });
+
+  it('返工：cursor-auto（cursor-agent）上一次 30 分钟前探通，派前真探，探通写回', async () => {
+    const t = target({
+      routeId: 'cursor:cursor-auto:cursor-agent',
+      hostId: 'cursor-agent',
+      channelId: 'cursor',
+      channelName: 'Cursor 订阅',
+      poolId: 'cursor',
+      modelId: 'cursor-auto',
+      modelName: 'Cursor Auto',
+      upstreamModel: 'auto',
+      previous: { state: 'ok', at: new Date(NOW.getTime() - 30 * 60_000), detail: '答上了：旧的' },
+    });
+    let called = 0;
+    const h = harness([t], {
+      probers: {
+        'cursor-agent': async () => {
+          called += 1;
+          return { kind: 'answered', detail: '答上了：OK' };
+        },
+      },
+    });
+    const got = await probeAssignedRoute(h.deps, createProbeLock(), {
+      routeId: t.routeId,
+      label: 'cursor-auto',
+    });
+    expect(called).toBe(1);
+    expect(h.saved).toEqual([{ routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了') }]);
+    expect(got).toMatchObject({ kind: 'pass', probed: true, label: 'cursor-auto' });
   });
 
   it('组织这会儿定不下来，且没有探通的上一次结论：不当成通，不改写', async () => {
@@ -371,7 +401,7 @@ describe('派前探测', () => {
     expect(h.saved).toEqual([]);
   });
 
-  it('放慢的 grok-4.7 上一次探通还在 2 小时里：派前不探，按上一次结论派（通）', async () => {
+  it('grok-4.7 上一次探通 70 分钟前：派前照样真探（不再按执行方式放慢）', async () => {
     const t = target({
       routeId: 'grok:grok-4.7:grok',
       hostId: 'grok',
@@ -385,7 +415,7 @@ describe('派前探测', () => {
       probers: {
         grok: async () => {
           called += 1;
-          return { kind: 'answered', detail: '不该探到' };
+          return { kind: 'answered', detail: '答上了：OK' };
         },
       },
     });
@@ -393,9 +423,9 @@ describe('派前探测', () => {
       routeId: t.routeId,
       label: 'grok-4.7',
     });
-    expect(called).toBe(0);
-    expect(h.saved).toEqual([]);
-    expect(got).toMatchObject({ kind: 'pass', probed: false, label: 'grok-4.7' });
+    expect(called).toBe(1);
+    expect(h.saved).toEqual([{ routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了') }]);
+    expect(got).toMatchObject({ kind: 'pass', probed: true, label: 'grok-4.7' });
   });
 
   it('【故意造出的失败】探测本身抛错：按不通处理，不写成通', async () => {

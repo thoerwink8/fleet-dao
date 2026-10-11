@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { scanFile } from '../../scripts/lint-arbitrary.ts';
+import { scanFile } from '../../scripts/lint-design.ts';
 
 const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -13,12 +13,12 @@ const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const FILES = [
   'components/home/health-strip.tsx',
   'components/home/decision-card.tsx',
-  // #1805：定时任务的行挪进 job-row / expand-row，类名没变
+  // #1805：定时任务的行挪进 job-row，展开行后来并进 layout/list（#1848），类名没变
   'components/job-row.tsx',
-  'components/expand-row.tsx',
+  'components/layout/list.tsx',
   'routes/routing-status.tsx',
   'routes/changelog.tsx',
-  // #1638：渠道状态那处探针色点（size-2 shrink-0 rounded-2）随「探测记录」挪进这个组件，类名没变，所以也在这里钉
+  // #1638：渠道状态那处探针色点（size-2 shrink-0 rounded-sm；旧档 rounded-2 在收口片 #1855 删除）随「探测记录」挪进这个组件，类名没变，所以也在这里钉
   'components/probe-log.tsx',
 ] as const;
 
@@ -28,32 +28,31 @@ const FILES = [
  */
 const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
   { file: 'components/home/health-strip.tsx', snippet: 'max-w-health-detail' },
-  { file: 'components/home/health-strip.tsx', snippet: 'max-w-health-detail truncate text-caption' },
+  { file: 'components/home/health-strip.tsx', snippet: 'max-w-health-detail truncate text-meta' },
   {
     file: 'components/home/decision-card.tsx',
-    snippet: 'text-caption font-medium uppercase tracking-wide text-ink-human',
+    snippet: '<Tag tone="human">',
   },
   {
     file: 'components/home/decision-card.tsx',
-    snippet: 'num shrink-0 whitespace-nowrap text-caption text-muted-foreground',
+    snippet: 'num shrink-0 whitespace-nowrap text-meta text-muted-foreground',
   },
-  { file: 'components/expand-row.tsx', snippet: 'absolute inset-y-0 left-0 w-rail' },
-  { file: 'components/job-row.tsx', snippet: 'text-caption text-muted-foreground' },
-  { file: 'components/job-row.tsx', snippet: 'num text-caption text-faint' },
-  { file: 'components/job-row.tsx', snippet: 'text-caption text-ink-stall' },
+  { file: 'components/layout/list.tsx', snippet: 'absolute inset-y-0 left-0 w-rail' },
+  { file: 'components/job-row.tsx', snippet: 'text-meta text-muted-foreground' },
+  { file: 'components/job-row.tsx', snippet: 'num text-meta text-muted-foreground' },
+  { file: 'components/job-row.tsx', snippet: 'text-meta text-ink-stall' },
   { file: 'routes/routing-status.tsx', snippet: 'lg:max-h-routing-pane' },
-  { file: 'routes/routing-status.tsx', snippet: 'text-caption font-medium leading-5 text-ink-run' },
-  { file: 'components/probe-log.tsx', snippet: 'size-2 shrink-0 rounded-2' },
-  { file: 'routes/changelog.tsx', snippet: 'flex flex-wrap items-baseline' },
+  { file: 'routes/routing-status.tsx', snippet: 'lg:grid-cols-routing' },
+  { file: 'components/probe-log.tsx', snippet: 'size-2 shrink-0 rounded-sm' },
+  // #1851：提交行迁到 ListRow，标题列和时间列仍在同一行内可换行、基线对齐
+  { file: 'routes/changelog.tsx', snippet: 'flex-wrap items-baseline' },
 ];
 
-/** 这 12 处用到的档位。why 必须出现在定义行往上 8 行里的注释中。 */
+/** 这 12 处用到的档位（健康条等的辅助字原来是 text-caption 11px，收口片 #1855 删了旧字号名，改用 text-meta，见 SPOTS）。why 必须出现在定义行往上 8 行里的注释中。 */
 const TIERS: { name: string; why: string }[] = [
-  { name: '--text-caption:', why: 'caption（辅助信息、时间戳）' },
   { name: '--container-health-detail:', why: '320px' },
   { name: '--width-rail:', why: '3px' },
   { name: '--max-height-routing-pane:', why: '16rem' },
-  { name: '--radius-2:', why: '2px' },
 ];
 
 /** 这 12 处换掉之前的写死类名。五个文件里不能再出现。 */
@@ -73,7 +72,9 @@ function source(rel: string): string {
 
 describe('#1445 五文件的尺寸 token', () => {
   test('五个文件 0 处任意尺寸值', () => {
-    const hits = FILES.flatMap((rel) => scanFile(join(srcDir, rel), rel));
+    const hits = FILES.flatMap((rel) => scanFile(join(srcDir, rel), `src/${rel}`)).filter(
+      (h) => h.rule === 'R0',
+    );
     expect(hits).toEqual([]);
   });
 

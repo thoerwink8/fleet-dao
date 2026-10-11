@@ -137,14 +137,11 @@ export const LIMITS = {
   taskQuiet: 60,
 };
 
-/** 路由探针：平时每 15 分钟一轮，结论 45 分钟没更新算过期；贵的执行方式探通后隔 120 分钟再探（shared 的 web-api.ts）。 */
+/** 路由探针：钟每 15 分钟走一次，结论 45 分钟没更新算过期，不分执行方式（真探间隔按活跃三档，#1798 片 3；shared 的 web-api/routing.ts）。 */
 export const PROBE_EVERY = 15;
 export const PROBE_STALE = 45;
-/** @type {Record<string, number>} */
-export const SLOW_PROBE_EVERY = { 'cursor-agent': 120, grok: 120, mirasim: 120 };
-/** @param {string} host */
-export const probeStaleMinutes = (host) =>
-  (SLOW_PROBE_EVERY[host] ?? PROBE_EVERY) + PROBE_STALE - PROBE_EVERY;
+/** @param {string} _host 留着给旧调用方，已不再按执行方式放宽。 */
+export const probeStaleMinutes = (_host) => PROBE_STALE;
 
 // —— 给人看的名字（跟 engine 的 routing/names.ts、feishu 的 words.ts 走） ——
 

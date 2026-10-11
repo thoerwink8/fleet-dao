@@ -23,7 +23,7 @@ import { useNavRoom, usePhone } from '../lib/viewport';
 function Screen({ children }: { children: ReactNode }) {
   return (
     <div className="grid h-dvh place-items-center bg-background p-6">
-      <div className="flex max-w-sm flex-col items-center gap-3 text-center text-sm text-muted-foreground">
+      <div className="flex max-w-sm flex-col items-center gap-3 text-center text-body text-muted-foreground">
         <LogoMark className="size-10" />
         {children}
       </div>

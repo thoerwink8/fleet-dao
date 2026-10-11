@@ -36,7 +36,7 @@ afterEach(cleanup);
 /** 写码用途下此刻画着的模型先后（显示名）。 */
 const modelNames = () =>
   Array.from(document.querySelectorAll('li[data-model]')).map(
-    (el) => el.querySelector('.text-sm.font-semibold')?.textContent,
+    (el) => el.querySelector('[data-row-name]')?.textContent,
   );
 
 const modelRow = (modelId: string) => {
@@ -435,7 +435,7 @@ describe('路由页：调先后和开关', () => {
   test('【故意造出的失败】选了远程环境（?node=）：整块置灰、写「去那台上操作」，拖动、置顶置底和开关都点不了', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute&node=wsl' });
     await opened();
-    expect(screen.getByRole('note').textContent).toContain('去那台上操作');
+    expect(screen.getByText(/去那台上操作/).textContent).toContain('去那台上操作');
     await waitFor(() =>
       expect(screen.getAllByRole('button', { name: /^暂停账号池 / }).length).toBeGreaterThan(0),
     );

@@ -152,9 +152,9 @@ describe('【失败】读不到的都写明，不写 0', () => {
     expect(within(segmentRow(box, 'unknown')).getAllByText('段名认不出').length).toBeGreaterThan(0);
     const runs = await panel('每一笔');
     expect(within(runRow(runs, 'x-2')).getByText(/段名「fusion-execute」认不出/)).toBeTruthy();
-    // 段标签的字号和提醒色在同一个 cn() 里，两个都得留下（cn 认得自定义字号档位，#734）
+    // 段标签用提醒色：断言 Tag 的 data-tone，不断言类名
     const tag = within(runRow(runs, 'x-2')).getByText('段名认不出');
-    expect(tag.className.split(' ')).toEqual(expect.arrayContaining(['text-caption', 'text-ink-stall']));
+    expect(tag.getAttribute('data-tone')).toBe('stall');
   });
 
   test('起止缺一头（单子结束了这一段还开着）：耗时写「没读到」，原因写在那一笔下面', async () => {
@@ -199,7 +199,7 @@ describe('【失败】读不到的都写明，不写 0', () => {
     const unread = document.querySelector('[data-stats-unread]');
     expect(unread?.textContent).toMatch(/输入当量没读到/);
     expect(unread?.textContent).toMatch(/花费/);
-    expect(document.querySelector('[data-segment-stats] .text-stat')?.textContent).not.toBe('没读到');
+    expect(document.querySelector('[data-segment-stats] .text-display')?.textContent).not.toBe('没读到');
   });
 
   test('动手段没记派工档：写「没记」，不猜成哪一档；没跑过的段写明没有记录', async () => {

@@ -7,7 +7,14 @@ import { Link } from 'react-router';
 import { brand } from '#brand';
 import { useFranceReleasedCommits } from '../api/client';
 import type { ReleasedCommits } from '../api/types';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { EmptyState } from '../components/layout/empty-state';
+import { List, ListRow } from '../components/layout/list';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Notice } from '../components/layout/notice';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
+import { StatusBadge } from '../components/layout/status-badge';
+import { Tag } from '../components/layout/tag';
 import { RefreshBar } from '../components/refresh-bar';
 import { formatAgo, formatDateTime, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -26,7 +33,7 @@ type Commits = Extract<ReleasedCommits, { state: 'ok' }>['commits'];
 /** 一行没查成：黄字写原因。 */
 function Unread({ why }: { why: string }) {
   return (
-    <p className="text-xs text-ink-stall" data-unreadable>
+    <p className="text-meta text-ink-stall" data-unreadable>
       没查成：{why}
     </p>
   );
@@ -35,7 +42,7 @@ function Unread({ why }: { why: string }) {
 function CommitList({ commits, now }: { commits: Commits; now: number }) {
   if (commits.length === 0) {
     return (
-      <Empty
+      <EmptyState
         icon={GitCommitHorizontal}
         title="法国的发布历史里还没有发布记录"
         hint="发过一次之后，这里按时间列出每次切上去的主线提交。"
@@ -43,33 +50,35 @@ function CommitList({ commits, now }: { commits: Commits; now: number }) {
     );
   }
   return (
-    <ul className="divide-y" data-released-commits>
+    <List data-released-commits>
       {commits.map((c) => (
-        <li
+        <ListRow
           key={`${c.at}-${c.sha}-${c.event}`}
           // 窄屏：提交号和标题一行，徽标和时间换到第二行；宽屏三样排一行。标题列 min-w-0 flex-1，不被时间和徽标挤塌。
-          className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2.5 text-sm"
-        >
-          <span className="num shrink-0 rounded bg-muted px-1.5 py-0.5 text-center text-xs">{c.short}</span>
-          <div className="min-w-0 flex-1">
-            {c.title !== null ? (
-              <p className="break-words">{c.title}</p>
-            ) : (
-              <Unread why={c.titleWhy ?? '标题没读到'} />
-            )}
-          </div>
-          <div className="num w-full text-xs whitespace-nowrap text-muted-foreground sm:w-auto sm:text-right">
-            {c.event !== 'release' ? (
-              <span className="mr-2 rounded-full border border-st-stall/40 px-1.5 py-0.5 text-ink-stall">
-                {EVENT_TEXT[c.event]}
-              </span>
-            ) : null}
-            发于 {formatAgo(c.at, now)}
-            <span className="ml-2 text-caption text-faint sm:ml-0 sm:block">{formatDateTime(c.at)}</span>
-          </div>
-        </li>
+          summary={
+            <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3 gap-y-1" data-commit-row>
+              <Tag mono className="num">
+                {c.short}
+              </Tag>
+              <div className="min-w-0 flex-1">
+                {c.title !== null ? (
+                  <p className="break-words text-body">{c.title}</p>
+                ) : (
+                  <Unread why={c.titleWhy ?? '标题没读到'} />
+                )}
+              </div>
+              <div className="num flex w-full flex-wrap items-center gap-x-2 text-meta whitespace-nowrap text-muted-foreground sm:w-auto sm:justify-end sm:text-right">
+                {c.event !== 'release' ? (
+                  <StatusBadge tone="stall" variant="outline" icon={false} label={EVENT_TEXT[c.event]} />
+                ) : null}
+                <span>发于 {formatAgo(c.at, now)}</span>
+                <span className="sm:basis-full">{formatDateTime(c.at)}</span>
+              </div>
+            </div>
+          }
+        />
       ))}
-    </ul>
+    </List>
   );
 }
 
@@ -77,18 +86,21 @@ function ReleasedCommitsPanel({ query }: { query: ReturnType<typeof useFranceRel
   const now = useNow();
   const data = query.data;
   return (
-    <Panel
+    <Section
       title="已发布的提交"
       description={
         <>
           法国发过的主线提交，新的在前，读自法国的发布历史。要发新的，到
-          <Link to="/france" className="mx-0.5 underline underline-offset-2">
+          <Link
+            to="/france"
+            className="mx-0.5 underline underline-offset-2 max-md:inline-flex max-md:min-h-10 max-md:min-w-10 max-md:items-center max-md:justify-center"
+          >
             法国
           </Link>
           页「在用版本」那一行点「发布到法国」。
         </>
       }
-      bodyClassName="p-0"
+      flush
     >
       {query.error ? (
         <div className="p-4">
@@ -99,13 +111,15 @@ function ReleasedCommitsPanel({ query }: { query: ReturnType<typeof useFranceRel
           <LoadingRows rows={3} />
         </div>
       ) : data.state === 'unreadable' ? (
-        <div className="p-4" role="alert">
-          <Unread why={data.why} />
+        <div className="p-4">
+          <Notice tone="stall">
+            <Unread why={data.why} />
+          </Notice>
         </div>
       ) : (
         <CommitList commits={data.commits} now={now} />
       )}
-    </Panel>
+    </Section>
   );
 }
 

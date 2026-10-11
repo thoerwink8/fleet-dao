@@ -20,7 +20,7 @@ test('点刷新按钮调用该页主查询的 refetch', async () => {
   expect(before).toBeGreaterThan(0);
   fireEvent.click(button);
   await waitFor(() => expect(read.mock.calls.length).toBe(before + 1));
-  expect(read.mock.calls.at(-1)?.[0]).toMatchObject({ cursor: undefined, limit: 100 });
+  expect(read.mock.calls.at(-1)?.[0]).toMatchObject({ cursor: undefined, limit: 50 });
 });
 
 test('【故意造出的失败】操作记录没读成仍显示 LoadError', async () => {

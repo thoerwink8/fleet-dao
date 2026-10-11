@@ -577,11 +577,14 @@ export function useNotifications(status: 'open' | 'all' = 'open', limit: number 
 }
 
 /** 操作记录按新到旧分页。target 是后端的对象编号，例如 stage:execute。 */
+/** 操作记录一页读几条，「再看 50 条」每点一次再读一页（#1837：一次铺全部，手机端近两万像素）。 */
+export const AUDIT_PAGE_SIZE = 50;
+
 export function useAudit(target?: string) {
   const api = useApi();
   return useInfiniteQuery({
     queryKey: keys.audit(target ?? ''),
-    queryFn: ({ pageParam }) => api.audit({ target, cursor: pageParam, limit: 100 }),
+    queryFn: ({ pageParam }) => api.audit({ target, cursor: pageParam, limit: AUDIT_PAGE_SIZE }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.nextCursor,
   });

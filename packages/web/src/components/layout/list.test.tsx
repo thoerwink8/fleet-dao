@@ -1,0 +1,91 @@
+// @vitest-environment happy-dom
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import { List, ListRow } from './list';
+import { LAYOUT_TONES } from './tone';
+
+afterEach(cleanup);
+
+describe('ListRow', () => {
+  test('主行文字、小字、行首、行尾都渲染', () => {
+    render(
+      <List>
+        <ListRow leading={<i>头</i>} title="标题" meta="小字" trailing={<b>尾</b>} />
+      </List>,
+    );
+    for (const t of ['头', '标题', '小字', '尾']) expect(screen.getByText(t)).toBeTruthy();
+  });
+
+  test('expandable：默认收起，点一下展开（aria-expanded），再点收起', () => {
+    render(
+      <List>
+        <ListRow title="可展开" expandable details={<p>明细</p>} />
+      </List>,
+    );
+    const btn = screen.getByRole('button', { name: /可展开/ });
+    expect(btn.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText('明细')).toBeNull();
+    fireEvent.click(btn);
+    expect(btn.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByText('明细')).toBeTruthy();
+    fireEvent.click(btn);
+    expect(screen.queryByText('明细')).toBeNull();
+  });
+
+  test('defaultOpen 一开始就展开；明细也可以写在标签里面', () => {
+    render(
+      <List>
+        <ListRow title="展开的" expandable defaultOpen>
+          <p>里面的明细</p>
+        </ListRow>
+      </List>,
+    );
+    expect(screen.getByText('里面的明细')).toBeTruthy();
+  });
+
+  test('summary 自己排整行，不再用 title', () => {
+    render(
+      <List>
+        <ListRow summary={<span>自己排的</span>} title="不该出现" />
+      </List>,
+    );
+    expect(screen.getByText('自己排的')).toBeTruthy();
+    expect(screen.queryByText('不该出现')).toBeNull();
+  });
+
+  test('onClick：整行是按钮；href：整行是链接；selected 标 data-selected', () => {
+    const onClick = vi.fn();
+    render(
+      <MemoryRouter>
+        <List>
+          <ListRow title="按钮行" onClick={onClick} selected />
+          <ListRow title="链接行" href="/tasks" />
+        </List>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '按钮行' }));
+    expect(onClick).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('link', { name: '链接行' }).getAttribute('href')).toBe('/tasks');
+    expect(document.querySelector('[data-selected]')).not.toBeNull();
+  });
+
+  test.each(LAYOUT_TONES)('rail=%s 画左边竖线', (tone) => {
+    render(
+      <List>
+        <ListRow title="问题行" rail={tone} />
+      </List>,
+    );
+    expect(document.querySelector('[data-row-rail]')).not.toBeNull();
+    cleanup();
+  });
+
+  test('没有 rail 就没有竖线', () => {
+    render(
+      <List>
+        <ListRow title="正常行" />
+      </List>,
+    );
+    expect(document.querySelector('[data-row-rail]')).toBeNull();
+  });
+});

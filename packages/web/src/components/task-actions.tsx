@@ -207,7 +207,7 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
               <AlertDialogFooter>
                 <AlertDialogCancel>先不</AlertDialogCancel>
                 <AlertDialogAction
-                  className="bg-destructive text-white hover:bg-destructive/90"
+                  variant="destructive"
                   onClick={() => void send(dialog.target, { action: 'stop' }, '叫停')}
                 >
                   叫停

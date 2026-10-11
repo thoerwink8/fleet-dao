@@ -49,8 +49,8 @@ import { formatDuration } from '../../../lib/format';
 import { useLocalState, useMediaQuery, useNow } from '../../../lib/hooks';
 import { type Tone, toneLabel } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
+import { StatusDot } from '../../layout/status-badge';
 import { useRemoteView } from '../../node-notice';
-import { StatusDot } from '../../status';
 import { shortcutAction, useTaskActions } from '../../task-actions';
 import { useTheme } from '../../theme-provider';
 import { Button } from '../../ui/button';
@@ -643,7 +643,7 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
           aria-label="在跑的单的看板：方向键在卡片间移动，Enter 看详情，? 看全部快捷键"
           onKeyDown={onKeyDown}
           onPointerDown={() => wrapper.current?.focus({ preventScroll: true })}
-          className="relative h-full w-full outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          className="relative h-full w-full outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <ReactFlow
             nodes={nodes}
@@ -705,7 +705,7 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
             }}
           />
           {!positions && !layoutError ? (
-            <div className="pointer-events-none absolute inset-0 grid place-items-center text-sm text-muted-foreground">
+            <div className="pointer-events-none absolute inset-0 grid place-items-center text-body text-muted-foreground">
               正在排版…
             </div>
           ) : null}
@@ -721,8 +721,8 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
           ) : null}
           {graph.shown === 0 && graph.total > 0 && positions ? (
             <div className="pointer-events-none absolute inset-0 grid place-items-center">
-              <div className="pointer-events-auto rounded-xl border bg-popover px-5 py-4 text-center shadow-lg">
-                <div className="text-sm font-medium">{emptyFilterCopy(stuck, needsYou)}</div>
+              <div className="pointer-events-auto rounded-lg border bg-popover px-5 py-4 text-center shadow-overlay">
+                <div className="text-body font-medium">{emptyFilterCopy(stuck, needsYou)}</div>
                 <Button size="sm" variant="link" onClick={clearFilters}>
                   清掉过滤条件
                 </Button>
@@ -761,7 +761,7 @@ function LayoutFailed({ error, blank, onRetry }: { error: Error; blank: boolean;
     >
       <div
         role="alert"
-        className="pointer-events-auto flex max-w-xl items-center gap-2 rounded-lg border border-st-fail/40 bg-popover px-3 py-2 text-xs shadow-lg"
+        className="pointer-events-auto flex max-w-xl items-center gap-2 rounded-lg border border-st-fail-line bg-popover px-3 py-2 text-meta shadow-overlay"
       >
         <TriangleAlert className="size-3.5 shrink-0 text-ink-fail" aria-hidden />
         <span className="min-w-0">
@@ -770,7 +770,7 @@ function LayoutFailed({ error, blank, onRetry }: { error: Error; blank: boolean;
             ：{error.message}。{blank ? '画布先空着，' : '下面是上一次排好的画面，'}可以重试。
           </span>
         </span>
-        <Button size="sm" variant="outline" className="h-6 shrink-0 px-2 text-xs" onClick={onRetry}>
+        <Button size="sm" variant="outline" className="h-6 shrink-0 px-2 text-meta" onClick={onRetry}>
           重试
         </Button>
       </div>
@@ -809,8 +809,8 @@ function ToolButton({
           disabled={disabled}
           onClick={onClick}
           className={cn(
-            'h-8 gap-1.5 px-2.5 text-sub',
-            active && 'bg-foreground text-background hover:bg-foreground/90 hover:text-background',
+            'h-8 gap-1.5 px-2.5 text-body',
+            active && 'bg-foreground text-background hover:bg-foreground hover:text-background',
           )}
         >
           {children}
@@ -871,7 +871,7 @@ function Toolbar({
       // 右端让出主页右上角的抽屉按钮（外层给 --board-toolbar-end；没给就是 0.75rem，和左边一样）
       style={{ right: 'var(--board-toolbar-end, 0.75rem)' }}
     >
-      <div className="pointer-events-auto flex items-center gap-0.5 rounded-xl border bg-popover/90 p-1 shadow-sm backdrop-blur">
+      <div className="pointer-events-auto flex items-center gap-0.5 rounded-lg border bg-popover p-1 shadow-overlay">
         <ToolButton
           label="只看卡住的"
           tip="出问题了（不含等你）"
@@ -905,7 +905,7 @@ function Toolbar({
         </ToolButton>
       </div>
 
-      <div className="pointer-events-auto flex items-center gap-0.5 rounded-xl border bg-popover/90 p-1 shadow-sm backdrop-blur">
+      <div className="pointer-events-auto flex items-center gap-0.5 rounded-lg border bg-popover p-1 shadow-overlay">
         {levels.map((l) => (
           <ToolButton
             key={l.id}
@@ -929,8 +929,8 @@ function Toolbar({
         </ToolButton>
       </div>
 
-      <div className="pointer-events-auto ml-auto flex items-center gap-0.5 rounded-xl border bg-popover/90 p-1 shadow-sm backdrop-blur">
-        <span className="px-2 text-xs text-muted-foreground">
+      <div className="pointer-events-auto ml-auto flex items-center gap-0.5 rounded-lg border bg-popover p-1 shadow-overlay">
+        <span className="px-2 text-meta text-muted-foreground">
           <span className="num text-foreground">{shown}</span>
           {shown !== total ? (
             <>
@@ -972,13 +972,13 @@ function Legend() {
         <TooltipContent>颜色图例</TooltipContent>
       </Tooltip>
       <PopoverContent align="end" className="w-80">
-        <div className="mb-2 text-xs text-muted-foreground">看板上颜色只表达状态：</div>
+        <div className="mb-2 text-meta text-muted-foreground">看板上颜色只表达状态：</div>
         <ul className="space-y-1.5">
           {LEGEND.map((t) => (
-            <li key={t.tone} className="flex items-center gap-2 text-sub">
+            <li key={t.tone} className="flex items-center gap-2 text-body">
               <StatusDot tone={t.tone} />
               <span className="w-12 font-medium">{t.label}</span>
-              <span className="text-xs text-muted-foreground">{t.meaning}</span>
+              <span className="text-meta text-muted-foreground">{t.meaning}</span>
             </li>
           ))}
         </ul>
@@ -1021,12 +1021,12 @@ function NowPanel({
   return (
     <div
       data-board-now
-      className="pointer-events-auto absolute bottom-3 left-3 z-10 w-lg max-w-full overflow-hidden rounded-xl border bg-popover/92 shadow-lg backdrop-blur"
+      className="pointer-events-auto absolute bottom-3 left-3 z-10 w-lg max-w-full overflow-hidden rounded-lg border bg-popover shadow-overlay"
     >
       <button
         type="button"
         onClick={() => setStored(!open)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sub font-medium"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-body font-medium"
         aria-expanded={open}
       >
         <StatusDot tone={working ? 'run' : 'wait'} />
@@ -1046,7 +1046,7 @@ function NowPanel({
       </button>
       {open && rows.length ? (
         <div className="max-h-56 overflow-y-auto border-t">
-          <table className="w-full table-fixed text-xs">
+          <table className="w-full table-fixed text-meta">
             <colgroup>
               <col className="w-24" />
               <col className="w-14" />
@@ -1056,7 +1056,7 @@ function NowPanel({
               <col className="w-36" />
             </colgroup>
             <thead className="sticky top-0 bg-popover">
-              <tr className="text-left text-caption text-muted-foreground">
+              <tr className="text-left text-meta text-muted-foreground">
                 <th scope="col" className="w-24 px-3 py-1 font-normal whitespace-nowrap">
                   谁在做
                 </th>
@@ -1152,7 +1152,7 @@ function ShortcutsDialog({ open, onOpenChange }: { open: boolean; onOpenChange(o
         </DialogHeader>
         <ul className="divide-y">
           {SHORTCUTS.map((s) => (
-            <li key={s.what} className="flex items-center gap-3 py-2 text-sm">
+            <li key={s.what} className="flex items-center gap-3 py-2 text-body">
               <span className="flex w-36 shrink-0 flex-wrap gap-1">
                 {s.keys.map((k) => (
                   <Kbd key={k}>{k}</Kbd>

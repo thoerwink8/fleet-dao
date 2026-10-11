@@ -27,7 +27,8 @@ import { formatAgo, formatDateTime } from '../lib/format';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
-import { StatusDot } from './status';
+import { Section } from './layout/section';
+import { StatusDot } from './layout/status-badge';
 
 const TONE_CLASS: Record<Tone, string> = {
   done: 'text-ink-done',
@@ -48,7 +49,7 @@ type Head = { label: string; hint: string; icon: LucideIcon };
 
 function FactHead({ label, hint, icon: Icon }: Head) {
   return (
-    <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+    <span className="flex min-w-0 items-center gap-1.5 text-meta text-muted-foreground">
       <Icon className="size-3.5 shrink-0 opacity-70" aria-hidden />
       <span className="shrink-0">{label}</span>
       <span className="min-w-0 truncate opacity-80">· {hint}</span>
@@ -56,17 +57,46 @@ function FactHead({ label, hint, icon: Icon }: Head) {
   );
 }
 
-function shell(kind: FactKind, state: 'ok' | 'unread', look: FactLook, extra?: string) {
-  return {
-    [`data-${kind}-fact`]: state,
-    className: cn(
-      'min-w-0',
-      look === 'tile' ? 'rounded-xl border bg-card px-4 py-3' : 'border-t px-4 py-3',
-      look === 'tile' && state === 'ok' && 'shadow-card-edge',
-      look === 'tile' && state === 'unread' && 'border-dashed',
-      extra,
-    ),
-  };
+/**
+ * 一格的外框：tile 是独立的区块（Section，没查成的虚线边），row 是一列里的一行（上边线分隔）。
+ * 测试按 data-env-fact / data-france-fact 找格子。
+ */
+function FactShell({
+  kind,
+  state,
+  look,
+  flush,
+  extra,
+  children,
+  ...rest
+}: {
+  kind: FactKind;
+  state: 'ok' | 'unread';
+  look: FactLook;
+  /** tile：外框不留内边距，里面自己排（手机上折成一行的那种）。 */
+  flush?: boolean;
+  extra?: string;
+  children: ReactNode;
+  'data-fact-folded'?: 'open' | 'closed';
+}) {
+  const attr = { [`data-${kind}-fact`]: state };
+  if (look === 'tile') {
+    return (
+      <Section
+        {...attr}
+        {...rest}
+        {...(flush ? { flush: true } : {})}
+        className={cn(state === 'unread' && 'border-dashed', extra)}
+      >
+        {children}
+      </Section>
+    );
+  }
+  return (
+    <div {...attr} {...rest} className={cn('min-w-0 border-t px-4 py-3', extra)}>
+      {children}
+    </div>
+  );
 }
 
 /**
@@ -91,14 +121,13 @@ function FoldedFact({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
-  const frame = shell(kind, state, 'tile', 'px-0 py-0');
   return (
-    <div {...frame} data-fact-folded={open ? 'open' : 'closed'}>
+    <FactShell kind={kind} state={state} look="tile" flush data-fact-folded={open ? 'open' : 'closed'}>
       <button
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="flex min-h-10 w-full items-center gap-2 px-3 py-2 text-left text-sm"
+        className="flex min-h-10 w-full items-center gap-2 px-3 py-2 text-left text-body"
       >
         <Icon className="size-3.5 shrink-0 text-muted-foreground opacity-70" aria-hidden />
         <span className="shrink-0 text-muted-foreground">{label}</span>
@@ -112,7 +141,7 @@ function FoldedFact({
         />
       </button>
       {open ? <div className="border-t px-4 py-3">{children}</div> : null}
-    </div>
+    </FactShell>
   );
 }
 
@@ -149,11 +178,11 @@ function NotRead({
     );
   }
   return (
-    <div {...shell(kind, 'unread', look, 'text-muted-foreground')}>
+    <FactShell kind={kind} state="unread" look={look} extra="text-muted-foreground">
       <NotReadInner look={look} reason={reason} muted={muted} head={head}>
         {children}
       </NotReadInner>
-    </div>
+    </FactShell>
   );
 }
 /** 没查成那一格的内容（不含外框）：头、「没查成」、原因。 */
@@ -181,14 +210,16 @@ function NotReadInner({
           />
           <span
             className={cn(
-              'leading-tight tracking-tight',
-              muted ? 'text-sm font-normal text-muted-foreground' : 'text-title font-semibold text-ink-stall',
+              'leading-tight',
+              muted
+                ? 'text-body font-normal text-muted-foreground'
+                : 'text-title font-semibold text-ink-stall',
             )}
           >
             没查成
           </span>
         </div>
-        <p className={cn('text-xs', look === 'tile' && 'mt-1')}>{reason}</p>
+        <p className={cn('text-meta', look === 'tile' && 'mt-1')}>{reason}</p>
       </div>
       {children}
     </>
@@ -219,18 +250,20 @@ function ReadInner({
       {/* 一列一行（环境页）时值和白话并在一行，行矮一半；独立卡片（法国页）时上下两行 */}
       <div className={look === 'row' ? 'mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5' : 'mt-1.5'}>
         <div
+          data-fact-value
+          data-tone={muted ? undefined : tone}
           className={cn(
-            'num leading-tight tracking-tight',
+            'num leading-tight',
             look === 'tile' && 'truncate',
             muted
-              ? 'text-sm font-normal text-muted-foreground'
+              ? 'text-body font-normal text-muted-foreground'
               : cn('text-title font-semibold', tone ? TONE_CLASS[tone] : undefined),
           )}
         >
           {value}
         </div>
         {sub ? (
-          <div className={cn('text-xs text-muted-foreground', look === 'tile' && 'mt-1')}>{sub}</div>
+          <div className={cn('text-meta text-muted-foreground', look === 'tile' && 'mt-1')}>{sub}</div>
         ) : null}
       </div>
       {children}
@@ -282,7 +315,11 @@ function Read({
       </FoldedFact>
     );
   }
-  return <div {...shell(kind, 'ok', look)}>{inner}</div>;
+  return (
+    <FactShell kind={kind} state="ok" look={look}>
+      {inner}
+    </FactShell>
+  );
 }
 
 /** 引擎：on / off（按配置没开）/ down（真没连上）/ unknown（没查成）四态各说各的。 */
@@ -423,10 +460,10 @@ export function factCells({
         tone={versionTone(v)}
       >
         {v.behind !== null && v.behind > 0 && !v.detail?.includes('落后主线') ? (
-          <p className="mt-1 text-xs text-ink-stall">落后主线 {v.behind} 个提交</p>
+          <p className="mt-1 text-meta text-ink-stall">落后主线 {v.behind} 个提交</p>
         ) : null}
         {v.problems.length ? (
-          <ul className="mt-1 space-y-0.5 text-xs text-ink-stall">
+          <ul className="mt-1 space-y-0.5 text-meta text-ink-stall">
             {v.problems.map((p) => (
               <li key={p} className="flex gap-1.5">
                 <CircleChevronDown className="mt-0.5 size-3 shrink-0" aria-hidden />
@@ -474,7 +511,7 @@ export function factCells({
         }
       >
         {v.lastSuccessAt ? (
-          <div className="num mt-0.5 text-caption text-faint">
+          <div className="num mt-0.5 text-meta text-muted-foreground">
             最近一次跑成：{formatDateTime(v.lastSuccessAt)}
           </div>
         ) : null}

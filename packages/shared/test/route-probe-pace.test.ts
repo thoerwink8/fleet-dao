@@ -5,7 +5,6 @@ import {
   isOnDemandDetail,
   onDemandDetail,
   probeCadenceMinutes,
-  ROUTE_PROBE_PRIMARY_NOTE,
 } from '../src/route-probe-pace.ts';
 
 describe('疑似换成旧模型 / 疑似降智的原文（#1748、#1798）', () => {
@@ -66,11 +65,10 @@ describe('按需探测的原文', () => {
   });
 });
 
-describe('前 2 位隔 30 分钟的间隔', () => {
-  it('结论写了前 2 位隔 30 分钟：按 30；本来更久的执行方式取更长的', () => {
-    const detail = `答上了：OK。${ROUTE_PROBE_PRIMARY_NOTE}`;
-    expect(probeCadenceMinutes('claude-code', detail)).toBe(30);
-    expect(probeCadenceMinutes('cursor-agent', detail)).toBe(120);
+describe('再探间隔（三档成功间隔由引擎写列，这里只认退避）', () => {
+  it('通了的按钟一轮；写了连着不通次数的按退避档', () => {
     expect(probeCadenceMinutes('claude-code', '答上了：OK')).toBe(15);
+    expect(probeCadenceMinutes('cursor-agent', '答上了：OK')).toBe(15);
+    expect(probeCadenceMinutes('claude-code', '没通（连着不通 3 次）')).toBe(60);
   });
 });

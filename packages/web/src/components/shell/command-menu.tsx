@@ -53,7 +53,7 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
               >
                 <Icon />
                 {item.label}
-                <span className="truncate text-xs text-muted-foreground">{item.hint}</span>
+                <span className="truncate text-meta text-muted-foreground">{item.hint}</span>
               </CommandItem>
             );
           })}
@@ -94,7 +94,7 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
             >
               <Palette />
               主题色：{p.name}
-              <span className="num text-xs text-muted-foreground">{p.en}</span>
+              <span className="num text-meta text-muted-foreground">{p.en}</span>
             </CommandItem>
           ))}
         </CommandGroup>

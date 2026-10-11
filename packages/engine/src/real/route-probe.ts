@@ -30,6 +30,7 @@ import {
   saveRouteProbe,
   sessionOrgFacts,
   startScheduleRun,
+  updateRouteProbePace,
   upsertAlert,
 } from '@fleet-dao/db';
 import { type HostId, type OrgKind, probeBackoffNotice } from '@fleet-dao/shared';
@@ -49,6 +50,7 @@ import {
 import { loadHeldPools } from './pool-holds.ts';
 import {
   expectedNewAnswers,
+  expectedOldAnswers,
   type IdentityQuestion,
   matchIdentityAnswer,
   parseProbeReply,
@@ -164,6 +166,7 @@ export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeConte
               check: {
                 question: q.text,
                 expected: expectedNewAnswers(q),
+                oldAnswer: expectedOldAnswers(q),
                 answer: reply.answer,
                 passed: null,
                 selfIdentity: reply.identity,
@@ -188,6 +191,7 @@ export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeConte
     const check = {
       question: q.text,
       expected: expectedNewAnswers(q),
+      oldAnswer: expectedOldAnswers(q),
       answer: reply.answer,
       passed: match === 'new' ? true : match === 'old' ? false : null,
       selfIdentity: reply.identity,
@@ -580,6 +584,7 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
     sessionOrg: () => w.sessionOrg({ by: '路由探针' }),
     ...(w.orgSwitch ? { orgSwitch: w.orgSwitch } : {}),
     save: (x) => saveRouteProbe(w.db, x),
+    savePace: (x) => updateRouteProbePace(w.db, x),
     afterProbe: (t, a) => afterProbeAlerts(w.db, t, a),
     runs: {
       start: (job, at) => startScheduleRun(w.db, job, at),

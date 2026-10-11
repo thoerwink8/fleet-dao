@@ -7,14 +7,20 @@
 // - 先后、开关的写走 components/routing-edit.tsx（保存契约不变：带看到的旧顺序，别人先改了回 409）。
 
 import { routingPurposeOf, SCOPE_NO_ROUTE } from '@fleet-dao/shared';
-import { Route as RouteIcon, TriangleAlert } from 'lucide-react';
+import { Route as RouteIcon } from 'lucide-react';
 import { type KeyboardEvent, useState } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { usePoolHolds, useRoutingLayers } from '../api/client';
 import type { RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
-import { RefreshBar } from '../components/refresh-bar';
+import { EmptyState } from '../components/layout/empty-state';
+import { FilterTabs } from '../components/layout/filter-tabs';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Notice } from '../components/layout/notice';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
+import { StatusBadge } from '../components/layout/status-badge';
+import { Tag } from '../components/layout/tag';
 import {
   ChannelTab,
   LIST_HEIGHT,
@@ -42,7 +48,6 @@ import {
   ModelRoutes,
   OrderSummaryLine,
 } from '../components/routing-routes';
-import { StatusChip, StatusDot } from '../components/status';
 import { formatClock, TIME } from '../lib/format';
 import { useMediaQuery, useNow } from '../lib/hooks';
 import { filterActive, filterRows, type ListFilter, NO_FILTER, WINDOW_MIN_ROWS } from '../lib/list-window';
@@ -93,7 +98,7 @@ function RoutingDescription() {
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="block text-left underline-offset-2 hover:underline"
+        className="inline-flex items-center text-left underline-offset-2 hover:underline max-md:min-h-10"
       >
         怎么用
       </button>
@@ -105,38 +110,35 @@ function RoutingDescription() {
 export default function Routing() {
   const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useRoutingLayers();
   const [params, setParams] = useSearchParams();
-  const refresh = (
-    <RefreshBar
-      onRefresh={() => void refetch()}
-      isFetching={isFetching}
-      dataUpdatedAt={dataUpdatedAt}
-      staleAfterMs={ROUTING_STALE_AFTER_MS}
-    />
-  );
+  const refresh = {
+    onRefresh: () => void refetch(),
+    isFetching,
+    dataUpdatedAt,
+    staleAfterMs: ROUTING_STALE_AFTER_MS,
+  };
 
   if (error) {
     return (
-      <Page title="路由" description={<RoutingDescription />} keepDescription actions={refresh}>
+      <Page title="路由" description={<RoutingDescription />} keepDescription refresh={refresh}>
         <LoadError what="路由两层" error={error} />
       </Page>
     );
   }
   if (isLoading || !data) {
     return (
-      <Page title="路由" description={<RoutingDescription />} keepDescription actions={refresh}>
+      <Page title="路由" description={<RoutingDescription />} keepDescription refresh={refresh}>
         <LoadingRows rows={6} />
       </Page>
     );
   }
   if (data.unavailable) {
     return (
-      <Page title="路由" description={<RoutingDescription />} keepDescription actions={refresh}>
-        <div
-          role="note"
-          className="rounded-xl border border-dashed bg-card px-6 py-10 text-center text-sm text-muted-foreground"
-        >
-          {data.unavailable}
-        </div>
+      <Page title="路由" description={<RoutingDescription />} keepDescription refresh={refresh}>
+        <Section>
+          <div role="note">
+            <EmptyState icon={RouteIcon} title={data.unavailable} />
+          </div>
+        </Section>
       </Page>
     );
   }
@@ -160,13 +162,9 @@ export default function Routing() {
       title="路由"
       description={<RoutingDescription />}
       keepDescription
+      refresh={refresh}
       // 一个用途都没有时不报「0 个派不出去」：那会读成没事
-      actions={
-        <>
-          {refresh}
-          {purposes.length > 0 ? <Summary purposes={purposes} asOf={data.asOf} /> : null}
-        </>
-      }
+      actions={purposes.length > 0 ? <Summary purposes={purposes} asOf={data.asOf} /> : undefined}
     >
       <RoutingEditProvider>
         <RoutingTabs tab={tab} onPick={setTab} />
@@ -212,7 +210,7 @@ function RoutingTabs({ tab, onPick }: { tab: TabId; onPick: (id: TabId) => void 
             onClick={() => onPick(t.id)}
             onKeyDown={onKeyDown}
             className={cn(
-              '-mb-px border-b-2 px-4 py-2 text-sm transition-colors hover:text-foreground',
+              '-mb-px border-b-2 px-4 py-2 text-body transition-colors hover:text-foreground max-md:min-h-10',
               active
                 ? 'border-foreground font-semibold text-foreground'
                 : 'border-transparent text-muted-foreground',
@@ -230,13 +228,13 @@ function PurposesTab({ purposes, params }: { purposes: RoutingLayerPurpose[]; pa
   const selected = pickPurpose(purposes, params.get('purpose'));
   if (purposes.length === 0 || !selected) {
     return (
-      <Panel>
-        <Empty
+      <Section>
+        <EmptyState
           icon={RouteIcon}
           title="后端一个用途都没给"
           hint="每个用途都该有一份（没配的写明没配）：这不该发生，去看后端日志"
         />
-      </Panel>
+      </Section>
     );
   }
   return (
@@ -253,15 +251,15 @@ function Summary({ purposes, asOf }: { purposes: RoutingLayerPurpose[]; asOf: st
   const counts = countByVerdict(purposes);
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      <StatusChip tone="done" label={`${counts.live} 个派得出去`} />
-      <StatusChip tone="stall" label={`${counts.unknown} 个不知道`} />
-      <StatusChip tone="fail" label={`${counts.dead} 个派不出去`} />
-      <span className="num text-caption text-muted-foreground">{formatClock(asOf)} 现算</span>
+      <StatusBadge tone="done" label={`${counts.live} 个派得出去`} />
+      <StatusBadge tone="stall" label={`${counts.unknown} 个不知道`} />
+      <StatusBadge tone="fail" label={`${counts.dead} 个派不出去`} />
+      <span className="num text-meta text-muted-foreground">{formatClock(asOf)} 现算</span>
     </div>
   );
 }
 
-/** 用途选择：一排紧凑的按钮（手机上横向滑动），不再是一张张带阴影的卡片；每个用途的先后在下面的大区域里调。 */
+/** 用途选择：一排筛选标签（手机上横向滑动），带状态点和模型数；每个用途的先后在下面的大区域里调。 */
 function PurposeList({
   purposes,
   selected,
@@ -271,67 +269,60 @@ function PurposeList({
   selected: string;
   params: URLSearchParams;
 }) {
+  const [, setParams] = useSearchParams();
+  const env = useKindEnv();
   const flow = purposes.filter((p) => routingPurposeOf(p.purpose)?.aside !== true);
   const aside = purposes.filter((p) => routingPurposeOf(p.purpose)?.aside === true);
-  return (
-    <nav aria-label="用途" className="min-w-0">
-      {/* relative：横滑条里的 sr-only 文字是绝对定位，不套 relative 会跑到滚动区外撑宽页面（#1806） */}
-      <ul className="relative flex items-center gap-1.5 overflow-x-auto pb-1 md:flex-wrap md:overflow-visible">
-        {flow.map((p) => (
-          <PurposeItem key={p.purpose} purpose={p} selected={selected} params={params} />
-        ))}
-        {aside.length > 0 ? (
-          <>
-            <li className="shrink-0 px-1 text-caption text-muted-foreground">不是流程里的一段</li>
-            {aside.map((p) => (
-              <PurposeItem key={p.purpose} purpose={p} selected={selected} params={params} />
-            ))}
-          </>
-        ) : null}
-      </ul>
-      <p className="mt-1 text-caption text-muted-foreground">对题：{SCOPE_NO_ROUTE}</p>
-    </nav>
-  );
-}
-
-function PurposeItem({
-  purpose: p,
-  selected,
-  params,
-}: {
-  purpose: RoutingLayerPurpose;
-  selected: string;
-  params: URLSearchParams;
-}) {
-  const env = useKindEnv();
-  const active = p.purpose === selected;
-  // 别的网址参数（?node=、?tab=）带着走
-  const next = new URLSearchParams(params);
-  next.set('purpose', p.purpose);
-  return (
-    <li className="shrink-0">
-      <Link
-        to={{ search: `?${next}` }}
-        replace
-        preventScrollReset
-        aria-current={active ? 'true' : undefined}
+  const toItem = (p: RoutingLayerPurpose) => ({
+    id: p.purpose,
+    tone: verdictTone[p.verdict],
+    count: p.models.length,
+    label: (
+      <span
         title={purposeLine(p, { retired: env.modelRetired, channelOpen: env.channelEnabled }).text}
-        className={cn(
-          'inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3 text-sm transition-colors hover:border-border-strong md:min-h-8',
-          active ? 'border-foreground bg-foreground/10 font-semibold' : 'border-border bg-background',
-        )}
+        className="inline-flex items-center gap-1.5"
       >
-        <StatusDot tone={verdictTone[p.verdict]} />
         <span className="sr-only">{purposeVerdictLabel[p.verdict]}：</span>
         <span>{purposeLabel(p.purpose)}</span>
         {p.purpose === 'groom' ? (
-          <span className="hidden text-caption font-normal text-muted-foreground lg:inline">
+          <span className="hidden text-meta font-normal text-muted-foreground lg:inline">
             这里配指挥官用的模型
           </span>
         ) : null}
-        <span className="num text-caption font-normal text-muted-foreground">{p.models.length}</span>
-      </Link>
-    </li>
+      </span>
+    ),
+  });
+  // 别的网址参数（?node=、?tab=）带着走
+  const pick = (id: string) => {
+    const next = new URLSearchParams(params);
+    next.set('purpose', id);
+    setParams(next, { replace: true, preventScrollReset: true });
+  };
+  return (
+    <nav aria-label="用途" className="min-w-0">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+        <FilterTabs
+          mode="toggle"
+          aria-label="流程里的用途"
+          items={flow.map(toItem)}
+          value={selected}
+          onChange={pick}
+        />
+        {aside.length > 0 ? (
+          <>
+            <span className="shrink-0 text-meta text-muted-foreground">不是流程里的一段</span>
+            <FilterTabs
+              mode="toggle"
+              aria-label="流程之外的用途"
+              items={aside.map(toItem)}
+              value={selected}
+              onChange={pick}
+            />
+          </>
+        ) : null}
+      </div>
+      <p className="mt-1 text-meta text-muted-foreground">对题：{SCOPE_NO_ROUTE}</p>
+    </nav>
   );
 }
 
@@ -373,49 +364,32 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   return (
     <section aria-label={`${purposeLabel(p.purpose)}的调整顺序`} className="flex flex-col gap-3">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <h2 className="flex items-center gap-2 text-base font-semibold">
+        <h2 className="flex items-center gap-2 text-heading font-semibold">
           {purposeLabel(p.purpose)}
-          <span className="num text-caption font-normal text-muted-foreground">{p.purpose}</span>
+          <span className="num text-meta font-normal text-muted-foreground">{p.purpose}</span>
         </h2>
-        <StatusChip tone={verdictTone[p.verdict]} label={purposeVerdictLabel[p.verdict]} />
+        <StatusBadge tone={verdictTone[p.verdict]} label={purposeVerdictLabel[p.verdict]} />
         {p.purpose === 'judge' && p.verdict === 'unknown' ? (
-          <span className="text-caption text-muted-foreground">按量计费，不自动探，不用处理</span>
+          <span className="text-meta text-muted-foreground">按量计费，不自动探，不用处理</span>
         ) : null}
         {/* 一个模型都没排：那句话就是缺口本身，下面缺口栏已经写了，不在这里再写一遍 */}
         {p.models.length > 0 ? (
-          <span className={cn('min-w-0 text-sub', lineInk(line.tone))}>{line.text}</span>
+          <span className={cn('min-w-0 text-body', lineInk(line.tone))}>{line.text}</span>
         ) : null}
       </header>
       {edit.disabledWhy ? (
-        <p
-          role="note"
-          className="rounded-lg border border-dashed bg-muted/40 px-3 py-2 text-sub text-muted-foreground"
-        >
-          {edit.disabledWhy}。先后、开关、添加和档位都不能改。
-        </p>
+        <Notice tone="info">{edit.disabledWhy}。先后、开关、添加和档位都不能改。</Notice>
       ) : null}
-      {holds.error ? (
-        <p role="status" className="text-sub text-ink-fail">
-          整池暂停没读成，路由先不能单独开。
-        </p>
-      ) : null}
-      {membershipError ? (
-        <p role="alert" className="rounded-lg border border-ink-fail px-3 py-2 text-sub text-ink-fail">
-          {membershipError}
-        </p>
-      ) : null}
+      {holds.error ? <Notice tone="fail">整池暂停没读成，路由先不能单独开。</Notice> : null}
+      {membershipError ? <Notice tone="fail">{membershipError}</Notice> : null}
       {p.problems.length > 0 ? (
-        <ul
-          aria-label="配置缺口"
-          className="space-y-1 rounded-lg border border-st-fail/40 bg-st-fail/10 px-3 py-2 text-sub text-ink-fail"
-        >
-          {p.problems.map((x) => (
-            <li key={x} className="flex gap-2">
-              <TriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-              {x}
-            </li>
-          ))}
-        </ul>
+        <Notice tone="fail">
+          <ul aria-label="配置缺口" className="space-y-1">
+            {p.problems.map((x) => (
+              <li key={x}>{x}</li>
+            ))}
+          </ul>
+        </Notice>
       ) : null}
       {p.models.length === 0 ? <AddPurposeModel purpose={p} onError={setMembershipError} /> : null}
       {p.models.length > 0 ? (
@@ -428,17 +402,14 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
             onError={setMembershipError}
           />
           {current ? (
-            <section
+            <Section
               id="routing-model-detail"
               aria-label={`${current.displayName} 的路由`}
-              className="flex h-full min-h-0 scroll-mt-4 flex-col overflow-hidden rounded-lg border bg-card"
+              title={`${current.displayName} 的路由`}
+              description={`先后管这个模型在所有用途里 · ${modelSummary(current)}`}
+              flush
+              className="flex h-full min-h-0 scroll-mt-4 flex-col *:last:flex *:last:min-h-0 *:last:flex-1 *:last:flex-col"
             >
-              <header className="flex flex-wrap items-baseline gap-x-2 border-b bg-muted/40 px-3 py-2">
-                <h3 className="text-sm font-semibold">{current.displayName} 的路由</h3>
-                <span className="text-caption text-muted-foreground">
-                  先后管这个模型在所有用途里 · {modelSummary(current)}
-                </span>
-              </header>
               <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
                 {currentOff && foldOffRoutes ? (
                   <CollapsibleOffModelRoutes
@@ -457,11 +428,11 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
                   />
                 )}
               </div>
-            </section>
+            </Section>
           ) : null}
         </div>
       ) : null}
-      <p className="text-caption text-muted-foreground">
+      <p className="text-meta text-muted-foreground">
         活 = 接得上、额度够、没被禁令挡三件都过；不知道 =
         探针还没看过、额度没读成，不当活。引擎派活时另看账号池有没有空位
         （满了是等，不算故障）；探针的结论过期了，引擎照上一次的结论派、写明，这里标「探测过期」。
@@ -519,17 +490,14 @@ function ModelPriority({
         : undefined
       : { height: ORDER_LIST_HEIGHT, rowHeight: ORDER_ROW_HEIGHT };
   return (
-    <section
+    <Section
       aria-label="模型先后"
-      className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border bg-card"
+      title="模型先后"
+      description="只管这个用途 · 引擎从上往下试"
+      actions={<AddPurposeModel purpose={p} onError={onError} />}
+      flush
+      className="flex h-full min-h-0 flex-col *:last:flex *:last:min-h-0 *:last:flex-1 *:last:flex-col"
     >
-      <header className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b bg-muted/40 px-3 py-2">
-        <h3 className="text-sm font-semibold">模型先后</h3>
-        <span className="text-caption text-muted-foreground">只管这个用途 · 引擎从上往下试</span>
-        <span className="ml-auto">
-          <AddPurposeModel purpose={p} onError={onError} />
-        </span>
-      </header>
       <OrderSummaryLine summary={summary} noun="模型" />
       {long ? (
         <ListFilterBar
@@ -541,9 +509,7 @@ function ModelPriority({
         />
       ) : null}
       {shown.length === 0 ? (
-        <p className="px-3 py-8 text-center text-sub text-muted-foreground">
-          没有符合的模型：换个搜索词，或关掉「只看已开启」
-        </p>
+        <EmptyState size="inline" title="没有符合的模型：换个搜索词，或关掉「只看已开启」" className="py-6" />
       ) : (
         <div className="relative min-h-0 flex-1">
           <SortableList
@@ -559,8 +525,8 @@ function ModelPriority({
               cn(
                 'border-b',
                 !viewport && 'min-h-11',
-                slotOf.get(m.modelId)?.state !== 'on' && 'bg-muted/40',
-                m.modelId === selectedId && 'bg-muted/70 shadow-row-selected',
+                slotOf.get(m.modelId)?.state !== 'on' && 'bg-muted',
+                m.modelId === selectedId && 'bg-selected shadow-row-selected',
               )
             }
             rowProps={(m) => ({ 'data-model': m.modelId })}
@@ -585,13 +551,13 @@ function ModelPriority({
             )}
           </SortableList>
           {wide && shown.length > 0 && shown.length <= 4 ? (
-            <p className="pointer-events-none absolute inset-x-0 bottom-2 px-3 text-caption text-muted-foreground">
+            <p className="pointer-events-none absolute inset-x-0 bottom-2 px-3 text-meta text-muted-foreground">
               再往下没有更多模型
             </p>
           ) : null}
         </div>
       )}
-    </section>
+    </Section>
   );
 }
 
@@ -632,7 +598,7 @@ function ModelRow({
         <span
           data-position
           title="配置里的先后"
-          className="num grid size-5 shrink-0 place-items-center rounded-full bg-foreground/10 text-caption font-medium"
+          className="num grid size-5 shrink-0 place-items-center rounded-full bg-selected text-meta font-medium"
         >
           {position}
         </span>
@@ -643,36 +609,38 @@ function ModelRow({
           aria-label={`查看 ${m.displayName} 的路由`}
           title={modelSummary(m)}
           className={cn(
-            'flex min-h-9 flex-1 items-center gap-2 text-left md:h-full md:min-h-0',
+            'flex min-h-10 flex-1 items-center gap-2 text-left md:h-full md:min-h-0',
             skipped && 'opacity-60',
           )}
         >
           <KindDot kind={kind} whyNot="一条路由都没有" className="shrink-0" />
           <span
             data-row-name
-            className="whitespace-normal break-words text-sm font-semibold leading-snug md:shrink-0 md:whitespace-nowrap"
+            className="whitespace-normal break-words text-body font-semibold leading-snug md:shrink-0 md:whitespace-nowrap"
           >
             {m.displayName}
           </span>
           {m.family ? (
-            <span className="hidden truncate text-caption text-muted-foreground 2xl:inline">{m.family}</span>
+            <span className="hidden truncate text-meta text-muted-foreground 2xl:inline">{m.family}</span>
           ) : null}
           {/* 几条路几条活：窄的时候放不下，悬停名字看（title），2xl 以上直接写在行里 */}
-          <span className="hidden shrink-0 text-caption text-muted-foreground 2xl:inline">
+          <span className="hidden shrink-0 text-meta text-muted-foreground 2xl:inline">
             {modelSummary(m)}
           </span>
           <FounderOnlyBadge modelId={m.modelId} family={m.family} displayName={m.displayName} />
           <span
             data-slot-state={slot.state}
             className={cn(
-              'ml-auto shrink-0 text-caption',
-              skipped
-                ? 'rounded bg-muted px-1.5 py-0.5 font-medium text-muted-foreground'
-                : 'num text-muted-foreground',
+              'ml-auto shrink-0 text-meta',
+              !skipped && 'num text-muted-foreground',
               !skipped && slot.rank !== position && 'font-semibold text-foreground',
             )}
           >
-            {slotWord(slot.state, slot.rank, '模型')}
+            {skipped ? (
+              <Tag>{slotWord(slot.state, slot.rank, '模型')}</Tag>
+            ) : (
+              slotWord(slot.state, slot.rank, '模型')
+            )}
           </span>
         </button>
       </div>
