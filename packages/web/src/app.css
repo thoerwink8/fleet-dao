@@ -628,6 +628,29 @@
   letter-spacing: -0.01em;
 }
 
+/*
+ * 横向滑动条两端的渐隐提示（components/filter-tabs.tsx）：哪一端还有内容没滑出来，哪一端就渐隐。
+ * 渐隐宽度由组件按「这一端还有没有」设到 --fade-start / --fade-end，没有的一端设 0。
+ */
+@utility fade-edges-x {
+  --fade-start: 0px;
+  --fade-end: 0px;
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 var(--fade-start),
+    #000 calc(100% - var(--fade-end)),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 var(--fade-start),
+    #000 calc(100% - var(--fade-end)),
+    transparent
+  );
+}
+
 /* 细滚动条 */
 @utility scrollbar-thin {
   scrollbar-width: thin;

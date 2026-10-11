@@ -545,7 +545,7 @@ export default function Settings() {
           <a
             key={x.id}
             href={`#${x.id}`}
-            className="rounded-full border bg-card px-3 py-1 text-xs text-muted-foreground hover:border-border-strong hover:text-foreground"
+            className="inline-flex items-center rounded-full border bg-card px-3 py-1 text-xs text-muted-foreground hover:border-border-strong hover:text-foreground max-md:min-h-10"
           >
             {x.label}
           </a>

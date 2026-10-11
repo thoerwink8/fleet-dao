@@ -36,7 +36,7 @@ function Back() {
   const [params] = useSearchParams();
   const list = backToList(params.get(FROM_PARAM));
   return (
-    <Button asChild size="sm" variant="ghost" className="h-7">
+    <Button asChild size="sm" variant="ghost" className="h-7 max-md:min-h-10">
       <Link to={list ?? '/'}>
         <ArrowLeft className="size-3.5" aria-hidden />
         {list ? '回任务列表' : '回主页'}
@@ -60,7 +60,7 @@ function Header({ d, now }: { d: TaskDetail; now: number }) {
         repo={d.repo}
         kind="issues"
         n={d.task.issueNumber}
-        className="num underline-offset-2 hover:underline"
+        className="num underline-offset-2 hover:underline max-md:inline-flex max-md:min-h-10 max-md:items-center"
       >
         {d.repo.owner}/{d.repo.name}#{d.task.issueNumber}
       </RepoLink>
@@ -154,7 +154,7 @@ function NowBanner({ d, now }: { d: TaskDetail; now: number }) {
           repo={d.repo}
           kind="pull"
           n={prNumber}
-          className="num text-sm underline-offset-2 hover:underline"
+          className="num text-sm underline-offset-2 hover:underline max-md:inline-flex max-md:min-h-10 max-md:items-center"
         >
           PR #{prNumber}
         </RepoLink>
@@ -311,6 +311,7 @@ export default function TaskPage() {
         )
       }
       description={d ? <Header d={d} now={now} /> : undefined}
+      keepDescription
       actions={
         <>
           <RefreshBar

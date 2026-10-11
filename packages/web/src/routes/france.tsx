@@ -618,7 +618,7 @@ export default function France() {
           actions={
             <Link
               to="/schedules"
-              className="inline-flex items-center gap-0.5 text-xs text-muted-foreground underline underline-offset-2"
+              className="inline-flex items-center gap-0.5 text-xs text-muted-foreground underline underline-offset-2 max-md:min-h-10"
             >
               全部定时任务
               <ArrowRight className="size-3" />

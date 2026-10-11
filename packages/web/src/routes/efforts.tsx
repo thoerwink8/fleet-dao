@@ -154,7 +154,7 @@ export default function Efforts() {
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="搜模型、渠道、路由号"
                   aria-label="搜索模型或渠道"
-                  className="h-9 w-full rounded-lg border bg-card pl-8 pr-2.5 text-sub outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+                  className="h-9 w-full rounded-lg border bg-card max-md:min-h-10 pl-8 pr-2.5 text-sub outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
                 />
               </label>
               <div className="flex items-center gap-2 text-sub">
@@ -272,7 +272,7 @@ function FamilyGroup({
         aria-expanded={open}
         aria-controls={bodyId}
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 bg-muted/40 px-4 py-2 text-left text-sub font-medium hover:bg-muted/70"
+        className="flex w-full items-center gap-1.5 bg-muted/40 px-4 py-2 text-left text-sub font-medium hover:bg-muted/70 max-md:min-h-10"
       >
         <ChevronDown
           className={cn('size-4 shrink-0 text-muted-foreground transition-transform', !open && '-rotate-90')}

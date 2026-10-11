@@ -10,6 +10,7 @@ import { Link, useLocation, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { useRepos, useTaskList } from '../api/client';
 import type { TaskList, TaskListRow } from '../api/types';
+import { FilterTrack, filterTabClass } from '../components/filter-tabs';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RefreshBar } from '../components/refresh-bar';
 import { StatusChip } from '../components/status';
@@ -30,7 +31,6 @@ import {
   type TaskListView,
   viewOfParams,
 } from '../lib/task-list';
-import { cn } from '../lib/utils';
 
 export function meta() {
   return [{ title: brand.title('任务') }];
@@ -130,11 +130,7 @@ function StatusTabs({
   onChange: (next: TaskListView['status']) => void;
 }) {
   return (
-    <div
-      className="flex max-w-full overflow-x-auto rounded-lg bg-muted p-1"
-      role="tablist"
-      aria-label="按状态"
-    >
+    <FilterTrack role="tablist" aria-label="按状态">
       {GROUP_TABS.map((tab) => {
         const selected = (value ?? 'all') === tab.id;
         return (
@@ -144,17 +140,14 @@ function StatusTabs({
             role="tab"
             aria-selected={selected}
             onClick={() => onChange(tab.id === 'all' ? undefined : tab.id)}
-            className={cn(
-              'flex h-7 shrink-0 items-center gap-1.5 rounded-md px-3 text-sub text-muted-foreground transition-colors',
-              selected ? 'bg-card font-medium text-foreground shadow-sm' : 'hover:text-foreground',
-            )}
+            className={filterTabClass(selected)}
           >
             {tab.label}
             {counts ? <span className="num text-caption">{counts[tab.id]}</span> : null}
           </button>
         );
       })}
-    </div>
+    </FilterTrack>
   );
 }
 
@@ -240,7 +233,7 @@ export default function TasksPage() {
             aria-label="按仓筛选"
             value={view.repoId ?? ''}
             onChange={(e) => setView({ ...view, repoId: e.target.value || undefined })}
-            className="min-h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-sm sm:flex-none"
+            className="min-h-9 min-w-0 flex-1 rounded-md border border-input max-md:min-h-10 bg-background px-2 py-1.5 text-sm sm:flex-none"
           >
             <option value="">全部仓</option>
             {(repos.data?.repos ?? []).map((r) => (

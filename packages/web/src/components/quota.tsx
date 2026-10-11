@@ -10,6 +10,7 @@ import {
 } from '../lib/catalog';
 import { formatAgo, formatCount, formatIn, formatPercent, formatUsd } from '../lib/format';
 import { cn } from '../lib/utils';
+import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 
 /** 额度条的颜色：够用是中性色，75% 以上黄，90% 以上红。 */
 export function quotaTone(util: number): string {
@@ -146,7 +147,28 @@ export function ExpiredQuotaLine() {
   );
 }
 
-/** 一个时间窗的一格：用量、条、清零倒计时、来源和读数新鲜度（stale 由后端按 30 分钟判）。 */
+/**
+ * 一格的说明：原来只挂在悬停提示（title）上，手机没有悬停所以看不到（#1820）。
+ * 点格子弹出来；电脑上悬停的提示照旧。读法每格都有，其余按这格的状态出现。
+ */
+export function cellNotes(w: QuotaWindowView, hot: boolean): string[] {
+  const measured = w.reading === 'measured';
+  const notes = [
+    w.stale
+      ? `${measured ? '从官方或网页接口读到的' : '按我们自己的用量估的'}，但读数太旧，不是现值，不能当现值用（读法 ${w.source}）`
+      : `${measured ? '从官方或网页接口读到的' : '读不到，按我们自己的用量估的'}（读法 ${w.source}）`,
+  ];
+  if (hot) notes.push('先用它：快清零了、还有余量，先用掉这一格，不让额度白白过期。');
+  if (w.scope || w.window === 'other') notes.push(`上游原名：${w.label}`);
+  if (w.upstreamStatus && w.upstreamStatus !== 'allowed') {
+    notes.push(
+      `上游状态：${upstreamStatusLabel[w.upstreamStatus]}${w.statusRaw ? `（上游原话：${w.statusRaw}）` : ''}`,
+    );
+  }
+  return notes;
+}
+
+/** 一个时间窗的一格：用量、条、清零倒计时、来源和读数新鲜度（stale 由后端按 30 分钟判）。点一下弹出这一格的说明。 */
 export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
   const util = utilOf(w);
   // 过期的读数不能当现值：不据此喊「先用它」。用量没读到的也不喊。
@@ -158,122 +180,133 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
   const pair =
     w.used !== undefined && w.limit !== undefined ? amountPair(w, w.used, w.limit).split(' / ') : null;
   return (
-    <div
-      className={cn(
-        'rounded-lg border p-2.5 transition-colors',
-        hot && 'border-brand bg-brand/[0.06] shadow-brand-ring',
-        full && 'border-st-fail/50 bg-st-fail/[0.06]',
-      )}
-      data-hot={hot || undefined}
-      data-full={full || undefined}
-      data-stale={w.stale || undefined}
-      data-unknown={!known || undefined}
-    >
-      {/* 表头已经写了是哪种窗：格子里只在多出信息（按模型组、上游自报的窗名）时才再写一遍，省下一行（驾驶舱改版 2026-10-07）。模型名放不下就换行，不单行截成「o...」。 */}
-      {w.scope || w.window === 'other' ? (
-        <div
-          className="mb-1 min-w-0 break-words text-caption text-muted-foreground"
-          title={`上游原名：${w.label}`}
-        >
-          {windowTitle(w)}
-        </div>
-      ) : null}
-      {/* 金额放得下就跟百分比、来源同一行；放不下就换行，不单行截成「$61.…」。 */}
-      <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
-        {pair ? (
-          <span className="num whitespace-normal">
-            <span
-              className={cn(
-                'text-stat-num font-semibold',
-                full && 'text-ink-fail',
-                w.stale && 'text-muted-foreground',
-              )}
-            >
-              {pair[0]}
-            </span>
-            <span className="text-xs text-muted-foreground"> / {pair[1]}</span>
-          </span>
-        ) : util !== undefined ? (
-          <span
-            className={cn(
-              'num text-stat-num font-semibold',
-              full && 'text-ink-fail',
-              w.stale && 'text-muted-foreground',
-            )}
-          >
-            {formatPercent(util)}
-          </span>
-        ) : upstreamFull ? (
-          <span className="text-stat-num font-semibold text-ink-fail">已用满</span>
-        ) : w.used !== undefined ? (
-          <span className="num whitespace-normal">
-            <span className="text-stat-num font-semibold">{amount(w, w.used)}</span>
-            <span className="text-xs text-muted-foreground"> 已用，上限没读到</span>
-          </span>
-        ) : (
-          <span className="text-sub font-medium text-ink-stall">用量没读到</span>
-        )}
-        <span className="ml-auto flex shrink-0 items-center gap-1.5">
-          {w.used !== undefined && util !== undefined ? (
-            <span className="num text-xs text-muted-foreground">{formatUtil(util)}</span>
-          ) : null}
-          <ReadingBadge w={w} />
-        </span>
-      </div>
-      <QuotaBar
-        util={util ?? (upstreamFull ? 1 : undefined)}
-        className={cn('mt-1.5', w.stale && 'opacity-40')}
-      />
-      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 text-caption text-muted-foreground">
-        {w.resetsAt ? (
-          <span className={cn(hot && 'font-medium text-foreground')}>
-            <span className="num">{formatIn(w.resetsAt, now)}</span>清零
-          </span>
-        ) : (
-          <span>清零时间没读到</span>
-        )}
-        <span
-          className={cn(w.stale && 'text-ink-stall')}
-          title={w.stale ? '读数太旧，不能当现值用' : undefined}
-        >
-          {w.reading === 'measured' ? null : <span>按本机用量估算 · </span>}
-          <span className="num">{formatAgo(w.readAt, now)}</span>
-          {readingVerb(w.reading)}
-        </span>
-      </div>
-      {hot && util !== undefined ? (
-        <div className="mt-1.5 text-caption font-medium text-foreground">
-          快清零还剩 <span className="num">{formatPercent(1 - util)}</span>，先用它
-        </div>
-      ) : null}
-      {full ? (
-        <div className="mt-1.5 text-caption font-medium text-ink-fail">快用完了，调度会先绕开</div>
-      ) : null}
-      {w.upstreamStatus && w.upstreamStatus !== 'allowed' ? (
-        <div
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
           className={cn(
-            'mt-1.5 text-caption font-medium',
-            w.upstreamStatus === 'limit_reached' ? 'text-ink-fail' : 'text-ink-stall',
+            'block w-full cursor-pointer rounded-lg border p-2.5 text-left transition-colors focus-visible:ring-focus focus-visible:ring-ring/50 focus-visible:outline-none',
+            hot && 'border-brand bg-brand/[0.06] shadow-brand-ring',
+            full && 'border-st-fail/50 bg-st-fail/[0.06]',
           )}
-          title={w.statusRaw ? `上游原话：${w.statusRaw}` : undefined}
+          data-quota-cell
+          data-hot={hot || undefined}
+          data-full={full || undefined}
+          data-stale={w.stale || undefined}
+          data-unknown={!known || undefined}
         >
-          {upstreamStatusLabel[w.upstreamStatus]}
-        </div>
-      ) : null}
-      {w.stale ? (
-        <div data-stale-note className="mt-1.5 text-caption font-medium text-ink-stall">
-          读数过期，上面是 <span className="num">{formatAgo(w.readAt, now)}</span>
-          {readingVerb(w.reading)}到的旧数，不是现值，不参与排序
-        </div>
-      ) : null}
-      {w.staleSince ? (
-        <div className="mt-1.5 text-caption text-ink-stall">
-          上游从 <span className="num">{formatAgo(w.staleSince, now)}</span>
-          起没再报这个窗，数是之前的，不参与排序
-        </div>
-      ) : !known ? (
-        <div className="mt-1.5 text-caption text-muted-foreground">不参与「先用它」和排序</div>
-      ) : null}
-    </div>
+          {/* 表头已经写了是哪种窗：格子里只在多出信息（按模型组、上游自报的窗名）时才再写一遍，省下一行（驾驶舱改版 2026-10-07）。模型名放不下就换行，不单行截成「o...」。 */}
+          {w.scope || w.window === 'other' ? (
+            <div
+              className="mb-1 min-w-0 break-words text-caption text-muted-foreground"
+              title={`上游原名：${w.label}`}
+            >
+              {windowTitle(w)}
+            </div>
+          ) : null}
+          {/* 金额放得下就跟百分比、来源同一行；放不下就换行，不单行截成「$61.…」。 */}
+          <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
+            {pair ? (
+              <span className="num whitespace-normal">
+                <span
+                  className={cn(
+                    'text-stat-num font-semibold',
+                    full && 'text-ink-fail',
+                    w.stale && 'text-muted-foreground',
+                  )}
+                >
+                  {pair[0]}
+                </span>
+                <span className="text-xs text-muted-foreground"> / {pair[1]}</span>
+              </span>
+            ) : util !== undefined ? (
+              <span
+                className={cn(
+                  'num text-stat-num font-semibold',
+                  full && 'text-ink-fail',
+                  w.stale && 'text-muted-foreground',
+                )}
+              >
+                {formatPercent(util)}
+              </span>
+            ) : upstreamFull ? (
+              <span className="text-stat-num font-semibold text-ink-fail">已用满</span>
+            ) : w.used !== undefined ? (
+              <span className="num whitespace-normal">
+                <span className="text-stat-num font-semibold">{amount(w, w.used)}</span>
+                <span className="text-xs text-muted-foreground"> 已用，上限没读到</span>
+              </span>
+            ) : (
+              <span className="text-sub font-medium text-ink-stall">用量没读到</span>
+            )}
+            <span className="ml-auto flex shrink-0 items-center gap-1.5">
+              {w.used !== undefined && util !== undefined ? (
+                <span className="num text-xs text-muted-foreground">{formatUtil(util)}</span>
+              ) : null}
+              <ReadingBadge w={w} />
+            </span>
+          </div>
+          <QuotaBar
+            util={util ?? (upstreamFull ? 1 : undefined)}
+            className={cn('mt-1.5', w.stale && 'opacity-40')}
+          />
+          <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 text-caption text-muted-foreground">
+            {w.resetsAt ? (
+              <span className={cn(hot && 'font-medium text-foreground')}>
+                <span className="num">{formatIn(w.resetsAt, now)}</span>清零
+              </span>
+            ) : (
+              <span>清零时间没读到</span>
+            )}
+            <span
+              className={cn(w.stale && 'text-ink-stall')}
+              title={w.stale ? '读数太旧，不能当现值用' : undefined}
+            >
+              {w.reading === 'measured' ? null : <span>按本机用量估算 · </span>}
+              <span className="num">{formatAgo(w.readAt, now)}</span>
+              {readingVerb(w.reading)}
+            </span>
+          </div>
+          {hot && util !== undefined ? (
+            <div className="mt-1.5 text-caption font-medium text-foreground">
+              快清零还剩 <span className="num">{formatPercent(1 - util)}</span>，先用它
+            </div>
+          ) : null}
+          {full ? (
+            <div className="mt-1.5 text-caption font-medium text-ink-fail">快用完了，调度会先绕开</div>
+          ) : null}
+          {w.upstreamStatus && w.upstreamStatus !== 'allowed' ? (
+            <div
+              className={cn(
+                'mt-1.5 text-caption font-medium',
+                w.upstreamStatus === 'limit_reached' ? 'text-ink-fail' : 'text-ink-stall',
+              )}
+              title={w.statusRaw ? `上游原话：${w.statusRaw}` : undefined}
+            >
+              {upstreamStatusLabel[w.upstreamStatus]}
+            </div>
+          ) : null}
+          {w.stale ? (
+            <div data-stale-note className="mt-1.5 text-caption font-medium text-ink-stall">
+              读数过期，上面是 <span className="num">{formatAgo(w.readAt, now)}</span>
+              {readingVerb(w.reading)}到的旧数，不是现值，不参与排序
+            </div>
+          ) : null}
+          {w.staleSince ? (
+            <div className="mt-1.5 text-caption text-ink-stall">
+              上游从 <span className="num">{formatAgo(w.staleSince, now)}</span>
+              起没再报这个窗，数是之前的，不参与排序
+            </div>
+          ) : !known ? (
+            <div className="mt-1.5 text-caption text-muted-foreground">不参与「先用它」和排序</div>
+          ) : null}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-auto max-w-xs space-y-1.5 text-sub" data-quota-notes>
+        {cellNotes(w, hot).map((note) => (
+          <p key={note}>{note}</p>
+        ))}
+      </PopoverContent>
+    </Popover>
   );
 }

@@ -243,7 +243,7 @@ describe('额度页金额和窄表', () => {
     expect(amount?.className ?? '').not.toContain('truncate');
     expect(amount?.textContent).toContain('$61.20');
     expect(amount?.textContent).toContain('/ $100');
-    const cell = used.closest('div.rounded-lg');
+    const cell = used.closest('[data-quota-cell]');
     expect(cell).toBeTruthy();
     const badge = within(cell as HTMLElement).getByText('实读');
     expect(badge.closest('[data-source]')?.getAttribute('data-source')).toBe('relay-web');
@@ -252,7 +252,7 @@ describe('额度页金额和窄表', () => {
     expect(month.parentElement?.className ?? '').not.toContain('truncate');
     expect(month.parentElement?.textContent).toContain('/ $20.00');
     // 这个池的读数过期了：不挂「估算」牌，换成「读数过期」（#1748）；估算的说明仍写在页脚
-    expect(within(month.closest('div.rounded-lg') as HTMLElement).getByText('读数过期')).toBeTruthy();
+    expect(within(month.closest('[data-quota-cell]') as HTMLElement).getByText('读数过期')).toBeTruthy();
     expect(screen.getAllByText('18%').length).toBeGreaterThan(0);
   });
 

@@ -345,7 +345,7 @@ export function ModeSwitch() {
             aria-checked={active}
             onClick={() => setMode(m.id)}
             className={cn(
-              'flex h-7 items-center justify-center gap-1.5 rounded-md text-xs text-muted-foreground transition-colors',
+              'flex h-7 items-center justify-center gap-1.5 rounded-md text-xs text-muted-foreground transition-colors max-md:min-h-10',
               active ? 'bg-card font-medium text-foreground shadow-sm' : 'hover:text-foreground',
             )}
           >
