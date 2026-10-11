@@ -151,7 +151,8 @@ test.describe('其余页面', () => {
     problems.allow('status of 5');
     await page.goto('/changelog');
     await expect(page.getByRole('heading', { name: '更新日志' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '已发布的提交' })).toBeVisible();
+    // 区块里不再有自己的标题（#1902）：页头说明写着这页是法国已发布的提交
+    await expect(page.getByText(/法国已发布的提交/).first()).toBeVisible();
     // 开发环境没有法国的发布历史：要么列出提交，要么明确说没查成
     await expect(page.getByText(/没查成|没读成|发于/).first()).toBeVisible();
     await expect(page.getByRole('button', { name: /发布 v/ })).toHaveCount(0);
