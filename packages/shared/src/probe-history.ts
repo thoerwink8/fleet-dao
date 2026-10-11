@@ -41,9 +41,9 @@ export interface ProbeHistoryCell {
   checkPassed: boolean | null;
   selfIdentity: string | null;
   /** 连通 / 身份（#1798 片 6）。老行、没写过不给，不拿默认值顶。 */
-  kind?: RouteProbeKind;
+  kind?: RouteProbeKind | undefined;
   /** 定时 / 派前 / 人点 / 断链 / 切号。老行、没写过不给。 */
-  trigger?: RouteProbeTrigger;
+  trigger?: RouteProbeTrigger | undefined;
 }
 
 /** 一个渠道的条带：cells 是最近 60 次真探，从旧到新。可用率的分母是 cells 里的（通过 + 不通）。 */
