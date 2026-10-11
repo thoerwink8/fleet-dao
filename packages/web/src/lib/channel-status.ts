@@ -88,7 +88,7 @@ export function probeLatency(detail: string | undefined): string | undefined {
 
 /**
  * 这条路最近一次结论过没过「这一档间隔 + 3 分钟」。
- * detail 里写了退避或隔 30 分钟再探时按那一档，不把故意放慢当成检测中断。不给 detail 就按执行方式。
+ * detail 里写了退避时按那一档，不把故意退避当成检测中断。其余按钟一轮（三档成功间隔见引擎 probe_next_at，片 6/7 再读列）。
  */
 export function channelProbeInterrupted(
   route: { probedAt: string; hostId: string; detail?: string | null | undefined },
