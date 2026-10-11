@@ -100,11 +100,16 @@ describe('Page', () => {
         <p>正文</p>
       </Page>,
     );
-    const bar = document.querySelector('[data-page-titlebar]') as HTMLElement;
-    expect(bar.querySelector('h1')?.textContent).toBe('某页');
-    expect(bar.querySelector('[data-page-actions]')).toBeTruthy();
-    expect(bar.className).toContain('items-center');
-    expect(bar.contains(screen.getByText('一句说明。'))).toBe(false);
+    const header = document.querySelector('header') as HTMLElement;
+    const actions = header.querySelector('[data-page-actions]') as HTMLElement;
+    // 刷新槽位和标题块是页头里并排的两个子项，都从顶对齐；槽位至少一个控件高并居中
+    expect(actions.parentElement).toBe(header);
+    expect(header.className).toContain('items-start');
+    expect(actions.className).toContain('items-center');
+    expect(actions.className).toContain('min-h-8');
+    const titlebar = header.querySelector('[data-page-titlebar]') as HTMLElement;
+    expect(titlebar.querySelector('h1')?.textContent).toBe('某页');
+    expect(titlebar.contains(actions)).toBe(false);
   });
 
   test('电脑：字符串说明超过一行的字数，收进 ⓘ，标题下不摊开', async () => {

@@ -26,7 +26,7 @@ export function DescriptionHint({
           aria-label={label}
           title={label}
           data-description-hint
-          className="inline-grid size-8 shrink-0 max-md:size-10 place-items-center rounded-full text-muted-foreground hover:text-foreground"
+          className="inline-grid size-8 shrink-0 place-items-center align-middle max-md:size-10 rounded-full text-muted-foreground hover:text-foreground"
         >
           <Info className="size-4" aria-hidden />
         </button>
@@ -86,23 +86,25 @@ export function Page({
         className,
       )}
     >
-      <header className="mb-section-gap max-md:mb-4">
-        {/* 标题行：标题（后面跟 ⓘ）在左，操作和刷新在右，两边垂直居中在这一行上；说明在它下面，最多一行。 */}
-        <div className="flex flex-wrap items-center justify-between gap-x-stack gap-y-2" data-page-titlebar>
-          <div className="flex min-w-0 flex-1 basis-52 items-center gap-1">
-            <h1 className="min-w-0 text-title">{title}</h1>
-            {hint}
-          </div>
-          {actions || refresh ? (
-            <div className="flex max-w-full flex-wrap items-center gap-2 lg:shrink-0" data-page-actions>
-              {actions}
-              {refresh ? <RefreshBar {...refresh} /> : null}
+      {/* 标题行：标题（后面跟 ⓘ）在左，操作和刷新在右。两边都从顶对齐、各自至少一个控件高并垂直居中，
+          所以刷新和标题在同一行上对齐，不会被下面的说明拉低；说明在标题下面，最多一行。 */}
+      <header className="mb-section-gap flex flex-wrap items-start justify-between gap-x-stack gap-y-2 max-md:mb-4 lg:flex-nowrap">
+        <div className="min-w-0 basis-52 lg:flex-1" data-page-titlebar>
+          <h1 className="inline align-middle text-title">{title}</h1>
+          {hint}
+          {description && !fold ? (
+            <div className="mt-1 max-w-3xl text-body text-muted-foreground" data-page-description>
+              {description}
             </div>
           ) : null}
         </div>
-        {description && !fold ? (
-          <div className="mt-1 max-w-3xl text-body text-muted-foreground" data-page-description>
-            {description}
+        {actions || refresh ? (
+          <div
+            className="flex min-h-8 max-w-full flex-wrap items-center gap-2 max-md:min-h-10 lg:shrink-0"
+            data-page-actions
+          >
+            {actions}
+            {refresh ? <RefreshBar {...refresh} /> : null}
           </div>
         ) : null}
       </header>
