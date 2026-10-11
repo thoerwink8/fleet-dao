@@ -71,7 +71,8 @@ function durationText(j: JobView): string {
   return '—';
 }
 
-export function JobListRow({ j, now }: { j: JobView; now: number }) {
+/** fullOutcome：上次结果写全、可换行，不截断（定时任务页把异常行置顶时用，#1902）。 */
+export function JobListRow({ j, now, fullOutcome }: { j: JobView; now: number; fullOutcome?: boolean }) {
   const tone = rowTone(j);
   const r = j.lastRun;
   return (
@@ -95,12 +96,16 @@ export function JobListRow({ j, now }: { j: JobView; now: number }) {
               ) : null}
             </span>
             {/* 宽屏有单独的「上次运行」列；窄屏那一列藏起来，结果挪到名字下面一行，不让失败、没查全藏在展开里。 */}
-            <span className={cn('block truncate text-meta md:hidden', outcomeClass(j))}>
+            <span className={cn('block text-meta md:hidden', !fullOutcome && 'truncate', outcomeClass(j))}>
               {outcomeText(j)}
             </span>
           </span>
           <span
-            className={cn('hidden w-64 shrink-0 truncate text-meta md:block', outcomeClass(j))}
+            className={cn(
+              'hidden w-64 shrink-0 text-meta md:block',
+              !fullOutcome && 'truncate',
+              outcomeClass(j),
+            )}
             title={outcomeText(j)}
           >
             {outcomeText(j)}

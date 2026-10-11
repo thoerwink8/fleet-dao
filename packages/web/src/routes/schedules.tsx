@@ -1,12 +1,12 @@
-import { CalendarClock, CircleX, ScanSearch, TimerOff } from 'lucide-react';
+import { CalendarClock } from 'lucide-react';
 import { brand } from '#brand';
 import { useJobs } from '../api/client';
-import { JobListHead, JobListRow } from '../components/job-row';
+import { JobListHead, JobListRow, rowTone } from '../components/job-row';
 import { EmptyState } from '../components/layout/empty-state';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { Page } from '../components/layout/page';
 import { Section } from '../components/layout/section';
-import { Stat } from '../components/layout/stat';
+import { StatusBadge } from '../components/layout/status-badge';
 import { RefreshBar } from '../components/refresh-bar';
 import { TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -27,6 +27,12 @@ export default function Schedules() {
     (j) => j.lastRun?.outcome === 'unscanned' || j.lastRun?.outcome === 'partial',
   ).length;
   const notFresh = jobs.filter((j) => j.status !== 'fresh').length;
+  // 异常行排最前（失败、再是没查全 / 过期），其余保持原来的先后
+  const rowRank = (j: (typeof jobs)[number]): number => {
+    const tone = rowTone(j);
+    return tone === 'fail' ? 0 : tone === 'stall' ? 1 : 2;
+  };
+  const ordered = [...jobs].sort((a, b) => rowRank(a) - rowRank(b));
   // 没读到就显示「—」，不拿 0 冒充「没有失败」。
   const count = (n: number) => (data ? n : '—');
 
@@ -43,34 +49,32 @@ export default function Schedules() {
         />
       }
     >
-      <div className="mb-4 grid grid-cols-2 items-stretch gap-3 md:grid-cols-4">
-        <Stat className="h-full min-w-0" label="定时任务" value={count(jobs.length)} icon={CalendarClock} />
-        <Stat
-          className="h-full min-w-0"
-          label="上次失败"
-          value={count(failed)}
-          icon={CircleX}
-          tone={failed ? 'fail' : undefined}
-        />
-        <Stat
-          className="h-full min-w-0"
-          label="上次没查全"
-          value={count(unscanned)}
-          icon={ScanSearch}
-          hint="跑了，但一个都没扫到，或有一部分没查成"
-          wrapHint
-          tone={unscanned ? 'stall' : undefined}
-        />
-        <Stat
-          className="h-full min-w-0"
-          label="过期"
-          value={count(notFresh)}
-          icon={TimerOff}
-          hint="超过期望间隔没跑成，或从没跑成过"
-          wrapHint
-          tone={notFresh ? 'stall' : undefined}
-        />
-      </div>
+      {/* 统计压成一条摘要：只列不是 0 的，全是 0 就一句「都正常」，不拿三张 0 占半屏（#1902）。 */}
+      <p
+        className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-body text-muted-foreground"
+        data-job-summary
+      >
+        <span>
+          共 <span className="num font-medium text-foreground">{count(jobs.length)}</span> 个定时任务
+        </span>
+        {!data ? null : failed + unscanned + notFresh === 0 ? (
+          <StatusBadge tone="done" label="都正常" />
+        ) : (
+          <>
+            {failed > 0 ? <StatusBadge tone="fail" label={`上次失败 ${failed}`} /> : null}
+            {unscanned > 0 ? (
+              <span title="跑了，但一个都没扫到，或有一部分没查成">
+                <StatusBadge tone="stall" label={`没查全 ${unscanned}`} />
+              </span>
+            ) : null}
+            {notFresh > 0 ? (
+              <span title="超过期望间隔没跑成，或从没跑成过">
+                <StatusBadge tone="stall" label={`过期 ${notFresh}`} />
+              </span>
+            ) : null}
+          </>
+        )}
+      </p>
       {error ? (
         <div className="mb-3">
           <LoadError what="定时任务" error={error} />
@@ -91,8 +95,8 @@ export default function Schedules() {
           <>
             <JobListHead />
             <ul className="divide-y" data-job-list>
-              {jobs.map((j) => (
-                <JobListRow key={j.id} j={j} now={now} />
+              {ordered.map((j) => (
+                <JobListRow key={j.id} j={j} now={now} fullOutcome={rowTone(j) !== null} />
               ))}
             </ul>
           </>

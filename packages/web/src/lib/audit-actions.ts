@@ -89,9 +89,7 @@ export const UNKNOWN_ACTION_TEXT = '其他操作';
 /** 一个事件名的显示：有对照翻成一句话；没有就显示「其他操作」，translated 为 false，原键页面另放小字。 */
 export function describeAction(action: string): { text: string; translated: boolean } {
   const text = Object.hasOwn(AUDIT_ACTION_TEXT, action) ? AUDIT_ACTION_TEXT[action] : undefined;
-  return text === undefined
-    ? { text: UNKNOWN_ACTION_TEXT, translated: false }
-    : { text, translated: true };
+  return text === undefined ? { text: UNKNOWN_ACTION_TEXT, translated: false } : { text, translated: true };
 }
 
 /** 对象编号 → 站内地址：能点进对应的单或路由页。认不出的没有地址。 */

@@ -8,11 +8,11 @@ import { EmptyState } from '../components/layout/empty-state';
 import { FilterTabs } from '../components/layout/filter-tabs';
 import { List, ListRow } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { NativeSelect } from '../components/layout/native-select';
 import { Page } from '../components/layout/page';
 import { SearchInput } from '../components/layout/search-input';
 import { Section } from '../components/layout/section';
 import { StatusBadge } from '../components/layout/status-badge';
-import { NativeSelect } from '../components/layout/native-select';
 import { Toolbar } from '../components/layout/toolbar';
 import { RefreshBar } from '../components/refresh-bar';
 import { Button } from '../components/ui/button';
@@ -331,7 +331,10 @@ export default function Audit() {
                           data-audit-who
                           className="flex min-w-0 items-center gap-x-2 max-md:basis-full md:contents"
                         >
-                          <span className="max-md:max-w-32 max-md:shrink-0 max-md:truncate" title={a.actor.id}>
+                          <span
+                            className="max-md:max-w-32 max-md:shrink-0 max-md:truncate"
+                            title={a.actor.id}
+                          >
                             {actorName(a.actor, me)}
                           </span>
                           <ActionText action={a.action} ok={a.ok} className="max-md:min-w-0" />
