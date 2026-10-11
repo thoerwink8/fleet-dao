@@ -59,9 +59,12 @@ describe('三段的单：按段、按模型，每一笔', () => {
     ]);
     // 动手段两笔：一笔超时、没记缓存和花费——缓存那格写「不全」，不把没读到的当 0 加进去
     expect(within(manual).getAllByText(/另有 1 次没读到/).length).toBeGreaterThan(0);
-    // Kimi 那一行的缓存一次都没读到：写「没读到」，不写 0
+    // Kimi 那一行的缓存一次都没读到：格子里留 —（不写 0、也不逐格写「没读到」），哪项读不到由「三段」顶上的 Notice 说
     const kimi = manual.querySelector('[data-model="kimi-k3"]') as HTMLElement;
-    expect(within(kimi).getAllByText('没读到').length).toBeGreaterThan(0);
+    expect(kimi.querySelectorAll('[data-unread]').length).toBeGreaterThan(0);
+    expect(within(kimi).queryByText('没读到')).toBeNull();
+    expect(within(box).queryByText('没读到')).toBeNull();
+    expect(box.querySelectorAll('[data-unread-notice]')).toHaveLength(1);
     const scope = segmentRow(box, 'scope');
     expect(within(scope).getByText('不分档')).toBeTruthy();
     // 对题只用了一个模型：模型名写在段名旁边，不再多一行同样的数
@@ -162,10 +165,11 @@ describe('【失败】读不到的都写明，不写 0', () => {
     open('/tasks/t-x', apiWith(detailWith([{ ...open_, id: 'x-3' }], 'done')));
     const runs = await panel('每一笔');
     const row = runRow(runs, 'x-3');
-    expect(within(row).getByText('耗时没读到')).toBeTruthy();
+    expect(row.querySelector('[data-unread-item="time"]')).toBeTruthy();
     expect(within(row).getByText(/单子已经结束，这一段没记结束时刻/)).toBeTruthy();
     const box = await panel('三段');
-    expect(within(segmentRow(box, 'manual')).getAllByText('没读到').length).toBeGreaterThan(0);
+    expect(segmentRow(box, 'manual').querySelectorAll('[data-unread]').length).toBeGreaterThan(0);
+    expect(box.querySelector('[data-unread-notice]')?.textContent).toMatch(/没读到：耗时/);
   });
 
   test('token、花费一样都没记到：格子里写「没读到」，合计那格也写「没读到」，不写 0', async () => {
@@ -182,17 +186,18 @@ describe('【失败】读不到的都写明，不写 0', () => {
     const runs = await panel('每一笔');
     const notes = [...runRow(runs, 'x-4').querySelectorAll('[data-unread-item]')].map((n) => n.textContent);
     expect(notes).toEqual(['token · 四样 token 都没记到', '花费 · 花费没记到']);
+    // 一笔里没读到的几项并成一行，不是一项一行
+    expect(runRow(runs, 'x-4').querySelectorAll('[data-unread-line]')).toHaveLength(1);
     const box = await panel('三段');
     const manual = segmentRow(box, 'manual');
     // token、缓存、当量、花费四格各写一次没读到（只有一个模型，不再多一行）；没有哪格写成 0
     // 花费那格另写为什么也估不了（token 没读全，按目录单价估不出来），不拿 0 顶
-    expect([...manual.querySelectorAll('[data-unread]')].map((n) => n.textContent)).toEqual([
-      '没读到',
-      '没读到',
-      '没读到',
-      '套餐内 · 花费没读到',
-      '1 笔 token 没读全，估不了',
-    ]);
+    // 格子里只留 —（原因在 title 和每一笔里），一个区块只出一条 Notice 说哪几项没读到
+    expect([...manual.querySelectorAll('[data-unread]')].map((n) => n.textContent)).toEqual(['—', '—', '—', '—']);
+    expect(within(box).queryByText('没读到')).toBeNull();
+    const notice = box.querySelector('[data-unread-notice]');
+    expect(notice?.textContent).toMatch(/没读到：token、缓存、当量、花费/);
+    expect(box.querySelectorAll('[data-unread-notice]')).toHaveLength(1);
     expect(within(manual).queryByText('0 / 0')).toBeNull();
     expect(within(manual).queryByText('0')).toBeNull();
     // 合计顶格没读到的收成一行灰字，不再各占大格（#1751）
@@ -248,6 +253,8 @@ describe('【失败】读不到的都写明，不写 0', () => {
     expect(within(row).getByText('在跑')).toBeTruthy();
     expect(within(row).getByText(/已跑 30 分钟/)).toBeTruthy();
     expect(row.querySelectorAll('[data-unread-item]')).toHaveLength(0);
+    // 没有真读不到的项，就不出那条 Notice
+    expect(document.querySelector('[data-unread-notice]')).toBeNull();
   });
 });
 

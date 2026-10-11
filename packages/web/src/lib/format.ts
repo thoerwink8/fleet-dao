@@ -40,6 +40,13 @@ export function formatDateTime(iso: string): string {
   return `${formatDate(iso)} ${formatClock(iso)}`;
 }
 
+const ISO_TIME = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g;
+
+/** 后端写好的一句话里夹着的 ISO 时间（2026-10-11T10:45:29.086Z）换成本地化的写法；认不出的时刻原样留着。 */
+export function localizeIsoTimes(text: string): string {
+  return text.replace(ISO_TIME, (iso) => (Number.isNaN(Date.parse(iso)) ? iso : formatDateTime(iso)));
+}
+
 /** 过去的时间：刚刚 / 3 分钟前 / 2 小时前 / 昨天 14:20 / 3 天前 / 9月2日 */
 export function formatAgo(iso: string, now: number): string {
   const diff = now - Date.parse(iso);
