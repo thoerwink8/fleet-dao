@@ -449,7 +449,7 @@ export function PoolHoldsPanel() {
               id="hold-pool"
               value={draft.poolId}
               onChange={set('poolId')}
-              className="h-8 w-full max-w-sm rounded-md border border-input bg-transparent px-2 text-sm"
+              className="h-8 w-full max-w-sm max-md:min-h-10 rounded-md border border-input bg-transparent px-2 text-sm"
             >
               <option value="">选一个…</option>
               {(pools.data?.pools ?? [])

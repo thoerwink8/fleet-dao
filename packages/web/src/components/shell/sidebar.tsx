@@ -60,6 +60,8 @@ function Item({
       // 别的导航项挂在它下面时（/routing 和 /routing/status）只在正好是它时亮，不然两项一起亮
       end={item.to === '/' || NAV_ITEMS.some((o) => o.to.startsWith(`${item.to}/`))}
       onClick={onNavigate}
+      // 手机「更多」抽屉里点的：顶替抽屉压的那条历史，后退回到上一页而不是多停一次（#1820）
+      replace={onNavigate !== undefined}
       // 收成图标栏时没有字：名字交给读屏（悬停提示照旧）
       aria-label={collapsed ? item.label : undefined}
       className={({ isActive }) =>

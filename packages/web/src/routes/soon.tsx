@@ -49,7 +49,7 @@ export default function Soon() {
   const { pathname } = useLocation();
   const plan = PLANS[pathname];
   return (
-    <Page title={plan?.title ?? '还没做'} description={plan?.what ?? '这个地址还没有页面。'}>
+    <Page title={plan?.title ?? '还没做'} description={plan?.what ?? '这个地址还没有页面。'} keepDescription>
       <div className="flex items-center gap-2 text-sm text-ink-stall">
         <Construction className="size-4" aria-hidden />
         这一页还没做

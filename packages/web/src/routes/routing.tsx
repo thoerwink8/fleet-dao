@@ -116,21 +116,21 @@ export default function Routing() {
 
   if (error) {
     return (
-      <Page title="路由" description={<RoutingDescription />} actions={refresh}>
+      <Page title="路由" description={<RoutingDescription />} keepDescription actions={refresh}>
         <LoadError what="路由两层" error={error} />
       </Page>
     );
   }
   if (isLoading || !data) {
     return (
-      <Page title="路由" description={<RoutingDescription />} actions={refresh}>
+      <Page title="路由" description={<RoutingDescription />} keepDescription actions={refresh}>
         <LoadingRows rows={6} />
       </Page>
     );
   }
   if (data.unavailable) {
     return (
-      <Page title="路由" description={<RoutingDescription />} actions={refresh}>
+      <Page title="路由" description={<RoutingDescription />} keepDescription actions={refresh}>
         <div
           role="note"
           className="rounded-xl border border-dashed bg-card px-6 py-10 text-center text-sm text-muted-foreground"
@@ -159,6 +159,7 @@ export default function Routing() {
     <Page
       title="路由"
       description={<RoutingDescription />}
+      keepDescription
       // 一个用途都没有时不报「0 个派不出去」：那会读成没事
       actions={
         <>

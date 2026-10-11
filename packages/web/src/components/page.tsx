@@ -1,26 +1,57 @@
 import { errMessage } from '@fleet-dao/shared/util';
 import { useQueryClient } from '@tanstack/react-query';
-import type { LucideIcon } from 'lucide-react';
+import { Info, type LucideIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { cn } from '../lib/utils';
+import { usePhone } from '../lib/viewport';
 import { Button } from './ui/button';
+import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Skeleton } from './ui/skeleton';
 
 /** 后台页面的外框：标题、一句说明、右上角的操作。 */
+/**
+ * 手机上页头的说明收成标题旁边的「ⓘ」，点开才看（#1820）：一句说明在 390 宽要占三四行，把第一屏的内容往下挤。
+ * 说明没有丢：点「ⓘ」弹出来。
+ */
+function DescriptionHint({ children }: { children: ReactNode }) {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="这页是做什么的"
+          data-description-hint
+          className="inline-grid size-10 shrink-0 place-items-center rounded-full text-muted-foreground hover:text-foreground"
+        >
+          <Info className="size-4" aria-hidden />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-auto max-w-sm text-sm text-muted-foreground">
+        {children}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export function Page({
   title,
   description,
   actions,
   children,
   className,
+  keepDescription,
 }: {
   title: ReactNode;
   description?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
   className?: string;
+  /** 手机上也直接写出说明，不收成「ⓘ」：说明里放的是这页的关键信息（任务页的状态行），不是介绍。 */
+  keepDescription?: boolean;
 }) {
+  const phone = usePhone();
+  const fold = phone && Boolean(description) && !keepDescription;
   return (
     <div
       className={cn(
@@ -28,10 +59,15 @@ export function Page({
         className,
       )}
     >
-      <header className="mb-6 flex flex-wrap items-end justify-between gap-3 lg:flex-nowrap">
-        <div className="min-w-0 lg:flex-1">
-          <h1 className="text-title font-semibold tracking-tight">{title}</h1>
-          {description ? (
+      <header className="mb-6 flex flex-wrap items-end justify-between gap-3 max-md:mb-4 lg:flex-nowrap">
+        <div className="relative min-w-0 lg:flex-1">
+          <h1 className={cn('text-title font-semibold tracking-tight', fold && 'pr-10')}>{title}</h1>
+          {fold ? (
+            <span className="absolute -top-1.5 right-0">
+              <DescriptionHint>{description}</DescriptionHint>
+            </span>
+          ) : null}
+          {description && !fold ? (
             <div className="mt-1 max-w-3xl text-sm text-muted-foreground">{description}</div>
           ) : null}
         </div>

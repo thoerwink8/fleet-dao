@@ -431,7 +431,9 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
       <div className="mt-0.5 text-caption text-muted-foreground">
         每个渠道每个额度窗「最多用到百分之几」，已用到这条线引擎就不再往这个渠道派新活。
         <details className="mt-0.5">
-          <summary className="cursor-pointer underline-offset-2 hover:underline">怎么填</summary>
+          <summary className="cursor-pointer underline-offset-2 hover:underline max-md:flex max-md:min-h-10 max-md:items-center">
+            怎么填
+          </summary>
           {`${brand.terms.carpool}用不了时也不切过去（在跑的不动），剩下的留给自己用。灰色「—」= 未配置（不限；${brand.terms.carpool}用到被拒为止，一般不设线），点一下才能填；写「${UNLIMITED_WORD}」= 明确不限。`}
         </details>
       </div>
@@ -487,7 +489,7 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
                             onBlur={() => {
                               if ((draft[dk] ?? '') === '') stopEditing(dk);
                             }}
-                            className="num h-7 w-20"
+                            className="num h-7 w-20 max-md:min-h-10"
                           />
                           <span className="text-xs text-muted-foreground">%</span>
                         </>
@@ -500,7 +502,7 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
                             setEditing((cur) => new Set(cur).add(dk));
                             setFocusKey(dk);
                           }}
-                          className="num h-7 w-20 rounded-md border border-dashed bg-muted/40 text-xs text-faint outline-none hover:border-border-strong hover:text-muted-foreground focus-visible:ring-focus focus-visible:ring-ring/50"
+                          className="num h-7 w-20 max-md:min-h-10 rounded-md border border-dashed bg-muted/40 text-xs text-faint outline-none hover:border-border-strong hover:text-muted-foreground focus-visible:ring-focus focus-visible:ring-ring/50"
                         >
                           —<span className="sr-only">未配置，点击填写</span>
                         </button>
