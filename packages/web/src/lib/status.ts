@@ -47,13 +47,13 @@ export const toneBg: Record<Tone, string> = {
   stop: 'bg-st-stop',
 };
 export const toneSoft: Record<Tone, string> = {
-  run: 'bg-st-run/12',
-  wait: 'bg-st-wait/12',
-  human: 'bg-st-human/14',
-  stall: 'bg-st-stall/14',
-  fail: 'bg-st-fail/14',
-  done: 'bg-st-done/12',
-  stop: 'bg-st-stop/14',
+  run: 'bg-st-run-soft',
+  wait: 'bg-st-wait-soft',
+  human: 'bg-st-human-soft',
+  stall: 'bg-st-stall-soft',
+  fail: 'bg-st-fail-soft',
+  done: 'bg-st-done-soft',
+  stop: 'bg-st-stop-soft',
 };
 export const toneIcon: Record<Tone, LucideIcon> = {
   run: CircleDot,

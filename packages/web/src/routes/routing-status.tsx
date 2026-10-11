@@ -13,8 +13,8 @@
 //   均耗时、可用率按这 60 格算。库读不到写「没查成」，不拿空格子冒充没有。引擎关着这一份照样读。
 
 import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
-import { ChevronDown, LoaderCircle, Radar, SatelliteDish } from 'lucide-react';
-import { type ReactNode, useMemo, useState } from 'react';
+import { ChevronDown, LoaderCircle, Radar, SatelliteDish, SearchX } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import {
@@ -42,13 +42,14 @@ import {
   HistoryStrip,
 } from '../components/channel-status';
 import { EmptyState } from '../components/layout/empty-state';
+import { KeyValue } from '../components/layout/key-value';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Notice, type NoticeTone } from '../components/layout/notice';
 import { Page } from '../components/layout/page';
 import { Section } from '../components/layout/section';
 import { StatusBadge, StatusDot } from '../components/layout/status-badge';
 import { PoolProblemLine, usePoolProblems } from '../components/pool-problem';
 import { ProbeLog } from '../components/probe-log';
-import { RefreshBar } from '../components/refresh-bar';
 import { MOBILE_MQ } from '../components/routing-browse';
 import { KindChip } from '../components/routing-kinds';
 import { Button } from '../components/ui/button';
@@ -325,35 +326,35 @@ export default function RoutingStatus() {
     <Page
       title="渠道状态"
       description={DESCRIPTION}
+      refresh={{
+        onRefresh: () => void routing.refetch(),
+        isFetching: routing.isFetching,
+        // 共用秒表一拍最多慢 1 秒。刚读成的时间戳比「现在」新时压回这一拍，避免显示成「1 秒后」。
+        dataUpdatedAt: routing.dataUpdatedAt > now ? now : routing.dataUpdatedAt,
+        staleAfterMs: ROUTING_STATUS_STALE_AFTER_MS,
+      }}
       actions={
-        <>
-          <StatusBadge tone="done" label={`${okCount} 个在线`} />
-          {downCount > 0 ? <StatusBadge tone="fail" label={`${downCount} 个故障`} /> : null}
-          {unknownCount > 0 ? <StatusBadge tone="stall" label={`${unknownCount} 个待查`} /> : null}
-          {quietCount > 0 ? <StatusBadge tone="stop" label={`${quietCount} 个已关或未使用`} /> : null}
-          <RefreshBar
-            onRefresh={() => void routing.refetch()}
-            isFetching={routing.isFetching}
-            // 共用秒表一拍最多慢 1 秒。刚读成的时间戳比「现在」新时压回这一拍，避免显示成「1 秒后」。
-            dataUpdatedAt={routing.dataUpdatedAt > now ? now : routing.dataUpdatedAt}
-            staleAfterMs={ROUTING_STATUS_STALE_AFTER_MS}
-          />
-          <Button
-            size="sm"
-            onClick={() => fire()}
-            disabled={blocked !== undefined || allActive || probeNow.isPending}
-            title={blocked ?? (allActive ? '全部路由正在探' : '让引擎现在就把全部路由探一遍')}
-          >
-            {allActive || probeNow.isPending ? (
-              <LoaderCircle className="animate-spin" aria-hidden />
-            ) : (
-              <Radar aria-hidden />
-            )}
-            全部立即探测
-          </Button>
-        </>
+        <Button
+          size="sm"
+          onClick={() => fire()}
+          disabled={blocked !== undefined || allActive || probeNow.isPending}
+          title={blocked ?? (allActive ? '全部路由正在探' : '让引擎现在就把全部路由探一遍')}
+        >
+          {allActive || probeNow.isPending ? (
+            <LoaderCircle className="animate-spin" aria-hidden />
+          ) : (
+            <Radar aria-hidden />
+          )}
+          全部立即探测
+        </Button>
       }
     >
+      <div data-channel-counts className="mb-4 flex flex-wrap items-center gap-1.5">
+        <StatusBadge tone="done" label={`${okCount} 个在线`} />
+        {downCount > 0 ? <StatusBadge tone="fail" label={`${downCount} 个故障`} /> : null}
+        {unknownCount > 0 ? <StatusBadge tone="stall" label={`${unknownCount} 个待查`} /> : null}
+        {quietCount > 0 ? <StatusBadge tone="stop" label={`${quietCount} 个已关或未使用`} /> : null}
+      </div>
       <ProbeBanner
         requests={requests}
         now={now}
@@ -371,27 +372,32 @@ export default function RoutingStatus() {
             counts={filterCounts}
           />
           {visible.length === 0 ? (
-            <p
-              role="status"
-              className="rounded-lg border border-dashed px-3 py-6 text-center text-sub text-muted-foreground"
-            >
-              没有符合的渠道{q ? `：「${search.trim()}」` : ''}
-              {filter !== 'all' ? `，筛选在「${STATE_FILTERS.find((f) => f.id === filter)?.label}」` : ''}
-            </p>
+            <Section>
+              <div role="status">
+                <EmptyState
+                  icon={SearchX}
+                  title={`没有符合的渠道${q ? `：「${search.trim()}」` : ''}${
+                    filter !== 'all' ? `，筛选在「${STATE_FILTERS.find((f) => f.id === filter)?.label}」` : ''
+                  }`}
+                />
+              </div>
+            </Section>
           ) : (
             // 两栏时列表最高换成 max-h-routing-pane。
-            <div className="lg:max-h-routing-pane lg:overflow-y-auto lg:pr-1">
-              <ChannelList
-                cards={visible}
-                selected={drawer && !detailOpen ? undefined : (picked ?? undefined)}
-                probing={probing}
-                problems={channelProblems}
-                now={now}
-                onPick={pickChannel}
-              />
-            </div>
+            <Section flush>
+              <div className="lg:max-h-routing-pane lg:overflow-y-auto">
+                <ChannelList
+                  cards={visible}
+                  selected={drawer && !detailOpen ? undefined : (picked ?? undefined)}
+                  probing={probing}
+                  problems={channelProblems}
+                  now={now}
+                  onPick={pickChannel}
+                />
+              </div>
+            </Section>
           )}
-          <ul className="mt-3 space-y-1 text-caption text-muted-foreground">
+          <ul className="mt-3 space-y-1 text-meta text-muted-foreground">
             <li>绿灯只表示本节点最近一轮抽测通过，不保证每次使用都正常。</li>
             <li>晚于「下次探测时刻」20 分钟还没探，就显示「检测中断」并标红，不拿旧绿灯掩盖中断。</li>
             <li>已关（人关的）、未被用途使用、池暂停、已下架都不是坏了，只有「故障」才要修。</li>
@@ -413,7 +419,7 @@ export default function RoutingStatus() {
               className={cn('gap-0', phone ? 'max-h-9/10' : 'w-full sm:max-w-xl')}
             >
               <SheetHeader className="border-b py-3 pr-12">
-                <SheetTitle className="text-sm">渠道详情</SheetTitle>
+                <SheetTitle className="text-body">渠道详情</SheetTitle>
                 <SheetDescription className="sr-only">
                   这个渠道每条路由的状态、探测记录和立即探测
                 </SheetDescription>
@@ -424,12 +430,11 @@ export default function RoutingStatus() {
         ) : (
           <div className="min-w-0">
             {detail ?? (
-              <p
-                role="status"
-                className="rounded-lg border border-dashed px-3 py-6 text-center text-sub text-muted-foreground"
-              >
-                没有可看的渠道，换个搜索词或筛选
-              </p>
+              <Section>
+                <div role="status">
+                  <EmptyState icon={SearchX} title="没有可看的渠道，换个搜索词或筛选" />
+                </div>
+              </Section>
             )}
           </div>
         )}
@@ -456,7 +461,7 @@ function ProbeBanner({
   const last = requests.find((r) => !isActive(r));
   const recent =
     last && now - Date.parse(last.finishedAt ?? last.requestedAt) < 30 * 60_000 ? last : undefined;
-  const lines: { key: string; tone: Tone; text: string; spin?: boolean; onClose?: () => void }[] = [];
+  const lines: { key: string; tone: NoticeTone; text: string; onClose?: () => void }[] = [];
   if (error) {
     lines.push({ key: 'error', tone: 'fail', text: `没探成：${errorText(error)}`, onClose: onDismissError });
   }
@@ -465,9 +470,8 @@ function ProbeBanner({
     const what = r.routeIds ? `${r.routeIds.length} 条路由` : '全部路由';
     lines.push({
       key: r.requestId,
-      tone: r.why ? 'stall' : 'run',
+      tone: r.why ? 'stall' : 'info',
       text: `正在探${what}：${activityText(r, now)}`,
-      spin: true,
     });
   }
   if (recent) {
@@ -498,24 +502,23 @@ function ProbeBanner({
   return (
     <ul aria-label="立即探测" className="mb-4 space-y-1.5">
       {lines.map((l) => (
-        <li
-          key={l.key}
-          role={l.tone === 'fail' ? 'alert' : 'status'}
-          className={cn(
-            'flex items-start gap-2 rounded-lg border px-3 py-2 text-sub',
-            l.tone === 'fail' && 'border-st-fail/40 bg-st-fail/10 text-ink-fail',
-            l.tone === 'stall' && 'border-st-stall/50 bg-st-stall/10 text-ink-stall',
-            l.tone === 'run' && 'border-st-run/40 bg-st-run/10 text-ink-run',
-            l.tone === 'done' && 'bg-card text-muted-foreground',
-          )}
-        >
-          {l.spin ? <LoaderCircle className="mt-0.5 size-3.5 shrink-0 animate-spin" aria-hidden /> : null}
-          <span className="min-w-0 flex-1 break-words">{l.text}</span>
-          {l.onClose ? (
-            <button type="button" onClick={l.onClose} className="text-caption underline underline-offset-2">
-              知道了
-            </button>
-          ) : null}
+        <li key={l.key}>
+          <Notice
+            tone={l.tone}
+            action={
+              l.onClose ? (
+                <button
+                  type="button"
+                  onClick={l.onClose}
+                  className="inline-flex min-h-8 items-center px-1 text-meta underline underline-offset-2 max-md:min-h-10"
+                >
+                  知道了
+                </button>
+              ) : undefined
+            }
+          >
+            <span className="break-words">{l.text}</span>
+          </Notice>
         </li>
       ))}
     </ul>
@@ -646,7 +649,7 @@ function ChannelDetail({
       title={
         <span className="flex flex-wrap items-center gap-x-2">
           {card.channel.name}
-          <span className="text-caption font-normal text-muted-foreground">
+          <span className="text-meta font-normal text-muted-foreground">
             {card.channel.billing === 'metered' ? '按量计费' : '订阅'} · {routes.length} 条路由
           </span>
         </span>
@@ -671,24 +674,25 @@ function ChannelDetail({
       }
     >
       {card.interrupted ? (
-        <p role="status" className="mb-3 text-sub font-medium text-ink-fail">
+        <Notice tone="fail" className="mb-3">
           检测中断：晚于下次探测时刻 20 分钟还没探这个渠道，上次的结论不再当现状
           {card.probedAt ? `（${formatAgo(card.probedAt, now)}）` : null}
-        </p>
+        </Notice>
       ) : null}
-      {card.fallback ? <p className="mb-3 text-sub text-ink-fail">{card.fallback}</p> : null}
+      {card.fallback ? <p className="mb-3 text-body text-ink-fail">{card.fallback}</p> : null}
       {card.failover ? <FailoverNote failover={card.failover} now={now} /> : null}
       {channelPools.length > 0 ? (
-        <div
-          data-pool-problems
-          className="mb-3 space-y-1 rounded-md border border-st-stall/50 bg-st-stall/10 px-3 py-2"
-        >
-          {channelPools.map((p) => (
-            <PoolProblemLine key={p.poolId} problem={{ ...p }} now={now} />
-          ))}
+        <div data-pool-problems className="mb-3">
+          <Notice tone="stall">
+            <div className="space-y-1">
+              {channelPools.map((p) => (
+                <PoolProblemLine key={p.poolId} problem={{ ...p }} now={now} />
+              ))}
+            </div>
+          </Notice>
         </div>
       ) : problemsError ? (
-        <p data-pool-problems="unreadable" className="mb-3 text-caption text-ink-stall">
+        <p data-pool-problems="unreadable" className="mb-3 text-meta text-ink-stall">
           账号池的毛病（额度读不到、凭据过期）没读成：{errorText(problemsError)}。这里没写不代表没有。
         </p>
       ) : null}
@@ -710,7 +714,7 @@ function ChannelDetail({
         onToggle={toggleCell}
       />
       {sorted.length === 0 ? (
-        <p className="text-sub text-muted-foreground">这个渠道下一条路由都没有。</p>
+        <p className="text-body text-muted-foreground">这个渠道下一条路由都没有。</p>
       ) : (
         <>
           {attention.length > 0 ? (
@@ -725,7 +729,7 @@ function ChannelDetail({
                 aria-expanded={quietOpen}
                 aria-controls="route-fold-quiet"
                 onClick={() => setQuietShown(!quietOpen)}
-                className="inline-flex min-h-8 items-center gap-1 rounded-md px-2 text-meta text-muted-foreground hover:bg-muted hover:text-foreground"
+                className="inline-flex min-h-8 items-center gap-1 rounded-md px-2 max-md:min-h-10 text-meta text-muted-foreground hover:bg-muted hover:text-foreground"
               >
                 <ChevronDown
                   className={cn('size-3.5 transition-transform', quietOpen && 'rotate-180')}
@@ -826,9 +830,9 @@ function RouteRow({
       data-kind={kind}
       className={cn(
         'rounded-lg border',
-        alarm && !active && 'border-st-fail/40',
-        (kind === 'off' || kind === 'unused' || kind === 'retired') && 'bg-muted/30',
-        picked && 'ring-2 ring-ring/40',
+        alarm && !active && 'border-st-fail-line',
+        (kind === 'off' || kind === 'unused' || kind === 'retired') && 'bg-muted',
+        picked && 'ring-2 ring-ring',
       )}
     >
       <button
@@ -840,16 +844,12 @@ function RouteRow({
         className="flex min-h-10 w-full items-center gap-2 px-3 py-1.5 text-left"
       >
         <StatusDot tone={active ? 'run' : routeStateTone[kind]} />
-        <span className="shrink-0 text-sm font-semibold">{name}</span>
-        <span className="num min-w-0 flex-1 truncate text-caption text-muted-foreground" title={r.id}>
+        <span className="shrink-0 text-body font-semibold">{name}</span>
+        <span className="num min-w-0 flex-1 truncate text-meta text-muted-foreground" title={r.id}>
           {r.id}
         </span>
         {active ? (
-          // 探测中换成 text-caption。
-          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-st-run/10 px-1.5 text-caption font-medium leading-5 text-ink-run">
-            <LoaderCircle className="size-3 animate-spin" aria-hidden />
-            {active.state === 'running' ? '探测中' : '排队中'}
-          </span>
+          <StatusBadge tone="run" label={active.state === 'running' ? '探测中' : '排队中'} />
         ) : (
           <KindChip kind={kind} />
         )}
@@ -866,7 +866,7 @@ function RouteRow({
         />
       </button>
       {lastLine || next ? (
-        <div data-probe-pace className="num flex flex-wrap gap-x-3 gap-y-0.5 px-3 pb-1.5 text-caption">
+        <div data-probe-pace className="num flex flex-wrap gap-x-3 gap-y-0.5 px-3 pb-1.5 text-meta">
           {lastLine ? (
             <p data-probe-last className="text-muted-foreground">
               {lastLine}
@@ -888,65 +888,73 @@ function RouteRow({
       ) : null}
       {problem ? <PoolProblemLine problem={problem} className="px-3 pb-1.5" /> : null}
       {kind === 'degraded' && probe?.detail && !open ? (
-        <p className="truncate px-3 pb-2 text-caption text-ink-doubt" title={probe.detail}>
+        <p className="truncate px-3 pb-2 text-meta text-ink-doubt" title={probe.detail}>
           {probe.detail}
         </p>
       ) : null}
       {failed && probe?.detail && !open ? (
-        <p className="truncate px-3 pb-2 text-caption text-ink-fail" title={probe.detail}>
+        <p className="truncate px-3 pb-2 text-meta text-ink-fail" title={probe.detail}>
           {probe.detail}
         </p>
       ) : null}
       {open ? (
         <div id={bodyId} className="border-t px-3 pb-3 pt-2.5">
-          <p className="mb-2 text-caption text-muted-foreground">{routeStateWhy[kind]}</p>
+          <p className="mb-2 text-meta text-muted-foreground">{routeStateWhy[kind]}</p>
           {active ? (
-            <p className={cn('mb-2 text-caption', active.why ? 'text-ink-stall' : 'text-ink-run')}>
+            <p className={cn('mb-2 text-meta', active.why ? 'text-ink-stall' : 'text-ink-run')}>
               {activityText(active, now)}
             </p>
           ) : null}
           {failure ? (
-            <p role="alert" className="mb-2 text-caption text-ink-fail">
+            <p role="alert" className="mb-2 text-meta text-ink-fail">
               {formatClock(failure.requestedAt)} {sourceText(failure) ?? '点的立即探测'}没成：
               {failure.why ?? '没写原因'}
             </p>
           ) : null}
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-caption sm:grid-cols-4">
-            <Fact label="探针结论">{word.label}</Fact>
-            <Fact label="最近一次">
-              {probe ? (
-                <span className="num">
-                  {formatClock(probe.at)}（{formatAgo(probe.at, now)}）
-                </span>
-              ) : (
-                '探针还没看过'
-              )}
-            </Fact>
-            <Fact label="耗时">
-              {seconds !== undefined ? (
-                <span className="num">{seconds.toFixed(seconds < 10 ? 1 : 0)} 秒</span>
-              ) : (
-                <span className="text-muted-foreground">
-                  {probe && probe.state !== 'ok' && probe.state !== 'failed' ? '没真探' : '没量到'}
-                </span>
-              )}
-            </Fact>
-            <Fact label="执行方式">{r.hostId}</Fact>
-            <Fact label="节奏档">
-              {r.probeTier ? (
-                `${PROBE_TIER_WORD[r.probeTier].label}${PROBE_TIER_WORD[r.probeTier].every ? `，${PROBE_TIER_WORD[r.probeTier].every}` : ''}`
-              ) : (
-                <span className="text-muted-foreground">库里还没写</span>
-              )}
-            </Fact>
-          </dl>
+          <KeyValue
+            layout="grid"
+            cols={4}
+            items={[
+              { label: '探针结论', value: word.label },
+              {
+                label: '最近一次',
+                value: probe ? (
+                  <span className="num">
+                    {formatClock(probe.at)}（{formatAgo(probe.at, now)}）
+                  </span>
+                ) : (
+                  '探针还没看过'
+                ),
+              },
+              {
+                label: '耗时',
+                value:
+                  seconds !== undefined ? (
+                    <span className="num">{seconds.toFixed(seconds < 10 ? 1 : 0)} 秒</span>
+                  ) : (
+                    <span className="text-muted-foreground">
+                      {probe && probe.state !== 'ok' && probe.state !== 'failed' ? '没真探' : '没量到'}
+                    </span>
+                  ),
+              },
+              { label: '执行方式', value: r.hostId },
+              {
+                label: '节奏档',
+                value: r.probeTier ? (
+                  `${PROBE_TIER_WORD[r.probeTier].label}${PROBE_TIER_WORD[r.probeTier].every ? `，${PROBE_TIER_WORD[r.probeTier].every}` : ''}`
+                ) : (
+                  <span className="text-muted-foreground">库里还没写</span>
+                ),
+              },
+            ]}
+          />
           <div className="mt-2.5">
-            <div className="mb-1 text-caption text-muted-foreground">
+            <div className="mb-1 text-meta text-muted-foreground">
               {probe?.state === 'failed' ? '失败原因（原文）' : '原文'}
             </div>
             <pre
               className={cn(
-                'max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/40 px-2.5 py-2 font-mono text-micro',
+                'max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted px-2.5 py-2 font-mono text-meta',
                 failed ? 'text-ink-fail' : 'text-muted-foreground',
               )}
             >
@@ -967,7 +975,7 @@ function RouteRow({
             <button
               type="button"
               onClick={onPick}
-              className="text-caption text-muted-foreground underline underline-offset-2 hover:text-foreground"
+              className="text-meta text-muted-foreground underline underline-offset-2 hover:text-foreground"
             >
               看最近一次
             </button>
@@ -975,14 +983,5 @@ function RouteRow({
         </div>
       ) : null}
     </li>
-  );
-}
-
-function Fact({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="min-w-0">
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="mt-0.5 truncate text-sub">{children}</dd>
-    </div>
   );
 }

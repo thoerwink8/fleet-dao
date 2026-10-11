@@ -18,7 +18,7 @@ function withLayers(layers: RoutingLayers | (() => Promise<RoutingLayers>)): Moc
 }
 
 const purposeLinks = async () =>
-  within(await screen.findByRole('navigation', { name: '用途' })).getAllByRole('link');
+  within(await screen.findByRole('navigation', { name: '用途' })).getAllByRole('button');
 
 /** 用途页里点一个模型的名字，下面看它的路由（一次只展开一个模型）。 */
 const pickModel = async (name: string) =>
@@ -44,7 +44,7 @@ describe('路由页：每一层现在活着吗', () => {
     expect(links[4]?.textContent).toContain('这里配指挥官用的模型');
     expect(screen.getByText('在对话里做，不选路', { exact: false })).toBeTruthy();
     expect(screen.getByText('不是流程里的一段')).toBeTruthy();
-    const current = links.filter((a) => a.getAttribute('aria-current') === 'true');
+    const current = links.filter((a) => a.getAttribute('aria-pressed') === 'true');
     expect(current).toHaveLength(1);
     expect(current[0]?.textContent).toContain('验收');
     for (const gone of ['分诊', '需求文档', '方案', '调研', '第二意见', '开 PR 前验证']) {
@@ -345,7 +345,7 @@ describe('路由页：每一层现在活着吗', () => {
   test('网址里点了已不存在的用途（plan）：照没点名算（先看靠后备撑着的验收），不留一块空详情', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=plan' });
     const links = await purposeLinks();
-    expect(links.find((a) => a.getAttribute('aria-current') === 'true')?.textContent).toContain('验收');
+    expect(links.find((a) => a.getAttribute('aria-pressed') === 'true')?.textContent).toContain('验收');
     expect(screen.queryByText('方案')).toBeNull();
   });
 

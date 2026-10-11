@@ -19,6 +19,10 @@
 @theme inline {
   /* Tailwind 默认色板（red-500、white、black……）整个不生成：颜色只许用下面这些语义名。 */
   --color-*: initial;
+  /* 字号、圆角、阴影同理（#1855 收口）：Tailwind 默认的 text-xs、rounded-xl、shadow-lg 整个不生成，只剩下面定义的档位。 */
+  --text-*: initial;
+  --radius-*: initial;
+  --shadow-*: initial;
 
   --font-sans:
     "Inter Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
@@ -93,6 +97,7 @@
 
   /*
    * 字号六档（规范 6.2）：字号和行高绑在一起，页面不再另配 leading-数字。中文最小 12px（画布节点例外）。
+   * body、heading、title、display 四档读 --fs-* 变量（和密度令牌同一套写法）：手机（<48rem）的值在下面「字号」块的 :root，桌面（≥48rem）参照苹果 macOS HIG 的字阶在同一块的媒体查询里覆盖（#1882）。meta、canvas 两档两组一样，直接写值。下面的值是手机档：
    * meta 12/16：时间戳、表头、计数、标签里的字、辅助说明。
    * body 14/20：默认。列表行、表格、卡片正文、按钮、输入、菜单、段落（段落另加 leading-relaxed）。
    * heading 16/24：区块、卡片、抽屉、对话框标题。
@@ -102,53 +107,36 @@
    */
   --text-meta: 0.75rem;
   --text-meta--line-height: 1rem;
-  --text-body: 0.875rem;
-  --text-body--line-height: 1.25rem;
-  --text-heading: 1rem;
-  --text-heading--line-height: 1.5rem;
+  --text-body: var(--fs-body);
+  --text-body--line-height: var(--fs-body-lh);
+  --text-heading: var(--fs-heading);
+  --text-heading--line-height: var(--fs-heading-lh);
   --text-heading--font-weight: 600;
-  --text-title: 1.25rem;
-  --text-title--line-height: 1.75rem;
+  --text-title: var(--fs-title);
+  --text-title--line-height: var(--fs-title-lh);
   --text-title--font-weight: 600;
   --text-title--letter-spacing: -0.01em;
-  --text-display: 1.75rem;
-  --text-display--line-height: 2rem;
+  --text-display: var(--fs-display);
+  --text-display--line-height: var(--fs-display-lh);
   --text-display--font-weight: 600;
   --text-canvas: 0.6875rem;
   --text-canvas--line-height: 0.875rem;
 
-  /*
-   * 旧字号名（#182，迁移期保留，收口片删）：新代码用上面六档，lint-design 的 R2 拦。
-   * micro 10px → meta；caption 11px → meta；sub 13px → body；label 14px → body；
-   * strong 15px → heading；stat-num 17px → heading；stat 28px → display。
-   */
-  --text-micro: 10px;
-  --text-caption: 11px; /* 依据：健康条、决定卡、定时任务、渠道状态的辅助字。caption（辅助信息、时间戳） */
-  --text-sub: 13px;
-  --text-label: 14px;
-  --text-strong: 15px;
-  --text-stat-num: 17px;
-  --text-stat: 28px;
-
-  /* 圆角：控件 md、卡片和弹层 lg、标签 sm、圆点和胶囊 full（规范 6.4）。xl 和 2 是旧档，迁移完删。 */
+  /* 圆角：控件 md、卡片和弹层 lg、标签 sm、圆点和胶囊 full（规范 6.4）。只有这四档，其余（xl、2 等）已删。 */
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
-  /* 圆角钉死 2px。依据：channel-status 探针格、routing-status 探针点原来写死 2px（rounded-2）；进度条、tooltip 箭头同一档。默认 rounded-xs 是 0.125rem，不是 2px。 */
-  --radius-2: 2px;
 
   /*
    * 阴影只表示「浮起」（规范 6.5）：
    * xs 描边按钮、输入；card 区块和卡片（亮色一根下边线加一点影，暗色没有，靠边框）；
    * overlay 浮层、菜单、下拉、提示、画布浮动工具条；modal 对话框、抽屉。
-   * 另三个是特效：选中行竖线、品牌色圈（额度热）、状态色光圈（完成时一闪）。card-edge 是旧名，迁移完删。
+   * 另三个是特效：选中行竖线、品牌色圈（额度热）、状态色光圈（完成时一闪）。
    */
   --shadow-xs: 0 1px 2px 0 color-mix(in oklab, var(--shadow-color) 40%, transparent);
   --shadow-card: var(--elev-card);
   --shadow-overlay: 0 8px 24px -12px var(--shadow-color), 0 0 0 1px var(--border);
   --shadow-modal: 0 24px 48px -16px var(--shadow-color);
-  --shadow-card-edge: 0 1px 0 var(--border);
   /* 先后列表里选中的那一行：左边一道竖线，不是整行加框。 */
   --shadow-row-selected: inset 3px 0 0 var(--foreground);
   --shadow-brand-ring: 0 0 0 1px var(--brand);
@@ -257,10 +245,40 @@
 }
 
 /*
+ * ---------- 字号：两组值，桌面参照苹果 macOS HIG（#1882） ----------
+ * 第一个 @theme 是 inline，类名直接读这里的 --fs-*（和密度令牌同一套写法）。
+ * 手机（<48rem）：正文 14 起，可点区 40 不变。
+ * 桌面（md，48rem 起）：macOS 内置文字样式，Body 13/16、Callout 12/15、Title 3 15/20、Title 2 17/22、Title 1 22/26、Large Title 26/32。
+ * meta 两组都是 12/16：中文最小 12，行高不低于 16。页标题行高取 28：单行标题给汉字留足上下空。画布 text-canvas 不动。
+ */
+:root {
+  --fs-body: 0.875rem;
+  --fs-body-lh: 1.25rem;
+  --fs-heading: 1rem;
+  --fs-heading-lh: 1.5rem;
+  --fs-title: 1.25rem;
+  --fs-title-lh: 1.75rem;
+  --fs-display: 1.75rem;
+  --fs-display-lh: 2rem;
+}
+@media (width >= 48rem) {
+  :root {
+    --fs-body: 0.8125rem;
+    --fs-body-lh: 1rem;
+    --fs-heading: 0.9375rem;
+    --fs-heading-lh: 1.25rem;
+    --fs-title: 1.375rem;
+    --fs-title-lh: 1.75rem;
+    --fs-display: 1.625rem;
+    --fs-display-lh: 2rem;
+  }
+}
+
+/*
  * ---------- 密度：组件令牌的取值 ----------
  * 标准 32 / 40 / 16 / 24 / 12（控件高、行高、区块内边距、区块间距、区块内间距）。
  * 紧凑 28 / 32 / 12 / 16 / 8，只在桌面（md，48rem）起生效：手机上 40 的可点区（#1820）照旧，所以 390 宽两种密度完全一样。
- * 字号不跟着缩：中文最小 12、正文 14，紧凑只收框的高度和留白，不收字。
+ * 字号不跟着缩（字号看宽度，不看密度），紧凑只收框的高度和留白，不收字。
  * 写在 :root 而不是 [data-palette]：预览卡、陈列页这类嵌套的 data-palette 会继承外层的密度，不会被重置回标准。
  * 任何一棵子树挂 data-density 就按它自己的来（comfortable 也列在这里，用来在紧凑的页面里放一块标准的）。
  */
@@ -658,7 +676,7 @@
   border-radius: var(--radius);
   background: var(--primary);
   color: var(--primary-foreground);
-  font-size: var(--text-label);
+  font-size: var(--text-body);
   font-weight: 600;
   line-height: 1.2;
   box-shadow:

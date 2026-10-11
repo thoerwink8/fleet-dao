@@ -724,18 +724,19 @@ export default function Settings() {
                   {PALETTES.map((p) => {
                     const active = theme.pref.palette === p.id;
                     return (
-                      // biome-ignore lint/a11y/useSemanticElements: 小色块单选，按钮比原生单选框好点。
-                      <button
+                      <Button
                         key={p.id}
                         type="button"
+                        variant="outline"
+                        size="sm"
                         role="radio"
                         aria-checked={active}
                         aria-label={`主题色：${p.name}`}
                         title={p.blurb}
                         onClick={() => theme.setPalette(p.id)}
                         className={cn(
-                          'inline-flex h-8 items-center gap-2 rounded-lg border bg-card px-2 text-xs max-md:min-h-10 outline-none transition-colors hover:border-border-strong focus-visible:ring-focus focus-visible:ring-ring/50',
-                          active && 'border-foreground bg-muted',
+                          'gap-2 px-2 text-meta hover:border-border-strong',
+                          active && 'border-foreground bg-muted dark:bg-muted',
                         )}
                       >
                         <span
@@ -745,14 +746,14 @@ export default function Settings() {
                           aria-hidden
                         >
                           <span className="size-2.5 rounded-full bg-brand" />
-                          <span className="size-2.5 rounded-full bg-foreground/70" />
+                          <span className="size-2.5 rounded-full bg-muted-foreground" />
                           <span className="size-2.5 rounded-full bg-st-done" />
                           <span className="size-2.5 rounded-full bg-st-fail" />
                         </span>
                         <span className="font-medium">{p.name}</span>
-                        <span className="num text-xs text-muted-foreground">{p.en}</span>
+                        <span className="num text-meta text-muted-foreground">{p.en}</span>
                         {active ? <Check className="size-3.5" aria-hidden /> : null}
-                      </button>
+                      </Button>
                     );
                   })}
                 </div>
@@ -760,7 +761,7 @@ export default function Settings() {
               <FieldRow label="状态色" hint="看板上颜色只表达状态。当前主题下的七种状态色。">
                 <div className="flex flex-wrap gap-x-4 gap-y-1">
                   {TONES.map((t) => (
-                    <span key={t} className="inline-flex items-center gap-1.5 text-xs">
+                    <span key={t} className="inline-flex items-center gap-1.5 text-meta">
                       <StatusDot tone={t} />
                       {toneLabel[t]}
                     </span>
