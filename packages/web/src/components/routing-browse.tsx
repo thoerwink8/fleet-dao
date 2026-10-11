@@ -42,13 +42,14 @@ import {
   NO_CATALOG_FILTER,
 } from '../lib/routing-browse';
 import { cn } from '../lib/utils';
-import { LoadError, LoadingRows, Panel } from './page';
+import { LoadError, LoadingRows } from './layout/load-state';
+import { Section } from './layout/section';
+import { StatusBadge, StatusDot } from './layout/status-badge';
 import { ChannelSwitch, FounderOnlyBadge, ModelSwitch } from './routing-edit';
 import { KindChip, KindDot, useKindEnv } from './routing-kinds';
 import { isManualChannel, ManualModelForm } from './routing-membership';
 import { ModelRosterNotice } from './routing-roster';
 import { ModelRoutes, RouteItem } from './routing-routes';
-import { StatusChip, StatusDot } from './status';
 
 /** 紧凑行的高度（像素）和一屏高度：窗口化按它们算位置。手机宽度两行，用更高的行高。 */
 export const ROW_HEIGHT = 44;
@@ -588,7 +589,7 @@ function CatalogDetail({ entry: e, now }: { entry: CatalogEntry; now: number }) 
   const raw = (routing.data?.routes ?? []).filter((r) => r.modelId === e.modelId);
   const channelName = (id: string) => routing.data?.channels.find((c) => c.id === id)?.name ?? id;
   return (
-    <Panel title={e.displayName} description={entrySummary(e)} bodyClassName="p-0">
+    <Section title={e.displayName} description={entrySummary(e)} flush>
       {e.switchKnown ? (
         <div className="overflow-hidden">
           <p className="border-b px-3 py-2 text-caption text-muted-foreground">
@@ -624,7 +625,7 @@ function CatalogDetail({ entry: e, now }: { entry: CatalogEntry; now: number }) 
           )}
         </div>
       )}
-    </Panel>
+    </Section>
   );
 }
 
@@ -735,7 +736,7 @@ function ChannelRow({
       </button>
       <div data-row-meta className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
         <span data-status-word className="shrink-0">
-          <StatusChip tone={c.tone} label={c.label} />
+          <StatusBadge tone={c.tone} label={c.label} />
         </span>
         <span data-route-summary className="min-w-0 truncate text-caption text-muted-foreground">
           {channelRouteLine(c.counts)}
@@ -750,11 +751,11 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
   const routing = useRouting();
   const { inLayers, others } = channelRoutes(c.channel.id, layers, routing.data);
   return (
-    <Panel
+    <Section
       title={c.channel.name}
       description={c.reason ?? countsText(c.counts)}
-      actions={<StatusChip tone={c.tone} label={c.label} />}
-      bodyClassName="p-0"
+      actions={<StatusBadge tone={c.tone} label={c.label} />}
+      flush
     >
       {isManualChannel(c.channel.id, c.channel.name, layers.modelRoster?.manual) ? (
         <ManualModelForm channelId={c.channel.id} />
@@ -815,6 +816,6 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
           </ul>
         </div>
       ) : null}
-    </Panel>
+    </Section>
   );
 }

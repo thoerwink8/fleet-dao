@@ -7,8 +7,8 @@ import { formatAgo } from '../../../lib/format';
 import { useSlowNow } from '../../../lib/hooks';
 import { toneText } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
+import { StatusDot } from '../../layout/status-badge';
 import { useRemoteView } from '../../node-notice';
-import { StatusDot } from '../../status';
 import { useTargetActions } from '../../task-actions';
 import { Button } from '../../ui/button';
 import {

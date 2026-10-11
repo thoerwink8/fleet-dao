@@ -18,8 +18,8 @@ import {
   withReviewBy,
 } from '../lib/pool-holds';
 import { cn } from '../lib/utils';
-import { FieldRow } from './field-row';
-import { LoadError, LoadingRows } from './page';
+import { FieldRow } from './layout/field-row';
+import { LoadError, LoadingRows } from './layout/load-state';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';

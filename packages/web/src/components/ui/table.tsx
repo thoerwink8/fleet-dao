@@ -6,7 +6,7 @@ import { cn } from '../../lib/utils';
 function Table({ className, ...props }: React.ComponentProps<'table'>) {
   return (
     <div data-slot="table-container" className="relative w-full overflow-x-auto">
-      <table data-slot="table" className={cn('w-full caption-bottom text-sm', className)} {...props} />
+      <table data-slot="table" className={cn('w-full caption-bottom text-body', className)} {...props} />
     </div>
   );
 }
@@ -23,7 +23,7 @@ function TableFooter({ className, ...props }: React.ComponentProps<'tfoot'>) {
   return (
     <tfoot
       data-slot="table-footer"
-      className={cn('border-t bg-muted/50 font-medium [&>tr]:last:border-b-0', className)}
+      className={cn('border-t bg-muted font-medium [&>tr]:last:border-b-0', className)}
       {...props}
     />
   );
@@ -34,7 +34,7 @@ function TableRow({ className, ...props }: React.ComponentProps<'tr'>) {
     <tr
       data-slot="table-row"
       className={cn(
-        'border-b transition-colors hover:bg-muted/50 has-aria-expanded:bg-muted/50 data-[state=selected]:bg-muted',
+        'border-b transition-colors hover:bg-accent has-aria-expanded:bg-accent data-[state=selected]:bg-muted',
         className,
       )}
       {...props}
@@ -72,7 +72,7 @@ function TableCaption({ className, ...props }: React.ComponentProps<'caption'>) 
   return (
     <caption
       data-slot="table-caption"
-      className={cn('mt-4 text-sm text-muted-foreground', className)}
+      className={cn('mt-4 text-body text-muted-foreground', className)}
       {...props}
     />
   );

@@ -4,8 +4,11 @@ import { Link, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { AUDIT_PAGE_SIZE, useAllBoards, useAudit, useMe, useNotifications, useRouting } from '../api/client';
 import type { AuditEntry, Me } from '../api/types';
-import { FilterTrack, filterTabClass } from '../components/filter-tabs';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { EmptyState } from '../components/layout/empty-state';
+import { FilterTabs } from '../components/layout/filter-tabs';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
 import { RefreshBar } from '../components/refresh-bar';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -217,20 +220,7 @@ export default function Audit() {
       }
     >
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <FilterTrack role="tablist" aria-label="按谁做的">
-          {FILTERS.map((f) => (
-            <button
-              key={f.id}
-              type="button"
-              role="tab"
-              aria-selected={filter === f.id}
-              onClick={() => setFilter(f.id)}
-              className={filterTabClass(filter === f.id)}
-            >
-              {f.label}
-            </button>
-          ))}
-        </FilterTrack>
+        <FilterTabs aria-label="按谁做的" items={FILTERS} value={filter} onChange={setFilter} />
         {target ? (
           <span className="inline-flex h-8 items-center gap-1.5 rounded-full border bg-card pr-1 pl-3 text-sub">
             只看 {targetLabel(target, tasks, notifications)}
@@ -263,7 +253,7 @@ export default function Audit() {
           <LoadError what="操作记录" error={audit.error} />
         </div>
       ) : null}
-      <Panel bodyClassName="p-0">
+      <Section flush>
         {audit.isLoading ? (
           <div className="p-4">
             <LoadingRows rows={6} />
@@ -273,7 +263,7 @@ export default function Audit() {
             没读到操作记录，这里空着不代表没人操作过
           </p>
         ) : list.length === 0 ? (
-          <Empty
+          <EmptyState
             icon={ScrollText}
             title="没有符合条件的记录"
             hint={
@@ -379,7 +369,7 @@ export default function Audit() {
             <OlderRecordsButton pending={audit.isFetchingNextPage} onClick={loadOlder} />
           </div>
         ) : null}
-      </Panel>
+      </Section>
     </Page>
   );
 }

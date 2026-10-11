@@ -27,7 +27,7 @@ import { formatAgo, formatDateTime } from '../lib/format';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
-import { StatusDot } from './status';
+import { StatusDot } from './layout/status-badge';
 
 const TONE_CLASS: Record<Tone, string> = {
   done: 'text-ink-done',

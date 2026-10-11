@@ -23,7 +23,7 @@ const SITES = [
   { file: 'src/components/usage.tsx', where: '花费明细', from: 'text-[11px]', to: 'text-caption' },
   { file: 'src/components/usage.tsx', where: '分开看', from: 'text-[11px]', to: 'text-caption' },
   { file: 'src/components/usage.tsx', where: '额度提示', from: 'text-[11px]', to: 'text-caption' },
-  { file: 'src/components/run-timeline.tsx', where: '时间刻度字号', from: 'text-[10px]', to: 'text-micro' },
+  { file: 'src/components/run-timeline.tsx', where: '时间刻度字号', from: 'text-[10px]', to: 'text-meta' },
   {
     file: 'src/components/run-timeline.tsx',
     where: '刻度左内边距',
@@ -36,8 +36,8 @@ const SITES = [
     from: 'md:grid-cols-[160px_1fr]',
     to: 'md:grid-cols-timeline',
   },
-  { file: 'src/components/run-timeline.tsx', where: '阶段角标', from: 'text-[10px]', to: 'text-micro' },
-  { file: 'src/components/run-timeline.tsx', where: '时长行', from: 'text-[11px]', to: 'text-caption' },
+  { file: 'src/components/run-timeline.tsx', where: '阶段角标', from: 'text-[10px]', to: 'text-meta' },
+  { file: 'src/components/run-timeline.tsx', where: '时长行', from: 'text-[11px]', to: 'text-meta' },
   {
     file: 'src/components/channel-status.tsx',
     where: '故障说明',
@@ -46,7 +46,6 @@ const SITES = [
   },
   { file: 'src/components/channel-status.tsx', where: '空探针格', from: 'rounded-[2px]', to: 'rounded-2' },
   { file: 'src/components/channel-status.tsx', where: '探针格', from: 'rounded-[2px]', to: 'rounded-2' },
-  { file: 'src/components/status.tsx', where: '状态芯片', from: 'text-[11px]', to: 'text-caption' },
   {
     file: 'src/components/release-card.tsx',
     where: '每一行',
@@ -65,14 +64,13 @@ const COUNTS: Record<string, number> = {
   'src/components/usage.tsx': 8,
   'src/components/run-timeline.tsx': 5,
   'src/components/channel-status.tsx': 3,
-  'src/components/status.tsx': 1,
   'src/components/release-card.tsx': 1,
   'src/components/pool-holds.tsx': 1,
 };
 
-describe('token A2：19 处写死尺寸换成 token', () => {
-  test('六个组件各对上原来说的处数，加起来 19', () => {
-    expect(SITES).toHaveLength(19);
+describe('token A2：18 处写死尺寸换成 token', () => {
+  test('六个组件各对上原来说的处数，加起来 18', () => {
+    expect(SITES).toHaveLength(18);
     for (const [file, n] of Object.entries(COUNTS)) {
       expect(SITES.filter((site) => site.file === file)).toHaveLength(n);
     }

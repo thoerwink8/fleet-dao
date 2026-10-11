@@ -2,7 +2,11 @@ import { CalendarClock, CircleX, ScanSearch, TimerOff } from 'lucide-react';
 import { brand } from '#brand';
 import { useJobs } from '../api/client';
 import { JobListHead, JobListRow } from '../components/job-row';
-import { Empty, LoadError, LoadingRows, Page, Panel, Stat } from '../components/page';
+import { EmptyState } from '../components/layout/empty-state';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
+import { Stat } from '../components/layout/stat';
 import { RefreshBar } from '../components/refresh-bar';
 import { TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -46,7 +50,7 @@ export default function Schedules() {
           label="上次失败"
           value={count(failed)}
           icon={CircleX}
-          accent={failed ? 'text-ink-fail' : undefined}
+          tone={failed ? 'fail' : undefined}
         />
         <Stat
           className="h-full min-w-0"
@@ -55,7 +59,7 @@ export default function Schedules() {
           icon={ScanSearch}
           hint="跑了，但一个都没扫到，或有一部分没查成"
           wrapHint
-          accent={unscanned ? 'text-ink-stall' : undefined}
+          tone={unscanned ? 'stall' : undefined}
         />
         <Stat
           className="h-full min-w-0"
@@ -64,7 +68,7 @@ export default function Schedules() {
           icon={TimerOff}
           hint="超过期望间隔没跑成，或从没跑成过"
           wrapHint
-          accent={notFresh ? 'text-ink-stall' : undefined}
+          tone={notFresh ? 'stall' : undefined}
         />
       </div>
       {error ? (
@@ -72,7 +76,7 @@ export default function Schedules() {
           <LoadError what="定时任务" error={error} />
         </div>
       ) : null}
-      <Panel bodyClassName="p-0">
+      <Section flush>
         {isLoading ? (
           <div className="p-4">
             <LoadingRows rows={6} />
@@ -80,7 +84,7 @@ export default function Schedules() {
         ) : !data ? (
           <p className="px-4 py-10 text-center text-sm text-ink-fail">没读到定时任务，说不准它们跑得怎么样</p>
         ) : jobs.length === 0 ? (
-          <Empty icon={CalendarClock} title="还没有定时任务" />
+          <EmptyState icon={CalendarClock} title="还没有定时任务" />
         ) : (
           <>
             <JobListHead />
@@ -91,7 +95,7 @@ export default function Schedules() {
             </ul>
           </>
         )}
-      </Panel>
+      </Section>
       <p className="mt-3 text-xs text-muted-foreground">
         定时任务的变化没有实时推送，这一页每 30 秒自己刷新一次。
       </p>

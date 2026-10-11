@@ -9,7 +9,7 @@ import { formatAgo, formatDuration } from '../../../lib/format';
 import { useNow } from '../../../lib/hooks';
 import { type Tone, toneText } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
-import { StatusChip, StatusDot } from '../../status';
+import { StatusBadge, StatusDot } from '../../layout/status-badge';
 import { ActionButtons } from '../../task-actions';
 import { Button } from '../../ui/button';
 import { CardLink, needsFounder, statusTextOf, WAIT_LABEL } from '../running-card';
@@ -122,7 +122,7 @@ function TicketPanel({ item, onClose }: { item: HomeRunning; onClose(): void }) 
     <div>
       <Head onClose={onClose}>
         <span className="num text-sm font-semibold text-muted-foreground">#{item.issueNumber}</span>
-        <StatusChip tone={tone} label={statusTextOf(item)} />
+        <StatusBadge tone={tone} label={statusTextOf(item)} />
       </Head>
       <h2 className="mt-2 text-lg leading-snug font-semibold">{item.title}</h2>
       <p className="num mt-1 text-xs text-muted-foreground">{item.repo}</p>
@@ -229,7 +229,7 @@ function TicketButton({ item, onSelect }: { item: HomeRunning; onSelect(id: stri
         <div className="flex items-center gap-2">
           <span className={cn('num text-xs font-bold', toneText[tone])}>#{item.issueNumber}</span>
           <span className="min-w-0 flex-1 truncate text-sub font-medium">{item.title}</span>
-          <StatusChip tone={tone} label={statusTextOf(item)} />
+          <StatusBadge tone={tone} label={statusTextOf(item)} />
         </div>
         <div className="mt-1 truncate text-xs text-muted-foreground">
           {item.worker ?? '没有进程在跑'}

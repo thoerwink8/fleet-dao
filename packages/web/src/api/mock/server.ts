@@ -123,6 +123,8 @@ export interface MockOptions {
   seed?: number;
   /** 这些段的会话内容读不到（503，演示「没读成」）；不给就都读得到。 */
   transcriptFail?: readonly string[];
+  /** 给 ch-cursor 多加这么多条没用途在用的路由（演示一个渠道几百条）；不给就不加。 */
+  manyRoutes?: number;
 }
 
 export interface MockApi extends FleetApi {
@@ -242,6 +244,11 @@ function mockEngine() {
     default:
       return { state: 'on' as const };
   }
+}
+
+/** 地址上写了 ?mockRoutes=many 就多造一批没用途在用的路由。 */
+function mockRoutesMany(): boolean {
+  return typeof location !== 'undefined' && new URLSearchParams(location.search).get('mockRoutes') === 'many';
 }
 
 /** 看板多机的假环境（wsl）这一次是哪种样子：见 nodes() 的说明；地址上没写就是刚报过（fresh）。 */
@@ -509,6 +516,25 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const now = opts.now ?? (() => Date.now());
   const rand = rng(opts.seed ?? 20260925);
   const st = createSeed(now());
+  // 一个渠道下几百条路由（线上 Cursor 订阅 256 条、213 条没用途在用）：测试给 manyRoutes，点验在地址上加 ?mockRoutes=many。公共种子不带，免得别的页的数对不上。
+  const bulk = opts.manyRoutes ?? (mockRoutesMany() ? 213 : 0);
+  for (let i = 1; i <= bulk; i++) {
+    st.routes.push({
+      id: `r-cursor-bulk-${String(i).padStart(3, '0')}`,
+      channelId: 'ch-cursor',
+      poolId: 'cursor-pro',
+      modelId: 'cursor-auto',
+      hostId: 'cursor-agent',
+      alive: false,
+      probe: {
+        state: 'skipped',
+        at: new Date(now() - 5 * 60_000).toISOString(),
+        detail: '没有哪个阶段在用这条路由，不花额度去探',
+      },
+      probeTier: 'unused',
+      probeFailStreak: 0,
+    });
+  }
   /** 会话内容（#1640）的演示数据；在跑的段每被读一次多放出几条。mockTranscriptFail 里的段读不到（演示「没读成」）。 */
   const transcripts = transcriptSeed((min) => new Date(now() + min * 60_000).toISOString());
   const revealed = new Map<string, number>();

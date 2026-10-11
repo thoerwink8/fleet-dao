@@ -40,7 +40,10 @@ import { useMasterView } from '../components/engine-master';
 import { EngineMasterControl } from '../components/engine-master-card';
 import { FACT_ROWS, factCells, factsSummary } from '../components/env-facts';
 import { JobListHead, JobListRow, rowTone } from '../components/job-row';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { EmptyState } from '../components/layout/empty-state';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
 import { RefreshBar } from '../components/refresh-bar';
 import { ReleaseCardBody, ReleaseEntry } from '../components/release-card';
 import { Button } from '../components/ui/button';
@@ -277,7 +280,7 @@ function Whole({ children }: { children: ReactNode }) {
 function MissingSnapshot({ nodeId }: { nodeId: string }) {
   return (
     <div role="alert">
-      <Empty
+      <EmptyState
         icon={SearchX}
         title="没有这个环境"
         hint={
@@ -594,7 +597,7 @@ export default function France() {
       )}
 
       <div className="mt-4 grid items-start gap-4 xl:grid-cols-3">
-        <Panel
+        <Section
           className="min-w-0 xl:col-span-2"
           title={
             <span className="flex items-center gap-2">
@@ -618,7 +621,7 @@ export default function France() {
               <ArrowRight className="size-3" />
             </Link>
           }
-          bodyClassName="p-0"
+          flush
         >
           {jobs.error ? (
             <div className="p-4">
@@ -631,10 +634,10 @@ export default function France() {
           ) : (
             <JobsTable jobs={jobs.data.jobs} now={now} />
           )}
-        </Panel>
+        </Section>
 
         <div className="min-w-0 space-y-4">
-          <Panel
+          <Section
             title="发版"
             description="主线最新、法国在用、差几个、最近做完的一个任务（只读）；每一行读不到就写没查成和原因。要发布，点上面「在用版本」那一行的「发布到法国」。"
           >
@@ -645,8 +648,8 @@ export default function France() {
             ) : (
               <ReleaseCardBody card={card.data} now={now} />
             )}
-          </Panel>
-          <Panel
+          </Section>
+          <Section
             title="发版一键"
             description="只到预检（只读）；真发版点上面「在用版本」那一行的「发布到法国」，或走 pnpm release:onekey start。"
           >
@@ -657,7 +660,7 @@ export default function France() {
             ) : (
               <ReleaseBody release={release.data} preflight={preflight} />
             )}
-          </Panel>
+          </Section>
         </div>
       </div>
     </Page>

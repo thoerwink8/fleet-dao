@@ -31,8 +31,8 @@ describe('花费一格两行', () => {
     const folded = screen.getByText('套餐内折合');
     const lines = document.querySelector('[data-cost]');
     expect(lines?.className).toContain('flex-col');
-    expect(metered.nextElementSibling?.className).toContain('text-stat');
-    expect(folded.parentElement?.className ?? '').not.toContain('text-stat');
+    expect(metered.nextElementSibling?.getAttribute('data-large')).toBe('true');
+    expect(folded.parentElement?.hasAttribute('data-large')).toBe(false);
   });
 });
 

@@ -14,9 +14,11 @@ import { HealthStrip } from '../components/home/health-strip';
 import { HomeDrawer } from '../components/home/home-drawer';
 import { RunningBoard } from '../components/home/running-board';
 import type { HomeData } from '../components/home/types';
+import { EmptyState } from '../components/layout/empty-state';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Section } from '../components/layout/section';
 import { RemoteViewProvider, SnapshotBanner, useSelectedNodeName } from '../components/node-notice';
 import { NotBuilt } from '../components/not-built';
-import { Empty, LoadError, LoadingRows, Panel } from '../components/page';
 import { RefreshBar } from '../components/refresh-bar';
 import { InTopbar } from '../components/shell/topbar-slot';
 import { Button } from '../components/ui/button';
@@ -39,7 +41,7 @@ function HomeBody({ data, remote, phone }: { data: HomeData; remote: boolean; ph
         <RunningBoard running={data.running} flow={data.flow} health={data.health} slots={data.slots} />
       ) : (
         <div className="grid h-full place-items-center">
-          <Empty icon={CirclePlay} title="现在没有在跑的单" hint="新接的单会出现在这里。" />
+          <EmptyState icon={CirclePlay} title="现在没有在跑的单" hint="新接的单会出现在这里。" />
         </div>
       )}
     </HomeDrawer>
@@ -49,9 +51,9 @@ function HomeBody({ data, remote, phone }: { data: HomeData; remote: boolean; ph
 /** 没有这个环境（后端 404）：写明，给回主页的路；不转圈、不给「重试」（重试也不会有）。 */
 function MissingEnv({ nodeId }: { nodeId: string }) {
   return (
-    <Panel>
+    <Section>
       <div role="alert">
-        <Empty
+        <EmptyState
           icon={SearchX}
           title="没有这个环境"
           hint={
@@ -67,7 +69,7 @@ function MissingEnv({ nodeId }: { nodeId: string }) {
           }
         />
       </div>
-    </Panel>
+    </Section>
   );
 }
 

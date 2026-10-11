@@ -21,6 +21,7 @@ import { supportedPurposeEfforts } from '../lib/routing-browse';
 import { actualRanks, routeSlotState, type SlotState, slotWord, summarizeOrder } from '../lib/routing-order';
 import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
+import { StatusDot } from './layout/status-badge';
 import { PoolProblemLine, usePoolProblems } from './pool-problem';
 import {
   COMPACT_MQ,
@@ -32,7 +33,6 @@ import {
 } from './routing-edit';
 import { PoolHoldControl } from './routing-hold';
 import { KindChip, useKindEnv } from './routing-kinds';
-import { StatusDot } from './status';
 import { Badge } from './ui/badge';
 
 /**

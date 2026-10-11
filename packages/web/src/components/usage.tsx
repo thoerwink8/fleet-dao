@@ -10,7 +10,7 @@ import { formatCount, formatDuration, formatUsd, span } from '../lib/format';
 import { isTaskFinished, queueMs, workMs } from '../lib/status';
 import { EQUIVALENT_RULE, groupParts, type Reading, reading, type UsagePart } from '../lib/usage';
 import { cn } from '../lib/utils';
-import { Panel } from './page';
+import { Section } from './layout/section';
 
 /** 「不全」小标：这个合计只加了读到的那几次。 */
 function Incomplete() {
@@ -132,7 +132,7 @@ function Total({
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function SubSection({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="mt-4 border-t pt-3">
       <h3 className="mb-2 text-xs font-medium text-muted-foreground">{title}</h3>
@@ -304,7 +304,7 @@ export function UsagePanel({ d, now }: { d: TaskDetail; now: number }) {
   const queue = withLive(reading(t.queueMs, t.missingTime + t.noQueue, t.runs), liveQueue, live.length);
   const work = withLive(reading(t.runMs, t.missingTime, t.runs), liveWork, live.length);
   return (
-    <Panel title="时间与用量" description="排队和干活分开算；读不到的写明几次没读到，不当成 0。">
+    <Section title="时间与用量" description="排队和干活分开算；读不到的写明几次没读到，不当成 0。">
       <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
         <Total label={finished ? '总耗时' : '已用时'} r={{ kind: 'full', value: wall }} empty="">
           {formatDuration(wall)}
@@ -331,7 +331,7 @@ export function UsagePanel({ d, now }: { d: TaskDetail; now: number }) {
         </Total>
       </dl>
 
-      <Section title="额度">
+      <SubSection title="额度">
         {t.running && t.runs ? (
           <p className="mb-2 text-caption text-muted-foreground">
             {/* 原 11px，text-caption */}
@@ -358,13 +358,13 @@ export function UsagePanel({ d, now }: { d: TaskDetail; now: number }) {
             <span className="block">写 {formatCount(t.cacheWriteTokens)}</span>
           </Total>
         </dl>
-      </Section>
+      </SubSection>
 
-      <Section title="花费">
+      <SubSection title="花费">
         <Costs t={t} />
-      </Section>
+      </SubSection>
 
       <Breakdown usage={d.usage} />
-    </Panel>
+    </Section>
   );
 }
