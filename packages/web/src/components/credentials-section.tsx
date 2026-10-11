@@ -205,7 +205,10 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
         </Button>
         <span className="text-xs text-muted-foreground">
           改动会记进
-          <Link to="/audit" className="underline underline-offset-2">
+          <Link
+            to="/audit"
+            className="underline underline-offset-2 max-md:inline-flex max-md:min-h-10 max-md:items-center"
+          >
             操作记录
           </Link>
           （只记改了什么，不记密码）。

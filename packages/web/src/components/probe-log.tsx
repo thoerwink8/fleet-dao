@@ -24,6 +24,10 @@ import { cn } from '../lib/utils';
 import type { ChannelHistory } from './channel-status';
 import { StatusChip } from './status';
 
+/** 探测记录默认铺几条、每次「再看」加几条（#1837：一次铺 60 条，渠道状态页整页 13000px）。 */
+export const PROBE_LOG_FIRST = 10;
+export const PROBE_LOG_STEP = 20;
+
 const LEGEND: readonly (readonly [ProbeKind, string])[] = [
   ['passed', '探通了'],
   ['failed', '没探通'],
@@ -62,6 +66,8 @@ export function ProbeLog({
   routeMissing: boolean;
   onToggle: (cellId: number) => void;
 }) {
+  // 默认只铺最近 10 条，「再看 20 条」每点一次多 20 条；展开的那一行落在后面时，铺到它为止
+  const [extra, setExtra] = useState(0);
   if (history.state === 'loading') return null;
   if (history.state === 'unreadable') {
     return (
@@ -82,6 +88,8 @@ export function ProbeLog({
     ),
   );
   const rows = real;
+  const openIndex = rows.findIndex((cell) => cell.id === openId);
+  const shownCount = Math.max(PROBE_LOG_FIRST + extra, openIndex + 1);
   const modelNameOf = (cell: ProbeHistoryCell) =>
     models.find((m) => m.id === routes.find((r) => r.id === cell.routeId)?.modelId)?.displayName;
   return (
@@ -114,21 +122,34 @@ export function ProbeLog({
             : '还没有探测记录'}
         </p>
       ) : (
-        <ol
-          data-probe-log="list"
-          aria-label="探测记录列表"
-          className="max-h-routing-pane space-y-1.5 overflow-y-auto pr-1"
-        >
-          {rows.map((cell) => (
-            <ProbeLogRow
-              key={cell.id}
-              cell={cell}
-              modelName={modelNameOf(cell)}
-              open={cell.id === openId}
-              onToggle={() => onToggle(cell.id)}
-            />
-          ))}
-        </ol>
+        <>
+          <ol
+            data-probe-log="list"
+            aria-label="探测记录列表"
+            className="max-h-routing-pane space-y-1.5 overflow-y-auto pr-1"
+          >
+            {rows.slice(0, shownCount).map((cell) => (
+              <ProbeLogRow
+                key={cell.id}
+                cell={cell}
+                modelName={modelNameOf(cell)}
+                open={cell.id === openId}
+                onToggle={() => onToggle(cell.id)}
+              />
+            ))}
+          </ol>
+          {rows.length > shownCount ? (
+            <button
+              type="button"
+              data-probe-log="more"
+              onClick={() => setExtra(shownCount - PROBE_LOG_FIRST + PROBE_LOG_STEP)}
+              className="mt-1.5 inline-flex min-h-10 items-center gap-1 rounded-md px-2 text-caption text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              再看 {Math.min(PROBE_LOG_STEP, rows.length - shownCount)} 条（还有 {rows.length - shownCount}{' '}
+              条没显示）
+            </button>
+          ) : null}
+        </>
       )}
       {skipped.length > 0 ? (
         <SkippedFold skipped={skipped} openId={openId} modelNameOf={modelNameOf} onToggle={onToggle} />

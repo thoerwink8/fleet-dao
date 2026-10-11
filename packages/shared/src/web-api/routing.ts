@@ -2,7 +2,13 @@
 // 入口是 ../web-api.ts（只有 export *），拆分说明见 specs/901-项目瘦身与提速/重构方案.md 第 2 节；内容是从原来一个文件里原样搬来的。
 import { z } from 'zod';
 import { SESSION_EFFORTS } from '../effort.ts';
-import { BillingKindSchema, HostIdSchema, RouteProbeStateSchema, StageKindSchema } from './enums.ts';
+import {
+  BillingKindSchema,
+  HostIdSchema,
+  RouteProbeStateSchema,
+  SegmentKindSchema,
+  StageKindSchema,
+} from './enums.ts';
 import { Id, Time } from './internal.ts';
 
 // —— 调度台：路由与阶段策略 ——
@@ -480,10 +486,14 @@ export const RouteProbeResultSchema = z.object({
  */
 export const RouteProbeRequestStateSchema = z.enum(['queued', 'running', 'done', 'failed', 'expired']);
 
-/** 自动排的立即探测的来源：任务在这条路由上断了（引擎当场排的），不是人点的。老请求不带。 */
+/**
+ * 自动排的立即探测的来源：任务在这条路由上断了（引擎当场排的），不是人点的。老请求不带。
+ * 单号可空（巡逻、冷验收等没挂单的会话）；段名用来源文案认出来（#1809，片 1）。
+ */
 export const RouteProbeSourceSchema = z.object({
   kind: z.literal('task-route-broken'),
-  issueNumber: z.number().int().positive(),
+  issueNumber: z.number().int().positive().optional(),
+  segment: SegmentKindSchema.optional(),
 });
 
 export const RouteProbeRequestSchema = z.object({
