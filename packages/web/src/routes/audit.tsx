@@ -308,39 +308,49 @@ export default function Audit() {
               <li key={a.id} className={cn('flex items-start gap-3 px-4 py-3', !a.ok && 'bg-st-fail/[0.05]')}>
                 <ActorIcon actor={a.actor} me={me} />
                 <div className="min-w-0 flex-1">
-                  {/* 手机上摘要压成一行（谁、做了什么、对象），长了截断；前后值点「看改了什么」才展开 */}
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm max-md:flex-nowrap">
-                    <span
-                      className="font-medium max-md:max-w-20 max-md:shrink-0 max-md:truncate"
-                      title={a.actor.id}
+                  {/* 手机上摘要分两行：谁做了什么一行（长了截断），对象另起一行占满行宽；桌面照旧一行排开（md:contents）。前后值点「看改了什么」才展开 */}
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm">
+                    <div
+                      data-audit-who
+                      className="flex min-w-0 items-center gap-x-2 max-md:basis-full md:contents"
                     >
-                      {actorName(a.actor, me)}
-                    </span>
-                    <ActionText action={a.action} ok={a.ok} className="max-md:min-w-0 max-md:truncate" />
-                    <button
-                      type="button"
-                      onClick={() => setTarget(a.target)}
-                      className="min-w-0 truncate text-left text-muted-foreground underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10 max-md:flex-1"
-                      title="只看这个对象的记录"
+                      <span
+                        className="font-medium max-md:max-w-32 max-md:shrink-0 max-md:truncate"
+                        title={a.actor.id}
+                      >
+                        {actorName(a.actor, me)}
+                      </span>
+                      <ActionText action={a.action} ok={a.ok} className="max-md:min-w-0 max-md:truncate" />
+                    </div>
+                    <div
+                      data-audit-what
+                      className="flex min-w-0 items-center gap-x-2 max-md:basis-full md:contents"
                     >
-                      {targetLabel(a.target, tasks, notifications)}
-                    </button>
-                    {describeAction(a.action).translated && targetHref(a.target) ? (
-                      <Link
-                        to={targetHref(a.target) ?? '/'}
-                        className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground max-md:inline-flex max-md:min-h-10 max-md:shrink-0 max-md:items-center"
+                      <button
+                        type="button"
+                        onClick={() => setTarget(a.target)}
+                        className="min-w-0 truncate text-left text-muted-foreground underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10 max-md:flex-1"
+                        title="只看这个对象的记录"
                       >
-                        打开
-                      </Link>
-                    ) : null}
-                    {!a.ok ? (
-                      <Badge
-                        variant="outline"
-                        className="h-5 border-st-fail/50 text-caption text-ink-fail max-md:shrink-0"
-                      >
-                        没做成
-                      </Badge>
-                    ) : null}
+                        {targetLabel(a.target, tasks, notifications)}
+                      </button>
+                      {describeAction(a.action).translated && targetHref(a.target) ? (
+                        <Link
+                          to={targetHref(a.target) ?? '/'}
+                          className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground max-md:inline-flex max-md:min-h-10 max-md:min-w-10 max-md:shrink-0 max-md:items-center max-md:justify-center"
+                        >
+                          打开
+                        </Link>
+                      ) : null}
+                      {!a.ok ? (
+                        <Badge
+                          variant="outline"
+                          className="h-5 border-st-fail/50 text-caption text-ink-fail max-md:shrink-0"
+                        >
+                          没做成
+                        </Badge>
+                      ) : null}
+                    </div>
                   </div>
                   {a.reason ? (
                     <p className="mt-0.5 text-sub text-muted-foreground max-md:truncate">理由：{a.reason}</p>
