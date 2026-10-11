@@ -88,6 +88,17 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
     }
   });
 
+  it('task-merging 夹具（等合并）没有 merge-wait-conflict 标记：老历史重放不走「等合并遇冲突」那一支（#1838）', () => {
+    // 老历史里 waitMerged 不会回 conflict，这一支用 patched('merge-wait-conflict') 守住：
+    // 标记不在历史里就当没有，照老步序接着等（task-merging 夹具重放绿，这一条把「标记不在」钉住）
+    const marker = Buffer.from(JSON.stringify({ id: 'merge-wait-conflict', deprecated: false })).toString(
+      'base64',
+    );
+    const merging = readFileSync(`${DIR}task-merging.json`, 'utf8');
+    expect(merging).not.toContain(marker);
+    expect(merging).toContain('waitMerged'); // 这份夹具确实走过等合并那一段
+  });
+
   it('对照：历史里调度的活动和代码调的对不上，重放当场报 DeterminismViolationError（这道检查真能红）', async () => {
     const { workflowId, history } = load('task-merged.json');
     const scheduled = history.events.find((e) => e.activityTaskScheduledEventAttributes);

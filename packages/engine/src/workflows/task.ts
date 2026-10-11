@@ -142,6 +142,8 @@ class TaskFlow {
       await guardedPaths(rt);
       const merged = await armAndWaitMerged(rt);
       if (merged.kind === 'merged') return { commit: merged.commit };
+      // 等合并时 PR 和主线真有冲突（#1838）：返工意见已记下，交回下一轮动手会话解冲突，不回等 CI。
+      if (merged.kind === 'rework') return 'rework';
       rt.verifyRound = 0; // 头换了，验收对新的头重新数轮
     }
   }

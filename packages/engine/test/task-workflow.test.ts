@@ -709,6 +709,82 @@ describe('任务工作流 · 交付和合并的细节', { timeout: 60_000 }, () 
     expect(calls.merged).toBe(2);
     expect(calls.order.slice(-4)).toEqual(['arm', 'merged', 'arm', 'merged']);
   });
+
+  it('等合并时 PR 和主线冲突、并主线并得干净（#1838）：不停在等待循环里，回 head_moved 对新头重走 CI 和验收', async () => {
+    const world = createFakeWorld({
+      // 挂上自动合并、第一次等合并回冲突；并完主线的头是新的
+      sync: (_i, n) => (n === 1 ? { state: 'clean', head: fakeHead(700) } : undefined),
+    });
+    const { tasks, calls } = scripted({
+      merged: (n) => (n === 1 ? { state: 'conflict', detail: 'PR #1 和主线冲突' } : { state: 'merged' }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', head: fakeHead(700) });
+    // 一次都没停下等人：并主线是引擎自己换的头，直接回去对新头重走
+    expect(world.alerts).toEqual([]);
+    // 新的头重走了一遍 CI 和验收
+    expect(calls.verify.map((v) => v.headSha)).toEqual([fakeHead(101), fakeHead(700)]);
+    expect(world.callsOf('waitCi').map((c) => (c.input as { head: string }).head)).toEqual([
+      fakeHead(101),
+      fakeHead(700),
+    ]);
+    // 状态里写明了是冲突挡着（#1838：以前只写「在合并队列」，看不出是冲突）
+    expect(world.states.some((s) => s.doing.includes('冲突'))).toBe(true);
+  });
+
+  it('等合并时 PR 和主线真有冲突、并不动（#1838）：冲突文件名进返工意见，交回下一轮动手会话解', async () => {
+    const world = createFakeWorld({
+      sync: (_i, n) =>
+        n === 1 ? { state: 'conflict', conflictFiles: ['packages/conventions/src/ci-plan.ts'] } : undefined,
+    });
+    const { tasks, calls } = scripted({
+      merged: (n) => (n === 1 ? { state: 'conflict', detail: 'PR #1 和主线冲突' } : { state: 'merged' }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    // 回了动手再跑一轮：返工意见里带着冲突文件名
+    expect(calls.segment).toHaveLength(2);
+    const feedback = calls.segment[1]?.feedback.join('\n') ?? '';
+    expect(feedback).toContain('和最新主线有冲突');
+    expect(feedback).toContain('packages/conventions/src/ci-plan.ts');
+  });
+
+  it('【故意造出的失败】连着并满 3 次还冲突：停下报人，不无限并（#1838）', async () => {
+    const world = createFakeWorld({
+      // 每次都「没什么可并」（头不变）、GitHub 却一直说冲突：靠次数上限兜底，不无限并、不一直转
+      sync: () => ({ state: 'clean', head: fakeHead(101) }),
+    });
+    const { tasks } = scripted({ merged: () => ({ state: 'conflict', detail: 'PR #1 和主线冲突' }) });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        // 中间那几次「等 GitHub 把冲突数据重算过来」是 60 秒一跳：让测试服务端把这几段跳过去
+        // （不跳的话要按真实时间干等三分钟；跳完再查，不 await result()，#1764）
+        await env.sleep('5 minutes');
+        const s = await statusUntil(h, parked, '并满 3 次仍冲突，停下');
+        expect(s.lastProblem).toContain('还是和主线冲突');
+        expect(s.doing).toContain('冲突');
+        expect(world.count('syncMainline')).toBe(3); // 并到上限就停，不接着并
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '不做了' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('abandoned');
+    expect(world.alerts.map((a) => a.title)).toEqual([expect.stringContaining('还是和主线冲突')]);
+  });
 });
 
 describe('任务工作流 · 验收的岔路（#632 S2-5b）', { timeout: 60_000 }, () => {
