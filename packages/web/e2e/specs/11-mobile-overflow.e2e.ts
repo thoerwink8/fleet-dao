@@ -34,14 +34,25 @@ test.describe('手机宽度：三页不横滚', () => {
       expect(tabs.length).toBeGreaterThan(0);
       for (const tab of tabs) {
         await tab.click();
+        // 换用途时标题块整块换掉：等这一项选中、新标题块画好再量（量到正被换下的旧节点，什么都量不出）
+        await expect(tab).toHaveAttribute('aria-pressed', 'true');
         const hero = page.locator('[data-purpose-hero]');
         await expect(hero).toBeVisible();
         const lines = await hero.evaluate((el) => {
+          // 一行＝里面每段看得见的字都落在同一条基线附近：按字量（Range 的每个行盒），不按行高猜
           const oneLine = (node: Element | null) => {
             if (!(node instanceof HTMLElement)) return true;
-            const lh = Number.parseFloat(getComputedStyle(node).lineHeight);
-            // 带标签的那行比字高一点，不到两行高就算一行
-            return node.getBoundingClientRect().height < lh * 1.9;
+            if (!node.isConnected) return false;
+            const mids: number[] = [];
+            const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+            for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+              if (!t.textContent?.trim() || t.parentElement?.closest('.sr-only')) continue;
+              const range = document.createRange();
+              range.selectNodeContents(t);
+              for (const r of range.getClientRects()) if (r.width > 0) mids.push(r.top + r.height / 2);
+            }
+            // 一段字都量不到（没画出来）也不算过
+            return mids.length > 0 && Math.max(...mids) - Math.min(...mids) < 8;
           };
           const line = el.querySelector('[data-hero-line]');
           const text = line?.querySelector('[data-hero-text]')?.getBoundingClientRect();

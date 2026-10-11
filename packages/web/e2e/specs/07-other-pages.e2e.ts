@@ -17,7 +17,10 @@ test.describe('其余页面', () => {
     // 对题是用途那一排里只读的一项「对题」，「在对话里做，不选路」在它的悬停说明里（#1914）
     await expect(page.locator('[data-tab-note]', { hasText: '对题' })).toBeVisible();
     await expect(page.locator('[data-tab-note]')).toHaveAttribute('title', '对题：在对话里做，不选路');
-    await expect(page.getByText('动手', { exact: true }).first()).toBeVisible();
+    // 用途按钮的名字前面带读屏用的结论（「派得出去：动手」），整段不再是「动手」两个字，按按钮找
+    await expect(
+      page.getByRole('navigation', { name: '用途' }).getByRole('button', { name: /动手/ }).first(),
+    ).toBeVisible();
     await expect(page.getByText('验收').first()).toBeVisible();
     await expect(page.getByText('需求文档')).toHaveCount(0);
     await expect(page.getByText(/派得出去/).first()).toBeVisible();
