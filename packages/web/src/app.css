@@ -155,7 +155,6 @@
   --grid-template-columns-auto-fr: auto 1fr; /* channel-status 故障说明、pool-holds 暂停明细：原来写死 auto、1fr */
   --grid-template-columns-release: 4.5rem minmax(0, 1fr); /* release-card 每一行：原来写死 4.5rem、剩余 */
   --grid-template-columns-usage: 3.5rem minmax(0, 1fr); /* usage 花费行：原来写死 3.5rem、剩余 */
-  --grid-template-columns-changelog: 8.5rem minmax(0, 1fr) auto; /* 依据：更新日志提交行原来写死 8.5rem、剩余、自动 */
   --grid-template-columns-timeline: 160px 1fr; /* run-timeline 在 md：原来写死 160px、剩余 */
   --grid-template-columns-board: minmax(0, 26rem) minmax(0, 1fr); /* 2xl 起：最宽 26rem、剩余 */
   --grid-template-rows-stack: auto 1fr; /* 行：自动、剩余 */

@@ -1,18 +1,14 @@
 // @vitest-environment happy-dom
 // /changelog 页的钉子（#227 切片、#1255）：
-// - 仓根的 CHANGELOG.md 真能被 vite 的 ?raw 读到、共享的 splitChangelog 真能切出来；
-// - 解析失败，lib 抛错，页面给 LoadError——不能拿空、0 或 ok 冒充没事；
 // - 页面顶上是只读的「已发布的提交」（读法国发布历史）：每条提交号、标题、发于何时；读不到整份写没查成和原因，
 //   某一条标题读不到只那一条写原因，接口挂了写没读成；一条记录都没有写明「还没有发布记录」，不当成没查成；
 // - 页面上没有「发布 v<N>」按钮和弹窗，没有「版本里程碑发版」的说法（发版单位是主线提交，决定 0032）；
 
-import { splitChangelog } from '@fleet-dao/shared';
-import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import type { ReleasedCommits } from '../api/types';
-import { readChangelog } from '../lib/changelog';
 import ChangelogPage from '../routes/changelog';
 import { renderApp } from './harness';
 
@@ -44,7 +40,7 @@ function released(answer: ReleasedCommits | Error): FleetApi {
   return Object.assign(api, { franceReleasedCommits }) as MockApi as unknown as FleetApi;
 }
 
-/** 等「已发布的提交」那块画出来，回它的列表（CHANGELOG 对照里的 Markdown 也有列表，不能按角色找）。 */
+/** 等「已发布的提交」那块画出来，回它的列表。 */
 async function commitRows(): Promise<HTMLElement[]> {
   await screen.findByRole('heading', { name: '已发布的提交' });
   const list = await waitFor(() => {
@@ -61,23 +57,6 @@ function commitsPanel(): HTMLElement {
   if (!section) throw new Error('找不到「已发布的提交」那一块');
   return section;
 }
-
-describe('lib/changelog', () => {
-  test('把仓根的 CHANGELOG.md 切出 Unreleased 段和已发布版本', () => {
-    const r = readChangelog();
-    // 仓里 Keep a Changelog 的格式钉死了：Unreleased 段一定解析得出来。
-    expect(typeof r.section).toBe('string');
-    expect(Array.isArray(r.released)).toBe(true);
-    // 下一版叫什么不从更新日志推（#725）：切出来的东西里没有版本号可拿
-    expect(r.next).not.toHaveProperty('version');
-  });
-
-  test('共享的那份 splitChangelog：缺 Unreleased 标题就报错（lib 走同一个实现，不吞错）', () => {
-    // 仓根的 CHANGELOG.md 是 vite ?raw 顶层读的——文件不在编译就挂；这里钉「内容格式坏掉」的路：
-    // splitChangelog 是共享那份，lib 调它不包不藏，所以 splitChangelog 抛，lib 就抛，页面给 LoadError。
-    expect(() => splitChangelog('# Changelog\n\n## 认不出的标题\n')).toThrow(/缺 ## \[Unreleased\]/);
-  });
-});
 
 describe('/changelog 页：已发布的提交', () => {
   test('读到了：每条写提交号、标题、发于何时，回滚的标出来，新的在前；假后端默认数据也能画', async () => {
@@ -110,13 +89,8 @@ describe('/changelog 页：已发布的提交', () => {
     });
     await commitRows();
     expect(screen.queryByRole('button', { name: /^发布/ })).toBeNull();
-    // 页面自己写的话（CHANGELOG 里引的历史原文不算）：标题、说明、列表、对照区的标题
-    const own = [
-      commitsPanel().textContent,
-      screen.getByRole('heading', { name: 'CHANGELOG.md 对照' }).textContent,
-    ]
-      .concat(document.querySelector('header')?.textContent ?? '')
-      .join('\n');
+    // 页面自己写的话：标题、说明、列表
+    const own = [commitsPanel().textContent, document.querySelector('header')?.textContent ?? ''].join('\n');
     expect(own).not.toMatch(/发布 v|里程碑发版|版本里程碑|这一版是|publish:pr|release\/v\d/);
     expect(screen.queryByRole('alertdialog')).toBeNull();
   });
@@ -166,21 +140,18 @@ describe('/changelog 页：故意造出的失败照实说', () => {
   });
 });
 
-describe('/changelog 页：还没收进版本', () => {
-  test('还没收进版本默认折叠、点开后展开', async () => {
+describe('/changelog 页：版式与已删的对照区（#1821）', () => {
+  test('提交行标题列带 min-w-0 flex-1、徽标和时间窄屏换行；没有 CHANGELOG.md 对照区', async () => {
+    // 标题列又被写回固定轨道，或对照区回来，这一条会红。
     renderApp(<ChangelogPage />, {
-      api: released({ state: 'ok', commits: [commit(A)], asOf: AS_OF }),
+      api: released({ state: 'ok', commits: [commit(A, { event: 'rollback' })], asOf: AS_OF }),
     });
-    await screen.findByRole('heading', { name: 'CHANGELOG.md 对照' });
-    const toggle = screen.getByRole('button', { name: /还没收进版本的更新/ });
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    // 折叠时不画 Unreleased 正文（仓里真有的一条）
-    expect(screen.queryByText(/Fable 进模型目录了/)).toBeNull();
-
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    expect(await screen.findByText(/Fable 进模型目录了/)).toBeTruthy();
-    // 段首说明为什么还没收进版本
-    expect(screen.getByText(/发版单位已改成主线提交/)).toBeTruthy();
+    const [row] = await commitRows();
+    const titleCol = row?.querySelector('p')?.parentElement;
+    expect(titleCol?.className).toContain('min-w-0');
+    expect(titleCol?.className).toContain('flex-1');
+    expect(row?.className).toContain('flex-wrap');
+    expect(screen.queryByRole('heading', { name: 'CHANGELOG.md 对照' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /还没收进版本/ })).toBeNull();
   });
 });
