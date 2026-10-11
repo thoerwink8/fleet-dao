@@ -7,7 +7,7 @@ import { Button } from '../components/ui/button';
 
 export default function NotFound() {
   return (
-    <Page title="这个页面不存在" width="narrow">
+    <Page title="这个页面不存在">
       <Section>
         <EmptyState
           icon={Compass}
