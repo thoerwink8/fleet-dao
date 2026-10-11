@@ -57,8 +57,29 @@ const PAIRS: { fg: string; bg: string; name: string }[] = [
   { fg: 'text-destructive-foreground', bg: 'bg-destructive', name: 'destructive-foreground / destructive' },
 ];
 
+let swatch: CanvasRenderingContext2D | null | undefined;
+
+/** 浏览器把 color-mix 算成 oklab() 这类写法时，借一块 1×1 画布换成 sRGB。 */
+function viaCanvas(css: string) {
+  if (swatch === undefined) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 1;
+    swatch = c.getContext('2d', { willReadFrequently: true });
+  }
+  if (!swatch) return undefined;
+  swatch.clearRect(0, 0, 1, 1);
+  swatch.fillStyle = '#000';
+  swatch.fillStyle = css;
+  swatch.fillRect(0, 0, 1, 1);
+  const px = swatch.getImageData(0, 0, 1, 1).data;
+  const a = (px[3] ?? 0) / 255;
+  if (a === 0) return undefined;
+  return { r: px[0] ?? 0, g: px[1] ?? 0, b: px[2] ?? 0, a };
+}
+
 function resolved(el: Element, prop: 'color' | 'backgroundColor') {
-  return parseColor(getComputedStyle(el)[prop]);
+  const css = getComputedStyle(el)[prop];
+  return parseColor(css) ?? viaCanvas(css);
 }
 
 /** 在 host 里放一个探针，读它算好的颜色。 */
@@ -490,7 +511,7 @@ function Gallery({ mode }: { mode: 'light' | 'dark' }) {
 export default function DesignGallery() {
   return (
     <Page title="设计陈列" description="每个组件的各种状态，亮色和暗色各一屏。只在 dev:mock 里有。">
-      <div className="grid gap-6 xl:grid-cols-2">
+      <div className="grid gap-6 2xl:grid-cols-2">
         {(['light', 'dark'] as const).map((mode) => (
           <div
             key={mode}
