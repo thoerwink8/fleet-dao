@@ -5,8 +5,10 @@ import { formatAgo, formatDateTime, formatDuration } from '../lib/format';
 import { everyText, jobStatusLabel, outcomeText } from '../lib/schedule';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
+import { KeyValue } from './layout/key-value';
 import { ListRow } from './layout/list';
 import { StatusDot } from './layout/status-badge';
+import { Tag } from './layout/tag';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
 /** 一行该用什么颜色提醒：失败红，没查成、只查了一部分、过期黄。 */
@@ -34,20 +36,20 @@ function LastSuccess({ j, now }: { j: JobView; now: number }) {
       {j.lastSuccessAt ? (
         <Tooltip>
           <TooltipTrigger asChild>
-            <span className={cn('num text-xs', j.status !== 'fresh' && 'font-medium text-ink-stall')}>
+            <span className={cn('num text-meta', j.status !== 'fresh' && 'font-medium text-ink-stall')}>
               {formatAgo(j.lastSuccessAt, now)}
             </span>
           </TooltipTrigger>
           <TooltipContent>{formatDateTime(j.lastSuccessAt)}</TooltipContent>
         </Tooltip>
       ) : (
-        <span className="text-xs text-ink-stall">{jobStatusLabel.never}</span>
+        <span className="text-meta text-ink-stall">{jobStatusLabel.never}</span>
       )}
       {j.status === 'overdue' ? (
-        <div className="text-caption text-ink-stall">{jobStatusLabel.overdue}</div>
+        <div className="text-meta text-ink-stall">{jobStatusLabel.overdue}</div>
       ) : null}
       {r ? (
-        <div className="num text-caption text-muted-foreground">{formatAgo(r.startedAt, now)}开始</div>
+        <div className="num text-meta text-muted-foreground">{formatAgo(r.startedAt, now)}开始</div>
       ) : null}
     </div>
   );
@@ -77,77 +79,66 @@ export function JobListRow({ j, now }: { j: JobView; now: number }) {
       expandable
       data-outcome={r?.outcome ?? (r ? 'running' : 'never')}
       data-status={j.status}
-      className={cn(tone === 'fail' && 'bg-st-fail/[0.06]', tone === 'stall' && 'bg-st-stall/[0.07]')}
       rail={tone ?? undefined}
       summary={
         <>
           <StatusDot tone={dotTone(j)} />
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-1.5">
-              <span className="min-w-0 truncate text-sm font-medium" title={j.id}>
+              <span className="min-w-0 truncate text-body font-medium" title={j.id}>
                 {j.name}
               </span>
               {j.status === 'overdue' ? (
-                <span
-                  className="shrink-0 rounded bg-st-stall/14 px-1 text-micro leading-4 text-ink-stall"
-                  title={jobStatusLabel.overdue}
-                >
-                  过期
+                <span title={jobStatusLabel.overdue} className="shrink-0">
+                  <Tag tone="stall">过期</Tag>
                 </span>
               ) : null}
             </span>
             {/* 宽屏有单独的「上次运行」列；窄屏那一列藏起来，结果挪到名字下面一行，不让失败、没查全藏在展开里。 */}
-            <span className={cn('block truncate text-caption md:hidden', outcomeClass(j))}>
+            <span className={cn('block truncate text-meta md:hidden', outcomeClass(j))}>
               {outcomeText(j)}
             </span>
           </span>
           <span
-            className={cn('hidden w-64 shrink-0 truncate text-xs md:block', outcomeClass(j))}
+            className={cn('hidden w-64 shrink-0 truncate text-meta md:block', outcomeClass(j))}
             title={outcomeText(j)}
           >
             {outcomeText(j)}
           </span>
           <span
             className={cn(
-              'num w-20 shrink-0 text-right text-xs text-muted-foreground',
+              'num w-20 shrink-0 text-right text-meta text-muted-foreground',
               j.status !== 'fresh' && 'font-medium text-ink-stall',
             )}
           >
             {j.lastSuccessAt ? formatAgo(j.lastSuccessAt, now) : jobStatusLabel.never}
           </span>
-          <span className="num hidden w-14 shrink-0 text-right text-xs text-muted-foreground sm:block">
+          <span className="num hidden w-14 shrink-0 text-right text-meta text-muted-foreground sm:block">
             {durationText(j)}
           </span>
         </>
       }
     >
-      <dl className="grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
-        <div className="min-w-0">
-          <dt className="text-caption text-muted-foreground">周期</dt>
-          <dd className="num mt-0.5">{j.schedule}</dd>
-          <dd className="text-caption text-muted-foreground">
-            期望{everyText(j.expectEveryMinutes)}成功一次
-          </dd>
-        </div>
-        <div className="min-w-0 sm:col-span-1 lg:col-span-2">
-          <dt className="text-caption text-muted-foreground">上次运行</dt>
-          <dd className={cn('mt-0.5 break-words', outcomeClass(j))}>{outcomeText(j)}</dd>
-        </div>
-        <div className="min-w-0">
-          <dt className="text-caption text-muted-foreground">上次跑成</dt>
-          <dd className="mt-0.5">
-            <LastSuccess j={j} now={now} />
-          </dd>
-        </div>
-        <div className="min-w-0">
-          <dt className="text-caption text-muted-foreground">耗时</dt>
-          <dd className="num mt-0.5">{durationText(j)}</dd>
-        </div>
-        <div className="min-w-0">
-          <dt className="text-caption text-muted-foreground">编号</dt>
-          <dd className="num mt-0.5 break-all">{j.id}</dd>
-        </div>
-      </dl>
+      <KeyValue
+        layout="grid"
+        cols={4}
+        items={[
+          {
+            label: '周期',
+            value: <span className="num">{j.schedule}</span>,
+            hint: `期望${everyText(j.expectEveryMinutes)}成功一次`,
+          },
+          {
+            label: '上次运行',
+            value: outcomeText(j),
+            ...(r?.outcome === 'failed' ? { tone: 'fail' as const } : {}),
+            ...(r?.outcome === 'unscanned' || r?.outcome === 'partial' ? { tone: 'stall' as const } : {}),
+          },
+          { label: '上次跑成', value: <LastSuccess j={j} now={now} /> },
+          { label: '耗时', value: <span className="num">{durationText(j)}</span> },
+          { label: '编号', value: j.id, mono: true },
+        ]}
+      />
     </ListRow>
   );
 }
@@ -157,7 +148,7 @@ export function JobListHead() {
   return (
     <div
       aria-hidden
-      className="hidden items-center gap-3 border-b bg-muted/50 px-4 py-1.5 text-xs text-muted-foreground sm:flex"
+      className="hidden items-center gap-3 border-b bg-muted px-4 py-1.5 text-meta text-muted-foreground sm:flex"
     >
       <span className="size-2 shrink-0" />
       <span className="min-w-0 flex-1">任务</span>

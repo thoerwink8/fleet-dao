@@ -44,14 +44,8 @@ const SITES = [
     from: 'grid-cols-[auto_1fr]',
     to: 'grid-cols-auto-fr',
   },
-  { file: 'src/components/channel-status.tsx', where: '空探针格', from: 'rounded-[2px]', to: 'rounded-2' },
-  { file: 'src/components/channel-status.tsx', where: '探针格', from: 'rounded-[2px]', to: 'rounded-2' },
-  {
-    file: 'src/components/release-card.tsx',
-    where: '每一行',
-    from: 'grid-cols-[4.5rem_minmax(0,1fr)]',
-    to: 'grid-cols-release',
-  },
+  { file: 'src/components/channel-status.tsx', where: '空探针格', from: 'rounded-[2px]', to: 'rounded-sm' },
+  { file: 'src/components/channel-status.tsx', where: '探针格', from: 'rounded-[2px]', to: 'rounded-sm' },
   {
     file: 'src/components/pool-holds.tsx',
     where: '暂停明细',
@@ -64,13 +58,13 @@ const COUNTS: Record<string, number> = {
   'src/components/usage.tsx': 8,
   'src/components/run-timeline.tsx': 5,
   'src/components/channel-status.tsx': 3,
-  'src/components/release-card.tsx': 1,
   'src/components/pool-holds.tsx': 1,
 };
 
-describe('token A2：18 处写死尺寸换成 token', () => {
-  test('六个组件各对上原来说的处数，加起来 18', () => {
-    expect(SITES).toHaveLength(18);
+// 发版卡的一处（grid-cols-release）在片 7（#1853）改用 KeyValue，不再有写死的标签列宽，这一处不再钉。
+describe('token A2：17 处写死尺寸换成 token', () => {
+  test('五个组件各对上原来说的处数，加起来 17', () => {
+    expect(SITES).toHaveLength(17);
     for (const [file, n] of Object.entries(COUNTS)) {
       expect(SITES.filter((site) => site.file === file)).toHaveLength(n);
     }

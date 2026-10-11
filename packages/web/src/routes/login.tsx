@@ -13,6 +13,8 @@ import { Navigate, useNavigate, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { ApiError, errorText, keys, useApi, useAuthConfig, useMe } from '../api/client';
 import type { Me } from '../api/types';
+import { Notice } from '../components/layout/notice';
+import { Section } from '../components/layout/section';
 import { LogoMark } from '../components/logo';
 import { PasswordField } from '../components/password-field';
 import { Button } from '../components/ui/button';
@@ -148,9 +150,9 @@ export default function LoginPage() {
   };
 
   const errorBox = error ? (
-    <p role="alert" className="mt-3 rounded-lg bg-st-fail/10 px-3 py-2 text-sm text-ink-fail">
+    <Notice tone="fail" className="mt-3">
       {error}
-    </p>
+    </Notice>
   ) : null;
 
   return (
@@ -158,14 +160,14 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         <div className="flex flex-col items-center text-center">
           <LogoMark className="size-12" />
-          <h1 className="mt-4 text-xl font-semibold tracking-tight">登录{brand.product}</h1>
-          <p className="mt-1.5 text-sm text-muted-foreground">{brand.product}只放行创始人。</p>
+          <h1 className="mt-4 text-title font-semibold">登录{brand.product}</h1>
+          <p className="mt-1.5 text-body text-muted-foreground">{brand.product}只放行创始人。</p>
         </div>
 
-        <div className="mt-8 rounded-2xl border bg-card p-5 shadow-sm">
+        <Section className="mt-8">
           {api.source === 'mock' ? (
             <div className="space-y-3 text-center">
-              <p className="text-sm text-muted-foreground">现在是假数据模式，不用登录。</p>
+              <p className="text-body text-muted-foreground">现在是假数据模式，不用登录。</p>
               <Button className="w-full" onClick={() => navigate(next, { replace: true })}>
                 进{brand.product}
               </Button>
@@ -173,11 +175,11 @@ export default function LoginPage() {
           ) : (
             <>
               {config.isPending ? (
-                <p className="text-center text-sm text-muted-foreground">正在读登录配置…</p>
+                <p className="text-center text-body text-muted-foreground">正在读登录配置…</p>
               ) : null}
               {config.error ? (
                 <div className="space-y-2 text-center">
-                  <p className="text-sm text-ink-fail">
+                  <p className="text-body text-ink-fail">
                     连不上{brand.product}后端：{errorText(config.error)}
                   </p>
                   <Button type="button" variant="outline" size="sm" onClick={() => void config.refetch()}>
@@ -234,7 +236,7 @@ export default function LoginPage() {
               ) : null}
 
               {passwordReady && (feishuReady || busy === 'feishu') ? (
-                <div className="my-4 flex items-center gap-3 text-xs text-muted-foreground" aria-hidden>
+                <div className="my-4 flex items-center gap-3 text-meta text-muted-foreground" aria-hidden>
                   <span className="h-px flex-1 bg-border" />或<span className="h-px flex-1 bg-border" />
                 </div>
               ) : null}
@@ -254,17 +256,16 @@ export default function LoginPage() {
               ) : null}
 
               {nothingReady ? (
-                <div role="alert" className="rounded-lg bg-st-fail/10 px-3 py-2.5 text-sm text-ink-fail">
-                  <p className="font-medium">登录没有配好：请在服务器上设置账密或飞书。</p>
-                  <p className="mt-1 text-xs">
+                <Notice tone="fail" title="登录没有配好：请在服务器上设置账密或飞书。">
+                  <span className="text-meta">
                     后端的登录配置里，账密、飞书、开发免登都没有开，所以这里没有能点的入口。
-                  </p>
-                </div>
+                  </span>
+                </Notice>
               ) : null}
 
               {devReady ? (
-                <form onSubmit={devLogin} className="mt-5 space-y-2 rounded-xl border border-dashed p-3">
-                  <Label htmlFor="dev-user" className="text-xs text-muted-foreground">
+                <form onSubmit={devLogin} className="mt-5 space-y-2 rounded-lg border border-dashed p-3">
+                  <Label htmlFor="dev-user" className="text-meta text-muted-foreground">
                     开发环境免登：填白名单里的用户编号
                   </Label>
                   <div className="flex gap-2">
@@ -285,12 +286,12 @@ export default function LoginPage() {
             </>
           )}
           {passwordReady ? null : errorBox}
-        </div>
-        <p className="mt-4 text-center text-xs text-muted-foreground">
+        </Section>
+        <p className="mt-4 text-center text-meta text-muted-foreground">
           登录后回到 <span className="num">{next}</span>
         </p>
         {passwordReady ? (
-          <p className="mx-auto mt-2 max-w-xs text-center text-xs text-balance text-muted-foreground">
+          <p className="mx-auto mt-2 max-w-xs text-center text-meta text-balance text-muted-foreground">
             {
               '还没设过账密？先用飞书登录，到「设置 → 账密登录」里设第一次。飞书进不去时，请管理员在服务器上设。'
             }

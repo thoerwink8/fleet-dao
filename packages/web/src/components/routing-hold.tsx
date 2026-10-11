@@ -15,8 +15,8 @@ import {
   withHold,
   withoutHold,
 } from '../lib/pool-holds';
+import { Tag } from './layout/tag';
 import { TAP, useRoutingEdit } from './routing-edit';
-import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -75,16 +75,12 @@ export function PoolHoldControl({ poolId, routeId }: { poolId: string; routeId: 
     );
   };
 
-  const badge = paused ? (
-    <Badge variant="outline" className="h-4 px-1 text-micro font-normal">
-      整池暂停
-    </Badge>
-  ) : null;
+  const badge = paused ? <Tag tone="stall">整池暂停</Tag> : null;
 
   let action: ReactNode = null;
   if (paused && opaque) {
     action = (
-      <Link to="/settings" className="text-caption text-muted-foreground underline underline-offset-2">
+      <Link to="/settings" className="text-meta text-muted-foreground underline underline-offset-2">
         去设置页撤回
       </Link>
     );
@@ -125,10 +121,10 @@ export function PoolHoldControl({ poolId, routeId }: { poolId: string; routeId: 
         {action}
       </span>
       {open === 'pause' ? (
-        <div className="order-1 mt-1 grid basis-full gap-2 rounded-lg border bg-muted/30 p-2">
+        <div className="order-1 mt-1 grid basis-full gap-2 rounded-lg border bg-muted p-2">
           {FIELDS.map((field) => (
             <div key={field.key} className="grid gap-1">
-              <Label htmlFor={`${routeId}-hold-${field.key}`} className="text-caption text-muted-foreground">
+              <Label htmlFor={`${routeId}-hold-${field.key}`} className="text-meta text-muted-foreground">
                 {field.label}
               </Label>
               <Input
@@ -142,7 +138,7 @@ export function PoolHoldControl({ poolId, routeId }: { poolId: string; routeId: 
             </div>
           ))}
           <div className="flex items-center justify-end gap-2">
-            {problem ? <span className="mr-auto text-caption text-muted-foreground">{problem}</span> : null}
+            {problem ? <span className="mr-auto text-meta text-muted-foreground">{problem}</span> : null}
             <Button type="button" size="xs" variant="ghost" onClick={() => setOpen(null)}>
               取消
             </Button>
@@ -161,9 +157,9 @@ export function PoolHoldControl({ poolId, routeId }: { poolId: string; routeId: 
         </div>
       ) : null}
       {open === 'revoke' ? (
-        <div className="order-1 mt-1 grid basis-full gap-2 rounded-lg border bg-muted/30 p-2">
+        <div className="order-1 mt-1 grid basis-full gap-2 rounded-lg border bg-muted p-2">
           <div className="grid gap-1">
-            <Label htmlFor={`${routeId}-hold-revoke`} className="text-caption text-muted-foreground">
+            <Label htmlFor={`${routeId}-hold-revoke`} className="text-meta text-muted-foreground">
               撤回原因
             </Label>
             <Input
