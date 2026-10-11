@@ -36,13 +36,13 @@ export {
 /**
  * 远档标题的 CSS 字号。用字号名，不写死像素。
  * --fd-zoom-far 是远档预设缩放，--fd-board-zoom 是画布当前缩放（画布外壳上写）。
- * 屏幕字号 = max(设计字号 × 当前缩放 / 预设缩放, 11)。
+ * 屏幕字号 = max(设计字号 × 当前缩放 / 预设缩放, 12)。
  */
 export function farTitleFontSize(): string {
-  return 'max(calc(var(--text-strong) / var(--fd-zoom-far, 0.4)), calc(var(--text-caption) / var(--fd-board-zoom, 0.4)))';
+  return 'max(calc(var(--text-heading) / var(--fd-zoom-far, 0.4)), calc(var(--text-meta) / var(--fd-board-zoom, 0.4)))';
 }
 
-/** 远档标题换算到屏幕上的像素，用来对验收（不小于 11）。 */
+/** 远档标题换算到屏幕上的像素，用来对验收（不小于 12）。 */
 export function farTitleScreenPx(zoom: number): number {
   const z = zoom > 0 ? zoom : ZOOM_OF.far;
   return Math.max((FAR_TITLE_DESIGN_PX * z) / ZOOM_OF.far, FAR_TITLE_FLOOR_PX);
