@@ -78,7 +78,6 @@ const probeCell = (
   checkAnswer: null,
   checkPassed: null,
   selfIdentity: null,
-  kind: null,
   ...over,
 });
 

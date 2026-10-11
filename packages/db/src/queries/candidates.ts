@@ -60,6 +60,14 @@ export interface RouteCandidate {
    * 没探它，不是它坏了（引擎 routing/filter.ts 按它判等不等下一轮探针）。
    */
   probeOrg: (typeof routes.$inferSelect)['probeOrg'];
+  /** 节奏档（#1798 片 6）：routes.probe_tier。空 = 还没写过。 */
+  probeTier: (typeof routes.$inferSelect)['probeTier'];
+  /** 下次定时探的时刻；不在用或还没写过为空。 */
+  probeNextAt: (typeof routes.$inferSelect)['probeNextAt'];
+  /** 连着不通几次。和档一起读出；接口侧老行不拿默认 0 顶。 */
+  probeFailStreak: (typeof routes.$inferSelect)['probeFailStreak'];
+  /** 上一次真探是 ping 还是 identity；空 = 还没写过。 */
+  probeKind: (typeof routes.$inferSelect)['probeKind'];
   /**
    * unknown = 额度没读成或判不了：这个池从没读成过、最近一次读成或上游数据本身超过 30 分钟、适用的窗口已过清零点，
    * 或有窗口判不了扣不扣这条路由。派工原因里要写明「额度未知」。读成了、但没有扣这个模型的窗口，是 ok。
@@ -201,6 +209,10 @@ export async function evaluateRoutes(
       probeState: route.probeState,
       probeDetail: route.probeDetail,
       probeOrg: route.probeOrg,
+      probeTier: route.probeTier,
+      probeNextAt: route.probeNextAt,
+      probeFailStreak: route.probeFailStreak,
+      probeKind: route.probeKind,
       quota,
       windows,
       inFlight: running,

@@ -254,7 +254,24 @@ export interface Route {
   variantContext?: string;
   /** 渠道最近一次读成的名册里已经没有这条路由。不删。再次出现就清掉。 */
   goneAt?: string;
+  /**
+   * 探针节奏档（#1798 片 6）：active / idle / unused。引擎写；没有 = 还没写过，不拿默认值顶。
+   */
+  probeTier?: RouteProbeTier;
+  /** 下次定时探的时刻；不在用或还没写过为空。 */
+  probeNextAt?: string;
+  /** 连着不通几次；探通清零。没有 = 节奏列还没写过。 */
+  probeFailStreak?: number;
+  /** 上一次真探是 ping 还是 identity；没有 = 还没写过。 */
+  probeKind?: RouteProbeKind;
 }
+
+/** 路由探针按活跃分的三档（#1798）。 */
+export type RouteProbeTier = 'active' | 'idle' | 'unused';
+/** 上一次真探的种类：连通 / 身份（#1798）。 */
+export type RouteProbeKind = 'ping' | 'identity';
+/** 这一次探测是谁触发的（#1798）。 */
+export type RouteProbeTrigger = 'scheduled' | 'dispatch' | 'manual' | 'break' | 'org-switch';
 
 /**
  * 路由探针对一条路由的结论（design 第九节「路由探针」）：

@@ -43,6 +43,16 @@ function routeView(r: RoutingRouteView, channels: ReadonlyMap<string, Channel>) 
     ban: r.liveness.ban,
     ...(c.probedAt ? { probedAt: c.probedAt.toISOString() } : {}),
     ...(c.probeDetail ? { probeDetail: c.probeDetail } : {}),
+    // 节奏列（#1798 片 6）：库里写过的原样转出；老行（四列都没写过）一个都不给，fail_streak 不拿默认 0 顶。
+    // 「写过没有」由 db 的 probePace.written 判（shared 的 probePaceWritten 一处判法），这里照它给。
+    ...(r.probePace.written
+      ? {
+          ...(r.probePace.tier != null ? { probeTier: r.probePace.tier } : {}),
+          ...(r.probePace.nextAt != null ? { probeNextAt: r.probePace.nextAt.toISOString() } : {}),
+          probeFailStreak: r.probePace.failStreak,
+          ...(r.probePace.kind != null ? { probeKind: r.probePace.kind } : {}),
+        }
+      : {}),
     exhausted: c.windows
       .filter((w) => w.applies === 'yes' && w.state === 'exhausted')
       .map((w) => ({ label: w.label, ...(w.resetsAt ? { resetsAt: w.resetsAt.toISOString() } : {}) })),

@@ -28,7 +28,10 @@ export function pgProbeHistory(db: Db): ProbeHistoryPort {
         checkAnswer: row.checkAnswer,
         checkPassed: row.checkPassed,
         selfIdentity: row.selfIdentity,
-        kind: row.kind,
+        // 探测种类（#1798 片 5）：库里写过的原样给；老行（没写过）不给，不拿 null 顶。
+        // 触发者同理：老行、没写过不给（片 6）。
+        ...(row.kind != null ? { kind: row.kind } : {}),
+        ...(row.trigger != null ? { trigger: row.trigger } : {}),
       }));
     },
   };
