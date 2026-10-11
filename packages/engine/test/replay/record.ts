@@ -17,7 +17,7 @@ import { historyToJSON } from '@temporalio/common/lib/proto-utils.js';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import type { EngineJobs, EngineTasks } from '../../src/activities.ts';
 import { WORKFLOW_TYPES } from '../../src/contract.ts';
-import { createFakeWorld, type FakeScript, type FakeWorld } from '../../src/fakes.ts';
+import { createFakeWorld, type FakeScript, type FakeWorld, fakeHead } from '../../src/fakes.ts';
 import {
   type TaskStatus,
   type TaskWorkflowInput,
@@ -147,6 +147,22 @@ const SCENARIOS: Record<string, Scenario> = {
       },
     };
   })(),
+  // 等合并时 PR 和主线冲突（#1838）：并主线并得干净、对新头重走 CI 和验收、合上。
+  // 历史里带 patched('merge-wait-conflict') 的标记——这份夹具是新代码真走过「等合并遇冲突」那一支录的。
+  'task-merge-conflict': {
+    script: { sync: (_i, n) => (n === 1 ? { state: 'clean', head: fakeHead(700) } : undefined) },
+    tasks: scripted({
+      merged: (n) =>
+        n === 1
+          ? { state: 'conflict', detail: 'PR #100 和主线冲突' }
+          : { state: 'merged', mergeCommit: 'abc1234567890' },
+    }).tasks,
+    async run(r) {
+      const handle = await startTask(r);
+      await handle.result();
+      return { 'task-merge-conflict': handle };
+    },
+  },
   // 自动合并挂上了，在等 GitHub 把它合进主线（一直在长轮询）。
   'task-merging': {
     tasks: scripted({ merged: () => ({ state: 'waiting', detail: '必过检查还没齐' }) }).tasks,

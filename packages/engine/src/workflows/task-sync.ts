@@ -10,6 +10,7 @@
 // - 验收（冷调用）开始前不并：并了头就变、验收白跑。
 
 import { isCancellation, log, patched } from '@temporalio/workflow';
+import type { SyncResult } from '../decisions/types.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import { Abandoned } from './task-support.ts';
 
@@ -66,4 +67,41 @@ export async function syncMainlineBeforeImplement(rt: TaskRuntime): Promise<Sync
     rt.status.lastProblem = `${SYNC_UNREAD}（照旧往下走）：${why.slice(0, 200)}`;
     return 'unread';
   }
+}
+
+/**
+ * 等合并时发现 PR 和主线冲突（#1838）：并最新主线，和等 CI 遇冲突时走同一条路（复用同一个 syncMainline 活动）。
+ * 这个函数只在 armAndWaitMerged 的 patched('merge-wait-conflict') 那一支里调，老历史重放走不到，不另加标记。
+ * - 'merged'：真并上了新的主线（头是引擎自己换的）：调用方回 head_moved，对新头重走 CI 和验收。
+ * - 'conflict'：真有冲突，冲突文件名进返工意见：调用方回 'rework'，交回会话解（走现有的「回动手」带意见的路）。
+ * - 'current'：分支本来就含最新主线、没什么可并，GitHub 却还说冲突（它的数据是旧的）：调用方接着等它重算。
+ * 每调一次记一次 rt.mainSyncs（和「落后主线自动同步」同一个计数）：调用方拿它兜底，不无限转。
+ */
+export async function syncMainlineOnConflict(
+  rt: TaskRuntime,
+  head: string,
+): Promise<'merged' | 'conflict' | 'current'> {
+  const prNumber = rt.prNumber;
+  if (prNumber === null) throw new Error('并主线之前还没有 PR');
+  rt.mainSyncs += 1;
+  const sync: SyncResult = await rt.step('syncMainline', () =>
+    rt.acts.syncMainline({
+      taskId: rt.input.taskId,
+      repo: rt.input.repo,
+      prNumber,
+      branch: rt.branch,
+      head,
+      ...(rt.worktree ? { worktreePath: rt.worktree.path } : {}),
+    }),
+  );
+  rt.head = sync.head;
+  if (sync.state === 'conflict') {
+    const line = conflictFeedback(sync.conflictFiles, sync.mainlineStale);
+    if (!rt.feedback.includes(line)) rt.feedback = [...rt.feedback, line];
+    rt.status.lastProblem = '和主线有冲突';
+    return 'conflict';
+  }
+  if (sync.head === head) return 'current';
+  rt.status.lastProblem = null;
+  return 'merged';
 }
