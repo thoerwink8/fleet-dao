@@ -153,6 +153,11 @@ describe('通知数同一口径（#1745）', () => {
     expect(countOf('卡住报警')).toBe('8');
     expect(countOf('日报')).toBe('8');
     expect(screen.getByTestId('pending-rule').textContent).toContain('待处理 9 条');
+    // 说明行是写给创始人的白话，不再提「铃铛和侧栏角标同数」（#1821）
+    expect(screen.getByTestId('pending-rule').textContent).toContain(
+      '要你拍的和卡住的，处理了就从这里消失。',
+    );
+    expect(screen.getByTestId('pending-rule').textContent).not.toContain('角标');
     expect(screen.getByText(/只取回了最近/).textContent).toContain('共 17 条');
   });
 
