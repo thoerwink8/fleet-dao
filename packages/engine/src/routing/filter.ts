@@ -287,16 +287,20 @@ function offlineBlock(route: RouteFacts, ctx: FilterContext): Block {
   }
   const probedAt = Date.parse(route.probedAt);
   const was = `探针上一次看它（${stamp(probedAt)}）时会话用户挂的是${ORG_NAMES[seen]}组织，没探它`;
-  // 库里写了下次该探的时刻就照它判；老输入（片 3 之前写的结论，这一列空）退回按上一次结论之后一轮算。
-  const next = route.probeNextAt
+  // 过期只认库里写好的下次该探的时刻（probe_next_at）：它由引擎每轮现写，「没探」的结论写的是这一轮的时刻，
+  // 所以探针还在走时它一直在现在附近、判不成过期；只有探针真停了、这一列跟着停住，才会晚于它 20 分钟。
+  // 老输入（片 3 之前写的结论，这一列空）退回按上一次结论之后一轮算。
+  const due = route.probeNextAt
     ? Date.parse(route.probeNextAt)
     : probedAt + ROUTE_PROBE_EVERY_MINUTES * 60_000;
-  const overdue = ctx.now - next > ROUTE_PROBE_OVERDUE_MINUTES * 60_000;
+  const overdue = ctx.now - due > ROUTE_PROBE_OVERDUE_MINUTES * 60_000;
   if (overdue) {
     const age = ctx.now - probedAt;
     return hard('offline', `${was}，之后 ${duration(age)}探针都没再探它（探针可能停了），按不在线算`);
   }
-  const until = ahead(next, ctx.now);
+  // 等的那一会儿：下一次探针轮（结论之后一轮）。probe_next_at 对这种「没探」的结论写的是它自己的时刻（已到点），
+  // 拿它当「什么时候再来试」会塌成不知道时刻——那不是这里要说的，这里说的是等下一轮钟走完。
+  const until = ahead(probedAt + ROUTE_PROBE_EVERY_MINUTES * 60_000, ctx.now);
   return {
     code: 'offline',
     text: `${was}；现在挂的是${ORG_NAMES[kind]}组织，等下一轮路由探针在${ORG_NAMES[kind]}组织下探过再派`,
