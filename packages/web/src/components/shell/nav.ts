@@ -2,7 +2,6 @@ import type { LucideIcon } from 'lucide-react';
 import {
   Activity,
   Bell,
-  Brain,
   CalendarClock,
   Gauge,
   History,
@@ -23,7 +22,7 @@ export interface NavItem {
 
 /**
  * 侧栏只放做好了的页（驾驶舱改版 2026-10-07）：没做的页（账单、战绩、判断题记录）不占导航，
- * 它们的地址还在、打开写明「还没做」（routes/soon.tsx）。/models 转到路由页的模型目录。
+ * 它们的地址还在、打开写明「还没做」（routes/soon.tsx）。/models 转到路由页的模型目录，/efforts 转到路由页的「思考档位」页签。
  * 分组按创始人回来看一眼的先后：先看盘面和要他拍的，再看调度，再看法国这台机器，最后是管理。
  */
 export const NAV: { group: string; items: NavItem[] }[] = [
@@ -57,19 +56,14 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         to: '/routing',
         label: '路由',
         icon: Route,
-        hint: '每个用途排哪些模型、走哪几条路，现在派得出去吗',
+        // 思考档位并进来了（#1914 第 5 轮）：/efforts 转到这页的「思考档位」页签
+        hint: '每个用途排哪些模型、走哪几条路，现在派得出去吗；每条路的思考档位也在这里改',
       },
       {
         to: '/routing/status',
         label: '渠道状态',
         icon: Activity,
         hint: '每个渠道一张卡：近 60 次柱条、平均耗时、可用率，点开看 request/response 原文',
-      },
-      {
-        to: '/efforts',
-        label: '思考档位',
-        icon: Brain,
-        hint: '每个模型走的每条路起会话想多深：没配用 high，改了下一个会话就照新的',
       },
       { to: '/quota', label: '额度', icon: Gauge, hint: '每个账号池每个时间窗还剩多少' },
     ],

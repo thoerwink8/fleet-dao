@@ -66,7 +66,8 @@ describe('路由页分块：一次只显示一块', () => {
     renderApp(<RoutingPage />, { route: '/routing' });
     await screen.findByRole('navigation', { name: '用途' });
     const tabs = screen.getAllByRole('tab');
-    expect(tabs.map((t) => t.textContent)).toEqual(['用途', '模型目录', '渠道']);
+    // 思考档位并进路由页成了第四块（#1914 第 5 轮）
+    expect(tabs.map((t) => t.textContent)).toEqual(['用途', '模型目录', '渠道', '思考档位']);
     expect(screen.getByRole('tab', { name: '用途' }).getAttribute('aria-selected')).toBe('true');
     expect(screen.queryByRole('list', { name: '目录里的模型' })).toBeNull();
     expect(screen.queryByRole('list', { name: '渠道列表' })).toBeNull();
@@ -81,6 +82,11 @@ describe('路由页分块：一次只显示一块', () => {
     expect(await screen.findByRole('list', { name: '渠道列表' })).toBeTruthy();
     expect(screen.getByRole('tab', { name: '渠道' }).getAttribute('aria-selected')).toBe('true');
     expect(screen.queryByRole('list', { name: '目录里的模型' })).toBeNull();
+
+    fireEvent.keyDown(screen.getByRole('tab', { name: '渠道' }), { key: 'ArrowRight' });
+    expect(await screen.findByRole('searchbox', { name: '搜索模型或渠道' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: '思考档位' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.queryByRole('list', { name: '渠道列表' })).toBeNull();
 
     fireEvent.click(screen.getByRole('tab', { name: '用途' }));
     expect(await screen.findByRole('navigation', { name: '用途' })).toBeTruthy();

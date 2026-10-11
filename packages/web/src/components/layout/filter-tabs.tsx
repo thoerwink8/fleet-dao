@@ -30,7 +30,7 @@ export interface FilterTabGroup<Id extends string = string> {
 /**
  * 几组同一类的次级筛选排成一行（#1904 起分组说明写在组头上）：组和组之间一道细竖线，后一组前面写组头小标题。
  * 组头留在自己那一组前面，不悬在半空。每组各是一个 FilterTabs（同一个选中值）。
- * 桌面一行；手机上整排横向滑动，不折成第二行（#1914 第 4 轮：页签一层、用途一层，不再三层）。
+ * 任何宽度都是一行；lg 以下放不下就整排横向滑动，不折成第二行（#1914 第 4、5 轮：页签一层、用途一层，不再三层）。
  */
 export function FilterTabGroups<Id extends string = string>({
   groups,
@@ -47,10 +47,11 @@ export function FilterTabGroups<Id extends string = string>({
 }) {
   return (
     <div
-      // 手机上右端渐隐，提示「还能往右滑」
+      // 任何宽度都是一行（#1914 第 5 轮：768 宽后一组折到第二行、竖线落在行首）；lg 以下放不下就横滑，右端渐隐提示还能往右滑
       style={{ '--fade-end': FADE } as CSSProperties}
       className={cn(
-        'scrollbar-thin flex min-w-0 items-center gap-x-3 gap-y-2 max-md:fade-edges-x max-md:overflow-x-auto md:flex-wrap',
+        // relative：读屏用的 sr-only（绝对定位）以这条为容器、跟着一起裁，不把主区撑宽
+        'scrollbar-thin relative flex min-w-0 flex-nowrap items-center gap-x-3 max-lg:fade-edges-x max-lg:overflow-x-auto',
         className,
       )}
     >
@@ -58,10 +59,7 @@ export function FilterTabGroups<Id extends string = string>({
         <div
           key={g.key}
           data-tab-group={g.key}
-          className={cn(
-            'flex min-w-0 items-center gap-x-2 max-md:shrink-0 md:max-w-full md:flex-wrap md:gap-y-1',
-            i > 0 && 'border-l pl-3',
-          )}
+          className={cn('flex shrink-0 flex-nowrap items-center gap-x-2', i > 0 && 'border-l pl-3')}
         >
           {g.heading ? (
             <span className="shrink-0 text-meta text-muted-foreground" data-tab-group-heading>

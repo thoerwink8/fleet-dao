@@ -19,7 +19,7 @@ export default [
     route('routing', 'routes/routing.tsx'),
     // 渠道状态（#1087、#1139）：每个渠道一张卡，近 60 次格子，点开看那一次的耗时和原文。
     route('routing/status', 'routes/routing-status.tsx'),
-    // 每条路由起会话的思考档位（#470）
+    // 旧地址：思考档位（#470）并进路由页（#1914），打开转到 /routing?tab=efforts。
     route('efforts', 'routes/efforts.tsx'),
     // 旧地址：环境页并进法国页（#1217），打开转到 /france。
     route('env', 'routes/env.tsx'),

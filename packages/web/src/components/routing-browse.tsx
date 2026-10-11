@@ -50,6 +50,7 @@ import { Section } from './layout/section';
 import { StatusBadge, StatusDot } from './layout/status-badge';
 import { Tag, type TagTone } from './layout/tag';
 import { ChannelSwitch, FounderOnlyBadge, ModelSwitch } from './routing-edit';
+import { RouteEffortField } from './routing-efforts';
 import { KindChip, KindDot, useKindEnv } from './routing-kinds';
 import { isManualChannel, ManualModelForm } from './routing-membership';
 import { ModelRosterNotice } from './routing-roster';
@@ -559,8 +560,12 @@ function CatalogDetail({ entry: e, now }: { entry: CatalogEntry; now: number }) 
     <Section title={e.displayName} description={entrySummary(e)} flush>
       {e.switchKnown ? (
         <div className="overflow-hidden">
-          <p className="border-b px-3 py-2 text-meta text-muted-foreground">
-            路由的先后管这个模型在所有用途里：拖动、置顶、置底，或聚焦后 Alt+上下键。
+          {/* 一行不折（#1914 第 5 轮）：怎么改先后放悬停 */}
+          <p
+            className="truncate border-b px-3 py-2 text-meta text-muted-foreground"
+            title="路由的先后管这个模型在所有用途里：拖动、置顶、置底，或聚焦后 Alt+上下键。"
+          >
+            路由的先后管这个模型在所有用途里
           </p>
           <ModelRoutes model={model} now={now} />
         </div>
@@ -586,6 +591,15 @@ function CatalogDetail({ entry: e, now }: { entry: CatalogEntry; now: number }) 
                     {hostLabel[r.hostId]} · {r.probe ? (PROBE_WORD[r.probe.state] ?? '没探') : '探针还没看过'}
                   </span>
                   <span className="num ml-auto truncate text-meta text-muted-foreground">{r.id}</span>
+                  {/* 没配进用途的路由也能先配档位（#1914 第 5 轮，原 /efforts 页并进来） */}
+                  <div className="mt-2 basis-full">
+                    <RouteEffortField
+                      modelId={e.modelId}
+                      modelName={e.displayName}
+                      routeId={r.id}
+                      routeName={`${channelName(r.channelId)} · ${r.poolId}`}
+                    />
+                  </div>
                 </li>
               ))}
             </ul>
@@ -772,6 +786,14 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
                   {route.probe ? (PROBE_WORD[route.probe.state] ?? '没探') : '探针还没看过'}
                 </span>
                 <span className="num ml-auto truncate text-meta text-muted-foreground">{route.id}</span>
+                <div className="mt-2 basis-full">
+                  <RouteEffortField
+                    modelId={route.modelId}
+                    modelName={modelName}
+                    routeId={route.id}
+                    routeName={routeTitle({ channelName: c.channel.name, poolId: route.poolId })}
+                  />
+                </div>
               </li>
             ))}
           </ul>

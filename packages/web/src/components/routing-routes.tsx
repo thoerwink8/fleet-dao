@@ -43,6 +43,7 @@ import {
   SortableList,
   useRoutingEdit,
 } from './routing-edit';
+import { RouteEffortField, useConfiguredRouteEffort } from './routing-efforts';
 import { usePoolHoldControl } from './routing-hold';
 import { KindChip, useKindEnv } from './routing-kinds';
 
@@ -191,9 +192,10 @@ export function ModelRoutes({
  */
 export function OrderSummaryLine({ summary, noun }: { summary: OrderSummary; noun: '模型' | '路由' }) {
   const why = noun === '模型' ? '关着、已下架或没有可用路由' : '关着、疑似换模型或没有可用路由';
-  const text = summary.ok
-    ? `引擎按序试开着的 ${summary.active} 个${noun}${summary.skipped > 0 ? `，跳过 ${summary.skipped} 个` : ''}`
-    : summary.why;
+  const skipped = summary.ok && summary.skipped > 0 ? `，跳过 ${summary.skipped} 个` : '';
+  const text = summary.ok ? `引擎按序试开着的 ${summary.active} 个${noun}${skipped}` : summary.why;
+  // 手机上卡头一行放不下长句（#1914 第 5 轮：不许折行），换成短的；整句在悬停里
+  const short = summary.ok ? `按序试 ${summary.active} 个${skipped}` : summary.why;
   const full = summary.ok
     ? `引擎按这个先后试：开着的 ${summary.active} 个${noun}，${
         summary.skipped > 0 ? `跳过 ${summary.skipped} 个（${why}），` : ''
@@ -206,7 +208,8 @@ export function OrderSummaryLine({ summary, noun }: { summary: OrderSummary; nou
       data-order-summary={summary.ok ? 'ok' : 'none'}
       className={summary.ok ? 'text-muted-foreground' : 'font-medium text-ink-fail'}
     >
-      {text}
+      <span className="max-md:hidden">{text}</span>
+      <span className="md:hidden">{short}</span>
     </span>
   );
 }
@@ -263,6 +266,16 @@ export function RouteItem({
   const skipped = slot !== undefined && slot.state !== 'on';
   const dim = skipped || (slot === undefined && !r.enabled);
   const factsId = `facts-${r.routeId}`;
+  // 配过档位才在小字里写一句（没配就是默认，不占地方）
+  const effort = useConfiguredRouteEffort(modelId, r.routeId);
+  const metaTitle = [
+    `${routeHost(r)} · ${slots.text}${slots.full ? '（满了，等空位，不算故障）' : ''}`,
+    slot ? slotWord(slot.state, slot.rank, '路由') : null,
+    effort ? `档位上限 ${effort}` : null,
+    isFirst ? '顺位第一条活的' : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
   return (
     <>
       <RowFrame tall className="items-start">
@@ -288,7 +301,8 @@ export function RouteItem({
           </span>
           <span className={cn('min-w-0 flex-1', dim && 'opacity-60')}>
             {/* 名字后面紧跟这条路由的状态（一行一个状态）；右边只留开关和「⋯」，手机上也放得下 */}
-            <span className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+            {/* 小字一行不折（#1914 第 5 轮）：放不下截断，整句在悬停里。名字是认路的那一样，不截断，真放不下宁可换行 */}
+            <span data-route-name-line className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
               <span className="text-body font-medium break-words">
                 {name}
                 {modelLabel ? (
@@ -297,8 +311,11 @@ export function RouteItem({
               </span>
               <KindChip kind={kind} variant="dot" />
             </span>
-            {/* 小字按文字流换行，不按块折：窄的时候不会剩一个「·」孤零零起一行 */}
-            <span className="mt-0.5 block text-meta text-muted-foreground">
+            <span
+              data-route-meta
+              title={metaTitle}
+              className="mt-0.5 block truncate whitespace-nowrap text-meta text-muted-foreground"
+            >
               {routeHost(r)} · <span className="num">{slots.text}</span>
               {slots.full ? (
                 // 池满了是等空位、不算故障：一个小图标，话在悬停和读屏里，窄屏小字不折两行
@@ -318,6 +335,11 @@ export function RouteItem({
                     {slotWord(slot.state, slot.rank, '路由')}
                   </span>
                 </>
+              ) : null}
+              {effort ? (
+                <span data-route-effort-word title="这条路配的思考档位上限；点开这条路由能改">
+                  {' · '}档位上限 <span className="num">{effort}</span>
+                </span>
               ) : null}
               {isFirst ? <Tag className="ml-2 align-middle">顺位第一条活的</Tag> : null}
               {/* 整池暂停不另贴小标签：名字后面的状态已经写「池暂停」（#1914 第 4 轮，原来写两遍） */}
@@ -392,7 +414,7 @@ export function RouteItem({
               ) : null}{' '}
               <Link
                 to={`/routing/status?p=${encodeURIComponent(r.channelId)}`}
-                className="underline underline-offset-2 hover:text-foreground"
+                className="whitespace-nowrap underline underline-offset-2 hover:text-foreground"
               >
                 原文、立即探测
               </Link>
@@ -408,6 +430,17 @@ export function RouteItem({
             </Fact>
             <Fact label="禁令与开关" fact={r.ban} />
           </div>
+          {/* 思考档位按「模型 × 路由」配，就在这条路由上改（#1914 第 5 轮，原 /efforts 页并进来）。展开了才读、才画 */}
+          {open ? (
+            <div className="mt-3 border-t pt-3">
+              <RouteEffortField
+                modelId={modelId}
+                modelName={modelName}
+                routeId={r.routeId}
+                routeName={name}
+              />
+            </div>
+          ) : null}
         </div>
       </RowDetail>
     </>

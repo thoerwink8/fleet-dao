@@ -97,7 +97,8 @@ export function Page({
       {/* 标题行：标题（后面跟 ⓘ）在左，操作和刷新在右。两边都从顶对齐、各自至少一个控件高并垂直居中，
           所以刷新和标题在同一行上对齐，不会被下面的说明拉低；说明在标题下面，最多一行。 */}
       <header className="mb-section-gap flex flex-wrap items-start justify-between gap-x-stack gap-y-2 max-md:mb-4 lg:flex-nowrap">
-        <div className="min-w-0 basis-52 lg:flex-1" data-page-titlebar>
+        {/* grow：中间宽度（md）也吃满右边操作剩下的宽，一行说明不被挤成两行（#1914 第 5 轮，768 宽量到折行） */}
+        <div className="min-w-0 grow basis-52 lg:flex-1" data-page-titlebar>
           <h1 className="inline align-middle text-title">{title}</h1>
           {hint}
           {description && !fold ? (

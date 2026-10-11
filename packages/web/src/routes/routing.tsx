@@ -17,7 +17,7 @@ import { Route as RouteIcon } from 'lucide-react';
 import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
-import { usePoolHolds, useRoutingLayers } from '../api/client';
+import { usePoolHolds, useRoutingEfforts, useRoutingLayers } from '../api/client';
 import type { RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
 import { EmptyState } from '../components/layout/empty-state';
 import { FilterTabGroups, FilterTabNote, FilterTabs } from '../components/layout/filter-tabs';
@@ -45,6 +45,7 @@ import {
   SortableList,
   useRoutingEdit,
 } from '../components/routing-edit';
+import { EFFORTS_STALE_AFTER_MS, EffortsTab } from '../components/routing-efforts';
 import { KindDot, useKindEnv } from '../components/routing-kinds';
 import { AddPurposeModel, effortWord, PurposeModelMenu } from '../components/routing-membership';
 import {
@@ -96,6 +97,9 @@ const DESCRIPTION = (
       模型、渠道、每条路由都有开关：模型开关关了，它在所有用途里不派；渠道开关关了，它下面的路由都不派。账号池可以在路由的「⋯」里整池暂停。下一次选路就照新的。
     </p>
     <p>
+      思考档位（起会话想多深）：点开一条路由就能改；所有路的档位放在「思考档位」页签里一张表看。改了下一个会话就照新的，不用发版。
+    </p>
+    <p>
       活 = 接得上、额度够、没被禁令挡三件都过；不知道 =
       探针还没看过、额度没读成，不当活。引擎派活时另看账号池有没有空位（满了是等，不算故障）；探针的结论过期了，引擎照上一次的结论派、写明，这里标「探测过期」。
     </p>
@@ -106,6 +110,8 @@ const TABS = [
   { id: 'purposes', label: '用途' },
   { id: 'models', label: '模型目录' },
   { id: 'channels', label: '渠道' },
+  // 思考档位并进路由页（#1914 第 5 轮）：所有路的档位一张表；每条路由展开后也能就地改
+  { id: 'efforts', label: '思考档位' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -117,16 +123,32 @@ const ROUTING_STALE_AFTER_MS = 5 * TIME.MIN;
 
 export default function Routing() {
   const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useRoutingLayers();
+  const efforts = useRoutingEfforts();
+  const now = useNow();
   const [params, setParams] = useSearchParams();
-  // 刷新收成页头最右一个图标钮，最后更新时间在悬停里（和主页同一个样子，#1819）
-  const refresh = {
-    onRefresh: () => void refetch(),
-    isFetching,
-    dataUpdatedAt,
-    staleAfterMs: ROUTING_STALE_AFTER_MS,
-    variant: 'dot' as const,
-  };
   const tab = parseTab(params.get('tab'));
+  // 刷新收成页头最右一个图标钮，最后更新时间在悬停里（和主页同一个样子，#1819）。
+  // 「思考档位」页签看的是档位那份（没有推送，60 秒自己重拉）：刷新两份都重读，新鲜度按档位那份算。
+  const refresh =
+    tab === 'efforts'
+      ? {
+          onRefresh: () => {
+            void efforts.refetch();
+            void refetch();
+          },
+          isFetching: efforts.isFetching,
+          // 共用秒表一拍最多慢 1 秒。刚读成的时间戳比「现在」新时压回这一拍，避免显示成「1 秒后」。
+          dataUpdatedAt: efforts.dataUpdatedAt > now ? now : efforts.dataUpdatedAt,
+          staleAfterMs: EFFORTS_STALE_AFTER_MS,
+          variant: 'dot' as const,
+        }
+      : {
+          onRefresh: () => void refetch(),
+          isFetching,
+          dataUpdatedAt,
+          staleAfterMs: ROUTING_STALE_AFTER_MS,
+          variant: 'dot' as const,
+        };
   const setTab = (id: TabId) =>
     setParams(
       (prev) => {
@@ -198,6 +220,7 @@ export default function Routing() {
         <div role="tabpanel" id="routing-panel" aria-labelledby={`routing-tab-${tab}`}>
           {tab === 'models' ? <ModelCatalogTab layers={data} /> : null}
           {tab === 'channels' ? <ChannelTab layers={data} /> : null}
+          {tab === 'efforts' ? <EffortsTab /> : null}
           {tab === 'purposes' ? <PurposesTab purposes={purposes} params={params} /> : null}
         </div>
       </RoutingEditProvider>
@@ -480,7 +503,8 @@ function RoutesCard({
       title={`${model.displayName} 的路由`}
       description={
         <>
-          所有用途共用这个先后 ·{' '}
+          {/* 手机上卡头一行放不下（不许折行），这半句收起，ⓘ 里有 */}
+          <span className="max-md:hidden">所有用途共用这个先后 · </span>
           {model.routes.length > 0 ? <OrderSummaryLine summary={order} noun="路由" /> : modelSummary(model)}
         </>
       }
@@ -562,7 +586,9 @@ function ModelPriority({
       title="模型先后"
       description={
         <>
-          只管{purposeLabel(p.purpose)} · <OrderSummaryLine summary={summary} noun="模型" />
+          {/* 手机上卡头和「添加模型」挤一行，前半句收起，不折行 */}
+          <span className="max-md:hidden">只管{purposeLabel(p.purpose)} · </span>
+          <OrderSummaryLine summary={summary} noun="模型" />
         </>
       }
       actions={<AddPurposeModel purpose={p} onError={onError} />}
@@ -675,7 +701,9 @@ function ModelRow({
         )}
       >
         <KindDot kind={kind} whyNot="一条路由都没有" className="shrink-0" />
-        <span className="min-w-0">
+        {/* 小字一行不折（#1914 第 5 轮，320 宽量到折行）：放不下截断，整句在悬停里。
+            名字是认人的那一样，不截断：真长到放不下宁可换行（老规矩，test/routing-lists「名字可换行」） */}
+        <span className="min-w-0 flex-1">
           <span className="flex flex-wrap items-center gap-x-2">
             <span data-row-name className="text-body font-medium break-words">
               {m.displayName}
@@ -685,8 +713,8 @@ function ModelRow({
           <span
             data-row-meta
             data-effort-tip={effortTitle ? '' : undefined}
-            title={effortTitle ? `档位配不了：${effortTitle}` : undefined}
-            className="block text-meta text-muted-foreground md:truncate"
+            title={effortTitle ? `档位配不了：${effortTitle}` : `${meta} · ${word}`}
+            className="block truncate whitespace-nowrap text-meta text-muted-foreground"
           >
             {/* 手机上一行放不下名字、状态和开关：厂家不写，实际第几位挪到这行小字里 */}
             <span className="max-md:hidden">{meta}</span>
