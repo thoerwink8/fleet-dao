@@ -18,6 +18,7 @@ const REQUIRED = [
   'task-merged',
   'task-parked-brief',
   'task-parked-guarded',
+  'task-merge-conflict',
   'task-merging',
   'task-paused',
   'task-reworked',
@@ -33,13 +34,41 @@ interface Fixture {
   workflowId: string;
   history: {
     events: {
+      eventId?: string;
       activityTaskScheduledEventAttributes?: { activityType: { name: string } };
+      activityTaskCompletedEventAttributes?: {
+        scheduledEventId?: string;
+        result?: unknown;
+      };
+      markerRecordedEventAttributes?: {
+        markerName?: string;
+        details?: Record<string, { payloads?: { data?: string }[] }>;
+      };
       [key: string]: unknown;
     }[];
   };
 }
 
 const load = (file: string): Fixture => JSON.parse(readFileSync(`${DIR}${file}`, 'utf8')) as Fixture;
+
+type Event = Fixture['history']['events'][number];
+
+/** 历史里按顺序调度过的活动名（查步序用）。 */
+const scheduledActivities = (history: Fixture['history']): string[] =>
+  history.events
+    .map((e) => e.activityTaskScheduledEventAttributes?.activityType.name)
+    .filter((n): n is string => n !== undefined);
+
+/** 第一次调度某个活动的那个事件（找不到就是 undefined，测试自己断言）。 */
+const firstScheduled = (history: Fixture['history'], activity: string): Event | undefined =>
+  history.events.find((e) => e.activityTaskScheduledEventAttributes?.activityType.name === activity);
+
+/** 某次调度的结果事件（对上 scheduledEventId）。 */
+const completionOf = (history: Fixture['history'], scheduled: Event | undefined): Event | undefined =>
+  history.events.find((e) => e.activityTaskCompletedEventAttributes?.scheduledEventId === scheduled?.eventId);
+
+/** 载荷（Temporal 把活动结果封成 base64 的 json/plain）。 */
+const payloadOf = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64');
 
 let bundle: Awaited<ReturnType<typeof engineBundle>>;
 beforeAll(async () => {
@@ -88,15 +117,71 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
     }
   });
 
-  it('task-merging 夹具（等合并）没有 merge-wait-conflict 标记：老历史重放不走「等合并遇冲突」那一支（#1838）', () => {
-    // 老历史里 waitMerged 不会回 conflict，这一支用 patched('merge-wait-conflict') 守住：
-    // 标记不在历史里就当没有，照老步序接着等（task-merging 夹具重放绿，这一条把「标记不在」钉住）
-    const marker = Buffer.from(JSON.stringify({ id: 'merge-wait-conflict', deprecated: false })).toString(
-      'base64',
+  // 新分支真走没走、老历史重放会不会走进去——都要用「真重放一遍」证明，光查夹具里有没有标记不算（#1838 返工意见）。
+  // 两条用例各管一边：
+  //  - task-merging（老历史的等合并）：第一次 waitMerged 的结果改成 conflict，老历史里没有 merge-wait-conflict 标记，
+  //    patched() 为假就当没这一支、照老步序接着等，重放得过（历史里还是 waitMerged，没多出 syncMainline）。
+  //  - task-merge-conflict（新代码真走过的等合并遇冲突）：历史里带标记，走到那一支，重放得过；
+  //    把标记改名（patched() 认不出）后重放当场红——两边对照，证明这一支真的靠标记守着、真会改变走的步序。
+  const MERGE_WAIT_MARKER = Buffer.from(
+    JSON.stringify({ id: 'merge-wait-conflict', deprecated: false }),
+  ).toString('base64');
+
+  it('task-merging 老历史（等合并）里 waitMerged 回了 conflict、历史里没有标记：patched() 为假，照老步序重放得过（#1838）', async () => {
+    const { workflowId, history } = load('task-merging.json');
+    // 老历史第一回等合并回的是 waiting；把它的结果改成 conflict，模拟「GitHub 当时回了冲突」的历史
+    const done = completionOf(history, firstScheduled(history, 'waitMerged'));
+    expect(done).toBeDefined();
+    const attrs = done?.activityTaskCompletedEventAttributes;
+    expect(attrs).toBeDefined();
+    if (attrs)
+      attrs.result = {
+        payloads: [
+          {
+            metadata: { encoding: 'anNvbi9wbGFpbg==' },
+            data: payloadOf({ state: 'conflict', detail: 'PR #100 和主线冲突' }),
+          },
+        ],
+      };
+    expect(JSON.stringify(history)).not.toContain(MERGE_WAIT_MARKER); // 老历史里没有这个标记
+    // 重放得过就是这一支真没走的证明：patched() 为假，照老步序接着等下一回 waitMerged。
+    // 反过来验过：把代码里的 patched('merge-wait-conflict') 去掉，这一步重放当场报
+    // TMPRL1100（'waitMerged' 对不上 'syncMainline'）——证明新分支真被标记守着、这条断言真能红。
+    await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId);
+  });
+
+  it('task-merge-conflict 夹具（新代码真走过的等合并遇冲突）：带 merge-wait-conflict 标记，重放得过（#1838）', async () => {
+    const text = readFileSync(`${DIR}task-merge-conflict.json`, 'utf8');
+    expect(text).toContain(MERGE_WAIT_MARKER); // 这份夹具真走过这一支，标记在历史里
+    const { history } = load('task-merge-conflict.json');
+    // 真并了一遍主线、对新的头重走了一遍 CI 和验收：老历史里不会有这些步序（跑得通也证明历史和新代码对得上）
+    const acts = scheduledActivities(history);
+    expect(acts).toContain('syncMainline');
+    expect(acts.filter((n) => n === 'waitCi').length).toBe(2);
+    expect(acts.filter((n) => n === 'coldVerify').length).toBe(2);
+  });
+
+  it('对照：把 task-merge-conflict 里的标记改名，patched() 认不出，重放当场红（这一支真靠标记守着）（#1838）', async () => {
+    const { workflowId, history } = load('task-merge-conflict.json');
+    const marker = history.events.find((e) => {
+      const details = (e.markerRecordedEventAttributes?.details ?? {}) as Record<
+        string,
+        { payloads?: { data?: string }[] }
+      >;
+      return details['patch-data']?.payloads?.[0]?.data === MERGE_WAIT_MARKER;
+    });
+    if (marker === undefined) throw new Error('夹具里没有 merge-wait-conflict 的 core_patch 标记');
+    const details = marker.markerRecordedEventAttributes?.details as
+      | Record<string, { payloads: { data: string }[] }>
+      | undefined;
+    const patchData = details?.['patch-data']?.payloads?.[0];
+    if (patchData === undefined) throw new Error('core_patch 标记的载荷读不出来');
+    // 标记改成 patched() 认不出的名字：等于「这份历史没见过这一支」——老任务重放会照老步序走，和新历史对不上
+    patchData.data = payloadOf({ id: 'merge-wait-conflict-renamed', deprecated: false });
+    const error = await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId).catch(
+      (e: unknown) => e,
     );
-    const merging = readFileSync(`${DIR}task-merging.json`, 'utf8');
-    expect(merging).not.toContain(marker);
-    expect(merging).toContain('waitMerged'); // 这份夹具确实走过等合并那一段
+    expect(error).toBeInstanceOf(DeterminismViolationError);
   });
 
   it('对照：历史里调度的活动和代码调的对不上，重放当场报 DeterminismViolationError（这道检查真能红）', async () => {
