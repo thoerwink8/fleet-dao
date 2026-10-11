@@ -4,7 +4,7 @@
 // - 不知道（探针没看过、额度没读成）不画成活，也不画成死：用停滞色，原因照写。
 // - 渠道已关时这条路由不画开关，写「渠道已关」；整池暂停、整池暂停没读成时开关置灰并写原因。
 
-import { type HostId, probeBackoffNotice, routeEffortChoices } from '@fleet-dao/shared';
+import { type HostId, routeEffortChoices } from '@fleet-dao/shared';
 import { ChevronRight } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { Link } from 'react-router';
@@ -13,8 +13,10 @@ import type { LivenessFact, RoutingLayerModel, RoutingLayerRoute } from '../api/
 import { formatAgo, formatIn } from '../lib/format';
 import { useMediaQuery } from '../lib/hooks';
 import { poolIsHeld } from '../lib/pool-holds';
+import { nextProbeLine } from '../lib/probe-pace-view';
 import { routeKind } from '../lib/route-kinds';
-import { probeStale, routeHost, routeSlots, routeTitle } from '../lib/routing';
+import { probeInterrupted } from '../lib/route-state';
+import { routeHost, routeSlots, routeTitle } from '../lib/routing';
 import { supportedPurposeEfforts } from '../lib/routing-browse';
 import { actualRanks, routeSlotState, type SlotState, slotWord, summarizeOrder } from '../lib/routing-order';
 import { type Tone, toneText } from '../lib/status';
@@ -187,7 +189,7 @@ export function OrderSummaryLine({
         ? `引擎按这个先后试：开着的 ${summary.active} 个${noun}，${
             summary.skipped > 0
               ? `跳过 ${summary.skipped} 个（${
-                  noun === '模型' ? '关着、已下架或没有可用路由' : '关着、疑似降智或没有可用路由'
+                  noun === '模型' ? '关着、已下架或没有可用路由' : '关着、疑似换模型或没有可用路由'
                 }），`
               : ''
           }排头的是配置里第 ${summary.firstPosition} 个`
@@ -227,8 +229,10 @@ export function RouteItem({
   const [open, setOpen] = useState(false);
   // 不到 lg 且这一行能调先后（模型下的路由）：操作收进「⋯」菜单。渠道页里的路由只有一个开关，不收。
   const menuMode = useMediaQuery(COMPACT_MQ) && rowControls !== undefined;
-  const stale = probeStale(r, now);
-  const backoff = probeBackoffNotice(r.probeDetail ?? r.connect.reason);
+  const stale = r.probedAt !== undefined && probeInterrupted(r, now);
+  const nextLine = nextProbeLine(r, now);
+  // 退避中、已到点没探、检测中断才在行上写下次探测；正常的不占地方（展开能看）
+  const backoff = nextLine && (nextLine.tone !== 'normal' || (r.probeFailStreak ?? 0) > 0) ? nextLine : null;
   const slots = routeSlots(r);
   const edit = useRoutingEdit();
   const routing = useRouting();
@@ -353,8 +357,14 @@ export function RouteItem({
           {r.routeId}
         </span>
         {backoff ? (
-          <span data-probe-backoff className="basis-full text-caption text-ink-stall">
-            {backoff}
+          <span
+            data-probe-backoff
+            className={cn(
+              'basis-full text-caption',
+              backoff.tone === 'fail' ? 'font-medium text-ink-fail' : 'text-ink-stall',
+            )}
+          >
+            {backoff.text}
           </span>
         ) : null}
         {poolProblem ? <PoolProblemLine problem={poolProblem} now={now} className="basis-full" /> : null}
@@ -364,11 +374,11 @@ export function RouteItem({
         hidden={!open}
         className="mt-1 mb-1 grid gap-x-4 gap-y-2 rounded-md bg-muted/30 p-2 md:grid-cols-3"
       >
-        <Fact label="接得上" fact={r.connect} red={kind === 'fault'}>
+        <Fact label="接得上" fact={r.connect} red={kind === 'fault' || kind === 'interrupted'}>
           {r.probedAt ? (
             stale ? (
-              <span className="text-ink-stall">
-                探测过期：{formatAgo(r.probedAt, now)}的结论，探针可能停了
+              <span className="text-ink-fail">
+                检测中断：{formatAgo(r.probedAt, now)}的结论，晚于下次探测时刻 20 分钟还没探，探针可能停了
               </span>
             ) : (
               <>{formatAgo(r.probedAt, now)}探的</>

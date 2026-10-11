@@ -184,14 +184,19 @@ export async function prepare(env: Record<string, string | undefined> = process.
         alive: true,
         probeState: 'ok',
         probedAt: new Date(ago(4)),
-        probeDetail: '答上了：OK · 用时 8 秒',
+        probeDetail: '答上了：pong · 用时 8 秒',
+        // 和线上定时轮写的一样（#1798 片 3）：活跃的路由探通后 60 分钟再探，4 分钟前探的下次在 56 分钟后
+        probeTier: 'active',
+        probeNextAt: new Date(ago(-56)),
+        probeFailStreak: 0,
+        probeKind: 'ping',
       })
       .where(inArray(routes.id, alive));
-    // 渠道状态页（#1087）的「检测中断」：Claude 订阅两条在用的路是半小时前探的（15 分钟一轮 + 3 分钟都过了），其余渠道是 4 分钟前探的。
-    // 半小时还没到 45 分钟的「探测过期」线，路由页下面的活 / 不知道不受影响。
+    // 渠道状态页（#1087、#1798 片 7）的「检测中断」：Claude 订阅两条在用的路是 90 分钟前探的，本该 30 分钟前再探，
+    // 晚了 20 分钟还没探；其余渠道照常。判的是 probe_next_at 加 20 分钟，不看上次探测的时刻。
     await db
       .update(routes)
-      .set({ probedAt: new Date(ago(30)) })
+      .set({ probedAt: new Date(ago(90)), probeNextAt: new Date(ago(30)) })
       .where(inArray(routes.id, ['claude-carpool:opus-5.5:claude-code', 'claude-solo:opus-5.5:claude-code']));
 
     // 业务数据：devFixtures 里的任务、会话、提醒、PR 等，渠道、池、路由编号对到目录里的真名字；它自带的目录那几类不要。
