@@ -518,10 +518,11 @@ function ChannelSummary({
     <p
       data-channel-counts
       title={full}
-      aria-label={full}
       className="flex min-w-0 items-center gap-2 whitespace-nowrap text-body text-muted-foreground"
     >
       <StatusDot tone={worst} />
+      {/* 读屏念整句；看得见的几段（手机上只剩一段）不给读屏 */}
+      <span className="sr-only">{full}</span>
       {segs.map((s, i) => (
         <span key={s.key} aria-hidden className={cn('num', s.className, s.key !== lead && 'max-md:hidden')}>
           {i > 0 ? <span className="mr-2 font-normal text-muted-foreground max-md:hidden">·</span> : null}
