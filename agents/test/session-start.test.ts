@@ -66,7 +66,7 @@ interface HookLib {
   ): string[];
   RECENT_TOTAL_CHARS: number;
   checkTemporary(cwd: string, git: Git, now?: number): string[];
-  checkDirectives(cwd: string, git: Git): string[];
+  checkDirectives(cwd: string, git: Git, lineage?: Lineage | null): string[];
   sweepWorktrees(cwd: string, git: Git, now?: number, home?: string): string[];
   workerLines(home: string, now?: number, alive?: (pid: number) => boolean): string[];
   beijingToday(now?: number): string;
@@ -74,7 +74,13 @@ interface HookLib {
   pickCwd(input: unknown): string;
   PROGRESS_MS: number;
   progressRunner(timeoutMs?: number): ScriptRun;
-  checkProgressIssue(o: { cwd: string; git: Git; run: ScriptRun; mirror?: string | null }): string[];
+  checkProgressIssue(o: {
+    cwd: string;
+    git: Git;
+    run: ScriptRun;
+    mirror?: string | null;
+    lineage?: Lineage | null;
+  }): string[];
   IDLE_PR_MS: number;
   idlePrRunner(timeoutMs?: number): ScriptRun;
   checkIdlePrs(o: {
@@ -86,10 +92,16 @@ interface HookLib {
   }): string[];
 }
 type ScriptRun = (script: string, repo: string) => Result;
+type Lineage =
+  | { status: 'found'; dir: string; sessionIds: string[] }
+  | { status: 'none' | 'unchecked'; why: string };
 
 const HOOKS = fileURLToPath(new URL('../hooks/', import.meta.url));
 const HOOK = join(HOOKS, 'session-start.mjs');
 const hook = (await import(pathToFileURL(HOOK).href)) as HookLib;
+const inbox = (await import(pathToFileURL(join(HOOKS, 'founder-inbox.mjs')).href)) as {
+  lineageOf(o: { home: string; sessionId: unknown; env?: Record<string, string | undefined> }): Lineage;
+};
 /** 专用检出的位置（钩子是从 sync-source.mjs 里按家的目录拼出来的） */
 const mirrorIn = (home: string) => join(home, '.fleet-dao', 'origin-main');
 
@@ -140,6 +152,23 @@ function record(home: string, repo: string, commit?: string): void {
   mkdirSync(join(home, '.fleet-dao'), { recursive: true });
   const synced = commit ? { synced: { commit, dirty: false, at: '2026-09-26T00:00:00.000Z' } } : {};
   writeFileSync(join(home, '.fleet-dao', 'synced.json'), JSON.stringify({ repo, ...synced }));
+}
+
+/**
+ * 一个 Mirasim 会话（一条血缘）：目录 dir，各轮按 ids 的顺序各用一个原生会话号（不带他的话），record.json 的 nativeSessionId
+ * 是最后一个号。换过原生号的会话就给两个号。
+ */
+function mirasimLine(home: string, dir: string, ids: string[]): void {
+  const d = join(home, '.mirasim', 'sessions', 'claude', dir);
+  mkdirSync(d, { recursive: true });
+  writeFileSync(
+    join(d, 'record.json'),
+    JSON.stringify({ workdir: 'D:\\frank\\fleet-dao', nativeSessionId: ids[ids.length - 1] }),
+  );
+  writeFileSync(
+    join(d, 'turns.jsonl'),
+    ids.map((sessionId) => `${JSON.stringify({ sessionId })}\n`).join(''),
+  );
 }
 
 /** 假同步：记下被怎么调，回给定的结果 */
@@ -496,6 +525,8 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
   it('三分钟内不再取远端、不再问 GitHub、不再扫工作树；引导对账每轮都做；过了再做。工人不走这扇门', () => {
     const w = world();
     record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
+    // 同一个 Mirasim 会话换过原生号：other 是换号前的，me 是现在的
+    mirasimLine(w.home, 'm-me', ['other', 'me']);
     const log = join(w.home, '.fleet-dao', 'prompt-log');
     mkdirSync(log, { recursive: true });
     const now = Date.now();
@@ -1437,18 +1468,24 @@ describe('fleet-dao 的创始人引导在进度单 #1055 上（开会话钩子�
     expect(f.calls).toEqual([]);
   });
 
-  it('有待处理的：一行写条数、评论号、原话开头；没有不出声', () => {
+  it('有待处理的（旧的、没写主的算无主）：一行写条数、评论号、原话开头，叫先认领；没有不出声', () => {
     const dir = fleetRepo();
     const f = fakeRun({
       stdout:
         row(11, '【创始人引导·待处理】2026-10-05 17:50', '原话：太慢了，我建议优先gpt6luna，不行就grok') +
         row(12, '【创始人引导·待处理】2026-10-05 17:05', '原话：都按照你推荐'),
     });
-    const lines = check(dir, f.run);
+    const lines = hook.checkProgressIssue({
+      cwd: dir,
+      git,
+      run: f.run,
+      mirror: SCRIPT,
+      lineage: { status: 'found', dir: 'dir-a', sessionIds: ['dir-a'] },
+    });
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('创始人引导还有 2 条没处理（进度单 #1055）');
+    expect(lines[0]).toContain('无主的创始人引导 2 条（进度单 #1055');
     expect(lines[0]).toContain('11（2026-10-05 17:50）太慢了');
-    expect(lines[0]).toContain('pnpm progress:done');
+    expect(lines[0]).toContain('pnpm progress:claim');
     expect(f.calls.map(([script]) => script)).toEqual([SCRIPT]);
     expect(check(dir, fakeRun({ stdout: '' }).run)).toEqual([]);
   });
@@ -1484,14 +1521,24 @@ describe('fleet-dao 的创始人引导在进度单 #1055 上（开会话钩子�
   });
 });
 
-describe('创始人最近落盘的话（上一个会话没送到的，新会话开场能看到）', () => {
+describe('创始人最近落盘的话（同一个 Mirasim 会话换原生号之前没送到的，新号开场能看到）', () => {
   const NOW = Date.parse('2026-10-04T11:30:00Z');
-  const rec = (dir: string, day: string, rows: unknown[]) => {
+  // 没写会话号的行算换号前那个号 old 收到的
+  const rec = (dir: string, day: string, rows: object[]) => {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, `${day}.jsonl`), rows.map((r) => `${JSON.stringify(r)}\n`).join(''));
+    writeFileSync(
+      join(dir, `${day}.jsonl`),
+      rows.map((r) => `${JSON.stringify({ sessionId: 'old', ...r })}\n`).join(''),
+    );
   };
-  const recent = (o: { home: string; now?: number; dir?: string | null; sessionId?: string | null }) =>
-    (hook as unknown as { recentPrompts(o: unknown): string[] }).recentPrompts(o);
+  // 本会话是 Mirasim 会话 m1，现在的原生号 now、换号前是 old
+  const recent = (o: { home: string; now?: number; dir?: string | null; sessionId?: string | null }) => {
+    mirasimLine(o.home, 'm1', ['old', 'now']);
+    return (hook as unknown as { recentPrompts(o: unknown): string[] }).recentPrompts({
+      sessionId: 'now',
+      ...o,
+    });
+  };
 
   it('最近 1 小时内的话列出来，带北京时间；更早的、将来的不列', () => {
     const home = temp('rp-home');
@@ -1549,16 +1596,20 @@ describe('创始人最近落盘的话（上一个会话没送到的，新会话�
     expect((line ?? '').length).toBeLessThan(hook.RECENT_TOTAL_CHARS + 400);
   });
 
-  it('本会话自己落盘的话不再列（它早见过）；别的会话的照列', () => {
+  it('当前这个号自己落盘的话不列（它早见过）；换号前的照列；别的 Mirasim 会话的一概不列（2026-10-11 串会话）', () => {
     const home = temp('rp-home');
     rec(join(home, '.fleet-dao', 'prompt-log'), '2026-10-04', [
-      { at: '2026-10-04T11:20:00Z', sessionId: 'other', prompt: '别的会话里他说的话' },
-      { at: '2026-10-04T11:25:00Z', sessionId: 'me', prompt: '本会话里他说过的话' },
+      { at: '2026-10-04T11:20:00Z', sessionId: 'old', prompt: '换号前他说的话' },
+      { at: '2026-10-04T11:22:00Z', sessionId: 'stranger', prompt: '别的会话里他说的话' },
+      { at: '2026-10-04T11:25:00Z', sessionId: 'now', prompt: '本会话里他说过的话' },
     ]);
-    const line = recent({ home, now: NOW, sessionId: 'me' }).join('\n');
-    expect(line).toContain('别的会话里他说的话');
-    expect(line).not.toContain('本会话里他说过的话');
-    expect(line).toContain('共 1 条');
+    mirasimLine(home, 'm2', ['stranger']);
+    const lines = recent({ home, now: NOW, sessionId: 'now' });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^本会话（同一个 Mirasim 会话）换会话号之前最近 60 分钟收到的话（共 1 条/);
+    expect(lines[0]).toContain('换号前他说的话');
+    expect(lines[0]).not.toContain('本会话里他说过的话');
+    expect(lines[0]).not.toContain('别的会话里他说的话');
   });
 
   it('机器派的会话的提示不算他的话：反方、工人工作树里起的会话（10-05 之前已落盘的也滤掉）；真话不被挤出', () => {
@@ -1587,7 +1638,7 @@ describe('创始人最近落盘的话（上一个会话没送到的，新会话�
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, '2026-10-04.jsonl'),
-      `{坏了\n${JSON.stringify({ at: '2026-10-04T11:29:00Z', prompt: '好的那条' })}\n`,
+      `{坏了\n${JSON.stringify({ at: '2026-10-04T11:29:00Z', sessionId: 'old', prompt: '好的那条' })}\n`,
     );
     expect(recent({ home, now: NOW })[0]).toContain('好的那条');
   });
@@ -1604,19 +1655,21 @@ describe('创始人最近落盘的话：系统消息不算', () => {
   it('后台任务通知、系统提醒（也走 UserPromptSubmit，落盘时原样记）不列；只剩系统消息就不出声', () => {
     const NOW = Date.parse('2026-10-04T11:30:00Z');
     const home = temp('rp-sys');
+    mirasimLine(home, 'm1', ['old', 'now']);
     const dir = join(home, '.fleet-dao', 'prompt-log');
     mkdirSync(dir, { recursive: true });
     const rows = [
-      { at: '2026-10-04T11:28:00Z', prompt: '<task-notification>\n<task-id>x</task-id>' },
-      { at: '2026-10-04T11:28:30Z', prompt: '<system-reminder>\nfoo' },
-      { at: '2026-10-04T11:29:00Z', prompt: '[SYSTEM NOTIFICATION - NOT USER INPUT]\nbar' },
+      { at: '2026-10-04T11:28:00Z', sessionId: 'old', prompt: '<task-notification>\n<task-id>x</task-id>' },
+      { at: '2026-10-04T11:28:30Z', sessionId: 'old', prompt: '<system-reminder>\nfoo' },
+      { at: '2026-10-04T11:29:00Z', sessionId: 'old', prompt: '[SYSTEM NOTIFICATION - NOT USER INPUT]\nbar' },
     ];
     writeFileSync(join(dir, '2026-10-04.jsonl'), rows.map((r) => `${JSON.stringify(r)}\n`).join(''));
-    const recent = (hook as unknown as { recentPrompts(o: unknown): string[] }).recentPrompts;
+    const recent = (o: object) =>
+      (hook as unknown as { recentPrompts(o: unknown): string[] }).recentPrompts({ sessionId: 'now', ...o });
     expect(recent({ home, now: NOW })).toEqual([]);
     writeFileSync(
       join(dir, '2026-10-04.jsonl'),
-      `${rows.map((r) => JSON.stringify(r)).join('\n')}\n${JSON.stringify({ at: '2026-10-04T11:29:30Z', prompt: '创始人真说的话' })}\n`,
+      `${rows.map((r) => JSON.stringify(r)).join('\n')}\n${JSON.stringify({ at: '2026-10-04T11:29:30Z', sessionId: 'old', prompt: '创始人真说的话' })}\n`,
     );
     const [line] = recent({ home, now: NOW });
     expect(line).toContain('共 1 条');
@@ -1679,7 +1732,7 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
     expect(lines[0]).not.toContain('wsl好像流程关了');
   });
 
-  it('进程还没起来就被打断的提问也算没收到；收到了、但是别的会话收的照旧列在「落盘的话」那行', () => {
+  it('进程还没起来就被打断的提问也算没收到；同一个 Mirasim 会话另一个原生号收到的列在「换会话号之前」那行', () => {
     const home = temp('inbox');
     mirasim(home, 'm1', [
       {
@@ -1691,13 +1744,13 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
       { sessionId: 's2', startedAt: T('2026-10-06T03:20:00Z'), prompt: '还剩下什么任务', steers: [] },
     ]);
     received(home, [{ at: '2026-10-06T03:20:01Z', sessionId: 's2', prompt: '还剩下什么任务' }]);
-    // 本会话是 s1：丢的提问进「先答这些」；s2 收到的进「落盘的话」
+    // 本会话是 s1（和 s2 同在 Mirasim 会话 m1）：丢的提问进「先答这些」；s2 收到的进「换会话号之前」
     const lines = recent({ home, now: NOW, sessionId: 's1' });
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain('没收到的话');
     expect(lines[0]).toContain('重新用k3');
     expect(lines[0]).not.toContain('还剩下什么任务');
-    expect(lines[1]).toMatch(/^创始人最近 60 分钟落盘的话（共 1 条/);
+    expect(lines[1]).toMatch(/^本会话（同一个 Mirasim 会话）换会话号之前最近 60 分钟收到的话（共 1 条/);
     expect(lines[1]).toContain('还剩下什么任务');
   });
 
@@ -1737,7 +1790,7 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
     expect(lines[0]).not.toContain('11:05');
   });
 
-  it('不算他的话：斜杠命令、系统消息、机器派会话（工人工作树）里的、1 小时以前的；没有 Mirasim 目录不出声', () => {
+  it('不算他的话：斜杠命令、系统消息、机器派会话（工人工作树）里的、1 小时以前的；没有 Mirasim 目录（无血缘）不出声，收到的账再多也不列', () => {
     const home = temp('inbox');
     mirasim(home, 'm1', [
       { sessionId: 's1', startedAt: T('2026-10-06T03:30:00Z'), prompt: '/compact' },
@@ -1754,9 +1807,8 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
     expect(recent({ home, now: NOW })).toEqual([]);
     const bare = temp('inbox-bare');
     received(bare, [{ at: '2026-10-06T03:40:00Z', sessionId: 'x', prompt: '只有收到的账' }]);
-    const lines = recent({ home: bare, now: NOW });
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/^创始人最近 60 分钟落盘的话/);
+    expect(recent({ home: bare, now: NOW, sessionId: 'y' })).toEqual([]);
+    expect(recent({ home: bare, now: NOW, sessionId: 'x' })).toEqual([]);
   });
 
   it('上一轮跑了 95 分钟、开头那条引导丢了：下一轮开头（已过 60 分钟）照样报出来；已重发收到的、更早一轮的不报（#1721 引导「我确定了，可见」）', () => {
@@ -1808,12 +1860,13 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
     expect(lines[0]).not.toContain('之后重发');
   });
 
-  it('【故意造出的失败】Mirasim 的记录读不了、有行认不出：明说没读全，不当成「没丢」', () => {
+  it('【故意造出的失败】Mirasim 的记录读不了、有行认不出：明说没核成、没读全，不当成「没丢」「无血缘」', () => {
     const home = temp('inbox');
     const dir = join(home, '.mirasim', 'sessions', 'claude', 'm1');
     mkdirSync(join(dir, 'turns.jsonl'), { recursive: true }); // 路径是个目录：读不了
     const lines = recent({ home, now: NOW, sessionId: 's' });
-    expect(lines[0]).toMatch(/创始人在 Mirasim 里发的话没读全：.*读不了/);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^创始人的话没核成：认不出本会话是哪个 Mirasim 会话（.*读不了/);
     mirasim(home, 'm2', [{ sessionId: 's', startedAt: T('2026-10-06T03:40:00Z'), prompt: '好的那条' }]);
     writeFileSync(join(home, '.mirasim', 'sessions', 'claude', 'm2', 'turns.jsonl'), '{坏了\n', {
       flag: 'a',
@@ -1996,6 +2049,238 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
     expect(inbox).toContain('就改这一处，别动别的');
     expect(inbox).toContain('共 1 条');
     expect(inbox).not.toContain('别的会话丢的引导');
+  });
+});
+
+// 2026-10-11 串会话（创始人「现在你实现的引导方式会串会话想个最佳解决方式」）：fleet-dao 会话 17:49 问的话被另一个项目的会话
+// 当成自己的活答了（开场「最近 60 分钟落盘的话」把所有会话的话列给每个会话）；18:15 发给指挥官的引导被另一个 fleet-dao 会话也办了
+// （开场叫每个会话办进度单上全部待处理引导），开出重复 PR #1884。修法：按「Mirasim 会话」这条血缘认主。
+describe('血缘：一个原生会话号属于哪个 Mirasim 会话（founder-inbox.mjs 的 lineageOf）', () => {
+  const session = (home: string, dir: string, record: unknown, turns: string) => {
+    const d = join(home, '.mirasim', 'sessions', 'claude', dir);
+    mkdirSync(d, { recursive: true });
+    if (record !== null) writeFileSync(join(d, 'record.json'), JSON.stringify(record));
+    writeFileSync(join(d, 'turns.jsonl'), turns);
+  };
+
+  it('找到：按目录名、record.json 的 nativeSessionId、各轮的 sessionId 都认得出，返回目录名和全部原生号', () => {
+    const home = temp('lineage');
+    mirasimLine(home, 'dir-a', ['n-0', 'n-1']);
+    mirasimLine(home, 'dir-b', ['dir-b']);
+    session(home, 'dir-c', { nativeSessionId: 'n-9' }, '');
+    expect(inbox.lineageOf({ home, sessionId: 'n-1' })).toEqual({
+      status: 'found',
+      dir: 'dir-a',
+      sessionIds: ['dir-a', 'n-0', 'n-1'],
+    });
+    expect(inbox.lineageOf({ home, sessionId: 'dir-b' })).toMatchObject({ status: 'found', dir: 'dir-b' });
+    expect(inbox.lineageOf({ home, sessionId: 'n-9' })).toMatchObject({ status: 'found', dir: 'dir-c' });
+  });
+
+  it('换过原生号（/compact、换模型）：旧号、新号求出来是同一条血缘', () => {
+    const home = temp('lineage');
+    mirasimLine(home, 'dir-a', ['n-old', 'n-new']);
+    const a = inbox.lineageOf({ home, sessionId: 'n-old' });
+    const b = inbox.lineageOf({ home, sessionId: 'n-new' });
+    expect(a).toEqual(b);
+    expect(a).toMatchObject({ status: 'found', dir: 'dir-a' });
+  });
+
+  it('找不到：没给会话号、这台没装 Mirasim、Mirasim 里没有这个号，都是「无血缘」，不猜', () => {
+    const bare = temp('lineage');
+    expect(inbox.lineageOf({ home: bare, sessionId: null })).toMatchObject({ status: 'none' });
+    expect(inbox.lineageOf({ home: bare, sessionId: 'n-1' })).toMatchObject({ status: 'none' });
+    const home = temp('lineage');
+    mirasimLine(home, 'dir-a', ['n-0']);
+    expect(inbox.lineageOf({ home, sessionId: 'n-x' })).toMatchObject({ status: 'none' });
+  });
+
+  it('【故意造出的失败】一个号出现在两个 Mirasim 会话里、有目录读不了又没找到：明说没查成，不当成无血缘', () => {
+    const twice = temp('lineage');
+    mirasimLine(twice, 'dir-a', ['n-1']);
+    mirasimLine(twice, 'dir-b', ['n-1']);
+    expect(inbox.lineageOf({ home: twice, sessionId: 'n-1' })).toMatchObject({
+      status: 'unchecked',
+      why: expect.stringMatching(/出现在 2 个 Mirasim 会话里/),
+    });
+    const broken = temp('lineage');
+    mkdirSync(join(broken, '.mirasim', 'sessions', 'claude', 'dir-a', 'turns.jsonl'), { recursive: true });
+    expect(inbox.lineageOf({ home: broken, sessionId: 'n-1' })).toMatchObject({
+      status: 'unchecked',
+      why: expect.stringMatching(/读不了/),
+    });
+    // 读不了的那个不是本会话、本会话在别的目录里找到了：照样认得出
+    mirasimLine(broken, 'dir-b', ['n-1']);
+    expect(inbox.lineageOf({ home: broken, sessionId: 'n-1' })).toMatchObject({
+      status: 'found',
+      dir: 'dir-b',
+    });
+  });
+});
+
+describe('开会话不串会话：他的话只给同一个 Mirasim 会话', () => {
+  const T = (iso: string) => Date.parse(iso);
+  const NOW = T('2026-10-11T10:20:00Z'); // 北京 18:20
+  const recent = (o: { home: string; now?: number; sessionId?: string | null; lineage?: Lineage }) =>
+    (hook as unknown as { recentPrompts(o: unknown): string[] }).recentPrompts(o);
+  const session = (home: string, dir: string, native: string, workdir: string, turns: unknown[]) => {
+    const d = join(home, '.mirasim', 'sessions', 'claude', dir);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, 'record.json'), JSON.stringify({ workdir, nativeSessionId: native }));
+    writeFileSync(join(d, 'turns.jsonl'), turns.map((t) => `${JSON.stringify(t)}\n`).join(''));
+  };
+  const received = (home: string, rows: unknown[]) => {
+    const dir = join(home, '.fleet-dao', 'prompt-log');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '2026-10-11.jsonl'), rows.map((r) => `${JSON.stringify(r)}\n`).join(''));
+  };
+  /** 10-11 那一幕：fleet-dao 会话 A 17:49 收到一句；另一个项目的会话 B 18:00 开工、18:19 又开一轮 */
+  function twoSessions() {
+    const home = temp('cross');
+    session(home, 'dir-fleet', 'a-4e41', 'D:\\frank\\fleet-dao', [
+      { sessionId: 'a-4e41', startedAt: T('2026-10-11T09:49:00Z'), prompt: '子代理最佳实践排查' },
+    ]);
+    session(home, 'dir-foot', 'b-fb04', 'C:\\Users\\Administrator', [
+      { sessionId: 'b-fb04', startedAt: T('2026-10-11T10:00:00Z'), prompt: '足浴包 AI 短视频' },
+      { sessionId: 'b-fb04', startedAt: T('2026-10-11T10:19:00Z'), prompt: '接着做' },
+    ]);
+    received(home, [
+      { at: '2026-10-11T09:49:01Z', sessionId: 'a-4e41', prompt: '子代理最佳实践排查' },
+      { at: '2026-10-11T10:00:01Z', sessionId: 'b-fb04', prompt: '足浴包 AI 短视频' },
+      { at: '2026-10-11T10:19:01Z', sessionId: 'b-fb04', prompt: '接着做' },
+    ]);
+    return home;
+  }
+
+  it('两个 Mirasim 会话各收一句：B 开场看不到 A 的话，A 开场也看不到 B 的', () => {
+    const home = twoSessions();
+    const b = recent({ home, now: NOW, sessionId: 'b-fb04' }).join('\n');
+    expect(b).not.toContain('子代理最佳实践排查');
+    const a = recent({ home, now: NOW, sessionId: 'a-4e41' }).join('\n');
+    expect(a).not.toContain('足浴包');
+  });
+
+  it('【故意造出的失败】血缘认错（把 B 当成 A 家的）：A 的话就会出现在 B 的开场——上面那条断言查得出串会话', () => {
+    const home = twoSessions();
+    const wrong = inbox.lineageOf({ home, sessionId: 'a-4e41' });
+    const leaked = recent({ home, now: NOW, sessionId: 'b-fb04', lineage: wrong }).join('\n');
+    expect(leaked).toContain('子代理最佳实践排查');
+  });
+
+  it('同一个 Mirasim 会话换了原生号：新号看得到旧号收到的话；换号前丢的引导补回本会话，换号后重发收到了就不再报', () => {
+    const home = temp('cross');
+    const turns = [
+      {
+        sessionId: 'x-old',
+        startedAt: T('2026-10-11T09:50:00Z'),
+        prompt: '开工',
+        steers: [{ text: '换号前丢的引导', at: T('2026-10-11T09:55:00Z') }],
+        error: 'Interrupted by user.',
+      },
+      { sessionId: 'x-new', startedAt: T('2026-10-11T10:19:00Z'), prompt: '换号后开场' },
+    ];
+    session(home, 'dir-x', 'x-new', 'D:\\frank\\fleet-dao', turns);
+    session(home, 'dir-y', 'y-1', 'D:\\frank\\fleet-dao', [
+      { sessionId: 'y-1', startedAt: T('2026-10-11T10:00:00Z'), prompt: '别的会话的提问', steers: [] },
+    ]);
+    const rows = [
+      { at: '2026-10-11T09:50:01Z', sessionId: 'x-old', prompt: '开工' },
+      { at: '2026-10-11T10:19:01Z', sessionId: 'x-new', prompt: '换号后开场' },
+      { at: '2026-10-11T10:00:01Z', sessionId: 'y-1', prompt: '别的会话的提问' },
+    ];
+    received(home, rows);
+    const lines = recent({ home, now: NOW, sessionId: 'x-new' });
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^创始人发了、但 Claude Code 没收到的话.*换号前丢的引导.*先答这些/);
+    expect(lines[1]).toMatch(/^本会话（同一个 Mirasim 会话）换会话号之前.*（共 1 条.*开工/);
+    expect(lines.join('\n')).not.toContain('别的会话的提问');
+    // 换号后他原话重发、新号收到了：同一家，不再报丢
+    received(home, [...rows, { at: '2026-10-11T10:19:30Z', sessionId: 'x-new', prompt: '换号前丢的引导' }]);
+    expect(recent({ home, now: NOW, sessionId: 'x-new' }).some((l) => /没收到的话/.test(l))).toBe(false);
+  });
+});
+
+describe('引导认主：进度单 #1055 上的待处理引导只叫主人那个会话办', SLOW, () => {
+  const mine: Lineage = { status: 'found', dir: 'dir-a', sessionIds: ['dir-a'] };
+  const theirs: Lineage = { status: 'found', dir: 'dir-b', sessionIds: ['dir-b'] };
+  const none: Lineage = { status: 'none', why: '这台没装 Mirasim' };
+  function fleetRepo(): string {
+    const dir = repo({});
+    g(dir, 'remote', 'add', 'origin', 'https://github.com/thoerwink8/fleet-dao.git');
+    return dir;
+  }
+  const run =
+    (stdout: string): ScriptRun =>
+    () => ({ status: 0, stdout, stderr: '' });
+  const H = '【创始人引导·待处理】2026-10-11 18:15';
+  const LONG = '子代理最佳实践排查：哪些活该派 Haiku、哪些该派 Sonnet，后台跑的怎么收口，全文要给到接手的人';
+  const rows =
+    `31\t${H}\t原话：字号太大、参考苹果\tdir-b\n` +
+    `32\t${H}\t原话：${LONG}\tdir-a\n` +
+    `33\t${H}\t原话：老的一条\t无主\n`;
+  const check = (lineage: Lineage, out = rows) =>
+    hook.checkProgressIssue({ cwd: fleetRepo(), git, run: run(out), mirror: HOOK, lineage });
+
+  it('本血缘的列全文叫它办；别的会话的只说条数、不列原文；无主的照列开头，写明先认领', () => {
+    const lines = check(mine);
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toMatch(
+      /^创始人引导有 1 条归本会话、没处理（进度单 #1055；本会话是 Mirasim 会话 dir-a）/,
+    );
+    expect(lines[0]).toContain(LONG);
+    expect(lines[0]).toContain('pnpm progress:done');
+    expect(lines[1]).toMatch(
+      /^无主的创始人引导 1 条.*33（2026-10-11 18:15）老的一条.*先认领再办：pnpm progress:claim <评论号>/,
+    );
+    expect(lines[2]).toBe('别的会话还有 1 条创始人引导在办（进度单 #1055），不归你，别动。');
+    expect(lines.join('\n')).not.toContain('字号太大');
+  });
+
+  it('【故意造出的失败】换成另一个会话开场：它只看得到自己那条，A 的全文一个字都不给它', () => {
+    const lines = check(theirs).join('\n');
+    expect(lines).toContain('字号太大');
+    expect(lines).not.toContain('子代理最佳实践排查');
+    expect(lines).toContain('别的会话还有 1 条');
+  });
+
+  it('无血缘的会话：有主的一律只计数；无主的说认领不了、不是自己记的别动', () => {
+    const lines = check(none);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^无主的创始人引导 1 条.*认领不了.*不是就别动/);
+    expect(lines[1]).toBe('别的会话还有 2 条创始人引导在办（进度单 #1055），不归你，别动。');
+  });
+
+  it('旧版脚本只给三列：从正文里的〔主：…〕认主，没有标记的算无主', () => {
+    const old = `32\t${H}\t〔主：dir-a〕 原话：${LONG}\n33\t${H}\t原话：老的一条\n`;
+    const lines = check(mine, old);
+    expect(lines[0]).toContain('归本会话');
+    expect(lines[0]).toContain(LONG);
+    expect(lines[0]).not.toContain('〔主：');
+    expect(lines[1]).toMatch(/^无主的创始人引导 1 条/);
+  });
+});
+
+describe('引导认主：别的仓「## 创始人引导（待处理）」清单里的〔主：…〕', SLOW, () => {
+  const mine: Lineage = { status: 'found', dir: 'dir-a', sessionIds: ['dir-a'] };
+  const theirs: Lineage = { status: 'found', dir: 'dir-b', sessionIds: ['dir-b'] };
+  const text =
+    '# 进度\n\n## 创始人引导（待处理）\n\n' +
+    '- 04:42「坏的要删」〔主：dir-a〕\n- 05:33「删库表选 1」〔主：dir-b〕\n- 06:00「老的一条」\n\n## 别的节\n';
+
+  it('本血缘的和无主的列出来（无主的标出来、叫先写上主再办）；别的会话的只计数', () => {
+    const [line] = hook.checkDirectives(repo({ 'docs/PROGRESS.md': text }), git, mine);
+    expect(line).toContain('创始人引导还有 2 条没处理');
+    expect(line).toContain('坏的要删');
+    expect(line).toContain('（无主）06:00「老的一条」');
+    expect(line).toContain('无主的先在那一条写上〔主：dir-a〕认领再办');
+    expect(line).toContain('别的会话还有 1 条引导在办');
+    expect(line).not.toContain('删库表');
+  });
+
+  it('【故意造出的失败】换成另一个会话：它看得到自己那条，看不到 A 的', () => {
+    const [line] = hook.checkDirectives(repo({ 'docs/PROGRESS.md': text }), git, theirs);
+    expect(line).toContain('删库表');
+    expect(line).not.toContain('坏的要删');
   });
 });
 

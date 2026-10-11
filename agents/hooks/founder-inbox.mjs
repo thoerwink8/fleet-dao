@@ -14,13 +14,17 @@
 // 改这里之前必须知道：
 // - 这是读别人家的文件：格式变了要能认出来——整份读不了、一行认不出都照实说「没读成」，不当成「没有」。目录不存在（这台没装
 //   Mirasim、或会话不是它起的）才是真的「没有」，不出声。
-// - 对账认同一条：① 同一个 Claude 会话后来收到了开头一样的话（不限 15 分钟）；② MATCH_MS 以内、同一个会话收到的话以丢的那句开头
+// - 对账认同一条：① 同一家（同一条血缘；收到的认不出血缘才按原生会话号）后来收到了开头一样的话（不限 15 分钟）；② MATCH_MS 以内、同一家收到的话以丢的那句开头
 //   （带下文重发）。一条收到的在「时间最近」配对里只对掉一条发的；「之后重发已收到」可以清掉更早的同句/短句。
 // - 对账范围是「上一轮（含）以来」（创始人 2026-10-10 14:37「你读到我的引导吗？」：一轮跑了 95 分钟，开头发的引导丢了，下一轮开头
 //   已过 60 分钟窗口，没报出来）：每一个 Mirasim 会话各自算——把该目录 turns.jsonl 按 startedAt 排，倒数第二轮（上一轮；最后一轮是刚开的
 //   这一轮）的开始时刻往后的 prompt 和 steers 都对，不管那一轮多长。只有一轮的会话没有「上一轮」，按固定窗口。不再把各会话的范围取并集
-//   （#1733：并集会让别的会话一天内丢的话进每个会话的账）。固定窗口 RECENT_MS 是下限（上一轮短于它时仍看最近 RECENT_MS），
+//   （#1733：并集会让别的会话一天内丢的话进每个会话的账；开会话钩子现在只读本血缘那一个目录，见下一条）。固定窗口 RECENT_MS 是下限（上一轮短于它时仍看最近 RECENT_MS），
 //   MAX_LOOKBACK_MS 是上限（上一轮再早也不回头超过它）。返回的 since 是各会话范围起点的最早值，收到的账也要读到它。
+// - 认主按「Mirasim 会话」这条血缘（lineageOf，创始人 2026-10-11「现在你实现的引导方式会串会话想个最佳解决方式」）：一个
+//   Mirasim 会话目录用过的全部原生会话号算一家。开会话钩子只给本血缘列它的话、对它的账；别的 Mirasim 会话的话一概不列
+//   （原来「最近 60 分钟落盘的话」把所有会话的话列给每个会话，另一个项目的会话把 fleet-dao 的活当成自己的办了）。
+//   找不到血缘（不是 Mirasim 起的、这台没装）返回「无血缘」，不猜、不拿别的会话的话顶。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isMachineOpening, isMachineSession } from './unattended.mjs';
@@ -39,8 +43,15 @@ const SYSTEM_PROMPT = /^\s*(?:<task-notification|<system-reminder|<prior-convers
 /** Mirasim 附图时在话前面加的一行 */
 const ATTACHMENT_NOTE = /\[The image above is also on disk at:[^\]]*\]\s*/g;
 
-/** @typedef {{ at: number, text: string, sessionId: string | null, kind: 'prompt' | 'steer' }} Sent 他发出的一条 */
-/** @typedef {{ at: number, text: string, sessionId: string | null }} Received Claude Code 收到的一条（prompt-log 里的） */
+/** @typedef {{ at: number, text: string, sessionId: string | null, kind: 'prompt' | 'steer', line: string }} Sent 他发出的一条；line 是它所在的 Mirasim 会话目录名（血缘） */
+/** @typedef {{ at: number, text: string, sessionId: string | null, line?: string | null }} Received Claude Code 收到的一条（prompt-log 里的）；line 是收它的原生会话号所属的血缘，认不出不给 */
+/**
+ * @typedef {{ status: 'found', dir: string, sessionIds: string[] }
+ *   | { status: 'none', why: string }
+ *   | { status: 'unchecked', why: string }} Lineage
+ * 一个原生会话号的血缘：found = 它所属的 Mirasim 会话目录名和这个目录用过的全部原生会话号；none = 无血缘（不是 Mirasim 起的、
+ * 这台没装、没给会话号）；unchecked = 没查成（列不了、读不了、一个会话号出现在两个目录里），不当成无血缘。
+ */
 
 /**
  * Mirasim 的家目录：测试给 FLEET_MIRASIM_DIR 覆盖
@@ -76,12 +87,97 @@ function isFounderText(text) {
   return !isMachineOpening(t);
 }
 
+/** 会话号的样子（真的是 UUID）：认不出的不拿去比 */
+const SESSION_ID = /^[\w-]{1,128}$/;
+
+/**
+ * 读一个文件；不存在给 null，别的读不了抛
+ * @param {string} file
+ * @returns {string | null}
+ */
+function readOrNull(file) {
+  try {
+    return readFileSync(file, 'utf8');
+  } catch (err) {
+    if (errCode(err) === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/**
+ * 一个原生会话号属于哪条血缘：哪个 Mirasim 会话目录（~/.mirasim/sessions/claude/<目录>/）的目录名、record.json 的
+ * nativeSessionId、turns.jsonl 里某一轮的 sessionId 是它。返回那个目录名和它用过的全部原生会话号（含目录名本身：
+ * Mirasim 自己起的会话，第一个原生号就是目录名）。
+ * @param {{ home: string, sessionId: unknown, env?: Record<string, string | undefined> }} opts
+ * @returns {Lineage}
+ */
+export function lineageOf({ home, sessionId, env = process.env }) {
+  const id = typeof sessionId === 'string' && SESSION_ID.test(sessionId) ? sessionId : null;
+  if (id === null) return { status: 'none', why: '没有会话号' };
+  const base = join(mirasimDir(env, home), 'sessions', 'claude');
+  if (!existsSync(base)) return { status: 'none', why: '这台没装 Mirasim' };
+  let dirs;
+  try {
+    dirs = readdirSync(base);
+  } catch (err) {
+    return { status: 'unchecked', why: `${base} 列不了（${errCode(err)}）` };
+  }
+  /** @type {string[]} */
+  const problems = [];
+  /** @type {Array<{ dir: string, ids: Set<string> }>} */
+  const hits = [];
+  for (const d of dirs) {
+    let record;
+    let turns;
+    try {
+      record = readOrNull(join(base, d, 'record.json'));
+      turns = readOrNull(join(base, d, 'turns.jsonl'));
+    } catch (err) {
+      problems.push(`${join(base, d)} 读不了（${errCode(err)}）`);
+      continue;
+    }
+    // 先按原文粗筛：目录名、两份文件里都没出现这个号的，不用解析
+    if (d !== id && !record?.includes(id) && !turns?.includes(id)) continue;
+    /** @type {Set<string>} */
+    const ids = new Set();
+    if (SESSION_ID.test(d)) ids.add(d);
+    if (record !== null) {
+      try {
+        const native = JSON.parse(record)?.nativeSessionId;
+        if (typeof native === 'string' && SESSION_ID.test(native)) ids.add(native);
+      } catch {
+        problems.push(`${join(base, d, 'record.json')} 认不出（Mirasim 换格式了？）`);
+      }
+    }
+    for (const row of (turns ?? '').split(/\r?\n/)) {
+      if (!row.trim()) continue;
+      try {
+        const sid = JSON.parse(row)?.sessionId;
+        if (typeof sid === 'string' && SESSION_ID.test(sid)) ids.add(sid);
+      } catch {
+        // 认不出的一行：sentByFounder 那边会报；这里只认得出的
+      }
+    }
+    if (ids.has(id)) hits.push({ dir: d, ids });
+  }
+  if (hits.length > 1)
+    return {
+      status: 'unchecked',
+      why: `会话号 ${id} 出现在 ${hits.length} 个 Mirasim 会话里（${hits.map((h) => h.dir).join('、')}），认不了是哪一家`,
+    };
+  const [hit] = hits;
+  if (hit) return { status: 'found', dir: hit.dir, sessionIds: [...hit.ids].sort() };
+  if (problems.length > 0) return { status: 'unchecked', why: problems.join('；') };
+  return { status: 'none', why: `Mirasim 里没有会话号 ${id}（不是 Mirasim 起的会话）` };
+}
+
 /**
  * 「上一轮（含）以来」他在 Mirasim 里发出的话（范围见文件开头）：开一轮的提问和中途的引导都算。
- * @param {{ home: string, now?: number, env?: Record<string, string | undefined> }} opts
+ * only 给了就只读这一个 Mirasim 会话目录（本血缘），不给读全部。
+ * @param {{ home: string, now?: number, env?: Record<string, string | undefined>, only?: string | null }} opts
  * @returns {{ absent: true } | { absent: false, entries: Sent[], problems: string[], since: number }}
  */
-export function sentByFounder({ home, now = Date.now(), env = process.env }) {
+export function sentByFounder({ home, now = Date.now(), env = process.env, only = null }) {
   const base = join(mirasimDir(env, home), 'sessions', 'claude');
   if (!existsSync(base)) return { absent: true };
   /** @type {Sent[]} */
@@ -92,7 +188,7 @@ export function sentByFounder({ home, now = Date.now(), env = process.env }) {
   let since = now - RECENT_MS;
   let dirs;
   try {
-    dirs = readdirSync(base);
+    dirs = only === null ? readdirSync(base) : [only];
   } catch (err) {
     return { absent: false, entries, problems: [`${base} 列不了（${errCode(err)}）`], since };
   }
@@ -136,11 +232,11 @@ export function sentByFounder({ home, now = Date.now(), env = process.env }) {
       const startedAt = Number(turn.startedAt);
       if (Number.isFinite(startedAt) && startedAt > 0 && startedAt <= now + 60_000) starts.push(startedAt);
       if (isFounderText(turn.prompt) && Number.isFinite(startedAt) && startedAt > 0)
-        mine.push({ at: startedAt, text: turn.prompt, sessionId, kind: 'prompt' });
+        mine.push({ at: startedAt, text: turn.prompt, sessionId, kind: 'prompt', line: d });
       for (const s of Array.isArray(turn.steers) ? turn.steers : []) {
         const at = Number(s?.at);
         if (isFounderText(s?.text) && Number.isFinite(at) && at > 0)
-          mine.push({ at, text: s.text, sessionId, kind: 'steer' });
+          mine.push({ at, text: s.text, sessionId, kind: 'steer', line: d });
       }
     }
     // 上一轮 = 倒数第二轮；只截本目录，不拿别的 Mirasim 会话的起点拉长本目录的窗口
@@ -157,12 +253,14 @@ export function sentByFounder({ home, now = Date.now(), env = process.env }) {
 }
 
 /**
- * 发了的和收到的是不是同一个 Claude 原生会话（对账、重发识别都按会话各算各的）
- * @param {{ sessionId: string | null }} a
- * @param {{ sessionId: string | null }} b
+ * 发了的和收到的是不是同一家（对账、重发识别都按家各算各的）：收到的那条认得出血缘，就按血缘比（同一个 Mirasim 会话换了
+ * 原生号，换号前发的、换号后收到的也算同一家）；认不出血缘才退回按原生会话号比。
+ * @param {Sent} s
+ * @param {Received} r
  */
-function sameSession(a, b) {
-  return typeof a.sessionId === 'string' && a.sessionId === b.sessionId;
+function sameSession(s, r) {
+  if (typeof r.line === 'string') return r.line === s.line;
+  return typeof s.sessionId === 'string' && s.sessionId === r.sessionId;
 }
 
 /**
@@ -209,9 +307,11 @@ export function reconcile(sent, received) {
         text: s.text,
         sessionId: s.sessionId,
         kind: s.kind,
+        line: s.line,
         receivedBy: s.hit.sessionId ?? null,
       });
-    else if (!coveredLater(s)) lost.push({ at: s.at, text: s.text, sessionId: s.sessionId, kind: s.kind });
+    else if (!coveredLater(s))
+      lost.push({ at: s.at, text: s.text, sessionId: s.sessionId, kind: s.kind, line: s.line });
   }
   return { lost, matched };
 }
