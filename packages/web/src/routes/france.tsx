@@ -226,17 +226,21 @@ function EnvColumn({
       data-env-column={id}
       data-env-column-state={tone}
       data-env-selected={selected}
+      aria-current={selected ? true : undefined}
       className={cn(
         // 不是卡片：整排环境在同一个区块里，列之间一条分隔线。
         // 手机一列上下叠，不用 subgrid 对齐；md 起每台一列、六项各落一行（subgrid）
         'grid min-w-0 gap-0 border-t first:border-t-0 md:row-span-7 md:grid-rows-subgrid md:border-t-0 md:border-l md:first:border-l-0',
-        selected && 'bg-selected',
         // 失联 / 没数据：整块置灰，别让旧的「在跑」「N 项红」看起来像现在的状态
         tone === 'stale' && 'bg-muted text-muted-foreground opacity-70',
       )}
     >
-      <header className="px-4 py-3">
-        <h3 className="flex min-w-0 items-center gap-2 text-heading">
+      <header
+        data-env-header
+        data-selected={selected}
+        className={cn('border-b-2 px-4 py-3', selected ? 'border-brand bg-selected' : 'border-transparent')}
+      >
+        <h3 className={cn('flex min-w-0 items-center gap-2 text-heading', selected && 'font-semibold')}>
           <ServerCog className="size-4 shrink-0 text-muted-foreground" aria-hidden />
           <span className="min-w-0 truncate">{name}</span>
           <Tag>{badge}</Tag>
