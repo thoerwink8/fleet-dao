@@ -3,10 +3,26 @@
 // 改这里之前必须知道：
 // - 工作流不绕合并闸、不替创始人同意：碰了标准路径要人点「继续」才往下；批准只认批准那一刻的头（头换了新内容要重新批）。
 // - 头被改了、人点「继续」之后回 head_moved，由调用方对新的头重走等 CI、验收、查路径；原样重新挂只会永远等下去（新头上没有 cold-verify）。
+// - 等合并时 PR 和主线冲突（#1838，patched('merge-wait-conflict')）：自动合并永远等不到（GitHub 不给冲突的 PR 起 CI，也不会合它，
+//   等下去只有超时；#1824 就这么卡了 7 小时 45 分）。走「推分支并主线撞上冲突」那一条：并主线，并得干净就回 head_moved 让调用方
+//   对新头重走 CI 和验收；并不动（真有冲突）把冲突文件名记进返工意见、回 'rework' 交回会话解；本来就没得并、只是 GitHub 数据旧了，
+//   睡一会儿再看。连着并满 MAX_MAIN_SYNCS 次还冲突就停下报人，不无限转。老历史里没有这一支。
+// - 老历史重放：这一支用 patched() 守住——老历史里 waitMerged 不会回 conflict，标记也不在历史里，patched() 为假就当没有。
 
-import { type GuardedPaths, MERGE_POLL_MINUTES, type MergeWait } from '../task-contract.ts';
+import { patched } from '@temporalio/workflow';
+import { type GuardedPaths, MAX_MAIN_SYNCS, MERGE_POLL_MINUTES, type MergeWait } from '../task-contract.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import { headMovedDetail } from './task-support.ts';
+import { syncMainlineOnConflict } from './task-sync.ts';
+
+/** 等合并时发现 PR 和主线冲突：写进任务状态的那句话（驾驶舱和库里看得到，和「在合并队列」分开）。 */
+export const MERGE_CONFLICT_NOTE = 'PR 和主线冲突，在并主线';
+
+/**
+ * 分支已含最新主线、GitHub 却还说冲突（它的 mergeable 是后台算的，刚推完的头要等它重算）时隔多久再看一遍。
+ * 不用 MERGE_POLL_MINUTES（那一次要 15 分钟，是「等合并」的节奏）：这里只是等 GitHub 把数据刷新过来。
+ */
+const CONFLICT_REPOLL_SECONDS = 60;
 
 /** 碰了「改标准」的路径：停下等人（工作流不绕合并闸、不替创始人同意）。 */
 export async function guardedPaths(rt: TaskRuntime): Promise<void> {
@@ -48,10 +64,12 @@ function approve(rt: TaskRuntime, head: string, pending: GuardedPaths, before: G
 /**
  * 挂自动合并、等合并。PR 被关了、头被改了，停下等人。头被改了、人点「继续」之后回 head_moved，由调用方对新的头重走一遍
  * （等 CI、验收、查路径）再来；别的情况一直等到合并才回。
+ * 等合并期间 PR 和主线冲突（#1838）：不留在等合并的循环里，走并主线的路——并得干净回 head_moved 让调用方对新头重走；
+ * 并不动回 'rework'，由调用方交回这一轮的动手会话解冲突。
  */
 export async function armAndWaitMerged(
   rt: TaskRuntime,
-): Promise<{ kind: 'merged'; commit?: string | undefined } | { kind: 'head_moved' }> {
+): Promise<{ kind: 'merged'; commit?: string | undefined } | { kind: 'head_moved' } | { kind: 'rework' }> {
   const prNumber = rt.prNumber;
   if (prNumber === null || rt.head === null) throw new Error('合并之前还没有 PR');
   for (;;) {
@@ -116,6 +134,33 @@ export async function armAndWaitMerged(
         await rt.park('PR 的头被别人改了', headMovedDetail(w.head, head));
         rt.head = w.head;
         return { kind: 'head_moved' };
+      }
+      if (w.state === 'conflict') {
+        // 老历史重放：这一支是加进来的，老历史里 waitMerged 不会回 conflict，patched() 为假就当没有（照旧接着等）。
+        if (!patched('merge-wait-conflict')) continue;
+        // 状态里写清是冲突挡着（不是单纯在排队），人打开驾驶舱看得出来。
+        await rt.advance('merge', MERGE_CONFLICT_NOTE);
+        // 已经同步过 MAX_MAIN_SYNCS 次了还是冲突：不接着转（和「落后主线自动同步」同一个上限），原样停下报人。
+        if (rt.mainSyncs >= MAX_MAIN_SYNCS) {
+          await rt.park(
+            `连着 ${MAX_MAIN_SYNCS} 次并主线后 PR #${prNumber} 还是和主线冲突`,
+            `PR #${prNumber} 和主线冲突，引擎自动并主线 ${MAX_MAIN_SYNCS} 次都没并干净：要人看。` +
+              `看一下 PR #${prNumber} 和主线的冲突，解完对新头重走 CI 和验收。`,
+          );
+          continue;
+        }
+        const sync = await syncMainlineOnConflict(rt, head);
+        // 并得干净：头是引擎自己换的，不停下等人，回 head_moved 让调用方对新头重走 CI 和验收。
+        if (sync === 'merged') return { kind: 'head_moved' };
+        // 真有冲突：返工意见（冲突文件名）已记下，交回会话解。
+        if (sync === 'conflict') return { kind: 'rework' };
+        // 分支已含最新主线、没什么可并，GitHub 却说冲突（它的 mergeable 是后台算的，刚推完的头要等它重算）：
+        // 睡一会儿再问一遍，不空转。连着转满 MAX_MAIN_SYNCS 次上面就停下报人了。
+        await rt.pause(
+          'merge',
+          `PR #${prNumber} 的冲突数据还没重算完，等一会儿再看`,
+          CONFLICT_REPOLL_SECONDS,
+        );
       }
       // waiting：这一轮没合，接着等
     }

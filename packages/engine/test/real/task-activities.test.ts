@@ -30,6 +30,8 @@ interface PullOver {
   state?: 'open' | 'closed';
   headSha?: string;
   autoMerge?: boolean;
+  mergeable?: boolean | null;
+  mergeableState?: string;
 }
 const pullFacts = (o: PullOver = {}) => ({
   number: 7,
@@ -44,6 +46,8 @@ const pullFacts = (o: PullOver = {}) => ({
   fromFork: false,
   author: null,
   autoMerge: o.autoMerge ?? false,
+  mergeable: o.mergeable === undefined ? true : o.mergeable,
+  mergeableState: o.mergeableState ?? 'clean',
 });
 
 const mergedOk = (commit = 'c'.repeat(40), already = true): MergePrResult => ({
@@ -783,6 +787,57 @@ describe('等合并', () => {
         ctx({ signal: ac.signal }),
       ),
     ).rejects.toThrow('被叫停了');
+  });
+
+  it('挂着自动合并、PR 和主线冲突（mergeable=dirty）：当场回 conflict，不干等到超时（#1838：#1824 卡了 7 小时 45 分）', async () => {
+    let n = 0;
+    const f = fakeGh({
+      readPull: async () => {
+        n += 1;
+        return pullFacts({ autoMerge: true, mergeable: false, mergeableState: 'dirty' });
+      },
+    });
+    const got = await wait(f.gh);
+    expect(got.state).toBe('conflict');
+    expect(got).toMatchObject({ state: 'conflict', detail: expect.stringContaining('和主线冲突') });
+    expect(n).toBe(1); // 第一次看就回，不接着轮询
+  });
+
+  it('GitHub 只说不能合（mergeable=false）、细分状态没给：一样回 conflict，不干等', async () => {
+    // mergeable=false 就是「合不了」（github 包的 mergePr / waitCi 也这么判）：细分状态认不出时不能当「还在排队」接着等
+    const f = fakeGh({
+      readPull: async () => pullFacts({ autoMerge: true, mergeable: false, mergeableState: 'unknown' }),
+    });
+    expect(await wait(f.gh)).toMatchObject({ state: 'conflict' });
+  });
+
+  it('等必过检查（mergeable_state=blocked、mergeable=true）：仍是 waiting，不当成冲突（#1838 别把排队当冲突）', async () => {
+    let clock = 0;
+    const f = fakeGh({
+      readPull: async () => pullFacts({ autoMerge: true, mergeable: true, mergeableState: 'blocked' }),
+    });
+    const got = await wait(f.gh, {
+      now: () => new Date(clock),
+      sleep: async (ms) => {
+        clock += ms * 1000;
+      },
+    });
+    expect(got).toMatchObject({ state: 'waiting' });
+    expect(f.calls.filter((c) => c === 'readPull').length).toBeGreaterThan(1);
+  });
+
+  it('GitHub 还没算完（mergeable=null）：仍是 waiting，不猜成冲突', async () => {
+    let clock = 0;
+    const f = fakeGh({
+      readPull: async () => pullFacts({ autoMerge: true, mergeable: null, mergeableState: 'unknown' }),
+    });
+    const got = await wait(f.gh, {
+      now: () => new Date(clock),
+      sleep: async (ms) => {
+        clock += ms * 1000;
+      },
+    });
+    expect(got).toMatchObject({ state: 'waiting' });
   });
 
   it('【故意造出的失败】读 PR 失败：抛 PortError（码带过去），不回「还在等」', async () => {

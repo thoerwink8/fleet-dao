@@ -292,6 +292,12 @@ export type MergeWait =
   | { state: 'head_moved'; head: string }
   /** 自动合并被撤掉了（人撤的，或 GitHub 因为头变了撤的）：回去重新挂。 */
   | { state: 'unarmed' }
+  /**
+   * PR 和主线冲突（GitHub 的 mergeable=false / mergeable_state=dirty，自动合并永远等不到）：工作流去并主线
+   * （能自动并的并上，并不动交回会话解），不留在等合并的循环里（#1838：#1824 卡了 7 小时 45 分就是这么来的）。
+   * 老历史里没有这个状态（那时候冲突只回 waiting）。
+   */
+  | { state: 'conflict'; detail: string }
   | { state: 'waiting'; detail: string };
 
 /** 派单前对选定的这一条路由探一次（#1409）。label 是写进任务状态的名字（模型 id）。 */
