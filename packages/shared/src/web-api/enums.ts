@@ -9,7 +9,10 @@ import type {
   QuotaUnit,
   QuotaWindowKind,
   ReadingKind,
+  RouteProbeKind,
   RouteProbeState,
+  RouteProbeTier,
+  RouteProbeTrigger,
   RunOutcome,
   ScheduleOutcome,
   SegmentKind,
@@ -80,6 +83,15 @@ export const QuotaStatusSchema = z.enum(['allowed', 'warning', 'limit_reached'])
 export const QuotaUnitSchema = z.enum(['percent', 'usd', 'tokens', 'points']);
 export const ScheduleOutcomeSchema = z.enum(['ok', 'partial', 'unscanned', 'failed']);
 export const RouteProbeStateSchema = z.enum(['ok', 'failed', 'not_wired', 'skipped', 'on_demand']);
+/** 路由探针按活跃分的三档（#1798）：和 routes.probe_tier 同一套取值。 */
+export const ROUTE_PROBE_TIERS = ['active', 'idle', 'unused'] as const;
+export const RouteProbeTierSchema = z.enum(ROUTE_PROBE_TIERS);
+/** 上一次真探的种类：连通 / 身份。 */
+export const ROUTE_PROBE_KINDS = ['ping', 'identity'] as const;
+export const RouteProbeKindSchema = z.enum(ROUTE_PROBE_KINDS);
+/** 这一次探测是谁触发的。 */
+export const ROUTE_PROBE_TRIGGERS = ['scheduled', 'dispatch', 'manual', 'break', 'org-switch'] as const;
+export const RouteProbeTriggerSchema = z.enum(ROUTE_PROBE_TRIGGERS);
 export const SegmentKindSchema = z.enum(SEGMENT_KINDS);
 export const SegmentTierSchema = z.enum(SEGMENT_TIERS);
 export const SegmentOutcomeSchema = z.enum(SEGMENT_OUTCOMES);
@@ -100,7 +112,31 @@ export const ENUMS_MATCH_DOMAIN: [
   Same<z.infer<typeof QuotaUnitSchema>, QuotaUnit>,
   Same<z.infer<typeof ScheduleOutcomeSchema>, ScheduleOutcome>,
   Same<z.infer<typeof RouteProbeStateSchema>, RouteProbeState>,
+  Same<z.infer<typeof RouteProbeTierSchema>, RouteProbeTier>,
+  Same<z.infer<typeof RouteProbeKindSchema>, RouteProbeKind>,
+  Same<z.infer<typeof RouteProbeTriggerSchema>, RouteProbeTrigger>,
   Same<z.infer<typeof SegmentKindSchema>, SegmentKind>,
   Same<z.infer<typeof SegmentTierSchema>, SegmentTier>,
   Same<z.infer<typeof SegmentOutcomeSchema>, SegmentOutcome>,
-] = [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true];
+] = [
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+];

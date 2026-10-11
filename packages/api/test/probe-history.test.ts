@@ -126,4 +126,40 @@ describe('探针历史接口', () => {
       selfIdentity: 'GPT',
     });
   });
+
+  it('种类和触发者（#1798 片 6）：库里写了的原样给出；老行没写过的不给，不拿默认值顶', async () => {
+    current = await pgHarness(t, { probeHistory: pgProbeHistory(t.db) });
+    const { cookie } = await current.login();
+    const before = await history(current, cookie);
+    if (before.state !== 'ok') throw new Error('读不到历史');
+    const old = before.channels.find((c) => c.channelId === 'ch-claude')?.cells[0];
+    if (!old) throw new Error('样例里没有这条路由的老格子');
+    expect(old).not.toHaveProperty('kind');
+    expect(old).not.toHaveProperty('trigger');
+
+    await saveRouteProbe(t.db, {
+      routeId: old.routeId,
+      state: 'ok',
+      at: new Date(Date.parse(old.probedAt) + 60_000),
+      detail: 'pong',
+      kind: 'identity',
+      trigger: 'dispatch',
+    });
+    const after = await history(current, cookie);
+    if (after.state !== 'ok') throw new Error('读不到历史');
+    const last = after.channels.find((c) => c.channelId === 'ch-claude')?.cells.at(-1);
+    expect(last).toMatchObject({ kind: 'identity', trigger: 'dispatch' });
+    // 没带种类/触发者的新行也不顶默认
+    await saveRouteProbe(t.db, {
+      routeId: old.routeId,
+      state: 'ok',
+      at: new Date(Date.parse(old.probedAt) + 120_000),
+      detail: 'pong',
+    });
+    const again = await history(current, cookie);
+    if (again.state !== 'ok') throw new Error('读不到历史');
+    const bare = again.channels.find((c) => c.channelId === 'ch-claude')?.cells.at(-1);
+    expect(bare).not.toHaveProperty('kind');
+    expect(bare).not.toHaveProperty('trigger');
+  });
 });

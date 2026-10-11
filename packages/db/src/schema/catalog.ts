@@ -2,6 +2,10 @@
 
 import {
   type OrgKind,
+  ROUTE_PROBE_KINDS,
+  ROUTE_PROBE_TIERS,
+  type RouteProbeKind,
+  type RouteProbeTier,
   type RunAsUser,
   type ScopeMembership,
   SESSION_EFFORTS,
@@ -36,13 +40,8 @@ import {
 
 const tz = { withTimezone: true, mode: 'date' } as const;
 
-/** 路由探针按活跃分的三档（#1798 片 2）：引擎每轮重写；空 = 还没写过。 */
-export const ROUTE_PROBE_TIERS = ['active', 'idle', 'unused'] as const;
-export type RouteProbeTier = (typeof ROUTE_PROBE_TIERS)[number];
-
-/** 上一次真探的种类：连通 / 身份（#1798 片 2）。空 = 还没写过，或老结论。 */
-export const ROUTE_PROBE_KINDS = ['ping', 'identity'] as const;
-export type RouteProbeKind = (typeof ROUTE_PROBE_KINDS)[number];
+/** 路由探针三档 / 种类：取值和 shared 同一份（#1798）。空 = 还没写过。 */
+export { ROUTE_PROBE_KINDS, ROUTE_PROBE_TIERS, type RouteProbeKind, type RouteProbeTier };
 
 export const families = pgTable('families', {
   id: text('id').primaryKey(),
