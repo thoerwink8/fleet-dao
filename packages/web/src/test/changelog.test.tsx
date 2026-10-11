@@ -42,7 +42,7 @@ function released(answer: ReleasedCommits | Error): FleetApi {
 
 /** 等「已发布的提交」那块画出来，回它的列表。 */
 async function commitRows(): Promise<HTMLElement[]> {
-  await screen.findByRole('heading', { name: '已发布的提交' });
+  await screen.findByRole('heading', { name: '更新日志' });
   const list = await waitFor(() => {
     const el = document.querySelector('[data-released-commits]');
     if (!(el instanceof HTMLElement)) throw new Error('列表还没画出来');
@@ -51,10 +51,10 @@ async function commitRows(): Promise<HTMLElement[]> {
   return within(list).getAllByRole('listitem');
 }
 
-/** 「已发布的提交」那一整块（标题、说明、列表或没查成的原因）。 */
+/** 页里那一块区块（列表或没查成的原因）；#1902 起区块里没有自己的标题。 */
 function commitsPanel(): HTMLElement {
-  const section = screen.getByRole('heading', { name: '已发布的提交' }).closest('section');
-  if (!section) throw new Error('找不到「已发布的提交」那一块');
+  const section = document.querySelector('section');
+  if (!section) throw new Error('找不到已发布的提交那一块');
   return section;
 }
 
@@ -78,7 +78,12 @@ describe('/changelog 页：已发布的提交', () => {
     expect(rows[0]?.textContent).toContain('发于');
     expect(rows[1]?.textContent).toContain('回滚');
     expect(rows[2]?.textContent).not.toContain('回滚');
-    expect(screen.getByRole('heading', { name: '已发布的提交' })).toBeTruthy();
+    // 页标题下不再有一层卡内标题「已发布的提交」；时间一行，绝对时间在悬停里
+    expect(screen.queryByRole('heading', { name: '已发布的提交' })).toBeNull();
+    expect(commitsPanel().textContent).not.toContain('已发布的提交');
+    const when = rows[0]?.querySelector('[title]');
+    expect(when?.textContent).toMatch(/^发于 /);
+    expect(when?.getAttribute('title')).toMatch(/\d+月\d+日 \d+:\d+/);
     // 指路去法国页的入口，不在这一页给按钮
     expect(screen.getByRole('link', { name: '法国' }).getAttribute('href')).toBe('/france');
   });

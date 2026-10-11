@@ -128,6 +128,22 @@ describe('思考档位页：看', () => {
     expect(screen.queryAllByRole('radio')).toEqual([]);
   });
 
+  test('关着的行不换底色，用「关着」状态标签表示；路由列不露内部编号（#1902）', async () => {
+    renderApp(<EffortsPage />, { route: '/efforts' });
+    await opened();
+    const off = row('r-rl-opus');
+    expect(off.className).not.toContain('bg-muted');
+    expect(off.querySelector('div[class*="bg-muted"]')).toBeNull();
+    const badge = off.querySelector('[data-tone="stop"]');
+    expect(badge?.textContent).toBe('关着');
+    // 开着的行没有这枚标签
+    expect(row('r-ca-opus').querySelector('[data-tone="stop"]')).toBeNull();
+    // 路由号、池号只在悬停里，不写在行文字里
+    expect(off.textContent).not.toContain('r-rl-opus');
+    expect(off.textContent).not.toContain('relay');
+    expect(off.textContent).toContain('中转站');
+  });
+
   test('组头可折叠：点一下收起这一家的行，再点展开', async () => {
     renderApp(<EffortsPage />, { route: '/efforts' });
     await opened();

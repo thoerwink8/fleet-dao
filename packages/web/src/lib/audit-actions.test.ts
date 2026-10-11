@@ -4,11 +4,12 @@ import { describe, expect, test } from 'vitest';
 import { AUDIT_ACTION_TEXT, describeAction, targetHref } from './audit-actions';
 
 describe('describeAction', () => {
-  test('routing.probe.done 翻成中文；表里没有的原样返回并标没翻译', () => {
+  test('routing.probe.done 翻成中文；表里没有的给默认译名「其他操作」，不写「没翻译」', () => {
     // 把 routing.probe.done 删出表，或没收录的也返回 translated: true，这一条会红。
     expect(describeAction('routing.probe.done')).toEqual({ text: '探针探完', translated: true });
     expect(describeAction('routing.probe.start')).toEqual({ text: '探针开始探', translated: true });
-    expect(describeAction('zzz.never.heard')).toEqual({ text: 'zzz.never.heard', translated: false });
+    expect(describeAction('zzz.never.heard')).toEqual({ text: '其他操作', translated: false });
+    expect(describeAction('zzz.never.heard').text).not.toContain('没翻译');
     // 原型链上的名字不算收录
     expect(describeAction('constructor').translated).toBe(false);
   });

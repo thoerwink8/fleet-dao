@@ -6,12 +6,13 @@
 
 import { ListChecks, SearchX } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useLocation, useSearchParams } from 'react-router';
+import { useLocation, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { useRepos, useTaskList } from '../api/client';
 import type { TaskList, TaskListRow } from '../api/types';
 import { EmptyState } from '../components/layout/empty-state';
 import { FilterTabs } from '../components/layout/filter-tabs';
+import { List, ListRow } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { NativeSelect } from '../components/layout/native-select';
 import { Page } from '../components/layout/page';
@@ -35,6 +36,7 @@ import {
   type TaskListView,
   viewOfParams,
 } from '../lib/task-list';
+import { cn } from '../lib/utils';
 
 export function meta() {
   return [{ title: brand.title('任务') }];
@@ -60,67 +62,93 @@ function Cost({ cost }: { cost: TaskListRow['cost'] }) {
   );
 }
 
-/** 桌面十二栏表头：和 Row 同一套 col-span，手机上不画（每行卡片自己带上下文）。 */
-function ListHeader() {
+/** 十二栏怎么分：花费列整列都读不到时不画，空出来的宽度给标题和模型（#1902）。类名写全，Tailwind 才扫得到。 */
+const COLS = {
+  withCost: { title: 'md:col-span-4', model: 'md:col-span-2' },
+  noCost: { title: 'md:col-span-5', model: 'md:col-span-3' },
+} as const;
+
+/** 桌面十二栏表头：和 Row 同一套 col-span，手机上不画（每行自己带两行上下文）。 */
+function ListHeader({ showCost }: { showCost: boolean }) {
+  const cols = showCost ? COLS.withCost : COLS.noCost;
   return (
     <li
-      className="hidden border-b px-4 py-2 text-meta text-muted-foreground md:grid md:grid-cols-12 md:items-center md:gap-x-4"
+      className="hidden px-4 py-2 text-meta text-muted-foreground md:grid md:grid-cols-12 md:items-center md:gap-x-4"
       aria-hidden
       data-list-header
     >
-      <span className="md:col-span-4">单</span>
+      <span className={cols.title}>单</span>
       <span className="md:col-span-2">状态</span>
-      <span className="md:col-span-2">模型</span>
-      <span className="text-right md:col-span-2">花费</span>
+      <span className={cols.model}>模型</span>
+      {showCost ? <span className="text-right md:col-span-2">花费</span> : null}
       <span className="text-right md:col-span-2">更新</span>
     </li>
   );
 }
 
-function Row({ row, from, now }: { row: TaskListRow; from: string; now: number }) {
+/**
+ * 一行：桌面单行（行高回 h-row，标题前带仓和单号，开单时间放进时间格的悬停）；
+ * 手机两行：标题 / 状态 · 模型 · 时间（#1902）。
+ */
+function Row({
+  row,
+  from,
+  now,
+  showCost,
+}: {
+  row: TaskListRow;
+  from: string;
+  now: number;
+  showCost: boolean;
+}) {
   const status = rowStatus(row);
+  const cols = showCost ? COLS.withCost : COLS.noCost;
   return (
-    <li>
-      <Link
-        to={detailLink(row.taskId, from)}
-        className="grid gap-x-4 gap-y-2 px-4 py-3 transition-colors hover:bg-accent focus-visible:bg-accent focus-visible:outline-none md:grid-cols-12 md:items-center"
-      >
-        <div className="min-w-0 md:col-span-4">
-          <div className="truncate text-body font-medium">{row.title}</div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-3 text-meta text-muted-foreground">
-            <span className="num">
+    <ListRow
+      href={detailLink(row.taskId, from)}
+      summary={
+        <div className="grid w-full min-w-0 gap-y-0.5 md:grid-cols-12 md:items-center md:gap-x-4">
+          <div className={cn('flex min-w-0 items-baseline gap-x-2', cols.title)}>
+            <span className="num shrink-0 text-meta text-muted-foreground max-md:hidden">
               {row.repo}#{row.issueNumber}
             </span>
-            <span className="num" title={formatDateTime(row.createdAt)}>
-              开单 {formatAgo(row.createdAt, now)}
-            </span>
+            <span className="truncate text-body font-medium">{row.title}</span>
+          </div>
+          {/* 手机上排成第二行；md 起各自占一栏（contents 让它们直接成为外层十二栏网格的格子） */}
+          <div className="flex min-w-0 items-center gap-x-2 md:contents">
+            <div className="flex shrink-0 items-center gap-x-2 md:col-span-2">
+              <StatusBadge tone={status.tone} label={status.label} />
+              {row.segment === null ? null : (
+                <span className="text-meta whitespace-nowrap text-muted-foreground max-md:hidden">
+                  {segmentText[row.segment]}
+                </span>
+              )}
+            </div>
+            <div
+              className={cn(
+                'min-w-0 flex-1 truncate text-body text-muted-foreground max-md:text-meta',
+                cols.model,
+              )}
+              title="用的模型"
+            >
+              {row.model ?? <span title="这张单还没有会话记录">没记模型</span>}
+            </div>
+            {showCost ? (
+              <div className="text-body max-md:hidden md:col-span-2 md:text-right">
+                <Cost cost={row.cost} />
+              </div>
+            ) : null}
+            <div
+              className="flex shrink-0 items-center gap-x-3 text-meta text-muted-foreground md:col-span-2 md:justify-end"
+              title={`开单 ${formatDateTime(row.createdAt)}；更新 ${formatDateTime(row.updatedAt)}`}
+            >
+              {row.prNumber === null ? null : <span className="num max-md:hidden">PR #{row.prNumber}</span>}
+              <span className="num whitespace-nowrap">{formatAgo(row.updatedAt, now)}</span>
+            </div>
           </div>
         </div>
-        {/* 手机上这四样排成一两行；md 起各自占一栏（contents 让它们直接成为外层十二栏网格的格子） */}
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 md:contents">
-          <div className="flex min-w-0 items-center gap-x-2 md:col-span-2">
-            <StatusBadge tone={status.tone} label={status.label} />
-            {row.segment === null ? null : (
-              <span className="text-meta whitespace-nowrap text-muted-foreground">
-                {segmentText[row.segment]}
-              </span>
-            )}
-          </div>
-          <div className="min-w-0 truncate text-body text-muted-foreground md:col-span-2" title="用的模型">
-            {row.model ?? <span title="这张单还没有会话记录">没记模型</span>}
-          </div>
-          <div className="text-body md:col-span-2 md:text-right">
-            <Cost cost={row.cost} />
-          </div>
-          <div className="flex flex-wrap items-center gap-x-3 text-meta text-muted-foreground md:col-span-2 md:justify-end">
-            {row.prNumber === null ? null : <span className="num">PR #{row.prNumber}</span>}
-            <span className="num whitespace-nowrap" title={formatDateTime(row.updatedAt)}>
-              更新 {formatAgo(row.updatedAt, now)}
-            </span>
-          </div>
-        </div>
-      </Link>
-    </li>
+      }
+    />
   );
 }
 
@@ -196,6 +224,8 @@ export default function TasksPage() {
       for (const row of page.items) if (!seen.has(row.taskId)) seen.set(row.taskId, row);
     return [...seen.values()];
   }, [list.data]);
+  // 已读到的行花费全读不到：整列不画（#1902）
+  const showCost = rows.some((r) => r.cost.usd !== null);
   const counts = list.data?.pages[0]?.counts;
   const sentinel = useLoadMoreOnScroll(
     Boolean(list.hasNextPage) && !list.isFetchingNextPage && !list.isFetchNextPageError,
@@ -220,103 +250,105 @@ export default function TasksPage() {
         staleAfterMs: TASKS_STALE_AFTER_MS,
       }}
     >
-      <Toolbar
-        start={
-          <StatusTabs
-            value={view.status}
-            counts={counts}
-            onChange={(status) => setView({ ...view, status })}
-          />
-        }
-        end={
-          <>
-            <NativeSelect
-              aria-label="按仓筛选"
-              value={view.repoId ?? ''}
-              onChange={(e) => setView({ ...view, repoId: e.target.value || undefined })}
-              className="max-md:w-full"
-            >
-              <option value="">全部仓</option>
-              {(repos.data?.repos ?? []).map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.owner}/{r.name}
-                </option>
-              ))}
-            </NativeSelect>
-            <SearchInput
-              value={typed}
-              onChange={setTyped}
-              placeholder="搜单号或标题"
-              aria-label="搜索任务：单号精确，标题包含"
-              className="md:w-64"
+      <div className="max-w-task-table" data-task-table>
+        <Toolbar
+          start={
+            <StatusTabs
+              value={view.status}
+              counts={counts}
+              onChange={(status) => setView({ ...view, status })}
             />
-          </>
-        }
-      />
-      {shownError ? (
-        <div className="mb-3">
-          <LoadError what="任务列表" error={shownError} onRetry={() => void list.refetch()} />
-        </div>
-      ) : null}
-      <Section flush>
-        {!list.data ? (
-          shownError ? (
-            <p className="px-4 py-10 text-center text-body text-ink-fail">
-              没读到任务列表，这里空着不代表没有任务
-            </p>
-          ) : (
-            <div className="p-4">
-              <LoadingRows rows={6} />
-            </div>
-          )
-        ) : rows.length === 0 ? (
-          <EmptyState
-            icon={filtered ? SearchX : ListChecks}
-            title="没有符合的任务"
-            hint={
-              filtered ? (
-                <>
-                  <p>换个状态、仓或搜索词试试。</p>
-                  <div className="mt-2 text-foreground">
-                    <Button size="sm" variant="outline" onClick={clear}>
-                      清除筛选
-                    </Button>
-                  </div>
-                </>
-              ) : (
-                '库里还没有任何任务。'
-              )
-            }
-          />
-        ) : (
-          <ul className="divide-y">
-            <ListHeader />
-            {rows.map((row) => (
-              <Row key={row.taskId} row={row} from={from} now={now} />
-            ))}
-          </ul>
-        )}
-        {rows.length > 0 ? (
-          <div ref={sentinel} className="border-t p-2 text-center">
-            {list.isFetchNextPageError ? (
-              <LoadError what="下一页" error={list.error} onRetry={() => void list.fetchNextPage()} />
-            ) : list.hasNextPage ? (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => void list.fetchNextPage()}
-                disabled={list.isFetchingNextPage}
+          }
+          end={
+            <>
+              <NativeSelect
+                aria-label="按仓筛选"
+                value={view.repoId ?? ''}
+                onChange={(e) => setView({ ...view, repoId: e.target.value || undefined })}
+                className="max-md:w-full"
               >
-                {list.isFetchingNextPage ? '正在读…' : '加载更多'}
-              </Button>
-            ) : (
-              <span className="text-meta text-muted-foreground">
-                已经到底，共 <span className="num">{rows.length}</span> 张
-              </span>
-            )}
+                <option value="">全部仓</option>
+                {(repos.data?.repos ?? []).map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.owner}/{r.name}
+                  </option>
+                ))}
+              </NativeSelect>
+              <SearchInput
+                value={typed}
+                onChange={setTyped}
+                placeholder="搜单号或标题"
+                aria-label="搜索任务：单号精确，标题包含"
+                className="md:w-64"
+              />
+            </>
+          }
+        />
+        {shownError ? (
+          <div className="mb-3">
+            <LoadError what="任务列表" error={shownError} onRetry={() => void list.refetch()} />
           </div>
         ) : null}
-      </Section>
+        <Section flush>
+          {!list.data ? (
+            shownError ? (
+              <p className="px-4 py-10 text-center text-body text-ink-fail">
+                没读到任务列表，这里空着不代表没有任务
+              </p>
+            ) : (
+              <div className="p-4">
+                <LoadingRows rows={6} />
+              </div>
+            )
+          ) : rows.length === 0 ? (
+            <EmptyState
+              icon={filtered ? SearchX : ListChecks}
+              title="没有符合的任务"
+              hint={
+                filtered ? (
+                  <>
+                    <p>换个状态、仓或搜索词试试。</p>
+                    <div className="mt-2 text-foreground">
+                      <Button size="sm" variant="outline" onClick={clear}>
+                        清除筛选
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  '库里还没有任何任务。'
+                )
+              }
+            />
+          ) : (
+            <List>
+              <ListHeader showCost={showCost} />
+              {rows.map((row) => (
+                <Row key={row.taskId} row={row} from={from} now={now} showCost={showCost} />
+              ))}
+            </List>
+          )}
+          {rows.length > 0 ? (
+            <div ref={sentinel} className="border-t p-2 text-center">
+              {list.isFetchNextPageError ? (
+                <LoadError what="下一页" error={list.error} onRetry={() => void list.fetchNextPage()} />
+              ) : list.hasNextPage ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => void list.fetchNextPage()}
+                  disabled={list.isFetchingNextPage}
+                >
+                  {list.isFetchingNextPage ? '正在读…' : '加载更多'}
+                </Button>
+              ) : (
+                <span className="text-meta text-muted-foreground">
+                  已经到底，共 <span className="num">{rows.length}</span> 张
+                </span>
+              )}
+            </div>
+          ) : null}
+        </Section>
+      </div>
     </Page>
   );
 }
