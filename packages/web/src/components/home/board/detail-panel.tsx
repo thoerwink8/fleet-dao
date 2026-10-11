@@ -187,7 +187,9 @@ function TicketPanel({ item, onClose }: { item: HomeRunning; onClose(): void }) 
           {phasesOf(item).map((p) => (
             <li key={p.key} className="flex items-center gap-2 text-sub">
               <StatusDot tone={p.state === 'pending' ? 'wait' : p.tone} />
-              <span className={cn('w-12 shrink-0', p.state === 'pending' ? 'text-faint' : undefined)}>
+              <span
+                className={cn('w-12 shrink-0', p.state === 'pending' ? 'text-muted-foreground' : undefined)}
+              >
                 {p.label}
               </span>
               <span className="text-xs text-muted-foreground">

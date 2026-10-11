@@ -1,5 +1,6 @@
 // 路由探针的逐次历史（#1139）：routes 只留最近一次结论，渠道状态页要画每次的耗时和问题，得另有一张只追加的表。
 // 不设外键：路由可以被删（探针这一轮里会碰到），历史不该挡住删除，也不该跟着被清掉。迁移只建这张表和索引。
+import { ROUTE_PROBE_TRIGGERS, type RouteProbeTrigger } from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import { bigint, boolean, check, index, integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
 import { ROUTE_PROBE_KINDS, type RouteProbeKind } from './catalog.ts';
@@ -10,9 +11,8 @@ const tz = { withTimezone: true, mode: 'date' } as const;
 export const ROUTE_PROBE_HISTORY_RESULTS = ['passed', 'failed', 'not_probed'] as const;
 export type RouteProbeHistoryResult = (typeof ROUTE_PROBE_HISTORY_RESULTS)[number];
 
-/** 谁触发的这一次探测（#1798 片 2）。空 = 老行，还没记下触发者。 */
-export const ROUTE_PROBE_TRIGGERS = ['scheduled', 'dispatch', 'manual', 'break', 'org-switch'] as const;
-export type RouteProbeTrigger = (typeof ROUTE_PROBE_TRIGGERS)[number];
+/** 谁触发的这一次探测：取值和 shared 同一份（#1798）。空 = 老行。 */
+export { ROUTE_PROBE_TRIGGERS, type RouteProbeTrigger };
 
 export const routeProbeHistory = pgTable(
   'route_probe_history',
@@ -33,6 +33,8 @@ export const routeProbeHistory = pgTable(
     /** 降智检测（#1637），全部可空，老行不动。题面、标准答案、实答超长由写入方截断并标注。 */
     checkQuestion: text('check_question'),
     checkExpected: text('check_expected'),
+    /** 身份题的旧答案原文（#1846，旧答案几种写法用「/」拼）；没带题、老行为空。 */
+    checkOldAnswer: text('check_old_answer'),
     checkAnswer: text('check_answer'),
     /** 判过：true 答对、false 答错或没写第二行；空 = 没判（没带题、回答里没有第一行 OK）。 */
     checkPassed: boolean('check_passed'),

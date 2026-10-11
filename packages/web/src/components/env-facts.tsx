@@ -474,7 +474,7 @@ export function factCells({
         }
       >
         {v.lastSuccessAt ? (
-          <div className="num mt-0.5 text-caption text-faint">
+          <div className="num mt-0.5 text-caption text-muted-foreground">
             最近一次跑成：{formatDateTime(v.lastSuccessAt)}
           </div>
         ) : null}

@@ -65,7 +65,9 @@ function CommitList({ commits, now }: { commits: Commits; now: number }) {
               </span>
             ) : null}
             发于 {formatAgo(c.at, now)}
-            <span className="ml-2 text-caption text-faint sm:ml-0 sm:block">{formatDateTime(c.at)}</span>
+            <span className="ml-2 text-caption text-muted-foreground sm:ml-0 sm:block">
+              {formatDateTime(c.at)}
+            </span>
           </div>
         </li>
       ))}

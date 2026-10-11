@@ -2,6 +2,12 @@
 
 import {
   type OrgKind,
+  ROUTE_PROBE_KINDS,
+  ROUTE_PROBE_TIERS,
+  ROUTE_PROBE_TRIGGERS,
+  type RouteProbeKind,
+  type RouteProbeTier,
+  type RouteProbeTrigger,
   type RunAsUser,
   type ScopeMembership,
   SESSION_EFFORTS,
@@ -36,13 +42,8 @@ import {
 
 const tz = { withTimezone: true, mode: 'date' } as const;
 
-/** 路由探针按活跃分的三档（#1798 片 2）：引擎每轮重写；空 = 还没写过。 */
-export const ROUTE_PROBE_TIERS = ['active', 'idle', 'unused'] as const;
-export type RouteProbeTier = (typeof ROUTE_PROBE_TIERS)[number];
-
-/** 上一次真探的种类：连通 / 身份（#1798 片 2）。空 = 还没写过，或老结论。 */
-export const ROUTE_PROBE_KINDS = ['ping', 'identity'] as const;
-export type RouteProbeKind = (typeof ROUTE_PROBE_KINDS)[number];
+/** 路由探针三档 / 种类：取值和 shared 同一份（#1798）。空 = 还没写过。 */
+export { ROUTE_PROBE_KINDS, ROUTE_PROBE_TIERS, type RouteProbeKind, type RouteProbeTier };
 
 export const families = pgTable('families', {
   id: text('id').primaryKey(),
@@ -174,6 +175,10 @@ export const routes = pgTable(
     probeFailStreak: integer('probe_fail_streak').notNull().default(0),
     /** 上一次真探是 ping 还是 identity；空 = 还没写过。 */
     probeKind: text('probe_kind').$type<RouteProbeKind>(),
+    /** 疑似换模型（#1846）：上一次身份题答中旧答案为真、答中新答案为假；认不出、没带题不动；空 = 没判过（老行）。 */
+    suspectedSwap: boolean('suspected_swap'),
+    /** 上一次真探是谁触发的（#1846）：scheduled / dispatch / manual / break / org-switch；空 = 老行。 */
+    probeTrigger: text('probe_trigger').$type<RouteProbeTrigger>(),
   },
   (t) => [
     foreignKey({
@@ -214,6 +219,10 @@ export const routes = pgTable(
       sql`${t.probeTier} is null or ${t.probeTier} in (${sql.raw(ROUTE_PROBE_TIERS.map((v) => `'${v}'`).join(', '))})`,
     ),
     check('routes_probe_fail_streak_nonneg', sql`${t.probeFailStreak} >= 0`),
+    check(
+      'routes_probe_trigger_known',
+      sql`${t.probeTrigger} is null or ${t.probeTrigger} in (${sql.raw(ROUTE_PROBE_TRIGGERS.map((v) => `'${v}'`).join(', '))})`,
+    ),
     check(
       'routes_probe_kind_known',
       sql`${t.probeKind} is null or ${t.probeKind} in (${sql.raw(ROUTE_PROBE_KINDS.map((v) => `'${v}'`).join(', '))})`,

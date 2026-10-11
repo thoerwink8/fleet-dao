@@ -52,7 +52,8 @@ const segmentClass = filterTabClass;
 
 /** 飞书等渠道送没送到：没拿到消息编号就算没送到。 */
 function Deliveries({ n }: { n: Notification }) {
-  if (!n.deliveries.length) return <span className="text-caption text-faint">只在{brand.product}</span>;
+  if (!n.deliveries.length)
+    return <span className="text-caption text-muted-foreground">只在{brand.product}</span>;
   return (
     <span className="flex flex-wrap gap-1.5">
       {n.deliveries.map((d, i) => (
@@ -146,7 +147,7 @@ function HandlingRow({ h, now }: { h: Handling; now: number }) {
           {h.silence.comment} · 到 {formatDateTime(h.silence.endsAt)}
         </span>
       ) : null}
-      <span className="num text-caption text-faint" title={formatDateTime(h.since)}>
+      <span className="num text-caption text-muted-foreground" title={formatDateTime(h.since)}>
         {since}
       </span>
       {h.problems.map((p) => (
@@ -205,7 +206,7 @@ function NotificationRow({
           <p className="mt-0.5 text-sub whitespace-pre-wrap text-muted-foreground">{n.body}</p>
           {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span className="num text-caption text-faint" title={formatClock(n.createdAt)}>
+            <span className="num text-caption text-muted-foreground" title={formatClock(n.createdAt)}>
               {formatAgo(n.createdAt, now)}
             </span>
             <Deliveries n={n} />

@@ -11,6 +11,8 @@ export interface KindEnv {
   channelEnabled(channelId: string): boolean | undefined;
   poolHeld(poolId: string): boolean;
   modelRetired(modelId: string): boolean;
+  /** 现在的时刻（毫秒）；给了才判检测中断。 */
+  now?: number;
 }
 
 export const NO_ENV: KindEnv = {
@@ -26,6 +28,7 @@ export function routeKind(r: RoutingLayerRoute, modelId: string, env: KindEnv): 
     modelRetired: env.modelRetired(modelId),
     poolHeld: env.poolHeld(r.poolId),
     usedByPurpose: true,
+    now: env.now,
   });
 }
 

@@ -42,7 +42,9 @@ export function BottomNav({ onMore }: { onMore(): void }) {
                   <span
                     className={cn(
                       'num absolute -top-1.5 left-3 grid min-w-4 place-items-center rounded-full px-1 text-micro leading-4 font-semibold',
-                      badge === '!' ? 'bg-st-fail text-white' : 'bg-st-human text-white',
+                      badge === '!'
+                        ? 'bg-destructive text-destructive-foreground'
+                        : 'bg-st-human text-background',
                     )}
                   >
                     {badge}

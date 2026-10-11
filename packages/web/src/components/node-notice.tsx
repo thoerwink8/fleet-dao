@@ -111,7 +111,7 @@ export function SnapshotBanner({
         <span>数据是它自己推来的快照，这里的按钮都不能用；要操作请去{name}那台上做。</span>
       )}
       {reportedAt && f === 'fresh' ? (
-        <span className="text-caption text-faint">它的钟 {formatDateTime(reportedAt)}</span>
+        <span className="text-caption text-muted-foreground">它的钟 {formatDateTime(reportedAt)}</span>
       ) : null}
     </div>
   );

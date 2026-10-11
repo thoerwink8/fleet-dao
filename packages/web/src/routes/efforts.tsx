@@ -423,7 +423,7 @@ function FixedRouteRow({ model, route: r }: { model: EffortModel; route: RouteEf
             关着
           </Badge>
         )}
-        <span className="num ml-auto truncate text-micro text-faint" title={r.model}>
+        <span className="num ml-auto truncate text-micro text-muted-foreground" title={r.model}>
           {r.routeId}
         </span>
       </div>
@@ -472,7 +472,7 @@ function RouteRow({
           <span className="truncate" title={`${title} · ${hostLabel[r.hostId]} · ${r.routeId}`}>
             {title}
           </span>
-          <span className="num shrink-0 text-micro text-faint max-md:hidden" title={r.model}>
+          <span className="num shrink-0 text-micro text-muted-foreground max-md:hidden" title={r.model}>
             {r.routeId}
           </span>
           {r.enabled ? null : (

@@ -17,6 +17,7 @@ import type {
   Subtask,
   Task,
 } from '@fleet-dao/shared';
+import { probePaceWritten } from '@fleet-dao/shared';
 import type {
   bans,
   channelStates,
@@ -167,6 +168,24 @@ export const toRoute = (r: typeof routes.$inferSelect): Route =>
     variantThinking: opt(r.variantThinking),
     variantContext: opt(r.variantContext),
     goneAt: isoOpt(r.goneAt),
+    // 节奏列（#1798 片 6）：写过的一起给；老行（四列都没写过）一个都不给，fail_streak 不拿默认 0 顶。
+    // 「写过没有」只有 shared 的 probePaceWritten 一处判法（probe_fail_streak 有默认 0，单看它分不出没写过和清零写成 0）。
+    ...(probePaceWritten(r)
+      ? {
+          probeTier: opt(r.probeTier),
+          probeNextAt: isoOpt(r.probeNextAt),
+          probeFailStreak: r.probeFailStreak,
+          probeKind: opt(r.probeKind),
+        }
+      : {
+          probeTier: undefined,
+          probeNextAt: undefined,
+          probeFailStreak: undefined,
+          probeKind: undefined,
+        }),
+    // 疑似换模型和上次触发者（#1846）：空 = 没判过 / 老行，不给。
+    suspectedSwap: opt(r.suspectedSwap),
+    probeTrigger: opt(r.probeTrigger),
   });
 
 /** routeIds 按调度台的先后；disabledRouteIds 是其中关着的（必须传：漏传就把关着的全当开着）。 */

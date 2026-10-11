@@ -45,7 +45,7 @@ const SEARCH_DEBOUNCE_MS = 300;
 function Cost({ cost }: { cost: TaskListRow['cost'] }) {
   // 读不到留空：仍挂悬停说明，不写「没读到」（叫停、已结束的单同样；#1751）
   if (cost.usd === null) {
-    // 标准档位占位，留给悬停说明一块可指区域；不用任意值（lint-arbitrary / #182）
+    // 标准档位占位，留给悬停说明一块可指区域；不用任意值（lint-design R0 / #182）
     return <span className="inline-block size-4" title={cost.note} data-cost-empty />;
   }
   return (

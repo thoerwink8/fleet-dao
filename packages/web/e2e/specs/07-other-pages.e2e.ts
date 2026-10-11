@@ -93,7 +93,7 @@ test.describe('其余页面', () => {
       await expect(list.getByText(name, { exact: true })).toBeVisible();
     }
     await expect(list.getByRole('listitem')).toHaveCount(5);
-    // 备库里 Claude 订阅两条在用的路是半小时前探的：超过 15 分钟 + 3 分钟，不拿旧绿灯装没事
+    // 备库里 Claude 订阅两条在用的路本该 30 分钟前再探，晚了 20 分钟还没探（probe_next_at 加 20 分钟）：不拿旧绿灯装没事
     const claude = list.locator('[data-channel="claude-sub"]');
     await expect(claude).toHaveAttribute('data-state', 'interrupted');
     await expect(claude).toContainText('检测中断');

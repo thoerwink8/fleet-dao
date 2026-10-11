@@ -25,6 +25,7 @@ export function useKindEnv(): KindEnv {
         const at = models?.find((m) => m.id === modelId)?.retiredAt;
         return at !== undefined && Date.parse(at) <= now;
       },
+      now,
     }),
     [channels, models, held, now],
   );
@@ -32,12 +33,12 @@ export function useKindEnv(): KindEnv {
 
 /** 状态词的芯片。 */
 export function KindChip({ kind }: { kind: RouteStateKind }) {
-  // 疑似降智和探针记录里的「疑似降智」同一个橙色，和不通的红分开（#1748）
+  // 疑似换模型和探测记录里的「疑似换模型」同一个橙色，和不通的红分开（#1748、#1798）
   if (kind === 'degraded') return <DoubtChip label={routeStateLabel[kind]} title={routeStateWhy[kind]} />;
   return <StatusChip tone={routeStateTone[kind]} label={routeStateLabel[kind]} />;
 }
 
-/** 橙色的「疑似降智」芯片：探通了但降智题答错，不是红的故障。 */
+/** 橙色的「疑似换模型」芯片：身份题说出了旧答案，已按不在线处理，不是红的故障。 */
 export function DoubtChip({ label, title }: { label: string; title?: string }) {
   return (
     <span

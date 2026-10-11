@@ -56,15 +56,22 @@ export interface RouteCandidate {
   /** 探针自己写的原因（routes.probe_detail）：不是 ok 的结论一定有（库里约束），为什么没探、没通照它说。 */
   probeDetail: (typeof routes.$inferSelect)['probeDetail'];
   /**
-   * 探针下一次该真探的时刻（routes.probe_next_at，引擎每轮现写；#1798 片 3）。老的行、还没写过这一列的空。
-   * 选路靠它判「挂着别的组织没探」那一支有没有过期（引擎 routing/filter.ts）。
-   */
-  probeNextAt: (typeof routes.$inferSelect)['probeNextAt'];
-  /**
    * Claude 订阅池的路由：探针下那次结论时会话用户挂的是哪个组织（routes.probe_org）。skipped、又是另一个组织 = 那一轮
    * 没探它，不是它坏了（引擎 routing/filter.ts 按它判等不等下一轮探针）。
    */
   probeOrg: (typeof routes.$inferSelect)['probeOrg'];
+  /** 节奏档（#1798 片 6）：routes.probe_tier。空 = 还没写过。 */
+  probeTier: (typeof routes.$inferSelect)['probeTier'];
+  /** 下次定时探的时刻；不在用或还没写过为空。 */
+  probeNextAt: (typeof routes.$inferSelect)['probeNextAt'];
+  /** 连着不通几次。和档一起读出；接口侧老行不拿默认 0 顶。 */
+  probeFailStreak: (typeof routes.$inferSelect)['probeFailStreak'];
+  /** 上一次真探是 ping 还是 identity；空 = 还没写过。 */
+  probeKind: (typeof routes.$inferSelect)['probeKind'];
+  /** 疑似换模型（#1846）：routes.suspected_swap；空 = 没判过。 */
+  suspectedSwap: (typeof routes.$inferSelect)['suspectedSwap'];
+  /** 上一次真探的触发者（#1846）：routes.probe_trigger；空 = 老行。 */
+  probeTrigger: (typeof routes.$inferSelect)['probeTrigger'];
   /**
    * unknown = 额度没读成或判不了：这个池从没读成过、最近一次读成或上游数据本身超过 30 分钟、适用的窗口已过清零点，
    * 或有窗口判不了扣不扣这条路由。派工原因里要写明「额度未知」。读成了、但没有扣这个模型的窗口，是 ok。
@@ -206,7 +213,12 @@ export async function evaluateRoutes(
       probeState: route.probeState,
       probeDetail: route.probeDetail,
       probeOrg: route.probeOrg,
+      probeTier: route.probeTier,
       probeNextAt: route.probeNextAt,
+      probeFailStreak: route.probeFailStreak,
+      probeKind: route.probeKind,
+      suspectedSwap: route.suspectedSwap,
+      probeTrigger: route.probeTrigger,
       quota,
       windows,
       inFlight: running,

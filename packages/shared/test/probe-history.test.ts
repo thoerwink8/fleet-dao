@@ -20,7 +20,6 @@ function cell(over: Partial<ProbeHistoryCell> & Pick<ProbeHistoryCell, 'id' | 'r
     checkAnswer: null,
     checkPassed: null,
     selfIdentity: null,
-    kind: null,
     ...over,
   };
 }

@@ -57,7 +57,6 @@ import {
   RepoDispatchResponse,
   ReposResponse,
   ROUTE_PROBE_ACTION,
-  ROUTE_PROBE_ON_DEMAND_MARK,
   ROUTE_PROBE_TARGET,
   ROUTING_PURPOSE_IDS,
   type Route,
@@ -324,23 +323,34 @@ function durationMsFromDetail(detail: string | undefined): number | null {
   return ms;
 }
 
+// 身份题那五项；kind / trigger 没写就是不给（#1798 片 6），不拿 null 顶老行。
 const NO_CHECK = {
   checkQuestion: null,
   checkExpected: null,
   checkAnswer: null,
   checkPassed: null,
   selfIdentity: null,
-  kind: null,
 } as const;
 
 const MOCK_CHECK_PASSED = {
   checkQuestion: '现任日本首相是谁？答案只写人名。',
   checkExpected: '高市早苗/Takaichi',
+  checkOldAnswer: '石破茂/Ishiba/岸田文雄',
   checkAnswer: '高市早苗',
   checkPassed: true,
   selfIdentity: 'gpt-6-sol',
   kind: 'identity' as const,
 };
+
+const MOCK_CHECK_MISMATCH = {
+  ...MOCK_CHECK_PASSED,
+  checkAnswer: '石破茂',
+  checkPassed: false,
+  selfIdentity: 'GPT-4 级别的通用助手',
+};
+
+const MOCK_IDENTITY_REQUEST =
+  '第一行只写 pong\n第二行写「答案：」加这道题的答案\n第三行写「模型：」加你的型号\n题目：现任日本首相是谁？答案只写人名。';
 
 /** 假数据里每条路由的最近一次结论收成一条探针历史，页面开发时格子不是空的。 */
 function mockProbeHistory(
@@ -348,6 +358,7 @@ function mockProbeHistory(
     id: string;
     channelId: string;
     probe?: { state: string; at: string; detail?: string };
+    probeKind?: 'ping' | 'identity';
   }[],
 ) {
   const cells: ProbeHistoryCell[] = [];
@@ -356,6 +367,9 @@ function mockProbeHistory(
     if (!probe) continue;
     const result = probe.state === 'ok' ? 'passed' : probe.state === 'failed' ? 'failed' : 'not_probed';
     const reason = probe.detail?.trim() ? probe.detail : '（假数据没写原因）';
+    // 身份题的路由：通过的记「对上新答案」，不通的（r-cursor-hi）记「说中了旧答案」
+    const identity = route.probeKind === 'identity' && result !== 'not_probed';
+    const mismatch = identity && result === 'failed';
     cells.push({
       id: cells.length + 1,
       routeId: route.id,
@@ -364,9 +378,24 @@ function mockProbeHistory(
       result,
       durationMs: result === 'not_probed' ? null : durationMsFromDetail(probe.detail),
       failureReason: result === 'passed' ? null : reason,
-      requestText: result === 'not_probed' ? null : '只回一个词：pong',
-      responseText: result === 'passed' ? 'pong' : result === 'failed' ? reason : null,
-      ...(result === 'passed' ? { ...NO_CHECK, kind: 'ping' as const } : NO_CHECK),
+      requestText: result === 'not_probed' ? null : identity ? MOCK_IDENTITY_REQUEST : '只回一个词：pong',
+      responseText: mismatch
+        ? 'pong\n答案：石破茂\n模型：GPT-4 级别的通用助手'
+        : identity
+          ? 'pong\n答案：高市早苗\n模型：gpt-6-sol'
+          : result === 'passed'
+            ? 'pong'
+            : result === 'failed'
+              ? reason
+              : null,
+      ...(mismatch
+        ? MOCK_CHECK_MISMATCH
+        : identity
+          ? MOCK_CHECK_PASSED
+          : result !== 'not_probed'
+            ? { ...NO_CHECK, kind: 'ping' as const }
+            : NO_CHECK),
+      trigger: 'scheduled' as const,
     });
   }
   // 中转站（ch-relay）补几次更早的探测，页面上能看到每种结论：疑似换模型、不通、没探、通过
@@ -383,14 +412,10 @@ function mockProbeHistory(
         result: 'failed',
         durationMs: 8_400,
         failureReason: '疑似换成旧模型：题 现任日本首相是谁？，新答案应为 高市早苗，实答 石破茂',
-        requestText: '第一行只写 pong\n第二行写「答案：」……\n题目：现任日本首相是谁？答案只写人名。',
+        requestText: MOCK_IDENTITY_REQUEST,
         responseText: 'pong\n答案：石破茂\n模型：GPT-4 级别的通用助手',
-        checkQuestion: '现任日本首相是谁？答案只写人名。',
-        checkExpected: '高市早苗/Takaichi',
-        checkAnswer: '石破茂',
-        checkPassed: false,
-        selfIdentity: 'GPT-4 级别的通用助手',
-        kind: 'identity',
+        ...MOCK_CHECK_MISMATCH,
+        trigger: 'dispatch',
       },
       {
         ...base,
@@ -399,9 +424,11 @@ function mockProbeHistory(
         result: 'failed',
         durationMs: null,
         failureReason: '连探两次都没通：503 容量满，上游没给原文\n（假数据）',
-        requestText: '只回一个词：pong',
+        requestText: '这是连通性测试。不要调用任何工具，不要解释，只回一个词：pong',
         responseText: '503 Service Unavailable\n{"error":{"type":"overloaded","message":"capacity full"}}',
         ...NO_CHECK,
+        kind: 'ping',
+        trigger: 'break',
       },
       {
         ...base,
@@ -409,10 +436,11 @@ function mockProbeHistory(
         probedAt: at(50),
         result: 'not_probed',
         durationMs: null,
-        failureReason: `${ROUTE_PROBE_ON_DEMAND_MARK}。上一次真探：通，10-10 11:00`,
+        failureReason: '这一轮没探：账号池整池暂停（假数据）',
         requestText: null,
         responseText: null,
         ...NO_CHECK,
+        trigger: 'scheduled',
       },
       {
         ...base,
@@ -421,46 +449,58 @@ function mockProbeHistory(
         result: 'passed',
         durationMs: 12_100,
         failureReason: null,
-        requestText: '第一行只写 pong\n第二行写「答案：」……\n题目：现任日本首相是谁？答案只写人名。',
+        requestText: MOCK_IDENTITY_REQUEST,
         responseText: 'pong\n答案：高市早苗\n模型：gpt-6-sol',
         ...MOCK_CHECK_PASSED,
+        trigger: 'scheduled',
+      },
+      {
+        ...base,
+        id: cells.length + 5,
+        probedAt: at(80),
+        result: 'passed',
+        durationMs: 5_300,
+        failureReason: null,
+        requestText: '这是连通性测试。不要调用任何工具，不要解释，只回一个词：pong',
+        responseText: 'pong',
+        ...NO_CHECK,
+        kind: 'ping',
+        trigger: 'manual',
+      },
+      {
+        // 算术题时代的老记录：没有种类、没有触发者，照原样显示，标「旧版降智题」
+        ...base,
+        id: cells.length + 6,
+        probedAt: at(125),
+        result: 'failed',
+        durationMs: 9_900,
+        failureReason: '疑似降智：题 17 乘 23 等于多少？只回数字。，应为 391，实答 381',
+        requestText: '第一行只回 OK\n第二行：17 乘 23 等于多少？只回数字。',
+        responseText: 'OK\n381',
+        checkQuestion: '17 乘 23 等于多少？只回数字。',
+        checkExpected: '391',
+        checkAnswer: '381',
+        checkPassed: false,
+        selfIdentity: 'gpt-6-sol',
       },
     );
   }
-  // Cursor（ch-cursor）的按需路由：一次真探判了疑似换模型，后面全是「按需」没探（#1748：色条不能全黄、真探不能被埋）
+  // Cursor 的疑似换模型路由：一小时前的身份题还是对的，现在说出了旧答案
   const hi = routes.find((r) => r.id === 'r-cursor-hi' && r.probe);
   if (hi?.probe) {
-    const t0 = Date.parse(hi.probe.at);
-    const base = { routeId: hi.id, channelId: hi.channelId };
     cells.push({
-      ...base,
+      routeId: hi.id,
+      channelId: hi.channelId,
       id: cells.length + 1,
-      probedAt: new Date(t0 - 60 * 60_000).toISOString(),
-      result: 'failed',
+      probedAt: new Date(Date.parse(hi.probe.at) - 60 * 60_000).toISOString(),
+      result: 'passed',
       durationMs: 9_200,
-      failureReason: '疑似换成旧模型：题 现任日本首相是谁？，新答案应为 高市早苗，实答 石破茂',
-      requestText: '题目：现任日本首相是谁？答案只写人名。',
-      responseText: 'pong\n答案：石破茂\n模型：GPT-4 级别的通用助手',
-      checkQuestion: '现任日本首相是谁？答案只写人名。',
-      checkExpected: '高市早苗/Takaichi',
-      checkAnswer: '石破茂',
-      checkPassed: false,
-      selfIdentity: 'GPT-4 级别的通用助手',
-      kind: 'identity',
+      failureReason: null,
+      requestText: MOCK_IDENTITY_REQUEST,
+      responseText: 'pong\n答案：高市早苗\n模型：gpt-6-sol',
+      ...MOCK_CHECK_PASSED,
+      trigger: 'scheduled',
     });
-    for (let i = 0; i < 12; i++) {
-      cells.push({
-        ...base,
-        id: cells.length + 1,
-        probedAt: new Date(t0 - (50 - i * 4) * 60_000).toISOString(),
-        result: 'not_probed',
-        durationMs: null,
-        failureReason: `${ROUTE_PROBE_ON_DEMAND_MARK}。上一次真探：不通，10-10 09:05（疑似降智：题 17 乘 23 等于多少？只回数字。，应为 391，实答 381）`,
-        requestText: null,
-        responseText: null,
-        ...NO_CHECK,
-      });
-    }
   }
   return RouteProbeHistoryResponse.parse({ state: 'ok', ...probeHistoryStrips(cells) });
 }
@@ -688,6 +728,11 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           const detail = failed ? (route.probe?.detail ?? '没探通') : `答上了：OK · 用时 ${sec} 秒`;
           route.probe = { state: failed ? 'failed' : 'ok', at: iso(), detail };
           route.alive = !failed;
+          // 探完重写下次时刻：活跃 1 小时、不活跃 1 天，不通的按连着不通几次退避（15、30、60、120、240 分钟）
+          route.probeFailStreak = failed ? (route.probeFailStreak ?? 0) + 1 : 0;
+          const backoff = [15, 30, 60, 120, 240][Math.min(route.probeFailStreak, 5) - 1];
+          const waitMin = failed && backoff ? backoff : route.probeTier === 'idle' ? 24 * 60 : 60;
+          if (route.probeTier !== 'unused') route.probeNextAt = new Date(t + waitMin * 60_000).toISOString();
           return {
             routeId: id,
             outcome: failed ? 'failed' : 'ok',
@@ -774,11 +819,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     else if (model?.retiredAt && Date.parse(model.retiredAt) <= t) connect = fact('dead', '模型已下架');
     else if (r.alive) connect = fact('live', '探针探通了');
     else if (!r.probe) connect = fact('unknown', '探针还没看过这条路由');
-    else if (r.probe.state === 'on_demand')
-      connect = fact(
-        'unknown',
-        `按需探测（不主动探，派给它时先探一次）：${r.probe.detail ?? '探针没写原因'}`,
-      );
     else if (r.probe.state === 'skipped')
       connect = fact('unknown', `探针这一轮没探它（不是探了没通）：${r.probe.detail ?? '探针没写原因'}`);
     else connect = fact('dead', `探针判不在线：${r.probe.detail ?? `探针没写原因（${r.probe.state}）`}`);
@@ -836,6 +876,12 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       ban,
       ...(r.probe ? { probedAt: r.probe.at } : {}),
       ...(r.probe?.detail ? { probeDetail: r.probe.detail } : {}),
+      ...(r.probeTier ? { probeTier: r.probeTier } : {}),
+      ...(r.probeNextAt ? { probeNextAt: r.probeNextAt } : {}),
+      ...(r.probeFailStreak !== undefined ? { probeFailStreak: r.probeFailStreak } : {}),
+      ...(r.probeKind ? { probeKind: r.probeKind } : {}),
+      ...(r.suspectedSwap !== undefined ? { suspectedSwap: r.suspectedSwap } : {}),
+      ...(r.probeTrigger ? { probeTrigger: r.probeTrigger } : {}),
       exhausted: full.map((w) => ({
         label: w.label ?? w.window,
         ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}),

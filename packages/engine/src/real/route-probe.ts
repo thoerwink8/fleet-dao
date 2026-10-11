@@ -50,6 +50,7 @@ import {
 import { loadHeldPools } from './pool-holds.ts';
 import {
   expectedNewAnswers,
+  expectedOldAnswers,
   type IdentityQuestion,
   matchIdentityAnswer,
   parseProbeReply,
@@ -165,6 +166,7 @@ export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeConte
               check: {
                 question: q.text,
                 expected: expectedNewAnswers(q),
+                oldAnswer: expectedOldAnswers(q),
                 answer: reply.answer,
                 passed: null,
                 selfIdentity: reply.identity,
@@ -189,6 +191,7 @@ export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeConte
     const check = {
       question: q.text,
       expected: expectedNewAnswers(q),
+      oldAnswer: expectedOldAnswers(q),
       answer: reply.answer,
       passed: match === 'new' ? true : match === 'old' ? false : null,
       selfIdentity: reply.identity,

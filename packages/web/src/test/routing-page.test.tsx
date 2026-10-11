@@ -233,7 +233,7 @@ describe('路由页：每一层现在活着吗', () => {
     expect(off.textContent).toContain('开关关着（这条路由在它的模型下关着）');
   });
 
-  test('额度用满写哪个窗、几点清零；探针结论过期标出来；池满了说是等空位；模型下没路由照说', async () => {
+  test('额度用满写哪个窗、几点清零；晚于下次探测 20 分钟标检测中断；池满了说是等空位；模型下没路由照说', async () => {
     const now = Date.now();
     const iso = (min: number) => new Date(now + min * 60_000).toISOString();
     const fact = (verdict: 'live' | 'dead' | 'unknown', reason: string) => ({ verdict, reason });
@@ -264,6 +264,8 @@ describe('路由页：每一层现在活着吗', () => {
                   quota: fact('dead', '适用的额度窗用满了'),
                   ban: fact('live', '没有禁令、开关开着'),
                   probedAt: iso(-120),
+                  probeTier: 'active' as const,
+                  probeNextAt: iso(-100),
                   exhausted: [{ label: '5h', resetsAt: iso(90) }, { label: '7d' }],
                   inFlight: 2,
                   reserved: 0,
@@ -281,7 +283,7 @@ describe('路由页：每一层现在活着吗', () => {
     const a = routeItem('rt-a');
     expect(a.textContent).toMatch(/5h：1 小时 \d+ 分后清零|5h：1 小时后清零|5h：(89|90) 分钟后清零/);
     expect(a.textContent).toContain('7d：清零时刻没读到');
-    expect(a.textContent).toContain('探测过期：2 小时前的结论，探针可能停了');
+    expect(a.textContent).toContain('检测中断：2 小时前的结论，晚于下次探测时刻 20 分钟还没探，探针可能停了');
     expect(a.textContent).toContain('满了，等空位，不算故障');
     // 行上写一条路由都没有；点开它，下面写排了它也派不到它
     expect(screen.getByText('一条路由都没有')).toBeTruthy();
@@ -398,7 +400,7 @@ describe('路由页的「渠道」块（#1366 第二部分：细看和立即探�
     expect(within(cursor as HTMLElement).getByRole('switch', { name: 'Cursor 的开关' })).toBeTruthy();
     fireEvent.click(within(cursor as HTMLElement).getByRole('button', { name: '查看 Cursor 的路由' }));
     const detail = await screen.findByRole('list', { name: 'Cursor 的路由' });
-    expect(within(detail).getByText(/探针判不在线/, { exact: false })).toBeTruthy();
+    expect(within(detail).getAllByText(/探针判不在线/, { exact: false }).length).toBeGreaterThan(0);
     expect(screen.getByRole('link', { name: /看原文、立即探测/ }).getAttribute('href')).toBe(
       '/routing/status?p=ch-cursor',
     );

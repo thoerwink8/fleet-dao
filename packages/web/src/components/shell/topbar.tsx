@@ -254,11 +254,11 @@ function NotificationBell() {
         >
           {urgent ? <BellRing /> : <Bell />}
           {error && !data ? (
-            <span className="absolute -top-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-st-fail text-micro leading-4 font-bold text-white">
+            <span className="absolute -top-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-destructive text-micro leading-4 font-bold text-destructive-foreground">
               !
             </span>
           ) : urgent ? (
-            <span className="num absolute -top-0.5 -right-0.5 grid min-w-4 place-items-center rounded-full bg-st-human px-1 text-micro leading-4 font-semibold text-white">
+            <span className="num absolute -top-0.5 -right-0.5 grid min-w-4 place-items-center rounded-full bg-st-human px-1 text-micro leading-4 font-semibold text-background">
               {urgent}
             </span>
           ) : null}

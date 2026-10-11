@@ -72,7 +72,7 @@ function DrawerBody({
                 className={cn(
                   'num rounded-full px-1.5 text-micro leading-4',
                   t.id === 'decisions' && t.count > 0
-                    ? 'bg-st-human text-white'
+                    ? 'bg-st-human text-background'
                     : 'bg-muted text-muted-foreground',
                 )}
               >
@@ -180,7 +180,7 @@ function DrawerButton({ count, open, onOpen }: { count: number; open: boolean; o
         <span
           className={cn(
             'num rounded-full px-1.5 text-micro leading-4',
-            count > 0 ? 'bg-st-human text-white' : 'bg-muted text-muted-foreground',
+            count > 0 ? 'bg-st-human text-background' : 'bg-muted text-muted-foreground',
           )}
         >
           {count}

@@ -5,7 +5,10 @@ import { SESSION_EFFORTS } from '../effort.ts';
 import {
   BillingKindSchema,
   HostIdSchema,
+  RouteProbeKindSchema,
   RouteProbeStateSchema,
+  RouteProbeTierSchema,
+  RouteProbeTriggerSchema,
   SegmentKindSchema,
   StageKindSchema,
 } from './enums.ts';
@@ -74,6 +77,14 @@ export const RouteSchema = z.object({
   alive: z.boolean(),
   /** 没有 = 探针还没看过这条路由（上线后第一轮之前），不是离线。 */
   probe: RouteProbeSchema.optional(),
+  /** 节奏档（#1798 片 6）。库里没写过不给，不拿默认值顶。 */
+  probeTier: RouteProbeTierSchema.optional(),
+  probeNextAt: Time.optional(),
+  probeFailStreak: z.number().int().nonnegative().optional(),
+  probeKind: RouteProbeKindSchema.optional(),
+  /** 疑似换模型、上次探测的触发者（#1846）。没判过、老行不给。 */
+  suspectedSwap: z.boolean().optional(),
+  probeTrigger: RouteProbeTriggerSchema.optional(),
 });
 
 export const BanSchema = z.object({
@@ -153,6 +164,14 @@ export const RoutingLayerRouteSchema = z.object({
   probedAt: Time.optional(),
   /** 探针原文（routes.probe_detail）。退避中的「下次约 HH:MM」写在这里，驾驶舱据此放宽「探针可能停了」。 */
   probeDetail: z.string().optional(),
+  /** 节奏档（#1798 片 6）。库里没写过不给，不拿默认值顶。 */
+  probeTier: RouteProbeTierSchema.optional(),
+  probeNextAt: Time.optional(),
+  probeFailStreak: z.number().int().nonnegative().optional(),
+  probeKind: RouteProbeKindSchema.optional(),
+  /** 疑似换模型、上次探测的触发者（#1846）。没判过、老行不给。 */
+  suspectedSwap: z.boolean().optional(),
+  probeTrigger: RouteProbeTriggerSchema.optional(),
   /** 挡着这条路由的、用满了的额度窗：哪一个、几点清零（读数里没有清零时刻就不给）。 */
   exhausted: z.array(z.object({ label: z.string(), resetsAt: Time.optional() })),
   /** 账号池此刻在跑几个、已选定还没开跑几个（#757 预占）、最多几个：两者之和到了上限就是满（shared 的 poolFull），等空位，不算死。 */
@@ -557,11 +576,15 @@ export const ProbeHistoryCellSchema = z.object({
   /** 身份题（#1798 片 5；原先 #1637 降智题）：题、标准答案、实答、判过没过（null = 没判）、自报身份。老行和没带题的探测都是 null。 */
   checkQuestion: z.string().nullable(),
   checkExpected: z.string().nullable(),
+  /** 旧答案原文（#1846）；老行、没带题为 null 或不给。 */
+  checkOldAnswer: z.string().nullable().optional(),
   checkAnswer: z.string().nullable(),
   checkPassed: z.boolean().nullable(),
   selfIdentity: z.string().nullable(),
-  /** 探测种类：连通 / 身份。老行为空（#1798 片 5）。 */
-  kind: z.enum(['ping', 'identity']).nullable(),
+  /** 探测种类：连通 / 身份。老行、没写过不给，不拿 null 顶（#1798 片 5、片 6）。 */
+  kind: RouteProbeKindSchema.optional(),
+  /** 定时 / 派前 / 人点 / 断链 / 切号（片 6）。老行、没写过不给。 */
+  trigger: RouteProbeTriggerSchema.optional(),
 });
 
 export const ProbeHistoryChannelSchema = z.object({
