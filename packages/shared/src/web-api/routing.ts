@@ -3,7 +3,15 @@
 import { z } from 'zod';
 import type { HostId } from '../domain.ts';
 import { SESSION_EFFORTS } from '../effort.ts';
-import { BillingKindSchema, HostIdSchema, RouteProbeStateSchema, StageKindSchema } from './enums.ts';
+import {
+  BillingKindSchema,
+  HostIdSchema,
+  RouteProbeKindSchema,
+  RouteProbeStateSchema,
+  RouteProbeTierSchema,
+  RouteProbeTriggerSchema,
+  StageKindSchema,
+} from './enums.ts';
 import { Id, Time } from './internal.ts';
 
 // —— 调度台：路由与阶段策略 ——
@@ -85,6 +93,11 @@ export const RouteSchema = z.object({
   alive: z.boolean(),
   /** 没有 = 探针还没看过这条路由（上线后第一轮之前），不是离线。 */
   probe: RouteProbeSchema.optional(),
+  /** 节奏档（#1798 片 6）。库里没写过不给，不拿默认值顶。 */
+  probeTier: RouteProbeTierSchema.optional(),
+  probeNextAt: Time.optional(),
+  probeFailStreak: z.number().int().nonnegative().optional(),
+  probeKind: RouteProbeKindSchema.optional(),
 });
 
 export const BanSchema = z.object({
@@ -164,6 +177,11 @@ export const RoutingLayerRouteSchema = z.object({
   probedAt: Time.optional(),
   /** 探针原文（routes.probe_detail）。退避、隔 30 分钟再探、按需探测都写在这里，驾驶舱据此放宽「探针可能停了」。 */
   probeDetail: z.string().optional(),
+  /** 节奏档（#1798 片 6）。库里没写过不给，不拿默认值顶。 */
+  probeTier: RouteProbeTierSchema.optional(),
+  probeNextAt: Time.optional(),
+  probeFailStreak: z.number().int().nonnegative().optional(),
+  probeKind: RouteProbeKindSchema.optional(),
   /** 挡着这条路由的、用满了的额度窗：哪一个、几点清零（读数里没有清零时刻就不给）。 */
   exhausted: z.array(z.object({ label: z.string(), resetsAt: Time.optional() })),
   /** 账号池此刻在跑几个、已选定还没开跑几个（#757 预占）、最多几个：两者之和到了上限就是满（shared 的 poolFull），等空位，不算死。 */
@@ -568,7 +586,9 @@ export const ProbeHistoryCellSchema = z.object({
   checkPassed: z.boolean().nullable(),
   selfIdentity: z.string().nullable(),
   /** 探测种类：连通 / 身份。老行为空（#1798 片 5）。 */
-  kind: z.enum(['ping', 'identity']).nullable(),
+  kind: RouteProbeKindSchema.nullable(),
+  /** 定时 / 派前 / 人点 / 断链 / 切号（片 6）。老行、没写过不给。 */
+  trigger: RouteProbeTriggerSchema.optional(),
 });
 
 export const ProbeHistoryChannelSchema = z.object({

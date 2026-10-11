@@ -3,6 +3,7 @@
 // 不占格子、不进可用率，单独放在 skipped 里（#1748：Cursor 最近 60 条全是没探，色条全黄、真探被埋在下面）。
 // 也不把没量到的耗时当成 0。
 // 点路由行要看的是那条路由自己最近一次，哪怕它已经挤出这 60 格。
+import type { RouteProbeKind, RouteProbeTrigger } from './domain.ts';
 
 /** 渠道卡上的格子数，也是每条路由在库里留下的条数（db 的 ROUTE_PROBE_HISTORY_KEEP 用同一个数）。 */
 export const PROBE_HISTORY_SLOTS = 60;
@@ -24,7 +25,7 @@ export interface ProbeCheck {
 }
 
 /** 探测种类：连通 / 身份（#1798）。老行没有。 */
-export type ProbeHistoryKind = 'ping' | 'identity';
+export type ProbeHistoryKind = RouteProbeKind;
 
 /** 一次探针。probedAt 是带时区的时刻（ISO）。耗时、失败原因、原文没有就是 null，不当 0 或空串。 */
 export interface ProbeHistoryCell {
@@ -43,8 +44,10 @@ export interface ProbeHistoryCell {
   checkAnswer: string | null;
   checkPassed: boolean | null;
   selfIdentity: string | null;
-  /** 探测种类；老行为空。 */
+  /** 探测种类：连通 / 身份。老行为空（#1798 片 5）。 */
   kind: ProbeHistoryKind | null;
+  /** 定时 / 派前 / 人点 / 断链 / 切号（片 6）。老行、没写过不给。 */
+  trigger?: RouteProbeTrigger | undefined;
 }
 
 /** 一个渠道的条带：cells 是最近 60 次真探，从旧到新。可用率的分母是 cells 里的（通过 + 不通）。 */

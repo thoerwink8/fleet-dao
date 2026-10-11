@@ -6,12 +6,13 @@ import {
   pools,
   quotaWindows,
   reservePoolSlot,
+  routes,
   routingCatalog,
   routingPurposeModels,
   tasks,
 } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { poolFull, RoutingLayersResponse, type StageKind } from '@fleet-dao/shared';
+import { poolFull, RoutingLayersResponse, RoutingResponse, type StageKind } from '@fleet-dao/shared';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { pgRoutingLayers, type RoutingLayersPort } from '../src/routing-layers.ts';
@@ -252,5 +253,61 @@ describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
     const h = harness();
     const res = await h.cockpit.request('/api/routing/layers');
     expect(res.status).toBe(401);
+  });
+
+  it('节奏列（#1798 片 6）：库里写了的原样给出；老行没写过的不给，不拿默认值顶', async () => {
+    current = await pgHarness(t, { routingLayers: pgRoutingLayers(t.db) });
+    await setLayers({ execute: ['opus-5.5'] }, { 'opus-5.5': SAMPLE_MODELS['opus-5.5'] });
+    const { cookie } = await current.login();
+
+    const before = await layers(current, cookie);
+    const old = before.purposes
+      .find((p) => p.purpose === 'execute')
+      ?.models[0]?.routes.find((r) => r.routeId === 'rt-claude-opus');
+    expect(old).toBeDefined();
+    expect(old).not.toHaveProperty('probeTier');
+    expect(old).not.toHaveProperty('probeNextAt');
+    expect(old).not.toHaveProperty('probeFailStreak');
+    expect(old).not.toHaveProperty('probeKind');
+
+    const nextAt = new Date(T0.getTime() + 60 * 60_000);
+    await t.db
+      .update(routes)
+      .set({
+        probeTier: 'active',
+        probeNextAt: nextAt,
+        probeFailStreak: 2,
+        probeKind: 'identity',
+      })
+      .where(eq(routes.id, 'rt-claude-opus'));
+
+    const after = await layers(current, cookie);
+    const written = after.purposes
+      .find((p) => p.purpose === 'execute')
+      ?.models[0]?.routes.find((r) => r.routeId === 'rt-claude-opus');
+    expect(written).toMatchObject({
+      probeTier: 'active',
+      probeNextAt: nextAt.toISOString(),
+      probeFailStreak: 2,
+      probeKind: 'identity',
+    });
+
+    // 路由目录接口同一套列
+    const catalog = RoutingResponse.parse(
+      await (await current.cockpit.request('/api/routing', { headers: { cookie } })).json(),
+    );
+    const catalogRoute = catalog.routes.find((r) => r.id === 'rt-claude-opus');
+    expect(catalogRoute).toMatchObject({
+      probeTier: 'active',
+      probeNextAt: nextAt.toISOString(),
+      probeFailStreak: 2,
+      probeKind: 'identity',
+    });
+    const untouched = catalog.routes.find((r) => r.id === 'rt-mirasim-kimi');
+    expect(untouched).toBeDefined();
+    expect(untouched).not.toHaveProperty('probeTier');
+    expect(untouched).not.toHaveProperty('probeNextAt');
+    expect(untouched).not.toHaveProperty('probeFailStreak');
+    expect(untouched).not.toHaveProperty('probeKind');
   });
 });
