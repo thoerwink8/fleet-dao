@@ -18,7 +18,7 @@ const FILES = [
   'components/layout/list.tsx',
   'routes/routing-status.tsx',
   'routes/changelog.tsx',
-  // #1638：渠道状态那处探针色点（size-2 shrink-0 rounded-2）随「探测记录」挪进这个组件，类名没变，所以也在这里钉
+  // #1638：渠道状态那处探针色点（size-2 shrink-0 rounded-sm；旧档 rounded-2 在收口片 #1855 删除）随「探测记录」挪进这个组件，类名没变，所以也在这里钉
   'components/probe-log.tsx',
 ] as const;
 
@@ -48,13 +48,11 @@ const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
   { file: 'routes/changelog.tsx', snippet: 'flex-wrap items-baseline' },
 ];
 
-/** 这 12 处用到的档位。why 必须出现在定义行往上 8 行里的注释中。 */
+/** 这 12 处用到的档位（健康条等的辅助字原来是 text-caption 11px，收口片 #1855 删了旧字号名，改用 text-meta，见 SPOTS）。why 必须出现在定义行往上 8 行里的注释中。 */
 const TIERS: { name: string; why: string }[] = [
-  { name: '--text-caption:', why: 'caption（辅助信息、时间戳）' },
   { name: '--container-health-detail:', why: '320px' },
   { name: '--width-rail:', why: '3px' },
   { name: '--max-height-routing-pane:', why: '16rem' },
-  { name: '--radius-2:', why: '2px' },
 ];
 
 /** 这 12 处换掉之前的写死类名。五个文件里不能再出现。 */

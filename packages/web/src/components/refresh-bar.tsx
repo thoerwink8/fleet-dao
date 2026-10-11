@@ -123,15 +123,15 @@ export function RefreshBar({
       </Button>
       <span role="status">
         {never ? (
-          <span className="text-caption text-muted-foreground">还没读到过</span>
+          <span className="text-meta text-muted-foreground">还没读到过</span>
         ) : (
-          <span className="text-caption text-muted-foreground">
+          <span className="text-meta text-muted-foreground">
             最后更新 <span className="num">{formatAgo(new Date(shownAt).toISOString(), now)}</span>
           </span>
         )}
       </span>
       {stale ? (
-        <span className="inline-flex h-5 items-center rounded-full bg-st-stall/14 px-1.5 text-caption font-medium text-ink-stall">
+        <span className="inline-flex h-5 items-center rounded-full bg-st-stall-soft px-1.5 text-meta font-medium text-ink-stall">
           数据已过期
         </span>
       ) : null}

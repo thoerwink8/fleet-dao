@@ -57,7 +57,7 @@ export function HydrateFallback() {
     <div className="grid h-dvh place-items-center bg-background">
       <div className="flex flex-col items-center gap-3 text-muted-foreground">
         <LogoMark className="size-10 animate-pulse" />
-        <span className="text-sm">{brand.product}启动中…</span>
+        <span className="text-body">{brand.product}启动中…</span>
       </div>
     </div>
   );
@@ -103,9 +103,9 @@ export function ErrorBoundary() {
     <main className="grid h-dvh place-items-center bg-background p-6">
       <div className="max-w-md text-center">
         <LogoMark className="mx-auto size-10" />
-        <h1 className="mt-4 text-lg font-semibold">{title}</h1>
-        <p className="mt-2 text-sm break-words text-muted-foreground">{detail}</p>
-        <Link to="/" className="mt-4 inline-block text-sm underline underline-offset-4">
+        <h1 className="mt-4 text-heading font-semibold">{title}</h1>
+        <p className="mt-2 text-body break-words text-muted-foreground">{detail}</p>
+        <Link to="/" className="mt-4 inline-block text-body underline underline-offset-4">
           回到看板
         </Link>
       </div>
