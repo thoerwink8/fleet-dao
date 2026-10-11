@@ -65,6 +65,7 @@ import {
   pickPurpose,
   purposeLabel,
   purposeLine,
+  purposeLineFull,
   purposeVerdictLabel,
   routeHost,
   routeSlots,
@@ -274,7 +275,11 @@ function PurposeList({
     tone: verdictTone[p.verdict],
     count: p.models.length,
     label: (
-      <span title={purposeLine(p, { retired: env.modelRetired, channelOpen: env.channelEnabled }).text}>
+      <span
+        title={purposeLineFull(
+          purposeLine(p, { retired: env.modelRetired, channelOpen: env.channelEnabled }),
+        )}
+      >
         <span className="sr-only">{purposeVerdictLabel[p.verdict]}：</span>
         {purposeLabel(p.purpose)}
         {/* 选中后标题块里写出来；按钮上只给读屏，不挤在筛选条里 */}
@@ -328,43 +333,48 @@ function PurposeHero({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   const env = useKindEnv();
   const line = purposeLine(p, { retired: env.modelRetired, channelOpen: env.channelEnabled });
   const first = firstLive(p);
+  // 灰字一行：结论的补充（走哪条路、为什么不是首选）+ 执行方式和在跑几个 + 用途自己的提示
+  // 窄屏放不下时截掉的是最后的「在跑几个」，所以用途自己的提示排在前面
   const notes: string[] = [];
-  if (first) {
-    // 结论里已经写了走哪条路（首选活着那种），细节只补执行方式和在跑几个
-    const via = routeTitle(first.route);
-    const how = `${routeHost(first.route)} · ${routeSlots(first.route).text}`;
-    notes.push(line.text.includes(via) ? how : `走 ${via} · ${how}`);
-  }
   if (p.purpose === 'groom') notes.push(GROOM_HINT);
-  const cut = line.text.indexOf('（');
-  const lead = cut > 0 ? line.text.slice(0, cut) : line.text;
-  const paren = cut > 0 ? line.text.slice(cut) : '';
+  if (p.purpose === 'judge' && p.verdict === 'unknown') notes.push('按量计费，不自动探，不用处理');
+  if (line.detail && p.models.length > 0) notes.push(line.detail);
+  if (first) {
+    const via = routeTitle(first.route);
+    if (!line.detail?.includes(via)) notes.push(`走 ${via}`);
+    notes.push(`${routeHost(first.route)} · ${routeSlots(first.route).text}`);
+  }
+  const noteText = notes.join(' · ');
   const badge = <StatusBadge tone={verdictTone[p.verdict]} label={purposeVerdictLabel[p.verdict]} />;
   return (
-    // 和页标题「路由」拉开层级：用途名单独一行（subtitle，比页标题小一档），下面隔 12 是结论（15 正文字重）带结论标签，再下面是灰字细节
+    // 三行、每行都不折（#1914 第 5 轮，创始人看 390 宽「变成 2 行了」）：用途名一行；结论短话带状态标签一行
+    // （短话放不下就截断、标签不挤走）；灰字补充一行（放不下截断，整句在悬停里）。
     <header data-purpose-hero className="flex min-w-0 flex-col pt-2">
-      <div className="mb-3 flex items-baseline gap-2">
-        <h2 className="text-subtitle">{purposeLabel(p.purpose)}</h2>
-        <span className="text-meta text-muted-foreground">{p.purpose}</span>
+      <div className="mb-3 flex min-w-0 items-baseline gap-2 whitespace-nowrap">
+        <h2 className="truncate text-subtitle">{purposeLabel(p.purpose)}</h2>
+        <span className="shrink-0 text-meta text-muted-foreground">{p.purpose}</span>
       </div>
       {/* 一个模型都没排：那句话就是缺口本身，下面缺口栏已经写了，不在这里再写一遍 */}
       {p.models.length > 0 ? (
-        <p className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-heading font-normal">
-          {line.tone === 'done' ? null : <StatusDot tone={line.tone} />}
-          <span className="min-w-0">
-            {/* 括号里的路由名（「Claude 订阅 · claude-a」）不从中间断行：窄屏整段换到下一行 */}
-            {lead}
-            {paren ? <span className="whitespace-nowrap">{paren}</span> : null}
+        <p
+          data-hero-line
+          title={purposeLineFull(line)}
+          className="flex min-w-0 items-center gap-2.5 whitespace-nowrap text-heading font-normal"
+        >
+          {line.tone === 'done' ? null : <StatusDot tone={line.tone} className="shrink-0" />}
+          <span data-hero-text className="min-w-0 truncate">
+            {line.text}
           </span>
-          {badge}
+          <span className="shrink-0">{badge}</span>
         </p>
       ) : (
         <p>{badge}</p>
       )}
-      {p.purpose === 'judge' && p.verdict === 'unknown' ? (
-        <p className="mt-1.5 text-meta text-muted-foreground">按量计费，不自动探，不用处理</p>
+      {noteText ? (
+        <p data-hero-notes title={noteText} className="mt-1.5 truncate text-meta text-muted-foreground">
+          {noteText}
+        </p>
       ) : null}
-      {notes.length > 0 ? <p className="mt-1.5 text-meta text-muted-foreground">{notes.join('　')}</p> : null}
     </header>
   );
 }

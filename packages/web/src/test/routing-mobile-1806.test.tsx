@@ -226,6 +226,38 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
     // 行框带 group/row，悬停才认得到这一行
     expect(classes(row.querySelector('[data-row-frame]'))).toContain('group/row');
   });
+
+  test('用途标题块三行都不折（#1914 第 5 轮，创始人看 390 宽「变成 2 行了」）：结论短话截断、状态标签不收缩，灰字截断、整句在悬停', async () => {
+    // 每个用途都看：首选活着、靠后备、不知道的结论都要放得进一行
+    for (const purpose of ['execute', 'verify', 'judge', 'groom']) {
+      cleanup();
+      renderApp(<RoutingPage />, { route: `/routing?purpose=${purpose}` });
+      const hero = (await waitFor(() => {
+        const el = document.querySelector('[data-purpose-hero]');
+        if (!el) throw new Error('标题块还没画');
+        return el;
+      })) as HTMLElement;
+      expect(classes(hero.querySelector('h2')?.parentElement ?? null)).toContain('whitespace-nowrap');
+      const line = hero.querySelector('[data-hero-line]') as HTMLElement;
+      expect(classes(line)).toEqual(expect.arrayContaining(['whitespace-nowrap', 'min-w-0']));
+      expect(classes(line)).not.toContain('flex-wrap');
+      expect(classes(line.querySelector('[data-hero-text]'))).toEqual(
+        expect.arrayContaining(['truncate', 'min-w-0']),
+      );
+      // 状态标签不让位：放不下时截断的是短话，不是标签掉到下一行
+      expect(classes(line.querySelector('[data-variant]')?.parentElement ?? null)).toContain('shrink-0');
+      expect(
+        line.getAttribute('title')?.startsWith(line.querySelector('[data-hero-text]')?.textContent ?? '?'),
+      ).toBe(true);
+      // 结论短话不再带括号里的路由名（那段挪到灰字行）
+      expect(line.querySelector('[data-hero-text]')?.textContent).not.toContain('（');
+      const notes = hero.querySelector('[data-hero-notes]');
+      if (notes) {
+        expect(classes(notes)).toContain('truncate');
+        expect(notes.getAttribute('title')).toBe(notes.textContent);
+      }
+    }
+  });
 });
 
 describe('页头和操作记录不撑出屏幕', () => {

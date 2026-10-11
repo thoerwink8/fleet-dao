@@ -80,17 +80,18 @@ describe('路由页：每一层现在活着吗', () => {
   test('点名验收：首选不可用时写人话「实际派谁」，不知道的原因照写，顺位第一条活的那条标出来', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=verify' });
     await purposeLinks();
-    // 用途按钮上只有名字和个数（这句话在按钮的悬停提示里），详情标题旁写一遍
-    expect(screen.getAllByText('首选 Grok 4.7 不可用，实际派 GPT 5.6 luna')).toHaveLength(1);
-    // 标题块（#1914 第 4 轮）：用途名单独一行比页标题小一档；结论一句 15 正文字重、后面跟结论标签；细节灰字在下面
+    // 用途按钮上只有名字和个数（整句在按钮的悬停提示里），详情标题块里写一遍：短话「实际派谁」，为什么不是首选在灰字
+    expect(screen.getAllByText('实际派 GPT 5.6 luna')).toHaveLength(1);
+    // 标题块（#1914 第 4、5 轮）：用途名单独一行比页标题小一档；结论短话 15 正文字重、同一行跟结论标签；细节灰字在下面
     const hero = document.querySelector('[data-purpose-hero]') as HTMLElement;
     expect(within(hero).getByRole('heading', { level: 2 }).className).toContain('text-subtitle');
-    const conclusion = within(hero)
-      .getByText('首选 Grok 4.7 不可用，实际派 GPT 5.6 luna')
-      .closest('p') as HTMLElement;
+    const conclusion = within(hero).getByText('实际派 GPT 5.6 luna').closest('p') as HTMLElement;
     expect(conclusion.className).toEqual(expect.stringContaining('text-heading font-normal'));
     expect(conclusion.querySelector('[data-variant]')?.textContent).toContain('派得出去');
-    expect(hero.textContent).toContain('走 中转站 · relay');
+    expect(conclusion.getAttribute('title')).toBe('实际派 GPT 5.6 luna：首选 Grok 4.7 不可用');
+    const notes = hero.querySelector('[data-hero-notes]') as HTMLElement;
+    expect(notes.textContent).toContain('首选 Grok 4.7 不可用');
+    expect(notes.textContent).toContain('走 中转站 · relay');
     // 默认展开顺位第一条活的所在的模型
     expect(routeItem('r-rl-gpt').textContent).toContain('顺位第一条活的');
     // Grok 的额度读数是 42 分钟前的：额度不知道，整条不知道（不画成活）
@@ -246,7 +247,7 @@ describe('路由页：每一层现在活着吗', () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=judge', api });
     await purposeLinks();
     expect(screen.getByText('不知道', { selector: 'span' })).toBeTruthy();
-    expect(screen.getByText('按量计费，不自动探，不用处理')).toBeTruthy();
+    expect(screen.getByText(/按量计费，不自动探，不用处理/)).toBeTruthy();
   });
   test('写码：探了没通、模型下架、开关关着的都列出来，死因写全', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
