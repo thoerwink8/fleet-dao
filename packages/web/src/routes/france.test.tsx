@@ -306,7 +306,8 @@ describe('失联与在用版本小标题', () => {
   test('失联环境整块置灰且不显示大号在跑', async () => {
     const inner = createMockApi({ live: false });
     const t = Date.now();
-    const ago = 4 * 24 * 60 * 60_000 + 6 * 60 * 60_000;
+    // 6 小时：失联但没到 24 小时，还在对照列里（超过 24 小时的收成一行，见下面 #1888）
+    const ago = 6 * 60 * 60_000;
     const snapFacts = envData({
       engine: { ok: true, value: { state: 'on', detail: '探到了在拉活的工人' } },
       health: {
@@ -363,24 +364,7 @@ describe('失联与在用版本小标题', () => {
     expect(red.className).toContain('text-muted-foreground');
   });
 
-  describe('手机上失联超过 24 小时的远程环境默认折成一行（#1837）', () => {
-    function phone(width: number) {
-      vi.spyOn(window, 'matchMedia').mockImplementation(
-        (query: string) =>
-          ({
-            matches: [...query.matchAll(/\((min|max)-width:\s*(\d+)px\)/g)].every(([, kind, px]) =>
-              kind === 'min' ? width >= Number(px) : width <= Number(px),
-            ),
-            media: query,
-            onchange: null,
-            addEventListener() {},
-            removeEventListener() {},
-            addListener() {},
-            removeListener() {},
-            dispatchEvent: () => false,
-          }) as MediaQueryList,
-      );
-    }
+  describe('超过 24 小时没报的远程环境收成一行（#1888）', () => {
     function renderWithRemote(agoMs: number) {
       const inner = createMockApi({ live: false });
       const t = Date.now();
@@ -411,34 +395,87 @@ describe('失联与在用版本小标题', () => {
     }
     const col = () => document.querySelector('[data-env-column="wsl"]') as HTMLElement;
 
-    test('手机：失联 5 天默认只有一行「本机 · 失联 5 天」，没有六项事实；点开才展开，能再收起', async () => {
-      // 手机上仍把旧数据整块铺开（占半屏），这一条会红。
-      phone(390);
-      renderWithRemote(5 * 24 * 60 * 60_000 + 2 * 60 * 60_000);
-      await waitFor(() => expect(col()).toBeTruthy());
-      expect(col().hasAttribute('data-env-collapsed')).toBe(true);
-      expect(col().textContent).toContain('本机 · 失联 5 天 2 小时');
-      expect(col().querySelector('[data-env-fact]')).toBeNull();
-      expect(within(col()).queryByRole('heading')).toBeNull();
-      fireEvent.click(within(col()).getByRole('button', { name: /本机/ }));
+    const gone = () => document.querySelector('[data-env-gone="wsl"]') as HTMLElement;
+
+    test('25 小时没报：只有本台一张卡片（不画对照列）加一行说明；点开才出旧快照，标明旧数据，能再收起', async () => {
+      // 旧数据仍占一整列对照，这一条会红。
+      renderWithRemote(25 * 60 * 60_000);
+      await waitFor(() => expect(gone()).toBeTruthy());
+      expect(document.querySelector('[data-env-columns]')).toBeNull();
+      expect(document.querySelectorAll('[data-france-fact]').length).toBe(6);
+      expect(col()).toBeNull();
+      expect(gone().textContent).toContain('本机：1 天 1 小时没报（不跑引擎时正常），点开看最后一次的快照');
+      fireEvent.click(within(gone()).getByRole('button', { name: /点开看快照/ }));
       await waitFor(() => expect(col().querySelector('[data-env-fact]')).toBeTruthy());
-      expect(col().hasAttribute('data-env-collapsed')).toBe(false);
+      expect(col().textContent).toContain('1 天 1 小时前的旧数据');
       expect(col().textContent).toContain('失联，以下是旧数据');
-      fireEvent.click(within(col()).getByRole('button', { name: '收起' }));
-      await waitFor(() => expect(col().hasAttribute('data-env-collapsed')).toBe(true));
+      fireEvent.click(within(gone()).getByRole('button', { name: /收起/ }));
+      await waitFor(() => expect(col()).toBeNull());
     });
 
-    test('手机：失联不到 24 小时的照常展开；桌面失联 5 天也照常并排展开', async () => {
-      phone(390);
-      renderWithRemote(2 * 60 * 60_000);
-      await screen.findByRole('heading', { name: /本机/ });
-      expect(col().hasAttribute('data-env-collapsed')).toBe(false);
+    test('5 天没报同样收成一行；1 小时前报过的照旧并排两列', async () => {
+      renderWithRemote(5 * 24 * 60 * 60_000 + 2 * 60 * 60_000);
+      await waitFor(() => expect(gone()).toBeTruthy());
+      expect(gone().textContent).toContain('本机：5 天 2 小时没报');
+      expect(col()).toBeNull();
       cleanup();
-      phone(1366);
-      renderWithRemote(5 * 24 * 60 * 60_000);
+      renderWithRemote(60 * 60_000);
       await screen.findByRole('heading', { name: /本机/ });
-      expect(col().hasAttribute('data-env-collapsed')).toBe(false);
-      expect(col().querySelector('[data-env-fact]')).toBeTruthy();
+      expect(document.querySelector('[data-env-gone]')).toBeNull();
+      expect(document.querySelector('[data-env-columns]')?.getAttribute('data-env-columns')).toBe('2');
+      expect(
+        Array.from(document.querySelectorAll('[data-env-column]')).map((c) =>
+          c.getAttribute('data-env-column'),
+        ),
+      ).toEqual(['local', 'wsl']);
+    });
+
+    test('一台 25 小时没报、一台刚报过：对照里只有本台和刚报的，旧的在下面一行', async () => {
+      const inner = createMockApi({ live: false });
+      const t = Date.now();
+      const at = (ago: number) => new Date(t - ago).toISOString();
+      const api = {
+        ...inner,
+        env: () => Promise.resolve(envData()),
+        nodes: async () => ({
+          ...(await inner.nodes()),
+          nodes: [
+            {
+              id: 'wsl',
+              name: '本机',
+              freshness: 'stale' as const,
+              receivedAt: at(25 * 3600_000),
+              reportedAt: at(25 * 3600_000),
+            },
+            {
+              id: 'lab',
+              name: '实验机',
+              freshness: 'fresh' as const,
+              receivedAt: at(60_000),
+              reportedAt: at(60_000),
+            },
+          ],
+        }),
+        node: async (id: string) => {
+          const detail = await inner.node('wsl');
+          return {
+            ...detail,
+            id,
+            name: id === 'lab' ? '实验机' : '本机',
+            env: { ...detail.env, facts: envData().facts },
+          };
+        },
+        jobs: () => Promise.resolve(jobsData()),
+      } as unknown as MockApi;
+      renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
+      await screen.findByRole('heading', { name: /实验机/ });
+      expect(
+        Array.from(document.querySelectorAll('[data-env-column]')).map((c) =>
+          c.getAttribute('data-env-column'),
+        ),
+      ).toEqual(['local', 'lab']);
+      expect(document.querySelector('[data-env-columns]')?.getAttribute('data-env-columns')).toBe('2');
+      expect(gone().textContent).toContain('本机');
     });
   });
 
