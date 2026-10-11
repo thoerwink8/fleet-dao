@@ -122,6 +122,55 @@ describe('组件令牌和密度（规范 2.7）', () => {
   });
 });
 
+describe('字号两组值：桌面苹果档、手机 14 起（#1882）', () => {
+  const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
+  const NAMES = ['meta', 'body', 'heading', 'title'] as const;
+
+  /** 取 :root 块里「--fs-xxx: 值」；desktop 取 @media (width >= 48rem) 里的那一块。 */
+  function fsTokens(desktop: boolean): Record<string, string | undefined> {
+    const at = desktop
+      ? css.indexOf('@media (width >= 48rem) {\n  :root')
+      : css.indexOf('\n:root {\n  --fs-meta');
+    expect(at, `app.css 里没有${desktop ? '桌面' : '手机'}字号块`).toBeGreaterThan(-1);
+    const body = css.slice(css.indexOf('{', at + (desktop ? 30 : 0)) + 1, css.indexOf('}', at));
+    return Object.fromEntries([...body.matchAll(/--fs-([a-z-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2]]));
+  }
+  const pick = (t: Record<string, string | undefined>) => NAMES.flatMap((n) => [t[n], t[`${n}-lh`]]);
+
+  test('手机（<48rem）：辅助 12/16、正文 14/20、小标题 16/24、页标题 20/28', () => {
+    expect(pick(fsTokens(false))).toEqual([
+      '0.75rem',
+      '1rem',
+      '0.875rem',
+      '1.25rem',
+      '1rem',
+      '1.5rem',
+      '1.25rem',
+      '1.75rem',
+    ]);
+  });
+  test('桌面（≥48rem）：辅助 12/16、正文 13/18、小标题 15/20、页标题 22/28', () => {
+    expect(pick(fsTokens(true))).toEqual([
+      '0.75rem',
+      '1rem',
+      '0.8125rem',
+      '1.125rem',
+      '0.9375rem',
+      '1.25rem',
+      '1.375rem',
+      '1.75rem',
+    ]);
+  });
+  test('@theme 的 text-* 引用这些变量，display 和 canvas 不随宽度变', () => {
+    for (const n of NAMES) {
+      expect(css).toMatch(new RegExp(`--text-${n}:\\s*var\\(--fs-${n}\\);`));
+      expect(css).toMatch(new RegExp(`--text-${n}--line-height:\\s*var\\(--fs-${n}-lh\\);`));
+    }
+    expect(css).toMatch(/--text-display:\s*1\.75rem;/);
+    expect(css).toMatch(/--text-canvas:\s*0\.6875rem;/);
+  });
+});
+
 describe('收口：@theme 关掉 Tailwind 默认的字号、圆角、阴影（#1855）', () => {
   const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
 
