@@ -15,7 +15,8 @@
 // 4. 决定 0035 的七点：坑和派法、边界、级联、交代写全、先砍固定开销、实测数据和样本小、引擎侧由创始人配。
 // 5. haiku55 随同步装到每台机器（#1393，创始人 2026-10-09 21:29～21:41「都按照你推荐，不要小修，要改彻底」）：
 //    原件 agents/subagents/haiku55.md 的 name、完整 id、精简的 tools 白名单、汇报首行写模型 id；
-//    packages/agents-sync/src/targets.ts 的 SUBAGENT_TARGET 列着它（按文本核，不跨包 import）；参考页和决定 0035 写着「同步会装上」。
+//    packages/agents-sync/src/targets.ts 的 SUBAGENT_TARGET 列着它（按文本核，不跨包 import；同一张名单里的 fleet-* 通用版
+//    由 project-subagents.rules.test.ts 钉）；参考页和决定 0035 写着「同步会装上」。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -362,7 +363,10 @@ describe('规矩：haiku55 定义在仓里、随 agents:sync 装到每台机器�
   });
 
   it('【故意造出的失败】名单里去掉 haiku55.md、或认不出 SUBAGENT_TARGET：都查得出来', () => {
-    const dropped = TARGETS.replace(/(\nexport const SUBAGENT_TARGET\b[\s\S]*?files: \[)'haiku55\.md'/, '$1');
+    const dropped = TARGETS.replace(
+      /(\nexport const SUBAGENT_TARGET\b[\s\S]*?files: \[\s*)'haiku55\.md',?/,
+      '$1',
+    );
     expect(dropped, 'targets.ts 里找不到那一项，这条失败造不出来').not.toBe(TARGETS);
     expect(syncListsH55(dropped)).toBe(false);
     const gone = TARGETS.replace('export const SUBAGENT_TARGET', 'export const SOMETHING_ELSE');

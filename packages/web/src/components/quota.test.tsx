@@ -318,3 +318,94 @@ describe('窗口格子小标题', () => {
     expect(el.textContent).not.toContain('5 小时窗');
   });
 });
+
+describe('额度页观感（#1898）', () => {
+  /** 在假数据上加一个没有任何额度窗的池、一个上游新出的窗口，再按需带上切号现状和对账两项。 */
+  function apiWith(extra: { orgSwitch?: boolean; reconcile?: boolean } = {}) {
+    const api = createMockApi({ live: false });
+    const readAt = new Date().toISOString();
+    return {
+      ...api,
+      pools: async () => {
+        const base = await api.pools();
+        const first = base.pools[0] as (typeof base.pools)[number];
+        const empty = { ...first, id: 'carpool-empty', windows: [], quotaStatus: 'fresh' as const };
+        const other = (label: string, scope?: string): QuotaWindowView => ({
+          window: 'other',
+          label,
+          ...(scope ? { scope } : {}),
+          unit: 'percent',
+          source: 'cursor-dashboard',
+          stale: false,
+          utilization: 0.12,
+          resetsAt: at(600),
+          reading: 'measured',
+          readAt,
+        });
+        const cursor = {
+          ...first,
+          id: 'cursor-x',
+          windows: [other('api_percent', 'api'), other('brand_new_key')],
+        };
+        return {
+          ...base,
+          pools: [...base.pools, empty, cursor],
+          ...(extra.orgSwitch
+            ? {
+                orgSwitch: {
+                  state: 'known' as const,
+                  live: 'carpool' as const,
+                  whites: 0,
+                  soloPaused: false,
+                  updatedAt: readAt,
+                },
+              }
+            : {}),
+          ...(extra.reconcile
+            ? { carpoolReconcile: { state: 'unavailable' as const, why: '还没读到拼车窗口' } }
+            : {}),
+        };
+      },
+    };
+  }
+
+  test('没有任何额度窗的池整行折成一行「无额度窗」，不补一排「—」', async () => {
+    renderApp(<QuotaPage />, { api: apiWith() });
+    const row = (await screen.findByText('carpool-empty')).closest('tr') as HTMLElement;
+    expect(within(row).getByText('无额度窗').hasAttribute('data-quota-empty')).toBe(true);
+    expect(row.querySelectorAll('td')).toHaveLength(0);
+    expect(row.textContent).not.toContain('—');
+  });
+
+  test('窗口名一律中文：api_percent 变「指定模型额度」，认不出的写「未命名窗口」，原键只在说明里', async () => {
+    renderApp(<QuotaPage />, { api: apiWith() });
+    const row = (await screen.findByText('cursor-x')).closest('tr') as HTMLElement;
+    expect(within(row).getByText('指定模型额度')).toBeTruthy();
+    const unnamed = within(row).getByText('未命名窗口');
+    expect(unnamed.getAttribute('title')).toBe('上游原名：brand_new_key');
+    expect(row.textContent).not.toContain('api_percent');
+    expect(row.textContent).not.toContain('brand_new_key');
+    expect(document.body.textContent).not.toContain('api_percent');
+  });
+
+  test('页内顶部只剩一条提醒：切号现状和对账合在一起', async () => {
+    renderApp(<QuotaPage />, { api: apiWith({ orgSwitch: true, reconcile: true }) });
+    const notice = await screen.findByTestId('quota-notice');
+    expect(notice.querySelectorAll('[role="alert"], [role="status"]')).toHaveLength(1);
+    expect(notice.textContent).toContain('挂着拼车');
+    expect(notice.textContent).toContain('额度对账看不到：还没读到拼车窗口');
+    expect(screen.queryByTestId('org-switch')).toBeNull();
+    expect(screen.queryByTestId('carpool-reconcile')).toBeNull();
+  });
+
+  test('图例收进表头的 ⓘ，表上面没有灰色图例；用量格不用整块红底', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    await screen.findByRole('columnheader', { name: /账号池/ });
+    expect(screen.getByRole('button', { name: '实读和估算是什么意思' })).toBeTruthy();
+    expect(screen.queryByText(/实读 = 从官方接口/)).toBeNull();
+    const full = document.querySelector('[data-quota-line][data-full]') as HTMLElement;
+    expect(full).toBeTruthy();
+    expect(full.className).not.toContain('bg-st-fail-soft');
+    expect(full.className).not.toContain('border-st-fail-line');
+  });
+});

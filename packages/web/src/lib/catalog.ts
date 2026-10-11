@@ -122,10 +122,45 @@ export function utilOf(w: QuotaWindowView): number | undefined {
   return undefined;
 }
 
-/** 额度窗的名字：归得了类的用中文名，归不了类（other）的用上游原名；只扣一组模型的窗后面写组名。 */
+/**
+ * 上游原名（label）到中文窗口名的对照，归不了类（window = other）的窗口靠它显示。
+ * 后端没有这样一张表（原名只存在 label 里，原样入库），所以放在这里一处；上游新出的键先写进来，别散在页面里。
+ */
+export const windowKeyLabel: Record<string, string> = {
+  plan_usd: '套餐美元',
+  api_percent: '指定模型额度',
+  auto_percent: '自动模式额度',
+  extra_usage: '超额用量',
+  on_demand: '按需用量',
+  carpool_5h_usd: '拼车 5 小时美元',
+  credits: '点数',
+};
+
+/** 认不出的上游原名显示成这个；原名放在悬停和点开的说明里（见 windowRawNote）。 */
+export const UNNAMED_WINDOW = '未命名窗口';
+
+/** 原名 → 中文名。认不出返回 undefined。credits:<账期> 这类带后缀的按前缀认。 */
+export function windowKeyName(key: string): string | undefined {
+  const k = key.trim().toLowerCase();
+  const direct = windowKeyLabel[k];
+  if (direct) return direct;
+  const head = k.split(':')[0] ?? '';
+  return k.includes(':') ? windowKeyLabel[head] : undefined;
+}
+
+/**
+ * 额度窗的名字，一律中文：归得了类的用类名；归不了类（other）的查原名对照表，查不到写「未命名窗口」；
+ * 只扣一组模型的窗后面写模型组名（那是模型名，不是窗口键）。other 窗的 scope 是原名里的一截（api、auto），不再重复写。
+ */
 export function windowTitle(w: Pick<QuotaWindowView, 'window' | 'label' | 'scope'>): string {
-  const base = w.window === 'other' ? w.label : windowLabel[w.window];
+  if (w.window === 'other') return windowKeyName(w.label) ?? UNNAMED_WINDOW;
+  const base = windowLabel[w.window];
   return w.scope ? `${base} · ${w.scope}` : base;
+}
+
+/** 悬停和点开说明里给人看的原键：只在名字不等于原名时才有意义。 */
+export function windowRawNote(w: Pick<QuotaWindowView, 'label'>): string {
+  return `上游原名：${w.label}`;
 }
 
 /**
