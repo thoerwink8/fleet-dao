@@ -56,6 +56,11 @@ export interface RouteCandidate {
   /** 探针自己写的原因（routes.probe_detail）：不是 ok 的结论一定有（库里约束），为什么没探、没通照它说。 */
   probeDetail: (typeof routes.$inferSelect)['probeDetail'];
   /**
+   * 探针下一次该真探的时刻（routes.probe_next_at，引擎每轮现写；#1798 片 3）。老的行、还没写过这一列的空。
+   * 选路靠它判「挂着别的组织没探」那一支有没有过期（引擎 routing/filter.ts）。
+   */
+  probeNextAt: (typeof routes.$inferSelect)['probeNextAt'];
+  /**
    * Claude 订阅池的路由：探针下那次结论时会话用户挂的是哪个组织（routes.probe_org）。skipped、又是另一个组织 = 那一轮
    * 没探它，不是它坏了（引擎 routing/filter.ts 按它判等不等下一轮探针）。
    */
@@ -201,6 +206,7 @@ export async function evaluateRoutes(
       probeState: route.probeState,
       probeDetail: route.probeDetail,
       probeOrg: route.probeOrg,
+      probeNextAt: route.probeNextAt,
       quota,
       windows,
       inFlight: running,

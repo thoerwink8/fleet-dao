@@ -65,9 +65,11 @@ export const ROUTE_PROBE_CONCURRENCY = 2;
 export const ROUTE_PROBE_DETAIL_MAX = 600;
 /**
  * 派单前：上一次探通的结论还在这么久以内（含刚好到点）就不重复探（#1409）。已经超过才当场探这一条。
+ * 15 分钟（#1798 片 4，创始人 2026-10-11「每个模型干活之前，先判断 15 分钟内有没有探测」）：不分执行方式，
+ * cursor、grok、mirasim 和 Claude 同一条线，不再按「上一次探通未满 2 小时就直接放行」放慢（那条已随片 3 删掉）。
  * 按量计费、以及 planProbe 写明不探的不看这条，照旧不探。
  */
-export const DISPATCH_PROBE_FRESH_MS = 5 * 60_000;
+export const DISPATCH_PROBE_FRESH_MS = 15 * 60_000;
 
 /**
  * heldBySwitch：这个池被人拍了整池暂停（开关 engine.poolHolds，值是写在开关里的原因）。探它没有意义——封号、欠费这类要人修的事，

@@ -9,10 +9,10 @@ import {
   poolOccupiedText,
   type ReserveReading,
   ROUTE_PROBE_EVERY_MINUTES,
+  ROUTE_PROBE_OVERDUE_MINUTES,
   reserveHitText,
   resolveMirasimExecutor,
   resolvePoolReserve,
-  routeProbeStaleMinutes,
   type StageKind,
   UI_PURPOSE,
 } from '@fleet-dao/shared';
@@ -267,8 +267,9 @@ function orgBlock(route: RouteFacts, ctx: FilterContext): Block | null {
 
 /**
  * 候选查询说它不在线。Claude 订阅池的路由上一次的结论是探针在另一个组织挂着时写的「不探」（skipped、probeOrg 是另一个
- * 组织）：那不是它坏了，是那一轮探不了它。现在会话用户挂的正是它的组织：等下一轮路由探针在这个组织下探过再派（最早是
- * 上一次结论之后一轮），任务不挂起；过了探针的过期线（routeProbeStaleMinutes）还没探到，按不在线硬挡，写明探针可能停了。
+ * 组织）：那不是它坏了，是那一轮探不了它。现在会话用户挂的正是它的组织：等下一轮路由探针在这个组织下探过再派（下次该探的
+ * 时刻是库里写好的 probe_next_at），任务不挂起；晚于那个时刻加一轮钟的余量（ROUTE_PROBE_OVERDUE_MINUTES）还没探到，
+ * 才是探针真停了，按不在线硬挡（#1798 片 4：改成读结构化列，不再按执行方式从头算过期线）。
  * 别的（探了没通、认不出组织没探、老的输入没给结论）照老样子硬挡。
  */
 function offlineBlock(route: RouteFacts, ctx: FilterContext): Block {
@@ -285,17 +286,22 @@ function offlineBlock(route: RouteFacts, ctx: FilterContext): Block {
     return hard('offline', CANDIDATE_TEXT.offline);
   }
   const probedAt = Date.parse(route.probedAt);
-  const age = ctx.now - probedAt;
   const was = `探针上一次看它（${stamp(probedAt)}）时会话用户挂的是${ORG_NAMES[seen]}组织，没探它`;
-  if (age > routeProbeStaleMinutes(route.hostId) * 60_000) {
+  // 库里写了下次该探的时刻就照它判；老输入（片 3 之前写的结论，这一列空）退回按上一次结论之后一轮算。
+  const next = route.probeNextAt
+    ? Date.parse(route.probeNextAt)
+    : probedAt + ROUTE_PROBE_EVERY_MINUTES * 60_000;
+  const overdue = ctx.now - next > ROUTE_PROBE_OVERDUE_MINUTES * 60_000;
+  if (overdue) {
+    const age = ctx.now - probedAt;
     return hard('offline', `${was}，之后 ${duration(age)}探针都没再探它（探针可能停了），按不在线算`);
   }
-  const next = ahead(probedAt + ROUTE_PROBE_EVERY_MINUTES * 60_000, ctx.now);
+  const until = ahead(next, ctx.now);
   return {
     code: 'offline',
     text: `${was}；现在挂的是${ORG_NAMES[kind]}组织，等下一轮路由探针在${ORG_NAMES[kind]}组织下探过再派`,
     wait: 'probe',
-    until: next === null ? null : new Date(next).toISOString(),
+    until: until === null ? null : new Date(until).toISOString(),
   };
 }
 

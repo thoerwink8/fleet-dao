@@ -163,7 +163,7 @@ export function countByVerdict(
 /**
  * 探针的结论过期了没有：超过「这一档间隔 + 两轮」没更新，探针可能停了。
  * 原文写了退避或隔 30 分钟再探时按那一档（probeDetail，没有就看接得上的原因），不把故意放慢标成停了。
- * 引擎照上一次的结论派、写明（routing/choose.ts 的 probeNote），驾驶舱同一条线标出来，不改结论。
+ * 只标记给人看，不改结论：引擎照上一次的结论派（#1798 片 4 起派前 15 分钟会真探一次，派工理由里不再写这一句）。
  */
 export function probeStale(
   r: Pick<RoutingLayerRoute, 'probedAt' | 'hostId' | 'probeDetail' | 'connect'>,
