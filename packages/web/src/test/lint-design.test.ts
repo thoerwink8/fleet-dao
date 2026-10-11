@@ -1,6 +1,6 @@
 // 设计规范检查（#1847，并入了 #182 / #1446 的 lint-arbitrary）。扫描脚本在 packages/web/scripts/lint-design.ts，
 // 规则表在 docs/design/驾驶舱界面.md 第八节。本测试盯三块：
-//   1) 每条规则 R0–R10：一条故意造红的写法要报出来，一条合规写法要放过；
+//   1) 每条规则 R0–R11：一条故意造红的写法要报出来，一条合规写法要放过；
 //   2) 计数；
 //   3) 整个 packages/web/src 严格模式一条违规都不许有（没有旧账清单，#1855）。
 import { readFileSync } from 'node:fs';
@@ -164,6 +164,22 @@ describe('每条规则：造红的报、合规的放', () => {
     );
     expect(rulesOf(`"h-control size-row"`, 'src/components/ui/button.tsx')).toEqual([]);
     expect(rulesOf(`"flex-row grid-flow-row h-8 gap-3"`)).toEqual([]);
+  });
+
+  test('R11 状态字不许裸文字：<Tag>关着</Tag>、<span>在跑</span> 报（故意造红）', () => {
+    expect(rulesOf(`<Tag>关着</Tag>`)).toEqual(['R11']);
+    expect(rulesOf(`<span className="text-meta">\n  在跑\n</span>`)).toEqual(['R11']);
+    expect(rulesOf(`<b>开着</b><i>已关</i>`)).toEqual(['R11', 'R11']);
+    const [hit] = scanSource(`\n<Tag>关着</Tag>`, PAGE);
+    expect(hit?.line).toBe(2);
+    expect(formatHit(hit as Hit)).toContain('StatusBadge');
+  });
+  test('R11 放行：经 StatusBadge 的 label、带别的字的句子、字符串里的词', () => {
+    expect(rulesOf(`<StatusBadge tone="stop" label="关着" />`)).toEqual([]);
+    expect(rulesOf(`<p>总开关关着只是不派活</p>`)).toEqual([]);
+    expect(rulesOf(`<span>在跑 3 个</span>`)).toEqual([]);
+    expect(rulesOf(`<span>已关 <b>3</b> 条路由</span>`)).toEqual([]);
+    expect(rulesOf(`const word = '在跑';`)).toEqual([]);
   });
 });
 

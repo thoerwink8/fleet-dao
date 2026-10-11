@@ -8,7 +8,7 @@
 
 import { routingPurposeOf, SCOPE_NO_ROUTE } from '@fleet-dao/shared';
 import { Route as RouteIcon } from 'lucide-react';
-import { type KeyboardEvent, useState } from 'react';
+import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { usePoolHolds, useRoutingLayers } from '../api/client';
@@ -163,49 +163,17 @@ export default function Routing() {
   );
 }
 
-/** 三块的页签：一次只显示一块。方向键、Home、End 在页签间移动。 */
+/** 三块的页签：一次只显示一块（FilterTabs 的页签模式，方向键、Home、End 在页签间移动）。 */
 function RoutingTabs({ tab, onPick }: { tab: TabId; onPick: (id: TabId) => void }) {
-  const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
-    const at = TABS.findIndex((t) => t.id === tab);
-    let to: number;
-    if (e.key === 'ArrowRight') to = (at + 1) % TABS.length;
-    else if (e.key === 'ArrowLeft') to = (at - 1 + TABS.length) % TABS.length;
-    else if (e.key === 'Home') to = 0;
-    else if (e.key === 'End') to = TABS.length - 1;
-    else return;
-    e.preventDefault();
-    const next = TABS[to];
-    if (!next) return;
-    onPick(next.id);
-    document.getElementById(`routing-tab-${next.id}`)?.focus();
-  };
   return (
-    <div role="tablist" aria-label="路由页分块" className="mb-4 flex gap-1 border-b">
-      {TABS.map((t) => {
-        const active = t.id === tab;
-        return (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            id={`routing-tab-${t.id}`}
-            aria-selected={active}
-            aria-controls="routing-panel"
-            tabIndex={active ? 0 : -1}
-            onClick={() => onPick(t.id)}
-            onKeyDown={onKeyDown}
-            className={cn(
-              '-mb-px border-b-2 px-4 py-2 text-body transition-colors hover:text-foreground max-md:min-h-10',
-              active
-                ? 'border-foreground font-semibold text-foreground'
-                : 'border-transparent text-muted-foreground',
-            )}
-          >
-            {t.label}
-          </button>
-        );
-      })}
-    </div>
+    <FilterTabs
+      aria-label="路由页分块"
+      idPrefix="routing-tab"
+      items={TABS}
+      value={tab}
+      onChange={onPick}
+      className="mb-4 w-fit"
+    />
   );
 }
 
@@ -285,25 +253,30 @@ function PurposeList({
   };
   return (
     <nav aria-label="用途" className="min-w-0">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-        <FilterTabs
-          mode="toggle"
-          aria-label="流程里的用途"
-          items={flow.map(toItem)}
-          value={selected}
-          onChange={pick}
-        />
+      {/* 两组各自带组头：说明写在组头上，不混在选项里被当成一个选项（#1904） */}
+      <div className="flex min-w-0 flex-wrap items-end gap-x-6 gap-y-3">
+        <div className="min-w-0 max-w-full">
+          <FilterTabs
+            mode="toggle"
+            variant="secondary"
+            aria-label="流程里的用途"
+            items={flow.map(toItem)}
+            value={selected}
+            onChange={pick}
+          />
+        </div>
         {aside.length > 0 ? (
-          <>
-            <span className="shrink-0 text-meta text-muted-foreground">不是流程里的一段</span>
+          <div className="min-w-0 max-w-full">
+            <div className="mb-1 text-meta text-muted-foreground">不是流程里的一段</div>
             <FilterTabs
               mode="toggle"
+              variant="secondary"
               aria-label="流程之外的用途"
               items={aside.map(toItem)}
               value={selected}
               onChange={pick}
             />
-          </>
+          </div>
         ) : null}
       </div>
       <p className="mt-1 text-meta text-muted-foreground">对题：{SCOPE_NO_ROUTE}</p>

@@ -18,7 +18,7 @@ import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { Page } from '../components/layout/page';
 import { SearchInput } from '../components/layout/search-input';
 import { Section } from '../components/layout/section';
-import { Tag } from '../components/layout/tag';
+import { StatusBadge } from '../components/layout/status-badge';
 import { Toolbar } from '../components/layout/toolbar';
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
@@ -423,7 +423,7 @@ function FixedRouteRow({ model, route: r }: { model: EffortModel; route: RouteEf
         </span>
         <span className="text-body text-muted-foreground">{title}</span>
         <span className="text-meta text-muted-foreground">{hostLabel[r.hostId]}</span>
-        {r.enabled ? null : <Tag>关着</Tag>}
+        {r.enabled ? null : <StatusBadge tone="stop" label="关着" />}
         <span className="num ml-auto truncate text-meta text-muted-foreground" title={r.model}>
           {r.routeId}
         </span>
@@ -476,7 +476,7 @@ function RouteRow({
           <span className="num shrink-0 text-meta text-muted-foreground max-md:hidden" title={r.model}>
             {r.routeId}
           </span>
-          {r.enabled ? null : <Tag>关着</Tag>}
+          {r.enabled ? null : <StatusBadge tone="stop" label="关着" />}
         </span>
         <span className="num text-body" aria-live="polite">
           {update.isPending ? (

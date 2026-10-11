@@ -255,3 +255,47 @@ describe('通知中心日报折叠', () => {
     expect(within(fold).getByText('2')).toBeTruthy();
   });
 });
+
+describe('通知卡：正文限两行、主操作带字、两组筛选分主次（#1904）', () => {
+  const LONG = Array.from({ length: 12 }, (_, i) => `第 ${i + 1} 行很长的说明`).join('\n');
+
+  test('正文默认只显两行，点一下展开、再点收起；「处理了」「打开」按钮上有字', async () => {
+    const api = createMockApi({ live: false });
+    api.notifications = () =>
+      Promise.resolve({
+        items: [{ ...ONE, body: LONG, link: '/tasks' }],
+        counts: { decision: 1, alert: 0, daily: 0 },
+      });
+    renderApp(<NotificationsPage />, { api, route: '/notifications' });
+
+    const body = (await screen.findByText(/第 1 行很长的说明/)).closest('button') as HTMLElement;
+    expect(body.className).toContain('line-clamp-2');
+    expect(body.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(body);
+    expect(body.className).not.toContain('line-clamp-2');
+    expect(body.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(body);
+    expect(body.className).toContain('line-clamp-2');
+
+    const row = body.closest('li[data-notice-row]') as HTMLElement;
+    const done = within(row).getByRole('button', { name: '处理了' });
+    expect(done.textContent).toBe('处理了');
+    expect(within(row).getByRole('button', { name: '打开' }).textContent).toBe('打开');
+  });
+
+  test('处理状态是主筛选（灰底轨道），级别是次级筛选（没有轨道）；级别标签的色和圆点同一个状态色', async () => {
+    const api = createMockApi({ live: false });
+    api.notifications = () => Promise.resolve({ items: MIXED, counts: MIXED_COUNTS });
+    renderApp(<NotificationsPage />, { api, route: '/notifications' });
+    await screen.findByText('等你拍：发不发版');
+    expect(screen.getByRole('tablist', { name: '处理状态' }).getAttribute('data-variant')).toBe('primary');
+    expect(screen.getByRole('group', { name: '按级别' }).getAttribute('data-variant')).toBe('secondary');
+    const row = screen.getByText('卡住：测试没过').closest('li') as HTMLElement;
+    const dotTone = row.querySelector('span[data-tone][aria-hidden]')?.getAttribute('data-tone');
+    const tagTone = Array.from(row.querySelectorAll('span[data-tone]'))
+      .find((e) => e.textContent === '卡住报警')
+      ?.getAttribute('data-tone');
+    expect(tagTone).toBeTruthy();
+    expect(tagTone).toBe(dotTone);
+  });
+});

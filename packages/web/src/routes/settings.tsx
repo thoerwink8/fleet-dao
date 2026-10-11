@@ -24,6 +24,7 @@ import { FilterTabs } from '../components/layout/filter-tabs';
 import { KeyValue } from '../components/layout/key-value';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { Page } from '../components/layout/page';
+import { SaveButton } from '../components/layout/save-button';
 import { Section } from '../components/layout/section';
 import { StatusDot } from '../components/layout/status-badge';
 import { PageNav } from '../components/page-nav';
@@ -250,9 +251,7 @@ function NumberSetting({
         className="num h-8 w-28"
       />
       <span className="text-body text-muted-foreground">{unit}</span>
-      <Button type="submit" size="sm" disabled={pending || draft === shown || draft === ''}>
-        保存
-      </Button>
+      <SaveButton canSave={draft !== shown && draft !== ''} pending={pending} />
     </FieldRow>
   );
 }
@@ -305,9 +304,7 @@ function QuietHours({ s }: { s: Setting | undefined }) {
         className="num h-8 w-28"
         aria-label="免打扰结束"
       />
-      <Button type="submit" size="sm" disabled={pending || !dirty}>
-        保存
-      </Button>
+      <SaveButton canSave={dirty} pending={pending} />
     </FieldRow>
   );
 }
@@ -443,10 +440,9 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
     save('engine.quotaReserve', next, s);
   };
   return (
-    <Section>
+    <Section title={settingLabel['engine.quotaReserve']}>
       <form onSubmit={submit}>
-        <div className="text-body font-medium">{settingLabel['engine.quotaReserve']}</div>
-        <div className="mt-0.5 text-meta text-muted-foreground">
+        <div className="text-meta text-muted-foreground">
           每个渠道每个额度窗「最多用到百分之几」，已用到这条线引擎就不再往这个渠道派新活。
           <details className="mt-0.5">
             <summary className="cursor-pointer underline-offset-2 hover:underline max-md:flex max-md:min-h-10 max-md:items-center">
@@ -535,9 +531,7 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
         </div>
         <div className="mt-2 flex items-end gap-3">
           <div className="min-w-0 flex-1">{source.kind === 'missing' ? null : <SettingMeta s={s} />}</div>
-          <Button type="submit" size="sm" disabled={pending || !dirty}>
-            保存
-          </Button>
+          <SaveButton canSave={dirty} pending={pending} />
         </div>
       </form>
     </Section>
