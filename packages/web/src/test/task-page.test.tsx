@@ -91,6 +91,29 @@ describe('三段的单：按段、按模型，每一笔', () => {
   });
 });
 
+describe('页头：面包屑代替「回任务列表」按钮（#1903）', () => {
+  test('从任务列表点进来：面包屑第一级是「任务列表」链接（带回筛选），页头没有「回任务列表」按钮', async () => {
+    open(`/tasks/t-c9?from=${encodeURIComponent('/tasks?state=done')}`);
+    await screen.findByRole('heading', { level: 1, name: /README/ });
+    const crumbs = document.querySelector('[data-breadcrumb]') as HTMLElement;
+    expect(within(crumbs).getByRole('link', { name: '任务列表' }).getAttribute('href')).toBe(
+      '/tasks?state=done',
+    );
+    expect(crumbs.querySelector('[aria-current="page"]')?.textContent).toBe('#9');
+    expect(screen.queryByText('回任务列表')).toBeNull();
+    // 页头右边只剩任务的动作和刷新，没有第三种按钮
+    const actions = document.querySelector('[data-page-actions]') as HTMLElement;
+    expect(within(actions).queryByRole('link')).toBeNull();
+  });
+
+  test('别处进来：第一级是「主页」', async () => {
+    open('/tasks/t-c9');
+    await screen.findByRole('heading', { level: 1, name: /README/ });
+    const crumbs = document.querySelector('[data-breadcrumb]') as HTMLElement;
+    expect(within(crumbs).getByRole('link', { name: '主页' }).getAttribute('href')).toBe('/');
+  });
+});
+
 describe('老流程的单', () => {
   test('没有三段的流水：照旧是会话时间线和「时间与用量」', async () => {
     // t-12 现在也带三段流水（主页流水线图的演示数据），老流程的样例换成 t-19（只有会话）
@@ -193,7 +216,12 @@ describe('【失败】读不到的都写明，不写 0', () => {
     // token、缓存、当量、花费四格各写一次没读到（只有一个模型，不再多一行）；没有哪格写成 0
     // 花费那格另写为什么也估不了（token 没读全，按目录单价估不出来），不拿 0 顶
     // 格子里只留 —（原因在 title 和每一笔里），一个区块只出一条 Notice 说哪几项没读到
-    expect([...manual.querySelectorAll('[data-unread]')].map((n) => n.textContent)).toEqual(['—', '—', '—', '—']);
+    expect([...manual.querySelectorAll('[data-unread]')].map((n) => n.textContent)).toEqual([
+      '—',
+      '—',
+      '—',
+      '—',
+    ]);
     expect(within(box).queryByText('没读到')).toBeNull();
     const notice = box.querySelector('[data-unread-notice]');
     expect(notice?.textContent).toMatch(/没读到：token、缓存、当量、花费/);

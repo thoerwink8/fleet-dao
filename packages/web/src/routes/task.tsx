@@ -3,7 +3,7 @@
 // 主页「在跑的」卡片、「要你拍的」都链到这里。三段的单读 runs 表的流水（segmentRuns、usage.bySegment）；
 // 老流程的单照旧是会话时间线加「时间与用量」。读不到的写「没读到」和原因，不写 0。
 
-import { ArrowLeft, ListChecks, SearchX } from 'lucide-react';
+import { ListChecks, SearchX } from 'lucide-react';
 import { useRef } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { brand } from '#brand';
@@ -35,16 +35,24 @@ export function meta() {
 }
 
 /** 从任务列表点进来的（链接带 ?from=/tasks?…）回列表并带回筛选；别处进来的照旧回主页。 */
-function Back() {
+function Crumbs({ d }: { d: TaskDetail | undefined }) {
   const [params] = useSearchParams();
   const list = backToList(params.get(FROM_PARAM));
   return (
-    <Button asChild size="sm" variant="ghost" className="h-7 max-md:min-h-10">
-      <Link to={list ?? '/'}>
-        <ArrowLeft className="size-3.5" aria-hidden />
-        {list ? '回任务列表' : '回主页'}
-      </Link>
-    </Button>
+    <ol className="flex flex-wrap items-center gap-1" data-breadcrumb>
+      <li>
+        <Link
+          to={list ?? '/'}
+          className="inline-flex underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10 max-md:items-center"
+        >
+          {list ? '任务列表' : '主页'}
+        </Link>
+      </li>
+      <li aria-hidden>/</li>
+      <li aria-current="page" className="num">
+        {d ? `#${d.task.issueNumber}` : '任务'}
+      </li>
+    </ol>
   );
 }
 
@@ -320,12 +328,8 @@ export default function TaskPage() {
         dataUpdatedAt: detail.dataUpdatedAt,
         staleAfterMs: TASK_STALE_AFTER_MS,
       }}
-      actions={
-        <>
-          {d ? <TaskActionBar d={d} /> : null}
-          <Back />
-        </>
-      }
+      breadcrumb={<Crumbs d={d} />}
+      actions={d ? <TaskActionBar d={d} /> : undefined}
     >
       {error && isNotFound(error) ? (
         <Missing taskId={taskId} />

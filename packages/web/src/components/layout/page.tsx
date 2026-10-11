@@ -36,6 +36,7 @@ export function Page({
   actions,
   refresh,
   tabs,
+  breadcrumb,
   width = 'full',
   children,
   className,
@@ -49,6 +50,8 @@ export function Page({
   refresh?: RefreshBarProps;
   /** 页头下面的一排页签（页内导航）。 */
   tabs?: ReactNode;
+  /** 标题上面一行的面包屑（详情页：任务列表 / 这张单）。 */
+  breadcrumb?: ReactNode;
   /** full 铺满（默认）；narrow 窄栏（设置、登录这类读文字的页）。 */
   width?: 'full' | 'narrow';
   children: ReactNode;
@@ -67,6 +70,11 @@ export function Page({
         className,
       )}
     >
+      {breadcrumb ? (
+        <nav aria-label="位置" data-page-breadcrumb className="mb-2 text-meta text-muted-foreground">
+          {breadcrumb}
+        </nav>
+      ) : null}
       <header className="mb-section-gap flex flex-wrap items-end justify-between gap-stack max-md:mb-4 lg:flex-nowrap">
         <div className="relative min-w-0 lg:flex-1">
           <h1 className={cn('text-title', fold && 'pr-10')}>{title}</h1>

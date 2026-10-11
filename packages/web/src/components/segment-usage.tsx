@@ -509,11 +509,7 @@ function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) =>
           <span className="num">{timesText(s)}</span>
         </Cell>
         <Cell label="派工档">
-          <span
-            className={cn(
-              (tier.missing || !s.tiers.length) && 'text-muted-foreground',
-            )}
-          >
+          <span className={cn((tier.missing || !s.tiers.length) && 'text-muted-foreground')}>
             {tier.text}
           </span>
           {tier.note ? <div className="text-meta text-muted-foreground">{tier.note}</div> : null}
@@ -566,11 +562,7 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
     .flatMap(unreadOf);
   const unreadList = ['耗时', 'token', '缓存', '当量', '花费'].filter((k) => unreadItems.includes(k));
   return (
-    <Section
-      title="三段"
-      description="对题 → 动手 → 验收，每段再按模型分。"
-      tight
-    >
+    <Section title="三段" description="对题 → 动手 → 验收，每段再按模型分。" tight>
       {unreadList.length ? (
         <div className="mt-2" data-unread-notice>
           <Notice tone="stall" title={`没读到：${unreadList.join('、')}`}>
@@ -760,7 +752,7 @@ function RunRow({
       ) : null}
       {run.unread.length || gap ? (
         // 一笔里没读到的几项并成一段话（原来一项一行，一笔占五行）；颜色不再用提醒色，提醒由「三段」顶上那条 Notice 担着
-        <p className="mt-1 text-meta text-muted-foreground" aria-label="没读到的" data-unread-line>
+        <p className="mt-1 text-meta text-muted-foreground" data-unread-line>
           没读到：
           {run.unread.map((n, i) => (
             <Fragment key={n.item}>

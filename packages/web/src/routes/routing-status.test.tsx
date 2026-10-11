@@ -180,6 +180,9 @@ describe('渠道状态页：渠道卡', () => {
     expect(card('ch-ds').textContent).toContain('按量计费，不自动探');
     expect(items.some((c) => c.textContent?.includes('顺位第 1'))).toBe(true);
     expect(list.textContent).not.toMatch(/grok-4\.7|deepseek-v4\.1-flash/);
+    // 四段脚注收进 ⓘ：点开才看（#1903）
+    expect(screen.queryByText(/绿灯只表示本节点最近一轮抽测通过/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '怎么看这些状态' }));
     expect(screen.getByText(/绿灯只表示本节点最近一轮抽测通过/)).toBeTruthy();
   });
 
