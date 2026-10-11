@@ -46,15 +46,28 @@ test('1366×768：图装得下时，初始缩放 ≥ 下限，卡内最小字 �
 });
 
 test('1366×768：初始缩放的具体值（高度是卡死的那一向：716 × 0.96 / 560）', () => {
-  const vp = fitOne({ x: 0, y: 0, width: 900, height: 560 }, VIEW_1366, { top: 0, right: 0, bottom: 0, left: 0 });
+  const vp = fitOne({ x: 0, y: 0, width: 900, height: 560 }, VIEW_1366, {
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  });
   // 宽 1134 × 0.96 / 900 = 1.2096，高 716 × 0.96 / 560 = 1.2274：取小，再被 1.15 封顶
   expect(vp.zoom).toBe(FIT_MAX_ZOOM);
-  const tall = fitOne({ x: 0, y: 0, width: 900, height: 640 }, VIEW_1366, { top: 0, right: 0, bottom: 0, left: 0 });
+  const tall = fitOne({ x: 0, y: 0, width: 900, height: 640 }, VIEW_1366, {
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  });
   // 高 716 × 0.96 / 640 = 1.074：低于下限，停在下限
   expect(tall.zoom).toBe(MIN_READABLE_ZOOM);
 });
 
-const midOf = (vp: { x: number; y: number; zoom: number }, b: { x: number; y: number; width: number; height: number }) => ({
+const midOf = (
+  vp: { x: number; y: number; zoom: number },
+  b: { x: number; y: number; width: number; height: number },
+) => ({
   x: vp.x + (b.x + b.width / 2) * vp.zoom,
   y: vp.y + (b.y + b.height / 2) * vp.zoom,
 });

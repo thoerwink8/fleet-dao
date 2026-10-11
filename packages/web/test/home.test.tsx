@@ -190,7 +190,7 @@ describe('home（/）：四种状态', () => {
       done: [],
       flow: SAMPLE.flow,
     };
-    renderHome({ status: 'data', data: empty });
+    renderHome({ status: 'data', data: empty }, 1600);
     expect(screen.getByText(/现在没有在跑的单/)).toBeTruthy();
     // 抽屉里两页各自写「没有」；按钮上的数是 0，不拿空白冒充
     openDrawer();
@@ -337,9 +337,12 @@ describe('home（/）：四种状态', () => {
     // 同一个父容器，且不换行
     expect(strip?.closest('[data-home-statusbar]')).toBe(refresh?.closest('[data-home-statusbar]'));
     expect(bar?.className).toContain('flex-nowrap');
-    // 三个状态点（额度、中转、引擎），不是三格带字的药丸
-    expect(strip?.querySelectorAll('[data-health-chip]')).toHaveLength(3);
-    expect(strip?.textContent).toBe('');
+    // 一个带字的「状态」摘要按钮（不是没字的三个点）；点开才是三格全文
+    expect(strip?.hasAttribute('data-health-menu')).toBe(true);
+    expect(strip?.textContent).toBe('状态 3 项要留意');
+    expect(strip?.querySelectorAll('[data-health-chip]')).toHaveLength(0);
+    fireEvent.click(strip as Element);
+    expect(document.querySelectorAll('[data-health-chip]')).toHaveLength(3);
     // 刷新是图标按钮：没有文字，只有 aria-label
     expect(refresh?.textContent).toBe('');
     expect(refresh?.querySelector('svg')).toBeTruthy();
@@ -364,7 +367,7 @@ describe('home（/）：四种状态', () => {
   });
 
   test('data：三块各画出有数据的样子', async () => {
-    renderHome({ status: 'data', data: SAMPLE });
+    renderHome({ status: 'data', data: SAMPLE }, 1600);
     // 「在跑的」画布按需加载、排完版才有卡片
     await screen.findByText('清理：删编排层、删 Fusion');
     // 决策块（在抽屉里）
@@ -386,7 +389,7 @@ describe('home（/）：四种状态', () => {
     // 引擎那一格（看板中心节点上也写一遍，这里只认状态条里的）
     expect(
       Array.from(document.querySelectorAll('[data-health-chip]')).some((el) =>
-        /引擎进程已停用/.test(el.textContent ?? ''),
+        /引擎进程 已停用/.test(el.textContent ?? ''),
       ),
     ).toBe(true);
   });
@@ -401,7 +404,7 @@ describe('home（/）：四种状态', () => {
   });
 
   test('持续状态条引擎关时用「提示」色（不是失败红）', () => {
-    renderHome({ status: 'data', data: SAMPLE });
+    renderHome({ status: 'data', data: SAMPLE }, 1600);
     const chip = Array.from(document.querySelectorAll('[data-health-chip]')).find((el) =>
       el.textContent?.includes('引擎'),
     );
@@ -646,37 +649,43 @@ describe('home（/）：引擎那一格（#902 D7）', () => {
   });
 
   test('on：写「引擎进程 正常」，不标色', () => {
-    renderHome({ status: 'data', data: withEngine({ state: 'on' }) });
+    renderHome({ status: 'data', data: withEngine({ state: 'on' }) }, 1600);
     expect(engineChip()?.getAttribute('data-health-chip')).toBe('ok');
     expect(engineChip()?.textContent).toContain('引擎进程');
     expect(engineChip()?.textContent).toContain('正常');
   });
 
   test('down：写「引擎进程没连上」和原因，标红（bad），绝不写「正常」', () => {
-    renderHome({
-      status: 'data',
-      data: withEngine({ state: 'down', detail: '任务队列上没有在拉活的引擎工人（没起来或卡住了）' }),
-    });
+    renderHome(
+      {
+        status: 'data',
+        data: withEngine({ state: 'down', detail: '任务队列上没有在拉活的引擎工人（没起来或卡住了）' }),
+      },
+      1600,
+    );
     const chip = engineChip();
     expect(chip?.getAttribute('data-health-chip')).toBe('bad');
-    expect(chip?.className).toContain('border-st-fail');
-    expect(chip?.textContent).toContain('引擎进程没连上');
+    expect(chip?.getAttribute('data-tone')).toBe('fail');
+    expect(chip?.textContent).toContain('引擎进程 没连上');
     expect(chip?.textContent).toContain('没有在拉活的引擎工人');
     expect(chip?.textContent).not.toContain('正常');
   });
 
   test('off：写「引擎进程已停用」，用提示色（warn）不是红', () => {
-    renderHome({
-      status: 'data',
-      data: withEngine({ state: 'off', detail: '这台机器按配置（release.env 的 FLEET_SERVICES）没开引擎' }),
-    });
+    renderHome(
+      {
+        status: 'data',
+        data: withEngine({ state: 'off', detail: '这台机器按配置（release.env 的 FLEET_SERVICES）没开引擎' }),
+      },
+      1600,
+    );
     expect(engineChip()?.getAttribute('data-health-chip')).toBe('warn');
-    expect(engineChip()?.textContent).toContain('引擎进程已停用');
-    expect(engineChip()?.className).not.toContain('border-st-fail');
+    expect(engineChip()?.textContent).toContain('引擎进程 已停用');
+    expect(engineChip()?.getAttribute('data-tone')).toBe('wait');
   });
 
   test('unknown：名字带「引擎进程」，写「没查成」，灰虚线，不写正常', () => {
-    renderHome({ status: 'data', data: withEngine({ state: 'unknown' }) });
+    renderHome({ status: 'data', data: withEngine({ state: 'unknown' }) }, 1600);
     expect(engineChip()?.getAttribute('data-health-chip')).toBe('muted');
     expect(engineChip()?.textContent).toContain('引擎进程');
     expect(engineChip()?.textContent).toContain('没查成');
@@ -704,6 +713,30 @@ describe('home（/）：手机上看板退化成树形列表，一张单一行�
     expect(doing?.textContent).toContain('清理：删编排层、删 Fusion');
     expect(doing?.textContent).toContain('在动手');
     expect(doing?.querySelector('[data-ticket-toggle]')?.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  test('手机首屏：「要你拍的」横条排在状态摘要和站卡之前（#1899）', () => {
+    renderHome({ status: 'data', data: SAMPLE }, PHONE);
+    const strip = document.querySelector('[data-home-strip]') as Element;
+    const status = document.querySelector('[data-home-statusbar]') as Element;
+    const tree = document.querySelector('[data-board-tree]') as Element;
+    expect(strip.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(strip.compareDocumentPosition(tree) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  test('手机上没有单在途的站折成一行「对题、验收：0 张在途」，不再占一张卡（#1899）', () => {
+    renderHome({ status: 'data', data: { ...SAMPLE, running: [ticket(7)] } }, PHONE);
+    expect(
+      Array.from(document.querySelectorAll('[data-flow-lane]')).map((l) => l.getAttribute('data-flow-lane')),
+    ).toEqual(['manual']);
+    expect(document.querySelector('[data-flow-idle]')?.textContent).toBe('对题、验收：0 张在途');
+  });
+
+  test('手机上过滤：件数写成「显示 N / 共 M 张」，站有单但被过滤藏光不算空（#1899）', () => {
+    renderHome({ status: 'data', data: { ...SAMPLE, running: [ticket(7)] } }, PHONE);
+    expect(document.querySelector('[data-board-tree]')?.textContent).toContain('显示 1 / 共 1 张');
+    fireEvent.click(screen.getByRole('button', { name: /只看等你的/ }));
+    expect(document.querySelector('[data-flow-lane="manual"]')).toBeTruthy();
   });
 
   test('点一行原地展开成整张卡（进详情的链接在里面），再点收回；别的行不受影响', () => {

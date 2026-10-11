@@ -28,7 +28,10 @@ import { avgText, segmentHintOf, segmentName } from './nodes';
  * 手机上一整段一张卡太占地方：没有单在途（total 为 0）的段折成一行字，排在有单的段后面。
  * 有单但被过滤藏光的段不算空，照旧一张卡（颜色和件数还在）。
  */
-export function foldIdleGroups(groups: readonly SegmentGroup[]): { live: SegmentGroup[]; idle: SegmentGroup[] } {
+export function foldIdleGroups(groups: readonly SegmentGroup[]): {
+  live: SegmentGroup[];
+  idle: SegmentGroup[];
+} {
   return {
     live: groups.filter((g) => g.total > 0),
     idle: groups.filter((g) => g.total === 0),
