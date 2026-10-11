@@ -10,8 +10,10 @@ import { toast } from 'sonner';
 import { errorText, useSettings, useUpdateSetting } from '../api/client';
 import type { EnvMaster } from '../api/types';
 import { formatDateTime } from '../lib/format';
-import { cn } from '../lib/utils';
 import { useMasterView } from './engine-master';
+import { Section } from './layout/section';
+import { StatusBadge } from './layout/status-badge';
+import { Tag } from './layout/tag';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -74,93 +76,90 @@ export function EngineMasterControl({ standbyNote }: { standbyNote?: ReactNode }
           : (master?.detail ?? '');
   const who = master === null ? null : changedBy(master);
 
+  const button =
+    master === null || remote ? null : (
+      <>
+        <Button
+          className="shrink-0"
+          variant={target ? 'default' : 'outline'}
+          disabled={update.isPending || settings.isLoading}
+          onClick={() => setAsking(true)}
+          aria-label={`${verb}引擎总开关`}
+        >
+          {verb}
+        </Button>
+        <AlertDialog open={asking} onOpenChange={setAsking}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>{verb}引擎总开关？</AlertDialogTitle>
+              <AlertDialogDescription>
+                {target
+                  ? '开启后引擎开始运转：下一轮拉单就往「让 AI 接活」开着的项目派活、起 AI 会话（会花额度）。并记一条操作记录。'
+                  : '关闭后引擎全停：不再拉单、不派活、不起新的干活会话；已经在跑的会话做完这一步就停，不会被腰斩；探针和健康检查照跑。并记一条操作记录。'}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>先不</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={(e) => {
+                  e.preventDefault();
+                  confirm();
+                }}
+              >
+                {verb}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </>
+    );
+
   return (
-    <section
+    <Section
       id="engine-master"
       data-testid="engine-master"
       data-engine-master={master === null ? view.kind : master.on ? 'on' : 'off'}
-      className={cn('mb-4 rounded-xl border bg-card p-4', master?.on === false && 'border-st-stall/40')}
+      className="mb-4"
+      {...(master?.on === false ? { tone: 'stall' as const } : {})}
+      title={
+        <span className="flex flex-wrap items-center gap-2">
+          <Power className="size-4 text-muted-foreground" aria-hidden />
+          引擎总开关
+          <span data-testid="engine-master-state">
+            {master === null ? (
+              <Tag>{view.kind === 'loading' ? '读取中' : '没查成'}</Tag>
+            ) : (
+              <StatusBadge
+                tone={master.on ? 'done' : 'stall'}
+                label={master.on ? '开着' : '关着'}
+                variant="outline"
+              />
+            )}
+          </span>
+        </span>
+      }
+      actions={button}
     >
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0 flex-1">
-          <h2 className="flex items-center gap-2 text-base font-semibold tracking-tight">
-            <Power className="size-4 text-muted-foreground" aria-hidden />
-            引擎总开关
-            <span
-              data-testid="engine-master-state"
-              className={cn(
-                'rounded-full border px-2 py-0.5 text-xs font-normal',
-                master?.on === true && 'border-st-done/40 text-ink-done',
-                master?.on === false && 'border-st-stall/50 text-ink-stall',
-                master === null && 'border-dashed text-muted-foreground',
-              )}
-            >
-              {master === null
-                ? view.kind === 'loading'
-                  ? '读取中'
-                  : '没查成'
-                : master.on
-                  ? '开着'
-                  : '关着'}
-            </span>
-          </h2>
-          <p className="mt-1 text-sm text-muted-foreground" data-testid="engine-master-note">
-            {note}
-          </p>
-          {who ? (
-            <p className="num mt-1 text-xs text-muted-foreground" data-testid="engine-master-who">
-              {who}
-            </p>
-          ) : null}
-          <p className="mt-2 text-xs text-muted-foreground">
-            总开关关＝全停：不拉单、不派活、不起干活的会话（探针和健康检查照跑，渠道通不通照样看得到）；总开关开＝只有「让
-            AI 接活」开着的项目才派（在设置 →
-            仓库里逐个项目开）。往法国发版会先暂停它，发完恢复发版前的样子（发前开着的开回，发前关着的保持关）。
-          </p>
-          {standbyNote}
-        </div>
-        {master === null ? null : remote ? (
-          <p className="max-w-64 text-xs text-muted-foreground" data-testid="engine-master-remote-note">
-            这是远程环境的快照，只读。要开关请去那台上用 <span className="num">fleet-api engine on</span> /{' '}
-            <span className="num">off</span>。
-          </p>
-        ) : (
-          <>
-            <Button
-              className="shrink-0 self-start"
-              variant={target ? 'default' : 'outline'}
-              disabled={update.isPending || settings.isLoading}
-              onClick={() => setAsking(true)}
-              aria-label={`${verb}引擎总开关`}
-            >
-              {verb}
-            </Button>
-            <AlertDialog open={asking} onOpenChange={setAsking}>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>{verb}引擎总开关？</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    {target
-                      ? '开启后引擎开始运转：下一轮拉单就往「让 AI 接活」开着的项目派活、起 AI 会话（会花额度）。并记一条操作记录。'
-                      : '关闭后引擎全停：不再拉单、不派活、不起新的干活会话；已经在跑的会话做完这一步就停，不会被腰斩；探针和健康检查照跑。并记一条操作记录。'}
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>先不</AlertDialogCancel>
-                  <AlertDialogAction
-                    onClick={(e) => {
-                      e.preventDefault();
-                      confirm();
-                    }}
-                  >
-                    {verb}
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </>
-        )}
-      </div>
-    </section>
+      <p className="text-body text-muted-foreground" data-testid="engine-master-note">
+        {note}
+      </p>
+      {who ? (
+        <p className="num mt-1 text-meta text-muted-foreground" data-testid="engine-master-who">
+          {who}
+        </p>
+      ) : null}
+      <p className="mt-2 text-meta text-muted-foreground">
+        总开关关＝全停：不拉单、不派活、不起干活的会话（探针和健康检查照跑，渠道通不通照样看得到）；总开关开＝只有「让
+        AI 接活」开着的项目才派（在设置 →
+        仓库里逐个项目开）。往法国发版会先暂停它，发完恢复发版前的样子（发前开着的开回，发前关着的保持关）。
+      </p>
+      {master !== null && remote ? (
+        <p className="mt-2 text-meta text-muted-foreground" data-testid="engine-master-remote-note">
+          这是远程环境的快照，只读。要开关请去那台上用 <span className="num">fleet-api engine on</span> /{' '}
+          <span className="num">off</span>。
+        </p>
+      ) : null}
+      {standbyNote}
+    </Section>
   );
 }

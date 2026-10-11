@@ -99,13 +99,12 @@ describe('环境页', () => {
   test('引擎按配置关着写「按配置没开」，用等待色，不是红', async () => {
     renderEnv(envData({ engine: { ok: true, value: { state: 'off', detail: '按 FLEET_SERVICES 没开' } } }));
     const value = (await screen.findByText('按配置没开')) as HTMLElement;
-    expect(value.className).toContain('text-ink-stall');
-    expect(value.className).not.toContain('text-ink-fail');
+    expect(value.dataset.tone).toBe('stall');
     // 引擎没连上（down）才用红：两者分开
     cleanup();
     renderEnv(envData({ engine: { ok: true, value: { state: 'down', detail: '探不到在线的工人' } } }));
     const down = (await screen.findByText('没连上')) as HTMLElement;
-    expect(down.className).toContain('text-ink-fail');
+    expect(down.dataset.tone).toBe('fail');
   });
 
   test('故意造出失败：某一项没查成时那一格写「没查成 + 原因」，别的格照常显示数', async () => {
