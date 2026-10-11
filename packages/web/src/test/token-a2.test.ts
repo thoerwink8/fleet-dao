@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { scanFile } from '../../scripts/lint-arbitrary.ts';
+import { scanFile } from '../../scripts/lint-design.ts';
 
 const webRoot = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -83,7 +83,10 @@ describe('token A2：19 处写死尺寸换成 token', () => {
     for (const file of files) {
       const abs = join(webRoot, file);
       const source = readFileSync(abs, 'utf8');
-      expect(scanFile(abs, file), file).toEqual([]);
+      expect(
+        scanFile(abs, file).filter((h) => h.rule === 'R0'),
+        file,
+      ).toEqual([]);
       for (const site of SITES.filter((item) => item.file === file)) {
         expect(source.includes(site.from), `${file} ${site.where} 还留着 ${site.from}`).toBe(false);
         expect(source.includes(site.to), `${file} ${site.where} 没用 ${site.to}`).toBe(true);

@@ -617,7 +617,7 @@ function CatalogDetail({ entry: e, now }: { entry: CatalogEntry; now: number }) 
                   <span className="text-caption text-muted-foreground">
                     {hostLabel[r.hostId]} · {r.probe ? (PROBE_WORD[r.probe.state] ?? '没探') : '探针还没看过'}
                   </span>
-                  <span className="num ml-auto truncate text-micro text-faint">{r.id}</span>
+                  <span className="num ml-auto truncate text-micro text-muted-foreground">{r.id}</span>
                 </li>
               ))}
             </ul>
@@ -809,7 +809,7 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
                   {modelName} · {hostLabel[route.hostId]} ·{' '}
                   {route.probe ? (PROBE_WORD[route.probe.state] ?? '没探') : '探针还没看过'}
                 </span>
-                <span className="num ml-auto truncate text-micro text-faint">{route.id}</span>
+                <span className="num ml-auto truncate text-micro text-muted-foreground">{route.id}</span>
               </li>
             ))}
           </ul>

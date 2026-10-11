@@ -77,7 +77,7 @@ function ActionText({ action, ok, className }: { action: string; ok: boolean; cl
   return (
     <span className={cn(!ok && 'text-ink-fail', className)} title={action}>
       {text}
-      {translated ? null : <span className="ml-1 text-xs text-faint">（没翻译）</span>}
+      {translated ? null : <span className="ml-1 text-xs text-muted-foreground">（没翻译）</span>}
     </span>
   );
 }

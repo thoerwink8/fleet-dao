@@ -502,7 +502,7 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
                             setEditing((cur) => new Set(cur).add(dk));
                             setFocusKey(dk);
                           }}
-                          className="num h-7 w-20 max-md:min-h-10 rounded-md border border-dashed bg-muted/40 text-xs text-faint outline-none hover:border-border-strong hover:text-muted-foreground focus-visible:ring-focus focus-visible:ring-ring/50"
+                          className="num h-7 w-20 max-md:min-h-10 rounded-md border border-dashed bg-muted/40 text-xs text-muted-foreground outline-none hover:border-border-strong hover:text-muted-foreground focus-visible:ring-focus focus-visible:ring-ring/50"
                         >
                           —<span className="sr-only">未配置，点击填写</span>
                         </button>

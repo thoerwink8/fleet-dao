@@ -305,7 +305,7 @@ function CountCells({ counts }: { counts: ToneCounts }) {
           <div
             className={cn(
               'num text-stat-num leading-none font-semibold',
-              c.value ? toneText[c.tone] : 'text-faint',
+              c.value ? toneText[c.tone] : 'text-muted-foreground',
             )}
           >
             {c.value}
@@ -336,7 +336,7 @@ function PhaseStrip({ item, live }: { item: HomeRunning; live: boolean }) {
           <div
             className={cn(
               'mt-1 truncate text-micro',
-              p.state === 'pending' ? 'text-faint' : 'text-muted-foreground',
+              'text-muted-foreground',
               p.state === 'active' && cn('font-medium', toneText[p.tone]),
             )}
           >

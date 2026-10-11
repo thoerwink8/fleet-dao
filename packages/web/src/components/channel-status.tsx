@@ -323,7 +323,7 @@ export function HistoryStrip({
           );
         })}
       </div>
-      <p className="mt-1 text-micro text-faint">
+      <p className="mt-1 text-micro text-muted-foreground">
         {cells.length === 0 ? '还没有真探 · ' : null}绿通过 · 红不通 · 橙疑似换模型（身份题说出了旧答案）
       </p>
     </div>

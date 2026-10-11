@@ -353,7 +353,7 @@ export function RouteItem({
           {slots.full ? <span className="text-ink-stall">（满了，等空位，不算故障）</span> : null}
         </span>
         <PoolHoldControl poolId={r.poolId} routeId={r.routeId} />
-        <span className="num max-w-40 truncate text-micro text-faint" title={r.routeId}>
+        <span className="num max-w-40 truncate text-micro text-muted-foreground" title={r.routeId}>
           {r.routeId}
         </span>
         {backoff ? (
