@@ -10,12 +10,19 @@
 // - 三段节点永远在（哪怕这一段 0 张）：它们是流程本身；过滤只藏单子，不藏段。
 // - 单子节点编号 ticket:<单号>:<owner/name>（e2e 按这个前缀数单子）。
 import { laneOf, type SegmentKind } from '@fleet-dao/shared';
+import { segmentLabel } from '../../../lib/segments';
 import type { Tone } from '../../../lib/status';
 import { needsFounder, toneOf } from '../running-card';
 import type { HomeFlowStage, HomeHealth, HomeRunning } from '../types';
+import { segmentNodeWidth } from './far-type';
 
 export type SegmentKey = SegmentKind | 'none';
 export const SEGMENT_KEYS: readonly SegmentKey[] = ['scope', 'manual', 'verify', 'none'];
+
+/** 一段给人看的名字。 */
+export function segmentName(key: SegmentKey): string {
+  return key === 'none' ? '还没分段' : segmentLabel[key];
+}
 
 export type NodeKind = 'root' | 'segment' | 'ticket' | 'ask';
 
@@ -237,12 +244,18 @@ export function buildGraph(input: {
   const parentOf = new Map<string, string>();
   const childrenOf = new Map<string, string[]>();
 
+  const groups = groupSegments(input.running, input.flow, input.filter);
+  // 段节点按最长段名定宽（所有段同宽），远档下段名不被截成「还没…」
+  const segmentWidth = segmentNodeWidth(groups.map((g) => segmentName(g.key)));
+
   const add = (
     id: string,
     data: BoardNodeData,
     parent?: { id: string; side: Side; tone: Tone; live: boolean },
   ) => {
-    const node: GraphNode = { id, data, ...NODE_SIZE[data.kind] };
+    const size =
+      data.kind === 'segment' ? { ...NODE_SIZE.segment, width: segmentWidth } : NODE_SIZE[data.kind];
+    const node: GraphNode = { id, data, ...size };
     if (parent) node.side = parent.side;
     nodes.push(node);
     if (!parent) return;
@@ -266,7 +279,6 @@ export function buildGraph(input: {
     repos,
   });
 
-  const groups = groupSegments(input.running, input.flow, input.filter);
   const sides = splitSides(groups);
   let shown = 0;
   for (const g of groups) {
