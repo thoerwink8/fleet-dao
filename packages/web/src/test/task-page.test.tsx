@@ -96,7 +96,7 @@ describe('页头：面包屑代替「回任务列表」按钮（#1903）', () =>
     open(`/tasks/t-c9?from=${encodeURIComponent('/tasks?state=done')}`);
     await screen.findByRole('heading', { level: 1, name: /README/ });
     const crumbs = document.querySelector('[data-breadcrumb]') as HTMLElement;
-    expect(within(crumbs).getByRole('link', { name: '任务列表' }).getAttribute('href')).toBe(
+    expect(within(crumbs).getByRole('link', { name: '回任务列表' }).getAttribute('href')).toBe(
       '/tasks?state=done',
     );
     expect(crumbs.querySelector('[aria-current="page"]')?.textContent).toBe('#9');
@@ -110,7 +110,7 @@ describe('页头：面包屑代替「回任务列表」按钮（#1903）', () =>
     open('/tasks/t-c9');
     await screen.findByRole('heading', { level: 1, name: /README/ });
     const crumbs = document.querySelector('[data-breadcrumb]') as HTMLElement;
-    expect(within(crumbs).getByRole('link', { name: '主页' }).getAttribute('href')).toBe('/');
+    expect(within(crumbs).getByRole('link', { name: '回主页' }).getAttribute('href')).toBe('/');
   });
 });
 

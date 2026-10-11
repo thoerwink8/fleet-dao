@@ -43,6 +43,7 @@ function Crumbs({ d }: { d: TaskDetail | undefined }) {
       <li>
         <Link
           to={list ?? '/'}
+          aria-label={list ? '回任务列表' : '回主页'}
           className="inline-flex underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10 max-md:items-center"
         >
           {list ? '任务列表' : '主页'}

@@ -342,9 +342,18 @@ function CostCell({ t }: { t: UsageTotals }) {
   if (!parts.length) return <span className="text-muted-foreground">{t.running ? '跑完才有' : '—'}</span>;
   // 一格里全是没读到：只留一个 —，原因放在 title 里（区块顶上的 Notice 已经说了这一项读不到）
   if (parts.every((p) => p.missing)) {
+    // 「估不了」「没有单价」是说明为什么算不出来，不是单纯的没读到：照写在 — 下面，原因不丢
+    const why = parts.filter((p) => p.missing && /估不了|没有单价/.test(p.missing));
     return (
-      <span className="text-muted-foreground" data-unread title={parts.map((p) => p.missing).join('；')}>
-        —
+      <span className="flex flex-col text-muted-foreground">
+        <span data-unread title={parts.map((p) => p.missing).join('；')}>
+          —
+        </span>
+        {why.map((p) => (
+          <span key={p.key} className="text-meta">
+            {p.missing}
+          </span>
+        ))}
       </span>
     );
   }
