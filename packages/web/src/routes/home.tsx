@@ -9,7 +9,7 @@ import { CirclePlay, SearchX } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
-import { isNotFound, useHome, useNodeHome } from '../api/client';
+import { isNotFound, useHome, useLiveState, useNodeHome } from '../api/client';
 import { HealthStrip } from '../components/home/health-strip';
 import { HomeDrawer } from '../components/home/home-drawer';
 import { RunningBoard } from '../components/home/running-board';
@@ -84,6 +84,7 @@ export default function Home() {
   const local = useHome({ enabled: nodeId === null });
   const remote = useNodeHome(nodeId);
   const phone = usePhone();
+  const push = useLiveState().status;
   const topbarRoom = useTopbarRoom();
   // 本台读 useHome，选了远程环境读那台的快照。刷新条跟眼下这一份主查询走。
   const main = nodeId === null ? local : remote;
@@ -98,11 +99,13 @@ export default function Home() {
 
   const refresh = (
     <RefreshBar
-      className="shrink-0 flex-nowrap"
+      variant="dot"
+      className="shrink-0"
       onRefresh={() => void main.refetch()}
       isFetching={main.isFetching}
       dataUpdatedAt={main.dataUpdatedAt}
       staleAfterMs={HOME_STALE_AFTER_MS}
+      push={push}
     />
   );
 
@@ -116,9 +119,12 @@ export default function Home() {
         fallback={
           <div
             data-home-statusbar
-            className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b px-3 py-2 sm:px-4"
+            className="flex shrink-0 flex-nowrap items-center gap-x-3 border-b px-3 sm:px-4 max-md:py-0 md:py-1.5"
           >
-            {state.status === 'data' ? <HealthStrip health={state.data.health} detail="never" /> : null}
+            {/* 手机：三个状态点 + 刷新图标按钮，同一行；更宽一点的屏仍写三格的名字 */}
+            {state.status === 'data' ? (
+              <HealthStrip health={state.data.health} detail="never" compact={phone} />
+            ) : null}
             <div className="ml-auto">{refresh}</div>
           </div>
         }

@@ -18,11 +18,11 @@ import {
 } from '../lib/credentials';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
+import { FieldRow } from './field-row';
 import { LoadError, LoadingRows } from './page';
 import { PasswordField } from './password-field';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
-import { Label } from './ui/label';
 
 /** 用户名栏的提示：就是后端 checkUsername 的规则，原话照抄，不另编。 */
 const USERNAME_HINT = '3–32 位，字母或数字开头，可以用字母、数字、点、下划线、连字符；大小写不区分。';
@@ -115,12 +115,7 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
 
   const busy = update.isPending;
   return (
-    <form
-      onSubmit={submit}
-      method="post"
-      className="mt-4 max-w-md space-y-4"
-      aria-label={first ? '设账密' : '改账密'}
-    >
+    <form onSubmit={submit} method="post" className="mt-3" aria-label={first ? '设账密' : '改账密'}>
       {/* 密码管理器 / 无障碍：密码表单要有 autocomplete=username 的用户名字段；看得见的那一栏另写，这里藏一份兜底。 */}
       <input
         type="text"
@@ -133,7 +128,7 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
         aria-hidden
       />
       {blocked ? (
-        <p role="status" className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
+        <p role="status" className="mb-2 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
           第一次设账密要在飞书登录后 10 分钟内设：请先退出，用飞书重新登录一次，再回到这里。
         </p>
       ) : null}
@@ -149,10 +144,17 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
           readOnly={busy}
           inputRef={currentRef}
           hint="改用户名或密码都要先输入当前密码；输错 5 次会被临时锁住。"
+          layout="row"
         />
       )}
-      <div className="space-y-1.5">
-        <Label htmlFor="cred-username">{first ? '用户名' : '用户名（不改就别动）'}</Label>
+      <FieldRow
+        label={first ? '用户名' : '用户名（不改就别动）'}
+        htmlFor="cred-username"
+        hint={USERNAME_HINT}
+        hintId="cred-username-hint"
+        error={errors.username}
+        errorId="cred-username-error"
+      >
         <Input
           id="cred-username"
           name="username-visible"
@@ -166,16 +168,9 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
           readOnly={busy}
           aria-invalid={errors.username ? true : undefined}
           aria-describedby={`cred-username-hint${errors.username ? ' cred-username-error' : ''}`}
+          className="max-w-sm"
         />
-        <p id="cred-username-hint" className="text-xs text-muted-foreground">
-          {USERNAME_HINT}
-        </p>
-        {errors.username ? (
-          <p id="cred-username-error" role="alert" className="text-xs text-ink-fail">
-            {errors.username}
-          </p>
-        ) : null}
-      </div>
+      </FieldRow>
       <PasswordField
         id="cred-new"
         label={first ? '密码' : '新密码（不改就留空）'}
@@ -186,6 +181,7 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
         error={errors.newPassword}
         readOnly={busy}
         hint={`至少 ${PASSWORD_MIN_LENGTH} 位，别的不限：长一点的一句话、密码管理器生成的都可以。`}
+        layout="row"
       />
       <PasswordField
         id="cred-confirm"
@@ -196,13 +192,14 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
         maxLength={PASSWORD_MAX}
         error={errors.confirm}
         readOnly={busy}
+        layout="row"
       />
       {errors.form ? (
-        <p role="alert" className="rounded-lg bg-st-fail/10 px-3 py-2 text-sm text-ink-fail">
+        <p role="alert" className="mt-2 rounded-lg bg-st-fail/10 px-3 py-2 text-sm text-ink-fail">
           {errors.form}
         </p>
       ) : null}
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3 pt-3">
         <Button type="submit" size="sm" disabled={busy || blocked}>
           {busy ? '保存中…' : first ? '设账密' : '保存修改'}
         </Button>

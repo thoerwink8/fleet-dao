@@ -4,7 +4,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
 import type { QuotaWindowView } from '../api/types';
 import QuotaPage from '../routes/quota';
-import { renderApp } from '../test/harness';
+import { openSummary, renderApp } from '../test/harness';
 import { amountPair, QuotaCell } from './quota';
 
 afterEach(cleanup);
@@ -170,7 +170,7 @@ describe('额度格', () => {
 describe('额度页摘要卡', () => {
   function card(title: string): HTMLElement {
     const heading = screen.getByText(title);
-    const box = heading.closest('div.rounded-xl');
+    const box = heading.closest('button') ? openSummary(title) : null;
     if (!box) throw new Error(`找不到摘要卡：${title}`);
     return box as HTMLElement;
   }
@@ -218,10 +218,10 @@ describe('读数过期、凭据过期（#1748）', () => {
     renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
     await screen.findByText('读数过期或没查成');
     const heading = screen.getByText('快用完');
-    const full = heading.closest('div.rounded-xl') as HTMLElement;
+    const full = openSummary('快用完');
     expect(full.textContent).not.toContain('supergrok');
     expect(full.textContent).not.toContain('Grok');
-    const staleBox = screen.getByText('读数过期或没查成').closest('div.rounded-xl') as HTMLElement;
+    const staleBox = openSummary('读数过期或没查成');
     const line = staleBox.querySelector('[data-pool-problem="unreadable"]');
     expect(line?.textContent).toContain('额度读不到');
     expect(line?.textContent).toContain('登录令牌已过期');
@@ -243,7 +243,7 @@ describe('额度页金额和窄表', () => {
     expect(amount?.className ?? '').not.toContain('truncate');
     expect(amount?.textContent).toContain('$61.20');
     expect(amount?.textContent).toContain('/ $100');
-    const cell = used.closest('[data-quota-cell]');
+    const cell = used.closest('[data-quota-line]');
     expect(cell).toBeTruthy();
     const badge = within(cell as HTMLElement).getByText('实读');
     expect(badge.closest('[data-source]')?.getAttribute('data-source')).toBe('relay-web');
@@ -252,18 +252,40 @@ describe('额度页金额和窄表', () => {
     expect(month.parentElement?.className ?? '').not.toContain('truncate');
     expect(month.parentElement?.textContent).toContain('/ $20.00');
     // 这个池的读数过期了：不挂「估算」牌，换成「读数过期」（#1748）；估算的说明仍写在页脚
-    expect(within(month.closest('[data-quota-cell]') as HTMLElement).getByText('读数过期')).toBeTruthy();
+    expect(within(month.closest('[data-quota-line]') as HTMLElement).getByText('读数过期')).toBeTruthy();
     expect(screen.getAllByText('18%').length).toBeGreaterThan(0);
   });
 
-  test('额度表可以横向滚动时，边上有「向右滑动」提示', async () => {
-    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+  test('账号池一个池一行，不出现横向滚动（390 宽手机上也一样）（#1805）', async () => {
+    const api = createMockApi({ live: false });
+    const { pools } = await api.pools();
+    renderApp(<QuotaPage />, { api });
     await screen.findByRole('columnheader', { name: '周期美元' });
-    const hint = screen.getByText('向右滑动，看其余窗口');
-    const matrix = hint.closest('.quota-matrix');
+    const matrix = document.querySelector('[data-quota-matrix]') as HTMLElement;
     expect(matrix).toBeTruthy();
-    expect(matrix?.querySelector('table')).toBeTruthy();
-    expect(matrix?.querySelector('.quota-scroll-fade')).toBeTruthy();
+    // 一个池一行；窗口各一格，不再有「向右滑动」提示、横向滚动容器和最小表宽
+    expect(matrix.querySelectorAll('tr.quota-pool')).toHaveLength(pools.length);
+    expect(matrix.querySelectorAll('[data-quota-line]')).toHaveLength(
+      pools.reduce((n, p) => n + p.windows.length, 0),
+    );
+    expect(screen.queryByText('向右滑动，看其余窗口')).toBeNull();
+    expect(matrix.querySelector('.overflow-x-auto')).toBeNull();
+    // 容器没有超出自己的宽度（happy-dom 不排版，两边都是 0；真宽度在点验里量）
+    const table = matrix.querySelector('table') as HTMLElement;
+    expect(table.scrollWidth).toBeLessThanOrEqual(table.clientWidth);
+    expect(matrix.scrollWidth).toBeLessThanOrEqual(matrix.clientWidth);
+  });
+
+  test('一个窗口一格：一行字（已用 / 上限 · 清零）加一根进度条，来源牌在条的旁边', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    const used = await screen.findByText('$61.20');
+    const line = used.closest('[data-quota-line]') as HTMLElement;
+    // 字一行（flex）、条一行：格子里只有窗口名（宽屏藏）、这一行字、条这三块
+    expect(line.children).toHaveLength(3);
+    expect(line.children[1]?.textContent).toContain('$61.20');
+    expect(line.children[1]?.textContent).toContain('/ $100');
+    expect(line.children[1]?.textContent).toContain('清零');
+    expect(within(line.children[2] as HTMLElement).getByText('实读')).toBeTruthy();
   });
 });
 

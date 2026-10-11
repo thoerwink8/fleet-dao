@@ -282,6 +282,36 @@ describe('接真后端：实时推送（SSE）', () => {
     expect(statuses.at(-1)).toBe('down');
   });
 
+  test('退出时停推送：断线也不再探 /api/me，不二次跳登录页', async () => {
+    vi.useFakeTimers();
+    const sources: FakeEventSource[] = [];
+    const onUnauthorized = vi.fn();
+    const { fn, calls } = fakeFetch({
+      'GET /api/me': () => ({ body: ME }),
+      'POST /auth/logout': () => ({ status: 204 }),
+    });
+    const api = createHttpApi({
+      fetch: fn,
+      onUnauthorized,
+      eventSource: (url) => {
+        const es = new FakeEventSource(url);
+        sources.push(es);
+        return es as unknown as EventSource;
+      },
+    });
+    api.subscribe(() => undefined);
+    const es = sources[0];
+    if (!es) throw new Error('没建 EventSource');
+    await api.logout();
+    expect(es.closed).toBe(true);
+    killByBackend(es);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    // 退出要带 CSRF：先问一次 /api/me；之后没有重连探活
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(['GET /api/me', 'POST /auth/logout']);
+    expect(sources).toHaveLength(1);
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
   /** 假的页面可见性：hidden() 读现状，set() 切换并通知订阅的人。 */
   function fakePage(hidden = false) {
     const listeners = new Set<() => void>();

@@ -39,29 +39,20 @@ import type {
 import { useMasterView } from '../components/engine-master';
 import { EngineMasterControl } from '../components/engine-master-card';
 import { FACT_ROWS, factCells, factsSummary } from '../components/env-facts';
+import { JobListHead, JobListRow, rowTone } from '../components/job-row';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RefreshBar } from '../components/refresh-bar';
 import { ReleaseCardBody, ReleaseEntry } from '../components/release-card';
 import { Button } from '../components/ui/button';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { formatAgo, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { freshnessNow, nodeAgeText, useNodeSelection } from '../lib/node';
-import { outcomeText } from '../lib/schedule';
 import { useShownError } from '../lib/shown-error';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
 
 export function meta() {
   return [{ title: brand.title('法国') }];
-}
-
-/** 定时任务表：失败红、没查全 / 过期黄（判法同 /schedules 页）。 */
-function rowTone(j: JobView): 'fail' | 'stall' | null {
-  if (j.lastRun?.outcome === 'failed') return 'fail';
-  if (j.lastRun?.outcome === 'unscanned' || j.lastRun?.outcome === 'partial' || j.status !== 'fresh')
-    return 'stall';
-  return null;
 }
 
 /** 出问题的排前面（失败、再没查全 / 过期），其余照后端给的先后：回来看一眼，先看到要管的。 */
@@ -190,59 +181,14 @@ function JobsTable({ jobs, now }: { jobs: readonly JobView[]; now: number }) {
     return <p className="px-4 py-6 text-sm text-muted-foreground">这台环境一个定时任务都没有。</p>;
   }
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead className="pl-4">任务</TableHead>
-          <TableHead className="w-36">周期</TableHead>
-          <TableHead>上次结局</TableHead>
-          <TableHead className="w-28 pr-4">上次跑成</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {problemsFirst(jobs).map((j) => {
-          const tone = rowTone(j);
-          const r = j.lastRun;
-          return (
-            <TableRow
-              key={j.id}
-              data-outcome={r?.outcome ?? (r ? 'running' : 'never')}
-              data-status={j.status}
-              className={cn(
-                tone === 'fail' && 'bg-st-fail/[0.06] hover:bg-st-fail/[0.09]',
-                tone === 'stall' && 'bg-st-stall/[0.07] hover:bg-st-stall/[0.1]',
-              )}
-            >
-              <TableCell className="pl-4">
-                <div className="font-medium">{j.name}</div>
-                <div className="num text-xs text-muted-foreground">{j.id}</div>
-              </TableCell>
-              <TableCell className="num text-xs">{j.schedule}</TableCell>
-              <TableCell
-                className={cn(
-                  'text-xs whitespace-normal',
-                  r?.outcome === 'failed' && 'font-medium text-ink-fail',
-                  (r?.outcome === 'unscanned' || r?.outcome === 'partial') && 'font-medium text-ink-stall',
-                  r?.outcome === 'ok' && 'text-muted-foreground',
-                )}
-              >
-                {outcomeText(j)}
-                {r ? (
-                  <span className="num block text-caption text-faint">{formatAgo(r.startedAt, now)}开始</span>
-                ) : null}
-              </TableCell>
-              <TableCell className="num pr-4 text-xs text-muted-foreground">
-                {j.lastSuccessAt ? (
-                  formatAgo(j.lastSuccessAt, now)
-                ) : (
-                  <span className="text-xs text-ink-stall">从没跑成</span>
-                )}
-              </TableCell>
-            </TableRow>
-          );
-        })}
-      </TableBody>
-    </Table>
+    <>
+      <JobListHead />
+      <ul className="divide-y" data-job-list>
+        {problemsFirst(jobs).map((j) => (
+          <JobListRow key={j.id} j={j} now={now} />
+        ))}
+      </ul>
+    </>
   );
 }
 

@@ -9,7 +9,7 @@ import type { EnvResponse, QuotaWindowView } from '../api/types';
 import { factCells } from '../components/env-facts';
 import { filterTabClass } from '../components/filter-tabs';
 import { Page } from '../components/page';
-import { cellNotes, QuotaCell } from '../components/quota';
+import { QuotaLine } from '../components/quota';
 import { RefreshBar } from '../components/refresh-bar';
 import NotificationsPage from '../routes/notifications';
 import TaskPage from '../routes/task';
@@ -237,7 +237,7 @@ describe('法国页本台六项事实：手机一行一项', () => {
   });
 });
 
-describe('额度格点一下弹出说明', () => {
+describe('额度窗口格点一下弹出说明', () => {
   const NOW = Date.parse('2026-09-25T10:00:00Z');
   const w: QuotaWindowView = {
     window: '5h',
@@ -253,25 +253,22 @@ describe('额度格点一下弹出说明', () => {
     statusRaw: 'allowed_warning',
   };
 
-  test('说明内容：读法、读数过期、上游状态；先用它只在高亮时出现', () => {
-    const notes = cellNotes(w, false).join('\n');
-    expect(notes).toContain('读法 claude-usage');
-    expect(notes).toContain('读数太旧');
-    expect(notes).toContain('上游状态');
-    expect(notes).toContain('上游原话：allowed_warning');
-    expect(notes).not.toContain('先用它');
-    expect(cellNotes({ ...w, stale: false }, true).join('\n')).toContain('先用它');
-  });
-
-  test('点格子弹出说明，说明里有读法；未点时没有', async () => {
-    render(<QuotaCell w={w} now={NOW} />);
+  test('点格子才弹出说明：读数过期、上游状态、上游原话、读法都在；没点时没有', async () => {
+    render(<QuotaLine w={w} now={NOW} />);
     expect(document.querySelector('[data-quota-notes]')).toBeNull();
-    fireEvent.click(document.querySelector('[data-quota-cell]') as HTMLElement);
+    fireEvent.click(document.querySelector('[data-quota-line]') as HTMLElement);
     const pop = await waitFor(() => {
       const el = document.querySelector('[data-quota-notes]');
       if (!el) throw new Error('还没弹出');
       return el as HTMLElement;
     });
-    expect(pop.textContent).toContain('读法 claude-usage');
+    expect(pop.textContent).toContain('读数过期');
+    expect(pop.textContent).toContain('上游原话：allowed_warning');
+    expect(pop.textContent).toContain('读法：claude-usage');
+  });
+
+  test('电脑上悬停的提示（title）照旧留着', () => {
+    render(<QuotaLine w={w} now={NOW} />);
+    expect(document.querySelector('[data-quota-line]')?.getAttribute('title')).toContain('读数过期');
   });
 });
