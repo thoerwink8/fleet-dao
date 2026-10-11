@@ -1,4 +1,5 @@
-// 用户级子代理定义（#1393）：仓里 agents/subagents/ 下、targets.ts 的 SUBAGENT_TARGET 列了名字的几份，整份拷到 ~/.claude/agents/。
+// 用户级子代理定义（#1393、决定 0079）：targets.ts 的 SUBAGENT_TARGET 列的几份（agents/subagents/haiku55.md 和
+// .claude/agents/ 下的 fleet-*），按文件名整份拷到 ~/.claude/agents/。
 // 只认列了的文件名，不扫目录：~/.claude/agents/ 里机器上手写的（Explore.md、Plan.md 这类）一律不碰、不删。
 // 同名文件内容和仓里不一样：先整份备份到 ~/.fleet-dao/backups/<时间>/，再换成仓里的，报出来（这几份归仓里管，手改的会被换回）。
 // 清单 ~/.fleet-dao/agents-sync.json 的 subagents 记着装过哪几份：从 SUBAGENT_TARGET 里去掉的，清单里记着才撤（先备份），没记着的不碰。
@@ -16,7 +17,7 @@ import {
   manifestKey,
   relOf,
   type Sources,
-  SUBAGENTS_DIR,
+  SUBAGENTS_KEY,
   writeAtomic,
 } from './sync.ts';
 import { agentNames, SUBAGENT_TARGET, slashed } from './targets.ts';
@@ -41,7 +42,7 @@ function scope(ctx: Ctx): Scope | Line {
 export function checkSubagents(ctx: Ctx, src: Sources, manifest: ManifestRead): Line[] {
   const s = scope(ctx);
   if ('kind' in s) return [s];
-  if (!src.subagents.ok) return [line('unknown', SUBAGENTS_DIR, `没查成——${src.subagents.why}`)];
+  if (!src.subagents.ok) return [line('unknown', SUBAGENTS_KEY, `没查成——${src.subagents.why}`)];
   if (!manifest.ok) {
     return [
       line(
@@ -102,7 +103,7 @@ export function applySubagents(ctx: Ctx, src: Sources, manifest: ManifestRead, b
   const s = scope(ctx);
   if ('kind' in s) return [s];
   if (!src.subagents.ok)
-    return [line('failed', SUBAGENTS_DIR, `没做成——${src.subagents.why}，子代理一个没动`)];
+    return [line('failed', SUBAGENTS_KEY, `没做成——${src.subagents.why}，子代理一个没动`)];
   if (!manifest.ok) {
     return [
       line(

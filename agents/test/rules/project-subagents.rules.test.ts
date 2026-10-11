@@ -10,6 +10,10 @@
 //    Haiku 档除 fleet-fixer 外不许有 Edit。
 // 4. 汇报：每个正文都要求汇报首行写自己的模型 id（派完核对实际 id 靠它）；Haiku 档都限回合数。
 // 5. 指挥官技能、参考页、标准路径清单都写着「默认用 fleet-* 子代理」和这条测试。
+// 6. 随同步装到每台机器的用户级（决定 0079，创始人 2026-10-11「我希望未来每台有fleet-dao的机器，包括vps，都能具备最佳
+//    subagent方式」）：packages/agents-sync/src/targets.ts 的 SUBAGENT_TARGET 恰好列着 .claude/agents/ 下这 16 份加
+//    agents/subagents/haiku55.md（按文本核，不跨包 import）；原件只有 .claude/agents/ 这一处，不另存副本；
+//    参考页写着「同步也装到用户级」。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -105,6 +109,22 @@ function textOf(file: string): string {
 const SKILL = read(`${ROOT}agents/skills/commander/SKILL.md`);
 const GUIDE = read(`${ROOT}agents/skills/commander/references/子代理选模型.md`);
 const STANDARD = read(`${ROOT}packages/conventions/standard-paths.json`);
+const TARGETS = read(`${ROOT}packages/agents-sync/src/targets.ts`);
+
+/** 同步该装的：haiku55 加名单里每一份，写成仓内路径（排好序） */
+const SYNC_WANT = [
+  'agents/subagents/haiku55.md',
+  ...Object.keys(ROSTER).map((n) => `.claude/agents/${n}.md`),
+].sort();
+
+/** targets.ts 的 SUBAGENT_TARGET 里 files 列的仓内路径（排好序）；认不出这一项明确报错，不当成空名单 */
+function syncFiles(targets: string): string[] {
+  const block = /\nexport const SUBAGENT_TARGET\b[\s\S]*?\n\};/.exec(targets)?.[0];
+  if (block === undefined) throw new Error('packages/agents-sync/src/targets.ts 里认不出 SUBAGENT_TARGET');
+  const list = /\bfiles:\s*\[([^\]]*)\]/.exec(block)?.[1];
+  if (list === undefined) throw new Error('SUBAGENT_TARGET 里认不出 files: [...]');
+  return [...list.matchAll(/'([^']+)'/g)].map((m) => m[1] ?? '').sort();
+}
 
 describe('规矩：本仓子代理定义在 .claude/agents/，名单、模型、权限、汇报固定（决定 0036）', () => {
   it('名单：恰好是这 16 个 fleet-* 文件，一个不多一个不少', () => {
@@ -174,5 +194,44 @@ describe('规矩：本仓子代理定义在 .claude/agents/，名单、模型、
     expect(GUIDE).toContain('`.claude/agents/`');
     for (const name of Object.keys(ROSTER)) expect(GUIDE, name).toContain(`\`${name}\``);
     expect(STANDARD).toContain('.claude/agents/');
+  });
+});
+
+describe('规矩：fleet-* 随 agents:sync 装到每台机器的用户级，原件只在 .claude/agents/（决定 0079）', () => {
+  it('同步工具的名单（targets.ts 的 SUBAGENT_TARGET）恰好是 haiku55 加这 16 份，一个不多一个不少', () => {
+    expect(syncFiles(TARGETS)).toEqual(SYNC_WANT);
+  });
+
+  it('原件只有一处：agents/subagents/ 下没有 fleet-* 副本', () => {
+    const dir = `${ROOT}agents/subagents/`;
+    const copies = existsSync(dir) ? readdirSync(dir).filter((f) => f.startsWith('fleet-')) : [];
+    expect(copies).toEqual([]);
+  });
+
+  it('参考页写着：同步也装到每台机器的用户级、哪个目录都能按名字派', () => {
+    expect(GUIDE).toMatch(/`pnpm agents:sync` 也把这 16 份装到每台机器的 `~\/\.claude\/agents\/`/);
+    expect(GUIDE).toContain('决定 0079');
+  });
+
+  it('【故意造出的失败】名单里去掉一份 fleet-*、多出一份、认不出 SUBAGENT_TARGET 或 files：都查得出来', () => {
+    const dropped = TARGETS.replace(/\n\s*'\.claude\/agents\/fleet-reviewer\.md',?/, '');
+    expect(dropped, 'targets.ts 里找不到 fleet-reviewer 那一项，这条失败造不出来').not.toBe(TARGETS);
+    expect(syncFiles(dropped)).not.toEqual(SYNC_WANT);
+    const extra = TARGETS.replace(
+      "'agents/subagents/haiku55.md'",
+      "'agents/subagents/haiku55.md', '.claude/agents/fleet-x.md'",
+    );
+    expect(extra).not.toBe(TARGETS);
+    expect(syncFiles(extra)).not.toEqual(SYNC_WANT);
+    const gone = TARGETS.replace('export const SUBAGENT_TARGET', 'export const SOMETHING_ELSE');
+    expect(gone).not.toBe(TARGETS);
+    expect(() => syncFiles(gone)).toThrow(/认不出 SUBAGENT_TARGET/);
+    expect(() => syncFiles('\nexport const SUBAGENT_TARGET = {\n  dir: x,\n};')).toThrow(/认不出 files/);
+  });
+
+  it('【故意造出的失败】参考页删掉「同步也装到用户级」：查得出来', () => {
+    const cut = GUIDE.replace(/`pnpm agents:sync` 也把这 16 份装到每台机器的 `~\/\.claude\/agents\/`/, '');
+    expect(cut, '参考页里找不到那一句，这条失败造不出来').not.toBe(GUIDE);
+    expect(cut).not.toMatch(/`pnpm agents:sync` 也把这 16 份装到每台机器的 `~\/\.claude\/agents\/`/);
   });
 });

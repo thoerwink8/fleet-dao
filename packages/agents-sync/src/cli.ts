@@ -28,14 +28,14 @@ import {
 import type { Platform } from './targets.ts';
 import { applyToolConfig, checkToolConfig } from './tool-config.ts';
 
-export const USAGE = `agents-sync —— 把 fleet-dao 仓里 agents/shared-rules.md 的通用段、agents/skills/（自研）、agents/skills-vendor/（第三方，照锁文件核过才发）、agents/hooks/、agents/subagents/ 分发到这台机器上各家 AI 的全局入口
+export const USAGE = `agents-sync —— 把 fleet-dao 仓里 agents/shared-rules.md 的通用段、agents/skills/（自研）、agents/skills-vendor/（第三方，照锁文件核过才发）、agents/hooks/、子代理定义（agents/subagents/、.claude/agents/）分发到这台机器上各家 AI 的全局入口
 
 用法（三种模式挑一种）：
   agents-sync --check        只读：逐家报 一致 / 漂移 / 缺失 / 没装（跳过）/ 没查成；最后报这台同步到哪个提交、落后主线几个
   agents-sync --apply        写：通用段写进各家的全局文件（只动标记圈起来的那一块；第一次接管先整份备份），
                              skill 拷进各家的 skill 目录（只动清单里记着是本脚本装的），
-                             agents/subagents/ 里 targets.ts 的 SUBAGENT_TARGET 列了名字的子代理定义（haiku55.md）
-                             拷进 ~/.claude/agents/（只认列了的文件名，那个目录里别的文件不碰；同名的内容不一样就先备份
+                             targets.ts 的 SUBAGENT_TARGET 列的子代理定义（agents/subagents/haiku55.md、
+                             .claude/agents/fleet-*.md）拷进 ~/.claude/agents/（只认列了的文件名，那个目录里别的文件不碰；同名的内容不一样就先备份
                              再换成仓里的；从名单里去掉的，清单里记着是本脚本装的才备份后撤掉），
                              钩子脚本拷进 ~/.fleet-dao/hooks/、在各家设置里登记（只动指向它们的那几条），
                              agents/config/claude-permissions.json 合进 ~/.claude/settings.json 的 permissions
@@ -311,7 +311,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
       const permsOff = args.user === undefined ? undefined : PERMISSIONS_OFF_FOR_USER;
       const mcpOff = args.user === undefined ? undefined : MCP_OFF_FOR_USER;
       const mcpSection = 'MCP 服务器（~/.claude.json 里的 Playwright 输出目录）';
-      const subagentSection = '子代理定义（agents/subagents/ 里列了名字的几份 → ~/.claude/agents/）';
+      const subagentSection = '子代理定义（SUBAGENT_TARGET 列的几份 → ~/.claude/agents/）';
       const mf = manifestPath(home, deps.platform);
       if (args.mode === '--check') {
         section('通用段（agents/shared-rules.md）', checkRules(ctx, src));

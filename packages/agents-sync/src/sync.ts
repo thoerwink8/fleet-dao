@@ -45,7 +45,7 @@ export interface Sources {
   hooks: { ok: true; tree: Tree } | { ok: false; why: string };
   /** agents/config/claude-permissions.json 的原文；读不到时是为什么（只影响权限那一段，别的照写）。认内容在 permissions.ts */
   permissions: { ok: true; text: string } | { ok: false; why: string };
-  /** agents/subagents/ 下 SUBAGENT_TARGET 列了名字的几份（文件名 → 原文）；读不到时是为什么（只影响子代理这一段） */
+  /** SUBAGENT_TARGET 列的几份（装到家里的文件名 → 原文）；读不到时是为什么（只影响子代理这一段） */
   subagents: { ok: true; files: Map<string, string> } | { ok: false; why: string };
 }
 
@@ -116,17 +116,21 @@ export function readSources(repo: string): { ok: true; value: Sources } | { ok: 
   };
 }
 
-/** 用户级子代理定义的原件在仓里的目录：只读 SUBAGENT_TARGET 列了名字的几份，不扫目录 */
-export const SUBAGENTS_DIR = 'agents/subagents';
+/** 子代理原件整段读不到时报告里那一行的名字（原件分在 agents/subagents/ 和 .claude/agents/ 两处，具体哪份写在原因里） */
+export const SUBAGENTS_KEY = '仓里的子代理定义';
 
 /**
- * agents/subagents/ 下列了名字的几份：读不到不挡规矩和 skill（旧检出里还没有它），子代理那一段报没查成。
- * frontmatter 里的 name 要和文件名对上：Claude Code 按 name 认子代理，对不上装上去就是另一个名字，派 haiku55 派不到。
+ * SUBAGENT_TARGET 列的几份（仓内路径）：读不到不挡规矩和 skill（旧检出里还没有它），子代理那一段报没查成。
+ * 一份读不到就整段不装：少装一份会让清单把已装的当成从名单里去掉了、撤掉。
+ * frontmatter 里的 name 要和文件名对上：Claude Code 按 name 认子代理，对不上装上去就是另一个名字，按名字派不到。
+ * 装到家里用文件名：两份文件名一样就分不清该装哪份，整段不装。
  */
 function readSubagents(repo: string): Sources['subagents'] {
   const files = new Map<string, string>();
-  for (const file of SUBAGENT_TARGET.files) {
-    const rel = `${SUBAGENTS_DIR}/${file}`;
+  for (const rel of SUBAGENT_TARGET.files) {
+    const file = rel.slice(rel.lastIndexOf('/') + 1);
+    if (files.has(file))
+      return { ok: false, why: `SUBAGENT_TARGET 里有两份都叫 ${file}，装到家里会互相覆盖` };
     let text: string;
     try {
       text = readFileSync(join(repo, ...rel.split('/')), 'utf8');
