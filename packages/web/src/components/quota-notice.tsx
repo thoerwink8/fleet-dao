@@ -37,7 +37,7 @@ export function QuotaNotice({
     ...(rec?.detail ? [rec.detail] : []),
   ];
   return (
-    <div data-testid="quota-notice" className="mb-3">
+    <div data-testid="quota-notice">
       <Notice tone={tone} title={title}>
         {lines.length || org?.action ? (
           <ul className="mt-1 space-y-0.5 text-meta text-muted-foreground">

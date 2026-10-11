@@ -267,7 +267,7 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
 /**
  * 额度页账号池里一个窗口的一格（#1805）：一行字（已用 / 上限 · 几时清零 · 来源）加一根细进度条，数字等宽。
  * 比 QuotaCell 少的说明（先用它、快用完、读数过期、上游状态……）收进悬停提示，颜色和小标记照样在：
- * 先用它描品牌色边，快用完红字，读数过期换「读数过期」牌。窗口名只在窄屏（表头藏起来的时候）或有额外信息（模型组、上游自报名）时写。
+ * 先用它铺淡底、清零时刻加粗，快用完红字，读数过期换「读数过期」牌。窗口名只在窄屏（表头藏起来的时候）或有额外信息（模型组、上游自报名）时写。
  */
 export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
   const util = utilOf(w);
@@ -311,7 +311,8 @@ export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
           title={notes.join('；')}
           className={cn(
             'block w-full min-w-0 cursor-pointer rounded-md border border-transparent px-2 py-1 text-left focus-visible:ring-focus focus-visible:ring-ring focus-visible:outline-none',
-            hot && 'border-brand bg-accent',
+            // 先用它只铺一层悬停色的底、清零时刻加粗，不再描粗框（样板：层级靠字重和灰度，不靠边框，#1921）
+            hot && 'bg-accent',
           )}
         >
           <div
