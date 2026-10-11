@@ -1779,6 +1779,22 @@ export function createSeed(now: number): MockState {
         probeTier: 'unused',
         probeFailStreak: 0,
       },
+      // 线上的 Cursor 订阅有 256 条路由，其中 213 条没用途在用：一个渠道下一次铺几百行（#1798 线上点验）
+      ...Array.from({ length: 213 }, (_, i) => ({
+        id: `r-cursor-bulk-${String(i + 1).padStart(3, '0')}`,
+        channelId: 'ch-cursor',
+        poolId: 'cursor-pro',
+        modelId: 'cursor-auto',
+        hostId: 'cursor-agent' as const,
+        alive: false,
+        probe: {
+          state: 'skipped' as const,
+          at: at(-5),
+          detail: '没有哪个阶段在用这条路由，不花额度去探',
+        },
+        probeTier: 'unused' as const,
+        probeFailStreak: 0,
+      })),
     ],
     // 路由两层（#574）：用途 → 模型顺序，模型 → 路由顺序（和真后端那两张表一个形状）。
     purposes: {

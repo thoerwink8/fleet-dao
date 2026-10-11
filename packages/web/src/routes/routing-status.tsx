@@ -515,6 +515,11 @@ function ProbeBanner({
   );
 }
 
+/** 已关、未使用、已下架、池暂停：不是坏了，默认折起来（渠道里可能有几百条）。 */
+const QUIET_KINDS: ReadonlySet<RouteStateKind> = new Set(['off', 'unused', 'retired', 'held']);
+const ROUTE_QUIET_FIRST = 20;
+const ROUTE_QUIET_STEP = 50;
+
 /** 路由行的先后：该修的在前，要看一眼的其次，在线的，最后是已关、没用的。同一档里探过的在前、再按编号。 */
 const KIND_ORDER: readonly RouteStateKind[] = [
   'fault',
@@ -568,6 +573,9 @@ function ChannelDetail({
   const [openRoute, setOpenRoute] = useState<string | null>(null);
   // 探测记录里展开哪一行：页面选中的那一格（点格子、点「看最近一次」）就是展开的那行；点开着的那行再点一下折起来
   const [dismissed, setDismissed] = useState<number | null>(null);
+  // 折起来的已关、未使用路由：点开才铺，先铺 20 条，每次「再看」加 50 条
+  const [quietShown, setQuietShown] = useState(false);
+  const [quietExtra, setQuietExtra] = useState(0);
   const focusId = focus?.cell?.id;
   const openId = focusId !== undefined && focusId !== dismissed ? focusId : undefined;
   const pickCell = (cellId: number) => {
@@ -586,6 +594,42 @@ function ChannelDetail({
       a.id.localeCompare(b.id),
   );
   const idle = sorted.filter((r) => !activeFor(requests, r.id)).map((r) => r.id);
+  // 默认只铺要人看的；已关、未使用（人关的、没用途在用的、下架、池暂停）折成一行，点开再分批铺（#1798 线上点验：一个渠道 256 条）
+  const attention = sorted.filter((r) => !QUIET_KINDS.has(kindOf(r)));
+  const quiet = sorted.filter((r) => QUIET_KINDS.has(kindOf(r)));
+  const quietIndex = (id: string | undefined) =>
+    id === undefined ? -1 : quiet.findIndex((r) => r.id === id);
+  // 点路由行看最近一次、手风琴展开的那条恰好折在里面：自动展开并铺到它为止
+  const wantedIndex = Math.max(quietIndex(focus?.cell?.routeId), quietIndex(openRoute ?? undefined));
+  const quietOpen = quietShown || wantedIndex >= 0;
+  const quietCount = Math.max(ROUTE_QUIET_FIRST + quietExtra, wantedIndex + 1);
+  const quietOff = quiet.filter((r) => kindOf(r) !== 'unused').length;
+  const quietParts = [
+    quietOff > 0 ? `已关 ${quietOff} 条` : undefined,
+    quiet.length - quietOff > 0 ? `未使用 ${quiet.length - quietOff} 条` : undefined,
+  ].filter((x): x is string => x !== undefined);
+  const renderRow = (r: Route) => (
+    <RouteRow
+      key={r.id}
+      route={r}
+      kind={kindOf(r)}
+      lastCell={history.state === 'ok' ? history.latestByRoute.find((c) => c.routeId === r.id) : undefined}
+      model={models.find((m) => m.id === r.modelId)}
+      problem={problems.get(r.poolId)}
+      requests={requests}
+      blocked={blocked}
+      busy={busy}
+      now={now}
+      open={openRoute === r.id}
+      picked={focus?.cell?.routeId === r.id}
+      onToggle={() => setOpenRoute((cur) => (cur === r.id ? null : r.id))}
+      onPick={() => {
+        setDismissed(null);
+        onPickRoute(r.id);
+      }}
+      onProbe={() => onProbe([r.id])}
+    />
+  );
   const channelPools = [...new Set(routes.map((r) => r.poolId))].flatMap((id) => {
     const p = problems.get(id);
     return p ? [p] : [];
@@ -661,32 +705,48 @@ function ChannelDetail({
       {sorted.length === 0 ? (
         <p className="text-sub text-muted-foreground">这个渠道下一条路由都没有。</p>
       ) : (
-        <ol aria-label={`${card.channel.name} 的路由`} className="space-y-1.5">
-          {sorted.map((r) => (
-            <RouteRow
-              key={r.id}
-              route={r}
-              kind={kindOf(r)}
-              lastCell={
-                history.state === 'ok' ? history.latestByRoute.find((c) => c.routeId === r.id) : undefined
-              }
-              model={models.find((m) => m.id === r.modelId)}
-              problem={problems.get(r.poolId)}
-              requests={requests}
-              blocked={blocked}
-              busy={busy}
-              now={now}
-              open={openRoute === r.id}
-              picked={focus?.cell?.routeId === r.id}
-              onToggle={() => setOpenRoute((cur) => (cur === r.id ? null : r.id))}
-              onPick={() => {
-                setDismissed(null);
-                onPickRoute(r.id);
-              }}
-              onProbe={() => onProbe([r.id])}
-            />
-          ))}
-        </ol>
+        <>
+          {attention.length > 0 ? (
+            <ol aria-label={`${card.channel.name} 的路由`} className="space-y-1.5">
+              {attention.map(renderRow)}
+            </ol>
+          ) : null}
+          {quiet.length > 0 ? (
+            <div data-route-fold="quiet" className={attention.length > 0 ? 'mt-2' : undefined}>
+              <button
+                type="button"
+                aria-expanded={quietOpen}
+                aria-controls="route-fold-quiet"
+                onClick={() => setQuietShown(!quietOpen)}
+                className="inline-flex min-h-8 items-center gap-1 rounded-md px-2 text-meta text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <ChevronDown
+                  className={cn('size-3.5 transition-transform', quietOpen && 'rotate-180')}
+                  aria-hidden
+                />
+                {quietParts.join(' · ')}，{quietOpen ? '收起' : '点开看'}
+              </button>
+              {quietOpen ? (
+                <div id="route-fold-quiet">
+                  <ol aria-label={`${card.channel.name} 已关和未使用的路由`} className="mt-1.5 space-y-1.5">
+                    {quiet.slice(0, quietCount).map(renderRow)}
+                  </ol>
+                  {quiet.length > quietCount ? (
+                    <button
+                      type="button"
+                      data-route-fold="more"
+                      onClick={() => setQuietExtra(quietCount - ROUTE_QUIET_FIRST + ROUTE_QUIET_STEP)}
+                      className="mt-1.5 inline-flex min-h-10 items-center gap-1 rounded-md px-2 text-meta text-muted-foreground hover:bg-muted hover:text-foreground"
+                    >
+                      再看 {Math.min(ROUTE_QUIET_STEP, quiet.length - quietCount)} 条（还有{' '}
+                      {quiet.length - quietCount} 条没显示）
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </>
       )}
     </Panel>
   );

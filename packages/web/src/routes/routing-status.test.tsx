@@ -53,6 +53,16 @@ const openRoute = (routeId: string) => {
   return routeRow(routeId);
 };
 
+/** 已关、未使用的路由默认折成一行：点开（等折叠行出来再点）。 */
+const openQuiet = async () => {
+  const toggle = await waitFor(() => {
+    const el = document.querySelector('[data-route-fold="quiet"] button[aria-expanded]');
+    if (!(el instanceof HTMLElement)) throw new Error('折叠行还没出来');
+    return el;
+  });
+  if (toggle.getAttribute('aria-expanded') !== 'true') fireEvent.click(toggle);
+};
+
 /** 详情里的探针格子条（选中渠道的）。 */
 const historyStrip = () => {
   const el = document.querySelector('[data-history="strip"]');
@@ -194,8 +204,43 @@ describe('渠道状态页：渠道卡', () => {
     expect(routeRow('r-cursor').getAttribute('data-kind')).toBe('fault');
   });
 
+  test('一个渠道 200 多条路由：默认只铺要人看的，已关、未使用折成一行，点开先 20 条，「再看 50 条」分批', async () => {
+    const api = createMockApi({ live: false });
+    const routes = api.state().routes.filter((r) => r.channelId === 'ch-cursor');
+    expect(routes.length).toBeGreaterThan(200);
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
+    await waitFor(() => routeRow('r-cursor'));
+    const rows = () => document.querySelectorAll('[data-route]').length;
+    // 要人看的：不通 1 条、疑似换模型 1 条；其余 213 条没用途在用，全折起来
+    expect(rows()).toBe(2);
+    const fold = document.querySelector('[data-route-fold="quiet"] button[aria-expanded]') as HTMLElement;
+    expect(fold.textContent).toContain('未使用 213 条');
+    expect(fold.getAttribute('aria-expanded')).toBe('false');
+    // 点开：先 20 条，每次「再看」50 条
+    fireEvent.click(fold);
+    expect(rows()).toBe(2 + 20);
+    const more = () => document.querySelector('[data-route-fold="more"]') as HTMLElement;
+    expect(more().textContent).toContain('再看 50 条');
+    fireEvent.click(more());
+    expect(rows()).toBe(2 + 70);
+    // 再点一下折回去
+    fireEvent.click(fold);
+    expect(rows()).toBe(2);
+  });
+
+  test('点开折叠行：先铺前 20 条（第 20 条在、第 21 条还没有）', async () => {
+    const api = createMockApi({ live: false });
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
+    await waitFor(() => routeRow('r-cursor'));
+    await openQuiet();
+    const last = routeRow('r-cursor-bulk-020');
+    expect(last).toBeTruthy();
+    expect(document.querySelector('[data-route="r-cursor-bulk-021"]')).toBeNull();
+  });
+
   test('路由行按新列显示：上次（时刻、种类、触发者）、下次（时刻、档），活跃 / 不活跃 / 不在用各一句', async () => {
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-relay' });
+    await openQuiet();
     await waitFor(() => routeRow('r-rl-opus'));
     const last = (id: string) => routeRow(id).querySelector('[data-probe-last]')?.textContent;
     const next = (id: string) => routeRow(id).querySelector('[data-probe-next]')?.textContent;
@@ -206,6 +251,7 @@ describe('渠道状态页：渠道卡', () => {
     expect(last('r-rl-gpt')).toBe('上次 5 分钟前 · 连通 · 定时');
     expect(next('r-rl-gpt')).toMatch(/^下次约 明天 \d{2}:\d{2}（不活跃，每天）$/);
     // 不在用：不主动探
+    await openQuiet();
     expect(next('r-rl-fable')).toBe('不主动探（没用途在用）');
   });
 
@@ -337,6 +383,7 @@ describe('渠道状态页：每条路由', () => {
     const api = createMockApi({ live: false, now: () => t });
     const { qc } = renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-ds', api });
     await screen.findByRole('list', { name: '渠道状态' });
+    await openQuiet();
     fireEvent.click(screen.getByRole('button', { name: '全部立即探测' }));
     await waitFor(() => expect(routeRow('r-ds').getAttribute('data-probe')).toBe('queued'));
     expect(screen.getByRole('button', { name: '全部立即探测' })).toHaveProperty('disabled', true);
@@ -945,6 +992,7 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
       },
     });
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-dry', api });
+    await openQuiet();
     await waitFor(() => routeRow('r-dry'));
     const row = routeRow('r-dry');
     expect(row.getAttribute('data-kind')).toBe('unused');
@@ -982,9 +1030,9 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
       Array.from(document.querySelectorAll('ol[aria-label="渠道状态"] > [data-channel]')).map((el) =>
         el.getAttribute('data-channel'),
       );
-    fireEvent.click(screen.getByRole('button', { name: /^已关/ }));
+    fireEvent.click(document.querySelector('[data-filter="off"]') as Element);
     expect(shown()).toEqual(['ch-off']);
-    fireEvent.click(screen.getByRole('button', { name: /^未使用/ }));
+    fireEvent.click(document.querySelector('[data-filter="unused"]') as Element);
     expect(shown()).toEqual(['ch-dry']);
     fireEvent.click(document.querySelector('[data-filter="all"]') as Element);
     expect(shown().length).toBeGreaterThan(5);
