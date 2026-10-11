@@ -5,9 +5,10 @@ import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { formatAgo } from '../../../lib/format';
 import { useSlowNow } from '../../../lib/hooks';
-import { toneText } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
+import { Section } from '../../layout/section';
 import { StatusDot } from '../../layout/status-badge';
+import { inkClass } from '../../layout/tone';
 import { useRemoteView } from '../../node-notice';
 import { useTargetActions } from '../../task-actions';
 import { Button } from '../../ui/button';
@@ -55,7 +56,7 @@ export function BoardTree({
           title="出问题了（不含等你）"
           onClick={() => toggle('stuck', stuck)}
           className={cn(
-            'inline-flex h-10 items-center gap-1.5 rounded-full border px-3 text-sub transition-colors',
+            'inline-flex h-10 items-center gap-1.5 rounded-full border px-3 text-body transition-colors',
             stuck ? 'border-foreground bg-foreground text-background' : 'bg-card text-muted-foreground',
           )}
         >
@@ -69,19 +70,19 @@ export function BoardTree({
           title="等你拍（不含出问题）"
           onClick={() => toggle('you', needsYou)}
           className={cn(
-            'inline-flex h-10 items-center gap-1.5 rounded-full border px-3 text-sub transition-colors',
+            'inline-flex h-10 items-center gap-1.5 rounded-full border px-3 text-body transition-colors',
             needsYou ? 'border-foreground bg-foreground text-background' : 'bg-card text-muted-foreground',
           )}
         >
           <MessageCircleQuestion className="size-3.5" />
           只看等你的
         </button>
-        <span className="num ml-auto text-xs text-muted-foreground">
+        <span className="num ml-auto text-meta text-muted-foreground">
           {shown}/{running.length}
         </span>
       </div>
       {shown === 0 && (stuck || needsYou) ? (
-        <p className="mb-3 text-xs text-muted-foreground">
+        <p className="mb-3 text-meta text-muted-foreground">
           {stuck && needsYou
             ? '没有出问题的单，也没有等你拍的单'
             : stuck
@@ -104,46 +105,48 @@ function SegmentRow({ group, running }: { group: SegmentGroup; running: readonly
   const counts = countTones(running.filter((r) => segmentKeyOf(r) === group.key));
   const tone = group.total ? worstTone(counts) : 'wait';
   return (
-    <li className="overflow-hidden rounded-xl border bg-card" data-flow-lane={group.key}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        disabled={!group.items.length}
-        className="flex w-full items-start gap-2 py-2.5 pr-3 pl-2 text-left disabled:cursor-default"
-      >
-        <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground">
-          <ChevronRight
-            className={cn(
-              'size-4 transition-transform',
-              open && 'rotate-90',
-              !group.items.length && 'opacity-30',
-            )}
-          />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-2">
-            <StatusDot tone={tone} />
-            <span className="text-strong font-semibold">{segmentName(group.key)}</span>
-            <span className="ml-auto text-xs text-muted-foreground">
-              <span className="num text-foreground">{group.total}</span> 张在途
+    <li data-flow-lane={group.key}>
+      <Section flush>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          disabled={!group.items.length}
+          className="flex w-full items-start gap-2 py-2.5 pr-3 pl-2 text-left disabled:cursor-default"
+        >
+          <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground">
+            <ChevronRight
+              className={cn(
+                'size-4 transition-transform',
+                open && 'rotate-90',
+                !group.items.length && 'opacity-30',
+              )}
+            />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-2">
+              <StatusDot tone={tone} />
+              <span className="text-heading">{segmentName(group.key)}</span>
+              <span className="ml-auto text-meta text-muted-foreground">
+                <span className="num text-foreground">{group.total}</span> 张在途
+              </span>
+            </span>
+            <span className="mt-0.5 block truncate text-meta text-muted-foreground">
+              {segmentHintOf(group.key)}
+            </span>
+            <span className="num block truncate text-meta text-muted-foreground">
+              {avgText(group.stage, group.key)}
             </span>
           </span>
-          <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-            {segmentHintOf(group.key)}
-          </span>
-          <span className="num block truncate text-xs text-muted-foreground">
-            {avgText(group.stage, group.key)}
-          </span>
-        </span>
-      </button>
-      {open && group.items.length ? (
-        <ul className="divide-y border-t bg-muted/40">
-          {group.items.map((it) => (
-            <TicketRow key={nodeId.ticket(it)} item={it} />
-          ))}
-        </ul>
-      ) : null}
+        </button>
+        {open && group.items.length ? (
+          <ul className="divide-y border-t bg-muted">
+            {group.items.map((it) => (
+              <TicketRow key={nodeId.ticket(it)} item={it} />
+            ))}
+          </ul>
+        ) : null}
+      </Section>
     </li>
   );
 }
@@ -168,15 +171,15 @@ function TicketRow({ item }: { item: HomeRunning }) {
           className="flex min-h-11 min-w-0 flex-1 items-center gap-2 py-1.5 pr-1 pl-3 text-left"
         >
           <StatusDot tone={tone} />
-          <span className="num shrink-0 text-xs font-semibold text-muted-foreground">
+          <span className="num shrink-0 text-meta font-semibold text-muted-foreground">
             #{item.issueNumber}
           </span>
-          <span className="min-w-0 flex-1 truncate text-sm">{item.title}</span>
-          <span className={cn('max-w-24 shrink-0 truncate text-xs font-medium', toneText[tone])}>
+          <span className="min-w-0 flex-1 truncate text-body">{item.title}</span>
+          <span className={cn('max-w-24 shrink-0 truncate text-meta font-medium', inkClass[tone])}>
             {statusTextOf(item)}
           </span>
           {stamp ? (
-            <span className="num w-16 shrink-0 text-right text-caption text-muted-foreground">
+            <span className="num w-16 shrink-0 text-right text-meta text-muted-foreground">
               {formatAgo(stamp, now)}
             </span>
           ) : null}
