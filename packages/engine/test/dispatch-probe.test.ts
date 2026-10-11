@@ -453,6 +453,47 @@ describe('派前探测', () => {
     expect(got).toMatchObject({ kind: 'pass', probed: true, label: 'grok-4.7' });
   });
 
+  // 验收条 2：dispatch-probe 里没有 kept 分支（上一次探通未满 2 小时就按上一次放行的那一支）。
+  // 钉住它的做法：四条执行方式（claude-code、cursor-agent、grok、mirasim）各造一条「20 分钟前探通」的路由，
+  // 派前一律真探、结论一律写回带 trigger: dispatch。只要谁再按执行方式放行（kept 回来），这里就有命中的那条不真探。
+  it('不论执行方式：四条路由都是 20 分钟前探通，派前一律真探、一律写回', async () => {
+    const hosts = [
+      { hostId: 'claude-code', routeId: 'claude:a:claude-code', modelId: 'a' },
+      { hostId: 'cursor-agent', routeId: 'cursor:b:cursor-agent', modelId: 'b' },
+      { hostId: 'grok', routeId: 'grok:c:grok', modelId: 'c' },
+      { hostId: 'mirasim', routeId: 'mirasim-relay:d:mirasim', modelId: 'd' },
+    ] as const;
+    const targets = hosts.map((host) =>
+      target({
+        routeId: host.routeId,
+        hostId: host.hostId,
+        modelId: host.modelId,
+        previous: { state: 'ok', at: new Date(NOW.getTime() - 20 * 60_000), detail: '答上了：OK' },
+      }),
+    );
+    const called: string[] = [];
+    const h = harness(targets, {
+      probers: Object.fromEntries(
+        hosts.map((host) => [
+          host.hostId,
+          async () => {
+            called.push(host.hostId);
+            return { kind: 'answered', detail: '答上了：OK' };
+          },
+        ]),
+      ),
+    });
+    for (const host of hosts) {
+      const got = await probeAssignedRoute(h.deps, createProbeLock(), {
+        routeId: host.routeId,
+        label: host.modelId,
+      });
+      expect(got).toMatchObject({ kind: 'pass', probed: true });
+    }
+    expect(called).toEqual(['claude-code', 'cursor-agent', 'grok', 'mirasim']);
+    expect(h.saved.map((s) => s.trigger)).toEqual(['dispatch', 'dispatch', 'dispatch', 'dispatch']);
+  });
+
   it('【故意造出的失败】探测本身抛错：按不通处理，不写成通', async () => {
     const t = target({ previous: null });
     let probes = 0;

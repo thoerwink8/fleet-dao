@@ -30,9 +30,20 @@ export interface PickThenProbeFailure extends DispatchProbeFail {
   routeId: string;
 }
 
-/** 「一轮」已经真探了几条：验收按族问好几轮（每族一次），共用一个 3 条的上限，别每族各探 3 条。 */
+/**
+ * 「一轮」的共享状态：真探了几条、已经打掉哪几条。验收按族问好几轮（每族一次）时跨调用共用一份：
+ * - 上限是「这一轮真探了几条」，不是「失败了几条」——探通的那条也占名额，不然换了族又能再探三条
+ *   （一轮真探 3 条是硬上限，和各族问几轮无关）。
+ * - 打掉的名单也共用：三条都不通时要把每一族打掉的每一条都带上，不能只留最后一个族那一条。
+ */
 export interface ProbeBudget {
   probed: number;
+  failures: PickThenProbeFailure[];
+}
+
+/** 跨调用共用一份名额和打掉名单（验收按族问好几轮时给；不给就这一次算一轮）。 */
+export function createProbeBudget(): ProbeBudget {
+  return { probed: 0, failures: [] };
 }
 
 export interface PickThenProbeDeps {
@@ -45,13 +56,13 @@ export interface PickThenProbeDeps {
   probe: AssignedProber;
   /** 探不通的那一条：放掉它预占的名额。抛了只记日志，不改这一轮的结果。 */
   onUnprobed?: (route: RouteChoice) => Promise<void>;
-  /** 跨调用共用的名额（验收按族问好几轮时给；不给就这一次算一轮）。 */
+  /** 跨调用共用的名额和打掉名单（验收按族问好几轮时给；不给就这一次算一轮）。 */
   budget?: ProbeBudget;
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
 
 export type PickThenProbeOutcome =
-  /** 选到一条、探通了：可以起会话。failures 是先探不通、被换掉的那几条。 */
+  /** 选到一条、探通了：可以起会话。failures 是先探不通、被换掉的那几条（含共用预算里别的族打掉的）。 */
   | { kind: 'picked'; route: RouteChoice; why: string; failures: PickThenProbeFailure[] }
   /** 选路自己说派不出（等空位 / 等额度 / 一条能用的都没有）：没探，原样交回。 */
   | { kind: 'unavailable'; result: Extract<PickRouteResult, { ok: false }>; failures: PickThenProbeFailure[] }
@@ -64,7 +75,7 @@ export function pickThenProbeStopText(failures: readonly PickThenProbeFailure[])
 }
 
 /**
- * 选一条就派前探一次，不通就避开它再选，一轮最多 PICK_THEN_PROBE_LIMIT 条真探。
+ * 选一条就派前探一次，不通就避开它再选，一轮最多 PICK_THEN_PROBE_LIMIT 条真探（共用预算时跨调用一起数）。
  * 探通的直接交回（带这一轮打掉的几条）；探满 3 条回 exhausted；选路说派不出回 unavailable。
  * avoidRouteIds 是调用方本来就要避开的（老避让、已经挑过的），在这里往下接着攒。
  */
@@ -73,16 +84,20 @@ export async function pickThenProbe(
   input: { avoidRouteIds?: readonly string[] } = {},
 ): Promise<PickThenProbeOutcome> {
   const avoid = [...(input.avoidRouteIds ?? [])];
-  const failures: PickThenProbeFailure[] = [];
-  const budget = deps.budget ?? { probed: 0 };
+  // 共用的预算里记着前面几次调用打掉的每一条；这一次也往里攒，停下来时一起交回（验收三条都不通要带全）。
+  const budget = deps.budget ?? createProbeBudget();
+  const failures = budget.failures;
   for (;;) {
-    if (budget.probed >= PICK_THEN_PROBE_LIMIT) return { kind: 'exhausted', failures };
+    if (budget.probed >= PICK_THEN_PROBE_LIMIT) return { kind: 'exhausted', failures: [...failures] };
     const got = await deps.pick(avoid);
-    if (!got.ok) return { kind: 'unavailable', result: got, failures };
+    if (!got.ok) return { kind: 'unavailable', result: got, failures: [...failures] };
     const probe = await deps.probe({ routeId: got.route.routeId, label: got.route.modelId });
-    if (probe.kind === 'pass') return { kind: 'picked', route: got.route, why: got.why, failures };
+    // 真探过的都占名额——探通的那条也算：不这样，跨族共用预算时第一族探两条失败、第三条探通后，
+    // 第二族还能再探三条，一轮就超过 3 条了。没真探的（复用了 15 分钟内的旧结论、按规矩没探）不占。
+    if (probe.kind === 'pass' ? probe.probed : probe.counted) budget.probed += 1;
+    if (probe.kind === 'pass')
+      return { kind: 'picked', route: got.route, why: got.why, failures: [...failures] };
     failures.push({ routeId: got.route.routeId, label: probe.label, detail: probe.detail });
-    if (probe.counted) budget.probed += 1;
     // 这条不会进起会话：它预占的名额当场放掉，别占着池等它过期。放不掉只记日志，不改这一轮的结果。
     if (deps.onUnprobed) {
       try {

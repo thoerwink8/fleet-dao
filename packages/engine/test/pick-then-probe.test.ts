@@ -3,9 +3,9 @@
 import { describe, expect, it } from 'vitest';
 import type { PickRouteResult, RouteChoice } from '../src/ports.ts';
 import {
+  createProbeBudget,
   PICK_THEN_PROBE_LIMIT,
   type PickThenProbeFailure,
-  type ProbeBudget,
   pickThenProbe,
   pickThenProbeStopText,
 } from '../src/real/pick-then-probe.ts';
@@ -130,8 +130,8 @@ describe('pickThenProbe：探不通时换下一条、三条都不通就派不出
 });
 
 describe('pickThenProbe：跨调用共用的名额（验收按族问好几轮）', () => {
-  it('budget 跨调用共用：第二族不再各探 3 条', async () => {
-    const budget: ProbeBudget = { probed: 0 };
+  it('budget 跨调用共用：第一族用满 3 条，第二族一条也不探', async () => {
+    const budget = createProbeBudget();
     // 第一族：a、b、c 都不通 → 用满 3 条
     const first = line(['a', 'b', 'c', 'd']);
     const p1 = prober([]);
@@ -146,8 +146,49 @@ describe('pickThenProbe：跨调用共用的名额（验收按族问好几轮）
     expect(p2.probed).toEqual([]);
   });
 
+  it('返工：探通的那条也占名额——第一族 2 条不通、第 3 条探通，第二族不再有 3 条可探', async () => {
+    const budget = createProbeBudget();
+    // 第一族：a、b 不通，c 探通 → 真探 3 条（含探通的 c）
+    const first = line(['a', 'b', 'c']);
+    const p1 = prober(['c']);
+    const one = await pickThenProbe({ pick: first.pick, probe: p1.probe, budget });
+    expect(one.kind).toBe('picked');
+    expect(p1.probed).toEqual(['a', 'b', 'c']);
+    expect(budget.probed).toBe(3);
+    // 第二族：名额已满，一条也不探
+    const second = line(['x', 'y']);
+    const p2 = prober(['x']);
+    const two = await pickThenProbe({ pick: second.pick, probe: p2.probe, budget });
+    expect(two.kind).toBe('exhausted');
+    expect(p2.probed).toEqual([]);
+  });
+
+  it('返工：跨族共用的打掉名单——第一族打掉 a、第二族打掉 x，第三族 exhausted 带上两条', async () => {
+    const budget = createProbeBudget();
+    // 第一族：a 不通 → 打掉 a（占 1 条）
+    const p1 = prober([]);
+    const one = await pickThenProbe({ pick: line(['a']).pick, probe: p1.probe, budget });
+    expect(one.kind).toBe('unavailable'); // 避开 a 之后选路说派不出
+    // 第二族：用一个「一条都没有」的选路，打掉 x、y（占 2 条，累计满 3）
+    const second = line(['x', 'y']);
+    const p2 = prober([]);
+    const two = await pickThenProbe({ pick: second.pick, probe: p2.probe, budget });
+    expect(two.kind).toBe('exhausted');
+    expect(p2.probed).toEqual(['x', 'y']);
+    // 第三族：名额已满，exhausted 必须带上前面两族打掉的每一条，不能只留最后一个族那两条
+    const p3 = prober([]);
+    const three = await pickThenProbe({ pick: line(['z']).pick, probe: p3.probe, budget });
+    expect(three.kind).toBe('exhausted');
+    expect(p3.probed).toEqual([]);
+    expect(three.failures.map((f) => f.routeId)).toEqual(['a', 'x', 'y']);
+    expect(pickThenProbeStopText(three.failures)).toContain('m-a 不通（a 网络不通）');
+    expect(pickThenProbeStopText(three.failures)).toContain('m-x 不通（x 网络不通）');
+    expect(pickThenProbeStopText(three.failures)).toContain('m-y 不通（y 网络不通）');
+  });
+
   it('起点就是 exhausted：一开始名额满了就不探', async () => {
-    const budget: ProbeBudget = { probed: 3 };
+    const budget = createProbeBudget();
+    budget.probed = 3;
     const { pick } = line(['a']);
     const { probe, probed } = prober(['a']);
     const got = await pickThenProbe({ pick, probe, budget });

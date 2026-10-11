@@ -106,11 +106,12 @@ export function familyPickerFrom(
   uiWork = false,
   /**
    * 派前探测（#1798 片 4）：给了就选到一条先探一次（活动 probeAssignedRoute，15 分钟新鲜线），探不通避开它再选，
-   * 一轮最多 3 条（budget 跨族共用）。不给 = 老样子，选到就交回（冷验收的老测试、还没接探针的进程）。
+   * 一轮最多 3 条真探（探通的也算，budget 跨族共用一份，不每族各算一轮）。不给 = 老样子，选到就交回
+   * （冷验收的老测试、还没接探针的进程）。
    */
   probeDeps?: {
     probe: AssignedProber;
-    /** 跨族共用的名额（一轮验收最多探 3 条）：不给就每族各算一轮。 */
+    /** 跨族共用的名额和打掉名单（CreateProbeBudget 造）：不给就每族各算一轮。 */
     budget?: ProbeBudget;
     /** 探不通的那一条：放掉它预占的名额。 */
     onUnprobed?: (route: RouteChoice) => Promise<void>;
@@ -150,7 +151,7 @@ export function familyPickerFrom(
           return undefined;
         }
         if (outcome.kind === 'exhausted') {
-          // 探不通的这几条别再来一遍：记进避开，下一族问的时候（或下一次重来）不重复探
+          // 一轮真探的名额用满了（跨族共用）：这一族当成没挑到，别再来一遍
           for (const f of outcome.failures) if (!skipped.includes(f.routeId)) skipped.push(f.routeId);
           probeDeps.onProbeFailed?.(want, outcome.failures);
           onNotPicked?.(want, {

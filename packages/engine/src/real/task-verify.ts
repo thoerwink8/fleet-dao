@@ -54,7 +54,7 @@ import type { EngineGitHub } from './github-ports.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import { mapped } from './mirror.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
-import type { AssignedProber, ProbeBudget } from './pick-then-probe.ts';
+import { type AssignedProber, createProbeBudget } from './pick-then-probe.ts';
 import type { SegmentReservations } from './runs-writer.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
 import { sweepRunDirs } from './task-segment.ts';
@@ -315,9 +315,9 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     const waits: PickWait[] = [];
     // 选路给这一次验收预占的名额（#757）：每挑中一次记下，收场（下面的 finally）一个个放掉，开跑了的放一次什么都不做
     const reservations: string[] = [];
-    // 派前探测（#1798 片 4）：一轮验收最多真探 3 条，跨族共用（别每族各探 3 条）。留给探不通那几条的池名额
-    // 当场放掉：没进起会话，不能占着池等到过期。
-    const probeBudget: ProbeBudget = { probed: 0 };
+    // 派前探测（#1798 片 4）：一轮验收最多真探 3 条，跨族共用（探通的也算名额，别每族各探 3 条）。留给探不通
+    // 那几条的池名额当场放掉：没进起会话，不能占着池等到过期。
+    const probeBudget = createProbeBudget();
     const picker = familyPickerFrom(
       async (pickInput) => {
         const got = await deps.pickRoute({ ...pickInput, reserve: { segment: 'verify' } }, ctx);

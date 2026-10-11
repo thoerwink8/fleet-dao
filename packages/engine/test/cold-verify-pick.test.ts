@@ -1,9 +1,13 @@
 // 按族挑模型（#555-2 装配侧）的测试：0006 的顺序、跳过写这张单的族、挑不出来回 undefined（不许拿默认模型顶上）、
 // 选路回了别的族不替它改名、读库读不到要**抛**（不许当成「这个族没有」——那是拿没查成当没问题）。
 
+import type { RouteProbeTarget } from '@fleet-dao/db';
 import { acceptancePurpose } from '@fleet-dao/shared/flow-purposes';
 import { describe, expect, it } from 'vitest';
 import { type FamilyPickDeps, familyPickerFrom, pickFamilyModel } from '../src/cold-verify-pick.ts';
+import { probeAssignedRoute } from '../src/jobs/dispatch-probe.ts';
+import type { RouteProbeJobDeps } from '../src/jobs/route-probe.ts';
+import { createProbeLock } from '../src/jobs/route-probe-now.ts';
 import type { PickRouteInput, PickRouteResult } from '../src/ports.ts';
 
 const ORDER = ['gpt', 'grok', 'claude', 'deepseek', 'kimi'] as const;
@@ -202,7 +206,7 @@ describe('familyPickerFrom：接到真选路上（避开别的族、不替选路
   });
 });
 
-// #1798 片 4：验收选到一条路由时也先派前探一次（15 分钟新鲜线），探不通避开它再选，一轮最多 3 条。
+// #1798 片 4：验收选到一条路由时也先派前探一次（15 分钟新鲜线），探不通避开它再选，一轮最多 3 条（探通的也算）。
 describe('familyPickerFrom：派前探测（#1798 片 4）', () => {
   function fakePort(pick: (input: PickRouteInput) => PickRouteResult) {
     const calls: PickRouteInput[] = [];
@@ -242,13 +246,67 @@ describe('familyPickerFrom：派前探测（#1798 片 4）', () => {
     });
   }
 
-  it('验收选到 20 分钟前探通的路由：先探一次（15 分钟新鲜线）', async () => {
-    const port = candidates(['r1']);
-    const { probe, probed } = prober(['r1']);
-    const deps = familyPickerFrom(port.pickRoute, ORDER, 'review', undefined, false, { probe })('task-1');
+  it('验收选到 20 分钟前探通的路由：真探一次（接真 probeAssignedRoute，15 分钟新鲜线）', async () => {
+    // 探针不是假回调：接真的 probeAssignedRoute。上一次探通在 20 分钟前（过了 15 分钟线）——必须真探；
+    // 上一次在 5 分钟前（线内）——不该再探。新鲜线被改回 2 小时，第一条断言就会红。
+    const now = new Date('2026-10-11T08:00:00.000Z');
+    const targetAt = (agoMinutes: number): RouteProbeTarget => ({
+      routeId: 'r1',
+      hostId: 'grok',
+      channelId: 'grok',
+      channelName: 'Grok',
+      billing: 'subscription',
+      channelEnabled: true,
+      identityCheck: false,
+      poolId: 'p-grok',
+      runAsUser: null,
+      orgKind: null,
+      modelId: 'm-r1',
+      modelName: 'R1',
+      upstreamModel: 'm-r1',
+      modelRetiredAt: null,
+      inUse: true,
+      alive: true,
+      lastRunAt: null,
+      failStreak: 0,
+      previous: { state: 'ok', at: new Date(now.getTime() - agoMinutes * 60_000), detail: '答上了：旧' },
+    });
+    const harness = (target: RouteProbeTarget) => {
+      let probes = 0;
+      const deps: RouteProbeJobDeps = {
+        targets: async () => [target],
+        probers: {
+          grok: async () => {
+            probes += 1;
+            return { kind: 'answered', detail: '答上了：OK' };
+          },
+        },
+        sessionOrg: async () => ({ ok: true, org: 'carpool' }),
+        save: async () => 'saved',
+        runs: { start: async () => 1, finish: async () => {} },
+        now: () => now,
+        sleep: async () => {},
+        log: () => {},
+      };
+      const probe = (input: { routeId: string; label: string }) =>
+        probeAssignedRoute(deps, createProbeLock(), input);
+      return { probe, probes: () => probes };
+    };
+
+    const old = harness(targetAt(20));
+    const deps = familyPickerFrom(candidates(['r1']).pickRoute, ORDER, 'review', undefined, false, {
+      probe: old.probe,
+    })('task-1');
     const got = await deps.pickRouteForFamily('grok');
-    expect(probed).toEqual(['r1']);
+    expect(old.probes()).toBe(1);
     expect(got?.routeId).toBe('r1');
+
+    const fresh = harness(targetAt(5));
+    const depsFresh = familyPickerFrom(candidates(['r1']).pickRoute, ORDER, 'review', undefined, false, {
+      probe: fresh.probe,
+    })('task-1');
+    expect(await depsFresh.pickRouteForFamily('grok')).toBeDefined();
+    expect(fresh.probes()).toBe(0);
   });
 
   it('探不通就换下一条：第一条不通、第二条通，交回第二条，失败的记进避开', async () => {
