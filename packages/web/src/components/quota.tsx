@@ -6,6 +6,7 @@ import {
   isUseItOrLoseIt,
   upstreamStatusLabel,
   utilOf,
+  windowRawNote,
   windowTitle,
 } from '../lib/catalog';
 import { formatAgo, formatCount, formatIn, formatPercent, formatUsd } from '../lib/format';
@@ -152,7 +153,6 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
       className={cn(
         'rounded-md border p-2.5 transition-colors',
         hot && 'border-brand bg-accent shadow-brand-ring',
-        full && 'border-st-fail-line bg-st-fail-soft',
       )}
       data-hot={hot || undefined}
       data-full={full || undefined}
@@ -161,10 +161,7 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
     >
       {/* 表头已经写了是哪种窗：格子里只在多出信息（按模型组、上游自报的窗名）时才再写一遍，省下一行（驾驶舱改版 2026-10-07）。模型名放不下就换行，不单行截成「o...」。 */}
       {w.scope || w.window === 'other' ? (
-        <div
-          className="mb-1 min-w-0 break-words text-meta text-muted-foreground"
-          title={`上游原名：${w.label}`}
-        >
+        <div className="mb-1 min-w-0 break-words text-meta text-muted-foreground" title={windowRawNote(w)}>
           {windowTitle(w)}
         </div>
       ) : null}
@@ -298,7 +295,7 @@ export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
   const popNotes = [
     ...notes,
     `读法：${w.source}（${w.reading === 'measured' ? '从官方或网页接口读到的' : '读不到，按我们自己的用量估的'}）`,
-    extraLabel ? null : `上游原名：${w.label}`,
+    windowRawNote(w),
     w.statusRaw && w.upstreamStatus && w.upstreamStatus !== 'allowed' ? `上游原话：${w.statusRaw}` : null,
   ].filter((n): n is string => Boolean(n));
   return (
@@ -315,12 +312,14 @@ export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
           className={cn(
             'block w-full min-w-0 cursor-pointer rounded-md border border-transparent px-2 py-1 text-left focus-visible:ring-focus focus-visible:ring-ring focus-visible:outline-none',
             hot && 'border-brand bg-accent',
-            full && 'border-st-fail-line bg-st-fail-soft',
           )}
         >
           <div
-            className={cn('truncate text-meta text-muted-foreground', !extraLabel && 'quota-cell-label')}
-            title={`上游原名：${w.label}`}
+            className={cn(
+              'min-w-0 break-words text-meta text-muted-foreground',
+              !extraLabel && 'quota-cell-label',
+            )}
+            title={windowRawNote(w)}
           >
             {windowTitle(w)}
           </div>

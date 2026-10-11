@@ -10,6 +10,13 @@
 //    Haiku 档除 fleet-fixer 外不许有 Edit。
 // 4. 汇报：每个正文都要求汇报首行写自己的模型 id（派完核对实际 id 靠它）；Haiku 档都限回合数。
 // 5. 指挥官技能、参考页、标准路径清单都写着「默认用 fleet-* 子代理」和这条测试。
+// 6. 通用版随同步装到每台机器的用户级（决定 0079，创始人 2026-10-11「我希望未来每台有fleet-dao的机器，包括vps，都能具备最佳
+//    subagent方式」，20:44「子代理 PR #1886：改成通用版，VPS 照装」）：
+//    - .claude/agents/ 下每份都有同名通用版 agents/subagents/<名>.md：name、description、model 逐份一致，tools 只少
+//      mcp__codegraph__*，tools 以外的 frontmatter 逐行一致；通用版也过上面那套定义检查。
+//    - 通用版全文不含仓专属词（词表 REPO_ONLY，只写这一处），tools 不含 mcp__codegraph__。
+//    - packages/agents-sync/src/targets.ts 的 SUBAGENT_TARGET 恰好列着 agents/subagents/ 下全部 17 份（16 通用版加
+//      haiku55，按文本核，不跨包 import），不装 .claude/agents/ 那份；参考页写着「同步装的是通用版」。
 // 另钉一处（#1844 方案第十节 9b）：fleet-ui-builder 照 docs/design/驾驶舱界面.md、lint-design 必须绿，不再指旧令牌 #182；
 // fleet-ui-verifier 点验对照这份规范。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -121,6 +128,103 @@ function uiDesignProblems(builder: string, verifier: string): string[] {
 const SKILL = read(`${ROOT}agents/skills/commander/SKILL.md`);
 const GUIDE = read(`${ROOT}agents/skills/commander/references/子代理选模型.md`);
 const STANDARD = read(`${ROOT}packages/conventions/standard-paths.json`);
+const TARGETS = read(`${ROOT}packages/agents-sync/src/targets.ts`);
+
+/** 通用版的目录：装到每台机器用户级的原件都在这里（和 haiku55 同目录） */
+const GENERIC_DIR = `${ROOT}agents/subagents/`;
+const genericFiles = existsSync(GENERIC_DIR)
+  ? readdirSync(GENERIC_DIR)
+      .filter((f) => f.endsWith('.md'))
+      .sort()
+  : [];
+const genericTexts = Object.fromEntries(genericFiles.map((f) => [f, read(`${GENERIC_DIR}${f}`)]));
+/** 某个通用版的原文；文件不在明确报错 */
+function genericOf(file: string): string {
+  const t = genericTexts[file];
+  if (t === undefined) throw new Error(`agents/subagents/${file} 不存在`);
+  return t;
+}
+
+/** 同步该装的：agents/subagents/ 下的文件名，haiku55 加名单里每一份的通用版（排好序） */
+const SYNC_WANT = ['haiku55.md', ...Object.keys(ROSTER).map((n) => `${n}.md`)].sort();
+
+/**
+ * 仓专属词：通用版装到每台机器、别的仓的会话也读，正文里出现这些就是把 fleet-dao 的规矩带过去了。
+ * 加词只改这里。每项：说法、怎么认、一句故意造出失败用的样例。
+ */
+const REPO_ONLY: ReadonlyArray<readonly [string, RegExp, string]> = [
+  ['pnpm', /pnpm/, '开 PR 用 `pnpm pr:open`'],
+  [
+    'pr:open 这类本仓脚本',
+    /\b(pr:open|issue:new|issue:close|agents:sync|progress:note)\b/,
+    '收尾跑 issue:close',
+  ],
+  ['fleet 命令', /(^|[^\w-])fleet(?![\w-])/m, '用 `fleet say` 报进度'],
+  ['codegraph', /codegraph/i, '先用 codegraph 查'],
+  ['_tmp', /_tmp/, '截图放 `_tmp/ui/`'],
+  ['docs/', /docs\//, '先读 `docs/design.md`'],
+  ['specs/', /specs\//, '方案写进 `specs/1-x/方案.md`'],
+  ['AGENTS.md', /AGENTS\.md/, '照 AGENTS.md 做'],
+  ['.claude/', /\.claude\//, '定义在 `.claude/agents/`'],
+  ['决定编号', /决定\s*0\d/, '见决定 0036'],
+  ['agents/ 下的路径', /(^|[^\w.])agents\//m, '不碰 `agents/skills/`'],
+  ['packages/ 下的路径', /packages\//, '只改 `packages/web`'],
+  ['check-brief', /check-brief/, '跑 check-brief.mjs'],
+  ['standard-paths', /standard-paths/, '先读 standard-paths.json'],
+  ['shared-rules', /shared-rules/, '通用段在 shared-rules.md'],
+  ['lint-design', /lint-design/, 'lint-design 必须绿'],
+  ['指挥官', /指挥官/, '由指挥官升档'],
+  ['驾驶舱', /驾驶舱/, '点验驾驶舱'],
+  ['fleet-dao', /fleet-dao/, '照 fleet-dao 的规矩'],
+];
+
+/** frontmatter 原文的各行（认不出明确报错） */
+function fmLines(file: string, text: string): string[] {
+  const m = /^---\n([\s\S]*?)\n---\n/.exec(text);
+  if (!m) throw new Error(`${file}：认不出 frontmatter`);
+  return (m[1] ?? '').split('\n');
+}
+
+const toolsOf = (fm: Record<string, string>) =>
+  (fm.tools ?? '')
+    .split(',')
+    .map((t) => t.trim())
+    .filter((t) => t !== '');
+
+/** 一份项目级定义和它的通用版对不上的地方；空数组才算对。通用版缺了明确报出来 */
+function pairProblems(file: string, project: string, generic: string | undefined): string[] {
+  if (generic === undefined) return [`${file}：agents/subagents/ 下没有同名通用版`];
+  const p = parse(file, project).fm;
+  const g = parse(file, generic).fm;
+  const out: string[] = [];
+  for (const key of ['name', 'description', 'model'] as const)
+    if (p[key] !== g[key]) out.push(`${file}：通用版的 ${key} 和 .claude/agents/ 那份不一样`);
+  const strip = (lines: string[]) => lines.filter((l) => !/^tools:/.test(l));
+  if (strip(fmLines(file, project)).join('\n') !== strip(fmLines(file, generic)).join('\n'))
+    out.push(`${file}：通用版 tools 以外的 frontmatter 和 .claude/agents/ 那份不一样`);
+  const want = toolsOf(p).filter((t) => !t.startsWith('mcp__codegraph__'));
+  if (toolsOf(g).join(', ') !== want.join(', '))
+    out.push(`${file}：通用版的 tools 该是「${want.join(', ')}」（只去掉 mcp__codegraph__*）`);
+  return out;
+}
+
+/** 一份通用版里的仓专属内容；空数组才算对 */
+function genericProblems(file: string, text: string): string[] {
+  const out: string[] = [];
+  if (toolsOf(parse(file, text).fm).some((t) => t.startsWith('mcp__codegraph__')))
+    out.push(`${file}：通用版的 tools 带了 mcp__codegraph__`);
+  for (const [label, re] of REPO_ONLY) if (re.test(text)) out.push(`${file}：通用版里有仓专属的「${label}」`);
+  return out;
+}
+
+/** targets.ts 的 SUBAGENT_TARGET 里 files 列的仓内路径（排好序）；认不出这一项明确报错，不当成空名单 */
+function syncFiles(targets: string): string[] {
+  const block = /\nexport const SUBAGENT_TARGET\b[\s\S]*?\n\};/.exec(targets)?.[0];
+  if (block === undefined) throw new Error('packages/agents-sync/src/targets.ts 里认不出 SUBAGENT_TARGET');
+  const list = /\bfiles:\s*\[([^\]]*)\]/.exec(block)?.[1];
+  if (list === undefined) throw new Error('SUBAGENT_TARGET 里认不出 files: [...]');
+  return [...list.matchAll(/'([^']+)'/g)].map((m) => m[1] ?? '').sort();
+}
 
 describe('规矩：本仓子代理定义在 .claude/agents/，名单、模型、权限、汇报固定（决定 0036）', () => {
   it('名单：恰好是这 16 个 fleet-* 文件，一个不多一个不少', () => {
@@ -212,5 +316,91 @@ describe('规矩：本仓子代理定义在 .claude/agents/，名单、模型、
     expect(GUIDE).toContain('`.claude/agents/`');
     for (const name of Object.keys(ROSTER)) expect(GUIDE, name).toContain(`\`${name}\``);
     expect(STANDARD).toContain('.claude/agents/');
+  });
+});
+
+/** 参考页里写「同步装的是通用版」的那一句 */
+const GUIDE_SYNC =
+  /`pnpm agents:sync` 把这 16 份的通用版（`agents\/subagents\/` 下同名[^）]*）装到每台机器的 `~\/\.claude\/agents\/`/;
+
+describe('规矩：fleet-* 的通用版随 agents:sync 装到每台机器的用户级，本仓仍用 .claude/agents/ 那份（决定 0079）', () => {
+  it('每份 .claude/agents/fleet-*.md 都有同名通用版：name、description、model 一致，tools 只少 mcp__codegraph__*', () => {
+    expect(files.length).toBe(16);
+    expect(files.flatMap((f) => pairProblems(f, textOf(f), genericTexts[f]))).toEqual([]);
+  });
+
+  it('通用版也过同一套定义检查（完整模型 id、tools 白名单、带 Edit 的在独立工作树、Haiku 限回合、汇报首行写模型 id）', () => {
+    expect(files.flatMap((f) => problems(f, genericOf(f)))).toEqual([]);
+  });
+
+  it('通用版全文不含仓专属词、tools 不含 mcp__codegraph__', () => {
+    expect(files.flatMap((f) => genericProblems(f, genericOf(f)))).toEqual([]);
+  });
+
+  it('同步工具的名单（targets.ts 的 SUBAGENT_TARGET）恰好是 agents/subagents/ 下这 17 份，一个不多一个不少', () => {
+    expect(genericFiles).toEqual(SYNC_WANT);
+    expect(syncFiles(TARGETS)).toEqual(SYNC_WANT);
+  });
+
+  it('参考页写着：同步装的是通用版，本仓里项目级那份优先', () => {
+    expect(GUIDE).toMatch(GUIDE_SYNC);
+    expect(GUIDE).toContain('决定 0079');
+  });
+
+  it('【故意造出的失败】通用版缺一份、description 或 model 不一样、tools 以外的字段改了、tools 多去或少去：都查得出来', () => {
+    const f = 'fleet-builder.md';
+    const project = textOf(f);
+    const generic = genericOf(f);
+    expect(pairProblems(f, project, undefined)).toEqual([`${f}：agents/subagents/ 下没有同名通用版`]);
+    const desc = generic.replace(/^description: .*$/m, 'description: 改过的说明');
+    expect(desc).not.toBe(generic);
+    expect(pairProblems(f, project, desc)).toContain(
+      `${f}：通用版的 description 和 .claude/agents/ 那份不一样`,
+    );
+    const model = generic.replace(/^model: .*$/m, 'model: claude-opus-5-5');
+    expect(model).not.toBe(generic);
+    expect(pairProblems(f, project, model)).toContain(`${f}：通用版的 model 和 .claude/agents/ 那份不一样`);
+    const effort = generic.replace(/^effort: .*$/m, 'effort: low');
+    expect(effort).not.toBe(generic);
+    expect(pairProblems(f, project, effort)).toEqual([
+      `${f}：通用版 tools 以外的 frontmatter 和 .claude/agents/ 那份不一样`,
+    ]);
+    const lessTools = generic.replace(/^tools: .*$/m, 'tools: Read, Grep');
+    expect(lessTools).not.toBe(generic);
+    expect(pairProblems(f, project, lessTools).join('\n')).toMatch(/通用版的 tools 该是/);
+  });
+
+  it('【故意造出的失败】通用版里写进每一个仓专属词、tools 带回 codegraph：逐个查得出来', () => {
+    const f = 'fleet-builder.md';
+    const generic = genericOf(f);
+    for (const [label, , sample] of REPO_ONLY) {
+      const bad = generic.replace('做法：', `做法：${sample}。`);
+      expect(bad, '找不到「做法：」，这条失败造不出来').not.toBe(generic);
+      expect(genericProblems(f, bad), label).toContain(`${f}：通用版里有仓专属的「${label}」`);
+    }
+    const withCg = generic.replace(/^tools: (.*)$/m, 'tools: $1, mcp__codegraph__codegraph_explore');
+    expect(withCg).not.toBe(generic);
+    expect(genericProblems(f, withCg)).toContain(`${f}：通用版的 tools 带了 mcp__codegraph__`);
+    // 别的子代理的名字（fleet-reviewer 这种）不算 fleet 命令
+    expect(genericProblems(f, generic.replace('做法：', '做法：先让 fleet-reviewer 看。'))).toEqual([]);
+  });
+
+  it('【故意造出的失败】名单里去掉一份、多出一份、认不出 SUBAGENT_TARGET 或 files：都查得出来', () => {
+    const dropped = TARGETS.replace(/\n\s*'fleet-reviewer\.md',?/, '');
+    expect(dropped, 'targets.ts 里找不到 fleet-reviewer 那一项，这条失败造不出来').not.toBe(TARGETS);
+    expect(syncFiles(dropped)).not.toEqual(SYNC_WANT);
+    const extra = TARGETS.replace("'haiku55.md'", "'haiku55.md', 'fleet-x.md'");
+    expect(extra).not.toBe(TARGETS);
+    expect(syncFiles(extra)).not.toEqual(SYNC_WANT);
+    const gone = TARGETS.replace('export const SUBAGENT_TARGET', 'export const SOMETHING_ELSE');
+    expect(gone).not.toBe(TARGETS);
+    expect(() => syncFiles(gone)).toThrow(/认不出 SUBAGENT_TARGET/);
+    expect(() => syncFiles('\nexport const SUBAGENT_TARGET = {\n  dir: x,\n};')).toThrow(/认不出 files/);
+  });
+
+  it('【故意造出的失败】参考页删掉「同步装的是通用版」：查得出来', () => {
+    const cut = GUIDE.replace(GUIDE_SYNC, '');
+    expect(cut, '参考页里找不到那一句，这条失败造不出来').not.toBe(GUIDE);
+    expect(cut).not.toMatch(GUIDE_SYNC);
   });
 });

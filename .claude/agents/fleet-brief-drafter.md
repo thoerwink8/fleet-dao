@@ -1,6 +1,6 @@
 ---
 name: fleet-brief-drafter
-description: 写任务书草稿（Haiku 5.5）：按写全的规矩把需求写成四节单（场景、原话、已知的模块、怎么算做完），草稿写进 _tmp/ 并必须过 check-brief.mjs 的 PASS 才交出。
+description: 写任务书草稿（Haiku 5.5）：按交代里写全的格式和规矩把需求写成单子草稿，有检查脚本的必须过了才交出。
 model: claude-haiku-5-5
 effort: medium
 maxTurns: 20

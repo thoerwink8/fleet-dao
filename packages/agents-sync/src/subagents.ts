@@ -1,4 +1,5 @@
-// 用户级子代理定义（#1393）：仓里 agents/subagents/ 下、targets.ts 的 SUBAGENT_TARGET 列了名字的几份，整份拷到 ~/.claude/agents/。
+// 用户级子代理定义（#1393、决定 0079）：仓里 agents/subagents/ 下、targets.ts 的 SUBAGENT_TARGET 列了名字的几份
+// （haiku55 和 16 个 fleet-* 的通用版），整份拷到 ~/.claude/agents/。
 // 只认列了的文件名，不扫目录：~/.claude/agents/ 里机器上手写的（Explore.md、Plan.md 这类）一律不碰、不删。
 // 同名文件内容和仓里不一样：先整份备份到 ~/.fleet-dao/backups/<时间>/，再换成仓里的，报出来（这几份归仓里管，手改的会被换回）。
 // 清单 ~/.fleet-dao/agents-sync.json 的 subagents 记着装过哪几份：从 SUBAGENT_TARGET 里去掉的，清单里记着才撤（先备份），没记着的不碰。

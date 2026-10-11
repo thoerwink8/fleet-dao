@@ -1,6 +1,6 @@
 ---
 name: fleet-fixer
-description: 小修（Haiku 5.5，可写）：规格明确的小函数、已有失败测试的 bug 修复。测试先写好并点名跑过才算数；过不了就停下回报，由指挥官升 Sonnet。
+description: 小修（Haiku 5.5，可写）：规格明确的小函数、已有失败测试的 bug 修复。测试先写好并点名跑过才算数；过不了就停下回报，由派活的主会话升 Sonnet。
 model: claude-haiku-5-5
 effort: medium
 maxTurns: 25

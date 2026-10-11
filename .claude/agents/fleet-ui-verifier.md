@@ -1,6 +1,6 @@
 ---
 name: fleet-ui-verifier
-description: 页面点验（Sonnet 5.5，只读）：驾驶舱等已上线页面用浏览器真点一遍，截图、查控制台和网络报错，列出坏的和难看的。不改代码。
+description: 页面点验（Sonnet 5.5，只读）：已上线的页面用浏览器真点一遍，截图、查控制台和网络报错，列出坏的和难看的。不改代码。
 model: claude-sonnet-5-5
 effort: medium
 maxTurns: 40
