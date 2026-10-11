@@ -1,15 +1,6 @@
 // 路由页（/routing，#574）的白话和先看哪个：活不活由后端现算（db 的 routing-liveness.ts，判法只在那里），这里只管怎么说。
 
-import {
-  isOnDemandDetail,
-  poolFull,
-  poolOccupied,
-  probeCadenceMinutes,
-  ROUTE_PROBE_EVERY_MINUTES,
-  ROUTE_PROBE_STALE_MINUTES,
-  routeProbeStaleMinutes,
-  routingPurposeOf,
-} from '@fleet-dao/shared';
+import { poolFull, poolOccupied, routingPurposeOf } from '@fleet-dao/shared';
 import type {
   LivenessVerdict,
   RoutingLayerModel,
@@ -17,7 +8,6 @@ import type {
   RoutingLayerRoute,
 } from '../api/types';
 import { hostLabel, stageLabel } from './catalog';
-import { TIME } from './format';
 import { type ChannelOpen, modelSlotState } from './routing-order';
 import type { Tone } from './status';
 /** 活 = 完成色；死 = 失败色；不知道 = 停滞色（要人看，但不是坏了）。 */
@@ -158,23 +148,4 @@ export function countByVerdict(
   const out: Record<LivenessVerdict, number> = { live: 0, dead: 0, unknown: 0 };
   for (const p of purposes) out[p.verdict] += 1;
   return out;
-}
-
-/**
- * 探针的结论过期了没有：超过「这一档间隔 + 两轮」没更新，探针可能停了。
- * 原文写了退避或隔 30 分钟再探时按那一档（probeDetail，没有就看接得上的原因），不把故意放慢标成停了。
- * 引擎照上一次的结论派、写明（routing/choose.ts 的 probeNote），驾驶舱同一条线标出来，不改结论。
- */
-export function probeStale(
-  r: Pick<RoutingLayerRoute, 'probedAt' | 'hostId' | 'probeDetail' | 'connect'>,
-  now: number,
-): boolean {
-  if (r.probedAt === undefined) return false;
-  if (isOnDemandDetail(r.probeDetail)) return false;
-  const detail = r.probeDetail ?? r.connect.reason;
-  const limit = detail
-    ? (probeCadenceMinutes(r.hostId, detail) + ROUTE_PROBE_STALE_MINUTES - ROUTE_PROBE_EVERY_MINUTES) *
-      TIME.MIN
-    : routeProbeStaleMinutes(r.hostId) * TIME.MIN;
-  return now - Date.parse(r.probedAt) > limit;
 }

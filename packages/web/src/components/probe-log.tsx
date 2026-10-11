@@ -3,7 +3,8 @@
 // - 一行 = 一次探测（探针历史里的一格）。点格子和点这一行开的是同一个详情，展开哪一行由页面（focus 的那一格）定。
 // - 数据是近 60 格加每条路由自己的最近一次（lib/probe-history-view.ts 的 probeLogRows），不另加接口；
 //   所以这里写「最近 60 次」，不写「全部」。
-// - 疑似降智 = 探通了但降智题答错：橙色，和不通的红分开。有题就写题、标准答案、实答，有自报身份就写身份。
+// - 疑似换模型 = 身份题说出了旧答案：橙色，和不通的红分开。每行带种类（连通 / 身份题）和触发者（定时、派前、人点、断链、切号）；
+//   身份题那行展开有题、新答案、旧答案、实答、自报身份。老记录（算术题时代）照原样显示，标「旧版降智题」。
 // - 读不到写「没读成」和原因，不画空列表；读成了但没有才写「还没有探测记录」。
 
 import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
@@ -13,9 +14,11 @@ import type { Model, ProbeHistoryCell, Route } from '../api/types';
 import { formatDateTime } from '../lib/format';
 import {
   formatProbeMs,
+  isLegacyQuizCell,
   PROBE_KIND_BG,
   PROBE_KIND_WORD,
   type ProbeKind,
+  probeCellSource,
   probeKind,
   probeLogRows,
   splitProbeRows,
@@ -31,12 +34,11 @@ export const PROBE_LOG_STEP = 20;
 const LEGEND: readonly (readonly [ProbeKind, string])[] = [
   ['passed', '探通了'],
   ['failed', '没探通'],
-  ['doubt', '探通了但降智题答错'],
+  ['doubt', '身份题说出了旧答案'],
   ['not_probed', '这轮没真探'],
-  ['on_demand', '不主动探，要派给它时才探'],
 ];
 
-/** 结论标签。疑似降智没有状态色，用橙色（st-doubt）。 */
+/** 结论标签。疑似换模型没有状态色，用橙色（st-doubt）。 */
 export function ProbeKindChip({ kind }: { kind: ProbeKind }) {
   const word = PROBE_KIND_WORD[kind];
   if (word.tone !== 'doubt') return <StatusChip tone={word.tone} label={word.label} />;
@@ -158,7 +160,7 @@ export function ProbeLog({
   );
 }
 
-/** 没真探的记录（没探、按需）折起来：点开才看；从格子或「看最近一次」点进来的恰好是其中一条时自动展开。 */
+/** 没真探的记录（没探）折起来：点开才看；从格子或「看最近一次」点进来的恰好是其中一条时自动展开。 */
 function SkippedFold({
   skipped,
   openId,
@@ -183,7 +185,7 @@ function SkippedFold({
         className="inline-flex min-h-8 items-center gap-1 rounded-md px-2 text-caption text-muted-foreground hover:bg-muted hover:text-foreground"
       >
         <ChevronDown className={cn('size-3.5 transition-transform', expanded && 'rotate-180')} aria-hidden />
-        {skipped.length} 条没真探的记录（没探、按需），{expanded ? '收起' : '点开看'}
+        {skipped.length} 条没真探的记录（没探），{expanded ? '收起' : '点开看'}
       </button>
       {expanded ? (
         <ol
@@ -225,6 +227,8 @@ function ProbeLogRow({
     if (open) ref.current?.scrollIntoView?.({ block: 'nearest' });
   }, [open]);
   const hasCheck = cell.checkQuestion !== null;
+  const source = probeCellSource(cell);
+  const legacy = isLegacyQuizCell(cell);
   return (
     <li
       ref={ref}
@@ -250,46 +254,81 @@ function ProbeLogRow({
         <span className="num min-w-0 flex-1 basis-24 truncate text-caption text-muted-foreground">
           {cell.routeId}
         </span>
+        {source || legacy ? (
+          <span
+            data-field="source"
+            className="inline-flex shrink-0 items-center gap-1.5 text-caption text-muted-foreground"
+          >
+            {source}
+            {legacy ? (
+              <span
+                data-field="legacy"
+                title="算术题时代的老记录，照原样显示"
+                className="rounded bg-muted px-1.5 py-0.5 text-micro"
+              >
+                旧版降智题
+              </span>
+            ) : null}
+          </span>
+        ) : null}
         <span className="num shrink-0 text-caption">{formatProbeMs(cell.durationMs, cell.result)}</span>
         <ChevronDown
           className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')}
           aria-hidden
         />
       </button>
-      {hasCheck || cell.selfIdentity !== null ? (
-        <dl data-field="check" className="grid grid-cols-auto-fr gap-x-2 gap-y-0.5 px-3 pb-2 text-caption">
-          {hasCheck ? (
-            <>
-              <dt className="text-muted-foreground">题</dt>
-              <dd className="min-w-0 break-words">{cell.checkQuestion}</dd>
-              <dt className="text-muted-foreground">标准答案</dt>
-              <dd data-field="expected" className="min-w-0 break-words">
-                {cell.checkExpected ?? '（没有）'}
-              </dd>
-              <dt className="text-muted-foreground">实答</dt>
-              <dd
-                data-field="answer"
-                className={cn(
-                  'min-w-0 break-words',
-                  cell.checkPassed === false && 'font-medium text-ink-doubt',
-                )}
-              >
-                {cell.checkAnswer ?? '（没答）'}
-              </dd>
-            </>
-          ) : null}
-          {cell.selfIdentity !== null ? (
-            <>
-              <dt className="text-muted-foreground">自报身份</dt>
-              <dd data-field="identity" className="min-w-0 break-words">
-                {cell.selfIdentity}
-              </dd>
-            </>
-          ) : null}
-        </dl>
-      ) : null}
       {open ? (
         <div id={bodyId} className="min-w-0 border-t px-3 pb-3 pt-2.5">
+          {hasCheck || cell.selfIdentity !== null ? (
+            <dl data-field="check" className="mb-2 grid grid-cols-auto-fr gap-x-3 gap-y-0.5 text-caption">
+              {hasCheck ? (
+                <>
+                  <dt className="text-muted-foreground">题</dt>
+                  <dd data-field="question" className="min-w-0 break-words">
+                    {cell.checkQuestion}
+                  </dd>
+                  <dt className="text-muted-foreground">新答案</dt>
+                  <dd data-field="expected" className="min-w-0 break-words">
+                    {cell.checkExpected ?? '（没有）'}
+                  </dd>
+                  {cell.kind === 'identity' ? (
+                    <>
+                      <dt className="text-muted-foreground">旧答案</dt>
+                      <dd data-field="old" className="min-w-0 break-words">
+                        {cell.checkOldAnswer ? (
+                          <span className={cn(cell.checkPassed === false && 'font-medium text-ink-doubt')}>
+                            {cell.checkOldAnswer}
+                          </span>
+                        ) : cell.checkPassed === false ? (
+                          <span className="font-medium text-ink-doubt">实答命中了旧答案</span>
+                        ) : (
+                          <span className="text-muted-foreground">这条记录里没有旧答案</span>
+                        )}
+                      </dd>
+                    </>
+                  ) : null}
+                  <dt className="text-muted-foreground">实答</dt>
+                  <dd
+                    data-field="answer"
+                    className={cn(
+                      'min-w-0 break-words',
+                      cell.checkPassed === false && 'font-medium text-ink-doubt',
+                    )}
+                  >
+                    {cell.checkAnswer ?? '（没答）'}
+                  </dd>
+                </>
+              ) : null}
+              {cell.selfIdentity !== null ? (
+                <>
+                  <dt className="text-muted-foreground">自报身份</dt>
+                  <dd data-field="identity" className="min-w-0 break-words">
+                    {cell.selfIdentity}
+                  </dd>
+                </>
+              ) : null}
+            </dl>
+          ) : null}
           {kind === 'failed' ? (
             <p
               role="alert"
@@ -304,10 +343,10 @@ function ProbeLogRow({
               data-field="failure"
               className="break-words rounded-md border border-st-doubt/50 bg-st-doubt/10 px-2.5 py-2 text-sub text-ink-doubt"
             >
-              疑似降智：{cell.failureReason ?? '降智题答错了'}
+              疑似换模型：{cell.failureReason ?? '身份题说出了旧答案'}
             </p>
           ) : null}
-          {kind === 'not_probed' || kind === 'on_demand' ? (
+          {kind === 'not_probed' ? (
             <p data-field="failure" className="break-words text-caption text-muted-foreground">
               {PROBE_KIND_WORD[kind].label}：{cell.failureReason ?? '（没写原因）'}
             </p>

@@ -70,7 +70,7 @@ export function FailoverNote({
       <dd data-field="next-probe" className="num">
         {next
           ? `${formatClock(next)}（${formatIn(next, now)}）`
-          : `下一轮探针（约每 ${failover.probeEveryMinutes} 分钟一轮）`}
+          : '下一轮探针（这条路由的下次探测时刻库里还没写）'}
         {failover.failedRouteId
           ? ` · 探通 ${failover.failedRouteId} 才恢复`
           : ' · 探通渠道下任一条路由就恢复'}
@@ -201,7 +201,7 @@ function ChannelRow({
       className={cn(
         'rounded-lg border bg-card shadow-card-edge transition-colors hover:border-border-strong',
         down && 'border-st-fail/40 bg-st-fail/5',
-        c.interrupted && 'border-st-stall/50 bg-st-stall/5',
+        c.interrupted && 'border-st-fail/40 bg-st-fail/5',
         quiet && 'bg-muted/30',
         selected && 'border-border-strong ring-2 ring-ring/30',
       )}
@@ -324,7 +324,7 @@ export function HistoryStrip({
         })}
       </div>
       <p className="mt-1 text-micro text-muted-foreground">
-        {cells.length === 0 ? '还没有真探 · ' : null}绿通过 · 红不通 · 橙疑似降智（探通了但降智题答错）
+        {cells.length === 0 ? '还没有真探 · ' : null}绿通过 · 红不通 · 橙疑似换模型（身份题说出了旧答案）
       </p>
     </div>
   );

@@ -169,8 +169,8 @@
   },
   "src/components/probe-log.tsx": {
     "R1": 9,
-    "R2": 19,
-    "R5": 1,
+    "R2": 21,
+    "R5": 2,
     "R8": 1
   },
   "src/components/quota.tsx": {
@@ -411,7 +411,7 @@
   },
   "src/routes/routing-status.tsx": {
     "R1": 13,
-    "R2": 26,
+    "R2": 25,
     "R7": 1,
     "R8": 2
   },

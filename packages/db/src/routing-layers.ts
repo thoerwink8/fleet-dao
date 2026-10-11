@@ -3,7 +3,7 @@
 // 「接得上、额度够、没被禁令挡」不在这里再判一遍：路由一条条交给 evaluateRoutes（「为什么不能用」只有这一处判法），再由
 // livenessOf 读成三件事。
 // 空的一层是 dead（整层没人，派不出去），不是 live；没配的用途同理，写在 problems 里。
-import type { SessionEffort, StageKind } from '@fleet-dao/shared';
+import { probePaceWritten, type SessionEffort, type StageKind } from '@fleet-dao/shared';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { Db } from './client.ts';
 import { alertByKey } from './queries/alerts.ts';
@@ -32,6 +32,20 @@ export interface RoutingRouteView {
   candidate: RouteCandidate;
   liveness: RoutingLiveness;
   verdict: LivenessVerdict;
+  /**
+   * 探针节奏和种类（#1798 片 2 的 routes.probe_tier / probe_next_at / probe_fail_streak / probe_kind）。
+   * 在这里一次读齐交给上层（api 的 routeView 原样转出），上层不再伸手进 candidate 里抠。
+   * 「老行没写过」由 shared 的 probePaceWritten 判：probe_fail_streak 有默认 0，认不出「没写过」和「写过 0」，
+   * 所以只有另外三列有值、或它自己不是 0，才算写过（片 6）。
+   */
+  probePace: {
+    tier: RouteCandidate['probeTier'];
+    nextAt: RouteCandidate['probeNextAt'];
+    failStreak: RouteCandidate['probeFailStreak'];
+    kind: RouteCandidate['probeKind'];
+    /** 这一行的节奏列写过没有；老行 false，接口据此一个都不给，不拿默认 0 顶。 */
+    written: boolean;
+  };
 }
 
 export interface RoutingModelView {
@@ -115,7 +129,7 @@ export async function routingLayers(
       ...(carpoolHold && carpoolPools.has(candidate.poolId) ? { hold: carpoolHold } : {}),
     });
     const list = byModel.get(candidate.modelId) ?? [];
-    list.push({ candidate, liveness, verdict: routeLiveness(liveness) });
+    list.push({ candidate, liveness, verdict: routeLiveness(liveness), probePace: probePaceOf(candidate) });
     byModel.set(candidate.modelId, list);
   }
 
@@ -136,6 +150,26 @@ export async function routingLayers(
     models: views,
     verdict: layerLiveness(views.map((m) => m.verdict)),
     problems,
+  };
+}
+
+/**
+ * 候选里那四列节奏/种类，连同「写过没有」一起给上层（#1798 片 6）。
+ * 写过没有只有 shared 的 probePaceWritten 一处判法：probe_fail_streak 库里有默认 0，光看它分不出「老行没写过」和
+ * 「探通了清零写成 0」，所以另外三列有值、或它自己不是 0，才算写过。
+ */
+function probePaceOf(candidate: RouteCandidate): RoutingRouteView['probePace'] {
+  return {
+    tier: candidate.probeTier,
+    nextAt: candidate.probeNextAt,
+    failStreak: candidate.probeFailStreak,
+    kind: candidate.probeKind,
+    written: probePaceWritten({
+      probeTier: candidate.probeTier,
+      probeNextAt: candidate.probeNextAt,
+      probeFailStreak: candidate.probeFailStreak,
+      probeKind: candidate.probeKind,
+    }),
   };
 }
 

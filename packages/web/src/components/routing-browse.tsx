@@ -11,7 +11,7 @@ import { ChevronRight, Search } from 'lucide-react';
 import { type ReactNode, useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { useRouting } from '../api/client';
-import type { Route, RoutingLayerModel, RoutingLayers } from '../api/types';
+import type { RoutingLayerModel, RoutingLayers } from '../api/types';
 import { hostLabel } from '../lib/catalog';
 import { buildChannelCards, type ChannelCard } from '../lib/channel-status';
 import { useMediaQuery, useNow } from '../lib/hooks';
@@ -233,12 +233,12 @@ export function WindowedRows<T>({
   );
 }
 
-const PROBE_WORD: Record<NonNullable<Route['probe']>['state'], string> = {
+/** 库里留着的老状态词（已不再写）按「没探」说。 */
+const PROBE_WORD: Readonly<Record<string, string>> = {
   ok: '探通',
   failed: '不通',
   skipped: '没探',
   not_wired: '插头没接',
-  on_demand: '按需探测',
 };
 
 // —— 模型目录 ——
@@ -615,7 +615,7 @@ function CatalogDetail({ entry: e, now }: { entry: CatalogEntry; now: number }) 
                     {channelName(r.channelId)} · {r.poolId}
                   </span>
                   <span className="text-caption text-muted-foreground">
-                    {hostLabel[r.hostId]} · {r.probe ? PROBE_WORD[r.probe.state] : '探针还没看过'}
+                    {hostLabel[r.hostId]} · {r.probe ? (PROBE_WORD[r.probe.state] ?? '没探') : '探针还没看过'}
                   </span>
                   <span className="num ml-auto truncate text-micro text-muted-foreground">{r.id}</span>
                 </li>
@@ -807,7 +807,7 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
                 </span>
                 <span className="text-caption text-muted-foreground">
                   {modelName} · {hostLabel[route.hostId]} ·{' '}
-                  {route.probe ? PROBE_WORD[route.probe.state] : '探针还没看过'}
+                  {route.probe ? (PROBE_WORD[route.probe.state] ?? '没探') : '探针还没看过'}
                 </span>
                 <span className="num ml-auto truncate text-micro text-muted-foreground">{route.id}</span>
               </li>

@@ -62,7 +62,7 @@
   --color-st-fail: var(--st-fail);
   --color-st-done: var(--st-done);
   --color-st-stop: var(--st-stop);
-  /* 疑似降智（#1638）：黄多红少调成橙，跟着每套主题走，不另配一套色。 */
+  /* 疑似换模型（#1638）：黄多红少调成橙，跟着每套主题走，不另配一套色。 */
   --color-st-doubt: var(--st-doubt);
   /* 状态淡底（实色 12%）和状态描边（实色 40%）：替掉页里随手写的 bg-st-fail/5、/10、/14 和 border-st-fail/40、/55。 */
   --color-st-run-soft: color-mix(in oklab, var(--st-run) 12%, transparent);
