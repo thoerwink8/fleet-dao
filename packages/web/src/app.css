@@ -337,7 +337,8 @@
   --canvas: var(--bg);
   --grid: color-mix(in oklab, var(--fg) 13%, transparent);
   --shadow-color: color-mix(in oklab, #000 14%, transparent);
-  --elev-card: 0 1px 0 var(--border), 0 1px 2px color-mix(in oklab, var(--shadow-color) 50%, transparent);
+  /* 亮色卡片只有一根下边线，没有模糊投影（规范第一节第 5 条）。 */
+  --elev-card: 0 1px 0 var(--border);
   --st-doubt: color-mix(in oklab, var(--st-stall) 62%, var(--st-fail));
   /*
    * 状态色当字用时的「墨色」：往前景色里混一点，保证 11px 小字在卡片、页面底、浮层、侧栏、muted，

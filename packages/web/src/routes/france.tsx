@@ -551,7 +551,8 @@ export default function France() {
   return (
     <Page
       title="法国"
-      description="本台的六项事实、引擎总开关、定时任务、发版。读不到的写「没查成」和原因，不拿 0 顶；每 30 秒自己刷新。多一台机器时按台并排比。"
+      description="本台的六项事实、引擎总开关、定时任务、发版。"
+      detail="读不到的写「没查成」和原因，不拿 0 顶；每 30 秒自己刷新。多一台机器时按台并排比。"
       actions={
         <RefreshBar
           onRefresh={() => void read.refetch()}
