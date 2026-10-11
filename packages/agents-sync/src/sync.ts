@@ -45,7 +45,7 @@ export interface Sources {
   hooks: { ok: true; tree: Tree } | { ok: false; why: string };
   /** agents/config/claude-permissions.json 的原文；读不到时是为什么（只影响权限那一段，别的照写）。认内容在 permissions.ts */
   permissions: { ok: true; text: string } | { ok: false; why: string };
-  /** agents/subagents/ 下 SUBAGENT_TARGET 列了名字的几份（文件名 → 原文）；读不到时是为什么（只影响子代理这一段） */
+  /** SUBAGENT_TARGET 列的几份（装到家里的文件名 → 原文）；读不到时是为什么（只影响子代理这一段） */
   subagents: { ok: true; files: Map<string, string> } | { ok: false; why: string };
 }
 
@@ -120,12 +120,18 @@ export function readSources(repo: string): { ok: true; value: Sources } | { ok: 
 export const SUBAGENTS_DIR = 'agents/subagents';
 
 /**
- * agents/subagents/ 下列了名字的几份：读不到不挡规矩和 skill（旧检出里还没有它），子代理那一段报没查成。
- * frontmatter 里的 name 要和文件名对上：Claude Code 按 name 认子代理，对不上装上去就是另一个名字，派 haiku55 派不到。
+ * agents/subagents/ 下列了名字的几份（haiku55 和 16 个 fleet-* 的通用版，决定 0079）：读不到不挡规矩和 skill
+ * （旧检出里还没有它），子代理那一段报没查成。
+ * 一份读不到就整段不装：少装一份会让清单把已装的当成从名单里去掉了、撤掉。
+ * frontmatter 里的 name 要和文件名对上：Claude Code 按 name 认子代理，对不上装上去就是另一个名字，按名字派不到。
+ * 名单里同一个文件名列了两遍、或写成了带目录的路径，整段不装：说明名单写错了，装哪份都不对。
  */
 function readSubagents(repo: string): Sources['subagents'] {
   const files = new Map<string, string>();
   for (const file of SUBAGENT_TARGET.files) {
+    if (/[/\\]/.test(file))
+      return { ok: false, why: `SUBAGENT_TARGET 里的「${file}」带了目录，只认 ${SUBAGENTS_DIR}/ 下的文件名` };
+    if (files.has(file)) return { ok: false, why: `SUBAGENT_TARGET 里 ${file} 列了两遍，名单写错了` };
     const rel = `${SUBAGENTS_DIR}/${file}`;
     let text: string;
     try {

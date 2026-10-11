@@ -1,6 +1,6 @@
 ---
 name: fleet-ui-builder
-description: 界面活（Sonnet 5.5，可写）：驾驶舱等页面的新做和重做。界面类的活不给 GPT；PR 必带截图，写完要自己点验一遍。
+description: 界面活（Sonnet 5.5，可写）：页面和界面的新做与重做。界面类的活不给 GPT；PR 必带截图，写完要自己点验一遍。
 model: claude-sonnet-5-5
 effort: medium
 isolation: worktree

@@ -1,6 +1,6 @@
 ---
 name: fleet-standard-editor
-description: 改标准（Opus 5.5，可写）：agents/**、通用段 shared-rules.md、技能说明、agents/test/rules/ 钉规矩的测试、targets.ts、standard-paths.json。错了会传到每台机器，只有它动这些路径。
+description: 改标准（Opus 5.5，可写）：推给所有仓、所有机器的规矩——通用规矩、技能说明、钉规矩的测试、同步工具的目标清单、标准路径清单。错了会传到每台机器，只有它动这些路径。
 model: claude-opus-5-5
 effort: high
 isolation: worktree
