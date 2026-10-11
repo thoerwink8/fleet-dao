@@ -101,7 +101,7 @@ export function ProbeLog({
       <ul
         data-probe-log="legend"
         aria-label="图例"
-        className="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-micro text-faint"
+        className="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-micro text-muted-foreground"
       >
         {LEGEND.map(([kind, hint]) => (
           <li key={kind} className="inline-flex items-center gap-1">

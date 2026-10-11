@@ -329,7 +329,7 @@ function Matrix({
                         <span
                           className={cn(
                             'quota-narrow-only text-caption',
-                            p.quotaStatus === 'unread' ? 'text-ink-stall' : 'text-faint',
+                            p.quotaStatus === 'unread' ? 'text-ink-stall' : 'text-muted-foreground',
                           )}
                         >
                           {p.quotaStatus === 'unread' ? '没查成' : '没有额度窗'}
@@ -366,7 +366,7 @@ function Matrix({
                           key={k}
                           className={cn(
                             'quota-cell-empty text-xs',
-                            p.quotaStatus === 'unread' ? 'text-ink-stall' : 'text-faint',
+                            p.quotaStatus === 'unread' ? 'text-ink-stall' : 'text-muted-foreground',
                           )}
                         >
                           {p.quotaStatus === 'unread' ? '没查成' : '—'}

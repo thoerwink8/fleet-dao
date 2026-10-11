@@ -85,7 +85,7 @@ function Item({
               title={badge === '!' ? '没读成' : undefined}
               className={cn(
                 'num grid min-w-4 place-items-center rounded-full px-1 text-micro leading-4 font-semibold',
-                badge === '!' ? 'bg-st-fail text-white' : 'bg-foreground text-background',
+                badge === '!' ? 'bg-destructive text-destructive-foreground' : 'bg-foreground text-background',
                 collapsed && 'absolute top-0.5 right-1.5',
               )}
             >
@@ -137,7 +137,7 @@ export function SidebarNav({
             {collapsed ? (
               <div className="mx-auto my-2 h-px w-6 bg-border" />
             ) : (
-              <div className="mb-1 px-2.5 text-caption font-medium text-faint">{g.group}</div>
+              <div className="mb-1 px-2.5 text-caption font-medium text-muted-foreground">{g.group}</div>
             )}
             <div className="space-y-0.5">
               {g.items.map((item) => (

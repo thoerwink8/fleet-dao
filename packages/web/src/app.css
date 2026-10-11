@@ -6,11 +6,19 @@
  * 每套主题色只给 16 个基色（底、侧栏、卡片、浮层、字、品牌色 + 7 个状态色），其余由下面的
  * [data-palette] 规则用 color-mix 就地派生——设置页的预览卡片也挂这两个属性，所以能在同一页里同时显示多套。
  * 颜色约定：界面框架只用品牌色和黑白灰；七个状态色只用来表达状态，不做装饰。
+ *
+ * 规范在 docs/design/驾驶舱界面.md（#1844）：令牌表、组件用法、检查规则。改这里的令牌，同一个 PR 改那份文档。
+ * 令牌分三层：主题基色（下面每套主题的 16 个基色）→ 语义令牌（本文件第一个 @theme）→ 版式组件内部用。
+ * 页面只用语义令牌；某一页要的专用尺寸放第二个 @theme「版式常量」。scripts/lint-design.ts 守着（src/test/lint-design.test.ts）。
  */
 
 @custom-variant dark (&:where([data-mode="dark"], [data-mode="dark"] *));
 
+/* ---------- 语义令牌（规范第六节） ---------- */
 @theme inline {
+  /* Tailwind 默认色板（red-500、white、black……）整个不生成：颜色只许用下面这些语义名。 */
+  --color-*: initial;
+
   --font-sans:
     "Inter Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
     "Noto Sans SC", "Source Han Sans SC", system-ui, sans-serif;
@@ -30,10 +38,14 @@
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
-  --color-faint: var(--faint);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  /* 选中行的底（前景 10%），比悬停的 accent（7%）深一档。 */
+  --color-selected: var(--selected);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  /* 对话框、抽屉后面的遮罩。 */
+  --color-scrim: var(--scrim);
   --color-border: var(--border);
   --color-border-strong: var(--border-strong);
   --color-input: var(--input);
@@ -51,7 +63,24 @@
   --color-st-done: var(--st-done);
   --color-st-stop: var(--st-stop);
   /* 疑似降智（#1638）：黄多红少调成橙，跟着每套主题走，不另配一套色。 */
-  --color-st-doubt: color-mix(in oklab, var(--st-stall) 62%, var(--st-fail));
+  --color-st-doubt: var(--st-doubt);
+  /* 状态淡底（实色 12%）和状态描边（实色 40%）：替掉页里随手写的 bg-st-fail/5、/10、/14 和 border-st-fail/40、/55。 */
+  --color-st-run-soft: color-mix(in oklab, var(--st-run) 12%, transparent);
+  --color-st-wait-soft: color-mix(in oklab, var(--st-wait) 12%, transparent);
+  --color-st-human-soft: color-mix(in oklab, var(--st-human) 12%, transparent);
+  --color-st-stall-soft: color-mix(in oklab, var(--st-stall) 12%, transparent);
+  --color-st-fail-soft: color-mix(in oklab, var(--st-fail) 12%, transparent);
+  --color-st-done-soft: color-mix(in oklab, var(--st-done) 12%, transparent);
+  --color-st-stop-soft: color-mix(in oklab, var(--st-stop) 12%, transparent);
+  --color-st-doubt-soft: color-mix(in oklab, var(--st-doubt) 12%, transparent);
+  --color-st-run-line: color-mix(in oklab, var(--st-run) 40%, transparent);
+  --color-st-wait-line: color-mix(in oklab, var(--st-wait) 40%, transparent);
+  --color-st-human-line: color-mix(in oklab, var(--st-human) 40%, transparent);
+  --color-st-stall-line: color-mix(in oklab, var(--st-stall) 40%, transparent);
+  --color-st-fail-line: color-mix(in oklab, var(--st-fail) 40%, transparent);
+  --color-st-done-line: color-mix(in oklab, var(--st-done) 40%, transparent);
+  --color-st-stop-line: color-mix(in oklab, var(--st-stop) 40%, transparent);
+  --color-st-doubt-line: color-mix(in oklab, var(--st-doubt) 40%, transparent);
   /* 状态色的字：text-ink-*（色块、边框、圆点仍用 st-*）。 */
   --color-ink-run: var(--st-run-ink);
   --color-ink-wait: var(--st-wait-ink);
@@ -62,6 +91,46 @@
   --color-ink-stop: var(--st-stop-ink);
   --color-ink-doubt: color-mix(in oklab, var(--st-stall-ink) 62%, var(--st-fail-ink));
 
+  /*
+   * 字号六档（规范 6.2）：字号和行高绑在一起，页面不再另配 leading-数字。中文最小 12px（画布节点例外）。
+   * meta 12/16：时间戳、表头、计数、标签里的字、辅助说明。
+   * body 14/20：默认。列表行、表格、卡片正文、按钮、输入、菜单、段落（段落另加 leading-relaxed）。
+   * heading 16/24：区块、卡片、抽屉、对话框标题。
+   * title 20/28：页面标题。
+   * display 28/32：指标大数字（配 tabular-nums）。
+   * canvas 11/14：只给主页画布（components/home/board/）用，画布随缩放放大。
+   */
+  --text-meta: 0.75rem;
+  --text-meta--line-height: 1rem;
+  --text-body: 0.875rem;
+  --text-body--line-height: 1.25rem;
+  --text-heading: 1rem;
+  --text-heading--line-height: 1.5rem;
+  --text-heading--font-weight: 600;
+  --text-title: 1.25rem;
+  --text-title--line-height: 1.75rem;
+  --text-title--font-weight: 600;
+  --text-title--letter-spacing: -0.01em;
+  --text-display: 1.75rem;
+  --text-display--line-height: 2rem;
+  --text-display--font-weight: 600;
+  --text-canvas: 0.6875rem;
+  --text-canvas--line-height: 0.875rem;
+
+  /*
+   * 旧字号名（#182，迁移期保留，收口片删）：新代码用上面六档，lint-design 的 R2 拦。
+   * micro 10px → meta；caption 11px → meta；sub 13px → body；label 14px → body；
+   * strong 15px → heading；stat-num 17px → heading；stat 28px → display。
+   */
+  --text-micro: 10px;
+  --text-caption: 11px; /* 依据：健康条、决定卡、定时任务、渠道状态的辅助字。caption（辅助信息、时间戳） */
+  --text-sub: 13px;
+  --text-label: 14px;
+  --text-strong: 15px;
+  --text-stat-num: 17px;
+  --text-stat: 28px;
+
+  /* 圆角：控件 md、卡片和弹层 lg、标签 sm、圆点和胶囊 full（规范 6.4）。xl 和 2 是旧档，迁移完删。 */
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -70,28 +139,38 @@
   --radius-2: 2px;
 
   /*
-   * 字号档位（#182 设计 token）：页面代码一律从这里取，不再写 text-[Npx]。
-   * 名字按用途：micro（角标、徽标）、caption（辅助信息、时间戳）、sub（卡片正文、列表条目）、
-   * label（侧栏品牌名）、strong（小标）、stat-num（额度大数字）、title（页面标题）、stat（顶栏大数字）。
-   * 每一档就是原来写死的那一档像素：
-   * micro 10px：角标（#587）；usage 的「不全」标，run-timeline 的时间刻度和阶段角标（#1444）。
-   * caption 11px：辅助信息、时间戳（#587）；usage 的说明、花费明细、分开看和额度提示，run-timeline 的时长行，status 芯片（#1444）。
-   * sub 13px：卡片正文、列表条目（#587，原来写死 13px：侧栏项、通知标题）。
-   * label 14px：侧栏品牌名（#587，原来写死 14px）。
-   * strong 15px：页头小标（#587，原来写死 15px）。
-   * stat-num 17px：额度大数字（#587，原来写死 17px）。
-   * title 22px：页面标题（#587，原来写死 22px）。
-   * stat 28px：页头大数字（#587，原来写死 28px）。
+   * 阴影只表示「浮起」（规范 6.5）：
+   * xs 描边按钮、输入；card 区块和卡片（亮色一根下边线加一点影，暗色没有，靠边框）；
+   * overlay 浮层、菜单、下拉、提示、画布浮动工具条；modal 对话框、抽屉。
+   * 另三个是特效：选中行竖线、品牌色圈（额度热）、状态色光圈（完成时一闪）。card-edge 是旧名，迁移完删。
    */
-  --text-micro: 10px;
-  --text-caption: 11px; /* 依据：健康条、决定卡、定时任务、渠道状态的辅助字。caption（辅助信息、时间戳） */
-  --text-sub: 13px;
-  --text-label: 14px;
-  --text-strong: 15px;
-  --text-stat-num: 17px;
-  --text-title: 22px;
-  --text-stat: 28px;
+  --shadow-xs: 0 1px 2px 0 color-mix(in oklab, var(--shadow-color) 40%, transparent);
+  --shadow-card: var(--elev-card);
+  --shadow-overlay: 0 8px 24px -12px var(--shadow-color), 0 0 0 1px var(--border);
+  --shadow-modal: 0 24px 48px -16px var(--shadow-color);
+  --shadow-card-edge: 0 1px 0 var(--border);
+  /* 先后列表里选中的那一行：左边一道竖线，不是整行加框。 */
+  --shadow-row-selected: inset 3px 0 0 var(--foreground);
+  --shadow-brand-ring: 0 0 0 1px var(--brand);
+  --shadow-done-pop: 0 0 0 4px color-mix(in oklab, var(--st-done) 30%, transparent);
 
+  /*
+   * 动效（规范 6.6）：时长只用三档——悬停变色 100、展开收起 200、抽屉进出 300。
+   * ease-out 进入、展开（和画布排版过渡同一条）；ease-in-out 来回切换。
+   */
+  --transition-duration-100: 100ms;
+  --transition-duration-200: 200ms;
+  --transition-duration-300: 300ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/*
+ * ---------- 版式常量 ----------
+ * 某一页、某一块要的专用尺寸（39 个）。不是设计档位，别的页别拿来当间距用；写明哪页用、依据是什么。
+ * 名字放在 Tailwind 工具类认的命名空间下（h-* 认 --height/--spacing，max-w 认 --container……），src/test/theme-tokens.test.ts 钉住。
+ */
+@theme inline {
   /*
    * 专用尺寸：顶栏高、侧栏宽（展开/收起/小屏抽屉）。改这里，整站的壳一起变。
    * 必须放在 --spacing-* 下：Tailwind v4 的 h-* 只认 --height/--spacing、w-* 只认 --width/--spacing/--container，
@@ -163,13 +242,6 @@
   --grid-template-columns-board: minmax(0, 26rem) minmax(0, 1fr); /* 2xl 起：最宽 26rem、剩余 */
   --grid-template-rows-stack: auto 1fr; /* 行：自动、剩余 */
   --grid-template-rows-media: auto auto 1fr; /* 行：自动、自动、剩余 */
-
-  /* 阴影：卡片描边（亮色下勾下边线）、品牌色圈（额度热）、状态色光圈（完成时一闪）。 */
-  --shadow-card-edge: 0 1px 0 var(--border);
-  /* 先后列表里选中的那一行：左边一道竖线，不是整行加框。 */
-  --shadow-row-selected: inset 3px 0 0 var(--foreground);
-  --shadow-brand-ring: 0 0 0 1px var(--brand);
-  --shadow-done-pop: 0 0 0 4px color-mix(in oklab, var(--st-done) 30%, transparent);
 }
 
 /* ---------- 派生色：所有主题共用一套算法 ---------- */
@@ -187,18 +259,28 @@
   --secondary: color-mix(in oklab, var(--fg) 7%, var(--surface));
   --secondary-foreground: var(--fg);
   --muted: color-mix(in oklab, var(--fg) 5%, var(--surface));
-  --muted-foreground: color-mix(in oklab, var(--fg) 64%, var(--bg));
-  --faint: color-mix(in oklab, var(--fg) 44%, var(--bg));
+  /*
+   * 下面四个按每套主题校准，份量写在各自的块里（--muted-ink、--input-ink、--ring-ink、--destructive-foreground），
+   * 由 src/lib/contrast.test.ts 逐套验（WCAG 2.2 AA）：
+   * 次要文字在页面底、卡片、浮层、muted、侧栏上都 ≥ 4.5:1；控件边框对卡片、聚焦圈对页面底 ≥ 3:1；危险按钮的字 ≥ 4.5:1。
+   * 新加主题不给这几个值，颜色算不出来，闸也会红。
+   */
+  --muted-foreground: color-mix(in oklab, var(--fg) var(--muted-ink), var(--bg));
   --accent: color-mix(in oklab, var(--fg) 7%, transparent);
   --accent-foreground: var(--fg);
-  --destructive: var(--st-fail);
+  --selected: color-mix(in oklab, var(--fg) 10%, transparent);
+  /* 危险按钮的底用状态红的墨色：亮色下比实色深一点、暗色下浅一点，白字或深字都能到 4.5:1。 */
+  --destructive: var(--st-fail-ink);
+  --scrim: color-mix(in oklab, #000 50%, transparent);
   --border: color-mix(in oklab, var(--fg) 11%, transparent);
   --border-strong: color-mix(in oklab, var(--fg) 20%, transparent);
-  --input: color-mix(in oklab, var(--fg) 15%, transparent);
-  --ring: color-mix(in oklab, var(--brand) 55%, transparent);
+  --input: color-mix(in oklab, var(--fg) var(--input-ink), transparent);
+  --ring: color-mix(in oklab, var(--brand) var(--ring-ink), transparent);
   --canvas: var(--bg);
   --grid: color-mix(in oklab, var(--fg) 13%, transparent);
   --shadow-color: color-mix(in oklab, #000 14%, transparent);
+  --elev-card: 0 1px 0 var(--border), 0 1px 2px color-mix(in oklab, var(--shadow-color) 50%, transparent);
+  --st-doubt: color-mix(in oklab, var(--st-stall) 62%, var(--st-fail));
   /*
    * 状态色当字用时的「墨色」：往前景色里混一点，保证 11px 小字在卡片、页面底、浮层、侧栏、muted，
    * 以及叠在它们上面的同色淡底（最深 15%）上都 ≥ 4.5:1。
@@ -225,6 +307,9 @@
   color-scheme: dark;
   --shadow-color: color-mix(in oklab, #000 45%, transparent);
   --grid: color-mix(in oklab, var(--fg) 11%, transparent);
+  --scrim: color-mix(in oklab, #000 60%, transparent);
+  /* 暗色下卡片不加影，靠边框分层。 */
+  --elev-card: none;
 }
 
 /* ---------- 石墨：默认。框架只用黑白灰，颜色全部留给状态 ---------- */
@@ -247,6 +332,10 @@
   --ink-wait: 90%;
   --ink-fail: 98%;
   --ink-stop: 69%;
+  --muted-ink: 64%;
+  --input-ink: 37%;
+  --ring-ink: 55%;
+  --destructive-foreground: #0c0d0f;
 }
 [data-palette="graphite"][data-mode="light"] {
   --bg: #f4f4f5;
@@ -270,6 +359,10 @@
   --ink-fail: 80%;
   --ink-done: 74%;
   --ink-stop: 60%;
+  --muted-ink: 64%;
+  --input-ink: 47%;
+  --ring-ink: 55%;
+  --destructive-foreground: #ffffff;
 }
 
 /* ---------- 青瓷：温润的青绿釉色 ---------- */
@@ -295,6 +388,10 @@
   --ink-fail: 80%;
   --ink-done: 75%;
   --ink-stop: 54%;
+  --muted-ink: 64%;
+  --input-ink: 49%;
+  --ring-ink: 87%;
+  --destructive-foreground: #ffffff;
 }
 [data-palette="celadon"][data-mode="dark"] {
   --bg: #0b1311;
@@ -314,6 +411,10 @@
   --ink-run: 98%;
   --ink-wait: 80%;
   --ink-stop: 61%;
+  --muted-ink: 64%;
+  --input-ink: 38%;
+  --ring-ink: 55%;
+  --destructive-foreground: #0b1311;
 }
 
 /* ---------- 北境 Nord：极地蓝灰与霜色 ---------- */
@@ -339,6 +440,10 @@
   --ink-fail: 44%;
   --ink-done: 57%;
   --ink-stop: 36%;
+  --muted-ink: 73%;
+  --input-ink: 42%;
+  --ring-ink: 57%;
+  --destructive-foreground: #2e3440;
 }
 [data-palette="nord"][data-mode="light"] {
   --bg: #e5e9f0;
@@ -362,6 +467,10 @@
   --ink-fail: 72%;
   --ink-done: 56%;
   --ink-stop: 43%;
+  --muted-ink: 69%;
+  --input-ink: 54%;
+  --ring-ink: 95%;
+  --destructive-foreground: #ffffff;
 }
 
 /* ---------- 东京夜 Tokyo Night：霓虹夜色 ---------- */
@@ -384,6 +493,10 @@
   --ink-human: 99%;
   --ink-fail: 85%;
   --ink-stop: 44%;
+  --muted-ink: 70%;
+  --input-ink: 43%;
+  --ring-ink: 57%;
+  --destructive-foreground: #1a1b26;
 }
 [data-palette="tokyo"][data-mode="light"] {
   --bg: #e1e2e7;
@@ -407,6 +520,10 @@
   --ink-fail: 45%;
   --ink-done: 60%;
   --ink-stop: 34%;
+  --muted-ink: 75%;
+  --input-ink: 57%;
+  --ring-ink: 98%;
+  --destructive-foreground: #ffffff;
 }
 
 /* ---------- 德古拉 Dracula：高饱和紫粉 ---------- */
@@ -429,6 +546,10 @@
   --ink-human: 75%;
   --ink-fail: 63%;
   --ink-stop: 50%;
+  --muted-ink: 64%;
+  --input-ink: 38%;
+  --ring-ink: 60%;
+  --destructive-foreground: #282a36;
 }
 [data-palette="dracula"][data-mode="light"] {
   --bg: #f5f1e1;
@@ -451,6 +572,10 @@
   --ink-fail: 81%;
   --ink-done: 97%;
   --ink-stop: 56%;
+  --muted-ink: 64%;
+  --input-ink: 49%;
+  --ring-ink: 70%;
+  --destructive-foreground: #ffffff;
 }
 
 /* ---------- 原子 One：Atom 编辑器的经典配色 ---------- */
@@ -475,6 +600,10 @@
   --ink-fail: 50%;
   --ink-done: 78%;
   --ink-stop: 36%;
+  --muted-ink: 73%;
+  --input-ink: 44%;
+  --ring-ink: 60%;
+  --destructive-foreground: #282c34;
 }
 [data-palette="one"][data-mode="light"] {
   --bg: #f0f0f1;
@@ -498,6 +627,10 @@
   --ink-fail: 53%;
   --ink-done: 50%;
   --ink-stop: 40%;
+  --muted-ink: 71%;
+  --input-ink: 56%;
+  --ring-ink: 89%;
+  --destructive-foreground: #ffffff;
 }
 
 /* ---------- 日晒 Solarized：精确计算的低对比配色 ---------- */
@@ -523,6 +656,10 @@
   --ink-fail: 69%;
   --ink-done: 55%;
   --ink-stop: 47%;
+  --muted-ink: 68%;
+  --input-ink: 53%;
+  --ring-ink: 91%;
+  --destructive-foreground: #ffffff;
 }
 [data-palette="solarized"][data-mode="dark"] {
   --bg: #002b36;
@@ -546,6 +683,10 @@
   --ink-fail: 59%;
   --ink-done: 76%;
   --ink-stop: 41%;
+  --muted-ink: 72%;
+  --input-ink: 45%;
+  --ring-ink: 66%;
+  --destructive-foreground: #002b36;
 }
 
 /* ---------- 炉火 Darcula：炭灰底上的一点橙 ---------- */
@@ -571,6 +712,10 @@
   --ink-fail: 44%;
   --ink-done: 39%;
   --ink-stop: 29%;
+  --muted-ink: 78%;
+  --input-ink: 48%;
+  --ring-ink: 76%;
+  --destructive-foreground: #2b2b2b;
 }
 [data-palette="darcula"][data-mode="light"] {
   --bg: #f2f2f2;
@@ -593,6 +738,10 @@
   --ink-fail: 75%;
   --ink-done: 76%;
   --ink-stop: 54%;
+  --muted-ink: 64%;
+  --input-ink: 49%;
+  --ring-ink: 83%;
+  --destructive-foreground: #ffffff;
 }
 
 /* ---------- 基础 ---------- */

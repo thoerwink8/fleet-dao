@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
-import { scanFile } from '../../scripts/lint-arbitrary.ts';
+import { scanFile } from '../../scripts/lint-design.ts';
 
 const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -39,7 +39,7 @@ const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
   },
   { file: 'components/expand-row.tsx', snippet: 'absolute inset-y-0 left-0 w-rail' },
   { file: 'components/job-row.tsx', snippet: 'text-caption text-muted-foreground' },
-  { file: 'components/job-row.tsx', snippet: 'num text-caption text-faint' },
+  { file: 'components/job-row.tsx', snippet: 'num text-caption text-muted-foreground' },
   { file: 'components/job-row.tsx', snippet: 'text-caption text-ink-stall' },
   { file: 'routes/routing-status.tsx', snippet: 'lg:max-h-routing-pane' },
   { file: 'routes/routing-status.tsx', snippet: 'text-caption font-medium leading-5 text-ink-run' },
@@ -73,7 +73,7 @@ function source(rel: string): string {
 
 describe('#1445 五文件的尺寸 token', () => {
   test('五个文件 0 处任意尺寸值', () => {
-    const hits = FILES.flatMap((rel) => scanFile(join(srcDir, rel), rel));
+    const hits = FILES.flatMap((rel) => scanFile(join(srcDir, rel), `src/${rel}`)).filter((h) => h.rule === 'R0');
     expect(hits).toEqual([]);
   });
 
