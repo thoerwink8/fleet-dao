@@ -54,7 +54,7 @@ export function inline(text: string): ReactNode[] {
     if (at > last) out.push(text.slice(last, at));
     if (m[1] !== undefined) {
       out.push(
-        <code key={at} className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
+        <code key={at} className="rounded-sm bg-muted px-1 py-0.5 font-mono text-meta">
           {m[1]}
         </code>,
       );
@@ -79,16 +79,16 @@ export function inline(text: string): ReactNode[] {
 
 export function MarkdownLite({ source }: { source: string }) {
   return (
-    <div className="space-y-3 text-sm leading-7">
+    <div className="space-y-3 text-body leading-relaxed">
       {parseBlocks(source).map((b, i) => {
         const key = i;
         if (b.kind === 'heading') {
           return b.level === 3 ? (
-            <h3 key={key} className="pt-2 text-strong font-semibold first:pt-0">
+            <h3 key={key} className="pt-2 text-heading first:pt-0">
               {inline(b.text)}
             </h3>
           ) : (
-            <h4 key={key} className="pt-1 text-sm font-semibold">
+            <h4 key={key} className="pt-1 text-body font-semibold">
               {inline(b.text)}
             </h4>
           );
@@ -99,7 +99,7 @@ export function MarkdownLite({ source }: { source: string }) {
               {b.items.map((it, j) => (
                 // biome-ignore lint/suspicious/noArrayIndexKey: 列表项按文档先后排。
                 <li key={j} className="flex gap-2.5">
-                  <span className="mt-3 size-1.5 shrink-0 rounded-full bg-foreground/40" aria-hidden />
+                  <span className="mt-2 size-1.5 shrink-0 rounded-full bg-muted-foreground" aria-hidden />
                   <span className="min-w-0">{inline(it)}</span>
                 </li>
               ))}

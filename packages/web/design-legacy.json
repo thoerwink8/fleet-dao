@@ -108,16 +108,6 @@
     "R5": 1,
     "R7": 1
   },
-  "src/components/markdown-lite.tsx": {
-    "R1": 1,
-    "R2": 4,
-    "R5": 1,
-    "R7": 1
-  },
-  "src/components/node-notice.tsx": {
-    "R1": 3,
-    "R2": 4
-  },
   "src/components/not-built.tsx": {
     "R2": 2,
     "R5": 1,
@@ -247,19 +237,6 @@
   "src/root.tsx": {
     "R2": 4
   },
-  "src/routes/audit.tsx": {
-    "R1": 4,
-    "R2": 16,
-    "R5": 1,
-    "R7": 1,
-    "R8": 1,
-    "R9": 1
-  },
-  "src/routes/changelog.tsx": {
-    "R1": 1,
-    "R2": 5,
-    "R5": 1
-  },
   "src/routes/efforts.tsx": {
     "R1": 6,
     "R2": 22,
@@ -286,13 +263,6 @@
   },
   "src/routes/not-found.tsx": {
     "R2": 2
-  },
-  "src/routes/notifications.tsx": {
-    "R1": 3,
-    "R2": 18,
-    "R5": 3,
-    "R7": 1,
-    "R8": 2
   },
   "src/routes/quota.tsx": {
     "R1": 3,

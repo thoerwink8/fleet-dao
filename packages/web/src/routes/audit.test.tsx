@@ -30,6 +30,27 @@ describe('操作记录页', () => {
     expect(raw.contains(within(block).getByText('路由：（无） → Sonnet 5'))).toBe(false);
   });
 
+  test('没做成的记录：行标 fail（竖线）、带「没做成」状态标签，做成的行没有', async () => {
+    // 失败行又退回手写的淡红底、或做成的行也带了标签，这一条会红。
+    const api = createMockApi({ live: false });
+    const sample = (await api.audit({ limit: 1 })).items[0];
+    if (!sample) throw new Error('假数据没有操作记录');
+    api.audit = () =>
+      Promise.resolve({
+        items: [
+          { ...sample, id: 'a-ok', ok: true },
+          { ...sample, id: 'a-bad', ok: false, error: '没权限' },
+        ],
+      });
+    renderApp(<AuditPage />, { api });
+    await screen.findAllByText('没权限');
+    const [good, bad] = document.querySelectorAll('li[data-audit-row]');
+    expect(good?.querySelector('[data-row-rail]')).toBeNull();
+    expect(good?.querySelector('[data-tone="fail"]')).toBeNull();
+    expect(bad?.querySelector('[data-row-rail]')).not.toBeNull();
+    expect(bad?.querySelector('[data-tone="fail"]')?.textContent).toBe('没做成');
+  });
+
   test('过滤后没有记录、也没有更早的：不提往前翻，没有按钮', async () => {
     // 空态仍写「往前翻更早的」或凭空放按钮，这一条会红。
     renderApp(<AuditPage />);
@@ -143,7 +164,7 @@ describe('操作记录页：50 条一页（#1837）', () => {
       });
     };
     renderApp(<AuditPage />, { api });
-    const rows = () => document.querySelectorAll('ol > li').length;
+    const rows = () => document.querySelectorAll('li[data-audit-row]').length;
     await waitFor(() => expect(rows()).toBe(50));
     expect(limits).toEqual([50]);
     fireEvent.click(screen.getByRole('button', { name: '再看 50 条' }));
