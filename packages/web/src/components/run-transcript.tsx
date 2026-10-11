@@ -25,6 +25,7 @@ import {
   UNKNOWN_SEGMENT,
 } from '../lib/segments';
 import { cn } from '../lib/utils';
+import { Notice } from './layout/notice';
 import { StatusBadge } from './layout/status-badge';
 import { Button } from './ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
@@ -109,7 +110,7 @@ const subType = (e: TranscriptEntry): string => {
 function SubagentTag({ entry }: { entry: TranscriptEntry }) {
   return (
     <span
-      className="mb-1 inline-flex h-5 items-center rounded border border-dashed px-1.5 text-caption text-muted-foreground"
+      className="mb-1 inline-flex h-5 items-center rounded-sm border border-dashed px-1.5 text-meta text-muted-foreground"
       data-subagent-tag
     >
       子代理 {subType(entry)}
@@ -148,11 +149,11 @@ function Prompt({ entry }: { entry: TranscriptEntry }) {
   const [full, setFull] = useState(false);
   const long = entry.text.split('\n').length > PROMPT_LINES || entry.text.length > PROMPT_CHARS;
   return (
-    <div className="rounded-lg border bg-muted/40 px-3 py-2" data-kind="prompt">
-      <div className="text-caption font-medium text-muted-foreground">提示词</div>
+    <div className="rounded-lg border bg-muted px-3 py-2" data-kind="prompt">
+      <div className="text-meta font-medium text-muted-foreground">提示词</div>
       <p
         className={cn(
-          'mt-1 min-w-0 text-sub break-words whitespace-pre-wrap',
+          'mt-1 min-w-0 text-body break-words whitespace-pre-wrap',
           long && !full && 'line-clamp-4',
         )}
       >
@@ -180,12 +181,12 @@ function ToolCall({ call, result }: { call: TranscriptEntry; result: TranscriptE
   const [picked, setPicked] = useState<boolean | undefined>(undefined);
   const open = picked ?? failed;
   return (
-    <div className="min-w-0 text-sub" data-kind="tool_call" data-failed={failed ? '' : undefined}>
+    <div className="min-w-0 text-body" data-kind="tool_call" data-failed={failed ? '' : undefined}>
       <button
         type="button"
         aria-expanded={open}
         onClick={() => setPicked(!open)}
-        className="flex w-full min-w-0 items-baseline gap-1.5 rounded-md px-1 py-0.5 text-left hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+        className="flex w-full min-w-0 items-baseline gap-1.5 rounded-md px-1 py-0.5 text-left hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
       >
         <ChevronRight
           className={cn('size-3.5 shrink-0 translate-y-0.5 text-muted-foreground', open && 'rotate-90')}
@@ -195,28 +196,28 @@ function ToolCall({ call, result }: { call: TranscriptEntry; result: TranscriptE
         <span className={cn('num min-w-0 text-muted-foreground', open ? 'break-words' : 'truncate')}>
           {call.text}
         </span>
-        {failed ? <span className="shrink-0 text-caption font-medium text-ink-fail">没成</span> : null}
+        {failed ? <span className="shrink-0 text-meta font-medium text-ink-fail">没成</span> : null}
       </button>
       {open ? (
         <div
           className={cn(
             'mt-1 ml-5 rounded-md border px-2.5 py-1.5',
-            failed ? 'border-st-fail/40 bg-st-fail/10' : 'bg-muted/40',
+            failed ? 'border-st-fail-line bg-st-fail-soft' : 'bg-muted',
           )}
           data-kind="tool_result"
         >
           {result ? (
             <>
-              <div className={cn('text-caption font-medium', failed ? 'text-ink-fail' : 'text-ink-done')}>
+              <div className={cn('text-meta font-medium', failed ? 'text-ink-fail' : 'text-ink-done')}>
                 {result.ok === false ? '没成' : result.ok === true ? '成了' : '结果'}
               </div>
               <Clamped
                 text={result.text}
-                className="num mt-0.5 min-w-0 text-caption break-words whitespace-pre-wrap"
+                className="num mt-0.5 min-w-0 text-meta break-words whitespace-pre-wrap"
               />
             </>
           ) : (
-            <span className="text-caption text-muted-foreground">还没有结果</span>
+            <span className="text-meta text-muted-foreground">还没有结果</span>
           )}
         </div>
       ) : null}
@@ -233,14 +234,14 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
         <Clamped
           text={entry.text}
           dataKind="assistant"
-          className="min-w-0 text-sub break-words whitespace-pre-wrap"
+          className="min-w-0 text-body break-words whitespace-pre-wrap"
         />
       );
     case 'error':
       return (
         <div
           role="alert"
-          className="rounded-lg border border-st-fail/40 bg-st-fail/10 px-3 py-2 text-sub text-ink-fail"
+          className="rounded-lg border border-st-fail-line bg-st-fail-soft px-3 py-2 text-body text-ink-fail"
           data-kind="error"
         >
           <span className="font-medium">报错</span>
@@ -251,16 +252,15 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
       return (
         <div
           className={cn(
-            'rounded-lg border-2 px-3 py-2 text-sub',
-            entry.ok === false ? 'border-st-fail/60 bg-st-fail/10' : 'border-st-done/60 bg-st-done/10',
+            'rounded-lg border-2 px-3 py-2 text-body',
+            entry.ok === false
+              ? 'border-st-fail-line bg-st-fail-soft'
+              : 'border-st-done-line bg-st-done-soft',
           )}
           data-kind="result"
         >
           <div
-            className={cn(
-              'text-caption font-semibold',
-              entry.ok === false ? 'text-ink-fail' : 'text-ink-done',
-            )}
+            className={cn('text-meta font-semibold', entry.ok === false ? 'text-ink-fail' : 'text-ink-done')}
           >
             结论
           </div>
@@ -269,7 +269,7 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
       );
     case 'truncated':
       return (
-        <p className="min-w-0 text-caption break-words text-muted-foreground" data-kind="truncated">
+        <p className="min-w-0 text-meta break-words text-muted-foreground" data-kind="truncated">
           {entry.text}
         </p>
       );
@@ -277,7 +277,7 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
       // 前面没有对上的调用（窗口切在中间、调用被丢了）：单画结果
       return (
         <p
-          className="num min-w-0 text-caption break-words whitespace-pre-wrap text-muted-foreground"
+          className="num min-w-0 text-meta break-words whitespace-pre-wrap text-muted-foreground"
           data-kind="tool_result"
         >
           {entry.tool ? `${entry.tool} 的结果：` : '工具结果：'}
@@ -285,7 +285,7 @@ function Entry({ entry }: { entry: TranscriptEntry }) {
         </p>
       );
     default:
-      return <p className="min-w-0 text-sub break-words whitespace-pre-wrap">{entry.text}</p>;
+      return <p className="min-w-0 text-body break-words whitespace-pre-wrap">{entry.text}</p>;
   }
 }
 
@@ -348,7 +348,7 @@ export function TranscriptEntries({
           {rows}
         </ol>
       ) : filter !== 'all' ? (
-        <p className="text-sub text-muted-foreground" data-filter-empty>
+        <p className="text-body text-muted-foreground" data-filter-empty>
           {EMPTY_FILTERED[filter]}
         </p>
       ) : null}
@@ -441,33 +441,34 @@ function TranscriptBody({ taskId, runId, running }: { taskId: string; runId: str
           data-transcript-body
         >
           {q.isPending && !data ? (
-            <p className="flex items-center gap-1.5 text-sub text-muted-foreground" role="status">
+            <p className="flex items-center gap-1.5 text-body text-muted-foreground" role="status">
               <LoaderCircle className="size-3.5 animate-spin" aria-hidden />
               正在读会话内容…
             </p>
           ) : null}
           {q.isError ? (
-            <div
-              role="alert"
-              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-st-fail/40 bg-st-fail/10 px-3 py-2 text-sub text-ink-fail"
+            <Notice
+              tone="fail"
+              action={
+                <Button type="button" size="xs" variant="outline" onClick={() => void q.refetch()}>
+                  重试
+                </Button>
+              }
             >
-              <span className="min-w-0 break-words">没读成：{reasonOf(q.error)}</span>
-              <Button type="button" size="xs" variant="outline" onClick={() => void q.refetch()}>
-                重试
-              </Button>
-            </div>
+              <span className="break-words">没读成：{reasonOf(q.error)}</span>
+            </Notice>
           ) : null}
           {data?.noRecord ? (
-            <p className="text-sub text-muted-foreground" data-no-record>
+            <p className="text-body text-muted-foreground" data-no-record>
               这一段跑在记录会话内容之前，没有记录
             </p>
           ) : null}
           {data && !data.noRecord && !data.entries.length && !q.isError ? (
-            <p className="text-sub text-muted-foreground">还没有内容，会话刚起来。</p>
+            <p className="text-body text-muted-foreground">还没有内容，会话刚起来。</p>
           ) : null}
           {data?.entries.length ? <TranscriptEntries entries={data.entries} filter={filter} /> : null}
           {data && !data.done && !q.isError && !data.noRecord ? (
-            <p className="flex items-center gap-1.5 text-caption text-ink-run" data-live>
+            <p className="flex items-center gap-1.5 text-meta text-ink-run" data-live>
               <span className="size-1.5 animate-pulse rounded-full bg-st-run" aria-hidden />
               还在跑，每 3 秒读一次新的
               {q.dataUpdatedAt ? (
@@ -482,7 +483,7 @@ function TranscriptBody({ taskId, runId, running }: { taskId: string; runId: str
           <Button
             type="button"
             size="sm"
-            className="absolute bottom-3 left-1/2 -translate-x-1/2 shadow-lg"
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 shadow-overlay"
             onClick={jump}
           >
             跳到最新
@@ -505,9 +506,11 @@ function DrawerSummary({ run, nth, now }: { run: SegmentRunView; nth: number; no
   const cost = run.costUsd !== undefined ? formatUsd(run.costUsd) : '花费没读到';
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1" data-drawer-summary>
-      <span className="text-sm font-medium">{run.segment ? segmentLabel[run.segment] : UNKNOWN_SEGMENT}</span>
-      <span className="num text-caption text-muted-foreground">第 {nth} 次</span>
-      <span className="num text-sub">{run.modelName}</span>
+      <span className="text-body font-medium">
+        {run.segment ? segmentLabel[run.segment] : UNKNOWN_SEGMENT}
+      </span>
+      <span className="num text-meta text-muted-foreground">第 {nth} 次</span>
+      <span className="num text-body">{run.modelName}</span>
       {run.running ? (
         <StatusBadge tone="run" label="在跑" />
       ) : run.outcome ? (
@@ -515,8 +518,8 @@ function DrawerSummary({ run, nth, now }: { run: SegmentRunView; nth: number; no
       ) : (
         <StatusBadge tone="stall" label="结局没读到" />
       )}
-      <span className="num text-caption text-muted-foreground">{duration}</span>
-      <span className="num text-caption text-muted-foreground">{cost}</span>
+      <span className="num text-meta text-muted-foreground">{duration}</span>
+      <span className="num text-meta text-muted-foreground">{cost}</span>
     </div>
   );
 }
@@ -584,7 +587,7 @@ export function RunTranscriptDrawer({
           className="absolute inset-y-0 left-0 z-10 hidden w-1.5 cursor-col-resize hover:bg-border-strong focus-visible:bg-ring focus-visible:outline-none sm:block"
         />
         <SheetHeader className="shrink-0 gap-1 border-b py-3 pr-12">
-          <SheetTitle className="text-sm">会话内容</SheetTitle>
+          <SheetTitle className="text-body">会话内容</SheetTitle>
           <SheetDescription className="sr-only">这一笔的提示词、助手的话、工具调用和结论</SheetDescription>
           <DrawerSummary run={run} nth={nth} now={now} />
         </SheetHeader>

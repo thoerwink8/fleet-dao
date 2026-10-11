@@ -24,7 +24,7 @@ export function EmptyState({
       <div
         data-size="inline"
         className={cn(
-          'flex flex-wrap items-center gap-2 px-4 py-3 text-body text-muted-foreground',
+          'flex flex-wrap items-center gap-2 px-section py-stack text-body text-muted-foreground',
           className,
         )}
       >
@@ -38,7 +38,10 @@ export function EmptyState({
   return (
     <div
       data-size="section"
-      className={cn('flex flex-col items-center justify-center gap-2 px-6 py-12 text-center', className)}
+      className={cn(
+        'flex flex-col items-center justify-center gap-2 px-section-gap py-[calc(var(--spacing-section-gap)*2)] text-center',
+        className,
+      )}
     >
       {Icon ? (
         <div className="grid size-10 place-items-center rounded-full bg-muted text-muted-foreground">
