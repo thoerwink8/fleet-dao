@@ -266,6 +266,7 @@ export default function Audit() {
               onChange={setQ}
               placeholder="搜人、动作、对象、理由"
               aria-label="搜索操作记录"
+              className="md:w-64"
             />
           </>
         }
