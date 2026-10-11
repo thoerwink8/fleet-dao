@@ -292,6 +292,34 @@ describe('写请求：令牌与校验', () => {
     expect(calls.filter((c) => c.url === '/api/me')).toHaveLength(2);
   });
 
+  test('退出后在飞请求回 401：不调 onUnauthorized（二次跳登录页会打断 e2e 的 goto）', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const onUnauthorized = vi.fn();
+    const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (method === 'GET' && url === '/api/me') return respond({ body: ME });
+      if (method === 'POST' && url === '/auth/logout') return respond({ status: 204 });
+      if (url === '/api/repos') {
+        await held;
+        return respond({
+          status: 401,
+          body: { error: { code: 'session_revoked', message: '会话已作废' } },
+        });
+      }
+      return respond({ status: 404, body: { error: { code: 'not_found', message: '没有' } } });
+    };
+    const api = createHttpApi({ fetch: fn, onUnauthorized });
+    const stale = api.repos().catch((e: unknown) => e);
+    await api.logout();
+    release();
+    expect(await stale).toMatchObject({ status: 401, code: 'session_revoked' });
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
   test.each([
     [
       '档位不在约定里',
