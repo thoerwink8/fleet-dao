@@ -71,9 +71,9 @@ let root: string;
 beforeEach(async () => {
   await resetTestDb(t);
   await world(t.db);
-  // 夹具里「5 分钟前探通」落在前 2 位 30 分钟的间隔之内（#1635），这一轮会照旧不探；这里测的是探的行为，把上一次探通挪到间隔之外
+  // 夹具里「5 分钟前探通」落在活跃档 60 分钟间隔之内（#1798 片 3），这一轮会照旧不探；这里测的是探的行为，把上一次探通挪到间隔之外
   await t.client.query(
-    "update routes set probed_at = probed_at - interval '35 minutes' where probe_state = 'ok'",
+    "update routes set probed_at = probed_at - interval '65 minutes' where probe_state = 'ok'",
   );
   // 真实的样子：独享池挂在独享组织上、拼车池挂在拼车组织上
   await t.client.query("update pools set org_kind = 'solo' where id = 'claude-solo'");

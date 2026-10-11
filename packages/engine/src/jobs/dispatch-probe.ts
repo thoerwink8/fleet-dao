@@ -56,6 +56,9 @@ async function writeConclusion(
     requestText: string | null;
     responseText: string | null;
     check?: ProbeCheck | null;
+    tier?: Conclusion['tier'];
+    nextAt?: Conclusion['nextAt'];
+    failStreak?: Conclusion['failStreak'];
     kind?: RouteProbeKind | null;
   },
 ): Promise<Written> {
@@ -79,7 +82,7 @@ function unwritten(detail: string, error: string): string {
 /**
  * 这一轮不改写结论时能不能派。上一次是通才派。
  * requireOk：该探却没有新结论（组织定不下来）。还没有结论、或上一次不是通，都不起会话。
- * 按规矩不探（按量、放慢没到点、没接上、下架）：还没有结论不当成不通；上一次是 failed / skipped / not_wired 则不派。
+ * 按规矩不探（按量、没接上、下架、没有用途在用）：还没有结论不当成不通；上一次是 failed / skipped / not_wired 则不派。
  */
 function followPrevious(
   label: string,
@@ -117,7 +120,7 @@ async function probeLocked(
   const now = deps.now();
   const plan = planProbe(target, deps.probers, live, now);
   if (!('probe' in plan)) {
-    const detail = 'kept' in plan ? plan.kept : 'unsettled' in plan ? plan.unsettled : plan.detail;
+    const detail = 'unsettled' in plan ? plan.unsettled : plan.detail;
     // 该探却探不了（组织认不出）：这一轮当不通，但不把一条可能还通的路由写成不在线
     if ('state' in plan && plan.state === 'failed') return fail(input.label, detail, false);
     // unsettled 没有新结论，只有上一次探通才派。其余是按规矩不探，按上一次结论走，不改写。
@@ -147,7 +150,7 @@ async function probeLocked(
     );
   }
   // conclude 会再读一次组织：中途变成不探或定不下来时，和上面同一条口径，不改写。
-  if (concluded.kept || concluded.unsettled || (concluded.state !== 'ok' && concluded.state !== 'failed')) {
+  if (concluded.unsettled || (concluded.state !== 'ok' && concluded.state !== 'failed')) {
     return followPrevious(input.label, target.previous, concluded.detail, concluded.unsettled === true);
   }
   // 第二次才认不出组织：没真探，不写成不在线
