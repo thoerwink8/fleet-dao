@@ -2,8 +2,8 @@
 // 法国总览页（#618 第 1 版）：引擎、在用版本、健康、最近拉单 4 格 + 定时任务表。
 // 做完的标准：① 每一项读不到就写「没查成 + 原因」，不拿 0 或假 ok 顶；② 故意造一项失败，那一格变虚线灰框，别的格照常；
 // ③ 定时任务有失败亮红、没查全亮黄（判法照 schedules 页）。
-import { cleanup, fireEvent, screen, within } from '@testing-library/react';
-import { afterEach, describe, expect, test } from 'vitest';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import type { EnvResponse, Jobs, Setting } from '../api/types';
@@ -11,7 +11,10 @@ import { HealthStrip } from '../components/home/health-strip';
 import France from '../routes/france';
 import { renderApp } from '../test/harness';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 function envData(overrides: Partial<EnvResponse['facts']> = {}): EnvResponse {
   return {
@@ -360,6 +363,85 @@ describe('失联与在用版本小标题', () => {
     const red = within(col).getByText('2 项红');
     expect(red.className).not.toContain('text-title');
     expect(red.className).not.toContain('text-ink-fail');
+  });
+
+  describe('手机上失联超过 24 小时的远程环境默认折成一行（#1837）', () => {
+    function phone(width: number) {
+      vi.spyOn(window, 'matchMedia').mockImplementation(
+        (query: string) =>
+          ({
+            matches: [...query.matchAll(/\((min|max)-width:\s*(\d+)px\)/g)].every(([, kind, px]) =>
+              kind === 'min' ? width >= Number(px) : width <= Number(px),
+            ),
+            media: query,
+            onchange: null,
+            addEventListener() {},
+            removeEventListener() {},
+            addListener() {},
+            removeListener() {},
+            dispatchEvent: () => false,
+          }) as MediaQueryList,
+      );
+    }
+    function renderWithRemote(agoMs: number) {
+      const inner = createMockApi({ live: false });
+      const t = Date.now();
+      const at = new Date(t - agoMs).toISOString();
+      const state = agoMs > 5 * 60_000 ? ('stale' as const) : ('fresh' as const);
+      const api = {
+        ...inner,
+        env: () => Promise.resolve(envData()),
+        nodes: async () => ({
+          ...(await inner.nodes()),
+          nodes: [{ id: 'wsl', name: '本机', freshness: state, receivedAt: at, reportedAt: at }],
+        }),
+        node: async () => {
+          const detail = await inner.node('wsl');
+          return {
+            ...detail,
+            id: 'wsl',
+            name: '本机',
+            freshness: state,
+            receivedAt: at,
+            reportedAt: at,
+            env: { ...detail.env, name: { name: '本机' }, asOf: at, facts: envData().facts },
+          };
+        },
+        jobs: () => Promise.resolve(jobsData()),
+      } as unknown as MockApi;
+      renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
+    }
+    const col = () => document.querySelector('[data-env-column="wsl"]') as HTMLElement;
+
+    test('手机：失联 5 天默认只有一行「本机 · 失联 5 天」，没有六项事实；点开才展开，能再收起', async () => {
+      // 手机上仍把旧数据整块铺开（占半屏），这一条会红。
+      phone(390);
+      renderWithRemote(5 * 24 * 60 * 60_000 + 2 * 60 * 60_000);
+      await waitFor(() => expect(col()).toBeTruthy());
+      expect(col().hasAttribute('data-env-collapsed')).toBe(true);
+      expect(col().textContent).toContain('本机 · 失联 5 天 2 小时');
+      expect(col().querySelector('[data-env-fact]')).toBeNull();
+      expect(within(col()).queryByRole('heading')).toBeNull();
+      fireEvent.click(within(col()).getByRole('button', { name: /本机/ }));
+      await waitFor(() => expect(col().querySelector('[data-env-fact]')).toBeTruthy());
+      expect(col().hasAttribute('data-env-collapsed')).toBe(false);
+      expect(col().textContent).toContain('失联，以下是旧数据');
+      fireEvent.click(within(col()).getByRole('button', { name: '收起' }));
+      await waitFor(() => expect(col().hasAttribute('data-env-collapsed')).toBe(true));
+    });
+
+    test('手机：失联不到 24 小时的照常展开；桌面失联 5 天也照常并排展开', async () => {
+      phone(390);
+      renderWithRemote(2 * 60 * 60_000);
+      await screen.findByRole('heading', { name: /本机/ });
+      expect(col().hasAttribute('data-env-collapsed')).toBe(false);
+      cleanup();
+      phone(1366);
+      renderWithRemote(5 * 24 * 60 * 60_000);
+      await screen.findByRole('heading', { name: /本机/ });
+      expect(col().hasAttribute('data-env-collapsed')).toBe(false);
+      expect(col().querySelector('[data-env-fact]')).toBeTruthy();
+    });
   });
 
   test('在用版本小标题为落后主线几个提交', async () => {

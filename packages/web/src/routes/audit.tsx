@@ -2,7 +2,7 @@ import { Bot, Cog, ScrollText, Search, Terminal, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { brand } from '#brand';
-import { useAllBoards, useAudit, useMe, useNotifications, useRouting } from '../api/client';
+import { AUDIT_PAGE_SIZE, useAllBoards, useAudit, useMe, useNotifications, useRouting } from '../api/client';
 import type { AuditEntry, Me } from '../api/types';
 import { FilterTrack, filterTabClass } from '../components/filter-tabs';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
@@ -72,10 +72,10 @@ function ActorIcon({ actor, me }: { actor: AuditEntry['actor']; me: Me | undefin
 }
 
 /** 事件名：有中文对照显示成一句话（悬停看原名）；没有就显示原名加灰字「（没翻译）」。 */
-function ActionText({ action, ok }: { action: string; ok: boolean }) {
+function ActionText({ action, ok, className }: { action: string; ok: boolean; className?: string }) {
   const { text, translated } = describeAction(action);
   return (
-    <span className={cn(!ok && 'text-ink-fail')} title={action}>
+    <span className={cn(!ok && 'text-ink-fail', className)} title={action}>
       {text}
       {translated ? null : <span className="ml-1 text-xs text-faint">（没翻译）</span>}
     </span>
@@ -93,7 +93,7 @@ function json(v: unknown): string {
 function OlderRecordsButton({ pending, onClick }: { pending: boolean; onClick: () => void }) {
   return (
     <Button size="sm" variant="ghost" onClick={onClick} disabled={pending}>
-      {pending ? '正在读更早的…' : '看更早的记录'}
+      {pending ? '正在读更早的…' : `再看 ${AUDIT_PAGE_SIZE} 条`}
     </Button>
   );
 }
@@ -308,15 +308,19 @@ export default function Audit() {
               <li key={a.id} className={cn('flex items-start gap-3 px-4 py-3', !a.ok && 'bg-st-fail/[0.05]')}>
                 <ActorIcon actor={a.actor} me={me} />
                 <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm">
-                    <span className="font-medium" title={a.actor.id}>
+                  {/* 手机上摘要压成一行（谁、做了什么、对象），长了截断；前后值点「看改了什么」才展开 */}
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm max-md:flex-nowrap">
+                    <span
+                      className="font-medium max-md:max-w-20 max-md:shrink-0 max-md:truncate"
+                      title={a.actor.id}
+                    >
                       {actorName(a.actor, me)}
                     </span>
-                    <ActionText action={a.action} ok={a.ok} />
+                    <ActionText action={a.action} ok={a.ok} className="max-md:min-w-0 max-md:truncate" />
                     <button
                       type="button"
                       onClick={() => setTarget(a.target)}
-                      className="min-w-0 truncate text-left text-muted-foreground underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10"
+                      className="min-w-0 truncate text-left text-muted-foreground underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10 max-md:flex-1"
                       title="只看这个对象的记录"
                     >
                       {targetLabel(a.target, tasks, notifications)}
@@ -324,21 +328,26 @@ export default function Audit() {
                     {describeAction(a.action).translated && targetHref(a.target) ? (
                       <Link
                         to={targetHref(a.target) ?? '/'}
-                        className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground max-md:inline-flex max-md:min-h-10 max-md:items-center"
+                        className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground max-md:inline-flex max-md:min-h-10 max-md:shrink-0 max-md:items-center"
                       >
                         打开
                       </Link>
                     ) : null}
                     {!a.ok ? (
-                      <Badge variant="outline" className="h-5 border-st-fail/50 text-caption text-ink-fail">
+                      <Badge
+                        variant="outline"
+                        className="h-5 border-st-fail/50 text-caption text-ink-fail max-md:shrink-0"
+                      >
                         没做成
                       </Badge>
                     ) : null}
                   </div>
                   {a.reason ? (
-                    <p className="mt-0.5 text-sub text-muted-foreground">理由：{a.reason}</p>
+                    <p className="mt-0.5 text-sub text-muted-foreground max-md:truncate">理由：{a.reason}</p>
                   ) : null}
-                  {a.error ? <p className="mt-0.5 text-sub text-ink-fail">{a.error}</p> : null}
+                  {a.error ? (
+                    <p className="mt-0.5 text-sub text-ink-fail max-md:truncate">{a.error}</p>
+                  ) : null}
                   {a.before !== undefined || a.after !== undefined ? (
                     <ChangeDetails before={a.before} after={a.after} routeNames={routeNames} />
                   ) : null}

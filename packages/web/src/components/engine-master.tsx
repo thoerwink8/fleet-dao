@@ -184,7 +184,10 @@ export function EngineMasterRelation() {
     <p className="mb-3 text-xs text-muted-foreground" data-testid="engine-master-relation">
       每个项目的「让 AI 接活」要和<strong className="font-medium text-foreground">引擎总开关</strong>
       一起看：总开关关＝全停，开＝只有这里接活开着的项目才派。总开关{state}（
-      <Link to="/france" className="underline underline-offset-2 hover:text-foreground">
+      <Link
+        to="/france"
+        className="underline underline-offset-2 hover:text-foreground max-md:inline-flex max-md:min-h-10 max-md:items-center"
+      >
         去法国页开关
       </Link>
       ）。

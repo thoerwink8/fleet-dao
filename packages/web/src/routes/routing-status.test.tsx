@@ -508,9 +508,14 @@ describe('渠道状态页：近 60 次真历史（#1139）', () => {
     expect(strip.querySelector('[data-cell="1"]')).toBeNull();
     expect(strip.querySelector('[data-cell="61"]')).toBeTruthy();
     expect(strip.querySelector('[data-result="empty"]')).toBeNull();
-    expect(within(screen.getByRole('list', { name: '探测记录列表' })).getAllByRole('button')).toHaveLength(
-      60,
-    );
+    // 探测记录默认只铺最近 10 条（#1837），点「再看」铺到 60 条为止
+    const logButtons = () =>
+      within(screen.getByRole('list', { name: '探测记录列表' })).getAllByRole('button');
+    expect(logButtons()).toHaveLength(10);
+    for (const more of [/^再看 20 条/, /^再看 20 条/, /^再看 10 条/]) {
+      fireEvent.click(screen.getByRole('button', { name: more }));
+    }
+    expect(logButtons()).toHaveLength(60);
   });
 
   test('【故意造出的失败】库读不到：写没查成，不画格子冒充没有历史', async () => {
@@ -662,6 +667,35 @@ describe('渠道状态页：探测记录（#1638）', () => {
     expect(document.querySelector('[data-probe-log="empty"]')).toBeNull();
   });
 
+  test('默认只铺最近 10 条，点「再看 20 条」多出 20 条，余下不足 20 时按实数写（#1837）', async () => {
+    // 一次铺满 60 条（渠道状态页整页 13000px）这一条会红。
+    renderLog(
+      historyOf(
+        Array.from({ length: 35 }, (_, i) =>
+          probeCell({
+            id: i + 1,
+            routeId: 'r-cursor',
+            channelId: 'ch-cursor',
+            probedAt: mins(100 - i),
+            result: 'passed',
+            durationMs: 1000,
+            failureReason: null,
+            requestText: 'PING',
+            responseText: 'OK',
+          }),
+        ),
+      ),
+    );
+    await waitFor(() => expect(rowOrder()).toHaveLength(10));
+    // 新的在上：最后一格（id 35）最新
+    expect(rowOrder()[0]).toBe('35');
+    fireEvent.click(screen.getByRole('button', { name: /^再看 20 条/ }));
+    expect(rowOrder()).toHaveLength(30);
+    fireEvent.click(screen.getByRole('button', { name: /^再看 5 条/ }));
+    expect(rowOrder()).toHaveLength(35);
+    expect(document.querySelector('[data-probe-log="more"]')).toBeNull();
+  });
+
   test('读成了但真没有记录：写还没有探测记录', async () => {
     renderLog({ state: 'ok', channels: [], latestByRoute: [] });
     const empty = await waitFor(() => {
@@ -736,7 +770,11 @@ describe('渠道状态页：探测记录（#1638）', () => {
       ],
       latestByRoute: [old],
     });
-    await waitFor(() => expect(rowOrder()).toHaveLength(61));
+    await waitFor(() => expect(rowOrder()).toHaveLength(10));
+    for (const more of [/^再看 20 条/, /^再看 20 条/, /^再看 11 条/]) {
+      fireEvent.click(screen.getByRole('button', { name: more }));
+    }
+    expect(rowOrder()).toHaveLength(61);
     expect(rowOrder().at(-1)).toBe('1');
   });
 });
