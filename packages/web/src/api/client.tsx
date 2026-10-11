@@ -1194,3 +1194,13 @@ export function useLiveSync(enabled = true) {
     };
   }, [api, qc, enabled]);
 }
+
+/**
+ * 退出：先取消在飞查询（停掉外壳轮询），再调 api.logout（里头停推送、抬 sessionEpoch，
+ * 在飞的 401 不再二次跳登录页），最后清缓存。调用方自己 navigate 到登录页。
+ */
+export async function logoutAndClear(api: FleetApi, qc: QueryClient): Promise<void> {
+  await qc.cancelQueries();
+  await api.logout();
+  qc.clear();
+}
