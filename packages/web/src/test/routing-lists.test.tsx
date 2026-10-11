@@ -410,7 +410,7 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await screen.findByRole('list', { name: '模型' });
     const row = document.querySelector('li[data-model="opus-5.5"]') as HTMLElement;
-    // 行框是版式组件 RowFrame（行高、内边距取令牌，#1915）
+    // 行框是版式组件 RowFrame（行高、内边距取令牌，#1914）
     const shell = row.querySelector('[data-row-frame]') as HTMLElement;
     expect(shell).toBeTruthy();
     expect(classTokens(shell)).toEqual(

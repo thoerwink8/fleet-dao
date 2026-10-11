@@ -2,7 +2,7 @@
 // 路由、渠道状态两页在手机上的版面（#1806）：
 // - 渠道状态：不到 lg（1024）只画列表，点一行从底部（手机）开详情抽屉，不再上下堆两栏。
 // - 路由：每行的档位、上移、下移、置顶、置底、移出、整池暂停收进行尾一个「⋯」菜单，菜单项照旧走原来的接口；
-//   #1915 起各宽度同一个样子，开关留在行里。
+//   #1914 起各宽度同一个样子，开关留在行里。
 // - 页头右边那一排（状态胶囊、刷新）可以换行，不撑出屏幕；操作记录的 pre 自动换行。
 // 真正的横向溢出（scrollWidth 大于 clientWidth）要有版面引擎才量得出：这里只能断言类名和 happy-dom 里量得出的 0；
 // 真量宽度的在 e2e/specs/11-mobile-overflow.e2e.ts。
@@ -108,7 +108,7 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await opened();
     const row = document.querySelector('li[data-model="opus-5.5"]') as HTMLElement;
-    // 开关留在行里（#1915：各宽度同一个样子，开关是一行唯一的直接操作）；别的都不在行里
+    // 开关留在行里（#1914：各宽度同一个样子，开关是一行唯一的直接操作）；别的都不在行里
     expect(within(row).getByRole('switch', { name: 'Opus 5.5 的开关' })).toBeTruthy();
     expect(within(row).queryByRole('button', { name: /^上移 / })).toBeNull();
     expect(within(row).queryByRole('button', { name: /^把 .* 移出用途/ })).toBeNull();
@@ -205,7 +205,7 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
     expect(spy.mock.calls[0]?.[2]).toMatchObject({ op: 'reorder' });
   });
 
-  test('宽屏和手机同一个样子（#1915）：行里开关和「⋯」，「⋯」和拖动柄悬停这一行才露出', async () => {
+  test('宽屏和手机同一个样子（#1914）：行里开关和「⋯」，「⋯」和拖动柄悬停这一行才露出', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await opened();
     const row = document.querySelector('li[data-model="opus-5.5"]') as HTMLElement;

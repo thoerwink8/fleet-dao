@@ -101,7 +101,7 @@ describe('用途：添加、移出、档位', () => {
   test('移出用途要先确认，确认后调用 removePurposeModel，这一行没了', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await screen.findByRole('navigation', { name: '用途' });
-    // 「移出」在这一行行尾的「⋯」里（#1915）
+    // 「移出」在这一行行尾的「⋯」里（#1914）
     fireEvent.click(await menuItem('kimi-k3', '移出动手'));
     const dialog = await screen.findByRole('alertdialog');
     expect(dialog.textContent).toContain('Kimi k3');

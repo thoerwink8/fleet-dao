@@ -298,7 +298,7 @@ export interface RowMoves {
 export const ROW_MENU_TITLE = '上移、下移、置顶、置底和更多操作';
 
 /**
- * 「⋯」菜单里的四个挪动项（#1806 起手机这样，路由页样板 #1915 起桌面也这样）：行里不再并排四个箭头。
+ * 「⋯」菜单里的四个挪动项（#1806 起手机这样，路由页样板 #1914 起桌面也这样）：行里不再并排四个箭头。
  * 置灰的项悬停写原因：到头了、远程环境、正在保存。键盘照旧：聚焦拖动柄按 Alt+方向键。
  */
 export function RowMoveItems({ moves }: { moves: RowMoves }) {

@@ -20,7 +20,7 @@ test('点刷新按钮调用该页主查询的 refetch', async () => {
     expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-disabled')).toBe('false'),
   );
   const button = screen.getByRole('button', { name: '刷新' });
-  // 页头只留图标刷新（#1915），最后更新时间在悬停和读屏里
+  // 页头只留图标刷新（#1914），最后更新时间在悬停和读屏里
   const fresh = document.querySelector('[data-refresh-bar="dot"] [role="status"]');
   expect(fresh?.getAttribute('title')).toMatch(/最后更新/);
   expect(fresh?.getAttribute('aria-label')).toMatch(/最后更新/);

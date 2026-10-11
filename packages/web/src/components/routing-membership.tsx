@@ -296,7 +296,7 @@ export function effortWord(effort: SessionEffort | null | undefined): string | n
 }
 
 /**
- * 用途里这一行的行尾「⋯」菜单（路由页样板 #1915）：档位（单选，只列这个模型的路由都认的）、上移、下移、置顶、置底、移出。
+ * 用途里这一行的行尾「⋯」菜单（路由页样板 #1914）：档位（单选，只列这个模型的路由都认的）、上移、下移、置顶、置底、移出。
  * 行里只留名字、状态和开关；这些都是偶尔才动的，收进菜单，各宽度同一个样子。
  */
 export function PurposeModelMenu({

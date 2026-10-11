@@ -739,7 +739,7 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
       {inLayers.length > 0 ? (
         <ol aria-label={`${c.channel.name} 的路由`} className="py-1">
           {inLayers.map(({ route, modelId, modelName }) => (
-            // 行高、内边距由 RouteItem 的行框（RowFrame）给；关着的只变淡，不整行灰底（路由页样板 #1915）
+            // 行高、内边距由 RouteItem 的行框（RowFrame）给；关着的只变淡，不整行灰底（路由页样板 #1914）
             <li key={route.routeId} data-route={route.routeId} className="relative hover:bg-accent">
               <RouteItem
                 route={route}

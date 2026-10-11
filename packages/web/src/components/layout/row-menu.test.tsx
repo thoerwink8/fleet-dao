@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// 行的三件版式组件（#1915 路由页样板，规范第三节「行：一个主信息、一个状态，次要操作收进「⋯」」）：
+// 行的三件版式组件（#1914 路由页样板，规范第三节「行：一个主信息、一个状态，次要操作收进「⋯」」）：
 // RowFrame 行框取令牌、带 group/row；RowMenu 平时藏着、悬停这一行才露出，菜单项手机上 40 高；FilterTabGroups 组头不悬在半空。
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';

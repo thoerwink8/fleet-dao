@@ -56,7 +56,7 @@ describe('路由页：每一层现在活着吗', () => {
     for (const gone of ['分诊', '需求文档', '方案', '调研', '第二意见', '开 PR 前验证']) {
       expect(screen.queryByText(gone)).toBeNull();
     }
-    // 页头一句汇总（#1915）：派得出去几个；不知道、派不出去是 0 就不写（红灯数为 0 不显示红），算的时刻在悬停里
+    // 页头一句汇总（#1914）：派得出去几个；不知道、派不出去是 0 就不写（红灯数为 0 不显示红），算的时刻在悬停里
     expect(screen.getByText('5 个派得出去')).toBeTruthy();
     expect(screen.queryByText(/个不知道/)).toBeNull();
     expect(screen.queryByText(/个派不出去/)).toBeNull();
@@ -65,7 +65,7 @@ describe('路由页：每一层现在活着吗', () => {
     expect(page).not.toContain('不算死');
     expect(page).not.toContain('上移');
     expect(page).not.toContain('下移');
-    // 「活、不知道、满了不算故障」的说明收进页头 ⓘ（#1915），点开才看
+    // 「活、不知道、满了不算故障」的说明收进页头 ⓘ（#1914），点开才看
     expect(page).not.toContain('不算故障');
     fireEvent.click(document.querySelector('[data-description-hint]') as HTMLElement);
     const legend = await screen.findByText(/满了是等，不算故障/);
@@ -180,7 +180,7 @@ describe('路由页：每一层现在活着吗', () => {
     expect(row.querySelector('[data-effort-tip]')?.getAttribute('title')).toMatch(
       /没有单独的档位参数.*不带方括号/,
     );
-    // 行里只有一行小字，长说明不铺开；全文在行尾「⋯」菜单的档位组头下面（#1915）
+    // 行里只有一行小字，长说明不铺开；全文在行尾「⋯」菜单的档位组头下面（#1914）
     expect(row.textContent).not.toMatch(/不带方括号/);
     const more = within(row).getByRole('button', { name: /^更多操作：Cursor Auto/ });
     more.focus();

@@ -2,7 +2,7 @@
 // 路由页调先后和开关（#1333，#1366 第二部分）：拖动、每行置顶 / 置底、聚焦后 Alt+上下键改先后（放下 / 点 / 按键就保存，失败回到原顺序）；
 // 每条路由、每个模型、每个渠道各有开关，开关确认后才写；渠道关了，下面的路由显示「渠道已关」不能单独开；
 // 整池暂停在对应池旁边设和撤。选了远程环境整块置灰并写「去那台上操作」。
-// 每行行尾「⋯」里有「上移一位」「下移一位」「置顶」「置底」（#1915 起收进菜单；用的还是 movePurposeModel / updateModelRoute 的 reorder，没有新接口）。
+// 每行行尾「⋯」里有「上移一位」「下移一位」「置顶」「置底」（#1914 起收进菜单；用的还是 movePurposeModel / updateModelRoute 的 reorder，没有新接口）。
 // #856 第 2 处：旧的 useUpdateChannel 仍不导出。新的渠道开关是 setChannelEnabled，不是那条已删的 PATCH。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -59,7 +59,7 @@ const opened = async () => {
 const modelGrip = (modelId: string) => within(modelRow(modelId)).getByRole('button', { name: /^拖动 / });
 const routeGrip = (routeId: string) => within(routeItem(routeId)).getByRole('button', { name: /^拖动 / });
 
-/** 行尾「⋯」（路由页样板 #1915 起上移、下移、置顶、置底都在这里）。键盘 Enter 打开，不依赖 happy-dom 的指针事件。 */
+/** 行尾「⋯」（路由页样板 #1914 起上移、下移、置顶、置底都在这里）。键盘 Enter 打开，不依赖 happy-dom 的指针事件。 */
 const openRowMenu = async (row: HTMLElement) => {
   const trigger = within(row).getByRole('button', { name: /^更多操作：/ });
   trigger.focus();
@@ -97,7 +97,7 @@ describe('路由页：调先后和开关', () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await opened();
     expect(modelNames()).toEqual(BEFORE);
-    // 四个挪动收在行尾「⋯」里，行里不再并排四个箭头（#1915）
+    // 四个挪动收在行尾「⋯」里，行里不再并排四个箭头（#1914）
     expect(within(modelRow('kimi-k3')).queryByRole('button', { name: /^(上移|下移|置顶|置底) / })).toBeNull();
     const menu = await openRowMenu(modelRow('kimi-k3'));
     for (const name of ['上移一位', '下移一位', '置顶', '置底']) {
@@ -427,7 +427,7 @@ describe('路由页：调先后和开关', () => {
     const spy = vi.spyOn(api, 'updateSetting');
     await opened();
     const row = routeItem('r-ca-opus');
-    // 整池暂停在这条路由行尾的「⋯」里（#1915），点了在行下面展开表单
+    // 整池暂停在这条路由行尾的「⋯」里（#1914），点了在行下面展开表单
     await waitFor(() => expect(row.querySelector('[data-row-menu]')).not.toBeNull());
     const menu = await openRowMenu(row);
     fireEvent.click(await within(menu).findByRole('menuitem', { name: '暂停账号池 claude-a' }));
