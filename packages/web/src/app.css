@@ -163,6 +163,18 @@
   --transition-duration-300: 300ms;
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /*
+   * 组件令牌（规范 2.7，学 Ant Design 的组件令牌和紧凑算法）：只给会随密度变的五个尺寸起名。
+   * 值在下面「密度」一节，标准一组、紧凑一组，切 <html data-density> 整站一起变。
+   * 只许 components/layout/、components/ui/ 用（lint-design R10）：页面要的是版式组件，不是自己量尺寸。
+   * 名字放 --spacing-* 下：h-*、p-*、gap-* 都认它。
+   */
+  --spacing-control: var(--control-h);
+  --spacing-row: var(--row-h);
+  --spacing-section: var(--section-p);
+  --spacing-section-gap: var(--section-gap);
+  --spacing-stack: var(--stack-gap);
 }
 
 /*
@@ -242,6 +254,32 @@
   --grid-template-columns-board: minmax(0, 26rem) minmax(0, 1fr); /* 2xl 起：最宽 26rem、剩余 */
   --grid-template-rows-stack: auto 1fr; /* 行：自动、剩余 */
   --grid-template-rows-media: auto auto 1fr; /* 行：自动、自动、剩余 */
+}
+
+/*
+ * ---------- 密度：组件令牌的取值 ----------
+ * 标准 32 / 40 / 16 / 24 / 12（控件高、行高、区块内边距、区块间距、区块内间距）。
+ * 紧凑 28 / 32 / 12 / 16 / 8，只在桌面（md，48rem）起生效：手机上 40 的可点区（#1820）照旧，所以 390 宽两种密度完全一样。
+ * 字号不跟着缩：中文最小 12、正文 14，紧凑只收框的高度和留白，不收字。
+ * 写在 :root 而不是 [data-palette]：预览卡、陈列页这类嵌套的 data-palette 会继承外层的密度，不会被重置回标准。
+ * 任何一棵子树挂 data-density 就按它自己的来（comfortable 也列在这里，用来在紧凑的页面里放一块标准的）。
+ */
+:root,
+[data-density="comfortable"] {
+  --control-h: 32px;
+  --row-h: 40px;
+  --section-p: 16px;
+  --section-gap: 24px;
+  --stack-gap: 12px;
+}
+@media (width >= 48rem) {
+  [data-density="compact"] {
+    --control-h: 28px;
+    --row-h: 32px;
+    --section-p: 12px;
+    --section-gap: 16px;
+    --stack-gap: 8px;
+  }
 }
 
 /* ---------- 派生色：所有主题共用一套算法 ---------- */

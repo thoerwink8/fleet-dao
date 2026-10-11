@@ -8,7 +8,7 @@ export function NativeSelect({ className, children, ...props }: ComponentProps<'
     <span className={cn('relative inline-flex min-w-0', className)}>
       <select
         data-slot="native-select"
-        className="h-8 w-full min-w-0 appearance-none rounded-md border border-input bg-transparent py-1 pr-8 pl-3 text-body shadow-xs outline-none transition-[color,box-shadow] duration-100 focus-visible:border-ring focus-visible:ring-focus focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive max-md:min-h-10 max-md:text-heading max-md:font-normal"
+        className="h-control w-full min-w-0 appearance-none rounded-md border border-input bg-transparent py-1 pr-8 pl-3 text-body shadow-xs outline-none transition-[color,box-shadow] duration-100 focus-visible:border-ring focus-visible:ring-focus focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive max-md:min-h-10 max-md:text-heading max-md:font-normal"
         {...props}
       >
         {children}

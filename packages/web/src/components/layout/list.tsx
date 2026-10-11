@@ -1,5 +1,6 @@
 // 列表和列表行（参照 shadcn Item）。合并了原来的 ExpandRow：expandable 的行整行是一个按钮（aria-expanded），点一下才展开明细。
-// 行高桌面 40、手机 44；左边的竖线（rail）标出问题行。
+// 行高取行高令牌（标准 40、紧凑 32），手机 44；左边的竖线（rail）标出问题行。
+// 上下内边距 = (行高 − 一行正文 20px) / 2：单行行正好是行高，两行的行跟着行高一起收。
 import { ChevronRight } from 'lucide-react';
 import { type ComponentProps, type ReactNode, useId, useState } from 'react';
 import { Link } from 'react-router';
@@ -11,7 +12,7 @@ export function List({ divided = true, className, ...rest }: { divided?: boolean
 }
 
 const rowBase =
-  'flex min-h-10 w-full items-center gap-3 px-4 py-2.5 text-left outline-none focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-11';
+  'flex min-h-row w-full items-center gap-stack px-section py-[calc((var(--spacing-row)-1.25rem)/2)] text-left outline-none focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-11';
 const rowHover = 'hover:bg-accent';
 
 export function ListRow({
@@ -102,7 +103,7 @@ export function ListRow({
             />
           </button>
           {open ? (
-            <div id={bodyId} className="border-t bg-muted px-4 py-3">
+            <div id={bodyId} className="border-t bg-muted px-section py-stack">
               {detail}
             </div>
           ) : null}
