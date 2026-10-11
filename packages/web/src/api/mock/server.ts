@@ -8,6 +8,8 @@ import {
   AuditResponse,
   AuthConfigResponse,
   BoardResponse,
+  CI_MODE_SET,
+  type CiMode,
   CredentialsResponse,
   DEFAULT_SESSION_EFFORT,
   describeEngineMaster,
@@ -96,6 +98,8 @@ import {
   UpdateCredentialsRequest,
   UpdateModelRouteRequest,
   UpdateModelRouteResponse,
+  UpdateRepoCiModeRequest,
+  UpdateRepoCiModeResponse,
   UpdateRepoDispatchRequest,
   UpdateRepoDispatchResponse,
   UpdateRouteEffortRequest,
@@ -567,6 +571,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const switchedOff = new Set(MOCK_SWITCHED_OFF_AT_START);
   /** 每个项目「让 AI 接活」打开的时刻：没有就是关着。种子里 orbit 开着、另两个关着，页面上两种样子都能看到。 */
   const mockDispatch = new Map<string, string>([['r-orbit', new Date(now() - 3 * 86_400_000).toISOString()]]);
+  /** 每个项目的合并方式；没记的就是强制 CI（默认）。 */
+  const mockCiMode = new Map<string, CiMode>();
   /**
    * 临时指挥官整理待办的记录（新的在前）。orbit 有一次做成、一次没做成，都在 24 小时内接手过，所以今日剩余 1/3。
    * 没有排队或在做的：按钮能点。点了以后插到最前。
@@ -1555,6 +1561,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             name: r.name,
             on: since !== undefined,
             ...(since ? { since } : {}),
+            ciMode: mockCiMode.get(r.id) ?? 'required',
           };
         }),
       });
@@ -1587,6 +1594,34 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         name: repo.name,
         on: since !== undefined,
         ...(since ? { since } : {}),
+        ciMode: mockCiMode.get(repoId) ?? 'required',
+        changed,
+      });
+    },
+    async updateRepoCiMode(repoId, raw) {
+      await wait();
+      const body = UpdateRepoCiModeRequest.parse(raw);
+      const repo = st.repos.find((r) => r.id === repoId);
+      if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
+      const before = mockCiMode.get(repoId) ?? 'required';
+      const changed = before !== body.ciMode;
+      if (changed) {
+        mockCiMode.set(repoId, body.ciMode);
+        audit({
+          actor: meActor(),
+          action: CI_MODE_SET,
+          target: `repo:${repoId}`,
+          before: { ciMode: before },
+          after: { ciMode: body.ciMode },
+          via: 'cockpit',
+          reason: body.reason ?? `在页面上把合并方式切到${body.ciMode === 'skip' ? '不强制 CI' : '强制 CI'}`,
+        });
+      }
+      return UpdateRepoCiModeResponse.parse({
+        repoId,
+        owner: repo.owner,
+        name: repo.name,
+        ciMode: mockCiMode.get(repoId) ?? 'required',
         changed,
       });
     },

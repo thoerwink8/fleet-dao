@@ -7,6 +7,9 @@
 // - 合并这一步 GitHub 说了算：自动合并只由 armAutoMerge 在验收通过之后挂（每小时对账的兜底不碰任务分支，jobs/auto-merge-check.ts）。
 //   挂的时候 GitHub 说「已经是 clean」（所有条件都满足了，没什么可等的）就直接合（github 包的 mergePr：核头、核不落后主线、
 //   核 CI 绿），合不了的原样说明原因交工作流停下报人。
+// - 不强制 CI 的仓（#1877，input.direct）不挂自动合并（GitHub Free 组织的私有仓挂不了，挂了也等不到合并）：引擎自己直接合，
+//   核头、核不落后主线，不核 CI；合之前在头上贴 cold-verify 成功状态（描述写明没做冷验收），让仓里自带的合并闸放行。
+//   GitHub 自己的合并规则（主线规则集的必过检查、审批）不绕：不满足它拒绝，原话带出去停下报人。
 // - 合并记录：这个仓的对账（github 包 auditMergedPrs）要求引擎开的 PR 账上有合并记录。自动合并是 GitHub 自己合的，没有记录，
 //   所以等到合并之后再调一次 mergePr——它对「已经合了」的 PR 只补记录、删分支，不再合一次。补不成只记日志，不拦任务往下走。
 // - 等合并是长轮询（心跳不断）：叫停时休眠被打断，活动抛取消，不吞。
@@ -14,11 +17,13 @@
 import type { SessionUser } from '@fleet-dao/adapters';
 import {
   type ChangedFile,
+  COLD_VERIFY_CONTEXT,
   parseStandardPaths,
   STANDARD_PATHS_FILE,
   standardFiles,
 } from '@fleet-dao/conventions';
 import type { RepoRef } from '@fleet-dao/github';
+import type { CiMode } from '@fleet-dao/shared';
 import { abortableSleep, errMessage } from '@fleet-dao/shared/util';
 import type { EngineTasks } from '../activities.ts';
 import { type PortContext, PortError } from '../ports.ts';
@@ -30,6 +35,8 @@ import type {
   DeliveryRead,
   GuardedPaths,
   MergeWait,
+  ReadCiModeInput,
+  ReadCiModeResult,
   ReadDeliveryInput,
   ReadTaskBriefInput,
   WaitMergedInput,
@@ -59,6 +66,8 @@ export interface TaskActivitiesDeps {
   >;
   trees: Pick<WorkTrees, 'ownerOf'>;
   exec: UserExec;
+  /** 这个仓现在的合并方式（读库；读不到、认不出抛错）。readCiMode 活动用。 */
+  ciMode: (repo: { owner: string; name: string }) => Promise<CiMode>;
   now?: () => Date;
   /** 看 PR 的间隔；默认 MERGE_POLL_EVERY_MS，测试调短。 */
   pollEveryMs?: number;
@@ -71,7 +80,10 @@ export interface TaskActivitiesDeps {
 }
 
 type TaskActivities = Required<
-  Pick<EngineTasks, 'readTaskBrief' | 'readDelivery' | 'checkGuarded' | 'armAutoMerge' | 'waitMerged'>
+  Pick<
+    EngineTasks,
+    'readTaskBrief' | 'readCiMode' | 'readDelivery' | 'checkGuarded' | 'armAutoMerge' | 'waitMerged'
+  >
 >;
 
 const refOf = (repo: { owner: string; name: string }): RepoRef => ({ owner: repo.owner, name: repo.name });
@@ -176,6 +188,44 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
     };
   };
 
+  /**
+   * 不强制 CI 的仓（#1877）：贴 cold-verify 成功状态（写明没做冷验收）后直接合，不核 CI。状态贴不上也照合（没有合并闸的仓
+   * 本来就不看它）：仓里的合并闸要它，缺了合并会被 GitHub 拒，原话在 why 里。落后主线同强制 CI 那一路：同步到最新主线，
+   * 新头交回工作流重走（不强制的仓重走只是再合一次）。
+   */
+  const mergeDirect = async (
+    repo: RepoRef,
+    input: ArmAutoMergeInput,
+    ctx: PortContext,
+  ): Promise<ArmAutoMergeResult> => {
+    const { prNumber, expectedHead } = input;
+    try {
+      await mapped(() =>
+        gh.claims.setStatus(repo, expectedHead, {
+          context: COLD_VERIFY_CONTEXT,
+          state: 'success',
+          description: '不强制 CI：没做冷验收，由引擎直接合并',
+        }),
+      );
+    } catch (error) {
+      log('不强制 CI：贴 cold-verify 状态没成（没有合并闸的仓不看它）', {
+        repo: `${repo.owner}/${repo.name}`,
+        prNumber,
+        error: errMessage(error),
+      });
+    }
+    const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead, skipCi: true }, ctx));
+    if (merged.merged) return { armed: false, merged: true, mergeCommit: merged.mergeCommit };
+    if (merged.reason === 'behind_main') {
+      return syncBehindMain(repo, prNumber, expectedHead, input.syncedBehind ?? 0, merged.detail, ctx);
+    }
+    return {
+      armed: false,
+      merged: false,
+      why: `不强制 CI，直接合被拒（${merged.reason}）：${merged.detail}`,
+    };
+  };
+
   return {
     async readTaskBrief(input: ReadTaskBriefInput, ctx: PortContext) {
       return readTaskBrief(
@@ -189,6 +239,10 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         },
         { repo: refOf(input.repo), issueNumber: input.issueNumber },
       );
+    },
+
+    async readCiMode(input: ReadCiModeInput): Promise<ReadCiModeResult> {
+      return { mode: await deps.ciMode(input.repo) };
     },
 
     async readDelivery(input: ReadDeliveryInput, ctx: PortContext): Promise<DeliveryRead> {
@@ -262,6 +316,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           headMoved: pull.headSha,
         };
       }
+      if (input.direct) return mergeDirect(repo, input, ctx);
       if (pull.autoMerge) return { armed: true, merged: false };
       try {
         await mapped(() => gh.claims.enableAutoMerge(repo, pull));

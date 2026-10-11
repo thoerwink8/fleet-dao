@@ -48,7 +48,9 @@ export const NO_AVOID: Avoid = { routeIds: [], poolIds: [], modelIds: [] };
 export type CiStep =
   | { kind: 'green' }
   | { kind: 'merged'; mergeCommit?: string | undefined }
-  | { kind: 'rework' };
+  | { kind: 'rework' }
+  /** 等的时候仓被切成「不强制 CI」：不用等了（#1877）。 */
+  | { kind: 'skipped' };
 
 /** 验收停下的原因类别（#1404）。通知第一行、整理提示词都用这三份，不另写一份字符串。 */
 export const VERIFY_STOP_UNPROVABLE = '验收条在 diff 里证不了';

@@ -6,6 +6,7 @@ import type {
   Ban,
   Channel,
   ChannelStateRecord,
+  CiMode,
   HistoryResponse,
   Model,
   NodeReport,
@@ -525,6 +526,18 @@ export interface GitHubStore {
 /** 受管的仓，带「让 AI 接活」开关：autoDispatchSince = 打开的时刻，null = 关着（引擎拉单不派）。 */
 export interface IntakeRepo extends Repo {
   autoDispatchSince: string | null;
+  /** 合并方式（#1877）：required＝强制 CI（默认），skip＝不强制 CI。 */
+  ciMode: CiMode;
+}
+
+/** 切合并方式的结果（setCiMode）。 */
+export interface CiModeChange {
+  /** false = 本来就是要的合并方式：什么都没改，也没记操作记录。 */
+  changed: boolean;
+  /** 现在库里的值。 */
+  ciMode: CiMode;
+  /** 改了才有：同一事务里记下的那条操作记录的编号。 */
+  auditId?: string | undefined;
 }
 
 /** 改「让 AI 接活」开关的结果（setAutoDispatch）。 */
@@ -613,6 +626,15 @@ export interface IntakeStore {
     input: { repoId: string; on: boolean },
     audit: Omit<NewAuditEntry, 'before' | 'after'>,
   ): Promise<AutoDispatchChange | 'not_found'>;
+  /**
+   * 切一个仓的合并方式（repos.ci_mode，#1877）：强制 CI / 不强制 CI，驾驶舱的开关走这里。随时可切：引擎的任务工作流每次走到
+   * 「等 CI」之前现读。已经是要的合并方式就不改、不记（changed=false）；改了和操作记录同一事务：先锁住这一行，
+   * 操作记录的 before/after（{ ciMode }）按库里的值填。没这个仓（含编号不是 uuid）：not_found。
+   */
+  setCiMode(
+    input: { repoId: string; ciMode: CiMode },
+    audit: Omit<NewAuditEntry, 'before' | 'after'>,
+  ): Promise<CiModeChange | 'not_found'>;
 }
 
 /** 别的环境推来的快照（node_reports 表一行），不带快照本体：列环境用。 */

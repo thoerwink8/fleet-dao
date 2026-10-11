@@ -5,7 +5,10 @@
 import {
   AUTO_DISPATCH_DISABLE,
   AUTO_DISPATCH_ENABLE,
+  CI_MODE_SET,
   RepoDispatchResponse,
+  UpdateRepoCiModeRequest,
+  UpdateRepoCiModeResponse,
   UpdateRepoDispatchRequest,
   UpdateRepoDispatchResponse,
   WebRoutes,
@@ -22,6 +25,7 @@ const view = (r: IntakeRepo) => ({
   name: r.name,
   on: r.autoDispatchSince !== null,
   ...(r.autoDispatchSince === null ? {} : { since: r.autoDispatchSince }),
+  ciMode: r.ciMode,
 });
 
 export function registerDispatchRoutes(
@@ -57,12 +61,44 @@ export function registerDispatchRoutes(
       },
     );
     if (change === 'not_found') throw new ApiError(404, 'repo_not_found', '没有这个项目');
+    // 合并方式不在 getRepo 里：改完按名字读回（和 GET 同一条）。
+    const now = await store.findRepoByName(repo.owner, repo.name);
+    if (!now) throw new ApiError(404, 'repo_not_found', '没有这个项目');
     return reply(c, UpdateRepoDispatchResponse, {
       repoId: repo.id,
       owner: repo.owner,
       name: repo.name,
       on: change.autoDispatchSince !== null,
       ...(change.autoDispatchSince === null ? {} : { since: change.autoDispatchSince }),
+      ciMode: now.ciMode,
+      changed: change.changed,
+    });
+  });
+
+  app.put(WebRoutes.updateRepoCiMode.path, async (c) => {
+    const repoId = c.req.param('repoId');
+    const body = await readJson(c, UpdateRepoCiModeRequest);
+    const repo = await store.getRepo(repoId);
+    if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
+    const change = await store.setCiMode(
+      { repoId: repo.id, ciMode: body.ciMode },
+      {
+        actor: actorOf(c),
+        action: CI_MODE_SET,
+        target: `repo:${repo.id}`,
+        reason:
+          body.reason ??
+          `驾驶舱上把 ${repo.owner}/${repo.name} 切成「${body.ciMode === 'skip' ? '不强制 CI' : '强制 CI'}」`,
+        via: c.get('via'),
+        ok: true,
+      },
+    );
+    if (change === 'not_found') throw new ApiError(404, 'repo_not_found', '没有这个项目');
+    return reply(c, UpdateRepoCiModeResponse, {
+      repoId: repo.id,
+      owner: repo.owner,
+      name: repo.name,
+      ciMode: change.ciMode,
       changed: change.changed,
     });
   });

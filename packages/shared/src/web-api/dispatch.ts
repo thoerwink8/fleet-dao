@@ -10,7 +10,18 @@ import { Id, Time } from './internal.ts';
 export const AUTO_DISPATCH_ENABLE = 'repo.auto_dispatch.enable';
 export const AUTO_DISPATCH_DISABLE = 'repo.auto_dispatch.disable';
 
-/** 一个项目一行：现在开还是关、什么时候开的（关着没有）。 */
+/** 操作记录里切「强制 CI / 不强制 CI」的名字；target 是 repo:<仓的编号>，before/after 是 { ciMode }。 */
+export const CI_MODE_SET = 'repo.ci_mode.set';
+
+/**
+ * 引擎按仓的合并方式（repos.ci_mode，#1877）：required＝强制 CI，等 CI 全绿、冷验收通过再合并（默认）；
+ * skip＝不强制 CI，不等 CI、不做冷验收，改标准路径照旧停下，其余由引擎直接合并。
+ */
+export const CI_MODES = ['required', 'skip'] as const;
+export const CiModeSchema = z.enum(CI_MODES);
+export type CiMode = z.infer<typeof CiModeSchema>;
+
+/** 一个项目一行：现在开还是关、什么时候开的（关着没有）、合并方式。 */
 export const RepoDispatchSchema = z.object({
   repoId: Id,
   owner: z.string(),
@@ -18,6 +29,8 @@ export const RepoDispatchSchema = z.object({
   on: z.boolean(),
   /** 开着才有：打开的时刻。 */
   since: Time.optional(),
+  /** 这个项目的合并方式：强制 CI（默认）或不强制 CI。 */
+  ciMode: CiModeSchema,
 });
 export const RepoDispatchResponse = z.object({ repos: z.array(RepoDispatchSchema) });
 
@@ -29,6 +42,20 @@ export const UpdateRepoDispatchRequest = z.object({
 
 /** changed=false：本来就是要的状态，没改、没记操作记录（开着再点开不重设时刻）。 */
 export const UpdateRepoDispatchResponse = RepoDispatchSchema.extend({ changed: z.boolean() });
+
+/** 切一个项目的合并方式；reason 可选，写进操作记录。 */
+export const UpdateRepoCiModeRequest = z.object({
+  ciMode: CiModeSchema,
+  reason: z.string().max(500).optional(),
+});
+/** changed=false：本来就是要的合并方式，没改、没记操作记录。 */
+export const UpdateRepoCiModeResponse = z.object({
+  repoId: Id,
+  owner: z.string(),
+  name: z.string(),
+  ciMode: CiModeSchema,
+  changed: z.boolean(),
+});
 
 // —— 临时指挥官整理待办（母单 #1335 第 3 片，#1338）：设置页仓库一节的「让指挥官整理」按钮要的两个口 ——
 // 点一下 = 记一条操作记录 groom.request（和命令行 fleet-api groom、引擎拉单一轮自己叫是同一个入口、同一把锁），引擎接手整理。

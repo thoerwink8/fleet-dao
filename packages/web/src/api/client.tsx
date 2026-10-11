@@ -69,9 +69,11 @@ import type {
   TaskRoutePin,
   UpdateCredentialsBody,
   UpdatedModelRoute,
+  UpdatedRepoCiMode,
   UpdatedRepoDispatch,
   UpdatedRouteEffort,
   UpdateModelRouteBody,
+  UpdateRepoCiModeBody,
   UpdateRepoDispatchBody,
   UpdateRouteEffortBody,
   UpdateSettingBody,
@@ -102,6 +104,8 @@ export interface FleetApi {
   repoDispatch(): Promise<{ repos: RepoDispatch[] }>;
   /** 开、关一个项目的「让 AI 接活」（写操作记录）；本来就是那个状态时 changed=false。没有这个项目 404。 */
   updateRepoDispatch(repoId: string, body: UpdateRepoDispatchBody): Promise<UpdatedRepoDispatch>;
+  /** 切一个项目的合并方式（强制 CI / 不强制 CI，写操作记录）；本来就是那个方式时 changed=false。没有这个项目 404。 */
+  updateRepoCiMode(repoId: string, body: UpdateRepoCiModeBody): Promise<UpdatedRepoCiMode>;
   /** 这个仓的「指挥官整理待办」：今日剩余、最近几次、有没有一次在排队或在做。没有这个项目 404。 */
   groomStatus(repoId: string): Promise<GroomStatus>;
   /**
@@ -1005,6 +1009,20 @@ export function useUpdateRepoDispatch() {
   return useMutation({
     mutationFn: ({ repoId, body }: { repoId: string; body: UpdateRepoDispatchBody }) =>
       api.updateRepoDispatch(repoId, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.repoDispatch });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/** 切一个项目的合并方式：同「让 AI 接活」，不先改缓存，等后端写完再重拉，页面上永远是库里现在的值。 */
+export function useUpdateRepoCiMode() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ repoId, body }: { repoId: string; body: UpdateRepoCiModeBody }) =>
+      api.updateRepoCiMode(repoId, body),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: keys.repoDispatch });
       qc.invalidateQueries({ queryKey: ['audit'] });

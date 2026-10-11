@@ -9,6 +9,9 @@
 // 一张单的路：读交代 → [选路 → 建树（第一轮）→ 动手会话 → 读交付 → 推分支 → 开 PR（第一轮）→ 等 CI → 冷验收] 最多 3 轮 →
 // 碰没碰「改标准」→ 挂自动合并 → 等合并 → 关单、收树。
 // 返工只有这几种：没产生提交、CI 红了、合并冲突、验收没过；返工意见带进下一轮动手会话。验收最多 2 轮（specs/555）。
+// 按仓切换强制 CI / 不强制 CI（#1877，patched('ci-mode-per-repo')）：每次走到「等 CI」之前现读（rt.ciMode）。不强制 CI 的仓跳过等 CI 和冷验收，
+// 查完改标准路径（照旧停下等人）就由引擎直接合并（armAndWaitMerged 的 direct：不挂自动合并，核头、核不落后主线、不核 CI）；
+// 等 CI 的时候被切成不强制，等 CI 的活动回 skipped，不用人点就往下走；不强制的单停在查路径时被切回强制，回头走等 CI 和验收。
 //
 // 停下等人（waiting.kind = human，驾驶舱点「继续」「放弃」发信号）只有这几处，而且每一处都写清卡在哪、要人干什么：
 // - 交代不全（缺栏）；没有可用的路由；失败分流判「挂起」（同因连着两次再犯、额度要等很久、登录失效……）；
@@ -128,19 +131,29 @@ class TaskFlow {
     const rt = this.rt;
     for (;;) {
       await rt.checkpoint();
-      const ci = await waitForCi(rt);
-      if (ci.kind === 'merged') return { commit: ci.mergeCommit };
-      if (ci.kind === 'rework') return 'rework';
+      // 合并方式（#1877）每次走到这里现读：不强制 CI 的仓不等 CI、不做冷验收，查完改标准路径就由引擎直接合并
+      let skipCi = (await rt.ciMode()) === 'skip';
+      if (!skipCi) {
+        const ci = await waitForCi(rt);
+        if (ci.kind === 'merged') return { commit: ci.mergeCommit };
+        if (ci.kind === 'rework') return 'rework';
+        // 等的时候被切成不强制 CI：不用等了，也不做冷验收
+        if (ci.kind === 'skipped') skipCi = true;
+      }
 
-      const verdict = await coldVerifyPr(rt, brief);
-      if (verdict === 'rework') return 'rework';
-      if (verdict === 'head_moved') {
-        rt.verifyRound = 0; // 头换了，验收对新的头重新数轮
-        continue;
+      if (!skipCi) {
+        const verdict = await coldVerifyPr(rt, brief);
+        if (verdict === 'rework') return 'rework';
+        if (verdict === 'head_moved') {
+          rt.verifyRound = 0; // 头换了，验收对新的头重新数轮
+          continue;
+        }
       }
 
       await guardedPaths(rt);
-      const merged = await armAndWaitMerged(rt);
+      // 查路径可能停下等人很久：期间被切回强制 CI 的，不能带着没等过的 CI 直接合，回头照强制 CI 走
+      if (skipCi && (await rt.ciMode()) !== 'skip') continue;
+      const merged = await armAndWaitMerged(rt, skipCi);
       if (merged.kind === 'merged') return { commit: merged.commit };
       rt.verifyRound = 0; // 头换了，验收对新的头重新数轮
     }

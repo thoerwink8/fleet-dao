@@ -1,6 +1,7 @@
 // 任务工作流的脚本化活动（测试和重放夹具录制器共用）：默认全走通；哪一步要出岔子，给那一步的脚本。
 // 活动被调的先后记在 calls.order 里（验收一定在挂自动合并之前）。
 
+import type { CiMode } from '@fleet-dao/shared';
 import type { EngineTasks } from '../src/activities.ts';
 import { fakeHead } from '../src/fakes.ts';
 import { buildTaskBrief, type TaskBrief, type TaskBriefResult } from '../src/runner/task-brief.ts';
@@ -55,6 +56,8 @@ export interface Script {
   guarded: (n: number) => GuardedPaths;
   arm: (n: number, input: ArmAutoMergeInput) => ArmAutoMergeResult;
   merged: (n: number) => MergeWait;
+  /** 第 n 次读这个仓的合并方式（#1877）；默认一直是强制 CI。 */
+  ciMode: (n: number) => CiMode;
 }
 
 export interface Calls {
@@ -69,6 +72,8 @@ export interface Calls {
   /** 挂自动合并被调时收到的入参。 */
   armInputs: ArmAutoMergeInput[];
   merged: number;
+  /** 读合并方式被调了几次（不进 order：老用例钉着 order 的全序）。 */
+  ciMode: number;
 }
 
 export const OK_SEGMENT: RunSegmentResult = { ok: true, runId: 'run-1', answer: '已提交' };
@@ -85,6 +90,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     arm: 0,
     armInputs: [],
     merged: 0,
+    ciMode: 0,
   };
   const script: Script = {
     brief: () => ({ ok: true, brief: goodBrief() }),
@@ -98,6 +104,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     guarded: () => ({ standards: [] }),
     arm: () => ({ armed: true, merged: false }),
     merged: () => ({ state: 'merged', mergeCommit: 'abc1234567890' }),
+    ciMode: () => 'required',
     ...over,
   };
   const tasks: EngineTasks = {
@@ -105,6 +112,10 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
       calls.order.push('brief');
       calls.brief += 1;
       return script.brief(calls.brief);
+    },
+    async readCiMode() {
+      calls.ciMode += 1;
+      return { mode: script.ciMode(calls.ciMode) };
     },
     async runSegment(input, ctx) {
       calls.order.push('segment');

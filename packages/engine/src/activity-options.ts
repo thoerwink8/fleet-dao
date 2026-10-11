@@ -19,6 +19,8 @@ import {
   type MergeWait,
   type ProbeAssignedInput,
   type ProbeAssignedResult,
+  type ReadCiModeInput,
+  type ReadCiModeResult,
   type ReadDeliveryInput,
   type ReadTaskBriefInput,
   type ReleaseReservationInput,
@@ -51,6 +53,8 @@ export type EngineActivities = PortActivities & {
   readDelivery(input: ReadDeliveryInput): Promise<DeliveryRead>;
   /** 合并之前的冷验收（换一个不同的族）。没能做出来回 unavailable，不当成没过。 */
   coldVerify(input: ColdVerifyInput): Promise<ColdVerifyResult>;
+  /** 读这个仓现在的合并方式（强制 CI / 不强制 CI，#1877）。读不到、认不出抛错，不当成强制 CI。 */
+  readCiMode(input: ReadCiModeInput): Promise<ReadCiModeResult>;
   /** 这个 PR 改到的文件里，哪些是改标准的路径（要创始人同意）。读不到抛错，不当成没碰到。 */
   checkGuarded(input: CheckGuardedInput): Promise<GuardedPaths>;
   /** 给 PR 挂上自动合并（squash，只合 expectedHead）。 */
@@ -96,6 +100,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   probeAssignedRoute: 'job',
   releaseReservation: 'quick',
   readTaskBrief: 'git',
+  readCiMode: 'quick',
   runSegment: 'segment',
   readDelivery: 'git',
   coldVerify: 'segment',

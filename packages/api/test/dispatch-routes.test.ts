@@ -4,7 +4,9 @@ import {
   AUTO_DISPATCH_DISABLE,
   AUTO_DISPATCH_ENABLE,
   AuditResponse,
+  CI_MODE_SET,
   RepoDispatchResponse,
+  UpdateRepoCiModeResponse,
   UpdateRepoDispatchResponse,
 } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
@@ -34,6 +36,96 @@ describe('GET /api/repos/dispatch', () => {
     const h = harness();
     const res = await h.cockpit.request(READ);
     expect(res.status).toBe(401);
+  });
+});
+
+const putCiMode = (repoId: string) => `/api/repos/${repoId}/ci-mode`;
+
+describe('合并方式（强制 CI / 不强制 CI，#1877）', () => {
+  it('已有的项目读出来都是强制 CI（required）', async () => {
+    const h = harness();
+    const s = await h.login();
+    const repos = await state(h, s.cookie);
+    expect(repos.every((r) => r.ciMode === 'required')).toBe(true);
+  });
+
+  it('切到不强制：读回 skip，记一条操作记录（操作人是登录的人，前后值都在）；再切同一个值 changed=false、不多记', async () => {
+    const h = harness();
+    const s = await h.login();
+    const res = await h.cockpit.request(putCiMode(IDS.repo), write('PUT', s, { ciMode: 'skip' }));
+    expect(res.status).toBe(200);
+    expect(UpdateRepoCiModeResponse.parse(await res.json())).toMatchObject({
+      repoId: IDS.repo,
+      owner: 'example',
+      name: 'canary',
+      ciMode: 'skip',
+      changed: true,
+    });
+    expect((await state(h, s.cookie)).find((r) => r.repoId === IDS.repo)?.ciMode).toBe('skip');
+
+    const again = await h.cockpit.request(putCiMode(IDS.repo), write('PUT', s, { ciMode: 'skip' }));
+    expect(UpdateRepoCiModeResponse.parse(await again.json())).toMatchObject({
+      ciMode: 'skip',
+      changed: false,
+    });
+
+    const audit = AuditResponse.parse(
+      await (
+        await h.cockpit.request(`/api/audit?target=repo:${IDS.repo}`, { headers: { cookie: s.cookie } })
+      ).json(),
+    );
+    expect(audit.items.map((a) => [a.action, a.actor.kind, a.via])).toEqual([
+      [CI_MODE_SET, 'user', 'cockpit'],
+    ]);
+    expect(audit.items[0]?.before).toEqual({ ciMode: 'required' });
+    expect(audit.items[0]?.after).toEqual({ ciMode: 'skip' });
+  });
+
+  it('切回强制 CI；切换不碰「让 AI 接活」开关', async () => {
+    const h = harness();
+    const s = await h.login();
+    await h.cockpit.request(putCiMode(IDS.repo), write('PUT', s, { ciMode: 'skip' }));
+    const back = await h.cockpit.request(putCiMode(IDS.repo), write('PUT', s, { ciMode: 'required' }));
+    expect(UpdateRepoCiModeResponse.parse(await back.json())).toMatchObject({
+      ciMode: 'required',
+      changed: true,
+    });
+    const row = (await state(h, s.cookie)).find((r) => r.repoId === IDS.repo);
+    expect(row).toMatchObject({ ciMode: 'required', on: false });
+  });
+
+  it('开关接口的回执也带着合并方式（页面据此显示，不用再拉一遍）', async () => {
+    const h = harness();
+    const s = await h.login();
+    await h.cockpit.request(putCiMode(IDS.repo), write('PUT', s, { ciMode: 'skip' }));
+    const res = await h.cockpit.request(put(IDS.repo), write('PUT', s, { on: true }));
+    expect(UpdateRepoDispatchResponse.parse(await res.json())).toMatchObject({ on: true, ciMode: 'skip' });
+  });
+
+  it('【故意造出的失败】没登录 401；项目不存在 404；合并方式不是 required/skip：400，库里一点没动', async () => {
+    const h = harness();
+    const s = await h.login();
+    expect((await h.cockpit.request(putCiMode(IDS.repo), { method: 'PUT' })).status).toBe(401);
+    const missing = await h.cockpit.request(
+      putCiMode('00000000-0000-4000-8000-000000000000'),
+      write('PUT', s, { ciMode: 'skip' }),
+    );
+    expect(missing.status).toBe(404);
+    expect(await errorCode(missing)).toBe('repo_not_found');
+    const bad = await h.cockpit.request(putCiMode(IDS.repo), write('PUT', s, { ciMode: 'off' }));
+    expect(bad.status).toBe(400);
+    expect((await state(h, s.cookie)).find((r) => r.repoId === IDS.repo)?.ciMode).toBe('required');
+  });
+
+  it('【故意造出的失败】飞书网关通行证不能切合并方式：403，库里一点没动', async () => {
+    const h = harness();
+    const s = await h.login();
+    const res = await h.cockpit.request(
+      putCiMode(IDS.repo),
+      viaGateway('PUT', 'ou_dev_founder_a', { ciMode: 'skip' }),
+    );
+    expect(res.status).toBe(403);
+    expect((await state(h, s.cookie)).find((r) => r.repoId === IDS.repo)?.ciMode).toBe('required');
   });
 });
 

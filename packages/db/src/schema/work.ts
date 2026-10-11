@@ -51,8 +51,16 @@ export const repos = pgTable(
      * 开着，引擎自己按依据挑单（开单时间不再比这个时刻，#1336）。
      */
     autoDispatchSince: timestamp('auto_dispatch_since', tz),
+    /**
+     * 引擎按仓的合并方式（#1877）：required＝强制 CI（等 CI 全绿、冷验收通过再合并，默认）；skip＝不强制 CI
+     * （不等 CI、不做冷验收，改标准路径照旧停下，其余由引擎直接合并）。随时可切，工作流每次走到「等 CI」之前现读。
+     */
+    ciMode: text('ci_mode').notNull().default('required'),
   },
-  (t) => [unique('repos_owner_name_unique').on(t.owner, t.name)],
+  (t) => [
+    unique('repos_owner_name_unique').on(t.owner, t.name),
+    check('repos_ci_mode_known', sql`${t.ciMode} in ('required', 'skip')`),
+  ],
 );
 
 /** 需求：一张 GitHub issue 一行。 */

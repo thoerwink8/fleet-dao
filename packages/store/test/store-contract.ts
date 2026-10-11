@@ -1391,6 +1391,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           defaultBranch: 'main',
           testCommand: 'pnpm check',
           autoDispatchSince: null,
+          ciMode: 'required',
         });
         expect(await store.findRepoByName('example', 'other')).toBeNull();
       });
@@ -1649,6 +1650,70 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           store.adoptOrphanTask({ taskId: NEW_TASK, title: '不该留下', rawRequest: '不该留下' }, badAudit()),
         ).rejects.toThrow();
         expect((await store.getTask(NEW_TASK))?.title).toBe('新需求');
+      });
+
+      describe('合并方式（强制 CI / 不强制 CI，#1877）', () => {
+        const target = `repo:${IDS.repo}`;
+        const setMode = audit({
+          actor: { kind: 'engine', id: 'ops:ci-mode' },
+          action: 'repo.ci_mode.set',
+          target,
+          via: 'engine',
+        });
+        const mode = async () => (await store.findRepoByName('example', 'canary'))?.ciMode;
+        const modeAudits = async () => (await store.listAudit({ target, limit: 10 })).items;
+
+        it('已有的仓默认强制 CI：读出来是 required', async () => {
+          expect(await mode()).toBe('required');
+        });
+
+        it('切到不强制：读回 skip，同一事务写一条带前后值的操作记录；再切同一个值不改、不记；切回强制又记一条', async () => {
+          tick();
+          expect(await store.setCiMode({ repoId: IDS.repo, ciMode: 'skip' }, setMode)).toEqual({
+            changed: true,
+            ciMode: 'skip',
+            auditId: expect.any(String),
+          });
+          expect(await mode()).toBe('skip');
+          const [entry, ...rest] = await modeAudits();
+          expect(rest).toEqual([]);
+          expect(entry).toMatchObject({
+            at: clock.now.toISOString(),
+            actor: { kind: 'engine', id: 'ops:ci-mode' },
+            action: 'repo.ci_mode.set',
+            via: 'engine',
+            ok: true,
+            before: { ciMode: 'required' },
+            after: { ciMode: 'skip' },
+          });
+          tick();
+          expect(await store.setCiMode({ repoId: IDS.repo, ciMode: 'skip' }, setMode)).toEqual({
+            changed: false,
+            ciMode: 'skip',
+          });
+          expect(await modeAudits()).toHaveLength(1);
+          expect(await store.setCiMode({ repoId: IDS.repo, ciMode: 'required' }, setMode)).toMatchObject({
+            changed: true,
+            ciMode: 'required',
+          });
+          expect((await modeAudits()).map((a) => [a.before, a.after])).toEqual([
+            [{ ciMode: 'skip' }, { ciMode: 'required' }],
+            [{ ciMode: 'required' }, { ciMode: 'skip' }],
+          ]);
+        });
+
+        it('没这个仓 not_found、不留记录；操作记录写不进：合并方式也不改', async () => {
+          for (const repoId of [OTHER_UUID, 'nope'])
+            expect(await store.setCiMode({ repoId, ciMode: 'skip' }, setMode), repoId).toBe('not_found');
+          await expect(store.setCiMode({ repoId: IDS.repo, ciMode: 'skip' }, badAudit())).rejects.toThrow();
+          expect(await mode()).toBe('required');
+          expect(await modeAudits()).toEqual([]);
+        });
+
+        it('切合并方式不动「让 AI 接活」开关', async () => {
+          await store.setCiMode({ repoId: IDS.repo, ciMode: 'skip' }, setMode);
+          expect((await store.findRepoByName('example', 'canary'))?.autoDispatchSince).toBeNull();
+        });
       });
 
       describe('「让 AI 接活」开关', () => {

@@ -29,6 +29,7 @@ import { StatusDot } from '../components/layout/status-badge';
 import { PageNav } from '../components/page-nav';
 import { PoolHoldsPanel } from '../components/pool-holds';
 import { RefreshBar } from '../components/refresh-bar';
+import { RepoCiModeControl } from '../components/repo-ci-mode';
 import { useRepo } from '../components/repo-context';
 import { RepoDispatchControl } from '../components/repo-dispatch';
 import { RepoGroomControl } from '../components/repo-groom';
@@ -623,6 +624,10 @@ export default function Settings() {
                         row={dispatch.data?.repos.find((d) => d.repoId === r.id)}
                       />
                       <RepoGroomControl repoId={r.id} repo={{ owner: r.owner, name: r.name }} />
+                      <RepoCiModeControl
+                        repoId={r.id}
+                        row={dispatch.data?.repos.find((d) => d.repoId === r.id)}
+                      />
                     </li>
                   ))}
                   {/* 只有真读到了一个空列表才说「还没有仓」；没读成、还在读都不算。 */}

@@ -3,7 +3,7 @@
 // 这里是工作流代码也会引入的文件：运行时只引 @temporalio/workflow 的 defineSignal / defineQuery，别的一律只写类型。
 // 输入进了工作流历史：以后只许加可选字段，不许改老字段的意思。
 
-import type { Repo } from '@fleet-dao/shared';
+import type { CiMode, Repo } from '@fleet-dao/shared';
 import {
   type AbandonCommand,
   type ContinueCommand,
@@ -249,11 +249,27 @@ export interface CheckGuardedInput {
   approved?: GuardedPaths;
 }
 
+/** 读这个仓现在的合并方式（#1877）：工作流每次走到「等 CI」之前现读，随时可切。 */
+export interface ReadCiModeInput {
+  schemaVersion: 1;
+  repo: Pick<Repo, 'owner' | 'name'>;
+}
+
+export interface ReadCiModeResult {
+  /** required＝强制 CI（等 CI、冷验收、挂自动合并）；skip＝不强制 CI（不等 CI、不做冷验收，引擎直接合并）。 */
+  mode: CiMode;
+}
+
 export interface ArmAutoMergeInput {
   schemaVersion: 1;
   repo: Repo;
   prNumber: number;
   expectedHead: string;
+  /**
+   * 不强制 CI 的仓（#1877）：不挂自动合并，引擎直接合（核头、核不落后主线，不核 CI），合之前在头上贴 cold-verify 成功状态，
+   * 描述写明「不强制 CI，没做冷验收」，让仓里自带的合并闸放行。老历史里没有这个字段，当作强制 CI。
+   */
+  direct?: true;
   /**
    * 这张 PR 已经因为落后主线自动同步过几次（工作流数；没同步过就不带）。到了 MAX_MAIN_SYNCS 次，
    * 再落后就不同步了，原样停下报人。老历史里没有这个字段，当作 0。

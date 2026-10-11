@@ -671,6 +671,11 @@ export interface MergePrInput {
   commitMessage?: string | undefined;
   /** 合完删分支，默认删（仓没开「合并后自动删」）。 */
   deleteBranch?: boolean | undefined;
+  /**
+   * 不核 CI（#1877：仓被切成「不强制 CI」，引擎直接合并）。头、目标分支、冲突、不落后主线照核；GitHub 自己的合并规则
+   * （主线规则集的必过检查、审批）照旧管，不满足它回 405，原话带出去，不绕。
+   */
+  skipCi?: boolean | undefined;
 }
 
 export type MergeRefusal =
@@ -772,10 +777,17 @@ export async function mergePr(
       return refused('behind_main', `主线比 PR #${prNumber} 多 ${behindBy} 个提交：先同步主线、在新头上重测`);
     }
 
-    // 合并前再确认一次：CI 在这个头上是绿的
-    const required = await requiredChecksFor(deps, repo, input.checks, ctx.signal);
-    const ci = await readCi(deps, repo, expectedHead, required, ctx.signal);
-    if (ci.evaluation.overall !== 'green') {
+    // 合并前再确认一次：CI 在这个头上是绿的（不强制 CI 的仓不核，见 MergePrInput.skipCi）
+    const ci = input.skipCi
+      ? null
+      : await readCi(
+          deps,
+          repo,
+          expectedHead,
+          await requiredChecksFor(deps, repo, input.checks, ctx.signal),
+          ctx.signal,
+        );
+    if (ci !== null && ci.evaluation.overall !== 'green') {
       const e = ci.evaluation;
       const parts = [
         e.failed.length ? `红：${e.failed.join('、')}` : '',

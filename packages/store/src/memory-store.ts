@@ -5,6 +5,7 @@ import {
   type Ban,
   type Channel,
   type ChannelStateRecord,
+  type CiMode,
   type Model,
   type Pool,
   type ProgressKind,
@@ -73,8 +74,12 @@ import {
   autoDispatchUnchanged,
   boardCutoffMs,
   canStopTask,
+  ciModeAudit,
+  ciModeChanged,
+  ciModeUnchanged,
   emptyTaskGroupCounts,
   isAutoDispatchUnchanged,
+  isCiModeUnchanged,
   isRequestUnchanged,
   keepOnBoard,
   lastTaskChangeAt,
@@ -135,7 +140,7 @@ interface IdempotencyRecord {
 }
 
 /** repos 表的一行：多一个自动派活开关（打开的时刻，不填 = 关着）。列仓的接口不带这一样。 */
-export type RepoRecord = Repo & { autoDispatchSince?: string | undefined };
+export type RepoRecord = Repo & { autoDispatchSince?: string | undefined; ciMode?: CiMode | undefined };
 
 /** 和库里的表一一对应（去掉了库自己算的列）。 */
 /** 内存里的人：多一个可选的创建时刻（库里 users.created_at），只用来给 listUsers 排序，读出去时不带。 */
@@ -217,7 +222,7 @@ export interface MemoryStoreOptions {
 /** 列环境不带快照本体。 */
 const summaryOf = ({ snapshot: _snapshot, ...summary }: NodeReportRecord) => summary;
 
-const repoOnly = ({ autoDispatchSince: _switch, ...repo }: RepoRecord): Repo => repo;
+const repoOnly = ({ autoDispatchSince: _switch, ciMode: _ciMode, ...repo }: RepoRecord): Repo => repo;
 
 /** 给出去的是副本：调用方改了不影响库里的。对象版本按对象排（和库版一样）。 */
 const copyDelivery = (e: GitHubDelivery): GitHubDelivery => ({
@@ -893,6 +898,7 @@ export function createMemoryStore(
         ? {
             ...repoOnly(repo),
             autoDispatchSince: repo.autoDispatchSince ?? null,
+            ciMode: repo.ciMode ?? 'required',
           }
         : null;
     },
@@ -1047,6 +1053,16 @@ export function createMemoryStore(
       checkAudit(full);
       repo.autoDispatchSince = after ?? undefined;
       return autoDispatchChanged(after, audit(full));
+    },
+    async setCiMode({ repoId, ciMode }, entry) {
+      const repo = data.repos.find((r) => r.id === repoId);
+      if (!repo) return 'not_found';
+      const before = repo.ciMode ?? 'required';
+      if (isCiModeUnchanged(before, ciMode)) return ciModeUnchanged(before);
+      const full = ciModeAudit(entry, before, ciMode);
+      checkAudit(full);
+      repo.ciMode = ciMode;
+      return ciModeChanged(ciMode, audit(full));
     },
   };
 }

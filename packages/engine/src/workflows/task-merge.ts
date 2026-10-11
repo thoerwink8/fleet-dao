@@ -51,11 +51,15 @@ function approve(rt: TaskRuntime, head: string, pending: GuardedPaths, before: G
  */
 export async function armAndWaitMerged(
   rt: TaskRuntime,
+  direct = false,
 ): Promise<{ kind: 'merged'; commit?: string | undefined } | { kind: 'head_moved' }> {
   const prNumber = rt.prNumber;
   if (prNumber === null || rt.head === null) throw new Error('合并之前还没有 PR');
   for (;;) {
-    await rt.advance('merge', `PR #${prNumber} 挂自动合并，等合并`);
+    await rt.advance(
+      'merge',
+      direct ? `PR #${prNumber} 不强制 CI，直接合并` : `PR #${prNumber} 挂自动合并，等合并`,
+    );
     const head: string = rt.head;
     const armed = await rt.step('armAutoMerge', () =>
       rt.acts.armAutoMerge({
@@ -63,6 +67,7 @@ export async function armAndWaitMerged(
         repo: rt.input.repo,
         prNumber,
         expectedHead: head,
+        ...(direct ? { direct: true as const } : {}),
         ...(rt.mainSyncs > 0 ? { syncedBehind: rt.mainSyncs } : {}),
       }),
     );
@@ -80,7 +85,10 @@ export async function armAndWaitMerged(
       return { kind: 'head_moved' };
     }
     if (!armed.armed) {
-      await rt.park('自动合并没挂上', armed.why ?? 'GitHub 没说为什么');
+      await rt.park(
+        direct ? '直接合并没成（不强制 CI）' : '自动合并没挂上',
+        armed.why ?? 'GitHub 没说为什么',
+      );
       continue;
     }
     for (;;) {

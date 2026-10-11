@@ -93,6 +93,8 @@ import type {
   UpdateCredentialsRequest,
   UpdateModelRouteRequest,
   UpdateModelRouteResponse,
+  UpdateRepoCiModeRequest,
+  UpdateRepoCiModeResponse,
   UpdateRepoDispatchRequest,
   UpdateRepoDispatchResponse,
   UpdateRouteEffortRequest,
@@ -126,6 +128,9 @@ export type Repo = z.infer<typeof RepoSchema>;
 export type RepoDispatch = z.infer<typeof RepoDispatchResponse>['repos'][number];
 export type UpdateRepoDispatchBody = z.input<typeof UpdateRepoDispatchRequest>;
 export type UpdatedRepoDispatch = z.infer<typeof UpdateRepoDispatchResponse>;
+export type { CiMode } from '@fleet-dao/shared';
+export type UpdateRepoCiModeBody = z.input<typeof UpdateRepoCiModeRequest>;
+export type UpdatedRepoCiMode = z.infer<typeof UpdateRepoCiModeResponse>;
 /** 一个仓的「指挥官整理待办」：今日剩余次数、最近几次、有没有一次在做。 */
 export type GroomStatus = z.infer<typeof GroomStatusResponse>;
 export type GroomNowBody = z.input<typeof GroomNowRequest>;

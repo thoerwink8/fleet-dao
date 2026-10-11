@@ -3,6 +3,7 @@
 import {
   AUTO_DISPATCH_DISABLE,
   AUTO_DISPATCH_ENABLE,
+  CI_MODE_SET,
   GROOM_ACTION,
   RELEASE_REQUEST_ACTION,
   ROUTE_PROBE_ACTION,
@@ -24,6 +25,7 @@ export const AUDIT_ACTION_TEXT: Readonly<Record<string, string>> = {
   'ask.close': '关闭了旧追问',
   [AUTO_DISPATCH_ENABLE]: '开启了「让 AI 接活」',
   [AUTO_DISPATCH_DISABLE]: '关闭了「让 AI 接活」',
+  [CI_MODE_SET]: '切合并方式',
   [RELEASE_REQUEST_ACTION]: '点了发布到法国',
   // 任务
   'task.create': '建了任务',

@@ -64,6 +64,13 @@ describe('auditChangeLines', () => {
     );
   });
 
+  test('合并方式：字段叫「合并方式」，值显示强制 CI / 不强制 CI，不露 required / skip', () => {
+    // 把 ciMode 的值原样丢出来，或漏掉字段中文名，这一条会红。
+    expect(auditChangeLines({ ciMode: 'required' }, { ciMode: 'skip' })).toEqual([
+      { key: 'ciMode', label: '合并方式', before: '强制 CI', after: '不强制 CI' },
+    ]);
+  });
+
   test('认不出的字段名原样显示，不猜', () => {
     // 给 notAKnownField 编一个中文，这一条会红。
     expect(auditChangeLines({ notAKnownField: 'a' }, { notAKnownField: 'b' })).toEqual([

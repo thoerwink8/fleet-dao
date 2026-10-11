@@ -16,6 +16,8 @@ import {
   GroomNowResponse,
   GroomStatusResponse,
   RepoDispatchResponse,
+  UpdateRepoCiModeRequest,
+  UpdateRepoCiModeResponse,
   UpdateRepoDispatchRequest,
   UpdateRepoDispatchResponse,
 } from './dispatch.ts';
@@ -117,6 +119,13 @@ export const WebRoutes = {
     path: '/repos/:repoId/dispatch',
     request: UpdateRepoDispatchRequest,
     response: UpdateRepoDispatchResponse,
+  },
+  /** 切一个项目的合并方式（强制 CI / 不强制 CI，#1877）：随时可切，记操作记录；没有这个项目 404。 */
+  updateRepoCiMode: {
+    method: 'PUT',
+    path: '/repos/:repoId/ci-mode',
+    request: UpdateRepoCiModeRequest,
+    response: UpdateRepoCiModeResponse,
   },
   /** 「让指挥官整理」按钮的现状（母单 #1335 第 3 片，#1338）：这个项目今日剩余次数、最近几次结果、有没有一次在排队或在做。没有这个项目 404。 */
   groomStatus: { method: 'GET', path: '/repos/:repoId/dispatch/groom', response: GroomStatusResponse },

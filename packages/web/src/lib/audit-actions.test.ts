@@ -13,6 +13,10 @@ describe('describeAction', () => {
     expect(describeAction('constructor').translated).toBe(false);
   });
 
+  test('repo.ci_mode.set 翻成「切合并方式」', () => {
+    expect(describeAction('repo.ci_mode.set')).toEqual({ text: '切合并方式', translated: true });
+  });
+
   test('引擎、整理、探针这几组事件名都有对照，译文都是非空的一句话', () => {
     for (const a of [...Object.values(ROUTE_PROBE_ACTION), ...Object.values(GROOM_ACTION)]) {
       expect(AUDIT_ACTION_TEXT[a], a).toBeTruthy();

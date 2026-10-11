@@ -1,7 +1,7 @@
 // 引擎拉单从库里读的两样（queries/intake.ts）：受管的仓带开关、一张单的任务行状态。
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { listIntakeRepos, taskStateByIssue } from '../src/queries/intake.ts';
+import { listIntakeRepos, readRepoCiMode, taskStateByIssue } from '../src/queries/intake.ts';
 import { repos } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addTask, ago, DAY } from './helpers.ts';
@@ -27,12 +27,32 @@ describe('受管的仓（listIntakeRepos）', () => {
       defaultBranch: 'main',
       testCommand: 'pnpm check',
       autoDispatchSince: null,
+      ciMode: 'required',
     });
     expect(rows[1]?.autoDispatchSince?.toISOString()).toBe(opened.toISOString());
   });
 
   it('一个仓都没有：空数组（调用方把它当「库里没有受管的仓」报，不当成都关着）', async () => {
     expect(await listIntakeRepos(t.db)).toEqual([]);
+  });
+});
+
+describe('合并方式（#1877）', () => {
+  it('新仓默认强制 CI；切成不强制后 listIntakeRepos 和 readRepoCiMode 读到的一致，仓名不分大小写', async () => {
+    const a = await addRepo(t.db, 'aaa');
+    expect(await readRepoCiMode(t.db, { owner: 'acme', name: 'aaa' })).toBe('required');
+    await t.db.update(repos).set({ ciMode: 'skip' }).where(eq(repos.id, a.id));
+    expect(await readRepoCiMode(t.db, { owner: 'ACME', name: 'AAA' })).toBe('skip');
+    expect((await listIntakeRepos(t.db))[0]?.ciMode).toBe('skip');
+  });
+
+  it('【故意造出的失败】库里没有这个仓：抛错，不当成强制 CI', async () => {
+    await expect(readRepoCiMode(t.db, { owner: 'acme', name: 'nope' })).rejects.toThrow('库里没有仓');
+  });
+
+  it('【故意造出的失败】认不出的值进不了库（check 约束）', async () => {
+    const a = await addRepo(t.db, 'aaa');
+    await expect(t.db.update(repos).set({ ciMode: 'off' }).where(eq(repos.id, a.id))).rejects.toThrow();
   });
 });
 

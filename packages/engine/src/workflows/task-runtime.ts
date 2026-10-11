@@ -7,7 +7,7 @@
 // - 「放弃」「叫停」都要把正在跑的长活动取消掉：长活动一律包在 cancellable() 里。
 // - 停下等人 park() 回来＝人点了「继续」；放弃会在 park() 里抛 Abandoned，走不到下一行。
 
-import type { TaskState } from '@fleet-dao/shared';
+import type { CiMode, TaskState } from '@fleet-dao/shared';
 import {
   CancellationScope,
   condition,
@@ -184,6 +184,21 @@ export class TaskRuntime {
   async advance(phase: TaskPhase, doing: string): Promise<void> {
     this.set(phase, doing);
     if (patched('mirror-phase')) await this.mirror('running');
+  }
+
+  /**
+   * 这个仓现在的合并方式（#1877）：每次走到「等 CI」之前、挂合并之前现读，不在拉单那一刻定死，随时可切。
+   * 老历史重放时没有这一步活动（patched 为假）：一律当强制 CI，和原来的顺序一字不差。
+   */
+  async ciMode(): Promise<CiMode> {
+    if (!patched('ci-mode-per-repo')) return 'required';
+    const got = await this.step('readCiMode', () =>
+      this.acts.readCiMode({
+        schemaVersion: 1,
+        repo: { owner: this.input.repo.owner, name: this.input.repo.name },
+      }),
+    );
+    return got.mode;
   }
 
   guard(): void {

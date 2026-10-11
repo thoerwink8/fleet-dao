@@ -37,6 +37,8 @@ export async function waitForCi(rt: TaskRuntime): Promise<CiStep> {
         return { kind: 'green' };
       case 'merged':
         return { kind: 'merged', mergeCommit: got.mergeCommit };
+      case 'skipped':
+        return { kind: 'skipped' };
       case 'red':
         rt.feedback = [
           `CI 红了：${got.failedChecks.join('、') || '（没写是哪项）'}`,
@@ -63,7 +65,11 @@ export async function waitForCi(rt: TaskRuntime): Promise<CiStep> {
         return { kind: 'rework' };
       }
       case 'unknown':
-        await rt.park('CI 的结果没查成', got.detail ?? '没有检查，或超时读不到');
+        // 走到这里的都是强制 CI 的仓（不强制的仓不进等 CI）：把话说全，别让人以为是引擎坏了
+        await rt.park(
+          'CI 的结果没查成：这个仓是强制 CI，但没配检查，或超时读不到',
+          `${got.detail ?? '没有更多信息'}。补上检查后点「继续」；要不等 CI 直接合并，到驾驶舱把这个项目切成「不强制 CI」后点「继续」。`,
+        );
         continue;
       case 'diverged':
         await rt.park('PR 的头被改写了（新头不含老头）', got.detail ?? '像是被强推改写，自动并主线接不了');

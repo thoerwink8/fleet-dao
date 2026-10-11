@@ -3,8 +3,14 @@
  * 改这里之前必须知道：pg 版把同样的判断写在 SQL 里（priority 的子查询、`is distinct from`、`where state = 'queued'`、行锁里比开关），
  * 只能共用常量和「判完之后」的形状；内存版直接调这里的函数。两边必须判得一样，契约测试（store-contract）管。
  */
-import { TASK_LIST_GROUPS, type Task, type TaskListGroup } from '@fleet-dao/shared';
-import type { AutoDispatchChange, NewAuditEntry } from './ports.ts';
+import {
+  type CiMode,
+  CiModeSchema,
+  TASK_LIST_GROUPS,
+  type Task,
+  type TaskListGroup,
+} from '@fleet-dao/shared';
+import type { AutoDispatchChange, CiModeChange, NewAuditEntry } from './ports.ts';
 
 /** 到了这些状态就不再动了；看板上只留最近一段时间内结束的。 */
 export const TERMINAL_TASK_STATES = ['done', 'stopped', 'failed'] as const satisfies readonly Task['state'][];
@@ -84,6 +90,37 @@ export const autoDispatchAudit = (
   ...entry,
   before: { autoDispatchSince: before },
   after: { autoDispatchSince: after },
+});
+
+/** 合并方式改成 next：现在已经是了就不改、不记操作记录。 */
+export const isCiModeUnchanged = (before: CiMode, next: CiMode): boolean => before === next;
+
+/** 库里读出的合并方式：认不出的值抛错（check 约束挡着，走到这里是库被人改坏了），不当成「强制 CI」顶。 */
+export function ciModeOf(raw: string): CiMode {
+  const parsed = CiModeSchema.safeParse(raw);
+  if (!parsed.success) throw new Error(`repos.ci_mode 认不出：${JSON.stringify(raw)}`);
+  return parsed.data;
+}
+
+/** 合并方式没变：回现在的值。 */
+export const ciModeUnchanged = (ciMode: CiMode): CiModeChange => ({ changed: false, ciMode });
+
+/** 改成了：回新值和那条操作记录的编号。 */
+export const ciModeChanged = (ciMode: CiMode, auditId: string): CiModeChange => ({
+  changed: true,
+  ciMode,
+  auditId,
+});
+
+/** 合并方式改动的操作记录：before、after 都是 { ciMode }。 */
+export const ciModeAudit = (
+  entry: Omit<NewAuditEntry, 'before' | 'after'>,
+  before: CiMode,
+  after: CiMode,
+): NewAuditEntry => ({
+  ...entry,
+  before: { ciMode: before },
+  after: { ciMode: after },
 });
 
 // —— 任务列表页（#1639）——

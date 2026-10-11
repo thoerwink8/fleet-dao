@@ -542,6 +542,27 @@ describe('合并', () => {
     }
   });
 
+  it('skipCi（仓被切成不强制 CI，#1877）：CI 红的、没跑完的、没出现的都照合；头、落后主线照核', async () => {
+    for (const conclusion of ['failure', null, 'none'] as const) {
+      const { gh, fake } = setup();
+      const pr = fake.addPull({ head: { ref: 'task/1', sha: A } });
+      if (conclusion !== 'none') fake.addCheck(A, 'check', conclusion);
+      const res = await gh.mergePr({ repo, prNumber: pr.number, expectedHead: A, skipCi: true });
+      expect(res).toMatchObject({ merged: true });
+    }
+    const moved = setup();
+    const movedPr = ready(moved.fake, { head: { ref: 'task/1', sha: B } });
+    expect(
+      await moved.gh.mergePr({ repo, prNumber: movedPr.number, expectedHead: A, skipCi: true }),
+    ).toMatchObject({ merged: false, reason: 'head_moved' });
+    const behind = setup();
+    const behindPr = ready(behind.fake);
+    behind.fake.behindBy.set(A, 2);
+    expect(
+      await behind.gh.mergePr({ repo, prNumber: behindPr.number, expectedHead: A, skipCi: true }),
+    ).toMatchObject({ merged: false, reason: 'behind_main' });
+  });
+
   it('C10：mergeable 还没算出来就重读，算出来再合；一直算不出来就报可重试', async () => {
     const first = setup();
     const pr = ready(first.fake);

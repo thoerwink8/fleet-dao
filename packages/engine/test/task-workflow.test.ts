@@ -64,6 +64,36 @@ const statusUntil = (h: WorkflowHandle, check: (s: TaskStatus) => boolean, what:
 
 const parked = (s: TaskStatus) => s.waiting?.kind === 'human';
 
+// 查路径用真活动（real/task-activities.ts）+ 内存假 GitHub：不靠桩「点了继续就变空」，
+// 人批了之后能不能放行，由真活动怎么判说了算（#10）。
+const STANDARDS = JSON.stringify({ paths: [{ path: 'AGENTS.md', section: '通用段', why: '通用段' }] });
+function realGuard(prFiles: string[]): {
+  checkGuarded: NonNullable<EngineTasks['checkGuarded']>;
+  seen: CheckGuardedInput[];
+} {
+  const seen: CheckGuardedInput[] = [];
+  const acts = createTaskActivities({
+    gh: {
+      pullFiles: async () => prFiles.map((filename) => ({ filename, status: 'modified' })),
+      readRepoFile: async () => ({
+        defaultBranch: 'main',
+        commit: 'a'.repeat(40),
+        file: { kind: 'text', text: STANDARDS },
+      }),
+    } as unknown as TaskActivitiesDeps['gh'],
+    trees: { ownerOf: async () => null },
+    exec: localExec(),
+    ciMode: async () => 'required',
+  });
+  return {
+    seen,
+    checkGuarded: async (i, ctx) => {
+      seen.push(i);
+      return acts.checkGuarded(i, ctx);
+    },
+  };
+}
+
 describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
   it('一张单：选路、建树、动手、读交付、推分支、开 PR、等 CI、验收、挂自动合并、等合并、关单、收树', async () => {
     const world = createFakeWorld();
@@ -290,35 +320,6 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
     expect(calls.verify.map((v) => v.round)).toEqual([1, 1]); // 两次都是第 1 轮
   });
-
-  // 查路径用真活动（real/task-activities.ts）+ 内存假 GitHub：不靠桩「点了继续就变空」，
-  // 人批了之后能不能放行，由真活动怎么判说了算（#10）。
-  const STANDARDS = JSON.stringify({ paths: [{ path: 'AGENTS.md', section: '通用段', why: '通用段' }] });
-  function realGuard(prFiles: string[]): {
-    checkGuarded: NonNullable<EngineTasks['checkGuarded']>;
-    seen: CheckGuardedInput[];
-  } {
-    const seen: CheckGuardedInput[] = [];
-    const acts = createTaskActivities({
-      gh: {
-        pullFiles: async () => prFiles.map((filename) => ({ filename, status: 'modified' })),
-        readRepoFile: async () => ({
-          defaultBranch: 'main',
-          commit: 'a'.repeat(40),
-          file: { kind: 'text', text: STANDARDS },
-        }),
-      } as unknown as TaskActivitiesDeps['gh'],
-      trees: { ownerOf: async () => null },
-      exec: localExec(),
-    });
-    return {
-      seen,
-      checkGuarded: async (i, ctx) => {
-        seen.push(i);
-        return acts.checkGuarded(i, ctx);
-      },
-    };
-  }
 
   it('改到了标准路径：不挂自动合并，停下等创始人；点「继续」后再查放行、才挂（真活动判）', async () => {
     const world = createFakeWorld();
@@ -1967,5 +1968,135 @@ describe('任务工作流 · 没提交就避开上一轮路由（#1408）', { ti
     );
     expect(run.outcome).toBe('merged');
     expect(calls.segment.filter((segment) => segment.taskId === task.taskId).length).toBeGreaterThan(3);
+  });
+});
+
+// 按仓切换强制 CI / 不强制 CI（#1877）：不强制的仓不等 CI、不做冷验收，改标准路径照旧停下，其余由引擎直接合并；
+// 合并方式每次走到「等 CI」之前现读，随时可切。
+describe('任务工作流 · 合并方式（强制 CI / 不强制 CI）', { timeout: 60_000 }, () => {
+  const mergedNow = () => ({ armed: false, merged: true, mergeCommit: 'abc1234567890' });
+
+  it('不强制 CI：一路走到合并，不调 waitCi、不调冷验收，直接合并（direct），不等合并', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({ ciMode: () => 'skip', arm: mergedNow });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1, verifyRounds: 0 });
+    expect(world.count('waitCi')).toBe(0);
+    expect(calls.verify).toHaveLength(0);
+    expect(calls.order).toEqual(['brief', 'segment', 'delivery', 'guarded', 'arm']);
+    expect(calls.armInputs[0]).toMatchObject({ direct: true });
+    expect(calls.merged).toBe(0);
+    expect(world.callsOf('closeIssue')[0]?.input).toMatchObject({ issueNumber: 12, reason: 'completed' });
+    expect(world.states.at(-1)).toMatchObject({ state: 'done' });
+  });
+
+  it('强制 CI（默认）：照旧等 CI、验收、挂自动合并（不带 direct），每个仓每次都读一遍合并方式', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(world.count('waitCi')).toBe(1);
+    expect(calls.verify).toHaveLength(1);
+    expect(calls.armInputs[0]).not.toHaveProperty('direct');
+    expect(calls.ciMode).toBe(1);
+  });
+
+  it('不强制 CI 的仓碰到改标准路径：照样停下等创始人，同意后才直接合', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({ ciMode: () => 'skip', arm: mergedNow });
+    const guard = realGuard(['AGENTS.md', 'src/a.ts']);
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '改标准，停下等创始人');
+        expect(s.waiting?.detail).toContain('标准路径');
+        expect(calls.arm).toBe(0);
+        expect(world.count('waitCi')).toBe(0);
+        await h.signal(taskContinueSignal, { by: 'frank', note: '同意' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks: { ...tasks, checkGuarded: guard.checkGuarded } },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.armInputs[0]).toMatchObject({ direct: true });
+    expect(calls.verify).toHaveLength(0);
+  });
+
+  it('停在等 CI 的单，仓切到不强制 CI 后不用人点就往下走：不做冷验收，直接合并', async () => {
+    // 第一次读是强制 CI（进了等 CI），等的时候被切成不强制（waitCi 回 skipped），之后读到的都是不强制
+    const world = createFakeWorld({ ci: () => ({ state: 'skipped' }) });
+    const { tasks, calls } = scripted({ ciMode: (n) => (n === 1 ? 'required' : 'skip'), arm: mergedNow });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', verifyRounds: 0 });
+    expect(world.count('waitCi')).toBe(1);
+    expect(calls.verify).toHaveLength(0);
+    expect(calls.armInputs[0]).toMatchObject({ direct: true });
+  });
+
+  it('不强制 CI 的单停在改标准路径等人时，仓被切回强制 CI：同意后回头走等 CI、验收，再挂自动合并，不带着没等过的 CI 直接合', async () => {
+    // 读合并方式：1 开头＝不强制；2 查完路径后＝已经切回强制；之后都是强制
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({ ciMode: (n) => (n === 1 ? 'skip' : 'required') });
+    const guard = realGuard(['AGENTS.md']);
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await statusUntil(h, parked, '改标准，停下等创始人');
+        await h.signal(taskContinueSignal, { by: 'frank', note: '同意' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks: { ...tasks, checkGuarded: guard.checkGuarded } },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(world.count('waitCi')).toBe(1);
+    expect(calls.verify).toHaveLength(1);
+    expect(calls.armInputs).toHaveLength(1);
+    expect(calls.armInputs[0]).not.toHaveProperty('direct');
+  });
+
+  it('【故意造出的失败】强制 CI 的仓没有检查（CI 结果没查成）：停下，提示里写明「这个仓是强制 CI，但没配检查」', async () => {
+    const world = createFakeWorld({ ci: () => ({ state: 'unknown', detail: '没有检查' }) });
+    const { tasks, calls } = scripted();
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, 'CI 没查成，停下等人');
+        expect(s.waiting?.detail).toContain('这个仓是强制 CI，但没配检查');
+        // 怎么办写在报警正文里：补检查，或到驾驶舱切成不强制 CI
+        expect(world.alerts.map((a) => a.detail).join('\n')).toContain('切成「不强制 CI」');
+        expect(calls.verify).toHaveLength(0);
+        expect(calls.arm).toBe(0);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收尾' });
+        await h.result();
+      },
+      { tasks },
+    );
   });
 });

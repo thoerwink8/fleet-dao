@@ -1,0 +1,2 @@
+ALTER TABLE "repos" ADD COLUMN "ci_mode" text DEFAULT 'required' NOT NULL;--> statement-breakpoint
+ALTER TABLE "repos" ADD CONSTRAINT "repos_ci_mode_known" CHECK ("repos"."ci_mode" in ('required', 'skip'));

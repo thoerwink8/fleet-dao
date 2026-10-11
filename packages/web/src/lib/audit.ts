@@ -182,6 +182,7 @@ export const auditFieldLabel: Record<string, string> = {
   askId: '追问',
   autoDispatchSince: '「让 AI 接活」',
   channelId: '渠道',
+  ciMode: '合并方式',
   effort: '思考档位',
   enabled: '开关',
   enabledRouteIds: '开着的路由',
@@ -282,12 +283,16 @@ function withRouteNames(v: unknown, names: ReadonlyMap<string, string> | undefin
   return v.map((item) => (typeof item === 'string' ? (namedRoute(item, names) ?? item) : item));
 }
 
+/** 合并方式的值：后端是 required / skip，界面不露出来。 */
+const CI_MODE_TEXT = { required: '强制 CI', skip: '不强制 CI' } as const;
+
 function formatFieldValue(
   key: string,
   v: unknown,
   routeNames: ReadonlyMap<string, string> | undefined,
 ): string {
   if (key === 'stage' && typeof v === 'string' && isStage(v)) return stageLabel[v];
+  if (key === 'ciMode' && (v === 'required' || v === 'skip')) return CI_MODE_TEXT[v];
   if (ROUTE_ID_FIELDS.has(key)) return formatValue(withRouteNames(v, routeNames));
   return formatValue(v);
 }

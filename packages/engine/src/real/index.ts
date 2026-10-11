@@ -22,6 +22,7 @@ import {
   type Db,
   finishScheduleRun,
   readEngineMasterRow,
+  readRepoCiMode,
   readSubagentHint,
   recordRouteProbeDone,
   recordRouteProbeRequest,
@@ -51,6 +52,7 @@ import { DECLARED_CANARY_DEPLOY_DIR, readDeclaredCanaryRepos } from './canary-re
 import { carpoolApiReader } from './carpool-api.ts';
 import { carpoolRegistry } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
+import { waitCiUnlessSkipped } from './ci-mode.ts';
 import { ciTimingsJob } from './ci-timings.ts';
 import { drainNotifier } from './drain-alerts.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
@@ -168,7 +170,11 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     removeWorktree: github.removeWorktree,
     pushBranch: github.pushBranch,
     openPr: github.openPr,
-    waitCi: github.waitCi,
+    // 等 CI 的时候盯合并方式：被切成不强制 CI 就不用再等了（#1877，real/ci-mode.ts）
+    waitCi: waitCiUnlessSkipped(github.waitCi, {
+      mode: (repo) => readRepoCiMode(deps.db, repo),
+      ...(deps.log ? { log: deps.log } : {}),
+    }),
     syncMainline: github.syncMainline,
     closeIssue: github.closeIssue,
   };
@@ -848,7 +854,7 @@ export function realPortsFromEnv(
   jobs.releaseReservation = (reservationId) => reservations.release(reservationId);
   const runsDir = join(config.stateDir, 'runs');
   const tasks: EngineTasks = {
-    ...createTaskActivities({ gh, trees, exec, log: taskLog }),
+    ...createTaskActivities({ gh, trees, exec, log: taskLog, ciMode: (repo) => readRepoCiMode(db, repo) }),
     runSegment: createRunSegment({
       tree: { gh, trees, exec, tmpDir: join(config.stateDir, 'tmp') },
       spawner: segmentSpawner,

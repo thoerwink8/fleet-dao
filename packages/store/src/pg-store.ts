@@ -77,6 +77,7 @@ import { planSteps } from './plan-logic.ts';
 import type {
   AuditRecord,
   AutoDispatchChange,
+  CiModeChange,
   CommandClaim,
   GitHubDelivery,
   GitHubObjectVersion,
@@ -97,8 +98,13 @@ import {
   autoDispatchChanged,
   autoDispatchUnchanged,
   boardCutoffMs,
+  ciModeAudit,
+  ciModeChanged,
+  ciModeOf,
+  ciModeUnchanged,
   emptyTaskGroupCounts,
   isAutoDispatchUnchanged,
+  isCiModeUnchanged,
   isTerminalTaskState,
   keepOnBoard,
 } from './task-logic.ts';
@@ -1050,6 +1056,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       return {
         ...toRepo(row),
         autoDispatchSince: row.autoDispatchSince ? iso(row.autoDispatchSince) : null,
+        ciMode: ciModeOf(row.ciMode),
       };
     },
     async findTaskByIssue(repoId, issueNumber) {
@@ -1204,6 +1211,29 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         const after = updated.since ? iso(updated.since) : null;
         const auditId = await insertAudit(tx, autoDispatchAudit(entry, before, after));
         return autoDispatchChanged(after, auditId);
+      });
+    },
+    async setCiMode({ repoId, ciMode }, entry) {
+      if (!isUuid(repoId)) return 'not_found';
+      return db.transaction(async (tx): Promise<CiModeChange | 'not_found'> => {
+        // 锁住这一行：同一个仓的切换排队做，before 就是改之前库里真正的值
+        const [row] = await tx
+          .select({ ciMode: repos.ciMode })
+          .from(repos)
+          .where(eq(repos.id, repoId))
+          .for('update');
+        if (!row) return 'not_found';
+        const before = ciModeOf(row.ciMode);
+        if (isCiModeUnchanged(before, ciMode)) return ciModeUnchanged(before);
+        const [updated] = await tx
+          .update(repos)
+          .set({ ciMode })
+          .where(eq(repos.id, repoId))
+          .returning({ ciMode: repos.ciMode });
+        if (!updated) throw new Error(`仓 ${repoId} 锁住了却没改成`);
+        const after = ciModeOf(updated.ciMode);
+        const auditId = await insertAudit(tx, ciModeAudit(entry, before, after));
+        return ciModeChanged(after, auditId);
       });
     },
   };

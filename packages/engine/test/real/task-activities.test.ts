@@ -80,6 +80,7 @@ function fakeGh(over: Partial<Record<string, unknown>> = {}): { gh: Gh; calls: s
     claims: {
       readPull: pick('readPull'),
       enableAutoMerge: pick('enableAutoMerge'),
+      setStatus: pick('setStatus', async () => undefined),
     },
   } as unknown as Gh;
   return { gh, calls };
@@ -109,6 +110,7 @@ function make(over: Partial<TaskActivitiesDeps> & { gh: Gh }) {
   const acts = createTaskActivities({
     trees: { ownerOf: async () => 'fleet-agent-carpool' },
     exec: localExec(),
+    ciMode: async () => 'required',
     gitBin: 'git',
     shBin: 'sh',
     pollEveryMs: 1,
@@ -532,6 +534,109 @@ describe('查改标准的路径', () => {
       readRepoFile: async () => missing,
     });
     await expect(check(filesDown.gh)).rejects.toMatchObject({ code: 'UPSTREAM_ERROR' });
+  });
+});
+
+describe('不强制 CI 的仓：直接合并（#1877）', () => {
+  const direct = (gh: Gh, syncedBehind?: number) =>
+    make({ gh }).acts.armAutoMerge(
+      {
+        schemaVersion: 1,
+        repo: REPO,
+        prNumber: 7,
+        expectedHead: HEAD,
+        direct: true,
+        ...(syncedBehind === undefined ? {} : { syncedBehind }),
+      },
+      ctx(),
+    );
+
+  it('不挂自动合并：先在头上贴 cold-verify 成功状态（写明没做冷验收），再不核 CI 直接合，回合并提交', async () => {
+    const statuses: unknown[] = [];
+    let mergeInput: unknown;
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      setStatus: async (...args: unknown[]) => {
+        statuses.push(args);
+      },
+      mergePr: async (input: unknown) => {
+        mergeInput = input;
+        return mergedOk('a'.repeat(40), false);
+      },
+    });
+    expect(await direct(f.gh)).toEqual({ armed: false, merged: true, mergeCommit: 'a'.repeat(40) });
+    expect(f.calls).toEqual(['readPull', 'setStatus', 'mergePr']); // 没有 enableAutoMerge
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatchObject([
+      { owner: REPO.owner, name: REPO.name },
+      HEAD,
+      { context: 'cold-verify', state: 'success', description: expect.stringContaining('不强制 CI') },
+    ]);
+    expect(mergeInput).toMatchObject({ prNumber: 7, expectedHead: HEAD, skipCi: true });
+  });
+
+  it('贴状态没成（仓里没有合并闸 / 没权限）：记日志，照合', async () => {
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      setStatus: async () => {
+        throw new Error('403');
+      },
+      mergePr: async () => mergedOk('b'.repeat(40), false),
+    });
+    const { acts, logs } = make({ gh: f.gh });
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD, direct: true },
+      ctx(),
+    );
+    expect(got).toMatchObject({ merged: true });
+    expect(logs.map((l) => l.message).join()).toContain('贴 cold-verify 状态没成');
+  });
+
+  it('【故意造出的失败】头被别人改了 / PR 关了：不贴状态、不合', async () => {
+    const moved = fakeGh({ readPull: async () => pullFacts({ headSha: 'b'.repeat(40) }) });
+    expect(await direct(moved.gh)).toMatchObject({ merged: false, headMoved: 'b'.repeat(40) });
+    expect(moved.calls).toEqual(['readPull']);
+    const closed = fakeGh({ readPull: async () => pullFacts({ state: 'closed' }) });
+    expect(await direct(closed.gh)).toMatchObject({ merged: false, why: expect.stringContaining('关了') });
+    expect(closed.calls).toEqual(['readPull']);
+  });
+
+  it('【故意造出的失败】GitHub 自己的合并规则拒绝（必过检查没过、要审批）：不当成合了，原话交出去，不去同步主线', async () => {
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      mergePr: async () => ({ merged: false, reason: 'conflict', detail: 'PR #7 和主线冲突' }),
+    });
+    const got = await direct(f.gh);
+    expect(got).toMatchObject({ armed: false, merged: false });
+    expect(got.why).toContain('不强制 CI');
+    expect(got.why).toContain('PR #7 和主线冲突');
+    expect(f.calls).not.toContain('updateBranch');
+  });
+
+  it('落后主线：同强制 CI 那一路，同步到最新主线，新头交回去', async () => {
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      mergePr: async () => ({ merged: false, reason: 'behind_main', detail: '主线比 PR 多 2 个提交' }),
+      updateBranch: async () => ({ updated: true, head: 'c'.repeat(40) }),
+    });
+    expect(await direct(f.gh)).toMatchObject({ headMoved: 'c'.repeat(40), syncedMain: true });
+  });
+});
+
+describe('读合并方式', () => {
+  it('读库的值原样交出；读不到抛错，不当成强制 CI', async () => {
+    const f = fakeGh();
+    const skip = make({ gh: f.gh, ciMode: async () => 'skip' }).acts;
+    expect(await skip.readCiMode({ schemaVersion: 1, repo: REPO }, ctx())).toEqual({ mode: 'skip' });
+    const broken = make({
+      gh: f.gh,
+      ciMode: async () => {
+        throw new Error('库里没有这个仓');
+      },
+    }).acts;
+    await expect(broken.readCiMode({ schemaVersion: 1, repo: REPO }, ctx())).rejects.toThrow(
+      '库里没有这个仓',
+    );
   });
 });
 

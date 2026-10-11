@@ -42,6 +42,8 @@ import type {
   GuardedPaths,
   MergeWait,
   ProbeAssignedInput,
+  ReadCiModeInput,
+  ReadCiModeResult,
   ReadDeliveryInput,
   ReadTaskBriefInput,
   ReleaseReservationInput,
@@ -228,6 +230,7 @@ export interface EngineJobs {
  */
 export interface EngineTasks {
   readTaskBrief?: (input: ReadTaskBriefInput, ctx: PortContext) => Promise<TaskBriefResult>;
+  readCiMode?: (input: ReadCiModeInput, ctx: PortContext) => Promise<ReadCiModeResult>;
   runSegment?: (input: RunSegmentInput, ctx: PortContext) => Promise<RunSegmentResult>;
   readDelivery?: (input: ReadDeliveryInput, ctx: PortContext) => Promise<DeliveryRead>;
   coldVerify?: (input: ColdVerifyInput, ctx: PortContext) => Promise<ColdVerifyResult>;
@@ -239,6 +242,7 @@ export interface EngineTasks {
 /** 任务工作流的活动名全集（写成 Record 让编译器保证一个不漏）。 */
 const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   readTaskBrief: true,
+  readCiMode: true,
   runSegment: true,
   readDelivery: true,
   coldVerify: true,
