@@ -193,3 +193,8 @@ export function matchIdentityAnswer(q: IdentityQuestion, answer: string | null):
 export function expectedNewAnswers(q: IdentityQuestion): string {
   return q.newAnswers.join('/');
 }
+
+/** 旧答案原文（#1846）：旧答案的几种写法用「/」拼，写进探测记录给人看。 */
+export function expectedOldAnswers(q: IdentityQuestion): string {
+  return q.oldAnswers.join('/');
+}

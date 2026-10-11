@@ -53,6 +53,9 @@ function routeView(r: RoutingRouteView, channels: ReadonlyMap<string, Channel>) 
           ...(r.probePace.kind != null ? { probeKind: r.probePace.kind } : {}),
         }
       : {}),
+    // 疑似换模型和上次触发者（#1846）：库里空的（没判过、老行）不给。
+    ...(c.suspectedSwap != null ? { suspectedSwap: c.suspectedSwap } : {}),
+    ...(c.probeTrigger != null ? { probeTrigger: c.probeTrigger } : {}),
     exhausted: c.windows
       .filter((w) => w.applies === 'yes' && w.state === 'exhausted')
       .map((w) => ({ label: w.label, ...(w.resetsAt ? { resetsAt: w.resetsAt.toISOString() } : {}) })),

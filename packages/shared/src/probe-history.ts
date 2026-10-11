@@ -19,6 +19,8 @@ export type ProbeHistoryResult = (typeof PROBE_HISTORY_RESULTS)[number];
 export interface ProbeCheck {
   question: string;
   expected: string;
+  /** 旧答案原文（#1846，几种写法用「/」拼）；不给 = 没带或老写入方，库里写空。 */
+  oldAnswer?: string | null;
   answer: string | null;
   passed: boolean | null;
   selfIdentity: string | null;
@@ -41,6 +43,8 @@ export interface ProbeHistoryCell {
   /** 身份题的五项；老行、没带题的探测都是 null，不当空串。 */
   checkQuestion: string | null;
   checkExpected: string | null;
+  /** 旧答案原文（#1846）；老行、没带题为 null。 */
+  checkOldAnswer?: string | null | undefined;
   checkAnswer: string | null;
   checkPassed: boolean | null;
   selfIdentity: string | null;

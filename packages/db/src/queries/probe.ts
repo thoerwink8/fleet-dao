@@ -264,6 +264,7 @@ export interface RouteProbeHistoryRow {
   responseText: string | null;
   checkQuestion: string | null;
   checkExpected: string | null;
+  checkOldAnswer: string | null;
   checkAnswer: string | null;
   checkPassed: boolean | null;
   selfIdentity: string | null;
@@ -328,6 +329,9 @@ export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved
         ...(w.nextAt !== undefined ? { probeNextAt: w.nextAt } : {}),
         ...(w.failStreak !== undefined ? { probeFailStreak: w.failStreak } : {}),
         ...(w.kind !== undefined ? { probeKind: w.kind } : {}),
+        // 疑似换模型和上次触发者（#1846）：身份题判过才写（答中旧答案 true、新答案 false；认不出、没带题不动）；触发者给了才写。
+        ...(w.check?.passed != null ? { suspectedSwap: w.check.passed === false } : {}),
+        ...(w.trigger != null ? { probeTrigger: w.trigger } : {}),
       })
       .where(eq(routes.id, w.routeId))
       .returning({ id: routes.id });
@@ -343,6 +347,7 @@ export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved
       responseText: clipOrNull(w.responseText),
       checkQuestion: clipOrNull(w.check?.question),
       checkExpected: clipOrNull(w.check?.expected),
+      checkOldAnswer: clipOrNull(w.check?.oldAnswer),
       checkAnswer: clipOrNull(w.check?.answer),
       checkPassed: w.check?.passed ?? null,
       selfIdentity: clipOrNull(w.check?.selfIdentity),
@@ -376,6 +381,7 @@ export interface ProbeHistoryJoined {
   responseText: string | null;
   checkQuestion: string | null;
   checkExpected: string | null;
+  checkOldAnswer: string | null;
   checkAnswer: string | null;
   checkPassed: boolean | null;
   selfIdentity: string | null;
@@ -447,6 +453,7 @@ export async function readProbeHistoryJoined(db: Db): Promise<ProbeHistoryJoined
         responseText: routeProbeHistory.responseText,
         checkQuestion: routeProbeHistory.checkQuestion,
         checkExpected: routeProbeHistory.checkExpected,
+        checkOldAnswer: routeProbeHistory.checkOldAnswer,
         checkAnswer: routeProbeHistory.checkAnswer,
         checkPassed: routeProbeHistory.checkPassed,
         selfIdentity: routeProbeHistory.selfIdentity,
@@ -487,6 +494,7 @@ export async function readRouteProbeHistory(
         responseText: routeProbeHistory.responseText,
         checkQuestion: routeProbeHistory.checkQuestion,
         checkExpected: routeProbeHistory.checkExpected,
+        checkOldAnswer: routeProbeHistory.checkOldAnswer,
         checkAnswer: routeProbeHistory.checkAnswer,
         checkPassed: routeProbeHistory.checkPassed,
         selfIdentity: routeProbeHistory.selfIdentity,

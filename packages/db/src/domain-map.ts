@@ -183,6 +183,9 @@ export const toRoute = (r: typeof routes.$inferSelect): Route =>
           probeFailStreak: undefined,
           probeKind: undefined,
         }),
+    // 疑似换模型和上次触发者（#1846）：空 = 没判过 / 老行，不给。
+    suspectedSwap: opt(r.suspectedSwap),
+    probeTrigger: opt(r.probeTrigger),
   });
 
 /** routeIds 按调度台的先后；disabledRouteIds 是其中关着的（必须传：漏传就把关着的全当开着）。 */
