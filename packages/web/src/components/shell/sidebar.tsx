@@ -85,7 +85,9 @@ function Item({
               title={badge === '!' ? '没读成' : undefined}
               className={cn(
                 'num grid min-w-4 place-items-center rounded-full px-1 text-micro leading-4 font-semibold',
-                badge === '!' ? 'bg-destructive text-destructive-foreground' : 'bg-foreground text-background',
+                badge === '!'
+                  ? 'bg-destructive text-destructive-foreground'
+                  : 'bg-foreground text-background',
                 collapsed && 'absolute top-0.5 right-1.5',
               )}
             >

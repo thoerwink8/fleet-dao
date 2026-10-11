@@ -38,7 +38,7 @@ interface Options {
   pages: (readonly [string, string])[];
   widths: number[];
   modes: Mode[];
-  base?: string;
+  base?: string | undefined;
   port: number;
 }
 
@@ -50,11 +50,14 @@ function listArg(argv: string[], name: string): string[] | undefined {
 
 export function parseArgs(argv: string[]): Options {
   const label = argv[0];
-  if (!label || label.startsWith('--')) throw new Error('第一个参数是标签（输出到 _tmp/shots/<标签>/），没给');
+  if (!label || label.startsWith('--'))
+    throw new Error('第一个参数是标签（输出到 _tmp/shots/<标签>/），没给');
   const pageKeys = listArg(argv, '--pages');
   const pages = pageKeys ? PAGES.filter(([key]) => pageKeys.includes(key)) : [...PAGES];
   if (pageKeys && pages.length !== pageKeys.length) {
-    throw new Error(`--pages 里有认不出的页：${pageKeys.join(',')}；认得的：${PAGES.map(([k]) => k).join(',')}`);
+    throw new Error(
+      `--pages 里有认不出的页：${pageKeys.join(',')}；认得的：${PAGES.map(([k]) => k).join(',')}`,
+    );
   }
   const widths = (listArg(argv, '--widths') ?? ['1920', '1366', '390']).map(Number);
   for (const w of widths) if (!HEIGHTS[w]) throw new Error(`--widths 只认 1920、1366、390，收到 ${w}`);
@@ -83,10 +86,14 @@ async function waitUp(url: string, child: ChildProcess): Promise<void> {
 function startMock(port: number): ChildProcess {
   const require = createRequire(join(pkgDir, 'package.json'));
   const bin = join(dirname(require.resolve('@react-router/dev/package.json')), 'bin.cjs');
-  const child = spawn(process.execPath, [bin, 'dev', '--mode', 'mock', '--port', String(port), '--strictPort'], {
-    cwd: pkgDir,
-    stdio: ['ignore', 'ignore', 'inherit'],
-  });
+  const child = spawn(
+    process.execPath,
+    [bin, 'dev', '--mode', 'mock', '--port', String(port), '--strictPort'],
+    {
+      cwd: pkgDir,
+      stdio: ['ignore', 'ignore', 'inherit'],
+    },
+  );
   return child;
 }
 

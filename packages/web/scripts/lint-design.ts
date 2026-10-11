@@ -102,8 +102,38 @@ interface Segment {
   start: number;
 }
 
-const REGEX_BEFORE = new Set(['(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '+', '-', '*', '%', '~', '^']);
-const REGEX_AFTER_WORD = new Set(['return', 'typeof', 'case', 'in', 'of', 'void', 'delete', 'throw', 'yield', 'await']);
+const REGEX_BEFORE = new Set([
+  '(',
+  ',',
+  '=',
+  ':',
+  '[',
+  '!',
+  '&',
+  '|',
+  '?',
+  '{',
+  '}',
+  ';',
+  '+',
+  '-',
+  '*',
+  '%',
+  '~',
+  '^',
+]);
+const REGEX_AFTER_WORD = new Set([
+  'return',
+  'typeof',
+  'case',
+  'in',
+  'of',
+  'void',
+  'delete',
+  'throw',
+  'yield',
+  'await',
+]);
 
 /**
  * 一个够用的 TS/TSX 词法：认注释、单双引号字符串（必须在同一行闭合，JSX 正文里的撇号不当字符串）、
@@ -308,7 +338,23 @@ const SIZE_FIX: Record<string, string> = {
   xl: 'text-title',
   stat: 'text-display',
 };
-const SPACING_OK = new Set(['0', 'px', '0.5', '1', '1.5', '2', '2.5', '3', '4', '5', '6', '8', '10', '12', '16']);
+const SPACING_OK = new Set([
+  '0',
+  'px',
+  '0.5',
+  '1',
+  '1.5',
+  '2',
+  '2.5',
+  '3',
+  '4',
+  '5',
+  '6',
+  '8',
+  '10',
+  '12',
+  '16',
+]);
 
 /** 判一个类名（已去掉变体），返回 [规则, 该换成什么]；合规返回 undefined。R8、R9 不在这里。 */
 export function judgeUtility(util: string, file: string): [RuleId, string] | undefined {
@@ -365,14 +411,19 @@ export function judgeUtility(util: string, file: string): [RuleId, string] | und
   }
 
   // R4 间距
-  const sp = util.match(/^(?:p|px|py|pt|pr|pb|pl|ps|pe|m|mx|my|mt|mr|mb|ml|ms|me|gap|gap-x|gap-y|space-x|space-y)-([0-9.]+)$/);
+  const sp = util.match(
+    /^(?:p|px|py|pt|pr|pb|pl|ps|pe|m|mx|my|mt|mr|mb|ml|ms|me|gap|gap-x|gap-y|space-x|space-y)-([0-9.]+)$/,
+  );
   if (sp && !SPACING_OK.has(sp[1] as string)) {
     const v = Number(sp[1]);
     const near = [...SPACING_OK]
       .filter((s) => s !== 'px')
       .map(Number)
       .sort((a, b) => Math.abs(a - v) - Math.abs(b - v))[0];
-    return ['R4', `${util.replace(/-[0-9.]+$/, `-${near}`)}（间距只用 0、0.5、1、1.5、2、2.5、3、4、5、6、8、10、12、16）`];
+    return [
+      'R4',
+      `${util.replace(/-[0-9.]+$/, `-${near}`)}（间距只用 0、0.5、1、1.5、2、2.5、3、4、5、6、8、10、12、16）`,
+    ];
   }
 
   // R5 圆角
@@ -429,7 +480,8 @@ function layoutRulesApply(file: string): boolean {
 }
 
 // 旧 lint-arbitrary 的写法：.css 里只判任意值。
-const CSS_ARBITRARY = /(?:^|[\s"'])((?:[a-zA-Z0-9][a-zA-Z0-9_-]*:)*[a-zA-Z][a-zA-Z0-9_-]*-\[([^\]]*\d[^\]]*)\])/g;
+const CSS_ARBITRARY =
+  /(?:^|[\s"'])((?:[a-zA-Z0-9][a-zA-Z0-9_-]*:)*[a-zA-Z][a-zA-Z0-9_-]*-\[([^\]]*\d[^\]]*)\])/g;
 
 export function scanSource(src: string, file: string): Hit[] {
   const hits: Hit[] = [];
@@ -454,7 +506,13 @@ export function scanSource(src: string, file: string): Hit[] {
       if (token === util) utils.add(util);
       const verdict = judgeUtility(util, file);
       if (!verdict) continue;
-      hits.push({ file, line: lineAt(starts, seg.start + (m.index ?? 0)), rule: verdict[0], cls: token, fix: verdict[1] });
+      hits.push({
+        file,
+        line: lineAt(starts, seg.start + (m.index ?? 0)),
+        rule: verdict[0],
+        cls: token,
+        fix: verdict[1],
+      });
     }
     if (!layout) continue;
     const line = lineAt(starts, seg.start);
@@ -462,12 +520,24 @@ export function scanSource(src: string, file: string): Hit[] {
       hits.push({ file, line, rule: 'R8', cls: 'border + bg-card', fix: '<Section>（手写卡片换版式组件）' });
     }
     if (utils.has('border-dashed') && utils.has('text-center')) {
-      hits.push({ file, line, rule: 'R8', cls: 'border-dashed + text-center', fix: '<EmptyState>（手写空状态换版式组件）' });
+      hits.push({
+        file,
+        line,
+        rule: 'R8',
+        cls: 'border-dashed + text-center',
+        fix: '<EmptyState>（手写空状态换版式组件）',
+      });
     }
   }
   if (layout) {
     for (const m of code.matchAll(/<select\b/g)) {
-      hits.push({ file, line: lineAt(starts, m.index ?? 0), rule: 'R9', cls: '<select>', fix: '<NativeSelect>' });
+      hits.push({
+        file,
+        line: lineAt(starts, m.index ?? 0),
+        rule: 'R9',
+        cls: '<select>',
+        fix: '<NativeSelect>',
+      });
     }
     const icons = lucideImports(src);
     if (icons.length > 0) {
@@ -546,7 +616,11 @@ export function loadLegacy(path: string = LEGACY_PATH): Legacy {
  * 对着旧账清单判：返回出错的话（空数组＝通过）。
  * 不在清单里的文件一条都不许有；在清单里的，每条规则条数必须和清单一样——多了是新写了违规，少了要把清单改小（降到 0 删掉）。
  */
-export function checkLegacy(hits: readonly Hit[], legacy: Legacy, fileExists: (rel: string) => boolean): string[] {
+export function checkLegacy(
+  hits: readonly Hit[],
+  legacy: Legacy,
+  fileExists: (rel: string) => boolean,
+): string[] {
   const errors: string[] = [];
   const now = countHits(hits);
   for (const [file, row] of Object.entries(now)) {
@@ -629,7 +703,9 @@ function main() {
   const errors = check();
   for (const e of errors) console.error(e);
   if (errors.length > 0) {
-    console.error(`\n设计规范检查没过（${errors.length} 条）。规范：${DOC}；旧账清单：packages/web/design-legacy.json。`);
+    console.error(
+      `\n设计规范检查没过（${errors.length} 条）。规范：${DOC}；旧账清单：packages/web/design-legacy.json。`,
+    );
     process.exit(1);
   }
   console.log('设计规范检查通过（旧账清单之外没有新违规）。');

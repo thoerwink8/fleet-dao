@@ -135,7 +135,9 @@ export function checkUiContrast(css: string): { where: string; group: UiGroup; r
       if (!c) throw new Error(`${where} 缺 --${name}`);
       return c;
     };
-    const [fg, bg, surface, elev, panel, brand] = ['fg', 'bg', 'surface', 'elev', 'panel', 'brand'].map(need) as Rgb[];
+    const [fg, bg, surface, elev, panel, brand] = ['fg', 'bg', 'surface', 'elev', 'panel', 'brand'].map(
+      need,
+    ) as Rgb[];
     const muted = mixOklab(fg as Rgb, surface as Rgb, MUTED);
     const mutedFg = mixOklab(fg as Rgb, bg as Rgb, percent(body, 'muted-ink', where));
     const round = (r: number) => Math.round(r * 100) / 100;
@@ -150,7 +152,11 @@ export function checkUiContrast(css: string): { where: string; group: UiGroup; r
     out.push({ where, group: 'ring', ratio: round(contrast(ring, bg as Rgb)) });
     const inkFail = body.match(/--ink-fail:\s*(\d+)%/);
     const destructive = mixOklab(need('st-fail'), fg as Rgb, inkFail ? Number(inkFail[1]) / 100 : 1);
-    out.push({ where, group: 'destructive', ratio: round(contrast(need('destructive-foreground'), destructive)) });
+    out.push({
+      where,
+      group: 'destructive',
+      ratio: round(contrast(need('destructive-foreground'), destructive)),
+    });
   }
   return out;
 }
@@ -189,7 +195,13 @@ describe('次要文字、控件边框、聚焦圈、危险按钮的字（#1847�
   test('16 套主题每组都算到了', () => {
     const expected = PALETTES.flatMap((p) => [`${p.id}/dark`, `${p.id}/light`]).sort();
     for (const group of Object.keys(UI_MIN) as UiGroup[]) {
-      expect(all.filter((f) => f.group === group).map((f) => f.where).sort(), group).toEqual(expected);
+      expect(
+        all
+          .filter((f) => f.group === group)
+          .map((f) => f.where)
+          .sort(),
+        group,
+      ).toEqual(expected);
     }
   });
 

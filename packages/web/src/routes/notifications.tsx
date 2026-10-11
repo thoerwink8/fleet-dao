@@ -52,7 +52,8 @@ const segmentClass = filterTabClass;
 
 /** 飞书等渠道送没送到：没拿到消息编号就算没送到。 */
 function Deliveries({ n }: { n: Notification }) {
-  if (!n.deliveries.length) return <span className="text-caption text-muted-foreground">只在{brand.product}</span>;
+  if (!n.deliveries.length)
+    return <span className="text-caption text-muted-foreground">只在{brand.product}</span>;
   return (
     <span className="flex flex-wrap gap-1.5">
       {n.deliveries.map((d, i) => (

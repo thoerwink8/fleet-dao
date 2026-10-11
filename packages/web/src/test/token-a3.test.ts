@@ -73,7 +73,9 @@ function source(rel: string): string {
 
 describe('#1445 五文件的尺寸 token', () => {
   test('五个文件 0 处任意尺寸值', () => {
-    const hits = FILES.flatMap((rel) => scanFile(join(srcDir, rel), `src/${rel}`)).filter((h) => h.rule === 'R0');
+    const hits = FILES.flatMap((rel) => scanFile(join(srcDir, rel), `src/${rel}`)).filter(
+      (h) => h.rule === 'R0',
+    );
     expect(hits).toEqual([]);
   });
 

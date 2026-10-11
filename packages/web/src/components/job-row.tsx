@@ -46,7 +46,9 @@ function LastSuccess({ j, now }: { j: JobView; now: number }) {
       {j.status === 'overdue' ? (
         <div className="text-caption text-ink-stall">{jobStatusLabel.overdue}</div>
       ) : null}
-      {r ? <div className="num text-caption text-muted-foreground">{formatAgo(r.startedAt, now)}开始</div> : null}
+      {r ? (
+        <div className="num text-caption text-muted-foreground">{formatAgo(r.startedAt, now)}开始</div>
+      ) : null}
     </div>
   );
 }

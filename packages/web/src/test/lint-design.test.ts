@@ -36,7 +36,9 @@ describe('每条规则：造红的报、合规的放', () => {
     ]);
   });
   test('R0 放行：引 CSS 变量的、data-[…] 变体', () => {
-    expect(rulesOf(`<div className="shadow-[0_1px_0_var(--border)] data-[spacing=0]:rounded-none" />`)).toEqual([]);
+    expect(
+      rulesOf(`<div className="shadow-[0_1px_0_var(--border)] data-[spacing=0]:rounded-none" />`),
+    ).toEqual([]);
   });
 
   test('R1 颜色：默认色板、white、black、语义色上的透明度都报', () => {
@@ -49,9 +51,9 @@ describe('每条规则：造红的报、合规的放', () => {
     ]);
   });
   test('R1 放行：语义色、状态淡底和描边令牌、ui/ 里的聚焦圈', () => {
-    expect(rulesOf(`cn('bg-st-fail-soft border-st-fail-line text-ink-fail bg-scrim text-muted-foreground')`)).toEqual(
-      [],
-    );
+    expect(
+      rulesOf(`cn('bg-st-fail-soft border-st-fail-line text-ink-fail bg-scrim text-muted-foreground')`),
+    ).toEqual([]);
     expect(rulesOf(`cn('focus-visible:ring-ring/50')`, 'src/components/ui/button.tsx')).toEqual([]);
     // 同一个聚焦圈写在页面里不放行
     expect(rulesOf(`cn('focus-visible:ring-ring/50')`)).toEqual(['R1']);
@@ -68,7 +70,9 @@ describe('每条规则：造红的报、合规的放', () => {
     ]);
   });
   test('R2 放行：六档字号；text-canvas 在画布目录里', () => {
-    expect(rulesOf(`"text-meta text-body text-heading text-title text-display text-left text-ink-run"`)).toEqual([]);
+    expect(
+      rulesOf(`"text-meta text-body text-heading text-title text-display text-left text-ink-run"`),
+    ).toEqual([]);
     expect(rulesOf(`"text-canvas"`, 'src/components/home/board/nodes.tsx')).toEqual([]);
   });
 
@@ -102,7 +106,9 @@ describe('每条规则：造红的报、合规的放', () => {
     expect(rulesOf(`"shadow-sm shadow-lg shadow-card-edge shadow"`)).toEqual(['R6', 'R6', 'R6', 'R6']);
   });
   test('R6 放行：xs、card、overlay、modal 和三个特效', () => {
-    expect(rulesOf(`"shadow-xs shadow-card shadow-overlay shadow-modal shadow-row-selected shadow-none"`)).toEqual([]);
+    expect(
+      rulesOf(`"shadow-xs shadow-card shadow-overlay shadow-modal shadow-row-selected shadow-none"`),
+    ).toEqual([]);
   });
 
   test('R7 行高字距：leading-4、tracking-tight 报', () => {
@@ -144,10 +150,11 @@ describe('每条规则：造红的报、合规的放', () => {
 });
 
 describe('词法和报错', () => {
-  test('注释里的类名不算；模板串的静态段和 ${} 里的字符串都算', () => {
+  test('注释里的类名不算；模板串的静态段和插值里的字符串都算', () => {
     const src = [
       '// 原来是 text-xs',
       '/* rounded-xl */',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: 样例本身就是一段带插值的源码
       'const a = `px-4 text-sm ${on ? "font-bold" : ""} rounded`;',
     ].join('\n');
     expect(classesOf(src)).toEqual(['text-sm', 'font-bold', 'rounded']);
