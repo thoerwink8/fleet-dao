@@ -32,6 +32,13 @@ export interface PullFacts {
   author: { login: string; id: number; type: string } | null;
   /** 开着 GitHub 的自动合并。 */
   autoMerge: boolean;
+  /**
+   * GitHub 算的「这个 PR 能不能并进主线」：false = 不能（和主线冲突、或别的挡着）；null = GitHub 还没算完。
+   * 等合并靠它认出冲突（#1838：以前看不出冲突，一直等在合并队列里）。
+   */
+  mergeable?: boolean | null;
+  /** GitHub 的细分状态：'dirty' = 和主线冲突、'blocked' = 等必过检查、'behind' = 落后主线…… */
+  mergeableState?: string;
 }
 
 /** 某个 context 在一个提交上最新的一条提交状态。 */
@@ -116,6 +123,8 @@ function factsOf(repo: RepoRef, p: z.infer<typeof ClaimPullSchema>): PullFacts {
     fromFork: p.head.repo === null || p.head.repo.full_name.toLowerCase() !== repoSlug(repo).toLowerCase(),
     author: p.user,
     autoMerge: p.auto_merge !== null && p.auto_merge !== undefined,
+    ...(p.mergeable === undefined ? {} : { mergeable: p.mergeable }),
+    ...(p.mergeable_state === undefined ? {} : { mergeableState: p.mergeable_state }),
   };
 }
 
