@@ -57,6 +57,18 @@ function withModels(n: number): MockApi {
   return Object.assign(api, { routingLayers: async () => layers });
 }
 
+/** 打开一个模型行行尾的「⋯」：键盘 Enter 就能开，不依赖 happy-dom 的指针事件。 */
+const openRowMenu = async (modelId: string) => {
+  const row = document.querySelector(`li[data-model="${modelId}"]`) as HTMLElement;
+  const trigger = within(row).getByRole('button', { name: /^更多操作：/ });
+  trigger.focus();
+  fireEvent.keyDown(trigger, { key: 'Enter' });
+  return screen.findByRole('menu');
+};
+
+const menuItem = async (modelId: string, name: string) =>
+  within(await openRowMenu(modelId)).getByRole('menuitem', { name });
+
 const catalogIds = () =>
   Array.from(document.querySelectorAll('li[data-catalog]')).map((el) => el.getAttribute('data-catalog'));
 
@@ -89,50 +101,50 @@ describe('用途：添加、移出、档位', () => {
   test('移出用途要先确认，确认后调用 removePurposeModel，这一行没了', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await screen.findByRole('navigation', { name: '用途' });
-    fireEvent.click(screen.getByRole('button', { name: '把 Kimi k3 移出用途' }));
+    // 「移出」在这一行行尾的「⋯」里（#1914）
+    fireEvent.click(await menuItem('kimi-k3', '移出动手'));
     const dialog = await screen.findByRole('alertdialog');
     expect(dialog.textContent).toContain('Kimi k3');
     fireEvent.click(within(dialog).getByRole('button', { name: '先不' }));
     expect(document.querySelector('li[data-model="kimi-k3"]')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '把 Kimi k3 移出用途' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    fireEvent.click(await menuItem('kimi-k3', '移出动手'));
     fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: '移出' }));
     await waitFor(() => expect(document.querySelector('li[data-model="kimi-k3"]')).toBeNull());
   });
 
-  test('档位下拉只列这个模型认的档，选定后调用 setPurposeModelEffort', async () => {
+  test('档位（「⋯」里的单选）只列这个模型认的档，选定后调用 setPurposeModelEffort，行上小字写出档位', async () => {
     const execute = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await screen.findByRole('navigation', { name: '用途' });
-    const cursor = screen.getByRole('combobox', { name: 'Cursor Auto 的档位' }) as HTMLSelectElement;
-    expect(
-      within(cursor)
-        .getAllByRole('option')
-        .map((o) => o.textContent),
-    ).toEqual(['不另配']);
-    expect(cursor.disabled).toBe(true);
-    expect(cursor.closest('li')?.textContent).toContain('不带方括号');
+    const cursorMenu = await openRowMenu('cursor-auto');
+    const cursor = within(cursorMenu).getByRole('group', { name: 'Cursor Auto 的档位' });
+    const cursorOptions = within(cursor).getAllByRole('menuitemradio');
+    expect(cursorOptions.map((o) => o.textContent)).toEqual(['不另配']);
+    expect(cursorOptions[0]?.getAttribute('data-disabled')).not.toBeNull();
+    // 为什么配不了：写在档位组头下面
+    expect(cursorMenu.textContent).toContain('不带方括号');
     execute.unmount();
     const verify = renderApp(<RoutingPage />, { route: '/routing?purpose=verify' });
     const setEffort = vi.spyOn(verify.api, 'setPurposeModelEffort');
     await screen.findByRole('navigation', { name: '用途' });
-    const grok = screen.getByRole('combobox', { name: 'Grok 4.7 的档位' });
-    const grokOptions = within(grok).getAllByRole('option');
+    const grokMenu = await openRowMenu('grok-4.7');
+    const grok = within(grokMenu).getByRole('group', { name: 'Grok 4.7 的档位' });
+    const grokOptions = within(grok).getAllByRole('menuitemradio');
     expect(grokOptions.map((o) => o.textContent)).toEqual(['不另配', '低', '中', '高', '很高']);
-    expect(grokOptions.map((o) => (o as HTMLOptionElement).value)).toEqual([
-      '',
-      'low',
-      'medium',
-      'high',
-      'xhigh',
-    ]);
-    expect((grok as HTMLSelectElement).disabled).toBe(false);
-    fireEvent.change(grok, { target: { value: 'high' } });
+    expect(grokOptions[0]?.getAttribute('aria-checked')).toBe('true');
+    for (const o of grokOptions) expect(o.getAttribute('data-disabled')).toBeNull();
+    fireEvent.click(within(grok).getByRole('menuitemradio', { name: '高' }));
     await waitFor(() =>
       expect(setEffort).toHaveBeenCalledWith('verify', 'grok-4.7', { effort: 'high', version: 0 }),
     );
     await waitFor(() =>
-      expect((screen.getByRole('combobox', { name: 'Grok 4.7 的档位' }) as HTMLSelectElement).value).toBe(
-        'high',
+      expect(document.querySelector('li[data-model="grok-4.7"] [data-row-meta]')?.textContent).toContain(
+        '档位 高',
       ),
+    );
+    const again = await openRowMenu('grok-4.7');
+    expect(within(again).getByRole('menuitemradio', { name: '高' }).getAttribute('aria-checked')).toBe(
+      'true',
     );
   });
 });

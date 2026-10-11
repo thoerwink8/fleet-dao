@@ -167,7 +167,7 @@ async function warmUp(webOrigin: string, facts: E2eFacts): Promise<void> {
       '/settings',
       '/notifications',
       '/routing',
-      '/efforts',
+      '/routing?tab=efforts',
       '/schedules',
       '/audit',
       '/changelog',

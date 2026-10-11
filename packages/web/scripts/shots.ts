@@ -21,7 +21,8 @@ export const PAGES: readonly (readonly [string, string])[] = [
   ['notifications', '/notifications'],
   ['routing', '/routing'],
   ['status', '/routing/status'],
-  ['efforts', '/efforts'],
+  // 思考档位并进路由页的页签（#1914）
+  ['efforts', '/routing?tab=efforts'],
   ['quota', '/quota'],
   ['france', '/france'],
   ['schedules', '/schedules'],

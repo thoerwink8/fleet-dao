@@ -1,4 +1,4 @@
-// 第七步：其余页面逐个走一遍（路由、思考档位、定时任务、操作记录、更新日志、找不到的页面）。
+// 第七步：其余页面逐个走一遍（路由、思考档位（路由页的页签）、定时任务、操作记录、更新日志、找不到的页面）。
 // 创始人剧本里的「环境视图」：驾驶舱里没有叫这个名字的页面；最接近的是「路由」（每条路现在接得上吗、额度够吗、被禁了吗）
 // 和主页顶上的持续状态条，这里把路由页当它测，并在缺陷清单里记一笔。
 import { expect, onlyDesktop, test } from '../support/fixtures.ts';
@@ -14,8 +14,13 @@ test.describe('其余页面', () => {
     // 页标题就是这一级的「路由」。差集那一节的标题里也有这两个字，子串会配到两个标题。
     await expect(page.getByRole('heading', { level: 1, name: '路由', exact: true })).toBeVisible();
     // 用途骨架是发布时装进库的：execute / ui / verify / judge。对题不选路，老的环节不列。
-    await expect(page.getByText('在对话里做，不选路')).toBeVisible();
-    await expect(page.getByText('动手', { exact: true }).first()).toBeVisible();
+    // 对题是用途那一排里只读的一项「对题」，「在对话里做，不选路」在它的悬停说明里（#1914）
+    await expect(page.locator('[data-tab-note]', { hasText: '对题' })).toBeVisible();
+    await expect(page.locator('[data-tab-note]')).toHaveAttribute('title', '对题：在对话里做，不选路');
+    // 用途按钮的名字前面带读屏用的结论（「派得出去：动手」），整段不再是「动手」两个字，按按钮找
+    await expect(
+      page.getByRole('navigation', { name: '用途' }).getByRole('button', { name: /动手/ }).first(),
+    ).toBeVisible();
     await expect(page.getByText('验收').first()).toBeVisible();
     await expect(page.getByText('需求文档')).toHaveCount(0);
     await expect(page.getByText(/派得出去/).first()).toBeVisible();
@@ -108,11 +113,18 @@ test.describe('其余页面', () => {
     await shot(page, '07-渠道状态');
   });
 
-  test('思考档位：每个模型的每条路都列出来，来自库里的路由两层', async ({ page, shot }) => {
+  test('思考档位：每个模型的每条路都列出来，来自库里的路由两层（并进路由页的页签，/efforts 转过去）', async ({
+    page,
+    shot,
+  }) => {
+    // 思考档位并进路由页（#1914 第 5 轮）：旧地址不留死链，转到「思考档位」页签
     await page.goto('/efforts');
-    await expect(page.getByRole('heading', { name: '思考档位' })).toBeVisible();
+    await expect(page).toHaveURL(/\/routing\?tab=efforts$/);
+    await expect(page.getByRole('heading', { level: 1, name: '路由', exact: true })).toBeVisible();
+    await expect(page.getByRole('tab', { name: '思考档位' })).toHaveAttribute('aria-selected', 'true');
     await expect(page.getByText('路由两层里一条路由都没有')).toHaveCount(0);
     await expect(page.getByText(/Opus 5\.5/).first()).toBeVisible();
+    await expect(page.getByRole('combobox', { name: /的思考档位$/ }).first()).toBeVisible();
     await shot(page, '07-思考档位');
   });
 
@@ -170,7 +182,8 @@ test.describe('其余页面', () => {
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: '主导航' });
     await expect(nav.getByRole('link', { name: '主页' })).toBeVisible();
-    for (const label of ['模型目录', '账单', '战绩', 'Jev 判断']) {
+    // 思考档位并进路由页（#1914 第 5 轮），侧栏不再单列
+    for (const label of ['模型目录', '账单', '战绩', 'Jev 判断', '思考档位']) {
       await expect(nav.getByRole('link', { name: label })).toHaveCount(0);
     }
     await page.goto('/models');

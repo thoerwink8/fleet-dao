@@ -89,15 +89,24 @@ function preferredUnavailableWord(preferred: RoutingLayerModel, env: PurposeLine
   return modelSlotState(preferred, channelOpen, retired) === 'off' ? '已关' : '不可用';
 }
 
-/** 用途一句话：走的是不是首选；不是首选，写首选已关/不可用和实际派谁；派不出去为什么。 */
-export function purposeLine(p: RoutingLayerPurpose, env: PurposeLineEnv = {}): { text: string; tone: Tone } {
+/**
+ * 用途的结论：text 是一句短话（路由页标题块里和状态标签同一行，任何宽度都不折行，#1914 第 5 轮），
+ * detail 是补充（走哪条路、为什么不是首选、几条不知道），放在下面的灰字行；悬停、读屏用两段合起来的整句。
+ */
+export function purposeLine(
+  p: RoutingLayerPurpose,
+  env: PurposeLineEnv = {},
+): { text: string; detail: string | null; tone: Tone } {
   const first = firstLive(p);
   if (first) {
-    const where = `${first.model.displayName}（${routeTitle(first.route)}）`;
-    if (first.modelIndex === 0 && first.routeIndex === 0) return { text: `首选活着：${where}`, tone: 'done' };
+    const route = routeTitle(first.route);
+    // 先说现在派给谁；走哪条路挪到灰字行
+    if (first.modelIndex === 0 && first.routeIndex === 0)
+      return { text: `首选 ${first.model.displayName}`, detail: `走 ${route}`, tone: 'done' };
     if (first.modelIndex === 0) {
       return {
-        text: `首选那条路不行，顺位第一条活的是它的第 ${first.routeIndex + 1} 条：${where}`,
+        text: `首选 ${first.model.displayName}`,
+        detail: `首选那条路不行，顺位第一条活的是它的第 ${first.routeIndex + 1} 条：${route}`,
         tone: 'stall',
       };
     }
@@ -105,16 +114,27 @@ export function purposeLine(p: RoutingLayerPurpose, env: PurposeLineEnv = {}): {
     if (!preferred) throw new Error('有后备活路时用途里至少有一个模型');
     const why = preferredUnavailableWord(preferred, env);
     return {
-      text: `首选 ${preferred.displayName} ${why}，实际派 ${first.model.displayName}`,
+      text: `实际派 ${first.model.displayName}`,
+      detail: `首选 ${preferred.displayName} ${why}`,
       tone: 'stall',
     };
   }
   if (p.verdict === 'unknown') {
     const n = p.models.flatMap((m) => m.routes).filter((r) => r.verdict === 'unknown').length;
-    return { text: `没有确定活着的：${n} 条不知道（探针没看过、额度没读成）`, tone: 'stall' };
+    return {
+      text: '没有确定活着的',
+      detail: `${n} 条不知道（探针没看过、额度没读成）`,
+      tone: 'stall',
+    };
   }
-  if (p.models.length === 0) return { text: p.problems[0] ?? '这个用途没有模型，派不了', tone: 'fail' };
-  return { text: '一条活的都没有：下面逐条写了为什么', tone: 'fail' };
+  if (p.models.length === 0)
+    return { text: '派不了', detail: p.problems[0] ?? '这个用途没有模型，派不了', tone: 'fail' };
+  return { text: '一条活的都没有', detail: '下面逐条写了为什么', tone: 'fail' };
+}
+
+/** 结论的整句（悬停、读屏）：短话加补充。 */
+export function purposeLineFull(line: { text: string; detail: string | null }): string {
+  return line.detail ? `${line.text}：${line.detail}` : line.text;
 }
 /** 一个模型下几条路、几条活。 */
 export function modelSummary(m: Pick<RoutingLayerModel, 'routes'>): string {

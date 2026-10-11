@@ -112,6 +112,10 @@
   --text-heading: var(--fs-heading);
   --text-heading--line-height: var(--fs-heading-lh);
   --text-heading--font-weight: 600;
+  /* subtitle：一页最多一处的主标题块（路由页的用途名，#1914），比页标题小一档、比区块标题大一档。 */
+  --text-subtitle: var(--fs-subtitle);
+  --text-subtitle--line-height: var(--fs-subtitle-lh);
+  --text-subtitle--font-weight: 600;
   --text-title: var(--fs-title);
   --text-title--line-height: var(--fs-title-lh);
   --text-title--font-weight: 600;
@@ -160,6 +164,8 @@
    */
   --spacing-control: var(--control-h);
   --spacing-row: var(--row-h);
+  /* 两行的行（名字一行加一行小字，路由页的模型行、路由行，#1914）：标准 48、紧凑 40。 */
+  --spacing-row-tall: var(--row-tall-h);
   --spacing-section: var(--section-p);
   --spacing-section-gap: var(--section-gap);
   --spacing-stack: var(--stack-gap);
@@ -200,6 +206,9 @@
   /* 基础件聚焦圈宽 3px（button、input、select、textarea、badge、toggle、switch 的聚焦圈）。
    * ring-* 只认 --ring-width。和自带的 ring-3 同是 3px，主题里只留这一档。 */
   --ring-width-focus: 3px;
+  /* 行下面展开的明细往右缩进 3rem，和行里名字的左边对齐：展开箭头 1rem + 间距 0.5rem + 序号 1rem + 间距 0.5rem（路由页路由行，#1914）。
+   * 只在 components/layout/list.tsx 的 RowDetail 里用，再加上行的左内边距（区块内边距令牌）。padding 认 --spacing。 */
+  --spacing-row-indent: 3rem;
   /* 逾期竖线宽 3px。依据：定时任务失败、过期行左侧竖线（w-rail）。w-* 认 --width。 */
   --width-rail: 3px;
   /* run-timeline 在 md 的刻度左内边距，原来写死 172px。padding 认 --spacing。 */
@@ -258,6 +267,8 @@
   --fs-body-lh: 1.25rem;
   --fs-heading: 1rem;
   --fs-heading-lh: 1.5rem;
+  --fs-subtitle: 1.125rem;
+  --fs-subtitle-lh: 1.5rem;
   --fs-title: 1.25rem;
   --fs-title-lh: 1.75rem;
   --fs-display: 1.75rem;
@@ -269,6 +280,8 @@
     --fs-body-lh: 1rem;
     --fs-heading: 0.9375rem;
     --fs-heading-lh: 1.25rem;
+    --fs-subtitle: 1.25rem;
+    --fs-subtitle-lh: 1.625rem;
     --fs-title: 1.375rem;
     --fs-title-lh: 1.75rem;
     --fs-display: 1.625rem;
@@ -288,6 +301,7 @@
 [data-density="comfortable"] {
   --control-h: 32px;
   --row-h: 40px;
+  --row-tall-h: 48px;
   --section-p: 16px;
   --section-gap: 24px;
   --stack-gap: 12px;
@@ -296,6 +310,7 @@
   [data-density="compact"] {
     --control-h: 28px;
     --row-h: 32px;
+    --row-tall-h: 40px;
     --section-p: 12px;
     --section-gap: 16px;
     --stack-gap: 8px;

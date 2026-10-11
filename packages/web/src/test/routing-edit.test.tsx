@@ -2,7 +2,7 @@
 // 路由页调先后和开关（#1333，#1366 第二部分）：拖动、每行置顶 / 置底、聚焦后 Alt+上下键改先后（放下 / 点 / 按键就保存，失败回到原顺序）；
 // 每条路由、每个模型、每个渠道各有开关，开关确认后才写；渠道关了，下面的路由显示「渠道已关」不能单独开；
 // 整池暂停在对应池旁边设和撤。选了远程环境整块置灰并写「去那台上操作」。
-// 每行有「上移」「下移」「置顶」「置底」四个按钮（用的还是 movePurposeModel / updateModelRoute 的 reorder，没有新接口）。
+// 每行行尾「⋯」里有「上移一位」「下移一位」「置顶」「置底」（#1914 起收进菜单；用的还是 movePurposeModel / updateModelRoute 的 reorder，没有新接口）。
 // #856 第 2 处：旧的 useUpdateChannel 仍不导出。新的渠道开关是 setChannelEnabled，不是那条已删的 PATCH。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -59,6 +59,31 @@ const opened = async () => {
 const modelGrip = (modelId: string) => within(modelRow(modelId)).getByRole('button', { name: /^拖动 / });
 const routeGrip = (routeId: string) => within(routeItem(routeId)).getByRole('button', { name: /^拖动 / });
 
+/** 行尾「⋯」（路由页样板 #1914 起上移、下移、置顶、置底都在这里）。键盘 Enter 打开，不依赖 happy-dom 的指针事件。 */
+const openRowMenu = async (row: HTMLElement) => {
+  const trigger = within(row).getByRole('button', { name: /^更多操作：/ });
+  trigger.focus();
+  fireEvent.keyDown(trigger, { key: 'Enter' });
+  return screen.findByRole('menu');
+};
+
+/** 在一行的「⋯」里点一项挪动（上移一位、下移一位、置顶、置底）。 */
+const pickMove = async (row: HTMLElement, name: '上移一位' | '下移一位' | '置顶' | '置底') => {
+  const menu = await openRowMenu(row);
+  fireEvent.click(within(menu).getByRole('menuitem', { name }));
+  await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+};
+
+/** 一行「⋯」里某一项挪动是不是灰的（灰的写了原因）。看完把菜单关掉。 */
+const moveDisabled = async (row: HTMLElement, name: '上移一位' | '下移一位' | '置顶' | '置底') => {
+  const menu = await openRowMenu(row);
+  const item = within(menu).getByRole('menuitem', { name });
+  const off = item.getAttribute('data-disabled') !== null;
+  fireEvent.keyDown(menu, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+  return off;
+};
+
 /** Opus 5.5 下此刻画着的路由先后。 */
 const routeOrder = () =>
   Array.from(document.querySelectorAll('ol[aria-label="Opus 5.5 的路由"] > li')).map((li) =>
@@ -72,10 +97,13 @@ describe('路由页：调先后和开关', () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await opened();
     expect(modelNames()).toEqual(BEFORE);
-    expect(screen.getByRole('button', { name: '上移 Kimi k3（动手里的先后）' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '下移 Kimi k3（动手里的先后）' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '置顶 Kimi k3（动手里的先后）' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '置底 Kimi k3（动手里的先后）' })).toBeTruthy();
+    // 四个挪动收在行尾「⋯」里，行里不再并排四个箭头（#1914）
+    expect(within(modelRow('kimi-k3')).queryByRole('button', { name: /^(上移|下移|置顶|置底) / })).toBeNull();
+    const menu = await openRowMenu(modelRow('kimi-k3'));
+    for (const name of ['上移一位', '下移一位', '置顶', '置底']) {
+      expect(within(menu).getByRole('menuitem', { name })).toBeTruthy();
+    }
+    fireEvent.keyDown(menu, { key: 'Escape' });
     expect((modelGrip('opus-5.5') as HTMLButtonElement).disabled).toBe(false);
     expect(
       within(modelRow('opus-5.5'))
@@ -87,23 +115,22 @@ describe('路由页：调先后和开关', () => {
     expect(within(routeItem('r-rl-opus')).getByRole('switch').getAttribute('aria-checked')).toBe('false');
   });
 
-  test('上移、下移按钮：点一下挪一格并保存；已在最前的上移是灰的，点了不写', async () => {
+  test('上移、下移：点一下挪一格并保存；已在最前的上移是灰的，点了不写', async () => {
     const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     const spy = vi.spyOn(api, 'movePurposeModel');
     await opened();
-    const upOfFirst = screen.getByRole('button', { name: '上移 Opus 5.5（动手里的先后）' });
-    expect(upOfFirst.getAttribute('aria-disabled')).toBe('true');
-    fireEvent.click(upOfFirst);
+    expect(await moveDisabled(modelRow('opus-5.5'), '上移一位')).toBe(true);
     expect(spy).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole('button', { name: '下移 Opus 5.5（动手里的先后）' }));
+    await pickMove(modelRow('opus-5.5'), '下移一位');
     await waitFor(() => expect(modelNames()).toEqual(['Kimi k3', 'Opus 5.5', 'Cursor Auto', 'Opus 5']));
     expect(spy).toHaveBeenCalledExactlyOnceWith('execute', 'opus-5.5', {
       order: ['kimi-k3', 'opus-5.5', 'cursor-auto', 'opus-5'],
       expected: ['opus-5.5', 'kimi-k3', 'cursor-auto', 'opus-5'],
     });
 
-    fireEvent.click(screen.getByRole('button', { name: '上移 Opus 5.5（动手里的先后）' }));
+    await waitFor(() => expect(modelGrip('opus-5.5').getAttribute('aria-disabled')).toBeNull());
+    await pickMove(modelRow('opus-5.5'), '上移一位');
     await waitFor(() => expect(modelNames()).toEqual(BEFORE));
   });
 
@@ -112,7 +139,7 @@ describe('路由页：调先后和开关', () => {
     const spy = vi.spyOn(api, 'updateModelRoute');
     await opened();
     expect(routeOrder()).toEqual(['r-ca-opus', 'r-cb-opus', 'r-rl-opus']);
-    fireEvent.click(within(routeItem('r-ca-opus')).getByRole('button', { name: /^下移 / }));
+    await pickMove(routeItem('r-ca-opus'), '下移一位');
     await waitFor(() => expect(routeOrder()).toEqual(['r-cb-opus', 'r-ca-opus', 'r-rl-opus']));
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy.mock.calls[0]?.[2]).toMatchObject({ op: 'reorder' });
@@ -166,12 +193,10 @@ describe('路由页：调先后和开关', () => {
     const spy = vi.spyOn(api, 'movePurposeModel');
     await opened();
 
-    const topOfFirst = screen.getByRole('button', { name: '置顶 Opus 5.5（动手里的先后）' });
-    expect(topOfFirst.getAttribute('aria-disabled')).toBe('true');
-    fireEvent.click(topOfFirst);
+    expect(await moveDisabled(modelRow('opus-5.5'), '置顶')).toBe(true);
     expect(spy).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole('button', { name: '置顶 Cursor Auto（动手里的先后）' }));
+    await pickMove(modelRow('cursor-auto'), '置顶');
     await waitFor(() => expect(modelNames()).toEqual(['Cursor Auto', 'Opus 5.5', 'Kimi k3', 'Opus 5']));
     expect(spy).toHaveBeenLastCalledWith('execute', 'cursor-auto', {
       order: ['cursor-auto', 'opus-5.5', 'kimi-k3', 'opus-5'],
@@ -179,7 +204,7 @@ describe('路由页：调先后和开关', () => {
     });
 
     await waitFor(() => expect(modelGrip('cursor-auto').getAttribute('aria-disabled')).toBeNull());
-    fireEvent.click(screen.getByRole('button', { name: '置底 Cursor Auto（动手里的先后）' }));
+    await pickMove(modelRow('cursor-auto'), '置底');
     await waitFor(() => expect(modelNames()).toEqual(['Opus 5.5', 'Kimi k3', 'Opus 5', 'Cursor Auto']));
     expect(spy).toHaveBeenLastCalledWith('execute', 'cursor-auto', {
       order: ['opus-5.5', 'kimi-k3', 'opus-5', 'cursor-auto'],
@@ -216,14 +241,13 @@ describe('路由页：调先后和开关', () => {
     const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await opened();
 
-    fireEvent.click(screen.getByRole('button', { name: '下移 Opus 5.5（动手里的先后）' }));
+    await pickMove(modelRow('opus-5.5'), '下移一位');
     await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(modelGrip('opus-5.5').getAttribute('aria-disabled')).toBeNull());
-    fireEvent.click(screen.getByRole('button', { name: '下移 Kimi k3（动手里的先后）' }));
+    await pickMove(modelRow('kimi-k3'), '下移一位');
     await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(2));
-    const routeDown = () => within(routeItem('r-ca-opus')).getByRole('button', { name: /^下移 / });
-    await waitFor(() => expect(routeDown().getAttribute('aria-disabled')).toBeNull());
-    fireEvent.click(routeDown());
+    await waitFor(() => expect(routeGrip('r-ca-opus').getAttribute('aria-disabled')).toBeNull());
+    await pickMove(routeItem('r-ca-opus'), '下移一位');
     await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(3));
     for (const call of toast.success.mock.calls) {
       expect(call[0]).toBe('已改先后');
@@ -234,10 +258,10 @@ describe('路由页：调先后和开关', () => {
       new ApiError(409, 'conflict', '这个用途下模型的先后刚被别人改过，刷新后再改'),
     );
     await waitFor(() => expect(modelGrip('opus-5.5').getAttribute('aria-disabled')).toBeNull());
-    fireEvent.click(screen.getByRole('button', { name: '下移 Opus 5.5（动手里的先后）' }));
+    await pickMove(modelRow('opus-5.5'), '下移一位');
     await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(modelGrip('opus-5.5').getAttribute('aria-disabled')).toBeNull());
-    fireEvent.click(screen.getByRole('button', { name: '下移 Opus 5.5（动手里的先后）' }));
+    await pickMove(modelRow('opus-5.5'), '下移一位');
     await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(2));
     for (const call of toast.error.mock.calls) {
       expect(call[0]).toBe('没改成');
@@ -285,7 +309,7 @@ describe('路由页：调先后和开关', () => {
     const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     const spy = vi.spyOn(api, 'updateModelRoute');
     await opened();
-    fireEvent.click(within(routeItem('r-rl-opus')).getByRole('button', { name: /^置顶 / }));
+    await pickMove(routeItem('r-rl-opus'), '置顶');
     await waitFor(() => expect(routeOrder()).toEqual(['r-rl-opus', 'r-ca-opus', 'r-cb-opus']));
     expect(spy).toHaveBeenCalledExactlyOnceWith('opus-5.5', 'r-rl-opus', {
       op: 'reorder',
@@ -403,9 +427,11 @@ describe('路由页：调先后和开关', () => {
     const spy = vi.spyOn(api, 'updateSetting');
     await opened();
     const row = routeItem('r-ca-opus');
-    const pause = await within(row).findByRole('button', { name: '暂停账号池 claude-a' });
-    fireEvent.click(pause);
-    const confirm = within(row).getByRole('button', { name: '确认暂停' });
+    // 整池暂停在这条路由行尾的「⋯」里（#1914），点了在行下面展开表单
+    await waitFor(() => expect(row.querySelector('[data-row-menu]')).not.toBeNull());
+    const menu = await openRowMenu(row);
+    fireEvent.click(await within(menu).findByRole('menuitem', { name: '暂停账号池 claude-a' }));
+    const confirm = await within(row).findByRole('button', { name: '确认暂停' });
     expect((confirm as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(confirm);
     expect(spy).not.toHaveBeenCalled();
@@ -416,12 +442,19 @@ describe('路由页：调先后和开关', () => {
     fireEvent.change(within(row).getByLabelText('最迟复查日期'), { target: { value: '2026-12-01' } });
     expect((within(row).getByRole('button', { name: '确认暂停' }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(within(row).getByRole('button', { name: '确认暂停' }));
-    await waitFor(() => expect(row.textContent).toContain('整池暂停'));
+    // 暂停了只看名字后面的状态「池暂停」，不再另贴「整池暂停」小标签（#1914 第 4 轮，同一件事一行只写一遍）
+    await waitFor(() => expect(row.textContent).toContain('池暂停'));
+    expect(row.textContent).not.toContain('整池暂停');
+    const chip = [...row.querySelectorAll('span[data-variant]')].find((el) =>
+      el.textContent?.includes('池暂停'),
+    );
+    expect(chip).toBeTruthy();
     expect((within(row).getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
     expect((within(routeItem('r-cb-opus')).getByRole('switch') as HTMLButtonElement).disabled).toBe(false);
 
-    fireEvent.click(within(row).getByRole('button', { name: '撤回账号池 claude-a 的整池暂停' }));
-    const revoke = within(row).getByRole('button', { name: '确认撤回' });
+    const again = await openRowMenu(row);
+    fireEvent.click(within(again).getByRole('menuitem', { name: '撤回账号池 claude-a 的整池暂停' }));
+    const revoke = await within(row).findByRole('button', { name: '确认撤回' });
     expect((revoke as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(revoke);
     expect((within(row).getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
@@ -429,24 +462,36 @@ describe('路由页：调先后和开关', () => {
     fireEvent.change(within(row).getByLabelText('撤回原因'), { target: { value: '账号解封了' } });
     fireEvent.click(within(row).getByRole('button', { name: '确认撤回' }));
     await waitFor(() => expect((within(row).getByRole('switch') as HTMLButtonElement).disabled).toBe(false));
-    expect(row.textContent).not.toContain('整池暂停');
+    expect(row.textContent).not.toContain('池暂停');
   });
 
   test('【故意造出的失败】选了远程环境（?node=）：整块置灰、写「去那台上操作」，拖动、置顶置底和开关都点不了', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute&node=wsl' });
     await opened();
     expect(screen.getByText(/去那台上操作/).textContent).toContain('去那台上操作');
-    await waitFor(() =>
-      expect(screen.getAllByRole('button', { name: /^暂停账号池 / }).length).toBeGreaterThan(0),
-    );
-    for (const b of screen.getAllByRole('button', { name: /^(拖动|置顶|置底) / })) {
-      expect((b as HTMLButtonElement).disabled).toBe(true);
-    }
-    for (const b of screen.getAllByRole('button', { name: /^暂停账号池 / })) {
+    for (const b of screen.getAllByRole('button', { name: /^拖动 / })) {
       expect((b as HTMLButtonElement).disabled).toBe(true);
     }
     for (const sw of screen.getAllByRole('switch')) {
       expect((sw as HTMLButtonElement).disabled).toBe(true);
+    }
+    // 「⋯」里的置顶、置底、档位、移出、整池暂停也都是灰的，悬停写「去那台上操作」
+    const modelMenu = await openRowMenu(modelRow('kimi-k3'));
+    for (const item of within(modelMenu).getAllByRole('menuitem')) {
+      expect(item.getAttribute('data-disabled')).not.toBeNull();
+    }
+    for (const item of within(modelMenu).getAllByRole('menuitemradio')) {
+      expect(item.getAttribute('data-disabled')).not.toBeNull();
+    }
+    fireEvent.keyDown(modelMenu, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+    await waitFor(() => expect(routeItem('r-ca-opus').querySelector('[data-row-menu]')).not.toBeNull());
+    const routeMenu = await openRowMenu(routeItem('r-ca-opus'));
+    const pause = await within(routeMenu).findByRole('menuitem', { name: /^暂停账号池 / });
+    expect(pause.getAttribute('data-disabled')).not.toBeNull();
+    expect(pause.getAttribute('title')).toContain('去那台上操作');
+    for (const item of within(routeMenu).getAllByRole('menuitem')) {
+      expect(item.getAttribute('data-disabled')).not.toBeNull();
     }
   });
 });

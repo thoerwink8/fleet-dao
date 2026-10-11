@@ -15,6 +15,46 @@ const rowBase =
   'flex min-h-row w-full items-center gap-stack px-section py-[calc((var(--spacing-row)-1.25rem)/2)] text-left outline-none focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-11';
 const rowHover = 'hover:bg-accent';
 
+/**
+ * 一行的外框，给自己管 li 的列表（拖动排序的先后列表）用：行高、左右内边距、元素间距取同一组令牌，和 ListRow 一样高。
+ * 带 group/row：行尾菜单（RowMenu）、拖动柄靠它在悬停这一行时才露出。
+ */
+export function RowFrame({
+  tall = false,
+  className,
+  ...rest
+}: {
+  /** 两行的行（名字一行加一行小字）：行高取 row-tall（标准 48、紧凑 40），上下内边距 6。 */
+  tall?: boolean;
+} & ComponentProps<'div'>) {
+  return (
+    <div
+      data-row-frame
+      data-tall={tall || undefined}
+      className={cn(
+        'group/row relative flex w-full items-center gap-stack px-section max-md:min-h-11',
+        tall ? 'min-h-row-tall py-1.5' : 'min-h-row py-[calc((var(--spacing-row)-1.25rem)/2)]',
+        className,
+      )}
+      {...rest}
+    />
+  );
+}
+
+/**
+ * 行下面展开的明细、提示（三件事的原因、整池暂停表单、退避提示）：左边和行里的名字对齐
+ * （行的左内边距 + 展开箭头、序号的宽，app.css 的 --spacing-row-indent），右边和行的右内边距对齐。
+ */
+export function RowDetail({ className, ...rest }: ComponentProps<'div'>) {
+  return (
+    <div
+      data-row-detail
+      className={cn('pr-section pl-[calc(var(--spacing-section)+var(--spacing-row-indent))]', className)}
+      {...rest}
+    />
+  );
+}
+
 export function ListRow({
   leading,
   title,
