@@ -42,6 +42,7 @@ import {
 } from '../lib/list-window';
 import { useSelectedNodeId } from '../lib/node';
 import { cn } from '../lib/utils';
+import { Tag } from './layout/tag';
 import { useSelectedNodeName } from './node-notice';
 import {
   AlertDialog,
@@ -53,7 +54,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from './ui/alert-dialog';
-import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import {
   DropdownMenu,
@@ -773,9 +773,9 @@ export function FounderOnlyBadge({
   const rule = founderOnlyFor({ id: modelId, family: family ?? '', displayName });
   if (!rule) return null;
   return (
-    <Badge variant="outline" title={rule.reason} className="h-4 shrink-0 px-1 text-micro font-normal">
-      仅创始人可开
-    </Badge>
+    <span title={rule.reason} className="inline-flex shrink-0">
+      <Tag>仅创始人可开</Tag>
+    </span>
   );
 }
 

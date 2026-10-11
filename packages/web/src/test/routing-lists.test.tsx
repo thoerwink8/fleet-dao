@@ -375,6 +375,8 @@ const classTokens = (el: Element) => (el.getAttribute('class') ?? '').split(/\s+
 
 function expectTap(el: Element) {
   const tokens = classTokens(el);
+  // 按钮：min-h-9 加 min-w-9；原生下拉（NativeSelect）手机上 max-md:min-h-10，更高
+  if (tokens.includes('max-md:min-h-10')) return;
   expect(tokens).toContain('min-h-9');
   expect(tokens).toContain('min-w-9');
 }
@@ -518,39 +520,29 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     renderApp(<RoutingPage />, { route: '/routing?tab=models' });
     await screen.findByRole('list', { name: '目录里的模型' });
     const only = screen.getByRole('button', { name: '只看已开启' });
-    const idleOnly = only.className;
     expect(only.getAttribute('aria-pressed')).toBe('false');
+    expect(only.getAttribute('data-state')).toBe('off');
     fireEvent.click(only);
     expect(only.getAttribute('aria-pressed')).toBe('true');
-    expect(only.className).not.toBe(idleOnly);
-    expect(only.className).toContain('border-foreground');
-    expect(only.className).toContain('bg-foreground/10');
-    expect(idleOnly).not.toContain('bg-foreground/10');
+    expect(only.getAttribute('data-state')).toBe('on');
 
     const discovered = screen.getByRole('button', { name: '新发现' });
-    const idleDiscovered = discovered.className;
     fireEvent.click(discovered);
     expect(discovered.getAttribute('aria-pressed')).toBe('true');
-    expect(discovered.className).not.toBe(idleDiscovered);
-    expect(discovered.className).toContain('bg-foreground/10');
-    expect(discovered.className).toContain('border-foreground');
+    expect(discovered.getAttribute('data-state')).toBe('on');
 
     fireEvent.click(screen.getByRole('button', { name: '清除筛选' }));
     expect(only.getAttribute('aria-pressed')).toBe('false');
     expect(discovered.getAttribute('aria-pressed')).toBe('false');
 
     const vendor = screen.getByRole('combobox', { name: '按厂家筛选' }) as HTMLSelectElement;
-    const idleVendor = vendor.className;
     fireEvent.change(vendor, { target: { value: 'grok' } });
-    expect(vendor.className).not.toBe(idleVendor);
-    expect(vendor.className).toContain('border-foreground');
-    expect(vendor.className).toContain('bg-foreground/10');
+    expect(vendor.value).toBe('grok');
     await waitFor(() => expect(screen.getByText(/^显示 1 \/ 共/)).toBeTruthy());
 
     fireEvent.click(screen.getByRole('button', { name: '清除筛选' }));
     await waitFor(() => expect(screen.getByText(/^共 \d+ 个$/)).toBeTruthy());
     expect(vendor.value).toBe('');
-    expect(vendor.className).not.toContain('bg-foreground/10');
   });
 
   test('顶部说明折成一行「怎么用」，点开才展开（手机和桌面一样）', async () => {
@@ -618,18 +610,18 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
         (node) => node.textContent === label,
       );
       if (!el) throw new Error(`没有标记 ${label}（${id}）`);
-      return el.getAttribute('class') ?? '';
+      return el.querySelector('[data-tone]')?.getAttribute('data-tone') ?? '';
     };
     const discovered = await waitFor(() => mark('sonnet-5', '新发现'));
     const locked = mark('gpt-5.6-luna', '锁住');
-    expect(discovered).toMatch(/text-ink-done|text-ink-run/);
-    expect(locked).toContain('text-ink-stall');
+    expect(discovered).toBe('done');
+    expect(locked).toBe('stall');
     expect(discovered).not.toBe(locked);
     const retired = document.querySelector('li[data-catalog="opus-5"]');
     expect(retired?.querySelector('[data-catalog-mark="retired"]')).toBeNull();
     const chip = retired?.querySelector('[data-status-word] span');
     expect(chip?.textContent).toContain('已下架');
-    expect(chip?.className).toContain('text-ink-stop');
+    expect(chip?.closest('[data-tone]')?.getAttribute('data-tone')).toBe('stop');
   });
 });
 

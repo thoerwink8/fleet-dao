@@ -44,8 +44,8 @@ const SITES = [
     from: 'grid-cols-[auto_1fr]',
     to: 'grid-cols-auto-fr',
   },
-  { file: 'src/components/channel-status.tsx', where: '空探针格', from: 'rounded-[2px]', to: 'rounded-2' },
-  { file: 'src/components/channel-status.tsx', where: '探针格', from: 'rounded-[2px]', to: 'rounded-2' },
+  { file: 'src/components/channel-status.tsx', where: '空探针格', from: 'rounded-[2px]', to: 'rounded-sm' },
+  { file: 'src/components/channel-status.tsx', where: '探针格', from: 'rounded-[2px]', to: 'rounded-sm' },
   {
     file: 'src/components/pool-holds.tsx',
     where: '暂停明细',
