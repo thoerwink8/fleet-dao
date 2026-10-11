@@ -175,7 +175,7 @@ describe('环境页的开关卡（EngineMasterControl）', () => {
     const card = await screen.findByTestId('engine-master');
     await waitFor(() => expect(within(card).getByTestId('engine-master-state').textContent).toBe('没查成'));
     expect(within(card).getByTestId('engine-master-note').textContent).toContain('库连不上');
-    expect(within(card).queryByRole('button')).toBeNull();
+    expect(within(card).queryByRole('button', { name: /引擎总开关/ })).toBeNull();
   });
 });
 
@@ -204,7 +204,7 @@ describe('选了远程环境（?node=）：只读、写明去那台上操作', (
     renderApp(<France />, { api: remoteWith(fact(true)) as unknown as FleetApi, route: '/france?node=wsl' });
     const card = await screen.findByTestId('engine-master');
     await waitFor(() => expect(within(card).getByTestId('engine-master-state').textContent).toBe('开着'));
-    expect(within(card).queryByRole('button')).toBeNull();
+    expect(within(card).queryByRole('button', { name: /引擎总开关/ })).toBeNull();
     expect(within(card).getByTestId('engine-master-remote-note').textContent).toContain('fleet-api engine');
   });
 
@@ -215,7 +215,7 @@ describe('选了远程环境（?node=）：只读、写明去那台上操作', (
       expect(within(card).getByTestId('engine-master-note').textContent).toContain('还不带'),
     );
     expect(within(card).getByTestId('engine-master-state').textContent).toBe('没查成');
-    expect(within(card).queryByRole('button')).toBeNull();
+    expect(within(card).queryByRole('button', { name: /引擎总开关/ })).toBeNull();
   });
 });
 

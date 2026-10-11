@@ -286,9 +286,15 @@ describe('渠道状态页：渠道卡', () => {
   test('顶上的说明换成三档节奏的那一句，不再写「Mirasim、Cursor、Grok 探通后 2 小时一轮」', async () => {
     renderApp(<RoutingStatus />, { route: '/routing/status' });
     await screen.findByRole('list', { name: '渠道状态' });
-    expect(document.body.textContent).toContain(
-      '活跃路由每小时探一次，不活跃的每天一次，派活前 15 分钟内没探过会先探；中转渠道的活跃模型额外问一道身份题。',
-    );
+    // 页头一行写概要，探测节奏这一句收在标题旁的 ⓘ 里（#1897），点开才看
+    fireEvent.click(document.querySelector('[data-description-hint]') as HTMLElement);
+    expect(
+      await screen.findByText((text) =>
+        text.includes(
+          '活跃路由每小时探一次，不活跃的每天一次，派活前 15 分钟内没探过会先探；中转渠道的活跃模型额外问一道身份题。',
+        ),
+      ),
+    ).toBeTruthy();
     expect(document.body.textContent).not.toContain('2 小时一轮');
   });
 

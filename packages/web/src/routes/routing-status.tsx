@@ -90,6 +90,7 @@ export function meta() {
   return [{ title: brand.title('渠道状态') }];
 }
 
+const SUMMARY = '每条路由现在通不通，多久探一次。';
 const DESCRIPTION =
   '活跃路由每小时探一次，不活跃的每天一次，派活前 15 分钟内没探过会先探；中转渠道的活跃模型额外问一道身份题。点「立即探测」让法国引擎现在就探。';
 
@@ -224,7 +225,7 @@ export default function RoutingStatus() {
 
   if (routing.error || layers.error) {
     return (
-      <Page title="渠道状态" description={DESCRIPTION}>
+      <Page title="渠道状态" description={SUMMARY} detail={DESCRIPTION}>
         {routing.error ? <LoadError what="渠道目录" error={routing.error} /> : null}
         {layers.error ? <LoadError what="路由两层" error={layers.error} /> : null}
       </Page>
@@ -232,14 +233,14 @@ export default function RoutingStatus() {
   }
   if (!routing.data || !layers.data) {
     return (
-      <Page title="渠道状态" description={DESCRIPTION}>
+      <Page title="渠道状态" description={SUMMARY} detail={DESCRIPTION}>
         <LoadingRows rows={5} />
       </Page>
     );
   }
   if (cards.length === 0) {
     return (
-      <Page title="渠道状态" description={DESCRIPTION}>
+      <Page title="渠道状态" description={SUMMARY} detail={DESCRIPTION}>
         <Section>
           <EmptyState
             icon={SatelliteDish}
@@ -326,7 +327,8 @@ export default function RoutingStatus() {
   return (
     <Page
       title="渠道状态"
-      description={DESCRIPTION}
+      description={SUMMARY}
+      detail={DESCRIPTION}
       refresh={{
         onRefresh: () => void routing.refetch(),
         isFetching: routing.isFetching,

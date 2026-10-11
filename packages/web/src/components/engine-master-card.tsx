@@ -11,6 +11,7 @@ import { errorText, useSettings, useUpdateSetting } from '../api/client';
 import type { EnvMaster } from '../api/types';
 import { formatDateTime, localizeIsoTimes } from '../lib/format';
 import { useMasterView } from './engine-master';
+import { DescriptionHint } from './layout/page';
 import { Section } from './layout/section';
 import { StatusBadge } from './layout/status-badge';
 import { Tag } from './layout/tag';
@@ -141,6 +142,14 @@ export function EngineMasterControl({ standbyNote }: { standbyNote?: ReactNode }
               />
             )}
           </span>
+          {/* 长说明收进 ⓘ（#1897）：手机首屏不再被它占掉近半。 */}
+          <DescriptionHint label="总开关是什么">
+            <p data-testid="engine-master-help">
+              总开关关＝全停：不拉单、不派活、不起干活的会话（探针和健康检查照跑，渠道通不通照样看得到）；总开关开＝只有「让
+              AI 接活」开着的项目才派（在设置 →
+              仓库里逐个项目开）。往法国发版会先暂停它，发完恢复发版前的样子（发前开着的开回，发前关着的保持关）。
+            </p>
+          </DescriptionHint>
         </span>
       }
       actions={button}
@@ -153,11 +162,6 @@ export function EngineMasterControl({ standbyNote }: { standbyNote?: ReactNode }
           {who}
         </p>
       ) : null}
-      <p className="mt-2 text-meta text-muted-foreground">
-        总开关关＝全停：不拉单、不派活、不起干活的会话（探针和健康检查照跑，渠道通不通照样看得到）；总开关开＝只有「让
-        AI 接活」开着的项目才派（在设置 →
-        仓库里逐个项目开）。往法国发版会先暂停它，发完恢复发版前的样子（发前开着的开回，发前关着的保持关）。
-      </p>
       {master !== null && remote ? (
         <p className="mt-2 text-meta text-muted-foreground" data-testid="engine-master-remote-note">
           这是远程环境的快照，只读。要开关请去那台上用 <span className="num">fleet-api engine on</span> /{' '}
