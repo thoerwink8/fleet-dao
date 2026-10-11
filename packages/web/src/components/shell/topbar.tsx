@@ -124,7 +124,7 @@ function EnvSwitcher() {
           {nodeId !== null ? (
             <span
               className={cn(
-                'rounded-full border px-1.5 text-meta whitespace-nowrap',
+                'rounded-sm border px-1.5 text-meta whitespace-nowrap',
                 state === 'fresh' ? 'text-muted-foreground' : 'border-st-stall-line text-ink-stall',
               )}
             >

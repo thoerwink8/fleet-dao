@@ -638,7 +638,8 @@ export default function Settings() {
             {/* 读失败后再重拉会先清掉 error、回到 pending。已经读过就不再画骨架。 */}
             {settings.data ? (
               <div className="space-y-3">
-                <FieldGroup className="2xl:grid 2xl:grid-cols-2 2xl:gap-x-8">
+                {/* 单栏：只有 3 项，分两栏会剩 1 项孤零零（#1910 第 11 条） */}
+                <FieldGroup>
                   <NumberSetting
                     k="sessions.maxConcurrent"
                     s={find('sessions.maxConcurrent')}

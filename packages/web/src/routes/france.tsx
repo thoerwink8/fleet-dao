@@ -657,7 +657,7 @@ export default function France() {
             <span className="flex items-center gap-2">
               定时任务
               {jobList ? (
-                <span className="num rounded-full border px-2 py-0.5 text-meta font-normal text-muted-foreground">
+                <span className="num rounded-sm border px-2 py-0.5 text-meta font-normal text-muted-foreground">
                   共 {jobList.length} 项
                   {failed ? <span className="text-ink-fail"> · 失败 {failed}</span> : null}
                   {warn ? <span className="text-ink-stall"> · 没查全或过期 {warn}</span> : null}

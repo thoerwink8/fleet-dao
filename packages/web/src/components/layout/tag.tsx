@@ -1,7 +1,7 @@
-// 非状态的小标签：「卡住报警」「套餐内」、提交号。状态本身用 StatusBadge。
+// 非状态的小标签：「卡住报警」「套餐内」、提交号。状态本身用 StatusBadge；两者外形同一套（tone.ts 的 badgeShape）。
 import type { ReactNode } from 'react';
 import { cn } from '../../lib/utils';
-import { inkClass, type LayoutTone, softClass } from './tone';
+import { badgeShape, inkClass, type LayoutTone, softClass } from './tone';
 
 export type TagTone = 'neutral' | 'brand' | LayoutTone;
 
@@ -21,7 +21,7 @@ export function Tag({
     <span
       data-tone={tone}
       className={cn(
-        'inline-flex h-5 shrink-0 items-center rounded-sm px-1.5 text-meta font-medium whitespace-nowrap',
+        badgeShape,
         tone === 'neutral' && 'bg-muted text-muted-foreground',
         tone === 'brand' && 'bg-brand text-brand-foreground',
         tone !== 'neutral' && tone !== 'brand' && cn(softClass[tone], inkClass[tone]),
