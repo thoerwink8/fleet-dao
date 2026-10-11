@@ -20,15 +20,22 @@ import {
 import { cn } from '../lib/utils';
 import { EmptyState } from './layout/empty-state';
 import { FieldRow } from './layout/field-row';
+import { RowDetail, RowFrame } from './layout/list';
 import { LoadError, LoadingRows } from './layout/load-state';
 import { NativeSelect } from './layout/native-select';
 import { Notice } from './layout/notice';
+import { DescriptionHint } from './layout/page';
+import { RowMenu, RowMenuItem, RowMenuSeparator } from './layout/row-menu';
 import { Section } from './layout/section';
 import { StatusBadge } from './layout/status-badge';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Textarea } from './ui/textarea';
+
+const HOLDS_SHORT = '临时停用一个账号池：选路不派、切号不切过去（在跑的不动）';
+const HOLDS_DETAIL =
+  '临时停用一个账号池：选路不派、切号不切过去（在跑的不动）。每条要写清原因、谁拍的、撤回条件、最迟复查日期（北京时间）、负责人（没写按指挥官）。探针探通、会话跑通都撤不掉它，只有人在这里撤（要写原因）；过了复查日期会标红，但不会自动撤。改负责人、续期、撤回在每行行尾的「⋯」里。';
 
 type RowAction = { poolId: string; kind: 'revoke' | 'renew' | 'owner' };
 
@@ -139,124 +146,131 @@ export function PoolHoldsPanel() {
     const words = reviewWords(h);
     const open = action?.poolId === h.poolId;
     return (
-      <li key={h.poolId} className="px-4 py-3" data-testid={`hold-${h.poolId}`}>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-body font-medium">{poolName(h.poolId)}</span>
+      <li key={h.poolId} data-testid={`hold-${h.poolId}`}>
+        {/* 一行一个主信息（池名加一行小字：负责人、最迟复查）、一个状态；改负责人、续期、撤回偶尔才动，收进行尾「⋯」（#1917） */}
+        <RowFrame tall>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-body font-medium" title={poolName(h.poolId)}>
+              {poolName(h.poolId)}
+            </span>
+            <span
+              title={`负责人 ${h.owner} · 最迟复查 ${h.reviewBy}（北京时间）`}
+              className="block truncate whitespace-nowrap text-meta text-muted-foreground"
+            >
+              负责人 <span>{h.owner}</span> · 最迟复查 <span className="num">{h.reviewBy}</span>
+            </span>
+          </span>
           {words ? (
-            <span role="alert">
+            <span role="alert" className="shrink-0">
               <StatusBadge tone="fail" label={words} />
             </span>
-          ) : null}
-          <span className="ml-auto flex gap-2">
-            <Button
-              size="sm"
-              variant="outline"
+          ) : (
+            <span className="shrink-0">
+              <StatusBadge variant="dot" tone="stop" label="暂停中" />
+            </span>
+          )}
+          <RowMenu label={`更多操作：${poolName(h.poolId)}`} title="改负责人、续期、撤回">
+            <RowMenuItem
               disabled={update.isPending}
-              onClick={() => {
+              onSelect={() => {
                 setOwnerDraft(h.owner);
                 setAction({ poolId: h.poolId, kind: 'owner' });
               }}
             >
               改负责人
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
+            </RowMenuItem>
+            <RowMenuItem
               disabled={update.isPending}
-              onClick={() => setAction({ poolId: h.poolId, kind: 'renew' })}
+              onSelect={() => setAction({ poolId: h.poolId, kind: 'renew' })}
             >
               续期
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
+            </RowMenuItem>
+            <RowMenuSeparator />
+            <RowMenuItem
+              variant="destructive"
               disabled={update.isPending}
-              onClick={() => setAction({ poolId: h.poolId, kind: 'revoke' })}
+              onSelect={() => setAction({ poolId: h.poolId, kind: 'revoke' })}
             >
               撤回
-            </Button>
-          </span>
-        </div>
-        <dl className="mt-1.5 grid grid-cols-auto-fr gap-x-3 gap-y-0.5 text-meta text-muted-foreground">
-          {/* 原标签列 auto、剩余 1fr，grid-cols-auto-fr */}
-          <dt>为什么停</dt>
-          <dd className="text-foreground">{h.reason}</dd>
-          <dt>负责人</dt>
-          <dd className="text-foreground">{h.owner}</dd>
-          <dt>谁拍的</dt>
-          <dd className="text-foreground">{h.decidedBy}</dd>
-          <dt>撤回条件</dt>
-          <dd className="text-foreground">{h.revokeWhen}</dd>
-          <dt>最迟复查</dt>
-          <dd className={words ? 'num font-medium text-ink-fail' : 'num text-foreground'}>
-            {h.reviewBy}（北京时间）
-          </dd>
-        </dl>
-        {open && action ? (
-          <div className="mt-2 rounded-md bg-muted p-3">
-            {action.kind === 'renew' ? (
-              <div className="mb-2 flex items-center gap-2">
-                <Label htmlFor="hold-renew-date" className="text-meta">
-                  新的最迟复查日期
-                </Label>
-                <Input
-                  id="hold-renew-date"
-                  type="date"
-                  value={renewDate}
-                  onChange={(e) => setRenewDate(e.target.value)}
-                  className="num h-8 w-40"
-                />
-              </div>
-            ) : null}
-            {action.kind === 'owner' ? (
-              <div className="mb-2 flex items-center gap-2">
-                <Label htmlFor="hold-owner-edit" className="text-meta">
-                  负责人
-                </Label>
-                <Input
-                  id="hold-owner-edit"
-                  value={ownerDraft}
-                  onChange={(e) => setOwnerDraft(e.target.value)}
-                  className="h-8 w-40"
-                />
-              </div>
-            ) : null}
-            <Label htmlFor="hold-action-reason" className="text-meta">
-              {action.kind === 'revoke'
-                ? '撤回原因（必填，进操作记录）'
-                : action.kind === 'renew'
-                  ? '续期原因（必填，进操作记录）'
-                  : '改负责人的原因（必填，进操作记录）'}
-            </Label>
-            <Textarea
-              id="hold-action-reason"
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              className="mt-1 min-h-12"
-            />
-            <div className="mt-2 flex justify-end gap-2">
-              <Button size="sm" variant="ghost" onClick={closeAction}>
-                取消
-              </Button>
-              <Button
-                size="sm"
-                disabled={
-                  update.isPending ||
-                  reason.trim() === '' ||
-                  (action.kind === 'renew' && renewDate === '') ||
-                  (action.kind === 'owner' && ownerDraft.trim() === '')
-                }
-                onClick={submitAction}
-              >
+            </RowMenuItem>
+          </RowMenu>
+        </RowFrame>
+        <RowDetail indent={false} className="pb-3">
+          {/* 负责人、最迟复查已经在行的小字里（日期是北京时间，写在悬停里）；这里只放成段的三项 */}
+          <dl className="grid grid-cols-auto-fr gap-x-3 gap-y-0.5 text-meta text-muted-foreground">
+            <dt>为什么停</dt>
+            <dd className="text-foreground">{h.reason}</dd>
+            <dt>谁拍的</dt>
+            <dd className="text-foreground">{h.decidedBy}</dd>
+            <dt>撤回条件</dt>
+            <dd className="text-foreground">{h.revokeWhen}</dd>
+          </dl>
+          {open && action ? (
+            <div className="mt-2 rounded-md bg-muted p-3">
+              {action.kind === 'renew' ? (
+                <div className="mb-2 flex items-center gap-2">
+                  <Label htmlFor="hold-renew-date" className="text-meta">
+                    新的最迟复查日期
+                  </Label>
+                  <Input
+                    id="hold-renew-date"
+                    type="date"
+                    value={renewDate}
+                    onChange={(e) => setRenewDate(e.target.value)}
+                    className="num h-8 w-40"
+                  />
+                </div>
+              ) : null}
+              {action.kind === 'owner' ? (
+                <div className="mb-2 flex items-center gap-2">
+                  <Label htmlFor="hold-owner-edit" className="text-meta">
+                    负责人
+                  </Label>
+                  <Input
+                    id="hold-owner-edit"
+                    value={ownerDraft}
+                    onChange={(e) => setOwnerDraft(e.target.value)}
+                    className="h-8 w-40"
+                  />
+                </div>
+              ) : null}
+              <Label htmlFor="hold-action-reason" className="text-meta">
                 {action.kind === 'revoke'
-                  ? '确认撤回'
+                  ? '撤回原因（必填，进操作记录）'
                   : action.kind === 'renew'
-                    ? '确认续期'
-                    : '确认改负责人'}
-              </Button>
+                    ? '续期原因（必填，进操作记录）'
+                    : '改负责人的原因（必填，进操作记录）'}
+              </Label>
+              <Textarea
+                id="hold-action-reason"
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                className="mt-1 min-h-12"
+              />
+              <div className="mt-2 flex justify-end gap-2">
+                <Button size="sm" variant="ghost" onClick={closeAction}>
+                  取消
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={
+                    update.isPending ||
+                    reason.trim() === '' ||
+                    (action.kind === 'renew' && renewDate === '') ||
+                    (action.kind === 'owner' && ownerDraft.trim() === '')
+                  }
+                  onClick={submitAction}
+                >
+                  {action.kind === 'revoke'
+                    ? '确认撤回'
+                    : action.kind === 'renew'
+                      ? '确认续期'
+                      : '确认改负责人'}
+                </Button>
+              </div>
             </div>
-          </div>
-        ) : null}
+          ) : null}
+        </RowDetail>
       </li>
     );
   };
@@ -270,7 +284,13 @@ export function PoolHoldsPanel() {
           {v && holdsNeedAttention(v) ? <StatusBadge tone="fail" label="要人看" /> : null}
         </span>
       }
-      description="临时停用一个账号池：选路不派、切号不切过去（在跑的不动）。每条要写清原因、谁拍的、撤回条件、最迟复查日期、负责人（没写按指挥官）。探针探通、会话跑通都撤不掉它，只有人在这里撤（要写原因）；过了复查日期会标红，但不会自动撤。"
+      // 卡头说明一行不折（#1917）：细则收进 ⓘ
+      description={
+        <span className="block truncate whitespace-nowrap" title={HOLDS_SHORT}>
+          {HOLDS_SHORT}
+        </span>
+      }
+      actions={<DescriptionHint label="整池暂停怎么用">{HOLDS_DETAIL}</DescriptionHint>}
     >
       {holds.error ? <LoadError what="整池暂停" error={holds.error} /> : null}
       {!v && !holds.error ? <LoadingRows rows={1} /> : null}
