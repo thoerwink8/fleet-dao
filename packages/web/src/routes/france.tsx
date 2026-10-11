@@ -11,10 +11,11 @@
 // - 在法国真机的驾驶舱上打开，本台就是法国；在本地开发 / 演示 mock 上打开，本台是这台后端自己的数。
 // - 每一项都按后端给的 ok / reason 两态如实画：读不到就写「没查成 + 原因」，不拿 0 或假 ok 冒充（仓的底线）。
 //
-// 版式：只有一台时六格排成卡片（不画对照列）；两台及以上每个环境一列、六项各占一行用 subgrid 对齐。
-// 下面左边定时任务表（出问题的排前面）、右边发版。六格怎么画在 components/env-facts.tsx。
+// 版式（路由页样板 #1914 铺开）：最上面是本台的标题块（名字、一句结论带状态、一行灰字细节），下面总开关一行；
+// 只有一台时六项是一个区块里的六行（宽屏两栏各三行）；两台及以上每个环境一列、六项各占一行用 subgrid 对齐。
+// 再下面左边定时任务列表（出问题的排前面）、右边发版。每一项一行怎么画在 components/env-facts.tsx。
 
-import { ArrowRight, ChevronDown, Rocket, SearchX, ServerCog } from 'lucide-react';
+import { ArrowRight, ChevronDown, Rocket, SearchX, ServerCog, Timer } from 'lucide-react';
 import { type CSSProperties, type ReactNode, useState } from 'react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
@@ -30,23 +31,27 @@ import {
   useNodes,
 } from '../api/client';
 import type {
+  EnvFacts,
+  EnvResponse,
   FrancePreflightResponse,
   FranceReleaseState,
   JobView,
   NodeDetail,
   NodeListItem,
+  ReleaseCard,
 } from '../api/types';
 import { useMasterView } from '../components/engine-master';
 import { EngineMasterControl } from '../components/engine-master-card';
-import { FACT_ROWS, factCells, factsSummary } from '../components/env-facts';
+import { FACT_ROWS, factCells, factsSummary, factsUnread } from '../components/env-facts';
 import { JobListHead, JobListRow, rowTone } from '../components/job-row';
 import { EmptyState } from '../components/layout/empty-state';
+import { RowDetail, RowFrame } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { Notice } from '../components/layout/notice';
 import { Page } from '../components/layout/page';
-import { Section } from '../components/layout/section';
+import { Section, SectionGrid } from '../components/layout/section';
+import { StatusBadge, StatusDot } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
-import { RefreshBar } from '../components/refresh-bar';
 import { ReleaseCardBody, ReleaseEntry } from '../components/release-card';
 import { Button } from '../components/ui/button';
 import { formatAgo, formatDuration, TIME } from '../lib/format';
@@ -69,10 +74,26 @@ function problemsFirst(jobs: readonly JobView[]): JobView[] {
     .map((x) => x.j);
 }
 
-const RELEASE_TONE: Partial<Record<Tone, string>> = { stall: 'text-ink-stall', fail: 'text-ink-fail' };
+/** release-train 此刻的一个状态：在走（卡住、没成）/ 暂停标记没人收 / 没在走 / 没查成。 */
+function releaseState(release: FranceReleaseState): { tone: Tone; label: string } {
+  switch (release.state) {
+    case 'running':
+      return release.status === 'blocked'
+        ? { tone: 'stall', label: '卡住了' }
+        : release.status === 'failed'
+          ? { tone: 'fail', label: '没成' }
+          : { tone: 'run', label: '在走' };
+    case 'paused':
+      return { tone: 'fail', label: '暂停标记没人收' };
+    case 'idle':
+      return { tone: 'stop', label: '没在走' };
+    default:
+      return { tone: 'stall', label: '没查成' };
+  }
+}
 
 /**
- * 发版（#618）：release-train 此刻的状态 + 「发版预检」按钮。
+ * 发版一键（#618）：release-train 此刻的状态 + 「发版预检」按钮，一行；下面一句灰字说明，点了预检才有结果块。
  * 状态三态：running = 在走；paused = 暂停标记留下来了但一趟不在（孤儿）；idle = 没在走。读不到一律 unreadable，写明原因。
  */
 function ReleaseBody({
@@ -83,29 +104,24 @@ function ReleaseBody({
   preflight: ReturnType<typeof useFrancePreflight>;
 }) {
   const result: FrancePreflightResponse | undefined = preflight.data;
-  const tone: Tone | undefined =
-    release.state === 'running' ? 'stall' : release.state === 'paused' ? 'fail' : undefined;
+  const state = releaseState(release);
   return (
     <div className="space-y-3">
       <div>
-        <div className="flex items-center gap-1.5 text-meta text-muted-foreground">
-          <Rocket className="size-3.5 opacity-70" aria-hidden />
-          release-train 此刻
-        </div>
-        <div
-          className={cn('mt-1 text-title leading-tight font-semibold', tone ? RELEASE_TONE[tone] : undefined)}
-        >
-          {release.state === 'running'
-            ? release.status === 'blocked'
-              ? '卡住了'
-              : release.status === 'failed'
-                ? '没成'
-                : '在走'
-            : release.state === 'paused'
-              ? '暂停标记没人收'
-              : release.state === 'idle'
-                ? '没在走'
-                : '没查成'}
+        <div className="flex min-h-8 min-w-0 items-center gap-2 whitespace-nowrap">
+          <Rocket className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          <span className="shrink-0 text-body font-medium">release-train</span>
+          <StatusBadge tone={state.tone} label={state.label} variant="dot" className="text-body" />
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="ml-auto max-md:min-h-10"
+            disabled={preflight.isPending}
+            onClick={() => preflight.mutate()}
+          >
+            {preflight.isPending ? '预检在跑…' : '发版预检'}
+          </Button>
         </div>
         <p className="mt-1 text-meta text-muted-foreground">
           {release.state === 'running'
@@ -117,15 +133,6 @@ function ReleaseBody({
                 : release.why}
         </p>
       </div>
-      <Button
-        type="button"
-        size="sm"
-        variant="outline"
-        disabled={preflight.isPending}
-        onClick={() => preflight.mutate()}
-      >
-        {preflight.isPending ? '预检在跑…' : '发版预检'}
-      </Button>
       {preflight.isError ? (
         <Notice tone="fail">
           预检请求没发出去：
@@ -138,12 +145,18 @@ function ReleaseBody({
             <p className="text-body text-ink-stall">没查成：{result.why}</p>
           ) : (
             <>
-              <div
-                className={cn('text-body font-medium', result.code === 0 ? 'text-ink-done' : 'text-ink-fail')}
-              >
-                {result.code === 0 ? '预检过了' : '预检没过（退出码不是 0；看下面输出找哪一项卡住）'}
-              </div>
-              <p className="mt-1 text-meta text-muted-foreground">
+              <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <StatusBadge
+                  tone={result.code === 0 ? 'done' : 'fail'}
+                  label={result.code === 0 ? '预检过了' : '预检没过'}
+                />
+                {result.code === 0 ? null : (
+                  <span className="text-meta text-muted-foreground">
+                    退出码不是 0，看下面输出找哪一项卡住
+                  </span>
+                )}
+              </p>
+              <p className="mt-1.5 text-meta text-muted-foreground">
                 <span className="num">{result.command}</span>
                 {' · '}
                 退出码 {result.code ?? '（没给）'}
@@ -180,7 +193,7 @@ function ReleaseBody({
 
 function JobsTable({ jobs, now }: { jobs: readonly JobView[]; now: number }) {
   if (jobs.length === 0) {
-    return <p className="px-4 py-6 text-body text-muted-foreground">这台环境一个定时任务都没有。</p>;
+    return <EmptyState icon={Timer} title="这台环境一个定时任务都没有。" />;
   }
   return (
     <>
@@ -195,8 +208,8 @@ function JobsTable({ jobs, now }: { jobs: readonly JobView[]; now: number }) {
 }
 
 /**
- * 对照表的一列（多台时才画）：环境名、本台还是远程、读于 / 上报于 / 失联多久、选中时描边。
- * 这一列占父网格的 1 + 6 行（subgrid），六格各落一行，和别的列同一项横着对齐。
+ * 对照表的一列（多台时才画）：列头一行名字和「本台 / 远程」，一行灰字写读于 / 上报于 / 失联多久和一句说明；选中时列头底色加下划线。
+ * 这一列占父网格的 1 + 6 行（subgrid），六项各落一行，和别的列同一项横着对齐。
  */
 function EnvColumn({
   id,
@@ -214,7 +227,7 @@ function EnvColumn({
   age: string;
   tone: 'ok' | 'stale';
   selected: boolean;
-  note?: ReactNode;
+  note?: string | null | undefined;
   children: ReactNode;
 }) {
   return (
@@ -226,28 +239,36 @@ function EnvColumn({
       className={cn(
         // 不是卡片：整排环境在同一个区块里，列之间一条分隔线。
         // 手机一列上下叠，不用 subgrid 对齐；md 起每台一列、六项各落一行（subgrid）
-        'grid min-w-0 gap-0 border-t first:border-t-0 md:row-span-7 md:grid-rows-subgrid md:border-t-0 md:border-l md:first:border-l-0',
-        // 失联 / 没数据：整块置灰，别让旧的「在跑」「N 项红」看起来像现在的状态
-        tone === 'stale' && 'bg-muted text-muted-foreground opacity-70',
+        // grid-cols-1（minmax(0,1fr)）：列头和行里不折的长句不把这一列撑宽（手机上远程列曾被撑出屏幕）
+        'grid min-w-0 grid-cols-1 gap-0 border-t first:border-t-0 md:row-span-7 md:grid-rows-subgrid md:border-t-0 md:border-l md:first:border-l-0',
+        // 失联 / 没数据：整块降对比度，别让旧的「在跑」「N 项红」看起来像现在的状态
+        tone === 'stale' && 'text-muted-foreground opacity-70',
       )}
     >
       <header
         data-env-header
         data-selected={selected}
-        className={cn('border-b-2 px-4 py-3', selected ? 'border-brand bg-selected' : 'border-transparent')}
+        // 选中（正在看的那台）：列头选中底色；不再画 2px 的黑下划线
+        className={cn('px-4 py-3', selected && 'bg-selected')}
       >
-        <h3 className={cn('flex min-w-0 items-center gap-2 text-heading', selected && 'font-semibold')}>
+        <h3 className="flex min-w-0 items-center gap-2 whitespace-nowrap text-heading">
           <ServerCog className="size-4 shrink-0 text-muted-foreground" aria-hidden />
           <span className="min-w-0 truncate">{name}</span>
           <Tag>{badge}</Tag>
         </h3>
-        <p
-          data-env-age
-          className={cn('num mt-1 text-meta', tone === 'stale' ? 'text-ink-stall' : 'text-muted-foreground')}
-        >
-          {age}
+        <p className="mt-1 flex min-w-0 gap-1.5 text-meta whitespace-nowrap">
+          <span
+            data-env-age
+            className={cn('num shrink-0', tone === 'stale' ? 'text-ink-stall' : 'text-muted-foreground')}
+          >
+            {age}
+          </span>
+          {note ? (
+            <span className="min-w-0 truncate text-muted-foreground" title={note}>
+              · {note}
+            </span>
+          ) : null}
         </p>
-        {note ? <p className="mt-0.5 text-meta text-muted-foreground">{note}</p> : null}
       </header>
       {children}
     </section>
@@ -294,7 +315,7 @@ function MissingSnapshot({ nodeId }: { nodeId: string }) {
 const FRANCE_STALE_AFTER_MS = 5 * TIME.MIN;
 
 /**
- * 远程环境超过这么久没报，就不再占对照列，收成对照区下面一行（#1888，取代手机上才折的 #1837）。
+ * 远程环境超过这么久没报，就不再占对照列，收成六项下面的一行（#1888，取代手机上才折的 #1837）。
  * 24 小时：一天没报的环境，旧的「在跑」「N 项红」不再有对比价值；正在看的那台（选中）不收。
  */
 const STALE_NODE_FOLD_MS = 24 * TIME.HOUR;
@@ -305,8 +326,8 @@ const isLongGone = (n: NodeListItem, now: number): boolean =>
   now - Date.parse(n.receivedAt) > STALE_NODE_FOLD_MS;
 
 /**
- * 对照区下面收起的一行：每台超过阈值没报的远程环境一行说明，点开才画最后一次的快照（照对照列的画法，标明是旧数据）。
- * 不报对不跑引擎的环境是常态，所以用 info 不用红。
+ * 六项下面收起的几行：每台超过阈值没报的远程环境一行（名字、多久没报），行尾「点开看快照」，
+ * 点开才画最后一次的快照（照对照列的画法，标明是旧数据）。不报对不跑引擎的环境是常态，所以点是灰的、不用红。
  */
 function StaleNodes({
   nodes,
@@ -327,43 +348,47 @@ function StaleNodes({
       return next;
     });
   return (
-    <div data-env-gone-list className="mt-3 space-y-2">
+    <div data-env-gone-list className="divide-y border-t">
       {nodes.map((n) => {
         const isOpen = open.has(n.id);
         const gap = formatDuration(now - Date.parse(n.receivedAt ?? ''));
+        const line = `${n.name}：${gap}没报（不跑引擎时正常）`;
         return (
           <div key={n.id} data-env-gone={n.id}>
-            <Notice
-              tone="info"
-              action={
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  aria-expanded={isOpen}
-                  onClick={() => toggle(n.id)}
-                  className="max-md:min-h-10"
-                >
-                  {isOpen ? '收起' : '点开看快照'}
-                  <ChevronDown
-                    className={cn('size-4 transition-transform', isOpen && 'rotate-180')}
-                    aria-hidden
-                  />
-                </Button>
-              }
-            >
-              {n.name}：{gap}没报（不跑引擎时正常），点开看最后一次的快照
-            </Notice>
+            <RowFrame>
+              <StatusDot tone="stop" />
+              <p className="min-w-0 flex-1 truncate text-body" title={line}>
+                <span className="font-medium">{n.name}</span>
+                <span className="text-muted-foreground">：{gap}没报（不跑引擎时正常）</span>
+                <span className="sr-only">，点开看最后一次的快照</span>
+              </p>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                aria-expanded={isOpen}
+                onClick={() => toggle(n.id)}
+                className="shrink-0 text-muted-foreground max-md:min-h-10"
+              >
+                {isOpen ? '收起' : '点开看快照'}
+                <ChevronDown
+                  className={cn('size-4 transition-transform duration-200', isOpen && 'rotate-180')}
+                  aria-hidden
+                />
+              </Button>
+            </RowFrame>
             {isOpen ? (
-              <div className="mt-2 overflow-hidden rounded-lg border">
-                <div
-                  data-env-columns={1}
-                  className="grid grid-cols-env-compare gap-0"
-                  style={{ '--env-cols': 1 } as CSSProperties}
-                >
-                  <RemoteColumn n={n} snap={snapshotOf(n)} now={now} selected={false} look="row" />
+              <RowDetail className="pb-3">
+                <div className="overflow-hidden rounded-lg border">
+                  <div
+                    data-env-columns={1}
+                    className="grid grid-cols-env-compare gap-0"
+                    style={{ '--env-cols': 1 } as CSSProperties}
+                  >
+                    <RemoteColumn n={n} snap={snapshotOf(n)} now={now} selected={false} />
+                  </div>
                 </div>
-              </div>
+              </RowDetail>
             ) : null}
           </div>
         );
@@ -401,7 +426,7 @@ function pageRead(blocks: readonly ReadBlock[]) {
   };
 }
 
-/** 总开关关着、引擎进程仍在跑时，贴在开关和「在跑」那一格旁边。 */
+/** 总开关关着、引擎进程仍在跑时，贴在开关和「在跑」那一项底下。 */
 function StandbyNote() {
   return (
     <p className="mt-2 text-meta leading-relaxed text-muted-foreground">
@@ -416,14 +441,12 @@ function RemoteColumn({
   snap,
   now,
   selected,
-  look,
   engineNote,
 }: {
   n: NodeListItem;
   snap: { error: unknown; data: NodeDetail | undefined; refetch: () => unknown } | undefined;
   now: number;
   selected: boolean;
-  look: 'row';
   engineNote?: ReactNode;
 }) {
   const f = freshnessNow(n, now);
@@ -454,7 +477,7 @@ function RemoteColumn({
           facts: snap.data.env.facts,
           now,
           kind: 'env',
-          look,
+          look: 'row',
           engineNote,
           muted: stale,
         })}
@@ -493,6 +516,84 @@ function RemoteColumn({
   );
 }
 
+/**
+ * 标题块的结论：本台现在最该看的那一件（健康红、引擎没连上、没查成、落后主线、定时任务失败，按轻重排），
+ * 一件都没有就是「引擎在跑，六项都正常」。其余几件进灰字行。
+ */
+function verdictOf(
+  facts: EnvFacts,
+  card: ReleaseCard | undefined,
+  jobsFailed: number,
+): { tone: Tone; badge: string; text: string; rest: string[] } {
+  const issues: { tone: Tone; text: string }[] = [];
+  const failing = facts.health.ok ? facts.health.value.failing : [];
+  if (failing.length > 0) issues.push({ tone: 'fail', text: `健康 ${failing.length} 项红` });
+  if (facts.engine.ok && facts.engine.value.state === 'down')
+    issues.push({ tone: 'fail', text: '引擎没连上' });
+  if (jobsFailed > 0) issues.push({ tone: 'fail', text: `定时任务失败 ${jobsFailed} 个` });
+  if (facts.engine.ok && facts.engine.value.state === 'off')
+    issues.push({ tone: 'stall', text: '引擎按配置没开' });
+  const unread = factsUnread(facts);
+  if (unread > 0) issues.push({ tone: 'stall', text: `${unread} 项没查成` });
+  const behind =
+    card?.gap.state === 'ahead'
+      ? card.gap.count
+      : facts.version.ok && facts.version.value.behind !== null
+        ? facts.version.value.behind
+        : 0;
+  if (behind > 0) issues.push({ tone: 'wait', text: `落后主线 ${behind} 个提交` });
+  const [first, ...rest] = issues;
+  if (!first) return { tone: 'done', badge: '正常', text: '引擎在跑，六项都正常', rest: [] };
+  const badge = first.tone === 'fail' ? '要处理' : first.tone === 'stall' ? '要留意' : '可以发版';
+  return { tone: first.tone, badge, text: first.text, rest: rest.map((x) => x.text) };
+}
+
+/**
+ * 本台的标题块（照路由页的用途标题块）：名字一行（subtitle）；结论短话带状态一行；读于何时、名字的问题、其余几件一行灰字。
+ * 三行都不折：放不下截断，整句在悬停里。名字不是标题元素（页标题是「法国」，各列的列头才是）。
+ */
+function FranceHero({
+  env,
+  card,
+  jobsFailed,
+  now,
+}: {
+  env: EnvResponse;
+  card: ReleaseCard | undefined;
+  jobsFailed: number;
+  now: number;
+}) {
+  const v = verdictOf(env.facts, card, jobsFailed);
+  const notes = [`${formatAgo(env.asOf, now)}读`, env.name.problem, ...v.rest]
+    .filter((x): x is string => Boolean(x))
+    .join(' · ');
+  return (
+    <header data-france-hero className="flex min-w-0 flex-col pt-1">
+      <div className="mb-3 flex min-w-0 items-baseline gap-2 whitespace-nowrap">
+        <p className="truncate text-subtitle" data-machine-name>
+          {env.name.name}
+        </p>
+        <span className="shrink-0 text-meta text-muted-foreground">本台</span>
+      </div>
+      <p
+        data-hero-line
+        title={v.text}
+        className="flex min-w-0 items-center gap-2.5 whitespace-nowrap text-heading font-normal"
+      >
+        <span data-hero-text className="min-w-0 truncate">
+          {v.text}
+        </span>
+        <span className="shrink-0">
+          <StatusBadge tone={v.tone} label={v.badge} />
+        </span>
+      </p>
+      <p data-hero-notes title={notes} className="mt-1.5 truncate text-meta text-muted-foreground">
+        {notes}
+      </p>
+    </header>
+  );
+}
+
 export default function France() {
   const { view: masterView } = useMasterView();
   const env = useEnv();
@@ -511,19 +612,18 @@ export default function France() {
   // 收到过快照的远程环境各读一份；从没收到过的（never）没有快照可读，那一列只写「从没收到过」
   const received = remote.filter((n) => n.receivedAt !== undefined);
   const snapshots = useNodeSnapshots(received.map((n) => n.id));
-  // 列表还没回来时先别画：不然会先按「一台」画出卡片，有远程时再跳成对照列。
+  // 列表还没回来时先别画：不然会先按「一台」画出六行，有远程时再跳成对照列。
   const nodesPending = nodes.isPending && nodes.data === undefined;
-  // 超过 24 小时没报的（没选中的）收成对照区下面一行，不进对照列（#1888）
+  // 超过 24 小时没报的（没选中的）收成六项下面的一行，不进对照列（#1888）
   const folded = remote.filter((n) => nodeId !== n.id && isLongGone(n, now));
   const shown = remote.filter((n) => !folded.includes(n));
-  // 只剩本台（列表读成了、一台远程都没有，或远程都收成了一行）不画对照列。读列表失败也不画空的对照列，本台改用卡片，上面写明没读成。
+  // 只剩本台（列表读成了、一台远程都没有，或远程都收成了一行）不画对照列。读列表失败也不画空的对照列，本台照单台画，上面写明没读成。
   const comparing = shown.length > 0;
   const snapshotOf = (n: NodeListItem) => {
     const i = received.findIndex((r) => r.id === n.id);
     return i < 0 ? undefined : snapshots[i];
   };
   const goneRows = folded.length > 0 ? <StaleNodes nodes={folded} snapshotOf={snapshotOf} now={now} /> : null;
-  const look = 'row' as const;
   // 「在用版本」那一行的发布入口（#1255）：只给本台那一列；发版卡读不到写没查成和原因，不画一个点不了的假按钮。
   const selectedEngine =
     nodeId === null
@@ -537,186 +637,177 @@ export default function France() {
     selectedEngine.value.state === 'on';
 
   const versionExtra = card.error ? (
-    <p className="mt-2 border-t pt-2 text-meta text-ink-stall" data-release-entry-unread>
+    <p className="text-meta text-ink-stall" data-release-entry-unread>
       发布入口没查成：{errorText(card.error)}
     </p>
   ) : !card.data ? (
-    <p className="mt-2 border-t pt-2 text-meta text-muted-foreground">正在读发布入口…</p>
+    <p className="text-meta text-muted-foreground">正在读发布入口…</p>
   ) : (
     <ReleaseEntry card={card.data} now={now} />
   );
 
   const read = pageRead([env, nodes, jobs, release, card, ...snapshots]);
+  const ready = !(nodesPending || env.isLoading || !env.data || !facts);
+
+  const localCells = (kind: 'env' | 'france', look: 'row' | 'tile') =>
+    facts
+      ? factCells({
+          facts,
+          now,
+          kind,
+          look,
+          jobCount: jobList?.length,
+          versionExtra,
+          engineNote: nodeId === null && standby ? <StandbyNote /> : undefined,
+        })
+      : [];
+
+  let factsBlock: ReactNode = null;
+  if (!ready) {
+    factsBlock = env.error ? null : <LoadingRows rows={2} />;
+  } else if (comparing && env.data) {
+    factsBlock = (
+      <Section flush title="本台和远程环境" description="每个环境一列，六项各占一行，横着对比。">
+        <div
+          data-env-columns={1 + shown.length}
+          className="grid grid-cols-env-compare gap-0"
+          style={{ '--env-cols': 1 + shown.length } as CSSProperties}
+        >
+          <EnvColumn
+            id="local"
+            name={env.data.name.name}
+            badge="本台"
+            age={`${formatAgo(env.data.asOf, now)}读`}
+            tone="ok"
+            selected={nodeId === null}
+            note={[env.data.name.problem, facts ? factsSummary(facts) : null].filter(Boolean).join(' · ')}
+          >
+            {localCells('env', 'row')}
+          </EnvColumn>
+          {shown.map((n) => (
+            <RemoteColumn
+              key={n.id}
+              n={n}
+              snap={snapshotOf(n)}
+              now={now}
+              selected={nodeId === n.id}
+              engineNote={nodeId === n.id && standby ? <StandbyNote /> : undefined}
+            />
+          ))}
+        </div>
+        {goneRows}
+      </Section>
+    );
+  } else {
+    // 只有本台：一个区块里六行，宽屏两栏各三行（引擎、会话、池 | 健康、版本、拉单）
+    const cells = localCells('france', 'tile');
+    factsBlock = (
+      <Section flush>
+        <div className="grid lg:grid-cols-2">
+          <div className="min-w-0 divide-y">{cells.slice(0, 3)}</div>
+          <div className="min-w-0 divide-y max-lg:border-t lg:border-l">{cells.slice(3)}</div>
+        </div>
+        {goneRows}
+      </Section>
+    );
+  }
 
   return (
     <Page
       title="法国"
-      description="本台的六项事实、引擎总开关、定时任务、发版。"
+      description="本台的六项事实、引擎总开关、定时任务和发版。"
       detail="读不到的写「没查成」和原因，不拿 0 顶；每 30 秒自己刷新。多一台机器时按台并排比。"
-      actions={
-        <RefreshBar
-          onRefresh={() => void read.refetch()}
-          isFetching={read.isFetching}
-          dataUpdatedAt={read.dataUpdatedAt}
-          staleAfterMs={FRANCE_STALE_AFTER_MS}
-        />
-      }
+      refresh={{
+        onRefresh: () => void read.refetch(),
+        isFetching: read.isFetching,
+        dataUpdatedAt: read.dataUpdatedAt,
+        staleAfterMs: FRANCE_STALE_AFTER_MS,
+      }}
     >
-      <EngineMasterControl standbyNote={standby ? <StandbyNote /> : null} />
-      {nodes.error ? (
-        <div className="mb-3">
-          <LoadError what="远程环境列表" error={nodes.error} onRetry={() => void nodes.refetch()} />
-        </div>
-      ) : null}
-      {env.error ? (
-        <div className="mb-3">
-          <LoadError what="本台" error={env.error} onRetry={() => void env.refetch()} />
-        </div>
-      ) : null}
-      {nodesPending || env.isLoading || !env.data || !facts ? (
-        env.error ? null : (
-          <LoadingRows rows={2} />
-        )
-      ) : comparing ? (
-        <Section flush title="本台和远程环境" description="每个环境一列，六项各占一行，横着对比。">
-          <div
-            data-env-columns={1 + shown.length}
-            className="grid grid-cols-env-compare gap-0"
-            style={{ '--env-cols': 1 + shown.length } as CSSProperties}
-          >
-            <EnvColumn
-              id="local"
-              name={env.data.name.name}
-              badge="本台"
-              age={`${formatAgo(env.data.asOf, now)}读`}
-              tone="ok"
-              selected={nodeId === null}
-              note={
-                env.data.name.problem ? (
-                  <>
-                    {env.data.name.problem}
-                    {factsSummary(facts) ? <> · {factsSummary(facts)}</> : null}
-                  </>
-                ) : (
-                  factsSummary(facts)
-                )
-              }
-            >
-              {factCells({
-                facts,
-                now,
-                kind: 'env',
-                look,
-                jobCount: jobList?.length,
-                versionExtra,
-                engineNote: nodeId === null && standby ? <StandbyNote /> : undefined,
-              })}
-            </EnvColumn>
-            {shown.map((n) => {
-              return (
-                <RemoteColumn
-                  key={n.id}
-                  n={n}
-                  snap={snapshotOf(n)}
-                  now={now}
-                  selected={nodeId === n.id}
-                  look={look}
-                  engineNote={nodeId === n.id && standby ? <StandbyNote /> : undefined}
-                />
-              );
-            })}
+      <SectionGrid cols={1}>
+        {ready && env.data ? (
+          <FranceHero env={env.data} card={card.data} jobsFailed={failed} now={now} />
+        ) : null}
+        {nodes.error || env.error ? (
+          <div className="space-y-3">
+            {nodes.error ? (
+              <LoadError what="远程环境列表" error={nodes.error} onRetry={() => void nodes.refetch()} />
+            ) : null}
+            {env.error ? (
+              <LoadError what="本台" error={env.error} onRetry={() => void env.refetch()} />
+            ) : null}
           </div>
-          {goneRows ? <div className="border-t p-3">{goneRows}</div> : null}
-        </Section>
-      ) : (
-        <>
-          <p className="mb-3 text-body text-muted-foreground" data-machine-name>
-            本台「<span>{env.data.name.name}</span>」· {formatAgo(env.data.asOf, now)}读
-            {env.data.name.problem ? <> · {env.data.name.problem}</> : null}
-            {factsSummary(facts) ? <> · {factsSummary(facts)}</> : null}
-          </p>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
-            {factCells({
-              facts,
-              now,
-              kind: 'france',
-              look: 'tile',
-              jobCount: jobList?.length,
-              versionExtra,
-              engineNote: nodeId === null && standby ? <StandbyNote /> : undefined,
-            })}
-          </div>
-          {goneRows}
-        </>
-      )}
+        ) : null}
+        <div className="space-y-4">
+          <EngineMasterControl standbyNote={standby ? <StandbyNote /> : null} />
+          {factsBlock}
+        </div>
 
-      <div className="mt-4 grid items-start gap-4 xl:grid-cols-3">
-        <Section
-          className="min-w-0 xl:col-span-2"
-          title={
-            <span className="flex items-center gap-2">
-              定时任务
-              {jobList ? (
-                <span className="num rounded-sm border px-2 py-0.5 text-meta font-normal text-muted-foreground">
-                  共 {jobList.length} 项
-                  {failed ? <span className="text-ink-fail"> · 失败 {failed}</span> : null}
-                  {warn ? <span className="text-ink-stall"> · 没查全或过期 {warn}</span> : null}
-                </span>
-              ) : null}
-            </span>
-          }
-          description="出问题的排在前面：失败红，没查全 / 过期黄。"
-          actions={
-            <Link
-              to="/schedules"
-              className="inline-flex items-center gap-0.5 text-meta text-muted-foreground underline underline-offset-2 max-md:min-h-10"
-            >
-              全部定时任务
-              <ArrowRight className="size-3" />
-            </Link>
-          }
-          flush
-        >
-          {jobs.error ? (
-            <div className="p-4">
-              <LoadError what="定时任务" error={jobs.error} onRetry={() => void jobs.refetch()} />
-            </div>
-          ) : jobs.isLoading || !jobs.data ? (
-            <div className="p-4">
-              <LoadingRows rows={4} />
-            </div>
-          ) : (
-            <JobsTable jobs={jobs.data.jobs} now={now} />
-          )}
-        </Section>
-
-        <div className="min-w-0 space-y-4">
+        <div className="grid items-start gap-4 xl:grid-cols-3">
           <Section
-            title="发版"
-            description="主线最新、法国在用、差几个、最近做完的一个任务（只读）；每一行读不到就写没查成和原因。要发布，点上面「在用版本」那一行的「发布到法国」。"
+            className="min-w-0 xl:col-span-2"
+            title={
+              <span className="flex min-w-0 items-baseline gap-2 whitespace-nowrap">
+                定时任务
+                {jobList ? (
+                  <span className="num truncate text-meta font-normal text-muted-foreground">
+                    共 {jobList.length} 项
+                    {failed ? <span className="text-ink-fail"> · 失败 {failed}</span> : null}
+                    {warn ? <span className="text-ink-stall"> · 没查全或过期 {warn}</span> : null}
+                  </span>
+                ) : null}
+              </span>
+            }
+            description="出问题的排在前面：失败红，没查全 / 过期黄。"
+            actions={
+              <Link
+                to="/schedules"
+                className="inline-flex items-center gap-0.5 text-meta text-muted-foreground hover:text-foreground max-md:min-h-10"
+              >
+                全部定时任务
+                <ArrowRight className="size-3" aria-hidden />
+              </Link>
+            }
+            flush
           >
-            {card.error ? (
-              <LoadError what="发版卡" error={card.error} onRetry={() => void card.refetch()} />
-            ) : card.isLoading || !card.data ? (
-              <LoadingRows rows={4} />
+            {jobs.error ? (
+              <div className="p-4">
+                <LoadError what="定时任务" error={jobs.error} onRetry={() => void jobs.refetch()} />
+              </div>
+            ) : jobs.isLoading || !jobs.data ? (
+              <div className="p-4">
+                <LoadingRows rows={4} />
+              </div>
             ) : (
-              <ReleaseCardBody card={card.data} now={now} />
+              <JobsTable jobs={jobs.data.jobs} now={now} />
             )}
           </Section>
-          <Section
-            title="发版一键"
-            description="只到预检（只读）；真发版点上面「在用版本」那一行的「发布到法国」，或走 pnpm release:onekey start。"
-          >
-            {release.error ? (
-              <LoadError what="发版一键" error={release.error} onRetry={() => void release.refetch()} />
-            ) : release.isLoading || !release.data ? (
-              <LoadingRows rows={2} />
-            ) : (
-              <ReleaseBody release={release.data} preflight={preflight} />
-            )}
-          </Section>
+
+          <div className="min-w-0 space-y-4">
+            <Section title="发版" description="主线和法国差几个、最近做完的一个任务（只读）。">
+              {card.error ? (
+                <LoadError what="发版卡" error={card.error} onRetry={() => void card.refetch()} />
+              ) : card.isLoading || !card.data ? (
+                <LoadingRows rows={4} />
+              ) : (
+                <ReleaseCardBody card={card.data} now={now} />
+              )}
+            </Section>
+            <Section
+              title="发版一键"
+              description="只到预检（只读）；真发版点「在用版本」那一行的「发布到法国」。"
+            >
+              {release.error ? (
+                <LoadError what="发版一键" error={release.error} onRetry={() => void release.refetch()} />
+              ) : release.isLoading || !release.data ? (
+                <LoadingRows rows={2} />
+              ) : (
+                <ReleaseBody release={release.data} preflight={preflight} />
+              )}
+            </Section>
+          </div>
         </div>
-      </div>
+      </SectionGrid>
     </Page>
   );
 }

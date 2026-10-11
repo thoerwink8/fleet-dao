@@ -120,55 +120,59 @@ export function EngineMasterControl({ standbyNote }: { standbyNote?: ReactNode }
       </>
     );
 
+  // 一行（#1914 样板铺开）：开关名和状态一行，这句话和谁改的灰字在下面，按钮在右；不再是带标题栏的大卡片
   return (
     <Section
       id="engine-master"
       data-testid="engine-master"
       data-engine-master={master === null ? view.kind : master.on ? 'on' : 'off'}
-      className="mb-4"
       {...(master?.on === false ? { tone: 'stall' as const } : {})}
-      title={
-        <span className="flex flex-wrap items-center gap-2">
-          <Power className="size-4 text-muted-foreground" aria-hidden />
-          引擎总开关
-          <span data-testid="engine-master-state">
-            {master === null ? (
-              <Tag>{view.kind === 'loading' ? '读取中' : '没查成'}</Tag>
-            ) : (
-              <StatusBadge
-                tone={master.on ? 'done' : 'stall'}
-                label={master.on ? '开着' : '关着'}
-                variant="outline"
-              />
-            )}
-          </span>
-          {/* 长说明收进 ⓘ（#1897）：手机首屏不再被它占掉近半。 */}
-          <DescriptionHint label="总开关是什么">
-            <p data-testid="engine-master-help">
-              总开关关＝全停：不拉单、不派活、不起干活的会话（探针和健康检查照跑，渠道通不通照样看得到）；总开关开＝只有「让
-              AI 接活」开着的项目才派（在设置 →
-              仓库里逐个项目开）。往法国发版会先暂停它，发完恢复发版前的样子（发前开着的开回，发前关着的保持关）。
-            </p>
-          </DescriptionHint>
-        </span>
-      }
-      actions={button}
     >
-      <p className="text-body text-muted-foreground" data-testid="engine-master-note">
-        {note}
-      </p>
-      {who ? (
-        <p className="num mt-1 text-meta text-muted-foreground" data-testid="engine-master-who">
-          {who}
-        </p>
-      ) : null}
-      {master !== null && remote ? (
-        <p className="mt-2 text-meta text-muted-foreground" data-testid="engine-master-remote-note">
-          这是远程环境的快照，只读。要开关请去那台上用 <span className="num">fleet-api engine on</span> /{' '}
-          <span className="num">off</span>。
-        </p>
-      ) : null}
-      {standbyNote}
+      <div className="flex min-w-0 items-start gap-3">
+        <Power className="size-4 shrink-0 text-muted-foreground max-md:mt-3 md:mt-2" aria-hidden />
+        <div className="min-w-0 flex-1">
+          <h2 className="flex min-w-0 items-center gap-2 whitespace-nowrap text-body font-medium">
+            引擎总开关
+            <span data-testid="engine-master-state" className="shrink-0">
+              {master === null ? (
+                <Tag>{view.kind === 'loading' ? '读取中' : '没查成'}</Tag>
+              ) : (
+                <StatusBadge tone={master.on ? 'done' : 'stall'} label={master.on ? '开着' : '关着'} />
+              )}
+            </span>
+            {/* 长说明收进 ⓘ（#1897）：手机首屏不再被它占掉近半。 */}
+            <DescriptionHint label="总开关是什么">
+              <p data-testid="engine-master-help">
+                总开关关＝全停：不拉单、不派活、不起干活的会话（探针和健康检查照跑，渠道通不通照样看得到）；总开关开＝只有「让
+                AI 接活」开着的项目才派（在设置 →
+                仓库里逐个项目开）。往法国发版会先暂停它，发完恢复发版前的样子（发前开着的开回，发前关着的保持关）。
+              </p>
+            </DescriptionHint>
+          </h2>
+          <p
+            // 桌面一行截断、整句在悬停里；手机没有悬停，照常折行
+            className="text-meta text-muted-foreground md:truncate"
+            data-testid="engine-master-note"
+            title={note}
+          >
+            {note}
+          </p>
+          {who ? (
+            <p className="num truncate text-meta text-muted-foreground" data-testid="engine-master-who">
+              {who}
+            </p>
+          ) : null}
+          {/* 两句附注接在灰字下面、和名字对齐 */}
+          {master !== null && remote ? (
+            <p className="mt-2 text-meta text-muted-foreground" data-testid="engine-master-remote-note">
+              这是远程环境的快照，只读。要开关请去那台上用 <span className="num">fleet-api engine on</span> /{' '}
+              <span className="num">off</span>。
+            </p>
+          ) : null}
+          {standbyNote}
+        </div>
+        {button}
+      </div>
     </Section>
   );
 }

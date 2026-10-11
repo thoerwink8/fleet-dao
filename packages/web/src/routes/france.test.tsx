@@ -502,6 +502,53 @@ describe('失联与在用版本小标题', () => {
   });
 });
 
+describe('本台标题块和一项一行（#1914 样板铺开）', () => {
+  const hero = () => document.querySelector('[data-france-hero]') as HTMLElement;
+
+  test('标题块三行：名字、结论带状态、灰字（读于何时）；落后主线时结论写落后几个、等待色', async () => {
+    renderFrance(envData(), jobsData());
+    await waitFor(() => expect(hero()).toBeTruthy());
+    expect(hero().querySelector('[data-machine-name]')?.textContent).toBe('法国');
+    // 发版卡的「差几个」读成了用它，没读成用本台版本那一项的 behind：都是「落后主线 N 个提交」
+    await waitFor(() =>
+      expect(hero().querySelector('[data-hero-text]')?.textContent).toMatch(/^落后主线 \d+ 个提交$/),
+    );
+    expect(hero().querySelector('[data-hero-line] [data-tone]')?.getAttribute('data-tone')).toBe('wait');
+    expect(hero().querySelector('[data-hero-notes]')?.textContent).toContain('读');
+    // 名字不是标题元素：页标题「法国」只有一个
+    expect(screen.getAllByRole('heading', { name: '法国' })).toHaveLength(1);
+  });
+
+  test('【故意造出的失败】健康两项红：结论先写健康几项红、红色「要处理」，其余几件进灰字行', async () => {
+    renderFrance(
+      envData({
+        health: { ok: true, value: { ok: false, total: 9, failing: ['routes', 'quota'], notWired: [] } },
+        sessions: { ok: false, reason: '库连不上（测试故意造的）' },
+      }),
+      jobsData(),
+    );
+    await waitFor(() => expect(hero()?.querySelector('[data-hero-text]')?.textContent).toBe('健康 2 项红'));
+    const badge = hero().querySelector('[data-hero-line] [data-tone]') as HTMLElement;
+    expect(badge.getAttribute('data-tone')).toBe('fail');
+    expect(badge.textContent).toBe('要处理');
+    expect(hero().querySelector('[data-hero-notes]')?.textContent).toContain('1 项没查成');
+  });
+
+  test('一项一行：小标题在名字的悬停和读屏里；状态是点加字；最近拉单的完整时刻在值的悬停里', async () => {
+    renderFrance(envData(), jobsData());
+    await screen.findByText('在用版本');
+    const label = screen.getByText('在用版本');
+    expect(label.getAttribute('title')).toBe('落后主线几个提交');
+    const engine = tile('引擎').getByText('在跑');
+    expect(engine.getAttribute('data-variant')).toBe('dot');
+    const value = screen
+      .getByText('最近拉单')
+      .closest('[data-france-fact]')
+      ?.querySelector('[data-fact-value]');
+    expect(value?.getAttribute('title')).toMatch(/^最近一次跑成：/);
+  });
+});
+
 describe('总开关和引擎进程是两件事', () => {
   test('总开关关、引擎在跑：开关和「在跑」那一格旁边都写明不派活、进程还在；健康条的名字含「引擎进程」', async () => {
     const inner = apiWith(
