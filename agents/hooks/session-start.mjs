@@ -40,7 +40,7 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { lineageOf, reconcile, sentByFounder } from './founder-inbox.mjs';
+import { lineageOf, reconcile, relayedUpTo, sentByFounder } from './founder-inbox.mjs';
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, gitWhy as why } from './git-run.mjs';
 import { logDir } from './prompt-log.mjs';
@@ -605,7 +605,13 @@ export function recentPrompts({
   // 发了的只读了本血缘那个目录，收到的也只留本血缘的：换了原生会话号之前丢的也补回本会话；别的会话丢的不进来（#1733）
   if (!sent.absent) {
     for (const p of sent.problems) lines.push(`创始人在 Mirasim 里发的话没读全：${p}；有没有丢的核不了。`);
-    const { lost } = reconcile(sent.entries, received);
+    // 钩子（main-thread.mjs）转进来过的引导不进 prompt-log：读本血缘的 steer-shown 记录，转过的算收到（#1891）
+    const relay = relayedUpTo({ home, sessionIds: line.sessionIds, env });
+    for (const p of relay.problems)
+      lines.push(
+        `钩子转过的引导没核成：${p}；钩子转进来过的引导这次照没收到列，前面已经回过的说一句「这条前面已回」。`,
+      );
+    const { lost } = reconcile(sent.entries, received, { relayed: { line: line.dir, at: relay.at } });
     if (lost.length > 0) {
       const shown = packNewestFirst(lost);
       lines.push(

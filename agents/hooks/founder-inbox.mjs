@@ -25,8 +25,12 @@
 //   Mirasim 会话目录用过的全部原生会话号算一家。开会话钩子只给本血缘列它的话、对它的账；别的 Mirasim 会话的话一概不列
 //   （原来「最近 60 分钟落盘的话」把所有会话的话列给每个会话，另一个项目的会话把 fleet-dao 的活当成自己的办了）。
 //   找不到血缘（不是 Mirasim 起的、这台没装）返回「无血缘」，不猜、不拿别的会话的话顶。
+// - 钩子转进来过的引导也算收到（#1891）：main-thread.mjs 从 Mirasim 取原文、拒工具调用转给模型的引导不经 UserPromptSubmit，
+//   不进 prompt-log；它只记在 ~/.fleet-dao/steer-shown/<原生会话号>.json（{ at: 最后转过的那条的 Mirasim 时刻 }）。
+//   本血缘任一号的 at 以前（含）的本 Mirasim 会话的引导算收到（relayedUpTo）。那份读不了、认不出照实说没核成，不当成收到。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { shownFile, steerShownDir } from './main-thread.mjs';
 import { isMachineOpening, isMachineSession } from './unattended.mjs';
 
 /** 最近多久以内的话算数（和 session-start.mjs 列「收到的话」同一个窗口） */
@@ -264,13 +268,54 @@ function sameSession(s, r) {
 }
 
 /**
+ * 钩子（main-thread.mjs）把本血缘的引导转进来到了哪一刻：读本血缘每个原生会话号的 steer-shown 记录，取最晚的 at（毫秒）。
+ * 一份都没有（没转过）给 null。某一份读不了、认不出：记进 problems、不拿它算（宁可照没收到列，也不把丢的藏起来）。
+ * @param {{ home: string, sessionIds: string[], env?: Record<string, string | undefined> }} opts
+ * @returns {{ at: number | null, problems: string[] }}
+ */
+export function relayedUpTo({ home, sessionIds, env = process.env }) {
+  const dir = steerShownDir(env, home);
+  /** @type {number | null} */
+  let at = null;
+  /** @type {string[]} */
+  const problems = [];
+  for (const id of sessionIds) {
+    const file = shownFile(dir, id);
+    let text;
+    try {
+      text = readOrNull(file);
+    } catch (err) {
+      problems.push(`${file} 读不了（${errCode(err)}）`);
+      continue;
+    }
+    if (text === null) continue;
+    /** @type {unknown} */
+    let value;
+    try {
+      value = JSON.parse(text)?.at;
+    } catch {
+      value = undefined;
+    }
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      problems.push(`${file} 认不出（不是 { at: 毫秒 }）`);
+      continue;
+    }
+    if (at === null || value > at) at = value;
+  }
+  return { at, problems };
+}
+
+/**
  * 对账：发了的里面哪些没收到。received 是 prompt-log 里的（{ at: 毫秒, text, sessionId }），一条收到的只对掉一条发的。
- * 返回 { lost, matched }：lost 是没对上的发了的话；matched 是对上的，带上收到它的那个会话号（看是不是本会话）。
+ * relayed 给了：血缘 line 里、at 以前（含）的引导是钩子转进来过的（relayedUpTo），没在 prompt-log 里对上也算收到。
+ * 返回 { lost, matched, relayed }：lost 是没对上的发了的话；matched 是对上的，带上收到它的那个会话号（看是不是本会话）；
+ * relayed 是靠钩子转进来算收到的引导。
  * @param {Sent[]} sent
  * @param {Received[]} received
- * @returns {{ lost: Sent[], matched: Array<Sent & { receivedBy: string | null }> }}
+ * @param {{ relayed?: { line: string, at: number | null } | null }} [opts]
+ * @returns {{ lost: Sent[], matched: Array<Sent & { receivedBy: string | null }>, relayed: Sent[] }}
  */
-export function reconcile(sent, received) {
+export function reconcile(sent, received, { relayed = null } = {}) {
   /** @type {Array<Received & { key: string, used: boolean }>} */
   const recv = received.map((r) => ({ ...r, key: promptKey(r.text), used: false }));
   /** @type {Array<Sent & { key: string, hit: (Received & { key: string, used: boolean }) | null }>} */
@@ -298,20 +343,22 @@ export function reconcile(sent, received) {
     });
   /** @type {Array<Sent & { receivedBy: string | null }>} */
   const matched = [];
+  /** 钩子转进来过：本血缘的引导、不晚于转过的那一刻 */
+  const relayedIn = (/** @type {(typeof sentRows)[number]} */ s) =>
+    relayed !== null &&
+    relayed.at !== null &&
+    s.kind === 'steer' &&
+    s.line === relayed.line &&
+    s.at <= relayed.at;
   /** @type {Sent[]} */
   const lost = [];
+  /** @type {Sent[]} */
+  const viaHook = [];
   for (const s of sentRows) {
-    if (s.hit)
-      matched.push({
-        at: s.at,
-        text: s.text,
-        sessionId: s.sessionId,
-        kind: s.kind,
-        line: s.line,
-        receivedBy: s.hit.sessionId ?? null,
-      });
-    else if (!coveredLater(s))
-      lost.push({ at: s.at, text: s.text, sessionId: s.sessionId, kind: s.kind, line: s.line });
+    const row = { at: s.at, text: s.text, sessionId: s.sessionId, kind: s.kind, line: s.line };
+    if (s.hit) matched.push({ ...row, receivedBy: s.hit.sessionId ?? null });
+    else if (relayedIn(s)) viaHook.push(row);
+    else if (!coveredLater(s)) lost.push(row);
   }
-  return { lost, matched };
+  return { lost, matched, relayed: viaHook };
 }
