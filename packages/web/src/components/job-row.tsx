@@ -79,8 +79,24 @@ export function JobListRow({ j, now }: { j: JobView; now: number }) {
       summary={
         <>
           <StatusDot tone={dotTone(j)} />
-          <span className="min-w-0 flex-1 truncate text-sm font-medium" title={j.id}>
-            {j.name}
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-1.5">
+              <span className="min-w-0 truncate text-sm font-medium" title={j.id}>
+                {j.name}
+              </span>
+              {j.status === 'overdue' ? (
+                <span
+                  className="shrink-0 rounded bg-st-stall/14 px-1 text-micro leading-4 text-ink-stall"
+                  title={jobStatusLabel.overdue}
+                >
+                  过期
+                </span>
+              ) : null}
+            </span>
+            {/* 宽屏有单独的「上次运行」列；窄屏那一列藏起来，结果挪到名字下面一行，不让失败、没查全藏在展开里。 */}
+            <span className={cn('block truncate text-caption md:hidden', outcomeClass(j))}>
+              {outcomeText(j)}
+            </span>
           </span>
           <span
             className={cn('hidden w-64 shrink-0 truncate text-xs md:block', outcomeClass(j))}

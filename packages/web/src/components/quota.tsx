@@ -343,6 +343,12 @@ export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
         ) : (
           <span className="font-medium text-ink-stall">用量没读到</span>
         )}
+        {/* 美元、token 窗：金额之外把已用百分比也写出来（重排前就有），和进度条对得上。 */}
+        {pair && util !== undefined && w.unit !== 'percent' ? (
+          <span className={cn('num', w.stale ? 'text-muted-foreground' : full && 'text-ink-fail')}>
+            {formatUtil(util)}
+          </span>
+        ) : null}
         <span
           className={cn(
             'text-caption whitespace-nowrap text-muted-foreground',
