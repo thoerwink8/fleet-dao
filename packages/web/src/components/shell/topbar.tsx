@@ -17,6 +17,7 @@ import { Link, useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import {
   errorText,
+  logoutAndClear,
   useApi,
   useLiveState,
   useMe,
@@ -407,8 +408,7 @@ function UserMenu() {
   const user = me?.user;
   const logout = async () => {
     try {
-      await api.logout();
-      qc.clear();
+      await logoutAndClear(api, qc);
       navigate('/login', { replace: true });
     } catch (e) {
       toast.error('退出没成功', { description: errorText(e) });

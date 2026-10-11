@@ -116,6 +116,8 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
   // 回来是 401，浏览器控制台记一条「Failed to load resource」（e2e 10-credentials 偶发红：推送攒的那次全量重拉
   // 正好落在 PUT 路上，run 37257542728）。上面的 401 放行只兜 PUT 发出之前就在路上的那些。
   let rotation: Promise<unknown> | undefined;
+  // 推送订阅的停手：退出时先全停，避免断线重连探 /api/me 拿到 401 再跳一次登录页（e2e 09-logout 偶发红）。
+  const liveStops = new Set<() => void>();
 
   async function send<S extends z.ZodType>(
     method: string,
@@ -242,6 +244,10 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       }
     },
     async logout() {
+      // 先抬 epoch、停推送：外壳里还在飞的读取、推送重连探 /api/me 回来的 401 不当成「再跳一次登录页」
+      // （否则和页面自己的 navigate / e2e 的 goto 撞车，见 #1830）。
+      sessionEpoch += 1;
+      for (const stop of [...liveStops]) stop();
       await send('POST', authUrl(AuthRoutes.logout.path), null);
       csrf = undefined;
     },
@@ -526,16 +532,21 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       };
       const stopWatching = page?.onChange(onVisibility);
 
-      connect();
-      onVisibility();
-      return () => {
+      const stop = () => {
+        if (stopped) return;
         stopped = true;
+        liveStops.delete(stop);
         stopWatching?.();
         clearTimeout(hideTimer);
         clearTimeout(timer);
         es?.close();
         es = undefined;
       };
+      liveStops.add(stop);
+
+      connect();
+      onVisibility();
+      return stop;
     },
   };
   return api;
