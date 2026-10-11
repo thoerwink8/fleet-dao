@@ -24,6 +24,22 @@ import { targetOfItem } from './board-ui';
 import { countTones, groupSegments, nodeId, type SegmentGroup, segmentKeyOf, worstTone } from './model';
 import { avgText, segmentHintOf, segmentName } from './nodes';
 
+/**
+ * 手机上一整段一张卡太占地方：没有单在途（total 为 0）的段折成一行字，排在有单的段后面。
+ * 有单但被过滤藏光的段不算空，照旧一张卡（颜色和件数还在）。
+ */
+export function foldIdleGroups(groups: readonly SegmentGroup[]): { live: SegmentGroup[]; idle: SegmentGroup[] } {
+  return {
+    live: groups.filter((g) => g.total > 0),
+    idle: groups.filter((g) => g.total === 0),
+  };
+}
+
+/** 折起来的空段那一行：「对题、验收：0 张在途」。 */
+export function idleLine(idle: readonly SegmentGroup[]): string {
+  return `${idle.map((g) => segmentName(g.key)).join('、')}：0 张在途`;
+}
+
 export function BoardTree({
   running,
   flow,
@@ -35,6 +51,7 @@ export function BoardTree({
   const stuck = params.get('stuck') === '1';
   const needsYou = params.get('you') === '1';
   const groups = groupSegments(running, flow, { stuck, needsYou });
+  const { live, idle } = foldIdleGroups(groups);
   const shown = groups.reduce((n, g) => n + g.items.length, 0);
   const toggle = (key: 'stuck' | 'you', on: boolean) =>
     setParams(
@@ -78,7 +95,7 @@ export function BoardTree({
           只看等你的
         </button>
         <span className="num ml-auto text-meta text-muted-foreground">
-          {shown}/{running.length}
+          显示 {shown} / 共 {running.length} 张
         </span>
       </div>
       {shown === 0 && (stuck || needsYou) ? (
@@ -91,9 +108,14 @@ export function BoardTree({
         </p>
       ) : null}
       <ul className="space-y-2" aria-label="三段里的单">
-        {groups.map((g) => (
+        {live.map((g) => (
           <SegmentRow key={g.key} group={g} running={running} />
         ))}
+        {idle.length ? (
+          <li data-flow-idle className="px-1 text-meta text-muted-foreground">
+            {idleLine(idle)}
+          </li>
+        ) : null}
       </ul>
     </div>
   );
