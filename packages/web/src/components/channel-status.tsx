@@ -20,11 +20,13 @@ import {
   formatProbeMs,
   PROBE_KIND_BG,
   PROBE_KIND_WORD,
+  type ProbeKind,
   probeKind,
 } from '../lib/probe-history-view';
 import type { Failover } from '../lib/provider-status';
 import { countsText, STATE_FILTERS, type StateFilter } from '../lib/route-state';
 import { cn } from '../lib/utils';
+import { usePhone } from '../lib/viewport';
 import { FilterTabs } from './layout/filter-tabs';
 import { List, ListRow } from './layout/list';
 import { SearchInput } from './layout/search-input';
@@ -188,9 +190,15 @@ function ChannelRow({
       data-kind={c.kind}
       rail={down || c.interrupted ? 'fail' : undefined}
       selected={selected}
-      onClick={onPick}
       summary={
-        <>
+        // 整行是一个按钮：ListRow 的 onClick 够不到 aria-current 和 aria-label，所以按钮自己写，用负边距盖满行
+        <button
+          type="button"
+          onClick={onPick}
+          aria-current={selected ? 'true' : undefined}
+          aria-label={`${c.channel.name}：${c.interrupted ? '检测中断' : c.label}，${summary.join('，')}`}
+          className="-mx-4 -my-2.5 flex flex-1 items-center gap-3 px-4 py-2.5 text-left outline-none hover:bg-accent focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-11"
+        >
           <span
             title={c.rank ? `顺位第 ${c.rank}` : '没排进顺位'}
             className="num grid size-5 shrink-0 place-items-center rounded-full bg-selected text-meta font-medium"
@@ -217,10 +225,16 @@ function ChannelRow({
             </span>
           </span>
           <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-        </>
+        </button>
       }
     />
   );
+}
+
+/** 手机上整条色条的读屏汇总：近几次里通过、不通、疑似换模型各几次。 */
+function stripSummary(cells: readonly ProbeHistoryCell[]): string {
+  const count = (k: ProbeKind) => cells.filter((c) => probeKind(c) === k).length;
+  return `近 ${cells.length} 次真探：通过 ${count('passed')}、不通 ${count('failed')}、疑似换模型 ${count('doubt')}`;
 }
 
 /** 不够 60 格时左边的空位。键按「第几格」写死，不拿数组下标当键。 */
@@ -242,6 +256,7 @@ export function HistoryStrip({
   activeCellId: number | undefined;
   onPickCell: (channelId: string, cellId: number) => void;
 }) {
+  const phone = usePhone();
   if (history.state === 'loading') {
     return (
       <p data-history="loading" className="mb-3 text-meta text-muted-foreground">
@@ -268,7 +283,10 @@ export function HistoryStrip({
         {formatAvailability(strip?.passed ?? 0, strip?.attempted ?? 0)}
         {skippedCount > 0 ? ` · 另有 ${skippedCount} 条没真探，折在下面` : ''}
       </p>
-      <div className="mt-1.5 flex h-5 gap-px">
+      <div
+        className="mt-1.5 flex h-5 gap-px"
+        {...(phone ? { role: 'img', 'aria-label': stripSummary(cells), 'data-strip-display': 'true' } : {})}
+      >
         {empties.map((slot) => (
           <span
             key={slot}
@@ -280,6 +298,22 @@ export function HistoryStrip({
           const kind = probeKind(cell);
           const word = PROBE_KIND_WORD[kind];
           const on = cell.id === activeCellId;
+          // 手机上 60 格只做展示：每格 3px 宽点不准，定位靠下面的探测记录行
+          if (phone) {
+            return (
+              <span
+                key={cell.id}
+                aria-hidden
+                data-result={kind}
+                data-cell={cell.id}
+                className={cn(
+                  'h-full min-w-0 flex-1 rounded-sm',
+                  PROBE_KIND_BG[kind],
+                  on && 'ring-2 ring-foreground',
+                )}
+              />
+            );
+          }
           return (
             <button
               key={cell.id}
