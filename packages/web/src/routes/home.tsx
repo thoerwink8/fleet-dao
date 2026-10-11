@@ -34,9 +34,25 @@ export function meta() {
 /** 本台主页靠推送更新、不自己轮询；远程快照每 30 秒重拉。超过 5 分钟还没再读成，刷新条标「数据已过期」。 */
 const HOME_STALE_AFTER_MS = 5 * TIME.MIN;
 
-function HomeBody({ data, remote, phone }: { data: HomeData; remote: boolean; phone: boolean }) {
+function HomeBody({
+  data,
+  remote,
+  phone,
+  afterStrip,
+}: {
+  data: HomeData;
+  remote: boolean;
+  phone: boolean;
+  afterStrip?: ReactNode;
+}) {
   return (
-    <HomeDrawer decisions={data.decisions} done={data.done} remote={remote} phone={phone}>
+    <HomeDrawer
+      decisions={data.decisions}
+      done={data.done}
+      remote={remote}
+      phone={phone}
+      afterStrip={afterStrip}
+    >
       {data.running.length ? (
         <RunningBoard running={data.running} flow={data.flow} health={data.health} slots={data.slots} />
       ) : (
@@ -111,27 +127,26 @@ export default function Home() {
     />
   );
 
+  // 画布上方（顶栏放不下时）或手机上的一条细栏：状态摘要（带字的「状态」按钮）+ 刷新。
+  // 手机上它排在「要你拍的」横条下面，首屏第一眼是要你拍的；还没读到数据时（读取中、出错）没有横条，它照旧在最上面。
+  const statusbar = (
+    <div
+      data-home-statusbar
+      className="flex shrink-0 flex-nowrap items-center gap-x-3 border-b px-3 sm:px-4 max-md:py-0 md:py-1.5"
+    >
+      {state.status === 'data' ? <HealthStrip health={state.data.health} /> : null}
+      <div className="ml-auto">{refresh}</div>
+    </div>
+  );
+  const phoneUnderStrip = phone && state.status === 'data';
+
   return (
     <div className="flex h-full min-h-0 flex-col" data-home>
       {/* 页面标题行去掉了，标题留给读屏和标签页：看哪个环境，顶栏的环境切换器也写着 */}
       <h1 className="sr-only">{nodeId === null ? '主页' : `主页 · ${nodeName ?? nodeId}`}</h1>
       {/* 健康条 + 刷新条：顶栏放得下（≥1024）就进顶栏右段，放不下落在画布上方一条细栏里 */}
-      <InTopbar
-        enabled={topbarRoom}
-        fallback={
-          <div
-            data-home-statusbar
-            className="flex shrink-0 flex-nowrap items-center gap-x-3 border-b px-3 sm:px-4 max-md:py-0 md:py-1.5"
-          >
-            {/* 手机：三个状态点 + 刷新图标按钮，同一行；更宽一点的屏仍写三格的名字 */}
-            {state.status === 'data' ? (
-              <HealthStrip health={state.data.health} detail="never" compact={phone} />
-            ) : null}
-            <div className="ml-auto">{refresh}</div>
-          </div>
-        }
-      >
-        {state.status === 'data' ? <HealthStrip health={state.data.health} detail="wide" /> : null}
+      <InTopbar enabled={topbarRoom} fallback={phoneUnderStrip ? null : statusbar}>
+        {state.status === 'data' ? <HealthStrip health={state.data.health} /> : null}
         {refresh}
       </InTopbar>
       {nodeId !== null && remote.node ? (
@@ -162,7 +177,12 @@ export default function Home() {
       ) : (
         <div className="min-h-0 flex-1">
           <RemoteViewProvider value={nodeId === null ? null : { name: nodeName ?? nodeId }}>
-            <HomeBody data={state.data} remote={nodeId !== null} phone={phone} />
+            <HomeBody
+              data={state.data}
+              remote={nodeId !== null}
+              phone={phone}
+              afterStrip={phoneUnderStrip ? statusbar : undefined}
+            />
           </RemoteViewProvider>
         </div>
       )}
