@@ -47,7 +47,7 @@ import type { ProgressEvent, StageKind } from '@fleet-dao/shared';
 import type { CarpoolApiRead } from '../../src/jobs/carpool-outage.ts';
 import type { UserCommand, UserCommandResult, UserExec } from '../../src/real/exec.ts';
 import { cursorLaunchCommand } from '../../src/real/hosts.ts';
-import type { IqQuestion } from '../../src/real/probe-iq.ts';
+import type { IdentityQuestion } from '../../src/real/probe-identity.ts';
 import { type SessionOrgControl, type SessionOrgDeps, sessionOrgReader } from '../../src/real/session-org.ts';
 import { layout, SESSION_TMP_DIR, type WorkTrees } from '../../src/real/worktrees.ts';
 import { runChildOk } from '../child.ts';
@@ -86,7 +86,7 @@ export function fullCarpoolRead(at: Date, resetsAt: Date): Extract<CarpoolApiRea
 export const PROBED_OK = {
   probeState: 'ok' as const,
   probedAt: new Date(NOW.getTime() - 5 * MIN),
-  probeDetail: '答上了：OK',
+  probeDetail: '答上了：pong',
 };
 
 const GIT_ENV = {
@@ -1135,8 +1135,8 @@ export function cursorKeyRig(root: string): CursorKeyRig {
       `{ echo '--- run'; for a in "$@"; do printf '%s\\n' "$a"; done; } >>'${argvLog}'`,
       `if [ -e '${rejectFlag}' ]; then printf '\\033[33m⚠ Warning: The provided API key is invalid.\\033[0m\\nThe API key was loaded from the CURSOR_API_KEY environment variable.\\nPlease check you have the right key, create a new one, or authenticate without it.\\n' >&2; exit 1; fi`,
       `if ! printenv CURSOR_API_KEY >/dev/null; then a=NO_KEY; elif [ "$CURSOR_API_KEY" = "$(cat '${keyFile}')" ]; then a=OK; else a=KEY_MISMATCH; fi`,
-      // 对上了才像真的那样答对题（第二、三行；JSON 里的换行是字面的 \n）
-      `if [ "$a" = OK ]; then a="OK\\n答案：${TEST_Q.answer}\\n模型：fake-cursor"; fi`,
+      // 对上了才像真的那样回 pong（JSON 里的换行是字面的 \n）
+      `if [ "$a" = OK ]; then a="pong"; fi`,
       `printf '%s\\n' '{"type":"system","subtype":"init","apiKeySource":"env","cwd":"/w","session_id":"${sid}","model":"Auto","permissionMode":"default"}'`,
       `printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]},"session_id":"${sid}"}\\n' "$a"`,
       `printf '{"type":"result","subtype":"success","duration_ms":1,"duration_api_ms":1,"is_error":false,"result":"%s","session_id":"${sid}","request_id":"r","usage":{"inputTokens":1,"outputTokens":1,"cacheReadTokens":0,"cacheWriteTokens":0}}\\n' "$a"`,
@@ -1263,13 +1263,21 @@ export async function dumpDb(client: TestDb['client']): Promise<string> {
   return parts.join('\n');
 }
 
-/** 探针测试固定问的那道降智题（经 routeProbeJob 的 pickQuestion 注入）和一份答对的三行回复。 */
-export const TEST_Q: IqQuestion = {
-  id: 'test-1',
-  text: '算一下 (37 + 58) × 12 - 205 等于多少？答案只写最终的数字。',
-  short: '(37+58)×12-205',
-  answer: '935',
-  kind: 'number',
+/** 探针测试固定问的那道身份题（经 routeProbeJob 的 pickQuestion 注入）和一份答对的三行回复。 */
+export const TEST_Q: IdentityQuestion = {
+  id: 'test-jp-pm',
+  text: '现任日本首相是谁？答案只写人名。',
+  short: '日本首相',
+  newAnswers: ['高市早苗', 'Takaichi'],
+  oldAnswers: ['石破茂', 'Ishiba', '岸田文雄', 'Kishida'],
+  changedAt: '2025-10',
 };
-export const pickTestQuestion = () => TEST_Q;
-export const REPLY = 'OK\n答案：935\n模型：Anthropic Claude Opus 5.5';
+export const pickTestQuestion = (_modelId: string, _now: Date) => TEST_Q;
+/** 连通探测的标准回复。 */
+export const REPLY = 'pong';
+/** 身份题答对新答案。 */
+export const IDENTITY_REPLY_NEW = 'pong\n答案：高市早苗\n模型：gpt-6-sol';
+/** 身份题说出旧答案。 */
+export const IDENTITY_REPLY_OLD = 'pong\n答案：石破茂\n模型：gpt-6-astra';
+/** 身份题认不出。 */
+export const IDENTITY_REPLY_UNKNOWN = 'pong\n答案：我不确定\n模型：某模型';

@@ -17,6 +17,7 @@ import { Link, useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import {
   errorText,
+  logoutAndClear,
   useApi,
   useLiveState,
   useMe,
@@ -345,7 +346,7 @@ export function ModeSwitch() {
             aria-checked={active}
             onClick={() => setMode(m.id)}
             className={cn(
-              'flex h-7 items-center justify-center gap-1.5 rounded-md text-xs text-muted-foreground transition-colors',
+              'flex h-7 items-center justify-center gap-1.5 rounded-md text-xs text-muted-foreground transition-colors max-md:min-h-10',
               active ? 'bg-card font-medium text-foreground shadow-sm' : 'hover:text-foreground',
             )}
           >
@@ -407,8 +408,7 @@ function UserMenu() {
   const user = me?.user;
   const logout = async () => {
     try {
-      await api.logout();
-      qc.clear();
+      await logoutAndClear(api, qc);
       navigate('/login', { replace: true });
     } catch (e) {
       toast.error('退出没成功', { description: errorText(e) });

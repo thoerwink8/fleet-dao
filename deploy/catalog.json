@@ -14,7 +14,13 @@
   ],
   "channels": [
     { "id": "claude-sub", "name": "Claude 订阅", "billing": "subscription", "enabled": true },
-    { "id": "mirasim", "name": "Mirasim 中转", "billing": "subscription", "enabled": true },
+    {
+      "id": "mirasim",
+      "name": "Mirasim 中转",
+      "billing": "subscription",
+      "enabled": true,
+      "identityCheck": true
+    },
     { "id": "cursor", "name": "Cursor 订阅", "billing": "subscription", "enabled": true },
     { "id": "xai", "name": "Grok 订阅（Grok Build）", "billing": "subscription", "enabled": true },
     {

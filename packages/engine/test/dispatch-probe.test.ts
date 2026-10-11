@@ -25,6 +25,7 @@ function target(over: Partial<RouteProbeTarget> = {}): RouteProbeTarget {
     channelName: 'Claude',
     billing: 'subscription',
     channelEnabled: true,
+    identityCheck: false,
     poolId: 'mirasim-relay',
     runAsUser: null,
     orgKind: null,
@@ -34,6 +35,8 @@ function target(over: Partial<RouteProbeTarget> = {}): RouteProbeTarget {
     modelRetiredAt: null,
     inUse: true,
     alive: true,
+    lastRunAt: null,
+    failStreak: 0,
     previous: { state: 'ok', at: new Date(NOW.getTime() - 6 * 60_000), detail: '答上了：OK' },
     ...over,
   };

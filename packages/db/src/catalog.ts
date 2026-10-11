@@ -39,7 +39,16 @@ const RunAsUserField = z
 export const CatalogSchema = z.strictObject({
   families: z.array(z.strictObject({ id: Id, displayName: Text, vendor: Text })).default([]),
   channels: z
-    .array(z.strictObject({ id: Id, name: Text, billing: z.enum(BILLING_KINDS), enabled: z.boolean() }))
+    .array(
+      z.strictObject({
+        id: Id,
+        name: Text,
+        billing: z.enum(BILLING_KINDS),
+        enabled: z.boolean(),
+        /** 活跃路由要不要额外问身份题（#1798）；没写按 false。 */
+        identityCheck: z.boolean().optional().default(false),
+      }),
+    )
     .min(1),
   pools: z
     .array(
@@ -372,12 +381,31 @@ export async function loadCatalog(
         wrote(
           await tx
             .insert(channels)
-            .values(c)
+            .values({
+              id: c.id,
+              name: c.name,
+              billing: c.billing,
+              enabled: c.enabled,
+              identityCheck: c.identityCheck,
+            })
             .onConflictDoNothing({ target: channels.id })
             .returning({ id: channels.id }),
         ),
       ['name', 'billing', 'enabled'],
     );
+    // identityCheck 是目录独占（驾驶舱不改）：已有渠道每次按配置对齐，false→true 也能写上（#1798 片 2）。
+    for (const c of config.channels) {
+      const ok = wrote(
+        await tx
+          .update(channels)
+          .set({ identityCheck: c.identityCheck })
+          .where(
+            and(eq(channels.id, c.id), sql`${channels.identityCheck} is distinct from ${c.identityCheck}`),
+          )
+          .returning({ id: channels.id }),
+      );
+      if (ok) filled.push(`channels.${c.id}.identityCheck`);
+    }
     const sessionFilled = new Set<string>();
     await upsertMissing(
       'pools',

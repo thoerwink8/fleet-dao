@@ -13,7 +13,9 @@ const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const FILES = [
   'components/home/health-strip.tsx',
   'components/home/decision-card.tsx',
-  'routes/schedules.tsx',
+  // #1805：定时任务的行挪进 job-row / expand-row，类名没变
+  'components/job-row.tsx',
+  'components/expand-row.tsx',
   'routes/routing-status.tsx',
   'routes/changelog.tsx',
   // #1638：渠道状态那处探针色点（size-2 shrink-0 rounded-2）随「探测记录」挪进这个组件，类名没变，所以也在这里钉
@@ -35,14 +37,14 @@ const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
     file: 'components/home/decision-card.tsx',
     snippet: 'num shrink-0 whitespace-nowrap text-caption text-muted-foreground',
   },
-  { file: 'routes/schedules.tsx', snippet: 'absolute inset-y-0 left-0 w-rail' },
-  { file: 'routes/schedules.tsx', snippet: 'text-caption text-muted-foreground' },
-  { file: 'routes/schedules.tsx', snippet: 'num text-caption text-faint' },
-  { file: 'routes/schedules.tsx', snippet: 'text-caption text-ink-stall' },
+  { file: 'components/expand-row.tsx', snippet: 'absolute inset-y-0 left-0 w-rail' },
+  { file: 'components/job-row.tsx', snippet: 'text-caption text-muted-foreground' },
+  { file: 'components/job-row.tsx', snippet: 'num text-caption text-faint' },
+  { file: 'components/job-row.tsx', snippet: 'text-caption text-ink-stall' },
   { file: 'routes/routing-status.tsx', snippet: 'lg:max-h-routing-pane' },
   { file: 'routes/routing-status.tsx', snippet: 'text-caption font-medium leading-5 text-ink-run' },
   { file: 'components/probe-log.tsx', snippet: 'size-2 shrink-0 rounded-2' },
-  { file: 'routes/changelog.tsx', snippet: 'grid grid-cols-changelog items-baseline' },
+  { file: 'routes/changelog.tsx', snippet: 'flex flex-wrap items-baseline' },
 ];
 
 /** 这 12 处用到的档位。why 必须出现在定义行往上 8 行里的注释中。 */
@@ -52,7 +54,6 @@ const TIERS: { name: string; why: string }[] = [
   { name: '--width-rail:', why: '3px' },
   { name: '--max-height-routing-pane:', why: '16rem' },
   { name: '--radius-2:', why: '2px' },
-  { name: '--grid-template-columns-changelog:', why: '8.5rem' },
 ];
 
 /** 这 12 处换掉之前的写死类名。五个文件里不能再出现。 */
@@ -63,6 +64,7 @@ const GONE = [
   'xl:max-h-[calc(100dvh-16rem)]',
   'rounded-[2px]',
   'grid-cols-[8.5rem_minmax(0,1fr)_auto]',
+  'grid-cols-changelog',
 ] as const;
 
 function source(rel: string): string {

@@ -28,6 +28,7 @@ export function pgProbeHistory(db: Db): ProbeHistoryPort {
         checkAnswer: row.checkAnswer,
         checkPassed: row.checkPassed,
         selfIdentity: row.selfIdentity,
+        kind: row.kind,
       }));
     },
   };

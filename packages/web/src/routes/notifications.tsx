@@ -1,4 +1,4 @@
-import { Bell, Check, ChevronDown, ExternalLink, Send, TriangleAlert } from 'lucide-react';
+import { ArrowUpRight, Bell, Check, ChevronDown, ExternalLink, Send, TriangleAlert } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
@@ -11,6 +11,7 @@ import {
   useResolveNotification,
 } from '../api/client';
 import type { Me, Notification, NotificationLevel } from '../api/types';
+import { FilterTrack, filterTabClass } from '../components/filter-tabs';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RefreshBar } from '../components/refresh-bar';
 import { RepoLink } from '../components/repo-link';
@@ -46,15 +47,8 @@ function dayOf(iso: string, now: number): string {
 
 const DELIVERY_NAME: Record<string, string> = { feishu: '飞书' };
 
-/** 处理状态和级别共用这一套：灰底轨道，选中是白底卡片。 */
-const segmentTrack = 'flex max-w-full flex-wrap rounded-lg bg-muted p-1';
-
-function segmentClass(on: boolean): string {
-  return cn(
-    'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-3 text-sub transition-colors',
-    on ? 'bg-card font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
-  );
-}
+/** 处理状态和级别共用 components/filter-tabs 这一套：灰底轨道，选中是白底卡片，手机上每个标签至少 40 高。 */
+const segmentClass = filterTabClass;
 
 /** 飞书等渠道送没送到：没拿到消息编号就算没送到。 */
 function Deliveries({ n }: { n: Notification }) {
@@ -120,7 +114,7 @@ function WorkLink({
       repo={repo}
       kind={kind}
       n={n}
-      className="inline-flex items-center gap-0.5 text-caption text-muted-foreground underline-offset-2 [&[href]]:hover:text-foreground [&[href]]:hover:underline"
+      className="inline-flex items-center gap-0.5 text-caption text-muted-foreground underline-offset-2 max-md:min-h-10 [&[href]]:hover:text-foreground [&[href]]:hover:underline"
       icon={<ExternalLink className="size-2.5" aria-hidden />}
     >
       {label}
@@ -194,7 +188,8 @@ function NotificationRow({
   return (
     <li
       className={cn(
-        'flex flex-col gap-3 border-b px-4 py-3 last:border-b-0 md:flex-row md:items-center',
+        // 手机上「打开 / 处理了」是右侧的图标按钮，和标题同一行（#1820）；md 起是文字按钮、垂直居中
+        'flex items-start gap-3 border-b px-4 py-3 last:border-b-0 md:items-center',
         !resolved && n.level !== 'daily' && 'bg-accent/40',
       )}
     >
@@ -224,21 +219,28 @@ function NotificationRow({
           </div>
         </div>
       </div>
-      <div className="flex shrink-0 flex-wrap gap-1.5 pl-5 md:pl-0">
+      <div className="flex shrink-0 items-center gap-1.5 max-md:-mt-2" data-notice-actions>
         {n.link ? (
-          <Button size="sm" variant="ghost" onClick={() => onOpen(n.link ?? '/')}>
-            打开
+          <Button
+            size="sm"
+            variant="ghost"
+            className="max-md:w-10 max-md:px-0"
+            onClick={() => onOpen(n.link ?? '/')}
+          >
+            <ArrowUpRight className="md:hidden" aria-hidden />
+            <span className="max-md:sr-only">打开</span>
           </Button>
         ) : null}
         {!resolved ? (
           <Button
             size="sm"
             variant="outline"
+            className="max-md:w-10 max-md:px-0"
             disabled={resolvePending && resolveId === n.id}
             onClick={() => onDone(n)}
           >
             <Check />
-            处理了
+            <span className="max-md:sr-only">处理了</span>
           </Button>
         ) : null}
       </div>
@@ -337,7 +339,7 @@ export default function Notifications() {
   return (
     <Page
       title="通知中心"
-      description="只有三类：要你拍的、卡住报警、日报。飞书上也推同样的三类；进度不主动推。"
+      description="只有三类：要你拍的、卡住的、日报。飞书上推同样的三类，进度不主动推。"
       actions={
         <RefreshBar
           onRefresh={() => void refetch()}
@@ -348,7 +350,7 @@ export default function Notifications() {
       }
     >
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div className={segmentTrack} role="tablist" aria-label="处理状态">
+        <FilterTrack role="tablist" aria-label="处理状态">
           {(['open', 'all'] as const).map((s) => (
             <button
               key={s}
@@ -361,8 +363,8 @@ export default function Notifications() {
               {s === 'open' ? '待处理' : '连已处理的一起看'}
             </button>
           ))}
-        </div>
-        <div className={segmentTrack}>
+        </FilterTrack>
+        <FilterTrack>
           {LEVELS.map((l) => {
             // 数字是接口给的真实总数，不是这一页取回的条数（只取了前 N 条时也不会封顶）。
             // 没读到就写「—」，不拿 0 冒充「没有提醒」。真的没有（读成功且总数 0）才写 0。
@@ -382,16 +384,16 @@ export default function Notifications() {
               </button>
             );
           })}
-        </div>
+        </FilterTrack>
       </div>
       {data && status === 'open' ? (
         <p className="mb-3 text-xs text-muted-foreground" data-testid="pending-rule">
-          待处理 <span className="num">{pendingCount(data.counts)}</span>{' '}
-          条（要你拍加卡住报警），铃铛和侧栏角标同数。
+          待处理 <span className="num">{pendingCount(data.counts)}</span> 条。
+          要你拍的和卡住的，处理了就从这里消失。
           {data.counts.daily > 0 ? (
             <>
               {' '}
-              日报 <span className="num">{data.counts.daily}</span> 条只是看一眼，不算待处理。
+              日报 <span className="num">{data.counts.daily}</span> 条看一眼就行。
             </>
           ) : null}
         </p>

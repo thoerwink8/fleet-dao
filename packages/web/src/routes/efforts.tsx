@@ -8,7 +8,7 @@
 // - 没接上（开发环境内存版）和没读成是两回事：前者整块写 unavailable，后者写「没读成」和原因。都不画空表冒充「都没配」。
 // - 能配的按家族展开；配不了、未分类默认折叠（#1756）。未分类用人读名，原始编号放悬停。
 
-import { Brain, ChevronDown, Search } from 'lucide-react';
+import { Brain, ChevronDown, Info, Search } from 'lucide-react';
 import { type ReactNode, useId, useState } from 'react';
 import { brand } from '#brand';
 import { errorText, useRoutingEfforts, useUpdateRouteEffort } from '../api/client';
@@ -16,6 +16,7 @@ import type { EffortModel, RouteEffort, SessionEffort } from '../api/types';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RefreshBar } from '../components/refresh-bar';
 import { Badge } from '../components/ui/badge';
+import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Switch } from '../components/ui/switch';
 import { hostLabel } from '../lib/catalog';
@@ -39,8 +40,33 @@ export function meta() {
   return [{ title: brand.title('思考档位') }];
 }
 
-const DESCRIPTION =
-  '每个模型走的每条路，起会话想多深。没配的用默认档；配的是这条路的上限——单子只改一个文件（快档）时，引擎会再往下压到 medium，别的活就照配的这一档。改了下一个起的会话就照新的，不用发版。';
+/** 页头说明压成一行（#1821）；其余细节收进旁边的「ⓘ」。 */
+const SUMMARY = '每条路起会话想多深；改了，下一个会话就照新的。';
+const DETAILS =
+  '没配的用默认档。配的是这条路的上限：单子只改一个文件（快档）时，引擎会再往下压到 medium，别的活就照配的这一档。改了不用发版。';
+
+const DESCRIPTION = (
+  <span className="inline-flex items-center gap-1.5">
+    {SUMMARY}
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="档位怎么生效"
+          className="grid size-6 shrink-0 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          <Info className="size-4" aria-hidden />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72 text-sm">
+        {DETAILS}
+      </PopoverContent>
+    </Popover>
+  </span>
+);
+
+/** 「配不了」组头补的原因：各条的具体原因写在分组里，这里先说清为什么会配不了。 */
+const FIXED_WHY = '这些路的执行方式不支持档位，点开看各自原因';
 
 /** 「默认」那一项的值（不是一档，是「没配」）。 */
 const DEFAULT_VALUE = 'default';
@@ -128,7 +154,7 @@ export default function Efforts() {
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="搜模型、渠道、路由号"
                   aria-label="搜索模型或渠道"
-                  className="h-9 w-full rounded-lg border bg-card pl-8 pr-2.5 text-sub outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+                  className="h-9 w-full rounded-lg border bg-card max-md:min-h-10 pl-8 pr-2.5 text-sub outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
                 />
               </label>
               <div className="flex items-center gap-2 text-sub">
@@ -246,7 +272,7 @@ function FamilyGroup({
         aria-expanded={open}
         aria-controls={bodyId}
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 bg-muted/40 px-4 py-2 text-left text-sub font-medium hover:bg-muted/70"
+        className="flex w-full items-center gap-1.5 bg-muted/40 px-4 py-2 text-left text-sub font-medium hover:bg-muted/70 max-md:min-h-10"
       >
         <ChevronDown
           className={cn('size-4 shrink-0 text-muted-foreground transition-transform', !open && '-rotate-90')}
@@ -295,6 +321,9 @@ function FixedFold({
         label={
           <>
             配不了 <span className="num">{total}</span> 条
+            <span className="ml-2 text-caption font-normal text-muted-foreground" data-fixed-why>
+              {FIXED_WHY}
+            </span>
           </>
         }
       />

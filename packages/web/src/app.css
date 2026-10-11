@@ -138,9 +138,13 @@
    */
   --container-cockpit: 1840px;
   --container-settings-row: 96px;
-  --container-settings-col: 240px;
-  --container-quota-table: 860px;
+  /* 设置页左侧页内导航宽（lg 以上）。 */
+  --container-settings-nav: 176px;
+  /* 字段行「标签左、控件右」的标签列宽（md 以上），依据：调研 3 块，标签列 160–200px。 */
+  --container-field-label: 180px;
   --container-quota-row: 220px;
+  /* 额度页手机上一个窗口格的最小宽：两列排。 */
+  --container-quota-cell: 8.5rem;
   --container-search: 380px;
   --container-notifications: 380px;
   --container-usage: 340px;
@@ -155,7 +159,6 @@
   --grid-template-columns-auto-fr: auto 1fr; /* channel-status 故障说明、pool-holds 暂停明细：原来写死 auto、1fr */
   --grid-template-columns-release: 4.5rem minmax(0, 1fr); /* release-card 每一行：原来写死 4.5rem、剩余 */
   --grid-template-columns-usage: 3.5rem minmax(0, 1fr); /* usage 花费行：原来写死 3.5rem、剩余 */
-  --grid-template-columns-changelog: 8.5rem minmax(0, 1fr) auto; /* 依据：更新日志提交行原来写死 8.5rem、剩余、自动 */
   --grid-template-columns-timeline: 160px 1fr; /* run-timeline 在 md：原来写死 160px、剩余 */
   --grid-template-columns-board: minmax(0, 26rem) minmax(0, 1fr); /* 2xl 起：最宽 26rem、剩余 */
   --grid-template-rows-stack: auto 1fr; /* 行：自动、剩余 */
@@ -629,6 +632,29 @@
   letter-spacing: -0.01em;
 }
 
+/*
+ * 横向滑动条两端的渐隐提示（components/filter-tabs.tsx）：哪一端还有内容没滑出来，哪一端就渐隐。
+ * 渐隐宽度由组件按「这一端还有没有」设到 --fade-start / --fade-end，没有的一端设 0。
+ */
+@utility fade-edges-x {
+  --fade-start: 0px;
+  --fade-end: 0px;
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 var(--fade-start),
+    #000 calc(100% - var(--fade-end)),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 var(--fade-start),
+    #000 calc(100% - var(--fade-end)),
+    transparent
+  );
+}
+
 /* 细滚动条 */
 @utility scrollbar-thin {
   scrollbar-width: thin;
@@ -636,30 +662,64 @@
 }
 
 /*
- * 额度表横向滚动提示。表的最小宽度是 --container-quota-table（860px）。
- * 容器查询里写 var() 不会生效（长度对不上就不藏），所以这里写成同一个数再加 2px 边框。
- * 容器够放下整张表时把提示藏起来，免得宽屏上也写「向右滑动」。
+ * 额度页账号池（#1805）：一个池一行，各窗口一格（一行字加一根细进度条）。
+ * 容器够宽（862px 起）时窗口按类排成对齐的列、表头显示；窄了每个池变一张卡，窗口两列排、格内自带窗口名，不横向滚动。
+ * 容器查询里写 var() 不会生效，所以这里写同一个数。列数由行上的 --quota-kinds 给。
  */
 .quota-matrix {
   container-type: inline-size;
   container-name: quota-matrix;
 }
 
-.quota-scroll-fade {
-  background: linear-gradient(to left, var(--card), transparent);
+.quota-matrix :where(table, thead, tbody, tr, th, td) {
+  display: block;
+}
+
+.quota-pool {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--container-quota-cell), 1fr));
+  gap: 0.5rem 0.75rem;
+}
+
+.quota-pool-head {
+  grid-column: 1 / -1;
+}
+
+.quota-head,
+.quota-cell-empty {
+  display: none;
 }
 
 @container quota-matrix (min-width: 862px) {
-  .quota-scroll-hint {
+  .quota-pool,
+  .quota-head {
+    grid-template-columns: var(--container-quota-row) repeat(var(--quota-kinds), minmax(0, 1fr));
+    align-items: center;
+  }
+  .quota-head {
+    display: grid;
+    gap: 0 0.75rem;
+  }
+  .quota-pool-head {
+    grid-column: auto;
+  }
+  .quota-cell-empty {
+    display: block;
+  }
+  .quota-cell-label,
+  .quota-narrow-only {
     display: none;
   }
 }
 
-/*
- * 设置页左标题右内容的分栏（lg 以上）。宽度从 --container-settings-col 取。
- */
-@utility grid-cols-settings {
-  grid-template-columns: var(--container-settings-col) 1fr;
+/* 设置页：左侧页内导航 + 右侧各节（lg 以上）。导航宽从 --container-settings-nav 取。 */
+@utility grid-cols-settings-shell {
+  grid-template-columns: var(--container-settings-nav) minmax(0, 1fr);
+}
+
+/* 字段行：标签列 + 控件列（md 以上；窄了标签在上）。 */
+@utility grid-cols-field {
+  grid-template-columns: var(--container-field-label) minmax(0, 1fr);
 }
 
 /* 关于页的「键：值」对（窄标签 + 自由宽内容）。 */

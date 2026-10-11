@@ -36,6 +36,14 @@ import {
 
 const tz = { withTimezone: true, mode: 'date' } as const;
 
+/** 路由探针按活跃分的三档（#1798 片 2）：引擎每轮重写；空 = 还没写过。 */
+export const ROUTE_PROBE_TIERS = ['active', 'idle', 'unused'] as const;
+export type RouteProbeTier = (typeof ROUTE_PROBE_TIERS)[number];
+
+/** 上一次真探的种类：连通 / 身份（#1798 片 2）。空 = 还没写过，或老结论。 */
+export const ROUTE_PROBE_KINDS = ['ping', 'identity'] as const;
+export type RouteProbeKind = (typeof ROUTE_PROBE_KINDS)[number];
+
 export const families = pgTable('families', {
   id: text('id').primaryKey(),
   displayName: text('display_name').notNull(),
@@ -47,6 +55,11 @@ export const channels = pgTable('channels', {
   name: text('name').notNull(),
   billing: billingKind('billing').notNull(),
   enabled: boolean('enabled').notNull().default(true),
+  /**
+   * 这个渠道上的活跃路由要不要额外问身份题（#1798）：目录 deploy/catalog.json 的 identityCheck，
+   * 装载器写进来。默认 false；现在只有 mirasim 中转为 true。
+   */
+  identityCheck: boolean('identity_check').notNull().default(false),
 });
 
 /** 账号池 = 渠道下的一份额度。库里只放占位 id，账号与凭据在机器本地配置。 */
@@ -150,6 +163,17 @@ export const routes = pgTable(
      * 空 = 还没盖过，选路当时按前缀现判。字面「执行体未知」不是执行体名：选路不派。
      */
     executor: text('executor'),
+    /**
+     * 探针节奏档（#1798 片 2）：active / idle / unused。引擎每轮重写；空 = 还没写过。
+     * 选路和页面以后只读这一列，不再从 probe_detail 里抠。
+     */
+    probeTier: text('probe_tier').$type<RouteProbeTier>(),
+    /** 下次定时探的时刻；不在用的为空。 */
+    probeNextAt: timestamp('probe_next_at', tz),
+    /** 连着不通几次；探通清零。取代原文里的「连着不通 N 次」。 */
+    probeFailStreak: integer('probe_fail_streak').notNull().default(0),
+    /** 上一次真探是 ping 还是 identity；空 = 还没写过。 */
+    probeKind: text('probe_kind').$type<RouteProbeKind>(),
   },
   (t) => [
     foreignKey({
@@ -185,6 +209,15 @@ export const routes = pgTable(
       sql`${t.variantContext} is null or length(btrim(${t.variantContext})) > 0`,
     ),
     check('routes_executor_nonempty', sql`${t.executor} is null or length(btrim(${t.executor})) > 0`),
+    check(
+      'routes_probe_tier_known',
+      sql`${t.probeTier} is null or ${t.probeTier} in (${sql.raw(ROUTE_PROBE_TIERS.map((v) => `'${v}'`).join(', '))})`,
+    ),
+    check('routes_probe_fail_streak_nonneg', sql`${t.probeFailStreak} >= 0`),
+    check(
+      'routes_probe_kind_known',
+      sql`${t.probeKind} is null or ${t.probeKind} in (${sql.raw(ROUTE_PROBE_KINDS.map((v) => `'${v}'`).join(', '))})`,
+    ),
   ],
 );
 

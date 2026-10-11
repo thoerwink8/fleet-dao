@@ -229,7 +229,7 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
     files: [`${W}routes/france.tsx`, `${W}routes/env.tsx`, `${W}components/engine-master-card.tsx`],
     specs: [spec('07b-env'), spec('07c-nodes')],
   },
-  // 其余页（07）；11 量手机宽度下路由 / 渠道状态不横滚（#1806）
+  // 其余页（07）：路由、思考档位、定时任务、操作记录、更新日志、找不到的页面；11 量手机宽不横滚
   {
     files: [
       `${W}routes/routing.tsx`,
@@ -242,7 +242,6 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
       `${W}lib/channel-status.ts`,
       `${W}lib/provider-status.ts`,
       `${W}lib/efforts.ts`,
-      `${W}lib/changelog.ts`,
     ],
     specs: [spec('07-other-pages'), spec('11-mobile-overflow')],
   },
@@ -251,7 +250,7 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
     files: [`${W}routes/schedules.tsx`, `${W}lib/schedule.ts`],
     specs: [spec('07-other-pages'), spec('08-backend-down')],
   },
-  // 操作记录页和设置页共用 lib/audit；10 也去操作记录里核对；11 量手机宽度不横滚
+  // 操作记录页和设置页共用 lib/audit；10 也去操作记录里核对；11 量手机宽不横滚
   {
     files: [`${W}routes/audit.tsx`, `${W}lib/audit.ts`],
     specs: [spec('05-settings'), spec('07-other-pages'), spec('10-credentials'), spec('11-mobile-overflow')],

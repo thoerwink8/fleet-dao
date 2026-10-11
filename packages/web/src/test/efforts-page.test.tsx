@@ -162,6 +162,19 @@ describe('思考档位页：看', () => {
   });
 });
 
+describe('思考档位页：说明与「配不了」组头（#1821）', () => {
+  test('页头说明一行，细则收在「ⓘ」里；「配不了」组头写明原因', async () => {
+    // 说明又长回 4 行，或「配不了」组头只剩数字不说为什么，这一条会红。
+    renderApp(<EffortsPage />, { route: '/efforts' });
+    await opened();
+    expect(screen.getByText(/每条路起会话想多深/)).toBeTruthy();
+    expect(screen.queryByText(/单子只改一个文件/)).toBeNull();
+    expect(screen.getByRole('button', { name: '档位怎么生效' })).toBeTruthy();
+    const fold = await screen.findByRole('button', { name: /配不了 \d+ 条/ });
+    expect(fold.textContent).toContain('这些路的执行方式不支持档位');
+  });
+});
+
 describe('思考档位页：改', () => {
   test('改下拉就存：参数是那条路由和选的档、带上改之前看到的值，改完照库里的值显示；选「默认」清回没配', async () => {
     const { api } = renderApp(<EffortsPage />, { route: '/efforts' });

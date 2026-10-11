@@ -12,6 +12,7 @@ import type { LucideIcon } from 'lucide-react';
 import {
   Activity,
   CalendarClock,
+  ChevronDown,
   CircleChevronDown,
   CircleDashed,
   Gauge,
@@ -19,12 +20,14 @@ import {
   Power,
   Tag,
 } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { type ReactNode, useState } from 'react';
 import type { EnvEngine, EnvFacts, EnvSchedule, EnvVersion } from '../api/types';
 import { stageLabel } from '../lib/catalog';
 import { formatAgo, formatDateTime } from '../lib/format';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
+import { usePhone } from '../lib/viewport';
+import { StatusDot } from './status';
 
 const TONE_CLASS: Record<Tone, string> = {
   done: 'text-ink-done',
@@ -66,6 +69,53 @@ function shell(kind: FactKind, state: 'ok' | 'unread', look: FactLook, extra?: s
   };
 }
 
+/**
+ * 手机上法国页「本台六项事实」一行一项（#1820）：名字 · 状态点 · 一句话，点开才看原来那一整格。
+ * 两列各六格在 390 宽占了法国页大半的长度；一行一项六行就看完，要细节再点开。
+ */
+function FoldedFact({
+  kind,
+  state,
+  label,
+  icon: Icon,
+  tone,
+  summary,
+  children,
+}: {
+  kind: FactKind;
+  state: 'ok' | 'unread';
+  label: string;
+  icon: LucideIcon;
+  tone: Tone;
+  summary: ReactNode;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const frame = shell(kind, state, 'tile', 'px-0 py-0');
+  return (
+    <div {...frame} data-fact-folded={open ? 'open' : 'closed'}>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex min-h-10 w-full items-center gap-2 px-3 py-2 text-left text-sm"
+      >
+        <Icon className="size-3.5 shrink-0 text-muted-foreground opacity-70" aria-hidden />
+        <span className="shrink-0 text-muted-foreground">{label}</span>
+        <StatusDot tone={tone} />
+        <span className="num min-w-0 flex-1 truncate" data-fact-summary>
+          {summary}
+        </span>
+        <ChevronDown
+          className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')}
+          aria-hidden
+        />
+      </button>
+      {open ? <div className="border-t px-4 py-3">{children}</div> : null}
+    </div>
+  );
+}
+
 /** 没查成的一格：明说原因，等待色虚线（不是红、不是 0）。失联列 muted 时「没查成」也改成灰色小字。 */
 function NotRead({
   kind,
@@ -81,8 +131,47 @@ function NotRead({
   muted?: boolean | undefined;
   children?: ReactNode;
 }) {
+  const phone = usePhone();
+  if (phone && look === 'tile') {
+    return (
+      <FoldedFact
+        kind={kind}
+        state="unread"
+        label={head.label}
+        icon={head.icon}
+        tone="stall"
+        summary={`没查成 · ${reason}`}
+      >
+        <NotReadInner look="tile" reason={reason} muted={muted} head={head}>
+          {children}
+        </NotReadInner>
+      </FoldedFact>
+    );
+  }
   return (
     <div {...shell(kind, 'unread', look, 'text-muted-foreground')}>
+      <NotReadInner look={look} reason={reason} muted={muted} head={head}>
+        {children}
+      </NotReadInner>
+    </div>
+  );
+}
+/** 没查成那一格的内容（不含外框）：头、「没查成」、原因。 */
+function NotReadInner({
+  look,
+  reason,
+  muted,
+  head,
+  children,
+}: {
+  look: FactLook;
+  reason: string;
+  muted?: boolean | undefined;
+  head: Head;
+  children?: ReactNode;
+}) {
+  return (
+    <>
       <FactHead {...head} />
       <div className={look === 'row' ? 'mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5' : 'mt-1.5'}>
         <div className="flex items-center gap-1.5">
@@ -102,7 +191,50 @@ function NotRead({
         <p className={cn('text-xs', look === 'tile' && 'mt-1')}>{reason}</p>
       </div>
       {children}
-    </div>
+    </>
+  );
+}
+
+/** 查成了那一格的内容（不含外框）。 */
+function ReadInner({
+  look,
+  value,
+  sub,
+  tone,
+  muted,
+  head,
+  children,
+}: {
+  look: FactLook;
+  value: ReactNode;
+  sub?: ReactNode;
+  tone?: Tone | undefined;
+  muted?: boolean | undefined;
+  head: Head;
+  children?: ReactNode;
+}) {
+  return (
+    <>
+      <FactHead {...head} />
+      {/* 一列一行（环境页）时值和白话并在一行，行矮一半；独立卡片（法国页）时上下两行 */}
+      <div className={look === 'row' ? 'mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5' : 'mt-1.5'}>
+        <div
+          className={cn(
+            'num leading-tight tracking-tight',
+            look === 'tile' && 'truncate',
+            muted
+              ? 'text-sm font-normal text-muted-foreground'
+              : cn('text-title font-semibold', tone ? TONE_CLASS[tone] : undefined),
+          )}
+        >
+          {value}
+        </div>
+        {sub ? (
+          <div className={cn('text-xs text-muted-foreground', look === 'tile' && 'mt-1')}>{sub}</div>
+        ) : null}
+      </div>
+      {children}
+    </>
   );
 }
 
@@ -125,29 +257,32 @@ function Read({
   muted?: boolean | undefined;
   children?: ReactNode;
 }) {
-  return (
-    <div {...shell(kind, 'ok', look)}>
-      <FactHead {...head} />
-      {/* 一列一行（环境页）时值和白话并在一行，行矮一半；独立卡片（法国页）时上下两行 */}
-      <div className={look === 'row' ? 'mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5' : 'mt-1.5'}>
-        <div
-          className={cn(
-            'num leading-tight tracking-tight',
-            look === 'tile' && 'truncate',
-            muted
-              ? 'text-sm font-normal text-muted-foreground'
-              : cn('text-title font-semibold', tone ? TONE_CLASS[tone] : undefined),
-          )}
-        >
-          {value}
-        </div>
-        {sub ? (
-          <div className={cn('text-xs text-muted-foreground', look === 'tile' && 'mt-1')}>{sub}</div>
-        ) : null}
-      </div>
+  const phone = usePhone();
+  const inner = (
+    <ReadInner look={look} value={value} sub={sub} tone={tone} muted={muted} head={head}>
       {children}
-    </div>
+    </ReadInner>
   );
+  if (phone && look === 'tile') {
+    return (
+      <FoldedFact
+        kind={kind}
+        state="ok"
+        label={head.label}
+        icon={head.icon}
+        tone={tone ?? 'done'}
+        summary={
+          <>
+            {value}
+            {sub ? <span className="font-sans text-muted-foreground"> · {sub}</span> : null}
+          </>
+        }
+      >
+        {inner}
+      </FoldedFact>
+    );
+  }
+  return <div {...shell(kind, 'ok', look)}>{inner}</div>;
 }
 
 /** 引擎：on / off（按配置没开）/ down（真没连上）/ unknown（没查成）四态各说各的。 */

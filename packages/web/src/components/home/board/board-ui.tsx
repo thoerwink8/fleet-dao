@@ -5,6 +5,7 @@ import { createContext, useContext, useRef, useState, useSyncExternalStore } fro
 import { brand } from '#brand';
 import type { ActionTarget } from '../../task-actions';
 import type { HomeRunning } from '../types';
+import { FAR_ID_DESIGN_PX, FAR_ID_FLOOR_PX, FAR_TITLE_DESIGN_PX, FAR_TITLE_FLOOR_PX } from './far-type';
 import type { BoardNodeData } from './model';
 
 /** 三级缩放：远看只剩色块和数字，中景出现文字和状态，近景看到谁在做、等什么、最近一次事件和耗时。 */
@@ -24,12 +25,13 @@ export function farCardFontPx(basePx: number, zoom: number = ZOOM_OF.far): numbe
   return Math.max(basePx, FAR_LABEL_MIN_PX) / z;
 }
 
-/**
- * 远档标题在预设缩放 0.4 下的设计字号，对齐 --text-strong（15px）。
- * 屏幕上的下限对齐 --text-caption（11px）：收进视野时缩放常小于 0.4。
- */
-export const FAR_TITLE_DESIGN_PX = 15;
-export const FAR_TITLE_FLOOR_PX = 11;
+export {
+  FAR_ID_DESIGN_PX,
+  FAR_ID_FLOOR_PX,
+  FAR_TITLE_DESIGN_PX,
+  FAR_TITLE_FLOOR_PX,
+  farIdFontSize,
+} from './far-type';
 
 /**
  * 远档标题的 CSS 字号。用字号名，不写死像素。
@@ -44,6 +46,12 @@ export function farTitleFontSize(): string {
 export function farTitleScreenPx(zoom: number): number {
   const z = zoom > 0 ? zoom : ZOOM_OF.far;
   return Math.max((FAR_TITLE_DESIGN_PX * z) / ZOOM_OF.far, FAR_TITLE_FLOOR_PX);
+}
+
+/** 远档单号换算到屏幕上的像素：任何缩放下都比同一缩放下的标题小。 */
+export function farIdScreenPx(zoom: number): number {
+  const z = zoom > 0 ? zoom : ZOOM_OF.far;
+  return Math.max((FAR_ID_DESIGN_PX * z) / ZOOM_OF.far, FAR_ID_FLOOR_PX);
 }
 
 export function levelOf(zoom: number): ZoomLevel {

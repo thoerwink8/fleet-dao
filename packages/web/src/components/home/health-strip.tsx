@@ -7,6 +7,7 @@
 
 import { CircleAlert, CircleCheck, CircleDashed, Gauge, Power, Waypoints } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import type { HomeHealth } from './types';
 
 type Kind = 'ok' | 'warn' | 'muted' | 'bad';
@@ -105,15 +106,74 @@ function engineWords(engine: HomeHealth['engine']): { label: string; detail: str
   }
 }
 
+const dotTone: Record<Kind, string> = {
+  ok: 'bg-st-done',
+  warn: 'bg-st-wait',
+  bad: 'bg-st-fail',
+  muted: 'bg-st-stop',
+};
+
+/**
+ * 手机上的写法（#1819）：额度、中转、引擎各一个状态点，三个点合成一个按钮（不小于 40×40），
+ * 点开是原来三格的全文。颜色规矩同上：提示黄系不用红，红只给引擎没连上。
+ */
+function CompactStrip({ health, className }: { health: HomeHealth; className?: string }) {
+  const engine = engineWords(health.engine);
+  const items = [
+    { icon: Gauge, label: '额度', detail: health.quota.detail, kind: kindOfQuota(health.quota.state) },
+    { icon: Waypoints, label: '中转', detail: health.routes.detail, kind: kindOfRoutes(health.routes.state) },
+    { icon: Power, label: engine.label, detail: engine.detail, kind: kindOfEngine(health.engine.state) },
+  ];
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={`持续状态：${items.map((i) => `${i.label}${i.detail}`).join('；')}`}
+          data-health-strip
+          data-health-compact
+          className={cn('flex h-10 min-w-10 items-center justify-center gap-2 rounded-md px-2', className)}
+        >
+          {items.map((i) => (
+            <span
+              key={i.label}
+              data-health-chip={i.kind}
+              aria-hidden
+              className={cn('size-3 rounded-full', dotTone[i.kind])}
+            />
+          ))}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72">
+        <ul className="space-y-2">
+          {items.map((i) => (
+            <li key={i.label} className="flex items-start gap-2 text-sub">
+              <span aria-hidden className={cn('mt-1.5 size-2.5 shrink-0 rounded-full', dotTone[i.kind])} />
+              <span className="min-w-0">
+                <span className="font-medium">{i.label}</span>
+                <span className="block text-xs text-muted-foreground">{i.detail}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export function HealthStrip({
   health,
   className,
   detail = 'always',
+  compact = false,
 }: {
   health: HomeHealth;
   className?: string;
   detail?: DetailShow;
+  /** 只画三个状态点（手机）。 */
+  compact?: boolean;
 }) {
+  if (compact) return <CompactStrip health={health} {...(className ? { className } : {})} />;
   return (
     <div
       role="status"

@@ -1,21 +1,16 @@
-// 更新日志页：上面是「已发布的提交」（#1255，决定 0032：发版单位是主线提交），下面是仓根 CHANGELOG.md 在驾驶舱里的一份对照。
-// 「已发布的提交」只读：读法国的发布历史（release.sh 的 .history，后端 GET /api/france/released-commits，和发版卡共用同一个读口），
+// 更新日志页：「已发布的提交」（#1255，决定 0032：发版单位是主线提交）。
+// 只读：读法国的发布历史（release.sh 的 .history，后端 GET /api/france/released-commits，和发版卡共用同一个读口），
 // 每条写提交号、标题、发于何时；读不到写没查成和原因，不拿空列表冒充「没发过」。发布入口不在这一页：在「法国」页「在用版本」那一行。
-// CHANGELOG 对照的数据来源是仓根 CHANGELOG.md 在打包时被内联进来的字符串（lib/changelog.ts 用 vite 的 ?raw 取），
-// 格式解析共用 packages/shared/src/changelog.ts——和发布那条线是同一个实现，格式变了两边一样认不出。
-import { CalendarClock, ChevronDown, GitCommitHorizontal, ScrollText } from 'lucide-react';
-import { useId, useState } from 'react';
+// 「CHANGELOG.md 对照」区在 #1821 删了：只有一个 v3，对创始人没用。
+import { GitCommitHorizontal } from 'lucide-react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
 import { useFranceReleasedCommits } from '../api/client';
 import type { ReleasedCommits } from '../api/types';
-import { MarkdownLite } from '../components/markdown-lite';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { RefreshBar } from '../components/refresh-bar';
-import { readChangelog, releasedBody } from '../lib/changelog';
 import { formatAgo, formatDateTime, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
-import { cn } from '../lib/utils';
 
 export function meta() {
   return [{ title: brand.title('更新日志') }];
@@ -25,9 +20,6 @@ const EVENT_TEXT = { release: '发布', rollback: '回滚', 'auto-rollback': '�
 
 /** 已发布的提交每 5 分钟重拉一次。这份快照超过 5 分钟还没再读成，刷新条标「数据已过期」。 */
 const CHANGELOG_STALE_AFTER_MS = 5 * TIME.MIN;
-
-/** 还没收进版本：发版单位改成主线提交后，这些条目不再收进 vN 小节（#1753）。 */
-const UNRELEASED_WHY = '发版单位已改成主线提交，这些条目不再收进「vN」小节；对照用，不等于还没上线。';
 
 type Commits = Extract<ReleasedCommits, { state: 'ok' }>['commits'];
 
@@ -55,25 +47,25 @@ function CommitList({ commits, now }: { commits: Commits; now: number }) {
       {commits.map((c) => (
         <li
           key={`${c.at}-${c.sha}-${c.event}`}
-          // 三列轨道换成 grid-cols-changelog。
-          className="grid grid-cols-changelog items-baseline gap-x-3 px-4 py-2.5 text-sm"
+          // 窄屏：提交号和标题一行，徽标和时间换到第二行；宽屏三样排一行。标题列 min-w-0 flex-1，不被时间和徽标挤塌。
+          className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2.5 text-sm"
         >
-          <span className="num rounded bg-muted px-1.5 py-0.5 text-center text-xs">{c.short}</span>
-          <div className="min-w-0">
+          <span className="num shrink-0 rounded bg-muted px-1.5 py-0.5 text-center text-xs">{c.short}</span>
+          <div className="min-w-0 flex-1">
             {c.title !== null ? (
               <p className="break-words">{c.title}</p>
             ) : (
               <Unread why={c.titleWhy ?? '标题没读到'} />
             )}
           </div>
-          <div className="num text-right text-xs whitespace-nowrap text-muted-foreground">
+          <div className="num w-full text-xs whitespace-nowrap text-muted-foreground sm:w-auto sm:text-right">
             {c.event !== 'release' ? (
               <span className="mr-2 rounded-full border border-st-stall/40 px-1.5 py-0.5 text-ink-stall">
                 {EVENT_TEXT[c.event]}
               </span>
             ) : null}
             发于 {formatAgo(c.at, now)}
-            <span className="block text-caption text-faint">{formatDateTime(c.at)}</span>
+            <span className="ml-2 text-caption text-faint sm:ml-0 sm:block">{formatDateTime(c.at)}</span>
           </div>
         </li>
       ))}
@@ -117,159 +109,23 @@ function ReleasedCommitsPanel({ query }: { query: ReturnType<typeof useFranceRel
   );
 }
 
-/** 还没收进版本：默认折叠长篇正文，标题行带箭头；段首说明为什么还没收进版本（#1753）。 */
-function UnreleasedPanel({ section, hasContent }: { section: string; hasContent: boolean }) {
-  const [open, setOpen] = useState(false);
-  const bodyId = useId();
-  return (
-    <section className="rounded-xl border bg-card text-card-foreground shadow-card-edge">
-      <header className="border-b">
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-controls={bodyId}
-          onClick={() => setOpen((v) => !v)}
-          className="flex w-full items-center gap-2 px-4 py-3 text-left hover:bg-accent/40"
-        >
-          <h2 className="min-w-0 flex-1 text-sm font-semibold">还没收进版本的更新</h2>
-          <ChevronDown
-            className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')}
-            aria-hidden
-          />
-        </button>
-        <p className="px-4 pb-3 text-xs text-muted-foreground" data-unreleased-why>
-          {UNRELEASED_WHY}
-        </p>
-      </header>
-      {open ? (
-        <div id={bodyId} className="p-4">
-          {hasContent ? (
-            <MarkdownLite source={section} />
-          ) : (
-            <Empty
-              icon={CalendarClock}
-              title="还什么都没写"
-              hint="CHANGELOG.md 的 Unreleased 段现在是空的。"
-            />
-          )}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-/** 目录入口：选中白底带阴影，未选中灰字——像可点的页签（#1753）。 */
-function tocClass(on: boolean): string {
-  return cn(
-    'flex w-full items-baseline justify-between gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors',
-    on
-      ? 'bg-card font-medium text-foreground shadow-sm'
-      : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
-  );
-}
-
 export default function Changelog() {
-  // 对照区看哪一段：null = 还没收进版本的那段（默认）；否则是 CHANGELOG 里的某一版
-  const [picked, setPicked] = useState<string | null>(null);
   const query = useFranceReleasedCommits();
   const { refetch, isFetching, dataUpdatedAt } = query;
-  const refresh = (
-    <RefreshBar
-      onRefresh={() => void refetch()}
-      isFetching={isFetching}
-      dataUpdatedAt={dataUpdatedAt}
-      staleAfterMs={CHANGELOG_STALE_AFTER_MS}
-    />
-  );
-  let data: ReturnType<typeof readChangelog>;
-  try {
-    data = readChangelog();
-  } catch (error) {
-    return (
-      <Page
-        title="更新日志"
-        description="法国已发布的提交，和仓根 CHANGELOG.md 的一份对照。"
-        actions={refresh}
-      >
-        <ReleasedCommitsPanel query={query} />
-        <div className="mt-4">
-          <LoadError error={error} what="CHANGELOG" />
-        </div>
-      </Page>
-    );
-  }
-  const { section, released, hasContent } = data;
-
   return (
     <Page
       title="更新日志"
-      description="上面是法国已发布的提交（发版单位是主线提交）；下面是仓根 CHANGELOG.md 的一份对照，按版本写的记录是旧做法留下的。"
-      actions={refresh}
+      description="法国已发布的提交，新的在前。"
+      actions={
+        <RefreshBar
+          onRefresh={() => void refetch()}
+          isFetching={isFetching}
+          dataUpdatedAt={dataUpdatedAt}
+          staleAfterMs={CHANGELOG_STALE_AFTER_MS}
+        />
+      }
     >
       <ReleasedCommitsPanel query={query} />
-
-      {/* 版式（驾驶舱改版 2026-10-07）：左边正文（Markdown 渲染成小标题和列表），右边目录（还没收进版本的 + CHANGELOG 里的每一版，点一版看正文）。 */}
-      <h2 className="mt-8 mb-3 text-sm font-semibold">CHANGELOG.md 对照</h2>
-      <div className="grid items-start gap-4 xl:grid-cols-4">
-        <div className="min-w-0 xl:col-span-3">
-          {picked === null ? (
-            <UnreleasedPanel section={section} hasContent={hasContent} />
-          ) : (
-            <RecordedPanel version={picked} date={released.find((r) => r.version === picked)?.date} />
-          )}
-        </div>
-
-        <nav aria-label="CHANGELOG 目录" className="rounded-xl border bg-card p-2 shadow-card-edge">
-          <div className="rounded-lg bg-muted p-1">
-            <button
-              type="button"
-              onClick={() => setPicked(null)}
-              aria-current={picked === null ? 'true' : undefined}
-              className={tocClass(picked === null)}
-            >
-              <span>还没收进版本</span>
-            </button>
-          </div>
-          <h3 className="mt-2 px-3 pt-2 pb-1 text-xs font-medium text-muted-foreground">按版本写的记录</h3>
-          {released.length === 0 ? (
-            <Empty icon={ScrollText} title="一条都没有" hint="CHANGELOG.md 里没有按版本写的记录。" />
-          ) : (
-            <div className="space-y-0.5 rounded-lg bg-muted p-1">
-              {released.map((r) => (
-                <button
-                  key={`${r.version}-${r.date}`}
-                  type="button"
-                  onClick={() => setPicked(r.version)}
-                  aria-current={picked === r.version ? 'true' : undefined}
-                  className={tocClass(picked === r.version)}
-                >
-                  <span className="num font-medium">{r.version}</span>
-                  <span className="num text-xs opacity-80">{r.date}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </nav>
-      </div>
     </Page>
-  );
-}
-
-/** CHANGELOG 里的某一版：正文从 CHANGELOG 里切出来；切不出就照实说没读成。 */
-function RecordedPanel({ version, date }: { version: string; date: string | undefined }) {
-  let body: string;
-  try {
-    body = releasedBody(version);
-  } catch (error) {
-    return <LoadError error={error} what={`${version} 的更新日志`} />;
-  }
-  return (
-    <Panel title={version} description={date ? `${date} 记` : undefined}>
-      {body ? (
-        <MarkdownLite source={body} />
-      ) : (
-        <p className="text-sm text-muted-foreground">这一版没写正文。</p>
-      )}
-    </Panel>
   );
 }
