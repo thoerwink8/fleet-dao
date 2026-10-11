@@ -49,13 +49,12 @@ import { Tag } from '../components/layout/tag';
 import { RefreshBar } from '../components/refresh-bar';
 import { ReleaseCardBody, ReleaseEntry } from '../components/release-card';
 import { Button } from '../components/ui/button';
-import { formatAgo, TIME } from '../lib/format';
+import { formatAgo, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { freshnessNow, nodeAgeText, useNodeSelection } from '../lib/node';
 import { useShownError } from '../lib/shown-error';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
-import { usePhone } from '../lib/viewport';
 
 export function meta() {
   return [{ title: brand.title('法国') }];
@@ -207,7 +206,6 @@ function EnvColumn({
   tone,
   selected,
   note,
-  onFold,
   children,
 }: {
   id: string;
@@ -217,8 +215,6 @@ function EnvColumn({
   tone: 'ok' | 'stale';
   selected: boolean;
   note?: ReactNode;
-  /** 有就在头上画「收起」（手机上点开过的失联环境）。 */
-  onFold?: (() => void) | undefined;
   children: ReactNode;
 }) {
   return (
@@ -252,16 +248,6 @@ function EnvColumn({
           {age}
         </p>
         {note ? <p className="mt-0.5 text-meta text-muted-foreground">{note}</p> : null}
-        {onFold ? (
-          <button
-            type="button"
-            aria-expanded
-            onClick={onFold}
-            className="mt-1 inline-flex min-h-10 items-center gap-1 text-meta text-muted-foreground underline underline-offset-2"
-          >
-            收起
-          </button>
-        ) : null}
       </header>
       {children}
     </section>
@@ -307,8 +293,84 @@ function MissingSnapshot({ nodeId }: { nodeId: string }) {
  */
 const FRANCE_STALE_AFTER_MS = 5 * TIME.MIN;
 
-/** 失联超过这么久，手机上这台默认折成一行。 */
-const LONG_GONE_MS = TIME.DAY;
+/**
+ * 远程环境超过这么久没报，就不再占对照列，收成对照区下面一行（#1888，取代手机上才折的 #1837）。
+ * 24 小时：一天没报的环境，旧的「在跑」「N 项红」不再有对比价值；正在看的那台（选中）不收。
+ */
+const STALE_NODE_FOLD_MS = 24 * TIME.HOUR;
+
+const isLongGone = (n: NodeListItem, now: number): boolean =>
+  freshnessNow(n, now) === 'stale' &&
+  n.receivedAt !== undefined &&
+  now - Date.parse(n.receivedAt) > STALE_NODE_FOLD_MS;
+
+/**
+ * 对照区下面收起的一行：每台超过阈值没报的远程环境一行说明，点开才画最后一次的快照（照对照列的画法，标明是旧数据）。
+ * 不报对不跑引擎的环境是常态，所以用 info 不用红。
+ */
+function StaleNodes({
+  nodes,
+  snapshotOf,
+  now,
+}: {
+  nodes: readonly NodeListItem[];
+  snapshotOf: (
+    n: NodeListItem,
+  ) => { error: unknown; data: NodeDetail | undefined; refetch: () => unknown } | undefined;
+  now: number;
+}) {
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
+  const toggle = (id: string) =>
+    setOpen((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  return (
+    <div data-env-gone-list className="mt-3 space-y-2">
+      {nodes.map((n) => {
+        const isOpen = open.has(n.id);
+        const gap = formatDuration(now - Date.parse(n.receivedAt ?? ''));
+        return (
+          <div key={n.id} data-env-gone={n.id}>
+            <Notice
+              tone="info"
+              action={
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  aria-expanded={isOpen}
+                  onClick={() => toggle(n.id)}
+                  className="max-md:min-h-10"
+                >
+                  {isOpen ? '收起' : '点开看快照'}
+                  <ChevronDown
+                    className={cn('size-4 transition-transform', isOpen && 'rotate-180')}
+                    aria-hidden
+                  />
+                </Button>
+              }
+            >
+              {n.name}：{gap}没报（不跑引擎时正常），点开看最后一次的快照
+            </Notice>
+            {isOpen ? (
+              <div className="mt-2 overflow-hidden rounded-lg border">
+                <div
+                  data-env-columns={1}
+                  className="grid grid-cols-env-compare gap-0"
+                  style={{ '--env-cols': 1 } as CSSProperties}
+                >
+                  <RemoteColumn n={n} snap={snapshotOf(n)} now={now} selected={false} look="row" />
+                </div>
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 type ReadBlock = {
   refetch: () => unknown;
@@ -368,35 +430,8 @@ function RemoteColumn({
   const error = useShownError(n.id, { error: snap?.error, data: snap?.data });
   const age = nodeAgeText(n, now);
   const stale = f !== 'fresh';
-  // 手机上失联超过 24 小时的远程环境默认折成一行（#1837）：旧数据占半屏没用，点开才看；选中的那台不折
-  const phone = usePhone();
-  const [unfolded, setUnfolded] = useState(false);
-  const longGone =
-    f === 'stale' && n.receivedAt !== undefined && now - Date.parse(n.receivedAt) > LONG_GONE_MS;
-  if (phone && longGone && !unfolded && !selected) {
-    return (
-      <section
-        data-env-column={n.id}
-        data-env-column-state="stale"
-        data-env-collapsed
-        className="min-w-0 border-t bg-muted"
-      >
-        <button
-          type="button"
-          aria-expanded={false}
-          onClick={() => setUnfolded(true)}
-          className="flex min-h-10 w-full items-center gap-2 px-4 py-2 text-left text-body text-muted-foreground"
-        >
-          <ServerCog className="size-4 shrink-0" aria-hidden />
-          <span className="min-w-0 flex-1 truncate">
-            {snap?.data?.name ?? n.name} · <span className="text-ink-stall">{age}</span>
-          </span>
-          <span className="shrink-0 text-meta">点开看旧数据</span>
-          <ChevronDown className="size-4 shrink-0" aria-hidden />
-        </button>
-      </section>
-    );
-  }
+  // 超过 24 小时没报的：年龄标成「x 天前的旧数据」，别让人当成现在的样子（收成一行的逻辑在 France 里，#1888）
+  const longGone = isLongGone(n, now);
   const body =
     f === 'never' || snap === undefined ? (
       <Whole>
@@ -434,10 +469,15 @@ function RemoteColumn({
       id={n.id}
       name={snap?.data?.name ?? n.name}
       badge="远程"
-      age={f === 'fresh' ? `上报于 ${age}` : age}
+      age={
+        f === 'fresh'
+          ? `上报于 ${age}`
+          : longGone && n.receivedAt !== undefined
+            ? `${formatDuration(now - Date.parse(n.receivedAt))}前的旧数据`
+            : age
+      }
       tone={stale ? 'stale' : 'ok'}
       selected={selected}
-      onFold={phone && longGone && !selected ? () => setUnfolded(false) : undefined}
       note={
         f === 'stale'
           ? '失联，以下是旧数据。下面是它最后一次报的样子，不是现在的；要看现在的请去那台上看。'
@@ -473,8 +513,16 @@ export default function France() {
   const snapshots = useNodeSnapshots(received.map((n) => n.id));
   // 列表还没回来时先别画：不然会先按「一台」画出卡片，有远程时再跳成对照列。
   const nodesPending = nodes.isPending && nodes.data === undefined;
-  // 只有一台（列表读成了、一台远程都没有）不画对照列。读列表失败也不画空的对照列，本台改用卡片，上面写明没读成。
-  const comparing = remote.length > 0;
+  // 超过 24 小时没报的（没选中的）收成对照区下面一行，不进对照列（#1888）
+  const folded = remote.filter((n) => nodeId !== n.id && isLongGone(n, now));
+  const shown = remote.filter((n) => !folded.includes(n));
+  // 只剩本台（列表读成了、一台远程都没有，或远程都收成了一行）不画对照列。读列表失败也不画空的对照列，本台改用卡片，上面写明没读成。
+  const comparing = shown.length > 0;
+  const snapshotOf = (n: NodeListItem) => {
+    const i = received.findIndex((r) => r.id === n.id);
+    return i < 0 ? undefined : snapshots[i];
+  };
+  const goneRows = folded.length > 0 ? <StaleNodes nodes={folded} snapshotOf={snapshotOf} now={now} /> : null;
   const look = 'row' as const;
   // 「在用版本」那一行的发布入口（#1255）：只给本台那一列；发版卡读不到写没查成和原因，不画一个点不了的假按钮。
   const selectedEngine =
@@ -532,9 +580,9 @@ export default function France() {
       ) : comparing ? (
         <Section flush title="本台和远程环境" description="每个环境一列，六项各占一行，横着对比。">
           <div
-            data-env-columns={1 + remote.length}
+            data-env-columns={1 + shown.length}
             className="grid grid-cols-env-compare gap-0"
-            style={{ '--env-cols': 1 + remote.length } as CSSProperties}
+            style={{ '--env-cols': 1 + shown.length } as CSSProperties}
           >
             <EnvColumn
               id="local"
@@ -564,13 +612,12 @@ export default function France() {
                 engineNote: nodeId === null && standby ? <StandbyNote /> : undefined,
               })}
             </EnvColumn>
-            {remote.map((n) => {
-              const idx = received.findIndex((r) => r.id === n.id);
+            {shown.map((n) => {
               return (
                 <RemoteColumn
                   key={n.id}
                   n={n}
-                  snap={idx < 0 ? undefined : snapshots[idx]}
+                  snap={snapshotOf(n)}
                   now={now}
                   selected={nodeId === n.id}
                   look={look}
@@ -579,6 +626,7 @@ export default function France() {
               );
             })}
           </div>
+          {goneRows ? <div className="border-t p-3">{goneRows}</div> : null}
         </Section>
       ) : (
         <>
@@ -598,6 +646,7 @@ export default function France() {
               engineNote: nodeId === null && standby ? <StandbyNote /> : undefined,
             })}
           </div>
+          {goneRows}
         </>
       )}
 

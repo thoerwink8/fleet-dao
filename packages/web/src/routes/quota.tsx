@@ -1,9 +1,8 @@
-import { Gauge } from 'lucide-react';
+import { Gauge, Info } from 'lucide-react';
 import { type CSSProperties, type ReactNode, useState } from 'react';
 import { brand } from '#brand';
 import { errorText, usePools } from '../api/client';
 import type { PoolView, QuotaWindowKind, QuotaWindowView } from '../api/types';
-import { CarpoolReconcileBanner } from '../components/carpool-reconcile';
 import { EmptyState } from '../components/layout/empty-state';
 import { FilterTabs } from '../components/layout/filter-tabs';
 import { List, ListRow } from '../components/layout/list';
@@ -12,9 +11,10 @@ import { Page } from '../components/layout/page';
 import { Section } from '../components/layout/section';
 import { Tag } from '../components/layout/tag';
 import type { LayoutTone } from '../components/layout/tone';
-import { OrgSwitchBanner } from '../components/org-switch';
 import { PoolProblemLine, usePoolProblems } from '../components/pool-problem';
 import { ExpiredQuotaLine, isExpiredWindow, QuotaLine, quotaValue, readingVerb } from '../components/quota';
+import { QuotaNotice } from '../components/quota-notice';
+import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import {
   billingLabel,
   isNearlyExhausted,
@@ -228,8 +228,7 @@ export default function Quota() {
         <LoadingRows rows={6} />
       ) : (
         <>
-          <OrgSwitchBanner view={data.orgSwitch} />
-          <CarpoolReconcileBanner view={data.carpoolReconcile} />
+          <QuotaNotice orgSwitch={data.orgSwitch} reconcile={data.carpoolReconcile} />
           {/* 三个标签排一行，点哪个展开哪个的明细（一次只开一块，再点一下收起）。 */}
           <div data-quota-summary>
             <FilterTabs
@@ -249,10 +248,6 @@ export default function Quota() {
             ) : null}
           </div>
 
-          <p className="mt-3 mb-1.5 text-meta text-muted-foreground">
-            实读 = 从官方接口或它自家网页的用量接口读到；估算 =
-            读不到，按我们自己的用量算，撞到限额时记下上限。
-          </p>
           {pools.length === 0 ? (
             <Section>
               <EmptyState icon={Gauge} title="还没有账号池" />
@@ -269,6 +264,28 @@ export default function Quota() {
         </>
       )}
     </Page>
+  );
+}
+
+/** 表头里的 ⓘ：实读和估算是什么意思（原来是表上面一条灰色图例）。窄屏表头藏起来，每格点开的说明里有同样的读法。 */
+function LegendHint() {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="实读和估算是什么意思"
+          data-quota-legend
+          className="inline-grid size-6 shrink-0 place-items-center rounded-full text-muted-foreground hover:text-foreground focus-visible:ring-focus focus-visible:ring-ring focus-visible:outline-none"
+        >
+          <Info className="size-3.5" aria-hidden />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-auto max-w-xs space-y-1.5 text-body text-muted-foreground">
+        <p>实读：从官方接口或它自家网页的用量接口读到的。</p>
+        <p>估算：读不到，按我们自己的用量算，撞到限额时记下上限。</p>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -298,7 +315,10 @@ function Matrix({
               style={cols}
             >
               <th scope="col" className="font-normal">
-                账号池
+                <span className="inline-flex items-center gap-1">
+                  账号池
+                  <LegendHint />
+                </span>
               </th>
               {kinds.map((k) => (
                 <th scope="col" key={k} className="font-normal">
@@ -341,12 +361,13 @@ function Matrix({
                         </span>
                         {p.windows.length === 0 ? (
                           <span
+                            data-quota-empty
                             className={cn(
-                              'quota-narrow-only text-meta',
+                              'text-meta',
                               p.quotaStatus === 'unread' ? 'text-ink-stall' : 'text-muted-foreground',
                             )}
                           >
-                            {p.quotaStatus === 'unread' ? '没查成' : '没有额度窗'}
+                            {p.quotaStatus === 'unread' ? '没查成' : '无额度窗'}
                           </span>
                         ) : null}
                       </div>
@@ -367,7 +388,8 @@ function Matrix({
                         />
                       ) : null}
                     </th>
-                    {kinds.map((k) => {
+                    {/* 没有任何额度窗的池只画名字这一行，不再补一排「—」。 */}
+                    {(p.windows.length === 0 ? [] : kinds).map((k) => {
                       const ws = p.windows.filter((x) => x.window === k);
                       // 同一池同一类窗有新旧两张时：过期的收成一行灰字，不与新读数并排占大格
                       const expired = ws.filter((w) => isExpiredWindow(w, now));
