@@ -143,7 +143,7 @@ describe('选路', () => {
     expect(!none.ok && none.detail).toContain('不在线（探活或熔断判的）');
   });
 
-  it('在线是很久以前探的（探针可能停了）：照上一次的结论派，理由里写明是多久前的结论', async () => {
+  it('在线是很久以前探的：照派，理由里不再写「探针可能停了」（#1798 片 4 删了 probeNote）', async () => {
     await world(t.db);
     await saveRouteProbe(t.db, {
       routeId: 'solo',
@@ -153,10 +153,9 @@ describe('选路', () => {
     });
     const r = await pick();
     expect(r).toMatchObject({ ok: true, route: { routeId: 'solo' } });
-    expect(r.ok && r.why).toContain(
-      '在线是探针 2 小时前的结论，之后它没再给新结论（探针可能停了），照上一次的结论派',
-    );
-    // 另一条 5 分钟前刚探过：理由里不提
+    expect(r.ok && r.why).not.toContain('探针可能停了');
+    expect(r.ok && r.why).not.toContain('在线是探针');
+    // 另一条 5 分钟前刚探过：理由里也不提
     const fresh = await pick({ avoidRouteIds: ['solo'] });
     expect(fresh).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
     expect(fresh.ok && fresh.why).not.toContain('在线是探针');

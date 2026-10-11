@@ -201,3 +201,103 @@ describe('familyPickerFrom：接到真选路上（避开别的族、不替选路
     ]);
   });
 });
+
+// #1798 片 4：验收选到一条路由时也先派前探一次（15 分钟新鲜线），探不通避开它再选，一轮最多 3 条。
+describe('familyPickerFrom：派前探测（#1798 片 4）', () => {
+  function fakePort(pick: (input: PickRouteInput) => PickRouteResult) {
+    const calls: PickRouteInput[] = [];
+    return {
+      calls,
+      pickRoute: async (input: PickRouteInput) => {
+        calls.push(input);
+        return pick(input);
+      },
+    };
+  }
+
+  /** 记下探过哪些路由；pass 里的探通，其余不通。 */
+  function prober(pass: readonly string[]) {
+    const probed: string[] = [];
+    return {
+      probed,
+      probe: async (input: { routeId: string; label: string }) => {
+        probed.push(input.routeId);
+        return pass.includes(input.routeId)
+          ? { kind: 'pass' as const, label: input.label, detail: '答上了：OK', probed: true }
+          : { kind: 'fail' as const, label: input.label, detail: `${input.routeId} 不通`, counted: true };
+      },
+    };
+  }
+
+  /** 每次选路交回候选表里的下一条（避开名单跳过），和真选路一个口径。 */
+  function candidates(routeIds: readonly string[], family = 'grok') {
+    return fakePort((input) => {
+      const next = routeIds.find((id) => !input.avoidRouteIds.includes(id));
+      if (next === undefined) return { ok: false, waitFor: 'none', detail: '避开之后没了' };
+      return {
+        ok: true,
+        route: { routeId: next, poolId: 'p', modelId: `m-${next}`, family, hostId: 'grok' },
+        why: '有得派',
+      };
+    });
+  }
+
+  it('验收选到 20 分钟前探通的路由：先探一次（15 分钟新鲜线）', async () => {
+    const port = candidates(['r1']);
+    const { probe, probed } = prober(['r1']);
+    const deps = familyPickerFrom(port.pickRoute, ORDER, 'review', undefined, false, { probe })('task-1');
+    const got = await deps.pickRouteForFamily('grok');
+    expect(probed).toEqual(['r1']);
+    expect(got?.routeId).toBe('r1');
+  });
+
+  it('探不通就换下一条：第一条不通、第二条通，交回第二条，失败的记进避开', async () => {
+    const port = candidates(['r1', 'r2']);
+    const { probe, probed } = prober(['r2']);
+    const deps = familyPickerFrom(port.pickRoute, ORDER, 'review', undefined, false, { probe })('task-1');
+    const got = await deps.pickRouteForFamily('grok');
+    expect(probed).toEqual(['r1', 'r2']);
+    expect(got?.routeId).toBe('r2');
+    // 第二次问选路时避开了探不通的那条
+    expect(port.calls[1]?.avoidRouteIds).toContain('r1');
+  });
+
+  it('三条都不通：这一族当成没挑到，onProbeFailed 带上每条的 routeId', async () => {
+    const port = candidates(['r1', 'r2', 'r3', 'r4']);
+    const { probe } = prober([]);
+    const failed: { family: string; ids: string[] }[] = [];
+    const deps = familyPickerFrom(port.pickRoute, ORDER, 'review', undefined, false, {
+      probe,
+      onProbeFailed: (family, failures) => failed.push({ family, ids: failures.map((f) => f.routeId) }),
+    })('task-1');
+    expect(await deps.pickRouteForFamily('grok')).toBeUndefined();
+    expect(failed).toEqual([{ family: 'grok', ids: ['r1', 'r2', 'r3'] }]);
+  });
+
+  it('三条都不通时，选路说派不出的原因是「派前探测」那句（不是 waitFor: none 的空话）', async () => {
+    const port = candidates(['r1', 'r2', 'r3', 'r4']);
+    const { probe } = prober([]);
+    const seen: { family: string; waitFor: string; detail: string }[] = [];
+    const deps = familyPickerFrom(
+      port.pickRoute,
+      ORDER,
+      'review',
+      (family, why) => {
+        seen.push({ family, waitFor: why.waitFor, detail: why.detail });
+      },
+      false,
+      { probe },
+    )('task-1');
+    await deps.pickRouteForFamily('grok');
+    expect(seen).toEqual([
+      { family: 'grok', waitFor: 'none', detail: expect.stringContaining('派前探测：m-r1 不通（r1 不通）') },
+    ]);
+  });
+
+  it('不给 probe：老样子，选到就交回，不探', async () => {
+    const port = candidates(['r1']);
+    const deps = familyPickerFrom(port.pickRoute, ORDER)('task-1');
+    const got = await deps.pickRouteForFamily('grok');
+    expect(got?.routeId).toBe('r1');
+  });
+});

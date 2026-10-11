@@ -1,4 +1,4 @@
-// 派单前探测（#1409）：上一次结论超过 5 分钟才当场探；探不通换下一条；三条都不通就停下并写出每条结果。
+// 派单前探测（#1409）：上一次结论超过 15 分钟才当场探；探不通换下一条；三条都不通就停下并写出每条结果。
 // 按量计费不探。故意造出的失败放最后：探针自己抛，按不通记，不写成通。
 import type { RouteProbeTarget } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
@@ -15,7 +15,8 @@ import {
 } from '../src/workflows/task-support.ts';
 
 const NOW = new Date('2026-10-09T08:00:00.000Z');
-const FRESH_MS = 5 * 60_000;
+/** 新鲜线 15 分钟（#1798 片 4）：不分执行方式，cursor、grok、mirasim 和 Claude 同一条线。 */
+const FRESH_MS = 15 * 60_000;
 
 function target(over: Partial<RouteProbeTarget> = {}): RouteProbeTarget {
   return {
@@ -37,13 +38,19 @@ function target(over: Partial<RouteProbeTarget> = {}): RouteProbeTarget {
     alive: true,
     lastRunAt: null,
     failStreak: 0,
-    previous: { state: 'ok', at: new Date(NOW.getTime() - 6 * 60_000), detail: '答上了：OK' },
+    // 默认：上一次探通已经过了新鲜线（20 分钟前），派前会真探一次
+    previous: { state: 'ok', at: new Date(NOW.getTime() - 20 * 60_000), detail: '答上了：OK' },
     ...over,
   };
 }
 
 function harness(targets: RouteProbeTarget[], over: Partial<RouteProbeJobDeps> = {}) {
-  const saved: { routeId: string; state: string; detail: string }[] = [];
+  const saved: {
+    routeId: string;
+    state: string;
+    detail: string;
+    trigger?: string | null | undefined;
+  }[] = [];
   let probes = 0;
   const deps: RouteProbeJobDeps = {
     targets: async () => targets,
@@ -55,7 +62,7 @@ function harness(targets: RouteProbeTarget[], over: Partial<RouteProbeJobDeps> =
     },
     sessionOrg: async () => ({ ok: true, org: 'carpool' }),
     save: async (w) => {
-      saved.push({ routeId: w.routeId, state: w.state, detail: w.detail });
+      saved.push({ routeId: w.routeId, state: w.state, detail: w.detail, trigger: w.trigger });
       return 'saved';
     },
     runs: { start: async () => 1, finish: async () => {} },
@@ -68,13 +75,13 @@ function harness(targets: RouteProbeTarget[], over: Partial<RouteProbeJobDeps> =
 }
 
 describe('派前探测', () => {
-  it('5 分钟是常量，放在定时探针旁边', () => {
-    expect(DISPATCH_PROBE_FRESH_MS).toBe(FRESH_MS);
+  it('15 分钟是常量，放在定时探针旁边', () => {
+    expect(DISPATCH_PROBE_FRESH_MS).toBe(15 * 60_000);
     expect(DISPATCH_PROBE_LIMIT).toBe(3);
   });
 
-  it('上一次探通还在 5 分钟内（含刚好 5 分钟）：不重复探、不改写结论', async () => {
-    for (const age of [4 * 60_000, FRESH_MS]) {
+  it('上一次探通还在 15 分钟内（含刚好 15 分钟）：不重复探、不改写结论', async () => {
+    for (const age of [14 * 60_000, FRESH_MS]) {
       const t = target({
         previous: { state: 'ok', at: new Date(NOW.getTime() - age), detail: '答上了：OK' },
       });
@@ -89,8 +96,8 @@ describe('派前探测', () => {
     }
   });
 
-  it('上一次结论已经超过 5 分钟：当场探，探通写进 routes 同一处', async () => {
-    for (const age of [FRESH_MS + 1, 6 * 60_000]) {
+  it('上一次结论已经超过 15 分钟：当场探，探通写进 routes 同一处，历史记 trigger 为 dispatch', async () => {
+    for (const age of [FRESH_MS + 1, 20 * 60_000]) {
       const t = target({
         previous: { state: 'ok', at: new Date(NOW.getTime() - age), detail: '答上了：旧的' },
       });
@@ -101,7 +108,7 @@ describe('派前探测', () => {
       });
       expect(h.probes()).toBe(1);
       expect(h.saved).toEqual([
-        { routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了') },
+        { routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了'), trigger: 'dispatch' },
       ]);
       expect(got).toMatchObject({ kind: 'pass', probed: true, label: t.modelId });
     }
@@ -121,7 +128,9 @@ describe('派前探测', () => {
     const got = await probeAssignedRoute(h.deps, createProbeLock(), { routeId: t.routeId, label: t.modelId });
     expect(h.probes()).toBe(1);
     expect(got).toMatchObject({ kind: 'pass', probed: true });
-    expect(h.saved).toEqual([{ routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了') }]);
+    expect(h.saved).toEqual([
+      { routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了'), trigger: 'dispatch' },
+    ]);
   });
 
   it('按需探测的路由探不通：记成不通（退避照现在的规矩），本轮换下一条', async () => {
@@ -140,7 +149,12 @@ describe('派前探测', () => {
     const got = await probeAssignedRoute(h.deps, createProbeLock(), { routeId: t.routeId, label: t.modelId });
     expect(got).toMatchObject({ kind: 'fail', counted: true });
     expect(h.saved).toEqual([
-      { routeId: t.routeId, state: 'failed', detail: expect.stringContaining('连着不通 1 次') },
+      {
+        routeId: t.routeId,
+        state: 'failed',
+        detail: expect.stringContaining('连着不通 1 次'),
+        trigger: 'dispatch',
+      },
     ]);
   });
 
@@ -159,7 +173,12 @@ describe('派前探测', () => {
     if (got.kind !== 'fail') return;
     expect(got.counted).toBe(true);
     expect(h.saved).toEqual([
-      { routeId: t.routeId, state: 'failed', detail: expect.stringContaining('网络不通') },
+      {
+        routeId: t.routeId,
+        state: 'failed',
+        detail: expect.stringContaining('网络不通'),
+        trigger: 'dispatch',
+      },
     ]);
     const decided = afterDispatchProbe(EMPTY_DISPATCH_PROBE, {
       label: got.label,
@@ -217,12 +236,12 @@ describe('派前探测', () => {
     expect(got).toMatchObject({ kind: 'pass', probed: false });
   });
 
-  it('不分执行方式：mirasim 上一次探通超过 5 分钟，派前照样真探，探通写回', async () => {
+  it('不分执行方式：mirasim 上一次探通超过 15 分钟，派前照样真探，探通写回', async () => {
     const t = target({
       routeId: 'mirasim-relay:glm-5.3-flash:mirasim',
       hostId: 'mirasim',
       modelId: 'glm-5.3-flash',
-      previous: { state: 'ok', at: new Date(NOW.getTime() - 6 * 60_000), detail: '答上了：OK' },
+      previous: { state: 'ok', at: new Date(NOW.getTime() - 20 * 60_000), detail: '答上了：OK' },
     });
     let called = 0;
     const h = harness([t], {
@@ -235,7 +254,9 @@ describe('派前探测', () => {
     });
     const got = await probeAssignedRoute(h.deps, createProbeLock(), { routeId: t.routeId, label: t.modelId });
     expect(called).toBe(1);
-    expect(h.saved).toEqual([{ routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了') }]);
+    expect(h.saved).toEqual([
+      { routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了'), trigger: 'dispatch' },
+    ]);
     expect(got).toMatchObject({ kind: 'pass', probed: true, label: 'glm-5.3-flash' });
   });
 
@@ -265,7 +286,9 @@ describe('派前探测', () => {
       label: 'cursor-auto',
     });
     expect(called).toBe(1);
-    expect(h.saved).toEqual([{ routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了') }]);
+    expect(h.saved).toEqual([
+      { routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了'), trigger: 'dispatch' },
+    ]);
     expect(got).toMatchObject({ kind: 'pass', probed: true, label: 'cursor-auto' });
   });
 
@@ -401,14 +424,14 @@ describe('派前探测', () => {
     expect(h.saved).toEqual([]);
   });
 
-  it('grok-4.7 上一次探通 70 分钟前：派前照样真探（不再按执行方式放慢）', async () => {
+  it('grok-4.7 上一次探通 30 分钟前：派前照样真探（15 分钟新鲜线，不分执行方式）', async () => {
     const t = target({
       routeId: 'grok:grok-4.7:grok',
       hostId: 'grok',
       modelId: 'grok-4.7',
       modelName: 'Grok 4.7',
       probeRank: 9,
-      previous: { state: 'ok', at: new Date(NOW.getTime() - 70 * 60_000), detail: '答上了：OK' },
+      previous: { state: 'ok', at: new Date(NOW.getTime() - 30 * 60_000), detail: '答上了：OK' },
     });
     let called = 0;
     const h = harness([t], {
@@ -424,7 +447,9 @@ describe('派前探测', () => {
       label: 'grok-4.7',
     });
     expect(called).toBe(1);
-    expect(h.saved).toEqual([{ routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了') }]);
+    expect(h.saved).toEqual([
+      { routeId: t.routeId, state: 'ok', detail: expect.stringContaining('答上了'), trigger: 'dispatch' },
+    ]);
     expect(got).toMatchObject({ kind: 'pass', probed: true, label: 'grok-4.7' });
   });
 
@@ -446,7 +471,12 @@ describe('派前探测', () => {
     expect(got.counted).toBe(true);
     expect(probes).toBe(2);
     expect(h.saved).toEqual([
-      { routeId: t.routeId, state: 'failed', detail: expect.stringContaining('探针自己出错') },
+      {
+        routeId: t.routeId,
+        state: 'failed',
+        detail: expect.stringContaining('探针自己出错'),
+        trigger: 'dispatch',
+      },
     ]);
     expect(got.detail).toContain('连探两次都没通');
     expect(got.detail).not.toContain('答上了');

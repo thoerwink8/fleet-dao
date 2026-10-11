@@ -201,6 +201,11 @@ function rig(
       if (pick?.ok && hardBanFor(subjectOf(pick.route), input.uiWork ? 'ui' : input.stage)) {
         return { ok: false, waitFor: 'none', detail: '犯禁令：GPT 不做 UI 类活' };
       }
+      // 真选路按 avoidRouteIds 避开这一族已经挑过、没派成的那几条：这里一族的剧本只有一条，避开了就是「这一族没有」
+      // （派前探测不通换下一条时，第二次问同一族要靠它换到别的族，见 #1798 片 4）
+      if (pick?.ok && input.avoidRouteIds.includes(pick.route.routeId)) {
+        return { ok: false, waitFor: 'none', detail: '没有路由' };
+      }
       return pick || { ok: false, waitFor: 'none', detail: '没有路由' };
     },
     spawner: {
@@ -1319,5 +1324,72 @@ describe('验收会话撞上游临时故障：等一会儿再验，认不出就�
     const got = await r.run(r.input(), ctx());
     expect(got.unavailable).toBeUndefined();
     expect(got.retry).toBeDefined();
+  });
+});
+
+// #1798 片 4：验收选到一条路由后也先派前探一次（15 分钟新鲜线，不再放行 cursor/grok/mirasim），
+// 探不通避开它再选，一轮最多 3 条；三条都不通不当成「验不了」，回 retry 过一会儿再来。
+describe('验收派前探测（#1798 片 4）', { timeout: 30_000 }, () => {
+  /** 记下探过哪些路由；pass 里的探通，其余不通（真探、占名额）。 */
+  function prober(pass: readonly string[]) {
+    const probed: string[] = [];
+    return {
+      probed,
+      probe: async (input: { routeId: string; label: string }) => {
+        probed.push(input.routeId);
+        return pass.includes(input.routeId)
+          ? { kind: 'pass' as const, label: input.label, detail: '答上了：OK', probed: true }
+          : { kind: 'fail' as const, label: input.label, detail: `${input.routeId} 不通`, counted: true };
+      },
+    };
+  }
+
+  it('验收选到 20 分钟前探通的路由：先探一次再起会话（15 分钟新鲜线）', async () => {
+    const { probe, probed } = prober(['route-gpt']);
+    const r = rig({ deps: { probe } });
+    const got = await r.run(r.input(), ctx());
+    expect(got).toMatchObject({ pass: true });
+    expect(probed).toEqual(['route-gpt']);
+    expect(r.specs).toHaveLength(1);
+  });
+
+  it('探不通就换下一条：gpt 不通、grok 通，最终 grok 起会话，gpt 预占的名额放掉', async () => {
+    const gpt = okRoute('gpt');
+    if (!gpt.ok) throw new Error('夹具：okRoute 该是派出去的');
+    const { probe, probed } = prober(['route-grok']);
+    const r = rig({
+      picks: {
+        gpt: { ...gpt, route: { ...gpt.route, reservationId: 'res-gpt' } },
+        grok: okRoute('grok'),
+      },
+      deps: { probe },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got).toMatchObject({ pass: true });
+    expect(probed).toEqual(['route-gpt', 'route-grok']);
+    expect(r.startedWith).toEqual([undefined]); // grok 那条没带预占
+    expect(r.released).toContain('res-gpt'); // 探不通的 gpt 当场放掉
+    expect(r.specs).toHaveLength(1);
+    expect(r.recorded[0]?.routeId).toBe('route-grok');
+  });
+
+  it('三条都不通：回 retry（过一会儿重来），不起会话、不贴 failure', async () => {
+    const { probe, probed } = prober([]);
+    const r = rig({
+      picks: {
+        gpt: okRoute('gpt'),
+        grok: okRoute('grok'),
+        claude: okRoute('claude'),
+        deepseek: okRoute('deepseek'),
+      },
+      deps: { probe },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(false);
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry).toBeDefined();
+    expect(probed).toHaveLength(3); // 一轮最多探 3 条
+    expect(r.specs).toHaveLength(0);
+    expect(r.posted.map((p) => p.state)).not.toContain('failure');
   });
 });
