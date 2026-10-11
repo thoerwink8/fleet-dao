@@ -22,10 +22,17 @@ import { EFFORT_HINT } from '../lib/efforts';
 import { WINDOW_MIN_ROWS, windowRange } from '../lib/list-window';
 import { purposeLabel } from '../lib/routing';
 import { supportedPurposeEfforts } from '../lib/routing-browse';
-import { NativeSelect } from './layout/native-select';
 import { Notice } from './layout/notice';
+import {
+  RowMenu,
+  RowMenuItem,
+  RowMenuLabel,
+  RowMenuRadioGroup,
+  RowMenuRadioItem,
+  RowMenuSeparator,
+} from './layout/row-menu';
 import { SearchInput } from './layout/search-input';
-import { RowMenu, type RowMoves, TAP, useRoutingEdit } from './routing-edit';
+import { ROW_MENU_TITLE, RowMoveItems, type RowMoves, TAP, useRoutingEdit } from './routing-edit';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -283,24 +290,25 @@ function effortBlockedWhy(modelId: string, routes: readonly { hostId: HostId }[]
   return '这几条路由没有共同认的档位';
 }
 
+/** 行上小字里写的档位（「档位 高」）；不另配不写。 */
+export function effortWord(effort: SessionEffort | null | undefined): string | null {
+  return effort ? EFFORT_WORD[effort] : null;
+}
+
 /**
- * 用途里这一行的档位和「移出」。档位只列这个模型的路由都认的。
- * 给了 menu（手机）：「移出」不再单独一个按钮，和开关、上移、下移一起收进行尾「⋯」菜单（#1806）；档位下拉留在行里。
+ * 用途里这一行的行尾「⋯」菜单（路由页样板 #1915）：档位（单选，只列这个模型的路由都认的）、上移、下移、置顶、置底、移出。
+ * 行里只留名字、状态和开关；这些都是偶尔才动的，收进菜单，各宽度同一个样子。
  */
-export function PurposeModelControls({
+export function PurposeModelMenu({
   purpose,
   model,
   onError,
-  menu,
+  moves,
 }: {
   purpose: RoutingLayerPurpose;
   model: RoutingLayerModel;
   onError: (message: string | null) => void;
-  menu?: {
-    moves: RowMoves;
-    /** 模型开关此刻的样子；一条路由都没有时 unavailable 为 true，菜单里这一项置灰。 */
-    toggle: { enabled: boolean; expectedEnabled: string[]; unavailable: boolean };
-  };
+  moves: RowMoves;
 }) {
   const edit = useRoutingEdit();
   const setEffort = useSetPurposeModelEffort();
@@ -351,77 +359,48 @@ export function PurposeModelControls({
 
   const locked = edit.disabledWhy;
   const blocked = blockedWhy !== null;
+  const effortLocked = locked !== null || setEffort.isPending || blocked;
+  const label = purposeLabel(purpose.purpose);
   return (
     <>
-      <NativeSelect
-        aria-label={`${model.displayName} 的档位`}
-        value={blocked ? '' : value}
-        disabled={locked !== null || setEffort.isPending || blocked}
-        title={locked ?? blockedWhy ?? '这个用途下另配的档位。不另配就按每条路由自己的档起会话'}
-        onChange={(e) => void saveEffort(e.target.value)}
-        className="max-w-28 shrink-0"
-      >
-        <option value="">不另配</option>
-        {blocked
-          ? null
-          : options.map((effort) => (
-              <option key={effort} value={effort} title={EFFORT_HINT[effort]}>
-                {EFFORT_WORD[effort]}
-              </option>
-            ))}
-      </NativeSelect>
-      {blockedWhy ? (
-        <span
-          data-row-note
-          title={blockedWhy}
-          className="order-last basis-full shrink-0 whitespace-normal break-words text-meta leading-snug text-muted-foreground md:w-full"
+      <RowMenu label={`更多操作：${moves.label}`} title={ROW_MENU_TITLE}>
+        {/* 档位：这个用途下另配的档。配不了的整组置灰，说明写在组头下面（以前铺在行里，#1754 收进悬停） */}
+        <RowMenuLabel hint={locked ?? blockedWhy ?? undefined}>
+          <span data-effort-label>{model.displayName} 的档位</span>
+        </RowMenuLabel>
+        <RowMenuRadioGroup
+          aria-label={`${model.displayName} 的档位`}
+          value={blocked ? '' : value}
+          onValueChange={(next) => void saveEffort(next)}
         >
-          {blockedWhy}
-        </span>
-      ) : null}
-      {menu ? (
-        <RowMenu
-          moves={menu.moves}
-          leading={[
-            {
-              key: 'toggle',
-              label: menu.toggle.enabled ? '关闭这个模型' : '开启这个模型',
-              disabled: locked !== null || menu.toggle.unavailable,
-              title: locked ?? (menu.toggle.unavailable ? '这个模型下一条路由都没有' : undefined),
-              onSelect: () =>
-                edit.toggleModel({
-                  modelId: model.modelId,
-                  modelName: model.displayName,
-                  enabled: menu.toggle.enabled,
-                  expectedEnabled: menu.toggle.expectedEnabled,
-                }),
-            },
-          ]}
-          trailing={[
-            {
-              key: 'remove',
-              label: `移出${purposeLabel(purpose.purpose)}`,
-              destructive: true,
-              disabled: locked !== null,
-              title: locked ?? `把 ${model.displayName} 移出${purposeLabel(purpose.purpose)}`,
-              onSelect: () => setConfirm(true),
-            },
-          ]}
-        />
-      ) : (
-        <Button
-          type="button"
-          size="xs"
-          variant="ghost"
-          className={TAP}
+          <RowMenuRadioItem value="" disabled={effortLocked} title="不另配就按每条路由自己的档起会话">
+            不另配
+          </RowMenuRadioItem>
+          {blocked
+            ? null
+            : options.map((effort) => (
+                <RowMenuRadioItem
+                  key={effort}
+                  value={effort}
+                  disabled={effortLocked}
+                  title={EFFORT_HINT[effort]}
+                >
+                  {EFFORT_WORD[effort]}
+                </RowMenuRadioItem>
+              ))}
+        </RowMenuRadioGroup>
+        <RowMenuSeparator />
+        <RowMoveItems moves={moves} />
+        <RowMenuSeparator />
+        <RowMenuItem
+          variant="destructive"
           disabled={locked !== null}
-          title={locked ?? `把 ${model.displayName} 移出${purposeLabel(purpose.purpose)}`}
-          aria-label={`把 ${model.displayName} 移出用途`}
-          onClick={() => setConfirm(true)}
+          title={locked ?? `把 ${model.displayName} 移出${label}`}
+          onSelect={() => setConfirm(true)}
         >
-          移出
-        </Button>
-      )}
+          移出{label}
+        </RowMenuItem>
+      </RowMenu>
       <AlertDialog open={confirm} onOpenChange={(open) => !open && !remove.isPending && setConfirm(false)}>
         <AlertDialogContent>
           <AlertDialogHeader>

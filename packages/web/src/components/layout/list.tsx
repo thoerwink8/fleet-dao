@@ -15,6 +15,23 @@ const rowBase =
   'flex min-h-row w-full items-center gap-stack px-section py-[calc((var(--spacing-row)-1.25rem)/2)] text-left outline-none focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-11';
 const rowHover = 'hover:bg-accent';
 
+/**
+ * 一行的外框，给自己管 li 的列表（拖动排序的先后列表）用：行高、左右内边距、元素间距取同一组令牌，和 ListRow 一样高。
+ * 带 group/row：行尾菜单（RowMenu）、拖动柄靠它在悬停这一行时才露出。
+ */
+export function RowFrame({ className, ...rest }: ComponentProps<'div'>) {
+  return (
+    <div
+      data-row-frame
+      className={cn(
+        'group/row relative flex min-h-row w-full items-center gap-stack px-section py-[calc((var(--spacing-row)-1.25rem)/2)] max-md:min-h-11',
+        className,
+      )}
+      {...rest}
+    />
+  );
+}
+
 export function ListRow({
   leading,
   title,

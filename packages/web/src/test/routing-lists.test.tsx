@@ -406,31 +406,37 @@ function mockMobile() {
 }
 
 describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
-  test('用途里的模型行：名字可换行，操作在下一行', async () => {
+  test('用途里的模型行：名字可换行，名字下面一行小字，开关和「⋯」在名字后面', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await screen.findByRole('list', { name: '模型' });
     const row = document.querySelector('li[data-model="opus-5.5"]') as HTMLElement;
-    const shell = row.firstElementChild as HTMLElement;
-    expect(classTokens(shell)).toEqual(expect.arrayContaining(['flex-col', 'md:flex-row']));
+    // 行框是版式组件 RowFrame（行高、内边距取令牌，#1915）
+    const shell = row.querySelector('[data-row-frame]') as HTMLElement;
+    expect(shell).toBeTruthy();
+    expect(classTokens(shell)).toEqual(
+      expect.arrayContaining(['min-h-row', 'px-section', 'max-md:min-h-11']),
+    );
     const name = row.querySelector('[data-row-name]') as HTMLElement;
     expect(name.textContent).toBe('Opus 5.5');
     expect(classTokens(name)).toContain('break-words');
     expect(classTokens(name)).not.toContain('truncate');
+    // 一行小字：厂家 · 几条路几条活
+    expect(row.querySelector('[data-row-meta]')?.textContent).toContain('claude · 3 条路，2 条活');
     const actions = row.querySelector('[data-row-actions]') as HTMLElement;
     expect(name.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // 手机上可点区至少 40（拖动柄 36 起，「⋯」是 icon-sm：手机 40）
     expectTap(within(row).getByRole('button', { name: /^拖动 / }));
-    expectTap(within(row).getByRole('button', { name: /^置顶 / }));
-    expectTap(within(row).getByRole('button', { name: /^置底 / }));
+    expect(classTokens(within(actions).getByRole('button', { name: /^更多操作：/ }))).toEqual(
+      expect.arrayContaining(['max-md:min-h-10', 'max-md:min-w-10']),
+    );
     // 开关是小滑块，不撑成圆：可点的范围用伪元素往外扩
-    expect(classTokens(within(row).getByRole('switch'))).toEqual(
+    expect(classTokens(within(actions).getByRole('switch'))).toEqual(
       expect.arrayContaining(['relative', 'after:absolute', 'after:-inset-y-3']),
     );
-    expectTap(within(row).getByRole('button', { name: /^上移 / }));
-    expectTap(within(row).getByRole('button', { name: /^下移 / }));
-    expectTap(within(row).getByRole('combobox'));
-    expectTap(within(row).getByRole('button', { name: /移出用途/ }));
-    const [pause] = await screen.findAllByRole('button', { name: /暂停账号池/ });
-    expectTap(pause as HTMLElement);
+    // 上移、下移、置顶、置底、档位、移出、整池暂停都不在行里
+    expect(within(row).queryByRole('button', { name: /^(上移|下移|置顶|置底) / })).toBeNull();
+    expect(within(row).queryByRole('combobox')).toBeNull();
+    expect(screen.queryByRole('button', { name: /暂停账号池/ })).toBeNull();
   });
 
   test('手机宽度定高行加高，装得下两行', async () => {

@@ -17,6 +17,65 @@ export interface FilterTabItem<Id extends string = string> {
   tone?: LayoutTone;
 }
 
+export interface FilterTabGroup<Id extends string = string> {
+  key: string;
+  /** 组头：写在这一组前面的小标题（「不是流程里的一段」）。第一组通常不写。 */
+  heading?: ReactNode;
+  /** 组尾一句灰字（「对题：在对话里做，不选路」）。 */
+  note?: ReactNode;
+  items: readonly FilterTabItem<Id>[];
+  'aria-label': string;
+}
+
+/**
+ * 几组同一类的次级筛选排成一行（#1904 起分组说明写在组头上）：组和组之间一道细竖线，后一组前面写组头小标题。
+ * 手机上放不下就换行，组头留在自己那一组前面，不悬在半空。每组各是一个 FilterTabs（同一个选中值）。
+ */
+export function FilterTabGroups<Id extends string = string>({
+  groups,
+  value,
+  onChange,
+  mode = 'toggle',
+  className,
+}: {
+  groups: readonly FilterTabGroup<Id>[];
+  value: Id | undefined;
+  onChange: (id: Id) => void;
+  mode?: 'tabs' | 'toggle';
+  className?: string;
+}) {
+  return (
+    <div className={cn('flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2', className)}>
+      {groups.map((g, i) => (
+        <div
+          key={g.key}
+          data-tab-group={g.key}
+          className={cn(
+            'flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-1',
+            i > 0 && 'md:border-l md:pl-3',
+          )}
+        >
+          {g.heading ? (
+            <span className="shrink-0 text-meta text-muted-foreground" data-tab-group-heading>
+              {g.heading}
+            </span>
+          ) : null}
+          <FilterTabs
+            mode={mode}
+            variant="secondary"
+            aria-label={g['aria-label']}
+            items={g.items}
+            value={value}
+            onChange={onChange}
+            className="min-w-0"
+          />
+          {g.note ? <span className="text-meta text-muted-foreground">{g.note}</span> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** 渐隐带的宽度（rem，跟着字号走，不写死像素）。 */
 const FADE = '1.5rem';
 

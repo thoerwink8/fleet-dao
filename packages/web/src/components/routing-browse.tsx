@@ -737,13 +737,10 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
         <p className="px-3 py-6 text-center text-body text-muted-foreground">这个渠道下一条路由都没有</p>
       ) : null}
       {inLayers.length > 0 ? (
-        <ol aria-label={`${c.channel.name} 的路由`}>
+        <ol aria-label={`${c.channel.name} 的路由`} className="py-1">
           {inLayers.map(({ route, modelId, modelName }) => (
-            <li
-              key={route.routeId}
-              data-route={route.routeId}
-              className={cn('border-b px-3 py-2.5 last:border-b-0', !route.enabled && 'bg-muted')}
-            >
+            // 行高、内边距由 RouteItem 的行框（RowFrame）给；关着的只变淡，不整行灰底（路由页样板 #1915）
+            <li key={route.routeId} data-route={route.routeId} className="relative hover:bg-accent">
               <RouteItem
                 route={route}
                 modelId={modelId}

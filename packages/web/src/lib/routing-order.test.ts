@@ -113,14 +113,12 @@ describe('模型行：长说明不跟名字挤在一起', () => {
     const list = await screen.findByRole('list', { name: '模型' });
     const row = list.querySelector('li[data-model="gpt-5.6-luna"]') as HTMLElement;
     const name = row.querySelector('[data-row-name]') as HTMLElement;
-    const note = row.querySelector('[data-row-note]') as HTMLElement;
+    // #1915 起长说明不在行里铺开：名字下面那行小字悬停是全文，行尾「⋯」的档位组头下面也写着
+    const note = row.querySelector('[data-effort-tip]') as HTMLElement;
     expect(name.textContent).toBe('GPT 5.6 luna');
     expect(name.className).not.toContain('truncate');
-    expect(note.textContent).toBe('引擎还没接上，起不了会话');
-    expect(note.getAttribute('title')).toBe('引擎还没接上，起不了会话');
+    expect(note.getAttribute('title')).toBe('档位配不了：引擎还没接上，起不了会话');
     expect(name.contains(note)).toBe(false);
-    expect(note.className).not.toContain('truncate');
-    // 自己占一行：窄宽度下不再跟名字抢同一行的宽度
-    expect(note.className).toContain('basis-full');
+    expect(row.textContent).not.toContain('引擎还没接上');
   });
 });
