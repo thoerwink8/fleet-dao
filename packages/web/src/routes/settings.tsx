@@ -402,11 +402,13 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
   // 「未配置」的格子默认是灰色占位「—」，点一下才变输入框；点开了但没填的，离开输入框就缩回占位。
   const [editing, setEditing] = useState<ReadonlySet<string>>(new Set());
   const [focusKey, setFocusKey] = useState<string | null>(null);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 服务端版本变了、池列表读到了才重置，不跟着输入重置。
+  // 池数据带实时用量，后台每次重拉都换引用；只跟池与窗口的形状走，否则刚点开的格子、没保存的草稿会被打回（#1871）。
+  const shape = rows.map((r) => `${r.pool.id}:${r.kinds.join(',')}`).join(';');
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 服务端版本变了、池与窗口的形状变了才重置，不跟着输入、用量重置。
   useEffect(() => {
     setDraft(initial());
     setEditing(new Set());
-  }, [s?.version, pools.data]);
+  }, [s?.version, shape]);
   useEffect(() => {
     if (focusKey) document.getElementById(`reserve-${focusKey.replace('|', '-')}`)?.focus();
   }, [focusKey]);

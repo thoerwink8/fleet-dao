@@ -83,7 +83,7 @@ export function FilterTabs<Id extends string = string>({
             {...(mode === 'tabs' ? { role: 'tab', 'aria-selected': selected } : { 'aria-pressed': selected })}
             onClick={() => onChange(it.id)}
             className={cn(
-              'inline-flex h-[calc(var(--spacing-control)-0.25rem)] shrink-0 items-center gap-1.5 rounded-md px-3 text-body whitespace-nowrap transition-colors duration-100 outline-none focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-10',
+              'inline-flex h-[calc(var(--spacing-control)-0.25rem)] shrink-0 items-center gap-1.5 rounded-md px-3 text-body whitespace-nowrap transition-colors duration-100 outline-none focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-10 max-md:min-w-10 max-md:justify-center',
               selected
                 ? 'bg-card font-medium text-foreground shadow-xs'
                 : 'text-muted-foreground hover:text-foreground',

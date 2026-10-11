@@ -28,14 +28,14 @@ const FILES = [
  */
 const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
   { file: 'components/home/health-strip.tsx', snippet: 'max-w-health-detail' },
-  { file: 'components/home/health-strip.tsx', snippet: 'max-w-health-detail truncate text-caption' },
+  { file: 'components/home/health-strip.tsx', snippet: 'max-w-health-detail truncate text-meta' },
   {
     file: 'components/home/decision-card.tsx',
-    snippet: 'text-caption font-medium uppercase tracking-wide text-ink-human',
+    snippet: '<Tag tone="human">',
   },
   {
     file: 'components/home/decision-card.tsx',
-    snippet: 'num shrink-0 whitespace-nowrap text-caption text-muted-foreground',
+    snippet: 'num shrink-0 whitespace-nowrap text-meta text-muted-foreground',
   },
   { file: 'components/layout/list.tsx', snippet: 'absolute inset-y-0 left-0 w-rail' },
   { file: 'components/job-row.tsx', snippet: 'text-meta text-muted-foreground' },
@@ -44,7 +44,8 @@ const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
   { file: 'routes/routing-status.tsx', snippet: 'lg:max-h-routing-pane' },
   { file: 'routes/routing-status.tsx', snippet: 'text-caption font-medium leading-5 text-ink-run' },
   { file: 'components/probe-log.tsx', snippet: 'size-2 shrink-0 rounded-2' },
-  { file: 'routes/changelog.tsx', snippet: 'flex flex-wrap items-baseline' },
+  // #1851：提交行迁到 ListRow，标题列和时间列仍在同一行内可换行、基线对齐
+  { file: 'routes/changelog.tsx', snippet: 'flex-wrap items-baseline' },
 ];
 
 /** 这 12 处用到的档位。why 必须出现在定义行往上 8 行里的注释中。 */

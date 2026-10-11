@@ -3,6 +3,9 @@
 //   1) 每条规则 R0–R10：一条故意造红的写法要报出来，一条合规写法要放过；
 //   2) 旧账清单的判法：不在清单的文件一条都不许有，清单里的条数只许减（减了要改清单）；
 //   3) 整个 packages/web/src 对着 design-legacy.json 没有新违规。
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import {
   ALLOWLIST,
@@ -237,6 +240,14 @@ describe('旧账清单：只减不加', () => {
   });
   test('计数按文件、按规则', () => {
     expect(countHits(hits)).toEqual({ [PAGE]: { R2: 2, R5: 1 } });
+  });
+});
+
+describe('令牌名不撞车', () => {
+  test('app.css 里没有 --color-canvas：它会让 text-canvas 被当成文字颜色，字号类不生成（#1850）', () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../app.css'), 'utf8');
+    expect(css).not.toMatch(/--color-canvas\s*:/);
+    expect(css).toMatch(/--text-canvas\s*:/);
   });
 });
 

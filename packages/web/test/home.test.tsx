@@ -218,14 +218,14 @@ describe('home（/）：四种状态', () => {
     // 抽屉按钮：要你拍的 2 条（醒目色），旁边是做完的
     const button = screen.getByRole('button', { name: /要你拍的 2 条/ });
     expect(button.textContent).toContain('2');
-    expect(button.className).toContain('text-ink-human');
+    expect(button.getAttribute('data-tone')).toBe('human');
     expect(screen.getByRole('button', { name: /做完的/ })).toBeTruthy();
   });
 
   test('没有要你拍的：按钮写 0、不用醒目色', () => {
     renderHome({ status: 'data', data: { ...SAMPLE, decisions: [] } });
     const button = screen.getByRole('button', { name: /要你拍的 0 条/ });
-    expect(button.className).not.toContain('text-ink-human');
+    expect(button.getAttribute('data-tone')).toBeNull();
   });
 
   test('点按钮开抽屉：两个分页签，要你拍的单列通栏、时间不换行；Esc 关', () => {
@@ -240,9 +240,9 @@ describe('home（/）：四种状态', () => {
     expect(list?.tagName).toBe('UL');
     expect(list?.className).toBe('grid grid-cols-1 gap-2');
     // 抽屉窄：卡片一直上文下按钮，不随屏宽改成左右排
-    expect(card?.className).not.toContain('sm:flex-row');
+    expect(card?.getAttribute('data-stacked')).toBe('true');
     const time = card?.querySelector('.whitespace-nowrap');
-    expect(time?.className).toContain('text-caption');
+    expect(time?.className).toContain('text-meta');
     fireEvent.click(screen.getByRole('tab', { name: /做完的/ }));
     expect(document.querySelector('[data-done-card]')).toBeTruthy();
     expect(document.querySelector('[data-decision-card]')).toBeNull();
@@ -268,7 +268,7 @@ describe('home（/）：四种状态', () => {
     expect(document.querySelector('[data-home-drawer]')).toBeNull();
     expect(document.querySelector('[data-decision-card]')).toBeNull();
     const button = screen.getByRole('button', { name: /要你拍的 2 条/ });
-    expect(button.className).toContain('text-ink-human');
+    expect(button.getAttribute('data-tone')).toBe('human');
     expect(document.querySelector('[data-board-now] [aria-expanded]')?.getAttribute('aria-expanded')).toBe(
       'false',
     );
@@ -396,9 +396,8 @@ describe('home（/）：四种状态', () => {
     await waitFor(() => expect(document.querySelector('[data-running-card="verify_pending"]')).toBeTruthy());
     const card = document.querySelector('[data-running-card="verify_pending"]');
     expect(card).toBeTruthy();
-    const chip = card?.querySelector('[class*="bg-st-"]');
-    expect(chip?.className).toContain('bg-st-stall');
-    expect(chip?.className).not.toContain('bg-st-fail');
+    const chip = card?.querySelector('[data-tone]');
+    expect(chip?.getAttribute('data-tone')).toBe('stall');
   });
 
   test('持续状态条引擎关时用「提示」色（不是失败红）', () => {

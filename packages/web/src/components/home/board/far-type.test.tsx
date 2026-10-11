@@ -3,22 +3,28 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { farIdScreenPx, farTitleFontSize, farTitleScreenPx } from './board-ui';
-import { FAR_ID_DESIGN_PX, FAR_TITLE_DESIGN_PX, farIdFontSize, segmentNodeWidth } from './far-type';
+import {
+  FAR_ID_DESIGN_PX,
+  FAR_TITLE_DESIGN_PX,
+  FAR_TITLE_FLOOR_PX,
+  farIdFontSize,
+  segmentNodeWidth,
+} from './far-type';
 import { buildGraph, NODE_SIZE, segmentName } from './model';
 import { FarSegment, FarTicket } from './nodes';
 
 afterEach(cleanup);
 
 describe('远档单子', () => {
-  test('标题用 --text-strong、单号用 --text-sub：标题字号大于单号', () => {
+  test('标题用 --text-heading、单号用 --text-body：标题字号大于单号', () => {
     render(<FarTicket tone="run" id="#1742" title="数据库夜间备份超时" />);
     const title = document.querySelector<HTMLElement>('[data-far-title]');
     const id = document.querySelector<HTMLElement>('[data-far-id]');
     expect(title).toBeTruthy();
     expect(id).toBeTruthy();
     // 字号写在内联样式里（max(… var(--text-*) …) happy-dom 不收），这里对字号函数本身
-    expect(farTitleFontSize()).toContain('var(--text-strong)');
-    expect(farIdFontSize()).toContain('var(--text-sub)');
+    expect(farTitleFontSize()).toContain('var(--text-heading)');
+    expect(farIdFontSize()).toContain('var(--text-body)');
     expect(FAR_TITLE_DESIGN_PX).toBeGreaterThan(FAR_ID_DESIGN_PX);
     // 不管缩放到哪里，屏幕上标题都比单号大
     for (const zoom of [0.15, 0.176, 0.25, 0.4]) {
@@ -49,8 +55,8 @@ describe('远档段节点', () => {
     expect(segmentNodeWidth(['对题', '动手', '验收'])).toBe(NODE_SIZE.segment.width);
     const wide = segmentNodeWidth(['对题', '还没开始对题']);
     expect(wide).toBeGreaterThan(NODE_SIZE.segment.width);
-    // 6 个字、缩放到最小时每个字不小于 11px 屏幕字号 → 画布坐标 11 / 0.15
-    expect(wide).toBeGreaterThanOrEqual(Math.ceil((6 * 11) / 0.15));
+    // 6 个字、缩放到最小时每个字不小于标题下限（12px）屏幕字号 → 画布坐标 12 / 0.15
+    expect(wide).toBeGreaterThanOrEqual(Math.ceil((6 * FAR_TITLE_FLOOR_PX) / 0.15));
     expect(segmentNodeWidth(['还没开始对题'])).toBe(wide);
   });
 
