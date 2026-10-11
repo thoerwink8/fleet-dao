@@ -229,7 +229,7 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
     files: [`${W}routes/france.tsx`, `${W}routes/env.tsx`, `${W}components/engine-master-card.tsx`],
     specs: [spec('07b-env'), spec('07c-nodes')],
   },
-  // 其余页（07）：路由、思考档位、定时任务、操作记录、更新日志、找不到的页面
+  // 其余页（07）：路由、思考档位、定时任务、操作记录、更新日志、找不到的页面；11 量手机宽不横滚
   {
     files: [
       `${W}routes/routing.tsx`,
@@ -244,17 +244,17 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
       `${W}lib/efforts.ts`,
       `${W}lib/changelog.ts`,
     ],
-    specs: [spec('07-other-pages')],
+    specs: [spec('07-other-pages'), spec('11-mobile-overflow')],
   },
   // 定时任务页：08 点它造后端 500
   {
     files: [`${W}routes/schedules.tsx`, `${W}lib/schedule.ts`],
     specs: [spec('07-other-pages'), spec('08-backend-down')],
   },
-  // 操作记录页和设置页共用 lib/audit；10 也去操作记录里核对
+  // 操作记录页和设置页共用 lib/audit；10 也去操作记录里核对；11 量手机宽不横滚
   {
     files: [`${W}routes/audit.tsx`, `${W}lib/audit.ts`],
-    specs: [spec('05-settings'), spec('07-other-pages'), spec('10-credentials')],
+    specs: [spec('05-settings'), spec('07-other-pages'), spec('10-credentials'), spec('11-mobile-overflow')],
   },
   // 占位页：没有任何 spec 点它们（specs 里没有 goto），改它们不跑 e2e，靠每夜全量里别页的回归兜底
   { files: [`${W}routes/soon.tsx`], specs: [] },

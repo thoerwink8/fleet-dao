@@ -1651,6 +1651,7 @@ function probeTarget(route: RouteChoice): RouteProbeTarget {
     channelName: '渠道',
     billing: 'subscription',
     channelEnabled: true,
+    identityCheck: false,
     poolId: route.poolId,
     runAsUser: null,
     orgKind: null,
@@ -1660,6 +1661,8 @@ function probeTarget(route: RouteChoice): RouteProbeTarget {
     modelRetiredAt: null,
     inUse: true,
     alive: true,
+    lastRunAt: null,
+    failStreak: 0,
     previous: null,
   };
 }

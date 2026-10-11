@@ -128,7 +128,7 @@ function ChangeDetails({
           {before !== undefined ? (
             <div>
               <div className="mb-1">之前</div>
-              <pre className="num overflow-x-auto rounded-md bg-muted/70 p-2 text-caption scrollbar-thin">
+              <pre className="num overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-muted/70 p-2 text-caption scrollbar-thin">
                 {json(before)}
               </pre>
             </div>
@@ -136,7 +136,7 @@ function ChangeDetails({
           {after !== undefined ? (
             <div>
               <div className="mb-1">之后</div>
-              <pre className="num overflow-x-auto rounded-md bg-muted/70 p-2 text-caption scrollbar-thin">
+              <pre className="num overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-muted/70 p-2 text-caption scrollbar-thin">
                 {json(after)}
               </pre>
             </div>
