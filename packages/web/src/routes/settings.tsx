@@ -702,7 +702,7 @@ export default function Settings() {
                         title={p.blurb}
                         onClick={() => theme.setPalette(p.id)}
                         className={cn(
-                          'inline-flex h-8 items-center gap-2 rounded-lg border bg-card px-2 text-xs outline-none transition-colors hover:border-border-strong focus-visible:ring-focus focus-visible:ring-ring/50',
+                          'inline-flex h-8 items-center gap-2 rounded-lg border bg-card px-2 text-xs max-md:min-h-10 outline-none transition-colors hover:border-border-strong focus-visible:ring-focus focus-visible:ring-ring/50',
                           active && 'border-foreground bg-muted',
                         )}
                       >

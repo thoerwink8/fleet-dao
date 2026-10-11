@@ -717,6 +717,21 @@
   grid-template-columns: var(--container-settings-nav) minmax(0, 1fr);
 }
 
+/* 法国页多台对照（#1837）：手机一列上下叠，md 起每台一列（列数由元素上的 --env-cols 给）。 */
+@utility grid-cols-env-compare {
+  grid-template-columns: minmax(0, 1fr);
+  @media (min-width: 48rem) {
+    grid-template-columns: repeat(var(--env-cols), minmax(0, 1fr));
+  }
+}
+
+/* 对照列里占满六行的那一块（md 起；手机一列叠着，不占多行）。行数从 --fact-rows 取。 */
+@utility row-span-env-facts {
+  @media (min-width: 48rem) {
+    grid-row: span var(--fact-rows) / span var(--fact-rows);
+  }
+}
+
 /* 字段行：标签列 + 控件列（md 以上；窄了标签在上）。 */
 @utility grid-cols-field {
   grid-template-columns: var(--container-field-label) minmax(0, 1fr);

@@ -432,7 +432,7 @@ export function PoolHoldsPanel() {
           aria-expanded={showCreate}
           aria-controls="hold-create"
           onClick={() => setCreating((c) => !c)}
-          className="flex items-center gap-1 text-left text-sm font-medium"
+          className="flex items-center gap-1 text-left text-sm font-medium max-md:min-h-10"
         >
           新建一条整池暂停
           <ChevronRight
