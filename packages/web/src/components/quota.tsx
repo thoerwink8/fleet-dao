@@ -370,6 +370,10 @@ export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
           className={cn('min-w-0 flex-1', w.stale && 'opacity-40')}
         />
         <ReadingBadge w={w} />
+        {/* 读数过期时小牌换成「读数过期」，估算这层来源就看不见了：估算的补一句，实读 / 估算不丢。 */}
+        {w.stale && w.reading !== 'measured' ? (
+          <span className="shrink-0 text-micro text-muted-foreground">按本机用量估算</span>
+        ) : null}
       </div>
     </div>
   );
