@@ -8,7 +8,7 @@ import { useNow } from '../lib/hooks';
 import { poolIsHeld } from '../lib/pool-holds';
 import type { KindEnv } from '../lib/route-kinds';
 import { type RouteStateKind, routeStateLabel, routeStateTone, routeStateWhy } from '../lib/route-state';
-import { StatusChip, StatusDot } from './status';
+import { StatusBadge, StatusDot } from './layout/status-badge';
 
 export function useKindEnv(): KindEnv {
   const routing = useRouting();
@@ -35,7 +35,7 @@ export function useKindEnv(): KindEnv {
 export function KindChip({ kind }: { kind: RouteStateKind }) {
   // 疑似换模型和探测记录里的「疑似换模型」同一个橙色，和不通的红分开（#1748、#1798）
   if (kind === 'degraded') return <DoubtChip label={routeStateLabel[kind]} title={routeStateWhy[kind]} />;
-  return <StatusChip tone={routeStateTone[kind]} label={routeStateLabel[kind]} />;
+  return <StatusBadge tone={routeStateTone[kind]} label={routeStateLabel[kind]} />;
 }
 
 /** 橙色的「疑似换模型」芯片：身份题说出了旧答案，已按不在线处理，不是红的故障。 */

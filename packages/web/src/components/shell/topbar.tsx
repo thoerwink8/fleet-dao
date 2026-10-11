@@ -34,7 +34,7 @@ import { noticeLevelMeta } from '../../lib/status';
 import { type ModePref, PALETTES } from '../../lib/theme';
 import { cn } from '../../lib/utils';
 import { EngineMasterBadge } from '../engine-master';
-import { StatusDot } from '../status';
+import { StatusDot } from '../layout/status-badge';
 import { useTheme } from '../theme-provider';
 import { Button } from '../ui/button';
 import {
@@ -55,13 +55,13 @@ export function Topbar({ onSearch }: { onSearch(): void }) {
   // 选了远程环境：提醒铃铛是本台（法国）的数据，不顶着远程环境的名字露出来
   const { nodeId } = useNodeSelection();
   return (
-    <header className="flex h-topbar shrink-0 items-center gap-2 border-b bg-panel/80 px-3 backdrop-blur md:px-4">
+    <header className="flex h-topbar shrink-0 items-center gap-2 border-b bg-panel px-3 md:px-4">
       <EnvSwitcher />
       <EngineMasterBadge />
       <button
         type="button"
         onClick={onSearch}
-        className="ml-1 hidden h-8 w-full max-w-search items-center gap-2 rounded-lg border bg-background/60 px-2.5 text-sub text-muted-foreground transition-colors hover:border-border-strong 2xl:flex"
+        className="ml-1 hidden h-8 w-full max-w-search items-center gap-2 rounded-lg border bg-background px-2.5 text-body text-muted-foreground transition-colors hover:border-border-strong 2xl:flex"
       >
         <Search className="size-3.5" aria-hidden />
         <span className="flex-1 text-left">搜任务、页面、操作…</span>
@@ -114,7 +114,7 @@ function EnvSwitcher() {
           variant="ghost"
           data-env-switcher={nodeId ?? 'local'}
           className={cn(
-            'h-10 shrink-0 gap-1.5 px-2 text-sub md:h-8',
+            'h-10 shrink-0 gap-1.5 px-2 text-body md:h-8',
             problem || state !== 'fresh' ? 'text-ink-stall' : undefined,
           )}
           aria-label={`现在看的是${label}，点开切换环境`}
@@ -124,8 +124,8 @@ function EnvSwitcher() {
           {nodeId !== null ? (
             <span
               className={cn(
-                'rounded-full border px-1.5 text-micro leading-4 whitespace-nowrap',
-                state === 'fresh' ? 'text-muted-foreground' : 'border-st-stall/50 text-ink-stall',
+                'rounded-full border px-1.5 text-meta whitespace-nowrap',
+                state === 'fresh' ? 'text-muted-foreground' : 'border-st-stall-line text-ink-stall',
               )}
             >
               {state === 'fresh' ? '只读' : state === 'stale' ? '失联' : '没数据'}
@@ -135,16 +135,16 @@ function EnvSwitcher() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-72">
-        <DropdownMenuLabel className="text-xs text-muted-foreground">
+        <DropdownMenuLabel className="text-meta text-muted-foreground">
           切换环境（看板按环境显示）
         </DropdownMenuLabel>
         <DropdownMenuItem data-node-item="local" onSelect={() => select(null)}>
           <span className="num min-w-0 flex-1 truncate">{env.name}</span>
-          <span className="text-xs text-muted-foreground">这台</span>
+          <span className="text-meta text-muted-foreground">这台</span>
           {nodeId === null ? <Check className="size-4" /> : null}
         </DropdownMenuItem>
         {nodes.error ? (
-          <DropdownMenuItem disabled className="text-xs text-ink-fail">
+          <DropdownMenuItem disabled className="text-meta text-ink-fail">
             远程环境没读成：{errorText(nodes.error)}
           </DropdownMenuItem>
         ) : null}
@@ -159,7 +159,7 @@ function EnvSwitcher() {
               className={f === 'fresh' ? undefined : 'text-muted-foreground'}
             >
               <span className="num min-w-0 flex-1 truncate">{n.name}</span>
-              <span className={cn('text-xs', f === 'fresh' ? 'text-muted-foreground' : 'text-ink-stall')}>
+              <span className={cn('text-meta', f === 'fresh' ? 'text-muted-foreground' : 'text-ink-stall')}>
                 {nodeAgeText(n, now)}
               </span>
               {n.id === nodeId ? <Check className="size-4" /> : null}
@@ -172,7 +172,7 @@ function EnvSwitcher() {
           打开法国页
         </DropdownMenuItem>
         {problem ? (
-          <DropdownMenuItem disabled className="text-xs text-ink-stall">
+          <DropdownMenuItem disabled className="text-meta text-ink-stall">
             {env.problem}
           </DropdownMenuItem>
         ) : null}
@@ -202,7 +202,7 @@ function LiveIndicator() {
           role="status"
           data-live={status}
           className={cn(
-            'flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-1.5 text-xs whitespace-nowrap md:px-2',
+            'flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-1.5 text-meta whitespace-nowrap md:px-2',
             ok ? 'text-muted-foreground' : status === 'down' ? 'text-ink-fail' : 'text-ink-stall',
           )}
         >
@@ -254,11 +254,11 @@ function NotificationBell() {
         >
           {urgent ? <BellRing /> : <Bell />}
           {error && !data ? (
-            <span className="absolute -top-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-destructive text-micro leading-4 font-bold text-destructive-foreground">
+            <span className="absolute -top-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-destructive text-meta font-semibold text-destructive-foreground">
               !
             </span>
           ) : urgent ? (
-            <span className="num absolute -top-0.5 -right-0.5 grid min-w-4 place-items-center rounded-full bg-st-human px-1 text-micro leading-4 font-semibold text-background">
+            <span className="num absolute -top-0.5 -right-0.5 grid min-w-4 place-items-center rounded-full bg-st-human px-1 text-meta font-semibold text-background">
               {urgent}
             </span>
           ) : null}
@@ -266,18 +266,18 @@ function NotificationBell() {
       </PopoverTrigger>
       <PopoverContent align="end" className="w-notifications p-0">
         <div className="flex items-center justify-between border-b px-3 py-2">
-          <span className="text-sm font-semibold">待处理的提醒</span>
-          <span className="num text-xs text-muted-foreground">
+          <span className="text-body font-semibold">待处理的提醒</span>
+          <span className="num text-meta text-muted-foreground">
             {data ? urgent : '—'}
             {daily > 0 ? `，另有日报 ${daily}` : ''}
           </span>
         </div>
         {error && !data ? (
-          <p role="alert" className="px-3 py-6 text-center text-sm text-ink-fail">
+          <p role="alert" className="px-3 py-6 text-center text-body text-ink-fail">
             提醒没读成：{errorText(error)}
           </p>
         ) : data && urgent + daily === 0 ? (
-          <p className="px-3 py-6 text-center text-sm text-muted-foreground">没有待处理的提醒</p>
+          <p className="px-3 py-6 text-center text-body text-muted-foreground">没有待处理的提醒</p>
         ) : null}
         <ul className="max-h-notifications-list overflow-y-auto scrollbar-thin">
           {items.slice(0, 8).map((n) => (
@@ -289,17 +289,17 @@ function NotificationBell() {
               >
                 <StatusDot tone={noticeLevelMeta[n.level].tone} className="mt-1.5" />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sub font-medium">{n.title}</span>
-                  <span className="block truncate text-xs text-muted-foreground">{n.body}</span>
+                  <span className="block truncate text-body font-medium">{n.title}</span>
+                  <span className="block truncate text-meta text-muted-foreground">{n.body}</span>
                 </span>
-                <span className="num shrink-0 text-caption text-muted-foreground">
+                <span className="num shrink-0 text-meta text-muted-foreground">
                   {formatAgo(n.createdAt, now)}
                 </span>
               </button>
               <Button
                 size="sm"
                 variant="ghost"
-                className="mt-2 h-7 shrink-0 px-2 text-xs text-muted-foreground"
+                className="mt-2 h-7 shrink-0 px-2 text-meta text-muted-foreground"
                 disabled={resolve.isPending}
                 onClick={() =>
                   resolve.mutate(n.id, {
@@ -315,7 +315,7 @@ function NotificationBell() {
         <Link
           to="/notifications"
           onClick={() => setOpen(false)}
-          className="block border-t px-3 py-2 text-center text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="block border-t px-3 py-2 text-center text-meta text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           打开通知中心
         </Link>
@@ -346,8 +346,8 @@ export function ModeSwitch() {
             aria-checked={active}
             onClick={() => setMode(m.id)}
             className={cn(
-              'flex h-7 items-center justify-center gap-1.5 rounded-md text-xs text-muted-foreground transition-colors max-md:min-h-10',
-              active ? 'bg-card font-medium text-foreground shadow-sm' : 'hover:text-foreground',
+              'flex h-7 items-center justify-center gap-1.5 rounded-md text-meta text-muted-foreground transition-colors max-md:min-h-10',
+              active ? 'bg-card font-medium text-foreground shadow-xs' : 'hover:text-foreground',
             )}
           >
             <Icon className="size-3.5" aria-hidden />
@@ -375,9 +375,9 @@ function ThemeMenu() {
         <TooltipContent>主题色与深浅</TooltipContent>
       </Tooltip>
       <PopoverContent align="end" className="w-usage">
-        <div className="mb-2 text-xs text-muted-foreground">深浅</div>
+        <div className="mb-2 text-meta text-muted-foreground">深浅</div>
         <ModeSwitch />
-        <div className="mt-4 mb-2 text-xs text-muted-foreground">主题色</div>
+        <div className="mt-4 mb-2 text-meta text-muted-foreground">主题色</div>
         <div className="grid grid-cols-2 gap-2">
           {PALETTES.map((p) => (
             <PaletteSwatch
@@ -391,7 +391,7 @@ function ThemeMenu() {
         </div>
         <Link
           to="/settings"
-          className="mt-3 block text-center text-xs text-muted-foreground hover:text-foreground"
+          className="mt-3 block text-center text-meta text-muted-foreground hover:text-foreground"
         >
           更多外观设置
         </Link>
@@ -421,7 +421,7 @@ function UserMenu() {
           {user?.avatarUrl ? (
             <img src={user.avatarUrl} alt="" className="size-7 rounded-full object-cover" />
           ) : (
-            <span className="grid size-7 place-items-center rounded-full bg-foreground text-xs font-semibold text-background">
+            <span className="grid size-7 place-items-center rounded-full bg-foreground text-meta font-semibold text-background">
               {user?.displayName.slice(0, 1) ?? '·'}
             </span>
           )}
@@ -429,8 +429,8 @@ function UserMenu() {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-52">
         <DropdownMenuLabel>
-          <div className="text-sm">{user?.displayName}</div>
-          <div className="text-xs font-normal text-muted-foreground">创始人</div>
+          <div className="text-body">{user?.displayName}</div>
+          <div className="text-meta font-normal text-muted-foreground">创始人</div>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => navigate('/settings')}>

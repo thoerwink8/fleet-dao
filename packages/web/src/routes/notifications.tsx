@@ -11,11 +11,14 @@ import {
   useResolveNotification,
 } from '../api/client';
 import type { Me, Notification, NotificationLevel } from '../api/types';
-import { FilterTrack, filterTabClass } from '../components/filter-tabs';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { EmptyState } from '../components/layout/empty-state';
+import { FilterTabs } from '../components/layout/filter-tabs';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
+import { StatusBadge, StatusDot } from '../components/layout/status-badge';
 import { RefreshBar } from '../components/refresh-bar';
 import { RepoLink } from '../components/repo-link';
-import { StatusChip, StatusDot } from '../components/status';
 import { Button } from '../components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import { formatAgo, formatClock, formatDateTime, formatDuration, TIME } from '../lib/format';
@@ -46,9 +49,6 @@ function dayOf(iso: string, now: number): string {
 }
 
 const DELIVERY_NAME: Record<string, string> = { feishu: '飞书' };
-
-/** 处理状态和级别共用 components/filter-tabs 这一套：灰底轨道，选中是白底卡片，手机上每个标签至少 40 高。 */
-const segmentClass = filterTabClass;
 
 /** 飞书等渠道送没送到：没拿到消息编号就算没送到。 */
 function Deliveries({ n }: { n: Notification }) {
@@ -131,7 +131,7 @@ function HandlingRow({ h, now }: { h: Handling; now: number }) {
   const since = formatDuration(now - Date.parse(h.since));
   return (
     <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="alert-handling">
-      <StatusChip tone={STAGE_TONE[h.stage]} label={h.stageText} />
+      <StatusBadge tone={STAGE_TONE[h.stage]} label={h.stageText} />
       {h.who ? <span className="text-xs text-foreground">{h.who}</span> : null}
       {h.work ? (
         <WorkLink
@@ -351,41 +351,29 @@ export default function Notifications() {
       }
     >
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <FilterTrack role="tablist" aria-label="处理状态">
-          {(['open', 'all'] as const).map((s) => (
-            <button
-              key={s}
-              type="button"
-              role="tab"
-              aria-selected={status === s}
-              onClick={() => set('status', s === 'open' ? null : 'all')}
-              className={segmentClass(status === s)}
-            >
-              {s === 'open' ? '待处理' : '连已处理的一起看'}
-            </button>
-          ))}
-        </FilterTrack>
-        <FilterTrack>
-          {LEVELS.map((l) => {
+        <FilterTabs
+          aria-label="处理状态"
+          items={[
+            { id: 'open', label: '待处理' },
+            { id: 'all', label: '连已处理的一起看' },
+          ]}
+          value={status}
+          onChange={(s) => set('status', s === 'open' ? null : 'all')}
+        />
+        <FilterTabs
+          mode="toggle"
+          aria-label="按级别"
+          items={LEVELS.map((l) => ({
+            id: l.id,
+            label: l.label,
             // 数字是接口给的真实总数，不是这一页取回的条数（只取了前 N 条时也不会封顶）。
-            // 没读到就写「—」，不拿 0 冒充「没有提醒」。真的没有（读成功且总数 0）才写 0。
-            const n = data ? (l.id === 'all' ? totalCount : data.counts[l.id]) : null;
-            const shown = n ?? '—';
-            return (
-              <button
-                key={l.id}
-                type="button"
-                aria-pressed={level === l.id}
-                onClick={() => set('level', l.id === 'all' ? null : l.id)}
-                className={segmentClass(level === l.id)}
-              >
-                {l.id !== 'all' ? <StatusDot tone={noticeLevelMeta[l.id].tone} className="size-1.5" /> : null}
-                {l.label}
-                <span className="num text-caption opacity-70">{shown}</span>
-              </button>
-            );
-          })}
-        </FilterTrack>
+            // 没读到就写「—」（count 传 null），不拿 0 冒充「没有提醒」。真的没有（读成功且总数 0）才写 0。
+            count: data ? (l.id === 'all' ? totalCount : data.counts[l.id]) : null,
+            ...(l.id !== 'all' ? { tone: noticeLevelMeta[l.id].tone } : {}),
+          }))}
+          value={level}
+          onChange={(id) => set('level', id === 'all' ? null : id)}
+        />
       </div>
       {data && status === 'open' ? (
         <p className="mb-3 text-xs text-muted-foreground" data-testid="pending-rule">
@@ -408,13 +396,13 @@ export default function Notifications() {
       {isLoading ? (
         <LoadingRows rows={5} />
       ) : !data ? null : listEmpty ? (
-        <Panel>
-          <Empty
+        <Section>
+          <EmptyState
             icon={Bell}
             title={status === 'open' ? '没有待处理的提醒' : '这里没有提醒'}
             hint="要你拍板或有东西卡住时，这里和飞书会同时提醒。"
           />
-        </Panel>
+        </Section>
       ) : (
         <div className="space-y-5">
           <DayGroups

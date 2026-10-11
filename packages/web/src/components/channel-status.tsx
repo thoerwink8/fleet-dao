@@ -25,7 +25,7 @@ import {
 import type { Failover } from '../lib/provider-status';
 import { countsText, STATE_FILTERS, type StateFilter } from '../lib/route-state';
 import { cn } from '../lib/utils';
-import { StatusChip, StatusDot } from './status';
+import { StatusBadge, StatusDot } from './layout/status-badge';
 
 /** 渠道卡上的探针历史：读不到和还没有是两回事。 */
 export type ChannelHistory =
@@ -226,7 +226,7 @@ function ChannelRow({
             <span className={cn('truncate text-sm font-semibold', quiet && 'text-muted-foreground')}>
               {c.channel.name}
             </span>
-            <StatusChip tone={c.tone} label={c.label} className={cn(c.interrupted && 'font-semibold')} />
+            <StatusBadge tone={c.tone} label={c.label} className={cn(c.interrupted && 'font-semibold')} />
             {probing ? (
               <span className="inline-flex items-center gap-1 text-caption text-ink-run">
                 <LoaderCircle className="size-3 animate-spin" aria-hidden />

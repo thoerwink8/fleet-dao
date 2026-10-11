@@ -8,7 +8,7 @@
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { createMockApi } from '../api/mock/server';
-import { Page } from '../components/page';
+import { Page } from '../components/layout/page';
 import AuditPage from '../routes/audit';
 import RoutingPage from '../routes/routing';
 import RoutingStatus from '../routes/routing-status';

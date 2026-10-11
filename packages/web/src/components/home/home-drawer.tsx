@@ -12,7 +12,7 @@ import { brand } from '#brand';
 import { useLocalState } from '../../lib/hooks';
 import { cn } from '../../lib/utils';
 import { useDockRoom } from '../../lib/viewport';
-import { Empty } from '../page';
+import { EmptyState } from '../layout/empty-state';
 import { Button } from '../ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '../ui/sheet';
 import { DecisionCard } from './decision-card';
@@ -113,7 +113,7 @@ function DrawerBody({
                 ))}
               </ul>
             ) : (
-              <Empty icon={Hand} title="没有要你拍的" hint="有决定、待批时会出现在这里。" />
+              <EmptyState icon={Hand} title="没有要你拍的" hint="有决定、待批时会出现在这里。" />
             )}
             {more > 0 ? (
               <p className="mt-3 px-1 text-xs text-muted-foreground">
@@ -142,7 +142,7 @@ function DrawerBody({
                 ))}
               </ul>
             ) : (
-              <Empty icon={CheckCheck} title="最近没有合进的 PR" hint="有 PR 合进主线会出现在这里。" />
+              <EmptyState icon={CheckCheck} title="最近没有合进的 PR" hint="有 PR 合进主线会出现在这里。" />
             )}
           </>
         )}

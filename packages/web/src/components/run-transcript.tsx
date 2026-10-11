@@ -25,7 +25,7 @@ import {
   UNKNOWN_SEGMENT,
 } from '../lib/segments';
 import { cn } from '../lib/utils';
-import { StatusChip } from './status';
+import { StatusBadge } from './layout/status-badge';
 import { Button } from './ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
 
@@ -509,11 +509,11 @@ function DrawerSummary({ run, nth, now }: { run: SegmentRunView; nth: number; no
       <span className="num text-caption text-muted-foreground">第 {nth} 次</span>
       <span className="num text-sub">{run.modelName}</span>
       {run.running ? (
-        <StatusChip tone="run" label="在跑" />
+        <StatusBadge tone="run" label="在跑" />
       ) : run.outcome ? (
-        <StatusChip tone={segmentOutcomeTone[run.outcome]} label={segmentOutcomeLabel[run.outcome]} />
+        <StatusBadge tone={segmentOutcomeTone[run.outcome]} label={segmentOutcomeLabel[run.outcome]} />
       ) : (
-        <StatusChip tone="stall" label="结局没读到" />
+        <StatusBadge tone="stall" label="结局没读到" />
       )}
       <span className="num text-caption text-muted-foreground">{duration}</span>
       <span className="num text-caption text-muted-foreground">{cost}</span>

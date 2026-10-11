@@ -8,7 +8,7 @@ import { useNow } from '../../../lib/hooks';
 import { SEGMENT_UNMETERED, segmentHint } from '../../../lib/segments';
 import { type Tone, toneBg, toneSoft, toneText } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
-import { StatusChip, StatusDot } from '../../status';
+import { StatusBadge, StatusDot } from '../../layout/status-badge';
 import { ACTIONS, type ActionTarget, useTargetActions } from '../../task-actions';
 import { Kbd } from '../../ui/kbd';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../ui/tooltip';
@@ -444,7 +444,7 @@ export const TicketNode = memo(function TicketNode({ id, data }: Props) {
         <div className="flex h-full flex-col overflow-hidden py-3 pr-3 pl-4">
           <div className="flex shrink-0 items-center gap-x-2">
             <span className="num text-sub font-semibold text-muted-foreground">#{item.issueNumber}</span>
-            <StatusChip tone={tone} label={statusTextOf(item)} />
+            <StatusBadge tone={tone} label={statusTextOf(item)} />
             {founder ? (
               <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-ink-human">
                 <span className="size-2 rounded-full bg-st-human" aria-hidden />

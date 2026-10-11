@@ -7,8 +7,7 @@ import { Route, Routes } from 'react-router';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { EnvResponse, QuotaWindowView } from '../api/types';
 import { factCells } from '../components/env-facts';
-import { filterTabClass } from '../components/filter-tabs';
-import { Page } from '../components/page';
+import { Page } from '../components/layout/page';
 import { QuotaLine } from '../components/quota';
 import { RefreshBar } from '../components/refresh-bar';
 import NotificationsPage from '../routes/notifications';
@@ -40,11 +39,6 @@ function viewport(width: number) {
 }
 
 describe('筛选标签手机上不小于 40', () => {
-  test('标签类名带 max-md:min-h-10；选中与否都带', () => {
-    expect(filterTabClass(true)).toContain('max-md:min-h-10');
-    expect(filterTabClass(false)).toContain('max-md:min-h-10');
-  });
-
   test('任务列表的状态标签用的就是它，条上带渐隐提示用的类', async () => {
     renderApp(<TasksPage />, { route: '/tasks' });
     const tabs = await screen.findAllByRole('tab');

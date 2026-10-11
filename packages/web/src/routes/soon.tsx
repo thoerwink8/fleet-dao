@@ -1,7 +1,7 @@
 import { ArrowRight, Construction } from 'lucide-react';
 import { Link, useLocation } from 'react-router';
 import { brand } from '#brand';
-import { Page } from '../components/page';
+import { Page } from '../components/layout/page';
 import { Button } from '../components/ui/button';
 
 /**

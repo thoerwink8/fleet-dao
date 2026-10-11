@@ -13,7 +13,11 @@ import { Link, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { usePoolHolds, useRoutingLayers } from '../api/client';
 import type { RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { EmptyState } from '../components/layout/empty-state';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
+import { StatusBadge, StatusDot } from '../components/layout/status-badge';
 import { RefreshBar } from '../components/refresh-bar';
 import {
   ChannelTab,
@@ -42,7 +46,6 @@ import {
   ModelRoutes,
   OrderSummaryLine,
 } from '../components/routing-routes';
-import { StatusChip, StatusDot } from '../components/status';
 import { formatClock, TIME } from '../lib/format';
 import { useMediaQuery, useNow } from '../lib/hooks';
 import { filterActive, filterRows, type ListFilter, NO_FILTER, WINDOW_MIN_ROWS } from '../lib/list-window';
@@ -230,13 +233,13 @@ function PurposesTab({ purposes, params }: { purposes: RoutingLayerPurpose[]; pa
   const selected = pickPurpose(purposes, params.get('purpose'));
   if (purposes.length === 0 || !selected) {
     return (
-      <Panel>
-        <Empty
+      <Section>
+        <EmptyState
           icon={RouteIcon}
           title="后端一个用途都没给"
           hint="每个用途都该有一份（没配的写明没配）：这不该发生，去看后端日志"
         />
-      </Panel>
+      </Section>
     );
   }
   return (
@@ -253,9 +256,9 @@ function Summary({ purposes, asOf }: { purposes: RoutingLayerPurpose[]; asOf: st
   const counts = countByVerdict(purposes);
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      <StatusChip tone="done" label={`${counts.live} 个派得出去`} />
-      <StatusChip tone="stall" label={`${counts.unknown} 个不知道`} />
-      <StatusChip tone="fail" label={`${counts.dead} 个派不出去`} />
+      <StatusBadge tone="done" label={`${counts.live} 个派得出去`} />
+      <StatusBadge tone="stall" label={`${counts.unknown} 个不知道`} />
+      <StatusBadge tone="fail" label={`${counts.dead} 个派不出去`} />
       <span className="num text-caption text-muted-foreground">{formatClock(asOf)} 现算</span>
     </div>
   );
@@ -377,7 +380,7 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
           {purposeLabel(p.purpose)}
           <span className="num text-caption font-normal text-muted-foreground">{p.purpose}</span>
         </h2>
-        <StatusChip tone={verdictTone[p.verdict]} label={purposeVerdictLabel[p.verdict]} />
+        <StatusBadge tone={verdictTone[p.verdict]} label={purposeVerdictLabel[p.verdict]} />
         {p.purpose === 'judge' && p.verdict === 'unknown' ? (
           <span className="text-caption text-muted-foreground">按量计费，不自动探，不用处理</span>
         ) : null}

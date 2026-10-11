@@ -3,7 +3,7 @@ import { toast } from 'sonner';
 import { errorText, useUpdateRepoDispatch } from '../api/client';
 import type { RepoDispatch } from '../api/types';
 import { formatDateTime } from '../lib/format';
-import { StatusDot } from './status';
+import { StatusDot } from './layout/status-badge';
 import {
   AlertDialog,
   AlertDialogAction,

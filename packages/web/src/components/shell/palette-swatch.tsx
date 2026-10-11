@@ -28,7 +28,7 @@ export function PaletteSwatch({
       aria-pressed={active}
       aria-label={`主题色：${p.name}`}
       className={cn(
-        'group relative overflow-hidden rounded-xl border text-left transition-[box-shadow,transform] hover:-translate-y-px',
+        'group relative overflow-hidden rounded-lg border text-left transition-[box-shadow,transform] hover:-translate-y-px',
         active ? 'outline-2 outline-offset-2 outline-foreground' : 'hover:border-border-strong',
       )}
     >
@@ -36,13 +36,13 @@ export function PaletteSwatch({
         <div className={cn('flex gap-1.5', size === 'lg' ? 'h-20' : 'h-12')}>
           <div className="flex w-3 flex-col gap-1 rounded-md bg-panel p-0.5">
             <span className="h-1 rounded-full bg-brand" />
-            <span className="h-1 rounded-full bg-foreground/25" />
-            <span className="h-1 rounded-full bg-foreground/25" />
+            <span className="h-1 rounded-full bg-border-strong" />
+            <span className="h-1 rounded-full bg-border-strong" />
           </div>
-          <div className="flex min-w-0 flex-1 flex-col justify-between rounded-md border bg-card p-1.5">
+          <div className="flex min-w-0 flex-1 flex-col justify-between rounded-md bg-card p-1.5 ring-1 ring-border">
             <div className="space-y-1">
-              <span className="block h-1 w-3/5 rounded-full bg-foreground/70" />
-              <span className="block h-1 w-2/5 rounded-full bg-foreground/25" />
+              <span className="block h-1 w-3/5 rounded-full bg-muted-foreground" />
+              <span className="block h-1 w-2/5 rounded-full bg-border-strong" />
             </div>
             <div className="flex gap-1">
               <span className="size-1.5 rounded-full bg-st-run" />
@@ -55,12 +55,12 @@ export function PaletteSwatch({
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 border-t bg-card px-2 py-1.5">
-        <span className="text-xs font-medium">{p.name}</span>
-        <span className="num break-words text-micro leading-snug text-muted-foreground">{p.en}</span>
+        <span className="text-meta font-medium">{p.name}</span>
+        <span className="num break-words text-meta leading-snug text-muted-foreground">{p.en}</span>
         {active ? <Check className="ml-auto size-3.5 shrink-0" aria-hidden /> : null}
       </div>
       {size === 'lg' ? (
-        <p className="border-t bg-card px-2 pb-2 text-caption text-muted-foreground">{p.blurb}</p>
+        <p className="border-t bg-card px-2 pb-2 text-meta text-muted-foreground">{p.blurb}</p>
       ) : null}
     </button>
   );

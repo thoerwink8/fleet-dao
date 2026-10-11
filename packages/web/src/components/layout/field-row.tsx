@@ -1,12 +1,12 @@
 // 字段行（#1805）：标签在左、控件在右一行（md 起标签列 180px），窄了标签在上。
 // 一节里的一组字段放进 FieldGroup，字段之间一条细线，一组只写一个说明（写在节标题下）。
 import type { ComponentProps, ReactNode } from 'react';
-import { cn } from '../lib/utils';
-import { Label } from './ui/label';
+import { cn } from '../../lib/utils';
+import { Label } from '../ui/label';
 
 /** 一组字段：细线分隔，行高紧凑。 */
 export function FieldGroup({ className, ...props }: ComponentProps<'div'>) {
-  return <div className={cn('rounded-xl border bg-card px-4', className)} {...props} />;
+  return <div className={cn('rounded-lg border bg-card px-4 shadow-card', className)} {...props} />;
 }
 
 /**
@@ -42,9 +42,9 @@ export function FieldRow({
   );
   const body = (
     <>
-      <div className="min-h-8 pt-1.5 text-sm font-medium md:pt-1.5">
+      <div className="min-h-8 pt-1.5 text-body font-medium">
         {htmlFor ? (
-          <Label htmlFor={htmlFor} className="text-sm leading-snug">
+          <Label htmlFor={htmlFor} className="leading-snug">
             {label}
           </Label>
         ) : (
@@ -54,12 +54,12 @@ export function FieldRow({
       <div className="min-w-0">
         <div className="flex min-h-8 flex-wrap items-center gap-2">{children}</div>
         {hint ? (
-          <div id={hintId} className="mt-1 text-caption text-muted-foreground">
+          <div id={hintId} className="mt-1 text-meta text-muted-foreground">
             {hint}
           </div>
         ) : null}
         {error ? (
-          <p id={errorId} role="alert" className="mt-1 text-xs text-ink-fail">
+          <p id={errorId} role="alert" className="mt-1 text-meta text-ink-fail">
             {error}
           </p>
         ) : null}

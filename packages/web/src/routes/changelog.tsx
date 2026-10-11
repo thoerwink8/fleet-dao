@@ -7,7 +7,10 @@ import { Link } from 'react-router';
 import { brand } from '#brand';
 import { useFranceReleasedCommits } from '../api/client';
 import type { ReleasedCommits } from '../api/types';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { EmptyState } from '../components/layout/empty-state';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
 import { RefreshBar } from '../components/refresh-bar';
 import { formatAgo, formatDateTime, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -35,7 +38,7 @@ function Unread({ why }: { why: string }) {
 function CommitList({ commits, now }: { commits: Commits; now: number }) {
   if (commits.length === 0) {
     return (
-      <Empty
+      <EmptyState
         icon={GitCommitHorizontal}
         title="法国的发布历史里还没有发布记录"
         hint="发过一次之后，这里按时间列出每次切上去的主线提交。"
@@ -79,7 +82,7 @@ function ReleasedCommitsPanel({ query }: { query: ReturnType<typeof useFranceRel
   const now = useNow();
   const data = query.data;
   return (
-    <Panel
+    <Section
       title="已发布的提交"
       description={
         <>
@@ -90,7 +93,7 @@ function ReleasedCommitsPanel({ query }: { query: ReturnType<typeof useFranceRel
           页「在用版本」那一行点「发布到法国」。
         </>
       }
-      bodyClassName="p-0"
+      flush
     >
       {query.error ? (
         <div className="p-4">
@@ -107,7 +110,7 @@ function ReleasedCommitsPanel({ query }: { query: ReturnType<typeof useFranceRel
       ) : (
         <CommitList commits={data.commits} now={now} />
       )}
-    </Panel>
+    </Section>
   );
 }
 

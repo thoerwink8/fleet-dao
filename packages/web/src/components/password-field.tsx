@@ -5,7 +5,7 @@ import { Eye, EyeOff } from 'lucide-react';
 import type { Ref } from 'react';
 import { useState } from 'react';
 import { cn } from '../lib/utils';
-import { FieldRow } from './field-row';
+import { FieldRow } from './layout/field-row';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';

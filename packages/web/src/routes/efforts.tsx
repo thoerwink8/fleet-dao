@@ -13,7 +13,10 @@ import { type ReactNode, useId, useState } from 'react';
 import { brand } from '#brand';
 import { errorText, useRoutingEfforts, useUpdateRouteEffort } from '../api/client';
 import type { EffortModel, RouteEffort, SessionEffort } from '../api/types';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { EmptyState } from '../components/layout/empty-state';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
 import { RefreshBar } from '../components/refresh-bar';
 import { Badge } from '../components/ui/badge';
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
@@ -130,13 +133,13 @@ export default function Efforts() {
   return (
     <Page title="思考档位" description={DESCRIPTION} actions={refresh}>
       {data.models.length === 0 ? (
-        <Panel>
-          <Empty
+        <Section>
+          <EmptyState
             icon={Brain}
             title="路由两层里一条路由都没有"
             hint="发布时会把仓里的默认骨架装进库；装过了还是空的，去看发布日志（load_routing 那一步）"
           />
-        </Panel>
+        </Section>
       ) : (
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
@@ -333,17 +336,17 @@ function FixedFold({
             const items = g.items.filter((i) => effortRowMatches(i, search));
             if (items.length === 0) return null;
             return (
-              <Panel
+              <Section
                 key={g.reason}
                 title={<span className="font-normal text-muted-foreground">{g.reason}</span>}
-                bodyClassName="p-0"
+                flush
               >
                 <ul>
                   {items.map(({ model, route }) => (
                     <FixedRouteRow key={route.routeId} model={model} route={route} />
                   ))}
                 </ul>
-              </Panel>
+              </Section>
             );
           })}
         </div>

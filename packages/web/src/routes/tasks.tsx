@@ -10,10 +10,13 @@ import { Link, useLocation, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { useRepos, useTaskList } from '../api/client';
 import type { TaskList, TaskListRow } from '../api/types';
-import { FilterTrack, filterTabClass } from '../components/filter-tabs';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { EmptyState } from '../components/layout/empty-state';
+import { FilterTabs } from '../components/layout/filter-tabs';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
+import { StatusBadge } from '../components/layout/status-badge';
 import { RefreshBar } from '../components/refresh-bar';
-import { StatusChip } from '../components/status';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { formatAgo, formatDateTime, formatUsd, TIME } from '../lib/format';
@@ -95,7 +98,7 @@ function Row({ row, from, now }: { row: TaskListRow; from: string; now: number }
         {/* 手机上这四样排成一两行；md 起各自占一栏（contents 让它们直接成为外层十二栏网格的格子） */}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 md:contents">
           <div className="flex min-w-0 items-center gap-x-2 md:col-span-2">
-            <StatusChip tone={status.tone} label={status.label} />
+            <StatusBadge tone={status.tone} label={status.label} />
             {row.segment === null ? null : (
               <span className="text-caption whitespace-nowrap text-muted-foreground">
                 {segmentText[row.segment]}
@@ -130,24 +133,16 @@ function StatusTabs({
   onChange: (next: TaskListView['status']) => void;
 }) {
   return (
-    <FilterTrack role="tablist" aria-label="按状态">
-      {GROUP_TABS.map((tab) => {
-        const selected = (value ?? 'all') === tab.id;
-        return (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={selected}
-            onClick={() => onChange(tab.id === 'all' ? undefined : tab.id)}
-            className={filterTabClass(selected)}
-          >
-            {tab.label}
-            {counts ? <span className="num text-caption">{counts[tab.id]}</span> : null}
-          </button>
-        );
-      })}
-    </FilterTrack>
+    <FilterTabs
+      aria-label="按状态"
+      items={GROUP_TABS.map((tab) => ({
+        id: tab.id,
+        label: tab.label,
+        ...(counts ? { count: counts[tab.id] } : {}),
+      }))}
+      value={value ?? 'all'}
+      onChange={(id) => onChange(id === 'all' ? undefined : id)}
+    />
   );
 }
 
@@ -263,7 +258,7 @@ export default function TasksPage() {
           <LoadError what="任务列表" error={shownError} onRetry={() => void list.refetch()} />
         </div>
       ) : null}
-      <Panel bodyClassName="p-0">
+      <Section flush>
         {!list.data ? (
           shownError ? (
             <p className="px-4 py-10 text-center text-sm text-ink-fail">
@@ -275,7 +270,7 @@ export default function TasksPage() {
             </div>
           )
         ) : rows.length === 0 ? (
-          <Empty
+          <EmptyState
             icon={filtered ? SearchX : ListChecks}
             title="没有符合的任务"
             hint={
@@ -321,7 +316,7 @@ export default function TasksPage() {
             )}
           </div>
         ) : null}
-      </Panel>
+      </Section>
     </Page>
   );
 }
