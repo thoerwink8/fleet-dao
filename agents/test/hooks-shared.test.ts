@@ -126,19 +126,27 @@ describe('原来各写一份的口径（R4）', () => {
   });
 
   it('开会话列创始人最近的话认 FLEET_PROMPT_LOG_DIR（和落盘那边一样），不只看家目录', async () => {
-    const ss = await load<{ recentPrompts(o: { home: string; now?: number }): string[] }>(
-      'session-start.mjs',
-    );
+    const ss = await load<{
+      recentPrompts(o: {
+        home: string;
+        now?: number;
+        sessionId?: string;
+        lineage?: { status: 'found'; dir: string; sessionIds: string[] };
+      }): string[];
+    }>('session-start.mjs');
     const logs = temp('plog');
     const now = Date.parse('2026-10-05T07:30:00Z');
+    // 同一个 Mirasim 会话换原生号之前收到的话（只有同血缘的才列，#1889）
     writeFileSync(
       join(logs, '2026-10-05.jsonl'),
-      `${JSON.stringify({ at: '2026-10-05T07:20:00Z', prompt: '落在别处的一句话' })}\n`,
+      `${JSON.stringify({ at: '2026-10-05T07:20:00Z', prompt: '落在别处的一句话', sessionId: 'old-native' })}\n`,
     );
     const before = process.env.FLEET_PROMPT_LOG_DIR;
     process.env.FLEET_PROMPT_LOG_DIR = logs;
     try {
-      expect(ss.recentPrompts({ home: temp('empty-home'), now }).join('\n')).toContain('落在别处的一句话');
+      const lineage = { status: 'found' as const, dir: 'dir-a', sessionIds: ['new-native', 'old-native'] };
+      const said = ss.recentPrompts({ home: temp('empty-home'), now, sessionId: 'new-native', lineage });
+      expect(said.join('\n')).toContain('落在别处的一句话');
     } finally {
       if (before === undefined) delete process.env.FLEET_PROMPT_LOG_DIR;
       else process.env.FLEET_PROMPT_LOG_DIR = before;
