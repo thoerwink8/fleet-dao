@@ -118,7 +118,8 @@ describe('模型目录：搜索、只看已开启、窗口化（300 个模型）
     const list = await screen.findByRole('list', { name: '目录里的模型' });
     const box = list.parentElement as HTMLElement;
     expect(box.getAttribute('data-windowed')).toBe('true');
-    fireEvent.scroll(box, { target: { scrollTop: 44 * 200 } });
+    // 行高 48（两行字的行，#1916 起和样板 row-tall 一样；原来 44）：滚到第 200 行
+    fireEvent.scroll(box, { target: { scrollTop: 48 * 200 } });
     await waitFor(() => expect(rowIds('li[data-catalog]', 'data-catalog')).toContain('m-200'));
     expect(rowIds('li[data-catalog]', 'data-catalog')).not.toContain('m-000');
     expect(rows('li[data-catalog]').length).toBeLessThan(30);
@@ -446,31 +447,46 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
   });
 
   test('手机宽度定高行加高，装得下两行', async () => {
+    // #1916 起一行固定两行字（名字加状态一行、小字一行，各不折），手机行高 56（比桌面 48 高，点得准）；
+    // 原来手机上一行拆成三行，用 80。断言仍是「手机比桌面高、两行字都在」。
     mockMobile();
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api: withModels(60) });
     await screen.findByRole('list', { name: '模型' });
     const model = document.querySelector('li[data-model]') as HTMLElement;
-    expect(model.style.height).toBe('80px');
+    expect(model.style.height).toBe('56px');
     cleanup();
     mockMobile();
     renderApp(<RoutingPage />, { route: '/routing?tab=models', api: withModels(60) });
     await screen.findByRole('list', { name: '目录里的模型' });
     const catalog = document.querySelector('li[data-catalog]') as HTMLElement;
-    expect(catalog.style.height).toBe('80px');
+    expect(catalog.style.height).toBe('56px');
+    expect(catalog.querySelector('[data-row-name-line]')).toBeTruthy();
+    expect(catalog.querySelector('[data-row-meta]')).toBeTruthy();
     cleanup();
     mockMobile();
     renderApp(<RoutingPage />, { route: '/routing?tab=channels' });
     await screen.findByRole('list', { name: '渠道列表' });
     const channel = document.querySelector('li[data-channel]') as HTMLElement;
-    expect(channel.style.height).toBe('80px');
+    expect(channel.style.height).toBe('56px');
+    expect(channel.querySelector('[data-row-name-line]')).toBeTruthy();
+    expect(channel.querySelector('[data-row-meta]')).toBeTruthy();
   });
 
   test('模型目录和渠道的第二行写出厂家、状态词、几条路几条活，不用 hidden 藏', async () => {
     renderApp(<RoutingPage />, { route: '/routing?tab=models' });
     await screen.findByRole('list', { name: '目录里的模型' });
     const grok = document.querySelector('li[data-catalog="grok-4.7"]') as HTMLElement;
+    // #1916 起行是样板的两行骨架（各宽度一样）：第一行名字加状态词，第二行小字写厂家和几条路几条活；
+    // 原来断言的是「手机 flex-col、桌面 flex-row」，换成等价的「两行分开、都看得见、各不折」
     const shell = grok.firstElementChild as HTMLElement;
-    expect(classTokens(shell)).toEqual(expect.arrayContaining(['flex-col', 'md:flex-row']));
+    expect(shell.hasAttribute('data-row-frame')).toBe(true);
+    const nameLine = grok.querySelector('[data-row-name-line]') as HTMLElement;
+    const metaLine = grok.querySelector('[data-row-meta]') as HTMLElement;
+    expect(classTokens(nameLine)).toContain('whitespace-nowrap');
+    expect(classTokens(metaLine)).toEqual(expect.arrayContaining(['truncate', 'whitespace-nowrap']));
+    expect(nameLine.querySelector('[data-status-word]')).toBeTruthy();
+    expect(metaLine.querySelector('[data-vendor]')).toBeTruthy();
+    expect(metaLine.querySelector('[data-route-summary]')).toBeTruthy();
     const vendor = grok.querySelector('[data-vendor]') as HTMLElement;
     const status = grok.querySelector('[data-status-word]') as HTMLElement;
     const summary = grok.querySelector('[data-route-summary]') as HTMLElement;
@@ -486,9 +502,9 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     renderApp(<RoutingPage />, { route: '/routing?tab=channels' });
     await screen.findByRole('list', { name: '渠道列表' });
     const channel = document.querySelector('li[data-channel="ch-claude"]') as HTMLElement;
-    expect(classTokens(channel.firstElementChild as HTMLElement)).toEqual(
-      expect.arrayContaining(['flex-col', 'md:flex-row']),
-    );
+    expect((channel.firstElementChild as HTMLElement).hasAttribute('data-row-frame')).toBe(true);
+    expect(channel.querySelector('[data-row-name-line] [data-status-word]')).toBeTruthy();
+    expect(channel.querySelector('[data-row-meta] [data-route-summary]')).toBeTruthy();
     const channelStatus = channel.querySelector('[data-status-word]') as HTMLElement;
     const channelSummary = channel.querySelector('[data-route-summary]') as HTMLElement;
     expect(channelStatus.textContent?.trim()).not.toBe('');

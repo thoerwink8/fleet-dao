@@ -227,6 +227,18 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
     expect(classes(row.querySelector('[data-row-frame]'))).toContain('group/row');
   });
 
+  test('路由行小字截断时不截掉「顺位第一条活的」：它排在小字最前面（#1916）', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
+    const meta = (await waitFor(() => {
+      const el = document.querySelector('[data-route="r-ca-opus"] [data-route-meta]');
+      if (!el) throw new Error('还没画路由行');
+      return el;
+    })) as HTMLElement;
+    expect(classes(meta)).toEqual(expect.arrayContaining(['truncate', 'whitespace-nowrap']));
+    expect(meta.firstElementChild?.textContent).toBe('顺位第一条活的');
+    expect(meta.getAttribute('title')).toContain('顺位第一条活的');
+  });
+
   test('用途标题块三行都不折（#1914 第 5 轮，创始人看 390 宽「变成 2 行了」）：结论短话截断、状态标签不收缩，灰字截断、整句在悬停', async () => {
     // 每个用途都看：首选活着、靠后备、不知道的结论都要放得进一行
     for (const purpose of ['execute', 'verify', 'judge', 'groom']) {

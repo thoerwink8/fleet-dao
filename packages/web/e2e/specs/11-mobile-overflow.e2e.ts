@@ -78,6 +78,69 @@ test.describe('手机宽度：三页不横滚', () => {
     }
   });
 
+  test('路由：模型目录、渠道、思考档位三个页签每行名字一行、小字一行，主区不横滚（320、390，#1916）', async ({
+    page,
+  }) => {
+    // 创始人 2026-10-11：手机上模型目录行的小字折到第二行。按样板每行＝名字一行（带状态）＋小字一行，放不下截断
+    const tabs = [
+      { tab: 'models', lines: ['[data-row-name-line]', '[data-row-meta]'] },
+      { tab: 'channels', lines: ['[data-row-name-line]', '[data-row-meta]'] },
+      { tab: 'efforts', lines: ['[data-route-where]'] },
+    ] as const;
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: PHONE.height });
+      for (const { tab, lines } of tabs) {
+        await page.goto(`/routing?tab=${tab}`);
+        await expect(page.locator(lines[0]).first()).toBeVisible();
+        await noOverflow(page);
+        const bad = await page.locator('main').evaluate(
+          (main, sels) => {
+            const oneLine = (node: Element) => {
+              const mids: number[] = [];
+              const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+              for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+                if (!t.textContent?.trim() || t.parentElement?.closest('.sr-only')) continue;
+                const range = document.createRange();
+                range.selectNodeContents(t);
+                for (const r of range.getClientRects()) if (r.width > 0) mids.push(r.top + r.height / 2);
+              }
+              return mids.length > 0 && Math.max(...mids) - Math.min(...mids) < 8;
+            };
+            const out: string[] = [];
+            let seen = 0;
+            for (const sel of sels) {
+              for (const el of main.querySelectorAll(sel)) {
+                if (!(el as HTMLElement).offsetParent) continue;
+                seen += 1;
+                if (!oneLine(el)) out.push(`${sel}：${el.textContent}`);
+              }
+            }
+            return { seen, out };
+          },
+          lines as unknown as string[],
+        );
+        expect(bad.seen, `${width} 宽 ${tab} 一行都没量到`).toBeGreaterThan(0);
+        expect(bad.out, `${width} 宽 ${tab}`).toEqual([]);
+      }
+    }
+  });
+
+  test('路由：用途下路由行的「顺位第一条活的」标签在小字行开头，不被截掉（390）', async ({ page }) => {
+    await page.goto('/routing?purpose=execute');
+    await expect(page.locator('[data-route-meta]').first()).toBeVisible();
+    const clipped = await page.locator('main').evaluate((main) => {
+      const out: string[] = [];
+      for (const meta of main.querySelectorAll('[data-route-meta]')) {
+        const tag = [...meta.children].find((c) => c.textContent === '顺位第一条活的');
+        if (!tag) continue;
+        if (meta.firstElementChild !== tag) out.push('不在开头');
+        if (tag.getBoundingClientRect().right > meta.getBoundingClientRect().right + 0.5) out.push('被截掉');
+      }
+      return out;
+    });
+    expect(clipped).toEqual([]);
+  });
+
   test('路由：每行的操作收进「⋯」菜单，菜单项不低于 40px', async ({ page }) => {
     await page.goto('/routing?purpose=execute');
     const more = page.getByRole('button', { name: /^更多操作：/ }).first();
