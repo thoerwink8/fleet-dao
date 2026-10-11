@@ -8,9 +8,10 @@ import {
   ROUTE_PROBE_PRIMARY_NOTE,
 } from '../src/route-probe-pace.ts';
 
-describe('疑似降智的原文（#1748）', () => {
-  it('不通的结论直接以「疑似降智」起头：认', () => {
+describe('疑似换成旧模型 / 疑似降智的原文（#1748、#1798）', () => {
+  it('不通的结论直接以「疑似降智」或「疑似换成旧模型」起头：认', () => {
     expect(isDegradedDetail('疑似降智：题 17 乘 23，应为 391，实答 381')).toBe(true);
+    expect(isDegradedDetail('疑似换成旧模型：题 日本首相，新答案应为 高市早苗，实答 石破茂')).toBe(true);
   });
   it('按需探测接手后，上一次真探是疑似降智：也认（路由页、渠道状态页不能只写按需）', () => {
     const text = onDemandDetail({
