@@ -1,4 +1,4 @@
-// 渠道状态（#1087）：顺位怎么排、探针报错的渠道怎么写「暂不可用、顺延到下一个」、干粉渠道照列、超过间隔 + 3 分钟改成「检测中断」。
+// 渠道状态（#1087）：顺位怎么排、探针报错的渠道怎么写「暂不可用、顺延到下一个」、干粉渠道照列、晚于下次探测时刻 20 分钟改成「检测中断」（#1798 片 7）。
 import { describe, expect, test } from 'vitest';
 import type { Channel, LivenessVerdict, Route, RoutingLayerRoute, RoutingLayers } from '../api/types';
 import { buildChannelCards, probeLatency } from './channel-status';
@@ -316,34 +316,57 @@ describe('干粉和下架的渠道照列，排在后面', () => {
   });
 });
 
-describe('检测中断：上次探超过「探测间隔 + 3 分钟」就不当现状', () => {
-  const one = (probedMinutesAgo: number, hostId: RoutingLayerRoute['hostId'] = 'claude-code') =>
+describe('检测中断：晚于 probeNextAt 加 20 分钟就不当现状', () => {
+  const later = (min: number) => new Date(NOW + min * TIME.MIN).toISOString();
+  const one = (over: Partial<RoutingLayerRoute>) =>
     byId(
       buildChannelCards(
         { channels: [channel('a')], routes: [], models: [] },
-        layers([{ m1: [layerRoute('a1', 'a', 'live', { probedAt: ago(probedMinutesAgo), hostId })] }]),
+        layers([{ m1: [layerRoute('a1', 'a', 'live', { probeTier: 'active', ...over })] }]),
         NOW,
       ),
       'a',
     );
 
-  test('15 分钟一轮的渠道：17 分钟前还算现状，19 分钟前改成检测中断（不再亮绿灯）', () => {
-    expect(one(17)).toMatchObject({ interrupted: false, label: '在线', tone: 'done' });
-    expect(one(19)).toMatchObject({ interrupted: true, label: '检测中断', tone: 'stall', state: 'ok' });
+  test('下次探测时刻过了 19 分钟还算现状，过了 21 分钟改成检测中断，画红（不再亮绿灯）', () => {
+    expect(one({ probeNextAt: later(-19) })).toMatchObject({
+      interrupted: false,
+      label: '在线',
+      tone: 'done',
+    });
+    expect(one({ probeNextAt: later(-21) })).toMatchObject({
+      interrupted: true,
+      label: '检测中断',
+      tone: 'fail',
+      state: 'ok',
+    });
   });
-  test('半小时前的结论：检测中断（e2e 用的就是这个）', () => {
-    expect(one(30).interrupted).toBe(true);
+  test('不活跃的路由也一样：每天一次的下次时刻过了 20 分钟没探，就是中断', () => {
+    expect(one({ probeTier: 'idle', probeNextAt: later(-21) }).interrupted).toBe(true);
+    expect(one({ probeTier: 'idle', probeNextAt: later(600) }).interrupted).toBe(false);
   });
-  test('不分执行方式：cursor-agent 和 15 分钟一轮同一条线（#1798 片 3），17 分钟前不中断，19 分钟前中断', () => {
-    expect(one(17, 'cursor-agent').interrupted).toBe(false);
-    expect(one(19, 'cursor-agent').interrupted).toBe(true);
+  test('不在用的路由不主动探，没有「下次」可晚：放多久都不算中断', () => {
+    expect(one({ probeTier: 'unused', probeNextAt: later(-5000), probedAt: ago(5000) }).interrupted).toBe(
+      false,
+    );
+  });
+  test('库里没写 probeNextAt（老行、引擎还没走过钟）：判不了，不猜成中断', () => {
+    expect(one({ probedAt: ago(600) }).interrupted).toBe(false);
+  });
+  test('不看探针原文：原文写什么退避、隔多久都不影响，只看 probeNextAt', () => {
+    const detail = '答上了：OK。用途前 2 位，隔 30 分钟再探；退避中，下次约 16:07 再探（连着不通 3 次）';
+    expect(one({ probeDetail: detail, probeNextAt: later(10) }).interrupted).toBe(false);
+    expect(one({ probeDetail: detail, probeNextAt: later(-21) }).interrupted).toBe(true);
   });
   test('探针报错的渠道检测中断了：不再写「顺延」（那是旧结论）', () => {
     const cards = buildChannelCards(
       { channels: [channel('a'), channel('b')], routes: [], models: [] },
       layers([
         {
-          m1: [layerRoute('a1', 'a', 'dead', { probedAt: ago(40) }), layerRoute('b1', 'b', 'live')],
+          m1: [
+            layerRoute('a1', 'a', 'dead', { probeTier: 'active', probeNextAt: later(-40) }),
+            layerRoute('b1', 'b', 'live'),
+          ],
         },
       ]),
       NOW,
@@ -351,8 +374,7 @@ describe('检测中断：上次探超过「探测间隔 + 3 分钟」就不当�
     expect(byId(cards, 'a')).toMatchObject({ interrupted: true, label: '检测中断' });
     expect(byId(cards, 'a').fallback).toBeUndefined();
   });
-  test('退避中的不通：按那一档，不把 40 分钟前的结论标成检测中断', () => {
-    const detail = '没通。退避中，下次约 16:07 再探（连着不通 3 次）';
+  test('退避中的不通：下次探测时刻还没到，40 分钟前探的结论不算检测中断', () => {
     const cards = buildChannelCards(
       { channels: [channel('a')], routes: [], models: [] },
       layers([
@@ -360,7 +382,9 @@ describe('检测中断：上次探超过「探测间隔 + 3 分钟」就不当�
           m1: [
             layerRoute('a1', 'a', 'dead', {
               probedAt: ago(40),
-              connect: { verdict: 'dead', reason: `探针判不在线：${detail}` },
+              probeTier: 'active',
+              probeFailStreak: 3,
+              probeNextAt: later(20),
             }),
           ],
         },
@@ -369,56 +393,41 @@ describe('检测中断：上次探超过「探测间隔 + 3 分钟」就不当�
     );
     expect(byId(cards, 'a').interrupted).toBe(false);
   });
-
-  test('旧的「前 2 位隔 30 分钟再探」原文不再放宽中断线：和每轮探同一条（17 不中断、19 中断）', () => {
-    const detail = '答上了：OK。用途前 2 位，隔 30 分钟再探';
-    const at = (min: number) =>
-      byId(
-        buildChannelCards(
-          { channels: [channel('a')], routes: [], models: [] },
-          layers([{ m1: [layerRoute('a1', 'a', 'live', { probedAt: ago(min), probeDetail: detail })] }]),
-          NOW,
-        ),
-        'a',
-      );
-    expect(at(17).interrupted).toBe(false);
-    expect(at(19).interrupted).toBe(true);
-  });
-
-  test('按需探测的路由：不主动探，放多久都不算检测中断，也不画红；渠道标「按需探测」', () => {
-    const detail = '不主动探，要派给它时先探一次。上一次真探：通，10-05 09:00';
+  test('一个渠道有一条路刚探过：不算中断（要每条在探的路都晚了才算）', () => {
     const cards = buildChannelCards(
       { channels: [channel('a')], routes: [], models: [] },
       layers([
         {
           m1: [
-            layerRoute('a1', 'a', 'unknown', {
-              probedAt: ago(600),
-              probeDetail: detail,
-              connect: { verdict: 'unknown', reason: `按需探测（不主动探，派给它时先探一次）：${detail}` },
-            }),
-          ],
-        },
-      ]),
-      NOW,
-    );
-    expect(byId(cards, 'a')).toMatchObject({ interrupted: false, label: '按需探测', tone: 'stop' });
-    expect(byId(cards, 'a').hasFault).toBe(false);
-  });
-
-  test('一个渠道有一条路刚探过：不算中断（要每条探过的路都过了才算）', () => {
-    const cards = buildChannelCards(
-      { channels: [channel('a')], routes: [], models: [] },
-      layers([
-        {
-          m1: [
-            layerRoute('a1', 'a', 'live', { probedAt: ago(40) }),
-            layerRoute('a2', 'a', 'live', { probedAt: ago(2) }),
+            layerRoute('a1', 'a', 'live', { probeTier: 'active', probeNextAt: later(-40) }),
+            layerRoute('a2', 'a', 'live', { probeTier: 'active', probeNextAt: later(50) }),
           ],
         },
       ]),
       NOW,
     );
     expect(cards[0]?.interrupted).toBe(false);
+  });
+  test('渠道下每条路由各数各的：晚了的数检测中断，身份题说出旧答案的数疑似换模型', () => {
+    const cards = buildChannelCards(
+      {
+        channels: [channel('a')],
+        routes: [rawRoute('a1', 'a', '通'), rawRoute('a2', 'a', '通'), rawRoute('a3', 'a', '通')],
+        models: [],
+      },
+      layers([
+        {
+          m1: [
+            layerRoute('a1', 'a', 'live', { probeTier: 'active', probeNextAt: later(-40) }),
+            layerRoute('a2', 'a', 'dead', { probeTier: 'active', probeNextAt: later(10) }),
+            layerRoute('a3', 'a', 'live', { probeTier: 'active', probeNextAt: later(10) }),
+          ],
+        },
+      ]),
+      NOW,
+      () => false,
+      new Set(['a2']),
+    );
+    expect(byId(cards, 'a').counts).toMatchObject({ interrupted: 1, degraded: 1, live: 1, fault: 0 });
   });
 });

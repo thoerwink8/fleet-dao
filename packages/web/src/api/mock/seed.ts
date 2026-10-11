@@ -10,7 +10,6 @@ import type {
   SubtaskState,
   TaskState,
 } from '@fleet-dao/shared';
-import { onDemandDetail } from '@fleet-dao/shared';
 import type { AuditEntry, Notification, Setting } from '../types';
 import type { MJob, MLog, MockState, MSubtask, MTask, PlanTemplate } from './model';
 
@@ -1611,7 +1610,12 @@ export function createSeed(now: number): MockState {
         modelId: 'opus-5.5',
         hostId: 'claude-code',
         alive: true,
-        probe: { state: 'ok', at: at(-4), detail: '答上了：OK · 用时 9 秒 · 按 API 价折合 $0.021' },
+        probe: { state: 'ok', at: at(-4), detail: '答上了：pong · 用时 9 秒 · 按 API 价折合 $0.021' },
+        // 活跃：每小时一次，下次在 56 分钟后
+        probeTier: 'active',
+        probeNextAt: at(56),
+        probeFailStreak: 0,
+        probeKind: 'ping',
       },
       {
         id: 'r-cb-opus',
@@ -1620,7 +1624,11 @@ export function createSeed(now: number): MockState {
         modelId: 'opus-5.5',
         hostId: 'claude-code',
         alive: true,
-        probe: { state: 'ok', at: at(-4), detail: '答上了：OK · 用时 11 秒 · 按 API 价折合 $0.023' },
+        probe: { state: 'ok', at: at(-4), detail: '答上了：pong · 用时 11 秒 · 按 API 价折合 $0.023' },
+        probeTier: 'active',
+        probeNextAt: at(56),
+        probeFailStreak: 0,
+        probeKind: 'ping',
       },
       {
         id: 'r-ca-sonnet',
@@ -1629,7 +1637,11 @@ export function createSeed(now: number): MockState {
         modelId: 'sonnet-5',
         hostId: 'claude-code',
         alive: true,
-        probe: { state: 'ok', at: at(-4), detail: '答上了：OK · 用时 6 秒 · 按 API 价折合 $0.004' },
+        probe: { state: 'ok', at: at(-4), detail: '答上了：pong · 用时 6 秒 · 按 API 价折合 $0.004' },
+        probeTier: 'active',
+        probeNextAt: at(56),
+        probeFailStreak: 0,
+        probeKind: 'ping',
       },
       {
         id: 'r-ca-opus5',
@@ -1639,6 +1651,9 @@ export function createSeed(now: number): MockState {
         hostId: 'claude-code',
         alive: false,
         probe: { state: 'skipped', at: at(-4), detail: '模型「Opus 5」已下架，不探' },
+        // 不在用：不主动探，没有下次时刻
+        probeTier: 'unused',
+        probeFailStreak: 0,
       },
       {
         id: 'r-rl-opus',
@@ -1647,7 +1662,12 @@ export function createSeed(now: number): MockState {
         modelId: 'opus-5.5',
         hostId: 'mirasim',
         alive: true,
-        probe: { state: 'ok', at: at(-5), detail: '答上了：OK · 用时 14 秒' },
+        probe: { state: 'ok', at: at(-5), detail: '答上了：pong · 身份题通过 · 用时 14 秒' },
+        // 中转渠道的活跃模型：额外问一道身份题
+        probeTier: 'active',
+        probeNextAt: at(55),
+        probeFailStreak: 0,
+        probeKind: 'identity',
       },
       {
         id: 'r-rl-gpt',
@@ -1656,7 +1676,12 @@ export function createSeed(now: number): MockState {
         modelId: 'gpt-5.6-luna',
         hostId: 'codex',
         alive: true,
-        probe: { state: 'ok', at: at(-5), detail: '答上了：OK · 用时 8 秒' },
+        probe: { state: 'ok', at: at(-5), detail: '答上了：pong · 用时 8 秒' },
+        // 不活跃：每天一次，下次在明天
+        probeTier: 'idle',
+        probeNextAt: at(24 * 60 - 5),
+        probeFailStreak: 0,
+        probeKind: 'ping',
       },
       {
         id: 'r-rl-kimi',
@@ -1665,7 +1690,12 @@ export function createSeed(now: number): MockState {
         modelId: 'kimi-k3',
         hostId: 'mirasim',
         alive: true,
-        probe: { state: 'ok', at: at(-5), detail: '答上了：OK · 用时 7 秒' },
+        // 检测中断：不活跃的每天探一次，本该 60 分钟前探，晚了 20 分钟以上还没探（探针可能停了）
+        probe: { state: 'ok', at: at(-24 * 60 - 60), detail: '答上了：pong · 用时 7 秒' },
+        probeTier: 'idle',
+        probeNextAt: at(-60),
+        probeFailStreak: 0,
+        probeKind: 'ping',
       },
       {
         id: 'r-rl-fable',
@@ -1679,6 +1709,8 @@ export function createSeed(now: number): MockState {
           at: at(-5),
           detail: '没有哪个阶段在用这条路由（挂着但关着的不算），不花额度去探；哪个阶段用上它，下一轮就探',
         },
+        probeTier: 'unused',
+        probeFailStreak: 0,
       },
       {
         id: 'r-cursor',
@@ -1692,9 +1724,14 @@ export function createSeed(now: number): MockState {
           at: at(-5),
           detail: '连探两次都没通：等了 150 秒还没起来（第一次：进程退出（退出码 1），没有终帧）',
         },
+        // 退避中：连着不通 3 次，隔 60 分钟再探
+        probeTier: 'active',
+        probeNextAt: at(55),
+        probeFailStreak: 3,
+        probeKind: 'ping',
       },
       {
-        // 降智检测没过（#1748）：真探判了疑似降智，之后不在用途前 2 位，结论改成按需探测，原文里还带着那次降智结论
+        // 身份题说出了旧答案（#1798）：疑似换模型，已按不在线处理，退避第一档 15 分钟后再探
         id: 'r-cursor-hi',
         channelId: 'ch-cursor',
         poolId: 'cursor-pro',
@@ -1702,14 +1739,14 @@ export function createSeed(now: number): MockState {
         hostId: 'cursor-agent',
         alive: false,
         probe: {
-          state: 'on_demand',
+          state: 'failed',
           at: at(-4),
-          detail: onDemandDetail({
-            state: 'failed',
-            at: new Date(now - 60 * MIN),
-            detail: '疑似降智：题 17 乘 23 等于多少？只回数字。，应为 391，实答 381',
-          }),
+          detail: '疑似换成旧模型：题 现任日本首相是谁？，新答案应为 高市早苗，实答 石破茂',
         },
+        probeTier: 'active',
+        probeNextAt: at(11),
+        probeFailStreak: 1,
+        probeKind: 'identity',
       },
       {
         id: 'r-grok',
@@ -1718,7 +1755,11 @@ export function createSeed(now: number): MockState {
         modelId: 'grok-4.7',
         hostId: 'grok',
         alive: true,
-        probe: { state: 'ok', at: at(-5), detail: '答上了：OK · 用时 13 秒' },
+        probe: { state: 'ok', at: at(-5), detail: '答上了：pong · 用时 13 秒' },
+        probeTier: 'active',
+        probeNextAt: at(55),
+        probeFailStreak: 0,
+        probeKind: 'ping',
       },
       {
         id: 'r-ds',
@@ -1732,6 +1773,8 @@ export function createSeed(now: number): MockState {
           at: at(-5),
           detail: '按量计费的渠道不自动探：探一次就多一笔账（design 第三节第 21 条）',
         },
+        probeTier: 'unused',
+        probeFailStreak: 0,
       },
     ],
     // 路由两层（#574）：用途 → 模型顺序，模型 → 路由顺序（和真后端那两张表一个形状）。

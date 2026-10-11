@@ -1,5 +1,4 @@
 // 路由页的白话和先看哪个（#574）：走的是不是首选、派不出去怎么说、进页面先看哪个用途、探针结论过没过期。
-import { ROUTE_PROBE_STALE_MINUTES } from '@fleet-dao/shared';
 import { describe, expect, test } from 'vitest';
 import type {
   LivenessVerdict,
@@ -7,14 +6,12 @@ import type {
   RoutingLayerPurpose,
   RoutingLayerRoute,
 } from '../api/types';
-import { TIME } from './format';
 import {
   countByVerdict,
   firstLive,
   modelSummary,
   onFallback,
   pickPurpose,
-  probeStale,
   purposeLine,
   routeSlots,
 } from './routing';
@@ -42,9 +39,6 @@ describe('routeSlots：账号池满不满（#800，和引擎选路同一个判�
     expect(() => routeSlots({ inFlight: 1, reserved: -1, maxConcurrency: 3 })).toThrow(/已选定数/);
   });
 });
-
-const NOW = Date.parse('2026-10-04T10:00:00Z');
-const ago = (min: number) => new Date(NOW - min * TIME.MIN).toISOString();
 
 const fact = (verdict: LivenessVerdict) => ({ verdict, reason: `原因：${verdict}` });
 
@@ -216,41 +210,5 @@ describe('一个模型几条路、几条活', () => {
 
   test('【故意造出的失败】一条路由都没有：照说，不写成「0 条活」', () => {
     expect(modelSummary(model('opus', [], 'dead'))).toBe('一条路由都没有');
-  });
-});
-
-describe('探针结论过没过期（和引擎同一条线）', () => {
-  test('每轮都探的：过了过期线算过期，没过不算；没探过不算过期', () => {
-    expect(probeStale(route('a', 'live', { probedAt: ago(ROUTE_PROBE_STALE_MINUTES - 1) }), NOW)).toBe(false);
-    expect(probeStale(route('a', 'live', { probedAt: ago(ROUTE_PROBE_STALE_MINUTES + 1) }), NOW)).toBe(true);
-    expect(probeStale(route('a', 'unknown'), NOW)).toBe(false);
-  });
-
-  test('不分执行方式：cursor-agent 和 Claude 同一条过期线（#1798 片 3），一小时前算过期', () => {
-    expect(probeStale(route('c', 'live', { hostId: 'cursor-agent', probedAt: ago(40) }), NOW)).toBe(false);
-    expect(probeStale(route('c', 'live', { hostId: 'cursor-agent', probedAt: ago(60) }), NOW)).toBe(true);
-  });
-
-  test('退避中按那一档放宽；旧的「隔 30 分钟再探」原文不再放宽；按需探测仍不算过期', () => {
-    const backing = '没通。退避中，下次约 16:07 再探（连着不通 6 次）';
-    expect(
-      probeStale(
-        route('b', 'dead', {
-          probedAt: ago(200),
-          probeDetail: backing,
-          connect: { verdict: 'dead', reason: `探针判不在线：${backing}` },
-        }),
-        NOW,
-      ),
-    ).toBe(false);
-    expect(probeStale(route('b', 'dead', { probedAt: ago(280), probeDetail: backing }), NOW)).toBe(true);
-    const deferred = '答上了：OK。用途前 2 位，隔 30 分钟再探';
-    expect(probeStale(route('d', 'live', { probedAt: ago(40), probeDetail: deferred }), NOW)).toBe(false);
-    expect(probeStale(route('d', 'live', { probedAt: ago(60), probeDetail: deferred }), NOW)).toBe(true);
-    // 按需探测：不主动探，放多久都不算探针停了
-    const onDemand = '不主动探，要派给它时先探一次。上一次真探：通，10-09 08:00';
-    expect(probeStale(route('o', 'unknown', { probedAt: ago(5000), probeDetail: onDemand }), NOW)).toBe(
-      false,
-    );
   });
 });

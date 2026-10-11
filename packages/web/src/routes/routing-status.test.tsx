@@ -4,7 +4,7 @@
 // 「立即探测」，点了马上看到排队 / 探测中，探完自己刷新。
 // 故意造出的失败：引擎关着（按钮置灰、写明，历史照样在）、点了被拒（写明是哪样）、立即探测的记录读不到（写没读成）、
 // 探针历史读不到（写没查成、不画格子）、运行中失败的渠道顺到谁没有。
-import { type ProbeHistoryCell, probeHistoryStrips, ROUTE_PROBE_ON_DEMAND_MARK } from '@fleet-dao/shared';
+import { type ProbeHistoryCell, probeHistoryStrips } from '@fleet-dao/shared';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { ApiError } from '../api/client';
@@ -99,38 +99,37 @@ describe('运行中失败的渠道（#1118，failoverOf）', () => {
     models: [{ id: 'm1', family: 'claude', displayName: 'Opus 5.5' }],
   };
 
-  test('写明为什么、顺延到谁（渠道和模型）、下次探测：引发失败的那条上次通了，按它的间隔算', () => {
-    const routes = [route('r1', 'c1', { probe: { state: 'ok', at: '2026-10-05T01:00:00Z' } })];
+  test('写明为什么、顺延到谁（渠道和模型）、下次探测：直接读引发失败的那条路由的 probeNextAt', () => {
+    const routes = [
+      route('r1', 'c1', {
+        probe: { state: 'ok', at: '2026-10-05T01:00:00Z' },
+        probeTier: 'active',
+        probeNextAt: '2026-10-05T02:00:00Z',
+      }),
+    ];
     expect(failoverOf(failedState(), routes, routing)).toMatchObject({
       reason: '上游断连（已重试 2 次）',
       failedRouteId: 'r1',
       fallback: { channelName: '中转站', modelName: 'Opus 5.5' },
-      nextProbeAt: '2026-10-05T01:15:00.000Z',
-      probeEveryMinutes: 15,
-    });
-    // #1798 片 3：不分执行方式，mirasim / cursor / grok 不再按 120 分钟放慢；页面「下次」仍按钟一轮（15），
-    // 活跃 60 / 不活跃每天由引擎写进 probe_next_at，片 7 再读。
-    const slow = [
-      route('r1', 'c1', { hostId: 'mirasim', probe: { state: 'ok', at: '2026-10-05T01:00:00Z' } }),
-    ];
-    expect(failoverOf(failedState(), slow, routing)).toMatchObject({
-      nextProbeAt: '2026-10-05T01:15:00.000Z',
-      probeEveryMinutes: 15,
+      nextProbeAt: '2026-10-05T02:00:00Z',
     });
   });
 
-  test('不通且写了连着几次：下次探测按退避那一档，不按 15 分钟', () => {
-    const detail = '503 容量满。退避中，下次约 03:00 再探（连着不通 3 次）';
+  test('退避中的下次探测也是 probeNextAt，不看原文里写了什么', () => {
     const routes = [
       route('r1', 'c1', {
         alive: false,
-        probe: { state: 'failed', at: '2026-10-05T01:00:00Z', detail },
+        probe: {
+          state: 'failed',
+          at: '2026-10-05T01:00:00Z',
+          detail: '503 容量满。退避中，下次约 03:00 再探',
+        },
+        probeTier: 'active',
+        probeFailStreak: 3,
+        probeNextAt: '2026-10-05T02:00:00Z',
       }),
     ];
-    expect(failoverOf(failedState(), routes, routing)).toMatchObject({
-      nextProbeAt: '2026-10-05T02:00:00.000Z',
-      probeEveryMinutes: 60,
-    });
+    expect(failoverOf(failedState(), routes, routing)?.nextProbeAt).toBe('2026-10-05T02:00:00Z');
   });
 
   test('【故意造出的失败】顺到谁还没有、引发的路由没探过：照实写没有，不编', () => {
@@ -175,26 +174,71 @@ describe('渠道状态页：渠道卡', () => {
     expect(screen.getByText(/绿灯只表示本节点最近一轮抽测通过/)).toBeTruthy();
   });
 
-  test('退避中单独一行写下次大约几点，不带截断，也不标结论过期', async () => {
+  test('退避中：路由行写连着不通几次和下次几点，读的是 probeFailStreak、probeNextAt，不带截断，也不标检测中断', async () => {
     const api = createMockApi({ live: false });
     const cursor = api.state().routes.find((r) => r.id === 'r-cursor');
     if (!cursor?.probe) throw new Error('假数据没有 cursor 路由');
-    cursor.probe = {
-      state: 'failed',
-      at: new Date(Date.now() - 20 * 60_000).toISOString(),
-      detail: '连探两次都没通：503 容量满。退避中，下次约 16:07 再探（连着不通 6 次）',
-    };
+    cursor.probeFailStreak = 6;
+    cursor.probeNextAt = new Date(Date.now() + 100 * 60_000).toISOString();
+    // 原文里写的退避不再有人读：故意写一个对不上的
+    cursor.probe = { ...cursor.probe, detail: '连探两次都没通。退避中，下次约 03:00 再探（连着不通 2 次）' };
     renderApp(<RoutingStatus />, { api, route: '/routing/status' });
     await screen.findByRole('list', { name: '渠道状态' });
     fireEvent.click(within(card('ch-cursor')).getByRole('button'));
     const notice = await waitFor(() => {
-      const el = routeRow('r-cursor').querySelector('[data-probe-backoff]');
-      if (!(el instanceof HTMLElement)) throw new Error('还没有退避那一行');
+      const el = routeRow('r-cursor').querySelector('[data-probe-next]');
+      if (!(el instanceof HTMLElement)) throw new Error('还没有下次探测那一行');
       return el;
     });
-    expect(notice.textContent).toBe('退避中，下次约 16:07 再探');
+    expect(notice.textContent).toMatch(/^退避中，连着不通 6 次，下次约 \d{2}:\d{2}$/);
     expect(notice.className).not.toContain('truncate');
-    expect(routeRow('r-cursor').textContent).not.toContain('结论过期');
+    expect(routeRow('r-cursor').getAttribute('data-kind')).toBe('fault');
+  });
+
+  test('路由行按新列显示：上次（时刻、种类、触发者）、下次（时刻、档），活跃 / 不活跃 / 不在用各一句', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-relay' });
+    await waitFor(() => routeRow('r-rl-opus'));
+    const last = (id: string) => routeRow(id).querySelector('[data-probe-last]')?.textContent;
+    const next = (id: string) => routeRow(id).querySelector('[data-probe-next]')?.textContent;
+    // 活跃的中转模型：身份题，触发者来自探测记录
+    expect(last('r-rl-opus')).toBe('上次 5 分钟前 · 身份题 · 定时');
+    expect(next('r-rl-opus')).toMatch(/^下次约 \d{2}:\d{2}（活跃，每小时）$/);
+    // 不活跃：每天一次，下次在明天
+    expect(last('r-rl-gpt')).toBe('上次 5 分钟前 · 连通 · 定时');
+    expect(next('r-rl-gpt')).toMatch(/^下次约 明天 \d{2}:\d{2}（不活跃，每天）$/);
+    // 不在用：不主动探
+    expect(next('r-rl-fable')).toBe('不主动探（没用途在用）');
+  });
+
+  test('晚于下次探测时刻 20 分钟：路由行标「检测中断」并画红，写本该几点探', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-relay' });
+    await waitFor(() => routeRow('r-rl-kimi'));
+    const row = routeRow('r-rl-kimi');
+    expect(row.getAttribute('data-kind')).toBe('interrupted');
+    expect(within(row).getByText('检测中断')).toBeTruthy();
+    expect(row.className).toContain('border-st-fail');
+    const next = row.querySelector('[data-probe-next]');
+    expect(next?.getAttribute('data-probe-next')).toBe('fail');
+    expect(next?.textContent).toMatch(/^检测中断：本该 \d{2}:\d{2} 探，已过 [67]\d 分钟没探$/);
+    expect(next?.className).toContain('text-ink-fail');
+    // 同一个渠道里没晚的路由不受影响
+    expect(routeRow('r-rl-gpt').getAttribute('data-kind')).toBe('live');
+  });
+
+  test('疑似换模型的路由：橙色一档，不是故障；说明里写的是「疑似换模型」', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor' });
+    await waitFor(() => expect(routeRow('r-cursor-hi').getAttribute('data-kind')).toBe('degraded'));
+    expect(routeRow('r-cursor-hi').textContent).toContain('疑似换模型·已按不在线处理');
+    expect(document.body.textContent).not.toContain('疑似降智');
+  });
+
+  test('顶上的说明换成三档节奏的那一句，不再写「Mirasim、Cursor、Grok 探通后 2 小时一轮」', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status' });
+    await screen.findByRole('list', { name: '渠道状态' });
+    expect(document.body.textContent).toContain(
+      '活跃路由每小时探一次，不活跃的每天一次，派活前 15 分钟内没探过会先探；中转渠道的活跃模型额外问一道身份题。',
+    );
+    expect(document.body.textContent).not.toContain('2 小时一轮');
   });
 
   test('运行中失败（#1118）：中转站卡上写「运行中失败，已顺延」、为什么、顺到谁、下次探测；和路由页同一份判法', async () => {
@@ -212,19 +256,20 @@ describe('渠道状态页：渠道卡', () => {
     expect(document.querySelector('[data-failover]')).toBeNull();
   });
 
-  test('上次探测超过间隔 + 3 分钟：这个渠道改成「检测中断」，别的渠道不受影响', async () => {
+  test('晚于下次探测时刻 20 分钟：这个渠道改成「检测中断」，别的渠道不受影响', async () => {
     const api = createMockApi({ live: false });
     const layers = await api.routingLayers();
-    const old = new Date(Date.now() - 30 * 60_000).toISOString();
+    const late = new Date(Date.now() - 30 * 60_000).toISOString();
     for (const p of layers.purposes) {
-      for (const m of p.models) for (const r of m.routes) if (r.channelId === 'ch-claude') r.probedAt = old;
+      for (const m of p.models)
+        for (const r of m.routes) if (r.channelId === 'ch-claude') r.probeNextAt = late;
     }
     Object.assign(api, { routingLayers: async () => layers });
     renderApp(<RoutingStatus />, { route: '/routing/status', api });
     await screen.findByRole('list', { name: '渠道状态' });
     expect(card('ch-claude').getAttribute('data-state')).toBe('interrupted');
     expect(card('ch-claude').textContent).toContain('检测中断');
-    expect(card('ch-grok').getAttribute('data-state')).toBe('ok');
+    expect(card('ch-cursor').getAttribute('data-state')).toBe('down');
   });
 });
 
@@ -566,6 +611,8 @@ describe('渠道状态页：探测记录（#1638）', () => {
         failureReason: null,
         requestText: '只回 OK\n第二行',
         responseText: 'OK',
+        kind: 'ping',
+        trigger: 'scheduled',
       }),
       probeCell({
         id: 2,
@@ -574,14 +621,16 @@ describe('渠道状态页：探测记录（#1638）', () => {
         probedAt: mins(10),
         result: 'failed',
         durationMs: 8000,
-        failureReason: '降智题答错：实答 381',
+        failureReason: '疑似换成旧模型：题 现任日本首相是谁？，新答案应为 高市早苗，实答 石破茂',
         requestText: '请求原文 A\n请求原文 B',
         responseText: '响应原文 X\n响应原文 Y',
-        checkQuestion: '17 乘 23 等于多少？',
-        checkExpected: '391',
-        checkAnswer: '381',
+        checkQuestion: '现任日本首相是谁？',
+        checkExpected: '高市早苗/Takaichi',
+        checkAnswer: '石破茂',
         checkPassed: false,
         selfIdentity: '某个小模型',
+        kind: 'identity',
+        trigger: 'dispatch',
       }),
       probeCell({
         id: 3,
@@ -592,6 +641,8 @@ describe('渠道状态页：探测记录（#1638）', () => {
         failureReason: '上游 503',
         requestText: 'PING',
         responseText: 'boom',
+        kind: 'ping',
+        trigger: 'break',
       }),
     ]);
   const rowOrder = () =>
@@ -608,22 +659,64 @@ describe('渠道状态页：探测记录（#1638）', () => {
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
   };
 
-  test('从新到旧列出；疑似降智那一行写题、标准答案、实答和自报身份，格子单独一种颜色', async () => {
+  test('从新到旧列出；每行带种类和触发者；格子单独一种颜色，橙色叫「疑似换模型」', async () => {
     renderLog(logHistory());
     await waitFor(() => expect(rowOrder()).toEqual(['2', '3', '1']));
+    const source = (id: number) =>
+      document.querySelector(`[data-probe-row="${id}"] [data-field="source"]`)?.textContent;
+    expect(source(1)).toBe('连通 · 定时');
+    expect(source(2)).toBe('身份题 · 派前');
+    expect(source(3)).toBe('连通 · 断链');
     const row = document.querySelector('[data-probe-row="2"]') as HTMLElement;
     expect(row.getAttribute('data-result')).toBe('doubt');
-    expect(within(row).getByText('疑似降智')).toBeTruthy();
-    expect(within(row).getByText('17 乘 23 等于多少？')).toBeTruthy();
-    expect(row.querySelector('[data-field="expected"]')?.textContent).toBe('391');
-    expect(row.querySelector('[data-field="answer"]')?.textContent).toBe('381');
-    expect(row.querySelector('[data-field="identity"]')?.textContent).toBe('某个小模型');
-    // 不通的那行没有题，不画题
-    expect(document.querySelector('[data-probe-row="3"] [data-field="check"]')).toBeNull();
+    expect(within(row).getByText('疑似换模型')).toBeTruthy();
+    expect(document.body.textContent).not.toContain('疑似降智');
     const cell = historyStrip().querySelector('[data-cell="2"]');
     expect(cell?.getAttribute('data-result')).toBe('doubt');
     expect(cell?.className).toContain('bg-st-doubt');
-    expect(historyStrip().textContent).toContain('橙疑似降智');
+    expect(historyStrip().textContent).toContain('橙疑似换模型');
+  });
+
+  test('身份题那一行展开：题、新答案、旧答案、实答、自报身份；折叠时不铺；连通那行没有题', async () => {
+    renderLog(logHistory());
+    await waitFor(() => expect(rowOrder()).toHaveLength(3));
+    expect(document.querySelector('[data-probe-row="2"] [data-field="check"]')).toBeNull();
+    open(2);
+    const row = document.querySelector('[data-probe-row="2"]') as HTMLElement;
+    expect(row.querySelector('[data-field="question"]')?.textContent).toBe('现任日本首相是谁？');
+    expect(row.querySelector('[data-field="expected"]')?.textContent).toBe('高市早苗/Takaichi');
+    expect(row.querySelector('[data-field="old"]')?.textContent).toContain('实答命中了旧答案');
+    expect(row.querySelector('[data-field="answer"]')?.textContent).toBe('石破茂');
+    expect(row.querySelector('[data-field="identity"]')?.textContent).toBe('某个小模型');
+    open(1);
+    expect(document.querySelector('[data-probe-row="1"] [data-field="check"]')).toBeNull();
+  });
+
+  test('算术题时代的老记录（没有种类、带着题）：照原样显示，标「旧版降智题」，没有旧答案那一栏', async () => {
+    renderLog(
+      historyOf([
+        probeCell({
+          id: 1,
+          routeId: 'r-cursor',
+          channelId: 'ch-cursor',
+          probedAt: mins(10),
+          result: 'failed',
+          failureReason: '疑似降智：题 17 乘 23，应为 391，实答 381',
+          checkQuestion: '17 乘 23 等于多少？',
+          checkExpected: '391',
+          checkAnswer: '381',
+          checkPassed: false,
+        }),
+      ]),
+    );
+    await waitFor(() => expect(rowOrder()).toEqual(['1']));
+    const row = document.querySelector('[data-probe-row="1"]') as HTMLElement;
+    expect(row.querySelector('[data-field="legacy"]')?.textContent).toBe('旧版降智题');
+    open(1);
+    expect(row.querySelector('[data-field="question"]')?.textContent).toBe('17 乘 23 等于多少？');
+    expect(row.querySelector('[data-field="old"]')).toBeNull();
+    // 没有种类和触发者可写，这一行的来源栏里只有这个标
+    expect(row.querySelector('[data-field="source"]')?.textContent).toBe('旧版降智题');
   });
 
   test('点一行展开请求和响应原文；不通的另起一块写失败原因；点格子打开的是同一行', async () => {
@@ -646,13 +739,13 @@ describe('渠道状态页：探测记录（#1638）', () => {
     // 再点一下这一行折起来
     open(1);
     expect(document.querySelector('[data-probe-row="1"] [data-field="request"]')).toBeNull();
-    // 疑似降智的行展开：原文保留换行
+    // 疑似换模型的行展开：原文保留换行
     open(2);
     expect(document.querySelector('[data-probe-row="2"] [data-field="request"]')?.textContent).toBe(
       '请求原文 A\n请求原文 B',
     );
     expect(document.querySelector('[data-probe-row="2"] [data-field="failure"]')?.textContent).toContain(
-      '疑似降智',
+      '疑似换模型',
     );
   });
 
@@ -708,7 +801,7 @@ describe('渠道状态页：探测记录（#1638）', () => {
     expect(empty.textContent).toBe('还没有探测记录');
   });
 
-  test('没探里原文带「按需」那一句的标「按需」，别的没探还是「没探」；图例一起写', async () => {
+  test('没真探的记录统一标「没探」，折在下面；图例里没有「按需」', async () => {
     renderLog(
       historyOf([
         probeCell({
@@ -717,7 +810,7 @@ describe('渠道状态页：探测记录（#1638）', () => {
           channelId: 'ch-cursor',
           probedAt: mins(10),
           result: 'not_probed',
-          failureReason: `${ROUTE_PROBE_ON_DEMAND_MARK}。还没真探过`,
+          failureReason: '这一轮没探：账号池整池暂停',
         }),
         probeCell({
           id: 2,
@@ -736,14 +829,11 @@ describe('渠道状态页：探测记录（#1638）', () => {
       within(document.querySelector('[data-probe-log="skipped"]') as HTMLElement).getByRole('button'),
     );
     await waitFor(() => expect(rowOrder()).toEqual(['1', '2']));
-    const onDemand = document.querySelector('[data-probe-row="1"]') as HTMLElement;
-    expect(onDemand.getAttribute('data-result')).toBe('on_demand');
-    expect(within(onDemand).getByText('按需')).toBeTruthy();
     const plain = document.querySelector('[data-probe-row="2"]') as HTMLElement;
     expect(plain.getAttribute('data-result')).toBe('not_probed');
     expect(within(plain).getByText('没探')).toBeTruthy();
     expect(historyStrip().querySelector('[data-cell]')).toBeNull();
-    expect(document.querySelector('[data-probe-log="legend"]')?.textContent).toContain('按需：');
+    expect(document.querySelector('[data-probe-log="legend"]')?.textContent).not.toContain('按需');
   });
 
   test('挤出 60 格的路由，它自己的最近一次也列出来', async () => {

@@ -12,7 +12,7 @@
 // - 近 60 次来自探针历史（route_probe_history），本渠道所有路由按时间排，一次一格。没探和不通颜色分开。
 //   均耗时、可用率按这 60 格算。库读不到写「没查成」，不拿空格子冒充没有。引擎关着这一份照样读。
 
-import { PROBE_HISTORY_SLOTS, probeBackoffNotice, probeNextEveryMinutes } from '@fleet-dao/shared';
+import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
 import { ChevronDown, LoaderCircle, Radar, SatelliteDish } from 'lucide-react';
 import { type ReactNode, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
@@ -54,13 +54,14 @@ import {
   buildChannelCards,
   type ChannelCard,
   channelMatchesFilter,
-  channelProbeInterrupted,
   routeKindMap,
 } from '../lib/channel-status';
-import { formatAgo, formatClock, formatIn, TIME } from '../lib/format';
+import { formatAgo, formatClock, TIME } from '../lib/format';
 import { useMediaQuery, useNow } from '../lib/hooks';
 import { poolIsHeld } from '../lib/pool-holds';
 import type { PoolProblem } from '../lib/pool-problems';
+import { identityMismatchRoutes } from '../lib/probe-history-view';
+import { lastProbeLine, type NextProbeLine, nextProbeLine, PROBE_TIER_WORD } from '../lib/probe-pace-view';
 import {
   activeFor,
   activityText,
@@ -85,7 +86,7 @@ export function meta() {
 }
 
 const DESCRIPTION =
-  '每个渠道通不通、不通为什么。点「立即探测」让法国引擎现在就探，不用等下一轮（Claude 订阅 15 分钟一轮；Mirasim、Cursor、Grok 探通后 2 小时一轮）。';
+  '活跃路由每小时探一次，不活跃的每天一次，派活前 15 分钟内没探过会先探；中转渠道的活跃模型额外问一道身份题。点「立即探测」让法国引擎现在就探。';
 
 /** 渠道目录每 30 秒自己重拉。超过 5 分钟还没再读成，刷新条才标「数据已过期」。 */
 const ROUTING_STATUS_STALE_AFTER_MS = 5 * TIME.MIN;
@@ -93,13 +94,14 @@ const ROUTING_STATUS_STALE_AFTER_MS = 5 * TIME.MIN;
 /** 两栏（列表 + 详情）从 lg（1024）起；再窄只画列表，详情改抽屉（#1806）。 */
 const DRAWER_MQ = '(max-width: 1023px)';
 
-const STATE_WORD: Record<NonNullable<Route['probe']>['state'], { label: string; tone: Tone }> = {
+const STATE_WORD: Readonly<Record<string, { label: string; tone: Tone }>> = {
   ok: { label: '通过', tone: 'done' },
   failed: { label: '不通', tone: 'fail' },
   skipped: { label: '没探', tone: 'stall' },
   not_wired: { label: '插头没接', tone: 'stall' },
-  on_demand: { label: '按需探测', tone: 'stop' },
 };
+/** 库里留着的老状态词（已不再写）：当没探。 */
+const OLD_STATE_WORD = { label: '没探', tone: 'stall' } as const satisfies { label: string; tone: Tone };
 
 /** 引擎此刻能不能接立即探测：不能就一句话说清是哪样，按钮跟着置灰。 */
 function engineBlock(status: RouteProbeStatus | undefined, error: unknown): string | undefined {
@@ -172,13 +174,27 @@ export default function RoutingStatus() {
     () => (poolId: string) => (holds.data ? poolIsHeld(holds.data, poolId) : false),
     [holds.data],
   );
+  // 最近一次身份题说出旧答案的路由：疑似换模型（探测记录里读，路由目录里没有这一条）
+  const mismatch = useMemo(
+    () =>
+      historyQuery.data && historyQuery.data.state !== 'unreadable'
+        ? identityMismatchRoutes(historyQuery.data.latestByRoute)
+        : new Set<string>(),
+    [historyQuery.data],
+  );
   const cards = useMemo(
-    () => (routing.data && layers.data ? buildChannelCards(routing.data, layers.data, now, poolHeld) : []),
-    [routing.data, layers.data, now, poolHeld],
+    () =>
+      routing.data && layers.data
+        ? buildChannelCards(routing.data, layers.data, now, poolHeld, mismatch)
+        : [],
+    [routing.data, layers.data, now, poolHeld, mismatch],
   );
   const kinds = useMemo(
-    () => (routing.data && layers.data ? routeKindMap(routing.data, layers.data, now, poolHeld) : new Map()),
-    [routing.data, layers.data, now, poolHeld],
+    () =>
+      routing.data && layers.data
+        ? routeKindMap(routing.data, layers.data, now, poolHeld, mismatch)
+        : new Map(),
+    [routing.data, layers.data, now, poolHeld, mismatch],
   );
   // 搜索只在渠道名、渠道号、渠道下的路由号和模型名里找
   const haystack = useMemo(() => {
@@ -370,7 +386,7 @@ export default function RoutingStatus() {
           )}
           <ul className="mt-3 space-y-1 text-caption text-muted-foreground">
             <li>绿灯只表示本节点最近一轮抽测通过，不保证每次使用都正常。</li>
-            <li>上次探测超过「探测间隔 + 3 分钟」还没更新，就显示「检测中断」，不拿旧绿灯掩盖中断。</li>
+            <li>晚于「下次探测时刻」20 分钟还没探，就显示「检测中断」并标红，不拿旧绿灯掩盖中断。</li>
             <li>已关（人关的）、未被用途使用、池暂停、已下架都不是坏了，只有「故障」才要修。</li>
             <li>
               每个用途排哪些模型、能不能派，看{' '}
@@ -502,12 +518,12 @@ function ProbeBanner({
 /** 路由行的先后：该修的在前，要看一眼的其次，在线的，最后是已关、没用的。同一档里探过的在前、再按编号。 */
 const KIND_ORDER: readonly RouteStateKind[] = [
   'fault',
+  'interrupted',
   'degraded',
   'blocked',
   'unknown',
   'unprobed',
   'live',
-  'on_demand',
   'held',
   'off',
   'retired',
@@ -604,8 +620,8 @@ function ChannelDetail({
       }
     >
       {card.interrupted ? (
-        <p role="status" className="mb-3 text-sub font-medium text-ink-stall">
-          检测中断：探针超过间隔没更新这个渠道，上次的结论不再当现状
+        <p role="status" className="mb-3 text-sub font-medium text-ink-fail">
+          检测中断：晚于下次探测时刻 20 分钟还没探这个渠道，上次的结论不再当现状
           {card.probedAt ? `（${formatAgo(card.probedAt, now)}）` : null}
         </p>
       ) : null}
@@ -651,6 +667,9 @@ function ChannelDetail({
               key={r.id}
               route={r}
               kind={kindOf(r)}
+              lastCell={
+                history.state === 'ok' ? history.latestByRoute.find((c) => c.routeId === r.id) : undefined
+              }
               model={models.find((m) => m.id === r.modelId)}
               problem={problems.get(r.poolId)}
               requests={requests}
@@ -676,6 +695,7 @@ function ChannelDetail({
 function RouteRow({
   route: r,
   kind,
+  lastCell,
   model,
   problem,
   requests,
@@ -690,6 +710,8 @@ function RouteRow({
 }: {
   route: Route;
   kind: RouteStateKind;
+  /** 这条路由在探测记录里的最近一次：上次是谁触发的（路由目录里没有这一列）。 */
+  lastCell: ProbeHistoryCell | undefined;
   model: Model | undefined;
   /** 这条路由的账号池有没有要人动手的毛病（额度读不到、凭据过期）。 */
   problem: PoolProblem | undefined;
@@ -706,24 +728,30 @@ function RouteRow({
   const active = activeFor(requests, r.id);
   const failure = lastFailureFor(requests, r);
   const probe = r.probe;
-  const word = probe ? STATE_WORD[probe.state] : { label: '还没探到', tone: 'stop' as Tone };
-  const notice = probe ? probeBackoffNotice(probe.detail) : null;
-  const stale = probe
-    ? channelProbeInterrupted(
+  const word = probe
+    ? (STATE_WORD[probe.state] ?? OLD_STATE_WORD)
+    : { label: '还没探到', tone: 'stop' as Tone };
+  // 上次那一句：时刻来自路由目录，触发者只有探测记录里有；两边对得上同一次（相差不到 1 分钟）才用它的触发者和种类
+  const sameProbe =
+    probe !== undefined &&
+    lastCell !== undefined &&
+    Math.abs(Date.parse(lastCell.probedAt) - Date.parse(probe.at)) < TIME.MIN;
+  const lastLine = probe
+    ? lastProbeLine(
+        probe.at,
         {
-          probedAt: probe.at,
-          hostId: r.hostId,
-          ...(probe.detail !== undefined ? { detail: probe.detail } : {}),
+          kind: r.probeKind ?? (sameProbe ? lastCell?.kind : undefined),
+          trigger: sameProbe ? lastCell?.trigger : undefined,
         },
         now,
       )
-    : false;
+    : null;
+  const next: NextProbeLine | null = nextProbeLine(r, now);
   const seconds = probeSeconds(r, requests);
-  const every = probeNextEveryMinutes(r.hostId, probe?.state, probe?.detail);
-  const nextAt = probe ? new Date(Date.parse(probe.at) + every * 60_000).toISOString() : undefined;
   const name = model?.displayName ?? r.modelId;
   const bodyId = `route-body-${r.id}`;
   const failed = kind === 'fault';
+  const alarm = kind === 'fault' || kind === 'interrupted';
   return (
     <li
       data-route={r.id}
@@ -731,7 +759,7 @@ function RouteRow({
       data-kind={kind}
       className={cn(
         'rounded-lg border',
-        failed && !active && 'border-st-fail/40',
+        alarm && !active && 'border-st-fail/40',
         (kind === 'off' || kind === 'unused' || kind === 'retired') && 'bg-muted/30',
         picked && 'ring-2 ring-ring/40',
       )}
@@ -765,19 +793,31 @@ function RouteRow({
             label={probe.state === 'ok' ? '探过：通' : '探过：不通'}
           />
         ) : null}
-        {stale && !active && kind !== 'unused' ? <StatusChip tone="stall" label="结论过期" /> : null}
-        <span className="num hidden shrink-0 text-caption text-muted-foreground sm:inline">
-          {probe ? formatAgo(probe.at, now) : ''}
-        </span>
         <ChevronDown
           className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')}
           aria-hidden
         />
       </button>
-      {notice && !active ? (
-        <p data-probe-backoff className="px-3 pb-1.5 text-caption text-ink-stall">
-          {notice}
-        </p>
+      {lastLine || next ? (
+        <div data-probe-pace className="num flex flex-wrap gap-x-3 gap-y-0.5 px-3 pb-1.5 text-caption">
+          {lastLine ? (
+            <p data-probe-last className="text-muted-foreground">
+              {lastLine}
+            </p>
+          ) : null}
+          {next ? (
+            <p
+              data-probe-next={next.tone}
+              className={cn(
+                next.tone === 'fail' && 'font-medium text-ink-fail',
+                next.tone === 'warn' && 'text-ink-stall',
+                next.tone === 'normal' && 'text-muted-foreground',
+              )}
+            >
+              {next.text}
+            </p>
+          ) : null}
+        </div>
       ) : null}
       {problem ? <PoolProblemLine problem={problem} className="px-3 pb-1.5" /> : null}
       {kind === 'degraded' && probe?.detail && !open ? (
@@ -825,13 +865,11 @@ function RouteRow({
               )}
             </Fact>
             <Fact label="执行方式">{r.hostId}</Fact>
-            <Fact label="下一轮定时探">
-              {probe?.state === 'on_demand' ? (
-                '不定时探，派前探一次'
-              ) : nextAt ? (
-                <span className="num">{formatIn(nextAt, now)}</span>
+            <Fact label="节奏档">
+              {r.probeTier ? (
+                `${PROBE_TIER_WORD[r.probeTier].label}${PROBE_TIER_WORD[r.probeTier].every ? `，${PROBE_TIER_WORD[r.probeTier].every}` : ''}`
               ) : (
-                '上线后第一轮'
+                <span className="text-muted-foreground">库里还没写</span>
               )}
             </Fact>
           </dl>
