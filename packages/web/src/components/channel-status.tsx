@@ -143,19 +143,25 @@ export function ChannelList({
   onPick: (channelId: string) => void;
 }) {
   return (
-    <List aria-label="渠道状态">
-      {cards.map((c) => (
-        <ChannelRow
-          key={c.channel.id}
-          card={c}
-          now={now}
-          selected={c.channel.id === selected}
-          probing={probing.has(c.channel.id)}
-          problems={problems.get(c.channel.id) ?? []}
-          onPick={() => onPick(c.channel.id)}
-        />
-      ))}
-    </List>
+    <>
+      {/* 左边的数字圈是派活的先后：给一行列头说明，不让它没头没尾（#1903） */}
+      <div data-rank-header className="border-b px-4 py-1.5 text-meta text-muted-foreground">
+        左边的数字是优先级：数字小的先用
+      </div>
+      <List aria-label="渠道状态">
+        {cards.map((c) => (
+          <ChannelRow
+            key={c.channel.id}
+            card={c}
+            now={now}
+            selected={c.channel.id === selected}
+            probing={probing.has(c.channel.id)}
+            problems={problems.get(c.channel.id) ?? []}
+            onPick={() => onPick(c.channel.id)}
+          />
+        ))}
+      </List>
+    </>
   );
 }
 

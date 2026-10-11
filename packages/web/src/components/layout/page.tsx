@@ -48,6 +48,7 @@ export function Page({
   actions,
   refresh,
   tabs,
+  breadcrumb,
   children,
   className,
   keepDescription,
@@ -63,6 +64,8 @@ export function Page({
   refresh?: RefreshBarProps;
   /** 页头下面的一排页签（页内导航）。 */
   tabs?: ReactNode;
+  /** 标题上面一行的面包屑（详情页：任务列表 / 这张单）。 */
+  breadcrumb?: ReactNode;
   children: ReactNode;
   className?: string;
   /** 一行说明在手机上、字多时也直接写出，不收成「ⓘ」：说明里放的是这页的关键信息（任务页的状态行），不是介绍。 */
@@ -86,6 +89,11 @@ export function Page({
         className,
       )}
     >
+      {breadcrumb ? (
+        <nav aria-label="位置" data-page-breadcrumb className="mb-2 text-meta text-muted-foreground">
+          {breadcrumb}
+        </nav>
+      ) : null}
       {/* 标题行：标题（后面跟 ⓘ）在左，操作和刷新在右。两边都从顶对齐、各自至少一个控件高并垂直居中，
           所以刷新和标题在同一行上对齐，不会被下面的说明拉低；说明在标题下面，最多一行。 */}
       <header className="mb-section-gap flex flex-wrap items-start justify-between gap-x-stack gap-y-2 max-md:mb-4 lg:flex-nowrap">

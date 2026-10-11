@@ -3,7 +3,7 @@
 // 读到的照数写；读到一部分照数写、写明几次没读到；全没读到写「没读到」，不写 0；每一笔没读到的原因原样列出来。
 import type { SegmentKind, UsageTotals } from '@fleet-dao/shared';
 import { ChevronDown } from 'lucide-react';
-import { type ReactNode, useState } from 'react';
+import { Fragment, type ReactNode, useState } from 'react';
 import type { Repo, TaskDetail } from '../api/types';
 import { formatClock, formatCount, formatDateTime, formatDuration, formatUsd, span } from '../lib/format';
 import {
@@ -28,6 +28,7 @@ import { costParts, EQUIVALENT_RULE, type Reading, reading } from '../lib/usage'
 import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
 import { Code } from './layout/code';
+import { Notice } from './layout/notice';
 import { Section } from './layout/section';
 import { Stat } from './layout/stat';
 import { StatusBadge } from './layout/status-badge';
@@ -39,9 +40,10 @@ import { Button } from './ui/button';
 function Read({ r, empty = '—', children }: { r: Reading; empty?: ReactNode; children: ReactNode }) {
   if (r.kind === 'none') return <span className="text-muted-foreground">{empty}</span>;
   if (r.kind === 'missing') {
+    // 没读到的格子只留 —；读不到的是什么、为什么，由区块顶上那一条 Notice 和「每一笔」说（#1903）
     return (
-      <span className="font-medium text-ink-stall" data-unread>
-        没读到
+      <span className="text-muted-foreground" data-unread title="没读到">
+        —
       </span>
     );
   }
@@ -49,7 +51,7 @@ function Read({ r, empty = '—', children }: { r: Reading; empty?: ReactNode; c
     <>
       <span className="num">{children}</span>
       {r.kind === 'partial' ? (
-        <span className="block text-meta text-ink-stall" data-partial>
+        <span className="block text-meta text-muted-foreground" data-partial>
           另有 {r.missing} 次没读到
         </span>
       ) : null}
@@ -338,14 +340,30 @@ function Cell({
 function CostCell({ t }: { t: UsageTotals }) {
   const parts = costParts(t);
   if (!parts.length) return <span className="text-muted-foreground">{t.running ? '跑完才有' : '—'}</span>;
+  // 一格里全是没读到：只留一个 —，原因放在 title 里（区块顶上的 Notice 已经说了这一项读不到）
+  if (parts.every((p) => p.missing)) {
+    // 「估不了」「没有单价」是说明为什么算不出来，不是单纯的没读到：照写在 — 下面，原因不丢
+    const why = parts.filter((p) => p.missing && /估不了|没有单价/.test(p.missing));
+    return (
+      <span className="flex flex-col text-muted-foreground">
+        <span data-unread title={parts.map((p) => p.missing).join('；')}>
+          —
+        </span>
+        {why.map((p) => (
+          <span key={p.key} className="text-meta">
+            {p.missing}
+          </span>
+        ))}
+      </span>
+    );
+  }
   return (
     <span className="flex flex-col">
       {parts.map((p) => (
         <span key={p.key} title={p.title}>
           {p.missing ? (
-            <span className="text-ink-stall" data-unread>
-              {p.label ? `${p.label} · ` : ''}
-              {p.missing}
+            <span className="text-muted-foreground" data-unread title={p.missing}>
+              {p.label ? `${p.label} ` : ''}—
             </span>
           ) : (
             <span className="num">
@@ -354,7 +372,7 @@ function CostCell({ t }: { t: UsageTotals }) {
             </span>
           )}
           {p.incomplete ? (
-            <span className="block text-meta text-ink-stall" data-partial>
+            <span className="block text-meta text-muted-foreground" data-partial>
               另有 {p.incomplete} 次没读到
             </span>
           ) : null}
@@ -419,11 +437,29 @@ function timesText(t: UsageTotals): string {
     .join(' · ');
 }
 
-/** 手机上一段只占一行的摘要：段、模型、次数、耗时、token、花费；没读到的写明没读到，不写 0。 */
+/**
+ * 一组（一段或一段里的一个模型）里哪几项整项没读到：区块顶上那条 Notice 用它写「没读到：耗时、token…」。
+ * 读到一部分的不算（那一格有数，旁边写另有几次没读到）。
+ */
+function unreadOf(t: UsageTotals): string[] {
+  const out: string[] = [];
+  if (reading(t.runMs, t.missingTime, t.runs).kind === 'missing') out.push('耗时');
+  if (reading(t.inputTokens + t.outputTokens, t.missingTokens, t.runs).kind === 'missing') out.push('token');
+  if (reading(t.cacheReadTokens + t.cacheWriteTokens, t.missingCache, t.runs).kind === 'missing') {
+    out.push('缓存');
+  }
+  if (reading(t.inputEquivalent, t.missingEquivalent, t.runs).kind === 'missing') out.push('当量');
+  if (costParts(t).some((p) => p.missing)) out.push('花费');
+  return out;
+}
+
+/** 手机上一段只占一行的摘要：段、模型、次数、耗时、token、花费；没读到的不写在这里（区块顶上的 Notice 说了），不写 0。 */
 function segmentSummary(s: SegmentTotals, live: number | undefined): string {
   const work = reading(s.runMs, s.missingTime, s.runs);
   const tokens = reading(s.inputTokens + s.outputTokens, s.missingTokens, s.runs);
-  const cost = costParts(s).map((p) => (p.missing ? `${p.label ?? '花费'}没读到` : `${p.label} ${p.value}`));
+  const cost = costParts(s)
+    .filter((p) => !p.missing)
+    .map((p) => `${p.label} ${p.value}`);
   return [
     s.segment ? segmentLabel[s.segment] : UNKNOWN_SEGMENT,
     s.byModel.length === 1
@@ -434,16 +470,12 @@ function segmentSummary(s: SegmentTotals, live: number | undefined): string {
     timesText(s),
     work.kind === 'full' || work.kind === 'partial'
       ? formatDuration(work.value + (live ?? 0))
-      : work.kind === 'missing'
-        ? '耗时没读到'
-        : live !== undefined
-          ? `在跑 ${formatDuration(live)}`
-          : '',
+      : live !== undefined && work.kind !== 'missing'
+        ? `在跑 ${formatDuration(live)}`
+        : '',
     tokens.kind === 'full' || tokens.kind === 'partial'
       ? `${formatCount(s.inputTokens)} / ${formatCount(s.outputTokens)} token`
-      : tokens.kind === 'missing'
-        ? 'token 没读到'
-        : '',
+      : '',
     cost.join('，'),
   ]
     .filter(Boolean)
@@ -486,14 +518,10 @@ function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) =>
           <span className="num">{timesText(s)}</span>
         </Cell>
         <Cell label="派工档">
-          <span
-            className={cn(
-              tier.missing ? 'font-medium text-ink-stall' : !s.tiers.length && 'text-muted-foreground',
-            )}
-          >
+          <span className={cn((tier.missing || !s.tiers.length) && 'text-muted-foreground')}>
             {tier.text}
           </span>
-          {tier.note ? <div className="text-meta text-ink-stall">{tier.note}</div> : null}
+          {tier.note ? <div className="text-meta text-muted-foreground">{tier.note}</div> : null}
         </Cell>
         <Figures t={s} live={live()} />
       </div>
@@ -536,12 +564,21 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
     return ms.length ? ms.reduce((a, b) => a + b, 0) : undefined;
   };
   const unknown = bySegment.get(null);
+  // 同一个区块里重复的「没读到」合成顶上一条（#1903）：格子里只留 —，哪几项、为什么，这里和「每一笔」说
+  const unreadItems = SEGMENT_ORDER.map((segment) => bySegment.get(segment))
+    .concat(unknown)
+    .flatMap((s) => (s ? [s, ...s.byModel] : []))
+    .flatMap(unreadOf);
+  const unreadList = ['耗时', 'token', '缓存', '当量', '花费'].filter((k) => unreadItems.includes(k));
   return (
-    <Section
-      title="三段"
-      description="对题 → 动手 → 验收，每段再按模型分。写「没读到」的格子，原因在下面「每一笔」里逐笔写着；不当成 0。"
-      tight
-    >
+    <Section title="三段" description="对题 → 动手 → 验收，每段再按模型分。" tight>
+      {unreadList.length ? (
+        <div className="mt-2" data-unread-notice>
+          <Notice tone="stall" title={`没读到：${unreadList.join('、')}`}>
+            这几项在表里留成 —，不是 0。原因在下面「每一笔」里逐笔写着。
+          </Notice>
+        </div>
+      ) : null}
       <div
         className={cn(
           'hidden md:grid',
@@ -645,7 +682,6 @@ function RunRow({
 }) {
   const live = liveMs(run, now);
   const gap = estimateGap(run);
-  const timeUnread = run.unread.some((n) => n.item === 'time');
   const figures = runFigures(run);
   return (
     <li className="py-3" data-run={run.id}>
@@ -684,8 +720,6 @@ function RunRow({
             formatDuration(run.durationMs)
           ) : live !== undefined ? (
             <span className="text-ink-run">已跑 {formatDuration(live)}</span>
-          ) : timeUnread ? (
-            <span className="text-ink-stall">耗时没读到</span>
           ) : (
             '—'
           )}
@@ -722,22 +756,28 @@ function RunRow({
           {run.branch ? <span className="num truncate">{run.branch}</span> : null}
         </div>
       ) : null}
-      {gap ? (
-        <p className="mt-1 text-meta text-ink-stall" data-estimate-gap>
-          花费 · {gap}
-        </p>
-      ) : null}
       {run.failureReason ? (
         <p className="mt-1 text-meta text-muted-foreground">为什么没成：{run.failureReason}</p>
       ) : null}
-      {run.unread.length ? (
-        <ul className="mt-1 space-y-0.5" aria-label="没读到的">
-          {run.unread.map((n) => (
-            <li key={n.item} className="text-meta text-ink-stall" data-unread-item={n.item}>
-              <span className="font-medium">{unreadItemLabel[n.item]}</span> · {n.reason}
-            </li>
+      {run.unread.length || gap ? (
+        // 一笔里没读到的几项并成一段话（原来一项一行，一笔占五行）；颜色不再用提醒色，提醒由「三段」顶上那条 Notice 担着
+        <p className="mt-1 text-meta text-muted-foreground" data-unread-line>
+          没读到：
+          {run.unread.map((n, i) => (
+            <Fragment key={n.item}>
+              {i ? '；' : ''}
+              <span data-unread-item={n.item}>
+                <span className="font-medium">{unreadItemLabel[n.item]}</span> · {n.reason}
+              </span>
+            </Fragment>
           ))}
-        </ul>
+          {gap ? (
+            <>
+              {run.unread.length ? '；' : ''}
+              <span data-estimate-gap>花费 · {gap}</span>
+            </>
+          ) : null}
+        </p>
       ) : null}
     </li>
   );
