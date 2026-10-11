@@ -69,7 +69,7 @@ function GroomHelp() {
           aria-expanded={open}
           aria-controls={bodyId}
           onClick={() => setOpen((v) => !v)}
-          className="shrink-0 underline-offset-2 hover:underline"
+          className="shrink-0 underline-offset-2 hover:underline max-md:min-h-10 max-md:px-2"
         >
           {open ? '收起' : '展开'}
         </button>

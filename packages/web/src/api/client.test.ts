@@ -1,7 +1,7 @@
 import type { RealtimeTable } from '@fleet-dao/shared';
 import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { describe, expect, test, vi } from 'vitest';
-import { applyLiveEvents, createLiveBatcher, keys } from './client';
+import { applyLiveEvents, createLiveBatcher, type FleetApi, keys, logoutAndClear } from './client';
 import type { LiveEvent } from './types';
 
 /** 一条推送单独处理。 */
@@ -166,5 +166,26 @@ describe('推送攒一小会儿再作废', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('logoutAndClear：退出前先取消在飞查询', () => {
+  test('先 cancelQueries，再 api.logout，再 clear', async () => {
+    const order: string[] = [];
+    const qc = new QueryClient();
+    vi.spyOn(qc, 'cancelQueries').mockImplementation(async () => {
+      order.push('cancelQueries');
+    });
+    vi.spyOn(qc, 'clear').mockImplementation(() => {
+      order.push('clear');
+    });
+    const api = {
+      logout: vi.fn(async () => {
+        order.push('logout');
+      }),
+    } as unknown as FleetApi;
+    await logoutAndClear(api, qc);
+    expect(order).toEqual(['cancelQueries', 'logout', 'clear']);
+    expect(api.logout).toHaveBeenCalledTimes(1);
   });
 });

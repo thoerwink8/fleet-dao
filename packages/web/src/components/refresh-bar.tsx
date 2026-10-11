@@ -6,6 +6,7 @@ import type { LiveStatus } from '../api/client';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { cn } from '../lib/utils';
+import { usePhone } from '../lib/viewport';
 import { Button } from './ui/button';
 
 const MIN = 60_000;
@@ -58,6 +59,8 @@ export function RefreshBar({
   // 页内时钟一秒才跳一次。读完那一下 dataUpdatedAt 可能比时钟新，按「未来」会写成「秒后」。
   const shownAt = dataUpdatedAt > now ? now : dataUpdatedAt;
   const stale = !never && now - dataUpdatedAt > staleAfterMs;
+  // 手机上刷新收成一个图标按钮（名字留给读屏），「最后更新」写在它左边：整条一行，不再独占一整行（#1820）
+  const phone = usePhone();
 
   if (variant === 'dot') {
     const level: Freshness = never ? 'stale' : freshnessOf(Math.max(0, now - dataUpdatedAt), push);
@@ -97,20 +100,22 @@ export function RefreshBar({
   }
 
   return (
-    <div className={cn('flex flex-wrap items-center gap-2', className)}>
+    <div className={cn('flex flex-wrap items-center gap-2', phone && 'flex-row-reverse', className)}>
       <Button
         type="button"
         variant="outline"
-        size="sm"
+        size={phone ? 'icon-lg' : 'sm'}
+        aria-label={phone ? '刷新' : undefined}
         aria-disabled={isFetching}
         aria-busy={isFetching}
-        className="aria-disabled:cursor-default aria-disabled:opacity-50 max-md:h-10"
+        data-refresh-icon={phone || undefined}
+        className="aria-disabled:cursor-default aria-disabled:opacity-50"
         onClick={() => {
           if (!isFetching) onRefresh();
         }}
       >
         {isFetching ? <LoaderCircle className="animate-spin" aria-hidden /> : <RefreshCw aria-hidden />}
-        刷新
+        {phone ? null : '刷新'}
       </Button>
       <span role="status">
         {never ? (

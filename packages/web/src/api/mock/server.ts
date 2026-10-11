@@ -325,15 +325,17 @@ const NO_CHECK = {
   checkAnswer: null,
   checkPassed: null,
   selfIdentity: null,
+  kind: null,
 } as const;
 
 const MOCK_CHECK_PASSED = {
-  checkQuestion: '17 乘 23 等于多少？只回数字。',
-  checkExpected: '391',
-  checkAnswer: '391',
+  checkQuestion: '现任日本首相是谁？答案只写人名。',
+  checkExpected: '高市早苗/Takaichi',
+  checkAnswer: '高市早苗',
   checkPassed: true,
-  selfIdentity: 'Claude Opus 5.5',
-} as const;
+  selfIdentity: 'gpt-6-sol',
+  kind: 'identity' as const,
+};
 
 /** 假数据里每条路由的最近一次结论收成一条探针历史，页面开发时格子不是空的。 */
 function mockProbeHistory(
@@ -357,12 +359,12 @@ function mockProbeHistory(
       result,
       durationMs: result === 'not_probed' ? null : durationMsFromDetail(probe.detail),
       failureReason: result === 'passed' ? null : reason,
-      requestText: result === 'not_probed' ? null : '只回 OK',
-      responseText: result === 'passed' ? 'OK' : result === 'failed' ? reason : null,
-      ...(result === 'passed' ? MOCK_CHECK_PASSED : NO_CHECK),
+      requestText: result === 'not_probed' ? null : '只回一个词：pong',
+      responseText: result === 'passed' ? 'pong' : result === 'failed' ? reason : null,
+      ...(result === 'passed' ? { ...NO_CHECK, kind: 'ping' as const } : NO_CHECK),
     });
   }
-  // 中转站（ch-relay）补几次更早的探测，页面上能看到每种结论：疑似降智、不通、没探、通过
+  // 中转站（ch-relay）补几次更早的探测，页面上能看到每种结论：疑似换模型、不通、没探、通过
   const relay = routes.find((r) => r.id === 'r-rl-opus' && r.probe);
   if (relay?.probe) {
     const at = (minutesAgo: number) =>
@@ -375,15 +377,15 @@ function mockProbeHistory(
         probedAt: at(20),
         result: 'failed',
         durationMs: 8_400,
-        failureReason: '降智题答错了：问 17 乘 23，标准答案 391，实答 381；自报身份与路由不符',
-        requestText:
-          '先回答下面的题，答案单独一行；再用一行 OK 收尾。\n题：17 乘 23 等于多少？只回数字。\n再说一句你是什么模型。',
-        responseText: '381\nOK\n我是 GPT-4 级别的通用助手。',
-        checkQuestion: '17 乘 23 等于多少？只回数字。',
-        checkExpected: '391',
-        checkAnswer: '381',
+        failureReason: '疑似换成旧模型：题 现任日本首相是谁？，新答案应为 高市早苗，实答 石破茂',
+        requestText: '第一行只写 pong\n第二行写「答案：」……\n题目：现任日本首相是谁？答案只写人名。',
+        responseText: 'pong\n答案：石破茂\n模型：GPT-4 级别的通用助手',
+        checkQuestion: '现任日本首相是谁？答案只写人名。',
+        checkExpected: '高市早苗/Takaichi',
+        checkAnswer: '石破茂',
         checkPassed: false,
         selfIdentity: 'GPT-4 级别的通用助手',
+        kind: 'identity',
       },
       {
         ...base,
@@ -392,7 +394,7 @@ function mockProbeHistory(
         result: 'failed',
         durationMs: null,
         failureReason: '连探两次都没通：503 容量满，上游没给原文\n（假数据）',
-        requestText: '只回 OK',
+        requestText: '只回一个词：pong',
         responseText: '503 Service Unavailable\n{"error":{"type":"overloaded","message":"capacity full"}}',
         ...NO_CHECK,
       },
@@ -414,14 +416,13 @@ function mockProbeHistory(
         result: 'passed',
         durationMs: 12_100,
         failureReason: null,
-        requestText:
-          '先回答下面的题，答案单独一行；再用一行 OK 收尾。\n题：17 乘 23 等于多少？只回数字。\n再说一句你是什么模型。',
-        responseText: '391\nOK\n我是 Claude Opus 5.5。',
+        requestText: '第一行只写 pong\n第二行写「答案：」……\n题目：现任日本首相是谁？答案只写人名。',
+        responseText: 'pong\n答案：高市早苗\n模型：gpt-6-sol',
         ...MOCK_CHECK_PASSED,
       },
     );
   }
-  // Cursor（ch-cursor）的按需路由：一次真探判了疑似降智，后面全是「按需」没探（#1748：色条不能全黄、真探不能被埋）
+  // Cursor（ch-cursor）的按需路由：一次真探判了疑似换模型，后面全是「按需」没探（#1748：色条不能全黄、真探不能被埋）
   const hi = routes.find((r) => r.id === 'r-cursor-hi' && r.probe);
   if (hi?.probe) {
     const t0 = Date.parse(hi.probe.at);
@@ -432,14 +433,15 @@ function mockProbeHistory(
       probedAt: new Date(t0 - 60 * 60_000).toISOString(),
       result: 'failed',
       durationMs: 9_200,
-      failureReason: '疑似降智：题 17 乘 23 等于多少？只回数字。，应为 391，实答 381',
-      requestText: '题：17 乘 23 等于多少？只回数字。\n再说一句你是什么模型。',
-      responseText: '381\nOK\n我是 GPT-4 级别的通用助手。',
-      checkQuestion: '17 乘 23 等于多少？只回数字。',
-      checkExpected: '391',
-      checkAnswer: '381',
+      failureReason: '疑似换成旧模型：题 现任日本首相是谁？，新答案应为 高市早苗，实答 石破茂',
+      requestText: '题目：现任日本首相是谁？答案只写人名。',
+      responseText: 'pong\n答案：石破茂\n模型：GPT-4 级别的通用助手',
+      checkQuestion: '现任日本首相是谁？答案只写人名。',
+      checkExpected: '高市早苗/Takaichi',
+      checkAnswer: '石破茂',
       checkPassed: false,
       selfIdentity: 'GPT-4 级别的通用助手',
+      kind: 'identity',
     });
     for (let i = 0; i < 12; i++) {
       cells.push({
