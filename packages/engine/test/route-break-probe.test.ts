@@ -1,8 +1,9 @@
-// 任务在路由上断了当场排一次立即探测（#1636）：排的请求带单号和路由、10 分钟内同一条路由不重复排（人点的、自动的都算）、
+// 任务在路由上断了当场排一次立即探测（#1636 / #1809）：排的请求带段名（和可选单号）、10 分钟内同一条路由不重复排（人点的、自动的都算）、
 // 排不成只记日志不抛。故意造出的失败：读记录抛、写记录抛（都回 failed，不往外抛）。
 import { ROUTE_PROBE_ACTION, type RouteProbeAuditRow } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
+  breakProbeReason,
   ROUTE_BREAK_PROBE_DEDUPE_MS,
   type RouteBreakProbeDeps,
   scheduleRouteBreakProbe,
@@ -36,28 +37,53 @@ function harness(rows: RouteProbeAuditRow[] = [], over: Partial<RouteBreakProbeD
 }
 
 describe('任务断链后排立即探测（scheduleRouteBreakProbe）', () => {
-  it('排一次：请求只点那一条路由，带单号来源和「任务 #N 在这条路由上断了，自动探一次」', async () => {
+  it('排一次：请求只点那一条路由，带来源（单号+段名）和「任务 #N 的〈段〉在这条路由上断了，自动探一次」', async () => {
     const h = harness();
-    expect(await scheduleRouteBreakProbe(h.deps, { routeId: ROUTE, issueNumber: 1621 })).toBe('scheduled');
+    expect(
+      await scheduleRouteBreakProbe(h.deps, { routeId: ROUTE, issueNumber: 1621, segment: 'manual' }),
+    ).toBe('scheduled');
     expect(h.requests).toHaveLength(1);
     expect(h.requests[0]).toMatchObject({
       routeIds: [ROUTE],
-      source: { kind: 'task-route-broken', issueNumber: 1621 },
-      reason: '任务 #1621 在这条路由上断了，自动探一次',
+      source: { kind: 'task-route-broken', issueNumber: 1621, segment: 'manual' },
+      reason: '任务 #1621 的动手在这条路由上断了，自动探一次',
       at: NOW,
     });
     expect(h.requests[0]?.requestId).toBeTruthy();
   });
 
+  it('没有单号：来源只带段名，文案写段名', async () => {
+    const h = harness();
+    expect(await scheduleRouteBreakProbe(h.deps, { routeId: ROUTE, segment: 'verify' })).toBe('scheduled');
+    expect(h.requests[0]).toMatchObject({
+      source: { kind: 'task-route-broken', segment: 'verify' },
+      reason: '验收在这条路由上断了，自动探一次',
+    });
+    expect(h.requests[0]?.source).not.toHaveProperty('issueNumber');
+  });
+
+  it('breakProbeReason：有单号写「任务 #N 的〈段〉」，没有写段名', () => {
+    expect(breakProbeReason({ issueNumber: 12, segment: 'scope' })).toBe(
+      '任务 #12 的对题在这条路由上断了，自动探一次',
+    );
+    expect(breakProbeReason({ segment: 'manual' })).toBe('动手在这条路由上断了，自动探一次');
+  });
+
   it('10 分钟里同一条路由第二次断：不再排（前一次还在排队）', async () => {
     const first = row(
       ROUTE_PROBE_ACTION.request,
-      { requestId: 'a', routeIds: [ROUTE], source: { kind: 'task-route-broken', issueNumber: 1621 } },
+      {
+        requestId: 'a',
+        routeIds: [ROUTE],
+        source: { kind: 'task-route-broken', issueNumber: 1621, segment: 'manual' },
+      },
       ago(60_000),
       'engine:route-probe-now',
     );
     const h = harness([first]);
-    expect(await scheduleRouteBreakProbe(h.deps, { routeId: ROUTE, issueNumber: 1622 })).toBe('deduped');
+    expect(
+      await scheduleRouteBreakProbe(h.deps, { routeId: ROUTE, issueNumber: 1622, segment: 'manual' }),
+    ).toBe('deduped');
     expect(h.requests).toHaveLength(0);
   });
 
@@ -66,25 +92,37 @@ describe('任务断链后排立即探测（scheduleRouteBreakProbe）', () => {
       row(ROUTE_PROBE_ACTION.request, { requestId: 'a', routeIds: [ROUTE] }, ago(120_000)),
       row(ROUTE_PROBE_ACTION.start, { requestId: 'a' }, ago(110_000), 'engine:route-probe-now'),
     ];
-    expect(await scheduleRouteBreakProbe(harness(started).deps, { routeId: ROUTE, issueNumber: 1 })).toBe(
-      'deduped',
-    );
+    expect(
+      await scheduleRouteBreakProbe(harness(started).deps, {
+        routeId: ROUTE,
+        issueNumber: 1,
+        segment: 'manual',
+      }),
+    ).toBe('deduped');
     const doneAt = ago(3 * 60_000);
     const finished = [
       row(ROUTE_PROBE_ACTION.request, { requestId: 'b', routeIds: null }, ago(5 * 60_000)),
       row(ROUTE_PROBE_ACTION.start, { requestId: 'b' }, ago(5 * 60_000 - 1000), 'engine:route-probe-now'),
       row(ROUTE_PROBE_ACTION.done, { requestId: 'b', results: [] }, doneAt, 'engine:route-probe-now'),
     ];
-    expect(await scheduleRouteBreakProbe(harness(finished).deps, { routeId: ROUTE, issueNumber: 1 })).toBe(
-      'deduped',
-    );
+    expect(
+      await scheduleRouteBreakProbe(harness(finished).deps, {
+        routeId: ROUTE,
+        issueNumber: 1,
+        segment: 'manual',
+      }),
+    ).toBe('deduped');
   });
 
   it('别的路由排的、探完已超过 10 分钟的：照常排', async () => {
     const other = row(ROUTE_PROBE_ACTION.request, { requestId: 'o', routeIds: ['别的路由'] }, ago(1000));
-    expect(await scheduleRouteBreakProbe(harness([other]).deps, { routeId: ROUTE, issueNumber: 1 })).toBe(
-      'scheduled',
-    );
+    expect(
+      await scheduleRouteBreakProbe(harness([other]).deps, {
+        routeId: ROUTE,
+        issueNumber: 1,
+        segment: 'manual',
+      }),
+    ).toBe('scheduled');
     const old = [
       row(
         ROUTE_PROBE_ACTION.request,
@@ -104,9 +142,9 @@ describe('任务断链后排立即探测（scheduleRouteBreakProbe）', () => {
         'engine:route-probe-now',
       ),
     ];
-    expect(await scheduleRouteBreakProbe(harness(old).deps, { routeId: ROUTE, issueNumber: 1 })).toBe(
-      'scheduled',
-    );
+    expect(
+      await scheduleRouteBreakProbe(harness(old).deps, { routeId: ROUTE, issueNumber: 1, segment: 'manual' }),
+    ).toBe('scheduled');
   });
 
   it('【故意造出的失败】读记录抛：只记 warn，不抛、不排', async () => {
@@ -115,7 +153,9 @@ describe('任务断链后排立即探测（scheduleRouteBreakProbe）', () => {
         throw new Error('库连不上');
       },
     });
-    expect(await scheduleRouteBreakProbe(h.deps, { routeId: ROUTE, issueNumber: 1 })).toBe('failed');
+    expect(await scheduleRouteBreakProbe(h.deps, { routeId: ROUTE, issueNumber: 1, segment: 'manual' })).toBe(
+      'failed',
+    );
     expect(h.requests).toHaveLength(0);
     expect(h.logs).toEqual([{ level: 'warn', message: expect.stringContaining('没成') }]);
   });
@@ -126,7 +166,9 @@ describe('任务断链后排立即探测（scheduleRouteBreakProbe）', () => {
         throw new Error('写不进库');
       },
     });
-    expect(await scheduleRouteBreakProbe(h.deps, { routeId: ROUTE, issueNumber: 1 })).toBe('failed');
+    expect(await scheduleRouteBreakProbe(h.deps, { routeId: ROUTE, issueNumber: 1, segment: 'manual' })).toBe(
+      'failed',
+    );
     expect(h.logs.map((l) => l.level)).toEqual(['warn']);
   });
 });

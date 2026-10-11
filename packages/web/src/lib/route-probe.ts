@@ -1,6 +1,7 @@
 // 渠道状态页的立即探测（驾驶舱改版 2026-10-07）：从「最近点过的立即探测」里找一条路由此刻在不在探、上一次立即探测给了它什么。
 // 一次立即探测走到哪由后端现算（shared 的 foldRouteProbeRequests），这里只按路由挑出来，不再判一遍。
 
+import { SEGMENT_LABELS } from '@fleet-dao/shared';
 import type { Route, RouteProbeRequest, RouteProbeResult } from '../api/types';
 
 const covers = (r: RouteProbeRequest, routeId: string) =>
@@ -59,9 +60,16 @@ export function probeSeconds(route: Route, requests: readonly RouteProbeRequest[
   return m?.[1] !== undefined ? Number.parseInt(m[1], 10) : undefined;
 }
 
-/** 引擎自动排的（任务断链后）写来源，不写成人点的；人点的返回 undefined。 */
+/** 引擎自动排的（任务断链后）写来源，不写成人点的；人点的返回 undefined。没有单号时写段名。 */
 export function sourceText(r: RouteProbeRequest): string | undefined {
-  return r.source ? `任务 #${r.source.issueNumber} 断链后自动探` : undefined;
+  if (!r.source) return undefined;
+  const seg = r.source.segment ? SEGMENT_LABELS[r.source.segment] : undefined;
+  if (r.source.issueNumber !== undefined) {
+    return seg
+      ? `任务 #${r.source.issueNumber} 的${seg}断链后自动探`
+      : `任务 #${r.source.issueNumber} 断链后自动探`;
+  }
+  return seg ? `${seg}断链后自动探` : '断链后自动探';
 }
 
 /** 点下去之后一句话：在等谁、等了多久。自动排的前面写来源。 */
