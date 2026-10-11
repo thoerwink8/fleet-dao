@@ -102,6 +102,8 @@ test.describe('其余页面', () => {
     await expect(grok).toHaveAttribute('data-state', 'ok');
     await expect(grok).toHaveAttribute('data-kind', 'live');
     await expect(grok).toContainText('在线');
+    // 底部脚注收进 ⓘ（#1903）：点开才看，里面仍要说清绿灯只表示什么
+    await page.getByRole('button', { name: '怎么看这些状态' }).click();
     await expect(page.getByText('绿灯只表示本节点最近一轮抽测通过')).toBeVisible();
     await shot(page, '07-渠道状态');
   });
