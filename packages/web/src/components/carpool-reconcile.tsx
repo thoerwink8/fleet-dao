@@ -3,6 +3,7 @@ import { brand } from '#brand';
 import type { CarpoolReconcileView } from '../api/types';
 import { formatClock } from '../lib/format';
 import { cn } from '../lib/utils';
+import { Section } from './layout/section';
 
 export type CarpoolReconcileTone = 'muted' | 'ok' | 'stall';
 
@@ -39,12 +40,17 @@ export function CarpoolReconcileBanner({ view }: { view: CarpoolReconcileView | 
   if (!view) return null;
   const s = carpoolReconcileSummary(view);
   return (
-    <div className="mb-3 rounded-xl border bg-card p-3" data-tone={s.tone} data-testid="carpool-reconcile">
+    <Section
+      {...(s.tone === 'stall' ? { tone: 'stall' as const } : {})}
+      className="mb-3"
+      data-tone={s.tone}
+      data-testid="carpool-reconcile"
+    >
       <div className="flex items-center gap-2">
         <Scale className={cn('size-4 shrink-0', TONE_CLASS[s.tone])} aria-hidden />
-        <span className={cn('text-sm font-medium', TONE_CLASS[s.tone])}>{s.headline}</span>
+        <span className={cn('text-body font-medium', TONE_CLASS[s.tone])}>{s.headline}</span>
       </div>
-      {s.detail ? <p className="mt-1.5 pl-6 text-xs text-muted-foreground">{s.detail}</p> : null}
-    </div>
+      {s.detail ? <p className="mt-1.5 pl-6 text-meta text-muted-foreground">{s.detail}</p> : null}
+    </Section>
   );
 }
