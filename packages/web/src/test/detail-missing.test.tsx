@@ -24,9 +24,14 @@ function open(ui: ReactElement, route: string, api: FleetApi) {
   return renderApp(ui, { route, api, retry: 1 });
 }
 
-/** 环境列表里放一个收到过快照的远程环境，详情读口换成传入的。 */
+/**
+ * 环境列表里放一个收到过快照的远程环境，详情读口换成传入的。
+ * 上报时刻按现在的钟往前推 6 小时（失联但不到一天）：写成固定日期，过了那一天就会超过 #1888 的一天门槛被收成一行，
+ * 这一列就不在对照里了（这几条测的是「读不到的那一列怎么写」，不是收成一行），所以按相对时刻给。
+ */
 function apiWithNode(node: (id: string) => Promise<NodeDetail>): FleetApi {
   const inner = createMockApi({ live: false });
+  const at = new Date(Date.now() - 6 * 60 * 60_000).toISOString();
   return {
     ...inner,
     nodes: async (): Promise<Nodes> => {
@@ -38,8 +43,8 @@ function apiWithNode(node: (id: string) => Promise<NodeDetail>): FleetApi {
             id: 'ghost',
             name: '幽灵环境',
             freshness: 'stale',
-            receivedAt: '2026-10-07T00:00:00.000Z',
-            reportedAt: '2026-10-07T00:00:00.000Z',
+            receivedAt: at,
+            reportedAt: at,
           },
         ],
       };
