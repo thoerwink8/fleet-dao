@@ -11,7 +11,8 @@ export const PROBE_HISTORY_RESULTS = ['passed', 'failed', 'not_probed'] as const
 export type ProbeHistoryResult = (typeof PROBE_HISTORY_RESULTS)[number];
 
 /**
- * 一次探测带的降智检测（#1637）：问的题、标准答案、实答、判过没过（null = 没判：回答里没有第一行 OK）、自报的身份。
+ * 一次探测带的身份题（#1798 片 5；原先是 #1637 降智题）：问的题、标准答案、实答、判过没过
+ * （null = 没判：连通探测、或身份题认不出、或回答里没有第一行 pong）、自报的身份。
  * 实答、自报身份回答里没写就是 null，不当空串。
  */
 export interface ProbeCheck {
@@ -21,6 +22,9 @@ export interface ProbeCheck {
   passed: boolean | null;
   selfIdentity: string | null;
 }
+
+/** 探测种类：连通 / 身份（#1798）。老行没有。 */
+export type ProbeHistoryKind = 'ping' | 'identity';
 
 /** 一次探针。probedAt 是带时区的时刻（ISO）。耗时、失败原因、原文没有就是 null，不当 0 或空串。 */
 export interface ProbeHistoryCell {
@@ -33,12 +37,14 @@ export interface ProbeHistoryCell {
   failureReason: string | null;
   requestText: string | null;
   responseText: string | null;
-  /** 降智检测的五项；老行、没带题的探测都是 null，不当空串。 */
+  /** 身份题的五项；老行、没带题的探测都是 null，不当空串。 */
   checkQuestion: string | null;
   checkExpected: string | null;
   checkAnswer: string | null;
   checkPassed: boolean | null;
   selfIdentity: string | null;
+  /** 探测种类；老行为空。 */
+  kind: ProbeHistoryKind | null;
 }
 
 /** 一个渠道的条带：cells 是最近 60 次真探，从旧到新。可用率的分母是 cells 里的（通过 + 不通）。 */

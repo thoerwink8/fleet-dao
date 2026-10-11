@@ -12,7 +12,7 @@
 // scanned = 这一轮看过的路由条数（写下结论的，加上结论照旧的），found = 其中不在线的条数（驾驶舱「定时任务」页和调度台的
 // 在线数对得上）。没跑成、一条都没写进去、只写进去一部分，照实记 failed / unscanned / partial，不记成 ok（没跑成 ≠ 没问题）。
 
-import type { RouteProbeTarget, ScheduleResult } from '@fleet-dao/db';
+import type { RouteProbeKind, RouteProbeTarget, ScheduleResult } from '@fleet-dao/db';
 import {
   type HostId,
   type OrgKind,
@@ -77,8 +77,10 @@ interface ProbeCapture {
   requestText?: string | null;
   /** 响应原文。 */
   responseText?: string | null;
-  /** 降智检测（#1637）：这一次问的题和判的结果。没带题（没问到、不是真探）不给。 */
+  /** 身份题（#1798 片 5）：这一次问的题和判的结果。连通探测、没问到不给。 */
   check?: ProbeCheck | null;
+  /** 这一次真探的种类（ping / identity）。没真探不给。 */
+  probeKind?: RouteProbeKind | null;
 }
 
 export type ProbeAttempt =
@@ -126,8 +128,10 @@ export interface RouteProbeJobDeps {
     requestText: string | null;
     /** 没拿到响应为 null。 */
     responseText: string | null;
-    /** 降智检测的题和判的结果；没带题为空。 */
+    /** 身份题的题和判的结果；没带题为空。 */
     check?: ProbeCheck | null;
+    /** 这一次真探的种类；没真探不给。 */
+    kind?: RouteProbeKind | null;
   }): Promise<'saved' | 'route_not_found'>;
   /** 一条路由真探完（写库之前）：真实现里接整池暂停的报警和撤销。抛了只记日志，不改结论。 */
   afterProbe?(target: ProbeTarget, attempt: ProbeAttempt): Promise<void>;
@@ -388,21 +392,25 @@ export interface Conclusion {
   requestText: string | null;
   responseText: string | null;
   check?: ProbeCheck | null;
+  /** 真探时的种类；没真探为空。 */
+  kind?: RouteProbeKind | null;
 }
 
-const NO_CAPTURE = { durationMs: null, requestText: null, responseText: null } as const;
+const NO_CAPTURE = { durationMs: null, requestText: null, responseText: null, kind: null } as const;
 
 function captureOf(attempt: ProbeAttempt): {
   durationMs: number | null;
   requestText: string | null;
   responseText: string | null;
   check: ProbeCheck | null;
+  kind: RouteProbeKind | null;
 } {
   return {
     durationMs: attempt.durationMs ?? null,
     requestText: attempt.requestText ?? null,
     responseText: attempt.responseText ?? null,
     check: attempt.check ?? null,
+    kind: attempt.probeKind ?? null,
   };
 }
 
@@ -717,6 +725,7 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
         requestText: c.requestText,
         responseText: c.responseText,
         check: c.check ?? null,
+        ...(c.kind !== undefined && c.kind !== null ? { kind: c.kind } : {}),
       });
     } catch (err) {
       unsaved.push(`${c.target.routeId}：${errMessage(err)}`);
@@ -817,6 +826,8 @@ export async function probeOrgNow(deps: RouteProbeJobDeps, kind: OrgKind): Promi
         durationMs: c.durationMs,
         requestText: c.requestText,
         responseText: c.responseText,
+        check: c.check ?? null,
+        ...(c.kind !== undefined && c.kind !== null ? { kind: c.kind } : {}),
       });
     } catch (err) {
       // 结论没写进库不改探到的结果：核对照探到的算，写不进的下一轮探针会再写

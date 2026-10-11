@@ -107,23 +107,31 @@ describe('探针历史接口', () => {
     if (before.state !== 'ok') throw new Error('读不到历史');
     const old = before.channels.find((c) => c.channelId === 'ch-claude')?.cells[0];
     if (!old) throw new Error('样例里没有这条路由的老格子');
-    expect(old).toMatchObject({ checkQuestion: null, checkPassed: null, selfIdentity: null });
+    expect(old).toMatchObject({ checkQuestion: null, checkPassed: null, selfIdentity: null, kind: null });
     await saveRouteProbe(t.db, {
       routeId: old.routeId,
       state: 'failed',
       at: new Date(Date.parse(old.probedAt) + 60_000),
-      detail: '疑似降智',
-      check: { question: '1+1？', expected: '2', answer: '3', passed: false, selfIdentity: 'GPT' },
+      detail: '疑似换成旧模型',
+      kind: 'identity',
+      check: {
+        question: '日本首相？',
+        expected: '高市早苗',
+        answer: '石破茂',
+        passed: false,
+        selfIdentity: 'GPT',
+      },
     });
     const after = await history(current, cookie);
     if (after.state !== 'ok') throw new Error('读不到历史');
     const last = after.channels.find((c) => c.channelId === 'ch-claude')?.cells.at(-1);
     expect(last).toMatchObject({
-      checkQuestion: '1+1？',
-      checkExpected: '2',
-      checkAnswer: '3',
+      checkQuestion: '日本首相？',
+      checkExpected: '高市早苗',
+      checkAnswer: '石破茂',
       checkPassed: false,
       selfIdentity: 'GPT',
+      kind: 'identity',
     });
   });
 });
