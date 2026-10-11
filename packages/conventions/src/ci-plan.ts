@@ -242,7 +242,6 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
       `${W}lib/channel-status.ts`,
       `${W}lib/provider-status.ts`,
       `${W}lib/efforts.ts`,
-      `${W}lib/changelog.ts`,
     ],
     specs: [spec('07-other-pages'), spec('11-mobile-overflow')],
   },
