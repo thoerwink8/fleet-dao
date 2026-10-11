@@ -310,4 +310,31 @@ describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
     expect(untouched).not.toHaveProperty('probeFailStreak');
     expect(untouched).not.toHaveProperty('probeKind');
   });
+
+  it('节奏列：三个字段都空、只有 probeFailStreak 写了非零值，也要原样给出（#1798 片 6）', async () => {
+    current = await pgHarness(t, { routingLayers: pgRoutingLayers(t.db) });
+    await setLayers({ execute: ['opus-5.5'] }, { 'opus-5.5': SAMPLE_MODELS['opus-5.5'] });
+    const { cookie } = await current.login();
+
+    // 只写 probe_fail_streak、另外三列留空：老行和它分得开，因为它不是默认 0
+    await t.db.update(routes).set({ probeFailStreak: 4 }).where(eq(routes.id, 'rt-claude-opus'));
+
+    const layersBody = await layers(current, cookie);
+    const route = layersBody.purposes
+      .find((p) => p.purpose === 'execute')
+      ?.models[0]?.routes.find((r) => r.routeId === 'rt-claude-opus');
+    expect(route?.probeFailStreak).toBe(4);
+    expect(route).not.toHaveProperty('probeTier');
+    expect(route).not.toHaveProperty('probeNextAt');
+    expect(route).not.toHaveProperty('probeKind');
+
+    const catalog = RoutingResponse.parse(
+      await (await current.cockpit.request('/api/routing', { headers: { cookie } })).json(),
+    );
+    const catalogRoute = catalog.routes.find((r) => r.id === 'rt-claude-opus');
+    expect(catalogRoute?.probeFailStreak).toBe(4);
+    expect(catalogRoute).not.toHaveProperty('probeTier');
+    expect(catalogRoute).not.toHaveProperty('probeNextAt');
+    expect(catalogRoute).not.toHaveProperty('probeKind');
+  });
 });

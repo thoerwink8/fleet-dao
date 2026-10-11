@@ -481,6 +481,48 @@ describe('读成「用途 → 模型 → 路由」，每层写明活着吗', () 
     });
   });
 
+  it('节奏列（#1798 片 6）：库里写过的原样读出来；老行四列都没写过，written=false', async () => {
+    const nextAt = new Date(NOW.getTime() + 60 * MIN);
+    const route = async (id: string) =>
+      (await routingLayers(t.db, 'execute', { now: NOW })).models
+        .flatMap((m) => m.routes)
+        .find((r) => r.candidate.routeId === id)?.probePace;
+
+    // 老行（a-opus 由 addRoute 写入，没碰过节奏列；probe_fail_streak 是库默认 0）
+    expect(await route('a-opus')).toEqual({
+      tier: null,
+      nextAt: null,
+      failStreak: 0,
+      kind: null,
+      written: false,
+    });
+
+    await t.db
+      .update(routes)
+      .set({ probeTier: 'active', probeNextAt: nextAt, probeFailStreak: 3, probeKind: 'identity' })
+      .where(eq(routes.id, 'a-opus'));
+    expect(await route('a-opus')).toEqual({
+      tier: 'active',
+      nextAt,
+      failStreak: 3,
+      kind: 'identity',
+      written: true,
+    });
+
+    // 只有 fail_streak 不是 0（另外三列还空）：也算写过，接口要原样给出它
+    await t.db
+      .update(routes)
+      .set({ probeTier: null, probeNextAt: null, probeFailStreak: 2, probeKind: null })
+      .where(eq(routes.id, 'a-opus'));
+    expect(await route('a-opus')).toEqual({
+      tier: null,
+      nextAt: null,
+      failStreak: 2,
+      kind: null,
+      written: true,
+    });
+  });
+
   it('【故意造出的失败】没配的用途、没有路由的模型：整层 dead，problems 里写明，不当 live', async () => {
     await t.db.delete(routingPurposeModels);
     const none = await routingLayers(t.db, 'execute', { now: NOW });
