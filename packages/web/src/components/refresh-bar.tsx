@@ -113,7 +113,7 @@ export function RefreshBar({
     <div className={cn('flex flex-wrap items-center gap-2', phone && 'flex-row-reverse', className)}>
       <Button
         type="button"
-        variant="outline"
+        variant={phone ? 'ghost' : 'outline'}
         size={phone ? 'icon-lg' : 'sm'}
         aria-label={phone ? '刷新' : undefined}
         aria-disabled={isFetching}

@@ -583,7 +583,7 @@ export default function Settings() {
           顺序按用得多少排——「让 AI 接活」是最常动的开关，放最前；外观放后面。 */}
       <div className="lg:grid lg:grid-cols-settings-shell lg:gap-8">
         <PageNav label="设置分节" items={SECTIONS} />
-        <div className="min-w-0 max-w-4xl">
+        <div className="min-w-0">
           <SettingsSection
             id="repos"
             icon={FolderGit2}
