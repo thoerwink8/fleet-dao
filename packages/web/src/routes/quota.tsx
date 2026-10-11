@@ -157,7 +157,7 @@ function QuotaHero({
     hot.length > 1 ? `另有 ${hot.length - 1} 个窗该先用` : null,
     otherFull > 0 ? `${soonest ? '' : '另有 '}${otherFull} 个窗快用完` : null,
     stuck > 0 ? `${stuck} 个池要人处理` : null,
-    staleCount > 0 ? `读数过期或没查成 ${staleCount} 条` : null,
+    staleCount > 0 ? `过期或没查成的读数 ${staleCount} 条` : null,
   ].filter((x): x is string => x !== null);
   if (notes.length === 0) notes.push(`${pools.length} 个账号池、${windows} 个时间窗，读数都是新的`);
   const noteText = notes.join(' · ');

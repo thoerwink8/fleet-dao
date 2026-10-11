@@ -335,7 +335,7 @@ describe('额度页照路由页样板（#1921）', () => {
     expect(notes.className).toContain('truncate');
     expect(notes.getAttribute('title')).toBe(notes.textContent);
     expect(notes.textContent).toContain('个窗快用完');
-    expect(notes.textContent).toContain('读数过期或没查成');
+    expect(notes.textContent).toContain('过期或没查成的读数');
   });
 
   test('池行：在跑几个和到期并成一行灰字；池的毛病收成一行，整句在悬停里，摘要里照旧是整句', async () => {
