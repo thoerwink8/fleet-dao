@@ -272,7 +272,7 @@ export interface RouteProbeHistoryRow {
   trigger: RouteProbeTrigger | null;
 }
 
-/** ok → 通过；failed → 不通；not_wired、skipped、on_demand → 没探（这一轮没真探）。 */
+/** ok → 通过；failed → 不通；not_wired、skipped → 没探（这一轮没真探）。 */
 function historyResultOf(state: RouteProbeState): RouteProbeHistoryResult {
   if (state === 'ok') return 'passed';
   if (state === 'failed') return 'failed';

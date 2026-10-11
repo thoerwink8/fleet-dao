@@ -698,6 +698,109 @@ describe('0037：删八张没人读写的表（只放删表语句）', () => {
   });
 });
 
+describe('0056：探针结论删掉 on_demand（#1798 片 8，#1843）', () => {
+  const target = ordered.findIndex((e) => e.tag.startsWith('0056_'));
+  const enumLabels = async (pg: PGlite) =>
+    (
+      await pg.query<{ v: string }>(
+        `select e.enumlabel as v from pg_enum e join pg_type t on t.oid = e.enumtypid
+         where t.typname = 'route_probe_state' order by e.enumsortorder`,
+      )
+    ).rows.map((r) => r.v);
+  const seedRoutes = `
+    insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
+    insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
+    insert into pools (id, channel_id, max_concurrency) values ('relay', 'sub', 5);
+    insert into models (id, family, display_name) values ('opus', 'claude', 'Opus'), ('sonnet', 'claude', 'Sonnet'),
+      ('haiku', 'claude', 'Haiku'), ('fable', 'claude', 'Fable');
+    insert into routes (id, channel_id, pool_id, model_id, host_id, alive, probe_state, probed_at, probe_detail) values
+      ('r-demand', 'sub', 'relay', 'opus', 'claude-code', false, 'on_demand', '2026-10-10T01:05:00Z',
+        '不主动探，要派给它时先探一次。还没真探过'),
+      ('r-ok', 'sub', 'relay', 'sonnet', 'claude-code', true, 'ok', '2026-10-11T08:00:00Z', '答上了：pong'),
+      ('r-failed', 'sub', 'relay', 'haiku', 'claude-code', false, 'failed', '2026-10-11T08:00:00Z', '网络不通'),
+      ('r-never', 'sub', 'relay', 'fable', 'claude-code', false, null, null, null);
+  `;
+
+  it(
+    '旧库升级：on_demand 那行改成 skipped、原文写「改版后等下一轮探」、时刻不动；别的行原样；枚举里没有 on_demand，约束照旧',
+    async () => {
+      expect(target).toBeGreaterThan(0);
+      const pg = await migratedBefore(target);
+      try {
+        await pg.exec(seedRoutes);
+        expect(await enumLabels(pg)).toContain('on_demand');
+
+        await runMigration(pg, ordered[target]?.tag ?? '');
+
+        expect(
+          (
+            await pg.query(
+              `select id, alive, probe_state::text as state, (probed_at at time zone 'UTC')::text as at, probe_detail as detail
+               from routes order by id`,
+            )
+          ).rows,
+        ).toEqual([
+          {
+            id: 'r-demand',
+            alive: false,
+            state: 'skipped',
+            at: '2026-10-10 01:05:00',
+            detail: '改版后等下一轮探',
+          },
+          { id: 'r-failed', alive: false, state: 'failed', at: '2026-10-11 08:00:00', detail: '网络不通' },
+          { id: 'r-never', alive: false, state: null, at: null, detail: null },
+          { id: 'r-ok', alive: true, state: 'ok', at: '2026-10-11 08:00:00', detail: '答上了：pong' },
+        ]);
+        expect(await enumLabels(pg)).toEqual(['ok', 'failed', 'not_wired', 'skipped']);
+        await expect(
+          pg.exec(`update routes set probe_state = 'on_demand' where id = 'r-never'`),
+        ).rejects.toThrow(/invalid input value for enum/);
+        // 重建枚举时摘下又装回的三条约束还在
+        await expect(pg.exec(`update routes set alive = true where id = 'r-demand'`)).rejects.toThrow(
+          /routes_alive_needs_probe_ok/,
+        );
+        await expect(pg.exec(`update routes set probed_at = null where id = 'r-demand'`)).rejects.toThrow(
+          /routes_probe_state_at_together/,
+        );
+        await expect(pg.exec(`update routes set probe_detail = '' where id = 'r-demand'`)).rejects.toThrow(
+          /routes_probe_not_ok_has_detail/,
+        );
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+
+  it(
+    '【故意造出的失败】少了先改写那一句，库里还有 on_demand 行时重建枚举会失败（迁移不能只在空库上能跑）',
+    async () => {
+      expect(target).toBeGreaterThan(0);
+      const pg = await migratedBefore(target);
+      try {
+        await pg.exec(seedRoutes);
+        const text = readFileSync(join(MIGRATIONS_FOLDER, `${ordered[target]?.tag}.sql`), 'utf8');
+        const statements = text.split('--> statement-breakpoint');
+        const rewrite = statements.filter((s) => /^\s*update\s+"?routes"?/im.test(s));
+        expect(rewrite).toHaveLength(1);
+        const rest = statements.filter((s) => !rewrite.includes(s));
+        await expect(
+          (async () => {
+            for (const s of rest) await pg.exec(s);
+          })(),
+        ).rejects.toThrow(/invalid input value for enum/);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+
+  it('schema 里的探针结论不再有 on_demand', () => {
+    expect([...schema.ROUTE_PROBE_STATES]).toEqual(['ok', 'failed', 'not_wired', 'skipped']);
+  });
+});
+
 describe('测试库', () => {
   it(
     '两份测试库互相看不见对方的数据',
