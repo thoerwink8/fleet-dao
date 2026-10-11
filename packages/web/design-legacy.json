@@ -29,89 +29,11 @@
     "R7": 2,
     "R8": 1
   },
-  "src/components/home/board/board-canvas.tsx": {
-    "R1": 7,
-    "R2": 13,
-    "R5": 5,
-    "R6": 6
-  },
-  "src/components/home/board/board-tree.tsx": {
-    "R1": 1,
-    "R2": 12,
-    "R5": 1,
-    "R8": 1
-  },
-  "src/components/home/board/context-menu.tsx": {
-    "R1": 2,
-    "R2": 6,
-    "R6": 2,
-    "R7": 1
-  },
-  "src/components/home/board/detail-panel.tsx": {
-    "R1": 4,
-    "R2": 28,
-    "R3": 1,
-    "R5": 1,
-    "R6": 1,
-    "R7": 1
-  },
-  "src/components/home/board/nodes.tsx": {
-    "R1": 1,
-    "R2": 24,
-    "R3": 6,
-    "R4": 2,
-    "R5": 1,
-    "R6": 1,
-    "R7": 1,
-    "R8": 1
-  },
-  "src/components/home/board/tones.ts": {
-    "R1": 7
-  },
-  "src/components/home/decision-card.tsx": {
-    "R1": 3,
-    "R2": 5,
-    "R7": 1
-  },
-  "src/components/home/done-card.tsx": {
-    "R1": 1,
-    "R2": 5
-  },
-  "src/components/home/health-strip.tsx": {
-    "R1": 4,
-    "R2": 4
-  },
-  "src/components/home/home-drawer.tsx": {
-    "R1": 5,
-    "R2": 8,
-    "R5": 2,
-    "R6": 2,
-    "R7": 2
-  },
-  "src/components/home/running-board.tsx": {
-    "R5": 1
-  },
-  "src/components/home/running-card.tsx": {
-    "R1": 2,
-    "R2": 8,
-    "R6": 1,
-    "R8": 1
-  },
   "src/components/job-row.tsx": {
     "R1": 4,
     "R2": 18,
     "R5": 1,
     "R7": 1
-  },
-  "src/components/markdown-lite.tsx": {
-    "R1": 1,
-    "R2": 4,
-    "R5": 1,
-    "R7": 1
-  },
-  "src/components/node-notice.tsx": {
-    "R1": 3,
-    "R2": 4
   },
   "src/components/not-built.tsx": {
     "R2": 2,
@@ -188,50 +110,11 @@
     "R4": 2,
     "R5": 1
   },
-  "src/components/run-timeline.tsx": {
-    "R1": 2,
-    "R2": 6,
-    "R5": 1
-  },
-  "src/components/run-transcript.tsx": {
-    "R1": 13,
-    "R2": 27,
-    "R5": 1,
-    "R6": 1
-  },
-  "src/components/segment-usage.tsx": {
-    "R1": 1,
-    "R2": 33,
-    "R5": 3,
-    "R6": 1,
-    "R7": 1,
-    "R8": 1
-  },
-  "src/components/task-actions.tsx": {
-    "R1": 1
-  },
-  "src/components/task-model-pins.tsx": {
-    "R1": 4,
-    "R2": 11
-  },
   "src/lib/status.ts": {
     "R1": 7
   },
   "src/root.tsx": {
     "R2": 4
-  },
-  "src/routes/audit.tsx": {
-    "R1": 4,
-    "R2": 16,
-    "R5": 1,
-    "R7": 1,
-    "R8": 1,
-    "R9": 1
-  },
-  "src/routes/changelog.tsx": {
-    "R1": 1,
-    "R2": 5,
-    "R5": 1
   },
   "src/routes/france.tsx": {
     "R1": 6,
@@ -251,13 +134,6 @@
   },
   "src/routes/not-found.tsx": {
     "R2": 2
-  },
-  "src/routes/notifications.tsx": {
-    "R1": 3,
-    "R2": 18,
-    "R5": 3,
-    "R7": 1,
-    "R8": 2
   },
   "src/routes/routing-status.tsx": {
     "R1": 13,
@@ -287,16 +163,5 @@
   "src/routes/soon.tsx": {
     "R1": 1,
     "R2": 3
-  },
-  "src/routes/task.tsx": {
-    "R2": 4,
-    "R5": 1,
-    "R6": 1,
-    "R8": 1
-  },
-  "src/routes/tasks.tsx": {
-    "R1": 2,
-    "R2": 10,
-    "R9": 2
   }
 }

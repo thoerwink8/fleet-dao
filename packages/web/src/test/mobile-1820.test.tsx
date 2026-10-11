@@ -171,9 +171,13 @@ describe('通知操作和标题同一行', () => {
       if (!el) throw new Error('还没出通知');
       return el as HTMLElement;
     });
-    const row = actions.closest('li') as HTMLElement;
-    expect(row.className).toContain('items-start');
-    expect(row.className).not.toContain('flex-col');
+    const row = actions.closest('li[data-notice-row]') as HTMLElement;
+    expect(row).toBeTruthy();
+    // 内容块和操作区是同一行里的两个兄弟，操作区在后（右侧），不是上下叠
+    const content = actions.previousElementSibling as HTMLElement;
+    expect(content?.parentElement).toBe(actions.parentElement);
+    expect(content?.textContent).toContain('分钟前');
+    expect(actions.parentElement?.className).not.toContain('flex-col');
     // 按钮的文字手机上只给读屏（sr-only），可见的是图标
     const done = within(actions).getByRole('button', { name: '处理了' });
     expect(done.className).toContain('max-md:w-10');

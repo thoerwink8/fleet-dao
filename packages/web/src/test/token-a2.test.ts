@@ -23,7 +23,7 @@ const SITES = [
   { file: 'src/components/usage.tsx', where: '花费明细', from: 'text-[11px]', to: 'text-caption' },
   { file: 'src/components/usage.tsx', where: '分开看', from: 'text-[11px]', to: 'text-caption' },
   { file: 'src/components/usage.tsx', where: '额度提示', from: 'text-[11px]', to: 'text-caption' },
-  { file: 'src/components/run-timeline.tsx', where: '时间刻度字号', from: 'text-[10px]', to: 'text-micro' },
+  { file: 'src/components/run-timeline.tsx', where: '时间刻度字号', from: 'text-[10px]', to: 'text-meta' },
   {
     file: 'src/components/run-timeline.tsx',
     where: '刻度左内边距',
@@ -36,8 +36,8 @@ const SITES = [
     from: 'md:grid-cols-[160px_1fr]',
     to: 'md:grid-cols-timeline',
   },
-  { file: 'src/components/run-timeline.tsx', where: '阶段角标', from: 'text-[10px]', to: 'text-micro' },
-  { file: 'src/components/run-timeline.tsx', where: '时长行', from: 'text-[11px]', to: 'text-caption' },
+  { file: 'src/components/run-timeline.tsx', where: '阶段角标', from: 'text-[10px]', to: 'text-meta' },
+  { file: 'src/components/run-timeline.tsx', where: '时长行', from: 'text-[11px]', to: 'text-meta' },
   {
     file: 'src/components/channel-status.tsx',
     where: '故障说明',

@@ -22,8 +22,11 @@ import { Link } from 'react-router';
 import { brand } from '#brand';
 import { formatAgo, formatDuration } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
-import { type Tone, toneBg, toneText } from '../../lib/status';
+import type { Tone } from '../../lib/status';
 import { cn } from '../../lib/utils';
+import { Section } from '../layout/section';
+import { StatusBadge } from '../layout/status-badge';
+import { inkClass } from '../layout/tone';
 import { useRemoteView } from '../node-notice';
 import type { HomeRunning } from './types';
 
@@ -93,90 +96,77 @@ export function statusTextOf(item: HomeRunning): string {
 
 export function RunningCard({ item, className }: { item: HomeRunning; className?: string }) {
   const now = useNow();
-  const { tone, icon: Icon } = toneOf(item);
+  const { tone } = toneOf(item);
   const founder = needsFounder(item);
   const since = (iso: string) => formatDuration(Math.max(0, now - Date.parse(iso)));
   const statusText = statusTextOf(item);
+  // 出问题和等你拍的卡，左边一道状态色竖线
+  const rail = tone === 'fail' ? 'fail' : founder ? 'human' : undefined;
   return (
     <div data-running-card={item.segment} data-needs-founder={founder} className={cn('h-full', className)}>
-      <CardLink
-        item={item}
-        className={cn(
-          'pointer-events-auto nopan nodrag flex h-full flex-col justify-between gap-1 rounded-lg border bg-card px-3 py-2 text-left shadow-card-edge transition-colors hover:border-border-strong',
-          founder && 'border-st-human/50',
-          tone === 'fail' && 'border-st-fail/50',
-        )}
-      >
-        <div className="flex items-center gap-2">
-          <span
-            className={cn(
-              'grid size-5 shrink-0 place-items-center rounded-full',
-              toneBg[tone],
-              toneText[tone],
-            )}
-            aria-hidden
-          >
-            <Icon className="size-3" />
-          </span>
-          <span className="num text-xs font-semibold text-muted-foreground">#{item.issueNumber}</span>
-          <span className="min-w-0 flex-1 truncate text-sm font-medium">{item.title}</span>
-          {founder ? (
-            <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-ink-human">
-              <span className="size-2 rounded-full bg-st-human" aria-hidden />
-              等你
+      <Section flush {...(rail ? { tone: rail } : {})} className="h-full [&>div]:h-full">
+        <CardLink
+          item={item}
+          className="pointer-events-auto nopan nodrag flex h-full flex-col justify-between gap-1 px-3 py-2 text-left transition-colors hover:bg-accent"
+        >
+          <div className="flex items-center gap-2">
+            <span className="num text-meta font-semibold text-muted-foreground">#{item.issueNumber}</span>
+            <span className="min-w-0 flex-1 truncate text-body font-medium">{item.title}</span>
+            <StatusBadge tone={tone} label={statusText} />
+            {founder ? <StatusBadge tone="human" label="等你" variant="dot" /> : null}
+          </div>
+
+          <div className="flex items-center gap-x-2 text-meta text-muted-foreground">
+            <Bot className="size-3 shrink-0" aria-hidden />
+            <span className={cn('max-w-1/2 shrink-0 truncate', item.worker ? 'text-foreground' : undefined)}>
+              {item.worker ?? '没有进程在跑'}
             </span>
-          ) : null}
-        </div>
+            {item.stageSince ? (
+              <>
+                <span aria-hidden>·</span>
+                <span className="num shrink-0 whitespace-nowrap">本段 {since(item.stageSince)}</span>
+              </>
+            ) : null}
+            {item.taskSince ? (
+              <>
+                <span aria-hidden>·</span>
+                <span className="num min-w-0 truncate">共 {since(item.taskSince)}</span>
+              </>
+            ) : null}
+          </div>
 
-        <div className="flex items-center gap-x-2 text-xs text-muted-foreground">
-          <Bot className="size-3 shrink-0" aria-hidden />
-          <span className={cn('max-w-1/2 shrink-0 truncate', item.worker ? 'text-foreground' : undefined)}>
-            {item.worker ?? '没有进程在跑'}
-          </span>
-          {item.stageSince ? (
-            <>
-              <span aria-hidden>·</span>
-              <span className="num shrink-0 whitespace-nowrap">本段 {since(item.stageSince)}</span>
-            </>
-          ) : null}
-          {item.taskSince ? (
-            <>
-              <span aria-hidden>·</span>
-              <span className="num min-w-0 truncate">共 {since(item.taskSince)}</span>
-            </>
-          ) : null}
-        </div>
-
-        <div className="flex items-center gap-x-2 text-xs">
-          <span className={cn('shrink-0 font-medium', toneText[tone])}>{statusText}</span>
           {item.waitingReason !== 'nothing' ? (
-            <span className="shrink-0 text-muted-foreground">· {WAIT_LABEL[item.waitingReason]}</span>
+            <div className="flex items-center gap-x-2 text-meta">
+              <span className={cn('shrink-0 font-medium', inkClass[tone])}>
+                {WAIT_LABEL[item.waitingReason]}
+              </span>
+              {item.waitingSince ? (
+                <span className="num shrink-0 whitespace-nowrap text-muted-foreground">
+                  已 {since(item.waitingSince)}
+                </span>
+              ) : null}
+            </div>
           ) : null}
-          {item.waitingSince ? (
-            <span className="num shrink-0 whitespace-nowrap text-muted-foreground">
-              {since(item.waitingSince)}
-            </span>
-          ) : null}
-        </div>
 
-        {founder && item.pendingDecision ? (
-          <div className="truncate text-xs text-ink-human" title={item.pendingDecision}>
-            要你拍：{item.pendingDecision}
-          </div>
-        ) : item.lastEvent ? (
-          <div
-            className={cn(
-              'truncate text-xs',
-              item.lastEvent.tone === 'trouble' ? 'text-ink-fail' : 'text-muted-foreground',
-            )}
-            title={item.lastEvent.text}
-          >
-            最近：{item.lastEvent.text} · <span className="num">{formatAgo(item.lastEvent.at, now)}</span>
-          </div>
-        ) : (
-          <div className="truncate text-xs text-muted-foreground">最近：还没有三段流水记录</div>
-        )}
-      </CardLink>
+          {founder && item.pendingDecision ? (
+            <div className="truncate text-meta text-ink-human" title={item.pendingDecision}>
+              要你拍：{item.pendingDecision}
+            </div>
+          ) : item.lastEvent ? (
+            <div
+              className={cn(
+                'truncate text-meta',
+                item.lastEvent.tone === 'trouble' ? 'text-ink-fail' : 'text-muted-foreground',
+              )}
+              title={item.lastEvent.text}
+            >
+              最近：{item.lastEvent.text} · <span className="num">{formatAgo(item.lastEvent.at, now)}</span>
+            </div>
+          ) : (
+            <div className="truncate text-meta text-muted-foreground">最近：还没有三段流水记录</div>
+          )}
+        </CardLink>
+      </Section>
     </div>
   );
 }

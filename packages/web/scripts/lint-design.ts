@@ -1,6 +1,6 @@
 // 驾驶舱设计规范检查（#1847，规范 docs/design/驾驶舱界面.md 第八节）。并入了原来的 lint-arbitrary（#182、#1446）。
 // 扫 packages/web/src 下非测试的 .ts/.tsx：取出所有字符串字面量和模板串的静态段（className、cn()、cva、映射表都在里面），
-// 按空白切成类名，去掉变体前缀（md:、hover:、data-[…]:）后逐条按 R0–R9 判；.css 只判 R0。
+// 按空白切成类名，去掉变体前缀（md:、hover:、data-[…]:）后逐条按 R0–R10 判；.css 只判 R0。
 // 没迁完的文件记在 design-legacy.json（旧账清单）：每个文件每条规则的条数冻结，只许减不许加；不在清单里的文件一条都不许有。
 // 用法（在 packages/web 下）：
 //   node scripts/lint-design.ts                 对着旧账清单检查，有问题退出 1
@@ -16,7 +16,7 @@ const srcDir = join(pkgDir, 'src');
 export const LEGACY_PATH = join(pkgDir, 'design-legacy.json');
 const DOC = 'docs/design/驾驶舱界面.md';
 
-export type RuleId = 'R0' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R6' | 'R7' | 'R8' | 'R9';
+export type RuleId = 'R0' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R6' | 'R7' | 'R8' | 'R9' | 'R10';
 
 /** 每条规则：名字和规范节号（报错里带上，照着去查）。 */
 export const RULES: Record<RuleId, { name: string; section: string }> = {
@@ -30,6 +30,7 @@ export const RULES: Record<RuleId, { name: string; section: string }> = {
   R7: { name: '行高字距', section: '6.2' },
   R8: { name: '手写版式', section: '7' },
   R9: { name: '原生控件', section: '7' },
+  R10: { name: '组件令牌', section: '2.7' },
 };
 export const RULE_IDS = Object.keys(RULES) as RuleId[];
 
@@ -38,7 +39,7 @@ export interface Hit {
   file: string;
   line: number;
   rule: RuleId;
-  /** 命中的类名（含变体前缀），R8 是那一对类名，R9 是标签。 */
+  /** 命中的类名（含变体前缀），R8 是那一对类名，R9 是标签，R10 是组件令牌类。 */
   cls: string;
   /** 该换成什么。 */
   fix: string;
@@ -357,7 +358,23 @@ const SPACING_OK = new Set([
 ]);
 
 /** 判一个类名（已去掉变体），返回 [规则, 该换成什么]；合规返回 undefined。R8、R9 不在这里。 */
+/** 组件令牌（app.css「组件令牌」一节）：控件高、行高、区块内边距、区块间距、区块内间距。 */
+const COMPONENT_TOKEN = 'control|row|section-gap|section|stack';
+const COMPONENT_TOKEN_UTIL = new RegExp(
+  `^(?:h|min-h|max-h|size|w|min-w|p|px|py|pt|pr|pb|pl|ps|pe|m|mx|my|mt|mr|mb|ml|ms|me|gap|gap-x|gap-y|space-x|space-y)-(?:${COMPONENT_TOKEN})$`,
+);
+const COMPONENT_TOKEN_VAR = new RegExp(`var\\(--spacing-(?:${COMPONENT_TOKEN})\\)`);
+/** 组件令牌只许版式组件和基础件用：页面要的尺寸由版式组件给，不自己量。 */
+function componentTokenFile(file: string): boolean {
+  return file.startsWith('src/components/layout/') || file.startsWith('src/components/ui/');
+}
+
 export function judgeUtility(util: string, file: string): [RuleId, string] | undefined {
+  // R10 组件令牌：h-control、p-section 这类类名，和写进任意值里的 var(--spacing-control)
+  if ((COMPONENT_TOKEN_UTIL.test(util) || COMPONENT_TOKEN_VAR.test(util)) && !componentTokenFile(file)) {
+    return ['R10', '用版式组件（Section、List、Toolbar……）或基础件（Button、Input……），页面不自己写组件令牌'];
+  }
+
   // R0 任意值
   // 颜色上的方括号透明度（bg-st-fail/[0.06]）归 R1，不算这里。
   const arb = util.match(/^[a-z][a-z0-9-]*-\[([^\]]*)\](?:\/.*)?$/);
@@ -656,7 +673,7 @@ export function checkLegacy(
     }
     for (const [rule, n] of Object.entries(row)) {
       if (!(rule in RULES) || !Number.isInteger(n) || (n as number) <= 0) {
-        errors.push(`design-legacy.json 里 ${file} 的 ${rule}: ${n} 不对：规则只有 R0–R9，条数是正整数。`);
+        errors.push(`design-legacy.json 里 ${file} 的 ${rule}: ${n} 不对：规则只有 R0–R10，条数是正整数。`);
       }
     }
   }

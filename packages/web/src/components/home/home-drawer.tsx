@@ -13,6 +13,8 @@ import { useLocalState } from '../../lib/hooks';
 import { cn } from '../../lib/utils';
 import { useDockRoom } from '../../lib/viewport';
 import { EmptyState } from '../layout/empty-state';
+import { Tag } from '../layout/tag';
+import { inkClass, lineClass, softClass } from '../layout/tone';
 import { Button } from '../ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '../ui/sheet';
 import { DecisionCard } from './decision-card';
@@ -63,21 +65,17 @@ function DrawerBody({
               aria-controls={`home-drawer-panel-${t.id}`}
               onClick={() => onTab(t.id)}
               className={cn(
-                'relative flex h-10 items-center gap-1.5 rounded-t-md px-3 text-sm text-muted-foreground transition-colors hover:text-foreground md:h-9',
+                'relative flex h-10 items-center gap-1.5 rounded-t-md px-3 text-body text-muted-foreground transition-colors hover:text-foreground md:h-9',
                 active && 'font-medium text-foreground',
               )}
             >
               {t.label}
-              <span
-                className={cn(
-                  'num rounded-full px-1.5 text-micro leading-4',
-                  t.id === 'decisions' && t.count > 0
-                    ? 'bg-st-human text-background'
-                    : 'bg-muted text-muted-foreground',
-                )}
+              <Tag
+                tone={t.id === 'decisions' && t.count > 0 ? 'human' : 'neutral'}
+                className="num rounded-full"
               >
                 {t.count}
-              </span>
+              </Tag>
               {active ? <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-brand" /> : null}
             </button>
           );
@@ -103,7 +101,7 @@ function DrawerBody({
       >
         {tab === 'decisions' ? (
           <>
-            <p className="mb-3 px-1 text-xs text-muted-foreground">
+            <p className="mb-3 px-1 text-meta text-muted-foreground">
               {remote ? '决定、待批（只读，要去那台上答）。' : '决定、待批。多的去通知中心。'}
             </p>
             {shown.length ? (
@@ -116,7 +114,7 @@ function DrawerBody({
               <EmptyState icon={Hand} title="没有要你拍的" hint="有决定、待批时会出现在这里。" />
             )}
             {more > 0 ? (
-              <p className="mt-3 px-1 text-xs text-muted-foreground">
+              <p className="mt-3 px-1 text-meta text-muted-foreground">
                 还有 <span className="num">{more}</span> 条，
                 {remote ? (
                   '要去那台上的通知中心看。'
@@ -134,7 +132,7 @@ function DrawerBody({
           </>
         ) : (
           <>
-            <p className="mb-3 px-1 text-xs text-muted-foreground">最近合进去的 PR。</p>
+            <p className="mb-3 px-1 text-meta text-muted-foreground">最近合进去的 PR。</p>
             {done.length ? (
               <ul className="grid grid-cols-1 gap-2">
                 {done.slice(0, MAX_DONE).map((d) => (
@@ -154,37 +152,34 @@ function DrawerBody({
 /** 画布右上角的按钮：左半开「要你拍的」，右半开「做完的」。N>0 时左半用等你色。 */
 function DrawerButton({ count, open, onOpen }: { count: number; open: boolean; onOpen(tab: Tab): void }) {
   const half =
-    'flex h-8 items-center gap-1.5 px-3 text-sm transition-colors hover:bg-accent focus-visible:z-10';
+    'flex h-8 items-center gap-1.5 px-3 text-body transition-colors hover:bg-accent focus-visible:z-10';
   return (
     <div
       data-drawer-button
+      data-tone={count > 0 ? 'human' : undefined}
       className={cn(
-        'absolute top-3 right-3 z-30 flex overflow-hidden rounded-xl border bg-popover/90 shadow-sm backdrop-blur',
-        count > 0 && 'border-st-human/50',
+        'absolute top-3 right-3 z-30 flex overflow-hidden rounded-lg border bg-popover shadow-overlay',
+        count > 0 && lineClass.human,
       )}
     >
       <button
         type="button"
         aria-expanded={open}
         aria-label={`要你拍的 ${count} 条，打开抽屉`}
+        data-tone={count > 0 ? 'human' : undefined}
         onClick={() => onOpen('decisions')}
         className={cn(
           half,
           count > 0
-            ? 'bg-st-human/12 font-medium text-ink-human hover:bg-st-human/20'
+            ? cn(softClass.human, inkClass.human, 'font-medium hover:bg-selected')
             : 'text-muted-foreground',
         )}
       >
         <Hand className="size-3.5" aria-hidden />
         要你拍的
-        <span
-          className={cn(
-            'num rounded-full px-1.5 text-micro leading-4',
-            count > 0 ? 'bg-st-human text-background' : 'bg-muted text-muted-foreground',
-          )}
-        >
+        <Tag tone={count > 0 ? 'human' : 'neutral'} className="num rounded-full">
           {count}
-        </span>
+        </Tag>
       </button>
       <button
         type="button"
@@ -252,8 +247,8 @@ export function HomeDrawer({
             setFloating(true);
           }}
           className={cn(
-            'flex min-h-11 shrink-0 items-center gap-2 border-b px-4 text-left text-sm',
-            n > 0 ? 'bg-st-human/10 font-medium text-ink-human' : 'text-muted-foreground',
+            'flex min-h-11 shrink-0 items-center gap-2 border-b px-4 text-left text-body',
+            n > 0 ? cn(softClass.human, inkClass.human, 'font-medium') : 'text-muted-foreground',
           )}
         >
           {n > 0 ? (
@@ -274,7 +269,7 @@ export function HomeDrawer({
         </button>
         {children}
         <Sheet open={floating} onOpenChange={setFloating}>
-          <SheetContent side="bottom" className="max-h-4/5 gap-0 rounded-t-2xl p-0">
+          <SheetContent side="bottom" className="max-h-4/5 gap-0 rounded-t-lg p-0">
             <SheetTitle className="sr-only">要你拍的和做完的</SheetTitle>
             <SheetDescription className="sr-only">要你拍的决定和最近做完的 PR</SheetDescription>
             <div className="mx-auto mt-2 h-1 w-10 shrink-0 rounded-full bg-border-strong" aria-hidden />
@@ -316,7 +311,7 @@ export function HomeDrawer({
             panelClass,
             'w-drawer max-w-full shrink-0 border-l outline-none',
             !docked &&
-              'absolute inset-y-0 right-0 z-40 bg-popover shadow-2xl motion-safe:animate-in motion-safe:slide-in-from-right motion-safe:duration-200',
+              'absolute inset-y-0 right-0 z-40 bg-popover shadow-modal motion-safe:animate-in motion-safe:slide-in-from-right motion-safe:duration-200',
           )}
         >
           <DrawerBody

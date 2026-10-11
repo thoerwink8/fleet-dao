@@ -19,7 +19,7 @@ export function Toolbar({
       role="toolbar"
       data-sticky={sticky || undefined}
       className={cn(
-        'mb-4 flex flex-wrap items-center justify-between gap-2',
+        'mb-section flex flex-wrap items-center justify-between gap-2',
         sticky && 'sticky top-topbar z-10 -mx-1 bg-background px-1 py-2',
         className,
       )}

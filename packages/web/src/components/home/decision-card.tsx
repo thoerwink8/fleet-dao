@@ -6,6 +6,8 @@ import { Link } from 'react-router';
 import { formatAgo } from '../../lib/format';
 import { useSlowNow } from '../../lib/hooks';
 import { cn } from '../../lib/utils';
+import { Section } from '../layout/section';
+import { Tag } from '../layout/tag';
 import { useRemoteView } from '../node-notice';
 import { Button } from '../ui/button';
 import type { HomeDecision } from './types';
@@ -30,62 +32,55 @@ export function DecisionCard({
   const meta = KIND_META[decision.kind];
   const Icon = meta.icon;
   return (
-    <li
-      data-decision-card={decision.kind}
-      className={cn(
-        'flex flex-col gap-3 rounded-lg border border-st-human/40 bg-st-human/6 p-4',
-        !stacked && 'sm:flex-row sm:items-start',
-        className,
-      )}
-    >
-      <div className="flex min-w-0 flex-1 items-start gap-3">
-        <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-full bg-st-human/15 text-ink-human">
-          <Icon className="size-3.5" aria-hidden />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-nowrap items-baseline gap-x-2">
-            {/* 种类换成 text-caption。 */}
-            <span className="shrink-0 whitespace-nowrap text-caption font-medium uppercase tracking-wide text-ink-human">
-              {meta.label}
+    <li data-decision-card={decision.kind} data-stacked={stacked} className={className}>
+      <Section tone="human">
+        <div className={cn('flex flex-col gap-3', !stacked && 'sm:flex-row sm:items-start')}>
+          <div className="flex min-w-0 flex-1 items-start gap-3">
+            <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-full bg-st-human-soft text-ink-human">
+              <Icon className="size-3.5" aria-hidden />
             </span>
-            {/* 时间换成 text-caption。 */}
-            <span className="num shrink-0 whitespace-nowrap text-caption text-muted-foreground">
-              {formatAgo(decision.since, now)}
-            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-nowrap items-center gap-x-2">
+                <Tag tone="human">{meta.label}</Tag>
+                <span className="num shrink-0 whitespace-nowrap text-meta text-muted-foreground">
+                  {formatAgo(decision.since, now)}
+                </span>
+              </div>
+              <p className="mt-1 text-body font-medium leading-snug">{decision.title}</p>
+              {decision.context ? (
+                <p className="mt-1 text-meta leading-relaxed text-muted-foreground">{decision.context}</p>
+              ) : null}
+            </div>
           </div>
-          <p className="mt-1 text-sm font-medium leading-snug">{decision.title}</p>
-          {decision.context ? (
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{decision.context}</p>
-          ) : null}
-        </div>
-      </div>
-      {remote ? (
-        // 看的是别的环境的快照：这条决定要在那台上答，这里只读，按钮置灰并说明
-        <div
-          className={cn(
-            'flex shrink-0 flex-col items-start gap-1 self-start',
-            !stacked && 'sm:items-end sm:self-center',
+          {remote ? (
+            // 看的是别的环境的快照：这条决定要在那台上答，这里只读，按钮置灰并说明
+            <div
+              className={cn(
+                'flex shrink-0 flex-col items-start gap-1 self-start',
+                !stacked && 'sm:items-end sm:self-center',
+              )}
+            >
+              <Button size="sm" variant="outline" disabled data-remote-disabled>
+                去答
+                <ArrowRight aria-hidden />
+              </Button>
+              <span className="text-meta text-muted-foreground">要去{remote.name}那台上答</span>
+            </div>
+          ) : (
+            <Button
+              asChild
+              size="sm"
+              variant="outline"
+              className={cn('shrink-0 self-start max-md:h-10', !stacked && 'sm:self-center')}
+            >
+              <Link to={decision.link}>
+                去答
+                <ArrowRight aria-hidden />
+              </Link>
+            </Button>
           )}
-        >
-          <Button size="sm" variant="outline" disabled data-remote-disabled>
-            去答
-            <ArrowRight aria-hidden />
-          </Button>
-          <span className="text-caption text-muted-foreground">要去{remote.name}那台上答</span>
         </div>
-      ) : (
-        <Button
-          asChild
-          size="sm"
-          variant="outline"
-          className={cn('shrink-0 self-start max-md:h-10', !stacked && 'sm:self-center')}
-        >
-          <Link to={decision.link}>
-            去答
-            <ArrowRight aria-hidden />
-          </Link>
-        </Button>
-      )}
+      </Section>
     </li>
   );
 }

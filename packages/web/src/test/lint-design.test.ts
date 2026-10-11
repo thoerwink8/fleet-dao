@@ -1,8 +1,11 @@
 // 设计规范检查（#1847，并入了 #182 / #1446 的 lint-arbitrary）。扫描脚本在 packages/web/scripts/lint-design.ts，
 // 规则表在 docs/design/驾驶舱界面.md 第八节。本测试盯三块：
-//   1) 每条规则 R0–R9：一条故意造红的写法要报出来，一条合规写法要放过；
+//   1) 每条规则 R0–R10：一条故意造红的写法要报出来，一条合规写法要放过；
 //   2) 旧账清单的判法：不在清单的文件一条都不许有，清单里的条数只许减（减了要改清单）；
 //   3) 整个 packages/web/src 对着 design-legacy.json 没有新违规。
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import {
   ALLOWLIST,
@@ -147,6 +150,22 @@ describe('每条规则：造红的报、合规的放', () => {
     expect(rulesOf(`<input type="checkbox" />`)).toEqual([]);
     expect(rulesOf(`const s = '<select>';`)).toEqual([]);
   });
+
+  test('R10 组件令牌：页面里 h-control、p-section、gap-stack、任意值里的 var(--spacing-row) 报', () => {
+    expect(
+      classesOf(
+        `<div className="h-control p-section gap-stack md:gap-section-gap min-h-[var(--spacing-row)]" />`,
+      ),
+    ).toEqual(['h-control', 'p-section', 'gap-stack', 'md:gap-section-gap', 'min-h-[var(--spacing-row)]']);
+    expect(rulesOf(`"h-row"`, 'src/components/home/board/card.tsx')).toEqual(['R10']);
+  });
+  test('R10 放行：layout/、ui/ 里写；flex-row、grid-flow-row 这类撞了名字的不算', () => {
+    expect(rulesOf(`"h-control p-section gap-stack min-h-row"`, 'src/components/layout/section.tsx')).toEqual(
+      [],
+    );
+    expect(rulesOf(`"h-control size-row"`, 'src/components/ui/button.tsx')).toEqual([]);
+    expect(rulesOf(`"flex-row grid-flow-row h-8 gap-3"`)).toEqual([]);
+  });
 });
 
 describe('词法和报错', () => {
@@ -221,6 +240,14 @@ describe('旧账清单：只减不加', () => {
   });
   test('计数按文件、按规则', () => {
     expect(countHits(hits)).toEqual({ [PAGE]: { R2: 2, R5: 1 } });
+  });
+});
+
+describe('令牌名不撞车', () => {
+  test('app.css 里没有 --color-canvas：它会让 text-canvas 被当成文字颜色，字号类不生成（#1850）', () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../app.css'), 'utf8');
+    expect(css).not.toMatch(/--color-canvas\s*:/);
+    expect(css).toMatch(/--text-canvas\s*:/);
   });
 });
 

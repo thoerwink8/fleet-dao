@@ -21,6 +21,7 @@ import { StatusBadge, StatusDot } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
 import { inkClass, LAYOUT_TONES, type LayoutTone } from '../components/layout/tone';
 import { Toolbar } from '../components/layout/toolbar';
+import { useTheme } from '../components/theme-provider';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -33,6 +34,7 @@ import { Textarea } from '../components/ui/textarea';
 import { ToggleGroup, ToggleGroupItem } from '../components/ui/toggle-group';
 import { contrastRatio, over, parseColor } from '../lib/color-ratio';
 import { toneLabel } from '../lib/status';
+import type { DensityPref } from '../lib/theme';
 import { cn } from '../lib/utils';
 
 const TONE_WORD: Record<LayoutTone, string> = { ...toneLabel, doubt: '疑似换模型' };
@@ -508,9 +510,27 @@ function Gallery({ mode }: { mode: 'light' | 'dark' }) {
   );
 }
 
+const DENSITY_ITEMS: { id: DensityPref; label: string }[] = [
+  { id: 'comfortable', label: '标准' },
+  { id: 'compact', label: '紧凑' },
+];
+
 export default function DesignGallery() {
+  const { pref, setDensity } = useTheme();
   return (
-    <Page title="设计陈列" description="每个组件的各种状态，亮色和暗色各一屏。只在 dev:mock 里有。">
+    <Page
+      title="设计陈列"
+      description="每个组件的各种状态，亮色和暗色各一屏，右上角切标准和紧凑密度。只在 dev:mock 里有。"
+      actions={
+        <FilterTabs
+          mode="toggle"
+          aria-label="密度"
+          items={DENSITY_ITEMS}
+          value={pref.density}
+          onChange={setDensity}
+        />
+      }
+    >
       <div className="grid gap-6 2xl:grid-cols-2">
         {(['light', 'dark'] as const).map((mode) => (
           <div

@@ -5,20 +5,20 @@
 /** 画布能缩到的最小倍数（ReactFlow 的 minZoom）。 */
 export const MIN_ZOOM = 0.15;
 
-/** 远档标题在预设缩放 0.4 下的设计字号，对齐 --text-strong（15px）；屏幕上的下限对齐 --text-caption（11px）。 */
-export const FAR_TITLE_DESIGN_PX = 15;
-export const FAR_TITLE_FLOOR_PX = 11;
+/** 远档标题在预设缩放 0.4 下的设计字号，对齐 --text-heading（16px）；屏幕上的下限对齐 --text-meta（12px）。 */
+export const FAR_TITLE_DESIGN_PX = 16;
+export const FAR_TITLE_FLOOR_PX = 12;
 
 /**
- * 远档单号的设计字号，对齐 --text-sub（13px），下限对齐 --text-micro（10px）。
+ * 远档单号的设计字号，对齐 --text-body（14px），下限对齐 --text-canvas（11px）。
  * 设计字号和下限都比标题小一档：缩放到哪里，标题都比单号大。
  */
-export const FAR_ID_DESIGN_PX = 13;
-export const FAR_ID_FLOOR_PX = 10;
+export const FAR_ID_DESIGN_PX = 14;
+export const FAR_ID_FLOOR_PX = 11;
 
 /** 远档单号的 CSS 字号，写法同标题（见 board-ui.tsx 的 farTitleFontSize）。 */
 export function farIdFontSize(): string {
-  return 'max(calc(var(--text-sub) / var(--fd-zoom-far, 0.4)), calc(var(--text-micro) / var(--fd-board-zoom, 0.4)))';
+  return 'max(calc(var(--text-body) / var(--fd-zoom-far, 0.4)), calc(var(--text-canvas) / var(--fd-board-zoom, 0.4)))';
 }
 
 /** 段节点左边那条状态色条加左右内边距占的宽（画布坐标）。 */

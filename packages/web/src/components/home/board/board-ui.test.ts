@@ -1,5 +1,5 @@
 // 远档卡片标题、编号的字号：按缩放倒数放大，屏幕上不小于 12px。
-// 标题另有一条：用字号名（--text-strong / --text-caption），实际缩放下屏幕上不小于 11px。
+// 标题另有一条：用字号名（--text-heading / --text-meta），实际缩放下屏幕上不小于 12px。
 // 「此刻」表「在做什么」列：单行省略 + title 悬停全文，列宽有下限（#1752）。
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -16,16 +16,16 @@ describe('远档字号', () => {
     expect(farCardFontPx(8, 0.25) * 0.25).toBeGreaterThanOrEqual(12);
   });
 
-  test('远档标题用字号名，1366 收进视野的缩放和最小缩放下屏幕上都不小于 11', () => {
+  test('远档标题用字号名，1366 收进视野的缩放和最小缩放下屏幕上都不小于 12', () => {
     const css = farTitleFontSize();
-    expect(css).toContain('var(--text-strong)');
-    expect(css).toContain('var(--text-caption)');
+    expect(css).toContain('var(--text-heading)');
+    expect(css).toContain('var(--text-meta)');
     expect(css).not.toMatch(/\d+px/);
     // 1366 宽实测收进视野约 0.176；画布最小缩放 0.15；远档预设 0.4
-    expect(farTitleScreenPx(0.176)).toBeGreaterThanOrEqual(11);
-    expect(farTitleScreenPx(0.15)).toBeGreaterThanOrEqual(11);
-    expect(farTitleScreenPx(0.4)).toBeGreaterThanOrEqual(11);
-    expect(farTitleScreenPx(ZOOM_OF.far)).toBe(15);
+    expect(farTitleScreenPx(0.176)).toBeGreaterThanOrEqual(12);
+    expect(farTitleScreenPx(0.15)).toBeGreaterThanOrEqual(12);
+    expect(farTitleScreenPx(0.4)).toBeGreaterThanOrEqual(12);
+    expect(farTitleScreenPx(ZOOM_OF.far)).toBe(16);
   });
 });
 
