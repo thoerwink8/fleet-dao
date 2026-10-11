@@ -1,6 +1,6 @@
 // 组件测试的外壳：假后端（不开模拟器）+ React Query + 路由 + 主题 + 当前仓 + 快捷操作。
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { type RenderResult, render } from '@testing-library/react';
+import { fireEvent, type RenderResult, render, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { MemoryRouter } from 'react-router';
 import { ApiProvider, type FleetApi } from '../api/client';
@@ -40,4 +40,14 @@ export function renderApp<A extends FleetApi = MockApi>(
     </MemoryRouter>,
   );
   return { api, qc, ...view };
+}
+
+/** 额度页顶上的摘要胶囊：点开它，返回展开的明细（找不到就报错，不返回空）。 */
+export function openSummary(title: string): HTMLElement {
+  const btn = screen.getByText(title).closest('button');
+  if (!btn) throw new Error(`找不到摘要胶囊：${title}`);
+  if (btn.getAttribute('aria-expanded') !== 'true') fireEvent.click(btn);
+  const panel = document.getElementById(btn.getAttribute('aria-controls') ?? '');
+  if (!panel) throw new Error(`摘要胶囊没有展开：${title}`);
+  return panel;
 }

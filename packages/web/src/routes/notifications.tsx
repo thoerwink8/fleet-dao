@@ -337,7 +337,7 @@ export default function Notifications() {
   return (
     <Page
       title="通知中心"
-      description="只有三类：要你拍的、卡住报警、日报。飞书上也推同样的三类；进度不主动推。"
+      description="只有三类：要你拍的、卡住的、日报。飞书上推同样的三类，进度不主动推。"
       actions={
         <RefreshBar
           onRefresh={() => void refetch()}
@@ -386,12 +386,12 @@ export default function Notifications() {
       </div>
       {data && status === 'open' ? (
         <p className="mb-3 text-xs text-muted-foreground" data-testid="pending-rule">
-          待处理 <span className="num">{pendingCount(data.counts)}</span>{' '}
-          条（要你拍加卡住报警），铃铛和侧栏角标同数。
+          待处理 <span className="num">{pendingCount(data.counts)}</span> 条。
+          要你拍的和卡住的，处理了就从这里消失。
           {data.counts.daily > 0 ? (
             <>
               {' '}
-              日报 <span className="num">{data.counts.daily}</span> 条只是看一眼，不算待处理。
+              日报 <span className="num">{data.counts.daily}</span> 条看一眼就行。
             </>
           ) : null}
         </p>

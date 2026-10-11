@@ -34,7 +34,11 @@ test.describe('设置页', () => {
     await expect(reserve.getByTestId('reserve-source')).toContainText('来自种子');
     await expect(page.locator('#reserve-claude-solo-5h')).toHaveValue('80');
     await expect(page.locator('#reserve-claude-solo-7d')).toHaveValue('70');
-    await expect(page.locator('#reserve-claude-carpool-5h')).toHaveValue('');
+    // 没配的线（拼车池）是灰色占位「—」，点一下才变输入框
+    const unset = page.locator('#reserve-claude-carpool-5h');
+    await expect(unset).toHaveAttribute('title', /未配置/);
+    await unset.click();
+    await expect(unset).toHaveValue('');
     await shot(page, '05-设置');
   });
 

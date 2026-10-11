@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // 定时任务页顶部摘要卡：说明要完整折行，不能单行省略（#1527）。
 // 「上次跑成」和「N 分钟前开始」合成一列（#1753）。
-import { cleanup, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { renderApp } from '../test/harness';
 import SchedulesPage from './schedules';
@@ -59,29 +59,49 @@ describe('定时任务摘要卡', () => {
   });
 });
 
-describe('定时任务上次跑成列', () => {
-  test('上次跑成和开始时间在同一列', async () => {
+describe('定时任务可展开的列表行（#1805）', () => {
+  test('默认全部收起，点一行才展开明细，再点收起', async () => {
     renderApp(<SchedulesPage />, { route: '/schedules' });
-    // 窄屏卡片和宽屏表格各有一份，等任意一份出来再盯表格那一列
-    await screen.findAllByText('额度读取');
-    const table = document.querySelector('table');
-    if (!(table instanceof HTMLElement)) throw new Error('找不到表格');
-    const heads = within(table)
-      .getAllByRole('columnheader')
-      .map((h) => h.textContent?.trim());
-    expect(heads).toEqual(['任务', '周期', '上次运行', '上次跑成', '耗时']);
-
-    const row = within(table).getByText('额度读取').closest('tr');
+    const name = await screen.findByText('额度读取');
+    const row = name.closest('li');
     if (!(row instanceof HTMLElement)) throw new Error('找不到额度读取那一行');
-    const cells = within(row).getAllByRole('cell');
-    const outcomeCell = cells[2];
-    const successCell = cells[3];
-    if (!outcomeCell || !successCell) throw new Error('列数不对');
-    expect(successCell.textContent).toMatch(/开始/);
-    expect(outcomeCell.textContent).not.toMatch(/开始/);
-    // 主行是上次跑成（相对时间），副行是开始时间——同在一格里
-    const block = successCell.querySelector('[data-last-success]');
+    const toggle = within(row).getByRole('button');
+    // 默认收起：明细（周期、上次跑成块）不在
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(row.querySelector('[data-last-success]')).toBeNull();
+    expect(row.querySelector('dl')).toBeNull();
+    for (const li of document.querySelectorAll('[data-job-list] > li')) {
+      expect(li.querySelector('button')?.getAttribute('aria-expanded')).toBe('false');
+    }
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(row.querySelector('dl')).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(row.querySelector('dl')).toBeNull();
+  });
+
+  test('一行就一行：状态点、名字、上次结果、上次跑成的相对时间；没有表格', async () => {
+    renderApp(<SchedulesPage />, { route: '/schedules' });
+    const row = (await screen.findByText('额度读取')).closest('li') as HTMLElement;
+    expect(document.querySelector('table')).toBeNull();
+    expect(row.querySelector('[aria-hidden].rounded-full')).toBeTruthy();
+    expect(row.textContent).toContain('前');
+  });
+
+  test('上次跑成和开始时间在同一块（展开后）', async () => {
+    renderApp(<SchedulesPage />, { route: '/schedules' });
+    const row = (await screen.findByText('额度读取')).closest('li') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button'));
+    const block = row.querySelector('[data-last-success]');
     expect(block).toBeTruthy();
-    expect(within(successCell).getByText(/开始/).closest('[data-last-success]')).toBe(block);
+    expect(within(block as HTMLElement).getByText(/开始/)).toBeTruthy();
+  });
+
+  test('失败的那一行带红色竖线和 data-outcome', async () => {
+    renderApp(<SchedulesPage />, { route: '/schedules' });
+    const row = (await screen.findByText('夜间备份')).closest('li') as HTMLElement;
+    expect(row.dataset.outcome).toBe('failed');
+    expect(row.querySelector('.w-rail.bg-st-fail')).toBeTruthy();
   });
 });

@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 // 设置页两处难看：仓库一节仓列表和「让 AI 接活」都读失败时叠两条红横幅，合成一条；
 // 留量线窗口名把字段名 7d_model 漏到界面上，改成中文。
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, test } from 'vitest';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi } from '../api/mock/server';
 import SettingsPage from '../routes/settings';
@@ -92,6 +92,55 @@ describe('设置页留量线的窗口名', () => {
     expect(within(form).getAllByText('周额度').length).toBeGreaterThan(0);
     expect(within(form).getAllByText('月额度').length).toBeGreaterThan(0);
     expect(within(form).getAllByText('账期额度').length).toBeGreaterThan(0);
+  });
+});
+
+describe('设置页留量线：未配置显示占位，点了才变输入框（#1805）', () => {
+  test('灰色占位「—」点一下变输入框，填了保存仍走 updateSetting(engine.quotaReserve)', async () => {
+    const api = createMockApi({ live: false });
+    const spy = vi.spyOn(api, 'updateSetting');
+    renderApp(<SettingsPage />, { api: api as unknown as FleetApi, route: '/settings' });
+    const form = (await screen.findByTestId('reserve-source')).closest('form');
+    if (!form) throw new Error('留量线没有表单');
+    const placeholder = 'button[title="未配置（不限），点一下填写"]';
+    await waitFor(() => expect(form.querySelectorAll(placeholder).length).toBeGreaterThan(0));
+    const before = form.querySelectorAll(placeholder).length;
+    const boxes = within(form).queryAllByRole('textbox').length;
+    const first = form.querySelector(placeholder) as HTMLButtonElement;
+    fireEvent.click(first);
+    // 点了才出输入框，占位少一个
+    await waitFor(() => expect(within(form).queryAllByRole('textbox')).toHaveLength(boxes + 1));
+    expect(form.querySelectorAll(placeholder)).toHaveLength(before - 1);
+    // 点开了但没填，离开输入框就缩回占位
+    const input = within(form).queryAllByRole('textbox')[0] as HTMLInputElement;
+    fireEvent.blur(input);
+    await waitFor(() => expect(form.querySelectorAll(placeholder)).toHaveLength(before));
+    // 再点开、填 80、保存
+    fireEvent.click(form.querySelector(placeholder) as HTMLButtonElement);
+    await waitFor(() => expect(within(form).queryAllByRole('textbox')).toHaveLength(boxes + 1));
+    const typed = within(form).queryAllByRole('textbox')[0] as HTMLInputElement;
+    fireEvent.change(typed, { target: { value: '80' } });
+    fireEvent.click(within(form).getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+    const [key, body] = spy.mock.calls[0] ?? [];
+    expect(key).toBe('engine.quotaReserve');
+    expect(typeof (body as { version: number }).version).toBe('number');
+    expect(JSON.stringify((body as { value: unknown }).value)).toContain('0.8');
+  });
+});
+
+describe('设置页字段行和页内导航（#1805）', () => {
+  test('每节的字段是标签左、控件右的行；页内导航有六个锚点，吸顶 / 吸左', async () => {
+    renderApp(<SettingsPage />, { route: '/settings' });
+    const concurrent = await screen.findByText('同时跑的会话上限');
+    const row = concurrent.closest('form');
+    expect(row?.className).toContain('md:grid-cols-field');
+    const nav = document.querySelector('[data-page-nav]') as HTMLElement;
+    expect(nav.className).toContain('sticky');
+    expect(nav.className).toContain('lg:self-start');
+    const hrefs = [...nav.querySelectorAll('a')].map((a) => a.getAttribute('href'));
+    expect(hrefs).toEqual(['#repos', '#run', '#notify', '#account', '#look', '#about']);
+    for (const h of hrefs) expect(document.getElementById((h ?? '').slice(1))).toBeTruthy();
   });
 });
 

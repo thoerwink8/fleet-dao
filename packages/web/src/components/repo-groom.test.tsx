@@ -28,6 +28,12 @@ function groomButton(panel: HTMLElement): HTMLButtonElement {
   return btn;
 }
 
+/** 行尾只有一句状态：整理记录和长说明点「详情」才展开（#1805）。 */
+function openDetails(panel: HTMLElement) {
+  const toggle = within(panel).getByRole('button', { name: /的整理详情$/ });
+  if (toggle.getAttribute('aria-expanded') !== 'true') fireEvent.click(toggle);
+}
+
 async function confirm(panel: HTMLElement, reason?: string) {
   fireEvent.click(groomButton(panel));
   const dialog = await screen.findByRole('alertdialog');
@@ -55,7 +61,10 @@ describe('设置页：指挥官整理待办', () => {
       expect(panel.textContent).toContain(`今日剩余 ${status.quota.remaining}/${status.quota.max}`),
     );
     expect(status.quota).toMatchObject({ remaining: 1, max: 3 });
+    // 收起时行尾只有一句状态
     expect(panel.textContent).toContain('做成了');
+    expect(panel.textContent).not.toContain('开了 1 张');
+    openDetails(panel);
     expect(panel.textContent).toContain(formatDateTime(latest.finishedAt));
     expect(panel.textContent).toContain('开了 1 张');
     expect(panel.textContent).toContain('补了 2 张');
@@ -82,7 +91,8 @@ describe('设置页：指挥官整理待办', () => {
     const api = createMockApi({ live: false });
     renderApp(<SettingsPage />, { api, route: '/settings' });
     const panel = await screen.findByTestId(`groom-${ORBIT}`);
-    // 长说明已从仓库一节常显挪进「指挥官整理待办」折叠块：展开后才有新规则全文。
+    // 长说明已从仓库一节常显挪进「指挥官整理待办」折叠块：点「详情」再点「展开」才有新规则全文。
+    openDetails(panel);
     fireEvent.click(within(panel).getByRole('button', { name: '展开' }));
     await waitFor(() => {
       expect(panel.textContent).toContain('引擎每 5 分钟自己按准入和排序挑单');
@@ -220,6 +230,15 @@ describe('设置页：指挥官整理待办', () => {
     const api = createMockApi({ live: false });
     renderApp(<SettingsPage />, { api, route: '/settings' });
     const panel = await screen.findByTestId(`groom-${ORBIT}`);
+    // 收起时：只有行尾一句状态，说明正文和「展开」都不在
+    expect(within(panel).queryByRole('button', { name: '展开' })).toBeNull();
+    expect(panel.textContent).not.toContain('老单要整理过才能进队');
+    expect(
+      within(panel)
+        .getByRole('button', { name: /的整理详情$/ })
+        .getAttribute('aria-expanded'),
+    ).toBe('false');
+    openDetails(panel);
     const toggle = await within(panel).findByRole('button', { name: '展开' });
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     // 折叠时：一行摘要在，长说明正文不露；仓库一节也不再常显那段长文。
