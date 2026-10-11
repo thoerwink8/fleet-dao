@@ -18,8 +18,13 @@ import {
   withReviewBy,
 } from '../lib/pool-holds';
 import { cn } from '../lib/utils';
+import { EmptyState } from './layout/empty-state';
 import { FieldRow } from './layout/field-row';
 import { LoadError, LoadingRows } from './layout/load-state';
+import { NativeSelect } from './layout/native-select';
+import { Notice } from './layout/notice';
+import { Section } from './layout/section';
+import { StatusBadge } from './layout/status-badge';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -136,13 +141,10 @@ export function PoolHoldsPanel() {
     return (
       <li key={h.poolId} className="px-4 py-3" data-testid={`hold-${h.poolId}`}>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-medium">{poolName(h.poolId)}</span>
+          <span className="text-body font-medium">{poolName(h.poolId)}</span>
           {words ? (
-            <span
-              className="rounded-full bg-fail/10 px-2 py-0.5 text-xs font-medium text-ink-fail"
-              role="alert"
-            >
-              {words}
+            <span role="alert">
+              <StatusBadge tone="fail" label={words} />
             </span>
           ) : null}
           <span className="ml-auto flex gap-2">
@@ -175,7 +177,7 @@ export function PoolHoldsPanel() {
             </Button>
           </span>
         </div>
-        <dl className="mt-1.5 grid grid-cols-auto-fr gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+        <dl className="mt-1.5 grid grid-cols-auto-fr gap-x-3 gap-y-0.5 text-meta text-muted-foreground">
           {/* 原标签列 auto、剩余 1fr，grid-cols-auto-fr */}
           <dt>为什么停</dt>
           <dd className="text-foreground">{h.reason}</dd>
@@ -191,10 +193,10 @@ export function PoolHoldsPanel() {
           </dd>
         </dl>
         {open && action ? (
-          <div className="mt-2 rounded-lg border bg-muted/30 p-3">
+          <div className="mt-2 rounded-md bg-muted p-3">
             {action.kind === 'renew' ? (
               <div className="mb-2 flex items-center gap-2">
-                <Label htmlFor="hold-renew-date" className="text-xs">
+                <Label htmlFor="hold-renew-date" className="text-meta">
                   新的最迟复查日期
                 </Label>
                 <Input
@@ -208,7 +210,7 @@ export function PoolHoldsPanel() {
             ) : null}
             {action.kind === 'owner' ? (
               <div className="mb-2 flex items-center gap-2">
-                <Label htmlFor="hold-owner-edit" className="text-xs">
+                <Label htmlFor="hold-owner-edit" className="text-meta">
                   负责人
                 </Label>
                 <Input
@@ -219,7 +221,7 @@ export function PoolHoldsPanel() {
                 />
               </div>
             ) : null}
-            <Label htmlFor="hold-action-reason" className="text-xs">
+            <Label htmlFor="hold-action-reason" className="text-meta">
               {action.kind === 'revoke'
                 ? '撤回原因（必填，进操作记录）'
                 : action.kind === 'renew'
@@ -260,25 +262,20 @@ export function PoolHoldsPanel() {
   };
 
   return (
-    <div className="rounded-xl border bg-card px-4 py-3" data-testid="pool-holds">
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="text-sm font-medium">整池暂停</div>
-        {v && holdsNeedAttention(v) ? (
-          <span className="rounded-full bg-fail/10 px-2 py-0.5 text-xs font-medium text-ink-fail">
-            要人看
-          </span>
-        ) : null}
-      </div>
-      <p className="mt-0.5 text-xs text-muted-foreground">
-        临时停用一个账号池：选路不派、切号不切过去（在跑的不动）。每条要写清原因、谁拍的、撤回条件、最迟复查日期、负责人（没写按指挥官）。探针探通、会话跑通都撤不掉它，只有人在这里撤（要写原因）；过了复查日期会标红，但不会自动撤。
-      </p>
+    <Section
+      data-testid="pool-holds"
+      title={
+        <span className="flex flex-wrap items-center gap-2">
+          整池暂停
+          {v && holdsNeedAttention(v) ? <StatusBadge tone="fail" label="要人看" /> : null}
+        </span>
+      }
+      description="临时停用一个账号池：选路不派、切号不切过去（在跑的不动）。每条要写清原因、谁拍的、撤回条件、最迟复查日期、负责人（没写按指挥官）。探针探通、会话跑通都撤不掉它，只有人在这里撤（要写原因）；过了复查日期会标红，但不会自动撤。"
+    >
       {holds.error ? <LoadError what="整池暂停" error={holds.error} /> : null}
       {!v && !holds.error ? <LoadingRows rows={1} /> : null}
       {v?.holdAll ? (
-        <div
-          className="mt-3 rounded-lg border border-fail/40 bg-fail/5 p-3 text-xs text-ink-fail"
-          role="alert"
-        >
+        <Notice tone="fail" className="mt-3">
           <p>{v.problems.find((p) => p.poolId === null)?.why ?? '整份设置认不出，所有账号池按暂停办'}</p>
           <Button
             size="sm"
@@ -290,7 +287,7 @@ export function PoolHoldsPanel() {
           </Button>
           {action?.poolId === '*' ? (
             <div className="mt-2">
-              <Label htmlFor="hold-clear-reason" className="text-xs">
+              <Label htmlFor="hold-clear-reason" className="text-meta">
                 原因（必填，进操作记录）
               </Label>
               <Textarea
@@ -313,13 +310,10 @@ export function PoolHoldsPanel() {
               </div>
             </div>
           ) : null}
-        </div>
+        </Notice>
       ) : null}
       {v && !v.holdAll && v.problems.length > 0 ? (
-        <div
-          className="mt-3 rounded-lg border border-fail/40 bg-fail/5 p-3 text-xs text-ink-fail"
-          role="alert"
-        >
+        <Notice tone="fail" className="mt-3">
           <p className="font-medium">下面这些暂停认不出，引擎照样按暂停办（不当成能用）：</p>
           <ul className="mt-1 list-disc pl-4">
             {v.problems.map((p) => (
@@ -337,7 +331,7 @@ export function PoolHoldsPanel() {
           </Button>
           {action?.poolId === '*bad' ? (
             <div className="mt-2">
-              <Label htmlFor="hold-bad-reason" className="text-xs">
+              <Label htmlFor="hold-bad-reason" className="text-meta">
                 原因（必填，进操作记录；撤掉后这些池就不再暂停）
               </Label>
               <Textarea
@@ -360,55 +354,53 @@ export function PoolHoldsPanel() {
               </div>
             </div>
           ) : null}
-        </div>
+        </Notice>
       ) : null}
       {v ? (
         v.holds.length === 0 && !v.holdAll && v.problems.length === 0 ? (
-          <p className="mt-3 text-sm text-muted-foreground">现在没有整池暂停。</p>
+          <EmptyState size="inline" title="现在没有整池暂停。" className="px-0" />
         ) : (
           <ul className="mt-3 divide-y rounded-lg border empty:hidden">{v.holds.map(row)}</ul>
         )
       ) : null}
       {v?.legacyProblem ? (
-        <p className="mt-3 text-xs text-ink-fail" role="alert">
+        <Notice tone="fail" className="mt-3">
           {`没读成旧的 pool-hold 提醒：${v.legacyProblem}（不当成没有）`}
-        </p>
+        </Notice>
       ) : null}
       {v && v.legacy.length > 0 ? (
-        <div
-          className="mt-3 rounded-lg border border-warn/40 bg-warn/5 p-3 text-xs"
-          data-testid="pool-holds-legacy"
-        >
-          <p className="font-medium text-foreground">请迁成开关：下面这些池还靠旧的 pool-hold 提醒顶着暂停</p>
-          <p className="mt-0.5 text-muted-foreground">
-            引擎照旧按它整池避开（兼容读法，只保留一版）。引擎自己写的（登录失效、封号这类）修好了会自己撤，不用管；如果是人拍的临时停用，要迁成上面的开关，否则探针探通或会话跑通会把它悄悄撤掉。
-          </p>
-          <ul className="mt-1.5 space-y-1">
-            {v.legacy.map((l) => (
-              <li key={l.poolId} className="flex flex-wrap items-center gap-2">
-                <span className="text-foreground">{poolName(l.poolId)}</span>
-                <span className="text-muted-foreground">{l.title}</span>
-                {l.alsoSwitched ? (
-                  <span className="text-muted-foreground">（已经有开关了，这条提醒多余）</span>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="ml-auto"
-                    onClick={() =>
-                      setDraft({
-                        ...EMPTY_DRAFT,
-                        poolId: l.poolId,
-                        reason: l.title.replace(/^账号池 \S+ 整池暂停：/, ''),
-                      })
-                    }
-                  >
-                    迁成开关
-                  </Button>
-                )}
-              </li>
-            ))}
-          </ul>
+        <div className="mt-3" data-testid="pool-holds-legacy">
+          <Notice tone="stall" title="请迁成开关：下面这些池还靠旧的 pool-hold 提醒顶着暂停">
+            <p className="text-muted-foreground">
+              引擎照旧按它整池避开（兼容读法，只保留一版）。引擎自己写的（登录失效、封号这类）修好了会自己撤，不用管；如果是人拍的临时停用，要迁成上面的开关，否则探针探通或会话跑通会把它悄悄撤掉。
+            </p>
+            <ul className="mt-1.5 space-y-1">
+              {v.legacy.map((l) => (
+                <li key={l.poolId} className="flex flex-wrap items-center gap-2">
+                  <span className="text-foreground">{poolName(l.poolId)}</span>
+                  <span className="text-muted-foreground">{l.title}</span>
+                  {l.alsoSwitched ? (
+                    <span className="text-muted-foreground">（已经有开关了，这条提醒多余）</span>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="ml-auto"
+                      onClick={() =>
+                        setDraft({
+                          ...EMPTY_DRAFT,
+                          poolId: l.poolId,
+                          reason: l.title.replace(/^账号池 \S+ 整池暂停：/, ''),
+                        })
+                      }
+                    >
+                      迁成开关
+                    </Button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </Notice>
         </div>
       ) : null}
       <form
@@ -432,7 +424,7 @@ export function PoolHoldsPanel() {
           aria-expanded={showCreate}
           aria-controls="hold-create"
           onClick={() => setCreating((c) => !c)}
-          className="flex items-center gap-1 text-left text-sm font-medium max-md:min-h-10"
+          className="flex items-center gap-1 text-left text-body font-medium max-md:min-h-10"
         >
           新建一条整池暂停
           <ChevronRight
@@ -441,15 +433,15 @@ export function PoolHoldsPanel() {
           />
         </button>
         {blocked ? (
-          <p className="text-xs text-ink-fail">上面有认不出的暂停，先处理掉（撤掉或清空）再新建。</p>
+          <p className="text-meta text-ink-fail">上面有认不出的暂停，先处理掉（撤掉或清空）再新建。</p>
         ) : null}
         <div id="hold-create" className={cn(!showCreate && 'hidden')}>
           <FieldRow label="哪个账号池" htmlFor="hold-pool">
-            <select
+            <NativeSelect
               id="hold-pool"
               value={draft.poolId}
               onChange={set('poolId')}
-              className="h-8 w-full max-w-sm max-md:min-h-10 rounded-md border border-input bg-transparent px-2 text-sm"
+              className="w-full max-w-sm"
             >
               <option value="">选一个…</option>
               {(pools.data?.pools ?? [])
@@ -462,7 +454,7 @@ export function PoolHoldsPanel() {
               {draft.poolId && !pools.data?.pools.some((p) => p.id === draft.poolId) ? (
                 <option value={draft.poolId}>{draft.poolId}</option>
               ) : null}
-            </select>
+            </NativeSelect>
           </FieldRow>
           <FieldRow label="最迟复查日期（北京时间）" htmlFor="hold-review">
             <Input
@@ -487,7 +479,7 @@ export function PoolHoldsPanel() {
           </FieldRow>
         </div>
         <div className={cn('flex items-center gap-3', !showCreate && 'hidden')}>
-          {problem && touched ? <span className="text-xs text-muted-foreground">{problem}</span> : null}
+          {problem && touched ? <span className="text-meta text-muted-foreground">{problem}</span> : null}
           <Button
             type="submit"
             size="sm"
@@ -498,6 +490,6 @@ export function PoolHoldsPanel() {
           </Button>
         </div>
       </form>
-    </div>
+    </Section>
   );
 }
