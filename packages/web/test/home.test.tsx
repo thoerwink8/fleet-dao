@@ -261,18 +261,41 @@ describe('home（/）：四种状态', () => {
     expect(document.querySelector('[data-home-drawer]')).toBeNull();
   });
 
-  test('≥1920：抽屉停靠成右侧一列（不盖画布），默认展开；折叠状态记在 localStorage', () => {
+  test('≥1920 首次打开：抽屉是收起的，按钮照样写条数；点开才停靠成右侧一列（不盖画布），收起状态记在 localStorage（#1819）', async () => {
     renderHome({ status: 'data', data: SAMPLE }, 1920);
+    await waitFor(() => expect(document.querySelector('[data-board-now]')).toBeTruthy());
+    // 默认收起，和 1366 一致；「此刻」也是收成一行
+    expect(document.querySelector('[data-home-drawer]')).toBeNull();
+    expect(document.querySelector('[data-decision-card]')).toBeNull();
+    const button = screen.getByRole('button', { name: /要你拍的 2 条/ });
+    expect(button.className).toContain('text-ink-human');
+    expect(document.querySelector('[data-board-now] [aria-expanded]')?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+    fireEvent.click(button);
     const drawer = document.querySelector('[data-home-drawer]');
     expect(drawer?.getAttribute('data-home-drawer')).toBe('docked');
     expect(drawer?.className).not.toContain('absolute');
     expect(document.querySelector('[data-decision-card]')).toBeTruthy();
+    expect(localStorage.getItem('fleet-dao.home-drawer-collapsed')).toBe('false');
     fireEvent.click(screen.getByRole('button', { name: '收起抽屉' }));
     expect(document.querySelector('[data-home-drawer]')).toBeNull();
     expect(localStorage.getItem('fleet-dao.home-drawer-collapsed')).toBe('true');
   });
 
-  test('做完的：有标题显示「PR #号」加标题；标题就是「PR #号」时只显示一次（#1744）', () => {
+  test('1366 和 1920 默认状态一致：抽屉都收起、此刻都收成一行（#1819）', async () => {
+    for (const width of [1366, 1920]) {
+      renderHome({ status: 'data', data: SAMPLE }, width);
+      await waitFor(() => expect(document.querySelector('[data-board-now]')).toBeTruthy());
+      expect(document.querySelector('[data-home-drawer]')).toBeNull();
+      expect(document.querySelector('[data-board-now] [aria-expanded]')?.getAttribute('aria-expanded')).toBe(
+        'false',
+      );
+      cleanup();
+    }
+  });
+
+  test('做完的：有标题显示「PR #号」加标题；标题就是「PR #号」时只写一次，并说标题没读到（#1744、#1819）', () => {
     const first = SAMPLE.done[0];
     if (!first) throw new Error('样例没有做完的');
     renderHome({
@@ -284,7 +307,60 @@ describe('home（/）：四种状态', () => {
     expect(cards).toHaveLength(2);
     expect(cards[0]?.textContent).toContain('PR #421');
     expect(cards[0]?.textContent).toContain('把路由配置拆成两层');
+    expect(cards[0]?.textContent).not.toContain('标题没读到');
     expect(cards[1]?.textContent?.match(/PR #1741/g)).toHaveLength(1);
+    expect(cards[1]?.textContent).toContain('（标题没读到）');
+  });
+
+  test('做完的：没有任务标题时后端给的是 PR 标题，卡片照写这个标题（#1819）', () => {
+    const first = SAMPLE.done[0];
+    if (!first) throw new Error('样例没有做完的');
+    renderHome({
+      status: 'data',
+      data: { ...SAMPLE, done: [{ ...first, prNumber: 1742, title: '把夜间备份的超时改成 30 分钟' }] },
+    });
+    openDrawer(/做完的/);
+    const card = document.querySelector('[data-done-card]');
+    expect(card?.textContent).toContain('PR #1742');
+    expect(card?.textContent).toContain('把夜间备份的超时改成 30 分钟');
+    expect(card?.textContent).not.toContain('标题没读到');
+  });
+
+  test('手机宽度：健康条和刷新在同一行的同一个父容器里，刷新是图标按钮（#1819）', () => {
+    renderHome({ status: 'data', data: SAMPLE }, 390);
+    const bar = document.querySelector('[data-home-statusbar]');
+    expect(bar).toBeTruthy();
+    const strip = bar?.querySelector('[data-health-strip]');
+    const refresh = bar?.querySelector('button[aria-label="刷新"]');
+    expect(strip).toBeTruthy();
+    expect(refresh).toBeTruthy();
+    // 同一个父容器，且不换行
+    expect(strip?.closest('[data-home-statusbar]')).toBe(refresh?.closest('[data-home-statusbar]'));
+    expect(bar?.className).toContain('flex-nowrap');
+    // 三个状态点（额度、中转、引擎），不是三格带字的药丸
+    expect(strip?.querySelectorAll('[data-health-chip]')).toHaveLength(3);
+    expect(strip?.textContent).toBe('');
+    // 刷新是图标按钮：没有文字，只有 aria-label
+    expect(refresh?.textContent).toBe('');
+    expect(refresh?.querySelector('svg')).toBeTruthy();
+    // 新鲜度点在同一行
+    expect(bar?.querySelector('[data-freshness]')).toBeTruthy();
+    expect(bar?.textContent).not.toContain('最后更新');
+  });
+
+  test('详情面板的操作行右边没有孤立的竖线（#1819）', async () => {
+    const withTask = SAMPLE.running.map((r) => (r.issueNumber === 556 ? { ...r, taskId: 't-556' } : r));
+    renderHome({ status: 'data', data: { ...SAMPLE, running: withTask } });
+    const node = () => document.querySelector('.react-flow__node[data-id^="ticket:556"]');
+    await waitFor(() => expect(node()).toBeTruthy());
+    fireEvent.click(node() as Element);
+    const actions = await waitFor(() => {
+      const el = document.querySelector('[data-board-detail] [data-task-actions]');
+      expect(el).toBeTruthy();
+      return el as HTMLElement;
+    });
+    expect(actions?.className).not.toMatch(/(^|\s)border-r(\s|$)/);
+    expect(actions?.className).not.toContain('pr-3');
   });
 
   test('data：三块各画出有数据的样子', async () => {

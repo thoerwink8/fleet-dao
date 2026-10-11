@@ -117,8 +117,9 @@ test.describe('其余页面', () => {
   test('定时任务：额度读取跑成了、每小时对账上次没查全且已过期，分开显示', async ({ page, shot }) => {
     await page.goto('/schedules');
     await expect(page.getByRole('heading', { name: '定时任务' })).toBeVisible();
-    await expect(page.getByRole('row', { name: /额度读取/ })).toContainText('跑成了');
-    const reconcile = page.getByRole('row', { name: /每小时对账/ });
+    // 任务是默认收起的列表行（#1805），摘要行里就有名字、上次结果和「过期」
+    await expect(page.getByRole('listitem').filter({ hasText: '额度读取' })).toContainText('跑成了');
+    const reconcile = page.getByRole('listitem').filter({ hasText: '每小时对账' });
     await expect(reconcile).toContainText('没查成：GitHub 接口限流，一个仓都没扫到');
     await expect(reconcile).toContainText('过期');
     await shot(page, '07-定时任务');

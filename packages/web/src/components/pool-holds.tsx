@@ -1,5 +1,6 @@
 // 尺寸 token：暂停明细 grid-cols-auto-fr（标签原来 auto、剩余 1fr）。
 import { DEFAULT_POOL_HOLD_OWNER, SETTING_SCHEMAS } from '@fleet-dao/shared';
+import { ChevronRight } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { ApiError, errorText, usePoolHolds, usePools, useUpdateSetting } from '../api/client';
@@ -16,6 +17,8 @@ import {
   withoutHold,
   withReviewBy,
 } from '../lib/pool-holds';
+import { cn } from '../lib/utils';
+import { FieldRow } from './field-row';
 import { LoadError, LoadingRows } from './page';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -83,6 +86,8 @@ export function PoolHoldsPanel() {
     draft.revokeWhen !== '' ||
     draft.reviewBy !== '' ||
     draft.owner !== DEFAULT_POOL_HOLD_OWNER;
+  const [creating, setCreating] = useState(false);
+  const showCreate = creating || touched;
   const set = (k: keyof HoldDraft) => (e: { target: { value: string } }) =>
     setDraft((d) => ({ ...d, [k]: e.target.value }));
   const closeAction = () => {
@@ -255,7 +260,7 @@ export function PoolHoldsPanel() {
   };
 
   return (
-    <div className="rounded-xl border bg-card p-4 md:col-span-2" data-testid="pool-holds">
+    <div className="rounded-xl border bg-card px-4 py-3" data-testid="pool-holds">
       <div className="flex flex-wrap items-center gap-2">
         <div className="text-sm font-medium">整池暂停</div>
         {v && holdsNeedAttention(v) ? (
@@ -407,7 +412,7 @@ export function PoolHoldsPanel() {
         </div>
       ) : null}
       <form
-        className="mt-4 grid gap-2 border-t pt-4"
+        className="mt-3 grid gap-1 border-t pt-3"
         onSubmit={(e) => {
           e.preventDefault();
           if (!v || blocked) return;
@@ -421,20 +426,30 @@ export function PoolHoldsPanel() {
           );
         }}
       >
-        <div className="text-sm font-medium">新建一条整池暂停</div>
+        {/* 新建表单默认收起，点标题才展开；「迁成开关」带进了内容、或填到一半时一直展开。 */}
+        <button
+          type="button"
+          aria-expanded={showCreate}
+          aria-controls="hold-create"
+          onClick={() => setCreating((c) => !c)}
+          className="flex items-center gap-1 text-left text-sm font-medium"
+        >
+          新建一条整池暂停
+          <ChevronRight
+            className={cn('size-4 text-muted-foreground transition-transform', showCreate && 'rotate-90')}
+            aria-hidden
+          />
+        </button>
         {blocked ? (
           <p className="text-xs text-ink-fail">上面有认不出的暂停，先处理掉（撤掉或清空）再新建。</p>
         ) : null}
-        <div className="grid gap-2 md:grid-cols-2">
-          <div className="grid gap-1">
-            <Label htmlFor="hold-pool" className="text-xs">
-              哪个账号池
-            </Label>
+        <div id="hold-create" className={cn(!showCreate && 'hidden')}>
+          <FieldRow label="哪个账号池" htmlFor="hold-pool">
             <select
               id="hold-pool"
               value={draft.poolId}
               onChange={set('poolId')}
-              className="h-9 rounded-md border border-input bg-transparent px-2 text-sm"
+              className="h-8 w-full max-w-sm rounded-md border border-input bg-transparent px-2 text-sm"
             >
               <option value="">选一个…</option>
               {(pools.data?.pools ?? [])
@@ -448,45 +463,30 @@ export function PoolHoldsPanel() {
                 <option value={draft.poolId}>{draft.poolId}</option>
               ) : null}
             </select>
-          </div>
-          <div className="grid gap-1">
-            <Label htmlFor="hold-review" className="text-xs">
-              最迟复查日期（北京时间）
-            </Label>
+          </FieldRow>
+          <FieldRow label="最迟复查日期（北京时间）" htmlFor="hold-review">
             <Input
               id="hold-review"
               type="date"
               value={draft.reviewBy}
               onChange={set('reviewBy')}
-              className="num h-9"
+              className="num h-8 w-40"
             />
-          </div>
-          <div className="grid gap-1 md:col-span-2">
-            <Label htmlFor="hold-owner" className="text-xs">
-              负责人
-            </Label>
-            <Input id="hold-owner" value={draft.owner} onChange={set('owner')} className="h-9" />
-          </div>
-          <div className="grid gap-1 md:col-span-2">
-            <Label htmlFor="hold-reason" className="text-xs">
-              为什么停
-            </Label>
-            <Input id="hold-reason" value={draft.reason} onChange={set('reason')} className="h-9" />
-          </div>
-          <div className="grid gap-1 md:col-span-2">
-            <Label htmlFor="hold-by" className="text-xs">
-              谁拍的（原话加日期，例如「某某原话」2026-10-05）
-            </Label>
-            <Input id="hold-by" value={draft.decidedBy} onChange={set('decidedBy')} className="h-9" />
-          </div>
-          <div className="grid gap-1 md:col-span-2">
-            <Label htmlFor="hold-when" className="text-xs">
-              什么条件下撤
-            </Label>
-            <Input id="hold-when" value={draft.revokeWhen} onChange={set('revokeWhen')} className="h-9" />
-          </div>
+          </FieldRow>
+          <FieldRow label="负责人" htmlFor="hold-owner">
+            <Input id="hold-owner" value={draft.owner} onChange={set('owner')} className="h-8 max-w-sm" />
+          </FieldRow>
+          <FieldRow label="为什么停" htmlFor="hold-reason">
+            <Input id="hold-reason" value={draft.reason} onChange={set('reason')} className="h-8" />
+          </FieldRow>
+          <FieldRow label="谁拍的（原话加日期，例如「某某原话」2026-10-05）" htmlFor="hold-by">
+            <Input id="hold-by" value={draft.decidedBy} onChange={set('decidedBy')} className="h-8" />
+          </FieldRow>
+          <FieldRow label="什么条件下撤" htmlFor="hold-when">
+            <Input id="hold-when" value={draft.revokeWhen} onChange={set('revokeWhen')} className="h-8" />
+          </FieldRow>
         </div>
-        <div className="flex items-center gap-3">
+        <div className={cn('flex items-center gap-3', !showCreate && 'hidden')}>
           {problem && touched ? <span className="text-xs text-muted-foreground">{problem}</span> : null}
           <Button
             type="submit"

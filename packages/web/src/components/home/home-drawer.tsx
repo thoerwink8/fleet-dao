@@ -17,8 +17,11 @@ import { Button } from '../ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '../ui/sheet';
 import { DecisionCard } from './decision-card';
 import { DoneCard } from './done-card';
+import { DrawerFloatingContext } from './drawer-open';
 import type { HomeDecision, HomeDone } from './types';
 
+/** 人没动过时，停靠的抽屉是不是收起：收起。 */
+const DRAWER_COLLAPSED_DEFAULT = true;
 const MAX_DECISIONS = 3;
 const MAX_DONE = 6;
 
@@ -212,9 +215,10 @@ export function HomeDrawer({
   children: ReactNode;
 }) {
   const docked = useDockRoom();
+  // 默认收起，哪一档屏宽都一样（以前 ≥1920 默认展开、其余收起，#1819）；有要你拍的时按钮自己高亮。人点开、收起过记在这里。
   const [collapsed, setCollapsed] = useLocalState<boolean>(
     `${brand.storagePrefix}home-drawer-collapsed`,
-    false,
+    DRAWER_COLLAPSED_DEFAULT,
   );
   const [floating, setFloating] = useState(false);
   const [tab, setTab] = useState<Tab>(decisions.length > 0 ? 'decisions' : 'done');
@@ -296,7 +300,7 @@ export function HomeDrawer({
           setFloating(false);
         }}
       >
-        {children}
+        <DrawerFloatingContext value={!docked && floating}>{children}</DrawerFloatingContext>
         <DrawerButton count={decisions.length} open={open} onOpen={openTab} />
       </div>
       {open ? (

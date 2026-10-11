@@ -1,6 +1,6 @@
 import type { LucideIcon } from 'lucide-react';
-import { Flame, Gauge, TimerOff, TriangleAlert } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { ChevronDown, Flame, Gauge, TimerOff, TriangleAlert } from 'lucide-react';
+import { type CSSProperties, type ReactNode, useId, useState } from 'react';
 import { brand } from '#brand';
 import { errorText, usePools } from '../api/client';
 import type { PoolView, QuotaWindowKind, QuotaWindowView } from '../api/types';
@@ -8,7 +8,7 @@ import { CarpoolReconcileBanner } from '../components/carpool-reconcile';
 import { OrgSwitchBanner } from '../components/org-switch';
 import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { PoolProblemLine, usePoolProblems } from '../components/pool-problem';
-import { ExpiredQuotaLine, isExpiredWindow, QuotaCell, quotaValue, readingVerb } from '../components/quota';
+import { ExpiredQuotaLine, isExpiredWindow, QuotaLine, quotaValue, readingVerb } from '../components/quota';
 import { RefreshBar } from '../components/refresh-bar';
 import { Badge } from '../components/ui/badge';
 import {
@@ -45,20 +45,46 @@ function Callout({
   items: ReactNode[];
   tone: string;
 }) {
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
   return (
-    <div className="rounded-xl border bg-card p-4">
-      <div className="flex items-center gap-2">
-        <Icon className={cn('size-4', tone)} aria-hidden />
-        <span className="text-sm font-semibold">{title}</span>
-        <span className="num ml-auto text-sm text-muted-foreground">{items.length}</span>
-      </div>
-      <p className="mt-0.5 text-xs text-muted-foreground">{hint}</p>
-      {items.length ? (
-        <ul className="mt-3 space-y-1.5 text-sub">{items}</ul>
-      ) : (
-        <p className="mt-3 text-sub text-muted-foreground">没有</p>
-      )}
-    </div>
+    <>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          'flex min-w-0 flex-col items-start gap-0.5 rounded-xl border bg-card px-3 py-2 text-left outline-none hover:border-border-strong focus-visible:ring-focus focus-visible:ring-ring/50 sm:flex-row sm:items-center sm:gap-2',
+          open && 'border-border-strong',
+        )}
+      >
+        <span className="flex items-center gap-1.5">
+          <Icon className={cn('size-4 shrink-0', tone)} aria-hidden />
+          <span className={cn('num text-sm font-semibold', items.length === 0 && 'text-muted-foreground')}>
+            {items.length}
+          </span>
+        </span>
+        <span className="min-w-0 text-xs font-medium sm:flex-1">{title}</span>
+        <ChevronDown
+          className={cn(
+            'hidden size-3.5 shrink-0 text-muted-foreground transition-transform sm:block',
+            open && 'rotate-180',
+          )}
+          aria-hidden
+        />
+      </button>
+      {open ? (
+        <div id={panelId} className="order-1 col-span-3 rounded-xl border bg-card p-3">
+          <p className="text-xs text-muted-foreground">{hint}</p>
+          {items.length ? (
+            <ul className="mt-2 space-y-1.5 text-sub">{items}</ul>
+          ) : (
+            <p className="mt-2 text-sub text-muted-foreground">没有</p>
+          )}
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -132,7 +158,8 @@ export default function Quota() {
         <>
           <OrgSwitchBanner view={data.orgSwitch} />
           <CarpoolReconcileBanner view={data.carpoolReconcile} />
-          <div className="grid gap-3 md:grid-cols-3">
+          {/* 三个紧凑胶囊排一行，点哪个展开哪个的明细（展开的明细排在整行胶囊下面、占满一行）。 */}
+          <div className="grid grid-cols-3 gap-2" data-quota-summary>
             <Callout
               icon={Flame}
               title="先用它"
@@ -207,7 +234,7 @@ export default function Quota() {
             />
           </div>
 
-          <p className="mt-5 mb-2 text-xs text-muted-foreground">
+          <p className="mt-3 mb-1.5 text-caption text-muted-foreground">
             实读 = 从官方接口或它自家网页的用量接口读到；估算 =
             读不到，按我们自己的用量算，撞到限额时记下上限。
           </p>
@@ -230,6 +257,7 @@ export default function Quota() {
   );
 }
 
+/** 一个池一行：宽屏窗口按类对齐成列，窄屏每个池一张卡、窗口两列排，都不横向滚动（见 app.css 的 .quota-*）。 */
 function Matrix({
   pools,
   kinds,
@@ -242,126 +270,130 @@ function Matrix({
   problems: ReadonlyMap<string, PoolProblem>;
 }) {
   const channels = [...new Map(pools.map((p) => [p.channelId, p])).values()];
+  const cols = { '--quota-kinds': kinds.length } as CSSProperties;
   return (
-    <div className="quota-matrix">
-      {/* 表比这一列窄时才露出来：写在表上方，第一屏就能看见；够宽时由样式藏起。 */}
-      <p className="quota-scroll-hint mb-1.5 text-right text-caption font-medium text-muted-foreground">
-        向右滑动，看其余窗口
-      </p>
-      <div className="relative">
-        <div className="overflow-x-auto rounded-xl border bg-card scrollbar-thin">
-          <table className="w-full min-w-quota-table table-fixed border-collapse text-left">
-            <caption className="sr-only">每个账号池、每个时间窗的额度</caption>
-            <colgroup>
-              <col className="w-quota-row" />
-              {kinds.map((k) => (
-                <col key={k} />
-              ))}
-            </colgroup>
-            <thead>
-              <tr className="border-b bg-muted/50 text-xs text-muted-foreground">
-                <th scope="col" className="px-4 py-2 font-normal">
-                  账号池
+    <div className="quota-matrix" data-quota-matrix>
+      {/* 真表格元素，样式里改成块 / 网格布局（.quota-matrix :where(...)），读屏照样按表读。 */}
+      <table className="w-full overflow-hidden rounded-xl border bg-card text-left">
+        <caption className="sr-only">每个账号池、每个时间窗的额度</caption>
+        <thead>
+          <tr
+            className="quota-head border-b bg-muted/50 px-4 py-1.5 text-xs text-muted-foreground"
+            style={cols}
+          >
+            <th scope="col" className="font-normal">
+              账号池
+            </th>
+            {kinds.map((k) => (
+              <th scope="col" key={k} className="font-normal">
+                {windowLabel[k]}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        {channels.map((ch) => {
+          const list = pools.filter((p) => p.channelId === ch.channelId);
+          return (
+            <tbody key={ch.channelId}>
+              <tr>
+                <th scope="colgroup" className="border-b bg-background/40 px-4 py-1 text-xs font-normal">
+                  <span className="flex items-center gap-2">
+                    <span className="font-semibold">{ch.channelName}</span>
+                    <Badge variant="outline" className="h-4 px-1 text-micro font-normal">
+                      {ch.billing ? billingLabel[ch.billing] : '计费未知'}
+                    </Badge>
+                    {ch.channelEnabled ? null : <span className="text-muted-foreground">已下架</span>}
+                  </span>
                 </th>
-                {kinds.map((k) => (
-                  <th scope="col" key={k} className="px-2 py-2 font-normal">
-                    {windowLabel[k]}
-                  </th>
-                ))}
               </tr>
-            </thead>
-            {channels.map((ch) => {
-              const list = pools.filter((p) => p.channelId === ch.channelId);
-              return (
-                <tbody key={ch.channelId}>
-                  <tr className="border-b bg-background/40">
-                    <th scope="colgroup" colSpan={kinds.length + 1} className="px-4 py-1.5 text-xs">
-                      <span className="flex items-center gap-2">
-                        <span className="font-semibold">{ch.channelName}</span>
-                        <Badge variant="outline" className="h-4 px-1 text-micro font-normal">
-                          {ch.billing ? billingLabel[ch.billing] : '计费未知'}
-                        </Badge>
-                        {ch.channelEnabled ? null : <span className="text-muted-foreground">已下架</span>}
+              {list.map((p) => (
+                <tr
+                  key={p.id}
+                  className="quota-pool border-b px-4 py-2 last:border-b-0"
+                  style={cols}
+                  data-pool={p.id}
+                >
+                  <th scope="row" className="quota-pool-head min-w-0 font-normal">
+                    <div className="flex flex-wrap items-baseline gap-x-2">
+                      <span className="num text-sm font-medium">{p.id}</span>
+                      <span className="text-caption text-muted-foreground">
+                        {
+                          routeSlots({
+                            inFlight: p.running,
+                            reserved: p.reserved,
+                            maxConcurrency: p.maxConcurrency,
+                          }).text
+                        }
                       </span>
-                    </th>
-                  </tr>
-                  {list.map((p) => (
-                    <tr key={p.id} className="border-b align-top last:border-b-0">
-                      <th scope="row" className="px-4 py-3 font-normal">
-                        <div className="num text-sm font-medium">{p.id}</div>
-                        <div className="mt-0.5 text-caption text-muted-foreground">
-                          {p.expiresAt ? (
-                            <>
-                              <span className="num">{formatDate(p.expiresAt)}</span> 到期 ·{' '}
-                              <span className="num">{formatInDays(p.expiresAt, now)}</span>
-                            </>
-                          ) : (
-                            '没有到期日'
+                      {p.windows.length === 0 ? (
+                        <span
+                          className={cn(
+                            'quota-narrow-only text-caption',
+                            p.quotaStatus === 'unread' ? 'text-ink-stall' : 'text-faint',
                           )}
-                        </div>
-                        <div className="mt-0.5 text-caption text-muted-foreground">
-                          {
-                            routeSlots({
-                              inFlight: p.running,
-                              reserved: p.reserved,
-                              maxConcurrency: p.maxConcurrency,
-                            }).text
-                          }
-                        </div>
-                        {problems.has(p.id) ? (
-                          <PoolProblemLine
-                            problem={problems.get(p.id) as PoolProblem}
-                            className="mt-1 font-normal"
-                          />
-                        ) : null}
-                      </th>
-                      {kinds.map((k) => {
-                        const ws = p.windows.filter((x) => x.window === k);
-                        // 同一池同一类窗有新旧两张时：过期的收成一行灰字，不与新读数并排占大格
-                        const expired = ws.filter((w) => isExpiredWindow(w, now));
-                        const current = ws.filter((w) => !isExpiredWindow(w, now));
-                        const collapseExpired = expired.length > 0 && current.length > 0;
-                        const showFull = collapseExpired ? current : ws;
-                        return (
-                          <td key={k} className="p-2">
-                            {ws.length ? (
-                              <div className="space-y-2">
-                                {showFull.map((w, i) => (
-                                  // biome-ignore lint/suspicious/noArrayIndexKey: 同一种窗可能有好几个（按模型组），契约里没有区分它们的字段。
-                                  <QuotaCell key={i} w={w} now={now} />
-                                ))}
-                                {collapseExpired
-                                  ? expired.map((_, i) => (
-                                      // biome-ignore lint/suspicious/noArrayIndexKey: 同上，过期旧读数没有稳定主键。
-                                      <ExpiredQuotaLine key={`expired-${i}`} />
-                                    ))
-                                  : null}
-                              </div>
-                            ) : (
-                              <div
-                                className={cn(
-                                  'grid h-full min-h-10 place-items-center text-xs',
-                                  p.quotaStatus === 'unread' ? 'text-ink-stall' : 'text-faint',
-                                )}
-                              >
-                                {p.quotaStatus === 'unread' ? '没查成' : '—'}
-                              </div>
-                            )}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              );
-            })}
-          </table>
-        </div>
-        <div
-          className="quota-scroll-hint quota-scroll-fade pointer-events-none absolute inset-y-px right-px w-12 rounded-r-xl"
-          aria-hidden
-        />
-      </div>
+                        >
+                          {p.quotaStatus === 'unread' ? '没查成' : '没有额度窗'}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="text-caption text-muted-foreground">
+                      {p.expiresAt ? (
+                        <>
+                          <span className="num">{formatDate(p.expiresAt)}</span> 到期 ·{' '}
+                          <span className="num">{formatInDays(p.expiresAt, now)}</span>
+                        </>
+                      ) : (
+                        '没有到期日'
+                      )}
+                    </div>
+                    {problems.has(p.id) ? (
+                      <PoolProblemLine
+                        problem={problems.get(p.id) as PoolProblem}
+                        className="mt-1 font-normal"
+                      />
+                    ) : null}
+                  </th>
+                  {kinds.map((k) => {
+                    const ws = p.windows.filter((x) => x.window === k);
+                    // 同一池同一类窗有新旧两张时：过期的收成一行灰字，不与新读数并排占大格
+                    const expired = ws.filter((w) => isExpiredWindow(w, now));
+                    const current = ws.filter((w) => !isExpiredWindow(w, now));
+                    const collapseExpired = expired.length > 0 && current.length > 0;
+                    const showFull = collapseExpired ? current : ws;
+                    if (ws.length === 0) {
+                      return (
+                        <td
+                          key={k}
+                          className={cn(
+                            'quota-cell-empty text-xs',
+                            p.quotaStatus === 'unread' ? 'text-ink-stall' : 'text-faint',
+                          )}
+                        >
+                          {p.quotaStatus === 'unread' ? '没查成' : '—'}
+                        </td>
+                      );
+                    }
+                    return (
+                      <td key={k} className="min-w-0 space-y-1">
+                        {showFull.map((w, i) => (
+                          // biome-ignore lint/suspicious/noArrayIndexKey: 同一种窗可能有好几个（按模型组），契约里没有区分它们的字段。
+                          <QuotaLine key={i} w={w} now={now} />
+                        ))}
+                        {collapseExpired
+                          ? expired.map((_, i) => (
+                              // biome-ignore lint/suspicious/noArrayIndexKey: 同上，过期旧读数没有稳定主键。
+                              <ExpiredQuotaLine key={`expired-${i}`} />
+                            ))
+                          : null}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          );
+        })}
+      </table>
     </div>
   );
 }

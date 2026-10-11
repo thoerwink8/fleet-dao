@@ -51,7 +51,12 @@ test.describe('额度页', () => {
   test('额度快用完的池进「快用完」，不在「先用它」里', async ({ page }) => {
     await page.goto('/quota');
     // Mirasim 5 小时窗用了 93%
-    const near = page.locator('div.rounded-xl', { has: page.getByText('快用完', { exact: true }) }).first();
+    // 顶上三块是收起的胶囊（#1805）：点开「快用完」才出明细，明细是带说明句的那块面板
+    await page
+      .locator('[data-quota-summary]')
+      .getByRole('button', { name: /快用完/ })
+      .click();
+    const near = page.locator('div.rounded-xl', { hasText: '用了九成以上，调度会先绕开' }).first();
     await expect(near).toContainText('93%');
   });
 });

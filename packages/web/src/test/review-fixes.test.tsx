@@ -11,7 +11,7 @@ import { Topbar } from '../components/shell/topbar';
 import { isNearlyExhausted, isUseItOrLoseIt, utilOf, windowLength, windowTitle } from '../lib/catalog';
 import QuotaPage from '../routes/quota';
 import SettingsPage from '../routes/settings';
-import { renderApp } from './harness';
+import { openSummary, renderApp } from './harness';
 
 afterEach(() => {
   cleanup();
@@ -112,9 +112,10 @@ describe('额度：用量没读到不当 0%', () => {
 
   test('额度页：没读到用量的窗列进「读数过期或没查成」，不进「先用它」', async () => {
     renderApp(<QuotaPage />, { api: withUnknownUsage(createMockApi({ live: false })) });
-    const box = (await screen.findByText('读数过期或没查成')).closest('div.rounded-xl') as HTMLElement;
+    await screen.findByText('读数过期或没查成');
+    const box = openSummary('读数过期或没查成');
     expect(within(box).getAllByText('用量没读到').length).toBeGreaterThan(0);
-    const hot = screen.getByText('先用它').closest('div.rounded-xl') as HTMLElement;
+    const hot = openSummary('先用它');
     expect(within(hot).getByText('没有')).toBeTruthy();
     expect(screen.queryByText('0%')).toBeNull();
   });
