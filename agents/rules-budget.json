@@ -13,5 +13,16 @@
       }
     ]
   },
-  "repo": { "chars": 4355, "baseline": 4355, "log": [] }
+  "repo": {
+    "chars": 4409,
+    "baseline": 4355,
+    "log": [
+      {
+        "date": "2026-10-11",
+        "delta": 54,
+        "why": "改驾驶舱界面先读规范文档 docs/design/驾驶舱界面.md，lint-design 测试守着（设计规范片 1）",
+        "ref": "#1847"
+      }
+    ]
+  }
 }
