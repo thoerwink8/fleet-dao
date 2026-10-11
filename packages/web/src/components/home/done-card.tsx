@@ -9,6 +9,7 @@ import type { HomeDone } from './types';
 export function DoneCard({ item, className }: { item: HomeDone; className?: string }) {
   const now = useSlowNow();
   const prLabel = `PR #${item.prNumber}`;
+  const noTitle = item.title === prLabel || item.title.trim() === '';
   const body = (
     <>
       <span
@@ -19,11 +20,18 @@ export function DoneCard({ item, className }: { item: HomeDone; className?: stri
       </span>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          {/* 标题就是「PR #号」（没读到 PR 标题的退路）时只显示一次 */}
-          {item.title === prLabel ? null : (
-            <span className="num text-xs font-semibold text-muted-foreground">{prLabel}</span>
+          {noTitle ? (
+            // 任务标题、PR 标题都没读到（后端的退路是「PR #号」）：只写一次号，并照实说标题没读到
+            <>
+              <span className="num text-sm font-medium">{prLabel}</span>
+              <span className="text-xs text-muted-foreground">（标题没读到）</span>
+            </>
+          ) : (
+            <>
+              <span className="num text-xs font-semibold text-muted-foreground">{prLabel}</span>
+              <span className="truncate text-sm font-medium">{item.title}</span>
+            </>
           )}
-          <span className="truncate text-sm font-medium">{item.title}</span>
         </div>
         <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
           <span className="num">{item.repo}</span>

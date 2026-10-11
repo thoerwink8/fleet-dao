@@ -126,7 +126,8 @@ function TicketPanel({ item, onClose }: { item: HomeRunning; onClose(): void }) 
       </Head>
       <h2 className="mt-2 text-lg leading-snug font-semibold">{item.title}</h2>
       <p className="num mt-1 text-xs text-muted-foreground">{item.repo}</p>
-      {target ? <ActionButtons target={target} className="mt-3" /> : null}
+      {/* 操作行右边没有别的东西，共用的那根「叫停与右侧按钮之间」的竖线和间距在这里不要（它会孤零零立在行尾，#1819） */}
+      {target ? <ActionButtons target={target} className="mt-3 mr-0 border-r-0 pr-0" /> : null}
 
       {founder && item.pendingDecision ? (
         <Section title="要你拍">

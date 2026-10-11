@@ -5,7 +5,7 @@ import { ArrowUpRight, Bot, MessageCircleQuestion } from 'lucide-react';
 import { memo, type ReactNode } from 'react';
 import { formatAgo, formatDuration } from '../../../lib/format';
 import { useNow } from '../../../lib/hooks';
-import { SEGMENT_UNMETERED, segmentHint, segmentLabel } from '../../../lib/segments';
+import { SEGMENT_UNMETERED, segmentHint } from '../../../lib/segments';
 import { type Tone, toneBg, toneSoft, toneText } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
 import { StatusChip, StatusDot } from '../../status';
@@ -16,6 +16,7 @@ import { CardLink, needsFounder, statusTextOf, WAIT_LABEL } from '../running-car
 import type { HomeFlowStage, HomeRunning } from '../types';
 import {
   farCardFontPx,
+  farIdFontSize,
   farTitleFontSize,
   itemOf,
   targetOfItem,
@@ -39,6 +40,7 @@ import {
   phasesOf,
   type SegmentKey,
   type Side,
+  segmentName,
   type ToneCounts,
   ticketLive,
   ticketTone,
@@ -53,9 +55,7 @@ type Props = NodeProps<BoardNode>;
 /** 窗口天数写在三段节点的说明里：api 的样本取看板窗口（近 7 天进终态的 + 开着的）。 */
 const SAMPLE_DAYS = 7;
 
-export function segmentName(key: SegmentKey): string {
-  return key === 'none' ? '还没分段' : segmentLabel[key];
-}
+export { segmentName };
 
 export function segmentHintOf(key: SegmentKey): string {
   return key === 'none' ? 'runs 里没有流水可推出在哪一段' : segmentHint[key];
@@ -239,26 +239,52 @@ const FAR_HEAD_PX = farCardFontPx(32, ZOOM_OF.far);
 /** 远档标题：字号名，跟着画布当前缩放，屏幕上不小于 --text-caption（11px）。 */
 const FAR_TITLE_FONT = farTitleFontSize();
 
-/** 远景：整张卡只剩状态色和大号字。编号按缩放倒数放大；标题跟着当前缩放，屏幕上不小于 11px。 */
-function Far({ tone, big, small }: { tone: Tone; big: string; small?: string | undefined }) {
+/** 远档单号：比标题小一档（设计字号 13 对 15，下限 10 对 11），缩放到哪里标题都比它大。 */
+const FAR_ID_FONT = farIdFontSize();
+
+/**
+ * 远景的单子：整张卡只剩状态色、小号单号和大号标题。认事靠标题，所以标题字号大于单号，最多两行、悬停看全文（#1819）。
+ */
+export function FarTicket({ tone, id, title }: { tone: Tone; id: string; title: string }) {
+  return (
+    <div className={cn('flex h-full flex-col justify-center gap-1 overflow-hidden px-3', toneSoft[tone])}>
+      <div
+        className={cn('num shrink-0 leading-none font-semibold', toneText[tone])}
+        style={{ fontSize: FAR_ID_FONT }}
+        data-far-id
+      >
+        {id}
+      </div>
+      <div
+        className="line-clamp-2 min-h-0 leading-tight font-bold break-words text-foreground"
+        style={{ fontSize: FAR_TITLE_FONT }}
+        title={title}
+        data-far-title
+      >
+        {title}
+      </div>
+    </div>
+  );
+}
+
+/** 远景的段：段名是标题（大、一行写完，不截断；节点宽度按最长段名定），在途张数是小字。 */
+export function FarSegment({ tone, name, count }: { tone: Tone; name: string; count: string }) {
   return (
     <div className={cn('flex h-full flex-col items-center justify-center gap-1 px-3', toneSoft[tone])}>
       <div
-        className={cn('num max-w-full truncate leading-none font-bold tracking-tight', toneText[tone])}
-        style={{ fontSize: FAR_HEAD_PX }}
-        title={big}
+        className={cn('leading-none font-bold whitespace-nowrap', toneText[tone])}
+        style={{ fontSize: FAR_TITLE_FONT }}
+        data-far-title
       >
-        {big}
+        {name}
       </div>
-      {small ? (
-        <div
-          className="max-w-full truncate leading-none font-semibold text-muted-foreground"
-          style={{ fontSize: FAR_TITLE_FONT }}
-          title={small}
-        >
-          {small}
-        </div>
-      ) : null}
+      <div
+        className="num leading-none font-semibold whitespace-nowrap text-muted-foreground"
+        style={{ fontSize: FAR_ID_FONT }}
+        data-far-id
+      >
+        {count}
+      </div>
     </div>
   );
 }
@@ -413,7 +439,7 @@ export const TicketNode = memo(function TicketNode({ id, data }: Props) {
     >
       <Handles side={data.side} source={item.pendingDecision !== undefined} />
       {level === 'far' ? (
-        <Far tone={tone} big={`#${item.issueNumber}`} small={item.title} />
+        <FarTicket tone={tone} id={`#${item.issueNumber}`} title={item.title} />
       ) : (
         <div className="flex h-full flex-col overflow-hidden py-3 pr-3 pl-4">
           <div className="flex shrink-0 items-center gap-x-2">
@@ -507,7 +533,7 @@ export const SegmentNode = memo(function SegmentNode({ id, data }: Props) {
     >
       <Handles side={data.side} />
       {level === 'far' ? (
-        <Far tone={data.total ? tone : 'wait'} big={name} small={`${data.total} 张`} />
+        <FarSegment tone={data.total ? tone : 'wait'} name={name} count={`${data.total} 张`} />
       ) : (
         <div className="flex h-full flex-col py-3 pr-3.5 pl-4">
           <div className="flex items-baseline justify-between gap-2">
