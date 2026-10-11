@@ -189,7 +189,7 @@ export function OrderSummaryLine({
         ? `引擎按这个先后试：开着的 ${summary.active} 个${noun}，${
             summary.skipped > 0
               ? `跳过 ${summary.skipped} 个（${
-                  noun === '模型' ? '关着、已下架或没有可用路由' : '关着、渠道已关或没有可用路由'
+                  noun === '模型' ? '关着、已下架或没有可用路由' : '关着、疑似换模型或没有可用路由'
                 }），`
               : ''
           }排头的是配置里第 ${summary.firstPosition} 个`

@@ -335,6 +335,7 @@ const NO_CHECK = {
 const MOCK_CHECK_PASSED = {
   checkQuestion: '现任日本首相是谁？答案只写人名。',
   checkExpected: '高市早苗/Takaichi',
+  checkOldAnswer: '石破茂/Ishiba/岸田文雄',
   checkAnswer: '高市早苗',
   checkPassed: true,
   selfIdentity: 'gpt-6-sol',
@@ -879,6 +880,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       ...(r.probeNextAt ? { probeNextAt: r.probeNextAt } : {}),
       ...(r.probeFailStreak !== undefined ? { probeFailStreak: r.probeFailStreak } : {}),
       ...(r.probeKind ? { probeKind: r.probeKind } : {}),
+      ...(r.suspectedSwap !== undefined ? { suspectedSwap: r.suspectedSwap } : {}),
+      ...(r.probeTrigger ? { probeTrigger: r.probeTrigger } : {}),
       exhausted: full.map((w) => ({
         label: w.label ?? w.window,
         ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}),

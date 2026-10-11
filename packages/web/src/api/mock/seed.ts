@@ -1728,6 +1728,7 @@ export function createSeed(now: number): MockState {
         probeTier: 'active',
         probeNextAt: at(55),
         probeFailStreak: 3,
+        probeTrigger: 'break',
         probeKind: 'ping',
       },
       {
@@ -1746,6 +1747,8 @@ export function createSeed(now: number): MockState {
         probeTier: 'active',
         probeNextAt: at(11),
         probeFailStreak: 1,
+        suspectedSwap: true,
+        probeTrigger: 'dispatch',
         probeKind: 'identity',
       },
       {

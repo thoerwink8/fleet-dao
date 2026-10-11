@@ -295,13 +295,14 @@ function ProbeLogRow({
                     <>
                       <dt className="text-muted-foreground">旧答案</dt>
                       <dd data-field="old" className="min-w-0 break-words">
-                        {cell.checkPassed === false ? (
+                        {cell.checkOldAnswer ? (
+                          <span className={cn(cell.checkPassed === false && 'font-medium text-ink-doubt')}>
+                            {cell.checkOldAnswer}
+                          </span>
+                        ) : cell.checkPassed === false ? (
                           <span className="font-medium text-ink-doubt">实答命中了旧答案</span>
                         ) : (
-                          <span className="text-muted-foreground">
-                            {cell.checkPassed === true ? '没说中' : '新旧答案都没对上'}
-                            （旧答案的原文记录里没存）
-                          </span>
+                          <span className="text-muted-foreground">这条记录里没有旧答案</span>
                         )}
                       </dd>
                     </>

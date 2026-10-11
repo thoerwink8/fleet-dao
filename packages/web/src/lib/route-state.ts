@@ -152,7 +152,7 @@ export interface RouteStateContext {
 /** 后端给的三件事 + 路由开关 + 节奏列，加上外部事实 → 这条路由是哪一种。 */
 export function classifyRoute(
   r: Pick<RoutingLayerRoute, 'enabled' | 'verdict' | 'connect' | 'quota' | 'ban'> &
-    Partial<Pick<RoutingLayerRoute, 'probedAt' | 'probeTier' | 'probeNextAt'>>,
+    Partial<Pick<RoutingLayerRoute, 'probedAt' | 'probeTier' | 'probeNextAt' | 'suspectedSwap'>>,
   ctx: RouteStateContext = {},
 ): RouteStateKind {
   if (ctx.modelRetired) return 'retired';
@@ -161,7 +161,8 @@ export function classifyRoute(
   if (ctx.usedByPurpose === false || r.probeTier === 'unused') return 'unused';
   // 探过的才谈得上「中断」：从没探过的是未探，不是中断
   if (r.probedAt !== undefined && ctx.now !== undefined && probeInterrupted(r, ctx.now)) return 'interrupted';
-  if (ctx.identityMismatch) return 'degraded';
+  // 后端给了 suspectedSwap 就用它；没给（老后端）才退回探测记录里反推的
+  if (r.suspectedSwap ?? ctx.identityMismatch) return 'degraded';
   if (r.connect.verdict === 'dead') return 'fault';
   if (r.connect.verdict === 'unknown') return r.probedAt === undefined ? 'unprobed' : 'unknown';
   if (r.quota.verdict === 'dead' || r.ban.verdict === 'dead') return 'blocked';
@@ -173,7 +174,11 @@ export function classifyRoute(
 export function classifyProbe(
   probe: { state: string } | undefined,
   ctx: RouteStateContext = {},
-  pace: { probeTier?: RouteProbeTier | undefined; probeNextAt?: string | undefined } = {},
+  pace: {
+    probeTier?: RouteProbeTier | undefined;
+    probeNextAt?: string | undefined;
+    suspectedSwap?: boolean | undefined;
+  } = {},
 ): RouteStateKind {
   if (ctx.modelRetired) return 'retired';
   if (ctx.channelEnabled === false) return 'off';
@@ -181,7 +186,7 @@ export function classifyProbe(
   if (ctx.usedByPurpose === false || pace.probeTier === 'unused') return 'unused';
   if (!probe) return 'unprobed';
   if (ctx.now !== undefined && probeInterrupted(pace, ctx.now)) return 'interrupted';
-  if (ctx.identityMismatch && probe.state !== 'ok') return 'degraded';
+  if ((pace.suspectedSwap ?? ctx.identityMismatch) && probe.state !== 'ok') return 'degraded';
   if (probe.state === 'ok') return 'live';
   if (probe.state === 'failed') return 'fault';
   return 'unknown';

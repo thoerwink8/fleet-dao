@@ -228,6 +228,9 @@ describe('渠道状态页：渠道卡', () => {
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor' });
     await waitFor(() => expect(routeRow('r-cursor-hi').getAttribute('data-kind')).toBe('degraded'));
     expect(routeRow('r-cursor-hi').textContent).toContain('疑似换模型·已按不在线处理');
+    // 触发者直接读路由目录的 probeTrigger（mock 里 cursor-hi 是派前、cursor 是断链）
+    expect(routeRow('r-cursor-hi').querySelector('[data-probe-last]')?.textContent).toContain('派前');
+    expect(routeRow('r-cursor').querySelector('[data-probe-last]')?.textContent).toContain('断链');
     expect(document.body.textContent).not.toContain('疑似降智');
   });
 
@@ -625,6 +628,7 @@ describe('渠道状态页：探测记录（#1638）', () => {
         responseText: '响应原文 X\n响应原文 Y',
         checkQuestion: '现任日本首相是谁？',
         checkExpected: '高市早苗/Takaichi',
+        checkOldAnswer: '石破茂/Ishiba',
         checkAnswer: '石破茂',
         checkPassed: false,
         selfIdentity: '某个小模型',
@@ -684,7 +688,7 @@ describe('渠道状态页：探测记录（#1638）', () => {
     const row = document.querySelector('[data-probe-row="2"]') as HTMLElement;
     expect(row.querySelector('[data-field="question"]')?.textContent).toBe('现任日本首相是谁？');
     expect(row.querySelector('[data-field="expected"]')?.textContent).toBe('高市早苗/Takaichi');
-    expect(row.querySelector('[data-field="old"]')?.textContent).toContain('实答命中了旧答案');
+    expect(row.querySelector('[data-field="old"]')?.textContent).toBe('石破茂/Ishiba');
     expect(row.querySelector('[data-field="answer"]')?.textContent).toBe('石破茂');
     expect(row.querySelector('[data-field="identity"]')?.textContent).toBe('某个小模型');
     open(1);

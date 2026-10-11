@@ -731,7 +731,7 @@ function RouteRow({
   const word = probe
     ? (STATE_WORD[probe.state] ?? OLD_STATE_WORD)
     : { label: '还没探到', tone: 'stop' as Tone };
-  // 上次那一句：时刻来自路由目录，触发者只有探测记录里有；两边对得上同一次（相差不到 1 分钟）才用它的触发者和种类
+  // 上次那一句：触发者、种类优先读路由目录的 probeTrigger、probeKind；目录没给（老后端）才用探测记录里同一次的（相差不到 1 分钟）
   const sameProbe =
     probe !== undefined &&
     lastCell !== undefined &&
@@ -741,7 +741,7 @@ function RouteRow({
         probe.at,
         {
           kind: r.probeKind ?? (sameProbe ? lastCell?.kind : undefined),
-          trigger: sameProbe ? lastCell?.trigger : undefined,
+          trigger: r.probeTrigger ?? (sameProbe ? lastCell?.trigger : undefined),
         },
         now,
       )

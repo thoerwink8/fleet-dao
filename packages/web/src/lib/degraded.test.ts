@@ -71,16 +71,28 @@ describe('路由状态：疑似换模型', () => {
     expect([...identityMismatchRoutes(rows)]).toEqual(['a']);
     expect(probeKind(rows[0] as ProbeHistoryCell)).toBe('doubt');
   });
+
+  test('后端给了 suspectedSwap 就直接用它，不看探测记录；没给才退回反推', () => {
+    const dd = { ...base, verdict: 'dead' as const, connect: dead };
+    expect(classifyRoute({ ...dd, suspectedSwap: true })).toBe('degraded');
+    // 后端明说不是：记录里反推出的不算
+    expect(classifyRoute({ ...dd, suspectedSwap: false }, { identityMismatch: true })).toBe('fault');
+    expect(classifyRoute(dd, { identityMismatch: true })).toBe('degraded');
+    expect(classifyProbe({ state: 'failed' }, {}, { suspectedSwap: true })).toBe('degraded');
+    expect(classifyProbe({ state: 'failed' }, { identityMismatch: true }, { suspectedSwap: false })).toBe(
+      'fault',
+    );
+  });
 });
 
-describe('顺位：路由的疑似换模型不单列', () => {
+describe('顺位：疑似换模型的路由被跳过，不占实际顺位', () => {
   const open = () => true;
-  test('顺位只看开关和渠道：开着的算 on，被跳过的只有关着、渠道已关', () => {
+  test('读 suspectedSwap：跳过它，开着的数少一个，词写「疑似换模型，已跳过」', () => {
     const states = [
-      routeSlotState({ enabled: false, channelId: 'c' }, open),
+      routeSlotState({ enabled: true, channelId: 'c', suspectedSwap: true }, open),
       routeSlotState({ enabled: true, channelId: 'c' }, open),
     ];
-    expect(states).toEqual(['off', 'on']);
+    expect(states).toEqual(['degraded', 'on']);
     expect(actualRanks(states)).toEqual([null, 1]);
     expect(summarizeOrder(states, '路由')).toMatchObject({
       ok: true,
@@ -88,10 +100,12 @@ describe('顺位：路由的疑似换模型不单列', () => {
       skipped: 1,
       firstPosition: 2,
     });
-    expect(slotWord('off', null, '路由')).toBe('关着，已跳过');
+    expect(slotWord('degraded', null, '路由')).toBe('疑似换模型，已跳过');
   });
 
-  test('一个模型下的路由全关着：整个模型被跳过', () => {
-    expect(modelSlotState({ routes: [{ enabled: false, channelId: 'c' }] }, open)).toBe('off');
+  test('一个模型下的路由全是疑似换模型：整个模型被跳过', () => {
+    expect(modelSlotState({ routes: [{ enabled: true, channelId: 'c', suspectedSwap: true }] }, open)).toBe(
+      'off',
+    );
   });
 });
