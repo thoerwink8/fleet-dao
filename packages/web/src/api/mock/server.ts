@@ -1877,7 +1877,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     /**
      * 看板多机（切换器）的假数据：一个叫 wsl 的远程环境（本机 WSL）。形状照真后端；快照取自这份假库、环境名换成「本机 WSL」。
-     * 地址上加 ?mockNode=stale（失联 12 分钟）/ gone（失联 5 天 2 小时，法国页手机上默认折成一行）/ never（配了钥匙没推过）/ off（没有远程环境）看另外几种，默认是 1 分钟前刚报过。
+     * 地址上加 ?mockNode=stale（失联 12 分钟）/ gone（失联 5 天 2 小时，法国页收成一行、点开看旧快照，不占对照列）/ never（配了钥匙没推过）/ off（没有远程环境）看另外几种，默认是 1 分钟前刚报过。
      */
     async nodes() {
       await wait();

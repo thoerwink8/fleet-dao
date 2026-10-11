@@ -303,10 +303,11 @@ describe('法国页：一台不画对照列，两台并排', () => {
 });
 
 describe('失联与在用版本小标题', () => {
-  test('失联环境整块置灰且不显示大号在跑', async () => {
+  test('失联（不到一天）环境整块置灰且不显示大号在跑', async () => {
     const inner = createMockApi({ live: false });
     const t = Date.now();
-    const ago = 4 * 24 * 60 * 60_000 + 6 * 60 * 60_000;
+    // 6 小时：失联但不到一天，仍照常占一列（超过一天的收成一行，见下面 #1888 那组）
+    const ago = 6 * 60 * 60_000;
     const snapFacts = envData({
       engine: { ok: true, value: { state: 'on', detail: '探到了在拉活的工人' } },
       health: {
@@ -363,82 +364,130 @@ describe('失联与在用版本小标题', () => {
     expect(red.className).toContain('text-muted-foreground');
   });
 
-  describe('手机上失联超过 24 小时的远程环境默认折成一行（#1837）', () => {
-    function phone(width: number) {
-      vi.spyOn(window, 'matchMedia').mockImplementation(
-        (query: string) =>
-          ({
-            matches: [...query.matchAll(/\((min|max)-width:\s*(\d+)px\)/g)].every(([, kind, px]) =>
-              kind === 'min' ? width >= Number(px) : width <= Number(px),
-            ),
-            media: query,
-            onchange: null,
-            addEventListener() {},
-            removeEventListener() {},
-            addListener() {},
-            removeListener() {},
-            dispatchEvent: () => false,
-          }) as MediaQueryList,
-      );
-    }
-    function renderWithRemote(agoMs: number) {
+  describe('超过 24 小时没报的远程环境收成一行，不占对照列（#1888）', () => {
+    function renderWithRemote(agoMs: number, nodes2: readonly Record<string, unknown>[] = []) {
       const inner = createMockApi({ live: false });
       const t = Date.now();
       const at = new Date(t - agoMs).toISOString();
       const state = agoMs > 5 * 60_000 ? ('stale' as const) : ('fresh' as const);
+      const item = { id: 'wsl', name: '本机', freshness: state, receivedAt: at, reportedAt: at };
       const api = {
         ...inner,
         env: () => Promise.resolve(envData()),
-        nodes: async () => ({
-          ...(await inner.nodes()),
-          nodes: [{ id: 'wsl', name: '本机', freshness: state, receivedAt: at, reportedAt: at }],
-        }),
-        node: async () => {
+        nodes: async () => ({ ...(await inner.nodes()), nodes: [item, ...nodes2] }),
+        node: async (id: string) => {
+          // 假库只认得 wsl，别的编号一律 404；这里拿 wsl 的快照当底，换成要的那一台
           const detail = await inner.node('wsl');
+          const isWsl = id === 'wsl';
           return {
             ...detail,
-            id: 'wsl',
-            name: '本机',
+            id,
+            name: isWsl ? '本机' : '另一台',
             freshness: state,
             receivedAt: at,
             reportedAt: at,
-            env: { ...detail.env, name: { name: '本机' }, asOf: at, facts: envData().facts },
+            env: {
+              ...detail.env,
+              name: { name: isWsl ? '本机' : '另一台' },
+              asOf: at,
+              facts: envData().facts,
+            },
           };
         },
         jobs: () => Promise.resolve(jobsData()),
       } as unknown as MockApi;
       renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
     }
+    const goneRow = () => document.querySelector('[data-env-gone="wsl"]') as HTMLElement;
     const col = () => document.querySelector('[data-env-column="wsl"]') as HTMLElement;
 
-    test('手机：失联 5 天默认只有一行「本机 · 失联 5 天」，没有六项事实；点开才展开，能再收起', async () => {
-      // 手机上仍把旧数据整块铺开（占半屏），这一条会红。
-      phone(390);
-      renderWithRemote(5 * 24 * 60 * 60_000 + 2 * 60 * 60_000);
-      await waitFor(() => expect(col()).toBeTruthy());
-      expect(col().hasAttribute('data-env-collapsed')).toBe(true);
-      expect(col().textContent).toContain('本机 · 失联 5 天 2 小时');
-      expect(col().querySelector('[data-env-fact]')).toBeNull();
-      expect(within(col()).queryByRole('heading')).toBeNull();
-      fireEvent.click(within(col()).getByRole('button', { name: /本机/ }));
-      await waitFor(() => expect(col().querySelector('[data-env-fact]')).toBeTruthy());
-      expect(col().hasAttribute('data-env-collapsed')).toBe(false);
-      expect(col().textContent).toContain('失联，以下是旧数据');
-      fireEvent.click(within(col()).getByRole('button', { name: '收起' }));
-      await waitFor(() => expect(col().hasAttribute('data-env-collapsed')).toBe(true));
+    test('远程 25 小时没报：不占对照列，本台按一台画卡片，下面一行说明；点开才展开旧快照', async () => {
+      renderWithRemote(25 * 60 * 60_000);
+      await waitFor(() => expect(goneRow()).toBeTruthy());
+      // 不收成对照列
+      expect(document.querySelector('[data-env-columns]')).toBeNull();
+      expect(document.querySelectorAll('[data-env-column]').length).toBe(0);
+      // 只剩本台：按「只有一台」的卡片画法
+      expect(document.querySelectorAll('[data-france-fact]').length).toBe(6);
+      // 一行说明：名字 + 多久没报 + 为什么不报
+      const row = goneRow();
+      expect(row.textContent).toContain('本机');
+      expect(row.textContent).toContain('1 天 1 小时没报');
+      expect(row.textContent).toContain('不跑引擎的机器本来就不报');
+      expect(row.getAttribute('data-env-gone-open')).toBe('false');
+      expect(row.querySelector('[data-env-fact]')).toBeNull();
+      // 点开才展开旧快照
+      fireEvent.click(within(row).getByRole('button'));
+      await waitFor(() => expect(row.querySelectorAll('[data-env-fact]').length).toBe(6));
+      expect(row.getAttribute('data-env-gone-open')).toBe('true');
+      // 能再收起
+      fireEvent.click(within(row).getByRole('button'));
+      await waitFor(() => expect(row.querySelector('[data-env-fact]')).toBeNull());
     });
 
-    test('手机：失联不到 24 小时的照常展开；桌面失联 5 天也照常并排展开', async () => {
-      phone(390);
-      renderWithRemote(2 * 60 * 60_000);
+    test('远程 1 小时前报过：照旧并排两列，不画成收起的一行', async () => {
+      renderWithRemote(60 * 60_000);
       await screen.findByRole('heading', { name: /本机/ });
-      expect(col().hasAttribute('data-env-collapsed')).toBe(false);
+      const cols = document.querySelectorAll('[data-env-column]');
+      expect(Array.from(cols).map((c) => c.getAttribute('data-env-column'))).toEqual(['local', 'wsl']);
+      expect(document.querySelector('[data-env-columns]')?.getAttribute('data-env-columns')).toBe('2');
+      expect(document.querySelector('[data-env-gone="wsl"]')).toBeNull();
+    });
+
+    test('一台刚报过、另一台 5 天没报：刚报过的照旧并排，5 天没报的收成一行', async () => {
+      renderWithRemote(60 * 60_000, [
+        {
+          id: 'far',
+          name: '另一台',
+          freshness: 'stale' as const,
+          receivedAt: new Date(Date.now() - 5 * 24 * 60 * 60_000).toISOString(),
+          reportedAt: new Date(Date.now() - 5 * 24 * 60 * 60_000).toISOString(),
+        },
+      ]);
+      await screen.findByRole('heading', { name: /本机/ });
+      // 5 天没报的那台的旧快照读回来才折（折之前先照常占一列，不闪）
+      await waitFor(() => expect(document.querySelector('[data-env-gone="far"]')).toBeTruthy());
+      // 只有刚报过的那台进对照列
+      const cols = document.querySelectorAll('[data-env-column]');
+      expect(Array.from(cols).map((c) => c.getAttribute('data-env-column'))).toEqual(['local', 'wsl']);
+      expect(document.querySelector('[data-env-columns]')?.getAttribute('data-env-columns')).toBe('2');
+      // 5 天没报的那台在下面一行
+      const row = document.querySelector('[data-env-gone="far"]') as HTMLElement;
+      expect(row.textContent).toContain('另一台');
+      expect(row.textContent).toContain('5 天没报');
+    });
+
+    test('人特意点开的那台（?node=）不折，仍占对照列；快照读不出来的也留在列里把原因写清楚', async () => {
+      const inner = createMockApi({ live: false });
+      const t = Date.now();
+      const ago = 5 * 24 * 60 * 60_000;
+      const at = new Date(t - ago).toISOString();
+      const api = {
+        ...inner,
+        env: () => Promise.resolve(envData()),
+        nodes: async () => ({
+          ...(await inner.nodes()),
+          nodes: [{ id: 'wsl', name: '本机', freshness: 'stale' as const, receivedAt: at, reportedAt: at }],
+        }),
+        node: async () => {
+          throw new Error('快照读不了（测试故意造的）');
+        },
+        jobs: () => Promise.resolve(jobsData()),
+      } as unknown as MockApi;
+      // 读不出来：不折，留在对照列里写原因（不然「点开看最后一次的快照」其实没有）
+      renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
+      const wsl = (await screen.findByRole('heading', { name: /本机/ })).closest(
+        '[data-env-column]',
+      ) as HTMLElement;
+      expect(await within(wsl).findByText(/快照读不了（测试故意造的）/)).toBeTruthy();
+      expect(document.querySelector('[data-env-gone="wsl"]')).toBeNull();
       cleanup();
-      phone(1366);
-      renderWithRemote(5 * 24 * 60 * 60_000);
+      // 选中的那台也不折
+      const api2 = { ...api, node: inner.node.bind(inner) } as unknown as MockApi;
+      renderApp(<France />, { api: api2 as unknown as FleetApi, route: '/france?node=wsl' });
       await screen.findByRole('heading', { name: /本机/ });
-      expect(col().hasAttribute('data-env-collapsed')).toBe(false);
-      expect(col().querySelector('[data-env-fact]')).toBeTruthy();
+      expect(document.querySelector('[data-env-gone="wsl"]')).toBeNull();
+      expect(col()).toBeTruthy();
     });
   });
 
