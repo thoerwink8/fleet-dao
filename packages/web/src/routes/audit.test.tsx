@@ -187,4 +187,20 @@ describe('操作记录页：事件名翻成中文（#1821）', () => {
     const links = screen.getAllByRole('link', { name: '打开' });
     expect(links.some((a) => a.getAttribute('href')?.startsWith('/tasks/'))).toBe(true);
   });
+
+  test('手机上对象链接自己占一行：不和执行者、动作挤在同一个截断容器里', async () => {
+    // 对象按钮又回到执行者那一行的容器里，被压成几像素宽，这一条会红。
+    renderApp(<AuditPage />);
+    const buttons = await screen.findAllByTitle('只看这个对象的记录');
+    for (const button of buttons) {
+      const what = button.parentElement;
+      expect(what?.hasAttribute('data-audit-what')).toBe(true);
+      expect(what?.className).toContain('max-md:basis-full');
+      expect(button.className).toContain('max-md:min-h-10');
+      const who = what?.previousElementSibling;
+      expect(who?.hasAttribute('data-audit-who')).toBe(true);
+      expect(who?.contains(button)).toBe(false);
+      expect(who?.className).toContain('max-md:basis-full');
+    }
+  });
 });
