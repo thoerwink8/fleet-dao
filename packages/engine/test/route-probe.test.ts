@@ -766,7 +766,8 @@ describe('按活跃分三档（#1798 片 3）', () => {
     for (const previous of [
       null,
       { state: 'skipped' as const, at: minutesAgo(10), detail: '没有阶段在用' },
-      { state: 'on_demand' as const, at: minutesAgo(10), detail: '不主动探，要派给它时先探一次' },
+      // 原来的按需探测 on_demand 已删（#1843），迁移改写过来的行是这样
+      { state: 'skipped' as const, at: minutesAgo(10), detail: '改版后等下一轮探' },
       { state: 'ok' as const, at: new Date('不是时间'), detail: '答上了：OK' },
       okAgo(-5),
     ]) {

@@ -115,14 +115,15 @@ describe('派前探测', () => {
     }
   });
 
-  it('按需探测的路由（上一次结论 on_demand、alive 为 false）：派前探一次，探通就派，写回通（#1635）', async () => {
+  // 原来的按需探测 on_demand 已删（#1843）：迁移把剩下的行改成 skipped、原文「改版后等下一轮探」，派前照样探一次。
+  it('没探的路由（上一次结论 skipped、alive 为 false）：派前探一次，探通就派，写回通', async () => {
     const t = target({
       alive: false,
       probeRank: 5,
       previous: {
-        state: 'on_demand',
+        state: 'skipped',
         at: new Date(NOW.getTime() - 3 * 3_600_000),
-        detail: '不主动探，要派给它时先探一次。上一次真探：通，10-09 08:00',
+        detail: '改版后等下一轮探',
       },
     });
     const h = harness([t]);
@@ -134,14 +135,14 @@ describe('派前探测', () => {
     ]);
   });
 
-  it('按需探测的路由探不通：记成不通（退避照现在的规矩），本轮换下一条', async () => {
+  it('没探的路由探不通：记成不通（退避照现在的规矩），本轮换下一条', async () => {
     const t = target({
       alive: false,
       probeRank: 5,
       previous: {
-        state: 'on_demand',
+        state: 'skipped',
         at: new Date(NOW.getTime() - 3_600_000),
-        detail: '不主动探，要派给它时先探一次。还没真探过',
+        detail: '改版后等下一轮探',
       },
     });
     const h = harness([t], {

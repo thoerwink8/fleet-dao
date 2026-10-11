@@ -188,8 +188,7 @@ export async function evaluateRoutes(
     const reserved = occupancy.get(pool.id)?.reserved ?? 0;
     const blockers: Blocker[] = [];
     if (!order.enabled) blockers.push('switched-off');
-    // 按需探测（on_demand）的路由 alive 留 false，但不挡：派前探一次，探通才派（#1635）
-    if (!route.alive && route.probeState !== 'on_demand') blockers.push('offline');
+    if (!route.alive) blockers.push('offline');
     if (!channel.enabled) blockers.push('channel-disabled');
     if (channelStateById.get(channel.id)?.status === 'disabled') blockers.push('channel-failed');
     if (pool.expiresAt !== null && pool.expiresAt.getTime() <= now.getTime()) blockers.push('pool-expired');
