@@ -10,6 +10,7 @@ import {
 import { useMediaQuery } from '../lib/hooks';
 import {
   applyTheme,
+  type DensityPref,
   type ModePref,
   type MotionPref,
   type PaletteId,
@@ -26,6 +27,7 @@ interface ThemeApi {
   setPalette(p: PaletteId): void;
   setMode(m: ModePref): void;
   setMotion(m: MotionPref): void;
+  setDensity(d: DensityPref): void;
   /** 深浅互换（⌘K 与快捷键用）。 */
   toggleMode(): void;
 }
@@ -56,6 +58,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       setPalette: (palette) => update({ palette }),
       setMode: (mode) => update({ mode }),
       setMotion: (motion) => update({ motion }),
+      setDensity: (density) => update({ density }),
       toggleMode: () => update({ mode: resolvedMode === 'dark' ? 'light' : 'dark' }),
     }),
     [pref, resolvedMode, update],

@@ -4,13 +4,13 @@ import type { Tone } from '../../../lib/status';
 
 // Tailwind 只认完整类名，所以逐个写全，不拼接。
 export const toneBorder: Record<Tone, string> = {
-  run: 'border-st-run/45',
-  wait: 'border-st-wait/35',
-  human: 'border-st-human/50',
-  stall: 'border-st-stall/55',
-  fail: 'border-st-fail/55',
-  done: 'border-st-done/40',
-  stop: 'border-st-stop/40',
+  run: 'border-st-run-line',
+  wait: 'border-st-wait-line',
+  human: 'border-st-human-line',
+  stall: 'border-st-stall-line',
+  fail: 'border-st-fail-line',
+  done: 'border-st-done-line',
+  stop: 'border-st-stop-line',
 };
 
 /** 画连线、小地图要的颜色值（CSS 变量）。 */

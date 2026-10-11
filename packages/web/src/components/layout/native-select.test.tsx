@@ -21,14 +21,14 @@ describe('NativeSelect', () => {
     expect(sel.value).toBe('b');
   });
 
-  test('样式和 ui/select 对齐：桌面 h-8、手机不低于 40 且 16px', () => {
+  test('样式和 ui/select 对齐：桌面 h-control（标准 32）、手机不低于 40 且 16px', () => {
     render(
       <NativeSelect aria-label="仓">
         <option>甲</option>
       </NativeSelect>,
     );
     const cls = screen.getByRole('combobox').className;
-    expect(cls).toContain('h-8');
+    expect(cls).toContain('h-control');
     expect(cls).toContain('rounded-md');
     expect(cls).toContain('max-md:min-h-10');
     expect(cls).toContain('max-md:text-heading');

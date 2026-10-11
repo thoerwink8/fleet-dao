@@ -21,7 +21,7 @@ export function Section({
   actions?: ReactNode;
   /** 正文没有内边距，放列表和表格。 */
   flush?: boolean;
-  /** 正文左右留 16、上下只留 4：里面是自带行距的列表（行本身有 py）。 */
+  /** 正文左右留区块内边距、上下只留 4：里面是自带行距的列表（行本身有 py）。 */
   tight?: boolean;
   /** card 有边框和底（默认）；plain 无边框，只有标题和内容（设置页那种）。 */
   variant?: 'card' | 'plain';
@@ -51,7 +51,10 @@ export function Section({
       ) : null}
       {title || actions ? (
         <header
-          className={cn('flex items-start justify-between gap-3', card ? 'border-b px-4 py-3' : 'pb-3')}
+          className={cn(
+            'flex items-start justify-between gap-stack',
+            card ? 'border-b px-section py-stack' : 'pb-stack',
+          )}
         >
           <div className="min-w-0">
             {title ? <h2 className="text-heading">{title}</h2> : null}
@@ -60,14 +63,14 @@ export function Section({
           {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
         </header>
       ) : null}
-      <div className={cn(card && !flush && (tight ? 'px-4 py-1' : 'p-4'))}>{children}</div>
+      <div className={cn(card && !flush && (tight ? 'px-section py-1' : 'p-section'))}>{children}</div>
     </section>
   );
 }
 
 const COLS = { 1: 'lg:grid-cols-1', 2: 'lg:grid-cols-2', 3: 'lg:grid-cols-3' } as const;
 
-/** 两栏（或三栏）并排的区块：手机上叠成一列，区块之间 16，桌面 24。 */
+/** 两栏（或三栏）并排的区块：手机上叠成一列，区块之间 16；桌面（lg）起用区块间距令牌（标准 24，紧凑 16）。 */
 export function SectionGrid({
   cols = 2,
   children,
@@ -77,5 +80,7 @@ export function SectionGrid({
   children: ReactNode;
   className?: string;
 }) {
-  return <div className={cn('grid grid-cols-1 gap-4 lg:gap-6', COLS[cols], className)}>{children}</div>;
+  return (
+    <div className={cn('grid grid-cols-1 gap-4 lg:gap-section-gap', COLS[cols], className)}>{children}</div>
+  );
 }

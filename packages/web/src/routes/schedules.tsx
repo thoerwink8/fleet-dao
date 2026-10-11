@@ -82,7 +82,9 @@ export default function Schedules() {
             <LoadingRows rows={6} />
           </div>
         ) : !data ? (
-          <p className="px-4 py-10 text-center text-sm text-ink-fail">没读到定时任务，说不准它们跑得怎么样</p>
+          <p className="px-4 py-10 text-center text-body text-ink-fail">
+            没读到定时任务，说不准它们跑得怎么样
+          </p>
         ) : jobs.length === 0 ? (
           <EmptyState icon={CalendarClock} title="还没有定时任务" />
         ) : (
@@ -96,7 +98,7 @@ export default function Schedules() {
           </>
         )}
       </Section>
-      <p className="mt-3 text-xs text-muted-foreground">
+      <p className="mt-3 text-meta text-muted-foreground">
         定时任务的变化没有实时推送，这一页每 30 秒自己刷新一次。
       </p>
     </Page>

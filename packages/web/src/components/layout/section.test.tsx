@@ -49,7 +49,7 @@ describe('Section', () => {
         <i data-body />
       </Section>,
     );
-    expect(flush.container.querySelector('[data-body]')?.parentElement?.className).not.toContain('p-4');
+    expect(flush.container.querySelector('[data-body]')?.parentElement?.className).not.toContain('p-section');
   });
 });
 

@@ -12,130 +12,6 @@
     "R8": 2,
     "R9": 1
   },
-  "src/components/credentials-section.tsx": {
-    "R1": 1,
-    "R2": 7
-  },
-  "src/components/engine-master-card.tsx": {
-    "R1": 3,
-    "R2": 6,
-    "R5": 1,
-    "R7": 1,
-    "R8": 1
-  },
-  "src/components/engine-master.tsx": {
-    "R1": 3,
-    "R2": 5
-  },
-  "src/components/env-facts.tsx": {
-    "R2": 9,
-    "R5": 1,
-    "R6": 1,
-    "R7": 2,
-    "R8": 1
-  },
-  "src/components/home/board/board-canvas.tsx": {
-    "R1": 7,
-    "R2": 13,
-    "R5": 5,
-    "R6": 6
-  },
-  "src/components/home/board/board-tree.tsx": {
-    "R1": 1,
-    "R2": 12,
-    "R5": 1,
-    "R8": 1
-  },
-  "src/components/home/board/context-menu.tsx": {
-    "R1": 2,
-    "R2": 6,
-    "R6": 2,
-    "R7": 1
-  },
-  "src/components/home/board/detail-panel.tsx": {
-    "R1": 4,
-    "R2": 28,
-    "R3": 1,
-    "R5": 1,
-    "R6": 1,
-    "R7": 1
-  },
-  "src/components/home/board/nodes.tsx": {
-    "R1": 1,
-    "R2": 24,
-    "R3": 6,
-    "R4": 2,
-    "R5": 1,
-    "R6": 1,
-    "R7": 1,
-    "R8": 1
-  },
-  "src/components/home/board/tones.ts": {
-    "R1": 7
-  },
-  "src/components/home/decision-card.tsx": {
-    "R1": 3,
-    "R2": 5,
-    "R7": 1
-  },
-  "src/components/home/done-card.tsx": {
-    "R1": 1,
-    "R2": 5
-  },
-  "src/components/home/health-strip.tsx": {
-    "R1": 4,
-    "R2": 4
-  },
-  "src/components/home/home-drawer.tsx": {
-    "R1": 5,
-    "R2": 8,
-    "R5": 2,
-    "R6": 2,
-    "R7": 2
-  },
-  "src/components/home/running-board.tsx": {
-    "R5": 1
-  },
-  "src/components/home/running-card.tsx": {
-    "R1": 2,
-    "R2": 8,
-    "R6": 1,
-    "R8": 1
-  },
-  "src/components/job-row.tsx": {
-    "R1": 4,
-    "R2": 18,
-    "R5": 1,
-    "R7": 1
-  },
-  "src/components/markdown-lite.tsx": {
-    "R1": 1,
-    "R2": 4,
-    "R5": 1,
-    "R7": 1
-  },
-  "src/components/node-notice.tsx": {
-    "R1": 3,
-    "R2": 4
-  },
-  "src/components/not-built.tsx": {
-    "R2": 2,
-    "R5": 1,
-    "R8": 1
-  },
-  "src/components/org-switch.tsx": {
-    "R2": 2,
-    "R5": 1,
-    "R8": 1
-  },
-  "src/components/page-nav.tsx": {
-    "R1": 1,
-    "R2": 2,
-    "R8": 1
-  },
-  "src/components/password-field.tsx": {
-    "R2": 2
-  },
   "src/components/pool-holds.tsx": {
     "R1": 1,
     "R2": 20,
@@ -160,17 +36,6 @@
   "src/components/refresh-bar.tsx": {
     "R1": 1,
     "R2": 3
-  },
-  "src/components/release-card.tsx": {
-    "R1": 8,
-    "R2": 23,
-    "R5": 2
-  },
-  "src/components/repo-dispatch.tsx": {
-    "R2": 2
-  },
-  "src/components/repo-groom.tsx": {
-    "R2": 15
   },
   "src/components/routing-browse.tsx": {
     "R1": 7,
@@ -221,19 +86,6 @@
   "src/root.tsx": {
     "R2": 4
   },
-  "src/routes/audit.tsx": {
-    "R1": 4,
-    "R2": 16,
-    "R5": 1,
-    "R7": 1,
-    "R8": 1,
-    "R9": 1
-  },
-  "src/routes/changelog.tsx": {
-    "R1": 1,
-    "R2": 5,
-    "R5": 1
-  },
   "src/routes/efforts.tsx": {
     "R1": 6,
     "R2": 22,
@@ -241,32 +93,6 @@
     "R6": 3,
     "R8": 7,
     "R9": 1
-  },
-  "src/routes/france.tsx": {
-    "R1": 6,
-    "R2": 25,
-    "R5": 2,
-    "R6": 1,
-    "R7": 2,
-    "R8": 1
-  },
-  "src/routes/login.tsx": {
-    "R1": 2,
-    "R2": 12,
-    "R5": 2,
-    "R6": 1,
-    "R7": 1,
-    "R8": 1
-  },
-  "src/routes/not-found.tsx": {
-    "R2": 2
-  },
-  "src/routes/notifications.tsx": {
-    "R1": 3,
-    "R2": 18,
-    "R5": 3,
-    "R7": 1,
-    "R8": 2
   },
   "src/routes/quota.tsx": {
     "R1": 3,
@@ -286,21 +112,12 @@
     "R5": 2,
     "R8": 4
   },
-  "src/routes/schedules.tsx": {
-    "R2": 2
-  },
   "src/routes/settings.tsx": {
-    "R1": 4,
-    "R2": 23,
-    "R5": 2,
-    "R7": 1,
-    "R8": 3
+    "R1": 2,
+    "R2": 3,
+    "R8": 1
   },
   "src/routes/shell.tsx": {
     "R2": 1
-  },
-  "src/routes/soon.tsx": {
-    "R1": 1,
-    "R2": 3
   }
 }

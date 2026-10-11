@@ -67,7 +67,7 @@ export function Page({
         className,
       )}
     >
-      <header className="mb-6 flex flex-wrap items-end justify-between gap-3 max-md:mb-4 lg:flex-nowrap">
+      <header className="mb-section-gap flex flex-wrap items-end justify-between gap-stack max-md:mb-4 lg:flex-nowrap">
         <div className="relative min-w-0 lg:flex-1">
           <h1 className={cn('text-title', fold && 'pr-10')}>{title}</h1>
           {fold ? (
@@ -86,7 +86,7 @@ export function Page({
           </div>
         ) : null}
       </header>
-      {tabs ? <div className="mb-4">{tabs}</div> : null}
+      {tabs ? <div className="mb-section">{tabs}</div> : null}
       {children}
     </div>
   );
