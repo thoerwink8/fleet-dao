@@ -33,7 +33,7 @@ import {
   updateRouteProbePace,
   upsertAlert,
 } from '@fleet-dao/db';
-import { type HostId, type OrgKind, probeBackoffNotice } from '@fleet-dao/shared';
+import { type DecisionOption, type HostId, type OrgKind, probeBackoffNotice } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { classifyFailure } from '../failure/classify.ts';
 import type { OrgSwitchRound } from '../jobs/org-switch.ts';
@@ -365,10 +365,38 @@ export async function poolHoldAfterProbe(db: Db, t: ProbeTarget, a: ProbeAttempt
       taskId: null,
       title: `账号池 ${t.poolId} 整池暂停：${a.poolHold.title}`,
       body: `路由探针探 ${t.routeId} 时发现的。${a.poolHold.body}${notice ? `。${notice}` : ''}`,
+      options: poolHoldOptions(t.poolId),
     });
     return;
   }
   await resolveAlertByKey(db, { dedupeKey, by: 'engine' });
+}
+
+/**
+ * 整池暂停的选项（#1915、#1931）。这条提醒开着就是池子停着，选路读的就是它：只有「放开」那项把它转已处理（池子当场放开）；
+ * 另两项带 keepsOpen，答案记下交给指挥官，提醒照旧开着、池子照旧停着。每项写的效果有测试（store-ports.test）。
+ */
+export function poolHoldOptions(poolId: string): DecisionOption[] {
+  return [
+    {
+      id: 'fixed',
+      label: '修好了，放开',
+      detail: `这条转已处理，账号池 ${poolId} 当场放开给选路用（账号我已经重新登录、续费或换号）`,
+      recommended: '没修好也不怕：探针、会话再撞上同样的问题会再报一条、再停这个池',
+    },
+    {
+      id: 'hold',
+      label: '先停着',
+      detail: `这条留着，账号池 ${poolId} 照旧停着；探针探通会自己放开。要停到我撤为止的，记下交给指挥官去改整池暂停开关`,
+      keepsOpen: true,
+    },
+    {
+      id: 'retire',
+      label: '这个池不要了',
+      detail: `这条留着，账号池 ${poolId} 照旧停着；记下交给指挥官去把它从路由里下掉`,
+      keepsOpen: true,
+    },
+  ];
 }
 
 /** 老降智提醒的去重键（上线后探通时一并撤）。 */

@@ -1,9 +1,11 @@
 // 提醒（notifications）的对账要用的查询：列出没处理的、按前缀连同已处理的一起列、按条件撤掉（写明谁撤的、为什么，
 // 进操作记录）、只在没有时插一条（再提醒一天一条）、只改还开着的（不把人刚处理掉的又打开）。
 // 报警本身的写法（同一件事一条、再报原地更新）在 engine-alerts.ts 的 upsertAlert。
+import type { DecisionOption } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gte, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, notifications } from '../schema/index.ts';
+import { decisionOptionsFor } from './engine-alerts.ts';
 
 export interface AlertRow {
   id: string;
@@ -137,6 +139,8 @@ export async function insertAlertOnce(
     title: string;
     body: string;
     link?: string | null;
+    /** 「要你拍」的选项（#1915）：只有 decision 级带。 */
+    options?: readonly DecisionOption[];
   },
 ): Promise<{ id: string; created: boolean }> {
   const [row] = await db
@@ -148,6 +152,7 @@ export async function insertAlertOnce(
       title: input.title,
       body: input.body,
       link: input.link ?? null,
+      decisionOptions: decisionOptionsFor(input.dedupeKey, input.level, input.options),
     })
     .onConflictDoNothing({ target: notifications.dedupeKey })
     .returning({ id: notifications.id });

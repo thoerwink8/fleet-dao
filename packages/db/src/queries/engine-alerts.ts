@@ -1,9 +1,29 @@
 // 引擎的报警：同一件事（dedupe_key）一条、再报原地更新，按 dedupe_key 标成已处理，按前缀列还没处理的。
+import { type DecisionOption, decisionOptionsProblem } from '@fleet-dao/shared';
 import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { notifications } from '../schema/index.ts';
 
-/** 报警：同一件事（dedupe_key）只有一条，再报原地更新标题、正文、updated_at（显式写），已处理的重新打开（resolved_at/by 清空）。 */
+/**
+ * 「要你拍」的选项（#1915）落库前核一遍：只有 decision 级能带；带了就要合规矩（至少两项、编号不重、恰好一项推荐）。
+ * 不合规矩的照抛，不悄悄存成没有选项。没带回 null（页面写「没有选项，请直接回复」）。
+ */
+export function decisionOptionsFor(
+  dedupeKey: string,
+  level: 'alert' | 'decision' | 'daily',
+  options: readonly DecisionOption[] | undefined,
+): DecisionOption[] | null {
+  if (options === undefined) return null;
+  if (level !== 'decision') throw new Error(`报警 ${dedupeKey} 是 ${level} 级，只有要人拍的才带选项`);
+  const problem = decisionOptionsProblem(options);
+  if (problem) throw new Error(`报警 ${dedupeKey} 的选项不合规矩：${problem}`);
+  return [...options];
+}
+
+/**
+ * 报警：同一件事（dedupe_key）只有一条，再报原地更新标题、正文、选项、updated_at（显式写），已处理的重新打开（resolved_at/by、
+ * 上一次拍的答案清空：重开就是又要人拍一次）。
+ */
 export async function upsertAlert(
   db: Db,
   input: {
@@ -13,9 +33,12 @@ export async function upsertAlert(
     title: string;
     body: string;
     link?: string;
+    /** 「要你拍」的选项（#1915）：只有 decision 级带。 */
+    options?: readonly DecisionOption[];
   },
 ): Promise<{ id: string; created: boolean }> {
   const now = new Date();
+  const decisionOptions = decisionOptionsFor(input.dedupeKey, input.level, input.options);
   const [row] = await db
     .insert(notifications)
     .values({
@@ -25,6 +48,7 @@ export async function upsertAlert(
       title: input.title,
       body: input.body,
       link: input.link ?? null,
+      decisionOptions,
     })
     .onConflictDoUpdate({
       target: notifications.dedupeKey,
@@ -34,9 +58,11 @@ export async function upsertAlert(
         title: input.title,
         body: input.body,
         link: input.link ?? null,
+        decisionOptions,
         updatedAt: now,
         resolvedAt: null,
         resolvedBy: null,
+        answer: null,
       },
     })
     // xmax = 0 只在这一行是刚插入（不是走 on conflict 更新）时成立，是判断「插成还是原地更新」的标准写法。

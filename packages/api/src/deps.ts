@@ -2,6 +2,7 @@ import type { Repo } from '@fleet-dao/shared';
 import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
 import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
 import type { Config } from './config.ts';
+import type { DecisionCommenter } from './decision-handoff.ts';
 import type { CockpitAlerts } from './feishu-alerts.ts';
 import type { FranceReleasePort } from './france-release.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
@@ -119,6 +120,11 @@ export interface Deps {
    * 接口回 503 写明原因，不拿空列表冒充「没有记录」。
    */
   runTranscript?: RunTranscriptPort | undefined;
+  /**
+   * 「要你拍」拍完交给指挥官（#1915，decision-handoff.ts）：往进度单 #1055、任务单留言，走引擎机器人的 GitHub 客户端。
+   * 没给（开发环境、机器人凭据没读到）的答案照样存下，回包里 handoff 写没接上，不当成记上了。
+   */
+  decisionCommenter?: DecisionCommenter | undefined;
   /**
    * 环境页（#820 片 1）的版本那一项：读这台的发布目录（current 链接 + 状态文件）现算。只在正式环境装配
    * （main.ts 的 production；法国是）；别的环境不给，环境页写「没查成 + 原因」，不拿「还没发布过」顶。

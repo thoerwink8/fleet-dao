@@ -21,6 +21,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { createPgStore } from '@fleet-dao/store';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type AlertSweepDeps, type RouteCheck, sweepAlerts } from '../../src/jobs/alert-sweep.ts';
 import { HOURLY_RECONCILE_JOB, runHourlyReconcileJob } from '../../src/jobs/hourly-reconcile.ts';
@@ -307,6 +308,30 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     expect((await runsOf())[0]).toMatchObject({ outcome: 'ok', scanned: 3, found: 3 });
   });
 
+  it('工作树要你拍的选项真有说的效果（#1931）：「先看看」只记答案、这条照旧开着；「留着」转已处理，下一轮不再报、树不删', async () => {
+    await work();
+    const tree = makeTree('acme_widgets/160-login', { extra: 2, dirty: true });
+    probeDir();
+    await runHourlyReconcileJob(deps());
+    const key = 'worktree:acme_widgets/160-login';
+    const id = (await alertByKey(t.db, key))?.id ?? '';
+    const store = createPgStore(t.db);
+    const by = { kind: 'user' as const, id: 'founder-a' };
+    const answer = (optionId: string) =>
+      store.answerNotification(
+        { id, by, optionId },
+        { actor: by, action: 'notification.answer', target: `notification:${id}`, via: 'cockpit', ok: true },
+      );
+    expect((await answer('look')).kind).toBe('ok');
+    expect(await alertByKey(t.db, key)).toMatchObject({ resolvedAt: null });
+    await runHourlyReconcileJob(deps());
+    expect(await alertByKey(t.db, key)).toMatchObject({ resolvedAt: null });
+    expect((await answer('keep')).kind).toBe('ok');
+    expect(await runHourlyReconcileJob(deps())).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(await alertByKey(t.db, key)).toMatchObject({ resolvedBy: 'founder-a' });
+    expect(existsSync(tree.dir)).toBe(true);
+  });
+
   it('有没推的提交：不删，报要人拍（写清哪棵树、有什么、怎么删），「工作树没收掉」改成指向它；人点了处理之后不再报', async () => {
     const { task, sub } = await work();
     const tree = makeTree('acme_widgets/160-login', { extra: 2, dirty: true });
@@ -328,6 +353,15 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     expect(keep?.body).toContain('session work 1');
     expect(keep?.body).toContain('没提交的改动 1 处：?? half-done.ts');
     expect(keep?.body).toContain(`fleet-agent-scope remove ${tree.dir}`);
+    // 「要你拍」带选项（#1915）：留着（推荐，写理由）、删掉、先看看
+    const [opts] = (
+      await t.client.query<{ decision_options: { id: string; recommended?: string }[] | null }>(
+        `select decision_options from notifications where dedupe_key = $1`,
+        ['worktree:acme_widgets/160-login'],
+      )
+    ).rows;
+    expect(opts?.decision_options?.map((o) => o.id)).toEqual(['keep', 'remove', 'look']);
+    expect(opts?.decision_options?.find((o) => o.id === 'keep')?.recommended).toBeTruthy();
     expect((await alertByKey(t.db, `sub:${sub.id}:worktree`))?.body).toMatch(
       /^已撤：树里还有没推、没提交的东西，改成要你拍：看「工作树里有没推的东西/,
     );

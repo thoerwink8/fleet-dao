@@ -2,6 +2,7 @@
 // 行为照库的约束来（比较后再改、和操作记录同一「事务」、ok=false 的操作记录必须带原因……），
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
 import {
+  answerResolves,
   type Ban,
   type Channel,
   type ChannelStateRecord,
@@ -26,7 +27,12 @@ import {
   judgeExistingCommand,
   tookOverResult,
 } from './command-logic.ts';
-import { isNotificationOpen, isSettingConflict, nextSettingVersion } from './console-logic.ts';
+import {
+  decisionAnswerOf,
+  isNotificationOpen,
+  isSettingConflict,
+  nextSettingVersion,
+} from './console-logic.ts';
 import { clearedFailures, isLockedAt, nextFailureState, passwordNeedsUsername } from './credentials-logic.ts';
 import {
   assertOutcomeHasReason,
@@ -631,6 +637,28 @@ export function createMemoryStore(
       audit(entry);
       changed('notifications', id);
       return 'ok';
+    },
+    async answerNotification({ id, by, optionId, text }, entry) {
+      const n = data.notifications.find((x) => x.id === id);
+      if (!n) return { kind: 'not_found' };
+      if (n.level !== 'decision') return { kind: 'not_decision' };
+      if (!isNotificationOpen(n)) return { kind: 'already_resolved' };
+      const at = now().toISOString();
+      const answer = decisionAnswerOf(n.options, { optionId, text }, by.id, at);
+      if (answer === 'unknown_option') return { kind: 'unknown_option' };
+      checkAudit(entry);
+      n.answer = answer;
+      if (answerResolves(n.options, optionId)) {
+        n.resolvedAt = at;
+        n.resolvedBy = by.id;
+      }
+      audit(entry);
+      changed('notifications', id);
+      // 送到哪（target）和列表一样不往外给
+      return {
+        kind: 'ok',
+        notification: { ...n, deliveries: n.deliveries.map(({ target: _target, ...d }) => d) },
+      };
     },
     async appendAudit(entry) {
       return audit(entry);

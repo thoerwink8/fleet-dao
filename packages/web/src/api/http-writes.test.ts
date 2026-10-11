@@ -167,6 +167,20 @@ const WRITES: Write[] = [
     ok: OK,
   },
   {
+    name: 'answerNotification',
+    call: (api) => api.answerNotification('n-1', { optionId: 'release' }),
+    method: 'POST',
+    url: '/api/notifications/n-1/answer',
+    body: { optionId: 'release' },
+    ok: {
+      body: {
+        ok: true,
+        answer: { optionId: 'release', text: '发布', at: AT, by: 'u-a' },
+        handoff: { progress: { ok: true, url: 'https://github.com/o/r/issues/1055#c1' } },
+      },
+    },
+  },
+  {
     name: 'updateSetting',
     call: (api) => api.updateSetting('sessions.maxConcurrent', { value: 8, version: 1 }),
     method: 'PUT',

@@ -1,5 +1,6 @@
 // 人与运维：成员、通知、操作记录、外部写操作的幂等键、收到的 GitHub 事件、Jev 判断记录、定时任务登记与每次跑的记录、设置。
 // 「谁做的」统一记成 actor_kind + actor_id（人是用户 id，会话里的 AI 是会话 id……），和驾驶舱接口的 Actor 同形。
+import type { DecisionAnswer, DecisionOption } from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -94,8 +95,16 @@ export const notifications = pgTable(
     resolvedAt: timestamp('resolved_at', tz),
     /** 谁处理掉的（actor id）。 */
     resolvedBy: text('resolved_by'),
+    /** 「要你拍」的选项（#1915）：只 decision 级有；老的、补不出选项的是空，页面写「没有选项，请直接回复」。 */
+    decisionOptions: jsonb('decision_options').$type<DecisionOption[]>(),
+    /** 创始人拍了什么（选项编号或原文、时刻、谁）；没拍是空。再报（原地重开）时清空。 */
+    answer: jsonb('answer').$type<DecisionAnswer>(),
   },
   (t) => [
+    check(
+      'notifications_options_only_decision',
+      sql`${t.decisionOptions} is null or ${t.level} = 'decision'`,
+    ),
     index('notifications_task_idx').on(t.taskId),
     index('notifications_open_idx').on(t.createdAt).where(sql`${t.resolvedAt} is null`),
   ],
