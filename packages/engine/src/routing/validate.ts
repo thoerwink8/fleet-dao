@@ -122,6 +122,10 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
     else if (!r.blockers.includes('offline')) {
       throw new RoutingInputError(`选路判不了：${who} 在线，却没有探针下结论的时刻`);
     }
+    // 下次探针时刻可空（老输入、或者还没写过这一列）；给了就认得出（片 3 的 probe_next_at）。
+    if (r.probeNextAt !== undefined && r.probeNextAt !== null) {
+      time(r.probeNextAt, `${who} 下次探测的时刻`);
+    }
     // 候选查询里两者是一回事（额度用满才挂 quota-exhausted）。对不上说明输入拼错了：用满的池会被照派，
     // 不能按其中一边往下走。
     if ((r.quota === 'exhausted') !== r.blockers.includes('quota-exhausted')) {

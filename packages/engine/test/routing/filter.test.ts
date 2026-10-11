@@ -171,6 +171,19 @@ describe('探针在另一个组织挂着时没探的（skipped、probeOrg 是另
     expect(groupOf(blocks)).toEqual({ kind: 'hard' });
   });
 
+  // #1798 片 4：过期线改成读库里的 probe_next_at，晚于它 ROUTE_PROBE_OVERDUE_MINUTES 还没探到才算探针停了。
+  it('库里写了 probe_next_at：晚于它 20 分钟内还不算停（等），超过 20 分钟才算停（硬挡）', () => {
+    // 结论 40 分钟前下的，库里说下一次该探是那时之后 15 分钟（= 25 分钟前）。晚于 25 分钟但还在 20 分钟内：等
+    const next = at(-0.4 + 0.25); // 结论 at(-0.4) 之后 15 分钟
+    const waiting = blocksFor(skipped({ probedAt: at(-0.4), probeNextAt: next }), entry('car', 0), ctx());
+    expect(waiting[0]?.wait).toBe('probe');
+    // 库里说的下一次探是很久之前（这一列过期到超过 20 分钟）：探针真停了，硬挡
+    const stopped = blocksFor(skipped({ probedAt: at(-2), probeNextAt: at(-1.5) }), entry('car', 0), ctx());
+    expect(stopped.map((b) => b.code)).toEqual(['offline']);
+    expect(stopped[0]?.text).toContain('探针可能停了');
+    expect(groupOf(stopped)).toEqual({ kind: 'hard' });
+  });
+
   it('【故意造出的失败】别的不在线照老样子硬挡：探了没通、探针那时组织认不出、探的时候就是它的组织、没给结论', () => {
     for (const over of [
       { probeState: 'failed' as const },

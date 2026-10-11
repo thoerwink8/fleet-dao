@@ -3,15 +3,9 @@
 // 模型之间严格按用途顺序：往后挑只因额度用完（含留量线）、人关了或钉住别的、报错（探测不通、熔断）；
 // 不因为作者族、不因为本单之前用过哪一家而改顺序（冷验收验不了由冷验收自己兜，见 verifier-invoke.ts 的两家都验）。
 
-import {
-  probeCadenceMinutes,
-  ROUTE_PROBE_EVERY_MINUTES,
-  ROUTE_PROBE_STALE_MINUTES,
-  routeProbeStaleMinutes,
-} from '@fleet-dao/shared';
 import { blocksFor, type FilterContext, familyKey } from './filter.ts';
 import { type BlockGroup, groupOf } from './group.ts';
-import { duration, routeLabel, STAGE_NAMES, stamp } from './names.ts';
+import { routeLabel, STAGE_NAMES, stamp } from './names.ts';
 import { resolveRoutingPolicy } from './policy.ts';
 import { type Ranked, rank } from './rank.ts';
 import type {
@@ -78,7 +72,7 @@ export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
 
 /** 过滤、排序之后怎么选：任务指定的只看它；没配顺序、一条没配派不出；能派的派，全熔断放试探，其余等或派不出。 */
 function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResult {
-  const { policy, now } = ctx;
+  const { policy } = ctx;
   const stageName = STAGE_NAMES[input.stage];
   const factsOf = new Map(input.routes.map((r) => [r.routeId, r]));
   const fact = (id: string) => factsOf.get(id) as RouteFacts;
@@ -114,7 +108,7 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
           breakerTrial ? BREAKER_TRIAL : null,
         )
       : withNotes(whyFirst(stageName, chosen, judged), breakerTrial ? BREAKER_TRIAL : null);
-    return dispatch(route, why, trial, null, verdicts, now);
+    return dispatch(route, why, trial, null, verdicts);
   }
 
   const allOpen = allOpenTrial(judged);
@@ -123,20 +117,19 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
       `${stageName}阶段的候选路由全都熔断，多半是共用的一层坏了（本机网络、中转服务）：放最早到点的 ${routeLabel(allOpen.item.route)} 去试探`,
       quotaNote(allOpen.item.route),
     );
-    return dispatch(allOpen.item.route, why, 'all-open', why, verdicts, now);
+    return dispatch(allOpen.item.route, why, 'all-open', why, verdicts);
   }
 
   return waitOrNone(stageName, judged, verdicts);
 }
 
-/** 每条派出去的路径都经这里：理由末尾补上探针结论过期的那句（probeNote）。 */
+/** 每条派出去的路径都经这里。理由不必再补「探针结论过期」那句（#1798 片 4）：派前 15 分钟探一次保证了结论新。 */
 function dispatch(
   route: RouteFacts,
   why: string,
   trial: TrialKind | null,
   alarm: string | null,
   verdicts: RouteVerdict[],
-  now: number,
 ): ChooseRouteResult {
   return {
     kind: 'dispatch',
@@ -145,34 +138,11 @@ function dispatch(
     modelId: route.modelId,
     family: route.family,
     hostId: route.hostId,
-    why: withNotes(why, probeNote(route, now)),
+    why,
     trial,
     alarm,
     verdicts,
   };
-}
-
-/**
- * 派出去的这条路由的「在线」是探针多久前的结论（design 第九节「路由探针」）。超过 routeProbeStaleMinutes 没更新
- * （每轮都探的连着三轮没给新结论；放慢的执行方式按它的间隔再加两轮——探针可能停了）照上一次的结论派：探针是看门的，
- * 它自己坏了不该把活全挡住（额度没读成不挡是同一个道理，真坏了的路由由会话的失败分流兜住）；但理由里写明，不拿上一次的
- * 结论冒充现在。和驾驶舱标「探测过期」同一条线。
- */
-function probeNote(route: RouteFacts, now: number): string | null {
-  // 在线的一定有时刻（validate.ts 已拦）；派得出去的都在线。
-  // 退避、或结论写了隔 30 分钟再探：过期线按那一档加两轮，不把故意放慢写成探针停了。没写原文的仍按执行方式。
-  if (route.probedAt === null) return null;
-  // 按需探测的路由没有「在线」结论可过期：不主动探，派前探一次（#1635）
-  if (route.probeState === 'on_demand') return '按需，派前探一次';
-  const age = now - Date.parse(route.probedAt);
-  const limit = route.probeDetail
-    ? (probeCadenceMinutes(route.hostId, route.probeDetail) +
-        ROUTE_PROBE_STALE_MINUTES -
-        ROUTE_PROBE_EVERY_MINUTES) *
-      60_000
-    : routeProbeStaleMinutes(route.hostId) * 60_000;
-  if (age <= limit) return null;
-  return `在线是探针 ${duration(age)}前的结论，之后它没再给新结论（探针可能停了），照上一次的结论派`;
 }
 
 function verdictOf(j: Judged, index: number): RouteVerdict {
@@ -385,7 +355,7 @@ function chooseTaskRoute(input: ChooseRouteInput, route: RouteFacts, ctx: Filter
   const breakerTrial = route.breaker.admit === 'trial';
   const trial: TrialKind | null = breakerTrial ? 'breaker' : null;
   const why = withNotes(`任务指定的路由：${label}`, quotaNote(route), breakerTrial ? BREAKER_TRIAL : null);
-  return dispatch(route, why, trial, null, [verdict], ctx.now);
+  return dispatch(route, why, trial, null, [verdict]);
 }
 
 const BREAKER_TRIAL = '熔断半开，这一单当试探';

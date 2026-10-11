@@ -39,6 +39,7 @@ import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import { createEngineMasterGate, type EngineMasterGate } from '../engine-master.ts';
 import { foreignCanarySlugs } from '../jobs/canary-scope.ts';
+import { probeAssignedRoute } from '../jobs/dispatch-probe.ts';
 import { probeOrgNow } from '../jobs/route-probe.ts';
 import { routeProbeLock } from '../jobs/route-probe-now.ts';
 import type { InterruptedScheduleClose } from '../jobs/timers.ts';
@@ -78,6 +79,7 @@ import { productionMemoryPeak } from './memory-peak.ts';
 import { oneShotSessions } from './one-shot-sessions.ts';
 import { NO_FUSION_SESSIONS, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { orphanReaper } from './orphan-reap.ts';
+import type { AssignedProber } from './pick-then-probe.ts';
 import { type QuotaReadWiring, quotaReadJob } from './quota-read.ts';
 import { realReleaseEvidence } from './release-evidence.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
@@ -846,6 +848,9 @@ export function realPortsFromEnv(
   const reservations = realReservations({ db });
   // 派前探测不通时工作流放掉这次预占（#1409）：没进 runSegment，不能占到过期
   jobs.releaseReservation = (reservationId) => reservations.release(reservationId);
+  // 派前探测（#1798 片 4）：验收和整理选到一条就派前探一次，和动手那一段同一套（同一把锁，不让同一条路由同时起两个会话）；
+  // cursor、grok、mirasim 不再被 kept 放行，15 分钟新鲜线一律真探。
+  const probeAssigned: AssignedProber = (input) => probeAssignedRoute(routeProbe(), routeProbeLock, input);
   const runsDir = join(config.stateDir, 'runs');
   const tasks: EngineTasks = {
     ...createTaskActivities({ gh, trees, exec, log: taskLog }),
@@ -870,6 +875,7 @@ export function realPortsFromEnv(
       spawner: segmentSpawner,
       runs: taskRuns,
       reservations,
+      probe: probeAssigned,
       memoryAdmission: realMemoryAdmission(),
       runsDir,
       sessions: oneShots,
@@ -887,6 +893,7 @@ export function realPortsFromEnv(
     spawner: segmentSpawner,
     pickRoute: real.ports.pickRoute,
     sessions: oneShots,
+    probe: probeAssigned,
   });
   const evidence = realReleaseEvidence(extra.releasesDir ? { releasesDir: extra.releasesDir } : {});
   const drainControl: Omit<DrainControlDeps, 'drain' | 'log'> = {
