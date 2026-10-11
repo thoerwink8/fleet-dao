@@ -312,6 +312,22 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、顺手挂里程碑', ()
     expect(verbs(w.calls)).toEqual(['pr create', 'api --paginate', 'pr merge']);
   });
 
+  it('--no-issue + --body-file：需求栏里手写的创始人原话留着，只在开头插「无：<理由>」（#1890）', () => {
+    const body = [
+      '**做了什么**：x',
+      '',
+      '**需求**：<!-- 单号 -->',
+      '创始人原话（2026-10-11 03:48）：「我反馈的这些问题，触类旁通，你站在我的角度上去思考，然后去修复」',
+      '',
+    ].join('\n');
+    const w = world([CREATED, files('agents/shared-rules.md'), ok()], body, []);
+    expect(w.run('--founder-approved', '--no-issue', '改标准，随 PR 一起')).toBe(0);
+    const sent = w.bodies[0] ?? '';
+    expect(sent).toContain(`**需求**：无：改标准，随 PR 一起\n创始人原话（2026-10-11 03:48）`);
+    expect(sent).toContain('触类旁通');
+    expect(sent).not.toContain('<!-- 单号 -->');
+  });
+
   it('【故意造出的失败】--no-issue 理由是空的：退出码 1，不跑 gh', () => {
     for (const reason of ['', '   ']) {
       const w = world([], '**需求**：无\n');

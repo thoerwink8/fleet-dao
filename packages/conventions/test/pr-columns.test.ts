@@ -114,7 +114,7 @@ describe('需求栏挂单（#1052：pr:open 据此拒开没挂单的 PR）', () 
     expect(TEMPLATE).not.toContain('单号，如 #12；没有写「无」');
   });
 
-  it('withIssueColumn：整栏换掉（含模板提示），别的栏不动；没有这一栏就加在末尾', () => {
+  it('withIssueColumn：栏名那行换成「无：<理由>」，栏里原有的字留着；模板提示丢掉，别的栏不动；没有这一栏就加在末尾', () => {
     const body = '**做了什么**：x\n\n**需求**：<!-- 提示 -->\n\n**还欠什么**：无\n';
     const out = withIssueColumn(body, '无：一行文字修正');
     expect(prColumns(out).get('需求')).toBe('无：一行文字修正');
@@ -124,6 +124,35 @@ describe('需求栏挂单（#1052：pr:open 据此拒开没挂单的 PR）', () 
     const added = withIssueColumn('**做了什么**：x', '无：理由');
     expect(prColumns(added).get('需求')).toBe('无：理由');
     expect(prColumns(added).get('做了什么')).toBe('x');
+  });
+
+  it('withIssueColumn：需求栏里手写的原话段、说明原样留着（#1890：改标准的 PR 靠它证明创始人同意过）', () => {
+    const body = [
+      '**做了什么**：x',
+      '',
+      '**需求**：<!-- 提示 -->',
+      '这块要改。',
+      '',
+      '创始人原话（2026-10-11 03:48）：「触类旁通」',
+      '',
+      '**还欠什么**：无',
+      '',
+    ].join('\n');
+    const out = withIssueColumn(body, '无：理由');
+    expect(out).toBe(
+      [
+        '**做了什么**：x',
+        '',
+        '**需求**：无：理由',
+        '这块要改。',
+        '',
+        '创始人原话（2026-10-11 03:48）：「触类旁通」',
+        '',
+        '**还欠什么**：无',
+        '',
+      ].join('\n'),
+    );
+    expect(prColumns(out).get('还欠什么')).toBe('无');
   });
 
   it('withIssueColumn：需求栏下面另起一行的「人闸：改标准」留着，后面的栏也不动', () => {

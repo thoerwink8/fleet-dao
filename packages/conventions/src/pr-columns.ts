@@ -89,8 +89,9 @@ function columnSpans(body: string): ColumnSpan[] {
 }
 
 /**
- * 把「需求」栏整栏换成「**需求**：<value>」（没有这一栏就加在正文末尾）。`pnpm pr:open --no-issue "<理由>"` 把理由
- * 原样写进需求栏用；栏里原来的字（含模板提示）都被换掉，别的栏不动——只有「需求」栏下面另起一行的 GATE_LINE（人闸：改标准）留着。
+ * `pnpm pr:open --no-issue "<理由>"` 把理由写进「需求」栏：栏名那行换成「**需求**：<value>」，栏里原有的字
+ * （创始人原话段、说明、GATE_LINE「人闸：改标准」）按原顺序留在它下面——改标准的 PR 靠原话证明创始人同意过，
+ * 吞了就像没同意（#1890）。模板提示（HTML 注释）不算内容，丢掉；没有这一栏就整栏加在正文末尾，别的栏不动。
  */
 export function withIssueColumn(body: string, value: string): string {
   const line = `**${ISSUE_COLUMN}**：${value}`;
@@ -100,8 +101,11 @@ export function withIssueColumn(body: string, value: string): string {
   const lines = text.split('\n');
   let end = span.end;
   while (end > span.start + 1 && !lines[end - 1]?.trim()) end--; // 栏后面隔开下一栏的空行留着
-  const gate = lines.slice(span.start + 1, end).filter((l) => l.trim() === GATE_LINE);
-  lines.splice(span.start, end - span.start, line, ...gate);
+  // 栏里原有的行留着（空行也留：段与段之间靠它隔着）；只有整行都是模板提示（HTML 注释）的不算内容
+  const kept = lines.slice(span.start + 1, end).filter((l) => !l.trim() || stripComments(l).trim());
+  while (kept[0] !== undefined && !kept[0].trim()) kept.shift();
+  while (kept[kept.length - 1] !== undefined && !kept[kept.length - 1]?.trim()) kept.pop();
+  lines.splice(span.start, end - span.start, line, ...kept);
   return lines.join('\n');
 }
 
