@@ -197,13 +197,17 @@ test.describe('主页', () => {
     const home = (await api.get('/api/home')) as Home;
     expect(['down', 'off']).toContain(home.health.engine.state);
     await page.goto('/');
+    // 窄于 1440 三格收在「状态」按钮里（#1899），点开才看得见；够宽时直接摊在顶栏
+    const menu = page.locator('[data-health-menu]');
+    await expect(menu.or(page.locator('[data-health-chip]').first())).toBeVisible();
+    if (await menu.isVisible()) await menu.click();
     const chip = page.locator('[data-health-chip]', { hasText: '引擎进程' });
     await expect(chip).toBeVisible();
     if (home.health.engine.state === 'down') {
-      await expect(chip).toContainText('引擎进程没连上');
+      await expect(chip).toContainText('引擎进程 没连上');
       await expect(chip).toHaveAttribute('data-health-chip', 'bad');
     } else {
-      await expect(chip).toContainText('引擎进程已停用');
+      await expect(chip).toContainText('引擎进程 已停用');
       await expect(chip).toHaveAttribute('data-health-chip', 'warn');
     }
     await expect(chip).not.toContainText('正常');

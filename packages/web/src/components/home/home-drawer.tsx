@@ -200,12 +200,15 @@ export function HomeDrawer({
   done,
   remote,
   phone,
+  afterStrip,
   children,
 }: {
   decisions: readonly HomeDecision[];
   done: readonly HomeDone[];
   remote: boolean;
   phone: boolean;
+  /** 手机上排在「要你拍的」横条下面、看板上面的一条（状态摘要和刷新）：首屏第一眼是要你拍的。 */
+  afterStrip?: ReactNode;
   /** 画布（手机上是树形列表）。 */
   children: ReactNode;
 }) {
@@ -267,6 +270,7 @@ export function HomeDrawer({
           </span>
           <ChevronRight className="size-4 shrink-0 opacity-60" aria-hidden />
         </button>
+        {afterStrip}
         {children}
         <Sheet open={floating} onOpenChange={setFloating}>
           <SheetContent side="bottom" className="max-h-4/5 gap-0 rounded-t-lg p-0">

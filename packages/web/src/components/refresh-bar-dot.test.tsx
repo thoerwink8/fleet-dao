@@ -37,14 +37,20 @@ test('新鲜度点：推送断开直接红，哪怕数据刚读到；悬停写�
   expect(el?.getAttribute('title')).toMatch(/最后更新 \d{2}:\d{2}:\d{2}/);
 });
 
-test('新鲜度点：颜色类对应绿、黄、红，不再写「最后更新 刚刚」那行小字', () => {
-  const el = dot(30_000, 'open');
-  expect(el?.querySelector('.bg-st-done')).toBeTruthy();
+test('新鲜度：新鲜时不画没有字的绿点（只留给读屏）；旧了才出带字的标签，色按状态（#1899）', () => {
+  const fresh = dot(30_000, 'open');
+  expect(fresh?.getAttribute('data-tone')).toBe('done');
+  expect(fresh?.className).toContain('sr-only');
+  expect(fresh?.querySelector('[data-variant]')).toBeNull();
   expect(screen.queryByText(/最后更新/)).toBeNull();
   cleanup();
-  expect(dot(3 * MIN, 'open')?.querySelector('.bg-st-stall')).toBeTruthy();
+  const aging = dot(3 * MIN, 'open');
+  expect(aging?.getAttribute('data-tone')).toBe('wait');
+  expect(aging?.textContent).toBe('数据有点旧');
   cleanup();
-  expect(dot(10 * MIN, 'open')?.querySelector('.bg-st-fail')).toBeTruthy();
+  const stale = dot(10 * MIN, 'open');
+  expect(stale?.getAttribute('data-tone')).toBe('fail');
+  expect(stale?.textContent).toBe('数据已过期');
 });
 
 test('新鲜度点：刷新是图标按钮（没有文字），点了调用 onRefresh；从没读到过是红点', () => {
@@ -59,6 +65,7 @@ test('新鲜度点：刷新是图标按钮（没有文字），点了调用 onRe
     />,
   );
   expect(document.querySelector('[data-freshness]')?.getAttribute('data-freshness')).toBe('stale');
+  expect(document.querySelector('[data-freshness]')?.textContent).toBe('数据已过期');
   const button = screen.getByRole('button', { name: '刷新' });
   expect(button.textContent).toBe('');
   fireEvent.click(button);
