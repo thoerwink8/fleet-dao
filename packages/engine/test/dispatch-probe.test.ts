@@ -1,5 +1,6 @@
 // 派单前探测（#1409）：上一次结论超过 15 分钟才当场探；探不通换下一条；三条都不通就停下并写出每条结果。
 // 按量计费不探。故意造出的失败放最后：探针自己抛，按不通记，不写成通。
+import { readFileSync } from 'node:fs';
 import type { RouteProbeTarget } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import { probeAssignedRoute } from '../src/jobs/dispatch-probe.ts';
@@ -492,6 +493,29 @@ describe('派前探测', () => {
     }
     expect(called).toEqual(['claude-code', 'cursor-agent', 'grok', 'mirasim']);
     expect(h.saved.map((s) => s.trigger)).toEqual(['dispatch', 'dispatch', 'dispatch', 'dispatch']);
+  });
+
+  // 验收条 2：上面那条测试钉的是「行为」——四条路由都真探。行为对得上，源码里却仍可能留着一支按执行方式放行的旁路
+  // （只是这几条用例没走到），单看行为分不出来。所以再读 dispatch-probe.ts 的源码文本钉一次「没有这一支」：
+  // 它原先的样子是 planProbe 回 { kept: … } 时按上一次结论直接放行，靠 hostId / 探针原文分执行方式。这里断言裁判
+  // 只剩 freshOk 一处、且只认时刻，执行方式那些词一个都不在。
+  it('dispatch-probe.ts 里没有「按执行方式放行」那一支：不读 hostId、不读探针原文、裁判只有 freshOk', () => {
+    const src = readFileSync(new URL('../src/jobs/dispatch-probe.ts', import.meta.url), 'utf8');
+    // 读到了真源码：没有这个函数就是读错文件了，不能当「没有那一支」悄悄放过
+    expect(src).toContain('export async function probeAssignedRoute');
+    expect(src).toContain('function freshOk(');
+    // 那一支的特征词一个都不许在：kept 分支、按执行方式分、从探针原文抠节奏
+    expect(src).not.toMatch(/kept/);
+    expect(src).not.toMatch(/hostId/);
+    expect(src).not.toMatch(/probeDetail/);
+    expect(src).not.toMatch(/hostEvery|routeProbeEveryMinutes|routeProbeStaleMinutes|probeCadence/);
+    // 【故意造出的失败】把那一支的原文喂进来，上面这几条必须能命中——证明它们真在挑这个，不是恒真
+    const keptBranch =
+      "if ('kept' in plan) return pass(label, plan.kept, false);\nif (t.hostId === 'grok') {}";
+    expect(keptBranch).toMatch(/kept/);
+    expect(keptBranch).toMatch(/hostId/);
+    // 真探只由一个函数放行：只认时刻的那一处
+    expect(src.match(/function freshOk\(/g)?.length).toBe(1);
   });
 
   it('【故意造出的失败】探测本身抛错：按不通处理，不写成通', async () => {
