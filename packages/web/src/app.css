@@ -97,6 +97,7 @@
 
   /*
    * 字号六档（规范 6.2）：字号和行高绑在一起，页面不再另配 leading-数字。中文最小 12px（画布节点例外）。
+   * body、heading、title、display 四档读 --fs-* 变量（和密度令牌同一套写法）：手机（<48rem）的值在下面「字号」块的 :root，桌面（≥48rem）参照苹果 macOS HIG 的字阶在同一块的媒体查询里覆盖（#1882）。meta、canvas 两档两组一样，直接写值。下面的值是手机档：
    * meta 12/16：时间戳、表头、计数、标签里的字、辅助说明。
    * body 14/20：默认。列表行、表格、卡片正文、按钮、输入、菜单、段落（段落另加 leading-relaxed）。
    * heading 16/24：区块、卡片、抽屉、对话框标题。
@@ -106,17 +107,17 @@
    */
   --text-meta: 0.75rem;
   --text-meta--line-height: 1rem;
-  --text-body: 0.875rem;
-  --text-body--line-height: 1.25rem;
-  --text-heading: 1rem;
-  --text-heading--line-height: 1.5rem;
+  --text-body: var(--fs-body);
+  --text-body--line-height: var(--fs-body-lh);
+  --text-heading: var(--fs-heading);
+  --text-heading--line-height: var(--fs-heading-lh);
   --text-heading--font-weight: 600;
-  --text-title: 1.25rem;
-  --text-title--line-height: 1.75rem;
+  --text-title: var(--fs-title);
+  --text-title--line-height: var(--fs-title-lh);
   --text-title--font-weight: 600;
   --text-title--letter-spacing: -0.01em;
-  --text-display: 1.75rem;
-  --text-display--line-height: 2rem;
+  --text-display: var(--fs-display);
+  --text-display--line-height: var(--fs-display-lh);
   --text-display--font-weight: 600;
   --text-canvas: 0.6875rem;
   --text-canvas--line-height: 0.875rem;
@@ -244,10 +245,40 @@
 }
 
 /*
+ * ---------- 字号：两组值，桌面参照苹果 macOS HIG（#1882） ----------
+ * 第一个 @theme 是 inline，类名直接读这里的 --fs-*（和密度令牌同一套写法）。
+ * 手机（<48rem）：正文 14 起，可点区 40 不变。
+ * 桌面（md，48rem 起）：macOS 内置文字样式，Body 13/16、Callout 12/15、Title 3 15/20、Title 2 17/22、Title 1 22/26、Large Title 26/32。
+ * meta 两组都是 12/16：中文最小 12，行高不低于 16。页标题行高取 28：单行标题给汉字留足上下空。画布 text-canvas 不动。
+ */
+:root {
+  --fs-body: 0.875rem;
+  --fs-body-lh: 1.25rem;
+  --fs-heading: 1rem;
+  --fs-heading-lh: 1.5rem;
+  --fs-title: 1.25rem;
+  --fs-title-lh: 1.75rem;
+  --fs-display: 1.75rem;
+  --fs-display-lh: 2rem;
+}
+@media (width >= 48rem) {
+  :root {
+    --fs-body: 0.8125rem;
+    --fs-body-lh: 1rem;
+    --fs-heading: 0.9375rem;
+    --fs-heading-lh: 1.25rem;
+    --fs-title: 1.375rem;
+    --fs-title-lh: 1.75rem;
+    --fs-display: 1.625rem;
+    --fs-display-lh: 2rem;
+  }
+}
+
+/*
  * ---------- 密度：组件令牌的取值 ----------
  * 标准 32 / 40 / 16 / 24 / 12（控件高、行高、区块内边距、区块间距、区块内间距）。
  * 紧凑 28 / 32 / 12 / 16 / 8，只在桌面（md，48rem）起生效：手机上 40 的可点区（#1820）照旧，所以 390 宽两种密度完全一样。
- * 字号不跟着缩：中文最小 12、正文 14，紧凑只收框的高度和留白，不收字。
+ * 字号不跟着缩（字号看宽度，不看密度），紧凑只收框的高度和留白，不收字。
  * 写在 :root 而不是 [data-palette]：预览卡、陈列页这类嵌套的 data-palette 会继承外层的密度，不会被重置回标准。
  * 任何一棵子树挂 data-density 就按它自己的来（comfortable 也列在这里，用来在紧凑的页面里放一块标准的）。
  */
