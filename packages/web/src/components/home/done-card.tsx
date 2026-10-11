@@ -4,6 +4,7 @@ import { GitPullRequestArrow } from 'lucide-react';
 import { formatAgo } from '../../lib/format';
 import { useSlowNow } from '../../lib/hooks';
 import { cn } from '../../lib/utils';
+import { Section } from '../layout/section';
 import type { HomeDone } from './types';
 
 export function DoneCard({ item, className }: { item: HomeDone; className?: string }) {
@@ -13,7 +14,7 @@ export function DoneCard({ item, className }: { item: HomeDone; className?: stri
   const body = (
     <>
       <span
-        className="mt-1 grid size-6 shrink-0 place-items-center rounded-full bg-st-done/12 text-ink-done"
+        className="mt-1 grid size-6 shrink-0 place-items-center rounded-full bg-st-done-soft text-ink-done"
         aria-hidden
       >
         <GitPullRequestArrow className="size-3" />
@@ -23,17 +24,17 @@ export function DoneCard({ item, className }: { item: HomeDone; className?: stri
           {noTitle ? (
             // 任务标题、PR 标题都没读到（后端的退路是「PR #号」）：只写一次号，并照实说标题没读到
             <>
-              <span className="num text-sm font-medium">{prLabel}</span>
-              <span className="text-xs text-muted-foreground">（标题没读到）</span>
+              <span className="num text-body font-medium">{prLabel}</span>
+              <span className="text-meta text-muted-foreground">（标题没读到）</span>
             </>
           ) : (
             <>
-              <span className="num text-xs font-semibold text-muted-foreground">{prLabel}</span>
-              <span className="truncate text-sm font-medium">{item.title}</span>
+              <span className="num text-meta font-semibold text-muted-foreground">{prLabel}</span>
+              <span className="truncate text-body font-medium">{item.title}</span>
             </>
           )}
         </div>
-        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-meta text-muted-foreground">
           <span className="num">{item.repo}</span>
           <span aria-hidden>·</span>
           <span className="num">合于 {formatAgo(item.mergedAt, now)}</span>
@@ -41,18 +42,19 @@ export function DoneCard({ item, className }: { item: HomeDone; className?: stri
       </div>
     </>
   );
-  const cls =
-    'flex items-start gap-3 rounded-lg border px-3 py-2.5 transition-colors hover:border-border-strong';
+  const cls = 'flex items-start gap-3 px-3 py-2.5 transition-colors';
   return (
     <li data-done-card className={cn('block', className)}>
       {/* 没有链接时纯展示，不可点。 */}
-      {item.link ? (
-        <a href={item.link} target="_blank" rel="noreferrer" className={cls}>
-          {body}
-        </a>
-      ) : (
-        <div className={cls}>{body}</div>
-      )}
+      <Section flush>
+        {item.link ? (
+          <a href={item.link} target="_blank" rel="noreferrer" className={cn(cls, 'hover:bg-accent')}>
+            {body}
+          </a>
+        ) : (
+          <div className={cls}>{body}</div>
+        )}
+      </Section>
     </li>
   );
 }

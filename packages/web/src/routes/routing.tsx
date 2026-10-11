@@ -283,7 +283,7 @@ function PurposeList({
         className="inline-flex items-center gap-1.5"
       >
         <span className="sr-only">{purposeVerdictLabel[p.verdict]}：</span>
-        {purposeLabel(p.purpose)}
+        <span>{purposeLabel(p.purpose)}</span>
         {p.purpose === 'groom' ? (
           <span className="hidden text-meta font-normal text-muted-foreground lg:inline">
             这里配指挥官用的模型

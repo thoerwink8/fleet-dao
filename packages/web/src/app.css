@@ -52,7 +52,6 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
   --color-panel: var(--panel);
-  --color-canvas: var(--canvas);
   --color-brand: var(--brand);
   --color-brand-foreground: var(--brand-foreground);
 
@@ -684,7 +683,7 @@
   --xy-minimap-mask-stroke-color: var(--border-strong);
   --xy-minimap-mask-stroke-width: 1;
   --xy-attribution-background-color: transparent;
-  --xy-node-border-radius: 12px;
+  --xy-node-border-radius: var(--radius-lg);
 }
 .react-flow__node {
   cursor: pointer;
