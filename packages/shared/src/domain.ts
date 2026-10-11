@@ -264,6 +264,10 @@ export interface Route {
   probeFailStreak?: number;
   /** 上一次真探是 ping 还是 identity；没有 = 还没写过。 */
   probeKind?: RouteProbeKind;
+  /** 疑似换模型（#1846）：上一次身份题答中旧答案为 true、答中新答案为 false；没有 = 没判过。 */
+  suspectedSwap?: boolean;
+  /** 上一次真探是谁触发的（#1846）；没有 = 老行。 */
+  probeTrigger?: RouteProbeTrigger;
 }
 
 /** 路由探针按活跃分的三档（#1798）。 */

@@ -25,6 +25,7 @@ export function pgProbeHistory(db: Db): ProbeHistoryPort {
         responseText: row.responseText,
         checkQuestion: row.checkQuestion,
         checkExpected: row.checkExpected,
+        checkOldAnswer: row.checkOldAnswer,
         checkAnswer: row.checkAnswer,
         checkPassed: row.checkPassed,
         selfIdentity: row.selfIdentity,

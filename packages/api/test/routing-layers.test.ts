@@ -311,6 +311,34 @@ describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
     expect(untouched).not.toHaveProperty('probeKind');
   });
 
+  it('疑似换模型和上次触发者（#1846）：路由两层和路由目录都带；没判过的不给', async () => {
+    const h = await pgHarness(t, { routingLayers: pgRoutingLayers(t.db) });
+    current = h;
+    await setLayers({ execute: ['opus-5.5'] }, { 'opus-5.5': SAMPLE_MODELS['opus-5.5'] });
+    const { cookie } = await h.login();
+    const find = async () =>
+      (await layers(h, cookie)).purposes
+        .find((p) => p.purpose === 'execute')
+        ?.models[0]?.routes.find((r) => r.routeId === 'rt-claude-opus');
+    const old = await find();
+    expect(old).not.toHaveProperty('suspectedSwap');
+    expect(old).not.toHaveProperty('probeTrigger');
+
+    await t.db
+      .update(routes)
+      .set({ suspectedSwap: true, probeTrigger: 'manual' })
+      .where(eq(routes.id, 'rt-claude-opus'));
+    expect(await find()).toMatchObject({ suspectedSwap: true, probeTrigger: 'manual' });
+    const catalog = RoutingResponse.parse(
+      await (await h.cockpit.request('/api/routing', { headers: { cookie } })).json(),
+    );
+    expect(catalog.routes.find((r) => r.id === 'rt-claude-opus')).toMatchObject({
+      suspectedSwap: true,
+      probeTrigger: 'manual',
+    });
+    expect(catalog.routes.find((r) => r.id === 'rt-mirasim-kimi')).not.toHaveProperty('suspectedSwap');
+  });
+
   it('节奏列：三个字段都空、只有 probeFailStreak 写了非零值，也要原样给出（#1798 片 6）', async () => {
     current = await pgHarness(t, { routingLayers: pgRoutingLayers(t.db) });
     await setLayers({ execute: ['opus-5.5'] }, { 'opus-5.5': SAMPLE_MODELS['opus-5.5'] });
