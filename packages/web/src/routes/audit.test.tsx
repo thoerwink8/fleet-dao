@@ -197,9 +197,30 @@ describe('操作记录页：事件名翻成中文（#1821）', () => {
     const done = (await screen.findAllByText('探针探完'))[0];
     expect(done?.getAttribute('title')).toBe('routing.probe.done');
     expect(screen.queryByText('routing.probe.done')).toBeNull();
-    const raw = (await screen.findAllByText(/zzz\.never\.heard/))[0];
-    expect(raw?.textContent).toContain('（没翻译）');
-    expect(done?.textContent).not.toContain('（没翻译）');
+    // 认不出的键：显示默认译名「其他操作」，原键放等宽小字，页上任何地方都不写「没翻译」
+    const other = (await screen.findAllByText(/其他操作/))[0];
+    expect(other?.className).toContain('font-medium');
+    const key = screen.getByText('zzz.never.heard');
+    expect(key.className).toContain('font-mono');
+    expect(key.className).toContain('text-muted-foreground');
+    expect(document.body.textContent).not.toContain('没翻译');
+    expect(done?.textContent).not.toContain('zzz.never.heard');
+  });
+
+  test('「经引擎」不再逐行贴标签：来路放进下拉筛选，每行只在时间悬停里写', async () => {
+    renderApp(<AuditPage />);
+    await screen.findAllByText('派了会话');
+    // 页上不再有一排排「经引擎」标签（下拉里的选项不算行）
+    expect(screen.queryAllByText('经引擎').filter((el) => el.tagName !== 'OPTION')).toEqual([]);
+    const via = screen.getByRole('combobox', { name: '按来路筛选' });
+    const all = document.querySelectorAll('[data-audit-row]').length;
+    fireEvent.change(via, { target: { value: 'cockpit' } });
+    await waitFor(() => expect(document.querySelectorAll('[data-audit-row]').length).toBeLessThan(all));
+    expect(document.querySelectorAll('[data-audit-row]').length).toBeGreaterThan(0);
+    for (const row of document.querySelectorAll('[data-audit-row]')) {
+      expect(row.querySelector('[title*="· 经"]')).not.toBeNull();
+      expect(row.querySelector('[title*="经引擎"]')).toBeNull();
+    }
   });
 
   test('有对照的行能点进对应的单：task 对象旁有「打开」链接去任务页', async () => {

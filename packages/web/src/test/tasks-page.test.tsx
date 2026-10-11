@@ -242,6 +242,37 @@ describe('任务列表页', () => {
     expect(paused.getByText('验收')).toBeTruthy();
   });
 
+  test('花费列整列都读不到：不画花费列；单元格里不再写「更新」「开单」两个字（#1902）', async () => {
+    const api = createMockApi({ live: false });
+    api.tasks = async () => ({
+      items: [
+        row(1, { title: '甲单', cost: { usd: null, note: '没有会话' } }),
+        row(2, { title: '乙单', cost: { usd: null, note: '没有会话' }, prNumber: 7 }),
+      ],
+      counts: counts({ all: 2, running: 2 }),
+    });
+    open('/tasks', api);
+    const a = (await screen.findByText('甲单')).closest('a') as HTMLElement;
+    const header = document.querySelector('[data-list-header]') as HTMLElement;
+    expect(header.textContent).not.toContain('花费');
+    expect(header.textContent).toContain('更新');
+    expect(document.querySelector('[data-cost-empty]')).toBeNull();
+    expect(a.textContent).not.toContain('更新');
+    expect(a.textContent).not.toContain('开单');
+    // 开单时间还在，放进时间格的悬停
+    expect(a.querySelector('[title^="开单"]')).not.toBeNull();
+  });
+
+  test('任务表有宽度上限（--container-task-table），行是 ListRow（行高走令牌），不再手写 py-3', async () => {
+    open('/tasks');
+    const link = (await screen.findAllByRole('link')).find((l) =>
+      l.getAttribute('href')?.startsWith('/tasks/'),
+    );
+    expect(document.querySelector('[data-task-table]')?.className).toContain('max-w-task-table');
+    expect(link?.className).toContain('min-h-row');
+    expect(link?.className).not.toContain('py-3');
+  });
+
   test('花费读不到的行不出现没读到、有表头', async () => {
     const api = createMockApi({ live: false });
     api.tasks = async () => ({

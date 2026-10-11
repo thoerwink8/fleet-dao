@@ -14,6 +14,7 @@ import { brand } from '#brand';
 import { errorText, useRoutingEfforts, useUpdateRouteEffort } from '../api/client';
 import type { EffortModel, RouteEffort, SessionEffort } from '../api/types';
 import { EmptyState } from '../components/layout/empty-state';
+import { List, ListRow } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { Page } from '../components/layout/page';
 import { SearchInput } from '../components/layout/search-input';
@@ -79,7 +80,7 @@ const DEFAULT_VALUE = 'default';
 const EFFORTS_STALE_AFTER_MS = 5 * TIME.MIN;
 
 /** 一行四格：模型 | 路由 | 当前档位 | 改档位。窄屏两列两行：模型+路由一行，档位+下拉一行，不横滚。 */
-const ROW_GRID = 'grid grid-cols-2 items-center gap-x-3 gap-y-1.5 px-4 md:grid-cols-efforts';
+const ROW_GRID = 'grid w-full min-w-0 grid-cols-2 items-center gap-x-3 gap-y-1.5 md:grid-cols-efforts';
 
 export default function Efforts() {
   const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useRoutingEfforts();
@@ -172,7 +173,7 @@ export default function Efforts() {
             <Section flush>
               <div
                 aria-hidden
-                className={cn(ROW_GRID, 'border-b py-2 text-meta text-muted-foreground max-md:hidden')}
+                className={cn(ROW_GRID, 'border-b px-4 py-2 text-meta text-muted-foreground max-md:hidden')}
               >
                 <span>模型</span>
                 <span>路由</span>
@@ -287,7 +288,7 @@ function FamilyGroup({
         </span>
       </button>
       {open ? (
-        <ul id={bodyId}>
+        <List id={bodyId}>
           {rows.map(({ model, route }) => (
             <RouteRow
               key={route.routeId}
@@ -297,7 +298,7 @@ function FamilyGroup({
               fallback={fallback}
             />
           ))}
-        </ul>
+        </List>
       ) : null}
     </div>
   );
@@ -341,11 +342,11 @@ function FixedFold({
                 title={<span className="font-normal text-muted-foreground">{g.reason}</span>}
                 flush
               >
-                <ul>
+                <List>
                   {items.map(({ model, route }) => (
                     <FixedRouteRow key={route.routeId} model={model} route={route} />
                   ))}
-                </ul>
+                </List>
               </Section>
             );
           })}
@@ -386,7 +387,7 @@ function UncategorizedFold({
       />
       {open ? (
         <Section flush className="mt-2">
-          <ul id={bodyId}>
+          <List id={bodyId}>
             {rows.map(({ model, route }) => (
               <RouteRow
                 key={route.routeId}
@@ -397,7 +398,7 @@ function UncategorizedFold({
                 fallback={fallback}
               />
             ))}
-          </ul>
+          </List>
         </Section>
       ) : null}
     </section>
@@ -406,29 +407,27 @@ function UncategorizedFold({
 
 /** 配不了分组里的行：原因已在分组头，这里只写渠道和路由编号。 */
 function FixedRouteRow({ model, route: r }: { model: EffortModel; route: RouteEffort }) {
-  const title = `${r.channelName} · ${r.poolId}`;
   const name = isUncategorizedModel(model) ? readableModelName(model.modelId) : model.displayName;
   return (
-    <li
+    <ListRow
       data-route={r.routeId}
       data-model={model.modelId}
-      className={cn('border-b px-4 py-3 last:border-b-0', !r.enabled && 'bg-muted')}
-    >
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span
-          className="text-body font-medium"
-          title={isUncategorizedModel(model) ? model.modelId : undefined}
-        >
-          {name}
-        </span>
-        <span className="text-body text-muted-foreground">{title}</span>
-        <span className="text-meta text-muted-foreground">{hostLabel[r.hostId]}</span>
-        {r.enabled ? null : <StatusBadge tone="stop" label="关着" />}
-        <span className="num ml-auto truncate text-meta text-muted-foreground" title={r.model}>
-          {r.routeId}
-        </span>
-      </div>
-    </li>
+      summary={
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+          <span
+            className="text-body font-medium"
+            title={isUncategorizedModel(model) ? model.modelId : undefined}
+          >
+            {name}
+          </span>
+          <span className="text-body text-muted-foreground" title={`${r.poolId} · ${r.routeId}`}>
+            {r.channelName}
+          </span>
+          <span className="text-meta text-muted-foreground">{hostLabel[r.hostId]}</span>
+          {r.enabled ? null : <StatusBadge tone="stop" label="关着" />}
+        </div>
+      }
+    />
   );
 }
 
@@ -460,54 +459,57 @@ function RouteRow({
   };
 
   return (
-    <li
+    <ListRow
       data-route={r.routeId}
       data-model={modelId}
-      className={cn('border-t py-2.5 first:border-t-0', !r.enabled && 'bg-muted')}
-    >
-      <div className={ROW_GRID}>
-        <span className="min-w-0 truncate text-body font-medium" title={rawModelId ?? modelName}>
-          {modelName}
-        </span>
-        <span className="flex min-w-0 items-center gap-1.5 text-body text-muted-foreground">
-          <span className="truncate" title={`${title} · ${hostLabel[r.hostId]} · ${r.routeId}`}>
-            {title}
-          </span>
-          <span className="num shrink-0 text-meta text-muted-foreground max-md:hidden" title={r.model}>
-            {r.routeId}
-          </span>
-          {r.enabled ? null : <StatusBadge tone="stop" label="关着" />}
-        </span>
-        <span className="num text-body" aria-live="polite">
-          {update.isPending ? (
-            <span className="text-muted-foreground">改着…</span>
-          ) : effective?.configured ? (
-            <span className="font-medium">{effective.effort}</span>
-          ) : (
-            <span className="text-muted-foreground">默认（{effective?.effort ?? fallback}）</span>
-          )}
-        </span>
-        <Select value={shown ?? DEFAULT_VALUE} onValueChange={change} disabled={update.isPending}>
-          <SelectTrigger size="sm" className="w-full" aria-label={`${modelName} · ${title} 的思考档位`}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent position="popper" align="end">
-            <SelectItem value={DEFAULT_VALUE} title={`没配，用默认档 ${fallback}`}>
-              默认
-            </SelectItem>
-            {r.choices.map((e) => (
-              <SelectItem key={e} value={e} title={EFFORT_HINT[e]} className="num">
-                {e}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      {update.isError ? (
-        <p role="alert" className="mt-1.5 px-4 text-body text-ink-fail">
-          没改成：{errorText(update.error)}
-        </p>
-      ) : null}
-    </li>
+      summary={
+        <div className="min-w-0 flex-1">
+          <div className={ROW_GRID}>
+            <span className="min-w-0 truncate text-body font-medium" title={rawModelId ?? modelName}>
+              {modelName}
+            </span>
+            {/* 路由列只写渠道名和关着的状态；池号、路由号这类内部 id 放悬停，不占行宽（#1902） */}
+            <span className="flex min-w-0 items-center gap-1.5 text-body text-muted-foreground">
+              <span className="truncate" title={`${title} · ${hostLabel[r.hostId]} · ${r.routeId}`}>
+                {r.channelName}
+              </span>
+              <span className="shrink-0 text-meta text-muted-foreground max-md:hidden">
+                {hostLabel[r.hostId]}
+              </span>
+              {r.enabled ? null : <StatusBadge tone="stop" label="关着" />}
+            </span>
+            <span className="num text-body" aria-live="polite">
+              {update.isPending ? (
+                <span className="text-muted-foreground">改着…</span>
+              ) : effective?.configured ? (
+                <span className="font-medium">{effective.effort}</span>
+              ) : (
+                <span className="text-muted-foreground">默认（{effective?.effort ?? fallback}）</span>
+              )}
+            </span>
+            <Select value={shown ?? DEFAULT_VALUE} onValueChange={change} disabled={update.isPending}>
+              <SelectTrigger size="sm" className="w-full" aria-label={`${modelName} · ${title} 的思考档位`}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" align="end">
+                <SelectItem value={DEFAULT_VALUE} title={`没配，用默认档 ${fallback}`}>
+                  默认
+                </SelectItem>
+                {r.choices.map((e) => (
+                  <SelectItem key={e} value={e} title={EFFORT_HINT[e]} className="num">
+                    {e}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {update.isError ? (
+            <p role="alert" className="mt-1.5 text-body text-ink-fail">
+              没改成：{errorText(update.error)}
+            </p>
+          ) : null}
+        </div>
+      }
+    />
   );
 }

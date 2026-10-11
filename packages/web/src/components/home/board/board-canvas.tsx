@@ -12,7 +12,6 @@ import {
   Background,
   BackgroundVariant,
   type Edge,
-  getViewportForBounds,
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
@@ -73,6 +72,7 @@ import {
 } from './board-ui';
 import { DetailPanel } from './detail-panel';
 import { MIN_ZOOM } from './far-type';
+import { fitViewport } from './fit-view';
 import { layoutGraph, type Positions } from './layout';
 import {
   type BoardNodeData,
@@ -254,6 +254,9 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
   graphRef.current = graph;
 
   const [positions, setPositions] = useState<Positions | null>(null);
+  // positions 是按哪一版节点集合排出来的。换了过滤条件后新版还没排好时，positions 还是上一版的（节点 id 是它的子集），
+  // 这时不能拿它去收视野：量出来的是上一版稀疏的位置，收完又不再收，画面就偏了（#1899）
+  const [laidOutKey, setLaidOutKey] = useState('');
   const structureKey = graph.structureKey;
   const viewKey = `${stuck}:${needsYou}`;
   const fitted = useRef('');
@@ -272,6 +275,7 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
         if (!alive) return;
         setLayoutError(null);
         setPositions(p);
+        setLaidOutKey(g.structureKey);
       },
       (err: unknown) => {
         if (alive) setLayoutError(err instanceof Error ? err : new Error(String(err)));
@@ -318,7 +322,8 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
       const bottomSpace = Math.max(nowBox?.height ?? 0, mini?.height ?? 0) + gap * 2;
       // 详情面板、浮着的抽屉盖在右侧：收进视野时按它们的宽度留边，不把卡片收到它们底下
       const covered = overlayRightInset(el);
-      const fits = [
+      // 缩放不低于「卡内最小字 ≥12px」的下限，见 fit-view.ts
+      const vp = fitViewport(bounds, box, [
         { top, bottom: bottomSpace, left: 16, right: 16 + covered },
         {
           top,
@@ -326,13 +331,7 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
           left: (nowBox ? nowBox.right - box.left : 0) + gap,
           right: Math.max(mini ? box.right - mini.left : 0, covered) + gap,
         },
-      ].map((pad) => {
-        const w = Math.max(80, box.width - pad.left - pad.right);
-        const h = Math.max(80, box.height - pad.top - pad.bottom);
-        const vp = getViewportForBounds(bounds, w, h, 0.15, 1, 0.02);
-        return { ...vp, x: vp.x + pad.left, y: vp.y + pad.top };
-      });
-      const vp = fits.reduce((a, b) => (b.zoom > a.zoom ? b : a));
+      ]);
       void rf.setViewport(vp, { duration });
     },
     [positions, rf],
@@ -340,11 +339,11 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
 
   // 排好版、或换了过滤条件后，整体收进视野一次；之后不乱动用户的视角。
   useEffect(() => {
-    if (!positions || fitted.current === viewKey) return;
+    if (!positions || fitted.current === viewKey || laidOutKey !== structureKey) return;
     if (!graphRef.current.nodes.every((n) => positions.has(n.id))) return;
     fitted.current = viewKey;
     fitAll(450);
-  }, [positions, viewKey, fitAll]);
+  }, [positions, viewKey, fitAll, laidOutKey, structureKey]);
 
   const setParam = useCallback(
     (key: string, value: string | null) =>

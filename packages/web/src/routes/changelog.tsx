@@ -71,8 +71,7 @@ function CommitList({ commits, now }: { commits: Commits; now: number }) {
                 {c.event !== 'release' ? (
                   <StatusBadge tone="stall" variant="outline" icon={false} label={EVENT_TEXT[c.event]} />
                 ) : null}
-                <span>发于 {formatAgo(c.at, now)}</span>
-                <span className="sm:basis-full">{formatDateTime(c.at)}</span>
+                <span title={formatDateTime(c.at)}>发于 {formatAgo(c.at, now)}</span>
               </div>
             </div>
           }
@@ -86,22 +85,7 @@ function ReleasedCommitsPanel({ query }: { query: ReturnType<typeof useFranceRel
   const now = useNow();
   const data = query.data;
   return (
-    <Section
-      title="已发布的提交"
-      description={
-        <>
-          法国发过的主线提交，新的在前，读自法国的发布历史。要发新的，到
-          <Link
-            to="/france"
-            className="mx-0.5 underline underline-offset-2 max-md:inline-flex max-md:min-h-10 max-md:min-w-10 max-md:items-center max-md:justify-center"
-          >
-            法国
-          </Link>
-          页「在用版本」那一行点「发布到法国」。
-        </>
-      }
-      flush
-    >
+    <Section flush>
       {query.error ? (
         <div className="p-4">
           <LoadError what="已发布的提交" error={query.error} onRetry={() => void query.refetch()} />
@@ -129,7 +113,18 @@ export default function Changelog() {
   return (
     <Page
       title="更新日志"
-      description="法国已发布的提交，新的在前。"
+      description={
+        <>
+          法国已发布的提交，新的在前。要发新的，到
+          <Link
+            to="/france"
+            className="mx-0.5 underline underline-offset-2 max-md:inline-flex max-md:min-h-10 max-md:min-w-10 max-md:items-center max-md:justify-center"
+          >
+            法国
+          </Link>
+          页点「发布到法国」。
+        </>
+      }
       actions={
         <RefreshBar
           onRefresh={() => void refetch()}
