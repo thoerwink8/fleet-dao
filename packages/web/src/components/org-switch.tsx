@@ -196,7 +196,10 @@ export function OrgSwitchBanner({ view }: { view: OrgSwitchView | undefined }) {
           ))}
           {s.action ? (
             <li>
-              <Link to={s.action.to} className="underline underline-offset-2">
+              <Link
+                to={s.action.to}
+                className="inline-flex items-center underline underline-offset-2 max-md:min-h-10"
+              >
                 {s.action.label}
               </Link>
             </li>
