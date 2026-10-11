@@ -91,3 +91,33 @@ describe('自定义尺寸 token 放对命名空间', () => {
     );
   });
 });
+
+describe('组件令牌和密度（规范 2.7）', () => {
+  const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
+  const tokens = themeSizeTokens(css);
+  const VARS = ['control-h', 'row-h', 'section-p', 'section-gap', 'stack-gap'] as const;
+
+  /** 取一个选择器块里「--变量: 值」的字典。 */
+  function block(selector: string): Record<string, string | undefined> {
+    const at = css.indexOf(selector);
+    expect(at, `app.css 里没有 ${selector}`).toBeGreaterThan(-1);
+    const body = css.slice(css.indexOf('{', at) + 1, css.indexOf('}', at));
+    return Object.fromEntries([...body.matchAll(/--([a-z-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2]]));
+  }
+
+  test('五个令牌类认得：落在 --spacing-* 下', () => {
+    for (const name of ['control', 'row', 'section', 'section-gap', 'stack']) {
+      expect(tokens.get(name), name).toEqual(new Set(['spacing']));
+    }
+  });
+  test('标准 32/40/16/24/12，紧凑 28/32/12/16/8，紧凑只在桌面（48rem）起生效', () => {
+    const std = block(':root,\n[data-density="comfortable"]');
+    const compact = block('[data-density="compact"]');
+    expect(VARS.map((v) => std[v])).toEqual(['32px', '40px', '16px', '24px', '12px']);
+    expect(VARS.map((v) => compact[v])).toEqual(['28px', '32px', '12px', '16px', '8px']);
+    expect(css).toMatch(/@media \(width >= 48rem\) \{\s*\[data-density="compact"\]/);
+  });
+  test('紧凑不改字号', () => {
+    expect(Object.keys(block('[data-density="compact"]')).filter((k) => k.startsWith('text'))).toEqual([]);
+  });
+});
