@@ -68,6 +68,10 @@ export interface RouteCandidate {
   probeFailStreak: (typeof routes.$inferSelect)['probeFailStreak'];
   /** 上一次真探是 ping 还是 identity；空 = 还没写过。 */
   probeKind: (typeof routes.$inferSelect)['probeKind'];
+  /** 疑似换模型（#1846）：routes.suspected_swap；空 = 没判过。 */
+  suspectedSwap: (typeof routes.$inferSelect)['suspectedSwap'];
+  /** 上一次真探的触发者（#1846）：routes.probe_trigger；空 = 老行。 */
+  probeTrigger: (typeof routes.$inferSelect)['probeTrigger'];
   /**
    * unknown = 额度没读成或判不了：这个池从没读成过、最近一次读成或上游数据本身超过 30 分钟、适用的窗口已过清零点，
    * 或有窗口判不了扣不扣这条路由。派工原因里要写明「额度未知」。读成了、但没有扣这个模型的窗口，是 ok。
@@ -213,6 +217,8 @@ export async function evaluateRoutes(
       probeNextAt: route.probeNextAt,
       probeFailStreak: route.probeFailStreak,
       probeKind: route.probeKind,
+      suspectedSwap: route.suspectedSwap,
+      probeTrigger: route.probeTrigger,
       quota,
       windows,
       inFlight: running,

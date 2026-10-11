@@ -365,7 +365,10 @@ describe('身份题（#1798 片 5）', () => {
     const up = await row('carpool');
     expect(up).toMatchObject({ alive: true, probeState: 'ok', probeKind: 'identity' });
     expect(up?.probeDetail).toContain('身份题通过（日本首相）');
+    // 答中新答案：疑似换模型为假（#1846）
+    expect(up?.suspectedSwap).toBe(false);
     const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
+    expect(h?.checkOldAnswer).toBe(TEST_Q.oldAnswers.join('/'));
     expect(h).toMatchObject({
       result: 'passed',
       kind: 'identity',
@@ -394,7 +397,10 @@ describe('身份题（#1798 片 5）', () => {
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
     expect(down?.probeDetail).toContain('疑似换成旧模型');
     expect(down?.probeDetail).toContain('石破茂');
+    // 答中旧答案：疑似换模型为真，历史带旧答案原文（#1846）
+    expect(down?.suspectedSwap).toBe(true);
     const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
+    expect(h?.checkOldAnswer).toContain('石破茂');
     expect(h).toMatchObject({
       result: 'failed',
       checkAnswer: '石破茂',
@@ -416,7 +422,7 @@ describe('身份题（#1798 片 5）', () => {
     good = true;
     s.advance(60);
     await s.round();
-    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
+    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok', suspectedSwap: false });
     expect((await identityAlert())?.resolvedAt).not.toBeNull();
     expect((await iqAlert())?.resolvedAt).not.toBeNull();
   });

@@ -33,6 +33,8 @@ export const routeProbeHistory = pgTable(
     /** 降智检测（#1637），全部可空，老行不动。题面、标准答案、实答超长由写入方截断并标注。 */
     checkQuestion: text('check_question'),
     checkExpected: text('check_expected'),
+    /** 身份题的旧答案原文（#1846，旧答案几种写法用「/」拼）；没带题、老行为空。 */
+    checkOldAnswer: text('check_old_answer'),
     checkAnswer: text('check_answer'),
     /** 判过：true 答对、false 答错或没写第二行；空 = 没判（没带题、回答里没有第一行 OK）。 */
     checkPassed: boolean('check_passed'),

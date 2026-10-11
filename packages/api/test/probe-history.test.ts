@@ -119,6 +119,7 @@ describe('探针历史接口', () => {
       check: {
         question: '日本首相？',
         expected: '高市早苗',
+        oldAnswer: '石破茂/岸田文雄',
         answer: '石破茂',
         passed: false,
         selfIdentity: 'GPT',
@@ -130,6 +131,7 @@ describe('探针历史接口', () => {
     expect(last).toMatchObject({
       checkQuestion: '日本首相？',
       checkExpected: '高市早苗',
+      checkOldAnswer: '石破茂/岸田文雄',
       checkAnswer: '石破茂',
       checkPassed: false,
       selfIdentity: 'GPT',

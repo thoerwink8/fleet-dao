@@ -606,6 +606,60 @@ describe('节奏和种类列（#1798 片 2，只加列）', () => {
     ]);
   });
 
+  it('疑似换模型、上次触发者、旧答案原文（#1846）：身份题判过才写，认不出和没带题不动', async () => {
+    const check = (passed: boolean | null) => ({
+      question: '现任日本首相是谁？',
+      expected: '高市早苗',
+      oldAnswer: '石破茂/岸田文雄',
+      answer: '某人',
+      passed,
+      selfIdentity: null,
+    });
+    // 老行：全空
+    expect(await routeRow('car')).toMatchObject({ suspectedSwap: null, probeTrigger: null });
+
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'failed',
+      at: NOW,
+      detail: '疑似换成旧模型',
+      check: check(false),
+      trigger: 'manual',
+    });
+    expect(await routeRow('car')).toMatchObject({ suspectedSwap: true, probeTrigger: 'manual' });
+    expect(await readRouteProbeHistory(t.db, 'car', 1)).toMatchObject([
+      { checkOldAnswer: '石破茂/岸田文雄' },
+    ]);
+
+    // 认不出（passed 空）、没带题：不动
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'ok',
+      at: new Date(NOW.getTime() + MIN),
+      detail: 'ok',
+      check: check(null),
+    });
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'ok',
+      at: new Date(NOW.getTime() + 2 * MIN),
+      detail: 'ok',
+    });
+    expect(await routeRow('car')).toMatchObject({ suspectedSwap: true, probeTrigger: 'manual' });
+    expect(await readRouteProbeHistory(t.db, 'car', 1)).toMatchObject([{ checkOldAnswer: null }]);
+
+    // 答中新答案：为假
+    await saveRouteProbe(t.db, {
+      routeId: 'car',
+      state: 'ok',
+      at: new Date(NOW.getTime() + 3 * MIN),
+      detail: 'ok',
+      check: check(true),
+      trigger: 'scheduled',
+    });
+    expect(await routeRow('car')).toMatchObject({ suspectedSwap: false, probeTrigger: 'scheduled' });
+  });
+
   it('lastRunAt 取该路由 runs.started_at 的最大值；没有会话为空', async () => {
     const older = new Date(NOW.getTime() - 2 * MIN);
     const newer = new Date(NOW.getTime() - MIN);
