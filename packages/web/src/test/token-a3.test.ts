@@ -42,7 +42,7 @@ const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
   { file: 'routes/routing-status.tsx', snippet: 'lg:max-h-routing-pane' },
   { file: 'routes/routing-status.tsx', snippet: 'text-caption font-medium leading-5 text-ink-run' },
   { file: 'components/probe-log.tsx', snippet: 'size-2 shrink-0 rounded-2' },
-  { file: 'routes/changelog.tsx', snippet: 'grid grid-cols-changelog items-baseline' },
+  { file: 'routes/changelog.tsx', snippet: 'flex flex-wrap items-baseline' },
 ];
 
 /** 这 12 处用到的档位。why 必须出现在定义行往上 8 行里的注释中。 */
@@ -52,7 +52,6 @@ const TIERS: { name: string; why: string }[] = [
   { name: '--width-rail:', why: '3px' },
   { name: '--max-height-routing-pane:', why: '16rem' },
   { name: '--radius-2:', why: '2px' },
-  { name: '--grid-template-columns-changelog:', why: '8.5rem' },
 ];
 
 /** 这 12 处换掉之前的写死类名。五个文件里不能再出现。 */
@@ -63,6 +62,7 @@ const GONE = [
   'xl:max-h-[calc(100dvh-16rem)]',
   'rounded-[2px]',
   'grid-cols-[8.5rem_minmax(0,1fr)_auto]',
+  'grid-cols-changelog',
 ] as const;
 
 function source(rel: string): string {
