@@ -88,14 +88,11 @@ export const subagentMd = (name: string): string =>
   `---\nname: ${name}\ndescription: 测试用\nmodel: claude-haiku-5-5\ntools: Read, Grep\n---\n假的子代理正文\n`;
 export const SUBAGENT_MD = subagentMd('haiku55');
 /**
- * 假仓里的用户级子代理定义（仓内路径 → 原文）：路径和 targets.ts 的 SUBAGENT_TARGET 一样
- * （agents/subagents/haiku55.md、.claude/agents/fleet-*.md），内容是假的
+ * 假仓里的用户级子代理定义（仓内路径 → 原文）：agents/subagents/ 下 targets.ts 的 SUBAGENT_TARGET 列的每一份
+ * （haiku55.md 和 16 个 fleet-*.md），内容是假的
  */
 export const SUBAGENT_FILES: Record<string, string> = Object.fromEntries(
-  SUBAGENT_TARGET.files.map((rel) => [
-    rel,
-    subagentMd(rel.slice(rel.lastIndexOf('/') + 1).replace(/\.md$/, '')),
-  ]),
+  SUBAGENT_TARGET.files.map((file) => [`agents/subagents/${file}`, subagentMd(file.replace(/\.md$/, ''))]),
 );
 
 /**

@@ -1,6 +1,6 @@
-// 用户级子代理定义（#1393、决定 0079）：只装 SUBAGENT_TARGET 列的（agents/subagents/haiku55.md 和 .claude/agents/fleet-*.md），
-// 按文件名装进 ~/.claude/agents/，那里别的文件不碰；内容不一样先备份再覆盖、报出来；从名单里去掉的，清单里记着才撤；
-// 读不到、写不进都明确报出来，不当成没事。
+// 用户级子代理定义（#1393、决定 0079）：只装 SUBAGENT_TARGET 列了名字的（agents/subagents/ 下的 haiku55.md 和 16 个
+// fleet-* 通用版），~/.claude/agents/ 里别的文件不碰；仓里 .claude/agents/ 的项目级专属版不装；内容不一样先备份再覆盖、
+// 报出来；从名单里去掉的，清单里记着才撤；读不到、名单写错、写不进都明确报出来，不当成没事。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -8,7 +8,7 @@ import { Backups } from '../src/backup.ts';
 import { manifestPath, readManifest } from '../src/manifest.ts';
 import { exitCode } from '../src/report.ts';
 import { applySubagents, checkSubagents } from '../src/subagents.ts';
-import { SUBAGENTS_KEY } from '../src/sync.ts';
+import { SUBAGENTS_DIR } from '../src/sync.ts';
 import { type AgentId, SUBAGENT_TARGET } from '../src/targets.ts';
 import {
   cleanup,
@@ -29,8 +29,8 @@ import {
 afterEach(cleanup);
 
 const KEY = '~/.claude/agents/haiku55.md';
-/** 名单里每份装到家里的文件名（haiku55.md 和 16 个 fleet-*.md） */
-const NAMES = SUBAGENT_TARGET.files.map((rel) => rel.slice(rel.lastIndexOf('/') + 1));
+/** 名单里每份的文件名（haiku55.md 和 16 个 fleet-*.md），装到家里同名 */
+const NAMES = [...SUBAGENT_TARGET.files];
 const KEYS = NAMES.map((n) => `~/.claude/agents/${n}`);
 /** 清单里记的名字（写清单时排好序） */
 const SORTED = [...NAMES].sort();
@@ -74,12 +74,12 @@ function backedUp(home: string): string[] {
 }
 
 describe('名单', () => {
-  it('同步 haiku55（agents/subagents/）和 16 个 fleet-*（.claude/agents/，原件只这一处），装到 Claude Code 的用户级子代理目录', () => {
-    expect(SUBAGENT_TARGET.files[0]).toBe('agents/subagents/haiku55.md');
+  it('同步 agents/subagents/ 下的 haiku55 和 16 个 fleet-* 通用版，装到 Claude Code 的用户级子代理目录', () => {
+    expect(SUBAGENT_TARGET.files[0]).toBe('haiku55.md');
     const fleet = SUBAGENT_TARGET.files.slice(1);
     expect(fleet).toHaveLength(16);
-    for (const rel of fleet) expect(rel).toMatch(/^\.claude\/agents\/fleet-[a-z-]+\.md$/);
-    expect(new Set(NAMES).size, '家里的文件名不许重').toBe(NAMES.length);
+    for (const file of fleet) expect(file).toMatch(/^fleet-[a-z-]+\.md$/);
+    expect(new Set(NAMES).size, '文件名不许重').toBe(NAMES.length);
     expect(SUBAGENT_TARGET.dir).toEqual({ win32: '.claude\\agents', linux: '.claude/agents' });
     expect(SUBAGENT_TARGET.readers).toEqual(['claude']);
   });
@@ -104,10 +104,13 @@ describe('装', () => {
     expect(exitCode(after)).toBe(0);
   });
 
-  it('fleet-* 读的是仓里 .claude/agents/ 那一份（不是 agents/subagents/ 下的同名副本）', () => {
+  it('fleet-* 装的是 agents/subagents/ 下的通用版，不是仓里 .claude/agents/ 的项目级专属版', () => {
     const m = machine({
       ...SUBAGENT_FILES,
-      'agents/subagents/fleet-scout.md': subagentMd('fleet-scout').replace('假的子代理正文', '副本，不该装'),
+      '.claude/agents/fleet-scout.md': subagentMd('fleet-scout').replace(
+        '假的子代理正文',
+        '本仓专属版，不该装',
+      ),
     });
     m.apply();
     expect(get(m.home, '.claude/agents/fleet-scout.md')).toBe(SRC('fleet-scout.md'));
@@ -208,21 +211,42 @@ describe('读不到、写不进：明确报出来', () => {
   it('仓里没有 agents/subagents/haiku55.md：查是没查成，写是没做成，一个字不写', () => {
     const m = machine(null);
     const checked = m.check();
-    expect(kinds(checked, SUBAGENTS_KEY)).toEqual(['unknown']);
+    expect(kinds(checked, SUBAGENTS_DIR)).toEqual(['unknown']);
     expect(checked[0]?.text).toContain('仓里没有 agents/subagents/haiku55.md');
     expect(exitCode(checked)).toBe(2);
-    expect(kinds(m.apply(), SUBAGENTS_KEY)).toEqual(['failed']);
+    expect(kinds(m.apply(), SUBAGENTS_DIR)).toEqual(['failed']);
     expect(existsSync(join(m.home, '.claude'))).toBe(false);
   });
 
-  it('仓里少了一份 .claude/agents/fleet-*（检出不全）：整段没查成、一个不装，不少装（少装会让清单把它当成撤了）', () => {
-    const { '.claude/agents/fleet-reviewer.md': _gone, ...rest } = SUBAGENT_FILES;
-    const m = machine(rest);
+  it('仓里少了一份 fleet-* 通用版（检出不全）：整段没查成、一个不装，不少装（少装会让清单把它当成撤了）', () => {
+    const { 'agents/subagents/fleet-reviewer.md': _gone, ...rest } = SUBAGENT_FILES;
+    const m = machine({ ...rest, '.claude/agents/fleet-reviewer.md': subagentMd('fleet-reviewer') });
     const checked = m.check();
-    expect(kinds(checked, SUBAGENTS_KEY)).toEqual(['unknown']);
-    expect(checked[0]?.text).toContain('仓里没有 .claude/agents/fleet-reviewer.md');
-    expect(kinds(m.apply(), SUBAGENTS_KEY)).toEqual(['failed']);
+    expect(kinds(checked, SUBAGENTS_DIR)).toEqual(['unknown']);
+    expect(checked[0]?.text).toContain('仓里没有 agents/subagents/fleet-reviewer.md');
+    expect(kinds(m.apply(), SUBAGENTS_DIR)).toEqual(['failed']);
     expect(existsSync(join(m.home, '.claude'))).toBe(false);
+  });
+
+  it('【故意造出的失败】名单里同一个文件名列了两遍、或写成带目录的路径：整段没查成、一个不装', () => {
+    const target = SUBAGENT_TARGET as { files: readonly string[] };
+    const orig = target.files;
+    try {
+      for (const [files, why] of [
+        [[...orig, 'fleet-scout.md'], 'fleet-scout.md 列了两遍'],
+        [[...orig.slice(1), '.claude/agents/haiku55.md'], '带了目录'],
+      ] as const) {
+        target.files = files;
+        const m = machine();
+        const checked = m.check();
+        expect(kinds(checked, SUBAGENTS_DIR), why).toEqual(['unknown']);
+        expect(checked[0]?.text).toContain(why);
+        expect(kinds(m.apply(), SUBAGENTS_DIR)).toEqual(['failed']);
+        expect(existsSync(join(m.home, '.claude'))).toBe(false);
+      }
+    } finally {
+      target.files = orig;
+    }
   });
 
   it('仓里那份的 name 和文件名对不上：不装（装上去就是另一个名字，按名字派不到）', () => {
@@ -232,13 +256,16 @@ describe('读不到、写不进：明确报出来', () => {
     });
     const checked = m.check();
     expect(checked[0]?.text).toContain('name 是「haiku」，和文件名对不上');
-    expect(kinds(m.apply(), SUBAGENTS_KEY)).toEqual(['failed']);
+    expect(kinds(m.apply(), SUBAGENTS_DIR)).toEqual(['failed']);
     expect(existsSync(join(m.home, '.claude'))).toBe(false);
     const fleet = machine({
       ...SUBAGENT_FILES,
-      '.claude/agents/fleet-scout.md': subagentMd('fleet-scout').replace('name: fleet-scout', 'name: scout'),
+      'agents/subagents/fleet-scout.md': subagentMd('fleet-scout').replace(
+        'name: fleet-scout',
+        'name: scout',
+      ),
     });
-    expect(fleet.check()[0]?.text).toContain('.claude/agents/fleet-scout.md 的 name 是「scout」');
+    expect(fleet.check()[0]?.text).toContain('agents/subagents/fleet-scout.md 的 name 是「scout」');
   });
 
   it('清单坏了：查是没查成，写一个不动', () => {

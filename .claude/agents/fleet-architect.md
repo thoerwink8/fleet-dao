@@ -1,6 +1,6 @@
 ---
 name: fleet-architect
-description: 架构方案与取舍（Opus 5.5，只读 + 写方案）：新机制怎么设计、几种做法怎么选、重大改动的前提是否成立。出一份带推荐的方案，放 specs/<编号>-<短名>/方案.md。
+description: 架构方案与取舍（Opus 5.5，只读 + 写方案）：新机制怎么设计、几种做法怎么选、重大改动的前提是否成立。出一份带推荐的方案，写进交代指定的方案文件。
 model: claude-opus-5-5
 effort: high
 maxTurns: 50

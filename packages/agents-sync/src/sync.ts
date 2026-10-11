@@ -116,21 +116,23 @@ export function readSources(repo: string): { ok: true; value: Sources } | { ok: 
   };
 }
 
-/** 子代理原件整段读不到时报告里那一行的名字（原件分在 agents/subagents/ 和 .claude/agents/ 两处，具体哪份写在原因里） */
-export const SUBAGENTS_KEY = '仓里的子代理定义';
+/** 用户级子代理定义的原件在仓里的目录：只读 SUBAGENT_TARGET 列了名字的几份，不扫目录 */
+export const SUBAGENTS_DIR = 'agents/subagents';
 
 /**
- * SUBAGENT_TARGET 列的几份（仓内路径）：读不到不挡规矩和 skill（旧检出里还没有它），子代理那一段报没查成。
+ * agents/subagents/ 下列了名字的几份（haiku55 和 16 个 fleet-* 的通用版，决定 0079）：读不到不挡规矩和 skill
+ * （旧检出里还没有它），子代理那一段报没查成。
  * 一份读不到就整段不装：少装一份会让清单把已装的当成从名单里去掉了、撤掉。
  * frontmatter 里的 name 要和文件名对上：Claude Code 按 name 认子代理，对不上装上去就是另一个名字，按名字派不到。
- * 装到家里用文件名：两份文件名一样就分不清该装哪份，整段不装。
+ * 名单里同一个文件名列了两遍、或写成了带目录的路径，整段不装：说明名单写错了，装哪份都不对。
  */
 function readSubagents(repo: string): Sources['subagents'] {
   const files = new Map<string, string>();
-  for (const rel of SUBAGENT_TARGET.files) {
-    const file = rel.slice(rel.lastIndexOf('/') + 1);
-    if (files.has(file))
-      return { ok: false, why: `SUBAGENT_TARGET 里有两份都叫 ${file}，装到家里会互相覆盖` };
+  for (const file of SUBAGENT_TARGET.files) {
+    if (/[/\\]/.test(file))
+      return { ok: false, why: `SUBAGENT_TARGET 里的「${file}」带了目录，只认 ${SUBAGENTS_DIR}/ 下的文件名` };
+    if (files.has(file)) return { ok: false, why: `SUBAGENT_TARGET 里 ${file} 列了两遍，名单写错了` };
+    const rel = `${SUBAGENTS_DIR}/${file}`;
     let text: string;
     try {
       text = readFileSync(join(repo, ...rel.split('/')), 'utf8');

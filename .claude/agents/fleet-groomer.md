@@ -1,6 +1,6 @@
 ---
 name: fleet-groomer
-description: 审单与整理待办（Sonnet 5.5，只读）：逐张核对 open 的单——主线上做完没有、过期没有、该不该拆片、能不能交引擎——出结论和改好的单正文草稿，不动单。
+description: 审单与整理待办（Sonnet 5.5，只读）：逐张核对 open 的单——主线上做完没有、过期没有、该不该拆片、能不能直接交出去做——出结论和改好的单正文草稿，不动单。
 model: claude-sonnet-5-5
 effort: medium
 maxTurns: 60

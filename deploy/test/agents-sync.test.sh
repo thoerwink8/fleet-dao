@@ -55,11 +55,10 @@ chown "$U:$U" "$H/.codex/AGENTS.md"
 # 假仓：真的 AGENTS.md 和通用段原件（agents/shared-rules.md）加一个 skill、几个假钩子脚本（和 HOOK_TARGETS 登记的名字对上，缺一个就会被 missingScript
 # 拦下、settings.json 整份不写——只有 root 读得到，换身份之后才读原件的话，这里就读不到
 R=$T/repo
-mkdir -p "$R/agents/skills/demo" "$R/agents/hooks" "$R/agents/subagents" "$R/.claude/agents"
+mkdir -p "$R/agents/skills/demo" "$R/agents/hooks" "$R/agents/subagents"
 cp "$REPO/AGENTS.md" "$R/AGENTS.md"
-# 用户级子代理定义（#1393、决定 0079）：真的那几份，同步只装 targets.ts 的 SUBAGENT_TARGET 列了的
-cp "$REPO/agents/subagents/haiku55.md" "$R/agents/subagents/haiku55.md"
-cp "$REPO"/.claude/agents/fleet-*.md "$R/.claude/agents/"
+# 用户级子代理定义（#1393、决定 0079）：真的那几份（haiku55 和 16 个 fleet-* 通用版），同步只装 targets.ts 的 SUBAGENT_TARGET 列了的
+cp "$REPO"/agents/subagents/*.md "$R/agents/subagents/"
 cp "$REPO/agents/shared-rules.md" "$R/agents/shared-rules.md"
 printf -- '---\nname: demo\n---\n演示用的 skill\n' >"$R/agents/skills/demo/SKILL.md"
 printf '// 假的调工具前钩子\n' >"$R/agents/hooks/pretool.mjs"
@@ -97,10 +96,10 @@ check "清单记下了装过的 skill" "$(grep -c '"demo"' "$H/.fleet-dao/agents
 check "haiku55 子代理定义装进了 ~/.claude/agents、和仓里一样" \
   "$(cmp -s "$REPO/agents/subagents/haiku55.md" "$H/.claude/agents/haiku55.md" && echo 一样)" 一样
 same_fleet=0
-for f in "$REPO"/.claude/agents/fleet-*.md; do
+for f in "$REPO"/agents/subagents/fleet-*.md; do
   cmp -s "$f" "$H/.claude/agents/$(basename "$f")" && same_fleet=$((same_fleet + 1))
 done
-check "16 个 fleet-* 子代理定义也装进了 ~/.claude/agents、和仓里一样（决定 0079）" "$same_fleet" 16
+check "16 个 fleet-* 通用版也装进了 ~/.claude/agents、和仓里 agents/subagents/ 的一样（决定 0079）" "$same_fleet" 16
 # 替别的用户写：调工具前、Stop 那两条钩子照装（他家里就有 reclaude 的设备密钥，借道读这份设置的几家起的会话也要拦；
 # Stop 不需要会话、不用等自动发布），开会话那条不登记（它要在他自己能拉、能写的检出里快进、同步，法国的检出跟着自动发布走）
 check "钩子脚本拷进了他家" "$(cat "$H/.fleet-dao/hooks/pretool.mjs")" "// 假的调工具前钩子"
