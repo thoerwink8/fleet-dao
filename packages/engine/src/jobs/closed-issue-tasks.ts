@@ -1,6 +1,8 @@
-// 每小时对账的一部分（#1198）：单已经关了、任务工作流还在跑或停着，就给它发现成的「放弃」信号（走 taskAbandonSignal，不新造）。
-// 起因：#1182 被 PR 关掉了，它的任务还挂在「卡住了」，占着并发位（MAX_RUNNING_TASKS）、驾驶舱一直当异常报。
-// 只有一条规则：单关了才撤。读不到单的状态记「没查成」，不撤、不当成单还开着也不当成已关；工作流已经结束的收不到信号，不算问题。
+// 每小时对账的一部分（#1198 / #1816）：单已经关了、任务还停着等人（parked/stalled），就发「放弃」信号
+// （走 taskAbandonSignal，不新造），并撤掉「动手 N 轮都没过」那条挂起提醒，操作记录写「单已关，自动放弃」。
+// 起因：#1182 被 PR 关掉了还挂着；#1795 关单后停下等人的任务没人会再拍，巡查和提醒一直挂着。
+// 只有停下等人的才撤：还在跑（不是 parked）的不走这一支——人刚关单时会话可能还在交活。
+// 读不到单的状态记「没查成」，不撤、不当成单还开着也不当成已关；工作流已经结束的收不到信号，不算问题。
 
 import { LOCAL_LABEL, MOTHER_LABEL } from '@fleet-dao/conventions';
 import type { OpenTaskRow } from '@fleet-dao/db';
@@ -12,9 +14,10 @@ import type { ReconcileLog, SweepPart } from './reconcile-common.ts';
 
 export { parseTaskWorkflowId };
 
-/** 发「放弃」信号时记的「谁」「为什么」。 */
+/** 发「放弃」信号、撤挂起提醒时记的「谁」「为什么」。 */
 export const CLOSED_ISSUE_ABANDON_BY = 'engine:hourly-reconcile';
-export const CLOSED_ISSUE_ABANDON_REASON = '单已关闭';
+/** 放弃信号的 reason，也是撤提醒正文「已撤：」和操作记录里的那一句。 */
+export const CLOSED_ISSUE_ABANDON_REASON = '单已关，自动放弃';
 export const CLOSED_ISSUE_IDLE_STOP_REASON = '单已关闭，没有工作流在跑';
 export const NEVER_DISPATCHED_STOP_REASON = '单是母单或本机做，引擎不派';
 
@@ -22,6 +25,10 @@ export interface ClosedIssueTaskDeps {
   closedIssueTasks: {
     /** 在跑（含停着等人）的任务工作流编号，形如 task:<owner>/<repo>#<号> 或重做后的 :r2。列不出来照抛。 */
     runningTaskWorkflowIds(): Promise<string[]>;
+    /** 这个任务工作流是不是停着等人（phase = parked）。查不到照抛，不当成没挂着。 */
+    isParked(workflowId: string): Promise<boolean>;
+    /** 撤掉这个工作流还开着的挂起提醒（task:…:park:N）；why 进正文「已撤：」和操作记录。回实际新撤了几条。 */
+    resolveParkAlerts(workflowId: string, why: string): Promise<number>;
     /** 库里还没到终态的任务行。旧的测试装配可以不提供，真装配必须提供。 */
     openTaskRows?(): Promise<OpenTaskRow[]>;
     /** 把仍未到终态的任务行改成 stopped，返回实际改了几条。 */
@@ -54,6 +61,16 @@ export async function abandonClosedIssueTasks(deps: ClosedIssueTaskDeps): Promis
       continue;
     }
     const slug = `${ref.repo.owner}/${ref.repo.name}#${ref.issueNumber}`;
+
+    let parked: boolean;
+    try {
+      parked = await port.isParked(id);
+    } catch (err) {
+      part.unchecked.push(`${slug} 任务停没停着等人没查成，不动：${errMessage(err)}`);
+      continue;
+    }
+    if (!parked) continue;
+
     let state: 'open' | 'closed';
     try {
       state = await port.issueState(ref.repo, ref.issueNumber);
@@ -67,9 +84,19 @@ export async function abandonClosedIssueTasks(deps: ClosedIssueTaskDeps): Promis
         by: CLOSED_ISSUE_ABANDON_BY,
         reason: CLOSED_ISSUE_ABANDON_REASON,
       });
-      if (sent === 'sent') {
-        part.found += 1;
-        deps.log('info', '每小时对账：单已关闭，给还挂着的任务发了放弃信号', { workflowId: id });
+      if (sent !== 'sent') continue;
+      part.found += 1;
+      deps.log('info', '每小时对账：单已关且停下等人，给任务发了放弃信号', { workflowId: id });
+      try {
+        const resolved = await port.resolveParkAlerts(id, CLOSED_ISSUE_ABANDON_REASON);
+        if (resolved > 0) {
+          deps.log('info', '每小时对账：单已关，撤掉停下等人的提醒', {
+            workflowId: id,
+            resolved,
+          });
+        }
+      } catch (err) {
+        part.unchecked.push(`${slug} 单已关已放弃，挂起提醒没撤成：${errMessage(err)}`);
       }
     } catch (err) {
       part.unchecked.push(`${slug} 单已关闭，放弃信号没发成：${errMessage(err)}`);

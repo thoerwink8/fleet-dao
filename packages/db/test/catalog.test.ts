@@ -82,6 +82,24 @@ describe('目录配置 deploy/catalog.json（发布时装进库的真文件）',
     expect(result.unchanged).toBe(false);
   });
 
+  it('目录写了 identityCheck 就装进库为 true，没写为 false（#1798 片 2）', async () => {
+    await load();
+    const rows = await t.db.select({ id: channels.id, identityCheck: channels.identityCheck }).from(channels);
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r.identityCheck]));
+    expect(byId.mirasim).toBe(true);
+    expect(byId.cursor).toBe(false);
+    expect(byId['claude-sub']).toBe(false);
+    // 库里被改成 false 后，再装一次按目录对齐回来
+    await t.db.update(channels).set({ identityCheck: false }).where(eq(channels.id, 'mirasim'));
+    const again = await load();
+    expect(again.filled).toContain('channels.mirasim.identityCheck');
+    const [mira] = await t.db
+      .select({ identityCheck: channels.identityCheck })
+      .from(channels)
+      .where(eq(channels.id, 'mirasim'));
+    expect(mira?.identityCheck).toBe(true);
+  });
+
   it('装进空库，每张表的行数和样例对得上', async () => {
     const config = example();
     await load();

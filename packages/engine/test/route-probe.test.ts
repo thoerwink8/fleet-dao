@@ -32,6 +32,7 @@ function target(over: Partial<RouteProbeTarget> = {}): RouteProbeTarget {
     channelName: 'Claude 订阅',
     billing: 'subscription',
     channelEnabled: true,
+    identityCheck: false,
     poolId: 'claude-carpool',
     runAsUser: 'fleet-agent-carpool',
     orgKind: 'carpool',
@@ -41,6 +42,8 @@ function target(over: Partial<RouteProbeTarget> = {}): RouteProbeTarget {
     modelRetiredAt: null,
     inUse: true,
     alive: false,
+    lastRunAt: null,
+    failStreak: 0,
     previous: null,
     ...over,
   };

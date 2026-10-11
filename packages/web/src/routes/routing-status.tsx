@@ -13,7 +13,7 @@
 //   均耗时、可用率按这 60 格算。库读不到写「没查成」，不拿空格子冒充没有。引擎关着这一份照样读。
 
 import { PROBE_HISTORY_SLOTS, probeBackoffNotice, probeNextEveryMinutes } from '@fleet-dao/shared';
-import { ArrowLeft, ChevronDown, LoaderCircle, Radar, SatelliteDish } from 'lucide-react';
+import { ChevronDown, LoaderCircle, Radar, SatelliteDish } from 'lucide-react';
 import { type ReactNode, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { brand } from '#brand';
@@ -45,9 +45,11 @@ import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { PoolProblemLine, usePoolProblems } from '../components/pool-problem';
 import { ProbeLog } from '../components/probe-log';
 import { RefreshBar } from '../components/refresh-bar';
+import { MOBILE_MQ } from '../components/routing-browse';
 import { KindChip } from '../components/routing-kinds';
 import { StatusChip, StatusDot } from '../components/status';
 import { Button } from '../components/ui/button';
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '../components/ui/sheet';
 import {
   buildChannelCards,
   type ChannelCard,
@@ -56,7 +58,7 @@ import {
   routeKindMap,
 } from '../lib/channel-status';
 import { formatAgo, formatClock, formatIn, TIME } from '../lib/format';
-import { useNow } from '../lib/hooks';
+import { useMediaQuery, useNow } from '../lib/hooks';
 import { poolIsHeld } from '../lib/pool-holds';
 import type { PoolProblem } from '../lib/pool-problems';
 import {
@@ -87,6 +89,9 @@ const DESCRIPTION =
 
 /** 渠道目录每 30 秒自己重拉。超过 5 分钟还没再读成，刷新条才标「数据已过期」。 */
 const ROUTING_STATUS_STALE_AFTER_MS = 5 * TIME.MIN;
+
+/** 两栏（列表 + 详情）从 lg（1024）起；再窄只画列表，详情改抽屉（#1806）。 */
+const DRAWER_MQ = '(max-width: 1023px)';
 
 const STATE_WORD: Record<NonNullable<Route['probe']>['state'], { label: string; tone: Tone }> = {
   ok: { label: '通过', tone: 'done' },
@@ -158,7 +163,9 @@ export default function RoutingStatus() {
   const [routePick, setRoutePick] = useState<{ channelId: string; routeId: string } | null>(null);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<StateFilter>('all');
-  // 窄屏上列表和详情是两页：点一行进详情，点「返回」回列表（宽屏两栏并排，不看它）
+  // 不到 lg 只画列表，点一行开详情抽屉（宽屏两栏并排，不看它）；手机抽屉从底部上来，平板从右侧出来
+  const drawer = useMediaQuery(DRAWER_MQ);
+  const phone = useMediaQuery(MOBILE_MQ);
   const [detailOpen, setDetailOpen] = useState(() => params.has('p'));
 
   const poolHeld = useMemo(
@@ -267,6 +274,30 @@ export default function RoutingStatus() {
   const allActive = requests.some((r) => isActive(r) && r.routeIds === undefined);
   const fire = (routeIds?: string[]) => probeNow.mutate(routeIds ? { routeIds } : {});
 
+  const detail = current ? (
+    <ChannelDetail
+      key={current.channel.id}
+      card={current}
+      routes={allRoutes.filter((r) => r.channelId === current.channel.id)}
+      models={routing.data.models}
+      kinds={kinds}
+      problems={poolProblems}
+      problemsError={problemsError}
+      requests={requests}
+      blocked={blocked}
+      busy={probeNow.isPending}
+      now={now}
+      history={history}
+      focus={focus}
+      onPickCell={(cellId) => pickCell(current.channel.id, cellId)}
+      onPickRoute={(routeId) => {
+        setRoutePick({ channelId: current.channel.id, routeId });
+        setCellPick(null);
+      }}
+      onProbe={fire}
+    />
+  ) : null;
+
   return (
     <Page
       title="渠道状态"
@@ -307,8 +338,8 @@ export default function RoutingStatus() {
         error={probeNow.error}
         onDismissError={() => probeNow.reset()}
       />
-      <div className="grid items-start gap-4 xl:grid-cols-routing">
-        <div className={cn('min-w-0', detailOpen && 'hidden xl:block')}>
+      <div className="grid items-start gap-4 lg:grid-cols-routing">
+        <div className="min-w-0">
           <ChannelFilterBar
             search={search}
             onSearch={setSearch}
@@ -325,11 +356,11 @@ export default function RoutingStatus() {
               {filter !== 'all' ? `，筛选在「${STATE_FILTERS.find((f) => f.id === filter)?.label}」` : ''}
             </p>
           ) : (
-            // 桌面下列表最高换成 max-h-routing-pane。
-            <div className="xl:max-h-routing-pane xl:overflow-y-auto xl:pr-1">
+            // 两栏时列表最高换成 max-h-routing-pane。
+            <div className="lg:max-h-routing-pane lg:overflow-y-auto lg:pr-1">
               <ChannelList
                 cards={visible}
-                selected={picked ?? undefined}
+                selected={drawer && !detailOpen ? undefined : (picked ?? undefined)}
                 probing={probing}
                 problems={channelProblems}
                 now={now}
@@ -350,49 +381,35 @@ export default function RoutingStatus() {
             </li>
           </ul>
         </div>
-        <div className={cn('min-w-0', !detailOpen && 'hidden xl:block')}>
-          {current ? (
-            <>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="mb-2 xl:hidden"
-                onClick={() => setDetailOpen(false)}
-              >
-                <ArrowLeft aria-hidden />
-                返回渠道列表
-              </Button>
-              <ChannelDetail
-                key={current.channel.id}
-                card={current}
-                routes={allRoutes.filter((r) => r.channelId === current.channel.id)}
-                models={routing.data.models}
-                kinds={kinds}
-                problems={poolProblems}
-                problemsError={problemsError}
-                requests={requests}
-                blocked={blocked}
-                busy={probeNow.isPending}
-                now={now}
-                history={history}
-                focus={focus}
-                onPickCell={(cellId) => pickCell(current.channel.id, cellId)}
-                onPickRoute={(routeId) => {
-                  setRoutePick({ channelId: current.channel.id, routeId });
-                  setCellPick(null);
-                }}
-                onProbe={fire}
-              />
-            </>
-          ) : (
-            <p
-              role="status"
-              className="rounded-lg border border-dashed px-3 py-6 text-center text-sub text-muted-foreground"
+        {drawer ? (
+          // 不到 lg（手机、平板）只画列表：点一行从右侧（手机从底部）滑出详情抽屉，不再上下堆两栏（#1806）
+          <Sheet open={detailOpen && current !== undefined} onOpenChange={setDetailOpen}>
+            <SheetContent
+              side={phone ? 'bottom' : 'right'}
+              data-channel-drawer
+              className={cn('gap-0', phone ? 'max-h-9/10' : 'w-full sm:max-w-xl')}
             >
-              没有可看的渠道，换个搜索词或筛选
-            </p>
-          )}
-        </div>
+              <SheetHeader className="border-b py-3 pr-12">
+                <SheetTitle className="text-sm">渠道详情</SheetTitle>
+                <SheetDescription className="sr-only">
+                  这个渠道每条路由的状态、探测记录和立即探测
+                </SheetDescription>
+              </SheetHeader>
+              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">{detail}</div>
+            </SheetContent>
+          </Sheet>
+        ) : (
+          <div className="min-w-0">
+            {detail ?? (
+              <p
+                role="status"
+                className="rounded-lg border border-dashed px-3 py-6 text-center text-sub text-muted-foreground"
+              >
+                没有可看的渠道，换个搜索词或筛选
+              </p>
+            )}
+          </div>
+        )}
       </div>
     </Page>
   );

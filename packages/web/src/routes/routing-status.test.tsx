@@ -887,7 +887,6 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
     expect(screen.getByRole('heading', { name: /Grok/ })).toBeTruthy();
     expect(screen.queryByRole('heading', { name: /Claude 订阅/ })).toBeNull();
     expect(screen.getByRole('list', { name: 'Grok 的路由' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /返回渠道列表/ })).toBeTruthy();
   });
 
   test('任务断链后引擎自动排的立即探测（#1636）：顶上和路由行都写「任务 #N 断链后自动探」，不写成人点的', async () => {
@@ -931,7 +930,7 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
     expect(openRoute('r-grok').textContent).toContain('任务 #1621 断链后自动探');
   });
 
-  test('搜索没有匹配时，详情不再渲染渠道，改写空态；窄屏返回按钮不出现', async () => {
+  test('搜索没有匹配时，详情不再渲染渠道，改写空态', async () => {
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-claude' });
     await screen.findByRole('list', { name: '渠道状态' });
     await waitFor(() => expect(screen.getByRole('heading', { name: /Claude 订阅/ })).toBeTruthy());
@@ -943,20 +942,6 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
     expect(screen.queryByRole('heading', { name: /Claude 订阅/ })).toBeNull();
     expect(screen.queryByRole('heading', { level: 2 })).toBeNull();
     expect(screen.queryByRole('button', { name: '探这个渠道' })).toBeNull();
-    expect(screen.queryByRole('button', { name: /返回渠道列表/ })).toBeNull();
     expect(screen.queryByRole('list', { name: /的路由$/ })).toBeNull();
-  });
-
-  test('窄屏：点一行进详情页，返回回到列表（宽屏两栏并排，不看它）', async () => {
-    renderApp(<RoutingStatus />, { route: '/routing/status' });
-    await screen.findByRole('list', { name: '渠道状态' });
-    const back = () => screen.queryByRole('button', { name: /返回渠道列表/ });
-    fireEvent.click(within(card('ch-grok')).getByRole('button'));
-    await waitFor(() => expect(back()).toBeTruthy());
-    const listCol = screen.getByRole('list', { name: '渠道状态' }).closest('div.hidden, div.min-w-0');
-    expect(document.querySelector('.hidden.xl\\:block')).toBeTruthy();
-    expect(listCol).toBeTruthy();
-    fireEvent.click(back() as HTMLElement);
-    expect(screen.getByRole('list', { name: '渠道状态' }).closest('.hidden')).toBeNull();
   });
 });

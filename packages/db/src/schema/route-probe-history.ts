@@ -2,12 +2,17 @@
 // 不设外键：路由可以被删（探针这一轮里会碰到），历史不该挡住删除，也不该跟着被清掉。迁移只建这张表和索引。
 import { sql } from 'drizzle-orm';
 import { bigint, boolean, check, index, integer, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
+import { ROUTE_PROBE_KINDS, type RouteProbeKind } from './catalog.ts';
 
 const tz = { withTimezone: true, mode: 'date' } as const;
 
 /** 通过 = 探通（含额度用满仍算通）；不通 = 探了没通；没探 = 这一轮按规矩没探（插头没接、跳过）。 */
 export const ROUTE_PROBE_HISTORY_RESULTS = ['passed', 'failed', 'not_probed'] as const;
 export type RouteProbeHistoryResult = (typeof ROUTE_PROBE_HISTORY_RESULTS)[number];
+
+/** 谁触发的这一次探测（#1798 片 2）。空 = 老行，还没记下触发者。 */
+export const ROUTE_PROBE_TRIGGERS = ['scheduled', 'dispatch', 'manual', 'break', 'org-switch'] as const;
+export type RouteProbeTrigger = (typeof ROUTE_PROBE_TRIGGERS)[number];
 
 export const routeProbeHistory = pgTable(
   'route_probe_history',
@@ -33,6 +38,13 @@ export const routeProbeHistory = pgTable(
     checkPassed: boolean('check_passed'),
     /** 模型自报的厂家和型号，只记不判。 */
     selfIdentity: text('self_identity'),
+    /**
+     * 这一次真探的种类（#1798 片 2）：ping / identity。可空，老行留空。
+     * 取值约束和 routes.probe_kind 同一套（ROUTE_PROBE_KINDS）。
+     */
+    kind: text('kind').$type<RouteProbeKind>(),
+    /** 谁触发的：scheduled / dispatch / manual / break / org-switch。可空，老行留空。 */
+    trigger: text('trigger').$type<RouteProbeTrigger>(),
   },
   (t) => [
     index('route_probe_history_route_recent_idx').on(t.routeId, t.probedAt, t.id),
@@ -41,6 +53,14 @@ export const routeProbeHistory = pgTable(
     check(
       'route_probe_history_reason_matches_result',
       sql`(${t.result} = 'passed' and ${t.failureReason} is null) or (${t.result} <> 'passed' and coalesce(${t.failureReason}, '') <> '')`,
+    ),
+    check(
+      'route_probe_history_kind_known',
+      sql`${t.kind} is null or ${t.kind} in (${sql.raw(ROUTE_PROBE_KINDS.map((v) => `'${v}'`).join(', '))})`,
+    ),
+    check(
+      'route_probe_history_trigger_known',
+      sql`${t.trigger} is null or ${t.trigger} in (${sql.raw(ROUTE_PROBE_TRIGGERS.map((v) => `'${v}'`).join(', '))})`,
     ),
   ],
 );
