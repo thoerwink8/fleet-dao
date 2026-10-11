@@ -545,25 +545,25 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     expect(vendor.value).toBe('');
   });
 
-  test('顶部说明折成一行「怎么用」，点开才展开（手机和桌面一样）', async () => {
+  test('页头说明是真的一句话（不是「怎么用」占位），细则收进 ⓘ，点开才看（手机和桌面一样）', async () => {
     mockMobile();
     renderApp(<RoutingPage />, { route: '/routing' });
     await screen.findByRole('navigation', { name: '用途' });
+    expect(screen.queryByRole('button', { name: '怎么用' })).toBeNull();
     expect(screen.queryByText(/每个用途按顺序排哪些模型/)).toBeNull();
-    const toggle = screen.getByRole('button', { name: '怎么用' });
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    expect(screen.getByText(/每个用途按顺序排哪些模型/)).toBeTruthy();
+    fireEvent.click(document.querySelector('[data-description-hint]') as HTMLElement);
+    expect(await screen.findByText(/每个用途按顺序排哪些模型/)).toBeTruthy();
+    expect(screen.getByText(/每个用途里模型和渠道怎么排先后/)).toBeTruthy();
 
-    // 桌面也折起来：调整顺序的区域要占满页面主体高度，首屏留给顺序，不留给说明
+    // 桌面：一句说明直接写在标题下，细则还是在 ⓘ 里。调整顺序的区域要占满页面主体高度，首屏留给顺序
     cleanup();
     vi.restoreAllMocks();
     renderApp(<RoutingPage />, { route: '/routing' });
     await screen.findByRole('navigation', { name: '用途' });
+    expect(screen.getByText(/每个用途里模型和渠道怎么排先后/)).toBeTruthy();
     expect(screen.queryByText(/每个用途按顺序排哪些模型/)).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '怎么用' }));
-    expect(screen.getByText(/每个用途按顺序排哪些模型/)).toBeTruthy();
+    fireEvent.click(document.querySelector('[data-description-hint]') as HTMLElement);
+    expect(await screen.findByText(/每个用途按顺序排哪些模型/)).toBeTruthy();
   });
 
   test('手机宽度模型目录去掉内部定高滚动，行随页面滚；桌面仍是 440 高的窗口', async () => {

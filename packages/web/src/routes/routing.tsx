@@ -89,23 +89,8 @@ const ROUTING_STALE_AFTER_MS = 5 * TIME.MIN;
 /** 一句话的颜色：好消息不上色（只用灰），要看的才上色。 */
 const lineInk = (tone: Tone) => (tone === 'done' ? 'text-muted-foreground' : toneText[tone]);
 
-/** 说明折成一行「怎么用」，点开才展开：调整顺序的区域要占满页面主体高度，首屏留给顺序，不留给说明。 */
-function RoutingDescription() {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center text-left underline-offset-2 hover:underline max-md:min-h-10"
-      >
-        怎么用
-      </button>
-      {open ? <span className="mt-1 block">{DESCRIPTION}</span> : null}
-    </>
-  );
-}
+/** 页头一行说明；长的那段（DESCRIPTION）收进标题旁的 ⓘ：调整顺序的区域要占满页面主体高度，首屏留给顺序，不留给说明。 */
+const SUMMARY = '每个用途里模型和渠道怎么排先后，现在哪些派得出去。';
 
 export default function Routing() {
   const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useRoutingLayers();
@@ -119,21 +104,21 @@ export default function Routing() {
 
   if (error) {
     return (
-      <Page title="路由" description={<RoutingDescription />} keepDescription refresh={refresh}>
+      <Page title="路由" description={SUMMARY} detail={DESCRIPTION} refresh={refresh}>
         <LoadError what="路由两层" error={error} />
       </Page>
     );
   }
   if (isLoading || !data) {
     return (
-      <Page title="路由" description={<RoutingDescription />} keepDescription refresh={refresh}>
+      <Page title="路由" description={SUMMARY} detail={DESCRIPTION} refresh={refresh}>
         <LoadingRows rows={6} />
       </Page>
     );
   }
   if (data.unavailable) {
     return (
-      <Page title="路由" description={<RoutingDescription />} keepDescription refresh={refresh}>
+      <Page title="路由" description={SUMMARY} detail={DESCRIPTION} refresh={refresh}>
         <Section>
           <div role="note">
             <EmptyState icon={RouteIcon} title={data.unavailable} />
@@ -160,8 +145,8 @@ export default function Routing() {
   return (
     <Page
       title="路由"
-      description={<RoutingDescription />}
-      keepDescription
+      description={SUMMARY}
+      detail={DESCRIPTION}
       refresh={refresh}
       // 一个用途都没有时不报「0 个派不出去」：那会读成没事
       actions={purposes.length > 0 ? <Summary purposes={purposes} asOf={data.asOf} /> : undefined}
