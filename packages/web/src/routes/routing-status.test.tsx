@@ -733,7 +733,11 @@ describe('渠道状态页：探测记录（#1638）', () => {
     const cell = historyStrip().querySelector('[data-cell="2"]');
     expect(cell?.getAttribute('data-result')).toBe('doubt');
     expect(cell?.className).toContain('bg-st-doubt');
-    expect(historyStrip().textContent).toContain('橙疑似换模型');
+    // 颜色图例只留一份（#1922）：格子条下面那行「绿通过 · 红不通 · 橙疑似换模型」并进探测记录的图例，
+    // 图例里橙色色块就叫「疑似换模型」（原断言：格子条文字含「橙疑似换模型」）
+    const legend = document.querySelector('[data-probe-log="legend"]') as HTMLElement;
+    expect(legend.textContent).toContain('疑似换模型：身份题说出了旧答案');
+    expect(legend.querySelector('.bg-st-doubt')).toBeTruthy();
   });
 
   test('身份题那一行展开：题、新答案、旧答案、实答、自报身份；折叠时不铺；连通那行没有题', async () => {

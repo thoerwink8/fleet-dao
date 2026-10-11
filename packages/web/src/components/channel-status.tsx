@@ -30,7 +30,7 @@ import { usePhone } from '../lib/viewport';
 import { FilterTabs } from './layout/filter-tabs';
 import { List, ListRow } from './layout/list';
 import { SearchInput } from './layout/search-input';
-import { StatusBadge, StatusDot } from './layout/status-badge';
+import { StatusBadge } from './layout/status-badge';
 
 /** 渠道卡上的探针历史：读不到和还没有是两回事。 */
 export type ChannelHistory =
@@ -203,7 +203,7 @@ function ChannelRow({
           onClick={onPick}
           aria-current={selected ? 'true' : undefined}
           aria-label={`${c.channel.name}：${c.interrupted ? '检测中断' : c.label}，${summary.join('，')}`}
-          className="-mx-4 -my-2.5 flex flex-1 items-center gap-3 px-4 py-2.5 text-left outline-none hover:bg-accent focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-11"
+          className="-mx-4 -my-2.5 flex min-w-0 flex-1 items-center gap-3 px-4 py-2.5 text-left outline-none hover:bg-accent focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-11"
         >
           <span
             title={c.rank ? `顺位第 ${c.rank}` : '没排进顺位'}
@@ -212,21 +212,31 @@ function ChannelRow({
             {c.rank ?? '–'}
             <span className="sr-only">{c.rank ? `顺位第 ${c.rank}` : '没排进顺位'}</span>
           </span>
-          <StatusDot tone={c.tone} />
+          {/* 一行一个名字一个状态（点加字，状态点不再单独画一遍）；下面一行小字不折，整句在悬停里（样板 #1914） */}
           <span className="min-w-0 flex-1">
-            <span className="flex items-center gap-2">
-              <span className={cn('truncate text-body font-semibold', quiet && 'text-muted-foreground')}>
+            {/* 名字是认渠道的那一样，不截断：真放不下（320 宽加长状态）宁可状态换到下一行 */}
+            <span className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-0.5">
+              <span className={cn('text-body font-medium break-words', quiet && 'opacity-60')}>
                 {c.channel.name}
               </span>
-              <StatusBadge tone={c.tone} label={c.label} className={cn(c.interrupted && 'font-semibold')} />
+              <StatusBadge
+                tone={c.tone}
+                label={c.label}
+                variant="dot"
+                className={cn('shrink-0', c.interrupted && 'font-semibold')}
+              />
               {probing ? (
-                <span className="inline-flex items-center gap-1 text-meta text-ink-run">
+                <span className="inline-flex shrink-0 items-center gap-1 text-meta text-ink-run">
                   <LoaderCircle className="size-3 animate-spin" aria-hidden />
                   探测中
                 </span>
               ) : null}
             </span>
-            <span className="num mt-0.5 line-clamp-2 block break-words text-meta text-muted-foreground">
+            <span
+              data-row-meta
+              title={summary.join(' · ')}
+              className="num mt-0.5 block truncate whitespace-nowrap text-meta text-muted-foreground"
+            >
               {summary.join(' · ')}
             </span>
           </span>
@@ -284,7 +294,11 @@ export function HistoryStrip({
   const empties = emptySlotKeys(channelId, PROBE_HISTORY_SLOTS - cells.length);
   return (
     <div data-history="strip" data-channel-history={channelId} className="mb-3">
-      <p data-history-stats className="num text-meta text-muted-foreground">
+      <p
+        data-history-stats
+        title="近 60 次真探的均耗时和可用率；没真探的不进可用率，在下面的探测记录里折着"
+        className="num truncate whitespace-nowrap text-meta text-muted-foreground"
+      >
         近 60 次真探 · 均耗时 {formatProbeMs(strip?.avgDurationMs ?? null)} · 可用率{' '}
         {formatAvailability(strip?.passed ?? 0, strip?.attempted ?? 0)}
         {skippedCount > 0 ? ` · 另有 ${skippedCount} 条没真探，折在下面` : ''}
@@ -342,9 +356,8 @@ export function HistoryStrip({
           );
         })}
       </div>
-      <p className="mt-1 text-meta text-muted-foreground">
-        {cells.length === 0 ? '还没有真探 · ' : null}绿通过 · 红不通 · 橙疑似换模型（身份题说出了旧答案）
-      </p>
+      {/* 颜色的图例在下面探测记录的图例里（同一套颜色，原来这里又写一遍），这里只在一格都没有时说一句 */}
+      {cells.length === 0 ? <p className="mt-1 text-meta text-muted-foreground">还没有真探</p> : null}
     </div>
   );
 }

@@ -8,6 +8,54 @@ import { renderApp } from '../test/harness';
 
 afterEach(cleanup);
 
+describe('渠道状态页照路由页样板（#1922）', () => {
+  test('详情顶上三行结论块：渠道名、一句结论加状态、灰字细节；三行都不折', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-claude' });
+    const hero = await waitFor(() => {
+      const el = document.querySelector('[data-channel-hero]');
+      if (!(el instanceof HTMLElement)) throw new Error('结论块还没出来');
+      return el;
+    });
+    expect(hero.querySelector('h2')?.textContent).toBe('Claude 订阅');
+    const line = hero.querySelector('[data-hero-line]') as HTMLElement;
+    expect(line.textContent).toMatch(/条路都在线/);
+    expect(line.textContent).toContain('在线');
+    expect(line.className).toContain('whitespace-nowrap');
+    const notes = hero.querySelector('[data-hero-notes]') as HTMLElement;
+    expect(notes.className).toContain('truncate');
+    expect(notes.getAttribute('title')).toBe(notes.textContent);
+    expect(notes.textContent).toMatch(/订阅 · \d+ 条路由/);
+    // 「探这个渠道」在结论块第一行右边
+    expect(hero.querySelector('button')?.textContent).toContain('探这个渠道');
+  });
+
+  test('路由行：名字加一个状态，小字一行不折（路由号、上次、下次）；行尾「⋯」里有立即探测、看最近一次', async () => {
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-relay' });
+    const row = await waitFor(() => {
+      const el = document.querySelector('[data-route="r-rl-kimi"]');
+      if (!(el instanceof HTMLElement)) throw new Error('路由行还没出来');
+      return el;
+    });
+    // 不再是一行一个圆角框
+    expect(row.className).not.toContain('rounded-lg');
+    const meta = row.querySelector('[data-route-meta]') as HTMLElement;
+    expect(meta.className).toContain('whitespace-nowrap');
+    expect(meta.textContent).toContain('r-rl-kimi');
+    expect(meta.querySelector('[data-probe-last]')).toBeTruthy();
+    expect(meta.getAttribute('title')).toContain('上次');
+    const menu = row.querySelector('[data-row-menu]') as HTMLElement;
+    expect(menu.getAttribute('aria-label')).toContain('更多操作');
+    fireEvent.pointerDown(menu, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+    const items = await waitFor(() => {
+      const found = Array.from(document.querySelectorAll('[role="menuitem"]')).map((m) => m.textContent);
+      if (found.length === 0) throw new Error('菜单还没开');
+      return found;
+    });
+    expect(items.some((t) => t?.startsWith('立即探测'))).toBe(true);
+    expect(items).toContain('看最近一次');
+  });
+});
+
 describe('渠道状态页：报错进可展开的提醒', () => {
   test('故障渠道：头部是中文结论，探针原文在默认收着的提醒里，头部不直接露原文', async () => {
     renderApp(<RoutingStatus />, { route: '/routing/status' });

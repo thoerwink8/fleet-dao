@@ -93,11 +93,8 @@ export function ProbeLog({
   const modelNameOf = (cell: ProbeHistoryCell) =>
     models.find((m) => m.id === routes.find((r) => r.id === cell.routeId)?.modelId)?.displayName;
   return (
-    <section aria-label="探测记录" className="mb-4">
-      <h3 className="text-body font-semibold">探测记录</h3>
-      <p className="mb-2 text-meta text-muted-foreground">
-        最近 60 次真探，从新到旧；每条路由自己的最近一次也在里面。点一行看请求和响应原文。没真探的另折在下面。
-      </p>
+    // 标题和「最近 60 次真探、从新到旧、点一行看原文」那句说明在外面的区块头上（渠道状态页 #1922），这里不再写一遍
+    <section aria-label="探测记录" className="mt-3">
       <ul
         data-probe-log="legend"
         aria-label="图例"
@@ -112,7 +109,7 @@ export function ProbeLog({
       </ul>
       {routeMissing ? <p className="mb-2 text-meta text-ink-stall">这条路由还没有探针历史</p> : null}
       {rows.length === 0 ? (
-        <div role="status" data-probe-log="empty" className="rounded-lg border">
+        <div role="status" data-probe-log="empty" className="border-y">
           <EmptyState
             size="inline"
             title={
@@ -124,10 +121,11 @@ export function ProbeLog({
         </div>
       ) : (
         <>
+          {/* 一行一次探测，行间只有细线，不再一行一个圆角框（样板 #1914） */}
           <ol
             data-probe-log="list"
             aria-label="探测记录列表"
-            className="max-h-routing-pane space-y-1.5 overflow-y-auto pr-1"
+            className="max-h-routing-pane divide-y divide-border overflow-y-auto border-y"
           >
             {rows.slice(0, shownCount).map((cell) => (
               <ProbeLogRow
@@ -190,7 +188,7 @@ function SkippedFold({
         <ol
           id="probe-log-skipped"
           aria-label="没真探的记录"
-          className="mt-1.5 max-h-routing-pane space-y-1.5 overflow-y-auto pr-1"
+          className="mt-1.5 max-h-routing-pane divide-y divide-border overflow-y-auto border-y"
         >
           {skipped.map((cell) => (
             <ProbeLogRow
@@ -233,30 +231,28 @@ function ProbeLogRow({
       ref={ref}
       data-probe-row={cell.id}
       data-result={kind}
-      className={cn(
-        'min-w-0 rounded-lg border',
-        kind === 'failed' && 'border-st-fail-line',
-        kind === 'doubt' && 'border-st-doubt-line',
-        open && 'ring-2 ring-ring',
-      )}
+      // 行间细线、展开或选中的那行铺选中底，不再一行一个描色的圆角框；结论靠行首的状态（点加字）说
+      className={cn('min-w-0', open && 'bg-selected')}
     >
+      {/* 一行不折：结论、时刻、模型名、路由号（放不下截断）、来源、耗时；手机上来源收进展开 */}
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={open}
         aria-controls={bodyId}
-        className="flex min-h-10 w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-1.5 text-left"
+        title={`${formatDateTime(cell.probedAt)} ${modelName ?? cell.routeId} ${cell.routeId}${source ? ` ${source}` : ''}`}
+        className="flex min-h-10 w-full items-center gap-2 whitespace-nowrap px-2 py-1.5 text-left hover:bg-accent max-md:min-h-11"
       >
-        <ProbeKindChip kind={kind} />
-        <span className="num text-meta text-muted-foreground">{formatDateTime(cell.probedAt)}</span>
-        <span className="text-body font-semibold">{modelName ?? cell.routeId}</span>
-        <span className="num min-w-0 flex-1 basis-24 truncate text-meta text-muted-foreground">
-          {cell.routeId}
+        <span className="w-22 shrink-0">
+          <StatusBadge tone={PROBE_KIND_WORD[kind].tone} label={PROBE_KIND_WORD[kind].label} variant="dot" />
         </span>
+        <span className="num shrink-0 text-meta text-muted-foreground">{formatDateTime(cell.probedAt)}</span>
+        <span className="shrink-0 text-body font-medium">{modelName ?? cell.routeId}</span>
+        <span className="num min-w-0 flex-1 truncate text-meta text-muted-foreground">{cell.routeId}</span>
         {source || legacy ? (
           <span
             data-field="source"
-            className="inline-flex shrink-0 items-center gap-1.5 text-meta text-muted-foreground"
+            className="inline-flex shrink-0 items-center gap-1.5 text-meta text-muted-foreground max-md:hidden"
           >
             {source}
             {legacy ? (
@@ -273,7 +269,14 @@ function ProbeLogRow({
         />
       </button>
       {open ? (
-        <div id={bodyId} className="min-w-0 border-t px-3 pb-3 pt-2.5">
+        <div id={bodyId} className="min-w-0 px-2 pb-3 pt-1">
+          {source || legacy ? (
+            // 行上的来源（种类、触发者）手机上放不下：展开后写在这里
+            <p data-field="source-narrow" className="mb-2 text-meta text-muted-foreground md:hidden">
+              {source}
+              {legacy ? '（旧版降智题）' : null}
+            </p>
+          ) : null}
           {hasCheck || cell.selfIdentity !== null ? (
             <div data-field="check" className="mb-3">
               <KeyValue layout="grid" cols={2} items={checkItems(cell)} />
