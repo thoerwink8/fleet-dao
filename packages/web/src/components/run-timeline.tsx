@@ -4,10 +4,11 @@ import { formatClock, formatDuration } from '../lib/format';
 import { isRunning, queueMs, type Tone, toneBg, workMs } from '../lib/status';
 import { costParts, runUsage, tokenParts } from '../lib/usage';
 import { cn } from '../lib/utils';
+import { StatusBadge } from './layout/status-badge';
 import { RouteLabel } from './route-label';
 import { UsageParts } from './usage';
 
-// 尺寸 token：时间刻度和阶段角标 text-micro（10px）；md 起左内边距 pl-timeline-label（172px）、列 grid-cols-timeline（左 160px、剩余）；时长行 text-caption（11px）。
+// 尺寸 token：时间刻度和阶段角标 text-meta（10px）；md 起左内边距 pl-timeline-label（172px）、列 grid-cols-timeline（左 160px、剩余）；时长行 text-meta（11px）。
 
 function runTone(run: Run): Tone {
   if (!run.endedAt) return run.startedAt ? 'run' : 'wait';
@@ -49,7 +50,7 @@ export function RunTimeline({
   routing: Routing | undefined;
   now: number;
 }) {
-  if (!runs.length) return <p className="text-sm text-muted-foreground">还没有会话。</p>;
+  if (!runs.length) return <p className="text-body text-muted-foreground">还没有会话。</p>;
   const sorted = [...runs].sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
   const start = Math.min(...sorted.map((r) => Date.parse(r.queuedAt)));
   const end = Math.max(...sorted.map((r) => (r.endedAt ? Date.parse(r.endedAt) : now)), now - 1000);
@@ -60,8 +61,8 @@ export function RunTimeline({
 
   return (
     <div>
-      <div className="mb-1 flex justify-between text-micro text-muted-foreground md:pl-timeline-label">
-        {/* 原 10px，text-micro；左内边距原 172px，pl-timeline-label */}
+      <div className="mb-1 flex justify-between text-meta text-muted-foreground md:pl-timeline-label">
+        {/* 原 10px，text-meta；左内边距原 172px，pl-timeline-label */}
         <span className="num">{formatClock(new Date(start).toISOString())}</span>
         <span className="num">{live ? '现在' : formatClock(new Date(end).toISOString())}</span>
       </div>
@@ -76,27 +77,20 @@ export function RunTimeline({
           return (
             <li key={r.id} className="grid gap-x-3 gap-y-1 md:grid-cols-timeline">
               {/* 原左列 160px，grid-cols-timeline */}
-              <div className="min-w-0 text-xs">
+              <div className="min-w-0 text-meta">
                 <div className="flex items-center gap-1.5">
                   <span className="text-muted-foreground">{stageLabel[r.stage]}</span>
-                  <span
-                    className={cn(
-                      'rounded px-1 text-micro', // 原 10px，text-micro
-                      running ? 'bg-st-run/15 text-ink-run' : 'bg-muted text-muted-foreground',
-                    )}
-                  >
-                    {stateText(r)}
-                  </span>
+                  <StatusBadge tone={tone} label={stateText(r)} />
                 </div>
                 <RouteLabel
                   routing={routing}
                   routeId={r.routeId}
                   modelName={r.modelName}
-                  className="mt-0.5 text-xs"
+                  className="mt-0.5 text-meta"
                 />
               </div>
               <div className="min-w-0">
-                <div className="relative h-5 rounded-md bg-muted/60">
+                <div className="relative h-5 rounded-md bg-muted">
                   <div
                     className="absolute inset-y-1 rounded-sm bg-[repeating-linear-gradient(135deg,var(--border-strong)_0_3px,transparent_3px_7px)]"
                     style={{ left: pct(q0), width: width(q0, s0 ?? now) }}
@@ -110,8 +104,8 @@ export function RunTimeline({
                     />
                   ) : null}
                 </div>
-                <div className="mt-1 flex flex-wrap gap-x-3 text-caption text-muted-foreground">
-                  {/* 原 11px，text-caption */}
+                <div className="mt-1 flex flex-wrap gap-x-3 text-meta text-muted-foreground">
+                  {/* 原 11px，text-meta */}
                   {usage?.missingTime ? (
                     <span className="text-ink-stall">时刻认不出，时长没读到</span>
                   ) : (

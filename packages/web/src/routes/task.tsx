@@ -9,12 +9,12 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { isNotFound, useRouting, useTaskDetail } from '../api/client';
 import type { TaskDetail } from '../api/types';
+import { Code } from '../components/layout/code';
 import { EmptyState } from '../components/layout/empty-state';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { Page } from '../components/layout/page';
 import { Section } from '../components/layout/section';
 import { StatusBadge } from '../components/layout/status-badge';
-import { RefreshBar } from '../components/refresh-bar';
 import { RepoLink } from '../components/repo-link';
 import { RunTimeline } from '../components/run-timeline';
 import { RunTranscriptDrawer } from '../components/run-transcript';
@@ -138,31 +138,30 @@ function NowBanner({ d, now }: { d: TaskDetail; now: number }) {
       .filter((n): n is number => n !== undefined)
       .at(-1);
   return (
-    <div
-      data-now-banner
-      className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border bg-card px-4 py-3 shadow-card-edge"
-    >
-      {paused ? (
-        <StatusBadge tone="stall" label="已暂停" />
-      ) : (
-        <StatusBadge tone={taskTone(d.task)} label={taskStateLabel[d.task.state]} />
-      )}
-      {running?.segment ? <span className="text-sm font-medium">{segmentLabel[running.segment]}</span> : null}
-      {running?.modelName ? (
-        <span className="num text-sub text-muted-foreground">{running.modelName}</span>
-      ) : null}
-      {live !== undefined ? <span className="num text-sm">已跑 {formatDuration(live)}</span> : null}
-      {prNumber !== undefined ? (
-        <RepoLink
-          repo={d.repo}
-          kind="pull"
-          n={prNumber}
-          className="num text-sm underline-offset-2 hover:underline max-md:inline-flex max-md:min-h-10 max-md:items-center"
-        >
-          PR #{prNumber}
-        </RepoLink>
-      ) : null}
-    </div>
+    <Section data-now-banner className="mb-4">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        {paused ? (
+          <StatusBadge tone="stall" label="已暂停" />
+        ) : (
+          <StatusBadge tone={taskTone(d.task)} label={taskStateLabel[d.task.state]} />
+        )}
+        {running?.segment ? (
+          <span className="text-body font-medium">{segmentLabel[running.segment]}</span>
+        ) : null}
+        {running?.modelName ? <Code>{running.modelName}</Code> : null}
+        {live !== undefined ? <span className="num text-body">已跑 {formatDuration(live)}</span> : null}
+        {prNumber !== undefined ? (
+          <RepoLink
+            repo={d.repo}
+            kind="pull"
+            n={prNumber}
+            className="num text-body underline-offset-2 hover:underline max-md:inline-flex max-md:min-h-10 max-md:items-center"
+          >
+            PR #{prNumber}
+          </RepoLink>
+        ) : null}
+      </div>
+    </Section>
   );
 }
 
@@ -315,14 +314,14 @@ export default function TaskPage() {
       }
       description={d ? <Header d={d} now={now} /> : undefined}
       keepDescription
+      refresh={{
+        onRefresh: () => void detail.refetch(),
+        isFetching: detail.isFetching,
+        dataUpdatedAt: detail.dataUpdatedAt,
+        staleAfterMs: TASK_STALE_AFTER_MS,
+      }}
       actions={
         <>
-          <RefreshBar
-            onRefresh={() => void detail.refetch()}
-            isFetching={detail.isFetching}
-            dataUpdatedAt={detail.dataUpdatedAt}
-            staleAfterMs={TASK_STALE_AFTER_MS}
-          />
           {d ? <TaskActionBar d={d} /> : null}
           <Back />
         </>

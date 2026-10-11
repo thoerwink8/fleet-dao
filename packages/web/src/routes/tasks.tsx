@@ -4,7 +4,7 @@
 // 往下滚到底自动读下一页，也能点「加载更多」。读不到写「没读成」和原因、给重试；筛出来是空的写「没有符合的任务」，不拿空列表冒充没有。
 // 手机宽度一行是一张卡片，md 起是十二栏的表格行。
 
-import { ListChecks, Search, SearchX } from 'lucide-react';
+import { ListChecks, SearchX } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router';
 import { brand } from '#brand';
@@ -13,12 +13,13 @@ import type { TaskList, TaskListRow } from '../api/types';
 import { EmptyState } from '../components/layout/empty-state';
 import { FilterTabs } from '../components/layout/filter-tabs';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { NativeSelect } from '../components/layout/native-select';
 import { Page } from '../components/layout/page';
+import { SearchInput } from '../components/layout/search-input';
 import { Section } from '../components/layout/section';
 import { StatusBadge } from '../components/layout/status-badge';
-import { RefreshBar } from '../components/refresh-bar';
+import { Toolbar } from '../components/layout/toolbar';
 import { Button } from '../components/ui/button';
-import { Input } from '../components/ui/input';
 import { formatAgo, formatDateTime, formatUsd, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { useShownError } from '../lib/shown-error';
@@ -63,7 +64,7 @@ function Cost({ cost }: { cost: TaskListRow['cost'] }) {
 function ListHeader() {
   return (
     <li
-      className="hidden border-b px-4 py-2 text-caption text-muted-foreground md:grid md:grid-cols-12 md:items-center md:gap-x-4"
+      className="hidden border-b px-4 py-2 text-meta text-muted-foreground md:grid md:grid-cols-12 md:items-center md:gap-x-4"
       aria-hidden
       data-list-header
     >
@@ -82,11 +83,11 @@ function Row({ row, from, now }: { row: TaskListRow; from: string; now: number }
     <li>
       <Link
         to={detailLink(row.taskId, from)}
-        className="grid gap-x-4 gap-y-2 px-4 py-3 transition-colors hover:bg-accent/60 focus-visible:bg-accent/60 focus-visible:outline-none md:grid-cols-12 md:items-center"
+        className="grid gap-x-4 gap-y-2 px-4 py-3 transition-colors hover:bg-accent focus-visible:bg-accent focus-visible:outline-none md:grid-cols-12 md:items-center"
       >
         <div className="min-w-0 md:col-span-4">
-          <div className="truncate text-sm font-medium">{row.title}</div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-3 text-caption text-muted-foreground">
+          <div className="truncate text-body font-medium">{row.title}</div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-3 text-meta text-muted-foreground">
             <span className="num">
               {row.repo}#{row.issueNumber}
             </span>
@@ -100,18 +101,18 @@ function Row({ row, from, now }: { row: TaskListRow; from: string; now: number }
           <div className="flex min-w-0 items-center gap-x-2 md:col-span-2">
             <StatusBadge tone={status.tone} label={status.label} />
             {row.segment === null ? null : (
-              <span className="text-caption whitespace-nowrap text-muted-foreground">
+              <span className="text-meta whitespace-nowrap text-muted-foreground">
                 {segmentText[row.segment]}
               </span>
             )}
           </div>
-          <div className="min-w-0 truncate text-sub text-muted-foreground md:col-span-2" title="用的模型">
+          <div className="min-w-0 truncate text-body text-muted-foreground md:col-span-2" title="用的模型">
             {row.model ?? <span title="这张单还没有会话记录">没记模型</span>}
           </div>
-          <div className="text-sub md:col-span-2 md:text-right">
+          <div className="text-body md:col-span-2 md:text-right">
             <Cost cost={row.cost} />
           </div>
-          <div className="flex flex-wrap items-center gap-x-3 text-caption text-muted-foreground md:col-span-2 md:justify-end">
+          <div className="flex flex-wrap items-center gap-x-3 text-meta text-muted-foreground md:col-span-2 md:justify-end">
             {row.prNumber === null ? null : <span className="num">PR #{row.prNumber}</span>}
             <span className="num whitespace-nowrap" title={formatDateTime(row.updatedAt)}>
               更新 {formatAgo(row.updatedAt, now)}
@@ -212,47 +213,46 @@ export default function TasksPage() {
     <Page
       title="任务"
       description="所有仓的单子，最近有动静的在前：在跑的、排队的、等人的，做完、失败、叫停的也都在。"
-      actions={
-        <RefreshBar
-          onRefresh={() => void list.refetch()}
-          isFetching={list.isFetching}
-          dataUpdatedAt={list.dataUpdatedAt > now ? now : list.dataUpdatedAt}
-          staleAfterMs={TASKS_STALE_AFTER_MS}
-        />
-      }
+      refresh={{
+        onRefresh: () => void list.refetch(),
+        isFetching: list.isFetching,
+        dataUpdatedAt: list.dataUpdatedAt > now ? now : list.dataUpdatedAt,
+        staleAfterMs: TASKS_STALE_AFTER_MS,
+      }}
     >
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <StatusTabs value={view.status} counts={counts} onChange={(status) => setView({ ...view, status })} />
-        <div className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
-          <select
-            aria-label="按仓筛选"
-            value={view.repoId ?? ''}
-            onChange={(e) => setView({ ...view, repoId: e.target.value || undefined })}
-            className="min-h-9 min-w-0 flex-1 rounded-md border border-input max-md:min-h-10 bg-background px-2 py-1.5 text-sm sm:flex-none"
-          >
-            <option value="">全部仓</option>
-            {(repos.data?.repos ?? []).map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.owner}/{r.name}
-              </option>
-            ))}
-          </select>
-          <div className="relative w-full sm:w-64">
-            <Search
-              className="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
-              aria-hidden
-            />
-            <Input
-              type="search"
+      <Toolbar
+        start={
+          <StatusTabs
+            value={view.status}
+            counts={counts}
+            onChange={(status) => setView({ ...view, status })}
+          />
+        }
+        end={
+          <>
+            <NativeSelect
+              aria-label="按仓筛选"
+              value={view.repoId ?? ''}
+              onChange={(e) => setView({ ...view, repoId: e.target.value || undefined })}
+              className="max-md:w-full"
+            >
+              <option value="">全部仓</option>
+              {(repos.data?.repos ?? []).map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.owner}/{r.name}
+                </option>
+              ))}
+            </NativeSelect>
+            <SearchInput
               value={typed}
-              onChange={(e) => setTyped(e.target.value)}
+              onChange={setTyped}
               placeholder="搜单号或标题"
-              className="pl-8"
               aria-label="搜索任务：单号精确，标题包含"
+              className="md:w-64"
             />
-          </div>
-        </div>
-      </div>
+          </>
+        }
+      />
       {shownError ? (
         <div className="mb-3">
           <LoadError what="任务列表" error={shownError} onRetry={() => void list.refetch()} />
@@ -261,7 +261,7 @@ export default function TasksPage() {
       <Section flush>
         {!list.data ? (
           shownError ? (
-            <p className="px-4 py-10 text-center text-sm text-ink-fail">
+            <p className="px-4 py-10 text-center text-body text-ink-fail">
               没读到任务列表，这里空着不代表没有任务
             </p>
           ) : (
@@ -310,7 +310,7 @@ export default function TasksPage() {
                 {list.isFetchingNextPage ? '正在读…' : '加载更多'}
               </Button>
             ) : (
-              <span className="text-caption text-muted-foreground">
+              <span className="text-meta text-muted-foreground">
                 已经到底，共 <span className="num">{rows.length}</span> 张
               </span>
             )}

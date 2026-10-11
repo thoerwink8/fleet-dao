@@ -27,9 +27,11 @@ import { isTaskFinished } from '../lib/status';
 import { costParts, EQUIVALENT_RULE, type Reading, reading } from '../lib/usage';
 import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
+import { Code } from './layout/code';
 import { Section } from './layout/section';
 import { Stat } from './layout/stat';
 import { StatusBadge } from './layout/status-badge';
+import { Tag } from './layout/tag';
 import { RepoLink } from './repo-link';
 import { Button } from './ui/button';
 
@@ -47,7 +49,7 @@ function Read({ r, empty = '—', children }: { r: Reading; empty?: ReactNode; c
     <>
       <span className="num">{children}</span>
       {r.kind === 'partial' ? (
-        <span className="block text-caption text-ink-stall" data-partial>
+        <span className="block text-meta text-ink-stall" data-partial>
           另有 {r.missing} 次没读到
         </span>
       ) : null}
@@ -191,35 +193,33 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
       {phone ? (
         // 手机首屏只放一行摘要（耗时 · 花费 · 段），点开才出四张统计卡（#1820）
         <>
-          <button
-            type="button"
-            data-stats-summary
-            aria-expanded={expanded}
-            onClick={() => setExpanded((v) => !v)}
-            className="flex min-h-10 w-full items-center gap-2 rounded-xl border bg-card px-4 py-2 text-left text-sm shadow-card-edge"
-          >
-            <span className="num min-w-0 flex-1 truncate">
-              {finished ? '共' : '已用'} {wallText} · {costBrief(t)} · {segmentCount} 段
-            </span>
-            <ChevronDown
-              className={cn(
-                'size-4 shrink-0 text-muted-foreground transition-transform',
-                expanded && 'rotate-180',
-              )}
-              aria-hidden
-            />
-          </button>
+          <Section flush>
+            <button
+              type="button"
+              data-stats-summary
+              aria-expanded={expanded}
+              onClick={() => setExpanded((v) => !v)}
+              className="flex min-h-10 w-full items-center gap-2 px-4 py-2 text-left text-body"
+            >
+              <span className="num min-w-0 flex-1 truncate">
+                {finished ? '共' : '已用'} {wallText} · {costBrief(t)} · {segmentCount} 段
+              </span>
+              <ChevronDown
+                className={cn(
+                  'size-4 shrink-0 text-muted-foreground transition-transform',
+                  expanded && 'rotate-180',
+                )}
+                aria-hidden
+              />
+            </button>
+          </Section>
           {expanded ? <div className={cn('mt-3 grid', cols)}>{cards}</div> : null}
         </>
       ) : (
         <div className={cn('grid', cols)}>{cards}</div>
       )}
       {collapsed.length ? (
-        <p
-          className="mt-2 text-caption text-muted-foreground"
-          data-stats-unread
-          title={collapsed.join(' · ')}
-        >
+        <p className="mt-2 text-meta text-muted-foreground" data-stats-unread title={collapsed.join(' · ')}>
           {collapsed.join(' · ')}
         </p>
       ) : null}
@@ -275,18 +275,22 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
     <Stat
       label="花费"
       value={
-        <span data-cost className="flex flex-col items-start gap-2 font-normal tracking-normal">
+        <span data-cost className="flex flex-col items-start gap-2 font-normal">
           <span className="flex flex-col items-start gap-1">
             <span
-              className="text-xs leading-normal font-normal text-muted-foreground"
+              className="text-meta leading-normal font-normal text-muted-foreground"
               title="按量计费：真花的钱"
             >
               按量
             </span>
             <span
+              data-metered
+              data-large={meteredLarge}
               className={cn(
                 'num',
-                meteredLarge ? 'text-stat leading-none font-semibold' : 'text-sm leading-normal font-medium',
+                meteredLarge
+                  ? 'text-display leading-none font-semibold'
+                  : 'text-body leading-normal font-medium',
                 meteredR.kind === 'missing' && 'text-ink-stall',
               )}
             >
@@ -294,7 +298,7 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
             </span>
           </span>
           <span
-            className="text-xs leading-normal font-normal text-muted-foreground"
+            className="text-meta leading-normal font-normal text-muted-foreground"
             title="套餐内：按 API 价折合，账单不因它多一笔"
           >
             <span>套餐内折合</span> {shareText(subR)}
@@ -324,8 +328,8 @@ function Cell({
 }) {
   return (
     <div className={cn(nowrap ? 'whitespace-nowrap md:min-w-0' : 'min-w-0', className)}>
-      <div className="text-caption text-muted-foreground md:hidden">{label}</div>
-      <div className={cn('text-sub', nowrap ? 'whitespace-nowrap' : 'min-w-0')}>{children}</div>
+      <div className="text-meta text-muted-foreground md:hidden">{label}</div>
+      <div className={cn('text-body', nowrap ? 'whitespace-nowrap' : 'min-w-0')}>{children}</div>
     </div>
   );
 }
@@ -346,11 +350,11 @@ function CostCell({ t }: { t: UsageTotals }) {
           ) : (
             <span className="num">
               {p.label} {p.value}
-              {p.unit ? <span className="text-caption text-muted-foreground"> {p.unit}</span> : null}
+              {p.unit ? <span className="text-meta text-muted-foreground"> {p.unit}</span> : null}
             </span>
           )}
           {p.incomplete ? (
-            <span className="block text-caption text-ink-stall" data-partial>
+            <span className="block text-meta text-ink-stall" data-partial>
               另有 {p.incomplete} 次没读到
             </span>
           ) : null}
@@ -371,7 +375,7 @@ function Figures({ t, live }: { t: UsageTotals; live: number | undefined }) {
           {formatDuration(work.kind === 'none' || work.kind === 'missing' ? 0 : work.value)}
         </Read>
         {runningNote && work.kind !== 'none' ? (
-          <div className="text-caption text-ink-run">{runningNote}</div>
+          <div className="text-meta text-ink-run">{runningNote}</div>
         ) : null}
       </Cell>
       <Cell label="token（输入 / 输出）">
@@ -461,7 +465,7 @@ function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) =>
             </span>
             {only ? (
               <span
-                className="num min-w-0 truncate text-sub text-muted-foreground"
+                className="num min-w-0 truncate text-body text-muted-foreground"
                 title={only.model}
                 data-model={only.model}
               >
@@ -469,11 +473,11 @@ function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) =>
               </span>
             ) : null}
           </div>
-          <div className="text-caption text-muted-foreground">
+          <div className="text-meta text-muted-foreground">
             {s.segment ? segmentHint[s.segment] : '原样写在下面每一笔里'}
           </div>
           {s.segment && SEGMENT_UNMETERED[s.segment] ? (
-            <div className="text-caption text-muted-foreground" data-unmetered={s.segment}>
+            <div className="text-meta text-muted-foreground" data-unmetered={s.segment}>
               {SEGMENT_UNMETERED[s.segment]?.partial}
             </div>
           ) : null}
@@ -489,12 +493,12 @@ function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) =>
           >
             {tier.text}
           </span>
-          {tier.note ? <div className="text-caption text-ink-stall">{tier.note}</div> : null}
+          {tier.note ? <div className="text-meta text-ink-stall">{tier.note}</div> : null}
         </Cell>
         <Figures t={s} live={live()} />
       </div>
       <p
-        className={cn('text-sub break-words md:hidden', s.segment === null && 'text-ink-stall')}
+        className={cn('text-body break-words md:hidden', s.segment === null && 'text-ink-stall')}
         data-segment-summary
       >
         {summary}
@@ -504,7 +508,7 @@ function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) =>
           {s.byModel.map((m) => (
             <li key={m.model} className={ROW} data-model={m.model}>
               <div className="col-span-2 min-w-0 border-l-2 pl-2 md:col-span-1">
-                <span className="num block truncate text-sub" title={m.model}>
+                <span className="num block truncate text-body" title={m.model}>
                   {m.modelName}
                 </span>
               </div>
@@ -542,7 +546,7 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
         className={cn(
           'hidden md:grid',
           COLUMNS,
-          'border-b py-2 text-caption text-muted-foreground [&>span]:min-w-0',
+          'border-b py-2 text-meta text-muted-foreground [&>span]:min-w-0',
         )}
         aria-hidden
       >
@@ -569,15 +573,15 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
                   data-unmetered={segment}
                 >
                   <span className="font-medium text-muted-foreground">{segmentLabel[segment]}</span>
-                  <span className="text-sub text-muted-foreground">{unmetered.short}</span>
-                  <span className="w-full text-caption text-muted-foreground">{unmetered.why}</span>
+                  <span className="text-body text-muted-foreground">{unmetered.short}</span>
+                  <span className="w-full text-meta text-muted-foreground">{unmetered.why}</span>
                 </li>
               );
             }
             return (
               <li key={segment} className="flex flex-wrap items-baseline gap-x-3 py-3" data-segment={segment}>
                 <span className="font-medium text-muted-foreground">{segmentLabel[segment]}</span>
-                <span className="text-sub text-muted-foreground">没有这一段的记录</span>
+                <span className="text-body text-muted-foreground">没有这一段的记录</span>
               </li>
             );
           }
@@ -592,14 +596,9 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
 /** 一笔的段：认不出的用提醒色写「段名认不出」。 */
 function SegmentTag({ segment }: { segment: SegmentKind | null }) {
   return (
-    <span
-      className={cn(
-        'inline-flex h-5 items-center rounded border px-1.5 text-caption font-medium',
-        segment === null && 'border-st-stall/55 text-ink-stall',
-      )}
-    >
+    <Tag tone={segment === null ? 'stall' : 'neutral'}>
       {segment ? segmentLabel[segment] : UNKNOWN_SEGMENT}
-    </span>
+    </Tag>
   );
 }
 
@@ -652,14 +651,14 @@ function RunRow({
     <li className="py-3" data-run={run.id}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <SegmentTag segment={run.segment} />
-        <span className="num text-caption text-muted-foreground" data-nth={nth}>
+        <span className="num text-meta text-muted-foreground" data-nth={nth}>
           第 {nth} 次
         </span>
-        <span className="num text-sub font-medium">{run.modelName}</span>
+        <Code>{run.modelName}</Code>
         {run.tier ? (
-          <span className="text-caption text-muted-foreground">{tierLabel[run.tier]}</span>
+          <span className="text-meta text-muted-foreground">{tierLabel[run.tier]}</span>
         ) : run.segment && run.segment !== 'manual' ? (
-          <span className="text-caption text-muted-foreground">{noTierText[run.segment]}</span>
+          <span className="text-meta text-muted-foreground">{noTierText[run.segment]}</span>
         ) : null}
         {run.running ? (
           <StatusBadge tone="run" label="在跑" />
@@ -669,14 +668,11 @@ function RunRow({
           <StatusBadge tone="stall" label="结局没读到" />
         )}
         {run.matchedBy === 'issueNumber' ? (
-          <span
-            className="inline-flex h-5 items-center rounded border border-dashed px-1.5 text-caption text-muted-foreground"
-            title="这一笔没记 task_id，是按单号对上的；单号在几个仓里可能重"
-          >
-            按单号兜底
+          <span title="这一笔没记 task_id，是按单号对上的；单号在几个仓里可能重">
+            <Tag>按单号兜底</Tag>
           </span>
         ) : null}
-        <span className="num order-3 w-full text-caption text-muted-foreground sm:order-2 sm:ml-auto sm:w-auto">
+        <span className="num order-3 w-full text-meta text-muted-foreground sm:order-2 sm:ml-auto sm:w-auto">
           {run.startedAt ? clockOf(run.startedAt, now) : '开始没读到'}
           {run.running
             ? ' 起'
@@ -707,7 +703,7 @@ function RunRow({
         </Button>
       </div>
       {figures.length || run.prNumber !== undefined || run.branch ? (
-        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-caption text-muted-foreground">
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-meta text-muted-foreground">
           {figures.map((f) => (
             <span key={f} className="num">
               {f}
@@ -727,17 +723,17 @@ function RunRow({
         </div>
       ) : null}
       {gap ? (
-        <p className="mt-1 text-caption text-ink-stall" data-estimate-gap>
+        <p className="mt-1 text-meta text-ink-stall" data-estimate-gap>
           花费 · {gap}
         </p>
       ) : null}
       {run.failureReason ? (
-        <p className="mt-1 text-caption text-muted-foreground">为什么没成：{run.failureReason}</p>
+        <p className="mt-1 text-meta text-muted-foreground">为什么没成：{run.failureReason}</p>
       ) : null}
       {run.unread.length ? (
         <ul className="mt-1 space-y-0.5" aria-label="没读到的">
           {run.unread.map((n) => (
-            <li key={n.item} className="text-caption text-ink-stall" data-unread-item={n.item}>
+            <li key={n.item} className="text-meta text-ink-stall" data-unread-item={n.item}>
               <span className="font-medium">{unreadItemLabel[n.item]}</span> · {n.reason}
             </li>
           ))}

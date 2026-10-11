@@ -13,7 +13,8 @@
     "build": "react-router build",
     "preview": "vite preview --outDir dist/client",
     "e2e": "playwright test -c e2e/playwright.config.ts",
-    "e2e:serve": "node e2e/support/serve.ts"
+    "e2e:serve": "node e2e/support/serve.ts",
+    "gen:palettes": "node scripts/gen-palettes.ts"
   },
   "dependencies": {
     "@fleet-dao/shared": "workspace:*",

@@ -208,32 +208,6 @@
     "R4": 2,
     "R5": 1
   },
-  "src/components/run-timeline.tsx": {
-    "R1": 2,
-    "R2": 6,
-    "R5": 1
-  },
-  "src/components/run-transcript.tsx": {
-    "R1": 13,
-    "R2": 27,
-    "R5": 1,
-    "R6": 1
-  },
-  "src/components/segment-usage.tsx": {
-    "R1": 1,
-    "R2": 33,
-    "R5": 3,
-    "R6": 1,
-    "R7": 1,
-    "R8": 1
-  },
-  "src/components/task-actions.tsx": {
-    "R1": 1
-  },
-  "src/components/task-model-pins.tsx": {
-    "R1": 4,
-    "R2": 11
-  },
   "src/components/usage.tsx": {
     "R1": 1,
     "R2": 20,
@@ -328,16 +302,5 @@
   "src/routes/soon.tsx": {
     "R1": 1,
     "R2": 3
-  },
-  "src/routes/task.tsx": {
-    "R2": 4,
-    "R5": 1,
-    "R6": 1,
-    "R8": 1
-  },
-  "src/routes/tasks.tsx": {
-    "R1": 2,
-    "R2": 10,
-    "R9": 2
   }
 }
