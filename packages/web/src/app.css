@@ -121,13 +121,10 @@
   --text-canvas: 0.6875rem;
   --text-canvas--line-height: 0.875rem;
 
-  /* 圆角：控件 md、卡片和弹层 lg、标签 sm、圆点和胶囊 full（规范 6.4）。xl 和 2 是旧档，迁移完删。 */
+  /* 圆角：控件 md、卡片和弹层 lg、标签 sm、圆点和胶囊 full（规范 6.4）。只有这四档，其余（xl、2 等）已删。 */
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
-  /* 圆角钉死 2px。依据：channel-status 探针格、routing-status 探针点原来写死 2px（rounded-2）；进度条、tooltip 箭头同一档。默认 rounded-xs 是 0.125rem，不是 2px。 */
-  --radius-2: 2px;
 
   /*
    * 阴影只表示「浮起」（规范 6.5）：

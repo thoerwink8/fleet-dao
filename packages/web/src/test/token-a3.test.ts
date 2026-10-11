@@ -18,7 +18,7 @@ const FILES = [
   'components/layout/list.tsx',
   'routes/routing-status.tsx',
   'routes/changelog.tsx',
-  // #1638：渠道状态那处探针色点（size-2 shrink-0 rounded-2）随「探测记录」挪进这个组件，类名没变，所以也在这里钉
+  // #1638：渠道状态那处探针色点（size-2 shrink-0 rounded-sm；旧档 rounded-2 在收口片 #1855 删除）随「探测记录」挪进这个组件，类名没变，所以也在这里钉
   'components/probe-log.tsx',
 ] as const;
 
@@ -53,7 +53,6 @@ const TIERS: { name: string; why: string }[] = [
   { name: '--container-health-detail:', why: '320px' },
   { name: '--width-rail:', why: '3px' },
   { name: '--max-height-routing-pane:', why: '16rem' },
-  { name: '--radius-2:', why: '2px' },
 ];
 
 /** 这 12 处换掉之前的写死类名。五个文件里不能再出现。 */

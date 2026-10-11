@@ -199,7 +199,7 @@ describe('【失败】读不到的都写明，不写 0', () => {
     const unread = document.querySelector('[data-stats-unread]');
     expect(unread?.textContent).toMatch(/输入当量没读到/);
     expect(unread?.textContent).toMatch(/花费/);
-    expect(document.querySelector('[data-segment-stats] .text-stat')?.textContent).not.toBe('没读到');
+    expect(document.querySelector('[data-segment-stats] .text-display')?.textContent).not.toBe('没读到');
   });
 
   test('动手段没记派工档：写「没记」，不猜成哪一档；没跑过的段写明没有记录', async () => {
