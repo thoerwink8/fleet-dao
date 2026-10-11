@@ -19,6 +19,10 @@
 @theme inline {
   /* Tailwind 默认色板（red-500、white、black……）整个不生成：颜色只许用下面这些语义名。 */
   --color-*: initial;
+  /* 字号、圆角、阴影同理（#1855 收口）：Tailwind 默认的 text-xs、rounded-xl、shadow-lg 整个不生成，只剩下面定义的档位。 */
+  --text-*: initial;
+  --radius-*: initial;
+  --shadow-*: initial;
 
   --font-sans:
     "Inter Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
@@ -117,19 +121,6 @@
   --text-canvas: 0.6875rem;
   --text-canvas--line-height: 0.875rem;
 
-  /*
-   * 旧字号名（#182，迁移期保留，收口片删）：新代码用上面六档，lint-design 的 R2 拦。
-   * micro 10px → meta；caption 11px → meta；sub 13px → body；label 14px → body；
-   * strong 15px → heading；stat-num 17px → heading；stat 28px → display。
-   */
-  --text-micro: 10px;
-  --text-caption: 11px; /* 依据：健康条、决定卡、定时任务、渠道状态的辅助字。caption（辅助信息、时间戳） */
-  --text-sub: 13px;
-  --text-label: 14px;
-  --text-strong: 15px;
-  --text-stat-num: 17px;
-  --text-stat: 28px;
-
   /* 圆角：控件 md、卡片和弹层 lg、标签 sm、圆点和胶囊 full（规范 6.4）。xl 和 2 是旧档，迁移完删。 */
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -142,13 +133,12 @@
    * 阴影只表示「浮起」（规范 6.5）：
    * xs 描边按钮、输入；card 区块和卡片（亮色一根下边线加一点影，暗色没有，靠边框）；
    * overlay 浮层、菜单、下拉、提示、画布浮动工具条；modal 对话框、抽屉。
-   * 另三个是特效：选中行竖线、品牌色圈（额度热）、状态色光圈（完成时一闪）。card-edge 是旧名，迁移完删。
+   * 另三个是特效：选中行竖线、品牌色圈（额度热）、状态色光圈（完成时一闪）。
    */
   --shadow-xs: 0 1px 2px 0 color-mix(in oklab, var(--shadow-color) 40%, transparent);
   --shadow-card: var(--elev-card);
   --shadow-overlay: 0 8px 24px -12px var(--shadow-color), 0 0 0 1px var(--border);
   --shadow-modal: 0 24px 48px -16px var(--shadow-color);
-  --shadow-card-edge: 0 1px 0 var(--border);
   /* 先后列表里选中的那一行：左边一道竖线，不是整行加框。 */
   --shadow-row-selected: inset 3px 0 0 var(--foreground);
   --shadow-brand-ring: 0 0 0 1px var(--brand);
@@ -658,7 +648,7 @@
   border-radius: var(--radius);
   background: var(--primary);
   color: var(--primary-foreground);
-  font-size: var(--text-label);
+  font-size: var(--text-body);
   font-weight: 600;
   line-height: 1.2;
   box-shadow:

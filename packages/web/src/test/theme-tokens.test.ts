@@ -121,3 +121,22 @@ describe('组件令牌和密度（规范 2.7）', () => {
     expect(Object.keys(block('[data-density="compact"]')).filter((k) => k.startsWith('text'))).toEqual([]);
   });
 });
+
+describe('收口：@theme 关掉 Tailwind 默认的字号、圆角、阴影（#1855）', () => {
+  const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
+
+  test('三行 initial 都在', () => {
+    for (const line of ['--text-*: initial;', '--radius-*: initial;', '--shadow-*: initial;']) {
+      expect(css, line).toContain(line);
+    }
+  });
+  test('#182 的旧字号名和 shadow-card-edge 不再定义，新档位还在', () => {
+    for (const old of ['micro', 'caption', 'sub', 'label', 'strong', 'stat-num', 'stat']) {
+      expect(css, `--text-${old}`).not.toMatch(new RegExp(`--text-${old}\\s*:`));
+    }
+    expect(css).not.toMatch(/--shadow-card-edge\s*:/);
+    for (const name of ['meta', 'body', 'heading', 'title', 'display', 'canvas']) {
+      expect(css, `--text-${name}`).toMatch(new RegExp(`--text-${name}\\s*:`));
+    }
+  });
+});
