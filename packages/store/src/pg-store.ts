@@ -52,7 +52,7 @@ import {
   toTask,
   users,
 } from '@fleet-dao/db';
-import { type ProgressKind, taskWorkflowId } from '@fleet-dao/shared';
+import { answerResolves, type ProgressKind, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
   claimedCommandResult,
@@ -666,7 +666,12 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         if (answer === 'unknown_option') return { kind: 'unknown_option' as const };
         const [updated] = await tx
           .update(notifications)
-          .set({ answer, resolvedAt: at, resolvedBy: by.id, updatedAt: at })
+          .set({
+            answer,
+            // 选了「留着」的项（keepsOpen）：答案记下，通知照旧开着（开着本身就起作用，如整池暂停）
+            ...(answerResolves(row.decisionOptions, optionId) ? { resolvedAt: at, resolvedBy: by.id } : {}),
+            updatedAt: at,
+          })
           .where(eq(notifications.id, id))
           .returning();
         if (!updated) throw new Error(`通知 ${id} 锁住了却没改成`);

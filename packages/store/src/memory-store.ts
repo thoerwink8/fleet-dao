@@ -2,6 +2,7 @@
 // 行为照库的约束来（比较后再改、和操作记录同一「事务」、ok=false 的操作记录必须带原因……），
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
 import {
+  answerResolves,
   type Ban,
   type Channel,
   type ChannelStateRecord,
@@ -647,8 +648,10 @@ export function createMemoryStore(
       if (answer === 'unknown_option') return { kind: 'unknown_option' };
       checkAudit(entry);
       n.answer = answer;
-      n.resolvedAt = at;
-      n.resolvedBy = by.id;
+      if (answerResolves(n.options, optionId)) {
+        n.resolvedAt = at;
+        n.resolvedBy = by.id;
+      }
       audit(entry);
       changed('notifications', id);
       // 送到哪（target）和列表一样不往外给

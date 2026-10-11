@@ -373,23 +373,29 @@ export async function poolHoldAfterProbe(db: Db, t: ProbeTarget, a: ProbeAttempt
 }
 
 /**
- * 整池暂停的选项（#1915）。这条提醒开着就是池子停着，拍了（任何一项）它就转已处理、池子放开，所以选项照这个写：
- * 推荐修好了再拍；要一直停着的，交给指挥官改成人拍的整池暂停开关（engine.poolHolds）。
+ * 整池暂停的选项（#1915、#1931）。这条提醒开着就是池子停着，选路读的就是它：只有「放开」那项把它转已处理（池子当场放开）；
+ * 另两项带 keepsOpen，答案记下交给指挥官，提醒照旧开着、池子照旧停着。每项写的效果有测试（store-ports.test）。
  */
 export function poolHoldOptions(poolId: string): DecisionOption[] {
   return [
     {
       id: 'fixed',
       label: '修好了，放开',
-      detail: `账号池 ${poolId} 的账号我已经处理好（重新登录、续费、换号），放开给选路用`,
+      detail: `这条转已处理，账号池 ${poolId} 当场放开给选路用（账号我已经重新登录、续费或换号）`,
       recommended: '没修好也不怕：探针、会话再撞上同样的问题会再报一条、再停这个池',
     },
     {
       id: 'hold',
-      label: '一直停着',
-      detail: `指挥官把账号池 ${poolId} 写进整池暂停开关，到我撤为止（拍完这条先放开，开关写上前可能还会派一次）`,
+      label: '先停着',
+      detail: `这条留着，账号池 ${poolId} 照旧停着；探针探通会自己放开。要停到我撤为止的，记下交给指挥官去改整池暂停开关`,
+      keepsOpen: true,
     },
-    { id: 'retire', label: '这个池不要了', detail: `指挥官把账号池 ${poolId} 从路由里下掉` },
+    {
+      id: 'retire',
+      label: '这个池不要了',
+      detail: `这条留着，账号池 ${poolId} 照旧停着；记下交给指挥官去把它从路由里下掉`,
+      keepsOpen: true,
+    },
   ];
 }
 

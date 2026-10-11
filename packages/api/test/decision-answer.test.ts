@@ -162,6 +162,11 @@ describe('「要你拍」带选项（#1915）', () => {
     // 没接上 GitHub：答案存下了，handoff 照实写没接上，不冒充记上了
     const body = AnswerNotificationResponse.parse(await res.json());
     expect(body.handoff.progress).toEqual({ ok: false, why: HANDOFF_NOT_WIRED });
+    // 没有要留着的选项：自己写的也转已处理
+    const open = NotificationsResponse.parse(
+      await (await h.cockpit.request('/api/notifications', { headers: { cookie: s.cookie } })).json(),
+    );
+    expect(open.items.map((n) => n.id)).not.toContain('n-old');
   });
 
   it('请求不对、不是要人拍的、没有这条：分开报', async () => {

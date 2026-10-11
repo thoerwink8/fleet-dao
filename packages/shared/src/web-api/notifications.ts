@@ -71,8 +71,25 @@ export const DecisionOptionSchema = z.object({
   detail: z.string().min(1).max(300),
   /** 推荐理由：有它就是推荐的那一项（一条通知恰好一项）。 */
   recommended: z.string().min(1).max(300).optional(),
+  /**
+   * 选了这项，答案记下、交给指挥官，但通知不转已处理（#1931）：有的通知开着本身就起作用（整池暂停开着池子就停着），
+   * 选「先停着」却把它处理掉等于放开，是骗人的选项。只有真要「放开、了结」的那项才不带它。
+   */
+  keepsOpen: z.literal(true).optional(),
 });
 export type DecisionOption = z.infer<typeof DecisionOptionSchema>;
+
+/**
+ * 这个回答会不会把通知转已处理：点的选项看它带不带 keepsOpen；自己输入的，只要这条有任何一项要留着就留着
+ * （写的是什么系统读不懂，不能替人把开着就起作用的提醒处理掉），没有这种选项（含没选项的老通知）就转已处理。
+ */
+export function answerResolves(
+  options: readonly DecisionOption[] | null | undefined,
+  optionId: string | undefined,
+): boolean {
+  if (optionId !== undefined) return !options?.find((o) => o.id === optionId)?.keepsOpen;
+  return !options?.some((o) => o.keepsOpen);
+}
 
 /** 选项合不合规矩：至少两项、编号不重、恰好一项推荐。合规回 null，不合回一句为什么。 */
 export function decisionOptionsProblem(options: readonly DecisionOption[]): string | null {

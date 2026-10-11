@@ -9,6 +9,7 @@ import {
   AUTO_DISPATCH_ENABLE,
   AuditResponse,
   AuthConfigResponse,
+  answerResolves,
   BoardResponse,
   CredentialsResponse,
   DEFAULT_SESSION_EFFORT,
@@ -2803,8 +2804,11 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         ? { optionId: picked.id, text: picked.label, at, by: st.me.user.id }
         : { text: body.text ?? '', at, by: st.me.user.id };
       n.answer = answer;
-      n.resolvedAt = at;
-      n.resolvedBy = st.me.user.id;
+      // 选了要留着的项（keepsOpen）只记答案，通知照旧开着（和后端同一个判法）
+      if (answerResolves(n.options, body.optionId)) {
+        n.resolvedAt = at;
+        n.resolvedBy = st.me.user.id;
+      }
       audit({
         actor: meActor(),
         action: 'notification.answer',

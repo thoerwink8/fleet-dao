@@ -386,7 +386,8 @@ export interface OpsStore {
   ): Promise<'ok' | 'already_resolved' | 'not_found'>;
   /**
    * 回答一条还开着的「要你拍」（#1915）：点选项给 optionId，自己输入给 text（二选一，路由已核过）。答案（选项的字或原文、时刻、谁）
-   * 和处理掉（resolved_at/by）、操作记录同一事务。选项编号不在这条的选项里回 unknown_option，什么都不改。
+   * 和处理掉（resolved_at/by）、操作记录同一事务；选了带 keepsOpen 的项（或这条有这种项时自己输入）只记答案、通知照旧开着
+   * （@fleet-dao/shared 的 answerResolves），开着时可以再拍、答案换成新的。选项编号不在这条的选项里回 unknown_option，什么都不改。
    */
   answerNotification(
     input: { id: string; by: Actor; optionId?: string | undefined; text?: string | undefined },

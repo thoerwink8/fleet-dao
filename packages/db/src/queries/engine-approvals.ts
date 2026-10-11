@@ -39,17 +39,29 @@ function mapApproval(row: typeof approvals.$inferSelect): ApprovalRecord {
   };
 }
 
-/** 人闸待批的选项（#1915）：批、不批、先看看。推荐先看 PR：人闸拦的就是要人亲眼看过的改动。 */
+/**
+ * 人闸待批的选项（#1915、#1931）：先看看、批、不批。推荐先看 PR：人闸拦的就是要人亲眼看过的改动。
+ * 在这里拍不会替人写批准（approvals 表的 decision 不动）：批、不批都写明「记下交给指挥官去办」；先看看带 keepsOpen，这条留着等看完。
+ */
 export function approvalOptions(prNumber: number): DecisionOption[] {
   return [
     {
       id: 'review',
       label: '先看 PR 再定',
-      detail: `我去看 PR #${prNumber} 的改动，看完再批或不批`,
+      detail: `这条留着；我去看 PR #${prNumber} 的改动，看完再批或不批`,
       recommended: '人闸拦下的就是要人亲眼看过的改动（删数据、改标准这类），看了再批最稳',
+      keepsOpen: true,
     },
-    { id: 'approve', label: '批，合进去', detail: `PR #${prNumber} 照现在的样子合` },
-    { id: 'reject', label: '不批', detail: `PR #${prNumber} 不合，指挥官去问清楚或撤掉` },
+    {
+      id: 'approve',
+      label: '批，合进去',
+      detail: `这条转已处理，记下交给指挥官去批、合 PR #${prNumber}`,
+    },
+    {
+      id: 'reject',
+      label: '不批',
+      detail: `这条转已处理，记下交给指挥官：PR #${prNumber} 不合，去问清楚或撤掉`,
+    },
   ];
 }
 

@@ -729,6 +729,36 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         ).toEqual(answer);
       });
 
+      it('「要你拍」（#1931）：选了要留着的项（keepsOpen）只记答案、通知照旧开着、能再拍；有这种项时自己输入也留着；选了结的项才转已处理', async () => {
+        const by = { kind: 'user' as const, id: DEV_USER_ID };
+        const openIds = async () =>
+          (await store.listNotifications({ status: 'open', limit: 10 })).items.map((n) => n.id);
+        const review = await store.answerNotification(
+          { id: IDS.notification2, by, optionId: 'review' },
+          audit(),
+        );
+        expect(review.kind === 'ok' && review.notification).toMatchObject({
+          answer: { optionId: 'review', text: '先看 PR 再定' },
+        });
+        expect(review.kind === 'ok' && review.notification.resolvedAt).toBeUndefined();
+        expect(await openIds()).toContain(IDS.notification2);
+        const typed = await store.answerNotification(
+          { id: IDS.notification2, by, text: '周一再说' },
+          audit(),
+        );
+        expect(typed.kind === 'ok' && typed.notification.resolvedAt).toBeUndefined();
+        expect(await openIds()).toContain(IDS.notification2);
+        const approve = await store.answerNotification(
+          { id: IDS.notification2, by, optionId: 'approve' },
+          audit(),
+        );
+        expect(approve.kind === 'ok' && approve.notification).toMatchObject({
+          answer: { optionId: 'approve' },
+          resolvedAt: clock.now.toISOString(),
+        });
+        expect(await openIds()).not.toContain(IDS.notification2);
+      });
+
       it('「要你拍」（#1915）：自己输入记原文、不带编号；不是要人拍的、没有这条照实回', async () => {
         const by = { kind: 'user' as const, id: DEV_USER_ID };
         const got = await store.answerNotification(

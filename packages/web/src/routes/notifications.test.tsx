@@ -348,26 +348,45 @@ describe('「要你拍」带选项（#1915）', () => {
     expect(within(rowOf(RELEASE)).queryByTestId('decision-picker')).toBeNull();
   });
 
-  test('自定义输入记下答案：发原文，页面写「自己写了」', async () => {
+  test('自定义输入记下答案：发原文，转已处理，页面写「自己写了」', async () => {
+    const api = createMockApi({ live: false });
+    const answer = vi.spyOn(api, 'answerNotification');
+    renderApp(<NotificationsPage />, { api, route: '/notifications' });
+    await screen.findByText(OLD);
+    const picker = within(rowOf(OLD)).getByTestId('decision-picker');
+    const submit = within(picker).getByRole('button', { name: '提交' });
+    expect(submit).toHaveProperty('disabled', true); // 空的不能交
+    // 这条没有要留着的选项：页面先说清自己写的会转已处理
+    expect(within(picker).getByTestId('custom-effect').textContent).toBe(
+      '自己写的：记下交给指挥官，这条转已处理',
+    );
+    fireEvent.change(within(picker).getByRole('textbox', { name: '自己输入' }), {
+      target: { value: '  发新消息  ' },
+    });
+    fireEvent.click(submit);
+    await waitFor(() => expect(answer).toHaveBeenCalledExactlyOnceWith('n-4', { text: '发新消息' }));
+    await waitFor(() => expect(screen.queryByText(OLD)).toBeNull());
+    cleanup();
+    renderApp(<NotificationsPage />, { api, route: '/notifications?status=all' });
+    await screen.findByText(OLD);
+    expect(within(rowOf(OLD)).getByTestId('decision-answer').textContent).toContain('自己写了：发新消息');
+  });
+
+  test('选了要留着的项（#1931）：答案记下、这条照旧在待处理里、还能再拍；有这种项时自己写的也说「先留着」', async () => {
     const api = createMockApi({ live: false });
     const answer = vi.spyOn(api, 'answerNotification');
     renderApp(<NotificationsPage />, { api, route: '/notifications' });
     await screen.findByText(RELEASE);
-    const picker = within(rowOf(RELEASE)).getByTestId('decision-picker');
-    const submit = within(picker).getByRole('button', { name: '提交' });
-    expect(submit).toHaveProperty('disabled', true); // 空的不能交
-    fireEvent.change(within(picker).getByRole('textbox', { name: '自己输入' }), {
-      target: { value: '  下周一再发  ' },
-    });
-    fireEvent.click(submit);
-    await waitFor(() => expect(answer).toHaveBeenCalledExactlyOnceWith('n-1', { text: '下周一再发' }));
-    await waitFor(() => expect(screen.queryByText(RELEASE)).toBeNull());
-    cleanup();
-    renderApp(<NotificationsPage />, { api, route: '/notifications?status=all' });
-    await screen.findByText(RELEASE);
-    expect(within(rowOf(RELEASE)).getByTestId('decision-answer').textContent).toContain(
-      '自己写了：下周一再发',
+    expect(within(rowOf(RELEASE)).getByTestId('custom-effect').textContent).toBe(
+      '自己写的：记下交给指挥官，这条先留着',
     );
+    fireEvent.click(within(rowOf(RELEASE)).getByRole('button', { name: '先不发' }));
+    await waitFor(() => expect(answer).toHaveBeenCalledExactlyOnceWith('n-1', { optionId: 'hold' }));
+    await waitFor(() =>
+      expect(within(rowOf(RELEASE)).getByTestId('decision-answer').textContent).toContain('选了：先不发'),
+    );
+    // 还在待处理里，选项还能点
+    expect(within(rowOf(RELEASE)).getByRole('button', { name: '发布' })).toBeTruthy();
   });
 
   test('没有选项的老通知照旧显示：标题、正文、「处理了」都在，写明「没有选项，请直接回复」并给输入框', async () => {

@@ -267,21 +267,30 @@ async function escalate(
   return { kind: 'escalated', title };
 }
 
-/** 有没推东西的工作树删不删的选项（#1915）。推荐留着：删了就没了，留着只占点盘。 */
+/**
+ * 有没推东西的工作树删不删的选项（#1915、#1931）。推荐留着：删了就没了，留着只占点盘。
+ * 「留着」是真效果：这条转已处理，人处理过的树对账不再报（上面 escalate 开头那一句）。
+ * 「删掉」引擎自己删不了（删数据要人拍、要 root），写明交给指挥官；「先看看」带 keepsOpen，这条留着等看完再拍。
+ */
 export function keepTreeOptions(machine: string): DecisionOption[] {
   return [
     {
       id: 'keep',
       label: '留着',
-      detail: '这棵树不再提醒；里面的东西推走或清掉以后，对账自己删',
+      detail: '这条转已处理，这棵树不再提醒；里面的东西推走或清掉以后，对账自己删',
       recommended: '删了就找不回来，留着只占一点盘',
     },
     {
       id: 'remove',
       label: '删掉',
-      detail: `指挥官在${machine}用 fleet-agent-scope remove 删这棵树，下一轮对账看它不在了就撤掉这条`,
+      detail: `这条转已处理，记下交给指挥官去删（在${machine}以 root 跑 fleet-agent-scope remove）`,
     },
-    { id: 'look', label: '先看看里面', detail: '指挥官把里面没推的改动列给我看，看完再定' },
+    {
+      id: 'look',
+      label: '先看看里面',
+      detail: '这条留着；记下交给指挥官把里面没推的改动列给我看，看完再拍',
+      keepsOpen: true,
+    },
   ];
 }
 

@@ -1,4 +1,4 @@
-import { NO_OPTIONS_TEXT } from '@fleet-dao/shared';
+import { answerResolves, NO_OPTIONS_TEXT } from '@fleet-dao/shared';
 import { ArrowUpRight, Bell, Check, ChevronDown, ExternalLink, Send, TriangleAlert } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
@@ -250,6 +250,11 @@ function DecisionPicker({
           提交
         </Button>
       </form>
+      <p className="text-meta text-muted-foreground" data-testid="custom-effect">
+        {answerResolves(options, undefined)
+          ? '自己写的：记下交给指挥官，这条转已处理'
+          : '自己写的：记下交给指挥官，这条先留着'}
+      </p>
     </div>
   );
 }
