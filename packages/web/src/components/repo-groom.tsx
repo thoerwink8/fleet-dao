@@ -184,7 +184,7 @@ export function RepoGroomControl({
   return (
     <section data-testid={`groom-${repoId}`} aria-label={`${name} 的指挥官整理待办`} className="contents">
       {/* 行尾：状态点 + 一句状态 + 今日剩余 + 「详情」+「整理」按钮；整理记录点「详情」才展开。 */}
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 self-center">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 self-center max-md:w-full">
         <StatusDot tone={busy ? 'run' : latest ? STATE_TONE[latest.state] : 'stop'} />
         <span className="text-meta">
           {busy ? (
@@ -221,6 +221,7 @@ export function RepoGroomControl({
           type="button"
           size="sm"
           variant="outline"
+          className="min-w-16 max-md:ml-auto"
           disabled={groom.isPending || busy || query.isLoading || masterOff}
           onClick={() => {
             if (masterOff) return;

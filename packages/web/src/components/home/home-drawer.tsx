@@ -177,7 +177,7 @@ function DrawerButton({ count, open, onOpen }: { count: number; open: boolean; o
       >
         <Hand className="size-3.5" aria-hidden />
         要你拍的
-        <Tag tone={count > 0 ? 'human' : 'neutral'} className="num rounded-full">
+        <Tag tone={count > 0 ? 'human' : 'neutral'} className="num">
           {count}
         </Tag>
       </button>

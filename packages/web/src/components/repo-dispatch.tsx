@@ -58,7 +58,11 @@ export function RepoDispatchControl({
   };
 
   return (
-    <div className="flex items-center gap-x-2 self-center" data-testid={`dispatch-${repoId}`}>
+    // 手机上占满一行、状态在左按钮在右，和下面「整理」那一行的按钮同宽同列（#1910 第 13 条）
+    <div
+      className="flex items-center gap-x-2 self-center max-md:w-full max-md:justify-between"
+      data-testid={`dispatch-${repoId}`}
+    >
       <div className="flex min-w-0 items-center gap-1.5 text-meta text-muted-foreground">
         <StatusDot tone={row.on ? 'done' : 'stop'} />
         <span className="font-medium text-foreground" data-testid={`dispatch-state-${repoId}`}>
@@ -73,6 +77,7 @@ export function RepoDispatchControl({
         <Button
           size="sm"
           variant="outline"
+          className="min-w-16"
           disabled={update.isPending}
           onClick={() => setAsking(true)}
           aria-label={`${verb} ${name} 的让 AI 接活`}

@@ -26,7 +26,7 @@ const routeItem = (routeId: string) => {
 
 /** 一条路由行上的状态芯片（第一个有字的圆角底色；开关的滑块也是圆的，但没有字）。 */
 const chipOf = (routeId: string) => {
-  const chip = [...routeItem(routeId).querySelectorAll('span.rounded-full')].find((el) =>
+  const chip = [...routeItem(routeId).querySelectorAll('span[data-variant]')].find((el) =>
     el.textContent?.trim(),
   );
   if (!(chip instanceof HTMLElement)) throw new Error(`路由 ${routeId} 上没有状态芯片`);

@@ -284,11 +284,10 @@ function PurposeList({
   );
 }
 
-/** 调整顺序用的行高（桌面）。档位配不了的长说明已收进悬停，单行即可；区域仍占满页面主体高度。手机沿用 MOBILE_ROW_HEIGHT。 */
+/** 调整顺序用的行高（桌面、平板）。档位配不了的长说明已收进悬停，单行即可。手机沿用 MOBILE_ROW_HEIGHT。 */
 const ORDER_ROW_HEIGHT = 40;
-/** 不到 xl 宽（平板）时模型清单没有父元素给高度：固定放得下 13 行。 */
+/** 模型清单按内容高度，最多放 13 行，再多内部滚（不被右边的卡拉高）。 */
 const ORDER_LIST_HEIGHT = ORDER_ROW_HEIGHT * 13;
-const WIDE_MQ = '(min-width: 1280px)';
 
 function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   const now = useNow();
@@ -351,8 +350,9 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
       ) : null}
       {p.models.length === 0 ? <AddPurposeModel purpose={p} onError={setMembershipError} /> : null}
       {p.models.length > 0 ? (
-        // 桌面（xl）：左模型先后、右这个模型下的路由先后，并排，各自占满页面主体高度、内部自己滚；窄屏纵向铺开
-        <div className="grid items-stretch gap-3 xl:h-routing-desk xl:grid-cols-routing-desk xl:grid-rows-routing-desk">
+        // 桌面（xl）：左模型先后、右这个模型下的路由先后，并排，各按各的内容高度（items-start，不互相拉高）；
+        // 右边路由多了封顶在 routing-desk 高度、内部自己滚，左边最多 13 行、再多自己滚；窄屏纵向铺开
+        <div className="grid items-start gap-3 xl:grid-cols-routing-desk">
           <ModelPriority
             purpose={p}
             selectedId={current?.modelId}
@@ -366,7 +366,7 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
               title={`${current.displayName} 的路由`}
               description={`先后管这个模型在所有用途里 · ${modelSummary(current)}`}
               flush
-              className="flex h-full min-h-0 scroll-mt-4 flex-col *:last:flex *:last:min-h-0 *:last:flex-1 *:last:flex-col"
+              className="flex min-h-0 scroll-mt-4 flex-col xl:max-h-routing-desk *:last:flex *:last:min-h-0 *:last:flex-1 *:last:flex-col"
             >
               <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
                 {currentOff && foldOffRoutes ? (
@@ -418,7 +418,6 @@ function ModelPriority({
   const edit = useRoutingEdit();
   const env = useKindEnv();
   const mobile = useMediaQuery(MOBILE_MQ);
-  const wide = useMediaQuery(WIDE_MQ);
   const [filter, setFilter] = useState<ListFilter>(NO_FILTER);
   const long = p.models.length > WINDOW_MIN_ROWS;
   const filtering = long && filterActive(filter);
@@ -439,14 +438,12 @@ function ModelPriority({
   const summary = summarizeOrder(states, '模型');
   const why =
     edit.disabledWhy ?? (filtering ? '正在筛选，只显示了一部分：清掉搜索和「只看已开启」再调先后' : null);
-  // 视口：桌面宽屏填满父元素；平板固定 13 行；手机不超过 50 个就整页铺开（不设内部滚动），超过 50 个才开窗口
-  const viewport = wide
-    ? { height: 'fill' as const, rowHeight: ORDER_ROW_HEIGHT }
-    : mobile
-      ? long
-        ? { height: LIST_HEIGHT, rowHeight: MOBILE_ROW_HEIGHT }
-        : undefined
-      : { height: ORDER_LIST_HEIGHT, rowHeight: ORDER_ROW_HEIGHT };
+  // 视口：桌面和平板都按内容高度、最多 13 行（再多内部滚，不被右卡拉高）；手机不超过 50 个就整页铺开（不设内部滚动），超过 50 个才开窗口
+  const viewport = mobile
+    ? long
+      ? { height: LIST_HEIGHT, rowHeight: MOBILE_ROW_HEIGHT }
+      : undefined
+    : { height: ORDER_LIST_HEIGHT, rowHeight: ORDER_ROW_HEIGHT };
   return (
     <Section
       aria-label="模型先后"
@@ -454,7 +451,7 @@ function ModelPriority({
       description="只管这个用途 · 引擎从上往下试"
       actions={<AddPurposeModel purpose={p} onError={onError} />}
       flush
-      className="flex h-full min-h-0 flex-col *:last:flex *:last:min-h-0 *:last:flex-1 *:last:flex-col"
+      className="flex min-h-0 flex-col *:last:flex *:last:min-h-0 *:last:flex-1 *:last:flex-col"
     >
       <OrderSummaryLine summary={summary} noun="模型" />
       {long ? (
@@ -508,11 +505,6 @@ function ModelPriority({
               />
             )}
           </SortableList>
-          {wide && shown.length > 0 && shown.length <= 4 ? (
-            <p className="pointer-events-none absolute inset-x-0 bottom-2 px-3 text-meta text-muted-foreground">
-              再往下没有更多模型
-            </p>
-          ) : null}
         </div>
       )}
     </Section>
