@@ -20,6 +20,7 @@ function target(over: Partial<RouteProbeTarget> = {}): RouteProbeTarget {
     channelName: 'Mirasim 中转',
     billing: 'subscription',
     channelEnabled: true,
+    identityCheck: true,
     poolId: 'mirasim-relay',
     runAsUser: null,
     orgKind: null,
@@ -29,6 +30,8 @@ function target(over: Partial<RouteProbeTarget> = {}): RouteProbeTarget {
     modelRetiredAt: null,
     inUse: true,
     alive: true,
+    lastRunAt: null,
+    failStreak: 0,
     // 上一次刚探通：定时那一轮会「还没到再探的时候」照旧；人点的要真探
     previous: { state: 'ok', at: new Date(NOW.getTime() - 5 * 60_000), detail: '答上了：OK · 用时 7 秒' },
     ...over,

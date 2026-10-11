@@ -3,7 +3,7 @@
 import type { BillingKind, HostId, OrgKind, ProbeCheck, RouteProbeState } from '@fleet-dao/shared';
 import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { asc, desc, eq, sql } from 'drizzle-orm';
+import { asc, desc, eq, max, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { routesInUse } from '../routing-layers.ts';
 import {
@@ -12,10 +12,14 @@ import {
   models,
   pools,
   type RouteProbeHistoryResult,
+  type RouteProbeKind,
+  type RouteProbeTier,
+  type RouteProbeTrigger,
   routeProbeHistory,
   routes,
   routingCatalog,
   routingPurposeModels,
+  runs,
 } from '../schema/index.ts';
 import { noteRouteProbed } from './channel-fallback.ts';
 
@@ -46,6 +50,8 @@ export interface RouteProbeTarget {
   channelName: string;
   billing: BillingKind;
   channelEnabled: boolean;
+  /** 这个渠道要不要额外问身份题（channels.identity_check，#1798 片 2）。 */
+  identityCheck: boolean;
   poolId: string;
   /** 这个池的会话跑在哪个系统用户下（pools.run_as_user）；空 = 还没定。 */
   runAsUser: string | null;
@@ -75,6 +81,10 @@ export interface RouteProbeTarget {
    * 所以不能转按需（按需不探，渠道被 channel-failed 挡着，派前探测也轮不到它）。
    */
   restoresChannel?: boolean;
+  /** 该路由 runs.started_at 的最大值；没有会话为空（#1798 片 2）。 */
+  lastRunAt: Date | null;
+  /** 连着不通几次（routes.probe_fail_streak）。 */
+  failStreak: number;
   /** 上一次的结论；探针还没看过为空。 */
   previous: { state: RouteProbeState; at: Date; detail: string | null } | null;
 }
@@ -150,7 +160,7 @@ async function openRankRows(db: Db): Promise<OpenRankRow[]> {
 
 export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
   const now = new Date();
-  const [rows, used, ranked, disabled] = await Promise.all([
+  const [rows, used, ranked, disabled, lastRuns] = await Promise.all([
     db
       .select({ route: routes, pool: pools, channel: channels, model: models })
       .from(routes)
@@ -164,10 +174,22 @@ export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
       .select({ channelId: channelStates.channelId, failedRouteId: channelStates.failedRouteId })
       .from(channelStates)
       .where(eq(channelStates.status, 'disabled')),
+    db
+      .select({ routeId: runs.routeId, lastRunAt: max(runs.startedAt) })
+      .from(runs)
+      .where(sql`${runs.routeId} is not null`)
+      .groupBy(runs.routeId),
   ]);
   const flagged = new Map(disabled.map((d) => [d.channelId, d.failedRouteId]));
   const inUse = new Set(used.map((u) => u.routeId));
   const ranks = bestOpenRanks(ranked, now);
+  const lastRunAtByRoute = new Map(
+    lastRuns
+      .filter(
+        (row): row is { routeId: string; lastRunAt: Date } => row.routeId !== null && row.lastRunAt !== null,
+      )
+      .map((row) => [row.routeId, row.lastRunAt]),
+  );
   return rows.map(({ route, pool, channel, model }) => ({
     routeId: route.id,
     hostId: route.hostId,
@@ -175,6 +197,7 @@ export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
     channelName: channel.name,
     billing: channel.billing,
     channelEnabled: channel.enabled,
+    identityCheck: channel.identityCheck,
     poolId: pool.id,
     runAsUser: pool.runAsUser,
     orgKind: pool.orgKind,
@@ -187,6 +210,8 @@ export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
     probeRank: ranks.get(route.id) ?? null,
     restoresChannel: flagged.has(channel.id) && (flagged.get(channel.id) ?? route.id) === route.id,
     alive: route.alive,
+    lastRunAt: lastRunAtByRoute.get(route.id) ?? null,
+    failStreak: route.probeFailStreak,
     previous:
       route.probeState === null || route.probedAt === null
         ? null
@@ -217,6 +242,15 @@ export interface RouteProbeWrite {
   responseText?: string | null;
   /** 降智检测（#1637）。没带题不给或给 null：五列都写空，不当空串。超长截断并标注。 */
   check?: ProbeCheck | null;
+  /**
+   * 节奏档 / 下次探测 / 连着不通次数 / 种类 / 触发者（#1798 片 2）。
+   * 都可选：不给的字段不写（路由上留原值；历史上 kind、trigger 写空）。
+   */
+  tier?: RouteProbeTier | null;
+  nextAt?: Date | null;
+  failStreak?: number;
+  kind?: RouteProbeKind | null;
+  trigger?: RouteProbeTrigger | null;
 }
 
 export interface RouteProbeHistoryRow {
@@ -233,6 +267,8 @@ export interface RouteProbeHistoryRow {
   checkAnswer: string | null;
   checkPassed: boolean | null;
   selfIdentity: string | null;
+  kind: RouteProbeKind | null;
+  trigger: RouteProbeTrigger | null;
 }
 
 /** ok → 通过；failed → 不通；not_wired、skipped、on_demand → 没探（这一轮没真探）。 */
@@ -271,6 +307,11 @@ export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved
         probedAt: w.at,
         probeDetail: w.detail,
         probeOrg: w.org ?? null,
+        // 节奏列可选：不给的不动（#1798 片 2，上线后引擎才开始写）。
+        ...(w.tier !== undefined ? { probeTier: w.tier } : {}),
+        ...(w.nextAt !== undefined ? { probeNextAt: w.nextAt } : {}),
+        ...(w.failStreak !== undefined ? { probeFailStreak: w.failStreak } : {}),
+        ...(w.kind !== undefined ? { probeKind: w.kind } : {}),
       })
       .where(eq(routes.id, w.routeId))
       .returning({ id: routes.id });
@@ -289,6 +330,8 @@ export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved
       checkAnswer: clipOrNull(w.check?.answer),
       checkPassed: w.check?.passed ?? null,
       selfIdentity: clipOrNull(w.check?.selfIdentity),
+      kind: w.kind ?? null,
+      trigger: w.trigger ?? null,
     });
     await tx.execute(sql`
       delete from route_probe_history
@@ -320,6 +363,8 @@ export interface ProbeHistoryJoined {
   checkAnswer: string | null;
   checkPassed: boolean | null;
   selfIdentity: string | null;
+  kind: RouteProbeKind | null;
+  trigger: RouteProbeTrigger | null;
 }
 
 /**
@@ -389,6 +434,8 @@ export async function readProbeHistoryJoined(db: Db): Promise<ProbeHistoryJoined
         checkAnswer: routeProbeHistory.checkAnswer,
         checkPassed: routeProbeHistory.checkPassed,
         selfIdentity: routeProbeHistory.selfIdentity,
+        kind: routeProbeHistory.kind,
+        trigger: routeProbeHistory.trigger,
       })
       .from(routeProbeHistory)
       .innerJoin(routes, eq(routes.id, routeProbeHistory.routeId))
@@ -427,6 +474,8 @@ export async function readRouteProbeHistory(
         checkAnswer: routeProbeHistory.checkAnswer,
         checkPassed: routeProbeHistory.checkPassed,
         selfIdentity: routeProbeHistory.selfIdentity,
+        kind: routeProbeHistory.kind,
+        trigger: routeProbeHistory.trigger,
       })
       .from(routeProbeHistory)
       .where(eq(routeProbeHistory.routeId, routeId))
