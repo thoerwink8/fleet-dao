@@ -31,6 +31,8 @@ function apiWithNode(node: (id: string) => Promise<NodeDetail>): FleetApi {
     ...inner,
     nodes: async (): Promise<Nodes> => {
       const base = await inner.nodes();
+      // 失联但没到 24 小时：还画成对照列（超过 24 小时的收成一行，#1888），这几条用例看的是列里的读失败
+      const at = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
       return {
         ...base,
         nodes: [
@@ -38,8 +40,8 @@ function apiWithNode(node: (id: string) => Promise<NodeDetail>): FleetApi {
             id: 'ghost',
             name: '幽灵环境',
             freshness: 'stale',
-            receivedAt: '2026-10-07T00:00:00.000Z',
-            reportedAt: '2026-10-07T00:00:00.000Z',
+            receivedAt: at,
+            reportedAt: at,
           },
         ],
       };
