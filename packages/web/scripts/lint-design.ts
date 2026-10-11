@@ -14,7 +14,7 @@ const pkgDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const srcDir = join(pkgDir, 'src');
 const DOC = 'docs/design/驾驶舱界面.md';
 
-export type RuleId = 'R0' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R6' | 'R7' | 'R8' | 'R9' | 'R10';
+export type RuleId = 'R0' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R6' | 'R7' | 'R8' | 'R9' | 'R10' | 'R11';
 
 /** 每条规则：名字和规范节号（报错里带上，照着去查）。 */
 export const RULES: Record<RuleId, { name: string; section: string }> = {
@@ -29,6 +29,7 @@ export const RULES: Record<RuleId, { name: string; section: string }> = {
   R8: { name: '手写版式', section: '7' },
   R9: { name: '原生控件', section: '7' },
   R10: { name: '组件令牌', section: '2.7' },
+  R11: { name: '状态字裸文字', section: '4' },
 };
 export const RULE_IDS = Object.keys(RULES) as RuleId[];
 
@@ -83,7 +84,7 @@ export const ALLOWLIST: readonly AllowRule[] = [
   },
   {
     rule: 'R1',
-    pattern: /^bg-(?:primary|destructive|secondary|accent)\/\d+$/,
+    pattern: /^bg-(?:primary|brand|destructive|secondary|accent)\/\d+$/,
     files: /^src\/components\/ui\//,
     reason: '基础件的悬停、按下：按钮在自己的底色上加深或变浅一档，只在 components/ui/ 里写一次。',
   },
@@ -544,6 +545,17 @@ export function scanSource(src: string, file: string): Hit[] {
       });
     }
   }
+  // R11 状态字不许裸文字：列表行里的「在跑、关着、开着、已关」直接写成 JSX 正文（<Tag>关着</Tag>、<span>在跑</span>），
+  // 没有点或图标，颜色也不统一；一律经 StatusBadge（label 属性里的字不判）。
+  for (const m of code.matchAll(STATUS_WORD_TEXT)) {
+    hits.push({
+      file,
+      line: lineAt(starts, (m.index ?? 0) + 1),
+      rule: 'R11',
+      cls: `>${m[1]}<`,
+      fix: `<StatusBadge tone="…" label="${m[1]}" />（点加字；没有状态色的标签才用 <Tag>）`,
+    });
+  }
   if (layout) {
     for (const m of code.matchAll(/<select\b/g)) {
       hits.push({
@@ -569,6 +581,9 @@ export function scanSource(src: string, file: string): Hit[] {
   }
   return hits;
 }
+
+/** JSX 正文里整段就是一个状态字：>关着</、>在跑</ 前后只许有空白，后面直接是结束标签。 */
+const STATUS_WORD_TEXT = />\s*(在跑|关着|开着|已关)\s*<\//g;
 
 /** 这个文件从 lucide-react 引了哪些图标组件。 */
 function lucideImports(src: string): string[] {

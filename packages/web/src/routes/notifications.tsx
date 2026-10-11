@@ -156,6 +156,25 @@ function HandlingRow({ h, now }: { h: Handling; now: number }) {
   );
 }
 
+/** 正文默认只显两行，点一下展开、再点收起（长报警一张卡占满首屏，#1904）。 */
+function ClampedBody({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      title={open ? '点一下收起' : '点一下看全文'}
+      onClick={() => setOpen((v) => !v)}
+      className={cn(
+        'mt-0.5 w-full text-left text-body whitespace-pre-wrap text-muted-foreground outline-none focus-visible:ring-focus focus-visible:ring-ring',
+        !open && 'line-clamp-2',
+      )}
+    >
+      {text}
+    </button>
+  );
+}
+
 function groupByDay(items: Notification[], now: number): Map<string, Notification[]> {
   const groups = new Map<string, Notification[]>();
   for (const n of items) {
@@ -189,61 +208,54 @@ function NotificationRow({
       data-resolved={resolved || undefined}
       summary={
         <>
-          {/* 手机上「打开 / 处理了」是右侧的图标按钮，和标题同一行（#1820）；md 起是文字按钮、垂直居中 */}
-          <div className="flex min-w-0 flex-1 gap-3">
-            <StatusDot
-              tone={noticeLevelMeta[n.level].tone}
-              className={cn('mt-1.5', resolved && 'opacity-40')}
-            />
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className={cn('text-body', !resolved && 'font-semibold')}>{n.title}</span>
-                <Tag>{noticeLevelMeta[n.level].label}</Tag>
-              </div>
-              <p className="mt-0.5 text-body whitespace-pre-wrap text-muted-foreground">{n.body}</p>
-              {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
-              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-                <span className="num text-meta text-muted-foreground" title={formatClock(n.createdAt)}>
-                  {formatAgo(n.createdAt, now)}
-                </span>
-                <Deliveries n={n} />
-                {resolved && n.resolvedAt ? (
-                  <span className="inline-flex items-center gap-1 text-meta text-muted-foreground">
-                    <Check className="size-3" aria-hidden />
-                    {n.resolvedBy ? (isMine(n.resolvedBy, me) ? '我' : n.resolvedBy) : ''}处理于{' '}
-                    <span className="num">{formatAgo(n.resolvedAt, now)}</span>
+          {/* 手机上内容在上、「打开 / 处理了」带字排在下面一行（#1904，原来的无字图标看不出是什么）；md 起操作在右侧、垂直居中 */}
+          <div className="flex w-full min-w-0 flex-col gap-2 md:flex-row md:items-center md:gap-3">
+            <div className="flex min-w-0 flex-1 gap-3">
+              <StatusDot
+                tone={noticeLevelMeta[n.level].tone}
+                className={cn('mt-1.5', resolved && 'opacity-40')}
+              />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={cn('text-body', !resolved && 'font-semibold')}>{n.title}</span>
+                  <Tag tone={noticeLevelMeta[n.level].tone}>{noticeLevelMeta[n.level].label}</Tag>
+                </div>
+                <ClampedBody text={n.body} />
+                {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
+                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="num text-meta text-muted-foreground" title={formatClock(n.createdAt)}>
+                    {formatAgo(n.createdAt, now)}
                   </span>
-                ) : null}
+                  <Deliveries n={n} />
+                  {resolved && n.resolvedAt ? (
+                    <span className="inline-flex items-center gap-1 text-meta text-muted-foreground">
+                      <Check className="size-3" aria-hidden />
+                      {n.resolvedBy ? (isMine(n.resolvedBy, me) ? '我' : n.resolvedBy) : ''}处理于{' '}
+                      <span className="num">{formatAgo(n.resolvedAt, now)}</span>
+                    </span>
+                  ) : null}
+                </div>
               </div>
             </div>
-          </div>
-          <div
-            className="flex shrink-0 items-center gap-1.5 max-md:-mt-2 max-md:self-start"
-            data-notice-actions
-          >
-            {n.link ? (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="max-md:w-10 max-md:px-0"
-                onClick={() => onOpen(n.link ?? '/')}
-              >
-                <ArrowUpRight className="md:hidden" aria-hidden />
-                <span className="max-md:sr-only">打开</span>
-              </Button>
-            ) : null}
-            {!resolved ? (
-              <Button
-                size="sm"
-                variant="outline"
-                className="max-md:w-10 max-md:px-0"
-                disabled={resolvePending && resolveId === n.id}
-                onClick={() => onDone(n)}
-              >
-                <Check />
-                <span className="max-md:sr-only">处理了</span>
-              </Button>
-            ) : null}
+            <div className="flex shrink-0 items-center gap-1.5 max-md:pl-5" data-notice-actions>
+              {!resolved ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={resolvePending && resolveId === n.id}
+                  onClick={() => onDone(n)}
+                >
+                  <Check />
+                  处理了
+                </Button>
+              ) : null}
+              {n.link ? (
+                <Button size="sm" variant="ghost" onClick={() => onOpen(n.link ?? '/')}>
+                  <ArrowUpRight aria-hidden />
+                  打开
+                </Button>
+              ) : null}
+            </div>
           </div>
         </>
       }
@@ -366,6 +378,7 @@ export default function Notifications() {
         />
         <FilterTabs
           mode="toggle"
+          variant="secondary"
           aria-label="按级别"
           items={LEVELS.map((l) => ({
             id: l.id,

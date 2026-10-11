@@ -21,7 +21,7 @@ import { supportedPurposeEfforts } from '../lib/routing-browse';
 import { actualRanks, routeSlotState, type SlotState, slotWord, summarizeOrder } from '../lib/routing-order';
 import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
-import { StatusDot } from './layout/status-badge';
+import { StatusBadge, StatusDot } from './layout/status-badge';
 import { Tag } from './layout/tag';
 import { PoolProblemLine, usePoolProblems } from './pool-problem';
 import {
@@ -337,7 +337,7 @@ export function RouteItem({
       </div>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pb-1 pl-0 md:pl-6">
         <KindChip kind={kind} />
-        {r.enabled || slot ? null : <Tag>关着</Tag>}
+        {r.enabled || slot ? null : <StatusBadge tone="stop" label="关着" />}
         {isFirst ? <Tag tone="brand">顺位第一条活的</Tag> : null}
         <span className="text-meta text-muted-foreground">
           {routeHost(r)} · <span className="num">{slots.text}</span>

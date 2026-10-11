@@ -21,8 +21,8 @@ import { useNow } from '../lib/hooks';
 import { FieldRow } from './layout/field-row';
 import { LoadError, LoadingRows } from './layout/load-state';
 import { Notice } from './layout/notice';
+import { SaveButton } from './layout/save-button';
 import { PasswordField } from './password-field';
-import { Button } from './ui/button';
 import { Input } from './ui/input';
 
 /** 用户名栏的提示：就是后端 checkUsername 的规则，原话照抄，不另编。 */
@@ -201,9 +201,9 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
         </Notice>
       ) : null}
       <div className="flex flex-wrap items-center gap-3 pt-3">
-        <Button type="submit" size="sm" disabled={busy || blocked}>
+        <SaveButton canSave={!blocked} pending={busy}>
           {busy ? '保存中…' : first ? '设账密' : '保存修改'}
-        </Button>
+        </SaveButton>
         <span className="text-meta text-muted-foreground">
           改动会记进
           <Link

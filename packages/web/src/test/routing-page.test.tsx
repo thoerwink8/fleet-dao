@@ -44,6 +44,12 @@ describe('路由页：每一层现在活着吗', () => {
     expect(links[4]?.textContent).toContain('这里配指挥官用的模型');
     expect(screen.getByText('在对话里做，不选路', { exact: false })).toBeTruthy();
     expect(screen.getByText('不是流程里的一段')).toBeTruthy();
+    // 分组说明在组头上，不在任何一个筛选条里当选项（#1904）；三块页签、两组用途都是 FilterTabs
+    expect(screen.getByText('不是流程里的一段').closest('[role=group]')).toBeNull();
+    expect(screen.getByRole('tablist', { name: '路由页分块' }).getAttribute('data-variant')).toBe('primary');
+    for (const name of ['流程里的用途', '流程之外的用途']) {
+      expect(screen.getByRole('group', { name }).getAttribute('data-variant')).toBe('secondary');
+    }
     const current = links.filter((a) => a.getAttribute('aria-pressed') === 'true');
     expect(current).toHaveLength(1);
     expect(current[0]?.textContent).toContain('验收');
