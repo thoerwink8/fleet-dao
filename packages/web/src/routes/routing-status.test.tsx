@@ -1027,14 +1027,20 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
     renderApp(<RoutingStatus />, { route: '/routing/status', api: semanticsApi() });
     await waitFor(() => card('ch-off'));
     const shown = () =>
-      Array.from(document.querySelectorAll('ol[aria-label="渠道状态"] > [data-channel]')).map((el) =>
+      Array.from(document.querySelectorAll('ul[aria-label="渠道状态"] > [data-channel]')).map((el) =>
         el.getAttribute('data-channel'),
       );
-    fireEvent.click(document.querySelector('[data-filter="off"]') as Element);
+    fireEvent.click(
+      within(screen.getByRole('group', { name: '按状态筛选' })).getByRole('button', { name: /^已关/ }),
+    );
     expect(shown()).toEqual(['ch-off']);
-    fireEvent.click(document.querySelector('[data-filter="unused"]') as Element);
+    fireEvent.click(
+      within(screen.getByRole('group', { name: '按状态筛选' })).getByRole('button', { name: /^未使用/ }),
+    );
     expect(shown()).toEqual(['ch-dry']);
-    fireEvent.click(document.querySelector('[data-filter="all"]') as Element);
+    fireEvent.click(
+      within(screen.getByRole('group', { name: '按状态筛选' })).getByRole('button', { name: /^全部/ }),
+    );
     expect(shown().length).toBeGreaterThan(5);
   });
 
@@ -1042,10 +1048,10 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
     renderApp(<RoutingStatus />, { route: '/routing/status', api: semanticsApi() });
     await waitFor(() => card('ch-off'));
     const shown = () =>
-      Array.from(document.querySelectorAll('ol[aria-label="渠道状态"] > [data-channel]')).map((el) =>
+      Array.from(document.querySelectorAll('ul[aria-label="渠道状态"] > [data-channel]')).map((el) =>
         el.getAttribute('data-channel'),
       );
-    const first = document.querySelector('ol[aria-label="渠道状态"] > [data-channel]');
+    const first = document.querySelector('ul[aria-label="渠道状态"] > [data-channel]');
     expect(first?.getAttribute('data-kind')).toBe('fault');
     const box = screen.getByRole('searchbox', { name: '搜索渠道' });
     fireEvent.change(box, { target: { value: 'r-grok' } });

@@ -42,8 +42,8 @@ const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
   { file: 'components/job-row.tsx', snippet: 'num text-caption text-muted-foreground' },
   { file: 'components/job-row.tsx', snippet: 'text-caption text-ink-stall' },
   { file: 'routes/routing-status.tsx', snippet: 'lg:max-h-routing-pane' },
-  { file: 'routes/routing-status.tsx', snippet: 'text-caption font-medium leading-5 text-ink-run' },
-  { file: 'components/probe-log.tsx', snippet: 'size-2 shrink-0 rounded-2' },
+  { file: 'routes/routing-status.tsx', snippet: 'lg:grid-cols-routing' },
+  { file: 'components/probe-log.tsx', snippet: 'size-2 shrink-0 rounded-sm' },
   // #1851：提交行迁到 ListRow，标题列和时间列仍在同一行内可换行、基线对齐
   { file: 'routes/changelog.tsx', snippet: 'flex-wrap items-baseline' },
 ];

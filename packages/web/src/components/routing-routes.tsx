@@ -22,6 +22,7 @@ import { actualRanks, routeSlotState, type SlotState, slotWord, summarizeOrder }
 import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
 import { StatusDot } from './layout/status-badge';
+import { Tag } from './layout/tag';
 import { PoolProblemLine, usePoolProblems } from './pool-problem';
 import {
   COMPACT_MQ,
@@ -33,7 +34,6 @@ import {
 } from './routing-edit';
 import { PoolHoldControl } from './routing-hold';
 import { KindChip, useKindEnv } from './routing-kinds';
-import { Badge } from './ui/badge';
 
 /**
  * 档位配不了时的长说明（「没有单独的档位参数……不带方括号」等）：行内不铺开，
@@ -84,7 +84,7 @@ export function CollapsibleOffModelRoutes({
         aria-expanded={open}
         aria-controls={`off-routes-${model.modelId}`}
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 border-b px-3 py-2 text-left text-sub hover:bg-muted/50"
+        className="flex w-full items-center gap-2 border-b px-3 py-2 text-left text-body hover:bg-accent"
       >
         <ChevronRight
           className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-90')}
@@ -117,7 +117,7 @@ export function ModelRoutes({
   const edit = useRoutingEdit();
   const env = useKindEnv();
   if (m.routes.length === 0) {
-    return <p className="px-3 py-2.5 text-sub text-ink-fail">这个模型下一条路由都没有：排了它也派不到它</p>;
+    return <p className="px-3 py-2.5 text-body text-ink-fail">这个模型下一条路由都没有：排了它也派不到它</p>;
   }
   // 引擎自动跳过关着的、顺延给下一个：实际顺位只数开着的（lib/routing-order.ts）
   const states = m.routes.map((r) => routeSlotState(r, env.channelEnabled));
@@ -138,7 +138,7 @@ export function ModelRoutes({
         busy={edit.busy}
         disabledWhy={edit.disabledWhy}
         rowClassName={(r) =>
-          cn('border-b px-3 py-1.5 last:border-b-0', slotOf.get(r.routeId)?.state !== 'on' && 'bg-muted/40')
+          cn('border-b px-3 py-1.5 last:border-b-0', slotOf.get(r.routeId)?.state !== 'on' && 'bg-muted')
         }
         rowProps={(r) => ({ 'data-route': r.routeId })}
         onSave={(order, expected, movedId) =>
@@ -181,8 +181,8 @@ export function OrderSummaryLine({
       role="status"
       data-order-summary={summary.ok ? 'ok' : 'none'}
       className={cn(
-        'border-b px-3 py-1.5 text-caption',
-        summary.ok ? 'text-muted-foreground' : 'bg-st-fail/10 text-ink-fail',
+        'border-b px-3 py-1.5 text-meta',
+        summary.ok ? 'text-muted-foreground' : 'bg-st-fail-soft text-ink-fail',
       )}
     >
       {summary.ok
@@ -255,28 +255,27 @@ export function RouteItem({
     <>
       <div className="flex min-h-11 flex-wrap items-center gap-x-2 gap-y-0.5 md:min-h-9">
         {index === undefined ? null : (
-          <span className="num w-5 shrink-0 text-caption text-muted-foreground">{index + 1}.</span>
+          <span className="num w-5 shrink-0 text-meta text-muted-foreground">{index + 1}.</span>
         )}
-        <span className={cn('text-sub font-medium', slot && slot.state !== 'on' && 'text-muted-foreground')}>
+        <span className={cn('text-body font-medium', slot && slot.state !== 'on' && 'text-muted-foreground')}>
           {name}
         </span>
-        {modelLabel ? <span className="text-caption text-muted-foreground">· {modelLabel}</span> : null}
+        {modelLabel ? <span className="text-meta text-muted-foreground">· {modelLabel}</span> : null}
         {slot ? (
           <span
             data-slot-state={slot.state}
-            className={cn(
-              'text-caption',
-              slot.state === 'on'
-                ? 'num text-muted-foreground'
-                : 'rounded bg-muted px-1.5 py-0.5 font-medium text-muted-foreground',
-            )}
+            className={cn('text-meta', slot.state === 'on' && 'num text-muted-foreground')}
           >
-            {slotWord(slot.state, slot.rank, '路由')}
+            {slot.state === 'on' ? (
+              slotWord(slot.state, slot.rank, '路由')
+            ) : (
+              <Tag>{slotWord(slot.state, slot.rank, '路由')}</Tag>
+            )}
           </span>
         ) : null}
         <span className="ml-auto inline-flex shrink-0 items-center gap-1">
           {channelOff ? (
-            <span className="text-caption text-muted-foreground" title="渠道关了，这里不能单独开">
+            <span className="text-meta text-muted-foreground" title="渠道关了，这里不能单独开">
               渠道已关
             </span>
           ) : menuMode ? null : (
@@ -330,37 +329,29 @@ export function RouteItem({
             aria-label={`${open ? '收起' : '展开'} ${name} 的接得上、额度、禁令`}
             title="接得上、额度够、禁令与开关三件事的原因"
             onClick={() => setOpen((v) => !v)}
-            className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground min-h-9 min-w-9 md:min-h-0 md:min-w-0"
+            className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground min-h-10 min-w-10 md:min-h-0 md:min-w-0"
           >
             <ChevronRight className={cn('size-4 transition-transform', open && 'rotate-90')} aria-hidden />
           </button>
         </span>
       </div>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pb-1 pl-0 md:pl-7">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pb-1 pl-0 md:pl-6">
         <KindChip kind={kind} />
-        {r.enabled || slot ? null : (
-          <Badge variant="outline" className="h-4 px-1 text-micro font-normal">
-            关着
-          </Badge>
-        )}
-        {isFirst ? (
-          <Badge variant="secondary" className="h-4 px-1 text-micro font-normal">
-            顺位第一条活的
-          </Badge>
-        ) : null}
-        <span className="text-caption text-muted-foreground">
+        {r.enabled || slot ? null : <Tag>关着</Tag>}
+        {isFirst ? <Tag tone="brand">顺位第一条活的</Tag> : null}
+        <span className="text-meta text-muted-foreground">
           {routeHost(r)} · <span className="num">{slots.text}</span>
           {slots.full ? <span className="text-ink-stall">（满了，等空位，不算故障）</span> : null}
         </span>
         <PoolHoldControl poolId={r.poolId} routeId={r.routeId} />
-        <span className="num max-w-40 truncate text-micro text-muted-foreground" title={r.routeId}>
+        <span className="num max-w-40 truncate text-meta text-muted-foreground" title={r.routeId}>
           {r.routeId}
         </span>
         {backoff ? (
           <span
             data-probe-backoff
             className={cn(
-              'basis-full text-caption',
+              'basis-full text-meta',
               backoff.tone === 'fail' ? 'font-medium text-ink-fail' : 'text-ink-stall',
             )}
           >
@@ -372,7 +363,7 @@ export function RouteItem({
       <div
         id={`facts-${r.routeId}`}
         hidden={!open}
-        className="mt-1 mb-1 grid gap-x-4 gap-y-2 rounded-md bg-muted/30 p-2 md:grid-cols-3"
+        className="mt-1 mb-1 grid gap-x-4 gap-y-2 rounded-md bg-muted p-2 md:grid-cols-3"
       >
         <Fact label="接得上" fact={r.connect} red={kind === 'fault' || kind === 'interrupted'}>
           {r.probedAt ? (
@@ -424,8 +415,8 @@ function Fact({
   const tone: Tone = fact.verdict === 'live' ? 'done' : fact.verdict === 'dead' && red ? 'fail' : 'stall';
   return (
     <div className="min-w-0">
-      <div className="text-caption text-muted-foreground">{label}</div>
-      <div className="mt-0.5 flex items-start gap-1.5 text-sub">
+      <div className="text-meta text-muted-foreground">{label}</div>
+      <div className="mt-0.5 flex items-start gap-1.5 text-body">
         <StatusDot tone={tone} className="mt-1.5" />
         {/* 过了的一件用灰字，没过的（死、不知道）才上色：一眼先看到卡在哪 */}
         <span
@@ -438,7 +429,7 @@ function Fact({
           {fact.reason}
         </span>
       </div>
-      {children ? <div className="mt-0.5 pl-3.5 text-caption text-muted-foreground">{children}</div> : null}
+      {children ? <div className="mt-0.5 pl-3 text-meta text-muted-foreground">{children}</div> : null}
     </div>
   );
 }

@@ -4,14 +4,6 @@
     "R5": 1,
     "R8": 1
   },
-  "src/components/channel-status.tsx": {
-    "R1": 10,
-    "R2": 12,
-    "R5": 2,
-    "R6": 1,
-    "R8": 2,
-    "R9": 1
-  },
   "src/components/credentials-section.tsx": {
     "R1": 1,
     "R2": 7
@@ -136,12 +128,6 @@
   "src/components/pool-problem.tsx": {
     "R2": 1
   },
-  "src/components/probe-log.tsx": {
-    "R1": 9,
-    "R2": 21,
-    "R5": 2,
-    "R8": 1
-  },
   "src/components/quota.tsx": {
     "R1": 13,
     "R2": 24,
@@ -161,42 +147,6 @@
   },
   "src/components/repo-groom.tsx": {
     "R2": 15
-  },
-  "src/components/routing-browse.tsx": {
-    "R1": 7,
-    "R2": 27,
-    "R5": 3,
-    "R6": 2,
-    "R8": 2,
-    "R9": 3
-  },
-  "src/components/routing-edit.tsx": {
-    "R2": 1
-  },
-  "src/components/routing-hold.tsx": {
-    "R1": 2,
-    "R2": 5
-  },
-  "src/components/routing-kinds.tsx": {
-    "R1": 1,
-    "R2": 1
-  },
-  "src/components/routing-membership.tsx": {
-    "R1": 2,
-    "R2": 16,
-    "R5": 1,
-    "R9": 1
-  },
-  "src/components/routing-roster.tsx": {
-    "R2": 3,
-    "R5": 1,
-    "R8": 1
-  },
-  "src/components/routing-routes.tsx": {
-    "R1": 4,
-    "R2": 16,
-    "R4": 2,
-    "R5": 1
   },
   "src/components/usage.tsx": {
     "R1": 1,
@@ -243,18 +193,6 @@
     "R2": 16,
     "R5": 3,
     "R8": 3
-  },
-  "src/routes/routing-status.tsx": {
-    "R1": 13,
-    "R2": 25,
-    "R7": 1,
-    "R8": 2
-  },
-  "src/routes/routing.tsx": {
-    "R1": 9,
-    "R2": 28,
-    "R5": 2,
-    "R8": 4
   },
   "src/routes/schedules.tsx": {
     "R2": 2

@@ -1,7 +1,6 @@
 // 路由页判态要的外部事实（渠道开关、模型下架、整池暂停）从目录和整池暂停现读，交给 lib/route-kinds.ts 判。
 // 没读到的不猜（见 KindEnv）。
 
-import { TriangleAlert } from 'lucide-react';
 import { useMemo } from 'react';
 import { usePoolHolds, useRouting } from '../api/client';
 import { useNow } from '../lib/hooks';
@@ -41,12 +40,8 @@ export function KindChip({ kind }: { kind: RouteStateKind }) {
 /** 橙色的「疑似换模型」芯片：身份题说出了旧答案，已按不在线处理，不是红的故障。 */
 export function DoubtChip({ label, title }: { label: string; title?: string }) {
   return (
-    <span
-      title={title}
-      className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-st-doubt/15 px-1.5 text-caption font-medium leading-none whitespace-nowrap text-ink-doubt"
-    >
-      <TriangleAlert className="size-3" aria-hidden />
-      {label}
+    <span title={title} className="inline-flex shrink-0">
+      <StatusBadge tone="doubt" label={label} />
     </span>
   );
 }
