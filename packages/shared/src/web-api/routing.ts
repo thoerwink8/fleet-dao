@@ -137,9 +137,9 @@ export const RoutingLayerRouteSchema = z.object({
   connect: LivenessFactSchema,
   quota: LivenessFactSchema,
   ban: LivenessFactSchema,
-  /** 探针最近一次下结论的时刻；没有 = 探针还没看过。过没过期按执行方式判（routeProbeStaleMinutes）；退避、隔 30 分钟再探的按那一档；按需探测的不算过期。 */
+  /** 探针最近一次下结论的时刻；没有 = 探针还没看过。过没过期按 routeProbeStaleMinutes（不分执行方式）；退避中按那一档放宽；历史按需探测原文不算过期。 */
   probedAt: Time.optional(),
-  /** 探针原文（routes.probe_detail）。退避、隔 30 分钟再探、按需探测都写在这里，驾驶舱据此放宽「探针可能停了」。 */
+  /** 探针原文（routes.probe_detail）。退避中的「下次约 HH:MM」写在这里，驾驶舱据此放宽「探针可能停了」。 */
   probeDetail: z.string().optional(),
   /** 挡着这条路由的、用满了的额度窗：哪一个、几点清零（读数里没有清零时刻就不给）。 */
   exhausted: z.array(z.object({ label: z.string(), resetsAt: Time.optional() })),

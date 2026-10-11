@@ -107,12 +107,14 @@ describe('运行中失败的渠道（#1118，failoverOf）', () => {
       nextProbeAt: '2026-10-05T01:15:00.000Z',
       probeEveryMinutes: 15,
     });
+    // #1798 片 3：不分执行方式，mirasim / cursor / grok 不再按 120 分钟放慢；页面「下次」仍按钟一轮（15），
+    // 活跃 60 / 不活跃每天由引擎写进 probe_next_at，片 7 再读。
     const slow = [
       route('r1', 'c1', { hostId: 'mirasim', probe: { state: 'ok', at: '2026-10-05T01:00:00Z' } }),
     ];
     expect(failoverOf(failedState(), slow, routing)).toMatchObject({
-      nextProbeAt: '2026-10-05T03:00:00.000Z',
-      probeEveryMinutes: 120,
+      nextProbeAt: '2026-10-05T01:15:00.000Z',
+      probeEveryMinutes: 15,
     });
   });
 
