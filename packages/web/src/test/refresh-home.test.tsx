@@ -35,7 +35,10 @@ test('点刷新按钮，调用主页主查询的 refetch', async () => {
   await waitFor(() =>
     expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-busy')).toBe('false'),
   );
-  expect(screen.getByText(/最后更新/).textContent).toContain('刚刚');
+  // 主页换成新鲜度点（#1819）：刚读完是绿点，悬停写具体时间
+  const fresh = document.querySelector('[data-freshness]');
+  expect(fresh?.getAttribute('data-freshness')).toBe('fresh');
+  expect(fresh?.getAttribute('title')).toContain('最后更新');
   refetch.mockClear();
   const before = home.mock.calls.length;
   expect(before).toBeGreaterThan(0);
