@@ -12,7 +12,7 @@ import { Page } from '../components/layout/page';
 import { SearchInput } from '../components/layout/search-input';
 import { Section } from '../components/layout/section';
 import { StatusBadge } from '../components/layout/status-badge';
-import { Tag } from '../components/layout/tag';
+import { NativeSelect } from '../components/layout/native-select';
 import { Toolbar } from '../components/layout/toolbar';
 import { RefreshBar } from '../components/refresh-bar';
 import { Button } from '../components/ui/button';
@@ -77,13 +77,15 @@ function ActorIcon({ actor, me }: { actor: AuditEntry['actor']; me: Me | undefin
   );
 }
 
-/** 事件名：有中文对照显示成一句话（悬停看原名）；没有就显示原名加灰字「（没翻译）」。 */
+/** 事件名：有中文对照显示成一句话（悬停看原名）；没有就显示默认译名「其他操作」，原键放在后面做等宽次要灰小字。动作比人名、对象重一档。 */
 function ActionText({ action, ok, className }: { action: string; ok: boolean; className?: string }) {
   const { text, translated } = describeAction(action);
   return (
-    <span className={cn(!ok && 'text-ink-fail', className)} title={action}>
+    <span className={cn('font-medium', !ok && 'text-ink-fail', className)} title={action}>
       {text}
-      {translated ? null : <span className="ml-1 text-meta text-muted-foreground">（没翻译）</span>}
+      {translated ? null : (
+        <span className="ml-1.5 font-mono text-meta font-normal text-muted-foreground">{action}</span>
+      )}
     </span>
   );
 }
@@ -167,6 +169,8 @@ export default function Audit() {
   const notices = useNotifications('all');
   const now = useNow();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]['id']>('all');
+  // 「经哪里」：每行不再重复标「经引擎」，要看某条渠道进来的记录在这里筛（悬停时间能看到每行的来路）。
+  const [via, setVia] = useState<'all' | AuditEntry['via']>('all');
   const [q, setQ] = useState('');
   const routing = useRouting();
   const routeNames = routeModelNames(routing.data);
@@ -181,6 +185,7 @@ export default function Audit() {
   const query = q.trim();
   const list = all
     .filter((a) => filter === 'all' || a.actor.kind === filter)
+    .filter((a) => via === 'all' || a.via === via)
     .filter(
       (a) =>
         !query ||
@@ -242,12 +247,27 @@ export default function Audit() {
           </>
         }
         end={
-          <SearchInput
-            value={q}
-            onChange={setQ}
-            placeholder="搜人、动作、对象、理由"
-            aria-label="搜索操作记录"
-          />
+          <>
+            <NativeSelect
+              aria-label="按来路筛选"
+              value={via}
+              onChange={(e) => setVia(e.target.value as typeof via)}
+              className="max-md:w-full"
+            >
+              <option value="all">全部来路</option>
+              {(Object.keys(viaLabel) as AuditEntry['via'][]).map((v) => (
+                <option key={v} value={v}>
+                  经{viaLabel[v]}
+                </option>
+              ))}
+            </NativeSelect>
+            <SearchInput
+              value={q}
+              onChange={setQ}
+              placeholder="搜人、动作、对象、理由"
+              aria-label="搜索操作记录"
+            />
+          </>
         }
       />
       {audit.error ? (
@@ -311,17 +331,10 @@ export default function Audit() {
                           data-audit-who
                           className="flex min-w-0 items-center gap-x-2 max-md:basis-full md:contents"
                         >
-                          <span
-                            className="font-medium max-md:max-w-32 max-md:shrink-0 max-md:truncate"
-                            title={a.actor.id}
-                          >
+                          <span className="max-md:max-w-32 max-md:shrink-0 max-md:truncate" title={a.actor.id}>
                             {actorName(a.actor, me)}
                           </span>
-                          <ActionText
-                            action={a.action}
-                            ok={a.ok}
-                            className="max-md:min-w-0 max-md:truncate"
-                          />
+                          <ActionText action={a.action} ok={a.ok} className="max-md:min-w-0" />
                         </div>
                         <div
                           data-audit-what
@@ -355,23 +368,23 @@ export default function Audit() {
                         </div>
                       </div>
                       {a.reason ? (
-                        <p className="mt-0.5 text-body text-muted-foreground max-md:truncate">
+                        <p className="mt-0.5 text-body text-muted-foreground max-md:line-clamp-2">
                           理由：{a.reason}
                         </p>
                       ) : null}
                       {a.error ? (
-                        <p className="mt-0.5 text-body text-ink-fail max-md:truncate">{a.error}</p>
+                        <p className="mt-0.5 text-body text-ink-fail max-md:line-clamp-2">{a.error}</p>
                       ) : null}
                       {a.before !== undefined || a.after !== undefined ? (
                         <ChangeDetails before={a.before} after={a.after} routeNames={routeNames} />
                       ) : null}
                     </div>
-                    <div className="flex shrink-0 flex-col items-end gap-1">
-                      <span className="num text-meta text-muted-foreground" title={formatDateTime(a.at)}>
-                        {formatAgo(a.at, now)}
-                      </span>
-                      <Tag>经{viaLabel[a.via]}</Tag>
-                    </div>
+                    <span
+                      className="num shrink-0 text-meta whitespace-nowrap text-muted-foreground"
+                      title={`${formatDateTime(a.at)} · 经${viaLabel[a.via]}`}
+                    >
+                      {formatAgo(a.at, now)}
+                    </span>
                   </div>
                 }
               />

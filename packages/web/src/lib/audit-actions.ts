@@ -1,5 +1,5 @@
 // 操作记录里「事件名」的中文对照表（#1821）。后端只给代码（routing.probe.done、task.pause……），这里翻成一句话。
-// 收的是仓里 appendAudit 真会写的 action 值；表里没有的原样显示，页面在后面标灰字「（没翻译）」，不猜。
+// 收的是仓里 appendAudit 真会写的 action 值；表里没有的显示默认译名「其他操作」，原键放在旁边的小字里，不猜。
 import {
   AUTO_DISPATCH_DISABLE,
   AUTO_DISPATCH_ENABLE,
@@ -83,10 +83,15 @@ export const AUDIT_ACTION_TEXT: Readonly<Record<string, string>> = {
   'jev.question.rewrite': '改写了一道判断题',
 };
 
-/** 一个事件名的显示：有对照翻成一句话；没有就原名，translated 为 false，页面标「（没翻译）」。 */
+/** 表里没有的事件名统一显示成这个，原键由页面放小字（不再写「没翻译」）。 */
+export const UNKNOWN_ACTION_TEXT = '其他操作';
+
+/** 一个事件名的显示：有对照翻成一句话；没有就显示「其他操作」，translated 为 false，原键页面另放小字。 */
 export function describeAction(action: string): { text: string; translated: boolean } {
   const text = Object.hasOwn(AUDIT_ACTION_TEXT, action) ? AUDIT_ACTION_TEXT[action] : undefined;
-  return text === undefined ? { text: action, translated: false } : { text, translated: true };
+  return text === undefined
+    ? { text: UNKNOWN_ACTION_TEXT, translated: false }
+    : { text, translated: true };
 }
 
 /** 对象编号 → 站内地址：能点进对应的单或路由页。认不出的没有地址。 */

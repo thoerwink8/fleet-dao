@@ -60,18 +60,25 @@ function Cost({ cost }: { cost: TaskListRow['cost'] }) {
   );
 }
 
-/** 桌面十二栏表头：和 Row 同一套 col-span，手机上不画（每行卡片自己带上下文）。 */
-function ListHeader() {
+/** 十二栏怎么分：花费列整列都读不到时不画，空出来的宽度给标题和模型（#1902）。类名写全，Tailwind 才扫得到。 */
+const COLS = {
+  withCost: { title: 'md:col-span-4', model: 'md:col-span-2' },
+  noCost: { title: 'md:col-span-5', model: 'md:col-span-3' },
+} as const;
+
+/** 桌面十二栏表头：和 Row 同一套 col-span，手机上不画（每行自己带两行上下文）。 */
+function ListHeader({ showCost }: { showCost: boolean }) {
+  const cols = showCost ? COLS.withCost : COLS.noCost;
   return (
     <li
-      className="hidden border-b px-4 py-2 text-meta text-muted-foreground md:grid md:grid-cols-12 md:items-center md:gap-x-4"
+      className="hidden px-4 py-2 text-meta text-muted-foreground md:grid md:grid-cols-12 md:items-center md:gap-x-4"
       aria-hidden
       data-list-header
     >
-      <span className="md:col-span-4">单</span>
+      <span className={cols.title}>单</span>
       <span className="md:col-span-2">状态</span>
-      <span className="md:col-span-2">模型</span>
-      <span className="text-right md:col-span-2">花费</span>
+      <span className={cols.model}>模型</span>
+      {showCost ? <span className="text-right md:col-span-2">花费</span> : null}
       <span className="text-right md:col-span-2">更新</span>
     </li>
   );

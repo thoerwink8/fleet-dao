@@ -225,6 +225,8 @@
   /* 额度页手机上一个窗口格的最小宽：两列排。 */
   --container-quota-cell: 8.5rem;
   --container-search: 380px;
+  /* 任务列表的内容宽上限 80rem：1920 宽下十二栏拉到 1600 多，列间距过大（#1902）。只给 /tasks 用。 */
+  --container-task-table: 80rem;
   --container-notifications: 380px;
   --container-usage: 340px;
   --container-routing-list: 360px;
