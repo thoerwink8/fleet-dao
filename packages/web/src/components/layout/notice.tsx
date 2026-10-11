@@ -33,7 +33,7 @@ export function Notice({
       role={tone === 'fail' || tone === 'stall' ? 'alert' : 'status'}
       data-tone={tone}
       className={cn(
-        'flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2 text-body',
+        'flex flex-wrap items-center justify-between gap-2 rounded-lg border px-stack py-2 text-body',
         softClass[skin],
         lineClass[skin],
         className,

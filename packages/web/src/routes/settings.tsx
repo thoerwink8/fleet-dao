@@ -20,6 +20,7 @@ import type { Me, Setting, SettingKey } from '../api/types';
 import { CredentialsSection } from '../components/credentials-section';
 import { EngineMasterRelation } from '../components/engine-master';
 import { FieldGroup, FieldRow } from '../components/layout/field-row';
+import { FilterTabs } from '../components/layout/filter-tabs';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { Page } from '../components/layout/page';
 import { StatusDot } from '../components/layout/status-badge';
@@ -47,8 +48,13 @@ import {
   UNLIMITED_WORD,
 } from '../lib/reserve';
 import { isMine, TONES, toneLabel } from '../lib/status';
-import { PALETTES } from '../lib/theme';
+import { type DensityPref, PALETTES } from '../lib/theme';
 import { cn } from '../lib/utils';
+
+const DENSITY_ITEMS: { id: DensityPref; label: string }[] = [
+  { id: 'comfortable', label: '标准' },
+  { id: 'compact', label: '紧凑' },
+];
 
 /** 设置行里的「谁改的」：去 user: 前缀，方便和 /me、操作记录对上。 */
 function settingActorId(raw: string): string {
@@ -686,6 +692,15 @@ export default function Settings() {
                 <div className="w-full max-w-xs">
                   <ModeSwitch />
                 </div>
+              </FieldRow>
+              <FieldRow label="密度" hint="紧凑把控件、行和区块的留白收小一档，字号不变；手机上不生效。">
+                <FilterTabs
+                  mode="toggle"
+                  aria-label="密度"
+                  items={DENSITY_ITEMS}
+                  value={theme.pref.density}
+                  onChange={theme.setDensity}
+                />
               </FieldRow>
               <FieldRow label="主题色">
                 {/* 一行小色块 + 名字的单选；每个色块按它自己那套主题上色。 */}

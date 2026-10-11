@@ -1,4 +1,4 @@
-// 主题 = 主题色 × 深浅 × 动效。存在浏览器本地，切换即时生效。
+// 主题 = 主题色 × 深浅 × 密度 × 动效。存在浏览器本地，切换即时生效。
 import { brand } from '#brand';
 
 export type PaletteId =
@@ -12,17 +12,25 @@ export type PaletteId =
   | 'darcula';
 export type ModePref = 'light' | 'dark' | 'system';
 export type MotionPref = 'system' | 'reduced';
+/** 标准 / 紧凑：切一组组件令牌（控件高、行高、区块留白），只在桌面生效，字号不变。 */
+export type DensityPref = 'comfortable' | 'compact';
 export type ResolvedMode = 'light' | 'dark';
 
 export interface ThemePref {
   palette: PaletteId;
   mode: ModePref;
   motion: MotionPref;
+  density: DensityPref;
 }
 
 export const THEME_KEY = `${brand.storagePrefix}theme`;
 
-export const DEFAULT_THEME: ThemePref = { palette: 'graphite', mode: 'system', motion: 'system' };
+export const DEFAULT_THEME: ThemePref = {
+  palette: 'graphite',
+  mode: 'system',
+  motion: 'system',
+  density: 'comfortable',
+};
 
 export const PALETTES: { id: PaletteId; name: string; en: string; blurb: string }[] = [
   { id: 'graphite', name: '石墨', en: 'Graphite', blurb: '默认。框架只用黑白灰，颜色全部留给状态。' },
@@ -46,6 +54,7 @@ export function parseThemePref(raw: string | null): ThemePref {
         : DEFAULT_THEME.palette,
       mode: v.mode === 'light' || v.mode === 'dark' || v.mode === 'system' ? v.mode : DEFAULT_THEME.mode,
       motion: v.motion === 'reduced' ? 'reduced' : 'system',
+      density: v.density === 'compact' ? 'compact' : 'comfortable',
     };
   } catch {
     return DEFAULT_THEME;
@@ -82,13 +91,15 @@ export function applyTheme(
   const same =
     root.dataset.palette === pref.palette &&
     root.dataset.mode === mode &&
-    (root.dataset.motion === 'reduced') === (pref.motion === 'reduced');
+    (root.dataset.motion === 'reduced') === (pref.motion === 'reduced') &&
+    root.dataset.density === pref.density;
   if (same) return;
   root.setAttribute('data-theme-swap', '');
   root.dataset.palette = pref.palette;
   root.dataset.mode = mode;
   if (pref.motion === 'reduced') root.dataset.motion = 'reduced';
   else delete root.dataset.motion;
+  root.dataset.density = pref.density;
   // 等新颜色画完再把过渡还回去。
   requestAnimationFrame(() => requestAnimationFrame(() => root.removeAttribute('data-theme-swap')));
 }
@@ -107,6 +118,7 @@ export const THEME_BOOT_SCRIPT = [
   `d.dataset.palette=ids.indexOf(p.palette)>=0?p.palette:${JSON.stringify(DEFAULT_THEME.palette)};`,
   "d.dataset.mode=p.mode==='light'||p.mode==='dark'?p.mode:(window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');",
   "if(p.motion==='reduced')d.dataset.motion='reduced';",
+  "d.dataset.density=p.density==='compact'?'compact':'comfortable';",
   '}catch(e){}',
   '})();',
 ].join('');

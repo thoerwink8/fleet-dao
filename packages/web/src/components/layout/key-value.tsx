@@ -37,14 +37,18 @@ export function KeyValue({
   return (
     <dl
       data-layout={layout}
-      className={cn(rows ? 'divide-y divide-border' : cn('grid gap-x-4 gap-y-3', COLS[cols]), className)}
+      className={cn(rows ? 'divide-y divide-border' : cn('grid gap-x-4 gap-y-stack', COLS[cols]), className)}
     >
       {items.map((it, i) => (
         <div
           // biome-ignore lint/suspicious/noArrayIndexKey: 标签可以是节点，下标就是行的身份。
           key={i}
           data-tone={it.tone}
-          className={cn(rows ? 'grid grid-cols-about gap-x-4 py-2 max-md:grid-cols-1' : 'min-w-0')}
+          className={cn(
+            rows
+              ? 'grid grid-cols-about gap-x-4 py-[calc(var(--spacing-row)/5)] max-md:grid-cols-1'
+              : 'min-w-0',
+          )}
         >
           <dt className="text-meta text-muted-foreground">{it.label}</dt>
           <dd className={cn('min-w-0 text-body break-words', it.tone && inkClass[it.tone])}>

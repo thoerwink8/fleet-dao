@@ -42,7 +42,7 @@ export function FieldRow({
   );
   const body = (
     <>
-      <div className="min-h-8 pt-1.5 text-body font-medium">
+      <div className="min-h-control pt-1.5 text-body font-medium">
         {htmlFor ? (
           <Label htmlFor={htmlFor} className="leading-snug">
             {label}
@@ -52,7 +52,7 @@ export function FieldRow({
         )}
       </div>
       <div className="min-w-0">
-        <div className="flex min-h-8 flex-wrap items-center gap-2">{children}</div>
+        <div className="flex min-h-control flex-wrap items-center gap-2">{children}</div>
         {hint ? (
           <div id={hintId} className="mt-1 text-meta text-muted-foreground">
             {hint}

@@ -1,5 +1,5 @@
 // 筛选标签条：唯一一种筛选样式（规范第七节）。任务、通知、操作记录共用（#1820）。
-// - 灰底轨道，选中是白底卡片；手机上每个标签至少 40 高，手指点得准；电脑上 28 高。
+// - 灰底轨道，选中是白底卡片；手机上每个标签至少 40 高，手指点得准；电脑上比控件高少 4（标准 28，紧凑 24）。
 // - 标签多于一屏时横向滑动，还有内容没滑出来的那一端渐隐，提示「这边还能滑」。
 // - 默认是页签（role=tab，aria-selected）；mode="toggle" 是一组按钮（aria-pressed），页签之外的「选一个级别」用。
 import type { CSSProperties, ReactNode } from 'react';
@@ -83,7 +83,7 @@ export function FilterTabs<Id extends string = string>({
             {...(mode === 'tabs' ? { role: 'tab', 'aria-selected': selected } : { 'aria-pressed': selected })}
             onClick={() => onChange(it.id)}
             className={cn(
-              'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-3 text-body whitespace-nowrap transition-colors duration-100 outline-none focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-10',
+              'inline-flex h-[calc(var(--spacing-control)-0.25rem)] shrink-0 items-center gap-1.5 rounded-md px-3 text-body whitespace-nowrap transition-colors duration-100 outline-none focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-10',
               selected
                 ? 'bg-card font-medium text-foreground shadow-xs'
                 : 'text-muted-foreground hover:text-foreground',
