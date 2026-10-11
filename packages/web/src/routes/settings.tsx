@@ -440,8 +440,9 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
     save('engine.quotaReserve', next, s);
   };
   return (
-    <Section title={settingLabel['engine.quotaReserve']}>
-      <form onSubmit={submit}>
+    // 表单包在区块外面：区块标题在表单里（e2e 和读屏都按「表单里有标题」找它）
+    <form onSubmit={submit}>
+      <Section title={settingLabel['engine.quotaReserve']}>
         <div className="text-meta text-muted-foreground">
           每个渠道每个额度窗「最多用到百分之几」，已用到这条线引擎就不再往这个渠道派新活。
           <details className="mt-0.5">
@@ -533,8 +534,8 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
           <div className="min-w-0 flex-1">{source.kind === 'missing' ? null : <SettingMeta s={s} />}</div>
           <SaveButton canSave={dirty} pending={pending} />
         </div>
-      </form>
-    </Section>
+      </Section>
+    </form>
   );
 }
 

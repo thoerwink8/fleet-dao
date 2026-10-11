@@ -324,8 +324,8 @@ describe('设置页保存按钮：能存是品牌实色，不能存是禁用样�
     const api = createMockApi({ live: false });
     renderApp(<SettingsPage />, { api: api as unknown as FleetApi, route: '/settings' });
     const form = (await screen.findByTestId('reserve-source')).closest('form') as HTMLElement;
-    const section = form.closest('section') as HTMLElement;
-    const title = section.querySelector('h2');
+    // 标题在表单里（e2e 按「带这个标题的表单」找留量线）
+    const title = form.querySelector('section > header h2');
     expect(title?.textContent).toBe('各渠道的额度留量线');
     expect(title?.className).toContain('text-heading');
   });
