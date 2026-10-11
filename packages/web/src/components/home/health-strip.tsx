@@ -130,6 +130,22 @@ function Chip({ item, withDetail }: { item: HealthItem; withDetail: boolean }) {
 function StatusMenu({ items, className }: { items: readonly HealthItem[]; className?: string }) {
   const summary = healthSummary(items);
   return (
+    // 收起时也留一个 role=status「持续状态」：读屏读得到三格各自的状态字（按钮上只有汇总），france.test 守着它
+    <div role="status" aria-label="持续状态" className={cn('flex shrink-0 items-center', className)}>
+      <span className="sr-only">{items.map((i) => `${i.name}${i.word}`).join('，')}</span>
+      <MenuPopover items={items} summary={summary} />
+    </div>
+  );
+}
+
+function MenuPopover({
+  items,
+  summary,
+}: {
+  items: readonly HealthItem[];
+  summary: ReturnType<typeof healthSummary>;
+}) {
+  return (
     <Popover>
       <PopoverTrigger asChild>
         <button
@@ -137,10 +153,7 @@ function StatusMenu({ items, className }: { items: readonly HealthItem[]; classN
           aria-label={`持续状态：${items.map((i) => `${i.name}${i.word}`).join('；')}`}
           data-health-strip
           data-health-menu
-          className={cn(
-            'flex min-h-10 shrink-0 items-center rounded-md px-1 transition-colors hover:bg-accent md:min-h-8',
-            className,
-          )}
+          className="flex min-h-10 shrink-0 items-center rounded-md px-1 transition-colors hover:bg-accent md:min-h-8"
         >
           <StatusBadge tone={summary.tone} variant="outline" label={summary.label} />
         </button>
