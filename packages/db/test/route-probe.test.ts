@@ -579,6 +579,10 @@ describe('节奏和种类列（#1798 片 2，只加列）', () => {
     expect(await readRouteProbeHistory(t.db, 'car', 1)).toMatchObject([
       { kind: 'ping', trigger: 'scheduled', result: 'failed' },
     ]);
+    // 接口读的是按渠道合的那一份（readProbeHistoryJoined）：新列也要从那里读出（#1798 片 6）
+    expect(await readProbeHistoryJoined(t.db)).toMatchObject([
+      { routeId: 'car', kind: 'ping', trigger: 'scheduled', result: 'failed' },
+    ]);
     const [target] = await routeProbeTargets(t.db);
     expect(target).toMatchObject({ failStreak: 2, identityCheck: false });
 

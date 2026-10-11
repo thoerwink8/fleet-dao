@@ -590,8 +590,8 @@ export const ProbeHistoryCellSchema = z.object({
   checkAnswer: z.string().nullable(),
   checkPassed: z.boolean().nullable(),
   selfIdentity: z.string().nullable(),
-  /** 探测种类：连通 / 身份。老行为空（#1798 片 5）。 */
-  kind: RouteProbeKindSchema.nullable(),
+  /** 探测种类：连通 / 身份。老行、没写过不给，不拿 null 顶（#1798 片 5、片 6）。 */
+  kind: RouteProbeKindSchema.optional(),
   /** 定时 / 派前 / 人点 / 断链 / 切号（片 6）。老行、没写过不给。 */
   trigger: RouteProbeTriggerSchema.optional(),
 });

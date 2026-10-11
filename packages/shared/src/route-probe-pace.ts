@@ -4,6 +4,7 @@
 // 不在任何用途前 2 位的：定时探针不再主动探，结论写成「按需探测」（on_demand），要派给它时派前探测先探一次（#1635）。
 // 时刻按北京时间写进结论（驾驶舱在中国看的是同一点钟）。格式认不出就抛，不编一个钟点。
 
+import type { RouteProbeKind, RouteProbeTier } from './domain.ts';
 import { ROUTE_PROBE_EVERY_MINUTES, routeProbeEveryMinutes } from './web-api/routing.ts';
 
 export const ROUTE_PROBE_BACKOFF_MINUTES = [15, 30, 60, 120, 240] as const;
@@ -19,6 +20,22 @@ export const ROUTE_PROBE_PRIMARY_NOTE = `用途前 ${ROUTE_PROBE_PRIMARY_COUNT} 
 export const ROUTE_PROBE_ON_DEMAND_MARK = '不主动探，要派给它时先探一次';
 
 const NOTICE = /退避中，下次约 \d{2}:\d{2} 再探/;
+
+/**
+ * 库里这一行的节奏列写过没有（#1798 片 2 的 routes.probe_tier / probe_next_at / probe_fail_streak / probe_kind）。
+ * 引擎写的时候四列一起写，但 probe_fail_streak 有默认 0：认不出「老行没写过」和「写过 0（探通清零）」。
+ * 所以认得宽一点：另外三列有值，或 fail_streak 不是 0，就算写过；都没写过 = 老行。
+ * 接口据此决定给不给这几列：老行一个都不给，不拿默认 0 顶上（片 6）。判法只在这里一处，db、api 不各判一遍。
+ */
+export function probePaceWritten(r: {
+  probeTier?: RouteProbeTier | null;
+  probeNextAt?: Date | null;
+  probeFailStreak?: number | null;
+  probeKind?: RouteProbeKind | null;
+}): boolean {
+  if (r.probeTier != null || r.probeNextAt != null || r.probeKind != null) return true;
+  return (r.probeFailStreak ?? 0) !== 0;
+}
 
 /** 连着不通几次。原文没写次数回 null（不是 0：没写 ≠ 一次都没失败）。 */
 export function probeFailStreak(detail: string | null | undefined): number | null {

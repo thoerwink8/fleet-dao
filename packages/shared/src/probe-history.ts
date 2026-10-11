@@ -24,7 +24,7 @@ export interface ProbeCheck {
   selfIdentity: string | null;
 }
 
-/** 探测种类：连通 / 身份（#1798）。老行没有。 */
+/** 探测种类：连通 / 身份（#1798）。老行没写过。 */
 export type ProbeHistoryKind = RouteProbeKind;
 
 /** 一次探针。probedAt 是带时区的时刻（ISO）。耗时、失败原因、原文没有就是 null，不当 0 或空串。 */
@@ -44,8 +44,8 @@ export interface ProbeHistoryCell {
   checkAnswer: string | null;
   checkPassed: boolean | null;
   selfIdentity: string | null;
-  /** 探测种类：连通 / 身份。老行为空（#1798 片 5）。 */
-  kind: ProbeHistoryKind | null;
+  /** 探测种类：连通 / 身份。老行、没写过不给，不拿默认值顶（#1798 片 5、片 6）。 */
+  kind?: ProbeHistoryKind | undefined;
   /** 定时 / 派前 / 人点 / 断链 / 切号（片 6）。老行、没写过不给。 */
   trigger?: RouteProbeTrigger | undefined;
 }

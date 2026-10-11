@@ -319,13 +319,13 @@ function durationMsFromDetail(detail: string | undefined): number | null {
   return ms;
 }
 
+// 身份题那五项；kind / trigger 没写就是不给（#1798 片 6），不拿 null 顶老行。
 const NO_CHECK = {
   checkQuestion: null,
   checkExpected: null,
   checkAnswer: null,
   checkPassed: null,
   selfIdentity: null,
-  kind: null,
 } as const;
 
 const MOCK_CHECK_PASSED = {
