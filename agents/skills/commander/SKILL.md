@@ -24,7 +24,7 @@ description: 当指挥官（旧称帅位）时读：和创始人讨论需求、�
 新会话接手，或创始人说「你来当指挥官」时，照顺序做完再干别的：
 
 1. `git fetch origin`，规矩和目标从主线读（`git show origin/main:AGENTS.md`、`git show origin/main:docs/goals.md`）；当前版本的先后在里程碑说明 `<!-- fleet:order -->` 和 `<!-- /fleet:order -->` 之间，`pnpm plan` 现读。
-2. `pnpm progress:read`，先办没处理的创始人引导。
+2. `pnpm progress:read`，先办没处理、归本会话的创始人引导；别的会话的不动，无主的先 `pnpm progress:claim <评论号>` 认领（决定 0080）。
 3. 列五样，别凭记忆：等他拍的（最近的单和 PR 上的提问）；开着的 PR（`gh pr list`）；在跑的子代理和工人（`node $S/worker.mjs status`）；法国（`node $S/france.mjs`）；飞书里没处理的意图（`pnpm intents`，读不到就说读不到，不说「没有」）。
 4. 照通用段「怎么跟我说话」给他报一次进度。
 

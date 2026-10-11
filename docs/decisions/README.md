@@ -83,6 +83,7 @@
 | [0077](0077-review-screen-effort-high.md) | 评审初筛 `fleet-review-screen` 的 effort 从 medium 调到 high（Haiku 5.5 两道题 medium 10 遍过 8、high 6 遍全过），别的子代理档和 effort 不变（补充 0036） | 采纳 |
 | [0078](0078-steer-reply-and-background-subagents.md) | 引导三条：引导一送到、调工具前先回一句；派 Agent 子代理一律后台跑，主对话留在这一轮等完成通知、单次前台等待不超过 60 秒（不分无人值守与否）；引导涉及在跑的子代理用 `SendMessage` 转 | 采纳；文末修订（#1743，创始人 2026-10-11 让指挥官测、没问题就合）：Mirasim 的引导要等这一轮结束、后台子代理都跑完才读进来，调工具前和收尾钩子从 Mirasim 取原文先转，不用结束这一轮 |
 | [0079](0079-fleet-subagents-user-level.md) | 16 个 `fleet-*` 子代理随 `pnpm agents:sync` 和 `haiku55` 一起装到每台机器的 `~/.claude/agents/`；原件只在 `.claude/agents/`，不另放副本（部分取代 0036） | 待创始人同意；法国 VPS 装不装用户级待创始人拍 |
+| [0080](0080-steer-lineage-owner.md) | 创始人的话和引导按「Mirasim 会话」这条血缘认主：开会话只列同一个 Mirasim 会话换号前收到的话，不再全局广播；待处理引导记主人，只叫主人办，别的会话只计数，无主的先 `pnpm progress:claim` 认领 | 待创始人同意（改标准） |
 
 ## 第 1–14 条的编号（#1476）
 

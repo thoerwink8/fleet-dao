@@ -14,6 +14,8 @@
 //    subagent方式」）：packages/agents-sync/src/targets.ts 的 SUBAGENT_TARGET 恰好列着 .claude/agents/ 下这 16 份加
 //    agents/subagents/haiku55.md（按文本核，不跨包 import）；原件只有 .claude/agents/ 这一处，不另存副本；
 //    参考页写着「同步也装到用户级」。
+// 另钉一处（#1844 方案第十节 9b）：fleet-ui-builder 照 docs/design/驾驶舱界面.md、lint-design 必须绿，不再指旧令牌 #182；
+// fleet-ui-verifier 点验对照这份规范。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -106,6 +108,20 @@ function textOf(file: string): string {
   return t;
 }
 
+/** 驾驶舱界面规范（#1844）：界面两个子代理都以它为准 */
+const DESIGN_DOC = 'docs/design/驾驶舱界面.md';
+
+/** 界面两个子代理和规范对不上的地方；空数组才算对 */
+function uiDesignProblems(builder: string, verifier: string): string[] {
+  const out: string[] = [];
+  if (!builder.includes(`照 \`${DESIGN_DOC}\``)) out.push(`fleet-ui-builder.md：没写照 \`${DESIGN_DOC}\``);
+  if (!/lint-design[^\n]*必须绿/.test(builder)) out.push('fleet-ui-builder.md：没写 lint-design 必须绿');
+  if (/#182/.test(builder)) out.push('fleet-ui-builder.md：还指向旧令牌 #182');
+  if (!verifier.includes(`对照 \`${DESIGN_DOC}\``))
+    out.push(`fleet-ui-verifier.md：点验没对照 \`${DESIGN_DOC}\``);
+  return out;
+}
+
 const SKILL = read(`${ROOT}agents/skills/commander/SKILL.md`);
 const GUIDE = read(`${ROOT}agents/skills/commander/references/子代理选模型.md`);
 const STANDARD = read(`${ROOT}packages/conventions/standard-paths.json`);
@@ -186,6 +202,28 @@ describe('规矩：本仓子代理定义在 .claude/agents/，名单、模型、
 
   it('【故意造出的失败】认不出 frontmatter：明确报错，不当成没毛病', () => {
     expect(() => problems('fleet-x.md', '没有 frontmatter')).toThrow(/认不出 frontmatter/);
+  });
+
+  it('界面两个子代理照驾驶舱界面规范：builder 照 docs/design/驾驶舱界面.md 且 lint-design 必须绿，verifier 点验对照它（#1844 9b）', () => {
+    expect(existsSync(`${ROOT}${DESIGN_DOC}`), `${DESIGN_DOC} 不存在`).toBe(true);
+    expect(uiDesignProblems(textOf('fleet-ui-builder.md'), textOf('fleet-ui-verifier.md'))).toEqual([]);
+  });
+
+  it('【故意造出的失败】builder 退回「见 #182」、去掉 lint-design，或 verifier 不提规范：都查得出来', () => {
+    const builder = textOf('fleet-ui-builder.md');
+    const verifier = textOf('fleet-ui-verifier.md');
+    const old = builder.replace(
+      /照 `docs\/design\/驾驶舱界面\.md`[^\n]*?必须绿/,
+      '设计 token 用仓里已有的（见 #182）',
+    );
+    expect(old, '找不到 builder 那一行，这条失败造不出来').not.toBe(builder);
+    expect(uiDesignProblems(old, verifier).length).toBeGreaterThanOrEqual(2);
+    const noLint = builder.replaceAll('lint-design', 'lint');
+    expect(noLint).not.toBe(builder);
+    expect(uiDesignProblems(noLint, verifier)).toEqual(['fleet-ui-builder.md：没写 lint-design 必须绿']);
+    const noDoc = verifier.replaceAll(DESIGN_DOC, '');
+    expect(noDoc).not.toBe(verifier);
+    expect(uiDesignProblems(builder, noDoc)).toEqual([`fleet-ui-verifier.md：点验没对照 \`${DESIGN_DOC}\``]);
   });
 
   it('指挥官技能、参考页、标准路径清单都写着：默认用 fleet-* 子代理、定义在 .claude/agents/', () => {

@@ -22,6 +22,8 @@ const DIRECTIVE_RULES: Record<string, RegExp> = {
   别的仓的老读法: /「## 创始人引导（待处理）」/,
   会话级指令不记: /不是「这一次怎么干」那种会话级指令/,
   办完标已处理: /办完 `pnpm progress:done <评论号>`/,
+  // 2026-10-11 串会话（决定 0080）：几个会话都被叫去办全部引导，撞车开出重复 PR #1884
+  只办归本会话的: /只办归本会话的，别的会话的不动，无主的先 `pnpm progress:claim <评论号>` 认领/,
 };
 
 function missing(rules: Record<string, RegExp>, text: string): string[] {
@@ -44,5 +46,11 @@ describe('规矩：创始人引导必须落盘（2026-10-03 补）', () => {
     const cut = AGENTS.replace(/我中途给的引导和决定[^\n]*接手先 `pnpm progress:read`。/, '');
     expect(cut).not.toBe(AGENTS);
     expect(missing(DIRECTIVE_RULES, cut)).toEqual(Object.keys(DIRECTIVE_RULES));
+  });
+
+  it('【故意造出的失败】把「只办归本会话的」拿掉、回到「谁见了都办」：查得出来', () => {
+    const cut = AGENTS.replace(/只办归本会话的，[^；]*认领；/, '');
+    expect(cut).not.toBe(AGENTS);
+    expect(missing(DIRECTIVE_RULES, cut)).toEqual(['只办归本会话的']);
   });
 });
