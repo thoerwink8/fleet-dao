@@ -167,6 +167,12 @@ export const toRoute = (r: typeof routes.$inferSelect): Route =>
     variantThinking: opt(r.variantThinking),
     variantContext: opt(r.variantContext),
     goneAt: isoOpt(r.goneAt),
+    // 节奏列（#1798 片 6）：库里没写过的不给。fail_streak 库里有默认 0，只在节奏档/种类/下次时刻有值时一并给出，不拿 0 顶老行。
+    probeTier: opt(r.probeTier),
+    probeNextAt: isoOpt(r.probeNextAt),
+    probeFailStreak:
+      r.probeTier != null || r.probeKind != null || r.probeNextAt != null ? r.probeFailStreak : undefined,
+    probeKind: opt(r.probeKind),
   });
 
 /** routeIds 按调度台的先后；disabledRouteIds 是其中关着的（必须传：漏传就把关着的全当开着）。 */

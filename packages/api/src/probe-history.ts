@@ -28,7 +28,9 @@ export function pgProbeHistory(db: Db): ProbeHistoryPort {
         checkAnswer: row.checkAnswer,
         checkPassed: row.checkPassed,
         selfIdentity: row.selfIdentity,
+        // 探测种类：老行为 null（#1798 片 5）。触发者（片 6）：库里写了的原样给；老行空的不给，不拿默认值顶。
         kind: row.kind,
+        ...(row.trigger != null ? { trigger: row.trigger } : {}),
       }));
     },
   };

@@ -43,6 +43,13 @@ function routeView(r: RoutingRouteView, channels: ReadonlyMap<string, Channel>) 
     ban: r.liveness.ban,
     ...(c.probedAt ? { probedAt: c.probedAt.toISOString() } : {}),
     ...(c.probeDetail ? { probeDetail: c.probeDetail } : {}),
+    // 节奏列（#1798 片 6）：库里写了的原样转出；没写过的不给，fail_streak 不拿默认 0 顶老行。
+    ...(c.probeTier != null ? { probeTier: c.probeTier } : {}),
+    ...(c.probeNextAt != null ? { probeNextAt: c.probeNextAt.toISOString() } : {}),
+    ...(c.probeTier != null || c.probeKind != null || c.probeNextAt != null
+      ? { probeFailStreak: c.probeFailStreak }
+      : {}),
+    ...(c.probeKind != null ? { probeKind: c.probeKind } : {}),
     exhausted: c.windows
       .filter((w) => w.applies === 'yes' && w.state === 'exhausted')
       .map((w) => ({ label: w.label, ...(w.resetsAt ? { resetsAt: w.resetsAt.toISOString() } : {}) })),
