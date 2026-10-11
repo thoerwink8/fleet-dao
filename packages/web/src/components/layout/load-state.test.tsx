@@ -3,7 +3,8 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
-import { LoadError, Page } from './page';
+import { LoadError } from './load-state';
+import { Page } from './page';
 
 afterEach(cleanup);
 

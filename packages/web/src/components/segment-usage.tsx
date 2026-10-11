@@ -27,9 +27,10 @@ import { isTaskFinished } from '../lib/status';
 import { costParts, EQUIVALENT_RULE, type Reading, reading } from '../lib/usage';
 import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
-import { Panel, Stat } from './page';
+import { Section } from './layout/section';
+import { Stat } from './layout/stat';
+import { StatusBadge } from './layout/status-badge';
 import { RepoLink } from './repo-link';
-import { StatusChip } from './status';
 import { Button } from './ui/button';
 
 /** 一项读数怎么写：全读到照写；读到一部分照写、写明几次没读到；全没读到写「没读到」；没有结束了的写 empty。 */
@@ -255,7 +256,7 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
       <Stat
         label="花费"
         value={e.runs ? `估算 ${formatUsd(e.usd)}` : e.noPrice ? '没有单价' : '估不了'}
-        accent={e.runs ? undefined : 'text-ink-stall'}
+        tone={e.runs ? undefined : 'stall'}
         hint={['执行体没报花费，按目录单价 × token 估', ...estimateNotes.slice(e.runs ? 1 : 0)].join(' · ')}
       />
     );
@@ -532,10 +533,10 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
   };
   const unknown = bySegment.get(null);
   return (
-    <Panel
+    <Section
       title="三段"
       description="对题 → 动手 → 验收，每段再按模型分。写「没读到」的格子，原因在下面「每一笔」里逐笔写着；不当成 0。"
-      bodyClassName="px-4 py-1"
+      tight
     >
       <div
         className={cn(
@@ -584,7 +585,7 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
         })}
         {unknown ? <SegmentGroup s={unknown} live={liveOf(null)} /> : null}
       </ul>
-    </Panel>
+    </Section>
   );
 }
 
@@ -661,11 +662,11 @@ function RunRow({
           <span className="text-caption text-muted-foreground">{noTierText[run.segment]}</span>
         ) : null}
         {run.running ? (
-          <StatusChip tone="run" label="在跑" />
+          <StatusBadge tone="run" label="在跑" />
         ) : run.outcome ? (
-          <StatusChip tone={segmentOutcomeTone[run.outcome]} label={segmentOutcomeLabel[run.outcome]} />
+          <StatusBadge tone={segmentOutcomeTone[run.outcome]} label={segmentOutcomeLabel[run.outcome]} />
         ) : (
-          <StatusChip tone="stall" label="结局没读到" />
+          <StatusBadge tone="stall" label="结局没读到" />
         )}
         {run.matchedBy === 'issueNumber' ? (
           <span
@@ -757,10 +758,10 @@ export function SegmentRunList({
   onViewTranscript: (runId: string) => void;
 }) {
   return (
-    <Panel
+    <Section
       title="每一笔"
       description="三段每跑一次一笔，按起跑先后。没记 task_id、按单号对上的标「按单号兜底」；没读到的写明为什么。会话内容点「看会话」在右侧抽屉里看。"
-      bodyClassName="px-4 py-1"
+      tight
     >
       <ol className="divide-y">
         {d.segmentRuns.map((run) => (
@@ -774,6 +775,6 @@ export function SegmentRunList({
           />
         ))}
       </ol>
-    </Panel>
+    </Section>
   );
 }

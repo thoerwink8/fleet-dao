@@ -5,8 +5,11 @@ import { brand } from '#brand';
 import { errorText, usePools } from '../api/client';
 import type { PoolView, QuotaWindowKind, QuotaWindowView } from '../api/types';
 import { CarpoolReconcileBanner } from '../components/carpool-reconcile';
+import { EmptyState } from '../components/layout/empty-state';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
 import { OrgSwitchBanner } from '../components/org-switch';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
 import { PoolProblemLine, usePoolProblems } from '../components/pool-problem';
 import { ExpiredQuotaLine, isExpiredWindow, QuotaLine, quotaValue, readingVerb } from '../components/quota';
 import { RefreshBar } from '../components/refresh-bar';
@@ -239,9 +242,9 @@ export default function Quota() {
             读不到，按我们自己的用量算，撞到限额时记下上限。
           </p>
           {pools.length === 0 ? (
-            <Panel>
-              <Empty icon={Gauge} title="还没有账号池" />
-            </Panel>
+            <Section>
+              <EmptyState icon={Gauge} title="还没有账号池" />
+            </Section>
           ) : (
             <Matrix pools={pools} kinds={kinds} now={now} problems={problems} />
           )}

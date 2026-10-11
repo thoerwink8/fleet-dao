@@ -18,8 +18,8 @@ import {
 } from '../lib/credentials';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
-import { FieldRow } from './field-row';
-import { LoadError, LoadingRows } from './page';
+import { FieldRow } from './layout/field-row';
+import { LoadError, LoadingRows } from './layout/load-state';
 import { PasswordField } from './password-field';
 import { Button } from './ui/button';
 import { Input } from './ui/input';

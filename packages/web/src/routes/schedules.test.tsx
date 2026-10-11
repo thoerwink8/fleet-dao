@@ -20,7 +20,7 @@ function hintEl(text: string): HTMLElement {
 
 function statCard(label: string): HTMLElement {
   const span = screen.getAllByText(label, { exact: true }).find((el) => el.tagName === 'SPAN');
-  const card = span?.closest('div.rounded-xl');
+  const card = span?.closest('div.rounded-lg');
   if (!(card instanceof HTMLElement)) throw new Error(`找不到摘要卡：${label}`);
   return card;
 }

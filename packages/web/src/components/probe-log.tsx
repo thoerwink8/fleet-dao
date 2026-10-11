@@ -25,7 +25,7 @@ import {
 } from '../lib/probe-history-view';
 import { cn } from '../lib/utils';
 import type { ChannelHistory } from './channel-status';
-import { StatusChip } from './status';
+import { StatusBadge } from './layout/status-badge';
 
 /** 探测记录默认铺几条、每次「再看」加几条（#1837：一次铺 60 条，渠道状态页整页 13000px）。 */
 export const PROBE_LOG_FIRST = 10;
@@ -41,7 +41,7 @@ const LEGEND: readonly (readonly [ProbeKind, string])[] = [
 /** 结论标签。疑似换模型没有状态色，用橙色（st-doubt）。 */
 export function ProbeKindChip({ kind }: { kind: ProbeKind }) {
   const word = PROBE_KIND_WORD[kind];
-  if (word.tone !== 'doubt') return <StatusChip tone={word.tone} label={word.label} />;
+  if (word.tone !== 'doubt') return <StatusBadge tone={word.tone} label={word.label} />;
   return (
     <span className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-st-doubt/15 px-1.5 text-caption font-medium leading-none whitespace-nowrap text-ink-doubt">
       <TriangleAlert className="size-3" aria-hidden />

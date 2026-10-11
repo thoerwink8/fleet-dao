@@ -46,7 +46,6 @@ const SITES = [
   },
   { file: 'src/components/channel-status.tsx', where: '空探针格', from: 'rounded-[2px]', to: 'rounded-2' },
   { file: 'src/components/channel-status.tsx', where: '探针格', from: 'rounded-[2px]', to: 'rounded-2' },
-  { file: 'src/components/status.tsx', where: '状态芯片', from: 'text-[11px]', to: 'text-caption' },
   {
     file: 'src/components/release-card.tsx',
     where: '每一行',
@@ -65,14 +64,13 @@ const COUNTS: Record<string, number> = {
   'src/components/usage.tsx': 8,
   'src/components/run-timeline.tsx': 5,
   'src/components/channel-status.tsx': 3,
-  'src/components/status.tsx': 1,
   'src/components/release-card.tsx': 1,
   'src/components/pool-holds.tsx': 1,
 };
 
-describe('token A2：19 处写死尺寸换成 token', () => {
-  test('六个组件各对上原来说的处数，加起来 19', () => {
-    expect(SITES).toHaveLength(19);
+describe('token A2：18 处写死尺寸换成 token', () => {
+  test('六个组件各对上原来说的处数，加起来 18', () => {
+    expect(SITES).toHaveLength(18);
     for (const [file, n] of Object.entries(COUNTS)) {
       expect(SITES.filter((site) => site.file === file)).toHaveLength(n);
     }

@@ -8,9 +8,9 @@ import { useNow } from '../lib/hooks';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
 import { useMasterView } from './engine-master';
-import { LoadError } from './page';
+import { LoadError } from './layout/load-state';
+import { StatusDot } from './layout/status-badge';
 import { RepoLink } from './repo-link';
-import { StatusDot } from './status';
 import {
   AlertDialog,
   AlertDialogAction,

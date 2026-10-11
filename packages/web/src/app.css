@@ -774,15 +774,16 @@
   transition: none;
 }
 
-/* 数字、编号、耗时、模型名、额度：一律等宽。 */
+/*
+ * 数字、耗时、额度：无衬线字体的等宽数字（Inter 的 tabular-nums），中文和数字混排不再忽宽忽窄（规范第五节第 2 条）。
+ * 等宽字体（font-mono）只给编号、提交号、路由号、模型 id、代码，且只在 components/layout/code.tsx 里用。
+ */
 @utility num {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums slashed-zero;
-  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
 }
 
 /*
- * 横向滑动条两端的渐隐提示（components/filter-tabs.tsx）：哪一端还有内容没滑出来，哪一端就渐隐。
+ * 横向滑动条两端的渐隐提示（components/layout/filter-tabs.tsx）：哪一端还有内容没滑出来，哪一端就渐隐。
  * 渐隐宽度由组件按「这一端还有没有」设到 --fade-start / --fade-end，没有的一端设 0。
  */
 @utility fade-edges-x {

@@ -5,7 +5,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, test } from 'vitest';
 import { brand } from '#brand';
-import { Page } from '../components/page';
+import { Page } from '../components/layout/page';
 import Soon from './soon';
 
 afterEach(cleanup);

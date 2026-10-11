@@ -5,8 +5,8 @@ import { formatAgo, formatDateTime, formatDuration } from '../lib/format';
 import { everyText, jobStatusLabel, outcomeText } from '../lib/schedule';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
-import { ExpandRow } from './expand-row';
-import { StatusDot } from './status';
+import { ListRow } from './layout/list';
+import { StatusDot } from './layout/status-badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
 /** 一行该用什么颜色提醒：失败红，没查成、只查了一部分、过期黄。 */
@@ -73,11 +73,12 @@ export function JobListRow({ j, now }: { j: JobView; now: number }) {
   const tone = rowTone(j);
   const r = j.lastRun;
   return (
-    <ExpandRow
+    <ListRow
+      expandable
       data-outcome={r?.outcome ?? (r ? 'running' : 'never')}
       data-status={j.status}
       className={cn(tone === 'fail' && 'bg-st-fail/[0.06]', tone === 'stall' && 'bg-st-stall/[0.07]')}
-      rail={tone ? (tone === 'fail' ? 'bg-st-fail' : 'bg-st-stall') : undefined}
+      rail={tone ?? undefined}
       summary={
         <>
           <StatusDot tone={dotTone(j)} />
@@ -147,7 +148,7 @@ export function JobListRow({ j, now }: { j: JobView; now: number }) {
           <dd className="num mt-0.5 break-all">{j.id}</dd>
         </div>
       </dl>
-    </ExpandRow>
+    </ListRow>
   );
 }
 

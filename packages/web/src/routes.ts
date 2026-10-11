@@ -1,4 +1,5 @@
 import { index, layout, type RouteConfig, route } from '@react-router/dev/routes';
+import { designRoutes, isMockBuild } from './routes-design.ts';
 
 export default [
   route('login', 'routes/login.tsx'),
@@ -30,6 +31,8 @@ export default [
     route('billing', 'routes/soon.tsx', { id: 'soon-billing' }),
     route('record', 'routes/soon.tsx', { id: 'soon-record' }),
     route('judge', 'routes/soon.tsx', { id: 'soon-judge' }),
+    // 设计陈列页：只在 dev:mock 构建里有（routes-design.ts）。
+    ...designRoutes(isMockBuild()),
     route('*', 'routes/not-found.tsx'),
   ]),
 ] satisfies RouteConfig;

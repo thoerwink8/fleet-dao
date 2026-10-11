@@ -22,7 +22,7 @@ import {
 import { segmentLabel } from '../lib/segments';
 import { isTaskFinished } from '../lib/status';
 import { cn } from '../lib/utils';
-import { Panel } from './page';
+import { Section } from './layout/section';
 import { Button } from './ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 
@@ -258,14 +258,14 @@ export function TaskModelPins({ d, now }: { d: TaskDetail; now: number }) {
       : { segment, models: got.models, problem: undefined };
   });
   return (
-    <Panel
+    <Section
       title="用哪个模型"
       description={
         finished
           ? '这张单已经结束，指定只留作记录。'
           : '给这张单的动手、验收指定模型：下一次选路起照它，在跑的这一轮不打断；动手这一轮想当场换，点「现在就换」。指定的派不出时引擎停下等你，不悄悄换别的。'
       }
-      bodyClassName="px-4 py-1"
+      tight
       className="mt-4"
     >
       <ul className="divide-y">
@@ -291,6 +291,6 @@ export function TaskModelPins({ d, now }: { d: TaskDetail; now: number }) {
           {problems.find((p) => p.problem)?.problem}
         </p>
       ) : null}
-    </Panel>
+    </Section>
   );
 }

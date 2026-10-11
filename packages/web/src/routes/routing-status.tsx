@@ -41,13 +41,16 @@ import {
   FailoverNote,
   HistoryStrip,
 } from '../components/channel-status';
-import { Empty, LoadError, LoadingRows, Page, Panel } from '../components/page';
+import { EmptyState } from '../components/layout/empty-state';
+import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Page } from '../components/layout/page';
+import { Section } from '../components/layout/section';
+import { StatusBadge, StatusDot } from '../components/layout/status-badge';
 import { PoolProblemLine, usePoolProblems } from '../components/pool-problem';
 import { ProbeLog } from '../components/probe-log';
 import { RefreshBar } from '../components/refresh-bar';
 import { MOBILE_MQ } from '../components/routing-browse';
 import { KindChip } from '../components/routing-kinds';
-import { StatusChip, StatusDot } from '../components/status';
 import { Button } from '../components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '../components/ui/sheet';
 import {
@@ -235,9 +238,13 @@ export default function RoutingStatus() {
   if (cards.length === 0) {
     return (
       <Page title="渠道状态" description={DESCRIPTION}>
-        <Panel>
-          <Empty icon={SatelliteDish} title="目录里一个渠道都没有" hint="渠道在库里没配上：去看后端日志" />
-        </Panel>
+        <Section>
+          <EmptyState
+            icon={SatelliteDish}
+            title="目录里一个渠道都没有"
+            hint="渠道在库里没配上：去看后端日志"
+          />
+        </Section>
       </Page>
     );
   }
@@ -320,10 +327,10 @@ export default function RoutingStatus() {
       description={DESCRIPTION}
       actions={
         <>
-          <StatusChip tone="done" label={`${okCount} 个在线`} />
-          {downCount > 0 ? <StatusChip tone="fail" label={`${downCount} 个故障`} /> : null}
-          {unknownCount > 0 ? <StatusChip tone="stall" label={`${unknownCount} 个待查`} /> : null}
-          {quietCount > 0 ? <StatusChip tone="stop" label={`${quietCount} 个已关或未使用`} /> : null}
+          <StatusBadge tone="done" label={`${okCount} 个在线`} />
+          {downCount > 0 ? <StatusBadge tone="fail" label={`${downCount} 个故障`} /> : null}
+          {unknownCount > 0 ? <StatusBadge tone="stall" label={`${unknownCount} 个待查`} /> : null}
+          {quietCount > 0 ? <StatusBadge tone="stop" label={`${quietCount} 个已关或未使用`} /> : null}
           <RefreshBar
             onRefresh={() => void routing.refetch()}
             isFetching={routing.isFetching}
@@ -591,7 +598,7 @@ function ChannelDetail({
     return p ? [p] : [];
   });
   return (
-    <Panel
+    <Section
       title={
         <span className="flex flex-wrap items-center gap-x-2">
           {card.channel.name}
@@ -603,7 +610,7 @@ function ChannelDetail({
       description={card.reason && !card.failover ? card.reason : undefined}
       actions={
         <div className="flex items-center gap-2">
-          <StatusChip tone={card.tone} label={card.label} />
+          <StatusBadge tone={card.tone} label={card.label} />
           <Button
             size="sm"
             variant="outline"
@@ -688,7 +695,7 @@ function ChannelDetail({
           ))}
         </ol>
       )}
-    </Panel>
+    </Section>
   );
 }
 
@@ -788,7 +795,7 @@ function RouteRow({
         )}
         {kind === 'unused' && !active && (probe?.state === 'ok' || probe?.state === 'failed') ? (
           // 没用途在用的路由点立即探测（#1630）：灰的「未被用途使用」不变，结论在旁边写出来，不画红
-          <StatusChip
+          <StatusBadge
             tone={probe.state === 'ok' ? 'done' : 'stall'}
             label={probe.state === 'ok' ? '探过：通' : '探过：不通'}
           />
