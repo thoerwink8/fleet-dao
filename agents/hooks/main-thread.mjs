@@ -14,6 +14,7 @@
 //    （ui-cli raw 订阅这个会话，snapshot.steers；约 0.6 秒，只在 diag 显示有引导在等时才起），拒这次调用、理由带原文：
 //    先回一句、接着干、不用结束这一轮。转过的记进 ~/.fleet-dao/steer-shown/<会话号>.json，同一条不再拦；稍后 Claude Code
 //    正式送进来时它说一句「这条前面已回」。收尾钩子（stop.mjs）收尾时用同一个 takeSteers 挡回去。
+//    开会话对账（founder-inbox.mjs 的 relayedUpTo，#1891）也读这份 { at }，把转过的算收到：改它的位置、格式两边一起改。
 //    取不到原文、diag 读不了：不拦，明说没查成；整个 ~/.mirasim 都不在（没装 Mirasim）：不会有它的引导，不说话。
 // 子代理里的调用（输入带 agent_id）几条都不管：子代理不和创始人对话，收不到引导；子代理里再派子代理也不管。
 // 读不了 transcript：不拦（拦死所有工具代价太大），但用 systemMessage 明说「引导检查没查成：原因」，不当成没有引导静默过去。

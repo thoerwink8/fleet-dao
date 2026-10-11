@@ -2052,6 +2052,100 @@ describe('发了没收到的话：拿 Mirasim 的「发了的账」和 prompt-lo
   });
 });
 
+// #1891：2026-10-11 指挥官会话 16:03 的引导由 main-thread.mjs 从 Mirasim 取原文、拒工具调用转进了会话，会话也回了；
+// 可它不经 UserPromptSubmit、不进 prompt-log，之后每一轮开场都还列在「没收到的话」里。转过的记在
+// ~/.fleet-dao/steer-shown/<原生会话号>.json 的 at（最后转过的那条的 Mirasim 时刻）：对账把它以前（含）的本血缘引导算收到。
+describe('钩子转进来过的引导算收到（steer-shown，#1891）', () => {
+  const T = (iso: string) => Date.parse(iso);
+  const NOW = T('2026-10-11T08:31:00Z'); // 北京 16:31
+  const STEER = T('2026-10-11T08:03:10.123Z'); // 北京 16:03
+  const recent = (o: { home: string; sessionId: string }) =>
+    (hook as unknown as { recentPrompts(o: unknown): string[] }).recentPrompts({ now: NOW, env: {}, ...o });
+  /** 本会话 dir-c：16:00 那一轮中途一条引导（只经钩子转进来，prompt-log 里没有），16:30 换号后又开一轮；另有别的 Mirasim 会话 dir-o */
+  function world() {
+    const home = temp('relayed');
+    const session = (dir: string, native: string, turns: unknown[]) => {
+      const d = join(home, '.mirasim', 'sessions', 'claude', dir);
+      mkdirSync(d, { recursive: true });
+      writeFileSync(
+        join(d, 'record.json'),
+        JSON.stringify({ workdir: 'D:\\frank\\fleet-dao', nativeSessionId: native }),
+      );
+      writeFileSync(join(d, 'turns.jsonl'), turns.map((t) => `${JSON.stringify(t)}\n`).join(''));
+    };
+    session('dir-c', 'c-new', [
+      {
+        sessionId: 'c-old',
+        startedAt: T('2026-10-11T08:00:00Z'),
+        prompt: '驾驶舱表格改一版',
+        steers: [{ text: '我建议你思考下，antd 是怎么做的', at: STEER }],
+      },
+      { sessionId: 'c-new', startedAt: T('2026-10-11T08:30:00Z'), prompt: '接着做' },
+    ]);
+    session('dir-o', 'o-1', [{ sessionId: 'o-1', startedAt: T('2026-10-11T08:10:00Z'), prompt: '别的会话' }]);
+    const log = join(home, '.fleet-dao', 'prompt-log');
+    mkdirSync(log, { recursive: true });
+    writeFileSync(
+      join(log, '2026-10-11.jsonl'),
+      [
+        { at: '2026-10-11T08:00:01Z', sessionId: 'c-old', prompt: '驾驶舱表格改一版' },
+        { at: '2026-10-11T08:10:01Z', sessionId: 'o-1', prompt: '别的会话' },
+        { at: '2026-10-11T08:30:01Z', sessionId: 'c-new', prompt: '接着做' },
+      ]
+        .map((r) => `${JSON.stringify(r)}\n`)
+        .join(''),
+    );
+    const shown = (id: string, body: string) => {
+      const dir = join(home, '.fleet-dao', 'steer-shown');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${id}.json`), body);
+    };
+    return { home, shown };
+  }
+  const lostLine = (lines: string[]) => lines.find((l) => /没收到的话/.test(l));
+
+  it('不在 prompt-log、但本会话号的 steer-shown 的 at 不早于它（等于也算）：开场不再列进「没收到的话」', () => {
+    const { home, shown } = world();
+    shown('c-old', JSON.stringify({ at: STEER }));
+    const lines = recent({ home, sessionId: 'c-old' });
+    expect(lostLine(lines)).toBeUndefined();
+    expect(lines.join('\n')).not.toContain('antd');
+    expect(lines.join('\n')).not.toContain('没核成');
+  });
+
+  it('换了原生号：转的时候记在旧号上，新号开场照样算收到（本血缘任一号都认）', () => {
+    const { home, shown } = world();
+    shown('c-old', JSON.stringify({ at: STEER + 60_000 }));
+    expect(lostLine(recent({ home, sessionId: 'c-new' }))).toBeUndefined();
+  });
+
+  it('【故意造出的失败】steer-shown 的 at 早于这条、或记在别的 Mirasim 会话的号上：照样列进「没收到的话」', () => {
+    const early = world();
+    early.shown('c-old', JSON.stringify({ at: STEER - 1 }));
+    expect(lostLine(recent({ home: early.home, sessionId: 'c-new' }))).toMatch(
+      /16:03］我建议你思考下，antd 是怎么做的.*先答这些/,
+    );
+    const other = world();
+    other.shown('o-1', JSON.stringify({ at: NOW }));
+    expect(lostLine(recent({ home: other.home, sessionId: 'c-new' }))).toContain('antd');
+  });
+
+  it('【故意造出的失败】steer-shown 认不出、读不了：明说「没核成」，那条照没收到列，不当成收到', () => {
+    const bad = world();
+    bad.shown('c-old', '{"at":"16:03"}');
+    const lines = recent({ home: bad.home, sessionId: 'c-new' });
+    expect(lines.some((l) => /没核成.*steer-shown.*c-old\.json.*认不出/.test(l))).toBe(true);
+    expect(lostLine(lines)).toContain('antd');
+    const broken = world();
+    mkdirSync(join(broken.home, '.fleet-dao', 'steer-shown', 'c-new.json'), { recursive: true }); // 路径是个目录：读不了
+    broken.shown('c-old', 'not json');
+    const again = recent({ home: broken.home, sessionId: 'c-new' });
+    expect(again.some((l) => /没核成.*c-new\.json.*读不了/.test(l))).toBe(true);
+    expect(again.some((l) => /没核成.*c-old\.json.*认不出/.test(l))).toBe(true);
+    expect(lostLine(again)).toContain('antd');
+  });
+});
+
 // 2026-10-11 串会话（创始人「现在你实现的引导方式会串会话想个最佳解决方式」）：fleet-dao 会话 17:49 问的话被另一个项目的会话
 // 当成自己的活答了（开场「最近 60 分钟落盘的话」把所有会话的话列给每个会话）；18:15 发给指挥官的引导被另一个 fleet-dao 会话也办了
 // （开场叫每个会话办进度单上全部待处理引导），开出重复 PR #1884。修法：按「Mirasim 会话」这条血缘认主。
