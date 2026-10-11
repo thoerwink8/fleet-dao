@@ -365,7 +365,7 @@ describe('失联与在用版本小标题', () => {
   });
 
   describe('超过 24 小时没报的远程环境收成一行（#1888）', () => {
-    function renderWithRemote(agoMs: number) {
+    function renderWithRemote(agoMs: number, route = '/france') {
       const inner = createMockApi({ live: false });
       const t = Date.now();
       const at = new Date(t - agoMs).toISOString();
@@ -391,7 +391,7 @@ describe('失联与在用版本小标题', () => {
         },
         jobs: () => Promise.resolve(jobsData()),
       } as unknown as MockApi;
-      renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
+      renderApp(<France />, { api: api as unknown as FleetApi, route });
     }
     const col = () => document.querySelector('[data-env-column="wsl"]') as HTMLElement;
 
@@ -411,6 +411,21 @@ describe('失联与在用版本小标题', () => {
       expect(col().textContent).toContain('失联，以下是旧数据');
       fireEvent.click(within(gone()).getByRole('button', { name: /收起/ }));
       await waitFor(() => expect(col()).toBeNull());
+    });
+
+    test('选中的远程环境即使 5 天没报也不收起：画成并排列、不画收起的一行；同一台没选中时收成一行', async () => {
+      const ago = 5 * 24 * 60 * 60_000;
+      renderWithRemote(ago, '/france?node=wsl');
+      await waitFor(() => expect(col()).toBeTruthy());
+      expect(document.querySelector('[data-env-gone]')).toBeNull();
+      expect(document.querySelector('[data-env-columns]')?.getAttribute('data-env-columns')).toBe('2');
+      expect(col().getAttribute('data-env-selected')).toBe('true');
+      await waitFor(() => expect(col().querySelector('[data-env-fact]')).toBeTruthy());
+      cleanup();
+      // 对照：同一台没选中
+      renderWithRemote(ago);
+      await waitFor(() => expect(gone()).toBeTruthy());
+      expect(col()).toBeNull();
     });
 
     test('5 天没报同样收成一行；1 小时前报过的照旧并排两列', async () => {
