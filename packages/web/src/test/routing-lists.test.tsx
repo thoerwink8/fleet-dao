@@ -414,7 +414,7 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     const shell = row.querySelector('[data-row-frame]') as HTMLElement;
     expect(shell).toBeTruthy();
     expect(classTokens(shell)).toEqual(
-      expect.arrayContaining(['min-h-row', 'px-section', 'max-md:min-h-11']),
+      expect.arrayContaining(['min-h-row-tall', 'px-section', 'max-md:min-h-11']),
     );
     const name = row.querySelector('[data-row-name]') as HTMLElement;
     expect(name.textContent).toBe('Opus 5.5');

@@ -43,6 +43,11 @@ describe('路由页：每一层现在活着吗', () => {
     expect(links[4]?.textContent).toContain('整理待办');
     expect(links[4]?.textContent).toContain('这里配指挥官用的模型');
     expect(screen.getByText('在对话里做，不选路', { exact: false })).toBeTruthy();
+    // 对题是用途那一排里只读的一项，说明在悬停里，不另占一行（#1914 第 4 轮）
+    const scope = document.querySelector('[data-tab-note]');
+    expect(scope?.getAttribute('title')).toBe('对题：在对话里做，不选路');
+    expect(scope?.closest('[data-tab-group]')?.getAttribute('data-tab-group')).toBe('aside');
+    expect(within(await screen.findByRole('navigation', { name: '用途' })).queryByText(/^对题：/)).toBeNull();
     expect(screen.getByText('不是流程里的一段')).toBeTruthy();
     // 分组说明在组头上，不在任何一个筛选条里当选项（#1904）；三块页签、两组用途都是 FilterTabs
     expect(screen.getByText('不是流程里的一段').closest('[role=group]')).toBeNull();
@@ -77,6 +82,15 @@ describe('路由页：每一层现在活着吗', () => {
     await purposeLinks();
     // 用途按钮上只有名字和个数（这句话在按钮的悬停提示里），详情标题旁写一遍
     expect(screen.getAllByText('首选 Grok 4.7 不可用，实际派 GPT 5.6 luna')).toHaveLength(1);
+    // 标题块（#1914 第 4 轮）：用途名单独一行比页标题小一档；结论一句 15 正文字重、后面跟结论标签；细节灰字在下面
+    const hero = document.querySelector('[data-purpose-hero]') as HTMLElement;
+    expect(within(hero).getByRole('heading', { level: 2 }).className).toContain('text-subtitle');
+    const conclusion = within(hero)
+      .getByText('首选 Grok 4.7 不可用，实际派 GPT 5.6 luna')
+      .closest('p') as HTMLElement;
+    expect(conclusion.className).toEqual(expect.stringContaining('text-heading font-normal'));
+    expect(conclusion.querySelector('[data-variant]')?.textContent).toContain('派得出去');
+    expect(hero.textContent).toContain('走 中转站 · relay');
     // 默认展开顺位第一条活的所在的模型
     expect(routeItem('r-rl-gpt').textContent).toContain('顺位第一条活的');
     // Grok 的额度读数是 42 分钟前的：额度不知道，整条不知道（不画成活）
@@ -356,6 +370,8 @@ describe('路由页：每一层现在活着吗', () => {
     const reserved = routeItem('rt-reserved');
     expect(reserved.textContent).toContain('占 3/3（在跑 1、已选定还没开跑 2）');
     expect(reserved.textContent).toContain('满了，等空位，不算故障');
+    // 收成一个小图标，话在悬停和读屏里（#1914 第 4 轮：窄屏小字不再折两行）
+    expect(reserved.querySelector('[data-pool-full]')?.getAttribute('title')).toBe('满了，等空位，不算故障');
     const free = routeItem('rt-free');
     expect(free.textContent).toContain('在跑 1/3');
     expect(free.textContent).not.toContain('满了，等空位');

@@ -14,7 +14,9 @@ test.describe('其余页面', () => {
     // 页标题就是这一级的「路由」。差集那一节的标题里也有这两个字，子串会配到两个标题。
     await expect(page.getByRole('heading', { level: 1, name: '路由', exact: true })).toBeVisible();
     // 用途骨架是发布时装进库的：execute / ui / verify / judge。对题不选路，老的环节不列。
-    await expect(page.getByText('在对话里做，不选路')).toBeVisible();
+    // 对题是用途那一排里只读的一项「对题」，「在对话里做，不选路」在它的悬停说明里（#1914）
+    await expect(page.locator('[data-tab-note]', { hasText: '对题' })).toBeVisible();
+    await expect(page.locator('[data-tab-note]')).toHaveAttribute('title', '对题：在对话里做，不选路');
     await expect(page.getByText('动手', { exact: true }).first()).toBeVisible();
     await expect(page.getByText('验收').first()).toBeVisible();
     await expect(page.getByText('需求文档')).toHaveCount(0);

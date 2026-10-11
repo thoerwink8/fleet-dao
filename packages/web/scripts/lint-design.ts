@@ -357,8 +357,8 @@ const SPACING_OK = new Set([
 ]);
 
 /** 判一个类名（已去掉变体），返回 [规则, 该换成什么]；合规返回 undefined。R8、R9 不在这里。 */
-/** 组件令牌（app.css「组件令牌」一节）：控件高、行高、区块内边距、区块间距、区块内间距。 */
-const COMPONENT_TOKEN = 'control|row|section-gap|section|stack';
+/** 组件令牌（app.css「组件令牌」一节）：控件高、行高、两行的行高、区块内边距、区块间距、区块内间距。 */
+const COMPONENT_TOKEN = 'control|row-tall|row|section-gap|section|stack';
 const COMPONENT_TOKEN_UTIL = new RegExp(
   `^(?:h|min-h|max-h|size|w|min-w|p|px|py|pt|pr|pb|pl|ps|pe|m|mx|my|mt|mr|mb|ml|ms|me|gap|gap-x|gap-y|space-x|space-y)-(?:${COMPONENT_TOKEN})$`,
 );
@@ -388,7 +388,10 @@ export function judgeUtility(util: string, file: string): [RuleId, string] | und
   if (size) {
     const v = size[1] as string;
     if (v in SIZE_FIX || /^[2-9]xl$/.test(v)) {
-      return ['R2', `${SIZE_FIX[v] ?? 'text-display'}（六档：meta、body、heading、title、display）`];
+      return [
+        'R2',
+        `${SIZE_FIX[v] ?? 'text-display'}（七档：meta、body、heading、subtitle、title、display，加只给画布用的 canvas）`,
+      ];
     }
     if (v === 'canvas' && !file.startsWith('src/components/home/board/')) {
       return ['R2', 'text-meta（text-canvas 只给 components/home/board/ 的画布用）'];

@@ -94,7 +94,9 @@ export function purposeLine(p: RoutingLayerPurpose, env: PurposeLineEnv = {}): {
   const first = firstLive(p);
   if (first) {
     const where = `${first.model.displayName}（${routeTitle(first.route)}）`;
-    if (first.modelIndex === 0 && first.routeIndex === 0) return { text: `首选活着：${where}`, tone: 'done' };
+    // 路由页标题块的那句结论（#1914）：先说现在派给谁
+    if (first.modelIndex === 0 && first.routeIndex === 0)
+      return { text: `现在派给首选 ${where}`, tone: 'done' };
     if (first.modelIndex === 0) {
       return {
         text: `首选那条路不行，顺位第一条活的是它的第 ${first.routeIndex + 1} 条：${where}`,

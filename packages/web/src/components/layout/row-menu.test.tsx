@@ -44,7 +44,7 @@ describe('RowMenu', () => {
     const trigger = screen.getByRole('button', { name: '更多操作：甲' });
     expect(classes(trigger)).toEqual(
       expect.arrayContaining([
-        'pointer-fine:opacity-0',
+        'pointer-fine:opacity-40',
         'pointer-fine:group-hover/row:opacity-100',
         'pointer-fine:group-focus-within/row:opacity-100',
         'data-[state=open]:opacity-100',
@@ -61,7 +61,7 @@ describe('RowMenu', () => {
       </RowMenu>,
     );
     expect(classes(screen.getByRole('button', { name: '更多操作：乙' }))).not.toContain(
-      'pointer-fine:opacity-0',
+      'pointer-fine:opacity-40',
     );
   });
 
@@ -118,7 +118,7 @@ describe('FilterTabGroups', () => {
     const heading = screen.getByText('另一组');
     expect(heading.closest('[role=group]')).toBeNull();
     expect(heading.closest('[data-tab-group]')?.getAttribute('data-tab-group')).toBe('two');
-    expect(classes(heading.closest('[data-tab-group]'))).toEqual(expect.arrayContaining(['md:border-l']));
+    expect(classes(heading.closest('[data-tab-group]'))).toEqual(expect.arrayContaining(['border-l']));
     expect(screen.getByText('丁不在这里')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '乙' }));
     expect(onChange).toHaveBeenCalledWith('b');

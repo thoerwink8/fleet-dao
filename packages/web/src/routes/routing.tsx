@@ -20,7 +20,7 @@ import { brand } from '#brand';
 import { usePoolHolds, useRoutingLayers } from '../api/client';
 import type { RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
 import { EmptyState } from '../components/layout/empty-state';
-import { FilterTabGroups, FilterTabs } from '../components/layout/filter-tabs';
+import { FilterTabGroups, FilterTabNote, FilterTabs } from '../components/layout/filter-tabs';
 import { RowFrame } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { Notice } from '../components/layout/notice';
@@ -218,7 +218,7 @@ function PurposesTab({ purposes, params }: { purposes: RoutingLayerPurpose[]; pa
     );
   }
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-8">
       <PurposeList purposes={purposes} selected={selected.purpose} params={params} />
       <div id="routing-purpose-detail" className="min-w-0 scroll-mt-4">
         <PurposeDetail key={selected.purpose} purpose={selected} />
@@ -302,15 +302,13 @@ function PurposeList({
                   heading: '不是流程里的一段',
                   'aria-label': '流程之外的用途',
                   items: aside.map(toItem),
-                  note: `对题：${SCOPE_NO_ROUTE}`,
+                  // 对题不选路：只读的一项，说明在悬停里，不另占一行
+                  note: <FilterTabNote label="对题" detail={SCOPE_NO_ROUTE} />,
                 },
               ]
             : []),
         ]}
       />
-      {aside.length === 0 ? (
-        <p className="mt-2 text-meta text-muted-foreground">对题：{SCOPE_NO_ROUTE}</p>
-      ) : null}
     </nav>
   );
 }
@@ -318,7 +316,7 @@ function PurposeList({
 const GROOM_HINT = '这里配指挥官用的模型';
 
 /** 行高（桌面、平板）：名字一行加一行小字。只在超过 50 个模型、要开窗口时用；不到 50 个按内容高度、整页滚。 */
-const ORDER_ROW_HEIGHT = 56;
+const ORDER_ROW_HEIGHT = 48;
 /** 超过 50 个模型时窗口的高度：13 行，再多内部滚。 */
 const ORDER_LIST_HEIGHT = ORDER_ROW_HEIGHT * 13;
 
@@ -338,24 +336,35 @@ function PurposeHero({ purpose: p }: { purpose: RoutingLayerPurpose }) {
     notes.push(line.text.includes(via) ? how : `走 ${via} · ${how}`);
   }
   if (p.purpose === 'groom') notes.push(GROOM_HINT);
+  const cut = line.text.indexOf('（');
+  const lead = cut > 0 ? line.text.slice(0, cut) : line.text;
+  const paren = cut > 0 ? line.text.slice(cut) : '';
+  const badge = <StatusBadge tone={verdictTone[p.verdict]} label={purposeVerdictLabel[p.verdict]} />;
   return (
-    <header data-purpose-hero className="flex min-w-0 flex-col gap-1">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <h2 className="text-heading">{purposeLabel(p.purpose)}</h2>
+    // 和页标题「路由」拉开层级：用途名单独一行（subtitle，比页标题小一档），下面隔 12 是结论（15 正文字重）带结论标签，再下面是灰字细节
+    <header data-purpose-hero className="flex min-w-0 flex-col pt-2">
+      <div className="mb-3 flex items-baseline gap-2">
+        <h2 className="text-subtitle">{purposeLabel(p.purpose)}</h2>
         <span className="text-meta text-muted-foreground">{p.purpose}</span>
-        <StatusBadge tone={verdictTone[p.verdict]} label={purposeVerdictLabel[p.verdict]} />
       </div>
       {/* 一个模型都没排：那句话就是缺口本身，下面缺口栏已经写了，不在这里再写一遍 */}
       {p.models.length > 0 ? (
-        <p className="flex items-start gap-2 text-body font-medium">
-          {line.tone === 'done' ? null : <StatusDot tone={line.tone} className="mt-1" />}
-          <span className="min-w-0">{line.text}</span>
+        <p className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-heading font-normal">
+          {line.tone === 'done' ? null : <StatusDot tone={line.tone} />}
+          <span className="min-w-0">
+            {/* 括号里的路由名（「Claude 订阅 · claude-a」）不从中间断行：窄屏整段换到下一行 */}
+            {lead}
+            {paren ? <span className="whitespace-nowrap">{paren}</span> : null}
+          </span>
+          {badge}
         </p>
-      ) : null}
+      ) : (
+        <p>{badge}</p>
+      )}
       {p.purpose === 'judge' && p.verdict === 'unknown' ? (
-        <p className="text-meta text-muted-foreground">按量计费，不自动探，不用处理</p>
+        <p className="mt-1.5 text-meta text-muted-foreground">按量计费，不自动探，不用处理</p>
       ) : null}
-      {notes.length > 0 ? <p className="text-meta text-muted-foreground">{notes.join('　')}</p> : null}
+      {notes.length > 0 ? <p className="mt-1.5 text-meta text-muted-foreground">{notes.join('　')}</p> : null}
     </header>
   );
 }
@@ -389,7 +398,7 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   const currentPosition = current ? p.models.findIndex((m) => m.modelId === current.modelId) + 1 : 0;
   const currentOff = current !== undefined && modelIsOff(current);
   return (
-    <section aria-label={`${purposeLabel(p.purpose)}的调整顺序`} className="flex flex-col gap-4">
+    <section aria-label={`${purposeLabel(p.purpose)}的调整顺序`} className="flex flex-col gap-6">
       <PurposeHero purpose={p} />
       {edit.disabledWhy ? (
         <Notice tone="info">{edit.disabledWhy}。先后、开关、添加和档位都不能改。</Notice>
@@ -565,6 +574,8 @@ function ModelPriority({
         <div className="relative min-h-0 flex-1 py-1">
           <SortableList
             ariaLabel="模型"
+            // 行和行之间一根极细的分隔线，不画框（#1914 第 4 轮）
+            className="divide-y divide-border"
             items={shown}
             itemId={(m) => m.modelId}
             itemLabel={(m) => `${m.displayName}（${purposeLabel(p.purpose)}里的先后）`}
@@ -633,7 +644,7 @@ function ModelRow({
   const meta = [m.family, modelSummary(m), effort ? `档位 ${effort}` : null].filter(Boolean).join(' · ');
   const word = slotWord(slot.state, slot.rank, '模型');
   return (
-    <RowFrame className={cn(fixedHeight && 'h-full')}>
+    <RowFrame tall className={cn(fixedHeight && 'h-full')}>
       {controls.grip}
       <span
         data-position

@@ -205,7 +205,7 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
     expect(spy.mock.calls[0]?.[2]).toMatchObject({ op: 'reorder' });
   });
 
-  test('宽屏和手机同一个样子（#1914）：行里开关和「⋯」，「⋯」和拖动柄悬停这一行才露出', async () => {
+  test('宽屏和手机同一个样子（#1914）：行里开关和「⋯」；「⋯」平时极淡占着位置、拖动柄平时藏着，悬停这一行才变实', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await opened();
     const row = document.querySelector('li[data-model="opus-5.5"]') as HTMLElement;
@@ -214,11 +214,15 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
     expect(within(row).queryByRole('button', { name: /^把 .* 移出用途/ })).toBeNull();
     const more = within(row).getByRole('button', { name: /^更多操作：Opus 5.5/ });
     const grip = within(row).getByRole('button', { name: /^拖动 / });
-    for (const el of [more, grip]) {
-      expect(classes(el)).toEqual(
-        expect.arrayContaining(['pointer-fine:opacity-0', 'pointer-fine:group-hover/row:opacity-100']),
-      );
-    }
+    // 「⋯」固定占位但极淡（右边不空一块，#1914 第 4 轮）；拖动柄浮在留白里，平时整个藏着
+    expect(classes(more)).toEqual(
+      expect.arrayContaining(['pointer-fine:opacity-40', 'pointer-fine:group-hover/row:opacity-100']),
+    );
+    expect(classes(grip)).toEqual(
+      expect.arrayContaining(['pointer-fine:opacity-0', 'pointer-fine:group-hover/row:opacity-100']),
+    );
+    // 两行的行高取 row-tall（标准 48）
+    expect(classes(row.querySelector('[data-row-frame]'))).toContain('min-h-row-tall');
     // 行框带 group/row，悬停才认得到这一行
     expect(classes(row.querySelector('[data-row-frame]'))).toContain('group/row');
   });

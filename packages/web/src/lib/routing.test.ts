@@ -91,7 +91,7 @@ describe('走的是不是首选', () => {
     const p = purpose('execute', [model('opus', [route('a', 'live'), route('b', 'dead')])], 'live');
     expect(firstLive(p)).toMatchObject({ modelIndex: 0, routeIndex: 0 });
     expect(onFallback(p)).toBe(false);
-    expect(purposeLine(p)).toEqual({ text: '首选活着：OPUS（Claude 订阅 · pool-a）', tone: 'done' });
+    expect(purposeLine(p)).toEqual({ text: '现在派给首选 OPUS（Claude 订阅 · pool-a）', tone: 'done' });
   });
 
   test('首选那条路死了、同模型第 2 条活着：写明在用它的第 2 条', () => {

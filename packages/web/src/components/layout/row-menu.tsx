@@ -1,5 +1,5 @@
 // 行尾「⋯」菜单（规范第三节「行尾菜单」）：一行只留主信息、一个状态和一个开关，次要操作（挪位置、档位、移出、整池暂停……）收进这里。
-// - 鼠标设备上平时藏着，悬停这一行、键盘焦点进到这一行或菜单开着时才露出（参照 Linear 列表行）；触屏没有悬停，一直显示。
+// - 鼠标设备上平时极淡地占着位置，悬停这一行、键盘焦点进到这一行或菜单开着时才变实（参照 Linear 列表行）；触屏没有悬停，一直实着。
 // - 行要带 group/row（RowFrame 自带），露出才认得到「这一行」。
 // - 菜单项在手机上至少 40 高（#1806），桌面按菜单常规高度。
 import { Ellipsis } from 'lucide-react';
@@ -21,6 +21,13 @@ import {
 export const revealOnRowHover =
   'pointer-fine:opacity-0 pointer-fine:group-hover/row:opacity-100 pointer-fine:group-focus-within/row:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 transition-opacity duration-100';
 
+/**
+ * 「⋯」用的：平时也在原位、极淡（右边不空一块，看得出那里有东西），悬停这一行、焦点进来、菜单开着才变实（#1914 第 4 轮）。
+ * 拖动柄浮在留白里，平时整个藏着（revealOnRowHover）。
+ */
+export const faintUntilRowHover =
+  'pointer-fine:opacity-40 pointer-fine:group-hover/row:opacity-100 pointer-fine:group-focus-within/row:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 transition-opacity duration-100';
+
 export function RowMenu({
   label,
   title,
@@ -31,7 +38,7 @@ export function RowMenu({
   label: string;
   /** 悬停提示：菜单里有什么。 */
   title?: string;
-  /** 平时藏着、悬停这一行才露出（默认）。false = 一直显示。 */
+  /** 平时极淡、悬停这一行才变实（默认）。false = 一直实着。 */
   reveal?: boolean;
   children: ReactNode;
 }) {
@@ -43,7 +50,7 @@ export function RowMenu({
           variant="ghost"
           size="icon-sm"
           data-row-menu
-          className={cn('shrink-0 text-muted-foreground', reveal && revealOnRowHover)}
+          className={cn('shrink-0 text-muted-foreground', reveal && faintUntilRowHover)}
           aria-label={label}
           title={title}
         >

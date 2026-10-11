@@ -16,7 +16,6 @@ import {
   withoutHold,
 } from '../lib/pool-holds';
 import { RowMenuItem } from './layout/row-menu';
-import { StatusBadge } from './layout/status-badge';
 import { useRoutingEdit } from './routing-edit';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -30,14 +29,11 @@ const FIELDS: { key: keyof HoldDraft; label: string; type?: string }[] = [
 ];
 
 /**
- * 这一行路由所属的账号池：设暂停、撤回，或标明已经暂停（路由页样板 #1914 起拆成三块，调用方各摆各的）：
- * badge 放在行的小字里（暂停了才有）；menu 是行尾「⋯」菜单里的一项；panel 是点了之后在行下面展开的表单。
- * 整池暂停没读到（还在读、读失败）三块都是空的：失败另有横幅。
+ * 这一行路由所属的账号池：设暂停、撤回，或标明已经暂停（路由页样板 #1914 起拆成两块，调用方各摆各的）：
+ * 暂停了的样子由行上的状态（池暂停）表示，这里不另画标签；menu 是行尾「⋯」菜单里的一项；panel 是点了之后在行下面展开的表单。
+ * 整池暂停没读到（还在读、读失败）两块都是空的：失败另有横幅。
  */
-export function usePoolHoldControl(
-  poolId: string,
-  routeId: string,
-): { badge: ReactNode; menu: ReactNode; panel: ReactNode } {
+export function usePoolHoldControl(poolId: string, routeId: string): { menu: ReactNode; panel: ReactNode } {
   const { disabledWhy } = useRoutingEdit();
   const holds = usePoolHolds();
   const update = useUpdateSetting();
@@ -46,7 +42,7 @@ export function usePoolHoldControl(
   const [draft, setDraft] = useState<HoldDraft>({ ...EMPTY_DRAFT, poolId });
   const [revokeReason, setRevokeReason] = useState('');
   const v = holds.data;
-  if (!v || holds.error) return { badge: null, menu: null, panel: null };
+  if (!v || holds.error) return { menu: null, panel: null };
 
   const off = disabledWhy !== null;
   const recognized = v.holds.some((h) => h.poolId === poolId);
@@ -84,7 +80,6 @@ export function usePoolHoldControl(
     );
   };
 
-  const badge = paused ? <StatusBadge tone="stall" variant="dot" label="整池暂停" /> : null;
   const itemWhy = disabledWhy ?? (update.isPending ? '正在保存，稍等' : undefined);
 
   let menu: ReactNode = null;
@@ -185,5 +180,5 @@ export function usePoolHoldControl(
       ) : null}
     </>
   );
-  return { badge, menu, panel };
+  return { menu, panel };
 }

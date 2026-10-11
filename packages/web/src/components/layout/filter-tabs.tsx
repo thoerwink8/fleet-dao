@@ -21,7 +21,7 @@ export interface FilterTabGroup<Id extends string = string> {
   key: string;
   /** 组头：写在这一组前面的小标题（「不是流程里的一段」）。第一组通常不写。 */
   heading?: ReactNode;
-  /** 组尾一句灰字（「对题：在对话里做，不选路」）。 */
+  /** 组尾一项只读的说明（FilterTabNote：「对题」，悬停看「在对话里做，不选路」）。 */
   note?: ReactNode;
   items: readonly FilterTabItem<Id>[];
   'aria-label': string;
@@ -29,7 +29,8 @@ export interface FilterTabGroup<Id extends string = string> {
 
 /**
  * 几组同一类的次级筛选排成一行（#1904 起分组说明写在组头上）：组和组之间一道细竖线，后一组前面写组头小标题。
- * 手机上放不下就换行，组头留在自己那一组前面，不悬在半空。每组各是一个 FilterTabs（同一个选中值）。
+ * 组头留在自己那一组前面，不悬在半空。每组各是一个 FilterTabs（同一个选中值）。
+ * 桌面一行；手机上整排横向滑动，不折成第二行（#1914 第 4 轮：页签一层、用途一层，不再三层）。
  */
 export function FilterTabGroups<Id extends string = string>({
   groups,
@@ -45,14 +46,21 @@ export function FilterTabGroups<Id extends string = string>({
   className?: string;
 }) {
   return (
-    <div className={cn('flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2', className)}>
+    <div
+      // 手机上右端渐隐，提示「还能往右滑」
+      style={{ '--fade-end': FADE } as CSSProperties}
+      className={cn(
+        'scrollbar-thin flex min-w-0 items-center gap-x-3 gap-y-2 max-md:fade-edges-x max-md:overflow-x-auto md:flex-wrap',
+        className,
+      )}
+    >
       {groups.map((g, i) => (
         <div
           key={g.key}
           data-tab-group={g.key}
           className={cn(
-            'flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-1',
-            i > 0 && 'md:border-l md:pl-3',
+            'flex min-w-0 items-center gap-x-2 max-md:shrink-0 md:max-w-full md:flex-wrap md:gap-y-1',
+            i > 0 && 'border-l pl-3',
           )}
         >
           {g.heading ? (
@@ -69,10 +77,26 @@ export function FilterTabGroups<Id extends string = string>({
             onChange={onChange}
             className="min-w-0"
           />
-          {g.note ? <span className="text-meta text-muted-foreground">{g.note}</span> : null}
+          {g.note}
         </div>
       ))}
     </div>
+  );
+}
+
+/**
+ * 筛选条里一项只读的说明（「对题」）：和选项同高、同样的字，但不能点、更淡；说明全文在悬停和读屏里，不另占一行。
+ */
+export function FilterTabNote({ label, detail }: { label: string; detail: string }) {
+  return (
+    <span
+      data-tab-note
+      title={`${label}：${detail}`}
+      className="inline-flex h-[calc(var(--spacing-control)-0.25rem)] shrink-0 cursor-help items-center px-3 text-body whitespace-nowrap text-muted-foreground max-md:min-h-10"
+    >
+      {label}
+      <span className="sr-only">：{detail}</span>
+    </span>
   );
 }
 

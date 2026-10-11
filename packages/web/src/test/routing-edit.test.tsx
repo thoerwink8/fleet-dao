@@ -442,7 +442,13 @@ describe('路由页：调先后和开关', () => {
     fireEvent.change(within(row).getByLabelText('最迟复查日期'), { target: { value: '2026-12-01' } });
     expect((within(row).getByRole('button', { name: '确认暂停' }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(within(row).getByRole('button', { name: '确认暂停' }));
-    await waitFor(() => expect(row.textContent).toContain('整池暂停'));
+    // 暂停了只看名字后面的状态「池暂停」，不再另贴「整池暂停」小标签（#1914 第 4 轮，同一件事一行只写一遍）
+    await waitFor(() => expect(row.textContent).toContain('池暂停'));
+    expect(row.textContent).not.toContain('整池暂停');
+    const chip = [...row.querySelectorAll('span[data-variant]')].find((el) =>
+      el.textContent?.includes('池暂停'),
+    );
+    expect(chip).toBeTruthy();
     expect((within(row).getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
     expect((within(routeItem('r-cb-opus')).getByRole('switch') as HTMLButtonElement).disabled).toBe(false);
 
@@ -456,7 +462,7 @@ describe('路由页：调先后和开关', () => {
     fireEvent.change(within(row).getByLabelText('撤回原因'), { target: { value: '账号解封了' } });
     fireEvent.click(within(row).getByRole('button', { name: '确认撤回' }));
     await waitFor(() => expect((within(row).getByRole('switch') as HTMLButtonElement).disabled).toBe(false));
-    expect(row.textContent).not.toContain('整池暂停');
+    expect(row.textContent).not.toContain('池暂停');
   });
 
   test('【故意造出的失败】选了远程环境（?node=）：整块置灰、写「去那台上操作」，拖动、置顶置底和开关都点不了', async () => {

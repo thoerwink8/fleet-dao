@@ -7,7 +7,7 @@
 // - 渠道已关时这条路由不画开关，写「渠道已关」；整池暂停、整池暂停没读成时开关置灰并写原因。
 
 import { type HostId, routeEffortChoices } from '@fleet-dao/shared';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Hourglass } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { Link } from 'react-router';
 import { usePoolHolds, useRouting } from '../api/client';
@@ -30,7 +30,7 @@ import {
 import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
 import { Code } from './layout/code';
-import { RowFrame } from './layout/list';
+import { RowDetail, RowFrame } from './layout/list';
 import { RowMenu, RowMenuSeparator } from './layout/row-menu';
 import { StatusDot } from './layout/status-badge';
 import { Tag } from './layout/tag';
@@ -161,6 +161,7 @@ export function ModelRoutes({
         disabled={edit.disabledWhy !== null}
         busy={edit.busy}
         disabledWhy={edit.disabledWhy}
+        className="divide-y divide-border"
         rowClassName={() => 'hover:bg-accent'}
         rowProps={(r) => ({ 'data-route': r.routeId })}
         onSave={(order, expected, movedId) =>
@@ -264,7 +265,7 @@ export function RouteItem({
   const factsId = `facts-${r.routeId}`;
   return (
     <>
-      <RowFrame className="items-start">
+      <RowFrame tall className="items-start">
         {rowControls?.grip}
         <button
           type="button"
@@ -281,9 +282,10 @@ export function RouteItem({
             )}
             aria-hidden
           />
-          {index === undefined ? null : (
-            <span className="num shrink-0 text-body text-muted-foreground">{index + 1}</span>
-          )}
+          {/* 序号占定宽（渠道块里不分先后也留着）：下面展开的明细按这个宽缩进，和名字对齐（RowDetail） */}
+          <span className="num w-4 shrink-0 text-body text-muted-foreground">
+            {index === undefined ? null : index + 1}
+          </span>
           <span className={cn('min-w-0 flex-1', dim && 'opacity-60')}>
             {/* 名字后面紧跟这条路由的状态（一行一个状态）；右边只留开关和「⋯」，手机上也放得下 */}
             <span className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
@@ -298,7 +300,17 @@ export function RouteItem({
             {/* 小字按文字流换行，不按块折：窄的时候不会剩一个「·」孤零零起一行 */}
             <span className="mt-0.5 block text-meta text-muted-foreground">
               {routeHost(r)} · <span className="num">{slots.text}</span>
-              {slots.full ? <span className="text-ink-stall">（满了，等空位，不算故障）</span> : null}
+              {slots.full ? (
+                // 池满了是等空位、不算故障：一个小图标，话在悬停和读屏里，窄屏小字不折两行
+                <span
+                  data-pool-full
+                  title="满了，等空位，不算故障"
+                  className="ml-1 inline-flex align-middle text-ink-stall"
+                >
+                  <Hourglass className="size-3" aria-hidden />
+                  <span className="sr-only">（满了，等空位，不算故障）</span>
+                </span>
+              ) : null}
               {slot ? (
                 <>
                   {' · '}
@@ -308,7 +320,7 @@ export function RouteItem({
                 </>
               ) : null}
               {isFirst ? <Tag className="ml-2 align-middle">顺位第一条活的</Tag> : null}
-              {hold.badge ? <span className="ml-2 inline-flex align-middle">{hold.badge}</span> : null}
+              {/* 整池暂停不另贴小标签：名字后面的状态已经写「池暂停」（#1914 第 4 轮，原来写两遍） */}
             </span>
           </span>
         </button>
@@ -346,7 +358,7 @@ export function RouteItem({
         </span>
       </RowFrame>
       {backoff || poolProblem ? (
-        <div className="-mt-1 space-y-1 pr-4 pb-2 pl-12">
+        <RowDetail className="-mt-1 space-y-1 pb-2">
           {backoff ? (
             <p
               data-probe-backoff
@@ -359,43 +371,45 @@ export function RouteItem({
             </p>
           ) : null}
           {poolProblem ? <PoolProblemLine problem={poolProblem} now={now} /> : null}
-        </div>
+        </RowDetail>
       ) : null}
-      {hold.panel ? <div className="pr-4 pl-12">{hold.panel}</div> : null}
-      <div id={factsId} hidden={!open} className="mr-4 mb-3 ml-12 rounded-lg bg-muted p-3">
-        <p className="mb-2 text-meta text-muted-foreground">
-          路由编号 <Code>{r.routeId}</Code>
-        </p>
-        <div className="grid gap-x-4 gap-y-3 md:grid-cols-3">
-          <Fact label="接得上" fact={r.connect} red={kind === 'fault' || kind === 'interrupted'}>
-            {r.probedAt ? (
-              stale ? (
-                <span className="text-ink-fail">
-                  检测中断：{formatAgo(r.probedAt, now)}的结论，晚于下次探测时刻 20 分钟还没探，探针可能停了
-                </span>
-              ) : (
-                <>{formatAgo(r.probedAt, now)}探的</>
-              )
-            ) : null}{' '}
-            <Link
-              to={`/routing/status?p=${encodeURIComponent(r.channelId)}`}
-              className="underline underline-offset-2 hover:text-foreground"
-            >
-              原文、立即探测
-            </Link>
-          </Fact>
-          <Fact label="额度够" fact={r.quota}>
-            {r.exhausted.length > 0
-              ? r.exhausted.map((w) => (
-                  <span key={w.label} className="block">
-                    {w.label}：{w.resetsAt ? `${formatIn(w.resetsAt, now)}清零` : '清零时刻没读到'}
+      {hold.panel ? <RowDetail>{hold.panel}</RowDetail> : null}
+      <RowDetail id={factsId} hidden={!open} className="pb-3">
+        <div className="rounded-lg bg-muted p-3">
+          <p className="mb-2 text-meta text-muted-foreground">
+            路由编号 <Code>{r.routeId}</Code>
+          </p>
+          <div className="grid gap-x-4 gap-y-3 md:grid-cols-3">
+            <Fact label="接得上" fact={r.connect} red={kind === 'fault' || kind === 'interrupted'}>
+              {r.probedAt ? (
+                stale ? (
+                  <span className="text-ink-fail">
+                    检测中断：{formatAgo(r.probedAt, now)}的结论，晚于下次探测时刻 20 分钟还没探，探针可能停了
                   </span>
-                ))
-              : null}
-          </Fact>
-          <Fact label="禁令与开关" fact={r.ban} />
+                ) : (
+                  <>{formatAgo(r.probedAt, now)}探的</>
+                )
+              ) : null}{' '}
+              <Link
+                to={`/routing/status?p=${encodeURIComponent(r.channelId)}`}
+                className="underline underline-offset-2 hover:text-foreground"
+              >
+                原文、立即探测
+              </Link>
+            </Fact>
+            <Fact label="额度够" fact={r.quota}>
+              {r.exhausted.length > 0
+                ? r.exhausted.map((w) => (
+                    <span key={w.label} className="block">
+                      {w.label}：{w.resetsAt ? `${formatIn(w.resetsAt, now)}清零` : '清零时刻没读到'}
+                    </span>
+                  ))
+                : null}
+            </Fact>
+            <Fact label="禁令与开关" fact={r.ban} />
+          </div>
         </div>
-      </div>
+      </RowDetail>
     </>
   );
 }
