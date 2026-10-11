@@ -95,8 +95,8 @@ export function EngineMasterBadge() {
           ? `引擎总开关没读成：${view.reason}`
           : '正在读引擎总开关';
   const tone = cn(
-    on && 'border-st-done/40 text-ink-done',
-    off && 'border-st-stall/50 text-ink-stall',
+    on && 'border-st-done-line text-ink-done',
+    off && 'border-st-stall-line text-ink-stall',
     !on && !off && 'border-dashed text-muted-foreground',
   );
   const state = view.kind === 'ok' ? (view.master.on ? 'on' : 'off') : view.kind;
@@ -119,23 +119,23 @@ export function EngineMasterBadge() {
               aria-hidden
               className={cn(
                 'absolute top-1.5 right-1.5 size-2 rounded-full',
-                on ? 'bg-st-done' : off ? 'bg-st-stall' : 'bg-muted-foreground/60',
+                on ? 'bg-st-done' : off ? 'bg-st-stall' : 'bg-muted-foreground',
               )}
             />
           </button>
         </PopoverTrigger>
         <PopoverContent align="start" className="w-72" data-engine-master-card>
-          <div className="flex items-center gap-2 text-sm font-semibold">
+          <div className="flex items-center gap-2 text-body font-semibold">
             <Power className="size-4 text-muted-foreground" aria-hidden />
             {label}
           </div>
-          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+          <p className="mt-2 text-meta leading-relaxed text-muted-foreground">
             {detail}
             {remote ? '（远程环境只读：要开关请到那台上操作，说明在法国页）' : null}
           </p>
           <Link
             to={withNode('/france', nodeId)}
-            className="mt-3 flex h-10 items-center justify-center rounded-lg border text-sm hover:bg-accent"
+            className="mt-3 flex h-10 items-center justify-center rounded-lg border text-body hover:bg-accent"
           >
             去法国页看开关
           </Link>
@@ -151,7 +151,7 @@ export function EngineMasterBadge() {
           data-engine-master={state}
           aria-label={`${label}${remote ? '（远程环境，只读）' : ''}，去法国页`}
           className={cn(
-            'hidden h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2 text-xs whitespace-nowrap transition-colors hover:bg-accent sm:flex',
+            'hidden h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2 text-meta whitespace-nowrap transition-colors hover:bg-accent sm:flex',
             tone,
           )}
         >
@@ -181,7 +181,7 @@ export function EngineMasterRelation() {
           ? '现在是开是关没查成'
           : '正在读总开关';
   return (
-    <p className="mb-3 text-xs text-muted-foreground" data-testid="engine-master-relation">
+    <p className="mb-3 text-meta text-muted-foreground" data-testid="engine-master-relation">
       每个项目的「让 AI 接活」要和<strong className="font-medium text-foreground">引擎总开关</strong>
       一起看：总开关关＝全停，开＝只有这里接活开着的项目才派。总开关{state}（
       <Link

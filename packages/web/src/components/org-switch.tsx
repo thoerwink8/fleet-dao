@@ -4,6 +4,7 @@ import { brand } from '#brand';
 import type { OrgSwitchView } from '../api/types';
 import { formatClock } from '../lib/format';
 import { cn } from '../lib/utils';
+import { Section } from './layout/section';
 
 // 两类账号叫什么走品牌文件（brand.terms.carpool / solo）。
 const carpool = () => brand.terms.carpool;
@@ -178,13 +179,18 @@ export function OrgSwitchBanner({ view }: { view: OrgSwitchView | undefined }) {
   if (!view) return null;
   const s = orgSwitchSummary(view);
   return (
-    <div className="mb-3 rounded-xl border bg-card p-3" data-tone={s.tone} data-testid="org-switch">
+    <Section
+      className="mb-3"
+      data-tone={s.tone}
+      data-testid="org-switch"
+      {...(s.tone === 'stall' || s.tone === 'fail' ? { tone: s.tone } : {})}
+    >
       <div className="flex items-center gap-2">
         <ArrowLeftRight className={cn('size-4 shrink-0', TONE_CLASS[s.tone])} aria-hidden />
-        <span className={cn('text-sm font-medium', TONE_CLASS[s.tone])}>{s.headline}</span>
+        <span className={cn('text-body font-medium', TONE_CLASS[s.tone])}>{s.headline}</span>
       </div>
       {s.details.length || s.action ? (
-        <ul className="mt-1.5 space-y-0.5 pl-6 text-xs text-muted-foreground">
+        <ul className="mt-1.5 space-y-0.5 pl-6 text-meta text-muted-foreground">
           {s.details.map((d) => (
             <li key={d}>{d}</li>
           ))}
@@ -197,6 +203,6 @@ export function OrgSwitchBanner({ view }: { view: OrgSwitchView | undefined }) {
           ) : null}
         </ul>
       ) : null}
-    </div>
+    </Section>
   );
 }

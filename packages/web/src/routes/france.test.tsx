@@ -175,8 +175,7 @@ describe('法国总览页', () => {
       jobsData(),
     );
     const off = (await screen.findByText('按配置没开')) as HTMLElement;
-    expect(off.className).toContain('text-ink-stall');
-    expect(off.className).not.toContain('text-ink-fail');
+    expect(off.dataset.tone).toBe('stall');
     cleanup();
     renderFrance(
       envData({
@@ -188,7 +187,7 @@ describe('法国总览页', () => {
       jobsData(),
     );
     const down = (await screen.findByText('没连上')) as HTMLElement;
-    expect(down.className).toContain('text-ink-fail');
+    expect(down.dataset.tone).toBe('fail');
   });
 
   test('定时任务里有一个失败的：那一行带 fail 的行 tone，结局红字', async () => {
@@ -354,15 +353,14 @@ describe('失联与在用版本小标题', () => {
       '[data-env-column]',
     ) as HTMLElement;
     expect(col.getAttribute('data-env-column-state')).toBe('stale');
-    expect(col.className).toMatch(/opacity|muted|grayscale/);
     expect(col.textContent).toContain('失联，以下是旧数据');
+    // 失联列的状态值不带状态色（没有 data-tone），不让旧的「在跑」「N 项红」看起来像现在的状态
     const running = within(col).getByText('在跑');
-    expect(running.className).not.toContain('text-title');
-    expect(running.className).not.toContain('text-ink-done');
-    expect(running.className).toMatch(/text-muted|text-sm|text-xs/);
+    expect(running.dataset.tone).toBeUndefined();
+    expect(running.className).toContain('text-muted-foreground');
     const red = within(col).getByText('2 项红');
-    expect(red.className).not.toContain('text-title');
-    expect(red.className).not.toContain('text-ink-fail');
+    expect(red.dataset.tone).toBeUndefined();
+    expect(red.className).toContain('text-muted-foreground');
   });
 
   describe('手机上失联超过 24 小时的远程环境默认折成一行（#1837）', () => {
