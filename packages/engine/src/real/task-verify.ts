@@ -54,6 +54,7 @@ import type { EngineGitHub } from './github-ports.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import { mapped } from './mirror.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
+import type { AssignedProber, ProbeBudget } from './pick-then-probe.ts';
 import type { SegmentReservations } from './runs-writer.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
 import { sweepRunDirs } from './task-segment.ts';
@@ -87,6 +88,11 @@ export interface ColdVerifyActivityDeps {
   runs: RunsWriter;
   /** 选路时预占的名额（#757）：没开跑就收场的、挑中了没用上的，收场时放掉（runs-writer.ts 的 realReservations）。 */
   reservations: SegmentReservations;
+  /**
+   * 派前探测（#1798 片 4）：给了就选到一条验收路由先探一次（活动 probeAssignedRoute，15 分钟新鲜线），探不通避开它
+   * 再选，一轮最多 3 条。生产由 real/index.ts 装配；不给 = 老样子（选到就交回，冷验收的老测试、还没接探针的进程）。
+   */
+  probe?: AssignedProber;
   memoryAdmission?: MemoryAdmissionDeps;
   /** one-shot 落盘的根（<引擎状态目录>/runs）。 */
   runsDir: string;
@@ -309,6 +315,9 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     const waits: PickWait[] = [];
     // 选路给这一次验收预占的名额（#757）：每挑中一次记下，收场（下面的 finally）一个个放掉，开跑了的放一次什么都不做
     const reservations: string[] = [];
+    // 派前探测（#1798 片 4）：一轮验收最多真探 3 条，跨族共用（别每族各探 3 条）。留给探不通那几条的池名额
+    // 当场放掉：没进起会话，不能占着池等到过期。
+    const probeBudget: ProbeBudget = { probed: 0 };
     const picker = familyPickerFrom(
       async (pickInput) => {
         const got = await deps.pickRoute({ ...pickInput, reserve: { segment: 'verify' } }, ctx);
@@ -328,6 +337,32 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
         }
       },
       ui.uiWork,
+      deps.probe === undefined
+        ? undefined
+        : {
+            probe: deps.probe,
+            budget: probeBudget,
+            onUnprobed: async (route) => {
+              if (route.reservationId === undefined) return;
+              await deps.reservations.release(route.reservationId).catch((error: unknown) => {
+                log('派前探测不通：这条路由预占的池名额没放掉（最多占到预占过期）', {
+                  routeId: route.routeId,
+                  error: errMessage(error),
+                });
+              });
+            },
+            // 三条都不通：选路回的 waitFor 是 none（选路自己不说派不出，是候选都在派前探测里被打掉）。
+            // 这也要按「过一会儿重来」算（#1731），别当成「一方都派不出」的硬结论、更别报人。写进 waits 让
+            // retryFor 有秒数（waitFor 收窄成 slot/quota 是为了 PickWait 的形状，这里其实是在等探针再探通）。
+            onProbeFailed: () => {
+              waits.push({
+                family: 'probe',
+                waitFor: 'slot',
+                detail: '派前探测把候选都打掉了',
+                retryAfterSeconds: ROUTE_RETRY_SECONDS,
+              });
+            },
+          },
     )(input.taskId);
     // 起会话前登记（#59，prepareCwd 里）：切号照它停下这一次验收；收场（下面的 finally）走。
     // 两家并行起会话，各有各的登记：按族记最新一份（同一族换路由重验时，上一份先走），收场时全部走掉
@@ -351,7 +386,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     const retryFor = (reason: string): NonNullable<ColdVerifyResult['retry']> => {
       if (seen.orgSwitch) return { wait: 'slot', reason, afterSeconds: VERIFY_ORG_SWITCH_RETRY_SECONDS };
       if (seen.admission) return { wait: 'slot', reason, afterSeconds: VERIFY_ADMISSION_RETRY_SECONDS };
-      // 一个模型都派不出：选路没给过秒数，用默认的那一档
+      // 一个模型都派不出、或候选都在派前探测里被打掉：选路没给过秒数，用默认的那一档
       if (seen.noModel || waits.length === 0)
         return { wait: 'slot', reason, afterSeconds: ROUTE_RETRY_SECONDS };
       const slot = waits.filter((w) => w.waitFor === 'slot');

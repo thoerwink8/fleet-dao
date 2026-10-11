@@ -18,6 +18,13 @@
 
 import { SEGMENT_STAGE } from '@fleet-dao/shared/flow-purposes';
 import type { PickRouteInput, PickRouteResult, RouteChoice } from './ports.ts';
+import {
+  type AssignedProber,
+  type PickThenProbeFailure,
+  type ProbeBudget,
+  pickThenProbe,
+  pickThenProbeStopText,
+} from './real/pick-then-probe.ts';
 
 /** 这一层从选路拿到的「一个族此刻能不能派」的答案；`undefined` = 这个族没有能派的路由。 */
 export interface FamilyPickDeps {
@@ -97,6 +104,19 @@ export function familyPickerFrom(
    * GPT 族回「没有能派的」、顺序往下问下一家。不带 = 非界面单，照旧。
    */
   uiWork = false,
+  /**
+   * 派前探测（#1798 片 4）：给了就选到一条先探一次（活动 probeAssignedRoute，15 分钟新鲜线），探不通避开它再选，
+   * 一轮最多 3 条（budget 跨族共用）。不给 = 老样子，选到就交回（冷验收的老测试、还没接探针的进程）。
+   */
+  probeDeps?: {
+    probe: AssignedProber;
+    /** 跨族共用的名额（一轮验收最多探 3 条）：不给就每族各算一轮。 */
+    budget?: ProbeBudget;
+    /** 探不通的那一条：放掉它预占的名额。 */
+    onUnprobed?: (route: RouteChoice) => Promise<void>;
+    /** 这一族探满 3 条都不通：每条的结果（原因、谁），交给调用方写进等待的理由。 */
+    onProbeFailed?: (family: string, failures: readonly PickThenProbeFailure[]) => void;
+  },
 ): (taskId: string) => FamilyPickDeps {
   const all = order.map((f) => f.trim()).filter((f) => f !== '');
   // 这一轮已经挑中并交出去的路由：同一族再问时避开，好换这一族的下一条。没派成的不记。
@@ -104,15 +124,47 @@ export function familyPickerFrom(
   return (taskId) => ({
     async pickRouteForFamily(family) {
       const want = family.trim().toLowerCase();
-      const got = await pickRoute({
-        taskId,
-        stage,
-        avoidFamilies: all.filter((f) => f.toLowerCase() !== want),
-        avoidRouteIds: [...skipped],
-        avoidPoolIds: [],
-        avoidModelIds: [],
-        ...(uiWork ? { uiWork: true } : {}),
-      });
+      /** 这一族问选路的那一下：避开别的族、已经挑过的。 */
+      const ask = (avoidRouteIds: readonly string[]) =>
+        pickRoute({
+          taskId,
+          stage,
+          avoidFamilies: all.filter((f) => f.toLowerCase() !== want),
+          avoidRouteIds: [...avoidRouteIds],
+          avoidPoolIds: [],
+          avoidModelIds: [],
+          ...(uiWork ? { uiWork: true } : {}),
+        });
+      if (probeDeps) {
+        const outcome = await pickThenProbe(
+          {
+            pick: ask,
+            probe: probeDeps.probe,
+            ...(probeDeps.budget ? { budget: probeDeps.budget } : {}),
+            ...(probeDeps.onUnprobed ? { onUnprobed: probeDeps.onUnprobed } : {}),
+          },
+          { avoidRouteIds: skipped },
+        );
+        if (outcome.kind === 'unavailable') {
+          onNotPicked?.(want, outcome.result);
+          return undefined;
+        }
+        if (outcome.kind === 'exhausted') {
+          // 探不通的这几条别再来一遍：记进避开，下一族问的时候（或下一次重来）不重复探
+          for (const f of outcome.failures) if (!skipped.includes(f.routeId)) skipped.push(f.routeId);
+          probeDeps.onProbeFailed?.(want, outcome.failures);
+          onNotPicked?.(want, {
+            ok: false,
+            waitFor: 'none',
+            detail: pickThenProbeStopText(outcome.failures),
+          });
+          return undefined;
+        }
+        if (outcome.route.family.trim().toLowerCase() !== want) return undefined;
+        skipped.push(outcome.route.routeId);
+        return outcome.route;
+      }
+      const got = await ask(skipped);
       if (!got.ok) {
         onNotPicked?.(want, got);
         return undefined;

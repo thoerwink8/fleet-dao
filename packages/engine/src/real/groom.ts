@@ -31,11 +31,12 @@ import {
   readStoppedTasks,
 } from '../jobs/groom.ts';
 import type { IntakeRepo } from '../jobs/intake.ts';
-import type { PickRouteInput, PickRouteResult, PortContext } from '../ports.ts';
+import type { PickRouteInput, PickRouteResult, PortContext, RouteChoice } from '../ports.ts';
 import type { UserExec } from './exec.ts';
 import { groomRequestDeps } from './groom-request.ts';
 import { mapped } from './mirror.ts';
 import type { OneShotSessions } from './one-shot-sessions.ts';
+import { type AssignedProber, pickThenProbe, pickThenProbeStopText } from './pick-then-probe.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
 import { prepareSegmentTree } from './segment-tree.ts';
 import type { Identity } from './user-git.ts';
@@ -77,6 +78,11 @@ export interface GroomWiring {
   spawner: SegmentSpawnerDeps;
   /** 选路（store-ports 的 pickRoute）。 */
   pickRoute: (input: PickRouteInput, ctx: PortContext) => Promise<PickRouteResult>;
+  /**
+   * 派前探测（#1798 片 4）：给了就选到一条整理路由先探一次（活动 probeAssignedRoute，15 分钟新鲜线），探不通避开它
+   * 再选，一轮最多 3 条。生产由 real/index.ts 装配；不给 = 老样子（选到就交回，老测试、还没接探针的进程）。
+   */
+  probe?: AssignedProber;
   /** 一次性会话的登记（切号、发布排空照它停下会话）。 */
   sessions: OneShotSessions;
   now?: () => Date;
@@ -158,13 +164,34 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
       attempt: 1,
       lastHeartbeat: undefined,
     };
-    // 1. 选路：用途 groom。taskId 只是个占位（没有属于任何需求的任务行，不预占池的名额）
-    const picked = await w.pickRoute(
-      { taskId: `groom:${runId}`, stage: 'groom', avoidRouteIds: [], avoidPoolIds: [], avoidModelIds: [] },
-      ctx,
-    );
-    if (!picked.ok) return { ok: false, why: `选不到路由（用途 groom）：${picked.detail}` };
-    const route = picked.route;
+    // 1. 选路：用途 groom。taskId 只是个占位（没有属于任何需求的任务行，不预占池的名额）。
+    //    派前探一次（#1798 片 4）：探不通就避开它再选，一轮最多 3 条；3 条都不通就当这一次没整理成。
+    const pickOnce = (avoidRouteIds: readonly string[]) =>
+      w.pickRoute(
+        {
+          taskId: `groom:${runId}`,
+          stage: 'groom',
+          avoidRouteIds: [...avoidRouteIds],
+          avoidPoolIds: [],
+          avoidModelIds: [],
+        },
+        ctx,
+      );
+    let route: RouteChoice;
+    if (w.probe) {
+      const outcome = await pickThenProbe({ pick: pickOnce, probe: w.probe });
+      if (outcome.kind === 'unavailable') {
+        return { ok: false, why: `选不到路由（用途 groom）：${outcome.result.detail}` };
+      }
+      if (outcome.kind === 'exhausted') {
+        return { ok: false, why: `选到的整理路由派前探测都不通：${pickThenProbeStopText(outcome.failures)}` };
+      }
+      route = outcome.route;
+    } else {
+      const got = await pickOnce([]);
+      if (!got.ok) return { ok: false, why: `选不到路由（用途 groom）：${got.detail}` };
+      route = got.route;
+    }
     // 2. 路由 → 会话用户（树要归它）
     let info: Awaited<ReturnType<typeof resolveSegmentRoute>>;
     try {
