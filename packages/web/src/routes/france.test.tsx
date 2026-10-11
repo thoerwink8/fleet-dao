@@ -2,7 +2,7 @@
 // 法国总览页（#618 第 1 版）：引擎、在用版本、健康、最近拉单 4 格 + 定时任务表。
 // 做完的标准：① 每一项读不到就写「没查成 + 原因」，不拿 0 或假 ok 顶；② 故意造一项失败，那一格变虚线灰框，别的格照常；
 // ③ 定时任务有失败亮红、没查全亮黄（判法照 schedules 页）。
-import { cleanup, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
@@ -128,8 +128,22 @@ describe('法国总览页', () => {
     expect(tile('在用版本').getAllByText(/abcdef123456/).length).toBeGreaterThanOrEqual(1);
     expect(tile('在用版本').getAllByText(/落后主线 3 个提交/).length).toBeGreaterThanOrEqual(1);
     expect(tile('健康').getByText('没红的')).toBeTruthy();
-    // 定时任务表里那一行
+    // 定时任务列表里那一行
     expect(await screen.findByText('额度读取')).toBeTruthy();
+  });
+
+  test('定时任务是可展开的列表行：默认收起，点一行展开明细，再点收起（#1805）', async () => {
+    renderFrance(envData(), jobsData());
+    const row = (await screen.findByText('额度读取')).closest('li') as HTMLElement;
+    const toggle = within(row).getByRole('button');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(row.querySelector('dl')).toBeNull();
+    expect(document.querySelector('[data-job-list] table')).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(row.querySelector('dl')?.textContent).toContain('周期');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
   });
 
   test('故意造版本一项读不到：那一格写「没查成 + 原因」，别的格照常显示数，不拿 0 冒充', async () => {
@@ -191,7 +205,7 @@ describe('法国总览页', () => {
         },
       ]),
     );
-    const row = (await screen.findByText('巡检')).closest('tr');
+    const row = (await screen.findByText('巡检')).closest('li');
     expect(row?.dataset.outcome).toBe('failed');
   });
 
