@@ -205,7 +205,7 @@ describe('渠道状态页：渠道卡', () => {
   });
 
   test('一个渠道 200 多条路由：默认只铺要人看的，已关、未使用折成一行，点开先 20 条，「再看 50 条」分批', async () => {
-    const api = createMockApi({ live: false });
+    const api = createMockApi({ live: false, manyRoutes: 213 });
     const routes = api.state().routes.filter((r) => r.channelId === 'ch-cursor');
     expect(routes.length).toBeGreaterThan(200);
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
@@ -229,7 +229,7 @@ describe('渠道状态页：渠道卡', () => {
   });
 
   test('点开折叠行：先铺前 20 条（第 20 条在、第 21 条还没有）', async () => {
-    const api = createMockApi({ live: false });
+    const api = createMockApi({ live: false, manyRoutes: 213 });
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-cursor', api });
     await waitFor(() => routeRow('r-cursor'));
     await openQuiet();
