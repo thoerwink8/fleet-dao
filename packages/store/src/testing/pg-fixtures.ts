@@ -241,6 +241,8 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       updatedAt: date(n.createdAt),
       resolvedAt: dateOpt(n.resolvedAt),
       resolvedBy: n.resolvedBy ?? null,
+      decisionOptions: n.options ?? null,
+      answer: n.answer ?? null,
     });
     if (n.deliveries.length > 0) {
       await db.insert(notificationDeliveries).values(

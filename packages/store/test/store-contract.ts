@@ -687,6 +687,71 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(stillOpen?.resolvedBy).toBeUndefined();
       });
 
+      it('「要你拍」（#1915）：列表带选项；点选项记下那一项、转已处理、留操作记录', async () => {
+        const by = { kind: 'user' as const, id: DEV_USER_ID };
+        const open = await store.listNotifications({ status: 'open', limit: 10 });
+        const decision = open.items.find((n) => n.id === IDS.notification2);
+        expect(decision?.options?.map((o) => o.id)).toEqual(['review', 'approve', 'reject']);
+        expect(decision?.answer).toBeUndefined();
+        const auditsBefore = (await store.listAudit({ limit: 200 })).items.length;
+        // 选项编号认不出：什么都不改
+        expect(
+          await store.answerNotification({ id: IDS.notification2, by, optionId: 'nope' }, audit()),
+        ).toEqual({ kind: 'unknown_option' });
+        const got = await store.answerNotification(
+          { id: IDS.notification2, by, optionId: 'approve' },
+          audit(),
+        );
+        expect(got.kind).toBe('ok');
+        const answer = {
+          optionId: 'approve',
+          text: '批，合进去',
+          at: clock.now.toISOString(),
+          by: DEV_USER_ID,
+        };
+        expect(got.kind === 'ok' && got.notification).toMatchObject({
+          id: IDS.notification2,
+          answer,
+          resolvedAt: clock.now.toISOString(),
+          resolvedBy: DEV_USER_ID,
+        });
+        expect((await store.listAudit({ limit: 200 })).items.length).toBe(auditsBefore + 1);
+        const all = await store.listNotifications({ status: 'all', limit: 10 });
+        expect(all.items.find((n) => n.id === IDS.notification2)?.answer).toEqual(answer);
+        // 拍过的再拍：已处理，不盖掉前一个答案
+        expect(
+          await store.answerNotification({ id: IDS.notification2, by, text: '改主意了' }, audit()),
+        ).toEqual({ kind: 'already_resolved' });
+        expect(
+          (await store.listNotifications({ status: 'all', limit: 10 })).items.find(
+            (n) => n.id === IDS.notification2,
+          )?.answer,
+        ).toEqual(answer);
+      });
+
+      it('「要你拍」（#1915）：自己输入记原文、不带编号；不是要人拍的、没有这条照实回', async () => {
+        const by = { kind: 'user' as const, id: DEV_USER_ID };
+        const got = await store.answerNotification(
+          { id: IDS.notification2, by, text: '先别合，等我周一看' },
+          audit(),
+        );
+        expect(got.kind === 'ok' && got.notification.answer).toEqual({
+          text: '先别合，等我周一看',
+          at: clock.now.toISOString(),
+          by: DEV_USER_ID,
+        });
+        // notification1 是卡住报警，不是要人拍的
+        expect(await store.answerNotification({ id: IDS.notification1, by, text: '好' }, audit())).toEqual({
+          kind: 'not_decision',
+        });
+        expect(await store.answerNotification({ id: OTHER_UUID, by, text: '好' }, audit())).toEqual({
+          kind: 'not_found',
+        });
+        expect(await store.answerNotification({ id: 'nope', by, text: '好' }, audit())).toEqual({
+          kind: 'not_found',
+        });
+      });
+
       it('操作记录：倒序、按对象过滤、同一毫秒的几条翻页不重不漏；编号是字符串', async () => {
         const ids: string[] = [];
         for (let i = 0; i < 5; i++)

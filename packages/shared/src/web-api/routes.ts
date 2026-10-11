@@ -32,6 +32,8 @@ import { HomeResponseSchema } from './home.ts';
 import { JobsResponse } from './jobs.ts';
 import { NodeDetailResponseSchema, NodesResponseSchema } from './nodes.ts';
 import {
+  AnswerNotificationRequest,
+  AnswerNotificationResponse,
   AuditQuery,
   AuditResponse,
   NotificationsQuery,
@@ -258,6 +260,13 @@ export const WebRoutes = {
     method: 'POST',
     path: '/notifications/:notificationId/resolve',
     response: ResolveNotificationResponse,
+  },
+  /** 回答一条「要你拍」（#1915）：存下答案、转已处理，再记到进度单 #1055 交给指挥官。 */
+  answerNotification: {
+    method: 'POST',
+    path: '/notifications/:notificationId/answer',
+    request: AnswerNotificationRequest,
+    response: AnswerNotificationResponse,
   },
   audit: { method: 'GET', path: '/audit', query: AuditQuery, response: AuditResponse },
   settings: { method: 'GET', path: '/settings', response: SettingsResponse },

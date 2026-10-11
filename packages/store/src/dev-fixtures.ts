@@ -364,6 +364,17 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         taskId: IDS.task12,
         createdAt: ago(6),
         dedupeKey: 'approval:11111111-0000-4000-8000-00000000ap01',
+        // 「要你拍」带选项（#1915）：和 db 的 approvalOptions 同一套
+        options: [
+          {
+            id: 'review',
+            label: '先看 PR 再定',
+            detail: '我去看 PR #41 的改动，看完再批或不批',
+            recommended: '人闸拦下的就是要人亲眼看过的改动，看了再批最稳',
+          },
+          { id: 'approve', label: '批，合进去', detail: 'PR #41 照现在的样子合' },
+          { id: 'reject', label: '不批', detail: 'PR #41 不合，指挥官去问清楚或撤掉' },
+        ],
         deliveries: [{ channel: 'feishu', messageId: 'om_dev_2', attempts: 1, lastAttemptAt: ago(6) }],
       },
     ],

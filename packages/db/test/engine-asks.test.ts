@@ -158,6 +158,71 @@ describe('人闸批准', () => {
       .from(notifications)
       .where(eq(notifications.dedupeKey, `approval:${id}`));
     expect(alert).toMatchObject({ level: 'decision', title: '发版' });
+    // 「要你拍」带选项（#1915）：批、不批、先看 PR，恰好一项推荐
+    expect(alert?.decisionOptions?.map((o) => o.id)).toEqual(['review', 'approve', 'reject']);
+    expect(alert?.decisionOptions?.filter((o) => o.recommended)).toHaveLength(1);
+    expect(alert?.answer).toBeNull();
+  });
+});
+
+describe('「要你拍」的选项落库（#1915）', () => {
+  const two = [
+    { id: 'a', label: '甲', detail: '选甲', recommended: '甲稳' },
+    { id: 'b', label: '乙', detail: '选乙' },
+  ];
+
+  it('再报原地更新选项，并清掉上一次拍的答案（重开就是又要人拍）', async () => {
+    const key = `decision-test:${randomUUID()}`;
+    const { id } = await upsertAlert(t.db, {
+      dedupeKey: key,
+      level: 'decision',
+      taskId: null,
+      title: 't',
+      body: 'b',
+      options: two,
+    });
+    await t.db
+      .update(notifications)
+      .set({
+        answer: { optionId: 'a', text: '甲', at: ago(MIN).toISOString(), by: 'u' },
+        resolvedAt: new Date(),
+        resolvedBy: 'u',
+      })
+      .where(eq(notifications.id, id));
+    await upsertAlert(t.db, {
+      dedupeKey: key,
+      level: 'decision',
+      taskId: null,
+      title: 't',
+      body: 'b',
+      options: [...two].reverse(),
+    });
+    const [row] = await t.db.select().from(notifications).where(eq(notifications.id, id));
+    expect(row?.decisionOptions?.map((o) => o.id)).toEqual(['b', 'a']);
+    expect(row?.answer).toBeNull();
+    expect(row?.resolvedAt).toBeNull();
+  });
+
+  it('【故意造出的失败】不合规矩的选项、非要人拍的带选项：照抛，不悄悄存成没选项', async () => {
+    const base = { dedupeKey: `decision-test:${randomUUID()}`, taskId: null, title: 't', body: 'b' };
+    await expect(
+      upsertAlert(t.db, { ...base, level: 'decision', options: [two[0] as (typeof two)[0]] }),
+    ).rejects.toThrow('至少给两个选项');
+    await expect(
+      upsertAlert(t.db, {
+        ...base,
+        level: 'decision',
+        options: two.map((o) => ({ ...o, recommended: undefined })),
+      }),
+    ).rejects.toThrow('推荐的选项有 0 个');
+    await expect(upsertAlert(t.db, { ...base, level: 'alert', options: two })).rejects.toThrow(
+      '只有要人拍的才带选项',
+    );
+    // 库里的约束也拦：选项只给 decision 级
+    await expectViolation(
+      t.db.insert(notifications).values({ ...base, level: 'alert', decisionOptions: two }),
+      'notifications_options_only_decision',
+    );
   });
 });
 

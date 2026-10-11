@@ -14,7 +14,7 @@
 
 import type { SessionUser } from '@fleet-dao/adapters';
 import type { AlertRow, IssueWorkFacts, OpenSessionTree, SubtaskTreeRef } from '@fleet-dao/db';
-import type { StageKind } from '@fleet-dao/shared';
+import type { DecisionOption, StageKind } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { subtaskBranch } from '../contract.ts';
@@ -261,9 +261,28 @@ async function escalate(
       title,
       body,
       ...(ctx.taskId ? { link: `/tasks/${ctx.taskId}` } : {}),
+      options: keepTreeOptions(deps.machine),
     });
   }
   return { kind: 'escalated', title };
+}
+
+/** 有没推东西的工作树删不删的选项（#1915）。推荐留着：删了就没了，留着只占点盘。 */
+export function keepTreeOptions(machine: string): DecisionOption[] {
+  return [
+    {
+      id: 'keep',
+      label: '留着',
+      detail: '这棵树不再提醒；里面的东西推走或清掉以后，对账自己删',
+      recommended: '删了就找不回来，留着只占一点盘',
+    },
+    {
+      id: 'remove',
+      label: '删掉',
+      detail: `指挥官在${machine}用 fleet-agent-scope remove 删这棵树，下一轮对账看它不在了就撤掉这条`,
+    },
+    { id: 'look', label: '先看看里面', detail: '指挥官把里面没推的改动列给我看，看完再定' },
+  ];
 }
 
 async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): Promise<TreeOutcome> {

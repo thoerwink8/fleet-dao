@@ -232,6 +232,19 @@ describe('选路', () => {
       expect(none).toMatchObject({ ok: false });
     });
 
+    it('探针发现要人修的整池问题：写 pool-hold 那条「要你拍」，带选项（#1915：修好了放开是推荐）', async () => {
+      await world(t.db);
+      await poolHoldAfterProbe(
+        t.db,
+        { poolId: 'claude-solo', routeId: 'solo' } as unknown as Parameters<typeof poolHoldAfterProbe>[1],
+        { kind: 'failed', detail: '登录失效', poolHold: { title: '登录失效', body: '要重新登录' } },
+      );
+      const hold = (await alarms()).find((a) => a.dedupeKey === 'pool-hold:claude-solo');
+      expect(hold).toMatchObject({ level: 'decision', title: '账号池 claude-solo 整池暂停：登录失效' });
+      expect(hold?.decisionOptions?.map((o) => o.id)).toEqual(['fixed', 'hold', 'retire']);
+      expect(hold?.decisionOptions?.find((o) => o.recommended)?.id).toBe('fixed');
+    });
+
     it('【故意造出的失败】缺字段（读不出）：这个池按暂停办，不当成能用；别的池照派', async () => {
       await world(t.db);
       await putHolds({ 'claude-solo': hold({ reviewBy: undefined }) });

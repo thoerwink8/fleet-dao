@@ -3,6 +3,8 @@
 import type {
   ActivitySchema,
   AddPurposeModelRequest,
+  AnswerNotificationRequest,
+  AnswerNotificationResponse,
   AuditEntrySchema,
   AuditResponse,
   AuthConfigResponse,
@@ -15,6 +17,7 @@ import type {
   ChannelSchema,
   ChannelStateSchema,
   CredentialsResponse,
+  DecisionOptionSchema,
   EffortModelSchema,
   EnvEngineSchema,
   EnvFact as EnvFactBase,
@@ -248,6 +251,9 @@ export type NodeDetail = z.infer<typeof NodeDetailResponseSchema>;
 export type Notifications = z.infer<typeof NotificationsResponse>;
 export type Notification = z.infer<typeof NotificationSchema>;
 export type NotificationLevel = z.infer<typeof NotificationLevelSchema>;
+export type DecisionOption = z.infer<typeof DecisionOptionSchema>;
+export type AnswerNotificationBody = z.input<typeof AnswerNotificationRequest>;
+export type AnswerNotificationResult = z.infer<typeof AnswerNotificationResponse>;
 
 export type Audit = z.infer<typeof AuditResponse>;
 export type AuditEntry = z.infer<typeof AuditEntrySchema>;

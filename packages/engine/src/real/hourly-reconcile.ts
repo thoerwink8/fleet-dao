@@ -502,6 +502,7 @@ export function hourlyReconcileJob(
             title: x.title,
             body: x.body,
             ...(x.link ? { link: x.link } : {}),
+            ...(x.options ? { options: x.options } : {}),
           });
         },
         insertOnce: (x) => insertAlertOnce(w.db, x),

@@ -328,6 +328,15 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     expect(keep?.body).toContain('session work 1');
     expect(keep?.body).toContain('没提交的改动 1 处：?? half-done.ts');
     expect(keep?.body).toContain(`fleet-agent-scope remove ${tree.dir}`);
+    // 「要你拍」带选项（#1915）：留着（推荐，写理由）、删掉、先看看
+    const [opts] = (
+      await t.client.query<{ decision_options: { id: string; recommended?: string }[] | null }>(
+        `select decision_options from notifications where dedupe_key = $1`,
+        ['worktree:acme_widgets/160-login'],
+      )
+    ).rows;
+    expect(opts?.decision_options?.map((o) => o.id)).toEqual(['keep', 'remove', 'look']);
+    expect(opts?.decision_options?.find((o) => o.id === 'keep')?.recommended).toBeTruthy();
     expect((await alertByKey(t.db, `sub:${sub.id}:worktree`))?.body).toMatch(
       /^已撤：树里还有没推、没提交的东西，改成要你拍：看「工作树里有没推的东西/,
     );

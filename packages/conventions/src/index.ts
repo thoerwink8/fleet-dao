@@ -164,6 +164,15 @@ export {
 } from './pr-columns.ts';
 export { annotation } from './pr-fields.ts';
 export { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from './pr-links.ts';
+export {
+  kindOf as progressKindOf,
+  NO_OWNER,
+  ownerLine,
+  ownerOf as progressOwnerOf,
+  PENDING_TAG,
+  PROGRESS_ISSUE,
+  stamp as progressStamp,
+} from './progress.ts';
 export { fsRepo, type RepoView } from './repo.ts';
 export {
   type ChangedFile,

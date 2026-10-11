@@ -1,3 +1,4 @@
+import { NO_OPTIONS_TEXT } from '@fleet-dao/shared';
 import { ArrowUpRight, Bell, Check, ChevronDown, ExternalLink, Send, TriangleAlert } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
@@ -6,6 +7,7 @@ import { brand } from '#brand';
 import {
   errorText,
   NOTIFICATIONS_PAGE,
+  useAnswerNotification,
   useMe,
   useNotifications,
   useResolveNotification,
@@ -22,6 +24,7 @@ import { Tag } from '../components/layout/tag';
 import { RefreshBar } from '../components/refresh-bar';
 import { RepoLink } from '../components/repo-link';
 import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
 import { formatAgo, formatClock, formatDateTime, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -175,6 +178,98 @@ function ClampedBody({ text }: { text: string }) {
   );
 }
 
+/** 回答一条「要你拍」：点一个选项，或自己写一段。 */
+export type AnswerInput = { optionId: string } | { text: string };
+
+/**
+ * 「要你拍」的选项和自己输入的框（#1915）：一项一行，按钮是选项的字（推荐的那项是主按钮），旁边一句说明、推荐的写理由；
+ * 手机上按钮整宽、说明在下面。没有选项的老通知照实写「没有选项，请直接回复」，只给输入框，不退回单纯确认。
+ */
+function DecisionPicker({
+  n,
+  pending,
+  onAnswer,
+}: {
+  n: Notification;
+  pending: boolean;
+  onAnswer: (n: Notification, input: AnswerInput) => void;
+}) {
+  const [text, setText] = useState('');
+  const options = n.options ?? [];
+  const trimmed = text.trim();
+  return (
+    <div className="mt-2 space-y-2" data-testid="decision-picker">
+      {options.length > 0 ? (
+        <ul className="space-y-3 md:space-y-1.5" aria-label="选一个">
+          {options.map((o) => (
+            <li key={o.id} className="flex flex-col gap-1 md:flex-row md:items-center md:gap-3">
+              <Button
+                size="sm"
+                variant={o.recommended ? 'brand' : 'outline'}
+                disabled={pending}
+                onClick={() => onAnswer(n, { optionId: o.id })}
+                className="max-md:w-full md:min-w-24"
+              >
+                {o.label}
+              </Button>
+              <span className="min-w-0 text-meta text-muted-foreground">
+                {o.recommended ? (
+                  <Tag tone="brand" className="mr-1.5">
+                    推荐
+                  </Tag>
+                ) : null}
+                {o.detail}
+                {o.recommended ? `。${o.recommended}` : ''}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-meta text-muted-foreground" data-testid="no-options">
+          {NO_OPTIONS_TEXT}
+        </p>
+      )}
+      <form
+        className="flex gap-2 max-md:flex-col"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (trimmed) onAnswer(n, { text: trimmed });
+        }}
+      >
+        <Input
+          aria-label="自己输入"
+          placeholder={options.length > 0 ? '都不合适？自己写' : '写你的决定'}
+          value={text}
+          maxLength={2000}
+          disabled={pending}
+          onChange={(e) => setText(e.target.value)}
+          className="md:max-w-md"
+        />
+        <Button type="submit" size="sm" variant="outline" disabled={pending || !trimmed}>
+          <Send aria-hidden />
+          提交
+        </Button>
+      </form>
+    </div>
+  );
+}
+
+/** 拍过的：选了什么、谁、什么时候。 */
+function DecisionAnswerLine({ n, me, now }: { n: Notification; me: Me | undefined; now: number }) {
+  const a = n.answer;
+  if (!a) return null;
+  return (
+    <p className="mt-1 text-body text-foreground" data-testid="decision-answer">
+      {isMine(a.by, me) ? '我' : a.by}
+      {a.optionId === undefined ? '自己写了：' : '选了：'}
+      <span className="font-medium">{a.text}</span>
+      <span className="num ml-2 text-meta text-muted-foreground" title={formatDateTime(a.at)}>
+        {formatAgo(a.at, now)}
+      </span>
+    </p>
+  );
+}
+
 function groupByDay(items: Notification[], now: number): Map<string, Notification[]> {
   const groups = new Map<string, Notification[]>();
   for (const n of items) {
@@ -184,23 +279,27 @@ function groupByDay(items: Notification[], now: number): Map<string, Notificatio
   return groups;
 }
 
+interface RowActions {
+  resolvePending: boolean;
+  resolveId: string | undefined;
+  /** 正在回答的那一条（#1915）；没有在答的是 undefined。 */
+  answeringId: string | undefined;
+  onOpen: (link: string) => void;
+  onDone: (n: Notification) => void;
+  onAnswer: (n: Notification, input: AnswerInput) => void;
+}
+
 function NotificationRow({
   n,
   now,
   me,
   resolvePending,
   resolveId,
+  answeringId,
   onOpen,
   onDone,
-}: {
-  n: Notification;
-  now: number;
-  me: Me | undefined;
-  resolvePending: boolean;
-  resolveId: string | undefined;
-  onOpen: (link: string) => void;
-  onDone: (n: Notification) => void;
-}) {
+  onAnswer,
+}: { n: Notification; now: number; me: Me | undefined } & RowActions) {
   const resolved = Boolean(n.resolvedAt);
   return (
     <ListRow
@@ -221,6 +320,10 @@ function NotificationRow({
                   <Tag tone={noticeLevelMeta[n.level].tone}>{noticeLevelMeta[n.level].label}</Tag>
                 </div>
                 <ClampedBody text={n.body} />
+                {!resolved && n.level === 'decision' ? (
+                  <DecisionPicker n={n} pending={answeringId === n.id} onAnswer={onAnswer} />
+                ) : null}
+                <DecisionAnswerLine n={n} me={me} now={now} />
                 {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
                 <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
                   <span className="num text-meta text-muted-foreground" title={formatClock(n.createdAt)}>
@@ -268,19 +371,8 @@ function DayGroups({
   items,
   now,
   me,
-  resolvePending,
-  resolveId,
-  onOpen,
-  onDone,
-}: {
-  items: Notification[];
-  now: number;
-  me: Me | undefined;
-  resolvePending: boolean;
-  resolveId: string | undefined;
-  onOpen: (link: string) => void;
-  onDone: (n: Notification) => void;
-}) {
+  ...actions
+}: { items: Notification[]; now: number; me: Me | undefined } & RowActions) {
   const groups = groupByDay(items, now);
   return (
     <>
@@ -290,16 +382,7 @@ function DayGroups({
           <Section flush>
             <List>
               {dayItems.map((n) => (
-                <NotificationRow
-                  key={n.id}
-                  n={n}
-                  now={now}
-                  me={me}
-                  resolvePending={resolvePending}
-                  resolveId={resolveId}
-                  onOpen={onOpen}
-                  onDone={onDone}
-                />
+                <NotificationRow key={n.id} n={n} now={now} me={me} {...actions} />
               ))}
             </List>
           </Section>
@@ -320,6 +403,7 @@ export default function Notifications() {
   const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useNotifications(status, limit);
   const { data: me } = useMe();
   const resolve = useResolveNotification();
+  const answerMutation = useAnswerNotification();
   const navigate = useNavigate();
   const now = useNow();
   // 「全部」视图里日报默认收成一行；切回「全部」时重新折叠，避免上次展开还挂着。
@@ -350,7 +434,33 @@ export default function Notifications() {
       onError: (e) => toast.error('没处理成', { description: errorText(e) }),
     });
 
+  const answer = (n: Notification, input: AnswerInput) =>
+    answerMutation.mutate(
+      { id: n.id, body: input },
+      {
+        onSuccess: (r) => {
+          // 答案存下了；交没交给指挥官（进度单 #1055）照实说，没交出去不弹成「都好了」
+          if (r.handoff.progress.ok) {
+            toast.success(`记下了：${r.answer.text}`, { description: '已交给指挥官（进度单 #1055）' });
+          } else {
+            toast.warning(`记下了：${r.answer.text}`, {
+              description: `没交给指挥官：${r.handoff.progress.why}`,
+            });
+          }
+        },
+        onError: (e) => toast.error('没记下', { description: errorText(e) }),
+      },
+    );
+
   const open = (link: string) => navigate(link);
+  const actions: RowActions = {
+    resolvePending: resolve.isPending,
+    resolveId: resolve.variables,
+    answeringId: answerMutation.isPending ? answerMutation.variables?.id : undefined,
+    onOpen: open,
+    onDone: done,
+    onAnswer: answer,
+  };
   const listEmpty = foldDaily ? actionItems.length === 0 && dailyItems.length === 0 : list.length === 0;
 
   return (
@@ -422,15 +532,7 @@ export default function Notifications() {
         </Section>
       ) : (
         <div className="space-y-5">
-          <DayGroups
-            items={actionItems}
-            now={now}
-            me={me}
-            resolvePending={resolve.isPending}
-            resolveId={resolve.variables}
-            onOpen={open}
-            onDone={done}
-          />
+          <DayGroups items={actionItems} now={now} me={me} {...actions} />
           {foldDaily && dailyItems.length > 0 ? (
             <section>
               <Section flush className="mb-2">
@@ -454,17 +556,7 @@ export default function Notifications() {
                   </span>
                 </button>
               </Section>
-              {dailyOpen ? (
-                <DayGroups
-                  items={dailyItems}
-                  now={now}
-                  me={me}
-                  resolvePending={resolve.isPending}
-                  resolveId={resolve.variables}
-                  onOpen={open}
-                  onDone={done}
-                />
-              ) : null}
+              {dailyOpen ? <DayGroups items={dailyItems} now={now} me={me} {...actions} /> : null}
             </section>
           ) : null}
           {data?.nextCursor ? (

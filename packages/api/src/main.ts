@@ -32,6 +32,7 @@ import { pgCarpoolReconcile } from './carpool-reconcile-view.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
 import { ConfigError, engineEnabled, loadConfig } from './config.ts';
 import { probeDb } from './db-probe.ts';
+import type { DecisionCommenter } from './decision-handoff.ts';
 import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
 import { readEngineMaster } from './engine-switch.ts';
@@ -92,6 +93,8 @@ function githubMirror(db: Db): {
   sink: GitHubEventSink;
   credentialsMissing?: () => Promise<void>;
   releaseFacts: ReleaseFactsReader;
+  /** 「要你拍」拍完往进度单、任务单留言（#1915）；凭据没读到就没有，答案照存、回包写没接上。 */
+  decisionCommenter?: DecisionCommenter;
 } {
   try {
     const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db, { log }), log });
@@ -99,6 +102,12 @@ function githubMirror(db: Db): {
     return {
       sink: gh.eventSink({ async wake() {} }),
       releaseFacts: gh.releaseFacts,
+      decisionCommenter: {
+        async comment(input) {
+          const got = await gh.commentIssue(input);
+          return { url: got.url };
+        },
+      },
     };
   } catch (err) {
     log.error('GitHub 机器人的凭据没读到：PR、CI 事件写不进镜像', { error: String(err) });
@@ -224,6 +233,7 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     workflows: temporal.control,
     taskRedo: temporal.taskRedo,
     github: github.sink,
+    ...(github.decisionCommenter ? { decisionCommenter: github.decisionCommenter } : {}),
     gatewaySeen,
     // 飞书群聊理成的意图（#553 第 4 条）：网关收原话、取意图卡；指挥官经 fleet-api intent 读写同一张表
     intents: createPgIntentStore(db, { now }),

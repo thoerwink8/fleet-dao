@@ -55,11 +55,88 @@ export const AlertHandlingSchema = z.object({
   problems: z.array(z.string()),
 });
 
+// —— 「要你拍」的选项和答案（#1915）——
+// 要人拍的事给几个选项（每项一句话，其中一项标推荐并写理由），外加一个自己输入的框；创始人点一个或自己写，答案连同时间、谁存下，
+// 通知转已处理，答案再记到进度单 #1055 交给指挥官。补不出选项的，页面写明 NO_OPTIONS_TEXT，不静默退回单纯确认。
+
+/** 补不出选项的「要你拍」：页面和通知里照这句写，让人直接回复。 */
+export const NO_OPTIONS_TEXT = '没有选项，请直接回复';
+
+export const DecisionOptionSchema = z.object({
+  /** 选项编号：同一条通知里不重，答案按它认。 */
+  id: z.string().min(1).max(40),
+  /** 按钮上的字。 */
+  label: z.string().min(1).max(60),
+  /** 一句话说清选它会怎样。 */
+  detail: z.string().min(1).max(300),
+  /** 推荐理由：有它就是推荐的那一项（一条通知恰好一项）。 */
+  recommended: z.string().min(1).max(300).optional(),
+});
+export type DecisionOption = z.infer<typeof DecisionOptionSchema>;
+
+/** 选项合不合规矩：至少两项、编号不重、恰好一项推荐。合规回 null，不合回一句为什么。 */
+export function decisionOptionsProblem(options: readonly DecisionOption[]): string | null {
+  if (options.length < 2) return `选项只有 ${options.length} 个：要你拍的事至少给两个选项`;
+  const ids = new Set(options.map((o) => o.id));
+  if (ids.size !== options.length) return '选项编号有重的';
+  const recommended = options.filter((o) => o.recommended !== undefined).length;
+  if (recommended !== 1) return `推荐的选项有 ${recommended} 个：要恰好一个，并写理由`;
+  return null;
+}
+
+export const DecisionOptionsSchema = z.array(DecisionOptionSchema).superRefine((options, ctx) => {
+  const problem = decisionOptionsProblem(options);
+  if (problem) ctx.addIssue({ code: 'custom', message: problem });
+});
+
+/** 创始人拍了什么：点了哪个选项（optionId）或自己写的原文（没有 optionId），连同时刻和谁。 */
+export const DecisionAnswerSchema = z.object({
+  /** 点的那个选项；自己输入的没有这一项。 */
+  optionId: z.string().optional(),
+  /** 点选项时是那一项的字；自己输入时是原文。 */
+  text: z.string().min(1),
+  at: Time,
+  /** 谁拍的（用户编号）。 */
+  by: z.string(),
+});
+export type DecisionAnswer = z.infer<typeof DecisionAnswerSchema>;
+
+/** 回答一条「要你拍」：点一个选项（optionId）或自己输入（text），二选一。 */
+export const AnswerNotificationRequest = z
+  .object({
+    optionId: z.string().min(1).max(40).optional(),
+    text: z.string().trim().min(1).max(2000).optional(),
+  })
+  .refine((b) => (b.optionId === undefined) !== (b.text === undefined), {
+    message: '点一个选项或自己输入一段话，二选一',
+  });
+
+/** 答案交给指挥官那一步（进度单留言、任务单留言）：成了给评论地址，没成写为什么——不拿没报错冒充记上了。 */
+export const DecisionHandoffResultSchema = z.union([
+  z.object({ ok: z.literal(true), url: z.string() }),
+  z.object({ ok: z.literal(false), why: z.string() }),
+]);
+
+export const AnswerNotificationResponse = z.object({
+  ok: z.literal(true),
+  answer: DecisionAnswerSchema,
+  handoff: z.object({
+    /** 进度单 #1055 那一条。 */
+    progress: DecisionHandoffResultSchema,
+    /** 通知挂了任务的，任务那张单上的留言；没挂任务没有这一项。 */
+    task: DecisionHandoffResultSchema.optional(),
+  }),
+});
+
 export const NotificationSchema = z.object({
   id: Id,
   level: NotificationLevelSchema,
   title: z.string(),
   body: z.string(),
+  /** 「要你拍」的选项（#1915）；老通知、补不出选项的没有，页面写 NO_OPTIONS_TEXT 并给输入框。 */
+  options: z.array(DecisionOptionSchema).optional(),
+  /** 拍过了：选了什么、什么时候、谁。 */
+  answer: DecisionAnswerSchema.optional(),
   /** 点开直达驾驶舱对应页的站内路径。 */
   link: z.string().optional(),
   taskId: Id.optional(),

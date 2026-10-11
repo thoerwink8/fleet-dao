@@ -15,6 +15,8 @@ import { brand } from '#brand';
 import type { HomeData, HomeState } from '../components/home/types';
 import type {
   AddPurposeModelBody,
+  AnswerNotificationBody,
+  AnswerNotificationResult,
   Audit,
   AuthConfig,
   Board,
@@ -185,6 +187,8 @@ export interface FleetApi {
     limit?: number;
   }): Promise<Notifications>;
   resolveNotification(id: string): Promise<void>;
+  /** 回答「要你拍」（#1915）：点选项或自己输入；回答案和交给指挥官那一步成没成。 */
+  answerNotification(id: string, body: AnswerNotificationBody): Promise<AnswerNotificationResult>;
   audit(query?: { target?: string | undefined; cursor?: string | undefined; limit?: number }): Promise<Audit>;
   settings(): Promise<Settings>;
   updateSetting(key: SettingKey, body: UpdateSettingBody): Promise<Setting>;
@@ -994,6 +998,17 @@ export function useResolveNotification() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.resolveNotification(id),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['notifications'] }),
+  });
+}
+
+/** 回答「要你拍」（#1915）：存下就转已处理，重拉通知列表。 */
+export function useAnswerNotification() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: AnswerNotificationBody }) =>
+      api.answerNotification(id, body),
     onSettled: () => qc.invalidateQueries({ queryKey: ['notifications'] }),
   });
 }
