@@ -1,46 +1,13 @@
 // 操作记录的白话：动作名、对象、谁、从哪来。后端只给代码（例如 stage_policy.update、task:xxx），名字在这里翻。
 // 认不出的动作原样显示，不猜。
-import { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE } from '@fleet-dao/shared';
 import { brand } from '#brand';
 import type { AuditEntry, BoardTask, Me, SettingKey, StageKind } from '../api/types';
+import { describeAction } from './audit-actions';
 import { stageLabel } from './catalog';
 
-const ACTION_LABEL: Record<string, string> = {
-  'stage_policy.update': '改了路由顺序',
-  'channel.enable': '上架了渠道',
-  'channel.disable': '下架了渠道',
-  'routing.order.move': '调了路由先后',
-  'routing.route.enable': '开关了路由',
-  'routing.model.enable': '开关了模型',
-  'task.pause': '暂停了',
-  'task.resume': '继续了',
-  'task.stop': '叫停了',
-  'task.redo': '重做了',
-  'task.reroute': '换了路由',
-  'task.repin': '让动手会话现在就换了模型',
-  'ask.answer': '回答了追问',
-  'ask.close': '关闭了旧追问',
-  'notification.resolve': '处理了提醒',
-  'setting.update': '改了设置',
-  'agent.done_rejected': '「做完了」被退回',
-  'credentials.set': '设了账密登录',
-  'credentials.change': '改了账密登录',
-  [AUTO_DISPATCH_ENABLE]: '开启了「让 AI 接活」',
-  [AUTO_DISPATCH_DISABLE]: '关闭了「让 AI 接活」',
-  login: `登录了${brand.product}`,
-  logout: `退出了${brand.product}`,
-  // 引擎一侧的动作（名字以引擎实际写的为准，认不出的原样显示）。
-  'run.start': '派了会话',
-  'run.fail': '会话失败',
-  'pr.open': '开了 PR',
-  'pr.merge': '合并了 PR',
-  'task.close': '关了单',
-  'notify.decision': '发了要拍板的提醒',
-  'route.offline': '路由掉线',
-};
-
+/** 事件名的中文（对照表在 audit-actions.ts）；没收录的原样返回，页面另标「（没翻译）」。 */
 export function actionLabel(action: string): string {
-  return ACTION_LABEL[action] ?? action;
+  return describeAction(action).text;
 }
 
 export const viaLabel: Record<AuditEntry['via'], string> = {
@@ -131,6 +98,14 @@ export function targetLabel(
       if (/^\d+$/.test(id)) return `需求 #${id}`;
       return '需求';
     }
+    case 'routing':
+      return id === 'probe' ? '路由探测' : `路由 ${id}`;
+    case 'commit':
+      return `提交 ${id}`;
+    case 'issue':
+      return `单 ${id}`;
+    case 'repo':
+      return `仓库 ${id}`;
     case 'channel':
       return `渠道 ${id}`;
     case 'route':

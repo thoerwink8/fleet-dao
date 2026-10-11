@@ -1,6 +1,6 @@
 import { Bot, Cog, ScrollText, Search, Terminal, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { useAllBoards, useAudit, useMe, useNotifications, useRouting } from '../api/client';
 import type { AuditEntry, Me } from '../api/types';
@@ -21,6 +21,7 @@ import {
   taskIndex,
   viaLabel,
 } from '../lib/audit';
+import { describeAction, targetHref } from '../lib/audit-actions';
 import { formatAgo, formatDateTime, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { cn } from '../lib/utils';
@@ -65,6 +66,17 @@ function ActorIcon({ actor, me }: { actor: AuditEntry['actor']; me: Me | undefin
       title={actorKindLabel[actor.kind]}
     >
       {actorName(actor, me).slice(0, 1)}
+    </span>
+  );
+}
+
+/** 事件名：有中文对照显示成一句话（悬停看原名）；没有就显示原名加灰字「（没翻译）」。 */
+function ActionText({ action, ok }: { action: string; ok: boolean }) {
+  const { text, translated } = describeAction(action);
+  return (
+    <span className={cn(!ok && 'text-ink-fail')} title={action}>
+      {text}
+      {translated ? null : <span className="ml-1 text-xs text-faint">（没翻译）</span>}
     </span>
   );
 }
@@ -188,7 +200,7 @@ export default function Audit() {
   return (
     <Page
       title="操作记录"
-      description={`谁在什么时候做了什么：人的操作、${brand.terms.marshal}的调整、引擎的动作，只追加、不改、不删。先记后做，没做成的另记一条。`}
+      description={`谁在什么时候做了什么：人、${brand.terms.marshal}、引擎的动作都记在这里，只追加、不改。`}
       actions={
         <RefreshBar
           onRefresh={() => void audit.refetch()}
@@ -302,9 +314,7 @@ export default function Audit() {
                     <span className="font-medium" title={a.actor.id}>
                       {actorName(a.actor, me)}
                     </span>
-                    <span className={cn(!a.ok && 'text-ink-fail')} title={a.action}>
-                      {actionLabel(a.action)}
-                    </span>
+                    <ActionText action={a.action} ok={a.ok} />
                     <button
                       type="button"
                       onClick={() => setTarget(a.target)}
@@ -313,6 +323,14 @@ export default function Audit() {
                     >
                       {targetLabel(a.target, tasks, notifications)}
                     </button>
+                    {describeAction(a.action).translated && targetHref(a.target) ? (
+                      <Link
+                        to={targetHref(a.target) ?? '/'}
+                        className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                      >
+                        打开
+                      </Link>
+                    ) : null}
                     {!a.ok ? (
                       <Badge variant="outline" className="h-5 border-st-fail/50 text-caption text-ink-fail">
                         没做成

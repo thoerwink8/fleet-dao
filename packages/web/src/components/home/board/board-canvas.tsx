@@ -36,6 +36,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -57,6 +58,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Kbd } from '../../ui/kbd';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../ui/tooltip';
+import { DrawerFloatingContext } from '../drawer-open';
 import { statusTextOf } from '../running-card';
 import type { HomeFlowStage, HomeHealth, HomeRunning, HomeSlots } from '../types';
 import {
@@ -70,6 +72,7 @@ import {
   type ZoomLevel,
 } from './board-ui';
 import { DetailPanel } from './detail-panel';
+import { MIN_ZOOM } from './far-type';
 import { layoutGraph, type Positions } from './layout';
 import {
   type BoardNodeData,
@@ -83,6 +86,7 @@ import {
   worstTone,
 } from './model';
 import { type BoardNode, nodeTypes } from './nodes';
+import { centerViewport, type Inset, overlayRightInset, revealViewport, type Viewport } from './reveal';
 import { toneVar } from './tones';
 
 export interface BoardCanvasProps {
@@ -105,6 +109,10 @@ export function BoardCanvas(props: BoardCanvasProps) {
 const MAX_ANIMATED_EDGES = 60;
 /** 节点多于这个数时只渲染视野里的卡片和连线。 */
 const VISIBLE_ONLY_ABOVE = 150;
+/** 选中的卡片离浮层、画布边缘至少留的空（像素）。 */
+const REVEAL_MARGIN = 16;
+/** 「此刻」面板人没动过时是不是展开：收起，只留一行。 */
+const NOW_OPEN_DEFAULT = false;
 
 /** 两份节点数据是否画出来一样：单子对象靠 React Query 的结构共享，没变就是同一个对象。 */
 export function sameNodeData(a: BoardNodeData, b: BoardNodeData): boolean {
@@ -308,13 +316,15 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
       const top = toolbar ? toolbar.bottom - box.top + 12 : 16;
       const gap = 12;
       const bottomSpace = Math.max(nowBox?.height ?? 0, mini?.height ?? 0) + gap * 2;
+      // 详情面板、浮着的抽屉盖在右侧：收进视野时按它们的宽度留边，不把卡片收到它们底下
+      const covered = overlayRightInset(el);
       const fits = [
-        { top, bottom: bottomSpace, left: 16, right: 16 },
+        { top, bottom: bottomSpace, left: 16, right: 16 + covered },
         {
           top,
           bottom: 16,
           left: (nowBox ? nowBox.right - box.left : 0) + gap,
-          right: (mini ? box.right - mini.left : 0) + gap,
+          right: Math.max(mini ? box.right - mini.left : 0, covered) + gap,
         },
       ].map((pad) => {
         const w = Math.max(80, box.width - pad.left - pad.right);
@@ -446,15 +456,77 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
     return [...next.values()].map((x) => x.edge);
   }, [graph, focus, motion]);
 
+  /** 画布上现在被浮层盖住的边：顶上的工具条，右边的详情面板、浮着的抽屉。 */
+  const coveredInset = useCallback((): { box: DOMRect; inset: Inset } | null => {
+    const el = wrapper.current;
+    if (!el) return null;
+    const box = el.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) return null;
+    const toolbar = el.querySelector('[data-board-toolbar]')?.getBoundingClientRect();
+    return {
+      box,
+      inset: {
+        top: toolbar && toolbar.height > 0 ? toolbar.bottom - box.top : 0,
+        right: overlayRightInset(el),
+        bottom: 0,
+        left: 0,
+      },
+    };
+  }, []);
+
+  // 平移动画还在走时，目标视角记在这里（动画走完 onMoveEnd 清掉）：
+  // 紧接着的「放回可见区」按目标算，不按动画走到一半的位置算，免得两次平移打架
+  const heading = useRef<Viewport | null>(null);
+  const moveTo = useCallback(
+    (vp: Viewport) => {
+      heading.current = vp;
+      void rf.setViewport(vp, { duration: 280 });
+    },
+    [rf],
+  );
   const center = useCallback(
     (id: string, zoom?: number) => {
       const p = positions?.get(id);
       const n = graphRef.current.nodes.find((x) => x.id === id);
       if (!p || !n) return;
-      void rf.setCenter(p.x + n.width / 2, p.y + n.height / 2, { zoom: zoom ?? rf.getZoom(), duration: 280 });
+      const z = zoom ?? rf.getZoom();
+      const cover = coveredInset();
+      if (!cover) {
+        void rf.setCenter(p.x + n.width / 2, p.y + n.height / 2, { zoom: z, duration: 280 });
+        return;
+      }
+      // 居中在可见区正中，不是整块画布的正中：面板盖着右边时，卡片不被它压住
+      const vp = centerViewport({
+        node: { x: p.x, y: p.y, width: n.width, height: n.height },
+        zoom: z,
+        view: { width: cover.box.width, height: cover.box.height },
+        inset: cover.inset,
+      });
+      moveTo(vp);
     },
-    [positions, rf],
+    [positions, rf, coveredInset, moveTo],
   );
+
+  // 选中的卡片被详情面板、浮着的抽屉盖住（或在画布外）时，把画布平移到它露出来；没被盖住不动
+  const drawerFloating = useContext(DrawerFloatingContext);
+  const revealed = selectedId !== null && selectedExists;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: drawerFloating 只用来在抽屉开合时重算。
+  useLayoutEffect(() => {
+    if (!revealed || !selectedId || !positions) return;
+    const p = positions.get(selectedId);
+    const n = graphRef.current.nodes.find((x) => x.id === selectedId);
+    const cover = coveredInset();
+    if (!p || !n || !cover) return;
+    const [tx, ty, zoom] = flowStore.getState().transform;
+    const vp = revealViewport({
+      node: { x: p.x, y: p.y, width: n.width, height: n.height },
+      viewport: heading.current ?? { x: tx, y: ty, zoom },
+      view: { width: cover.box.width, height: cover.box.height },
+      inset: cover.inset,
+      margin: REVEAL_MARGIN,
+    });
+    if (vp) moveTo(vp);
+  }, [selectedId, revealed, positions, drawerFloating, coveredInset, flowStore, moveTo]);
 
   const zoomToLevel = useCallback(
     (level: ZoomLevel) => {
@@ -580,6 +652,9 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
             onNodeClick={(_, n) => select(n.id)}
             onNodeDoubleClick={(_, n) => open(n.id)}
             onPaneClick={() => select(null)}
+            onMoveEnd={() => {
+              heading.current = null;
+            }}
             nodesDraggable={false}
             nodesConnectable={false}
             elementsSelectable={false}
@@ -590,7 +665,7 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
             zoomOnScroll={false}
             preventScrolling={false}
             onlyRenderVisibleElements={graph.nodes.length > VISIBLE_ONLY_ABOVE}
-            minZoom={0.15}
+            minZoom={MIN_ZOOM}
             maxZoom={2.4}
             attributionPosition="bottom-center"
             className={cn(positions && 'fd-board-ready')}
@@ -923,13 +998,12 @@ function NowPanel({
   slots?: HomeSlots | undefined;
   onPick(id: string): void;
 }) {
-  // 矮屏（笔记本）默认收起，只留一行，免得盖住卡片；点开过、收起过就记住这个选择。
-  const tall = useMediaQuery('(min-height: 940px)');
+  // 默认收成一行，各种屏宽屏高都一样（以前高屏默认展开、笔记本收起，两边看到的不一致，#1819）；人点开、收起过就记住。
   const [stored, setStored] = useLocalState<boolean | null>(
     `${brand.storagePrefix}home-board.now-open`,
     null,
   );
-  const open = stored ?? tall;
+  const open = stored ?? NOW_OPEN_DEFAULT;
   const rows = running
     .filter((r) => r.worker !== undefined || r.waitingReason === 'queue')
     .map((r) => ({ item: r, queued: r.worker === undefined }))
