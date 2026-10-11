@@ -141,6 +141,36 @@ test('全流程巡检（canary）：显示成「全流程巡检」；通过写�
   assert.equal(byKey(w).canary.reason, '最近一轮（09-27 20:31 有结论）断在「派活」（canary_broken）');
 });
 
+test('待定（#1909）：结论早于当前部署这种「不是坏、现在也说不了好」的一项成全页不红，单独写「待定」', () => {
+  const pending = {
+    ok: true,
+    status: 'pending',
+    message: '这条结论早于当前部署（10-11 22:08），等新一轮（发版后最多 12 小时）',
+  };
+  const v = judge({ status: 200, body: report(true, { ...allOk, canary: pending }) });
+  assert.equal(v.ok, true);
+  assert.equal(v.summary, '全部在线（1 项待定）');
+  const row = byKey(v).canary;
+  assert.equal(row.ok, true);
+  assert.equal(row.pending, true);
+  assert.equal(row.notWired, undefined);
+  assert.equal(row.reason, '待定：这条结论早于当前部署（10-11 22:08），等新一轮（发版后最多 12 小时）');
+  // 「待定」和「未接」一起时都数出来
+  const both = judge({
+    status: 200,
+    body: report(true, { ...allOk, canary: pending, judge: { ok: true, status: 'not_wired', message: 'x' } }),
+  });
+  assert.equal(both.summary, '全部在线（1 项待定，1 项还没接上）');
+  // 待定缺原因：样子不完整，认不出、报红（不冒充待定）
+  const bad = judge({
+    status: 503,
+    body: report(false, { ...allOk, canary: { ok: true, status: 'pending' } }),
+  });
+  assert.equal(bad.ok, false);
+  assert.equal(byKey(bad).canary.ok, false);
+  assert.equal(byKey(bad).canary.reason, '这一项的格式认不出');
+});
+
 test('看门狗（watchdog）：显示成「看门狗」；跑完一轮写明几点、查了几个，停了照实报红、写明上次几点跑完', () => {
   const fine = { ok: true, message: '最近一轮 09-27 20:26 跑完：查了 7 个定时任务，都按期跑成' };
   const v = judge({ status: 200, body: report(true, { ...allOk, watchdog: fine }) });

@@ -88,6 +88,12 @@ export const EnvHealthSchema = z.object({
   failing: z.array(z.string()),
   /** 没接上的项名（这台机器没有这一项功能，不算坏）。 */
   notWired: z.array(z.string()),
+  /**
+   * 待定（#1909）：现在说不了「好」也不是坏（好比全流程巡检的结论早于当前部署）；不算红、也不算全好。
+   * 可选：别的环境升到带这一格的版本之前推来的旧快照没有它，不能因此整份认不出（和上面 master 那一格同一个道理）；
+   * 本台后端始终会给。页面看到没有就当空数组。
+   */
+  pending: z.array(z.string()).optional(),
 });
 
 export const EnvScheduleSchema = z.object({

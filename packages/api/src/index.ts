@@ -23,7 +23,13 @@ export { deployLagCheck } from './deploy-lag-check.ts';
 export type { Deps } from './deps.ts';
 export { createFeishuAuth, FeishuRejectedError, FeishuUnavailableError } from './feishu.ts';
 export { githubAppMissing, githubEventsCheck, verifyGithubSignature } from './github.ts';
-export { type HealthReport, PublicHealthError, runHealthChecks, serviceHealthChecks } from './health.ts';
+export {
+  type HealthReport,
+  PublicHealthError,
+  PublicHealthPending,
+  runHealthChecks,
+  serviceHealthChecks,
+} from './health.ts';
 export {
   type ChangeFeed,
   type FeedEvent,

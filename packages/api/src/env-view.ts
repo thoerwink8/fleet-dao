@@ -125,15 +125,17 @@ export function poolsFact(input: {
   };
 }
 
-/** 健康：红几项、哪几项（真没连上）；「未接」单列（这台机器没有这一项功能，不算坏）。 */
+/** 健康：红几项、哪几项（真没连上）；「未接」单列（这台机器没有这一项功能，不算坏）；「待定」单列（#1909：现在说不了好，也不是坏）。 */
 export function healthFact(report: HealthReport): EnvHealth {
   const failing: string[] = [];
   const notWired: string[] = [];
+  const pending: string[] = [];
   for (const [name, r] of Object.entries(report.checks)) {
     if (r.ok && 'status' in r && r.status === 'not_wired') notWired.push(name);
+    else if (r.ok && 'status' in r && r.status === 'pending') pending.push(name);
     else if (!r.ok) failing.push(name);
   }
-  return { ok: report.ok, total: Object.keys(report.checks).length, failing, notWired };
+  return { ok: report.ok, total: Object.keys(report.checks).length, failing, notWired, pending };
 }
 
 /** 按 /healthz 同一份检查跑一遍，翻成这一页要的几个数。 */
