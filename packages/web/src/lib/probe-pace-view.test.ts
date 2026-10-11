@@ -74,11 +74,11 @@ describe('探测记录每一行的种类和触发者', () => {
   test('「身份题 · 派前」；老行没有的段不写', () => {
     expect(probeCellSource({ kind: 'identity', trigger: 'dispatch' })).toBe('身份题 · 派前');
     expect(probeCellSource({ kind: 'ping', trigger: undefined })).toBe('连通');
-    expect(probeCellSource({ kind: null, trigger: undefined })).toBe('');
+    expect(probeCellSource({ kind: undefined, trigger: undefined })).toBe('');
   });
   test('算术题时代的老记录（没有种类、带着题）标「旧版降智题」；新记录不标', () => {
-    expect(isLegacyQuizCell({ kind: null, checkQuestion: '17 乘 23 等于多少？' })).toBe(true);
+    expect(isLegacyQuizCell({ kind: undefined, checkQuestion: '17 乘 23 等于多少？' })).toBe(true);
     expect(isLegacyQuizCell({ kind: 'identity', checkQuestion: '现任日本首相是谁？' })).toBe(false);
-    expect(isLegacyQuizCell({ kind: null, checkQuestion: null })).toBe(false);
+    expect(isLegacyQuizCell({ kind: undefined, checkQuestion: null })).toBe(false);
   });
 });

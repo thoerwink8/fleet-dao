@@ -481,7 +481,6 @@ function mockProbeHistory(
         checkAnswer: '381',
         checkPassed: false,
         selfIdentity: 'gpt-6-sol',
-        kind: null,
       },
     );
   }

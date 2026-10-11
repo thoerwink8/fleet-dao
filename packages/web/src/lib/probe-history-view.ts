@@ -46,7 +46,7 @@ export const PROBE_TRIGGER_NAME: Record<RouteProbeTrigger, string> = {
 
 /** 老记录（算术题时代）：没有种类、但带着题。照原样显示，标「旧版降智题」。 */
 export function isLegacyQuizCell(cell: Pick<ProbeHistoryCell, 'kind' | 'checkQuestion'>): boolean {
-  return cell.kind === null && cell.checkQuestion !== null;
+  return !cell.kind && cell.checkQuestion !== null;
 }
 
 /** 这一行的种类和触发者，一句话：「身份题 · 派前」。老行没有的段不写。 */

@@ -32,7 +32,6 @@ const cell = (over: Partial<ProbeHistoryCell>): ProbeHistoryCell => ({
   checkAnswer: null,
   checkPassed: null,
   selfIdentity: null,
-  kind: null,
   ...over,
 });
 
