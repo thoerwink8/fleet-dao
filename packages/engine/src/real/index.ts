@@ -24,6 +24,7 @@ import {
   readEngineMasterRow,
   readSubagentHint,
   recordRouteProbeDone,
+  recordRouteProbeRequest,
   recordRouteProbeStart,
   routeProbeAuditRows,
   scheduleHealth,
@@ -80,6 +81,7 @@ import { orphanReaper } from './orphan-reap.ts';
 import { type QuotaReadWiring, quotaReadJob } from './quota-read.ts';
 import { realReleaseEvidence } from './release-evidence.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
+import { scheduleRouteBreakProbe } from './route-break-probe.ts';
 import { routeProbeJob } from './route-probe.ts';
 import {
   lazyTemporalWakeClient,
@@ -825,7 +827,21 @@ export function realPortsFromEnv(
     },
     log: taskLog,
   };
-  const taskRuns = realRuns({ db });
+  // 收场记账时 routeOutcome=fail 排一次断链探测（#1636 / #1809）：三段都经这里，排不成不挡记账
+  const taskRuns = realRuns({
+    db,
+    scheduleBreakProbe: (input) =>
+      scheduleRouteBreakProbe(
+        {
+          rows: (since) => routeProbeAuditRows(db, since),
+          request: (r) => recordRouteProbeRequest(db, r),
+          now: () => new Date(),
+          log: (level, message, fields) => taskLog(message, { level, ...fields }),
+        },
+        input,
+      ),
+    log: (level, message, fields) => taskLog(message, { level, ...fields }),
+  });
   // 选路给三段的一段预占的池的名额（#757）：开跑那一行（taskRuns.start）换掉，没开跑就收场的由这两个活动放掉
   const reservations = realReservations({ db });
   // 派前探测不通时工作流放掉这次预占（#1409）：没进 runSegment，不能占到过期
