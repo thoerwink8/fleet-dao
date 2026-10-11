@@ -14,6 +14,7 @@ import { Power } from 'lucide-react';
 import { Link } from 'react-router';
 import { errorText, useNodeSnapshots, useSettings } from '../api/client';
 import type { EnvMaster, Setting } from '../api/types';
+import { localizeIsoTimes } from '../lib/format';
 import { useNodeSelection, withNode } from '../lib/node';
 import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
@@ -88,7 +89,7 @@ export function EngineMasterBadge() {
   const off = view.kind === 'ok' && !view.master.on;
   const detail =
     view.kind === 'ok'
-      ? view.master.detail
+      ? localizeIsoTimes(view.master.detail)
       : view.kind === 'absent'
         ? '这个环境的版本还不带引擎总开关'
         : view.kind === 'error'

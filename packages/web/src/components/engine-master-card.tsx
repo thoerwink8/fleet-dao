@@ -3,13 +3,13 @@
 // 写走通用的 PUT /settings/engine.master（登录门、CSRF、版本冲突回 409、操作记录都在那条路上），带上改之前看到的版本，别人先改了回
 // 409、提示刷新；选了远程环境、读不到：不给按钮，各写各的原因（本机 WSL 的开关只管那台自己的库，要去那台上用命令行）。
 
-import { ENGINE_MASTER_SETTING } from '@fleet-dao/shared';
+import { describeEngineMaster, ENGINE_MASTER_SETTING } from '@fleet-dao/shared';
 import { Power } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { toast } from 'sonner';
 import { errorText, useSettings, useUpdateSetting } from '../api/client';
 import type { EnvMaster } from '../api/types';
-import { formatDateTime } from '../lib/format';
+import { formatDateTime, localizeIsoTimes } from '../lib/format';
 import { useMasterView } from './engine-master';
 import { DescriptionHint } from './layout/page';
 import { Section } from './layout/section';
@@ -67,6 +67,7 @@ export function EngineMasterControl({ standbyNote }: { standbyNote?: ReactNode }
     );
   };
 
+  const who = master === null ? null : changedBy(master);
   const note =
     view.kind === 'loading'
       ? '正在读…'
@@ -74,8 +75,12 @@ export function EngineMasterControl({ standbyNote }: { standbyNote?: ReactNode }
         ? `没查成：${view.reason}`
         : view.kind === 'absent'
           ? '这个环境的版本还不带引擎总开关（它升级后会有这一项）。'
-          : (master?.detail ?? '');
-  const who = master === null ? null : changedBy(master);
+          : master === null
+            ? ''
+            : who === null
+              ? localizeIsoTimes(master.detail)
+              : // 谁、什么时候改的已经在下面那一行（本地化时间）：这一句只说现在是什么状态，不再把同一件事和 ISO 时间写第二遍（#1903）
+                describeEngineMaster(master.on ? { on: true } : { on: false, why: master.why });
 
   const button =
     master === null || remote ? null : (

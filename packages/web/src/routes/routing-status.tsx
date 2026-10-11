@@ -13,7 +13,7 @@
 //   均耗时、可用率按这 60 格算。库读不到写「没查成」，不拿空格子冒充没有。引擎关着这一份照样读。
 
 import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
-import { ChevronDown, LoaderCircle, Radar, SatelliteDish, SearchX } from 'lucide-react';
+import { ChevronDown, Info, LoaderCircle, Radar, SatelliteDish, SearchX } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { brand } from '#brand';
@@ -53,6 +53,7 @@ import { ProbeLog } from '../components/probe-log';
 import { MOBILE_MQ } from '../components/routing-browse';
 import { KindChip } from '../components/routing-kinds';
 import { Button } from '../components/ui/button';
+import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '../components/ui/sheet';
 import {
   buildChannelCards,
@@ -399,18 +400,37 @@ export default function RoutingStatus() {
               </div>
             </Section>
           )}
-          <ul className="mt-3 space-y-1 text-meta text-muted-foreground">
-            <li>绿灯只表示本节点最近一轮抽测通过，不保证每次使用都正常。</li>
-            <li>晚于「下次探测时刻」20 分钟还没探，就显示「检测中断」并标红，不拿旧绿灯掩盖中断。</li>
-            <li>已关（人关的）、未被用途使用、池暂停、已下架都不是坏了，只有「故障」才要修。</li>
-            <li>
-              每个用途排哪些模型、能不能派，看{' '}
-              <Link to="/routing" className="underline underline-offset-2">
-                路由
-              </Link>
-              。
-            </li>
-          </ul>
+          {/* 四段脚注同一个灰、满屏小字：收进 ⓘ，点开才看（#1903） */}
+          <div className="mt-2 flex items-center gap-1 text-meta text-muted-foreground">
+            <Popover>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="怎么看这些状态"
+                  title="怎么看这些状态"
+                  data-status-notes
+                  className="inline-grid size-8 shrink-0 place-items-center rounded-full hover:text-foreground max-md:size-10"
+                >
+                  <Info className="size-4" aria-hidden />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-auto max-w-sm text-body text-muted-foreground">
+                <ul className="space-y-1.5">
+                  <li>绿灯只表示本节点最近一轮抽测通过，不保证每次使用都正常。</li>
+                  <li>晚于「下次探测时刻」20 分钟还没探，就显示「检测中断」并标红，不拿旧绿灯掩盖中断。</li>
+                  <li>已关（人关的）、未被用途使用、池暂停、已下架都不是坏了，只有「故障」才要修。</li>
+                  <li>
+                    每个用途排哪些模型、能不能派，看{' '}
+                    <Link to="/routing" className="underline underline-offset-2">
+                      路由
+                    </Link>
+                    。
+                  </li>
+                </ul>
+              </PopoverContent>
+            </Popover>
+            怎么看这些状态
+          </div>
         </div>
         {drawer ? (
           // 不到 lg（手机、平板）只画列表：点一行从右侧（手机从底部）滑出详情抽屉，不再上下堆两栏（#1806）
@@ -547,6 +567,14 @@ const KIND_ORDER: readonly RouteStateKind[] = [
   'unused',
 ];
 
+/** 渠道头部那一句中文结论（只说通不通、几条路，不带探针的原文）。运行中失败的有自己的说明块，这里不写。 */
+function conclusionOf(card: ChannelCard): string | undefined {
+  if (card.failover || !card.reason) return undefined;
+  if (card.state === 'partial') return `有 ${card.deadRoutes} 条在用的路不通，其余在线`;
+  if (card.state === 'down') return `在用的 ${card.activeRoutes} 条路都不通`;
+  return '探针还没探通，原因见下面';
+}
+
 function ChannelDetail({
   card,
   routes,
@@ -656,7 +684,7 @@ function ChannelDetail({
           </span>
         </span>
       }
-      description={card.reason && !card.failover ? card.reason : undefined}
+      description={conclusionOf(card)}
       actions={
         <div className="flex items-center gap-2">
           <StatusBadge tone={card.tone} label={card.label} />
@@ -680,6 +708,17 @@ function ChannelDetail({
           检测中断：晚于下次探测时刻 20 分钟还没探这个渠道，上次的结论不再当现状
           {card.probedAt ? `（${formatAgo(card.probedAt, now)}）` : null}
         </Notice>
+      ) : null}
+      {card.reason && !card.failover ? (
+        // 探针写的原文常常是英文、很长：头部只留上面那句中文结论，原文收在这条可展开的提醒里（#1903）
+        <div data-raw-reason className="mb-3">
+          <Notice tone={card.tone === 'fail' ? 'fail' : 'stall'}>
+            <details>
+              <summary className="cursor-pointer font-medium max-md:min-h-10">探针报的原文，点开看</summary>
+              <p className="mt-1 break-words">{card.reason}</p>
+            </details>
+          </Notice>
+        </div>
       ) : null}
       {card.fallback ? <p className="mb-3 text-body text-ink-fail">{card.fallback}</p> : null}
       {card.failover ? <FailoverNote failover={card.failover} now={now} /> : null}
