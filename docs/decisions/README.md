@@ -85,6 +85,7 @@
 | [0079](0079-fleet-subagents-user-level.md) | 16 个 `fleet-*` 子代理的通用版（`agents/subagents/` 下同名，去掉本仓专属的命令和路径）随 `pnpm agents:sync` 和 `haiku55` 一起装到每台机器的 `~/.claude/agents/`，法国也装；`.claude/agents/` 的专属版本仓照用、不往家里装（部分取代 0036） | 采纳（创始人 2026-10-11 18:38「1. 装」、20:44「改成通用版，VPS 照装」） |
 | [0080](0080-steer-lineage-owner.md) | 创始人的话和引导按「Mirasim 会话」这条血缘认主：开会话只列同一个 Mirasim 会话换号前收到的话，不再全局广播；待处理引导记主人，只叫主人办，别的会话只计数，无主的先 `pnpm progress:claim` 认领 | 待创始人同意（改标准） |
 | [0081](0081-pnpm-entry-and-default-shared.md) | 仓合同 `agents/repo-contract.json`（首批：仓根 `pnpm dev/start/stop/check`、AGENTS.md、PROGRESS 两节、`.gitignore` 的 `_tmp/`）：开会话钩子在任何仓里每天最多提醒一次缺项，`pnpm repo:check`、`repo:init` 查和补，只提醒不拦；创始人说的原则默认各仓通用，引导条目标〔范围：通用｜只此仓〕，开会话和收尾钩子提醒 | 创始人 04:37 选定方案 B，PR #1934 合并即生效 |
+| [0082](0082-read-source-before-loosening.md) | 通用段底线补一句：读不到先追数据源；要放宽判据，PR 里贴上游真的不给的证据（#1936 放宽判据凑绿、#1946 才修根子）；`chain-first` 硬规矩跟着写 | 创始人 2026-10-12 在对话里选定（2.a），PR 合并即生效 |
 
 ## 第 1–14 条的编号（#1476）
 
