@@ -351,6 +351,34 @@ describe('home（/）：四种状态', () => {
     expect(bar?.textContent).not.toContain('最后更新');
   });
 
+  test('手机宽度：机器资源另起一行写具体数值，不挤进健康条那一行（#1973）', () => {
+    renderHome(
+      {
+        status: 'data',
+        data: {
+          ...SAMPLE,
+          resources: {
+            at: new Date().toISOString(),
+            everyMs: 5_000,
+            memory: { state: 'ok', totalMb: 12_000, availableMb: 6_000 },
+            cpu: { state: 'ok', percent: 40, busyCores: 1.6, cores: 4 },
+            sessions: { state: 'ok', byRun: {} },
+          },
+        },
+      },
+      390,
+    );
+    const bar = document.querySelector('[data-home-statusbar]');
+    const row = document.querySelector('[data-home-meter-row]');
+    expect(row).toBeTruthy();
+    // 健康条那一行里没有机器资源：那一行照旧只放状态 + 刷新、不换行
+    expect(bar?.querySelector('[data-machine-meter]')).toBeNull();
+    expect(Array.from(row?.querySelectorAll('[data-meter-amount]') ?? []).map((e) => e.textContent)).toEqual([
+      '5.9G / 11.7G',
+      '1.6 核 / 4 核',
+    ]);
+  });
+
   test('详情面板的操作行右边没有孤立的竖线（#1819）', async () => {
     const withTask = SAMPLE.running.map((r) => (r.issueNumber === 556 ? { ...r, taskId: 't-556' } : r));
     renderHome({ status: 'data', data: { ...SAMPLE, running: withTask } });

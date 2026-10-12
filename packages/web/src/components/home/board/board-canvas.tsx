@@ -272,7 +272,8 @@ function Canvas({ running, flow, health, slots, resources }: BoardCanvasProps) {
     const measure = () => {
       const { width, height } = el.getBoundingClientRect();
       const hOf = (sel: string) => el.querySelector(sel)?.getBoundingClientRect().height ?? 0;
-      const usable = height - hOf('[data-board-toolbar]') - hOf('[data-board-now]') - 48;
+      // 左下的坞（此刻面板 + 机器两格，窄画布时两行）整块的高
+      const usable = height - hOf('[data-board-toolbar]') - hOf('[data-board-dock]') - 48;
       setAspect(width > 0 && usable > 0 ? Math.round(width / usable / ASPECT_STEP) * ASPECT_STEP : undefined);
     };
     const ro = new ResizeObserver(measure);
@@ -351,7 +352,7 @@ function Canvas({ running, flow, health, slots, resources }: BoardCanvasProps) {
         return r && r.width > 0 && r.height > 0 ? r : undefined;
       };
       const toolbar = inset('[data-board-toolbar]');
-      const nowBox = inset('[data-board-now]');
+      const nowBox = dockRect(el);
       const top = toolbar ? toolbar.bottom - box.top + 12 : 16;
       const gap = 12;
       // 小地图只在拉近（中、近两档）时出现（#1973 排版）：收进视野不再给它让出一整条底边，整张图大一圈
@@ -1028,6 +1029,17 @@ function Legend() {
 
 // ---------- 此刻：哪个模型正在干哪张单 ----------
 
+/** 左下坞里几张卡（此刻面板、机器两格）合起来的外框：坞本身横跨整条底边，不能直接量它的宽。都量不到回 undefined。 */
+function dockRect(root: HTMLElement): { right: number; height: number } | undefined {
+  const rects = Array.from(root.querySelectorAll('[data-board-dock] > *'))
+    .map((c) => c.getBoundingClientRect())
+    .filter((r) => r.width > 0 && r.height > 0);
+  if (!rects.length) return undefined;
+  const top = Math.min(...rects.map((r) => r.top));
+  const bottom = Math.max(...rects.map((r) => r.bottom));
+  return { right: Math.max(...rects.map((r) => r.right)), height: bottom - top };
+}
+
 function NowPanel({
   running,
   slots,
@@ -1059,76 +1071,88 @@ function NowPanel({
   // 在干活的会话数读后端池占用（和法国页、额度页、路由页同一个数）；老后端没给才退回数表里有人在做的单
   const working = slots?.running ?? rows.filter((r) => !r.queued).length;
   const queued = rows.filter((r) => r.queued).length;
-  // w-lg（32rem）：四列定宽合计 30.5rem（6+3.5+12+9），「在做什么」占 12rem；max-w-full 窄画布不溢出
+  // 左下角一条「坞」：此刻面板 + 机器两格各一张小卡并排（#1973）。机器两格写了具体数值，塞进面板标题行会把「几个会话在干活」
+  // 挤没，所以单独成卡；画布窄、一行放不下时机器那张整块折到面板上面（flex-wrap-reverse），谁的字都不截。
+  // 收进视野、量宽高比都按坞里两张卡合起来的外框让位（dockRect）。
+  // 面板 w-lg（32rem）：四列定宽合计 30.5rem（6+3.5+12+9），「在做什么」占 12rem；max-w-full 窄画布不溢出
   return (
     <div
-      data-board-now
-      className="pointer-events-auto absolute bottom-3 left-3 z-10 w-lg max-w-full overflow-hidden rounded-lg border bg-popover shadow-overlay"
+      data-board-dock
+      className="pointer-events-none absolute inset-x-3 bottom-3 z-10 flex flex-wrap-reverse items-start gap-2"
     >
-      <div className="flex items-center gap-1 pr-1.5">
-        <button
-          type="button"
-          onClick={() => setStored(!open)}
-          className="flex min-w-0 flex-1 items-center gap-2 py-2 pl-3 text-left text-body font-medium whitespace-nowrap"
-          aria-expanded={open}
-        >
-          <ChevronDown
-            className={cn(
-              'size-4 shrink-0 text-muted-foreground transition-transform',
-              !open && '-rotate-90',
-            )}
-          />
-          <StatusDot tone={working ? 'run' : 'wait'} />
-          此刻
-          <span className="min-w-0 truncate text-muted-foreground">
-            <span className="num">{working}</span> 个会话在干活
-            {queued ? (
-              <>
-                {' '}
-                · <span className="num">{queued}</span> 张在排队
-              </>
-            ) : null}
-          </span>
-        </button>
-        {/* 这台机器此刻的内存、CPU（#1973）：和「几个会话在干活」放一行，一眼看到机器扛不扛得住 */}
-        <span aria-hidden className="h-5 w-px shrink-0 bg-border" />
+      <div
+        data-board-now
+        className="pointer-events-auto w-lg max-w-full overflow-hidden rounded-lg border bg-popover shadow-overlay"
+      >
+        <div className="flex items-center gap-1 pr-1.5">
+          <button
+            type="button"
+            onClick={() => setStored(!open)}
+            className="flex min-w-0 flex-1 items-center gap-2 py-2 pl-3 text-left text-body font-medium whitespace-nowrap"
+            aria-expanded={open}
+          >
+            <ChevronDown
+              className={cn(
+                'size-4 shrink-0 text-muted-foreground transition-transform',
+                !open && '-rotate-90',
+              )}
+            />
+            <StatusDot tone={working ? 'run' : 'wait'} />
+            此刻
+            <span className="min-w-0 truncate text-muted-foreground">
+              <span className="num">{working}</span> 个会话在干活
+              {queued ? (
+                <>
+                  {' '}
+                  · <span className="num">{queued}</span> 张在排队
+                </>
+              ) : null}
+            </span>
+          </button>
+        </div>
+        {open && rows.length ? (
+          <div className="max-h-56 overflow-y-auto border-t">
+            <table className="w-full table-fixed text-meta">
+              <colgroup>
+                <col className="w-24" />
+                <col className="w-14" />
+                {/* table-fixed 认 w-48（12rem），别用 min-w：固定布局下 min-width 不生效 */}
+                <col className="w-48" />
+                {/* 9rem：表头「分钟」和「1 小时 33 分」都放得下，不从「分钟」中间断开 */}
+                <col className="w-36" />
+              </colgroup>
+              <thead className="sticky top-0 bg-popover">
+                <tr className="text-left text-meta text-muted-foreground">
+                  <th scope="col" className="w-24 px-3 py-1 font-normal whitespace-nowrap">
+                    谁在做
+                  </th>
+                  <th scope="col" className="w-14 px-1 py-1 font-normal whitespace-nowrap">
+                    单
+                  </th>
+                  <th scope="col" className="w-48 px-1 py-1 font-normal whitespace-nowrap">
+                    在做什么
+                  </th>
+                  <th scope="col" className="w-36 px-3 py-1 text-right font-normal whitespace-nowrap">
+                    分钟
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <NowRow key={nodeId.ticket(r.item)} item={r.item} queued={r.queued} onPick={onPick} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+      </div>
+      {/* 这台机器此刻的内存、CPU（#1973）：紧挨着「此刻」，一眼看到机器扛不扛得住 */}
+      <div
+        data-board-machine
+        className="pointer-events-auto flex shrink-0 items-center rounded-lg border bg-popover px-1.5 py-0.5 shadow-overlay"
+      >
         <MachineMeter resources={resources} remote={remote !== null} machine={remote?.name} />
       </div>
-      {open && rows.length ? (
-        <div className="max-h-56 overflow-y-auto border-t">
-          <table className="w-full table-fixed text-meta">
-            <colgroup>
-              <col className="w-24" />
-              <col className="w-14" />
-              {/* table-fixed 认 w-48（12rem），别用 min-w：固定布局下 min-width 不生效 */}
-              <col className="w-48" />
-              {/* 9rem：表头「分钟」和「1 小时 33 分」都放得下，不从「分钟」中间断开 */}
-              <col className="w-36" />
-            </colgroup>
-            <thead className="sticky top-0 bg-popover">
-              <tr className="text-left text-meta text-muted-foreground">
-                <th scope="col" className="w-24 px-3 py-1 font-normal whitespace-nowrap">
-                  谁在做
-                </th>
-                <th scope="col" className="w-14 px-1 py-1 font-normal whitespace-nowrap">
-                  单
-                </th>
-                <th scope="col" className="w-48 px-1 py-1 font-normal whitespace-nowrap">
-                  在做什么
-                </th>
-                <th scope="col" className="w-36 px-3 py-1 text-right font-normal whitespace-nowrap">
-                  分钟
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <NowRow key={nodeId.ticket(r.item)} item={r.item} queued={r.queued} onPick={onPick} />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : null}
     </div>
   );
 }

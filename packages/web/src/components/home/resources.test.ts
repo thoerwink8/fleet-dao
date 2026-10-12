@@ -119,9 +119,7 @@ describe('整机两格', () => {
   test('那台推来的老快照没有忙的核数：数值写没读到带原因，不拿百分比 × 核数编一个', () => {
     const m = hostMeters(res({ cpu: { state: 'ok', percent: 40, cores: 4 } }), NOW, { remote: true });
     expect(m.cpu).toMatchObject({ kind: 'ok', text: '40%', amount: { kind: 'unread' } });
-    expect(m.cpu.kind === 'ok' && m.cpu.amount.kind === 'unread' && m.cpu.amount.why).toContain(
-      '忙的核数',
-    );
+    expect(m.cpu.kind === 'ok' && m.cpu.amount.kind === 'unread' && m.cpu.amount.why).toContain('忙的核数');
   });
 
   test('紧（内存 ≥ 85%、CPU ≥ 90%）：标紧，由页面画成等待黄', () => {
