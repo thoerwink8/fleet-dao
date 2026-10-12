@@ -11,6 +11,8 @@ import {
   AuthConfigResponse,
   answerResolves,
   BoardResponse,
+  CI_POLICY_SET,
+  type CiPolicy,
   CredentialsResponse,
   DEFAULT_SESSION_EFFORT,
   describeEngineMaster,
@@ -57,6 +59,7 @@ import {
   ReleasedCommitsSchema,
   ReleaseRequestResponse,
   RemovePurposeModelRequest,
+  RepoCiPolicyResponse,
   RepoDispatchResponse,
   ReposResponse,
   ROUTE_PROBE_ACTION,
@@ -99,6 +102,8 @@ import {
   UpdateCredentialsRequest,
   UpdateModelRouteRequest,
   UpdateModelRouteResponse,
+  UpdateRepoCiPolicyRequest,
+  UpdateRepoCiPolicyResponse,
   UpdateRepoDispatchRequest,
   UpdateRepoDispatchResponse,
   UpdateRouteEffortRequest,
@@ -570,6 +575,10 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const switchedOff = new Set(MOCK_SWITCHED_OFF_AT_START);
   /** 每个项目「让 AI 接活」打开的时刻：没有就是关着。种子里 orbit 开着、另两个关着，页面上两种样子都能看到。 */
   const mockDispatch = new Map<string, string>([['r-orbit', new Date(now() - 3 * 86_400_000).toISOString()]]);
+  /** 没写过的仓是强制。切换记录新的在前，最多留 5 条。 */
+  const mockCiPolicy = new Map<string, CiPolicy>();
+  const mockCiRecent = new Map<string, { at: string; actor: string; from: CiPolicy; to: CiPolicy }[]>();
+  const ciModeOf = (repoId: string): CiPolicy => mockCiPolicy.get(repoId) ?? 'force';
   /**
    * 临时指挥官整理待办的记录（新的在前）。orbit 有一次做成、一次没做成，都在 24 小时内接手过，所以今日剩余 1/3。
    * 没有排队或在做的：按钮能点。点了以后插到最前。
@@ -1590,6 +1599,54 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         name: repo.name,
         on: since !== undefined,
         ...(since ? { since } : {}),
+        changed,
+      });
+    },
+    async repoCiPolicy() {
+      await wait();
+      return RepoCiPolicyResponse.parse({
+        repos: st.repos.map((r) => ({
+          repoId: r.id,
+          owner: r.owner,
+          name: r.name,
+          mode: ciModeOf(r.id),
+          recent: mockCiRecent.get(r.id) ?? [],
+        })),
+      });
+    },
+    async updateRepoCiPolicy(repoId, raw) {
+      await wait();
+      const body = UpdateRepoCiPolicyRequest.parse(raw);
+      const repo = st.repos.find((r) => r.id === repoId);
+      if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
+      const before = ciModeOf(repoId);
+      const changed = before !== body.mode;
+      if (changed) {
+        mockCiPolicy.set(repoId, body.mode);
+        const recent = mockCiRecent.get(repoId) ?? [];
+        recent.unshift({
+          at: iso(),
+          actor: st.me.user.displayName,
+          from: before,
+          to: body.mode,
+        });
+        mockCiRecent.set(repoId, recent.slice(0, 5));
+        audit({
+          actor: meActor(),
+          action: CI_POLICY_SET,
+          target: `repo:${repoId}`,
+          before: { ciPolicy: before },
+          after: { ciPolicy: body.mode },
+          via: 'cockpit',
+          reason: body.reason ?? `在页面上把 CI 模式改成${body.mode === 'force' ? '强制' : '不强制'}`,
+        });
+      }
+      return UpdateRepoCiPolicyResponse.parse({
+        repoId,
+        owner: repo.owner,
+        name: repo.name,
+        mode: ciModeOf(repoId),
+        recent: mockCiRecent.get(repoId) ?? [],
         changed,
       });
     },

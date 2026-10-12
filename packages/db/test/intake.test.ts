@@ -27,8 +27,17 @@ describe('受管的仓（listIntakeRepos）', () => {
       defaultBranch: 'main',
       testCommand: 'pnpm check',
       autoDispatchSince: null,
+      ciPolicy: 'force',
     });
     expect(rows[1]?.autoDispatchSince?.toISOString()).toBe(opened.toISOString());
+    expect(rows[1]?.ciPolicy).toBe('force');
+  });
+
+  it('切成不强制之后读回来是 off；没改过的仍是强制', async () => {
+    const a = await addRepo(t.db, 'aaa');
+    await t.db.update(repos).set({ ciPolicy: 'off' }).where(eq(repos.id, a.id));
+    const rows = await listIntakeRepos(t.db);
+    expect(rows.map((r) => [r.name, r.ciPolicy])).toEqual([['aaa', 'off']]);
   });
 
   it('一个仓都没有：空数组（调用方把它当「库里没有受管的仓」报，不当成都关着）', async () => {

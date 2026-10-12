@@ -36,6 +36,11 @@ export const MERGE_POLL_MINUTES = 15;
 export const MAX_MAIN_SYNCS = 3;
 /** 没有可用路由、或额度没读成时隔多久再选一次（秒）。 */
 export const ROUTE_RETRY_SECONDS = 60;
+/**
+ * 强制 CI、停在等 CI（没配检查、超时、读失败）时，隔多久再读一次这个仓的 CI 模式（秒）。
+ * 切成不强制就自己接着合并，不用人点「继续」。
+ */
+export const CI_POLICY_POLL_SECONDS = 30;
 
 /**
  * 三段里经选路的那几段各按哪个用途选。定义在 shared 的 flow-purposes.ts：动手按 execute，验收按页面上叫「验收」的那一格
@@ -276,6 +281,36 @@ export interface ArmAutoMergeResult {
    * 老历史里没有这个字段，当作没有（头是别人改的）。
    */
   syncedMain?: true;
+}
+
+/** 现读这个仓现在的 CI 模式。工作流每次走到等 CI 之前读，不在拉单那一刻定死。 */
+export interface ReadCiPolicyInput {
+  schemaVersion: 1;
+  repo: Repo;
+}
+
+export interface ReadCiPolicyResult {
+  mode: 'force' | 'off';
+}
+
+/** 不强制 CI 的仓：开完 PR、查完改标准路径之后由引擎直接合并（不等检查、不挂自动合并）。 */
+export interface MergeNowInput {
+  schemaVersion: 1;
+  repo: Repo;
+  prNumber: number;
+  expectedHead: string;
+  /** 这张 PR 已经因为落后主线自动同步过几次。到了 MAX_MAIN_SYNCS 次就不再同步。 */
+  syncedBehind?: number;
+}
+
+export interface MergeNowResult {
+  merged: boolean;
+  mergeCommit?: string;
+  reason?: 'conflict' | 'head_moved' | 'behind_main' | 'closed' | 'other';
+  detail?: string;
+  /** 头已经不是 expectedHead。syncedMain 为 true 时是引擎自己同步主线换的头。 */
+  headMoved?: string;
+  syncedMain?: boolean;
 }
 
 export interface WaitMergedInput {

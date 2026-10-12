@@ -64,10 +64,13 @@ export interface ColdVerifyNeed {
   why: string;
 }
 
-export function coldVerifyNeed(flowPr: boolean): ColdVerifyNeed {
-  return flowPr
-    ? { needed: true, why: '这是引擎任务工作流开的 PR（分支名 fleet/<单号>-t<8 位>）' }
-    : { needed: false, why: '' };
+/** 受管仓的合并方式。没传 = 强制（闸跑在 GitHub 上，读不到法国的库，不能把没传当成不强制）。 */
+export type GateCiPolicy = 'force' | 'off';
+
+export function coldVerifyNeed(flowPr: boolean, ciPolicy: GateCiPolicy = 'force'): ColdVerifyNeed {
+  if (!flowPr) return { needed: false, why: '' };
+  if (ciPolicy === 'off') return { needed: false, why: '' };
+  return { needed: true, why: '这是引擎任务工作流开的 PR（分支名 fleet/<单号>-t<8 位>）' };
 }
 
 /**

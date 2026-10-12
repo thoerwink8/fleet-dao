@@ -1486,6 +1486,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           defaultBranch: 'main',
           testCommand: 'pnpm check',
           autoDispatchSince: null,
+          ciPolicy: 'force',
         });
         expect(await store.findRepoByName('example', 'other')).toBeNull();
       });
@@ -1816,6 +1817,67 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           await expect(store.setAutoDispatch({ repoId: IDS.repo, on: true }, badAudit())).rejects.toThrow();
           expect(await since()).toBeNull();
           expect(await switchAudits()).toEqual([]);
+        });
+      });
+
+      describe('CI 模式', () => {
+        const target = `repo:${IDS.repo}`;
+        const set = audit({
+          actor: { kind: 'user', id: DEV_USER_ID },
+          action: 'repo.ci_policy.set',
+          target,
+          via: 'cockpit',
+        });
+        const policy = async () => (await store.findRepoByName('example', 'canary'))?.ciPolicy;
+        const policyAudits = async () =>
+          (await store.listAudit({ target, limit: 10 })).items.filter(
+            (a) => a.action === 'repo.ci_policy.set',
+          );
+
+        it('已有的仓读出来是强制；切到不强制记下谁、前后值；再切成同一个不改、不记', async () => {
+          expect(await policy()).toBe('force');
+          tick();
+          const at = clock.now.toISOString();
+          expect(await store.setCiPolicy({ repoId: IDS.repo, mode: 'off' }, set)).toEqual({
+            changed: true,
+            ciPolicy: 'off',
+            auditId: expect.any(String),
+          });
+          expect(await policy()).toBe('off');
+          const [entry, ...rest] = await policyAudits();
+          expect(rest).toEqual([]);
+          expect(entry).toMatchObject({
+            at,
+            actor: { kind: 'user', id: DEV_USER_ID },
+            action: 'repo.ci_policy.set',
+            via: 'cockpit',
+            ok: true,
+            before: { ciPolicy: 'force' },
+            after: { ciPolicy: 'off' },
+          });
+          tick();
+          expect(await store.setCiPolicy({ repoId: IDS.repo, mode: 'off' }, set)).toEqual({
+            changed: false,
+            ciPolicy: 'off',
+          });
+          expect(await policy()).toBe('off');
+          expect(await policyAudits()).toHaveLength(1);
+        });
+
+        it('切回强制；没这个仓 not_found、不留记录；操作记录写不进也不改', async () => {
+          await store.setCiPolicy({ repoId: IDS.repo, mode: 'off' }, set);
+          tick();
+          expect(await store.setCiPolicy({ repoId: IDS.repo, mode: 'force' }, set)).toEqual({
+            changed: true,
+            ciPolicy: 'force',
+            auditId: expect.any(String),
+          });
+          expect(await policy()).toBe('force');
+          for (const repoId of [OTHER_UUID, 'nope'])
+            expect(await store.setCiPolicy({ repoId, mode: 'off' }, set), repoId).toBe('not_found');
+          await store.setCiPolicy({ repoId: IDS.repo, mode: 'off' }, set);
+          await expect(store.setCiPolicy({ repoId: IDS.repo, mode: 'force' }, badAudit())).rejects.toThrow();
+          expect(await policy()).toBe('off');
         });
       });
     });

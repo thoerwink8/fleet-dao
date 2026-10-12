@@ -12,6 +12,7 @@ import {
   useAudit,
   useMe,
   usePools,
+  useRepoCiPolicy,
   useRepoDispatch,
   useSettings,
   useUpdateSetting,
@@ -23,7 +24,7 @@ import { EmptyState } from '../components/layout/empty-state';
 import { FieldGroup, FieldRow } from '../components/layout/field-row';
 import { FilterTabs } from '../components/layout/filter-tabs';
 import { KeyValue } from '../components/layout/key-value';
-import { List } from '../components/layout/list';
+import { List, RowDetail } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { DescriptionHint, Page } from '../components/layout/page';
 import { SaveButton } from '../components/layout/save-button';
@@ -31,6 +32,7 @@ import { Section } from '../components/layout/section';
 import { StatusDot } from '../components/layout/status-badge';
 import { PageNav } from '../components/page-nav';
 import { PoolHoldsPanel } from '../components/pool-holds';
+import { RepoCiPolicyControl } from '../components/repo-ci-policy';
 import { useRepo } from '../components/repo-context';
 import { RepoRow } from '../components/repo-groom';
 import { ModeSwitch } from '../components/shell/topbar';
@@ -572,6 +574,7 @@ export default function Settings() {
   const { repos, loading: reposLoading, error: reposError } = useRepo();
   const settings = useSettings();
   const dispatch = useRepoDispatch();
+  const ciPolicy = useRepoCiPolicy();
   const repoFailure = repoReadFailure(reposError, dispatch.error);
   const find = (k: SettingKey) => settings.data?.settings.find((s) => s.key === k);
 
@@ -587,7 +590,8 @@ export default function Settings() {
           <p>外观（深浅、密度、主题色、减少动效）只存在这台浏览器里。</p>
           <p>
             仓库一行：「开启 / 关闭」管这个仓「让 AI
-            接活」，「整理」叫指挥官现在整理待办；点仓名展开整理记录。
+            接活」，「整理」叫指挥官现在整理待办；点仓名展开整理记录。CI
+            模式在这一行下面，随时能在强制和不强制之间切。
           </p>
         </div>
       }
@@ -608,7 +612,7 @@ export default function Settings() {
             id="repos"
             icon={FolderGit2}
             title="仓库"
-            description="接进来的仓（测试能跑、有一页 AGENTS.md）。点仓名看整理记录。"
+            description="接进来的仓（测试能跑、有一页 AGENTS.md）。接活、整理在一行；CI 模式在下面。点仓名看整理记录。"
           >
             {/* 总开关和按项目开关的关系（#1086）：总开关关＝全停，开＝只有接活开着的项目才派 */}
             <EngineMasterRelation />
@@ -633,6 +637,13 @@ export default function Settings() {
                         branch={r.defaultBranch}
                         dispatch={dispatch.data?.repos.find((d) => d.repoId === r.id)}
                       />
+                      <RowDetail indent={false} className="pb-3">
+                        <RepoCiPolicyControl
+                          repoId={r.id}
+                          name={`${r.owner}/${r.name}`}
+                          row={ciPolicy.data?.repos.find((d) => d.repoId === r.id)}
+                        />
+                      </RowDetail>
                     </li>
                   ))}
                 </List>

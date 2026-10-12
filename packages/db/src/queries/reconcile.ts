@@ -2,7 +2,7 @@
 // 对上的单记没记账（会话结局、用量、关单）。受管的仓按 repos 表列（listManagedRepos）。
 // 终态的单不在第一份清单里：做完、叫停、没做完都不再要求有一条在跑的工作流。
 // 主页「开着」数的也是这些非终态行。单早已关闭、工作流不在跑的遗留行，对账列出来再改成叫停。
-import type { RunOutcome, TaskState } from '@fleet-dao/shared';
+import { type CiPolicy, ciPolicyOf, type RunOutcome, type TaskState } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gte, inArray, notInArray, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { TERMINAL_TASK_STATES } from '../schema/enums.ts';
@@ -34,11 +34,14 @@ export async function pullMergedAt(
 }
 
 /** 受管的仓（repos 表的每一行）：对账逐个去查。 */
-export async function listManagedRepos(db: Db): Promise<{ id: string; owner: string; name: string }[]> {
-  return db
-    .select({ id: repos.id, owner: repos.owner, name: repos.name })
+export async function listManagedRepos(
+  db: Db,
+): Promise<{ id: string; owner: string; name: string; ciPolicy: CiPolicy }[]> {
+  const rows = await db
+    .select({ id: repos.id, owner: repos.owner, name: repos.name, ciPolicy: repos.ciPolicy })
     .from(repos)
     .orderBy(repos.owner, repos.name);
+  return rows.map((r) => ({ ...r, ciPolicy: ciPolicyOf(r.ciPolicy) }));
 }
 
 export interface ActiveTaskRef {

@@ -52,7 +52,7 @@ import {
   toTask,
   users,
 } from '@fleet-dao/db';
-import { answerResolves, type ProgressKind, taskWorkflowId } from '@fleet-dao/shared';
+import { answerResolves, ciPolicyOf, type ProgressKind, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
   claimedCommandResult,
@@ -78,6 +78,7 @@ import { planSteps } from './plan-logic.ts';
 import type {
   AuditRecord,
   AutoDispatchChange,
+  CiPolicyChange,
   CommandClaim,
   GitHubDelivery,
   GitHubObjectVersion,
@@ -98,8 +99,12 @@ import {
   autoDispatchChanged,
   autoDispatchUnchanged,
   boardCutoffMs,
+  ciPolicyAudit,
+  ciPolicyChanged,
+  ciPolicyUnchanged,
   emptyTaskGroupCounts,
   isAutoDispatchUnchanged,
+  isCiPolicyUnchanged,
   isTerminalTaskState,
   keepOnBoard,
 } from './task-logic.ts';
@@ -1089,6 +1094,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       return {
         ...toRepo(row),
         autoDispatchSince: row.autoDispatchSince ? iso(row.autoDispatchSince) : null,
+        ciPolicy: ciPolicyOf(row.ciPolicy),
       };
     },
     async findTaskByIssue(repoId, issueNumber) {
@@ -1243,6 +1249,28 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         const after = updated.since ? iso(updated.since) : null;
         const auditId = await insertAudit(tx, autoDispatchAudit(entry, before, after));
         return autoDispatchChanged(after, auditId);
+      });
+    },
+    async setCiPolicy({ repoId, mode }, entry) {
+      if (!isUuid(repoId)) return 'not_found';
+      return db.transaction(async (tx): Promise<CiPolicyChange | 'not_found'> => {
+        const [row] = await tx
+          .select({ ciPolicy: repos.ciPolicy })
+          .from(repos)
+          .where(eq(repos.id, repoId))
+          .for('update');
+        if (!row) return 'not_found';
+        const before = ciPolicyOf(row.ciPolicy);
+        if (isCiPolicyUnchanged(before, mode)) return ciPolicyUnchanged(before);
+        const [updated] = await tx
+          .update(repos)
+          .set({ ciPolicy: mode })
+          .where(eq(repos.id, repoId))
+          .returning({ ciPolicy: repos.ciPolicy });
+        if (!updated) throw new Error(`仓 ${repoId} 锁住了却没改成`);
+        const after = ciPolicyOf(updated.ciPolicy);
+        const auditId = await insertAudit(tx, ciPolicyAudit(entry, before, after));
+        return ciPolicyChanged(after, auditId);
       });
     },
   };

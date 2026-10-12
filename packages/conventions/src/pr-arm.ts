@@ -11,6 +11,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isFlowBranch } from './flow-branch.ts';
 import {
   type ChangedFile,
   parseStandardPaths,
@@ -134,6 +135,8 @@ interface ListedPr {
   isDraft: boolean;
   autoMergeRequest: unknown;
   statusCheckRollup: unknown;
+  /** 只有调用方要按不强制 CI 放行引擎分支时才向 gh 要这一项。 */
+  headRefName?: string;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -149,6 +152,18 @@ export function allGreen(rollup: unknown): boolean {
     if (c.__typename === 'StatusContext') return c.state === 'SUCCESS';
     return false;
   });
+}
+
+/**
+ * 能不能当「检查过了」：默认就是 allGreen（空的不算绿）。
+ * 只有「不强制 CI」并且是引擎任务分支，才允许一项检查都没有。别的 PR、强制 CI 的仓不放宽。
+ */
+export function armable(
+  rollup: unknown,
+  opts?: { ciPolicy?: 'force' | 'off'; engineBranch?: boolean },
+): boolean {
+  if (opts?.ciPolicy === 'off' && opts.engineBranch === true) return true;
+  return allGreen(rollup);
 }
 
 function listedOf(raw: unknown): ListedPr[] {
@@ -169,7 +184,9 @@ function listedOf(raw: unknown): ListedPr[] {
  * 当前 gh 账号开的、开着的 PR 里：不是草稿、检查全绿、没挂自动合并、没碰改标准路径的。
  * gh 没跑成、输出认不出、某个候选的文件没查成，都抛错（钩子报「没查成」，不冒充「没有」）。
  */
-export function idlePrs(gh: Gh, lists: PathLists): IdlePr[] {
+export function idlePrs(gh: Gh, lists: PathLists, opts?: { ciPolicy?: 'force' | 'off' }): IdlePr[] {
+  // 默认不向 gh 多要字段：开会话钩子的测试钉着这串参数。只有显式不强制才加分支名。
+  const off = opts?.ciPolicy === 'off';
   const r = gh([
     'pr',
     'list',
@@ -180,7 +197,9 @@ export function idlePrs(gh: Gh, lists: PathLists): IdlePr[] {
     '--limit',
     '50',
     '--json',
-    'number,title,isDraft,autoMergeRequest,statusCheckRollup',
+    off
+      ? 'number,title,isDraft,autoMergeRequest,statusCheckRollup,headRefName'
+      : 'number,title,isDraft,autoMergeRequest,statusCheckRollup',
   ]);
   if (r.code !== 0) throw new Error(`gh pr list ${reasonOf(r)}`);
   let raw: unknown;
@@ -189,9 +208,16 @@ export function idlePrs(gh: Gh, lists: PathLists): IdlePr[] {
   } catch {
     throw new Error(`gh pr list 的输出认不出：${r.stdout.trim().slice(0, 80)}`);
   }
-  const candidates = listedOf(raw).filter(
-    (p) => !p.isDraft && p.autoMergeRequest == null && allGreen(p.statusCheckRollup),
-  );
+  const candidates = listedOf(raw).filter((p) => {
+    if (p.isDraft || p.autoMergeRequest != null) return false;
+    const engine = off && typeof p.headRefName === 'string' && isFlowBranch(p.headRefName);
+    return armable(
+      p.statusCheckRollup,
+      opts?.ciPolicy === undefined
+        ? { engineBranch: engine }
+        : { ciPolicy: opts.ciPolicy, engineBranch: engine },
+    );
+  });
   return candidates
     .filter((p) => judgePaths(prFiles(gh, p.number), lists).standard.length === 0)
     .map((p) => ({ number: p.number, title: p.title }));

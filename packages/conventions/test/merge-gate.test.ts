@@ -150,6 +150,28 @@ describe('合并闸：#555-2 引擎任务工作流开的 PR，合前一次冷调
     expect(r.lines[0]).toContain('引擎任务工作流开的 PR');
   });
 
+  it('不强制 CI 的引擎 PR：不看冷验收，也不读提交状态', async () => {
+    const w = flowWorld();
+    const r = await gatePr(80, { ...deps(w), ciPolicy: 'off' });
+    expect(r.state).toBe('success');
+    expect(r.lines).toEqual(['能合：这个仓不强制 CI，引擎任务 PR 不看冷验收。']);
+    expect(w.statusReads).toBe(0);
+  });
+
+  it('没传模式的引擎 PR 仍要冷验收：不因为漏传把强制的仓放开', async () => {
+    const r = await gatePr(80, deps(flowWorld()));
+    expect(r.state).toBe('failure');
+    expect(r.lines[0]).toMatch(/^还没验：/);
+  });
+
+  it('不强制 CI 的人手 PR：仍是「不是引擎任务 PR」，不套用引擎那句', async () => {
+    const w = world();
+    const r = await gatePr(80, { ...deps(w), ciPolicy: 'off' });
+    expect(r.state).toBe('success');
+    expect(r.lines).toEqual(['能合：不是引擎任务 PR，只看 CI。']);
+    expect(w.statusReads).toBe(0);
+  });
+
   it('引擎的 PR、冷调用通过 → 通过', async () => {
     const r = await gatePr(80, deps(flowWorld({ statuses: CV_OK })));
     expect(r.state).toBe('success');

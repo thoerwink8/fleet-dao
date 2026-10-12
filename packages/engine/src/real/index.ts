@@ -22,6 +22,7 @@ import {
   createDb,
   type Db,
   finishScheduleRun,
+  listIntakeRepos,
   readEngineMasterRow,
   readSubagentHint,
   recordRouteProbeDone,
@@ -45,7 +46,7 @@ import { probeOrgNow } from '../jobs/route-probe.ts';
 import { routeProbeLock } from '../jobs/route-probe-now.ts';
 import type { InterruptedScheduleClose } from '../jobs/timers.ts';
 import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
-import type { EnginePorts } from '../ports.ts';
+import { type EnginePorts, PortError } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
 import { configFromEnv } from '../worker.ts';
 import { canaryJob } from './canary.ts';
@@ -897,6 +898,21 @@ export function realPortsFromEnv(
   const runsDir = join(config.stateDir, 'runs');
   const tasks: EngineTasks = {
     ...createTaskActivities({ gh, trees, exec, log: taskLog }),
+    async readCiPolicy(input) {
+      if (input?.schemaVersion !== 1 || !input.repo?.owner || !input.repo?.name) {
+        throw new PortError('INVALID_INPUT', '读 CI 模式：要有仓的 owner 和 name', { retryable: false });
+      }
+      const rows = await listIntakeRepos(db);
+      const owner = input.repo.owner.toLowerCase();
+      const name = input.repo.name.toLowerCase();
+      const row = rows.find((r) => r.owner.toLowerCase() === owner && r.name.toLowerCase() === name);
+      if (!row) {
+        throw new PortError('REPO_NOT_FOUND', `没有受管仓 ${input.repo.owner}/${input.repo.name}`, {
+          retryable: false,
+        });
+      }
+      return { mode: row.ciPolicy };
+    },
     runSegment: createRunSegment({
       tree: { gh, trees, exec, tmpDir: join(config.stateDir, 'tmp') },
       spawner: segmentSpawner,

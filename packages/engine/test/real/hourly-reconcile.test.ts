@@ -213,6 +213,9 @@ function ghWith(over: Partial<HourlyReconcileWiring['gh']> = {}): HourlyReconcil
     readRepoFile: async () => {
       throw new Error('用例里不该读主线上文件');
     },
+    mergePr: async () => {
+      throw new Error('用例里不该直接合并');
+    },
     deps: new Proxy({} as HourlyReconcileWiring['gh']['deps'], {
       get: (_t, prop) => {
         // 主线红每轮都读 ci.yml。这一页是空的：没有要推的，也不算没查成。别的请求照旧不该发生。

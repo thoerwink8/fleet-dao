@@ -23,6 +23,7 @@ import {
   TaskActionRequest,
   UpdateCredentialsRequest,
   UpdateModelRouteRequest,
+  UpdateRepoCiPolicyRequest,
   UpdateRepoDispatchRequest,
   UpdateRouteEffortRequest,
   UpdateSettingRequest,
@@ -261,6 +262,12 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     async updateRepoDispatch(repoId, body) {
       return send('PUT', apiUrl(R.updateRepoDispatch.path, { repoId }), R.updateRepoDispatch.response, {
         body: UpdateRepoDispatchRequest.parse(body),
+      });
+    },
+    repoCiPolicy: () => send('GET', apiUrl(R.repoCiPolicy.path), R.repoCiPolicy.response),
+    async updateRepoCiPolicy(repoId, body) {
+      return send('PUT', apiUrl(R.updateRepoCiPolicy.path, { repoId }), R.updateRepoCiPolicy.response, {
+        body: UpdateRepoCiPolicyRequest.parse(body),
       });
     },
     groomStatus: (repoId) => send('GET', apiUrl(R.groomStatus.path, { repoId }), R.groomStatus.response),

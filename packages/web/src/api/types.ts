@@ -63,6 +63,7 @@ import type {
   ReleasedCommitsSchema,
   ReleaseRequestResponse,
   RemovePurposeModelRequest,
+  RepoCiPolicyResponse,
   RepoDispatchResponse,
   RepoSchema,
   RouteEffortSchema,
@@ -96,6 +97,8 @@ import type {
   UpdateCredentialsRequest,
   UpdateModelRouteRequest,
   UpdateModelRouteResponse,
+  UpdateRepoCiPolicyRequest,
+  UpdateRepoCiPolicyResponse,
   UpdateRepoDispatchRequest,
   UpdateRepoDispatchResponse,
   UpdateRouteEffortRequest,
@@ -129,6 +132,10 @@ export type Repo = z.infer<typeof RepoSchema>;
 export type RepoDispatch = z.infer<typeof RepoDispatchResponse>['repos'][number];
 export type UpdateRepoDispatchBody = z.input<typeof UpdateRepoDispatchRequest>;
 export type UpdatedRepoDispatch = z.infer<typeof UpdateRepoDispatchResponse>;
+/** 设置页「仓库」一节：每个项目现在强制 CI 还是不强制，以及最近几次切换。 */
+export type RepoCiPolicy = z.infer<typeof RepoCiPolicyResponse>['repos'][number];
+export type UpdateRepoCiPolicyBody = z.input<typeof UpdateRepoCiPolicyRequest>;
+export type UpdatedRepoCiPolicy = z.infer<typeof UpdateRepoCiPolicyResponse>;
 /** 一个仓的「指挥官整理待办」：今日剩余次数、最近几次、有没有一次在做。 */
 export type GroomStatus = z.infer<typeof GroomStatusResponse>;
 export type GroomNowBody = z.input<typeof GroomNowRequest>;

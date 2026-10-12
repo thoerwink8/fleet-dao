@@ -51,8 +51,16 @@ export const repos = pgTable(
      * 开着，引擎自己按依据挑单（开单时间不再比这个时刻，#1336）。
      */
     autoDispatchSince: timestamp('auto_dispatch_since', tz),
+    /**
+     * 合并时要不要等 CI、做冷验收。force = 强制（默认，已有的仓也是这个）；off = 不强制，
+     * 引擎开完 PR 直接合并。随时能改，工作流每次走到等 CI 之前现读，不在拉单时定死。
+     */
+    ciPolicy: text('ci_policy').notNull().default('force'),
   },
-  (t) => [unique('repos_owner_name_unique').on(t.owner, t.name)],
+  (t) => [
+    unique('repos_owner_name_unique').on(t.owner, t.name),
+    check('repos_ci_policy_known', sql`${t.ciPolicy} in ('force', 'off')`),
+  ],
 );
 
 /** 需求：一张 GitHub issue 一行。 */

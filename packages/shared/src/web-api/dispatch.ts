@@ -30,6 +30,39 @@ export const UpdateRepoDispatchRequest = z.object({
 /** changed=false：本来就是要的状态，没改、没记操作记录（开着再点开不重设时刻）。 */
 export const UpdateRepoDispatchResponse = RepoDispatchSchema.extend({ changed: z.boolean() });
 
+// —— 每个仓的 CI 模式（和「让 AI 接活」放在同一页）：force 强制，off 不强制。默认 force。 ——
+
+/** 操作记录的名字；target 是 repo:<仓的编号>。before/after 都是 { ciPolicy }。 */
+export const CI_POLICY_SET = 'repo.ci_policy.set';
+
+export const CiPolicySchema = z.enum(['force', 'off']);
+
+/** 一次切换：谁、什么时候、从哪种到哪种。 */
+export const CiPolicySwitchSchema = z.object({
+  at: Time,
+  actor: z.string(),
+  from: CiPolicySchema,
+  to: CiPolicySchema,
+});
+
+/** 一个项目一行：现在的模式，和最近几次切换（新的在前）。 */
+export const RepoCiPolicySchema = z.object({
+  repoId: Id,
+  owner: z.string(),
+  name: z.string(),
+  mode: CiPolicySchema,
+  recent: z.array(CiPolicySwitchSchema).max(5),
+});
+export const RepoCiPolicyResponse = z.object({ repos: z.array(RepoCiPolicySchema) });
+
+export const UpdateRepoCiPolicyRequest = z.object({
+  mode: CiPolicySchema,
+  reason: z.string().max(500).optional(),
+});
+
+/** changed=false：本来就是这个模式，没改、没记。 */
+export const UpdateRepoCiPolicyResponse = RepoCiPolicySchema.extend({ changed: z.boolean() });
+
 // —— 临时指挥官整理待办（母单 #1335 第 3 片，#1338）：设置页仓库一节的「让指挥官整理」按钮要的两个口 ——
 // 点一下 = 记一条操作记录 groom.request（和命令行 fleet-api groom、引擎拉单一轮自己叫是同一个入口、同一把锁），引擎接手整理。
 // 一次整理走到哪不另存，读的时候从操作记录现算（../groom.ts 的 foldGroomRequests）。

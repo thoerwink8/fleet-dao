@@ -46,6 +46,7 @@ import type {
   ReleaseRequestResult,
   RemovePurposeModelBody,
   Repo,
+  RepoCiPolicy,
   RepoDispatch,
   RouteProbeHistory,
   RouteProbeNowBody,
@@ -71,9 +72,11 @@ import type {
   TaskRoutePin,
   UpdateCredentialsBody,
   UpdatedModelRoute,
+  UpdatedRepoCiPolicy,
   UpdatedRepoDispatch,
   UpdatedRouteEffort,
   UpdateModelRouteBody,
+  UpdateRepoCiPolicyBody,
   UpdateRepoDispatchBody,
   UpdateRouteEffortBody,
   UpdateSettingBody,
@@ -104,6 +107,10 @@ export interface FleetApi {
   repoDispatch(): Promise<{ repos: RepoDispatch[] }>;
   /** 开、关一个项目的「让 AI 接活」（写操作记录）；本来就是那个状态时 changed=false。没有这个项目 404。 */
   updateRepoDispatch(repoId: string, body: UpdateRepoDispatchBody): Promise<UpdatedRepoDispatch>;
+  /** 每个项目现在是强制 CI 还是不强制，以及最近几次切换（设置页「仓库」一节）。 */
+  repoCiPolicy(): Promise<{ repos: RepoCiPolicy[] }>;
+  /** 切换一个项目的 CI 模式（写操作记录）；本来就是这个模式时 changed=false。没有这个项目 404。 */
+  updateRepoCiPolicy(repoId: string, body: UpdateRepoCiPolicyBody): Promise<UpdatedRepoCiPolicy>;
   /** 这个仓的「指挥官整理待办」：今日剩余、最近几次、有没有一次在排队或在做。没有这个项目 404。 */
   groomStatus(repoId: string): Promise<GroomStatus>;
   /**
@@ -243,6 +250,7 @@ export const keys = {
   credentials: ['credentials'] as const,
   repos: ['repos'] as const,
   repoDispatch: ['repo-dispatch'] as const,
+  repoCiPolicy: ['repo-ci-policy'] as const,
   groomStatus: (repoId: string) => ['groom-status', repoId] as const,
   board: (repoId: string) => ['board', repoId] as const,
   task: (taskId: string) => ['task', taskId] as const,
@@ -331,6 +339,19 @@ export function useRepoDispatch() {
   return useQuery({
     queryKey: keys.repoDispatch,
     queryFn: () => api.repoDispatch(),
+    refetchInterval: 30_000,
+  });
+}
+
+/**
+ * 每个项目的 CI 模式。命令行和别的会话也能改、没有单独推送，所以每 30 秒重拉；
+ * 点切换的那一下自己重拉（useUpdateRepoCiPolicy）。
+ */
+export function useRepoCiPolicy() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.repoCiPolicy,
+    queryFn: () => api.repoCiPolicy(),
     refetchInterval: 30_000,
   });
 }
@@ -1022,6 +1043,20 @@ export function useUpdateRepoDispatch() {
       api.updateRepoDispatch(repoId, body),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: keys.repoDispatch });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/** 切换一个项目的 CI 模式：等后端写完（模式和操作记录同一事务）再重拉。 */
+export function useUpdateRepoCiPolicy() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ repoId, body }: { repoId: string; body: UpdateRepoCiPolicyBody }) =>
+      api.updateRepoCiPolicy(repoId, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.repoCiPolicy });
       qc.invalidateQueries({ queryKey: ['audit'] });
     },
   });

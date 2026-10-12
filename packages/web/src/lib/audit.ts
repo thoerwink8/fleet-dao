@@ -181,6 +181,7 @@ export const auditFieldLabel: Record<string, string> = {
   answer: '回答',
   askId: '追问',
   autoDispatchSince: '「让 AI 接活」',
+  ciPolicy: 'CI 模式',
   channelId: '渠道',
   effort: '思考档位',
   enabled: '开关',

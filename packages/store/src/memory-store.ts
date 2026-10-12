@@ -6,6 +6,7 @@ import {
   type Ban,
   type Channel,
   type ChannelStateRecord,
+  ciPolicyOf,
   type Model,
   type Pool,
   type ProgressKind,
@@ -79,8 +80,12 @@ import {
   autoDispatchUnchanged,
   boardCutoffMs,
   canStopTask,
+  ciPolicyAudit,
+  ciPolicyChanged,
+  ciPolicyUnchanged,
   emptyTaskGroupCounts,
   isAutoDispatchUnchanged,
+  isCiPolicyUnchanged,
   isRequestUnchanged,
   keepOnBoard,
   lastTaskChangeAt,
@@ -140,8 +145,11 @@ interface IdempotencyRecord {
   result?: unknown;
 }
 
-/** repos 表的一行：多一个自动派活开关（打开的时刻，不填 = 关着）。列仓的接口不带这一样。 */
-export type RepoRecord = Repo & { autoDispatchSince?: string | undefined };
+/** repos 表的一行：多一个自动派活开关（打开的时刻，不填 = 关着）和 CI 模式（不填 = 强制）。列仓的接口不带这两样。 */
+export type RepoRecord = Repo & {
+  autoDispatchSince?: string | undefined;
+  ciPolicy?: 'force' | 'off' | undefined;
+};
 
 /** 和库里的表一一对应（去掉了库自己算的列）。 */
 /** 内存里的人：多一个可选的创建时刻（库里 users.created_at），只用来给 listUsers 排序，读出去时不带。 */
@@ -223,7 +231,7 @@ export interface MemoryStoreOptions {
 /** 列环境不带快照本体。 */
 const summaryOf = ({ snapshot: _snapshot, ...summary }: NodeReportRecord) => summary;
 
-const repoOnly = ({ autoDispatchSince: _switch, ...repo }: RepoRecord): Repo => repo;
+const repoOnly = ({ autoDispatchSince: _switch, ciPolicy: _policy, ...repo }: RepoRecord): Repo => repo;
 
 /** 给出去的是副本：调用方改了不影响库里的。对象版本按对象排（和库版一样）。 */
 const copyDelivery = (e: GitHubDelivery): GitHubDelivery => ({
@@ -921,6 +929,8 @@ export function createMemoryStore(
         ? {
             ...repoOnly(repo),
             autoDispatchSince: repo.autoDispatchSince ?? null,
+            // 老夹具没这一列：按库的默认，强制。认不出的坏值抛错，不当成不强制。
+            ciPolicy: repo.ciPolicy === undefined ? 'force' : ciPolicyOf(repo.ciPolicy),
           }
         : null;
     },
@@ -1075,6 +1085,16 @@ export function createMemoryStore(
       checkAudit(full);
       repo.autoDispatchSince = after ?? undefined;
       return autoDispatchChanged(after, audit(full));
+    },
+    async setCiPolicy({ repoId, mode }, entry) {
+      const repo = data.repos.find((r) => r.id === repoId);
+      if (!repo) return 'not_found';
+      const before = repo.ciPolicy === undefined ? 'force' : ciPolicyOf(repo.ciPolicy);
+      if (isCiPolicyUnchanged(before, mode)) return ciPolicyUnchanged(before);
+      const full = ciPolicyAudit(entry, before, mode);
+      checkAudit(full);
+      repo.ciPolicy = mode;
+      return ciPolicyChanged(mode, audit(full));
     },
   };
 }

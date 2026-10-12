@@ -6,6 +6,7 @@ import type {
   Ban,
   Channel,
   ChannelStateRecord,
+  CiPolicy,
   DecisionAnswer,
   DecisionOption,
   HistoryResponse,
@@ -545,6 +546,17 @@ export interface GitHubStore {
 /** 受管的仓，带「让 AI 接活」开关：autoDispatchSince = 打开的时刻，null = 关着（引擎拉单不派）。 */
 export interface IntakeRepo extends Repo {
   autoDispatchSince: string | null;
+  /** 合并方式。库的默认是强制；读不出来的坏值由实现抛错，不当成不强制。 */
+  ciPolicy: CiPolicy;
+}
+
+/** 改 CI 模式的结果（setCiPolicy）。 */
+export interface CiPolicyChange {
+  /** false = 本来就是这个模式：什么都没改，也没记操作记录。 */
+  changed: boolean;
+  ciPolicy: CiPolicy;
+  /** 改了才有：同一事务里记下的那条操作记录的编号。 */
+  auditId?: string | undefined;
 }
 
 /** 改「让 AI 接活」开关的结果（setAutoDispatch）。 */
@@ -633,6 +645,14 @@ export interface IntakeStore {
     input: { repoId: string; on: boolean },
     audit: Omit<NewAuditEntry, 'before' | 'after'>,
   ): Promise<AutoDispatchChange | 'not_found'>;
+  /**
+   * 受管仓的 CI 模式（repos.ci_policy）。force 强制、off 不强制。已经是要的模式就不改、不记（changed=false）。
+   * 改了和操作记录同一事务：先锁住这一行，before/after 由这里按库里的值填。没这个仓（含编号不是 uuid）：not_found。
+   */
+  setCiPolicy(
+    input: { repoId: string; mode: CiPolicy },
+    audit: Omit<NewAuditEntry, 'before' | 'after'>,
+  ): Promise<CiPolicyChange | 'not_found'>;
 }
 
 /** 别的环境推来的快照（node_reports 表一行），不带快照本体：列环境用。 */

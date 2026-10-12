@@ -29,6 +29,8 @@ describe('合前验收（cold-verify）状态', () => {
 
   it('只有引擎任务 PR 要验；要验的：通过不报，没有、还在跑、没过各报一句', () => {
     expect(coldVerifyNeed(false)).toEqual({ needed: false, why: '' });
+    expect(coldVerifyNeed(true, 'off')).toEqual({ needed: false, why: '' });
+    expect(coldVerifyNeed(false, 'off')).toEqual({ needed: false, why: '' });
     const need = coldVerifyNeed(true);
     expect(need.needed).toBe(true);
     expect(checkColdVerify(HEAD, null, coldVerifyNeed(false))).toEqual([]);

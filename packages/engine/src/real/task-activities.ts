@@ -29,6 +29,8 @@ import type {
   CheckGuardedInput,
   DeliveryRead,
   GuardedPaths,
+  MergeNowInput,
+  MergeNowResult,
   MergeWait,
   ReadDeliveryInput,
   ReadTaskBriefInput,
@@ -71,7 +73,10 @@ export interface TaskActivitiesDeps {
 }
 
 type TaskActivities = Required<
-  Pick<EngineTasks, 'readTaskBrief' | 'readDelivery' | 'checkGuarded' | 'armAutoMerge' | 'waitMerged'>
+  Pick<
+    EngineTasks,
+    'readTaskBrief' | 'readDelivery' | 'checkGuarded' | 'armAutoMerge' | 'waitMerged' | 'mergeNow'
+  >
 >;
 
 const refOf = (repo: { owner: string; name: string }): RepoRef => ({ owner: repo.owner, name: repo.name });
@@ -280,6 +285,60 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           why: `GitHub 说 PR 已经满足合并条件，直接合被拒（${merged.reason}）：${merged.detail}`,
         };
       }
+    },
+
+    async mergeNow(input: MergeNowInput, ctx: PortContext): Promise<MergeNowResult> {
+      const repo = refOf(input.repo);
+      const { prNumber, expectedHead } = input;
+      const pull = await mapped(() => gh.claims.readPull(repo, prNumber));
+      if (pull.merged) {
+        const booked = await bookMerge(repo, prNumber, expectedHead, ctx);
+        if (booked.otherHead !== undefined)
+          return { merged: false, reason: 'other', detail: booked.otherHead };
+        return {
+          merged: true,
+          ...(booked.mergeCommit === undefined ? {} : { mergeCommit: booked.mergeCommit }),
+        };
+      }
+      if (pull.state !== 'open') {
+        return { merged: false, reason: 'closed', detail: `PR #${prNumber} 已经关了` };
+      }
+      if (pull.headSha !== expectedHead) {
+        return {
+          merged: false,
+          reason: 'head_moved',
+          detail: `PR #${prNumber} 的头是 ${short(pull.headSha)}，不是引擎推上去的 ${short(expectedHead)}`,
+          headMoved: pull.headSha,
+        };
+      }
+      // 不核 CI。头、冲突、落后主线、还开着，mergePr 仍核。分支保护拒绝会抛，不装成合过了。
+      const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead, requireCi: false }, ctx));
+      if (merged.merged) return { merged: true, mergeCommit: merged.mergeCommit };
+      if (merged.reason === 'behind_main') {
+        const synced = await syncBehindMain(
+          repo,
+          prNumber,
+          expectedHead,
+          input.syncedBehind ?? 0,
+          merged.detail,
+          ctx,
+        );
+        if (synced.headMoved !== undefined) {
+          return {
+            merged: false,
+            reason: 'head_moved',
+            detail: synced.why ?? merged.detail,
+            headMoved: synced.headMoved,
+            ...(synced.syncedMain === true ? { syncedMain: true } : {}),
+          };
+        }
+        return { merged: false, reason: 'behind_main', detail: synced.why ?? merged.detail };
+      }
+      if (merged.reason === 'conflict') return { merged: false, reason: 'conflict', detail: merged.detail };
+      if (merged.reason === 'not_open') return { merged: false, reason: 'closed', detail: merged.detail };
+      if (merged.reason === 'head_moved')
+        return { merged: false, reason: 'head_moved', detail: merged.detail };
+      return { merged: false, reason: 'other', detail: `${merged.reason}：${merged.detail}` };
     },
 
     async waitMerged(input: WaitMergedInput, ctx: PortContext): Promise<MergeWait> {

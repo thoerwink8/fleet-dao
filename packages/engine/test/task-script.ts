@@ -11,7 +11,10 @@ import type {
   ColdVerifyResult,
   DeliveryRead,
   GuardedPaths,
+  MergeNowInput,
+  MergeNowResult,
   MergeWait,
+  ReadCiPolicyResult,
   ReadDeliveryInput,
   RunSegmentInput,
   RunSegmentResult,
@@ -55,6 +58,9 @@ export interface Script {
   guarded: (n: number) => GuardedPaths;
   arm: (n: number, input: ArmAutoMergeInput) => ArmAutoMergeResult;
   merged: (n: number) => MergeWait;
+  /** 默认强制。不进 calls.order。 */
+  ciPolicy: () => ReadCiPolicyResult;
+  mergeNow: (n: number, input: MergeNowInput) => MergeNowResult;
 }
 
 export interface Calls {
@@ -69,6 +75,10 @@ export interface Calls {
   /** 挂自动合并被调时收到的入参。 */
   armInputs: ArmAutoMergeInput[];
   merged: number;
+  /** 读 CI 模式的次数。不进 order。 */
+  ciPolicy: number;
+  /** 直接合并的次数。不进 order。 */
+  merge: number;
 }
 
 export const OK_SEGMENT: RunSegmentResult = { ok: true, runId: 'run-1', answer: '已提交' };
@@ -85,6 +95,8 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     arm: 0,
     armInputs: [],
     merged: 0,
+    ciPolicy: 0,
+    merge: 0,
   };
   const script: Script = {
     brief: () => ({ ok: true, brief: goodBrief() }),
@@ -98,6 +110,8 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     guarded: () => ({ standards: [] }),
     arm: () => ({ armed: true, merged: false }),
     merged: () => ({ state: 'merged', mergeCommit: 'abc1234567890' }),
+    ciPolicy: () => ({ mode: 'force' }),
+    mergeNow: () => ({ merged: true, mergeCommit: 'abc1234567890' }),
     ...over,
   };
   const tasks: EngineTasks = {
@@ -142,6 +156,14 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
       calls.order.push('merged');
       calls.merged += 1;
       return script.merged(calls.merged);
+    },
+    async readCiPolicy() {
+      calls.ciPolicy += 1;
+      return script.ciPolicy();
+    },
+    async mergeNow(input) {
+      calls.merge += 1;
+      return script.mergeNow(calls.merge, input);
     },
   };
   return { tasks, calls };
