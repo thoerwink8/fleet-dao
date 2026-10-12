@@ -60,14 +60,15 @@ export type Positions = Map<string, { x: number; y: number }>;
  * 默认的网络单纯形分层在 100 张单上要 3 秒，结果却一模一样。
  * 连线由 React Flow 自己画，ELK 算出的线型不用。
  */
-function options(direction: 'RIGHT' | 'LEFT'): Record<string, string> {
+function options(direction: 'RIGHT' | 'LEFT', scale: number): Record<string, string> {
+  // 间距和节点尺寸乘同一个根字号倍数（model.ts 的 Graph.scale）：整张图等比放大，疏密不变
   return {
     'elk.algorithm': 'layered',
     'elk.direction': direction,
     'elk.edgeRouting': 'SPLINES',
     'elk.layered.layering.strategy': 'LONGEST_PATH_SOURCE',
-    'elk.layered.spacing.nodeNodeBetweenLayers': '84',
-    'elk.spacing.nodeNode': '20',
+    'elk.layered.spacing.nodeNodeBetweenLayers': String(Math.round(84 * scale)),
+    'elk.spacing.nodeNode': String(Math.round(20 * scale)),
     'elk.layered.nodePlacement.strategy': 'BRANDES_KOEPF',
     'elk.layered.nodePlacement.bk.fixedAlignment': 'BALANCED',
     // 保持数据里的先后（单子按「最该看的在前」排好了），不让算法为了少交叉而打乱。
@@ -81,7 +82,7 @@ async function layoutSide(elk: ELK, graph: Graph, rootId: string, side: Side): P
   ids.add(rootId);
   const input: ElkNode = {
     id: `root-${side}`,
-    layoutOptions: options(side === 'right' ? 'RIGHT' : 'LEFT'),
+    layoutOptions: options(side === 'right' ? 'RIGHT' : 'LEFT', graph.scale),
     children: graph.nodes
       .filter((n) => ids.has(n.id))
       .map((n) => ({ id: n.id, width: n.width, height: n.height })),

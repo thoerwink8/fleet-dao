@@ -58,6 +58,7 @@ import {
 import { formatClock, TIME } from '../lib/format';
 import { useMediaQuery, useNow } from '../lib/hooks';
 import { filterActive, filterRows, type ListFilter, NO_FILTER, WINDOW_MIN_ROWS } from '../lib/list-window';
+import { readRootScale, scaledPx } from '../lib/root-scale';
 import { modelKind } from '../lib/route-kinds';
 import {
   countByVerdict,
@@ -575,10 +576,12 @@ function ModelPriority({
   const why =
     edit.disabledWhy ?? (filtering ? '正在筛选，只显示了一部分：清掉搜索和「只看已开启」再调先后' : null);
   // 不超过 50 个：按内容高度、随页面滚（不设内部滚动）；超过 50 个才开窗口（定高行、只画看得见的）
+  // 行高、窗口高是 16px 根字号下的设计值，乘根字号倍数（桌面 125%，#1937）才和 rem 写的行内容对得上
+  const scale = readRootScale();
   const viewport = long
     ? mobile
-      ? { height: LIST_HEIGHT, rowHeight: MOBILE_ROW_HEIGHT }
-      : { height: ORDER_LIST_HEIGHT, rowHeight: ORDER_ROW_HEIGHT }
+      ? { height: scaledPx(LIST_HEIGHT, scale), rowHeight: scaledPx(MOBILE_ROW_HEIGHT, scale) }
+      : { height: scaledPx(ORDER_LIST_HEIGHT, scale), rowHeight: scaledPx(ORDER_ROW_HEIGHT, scale) }
     : undefined;
   return (
     <Section

@@ -141,7 +141,8 @@ describe('外壳按屏宽重排（#1801）', () => {
     }
   });
 
-  test('768 宽侧栏默认收成图标栏，1366 宽默认展开，没有底部导航', async () => {
+  // 默认展开的门槛从 1280 挪到 1440（#1937：桌面根字号放大到 125% 后，1366 上展开的侧栏把正文挤到 1000 上下）
+  test('768、1366 宽侧栏默认收成图标栏，1440 宽默认展开，没有底部导航', async () => {
     viewport(768);
     const small = renderShell();
     await settled();
@@ -149,6 +150,11 @@ describe('外壳按屏宽重排（#1801）', () => {
     expect(screen.queryByRole('navigation', { name: '底部导航' })).toBeNull();
     small.unmount();
     viewport(1366);
+    const laptop = renderShell();
+    await settled();
+    expect(document.querySelector('aside')?.className).toContain('w-sidebar-collapsed');
+    laptop.unmount();
+    viewport(1440);
     renderShell();
     await settled();
     expect(document.querySelector('aside')?.className.split(' ')).toContain('w-sidebar');

@@ -110,11 +110,12 @@ describe('组件令牌和密度（规范 2.7）', () => {
       expect(tokens.get(name), name).toEqual(new Set(['spacing']));
     }
   });
-  test('标准 32/40/16/24/12，紧凑 28/32/12/16/8，紧凑只在桌面（48rem）起生效', () => {
+  test('标准 32/40/16/24/12，紧凑 28/32/12/16/8（16px 根字号下，写成 rem 跟根字号放大，#1937），紧凑只在桌面（48rem）起生效', () => {
     const std = block(':root,\n[data-density="comfortable"]');
     const compact = block('[data-density="compact"]');
-    expect(VARS.map((v) => std[v])).toEqual(['32px', '40px', '16px', '24px', '12px']);
-    expect(VARS.map((v) => compact[v])).toEqual(['28px', '32px', '12px', '16px', '8px']);
+    const px = (v: string | undefined) => (v?.endsWith('rem') ? Number.parseFloat(v) * 16 : Number.NaN);
+    expect(VARS.map((v) => px(std[v]))).toEqual([32, 40, 16, 24, 12]);
+    expect(VARS.map((v) => px(compact[v]))).toEqual([28, 32, 12, 16, 8]);
     expect(css).toMatch(/@media \(width >= 48rem\) \{\s*\[data-density="compact"\]/);
   });
   test('紧凑不改字号', () => {
@@ -163,6 +164,33 @@ describe('字号两组值：手机在 :root，桌面（48rem 起）参照苹果 
     expect(css).toContain('--text-meta--line-height: 1rem;');
     expect(css).toContain('--text-canvas: 0.6875rem;');
     expect(desktop.meta).toBeUndefined();
+  });
+});
+
+describe('根字号：桌面放大到 125%，手机不变（#1937）', () => {
+  const css = readFileSync(join(srcDir, 'app.css'), 'utf8');
+
+  test('html 的字号按 --root-scale 放大；:root 是 1，48rem 起 1.25', () => {
+    expect(css).toMatch(/html \{\s*font-size: calc\(100% \* var\(--root-scale\)\);/);
+    expect(css).toMatch(/:root \{\s*--root-scale: 1;\s*\}/);
+    expect(css).toMatch(/@media \(width >= 48rem\) \{\s*:root \{\s*--root-scale: 1\.25;/);
+  });
+  test('壳和密度的尺寸写 rem，不写 px（写 px 就不跟根字号放大）', () => {
+    for (const name of [
+      'spacing-topbar',
+      'spacing-sidebar',
+      'spacing-sidebar-collapsed',
+      'spacing-drawer',
+      'container-cockpit',
+    ]) {
+      expect(css, name).toMatch(new RegExp(`--${name}:\\s*[\\d.]+rem;`));
+    }
+    for (const name of ['control-h', 'row-h', 'row-tall-h', 'section-p', 'section-gap', 'stack-gap']) {
+      expect(css, name).not.toMatch(new RegExp(`--${name}:\\s*[\\d.]+px;`));
+    }
+  });
+  test('【故意造出的失败】写成 px 的顶栏高会被认出来', () => {
+    expect('--spacing-topbar: 52px;').not.toMatch(/--spacing-topbar:\s*[\d.]+rem;/);
   });
 });
 
