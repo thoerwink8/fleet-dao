@@ -289,6 +289,9 @@ describe('页头和操作记录不撑出屏幕', () => {
   test('操作记录里「之前 / 之后」的 pre 自动换行', async () => {
     const api = createMockApi({ live: false });
     renderApp(<AuditPage />, { route: '/audit', api });
+    // #1940：改动明细改成点行尾展开钮才画（不再每行常驻一个 details）；先把有改动的行都展开，再量 pre
+    const expands = await screen.findAllByRole('button', { name: '看改了什么' });
+    for (const b of expands) fireEvent.click(b);
     await waitFor(() => expect(document.querySelectorAll('details').length).toBeGreaterThan(0));
     const pres = Array.from(document.querySelectorAll('details pre'));
     expect(pres.length).toBeGreaterThan(0);
