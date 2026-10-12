@@ -24,9 +24,12 @@ export interface SegmentPromptInput {
   subagentHint?: boolean;
 }
 
-/** 提示词里那一句子代理的提示（短）：查代码派 Haiku 档的侦察，自审派 Haiku 档的自审，Opus 档只在疑难时派。 */
+/**
+ * 提示词里那一句子代理的提示（短，决定 0087 三个角色）：查代码、初筛 diff 派斥候 Explore（Haiku），设计 Plan（Opus）只在疑难时派，
+ * 写代码的会话自己写、不派工人 general-purpose。名字是 Claude Code 内置的，定义经 --agents 从 agents/subagents/ 压住内置的。
+ */
 export const SUBAGENT_HINT =
-  '- 可以用 Agent 工具派子代理：查代码派 `fleet-scout`，交活前自审 diff 派 `fleet-review-screen`；Opus 档的（`fleet-reviewer`、`fleet-debugger`）只在疑难时派；写代码自己写，不派写代码的子代理。';
+  '- 可以用 Agent 工具派子代理（`subagent_type` 写名字、不传 `model`）：查代码、交活前初筛 diff 派 `Explore`（斥候，Haiku 5.5，只读）；`Plan`（设计，Opus 5.5，只读）只在疑难时派；写代码自己写，不派 `general-purpose`。';
 
 function clip(text: string): string {
   const t = text.trim();

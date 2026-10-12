@@ -156,7 +156,7 @@ export const CODE_TASK_CASES: EvalCase[] = [
     id: 'fixer/format-bytes',
     scenario: 'fixer',
     name: 'format-bytes',
-    agent: 'fleet-fixer',
+    agent: 'general-purpose',
     prompt:
       `${PREAMBLE}任务：\`test/bytes.test.ts\` 里有一条测试是红的。只许改 \`src/bytes.ts\`，不改测试、不碰别的文件。` +
       '改到 `npm test` 全绿为止。',
@@ -173,7 +173,7 @@ export const CODE_TASK_CASES: EvalCase[] = [
     id: 'fixer/slugify',
     scenario: 'fixer',
     name: 'slugify',
-    agent: 'fleet-fixer',
+    agent: 'general-purpose',
     prompt:
       `${PREAMBLE}任务：\`test/slug.test.ts\` 里有几条测试是红的。只许改 \`src/slug.ts\`，不改测试、不碰别的文件。` +
       '改到 `npm test` 全绿为止。',
@@ -187,7 +187,7 @@ export const CODE_TASK_CASES: EvalCase[] = [
     id: 'builder/parse-duration',
     scenario: 'builder',
     name: 'parse-duration',
-    agent: 'fleet-builder',
+    agent: 'general-purpose',
     prompt:
       `${PREAMBLE}任务：在 \`src/duration.ts\` 里加 \`parseDuration(text: string): number\`，和已有的 \`formatDuration\` 反过来：\n` +
       '- 单位：`d`、`h`、`m`、`s`、`ms`，写法是整数加单位，可以多个连着写，如 `1h30m`、`90s`、`500ms`；顺序随意；单位之间可以有空白，首尾空白忽略。\n' +
@@ -208,7 +208,7 @@ export const CODE_TASK_CASES: EvalCase[] = [
     id: 'builder/ttl-cache',
     scenario: 'builder',
     name: 'ttl-cache',
-    agent: 'fleet-builder',
+    agent: 'general-purpose',
     prompt:
       `${PREAMBLE}任务：新建 \`src/ttl-cache.ts\`，导出 \`class TtlCache<K, V>\`（不要用参数属性这类不可擦除的写法）：\n` +
       '- `new TtlCache({ max, ttlMs, now? })`：`now` 是返回毫秒的函数，默认 `Date.now`，测试里用它注入假时钟。`max`、`ttlMs` 不是正整数抛 `RangeError`。\n' +
@@ -227,7 +227,7 @@ export const CODE_TASK_CASES: EvalCase[] = [
     id: 'debugger/week-start-tz',
     scenario: 'debugger',
     name: 'week-start-tz',
-    agent: 'fleet-debugger',
+    agent: 'general-purpose',
     prompt:
       `${PREAMBLE}任务：\`test/week.test.ts\` 里「东京」那条红了，别的绿。找到根因，修在必经的那一步。\n` +
       '前两次有人试过：给东京的用例特判一下时区（会让洛杉矶之类别的时区继续错），没成。不要再打补丁式地修。\n' +
@@ -244,7 +244,7 @@ export const CODE_TASK_CASES: EvalCase[] = [
     id: 'debugger/merge-config',
     scenario: 'debugger',
     name: 'merge-config',
-    agent: 'fleet-debugger',
+    agent: 'general-purpose',
     prompt:
       `${PREAMBLE}任务：\`test/load.test.ts\` 里「上一次的覆盖不会留到下一次」红了。找到根因，修在必经的那一步。\n` +
       '前两次有人试过：每次 `loadConfig` 前把 `DEFAULTS` 重置一份（症状消了，但 `mergeConfig` 本身还在改它收到的对象，别处一调用又会中招），没成。不要再给同一个方案打补丁。\n' +
@@ -262,7 +262,7 @@ export const CODE_TASK_CASES: EvalCase[] = [
     id: 'standard-editor/pr-rounds',
     scenario: 'standard-editor',
     name: 'pr-rounds',
-    agent: 'fleet-standard-editor',
+    agent: 'general-purpose',
     prompt:
       `${PREAMBLE}（这里没有 agents/ 和 decisions，规矩文档是 \`rules/pr-rules.md\`，钉它的测试是 \`test/rules.test.ts\`。）\n` +
       '任务：把「一个 PR 最多 3 轮」改成「最多 2 轮」。规矩文档里所有讲 PR 轮数的地方、和钉它的测试要在同一次里改齐，' +

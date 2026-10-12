@@ -1,8 +1,11 @@
-// 把仓里 .claude/agents/*.md 的子代理定义（frontmatter + 正文）转成 `claude --agents <文件>` 要的 JSON（#1641 第 4 片）。
+// 把仓里 agents/subagents/*.md 的子代理定义（frontmatter + 正文）转成 `claude --agents <文件>` 要的 JSON（#1641 第 4 片）。
 //
 // 改这里之前必须知道：
-// - 为什么要转：法国上引擎经 reclaude 起的会话带 `--setting-sources project`，只认分支上工作树里的那份定义；转成 --agents 以后
-//   同名的压住工作树里的，发哪一版就用哪一版（方案 specs/1641-子代理分档/法国实装.md 第一节第 4 条）。
+// - 只有一份原件（决定 0087）：agents/subagents/ 下恰好三份，名字就是 Claude Code 内置的 Explore（斥候 Haiku）、
+//   general-purpose（工人 Sonnet）、Plan（设计 Opus）。同一份既由 agents-sync 装到每台机器的 ~/.claude/agents/，也由这里转成
+//   --agents 传给引擎的会话；--agents 的优先级高于项目级、用户级，同名条目压住内置的（2026-10-12 本机 2.1.296 实测）。
+// - 为什么要转：法国上引擎经 reclaude 起的会话带 `--setting-sources project`，不读用户级 ~/.claude/agents/；转成 --agents 以后
+//   发哪一版就用哪一版（方案 specs/1641-子代理分档/法国实装.md 第一节第 4 条）。
 // - 去掉三样：isolation（会话已经在任务自己的工作树里，再嵌一层改动就不在交付分支上）、color（CLI 忽略它）、
 //   mcp__ 开头的工具（引擎会话带 --strict-mcp-config，没有 MCP）。
 // - 解析不了、缺 description 或 model、认不出的字段，一律抛错写清哪个文件哪一项：不悄悄跳过，不拿空定义冒充装上了。
@@ -16,7 +19,7 @@ import { fileURLToPath } from 'node:url';
  * 这一版发布目录里的子代理定义：和 PRETOOL_SCRIPT 同一个找法（本文件往上四级是仓根；法国上在
  * /srv/fleet-dao-releases/<提交号>/，归 root、会话改不了）。
  */
-export const SUBAGENTS_DIR = fileURLToPath(new URL('../../../../.claude/agents', import.meta.url));
+export const SUBAGENTS_DIR = fileURLToPath(new URL('../../../../agents/subagents', import.meta.url));
 
 /** --agents JSON 里一个子代理的样子（字段取自官方 sub-agents 文档 CLI 定义那一节）。 */
 export interface SubagentDefinition {

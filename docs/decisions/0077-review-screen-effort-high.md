@@ -2,6 +2,7 @@
 
 - 日期：2026-10-10（北京时间）
 - 谁拍的：创始人要求探查每个子代理的能力并按最佳实践定场景（原话在下面）；按探查数据调哪一处由指挥官定。
+- 现状：已被 0087 替代（`0087-three-subagent-roles.md`）：`fleet-review-screen` 删了，评审初筛归斥候 `Explore`（effort medium）。下面是当时的原文。
 - 状态：采纳。定义和参考页同一个 PR 改（改标准；创始人在对话里已选定）。
 - 关联：`.claude/agents/fleet-review-screen.md`、`agents/skills/commander/references/子代理选模型.md`「档位表」和「本仓的子代理名单」、`specs/1641-子代理分档/能力探查.md`（指挥官另开 PR 写）、单 #1641
 - 取代：无。0034 的三档判据、0035 的级联、0036 的 16 个子代理名单和模型都不变。

@@ -113,7 +113,7 @@ export const REVIEW_CASES: EvalCase[] = [
     id: 'review-screen/queue-change',
     scenario: 'review-screen',
     name: 'queue-change',
-    agent: 'fleet-review-screen',
+    agent: 'Explore',
     prompt:
       `${PREAMBLE}这次改动的交代：只许改 \`packages/engine/src/queue.ts\` 和它的测试 \`packages/engine/test/queue.test.ts\`；点名的测试是 queue.test.ts。\n` +
       '标准路径（碰了就要报）：`agents/` 下的所有文件、`.github/workflows/`、`packages/conventions/standard-paths.json`。\n' +
@@ -129,7 +129,7 @@ export const REVIEW_CASES: EvalCase[] = [
     id: 'review-screen/scope-creep',
     scenario: 'review-screen',
     name: 'scope-creep',
-    agent: 'fleet-review-screen',
+    agent: 'Explore',
     prompt:
       `${PREAMBLE}这次改动的交代：只许改 \`packages/engine/src/retry.ts\` 和它的测试 \`packages/engine/test/retry.test.ts\`；点名的测试是 retry.test.ts。\n` +
       '标准路径（碰了就要报）：`agents/` 下的所有文件、`.claude/agents/`、`.github/workflows/`、`packages/conventions/standard-paths.json`。\n' +
@@ -145,7 +145,7 @@ export const REVIEW_CASES: EvalCase[] = [
     id: 'reviewer/pagination',
     scenario: 'reviewer',
     name: 'pagination',
-    agent: 'fleet-reviewer',
+    agent: 'Plan',
     prompt:
       `${PREAMBLE}这份 diff 要实现的需求：分页函数页码从 1 开始；任务列表展示时优先级高的排前面；入队必须写入成功之后才返回 ok；` +
       '`isClaimed` 对 owner 是 null 或没写都算没人认领；`dropExpired` 原地清掉过期任务。\n' +
@@ -161,7 +161,7 @@ export const REVIEW_CASES: EvalCase[] = [
     id: 'reviewer/rate-limit',
     scenario: 'reviewer',
     name: 'rate-limit',
-    agent: 'fleet-reviewer',
+    agent: 'Plan',
     prompt:
       `${PREAMBLE}这份 diff 要实现的需求：令牌桶，容量 capacity，每秒补 ratePerSec 个，补到容量为止、不超过；多进程共用的计数每个 key 每个窗口最多 limit 次；` +
       '`resetAt` 返回窗口到期的时间，单位毫秒；存储暂时读不到时重试，重试用完仍失败则放行（产品要求：限流挂了不能挡住正常请求）。\n' +

@@ -2,6 +2,7 @@
 
 - 日期：2026-10-09（北京时间）
 - 谁拍的：创始人。原话在下面；睡前「全程你拍板，无人值守，按照最佳方式处理」，名单和每个定义的细节由指挥官定。
+- 现状：已被 0087 替代（`0087-three-subagent-roles.md`，创始人 2026-10-12「Sonnet 是工人、Haiku 是斥候、Opus 是设计」「你能删的删」）：16 个 `fleet-*` 和 `.claude/agents/` 全删，子代理只分 `Explore`、`general-purpose`、`Plan` 三个角色，定义只在 `agents/subagents/` 一份。下面是当时的原文。
 - 状态：采纳；第 2 条后半句（`haiku55` 留给没有这批定义的仓和机器）和第 7 条部分已被 0079 替代：16 个 `fleet-*` 的通用版（`agents/subagents/` 下同名，去掉了本仓专属的规矩）随 `agents:sync` 装到每台机器的用户级、法国也装；本仓仍默认用 `.claude/agents/` 的专属版，第 1、3～6 条不变。技能说明、参考页、钉住名单的测试、标准路径清单同一个 PR 改（改标准；创始人在对话里已授权）。
 - 关联：`.claude/agents/fleet-*.md`、`agents/skills/commander/SKILL.md`「派活」、`agents/skills/commander/references/子代理选模型.md`「本仓的子代理名单」、`agents/test/rules/project-subagents.rules.test.ts`、`packages/conventions/standard-paths.json`
 - 取代：无。0034 的三档判据、0035 的 Haiku 5.5 派法和级联不变；本决定只把它们落成仓里的定义，并规定本仓默认用这批定义。

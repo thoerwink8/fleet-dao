@@ -1,4 +1,4 @@
-// 子代理定义（.claude/agents/*.md）转 `--agents` 的 JSON（claude-code/subagents.ts，#1641 第 4a 片）。
+// 子代理定义（agents/subagents/*.md）转 `--agents` 的 JSON（claude-code/subagents.ts，#1641 第 4a 片）。
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -119,15 +119,20 @@ describe('loadSubagents', () => {
   });
 });
 
-describe('仓里真的那 16 份', () => {
-  it('全部转得出来：16 个键、都有 description、model、prompt，没有 isolation、color、mcp__；带 isolation 的恰好是那 5 个', async () => {
+describe('仓里真的那 3 份（agents/subagents/，决定 0087）', () => {
+  it('目录指到 agents/subagents/，不是 .claude/agents/', () => {
+    expect(SUBAGENTS_DIR.replace(/\\/g, '/')).toMatch(/\/agents\/subagents$/);
+  });
+
+  it('全部转得出来：恰好 Explore、Plan、general-purpose，完整 id 对档；都有 description、prompt，没有 isolation、color、mcp__', async () => {
     const defs = await loadSubagents(SUBAGENTS_DIR);
-    const names = Object.keys(defs);
-    expect(names).toHaveLength(16);
-    expect(names.every((n) => n.startsWith('fleet-'))).toBe(true);
+    expect(Object.fromEntries(Object.entries(defs).map(([n, d]) => [n, d.model]))).toEqual({
+      Explore: 'claude-haiku-5-5',
+      Plan: 'claude-opus-5-5',
+      'general-purpose': 'claude-sonnet-5-5',
+    });
     for (const def of Object.values(defs)) {
       expect(def.description).not.toBe('');
-      expect(def.model).toMatch(/^claude-(haiku|sonnet|opus)-5-5$/);
       expect(def.prompt).not.toBe('');
       expect(Object.keys(def)).not.toContain('isolation');
       expect(Object.keys(def)).not.toContain('color');
@@ -138,12 +143,10 @@ describe('仓里真的那 16 份', () => {
         .flatMap((d) => d.tools ?? [])
         .filter((t) => t.startsWith('mcp__')),
     ).toEqual([]);
-    expect(await isolatedSubagentNames(SUBAGENTS_DIR)).toEqual([
-      'fleet-builder',
-      'fleet-debugger',
-      'fleet-fixer',
-      'fleet-standard-editor',
-      'fleet-ui-builder',
-    ]);
+    // 斥候、设计只读：Edit、Write 在禁用名单里
+    for (const n of ['Explore', 'Plan'])
+      expect(defs[n]?.disallowedTools, n).toEqual(expect.arrayContaining(['Edit', 'Write']));
+    // 工作树由派活时选，不写进定义（写了引擎会话里会被整个挡掉）
+    expect(await isolatedSubagentNames(SUBAGENTS_DIR)).toEqual([]);
   });
 });

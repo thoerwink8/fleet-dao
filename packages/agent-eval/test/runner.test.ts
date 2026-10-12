@@ -505,10 +505,10 @@ describe('真题 + 假会话（会话在临时目录里把活干了）', () => {
   const fixer = ALL_CASES.find((c) => c.id === 'fixer/format-bytes') as EvalCase;
   const defs = new Map([
     [
-      'fleet-fixer',
+      'general-purpose',
       parseAgentDefinition(
-        readFileSync(join(REPO_ROOT, '.claude', 'agents', 'fleet-fixer.md'), 'utf8'),
-        'fixer.md',
+        readFileSync(join(REPO_ROOT, 'agents', 'subagents', 'general-purpose.md'), 'utf8'),
+        'general-purpose.md',
       ),
     ],
   ]);

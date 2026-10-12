@@ -1,4 +1,5 @@
-// 子代理定义文件（#1641 第 4b 片）：引擎启动时从发布目录的 .claude/agents/ 生成一份 `--agents` 要的 JSON，claude-code 的干活会话带上它。
+// 子代理定义文件（#1641 第 4b 片）：引擎启动时从发布目录的 agents/subagents/（决定 0087：三个角色 Explore、general-purpose、Plan，
+// 和 agents-sync 装到各家目录的是同一份）生成一份 `--agents` 要的 JSON，claude-code 的干活会话带上它。
 //
 // 改这里之前必须知道：
 // - 写到会话用户读得到的地方：引擎自己的状态目录是 fleet:fleet 750，会话用户进不去；这里默认放 /var/lib/fleet-sessions/agents
@@ -31,7 +32,7 @@ export interface SubagentSet {
 }
 
 export interface PrepareSubagentsOptions {
-  /** 定义所在的目录，默认发布目录里的 .claude/agents。 */
+  /** 定义所在的目录，默认发布目录里的 agents/subagents。 */
   sourceDir?: string;
   /** 文件放哪，默认 DEFAULT_AGENTS_DIR。 */
   outDir?: string;

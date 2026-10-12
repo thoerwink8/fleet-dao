@@ -52,12 +52,20 @@ done
 ORIGINAL=$'# 原来的规矩\n- 一条\n'
 printf '%s' "$ORIGINAL" >"$H/.codex/AGENTS.md"
 chown "$U:$U" "$H/.codex/AGENTS.md"
+# 他家里原来就有（决定 0087）：Mirasim 设置页写的同名覆盖 Explore.md（别名 sonnet），和上一版同步装的 fleet-scout.md、
+# 手写的 my-own.md；清单记着 fleet-scout.md 是同步装的。同步后：Explore.md 备份后换成仓里的，fleet-scout.md 备份后撤掉，my-own.md 不碰
+install -d -o "$U" -g "$U" -m 755 "$H/.claude" "$H/.claude/agents" "$H/.fleet-dao"
+printf -- '---\nname: Explore\ndescription: Fast read-only codebase search; no edits.\nmodel: sonnet\nbackground: true\n---\n' >"$H/.claude/agents/Explore.md"
+printf -- '---\nname: fleet-scout\ndescription: 旧的\nmodel: claude-haiku-5-5\n---\n旧的\n' >"$H/.claude/agents/fleet-scout.md"
+printf -- '---\nname: my-own\ndescription: 手写的\nmodel: inherit\n---\n手写的\n' >"$H/.claude/agents/my-own.md"
+printf '{"skills":{},"subagents":{".claude/agents":["fleet-scout.md"]}}\n' >"$H/.fleet-dao/agents-sync.json"
+chown "$U:$U" "$H/.claude/agents/"*.md "$H/.fleet-dao/agents-sync.json"
 # 假仓：真的 AGENTS.md 和通用段原件（agents/shared-rules.md）加一个 skill、几个假钩子脚本（和 HOOK_TARGETS 登记的名字对上，缺一个就会被 missingScript
 # 拦下、settings.json 整份不写——只有 root 读得到，换身份之后才读原件的话，这里就读不到
 R=$T/repo
 mkdir -p "$R/agents/skills/demo" "$R/agents/hooks" "$R/agents/subagents"
 cp "$REPO/AGENTS.md" "$R/AGENTS.md"
-# 用户级子代理定义（#1393、决定 0079）：真的那几份（haiku55 和 16 个 fleet-* 通用版），同步只装 targets.ts 的 SUBAGENT_TARGET 列了的
+# 用户级子代理定义（#1393、决定 0087）：真的那三份（Explore、general-purpose、Plan），同步只装 targets.ts 的 SUBAGENT_TARGET 列了的
 cp "$REPO"/agents/subagents/*.md "$R/agents/subagents/"
 cp "$REPO/agents/shared-rules.md" "$R/agents/shared-rules.md"
 printf -- '---\nname: demo\n---\n演示用的 skill\n' >"$R/agents/skills/demo/SKILL.md"
@@ -94,13 +102,15 @@ check "输出写明原文件几行、备份在哪" "$(grep -c '接管——原�
 check "skill 拷进了 ~/.claude/skills 和 ~/.agents/skills" \
   "$(cat "$H/.claude/skills/demo/SKILL.md" "$H/.agents/skills/demo/SKILL.md" | grep -c '演示用的 skill')" 2
 check "清单记下了装过的 skill" "$(grep -c '"demo"' "$H/.fleet-dao/agents-sync.json")" 2
-check "haiku55 子代理定义装进了 ~/.claude/agents、和仓里一样" \
-  "$(cmp -s "$REPO/agents/subagents/haiku55.md" "$H/.claude/agents/haiku55.md" && echo 一样)" 一样
-same_fleet=0
-for f in "$REPO"/agents/subagents/fleet-*.md; do
-  cmp -s "$f" "$H/.claude/agents/$(basename "$f")" && same_fleet=$((same_fleet + 1))
+same_roles=0
+for f in Explore general-purpose Plan; do
+  cmp -s "$REPO/agents/subagents/$f.md" "$H/.claude/agents/$f.md" && same_roles=$((same_roles + 1))
 done
-check "16 个 fleet-* 通用版也装进了 ~/.claude/agents、和仓里 agents/subagents/ 的一样（决定 0079）" "$same_fleet" 16
+check "三个角色 Explore、general-purpose、Plan 装进了 ~/.claude/agents、和仓里 agents/subagents/ 的一样（决定 0087）" "$same_roles" 3
+check "Mirasim 写的那份 Explore.md 先整份备份了" "$(grep -c '^model: sonnet$' "$H"/.fleet-dao/backups/*/.claude/agents/Explore.md)" 1
+check "上一版同步装的 fleet-scout.md 撤掉了" "$(test -e "$H/.claude/agents/fleet-scout.md" && echo 还在 || echo 撤了)" 撤了
+check "撤之前也备份了" "$(grep -c '^旧的$' "$H"/.fleet-dao/backups/*/.claude/agents/fleet-scout.md)" 1
+check "手写的 my-own.md 没碰" "$(grep -c '^手写的$' "$H/.claude/agents/my-own.md")" 1
 # 决定 0083：用户级只登记拦密钥。脚本仍整份拷进家里，设置里不再登记开会话、收尾、落盘。
 check "钩子脚本拷进了他家" "$(cat "$H/.fleet-dao/hooks/pretool.mjs")" "// 假的调工具前钩子"
 check "Stop 钩子脚本也拷进了他家" "$(cat "$H/.fleet-dao/hooks/stop.mjs")" "// 假的收尾提醒钩子"
