@@ -54,6 +54,7 @@ export function get(base: string, rel: string): string {
 
 /** 假仓里的钩子脚本：名字和 targets.ts 登记的一样，内容是假的 */
 export const HOOK_FILES: Record<string, string> = {
+  'plugin-loader.mjs': '// 假的订阅加载器\n',
   'session-start.mjs': '// 假的开会话钩子\n',
   'pretool.mjs': '// 假的调工具前钩子\n',
   'pretool-codex.mjs': '// 假的 Codex 调工具前钩子\n',

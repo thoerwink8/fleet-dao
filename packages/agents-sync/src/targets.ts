@@ -253,7 +253,7 @@ export interface HookTarget {
  *   fail-open，所以钩子脚本自己出错时要按拦处理并退出 2）。工具名就是 Bash、Read、Grep，matcher 锚定成 ^(Bash|Read|Grep)$。
  *   Bash 在 Windows 上也是 Git Bash（packages/kaos/src/environment.ts）；钩子命令经 Node 的 shell: true 跑，Windows 上是
  *   cmd（packages/agent-core-v2/src/features/externalHooks/internal/runHook.ts），启动器照用。timeout 按秒算。
- *   开会话那条以前登记在用户级，决定 0083 起不登记了：流程钩子只在 fleet-dao 仓的项目设置里。
+ *   开会话那条以前登记在用户级，决定 0083 起过程钩子不在用户级给每个仓跑。决定 0085 只留一个加载器。
  */
 export const HOOK_TARGETS: readonly HookTarget[] = [
   {
@@ -262,8 +262,10 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
     readers: ['claude', 'grok', 'devin'],
     borrowed: ['grok', 'devin'],
     hooks: [
-      // 决定 0083：开会话、主对话、收尾、落盘只登记在 fleet-dao 仓的 .claude/settings.json。
-      // 用户级只留拦密钥。下次同步会摘掉这里不再列出的登记。
+      // 决定 0083：开会话、主对话、收尾、落盘不在用户级给每个仓跑。
+      // 决定 0085：用户级只加这一个加载器。有订阅标记的仓，它才把过程组写进那个仓的项目设置。
+      // 下次同步会摘掉这里不再列出的登记。
+      { event: 'SessionStart', script: 'plugin-loader.mjs', timeout: 10 },
       {
         event: 'PreToolUse',
         matcher:
