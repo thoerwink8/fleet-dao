@@ -13,7 +13,7 @@ export function usageTitle(u: TicketUsage): string {
       return `内存、CPU 没读到：${u.why}`;
     case 'ok': {
       const parts = [
-        `内存 ${formatMb(u.memoryMb)}（memory.current）`,
+        `内存 ${formatMb(u.memoryMb)}`,
         u.cpuPercent === undefined
           ? 'CPU 还在采样（这个会话刚起，只读到一次）'
           : `CPU ${formatCpu(u.cpuPercent)}（100% = 占满一个核）`,
