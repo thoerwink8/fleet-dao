@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // 路由页调先后和开关（#1333，#1366 第二部分）：拖动、每行置顶 / 置底、聚焦后 Alt+上下键改先后（放下 / 点 / 按键就保存，失败回到原顺序）；
 // 每条路由、每个模型、每个渠道各有开关，开关确认后才写；渠道关了，下面的路由显示「渠道已关」不能单独开；
-// 整池暂停在对应池旁边设和撤。选了远程环境整块置灰并写「去那台上操作」。
+// 停用账号池在额度页。池已经停着时，这条路由的开关锁住。选了远程环境整块置灰并写「去那台上操作」。
 // 每行行尾「⋯」里有「上移一位」「下移一位」「置顶」「置底」（#1914 起收进菜单；用的还是 movePurposeModel / updateModelRoute 的 reorder，没有新接口）。
 // #856 第 2 处：旧的 useUpdateChannel 仍不导出。新的渠道开关是 setChannelEnabled，不是那条已删的 PATCH。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
@@ -19,6 +19,7 @@ vi.mock('sonner', () => ({ toast, Toaster: () => null }));
 
 import * as client from '../api/client';
 import { ApiError } from '../api/client';
+import { createMockApi } from '../api/mock/server';
 import RoutingPage from '../routes/routing';
 import { renderApp } from './harness';
 
@@ -422,47 +423,26 @@ describe('路由页：调先后和开关', () => {
     );
   });
 
-  test('整池暂停：没填完不能设；设了只锁这个池的路由；没写原因撤不掉', async () => {
-    const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
-    const spy = vi.spyOn(api, 'updateSetting');
+  test('额度页停用的池：只锁这个池的路由开关，菜单里没有暂停', async () => {
+    const api = createMockApi({ live: false });
+    await api.updateSetting('engine.poolHolds', {
+      value: {
+        'claude-a': {
+          reason: '被封号',
+          decidedBy: '创始人',
+          revokeWhen: '创始人在额度页打开这个池',
+        },
+      },
+      version: 0,
+    });
+    renderApp(<RoutingPage />, { api, route: '/routing?purpose=execute' });
     await opened();
     const row = routeItem('r-ca-opus');
-    // 整池暂停在这条路由行尾的「⋯」里（#1914），点了在行下面展开表单
-    await waitFor(() => expect(row.querySelector('[data-row-menu]')).not.toBeNull());
-    const menu = await openRowMenu(row);
-    fireEvent.click(await within(menu).findByRole('menuitem', { name: '暂停账号池 claude-a' }));
-    const confirm = await within(row).findByRole('button', { name: '确认暂停' });
-    expect((confirm as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(confirm);
-    expect(spy).not.toHaveBeenCalled();
-
-    fireEvent.change(within(row).getByLabelText('为什么停'), { target: { value: '324 账号被封' } });
-    fireEvent.change(within(row).getByLabelText('谁拍的'), { target: { value: '创始人 2026-10-08' } });
-    fireEvent.change(within(row).getByLabelText('什么条件下撤'), { target: { value: '账号解封' } });
-    fireEvent.change(within(row).getByLabelText('最迟复查日期'), { target: { value: '2026-12-01' } });
-    expect((within(row).getByRole('button', { name: '确认暂停' }) as HTMLButtonElement).disabled).toBe(false);
-    fireEvent.click(within(row).getByRole('button', { name: '确认暂停' }));
-    // 暂停了只看名字后面的状态「池暂停」，不再另贴「整池暂停」小标签（#1914 第 4 轮，同一件事一行只写一遍）
     await waitFor(() => expect(row.textContent).toContain('池暂停'));
-    expect(row.textContent).not.toContain('整池暂停');
-    const chip = [...row.querySelectorAll('span[data-variant]')].find((el) =>
-      el.textContent?.includes('池暂停'),
-    );
-    expect(chip).toBeTruthy();
     expect((within(row).getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
     expect((within(routeItem('r-cb-opus')).getByRole('switch') as HTMLButtonElement).disabled).toBe(false);
-
-    const again = await openRowMenu(row);
-    fireEvent.click(within(again).getByRole('menuitem', { name: '撤回账号池 claude-a 的整池暂停' }));
-    const revoke = await within(row).findByRole('button', { name: '确认撤回' });
-    expect((revoke as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(revoke);
-    expect((within(row).getByRole('switch') as HTMLButtonElement).disabled).toBe(true);
-
-    fireEvent.change(within(row).getByLabelText('撤回原因'), { target: { value: '账号解封了' } });
-    fireEvent.click(within(row).getByRole('button', { name: '确认撤回' }));
-    await waitFor(() => expect((within(row).getByRole('switch') as HTMLButtonElement).disabled).toBe(false));
-    expect(row.textContent).not.toContain('池暂停');
+    const menu = await openRowMenu(row);
+    expect(within(menu).queryByRole('menuitem', { name: /暂停账号池|撤回账号池|整池暂停/ })).toBeNull();
   });
 
   test('【故意造出的失败】选了远程环境（?node=）：整块置灰、写「去那台上操作」，拖动、置顶置底和开关都点不了', async () => {
@@ -475,7 +455,7 @@ describe('路由页：调先后和开关', () => {
     for (const sw of screen.getAllByRole('switch')) {
       expect((sw as HTMLButtonElement).disabled).toBe(true);
     }
-    // 「⋯」里的置顶、置底、档位、移出、整池暂停也都是灰的，悬停写「去那台上操作」
+    // 「⋯」里的置顶、置底、档位、移出也都是灰的，悬停写「去那台上操作」
     const modelMenu = await openRowMenu(modelRow('kimi-k3'));
     for (const item of within(modelMenu).getAllByRole('menuitem')) {
       expect(item.getAttribute('data-disabled')).not.toBeNull();
@@ -487,9 +467,7 @@ describe('路由页：调先后和开关', () => {
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
     await waitFor(() => expect(routeItem('r-ca-opus').querySelector('[data-row-menu]')).not.toBeNull());
     const routeMenu = await openRowMenu(routeItem('r-ca-opus'));
-    const pause = await within(routeMenu).findByRole('menuitem', { name: /^暂停账号池 / });
-    expect(pause.getAttribute('data-disabled')).not.toBeNull();
-    expect(pause.getAttribute('title')).toContain('去那台上操作');
+    expect(within(routeMenu).queryByRole('menuitem', { name: /暂停账号池/ })).toBeNull();
     for (const item of within(routeMenu).getAllByRole('menuitem')) {
       expect(item.getAttribute('data-disabled')).not.toBeNull();
     }

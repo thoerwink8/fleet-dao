@@ -986,13 +986,22 @@ describe('拼车用不了，当场切（#194）：不等路由探针那一轮，
 
     it('【故意造出的失败】开关缺字段（读不出）：这个池照样按暂停办、不切；报「要人看」；补全了自己撤', async () => {
       const s = setup();
-      await putHolds({ 'claude-solo': hold({ reviewBy: undefined }) });
+      await putHolds({ 'claude-solo': hold({ decidedBy: '' }) });
       expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
       expect(s.helperCalls).toEqual([]);
       expect(await open(ORG_POOL_HOLD_ALERT)).toBe(true);
       expect((await alertOf(ORG_POOL_HOLD_ALERT))?.body).toContain('claude-solo');
       await putHolds({ 'claude-solo': hold() });
       await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) });
+      expect(await open(ORG_POOL_HOLD_ALERT)).toBe(false);
+    });
+
+    it('没填复查日期：这个池仍按暂停办、不切，但不报认不出', async () => {
+      const s = setup();
+      const raw = hold() as Record<string, unknown>;
+      delete raw.reviewBy;
+      await putHolds({ 'claude-solo': raw });
+      expect(await s.orgSwitch.now({ by: '被拒', rejection: rejection(s.now()) })).toBeNull();
       expect(await open(ORG_POOL_HOLD_ALERT)).toBe(false);
     });
 

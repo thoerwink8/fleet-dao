@@ -232,7 +232,7 @@
   --container-settings-nav: 11rem; /* 176 */
   /* 字段行「标签左、控件右」的标签列宽（md 以上），依据：调研 3 块，标签列 160–200px。 */
   --container-field-label: 11.25rem; /* 180 */
-  --container-quota-row: 13.75rem; /* 220 */
+  --container-quota-row: 16rem; /* 256：池名、封号或没查成、停用开关并排 */
   /* 额度页手机上一个窗口格的最小宽：两列排。 */
   --container-quota-cell: 8.5rem;
   --container-search: 23.75rem; /* 380 */
@@ -504,6 +504,11 @@ html {
 }
 
 .quota-pool-head {
+  grid-column: 1 / -1;
+}
+
+/* 点开关后的原因：窄屏、宽屏都占满这一行，不挤在池名那一列里。 */
+.quota-hold-form {
   grid-column: 1 / -1;
 }
 

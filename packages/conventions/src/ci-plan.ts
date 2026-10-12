@@ -205,6 +205,7 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
     files: [
       `${W}routes/quota.tsx`,
       `${W}components/quota.tsx`,
+      `${W}components/pool-switch.tsx`,
       `${W}components/carpool-reconcile.tsx`,
       `${W}components/org-switch.tsx`,
     ],
@@ -214,7 +215,6 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
   {
     files: [
       `${W}routes/settings.tsx`,
-      `${W}components/pool-holds.tsx`,
       `${W}components/repo-dispatch.tsx`,
       `${W}lib/pool-holds.ts`,
       `${W}lib/reserve.ts`,
