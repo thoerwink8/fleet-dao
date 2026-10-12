@@ -3,6 +3,9 @@
 // 「上次跑成」和「N 分钟前开始」合成一列（#1753）。
 import { cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
+import { ApiError } from '../api/client';
+import { createMockApi } from '../api/mock/server';
+import { rowTone } from '../components/job-row';
 import { renderApp } from '../test/harness';
 import SchedulesPage from './schedules';
 
@@ -13,7 +16,8 @@ describe('定时任务摘要条（#1902）', () => {
     renderApp(<SchedulesPage />, { route: '/schedules' });
     await screen.findByText('额度读取');
     const summary = document.querySelector('[data-job-summary]') as HTMLElement;
-    expect(summary.textContent).toMatch(/^共 \d+ 个定时任务/);
+    // 改成页顶标题块（#1914 样板）：第一行「N 个定时任务」，原来摘要条开头的「共 N 个定时任务」
+    expect(summary.textContent).toMatch(/^\d+ 个定时任务/);
     expect(summary.textContent).toContain('上次失败');
     expect(summary.textContent).not.toMatch(/上次失败 0|没查全 0|过期 0/);
     // 没有「定时任务 / 上次失败 / 上次没查全 / 过期」四张独立的统计卡
@@ -29,7 +33,8 @@ describe('定时任务摘要条（#1902）', () => {
     expect(firstOk).toBeGreaterThan(0);
     expect(tones.slice(firstOk)).not.toContain('bad');
     const bad = rows[0] as HTMLElement;
-    const column = (r: HTMLElement) => r.querySelector('[class~="md:block"][title]');
+    // 原来是宽屏的「上次运行」列；改成两层行后，上次结果在名字下面那一行灰字（data-job-outcome），各宽度同一处
+    const column = (r: HTMLElement) => r.querySelector('[data-job-outcome]');
     expect(column(bad)?.className).not.toContain('truncate');
     const ok = rows[rows.length - 1] as HTMLElement;
     expect(column(ok)?.className).toContain('truncate');
@@ -80,5 +85,56 @@ describe('定时任务可展开的列表行（#1805）', () => {
     const row = (await screen.findByText('夜间备份')).closest('li') as HTMLElement;
     expect(row.dataset.outcome).toBe('failed');
     expect(row.querySelector('.w-rail.bg-st-fail')).toBeTruthy();
+  });
+});
+
+describe('照路由页样板重做（标题块、一行一个状态）', () => {
+  test('标题块三行：几个定时任务、最要紧的一句加状态、异常计数；三行都不折', async () => {
+    renderApp(<SchedulesPage />, { route: '/schedules' });
+    await screen.findByText('额度读取');
+    const hero = document.querySelector('[data-schedules-hero]') as HTMLElement;
+    const line = hero.querySelector('[data-hero-line]') as HTMLElement;
+    // 假数据里夜间备份失败：结论写它和原因，状态「要处理」（红）
+    expect(line.textContent).toContain('夜间备份上次失败');
+    expect(line.querySelector('[data-tone="fail"]')?.textContent).toBe('要处理');
+    expect(line.className).toContain('whitespace-nowrap');
+    expect(hero.querySelector('[data-hero-text]')?.className).toContain('truncate');
+    expect(hero.querySelector('[data-hero-notes]')?.className).toContain('truncate');
+  });
+
+  test('都正常时结论写「全部按期跑成」，灰字写最近跑成的一个', async () => {
+    const api = createMockApi({ live: false });
+    const all = await api.jobs();
+    api.jobs = async () => ({ ...all, jobs: all.jobs.filter((j) => rowTone(j) === null) });
+    renderApp(<SchedulesPage />, { api, route: '/schedules' });
+    await screen.findByText('额度读取');
+    const hero = document.querySelector('[data-schedules-hero]') as HTMLElement;
+    expect(hero.querySelector('[data-hero-line]')?.textContent).toContain('全部按期跑成');
+    expect(hero.querySelector('[data-tone="done"]')?.textContent).toBe('都正常');
+    expect(hero.querySelector('[data-hero-notes]')?.textContent).toMatch(/^最近跑成：/);
+  });
+
+  test('一行只放一个状态：过期叠在失败、没查全后面，不另贴「过期」标签', async () => {
+    renderApp(<SchedulesPage />, { route: '/schedules' });
+    const backup = (await screen.findByText('夜间备份')).closest('li') as HTMLElement;
+    const line = backup.querySelector('[data-row-name-line]') as HTMLElement;
+    expect(line.querySelectorAll('[data-tone]').length).toBeGreaterThan(0);
+    expect(line.querySelector('[data-variant="dot"]')?.textContent).toBe('失败，已过期');
+    const quota = screen.getByText('额度读取').closest('li') as HTMLElement;
+    expect(quota.querySelector('[data-variant="dot"]')?.textContent).toBe('按期');
+    // 上次跑成的绝对时间在悬停里
+    expect(quota.querySelector('[data-last-success-ago]')?.getAttribute('title')).toMatch(/^上次跑成：/);
+  });
+
+  test('【故意造出的失败】读成过、刷新失败：照旧画上一次读到的，顶上一条横幅带重试', async () => {
+    const api = createMockApi({ live: false });
+    renderApp(<SchedulesPage />, { api, route: '/schedules' });
+    await screen.findByText('额度读取');
+    api.jobs = () => Promise.reject(new ApiError(500, 'internal', '后端出错了'));
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+    const alert = await screen.findByRole('alert', {}, { timeout: 4000 });
+    expect(alert.textContent).toContain('定时任务刷新没读成，下面是上一次读到的');
+    expect(within(alert).getByRole('button', { name: '重试' })).toBeTruthy();
+    expect(screen.getByText('额度读取')).toBeTruthy();
   });
 });
