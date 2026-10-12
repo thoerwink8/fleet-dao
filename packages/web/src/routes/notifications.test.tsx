@@ -277,6 +277,8 @@ describe('通知卡：正文限两行、主操作带字、两组筛选分主次�
       });
     renderApp(<NotificationsPage />, { api, route: '/notifications' });
 
+    // ONE 是待拍的「要你拍」：正文收在「看选项」里（#1950），先展开再看正文
+    fireEvent.click(await screen.findByRole('button', { name: '看选项' }));
     const body = (await screen.findByText(/第 1 行很长的说明/)).closest('button') as HTMLElement;
     expect(body.className).toContain('line-clamp-2');
     expect(body.getAttribute('aria-expanded')).toBe('false');
@@ -313,18 +315,23 @@ describe('「要你拍」带选项（#1915）', () => {
   const RELEASE = '等你点头：发布 v2.3'; // 假数据里带选项的那条（n-1）
   const OLD = '#15 在问你：发新消息还是把旧的顶上来？'; // 假数据里没有选项的老通知（n-4）
   const rowOf = (title: string) => screen.getByText(title).closest('li[data-notice-row]') as HTMLElement;
+  /** 选项默认收起（#1950）：点这一条的「看选项」展开。 */
+  const expand = (title: string) =>
+    fireEvent.click(within(rowOf(title)).getByRole('button', { name: '看选项' }));
 
   test('选项是可点的按钮，推荐那项标「推荐」并写理由；点选项记下答案，转已处理，页面上看得到选了什么', async () => {
     const api = createMockApi({ live: false });
     const answer = vi.spyOn(api, 'answerNotification');
     renderApp(<NotificationsPage />, { api, route: '/notifications' });
     await screen.findByText(RELEASE);
+    expand(RELEASE);
     const row = rowOf(RELEASE);
     const picker = within(row).getByTestId('decision-picker');
+    // 选项整行是按钮（#1950），行里还有说明：按钮的名字（aria-label）仍是选项的字
     expect(
       within(picker)
         .getAllByRole('button')
-        .map((b) => b.textContent),
+        .map((b) => b.getAttribute('aria-label') ?? b.textContent),
     ).toEqual(['发布', '今晚再发', '先不发', '提交']);
     expect(within(picker).getByText('推荐')).toBeTruthy();
     expect(picker.textContent).toContain('CI 全绿、金丝雀跑过，能一键回滚，风险小');
@@ -353,6 +360,7 @@ describe('「要你拍」带选项（#1915）', () => {
     const answer = vi.spyOn(api, 'answerNotification');
     renderApp(<NotificationsPage />, { api, route: '/notifications' });
     await screen.findByText(OLD);
+    expand(OLD);
     const picker = within(rowOf(OLD)).getByTestId('decision-picker');
     const submit = within(picker).getByRole('button', { name: '提交' });
     expect(submit).toHaveProperty('disabled', true); // 空的不能交
@@ -377,6 +385,7 @@ describe('「要你拍」带选项（#1915）', () => {
     const answer = vi.spyOn(api, 'answerNotification');
     renderApp(<NotificationsPage />, { api, route: '/notifications' });
     await screen.findByText(RELEASE);
+    expand(RELEASE);
     expect(within(rowOf(RELEASE)).getByTestId('custom-effect').textContent).toBe(
       '自己写的：记下交给指挥官，这条先留着',
     );
@@ -394,6 +403,9 @@ describe('「要你拍」带选项（#1915）', () => {
     renderApp(<NotificationsPage />, { api, route: '/notifications' });
     await screen.findByText(OLD);
     const row = rowOf(OLD);
+    // 「没有选项，请直接回复」收起时就看得到；正文和输入框在展开后（#1950）
+    expect(within(row).getByTestId('no-options').textContent).toBe('没有选项，请直接回复');
+    expand(OLD);
     expect(within(row).getByText('再提醒时怎么处理旧消息。')).toBeTruthy();
     expect(within(row).getByRole('button', { name: '处理了' })).toBeTruthy();
     expect(within(row).getByTestId('no-options').textContent).toBe('没有选项，请直接回复');
@@ -409,6 +421,7 @@ describe('「要你拍」带选项（#1915）', () => {
     );
     renderApp(<NotificationsPage />, { api, route: '/notifications' });
     await screen.findByText(RELEASE);
+    expand(RELEASE);
     fireEvent.click(within(rowOf(RELEASE)).getByRole('button', { name: '发布' }));
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith('没记下', { description: '这条已经处理过了，答案没改' }),
