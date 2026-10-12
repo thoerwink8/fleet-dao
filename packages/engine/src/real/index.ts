@@ -309,8 +309,8 @@ export function agentCommands(config: Pick<RealPortsConfig, 'claudeBin' | 'curso
 const MIRASIM_TOKEN_NAME = /^local-([1-9][0-9]{0,4})\.token$/;
 
 /** 一条以那个会话用户的身份跑的短命令：起个短命 scope（scopeId 每次都不同，同一时刻不撞）。 */
-function execAs(exec: UserExec, user: SessionUser, argv: string[], tag: string) {
-  return exec({ user, cwd: '/', argv, timeoutMs: 10_000, scopeId: `${tag}-${randomUUID()}` });
+function execAs(exec: UserExec, user: SessionUser, argv: string[], tag: string, timeoutMs = 10_000) {
+  return exec({ user, cwd: '/', argv, timeoutMs, scopeId: `${tag}-${randomUUID()}` });
 }
 
 /** ls 报「没有这个路径」的样子（GNU coreutils：退出 2，stderr 里这句）；和别的读不了（权限、没查成）分开报。 */
@@ -349,6 +349,7 @@ export async function grepAsUser(
   needles: readonly string[],
   paths: readonly string[],
   tag = 'mirasim-grep',
+  timeoutMs = 10_000,
 ): Promise<string> {
   if (needles.length === 0 || paths.length === 0) return '';
   for (const n of needles) {
@@ -356,7 +357,7 @@ export async function grepAsUser(
       throw new Error(`筛账本的关键字认不出：${JSON.stringify(n)}`);
   }
   const argv = ['/bin/grep', '-h', '-F', ...needles.flatMap((n) => ['-e', n]), '--', ...paths];
-  const r = await execAs(exec, user, argv, tag);
+  const r = await execAs(exec, user, argv, tag, timeoutMs);
   if (r.code === 1) return '';
   if (r.code !== 0) throw new Error(describeFailure(`筛 ${paths.join('、')}`, r));
   return r.stdout.toString('utf8');
