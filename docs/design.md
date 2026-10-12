@@ -528,12 +528,12 @@ GitHub 上只用标签和里程碑两样容器。issue 照第七节建（创始�
 - **拼车成员上限改读 reclaude 开放接口**（2026-09-25 起）：reclaude 网页「设置 → API Key」生成一把账号级的 Key，`GET /api/v1/carpool/quota` 直接给出这个上限的已用美元、上限、清零时刻，`GET /api/v1/orgs` 给各组织的到期日。拼车池的读法就用它（`reclaude-carpool`）：不起 Claude Code、不看这台机器挂哪个组织，本机、法国都读得到。独享号的用量这套接口不给，仍跑 /usage；/usage 只读得到这个家目录此刻挂的组织，会话用户挂拼车时独享池照实记「没读成」（读取器不为读数切号）。Key 放法国 `/etc/fleet-dao/reclaude-api.key`（进保险箱）、创始人电脑 `~/.fleet-dao/reclaude-api.key`。
 - **一个 5 小时窗能干多少活**（同日按会话记录实数，当量按输入 1、缓存写 1.25、缓存读 0.1、输出 5 折算）：拼车号约 3400 万输入当量（14 个会话约 20 分钟用满）；独享号至少 2.8 亿（约 12 个会话撑了 3 小时 20 分），差 8 倍。
 
-**经 Mirasim 起的会话用量从哪读**（#1933，Mirasim 服务端 0.0.466 查实）：引擎在会话结束时只看得到订阅快照里的 `usage`，各执行体给的不一样：
-- codex 给会话累计 `sessionTotals`（输入、输出、缓存读），引擎按上一轮求差，四样里记得上三样。
-- claude、dsh（DeepSeek）、pi、kimi 不给累计数。快照里的 `inputTokens`、`cachedInputTokens` 只是最近一次上游调用的数，不是本轮合计，不拿来记。能记的只有 `turnOutputTokens`（本轮累计输出）。所以这几家的 runs 只有输出，输入、缓存读、缓存写照实留空，任务页写「没记到」。
+**经 Mirasim 起的会话用量从哪读**（#1933 查实、#1935 接上，Mirasim 服务端 0.0.466）：真账是 Mirasim 的用量账本（中转计量），会话结束时的快照只是近似。
+- 每次上游调用的真用量在会话用户家里的 `~/.mirasim/insights/usage-<年-月>.ndjson`，一次调用一行，按 `<会话>:<callId>` 记，有输入（没命中缓存的那部分）、输出、缓存读、缓存写。走中转的调用当时先写一行全 0 的占位；服务端过 90 秒以后、每 3 分钟问一次中转的 `/usage/calls`，原地回填那一行（带 `relayMetered`），中转一天都查不到的记 `noRelayRecord`。中转回包带 `usd` 才有花费（`relayUsd`，0.0.466 时一行都没有，花费由任务页按单价估）。法国近 7 天走中转的 2xx 调用全部回填了，claude、codex、dsh、pi 各家、各模型都有四样。
+- 会话结束那一刻（`mirasimRunSummary`）只看得到订阅快照里的 `usage`：codex 给会话累计 `sessionTotals`（输入、输出、缓存读，按上一轮求差）；claude、dsh、pi、kimi 只给 `turnOutputTokens`（本轮累计输出，比计量少几十个），快照里的 `inputTokens` 是最近一次调用的、不是合计，不拿来记。runs 先记这些，并记下会话号（`runs.session_id`）。
+- 引擎的定时任务「用量补记」（`usage-backfill`，每 5 分钟，`packages/engine/src/jobs/usage-backfill.ts`）把近 24 小时结束、经 Mirasim 路由起、四样有缺的那几笔，以会话用户 `grep -F` 会话号读账本（不整份 cat），只认这一笔起止之间、2xx、真走了上游的调用：全部回填了才把四样整套写回（输出也换成计量的数），有一次还是占位就不写、在 `runs.usage_note` 写「等中转计量回填」，中转没有记录、行认不出的写明原因。补齐了的不再碰，重复跑只写一次。
 - 流量账本 `~/.mirasim/traffic/<会话>/index-*.ndjson` 每行没有 token 字段，只用来核走了哪条上游（MS-27）。
-- 每次调用的真用量在 Mirasim 自己的 `~/.mirasim/insights/usage-<年-月>.ndjson`，按 `<会话>:<callId>` 记。调用当时先写一行全 0 的占位，之后服务端每 3 分钟问中转 `/usage/calls` 回填（回填了的带 `relayMetered`）。会话结束那一刻多半还没填上，引擎还没接这条回填（#1935）。
-- 「记上用量」的口径（巡检的记账一步、对账的 zeroUsage）是四样里至少读到一样，不单认输入。
+- 「记上用量」的口径（巡检的记账一步）是输入、输出两样都读到；没记上的，巡检原因和任务页照 `usage_note` 写明模型和原因（#1935 收回 #1936 的「四样任一」）。
 
 ## 十一、Jev 判断题服务
 

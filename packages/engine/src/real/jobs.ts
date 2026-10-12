@@ -18,6 +18,7 @@ import { JUDGE_SELF_CHECK_JOB } from '../jobs/judge-self-check.ts';
 import { QUOTA_READ_JOB } from '../jobs/quota-read.ts';
 import { RETIRED_SCHEDULE_IDS } from '../jobs/retired-schedules.ts';
 import { ROUTE_PROBE_JOB } from '../jobs/route-probe.ts';
+import { USAGE_BACKFILL_JOB } from '../jobs/usage-backfill.ts';
 import { WATCHDOG_JOB } from '../jobs/watchdog.ts';
 
 export const ENGINE_JOBS = [
@@ -31,6 +32,7 @@ export const ENGINE_JOBS = [
   INTAKE_JOB,
   JUDGE_SELF_CHECK_JOB,
   CI_TIMINGS_JOB,
+  USAGE_BACKFILL_JOB,
 ] as const;
 
 /** 外部驱动：没有进程内定时器。登记编号和定时器编号的核对不要求它们对得上。 */

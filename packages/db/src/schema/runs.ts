@@ -106,6 +106,16 @@ export const runs = pgTable(
     cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
     cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }),
     costUsd: numeric('cost_usd', { precision: 14, scale: 6, mode: 'number' }),
+    /**
+     * 执行体报的会话号（收场时写；没开成会话、读不到不写）。经 Mirasim 起的是服务端回的 <执行体>:<uuid>：会话结束时用量多半还没
+     * 回填，定时任务「用量补记」（engine 的 jobs/usage-backfill.ts）凭它到 Mirasim 的用量账本按会话补读（#1935）。
+     */
+    sessionId: text('session_id'),
+    /**
+     * 用量为什么没记全（四样 token 有缺的时候才有）：还在等中转计量回填、中转没有这次调用的记录、账本读不了……由「用量补记」写，
+     * 补齐了清空。任务详情、巡检的「记账」一步照它写明原因，不拿 0 顶、也不只写「没读到」。
+     */
+    usageNote: text('usage_note'),
     /** 内存峰值（MiB）：只对挂在 cgroup 里的会话可读；本机不给。 */
     memoryPeakMb: integer('memory_peak_mb'),
     /** 失败原因（exit code、错误消息），outcome != 'done' 时给。 */

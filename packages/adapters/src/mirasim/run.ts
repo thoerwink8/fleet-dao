@@ -594,8 +594,9 @@ function sessionTotals(report: MirasimRunReport | undefined) {
  * 用量：有会话累计值（codex）就按上一轮求差（续跑不给上一轮就不带）；没有的只剩 turnOutputTokens（本轮累计输出），
  * 读不到就不带，不记成 0。claude、dsh 的快照里也有 inputTokens、cachedInputTokens，但那是最近一次上游调用的数、
  * 不是本轮合计（Mirasim 服务端每来一条助手消息就整个换掉），拿来记就是少记——输入、缓存照实不带（#1933）。
- * 账本（ledger.ts 读的流量账本）每行没有 token 字段；每次调用的真用量在 Mirasim 的 insights 账本里、靠中转计量事后回填，
- * 会话结束时多半还没有（docs/design.md 第十节「经 Mirasim 起的会话用量从哪读」）。
+ * 账本（ledger.ts 读的流量账本）每行没有 token 字段；每次调用的真用量在 Mirasim 的用量账本里、靠中转计量事后回填，
+ * 会话结束时多半还没有：这里只给会话结束那一刻读得到的，四样整套由引擎的定时任务「用量补记」凭会话号按中转计量补齐
+ * （meter.ts、engine 的 jobs/usage-backfill.ts，#1935；docs/design.md 第十节「经 Mirasim 起的会话用量从哪读」）。
  */
 export function mirasimRunSummary(report: MirasimRunReport, previous?: MirasimRunReport): RunSummary {
   const base = {
