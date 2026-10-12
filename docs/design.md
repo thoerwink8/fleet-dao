@@ -528,6 +528,13 @@ GitHub 上只用标签和里程碑两样容器。issue 照第七节建（创始�
 - **拼车成员上限改读 reclaude 开放接口**（2026-09-25 起）：reclaude 网页「设置 → API Key」生成一把账号级的 Key，`GET /api/v1/carpool/quota` 直接给出这个上限的已用美元、上限、清零时刻，`GET /api/v1/orgs` 给各组织的到期日。拼车池的读法就用它（`reclaude-carpool`）：不起 Claude Code、不看这台机器挂哪个组织，本机、法国都读得到。独享号的用量这套接口不给，仍跑 /usage；/usage 只读得到这个家目录此刻挂的组织，会话用户挂拼车时独享池照实记「没读成」（读取器不为读数切号）。Key 放法国 `/etc/fleet-dao/reclaude-api.key`（进保险箱）、创始人电脑 `~/.fleet-dao/reclaude-api.key`。
 - **一个 5 小时窗能干多少活**（同日按会话记录实数，当量按输入 1、缓存写 1.25、缓存读 0.1、输出 5 折算）：拼车号约 3400 万输入当量（14 个会话约 20 分钟用满）；独享号至少 2.8 亿（约 12 个会话撑了 3 小时 20 分），差 8 倍。
 
+**经 Mirasim 起的会话用量从哪读**（#1933，Mirasim 服务端 0.0.466 查实）：引擎在会话结束时只看得到订阅快照里的 `usage`，各执行体给的不一样：
+- codex 给会话累计 `sessionTotals`（输入、输出、缓存读），引擎按上一轮求差，四样里记得上三样。
+- claude、dsh（DeepSeek）、pi、kimi 不给累计数。快照里的 `inputTokens`、`cachedInputTokens` 只是最近一次上游调用的数，不是本轮合计，不拿来记。能记的只有 `turnOutputTokens`（本轮累计输出）。所以这几家的 runs 只有输出，输入、缓存读、缓存写照实留空，任务页写「没记到」。
+- 流量账本 `~/.mirasim/traffic/<会话>/index-*.ndjson` 每行没有 token 字段，只用来核走了哪条上游（MS-27）。
+- 每次调用的真用量在 Mirasim 自己的 `~/.mirasim/insights/usage-<年-月>.ndjson`，按 `<会话>:<callId>` 记。调用当时先写一行全 0 的占位，之后服务端每 3 分钟问中转 `/usage/calls` 回填（回填了的带 `relayMetered`）。会话结束那一刻多半还没填上，引擎还没接这条回填（#1935）。
+- 「记上用量」的口径（巡检的记账一步、对账的 zeroUsage）是四样里至少读到一样，不单认输入。
+
 ## 十一、Jev 判断题服务
 
 移至 `docs/design/jev.md`。
