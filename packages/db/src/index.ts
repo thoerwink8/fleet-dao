@@ -40,6 +40,7 @@ export * from './queries/worktrees.ts';
 export * from './quota-reserve-apply.ts';
 export * from './routing-apply.ts';
 export * from './routing-config.ts';
+export { DEFAULT_SESSION_EFFORT } from './routing-defaults.ts';
 export * from './routing-effort.ts';
 export * from './routing-layers.ts';
 export * from './routing-liveness.ts';

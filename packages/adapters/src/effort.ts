@@ -1,4 +1,4 @@
-// 各家插头认的思考档位。引擎起会话时总是显式传（没配就用 high，见 shared 的 DEFAULT_SESSION_EFFORT）；
+// 各家插头认的思考档位。引擎起会话时总是显式传（没配就用骨架 defaults.effort，见 db 的 DEFAULT_SESSION_EFFORT）；
 // 这里只负责「传了的值认不认、这家接不接」。不认识、这家不支持都抛错，调用方不起会话，不许当成 high。
 // 叫法和各家认哪些档只有 shared/effort.ts 一份（驾驶舱、路由骨架、引擎都照它判），这里转出去给插头用。
 import { SESSION_EFFORTS, type SessionEffort } from '@fleet-dao/shared';

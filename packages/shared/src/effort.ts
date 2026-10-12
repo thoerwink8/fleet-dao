@@ -1,31 +1,15 @@
-// 会话的思考档位（#470）：叫法、没配用哪档、各执行方式认哪些档、一条路由能配哪几档。
+// 会话的思考档位（#470）：叫法、各执行方式认哪些档、一条路由能配哪几档。
+// 没配用哪一档不写在这里（#1958）：值只在 routing.default.json 的 defaults.effort，由 db 的 routing-defaults.ts 读。
 // 引擎起会话（engine 的 hosts.ts applySessionEffort）、路由骨架装进库和驾驶舱改档位（db 的 routing-apply.ts、
-// setRoutingEffort）都照这一份判，不各写一份：这里说能配的，起会话时不会因为档位起不来。
+// setRoutingEffort）都照这一份判认不认：这里说能配的，起会话时不会因为档位起不来。
 // 改这里之前必须知道：各家命令行的参数在 adapters（claude-code/args.ts、grok/args.ts、mirasim/run.ts）里再认一次，
 // 这里加一档或给哪家放开一档，那边的参数要跟着认，否则这里放行、起会话时插头照样拒。
 
-import seed from '../../db/routing.default.json' with { type: 'json' };
 import type { HostId } from './domain.ts';
 
 /** 认的写法，从低到高（和 `claude --effort` 的 help 一致）。不在这里的一律不认识。 */
 export const SESSION_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type SessionEffort = (typeof SESSION_EFFORTS)[number];
-
-/**
- * 没配用这一档。值只在 routing.default.json 的 defaults.effort（#1958），这里不另写一份。
- * 创始人 2026-09-28 傍晚拍：总是显式传，不靠各家命令行自己的默认（Grok 自己默认 xhigh）。
- * 骨架里那一档认不出就抛，不当成 high。
- */
-function defaultEffort(value: unknown): SessionEffort {
-  if (!isSessionEffort(value)) {
-    throw new Error(
-      `routing.default.json 的 defaults.effort 不是思考档位：${JSON.stringify(value)}（只有 ${SESSION_EFFORTS.join(' / ')}）`,
-    );
-  }
-  return value;
-}
-
-export const DEFAULT_SESSION_EFFORT: SessionEffort = defaultEffort(seed.defaults?.effort);
 
 /** Grok 命令行 `--reasoning-effort` 认的档。help 不列取值；max 是 Claude Code `--effort` 才有的。 */
 export const GROK_EFFORTS = ['low', 'medium', 'high', 'xhigh'] as const satisfies readonly SessionEffort[];

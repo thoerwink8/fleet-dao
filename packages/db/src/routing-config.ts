@@ -12,7 +12,7 @@ export const ROUTING_DEFAULT_PATH = new URL('../routing.default.json', import.me
 const Id = z.string().trim().min(1);
 
 const RoutingDefaultsSchema = z.strictObject({
-  /** 用途表没另配档位时用这一档。只写在骨架里，effort.ts 和本机工人都从这里读。 */
+  /** 用途表没另配档位时用这一档。只写在骨架里。db 的 routing-defaults.ts 和本机工人读它，shared 不读。 */
   effort: z.enum(SESSION_EFFORTS, { error: `思考档位只有 ${SESSION_EFFORTS.join(' / ')}` }),
   /** 本机工人不给 --model-id 时，按哪一个目录型号查骨架（完整型号，不写别名）。 */
   models: z.strictObject({ grok: Id, codex: Id, claude: Id }),

@@ -272,12 +272,8 @@ function world() {
   };
 }
 
-/** 一份最小的路由骨架：默认档位和型号照仓里那一份，models 给什么就是什么。 */
-const SKELETON_DEFAULTS = {
-  effort: 'high',
-  models: { grok: 'grok-4.7', codex: 'gpt-5.6-luna', claude: 'sonnet-5.5' },
-  claudeModel: 'claude-sonnet-5-5',
-};
+/** 一份最小的路由骨架：默认档位和型号照仓里那一份，不在测试里再写一遍。models 给什么就是什么。 */
+const SKELETON_DEFAULTS = (JSON.parse(REAL_SKELETON) as { defaults: Record<string, unknown> }).defaults;
 const skeletonWith = (models: Record<string, unknown>) =>
   JSON.stringify({ defaults: SKELETON_DEFAULTS, purposes: { default: Object.keys(models) }, models });
 
@@ -803,7 +799,6 @@ const sharedEffort = (await import(
 )) as {
   SESSION_EFFORTS: readonly string[];
   GROK_EFFORTS: readonly string[];
-  DEFAULT_SESSION_EFFORT: string;
 };
 
 describe('start：思考档位照仓里的路由骨架（#470，本机读不到法国库）', () => {
@@ -816,10 +811,10 @@ describe('start：思考档位照仓里的路由骨架（#470，本机读不到�
     return { code, spec: w.spawnCalls[0] };
   };
 
-  it('档位的叫法、默认档和驾驶舱、引擎用的同一份（骨架 defaults.effort，effort.ts 从它读）', () => {
+  it('档位的叫法和驾驶舱、引擎用的同一份；默认档只在骨架里，effort.ts 不另存一份', () => {
     expect(lib.SESSION_EFFORTS).toEqual([...sharedEffort.SESSION_EFFORTS]);
-    const seed = JSON.parse(REAL_SKELETON) as { defaults: { effort: string } };
-    expect(seed.defaults.effort).toBe(sharedEffort.DEFAULT_SESSION_EFFORT);
+    expect(sharedEffort).not.toHaveProperty('DEFAULT_SESSION_EFFORT');
+    expect(lib).not.toHaveProperty('DEFAULT_EFFORT');
     // grok 命令行认的档：和引擎起 grok 会话认的一样
     expect(lib.EFFORTS).toEqual([...sharedEffort.GROK_EFFORTS]);
   });

@@ -1,7 +1,6 @@
 // 思考档位的叫法和「一条路由能配哪几档」（#470）：驾驶舱、骨架装载、引擎起会话都照这一份判，这里钉住判法。
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_SESSION_EFFORT,
   effortRank,
   GROK_EFFORTS,
   isSessionEffort,
@@ -12,9 +11,8 @@ import {
 } from '../src/effort.ts';
 
 describe('叫法', () => {
-  it('从低到高五档，没配用 high', () => {
+  it('从低到高五档', () => {
     expect([...SESSION_EFFORTS]).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
-    expect(DEFAULT_SESSION_EFFORT).toBe('high');
     expect(effortRank('low')).toBeLessThan(effortRank('medium'));
     expect(effortRank('xhigh')).toBeLessThan(effortRank('max'));
   });

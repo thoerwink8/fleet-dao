@@ -82,8 +82,8 @@ import {
   type SpawnInfo,
   type TranscriptEntry,
 } from '@fleet-dao/adapters';
+import { DEFAULT_SESSION_EFFORT } from '@fleet-dao/db';
 import {
-  DEFAULT_SESSION_EFFORT,
   effortRank,
   HOST_EFFORT_SUPPORT,
   type HostId,
@@ -109,7 +109,7 @@ export function isWiredHost(hostId: string): hostId is WiredHost {
   return (WIRED_HOSTS as readonly string[]).includes(hostId);
 }
 
-/** 没配思考档位时用这一档（high，创始人 2026-09-28 傍晚拍）；叫法、各家认哪些档都在 shared 的 effort.ts。 */
+/** 没配思考档位时用骨架 defaults.effort（db 的 routing-defaults.ts 读）；叫法、各家认哪些档都在 shared 的 effort.ts。 */
 export { DEFAULT_SESSION_EFFORT };
 
 /**

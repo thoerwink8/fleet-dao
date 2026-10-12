@@ -2,13 +2,13 @@
 // 读一律从数据库读（不直接查 GitHub；例外是发版卡，现读 GitHub 的主线头和 CI，见 release-card.ts）；
 // 每个写操作都留操作记录。路径取自 shared/web-api.ts 的 WebRoutes。
 
+import { DEFAULT_SESSION_EFFORT } from '@fleet-dao/db';
 import {
   AnswerNotificationRequest,
   AnswerNotificationResponse,
   AuditQuery,
   AuditResponse,
   BoardResponse,
-  DEFAULT_SESSION_EFFORT,
   EnvResponseSchema,
   HARD_BANS,
   HomeResponseSchema,

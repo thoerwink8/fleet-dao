@@ -12,7 +12,6 @@ import {
   answerResolves,
   BoardResponse,
   CredentialsResponse,
-  DEFAULT_SESSION_EFFORT,
   describeEngineMaster,
   ENGINE_MASTER_SETTING,
   EnvResponseSchema,
@@ -2373,7 +2372,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             }),
         };
       });
-      return RoutingEffortsResponse.parse({ defaultEffort: DEFAULT_SESSION_EFFORT, models });
+      // 假后端不连库。真默认档是 routing.default.json 的 defaults.effort（db 的 DEFAULT_SESSION_EFFORT 读它）。
+      return RoutingEffortsResponse.parse({ defaultEffort: 'high', models });
     },
     async routeProbeHistory() {
       await wait();

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { loadRoutingConfig, parseRoutingConfig } from '../src/routing-config.ts';
+import { DEFAULT_SESSION_EFFORT } from '../src/routing-defaults.ts';
 import { bareAliasProblems, seedLiteralProblems } from '../src/routing-seed-single.ts';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
@@ -33,6 +34,9 @@ describe('默认模型和档位只在 routing.default.json', () => {
   it('仓里的骨架有 defaults，型号都是完整的', async () => {
     const cfg = await loadRoutingConfig();
     expect(cfg.defaults?.effort).toBe('high');
+    expect(DEFAULT_SESSION_EFFORT).toBe(cfg.defaults?.effort);
+    // 假后端不连库，展示档写在这一行。和骨架对不上这里就红，不能自己另定一档。
+    expect(text('packages/web/src/api/mock/server.ts')).toContain(`defaultEffort: '${cfg.defaults?.effort}'`);
     expect(cfg.defaults?.models).toEqual({ grok: 'grok-4.7', codex: 'gpt-5.6-luna', claude: 'sonnet-5.5' });
     expect(cfg.defaults?.claudeModel).toBe('claude-sonnet-5-5');
     expect(bareAliasProblems(['auto', 'sonnet-5.5', 'claude-sonnet-5-5'])).toEqual([]);
