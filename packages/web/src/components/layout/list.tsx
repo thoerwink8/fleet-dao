@@ -12,7 +12,12 @@ export function List({ divided = true, className, ...rest }: { divided?: boolean
 }
 
 const rowBase =
-  'flex min-h-row w-full items-center gap-stack px-section py-[calc((var(--spacing-row)-1.25rem)/2)] text-left outline-none focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-11';
+  'flex w-full items-center gap-stack px-section text-left outline-none focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-11';
+/** 一行的行高：单行取 h-row；两行（名字一行加一行小字）取 row-tall，和 RowFrame tall 一样。 */
+const rowHeight = {
+  single: 'min-h-row py-[calc((var(--spacing-row)-1.25rem)/2)]',
+  tall: 'min-h-row-tall py-1.5',
+} as const;
 const rowHover = 'hover:bg-accent';
 
 /**
@@ -68,10 +73,13 @@ export function ListRow({
   expandable,
   defaultOpen = false,
   details,
+  tall = false,
   className,
   children,
   ...rest
 }: {
+  /** 两行的行（主行一行加一行小字）：行高取 row-tall（标准 48、紧凑 40），和 RowFrame tall 同高（任务列表，#1919）。 */
+  tall?: boolean | undefined;
   /** 行首：状态点、图标。 */
   leading?: ReactNode;
   /** 主行文字。 */
@@ -109,7 +117,12 @@ export function ListRow({
       {trailing}
     </>
   );
-  const rowClass = cn(rowBase, selected && 'bg-selected', (expandable || href || onClick) && rowHover);
+  const rowClass = cn(
+    rowBase,
+    tall ? rowHeight.tall : rowHeight.single,
+    selected && 'bg-selected',
+    (expandable || href || onClick) && rowHover,
+  );
   const detail = details ?? children;
   return (
     <li
