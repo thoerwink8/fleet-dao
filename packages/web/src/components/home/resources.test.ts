@@ -146,8 +146,10 @@ describe('整机两格', () => {
   });
 });
 
-test('内存写法：不到 1G 写 M，往上写一位小数的 G', () => {
+test('内存写法：三位数以内写 M，四位数起写一位小数的 G（不出现「1006M」）', () => {
   expect(formatMb(812)).toBe('812M');
+  expect(formatMb(999)).toBe('999M');
+  expect(formatMb(1_006)).toBe('1.0G');
   expect(formatMb(1_536)).toBe('1.5G');
   expect(formatMb(12_000)).toBe('11.7G');
 });

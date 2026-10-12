@@ -91,9 +91,9 @@ export interface HostMeters {
   stale: boolean;
 }
 
-/** 内存写法：不到 1G 写 M，往上写一位小数的 G。 */
+/** 内存写法：三位数以内写 M，四位数起写一位小数的 G（1000–1023M 也写 G，不出现「1006M」这种又长又难读的）。 */
 export function formatMb(mb: number): string {
-  return mb < 1024 ? `${Math.round(mb)}M` : `${(mb / 1024).toFixed(1)}G`;
+  return Math.round(mb) < 1000 ? `${Math.round(mb)}M` : `${(mb / 1024).toFixed(1)}G`;
 }
 
 /** CPU 写法：取整的百分比。 */
