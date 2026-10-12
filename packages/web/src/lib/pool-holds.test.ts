@@ -44,11 +44,26 @@ describe('withPause', () => {
       decidedBy: SWITCH_DECIDED_BY,
       revokeWhen: SWITCH_REVOKE_WHEN,
     });
-    expect(next.relay?.reviewBy).toBe('2026-10-30');
-    expect(next.relay?.owner).toBe('指挥官');
+    expect(next.relay).toMatchObject({ reviewBy: '2026-10-30', owner: '指挥官' });
     const dated = withPause([], 'claude-a', { reason: '被封号', reviewBy: '2026-12-01' });
-    expect(dated['claude-a']?.reviewBy).toBe('2026-12-01');
+    expect(dated['claude-a']).toMatchObject({ reviewBy: '2026-12-01' });
     expect(Object.keys(withoutHold([fact('a'), fact('b')], 'a'))).toEqual(['b']);
+  });
+
+  test('关一个池时，别的池认不出的暂停原样留着', () => {
+    const bad = { reason: '被封号' };
+    const next = withPause(
+      [fact('relay', '2026-10-30')],
+      'claude-a',
+      { reason: '被封号', reviewBy: '' },
+      { y: bad },
+    );
+    expect(next.y).toEqual(bad);
+    expect(next['claude-a']).toMatchObject({ reason: '被封号' });
+    expect(next.relay).toMatchObject({ reviewBy: '2026-10-30' });
+    const opened = withoutHold([fact('relay', '2026-10-30')], 'relay', { y: bad });
+    expect(opened.y).toEqual(bad);
+    expect(opened.relay).toBeUndefined();
   });
 });
 
@@ -66,6 +81,7 @@ describe('poolSettingUnread', () => {
     holds: [],
     problems: [],
     holdAll: false,
+    opaque: {},
     legacy: [],
     version: 0,
     today: '2026-10-12',

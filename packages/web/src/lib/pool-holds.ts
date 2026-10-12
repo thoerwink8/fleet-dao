@@ -1,6 +1,6 @@
 // 额度页每个池那一行的停用开关（设置 engine.poolHolds）：从现状拼出要存的整份值、校验这一行要填的原因。
-// 存的是认得出的那些 {池编号: {reason, decidedBy, revokeWhen, reviewBy?, owner?}}。认不出的项视图里没有原值，重写时带不进去。
-// 复查日期可不填。谁拍的、撤回条件由开关代填，人只写一句原因。
+// 认得出的还原成 {池编号: {reason, decidedBy, revokeWhen, reviewBy?, owner?}}。认不出的原值（视图的 opaque）必须原样写回，
+// 不然关的是这一个池，别的认不出的池会被放开。复查日期可不填。谁拍的、撤回条件由开关代填，人只写一句原因。
 import { BeijingDateSchema } from '@fleet-dao/shared';
 import type { PoolHoldFactView, PoolHolds } from '../api/types';
 
@@ -34,24 +34,33 @@ export function entriesOf(holds: readonly PoolHoldFactView[]): HoldEntries {
   return Object.fromEntries(holds.map((h) => [h.poolId, entryOf(h)]));
 }
 
-/** 撤掉一个池（只撤认得出的那些里的）。 */
-export function withoutHold(holds: readonly PoolHoldFactView[], poolId: string): HoldEntries {
-  const next = entriesOf(holds);
+/**
+ * 撤掉一个池。认得出的留下，认不出的原值（opaque）也留下；只删正在打开的这一个。
+ * 不传 opaque 时只动认得出的（调用方没拿到原值就不能假装留住了）。
+ */
+export function withoutHold(
+  holds: readonly PoolHoldFactView[],
+  poolId: string,
+  opaque: Readonly<Record<string, unknown>> = {},
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...opaque, ...entriesOf(holds) };
   delete next[poolId];
   return next;
 }
 
 /**
  * 额度页关掉一个池：只收原因和可选的复查日期。谁拍的、撤回条件由这一行代填，不写负责人（视图按指挥官）。
- * 别的池认得出的暂停原样留下。
+ * 别的池认得出的暂停原样留下；认不出的原值（opaque）也原样留下，不能因为关这一个池把它们丢掉。
  */
 export function withPause(
   holds: readonly PoolHoldFactView[],
   poolId: string,
   input: { reason: string; reviewBy: string },
-): HoldEntries {
+  opaque: Readonly<Record<string, unknown>> = {},
+): Record<string, unknown> {
   const reviewBy = input.reviewBy.trim();
   return {
+    ...opaque,
     ...entriesOf(holds),
     [poolId]: {
       reason: input.reason.trim(),

@@ -65,6 +65,35 @@ describe('额度页停用开关', () => {
     expect(switchOf('claude-b').getAttribute('aria-checked')).toBe('true');
   });
 
+  test('确认停用一个池时，别的池认不出的暂停原样写回', async () => {
+    const api = createMockApi({ live: false });
+    const bad = { reason: '被封号' };
+    const real = api.poolHolds.bind(api);
+    api.poolHolds = async () => {
+      const v = await real();
+      return {
+        ...v,
+        problems: [...v.problems, { poolId: 'claude-b', why: '缺 decidedBy，这个池照样按暂停办' }],
+        opaque: { ...v.opaque, 'claude-b': bad },
+      };
+    };
+    const spy = vi.spyOn(api, 'updateSetting');
+    renderApp(<QuotaPage />, { api });
+    const sw = await screen.findByRole('switch', { name: 'claude-a 的开关' });
+    await waitFor(() => expect(sw.getAttribute('aria-checked')).toBe('true'));
+    const other = switchOf('claude-b');
+    expect(other.getAttribute('aria-checked')).toBe('false');
+    expect(other.closest('tr')?.querySelector('[data-pool-flag="没查成"]')).toBeTruthy();
+    fireEvent.click(sw);
+    expect(await screen.findByText(/claude-b 的暂停认不出，这次会原样留着/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('原因'), { target: { value: '被封号' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认停用' }));
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+    const body = spy.mock.calls[0]?.[1] as { value: Record<string, unknown> };
+    expect(body.value['claude-b']).toEqual(bad);
+    expect(body.value['claude-a']).toMatchObject({ reason: '被封号' });
+  });
+
   test('填了复查日期就一起存', async () => {
     const api = createMockApi({ live: false });
     const spy = vi.spyOn(api, 'updateSetting');

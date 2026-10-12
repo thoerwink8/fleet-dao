@@ -49,6 +49,11 @@ export interface PoolHoldFacts {
   holdAll: boolean;
   /** 要整池避开的池：认得出的加上那一项认不出的（整份认不出时为空，看 holdAll）。 */
   heldPoolIds: string[];
+  /**
+   * 认不出的那一项的原值（池编号 → 库里那一项）。改别的池时要原样写回，不能丢掉，不然这个池会被放开。
+   * 整份认不出时为空（那不是按池分的条目，看 holdAll）。
+   */
+  opaque: Record<string, unknown>;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -74,11 +79,19 @@ const issueText = (issue: { path: PropertyKey[]; message: string } | undefined):
  * 设置里读到的原值（undefined = 库里没有这一行 = 没有暂停）变成现状。整份不是 {池编号: 条目} 的对象，所有池按暂停办；
  * 某个池的条目认不出，这个池按暂停办、写明原因。
  */
+const emptyFacts = (): PoolHoldFacts => ({
+  holds: [],
+  problems: [],
+  holdAll: false,
+  heldPoolIds: [],
+  opaque: {},
+});
+
 export function resolvePoolHolds(setting: unknown, now: Date): PoolHoldFacts {
-  if (setting === undefined) return { holds: [], problems: [], holdAll: false, heldPoolIds: [] };
+  if (setting === undefined) return emptyFacts();
   if (typeof setting !== 'object' || setting === null || Array.isArray(setting)) {
     return {
-      holds: [],
+      ...emptyFacts(),
       problems: [
         {
           poolId: null,
@@ -86,12 +99,12 @@ export function resolvePoolHolds(setting: unknown, now: Date): PoolHoldFacts {
         },
       ],
       holdAll: true,
-      heldPoolIds: [],
     };
   }
   const holds: PoolHoldFact[] = [];
   const problems: PoolHoldProblem[] = [];
   const heldPoolIds: string[] = [];
+  const opaque: Record<string, unknown> = {};
   for (const [poolId, entry] of Object.entries(setting as Record<string, unknown>)) {
     heldPoolIds.push(poolId);
     const parsed = PoolHoldSchema.safeParse(entry);
@@ -100,6 +113,7 @@ export function resolvePoolHolds(setting: unknown, now: Date): PoolHoldFacts {
         poolId,
         why: `设置 ${POOL_HOLDS_SETTING} 里 ${poolId} 的暂停认不出（${issueText(parsed.error.issues[0])}），这个池照样按暂停办`,
       });
+      opaque[poolId] = entry;
       continue;
     }
     const review = parsed.data.reviewBy
@@ -115,7 +129,43 @@ export function resolvePoolHolds(setting: unknown, now: Date): PoolHoldFacts {
       ...(parsed.data.reviewBy ? { reviewBy: parsed.data.reviewBy } : {}),
     });
   }
-  return { holds, problems, holdAll: false, heldPoolIds };
+  return { holds, problems, holdAll: false, heldPoolIds, opaque };
+}
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/**
+ * 整池暂停的写入。新写的、改过的每一项必须过 PoolHoldSchema。
+ * 库里已经认不出的那一项，原样带回来（和库里逐字一样）才收，这样改别的池不会把它们丢掉。
+ * 新造一条认不出的、或改了认不出的内容：拒。整份不是对象的（holdAll）不能靠这一项混进去。
+ */
+export function acceptPoolHoldsWrite(
+  before: unknown,
+  after: unknown,
+): { ok: true; value: Record<string, unknown> } | { ok: false; message: string } {
+  if (!isPlainObject(after)) {
+    return { ok: false, message: `设置 ${POOL_HOLDS_SETTING} 要是 {池编号: 条目}` };
+  }
+  const prior = isPlainObject(before) ? before : null;
+  const value: Record<string, unknown> = {};
+  for (const [poolId, entry] of Object.entries(after)) {
+    if (poolId.length === 0) return { ok: false, message: '池编号不能留空' };
+    const parsed = PoolHoldSchema.safeParse(entry);
+    if (parsed.success) {
+      value[poolId] = parsed.data;
+      continue;
+    }
+    if (prior && Object.hasOwn(prior, poolId) && JSON.stringify(prior[poolId]) === JSON.stringify(entry)) {
+      value[poolId] = prior[poolId];
+      continue;
+    }
+    return {
+      ok: false,
+      message: `${poolId} 的暂停认不出（${issueText(parsed.error.issues[0])}）。已经在库里、原样没改的才能留着`,
+    };
+  }
+  return { ok: true, value };
 }
 
 // —— 驾驶舱视图（api 的 /pool-holds 和 web 的假数据服务共用这一份）——
@@ -138,6 +188,7 @@ export type LegacyRead = { ok: true; alerts: readonly LegacyAlertLike[] } | { ok
 /**
  * 设置原值（undefined = 没设过）加旧 pool-hold:<池> 提醒 → 驾驶舱看的现状：到期标红（overdue）、认不出的明说、
  * 还靠提醒顶着的列出来（额度页把封号、登录失效显示成「封号」，不自动改开关）。
+ * opaque 带着认不出的原值：额度页改一个池时原样写回，不能只交认得出的。
  */
 export function poolHoldsView(
   setting: { value: unknown; version: number } | undefined,
@@ -159,6 +210,7 @@ export function poolHoldsView(
     holds: facts.holds,
     problems: facts.problems,
     holdAll: facts.holdAll,
+    opaque: facts.opaque,
     legacy: alerts,
     ...(legacy.ok ? {} : { legacyProblem: legacy.why }),
     version: setting?.version ?? 0,

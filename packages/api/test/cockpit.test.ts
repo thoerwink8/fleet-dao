@@ -1126,5 +1126,46 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
       expect((await put({ value: {}, version: 4, reason: '清掉被改坏的值' })).status).toBe(200);
       expect((await view(h, s.cookie)).holdAll).toBe(false);
     });
+
+    it('关一个池时，别的池认不出的暂停原样留着；改了认不出的内容仍拒收', async () => {
+      const h = harness();
+      const s = await h.login();
+      const bad = { reason: '被封号' };
+      h.store.data.settings.push({
+        key: 'engine.poolHolds',
+        value: { y: bad },
+        version: 2,
+        updatedAt: h.clock.now.toISOString(),
+        updatedBy: 'x',
+      });
+      const before = await view(h, s.cookie);
+      expect(before.opaque.y).toEqual(bad);
+      expect(before.problems.map((p) => p.poolId)).toEqual(['y']);
+      const put = (body: unknown) =>
+        h.cockpit.request('/api/settings/engine.poolHolds', write('PUT', s, body));
+      const added = { ...hold() } as Record<string, unknown>;
+      delete added.reviewBy;
+      const ok = await put({
+        value: { y: bad, 'claude-a': added },
+        version: 2,
+        reason: '被封号',
+      });
+      expect(ok.status).toBe(200);
+      const seen = await view(h, s.cookie);
+      expect(seen.opaque.y).toEqual(bad);
+      expect(seen.problems.map((p) => p.poolId)).toEqual(['y']);
+      expect(seen.holds.map((x) => x.poolId)).toEqual(['claude-a']);
+      expect(seen.holds[0]?.reviewBy).toBeUndefined();
+      expect(
+        await errorCode(
+          await put({
+            value: { y: { reason: '换成别的' }, 'claude-a': added },
+            version: 3,
+            reason: '改坏项',
+          }),
+        ),
+      ).toBe('invalid_request');
+      expect((await view(h, s.cookie)).opaque.y).toEqual(bad);
+    });
   });
 });

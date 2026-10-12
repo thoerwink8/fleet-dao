@@ -1,10 +1,11 @@
 // 额度页每个池一行的停用开关。背后仍是 engine.poolHolds。关的时候只写一句原因，复查日期可不填。
 // 引擎探到的封号、登录失效只在这一行标「封号」，不改开关，也不自动撤。
-import { SETTING_SCHEMAS } from '@fleet-dao/shared';
+import { acceptPoolHoldsWrite } from '@fleet-dao/shared';
 import { createContext, type ReactNode, useContext, useState } from 'react';
 import { toast } from 'sonner';
 import { ApiError, errorText, usePoolHolds, useUpdateSetting } from '../api/client';
 import {
+  entriesOf,
   legacyRowStatus,
   pauseProblem,
   poolSettingUnread,
@@ -47,17 +48,19 @@ function saveHold(
   update: SwitchCtx['update'],
   version: number,
   value: unknown,
+  before: unknown,
   why: string,
   done: string,
   onDone: () => void,
 ) {
-  const check = SETTING_SCHEMAS['engine.poolHolds'].safeParse(value);
-  if (!check.success) {
-    toast.error('这个值不行', { description: check.error.issues[0]?.message ?? '不符合约定' });
+  // before 是这一页看到的原值（含认不出的项）。新写的必须过格式；认不出的原样没改才收。
+  const check = acceptPoolHoldsWrite(before, value);
+  if (!check.ok) {
+    toast.error('这个值不行', { description: check.message });
     return;
   }
   update.mutate(
-    { key: 'engine.poolHolds', body: { value: check.data, version, reason: why } },
+    { key: 'engine.poolHolds', body: { value: check.value, version, reason: why } },
     {
       onSuccess: () => {
         toast.success(done);
@@ -85,7 +88,7 @@ export function PoolHoldBanner() {
   const problem = reason.trim() === '' ? '先写一句原因' : null;
   const clear = () => {
     if (!v || problem) return;
-    saveHold(update, v.version, {}, reason.trim(), '已清空整池暂停的设置', () => {
+    saveHold(update, v.version, {}, null, reason.trim(), '已清空整池暂停的设置', () => {
       setOpen(false);
       setReason('');
     });
@@ -248,6 +251,8 @@ export function PoolSwitchForm({ poolId }: { poolId: string }) {
   const onProblem = reason.trim() === '' ? '先写一句原因' : null;
   const problem = mode === 'off' ? offProblem : onProblem;
   const bad = v.problems.map((p) => p.poolId ?? '整份');
+  const kept = v.problems.flatMap((p) => (p.poolId && p.poolId !== poolId ? [p.poolId] : []));
+  const before = { ...v.opaque, ...entriesOf(v.holds) };
   const close = () => {
     setOpen(null);
     setReason('');
@@ -259,14 +264,23 @@ export function PoolSwitchForm({ poolId }: { poolId: string }) {
       saveHold(
         update,
         v.version,
-        withPause(v.holds, poolId, { reason, reviewBy }),
+        withPause(v.holds, poolId, { reason, reviewBy }, v.opaque),
+        before,
         reason.trim(),
         `已停用：${poolId}`,
         close,
       );
       return;
     }
-    saveHold(update, v.version, withoutHold(v.holds, poolId), reason.trim(), `已打开：${poolId}`, close);
+    saveHold(
+      update,
+      v.version,
+      withoutHold(v.holds, poolId, v.opaque),
+      before,
+      reason.trim(),
+      `已打开：${poolId}`,
+      close,
+    );
   };
   return (
     <td className="quota-hold-form">
@@ -274,9 +288,14 @@ export function PoolSwitchForm({ poolId }: { poolId: string }) {
         className="mt-2 flex min-w-0 max-w-lg flex-col gap-2 rounded-lg border-0 bg-muted p-3"
         aria-label={`${poolId} 的停用`}
       >
+        {mode === 'off' && kept.length > 0 ? (
+          <p className="text-meta text-ink-stall">
+            {`${kept.join('、')} 的暂停认不出，这次会原样留着，不会放开。`}
+          </p>
+        ) : null}
         {mode === 'on' && bad.length > 0 ? (
           <p className="text-meta text-ink-stall">
-            {`认不出的有 ${bad.join('、')}。写上原因后只保留认得出的暂停，认不出的这些池会打开。引擎现在仍按暂停办。`}
+            {`认不出的有 ${bad.join('、')}。这次只动 ${poolId}，别的认不出的暂停原样留着。引擎现在仍按暂停办。`}
           </p>
         ) : null}
         <Label htmlFor={`pool-hold-reason-${poolId}`}>{mode === 'off' ? '原因' : '为什么现在能开'}</Label>

@@ -90,6 +90,11 @@ export const PoolHoldsResponse = z.object({
   problems: z.array(PoolHoldProblemSchema),
   /** 设置整份认不出：引擎对所有池按暂停办。 */
   holdAll: z.boolean(),
+  /**
+   * 认不出的池条目原值（池编号 → 库里那一项）。额度页改一个池时必须原样写回，
+   * 不能只交认得出的，否则那些池会被放开。没有时是空对象。
+   */
+  opaque: z.record(z.string(), z.unknown()),
   legacy: z.array(LegacyPoolHoldSchema),
   /** 读旧提醒没读成：为什么（不拿「没有旧提醒」顶）。读成了没有这一项。 */
   legacyProblem: z.string().optional(),

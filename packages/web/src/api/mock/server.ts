@@ -9,6 +9,7 @@ import {
   AUTO_DISPATCH_ENABLE,
   AuditResponse,
   AuthConfigResponse,
+  acceptPoolHoldsWrite,
   answerResolves,
   BoardResponse,
   CI_POLICY_SET,
@@ -2898,21 +2899,27 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       await wait();
       if (!Object.hasOwn(SETTING_SCHEMAS, key)) throw new ApiError(404, 'setting_not_found', '没有这项设置');
       const body = UpdateSettingRequest.parse(raw);
-      const schema: z.ZodType = SETTING_SCHEMAS[key as SettingKey];
-      const value = schema.safeParse(body.value);
-      if (!value.success)
-        throw new ApiError(400, 'invalid_request', '设置的值不符合约定', value.error.issues);
       const current = st.settings.find((s) => s.key === key) ?? { key, value: null, version: 0 };
       if (current.version !== body.version)
         throw new ApiError(409, 'conflict', '这项设置刚被别人改过，刷新后再改');
-      // 整池暂停：撤回、续期必须写原因（和后端同一条判法）
+      // 整池暂停：新写的必须过格式；认不出的原样没改才留（和后端同一条判法）。撤回、续期必须写原因。
+      let stored: unknown;
       if (key === POOL_HOLDS_SETTING) {
-        const missing = revocationProblem(current.value, value.data, body.reason);
+        const accepted = acceptPoolHoldsWrite(current.value, body.value);
+        if (!accepted.ok) throw new ApiError(400, 'invalid_request', accepted.message);
+        const missing = revocationProblem(current.value, accepted.value, body.reason);
         if (missing) throw new ApiError(400, 'reason_required', missing);
+        stored = accepted.value;
+      } else {
+        const schema: z.ZodType = SETTING_SCHEMAS[key as SettingKey];
+        const value = schema.safeParse(body.value);
+        if (!value.success)
+          throw new ApiError(400, 'invalid_request', '设置的值不符合约定', value.error.issues);
+        stored = value.data;
       }
       const next = {
         key,
-        value: value.data,
+        value: stored,
         version: current.version + 1,
         updatedAt: iso(),
         updatedBy: st.me.user.id,
@@ -2923,7 +2930,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         action: 'setting.update',
         target: `setting:${key}`,
         before: current.value,
-        after: value.data,
+        after: stored,
         via: 'cockpit',
         ...(body.reason ? { reason: body.reason } : {}),
       });

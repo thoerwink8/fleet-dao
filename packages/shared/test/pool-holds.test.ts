@@ -1,6 +1,7 @@
 // 整池暂停的判法（#746）：读不到、认不出一律按暂停办，不当成能用；到期只标红，不撤；撤回、续期要写原因。
 import { describe, expect, it } from 'vitest';
 import {
+  acceptPoolHoldsWrite,
   beijingDateOf,
   DEFAULT_POOL_HOLD_OWNER,
   overduePoolHoldPushText,
@@ -85,6 +86,7 @@ describe('resolvePoolHolds：读不出按暂停办', () => {
       problems: [],
       holdAll: false,
       heldPoolIds: [],
+      opaque: {},
     });
     const f = resolvePoolHolds({ 'claude-solo': hold() }, NOW);
     expect(f.heldPoolIds).toEqual(['claude-solo']);
@@ -106,6 +108,13 @@ describe('resolvePoolHolds：读不出按暂停办', () => {
     expect(f.problems.map((p) => p.poolId)).toEqual(['b', 'c', 'd']);
     expect(f.problems[0]?.why).toContain('decidedBy');
     expect(f.holdAll).toBe(false);
+    expect(f.opaque.b).toEqual(hold({ decidedBy: '' }));
+    expect(f.opaque.a).toBeUndefined();
+    const raw = { y: { reason: '被封号', extra: 1 } };
+    const parsed = PoolHoldsResponse.parse(
+      poolHoldsView({ value: raw, version: 1 }, { ok: true, alerts: [] }, NOW),
+    );
+    expect(JSON.stringify(parsed.opaque.y)).toBe(JSON.stringify(raw.y));
   });
 
   it('【故意造出的失败】整份认不出（字符串、数组、null、数字）：所有池按暂停办（holdAll），不是没有暂停', () => {
@@ -178,6 +187,36 @@ describe('驾驶舱视图：旧提醒提示迁成开关，没读成不拿「没�
     expect(v.legacyProblem).toBe('库连不上');
     expect(v.legacy).toEqual([]);
     expect(v.version).toBe(0);
+  });
+});
+
+describe('acceptPoolHoldsWrite：认不出的原样带回来才收', () => {
+  const bad = { reason: '被封号' };
+
+  it('新写的必须过格式；库里认不出的那一项原样没改才留下', () => {
+    const before = { y: bad, relay: hold() };
+    const added = { ...hold() } as Record<string, unknown>;
+    delete added.reviewBy;
+    const next = acceptPoolHoldsWrite(before, {
+      y: bad,
+      relay: hold(),
+      'claude-a': added,
+    });
+    expect(next.ok).toBe(true);
+    if (!next.ok) return;
+    expect(next.value.y).toEqual(bad);
+    expect(next.value['claude-a']).toMatchObject({ reason: '创始人要大用独享' });
+    expect(next.value['claude-a']).not.toHaveProperty('reviewBy');
+  });
+
+  it('【故意造出的失败】新造一条认不出的、或改了认不出的内容：拒，不把库里的换掉', () => {
+    const before = { y: bad };
+    const fresh = acceptPoolHoldsWrite(undefined, { y: bad });
+    expect(fresh.ok).toBe(false);
+    const changed = acceptPoolHoldsWrite(before, { y: { reason: '换成别的' } });
+    expect(changed.ok).toBe(false);
+    const droppedShape = acceptPoolHoldsWrite('停', { y: bad });
+    expect(droppedShape.ok).toBe(false);
   });
 });
 
