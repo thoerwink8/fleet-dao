@@ -55,6 +55,7 @@ import { carpoolApiReader } from './carpool-api.ts';
 import { carpoolRegistry } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
 import { ciTimingsJob } from './ci-timings.ts';
+import { cliVersionsJob } from './cli-versions.ts';
 import { drainNotifier } from './drain-alerts.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
 import { gitNetworkEnv } from './git-env.ts';
@@ -839,6 +840,8 @@ export function realPortsFromEnv(
       meterDir: mirasim.meterDir,
       meterFs: mirasim.meterFs,
     }),
+    // 命令行工具版本（#1969）：probe 读在用版本，引擎进程拉官方最新。不升级。
+    cliVersions: cliVersionsJob({ db }),
   };
   const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});
   // 子代理（#1641，决定 0087）：claude-code 的干活会话带的 --agents 文件，引擎起来时从发布目录的 agents/subagents/ 生成一次；生成不成时

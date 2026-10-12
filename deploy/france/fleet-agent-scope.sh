@@ -24,6 +24,12 @@
 #                                    组织编号、名字、邮箱一概不打出来。标准输出最后一行：switched <类型> / already <类型>；
 #                                    没成是 failed <现在挂的类型：carpool、solo、other 或 unknown>。退出码：0 成功；64 校验不过；
 #                                    其余失败 1。
+#   sudo -n fleet-agent-scope probe --user <fleet-agent-carpool|pilot> -- <工具>
+#   sudo -n fleet-agent-scope probe --npm -- <kimi-code|dsh|pi>
+#                                    只读版本（#1969）。工具名写死：claude、codex、grok、cursor-agent、reclaude、mirasim-server，
+#                                    或全局 npm 的 kimi-code、dsh、pi。只跑 --version（Mirasim 读 current 指向的 servers/<版本> 目录名；
+#                                    npm 跑 npm ls -g --depth=0 --json）。不装、不升级。pilot 只在这条白名单里，run / adopt / org-use 仍不认它。
+#                                    读不到非 0，原因在标准错误。退出码：0 读到了；64 校验不过；124/137 超时；其余是命令自己的。
 #
 # 法国只有一个会话用户 fleet-agent-carpool（reclaude 一个账户最多挂 4 台设备、一个家目录算一台，创始人 2026-09-26；
 # 名字是历史沿用）。它的组织写在家里的 ~/.reclaude/device.json，对它的所有会话一起生效：平时挂拼车，用满切独享、恢复了
@@ -40,6 +46,12 @@
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 SESSION_USERS=(fleet-agent-carpool)
+# probe 比 run 宽一档：pilot 家里也有一份工具，只许读版本。不要把 pilot 加进 SESSION_USERS。
+PROBE_USERS=(fleet-agent-carpool pilot)
+PROBE_USER_TOOLS=(claude codex grok cursor-agent reclaude mirasim-server)
+PROBE_NPM_TOOLS=(kimi-code dsh pi)
+PROBE_TIMEOUT=20
+PROBE_KILL_AFTER=5
 SLICE=fleet-agents.slice
 PREFIX=fleet-agent-
 ENV_RE='^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TERM|GIT_TERMINAL_PROMPT)$'
@@ -480,6 +492,137 @@ org_use() {
   org_fail "$now" "没切成（org use $(rc_name "$rc")：$(scrub "$out")），也没回到原来的$(kind_name "$from_kind")组织：现在挂的是$(kind_name "$now")组织"
 }
 
+probe_home() { # 用户：家目录打到标准输出
+  local home=""
+  if [[ "$AS_USER_TEST" == direct ]]; then
+    home=$HOME_TEST
+  else
+    home=$(getent passwd "$1" | cut -d: -f6) || home=""
+  fi
+  printf '%s' "$home"
+}
+
+# 以这个用户、清掉的环境跑一条写死的命令。限时 PROBE_TIMEOUT，到点 TERM，再过 PROBE_KILL_AFTER 强杀。
+probe_as() { # 用户 家目录 命令…
+  local user=$1 home=$2
+  shift 2
+  local path="/usr/local/bin:/usr/bin:/bin:$home/.local/bin"
+  # direct 是不降权的测试：只看家目录里的假命令。这台镜像的 /usr/bin 里就有 claude、codex，
+  # 混进来会把「没装」测成读到了真版本。生产仍是系统目录在前、~/.local/bin 在最后（和 run 一样）。
+  if [[ "$AS_USER_TEST" == direct ]]; then path="$home/.local/bin"; fi
+  local -a envs=(HOME="$home" USER="$user" LOGNAME="$user" PATH="$path" LANG=C.UTF-8)
+  if [[ "$AS_USER_TEST" == direct ]]; then
+    (cd / && /usr/bin/timeout --kill-after="$PROBE_KILL_AFTER" "$PROBE_TIMEOUT" /usr/bin/env -i "${envs[@]}" "$@")
+  else
+    (cd / && /usr/bin/timeout --kill-after="$PROBE_KILL_AFTER" "$PROBE_TIMEOUT" /usr/bin/setpriv --reuid="$user" --regid="$user" \
+      --init-groups --no-new-privs -- /usr/bin/env -i "${envs[@]}" "$@")
+  fi
+}
+
+probe_known() { # 名字 候选…
+  local name=$1 u
+  shift
+  for u in "$@"; do
+    [[ "$name" == "$u" ]] && return 0
+  done
+  return 1
+}
+
+# Mirasim 服务端没有 --version：current 必须是指向 servers/<版本> 的链接，版本是目录名。
+probe_mirasim() { # 用户 家目录
+  local user=$1 home=$2 link="" rc=0 parent base
+  link=$(probe_as "$user" "$home" /usr/bin/readlink -f "$home/.mirasim-remote/current") || rc=$?
+  if ((rc != 0)) || [[ -z "$link" || ! -d "$link" ]]; then
+    printf 'fleet-agent-scope：读不到 %s 的 Mirasim 在用目录（退出码 %s）\n' "$user" "$rc" >&2
+    exit 1
+  fi
+  parent=$(dirname -- "$link")
+  base=$(basename -- "$link")
+  if [[ $(basename -- "$parent") != servers ]]; then
+    printf 'fleet-agent-scope：Mirasim 的 current 不在 servers 下：%s\n' "$link" >&2
+    exit 1
+  fi
+  if [[ ! $base =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+    printf 'fleet-agent-scope：Mirasim 目录名认不出版本：%s\n' "$base" >&2
+    exit 1
+  fi
+  printf '%s\n' "$base"
+}
+
+probe_one() { # 用户 工具
+  local user=$1 tool=$2 home script bin
+  home=$(probe_home "$user")
+  [[ "$home" == /* ]] || die "找不到 $user 的家目录"
+  case $tool in
+  claude) probe_as "$user" "$home" claude --version ;;
+  codex) probe_as "$user" "$home" codex --version ;;
+  grok) probe_as "$user" "$home" "$home/.grok/bin/grok" --version ;;
+  cursor-agent)
+    script=$AGENT_SCOPE_DEPLOY/lib/cursor-agent-version.sh
+    [[ -f "$script" ]] || die "找不到 cursor-agent 的版本脚本：$script"
+    probe_as "$user" "$home" /bin/sh "$script" "$home/.local/share/cursor-agent/versions"
+    ;;
+  reclaude)
+    bin=${RECLAUDE_TEST_BIN:-$home/.local/bin/reclaude}
+    probe_as "$user" "$home" "$bin" --version
+    ;;
+  mirasim-server) probe_mirasim "$user" "$home" ;;
+  *) die "不认识的工具：「$tool」" ;;
+  esac
+}
+
+# 全局 npm 以 root 跑（这个脚本本身就是 root）。工具名只用来对白名单，不拼进命令。
+probe_npm() {
+  local bin="" c
+  for c in /usr/local/bin/npm /usr/bin/npm; do
+    if [[ -x "$c" ]]; then
+      bin=$c
+      break
+    fi
+  done
+  if [[ -z "$bin" ]]; then
+    printf 'fleet-agent-scope：找不到 npm\n' >&2
+    exit 127
+  fi
+  /usr/bin/timeout --kill-after="$PROBE_KILL_AFTER" "$PROBE_TIMEOUT" /usr/bin/env -i \
+    PATH="/usr/local/bin:/usr/bin:/bin" HOME="${HOME:-/root}" LANG=C.UTF-8 \
+    "$bin" ls -g --depth=0 --json
+}
+
+probe() {
+  local user="" npm=0 tool
+  while (($#)); do
+    case $1 in
+    --user)
+      (($# >= 2)) || die "$1 后面要给一个值"
+      user=$2
+      shift 2
+      ;;
+    --npm)
+      npm=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *) die "不认识的参数：「$1」" ;;
+    esac
+  done
+  (($# == 1)) || die "probe 的 -- 后面要恰好一个写死的工具名，给了 $# 个"
+  tool=$1
+  if ((npm)); then
+    [[ -z "$user" ]] || die "probe --npm 不收 --user"
+    probe_known "$tool" "${PROBE_NPM_TOOLS[@]}" || die "全局 npm 只认 ${PROBE_NPM_TOOLS[*]}，给的是「$tool」"
+    probe_npm
+    return
+  fi
+  [[ -n "$user" ]] || die "probe 要带 --user"
+  probe_known "$user" "${PROBE_USERS[@]}" || die "--user 只能是 ${PROBE_USERS[*]}，给的是「$user」"
+  probe_known "$tool" "${PROBE_USER_TOOLS[@]}" || die "只认 ${PROBE_USER_TOOLS[*]}，给的是「$tool」"
+  probe_one "$user" "$tool"
+}
+
 case ${1:-} in
 run)
   shift
@@ -502,5 +645,9 @@ org-use)
   shift
   org_use "$@"
   ;;
-*) die "用法：fleet-agent-scope run <编号> --user <会话用户> [选项] -- /绝对路径/命令 参数… | stop <编号> | list | adopt <工作树> --user <会话用户> | remove <工作树> | org-use <carpool|solo> --user <会话用户>" ;;
+probe)
+  shift
+  probe "$@"
+  ;;
+*) die "用法：fleet-agent-scope run <编号> --user <会话用户> [选项] -- /绝对路径/命令 参数… | stop <编号> | list | adopt <工作树> --user <会话用户> | remove <工作树> | org-use <carpool|solo> --user <会话用户> | probe --user <fleet-agent-carpool|pilot> -- <工具> | probe --npm -- <kimi-code|dsh|pi>" ;;
 esac

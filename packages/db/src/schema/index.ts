@@ -3,6 +3,7 @@ export * from './alerts.ts';
 export * from './catalog.ts';
 export * from './channel-fallback.ts';
 export * from './channel-models.ts';
+export * from './cli-tool-readings.ts';
 export * from './enums.ts';
 export * from './intents.ts';
 export * from './ops.ts';

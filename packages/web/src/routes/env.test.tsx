@@ -114,9 +114,9 @@ describe('环境页', () => {
         health: { ok: true, value: { ok: false, total: 9, failing: ['temporal', 'engine'], notWired: [] } },
       }),
     );
-    // 会话那一格：没查成 + 原因，不拿 0 顶
-    expect(await screen.findByText('没查成')).toBeTruthy();
-    expect(screen.getByText(/读在跑的会话没成：库连不上（测试故意造的）/)).toBeTruthy();
+    // 会话那一格：没查成 + 原因，不拿 0 顶。整页上命令行工具也有「没查成」，只认这一格。
+    expect(await screen.findByText(/读在跑的会话没成：库连不上（测试故意造的）/)).toBeTruthy();
+    expect(tile('在跑的会话').getByText('没查成')).toBeTruthy();
     expect(screen.queryByText('2')).toBeNull();
     // 别的格不受影响：引擎照常在跑、池占用照常给数
     expect(tile('引擎').getByText('在跑')).toBeTruthy();
