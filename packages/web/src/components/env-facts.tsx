@@ -1,12 +1,12 @@
-// 一台环境的六项事实（引擎、在跑的会话、池占用、健康、在用版本、最近拉单）怎么画：法国页和环境页共用这一份。
-// 原来两页各抄了一遍 TileHead / NotRead / Read / engineWords（#618、#820 片 1），版式一改就要改两处。
+// 一台环境的六项事实（引擎、在跑的会话、池占用、健康、在用版本、最近拉单）怎么画：法国页的本台和对照列共用这一份。
 //
 // 规矩（照搬原来两页，见 specs/820-驾驶舱环境视图与中止恢复/方案.md §5 片 1）：
-// - 后端逐项包好「查成了 / 没查成」，这里只把两态如实画：没查成整格写「没查成 + 原因」，不拿空或 0 顶；一项读失败不连累别的项；
+// - 后端逐项包好「查成了 / 没查成」，这里只把两态如实画：没查成写「没查成 + 原因」，不拿空或 0 顶；一项读失败不连累别的项；
 // - 等待色（黄系）和「真坏了」的红分开：引擎按配置没开、落后主线、从没跑成是等情况，不画红；没连上、健康红、上次失败才红。
 //
-// 版式（驾驶舱改版 2026-10-07）：值和一句白话写在同一格里，格子矮（约 70px），六格在 1920 屏一行排完、1366 屏两行排完；
-// 原来每格是 28px 大字的高卡片，六格竖着堆满一屏，宽屏只用了上半。
+// 版式（路由页样板 #1914 铺开）：一项一行——名字和一个状态在第一行（状态在右），一句白话的灰字在第二行，
+// 挂在这一项底下的东西（发布入口、总开关说明、版本问题）接在灰字下面、和名字对齐。层级靠字重和灰度，不再用 22px 的彩色大字。
+// 每项的小标题（「落后主线几个提交」）在名字的悬停和读屏里。手机上本台六项（tile）各收成一行，点开才看灰字和挂件（#1820）。
 
 import type { LucideIcon } from 'lucide-react';
 import {
@@ -14,7 +14,6 @@ import {
   CalendarClock,
   ChevronDown,
   CircleChevronDown,
-  CircleDashed,
   Gauge,
   HeartPulse,
   Power,
@@ -27,125 +26,180 @@ import { formatAgo, formatDateTime } from '../lib/format';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
-import { Section } from './layout/section';
-import { StatusDot } from './layout/status-badge';
+import { RowFrame } from './layout/list';
+import { StatusBadge, StatusDot } from './layout/status-badge';
 
-const TONE_CLASS: Record<Tone, string> = {
-  done: 'text-ink-done',
-  run: 'text-ink-run',
-  wait: 'text-ink-wait',
-  human: 'text-ink-human',
-  stall: 'text-ink-stall',
-  fail: 'text-ink-fail',
-  stop: 'text-ink-stop',
-};
-
-/** 挂在每格上的数据属性：法国页叫 data-france-fact、环境页叫 data-env-fact（测试按它找格子）。 */
+/** 挂在每格上的数据属性：本台单独画时叫 data-france-fact、对照列里叫 data-env-fact（测试按它找格子）。 */
 export type FactKind = 'env' | 'france';
-/** tile = 独立的卡片（法国页一行六张）；row = 环境页一列里的一行（上边线分隔）。 */
+/** tile = 本台单独画（法国页只有一台时，一个区块里的一行；手机上折成一行）；row = 对照列里的一行（上边线分隔，手机也不折）。 */
 export type FactLook = 'tile' | 'row';
 
 type Head = { label: string; hint: string; icon: LucideIcon };
 
-function FactHead({ label, hint, icon: Icon }: Head) {
+/** 名字：小标题收进悬停和读屏，不另占一行。 */
+function FactLabel({ label, hint }: Head) {
   return (
-    <span className="flex min-w-0 items-center gap-1.5 text-meta text-muted-foreground">
-      <Icon className="size-3.5 shrink-0 opacity-70" aria-hidden />
-      <span className="shrink-0">{label}</span>
-      <span className="min-w-0 truncate opacity-80">· {hint}</span>
+    <span className="min-w-0 truncate text-body font-medium" title={hint}>
+      {label}
+      <span className="sr-only">（{hint}）</span>
     </span>
   );
 }
 
 /**
- * 一格的外框：tile 是独立的区块（Section，没查成的虚线边），row 是一列里的一行（上边线分隔）。
- * 测试按 data-env-fact / data-france-fact 找格子。
+ * 一行右边的那个状态：有状态色的走 StatusBadge（点加字）；没有状态色的（会话个数、几块池）写成普通的字；
+ * 失联列（muted）一律灰色小字、不带状态色，别让旧的「在跑」「N 项红」看起来像现在的状态。
  */
+function FactValue({
+  value,
+  tone,
+  muted,
+  mono,
+  title,
+}: {
+  value: string | number;
+  tone?: Tone | undefined;
+  muted?: boolean | undefined;
+  mono?: boolean | undefined;
+  title?: string | undefined;
+}) {
+  if (muted) {
+    return (
+      <span data-fact-value title={title} className="num shrink-0 text-body text-muted-foreground">
+        {value}
+      </span>
+    );
+  }
+  if (tone) {
+    return (
+      <span data-fact-value title={title} className="shrink-0">
+        <StatusBadge
+          tone={tone}
+          label={String(value)}
+          variant="dot"
+          className={cn('num text-body', mono && 'font-mono')}
+        />
+      </span>
+    );
+  }
+  return (
+    <span data-fact-value title={title} className="num shrink-0 text-body font-medium">
+      {value}
+    </span>
+  );
+}
+
+/** 一项的外框：数据属性挂在这里（测试按 data-env-fact / data-france-fact 找格子）。对照列里的行带上边线，本台的由外面的列表分隔。 */
 function FactShell({
   kind,
   state,
   look,
-  flush,
-  extra,
   children,
   ...rest
 }: {
   kind: FactKind;
   state: 'ok' | 'unread';
   look: FactLook;
-  /** tile：外框不留内边距，里面自己排（手机上折成一行的那种）。 */
-  flush?: boolean;
-  extra?: string;
   children: ReactNode;
   'data-fact-folded'?: 'open' | 'closed';
 }) {
   const attr = { [`data-${kind}-fact`]: state };
-  if (look === 'tile') {
-    return (
-      <Section
-        {...attr}
-        {...rest}
-        {...(flush ? { flush: true } : {})}
-        className={cn(state === 'unread' && 'border-dashed', extra)}
-      >
-        {children}
-      </Section>
-    );
-  }
   return (
-    <div {...attr} {...rest} className={cn('min-w-0 border-t px-4 py-3', extra)}>
+    <div {...attr} {...rest} className={cn('min-w-0', look === 'row' && 'border-t')}>
       {children}
     </div>
   );
 }
 
+/** 一行（桌面、对照列）：名字 + 状态一行，灰字一行，挂件接在下面、和名字对齐。 */
+function FactRow({
+  head,
+  value,
+  sub,
+  children,
+}: {
+  head: Head;
+  value: ReactNode;
+  sub?: string | undefined;
+  children?: ReactNode;
+}) {
+  const Icon = head.icon;
+  return (
+    <RowFrame tall className="items-start">
+      <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+      <div className="min-w-0 flex-1">
+        <div className="flex min-h-5 min-w-0 items-center justify-between gap-3 whitespace-nowrap">
+          <FactLabel {...head} />
+          {value}
+        </div>
+        {sub ? (
+          // 桌面一行截断、整句在悬停里；手机没有悬停，照常折行
+          <p className="text-meta text-muted-foreground md:truncate" title={sub}>
+            {sub}
+          </p>
+        ) : null}
+        {children ? <div className="mt-1.5 mb-1">{children}</div> : null}
+      </div>
+    </RowFrame>
+  );
+}
+
 /**
- * 手机上法国页「本台六项事实」一行一项（#1820）：名字 · 状态点 · 一句话，点开才看原来那一整格。
+ * 手机上本台六项一行一项（#1820）：名字 · 状态点 · 一句话，点开才看完整的灰字和挂件。
  * 两列各六格在 390 宽占了法国页大半的长度；一行一项六行就看完，要细节再点开。
  */
 function FoldedFact({
   kind,
   state,
-  label,
-  icon: Icon,
+  head,
   tone,
   summary,
+  sub,
   children,
 }: {
   kind: FactKind;
   state: 'ok' | 'unread';
-  label: string;
-  icon: LucideIcon;
+  head: Head;
   tone: Tone;
   summary: ReactNode;
-  children: ReactNode;
+  sub?: string | undefined;
+  children?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const Icon = head.icon;
   return (
-    <FactShell kind={kind} state={state} look="tile" flush data-fact-folded={open ? 'open' : 'closed'}>
+    <FactShell kind={kind} state={state} look="tile" data-fact-folded={open ? 'open' : 'closed'}>
       <button
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="flex min-h-10 w-full items-center gap-2 px-3 py-2 text-left text-body"
+        className="flex min-h-11 w-full items-center gap-2 px-4 py-2 text-left text-body whitespace-nowrap"
       >
-        <Icon className="size-3.5 shrink-0 text-muted-foreground opacity-70" aria-hidden />
-        <span className="shrink-0 text-muted-foreground">{label}</span>
-        <StatusDot tone={tone} />
+        <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        <FactLabel {...head} />
+        <StatusDot tone={tone} className="ml-1" />
         <span className="num min-w-0 flex-1 truncate" data-fact-summary>
           {summary}
         </span>
         <ChevronDown
-          className={cn('size-4 shrink-0 text-muted-foreground transition-transform', open && 'rotate-180')}
+          className={cn(
+            'size-4 shrink-0 text-muted-foreground transition-transform duration-200',
+            open && 'rotate-180',
+          )}
           aria-hidden
         />
       </button>
-      {open ? <div className="border-t px-4 py-3">{children}</div> : null}
+      {open ? (
+        <div className="px-4 pb-3 pl-10">
+          {sub ? <p className="text-meta text-muted-foreground">{sub}</p> : null}
+          {children ? <div className="mt-1.5">{children}</div> : null}
+        </div>
+      ) : null}
     </FactShell>
   );
 }
 
-/** 没查成的一格：明说原因，等待色虚线（不是红、不是 0）。失联列 muted 时「没查成」也改成灰色小字。 */
+/** 没查成的一项：状态写「没查成」（等待色，不是红、不是 0），灰字写原因。失联列 muted 时「没查成」也是灰字。 */
 function NotRead({
   kind,
   look,
@@ -166,112 +220,25 @@ function NotRead({
       <FoldedFact
         kind={kind}
         state="unread"
-        label={head.label}
-        icon={head.icon}
+        head={head}
         tone="stall"
         summary={`没查成 · ${reason}`}
+        sub={reason}
       >
-        <NotReadInner look="tile" reason={reason} muted={muted} head={head}>
-          {children}
-        </NotReadInner>
+        {children}
       </FoldedFact>
     );
   }
   return (
-    <FactShell kind={kind} state="unread" look={look} extra="text-muted-foreground">
-      <NotReadInner look={look} reason={reason} muted={muted} head={head}>
+    <FactShell kind={kind} state="unread" look={look}>
+      <FactRow head={head} value={<FactValue value="没查成" tone="stall" muted={muted} />} sub={reason}>
         {children}
-      </NotReadInner>
+      </FactRow>
     </FactShell>
   );
 }
-/** 没查成那一格的内容（不含外框）：头、「没查成」、原因。 */
-function NotReadInner({
-  look,
-  reason,
-  muted,
-  head,
-  children,
-}: {
-  look: FactLook;
-  reason: string;
-  muted?: boolean | undefined;
-  head: Head;
-  children?: ReactNode;
-}) {
-  return (
-    <>
-      <FactHead {...head} />
-      <div className={look === 'row' ? 'mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5' : 'mt-1.5'}>
-        <div className="flex items-center gap-1.5">
-          <CircleDashed
-            className={cn('shrink-0', muted ? 'size-3.5 text-muted-foreground' : 'size-4 text-ink-stall')}
-            aria-hidden
-          />
-          <span
-            className={cn(
-              'leading-tight',
-              muted
-                ? 'text-body font-normal text-muted-foreground'
-                : 'text-title font-semibold text-ink-stall',
-            )}
-          >
-            没查成
-          </span>
-        </div>
-        <p className={cn('text-meta', look === 'tile' && 'mt-1')}>{reason}</p>
-      </div>
-      {children}
-    </>
-  );
-}
 
-/** 查成了那一格的内容（不含外框）。 */
-function ReadInner({
-  look,
-  value,
-  sub,
-  tone,
-  muted,
-  head,
-  children,
-}: {
-  look: FactLook;
-  value: ReactNode;
-  sub?: ReactNode;
-  tone?: Tone | undefined;
-  muted?: boolean | undefined;
-  head: Head;
-  children?: ReactNode;
-}) {
-  return (
-    <>
-      <FactHead {...head} />
-      {/* 一列一行（环境页）时值和白话并在一行，行矮一半；独立卡片（法国页）时上下两行 */}
-      <div className={look === 'row' ? 'mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-0.5' : 'mt-1.5'}>
-        <div
-          data-fact-value
-          data-tone={muted ? undefined : tone}
-          className={cn(
-            'num leading-tight',
-            look === 'tile' && 'truncate',
-            muted
-              ? 'text-body font-normal text-muted-foreground'
-              : cn('text-title font-semibold', tone ? TONE_CLASS[tone] : undefined),
-          )}
-        >
-          {value}
-        </div>
-        {sub ? (
-          <div className={cn('text-meta text-muted-foreground', look === 'tile' && 'mt-1')}>{sub}</div>
-        ) : null}
-      </div>
-      {children}
-    </>
-  );
-}
-
-/** 查成了的一格：值 + 一句白话；tone 只给真正要提醒的那几种。失联列 muted 时值改成灰色小字、不用醒目色。 */
+/** 查成了的一项：状态 + 一句白话；tone 只给真正要提醒的那几种。 */
 function Read({
   kind,
   look,
@@ -279,31 +246,32 @@ function Read({
   sub,
   tone,
   muted,
+  mono,
+  valueTitle,
   children,
   ...head
 }: Head & {
   kind: FactKind;
   look: FactLook;
-  value: ReactNode;
-  sub?: ReactNode;
+  value: string | number;
+  sub?: string | undefined;
   tone?: Tone | undefined;
   muted?: boolean | undefined;
+  /** 值是提交号：等宽字。 */
+  mono?: boolean | undefined;
+  /** 值的悬停：完整时间这类。 */
+  valueTitle?: string | undefined;
   children?: ReactNode;
 }) {
   const phone = usePhone();
-  const inner = (
-    <ReadInner look={look} value={value} sub={sub} tone={tone} muted={muted} head={head}>
-      {children}
-    </ReadInner>
-  );
   if (phone && look === 'tile') {
     return (
       <FoldedFact
         kind={kind}
         state="ok"
-        label={head.label}
-        icon={head.icon}
+        head={head}
         tone={tone ?? 'done'}
+        sub={sub}
         summary={
           <>
             {value}
@@ -311,13 +279,19 @@ function Read({
           </>
         }
       >
-        {inner}
+        {children}
       </FoldedFact>
     );
   }
   return (
     <FactShell kind={kind} state="ok" look={look}>
-      {inner}
+      <FactRow
+        head={head}
+        value={<FactValue value={value} tone={tone} muted={muted} mono={mono} title={valueTitle} />}
+        sub={sub}
+      >
+        {children}
+      </FactRow>
     </FactShell>
   );
 }
@@ -359,7 +333,7 @@ const HEADS = {
 } satisfies Record<string, Head>;
 
 /**
- * 六格，按固定先后（引擎、会话、池、健康、版本、拉单）一格一个元素返回；外层决定怎么排（法国页一行六格、环境页一列六行用 subgrid 对齐）。
+ * 六项，按固定先后（引擎、会话、池、健康、版本、拉单）一项一个元素返回；外层决定怎么排（本台两栏各三行、对照列一列六行用 subgrid 对齐）。
  * jobCount：最近拉单「从没跑成」时顺带写一共几个定时任务（法国页有这份数）。
  */
 export function factCells({
@@ -377,9 +351,9 @@ export function factCells({
   kind: FactKind;
   look: FactLook;
   jobCount?: number | undefined;
-  /** 挂在「在用版本」那一格底下的东西（#1255：发布入口）。只有本台那一列给；远程列只读，不给。版本读成读不成都挂。 */
+  /** 挂在「在用版本」那一项底下的东西（#1255：发布入口）。只有本台给；远程列只读，不给。版本读成读不成都挂。 */
   versionExtra?: ReactNode;
-  /** 挂在「引擎」那一格底下：总开关关着、进程仍在跑时，说明这两件不是一回事。 */
+  /** 挂在「引擎」那一项底下：总开关关着、进程仍在跑时，说明这两件不是一回事。 */
   engineNote?: ReactNode;
   /** 失联 / 没数据：状态值改成灰色小字，不再用醒目色（法国页远程列）。 */
   muted?: boolean | undefined;
@@ -451,29 +425,37 @@ export function factCells({
 
   if (facts.version.ok) {
     const v = facts.version.value;
+    const behindLine =
+      v.behind !== null && v.behind > 0 && !v.detail?.includes('落后主线') ? (
+        <p className="text-meta text-ink-stall">落后主线 {v.behind} 个提交</p>
+      ) : null;
+    const problems = v.problems.length ? (
+      <ul className="space-y-0.5 text-meta text-ink-stall">
+        {v.problems.map((p) => (
+          <li key={p} className="flex gap-1.5">
+            <CircleChevronDown className="mt-0.5 size-3 shrink-0" aria-hidden />
+            <span className="min-w-0">{p}</span>
+          </li>
+        ))}
+      </ul>
+    ) : null;
     cells.push(
       <Read
         key="version"
         {...base}
         {...HEADS.version}
         value={v.current === null ? '没查成' : v.current.slice(0, 12)}
+        mono={v.current !== null}
         sub={v.detail}
         tone={versionTone(v)}
       >
-        {v.behind !== null && v.behind > 0 && !v.detail?.includes('落后主线') ? (
-          <p className="mt-1 text-meta text-ink-stall">落后主线 {v.behind} 个提交</p>
+        {behindLine || problems || versionExtra ? (
+          <div className="space-y-1.5">
+            {behindLine}
+            {problems}
+            {versionExtra}
+          </div>
         ) : null}
-        {v.problems.length ? (
-          <ul className="mt-1 space-y-0.5 text-meta text-ink-stall">
-            {v.problems.map((p) => (
-              <li key={p} className="flex gap-1.5">
-                <CircleChevronDown className="mt-0.5 size-3 shrink-0" aria-hidden />
-                <span className="min-w-0">{p}</span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {versionExtra}
       </Read>,
     );
   } else {
@@ -498,6 +480,8 @@ export function factCells({
               ? formatAgo(v.lastSuccessAt, now)
               : '没查到上次跑成的时间'
         }
+        // 最近一次跑成的完整时刻在值的悬停里（原来是这一格底下单独一行）
+        valueTitle={v.lastSuccessAt ? `最近一次跑成：${formatDateTime(v.lastSuccessAt)}` : undefined}
         tone={scheduleTone(v)}
         sub={
           v.status === 'never'
@@ -510,23 +494,26 @@ export function factCells({
                 ? '上次这一轮还没有结局'
                 : `上次结局：${v.outcome}${v.scanned === undefined ? '' : `，扫了 ${v.scanned} 个`}`
         }
-      >
-        {v.lastSuccessAt ? (
-          <div className="num mt-0.5 text-meta text-muted-foreground">
-            最近一次跑成：{formatDateTime(v.lastSuccessAt)}
-          </div>
-        ) : null}
-      </Read>,
+      />,
     );
   } else cells.push(<NotRead key="schedule" {...base} {...HEADS.schedule} reason={facts.schedule.reason} />);
 
   return cells;
 }
 
-/** 六项里几项没查成、健康几项红：列头上的一行小结。 */
-export function factsSummary(facts: EnvFacts): ReactNode {
-  const failing = facts.health.ok ? facts.health.value.failing.length : undefined;
-  const unread = [
+/** 六项里几项没查成、健康几项红：列头、标题块灰字里的一句小结（都没有就是 null）。 */
+export function factsSummary(facts: EnvFacts): string | null {
+  const failing = facts.health.ok ? facts.health.value.failing.length : 0;
+  const unread = factsUnread(facts);
+  const parts: string[] = [];
+  if (unread > 0) parts.push(`${unread} 项没查成`);
+  if (failing > 0) parts.push(`健康 ${failing} 项红`);
+  return parts.length ? parts.join(' · ') : null;
+}
+
+/** 几项没查成（含总开关那一项）。 */
+export function factsUnread(facts: EnvFacts): number {
+  return [
     facts.engine,
     ...(facts.master ? [facts.master] : []),
     facts.version,
@@ -535,15 +522,7 @@ export function factsSummary(facts: EnvFacts): ReactNode {
     facts.health,
     facts.schedule,
   ].filter((f) => !f.ok).length;
-  if (!unread && !failing) return null;
-  return (
-    <>
-      {unread > 0 ? <span className="text-ink-stall">{unread} 项没查成</span> : null}
-      {unread > 0 && failing ? ' · ' : null}
-      {failing ? <span className="text-ink-fail">健康 {failing} 项红</span> : null}
-    </>
-  );
 }
 
-/** 六格的行数：环境页按它给每一列划 subgrid 行。 */
+/** 六格的行数：对照列按它给每一列划 subgrid 行。 */
 export const FACT_ROWS = 6;
