@@ -39,7 +39,12 @@ export function ModelRosterNotice({ layers }: { layers: RoutingLayers }) {
     roster.notYet.length === 0 &&
     manual.length === 0
   ) {
-    body = <p>{matchedSentence(roster)}</p>;
+    // 都对得上是好消息：一行淡字，不占一张卡（#1916，样板：好消息不上色、不抢地方）
+    return (
+      <section aria-label="渠道模型表" className="mb-3 truncate text-meta text-muted-foreground">
+        {matchedSentence(roster)}
+      </section>
+    );
   } else if (
     roster.missingFromCatalog.length === 0 &&
     roster.goneRoutes.length === 0 &&

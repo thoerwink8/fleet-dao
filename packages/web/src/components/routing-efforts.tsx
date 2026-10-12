@@ -4,6 +4,8 @@
 //   配过的在路由行的小字里写「档位上限 xhigh」，没配不写（默认不是新闻）。
 // - 「思考档位」页签（EffortsTab）是原来 /efforts 那一整页：所有模型的所有路一张表，按家族分组，搜索、只看配过的，
 //   配不了、未分类默认折叠。要横着比、要找「哪几条配过」时看这里；/efforts 转到这个页签。
+//   #1916 按样板重做：一行一条路由，两行字（模型名、「渠道 · 池 · 执行方式」），右边现在照哪档和下拉；池号看得见（同一模型两条
+//   Claude 订阅的路要分得出），路由号只在悬停；家族组头是淡字小标题。没配进用途的路由在模型目录、渠道里用行尾的紧凑版（RouteEffortInline）。
 // 改这里之前必须知道（原 routes/efforts.tsx 的规矩，原样保留）：
 // - 档位存在库里（运行时配置，决定 0011 第 7 条）：改了直接写库，不开 PR、不用发版。
 // - 能配哪几档由后端照这条路由的执行方式给好（choices；配不了给 fixed 和原因），这里不另判：Grok 没有 max、cursor 整串
@@ -32,7 +34,7 @@ import {
 import { TIME } from '../lib/format';
 import { cn } from '../lib/utils';
 import { EmptyState } from './layout/empty-state';
-import { List, ListRow } from './layout/list';
+import { List, RowFrame } from './layout/list';
 import { LoadError, LoadingRows } from './layout/load-state';
 import { SearchInput } from './layout/search-input';
 import { Section } from './layout/section';
@@ -55,9 +57,6 @@ const DEFAULT_VALUE = 'default';
 
 /** 思考档位没有推送，每 60 秒自己重拉。这份快照超过 5 分钟还没再读成，刷新钮旁标「数据已过期」。 */
 export const EFFORTS_STALE_AFTER_MS = 5 * TIME.MIN;
-
-/** 一行四格：模型 | 路由 | 当前档位 | 改档位。窄屏两列两行：模型+路由一行，档位+下拉一行，不横滚。 */
-const ROW_GRID = 'grid w-full min-w-0 grid-cols-2 items-center gap-x-3 gap-y-1.5 md:grid-cols-efforts';
 
 // —— 改一条路由的档位：页签里的表、路由明细里的一格共用 ——
 
@@ -230,6 +229,82 @@ function RouteEffortEditor({
   );
 }
 
+/**
+ * 行尾的紧凑版（没配进用途的路由那一行，#1916）：只有下拉；配不了、没接上、没读成写两三个字，整句在悬停里。
+ * 没改成的原因照写在下拉下面（红字），不冒充改成了。
+ */
+export function RouteEffortInline({
+  modelId,
+  modelName,
+  routeId,
+  routeName,
+}: {
+  modelId: string;
+  modelName: string;
+  routeId: string;
+  routeName: string;
+}) {
+  const { data, error, isLoading } = useRoutingEfforts();
+  const quiet = (text: string, title: string, fixed = false) => (
+    <span
+      data-route-effort
+      data-effort-fixed={fixed ? '' : undefined}
+      title={title}
+      className="shrink-0 text-meta whitespace-nowrap text-muted-foreground"
+    >
+      {text}
+    </span>
+  );
+  if (error) {
+    return (
+      <span
+        data-route-effort
+        className="shrink-0 text-meta whitespace-nowrap text-ink-fail"
+        title={errorText(error)}
+      >
+        档位没读成
+      </span>
+    );
+  }
+  if (isLoading || !data) return quiet('读着…', '思考档位还在读');
+  if (data.unavailable) return quiet('档位没接上', data.unavailable);
+  const r = findRouteEffort(data.models, modelId, routeId);
+  if (!r) return quiet('没有档位', '目录里没有这条路由的档位');
+  if (r.fixed !== undefined) return quiet('档位配不了', `配不了：${r.fixed}`, true);
+  return (
+    <InlineEffortEditor
+      modelId={modelId}
+      route={r}
+      fallback={data.defaultEffort}
+      label={`${modelName} · ${routeName} 的思考档位`}
+    />
+  );
+}
+
+function InlineEffortEditor({
+  modelId,
+  route,
+  fallback,
+  label,
+}: {
+  modelId: string;
+  route: RouteEffort;
+  fallback: SessionEffort;
+  label: string;
+}) {
+  const edit = useRouteEffortEdit(modelId, route);
+  return (
+    <span data-route-effort className="flex max-w-48 shrink-0 flex-col items-end">
+      <EffortSelect edit={edit} route={route} fallback={fallback} label={label} className="w-28" />
+      {edit.update.isError ? (
+        <span role="alert" className="mt-1 text-right text-meta text-ink-fail">
+          没改成：{errorText(edit.update.error)}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 // —— 「思考档位」页签：原来的 /efforts 整页 ——
 
 export function EffortsTab() {
@@ -317,15 +392,7 @@ export function EffortsTab() {
 
           {families.length > 0 ? (
             <Section flush>
-              <div
-                aria-hidden
-                className={cn(ROW_GRID, 'border-b px-4 py-2 text-meta text-muted-foreground max-md:hidden')}
-              >
-                <span>模型</span>
-                <span>路由</span>
-                <span>当前档位</span>
-                <span>改档位</span>
-              </div>
+              {/* 不再有「模型 | 路由 | 当前档位 | 改档位」表头：一行两行字，右边就是档位（#1916） */}
               {families.map((g) => (
                 <FamilyGroup key={g.family} label={g.label} rows={g.rows} fallback={data.defaultEffort} />
               ))}
@@ -444,19 +511,20 @@ function FamilyGroup({
   const configured = rows.filter((r) => r.route.effort !== undefined).length;
   return (
     <div className="border-b last:border-b-0">
+      {/* 家族组头：淡字小标题加条数，不再是灰底横条（样板：层级靠字重和灰度，不靠色块） */}
       <button
         type="button"
         aria-expanded={open}
         aria-controls={bodyId}
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 bg-muted px-4 py-2 text-left text-body font-medium hover:bg-accent max-md:min-h-10"
+        className="flex w-full items-center gap-1.5 border-b px-4 pt-3 pb-2 text-left text-meta font-medium text-muted-foreground hover:text-foreground max-md:min-h-10"
       >
         <ChevronDown
-          className={cn('size-4 shrink-0 text-muted-foreground transition-transform', !open && '-rotate-90')}
+          className={cn('size-4 shrink-0 transition-transform', !open && '-rotate-90')}
           aria-hidden
         />
         <span>{label}</span>
-        <span className="num text-meta font-normal text-muted-foreground">
+        <span className="num font-normal">
           {rows.length} 条{configured > 0 ? `，已配 ${configured}` : ''}
         </span>
       </button>
@@ -514,11 +582,9 @@ function FixedFold({
             const items = g.items.filter((i) => effortRowMatches(i, search));
             if (items.length === 0) return null;
             return (
-              <Section
-                key={g.reason}
-                title={<span className="font-normal text-muted-foreground">{g.reason}</span>}
-                flush
-              >
+              <Section key={g.reason} flush>
+                {/* 原因是一段话：小字灰字写在这一组上面，不当大标题（#1916，原来用区块标题，手机上一大段粗字） */}
+                <p className="border-b px-4 pt-3 pb-2 text-meta text-muted-foreground">{g.reason}</p>
                 <List>
                   {items.map(({ model, route }) => (
                     <FixedRouteRow key={route.routeId} model={model} route={route} />
@@ -582,28 +648,68 @@ function UncategorizedFold({
   );
 }
 
-/** 配不了分组里的行：原因已在分组头，这里只写渠道和路由编号。 */
+/**
+ * 页签里一行一条路由（#1916，样板 #1914）：第一行模型名加一个状态（关着才写「关着」），第二行灰字「渠道 · 池 · 执行方式」，
+ * 右边是现在照哪一档和档位下拉。池号写出来：同一个模型常有两条同渠道的路（Claude 订阅 · claude-a、claude-b），
+ * 只写渠道名就分不出哪条是哪条（#1902 只把池号放悬停，这里改成可见；路由编号这类内部 id 仍只在悬停）。
+ */
+function EffortRowFrame({
+  routeId,
+  modelId,
+  name,
+  nameTitle,
+  route: r,
+  trailing,
+  detail,
+}: {
+  routeId: string;
+  modelId: string;
+  name: string;
+  nameTitle?: string | undefined;
+  route: RouteEffort;
+  trailing?: ReactNode;
+  detail?: ReactNode;
+}) {
+  const where = `${r.channelName} · ${r.poolId} · ${hostLabel[r.hostId]}`;
+  return (
+    <li data-route={routeId} data-model={modelId} className="hover:bg-accent">
+      <RowFrame tall>
+        <span className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
+          <span className="flex min-w-0 items-center gap-2 whitespace-nowrap">
+            <span className="min-w-0 truncate text-body font-medium" title={nameTitle ?? name}>
+              {name}
+            </span>
+            {r.enabled ? null : (
+              <span className="inline-flex shrink-0">
+                <StatusBadge tone="stop" label="关着" variant="dot" />
+              </span>
+            )}
+          </span>
+          <span
+            data-route-where
+            className="block truncate text-meta whitespace-nowrap text-muted-foreground"
+            title={`${where} · ${r.routeId}`}
+          >
+            {where}
+          </span>
+        </span>
+        {trailing}
+      </RowFrame>
+      {detail}
+    </li>
+  );
+}
+
+/** 配不了分组里的行：原因已在分组头，这里只写模型、渠道和池。 */
 function FixedRouteRow({ model, route: r }: { model: EffortModel; route: RouteEffort }) {
   const name = isUncategorizedModel(model) ? readableModelName(model.modelId) : model.displayName;
   return (
-    <ListRow
-      data-route={r.routeId}
-      data-model={model.modelId}
-      summary={
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
-          <span
-            className="text-body font-medium"
-            title={isUncategorizedModel(model) ? model.modelId : undefined}
-          >
-            {name}
-          </span>
-          <span className="text-body text-muted-foreground" title={`${r.poolId} · ${r.routeId}`}>
-            {r.channelName}
-          </span>
-          <span className="text-meta text-muted-foreground">{hostLabel[r.hostId]}</span>
-          {r.enabled ? null : <StatusBadge tone="stop" label="关着" />}
-        </div>
-      }
+    <EffortRowFrame
+      routeId={r.routeId}
+      modelId={model.modelId}
+      name={name}
+      nameTitle={isUncategorizedModel(model) ? model.modelId : undefined}
+      route={r}
     />
   );
 }
@@ -625,35 +731,33 @@ function EffortRouteRow({
   const edit = useRouteEffortEdit(modelId, r);
   const title = `${r.channelName} · ${r.poolId}`;
   return (
-    <ListRow
-      data-route={r.routeId}
-      data-model={modelId}
-      summary={
-        <div className="min-w-0 flex-1">
-          <div className={ROW_GRID}>
-            <span className="min-w-0 truncate text-body font-medium" title={rawModelId ?? modelName}>
-              {modelName}
-            </span>
-            {/* 路由列只写渠道名和关着的状态；池号、路由号这类内部 id 放悬停，不占行宽（#1902） */}
-            <span className="flex min-w-0 items-center gap-1.5 text-body text-muted-foreground">
-              <span className="truncate" title={`${title} · ${hostLabel[r.hostId]} · ${r.routeId}`}>
-                {r.channelName}
-              </span>
-              <span className="shrink-0 text-meta text-muted-foreground max-md:hidden">
-                {hostLabel[r.hostId]}
-              </span>
-              {r.enabled ? null : <StatusBadge tone="stop" label="关着" />}
-            </span>
+    <EffortRowFrame
+      routeId={r.routeId}
+      modelId={modelId}
+      name={modelName}
+      nameTitle={rawModelId ?? modelName}
+      route={r}
+      trailing={
+        <span className="flex shrink-0 items-center gap-3">
+          {/* 手机上下拉里已经写着这一档，「默认（high）」这句只在宽的时候写 */}
+          <span className="max-md:sr-only">
             <EffortNow edit={edit} route={r} fallback={fallback} />
-            <EffortSelect
-              edit={edit}
-              route={r}
-              fallback={fallback}
-              label={`${modelName} · ${title} 的思考档位`}
-            />
+          </span>
+          <EffortSelect
+            edit={edit}
+            route={r}
+            fallback={fallback}
+            label={`${modelName} · ${title} 的思考档位`}
+            className="w-28 md:w-32"
+          />
+        </span>
+      }
+      detail={
+        edit.update.isError ? (
+          <div className="-mt-1 px-4 pb-2">
+            <EffortFailed edit={edit} />
           </div>
-          <EffortFailed edit={edit} />
-        </div>
+        ) : null
       }
     />
   );

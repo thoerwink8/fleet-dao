@@ -138,9 +138,11 @@ describe('思考档位页：看', () => {
     expect(badge?.textContent).toBe('关着');
     // 开着的行没有这枚标签
     expect(row('r-ca-opus').querySelector('[data-tone="stop"]')).toBeNull();
-    // 路由号、池号只在悬停里，不写在行文字里
+    // 路由号这类内部 id 只在悬停里，不写在行文字里（#1902）。
+    // 池号 #1916 起改成看得见：同一模型常有两条同渠道的路（Claude 订阅 · claude-a、claude-b），只写渠道名分不出来。
+    // 原断言「行文字里没有池号 relay」换成等价的新说法：行上写「渠道 · 池」，路由号仍不露。
     expect(off.textContent).not.toContain('r-rl-opus');
-    expect(off.textContent).not.toContain('relay');
+    expect(off.querySelector('[data-route-where]')?.textContent).toContain('中转站 · relay');
     expect(off.textContent).toContain('中转站');
   });
 
@@ -313,6 +315,47 @@ describe('思考档位页：过滤（#1803）', () => {
     expect(document.querySelector('[data-route="r-ca-opus"]')).toBeNull();
     fireEvent.change(box, { target: { value: '没有这个' } });
     expect(screen.getByText(/^没有符合的路由/).textContent).toBe('没有符合的路由：「没有这个」');
+  });
+});
+
+describe('思考档位页签按样板重做（#1916）', () => {
+  test('同一模型的两条 Claude 订阅路由分得出来：行上写着各自的池（claude-a、claude-b）', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
+    await opened();
+    const a = row('r-ca-opus').querySelector('[data-route-where]')?.textContent ?? '';
+    const b = row('r-cb-opus').querySelector('[data-route-where]')?.textContent ?? '';
+    expect(a).toContain('Claude 订阅 · claude-a');
+    expect(b).toContain('Claude 订阅 · claude-b');
+    expect(a).not.toBe(b);
+  });
+
+  test('一行两行字：第一行模型名（关着才写状态），第二行小字不折行；档位下拉在行里；没有四列表头', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
+    await opened();
+    const r = row('r-ca-opus');
+    expect(r.querySelector('[data-row-frame]')?.getAttribute('data-tall')).toBe('true');
+    const where = r.querySelector('[data-route-where]') as HTMLElement;
+    expect(where.className).toContain('truncate');
+    expect(where.className).toContain('whitespace-nowrap');
+    // 路由号放悬停
+    expect(where.getAttribute('title')).toContain('r-ca-opus');
+    expect(within(r).getByRole('combobox')).toBeTruthy();
+    expect(screen.queryByText('改档位')).toBeNull();
+    // 家族组头还在、能折
+    expect(screen.getByRole('button', { name: /^Claude/ }).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  test('没配进用途的路由（模型目录里 Fable 那条）：行尾就地改档位，选项照后端给的 choices', async () => {
+    const { api } = renderApp(<RoutingPage />, { route: '/routing?tab=models' });
+    const spy = vi.spyOn(api, 'updateRouteEffort');
+    fireEvent.click(await screen.findByRole('button', { name: '查看 Fable 5.1 的路由' }));
+    const fable = await waitFor(() => row('r-rl-fable'));
+    const box = await within(fable).findByRole('combobox', { name: /的思考档位$/ });
+    fireEvent.pointerDown(box, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+    fireEvent.click(screen.getByRole('option', { name: 'low' }));
+    await waitFor(() =>
+      expect(spy).toHaveBeenCalledWith('fable-5.1', 'r-rl-fable', { effort: 'low', expected: null }),
+    );
   });
 });
 

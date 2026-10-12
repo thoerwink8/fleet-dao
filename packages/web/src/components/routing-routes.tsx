@@ -16,7 +16,7 @@ import { formatAgo, formatIn } from '../lib/format';
 import { poolIsHeld } from '../lib/pool-holds';
 import { nextProbeLine } from '../lib/probe-pace-view';
 import { routeKind } from '../lib/route-kinds';
-import { probeInterrupted } from '../lib/route-state';
+import { probeInterrupted, routeStateLabel, routeStateTone } from '../lib/route-state';
 import { routeHost, routeSlots, routeTitle } from '../lib/routing';
 import { supportedPurposeEfforts } from '../lib/routing-browse';
 import {
@@ -269,6 +269,7 @@ export function RouteItem({
   // 配过档位才在小字里写一句（没配就是默认，不占地方）
   const effort = useConfiguredRouteEffort(modelId, r.routeId);
   const metaTitle = [
+    modelLabel ?? null,
     `${routeHost(r)} · ${slots.text}${slots.full ? '（满了，等空位，不算故障）' : ''}`,
     slot ? slotWord(slot.state, slot.rank, '路由') : null,
     effort ? `档位上限 ${effort}` : null,
@@ -303,19 +304,33 @@ export function RouteItem({
             {/* 名字后面紧跟这条路由的状态（一行一个状态）；右边只留开关和「⋯」，手机上也放得下 */}
             {/* 小字一行不折（#1914 第 5 轮）：放不下截断，整句在悬停里。名字是认路的那一样，不截断，真放不下宁可换行 */}
             <span data-route-name-line className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
-              <span className="text-body font-medium break-words">
-                {name}
-                {modelLabel ? (
-                  <span className="font-normal text-muted-foreground"> · {modelLabel}</span>
-                ) : null}
+              <span className="text-body font-medium break-words">{name}</span>
+              {/* 手机上名字后面只留状态点（词在读屏和悬停里）：点加词会把状态挤到第二行（#1916，390 宽量到） */}
+              <span className="max-md:hidden">
+                <KindChip kind={kind} variant="dot" />
               </span>
-              <KindChip kind={kind} variant="dot" />
+              <span className="inline-flex items-center md:hidden" title={routeStateLabel[kind]}>
+                <StatusDot tone={routeStateTone[kind]} />
+                {/* 一段字（不拆成「：」和词两段）：同一个词在行里只算一次 */}
+                <span className="sr-only">{`（${routeStateLabel[kind]}）`}</span>
+              </span>
             </span>
             <span
               data-route-meta
               title={metaTitle}
               className="mt-0.5 block truncate whitespace-nowrap text-meta text-muted-foreground"
             >
+              {/* 「顺位第一条活的」放小字最前面：窄屏截断时截掉的是后面的在跑几个、第几位，不是它（#1916，原来放末尾，手机上被截掉） */}
+              {isFirst ? <Tag className="mr-2 align-middle">顺位第一条活的</Tag> : null}
+              {/* 渠道页里写明这条路由属于哪个模型：放小字最前面，名字那行只写「渠道 · 池」，窄屏不挤（#1916） */}
+              {modelLabel ? (
+                <>
+                  <span data-route-model className="text-foreground">
+                    {modelLabel}
+                  </span>
+                  {' · '}
+                </>
+              ) : null}
               {routeHost(r)} · <span className="num">{slots.text}</span>
               {slots.full ? (
                 // 池满了是等空位、不算故障：一个小图标，话在悬停和读屏里，窄屏小字不折两行
@@ -341,7 +356,6 @@ export function RouteItem({
                   {' · '}档位上限 <span className="num">{effort}</span>
                 </span>
               ) : null}
-              {isFirst ? <Tag className="ml-2 align-middle">顺位第一条活的</Tag> : null}
               {/* 整池暂停不另贴小标签：名字后面的状态已经写「池暂停」（#1914 第 4 轮，原来写两遍） */}
             </span>
           </span>
