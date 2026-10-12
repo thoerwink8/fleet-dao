@@ -34,8 +34,9 @@ describe('引导中继已删（决定 0083）', () => {
     expect(back).toMatch(/ui-cli/);
   });
 
-  it('引擎无头会话（FLEET_HEADLESS=1）五条流程钩子都直接退出、不说话', () => {
-    for (const hook of [MAIN, STOP, START, LOG, BOOT]) {
+  it('引擎无头会话（FLEET_HEADLESS=1）流程钩子和订阅加载器都直接退出、不说话', () => {
+    const LOADER = fileURLToPath(new URL('../../hooks/plugin-loader.mjs', import.meta.url));
+    for (const hook of [MAIN, STOP, START, LOG, BOOT, LOADER]) {
       const r = runChild(process.execPath, [hook], {
         input: '{}',
         env: { ...process.env, FLEET_HEADLESS: '1' },

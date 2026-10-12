@@ -202,10 +202,10 @@ describe('--user：替别的用户写', () => {
     expect(r.became).toEqual([{ name: 'alice', entry }]);
     expect(r.out).toContain('用户 alice');
     expect(get(home, '.claude/CLAUDE.md')).toBe(`${BLOCK}\n`);
-    // 决定 0083：用户级只登记拦密钥。脚本仍整份拷进 ~/.fleet-dao/hooks/，设置里不再登记开会话、收尾、落盘。
+    // 决定 0083：过程钩子不在用户级给每个仓跑。决定 0085：用户级多一个订阅加载器。
     expect(r.out).not.toContain('SessionStart：替别的用户写（--user）时不登记开会话钩子');
     const settings = JSON.parse(get(home, '.claude/settings.json')) as { hooks: Record<string, unknown> };
-    expect(Object.keys(settings.hooks)).toEqual(['PreToolUse']);
+    expect(Object.keys(settings.hooks)).toEqual(['SessionStart', 'PreToolUse']);
     expect(JSON.stringify(settings.hooks.PreToolUse)).toContain('/.fleet-dao/hooks/pretool.mjs');
     expect(existsSync(join(home, '.fleet-dao', 'hooks', 'pretool.mjs'))).toBe(true);
     expect(existsSync(join(home, '.fleet-dao', 'hooks', 'stop.mjs'))).toBe(true);

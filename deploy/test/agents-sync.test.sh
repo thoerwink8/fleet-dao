@@ -61,6 +61,7 @@ cp "$REPO/AGENTS.md" "$R/AGENTS.md"
 cp "$REPO"/agents/subagents/*.md "$R/agents/subagents/"
 cp "$REPO/agents/shared-rules.md" "$R/agents/shared-rules.md"
 printf -- '---\nname: demo\n---\n演示用的 skill\n' >"$R/agents/skills/demo/SKILL.md"
+printf '// 假的订阅加载器\n' >"$R/agents/hooks/plugin-loader.mjs"
 printf '// 假的调工具前钩子\n' >"$R/agents/hooks/pretool.mjs"
 printf '// 假的 Codex 调工具前钩子\n' >"$R/agents/hooks/pretool-codex.mjs"
 printf '// 假的开会话钩子\n' >"$R/agents/hooks/session-start.mjs"
@@ -105,9 +106,9 @@ check "钩子脚本拷进了他家" "$(cat "$H/.fleet-dao/hooks/pretool.mjs")" "
 check "Stop 钩子脚本也拷进了他家" "$(cat "$H/.fleet-dao/hooks/stop.mjs")" "// 假的收尾提醒钩子"
 check "主对话钩子脚本也拷进了他家（决定 0078）" "$(cat "$H/.fleet-dao/hooks/main-thread.mjs")" \
   "// 假的主对话两条（引导先回、子代理后台跑）钩子"
-check "Claude 的设置里只登记了调工具前" \
+check "Claude 的设置里登记了订阅加载器和调工具前" \
   "$("$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(Object.keys(s.hooks).join(","))' "$H/.claude/settings.json")" \
-  PreToolUse
+  "SessionStart,PreToolUse"
 check "Codex 的 hooks.json 也只登记了调工具前那条（#232）" \
   "$("$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(Object.keys(s.hooks).join(","))' "$H/.codex/hooks.json")" \
   PreToolUse

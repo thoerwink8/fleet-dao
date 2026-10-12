@@ -1,0 +1,189 @@
+// 用户级开会话钩子（决定 0085）。只做一件事：当前仓有订阅标记，就按目录把过程组写进这个仓的项目设置；
+// 没有标记，就把本目录里的过程钩子从项目设置里拿掉，别的钩子不动。
+// 0083 删的是「每个仓都跑流程钩子」。这个加载器没标记就不写。
+// 引擎无头会话（FLEET_HEADLESS=1）直接退出，不改项目设置。
+// 订阅文件读不成：不改项目设置，退出 0，并在 stderr 说明。退出 0 是为了不挡住开会话。
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { PROCESS_HOOKS } from './plugin-catalog.mjs';
+
+const SCRIPT_RE = /(?:\/\.fleet-dao\/hooks\/|\/agents\/hooks\/)([\w.-]+\.mjs)(?![\w.-])/;
+
+/**
+ * @param {unknown} command
+ * @returns {string | null}
+ */
+export function scriptOf(command) {
+  if (typeof command !== 'string') return null;
+  return SCRIPT_RE.exec(command.replaceAll('\\', '/'))?.[1] ?? null;
+}
+
+/**
+ * @param {string} text
+ * @returns {string[]}
+ */
+export function trackOf(text) {
+  const value = JSON.parse(text);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('订阅文件要是一个对象');
+  }
+  const track = /** @type {{ track?: unknown }} */ (value).track;
+  if (!Array.isArray(track) || track.some((item) => typeof item !== 'string')) {
+    throw new Error('订阅文件要有 track 字符串数组');
+  }
+  return track;
+}
+
+/**
+ * @param {string} hooksDir
+ * @param {string} script
+ */
+export function commandFor(hooksDir, script) {
+  return `node "${join(hooksDir, script).replaceAll('\\', '/')}"`;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
+function plainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * @param {unknown} settings
+ * @param {string[]} track
+ * @param {string} hooksDir
+ */
+export function applyCatalog(settings, track, hooksDir) {
+  const next = structuredClone(plainObject(settings) ? settings : {});
+  const root = /** @type {{ hooks?: Record<string, unknown> }} */ (next);
+  const subscribed = track.includes('process');
+  if (!plainObject(root.hooks)) {
+    if (!subscribed) return next;
+    root.hooks = {};
+  }
+  const catalog = new Set(PROCESS_HOOKS.map((hook) => hook.script));
+  for (const event of Object.keys(root.hooks)) {
+    const groups = root.hooks[event];
+    if (!Array.isArray(groups)) continue;
+    const kept = [];
+    for (const group of groups) {
+      const list = plainObject(group) ? group.hooks : undefined;
+      if (!Array.isArray(list)) {
+        kept.push(group);
+        continue;
+      }
+      const hooks = list.filter((handler) => {
+        const command = plainObject(handler) ? handler.command : undefined;
+        const script = scriptOf(command);
+        if (script === null || !catalog.has(script)) return true;
+        return subscribed;
+      });
+      if (hooks.length > 0) kept.push({ ...group, hooks });
+    }
+    if (kept.length > 0) root.hooks[event] = kept;
+    else delete root.hooks[event];
+  }
+  if (!subscribed) {
+    if (Object.keys(root.hooks).length === 0) delete root.hooks;
+    return next;
+  }
+  for (const spec of PROCESS_HOOKS) {
+    if (hasScript(root.hooks, spec.script)) continue;
+    const groups = Array.isArray(root.hooks[spec.event]) ? root.hooks[spec.event] : [];
+    let plain = groups.find(
+      (group) =>
+        typeof group === 'object' &&
+        group !== null &&
+        !Object.hasOwn(/** @type {object} */ (group), 'matcher') &&
+        Array.isArray(/** @type {{ hooks?: unknown }} */ (group).hooks),
+    );
+    if (plain === undefined) {
+      plain = { hooks: [] };
+      groups.push(plain);
+    }
+    /** @type {{ hooks: unknown[] }} */ (plain).hooks.push({
+      type: 'command',
+      command: commandFor(hooksDir, spec.script),
+      timeout: spec.timeout,
+    });
+    root.hooks[spec.event] = groups;
+  }
+  return next;
+}
+
+/**
+ * @param {Record<string, unknown>} hooks
+ * @param {string} script
+ */
+function hasScript(hooks, script) {
+  for (const groups of Object.values(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    for (const group of groups) {
+      const list = /** @type {{ hooks?: unknown[] }} */ (group)?.hooks;
+      if (!Array.isArray(list)) continue;
+      for (const handler of list) {
+        if (scriptOf(/** @type {{ command?: unknown }} */ (handler)?.command) === script) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isMain() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
+}
+
+if (isMain()) {
+  if (process.env.FLEET_HEADLESS === '1') process.exit(0);
+  try {
+    let input = {};
+    try {
+      input = JSON.parse(readFileSync(0, 'utf8') || '{}');
+    } catch {
+      input = {};
+    }
+    const cwd = typeof input.cwd === 'string' && input.cwd !== '' ? input.cwd : process.cwd();
+    const markerPath = join(cwd, '.fleet-plugins.json');
+    let track = [];
+    if (existsSync(markerPath)) {
+      try {
+        track = trackOf(readFileSync(markerPath, 'utf8'));
+      } catch (err) {
+        const why = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`订阅文件读不成，项目钩子没改：${why}\n`);
+        process.exit(0);
+      }
+    }
+    const settingsPath = join(cwd, '.claude', 'settings.json');
+    let current = {};
+    if (existsSync(settingsPath)) {
+      try {
+        current = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      } catch (err) {
+        const why = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`项目设置读不成，没改：${why}\n`);
+        process.exit(0);
+      }
+      if (!plainObject(current) || (current.hooks !== undefined && !plainObject(current.hooks))) {
+        process.stderr.write('项目设置读不成，没改：整份或 hooks 不是对象\n');
+        process.exit(0);
+      }
+    }
+    const next = applyCatalog(current, track, join(homedir(), '.fleet-dao', 'hooks'));
+    if (JSON.stringify(current) !== JSON.stringify(next)) {
+      mkdirSync(dirname(settingsPath), { recursive: true });
+      writeFileSync(settingsPath, `${JSON.stringify(next, null, 2)}\n`);
+    }
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`订阅加载没做成：${why}\n`);
+  }
+  process.exit(0);
+}
