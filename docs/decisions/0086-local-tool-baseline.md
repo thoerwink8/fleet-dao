@@ -4,7 +4,7 @@
 - 谁拍的：创始人「按照你的推荐走」，选的是上一问的第 1 条。不是改标准。
 - 状态：本机已装。清单只在这份决定里。不同步到别的仓，`pnpm agents:sync` 不装这些。
 - 关联：本机 `~/.claude.json`、`D:\Tools\mcp`、`D:\Tools\node`、`D:\Tools\python312`。
-- 不改：决定 0025（读代码先用 CodeGraph）、规格 #380（同步脚本不给没配过的机器新增 MCP）。子代理说明里的浏览器 MCP 名字这次不动，改那两份是改标准，会装到每台机器。
+- 不改：决定 0025（读代码先用 CodeGraph）、规格 #380（同步脚本不给没配过的机器新增 MCP）。0086 当时不改子代理说明；后面那次见「没做的」。
 
 ## 原话
 
@@ -41,5 +41,6 @@
 
 ## 没做的
 
-- `agents/subagents/fleet-ui-builder.md` 和 `fleet-ui-verifier.md` 仍写着 `mcp__playwright`、`mcp__chrome-devtools`。本机卸掉这两条之后，那两个子代理在这台点页面要改用上面的命令行。
-- 没跑 `pnpm agents:sync`。订阅加载器要等那次同步才在这台登记。
+- 别的机器没有 `playwright-cli` 和 `chrome-devtools`。同步只带说明，不装这两条命令。
+- 界面子代理的工具名单在这次改标准里改掉，点页面写明用这两条命令。创始人 2026-10-12 19:53 说「继续全都做完」。
+- 2026-10-12 19:51 这台同步到主线 `105a8ac`（`~/.fleet-dao/synced.json`）。20:01 又跑了一次 `pnpm agents:sync`：用户级 SessionStart 是 `quiet-plugin-loader.exe`。当时主线上的子代理说明还是旧的。这份新说明要等合进主线后再同步一次，才进 `~/.claude/agents/`。
