@@ -1,0 +1,270 @@
+// 决定 0085：别的仓放 .fleet-plugins.json 且 track 含 process，才把过程组写进那个仓的项目设置。
+// 命令指向这台 ~/.fleet-dao/hooks/。fleet-dao 自己的 $CLAUDE_PROJECT_DIR/agents/hooks/ 算已经登记，不重复写。
+// 没标记：不新建项目设置；已经写过的过程钩子要拿掉。标记读不成、项目设置读不成：一个字不改，退出 0。
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { afterEach, describe, expect, it } from 'vitest';
+import { runChild } from '../child.ts';
+
+const LOADER = fileURLToPath(new URL('../../hooks/plugin-loader.mjs', import.meta.url));
+const HOOKS = 'C:/Users/ada/.fleet-dao/hooks';
+
+interface Handler {
+  type: string;
+  command: string;
+  timeout: number;
+}
+interface Group {
+  matcher?: string;
+  hooks: Handler[];
+}
+interface Settings {
+  hooks?: Record<string, Group[]>;
+  env?: Record<string, string>;
+}
+interface Lib {
+  PROCESS_HOOKS: { event: string; script: string; timeout: number }[];
+  scriptOf(command: unknown): string | null;
+  trackOf(text: string): string[];
+  commandFor(hooksDir: string, script: string): string;
+  applyCatalog(settings: unknown, track: string[], hooksDir: string): Settings;
+}
+
+const lib = (await import(pathToFileURL(LOADER).href)) as Lib;
+const { PROCESS_HOOKS } = (await import(
+  pathToFileURL(fileURLToPath(new URL('../../hooks/plugin-catalog.mjs', import.meta.url))).href
+)) as { PROCESS_HOOKS: Lib['PROCESS_HOOKS'] };
+
+const dirs: string[] = [];
+afterEach(() => {
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+function temp(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'plugin-loader-'));
+  dirs.push(dir);
+  return dir;
+}
+
+function scriptsOf(settings: Settings): string[] {
+  const names: string[] = [];
+  for (const groups of Object.values(settings.hooks ?? {})) {
+    for (const group of groups) {
+      for (const handler of group.hooks) {
+        const name = lib.scriptOf(handler.command);
+        if (name !== null) names.push(name);
+      }
+    }
+  }
+  return names;
+}
+
+const projectHooks = (): Settings => ({
+  hooks: {
+    SessionStart: [
+      {
+        hooks: [
+          {
+            type: 'command',
+            command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/bootstrap.mjs"',
+            timeout: 120,
+          },
+          {
+            type: 'command',
+            command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/session-start.mjs"',
+            timeout: 90,
+          },
+        ],
+      },
+    ],
+    PreToolUse: [
+      {
+        hooks: [
+          {
+            type: 'command',
+            command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/main-thread.mjs"',
+            timeout: 10,
+          },
+        ],
+      },
+    ],
+    Stop: [
+      {
+        hooks: [
+          { type: 'command', command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/stop.mjs"', timeout: 10 },
+        ],
+      },
+    ],
+    UserPromptSubmit: [
+      {
+        hooks: [
+          {
+            type: 'command',
+            command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/prompt-log.mjs"',
+            timeout: 30000,
+          },
+        ],
+      },
+    ],
+  },
+});
+
+describe('订阅目录（决定 0085）', () => {
+  it('过程组就是这五条，超时和 fleet-dao 项目设置一致', () => {
+    expect(PROCESS_HOOKS.map((hook) => [hook.script, hook.event, hook.timeout])).toEqual([
+      ['bootstrap.mjs', 'SessionStart', 120],
+      ['session-start.mjs', 'SessionStart', 90],
+      ['main-thread.mjs', 'PreToolUse', 10],
+      ['stop.mjs', 'Stop', 10],
+      ['prompt-log.mjs', 'UserPromptSubmit', 30000],
+    ]);
+  });
+
+  it('空设置加上 process：五条命令都指向安装目录，不指向别的仓的 agents/hooks', () => {
+    const next = lib.applyCatalog({}, ['process'], HOOKS);
+    expect(scriptsOf(next)).toEqual(PROCESS_HOOKS.map((hook) => hook.script));
+    const handlers = Object.values(next.hooks ?? {}).flatMap((groups) =>
+      groups.flatMap((group) => group.hooks),
+    );
+    expect(handlers.map((handler) => handler.command)).toEqual(
+      PROCESS_HOOKS.map((hook) => lib.commandFor(HOOKS, hook.script)),
+    );
+    expect(handlers.map((handler) => handler.timeout)).toEqual(PROCESS_HOOKS.map((hook) => hook.timeout));
+    expect(JSON.stringify(next)).not.toContain('agents/hooks/');
+    expect(JSON.stringify(next)).not.toContain('plugin-loader.mjs');
+  });
+
+  it('fleet-dao 已经用本仓 agents/hooks 登记过的不重复写；缺的那条补到安装目录', () => {
+    const full = projectHooks();
+    expect(lib.applyCatalog(full, ['process'], HOOKS)).toEqual(full);
+    const missing = projectHooks();
+    delete missing.hooks?.UserPromptSubmit;
+    const next = lib.applyCatalog(missing, ['process'], HOOKS);
+    expect(scriptsOf(next).filter((name) => name === 'bootstrap.mjs')).toEqual(['bootstrap.mjs']);
+    const added = next.hooks?.UserPromptSubmit?.[0]?.hooks[0];
+    expect(added?.command).toBe(lib.commandFor(HOOKS, 'prompt-log.mjs'));
+    expect(added?.timeout).toBe(30000);
+  });
+
+  it('没标记不给空设置造 hooks；有标记再拿掉，过程钩子没了，别人的钩子还在', () => {
+    expect(lib.applyCatalog({}, [], HOOKS)).toEqual({});
+    expect(lib.applyCatalog({ env: { A: '1' } }, [], HOOKS)).toEqual({ env: { A: '1' } });
+    const on = lib.applyCatalog(
+      {
+        env: { A: '1' },
+        hooks: {
+          PreToolUse: [
+            { matcher: 'Bash', hooks: [{ type: 'command', command: 'node "/x/mine.mjs"', timeout: 5 }] },
+          ],
+        },
+      },
+      ['process'],
+      HOOKS,
+    );
+    const off = lib.applyCatalog(on, [], HOOKS);
+    expect(JSON.stringify(off)).not.toContain('bootstrap.mjs');
+    expect(off.env).toEqual({ A: '1' });
+    expect(off.hooks?.PreToolUse).toEqual([
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'node "/x/mine.mjs"', timeout: 5 }] },
+    ]);
+  });
+
+  it('【故意造出的失败】拿掉标记之后还留着过程钩子：这条对不上', () => {
+    const on = lib.applyCatalog({}, ['process'], HOOKS);
+    const off = lib.applyCatalog(on, [], HOOKS);
+    expect(JSON.stringify(off)).not.toContain('bootstrap.mjs');
+    expect(off).not.toEqual(on);
+    const stillWrites = on;
+    expect(JSON.stringify(stillWrites)).toContain('bootstrap.mjs');
+    expect(stillWrites).not.toEqual(off);
+  });
+
+  it('订阅文件不是带 track 字符串数组的对象就抛', () => {
+    expect(lib.trackOf('{"track":["process"]}')).toEqual(['process']);
+    expect(() => lib.trackOf('[]')).toThrow(/对象/);
+    expect(() => lib.trackOf('{"a":1}')).toThrow(/track/);
+    expect(() => lib.trackOf('{"track":[1]}')).toThrow(/track/);
+  });
+
+  it('本仓路径和安装目录认的是同一个脚本；反斜杠也认', () => {
+    expect(lib.scriptOf('node "$CLAUDE_PROJECT_DIR/agents/hooks/bootstrap.mjs"')).toBe('bootstrap.mjs');
+    expect(lib.scriptOf('node "C:\\Users\\a\\.fleet-dao\\hooks\\stop.mjs"')).toBe('stop.mjs');
+    expect(lib.scriptOf('node "/x/mine.mjs"')).toBeNull();
+  });
+});
+
+describe('加载器真跑（决定 0085）', () => {
+  function run(cwd: string, env: Record<string, string> = {}) {
+    return runChild(process.execPath, [LOADER], {
+      cwd,
+      input: JSON.stringify({ cwd }),
+      env: { ...process.env, ...env },
+    });
+  }
+
+  function readSettings(cwd: string): string | null {
+    const file = join(cwd, '.claude', 'settings.json');
+    return existsSync(file) ? readFileSync(file, 'utf8') : null;
+  }
+
+  it('有标记才写出五条；没有标记、原来也没有项目设置：不建文件', () => {
+    const bare = temp();
+    const none = run(bare);
+    expect(none.status).toBe(0);
+    expect(none.stderr).toBe('');
+    expect(readSettings(bare)).toBeNull();
+
+    const cwd = temp();
+    writeFileSync(join(cwd, '.fleet-plugins.json'), '{"track":["process"]}\n');
+    const wrote = run(cwd);
+    expect(wrote.status, wrote.stderr).toBe(0);
+    const text = readSettings(cwd);
+    if (text === null) throw new Error('订阅了却没写项目设置');
+    for (const hook of PROCESS_HOOKS) {
+      expect(text).toContain(`hooks/${hook.script}`);
+      expect(text).toContain(`"timeout": ${hook.timeout}`);
+    }
+    expect(text).not.toContain('agents/hooks/');
+  });
+
+  it('拿掉标记：已经写上的过程钩子从项目设置里消失', () => {
+    const cwd = temp();
+    writeFileSync(join(cwd, '.fleet-plugins.json'), '{"track":["process"]}\n');
+    expect(run(cwd).status).toBe(0);
+    rmSync(join(cwd, '.fleet-plugins.json'));
+    const again = run(cwd);
+    expect(again.status, again.stderr).toBe(0);
+    const text = readSettings(cwd);
+    expect(text).not.toContain('bootstrap.mjs');
+    expect(text).not.toContain('session-start.mjs');
+  });
+
+  it('【故意造出的失败】引擎无头、标记坏了、项目设置读不成：都不改文件', () => {
+    const headless = temp();
+    writeFileSync(join(headless, '.fleet-plugins.json'), '{"track":["process"]}\n');
+    const skipped = run(headless, { FLEET_HEADLESS: '1' });
+    expect(skipped.status).toBe(0);
+    expect(readSettings(headless)).toBeNull();
+
+    const bad = temp();
+    mkdirSync(join(bad, '.claude'));
+    const original = '{\n  "env": {}\n}\n';
+    writeFileSync(join(bad, '.claude', 'settings.json'), original);
+    writeFileSync(join(bad, '.fleet-plugins.json'), '{');
+    const unread = run(bad);
+    expect(unread.status).toBe(0);
+    expect(unread.stderr).toContain('订阅文件读不成，项目钩子没改');
+    expect(readSettings(bad)).toBe(original);
+
+    const broken = temp();
+    mkdirSync(join(broken, '.claude'));
+    writeFileSync(join(broken, '.claude', 'settings.json'), '{');
+    writeFileSync(join(broken, '.fleet-plugins.json'), '{"track":["process"]}\n');
+    const stuck = run(broken);
+    expect(stuck.status).toBe(0);
+    expect(stuck.stderr).toContain('项目设置读不成，没改');
+    expect(readSettings(broken)).toBe('{');
+  });
+});
