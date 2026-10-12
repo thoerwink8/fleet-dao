@@ -387,7 +387,7 @@ export function poolHoldOptions(poolId: string): DecisionOption[] {
     {
       id: 'hold',
       label: '先停着',
-      detail: `这条留着，账号池 ${poolId} 照旧停着；探针探通会自己放开。要停到我撤为止的，记下交给指挥官去改整池暂停开关`,
+      detail: `这条留着，账号池 ${poolId} 照旧停着；探针探通会自己放开。要停到我撤为止的，记下交给指挥官去额度页改开关`,
       keepsOpen: true,
     },
     {

@@ -88,9 +88,9 @@ export function orgSwitchSummary(v: OrgSwitchView): OrgSwitchSummary {
       headline += `；${outageName(v.outage.kind)}，${when}`;
       details.push(`凭什么：${v.outage.evidence}`);
     } else {
-      // 内部话「没有记着的拼车恢复条件」改成人话，并指到设置页整池暂停换账号
+      // 内部话「没有记着的拼车恢复条件」改成人话，并指到额度页那个池的开关
       headline = `${carpool()}账号被封，目前只剩${solo()}，要你换新${carpool()}账号`;
-      action = { to: '/settings#run', label: '整池暂停' };
+      action = { to: '/quota', label: '去额度页' };
     }
     if (v.backPendingSince) {
       details.push(

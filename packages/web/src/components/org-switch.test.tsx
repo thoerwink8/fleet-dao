@@ -149,14 +149,14 @@ describe('orgSwitchSummary', () => {
     expect(unknown.details[0]).toContain('读不到账号状态，不切号');
   });
 
-  test('挂着独享、没有拼车恢复条件：一句人话，并链到设置页整池暂停', () => {
+  test('挂着独享、没有拼车恢复条件：一句人话，并链到额度页', () => {
     const s = orgSwitchSummary(known({ live: 'solo' }));
     expect(s.headline).toContain('拼车账号被封');
     expect(s.headline).toContain('目前只剩独享');
     expect(s.headline).toContain('要你换新拼车账号');
     expect(s.headline).not.toContain('没有记着的');
     expect(s.headline).not.toContain('恢复条件');
-    expect(s.action).toEqual({ to: '/settings#run', label: '整池暂停' });
+    expect(s.action).toEqual({ to: '/quota', label: '去额度页' });
   });
 
   test('【故意造出失败】连着白切 3 次、最近一次读接口没成、人叫停了：都列出来', () => {
@@ -200,9 +200,9 @@ describe('OrgSwitchBanner', () => {
     expect(screen.getByText(/白切）连着 1 次/)).toBeTruthy();
   });
 
-  test('没有拼车恢复条件时画出整池暂停链接', () => {
+  test('没有拼车恢复条件时画出额度页链接', () => {
     renderBanner(<OrgSwitchBanner view={known({ live: 'solo' })} />);
-    const link = screen.getByRole('link', { name: '整池暂停' });
-    expect(link.getAttribute('href')).toBe('/settings#run');
+    const link = screen.getByRole('link', { name: '去额度页' });
+    expect(link.getAttribute('href')).toBe('/quota');
   });
 });

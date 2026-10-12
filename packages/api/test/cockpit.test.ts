@@ -988,7 +988,6 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
       const put = (body: unknown) =>
         h.cockpit.request('/api/settings/engine.poolHolds', write('PUT', s, body));
       for (const bad of [
-        { 'claude-solo': hold({ reviewBy: undefined }) },
         { 'claude-solo': hold({ reason: ' ' }) },
         { 'claude-solo': hold({ reviewBy: '2026-02-30' }) },
         { 'claude-solo': hold({ owner: ' ' }) },
@@ -1017,6 +1016,21 @@ describe('账号池、定时任务、通知、操作记录、设置', () => {
       });
       expect(named.status).toBe(200);
       expect((await view(h, s.cookie)).holds[0]?.owner).toBe('张三');
+    });
+
+    it('没填复查日期：存得下，不算到期', async () => {
+      const h = harness();
+      const s = await h.login();
+      const put = (body: unknown) =>
+        h.cockpit.request('/api/settings/engine.poolHolds', write('PUT', s, body));
+      const raw = { ...hold() } as Record<string, unknown>;
+      delete raw.reviewBy;
+      const ok = await put({ value: { 'claude-solo': raw }, version: 0, reason: '被封号' });
+      expect(ok.status).toBe(200);
+      const seen = await view(h, s.cookie);
+      expect(seen.holds[0]?.reviewBy).toBeUndefined();
+      expect(seen.holds[0]?.overdue).toBe(false);
+      expect(seen.holds[0]?.poolId).toBe('claude-solo');
     });
 
     it('【故意造出的失败】撤回、续期没写原因：400，设置不变；写了原因才撤，原因进操作记录；撤完 /api/pool-holds 没有了', async () => {

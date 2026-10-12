@@ -1,10 +1,11 @@
-// 路由页上「一个模型下的路由」那一块（#574，#1366 第二部分）：每条路由的活 / 死 / 不知道和三件事的原因、开关、整池暂停。
+// 路由页上「一个模型下的路由」那一块（#574，#1366 第二部分）：每条路由的活 / 死 / 不知道和三件事的原因、开关。
 // 用途页（选中一个模型）、模型目录页（选中一个模型）、渠道页（选中一个渠道，看它在各个模型下的路由）共用。
 // 路由页样板（#1914）：一行只留名字、一个状态和开关；渠道、在跑几个、实际第几位写在名字下面一行小字；
-// 挪位置、整池暂停收进行尾「⋯」（悬停才露出）；点名字展开三件事的原因。关着的行只降对比度，不整行变灰底。
+// 挪位置收进行尾「⋯」（悬停才露出）；点名字展开三件事的原因。关着的行只降对比度，不整行变灰底。
+// 停用账号池在额度页那一行的开关，不在这里设。池已经停着时，这条路由的开关置灰。
 // 改这里之前必须知道：
 // - 不知道（探针没看过、额度没读成）不画成活，也不画成死：用停滞色，原因照写。
-// - 渠道已关时这条路由不画开关，写「渠道已关」；整池暂停、整池暂停没读成时开关置灰并写原因。
+// - 渠道已关时这条路由不画开关，写「渠道已关」；池停着、暂停设置没读成时开关置灰并写原因。
 
 import { type HostId, routeEffortChoices } from '@fleet-dao/shared';
 import { ChevronRight, Hourglass } from 'lucide-react';
@@ -31,7 +32,7 @@ import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
 import { Code } from './layout/code';
 import { RowDetail, RowFrame } from './layout/list';
-import { RowMenu, RowMenuSeparator } from './layout/row-menu';
+import { RowMenu } from './layout/row-menu';
 import { StatusDot } from './layout/status-badge';
 import { Tag } from './layout/tag';
 import { PoolProblemLine, usePoolProblems } from './pool-problem';
@@ -44,7 +45,6 @@ import {
   useRoutingEdit,
 } from './routing-edit';
 import { RouteEffortField, useConfiguredRouteEffort } from './routing-efforts';
-import { usePoolHoldControl } from './routing-hold';
 import { KindChip, useKindEnv } from './routing-kinds';
 
 /**
@@ -248,7 +248,6 @@ export function RouteItem({
   const edit = useRoutingEdit();
   const routing = useRouting();
   const holds = usePoolHolds();
-  const hold = usePoolHoldControl(r.poolId, r.routeId);
   const name = routeTitle(r);
   // 状态词和颜色：后端的「死」拆开，只有故障画红（lib/route-state.ts）
   const kind = routeKind(r, modelId, useKindEnv());
@@ -381,14 +380,9 @@ export function RouteItem({
               }
             />
           )}
-          {rowControls || hold.menu ? (
-            <RowMenu
-              label={`更多操作：${rowControls?.moves.label ?? name}`}
-              title={rowControls ? ROW_MENU_TITLE : '整池暂停'}
-            >
-              {rowControls ? <RowMoveItems moves={rowControls.moves} /> : null}
-              {rowControls && hold.menu ? <RowMenuSeparator /> : null}
-              {hold.menu}
+          {rowControls ? (
+            <RowMenu label={`更多操作：${rowControls.moves.label}`} title={ROW_MENU_TITLE}>
+              <RowMoveItems moves={rowControls.moves} />
             </RowMenu>
           ) : null}
         </span>
@@ -409,7 +403,6 @@ export function RouteItem({
           {poolProblem ? <PoolProblemLine problem={poolProblem} now={now} /> : null}
         </RowDetail>
       ) : null}
-      {hold.panel ? <RowDetail>{hold.panel}</RowDetail> : null}
       <RowDetail id={factsId} hidden={!open} className="pb-3">
         <div className="rounded-lg bg-muted p-3">
           <p className="mb-2 text-meta text-muted-foreground">

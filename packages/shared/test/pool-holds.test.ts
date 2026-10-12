@@ -25,14 +25,19 @@ const hold = (over: Record<string, unknown> = {}) => ({
 const NOW = new Date('2026-10-05T04:00:00Z'); // 北京时间 2026-10-05 12:00
 
 describe('开关的形状：缺一项写不进去', () => {
-  it('四项齐全才过；每一项缺了、留空、多了不认识的字段、日期不是日历上的一天都不过', () => {
+  it('原因、谁拍的、撤回条件缺了不过；复查日期可不填，填了必须是真日子', () => {
     expect(PoolHoldSchema.safeParse(hold()).success).toBe(true);
-    for (const k of ['reason', 'decidedBy', 'revokeWhen', 'reviewBy']) {
+    const noDate = { ...hold() } as Record<string, unknown>;
+    delete noDate.reviewBy;
+    expect(PoolHoldSchema.safeParse(noDate).success).toBe(true);
+    for (const k of ['reason', 'decidedBy', 'revokeWhen']) {
       const without = { ...hold() } as Record<string, unknown>;
       delete without[k];
       expect(PoolHoldSchema.safeParse(without).success, `缺 ${k}`).toBe(false);
       expect(PoolHoldSchema.safeParse(hold({ [k]: '   ' })).success, `空白 ${k}`).toBe(false);
     }
+    expect(PoolHoldSchema.safeParse(hold({ reviewBy: '' })).success).toBe(false);
+    expect(PoolHoldSchema.safeParse(hold({ reviewBy: '   ' })).success).toBe(false);
     expect(PoolHoldSchema.safeParse(hold({ note: '多余' })).success).toBe(false);
     for (const bad of ['2026-02-30', '2026-13-01', '10/30', '2026-1-1', '明天']) {
       expect(PoolHoldSchema.safeParse(hold({ reviewBy: bad })).success, bad).toBe(false);
@@ -90,7 +95,7 @@ describe('resolvePoolHolds：读不出按暂停办', () => {
     const f = resolvePoolHolds(
       {
         a: hold(),
-        b: hold({ reviewBy: undefined }),
+        b: hold({ decidedBy: '' }),
         c: hold({ reviewBy: '2026-02-30' }),
         d: { ...hold(), extra: 1 },
       },
@@ -99,7 +104,7 @@ describe('resolvePoolHolds：读不出按暂停办', () => {
     expect(f.heldPoolIds).toEqual(['a', 'b', 'c', 'd']);
     expect(f.holds.map((h) => h.poolId)).toEqual(['a']);
     expect(f.problems.map((p) => p.poolId)).toEqual(['b', 'c', 'd']);
-    expect(f.problems[0]?.why).toContain('reviewBy');
+    expect(f.problems[0]?.why).toContain('decidedBy');
     expect(f.holdAll).toBe(false);
   });
 
@@ -204,8 +209,8 @@ describe('revocationProblem：撤回、续期必须写原因', () => {
 
   it('【故意造出的失败】改之前存着的值认不出（整份、某一项）：也要原因，不能悄悄换掉', () => {
     expect(revocationProblem('停', {}, undefined)).toContain('认不出');
-    expect(revocationProblem({ a: hold({ reviewBy: undefined }) }, {}, undefined)).toContain('a');
-    expect(revocationProblem({ a: hold({ reviewBy: undefined }) }, {}, '清掉坏项')).toBeNull();
+    expect(revocationProblem({ a: hold({ reviewBy: '2026-02-30' }) }, {}, undefined)).toContain('a');
+    expect(revocationProblem({ a: hold({ reviewBy: '2026-02-30' }) }, {}, '清掉坏项')).toBeNull();
   });
 });
 
@@ -222,7 +227,7 @@ describe('到期飞书正文', () => {
     expect(text).toContain('账号池 claude-solo');
     expect(text).toContain('创始人要大用独享');
     expect(text).toContain('张三');
-    expect(text).toContain('驾驶舱设置页「整池暂停」');
+    expect(text).toContain('驾驶舱额度页');
     expect(text).not.toContain('relay');
     expect(
       overduePoolHoldPushText(
@@ -230,5 +235,16 @@ describe('到期飞书正文', () => {
         '2026-10-05',
       ),
     ).toBeNull();
+  });
+
+  it('没填复查日期：仍暂停，不算到期，不推', () => {
+    const raw = { ...hold() } as Record<string, unknown>;
+    delete raw.reviewBy;
+    const f = resolvePoolHolds({ solo: raw }, NOW);
+    expect(f.problems).toEqual([]);
+    expect(f.heldPoolIds).toEqual(['solo']);
+    expect(f.holds[0]).toMatchObject({ overdue: false, overdueDays: 0 });
+    expect(f.holds[0]?.reviewBy).toBeUndefined();
+    expect(overduePoolHoldPushText(f.holds, '2026-10-05')).toBeNull();
   });
 });

@@ -2403,7 +2403,7 @@ describe('整池暂停到期（#954）', SLOW, () => {
     expect(lines[0]).toContain('claude-solo');
     expect(lines[0]).toContain('创始人要大用独享');
     expect(lines[0]).toContain('张三');
-    expect(lines[0]).toContain('驾驶舱设置页「整池暂停」');
+    expect(lines[0]).toContain('驾驶舱额度页');
     expect(lines[0]).not.toContain('relay');
     const bare = hook.poolHoldPromptLines(
       { ok: true, value: { relay: hold({ reviewBy: '2026-10-05' }) } },
@@ -2412,6 +2412,9 @@ describe('整池暂停到期（#954）', SLOW, () => {
     expect(bare[0]).toContain('负责人：指挥官');
     expect(hook.poolHoldPromptLines({ ok: true, skipped: true }, TODAY)).toEqual([]);
     expect(hook.poolHoldPromptLines({ ok: true, value: undefined }, TODAY)).toEqual([]);
+    const noDate = { ...hold() } as Record<string, unknown>;
+    delete noDate.reviewBy;
+    expect(hook.poolHoldPromptLines({ ok: true, value: { relay: noDate } }, TODAY)).toEqual([]);
   });
 
   it('【故意造出的失败】认不出、没查成：明说，不当成没到期', () => {
@@ -2487,9 +2490,9 @@ describe('整池暂停到期（#954）', SLOW, () => {
       poolHolds,
     });
     expect(reads).toBe(1);
-    expect(
-      lines.some((l) => l.includes('整池暂停到期：claude-solo') && l.includes('驾驶舱设置页「整池暂停」')),
-    ).toBe(true);
+    expect(lines.some((l) => l.includes('整池暂停到期：claude-solo') && l.includes('驾驶舱额度页'))).toBe(
+      true,
+    );
     const workerReads = { n: 0 };
     const workerLines = hook.sessionStart({
       cwd: w.work,
