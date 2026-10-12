@@ -28,8 +28,13 @@ export function segmentEvidence(result: OneShotResult): SegmentEvidence {
     };
   }
   const facts = result.facts;
+  // one-shot 自己的时限先到（驱动没先收场）：驱动交回的 aborted 是在回应我们这一下 kill，不是另一个原因——码按结局给
+  // wall_clock_timeout（分流 WT1），不让它变成「我们自己停的」（OU1），两次一字不差就挂起（#1859/#1877/#1933）
+  const echoOfTimeout = result.outcome === 'timeout' && facts?.reason === 'aborted';
   const reason =
-    facts?.reason && facts.reason !== 'delivered' && facts.reason !== 'answered' ? facts.reason : undefined;
+    facts?.reason && !echoOfTimeout && facts.reason !== 'delivered' && facts.reason !== 'answered'
+      ? facts.reason
+      : undefined;
   const code =
     reason ??
     (result.outcome === 'timeout'
