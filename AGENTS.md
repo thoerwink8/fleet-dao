@@ -2,6 +2,9 @@
 
 所有仓通用的规矩在 `agents/shared-rules.md`。同步脚本（`packages/agents-sync`）把它写进每台机器上各家 AI 的全局说明。没有全局说明的工具（Cursor CLI、zcode）先读它。这份只写本仓的规矩。
 
+<!-- repo-contract:skip entry 本机不起引擎和驾驶舱：它们跑在法国、按 docs/ops.md 发布；本仓的命令入口是 pnpm plan、pnpm pr:open、pnpm progress:* 这一套 -->
+<!-- repo-contract:skip progress 创始人引导记在进度单 #1055（决定 0014），docs/PROGRESS.md 不许有那一节（agents/test/progress-structure.test.ts 钉着） -->
+
 写法：一句话只说一件事。一个词只有一个意思：单＝GitHub issue；主线＝origin/main；法国＝法国 VPS 上的引擎；本机＝创始人的电脑；创始人＝仓的主人。
 
 ## 本仓（fleet-dao）

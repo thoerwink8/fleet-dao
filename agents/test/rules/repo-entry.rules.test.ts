@@ -1,97 +1,221 @@
-// 钉住通用段「在任何仓里干活」里两条（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json；决定 0081）。
-// 2026-10-12 凌晨的断链（带货工作台仓）：创始人要「pnpm xxx 方式，可以命令启动」，AI 先给的是双击 start.cmd 加一串路径；
-// 他说「这个非常重要……fleet-dao 应该也接收到，作为一个规则；但是显然没有这个意识，说明存在断链」。
-// 断点：① 通用段没有「仓要给一条 pnpm 命令起最新版」这条，新仓的 AI 读不到；② 「各仓都用得上的规矩给 fleet-dao 开 PR」没有触发点，
-// 「项目特有还是通用」默认落在项目一侧——同一个仓几小时里「不要让我记东西」说了两次（密钥要有历史、能随时换；要 pnpm 命令），两次都只记进了那个仓。
-// 修法：通用段加入口那条；把默认翻过来（他说的原则、偏好默认各仓通用）；`pnpm progress:directive` 记完引导当场问一句通用吗。
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
-import { DIRECTIVE_SCOPE_HINT } from '../../../packages/conventions/src/directive-scope.ts';
+// 钉住「仓合同」这条规矩（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json；决定 0081）。
+// 2026-10-12 凌晨的断链（带货工作台仓）：创始人要「pnpm xxx 方式，可以命令启动」，AI 先给的是双击 start.cmd 加一串路径。
+// 第一版（#1934 初稿）只加了一条长规矩和 progress:directive 上的一句提示，创始人看过不满意：「不应该限制在我们当前有的仓，
+// 未来还会有其他仓呀……需要提醒的机制……好像也是存在断链的」，04:37 选了方案 B「只提醒不拦」。
+// 规矩只是文字（AGENTS.md / CLAUDE.md 只是上下文，不是强制），所以这里钉的是机制，不只是文字：
+// ① 合同写成数据（agents/repo-contract.json），首批四项；② 开会话钩子在任何仓里都按合同查、提醒；
+// ③ 引导条目的〔范围：…〕由开会话的 checkDirectives 和收尾的 Stop 钩子提醒，只用 systemMessage、绝不拦；
+// ④ 通用段几句话指到合同；⑤ fleet-dao 自己也过合同（不适用的写明豁免理由）。
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { afterEach, describe, expect, it } from 'vitest';
+import { runChild, runChildOk } from '../child.ts';
 
 const read = (rel: string): string =>
   readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
 const SHARED = read('../../shared-rules.md');
-const PROGRESS_BIN = read('../../../packages/conventions/src/bin/progress.ts');
+const CONTRACT_TEXT = read('../../repo-contract.json');
+const SESSION_SRC = read('../../hooks/session-start.mjs');
+const STOP_SRC = read('../../hooks/stop.mjs');
+const PKG = JSON.parse(read('../../../package.json')) as { scripts: Record<string, string> };
+const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
+const LIB_PATH = fileURLToPath(new URL('../../hooks/repo-contract.mjs', import.meta.url));
+const STOP = fileURLToPath(new URL('../../hooks/stop.mjs', import.meta.url));
 
-/** 通用段里必须写着的几条，缺了哪条就列出哪条。 */
-const ENTRY_RULES: Record<string, RegExp> = {
-  仓根package给pnpm入口: /能跑起来的仓，根 `package\.json` 给 `pnpm dev`/,
-  四个命令都在: /`pnpm dev`（起最新版）、`start`、`stop`、`check`（交活前检查）/,
-  写进README第一屏: /写进 README 第一屏/,
-  没Node也放: /没 Node 也放个只有 `scripts` 的/,
-  只记pnpm命令: /我只记 pnpm 命令，不记路径、软件和环境变量/,
+interface Item {
+  id: string;
+  检查: { type: string; path?: string; scripts?: string[]; 行?: { 认: string[] }[] };
+}
+interface Checked {
+  id: string;
+  status: string;
+  reason?: string;
+}
+const lib = (await import(pathToFileURL(LIB_PATH).href)) as {
+  parseContract(text: string): { ok: true; items: Item[] } | { ok: false; why: string };
+  checkRepo(root: string, items: Item[]): Checked[];
+  exitCodeOf(rs: Checked[]): number;
 };
-const DEFAULT_SHARED_RULES: Record<string, RegExp> = {
-  原则偏好默认通用: /（我说的原则、偏好默认各仓通用）/,
-  当场开PR: /各仓都用得上的[^；]*当场给 fleet-dao 开 PR 改这一份，不横着抄/,
-  只此仓的要写明: /只此仓有效的要我明说过，或在仓里记决定处写明为什么/,
-};
+const session = (await import(
+  pathToFileURL(fileURLToPath(new URL('../../hooks/session-start.mjs', import.meta.url))).href
+)) as { DIRECTIVE_HEADING: string; TEMP_HEADING: string };
 
+/** 合同里必须有的四项，缺了哪项、判法变了哪项就列出哪项 */
+function contractProblems(text: string): string[] {
+  const parsed = lib.parseContract(text);
+  if (!parsed.ok) return [`合同读不出：${parsed.why}`];
+  const by = Object.fromEntries(parsed.items.map((i) => [i.id, i]));
+  const out: string[] = [];
+  const entry = by.entry?.检查;
+  if (
+    entry?.type !== 'scripts' ||
+    entry.path !== 'package.json' ||
+    entry.scripts?.join() !== 'dev,start,stop,check'
+  )
+    out.push('entry');
+  if (by['agents-md']?.检查.type !== 'file' || by['agents-md']?.检查.path !== 'AGENTS.md')
+    out.push('agents-md');
+  const prog = by.progress?.检查;
+  const progHeads = (prog?.行 ?? []).map((l) => l.认[0]);
+  // 和开会话钩子 checkDirectives、checkTemporary 现读的标题一字不差，不另起一套
+  if (
+    prog?.path !== 'docs/PROGRESS.md' ||
+    !progHeads.includes(session.DIRECTIVE_HEADING) ||
+    !progHeads.includes(session.TEMP_HEADING)
+  )
+    out.push('progress');
+  const gi = by['gitignore-tmp']?.检查;
+  if (gi?.path !== '.gitignore' || !(gi.行 ?? []).some((l) => l.认.includes('_tmp/')))
+    out.push('gitignore-tmp');
+  return out;
+}
+
+/** 开会话钩子真当主程序跑时，把合同检查接进去了 */
+function sessionWired(src: string): boolean {
+  const main = src.slice(src.indexOf('if (isMain())'));
+  return (
+    /repoContract:/.test(main) &&
+    /\.\.\.\(repoContract \?/.test(src) &&
+    /import \{[^}]*contractLines[^}]*\} from '\.\/repo-contract\.mjs'/.test(src)
+  );
+}
+/** Stop 钩子把范围检查接进了「只提醒」那一路（systemMessage 的 notes），不是 decision */
+function stopWired(src: string): boolean {
+  const main = src.slice(src.indexOf('if (isMain())'));
+  return /notes\.push\(scope\.systemMessage\)/.test(main) && /stopScopeCheck\(/.test(main);
+}
+
+const SHARED_RULES: Record<string, RegExp> = {
+  指到合同: /`agents\/repo-contract\.json`/,
+  入口四个命令: /`pnpm dev\/start\/stop\/check`/,
+  钩子列缺项: /开会话钩子列缺项/,
+  补用repo_init: /`pnpm repo:init`/,
+  只记pnpm命令: /我只记 pnpm 命令，不记路径和软件/,
+  原则默认通用: /我说的原则、偏好默认各仓通用/,
+  引导标范围: /引导条目标〔范围：通用｜只此仓〕/,
+};
 function missing(rules: Record<string, RegExp>, text: string): string[] {
   return Object.entries(rules)
     .filter(([, re]) => !re.test(text))
     .map(([name]) => name);
 }
 
-/** 通用段「在任何仓里干活」那一节（到下一个 ## 为止） */
-function anyRepoSection(text: string): string {
-  const at = text.indexOf('## 在任何仓里干活');
-  if (at < 0) throw new Error('通用段里认不出「## 在任何仓里干活」');
-  const next = text.indexOf('\n## ', at + 1);
-  return text.slice(at, next < 0 ? undefined : next);
+const made: string[] = [];
+afterEach(() => {
+  for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+function temp(name: string): string {
+  const dir = mkdtempSync(join(tmpdir(), `repo-entry-rules-${name}-`));
+  made.push(dir);
+  return dir;
 }
 
-/** bin/progress.ts 里 directive 分支那一段（到 claim 分支为止） */
-function directiveBranch(src: string): string {
-  const at = src.indexOf("cmd === 'directive'");
-  const end = src.indexOf("cmd === 'claim'");
-  if (at < 0 || end < at) throw new Error('bin/progress.ts 里认不出 directive 分支');
-  return src.slice(at, end);
-}
-
-describe('规矩：仓根要有 pnpm 命令入口；创始人说的原则默认各仓通用（2026-10-12，决定 0081）', () => {
-  it('「在任何仓里干活」里写着 pnpm 入口那条', () => {
-    expect(missing(ENTRY_RULES, anyRepoSection(SHARED))).toEqual([]);
+describe('规矩：仓合同（方案 B，只提醒不拦；决定 0081）', () => {
+  it('合同写成数据，首批四项都在、判法对', () => {
+    expect(contractProblems(CONTRACT_TEXT)).toEqual([]);
   });
 
-  it('「在任何仓里干活」里写着「默认各仓通用」那半句', () => {
-    expect(missing(DEFAULT_SHARED_RULES, anyRepoSection(SHARED))).toEqual([]);
+  it('开会话钩子接上了合同检查；Stop 钩子把范围检查接在 systemMessage 那一路', () => {
+    expect(sessionWired(SESSION_SRC)).toBe(true);
+    expect(stopWired(STOP_SRC)).toBe(true);
   });
 
-  it('pnpm progress:directive 记完引导当场问一句：各仓通用吗', () => {
-    expect(DIRECTIVE_SCOPE_HINT).toMatch(/各仓通用吗/);
-    expect(DIRECTIVE_SCOPE_HINT).toContain('`agents/shared-rules.md`');
-    expect(DIRECTIVE_SCOPE_HINT).toMatch(/只此仓有效/);
-    expect(directiveBranch(PROGRESS_BIN)).toMatch(/console\.log\(DIRECTIVE_SCOPE_HINT\)/);
+  it('fleet-dao 根 package.json 有 repo:check、repo:init，指向同一份逻辑', () => {
+    expect(PKG.scripts['repo:check']).toBe('node agents/hooks/repo-contract.mjs check');
+    expect(PKG.scripts['repo:init']).toBe('node agents/hooks/repo-contract.mjs init');
   });
 
-  it('【故意造出的失败】把 pnpm 入口那条整条拿掉：查得出来', () => {
-    const cut = SHARED.replace(/- 能跑起来的仓[^\n]*\n/, '');
+  it('通用段「在任何仓里干活」几句话指到合同、默认通用、标范围', () => {
+    expect(missing(SHARED_RULES, SHARED)).toEqual([]);
+  });
+
+  it('fleet-dao 自己也过合同：不适用的写明了豁免理由', () => {
+    const parsed = lib.parseContract(CONTRACT_TEXT);
+    if (!parsed.ok) throw new Error(parsed.why);
+    const rs = lib.checkRepo(REPO_ROOT, parsed.items);
+    expect(lib.exitCodeOf(rs), JSON.stringify(rs)).toBe(0);
+    for (const r of rs.filter((x) => x.status === 'skipped')) expect(r.reason, r.id).toBeTruthy();
+  });
+
+  it('Stop 钩子真跑：新记的引导没标范围，只给 systemMessage，没有 decision、没有 hookSpecificOutput；同一会话第二次不说', {
+    timeout: 0,
+  }, () => {
+    const dir = temp('repo');
+    const g = (...a: string[]) => runChildOk('git', a, { cwd: dir });
+    g('init', '-q', '-b', 'main');
+    mkdirSync(join(dir, 'docs'));
+    writeFileSync(
+      join(dir, 'docs', 'PROGRESS.md'),
+      '# 进度\n\n## 创始人引导（待处理）\n\n- 04:00「要 pnpm 命令」\n',
+    );
+    const state = temp('state');
+    const env = {
+      ...process.env,
+      FLEET_UNATTENDED_DIR: state,
+      FLEET_WORKERS_DIR: temp('workers'),
+      FLEET_WORKER: '',
+      CLAUDE_CODE_SESSION_ID: '',
+      FLEET_MIRASIM_DIR: join(state, 'no-mirasim'),
+    };
+    const input = JSON.stringify({
+      hook_event_name: 'Stop',
+      cwd: dir,
+      session_id: 'scope-rules-0001',
+      stop_hook_active: false,
+    });
+    const first = runChild(process.execPath, [STOP], { input, env });
+    expect(first.status).toBe(0);
+    const out = JSON.parse(first.stdout.trim());
+    expect(Object.keys(out)).toEqual(['systemMessage']);
+    expect(out.systemMessage).toContain('〔范围：');
+    expect(first.stdout).not.toContain('decision');
+    expect(first.stdout).not.toContain('hookSpecificOutput');
+    const second = runChild(process.execPath, [STOP], { input, env });
+    expect(second.status).toBe(0);
+    expect(second.stdout).not.toContain('范围');
+  });
+
+  it('【故意造出的失败】合同里拿掉 entry、progress 换了一套标题：查得出来', () => {
+    const obj = JSON.parse(CONTRACT_TEXT) as { items: (Item & Record<string, unknown>)[] };
+    obj.items = obj.items.filter((i) => i.id !== 'entry');
+    const prog = obj.items.find((i) => i.id === 'progress');
+    if (prog?.检查.行?.[0]) prog.检查.行[0].认 = ['## 待办'];
+    expect(contractProblems(JSON.stringify(obj))).toEqual(['entry', 'progress']);
+    expect(contractProblems('{坏的')[0]).toMatch(/合同读不出/);
+  });
+
+  it('【故意造出的失败】拿掉钩子接线（开会话不传 repoContract、Stop 不推范围提醒）：查得出来', () => {
+    const cutSession = SESSION_SRC.replace(/\n\s*repoContract: [^\n]*\n/, '\n');
+    expect(cutSession).not.toBe(SESSION_SRC);
+    expect(sessionWired(cutSession)).toBe(false);
+    const cutStop = STOP_SRC.replace(/notes\.push\(scope\.systemMessage\)/, 'void scope');
+    expect(cutStop).not.toBe(STOP_SRC);
+    expect(stopWired(cutStop)).toBe(false);
+  });
+
+  it('【故意造出的失败】Stop 范围提醒改成拦（decision:block）：接线判不过', () => {
+    const blocking = STOP_SRC.replace(
+      /notes\.push\(scope\.systemMessage\)/,
+      "process.stdout.write(JSON.stringify({ decision: 'block', reason: scope.systemMessage }))",
+    );
+    expect(stopWired(blocking)).toBe(false);
+  });
+
+  it('【故意造出的失败】通用段退回只有文字的长规矩（#1934 初稿）：查得出来', () => {
+    const s1 =
+      '- 能跑起来的仓，根 `package.json` 给 `pnpm dev`（起最新版）、`start`、`stop`、`check`（交活前检查），写进 README 第一屏；没 Node 也放个只有 `scripts` 的。我只记 pnpm 命令，不记路径、软件和环境变量。';
+    const cut = SHARED.replace(/- 仓要过 fleet-dao 的仓合同[^\n]*/, s1);
     expect(cut).not.toBe(SHARED);
-    expect(missing(ENTRY_RULES, anyRepoSection(cut))).toEqual(Object.keys(ENTRY_RULES));
-  });
-
-  it('【故意造出的失败】入口退回「双击 start.cmd」、少了 start/stop：查得出来', () => {
-    const cut = SHARED.replace(/、`start`、`stop`/, '、双击 `start.cmd`');
-    expect(cut).not.toBe(SHARED);
-    expect(missing(ENTRY_RULES, anyRepoSection(cut))).toEqual(['四个命令都在']);
-  });
-
-  it('【故意造出的失败】默认翻回「项目特有」（删掉默认通用那半句）：查得出来', () => {
-    const cut = SHARED.replace(/（我说的原则、偏好默认各仓通用）/, '');
-    expect(cut).not.toBe(SHARED);
-    expect(missing(DEFAULT_SHARED_RULES, anyRepoSection(cut))).toEqual(['原则偏好默认通用']);
-  });
-
-  it('【故意造出的失败】directive 不再打那句提示：查得出来', () => {
-    const cut = PROGRESS_BIN.replace(/\n\s*console\.log\(DIRECTIVE_SCOPE_HINT\);/, '');
-    expect(cut).not.toBe(PROGRESS_BIN);
-    expect(directiveBranch(cut)).not.toMatch(/console\.log\(DIRECTIVE_SCOPE_HINT\)/);
-  });
-
-  it('【故意造出的失败】认不出那一节、认不出 directive 分支：明确报错，不当成「都在」', () => {
-    expect(() => anyRepoSection('# 没有这一节')).toThrow(/认不出「## 在任何仓里干活」/);
-    expect(() => directiveBranch('// 没有分支')).toThrow(/认不出 directive 分支/);
+    expect(missing(SHARED_RULES, cut)).toEqual([
+      '指到合同',
+      '入口四个命令',
+      '钩子列缺项',
+      '补用repo_init',
+      '只记pnpm命令',
+      '原则默认通用',
+      '引导标范围',
+    ]);
   });
 });

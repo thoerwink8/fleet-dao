@@ -84,7 +84,7 @@
 | [0078](0078-steer-reply-and-background-subagents.md) | 引导三条：引导一送到、调工具前先回一句；派 Agent 子代理一律后台跑，主对话留在这一轮等完成通知、单次前台等待不超过 60 秒（不分无人值守与否）；引导涉及在跑的子代理用 `SendMessage` 转 | 采纳；文末修订（#1743，创始人 2026-10-11 让指挥官测、没问题就合）：Mirasim 的引导要等这一轮结束、后台子代理都跑完才读进来，调工具前和收尾钩子从 Mirasim 取原文先转，不用结束这一轮 |
 | [0079](0079-fleet-subagents-user-level.md) | 16 个 `fleet-*` 子代理的通用版（`agents/subagents/` 下同名，去掉本仓专属的命令和路径）随 `pnpm agents:sync` 和 `haiku55` 一起装到每台机器的 `~/.claude/agents/`，法国也装；`.claude/agents/` 的专属版本仓照用、不往家里装（部分取代 0036） | 采纳（创始人 2026-10-11 18:38「1. 装」、20:44「改成通用版，VPS 照装」） |
 | [0080](0080-steer-lineage-owner.md) | 创始人的话和引导按「Mirasim 会话」这条血缘认主：开会话只列同一个 Mirasim 会话换号前收到的话，不再全局广播；待处理引导记主人，只叫主人办，别的会话只计数，无主的先 `pnpm progress:claim` 认领 | 待创始人同意（改标准） |
-| [0081](0081-pnpm-entry-and-default-shared.md) | 能跑起来的仓，根 `package.json` 给 `pnpm dev`、`start`、`stop`、`check`，写进 README 第一屏；创始人说的原则、偏好默认各仓通用，当场给 fleet-dao 开 PR，只此仓有效的要他明说过或写明为什么；`pnpm progress:directive` 记完当场问一句 | 待创始人同意（改标准） |
+| [0081](0081-pnpm-entry-and-default-shared.md) | 仓合同 `agents/repo-contract.json`（首批：仓根 `pnpm dev/start/stop/check`、AGENTS.md、PROGRESS 两节、`.gitignore` 的 `_tmp/`）：开会话钩子在任何仓里每天最多提醒一次缺项，`pnpm repo:check`、`repo:init` 查和补，只提醒不拦；创始人说的原则默认各仓通用，引导条目标〔范围：通用｜只此仓〕，开会话和收尾钩子提醒 | 创始人 04:37 选定方案 B，PR #1934 合并即生效 |
 
 ## 第 1–14 条的编号（#1476）
 

@@ -23,6 +23,9 @@
 //    只在这台配了登法国的 ssh 时查：~/.fleet-dao/france-ssh，或真开会话时进程里的 FLEET_FRANCE_SSH。没配不出声，不当成没到期。
 //    当库被测试调用时不读进程环境，免得测试机上的环境变量把 ssh 打出去；真开会话（本文件当主程序）才把进程环境传进去。
 //    查不成就说没查成。结果缓存 QUIET_MS，免得每条消息都 ssh。认不出的不当成没到期。
+// 6. 仓合同（决定 0081，repo-contract.mjs 的 contractLines）：会话所在仓按 fleet-dao 的 agents/repo-contract.json 查，
+//    有缺项说一段事实，每个仓每天最多一次，全过不出声。只在真开会话时接上（repoContract 参数），测试按需注入。
+//    引导条目的〔范围：通用｜只此仓〕：checkDirectives 在那一行后面补一句没标的、标了通用还没上推的。
 // 环境变量 FLEET_WORKER=1（commander 的 worker.mjs 起工人时设）：只做第 1、2 件，其余各段（创始人的事、整池暂停、工作树、工人状态）一律不出。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
@@ -44,6 +47,7 @@ import { lineageOf, reconcile, relayedUpTo, sentByFounder } from './founder-inbo
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, gitWhy as why } from './git-run.mjs';
 import { logDir } from './prompt-log.mjs';
+import { contractLines, DIRECTIVE_HEADING, pendingItems, scopeNote } from './repo-contract.mjs';
 import {
   cleanId,
   isMachineOpening,
@@ -285,7 +289,9 @@ export function checkTemporary(cwd, git, now = Date.now()) {
  * 有没处理完的引导就报几条、让人接着办；没有这一节、不是 git 仓不出声；git 跑不起来、读不了明说没查成。
  * 只用本地 git grep 找已跟踪的 .md（不取远端，限时 GREP_MS），不拖慢开会话。返回要说的几行。
  */
-export const DIRECTIVE_HEADING = '## 创始人引导（待处理）';
+// 标题和条目的读法放在 repo-contract.mjs：收尾的 Stop 钩子、仓合同的 progress 一项读的是同一个
+export { DIRECTIVE_HEADING };
+
 const DIRECTIVE_NOT_CHECKED = '创始人引导待处理清单没查成';
 
 /**
@@ -341,7 +347,7 @@ export function checkDirectives(cwd, git, lineage = null) {
       out.push(`${DIRECTIVE_NOT_CHECKED}（${file}:${n}）：读不了（${err?.code ?? err?.message ?? err}）。`);
       continue;
     }
-    const items = directiveItems(text, Number(n));
+    const items = pendingItems(text, Number(n));
     if (items === null) {
       out.push(`${DIRECTIVE_NOT_CHECKED}（${file}:${n}）：标题下面认不出条目。`);
       continue;
@@ -360,6 +366,9 @@ export function checkDirectives(cwd, git, lineage = null) {
       said.push(
         `创始人引导还有 ${shown.length} 条没处理（${file}:${n}）：${listed.join('；')}${shown.length > 5 ? ' 等' : ''}。先接着办，办完把那条标「已处理」或删掉。`,
       );
+      // 〔范围：通用｜只此仓〕（决定 0081）：只看待处理的、归本会话或无主的，已处理的老条目不追溯
+      const scope = scopeNote(shown.map((p) => p.text));
+      if (scope) said.push(scope);
       if (mine && unowned > 0)
         said.push(`无主的先在那一条写上〔主：${mine}〕认领再办（已写了别的主的不动）。`);
     }
@@ -368,18 +377,6 @@ export function checkDirectives(cwd, git, lineage = null) {
     if (said.length > 0) out.push(said.join(''));
   }
   return out;
-}
-
-/** 「## 创始人引导（待处理）」标题下一节里的条目（原文，带主人标记）：`- ` 开头、没标「已处理」的非空行；标题下到下一个一、二级标题为止 */
-function directiveItems(text, headingLine) {
-  const lines = text.split(/\r?\n/);
-  const items = [];
-  for (let i = headingLine; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (/^#{1,2}\s/.test(t)) break;
-    if (t.startsWith('- ') && !/已处理/.test(t)) items.push(t.slice(2).trim());
-  }
-  return items;
 }
 
 /** 这台同步到哪个提交、落后主线几个（g 已经钉在同步专用的检出上了；算不了就说算不了） */
@@ -985,6 +982,7 @@ export function sessionStart({
   progress = progressRunner(),
   env = process.env,
   poolHolds = null,
+  repoContract = null,
 }) {
   // 工人不走三分钟门：它起来就要当前的远端。聊天这场每条消息都续上。
   // 问 GitHub、扫工作树看 session-net；git fetch 看 fetch-ok（子代理刚取成过就不再取）。两扇门都是三分钟。
@@ -1017,6 +1015,7 @@ export function sessionStart({
     ...checkTemporary(cwd, localGit, now),
     ...poolHoldPromptLines(holdRead, beijingToday(now)),
     ...checkDirectives(cwd, localGit, lineage),
+    ...(repoContract ? repoContract(cwd) : []),
     ...(quiet
       ? []
       : checkProgressIssue({
@@ -1504,6 +1503,7 @@ if (isMain()) {
       localGit: gitRunner(GREP_MS),
       sessionId: input?.session_id ?? process.env.CLAUDE_CODE_SESSION_ID,
       poolHolds: () => readFrancePoolHolds({ home, env: process.env, spawn: spawnSync }),
+      repoContract: (dir) => contractLines({ cwd: dir, git: gitRunner(GREP_MS), home }),
     });
   } catch (err) {
     lines = [`开场核规矩没查成：开会话钩子自己出错了（${err?.message ?? err}）；${READ_MAIN}。`];

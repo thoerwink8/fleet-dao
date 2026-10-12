@@ -7,7 +7,6 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { DIRECTIVE_SCOPE_HINT } from '../directive-scope.ts';
 import { ghRunner } from '../issue-new.ts';
 import {
   NO_OWNER,
@@ -62,7 +61,6 @@ try {
     console.log(
       `记下创始人引导（待处理，主：${c.owner}）：${c.url}（评论号 ${c.id}；办完 pnpm progress:done ${c.id}）`,
     );
-    console.log(DIRECTIVE_SCOPE_HINT);
   } else if (cmd === 'claim') {
     const line = await myLineage();
     if (line.status === 'unchecked') throw new ProgressUnchecked(`本会话的主没查成（${line.why}），没认领。`);

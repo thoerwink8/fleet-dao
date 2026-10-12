@@ -12,11 +12,13 @@
 // 退出码恒为 0：Stop 上 exit 2 也是「不许停」。
 // 规矩本身由 agents/test/rules/stop.rules.test.ts 钉住：没开无人值守时输出里出现 decision 或 hookSpecificOutput 会红
 // （转 Mirasim 引导那一条除外，钉在 agents/test/rules/mirasim-steer.rules.test.ts）。
+// 新记的创始人引导没标〔范围：通用｜只此仓〕（决定 0081，repo-contract.mjs 的 stopScopeCheck）：同一会话同一条提醒一次，也只用 systemMessage。
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitRunner, gitOk as ok } from './git-run.mjs';
 import { mirasimDir, steerRelay, takeSteers } from './main-thread.mjs';
+import { stopScopeCheck } from './repo-contract.mjs';
 import { cleanId, decideStop, isMachineSession, runningWorkers, stateDir } from './unattended.mjs';
 
 /** 仓根里一眼像临时文件的：截图、导出的数据、日志（AGENTS.md 通用段「放 _tmp/」那条列的几类） */
@@ -126,6 +128,19 @@ if (isMain()) {
       if (out) notes.push(out.systemMessage);
     } catch {
       // 钩子自己出错不影响会话收尾：安安静静退出，别把「查不成」搞成「拦下」
+    }
+    try {
+      const sid = cleanId(input?.session_id) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
+      const scope = stopScopeCheck({
+        cwd: pickCwd(input),
+        git: gitRunner(STOP_GIT_MS),
+        seenFile: sid ? join(stateDir(), `scope-reminded-${sid}.json`) : null,
+      });
+      if (scope) notes.push(scope.systemMessage);
+    } catch (e) {
+      notes.push(
+        `新记的创始人引导有没有标范围没查成：钩子自己出错了（${e instanceof Error ? e.message : String(e)}）`,
+      );
     }
   }
   if (notes.length > 0) process.stdout.write(`${JSON.stringify({ systemMessage: notes.join('；') })}\n`);
