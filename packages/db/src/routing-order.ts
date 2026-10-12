@@ -1,5 +1,5 @@
 // 路由两层的先后、开关，以及用途里加模型、移出、改档位（#1089、#1356）：驾驶舱「路由」页改。
-// 先后和开关改 position、enabled。用途下的档位写 routing_purpose_models.effort，不改 routing_catalog.effort（起会话仍读路由上的档）。
+// 先后和开关改 position、enabled。用途下的档位写 routing_purpose_models.effort，不改 routing_catalog.effort（起会话只读用途表这一列）。
 // 加、移、改档位带用途版本（routing_purpose_revisions），对不上回 conflict、一行不动。拖动先后仍比 expected 那一串，不改这个版本。
 // 和 routing-effort.ts 同一个写法：事务里先锁行、再比调用方看到的旧值，对不上回 conflict；能传事务进来（驾驶舱后端在同一个事务里再记操作记录）。
 // 为什么锁和读是两条语句：Postgres 在默认的 READ COMMITTED 下，`order by … for update` 若在锁上等过别人，

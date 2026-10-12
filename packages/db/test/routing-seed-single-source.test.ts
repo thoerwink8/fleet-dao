@@ -15,6 +15,9 @@ export function duplicateSeedProblems(effortSource: string, workerSource: string
   if (/DEFAULT_SESSION_EFFORT\s*=\s*['"]high['"]/.test(effortSource)) {
     problems.push('effort.ts 又把默认档位写成了 high');
   }
+  if (/from 'node:fs'/.test(effortSource)) {
+    problems.push('effort.ts 用 node:fs 读骨架：驾驶舱打包进不了浏览器');
+  }
   if (/DEFAULT_EFFORT\s*=\s*['"]high['"]/.test(workerSource)) {
     problems.push('worker-lib.mjs 又把 DEFAULT_EFFORT 写成了 high');
   }
@@ -43,7 +46,7 @@ describe('默认模型和档位只在 routing.default.json', () => {
 
   it('【故意造出的失败】源码里再写死一份，这道检查报出来', () => {
     const problems = duplicateSeedProblems(
-      `export const DEFAULT_SESSION_EFFORT = 'high';`,
+      `export const DEFAULT_SESSION_EFFORT = 'high';\nimport { readFileSync } from 'node:fs';`,
       [
         `export const DEFAULT_EFFORT = 'high';`,
         `export const ROUTING_MODEL_OF = { grok: 'grok-4.7' };`,
@@ -52,6 +55,7 @@ describe('默认模型和档位只在 routing.default.json', () => {
     );
     expect(problems).toEqual([
       'effort.ts 又把默认档位写成了 high',
+      'effort.ts 用 node:fs 读骨架：驾驶舱打包进不了浏览器',
       'worker-lib.mjs 又把 DEFAULT_EFFORT 写成了 high',
       'worker-lib.mjs 又写了一份 ROUTING_MODEL_OF',
       'worker-lib.mjs 又写了一份 CLAUDE_DEFAULT_MODEL',

@@ -286,8 +286,9 @@ export const RoutingLayersResponse = z.object({
   modelRosterUnavailable: z.string().optional(),
 });
 
-// —— 思考档位（#470）：路由两层里每个模型下的每条路由，起会话想多深 ——
-// 存在库里（routing_catalog.effort，运行时配置，决定 0011 第 7 条）：改了下一个起的会话就照新的，不走改仓库再部署。
+// —— 思考档位（#470，#1967）：起会话读用途表 routing_purpose_models.effort ——
+// 这一页按路由展示。改一条路由时，这个模型在每个用途里的档写成同一个值，routing_catalog.effort 跟着写；起会话不读路由上那一列。
+// 档位留在库里（决定 0011 第 7 条）：改了下一个起的会话就照新的，不走改仓库再部署。
 // 能配哪几档照 effort.ts 的 routeEffortChoices（和引擎起会话、骨架装载同一份判法）。
 
 export const SessionEffortSchema = z.enum(SESSION_EFFORTS);
