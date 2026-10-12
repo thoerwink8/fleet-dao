@@ -2,7 +2,7 @@
 name: fleet-scout
 description: 读码检索（Haiku 5.5，只读）：找文件、谁调谁、某个行为在哪实现，回「文件:行」。派它之前先想：产出是不是一行就能抽查。
 model: claude-haiku-5-5
-effort: low
+effort: medium
 maxTurns: 15
 omitClaudeMd: true
 tools: Read, Grep, Glob, mcp__codegraph__codegraph_explore

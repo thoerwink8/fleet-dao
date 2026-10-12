@@ -39,6 +39,6 @@
 
 ## 我的机器与模型
 - Claude 一律经 reclaude 起；有 Claude 会话在跑的设备上，别 `reclaude org use` 切号：会话会当场全断。
-- GPT 系不做界面类的活（包括审界面）；子代理、工人永不用 Fable；子代理按性价比分 Haiku 5.5、Sonnet 5.5、Opus 5.5 三档，核对实际 id（Haiku 用 haiku55），能脚本核对的先 Haiku、核对不过再升级，不符、连败升一档；引擎按路由派的会话、VPS 上的会话只用我在驾驶舱配进用途的 Fable，AI 不替我配；本机主对话里 Fable 由我自己选。
+- GPT 系不做界面类的活（包括审界面）；子代理、工人永不用 Fable；子代理按性价比分 Haiku 5.5、Sonnet 5.5、Opus 5.5 三档，核对实际 id（Haiku 用 haiku55），能脚本核对的先 Haiku、核对不过再升级（Haiku 的 effort 至少 medium，没跑核对就报完也算不过），不符、连败升一档；引擎按路由派的会话、VPS 上的会话只用我在驾驶舱配进用途的 Fable，AI 不替我配；本机主对话里 Fable 由我自己选。
 
 <!-- fleet-dao:通用段 结束 -->

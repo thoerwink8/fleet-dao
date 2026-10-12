@@ -152,7 +152,11 @@ const GUIDE_RULES: Record<string, [text: 'SKILL' | 'GUIDE', re: RegExp]> = {
   ],
   costUSD不当账: ['GUIDE', /`costUSD` 对 5\.5 不准/],
   档位表Haiku: ['GUIDE', /\n\| 读码检索[^\n]*\| Haiku 5\.5（`haiku55`） \|/],
-  档位表Haiku修bug: ['GUIDE', /\n\| 规格明确的小函数、有失败测试的 bug 修复 \| Haiku 5\.5（`haiku55`） \|/],
+  // 决定 0086 起这一行叫「窄改动编码」，三条同时满足才给 Haiku（agents/test/rules/haiku-scope.rules.test.ts 钉三条）
+  档位表Haiku修bug: [
+    'GUIDE',
+    /\n\| 窄改动编码：规格明确的小函数、有失败测试的 bug 修复[^\n]*\| Haiku 5\.5（`haiku55`） \|/,
+  ],
   档位表Haiku写任务书配脚本: ['GUIDE', /\n\| 按写全的规矩写任务书草稿 \| Haiku 5\.5[^\n]*check-brief\.mjs/],
   档位表Sonnet: ['GUIDE', /\n\| 没有机器核对的写代码[^\n]*\| Sonnet 5\.5 \|/],
   档位表Opus: ['GUIDE', /\n\| 改标准[^\n]*\| Opus 5\.5 \|/],
