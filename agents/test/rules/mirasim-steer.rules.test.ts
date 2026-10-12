@@ -713,7 +713,8 @@ describe('收尾钩子 stop.mjs：收尾时有没转过的引导就挡回去、r
 
   it('【故意造出的失败】收尾钩子不转引导：写最后一段话时来的引导就没人转了，第一条查得出来', () => {
     const copy = fresh('hooks');
-    for (const f of ['stop.mjs', 'main-thread.mjs', 'unattended.mjs', 'git-run.mjs'])
+    // repo-contract.mjs：stop.mjs 收尾时的引导范围提醒要用（决定 0081）
+    for (const f of ['stop.mjs', 'main-thread.mjs', 'unattended.mjs', 'git-run.mjs', 'repo-contract.mjs'])
       copyFileSync(join(HOOKS, f), join(copy, f));
     const src = readFileSync(STOP, 'utf8');
     const want = "if (steer.kind === 'relay') {";

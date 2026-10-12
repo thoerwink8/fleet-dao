@@ -33,6 +33,7 @@
 ## 在任何仓里干活
 - 仓自己的规矩写在仓根 AGENTS.md，只写这个仓特有的。各仓都用得上的规矩，给 fleet-dao 开 PR 改这一份，不横着抄。
 - 几个 AI 同时干活各用各的工作树，建在主检出的 `.claude/worktrees/` 下；改动走 PR；碰界面的 PR 带截图。提交信息一句话说清改了什么、为什么。
+- 仓要过 fleet-dao 的仓合同（`agents/repo-contract.json`，含仓根 `pnpm dev/start/stop/check`）：开会话钩子列缺项，`pnpm repo:init` 补；我只记 pnpm 命令，不记路径和软件。我说的原则、偏好默认各仓通用，引导条目标〔范围：通用｜只此仓〕。
 - 截图、导出的数据、日志这类临时文件放仓根 `_tmp/`。
 
 ## 我的机器与模型
