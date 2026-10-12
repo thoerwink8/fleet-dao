@@ -5,6 +5,7 @@
 // 拆分（#901 ③）：具体定义在 ./web-api/ 下按领域分文件；这里只重导出，所有原来的 import 路径不用改。
 export * from './web-api/auth.ts';
 export * from './web-api/board.ts';
+export * from './web-api/cli-tools.ts';
 export * from './web-api/common.ts';
 export * from './web-api/dispatch.ts';
 export * from './web-api/engine-switch.ts';

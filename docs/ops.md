@@ -731,6 +731,8 @@ FLEET_HK_PARTS=gateway                  # 往香港发哪几样：gateway 飞书
 | `fleet-engine` | fleet | `node packages/engine/src/main.ts`（Temporal worker，任务队列 fleet） | `engine.env`（`FLEET_ENGINE_PORTS=real` 真端口 / `fake` 假端口，必须写；真端口另要机器名、工作树的根、reclaude 的路径，见期望 `deploy/france/desired-config.json`）、`agent-token.env`、`github/`（两个 GitHub 机器人） |
 | `fleet-api` | fleet | `node packages/api/src/main.ts`：一个进程两个监听，驾驶舱接口 `10.99.0.2:8787`、fleet 命令接口 `127.0.0.1:8788`。端口由 `fleet-api.socket` 攥着，进程从 systemd 接手 fd | `api.env`、`agent-token.env`、`session-secret.env`、`gateway-token.env`、`github/`（两个机器人的 json） |
 | `fleet-api.socket` | root | 不跑进程：两个 `ListenStream` 攥着上面那两个地址（`FreeBind=yes`，隧道没起也能先听上）。重启 `fleet-api` 时新连接排在内核队列里 | 不读配置。改监听地址要 `api.env`、`deploy/release.sh` 的 `COCKPIT`、`AGENT_API` 两个常量、这个 socket 单元三处一起改 |
+| `fleet-cli-upgrade.path` | root | 不跑进程：看见 `/var/lib/fleet-dao/cli-upgrade/request.json` 就起下面那个单元。跟着版本走，`release.sh` 切版本时装上 | 不读环境文件。升什么看这一版的 `deploy/france/desired-config.json` 里 `cliTools` |
+| `fleet-cli-upgrade.service` | root | `node packages/engine/src/cli-upgrade-main.ts`：空闲时升命令行工具，核对版本、跑一次 `--help`，不过就装回上一版 | 同上。超时 40 分钟，到点杀掉，免得会话起来之后还在换二进制 |
 
 - 两个都是 `Restart=always`。引擎不开 `NoNewPrivileges`（要经 sudo 调 `fleet-agent-scope` 起会话），也不开挂载隔离（会话是它的子进程，会跟着看不见自己的家目录）；后端不起子进程，照常收紧。
 - `engine.env`、`api.env` 新机器由 france.sh 照这一档的期望建（私有值只留空位：飞书、GitHub 的凭据由人填在 `api.env`）。每一项「应该是什么」在仓里的 `deploy/france/desired-config.json`：公开值改期望、合进主线，发布时照期望写上、重启对应服务（本节末尾「配置进仓对账」）；只改机器的，下一轮自动发布就报不一致，发布也不替人改回（期望里 `selfHeal` 关着）。私有值只在机器上改，改完再发布一次就会重启对应服务。库连接写成 `DATABASE_URL=postgres:///fleet` 加 `PGHOST=/var/run/postgresql`：本机 socket、peer 认证，没有口令（postgres.js 不认连接串里的 `?host=`）。
@@ -865,6 +867,29 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 发布构建和密钥隔开（#79，已做）：装依赖、构建驾驶舱前端、打包飞书网关这三步不再以 fleet 直接跑，改走同一个构建沙箱。发布脚本以 root 起一次性 `systemd-run`（`InaccessiblePaths` + `NoNewPrivileges`），里面先以 root 跑 `unshare --pid --fork --mount-proc --kill-child`（root 才建得了 PID 命名空间，自建并换挂 `/proc`），再用 `setpriv --reuid=fleet --regid=fleet --init-groups --no-new-privs` 降成 fleet 跑构建命令（不用 `--uid=fleet` + `PrivateUsers`：法国 systemd 255 和 CI 上里面的 `unshare --pid` 报 `Operation not permitted`）。直接路径挡掉三处：`/etc/fleet-dao`（GitHub 机器人私钥、会话密钥、令牌）、本机库的 unix socket 目录（`/var/run/postgresql`；`/var/run` 指到 `/run` 时连实际路径一起挡）、`/var/lib/fleet-dao`。主机上同 UID 的 fleet 进程不出现在沙箱的 `/proc` 里，因此也不能经 `/proc/<pid>/root/…` 绕开那三处（只遮挂载、仍看主机 `/proc` 时这条绕路是通的）。跑之前先读回：直接路径或任一 `/proc/*/root/etc/fleet-dao` 在沙箱里仍可读、或者没有 `systemd-run` / `unshare` / `setpriv`、沙箱起不来、读回认不出，构建这一步红字停下，不切版本，也不退回用 fleet 直接构建。
 
 沙箱里还看得到的：fleet 的家目录（pnpm 和缓存在 `/home/fleet`，构建要用，家目录里 fleet 能读的文件构建时也能读）；出网（装依赖要连 registry.npmjs.org）；本机 TCP `127.0.0.1:5432`（只隔了 unix socket 目录，端口没隔；装机给 fleet 的是 socket 上的 peer、不设口令，TCP 那条要口令）；沙箱起来之后才在主机上挂进这三处下面的新挂载（`InaccessiblePaths` 挡不住后挂上的）；沙箱自己 PID 命名空间里的 `/proc`（能看本沙箱进程的环境与文件描述符，看不到主机上别的进程）。没有新建专用构建用户：构建仍是 fleet 这个 UID，靠挂载隔离 + 私有 PID/`/proc` 把密钥目录和主机同 UID 进程隔开。pnpm 11 默认仍不跑依赖的安装脚本（`pnpm-workspace.yaml` 的 `allowBuilds` 现在一个都没放行），这层还在，但不再是唯一的挡。
+
+### 命令行工具升级（#1971）
+
+法国上的 Claude Code、Codex 是 2026-09 用 root 的 `npm i -g` 装进 `/usr/lib/node_modules` 的（二进制在 `/usr/bin`）。Claude Code 官方的自动更新在这种「目录不归运行用户写」的装法下不生效。Cursor、reclaude 有各自的更新路径，不在这里升。Grok 装在会话用户家里（`~/.grok/bin/grok`），会话里关了自动更新，这里在空闲或发版窗口里替它跑 `grok update`。
+
+跟哪个渠道写在 `deploy/france/desired-config.json` 的 `cliTools`（对账认这个键、但不把它当环境文件）：
+
+- Claude Code：`stable`（npm 的 dist-tag。官方说大约晚一周，会跳过有大问题的版本）。
+- Codex、Grok：`latest+3d`（跟 `latest`，但发布满 3 天才升）。Grok 的官方指针只有版本号、没有发布时间，这台机器第一次看见这个版本的时刻算起，满 3 天才升。
+- 要用刚发的新模型：把那一项的 `channel` 改成 `latest`（不带天数），合进主线、发一版。没写 `channel` 的工具不升，只把现版本读给驾驶舱。
+
+两个时机，都不在会话运行中替换二进制（运行中的会话会从磁盘再读可执行文件，原地替换会让它崩）：
+
+1. 发版：`release.sh` 等会话收尾、停下引擎之后，切版本之前，直接跑要发的那一版的 `packages/engine/src/cli-upgrade-main.ts --release-window`。不多停一次。这一轮没全部成也不挡发版（不记红），每个工具自己退回或记下。
+2. 空闲：没有在跑的会话，并且拉单停着、或最近 1 小时每一轮拉单的候选都是 0。引擎写 `/var/lib/fleet-dao/cli-upgrade/request.json`，同时排空（不起新会话，到点也不停已经在跑的）。`fleet-cli-upgrade.path` 看见文件就以 root 起单元。升完引擎撤掉排空和请求。发布或停机已经在排空时，这一轮不另起。
+
+每个工具升完当场 `--version` 对上目标版本，再跑一次 `--help`（不调模型、不花钱）。对不上或冒烟不过，装回上一版（npm 装回精确版本；grok 把升级前拷下的二进制写回去）并记 `failure`。退不回去也记 `failure`，不留在坏版本上。有 `failure` 的工具不再装第二次。整轮只要还有工具带着 `failure`，引擎不再写新的升级请求。看完以后，删掉 `state.json` 里那个工具的 `failure` 字段才再升。驾驶舱「法国」页的「命令行工具」一块显示版本和上次升级时间；没成的推一条提醒（同一条，不另起）。
+
+单元 45 分钟还没写回结果：引擎撤掉排空、把请求改名为 `request.stuck`，下一轮空闲再试。这不算工具失败。看 `journalctl -u fleet-cli-upgrade`。单元自己的时限是 40 分钟，到点杀掉 npm 子进程。
+
+目录 `/var/lib/fleet-dao/cli-upgrade` 由 root 建成 `fleet:fleet` 0775。引擎写 `wanted.json`、`request.json`；root 写 `state.json`（0644，驾驶舱读得了）。发版窗口开始前会停掉还在跑的 `fleet-cli-upgrade.service`，并删掉 `wanted.json` 和 `request.json`，免得两路同时换二进制、也免得新引擎把没对上的空闲请求当成还要排空。
+
+退回上一版应用不会把命令行工具再升一遍，也不会自动把它们退回发版前的版本。某个工具退回是升级自己做的（装回它的上一版），和 `release.sh --rollback` 不是一回事。
 
 ### 自动发布
 

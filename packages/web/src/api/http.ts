@@ -430,6 +430,7 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       return res.setting;
     },
     franceReleaseState: () => send('GET', apiUrl(R.franceReleaseState.path), R.franceReleaseState.response),
+    franceCliTools: () => send('GET', apiUrl(R.franceCliTools.path), R.franceCliTools.response),
     franceReleaseCard: () => send('GET', apiUrl(R.franceReleaseCard.path), R.franceReleaseCard.response),
     franceReleasedCommits: () =>
       send('GET', apiUrl(R.franceReleasedCommits.path), R.franceReleasedCommits.response),

@@ -6,14 +6,15 @@
 // 真发版：点「在用版本」那一行里的「发布到法国」（#1232、#1255，components/release-card.tsx 的 ReleaseEntry；后端只写请求文件，法国上 root 的单元接活），或走 pnpm release:onekey start。
 // 发版单位是主线提交（决定 0032）：那一行写明落后几个提交、要发的主线头提交号和标题；下面的「发版」卡只读。
 //
-// 数据从哪来（不新开接口）：
-// - /api/env（本台六项事实）、/api/jobs（定时任务）、发版状态和预检、/api/nodes（远程环境列表和快照，多台时并排）。
+// 数据从哪来：
+// - /api/env（本台六项事实）、/api/jobs（定时任务）、发版状态和预检、/api/france/cli-tools（命令行工具的版本和上次升级）、
+//   /api/nodes（远程环境列表和快照，多台时并排）。
 // - 在法国真机的驾驶舱上打开，本台就是法国；在本地开发 / 演示 mock 上打开，本台是这台后端自己的数。
 // - 每一项都按后端给的 ok / reason 两态如实画：读不到就写「没查成 + 原因」，不拿 0 或假 ok 冒充（仓的底线）。
 //
 // 版式（路由页样板 #1914 铺开）：最上面是本台的标题块（名字、一句结论带状态、一行灰字细节），下面总开关一行；
 // 只有一台时六项是一个区块里的六行（宽屏两栏各三行）；两台及以上每个环境一列、六项各占一行用 subgrid 对齐。
-// 再下面左边定时任务列表（出问题的排前面）、右边发版。每一项一行怎么画在 components/env-facts.tsx。
+// 再下面左边定时任务列表（出问题的排前面）、右边发版和命令行工具。每一项一行怎么画在 components/env-facts.tsx。
 
 import { ArrowRight, ChevronDown, Rocket, SearchX, ServerCog, Timer } from 'lucide-react';
 import { type CSSProperties, type ReactNode, useState } from 'react';
@@ -23,6 +24,7 @@ import {
   errorText,
   isNotFound,
   useEnv,
+  useFranceCliTools,
   useFrancePreflight,
   useFranceReleaseCard,
   useFranceReleaseState,
@@ -33,6 +35,7 @@ import {
 import type {
   EnvFacts,
   EnvResponse,
+  FranceCliTools,
   FrancePreflightResponse,
   FranceReleaseState,
   JobView,
@@ -45,8 +48,9 @@ import { EngineMasterControl } from '../components/engine-master-card';
 import { FACT_ROWS, factCells, factsSummary, factsUnread } from '../components/env-facts';
 import { JobListHead, JobListRow, rowTone } from '../components/job-row';
 import { EmptyState } from '../components/layout/empty-state';
-import { RowDetail, RowFrame } from '../components/layout/list';
+import { List, ListRow, RowDetail, RowFrame } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { MetaLine } from '../components/layout/meta-line';
 import { Notice } from '../components/layout/notice';
 import { Page } from '../components/layout/page';
 import { Section, SectionGrid } from '../components/layout/section';
@@ -54,7 +58,7 @@ import { StatusBadge, StatusDot } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
 import { ReleaseCardBody, ReleaseEntry } from '../components/release-card';
 import { Button } from '../components/ui/button';
-import { formatAgo, formatDuration, TIME } from '../lib/format';
+import { formatAgo, formatDateTime, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { freshnessNow, nodeAgeText, useNodeSelection } from '../lib/node';
 import { useShownError } from '../lib/shown-error';
@@ -594,12 +598,71 @@ function FranceHero({
   );
 }
 
+function cliOutcome(outcome: FranceCliTools['tools'][number]['outcome']): { tone: Tone; label: string } {
+  switch (outcome) {
+    case 'ok':
+      return { tone: 'done', label: '已升级' };
+    case 'current':
+      return { tone: 'done', label: '已是这一版' };
+    case 'skipped':
+      return { tone: 'stop', label: '这轮不升' };
+    case 'failed':
+      return { tone: 'fail', label: '没成' };
+    case 'rolled-back':
+      return { tone: 'fail', label: '已退回' };
+    case 'refused':
+      return { tone: 'stall', label: '没换' };
+    default:
+      return { tone: 'stop', label: '还没升过' };
+  }
+}
+
+/** 命令行工具（#1971）：一行一个工具，版本和上次升级时刻都在这一行上。 */
+function CliToolsBody({ data, now }: { data: FranceCliTools; now: number }) {
+  if (data.state === 'unreadable') {
+    return (
+      <Notice tone="fail" title="没查成">
+        {data.reason ?? '读不到升级结果'}
+      </Notice>
+    );
+  }
+  if (data.tools.length === 0) {
+    return <EmptyState size="inline" title="还没升过" hint="空闲或下一次发版时才会升。" />;
+  }
+  return (
+    <List>
+      {data.tools.map((tool) => {
+        const badge = cliOutcome(tool.outcome);
+        const upgraded = tool.upgradedAt ? `上次升级 ${formatAgo(tool.upgradedAt, now)}` : '还没升过';
+        return (
+          <ListRow
+            key={tool.id}
+            tall
+            rail={badge.tone === 'fail' ? 'fail' : undefined}
+            title={tool.name}
+            meta={<MetaLine items={[tool.version ?? '还没有版本', upgraded]} />}
+            trailing={<StatusBadge tone={badge.tone} label={badge.label} variant="dot" />}
+          />
+        );
+      })}
+    </List>
+  );
+}
+
+function cliToolsDescription(data: FranceCliTools | undefined): string {
+  const base = '空闲或发版重启时升；核对或冒烟不过就退回上一版。';
+  if (data?.state !== 'ok' || !data.checkedAt) return base;
+  const when = data.why === 'release' ? '发版' : '空闲';
+  return `${base}上次核对 ${formatDateTime(data.checkedAt)}（${when}）。`;
+}
+
 export default function France() {
   const { view: masterView } = useMasterView();
   const env = useEnv();
   const nodes = useNodes();
   const jobs = useJobs();
   const release = useFranceReleaseState();
+  const cliTools = useFranceCliTools();
   const card = useFranceReleaseCard();
   const preflight = useFrancePreflight();
   const { nodeId } = useNodeSelection();
@@ -715,7 +778,7 @@ export default function France() {
   return (
     <Page
       title="法国"
-      description="本台的六项事实、引擎总开关、定时任务和发版。"
+      description="本台的六项事实、引擎总开关、定时任务、发版和命令行工具。"
       detail="读不到的写「没查成」和原因，不拿 0 顶；每 30 秒自己刷新。多一台机器时按台并排比。"
       refresh={{
         onRefresh: () => void read.refetch(),
@@ -803,6 +866,15 @@ export default function France() {
                 <LoadingRows rows={2} />
               ) : (
                 <ReleaseBody release={release.data} preflight={preflight} />
+              )}
+            </Section>
+            <Section title="命令行工具" description={cliToolsDescription(cliTools.data)}>
+              {cliTools.error ? (
+                <LoadError what="命令行工具" error={cliTools.error} onRetry={() => void cliTools.refetch()} />
+              ) : cliTools.isLoading || !cliTools.data ? (
+                <LoadingRows rows={3} />
+              ) : (
+                <CliToolsBody data={cliTools.data} now={now} />
               )}
             </Section>
           </div>

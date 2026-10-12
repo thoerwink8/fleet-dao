@@ -6,7 +6,13 @@ import { cleanup, fireEvent, screen } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
-import type { EnvResponse, FrancePreflightResponse, FranceReleaseState, Jobs } from '../api/types';
+import type {
+  EnvResponse,
+  FranceCliTools,
+  FrancePreflightResponse,
+  FranceReleaseState,
+  Jobs,
+} from '../api/types';
 import France from '../routes/france';
 import { renderApp } from '../test/harness';
 
@@ -37,7 +43,7 @@ interface PreflightCall {
   preflight: FrancePreflightResponse | { error: Error };
 }
 
-function apiWith({ release, preflight }: PreflightCall): MockApi {
+function apiWith({ release, preflight }: PreflightCall, cliTools?: FranceCliTools): MockApi {
   const inner = createMockApi({ live: false });
   return {
     ...inner,
@@ -46,12 +52,13 @@ function apiWith({ release, preflight }: PreflightCall): MockApi {
     franceReleaseState: () => Promise.resolve(release),
     francePreflight:
       'error' in preflight ? () => Promise.reject(preflight.error) : () => Promise.resolve(preflight),
+    ...(cliTools ? { franceCliTools: () => Promise.resolve(cliTools) } : {}),
   } as MockApi;
 }
 
-function renderWith(call: PreflightCall) {
+function renderWith(call: PreflightCall, cliTools?: FranceCliTools) {
   return renderApp(<France />, {
-    api: apiWith(call) as unknown as FleetApi,
+    api: apiWith(call, cliTools) as unknown as FleetApi,
     route: '/france',
   });
 }
@@ -75,6 +82,34 @@ function donePreflight(
 }
 
 const idleRelease: FranceReleaseState = { state: 'idle', asOf: '2026-10-05T02:00:00.000Z' };
+
+test('命令行工具：升完看得到版本和上次升级时间；还没升过写明', async () => {
+  renderWith(
+    { release: idleRelease, preflight: donePreflight() },
+    {
+      state: 'ok',
+      reason: null,
+      checkedAt: '2026-10-12T12:00:00.000Z',
+      why: 'idle',
+      tools: [
+        {
+          id: 'claude-code',
+          name: 'Claude Code',
+          version: '2.1.287',
+          upgradedAt: '2026-10-12T12:00:01.000Z',
+          channel: 'stable',
+          outcome: 'ok',
+          detail: '升到 2.1.287',
+        },
+      ],
+    },
+  );
+  expect(await screen.findByText('命令行工具')).toBeTruthy();
+  expect(await screen.findByText('Claude Code')).toBeTruthy();
+  expect(await screen.findByText('2.1.287')).toBeTruthy();
+  expect(await screen.findByText(/上次升级/)).toBeTruthy();
+  expect(await screen.findByText('已升级')).toBeTruthy();
+});
 
 describe('/france 页发版一键卡', () => {
   test('没在走 + 点「发版预检」预检过了：状态写没在走、结果块命令照写、退出码 0 那行绿', async () => {

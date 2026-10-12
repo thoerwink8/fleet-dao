@@ -3,8 +3,11 @@
 // 新引擎起来按编号续同一个会话），然后照发。发完新引擎起来就接着派；发布没成，请求一撤马上接着派。
 // 这一份只管「在不在排空、截止到几点、手上还有哪些会话」；谁来叫排空、到点怎么停在 drain-control.ts，状态文件在 drain-file.ts。
 // 改这里之前必须知道：
-// - 叫排空的有两处：发布脚本写的排空请求（deploy/release.sh，发布一开始就写，宽限和构建一起走）、systemd 的停机信号
-//   （发布切版本、人手动重启、关机）。停机信号来的撤不掉；发布请求来的，请求撤了就撤。已经在排空时只会把截止提前、不会推后。
+// - 叫排空的有三处：发布脚本写的排空请求（deploy/release.sh，发布一开始就写，宽限和构建一起走）、systemd 的停机信号
+//   （发布切版本、人手动重启、关机）、命令行工具升级（空闲时引擎自己挂上，升完撤；到了截止也不停会话）。
+//   停机信号比发布高，发布比升级高。低的改不了高的。同一个来源只会把截止提前、不会推后。
+//   发布或停机接手升级时用它们自己的截止：升级那段短钟是用来等装完的，接手以后不能拿它去停会话。
+//   停机信号来的撤不掉；发布请求来的，请求撤了就撤（不连带把升级排空撤掉）。升级来的只由升级任务撤。
 // - 只数这个工人进程手上的会话（起会话过了闸、还没交回工作流的）：在等额度、等空位、等人的单子不算在跑，照常算空闲
 //   （2026-09-28 帅位：拼车用满时法国多半在等额度，不能把它们当成在跑）。
 // - 会话是这个进程起的（sudo → fleet-agent-scope → 会话），输出管道接在这个进程上：进程一退就接不上了。所以「等会话做完」
@@ -29,10 +32,17 @@ export const DRAIN_POLL_MS = 5_000;
 /** 引擎在排空时，选路隔多久再选：新引擎起来、或者请求撤了，下一次就选得到。 */
 export const DRAIN_ROUTE_RETRY_SECONDS = 30;
 
-export type CordonSource = 'release' | 'signal';
+export type CordonSource = 'release' | 'signal' | 'cli-upgrade';
+
+/** 停机信号最高，发布其次，命令行工具升级最低。低的改不了已经挂着的高的。 */
+function sourceRank(source: CordonSource): number {
+  if (source === 'signal') return 2;
+  if (source === 'release') return 1;
+  return 0;
+}
 
 export interface Cordon {
-  /** release = 发布脚本的排空请求；signal = systemd 的停机信号（撤不掉）。 */
+  /** release = 发布脚本的排空请求；signal = systemd 的停机信号（撤不掉）；cli-upgrade = 升级命令行工具（到点不停会话）。 */
   source: CordonSource;
   /** 从什么时候起不起新会话（ISO）。 */
   since: string;
@@ -58,10 +68,12 @@ export interface EngineDrain {
   stopping(): Cordon | null;
   /** 在排空、而且过了截止：还在跑的该停下了。 */
   overdue(nowMs: number): boolean;
-  /** 开始排空，或者更新：截止只提前不推后；停机信号接手了发布的请求，就算停机信号的（撤不掉）。有变化返回 true。 */
+  /** 开始排空，或者更新。同一个来源截止只提前不推后；更高的来源接手。低的来源改不了已经挂着的高的。有变化返回 true。 */
   cordon(c: Cordon): boolean;
-  /** 撤掉发布请求来的排空（请求撤了、发布结束了）；停机信号来的撤不掉。撤了返回 true。 */
-  lift(): boolean;
+  /**
+   * 撤掉这个来源的排空。不写来源时只撤发布的：停机信号撤不掉，升级排空也不跟着发布请求一起撤。撤了返回 true。
+   */
+  lift(source?: CordonSource): boolean;
   /** 起会话过了闸就登记；同一个 runId 再登记是改它的阶段。 */
   track(session: InFlightSession): void;
   /** 会话交回工作流了（或者没起来）：不再等它。没登记过的不算错。 */
@@ -99,16 +111,25 @@ export function createEngineDrain(): EngineDrain {
         return true;
       }
       const old = cordon;
-      const until = Date.parse(c.until) < Date.parse(old.until) ? c.until : old.until;
-      const source: CordonSource = old.source === 'signal' || c.source === 'signal' ? 'signal' : 'release';
+      const oldRank = sourceRank(old.source);
+      const newRank = sourceRank(c.source);
+      if (newRank < oldRank) return false;
+      // 升级排空不杀会话。发布或停机接手时用它们自己的截止，不把升级那一段短钟继承过来再拿去停会话。
+      // 其余（停机接手发布、同一个来源）仍是截止只提前不推后。
+      const adoptUntil = newRank > oldRank && old.source === 'cli-upgrade';
+      const until = adoptUntil || Date.parse(c.until) < Date.parse(old.until) ? c.until : old.until;
+      const source: CordonSource = newRank > oldRank ? c.source : old.source;
       const why = source !== old.source ? `${old.why}；${c.why}` : old.why;
-      if (until === old.until && source === old.source) return false;
-      cordon = { ...old, until, source, why };
+      const sha = newRank > oldRank ? c.sha : old.sha;
+      if (until === old.until && source === old.source && why === old.why && sha === old.sha) return false;
+      const next: Cordon = { source, since: old.since, until, why };
+      if (sha) next.sha = sha;
+      cordon = next;
       changed();
       return true;
     },
-    lift() {
-      if (cordon?.source !== 'release') return false;
+    lift(source: CordonSource = 'release') {
+      if (cordon?.source !== source) return false;
       cordon = null;
       changed();
       return true;
@@ -130,6 +151,9 @@ export function createEngineDrain(): EngineDrain {
 
 /** 选路、起会话被拒时给人看的一句（驾驶舱「在等什么」、失败原因里都是这一句）。 */
 export function stoppingNote(c: Cordon): string {
+  if (c.source === 'cli-upgrade') {
+    return `在升级命令行工具（${c.why}）：${c.since} 起不起新会话，升完接着派（在跑的会话不停）`;
+  }
   const what = c.source === 'release' ? `要发新版本（${c.why}）` : `引擎在停（${c.why}）`;
   return `${what}：${c.since} 起不起新会话，在跑的最晚做到 ${c.until}，新引擎起来接着派`;
 }

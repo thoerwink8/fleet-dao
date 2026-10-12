@@ -244,7 +244,8 @@ export function createDrainControl(deps: DrainControlDeps): DrainControl {
       }
     }
     const c = deps.drain.stopping();
-    if (c && deps.drain.overdue(t)) {
+    // 升级命令行工具的排空到了截止也不停会话：换二进制只发生在已经没有会话的时候，不能把在跑的杀掉。
+    if (c && c.source !== 'cli-upgrade' && deps.drain.overdue(t)) {
       const stopped = deps.stopSessions(`到了发布宽限的截止（${c.until}）`);
       if (stopped.length > 0) {
         deps.log(

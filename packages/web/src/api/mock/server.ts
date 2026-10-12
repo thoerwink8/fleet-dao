@@ -19,6 +19,7 @@ import {
   ENGINE_MASTER_SETTING,
   EnvResponseSchema,
   engineMasterOf,
+  FranceCliToolsSchema,
   FrancePreflightResponseSchema,
   FranceReleaseStateSchema,
   flowStages,
@@ -2934,6 +2935,17 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       await wait();
       // 假数据：这台后端不是法国，装作「没在走」（开发 mock 看到的就是这个；真法国机器装的是正式环境）。
       return FranceReleaseStateSchema.parse({ state: 'idle', asOf: iso() });
+    },
+    async franceCliTools() {
+      await wait();
+      // 假数据：这台没有升级结果文件，和真后端读不到 state.json 时一样，页面写「还没升过」。
+      return FranceCliToolsSchema.parse({
+        state: 'ok',
+        reason: null,
+        checkedAt: null,
+        why: null,
+        tools: [],
+      });
     },
     async franceReleaseCard() {
       await wait();

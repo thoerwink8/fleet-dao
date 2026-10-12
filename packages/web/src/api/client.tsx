@@ -22,6 +22,7 @@ import type {
   Board,
   Credentials,
   EnvResponse,
+  FranceCliTools,
   FrancePreflightResponse,
   FranceReleaseState,
   GroomNowBody,
@@ -201,6 +202,8 @@ export interface FleetApi {
   updateSetting(key: SettingKey, body: UpdateSettingBody): Promise<Setting>;
   /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
   franceReleaseState(): Promise<FranceReleaseState>;
+  /** /france 页「命令行工具」（#1971）：版本和上次升级时刻。还没升过是空名单。 */
+  franceCliTools(): Promise<FranceCliTools>;
   /** /france 页「发版」卡（#1231）：主线最新提交和 CI、法国在用的提交、差几个、最近做完的一个任务，每行各自带没查成的原因。 */
   franceReleaseCard(): Promise<ReleaseCard>;
   /** /changelog 页「已发布的提交」（#1255）：法国发布历史里切上去的几条，每条提交号、标题、发于何时；读不到写没查成和原因。 */
@@ -269,6 +272,7 @@ export const keys = {
   audit: (target: string) => ['audit', target] as const,
   settings: ['settings'] as const,
   franceReleaseState: ['france-release-state'] as const,
+  franceCliTools: ['france-cli-tools'] as const,
   franceReleaseCard: ['france-release-card'] as const,
   franceReleasedCommits: ['france-released-commits'] as const,
   env: ['env'] as const,
@@ -629,6 +633,16 @@ export function useFranceReleaseState() {
   return useQuery({
     queryKey: keys.franceReleaseState,
     queryFn: () => api.franceReleaseState(),
+    refetchInterval: 30_000,
+  });
+}
+
+/** /france 页「命令行工具」（#1971）：30 秒重拉一次。读不到后端也照实显示「没查成」。 */
+export function useFranceCliTools() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.franceCliTools,
+    queryFn: () => api.franceCliTools(),
     refetchInterval: 30_000,
   });
 }

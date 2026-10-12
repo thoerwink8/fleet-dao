@@ -55,6 +55,7 @@ import { carpoolApiReader } from './carpool-api.ts';
 import { carpoolRegistry } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
 import { ciTimingsJob } from './ci-timings.ts';
+import { cliUpgradeJob } from './cli-upgrade.ts';
 import { drainNotifier } from './drain-alerts.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
 import { gitNetworkEnv } from './git-env.ts';
@@ -838,6 +839,13 @@ export function realPortsFromEnv(
       user: sessionUser,
       meterDir: mirasim.meterDir,
       meterFs: mirasim.meterFs,
+    }),
+    // 命令行工具升级（#1971）：空闲时排空、写请求。引擎没有 root，不在这里装。不看总开关。
+    cliUpgrade: cliUpgradeJob({
+      db,
+      ...(extra.drain ? { drain: extra.drain } : {}),
+      master,
+      env,
     }),
   };
   const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});

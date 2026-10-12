@@ -66,6 +66,27 @@ describe('排空状态', () => {
     expect(r.stopping()).toBeNull();
   });
 
+  it('升级排空最低：改不了发布；发布接手用发布自己的截止，不继承升级的短钟', () => {
+    const d = createEngineDrain();
+    const short = iso(T0 + 50 * 60_000);
+    d.cordon({ source: 'cli-upgrade', since: iso(T0), until: short, why: '空闲，升级命令行工具' });
+    expect(d.cordon(release())).toBe(true);
+    expect(d.stopping()).toMatchObject({ source: 'release', until: iso(T0 + RELEASE_GRACE_MS) });
+    const held = createEngineDrain();
+    held.cordon(release());
+    expect(held.cordon({ source: 'cli-upgrade', since: iso(T0), until: short, why: '升级' })).toBe(false);
+    expect(held.stopping()?.source).toBe('release');
+  });
+
+  it('lift() 只撤发布；升级排空要指名才撤', () => {
+    const d = createEngineDrain();
+    d.cordon({ source: 'cli-upgrade', since: iso(T0), until: iso(T0 + 50 * 60_000), why: '升级' });
+    expect(d.lift()).toBe(false);
+    expect(d.stopping()?.source).toBe('cli-upgrade');
+    expect(d.lift('cli-upgrade')).toBe(true);
+    expect(d.stopping()).toBeNull();
+  });
+
   it('截止认不出当已经到了（宁可早停、按编号续上，不一直等）', () => {
     const d = createEngineDrain();
     d.cordon({ ...release(), until: '不是时间' });
@@ -393,6 +414,16 @@ describe('排空的控制（createDrainControl）', () => {
     await r.c.tick();
     expect(r.d.stopping()).toBeNull();
     expect(r.events.map((e) => e.kind)).toEqual(['start', 'lift']);
+  });
+
+  it('【故意造出的失败】升级排空到了截止也不停会话', async () => {
+    const r = rig();
+    r.d.track(session('r1'));
+    r.d.cordon({ source: 'cli-upgrade', since: iso(T0), until: iso(T0 + 1000), why: '升级' });
+    r.at(T0 + 60_000);
+    await r.c.tick();
+    expect(r.stops).toEqual([]);
+    expect(r.d.stopping()?.source).toBe('cli-upgrade');
   });
 
   it('提醒写不进去：排空照做，日志写明', async () => {

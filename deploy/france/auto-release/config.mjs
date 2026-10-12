@@ -233,7 +233,7 @@ function publicValueProblem(v) {
  *   files: { 文件: [{ key, kind: 'public' | 'private', value?, fp?, note? }] } }。
  * 私有值的 fp 是 null = 仓里还没记它的指纹（对账记「没查成」，不当成一致）。
  * 顶层的 versions 块是撤掉本机档（#1107）之前老版本期望里钉版本用的，没人读了；老的一版里还有它（对账读的是在用的那一版），
- * 所以只认下不读，不当成「不认识的一项」。
+ * 所以只认下不读，不当成「不认识的一项」。cliTools 是命令行工具跟哪个渠道（#1971），升级入口自己读，对账不把它当环境文件。
  */
 export function parseDesired(text) {
   let raw;
@@ -247,7 +247,7 @@ export function parseDesired(text) {
   };
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) bad('整份要是一个对象');
   for (const k of Object.keys(raw)) {
-    if (!['说明', 'formatVersion', 'selfHeal', 'fingerprint', 'versions', 'files'].includes(k))
+    if (!['说明', 'formatVersion', 'selfHeal', 'fingerprint', 'versions', 'cliTools', 'files'].includes(k))
       bad(`不认识的一项「${k}」`);
   }
   if (raw.formatVersion !== DESIRED_FORMAT)

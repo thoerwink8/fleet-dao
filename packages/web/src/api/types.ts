@@ -29,6 +29,7 @@ import type {
   EnvScheduleSchema,
   EnvSessionsSchema,
   EnvVersionSchema,
+  FranceCliToolsSchema,
   FrancePreflightResponseSchema,
   FranceReleaseStateSchema,
   GroomNowRequest,
@@ -271,6 +272,8 @@ export type UpdateSettingBody = z.input<typeof UpdateSettingRequest>;
 
 /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
 export type FranceReleaseState = z.infer<typeof FranceReleaseStateSchema>;
+/** /france 页「命令行工具」（#1971）：各工具的版本、上次升级时刻、这一轮的结局。 */
+export type FranceCliTools = z.infer<typeof FranceCliToolsSchema>;
 /** /france 页「发版」卡（#1231）：四行各自带「查成了 / 没查成 + 原因」。 */
 export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;
 /** /changelog 页「已发布的提交」（#1255）：读法国发布历史，每条提交号、标题、发于何时；读不到整份是 unreadable + 原因。 */
