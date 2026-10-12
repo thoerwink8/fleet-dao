@@ -87,6 +87,7 @@
 | [0081](0081-pnpm-entry-and-default-shared.md) | 仓合同 `agents/repo-contract.json`（首批：仓根 `pnpm dev/start/stop/check`、AGENTS.md、PROGRESS 两节、`.gitignore` 的 `_tmp/`）：开会话钩子在任何仓里每天最多提醒一次缺项，`pnpm repo:check`、`repo:init` 查和补，只提醒不拦；创始人说的原则默认各仓通用，引导条目标〔范围：通用｜只此仓〕，开会话和收尾钩子提醒 | 创始人 04:37 选定方案 B，PR #1934 合并即生效 |
 | [0082](0082-read-source-before-loosening.md) | 通用段底线补一句：读不到先追数据源；要放宽判据，PR 里贴上游真的不给的证据（#1936 放宽判据凑绿、#1946 才修根子）；`chain-first` 硬规矩跟着写 | 创始人 2026-10-12 在对话里选定（2.a），PR 合并即生效 |
 | [0083](0083-present-keeps-the-turn.md) | 人在场还有活就别收这一轮，新话先回，活没干完不许写成收工；删引导中继；流程钩子只留在 fleet-dao 项目设置 | 创始人 2026-10-12 17:14 选 1，PR 合并即生效 |
+| [0084](0084-progress-table.md) | 进度汇报：「要你拍的」编号在前，「在做的」一张表，带百分比、做到哪、下一步 | 创始人 2026-10-12 17:56「你改回标准里吧」，PR 合并即生效 |
 
 ## 第 1–14 条的编号（#1476）
 
