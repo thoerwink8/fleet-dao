@@ -6,8 +6,9 @@
 // 把它们画成红就是在伪装失败。反过来，引擎开着却探不到在线的工人（down）是真坏了，红；没查成（unknown）不写成正常。
 //
 // 写法（#1899）：每格是一个 StatusBadge，tone 色加一个短状态字（正常 / 紧 / 有不通 / 已停用 / 没连上 / 没查成），
-// 不再靠灰色胶囊加颜色传意思。≥1440 三格摊在顶栏；更窄（含手机）收成一个「状态」按钮，按钮上写汇总，点开是三格全文。
+// 不再靠灰色胶囊加颜色传意思。≥1440 且顶栏里真放得下时三格摊在顶栏；放不下或更窄（含手机）收成一个「状态」按钮，按钮上写汇总，点开是三格全文。
 
+import { useLayoutEffect, useRef, useState } from 'react';
 import { useMediaQuery } from '../../lib/hooks';
 import { cn } from '../../lib/utils';
 import { usePhone } from '../../lib/viewport';
@@ -177,21 +178,59 @@ function MenuPopover({
   );
 }
 
+/**
+ * 三格摊开放不放得下：量一次摊开要多宽，再盯着外框还剩多宽，放不下就收成「状态」按钮。
+ * 只看屏宽不够：顶栏里还有环境切换、总开关、搜索框，三格的说明又长短不一，桌面根字号放大到 125%（#1937）后更容易压到搜索框上。
+ * 量不到（测试环境宽度恒为 0、没有 ResizeObserver）当放得下，照屏宽档走。
+ */
+function useStripRoom(items: readonly HealthItem[], wanted: boolean) {
+  const box = useRef<HTMLDivElement>(null);
+  const strip = useRef<HTMLDivElement>(null);
+  const [needed, setNeeded] = useState(0);
+  const [avail, setAvail] = useState(0);
+  const key = items.map((i) => `${i.word}${i.detail}`).join('|');
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 三格的字变了要重量，key 就是这些字。
+  useLayoutEffect(() => {
+    setNeeded(0);
+  }, [key]);
+  useLayoutEffect(() => {
+    if (wanted && needed === 0 && strip.current) setNeeded(strip.current.scrollWidth);
+  });
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => setAvail(el.clientWidth));
+    ro.observe(el);
+    setAvail(el.clientWidth);
+    return () => ro.disconnect();
+  }, []);
+  const fits = needed === 0 || avail === 0 || needed <= avail;
+  return { box, strip, fits };
+}
+
 export function HealthStrip({ health, className }: { health: HomeHealth; className?: string }) {
   const wide = useMediaQuery(WIDE_QUERY);
   const phone = usePhone();
   const items = healthItems(health);
-  if (!wide || phone) return <StatusMenu items={items} {...(className ? { className } : {})} />;
+  const wanted = wide && !phone;
+  const { box, strip, fits } = useStripRoom(items, wanted);
   return (
-    <div
-      role="status"
-      aria-label="持续状态"
-      data-health-strip
-      className={cn('flex flex-nowrap items-center gap-2', className)}
-    >
-      {items.map((i) => (
-        <Chip key={i.key} item={i} withDetail />
-      ))}
+    <div ref={box} className="flex min-w-0 flex-1 items-center justify-end">
+      {wanted && fits ? (
+        <div
+          ref={strip}
+          role="status"
+          aria-label="持续状态"
+          data-health-strip
+          className={cn('flex min-w-0 flex-nowrap items-center gap-2 overflow-hidden', className)}
+        >
+          {items.map((i) => (
+            <Chip key={i.key} item={i} withDetail />
+          ))}
+        </div>
+      ) : (
+        <StatusMenu items={items} {...(className ? { className } : {})} />
+      )}
     </div>
   );
 }

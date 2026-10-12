@@ -25,6 +25,7 @@ import {
   WINDOW_MIN_ROWS,
   windowRange,
 } from '../lib/list-window';
+import { readRootScale, scaledPx } from '../lib/root-scale';
 import { modelKind } from '../lib/route-kinds';
 import { countsText, type KindCounts } from '../lib/route-state';
 import { purposeLabel, routeTitle } from '../lib/routing';
@@ -79,8 +80,9 @@ export function revealOnMobile(id: string) {
   document.getElementById(id)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
 
+/** 现在的行高（像素）：设计值乘根字号倍数（桌面 125%，#1937），和 CSS 里 rem 写的行内容一起放大。调用方已按 MOBILE_MQ 重画。 */
 function rowHeightNow(mobile: boolean): number {
-  return mobile ? MOBILE_ROW_HEIGHT : ROW_HEIGHT;
+  return scaledPx(mobile ? MOBILE_ROW_HEIGHT : ROW_HEIGHT, readRootScale());
 }
 
 /**
@@ -211,11 +213,13 @@ export function WindowedRows<T>({
       </div>
     );
   }
-  const range = windowRange({ count: items.length, rowHeight, height: LIST_HEIGHT, scrollTop });
+  // 窗口高和行高同一个倍数（和 CSS 的 h-routing-window 一样跟根字号放大）
+  const listHeight = scaledPx(LIST_HEIGHT, readRootScale());
+  const range = windowRange({ count: items.length, rowHeight, height: listHeight, scrollTop });
   return (
     <div
       data-windowed={items.length > WINDOW_MIN_ROWS ? 'true' : undefined}
-      style={{ height: Math.min(LIST_HEIGHT, total) }}
+      style={{ height: Math.min(listHeight, total) }}
       className="overflow-y-auto overscroll-contain"
       onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
     >

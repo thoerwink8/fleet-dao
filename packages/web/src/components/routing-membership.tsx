@@ -20,6 +20,7 @@ import {
 import type { Model, RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
 import { EFFORT_HINT } from '../lib/efforts';
 import { WINDOW_MIN_ROWS, windowRange } from '../lib/list-window';
+import { scaledPx, useRootScale } from '../lib/root-scale';
 import { purposeLabel } from '../lib/routing';
 import { supportedPurposeEfforts } from '../lib/routing-browse';
 import { Notice } from './layout/notice';
@@ -86,13 +87,13 @@ function addRows(models: readonly Model[]): AddRow[] {
   return rows;
 }
 
-function addRowStyle(index: number) {
+function addRowStyle(index: number, rowHeight: number) {
   return {
     position: 'absolute' as const,
     left: 0,
     right: 0,
-    top: index * ADD_ROW_HEIGHT,
-    height: ADD_ROW_HEIGHT,
+    top: index * rowHeight,
+    height: rowHeight,
   };
 }
 
@@ -110,17 +111,21 @@ function AddCandidateList({
   onPick: (modelId: string) => void;
 }) {
   const [scrollTop, setScrollTop] = useState(0);
-  const total = rows.length * ADD_ROW_HEIGHT;
+  // 设计值乘根字号倍数（桌面 125%，#1937），行里 rem 写的字和按钮放大了，行框跟着放大
+  const scale = useRootScale();
+  const rowHeight = scaledPx(ADD_ROW_HEIGHT, scale);
+  const listHeight = scaledPx(ADD_LIST_HEIGHT, scale);
+  const total = rows.length * rowHeight;
   const range = windowRange({
     count: rows.length,
-    rowHeight: ADD_ROW_HEIGHT,
-    height: ADD_LIST_HEIGHT,
+    rowHeight,
+    height: listHeight,
     scrollTop,
   });
   return (
     <div
       data-windowed={rows.length > WINDOW_MIN_ROWS ? 'true' : undefined}
-      style={{ height: Math.min(ADD_LIST_HEIGHT, total) }}
+      style={{ height: Math.min(listHeight, total) }}
       className="overflow-y-auto overscroll-contain"
       onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
     >
@@ -134,7 +139,7 @@ function AddCandidateList({
                 data-add-group={row.family}
                 aria-posinset={index + 1}
                 aria-setsize={rows.length}
-                style={addRowStyle(index)}
+                style={addRowStyle(index, rowHeight)}
                 className="border-b"
               >
                 <div className="flex h-full items-center px-2 text-meta font-semibold text-muted-foreground">
@@ -153,7 +158,7 @@ function AddCandidateList({
               data-add-model={m.id}
               aria-posinset={index + 1}
               aria-setsize={rows.length}
-              style={addRowStyle(index)}
+              style={addRowStyle(index, rowHeight)}
               className="flex items-center gap-2 border-b px-1"
             >
               <span className="min-w-0 flex-1 truncate text-body">

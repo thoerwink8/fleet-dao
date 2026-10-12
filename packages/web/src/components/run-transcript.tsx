@@ -16,6 +16,7 @@ import {
 import { useRunTranscript } from '../api/client';
 import type { TranscriptEntry } from '../api/types';
 import { formatClock, formatDuration, formatUsd } from '../lib/format';
+import { scaledPx, useRootScale } from '../lib/root-scale';
 import {
   liveMs,
   type SegmentRunView,
@@ -541,9 +542,12 @@ export function RunTranscriptDrawer({
   now: number;
   onClose: () => void;
 }) {
-  const [width, setWidth] = useState(DRAWER_DEFAULT_PX);
-  const maxWidth = () => Math.max(DRAWER_MIN_PX, Math.floor(window.innerWidth * 0.8));
-  const clamp = (w: number) => Math.min(maxWidth(), Math.max(DRAWER_MIN_PX, w));
+  // 默认宽、最窄是 16px 根字号下的设计值，乘根字号倍数（桌面 125%，#1937），抽屉里 rem 写的字放大了，宽度跟着放大
+  const scale = useRootScale();
+  const minPx = scaledPx(DRAWER_MIN_PX, scale);
+  const [width, setWidth] = useState(() => scaledPx(DRAWER_DEFAULT_PX, scale));
+  const maxWidth = () => Math.max(minPx, Math.floor(window.innerWidth * 0.8));
+  const clamp = (w: number) => Math.min(maxWidth(), Math.max(minPx, w));
   const onDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     const move = (ev: PointerEvent) => setWidth(clamp(window.innerWidth - ev.clientX));

@@ -196,7 +196,7 @@ test.describe('其余页面', () => {
     await expect(page.getByRole('heading', { name: '账单' })).toBeVisible();
   });
 
-  test('外壳尺寸生效：顶栏 52px 高、侧栏 232px 宽（尺寸 token 放错命名空间时类名会静默失效）', async ({
+  test('外壳尺寸生效：顶栏 52、侧栏 232（收起 60）乘根字号倍数（尺寸 token 放错命名空间时类名会静默失效）', async ({
     page,
   }) => {
     await page.goto('/schedules');
@@ -204,9 +204,12 @@ test.describe('其余页面', () => {
     const header = await page.locator('main').evaluate((m) => {
       const top = m.parentElement?.querySelector('header')?.getBoundingClientRect().height;
       const side = document.querySelector('aside')?.getBoundingClientRect().width;
-      return { top, side };
+      const scale = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) / 16;
+      return { top, side, scale, wide: window.innerWidth >= 1440 };
     });
-    expect(header.top).toBe(52);
-    expect(header.side).toBe(232);
+    // 桌面根字号放大到 125%（#1937），壳的尺寸写 rem 跟着放大；侧栏 ≥1440 默认展开
+    expect(header.scale).toBe(1.25);
+    expect(header.top).toBe(52 * header.scale);
+    expect(header.side).toBe((header.wide ? 232 : 60) * header.scale);
   });
 });
