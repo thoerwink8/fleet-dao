@@ -115,11 +115,14 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'feishu', 'web'] as const;
  * agents/test/rules/prompt-log.rules.test.ts 读 agents-sync 的 targets.ts（钩子登记表，钉住 UserPromptSubmit 那条）；
  * agents/test/agents-md-budget.test.ts 读 conventions 的 rules-budget.ts（规矩字数账的算法，定时开瘦身单的 bin 也用它，#1737）。
  * shared 的单价测试不再读路由骨架：没登记的模型按未知单价算（#1355），不要求每个目录模型都写进价表。
+ * shared 的 effort.ts 读同一份骨架的 defaults.effort（#1967）。不能在 package.json 里让 shared 依赖 db：db 已经依赖 shared，
+ * 成环后改 db 会把依赖 shared 的包整片测上。只补这一条边：改 db 时 shared 自己的测试跟着跑，依赖 shared 的不因此全跑。
  */
 export const TEST_READS: Record<string, string[]> = {
   api: ['web'],
   feishu: ['web'],
   db: ['adapters', 'core'],
+  shared: ['db'],
   [AGENTS_UNIT]: ['db', 'agents-sync', 'conventions'],
 };
 
@@ -361,6 +364,12 @@ export const PATH_RULES: readonly Rule[] = [
     match: under('agents/subagents/'),
     units: [AGENTS_UNIT, 'agents-sync', 'adapters', 'agent-eval'],
     why: '子代理定义由 agents-sync 分发，引擎经 adapters 转成 --agents，agent-eval 读它探查',
+  },
+  // 比下面 agents/ 那道门更具体，要排在它前面。db 的 routing-seed-single-source.test.ts 读这份脚本（#1967）。
+  {
+    match: exact('agents/skills/commander/scripts/worker-lib.mjs'),
+    units: [AGENTS_UNIT, 'agents-sync', 'db'],
+    why: '技能脚本由 agents-sync 分发；db 的测试核对它不再另写默认档位和工人型号',
   },
   {
     match: under('agents/'),

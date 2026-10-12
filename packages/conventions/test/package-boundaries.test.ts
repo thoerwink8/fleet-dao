@@ -4,11 +4,13 @@
 //    里面写 `import '@fleet-dao/…'` 会直接找不到包。bridge.ts 更严：只许 node: 内置。
 // ② 跨包相对路径：src 里每一处指向别的包目录的相对 import / new URL，都要在名单里登记（写明理由），并且这个包在 package.json 里声明了对那个包的依赖
 //    ——CI 选测靠 package.json 的依赖算「改了谁、要重测谁」（packages/conventions/src/ci-plan.ts 的 readGraph），声明丢了就漏测。
+//    对方已经依赖自己时不再要求声明（再写一条就成环，改被读的包会把依赖这边的整片都测上）；这种选测改由 TEST_READS 补，真实仓那条测试核对。
 // 名单里登记了、文件里已经没有的，也算违规（免得名单越攒越多）；登记的目标文件不存在也算（目录挪了不会悄悄过）。
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, posix, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { TEST_READS } from '../src/ci-plan.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const SCOPE = '@fleet-dao/';
@@ -150,7 +152,11 @@ export function boundaryProblems(facts: BoundaryFacts): string[] {
       seenCross.add(k);
       if (!facts.exists(target))
         out.push(`${f.rel}：登记的跨包路径 '${ref.spec}' 指向的 ${target} 不存在（目录挪了？）`);
-      if (!(facts.deps[pkg] ?? []).includes(targetPkg)) {
+      const declared = (facts.deps[pkg] ?? []).includes(targetPkg);
+      // 对方已经依赖自己：再声明一条就会成环。shared 被几乎所有包依赖，成环后改被读的那个包会把整片都测上。
+      // 这种不要求 package.json 再写依赖；选测改由 ci-plan 的 TEST_READS 补（真实仓那条测试核对登记了的都有这条边）。
+      const reverse = (facts.deps[targetPkg] ?? []).includes(pkg);
+      if (!declared && !reverse) {
         out.push(
           `packages/${pkg}/package.json：src 里用了 ${targetPkg} 的路径，却没声明依赖 @fleet-dao/${targetPkg}——CI 选测会漏掉它`,
         );
@@ -225,6 +231,18 @@ describe('包边界：零安装区不引包名，跨包相对路径有名有姓'
     const real = repoBoundaryFacts(ROOT);
     expect(real.files.length).toBeGreaterThan(300); // 不是空扫一遍就算过
     expect(boundaryProblems({ ...real, allowedBare: ALLOWED_BARE, allowedCross: ALLOWED_CROSS })).toEqual([]);
+    // 成环所以没在 package.json 里声明依赖的，选测靠 TEST_READS。漏了这条边，改被读的包就不测这边。
+    const pkgOfFile = (rel: string) => /^packages\/([^/]+)\//.exec(rel)?.[1];
+    for (const a of ALLOWED_CROSS) {
+      const pkg = pkgOfFile(a.file);
+      const targetPkg = pkgOfFile(`${posix.normalize(posix.join(posix.dirname(a.file), a.spec))}/`);
+      if (pkg === undefined || targetPkg === undefined || targetPkg === pkg) continue;
+      if ((real.deps[pkg] ?? []).includes(targetPkg)) continue;
+      expect(real.deps[targetPkg] ?? [], a.file).toContain(pkg);
+      expect(TEST_READS[pkg] ?? [], `${a.file} 成环跨包读 ${targetPkg}，TEST_READS 没记`).toContain(
+        targetPkg,
+      );
+    }
   });
 
   const facts = (over: Partial<BoundaryFacts>): BoundaryFacts => ({
@@ -300,6 +318,12 @@ describe('包边界：零安装区不引包名，跨包相对路径有名有姓'
     );
     expect(noDep).toHaveLength(1);
     expect(noDep[0]).toContain('没声明依赖 @fleet-dao/c');
+
+    // c 已经依赖 a：再让 a 声明依赖 c 会成环。这种放行，不要求 package.json 再写一条。
+    const cycle = boundaryProblems(
+      facts({ files: [{ rel, text }], deps: { a: ['b'], c: ['a'] }, allowedCross: allowed }),
+    );
+    expect(cycle).toEqual([]);
 
     const gone = boundaryProblems(
       facts({

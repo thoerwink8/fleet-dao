@@ -196,10 +196,10 @@ describe('按改动算要跑什么', () => {
     ]);
   });
 
-  it('改了 db：db 和所有依赖它的（engine、api、store、jev）都测，读 db 路由骨架的 agents 也测；pg 的测试单独一台。github 不在里面（#901 ⑤：它不再依赖 db，改 db 不用重测它）', () => {
+  it('改了 db：db 和所有依赖它的（engine、api、store、jev）都测，读 db 路由骨架的 agents、读默认档的 shared 也测；pg 的测试单独一台。github 不在里面（#901 ⑤：它不再依赖 db，改 db 不用重测它）', () => {
     const p = pr('packages/db/src/schema/index.ts');
-    // shared 不再读路由骨架：没登记的单价按未知算（#1355），改 db 不用重测它。
-    expect(units(p)).toEqual(['agents', 'api', 'db', 'engine', 'jev', 'store']);
+    // 单价表不再读骨架（#1355）。effort.ts 读 defaults.effort（#1967），TEST_READS 只把 shared 自己的测试带上。
+    expect(units(p)).toEqual(['agents', 'api', 'db', 'engine', 'jev', 'shared', 'store']);
     expect(units(p)).not.toContain('github');
     const packed = assigned(p);
     // db 的测试（要真 Postgres）单独一台，不和别的包混在一个 vitest 进程里（FLEET_TEST_PG_URL 一设，全进程都连真库）
@@ -292,6 +292,12 @@ describe('按改动算要跑什么', () => {
     });
     expect(pr('docs/ops.md')).toMatchObject({ deploy: 'ops', testUnits: ['db'] });
     expect(testArgs(pr('agents/skills/discuss/SKILL.md'))).toEqual(['agents/', 'packages/agents-sync/']);
+    // worker-lib.mjs 被 db 的单源测试读：改它要测 db，不只 agents 和 agents-sync（#1967）
+    expect(testArgs(pr('agents/skills/commander/scripts/worker-lib.mjs'))).toEqual([
+      'agents/',
+      'packages/agents-sync/',
+      'packages/db/',
+    ]);
     // 调工具前的钩子：引擎起 Claude 会话也直接用仓里这份（adapters 的测试真跑它）
     expect(testArgs(pr('agents/hooks/pretool.mjs'))).toEqual([
       'packages/adapters/',

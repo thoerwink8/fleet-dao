@@ -17,6 +17,11 @@
       "file": "packages/agents-sync/src/main.ts",
       "spec": "../../mirasim-reclaude/bin/migrate",
       "why": "同上，不装依赖；用路径起 mirasim-reclaude 的 bin 当子进程，没有 import；package.json 声明保留作变更边"
+    },
+    {
+      "file": "packages/shared/src/effort.ts",
+      "spec": "../../db/routing.default.json",
+      "why": "默认档位只在这份骨架（#1967），驾驶舱要静态导入，不能用 node:fs。db 已经依赖 shared，shared 再声明依赖 db 会成环，改 db 会把依赖 shared 的包整片测上；选测改由 TEST_READS 的 shared→db 补"
     }
   ]
 }

@@ -1,6 +1,7 @@
 // 会话的思考档位（#470）：叫法、没配用哪档、各执行方式认哪些档、一条路由能配哪几档。
 // 没配用哪档只从 routing.default.json 的 defaults.effort 读（#1967），这里不另写一份。
 // 用静态导入、不用 node:fs：驾驶舱把这一份打进浏览器，读文件会在预渲染时 500（#1967 的 check）。
+// 这份跨包路径登记在 package-boundaries.allowed.json：db 已经依赖 shared，这里不能再声明依赖 db（成环）。
 // 引擎起会话（engine 的 hosts.ts applySessionEffort）、路由骨架装进库和驾驶舱改档位（db 的 routing-apply.ts、
 // setRoutingEffort）都照这一份判，不各写一份：这里说能配的，起会话时不会因为档位起不来。
 // 改这里之前必须知道：各家命令行的参数在 adapters（claude-code/args.ts、grok/args.ts、mirasim/run.ts）里再认一次，
