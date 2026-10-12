@@ -333,13 +333,15 @@ describe('登记和真跑', () => {
   });
 
   it('【故意造出的失败】项目设置里加了 matcher、或者整条删掉：上一条查得出来', () => {
-    const narrowed = SETTINGS.replace(WANT, WANT);
     const parsed = JSON.parse(SETTINGS) as {
       hooks: { PreToolUse: { matcher?: string; hooks: { command: string }[] }[] };
     };
-    parsed.hooks.PreToolUse[0].matcher = 'Bash';
-    expect(JSON.stringify(parsed)).not.toBe(SETTINGS);
-    expect(narrowed).toBe(SETTINGS);
+    const group = parsed.hooks.PreToolUse[0];
+    if (group === undefined) throw new Error('项目设置里没有 PreToolUse');
+    const before = JSON.stringify(parsed);
+    group.matcher = 'Bash';
+    expect(JSON.stringify(parsed)).not.toBe(before);
+    expect(group.matcher).toBe('Bash');
     const cut = SETTINGS.replace(WANT, 'node "$CLAUDE_PROJECT_DIR/agents/hooks/gone.mjs"');
     expect(cut).not.toContain(WANT);
   });

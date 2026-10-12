@@ -72,6 +72,7 @@ describe('规矩：创始人每条消息一到就落盘（2026-10-04 补）', { 
       hooks: { UserPromptSubmit: { matcher?: string; hooks: { command: string; timeout: number }[] }[] };
     };
     const group = settings.hooks.UserPromptSubmit[0];
+    if (group === undefined) throw new Error('项目设置里没有 UserPromptSubmit');
     expect(group.matcher).toBeUndefined();
     expect(group.hooks[0]?.command).toContain('prompt-log.mjs');
     expect(group.hooks[0]?.timeout).toBe(30000);
