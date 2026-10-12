@@ -65,9 +65,9 @@ const at = (min: number) => new Date(T0.getTime() + min * 60_000).toISOString();
 const REPO = { owner: 'acme', name: 'canary' };
 const WF = 'task:acme/canary#12';
 const ALL_STAGES = ['open', 'intake', 'implement', 'pr', 'verify', 'merge', 'close', 'ledger', 'board'];
-const NO_RUNS = { total: 0, ended: 0, manual: 0, verify: 0, withUsage: 0 };
+const NO_RUNS = { total: 0, ended: 0, manual: 0, verify: 0, withUsage: 0, missingUsage: [] };
 /** 一张做完的小单记的账：动手两笔、验收一笔，都结束了、记上了用量。 */
-const LEDGER = { total: 3, ended: 3, manual: 2, verify: 1, withUsage: 3 };
+const LEDGER = { total: 3, ended: 3, manual: 2, verify: 1, withUsage: 3, missingUsage: [] };
 
 function state(over: Partial<CanaryState> = {}): CanaryState {
   return {
@@ -365,15 +365,34 @@ describe('走到哪一步、断没断（canaryNext）', () => {
       ...finished(60),
       db: facts({
         ...finished(60).db,
-        runs: { total: 2, ended: 2, manual: 2, verify: 0, withUsage: 2 },
+        runs: { total: 2, ended: 2, manual: 2, verify: 0, withUsage: 2, missingUsage: [] },
       }),
     };
     expect(canaryNext(s, { ...noVerify, at: at(65) }).kind).toBe('continue');
     const ledger = canaryNext(s, { ...noVerify, at: at(60 + CANARY_STAGE_LIMIT_MINUTES.ledger + 1) });
     expect(ledger).toMatchObject({ kind: 'broken', stage: 'ledger' });
     expect(whyOf(ledger)).toContain('runs 记了 2 笔（动手 2、验收 0）');
-    const noUsage = { ...finished(60), db: facts({ ...finished(60).db, runs: { ...LEDGER, withUsage: 0 } }) };
-    expect(canaryNext(s, { ...noUsage, at: at(80) })).toMatchObject({ kind: 'broken', stage: 'ledger' });
+    // 用量没记上（#1935）：断在记账，原因里写明是哪个模型、补记写下的为什么
+    const noUsage = {
+      ...finished(60),
+      db: facts({
+        ...finished(60).db,
+        runs: {
+          ...LEDGER,
+          withUsage: 0,
+          missingUsage: [
+            { model: 'deepseek-flash', note: '用量没读成：中转没有这次调用的计量记录' },
+            { model: 'opus-5.5', note: null },
+          ],
+        },
+      }),
+    };
+    const unrecorded = canaryNext(s, { ...noUsage, at: at(80) });
+    expect(unrecorded).toMatchObject({ kind: 'broken', stage: 'ledger' });
+    expect(whyOf(unrecorded)).toContain(
+      '用量没记上的：deepseek-flash（用量没读成：中转没有这次调用的计量记录）',
+    );
+    expect(whyOf(unrecorded)).toContain('opus-5.5（没写原因');
     const open = { ...finished(60), db: facts({ ...finished(60).db, runs: { ...LEDGER, ended: 2 } }) };
     expect(canaryNext(s, { ...open, at: at(80) })).toMatchObject({ kind: 'broken', stage: 'ledger' });
   });
@@ -1484,6 +1503,7 @@ describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的
         endedAt: after(20),
         outcome: 'done',
         inputTokens: 5000,
+        outputTokens: 400,
       });
       await startRun(t.db, {
         segment: 'verify',
@@ -1493,6 +1513,7 @@ describe('真库上的一轮（PGlite 跑真迁移；GitHub、Temporal 是假的
         endedAt: after(30),
         outcome: 'done',
         inputTokens: 3000,
+        outputTokens: 200,
       });
       await t.db.insert(stepTimings).values({
         kind: 'activity',

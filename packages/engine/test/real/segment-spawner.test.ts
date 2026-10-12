@@ -368,6 +368,13 @@ describe('outcomeOfReport · 【故意造出的失败】不是 ok 的，退出�
     expect(o.stderr).toContain('econnreset');
   });
 
+  it('会话号带回去记进 runs（用量补记凭它补读，#1935）；起会话前的临时号不带', () => {
+    const real = outcomeOfReport(report({ sessionId: 'claude:403c41e2-8629-410a-8d7a-d61f65add9be' }));
+    expect(real.facts?.sessionId).toBe('claude:403c41e2-8629-410a-8d7a-d61f65add9be');
+    const pending = outcomeOfReport(report({ sessionId: 'mirasim-pending:r-1' }));
+    expect(pending.facts).not.toHaveProperty('sessionId');
+  });
+
   it('进程自己退出码非 0 → 保留它的退出码', () => {
     const o = outcomeOfReport(report({ facts: okFacts({ exitCode: 137, terminal: undefined }) }));
     expect(o.exitCode).toBe(137);

@@ -371,6 +371,8 @@ export interface SegmentRun {
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
   costUsd?: number;
+  /** 用量为什么没记全（库里 runs.usage_note，「用量补记」写）：四样 token 有缺时页面照它写原因。 */
+  usageNote?: string;
   /** 内存峰值（MiB）：只有挂在 cgroup 里的会话读得到，本机不给。 */
   memoryPeakMb?: number;
   failureReason?: string;

@@ -46,6 +46,8 @@ const RunRecordFields = z.object({
   cacheReadTokens: z.number().int().nonnegative().optional(),
   cacheWriteTokens: z.number().int().nonnegative().optional(),
   costUsd: z.number().nonnegative().optional(),
+  /** 执行体报的会话号（收场才有）；没开成会话、读不到不给。经 Mirasim 起的会话靠它事后补读用量（#1935）。 */
+  sessionId: z.string().min(1).optional(),
   /** 内存峰值（MiB）。只对挂在 cgroup 里的会话可读；本机不给。 */
   memoryPeakMb: z.number().int().nonnegative().optional(),
   /**

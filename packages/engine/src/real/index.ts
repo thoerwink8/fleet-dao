@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import {
   bridgeMirasimConnector,
   type LedgerFs,
+  type MeterFs,
   type MirasimConnect,
   parseSessionProxy,
   SESSION_USERS,
@@ -99,6 +100,7 @@ import { lazyOnSuccess, prepareSubagents, readSubagentGuard, subagentsOnce } fro
 import { createTaskActivities } from './task-activities.ts';
 import { createRunSegment } from './task-segment.ts';
 import { createColdVerify, mirrorFileDiff } from './task-verify.ts';
+import { usageBackfillJob } from './usage-backfill.ts';
 import { watchdogJob } from './watchdog.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
 
@@ -337,6 +339,30 @@ export async function catAsUser(
 }
 
 /**
+ * 经 exec 以那个会话用户在几份文件里筛出含任一个 needle 的行（grep -h -F，按字面认，不当正则）：Mirasim 用量账本按月一份、几十 MB，
+ * 不整份 cat 过来（#1935）。一行都没对上（grep 退出 1）回空串；读不了（退出 2、超时、起不来）抛错，错误里只有路径和 grep 的
+ * stderr，没有内容。needle 只收 uuid 这类不带空白、不以 - 开头的串，免得被当成 grep 的参数。
+ */
+export async function grepAsUser(
+  exec: UserExec,
+  user: SessionUser,
+  needles: readonly string[],
+  paths: readonly string[],
+  tag = 'mirasim-grep',
+): Promise<string> {
+  if (needles.length === 0 || paths.length === 0) return '';
+  for (const n of needles) {
+    if (!/^[0-9A-Za-z][0-9A-Za-z_:.-]*$/.test(n))
+      throw new Error(`筛账本的关键字认不出：${JSON.stringify(n)}`);
+  }
+  const argv = ['/bin/grep', '-h', '-F', ...needles.flatMap((n) => ['-e', n]), '--', ...paths];
+  const r = await execAs(exec, user, argv, tag);
+  if (r.code === 1) return '';
+  if (r.code !== 0) throw new Error(describeFailure(`筛 ${paths.join('、')}`, r));
+  return r.stdout.toString('utf8');
+}
+
+/**
  * 以会话用户的身份起一条命令（claude-usage 起 reclaude）。和账本、Mirasim 桥接同一条 exec：fleet-agent-scope 降权后再跑，
  * 引擎用户不直接 spawn 会话用户家里的二进制（那是 EACCES）。代理写上 /usr/bin/env 的参数，和读组织同一条（session-org.ts）；
  * 没登记代理就不加。通道自己没起来、代理认不出，收成 spawnError 交回读取器，由它写成「起不来」的原因，不抛成空读数。
@@ -557,6 +583,10 @@ export function mirasimDepsFor(
   connect(user: SessionUser): MirasimConnect;
   ledgerDir(user: SessionUser): string;
   ledgerFs(user: SessionUser): LedgerFs;
+  /** 这个会话用户的 Mirasim 用量账本目录（~/.mirasim/insights，中转计量回填在这里，#1935）。 */
+  meterDir(user: SessionUser): string;
+  /** 以他的身份读用量账本：ls、grep -F 都经 exec。 */
+  meterFs(user: SessionUser): MeterFs;
 } {
   const homeOf = (user: SessionUser) => home.replaceAll('{user}', user);
   return {
@@ -577,6 +607,11 @@ export function mirasimDepsFor(
     ledgerFs: (user) => ({
       readdir: (dir) => lsAsUser(exec, user, dir),
       readFile: (path) => catAsUser(exec, user, path),
+    }),
+    meterDir: (user) => `${homeOf(user)}/.mirasim/insights`,
+    meterFs: (user) => ({
+      readdir: (dir) => lsAsUser(exec, user, dir),
+      linesWith: (needles, paths) => grepAsUser(exec, user, needles, paths),
     }),
   };
 }
@@ -795,6 +830,13 @@ export function realPortsFromEnv(
     judgeSelfCheck: judgeSelfCheckJob({ db, env }),
     // 每周刷新 CI 测试耗时表（#921）：读本仓 ci.yml 日志、重写表、开 PR。不看总开关。
     ciTimings: ciTimingsJob({ db, github: gh }),
+    // 用量补记（#1935）：经 Mirasim 起的会话，以会话用户读他家里的用量账本（中转计量回填），把 runs 的输入、缓存、花费补齐。不看总开关。
+    usageBackfill: usageBackfillJob({
+      db,
+      user: sessionUser,
+      meterDir: mirasim.meterDir,
+      meterFs: mirasim.meterFs,
+    }),
   };
   const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});
   // 子代理（#1641）：claude-code 的干活会话带的 --agents 文件，引擎起来时从发布目录的 .claude/agents/ 生成一次；生成不成时

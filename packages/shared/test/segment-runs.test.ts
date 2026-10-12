@@ -160,6 +160,13 @@ describe('【失败】token、花费没记到', () => {
     expect(reasonOf(v, 'tokens')).toBe('四样 token 都没记到');
   });
 
+  it('「用量补记」写了为什么（#1935）：接在没记到后面；四样齐了就不再写它', () => {
+    const note = '等中转计量回填，补记任务每 5 分钟补一次（还在等中转计量回填：2 次计费调用里 1 次还没填）';
+    const v = read(without(run({ usageNote: note }), 'inputTokens', 'cacheReadTokens', 'cacheWriteTokens'));
+    expect(reasonOf(v, 'tokens')).toBe(`没记到：输入、缓存读、缓存写；${note}`);
+    expect(read(run({ usageNote: note })).unread).toEqual([]);
+  });
+
   it('认不出的数（负数、小数）不当成读到：原样写进原因', () => {
     const v = read(run({ inputTokens: -5, outputTokens: 1.5 }));
     expect(v.inputTokens).toBeUndefined();

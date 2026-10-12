@@ -1,4 +1,4 @@
-// 引擎的 10 个定时任务（design 第四节；#921 起多一个每周刷新耗时表，#1365 起多一个判断题自检）：每个任务的钟点格子、补跑窗口、一轮怎么跑，出处在这里；
+// 引擎的 11 个定时任务（design 第四节；#921 起多一个每周刷新耗时表，#1365 起多一个判断题自检，#1935 起多一个用量补记）：每个任务的钟点格子、补跑窗口、一轮怎么跑，出处在这里；
 // 每周刷新耗时表和判断题自检的格子在 jobs/schedules.ts（单子点名登记在那里），这里只把它们装进来。
 // 调度本身在 jobs/timers.ts。任务编号 = 登记表（real/jobs.ts 的 ENGINE_JOBS）上的编号。原来 8 个的格子是 Temporal Schedule 的
 // interval + offset，没改；耗时表是新的，周一 06:00（北京时间）。#1078 起不再建 Temporal Schedule，进程内定时器按这些格子跑。
@@ -44,6 +44,12 @@ import {
 import { routeProbeLock } from './route-probe-now.ts';
 import { ciTimingsSchedule, judgeSelfCheckSchedule } from './schedules.ts';
 import type { TimerJob } from './timers.ts';
+import {
+  runUsageBackfillJob,
+  USAGE_BACKFILL_EVERY_MINUTES,
+  USAGE_BACKFILL_JOB,
+  USAGE_BACKFILL_OFFSET_MINUTES,
+} from './usage-backfill.ts';
 import { runWatchdogJob, WATCHDOG_EVERY_MINUTES, WATCHDOG_JOB, WATCHDOG_OFFSET_MINUTES } from './watchdog.ts';
 
 /** 一轮超过多久还没回就记一条 error 日志（原来每一轮的 Temporal 工作流限时；现在到了不取消、也不放开不叠着跑，见 timers.ts）。 */
@@ -73,6 +79,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
   const intake = need(jobs, 'intake');
   const judgeSelfCheck = need(jobs, 'judgeSelfCheck');
   const ciTimings = need(jobs, 'ciTimings');
+  const usageBackfill = need(jobs, 'usageBackfill');
   // 巡检的活动在工作流里跑，依赖不在这里装；但没装齐要在起的时候就发现，别等到工作流里的活动才报
   need(jobs, 'canary');
   return [
@@ -163,5 +170,14 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
     judgeSelfCheckSchedule(() => runJudgeSelfCheckJob(judgeSelfCheck())),
     // 每周刷新 CI 测试耗时表（#921）。格子在 jobs/schedules.ts。不标 needsMaster：见文件头。
     ciTimingsSchedule(() => runCiTimingsJob(ciTimings())),
+    {
+      // 用量补记（#1935）：经 Mirasim 起的会话按中转计量补齐用量。不拉单、不起会话，不标 needsMaster
+      id: USAGE_BACKFILL_JOB.id,
+      everyMinutes: USAGE_BACKFILL_EVERY_MINUTES,
+      offsetMinutes: USAGE_BACKFILL_OFFSET_MINUTES,
+      catchupMinutes: USAGE_BACKFILL_EVERY_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
+      run: () => runUsageBackfillJob(usageBackfill()),
+    },
   ];
 }

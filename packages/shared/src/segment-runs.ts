@@ -67,6 +67,8 @@ export interface SegmentRunFacts {
   cacheReadTokens?: number | undefined;
   cacheWriteTokens?: number | undefined;
   costUsd?: number | undefined;
+  /** 用量为什么没记全（runs.usage_note）：token 有缺时接在「没记到」后面，写明为什么。 */
+  usageNote?: string | undefined;
   memoryPeakMb?: number | undefined;
   failureReason?: string | undefined;
   prNumber?: number | undefined;
@@ -198,6 +200,9 @@ export function readSegmentRun(run: SegmentRunFacts, ctx: SegmentReadContext): S
     if (missing.length === TOKEN_KEYS.length) {
       tokens.push(notStarted ? '进程没起来，没有用量读数' : '四样 token 都没记到');
     } else if (missing.length) tokens.push(`没记到：${missing.join('、')}`);
+    // 「用量补记」写下的原因（还在等中转计量回填、中转没有这次调用的记录……）：有缺才接上
+    const why = run.usageNote?.trim();
+    if (missing.length && !notStarted && why) tokens.push(why);
     if (bad.length) tokens.push(`认不出：${bad.join('、')}`);
     note('tokens', tokens);
   }

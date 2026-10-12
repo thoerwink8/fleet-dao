@@ -39,6 +39,16 @@ export {
   readMirasimLedger,
 } from './mirasim/ledger.ts';
 export {
+  type MeterFs,
+  type MeterReading,
+  type MeterUsage,
+  type MeterWindow,
+  meterReadingFrom,
+  meterSessionUuid,
+  nodeMeterFs,
+  readMirasimMeter,
+} from './mirasim/meter.ts';
+export {
   DEFAULT_MIRASIM_LIMITS,
   type MirasimAccepted,
   type MirasimLimits,

@@ -7,9 +7,9 @@
 
 import { randomUUID } from 'node:crypto';
 import { errMessage } from '@fleet-dao/shared/util';
-import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { type RunRouteOutcome, type RunTier, runs } from '../schema/index.ts';
+import { type RunRouteOutcome, type RunTier, routes, runs } from '../schema/index.ts';
 
 export type RunOutcome =
   | 'done'
@@ -42,6 +42,8 @@ export interface RunInsert {
   cacheReadTokens?: number | null;
   cacheWriteTokens?: number | null;
   costUsd?: number | null;
+  /** 执行体报的会话号（收场才有）；没读到不给。 */
+  sessionId?: string | null;
   memoryPeakMb?: number | null;
   failureReason?: string | null;
   prNumber?: number | undefined;
@@ -193,6 +195,123 @@ export async function closeOpenRuns(db: Db, input: { endedAt: Date; reason: stri
   }
 }
 
+/** 四样 token 有一样没记上（「用量补记」要补的那几笔，和补齐之后不再碰的判法是同一条）。 */
+const usageIncomplete = or(
+  isNull(runs.inputTokens),
+  isNull(runs.outputTokens),
+  isNull(runs.cacheReadTokens),
+  isNull(runs.cacheWriteTokens),
+);
+
+/** 等「用量补记」补的一笔：经 Mirasim 起、记了会话号、结束了、四样 token 有缺的。 */
+export interface MeterPendingRun {
+  id: string;
+  /** Mirasim 服务端回的 <执行体>:<uuid>。 */
+  sessionId: string;
+  model: string;
+  startedAt: Date;
+  endedAt: Date;
+  usageNote: string | null;
+}
+
+/**
+ * 经 Mirasim 起（路由的执行方式是 mirasim）、endedAfter 以后结束、记了会话号、四样 token 有缺的那几笔，先结束的在前，最多 limit 笔
+ * （#1935）。没记会话号的老行补不了（不知道是哪个会话），不在里面。
+ */
+export async function runsAwaitingMeter(
+  db: Db,
+  input: { endedAfter: Date; limit: number },
+): Promise<MeterPendingRun[]> {
+  if (!Number.isInteger(input.limit) || input.limit <= 0)
+    throw new RunInputError(`limit 要是正整数：${input.limit}`);
+  const rows = await db
+    .select({
+      id: runs.id,
+      sessionId: runs.sessionId,
+      model: runs.model,
+      startedAt: runs.startedAt,
+      endedAt: runs.endedAt,
+      usageNote: runs.usageNote,
+    })
+    .from(runs)
+    .innerJoin(routes, eq(routes.id, runs.routeId))
+    .where(
+      and(
+        eq(routes.hostId, 'mirasim'),
+        isNotNull(runs.sessionId),
+        isNotNull(runs.endedAt),
+        gte(runs.endedAt, input.endedAfter),
+        usageIncomplete,
+      ),
+    )
+    .orderBy(asc(runs.endedAt), asc(runs.id))
+    .limit(input.limit);
+  return rows.flatMap((r) =>
+    r.sessionId !== null && r.endedAt !== null ? [{ ...r, sessionId: r.sessionId, endedAt: r.endedAt }] : [],
+  );
+}
+
+/** 中转计量回填齐了的一次会话的用量（四样都读到了才有这一份；花费中转报了才有）。 */
+export interface MeterUsageWrite {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd?: number | undefined;
+}
+
+/**
+ * 把读齐了的用量写回这一笔：四样 token 整套换成计量的数（会话结束时快照里的输出只是近似，计量才是逐次调用的账），中转报了花费才写
+ * 花费，清掉原因。只改四样还有缺的行：补齐了的再来一遍什么都不做（回 false），重复跑、两轮叠着跑都不会改第二次。
+ */
+export async function fillRunUsageFromMeter(
+  db: Db,
+  input: { runId: string; usage: MeterUsageWrite; at: Date },
+): Promise<boolean> {
+  const u = input.usage;
+  for (const [name, v] of Object.entries({
+    inputTokens: u.inputTokens,
+    outputTokens: u.outputTokens,
+    cacheReadTokens: u.cacheReadTokens,
+    cacheWriteTokens: u.cacheWriteTokens,
+  })) {
+    if (!Number.isSafeInteger(v) || v < 0) throw new RunInputError(`${name} 要是非负整数：${v}`);
+  }
+  if (u.costUsd !== undefined && !(Number.isFinite(u.costUsd) && u.costUsd >= 0)) {
+    throw new RunInputError(`costUsd 要是非负数：${u.costUsd}`);
+  }
+  const rows = await db
+    .update(runs)
+    .set({
+      inputTokens: u.inputTokens,
+      outputTokens: u.outputTokens,
+      cacheReadTokens: u.cacheReadTokens,
+      cacheWriteTokens: u.cacheWriteTokens,
+      ...(u.costUsd !== undefined ? { costUsd: u.costUsd } : {}),
+      usageNote: null,
+      updatedAt: input.at,
+    })
+    .where(and(eq(runs.id, input.runId), isNotNull(runs.endedAt), usageIncomplete))
+    .returning({ id: runs.id });
+  return rows.length > 0;
+}
+
+/** 这一笔用量为什么还没记全（四样还有缺才写；原因没变不重写）。写了回 true。 */
+export async function noteRunUsage(
+  db: Db,
+  input: { runId: string; note: string; at: Date },
+): Promise<boolean> {
+  if (!input.note.trim()) throw new RunInputError('用量没记全的原因是空的');
+  const rows = await db
+    .update(runs)
+    .set({ usageNote: input.note, updatedAt: input.at })
+    .where(
+      and(eq(runs.id, input.runId), usageIncomplete, sql`${runs.usageNote} is distinct from ${input.note}`),
+    )
+    .returning({ id: runs.id });
+  return rows.length > 0;
+}
+
 /** 各段 loading: RunInsert -> 写入形状。 */
 function toRow(row: RunInsert, now: Date): RunRowSure {
   return {
@@ -213,6 +332,9 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
     cacheReadTokens: row.cacheReadTokens ?? null,
     cacheWriteTokens: row.cacheWriteTokens ?? null,
     costUsd: row.costUsd ?? null,
+    sessionId: row.sessionId ?? null,
+    // 只由「用量补记」写（fillRunUsageFromMeter / noteRunUsage），记一笔时不碰
+    usageNote: null,
     memoryPeakMb: row.memoryPeakMb ?? null,
     failureReason: row.failureReason ?? null,
     prNumber: row.prNumber ?? null,
@@ -227,9 +349,10 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
 
 /** 再记时要改的列：收场才有的那几列用 coalesce(新值, 库里已有的)，没给就不清。 */
 function pickRowWithoutId(r: RunRowSure) {
-  const { id: _i, createdAt: _c, ...rest } = r;
+  const { id: _i, createdAt: _c, usageNote: _n, ...rest } = r;
   return {
     ...rest,
+    sessionId: sql`coalesce(${r.sessionId}, ${runs.sessionId})`,
     endedAt: sql`coalesce(${r.endedAt?.toISOString() ?? null}::timestamptz, ${runs.endedAt})`,
     outcome: sql`coalesce(${r.outcome}, ${runs.outcome})`,
     routeOutcome: sql`coalesce(${r.routeOutcome}, ${runs.routeOutcome})`,

@@ -98,6 +98,10 @@ export function outcomeOfReport(report: HostReport): SpawnOutcome {
     usage: report.usage,
     ...(report.sessionCostUsd !== undefined ? { costUsd: report.sessionCostUsd } : {}),
     ...(report.actualModel !== undefined ? { actualModel: report.actualModel } : {}),
+    // 只记真号：起会话前的临时号（cursor-pending: / mirasim-pending:）不是执行体的会话，拿它补读不到用量
+    ...(report.sessionId !== undefined && !/^[a-z]+-pending:/.test(report.sessionId)
+      ? { sessionId: report.sessionId }
+      : {}),
     quotaExhausted: report.facts.quotaExhausted,
     ...(report.resetsAt !== undefined ? { resetsAt: report.resetsAt } : {}),
     ...(report.httpStatus !== undefined ? { httpStatus: report.httpStatus } : {}),

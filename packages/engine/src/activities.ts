@@ -23,6 +23,7 @@ import type { QuotaReadJobDeps } from './jobs/quota-read.ts';
 import type { RouteProbeJobDeps } from './jobs/route-probe.ts';
 import type { RouteProbeNowDeps } from './jobs/route-probe-now.ts';
 import { routeProbeLock } from './jobs/route-probe-now.ts';
+import type { UsageBackfillJobDeps } from './jobs/usage-backfill.ts';
 import type { WatchdogDeps } from './jobs/watchdog.ts';
 import {
   type ActivityTiming,
@@ -220,6 +221,8 @@ export interface EngineJobs {
   judgeSelfCheck?: () => JudgeSelfCheckJobDeps;
   /** 每周刷新 CI 测试耗时表（#921）：读 ci.yml 日志、重写表、开 PR。不拉单。 */
   ciTimings?: () => CiTimingsJobDeps;
+  /** 用量补记（#1935）：经 Mirasim 起的会话，按中转计量把 runs 的输入、缓存、花费补齐，没齐写原因。不拉单。 */
+  usageBackfill?: () => UsageBackfillJobDeps;
 }
 
 /**
