@@ -11,10 +11,15 @@ const ok = (over: Partial<HomeResources> = {}): HomeResources => ({
   at: new Date().toISOString(),
   everyMs: 5_000,
   memory: { state: 'ok', totalMb: 12_000, availableMb: 6_000 },
-  cpu: { state: 'ok', percent: 20, cores: 4 },
+  cpu: { state: 'ok', percent: 20, busyCores: 0.8, cores: 4 },
   sessions: { state: 'ok', byRun: {} },
   ...over,
 });
+
+const amounts = () =>
+  Array.from(document.querySelectorAll<HTMLElement>('[data-meter-amount]')).map((e) => e.textContent);
+const percents = () =>
+  Array.from(document.querySelectorAll<HTMLElement>('[data-meter-percent]')).map((e) => e.textContent);
 
 const cells = () =>
   Array.from(document.querySelectorAll<HTMLElement>('[data-meter]')).map((e) => [
@@ -23,12 +28,25 @@ const cells = () =>
     e.textContent,
   ]);
 
-test('读成了：两格写百分比，平时是 done', () => {
+test('读成了：两格写具体数值再写百分比，平时是 done', () => {
   render(<MachineMeter resources={ok()} remote={false} />);
   expect(cells()).toEqual([
-    ['memory', 'done', '内存50%'],
-    ['cpu', 'done', 'CPU20%'],
+    ['memory', 'done', '内存5.9G / 11.7G50%'],
+    ['cpu', 'done', 'CPU0.8 核 / 4 核20%'],
   ]);
+  expect(amounts()).toEqual(['5.9G / 11.7G', '0.8 核 / 4 核']);
+  expect(percents()).toEqual(['50%', '20%']);
+  // 读屏一句话里也带数值
+  expect(document.querySelector('[data-machine-meter]')?.getAttribute('aria-label')).toBe(
+    '机器资源：内存 5.9G / 11.7G 50%，CPU 0.8 核 / 4 核 20%',
+  );
+});
+
+test('老快照没有忙的核数：CPU 数值写没读到，百分比照写，不出现 0 核', () => {
+  render(<MachineMeter resources={ok({ cpu: { state: 'ok', percent: 20, cores: 4 } })} remote />);
+  expect(amounts()).toEqual(['5.9G / 11.7G', '没读到']);
+  expect(percents()).toEqual(['50%', '20%']);
+  expect(document.body.textContent).not.toContain('0 核');
 });
 
 test('紧：画黄（stall），不画红（fail）', () => {

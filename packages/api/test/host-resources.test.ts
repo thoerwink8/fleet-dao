@@ -110,7 +110,8 @@ describe('读一回', () => {
       first.next,
       new Date(15_000),
     );
-    expect(resources.cpu).toEqual({ state: 'ok', percent: 30, cores: 2, load1: 1.25 });
+    // 忙的核数和百分比同源：同一对差 × 核数（2 核 × 30% = 0.6 核），不是另读一份
+    expect(resources.cpu).toEqual({ state: 'ok', percent: 30, busyCores: 0.6, cores: 2, load1: 1.25 });
     expect(resources.sessions.state === 'ok' && resources.sessions.byRun['run-a']).toEqual({
       state: 'ok',
       memoryMb: 800,

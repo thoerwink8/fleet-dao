@@ -78,7 +78,10 @@ export const HomeRunningSchema = z.object({
 /** 一样读数没读到：原因原样写给人看（文件不在、内容认不出、这台不是 Linux……），页面写「没读到」，不拿 0 顶。 */
 const ResourceUnreadSchema = z.object({ state: z.literal('unread'), why: z.string().min(1) });
 
-/** 整机内存（/proc/meminfo）：已用 = 总量 − 可用（MemAvailable）。 */
+/**
+ * 整机内存（/proc/meminfo，MiB）：已用 = 总量 − 可用（MemAvailable）。页面上的「已用 / 总量」和百分比都只由这两个数算，
+ * 同一回读数，不另给一份已用（免得两份对不上）。
+ */
 export const HostMemorySchema = z.discriminatedUnion('state', [
   z.object({
     state: z.literal('ok'),
@@ -88,11 +91,16 @@ export const HostMemorySchema = z.discriminatedUnion('state', [
   ResourceUnreadSchema,
 ]);
 
-/** 整机 CPU（/proc/stat 两次读数的差）：percent 是所有核合起来忙的比例（0–100）；load1 是 /proc/loadavg 的 1 分钟负载。 */
+/**
+ * 整机 CPU（/proc/stat 两次读数的差）：percent 是所有核合起来忙的比例（0–100）；busyCores 是同一对差折成的忙的核数
+ * （= 忙的比例 × cores，一位小数），和 percent 同源；cores 是 /proc/stat 里 cpuN 的行数（真读，不是常数）；
+ * load1 是 /proc/loadavg 的 1 分钟负载。busyCores 缺 = 老版本推来的快照（页面写数值没读到，不拿 percent × cores 补）。
+ */
 export const HostCpuSchema = z.discriminatedUnion('state', [
   z.object({
     state: z.literal('ok'),
     percent: z.number().min(0).max(100),
+    busyCores: z.number().min(0).optional(),
     cores: z.number().int().positive(),
     load1: z.number().min(0).optional(),
   }),

@@ -138,8 +138,8 @@ export default function Home() {
     />
   );
 
-  // 机器资源两格（#1973）：整机内存、CPU，跟着推送动。桌面在画布左下「此刻」那一条的右半边（顶栏放不下），
-  // 手机没有画布，放在这条细栏里健康条的右边
+  // 机器资源两格（#1973）：整机内存、CPU，跟着推送动。桌面是画布左下「此刻」面板右边的一张小卡（顶栏放不下），
+  // 手机没有画布，放在这条细栏的第二行
   const meter =
     state.status === 'data' && phone ? (
       <MachineMeter
@@ -149,16 +149,24 @@ export default function Home() {
       />
     ) : null;
 
-  // 画布上方（顶栏放不下时）或手机上的一条细栏：状态摘要（带字的「状态」按钮）+ 机器资源 + 刷新。
+  // 画布上方（顶栏放不下时）或手机上的一条细栏：状态摘要（带字的「状态」按钮）+ 刷新；手机上第二行是机器资源。
+  // 机器资源写了具体数值（#1973），手机一行放不下三样：硬塞会把健康条（它自己是 flex-1 min-w-0、内容靠右）挤出左边、
+  // 字被截，所以手机上机器资源整块另起一行（靠右，和第一行的状态 + 刷新对齐右边）；第一行照旧是状态 + 刷新、不换行（#1819）。
   // 手机上它排在「要你拍的」横条下面，首屏第一眼是要你拍的；还没读到数据时（读取中、出错）没有横条，它照旧在最上面。
   const statusbar = (
-    <div
-      data-home-statusbar
-      className="flex shrink-0 flex-nowrap items-center gap-x-3 border-b px-3 sm:px-4 max-md:py-0 md:py-1.5"
-    >
-      {state.status === 'data' ? <HealthStrip health={state.data.health} /> : null}
-      {meter}
-      <div className="ml-auto">{refresh}</div>
+    <div className="shrink-0 border-b">
+      <div
+        data-home-statusbar
+        className="flex flex-nowrap items-center gap-x-3 px-3 sm:px-4 max-md:py-0 md:py-1.5"
+      >
+        {state.status === 'data' ? <HealthStrip health={state.data.health} /> : null}
+        <div className="ml-auto">{refresh}</div>
+      </div>
+      {meter ? (
+        <div data-home-meter-row className="-mt-1 flex justify-end px-3 sm:px-4">
+          {meter}
+        </div>
+      ) : null}
     </div>
   );
   const phoneUnderStrip = phone && state.status === 'data';

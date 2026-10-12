@@ -5,7 +5,8 @@
 // 改这里之前必须知道：
 // - 读不到一律是 unread + 原因（文件不在、读不了、内容认不出、这台不是 Linux），页面写「没读到」；绝不拿 0 顶、不拿「正常」顶。
 // - 整机 CPU 是 /proc/stat 两回读数的差（忙 = 总 − idle − iowait）；会话 CPU 是 cpu.stat 的 usage_usec 两回的差 ÷ 墙钟，
-//   100 = 占满一个核。只有一回读数时算不出：整机写 unread（说明还差一回），会话不给 cpuPercent（页面写「采样中」），都不是 0。
+//   100 = 占满一个核。整机忙的核数 = 同一对差的忙的比例 × 核数（核数数 /proc/stat 的 cpuN 行，真读、不写常数），
+//   和百分比同源。只有一回读数时算不出：整机写 unread（说明还差一回），会话不给 cpuPercent（页面写「采样中」），都不是 0。
 // - 会话 scope 在 fleet-agents.slice 下，名字是 `fleet-agent-<编号>.scope`（deploy/france/fleet-agent-scope.sh 起的，
 //   编号就是三段流水的编号，引擎 segment-spawner.ts 的 cgroup.id）。一回只 readdir 一次、各 scope 并排读，不逐单查库。
 // - scope 在两步之间收场（文件 ENOENT）就当它不在了，不算没读到；整个 slice 目录不在才是整池没读到。
@@ -158,7 +159,10 @@ async function readCpu(
       host,
     };
   }
-  const percent = Math.min(100, Math.max(0, Math.round(((now.busy - p.busy) / dTotal) * 1000) / 10));
+  // 百分比和忙的核数出自同一对差：忙的比例 × 核数（核数是这一回 /proc/stat 里数出来的 cpuN 行数）
+  const ratio = Math.min(1, Math.max(0, (now.busy - p.busy) / dTotal));
+  const percent = Math.round(ratio * 1000) / 10;
+  const busyCores = Math.round(ratio * now.cores * 10) / 10;
   // 负载是附带的一句：读不到就不写，不影响 CPU 那一格
   let load1: number | undefined;
   try {
@@ -166,7 +170,10 @@ async function readCpu(
   } catch {
     load1 = undefined;
   }
-  return { cpu: { state: 'ok', percent, cores: now.cores, ...(load1 === undefined ? {} : { load1 }) }, host };
+  return {
+    cpu: { state: 'ok', percent, busyCores, cores: now.cores, ...(load1 === undefined ? {} : { load1 }) },
+    host,
+  };
 }
 
 /** 一个 scope 一回的读数；scope 在读的中途收场了回 null（当它不在）。 */

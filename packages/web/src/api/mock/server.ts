@@ -322,14 +322,18 @@ export function mockResources(runIds: readonly string[], at: Date): HomeResource
   });
   const sessionsMb = Object.values(byRun).reduce((n, u) => n + (u.state === 'ok' ? u.memoryMb : 0), 0);
   const usedMb = Math.min(totalMb - 200, 1_450 + sessionsMb);
+  const cores = 4;
+  // 和真后端一样：忙的核数和百分比出自同一个比例
+  const percent = Math.min(100, Math.max(0, Math.round((tight ? 93 : 34) + wobble(0.5, 6))));
   return {
     at: at.toISOString(),
     everyMs: MOCK_RESOURCES_EVERY_MS,
     memory: { state: 'ok', totalMb, availableMb: totalMb - usedMb },
     cpu: {
       state: 'ok',
-      percent: Math.min(100, Math.max(0, Math.round((tight ? 93 : 34) + wobble(0.5, 6)))),
-      cores: 4,
+      percent,
+      busyCores: Math.round((percent / 100) * cores * 10) / 10,
+      cores,
       load1: Math.round(((tight ? 5.6 : 1.4) + wobble(0.2, 0.4)) * 100) / 100,
     },
     sessions: { state: 'ok', byRun },

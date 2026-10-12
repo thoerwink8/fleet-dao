@@ -21,7 +21,7 @@ function res(over: Partial<HomeResources> = {}): HomeResources {
     at: AT,
     everyMs: 5_000,
     memory: { state: 'ok', totalMb: 12_000, availableMb: 4_000 },
-    cpu: { state: 'ok', percent: 37.6, cores: 4, load1: 1.4 },
+    cpu: { state: 'ok', percent: 37.6, busyCores: 1.5, cores: 4, load1: 1.4 },
     sessions: {
       state: 'ok',
       byRun: {
@@ -102,6 +102,24 @@ describe('整机两格', () => {
     expect(m.memory).toMatchObject({ kind: 'ok', percent: 67, tight: false, text: '67%' });
     expect(m.cpu).toMatchObject({ kind: 'ok', percent: 38, tight: false, text: '38%' });
     expect(m.stale).toBe(false);
+  });
+
+  test('具体数值：内存写「已用 / 总量」，CPU 写「忙的核数 / 总核数」，和百分比出自同一份读数', () => {
+    const m = hostMeters(res(), NOW);
+    // 已用 = 12000 − 4000 = 8000M = 7.8G；总量 12000M = 11.7G；67% 也是 8000 / 12000
+    expect(m.memory).toMatchObject({ amount: { kind: 'ok', text: '7.8G / 11.7G' } });
+    expect(m.cpu).toMatchObject({ amount: { kind: 'ok', text: '1.5 核 / 4 核' } });
+  });
+
+  test('忙的核数写一位小数，整数核也写「.0」不跳字宽；总核数是整数', () => {
+    const m = hostMeters(res({ cpu: { state: 'ok', percent: 50, busyCores: 2, cores: 4 } }), NOW);
+    expect(m.cpu).toMatchObject({ amount: { kind: 'ok', text: '2.0 核 / 4 核' } });
+  });
+
+  test('那台推来的老快照没有忙的核数：数值写没读到带原因，不拿百分比 × 核数编一个', () => {
+    const m = hostMeters(res({ cpu: { state: 'ok', percent: 40, cores: 4 } }), NOW, { remote: true });
+    expect(m.cpu).toMatchObject({ kind: 'ok', text: '40%', amount: { kind: 'unread' } });
+    expect(m.cpu.kind === 'ok' && m.cpu.amount.kind === 'unread' && m.cpu.amount.why).toContain('忙的核数');
   });
 
   test('紧（内存 ≥ 85%、CPU ≥ 90%）：标紧，由页面画成等待黄', () => {

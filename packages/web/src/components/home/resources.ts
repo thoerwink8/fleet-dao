@@ -7,6 +7,8 @@
 // - 一张单同时几个会话（runIds 不止一个）按单合计：内存（memory.current）相加，CPU 相加（100% = 占满一个核），
 //   峰值是各会话 memory.peak 之和——各会话的峰值不一定同时出现，这是上界，悬停里照这个口径写。
 // - 有一个会话没读到，整张单就写没读到，不拿另一个会话的数冒充整张单的数。
+// - 整机两格写具体数值再写百分比：内存「已用 / 总量」（都由 totalMb、availableMb 算），CPU「忙的核数 / 总核数」（busyCores
+//   是后端和 percent 同一对差算的）。数值缺了写没读到，不拿百分比 × 核数在前端编。
 // - 紧：内存已用 ≥ 85%、CPU ≥ 90%，画提示黄（stall，见 machine-meter.tsx），不画失败红——机器忙不是坏了（health-strip.tsx 头注释的规矩）。
 import type { HomeResources, HomeRunning } from './types';
 
@@ -78,8 +80,11 @@ export function ticketUsage(
   };
 }
 
+/** 一格的具体数值（内存「已用 / 总量」、CPU「忙的核数 / 总核数」）；读不到写没读到带原因，不拿百分比反推。 */
+export type Amount = { kind: 'ok'; text: string } | { kind: 'unread'; why: string };
+
 export type Meter =
-  | { kind: 'ok'; percent: number; tight: boolean; text: string; detail: string }
+  | { kind: 'ok'; percent: number; tight: boolean; text: string; amount: Amount; detail: string }
   | { kind: 'unread'; why: string };
 
 export interface HostMeters {
@@ -123,6 +128,8 @@ export function hostMeters(
             percent,
             tight: percent >= MEMORY_TIGHT_PERCENT,
             text: `${percent}%`,
+            // 和百分比同一对数（总量、可用）算出来
+            amount: { kind: 'ok' as const, text: `${formatMb(used)} / ${formatMb(m.totalMb)}` },
             detail: `已用 ${formatMb(used)} / 共 ${formatMb(m.totalMb)}，可用 ${formatMb(m.availableMb)}`,
           };
         })();
@@ -135,7 +142,17 @@ export function hostMeters(
           percent: Math.round(c.percent),
           tight: c.percent >= CPU_TIGHT_PERCENT,
           text: formatCpu(c.percent),
-          detail: `${c.cores} 核合计忙 ${formatCpu(c.percent)}${
+          // 忙的核数是后端拿同一对差算的；老快照没有就写没读到，不拿百分比 × 核数在这里编
+          amount:
+            c.busyCores === undefined
+              ? {
+                  kind: 'unread',
+                  why: opts.remote
+                    ? '那台推来的读数里没有忙的核数（那台的版本还没有这一项）'
+                    : '后端没给忙的核数',
+                }
+              : { kind: 'ok', text: `${c.busyCores.toFixed(1)} 核 / ${c.cores} 核` },
+          detail: `${c.busyCores === undefined ? '' : `忙 ${c.busyCores.toFixed(1)} 核，`}${c.cores} 核合计忙 ${formatCpu(c.percent)}${
             c.load1 === undefined ? '' : `，1 分钟负载 ${c.load1.toFixed(2)}`
           }`,
         };
