@@ -14,7 +14,7 @@
 # 装、登录要创始人在自己电脑上做，这里只查 ~/.mirasim/run 下的令牌）、Mirasim 常驻单元该不该装、装了活没活
 # （mirasim-session，#424：服务端本体没装待配、不装单元；装了单元不活或 /api/health 不通判红）、
 # 自动档也装这个单元（mirasim-auto-tier，#1274：没变不重启、变了才重启、本体不在待配不算红、单元缺 MIRASIM_NO_AGENT_EGRESS=1 判红）、
-# 切会话用户挂的 reclaude 组织（agent-scope-org-use）、发布取代码、装依赖经期望里登记的会话代理、登记成空就直连（release-proxy，#786）、
+# 切会话用户挂的 reclaude 组织（agent-scope-org-use）、只读命令行工具版本（agent-scope-probe，#1969）、发布取代码、装依赖经期望里登记的会话代理、登记成空就直连（release-proxy，#786）、
 # 发布构建在沙箱里跑、读不到密钥目录和本机库 socket，沙箱建不成就不发、不退回用 fleet 直接构建（build-isolation，#79）、
 # node 的编译缓存目录归 root、别人放不进（node-cache）、会话用户在本机开的口只许它自己和 root 连（session-ports，#35）、
 # 法国 sshd 抗扫描和 fail2ban 的 sshd jail（sshd-hardening，#1348：sshd -t 不过撤掉文件不重载、有效配置被盖掉判红、fail2ban 没装只记待配）、
@@ -55,7 +55,7 @@ SKIP_WHY=""
 # 估三台各 80–100 秒。第二轮实测三台 101 / 84 / 95 秒，再把 release-flow、web-publish 从第一台挪去第三台。挪完看下一轮 CI 的「⏱」行，不匀了再挪。每一项的秒数都看日志里的「⏱」行。
 SHARDS=(
   'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards session-proxy session-ports release-proxy node-report-gate release-boot sshd-hardening hk-firewall'
-  'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use temporal-schema'
+  'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use agent-scope-probe temporal-schema'
   'lint session-pnpm no-demo gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish build-isolation'
 )
 NODE_TESTS=(health-page reclaude-old-account-clean auto-release config release-request static-child)

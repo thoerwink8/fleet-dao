@@ -20,6 +20,7 @@ import type {
   Audit,
   AuthConfig,
   Board,
+  CliToolsResponse,
   Credentials,
   EnvResponse,
   FrancePreflightResponse,
@@ -209,6 +210,8 @@ export interface FleetApi {
   franceRelease(sha: string): Promise<ReleaseRequestResult>;
   /** /france 页「发版预检」按钮：点下让后端起 pnpm release:onekey preflight，命令写死、不收参数。 */
   francePreflight(): Promise<FrancePreflightResponse>;
+  /** /france 页「命令行工具」：在用版本、官方最新、现算的落后。只读。 */
+  franceCliTools(): Promise<CliToolsResponse>;
   /** 订阅实时推送，返回取消订阅的函数。onStatus 报连接状态（给顶栏的「实时」小灯）。 */
   subscribe(listener: (event: LiveEvent) => void, onStatus?: (status: LiveStatus) => void): () => void;
 }
@@ -271,6 +274,7 @@ export const keys = {
   franceReleaseState: ['france-release-state'] as const,
   franceReleaseCard: ['france-release-card'] as const,
   franceReleasedCommits: ['france-released-commits'] as const,
+  franceCliTools: ['france-cli-tools'] as const,
   env: ['env'] as const,
   home: ['home'] as const,
   nodes: ['nodes'] as const,
@@ -641,6 +645,16 @@ export function useFranceReleaseCard() {
   return useQuery({
     queryKey: keys.franceReleaseCard,
     queryFn: () => api.franceReleaseCard(),
+    refetchInterval: 60_000,
+  });
+}
+
+/** /france 页「命令行工具」（#1969）：和定时任务同一档，一分钟重拉一次。读不到后端也照实显示。 */
+export function useCliTools() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.franceCliTools,
+    queryFn: () => api.franceCliTools(),
     refetchInterval: 60_000,
   });
 }

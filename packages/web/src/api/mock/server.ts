@@ -11,10 +11,12 @@ import {
   AUTO_DISPATCH_ENABLE,
   AuditResponse,
   AuthConfigResponse,
+  acceptPoolHoldsWrite,
   answerResolves,
   BoardResponse,
   CI_POLICY_SET,
   type CiPolicy,
+  CliToolsResponseSchema,
   CredentialsResponse,
   DEFAULT_SESSION_EFFORT,
   describeEngineMaster,
@@ -2984,21 +2986,27 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       await wait();
       if (!Object.hasOwn(SETTING_SCHEMAS, key)) throw new ApiError(404, 'setting_not_found', '没有这项设置');
       const body = UpdateSettingRequest.parse(raw);
-      const schema: z.ZodType = SETTING_SCHEMAS[key as SettingKey];
-      const value = schema.safeParse(body.value);
-      if (!value.success)
-        throw new ApiError(400, 'invalid_request', '设置的值不符合约定', value.error.issues);
       const current = st.settings.find((s) => s.key === key) ?? { key, value: null, version: 0 };
       if (current.version !== body.version)
         throw new ApiError(409, 'conflict', '这项设置刚被别人改过，刷新后再改');
-      // 整池暂停：撤回、续期必须写原因（和后端同一条判法）
+      // 整池暂停：新写的必须过格式；认不出的原样没改才留（和后端同一条判法）。撤回、续期必须写原因。
+      let stored: unknown;
       if (key === POOL_HOLDS_SETTING) {
-        const missing = revocationProblem(current.value, value.data, body.reason);
+        const accepted = acceptPoolHoldsWrite(current.value, body.value);
+        if (!accepted.ok) throw new ApiError(400, 'invalid_request', accepted.message);
+        const missing = revocationProblem(current.value, accepted.value, body.reason);
         if (missing) throw new ApiError(400, 'reason_required', missing);
+        stored = accepted.value;
+      } else {
+        const schema: z.ZodType = SETTING_SCHEMAS[key as SettingKey];
+        const value = schema.safeParse(body.value);
+        if (!value.success)
+          throw new ApiError(400, 'invalid_request', '设置的值不符合约定', value.error.issues);
+        stored = value.data;
       }
       const next = {
         key,
-        value: value.data,
+        value: stored,
         version: current.version + 1,
         updatedAt: iso(),
         updatedBy: st.me.user.id,
@@ -3009,7 +3017,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         action: 'setting.update',
         target: `setting:${key}`,
         before: current.value,
-        after: value.data,
+        after: stored,
         via: 'cockpit',
         ...(body.reason ? { reason: body.reason } : {}),
       });
@@ -3107,6 +3115,127 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         phase: '第 2 步「暂停法国」',
       };
       return ReleaseRequestResponse.parse({ requested: true, sha, at: iso() });
+    },
+    async franceCliTools() {
+      await wait();
+      // 假数据：四种状态都有，截图和页面测试看得到。这台不是法国，数字不是真机读数。
+      const ago = new Date(now() - 8 * 60_000).toISOString();
+      const cell = (version: string) => ({ state: 'ok' as const, version });
+      const row = (
+        tool: string,
+        name: string,
+        installed:
+          | { state: 'ok'; version: string }
+          | { state: 'unread'; why: string }
+          | { state: 'unreadable'; why: string },
+        latest: { state: 'ok'; version: string } | { state: 'unreadable'; why: string },
+        status:
+          | { kind: 'current'; label: '最新' }
+          | { kind: 'behind'; count: number; label: string }
+          | { kind: 'behind-uncounted'; reason: string; label: '落后（数不出几个）' }
+          | { kind: 'unread'; reason: string; label: '读不到' }
+          | { kind: 'unreadable'; reason: string; label: '没查成' },
+      ) => ({
+        scope: 'user' as const,
+        owner: '',
+        tool,
+        name,
+        installed,
+        latest,
+        status,
+        checkedAt: ago,
+      });
+      const userRows = (behindCodex: boolean) => [
+        row('claude', 'Claude Code', cell('2.1.282'), cell('2.1.296'), {
+          kind: 'behind',
+          count: 14,
+          label: '落后 14 个版本',
+        }),
+        row(
+          'codex',
+          'Codex',
+          behindCodex ? cell('0.156.1') : cell('0.162.1'),
+          cell('0.162.1'),
+          behindCodex
+            ? { kind: 'behind', count: 6, label: '落后 6 个版本' }
+            : { kind: 'current', label: '最新' },
+        ),
+        row('grok', 'Grok', cell('1.0.41'), cell('1.0.50'), {
+          kind: 'behind',
+          count: 9,
+          label: '落后 9 个版本',
+        }),
+        row(
+          'cursor-agent',
+          'Cursor Agent',
+          { state: 'unread', why: '退出码 127（找不到命令）' },
+          cell('2026.10.08'),
+          { kind: 'unread', reason: '退出码 127（找不到命令）', label: '读不到' },
+        ),
+        row('reclaude', 'reclaude', cell('1.3.0'), cell('1.4.1'), {
+          kind: 'behind-uncounted',
+          reason: '发布源只给了最新版，没有版本列表，数不出落后几个',
+          label: '落后（数不出几个）',
+        }),
+        row(
+          'mirasim-server',
+          'Mirasim 服务端',
+          cell('0.0.355'),
+          { state: 'unreadable', why: '更新日志里没认出版本号' },
+          { kind: 'unreadable', reason: '更新日志里没认出版本号', label: '没查成' },
+        ),
+      ];
+      const stamp = (owner: string, rows: ReturnType<typeof userRows>) =>
+        rows.map((item) => ({ ...item, scope: 'user' as const, owner }));
+      return CliToolsResponseSchema.parse({
+        state: 'ok',
+        asOf: iso(),
+        groups: [
+          {
+            scope: 'user',
+            owner: 'fleet-agent-carpool',
+            title: 'fleet-agent-carpool',
+            rows: stamp('fleet-agent-carpool', userRows(true)),
+          },
+          { scope: 'user', owner: 'pilot', title: 'pilot', rows: stamp('pilot', userRows(false)) },
+          {
+            scope: 'npm',
+            owner: '',
+            title: '全局 npm',
+            rows: [
+              {
+                ...row('kimi-code', 'Kimi', cell('2.1.1'), cell('2.2.0'), {
+                  kind: 'behind',
+                  count: 3,
+                  label: '落后 3 个版本',
+                }),
+                scope: 'npm',
+              },
+              {
+                ...row('dsh', 'DeepSeek dsh', cell('0.1.5'), cell('0.1.5'), {
+                  kind: 'current',
+                  label: '最新',
+                }),
+                scope: 'npm',
+              },
+              {
+                ...row(
+                  'pi',
+                  'pi',
+                  { state: 'unread', why: '全局 npm 里没有 @earendil-works/pi-coding-agent' },
+                  cell('0.90.0'),
+                  {
+                    kind: 'unread',
+                    reason: '全局 npm 里没有 @earendil-works/pi-coding-agent',
+                    label: '读不到',
+                  },
+                ),
+                scope: 'npm',
+              },
+            ],
+          },
+        ],
+      });
     },
     async francePreflight() {
       await wait();

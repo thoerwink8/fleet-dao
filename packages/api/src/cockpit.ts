@@ -7,6 +7,7 @@ import {
   AnswerNotificationResponse,
   AuditQuery,
   AuditResponse,
+  acceptPoolHoldsWrite,
   BoardResponse,
   DEFAULT_SESSION_EFFORT,
   EnvResponseSchema,
@@ -56,6 +57,7 @@ import type { z } from 'zod';
 import { meBody } from './auth.ts';
 import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reconcile-view.ts';
 import { registerCiPolicyRoutes } from './ci-policy-routes.ts';
+import { registerCliToolsRoutes } from './cli-versions.ts';
 import { registerCredentialRoutes } from './credentials.ts';
 import { handOffDecision } from './decision-handoff.ts';
 import type { Deps } from './deps.ts';
@@ -846,24 +848,32 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const key = c.req.param('key');
     if (!Object.hasOwn(SETTING_SCHEMAS, key)) throw new ApiError(404, 'setting_not_found', '没有这项设置');
     const body = await readJson(c, UpdateSettingRequest);
-    const valueSchema: z.ZodType = SETTING_SCHEMAS[key as SettingKey];
-    const value = valueSchema.safeParse(body.value);
-    if (!value.success) throw new ApiError(400, 'invalid_request', '设置的值不符合约定', value.error.issues);
     const before = (await settingsView()).find((s) => s.key === key);
-    // 整池暂停：撤回、续期必须写原因（写进操作记录），在落库前这一步拦，不靠页面自觉
+    // 整池暂停：新写的必须过格式；库里认不出的那一项原样没改才留，免得改一个池把别的池放开。
+    // 撤回、续期必须写原因（写进操作记录），在落库前这一步拦，不靠页面自觉。
+    let stored: unknown;
     if (key === POOL_HOLDS_SETTING) {
-      const missing = revocationProblem(before?.value, value.data, body.reason);
+      const accepted = acceptPoolHoldsWrite(before?.value, body.value);
+      if (!accepted.ok) throw new ApiError(400, 'invalid_request', accepted.message);
+      const missing = revocationProblem(before?.value, accepted.value, body.reason);
       if (missing) throw new ApiError(400, 'reason_required', missing);
+      stored = accepted.value;
+    } else {
+      const valueSchema: z.ZodType = SETTING_SCHEMAS[key as SettingKey];
+      const value = valueSchema.safeParse(body.value);
+      if (!value.success)
+        throw new ApiError(400, 'invalid_request', '设置的值不符合约定', value.error.issues);
+      stored = value.data;
     }
     const actor = actorOf(c);
     const result = await store.putSetting(
-      { key, value: value.data, expectedVersion: body.version, by: actor },
+      { key, value: stored, expectedVersion: body.version, by: actor },
       {
         actor,
         action: 'setting.update',
         target: `setting:${key}`,
         before: before?.value,
-        after: value.data,
+        after: stored,
         reason: body.reason,
         via: c.get('via'),
         ok: true,
@@ -884,6 +894,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   registerRunTranscriptRoutes(app, deps);
   registerModelRosterRoutes(app, deps, actorOf);
   registerFranceReleaseRoutes(app, deps);
+  registerCliToolsRoutes(app, deps);
   registerReleaseCardRoutes(app, deps);
   registerReleaseRequestRoutes(app, deps, actorOf);
 

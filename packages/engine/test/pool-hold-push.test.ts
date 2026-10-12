@@ -50,7 +50,7 @@ describe('pushOverduePoolHolds', () => {
     expect(text).toContain('账号池 claude-solo');
     expect(text).toContain('创始人要大用独享');
     expect(text).toContain('张三');
-    expect(text).toContain('驾驶舱设置页「整池暂停」');
+    expect(text).toContain('驾驶舱额度页');
     expect(text).not.toContain('relay');
     expect(due.marked).toEqual([text]);
 
@@ -61,6 +61,12 @@ describe('pushOverduePoolHolds', () => {
     const unset = world(undefined);
     expect(await unset.run()).toEqual({ scanned: 0, found: 0, unchecked: [] });
     expect(unset.sent).toEqual([]);
+
+    const raw = hold() as Record<string, unknown>;
+    delete raw.reviewBy;
+    const noDate = world({ 'claude-solo': raw });
+    expect(await noDate.run()).toMatchObject({ found: 0, unchecked: [] });
+    expect(noDate.sent).toEqual([]);
   });
 
   it('同一天同一份正文只推一次；正文变了（又有池到期）再推', async () => {

@@ -1,10 +1,10 @@
 // @vitest-environment happy-dom
-// 设置页照路由页样板重做（#1917）：仓库一行一个主信息、一个状态，两个按钮同一行；说明一行不折；整池暂停的次要操作收进「⋯」。
+// 设置页照路由页样板重做（#1917）：仓库一行一个主信息、一个状态，两个按钮同一行；说明一行不折。
+// 整池暂停不在这页，开关在额度页。
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
 import { RowDetail } from '../components/layout/list';
-import { PoolHoldsPanel } from '../components/pool-holds';
 import SettingsPage from '../routes/settings';
 import { renderApp } from './harness';
 
@@ -65,34 +65,6 @@ describe('设置页仓库行（#1917）', () => {
       expect(n.getAttribute('title')).toBe(n.textContent);
     }
     expect(screen.getByRole('button', { name: '这页是做什么的' })).toBeTruthy();
-  });
-});
-
-describe('整池暂停一行（#1917）', () => {
-  test('改负责人、续期、撤回不在行里，收进「⋯」；没到期的写「暂停中」', async () => {
-    const api = createMockApi({ live: false, now: () => Date.parse('2026-10-05T04:00:00Z') });
-    await api.updateSetting('engine.poolHolds', {
-      value: {
-        'claude-a': {
-          reason: '大用独享',
-          decidedBy: '「先停」2026-10-01',
-          revokeWhen: '说可以',
-          reviewBy: '2026-10-30',
-        },
-      },
-      version: 0,
-    });
-    renderApp(<PoolHoldsPanel />, { api });
-    const row = await screen.findByTestId('hold-claude-a');
-    for (const name of ['撤回', '续期', '改负责人'])
-      expect(within(row).queryByRole('button', { name })).toBeNull();
-    expect(row.querySelector('[data-tone="stop"]')?.textContent).toBe('暂停中');
-    fireEvent.pointerDown(within(row).getByRole('button', { name: /^更多操作：/ }), {
-      button: 0,
-      ctrlKey: false,
-      pointerType: 'mouse',
-    });
-    expect(screen.getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['改负责人', '续期', '撤回']);
   });
 });
 

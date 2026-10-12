@@ -16,6 +16,7 @@ import type {
   ChangeEventSchema,
   ChannelSchema,
   ChannelStateSchema,
+  CliToolsResponseSchema,
   CredentialsResponse,
   DecisionOptionSchema,
   EffortModelSchema,
@@ -272,6 +273,7 @@ export type UpdateSettingBody = z.input<typeof UpdateSettingRequest>;
 
 /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
 export type FranceReleaseState = z.infer<typeof FranceReleaseStateSchema>;
+export type CliToolsResponse = z.infer<typeof CliToolsResponseSchema>;
 /** /france 页「发版」卡（#1231）：四行各自带「查成了 / 没查成 + 原因」。 */
 export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;
 /** /changelog 页「已发布的提交」（#1255）：读法国发布历史，每条提交号、标题、发于何时；读不到整份是 unreadable + 原因。 */

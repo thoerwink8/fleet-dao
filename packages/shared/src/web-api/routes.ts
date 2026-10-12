@@ -11,6 +11,7 @@ import {
   UpdateCredentialsRequest,
 } from './auth.ts';
 import { BoardResponse, ReposResponse } from './board.ts';
+import { CliToolsResponseSchema } from './cli-versions.ts';
 import {
   GroomNowRequest,
   GroomNowResponse,
@@ -114,6 +115,8 @@ export const WebRoutes = {
   },
   /** /france 页「发版预检」按钮：起子进程跑 pnpm release:onekey preflight，命令写死、不收参数。 */
   francePreflight: { method: 'POST', path: '/france/preflight', response: FrancePreflightResponseSchema },
+  /** /france 页「命令行工具」：在用版本、官方最新、现算的落后。只读，不升级。 */
+  franceCliTools: { method: 'GET', path: '/france/cli-tools', response: CliToolsResponseSchema },
   /** 设置页「仓库」一节：每个项目的「让 AI 接活」现在开还是关、什么时候开的。 */
   repoDispatch: { method: 'GET', path: '/repos/dispatch', response: RepoDispatchResponse },
   /** 开、关一个项目的「让 AI 接活」（和命令行 fleet-api dispatch 同一个写入口，记操作记录）；没有这个项目 404。 */

@@ -1,6 +1,7 @@
 import type { Repo } from '@fleet-dao/shared';
 import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
 import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
+import type { CliToolsPort } from './cli-versions.ts';
 import type { Config } from './config.ts';
 import type { DecisionCommenter } from './decision-handoff.ts';
 import type { CockpitAlerts } from './feishu-alerts.ts';
@@ -141,6 +142,11 @@ export interface Deps {
    * 只在正式环境装配（main.ts 的 liveFranceReleasePort）；没给时接口照样回 unreadable，页面画「没查成 + 原因」。
    */
   franceRelease?: FranceReleasePort | undefined;
+  /**
+   * /france 页「命令行工具」（#1969，cli-versions.ts）：读引擎记下的在用版本和官方最新，落后现算。
+   * 没给（开发、内存版没有这张表）时整段写没查成，不拿空列表冒充都是最新。
+   */
+  cliTools?: CliToolsPort | undefined;
   /**
    * /france 页「发版」卡（#1231，release-card.ts）：读 GitHub 上主线头、CI、PR，和法国在用的提交（发布目录）。
    * 只在正式环境装配（main.ts 的 liveReleaseCardPort）；没给时接口照样回，四行都写「没接上 + 原因」，不拿「已是最新」顶。

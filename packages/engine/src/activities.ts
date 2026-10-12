@@ -13,6 +13,7 @@ import {
 } from './jobs/canary.ts';
 import type { CarpoolWatchDeps } from './jobs/carpool-watch.ts';
 import type { CiTimingsJobDeps } from './jobs/ci-timings.ts';
+import type { CliVersionsJobDeps } from './jobs/cli-versions.ts';
 import { probeAssignedRoute } from './jobs/dispatch-probe.ts';
 import type { GitHubReconcileJobDeps } from './jobs/github-reconcile.ts';
 import type { GroomRunDeps } from './jobs/groom.ts';
@@ -227,6 +228,8 @@ export interface EngineJobs {
   ciTimings?: () => CiTimingsJobDeps;
   /** 用量补记（#1935）：经 Mirasim 起的会话，按中转计量把 runs 的输入、缓存、花费补齐，没齐写原因。不拉单。 */
   usageBackfill?: () => UsageBackfillJobDeps;
+  /** 命令行工具版本（#1969）：读在用版本和官方最新。不升级、不拉单。 */
+  cliVersions?: () => CliVersionsJobDeps;
 }
 
 /**

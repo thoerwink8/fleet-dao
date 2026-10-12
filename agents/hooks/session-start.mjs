@@ -19,7 +19,7 @@
 //    各说一行，提醒照读法②问创始人。2026-09-28 拍的临时调整抄进产品仓时丢了撤回条件和复查日期，额度恢复了新会话还照做。
 // 4. 会话开在 fleet-dao 里时：我开的、检查全绿、没挂自动合并、没碰改标准的 PR（漏走 pnpm pr:open 的兜底），有才说一行；
 //    gh 没查成说一行没查成，不当成「没有」。这一件和进度单 #1055、扫工作树一起走第 1 件的三分钟门。
-// 5. 法国库里的整池暂停（设置 engine.poolHolds，#954）：复查日期到了（北京时间）提示一句（池、原因、负责人、到驾驶舱设置页「整池暂停」撤）。
+// 5. 法国库里的整池暂停（设置 engine.poolHolds，#954）：复查日期到了（北京时间）提示一句（池、原因、负责人、到驾驶舱额度页打开）。没填复查日期的不提示。
 //    只在这台配了登法国的 ssh 时查：~/.fleet-dao/france-ssh，或真开会话时进程里的 FLEET_FRANCE_SSH。没配不出声，不当成没到期。
 //    当库被测试调用时不读进程环境，免得测试机上的环境变量把 ssh 打出去；真开会话（本文件当主程序）才把进程环境传进去。
 //    查不成就说没查成。结果缓存 QUIET_MS，免得每条消息都 ssh。认不出的不当成没到期。
@@ -921,7 +921,7 @@ export function poolHoldPromptLines(read, today) {
   const value = read.value;
   if (value === undefined) return [];
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return ['整池暂停整份认不出，当不了没到期。到驾驶舱设置页「整池暂停」看。'];
+    return ['整池暂停整份认不出，当不了没到期。到驾驶舱额度页看。'];
   }
   const overdue = [];
   const bad = [];
@@ -932,7 +932,10 @@ export function poolHoldPromptLines(read, today) {
     }
     const extra = Object.keys(entry).some((k) => !POOL_HOLD_KEYS.has(k));
     const reason = holdText(entry, 'reason');
+    const reviewRaw = entry.reviewBy;
     const reviewBy = holdText(entry, 'reviewBy');
+    // 没写复查日期不算到期、也不算认不出。写了但不是 YYYY-MM-DD（含空白）仍算认不出。
+    const reviewBad = reviewRaw !== undefined && !holdDay(reviewBy);
     const ownerRaw = entry.owner;
     const ownerBad = ownerRaw !== undefined && (typeof ownerRaw !== 'string' || ownerRaw.trim() === '');
     if (
@@ -940,27 +943,25 @@ export function poolHoldPromptLines(read, today) {
       !reason ||
       !holdText(entry, 'decidedBy') ||
       !holdText(entry, 'revokeWhen') ||
-      !holdDay(reviewBy) ||
+      reviewBad ||
       ownerBad
     ) {
       bad.push(poolId);
       continue;
     }
-    if (today < reviewBy) continue;
+    if (reviewBy === '' || today < reviewBy) continue;
     const owner = typeof ownerRaw === 'string' && ownerRaw.trim() ? ownerRaw.trim() : DEFAULT_POOL_HOLD_OWNER;
     const days = Math.round(
       (Date.parse(`${today}T00:00:00Z`) - Date.parse(`${reviewBy}T00:00:00Z`)) / 86_400_000,
     );
     const when = days <= 0 ? '就是今天' : `已过 ${days} 天`;
     overdue.push(
-      `整池暂停到期：${poolId}（原因：${reason}；负责人：${owner}；复查日期 ${reviewBy}，${when}）。到驾驶舱设置页「整池暂停」撤或续期，引擎不会自动撤。`,
+      `整池暂停到期：${poolId}（原因：${reason}；负责人：${owner}；复查日期 ${reviewBy}，${when}）。到驾驶舱额度页打开或改复查日期，引擎不会自动撤。`,
     );
   }
   const lines = [...overdue];
   if (bad.length > 0) {
-    lines.push(
-      `整池暂停有 ${bad.length} 条认不出（${bad.join('、')}），当不了没到期。到驾驶舱设置页「整池暂停」看。`,
-    );
+    lines.push(`整池暂停有 ${bad.length} 条认不出（${bad.join('、')}），当不了没到期。到驾驶舱额度页看。`);
   }
   return lines;
 }

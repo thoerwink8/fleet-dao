@@ -40,15 +40,15 @@ export const BeijingDateSchema = z
 const HoldText = z.string().trim().min(1, '不能留空').max(500, '最多 500 字');
 
 /**
- * 一条整池暂停（#746）：通用段里「临时调整」的五列（内容 = 哪个池，下面四项），缺一项写不进去，多一项也不收（认不出明确失败）。
- * reason 为什么停；decidedBy 谁拍的（原话加日期）；revokeWhen 撤回条件；reviewBy 最迟复查日期（北京时间）。
- * owner 负责人（#954）：没写按「指挥官」（展示时补，不写进库）；空字符串不收。老数据没有这一项，仍算认得出。
+ * 一条整池暂停（#746）：reason 为什么停；decidedBy 谁拍的（原话加日期）；revokeWhen 撤回条件。这三项缺一项写不进去。
+ * reviewBy 最迟复查日期（北京时间）：可不填；填了必须是日历上的一天。没填的不算到期、不推复查提醒。
+ * owner 负责人（#954）：没写按「指挥官」（展示时补，不写进库）；空字符串不收。多一项不收（认不出明确失败）。
  */
 export const PoolHoldSchema = z.strictObject({
   reason: HoldText,
   decidedBy: HoldText,
   revokeWhen: HoldText,
-  reviewBy: BeijingDateSchema,
+  reviewBy: BeijingDateSchema.optional(),
   owner: HoldText.optional(),
 });
 /** 账号池编号 → 这个池的整池暂停。没有这个池的条目 = 没暂停；撤回 = 把这个池的条目删掉（撤回原因写在这次改动的 reason，进操作记录）。 */
@@ -63,7 +63,8 @@ export const PoolHoldViewSchema = z.strictObject({
   reason: HoldText,
   decidedBy: HoldText,
   revokeWhen: HoldText,
-  reviewBy: BeijingDateSchema,
+  /** 没填 = 不设复查日期，不算到期。 */
+  reviewBy: BeijingDateSchema.optional(),
   owner: HoldText,
   poolId: z.string(),
   /** 到了最迟复查日期（当天及以后）还开着：标红，不自动撤，等人撤或续期。 */
@@ -76,7 +77,7 @@ export const PoolHoldProblemSchema = z.object({
   poolId: z.string().nullable(),
   why: z.string(),
 });
-/** 还靠 `pool-hold:<池>` 提醒顶着的暂停（兼容读法，保留一版）：请迁成上面的开关。 */
+/** 还靠 `pool-hold:<池>` 提醒顶着的暂停（兼容读法，保留一版）：额度页显示成状态，不自动改开关。 */
 export const LegacyPoolHoldSchema = z.object({
   poolId: z.string(),
   title: z.string(),
@@ -89,6 +90,11 @@ export const PoolHoldsResponse = z.object({
   problems: z.array(PoolHoldProblemSchema),
   /** 设置整份认不出：引擎对所有池按暂停办。 */
   holdAll: z.boolean(),
+  /**
+   * 认不出的池条目原值（池编号 → 库里那一项）。额度页改一个池时必须原样写回，
+   * 不能只交认得出的，否则那些池会被放开。没有时是空对象。
+   */
+  opaque: z.record(z.string(), z.unknown()),
   legacy: z.array(LegacyPoolHoldSchema),
   /** 读旧提醒没读成：为什么（不拿「没有旧提醒」顶）。读成了没有这一项。 */
   legacyProblem: z.string().optional(),
@@ -123,9 +129,9 @@ export const SETTING_SCHEMAS = {
    */
   'engine.quotaReserve': QuotaReserveSettingSchema,
   /**
-   * 整池暂停（#746，创始人 2026-10-02 拍开关留在库里当指令）：{池编号: {reason, decidedBy, revokeWhen, reviewBy, owner?}}。
-   * 选路、切号整池避开；探针探通、会话跑通都撤不掉它，只有人撤（驾驶舱设置页撤回、续期、改负责人要写原因，进操作记录）。
-   * 过了 reviewBy 标红、不自动撤。负责人没写按「指挥官」，空着不收。
+   * 整池暂停（#746，创始人 2026-10-02 拍开关留在库里当指令）：{池编号: {reason, decidedBy, revokeWhen, reviewBy?, owner?}}。
+   * 选路、切号整池避开；探针探通、会话跑通都撤不掉它，只有人在额度页那一行的开关撤（撤回要写原因，进操作记录）。
+   * 填了 reviewBy 且过了当天标红、不自动撤；没填不算到期、不推。负责人没写按「指挥官」，空着不收。
    * 没设过 = 没有暂停；认不出（整份或某个池的那一项）按暂停办并报警，不当成能用。
    */
   'engine.poolHolds': PoolHoldsSettingSchema,

@@ -30,6 +30,7 @@ import { buildApps } from './app.ts';
 import { CANARY_NOT_HERE, canaryHealthCheck } from './canary-health.ts';
 import { pgCarpoolReconcile } from './carpool-reconcile-view.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
+import { pgCliTools } from './cli-versions.ts';
 import { ConfigError, engineEnabled, loadConfig } from './config.ts';
 import { probeDb } from './db-probe.ts';
 import type { DecisionCommenter } from './decision-handoff.ts';
@@ -245,6 +246,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     routingLayers: pgRoutingLayers(db),
     // 探针真历史（#1139）：渠道状态页的近 60 次格子。读库，不看引擎开没开
     probeHistory: pgProbeHistory(db),
+    // 命令行工具版本（#1969）：读引擎写下的读数。引擎没跑过时各行写「还没读过」，不拿最新顶。
+    cliTools: pgCliTools(db),
     // 渠道模型名册和目录的差（#1302）：读库里额度任务记下的名册，请求里不现连渠道
     modelRoster: pgModelRoster(db),
     // 会话用户切号的现状（#194）：引擎落库的切号账本，额度页顶上一行
