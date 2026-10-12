@@ -8,7 +8,7 @@ import { type Platform, placeOn, STATE_DIR } from './targets.ts';
 export interface Manifest {
   /** skill 目录（相对家目录、/ 分隔，如 .claude/skills）→ 装过的 skill 名 */
   skills: Record<string, string[]>;
-  /** 子代理目录（相对家目录、/ 分隔，如 .claude/agents）→ 装过的定义文件名（haiku55.md）；旧清单没有这一项，当成空的 */
+  /** 子代理目录（相对家目录、/ 分隔，如 .claude/agents）→ 装过的定义文件名（Explore.md）；旧清单没有这一项，当成空的 */
   subagents: Record<string, string[]>;
 }
 

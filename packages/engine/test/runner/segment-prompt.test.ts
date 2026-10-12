@@ -43,14 +43,16 @@ describe('动手会话的提示词', () => {
     expect(fresh).not.toContain('整理成');
   });
 
-  it('子代理提示（#1641）：开关关着（不给、给 false）不加；开着加一句，点名 fleet-scout、fleet-review-screen，Opus 档只在疑难时派', () => {
-    expect(render()).not.toContain('fleet-scout');
-    expect(render({ subagentHint: false })).not.toContain('fleet-scout');
+  it('子代理提示（#1641，决定 0087 三个角色）：开关关着（不给、给 false）不加；开着加一句，点名 Explore、Plan，Plan 只在疑难时派，写代码不派 general-purpose', () => {
+    expect(render()).not.toContain('`Explore`');
+    expect(render({ subagentHint: false })).not.toContain('`Explore`');
     const on = render({ subagentHint: true });
     expect(on).toContain(SUBAGENT_HINT);
-    expect(on).toContain('`fleet-scout`');
-    expect(on).toContain('`fleet-review-screen`');
+    expect(on).toContain('`Explore`');
+    expect(on).toContain('`Plan`');
+    expect(on).toContain('不派 `general-purpose`');
     expect(on).toContain('只在疑难时派');
+    expect(on).not.toMatch(/fleet-(scout|review-screen|reviewer|debugger)/);
     // 一句话：加在「怎么干」那一节里，最后一条回复的规矩还是最后一条
     expect(on.trimEnd().endsWith('还欠什么。')).toBe(true);
   });

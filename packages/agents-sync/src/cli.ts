@@ -34,7 +34,7 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 agents/shared-rule
   agents-sync --check        只读：逐家报 一致 / 漂移 / 缺失 / 没装（跳过）/ 没查成；最后报这台同步到哪个提交、落后主线几个
   agents-sync --apply        写：通用段写进各家的全局文件（只动标记圈起来的那一块；第一次接管先整份备份），
                              skill 拷进各家的 skill 目录（只动清单里记着是本脚本装的），
-                             agents/subagents/ 里 targets.ts 的 SUBAGENT_TARGET 列了名字的子代理定义（haiku55.md 和 16 个 fleet-* 的通用版）
+                             agents/subagents/ 里 targets.ts 的 SUBAGENT_TARGET 列了名字的子代理定义（三个角色：Explore.md、general-purpose.md、Plan.md）
                              拷进 ~/.claude/agents/（只认列了的文件名，那个目录里别的文件不碰；同名的内容不一样就先备份
                              再换成仓里的；从名单里去掉的，清单里记着是本脚本装的才备份后撤掉），
                              钩子脚本拷进 ~/.fleet-dao/hooks/、在各家设置里登记（只动指向它们的那几条），

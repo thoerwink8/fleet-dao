@@ -87,10 +87,10 @@ export const PERMS_JSON = `${JSON.stringify({ ...PERMS_SPEC, 说明: '测试用'
 /** 假的子代理定义：name 是给的名字，别的是假的 */
 export const subagentMd = (name: string): string =>
   `---\nname: ${name}\ndescription: 测试用\nmodel: claude-haiku-5-5\ntools: Read, Grep\n---\n假的子代理正文\n`;
-export const SUBAGENT_MD = subagentMd('haiku55');
+export const SUBAGENT_MD = subagentMd('Explore');
 /**
  * 假仓里的用户级子代理定义（仓内路径 → 原文）：agents/subagents/ 下 targets.ts 的 SUBAGENT_TARGET 列的每一份
- * （haiku55.md 和 16 个 fleet-*.md），内容是假的
+ * （三个角色 Explore.md、general-purpose.md、Plan.md），内容是假的
  */
 export const SUBAGENT_FILES: Record<string, string> = Object.fromEntries(
   SUBAGENT_TARGET.files.map((file) => [`agents/subagents/${file}`, subagentMd(file.replace(/\.md$/, ''))]),

@@ -120,7 +120,7 @@ export function readSources(repo: string): { ok: true; value: Sources } | { ok: 
 export const SUBAGENTS_DIR = 'agents/subagents';
 
 /**
- * agents/subagents/ 下列了名字的几份（haiku55 和 16 个 fleet-* 的通用版，决定 0079）：读不到不挡规矩和 skill
+ * agents/subagents/ 下列了名字的几份（三个角色 Explore、general-purpose、Plan，决定 0087）：读不到不挡规矩和 skill
  * （旧检出里还没有它），子代理那一段报没查成。
  * 一份读不到就整段不装：少装一份会让清单把已装的当成从名单里去掉了、撤掉。
  * frontmatter 里的 name 要和文件名对上：Claude Code 按 name 认子代理，对不上装上去就是另一个名字，按名字派不到。

@@ -3,9 +3,11 @@
 // 2026-10-08 决定 0033（母单 #1354 第三片，创始人「2.进，然后我自己选择要不要在哪个环节配置」）取代 0017 第 1、3 条：
 // Fable 进目录，引擎按路由派的会话、VPS 上的会话只用得到创始人本人在驾驶舱配进用途的 Fable，AI 不替他配；
 // 第 2 条的「子代理永不用 Fable」、第 4 条（本机主对话里由他自己选）照旧；第 2 条的「只用 Sonnet 或 Opus」被决定 0034
-// （创始人 2026-10-09 00:09 授权「改成最具有性价比的调整方案……全程你拍板」）换成按性价比分 Haiku 5.5、Sonnet 5.5、Opus 5.5 三档。
+// （创始人 2026-10-09 00:09 授权「改成最具有性价比的调整方案……全程你拍板」）换成按性价比分 Haiku 5.5、Sonnet 5.5、Opus 5.5 三档；
+// 2026-10-12 决定 0087（创始人「Sonnet 是工人、Haiku 是斥候、Opus 是设计」）把三档落成三个角色 Explore、general-purpose、Plan。
 // 下面钉住这几样：通用段改写时不能悄悄丢掉哪一样，也不能悄悄退回 0017 的「机器派的会话永不用」「子代理只用 Sonnet 或 Opus」
-// 或 #669 的「一律不用」。三档的细则（升级、核对实际 id、档位表、决定 0035 的 haiku55 和级联）钉在 subagent-model.rules.test.ts。
+// 或 #669 的「一律不用」。三个角色的细则（升级、核对实际 id、定义文件、派法）钉在 subagent-model.rules.test.ts 和
+// project-subagents.rules.test.ts。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -37,7 +39,8 @@ function fableLine(text: string): string {
  */
 const FABLE_RULES: Record<string, RegExp> = {
   子代理和工人永不用: /子代理、工人永不用 Fable/,
-  子代理分三档: /子代理按性价比分 Haiku 5\.5、Sonnet 5\.5、Opus 5\.5 三档/,
+  子代理分三档:
+    /子代理只分三个角色：斥候 Haiku 5\.5（`Explore`）、工人 Sonnet 5\.5（`general-purpose`）、设计 Opus 5\.5（`Plan`）/,
   引擎按路由派的会话只用配进用途的Fable: /引擎按路由派的会话[^；。]*只用我在驾驶舱配进用途的 Fable/,
   VPS上的会话只用配进用途的Fable: /VPS 上的会话只用我在驾驶舱配进用途的 Fable/,
   AI不替我配: /AI 不替我配/,
@@ -56,11 +59,11 @@ const FORBIDDEN: Record<string, RegExp> = {
 
 /** 指挥官技能里派子代理那条必须写着的：不写模型、或用 fork，子代理就跟着主会话用上 Fable。 */
 const COMMANDER_RULES: Record<string, RegExp> = {
-  子代理分三档: /派 Claude 子代理按性价比分三档[^\n]*Haiku 5\.5[^\n]*Sonnet 5\.5[^\n]*Opus 5\.5/,
-  // 决定 0035：别名 haiku 在本机指向 Haiku 4.5，Haiku 5.5 改走 subagent_type: "haiku55"、不传 model
-  派子代理写明模型:
-    /`model` 写明 `"sonnet"` 或 `"opus"`；Haiku 5\.5 写 `subagent_type: "haiku55"`、不传 `model`/,
-  说清不写会跟主会话同一个模型: /不写就跟主会话同一个模型/,
+  子代理分三档:
+    /斥候 Haiku 5\.5 写 `subagent_type: "Explore"`[^\n]*工人 Sonnet 5\.5 写 `subagent_type: "general-purpose"`[^\n]*设计 Opus 5\.5 写 `subagent_type: "Plan"`/,
+  // 决定 0087：写类型、不传 model；别名可能解析到旧版，升档才传
+  派子代理写明模型: /派活不传 `model`，用定义里的钉；难的活升档才传 `model`/,
+  说清不写会跟主会话同一个模型: /不写类型就跟主会话同一个模型/,
   说清fork写了也不管用: /`fork`[^\n]*总跟主会话同一个模型[^\n]*写了 `model` 也不管用/,
   指向决定0017: /`docs\/decisions\/0017-fable-only-in-founder-main-session\.md`/,
 };
@@ -127,7 +130,7 @@ describe('规矩：Fable 进目录，只有创始人本人配进用途才用得�
 
   it('【故意造出的失败】退回 0033 那句（子代理只用 Sonnet 或 Opus，优先 Sonnet）：缺三档、旧说法查得出来', () => {
     const line = fableLine(AGENTS);
-    const old = line.replace(/；子代理按性价比分[^；]*；/, '，子代理只用 Sonnet 或 Opus（优先 Sonnet）；');
+    const old = line.replace(/；子代理只分三个角色[^；]*；/, '，子代理只用 Sonnet 或 Opus（优先 Sonnet）；');
     expect(old, '那一行里找不到三档那一小句，这条失败造不出来').not.toBe(line);
     expect(missing(FABLE_RULES, old)).toEqual(['子代理分三档']);
     expect(present(FORBIDDEN, old)).toEqual(['子代理只用Sonnet或Opus']);
@@ -143,7 +146,7 @@ describe('规矩：Fable 进目录，只有创始人本人配进用途才用得�
     const line = fableLine(AGENTS);
     const cuts: [from: string, to: string, rule: string][] = [
       ['子代理、工人永不用 Fable；', '工人永不用 Fable；', '子代理和工人永不用'],
-      ['Haiku 5.5、', '', '子代理分三档'],
+      ['斥候 Haiku 5.5', '斥候', '子代理分三档'],
       ['引擎按路由派的会话、', '', '引擎按路由派的会话只用配进用途的Fable'],
       ['、VPS 上的会话', '', 'VPS上的会话只用配进用途的Fable'],
       ['，AI 不替我配', '', 'AI不替我配'],
@@ -164,7 +167,7 @@ describe('规矩：Fable 进目录，只有创始人本人配进用途才用得�
   });
 
   it('【故意造出的失败】指挥官技能不写子代理的模型（改之前那样）：查得出来', () => {
-    const cut = COMMANDER.replace(/\n- \*\*子代理的模型\*\*[^\n]*/, '');
+    const cut = COMMANDER.replace(/\n- \*\*子代理只分三个角色\*\*[^\n]*/, '');
     expect(cut).not.toBe(COMMANDER);
     expect(missing(COMMANDER_RULES, cut)).toEqual(Object.keys(COMMANDER_RULES));
   });

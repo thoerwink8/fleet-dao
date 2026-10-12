@@ -841,7 +841,7 @@ export function realPortsFromEnv(
     }),
   };
   const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});
-  // 子代理（#1641）：claude-code 的干活会话带的 --agents 文件，引擎起来时从发布目录的 .claude/agents/ 生成一次；生成不成时
+  // 子代理（#1641，决定 0087）：claude-code 的干活会话带的 --agents 文件，引擎起来时从发布目录的 agents/subagents/ 生成一次；生成不成时
   // claude-code 的干活会话起不来（hosts.ts 写清原因），这里先记一条日志。Mirasim 的会话靠工作树里的 settings.local.json 挡子代理，
   // 要的是名字清单，现读现用（读不到就不起会话，不带着没挡的状态起）。
   const subagents = subagentsOnce(prepareSubagents, (error) =>

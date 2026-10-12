@@ -2,6 +2,7 @@
 
 - 日期：2026-10-11（北京时间）
 - 谁拍的：创始人。要每台有 fleet-dao 的机器都有最佳子代理；法国 VPS 装（已告知风险）；装的是通用版（原话在下面）。通用版怎么写、放哪、怎么钉由改标准的会话定。
+- 现状：已被 0087 替代（`0087-three-subagent-roles.md`，创始人 2026-10-12「你能删的删」「每一台机器都要沿用这种方式」）：16 个 `fleet-*` 和 `haiku55` 从同步名单里撤掉，每台机器只装 `Explore`、`general-purpose`、`Plan` 三份；「每台有 fleet-dao 的机器、法国也装」这一半照旧。下面是当时的原文。
 - 状态：采纳（改标准；创始人在对话里已选定，原话和时间见下）。同步工具的目标清单、16 份通用版、钉住它们的测试、参考页和技能说明同一个 PR 改（#1886，单 #1885）。
 - 关联：`agents/subagents/`（16 份 `fleet-*.md` 通用版和 `haiku55.md`）、`.claude/agents/`（本仓专属版）、`packages/agents-sync/src/targets.ts`（`SUBAGENT_TARGET`）、`packages/agents-sync/src/sync.ts`（`readSubagents`）、`agents/test/rules/project-subagents.rules.test.ts`、`agents/skills/commander/references/子代理选模型.md`「本仓的子代理名单」、`agents/skills/commander/SKILL.md`「派活」、`docs/ops.md` 第五节
 - 取代：部分取代 0036 第 2 条后半句（「`haiku55` 留给没有这批定义的仓和机器」：同步后每台机器都有这批定义的通用版）和第 7 条（#1393 只装 `haiku55`：现在一起装 17 份）。0036 别的条、0077 的 effort 不变；本仓仍默认用 `.claude/agents/` 的专属版。#1641 方案第六节（只在本仓生效）不改原文，以本决定为准。

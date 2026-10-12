@@ -23,7 +23,7 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
-const defs = new Map(loadAgentDefinitions(join(REPO_ROOT, '.claude', 'agents')).map((d) => [d.name, d]));
+const defs = new Map(loadAgentDefinitions(join(REPO_ROOT, 'agents', 'subagents')).map((d) => [d.name, d]));
 
 describe('parseArgs', () => {
   it('默认三档都跑；--model 映射；--case --scenario --out --dry-run', () => {
@@ -76,10 +76,10 @@ describe('--dry-run', () => {
     const text = out.join('\n');
     expect(text).toContain('命令：reclaude');
     expect(text).toContain(
-      '[1/3] architect/engine-concurrency-limit · fleet-architect · claude-haiku-5-5 · 加一次裁判会话',
+      '[1/3] architect/engine-concurrency-limit · Plan · claude-haiku-5-5 · 加一次裁判会话',
     );
     expect(text).toContain(
-      '--model claude-opus-5-5 --effort high --output-format stream-json --verbose --no-session-persistence --setting-sources project --strict-mcp-config --permission-mode dontAsk --allowedTools Read,Grep,Glob,Write,Bash,WebSearch,WebFetch --append-system-prompt <定义正文',
+      '--model claude-opus-5-5 --effort high --output-format stream-json --verbose --no-session-persistence --setting-sources project --strict-mcp-config --permission-mode dontAsk --allowedTools Read,Grep,Glob,Bash,WebSearch,WebFetch --append-system-prompt <定义正文',
     );
     expect(text).toContain('合计：1 道题 × 3 个模型 = 3 次被测会话，加 3 次裁判会话，共 6 次');
     expect(text).toContain('不做：ui-builder');
@@ -155,7 +155,7 @@ describe('跑完写 results.json 和 report.md；退出码', () => {
     expect(md).toMatch(/\| log-digest \| 过 0 \/ 跑 1 遍；/);
     expect(md).toContain('<details><summary>groomer/four-issues-a · haiku · 第 1 遍 · 过</summary>');
     expect(md).toContain('提示词：');
-    expect(md).toContain('ui-builder（fleet-ui-builder）：要浏览器，自动探查不做');
+    expect(md).toContain('ui-builder（general-purpose）：要浏览器，自动探查不做');
     expect(log.at(-1)).toContain('没跑成 0');
   });
 
@@ -240,9 +240,9 @@ describe('跑完写 results.json 和 report.md；退出码', () => {
 
   it('默认输出目录是 _tmp/agent-eval/<时刻>/', async () => {
     const root = tmp();
-    mkdirSync(join(root, '.claude', 'agents'), { recursive: true });
+    mkdirSync(join(root, 'agents', 'subagents'), { recursive: true });
     for (const d of defs.values())
-      writeFileSync(join(root, '.claude', 'agents', `${d.name}.md`), readFileSync(d.file, 'utf8'));
+      writeFileSync(join(root, 'agents', 'subagents', `${d.name}.md`), readFileSync(d.file, 'utf8'));
     await main(['--model', 'haiku'], {
       cases: cases.slice(0, 1),
       repoRoot: root,

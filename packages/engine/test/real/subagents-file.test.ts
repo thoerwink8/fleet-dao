@@ -1,4 +1,4 @@
-// 子代理定义文件（real/subagents-file.ts，#1641 第 4b 片）：从发布目录的 .claude/agents/ 生成一次、文件名带内容哈希、
+// 子代理定义文件（real/subagents-file.ts，#1641 第 4b 片）：从发布目录的 agents/subagents/ 生成一次、文件名带内容哈希、
 // 会话用户读得到；生成不成明确抛错。
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

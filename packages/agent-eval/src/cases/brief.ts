@@ -41,7 +41,7 @@ export const BRIEF_CASES: EvalCase[] = [
     id: 'brief-drafter/project-badge',
     scenario: 'brief-drafter',
     name: 'project-badge',
-    agent: 'fleet-brief-drafter',
+    agent: 'general-purpose',
     prompt: `${PREAMBLE}${RULES}`,
     source: { kind: 'fixture' },
     planted:
@@ -53,7 +53,7 @@ export const BRIEF_CASES: EvalCase[] = [
     id: 'brief-drafter/split-by-module',
     scenario: 'brief-drafter',
     name: 'split-by-module',
-    agent: 'fleet-brief-drafter',
+    agent: 'general-purpose',
     prompt: `${PREAMBLE}${RULES}`,
     source: { kind: 'fixture' },
     planted:
