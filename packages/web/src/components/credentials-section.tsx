@@ -18,7 +18,7 @@ import {
 } from '../lib/credentials';
 import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
-import { FieldRow } from './layout/field-row';
+import { FieldGroup, FieldRow } from './layout/field-row';
 import { LoadError, LoadingRows } from './layout/load-state';
 import { Notice } from './layout/notice';
 import { SaveButton } from './layout/save-button';
@@ -27,6 +27,8 @@ import { Input } from './ui/input';
 
 /** 用户名栏的提示：就是后端 checkUsername 的规则，原话照抄，不另编。 */
 const USERNAME_HINT = '3–32 位，字母或数字开头，可以用字母、数字、点、下划线、连字符；大小写不区分。';
+
+const CRED_NOTE = `用用户名和密码登录${brand.product}，和飞书登录并列；随时可以改。`;
 
 type Errors = Partial<Record<CredentialField | 'confirm' | 'form', string>>;
 
@@ -133,68 +135,71 @@ function CredentialsForm({ c, setDone }: { c: Credentials; setDone: (text: strin
           第一次设账密要在飞书登录后 10 分钟内设：请先退出，用飞书重新登录一次，再回到这里。
         </p>
       ) : null}
-      {first ? null : (
+      {/* 和运行设置、外观同一个样子：字段装进一组（FieldGroup），保存在组下面（#1917） */}
+      <FieldGroup>
+        {first ? null : (
+          <PasswordField
+            id="cred-current"
+            label="当前密码"
+            value={currentPassword}
+            onChange={setCurrentPassword}
+            autoComplete="current-password"
+            maxLength={PASSWORD_MAX}
+            error={errors.currentPassword}
+            readOnly={busy}
+            inputRef={currentRef}
+            hint="改用户名或密码都要先输入当前密码；输错 5 次会被临时锁住。"
+            layout="row"
+          />
+        )}
+        <FieldRow
+          label={first ? '用户名' : '用户名（不改就别动）'}
+          htmlFor="cred-username"
+          hint={USERNAME_HINT}
+          hintId="cred-username-hint"
+          error={errors.username}
+          errorId="cred-username-error"
+        >
+          <Input
+            id="cred-username"
+            name="username-visible"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoComplete="username"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            maxLength={200}
+            readOnly={busy}
+            aria-invalid={errors.username ? true : undefined}
+            aria-describedby={`cred-username-hint${errors.username ? ' cred-username-error' : ''}`}
+            className="max-w-sm"
+          />
+        </FieldRow>
         <PasswordField
-          id="cred-current"
-          label="当前密码"
-          value={currentPassword}
-          onChange={setCurrentPassword}
-          autoComplete="current-password"
+          id="cred-new"
+          label={first ? '密码' : '新密码（不改就留空）'}
+          value={newPassword}
+          onChange={setNewPassword}
+          autoComplete="new-password"
           maxLength={PASSWORD_MAX}
-          error={errors.currentPassword}
+          error={errors.newPassword}
           readOnly={busy}
-          inputRef={currentRef}
-          hint="改用户名或密码都要先输入当前密码；输错 5 次会被临时锁住。"
+          hint={`至少 ${PASSWORD_MIN_LENGTH} 位，别的不限：长一点的一句话、密码管理器生成的都可以。`}
           layout="row"
         />
-      )}
-      <FieldRow
-        label={first ? '用户名' : '用户名（不改就别动）'}
-        htmlFor="cred-username"
-        hint={USERNAME_HINT}
-        hintId="cred-username-hint"
-        error={errors.username}
-        errorId="cred-username-error"
-      >
-        <Input
-          id="cred-username"
-          name="username-visible"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          autoComplete="username"
-          autoCapitalize="none"
-          autoCorrect="off"
-          spellCheck={false}
-          maxLength={200}
+        <PasswordField
+          id="cred-confirm"
+          label="再输一遍新密码"
+          value={confirm}
+          onChange={setConfirm}
+          autoComplete="new-password"
+          maxLength={PASSWORD_MAX}
+          error={errors.confirm}
           readOnly={busy}
-          aria-invalid={errors.username ? true : undefined}
-          aria-describedby={`cred-username-hint${errors.username ? ' cred-username-error' : ''}`}
-          className="max-w-sm"
+          layout="row"
         />
-      </FieldRow>
-      <PasswordField
-        id="cred-new"
-        label={first ? '密码' : '新密码（不改就留空）'}
-        value={newPassword}
-        onChange={setNewPassword}
-        autoComplete="new-password"
-        maxLength={PASSWORD_MAX}
-        error={errors.newPassword}
-        readOnly={busy}
-        hint={`至少 ${PASSWORD_MIN_LENGTH} 位，别的不限：长一点的一句话、密码管理器生成的都可以。`}
-        layout="row"
-      />
-      <PasswordField
-        id="cred-confirm"
-        label="再输一遍新密码"
-        value={confirm}
-        onChange={setConfirm}
-        autoComplete="new-password"
-        maxLength={PASSWORD_MAX}
-        error={errors.confirm}
-        readOnly={busy}
-        layout="row"
-      />
+      </FieldGroup>
       {errors.form ? (
         <Notice tone="fail" className="mt-2">
           {errors.form}
@@ -231,8 +236,8 @@ export function CredentialsSection() {
   return (
     <div>
       <Status c={c} />
-      <p className="mt-1 text-meta text-muted-foreground">
-        {`用用户名和密码登录${brand.product}，和飞书登录并列；随时可以改。`}
+      <p className="mt-0.5 truncate whitespace-nowrap text-meta text-muted-foreground" title={CRED_NOTE}>
+        {CRED_NOTE}
       </p>
       {done ? (
         <p role="status" className="mt-3 max-w-md rounded-lg bg-muted px-3 py-2 text-body">

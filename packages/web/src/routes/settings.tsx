@@ -19,20 +19,20 @@ import {
 import type { Me, Setting, SettingKey } from '../api/types';
 import { CredentialsSection } from '../components/credentials-section';
 import { EngineMasterRelation } from '../components/engine-master';
+import { EmptyState } from '../components/layout/empty-state';
 import { FieldGroup, FieldRow } from '../components/layout/field-row';
 import { FilterTabs } from '../components/layout/filter-tabs';
 import { KeyValue } from '../components/layout/key-value';
+import { List } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
-import { Page } from '../components/layout/page';
+import { DescriptionHint, Page } from '../components/layout/page';
 import { SaveButton } from '../components/layout/save-button';
 import { Section } from '../components/layout/section';
 import { StatusDot } from '../components/layout/status-badge';
 import { PageNav } from '../components/page-nav';
 import { PoolHoldsPanel } from '../components/pool-holds';
-import { RefreshBar } from '../components/refresh-bar';
 import { useRepo } from '../components/repo-context';
-import { RepoDispatchControl } from '../components/repo-dispatch';
-import { RepoGroomControl } from '../components/repo-groom';
+import { RepoRow } from '../components/repo-groom';
 import { ModeSwitch } from '../components/shell/topbar';
 import { useTheme } from '../components/theme-provider';
 import { Button } from '../components/ui/button';
@@ -130,8 +130,13 @@ function SettingsSection({
           {title}
         </span>
       }
-      description={description}
-      className="scroll-mt-14 border-b py-5 first:pt-0 last:border-b-0 lg:scroll-mt-6"
+      // 说明一行不折（#1917，照路由页样板）：放不下截断，整句在悬停里
+      description={
+        <span data-section-note className="block truncate whitespace-nowrap" title={description}>
+          {description}
+        </span>
+      }
+      className="scroll-mt-14 border-b py-6 first:pt-0 last:border-b-0 lg:scroll-mt-6"
     >
       {children}
     </Section>
@@ -368,6 +373,8 @@ function repoReadFailure(reposError: unknown, dispatchError: unknown): string | 
   return null;
 }
 
+const RESERVE_SHORT = '每个渠道每个额度窗「最多用到百分之几」，用到这条线引擎就不再往这个渠道派新活';
+
 /**
  * 各渠道的额度留量线（#194 方案 4.8）：每个渠道（账号池）每个额度窗一个「最多用到百分之几」，到了线引擎就不再往这个渠道派新活、
  * 也不切过去（在跑的不动）。线只存在库里（起始值是发布时装载器从种子文件只补缺装进去的，创始人 2026-10-05：不写死、驾驶舱可配置），
@@ -442,16 +449,23 @@ function QuotaReserve({ s }: { s: Setting | undefined }) {
   return (
     // 表单包在区块外面：区块标题在表单里（e2e 和读屏都按「表单里有标题」找它）
     <form onSubmit={submit}>
-      <Section title={settingLabel['engine.quotaReserve']}>
-        <div className="text-meta text-muted-foreground">
-          每个渠道每个额度窗「最多用到百分之几」，已用到这条线引擎就不再往这个渠道派新活。
-          <details className="mt-0.5">
-            <summary className="cursor-pointer underline-offset-2 hover:underline max-md:flex max-md:min-h-10 max-md:items-center">
-              怎么填
-            </summary>
-            {`${brand.terms.carpool}用不了时也不切过去（在跑的不动），剩下的留给自己用。灰色「—」= 未配置（不限；${brand.terms.carpool}用到被拒为止，一般不设线），点一下才能填；写「${UNLIMITED_WORD}」= 明确不限。`}
-          </details>
-        </div>
+      <Section
+        title={settingLabel['engine.quotaReserve']}
+        // 卡头说明一行不折；「怎么填」原来是一个折叠，收进 ⓘ（#1917）
+        description={
+          <span className="block truncate whitespace-nowrap" title={RESERVE_SHORT}>
+            {RESERVE_SHORT}
+          </span>
+        }
+        actions={
+          <DescriptionHint label="留量线怎么填">
+            <p>{RESERVE_SHORT}。</p>
+            <p className="mt-2">
+              {`${brand.terms.carpool}用不了时也不切过去（在跑的不动），剩下的留给自己用。灰色「—」= 未配置（不限；${brand.terms.carpool}用到被拒为止，一般不设线），点一下才能填；写「${UNLIMITED_WORD}」= 明确不限。`}
+            </p>
+          </DescriptionHint>
+        }
+      >
         <p className="mt-1 text-meta" data-testid="reserve-source">
           {source.kind === 'missing' ? (
             <span className="text-ink-fail" role="alert">
@@ -564,15 +578,26 @@ export default function Settings() {
   return (
     <Page
       title="设置"
-      description="运行设置和仓库开关存在后端，改了写进操作记录；外观只存在这台浏览器里。"
-      actions={
-        <RefreshBar
-          onRefresh={() => void settings.refetch()}
-          isFetching={settings.isFetching}
-          dataUpdatedAt={settings.dataUpdatedAt}
-          staleAfterMs={SETTINGS_STALE_AFTER_MS}
-        />
+      description="仓库开关、运行设置、提醒、登录和外观。"
+      detail={
+        <div className="space-y-2">
+          <p>
+            仓库开关、运行设置、提醒存在后端：保存时带上你看到的版本号，别人先改了会提示你刷新再改；改了写进操作记录。
+          </p>
+          <p>外观（深浅、密度、主题色、减少动效）只存在这台浏览器里。</p>
+          <p>
+            仓库一行：「开启 / 关闭」管这个仓「让 AI
+            接活」，「整理」叫指挥官现在整理待办；点仓名展开整理记录。
+          </p>
+        </div>
       }
+      // 刷新在页头固定槽位（规范第三节「页头」），页面不自己摆
+      refresh={{
+        onRefresh: () => void settings.refetch(),
+        isFetching: settings.isFetching,
+        dataUpdatedAt: settings.dataUpdatedAt,
+        staleAfterMs: SETTINGS_STALE_AFTER_MS,
+      }}
     >
       {/* 版式（#1805）：左侧页内导航（桌面吸在左边，手机吸顶成横向胶囊）+ 右边各节；每节标题下一句说明，字段标签左、控件右。
           顺序按用得多少排——「让 AI 接活」是最常动的开关，放最前；外观放后面。 */}
@@ -583,12 +608,12 @@ export default function Settings() {
             id="repos"
             icon={FolderGit2}
             title="仓库"
-            description="接进来的仓。一个仓接进来要满足：测试能跑、有一页 AGENTS.md。每个仓一行：接活开关在中间，整理在行尾，点「详情」看整理记录。"
+            description="接进来的仓（测试能跑、有一页 AGENTS.md）。点仓名看整理记录。"
           >
             {/* 总开关和按项目开关的关系（#1086）：总开关关＝全停，开＝只有接活开着的项目才派 */}
             <EngineMasterRelation />
             {repoFailure ? (
-              <div className="mb-3 max-w-xl">
+              <div className="mb-3">
                 <LoadError text={repoFailure} error={reposError ?? dispatch.error} />
                 {reposError && repos.length ? (
                   <p className="mt-1 text-meta text-muted-foreground">下面是上次读到的，可能不全。</p>
@@ -598,33 +623,23 @@ export default function Settings() {
             {reposLoading ? <LoadingRows rows={1} /> : null}
             {repos.length > 0 || (!reposLoading && !reposError) ? (
               <Section flush>
-                <ul className="divide-y">
+                {/* 一行一个仓（#1917，照路由页样板）：仓名加一行小字、一个状态、「开启/关闭」和「整理」同一行同宽 */}
+                <List aria-label="仓库">
                   {repos.map((r) => (
-                    <li key={r.id} className="flex flex-wrap items-start gap-x-4 gap-y-1.5 px-4 py-2.5">
-                      <div className="flex min-w-0 flex-1 basis-52 items-center gap-2 self-center">
-                        <FolderGit2 className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-                        <div className="min-w-0">
-                          <div className="num truncate text-body font-medium" title={`${r.owner}/${r.name}`}>
-                            {r.owner}/{r.name}
-                          </div>
-                          <div className="text-meta text-muted-foreground">
-                            主线 <span className="num">{r.defaultBranch}</span>
-                          </div>
-                        </div>
-                      </div>
-                      <RepoDispatchControl
+                    <li key={r.id}>
+                      <RepoRow
                         repoId={r.id}
-                        name={`${r.owner}/${r.name}`}
-                        row={dispatch.data?.repos.find((d) => d.repoId === r.id)}
+                        repo={{ owner: r.owner, name: r.name }}
+                        branch={r.defaultBranch}
+                        dispatch={dispatch.data?.repos.find((d) => d.repoId === r.id)}
                       />
-                      <RepoGroomControl repoId={r.id} repo={{ owner: r.owner, name: r.name }} />
                     </li>
                   ))}
-                  {/* 只有真读到了一个空列表才说「还没有仓」；没读成、还在读都不算。 */}
-                  {repos.length === 0 && !reposLoading && !reposError ? (
-                    <li className="px-4 py-3 text-body text-muted-foreground">还没有仓</li>
-                  ) : null}
-                </ul>
+                </List>
+                {/* 只有真读到了一个空列表才说「还没有仓」；没读成、还在读都不算。 */}
+                {repos.length === 0 && !reposLoading && !reposError ? (
+                  <EmptyState size="inline" icon={FolderGit2} title="还没有仓" />
+                ) : null}
               </Section>
             ) : null}
           </SettingsSection>

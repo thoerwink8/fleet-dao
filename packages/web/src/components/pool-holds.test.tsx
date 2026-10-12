@@ -34,6 +34,19 @@ const seed = async (a: MockApi, value: unknown) => {
 const fill = (label: string, value: string) =>
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
 
+/**
+ * 改负责人、续期、撤回收进了行尾「⋯」（#1917，照路由页样板）：原来点行里的按钮，现在先开这一行的「⋯」再点菜单项。
+ * 断言照旧（点完在这一行下面出表单）。
+ */
+const pick = (row: HTMLElement, name: '撤回' | '续期' | '改负责人') => {
+  fireEvent.pointerDown(within(row).getByRole('button', { name: /^更多操作：/ }), {
+    button: 0,
+    ctrlKey: false,
+    pointerType: 'mouse',
+  });
+  fireEvent.click(screen.getByRole('menuitem', { name }));
+};
+
 describe('新建', () => {
   test('四项齐了才能存：存下来的请求带版本号 0、没有 reason；成功后列表里有这一条', async () => {
     const a = api();
@@ -109,7 +122,7 @@ describe('撤回、续期要写原因', () => {
     const update = vi.spyOn(a, 'updateSetting');
     renderApp(<PoolHoldsPanel />, { api: a });
     const row = await screen.findByTestId('hold-claude-a');
-    fireEvent.click(within(row).getByRole('button', { name: '撤回' }));
+    pick(row, '撤回');
     const confirm = within(row).getByRole('button', { name: '确认撤回' });
     expect(confirm).toHaveProperty('disabled', true);
     fireEvent.click(confirm);
@@ -132,7 +145,7 @@ describe('撤回、续期要写原因', () => {
     const update = vi.spyOn(a, 'updateSetting');
     renderApp(<PoolHoldsPanel />, { api: a });
     const row = await screen.findByTestId('hold-claude-a');
-    fireEvent.click(within(row).getByRole('button', { name: '续期' }));
+    pick(row, '续期');
     fireEvent.change(within(row).getByLabelText('新的最迟复查日期'), { target: { value: '2026-11-30' } });
     fireEvent.change(within(row).getByLabelText(/续期原因/), { target: { value: '独享还要留给本机' } });
     fireEvent.click(within(row).getByRole('button', { name: '确认续期' }));
@@ -152,7 +165,7 @@ describe('撤回、续期要写原因', () => {
     const row = await screen.findByTestId('hold-claude-a');
     expect(within(row).getByText('张三')).toBeTruthy();
     expect(within(screen.getByTestId('hold-relay')).getByText('指挥官')).toBeTruthy();
-    fireEvent.click(within(row).getByRole('button', { name: '改负责人' }));
+    pick(row, '改负责人');
     const confirm = within(row).getByRole('button', { name: '确认改负责人' });
     expect(confirm).toHaveProperty('disabled', true);
     fireEvent.change(within(row).getByLabelText('负责人'), { target: { value: '李四' } });
@@ -183,7 +196,7 @@ describe('撤回、续期要写原因', () => {
     );
     renderApp(<PoolHoldsPanel />, { api: a });
     const row = await screen.findByTestId('hold-claude-a');
-    fireEvent.click(within(row).getByRole('button', { name: '撤回' }));
+    pick(row, '撤回');
     fireEvent.change(within(row).getByLabelText(/撤回原因/), { target: { value: '试' } });
     fireEvent.click(within(row).getByRole('button', { name: '确认撤回' }));
     await waitFor(() =>

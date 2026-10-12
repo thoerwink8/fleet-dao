@@ -50,11 +50,21 @@ export function RowFrame({
  * 行下面展开的明细、提示（三件事的原因、整池暂停表单、退避提示）：左边和行里的名字对齐
  * （行的左内边距 + 展开箭头、序号的宽，app.css 的 --spacing-row-indent），右边和行的右内边距对齐。
  */
-export function RowDetail({ className, ...rest }: ComponentProps<'div'>) {
+export function RowDetail({
+  indent = true,
+  className,
+  ...rest
+}: {
+  /** 行首没有展开箭头、序号（名字就在行的左内边距上）时传 false：明细只留行的左右内边距，和名字对齐。 */
+  indent?: boolean;
+} & ComponentProps<'div'>) {
   return (
     <div
       data-row-detail
-      className={cn('pr-section pl-[calc(var(--spacing-section)+var(--spacing-row-indent))]', className)}
+      className={cn(
+        indent ? 'pr-section pl-[calc(var(--spacing-section)+var(--spacing-row-indent))]' : 'px-section',
+        className,
+      )}
       {...rest}
     />
   );

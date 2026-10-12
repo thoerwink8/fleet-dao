@@ -32,7 +32,9 @@ describe('#1910 片 7', () => {
     expect(run?.innerHTML).not.toContain('2xl:grid-cols-2');
   });
 
-  test('仓库行：「关闭/开启」和「整理」按钮同宽，手机上各占一行、按钮靠右同列', async () => {
+  // #1917 起两个按钮在任何宽度都同一行（照路由页样板一行一个状态、按钮在行尾）：原来断言的「手机上各占一行、按钮靠右同列」
+  // （max-md:w-full / justify-between / ml-auto）换成等价的「同宽、同在这一行的 RowFrame 里、相邻」
+  test('仓库行：「关闭/开启」和「整理」按钮同宽，同一行、挨着放在行尾', async () => {
     renderApp(<SettingsPage />, { api: createMockApi({ live: false }), route: '/settings' });
     const dispatch = await screen.findByTestId('dispatch-r-orbit');
     const toggle = dispatch.querySelector('button');
@@ -40,9 +42,13 @@ describe('#1910 片 7', () => {
     const groom = panel.querySelector('button[aria-label^="让指挥官整理"]');
     expect(toggle?.className).toContain('min-w-16');
     expect(groom?.className).toContain('min-w-16');
-    expect(dispatch.className).toContain('max-md:w-full');
-    expect(dispatch.className).toContain('max-md:justify-between');
-    expect(groom?.className).toContain('max-md:ml-auto');
+    const frame = toggle?.closest('[data-row-frame]');
+    expect(frame).toBeTruthy();
+    expect(groom?.closest('[data-row-frame]')).toBe(frame);
+    // 状态和开关按钮直接落在行里（外层 contents），和「整理」是兄弟，不另起一行
+    expect(dispatch.className).toContain('contents');
+    expect(toggle?.parentElement).toBe(dispatch);
+    expect(dispatch.parentElement).toBe(groom?.parentElement);
   });
 
   test('StatusBadge 和 Tag 用同一套外形（badgeShape：h-5、px-1.5、rounded-sm），不再全圆', () => {
