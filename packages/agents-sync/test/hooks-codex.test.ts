@@ -58,9 +58,8 @@ function state(text: string, key: string) {
 }
 
 describe('登记在哪、挂在哪', () => {
-  it('Codex 的目标：~/.codex/hooks.json，开会话一条（90 秒）、调工具前一条只挂 ^Bash$（Codex 跑命令一律叫 Bash，没有单独的读文件工具）', () => {
+  it('Codex 的目标：~/.codex/hooks.json，调工具前一条只挂 ^Bash$（Codex 跑命令一律叫 Bash，没有单独的读文件工具；决定 0083 不登记开会话）', () => {
     expect(CODEX?.hooks).toEqual([
-      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
       { event: 'PreToolUse', matcher: '^Bash$', script: 'pretool-codex.mjs', timeout: 10 },
     ]);
     expect(CODEX?.settings.linux).toBe('.codex/hooks.json');
@@ -90,21 +89,17 @@ describe('登记在哪、挂在哪', () => {
 });
 
 describe('装', () => {
-  it('新机器：hooks.json 登记两条、config.toml 记上两条信任；查全绿；第二遍零改动', () => {
+  it('新机器：hooks.json 登记一条、config.toml 记上一条信任；查全绿；第二遍零改动', () => {
     const m = machine();
     const lines = m.apply();
     expectKind(lines, HOOKS_JSON, 'changed');
     expectKind(lines, TRUST, 'changed');
     expect(m.hooksJson().hooks).toEqual({
-      SessionStart: [{ hooks: [{ type: 'command', command: m.cmd('session-start.mjs'), timeout: 90 }] }],
       PreToolUse: [
         { matcher: '^Bash$', hooks: [{ type: 'command', command: m.cmd('pretool-codex.mjs'), timeout: 10 }] },
       ],
     });
     const toml = m.config();
-    expect(state(toml, m.key('session_start', 0)).trusted).toBe(
-      m.hash('SessionStart', undefined, 'session-start.mjs', 90),
-    );
     expect(state(toml, m.key('pre_tool_use', 0)).trusted).toBe(
       m.hash('PreToolUse', '^Bash$', 'pretool-codex.mjs', 10),
     );
@@ -132,7 +127,7 @@ describe('装', () => {
     const s = scanCodexConfig(m.config());
     if (!s.ok) throw new Error(s.why);
     const keys = [...s.value.entries.keys()];
-    expect(keys).toHaveLength(2);
+    expect(keys).toHaveLength(1);
     const realJson = join(realpathSync.native(real), '.codex', 'hooks.json');
     for (const k of keys) expect(k.startsWith(`${realJson}:`)).toBe(true);
     // 故意造出的失败：按链接路径拼的键 Codex 不认

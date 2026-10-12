@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 // 钉住一条规矩（创始人 2026-10-02 夜：「你为什么没有遵守 fleet-dao 约定的，反馈的时候，要带进度，是哪里有断链？」）：
-// 派工的交代里必须写清「按通用段『报进度』那两条汇报、进度随做随更落盘」。工人只读交代、不读通用段，
+// 派工的交代里必须写清「按通用段『报进度』汇报、进度随做随更落盘」。工人只读交代、不读通用段，
 // 交代漏了这两条，进度就断在工人这一环——云端 agents-sync 分发的通用段管不到派出去的那一段对话。
 describe('派工交代必须带上「报进度」和进度落盘', () => {
   const skill = readFileSync(join(import.meta.dirname, '../../skills/commander/SKILL.md'), 'utf8');

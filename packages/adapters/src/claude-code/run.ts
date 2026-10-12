@@ -87,6 +87,8 @@ export async function runClaudeCode(
   const env = {
     ...buildSessionEnv(spec.env),
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    // 项目级流程钩子（决定 0083）看到这个就退出。引擎要的拦密钥在 --settings 那份里，不靠它们。
+    FLEET_HEADLESS: '1',
     BASH_DEFAULT_TIMEOUT_MS: String(bashTimeout),
     BASH_MAX_TIMEOUT_MS: String(Math.max(bashTimeout, MAX_BASH_TIMEOUT_MS)),
     // 一个会话最多同时跑几个子代理（#1641）：防一个会话失控；子代理的请求和主会话算在同一份额度里

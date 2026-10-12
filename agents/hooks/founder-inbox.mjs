@@ -25,7 +25,7 @@
 //   Mirasim 会话目录用过的全部原生会话号算一家。开会话钩子只给本血缘列它的话、对它的账；别的 Mirasim 会话的话一概不列
 //   （原来「最近 60 分钟落盘的话」把所有会话的话列给每个会话，另一个项目的会话把 fleet-dao 的活当成自己的办了）。
 //   找不到血缘（不是 Mirasim 起的、这台没装）返回「无血缘」，不猜、不拿别的会话的话顶。
-// - 钩子转进来过的引导也算收到（#1891）：main-thread.mjs 从 Mirasim 取原文、拒工具调用转给模型的引导不经 UserPromptSubmit，
+// - 以前钩子转进来过的引导也算收到（#1891）：决定 0083 起不再往这份里写。旧记录还在，
 //   不进 prompt-log；它只记在 ~/.fleet-dao/steer-shown/<原生会话号>.json（{ at: 最后转过的那条的 Mirasim 时刻 }）。
 //   本血缘任一号的 at 以前（含）的本 Mirasim 会话的引导算收到（relayedUpTo）。那份读不了、认不出照实说没核成，不当成收到。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';

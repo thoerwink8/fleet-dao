@@ -45,22 +45,14 @@ const write = (file: string, text: string) => {
   mkdirSync(join(file, '..'), { recursive: true });
   writeFileSync(file, text);
 };
-const cmd = (home: string, script: string) =>
-  `node "${home.replaceAll('\\', '/')}/.fleet-dao/hooks/${script}"`;
-
-/** 一台「现在这一代」的机器：设置里登记了新位置、装着的钩子和专用检出里的一样 */
+/** 一台「现在这一代」的机器：用户级不登记流程钩子，装着的脚本和专用检出里的一样 */
 function currentMachine(
   files: Record<string, string> = { 'session-start.mjs': 'new\n', 'pretool.mjs': 'p\n' },
 ) {
   const home = mkdtempSync(join(tmpdir(), 'bootstrap-'));
   dirs.push(home);
   write(join(home, '.fleet-dao', 'synced.json'), '{}');
-  write(
-    join(home, '.claude', 'settings.json'),
-    JSON.stringify({
-      hooks: { SessionStart: [{ hooks: [{ type: 'command', command: cmd(home, 'session-start.mjs') }] }] },
-    }),
-  );
+  write(join(home, '.claude', 'settings.json'), JSON.stringify({ hooks: {} }));
   for (const [n, t] of Object.entries(files)) {
     write(join(home, '.fleet-dao', 'hooks', n), t);
     write(join(home, '.fleet-dao', 'origin-main', 'agents', 'hooks', n), t);
@@ -76,14 +68,7 @@ function fakeSync(home: string, fix = true) {
     if (fix) {
       write(join(home, '.fleet-dao', 'hooks', 'session-start.mjs'), 'new\n');
       write(join(home, '.fleet-dao', 'origin-main', 'agents', 'hooks', 'session-start.mjs'), 'new\n');
-      write(
-        join(home, '.claude', 'settings.json'),
-        JSON.stringify({
-          hooks: {
-            SessionStart: [{ hooks: [{ type: 'command', command: cmd(home, 'session-start.mjs') }] }],
-          },
-        }),
-      );
+      write(join(home, '.claude', 'settings.json'), JSON.stringify({ hooks: {} }));
     }
     return '规矩同步：这台刚同步到主线最新。';
   };
@@ -91,7 +76,7 @@ function fakeSync(home: string, fix = true) {
 }
 
 describe('是现在这一代：一个字不说、不同步', () => {
-  it('开会话钩子登记成 Windows 静默启动器，也算现在这一代', () => {
+  it('用户级还挂着开会话静默启动器：算旧，要同步摘掉（决定 0083）', () => {
     const home = currentMachine();
     const exe = `${home.replaceAll('\\', '/')}/.fleet-dao/bin/quiet-session-start.exe`;
     write(
@@ -100,7 +85,7 @@ describe('是现在这一代：一个字不说、不同步', () => {
         hooks: { SessionStart: [{ hooks: [{ type: 'command', command: exe }] }] },
       }),
     );
-    expect(lib.healthReasons({ home })).toEqual({ reasons: [] });
+    expect((lib.healthReasons({ home }).reasons ?? []).join('；')).toMatch(/用户级还登记着流程钩子（1 条/);
   });
 
   it('登记对、脚本和专用检出一样', () => {
@@ -128,7 +113,6 @@ describe('发现旧钩子 → 说为什么 → 强制同步换新', () => {
     );
     const r = lib.healthReasons({ home }).reasons ?? [];
     expect(r.join('；')).toMatch(/fleet-guard 目录的钩子（2 条）/);
-    expect(r.join('；')).toMatch(/开会话钩子没登记到/);
     const f = fakeSync(home);
     const out = lib.bootstrap({ home, projectDir: '/p/fleet-dao', syncFleet: f.syncFleet });
     expect(out[0]).toMatch(/^发现旧钩子：/);

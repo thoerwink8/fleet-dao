@@ -5,7 +5,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { Backups } from './backup.ts';
 import { installedAgents } from './detect.ts';
 import { applyGitExcludes, checkGitExcludes } from './git-excludes.ts';
-import { applyHooks, checkHooks, type HookSkip } from './hooks.ts';
+import { applyHooks, checkHooks } from './hooks.ts';
 import { takeLock } from './lock.ts';
 import { manifestPath, readManifest } from './manifest.ts';
 import { applyMcp, checkMcp } from './mcp.ts';
@@ -185,15 +185,11 @@ function planIdentity(args: Args, deps: Deps): Identity {
 }
 
 /**
- * 替别的用户写（法国装机）时开会话那条钩子不登记：它要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步，法国的检出跟着
- * 自动发布走。调工具前那条照装：会话用户家里就有 reclaude 的设备密钥，在那台上手开的会话、借道读 ~/.claude/settings.json
+ * 决定 0083：用户级谁都不登记开会话、收尾、落盘、主对话，不再为 --user 单独跳过 SessionStart（目标里已经没有）。
+ * 调工具前那条照装：会话用户家里就有 reclaude 的设备密钥，在那台上手开的会话、借道读 ~/.claude/settings.json
  * 的 Grok、Cursor 起的会话都要拦读密钥文件。引擎起的 Claude 会话带 --setting-sources project、不读用户级设置，这里装了
  * 也管不到它（packages/adapters/src/claude-code/args.ts），要管得由引擎另外带上。
  */
-const SESSION_START_OFF_FOR_USER: HookSkip = {
-  event: 'SessionStart',
-  why: '替别的用户写（--user）时不登记开会话钩子：它要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步，法国的检出跟着自动发布走',
-};
 /** 权限整段不写：defaultMode auto 会让那台上的 AI 会话少一道人工确认，法国的工人会话要不要放开由引擎自己带的参数定，不靠共用的用户级设置 */
 const PERMISSIONS_OFF_FOR_USER =
   '替别的用户写（--user）时不写权限：defaultMode auto 会让那个用户的 AI 会话少一道确认，法国的会话放不放开由引擎起会话时的参数定，不靠用户级设置';
@@ -307,7 +303,6 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         platform: deps.platform,
         installed: installedAgents({ env: deps.env, platform: deps.platform, home }),
       };
-      const hooksOff = args.user === undefined ? undefined : SESSION_START_OFF_FOR_USER;
       const permsOff = args.user === undefined ? undefined : PERMISSIONS_OFF_FOR_USER;
       const mcpOff = args.user === undefined ? undefined : MCP_OFF_FOR_USER;
       const mcpSection = 'MCP 服务器（~/.claude.json 里的 Playwright 输出目录）';
@@ -317,7 +312,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         section('通用段（agents/shared-rules.md）', checkRules(ctx, src));
         section('skill（agents/skills/、agents/skills-vendor/）', checkSkills(ctx, src, readManifest(mf)));
         section(subagentSection, checkSubagents(ctx, src, readManifest(mf)));
-        section('钩子（agents/hooks/）', checkHooks(ctx, src, hooksOff));
+        section('钩子（agents/hooks/）', checkHooks(ctx, src));
         section('权限（agents/config/claude-permissions.json）', checkPermissions(ctx, src, permsOff));
         section('其他几家 AI 的权限（Kimi、Codex、Devin）', checkOtherPermissions(ctx, src, permsOff));
         section('全局 git 忽略（_tmp/）', checkGitExcludes(ctx));
@@ -332,7 +327,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         // 清单在 skill 那一步可能刚写过：这里重读一遍，不拿旧的盖掉
         const subagents = applySubagents(ctx, src, readManifest(mf), backups);
         section(subagentSection, subagents);
-        const hooks = applyHooks(ctx, src, backups, hooksOff);
+        const hooks = applyHooks(ctx, src, backups);
         section('钩子（agents/hooks/）', hooks);
         const perms = applyPermissions(ctx, src, backups, permsOff);
         section('权限（agents/config/claude-permissions.json）', perms);
@@ -346,7 +341,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
           ...checkRules(ctx, src),
           ...checkSkills(ctx, src, readManifest(mf)),
           ...checkSubagents(ctx, src, readManifest(mf)),
-          ...checkHooks(ctx, src, hooksOff),
+          ...checkHooks(ctx, src),
           ...checkPermissions(ctx, src, permsOff),
           ...checkOtherPermissions(ctx, src, permsOff),
           ...checkToolConfig(ctx),

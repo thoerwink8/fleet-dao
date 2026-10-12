@@ -14,7 +14,7 @@ import { type Ctx, code, relOf, writeAtomic } from './sync.ts';
 import { agentNames, type HookTarget, slashed } from './targets.ts';
 
 const BEGIN =
-  '# >>> fleet-dao 钩子（同步脚本管：开会话、调工具前两条，改它改仓里 packages/agents-sync/src/targets.ts；块里手改的下次会被覆盖，块外不碰）';
+  '# >>> fleet-dao 钩子（同步脚本管：调工具前一条，决定 0083 开会话不在用户级登记；改它改仓里 packages/agents-sync/src/targets.ts；块里手改的下次会被覆盖，块外不碰）';
 const END = '# <<< fleet-dao 钩子';
 const isBegin = (l: string): boolean => l.trim().startsWith('# >>> fleet-dao 钩子（');
 const isEnd = (l: string): boolean => l.trim() === END;

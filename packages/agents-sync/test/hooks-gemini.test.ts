@@ -44,11 +44,10 @@ function machine() {
 }
 
 describe('登记在哪、挂在哪', () => {
-  it('Gemini CLI 的目标：~/.gemini/settings.json，开会话 90 秒、调工具前（BeforeTool）10 秒，按毫秒写；挂跑命令、读文件、搜内容几个工具', () => {
+  it('Gemini CLI 的目标：~/.gemini/settings.json，调工具前（BeforeTool）10 秒，按毫秒写；挂跑命令、读文件、搜内容几个工具（决定 0083 不登记开会话）', () => {
     expect(GEMINI?.settings.linux).toBe('.gemini/settings.json');
     expect(GEMINI?.nodeOnWindows).toBe(true);
     expect(GEMINI?.hooks).toEqual([
-      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90_000 },
       { event: 'BeforeTool', matcher: MATCHER, script: 'pretool-gemini.mjs', timeout: 10_000 },
     ]);
     expect(HOOK_GAPS.gemini).toBeUndefined();
@@ -79,13 +78,12 @@ describe('登记在哪、挂在哪', () => {
 });
 
 describe('装', () => {
-  it('新机器：登记两条、查全绿、第二遍零改动；不装启动器', () => {
+  it('新机器：登记一条、查全绿、第二遍零改动；不装启动器', () => {
     const m = machine();
     const lines = m.apply();
     expectKind(lines, SETTINGS, 'changed');
     expect(lines.find((l) => l.key === '~/.fleet-dao/bin')).toBeUndefined();
     expect(m.settings().hooks).toEqual({
-      SessionStart: [{ hooks: [{ type: 'command', command: m.cmd('session-start.mjs'), timeout: 90_000 }] }],
       BeforeTool: [
         {
           matcher: MATCHER,
@@ -135,7 +133,7 @@ describe('Gemini CLI 自己的开关把钩子关了：不替人打开，报出�
     expectKind(lines, SETTINGS, 'failed');
     expect(lines.find((l) => l.key === SETTINGS)?.text).toContain('hooksConfig.enabled 是 false');
     expect(m.settings().hooksConfig).toEqual({ enabled: false });
-    expect(Object.keys(m.settings().hooks)).toEqual(['SessionStart', 'BeforeTool']);
+    expect(Object.keys(m.settings().hooks)).toEqual(['BeforeTool']);
     expectKind(m.check(), SETTINGS, 'drift');
   });
 

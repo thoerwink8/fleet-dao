@@ -19,7 +19,7 @@ const ASK_SCOPE_RULES: Record<string, RegExp> = {
   四类之外不写成选择题: /不写成选择题/,
   判不准是否碰四类就问: /判不准碰不碰四类就问/,
   问了答过的只报不再问: /同类事我答过一次，往后照办、只报不问/,
-  报进度分两段不混编号: /报进度分两段、各自编号/,
+  报进度在做的用表: /「在做的」一张表，列事、谁在做、进度（大概百分比）、做到哪、下一步/,
 };
 
 function missing(rules: Record<string, RegExp>, text: string): string[] {
@@ -49,9 +49,9 @@ describe('规矩：什么时候停下来问我（2026-10-01 补边界）', () =>
     ]);
   });
 
-  it('【故意造出的失败】把「报进度分两段」那条去掉：查得出来', () => {
-    const cut = AGENTS.replace(/- 报进度分两段、各自编号[^\n]*\n/, '');
+  it('【故意造出的失败】把「在做的用表」那条去掉：查得出来', () => {
+    const cut = AGENTS.replace(/- 报进度：[^\n]*\n/, '');
     expect(cut).not.toBe(AGENTS);
-    expect(missing(ASK_SCOPE_RULES, cut)).toEqual(['报进度分两段不混编号']);
+    expect(missing(ASK_SCOPE_RULES, cut)).toEqual(['报进度在做的用表']);
   });
 });

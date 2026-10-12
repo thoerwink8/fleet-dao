@@ -81,11 +81,13 @@
 | [0075](0075-france-engine-release-by-commit.md) | 法国自家的引擎按主线上的一个提交发布 | 部分被 0032 替代 |
 | [0076](0076-route-strictly-by-order.md) | 选路只按顺序：只因额度用完、人关了、报错往后挑；冷验收验不了由冷验收「两家都验」兜 | 采纳 |
 | [0077](0077-review-screen-effort-high.md) | 评审初筛 `fleet-review-screen` 的 effort 从 medium 调到 high（Haiku 5.5 两道题 medium 10 遍过 8、high 6 遍全过），别的子代理档和 effort 不变（补充 0036） | 采纳 |
-| [0078](0078-steer-reply-and-background-subagents.md) | 引导三条：引导一送到、调工具前先回一句；派 Agent 子代理一律后台跑，主对话留在这一轮等完成通知、单次前台等待不超过 60 秒（不分无人值守与否）；引导涉及在跑的子代理用 `SendMessage` 转 | 采纳；文末修订（#1743，创始人 2026-10-11 让指挥官测、没问题就合）：Mirasim 的引导要等这一轮结束、后台子代理都跑完才读进来，调工具前和收尾钩子从 Mirasim 取原文先转，不用结束这一轮 |
+| [0078](0078-steer-reply-and-background-subagents.md) | 引导三条：引导一送到、调工具前先回一句；派 Agent 子代理一律后台跑；引导涉及在跑的子代理用 `SendMessage` 转 | 部分被 0083 替代：先回、后台跑、SendMessage、一轮结束不杀子代理仍有效；钩子中转和「不分无人值守都不收尾」作废 |
 | [0079](0079-fleet-subagents-user-level.md) | 16 个 `fleet-*` 子代理的通用版（`agents/subagents/` 下同名，去掉本仓专属的命令和路径）随 `pnpm agents:sync` 和 `haiku55` 一起装到每台机器的 `~/.claude/agents/`，法国也装；`.claude/agents/` 的专属版本仓照用、不往家里装（部分取代 0036） | 采纳（创始人 2026-10-11 18:38「1. 装」、20:44「改成通用版，VPS 照装」） |
 | [0080](0080-steer-lineage-owner.md) | 创始人的话和引导按「Mirasim 会话」这条血缘认主：开会话只列同一个 Mirasim 会话换号前收到的话，不再全局广播；待处理引导记主人，只叫主人办，别的会话只计数，无主的先 `pnpm progress:claim` 认领 | 待创始人同意（改标准） |
 | [0081](0081-pnpm-entry-and-default-shared.md) | 仓合同 `agents/repo-contract.json`（首批：仓根 `pnpm dev/start/stop/check`、AGENTS.md、PROGRESS 两节、`.gitignore` 的 `_tmp/`）：开会话钩子在任何仓里每天最多提醒一次缺项，`pnpm repo:check`、`repo:init` 查和补，只提醒不拦；创始人说的原则默认各仓通用，引导条目标〔范围：通用｜只此仓〕，开会话和收尾钩子提醒 | 创始人 04:37 选定方案 B，PR #1934 合并即生效 |
 | [0082](0082-read-source-before-loosening.md) | 通用段底线补一句：读不到先追数据源；要放宽判据，PR 里贴上游真的不给的证据（#1936 放宽判据凑绿、#1946 才修根子）；`chain-first` 硬规矩跟着写 | 创始人 2026-10-12 在对话里选定（2.a），PR 合并即生效 |
+| [0083](0083-present-keeps-the-turn.md) | 人在场还有活就别收这一轮，新话先回，活没干完不许写成收工；删引导中继；流程钩子只留在 fleet-dao 项目设置 | 创始人 2026-10-12 17:14 选 1，PR 合并即生效 |
+| [0084](0084-progress-table.md) | 进度汇报：「要你拍的」编号在前，「在做的」一张表，带百分比、做到哪、下一步 | 创始人 2026-10-12 17:56「你改回标准里吧」，PR 合并即生效 |
 
 ## 第 1–14 条的编号（#1476）
 

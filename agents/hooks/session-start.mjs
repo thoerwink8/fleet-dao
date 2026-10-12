@@ -602,12 +602,9 @@ export function recentPrompts({
   // 发了的只读了本血缘那个目录，收到的也只留本血缘的：换了原生会话号之前丢的也补回本会话；别的会话丢的不进来（#1733）
   if (!sent.absent) {
     for (const p of sent.problems) lines.push(`创始人在 Mirasim 里发的话没读全：${p}；有没有丢的核不了。`);
-    // 钩子（main-thread.mjs）转进来过的引导不进 prompt-log：读本血缘的 steer-shown 记录，转过的算收到（#1891）
+    // 决定 0083 起不再往 steer-shown 写。旧记录还在：转过的仍算收到，免得开会话把已经转过的再列一遍（#1891）
     const relay = relayedUpTo({ home, sessionIds: line.sessionIds, env });
-    for (const p of relay.problems)
-      lines.push(
-        `钩子转过的引导没核成：${p}；钩子转进来过的引导这次照没收到列，前面已经回过的说一句「这条前面已回」。`,
-      );
+    for (const p of relay.problems) lines.push(`旧的引导记录没核成：${p}；这次分不清哪些已经转过。`);
     const { lost } = reconcile(sent.entries, received, { relayed: { line: line.dir, at: relay.at } });
     if (lost.length > 0) {
       const shown = packNewestFirst(lost);
@@ -1486,6 +1483,7 @@ function isMain() {
 }
 
 if (isMain()) {
+  if (process.env.FLEET_HEADLESS === '1') process.exit(0);
   let lines;
   try {
     let input = {};
