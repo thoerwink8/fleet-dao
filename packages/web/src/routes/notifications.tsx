@@ -17,11 +17,11 @@ import { EmptyState } from '../components/layout/empty-state';
 import { FilterTabs } from '../components/layout/filter-tabs';
 import { List, ListRow } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Notice } from '../components/layout/notice';
 import { Page } from '../components/layout/page';
 import { Section } from '../components/layout/section';
 import { StatusBadge, StatusDot } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
-import { RefreshBar } from '../components/refresh-bar';
 import { RepoLink } from '../components/repo-link';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -55,25 +55,29 @@ function dayOf(iso: string, now: number): string {
 
 const DELIVERY_NAME: Record<string, string> = { feishu: '飞书' };
 
-/** 飞书等渠道送没送到：没拿到消息编号就算没送到。 */
+/**
+ * 飞书等渠道送没送到：没拿到消息编号就算没送到。送到了是一截灰字（平常事，不占色块）；
+ * 没送到才是红标签。试了几次、最后一次、错误原因都在悬停里（路由页样板 #1914：一行只一个显眼的东西）。
+ */
 function Deliveries({ n }: { n: Notification }) {
-  if (!n.deliveries.length)
-    return <span className="text-meta text-muted-foreground">只在{brand.product}</span>;
+  if (!n.deliveries.length) return <span className="shrink-0">只在{brand.product}</span>;
   return (
-    <span className="flex flex-wrap gap-1.5">
+    <>
       {n.deliveries.map((d, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: 同一渠道可以发给好几个对象，契约里没有对象编号。
         <Tooltip key={`${d.channel}-${i}`}>
           <TooltipTrigger asChild>
-            <Tag tone={d.delivered ? 'neutral' : 'fail'} className="gap-1">
-              {d.delivered ? (
-                <Send className="size-2.5" aria-hidden />
-              ) : (
-                <TriangleAlert className="size-2.5" aria-hidden />
-              )}
-              {DELIVERY_NAME[d.channel] ?? d.channel}
-              {d.delivered ? '已送到' : '没送到'}
-            </Tag>
+            {d.delivered ? (
+              <span data-delivery="ok" className="inline-flex shrink-0 items-center gap-1">
+                <Send className="size-3" aria-hidden />
+                {DELIVERY_NAME[d.channel] ?? d.channel}已送到
+              </span>
+            ) : (
+              <Tag tone="fail" className="gap-1">
+                <TriangleAlert className="size-3" aria-hidden />
+                {DELIVERY_NAME[d.channel] ?? d.channel}没送到
+              </Tag>
+            )}
           </TooltipTrigger>
           <TooltipContent>
             试了 {d.attempts} 次{d.lastAttemptAt ? ` · 最后一次 ${formatDateTime(d.lastAttemptAt)}` : ''}
@@ -81,7 +85,7 @@ function Deliveries({ n }: { n: Notification }) {
           </TooltipContent>
         </Tooltip>
       ))}
-    </span>
+    </>
   );
 }
 
@@ -115,8 +119,9 @@ function WorkLink({
       repo={repo}
       kind={kind}
       n={n}
-      className="inline-flex items-center gap-0.5 text-meta text-muted-foreground underline-offset-2 max-md:min-h-10 [&[href]]:hover:text-foreground [&[href]]:hover:underline"
-      icon={<ExternalLink className="size-2.5" aria-hidden />}
+      // 一行不折（#1939）：不靠 min-h 撑高这一行，手机上可点范围用伪元素往上下各撑 16（同路由页渠道卡头的链接）
+      className="relative inline-flex shrink-0 items-center gap-0.5 underline-offset-2 after:absolute after:inset-x-0 after:-inset-y-4 [&[href]]:hover:text-foreground [&[href]]:hover:underline"
+      icon={<ExternalLink className="size-3" aria-hidden />}
     >
       {label}
     </RepoLink>
@@ -126,13 +131,21 @@ function WorkLink({
 /**
  * 谁在处理 · 链接 · 多久了（design 15.3「谁在处理」）：后端从认领、PR、发布记录现算的，这里只照着显示；
  * 没查成的（发布判不了之类）照实列出来。
+ * 一行不折（#1939，路由页样板「行的小字只占一行」）：状态、多久、链接不让位；谁、静默说明、没查成的话放不下就截断，整句（后端给的 line）在悬停里。
  */
 function HandlingRow({ h, now }: { h: Handling; now: number }) {
   const since = formatDuration(now - Date.parse(h.since));
+  const full = [h.line, ...h.problems].join(' · ');
   return (
-    <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="alert-handling">
-      <StatusBadge tone={STAGE_TONE[h.stage]} label={h.stageText} />
-      {h.who ? <span className="text-meta text-foreground">{h.who}</span> : null}
+    <div
+      className="mt-1 flex min-w-0 items-center gap-x-2 overflow-hidden text-meta whitespace-nowrap text-muted-foreground"
+      title={full}
+      data-testid="alert-handling"
+    >
+      <StatusBadge tone={STAGE_TONE[h.stage]} label={h.stageText} variant="dot" />
+      <span className="num shrink-0" title={formatDateTime(h.since)}>
+        {since}
+      </span>
       {h.work ? (
         <WorkLink
           repo={h.work.repo}
@@ -142,16 +155,24 @@ function HandlingRow({ h, now }: { h: Handling; now: number }) {
         />
       ) : null}
       {h.pr ? <WorkLink repo={h.pr.repo} kind="pull" n={h.pr.number} label={`PR #${h.pr.number}`} /> : null}
+      {h.who ? (
+        <span
+          className={cn(
+            'min-w-0 truncate text-foreground',
+            // 「谁」就是那个 PR（PR #16）时，手机上不再写第二遍，省出位置给链接
+            h.pr && h.who === `PR #${h.pr.number}` && 'max-md:hidden',
+          )}
+        >
+          {h.who}
+        </span>
+      ) : null}
       {h.silence ? (
-        <span className="text-meta text-muted-foreground">
+        <span className="min-w-0 truncate">
           {h.silence.comment} · 到 {formatDateTime(h.silence.endsAt)}
         </span>
       ) : null}
-      <span className="num text-meta text-muted-foreground" title={formatDateTime(h.since)}>
-        {since}
-      </span>
       {h.problems.map((p) => (
-        <span key={p} className="text-meta text-ink-fail">
+        <span key={p} className="min-w-0 truncate text-ink-fail">
           {p}
         </span>
       ))}
@@ -184,6 +205,8 @@ export type AnswerInput = { optionId: string } | { text: string };
 /**
  * 「要你拍」的选项和自己输入的框（#1915）：一项一行，按钮是选项的字（推荐的那项是主按钮），旁边一句说明、推荐的写理由；
  * 手机上按钮整宽、说明在下面。没有选项的老通知照实写「没有选项，请直接回复」，只给输入框，不退回单纯确认。
+ * 观感（#1939）：整块左边一道「等人」色细竖线，和正文、谁在处理分开；按钮同宽、说明左对齐成一列；
+ * 输入框和「提交」同一行，自己写的去向是框下一行灰字。
  */
 function DecisionPicker({
   n,
@@ -198,28 +221,30 @@ function DecisionPicker({
   const options = n.options ?? [];
   const trimmed = text.trim();
   return (
-    <div className="mt-2 space-y-2" data-testid="decision-picker">
+    <div
+      className="mt-3 space-y-3 border-l-2 border-st-human-line pl-3 md:space-y-2 md:pl-4"
+      data-testid="decision-picker"
+    >
       {options.length > 0 ? (
-        <ul className="space-y-3 md:space-y-1.5" aria-label="选一个">
+        <ul className="space-y-3 md:space-y-2" aria-label="选一个">
           {options.map((o) => (
-            <li key={o.id} className="flex flex-col gap-1 md:flex-row md:items-center md:gap-3">
+            <li key={o.id} className="flex flex-col gap-1.5 md:flex-row md:items-center md:gap-3">
               <Button
                 size="sm"
                 variant={o.recommended ? 'brand' : 'outline'}
                 disabled={pending}
                 onClick={() => onAnswer(n, { optionId: o.id })}
-                className="max-md:w-full md:min-w-24"
+                className="max-md:w-full md:min-w-28"
               >
                 {o.label}
               </Button>
               <span className="min-w-0 text-meta text-muted-foreground">
                 {o.recommended ? (
-                  <Tag tone="brand" className="mr-1.5">
-                    推荐
-                  </Tag>
+                  // 推荐的那项按钮已经是实色主按钮：标签用灰底，不再一黑一黑叠在一起（#1939）
+                  <Tag className="mr-1.5 align-middle">推荐</Tag>
                 ) : null}
                 {o.detail}
-                {o.recommended ? `。${o.recommended}` : ''}
+                {o.recommended ? <span className="text-foreground">。{o.recommended}</span> : null}
               </span>
             </li>
           ))}
@@ -229,48 +254,55 @@ function DecisionPicker({
           {NO_OPTIONS_TEXT}
         </p>
       )}
-      <form
-        className="flex gap-2 max-md:flex-col"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (trimmed) onAnswer(n, { text: trimmed });
-        }}
-      >
-        <Input
-          aria-label="自己输入"
-          placeholder={options.length > 0 ? '都不合适？自己写' : '写你的决定'}
-          value={text}
-          maxLength={2000}
-          disabled={pending}
-          onChange={(e) => setText(e.target.value)}
-          className="md:max-w-md"
-        />
-        <Button type="submit" size="sm" variant="outline" disabled={pending || !trimmed}>
-          <Send aria-hidden />
-          提交
-        </Button>
-      </form>
-      <p className="text-meta text-muted-foreground" data-testid="custom-effect">
-        {answerResolves(options, undefined)
-          ? '自己写的：记下交给指挥官，这条转已处理'
-          : '自己写的：记下交给指挥官，这条先留着'}
-      </p>
+      <div>
+        <form
+          className="flex gap-2 md:max-w-xl"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (trimmed) onAnswer(n, { text: trimmed });
+          }}
+        >
+          <Input
+            aria-label="自己输入"
+            placeholder={options.length > 0 ? '都不合适？自己写' : '写你的决定'}
+            value={text}
+            maxLength={2000}
+            disabled={pending}
+            onChange={(e) => setText(e.target.value)}
+            className="min-w-0 flex-1"
+          />
+          <Button type="submit" size="sm" variant="outline" disabled={pending || !trimmed}>
+            <Send aria-hidden />
+            提交
+          </Button>
+        </form>
+        <p className="mt-1.5 text-meta text-muted-foreground" data-testid="custom-effect">
+          {answerResolves(options, undefined)
+            ? '自己写的：记下交给指挥官，这条转已处理'
+            : '自己写的：记下交给指挥官，这条先留着'}
+        </p>
+      </div>
     </div>
   );
 }
 
-/** 拍过的：选了什么、谁、什么时候。 */
+/** 拍过的：选了什么、谁、什么时候。一行：对勾、「我选了：发布」、灰字时间（#1939）。 */
 function DecisionAnswerLine({ n, me, now }: { n: Notification; me: Me | undefined; now: number }) {
   const a = n.answer;
   if (!a) return null;
   return (
-    <p className="mt-1 text-body text-foreground" data-testid="decision-answer">
-      {isMine(a.by, me) ? '我' : a.by}
-      {a.optionId === undefined ? '自己写了：' : '选了：'}
-      <span className="font-medium">{a.text}</span>
-      <span className="num ml-2 text-meta text-muted-foreground" title={formatDateTime(a.at)}>
-        {formatAgo(a.at, now)}
+    <p
+      className="mt-2 flex min-w-0 items-center gap-1.5 text-body text-foreground"
+      data-testid="decision-answer"
+      title={`${a.text} · ${formatDateTime(a.at)}`}
+    >
+      <Check className="size-4 shrink-0 text-ink-done" aria-hidden />
+      <span className="min-w-0 truncate">
+        {isMine(a.by, me) ? '我' : a.by}
+        {a.optionId === undefined ? '自己写了：' : '选了：'}
+        <span className="font-medium">{a.text}</span>
       </span>
+      <span className="num shrink-0 text-meta text-muted-foreground">{formatAgo(a.at, now)}</span>
     </p>
   );
 }
@@ -306,66 +338,88 @@ function NotificationRow({
   onAnswer,
 }: { n: Notification; now: number; me: Me | undefined } & RowActions) {
   const resolved = Boolean(n.resolvedAt);
+  const level = noticeLevelMeta[n.level];
   return (
     <ListRow
       data-notice-row
       data-resolved={resolved || undefined}
       summary={
-        <>
-          {/* 手机上内容在上、「打开 / 处理了」带字排在下面一行（#1904，原来的无字图标看不出是什么）；md 起操作在右侧、垂直居中 */}
-          <div className="flex w-full min-w-0 flex-col gap-2 md:flex-row md:items-center md:gap-3">
-            <div className="flex min-w-0 flex-1 gap-3">
-              <StatusDot
-                tone={noticeLevelMeta[n.level].tone}
-                className={cn('mt-1.5', resolved && 'opacity-40')}
-              />
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className={cn('text-body', !resolved && 'font-semibold')}>{n.title}</span>
-                  <Tag tone={noticeLevelMeta[n.level].tone}>{noticeLevelMeta[n.level].label}</Tag>
-                </div>
-                <ClampedBody text={n.body} />
-                {!resolved && n.level === 'decision' ? (
-                  <DecisionPicker n={n} pending={answeringId === n.id} onAnswer={onAnswer} />
-                ) : null}
-                <DecisionAnswerLine n={n} me={me} now={now} />
-                {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
-                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-                  <span className="num text-meta text-muted-foreground" title={formatClock(n.createdAt)}>
-                    {formatAgo(n.createdAt, now)}
-                  </span>
-                  <Deliveries n={n} />
-                  {resolved && n.resolvedAt ? (
-                    <span className="inline-flex items-center gap-1 text-meta text-muted-foreground">
-                      <Check className="size-3" aria-hidden />
+        // 一条通知（#1939，照路由页样板）：第一行标题加一个级别标签；正文两行；谁在处理一行；
+        // 要你拍的选项区；最后一行灰字写时间、送没送到、谁处理的。主操作带字（#1904），
+        // md 起在右上和标题同一行（不再在高卡片里垂直居中、飘在中间），手机上排在内容下面、两个按钮平分一行。
+        <div className="flex w-full min-w-0 flex-col gap-3 py-1 md:flex-row md:items-start md:gap-6">
+          <div className="flex min-w-0 flex-1 gap-3">
+            <StatusDot tone={level.tone} className={cn('mt-2', resolved && 'opacity-40')} />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1" data-row-name-line>
+                <span
+                  data-row-name
+                  className={cn(
+                    'min-w-0 text-body break-words',
+                    resolved ? 'text-muted-foreground' : 'font-semibold',
+                  )}
+                >
+                  {n.title}
+                </span>
+                <Tag tone={level.tone}>{level.label}</Tag>
+              </div>
+              <ClampedBody text={n.body} />
+              {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
+              {/* 已经拍过的写在选项上面（选了要留着的项时选项还在，可以再拍，#1931） */}
+              <DecisionAnswerLine n={n} me={me} now={now} />
+              {!resolved && n.level === 'decision' ? (
+                <DecisionPicker n={n} pending={answeringId === n.id} onAnswer={onAnswer} />
+              ) : null}
+              {/* 灰字一行不折：时间、送没送到、谁处理的；放不下截断 */}
+              <div
+                data-row-meta
+                className="mt-1.5 flex min-w-0 items-center gap-x-3 overflow-hidden text-meta whitespace-nowrap text-muted-foreground"
+              >
+                <span className="num shrink-0" title={formatClock(n.createdAt)}>
+                  {formatAgo(n.createdAt, now)}
+                </span>
+                <Deliveries n={n} />
+                {resolved && n.resolvedAt ? (
+                  <span
+                    className="inline-flex min-w-0 items-center gap-1"
+                    title={formatDateTime(n.resolvedAt)}
+                  >
+                    <Check className="size-3 shrink-0" aria-hidden />
+                    <span className="truncate">
                       {n.resolvedBy ? (isMine(n.resolvedBy, me) ? '我' : n.resolvedBy) : ''}处理于{' '}
                       <span className="num">{formatAgo(n.resolvedAt, now)}</span>
                     </span>
-                  ) : null}
-                </div>
+                  </span>
+                ) : null}
               </div>
             </div>
-            <div className="flex shrink-0 items-center gap-1.5 max-md:pl-5" data-notice-actions>
-              {!resolved ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={resolvePending && resolveId === n.id}
-                  onClick={() => onDone(n)}
-                >
-                  <Check />
-                  处理了
-                </Button>
-              ) : null}
-              {n.link ? (
-                <Button size="sm" variant="ghost" onClick={() => onOpen(n.link ?? '/')}>
-                  <ArrowUpRight aria-hidden />
-                  打开
-                </Button>
-              ) : null}
-            </div>
           </div>
-        </>
+          <div className="flex shrink-0 items-center gap-2 max-md:pl-5" data-notice-actions>
+            {!resolved ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={resolvePending && resolveId === n.id}
+                onClick={() => onDone(n)}
+                className="max-md:flex-1"
+              >
+                <Check />
+                处理了
+              </Button>
+            ) : null}
+            {n.link ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => onOpen(n.link ?? '/')}
+                className="max-md:flex-1"
+              >
+                <ArrowUpRight aria-hidden />
+                打开
+              </Button>
+            ) : null}
+          </div>
+        </div>
       }
     />
   );
@@ -383,7 +437,7 @@ function DayGroups({
     <>
       {[...groups.entries()].map(([day, dayItems]) => (
         <section key={day}>
-          <h2 className="mb-2 text-meta font-medium text-muted-foreground">{day}</h2>
+          <h2 className="mb-2 px-1 text-meta font-medium text-muted-foreground">{day}</h2>
           <Section flush>
             <List>
               {dayItems.map((n) => (
@@ -394,6 +448,47 @@ function DayGroups({
         </section>
       ))}
     </>
+  );
+}
+
+/**
+ * 列表上面的结论块（#1939，照路由页样板的标题块）：一行 subtitle「待处理 N 条」；一行结论短话加一个状态
+ * （有要你拍的写「等你拍板」，只剩卡住的写「有卡住」）；一行灰字写规则。三行都不折，放不下截断、整句在悬停里。
+ * 数字是接口给的总数（#1745），和铃铛、侧栏角标同数，日报不算进待处理。
+ */
+function PendingHero({ counts }: { counts: { decision: number; alert: number; daily: number } }) {
+  const pending = pendingCount(counts);
+  const parts = [
+    counts.decision > 0 ? `${counts.decision} 件要你拍` : null,
+    counts.alert > 0 ? `${counts.alert} 个卡住` : null,
+  ].filter(Boolean);
+  const line = parts.join('，');
+  const rule = `要你拍的和卡住的，处理了就从这里消失。${counts.daily > 0 ? `日报 ${counts.daily} 条看一眼就行。` : ''}`;
+  return (
+    <header data-testid="pending-rule" className="mb-6 flex min-w-0 flex-col">
+      <h2 className="truncate text-subtitle whitespace-nowrap">
+        待处理 <span className="num">{pending}</span> 条
+      </h2>
+      {pending > 0 ? (
+        <p
+          data-hero-line
+          title={line}
+          className="mt-2 flex min-w-0 items-center gap-2.5 whitespace-nowrap text-heading font-normal"
+        >
+          <span className="min-w-0 truncate">{line}</span>
+          <span className="shrink-0">
+            {counts.decision > 0 ? (
+              <StatusBadge tone="human" label="等你拍板" />
+            ) : (
+              <StatusBadge tone="stall" label="有卡住" />
+            )}
+          </span>
+        </p>
+      ) : null}
+      <p data-hero-notes title={rule} className="mt-1.5 truncate text-meta text-muted-foreground">
+        {rule}
+      </p>
+    </header>
   );
 }
 
@@ -472,16 +567,15 @@ export default function Notifications() {
     <Page
       title="通知中心"
       description="只有三类：要你拍的、卡住的、日报。飞书上推同样的三类，进度不主动推。"
-      actions={
-        <RefreshBar
-          onRefresh={() => void refetch()}
-          isFetching={isFetching}
-          dataUpdatedAt={dataUpdatedAt}
-          staleAfterMs={NOTIFICATIONS_STALE_AFTER_MS}
-        />
-      }
+      refresh={{
+        onRefresh: () => void refetch(),
+        isFetching,
+        dataUpdatedAt,
+        staleAfterMs: NOTIFICATIONS_STALE_AFTER_MS,
+      }}
     >
-      <div className="mb-4 flex flex-wrap items-center gap-2">
+      {/* 两组筛选同一行（主：处理状态，次：级别）；窄屏各自一行、自己横滑，不折（路由页样板） */}
+      <div className="mb-5 flex flex-wrap items-center gap-x-4 gap-y-2">
         <FilterTabs
           aria-label="处理状态"
           items={[
@@ -507,23 +601,17 @@ export default function Notifications() {
           onChange={(id) => set('level', id === 'all' ? null : id)}
         />
       </div>
-      {data && status === 'open' ? (
-        <p className="mb-3 text-meta text-muted-foreground" data-testid="pending-rule">
-          待处理 <span className="num">{pendingCount(data.counts)}</span> 条。
-          要你拍的和卡住的，处理了就从这里消失。
-          {data.counts.daily > 0 ? (
-            <>
-              {' '}
-              日报 <span className="num">{data.counts.daily}</span> 条看一眼就行。
-            </>
-          ) : null}
-        </p>
+      {/* 结论块只在「待处理」里有：接口的计数跟着视图走，「连已处理的」里那几个数不是待处理数 */}
+      {data && status === 'open' ? <PendingHero counts={data.counts} /> : null}
+      {error ? (
+        <div className="mb-4">
+          <LoadError what="提醒" error={error} />
+        </div>
       ) : null}
-      {error ? <LoadError what="提醒" error={error} /> : null}
       {data?.handlingProblem ? (
-        <p className="mb-3 text-meta text-ink-fail" role="status">
+        <Notice tone="stall" className="mb-4">
           {data.handlingProblem}（提醒照常列出，只是看不出谁在处理）
-        </p>
+        </Notice>
       ) : null}
       {isLoading ? (
         <LoadingRows rows={5} />
