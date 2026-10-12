@@ -671,6 +671,11 @@ export interface MergePrInput {
   commitMessage?: string | undefined;
   /** 合完删分支，默认删（仓没开「合并后自动删」）。 */
   deleteBranch?: boolean | undefined;
+  /**
+   * 合并前要不要再核一次 CI。默认要（零条必过检查不当绿）。
+   * 不强制 CI 的仓由引擎直接合并时传 false：仍然核头、冲突、落后主线、PR 还开着。
+   */
+  requireCi?: boolean | undefined;
 }
 
 export type MergeRefusal =
@@ -772,20 +777,22 @@ export async function mergePr(
       return refused('behind_main', `主线比 PR #${prNumber} 多 ${behindBy} 个提交：先同步主线、在新头上重测`);
     }
 
-    // 合并前再确认一次：CI 在这个头上是绿的
-    const required = await requiredChecksFor(deps, repo, input.checks, ctx.signal);
-    const ci = await readCi(deps, repo, expectedHead, required, ctx.signal);
-    if (ci.evaluation.overall !== 'green') {
-      const e = ci.evaluation;
-      const parts = [
-        e.failed.length ? `红：${e.failed.join('、')}` : '',
-        e.pending.length ? `没跑完：${e.pending.join('、')}` : '',
-        e.missing.length ? `没出现：${e.missing.join('、')}` : '',
-      ].filter(Boolean);
-      return refused(
-        'ci_not_green',
-        `PR #${prNumber} 的 CI 在 ${expectedHead.slice(0, 7)} 上不是全绿（${parts.join('；')}）`,
-      );
+    // 合并前再确认一次：CI 在这个头上是绿的。不强制 CI 的直接合并跳过这一段，其余拒绝照旧。
+    if (input.requireCi !== false) {
+      const required = await requiredChecksFor(deps, repo, input.checks, ctx.signal);
+      const ci = await readCi(deps, repo, expectedHead, required, ctx.signal);
+      if (ci.evaluation.overall !== 'green') {
+        const e = ci.evaluation;
+        const parts = [
+          e.failed.length ? `红：${e.failed.join('、')}` : '',
+          e.pending.length ? `没跑完：${e.pending.join('、')}` : '',
+          e.missing.length ? `没出现：${e.missing.join('、')}` : '',
+        ].filter(Boolean);
+        return refused(
+          'ci_not_green',
+          `PR #${prNumber} 的 CI 在 ${expectedHead.slice(0, 7)} 上不是全绿（${parts.join('；')}）`,
+        );
+      }
     }
 
     if (pr.draft) {

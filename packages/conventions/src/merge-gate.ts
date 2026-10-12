@@ -114,6 +114,11 @@ export interface GateResult {
 
 export interface GateDeps {
   gh: GitHubReads;
+  /**
+   * 这个仓的 CI 模式。不传 = 强制：闸跑在 GitHub Actions 里，读不到法国的库，
+   * 不能因为没传就把引擎分支的冷验收放掉。驾驶舱设成不强制的仓，由调用方显式传入 off。
+   */
+  ciPolicy?: 'force' | 'off';
 }
 
 /**
@@ -142,10 +147,18 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
     return { number, head: meta.head, closed: true, state: 'failure', notChecked: false, lines: [] };
 
   const base = { number, head: meta.head };
-  // 合前一次冷调用（#555-2）要不要等：引擎任务工作流开的 PR 要（分支名认），别的不要。
-  const cold = coldVerifyNeed(isFlowBranch(meta.headRef));
-  if (!cold.needed)
-    return { ...base, state: 'success', notChecked: false, lines: ['能合：不是引擎任务 PR，只看 CI。'] };
+  // 合前一次冷调用（#555-2）要不要等：强制 CI 的引擎任务 PR 要（分支名认）。
+  // 不强制 CI 的仓显式传入 off 才跳过；没传仍要，不能把别的仓放开。
+  const policy = deps.ciPolicy ?? 'force';
+  const flow = isFlowBranch(meta.headRef);
+  const cold = coldVerifyNeed(flow, policy);
+  if (!cold.needed) {
+    const line =
+      policy === 'off' && flow
+        ? '能合：这个仓不强制 CI，引擎任务 PR 不看冷验收。'
+        : '能合：不是引擎任务 PR，只看 CI。';
+    return { ...base, state: 'success', notChecked: false, lines: [line] };
+  }
 
   let statuses: unknown[];
   try {

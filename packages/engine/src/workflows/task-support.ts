@@ -44,11 +44,33 @@ export interface Avoid {
 }
 export const NO_AVOID: Avoid = { routeIds: [], poolIds: [], modelIds: [] };
 
-/** 一轮 CI 等下来该干什么。 */
+/** 一轮 CI 等下来该干什么。skip＝等的时候仓切成了不强制 CI，调用方直接合并。 */
 export type CiStep =
   | { kind: 'green' }
   | { kind: 'merged'; mergeCommit?: string | undefined }
-  | { kind: 'rework' };
+  | { kind: 'rework' }
+  | { kind: 'skip' };
+
+/** 不强制 CI 的仓，动手会话交活前要自己跑通。引擎这一路不设闸门。 */
+export const SKIP_CI_SELF_VERIFY =
+  '这个仓不强制 CI：交活前自己跑通（能起来，碰界面的贴截图）。引擎这一路不设 CI 和冷验收闸门。';
+
+/** 不强制 CI 的仓，开 PR 正文里「验证」那一行。 */
+export const SKIP_CI_PR_VERIFIED =
+  '这个仓不强制 CI：交活前自己跑通（能起来，碰界面的贴截图）。引擎直接合并，不等 CI、不做冷验收';
+
+/** 强制 CI 的仓一个检查都没有：停下等人，这句话要出现在提醒里。 */
+export const FORCE_CI_NO_CHECKS = '这个仓是强制 CI，但没配检查';
+
+/**
+ * unknown 是不是「仓里没配检查」。超时、读失败不算：那两种照旧停下，不写成没配检查。
+ * 活动的原文见 real/github-ports.ts 的 ciResultOf（missing →「根本没跑」）。
+ */
+export function ciUnknownIsNoChecks(detail: string | undefined): boolean {
+  if (!detail) return false;
+  if (detail.includes('CI 没在限时内跑完') || detail.includes('CI 没查成：')) return false;
+  return detail.includes('没有检查') || detail.includes('根本没跑') || detail.includes('一个检查');
+}
 
 /** 验收停下的原因类别（#1404）。通知第一行、整理提示词都用这三份，不另写一份字符串。 */
 export const VERIFY_STOP_UNPROVABLE = '验收条在 diff 里证不了';

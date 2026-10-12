@@ -41,6 +41,9 @@ export interface PrChangedFile {
   previous?: string;
 }
 
+/** 受管仓。没给 ciPolicy 当强制，不当成不强制。 */
+export type AutoMergeRepo = RepoRef & { ciPolicy?: 'force' | 'off' | undefined };
+
 /** 自动合并兜底要的 GitHub 读法（每仓一次 openPulls、按 PR 走 pullFiles + CI + 清单 + enableAutoMerge）。 */
 export interface AutoMergeGitHub {
   /** 开着的 PR，转成这一侧要的形状（翻完页；翻不完抛错，不当成就这几个）。 */
@@ -62,6 +65,14 @@ export interface AutoMergeGitHub {
   readStandardPathsFile(repo: RepoRef): Promise<string>;
   /** 挂上自动合并（「引擎」机器人身份，squash）。 */
   enableAutoMerge(repo: RepoRef, pull: { number: number; nodeId: string }): Promise<void>;
+  /**
+   * 不强制 CI 的任务分支：直接合并，不挂自动合并。没接上时调用方记没查成，不假装合过。
+   * 回 merged:false 同样记没查成。
+   */
+  mergeNow?(
+    repo: RepoRef,
+    pull: { number: number; expectedHead: string },
+  ): Promise<{ merged: boolean; detail?: string | undefined }>;
 }
 
 /** 自动合并兜底那部分要的提醒读写。 */
@@ -80,8 +91,8 @@ export interface AutoMergeAlerts {
 }
 
 export interface AutoMergeCheckDeps {
-  /** 受管的仓（库里的 repos 表）。 */
-  repos(): Promise<RepoRef[]>;
+  /** 受管的仓（库里的 repos 表）。ciPolicy 缺省当强制。 */
+  repos(): Promise<AutoMergeRepo[]>;
   gh: AutoMergeGitHub;
   autoMergeAlerts: AutoMergeAlerts;
   log(level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>): void;
@@ -138,9 +149,47 @@ async function reportFailure(
 }
 
 /** 一张 PR：判要不要挂、挂；挂上了撤销那条提醒、进 found。每一步读不到、判不出都明确抛错。 */
+function repoCiPolicy(repo: AutoMergeRepo): 'force' | 'off' {
+  return repo.ciPolicy === 'off' ? 'off' : 'force';
+}
+
+/** 不强制 CI 的任务分支：改标准照旧不合并，其余由引擎直接合并，不看检查、不挂自动合并。 */
+async function mergeOffTaskBranch(
+  deps: AutoMergeCheckDeps,
+  repo: AutoMergeRepo,
+  pr: PrAutoMergeCandidate,
+  part: SweepPart,
+): Promise<void> {
+  const files = await deps.gh.pullFiles(repo, pr.number);
+  const text = await deps.gh.readStandardPathsFile(repo).catch((e) => {
+    throw new Error(`读改标准路径清单没成：${errMessage(e)}`);
+  });
+  const parsed = parseStandardPaths(text);
+  if (typeof parsed === 'string') throw new Error(`改标准路径清单认不出：${parsed}`);
+  const risks = standardFiles(files, parsed);
+  if (risks.length > 0) {
+    await resolveOne(deps, repo, pr.number, '改到了改标准的路径，不挂：等创始人同意');
+    deps.log('info', '每小时对账：不强制 CI 的任务 PR 改到改标准路径，不直接合并', {
+      repo: `${repo.owner}/${repo.name}`,
+      prNumber: pr.number,
+      hits: risks.slice(0, 3).map((r) => r.rule),
+    });
+    return;
+  }
+  if (!deps.gh.mergeNow) throw new Error('不强制 CI 的任务 PR 要直接合并，这一轮没接上直接合并');
+  const merged = await deps.gh.mergeNow(repo, { number: pr.number, expectedHead: pr.headSha });
+  if (!merged.merged) throw new Error(merged.detail ?? '直接合并没成');
+  part.found += 1;
+  deps.log('info', '每小时对账：不强制 CI 的任务 PR 已直接合并', {
+    repo: `${repo.owner}/${repo.name}`,
+    prNumber: pr.number,
+  });
+  await resolveOne(deps, repo, pr.number, '每小时对账直接合并了（这个仓不强制 CI）');
+}
+
 async function judgeOne(
   deps: AutoMergeCheckDeps,
-  repo: RepoRef,
+  repo: AutoMergeRepo,
   pr: PrAutoMergeCandidate,
   part: SweepPart,
 ): Promise<void> {
@@ -155,6 +204,10 @@ async function judgeOne(
     return;
   }
   if (isTaskBranch(pr.headRef)) {
+    if (repoCiPolicy(repo) === 'off') {
+      await mergeOffTaskBranch(deps, repo, pr, part);
+      return;
+    }
     await resolveOne(
       deps,
       repo,
@@ -206,7 +259,7 @@ async function judgeOne(
  */
 export async function checkAutoMerges(deps: AutoMergeCheckDeps): Promise<SweepPart> {
   const part: SweepPart = { scanned: 0, found: 0, unchecked: [] };
-  let repos: RepoRef[];
+  let repos: AutoMergeRepo[];
   try {
     repos = await deps.repos();
   } catch (err) {

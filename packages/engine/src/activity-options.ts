@@ -16,9 +16,13 @@ import {
   type DeliveryRead,
   type GuardedPaths,
   MERGE_POLL_MINUTES,
+  type MergeNowInput,
+  type MergeNowResult,
   type MergeWait,
   type ProbeAssignedInput,
   type ProbeAssignedResult,
+  type ReadCiPolicyInput,
+  type ReadCiPolicyResult,
   type ReadDeliveryInput,
   type ReadTaskBriefInput,
   type ReleaseReservationInput,
@@ -57,6 +61,10 @@ export type EngineActivities = PortActivities & {
   armAutoMerge(input: ArmAutoMergeInput): Promise<ArmAutoMergeResult>;
   /** 等 PR 合并（长轮询，到点回 waiting 由工作流再来一次）。 */
   waitMerged(input: WaitMergedInput): Promise<MergeWait>;
+  /** 现读这个仓的 CI 模式（强制 / 不强制）。没有这个受管仓抛错，不当成不强制。 */
+  readCiPolicy(input: ReadCiPolicyInput): Promise<ReadCiPolicyResult>;
+  /** 不强制 CI 的仓：直接合并这张 PR（不等检查）。 */
+  mergeNow(input: MergeNowInput): Promise<MergeNowResult>;
   /** 派单前对选定的这一条路由探一次（#1409）。没装探针报 JOB_NOT_CONFIGURED，不当成探通。 */
   probeAssignedRoute(input: ProbeAssignedInput): Promise<ProbeAssignedResult>;
   /** 派前探测不通、这轮不用这条路由：放掉选路预占的名额。没装放名额报 JOB_NOT_CONFIGURED，不装作放过。 */
@@ -102,6 +110,8 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   checkGuarded: 'git',
   armAutoMerge: 'git',
   waitMerged: 'poll',
+  readCiPolicy: 'quick',
+  mergeNow: 'git',
 };
 
 /** quick 一档（含排进合并队列、撤出）一次尝试的限时。合并队列的空闲收工时长不能比它短（limits.ts 的下限）。 */

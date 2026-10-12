@@ -8,6 +8,7 @@
 //
 // 一张单的路：读交代 → [选路 → 建树（第一轮）→ 动手会话 → 读交付 → 推分支 → 开 PR（第一轮）→ 等 CI → 冷验收] 最多 3 轮 →
 // 碰没碰「改标准」→ 挂自动合并 → 等合并 → 关单、收树。
+// 不强制 CI 的仓（patched('repo-ci-policy')，每次走到等 CI 之前现读）：开完 PR 跳过等 CI 和冷验收，查完改标准路径后引擎直接合并。
 // 返工只有这几种：没产生提交、CI 红了、合并冲突、验收没过；返工意见带进下一轮动手会话。验收最多 2 轮（specs/555）。
 //
 // 停下等人（waiting.kind = human，驾驶舱点「继续」「放弃」发信号）只有这几处，而且每一处都写清卡在哪、要人干什么：
@@ -29,6 +30,8 @@
 //   每小时对账的兜底不碰这些分支（jobs/auto-merge-check.ts）；拉单入口在闸或冷验收没接上时不让任何仓接活
 //   （jobs/intake.ts 的 MERGE_GATE_REQUIRES_COLD_VERIFY）。头换了（人推过新提交）就对新的头重走 CI 和验收，不原样重新挂：
 //   新头上没有 cold-verify，合并闸不会放行。
+//   不强制 CI 的仓（patched('repo-ci-policy')）例外：跳过等 CI 和冷验收，查完改标准路径后引擎直接合并。
+//   强制 CI 的仓仍是冷验收通过之后才挂自动合并。没把模式传进合并闸时，闸仍按强制拦。
 // - 动手会话只试一次（activity-options.ts 的 segment 档）：基础设施的失败由 task-session.ts 按失败分流重试、换路由、挂起，不靠 Temporal 自动再起一遍。
 // - 切号停下的动手会话（码 org_switch，#59）不算失败：失败分流 OS1 马上接着干、不记账、不看上一次的原文（不会凑成「同因连挂」）；
 //   选路照常选到切过去的那个池，同一棵树、同一个分支重跑这一段，提示词带上被停下的原因（interrupted）。
@@ -59,7 +62,7 @@ import {
   taskBranch,
 } from '../task-contract.ts';
 import { activitiesFor, limitsFor } from './kit.ts';
-import { waitForCi } from './task-ci.ts';
+import { readRepoCiPolicy, waitForCi, waitForCiPolicy } from './task-ci.ts';
 import { armAndWaitMerged, guardedPaths } from './task-merge.ts';
 import { TaskRuntime } from './task-runtime.ts';
 import { writeSession } from './task-session.ts';
@@ -70,6 +73,8 @@ import {
   conflictHandoffLine,
   emptyCommitFeedback,
   noteEmptyCommit,
+  SKIP_CI_PR_VERIFIED,
+  SKIP_CI_SELF_VERIFY,
   taskPrDid,
 } from './task-support.ts';
 import { syncMainlineBeforeImplement } from './task-sync.ts';
@@ -77,6 +82,8 @@ import { coldVerifyPr } from './task-verify.ts';
 
 class TaskFlow {
   private readonly rt: TaskRuntime;
+  /** 这个仓现在的 CI 模式。只在 patched('repo-ci-policy') 里更新；老历史保持 force，开 PR 的验证句不变。 */
+  private ciMode: 'force' | 'off' = 'force';
 
   constructor(input: TaskWorkflowInput, acts: EngineActivities, limits: Limits) {
     this.rt = new TaskRuntime(input, acts, limits);
@@ -128,21 +135,110 @@ class TaskFlow {
     const rt = this.rt;
     for (;;) {
       await rt.checkpoint();
-      const ci = await waitForCi(rt);
+      // 老历史没有这个标记：下面这一支的活动顺序和原来一字不差。
+      if (!patched('repo-ci-policy')) {
+        const ci = await waitForCi(rt);
+        if (ci.kind === 'merged') return { commit: ci.mergeCommit };
+        if (ci.kind === 'rework') return 'rework';
+
+        const verdict = await coldVerifyPr(rt, brief);
+        if (verdict === 'rework') return 'rework';
+        if (verdict === 'head_moved') {
+          rt.verifyRound = 0; // 头换了，验收对新的头重新数轮
+          continue;
+        }
+
+        await guardedPaths(rt);
+        const merged = await armAndWaitMerged(rt);
+        if (merged.kind === 'merged') return { commit: merged.commit };
+        rt.verifyRound = 0; // 头换了，验收对新的头重新数轮
+        continue;
+      }
+
+      const mode = await readRepoCiPolicy(rt);
+      this.ciMode = mode;
+      if (mode === 'off') {
+        const direct = await this.mergeNowAndFinish(rt);
+        if (direct === 'rework') return 'rework';
+        if (direct === 'head_moved') continue;
+        return direct;
+      }
+
+      const ci = await waitForCiPolicy(rt);
       if (ci.kind === 'merged') return { commit: ci.mergeCommit };
       if (ci.kind === 'rework') return 'rework';
+      if (ci.kind === 'skip') {
+        const direct = await this.mergeNowAndFinish(rt);
+        if (direct === 'rework') return 'rework';
+        if (direct === 'head_moved') continue;
+        return direct;
+      }
+
+      // 等 CI 的这段时间里仓可能切成不强制：绿了也不再做冷验收。
+      const again = await readRepoCiPolicy(rt);
+      this.ciMode = again;
+      if (again === 'off') {
+        const direct = await this.mergeNowAndFinish(rt);
+        if (direct === 'rework') return 'rework';
+        if (direct === 'head_moved') continue;
+        return direct;
+      }
 
       const verdict = await coldVerifyPr(rt, brief);
       if (verdict === 'rework') return 'rework';
       if (verdict === 'head_moved') {
-        rt.verifyRound = 0; // 头换了，验收对新的头重新数轮
+        rt.verifyRound = 0;
         continue;
       }
 
       await guardedPaths(rt);
       const merged = await armAndWaitMerged(rt);
       if (merged.kind === 'merged') return { commit: merged.commit };
-      rt.verifyRound = 0; // 头换了，验收对新的头重新数轮
+      rt.verifyRound = 0;
+    }
+  }
+
+  /** 不强制 CI：查改标准路径（碰到照旧停下等人），然后引擎直接合并。冲突交回动手会话。 */
+  private async mergeNowAndFinish(
+    rt: TaskRuntime,
+  ): Promise<'rework' | 'head_moved' | { commit?: string | undefined }> {
+    await guardedPaths(rt);
+    const prNumber = rt.prNumber;
+    if (prNumber === null || rt.head === null) throw new Error('合并之前还没有 PR');
+    for (;;) {
+      await rt.advance('merge', `PR #${prNumber} 不强制 CI，直接合并`);
+      const head: string = rt.head;
+      const r = await rt.step('mergeNow', () =>
+        rt.acts.mergeNow({
+          schemaVersion: 1,
+          repo: rt.input.repo,
+          prNumber,
+          expectedHead: head,
+          ...(rt.mainSyncs > 0 ? { syncedBehind: rt.mainSyncs } : {}),
+        }),
+      );
+      if (r.merged) return { commit: r.mergeCommit };
+      if (r.reason === 'conflict') {
+        rt.feedback = [r.detail ?? `PR #${prNumber} 和主线冲突，解完再交`];
+        rt.status.lastProblem = '和主线有冲突';
+        return 'rework';
+      }
+      if (r.headMoved !== undefined && r.syncedMain === true) {
+        rt.mainSyncs += 1;
+        rt.status.lastProblem = r.detail ?? `PR #${prNumber} 落后主线，已同步`;
+        rt.head = r.headMoved;
+        return 'head_moved';
+      }
+      if (r.headMoved !== undefined || r.reason === 'head_moved') {
+        const moved = r.headMoved ?? head;
+        await rt.park(
+          'PR 的头被别人改了',
+          `现在的头是 ${moved}，不是引擎推上去的 ${head}。点「继续」后按这个仓现在的 CI 模式接着做；不要了点「放弃」。`,
+        );
+        if (r.headMoved !== undefined) rt.head = r.headMoved;
+        return 'head_moved';
+      }
+      await rt.park('直接合并没成', r.detail ?? 'GitHub 没说为什么');
     }
   }
 
@@ -169,6 +265,13 @@ class TaskFlow {
   /** 一轮动手：选路 → 建树 → 会话 → 读交付 → 推分支 → 开 PR。回 false＝这一轮要返工（意见已记下）。 */
   private async implement(brief: TaskBrief, tier: TierDecision): Promise<boolean> {
     const rt = this.rt;
+    // 老历史没有这个标记：不读模式、不改提示、开 PR 的验证句仍是原来那句。
+    if (patched('repo-ci-policy')) {
+      this.ciMode = await readRepoCiPolicy(rt);
+      if (this.ciMode === 'off' && !rt.feedback.includes(SKIP_CI_SELF_VERIFY)) {
+        rt.feedback = [SKIP_CI_SELF_VERIFY, ...rt.feedback];
+      }
+    }
     rt.set('implement', `动手第 ${rt.round} 轮`);
     const wt = await this.ensureWorktree();
     await syncMainlineBeforeImplement(rt);
@@ -242,7 +345,11 @@ class TaskFlow {
           body: {
             requirement: rt.input.issueNumber,
             did: taskPrDid(rt.input.issueNumber, rt.round, rt.changedFiles.length),
-            verified: ['CI 和冷验收的结果看这个 PR 的检查（验收通过才挂自动合并）'],
+            verified: [
+              patched('repo-ci-policy') && this.ciMode === 'off'
+                ? SKIP_CI_PR_VERIFIED
+                : 'CI 和冷验收的结果看这个 PR 的检查（验收通过才挂自动合并）',
+            ],
           },
         }),
       );

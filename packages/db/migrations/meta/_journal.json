@@ -393,6 +393,13 @@
       "when": 1791702484061,
       "tag": "0055_chilly_vance_astro",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1791803020031,
+      "tag": "0056_freezing_terror",
+      "breakpoints": true
     }
   ]
 }

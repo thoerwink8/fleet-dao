@@ -542,6 +542,23 @@ describe('合并', () => {
     }
   });
 
+  it('不强制 CI：一项检查都没有也直接合', async () => {
+    const { gh, fake } = setup();
+    fake.requiredChecks = [];
+    const pr = fake.addPull({ head: { ref: 'task/1', sha: A } });
+    const res = await gh.mergePr({ repo, prNumber: pr.number, expectedHead: A, requireCi: false });
+    expect(res).toMatchObject({ merged: true, alreadyMerged: false });
+  });
+
+  it('默认仍核 CI：一项必过检查都没有就拒绝，不当绿', async () => {
+    const { gh, fake } = setup();
+    fake.requiredChecks = [];
+    const pr = fake.addPull({ head: { ref: 'task/1', sha: A } });
+    await expect(gh.mergePr({ repo, prNumber: pr.number, expectedHead: A })).rejects.toMatchObject({
+      code: 'NO_REQUIRED_CHECKS',
+    });
+  });
+
   it('C10：mergeable 还没算出来就重读，算出来再合；一直算不出来就报可重试', async () => {
     const first = setup();
     const pr = ready(first.fake);

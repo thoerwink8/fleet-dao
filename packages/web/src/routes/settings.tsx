@@ -12,6 +12,7 @@ import {
   useAudit,
   useMe,
   usePools,
+  useRepoCiPolicy,
   useRepoDispatch,
   useSettings,
   useUpdateSetting,
@@ -29,6 +30,7 @@ import { StatusDot } from '../components/layout/status-badge';
 import { PageNav } from '../components/page-nav';
 import { PoolHoldsPanel } from '../components/pool-holds';
 import { RefreshBar } from '../components/refresh-bar';
+import { RepoCiPolicyControl } from '../components/repo-ci-policy';
 import { useRepo } from '../components/repo-context';
 import { RepoDispatchControl } from '../components/repo-dispatch';
 import { RepoGroomControl } from '../components/repo-groom';
@@ -563,6 +565,7 @@ export default function Settings() {
   const { repos, loading: reposLoading, error: reposError } = useRepo();
   const settings = useSettings();
   const dispatch = useRepoDispatch();
+  const ciPolicy = useRepoCiPolicy();
   const repoFailure = repoReadFailure(reposError, dispatch.error);
   const find = (k: SettingKey) => settings.data?.settings.find((s) => s.key === k);
 
@@ -588,7 +591,7 @@ export default function Settings() {
             id="repos"
             icon={FolderGit2}
             title="仓库"
-            description="接进来的仓。一个仓接进来要满足：测试能跑、有一页 AGENTS.md。每个仓一行：接活开关在中间，整理在行尾，点「详情」看整理记录。"
+            description="接进来的仓。一个仓接进来要满足：测试能跑、有一页 AGENTS.md。每个仓一行：接活开关和 CI 模式在中间，整理在行尾，点「详情」看整理记录。"
           >
             {/* 总开关和按项目开关的关系（#1086）：总开关关＝全停，开＝只有接活开着的项目才派 */}
             <EngineMasterRelation />
@@ -621,6 +624,11 @@ export default function Settings() {
                         repoId={r.id}
                         name={`${r.owner}/${r.name}`}
                         row={dispatch.data?.repos.find((d) => d.repoId === r.id)}
+                      />
+                      <RepoCiPolicyControl
+                        repoId={r.id}
+                        name={`${r.owner}/${r.name}`}
+                        row={ciPolicy.data?.repos.find((d) => d.repoId === r.id)}
                       />
                       <RepoGroomControl repoId={r.id} repo={{ owner: r.owner, name: r.name }} />
                     </li>

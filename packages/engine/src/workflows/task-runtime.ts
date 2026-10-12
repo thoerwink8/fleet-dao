@@ -24,6 +24,7 @@ import type { RouteChoice, Worktree } from '../ports.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import {
   type AbandonCommand,
+  CI_POLICY_POLL_SECONDS,
   type GuardedPaths,
   MAX_ROUND_RESETS,
   PAUSED_BY_HUMAN,
@@ -400,6 +401,56 @@ export class TaskRuntime {
     this.status.phase = previous;
     this.status.lastProblem = null;
     await this.mirror('running');
+  }
+
+  /**
+   * 停下等人，但每 CI_POLICY_POLL_SECONDS 秒问一次 leave。leave 回 true：恢复运行并回 left（仓已切成不强制 CI）。
+   * 人点「继续」回 stayed。放弃抛 Abandoned。还没离开就继续等，不每轮再报警。
+   * 只给 patched('repo-ci-policy') 的新路径用；老的 park() 仍是无限等。
+   */
+  async parkUnless(title: string, detail: string, leave: () => Promise<boolean>): Promise<'left' | 'stayed'> {
+    this.guard();
+    this.parks += 1;
+    const before = this.continued;
+    const previous = this.status.phase;
+    this.status.lastProblem = title;
+    this.status.phase = 'parked';
+    this.status.doing = `停下等人：${title}`;
+    await this.mirror('stalled');
+    try {
+      await CancellationScope.nonCancellable(() =>
+        this.acts.raiseAlert({
+          taskId: this.input.taskId,
+          level: 'stuck',
+          title,
+          detail,
+          dedupeKey: `${workflowInfo().workflowId}:park:${this.parks}`,
+        }),
+      );
+    } catch (error) {
+      log.warn('报警没发出去，照样停下等人', { title, error: String(error) });
+    }
+    for (;;) {
+      const woken = await this.waiting('human', `${title}（等「继续」或「放弃」，或仓改成不强制 CI）`, () =>
+        condition(
+          () => this.continued > before || this.abandon !== null,
+          `${CI_POLICY_POLL_SECONDS} seconds`,
+        ),
+      );
+      this.guard();
+      if (woken && this.continued > before) {
+        this.status.phase = previous;
+        this.status.lastProblem = null;
+        await this.mirror('running');
+        return 'stayed';
+      }
+      if (await leave()) {
+        this.status.phase = previous;
+        this.status.lastProblem = null;
+        await this.mirror('running');
+        return 'left';
+      }
+    }
   }
 
   // ---- 失败分流

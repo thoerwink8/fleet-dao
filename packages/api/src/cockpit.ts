@@ -53,6 +53,7 @@ import { type Context, Hono } from 'hono';
 import type { z } from 'zod';
 import { meBody } from './auth.ts';
 import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reconcile-view.ts';
+import { registerCiPolicyRoutes } from './ci-policy-routes.ts';
 import { registerCredentialRoutes } from './credentials.ts';
 import type { Deps } from './deps.ts';
 import { registerDispatchRoutes } from './dispatch-routes.ts';
@@ -835,6 +836,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
 
   registerCredentialRoutes(app, deps);
   registerDispatchRoutes(app, deps, actorOf);
+  registerCiPolicyRoutes(app, deps, actorOf);
   registerRoutingOrderRoutes(app, deps, actorOf);
   registerRouteProbeRoutes(app, deps, actorOf, engineProbe);
   registerGroomRoutes(app, deps, actorOf, engineProbe);

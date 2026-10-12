@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { allGreen, type Gh, idlePrs, loadPathLists, type RunResult } from '../src/pr-arm.ts';
+import { allGreen, armable, type Gh, idlePrs, loadPathLists, type RunResult } from '../src/pr-arm.ts';
 import { parseCreatedPr, prOpen } from '../src/pr-open.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -391,5 +391,51 @@ describe('idlePrs：我开的、全绿、没挂自动合并、没碰改标准的
     expect(allGreen([{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'FAILURE' }])).toBe(false);
     expect(allGreen([{ __typename: 'StatusContext', state: 'PENDING' }])).toBe(false);
     expect(allGreen([{ __typename: 'Other' }])).toBe(false);
+  });
+
+  it('默认不向 gh 多要分支名；只有显式不强制才加 headRefName', () => {
+    const calls: string[][] = [];
+    idlePrs((a) => {
+      calls.push(a);
+      return ok('[]');
+    }, LISTS);
+    expect(calls[0]).toContain('number,title,isDraft,autoMergeRequest,statusCheckRollup');
+    expect(calls[0]?.join(' ')).not.toContain('headRefName');
+
+    const offCalls: string[][] = [];
+    idlePrs(
+      (a) => {
+        offCalls.push(a);
+        return ok('[]');
+      },
+      LISTS,
+      { ciPolicy: 'off' },
+    );
+    expect(offCalls[0]).toContain('number,title,isDraft,autoMergeRequest,statusCheckRollup,headRefName');
+  });
+
+  it('armable：空的检查只有「不强制 CI 且是引擎分支」才算过，别的仍要至少一项', () => {
+    expect(armable([], { ciPolicy: 'off', engineBranch: true })).toBe(true);
+    expect(armable([])).toBe(false);
+    expect(armable([], { ciPolicy: 'off' })).toBe(false);
+    expect(armable([], { ciPolicy: 'off', engineBranch: false })).toBe(false);
+    expect(armable([], { ciPolicy: 'force', engineBranch: true })).toBe(false);
+    expect(allGreen([])).toBe(false);
+  });
+
+  it('不强制 CI：只放行引擎任务分支，空检查的别的分支和改标准的仍不放', () => {
+    const replies = [
+      ok(
+        JSON.stringify([
+          pr(1, { headRefName: 'fleet/12-t1a2b3c4d', statusCheckRollup: [] }),
+          pr(2, { headRefName: 'fix/typo', statusCheckRollup: [] }),
+          pr(3, { headRefName: 'fleet/99-tabcdef01', statusCheckRollup: [] }),
+        ]),
+      ),
+      files('packages/api/src/home.ts'),
+      files('agents/shared-rules.md'),
+    ];
+    const got = idlePrs(() => replies.shift() ?? bad('多调了'), LISTS, { ciPolicy: 'off' });
+    expect(got).toEqual([{ number: 1, title: 'PR 1' }]);
   });
 });

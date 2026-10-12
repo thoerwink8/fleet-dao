@@ -15,7 +15,10 @@ import {
   GroomNowRequest,
   GroomNowResponse,
   GroomStatusResponse,
+  RepoCiPolicyResponse,
   RepoDispatchResponse,
+  UpdateRepoCiPolicyRequest,
+  UpdateRepoCiPolicyResponse,
   UpdateRepoDispatchRequest,
   UpdateRepoDispatchResponse,
 } from './dispatch.ts';
@@ -117,6 +120,15 @@ export const WebRoutes = {
     path: '/repos/:repoId/dispatch',
     request: UpdateRepoDispatchRequest,
     response: UpdateRepoDispatchResponse,
+  },
+  /** 设置页「仓库」一节：每个项目现在是强制 CI 还是不强制，以及最近几次切换。 */
+  repoCiPolicy: { method: 'GET', path: '/repos/ci-policy', response: RepoCiPolicyResponse },
+  /** 切换一个项目的 CI 模式（记操作记录）；本来就是这个模式时 changed=false。没有这个项目 404。 */
+  updateRepoCiPolicy: {
+    method: 'PUT',
+    path: '/repos/:repoId/ci-policy',
+    request: UpdateRepoCiPolicyRequest,
+    response: UpdateRepoCiPolicyResponse,
   },
   /** 「让指挥官整理」按钮的现状（母单 #1335 第 3 片，#1338）：这个项目今日剩余次数、最近几次结果、有没有一次在排队或在做。没有这个项目 404。 */
   groomStatus: { method: 'GET', path: '/repos/:repoId/dispatch/groom', response: GroomStatusResponse },

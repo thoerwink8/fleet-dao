@@ -137,9 +137,17 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
     );
   }
   if (data.repos?.length) {
-    await db
-      .insert(repos)
-      .values(data.repos.map((r) => ({ ...r, autoDispatchSince: dateOpt(r.autoDispatchSince) })));
+    await db.insert(repos).values(
+      data.repos.map((r) => {
+        // 没写 ciPolicy 就别插：undefined 会变成 null，顶掉库的默认「强制」。
+        const { ciPolicy, ...rest } = r;
+        return {
+          ...rest,
+          autoDispatchSince: dateOpt(r.autoDispatchSince),
+          ...(ciPolicy !== undefined ? { ciPolicy } : {}),
+        };
+      }),
+    );
   }
   if (data.tasks?.length) {
     await db.insert(tasks).values(

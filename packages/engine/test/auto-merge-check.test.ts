@@ -52,6 +52,8 @@ interface Over {
   requiredChecks?: AutoMergeCheckDeps['gh']['requiredChecks'];
   readStandardPathsFile?: AutoMergeCheckDeps['gh']['readStandardPathsFile'];
   enableAutoMerge?: AutoMergeCheckDeps['gh']['enableAutoMerge'];
+  /** 不给就不接直接合并：不强制 CI 的任务分支会记没查成。 */
+  mergeNow?: NonNullable<AutoMergeCheckDeps['gh']['mergeNow']>;
   listOpenByPrefix?: AutoMergeCheckDeps['autoMergeAlerts']['listOpenByPrefix'];
 }
 
@@ -80,6 +82,7 @@ function world(o: Over = {}): World {
         enabled.push({ repo: `${repo.owner}/${repo.name}`, number: pull.number, nodeId: pull.nodeId });
         if (o.enableAutoMerge) await o.enableAutoMerge(repo, pull);
       },
+      ...(o.mergeNow ? { mergeNow: o.mergeNow } : {}),
     },
     autoMergeAlerts: {
       raise: async (input) => {
@@ -173,6 +176,93 @@ describe('开着的 PR 由对账兜底挂上自动合并', () => {
     expect(part).toMatchObject({ scanned: 1, found: 0, unchecked: [] });
     expect(w.enabled).toEqual([]);
     expect(w.raised).toEqual([]);
+    expect(read).toBe(0);
+    expect(w.resolved[0]?.why).toContain('任务工作流的 PR');
+  });
+
+  it('不强制 CI 的任务分支：不看检查，直接合并', async () => {
+    let readChecks = 0;
+    const merged: number[] = [];
+    const w = world({
+      repos: async () => [{ ...REPO, ciPolicy: 'off' }],
+      listPrs: async () => [pr({ headRef: 'fleet/12-t1a2b3c4d' })],
+      checksEvaluate: async () => {
+        readChecks += 1;
+        return 'red';
+      },
+      mergeNow: async (_repo, pull) => {
+        merged.push(pull.number);
+        return { merged: true };
+      },
+    });
+    const part = await checkAutoMerges(w.deps);
+    expect(part).toMatchObject({ scanned: 1, found: 1, unchecked: [] });
+    expect(merged).toEqual([88]);
+    expect(w.enabled).toEqual([]);
+    expect(readChecks).toBe(0);
+    expect(w.resolved[0]?.why).toContain('不强制 CI');
+  });
+
+  it('不强制 CI 的任务分支改到改标准路径：不合并', async () => {
+    let merged = 0;
+    const w = world({
+      repos: async () => [{ ...REPO, ciPolicy: 'off' }],
+      listPrs: async () => [pr({ headRef: 'fleet/12-t1a2b3c4d' })],
+      pullFiles: async () => [{ filename: 'AGENTS.md', status: 'modified' }],
+      mergeNow: async () => {
+        merged += 1;
+        return { merged: true };
+      },
+    });
+    const part = await checkAutoMerges(w.deps);
+    expect(part).toMatchObject({ scanned: 1, found: 0, unchecked: [] });
+    expect(merged).toBe(0);
+    expect(w.resolved[0]?.why).toContain('改标准');
+  });
+
+  it('【故意造出的失败】不强制 CI 的任务分支没接上直接合并：记没查成，不当成合过', async () => {
+    const w = world({
+      repos: async () => [{ ...REPO, ciPolicy: 'off' }],
+      listPrs: async () => [pr({ headRef: 'fleet/12-t1a2b3c4d' })],
+    });
+    const part = await checkAutoMerges(w.deps);
+    expect(part.found).toBe(0);
+    expect(part.unchecked.join('\n')).toContain('没接上直接合并');
+    expect(w.enabled).toEqual([]);
+  });
+
+  it('不强制 CI 的普通分支仍走检查，不借任务分支放行', async () => {
+    let merged = 0;
+    const w = world({
+      repos: async () => [{ ...REPO, ciPolicy: 'off' }],
+      listPrs: async () => [pr({ headRef: 'fix/widget-typo' })],
+      mergeNow: async () => {
+        merged += 1;
+        return { merged: true };
+      },
+    });
+    const part = await checkAutoMerges(w.deps);
+    expect(part).toMatchObject({ scanned: 1, found: 1, unchecked: [] });
+    expect(w.enabled).toEqual([{ repo: 'acme/widgets', number: 88, nodeId: 'PR_88' }]);
+    expect(merged).toBe(0);
+  });
+
+  it('显式强制的任务分支仍不读文件、不直接合并', async () => {
+    let read = 0;
+    const w = world({
+      repos: async () => [{ ...REPO, ciPolicy: 'force' }],
+      listPrs: async () => [pr({ headRef: 'fleet/12-t1a2b3c4d' })],
+      pullFiles: async () => {
+        read += 1;
+        return [];
+      },
+      mergeNow: async () => {
+        read += 1;
+        return { merged: true };
+      },
+    });
+    const part = await checkAutoMerges(w.deps);
+    expect(part).toMatchObject({ scanned: 1, found: 0, unchecked: [] });
     expect(read).toBe(0);
     expect(w.resolved[0]?.why).toContain('任务工作流的 PR');
   });

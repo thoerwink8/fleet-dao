@@ -75,6 +75,35 @@ export const autoDispatchChanged = (after: string | null, auditId: string): Auto
   auditId,
 });
 
+/** CI 模式没变：不改、不记。 */
+export const isCiPolicyUnchanged = (before: 'force' | 'off', mode: 'force' | 'off'): boolean =>
+  before === mode;
+
+export const ciPolicyUnchanged = (before: 'force' | 'off'): import('./ports.ts').CiPolicyChange => ({
+  changed: false,
+  ciPolicy: before,
+});
+
+export const ciPolicyChanged = (
+  after: 'force' | 'off',
+  auditId: string,
+): import('./ports.ts').CiPolicyChange => ({
+  changed: true,
+  ciPolicy: after,
+  auditId,
+});
+
+/** CI 模式改动的操作记录：before、after 都是 { ciPolicy }。 */
+export const ciPolicyAudit = (
+  entry: Omit<NewAuditEntry, 'before' | 'after'>,
+  before: 'force' | 'off',
+  after: 'force' | 'off',
+): NewAuditEntry => ({
+  ...entry,
+  before: { ciPolicy: before },
+  after: { ciPolicy: after },
+});
+
 /** 开关改动的操作记录：before、after 都是开关的打开时刻。 */
 export const autoDispatchAudit = (
   entry: Omit<NewAuditEntry, 'before' | 'after'>,

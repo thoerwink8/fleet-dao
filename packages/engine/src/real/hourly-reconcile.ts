@@ -173,6 +173,8 @@ export interface AutoMergeWiringGitHub {
   pullFiles: GitHub['pullFiles'];
   readRepoFile: GitHub['readRepoFile'];
   deps: GitHub['deps'];
+  /** 不强制 CI 的任务分支由对账直接合并。测试装配不给真合并时，默认实现仍要这个方法在类型上。 */
+  mergePr: GitHub['mergePr'];
   /** 主线上读的改标准路径清单文件名；默认 packages/conventions/standard-paths.json（#242）。*/
   standardPathsFile?: string;
 }
@@ -318,7 +320,7 @@ export function hourlyReconcileJob(
     w.stageAllOpen ?? ((stage) => store.stageAllOpen(stage));
   // 受管的仓：两处核对里审合并的 PR、机器人权限自检都按这一份（库里的 repos 表）
   const managedRepos = async () =>
-    (await listManagedRepos(w.db)).map((r) => ({ owner: r.owner, name: r.name }));
+    (await listManagedRepos(w.db)).map((r) => ({ owner: r.owner, name: r.name, ciPolicy: r.ciPolicy }));
   // 谁在处理（24 小时再推不给有人在处理、静默了的推）：和驾驶舱同一个口子、同一份判法（原来还有提醒派单，#445 删掉了）
   const alertWork = pgAlertWork(w.db, () => deployFacts(readDeployLagInput()));
   const handling: HourlyReconcileJobDeps['handling'] = async (ids) => {
@@ -395,6 +397,16 @@ export function hourlyReconcileJob(
       return r.file.text;
     },
     enableAutoMerge: (repo: RepoRef, pull) => w.gh.claims.enableAutoMerge(repo, pull),
+    async mergeNow(repo: RepoRef, pull: { number: number; expectedHead: string }) {
+      const r = await w.gh.mergePr({
+        repo,
+        prNumber: pull.number,
+        expectedHead: pull.expectedHead,
+        requireCi: false,
+      });
+      if (r.merged) return { merged: true };
+      return { merged: false, detail: r.detail };
+    },
   };
   const autoMergeAlerts: HourlyReconcileJobDeps['autoMergeAlerts'] = w.autoMergeAlerts ?? {
     async raise(x) {

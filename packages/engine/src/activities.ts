@@ -40,8 +40,12 @@ import type {
   ColdVerifyResult,
   DeliveryRead,
   GuardedPaths,
+  MergeNowInput,
+  MergeNowResult,
   MergeWait,
   ProbeAssignedInput,
+  ReadCiPolicyInput,
+  ReadCiPolicyResult,
   ReadDeliveryInput,
   ReadTaskBriefInput,
   ReleaseReservationInput,
@@ -234,6 +238,10 @@ export interface EngineTasks {
   checkGuarded?: (input: CheckGuardedInput, ctx: PortContext) => Promise<GuardedPaths>;
   armAutoMerge?: (input: ArmAutoMergeInput, ctx: PortContext) => Promise<ArmAutoMergeResult>;
   waitMerged?: (input: WaitMergedInput, ctx: PortContext) => Promise<MergeWait>;
+  /** 现读这个仓的 CI 模式。没有这个受管仓要抛，不许当成不强制。 */
+  readCiPolicy?: (input: ReadCiPolicyInput, ctx: PortContext) => Promise<ReadCiPolicyResult>;
+  /** 不强制 CI：直接合并，不等检查。 */
+  mergeNow?: (input: MergeNowInput, ctx: PortContext) => Promise<MergeNowResult>;
 }
 
 /** 任务工作流的活动名全集（写成 Record 让编译器保证一个不漏）。 */
@@ -245,6 +253,8 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   checkGuarded: true,
   armAutoMerge: true,
   waitMerged: true,
+  readCiPolicy: true,
+  mergeNow: true,
 };
 export const TASK_ACTIVITY_NAMES = Object.keys(TASK_ACTIVITY_KEYS) as (keyof EngineTasks)[];
 
