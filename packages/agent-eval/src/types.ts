@@ -55,6 +55,6 @@ export interface EvalCase {
 
 /** 方案第三节：这两种要浏览器，自动探查不做。 */
 export const SKIPPED_SCENARIOS: readonly { scenario: string; agent: string; reason: string }[] = [
-  { scenario: 'ui-builder', agent: 'fleet-ui-builder', reason: '要浏览器，自动探查不做（靠截图人看）' },
-  { scenario: 'ui-verifier', agent: 'fleet-ui-verifier', reason: '要浏览器，自动探查不做（靠截图人看）' },
+  { scenario: 'ui-builder', agent: 'general-purpose', reason: '要浏览器，自动探查不做（靠截图人看）' },
+  { scenario: 'ui-verifier', agent: 'general-purpose', reason: '要浏览器，自动探查不做（靠截图人看）' },
 ];

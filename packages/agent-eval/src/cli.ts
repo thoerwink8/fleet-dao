@@ -184,7 +184,7 @@ export async function main(argv: readonly string[], deps: CliDeps = {}): Promise
   let defs: Map<string, AgentDefinition>;
   try {
     defs = new Map(
-      loadAgentDefinitions(deps.definitionsDir ?? join(repoRoot, '.claude', 'agents')).map((d) => [
+      loadAgentDefinitions(deps.definitionsDir ?? join(repoRoot, 'agents', 'subagents')).map((d) => [
         d.name,
         d,
       ]),

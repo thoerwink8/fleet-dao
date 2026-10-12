@@ -328,12 +328,12 @@ export const PATH_RULES: readonly Rule[] = [
     deploy: 'ops',
     why: 'deploy/test 核对端口表、放文件的命令，db 的测试读它',
   },
-  // 决定 0035 的钉子测试 agents/test/rules/subagent-model.rules.test.ts 读 docs/decisions/0035-…md 核对七点都在：
-  // 只改这份决定文档也要测 agents（其余 decisions/ 是历史记录，#654，不进门）。
+  // 决定 0087 的钉子测试 agents/test/rules/subagent-model.rules.test.ts 读 docs/decisions/0087-…md 核对要点都在：
+  // 只改这份决定文档也要测 agents（其余 decisions/ 是历史记录，#654，不进门）。0035 原先也读，0087 取代了那一半，不再读。
   {
-    match: exact('docs/decisions/0035-haiku55-by-checkable-output.md'),
+    match: exact('docs/decisions/0087-three-subagent-roles.md'),
     units: [AGENTS_UNIT],
-    why: 'subagent-model.rules.test.ts 读它核对决定 0035 的七点',
+    why: 'subagent-model.rules.test.ts 读它核对决定 0087 的要点',
   },
   // agents/ 是 agents-sync 的输入，也是 agents 单测的输入：通用段原件 agents/shared-rules.md 标记成对、skill 格式由
   // agents-sync 和 agents 的单测读真文件核对，通用段自己也被 agents 的钉子测试读（agents/test/rules/ 读这几条规矩在不在，#522）。
@@ -355,6 +355,12 @@ export const PATH_RULES: readonly Rule[] = [
     match: under('agents/skills/commander/scripts/france-'),
     units: [AGENTS_UNIT, 'agents-sync', 'conventions'],
     why: 'skill 由 agents-sync 分发；conventions 的测试拿 ssh 名字的判法和它对拍',
+  },
+  // 三个子代理角色的定义（决定 0087）：agents-sync 装到各家，adapters 转成 --agents（测试读真文件），agent-eval 拿它出题
+  {
+    match: under('agents/subagents/'),
+    units: [AGENTS_UNIT, 'agents-sync', 'adapters', 'agent-eval'],
+    why: '子代理定义由 agents-sync 分发，引擎经 adapters 转成 --agents，agent-eval 读它探查',
   },
   {
     match: under('agents/'),

@@ -207,7 +207,7 @@ export const READING_CASES: EvalCase[] = [
     id: 'scout/route-probe-entry',
     scenario: 'scout',
     name: 'route-probe-entry',
-    agent: 'fleet-scout',
+    agent: 'Explore',
     prompt:
       `${PREAMBLE}当前目录是 fleet-dao 仓在某个固定提交的快照。问题：引擎里「定时路由探针跑一轮」的入口函数是哪个？` +
       '回答格式：一行「函数名 — 文件:行」，文件路径从仓根算起，行号是函数声明所在行。',
@@ -220,7 +220,7 @@ export const READING_CASES: EvalCase[] = [
     id: 'scout/hourly-reconcile-entry',
     scenario: 'scout',
     name: 'hourly-reconcile-entry',
-    agent: 'fleet-scout',
+    agent: 'Explore',
     prompt:
       `${PREAMBLE}当前目录是 fleet-dao 仓在某个固定提交的快照。问题：引擎里「每小时对账」跑一轮的入口函数是哪个？` +
       '回答格式：一行「函数名 — 文件:行」，文件路径从仓根算起，行号是函数声明所在行。',
@@ -234,7 +234,7 @@ export const READING_CASES: EvalCase[] = [
     id: 'log-digest/three-failures',
     scenario: 'log-digest',
     name: 'three-failures',
-    agent: 'fleet-log-digest',
+    agent: 'Explore',
     prompt:
       `${PREAMBLE}当前目录里的 \`ci-output.txt\` 是一次红灯的 CI 日志。把红的那几条缩成证据行：每个失败的用例，` +
       '摘出它的完整用例名（`文件 > 组 > 名字` 那一串里的最后两段即可）和原文里那行 `AssertionError…`。不写原因、不写怎么修。',
@@ -262,7 +262,7 @@ export const READING_CASES: EvalCase[] = [
     id: 'log-digest/retry-noise',
     scenario: 'log-digest',
     name: 'retry-noise',
-    agent: 'fleet-log-digest',
+    agent: 'Explore',
     prompt:
       `${PREAMBLE}当前目录里的 \`ci-output.txt\` 是一次红灯的 CI 日志（跑测试时带了 --retry=1）。把真正红的那几条缩成证据行：` +
       '每个最终失败的用例，摘出它的完整用例名（`组 > 名字`）和原文里那行 `AssertionError…`。不写原因、不写怎么修。',
@@ -285,7 +285,7 @@ export const READING_CASES: EvalCase[] = [
     id: 'triage/briefs-a',
     scenario: 'triage',
     name: 'briefs-a',
-    agent: 'fleet-triage',
+    agent: 'Explore',
     prompt:
       `${PREAMBLE}\`briefs/\` 下有 5 份任务书草稿（brief-1.md 到 brief-5.md）。按下面的规矩逐份判，` +
       '这里没有 check-brief.mjs，你自己读文件判。不下「该不该做」的结论。\n\n' +
@@ -301,7 +301,7 @@ export const READING_CASES: EvalCase[] = [
     id: 'triage/briefs-b',
     scenario: 'triage',
     name: 'briefs-b',
-    agent: 'fleet-triage',
+    agent: 'Explore',
     prompt:
       `${PREAMBLE}\`briefs/\` 下有 5 份任务书草稿（brief-1.md 到 brief-5.md）。按下面的规矩逐份判，` +
       '这里没有 check-brief.mjs，你自己读文件判。不下「该不该做」的结论。\n\n' +
@@ -317,7 +317,7 @@ export const READING_CASES: EvalCase[] = [
     id: 'ci-triager/renamed-method',
     scenario: 'ci-triager',
     name: 'renamed-method',
-    agent: 'fleet-ci-triager',
+    agent: 'Explore',
     prompt:
       `${PREAMBLE}当前目录里有一次红灯的 CI 日志 \`ci-output.txt\`、提交清单 \`commits.md\`，和两个提交的 diff（另一个提交只改了文档，没附 diff）。` +
       '问：哪个提交弄红的、根因是什么。\n回答格式（两行就够，后面可以补证据）：\n罪魁: <7 位提交号>\n根因: <一句话>',
@@ -331,7 +331,7 @@ export const READING_CASES: EvalCase[] = [
     id: 'ci-triager/retries-default',
     scenario: 'ci-triager',
     name: 'retries-default',
-    agent: 'fleet-ci-triager',
+    agent: 'Explore',
     prompt:
       `${PREAMBLE}当前目录里有一次红灯的 CI 日志 \`ci-output.txt\`、提交清单 \`commits.md\`，和两个提交的 diff（第三个提交只改了文档，没附 diff）。` +
       '问：哪个提交弄红的、根因是什么。\n回答格式（两行就够，后面可以补证据）：\n罪魁: <7 位提交号>\n根因: <一句话>',
@@ -345,7 +345,7 @@ export const READING_CASES: EvalCase[] = [
     id: 'groomer/four-issues-a',
     scenario: 'groomer',
     name: 'four-issues-a',
-    agent: 'fleet-groomer',
+    agent: 'Explore',
     prompt:
       `${PREAMBLE}当前目录里 \`issues.md\` 是 4 张待审的单，\`main-facts.md\` 是主线事实（只有那里写的，别的你不知道，不要猜）。` +
       '每张单判一个结论：\n- 做完：怎么算做完的每一条主线事实都证明做到了；\n- 没做完：有一条没做到或没证据；\n- 过期：它要改的对象已经不存在或被取代。\n' +
@@ -360,7 +360,7 @@ export const READING_CASES: EvalCase[] = [
     id: 'groomer/four-issues-b',
     scenario: 'groomer',
     name: 'four-issues-b',
-    agent: 'fleet-groomer',
+    agent: 'Explore',
     prompt:
       `${PREAMBLE}当前目录里 \`issues.md\` 是 4 张待审的单，\`main-facts.md\` 是主线事实（只有那里写的，别的你不知道，不要猜）。` +
       '每张单判一个结论：\n- 做完：怎么算做完的每一条主线事实都证明做到了；\n- 没做完：有一条没做到或没证据；\n- 过期：它要改的对象已经不存在或被取代。\n' +
@@ -375,7 +375,7 @@ export const READING_CASES: EvalCase[] = [
     id: 'researcher/agents-priority',
     scenario: 'researcher',
     name: 'agents-priority',
-    agent: 'fleet-researcher',
+    agent: 'Explore',
     prompt:
       `${PREAMBLE}（这一题不用写 _tmp 文件，答案直接写在最终回答里。）\n` +
       '问题：Claude Code 里，同名的子代理定义同时出现在几处时谁优先？命令行 `--agents` 传的定义，在这个优先级里排第几，' +

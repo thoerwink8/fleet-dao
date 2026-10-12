@@ -137,8 +137,8 @@ export const SETTING_SCHEMAS = {
    */
   'engine.master': z.boolean(),
   /**
-   * 动手会话的提示词里加一句「可以派哪些子代理、什么时候派」（#1641：查代码派 fleet-scout，自审派 fleet-review-screen，Opus 档只在
-   * 疑难时派）。没设过 = false（默认关：验收量完再由指挥官开）。
+   * 动手会话的提示词里加一句「可以派哪些子代理、什么时候派」（#1641；决定 0087 三个角色：查代码、初筛派斥候 Explore，设计 Plan
+   * 只在疑难时派）。没设过 = false（默认关：验收量完再由指挥官开）。
    */
   'engine.subagentHint': z.boolean(),
 } as const;

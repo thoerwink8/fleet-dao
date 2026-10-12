@@ -67,7 +67,7 @@ export const ARCHITECT_CASES: EvalCase[] = [
     id: 'architect/engine-concurrency-limit',
     scenario: 'architect',
     name: 'engine-concurrency-limit',
-    agent: 'fleet-architect',
+    agent: 'Plan',
     prompt: QUESTION,
     source: { kind: 'fixture' },
     usesJudge: true,

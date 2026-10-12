@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { ALL_CASES } from '../src/cases/index.ts';
 import {
   allowedToolsOf,
+  BUILTIN_TOOLS,
   DefinitionError,
   loadAgentDefinitions,
   parseAgentDefinition,
@@ -49,6 +50,18 @@ describe('parseAgentDefinition：认得出的', () => {
     expect(allowedToolsOf(parseAgentDefinition(GOOD, 'demo.md'))).toEqual(['Read', 'Grep']);
   });
 
+  it('tools 没写是 undefined、等于内置工具全给；disallowedTools 里的从里面去掉（只读的角色这样挡写文件，决定 0087）', () => {
+    const open = parseAgentDefinition(GOOD.replace(/tools: .*\n/, ''), 'demo.md');
+    expect(open.tools).toBeUndefined();
+    expect(allowedToolsOf(open)).toEqual(BUILTIN_TOOLS);
+    const readOnly = parseAgentDefinition(
+      GOOD.replace(/tools: .*\n/, 'disallowedTools: Edit, Write, NotebookEdit\n'),
+      'demo.md',
+    );
+    expect(readOnly.disallowedTools).toEqual(['Edit', 'Write', 'NotebookEdit']);
+    expect(allowedToolsOf(readOnly)).toEqual(['Read', 'Grep', 'Glob', 'Bash', 'WebSearch', 'WebFetch']);
+  });
+
   it('frontmatter 里的列表（skills:）认得，不影响别的键', () => {
     const d = parseAgentDefinition(
       GOOD.replace('color: cyan', 'skills:\n  - frontend-design\ncolor: cyan'),
@@ -63,7 +76,7 @@ describe('parseAgentDefinition：认不出的报错，不猜', () => {
     ['没有 frontmatter', '你好', /第一行不是 ---/],
     ['frontmatter 没收尾', '---\nname: x\n', /没有结尾/],
     ['缺 model', GOOD.replace(/model: .*\n/, ''), /缺 model/],
-    ['缺 tools', GOOD.replace(/tools: .*\n/, ''), /缺 tools/],
+    ['tools 写了却是空的', GOOD.replace(/tools: .*\n/, 'tools: ,\n'), /tools 写了却是空的/],
     ['model 是别名不是完整 id', GOOD.replace('claude-haiku-5-5', 'haiku'), /不是完整 id/],
     ['maxTurns 不是正整数', GOOD.replace('maxTurns: 15', 'maxTurns: many'), /maxTurns 不是正整数/],
     ['行不是「键: 值」', GOOD.replace('color: cyan', 'color cyan'), /不是「键: 值」/],
@@ -78,20 +91,27 @@ describe('parseAgentDefinition：认不出的报错，不猜', () => {
   }
 });
 
-describe('仓里真实的 .claude/agents', () => {
-  const defs = loadAgentDefinitions(join(REPO_ROOT, '.claude', 'agents'));
+describe('仓里真实的 agents/subagents（决定 0087 的三个角色）', () => {
+  const defs = loadAgentDefinitions(join(REPO_ROOT, 'agents', 'subagents'));
 
   it('每一份都认得出，模型都是完整 id', () => {
-    expect(defs.length).toBeGreaterThan(0);
+    expect(defs.map((d) => d.name).sort()).toEqual(['Explore', 'Plan', 'general-purpose']);
     for (const d of defs) expect(d.model).toMatch(/^claude-(haiku|sonnet|opus)-/);
   });
 
-  it('每道题的子代理都有定义；要浏览器的两个不出题', () => {
+  it('只读的两个角色探查时拿不到 Edit、Write', () => {
+    for (const d of defs.filter((x) => x.name !== 'general-purpose')) {
+      expect(allowedToolsOf(d), d.name).not.toContain('Edit');
+      expect(allowedToolsOf(d), d.name).not.toContain('Write');
+    }
+  });
+
+  it('每道题的子代理都有定义；要浏览器的两个场景不出题', () => {
     const names = new Set(defs.map((d) => d.name));
     for (const c of ALL_CASES) expect(names.has(c.agent), `${c.id} 的 ${c.agent}`).toBe(true);
     for (const k of SKIPPED_SCENARIOS) {
       expect(names.has(k.agent)).toBe(true);
-      expect(ALL_CASES.some((c) => c.agent === k.agent)).toBe(false);
+      expect(ALL_CASES.some((c) => c.scenario === k.scenario)).toBe(false);
     }
   });
 });

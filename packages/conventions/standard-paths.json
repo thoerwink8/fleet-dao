@@ -6,12 +6,12 @@
       "why": "通用段的原件：由同步脚本写进每台机器上各家 AI 的全局说明，是所有 AI 照着做的规矩（下一条通配也盖得住它，单列是为了命中时报的理由对）"
     },
     {
-      "path": "agents/**/*.md",
-      "why": "技能说明：教各家 AI 什么时候做、怎么做，经同步脚本装到每台机器"
+      "path": "agents/subagents/",
+      "why": "三个子代理角色的定义（决定 0087：斥候 Explore、工人 general-purpose、设计 Plan，同名压住 Claude Code 内置的）：模型、effort、只读写在这里，同步脚本装到每台机器的 ~/.claude/agents/，引擎也从这里转成 --agents；写错了每台机器、每个会话都会派错。下一条通配也盖得住它，单列在前面是为了命中时报的理由对；加减角色要同意"
     },
     {
-      "path": ".claude/agents/",
-      "why": "本仓的子代理定义（决定 0036）：模型、工具白名单、独立工作树都写在这里，写错了每个在本仓干活的会话都会派错；同名的通用版在 agents/subagents/（上面 agents/**/*.md 盖着），由同步脚本装到每台机器的 ~/.claude/agents/（决定 0079），frontmatter 两边一起改；加减子代理要同意"
+      "path": "agents/**/*.md",
+      "why": "技能说明：教各家 AI 什么时候做、怎么做，经同步脚本装到每台机器"
     },
     {
       "path": "agents/test/rules/",

@@ -243,7 +243,7 @@ describe('子代理一律后台跑', () => {
   const clean = () => transcript(turnStart());
 
   it.each([
-    ['Agent', { prompt: '干活', subagent_type: 'fleet-builder', run_in_background: false }],
+    ['Agent', { prompt: '干活', subagent_type: 'general-purpose', run_in_background: false }],
     ['Task', { prompt: '干活', run_in_background: false }],
   ])('主对话里 %s %j 写明前台：拒，并说清为什么', (tool, toolInput) => {
     const v = check(input(clean(), {}, tool, toolInput));

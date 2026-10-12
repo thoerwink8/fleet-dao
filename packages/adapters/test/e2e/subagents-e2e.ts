@@ -1,8 +1,9 @@
-// 真跑验收（#1641 第 6 片）：Mirasim 中转起的 claude 会话里，fleet-* 子代理真用上了、各档模型对得上、
-// 带 isolation 的那几个被挡住。判账本里的上游模型、最终回答里 fleet-builder 那一行、会话结局、快照模型核对。
+// 真跑验收（#1641 第 6 片，决定 0087 改成三个角色）：Mirasim 中转起的 claude 会话里，同名覆盖内置的三个子代理
+// （Explore 斥候 Haiku、general-purpose 工人 Sonnet、Plan 设计 Opus）真用上了、各自的模型对得上。判账本里的上游模型、
+// 最终回答里三个角色各一行、会话结局、快照模型核对。
 // 并发上限（CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=2）只在 settings.local.json 里写上，这里不单独触发超限，也不判它。
 // 以登录好的会话用户（即 Mirasim 服务的那个用户）、带 FLEET_ENV=development 跑：
-//   FLEET_ENV=development node packages/adapters/test/e2e/subagents-e2e.ts <令牌文件> <账本目录> <agents 来源目录（含 .claude/agents 的检出或发布目录）> [主会话模型，默认 claude-sonnet-5-5]
+//   FLEET_ENV=development node packages/adapters/test/e2e/subagents-e2e.ts <令牌文件> <账本目录> <agents 来源目录（含 agents/subagents 的检出或发布目录）> [主会话模型，默认 claude-sonnet-5-5]
 // 只动临时目录（TMPDIR 下），不碰任何配置；跑完删临时目录（失败也删，路径会打印出来）。
 // 退出码：0 全过，1 有没过，2 有没查成（没过优先于没查成）。
 import { randomUUID } from 'node:crypto';
@@ -52,7 +53,12 @@ const stripModel = (m: string) =>
     .toLowerCase()
     .replace(/\[[^\]]*\]$/, '');
 
-const BLOCKED = /deny|denied|not allowed|blocked|forbidden|不允许|被挡|拒绝|禁止/i;
+/** 三个角色和各自该用的模型（agents/subagents/ 下同名定义，决定 0087）。 */
+const ROLES: Record<string, string> = {
+  Explore: 'claude-haiku-5-5',
+  'general-purpose': 'claude-sonnet-5-5',
+  Plan: 'claude-opus-5-5',
+};
 
 try {
   // 1. 临时仓：拷入子代理定义，写和引擎一致的 settings.local.json
@@ -61,7 +67,7 @@ try {
   mkdirSync(agentsDir, { recursive: true });
   const names: string[] = [];
   const isolated: string[] = [];
-  const sourceDir = join(agentsSource, '.claude', 'agents');
+  const sourceDir = join(agentsSource, 'agents', 'subagents');
   for (const f of readdirSync(sourceDir).filter((n) => n.endsWith('.md'))) {
     copyFileSync(join(sourceDir, f), join(agentsDir, f));
     const text = readFileSync(join(sourceDir, f), 'utf8');
@@ -86,16 +92,14 @@ try {
   git(tree, 'add', '-A');
   git(tree, 'commit', '-q', '-m', 'init');
   console.log(`子代理 ${names.length} 个，带 isolation 的：${isolated.join('、') || '无'}`);
-  if (!names.includes('fleet-builder') || !isolated.includes('fleet-builder')) {
-    console.log('提示：来源目录里的 fleet-builder 没有 isolation，挡不挡的那一条会没法成立');
-  }
+  const missingRoles = Object.keys(ROLES).filter((n) => !names.includes(n));
+  if (missingRoles.length) console.log(`提示：来源目录里缺 ${missingRoles.join('、')}，那几行会没过`);
 
   // 2. 一次会话
   const PROMPT = [
-    '这是一次子代理验收，不读文件、不改任何东西。请依次用 Agent 工具派下面四个子代理，每个都只让它回一行自己的模型 id、不调任何工具：',
-    '1. fleet-scout  2. fleet-log-digest  3. fleet-ci-triager  4. fleet-reviewer',
-    '然后再试着派一次 fleet-builder（让它回一行自己的模型 id）。它应该会被挡住：把被挡的提示原话照抄下来，不要换说法。',
-    '最后把每个子代理的回话各一行列出，格式「<子代理名>: <回话或被挡的原话>」，共五行。',
+    '这是一次子代理验收，不读文件、不改任何东西。请依次用 Agent 工具派下面三个子代理（subagent_type 照写，不传 model），每个都只让它回一行自己的模型 id、不调任何工具：',
+    '1. Explore  2. general-purpose  3. Plan',
+    '最后把每个子代理的回话各一行列出，格式「<子代理名>: <回话>」，共三行。',
   ].join('\n');
   const events: ProgressEvent[] = [];
   const connect = mirasimConnector({ port, tokenFile });
@@ -170,22 +174,15 @@ try {
     }
   }
 
-  // 3b. fleet-builder 那一行
-  const builderLine = answer.split('\n').find((l) => /fleet-builder/i.test(l));
-  if (!answer.trim()) {
-    add('fleet-builder 被挡', '没查成', '没有收到最终回答');
-  } else if (!builderLine) {
-    add('fleet-builder 被挡', '没查成', '最终回答里没有 fleet-builder 那一行');
-  } else if (BLOCKED.test(builderLine)) {
-    add('fleet-builder 被挡', '过', `那一行：${builderLine}`);
-  } else if (/claude-(haiku|sonnet|opus)/i.test(builderLine)) {
-    add('fleet-builder 被挡', '没过', `它回了模型 id，像是真跑起来了：${builderLine}`);
-  } else {
-    add(
-      'fleet-builder 被挡',
-      '没查成',
-      `那一行里认不出「deny/denied/not allowed/blocked/不允许/被挡/拒绝/禁止」：${builderLine}`,
-    );
+  // 3b. 三个角色各一行，回的模型 id 对档
+  const lines = answer.split('\n');
+  for (const [role, want] of Object.entries(ROLES)) {
+    const name = `${role} 回 ${want}`;
+    // general-purpose 里没有别的角色名当子串，Explore、Plan 按词认
+    const row = lines.find((l) => new RegExp(`(^|[^\\w-])${role}([^\\w-]|$)`).test(l));
+    if (!answer.trim()) add(name, '没查成', '没有收到最终回答');
+    else if (!row) add(name, '没查成', `最终回答里没有 ${role} 那一行`);
+    else add(name, row.toLowerCase().includes(want) ? '过' : '没过', `那一行：${row}`);
   }
 
   // 3c. 会话结局

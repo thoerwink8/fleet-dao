@@ -1066,14 +1066,14 @@ describe('子代理（#1641）：树里的本地设置和提示词那一句', { 
       await r.run(r.input(), ctx());
       return r.specs[0]?.prompt ?? '';
     };
-    expect(await promptWith()).not.toContain('fleet-scout');
-    expect(await promptWith(async () => false)).not.toContain('fleet-scout');
+    expect(await promptWith()).not.toContain('`Explore`');
+    expect(await promptWith(async () => false)).not.toContain('`Explore`');
     expect(
       await promptWith(async () => {
         throw new Error('库读不了');
       }),
-    ).not.toContain('fleet-scout');
-    expect(await promptWith(async () => true)).toContain('`fleet-scout`');
+    ).not.toContain('`Explore`');
+    expect(await promptWith(async () => true)).toContain('`Explore`');
   });
 });
 
