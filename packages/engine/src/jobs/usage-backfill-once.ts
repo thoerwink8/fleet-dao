@@ -1,7 +1,7 @@
 // 一次性回填（#1948）：#1946 上线前结束的 run 没有会话号，定时任务「用量补记」对不上账本。
 // 按分支名最后一段（工作树目录名）加这一笔的起止，对上用量账本里 workspace 目录名相同、时刻落在起止之间的会话。
 // 对上唯一一个才补；只填还空着的字段，已有的数和 usage_note 一律不动，不写会话号（写了会被定时任务整套覆盖）。
-// 对不上、对上不止一个、还在等回填或认不出的，只写原因，不猜。已经写过原因、又补不上的，再跑不改。
+// 对不上、对上不止一个、同一分支有时间认不出的行、还在等回填或认不出的，只写原因，不猜。已经写过原因、又补不上的，再跑不改。
 // 默认只读。退出码：0 查完了（只读或已写）；1 账本或库没查成，一行都没写；2 参数不对，不连库。
 
 import { meterReadingFrom, meterSessionUuid } from '@fleet-dao/adapters';
@@ -18,6 +18,7 @@ const NO_BRANCH = '对不上：没有分支名，对不上 Mirasim 用量账本�
 const BAD_LEAF = '对不上：分支名最后一段含筛不了账本的字符，不猜';
 const NO_SESSION = '对不上：Mirasim 用量账本里没有这个分支在这一笔起止之间的会话';
 const UNREADABLE = '对不上：账本里有这个分支在这一笔起止之间的一行认不出会话号，不猜';
+const UNPLACED = '对不上：账本里有这个分支的一行时间认不出，判不了它落不落在这一笔起止之间，不猜';
 
 export interface UsageBackfillOnceDeps {
   /** db 的 runsAwaitingHistoricalMeter。 */
@@ -41,12 +42,14 @@ type Match =
   | { kind: 'bad-leaf' }
   | { kind: 'none' }
   | { kind: 'unreadable' }
+  | { kind: 'unplaced' }
   | { kind: 'many'; count: number }
   | { kind: 'one'; sessionId: string };
 
 interface LedgerLine {
   leaf: string;
-  at: number;
+  /** null：时间认不出。这行可能落在任何一个起止里，不能把它排除出窗口。 */
+  at: number | null;
   /** 认不出是 null：时刻和目录对得上、会话号没有的，这行让整笔变成「不猜」。 */
   sessionId: string | null;
 }
@@ -84,8 +87,9 @@ function parseLedger(text: string): Map<string, LedgerLine[]> {
     if (!row) continue;
     const leaf = workspaceLeaf(row.workspace);
     if (!leaf) continue;
-    const at = typeof row.ts === 'string' ? Date.parse(row.ts) : Number.NaN;
-    if (!Number.isFinite(at)) continue;
+    // 时间认不出不能丢掉：同一分支上别的会话可能也落在这一笔的起止里，丢掉就会把剩下的当成唯一对上。
+    const parsedAt = typeof row.ts === 'string' ? Date.parse(row.ts) : Number.NaN;
+    const at = Number.isFinite(parsedAt) ? parsedAt : null;
     const raw = row.sessionId;
     const sessionId = typeof raw === 'string' ? (meterSessionUuid(raw) ?? null) : null;
     const list = byLeaf.get(leaf);
@@ -101,12 +105,19 @@ function matchWindow(lines: readonly LedgerLine[] | undefined, since: number, un
   const sessions = new Set<string>();
   let unreadable = 0;
   let any = false;
+  let unplaced = false;
   for (const line of lines) {
+    if (line.at === null) {
+      unplaced = true;
+      continue;
+    }
     if (line.at < since || line.at > until) continue;
     any = true;
     if (line.sessionId) sessions.add(line.sessionId);
     else unreadable += 1;
   }
+  // 有一行时间对不上日历，就判不了它在不在这一笔里，也不能排除它是另一个会话。整笔不补。
+  if (unplaced) return { kind: 'unplaced' };
   if (!any) return { kind: 'none' };
   if (unreadable > 0 && sessions.size <= 1) return { kind: 'unreadable' };
   if (sessions.size === 0) return { kind: 'none' };
@@ -127,6 +138,7 @@ function noteFor(match: Match, shared: boolean): { note: string; ambiguous: bool
   if (match.kind === 'no-branch') return { note: NO_BRANCH, ambiguous: false };
   if (match.kind === 'bad-leaf') return { note: BAD_LEAF, ambiguous: false };
   if (match.kind === 'unreadable') return { note: UNREADABLE, ambiguous: false };
+  if (match.kind === 'unplaced') return { note: UNPLACED, ambiguous: false };
   if (match.kind === 'many') {
     return { note: `对不上：对上不唯一（这一笔起止之间有 ${match.count} 个会话，不猜）`, ambiguous: true };
   }

@@ -24,6 +24,8 @@ const S_SEQ_B = '77777777-7777-4777-8777-777777777777';
 const S_KEEP = '88888888-8888-4888-8888-888888888888';
 const S_OTHER = '99999999-9999-4999-8999-999999999999';
 const S_ODD = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const S_BAD = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+const S_BAD_OTHER = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
 
 const HIT = '1001-t00000001';
 const PART = '1002-t00000002';
@@ -36,6 +38,7 @@ const KEEP = '1009-t00000009';
 const OTHER = '1010-t0000000a';
 const FULL = '1011-t0000000b';
 const FAILED = '1012-t0000000c';
+const BAD = '1013-t0000000d';
 
 const ID_HIT = '00000000-0000-4000-8000-000000000001';
 const ID_PART = '00000000-0000-4000-8000-000000000002';
@@ -51,6 +54,7 @@ const ID_KEEP = '00000000-0000-4000-8000-000000000012';
 const ID_OTHER = '00000000-0000-4000-8000-000000000013';
 const ID_FULL = '00000000-0000-4000-8000-000000000014';
 const ID_FAILED = '00000000-0000-4000-8000-000000000015';
+const ID_BAD = '00000000-0000-4000-8000-000000000016';
 
 let seq = 0;
 function call(sessionId: string, leaf: string, at: number, over: Record<string, unknown> = {}): string {
@@ -126,6 +130,26 @@ function ledger(): string {
     call(S_OTHER, OTHER, T0 + 60_000, { input: 81 }),
     call(S_OTHER, FULL, T0 + 60_000, { input: 100, sessionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' }),
     call(S_OTHER, FAILED, T0 + 60_000, { input: 82, sessionId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' }),
+    call(S_BAD, BAD, T0 + 60_000, { input: 30, output: 31, cacheRead: 32, cacheWrite: 33, relayUsd: 0.01 }),
+    // 同一分支另一会话，时间认不出：不能排除它也落在这一笔里
+    JSON.stringify({
+      v: 1,
+      id: `${S_BAD_OTHER}:bad-time`,
+      ts: 'not-a-time',
+      sessionId: S_BAD_OTHER,
+      agent: 'claude',
+      viaRelay: true,
+      leg: 'relay',
+      model: 'claude-sonnet-5-5',
+      status: 200,
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      relayMetered: true,
+      repo: BAD,
+      workspace: `/var/lib/fleet-work/thoerwink8_fleet-dao/${BAD}`,
+    }),
   ].join('\n');
 }
 
@@ -186,6 +210,7 @@ beforeEach(async () => {
     cacheWriteTokens: 4,
   });
   await add(ID_FAILED, `fleet/${FAILED}`, { outcome: 'failed' });
+  await add(ID_BAD, `fleet/${BAD}`);
 }, TEST_DB_TIMEOUT_MS);
 
 // startRun 不收 usageNote。补上「原先就有原因」的那一笔。
@@ -256,7 +281,7 @@ describe('fleet-api usage-backfill-once', () => {
     const before = await view(ID_HIT);
     const out: string[] = [];
     expect(await runUsageBackfillOnce([], harness(out))).toBe(0);
-    expect(out[0]).toBe('只读，没写库。能补 4 笔，对不上 5 笔（对上不唯一 1 笔）。');
+    expect(out[0]).toBe('只读，没写库。能补 4 笔，对不上 6 笔（对上不唯一 1 笔）。');
     expect(out.join('\n')).toContain(ID_HIT);
     expect(out.join('\n')).toContain('没有这个分支在这一笔起止之间的会话');
     expect(out.join('\n')).toContain('对上不唯一');
@@ -273,7 +298,7 @@ describe('fleet-api usage-backfill-once', () => {
     const failedBefore = await view(ID_FAILED);
     const out: string[] = [];
     expect(await runUsageBackfillOnce(['--apply'], harness(out))).toBe(0);
-    expect(out[0]).toBe('已写入。能补 4 笔，对不上 5 笔（对上不唯一 1 笔）。');
+    expect(out[0]).toBe('已写入。能补 4 笔，对不上 6 笔（对上不唯一 1 笔）。');
     expect(await view(ID_HIT)).toMatchObject({
       inputTokens: 9,
       outputTokens: 4100,
@@ -304,6 +329,15 @@ describe('fleet-api usage-backfill-once', () => {
     expect((await view(ID_PEND)).inputTokens).toBeNull();
     expect((await view(ID_PEND)).usageNote).toContain('回填');
     expect((await view(ID_NOBRANCH)).usageNote).toContain('没有分支名');
+    expect(await view(ID_BAD)).toMatchObject({
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadTokens: null,
+      cacheWriteTokens: null,
+      costUsd: null,
+      sessionId: null,
+      usageNote: '对不上：账本里有这个分支的一行时间认不出，判不了它落不落在这一笔起止之间，不猜',
+    });
     expect((await view(ID_NOTED)).usageNote).toBe('原先的原因');
     expect(await view(ID_SEQ_A)).toMatchObject({
       inputTokens: 11,
@@ -337,6 +371,7 @@ describe('fleet-api usage-backfill-once', () => {
       ID_OTHER,
       ID_FULL,
       ID_FAILED,
+      ID_BAD,
     ];
     const before = await Promise.all(ids.map((id) => view(id)));
     now = new Date('2026-10-12T09:00:00.000Z');
