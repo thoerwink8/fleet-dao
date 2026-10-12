@@ -1,6 +1,7 @@
 // 机器资源两格（#1973）：这台机器（本台是法国，选了远程环境是那一台）此刻的整机内存、CPU。
 // 桌面放在画布左下「此刻」那一条的右半边，手机放在主页顶上的细栏里（顶栏右段放不下，会压到搜索框）。
-// 学 macOS 菜单栏的资源小表（iStat Menus 那一类）：名字 + 一根细条 + 百分比，常驻；点开是全文。
+// 学 macOS 菜单栏的资源小表（iStat Menus 那一类）：名字 + 具体数值（内存「已用 / 总量」、CPU「忙的核数 / 总核数」）
+// + 一根细条 + 百分比，常驻；点开是全文。数值和百分比出自同一回读数（resources.ts 的 hostMeters）。
 // 数据隔几秒经推送（SSE 的 resources 事件）换一回，细条的宽度跟着走，不整页重拉。
 //
 // 改这里之前必须知道：
@@ -8,7 +9,8 @@
 // - 紧（内存 ≥ 85%、CPU ≥ 90%）细条和数字用提示黄，不用失败红：机器忙不是坏了（health-strip.tsx 头注释「wait / stall
 //   提示色（黄系）」的规矩）。色板里 wait 是灰（排队）、和平时的灰条分不开，所以取黄系里真是黄的 stall。
 // - 本台超过三个采样间隔没来新读数，写「读数旧了」：推送断了或后端停了采样，数还在但不是此刻的。
-// - 手机上不画细条，只留「内存 67% CPU 38%」，点开一样是全文；按钮不小于 40 高。
+// - 放不下时先收细条（< lg）、再收百分比（< sm，手机），数值一直留着：「内存 7.8G / 11.7G CPU 1.5 核 / 4 核」，
+//   点开一样是全文；按钮不小于 40 高。
 import { formatAgo } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import { cn } from '../../lib/utils';
@@ -23,20 +25,45 @@ function toneOf(meter: Meter, stale: boolean): LayoutTone {
   return meter.tight ? 'stall' : 'done';
 }
 
-/** 一格：名字、细条、百分比。读不到是灰点加「没读到」。 */
+/** 一格的数值写法：读成了写「已用 / 总量」，没读到写「没读到」。 */
+function amountText(meter: Meter & { kind: 'ok' }): string {
+  return meter.amount.kind === 'ok' ? meter.amount.text : '没读到';
+}
+
+/** 一格：名字、具体数值、细条、百分比。读不到是灰点加「没读到」。窄屏先收细条、再收百分比，数值一直在。 */
 function Cell({ name, meter, stale, id }: { name: string; meter: Meter; stale: boolean; id: string }) {
   const tone = toneOf(meter, stale);
+  const strong = meter.kind === 'ok' && meter.tight && !stale;
   return (
     <span
       data-meter={id}
       data-tone={tone}
-      title={meter.kind === 'ok' ? `${name}：${meter.detail}` : `${name}没读到：${meter.why}`}
+      title={
+        meter.kind === 'ok'
+          ? `${name}：${meter.detail}${meter.amount.kind === 'unread' ? `；数值没读到：${meter.amount.why}` : ''}`
+          : `${name}没读到：${meter.why}`
+      }
       className="flex shrink-0 items-center gap-1.5 text-meta whitespace-nowrap"
     >
       <span className="text-muted-foreground">{name}</span>
       {meter.kind === 'ok' ? (
         <>
-          <span aria-hidden className="h-1.5 w-10 overflow-hidden rounded-full bg-selected max-md:hidden">
+          <span
+            data-meter-amount
+            className={cn(
+              'num',
+              meter.amount.kind === 'unread'
+                ? 'text-muted-foreground'
+                : strong
+                  ? 'text-ink-stall'
+                  : stale
+                    ? 'text-muted-foreground'
+                    : 'text-foreground',
+            )}
+          >
+            {amountText(meter)}
+          </span>
+          <span aria-hidden className="h-1.5 w-10 overflow-hidden rounded-full bg-selected max-lg:hidden">
             <span
               className={cn(
                 'block h-full rounded-full transition-[width] duration-300 ease-out',
@@ -46,9 +73,10 @@ function Cell({ name, meter, stale, id }: { name: string; meter: Meter; stale: b
             />
           </span>
           <span
+            data-meter-percent
             className={cn(
-              'num w-9 text-right font-medium',
-              meter.tight && !stale ? 'text-ink-stall' : stale ? 'text-muted-foreground' : 'text-foreground',
+              'num w-9 text-right font-medium max-sm:hidden',
+              strong ? 'text-ink-stall' : stale ? 'text-muted-foreground' : 'text-foreground',
             )}
           >
             {meter.text}
@@ -72,7 +100,7 @@ function Row({ name, meter }: { name: string; meter: Meter }) {
         {name}
         {meter.kind === 'ok' ? (
           <span className={cn('num', meter.tight ? 'text-ink-stall' : 'text-foreground')}>
-            {meter.text}
+            {amountText(meter)} · {meter.text}
             {meter.tight ? ' · 紧' : ''}
           </span>
         ) : (
@@ -80,7 +108,9 @@ function Row({ name, meter }: { name: string; meter: Meter }) {
         )}
       </span>
       <span className="text-meta text-muted-foreground">
-        {meter.kind === 'ok' ? meter.detail : meter.why}
+        {meter.kind === 'ok'
+          ? `${meter.detail}${meter.amount.kind === 'unread' ? `；数值没读到：${meter.amount.why}` : ''}`
+          : meter.why}
       </span>
     </li>
   );
@@ -102,7 +132,7 @@ export function MachineMeter({
   const now = useNow();
   const m = hostMeters(resources, now, { remote });
   const word = (name: string, meter: Meter) =>
-    `${name}${meter.kind === 'ok' ? ` ${meter.text}${meter.tight ? ' 紧' : ''}` : ' 没读到'}`;
+    `${name}${meter.kind === 'ok' ? ` ${amountText(meter)} ${meter.text}${meter.tight ? ' 紧' : ''}` : ' 没读到'}`;
   const label = `机器资源：${word('内存', m.memory)}，${word('CPU', m.cpu)}${m.stale ? '，读数旧了' : ''}`;
   return (
     <Popover>
