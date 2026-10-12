@@ -65,14 +65,17 @@ function beijingDay(ms: number) {
 
 // 同步起子进程：卡死由 runChild 给子进程的上限管，不靠 vitest 的超时（它打断不了同步用例，机器一忙又把慢报成红，#264）
 describe('规矩：创始人每条消息一到就落盘（2026-10-04 补）', { timeout: 0 }, () => {
-  it('挂在 UserPromptSubmit 上，且在同步工具的清单里', () => {
-    // 这一条得在清单里登记，不然本机/别家机器上根本不会装、也就不会触发。
-    expect(TARGETS).toMatch(/event:\s*'UserPromptSubmit'[^}]*script:\s*'prompt-log\.mjs'/);
-    // UserPromptSubmit 不吃 matcher：登记时不要写 matcher，写了也被忽略，容易让人以为它按工具挑。
-    const spec = TARGETS.match(/\{[^}]*script:\s*'prompt-log\.mjs'[^}]*\}/)?.[0] ?? '';
-    expect(spec).not.toMatch(/matcher/);
-    // 超时按毫秒理解（exe 里 UserPromptSubmit 默认 30000ms）。写 10 就是 10 毫秒，等于钩子从没跑成。
-    expect(spec).toMatch(/timeout:\s*30000/);
+  it('挂在本仓项目设置的 UserPromptSubmit 上，超时 30000；用户级清单里没有', () => {
+    const settings = JSON.parse(
+      readFileSync(fileURLToPath(new URL('../../../.claude/settings.json', import.meta.url)), 'utf8'),
+    ) as {
+      hooks: { UserPromptSubmit: { matcher?: string; hooks: { command: string; timeout: number }[] }[] };
+    };
+    const group = settings.hooks.UserPromptSubmit[0];
+    expect(group.matcher).toBeUndefined();
+    expect(group.hooks[0]?.command).toContain('prompt-log.mjs');
+    expect(group.hooks[0]?.timeout).toBe(30000);
+    expect(TARGETS).not.toContain('prompt-log.mjs');
   });
 
   it('绝不拦、绝不插话：正常路径 exit 0 且不往 stdout 打东西', () => {

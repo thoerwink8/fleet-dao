@@ -207,6 +207,8 @@ export interface HookTarget {
  * SessionStart 的输出进会话上下文；PreToolUse 退出码 2 拦下、stderr 给模型看；Stop 平时只提醒（systemMessage），
  * 退出码恒为 0（Stop 上 exit 2 是「不许停」）。没开无人值守时 Stop 不输出 decision:block；只有这个会话自己跑了 unattended.mjs on 才挡收尾（决定 0028，推翻 0026 的「收尾不拦」；起后台活不自动开仍是 0026）。
  * 开会话那条要取远端、快进、跑一遍同步，给足 90 秒。
+ * 决定 0083：用户级只登记拦密钥（PreToolUse / BeforeTool）。开会话、收尾、落盘、主对话只在 fleet-dao 仓的项目设置
+ * `.claude/settings.json`。下面写的事件语义是这些脚本自己的，不是用户级还在登记它们。
  * 借道读这份的：Grok 默认扫 ~/.claude/settings.json 的钩子（~/.grok/docs/user-guide/10-hooks.md「Hook Locations」，
  * 输入是 camelCase、终端工具叫 run_terminal_command，开会话钩子的输出不进上下文）；Devin CLI 默认 read_config_from.claude
  * （docs.devin.ai/cli/extensibility/hooks/overview，终端工具叫 exec）。Cursor 的命令行默认也读（cursor.com/docs/reference/third-party-hooks，
@@ -251,7 +253,7 @@ export interface HookTarget {
  *   fail-open，所以钩子脚本自己出错时要按拦处理并退出 2）。工具名就是 Bash、Read、Grep，matcher 锚定成 ^(Bash|Read|Grep)$。
  *   Bash 在 Windows 上也是 Git Bash（packages/kaos/src/environment.ts）；钩子命令经 Node 的 shell: true 跑，Windows 上是
  *   cmd（packages/agent-core-v2/src/features/externalHooks/internal/runHook.ts），启动器照用。timeout 按秒算。
- *   开会话那条（SessionStart）只看不拦，输出不保证进会话上下文，登记它是为了开会话就同步规矩。
+ *   开会话那条以前登记在用户级，决定 0083 起不登记了：流程钩子只在 fleet-dao 仓的项目设置里。
  */
 export const HOOK_TARGETS: readonly HookTarget[] = [
   {
@@ -260,7 +262,8 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
     readers: ['claude', 'grok', 'devin'],
     borrowed: ['grok', 'devin'],
     hooks: [
-      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
+      // 决定 0083：开会话、主对话、收尾、落盘只登记在 fleet-dao 仓的 .claude/settings.json。
+      // 用户级只留拦密钥。下次同步会摘掉这里不再列出的登记。
       {
         event: 'PreToolUse',
         matcher:
@@ -269,24 +272,13 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
         timeout: 10,
       },
       { event: 'PreToolUse', matcher: '^(exec|read|grep)$', script: 'pretool.mjs', timeout: 10 },
-      // 主对话的两条（决定 0078）：引导先回、子代理一律后台跑。不写 matcher，每次工具调用都过；
-      // 判断、为什么、Grok 借道时怎么办写在 agents/hooks/main-thread.mjs 开头。
-      { event: 'PreToolUse', script: 'main-thread.mjs', timeout: 10 },
-      { event: 'Stop', script: 'stop.mjs', timeout: 10 },
-      // 创始人每条消息一到就原样落盘一份（2026-10-04 他问「丢失我的回复」）。为什么要有它、为什么
-      // 绝不 exit 2 / 绝不输出、超时为什么是 30000 这些，写在 agents/hooks/prompt-log.mjs 开头。
-      // UserPromptSubmit 不吃 matcher，别写；timeout 按毫秒算，写小了等于钩子从没跑成。
-      { event: 'UserPromptSubmit', script: 'prompt-log.mjs', timeout: 30000 },
     ],
   },
   {
     settings: { win32: '.codex\\hooks.json', linux: '.codex/hooks.json' },
     format: 'codex',
     readers: ['codex'],
-    hooks: [
-      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
-      { event: 'PreToolUse', matcher: '^Bash$', script: 'pretool-codex.mjs', timeout: 10 },
-    ],
+    hooks: [{ event: 'PreToolUse', matcher: '^Bash$', script: 'pretool-codex.mjs', timeout: 10 }],
   },
   {
     settings: { win32: '.gemini\\settings.json', linux: '.gemini/settings.json' },
@@ -294,7 +286,6 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
     nodeOnWindows: true,
     readers: ['gemini'],
     hooks: [
-      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90_000 },
       {
         event: 'BeforeTool',
         matcher: '^(run_shell_command|read_file|read_many_files|grep_search|search_file_content)$',
@@ -325,10 +316,7 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
     settings: { win32: '.kimi-code\\config.toml', linux: '.kimi-code/config.toml' },
     format: 'kimi',
     readers: ['kimi'],
-    hooks: [
-      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
-      { event: 'PreToolUse', matcher: '^(Bash|Read|Grep)$', script: 'pretool-kimi.mjs', timeout: 10 },
-    ],
+    hooks: [{ event: 'PreToolUse', matcher: '^(Bash|Read|Grep)$', script: 'pretool-kimi.mjs', timeout: 10 }],
   },
 ];
 

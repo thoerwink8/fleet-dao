@@ -7,6 +7,44 @@
             "type": "command",
             "command": "node \"$CLAUDE_PROJECT_DIR/agents/hooks/bootstrap.mjs\"",
             "timeout": 120
+          },
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/agents/hooks/session-start.mjs\"",
+            "timeout": 90
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/agents/hooks/main-thread.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/agents/hooks/stop.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/agents/hooks/prompt-log.mjs\"",
+            "timeout": 30000
           }
         ]
       }

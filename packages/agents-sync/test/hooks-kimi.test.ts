@@ -61,10 +61,9 @@ function hookTables(text: string): Record<string, string>[] {
 }
 
 describe('登记在哪、挂在哪', () => {
-  it('Kimi Code 的目标：~/.kimi-code/config.toml，开会话 90 秒、调工具前 10 秒只挂 ^(Bash|Read|Grep)$', () => {
+  it('Kimi Code 的目标：~/.kimi-code/config.toml，调工具前 10 秒只挂 ^(Bash|Read|Grep)$（决定 0083 不登记开会话）', () => {
     expect(KIMI?.settings.linux).toBe('.kimi-code/config.toml');
     expect(KIMI?.hooks).toEqual([
-      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
       { event: 'PreToolUse', matcher: '^(Bash|Read|Grep)$', script: 'pretool-kimi.mjs', timeout: 10 },
     ]);
     expect(HOOK_GAPS.kimi).toBeUndefined();
@@ -81,7 +80,6 @@ describe('装', () => {
     expectKind(m.apply(), KEY, 'changed');
     const tables = hookTables(m.config());
     expect(tables).toEqual([
-      { event: 'SessionStart', command: m.cmd('session-start.mjs'), timeout: '90' },
       {
         event: 'PreToolUse',
         matcher: '^(Bash|Read|Grep)$',
@@ -111,7 +109,7 @@ describe('装', () => {
     put(m.home, '.kimi-code/config.toml', before);
     expectKind(m.apply(), KEY, 'changed');
     expect(m.config().startsWith(before)).toBe(true);
-    expect(hookTables(m.config())).toHaveLength(3);
+    expect(hookTables(m.config())).toHaveLength(2);
     const [stamp] = readdirSync(join(m.home, '.fleet-dao', 'backups'));
     expect(get(join(m.home, '.fleet-dao', 'backups', stamp ?? ''), '.kimi-code/config.toml')).toBe(before);
     expect(exitCode(m.check())).toBe(0);
@@ -185,15 +183,11 @@ describe('读不懂、块外混进本脚本的：不猜，报出来', () => {
     expectKind(lines, KEY, 'changed');
     expect(lines.find((l) => l.key === KEY)?.text).toContain('收回了块里');
     expect(m.config().startsWith(`model = "k3"\n\n${theirs}`)).toBe(true);
-    expect(hookTables(m.config()).map((t) => t.event)).toEqual([
-      'Notification',
-      'SessionStart',
-      'PreToolUse',
-    ]);
+    expect(hookTables(m.config()).map((t) => t.event)).toEqual(['Notification', 'PreToolUse']);
     expect(exitCode(m.check())).toBe(0);
   });
 
-  it('Kimi Code 自己改写配置、把块的两行标记连同注释丢了：同步认得出那两张是本脚本的，收回块里，不登记两遍', () => {
+  it('Kimi Code 自己改写配置、把块的两行标记连同注释丢了：同步认得出那一张是本脚本的，收回块里，不登记两遍', () => {
     const m = machine();
     m.apply();
     const stripped = m.config().replace(/^# .*fleet-dao 钩子.*\r?\n/gm, '');
@@ -201,7 +195,7 @@ describe('读不懂、块外混进本脚本的：不猜，报出来', () => {
     expect(stripped).not.toContain('# >>>');
     expectKind(m.check(), KEY, 'drift');
     m.apply();
-    expect(hookTables(m.config())).toHaveLength(2);
+    expect(hookTables(m.config())).toHaveLength(1);
     expect(exitCode(m.check())).toBe(0);
   });
 

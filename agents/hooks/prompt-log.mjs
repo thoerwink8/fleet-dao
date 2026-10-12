@@ -5,8 +5,8 @@
 // （2026-10-04 之前 06:08 那 9 条、更早那 9 条拍板都是这么丢的）。钩子在「消息提交那一刻」就跑，
 // 不经过模型、不依赖那一轮活不活得下来，所以那份留痕跟会话的死活无关。
 //
-// 挂法：Claude Code 的 UserPromptSubmit 事件（不吃 matcher，永远是整条消息）。同步工具装在
-// agents/config 那套里（packages/agents-sync 的 targets.ts），本机落到 ~/.claude/settings.json。
+// 挂法：Claude Code 的 UserPromptSubmit 事件（不吃 matcher，永远是整条消息）。登记在 fleet-dao 仓的
+// .claude/settings.json（项目级，决定 0083），不装进用户级设置。超时按毫秒，项目设置里写 30000。
 //
 // 改这里之前必须知道：
 // - **只落盘，绝不插话、绝不拦**：正常路径 exit 0 且一个字符都不往 stdout 打。绝不 exit 2、
@@ -110,6 +110,7 @@ const isMain = (() => {
 })();
 
 if (isMain) {
+  if (process.env.FLEET_HEADLESS === '1') process.exit(0);
   let text = '';
   try {
     text = readFileSync(0, 'utf8');

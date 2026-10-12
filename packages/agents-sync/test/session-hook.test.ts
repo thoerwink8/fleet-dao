@@ -101,11 +101,11 @@ describe('开会话钩子装上、真跑同步', { timeout: 180_000 }, () => {
     expect(installed.code, installed.out).toBe(0);
     const settings = get(m.home, '.claude/settings.json');
     if (process.platform === 'win32') {
-      expect(settings).toContain('.fleet-dao/bin/quiet-session-start.exe');
       expect(settings).toContain('.fleet-dao/bin/quiet-pretool.exe');
+      expect(settings).not.toContain('.fleet-dao/bin/quiet-session-start.exe');
     } else {
-      expect(settings).toContain('.fleet-dao/hooks/session-start.mjs');
       expect(settings).toContain('.fleet-dao/hooks/pretool.mjs');
+      expect(settings).not.toContain('session-start.mjs');
     }
     const clean = m.sync('--check');
     expect(clean.code, clean.out).toBe(0);
@@ -145,7 +145,7 @@ describe('开会话钩子装上、真跑同步', { timeout: 180_000 }, () => {
     writeFileSync(join(m.home, '.claude', 'settings.json'), '{}\n');
     const red = m.sync('--check');
     expect(red.code).toBe(1);
-    expect(red.out).toContain('~/.claude/settings.json：缺失——没登记 SessionStart');
+    expect(red.out).toContain('~/.claude/settings.json：缺失——没登记 PreToolUse（pretool.mjs');
     expect(m.sync('--apply').code).toBe(0);
     expect(m.sync('--check').code).toBe(0);
   });

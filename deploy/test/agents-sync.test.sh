@@ -100,20 +100,19 @@ for f in "$REPO"/agents/subagents/fleet-*.md; do
   cmp -s "$f" "$H/.claude/agents/$(basename "$f")" && same_fleet=$((same_fleet + 1))
 done
 check "16 个 fleet-* 通用版也装进了 ~/.claude/agents、和仓里 agents/subagents/ 的一样（决定 0079）" "$same_fleet" 16
-# 替别的用户写：调工具前、Stop 那两条钩子照装（他家里就有 reclaude 的设备密钥，借道读这份设置的几家起的会话也要拦；
-# Stop 不需要会话、不用等自动发布），开会话那条不登记（它要在他自己能拉、能写的检出里快进、同步，法国的检出跟着自动发布走）
+# 决定 0083：用户级只登记拦密钥。脚本仍整份拷进家里，设置里不再登记开会话、收尾、落盘。
 check "钩子脚本拷进了他家" "$(cat "$H/.fleet-dao/hooks/pretool.mjs")" "// 假的调工具前钩子"
 check "Stop 钩子脚本也拷进了他家" "$(cat "$H/.fleet-dao/hooks/stop.mjs")" "// 假的收尾提醒钩子"
 check "主对话钩子脚本也拷进了他家（决定 0078）" "$(cat "$H/.fleet-dao/hooks/main-thread.mjs")" \
   "// 假的主对话两条（引导先回、子代理后台跑）钩子"
-check "Claude 的设置里登记了调工具前、Stop、UserPromptSubmit 三条" \
+check "Claude 的设置里只登记了调工具前" \
   "$("$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(Object.keys(s.hooks).join(","))' "$H/.claude/settings.json")" \
-  PreToolUse,Stop,UserPromptSubmit
+  PreToolUse
 check "Codex 的 hooks.json 也只登记了调工具前那条（#232）" \
   "$("$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(Object.keys(s.hooks).join(","))' "$H/.codex/hooks.json")" \
   PreToolUse
 check "Codex 的 config.toml 替那一条记上了信任" "$(grep -c '^trusted_hash = "sha256:' "$H/.codex/config.toml")" 1
-check "写明开会话那条为什么不登记" "$(grep -c 'SessionStart：替别的用户写（--user）时不登记开会话钩子' <<<"$OUT")" 1
+check "不再为 --user 单独说不登记开会话" "$(grep -c 'SessionStart：替别的用户写（--user）时不登记开会话钩子' <<<"$OUT")" 0
 # 全局 git 忽略：换完身份之后才起的 git 子进程，cwd 还是原来那个仓目录（$U 摸不到）——踩过一次
 # 「fatal: failed to stat '<仓目录>': Permission denied」，git-excludes.ts 加了 -C "$home" 才好
 check "core.excludesFile 设到了 gitignore_global（原来没设过）" \
