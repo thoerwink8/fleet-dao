@@ -438,6 +438,7 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
         body: R.franceRelease.request.parse({ sha }),
       }),
     francePreflight: () => send('POST', apiUrl(R.francePreflight.path), R.francePreflight.response),
+    franceCliTools: () => send('GET', apiUrl(R.franceCliTools.path), R.franceCliTools.response),
     subscribe(listener, onStatus) {
       const make = opts.eventSource ?? ((url: string) => new EventSource(url, { withCredentials: true }));
       const url = apiUrl(R.events.path);

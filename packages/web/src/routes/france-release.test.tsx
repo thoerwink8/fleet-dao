@@ -2,7 +2,7 @@
 // /france 页发版一键卡（#618）：release-train 状态（在走 / 暂停 / 没在走 / 没查成）+ 「发版预检」按钮。
 // 做完的标准：① 每种状态各画各的、读不到写明原因；② 预检按钮点下后 show 命令、退出码、stdout / stderr，
 //   退出码 0 标绿、非 0 标红；③ 预检请求起不来（网络挂）写明没发出去；④ unreadable 写明没接上，不拿「没在走」顶。
-import { cleanup, fireEvent, screen } from '@testing-library/react';
+import { cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
@@ -128,8 +128,10 @@ describe('/france 页发版一键卡', () => {
       },
       preflight: donePreflight(),
     });
-    expect(await screen.findByText('没查成')).toBeTruthy();
     expect(await screen.findByText(/没接上 release-train 状态文件的读取/)).toBeTruthy();
+    const panel = screen.getByRole('heading', { name: '发版一键' }).closest('section');
+    if (!(panel instanceof HTMLElement)) throw new Error('找不到发版一键');
+    expect(within(panel).getByText('没查成')).toBeTruthy();
   });
 
   test('预检没过（退出码 2）：标红、原因行进 stderr 块', async () => {
