@@ -124,27 +124,35 @@ export function JobListRow({ j, now, fullOutcome }: { j: JobView; now: number; f
         </>
       }
     >
-      <KeyValue
-        layout="grid"
-        cols={4}
-        items={[
-          {
-            label: '周期',
-            value: <span className="num">{j.schedule}</span>,
-            hint: `期望${everyText(j.expectEveryMinutes)}成功一次`,
-          },
-          {
-            label: '上次运行',
-            value: outcomeText(j),
-            ...(r?.outcome === 'failed' ? { tone: 'fail' as const } : {}),
-            ...(r?.outcome === 'unscanned' || r?.outcome === 'partial' ? { tone: 'stall' as const } : {}),
-          },
-          { label: '上次跑成', value: <LastSuccess j={j} now={now} /> },
-          { label: '耗时', value: <span className="num">{durationText(j)}</span> },
-          { label: '编号', value: j.id, mono: true },
-        ]}
-      />
+      <JobDetails j={j} now={now} />
     </ListRow>
+  );
+}
+
+/** 一行展开后的明细：周期（期望多久成功一次）、完整的上次结果、上次跑成和开始时间、耗时、编号。定时任务页和法国页共用。 */
+export function JobDetails({ j, now }: { j: JobView; now: number }) {
+  const r = j.lastRun;
+  return (
+    <KeyValue
+      layout="grid"
+      cols={4}
+      items={[
+        {
+          label: '周期',
+          value: <span className="num">{j.schedule}</span>,
+          hint: `期望${everyText(j.expectEveryMinutes)}成功一次`,
+        },
+        {
+          label: '上次运行',
+          value: outcomeText(j),
+          ...(r?.outcome === 'failed' ? { tone: 'fail' as const } : {}),
+          ...(r?.outcome === 'unscanned' || r?.outcome === 'partial' ? { tone: 'stall' as const } : {}),
+        },
+        { label: '上次跑成', value: <LastSuccess j={j} now={now} /> },
+        { label: '耗时', value: <span className="num">{durationText(j)}</span> },
+        { label: '编号', value: j.id, mono: true },
+      ]}
+    />
   );
 }
 
