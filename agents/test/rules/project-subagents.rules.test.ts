@@ -10,18 +10,19 @@
 //    Haiku 档除 fleet-fixer 外不许有 Edit。
 // 4. 汇报：每个正文都要求汇报首行写自己的模型 id（派完核对实际 id 靠它）；Haiku 档都限回合数。
 // 5. 指挥官技能、参考页、标准路径清单都写着「默认用 fleet-* 子代理」和这条测试。
-// 6. 通用版随同步装到每台机器的用户级（决定 0079，创始人 2026-10-11「我希望未来每台有fleet-dao的机器，包括vps，都能具备最佳
-//    subagent方式」，20:44「子代理 PR #1886：改成通用版，VPS 照装」）：
-//    - .claude/agents/ 下每份都有同名通用版 agents/subagents/<名>.md：name、description、model 逐份一致，tools 只少
-//      mcp__codegraph__*，tools 以外的 frontmatter 逐行一致；通用版也过上面那套定义检查。
-//    - 通用版全文不含仓专属词（词表 REPO_ONLY，只写这一处），tools 不含 mcp__codegraph__。
-//    - packages/agents-sync/src/targets.ts 的 SUBAGENT_TARGET 恰好列着 agents/subagents/ 下全部 17 份（16 通用版加
-//      haiku55，按文本核，不跨包 import），不装 .claude/agents/ 那份；参考页写着「同步装的是通用版」。
-// 另钉一处（#1844 方案第十节 9b）：fleet-ui-builder 照 docs/design/驾驶舱界面.md、lint-design 必须绿，不再指旧令牌 #182；
-// fleet-ui-verifier 点验对照这份规范。
+// 6. 子代理只留 agents/subagents/ 一份（#1958）。.claude/agents/fleet-*.md 是它的原样副本，projectAgentDrift 对不上就红。
+//    用户级仍由 agents:sync 把 agents/subagents/ 装到 ~/.claude/agents/（决定 0079，创始人 2026-10-11「我希望未来每台有
+//    fleet-dao 的机器，包括 vps，都能具备最佳 subagent 方式」，20:44「子代理 PR #1886：改成通用版，VPS 照装」）：
+//    - 两处逐字一样，所以 name、description、model、tools 也一致；通用版也过上面那套定义检查。
+//    - 全文不含仓专属词（词表 REPO_ONLY，只写这一处），tools 不含 mcp__codegraph__。
+//    - packages/agents-sync/src/targets.ts 的 SUBAGENT_TARGET 恰好列着 agents/subagents/ 下全部 17 份（16 份加
+//      haiku55，按文本核，不跨包 import），不从 .claude/agents/ 往家里装；参考页写着「同步装的是通用版」。
+// 界面两个子代理写通用说法：先读这个仓的协作约定和界面规范（有就读）、仓里有界面检查的测试就必须绿；点验对照交代给的规范。
+// 不写本仓的 docs/design/驾驶舱界面.md、lint-design（那些在仓根 AGENTS.md）。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { projectAgentDrift } from '../../../packages/agents-sync/src/project-agents.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const AGENTS_DIR = `${ROOT}.claude/agents/`;
@@ -111,17 +112,20 @@ function textOf(file: string): string {
   return t;
 }
 
-/** 驾驶舱界面规范（#1844）：界面两个子代理都以它为准 */
-const DESIGN_DOC = 'docs/design/驾驶舱界面.md';
+const READ_SPEC = '先读这个仓根目录的协作约定和它的界面规范（有就读）';
+const MUST_GREEN = '仓里有界面检查的测试就必须绿';
+const CHECK_SPEC = '仓里有界面规范的（交代会给），样式对照它点验';
 
-/** 界面两个子代理和规范对不上的地方；空数组才算对 */
+/** 界面两个子代理和通用说法对不上的地方；空数组才算对。写进本仓路径也算错。 */
 function uiDesignProblems(builder: string, verifier: string): string[] {
   const out: string[] = [];
-  if (!builder.includes(`照 \`${DESIGN_DOC}\``)) out.push(`fleet-ui-builder.md：没写照 \`${DESIGN_DOC}\``);
-  if (!/lint-design[^\n]*必须绿/.test(builder)) out.push('fleet-ui-builder.md：没写 lint-design 必须绿');
-  if (/#182/.test(builder)) out.push('fleet-ui-builder.md：还指向旧令牌 #182');
-  if (!verifier.includes(`对照 \`${DESIGN_DOC}\``))
-    out.push(`fleet-ui-verifier.md：点验没对照 \`${DESIGN_DOC}\``);
+  if (!builder.includes(READ_SPEC)) out.push('fleet-ui-builder.md：没写先读这个仓的界面规范');
+  if (!builder.includes(MUST_GREEN)) out.push('fleet-ui-builder.md：没写界面检查的测试必须绿');
+  if (/docs\/design\/驾驶舱界面\.md/.test(builder) || /lint-design/.test(builder))
+    out.push('fleet-ui-builder.md：写进了本仓专属的规范路径或 lint-design');
+  if (!verifier.includes(CHECK_SPEC)) out.push('fleet-ui-verifier.md：点验没对照仓里的界面规范');
+  if (/docs\/design\/驾驶舱界面\.md/.test(verifier) || /lint-design/.test(verifier))
+    out.push('fleet-ui-verifier.md：写进了本仓专属的规范路径或 lint-design');
   return out;
 }
 
@@ -288,26 +292,22 @@ describe('规矩：本仓子代理定义在 .claude/agents/，名单、模型、
     expect(() => problems('fleet-x.md', '没有 frontmatter')).toThrow(/认不出 frontmatter/);
   });
 
-  it('界面两个子代理照驾驶舱界面规范：builder 照 docs/design/驾驶舱界面.md 且 lint-design 必须绿，verifier 点验对照它（#1844 9b）', () => {
-    expect(existsSync(`${ROOT}${DESIGN_DOC}`), `${DESIGN_DOC} 不存在`).toBe(true);
+  it('界面两个子代理写通用说法：先读这个仓的界面规范、界面检查必须绿，点验对照交代给的规范（#1958）', () => {
     expect(uiDesignProblems(textOf('fleet-ui-builder.md'), textOf('fleet-ui-verifier.md'))).toEqual([]);
   });
 
-  it('【故意造出的失败】builder 退回「见 #182」、去掉 lint-design，或 verifier 不提规范：都查得出来', () => {
+  it('【故意造出的失败】builder 去掉「先读界面规范」或「测试必须绿」，或 verifier 不对照规范：都查得出来', () => {
     const builder = textOf('fleet-ui-builder.md');
     const verifier = textOf('fleet-ui-verifier.md');
-    const old = builder.replace(
-      /照 `docs\/design\/驾驶舱界面\.md`[^\n]*?必须绿/,
-      '设计 token 用仓里已有的（见 #182）',
-    );
-    expect(old, '找不到 builder 那一行，这条失败造不出来').not.toBe(builder);
-    expect(uiDesignProblems(old, verifier).length).toBeGreaterThanOrEqual(2);
-    const noLint = builder.replaceAll('lint-design', 'lint');
-    expect(noLint).not.toBe(builder);
-    expect(uiDesignProblems(noLint, verifier)).toEqual(['fleet-ui-builder.md：没写 lint-design 必须绿']);
-    const noDoc = verifier.replaceAll(DESIGN_DOC, '');
+    const noRead = builder.replace(READ_SPEC, '先看页面');
+    expect(noRead, '找不到 builder 那一句，这条失败造不出来').not.toBe(builder);
+    expect(uiDesignProblems(noRead, verifier)).toContain('fleet-ui-builder.md：没写先读这个仓的界面规范');
+    const noGreen = builder.replace(MUST_GREEN, '测试随便');
+    expect(noGreen).not.toBe(builder);
+    expect(uiDesignProblems(noGreen, verifier)).toEqual(['fleet-ui-builder.md：没写界面检查的测试必须绿']);
+    const noDoc = verifier.replace(CHECK_SPEC, '样式自己看');
     expect(noDoc).not.toBe(verifier);
-    expect(uiDesignProblems(builder, noDoc)).toEqual([`fleet-ui-verifier.md：点验没对照 \`${DESIGN_DOC}\``]);
+    expect(uiDesignProblems(builder, noDoc)).toEqual(['fleet-ui-verifier.md：点验没对照仓里的界面规范']);
   });
 
   it('指挥官技能、参考页、标准路径清单都写着：默认用 fleet-* 子代理、定义在 .claude/agents/', () => {
@@ -327,6 +327,20 @@ describe('规矩：fleet-* 的通用版随 agents:sync 装到每台机器的用�
   it('每份 .claude/agents/fleet-*.md 都有同名通用版：name、description、model 一致，tools 只少 mcp__codegraph__*', () => {
     expect(files.length).toBe(16);
     expect(files.flatMap((f) => pairProblems(f, textOf(f), genericTexts[f]))).toEqual([]);
+  });
+
+  it('项目级 fleet-* 是 agents/subagents 的原样副本，少一个字就红（#1958）', () => {
+    expect(
+      projectAgentDrift(files.map((f) => ({ file: f, source: genericOf(f), committed: texts[f] }))),
+    ).toEqual([]);
+    const f = 'fleet-builder.md';
+    const source = genericOf(f);
+    expect(projectAgentDrift([{ file: f, source, committed: `${source}多\n` }])).toEqual([
+      `${f}：.claude/agents/ 和 agents/subagents/ 不一致`,
+    ]);
+    expect(projectAgentDrift([{ file: f, source, committed: undefined }])).toEqual([
+      `${f}：.claude/agents/ 里没有，该由 agents/subagents/ 原样生成`,
+    ]);
   });
 
   it('通用版也过同一套定义检查（完整模型 id、tools 白名单、带 Edit 的在独立工作树、Haiku 限回合、汇报首行写模型 id）', () => {

@@ -174,7 +174,11 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       // 1. 路由 → 会话用户（树要归它）。查不到、没接上都是配置问题，重试没用。
       let routeInfo: Awaited<ReturnType<typeof resolveSegmentRoute>>;
       try {
-        routeInfo = await resolveSegmentRoute(deps.spawner, input.route.routeId);
+        routeInfo = await resolveSegmentRoute(
+          deps.spawner,
+          input.route.routeId,
+          input.stage ?? SEGMENT_STAGE.manual,
+        );
       } catch (error) {
         throw new PortError('SEGMENT_ROUTE_UNUSABLE', errMessage(error), { retryable: false });
       }
@@ -283,6 +287,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
               timeoutMinutes: input.timeoutMinutes,
               routeId: input.route.routeId,
               effort: input.tier.effort,
+              stage: input.stage ?? SEGMENT_STAGE.manual,
               ...(input.route.reservationId ? { reservationId: input.route.reservationId } : {}),
             },
             {

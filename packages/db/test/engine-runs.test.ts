@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { routeLaunchFacts, taskContext } from '../src/queries/engine.ts';
-import { setRoutingEffort } from '../src/routing-effort.ts';
-import { pools, routingCatalog } from '../src/schema/index.ts';
+import { setPurposeModelEffort } from '../src/routing-order.ts';
+import { pools, routingCatalog, routingPurposeModels } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addRoute, addTask, catalog } from './helpers.ts';
 
@@ -68,17 +68,23 @@ describe('routeLaunchFacts', () => {
     });
   });
 
-  it('思考档位照路由两层里这条路由那一行现读：没配是 null，驾驶舱改了下一次读到的就是新的', async () => {
+  it('思考档位只读用途表：没给用途是 null；改了用途表，下一次带上这个用途读到的就是新的；路由上的旧档不管', async () => {
     await t.db
       .insert(routingCatalog)
-      .values({ modelId: 'opus-5.5', routeId: 'r1', position: 0, enabled: true });
+      .values({ modelId: 'opus-5.5', routeId: 'r1', position: 0, enabled: true, effort: 'low' });
+    await t.db.insert(routingPurposeModels).values({ purpose: 'execute', modelId: 'opus-5.5', position: 0 });
     expect((await routeLaunchFacts(t.db, 'r1'))?.effort).toBeNull();
-    expect(await setRoutingEffort(t.db, { modelId: 'opus-5.5', routeId: 'r1', effort: 'xhigh' })).toEqual({
-      ok: true,
-      before: null,
-      after: 'xhigh',
-    });
-    expect((await routeLaunchFacts(t.db, 'r1'))?.effort).toBe('xhigh');
+    expect((await routeLaunchFacts(t.db, 'r1', 'execute'))?.effort).toBeNull();
+    expect(
+      await setPurposeModelEffort(t.db, {
+        purpose: 'execute',
+        modelId: 'opus-5.5',
+        effort: 'xhigh',
+        version: 0,
+      }),
+    ).toMatchObject({ ok: true });
+    expect((await routeLaunchFacts(t.db, 'r1', 'execute'))?.effort).toBe('xhigh');
+    expect((await routeLaunchFacts(t.db, 'r1'))?.effort).toBeNull();
   });
 
   it('路由不在回 null', async () => {

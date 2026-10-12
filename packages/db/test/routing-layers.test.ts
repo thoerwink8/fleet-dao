@@ -250,7 +250,7 @@ describe('把默认骨架写进库', () => {
     expect(beforeCatalog.find((r) => r.routeId === 'b-opus')).toBeUndefined();
   });
 
-  it('骨架里写的思考档位：模型第一次装进库时跟着写进去；没写的是空（起会话用 high）', async () => {
+  it('骨架里写的思考档位：模型第一次装进库时写进 routing_catalog；没写的是空（起会话不读这一列）', async () => {
     const withEffort = config({
       models: {
         'opus-4.9': [

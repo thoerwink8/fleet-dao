@@ -4,20 +4,32 @@
 import { readFile } from 'node:fs/promises';
 import { SESSION_EFFORTS } from '@fleet-dao/shared';
 import { z } from 'zod';
+import { bareAliasProblems } from './routing-seed-single.ts';
 import { STAGE_KINDS } from './schema/enums.ts';
 
 export const ROUTING_DEFAULT_PATH = new URL('../routing.default.json', import.meta.url);
 
 const Id = z.string().trim().min(1);
 
+const RoutingDefaultsSchema = z.strictObject({
+  /** 用途表没另配档位时用这一档。只写在骨架里，effort.ts 和本机工人都从这里读。 */
+  effort: z.enum(SESSION_EFFORTS, { error: `思考档位只有 ${SESSION_EFFORTS.join(' / ')}` }),
+  /** 本机工人不给 --model-id 时，按哪一个目录型号查骨架（完整型号，不写别名）。 */
+  models: z.strictObject({ grok: Id, codex: Id, claude: Id }),
+  /** Claude 工人不给 --model-id 时发给命令行的完整型号。 */
+  claudeModel: Id,
+});
+
 export const RoutingConfigSchema = z.strictObject({
+  /** 默认档位和本机工人用的型号。老的测试夹具可以不写；仓里那份骨架必须写（测试钉着）。 */
+  defaults: RoutingDefaultsSchema.optional(),
   /** default 给没单列的用途用；单列的用途整串替换 default。 */
   purposes: z
     .partialRecord(z.enum(['default', ...STAGE_KINDS]), z.array(Id).min(1))
     .refine((p) => Object.keys(p).length > 0, '至少要有 default 或某个用途的模型顺序'),
   /**
-   * 模型 → 路由顺序；enabled 是调度台上的开关（关着的照样挂着，不派）。effort 是这条路由的思考档位（#470），不写 = 没配
-   * （起会话用 high）；这条路由的执行方式认不认这一档，装进库时对着库里的路由判（routing-apply.ts）。
+   * 模型 → 路由顺序；enabled 是调度台上的开关（关着的照样挂着，不派）。effort 写进 routing_catalog.effort（#470），
+   * 起会话不读它（#1958，读用途表）。这条路由的执行方式认不认这一档，装进库时对着库里的路由判（routing-apply.ts）。
    */
   models: z
     .record(
@@ -98,6 +110,16 @@ export function parseRoutingConfig(text: string, source = 'routing.default.json'
       owner.set(r.routeId, model);
     }
   }
+  const ids = [...Object.keys(cfg.models), ...Object.values(cfg.purposes).flatMap((models) => models ?? [])];
+  if (cfg.defaults) {
+    ids.push(cfg.defaults.claudeModel, ...Object.values(cfg.defaults.models));
+    for (const [host, id] of Object.entries(cfg.defaults.models)) {
+      if (!(id in cfg.models)) {
+        problems.push(`defaults.models.${host} 的型号 ${id} 在 models 里没有路由顺序`);
+      }
+    }
+  }
+  problems.push(...bareAliasProblems(ids));
   if (problems.length > 0) throw new RoutingConfigError(`${source} 里有对不上的地方`, problems);
   return cfg;
 }

@@ -1,5 +1,5 @@
-// 驾驶舱「思考档位」页的接口（#470）：读每个模型下每条路由配的档位、改一条。真库上读写路由两层那张表（routing_catalog.effort）；
-// 改了引擎起会话现读到的就是新的（routeLaunchFacts）；写错值、这家不认、没挂、别人刚改过都拒，库里不动、不记操作记录；
+// 驾驶舱「思考档位」页的接口（#470）：读每个模型下每条路由配的档位、改一条。真库上读写 routing_catalog.effort。
+// 起会话不读这一列（#1958）。写错值、这家不认、没挂、别人刚改过都拒，库里不动、不记操作记录；
 // 没接上（内存版）读写 unavailable、改回 503，不拿空列表冒充「都没配」。
 import { auditLog, routeLaunchFacts, routingCatalog } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
@@ -138,8 +138,9 @@ describe('驾驶舱思考档位：改', () => {
       routeId: 'rt-claude-opus',
       effort: 'xhigh',
     });
-    // 引擎下一个起的会话照这一份（segment-spawner 的 routeLaunchFacts）
-    expect((await routeLaunchFacts(t.db, 'rt-claude-opus'))?.effort).toBe('xhigh');
+    // 这一页仍写 routing_catalog.effort。起会话不读它（#1958）：不带用途、带上用途读到的都不是这一笔。
+    expect((await routeLaunchFacts(t.db, 'rt-claude-opus'))?.effort).toBeNull();
+    expect((await routeLaunchFacts(t.db, 'rt-claude-opus', 'execute'))?.effort).toBeNull();
     expect(
       (await efforts(current, s.cookie)).models.find((m) => m.modelId === 'opus-5.5')?.routes[0]?.effort,
     ).toBe('xhigh');

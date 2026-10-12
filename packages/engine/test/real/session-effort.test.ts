@@ -1,11 +1,16 @@
-// #470「怎么算做完」：驾驶舱改一个模型（路由）的档位，下一个起的会话命令行里带的就是新档位；没配用 high；配置读不到或写错就报错、
-// 不起会话。真库（PGlite）里的路由两层 + 生产 Spawner + 真驱动（只把起进程那一步换成假插头），档位从库里现读、经驱动合成、
-// 拼进命令行（和插头起 reclaude、grok 用的是同一个参数拼法）。
+// #1958：改用途表的档位，下一次选路和起会话读到的就是它，并写进命令行。routing_catalog.effort 不再管起会话。
+// 没配用 high；配置读不到或写错就报错、不起会话。真库（PGlite）里的路由两层 + 生产 Spawner + 真驱动（只把起进程那一步换成假插头）。
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildClaudeArgs, buildGrokArgs } from '@fleet-dao/adapters';
-import { routingCatalog, setRoutingEffort } from '@fleet-dao/db';
+import {
+  routeFactsForPurpose,
+  routeLaunchFacts,
+  routingPurposeModels,
+  setPurposeModelEffort,
+  setRoutingEffort,
+} from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type HostRunners, hostDrivers } from '../../src/real/hosts.ts';
@@ -63,6 +68,7 @@ function rig(over: Partial<SegmentSpawnerDeps> = {}) {
         prompt: '干活',
         cwd: join(tmp, 'tree'),
         timeoutMinutes: 30,
+        stage: 'execute',
         ...(tier === undefined ? {} : { effort: tier }),
       },
       { spawn, runs: { async start() {}, async record() {} }, tmpDir: tmp },
@@ -83,49 +89,94 @@ function rig(over: Partial<SegmentSpawnerDeps> = {}) {
   return { claude, grok, session, claudeEffort, grokEffort };
 }
 
-describe('驾驶舱配的档位进命令行', () => {
-  it('没配用 high；驾驶舱改了，下一个起的会话命令行带的就是新档位；清掉又回到 high', async () => {
+describe('用途表的档位进选路和命令行', () => {
+  it('改用途表的档位，下一次选路和起会话读到的就是它；同一模型的两条路由一起变；路由上的旧档不管', async () => {
     const r = rig();
     expect((await r.session('solo')).outcome).toBe('done');
     expect(r.claudeEffort()).toBe('high');
 
     expect(
-      await setRoutingEffort(t.db, { modelId: 'opus-5.5', routeId: 'solo', effort: 'xhigh' }),
+      await setPurposeModelEffort(t.db, {
+        purpose: 'execute',
+        modelId: 'opus-5.5',
+        effort: 'xhigh',
+        version: 0,
+      }),
+    ).toMatchObject({ ok: true });
+    const picked = await routeFactsForPurpose(t.db, 'execute');
+    expect(picked.routes.filter((row) => row.modelId === 'opus-5.5').map((row) => row.effort)).toEqual([
+      'xhigh',
+      'xhigh',
+    ]);
+    expect((await routeLaunchFacts(t.db, 'solo', 'execute'))?.effort).toBe('xhigh');
+    expect((await routeLaunchFacts(t.db, 'carpool', 'execute'))?.effort).toBe('xhigh');
+    await r.session('solo');
+    expect(r.claudeEffort()).toBe('xhigh');
+    await r.session('carpool');
+    expect(r.claudeEffort()).toBe('xhigh');
+
+    // 思考档位页仍能改路由上的旧列，起会话不读它
+    expect(
+      await setRoutingEffort(t.db, { modelId: 'opus-5.5', routeId: 'solo', effort: 'low' }),
     ).toMatchObject({
       ok: true,
     });
+    expect((await routeLaunchFacts(t.db, 'solo', 'execute'))?.effort).toBe('xhigh');
     await r.session('solo');
     expect(r.claudeEffort()).toBe('xhigh');
 
-    await setRoutingEffort(t.db, { modelId: 'opus-5.5', routeId: 'solo', effort: 'low' });
+    expect(
+      await setPurposeModelEffort(t.db, {
+        purpose: 'execute',
+        modelId: 'opus-5.5',
+        effort: 'medium',
+        version: 1,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      (await routeFactsForPurpose(t.db, 'execute')).routes.find((row) => row.routeId === 'solo')?.effort,
+    ).toBe('medium');
+    expect((await routeLaunchFacts(t.db, 'solo', 'execute'))?.effort).toBe('medium');
     await r.session('solo');
-    expect(r.claudeEffort()).toBe('low');
+    expect(r.claudeEffort()).toBe('medium');
 
-    // 改的是 solo 这一条：同一模型下的另一条路由不受影响
-    await r.session('carpool');
-    expect(r.claudeEffort()).toBe('high');
-
-    await setRoutingEffort(t.db, { modelId: 'opus-5.5', routeId: 'solo', effort: null });
+    expect(
+      await setPurposeModelEffort(t.db, {
+        purpose: 'execute',
+        modelId: 'opus-5.5',
+        effort: null,
+        version: 2,
+      }),
+    ).toMatchObject({ ok: true });
     await r.session('solo');
     expect(r.claudeEffort()).toBe('high');
-    expect(r.claude.count()).toBe(5);
   });
 
-  it('分档只往下压：配了 xhigh，快档（medium）的活是 medium，中档、主力档（high）的活照 xhigh', async () => {
+  it('分档只往下压：用途表配了 xhigh，快档（medium）的活是 medium，中档、主力档（high）的活照 xhigh', async () => {
     const r = rig();
-    await setRoutingEffort(t.db, { modelId: 'opus-5.5', routeId: 'solo', effort: 'xhigh' });
+    await setPurposeModelEffort(t.db, {
+      purpose: 'execute',
+      modelId: 'opus-5.5',
+      effort: 'xhigh',
+      version: 0,
+    });
     await r.session('solo', 'medium');
     expect(r.claudeEffort()).toBe('medium');
     await r.session('solo', 'high');
     expect(r.claudeEffort()).toBe('xhigh');
   });
 
-  it('Grok 路由：配了 medium，命令行是 --reasoning-effort medium', async () => {
+  it('Grok 路由：用途表配了 medium，命令行是 --reasoning-effort medium', async () => {
     const { routeId } = await addGrokRoute(t.db, { stages: ['execute'] });
     const r = rig();
     await r.session(routeId);
     expect(r.grokEffort()).toBe('high');
-    await setRoutingEffort(t.db, { modelId: 'grok-4.7', routeId, effort: 'medium' });
+    await setPurposeModelEffort(t.db, {
+      purpose: 'execute',
+      modelId: 'grok-4.7',
+      effort: 'medium',
+      version: 0,
+    });
     await r.session(routeId);
     expect(r.grokEffort()).toBe('medium');
   });
@@ -134,8 +185,8 @@ describe('驾驶舱配的档位进命令行', () => {
 describe('【故意造出的失败】配置写错、读不到：报错、不起会话，不当成 high', () => {
   it('库里给 Grok 路由写了它不认的 max（绕过了驾驶舱的校验）：起不了，说清哪条路由、为什么，插头一次没起', async () => {
     const { routeId } = await addGrokRoute(t.db, { stages: ['execute'] });
-    // 只有这一行是 grok 的；world 的两条 Claude 路由也被写成 max，Claude 认 max，不影响这条用例
-    await t.db.update(routingCatalog).set({ effort: 'max' });
+    // 绕过写入校验，直接把用途表写成 Grok 不认的 max。路由上的旧列不管起会话。
+    await t.db.update(routingPurposeModels).set({ effort: 'max' });
     const r = rig();
     const err = await r.session(routeId).catch((e: unknown) => e);
     expect(String((err as Error).message)).toMatch(

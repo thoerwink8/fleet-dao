@@ -120,9 +120,9 @@ export interface SubagentTarget {
  * 的 User-level 一档：这台上所有项目里都能用；同名时项目级 .claude/agents/ 优先）。
  * - 只装 files 列的几份，不扫目录：~/.claude/agents/ 里机器上手写的（把内置子代理钉到别名模型的 Explore.md、Plan.md 这类）
  *   一律不碰、不删。
- * - fleet-*.md：16 个子代理的通用版（决定 0079）。name、description、model 和仓里 .claude/agents/ 那份一致，正文去掉了
- *   fleet-dao 专属的规矩，别的仓的会话也能用；在 fleet-dao 里项目级那份优先，本仓照旧用专属版（决定 0036）。
- *   .claude/agents/ 那份不往家里装：里面是本仓的命令和路径。
+ * - fleet-*.md：16 个子代理只此一份，原件在 agents/subagents/（#1958，决定 0079 的用户级安装仍从这里装）。
+ *   仓里 .claude/agents/fleet-*.md 是它的原样副本，两处不一致测试会红。pnpm agents:sync 不改仓里的检出
+ *   （免得每次同步弄脏工作树），只把这几份装到每台机器的 ~/.claude/agents/。在 fleet-dao 里项目级那份优先（决定 0036）。
  * - haiku55.md：别名 haiku 在本机指向 Haiku 4.5，要真 5.5 只能靠写死完整 id 的自定义子代理（决定 0035，#1393）。
  *   不放进 .claude/agents/：那里的会被引擎当成本仓子代理传给 --agents。
  * - 只给 Claude Code：Grok、Devin 借道读 ~/.claude 的规矩和钩子，认不认这里的子代理定义没核过，不算它们的。

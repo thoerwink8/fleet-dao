@@ -4,6 +4,7 @@
   "include": ["test"],
   "files": [
     "../packages/conventions/src/rules-budget.ts",
+    "../packages/agents-sync/src/project-agents.ts",
     "skills/commander/scripts/check-brief.mjs",
     "skills/commander/scripts/france-lib.mjs",
     "skills/commander/scripts/france-query.mjs",

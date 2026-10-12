@@ -1,8 +1,8 @@
 // 引擎起会话要的事实：任务属于哪个仓、哪张 issue（含仓的测试命令），路由的池、会话用户、上游模型串、配的思考档位。
-import type { HostId, OrgKind, RunAsUser, SessionEffort } from '@fleet-dao/shared';
+import type { HostId, OrgKind, RunAsUser, SessionEffort, StageKind } from '@fleet-dao/shared';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { pools, repos, routes, routingCatalog, tasks } from '../schema/index.ts';
+import { models, pools, repos, routes, routingPurposeModels, tasks } from '../schema/index.ts';
 
 export interface TaskContext {
   taskId: string;
@@ -58,25 +58,38 @@ export interface RouteLaunchFacts {
   runAsUser: RunAsUser | null;
   orgKind: OrgKind | null;
   /**
-   * 驾驶舱给这条路由配的思考档位（routing_catalog.effort，#470）。没配、或这条路由没挂进路由两层，是 null（起会话用 high）。
-   * 起会话时现读：驾驶舱改了，下一个会话就照新的。
+   * 这个用途下这个模型的思考档位（routing_purpose_models.effort，#1958）。
+   * 没给用途、这个用途没排这个模型、或那一格没配，是 null（起会话用骨架 defaults.effort）。
+   * 不读 routing_catalog.effort。改用途表的档位，下一次带上同一个用途读到的就是新的。
    */
   effort: SessionEffort | null;
 }
 
-/** 起会话要的：这条路由的池、会话用户、执行方式、上游模型串、配的思考档位。路由不在返回 null。 */
-export async function routeLaunchFacts(db: Db, routeId: string): Promise<RouteLaunchFacts | null> {
+/**
+ * 起会话要的：这条路由的池、会话用户、执行方式、上游模型串、这个用途配的思考档位。路由不在返回 null。
+ * purpose 不给时 effort 是 null（调用方没说用途，不能去猜别的用途或路由上的旧档）。
+ */
+export async function routeLaunchFacts(
+  db: Db,
+  routeId: string,
+  purpose?: StageKind,
+): Promise<RouteLaunchFacts | null> {
   const [row] = await db
-    .select({ route: routes, pool: pools, effort: routingCatalog.effort })
+    .select({ route: routes, pool: pools })
     .from(routes)
     .innerJoin(pools, eq(pools.id, routes.poolId))
-    // 一条路由只挂在它自己的模型下（复合外键），最多一行
-    .leftJoin(
-      routingCatalog,
-      and(eq(routingCatalog.routeId, routes.id), eq(routingCatalog.modelId, routes.modelId)),
-    )
     .where(eq(routes.id, routeId));
   if (!row) return null;
+  let effort: SessionEffort | null = null;
+  if (purpose !== undefined) {
+    const [purposeRow] = await db
+      .select({ effort: routingPurposeModels.effort })
+      .from(routingPurposeModels)
+      .where(
+        and(eq(routingPurposeModels.purpose, purpose), eq(routingPurposeModels.modelId, row.route.modelId)),
+      );
+    effort = purposeRow?.effort ?? null;
+  }
   return {
     routeId: row.route.id,
     channelId: row.route.channelId,
@@ -87,6 +100,20 @@ export async function routeLaunchFacts(db: Db, routeId: string): Promise<RouteLa
     executor: row.route.executor,
     runAsUser: row.pool.runAsUser,
     orgKind: row.pool.orgKind,
-    effort: row.effort,
+    effort,
   };
+}
+
+/** Mirasim 起会话校验用的型号：目录里的模型 id，加上每条路由的上游串。引擎每次现读，插头不另存一份。 */
+export async function launchModelNames(db: Db): Promise<string[]> {
+  const [modelRows, routeRows] = await Promise.all([
+    db.select({ id: models.id }).from(models),
+    db.select({ upstream: routes.upstreamModel }).from(routes),
+  ]);
+  const names = new Set<string>();
+  for (const row of modelRows) names.add(row.id);
+  for (const row of routeRows) {
+    if (row.upstream) names.add(row.upstream);
+  }
+  return [...names];
 }

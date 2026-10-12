@@ -53,7 +53,6 @@ interface WorkerLib {
   USAGE: string;
   SESSION_EFFORTS: string[];
   EFFORTS: string[];
-  DEFAULT_EFFORT: string;
   GITHUB_HOSTS: string[];
   SAFE_ENV_KEYS: string[];
   KIMI_UNSUPPORTED: string;
@@ -273,9 +272,14 @@ function world() {
   };
 }
 
-/** 一份最小的路由骨架：models 给什么就是什么。 */
+/** 一份最小的路由骨架：默认档位和型号照仓里那一份，models 给什么就是什么。 */
+const SKELETON_DEFAULTS = {
+  effort: 'high',
+  models: { grok: 'grok-4.7', codex: 'gpt-5.6-luna', claude: 'sonnet-5.5' },
+  claudeModel: 'claude-sonnet-5-5',
+};
 const skeletonWith = (models: Record<string, unknown>) =>
-  JSON.stringify({ purposes: { default: Object.keys(models) }, models });
+  JSON.stringify({ defaults: SKELETON_DEFAULTS, purposes: { default: Object.keys(models) }, models });
 
 /** start 的一份合格 meta：clean/status/stop 的用例不走 start，直接手写一份，省得每次都跑一遍 start 的六步。 */
 function validMeta(w: ReturnType<typeof world>, name: string, over: Record<string, unknown> = {}) {
@@ -812,9 +816,10 @@ describe('start：思考档位照仓里的路由骨架（#470，本机读不到�
     return { code, spec: w.spawnCalls[0] };
   };
 
-  it('档位的叫法、默认档和驾驶舱、引擎用的同一份（packages/shared/src/effort.ts）', () => {
+  it('档位的叫法、默认档和驾驶舱、引擎用的同一份（骨架 defaults.effort，effort.ts 从它读）', () => {
     expect(lib.SESSION_EFFORTS).toEqual([...sharedEffort.SESSION_EFFORTS]);
-    expect(lib.DEFAULT_EFFORT).toBe(sharedEffort.DEFAULT_SESSION_EFFORT);
+    const seed = JSON.parse(REAL_SKELETON) as { defaults: { effort: string } };
+    expect(seed.defaults.effort).toBe(sharedEffort.DEFAULT_SESSION_EFFORT);
     // grok 命令行认的档：和引擎起 grok 会话认的一样
     expect(lib.EFFORTS).toEqual([...sharedEffort.GROK_EFFORTS]);
   });
@@ -885,13 +890,21 @@ describe('start：思考档位照仓里的路由骨架（#470，本机读不到�
       await refused(w, /路由骨架读不到.*pnpm agents:sync/);
     });
 
-    it('不是 JSON、没有 models、模型下不是路由列表', async () => {
+    it('不是 JSON、没有 models、没有 defaults、模型下不是路由列表', async () => {
       const w = world();
       w.skeleton('{ 坏的');
       await refused(w, /路由骨架不是 JSON/);
       const w2 = world();
       w2.skeleton(JSON.stringify({ purposes: {} }));
       await refused(w2, /没有 models/);
+      const w4 = world();
+      w4.skeleton(
+        JSON.stringify({
+          purposes: { default: ['grok-4.7'] },
+          models: { 'grok-4.7': [{ routeId: 'grok:grok-4.7:grok', enabled: true }] },
+        }),
+      );
+      await refused(w4, /没有 defaults/);
       const w3 = world();
       w3.skeleton(skeletonWith({ 'grok-4.7': { routeId: 'x' } }));
       await refused(w3, /models\.grok-4\.7 不是路由列表/);

@@ -20,8 +20,14 @@
 import { judgeRun, type RateLimitReading, type SessionUser } from '@fleet-dao/adapters';
 import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import type { Db, RouteLaunchFacts } from '@fleet-dao/db';
-import { appendRunTranscript, routeLaunchFacts, savePoolQuota, type TranscriptRow } from '@fleet-dao/db';
-import { routeEffortProblem } from '@fleet-dao/shared';
+import {
+  appendRunTranscript,
+  launchModelNames,
+  routeLaunchFacts,
+  savePoolQuota,
+  type TranscriptRow,
+} from '@fleet-dao/db';
+import { routeEffortProblem, type StageKind } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { CarpoolRejection } from '../jobs/carpool-outage.ts';
 import { hostName } from '../routing/names.ts';
@@ -46,8 +52,8 @@ export const SEGMENT_WALL_MARGIN_MS = 60_000;
 const MIN_WALL_MS = 10_000;
 
 export interface SegmentSpawnerDeps {
-  /** 路由编号 → 执行方式、池、会话用户、上游模型串。不给就用库里的（routeLaunchFacts）。 */
-  routeFacts?: (routeId: string) => Promise<RouteLaunchFacts | null>;
+  /** 路由编号 → 执行方式、池、会话用户、上游模型串、这个用途的档位。不给就用库里的（routeLaunchFacts）。 */
+  routeFacts?: (routeId: string, purpose?: StageKind) => Promise<RouteLaunchFacts | null>;
   db?: Db;
   drivers: Record<WiredHost, HostDriver>;
   /** 会话临时目录的管理（real/worktrees.ts）：只用这三样。 */
@@ -127,6 +133,7 @@ export function outcomeOfReport(report: HostReport): SpawnOutcome {
 export async function resolveSegmentRoute(
   deps: Pick<SegmentSpawnerDeps, 'routeFacts' | 'db' | 'drivers'>,
   routeId: string | undefined,
+  purpose?: StageKind,
 ): Promise<{ route: RouteLaunchFacts; driver: HostDriver; user: SessionUser }> {
   if (!routeId) {
     throw new Error('这一段没给路由编号（routeId）：生产 Spawner 不知道该起哪家执行体，也不落到默认的上');
@@ -134,11 +141,11 @@ export async function resolveSegmentRoute(
   const lookup =
     deps.routeFacts ??
     (deps.db
-      ? (id: string) => routeLaunchFacts(deps.db as Db, id)
+      ? (id: string, stage?: StageKind) => routeLaunchFacts(deps.db as Db, id, stage)
       : () => {
           throw new Error('生产 Spawner 没装路由查询：要给 routeFacts 或 db');
         });
-  const route = await lookup(routeId);
+  const route = await lookup(routeId, purpose);
   if (!route) throw new Error(`库里没有路由 ${routeId}`);
   if (!isWiredHost(route.hostId)) {
     throw new Error(
@@ -192,7 +199,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
   return async (cmd) => {
     const { input } = cmd;
     const runId = input.runId;
-    const { route, driver, user } = await resolveSegmentRoute(deps, input.routeId);
+    const { route, driver, user } = await resolveSegmentRoute(deps, input.routeId, input.stage);
 
     const tmpDir = deps.trees.tmpFor(runId);
     await deps.trees.adopt(tmpDir, user);
@@ -218,11 +225,15 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       },
       model: route.upstreamModel ?? route.modelId,
       ...(route.executor ? { executor: route.executor } : {}),
-      // 两个来源原样交给驱动，合成哪一档只在 hosts.ts 的 sessionEffortFor：路由配的是上限，分档只往下压
+      // 两个来源原样交给驱动，合成哪一档只在 hosts.ts 的 sessionEffortFor：用途表配的是上限，分档只往下压
       ...(route.effort !== null ? { effort: route.effort } : {}),
       ...(input.effort !== undefined ? { tierEffort: input.effort } : {}),
       session: { mode: 'new', id: driver.newSessionId(runId).id },
       purpose: 'work',
+      // Mirasim 每次把用途和目录里的型号带上。没给用途也带（purpose 空），插头拒「缺角色」。探针不走这里。
+      ...(route.hostId === 'mirasim' && deps.db
+        ? { mirasimGuard: { purpose: input.stage ?? null, models: await launchModelNames(deps.db) } }
+        : {}),
     };
     // 内存峰值（#948）：会话跑着时采它 scope 的 memory.peak，收场后交结果；scope 一收场 cgroup 就没了，只能边跑边读
     // 会话过程记录（#1640）：提示词记第一条，插头交来的接着记；runOneShot 写的开跑那一行在前（外键），收场前等写完

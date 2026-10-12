@@ -694,6 +694,8 @@ export async function invokeVerifier(
         prompt,
         cwd: prepared ? prepared.cwd : deps.cwd,
         ...(deps.timeoutMinutes !== undefined ? { timeoutMinutes: deps.timeoutMinutes } : {}),
+        // 验收是冷调用、不分档；用途照旧是 verify，起会话读这一档
+        stage: 'verify',
       };
       let oneShotResult: OneShotResult;
       try {

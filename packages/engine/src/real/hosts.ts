@@ -113,10 +113,10 @@ export function isWiredHost(hostId: string): hostId is WiredHost {
 export { DEFAULT_SESSION_EFFORT };
 
 /**
- * 一次会话用哪一档（#470）。只有这里把两个来源合成一档，别处只管传：
- * - configured：驾驶舱给这条路由配的（routing_catalog.effort，没配 = DEFAULT_SESSION_EFFORT）。它是这条路由的默认，也是上限。
+ * 一次会话用哪一档（#470、#1958）。只有这里把两个来源合成一档，别处只管传：
+ * - configured：这个用途下这个模型配的（routing_purpose_models.effort，没配 = DEFAULT_SESSION_EFFORT）。它是默认，也是上限。
  * - tier：分档按改动面给的（runner/tier.ts 的 effort）。只往下压、不往上抬：比标准档（DEFAULT_SESSION_EFFORT）低才算数
- *   （快档的 medium：小活少想），取它和 configured 里低的那个；标准档及以上 = 不压，照 configured（驾驶舱配了 xhigh 的，
+ *   （快档的 medium：小活少想），取它和 configured 里低的那个；标准档及以上 = 不压，照 configured（用途表配了 xhigh 的，
  *   中档、主力档的活就是 xhigh；配了 low 的，哪一档的活都是 low）。
  * 认不出的值抛错（调用方不起会话），不当成 high。
  */
@@ -209,12 +209,17 @@ export interface HostRunSpec {
    */
   executor?: string;
   /**
-   * 驾驶舱给这条路由配的思考档位（routing_catalog.effort）。不给 = 没配，用 DEFAULT_SESSION_EFFORT。
+   * 这个用途下这个模型配的思考档位（routing_purpose_models.effort）。不给 = 没配，用 DEFAULT_SESSION_EFFORT。
    * 模型串方括号里已经编了档位的不再另传（applySessionEffort）。
    */
   effort?: string;
   /** 分档按改动面给的档位（runner/tier.ts）：只往下压、不往上抬，和 effort 怎么合见 sessionEffortFor。不给 = 不压。 */
   tierEffort?: string;
+  /**
+   * Mirasim 起会话前的校验材料（#1958）。引擎每次现读传进来，插头不另存一份。
+   * 不给 = 不校验（探针没有用途）。给了：缺用途、档位越界、型号不在这份名单里，runMirasim 在连上之前拒。
+   */
+  mirasimGuard?: { purpose: string | null; models: readonly string[] };
   session: HostSession;
   /**
    * work = 干活的会话：命令一律放行（会话用户读不到引擎的配置和机器人凭据，design 第十四节；无头会话没人批权限）；
@@ -803,6 +808,7 @@ function mirasimDriver(
           route: 'cloud',
           ...(effort.pass ? { effort: effort.pass } : {}),
           ...(MIRASIM_MODELLESS_AGENTS.has(agent) ? { expectModel: effort.model } : { model: effort.model }),
+          ...(spec.mirasimGuard ? { guard: spec.mirasimGuard } : {}),
           session:
             spec.session.mode === 'resume' ? { mode: 'resume', key: spec.session.id } : { mode: 'new' },
           // 时限照引擎给的（和另外三家一样）：一次性段的总时长比 one-shot 早一分钟到、驱动先报 wall_clock_timeout，

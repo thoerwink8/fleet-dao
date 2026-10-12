@@ -27,6 +27,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { redact } from '@fleet-dao/adapters';
+import type { StageKind } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { MemoryAdmissionDeps } from '../real/memory-admission.ts';
 import { admitSessionMemory } from '../real/memory-admission.ts';
@@ -91,6 +92,11 @@ export interface OneShotInput {
   routeId?: string;
   /** 思考档位（按改动面分档给的，tier.ts 的 effort）；不给用执行方式自己的默认。 */
   effort?: string;
+  /**
+   * 这一段按哪个用途起（execute / ui / verify / groom）。生产 Spawner 用它读用途表的思考档位。
+   * 不给 = 没说用途，档位按没配（默认档）。老的调用可以不给。
+   */
+  stage?: StageKind;
   /** 选路时给这一段预占的池的名额（#757，pool_reservations 的编号）：开跑那一行写进去时换成这一行。不经选路的不给。 */
   reservationId?: string;
 }

@@ -1,5 +1,5 @@
 // 选路事实：按路由两层读一个用途下每条路由的池、模型、探针、额度窗、在途和占位、挡因。
-import type { HostId, OrgKind, QuotaWindowKind, StageKind } from '@fleet-dao/shared';
+import type { HostId, OrgKind, QuotaWindowKind, SessionEffort, StageKind } from '@fleet-dao/shared';
 import { eq, inArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { flattenRoutingLayers, routingLayers } from '../routing-layers.ts';
@@ -43,6 +43,11 @@ export interface PurposeRouteFacts {
     hostId: HostId;
     upstreamModel: string | null;
     upstreamAliases: string[];
+    /**
+     * 这个用途下这个模型的思考档位（routing_purpose_models.effort）。同一个模型下的路由共用这一档。
+     * 空 = 没配，起会话用默认档。不读 routing_catalog.effort。
+     */
+    effort: SessionEffort | null;
     /** Mirasim 记下的执行体（routes.executor）。别的执行方式也读出来，选路只用在 mirasim 上。 */
     executor: string | null;
     /** 路由探针最近一次下结论的时刻（候选查询的 probedAt）：在线的一定有，过没过期由选路判。 */
@@ -116,6 +121,7 @@ export async function routeFactsForPurpose(
     db.select().from(quotaWindows).where(inArray(quotaWindows.poolId, poolIds)),
   ]);
   const detailByRoute = new Map(detailRows.map((r) => [r.routeId, r]));
+  const effortByModel = new Map(layers.models.map((m) => [m.modelId, m.effort]));
   const windowByKey = new Map(windowRows.map((w) => [`${w.poolId}\u0000${w.label}`, w]));
 
   const routesOut = sorted.map((c) => {
@@ -134,6 +140,7 @@ export async function routeFactsForPurpose(
       hostId: c.hostId,
       upstreamModel: detail.upstreamModel,
       upstreamAliases: detail.upstreamAliases,
+      effort: effortByModel.get(c.modelId) ?? null,
       executor: detail.executor,
       probedAt: c.probedAt,
       probeState: c.probeState,

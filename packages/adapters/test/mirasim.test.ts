@@ -154,6 +154,28 @@ describe('Mirasim 会话状态（真跑夹具）', () => {
 });
 
 describe('Mirasim 起会话到判定（假服务端）', () => {
+  it('【故意造出的失败】缺角色、档位越界、型号不在目录里：连上之前拒，写明原因', async () => {
+    const server = new FakeMirasim({});
+    const models = ['claude-sonnet-5-5'];
+    await expect(
+      runMirasim(spec({ guard: { purpose: null, models }, model: 'claude-sonnet-5-5' }), {
+        connect: server.connect,
+      }),
+    ).rejects.toThrow(/缺角色/);
+    await expect(
+      runMirasim(
+        spec({ guard: { purpose: 'execute', models }, model: 'claude-sonnet-5-5', effort: 'ultra' }),
+        { connect: server.connect },
+      ),
+    ).rejects.toThrow(/档位越界/);
+    await expect(
+      runMirasim(spec({ guard: { purpose: 'execute', models }, model: 'sonnet' }), {
+        connect: server.connect,
+      }),
+    ).rejects.toThrow(/型号不在目录里/);
+    expect(server.connects).toBe(0);
+  });
+
   it('档位不认识：prompt 还没发出去就拒【故意造出的失败】', async () => {
     const server = new FakeMirasim({});
     await expect(runMirasim(spec({ effort: 'turbo' }), { connect: server.connect })).rejects.toThrow(

@@ -1,7 +1,6 @@
-// 路由两层里每条路由的思考档位（#470）：驾驶舱「思考档位」页经 routingEffortRows 读、经 setRoutingEffort 写
-// routing_catalog.effort。档位是运行时配置、留在库里（决定 0011
-// 第 7 条），不走「改仓库再部署」；引擎起会话时现读（queries/engine-launch-facts.ts 的 routeLaunchFacts），改完下一个会话就照新的。
-// 这条路由的执行方式认不认这一档照 shared 的 routeEffortProblem 判（和骨架装载、引擎起会话同一份判法），判不过一行不写、回原因。
+// 驾驶舱「思考档位」页经 routingEffortRows 读、经 setRoutingEffort 写 routing_catalog.effort（#470）。
+// 起会话不读这一列（#1958）：会话档位在 routing_purpose_models.effort，由 setPurposeModelEffort 改。
+// 这一页仍留着，改的是路由上的旧列。这条路由的执行方式认不认这一档照 shared 的 routeEffortProblem 判，判不过一行不写、回原因。
 import { type HostId, routeEffortProblem, type SessionEffort } from '@fleet-dao/shared';
 import { and, asc, eq } from 'drizzle-orm';
 import type { Db } from './client.ts';
@@ -16,7 +15,7 @@ export interface RoutingEffortRow {
   /** 在它的模型下的先后。 */
   position: number;
   enabled: boolean;
-  /** 空 = 没配（起会话用 high）。 */
+  /** 空 = 这一页没配。起会话不读这一列。 */
   effort: SessionEffort | null;
   hostId: HostId;
   upstreamModel: string | null;
@@ -53,7 +52,7 @@ export async function routingEffortRows(db: Db): Promise<RoutingEffortRow[]> {
 export interface SetRoutingEffortInput {
   modelId: string;
   routeId: string;
-  /** 要改成的档位；null = 清掉、回到没配（起会话用 high）。 */
+  /** 要改成的档位；null = 清掉这一列。起会话不读它（#1958）。 */
   effort: string | null;
   /** 调用方改之前看到的值：给了就比，库里已经不是它（别人刚改过）回 conflict、不覆盖。不给 = 不比。 */
   expected?: SessionEffort | null;

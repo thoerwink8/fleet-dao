@@ -3,7 +3,7 @@
 // 这里是工作流代码也会引入的文件：运行时只引 @temporalio/workflow 的 defineSignal / defineQuery，别的一律只写类型。
 // 输入进了工作流历史：以后只许加可选字段，不许改老字段的意思。
 
-import type { Repo } from '@fleet-dao/shared';
+import type { Repo, StageKind } from '@fleet-dao/shared';
 import {
   type AbandonCommand,
   type ContinueCommand,
@@ -143,6 +143,11 @@ export interface RunSegmentInput {
    * 会话不看它。老历史里没有这个字段。
    */
   prNumber?: number;
+  /**
+   * 这一段按哪个用途起会话（#1958）。动手是 execute，界面活是 ui。
+   * 老历史里没有这个字段：活动按 execute 读档位。只许加、不许改老字段的意思。
+   */
+  stage?: StageKind;
 }
 
 /**

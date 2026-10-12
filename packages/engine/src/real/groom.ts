@@ -195,7 +195,7 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
     // 2. 路由 → 会话用户（树要归它）
     let info: Awaited<ReturnType<typeof resolveSegmentRoute>>;
     try {
-      info = await resolveSegmentRoute(w.spawner, route.routeId);
+      info = await resolveSegmentRoute(w.spawner, route.routeId, 'groom');
     } catch (err) {
       return { ok: false, why: errMessage(err), routeId: route.routeId };
     }
@@ -228,7 +228,7 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
           stdin: input.prompt,
           signal: AbortSignal.any([stop.signal, ticket.signal]),
           timeoutMs: timeoutMs + SPAWN_MARGIN_MS,
-          // 生产 Spawner 只读 routeId、runId、effort；segment 在这里只是占位（不进 runs）
+          // 生产 Spawner 读 routeId、runId、effort、stage；segment 在这里只是占位（不进 runs）
           input: {
             runId,
             segment: 'scope',
@@ -236,6 +236,7 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
             routeId: route.routeId,
             prompt: input.prompt,
             cwd: dir,
+            stage: 'groom',
           },
         });
       } finally {

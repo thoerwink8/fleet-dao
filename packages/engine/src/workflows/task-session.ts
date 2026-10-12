@@ -12,6 +12,8 @@
 // - 派之前再探一次选定的那条（#1409，patched('dispatch-probe')）：不通就先放掉这次预占（patched('dispatch-probe-release')，
 //   没进起会话，不能占着池），再换下一条，每轮最多探 3 条；都探不通或都被挡就停下，不起会话。
 //   没提交避让滤光之后改派原来的那条，也先探再派。老历史没有这个标记，不探、不改选路之后的那一步。
+// - 起会话带上用途，好读用途表的思考档位（#1958，patched('purpose-session-effort')）：界面活带 ui，其余动手带 execute。
+//   老历史没有这个标记，活动按 execute 读。验收和整理在活动内部带用途，不经过这里的入参。
 
 import { isCancellation, patched } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -111,6 +113,10 @@ export async function writeSession(
             ...(interrupted ? { interrupted } : {}),
             // 只记账（runs.pr_number，#216）：第一轮会话交付之后才开 PR，这时还没有
             ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
+            // 老历史重放不带这个字段：活动按 execute 读档位。界面活和动手选路用的是同一个用途。
+            ...(patched('purpose-session-effort')
+              ? { stage: ui?.uiWork === true ? UI_PURPOSE : SEGMENT_STAGE.manual }
+              : {}),
           }),
         { pausable: true },
       );

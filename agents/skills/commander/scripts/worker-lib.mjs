@@ -84,13 +84,11 @@ export function readPauseMarker(home) {
 
 const NAME_RE = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const MODELS = ['grok', 'codex', 'kimi', 'claude'];
-/** 思考档位的叫法，和 packages/shared/src/effort.ts 的 SESSION_EFFORTS 一样（测试钉着）。 */
+/** 思考档位的叫法，和 packages/shared/src/effort.ts 的 SESSION_EFFORTS 一样（测试钉着）。这是认哪几档，不是默认值。 */
 export const SESSION_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 /** grok、codex 命令行认的档（都没有 max）；总是显式传给模型命令行。 */
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
-/** 骨架里这个模型没配档位时用这一档（创始人 2026-09-28 拍：默认 high，别用 xhigh）。 */
-export const DEFAULT_EFFORT = 'high';
-/** 路由骨架在同步专用检出里的位置（相对家目录）：本机读不到法国库，档位照它（见文件头）。 */
+/** 路由骨架在同步专用检出里的位置（相对家目录）：本机读不到法国库，默认档位和型号照这份（见文件头）。 */
 export const ROUTING_DEFAULT_REL = join(
   '.fleet-dao',
   'origin-main',
@@ -98,17 +96,15 @@ export const ROUTING_DEFAULT_REL = join(
   'db',
   'routing.default.json',
 );
-/** 不给 --model-id 时按骨架里哪个模型查档位：本机 grok 命令行跑的就是 grok-4.7（法国 grok 那条路由同一个命令行），codex 跑 GPT。 */
-export const ROUTING_MODEL_OF = { grok: 'grok-4.7', codex: 'gpt-5.6-luna', claude: 'sonnet' };
 /**
  * Claude 工人只许这两族：工人永不用 Fable（通用段「我的机器与模型」）；工人是写代码、开 PR 的整段活，
  * 照决定 0034 的档位表不用 Haiku（Haiku 只给读多写少、好抽查的子代理）。
- * 不给 --model-id 用 Sonnet 5.5 的完整 id（决定 0034：写完整 id，免得别名指到旧版），要 Opus 显式给 --model-id claude-opus-5-5；
- * 给了别的（fable、haiku、认不出的）一律拒起，不替人改成能用的。
+ * 不给 --model-id 用骨架 defaults.claudeModel（完整 id，免得别名指到旧版），要 Opus 显式给 --model-id claude-opus-5-5；
+ * 给了别的（fable、haiku、认不出的）一律拒起，不替人改成能用的。fallback 不给又没 modelId，就是骨架没读到。
  */
-export const CLAUDE_DEFAULT_MODEL = 'claude-sonnet-5-5';
-export function claudeModelProblem(modelId) {
-  const id = modelId ?? CLAUDE_DEFAULT_MODEL;
+export function claudeModelProblem(modelId, fallback) {
+  const id = modelId ?? fallback;
+  if (!id) return 'Claude 工人的默认型号读不到（路由骨架 defaults.claudeModel），不起';
   if (/^(opus|sonnet)$/.test(id) || /^claude-(opus|sonnet)-[\w.-]+$/.test(id)) return null;
   return `Claude 工人只用 Opus 或 Sonnet（工人永不用 Fable；写代码的整段活不用 Haiku，决定 0034）：--model-id 给的是「${id}」，不起。`;
 }
@@ -125,7 +121,7 @@ export const USAGE = `用法：node worker.mjs <命令> …（在项目仓的检
         --no-issue：确实没有单，理由原样进 PR 需求栏；两个必须给一个，缺了不起（--no-ship 冒烟除外）]
         [--model-id：claude 默认 claude-sonnet-5-5，要 Opus 给 claude-opus-5-5；Fable、Haiku 一律拒起]
         [--effort low|medium|high|xhigh，这一次用的；不给照 ~/${ROUTING_DEFAULT_REL.replaceAll('\\', '/')} 给这个模型配的，
-        没配是 ${DEFAULT_EFFORT}] [--no-ship] [--no-automerge]
+        没配是骨架 defaults.effort] [--no-ship] [--no-automerge]
                     在主检出的 .claude/worktrees/ 下建一棵工作树、起一个模型命令行去干活（后台跑，这条命令退出它照跑）
                     --no-automerge：开非草稿 PR 但不挂自动合并，正文「还欠什么」栏写「人闸：改标准」，CI 绿了就停
                     （改标准要创始人点头才能合，见 AGENTS.md「改标准是人闸第四类」）；不给就是本机快马老规矩：
@@ -242,12 +238,8 @@ function explicitEffortOf(p) {
   return v;
 }
 
-/**
- * 这次起工人用哪一档（#470）：--effort 给了就用它；不给照路由骨架给这个模型配的——模型下几条路由配了的都一样就用它，一条都没配、
- * 骨架里没这个模型就是 DEFAULT_EFFORT。骨架读不到、不是 JSON、形状或档位认不出、几条路由配的不一样（不知道照哪条）、这个命令行
- * 不认那一档：回 { ok: false, why }，调用方不起，不当成 high。
- */
-export function routingEffortFor(home, model, modelId) {
+/** 读骨架。读不到、不是 JSON、没有 models、没有 defaults，都回为什么。defaults 是默认档位和型号的唯一一份。 */
+function readRoutingSkeleton(home) {
   const file = join(home, ROUTING_DEFAULT_REL);
   let text;
   try {
@@ -268,10 +260,50 @@ export function routingEffortFor(home, model, modelId) {
   if (!models || typeof models !== 'object' || Array.isArray(models)) {
     return { ok: false, why: `路由骨架认不出（${file}）：没有 models（模型 → 路由顺序）` };
   }
-  const routingModel = modelId ?? ROUTING_MODEL_OF[model];
+  const defaults = cfg?.defaults;
+  if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults)) {
+    return {
+      ok: false,
+      why: `路由骨架认不出（${file}）：没有 defaults（默认档位和型号只写在这一处）`,
+    };
+  }
+  if (!SESSION_EFFORTS.includes(defaults.effort)) {
+    return {
+      ok: false,
+      why: `路由骨架 defaults.effort 认不出：${JSON.stringify(defaults.effort)}（只有 ${SESSION_EFFORTS.join('、')}）`,
+    };
+  }
+  const map = defaults.models;
+  if (!map || typeof map !== 'object' || Array.isArray(map)) {
+    return { ok: false, why: `路由骨架认不出（${file}）：defaults.models 不是 { grok, codex, claude }` };
+  }
+  for (const key of ['grok', 'codex', 'claude']) {
+    if (typeof map[key] !== 'string' || !map[key]) {
+      return { ok: false, why: `路由骨架认不出（${file}）：defaults.models.${key} 没写完整型号` };
+    }
+  }
+  if (typeof defaults.claudeModel !== 'string' || !defaults.claudeModel) {
+    return { ok: false, why: `路由骨架认不出（${file}）：defaults.claudeModel 没写` };
+  }
+  return { ok: true, file, cfg, models, defaults };
+}
+
+/**
+ * 这次起工人用哪一档（#470）：--effort 给了就用它；不给照路由骨架给这个模型配的——模型下几条路由配了的都一样就用它，一条都没配、
+ * 骨架里没这个模型就用 defaults.effort。骨架读不到、不是 JSON、没有 defaults、形状或档位认不出、几条路由配的不一样（不知道照哪条）、
+ * 这个命令行不认那一档：回 { ok: false, why }，调用方不起，不自己编一档。
+ */
+export function routingEffortFor(home, model, modelId) {
+  const loaded = readRoutingSkeleton(home);
+  if (!loaded.ok) return loaded;
+  const { file, models, defaults } = loaded;
+  const routingModel = modelId ?? defaults.models[model];
+  if (!routingModel) {
+    return { ok: false, why: `路由骨架 defaults.models 没有 ${model}，不知道按哪个型号查档位` };
+  }
   const routes = models[routingModel];
   if (routes === undefined) {
-    return { ok: true, effort: DEFAULT_EFFORT, source: `路由骨架里没有模型 ${routingModel}，用默认` };
+    return { ok: true, effort: defaults.effort, source: `路由骨架里没有模型 ${routingModel}，用默认` };
   }
   if (!Array.isArray(routes)) {
     return { ok: false, why: `路由骨架认不出（${file}）：models.${routingModel} 不是路由列表` };
@@ -300,7 +332,7 @@ export function routingEffortFor(home, model, modelId) {
       why: `路由骨架里模型 ${routingModel} 几条路由配的档位不一样（${configured.map((r) => `${r.routeId}：${r.effort}`).join('、')}），启动器不知道照哪条：带 --effort 明说这一次用哪档`,
     };
   }
-  const effort = distinct[0] ?? DEFAULT_EFFORT;
+  const effort = distinct[0] ?? defaults.effort;
   if (!EFFORTS.includes(effort)) {
     return {
       ok: false,
@@ -520,7 +552,7 @@ export function closingBrief({ branch, noShip, noAutomerge, issue, githubRoute =
  * 的内容」，避免模型自己主动 read_file 把这条掩盖掉）：不带这三样时 grok 答「NONE」（复现了问题——AGENTS.md
  * 确实没被自动加载），带上之后正确答出暗号（过程和命令见 PR 正文）。codex 没有这个概念，extraEnv 给空对象。
  */
-function launchOf(model, { promptFile, worktreeDir, modelId, effort }) {
+function launchOf(model, { promptFile, worktreeDir, modelId, effort, claudeModel }) {
   if (model === 'grok')
     return {
       command: 'grok',
@@ -559,7 +591,7 @@ function launchOf(model, { promptFile, worktreeDir, modelId, effort }) {
   // 会拿着这个不存在的名字去跑，一开场就报错（2026-10-06 四个工人同这事）。--model 显式给 Sonnet/Opus 之后，把这个环境变量
   // 覆盖成同值，免得 generate_session_title 走到主会话的 kimi-k3 再炸一次。
   if (model === 'claude') {
-    const claudeId = modelId ?? CLAUDE_DEFAULT_MODEL;
+    const claudeId = modelId ?? claudeModel;
     return {
       command: 'reclaude',
       args: [
@@ -739,8 +771,14 @@ async function cmdStart(p, io) {
   const issue = issueOf(p, noShip);
 
   if (model === 'kimi') return fail(io, KIMI_UNSUPPORTED);
+  // Claude 不给 --model-id，或这一次没给 --effort：都要读骨架里的 defaults。给了 --effort 又给了型号就可以不读。
+  let skeleton = null;
+  if (explicitEffort === undefined || (model === 'claude' && modelId === undefined)) {
+    skeleton = readRoutingSkeleton(io.home);
+    if (!skeleton.ok) return fail(io, skeleton.why);
+  }
   if (model === 'claude') {
-    const bad = claudeModelProblem(modelId);
+    const bad = claudeModelProblem(modelId, skeleton?.defaults.claudeModel);
     if (bad) return fail(io, bad);
   }
 
@@ -815,7 +853,13 @@ async function cmdStart(p, io) {
     `${briefText.trimEnd()}\n\n${closingBrief({ branch, noShip, noAutomerge, issue, githubRoute })}\n`,
   );
 
-  const launch = launchOf(model, { promptFile, worktreeDir, modelId, effort });
+  const launch = launchOf(model, {
+    promptFile,
+    worktreeDir,
+    modelId,
+    effort,
+    claudeModel: skeleton?.defaults.claudeModel,
+  });
   // Claude 工人不直接起 reclaude，起外壳 worker-supervise.mjs 由它看着：网关/网络类错误退出就等一等、用同一个会话续跑
   // （2026-10-05 的 502 一次让 5 个工人同时掉线，#1066）。别家模型照旧直接起。
   const spawnSpec = launch.supervise

@@ -68,6 +68,11 @@ export interface MirasimRunSpec {
   expectModel?: string;
   /** 不给就不写进 prompt 帧。引擎起会话时总是给。不认识的值在发出去之前抛错。 */
   effort?: string;
+  /**
+   * 起会话前的校验（#1958）。引擎每次把用途和目录里的型号传进来，这里不另存一份。
+   * 不给 = 不校验（已有调用、探针）。给了就在连上之前判：缺用途、档位越界、型号不在这份名单里都拒。
+   */
+  guard?: { purpose: string | null; models: readonly string[] };
   session: MirasimSessionRef;
   limits?: Partial<MirasimLimits>;
   testCommands?: readonly string[];
@@ -191,11 +196,37 @@ function modelMatches(expected: string, observed: string): boolean {
   return strip(expected) === strip(observed);
 }
 
+/**
+ * 连上 Mirasim 之前先看引擎传来的用途、型号、档位。空字符串 = 过了。不过的那句就是拒的原因。
+ * 型号看点名的 model，没有就看期望回读的 expectModel（pi 不点名，只核对期望）。
+ */
+export function mirasimLaunchProblem(
+  guard: { purpose: string | null; models: readonly string[] },
+  spec: { model?: string; expectModel?: string; effort?: string },
+): string {
+  const purpose = guard.purpose?.trim() ?? '';
+  if (!purpose) return '缺角色：起会话没给用途（Mirasim 不另存一份路由，引擎每次要带上用途）';
+  if (spec.effort !== undefined && !(SESSION_EFFORTS as readonly string[]).includes(spec.effort)) {
+    return `档位越界：${JSON.stringify(spec.effort)}（只有 ${SESSION_EFFORTS.join(' / ')}）`;
+  }
+  const named = [spec.model, spec.expectModel].filter(
+    (m): m is string => typeof m === 'string' && m.trim() !== '',
+  );
+  for (const model of named) {
+    if (!guard.models.includes(model)) return `型号不在目录里：${JSON.stringify(model)}`;
+  }
+  return '';
+}
+
 export async function runMirasim(
   spec: MirasimRunSpec,
   options: MirasimRunOptions,
 ): Promise<MirasimRunReport> {
   if (!spec.prompt.trim()) throw new Error('提示词是空的');
+  if (spec.guard) {
+    const problem = mirasimLaunchProblem(spec.guard, spec);
+    if (problem) throw new Error(problem);
+  }
   if (spec.effort !== undefined) assertSessionEffort(spec.effort, SESSION_EFFORTS, 'Mirasim');
   if (!AGENT.test(spec.agent)) throw new Error(`执行体名不合法：${JSON.stringify(spec.agent)}`);
   if (spec.agent === 'pi' && spec.model && !spec.model.startsWith('profile:')) {
