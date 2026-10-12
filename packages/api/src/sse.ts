@@ -87,6 +87,13 @@ export function eventsHandler(deps: Deps, relay: SseRelay) {
         chain = chain.then(() => stream.writeSSE(msg)).catch(() => undefined);
       };
       const unsubscribe = relay.subscribe((stamped) => send(message(stamped)));
+      // 机器资源（#1973）：采样器每读成一回就推一条 resources，不带 id、不进补发缓冲（过时的读数没用）；
+      // 一连上先给最近一回，页面不用等下一个间隔
+      const resourcesMessage = (r: unknown): SSEMessage => ({
+        event: SSE_EVENTS.resources,
+        data: JSON.stringify(r),
+      });
+      const unsubscribeResources = deps.hostResources?.subscribe((r) => send(resourcesMessage(r)));
       // 订阅和算补发之间没有 await：这中间不会有新事件插进来，所以不漏也不重。
       if (lastEventId === undefined) {
         send({
@@ -99,6 +106,8 @@ export function eventsHandler(deps: Deps, relay: SseRelay) {
         if (replay === null) send({ event: SSE_EVENTS.resync, id: relay.latestId(), data: '{}' });
         else for (const stamped of replay) send(message(stamped));
       }
+      const latest = deps.hostResources?.latest();
+      if (latest) send(resourcesMessage(latest));
       const heartbeat = setInterval(() => {
         chain = chain.then(() => stream.write(': ping\n\n')).catch(() => undefined);
       }, deps.config.sseHeartbeatMs);
@@ -107,6 +116,7 @@ export function eventsHandler(deps: Deps, relay: SseRelay) {
       } finally {
         clearInterval(heartbeat);
         unsubscribe();
+        unsubscribeResources?.();
       }
     });
   };

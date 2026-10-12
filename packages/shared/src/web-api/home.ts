@@ -68,6 +68,67 @@ export const HomeRunningSchema = z.object({
   taskId: Id.optional(),
   /** 单子现在的状态。老环境推来的快照里没有：没有时看板仍把等你拍记成 asking、其余记成 running。有了，挂起的单才画得出「重做」。 */
   state: TaskStateSchema.optional(),
+  /**
+   * 这一刻在跑的那几笔三段流水的编号（#1973）。引擎给每笔起的会话 scope 就叫 `fleet-agent-<编号>.scope`，
+   * 看板拿它到 HomeResources.sessions.byRun 里找这张单此刻占的内存、CPU。没有会话在跑是空数组；老后端没有这个键。
+   */
+  runIds: z.array(z.string().min(1)).optional(),
+});
+
+/** 一样读数没读到：原因原样写给人看（文件不在、内容认不出、这台不是 Linux……），页面写「没读到」，不拿 0 顶。 */
+const ResourceUnreadSchema = z.object({ state: z.literal('unread'), why: z.string().min(1) });
+
+/** 整机内存（/proc/meminfo）：已用 = 总量 − 可用（MemAvailable）。 */
+export const HostMemorySchema = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('ok'),
+    totalMb: z.number().int().positive(),
+    availableMb: z.number().int().min(0),
+  }),
+  ResourceUnreadSchema,
+]);
+
+/** 整机 CPU（/proc/stat 两次读数的差）：percent 是所有核合起来忙的比例（0–100）；load1 是 /proc/loadavg 的 1 分钟负载。 */
+export const HostCpuSchema = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('ok'),
+    percent: z.number().min(0).max(100),
+    cores: z.number().int().positive(),
+    load1: z.number().min(0).optional(),
+  }),
+  ResourceUnreadSchema,
+]);
+
+/**
+ * 一个会话（一个 scope）此刻的占用：memory.current、memory.peak（MiB），cpu.stat 的 usage_usec 两次读数的差算出的
+ * CPU 占用（100 = 占满一个核）。cpuPercent 缺 = 这个 scope 刚出现、还只有一次读数，算不出差（不是 0）。
+ */
+export const SessionUsageSchema = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('ok'),
+    memoryMb: z.number().int().min(0),
+    memoryPeakMb: z.number().int().min(0).optional(),
+    cpuPercent: z.number().min(0).optional(),
+  }),
+  ResourceUnreadSchema,
+]);
+
+/**
+ * 这台机器此刻的资源（#1973）：整机内存、CPU，加每个会话 scope 的占用。后端在本机读（/proc、cgroup），
+ * 每 everyMs 读一回并经推送（SSE 的 resources 事件）发给开着的页面；主页接口带最近一回。
+ */
+export const HomeResourcesSchema = z.object({
+  /** 这一回读数的时刻。 */
+  at: Time,
+  /** 采样间隔（毫秒）：页面隔多久该收到一回新的，超过两倍没来就是旧了。 */
+  everyMs: z.number().int().positive(),
+  memory: HostMemorySchema,
+  cpu: HostCpuSchema,
+  /** 会话资源池（fleet-agents.slice）下每个 scope 的占用，键是 scope 编号（= 三段流水的编号）；整池读不到是 unread。 */
+  sessions: z.discriminatedUnion('state', [
+    z.object({ state: z.literal('ok'), byRun: z.record(z.string(), SessionUsageSchema) }),
+    ResourceUnreadSchema,
+  ]),
 });
 
 /**
@@ -127,5 +188,7 @@ export const HomeResponseSchema = z.object({
   flow: z.array(HomeFlowStageSchema).length(3),
   /** 此刻在跑的会话数、已选定还没开跑的数：和法国页、额度页、路由页同一个来源（池占用）。老后端没有这一项。 */
   slots: z.object({ running: z.number().int().min(0), reserved: z.number().int().min(0) }).optional(),
+  /** 这台机器此刻的内存、CPU（#1973）。老后端、老环境推来的快照没有：页面写明「没给资源读数」，不画 0。 */
+  resources: HomeResourcesSchema.optional(),
   asOf: Time,
 });

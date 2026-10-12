@@ -11,6 +11,7 @@ import type {
   HomeDoneSchema,
   HomeFlowStageSchema,
   HomeHealthSchema,
+  HomeResourcesSchema,
   HomeResponseSchema,
   HomeRunningSchema,
   NotWired,
@@ -35,6 +36,9 @@ export type HomeFlowStage = z.infer<typeof HomeFlowStageSchema>;
 /** 持续状态条（额度、中转、engine_off）。 */
 export type HomeHealth = z.infer<typeof HomeHealthSchema>;
 
+/** 这台机器此刻的内存、CPU 和各会话的占用（#1973）。 */
+export type HomeResources = z.infer<typeof HomeResourcesSchema>;
+
 /** 一屏三块 + 状态条的整份数据。 */
 export interface HomeData {
   decisions: HomeDecision[];
@@ -45,6 +49,8 @@ export interface HomeData {
   flow: HomeFlowStage[];
   /** 此刻在跑的会话数、已选定还没开跑数；老后端没有。 */
   slots?: HomeSlots | undefined;
+  /** 这台机器此刻的资源；老后端、老快照没有（页面写明没给，不画 0）。推送的 resources 事件直接换掉它。 */
+  resources?: HomeResources | undefined;
 }
 
 /**

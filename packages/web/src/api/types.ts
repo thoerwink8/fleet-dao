@@ -34,6 +34,7 @@ import type {
   GroomNowRequest,
   GroomNowResponse,
   GroomStatusResponse,
+  HomeResourcesSchema,
   HomeResponseSchema,
   JobsResponse,
   JobViewSchema,
@@ -284,4 +285,6 @@ export type FrancePreflightResponse = z.infer<typeof FrancePreflightResponseSche
 export type LiveEvent =
   | { type: 'ready' }
   | { type: 'resync' }
-  | ({ type: 'change' } & z.infer<typeof ChangeEventSchema>);
+  | ({ type: 'change' } & z.infer<typeof ChangeEventSchema>)
+  /** 这台机器此刻的内存、CPU（#1973）：直接换掉主页数据里的 resources，不重拉主页。 */
+  | { type: 'resources'; resources: z.infer<typeof HomeResourcesSchema> };

@@ -6,6 +6,7 @@ import type { DecisionCommenter } from './decision-handoff.ts';
 import type { CockpitAlerts } from './feishu-alerts.ts';
 import type { FranceReleasePort } from './france-release.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
+import type { HostResourceSampler } from './host-resources.ts';
 import type { IntentStore } from './intent-store.ts';
 import type { ModelRosterPort } from './model-roster.ts';
 import type { OrgSwitchPort } from './org-switch-view.ts';
@@ -130,6 +131,11 @@ export interface Deps {
    * （main.ts 的 production；法国是）；别的环境不给，环境页写「没查成 + 原因」，不拿「还没发布过」顶。
    */
   deployLag?: (() => DeployLagInput) | undefined;
+  /**
+   * 这台机器此刻的内存、CPU 和各会话 scope 的占用（#1973，host-resources.ts）：读本机 /proc 和 cgroup。main.ts 两种装配都给
+   * （读不到的照实写 unread）；测试不给时主页不带 resources，页面写「这台后端没给资源读数」，不画 0。
+   */
+  hostResources?: HostResourceSampler | undefined;
   /**
    * /france 页发版一键（#618，france-release.ts）：读 release-train 状态文件 + 起 pnpm release:onekey preflight。
    * 只在正式环境装配（main.ts 的 liveFranceReleasePort）；没给时接口照样回 unreadable，页面画「没查成 + 原因」。

@@ -25,7 +25,10 @@ import { buildHome, buildPools } from './views.ts';
 type EngineHealth = z.input<typeof HomeHealthSchema>['engine'];
 
 /** 拼两份快照要的依赖：后端装配好的 Deps 里取几样，外加调用方建好的引擎探针（home-engine.ts 的 engineHealthProbe）。 */
-export type SnapshotDeps = Pick<Deps, 'config' | 'store' | 'log' | 'now' | 'health' | 'deployLag'> & {
+export type SnapshotDeps = Pick<
+  Deps,
+  'config' | 'store' | 'log' | 'now' | 'health' | 'deployLag' | 'hostResources'
+> & {
   engineProbe: () => Promise<EngineHealth>;
 };
 
@@ -74,6 +77,7 @@ export async function readHomeSnapshot(deps: SnapshotDeps): Promise<z.input<type
     segmentRuns,
     occupancy,
     engine,
+    resources,
   ] = await Promise.all([
     store.listNotifications({ status: 'open', limit: 200 }),
     store.listRuns({ taskIds, active: true }),
@@ -88,6 +92,8 @@ export async function readHomeSnapshot(deps: SnapshotDeps): Promise<z.input<type
     store.poolOccupancy(),
     // 引擎那一格读真实健康（#902 D7）：开着的要真探到在线的工人，不只看配置里开没开
     deps.engineProbe(),
+    // 这台机器此刻的内存、CPU（#1973）：采样器最近一回还新就直接给，不读库；没装采样器（测试）就不带
+    deps.hostResources?.current(),
   ]);
   const now = deps.now();
   const poolViews = buildPools({ pools, channels, windows, occupancy }, now, config.quotaStaleAfterMs);
@@ -104,6 +110,7 @@ export async function readHomeSnapshot(deps: SnapshotDeps): Promise<z.input<type
     models,
     channels,
     now,
+    resources,
   });
 }
 
