@@ -216,7 +216,7 @@ export interface MeterPendingRun {
 
 /**
  * 经 Mirasim 起（路由的执行方式是 mirasim）、endedAfter 以后结束、记了会话号、四样 token 有缺的那几笔，先结束的在前，最多 limit 笔
- * （#1935）。没记会话号的老行补不了（不知道是哪个会话），不在里面。
+ * （#1935）。没记会话号的老行不在里面（不知道是哪个会话）；那些走一次性的 runsAwaitingHistoricalMeter，按分支名对（#1948）。
  */
 export async function runsAwaitingMeter(
   db: Db,
@@ -312,6 +312,116 @@ export async function noteRunUsage(
   return rows.length > 0;
 }
 
+/**
+ * #1946 上线前结束、没记会话号、四样 token 还有缺的老 run（#1948）。只收经 Mirasim 起、结局是 done 的。
+ * 已经记了会话号的交给上面的定时任务；四样已经齐的、不是 done 的、不是这条执行方式的，这次不碰。
+ */
+export interface HistoricalMeterRun {
+  id: string;
+  branch: string | null;
+  model: string;
+  startedAt: Date;
+  endedAt: Date;
+  usageNote: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  costUsd: number | null;
+}
+
+/** 上面那一类，先结束的在前。 */
+export async function runsAwaitingHistoricalMeter(db: Db): Promise<HistoricalMeterRun[]> {
+  const rows = await db
+    .select({
+      id: runs.id,
+      branch: runs.branch,
+      model: runs.model,
+      startedAt: runs.startedAt,
+      endedAt: runs.endedAt,
+      usageNote: runs.usageNote,
+      inputTokens: runs.inputTokens,
+      outputTokens: runs.outputTokens,
+      cacheReadTokens: runs.cacheReadTokens,
+      cacheWriteTokens: runs.cacheWriteTokens,
+      costUsd: runs.costUsd,
+    })
+    .from(runs)
+    .innerJoin(routes, eq(routes.id, runs.routeId))
+    .where(
+      and(eq(routes.hostId, 'mirasim'), isNull(runs.sessionId), eq(runs.outcome, 'done'), usageIncomplete),
+    )
+    .orderBy(asc(runs.endedAt), asc(runs.id));
+  return rows.flatMap((r) => (r.endedAt !== null ? [{ ...r, endedAt: r.endedAt }] : []));
+}
+
+/**
+ * 一次性回填写用量：只填还是空的字段（coalesce），已经有的输入、输出、缓存、花费一律不动，也不写会话号、也不改 usage_note。
+ * 写了会话号的话，定时任务会整套覆盖，快照里的输出就没了。没有空字段可写、或者这行已经有会话号，回 false，不改 updated_at。
+ */
+export async function fillHistoricalRunUsage(
+  db: Db,
+  input: { runId: string; usage: MeterUsageWrite; at: Date },
+): Promise<boolean> {
+  const u = input.usage;
+  for (const [name, v] of Object.entries({
+    inputTokens: u.inputTokens,
+    outputTokens: u.outputTokens,
+    cacheReadTokens: u.cacheReadTokens,
+    cacheWriteTokens: u.cacheWriteTokens,
+  })) {
+    if (!Number.isSafeInteger(v) || v < 0) throw new RunInputError(`${name} 要是非负整数：${v}`);
+  }
+  if (u.costUsd !== undefined && !(Number.isFinite(u.costUsd) && u.costUsd >= 0)) {
+    throw new RunInputError(`costUsd 要是非负数：${u.costUsd}`);
+  }
+  const holes = [
+    isNull(runs.inputTokens),
+    isNull(runs.outputTokens),
+    isNull(runs.cacheReadTokens),
+    isNull(runs.cacheWriteTokens),
+    ...(u.costUsd !== undefined ? [isNull(runs.costUsd)] : []),
+  ];
+  const rows = await db
+    .update(runs)
+    .set({
+      inputTokens: sql`coalesce(${runs.inputTokens}, ${u.inputTokens}::bigint)`,
+      outputTokens: sql`coalesce(${runs.outputTokens}, ${u.outputTokens}::bigint)`,
+      cacheReadTokens: sql`coalesce(${runs.cacheReadTokens}, ${u.cacheReadTokens}::bigint)`,
+      cacheWriteTokens: sql`coalesce(${runs.cacheWriteTokens}, ${u.cacheWriteTokens}::bigint)`,
+      ...(u.costUsd !== undefined ? { costUsd: sql`coalesce(${runs.costUsd}, ${u.costUsd}::numeric)` } : {}),
+      updatedAt: input.at,
+    })
+    .where(and(eq(runs.id, input.runId), isNull(runs.sessionId), eq(runs.outcome, 'done'), or(...holes)))
+    .returning({ id: runs.id });
+  return rows.length > 0;
+}
+
+/**
+ * 一次性回填写「为什么对不上」。只在原因还空着、四样还有缺、没有会话号时写；已经有原因的不覆盖（再跑一次一行都不改）。
+ * 写了回 true。
+ */
+export async function noteHistoricalRunUsage(
+  db: Db,
+  input: { runId: string; note: string; at: Date },
+): Promise<boolean> {
+  if (!input.note.trim()) throw new RunInputError('用量没记全的原因是空的');
+  const rows = await db
+    .update(runs)
+    .set({ usageNote: input.note, updatedAt: input.at })
+    .where(
+      and(
+        eq(runs.id, input.runId),
+        isNull(runs.sessionId),
+        eq(runs.outcome, 'done'),
+        isNull(runs.usageNote),
+        usageIncomplete,
+      ),
+    )
+    .returning({ id: runs.id });
+  return rows.length > 0;
+}
+
 /** 各段 loading: RunInsert -> 写入形状。 */
 function toRow(row: RunInsert, now: Date): RunRowSure {
   return {
@@ -333,7 +443,7 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
     cacheWriteTokens: row.cacheWriteTokens ?? null,
     costUsd: row.costUsd ?? null,
     sessionId: row.sessionId ?? null,
-    // 只由「用量补记」写（fillRunUsageFromMeter / noteRunUsage），记一笔时不碰
+    // 只由「用量补记」和一次性回填写，记一笔时不碰
     usageNote: null,
     memoryPeakMb: row.memoryPeakMb ?? null,
     failureReason: row.failureReason ?? null,
