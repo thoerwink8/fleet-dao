@@ -44,8 +44,8 @@ const SPOTS: { file: (typeof FILES)[number]; snippet: string }[] = [
   { file: 'routes/routing-status.tsx', snippet: 'lg:max-h-routing-pane' },
   { file: 'routes/routing-status.tsx', snippet: 'lg:grid-cols-routing' },
   { file: 'components/probe-log.tsx', snippet: 'size-2 shrink-0 rounded-sm' },
-  // #1851：提交行迁到 ListRow，标题列和时间列仍在同一行内可换行、基线对齐
-  { file: 'routes/changelog.tsx', snippet: 'flex-wrap items-baseline' },
+  // #1851：提交行迁到 ListRow；照路由页样板重做后一行不折（标题截断、时间不让位），钉标题列那一段
+  { file: 'routes/changelog.tsx', snippet: 'min-w-0 flex-1" data-commit-row' },
 ];
 
 /** 这 12 处用到的档位（健康条等的辅助字原来是 text-caption 11px，收口片 #1855 删了旧字号名，改用 text-meta，见 SPOTS）。why 必须出现在定义行往上 8 行里的注释中。 */
