@@ -11,6 +11,7 @@ import {
   DevLoginRequest,
   FeishuAccessRequest,
   GroomNowRequest,
+  HomeResourcesSchema,
   ManualModelRequest,
   MovePurposeModelRequest,
   PasswordLoginRequest,
@@ -471,6 +472,18 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
           // 看不懂的变化也要重拉：当成 resync，不能当没发生。
           const event: LiveEvent = parsed.success ? { type: 'change', ...parsed.data } : { type: 'resync' };
           listener(event);
+        });
+        // 机器资源（#1973）：形状不对就丢掉这一回——页面上的读数按 at 判旧，过几个间隔没来新的会标「读数旧了」，
+        // 不拿认不出的东西去换掉上一回读成的数
+        src.addEventListener(SSE_EVENTS.resources, (ev) => {
+          let raw: unknown;
+          try {
+            raw = JSON.parse((ev as MessageEvent<string>).data);
+          } catch {
+            return;
+          }
+          const parsed = HomeResourcesSchema.safeParse(raw);
+          if (parsed.success) listener({ type: 'resources', resources: parsed.data });
         });
         src.onerror = () => {
           if (src !== es) return;

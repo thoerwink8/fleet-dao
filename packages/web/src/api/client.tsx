@@ -746,6 +746,7 @@ function homeDataOf(data: HomeResponse): HomeData {
     health: data.health,
     flow: data.flow,
     slots: data.slots,
+    resources: data.resources,
   };
 }
 
@@ -1184,6 +1185,12 @@ function refresh(qc: QueryClient, queryKey?: readonly string[]) {
 export function applyLiveEvents(qc: QueryClient, events: readonly LiveEvent[]) {
   const keysToDrop = new Map<string, readonly string[]>();
   for (const e of events) {
+    if (e.type === 'resources') {
+      // 机器资源（#1973）：读数本身就在推送里，直接换掉本台主页数据里的 resources，不作废、不重拉主页。
+      // 还没读到过主页就不造一份（等主页读回来自带最近一回）；一批里有几回，后来的盖掉先来的
+      qc.setQueryData<HomeResponse>(keys.home, (old) => (old ? { ...old, resources: e.resources } : old));
+      continue;
+    }
     const targets = e.type === 'change' && isRealtimeTable(e.table) ? TABLE_KEYS[e.table] : undefined;
     if (!targets) {
       refresh(qc);

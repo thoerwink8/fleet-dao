@@ -230,3 +230,83 @@ describe('迷你时间线：对题 → 动手 → 验收 → 合并', () => {
     expect(phasesOf(ticket(1, { segment: null })).every((p) => p.state === 'pending')).toBe(true);
   });
 });
+
+describe('卡片上的内存、CPU（#1973）', () => {
+  const usageOf = (g: ReturnType<typeof buildGraph>, n: number) => {
+    const node = g.nodes.find((x) => x.id === nodeId.ticket(ticket(n)));
+    return node?.data.kind === 'ticket' ? node.data.usage : undefined;
+  };
+
+  test('在跑的单按单合计；没有会话在跑的单是「没在占用」', () => {
+    const g = buildGraph({
+      running: [ticket(2, { worker: 'Opus', runIds: ['a', 'b'] }), ticket(4, { runIds: [] })],
+      flow: FLOW,
+      filter: { stuck: false },
+      resources: {
+        at: '2026-10-12T08:00:00Z',
+        everyMs: 5000,
+        memory: { state: 'ok', totalMb: 1000, availableMb: 500 },
+        cpu: { state: 'ok', percent: 10, cores: 2 },
+        sessions: {
+          state: 'ok',
+          byRun: {
+            a: { state: 'ok', memoryMb: 100, cpuPercent: 5 },
+            b: { state: 'ok', memoryMb: 50, cpuPercent: 7 },
+          },
+        },
+      },
+    });
+    expect(usageOf(g, 2)).toEqual({ kind: 'ok', sessions: 2, memoryMb: 150, cpuPercent: 12 });
+    expect(usageOf(g, 4)).toEqual({ kind: 'idle' });
+  });
+
+  test('cgroup 读不到：卡片是「没读到」带原因，不是 0', () => {
+    const g = buildGraph({
+      running: [ticket(2, { worker: 'Opus', runIds: ['a'] })],
+      flow: FLOW,
+      filter: { stuck: false },
+      resources: {
+        at: '2026-10-12T08:00:00Z',
+        everyMs: 5000,
+        memory: { state: 'unread', why: 'x' },
+        cpu: { state: 'unread', why: 'y' },
+        sessions: { state: 'unread', why: 'memory.current 的内容认不出' },
+      },
+    });
+    expect(usageOf(g, 2)).toEqual({ kind: 'unread', why: 'memory.current 的内容认不出' });
+  });
+
+  test('资源读数变了不动排版指纹（只重画卡片，不重新排版）', () => {
+    const base = {
+      running: [ticket(2, { worker: 'Opus', runIds: ['a'] })],
+      flow: FLOW,
+      filter: { stuck: false },
+    };
+    expect(buildGraph(base).structureKey).toBe(buildGraph({ ...base, resources: undefined }).structureKey);
+  });
+});
+
+describe('一段的单子排几列（#1973 排版）', () => {
+  const many = (n: number, seg: HomeRunning['segment']) =>
+    Array.from({ length: n }, (_, i) => ticket(100 + i + (seg === 'doing' ? 0 : 50), { segment: seg }));
+
+  test('量不到画布：都一列，照原来竖排；排版指纹不变', () => {
+    const g = buildGraph({ running: many(12, 'doing'), flow: FLOW, filter: { stuck: false } });
+    expect(g.columns).toEqual({ right: 1, left: 1 });
+    expect(g.structureKey).not.toContain('%');
+  });
+
+  test('单子少、画布宽：一列就够，不硬拆', () => {
+    const g = buildGraph({ running: RUNNING, flow: FLOW, filter: { stuck: false }, aspect: 2 });
+    expect(g.columns).toEqual({ right: 1, left: 1 });
+  });
+
+  test('一侧单子很多、画布又宽：那侧排成几列，收进视野能放大更多；指纹带上列数', () => {
+    const running = [...many(14, 'doing'), ...many(2, 'scoping')];
+    const g = buildGraph({ running, flow: FLOW, filter: { stuck: false }, aspect: 2 });
+    const tall = Math.max(g.columns.right, g.columns.left);
+    expect(tall).toBeGreaterThan(1);
+    expect(tall).toBeLessThanOrEqual(3);
+    expect(g.structureKey).toContain('%');
+  });
+});

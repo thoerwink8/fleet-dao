@@ -11,8 +11,15 @@ import type { Same } from './internal.ts';
  * resync：中间可能漏了变化（后端和数据库之间断过线，或者浏览器断开太久），前端全部重拉。
  * change 和 resync 都带 SSE 的 id；浏览器断线重连时（EventSource 自动带 Last-Event-ID）后端补发断开期间的变化，
  * 补不全（后端重启过、断开太久）就先发一条 resync。
+ * resources：这台机器此刻的内存、CPU 和各会话占用（data 是 HomeResourcesSchema，#1973），隔几秒一回；不带 id、不补发——
+ * 过时的读数没用，断线重连后等下一回就是。前端拿它直接换掉主页数据里的 resources，不重拉主页。
  */
-export const SSE_EVENTS = { ready: 'ready', change: 'change', resync: 'resync' } as const;
+export const SSE_EVENTS = {
+  ready: 'ready',
+  change: 'change',
+  resync: 'resync',
+  resources: 'resources',
+} as const;
 
 /** change 事件的 data，也是数据库 NOTIFY fleet_changes 的载荷（形状定义在 realtime.ts）。 */
 export const ChangeEventSchema = z.object({

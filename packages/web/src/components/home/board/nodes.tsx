@@ -49,6 +49,7 @@ import {
   worstTone,
 } from './model';
 import { toneBorder } from './tones';
+import { UsageLine, usageShort, usageTitle } from './usage';
 
 export type BoardNode = Node<BoardNodeData>;
 
@@ -252,7 +253,18 @@ const FAR_ID_FONT = farIdFontSize();
 /**
  * 远景的单子：整张卡只剩状态色、小号单号和大号标题。认事靠标题，所以标题字号大于单号，最多两行、悬停看全文（#1819）。
  */
-export function FarTicket({ tone, id, title }: { tone: Tone; id: string; title: string }) {
+export function FarTicket({
+  tone,
+  id,
+  title,
+  usage,
+}: {
+  tone: Tone;
+  id: string;
+  title: string;
+  /** 内存、CPU 的短写（#1973）：标题下面一行，和单号同一个字号、灰字。 */
+  usage?: { text: string; title: string } | undefined;
+}) {
   return (
     <div className={cn('flex h-full flex-col justify-center gap-1 overflow-hidden px-3', softClass[tone])}>
       <div
@@ -270,6 +282,16 @@ export function FarTicket({ tone, id, title }: { tone: Tone; id: string; title: 
       >
         {title}
       </div>
+      {usage ? (
+        <div
+          className="num shrink-0 truncate leading-none font-medium text-muted-foreground"
+          style={{ fontSize: FAR_ID_FONT }}
+          title={usage.title}
+          data-far-usage
+        >
+          {usage.text}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -448,7 +470,12 @@ export const TicketNode = memo(function TicketNode({ id, data }: Props) {
     >
       <Handles side={data.side} source={item.pendingDecision !== undefined} />
       {level === 'far' ? (
-        <FarTicket tone={tone} id={`#${item.issueNumber}`} title={item.title} />
+        <FarTicket
+          tone={tone}
+          id={`#${item.issueNumber}`}
+          title={item.title}
+          usage={{ text: usageShort(data.usage), title: usageTitle(data.usage) }}
+        />
       ) : (
         <div className="flex h-full flex-col overflow-hidden py-3 pr-3 pl-4">
           <div className="flex shrink-0 items-center gap-x-2">
@@ -475,6 +502,7 @@ export const TicketNode = memo(function TicketNode({ id, data }: Props) {
           <div className="mt-1 shrink-0 space-y-0.5">
             <WaitLine item={item} tone={tone} always={level === 'near'} />
             <WorkerLine item={item} />
+            <UsageLine usage={data.usage} />
             {level === 'near' ? (
               <div className="num truncate text-canvas text-muted-foreground">{item.repo}</div>
             ) : null}

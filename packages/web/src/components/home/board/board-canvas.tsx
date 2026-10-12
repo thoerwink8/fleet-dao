@@ -59,8 +59,9 @@ import { Kbd } from '../../ui/kbd';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../ui/tooltip';
 import { DrawerFloatingContext } from '../drawer-open';
+import { MachineMeter } from '../machine-meter';
 import { statusTextOf } from '../running-card';
-import type { HomeFlowStage, HomeHealth, HomeRunning, HomeSlots } from '../types';
+import type { HomeFlowStage, HomeHealth, HomeResources, HomeRunning, HomeSlots } from '../types';
 import {
   BoardUiContext,
   createBoardView,
@@ -96,7 +97,12 @@ export interface BoardCanvasProps {
   health?: HomeHealth | undefined;
   /** 此刻在跑的会话数、已选定还没开跑数（后端池占用，各页同一个来源）；老后端没有。 */
   slots?: HomeSlots | undefined;
+  /** 这台机器此刻的资源（#1973）：卡片上每张单的内存、CPU 从这里来；老后端、老快照没有。 */
+  resources?: HomeResources | undefined;
 }
+
+/** 画布宽高比按这一档取整再拿去挑列数：拖窗口时不每一像素都重算。 */
+const ASPECT_STEP = 0.25;
 
 export function BoardCanvas(props: BoardCanvasProps) {
   return (
@@ -136,7 +142,14 @@ export function sameNodeData(a: BoardNodeData, b: BoardNodeData): boolean {
         JSON.stringify(a.counts) === JSON.stringify(b.counts)
       );
     case 'ticket':
-      return b.kind === 'ticket' && a.item === b.item && a.side === b.side && a.key === b.key;
+      return (
+        b.kind === 'ticket' &&
+        a.item === b.item &&
+        a.side === b.side &&
+        a.key === b.key &&
+        // 内存、CPU 每几秒推来一回：数没变的卡不重画
+        JSON.stringify(a.usage) === JSON.stringify(b.usage)
+      );
     case 'ask':
       return b.kind === 'ask' && a.item === b.item && a.side === b.side && a.text === b.text;
   }
@@ -216,7 +229,7 @@ function neighbour(graph: Graph, pos: Positions, current: string | null, key: st
   return layer[key === 'ArrowDown' ? i + 1 : i - 1] ?? null;
 }
 
-function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
+function Canvas({ running, flow, health, slots, resources }: BoardCanvasProps) {
   const navigate = useNavigate();
   const remote = useRemoteView() !== null;
   const [params, setParams] = useSearchParams();
@@ -246,12 +259,31 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
     return flowStore.subscribe(apply);
   }, [flowStore]);
   const [view] = useState(createBoardView);
+  const level = useZoomLevel();
 
   // 卡里的字和内边距是 rem，桌面根字号放大 125%（#1937）：节点尺寸、排版间距乘同一个倍数，整张图等比放大
   const scale = useRootScale();
+  // 可用区的宽高比（取整到 ASPECT_STEP）：一段的单子排几列按它挑（model.ts 的 chooseColumns）。高度扣掉顶上的工具条和
+  // 左下「此刻」那一条（收进视野时也是让开它们）。量不到（测试环境宽高为 0）就不给，一列
+  const [aspect, setAspect] = useState<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    const el = wrapper.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const measure = () => {
+      const { width, height } = el.getBoundingClientRect();
+      const hOf = (sel: string) => el.querySelector(sel)?.getBoundingClientRect().height ?? 0;
+      const usable = height - hOf('[data-board-toolbar]') - hOf('[data-board-now]') - 48;
+      setAspect(width > 0 && usable > 0 ? Math.round(width / usable / ASPECT_STEP) * ASPECT_STEP : undefined);
+    };
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    measure();
+    return () => ro.disconnect();
+  }, []);
   const graph = useMemo(
-    () => buildGraph({ running, flow, health, filter: { stuck, needsYou }, scale }),
-    [running, flow, health, stuck, needsYou, scale],
+    () =>
+      buildGraph({ running, flow, health, filter: { stuck, needsYou }, scale, resources, remote, aspect }),
+    [running, flow, health, stuck, needsYou, scale, resources, remote, aspect],
   );
   const graphRef = useRef(graph);
   graphRef.current = graph;
@@ -261,7 +293,8 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
   // 这时不能拿它去收视野：量出来的是上一版稀疏的位置，收完又不再收，画面就偏了（#1899）
   const [laidOutKey, setLaidOutKey] = useState('');
   const structureKey = graph.structureKey;
-  const viewKey = `${stuck}:${needsYou}`;
+  // 换了列数（画布宽高比变了）也重新收一次视野：排法变了，原来的视角对不上
+  const viewKey = `${stuck}:${needsYou}:${graph.columns.right}x${graph.columns.left}`;
   const fitted = useRef('');
 
   // 只有节点集合变了才重新排版；状态变化（颜色、文字）不动位置。
@@ -319,10 +352,10 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
       };
       const toolbar = inset('[data-board-toolbar]');
       const nowBox = inset('[data-board-now]');
-      const mini = inset('.react-flow__minimap');
       const top = toolbar ? toolbar.bottom - box.top + 12 : 16;
       const gap = 12;
-      const bottomSpace = Math.max(nowBox?.height ?? 0, mini?.height ?? 0) + gap * 2;
+      // 小地图只在拉近（中、近两档）时出现（#1973 排版）：收进视野不再给它让出一整条底边，整张图大一圈
+      const bottomSpace = (nowBox?.height ?? 0) + gap * 2;
       // 详情面板、浮着的抽屉盖在右侧：收进视野时按它们的宽度留边，不把卡片收到它们底下
       const covered = overlayRightInset(el);
       // 缩放不低于「卡内最小字 ≥12px」的下限，见 fit-view.ts
@@ -332,7 +365,7 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
           top,
           bottom: 16,
           left: (nowBox ? nowBox.right - box.left : 0) + gap,
-          right: Math.max(mini ? box.right - mini.left : 0, covered) + gap,
+          right: covered + gap,
         },
       ]);
       void rf.setViewport(vp, { duration });
@@ -673,16 +706,19 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
             className={cn(positions && 'fd-board-ready')}
           >
             <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} color="var(--grid)" />
-            <MiniMap
-              pannable
-              zoomable
-              position="bottom-right"
-              nodeBorderRadius={6}
-              nodeStrokeWidth={0}
-              nodeColor={(n) => toneVar[toneOfData(n.data as BoardNodeData)]}
-              ariaLabel="小地图"
-              className="hidden! xl:block!"
-            />
+            {/* 远档整张图都在视野里，小地图没用还占一角：拉近（中、近）才出现 */}
+            {level === 'far' ? null : (
+              <MiniMap
+                pannable
+                zoomable
+                position="bottom-right"
+                nodeBorderRadius={6}
+                nodeStrokeWidth={0}
+                nodeColor={(n) => toneVar[toneOfData(n.data as BoardNodeData)]}
+                ariaLabel="小地图"
+                className="hidden! xl:block!"
+              />
+            )}
           </ReactFlow>
           <Toolbar
             stuck={stuck}
@@ -701,6 +737,7 @@ function Canvas({ running, flow, health, slots }: BoardCanvasProps) {
           <NowPanel
             running={running}
             slots={slots}
+            resources={resources}
             onPick={(id) => {
               select(id);
               center(id);
@@ -994,12 +1031,15 @@ function Legend() {
 function NowPanel({
   running,
   slots,
+  resources,
   onPick,
 }: {
   running: readonly HomeRunning[];
   slots?: HomeSlots | undefined;
+  resources?: HomeResources | undefined;
   onPick(id: string): void;
 }) {
+  const remote = useRemoteView();
   // 默认收成一行，各种屏宽屏高都一样（以前高屏默认展开、笔记本收起，两边看到的不一致，#1819）；人点开、收起过就记住。
   const [stored, setStored] = useLocalState<boolean | null>(
     `${brand.storagePrefix}home-board.now-open`,
@@ -1025,27 +1065,35 @@ function NowPanel({
       data-board-now
       className="pointer-events-auto absolute bottom-3 left-3 z-10 w-lg max-w-full overflow-hidden rounded-lg border bg-popover shadow-overlay"
     >
-      <button
-        type="button"
-        onClick={() => setStored(!open)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-body font-medium"
-        aria-expanded={open}
-      >
-        <StatusDot tone={working ? 'run' : 'wait'} />
-        此刻
-        <span className="text-muted-foreground">
-          <span className="num">{working}</span> 个会话在干活
-          {queued ? (
-            <>
-              {' '}
-              · <span className="num">{queued}</span> 张在排队
-            </>
-          ) : null}
-        </span>
-        <ChevronDown
-          className={cn('ml-auto size-4 text-muted-foreground transition-transform', !open && '-rotate-90')}
-        />
-      </button>
+      <div className="flex items-center gap-1 pr-1.5">
+        <button
+          type="button"
+          onClick={() => setStored(!open)}
+          className="flex min-w-0 flex-1 items-center gap-2 py-2 pl-3 text-left text-body font-medium whitespace-nowrap"
+          aria-expanded={open}
+        >
+          <ChevronDown
+            className={cn(
+              'size-4 shrink-0 text-muted-foreground transition-transform',
+              !open && '-rotate-90',
+            )}
+          />
+          <StatusDot tone={working ? 'run' : 'wait'} />
+          此刻
+          <span className="min-w-0 truncate text-muted-foreground">
+            <span className="num">{working}</span> 个会话在干活
+            {queued ? (
+              <>
+                {' '}
+                · <span className="num">{queued}</span> 张在排队
+              </>
+            ) : null}
+          </span>
+        </button>
+        {/* 这台机器此刻的内存、CPU（#1973）：和「几个会话在干活」放一行，一眼看到机器扛不扛得住 */}
+        <span aria-hidden className="h-5 w-px shrink-0 bg-border" />
+        <MachineMeter resources={resources} remote={remote !== null} machine={remote?.name} />
+      </div>
       {open && rows.length ? (
         <div className="max-h-56 overflow-y-auto border-t">
           <table className="w-full table-fixed text-meta">

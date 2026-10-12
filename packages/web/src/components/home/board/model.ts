@@ -12,8 +12,9 @@
 import { laneOf, type SegmentKind } from '@fleet-dao/shared';
 import { segmentLabel } from '../../../lib/segments';
 import type { Tone } from '../../../lib/status';
+import { type TicketUsage, ticketUsage } from '../resources';
 import { needsFounder, toneOf } from '../running-card';
-import type { HomeFlowStage, HomeHealth, HomeRunning } from '../types';
+import type { HomeFlowStage, HomeHealth, HomeResources, HomeRunning } from '../types';
 import { segmentNodeWidth } from './far-type';
 
 export type SegmentKey = SegmentKind | 'none';
@@ -54,16 +55,44 @@ export type BoardNodeData =
       total: number;
       side: Side;
     }
-  | { kind: 'ticket'; item: HomeRunning; key: SegmentKey; side: Side }
+  | {
+      kind: 'ticket';
+      item: HomeRunning;
+      key: SegmentKey;
+      side: Side;
+      /** 这张单此刻占的内存、CPU（#1973，口径见 ../resources.ts）。推送每几秒换一回，只重画这一张卡、不动排版。 */
+      usage: TicketUsage;
+    }
   | { kind: 'ask'; item: HomeRunning; text: string; side: Side };
 
-/** 节点尺寸固定：三级缩放只换内容不换大小，拉近拉远时排版不跳。 */
+/**
+ * 节点尺寸固定：三级缩放只换内容不换大小，拉近拉远时排版不跳。
+ * 单子比原来高 24（#1973）：中、近档多一行内存、CPU；远档单号、标题、占用三行，上下留得出边。
+ */
 export const NODE_SIZE: Record<NodeKind, { width: number; height: number }> = {
   root: { width: 264, height: 148 },
   segment: { width: 256, height: 148 },
-  ticket: { width: 304, height: 184 },
+  ticket: { width: 304, height: 208 },
   ask: { width: 216, height: 76 },
 };
+
+/**
+ * 排版间距（16px 根字号下的设计值，用时乘 Graph.scale）：layout.ts 的 ELK 和下面的「一段排几列」用同一份，
+ * 估出来的图有多宽多高才和真排出来的对得上。
+ */
+export const SPACING = {
+  /** 相邻两层（引擎 → 段 → 单子 → 要你拍）之间。 */
+  between: 84,
+  /** 同一列上下两张卡之间。 */
+  node: 20,
+  /** 一段的单子排成几列时，左右两列之间。 */
+  column: 24,
+  /** 同一侧上下两段的单子块之间。 */
+  segment: 40,
+} as const;
+
+/** 一段的单子最多排几列：再多连线就要从好几张卡底下穿过去，乱。 */
+export const MAX_COLUMNS = 3;
 
 export interface GraphNode {
   id: string;
@@ -95,6 +124,11 @@ export interface Graph {
    * 所以节点尺寸、排版间距都乘它，整张图等比放大，和浏览器缩放 125% 一模一样；缩放档位、读得出的下限都不用改。
    */
   scale: number;
+  /**
+   * 每一侧的段，单子排成几列（1 = 照原来一列竖排）。单子多、画布又宽的时候竖着一长条，收进视野只能缩到很小、两边大片空着；
+   * 排成两三列，图的宽高比贴近画布，收进视野时卡片大一圈（#1973 排版）。两侧各挑各的：单子多的那侧多排几列，两侧一样高。
+   */
+  columns: Columns;
   /** 过滤后画出来的单子数 / 一共的单子数。 */
   shown: number;
   total: number;
@@ -238,6 +272,84 @@ export function splitSides(groups: readonly SegmentGroup[]): Map<SegmentKey, Sid
   return sides;
 }
 
+/** 两侧各排几列。 */
+export type Columns = Readonly<Record<Side, number>>;
+
+export const ONE_COLUMN: Columns = { right: 1, left: 1 };
+
+/** 估一种列数下整张图的宽高（16px 根字号的设计值）：和 layout.ts 的排法同一套尺寸、间距。 */
+export function estimateBox(
+  groups: readonly SegmentGroup[],
+  sides: ReadonlyMap<SegmentKey, Side>,
+  cols: Columns,
+  segmentWidth: number,
+): { width: number; height: number } {
+  const t = NODE_SIZE.ticket;
+  const side = (s: Side) => {
+    const mine = groups.filter((g) => (sides.get(g.key) ?? 'right') === s);
+    if (!mine.length) return { width: 0, height: 0 };
+    const columns = cols[s];
+    let height = 0;
+    let asks = false;
+    for (const g of mine) {
+      const rows = Math.max(1, Math.ceil(g.items.length / columns));
+      height += rows * t.height + (rows - 1) * SPACING.node;
+      if (g.items.some((i) => i.pendingDecision !== undefined)) asks = true;
+    }
+    height += (mine.length - 1) * SPACING.segment;
+    // 要你拍挂在最外一列的外面（layout.ts 的 wrapColumns；一列时 ELK 也是这么排的）
+    const width =
+      SPACING.between * 2 +
+      segmentWidth +
+      columns * t.width +
+      (columns - 1) * SPACING.column +
+      (asks ? SPACING.between + NODE_SIZE.ask.width : 0);
+    return { width, height };
+  };
+  const r = side('right');
+  const l = side('left');
+  return {
+    width: NODE_SIZE.root.width + r.width + l.width,
+    height: Math.max(NODE_SIZE.root.height, r.height, l.height),
+  };
+}
+
+/**
+ * 两侧各排几列：在 1..MAX_COLUMNS 的组合里挑「收进这块画布时缩放最大」的那个，也就是图的宽高比最贴近画布（aspect = 可用区的宽 ÷ 高）。
+ * 列数合计少的先试，多排列得真放大 5% 以上才换（画布宽高比轻轻一动不来回跳）；一侧单子最多的那段也凑不满的列数不考虑。
+ * 量不到画布（aspect 不给）就都一列，照原来竖排。
+ */
+export function chooseColumns(
+  groups: readonly SegmentGroup[],
+  sides: ReadonlyMap<SegmentKey, Side>,
+  segmentWidth: number,
+  aspect: number | undefined,
+): Columns {
+  if (aspect === undefined || !(aspect > 0)) return ONE_COLUMN;
+  const most = (s: Side) =>
+    Math.max(1, ...groups.filter((g) => (sides.get(g.key) ?? 'right') === s).map((g) => g.items.length));
+  const limit = { right: Math.min(MAX_COLUMNS, most('right')), left: Math.min(MAX_COLUMNS, most('left')) };
+  const candidates: Columns[] = [];
+  for (let r = 1; r <= limit.right; r++)
+    for (let l = 1; l <= limit.left; l++) candidates.push({ right: r, left: l });
+  candidates.sort(
+    (a, b) =>
+      a.right + a.left - (b.right + b.left) || Math.abs(a.right - a.left) - Math.abs(b.right - b.left),
+  );
+  let best = ONE_COLUMN;
+  let bestZoom = 0;
+  for (const c of candidates) {
+    const box = estimateBox(groups, sides, c, segmentWidth);
+    // 画布高当 1、宽当 aspect：能放大到多少倍
+    const zoom = Math.min(aspect / box.width, 1 / box.height);
+    if (zoom > bestZoom * 1.05) {
+      best = c;
+      bestZoom = zoom;
+    }
+  }
+  return best;
+}
+
 export function buildGraph(input: {
   running: readonly HomeRunning[];
   flow: readonly HomeFlowStage[];
@@ -245,8 +357,15 @@ export function buildGraph(input: {
   filter: BoardFilter;
   /** 根字号倍数，缺省 1（见 Graph.scale）。 */
   scale?: number | undefined;
+  /** 这台机器此刻的资源（#1973）：每张单子卡片上的内存、CPU 从这里按单合计。 */
+  resources?: HomeResources | undefined;
+  /** 看的是别的环境推来的快照（资源读不到时原因说「那台」）。 */
+  remote?: boolean | undefined;
+  /** 画布的宽高比（宽 ÷ 高），挑一段排几列用；不给就一列。 */
+  aspect?: number | undefined;
 }): Graph {
   const scale = input.scale !== undefined && input.scale > 0 ? input.scale : 1;
+  const usageOpts = { remote: input.remote === true };
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const parentOf = new Map<string, string>();
@@ -293,6 +412,7 @@ export function buildGraph(input: {
   });
 
   const sides = splitSides(groups);
+  const columns = chooseColumns(groups, sides, segmentWidth, input.aspect);
   let shown = 0;
   for (const g of groups) {
     const side = sides.get(g.key) ?? 'right';
@@ -308,7 +428,12 @@ export function buildGraph(input: {
       shown += 1;
       const tid = nodeId.ticket(item);
       const tone = ticketTone(item);
-      add(tid, { kind: 'ticket', item, key: g.key, side }, { id: sid, side, tone, live: ticketLive(item) });
+      const usage = ticketUsage(item, input.resources, usageOpts);
+      add(
+        tid,
+        { kind: 'ticket', item, key: g.key, side, usage },
+        { id: sid, side, tone, live: ticketLive(item) },
+      );
       if (item.pendingDecision !== undefined) {
         add(
           nodeId.ask(item),
@@ -320,8 +445,20 @@ export function buildGraph(input: {
   }
 
   const nodeKey = nodes.map((n) => `${n.id}@${n.side ?? 'root'}`).join('|');
-  const structureKey = scale === 1 ? nodeKey : `${nodeKey}#${scale}`;
-  return { nodes, edges, parentOf, childrenOf, structureKey, scale, shown, total: input.running.length };
+  const scaled = scale === 1 ? nodeKey : `${nodeKey}#${scale}`;
+  const structureKey =
+    columns.right === 1 && columns.left === 1 ? scaled : `${scaled}%${columns.right}x${columns.left}`;
+  return {
+    nodes,
+    edges,
+    parentOf,
+    childrenOf,
+    structureKey,
+    scale,
+    columns,
+    shown,
+    total: input.running.length,
+  };
 }
 
 export interface Phase {

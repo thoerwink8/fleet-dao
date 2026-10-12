@@ -46,6 +46,7 @@ import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { githubAppHealthCheck } from './github-app-health.ts';
 import { serviceHealthChecks } from './health.ts';
 import { engineHealthProbe } from './home-engine.ts';
+import { createHostResourceSampler, realHostReader } from './host-resources.ts';
 import { createMemoryIntentStore } from './intent-store.ts';
 import { createPgIntentStore } from './intent-store-pg.ts';
 import { judgeHealthCheck } from './judge-health.ts';
@@ -313,12 +314,17 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
 }
 
 const { deps, close } = await assemble();
+// 这台机器此刻的内存、CPU（#1973）：两种装配都读本机 /proc 和 cgroup；不是 Linux、没有会话资源池的照实写没读到
+const hostResources = createHostResourceSampler({ read: realHostReader(), now, log });
+deps.hostResources = hostResources;
 snapshotDeps = deps;
 nodeReporter?.start();
 // 给停机时的意图卡长轮询用（intent-routes.ts）：main.ts 收到 SIGTERM 才会 abort，读不是装配的时候。
 const shutdownController = new AbortController();
 deps.shutdownSignal = shutdownController.signal;
-const { cockpit, agent } = buildApps(deps);
+const { cockpit, agent, relay } = buildApps(deps);
+// 有页面开着（SSE 连着）才按间隔读、推；没人看时主页接口来要再现读
+const stopHostResources = hostResources.start(() => relay.connections() > 0);
 
 let stopping = false;
 const isStopping = () => stopping;
@@ -382,6 +388,7 @@ async function shutdown(signal: string) {
   stopping = true;
   log.info('收到退出信号，停止接新请求', { signal });
   nodeReporter?.stop();
+  stopHostResources();
   await gracefulShutdown({
     servers,
     // 意图卡的长轮询（intent-routes.ts）拿这个信号跟请求自己的 signal 合并着等：马上醒，直接回手上已有的

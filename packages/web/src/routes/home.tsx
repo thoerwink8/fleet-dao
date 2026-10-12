@@ -12,6 +12,7 @@ import { brand } from '#brand';
 import { isNotFound, useHome, useLiveState, useNodeHome } from '../api/client';
 import { HealthStrip } from '../components/home/health-strip';
 import { HomeDrawer } from '../components/home/home-drawer';
+import { MachineMeter } from '../components/home/machine-meter';
 import { RunningBoard } from '../components/home/running-board';
 import type { HomeData } from '../components/home/types';
 import { EmptyState } from '../components/layout/empty-state';
@@ -54,10 +55,20 @@ function HomeBody({
       afterStrip={afterStrip}
     >
       {data.running.length ? (
-        <RunningBoard running={data.running} flow={data.flow} health={data.health} slots={data.slots} />
+        <RunningBoard
+          running={data.running}
+          flow={data.flow}
+          health={data.health}
+          slots={data.slots}
+          resources={data.resources}
+        />
       ) : (
         <div className="grid h-full place-items-center">
-          <EmptyState icon={CirclePlay} title="现在没有在跑的单" hint="新接的单会出现在这里。" />
+          <div className="flex flex-col items-center gap-3">
+            <EmptyState icon={CirclePlay} title="现在没有在跑的单" hint="新接的单会出现在这里。" />
+            {/* 没有画布就没有「此刻」那一条：桌面上机器资源放在这里（手机在上面的细栏里） */}
+            {phone ? null : <MachineMeter resources={data.resources} remote={remote} />}
+          </div>
         </div>
       )}
     </HomeDrawer>
@@ -127,7 +138,18 @@ export default function Home() {
     />
   );
 
-  // 画布上方（顶栏放不下时）或手机上的一条细栏：状态摘要（带字的「状态」按钮）+ 刷新。
+  // 机器资源两格（#1973）：整机内存、CPU，跟着推送动。桌面在画布左下「此刻」那一条的右半边（顶栏放不下），
+  // 手机没有画布，放在这条细栏里健康条的右边
+  const meter =
+    state.status === 'data' && phone ? (
+      <MachineMeter
+        resources={state.data.resources}
+        remote={nodeId !== null}
+        machine={nodeId === null ? undefined : (nodeName ?? nodeId)}
+      />
+    ) : null;
+
+  // 画布上方（顶栏放不下时）或手机上的一条细栏：状态摘要（带字的「状态」按钮）+ 机器资源 + 刷新。
   // 手机上它排在「要你拍的」横条下面，首屏第一眼是要你拍的；还没读到数据时（读取中、出错）没有横条，它照旧在最上面。
   const statusbar = (
     <div
@@ -135,6 +157,7 @@ export default function Home() {
       className="flex shrink-0 flex-nowrap items-center gap-x-3 border-b px-3 sm:px-4 max-md:py-0 md:py-1.5"
     >
       {state.status === 'data' ? <HealthStrip health={state.data.health} /> : null}
+      {meter}
       <div className="ml-auto">{refresh}</div>
     </div>
   );
