@@ -347,6 +347,41 @@ describe('巡检每一回从库里读的事实', () => {
     expect(facts.timings).toBe(1);
     expect(facts.openAlerts).toEqual([{ dedupeKey: 'task:acme/canary#1:park:1', title: '没有可用的路由' }]);
   });
+
+  it('经 Mirasim 中转的会话只记上输出（输入在会话结束时读不到，留空）：也算记上了用量（#1933）', async () => {
+    const repo = await addRepo(t.db, 'canary');
+    await addTask(t.db, repo.id, { issueNumber: 1, state: 'running', phase: 'merge' });
+    // 动手、验收都走 Mirasim 中转的 Claude：快照只给本轮累计输出，输入、缓存留空（不拿 0 顶）
+    await startRun(t.db, {
+      segment: 'manual',
+      issueNumber: 1,
+      model: 'sonnet-5.5',
+      startedAt: ago(40 * MIN),
+      endedAt: ago(30 * MIN),
+      outcome: 'done',
+      outputTokens: 4210,
+    });
+    await startRun(t.db, {
+      segment: 'verify',
+      issueNumber: 1,
+      model: 'deepseek-flash',
+      startedAt: ago(20 * MIN),
+      endedAt: ago(10 * MIN),
+      outcome: 'done',
+      outputTokens: 311,
+    });
+    // 结束了、四样都没读到的一笔：不算记上了
+    await startRun(t.db, {
+      segment: 'verify',
+      issueNumber: 1,
+      model: 'opus-5.5',
+      startedAt: ago(9 * MIN),
+      endedAt: ago(8 * MIN),
+      outcome: 'done',
+    });
+    const facts = await factsOf(1);
+    expect(facts.runs).toEqual({ total: 3, ended: 3, manual: 1, verify: 2, withUsage: 2 });
+  });
 });
 
 describe('canaryPullRequestNumber：任务做得快、工作流已经不在跑时，按单号从 PR 镜像找引擎给这张单开的 PR（#452）', () => {

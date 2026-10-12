@@ -309,6 +309,42 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     });
   });
 
+  it('用量：claude 经 Mirasim 只给本轮累计输出；快照里的输入、缓存读是最近一次上游调用的，不当本轮合计记（#1933）', async () => {
+    const key = 'claude:8ab4102d-ef34-4f23-ab97-23a978c574c6';
+    // Mirasim 服务端 0.0.466 给 claude 的快照 usage 就是这个形状：inputTokens、cachedInputTokens、outputTokens 是最后一条
+    // 助手消息的，contextUsedTokens 是那一次的上下文，turnOutputTokens 是本轮累计输出；没有 sessionTotals
+    const report = await runMirasim(
+      spec({ agent: 'claude', model: 'claude-sonnet-5-5', expectModel: 'claude-sonnet-5-5' }),
+      {
+        connect: new FakeMirasim({
+          agents: ['claude'],
+          reply: (p) => ({ type: 'accepted', clientRef: p.clientRef, sessionKey: key, taskId: 't1' }),
+          stream: [
+            {
+              type: 'snapshot',
+              sessionKey: key,
+              seq: 1,
+              snapshot: {
+                phase: 'done',
+                taskId: 't1',
+                model: 'claude-sonnet-5-5[1m]',
+                usage: {
+                  inputTokens: 4,
+                  outputTokens: 120,
+                  cachedInputTokens: 85_478,
+                  contextUsedTokens: 110_148,
+                  contextPercent: 11,
+                  turnOutputTokens: 4_210,
+                },
+              },
+            },
+          ],
+        }).connect,
+      },
+    );
+    expect(mirasimRunSummary(report).usage).toEqual({ outputTokens: 4_210 });
+  });
+
   it('续跑：这一轮的正文是另起的一份（不接在上一轮的「好了」后面）：从头算，开头的字不被吃掉（VPS 实跑撞到的）', async () => {
     const key = kimi.sessionKey;
     const server = new FakeMirasim({

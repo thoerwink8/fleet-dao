@@ -242,7 +242,12 @@ export async function markCanaryCleaned(db: Db, id: number, at: Date): Promise<v
   if (rows.length === 0) throw new Error(`没有这一轮巡检：${id}`);
 }
 
-/** 这张单记进 runs 的账：一共几笔、结束了几笔、动手（manual）几笔、验收（verify）几笔、结束了又记上用量（输入 token）的几笔。 */
+/**
+ * 这张单记进 runs 的账：一共几笔、结束了几笔、动手（manual）几笔、验收（verify）几笔、结束了又记上用量的几笔。
+ * 「记上用量」＝四样 token（输入、输出、缓存读、缓存写）至少读到一样，和对账（reconcile-checks.ts 的 zeroUsage）同一个口径。
+ * 不只认输入：经 Mirasim 中转起的 claude、dsh、pi、kimi 会话结束时只读得到本轮输出，输入那一列照实留空（#1933，
+ * 来源见 docs/design.md 第十节「经 Mirasim 起的会话用量从哪读」）；只认输入的话，巡检这一轮的会话全走中转就永远断在记账。
+ */
 export interface CanaryLedger {
   total: number;
   ended: number;
@@ -330,7 +335,7 @@ export async function canaryDbFacts(
       ended: sql<number>`count(${runs.endedAt})::int`,
       manual: sql<number>`count(*) filter (where ${runs.segment} = 'manual')::int`,
       verify: sql<number>`count(*) filter (where ${runs.segment} = 'verify')::int`,
-      withUsage: sql<number>`count(*) filter (where ${runs.endedAt} is not null and ${runs.inputTokens} is not null)::int`,
+      withUsage: sql<number>`count(*) filter (where ${runs.endedAt} is not null and coalesce(${runs.inputTokens}, ${runs.outputTokens}, ${runs.cacheReadTokens}, ${runs.cacheWriteTokens}) is not null)::int`,
     })
     .from(runs)
     .where(and(eq(runs.issueNumber, input.issueNumber), gte(runs.startedAt, input.since)));
