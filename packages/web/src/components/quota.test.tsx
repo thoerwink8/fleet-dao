@@ -319,6 +319,48 @@ describe('窗口格子小标题', () => {
   });
 });
 
+describe('额度页照路由页样板（#1921）', () => {
+  test('顶上结论块：池名一行、先用哪个窗一句加状态、灰字补充一行，三行都不折', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    const hero = (await screen.findByText('Claude 订阅 · claude-b')).closest(
+      '[data-quota-hero]',
+    ) as HTMLElement;
+    expect(hero).toBeTruthy();
+    const line = hero.querySelector('[data-hero-line]') as HTMLElement;
+    expect(line.textContent).toContain('5 小时窗还剩 82%');
+    expect(line.textContent).toContain('该先用');
+    expect(line.className).toContain('whitespace-nowrap');
+    expect(line.getAttribute('title')).toContain('清零');
+    const notes = hero.querySelector('[data-hero-notes]') as HTMLElement;
+    expect(notes.className).toContain('truncate');
+    expect(notes.getAttribute('title')).toBe(notes.textContent);
+    expect(notes.textContent).toContain('个窗快用完');
+    expect(notes.textContent).toContain('过期或没查成的读数');
+  });
+
+  test('池行：在跑几个和到期并成一行灰字；池的毛病收成一行，整句在悬停里，摘要里照旧是整句', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    const row = (await screen.findByRole('rowheader', { name: /supergrok/ })) as HTMLElement;
+    const meta = row.querySelector('[data-pool-meta]') as HTMLElement;
+    expect(meta.textContent).toMatch(/在跑 \d+\/\d+ · .*到期/);
+    expect(meta.className).toContain('whitespace-nowrap');
+    const problem = row.querySelector('[data-pool-problem]') as HTMLElement;
+    expect(problem.dataset.oneLine).toBe('true');
+    expect(problem.getAttribute('title')).toContain('要人做');
+    const panel = openSummary('读数过期或没查成');
+    expect(panel.querySelector('[data-pool-problem]')?.hasAttribute('data-one-line')).toBe(false);
+  });
+
+  test('先用它的格子不再描粗框，只铺淡底', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    await screen.findByRole('rowheader', { name: /claude-b/ });
+    const hot = document.querySelector('[data-quota-line][data-hot]') as HTMLElement;
+    expect(hot).toBeTruthy();
+    expect(hot.className).toContain('bg-accent');
+    expect(hot.className).not.toContain('border-brand');
+  });
+});
+
 describe('额度页观感（#1898）', () => {
   /** 在假数据上加一个没有任何额度窗的池、一个上游新出的窗口，再按需带上切号现状和对账两项。 */
   function apiWith(extra: { orgSwitch?: boolean; reconcile?: boolean } = {}) {

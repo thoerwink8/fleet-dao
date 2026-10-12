@@ -51,6 +51,29 @@ test('【故意造出的失败】额度没读成：仍显示 LoadError', async (
   expect(alert.textContent).toContain('没查成');
   expect(alert.textContent).toContain('后端出错了');
   expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+  // 写明是哪一块没查成；页头说明和 ⓘ 照旧在（#1921）
+  expect(alert.textContent).toContain('额度没查成');
+  expect(screen.getByRole('button', { name: '这页是做什么的' })).toBeTruthy();
+});
+
+test('【故意造出的失败】读成过、刷新时失败：照旧画上一次的数，顶上横幅写没查成和原因，重试再读（#1921）', async () => {
+  const api = createMockApi({ live: false });
+  const real = api.pools.bind(api);
+  renderApp(<QuotaPage />, { api });
+  await screen.findByRole('rowheader', { name: /claude-a/ });
+  api.pools = () => Promise.reject(new ApiError(503, 'pools_unreadable', '库连不上'));
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-busy')).toBe('false'),
+  );
+  fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+  const alert = await screen.findByRole('alert', {}, { timeout: 4000 });
+  expect(alert.textContent).toContain('额度刷新没查成，下面是上一次读到的：库连不上');
+  // 看得到的没被清空：表和结论块都还在
+  expect(screen.getByRole('rowheader', { name: /claude-a/ })).toBeTruthy();
+  expect(document.querySelector('[data-quota-hero]')).toBeTruthy();
+  api.pools = real;
+  fireEvent.click(within(alert).getByRole('button', { name: '重试' }));
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull(), { timeout: 4000 });
 });
 
 test('新旧两张周窗时旧的收起', async () => {
