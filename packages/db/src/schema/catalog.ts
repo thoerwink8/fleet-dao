@@ -147,7 +147,7 @@ export const routes = pgTable(
     /** 上游在别处（额度接口的成员表）对这条路由的叫法，和上面的模型串不同名时填。 */
     upstreamAliases: text('upstream_aliases').array().notNull().default(sql`'{}'::text[]`),
     /**
-     * 名册拆出来的思考档位（#1355）。跟 routing_catalog.effort 不是一回事：那一列是起会话的档位上限。
+     * 名册拆出来的思考档位（#1355）。跟 routing_catalog.effort 不是一回事：那一列是思考档位页按路由记下的值，起会话不读它。
      * 空 = 这条路由不是自动入库的，或上游串里没有档位。
      */
     variantEffort: text('variant_effort').$type<SessionEffort>(),
@@ -246,8 +246,8 @@ export const routingPurposeModels = pgTable(
     /** 从 0 起，越小越先用。 */
     position: integer('position').notNull(),
     /**
-     * 这个用途下这个模型起会话想用的思考档位（#1356）。空 = 这个用途没另配。
-     * 引擎起会话仍读 routing_catalog.effort（这条路由的档）；这一列给驾驶舱按用途配，下一片再接到开会话。
+     * 这个用途下这个模型起会话用的思考档位（#1356、#1967）。空 = 没另配，起会话用骨架 defaults.effort。
+     * 选路和起会话只读这一列，不读 routing_catalog.effort。
      * 认不出的写法由下面的约束挡；这条模型的执行方式认不认这一档，由写入的地方照 routeEffortProblem 判。
      */
     effort: text('effort').$type<SessionEffort>(),
@@ -294,11 +294,10 @@ export const routingCatalog = pgTable(
     /** 调度台上的开关：关着的照样挂在顺序里，但不派。没有默认值：写入的地方必须逐条带上，漏带就插不进去，不会悄悄全打开。 */
     enabled: boolean('enabled').notNull(),
     /**
-     * 这条路由起会话的思考档位（#470）：空 = 没配，用 high（shared 的 DEFAULT_SESSION_EFFORT）。它是这条路由的默认也是上限，
-     * 分档只往下压（engine 的 sessionEffortFor）。运行时配置、留在库里（决定 0011 第 7 条）：驾驶舱改了，下一个起的会话就照它；
-     * 仓里骨架的值只在用途表还没有任何一行、并且这个模型还没有路由行时写进来（routing-apply.ts）；用途表已经有行，发版不再改这一列。
+     * 思考档位页按路由记下的值（#470）。起会话不读这一列（#1967），读的是 routing_purpose_models.effort。
+     * setRoutingEffort 写这一列时，同时把这个模型每个用途的档写成同一个值。空 = 没配。
      * 这一列只挡认不出的写法；这条路由的执行方式认不认这一档（Grok 没有 max、cursor 的整串模型名配不了），由写入的地方
-     * 照 shared 的 routeEffortProblem 判（setRoutingEffort、routing-apply.ts），起会话时引擎再判一次。
+     * 照 shared 的 routeEffortProblem 判（setRoutingEffort、routing-apply.ts）。
      */
     effort: text('effort').$type<SessionEffort>(),
   },

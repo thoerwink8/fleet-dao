@@ -5,9 +5,9 @@
 // 协议与坑见 docs/reference/adapters.md 第八节（MS-01…28）。
 import { stat } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
-import type { ProgressEvent } from '@fleet-dao/shared';
+import { bareModelAliasProblem, type ProgressEvent } from '@fleet-dao/shared';
 import { CallbackGate, type LineMeta } from '../cli-run.ts';
-import { assertSessionEffort, SESSION_EFFORTS } from '../effort.ts';
+import { SESSION_EFFORTS } from '../effort.ts';
 import type { RunFacts, RunSummary } from '../judge.ts';
 import { looksLikeQuotaExhausted, num, rec, str } from '../stream-kit.ts';
 import type { KillReason, TranscriptEntry } from '../types.ts';
@@ -50,6 +50,62 @@ export const DEFAULT_MIRASIM_LIMITS: MirasimLimits = {
   ledgerWaitMs: 10_000,
 };
 
+/** Mirasim 服务端认的执行体。名册上多出来的，加在这里，起会话才会放行。 */
+export const MIRASIM_ROLES = [
+  'kimi',
+  'pi',
+  'codex',
+  'grok',
+  'claude',
+  'dsh',
+  'zcode',
+  'gemini',
+  'antigravity',
+  'qwen',
+] as const;
+
+/** 起会话前拿来核对的目录：执行体、型号。档位不给就用 SESSION_EFFORTS。 */
+export interface MirasimLaunchCatalog {
+  roles: readonly string[];
+  models: readonly string[];
+  efforts?: readonly string[];
+}
+
+/**
+ * 起会话之前的校验（#1967）。过了返回 null；不过返回原因，调用方拒、不连。
+ * 缺角色：没给执行体，或给了目录却不在目录里。
+ * 档位越界：给了档，但不在认的那一列里。
+ * 型号不在目录里：裸别名，或给了目录却没有这个型号。没给目录时只拦裸别名。
+ */
+export function mirasimLaunchProblem(spec: {
+  agent?: string;
+  model?: string;
+  expectModel?: string;
+  effort?: string;
+  catalog?: MirasimLaunchCatalog;
+}): string | null {
+  const agent = spec.agent?.trim() ?? '';
+  if (!agent) return '缺角色：没给执行体（agent）';
+  if (spec.catalog && !spec.catalog.roles.includes(agent)) {
+    return `缺角色：执行体「${agent}」不在目录里（有：${spec.catalog.roles.join('、') || '一个都没有'}）`;
+  }
+  if (spec.effort !== undefined) {
+    const allowed = spec.catalog?.efforts ?? SESSION_EFFORTS;
+    if (!(allowed as readonly string[]).includes(spec.effort)) {
+      return `档位越界：思考档位（effort）不认识：${JSON.stringify(spec.effort)}（只有 ${[...allowed].join(' / ')}）`;
+    }
+  }
+  const named = spec.model?.trim() || spec.expectModel?.trim() || '';
+  if (named) {
+    const alias = bareModelAliasProblem(named);
+    if (alias) return `型号不在目录里：${alias}`;
+    if (spec.catalog && !spec.catalog.models.includes(named)) {
+      return `型号不在目录里：${named}（目录有：${spec.catalog.models.join('、') || '一个都没有'}）`;
+    }
+  }
+  return null;
+}
+
 export interface MirasimRunSpec {
   runId: string;
   /** 工作树。执行体以这份 Mirasim 服务的用户（会话用户）的身份在这里干活。 */
@@ -68,6 +124,8 @@ export interface MirasimRunSpec {
   expectModel?: string;
   /** 不给就不写进 prompt 帧。引擎起会话时总是给。不认识的值在发出去之前抛错。 */
   effort?: string;
+  /** 给了就在连上之前核对执行体、型号、档位。不给只拦空执行体、裸别名和认不出的档。 */
+  catalog?: MirasimLaunchCatalog;
   session: MirasimSessionRef;
   limits?: Partial<MirasimLimits>;
   testCommands?: readonly string[];
@@ -195,8 +253,9 @@ export async function runMirasim(
   spec: MirasimRunSpec,
   options: MirasimRunOptions,
 ): Promise<MirasimRunReport> {
+  const launchProblem = mirasimLaunchProblem(spec);
+  if (launchProblem) throw new Error(launchProblem);
   if (!spec.prompt.trim()) throw new Error('提示词是空的');
-  if (spec.effort !== undefined) assertSessionEffort(spec.effort, SESSION_EFFORTS, 'Mirasim');
   if (!AGENT.test(spec.agent)) throw new Error(`执行体名不合法：${JSON.stringify(spec.agent)}`);
   if (spec.agent === 'pi' && spec.model && !spec.model.startsWith('profile:')) {
     throw new Error(

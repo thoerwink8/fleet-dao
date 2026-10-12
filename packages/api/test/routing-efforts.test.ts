@@ -1,7 +1,7 @@
 // 驾驶舱「思考档位」页的接口（#470）：读每个模型下每条路由配的档位、改一条。真库上读写路由两层那张表（routing_catalog.effort）；
 // 改了引擎起会话现读到的就是新的（routeLaunchFacts）；写错值、这家不认、没挂、别人刚改过都拒，库里不动、不记操作记录；
 // 没接上（内存版）读写 unavailable、改回 503，不拿空列表冒充「都没配」。
-import { auditLog, routeLaunchFacts, routingCatalog } from '@fleet-dao/db';
+import { auditLog, routeLaunchFacts, routingCatalog, routingPurposeModels } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { RoutingEffortsResponse, UpdateRouteEffortResponse } from '@fleet-dao/shared';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -26,6 +26,12 @@ async function hang() {
     { modelId: 'opus-5.5', routeId: 'rt-claude-opus', position: 0, enabled: true },
     { modelId: 'gpt-5.6', routeId: 'rt-mirasim-gpt', position: 0, enabled: true },
     { modelId: 'kimi-k3', routeId: 'rt-mirasim-kimi', position: 0, enabled: false },
+  ]);
+  // 起会话读用途表。思考档位页改路由时会把同一档写到这些行上。
+  await t.db.insert(routingPurposeModels).values([
+    { purpose: 'execute', modelId: 'opus-5.5', position: 0 },
+    { purpose: 'execute', modelId: 'gpt-5.6', position: 1 },
+    { purpose: 'execute', modelId: 'kimi-k3', position: 2 },
   ]);
 }
 

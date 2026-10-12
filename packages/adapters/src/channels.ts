@@ -50,13 +50,16 @@ export {
 } from './mirasim/meter.ts';
 export {
   DEFAULT_MIRASIM_LIMITS,
+  MIRASIM_ROLES,
   type MirasimAccepted,
+  type MirasimLaunchCatalog,
   type MirasimLimits,
   type MirasimRoute,
   type MirasimRunOptions,
   type MirasimRunReport,
   type MirasimRunSpec,
   type MirasimSessionRef,
+  mirasimLaunchProblem,
   mirasimRouting,
   mirasimRunFacts,
   mirasimRunSummary,

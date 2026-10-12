@@ -50,6 +50,7 @@
 //      pidUncertain: true），让 status/stop/clean 之后还找得到这棵工作树，报错里明说
 //      「进程可能已经在跑、没记上」。metaProblem/oneStatus/cmdStop/cmdClean 都跟着认 pidUncertain 这个状态。
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -88,8 +89,6 @@ const MODELS = ['grok', 'codex', 'kimi', 'claude'];
 export const SESSION_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 /** grok、codex 命令行认的档（都没有 max）；总是显式传给模型命令行。 */
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
-/** 骨架里这个模型没配档位时用这一档（创始人 2026-09-28 拍：默认 high，别用 xhigh）。 */
-export const DEFAULT_EFFORT = 'high';
 /** 路由骨架在同步专用检出里的位置（相对家目录）：本机读不到法国库，档位照它（见文件头）。 */
 export const ROUTING_DEFAULT_REL = join(
   '.fleet-dao',
@@ -98,15 +97,58 @@ export const ROUTING_DEFAULT_REL = join(
   'db',
   'routing.default.json',
 );
-/** 不给 --model-id 时按骨架里哪个模型查档位：本机 grok 命令行跑的就是 grok-4.7（法国 grok 那条路由同一个命令行），codex 跑 GPT。 */
-export const ROUTING_MODEL_OF = { grok: 'grok-4.7', codex: 'gpt-5.6-luna', claude: 'sonnet' };
+
+/**
+ * 默认档位和工人型号只在 routing.default.json 的 defaults 里（#1967）。
+ * 先读和这份脚本同仓的那份，没有再读同步专用检出。两处都没有就抛，不另写一份 high。
+ */
+function routingSeedDefaults() {
+  const beside = fileURLToPath(new URL('../../../../packages/db/routing.default.json', import.meta.url));
+  const synced = join(homedir(), ROUTING_DEFAULT_REL);
+  const file = existsSync(beside) ? beside : existsSync(synced) ? synced : '';
+  if (!file) {
+    throw new Error(`路由骨架读不到（试过 ${beside} 和 ${synced}）。默认档位和工人型号只写在这一份里。`);
+  }
+  let cfg;
+  try {
+    cfg = JSON.parse(readFileSync(file, 'utf8'));
+  } catch (e) {
+    throw new Error(`路由骨架不是 JSON（${file}：${e.message}）`);
+  }
+  const defaults = cfg?.defaults;
+  const effort = defaults?.effort;
+  const workers = defaults?.workers;
+  const claudeCliModel = defaults?.claudeCliModel;
+  if (!SESSION_EFFORTS.includes(effort)) {
+    throw new Error(`路由骨架 ${file} 的 defaults.effort 认不出：${JSON.stringify(effort)}`);
+  }
+  if (
+    !workers ||
+    typeof workers !== 'object' ||
+    typeof workers.grok !== 'string' ||
+    typeof workers.codex !== 'string' ||
+    typeof workers.claude !== 'string'
+  ) {
+    throw new Error(`路由骨架 ${file} 的 defaults.workers 认不出`);
+  }
+  if (typeof claudeCliModel !== 'string' || !claudeCliModel.trim()) {
+    throw new Error(`路由骨架 ${file} 的 defaults.claudeCliModel 认不出`);
+  }
+  return { effort, workers, claudeCliModel };
+}
+
+const SEED_DEFAULTS = routingSeedDefaults();
+/** 骨架里这个模型没配档位时用这一档（defaults.effort）。 */
+export const DEFAULT_EFFORT = SEED_DEFAULTS.effort;
+/** 不给 --model-id 时按骨架 defaults.workers 查哪个模型。 */
+export const ROUTING_MODEL_OF = SEED_DEFAULTS.workers;
 /**
  * Claude 工人只许这两族：工人永不用 Fable（通用段「我的机器与模型」）；工人是写代码、开 PR 的整段活，
  * 照决定 0034 的档位表不用 Haiku（Haiku 只给读多写少、好抽查的子代理）。
- * 不给 --model-id 用 Sonnet 5.5 的完整 id（决定 0034：写完整 id，免得别名指到旧版），要 Opus 显式给 --model-id claude-opus-5-5；
+ * 不给 --model-id 用骨架 defaults.claudeCliModel（决定 0034：写完整 id，免得别名指到旧版），要 Opus 显式给 --model-id claude-opus-5-5；
  * 给了别的（fable、haiku、认不出的）一律拒起，不替人改成能用的。
  */
-export const CLAUDE_DEFAULT_MODEL = 'claude-sonnet-5-5';
+export const CLAUDE_DEFAULT_MODEL = SEED_DEFAULTS.claudeCliModel;
 export function claudeModelProblem(modelId) {
   const id = modelId ?? CLAUDE_DEFAULT_MODEL;
   if (/^(opus|sonnet)$/.test(id) || /^claude-(opus|sonnet)-[\w.-]+$/.test(id)) return null;

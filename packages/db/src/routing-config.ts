@@ -2,7 +2,7 @@
 // 读不到、不是 JSON、格式认不出、引用对不上都明确报错，不拿空配置或旧配置冒充（通用段底线第三条）。
 // 这里只管读和校验；发布时只补缺写进库是 routing-apply.ts（deploy/release.sh 的 load_routing），选路读库里那两张表。
 import { readFile } from 'node:fs/promises';
-import { SESSION_EFFORTS } from '@fleet-dao/shared';
+import { bareModelAliasProblem, SESSION_EFFORTS } from '@fleet-dao/shared';
 import { z } from 'zod';
 import { STAGE_KINDS } from './schema/enums.ts';
 
@@ -10,14 +10,29 @@ export const ROUTING_DEFAULT_PATH = new URL('../routing.default.json', import.me
 
 const Id = z.string().trim().min(1);
 
+const RoutingDefaultsSchema = z.strictObject({
+  /** 用途表没另配档位时起会话用这一档。 */
+  effort: z.enum(SESSION_EFFORTS, { error: `思考档位只有 ${SESSION_EFFORTS.join(' / ')}` }),
+  /** 本机工人不给 --model-id 时，按命令行家族查骨架里哪个模型。值是目录里的完整型号。 */
+  workers: z.strictObject({
+    grok: Id,
+    codex: Id,
+    claude: Id,
+  }),
+  /** Claude 工人命令行上的完整型号（和目录 id 不是同一个字符串）。 */
+  claudeCliModel: Id,
+});
+
 export const RoutingConfigSchema = z.strictObject({
+  /** 默认档位和本机工人的型号。测试夹具可以不写；仓里那份骨架必须有（routing-seed-single-source 钉着）。 */
+  defaults: RoutingDefaultsSchema.optional(),
   /** default 给没单列的用途用；单列的用途整串替换 default。 */
   purposes: z
     .partialRecord(z.enum(['default', ...STAGE_KINDS]), z.array(Id).min(1))
     .refine((p) => Object.keys(p).length > 0, '至少要有 default 或某个用途的模型顺序'),
   /**
-   * 模型 → 路由顺序；enabled 是调度台上的开关（关着的照样挂着，不派）。effort 是这条路由的思考档位（#470），不写 = 没配
-   * （起会话用 high）；这条路由的执行方式认不认这一档，装进库时对着库里的路由判（routing-apply.ts）。
+   * 模型 → 路由顺序；enabled 是调度台上的开关（关着的照样挂着，不派）。effort 是思考档位页按这条路由记下的值（#470），
+   * 起会话不读它（读用途表）；不写 = 没配。这条路由的执行方式认不认这一档，装进库时对着库里的路由判（routing-apply.ts）。
    */
   models: z
     .record(
@@ -80,14 +95,26 @@ export function parseRoutingConfig(text: string, source = 'routing.default.json'
   }
   const cfg = parsed.data;
   const problems: string[] = [];
+  const rejectAlias = (modelId: string, where: string) => {
+    const problem = bareModelAliasProblem(modelId);
+    if (problem) problems.push(`${where}：${problem}`);
+  };
+  if (cfg.defaults) {
+    rejectAlias(cfg.defaults.claudeCliModel, 'defaults.claudeCliModel');
+    for (const [worker, modelId] of Object.entries(cfg.defaults.workers)) {
+      rejectAlias(modelId, `defaults.workers.${worker}`);
+    }
+  }
   for (const [purpose, models] of Object.entries(cfg.purposes)) {
     for (const d of dupes(models)) problems.push(`用途 ${purpose} 里模型 ${d} 写了不止一次`);
     for (const m of models) {
+      rejectAlias(m, `用途 ${purpose}`);
       if (!(m in cfg.models)) problems.push(`用途 ${purpose} 里的模型 ${m} 在 models 里没有路由顺序`);
     }
   }
   const owner = new Map<string, string>();
   for (const [model, routes] of Object.entries(cfg.models)) {
+    rejectAlias(model, 'models');
     for (const d of dupes(routes.map((r) => r.routeId)))
       problems.push(`模型 ${model} 里路由 ${d} 写了不止一次`);
     for (const r of routes) {

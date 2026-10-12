@@ -498,7 +498,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             ticket.attempt(picked.runId);
             tickets.set(picked.family, ticket);
           }
-          const { user } = await resolveSegmentRoute(deps.spawner, picked.routeId);
+          const { user } = await resolveSegmentRoute(deps.spawner, picked.routeId, SEGMENT_STAGE.verify);
           const dir = deps.spawner.trees.tmpFor(`verify-${newRunId()}`);
           await deps.spawner.trees.adopt(dir, user);
           return {

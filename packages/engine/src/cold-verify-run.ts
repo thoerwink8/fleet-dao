@@ -23,6 +23,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { CATALOG_NAMED_FAMILIES } from '@fleet-dao/db';
+import { SEGMENT_STAGE } from '@fleet-dao/shared/flow-purposes';
 import { errMessage } from '@fleet-dao/shared/util';
 import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { UNVERIFIABLE_AUTHOR_FAMILIES } from './author-families.ts';
@@ -209,6 +210,7 @@ export async function runColdVerifyForPr(
     fetchSpec: async () => ({ ...(spec.specDir !== undefined ? { specDir: spec.specDir } : {}) }),
     fetchNamedFiles: readNamedFilesAtHead({ head: pr.head, workflowId: spec.workflowId }),
     chooseModelForFamily: deps.chooseModelForFamily,
+    purpose: SEGMENT_STAGE.verify,
     cwd: deps.cwd,
     ...(deps.prepareCwd === undefined ? {} : { prepareCwd: deps.prepareCwd }),
     ...(deps.timeoutMinutes === undefined ? {} : { timeoutMinutes: deps.timeoutMinutes }),

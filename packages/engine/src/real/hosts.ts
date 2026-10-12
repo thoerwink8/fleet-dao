@@ -44,6 +44,8 @@
 //   不跑工具全靠 探针提示词（probePrompt）那句「不要调用任何工具」，服务端那边会不会听不是我们控制得了的——这是协议本身的限制，
 //   不是漏接了什么。
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   type AgentRunOptions,
   assertSessionEffort,
@@ -62,10 +64,12 @@ import {
   grokRunFacts,
   type LedgerFs,
   type LineMeta,
+  MIRASIM_ROLES,
   type MirasimConnect,
   type MirasimRunOptions,
   type MirasimRunReport,
   type MirasimRunSpec,
+  mirasimLaunchProblem,
   mirasimRunSummary,
   type ProcessLimits,
   type RateLimitReading,
@@ -114,7 +118,7 @@ export { DEFAULT_SESSION_EFFORT };
 
 /**
  * 一次会话用哪一档（#470）。只有这里把两个来源合成一档，别处只管传：
- * - configured：驾驶舱给这条路由配的（routing_catalog.effort，没配 = DEFAULT_SESSION_EFFORT）。它是这条路由的默认，也是上限。
+ * - configured：这个用途下这个模型配的（routing_purpose_models.effort，没配 = DEFAULT_SESSION_EFFORT）。它是默认，也是上限。
  * - tier：分档按改动面给的（runner/tier.ts 的 effort）。只往下压、不往上抬：比标准档（DEFAULT_SESSION_EFFORT）低才算数
  *   （快档的 medium：小活少想），取它和 configured 里低的那个；标准档及以上 = 不压，照 configured（驾驶舱配了 xhigh 的，
  *   中档、主力档的活就是 xhigh；配了 low 的，哪一档的活都是 low）。
@@ -209,7 +213,7 @@ export interface HostRunSpec {
    */
   executor?: string;
   /**
-   * 驾驶舱给这条路由配的思考档位（routing_catalog.effort）。不给 = 没配，用 DEFAULT_SESSION_EFFORT。
+   * 这个用途下这个模型配的思考档位（routing_purpose_models.effort）。不给 = 没配，用 DEFAULT_SESSION_EFFORT。
    * 模型串方括号里已经编了档位的不再另传（applySessionEffort）。
    */
   effort?: string;
@@ -766,6 +770,25 @@ export function grokReport(report: GrokRunReport): HostReport {
  */
 const MIRASIM_MODELLESS_AGENTS = new Set(['pi']);
 
+/** 目录里的型号：模型 id 和路由的上游串。读不到就抛，不拿空目录放行。 */
+function mirasimModelDirectory(): readonly string[] {
+  const file = fileURLToPath(new URL('../../../../deploy/catalog.json', import.meta.url));
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(file, 'utf8')) as unknown;
+  } catch (err) {
+    throw new Error(`读不到模型目录 ${file}，Mirasim 起会话前对不上型号：${(err as Error).message}`);
+  }
+  const models: string[] = [];
+  const rec = raw as { models?: { id?: string }[]; routes?: { upstreamModel?: string | null }[] };
+  for (const m of rec.models ?? []) if (typeof m?.id === 'string' && m.id) models.push(m.id);
+  for (const r of rec.routes ?? []) {
+    if (typeof r?.upstreamModel === 'string' && r.upstreamModel) models.push(r.upstreamModel);
+  }
+  if (models.length === 0) throw new Error(`模型目录 ${file} 里没有型号，Mirasim 起会话对不上`);
+  return [...new Set(models)];
+}
+
 /** 认不出的模型串明确报错（不瞎猜执行体）：故意造这条失败的测试见 hosts.test.ts。 */
 export function mirasimAgentFor(upstreamModel: string, rosterExecutor?: string | null): string {
   const resolved = resolveMirasimExecutor({ rosterExecutor, upstreamModel });
@@ -793,6 +816,14 @@ function mirasimDriver(
       }
       const effort = applySessionEffort('mirasim', spec);
       const agent = mirasimAgentFor(effort.model, spec.executor);
+      const modeless = MIRASIM_MODELLESS_AGENTS.has(agent);
+      const launchProblem = mirasimLaunchProblem({
+        agent,
+        ...(modeless ? { expectModel: effort.model } : { model: effort.model }),
+        ...(effort.pass ? { effort: effort.pass } : {}),
+        catalog: { roles: MIRASIM_ROLES, models: mirasimModelDirectory() },
+      });
+      if (launchProblem) throw new Error(launchProblem);
       const report = await run(
         {
           runId: spec.runId,

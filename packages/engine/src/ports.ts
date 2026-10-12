@@ -1,4 +1,12 @@
-import type { HostId, OrgKind, Repo, StageKind, SubtaskState, TaskState } from '@fleet-dao/shared';
+import type {
+  HostId,
+  OrgKind,
+  Repo,
+  SessionEffort,
+  StageKind,
+  SubtaskState,
+  TaskState,
+} from '@fleet-dao/shared';
 import type {
   CiResult,
   Feedback,
@@ -75,6 +83,10 @@ export interface RouteChoice {
   orgKind?: OrgKind;
   /** 这条路由所在的渠道（routes.channel_id）：失败分流换渠道时标哪个渠道不可用。老历史里没有。 */
   channelId?: string;
+  /** 选路时的用途。起会话按它读这个用途下这个模型的档。老历史里没有，动手段按 execute。 */
+  purpose?: StageKind;
+  /** 选路读到的这个用途下这个模型的档。空 = 没另配。起会话仍现读库。 */
+  effort?: SessionEffort | null;
   /**
    * 选路时给这一段预占上的池的名额（PickRouteInput.reserve，#757，pool_reservations 的编号）：开跑那一行写进去时换成那一行，
    * 没开跑就收场的由起会话的那一边放掉。没要预占的选路（Fusion、对账）、老历史里没有。

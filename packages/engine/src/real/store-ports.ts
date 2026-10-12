@@ -373,6 +373,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       poolName: poolNameOf(r.channelName, r.poolOrgKind),
       orgKind: r.poolOrgKind,
       modelId: r.modelId,
+      effort: r.effort,
       modelName: r.modelName,
       family: r.family,
       hostId: r.hostId,
@@ -660,6 +661,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
             family: r.family,
             hostId: r.hostId,
             channelId: fact.channelId,
+            purpose: input.stage,
+            effort: fact.effort ?? null,
             ...(fact.orgKind ? { orgKind: fact.orgKind } : {}),
             ...(reservationId ? { reservationId } : {}),
           };

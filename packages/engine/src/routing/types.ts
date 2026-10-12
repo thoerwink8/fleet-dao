@@ -1,6 +1,13 @@
 // 选路的输入与结果。输入由引擎的 pickRoute 端口从库里取齐（候选路由、熔断、战绩），结果只有三种：派、等、派不出。
 // 时刻一律 ISO 字符串（和熔断一样），认不出就抛 RoutingInputError，不当成「没有」。
-import type { HostId, OrgKind, QuotaWindowKind, RouteProbeState, StageKind } from '@fleet-dao/shared';
+import type {
+  HostId,
+  OrgKind,
+  QuotaWindowKind,
+  RouteProbeState,
+  SessionEffort,
+  StageKind,
+} from '@fleet-dao/shared';
 import type { RoutingPolicy } from './policy.ts';
 
 /**
@@ -77,6 +84,8 @@ export interface RouteFacts {
    */
   orgKind?: OrgKind | null;
   modelId: string;
+  /** 这个用途下这个模型的思考档位（routing_purpose_models.effort）。空 = 没另配。 */
+  effort?: SessionEffort | null;
   /** 模型目录的显示名，例如 Opus 5.5（硬禁令也按它认 Fable）。 */
   modelName: string;
   family: string;

@@ -364,6 +364,14 @@ describe('默认配置 routing.default.json', () => {
     expect(cfg.models.m?.map((r) => r.effort)).toEqual(['medium', undefined]);
   });
 
+  it('【故意造出的失败】模型写成裸别名：报错，不收进骨架', () => {
+    const bad = {
+      purposes: { default: ['sonnet'] },
+      models: { sonnet: [{ routeId: 'r', enabled: true }] },
+    };
+    expect(() => parseRoutingConfig(JSON.stringify(bad))).toThrow(/裸别名/);
+  });
+
   it('【故意造出的失败】思考档位写了认不出的值：格式不对，写明哪条、只有哪几档', () => {
     const bad = {
       purposes: { default: ['m'] },

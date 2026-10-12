@@ -33,6 +33,7 @@
 // - 内存放不下没派出去（admission_blocked）、切号停下（org_switch）→ 照旧回这一次的结局，调用方认结局过一会儿重来
 // - 结论写 pass 但问题清单里还有算挡的 → pass: false（自相矛盾的结论不放行）
 
+import type { StageKind } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
 import { classifyFailure, isUpstreamBlip } from './failure/index.ts';
@@ -264,6 +265,8 @@ export interface VerifierInvokeDeps {
   fetchDiff: FetchDiff;
   fetchSpec: FetchSpec;
   chooseModelForFamily: ChooseModelForFamily;
+  /** 这次验收选路的用途。起会话按它读档。 */
+  purpose?: StageKind;
   /** 会话 cwd（通常是调用方为这张 PR 准备的工作树）。给了 prepareCwd 就不用它。 */
   cwd: string;
   /**
@@ -685,6 +688,7 @@ export async function invokeVerifier(
         modelId: picked.modelId,
         ...(picked.channel !== undefined ? { channel: picked.channel } : {}),
         ...(picked.routeId !== undefined ? { routeId: picked.routeId } : {}),
+        ...(deps.purpose !== undefined ? { purpose: deps.purpose } : {}),
         // 记到这张单名下（#216）：验收是冷调用、不分档，不带派工档
         taskId: parsed.taskId,
         issueNumber: parsed.issueNumber,

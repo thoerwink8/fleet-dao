@@ -27,6 +27,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { redact } from '@fleet-dao/adapters';
+import type { StageKind } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { MemoryAdmissionDeps } from '../real/memory-admission.ts';
 import { admitSessionMemory } from '../real/memory-admission.ts';
@@ -91,6 +92,11 @@ export interface OneShotInput {
   routeId?: string;
   /** 思考档位（按改动面分档给的，tier.ts 的 effort）；不给用执行方式自己的默认。 */
   effort?: string;
+  /**
+   * 这次起会话的用途。档位只读这个用途下这个模型的 routing_purpose_models.effort。
+   * 不给：各用途档位一样才起，不一样就拒。
+   */
+  purpose?: StageKind;
   /** 选路时给这一段预占的池的名额（#757，pool_reservations 的编号）：开跑那一行写进去时换成这一行。不经选路的不给。 */
   reservationId?: string;
 }

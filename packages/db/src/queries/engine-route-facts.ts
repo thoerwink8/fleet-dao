@@ -1,5 +1,5 @@
 // 选路事实：按路由两层读一个用途下每条路由的池、模型、探针、额度窗、在途和占位、挡因。
-import type { HostId, OrgKind, QuotaWindowKind, StageKind } from '@fleet-dao/shared';
+import type { HostId, OrgKind, QuotaWindowKind, SessionEffort, StageKind } from '@fleet-dao/shared';
 import { eq, inArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { flattenRoutingLayers, routingLayers } from '../routing-layers.ts';
@@ -38,6 +38,11 @@ export interface PurposeRouteFacts {
     /** Claude 订阅池对应的组织类型（pools.org_kind）：会话用户挂着哪个组织，只有那个池能派。别的池 null。 */
     poolOrgKind: OrgKind | null;
     modelId: string;
+    /**
+     * 这个用途下这个模型的思考档位（routing_purpose_models.effort）。空 = 没另配。
+     * 同一个模型下的几条路由读到同一档；不读 routing_catalog.effort。
+     */
+    effort: SessionEffort | null;
     modelName: string;
     family: string;
     hostId: HostId;
@@ -118,6 +123,7 @@ export async function routeFactsForPurpose(
   const detailByRoute = new Map(detailRows.map((r) => [r.routeId, r]));
   const windowByKey = new Map(windowRows.map((w) => [`${w.poolId}\u0000${w.label}`, w]));
 
+  const effortByModel = new Map(layers.models.map((m) => [m.modelId, m.effort]));
   const routesOut = sorted.map((c) => {
     const detail = detailByRoute.get(c.routeId);
     if (!detail) throw new Error(`路由 ${c.routeId} 查不到渠道 / 池 / 模型详情`);
@@ -129,6 +135,7 @@ export async function routeFactsForPurpose(
       poolRunAsUser: detail.poolRunAsUser,
       poolOrgKind: detail.poolOrgKind,
       modelId: c.modelId,
+      effort: effortByModel.get(c.modelId) ?? null,
       modelName: detail.modelName,
       family: c.family,
       hostId: c.hostId,

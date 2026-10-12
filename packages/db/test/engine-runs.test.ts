@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { routeLaunchFacts, taskContext } from '../src/queries/engine.ts';
 import { setRoutingEffort } from '../src/routing-effort.ts';
-import { pools, routingCatalog } from '../src/schema/index.ts';
+import { pools, routingCatalog, routingPurposeModels } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addRoute, addTask, catalog } from './helpers.ts';
 
@@ -68,10 +68,11 @@ describe('routeLaunchFacts', () => {
     });
   });
 
-  it('思考档位照路由两层里这条路由那一行现读：没配是 null，驾驶舱改了下一次读到的就是新的', async () => {
+  it('思考档位照用途表现读：没配是 null，驾驶舱改了下一次读到的就是新的', async () => {
     await t.db
       .insert(routingCatalog)
       .values({ modelId: 'opus-5.5', routeId: 'r1', position: 0, enabled: true });
+    await t.db.insert(routingPurposeModels).values({ purpose: 'execute', modelId: 'opus-5.5', position: 0 });
     expect((await routeLaunchFacts(t.db, 'r1'))?.effort).toBeNull();
     expect(await setRoutingEffort(t.db, { modelId: 'opus-5.5', routeId: 'r1', effort: 'xhigh' })).toEqual({
       ok: true,

@@ -154,11 +154,37 @@ describe('Mirasim 会话状态（真跑夹具）', () => {
 });
 
 describe('Mirasim 起会话到判定（假服务端）', () => {
+  const directory = {
+    roles: ['kimi', 'pi', 'codex', 'grok', 'claude', 'dsh'],
+    models: ['kimi-k3', 'kimi-code/k3'],
+  };
+
   it('档位不认识：prompt 还没发出去就拒【故意造出的失败】', async () => {
     const server = new FakeMirasim({});
     await expect(runMirasim(spec({ effort: 'turbo' }), { connect: server.connect })).rejects.toThrow(
-      'effort',
+      /档位越界：思考档位（effort）/,
     );
+    expect(server.connects).toBe(0);
+    expect(server.framesOf('prompt')).toEqual([]);
+  });
+
+  it('缺角色：执行体不在目录里，连都不连【故意造出的失败】', async () => {
+    const server = new FakeMirasim({});
+    await expect(
+      runMirasim(spec({ agent: 'no-such-role', catalog: directory }), { connect: server.connect }),
+    ).rejects.toThrow(/缺角色/);
+    expect(server.connects).toBe(0);
+    expect(server.framesOf('prompt')).toEqual([]);
+  });
+
+  it('型号不在目录里：连都不连【故意造出的失败】', async () => {
+    const server = new FakeMirasim({});
+    await expect(
+      runMirasim(spec({ model: 'not-a-real-model', catalog: directory }), { connect: server.connect }),
+    ).rejects.toThrow(/型号不在目录里/);
+    await expect(
+      runMirasim(spec({ model: 'sonnet', catalog: directory }), { connect: server.connect }),
+    ).rejects.toThrow(/型号不在目录里/);
     expect(server.connects).toBe(0);
     expect(server.framesOf('prompt')).toEqual([]);
   });

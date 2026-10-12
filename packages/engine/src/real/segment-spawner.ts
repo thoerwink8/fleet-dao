@@ -21,7 +21,7 @@ import { judgeRun, type RateLimitReading, type SessionUser } from '@fleet-dao/ad
 import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import type { Db, RouteLaunchFacts } from '@fleet-dao/db';
 import { appendRunTranscript, routeLaunchFacts, savePoolQuota, type TranscriptRow } from '@fleet-dao/db';
-import { routeEffortProblem } from '@fleet-dao/shared';
+import { routeEffortProblem, type StageKind } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { CarpoolRejection } from '../jobs/carpool-outage.ts';
 import { hostName } from '../routing/names.ts';
@@ -127,6 +127,7 @@ export function outcomeOfReport(report: HostReport): SpawnOutcome {
 export async function resolveSegmentRoute(
   deps: Pick<SegmentSpawnerDeps, 'routeFacts' | 'db' | 'drivers'>,
   routeId: string | undefined,
+  purpose?: StageKind,
 ): Promise<{ route: RouteLaunchFacts; driver: HostDriver; user: SessionUser }> {
   if (!routeId) {
     throw new Error('这一段没给路由编号（routeId）：生产 Spawner 不知道该起哪家执行体，也不落到默认的上');
@@ -134,7 +135,7 @@ export async function resolveSegmentRoute(
   const lookup =
     deps.routeFacts ??
     (deps.db
-      ? (id: string) => routeLaunchFacts(deps.db as Db, id)
+      ? (id: string) => routeLaunchFacts(deps.db as Db, id, purpose)
       : () => {
           throw new Error('生产 Spawner 没装路由查询：要给 routeFacts 或 db');
         });
@@ -192,7 +193,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
   return async (cmd) => {
     const { input } = cmd;
     const runId = input.runId;
-    const { route, driver, user } = await resolveSegmentRoute(deps, input.routeId);
+    const { route, driver, user } = await resolveSegmentRoute(deps, input.routeId, input.purpose);
 
     const tmpDir = deps.trees.tmpFor(runId);
     await deps.trees.adopt(tmpDir, user);

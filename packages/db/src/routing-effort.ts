@@ -1,11 +1,12 @@
-// 路由两层里每条路由的思考档位（#470）：驾驶舱「思考档位」页经 routingEffortRows 读、经 setRoutingEffort 写
-// routing_catalog.effort。档位是运行时配置、留在库里（决定 0011
+// 路由两层里每条路由的思考档位（#470）：驾驶舱「思考档位」页经 routingEffortRows 读、经 setRoutingEffort 写。
+// 起会话只读 routing_purpose_models.effort（#1967）。这一页改一条路由时，把这个模型在每个用途里的档写成同一个值，
+// routing_catalog.effort 跟着写，但起会话不读它。档位是运行时配置、留在库里（决定 0011
 // 第 7 条），不走「改仓库再部署」；引擎起会话时现读（queries/engine-launch-facts.ts 的 routeLaunchFacts），改完下一个会话就照新的。
 // 这条路由的执行方式认不认这一档照 shared 的 routeEffortProblem 判（和骨架装载、引擎起会话同一份判法），判不过一行不写、回原因。
 import { type HostId, routeEffortProblem, type SessionEffort } from '@fleet-dao/shared';
 import { and, asc, eq } from 'drizzle-orm';
 import type { Db } from './client.ts';
-import { channels, models, routes, routingCatalog } from './schema/index.ts';
+import { channels, models, routes, routingCatalog, routingPurposeModels } from './schema/index.ts';
 
 /** 路由两层里的一条路由和它配的档位（驾驶舱「思考档位」页一行）。 */
 export interface RoutingEffortRow {
@@ -97,6 +98,11 @@ export async function setRoutingEffort(
       .update(routingCatalog)
       .set({ effort: after })
       .where(and(eq(routingCatalog.modelId, modelId), eq(routingCatalog.routeId, routeId)));
+    // 起会话只读用途表。这一页按路由改，同根写到这个模型的每一个用途上（各用途原先不同档的，以这一次为准）。
+    await tx
+      .update(routingPurposeModels)
+      .set({ effort: after })
+      .where(eq(routingPurposeModels.modelId, modelId));
     return { ok: true, before: row.effort, after };
   });
 }
