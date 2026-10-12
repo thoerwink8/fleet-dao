@@ -145,7 +145,9 @@ describe('开会话钩子装上、真跑同步', { timeout: 180_000 }, () => {
     writeFileSync(join(m.home, '.claude', 'settings.json'), '{}\n');
     const red = m.sync('--check');
     expect(red.code).toBe(1);
-    expect(red.out).toContain('~/.claude/settings.json：缺失——没登记 PreToolUse（pretool.mjs');
+    expect(red.out).toContain(
+      '~/.claude/settings.json：缺失——没登记 SessionStart（plugin-loader.mjs）、PreToolUse（pretool.mjs',
+    );
     expect(m.sync('--apply').code).toBe(0);
     expect(m.sync('--check').code).toBe(0);
   });

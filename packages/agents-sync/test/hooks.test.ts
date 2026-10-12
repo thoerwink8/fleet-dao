@@ -114,8 +114,11 @@ describe('装', () => {
     expectKind(lines, SETTINGS, 'changed');
     expect(get(m.home, '.fleet-dao/hooks/session-start.mjs')).toBe(HOOK_FILES['session-start.mjs']);
     const s = m.settings();
-    expect(Object.keys(s.hooks)).toEqual(['PreToolUse']);
+    expect(Object.keys(s.hooks)).toEqual(['SessionStart', 'PreToolUse']);
     expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m.cmd));
+    expect(s.hooks.SessionStart).toEqual([
+      { hooks: [{ type: 'command', command: m.cmd('plugin-loader.mjs'), timeout: 10 }] },
+    ]);
     if (PLATFORM === 'win32') {
       expect(m.cmd('pretool.mjs')).toMatch(/\/\.fleet-dao\/bin\/quiet-pretool\.exe$/);
       expect(m.cmd('pretool.mjs')).not.toMatch(/[\s"$&|<>]/);
@@ -144,8 +147,10 @@ describe('装', () => {
     );
     const partly = m.check();
     expectKind(partly, SETTINGS, 'missing');
-    expect(partly.find((l) => l.key === SETTINGS)?.text).toContain(
-      '没登记 PreToolUse（pretool.mjs，matcher Bash|PowerShell|Read|Grep|Agent|Task|Monitor|Workflow|mcp__mirasim__deliver_artifact|PushNotification）',
+    const missing = partly.find((l) => l.key === SETTINGS)?.text ?? '';
+    expect(missing).toContain('SessionStart（plugin-loader.mjs）');
+    expect(missing).toContain(
+      'PreToolUse（pretool.mjs，matcher Bash|PowerShell|Read|Grep|Agent|Task|Monitor|Workflow|mcp__mirasim__deliver_artifact|PushNotification）',
     );
   });
 
@@ -181,7 +186,9 @@ describe('装', () => {
     const s = m.settings();
     expect(s.hooks.PreToolUse).toEqual([before.hooks.PreToolUse[1], ...pretoolGroups(m.cmd)]);
     expect(s.hooks.PostToolUse).toEqual(before.hooks.PostToolUse);
-    expect(s.hooks.SessionStart).toBeUndefined();
+    expect(s.hooks.SessionStart).toEqual([
+      { hooks: [{ type: 'command', command: m.cmd('plugin-loader.mjs'), timeout: 10 }] },
+    ]);
     expect(exitCode(m.check())).toBe(0);
   });
 });
@@ -280,7 +287,10 @@ describe('别的钩子、别的设置一条不碰', () => {
     expect(s.autoUpdatesChannel).toBe('latest');
     expect(s.hooks.PostToolUse).toEqual(before.hooks.PostToolUse);
     expect(s.hooks.PreToolUse).toEqual([before.hooks.PreToolUse?.[1], ...pretoolGroups(m.cmd)]);
-    expect(s.hooks.SessionStart).toEqual([before.hooks.SessionStart?.[1]]);
+    expect(s.hooks.SessionStart).toEqual([
+      before.hooks.SessionStart?.[1],
+      { hooks: [{ type: 'command', command: m.cmd('plugin-loader.mjs'), timeout: 10 }] },
+    ]);
     const all = JSON.stringify(s);
     expect(all).not.toContain('fleet-guard');
     const backups = join(m.home, '.fleet-dao', 'backups');
@@ -353,7 +363,9 @@ describe('读不懂、被人改坏：不当成空的重写，报出来', () => {
     expect(lines.find((l) => l.key === SETTINGS)?.text).toContain('disableAllHooks 开着');
     expect(m.settings().disableAllHooks).toBe(true);
     expect(m.settings().hooks.PreToolUse).toHaveLength(2);
-    expect(m.settings().hooks.SessionStart).toBeUndefined();
+    expect(m.settings().hooks.SessionStart).toEqual([
+      { hooks: [{ type: 'command', command: m.cmd('plugin-loader.mjs'), timeout: 10 }] },
+    ]);
     expectKind(m.check(), SETTINGS, 'drift');
     expectKind(m.apply(), SETTINGS, 'failed');
   });
@@ -414,7 +426,7 @@ describe('读不懂、被人改坏：不当成空的重写，报出来', () => {
     const m = machine(['claude'], { 'session-start.mjs': '// 只有这一个\n' });
     const lines = m.apply();
     expectKind(lines, SETTINGS, 'failed');
-    expect(lines.find((l) => l.key === SETTINGS)?.text).toContain('没有 pretool.mjs');
+    expect(lines.find((l) => l.key === SETTINGS)?.text).toContain('没有 plugin-loader.mjs');
   });
 });
 

@@ -2,9 +2,10 @@
 // Codex 的钩子还要信任了才跑：登记完替本脚本那几条记上信任（hooks-codex.ts）。
 // 设置文件里只动本脚本管的那几条：命令指向 ~/.fleet-dao/hooks/ 下的脚本，或者以前手装在 fleet-guard 目录的两条（接管时换掉）。
 // 别的钩子、别的设置一条不碰；设置文件读不懂（不是 JSON、整份不是对象、hooks 不是对象）就不动，报没做成——不当成空的重写。
-// 决定 0083：用户级只登记拦密钥。开会话、收尾、落盘、主对话只在 fleet-dao 仓的项目设置里；这里不再列出的登记，下次同步摘掉。
+// 决定 0083：用户级不再给每个仓登记过程钩子。决定 0085：用户级只多一个订阅加载器（plugin-loader.mjs）。
+// 这里不再列出的登记，下次同步摘掉。
 // 调工具前那条照装：法国会话用户家里就有 reclaude 的设备密钥，借道读这份设置的 Grok、Cursor 起的会话也要拦。
-// HookSkip 仍可按事件名少登记一类（调用方传入）；--user 不再单独跳过 SessionStart，目标里已经没有。
+// HookSkip 仍可按事件名少登记一类（调用方传入）。
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Backups } from './backup.ts';
