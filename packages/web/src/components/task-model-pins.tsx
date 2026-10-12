@@ -135,7 +135,7 @@ function SegmentRow({
       <div className="md:col-span-1">
         <span className="font-medium">{segmentLabel[segment]}</span>
       </div>
-      <div className="min-w-0 md:col-span-4">
+      <div className="min-w-0 md:col-span-5">
         <Current pin={pin} models={models} now={now} />
         {last ? (
           <div className="mt-0.5 text-meta text-muted-foreground" data-last-run>
@@ -144,13 +144,18 @@ function SegmentRow({
           </div>
         ) : null}
       </div>
-      <div className="flex min-w-0 flex-wrap items-center gap-2 md:col-span-5">
+      {/* 下拉和按钮靠右排成一组（#1920）：左边读「现在用谁」，右边改 */}
+      <div className="flex min-w-0 flex-wrap items-center gap-2 md:col-span-6 md:justify-end">
         <Select
           value={pin?.modelId ?? AUTO}
           disabled={locked || busy}
           onValueChange={(v) => void send(v === AUTO ? null : v)}
         >
-          <SelectTrigger size="sm" className="w-56" aria-label={`${segmentLabel[segment]}用哪个模型`}>
+          <SelectTrigger
+            size="sm"
+            className="w-56 max-md:w-full"
+            aria-label={`${segmentLabel[segment]}用哪个模型`}
+          >
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -175,7 +180,11 @@ function SegmentRow({
             disabled={locked || busy}
             onValueChange={(v) => void send(chosen.modelId, v === AUTO ? null : v)}
           >
-            <SelectTrigger size="sm" className="w-56" aria-label={`${segmentLabel[segment]}走哪条渠道`}>
+            <SelectTrigger
+              size="sm"
+              className="w-56 max-md:w-full"
+              aria-label={`${segmentLabel[segment]}走哪条渠道`}
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -189,8 +198,6 @@ function SegmentRow({
             </SelectContent>
           </Select>
         ) : null}
-      </div>
-      <div className="flex flex-wrap items-center gap-1 md:col-span-2 md:justify-end">
         {canRepin ? (
           <Button
             size="sm"
@@ -262,18 +269,14 @@ export function TaskModelPins({ d, now }: { d: TaskDetail; now: number }) {
   return (
     <Section
       title="用哪个模型"
-      description={
-        finished
-          ? '这张单已经结束，指定只留作记录。'
-          : '给这张单的动手、验收指定模型：下一次选路起照它，在跑的这一轮不打断；动手这一轮想当场换，点「现在就换」。指定的派不出时引擎停下等你，不悄悄换别的。'
-      }
+      // 块头只留一句；「现在就换」「派不出时停下等你」的整段说明在任务页页头 ⓘ 里（#1920），派不出时这一行下面也会写
+      description={finished ? '这张单已经结束，指定只留作记录' : '下一次选路起照它，在跑的这一轮不打断'}
       tight
-      className="mt-4"
     >
       <ul className="divide-y">
         <li className="grid gap-x-4 gap-y-1 py-3 md:grid-cols-12 md:items-baseline" data-pin-segment="scope">
           <span className="font-medium text-muted-foreground md:col-span-1">{segmentLabel.scope}</span>
-          <span className="text-body text-muted-foreground md:col-span-11">
+          <span className="text-meta text-muted-foreground md:col-span-11">
             在对话里和你一起做，引擎不起会话、不经选路，没有模型可指定
           </span>
         </li>

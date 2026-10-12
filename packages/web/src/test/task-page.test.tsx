@@ -302,6 +302,58 @@ describe('在跑任务详情首屏（#1751）', () => {
   });
 });
 
+describe('首屏结论块（#1920，照路由页样板）', () => {
+  test('一句结论加一个状态，下一行灰字写仓#单号、开单、PR；两行都不折，整句在悬停里；页头不再重复一行状态', async () => {
+    open('/tasks/t-c9');
+    await screen.findByRole('heading', { level: 1, name: /README/ });
+    const hero = document.querySelector('[data-now-banner]') as HTMLElement;
+    const line = hero.querySelector('[data-hero-line]') as HTMLElement;
+    expect(line.className).toContain('whitespace-nowrap');
+    expect(line.className).toContain('text-heading');
+    expect(line.getAttribute('title')).toMatch(/^做完了/);
+    expect(line.querySelectorAll('[data-tone][data-variant]')).toHaveLength(1);
+    const notes = hero.querySelector('[data-hero-notes]') as HTMLElement;
+    expect(notes.className).toContain('whitespace-nowrap');
+    expect(notes.textContent).toContain('acme/orbit-canary#9');
+    expect(notes.textContent).toMatch(/开单/);
+    expect(notes.textContent).toContain('PR #12');
+    // 「已完成」只在结论块里出现一次（原来页头说明和首屏状态条各一枚）
+    expect(screen.getAllByText('已完成')).toHaveLength(1);
+    // 各块的长说明收进页头 ⓘ
+    expect(document.querySelector('[data-description-hint]')).not.toBeNull();
+  });
+
+  test('在跑的单：结论写哪一段、哪个模型、已跑多久', async () => {
+    const { endedAt: _e, outcome: _o, ...live } = base;
+    open('/tasks/t-x', apiWith(detailWith([{ ...live, id: 'x-run' }])));
+    await waitFor(() => expect(document.querySelector('[data-hero-line]')).not.toBeNull());
+    expect(document.querySelector('[data-hero-text]')?.textContent).toMatch(
+      /^动手中：Opus 5\.5，已跑 30 分钟/,
+    );
+  });
+
+  test('读成过、刷新没读成：上一次读到的照旧画着，顶上横幅写明并带重试', async () => {
+    const api = createMockApi({ live: false });
+    const real = api.task.bind(api);
+    let fail = false;
+    api.task = (id) => (fail ? Promise.reject(new Error('后端出错了')) : real(id));
+    open('/tasks/t-c9', api);
+    await screen.findByRole('heading', { name: '每一笔' });
+    fail = true;
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+    // 「三段」顶上本来就有一条没读到的提醒（也是 alert），按字找这一条
+    const text = await screen.findByText(/这张单刷新没读成，下面是上一次读到的/, undefined, {
+      timeout: 8000,
+    });
+    const alert = text.closest('[role="alert"]') as HTMLElement;
+    expect(alert.textContent).toContain('后端出错了');
+    expect(screen.getByRole('heading', { name: '每一笔' })).toBeTruthy();
+    fail = false;
+    fireEvent.click(within(alert).getByRole('button', { name: '重试' }));
+    await waitFor(() => expect(screen.queryByText(/刷新没读成/)).toBeNull());
+  }, 15000);
+});
+
 describe('任务页上的暂停、继续、叫停（#820 片 3，#856 第 1 处）', () => {
   const actionBox = async () => {
     await screen.findByRole('heading', { level: 1 });

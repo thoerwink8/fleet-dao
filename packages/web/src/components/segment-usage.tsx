@@ -30,7 +30,6 @@ import { usePhone } from '../lib/viewport';
 import { Code } from './layout/code';
 import { Notice } from './layout/notice';
 import { Section } from './layout/section';
-import { Stat } from './layout/stat';
 import { StatusBadge } from './layout/status-badge';
 import { Tag } from './layout/tag';
 import { RepoLink } from './repo-link';
@@ -111,7 +110,42 @@ function costBrief(t: UsageTotals): string {
   return `花费 ${shareText(meteredR)}`;
 }
 
-/** 顶上几格：已用时、干活合计、输入当量、花费。没读到的不占大格，收成一行灰字（#1751）。 */
+/**
+ * 结论块下面的一个数（#1920，照路由页样板）：不再是一张张带框的大卡片，而是一排不带框的数，桌面上用细竖线隔开；
+ * 标签一行灰字、数一行（区块标题那一档，比页标题小）、说明一行灰字（放不下截断，整句在悬停里）。
+ */
+function Figure({
+  label,
+  value,
+  hint,
+  tone,
+}: {
+  label: string;
+  value: ReactNode;
+  hint?: ReactNode;
+  tone?: 'stall' | undefined;
+}) {
+  return (
+    <div
+      data-tone={tone}
+      data-figure
+      className="min-w-0 xl:border-l xl:pl-4 xl:first:border-l-0 xl:first:pl-0"
+    >
+      <div className="text-meta text-muted-foreground">{label}</div>
+      <div className={cn('num mt-1 text-heading', tone && 'text-ink-stall')}>{value}</div>
+      {hint ? (
+        <div
+          className="mt-0.5 truncate text-meta text-muted-foreground"
+          title={typeof hint === 'string' ? hint : undefined}
+        >
+          {hint}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** 顶上几个数：已用时、干活合计、输入当量、花费。没读到的不占一格，收成一行灰字（#1751）。 */
 export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
   const phone = usePhone();
   const [expanded, setExpanded] = useState(false);
@@ -132,7 +166,7 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
         : undefined;
 
   const cards: ReactNode[] = [
-    <Stat
+    <Figure
       key="wall"
       label={finished ? '总耗时' : '已用时'}
       value={formatDuration(wallMs(d, now))}
@@ -145,7 +179,7 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
     collapsed.push('干活合计没读到');
   } else {
     cards.push(
-      <Stat
+      <Figure
         key="work"
         label="干活合计"
         value={
@@ -163,7 +197,7 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
     collapsed.push('输入当量没读到');
   } else {
     cards.push(
-      <Stat
+      <Figure
         key="equivalent"
         label="输入当量"
         value={equivalent.kind === 'none' ? '—' : formatCount(equivalent.value)}
@@ -182,7 +216,7 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
   // 有几张大格排几栏；四格手机就是 2×2（#1802，一行一张页面太长），电脑宽屏四列并排；三格手机一列
   const cols =
     cards.length >= 4
-      ? 'grid-cols-2 gap-3 xl:grid-cols-4'
+      ? 'grid-cols-2 gap-4 xl:grid-cols-4'
       : cards.length === 3
         ? 'grid-cols-1 gap-3 sm:grid-cols-3'
         : 'grid-cols-2 gap-3';
@@ -255,7 +289,7 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
   if (r.kind === 'missing' && (e.runs || e.noPrice || e.noTokens)) {
     // 一笔都没报花费：大字写估算（标「估算」），估不了的写原因
     return (
-      <Stat
+      <Figure
         label="花费"
         value={e.runs ? `估算 ${formatUsd(e.usd)}` : e.noPrice ? '没有单价' : '估不了'}
         tone={e.runs ? undefined : 'stall'}
@@ -263,7 +297,7 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
       />
     );
   }
-  if (r.kind === 'none') return <Stat label="花费" value="—" hint={notYet} />;
+  if (r.kind === 'none') return <Figure label="花费" value="—" hint={notYet} />;
   const meteredLarge = meteredR.kind === 'full' || meteredR.kind === 'partial';
   const notes = [
     meteredR.kind === 'partial' ? `按量另有 ${meteredR.missing} 次没读到` : '',
@@ -273,16 +307,14 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
     unknownR.kind === 'partial' ? `分不清的另有 ${unknownR.missing} 次没读到` : '',
     ...estimateNotes,
   ].filter(Boolean);
+  // 两行：「按量 $x」（真花的钱，数用这一格的字号）；下面一行灰字「套餐内折合 $y」。说明（几次没读到、另估）在第三行，悬停看全
   return (
-    <Stat
+    <Figure
       label="花费"
       value={
-        <span data-cost className="flex flex-col items-start gap-2 font-normal">
-          <span className="flex flex-col items-start gap-1">
-            <span
-              className="text-meta leading-normal font-normal text-muted-foreground"
-              title="按量计费：真花的钱"
-            >
+        <span data-cost className="flex flex-col items-start gap-0.5 font-normal">
+          <span className="flex items-baseline gap-1.5">
+            <span className="text-meta font-normal text-muted-foreground" title="按量计费：真花的钱">
               按量
             </span>
             <span
@@ -290,9 +322,7 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
               data-large={meteredLarge}
               className={cn(
                 'num',
-                meteredLarge
-                  ? 'text-display leading-none font-semibold'
-                  : 'text-body leading-normal font-medium',
+                meteredLarge ? 'text-heading' : 'text-body font-medium',
                 meteredR.kind === 'missing' && 'text-ink-stall',
               )}
             >
@@ -300,7 +330,7 @@ function CostStat({ t, notYet }: { t: UsageTotals; notYet: string }) {
             </span>
           </span>
           <span
-            className="text-meta leading-normal font-normal text-muted-foreground"
+            className="text-meta font-normal text-muted-foreground"
             title="套餐内：按 API 价折合，账单不因它多一笔"
           >
             <span>套餐内折合</span> {shareText(subR)}
@@ -491,8 +521,13 @@ function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) =>
     <li className="py-3" data-segment={s.segment ?? 'unknown'}>
       <div className={cn('hidden md:grid', COLUMNS)}>
         <div className="col-span-2 min-w-0 md:col-span-1">
-          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-            <span className={cn('font-medium', s.segment === null && 'text-ink-stall')}>
+          {/* 段名一行：段名加只用了的那个模型，不折；这一段做什么收进段名的悬停（#1920，原来多占一行灰字） */}
+          <div className="flex min-w-0 items-baseline gap-x-2 whitespace-nowrap">
+            <span
+              className={cn('shrink-0 font-medium', s.segment === null && 'text-ink-stall')}
+              title={s.segment ? segmentHint[s.segment] : '原样写在下面每一笔里'}
+              data-segment-hint
+            >
               {s.segment ? segmentLabel[s.segment] : UNKNOWN_SEGMENT}
             </span>
             {only ? (
@@ -504,9 +539,6 @@ function SegmentGroup({ s, live }: { s: SegmentTotals; live: (model?: string) =>
                 {only.modelName}
               </span>
             ) : null}
-          </div>
-          <div className="text-meta text-muted-foreground">
-            {s.segment ? segmentHint[s.segment] : '原样写在下面每一笔里'}
           </div>
           {s.segment && SEGMENT_UNMETERED[s.segment] ? (
             <div className="text-meta text-muted-foreground" data-unmetered={s.segment}>
@@ -571,7 +603,7 @@ export function SegmentBreakdown({ d, now }: { d: TaskDetail; now: number }) {
     .flatMap(unreadOf);
   const unreadList = ['耗时', 'token', '缓存', '当量', '花费'].filter((k) => unreadItems.includes(k));
   return (
-    <Section title="三段" description="对题 → 动手 → 验收，每段再按模型分。" tight>
+    <Section title="三段" description="对题 → 动手 → 验收，每段再按模型分" tight>
       {unreadList.length ? (
         <div className="mt-2" data-unread-notice>
           <Notice tone="stall" title={`没读到：${unreadList.join('、')}`}>
@@ -796,7 +828,8 @@ export function SegmentRunList({
   return (
     <Section
       title="每一笔"
-      description="三段每跑一次一笔，按起跑先后。没记 task_id、按单号对上的标「按单号兜底」；没读到的写明为什么。会话内容点「看会话」在右侧抽屉里看。"
+      // 长说明（按单号兜底是什么、抽屉网址能分享）在页头 ⓘ 里（#1920）
+      description="按起跑先后，点「看会话」在右侧看会话内容"
       tight
     >
       <ol className="divide-y">

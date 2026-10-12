@@ -158,8 +158,12 @@ describe('任务详情手机首屏一行摘要', () => {
     viewport(390);
     open();
     await screen.findByRole('heading', { name: '每一笔' });
-    expect(document.querySelector('[data-description-hint]')).toBeNull();
-    expect(screen.getByText(/开单/)).toBeTruthy();
+    // #1920 起状态行是正文顶上的结论块（不再是页头说明）；页头 ⓘ 里放的是各块的长说明，结论块不在 ⓘ 里、直接看得到
+    const hero = document.querySelector('[data-now-banner]') as HTMLElement;
+    expect(hero).toBeTruthy();
+    expect(hero.closest('[data-description-hint]')).toBeNull();
+    expect(within(hero).getByText(/开单/)).toBeTruthy();
+    expect(within(hero).getByText('已完成')).toBeTruthy();
   });
 });
 
