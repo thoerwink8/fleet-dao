@@ -4,8 +4,8 @@
 //   某一条标题读不到只那一条写原因，接口挂了写没读成；一条记录都没有写明「还没有发布记录」，不当成没查成；
 // - 页面上没有「发布 v<N>」按钮和弹窗，没有「版本里程碑发版」的说法（发版单位是主线提交，决定 0032）；
 
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, test } from 'vitest';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import type { ReleasedCommits } from '../api/types';
@@ -81,7 +81,8 @@ describe('/changelog 页：已发布的提交', () => {
     // 页标题下不再有一层卡内标题「已发布的提交」；时间一行，绝对时间在悬停里
     expect(screen.queryByRole('heading', { name: '已发布的提交' })).toBeNull();
     expect(commitsPanel().textContent).not.toContain('已发布的提交');
-    const when = rows[0]?.querySelector('[title]');
+    // 标题截断后自己也带 title（整句悬停），所以按 data-released-at 找时间那一格（原来取行里第一个 [title]）
+    const when = rows[0]?.querySelector('[data-released-at]');
     expect(when?.textContent).toMatch(/^发于 /);
     expect(when?.getAttribute('title')).toMatch(/\d+月\d+日 \d+:\d+/);
     // 指路去法国页的入口，不在这一页给按钮
@@ -146,19 +147,77 @@ describe('/changelog 页：故意造出的失败照实说', () => {
 });
 
 describe('/changelog 页：版式与已删的对照区（#1821）', () => {
-  test('提交行标题列带 min-w-0 flex-1、徽标和时间窄屏换行；没有 CHANGELOG.md 对照区', async () => {
+  test('提交行标题列带 min-w-0 flex-1、标题一行截断不挤走徽标和时间；没有 CHANGELOG.md 对照区', async () => {
     // 标题列又被写回固定轨道，或对照区回来，这一条会红。
+    // 照路由页样板（#1914「一行不折」）：原来窄屏把徽标和时间折到第二行（flex-wrap），现在标题截断、整句在悬停，
+    // 徽标、时间不让位（shrink-0）。原断言「标题的父元素 min-w-0 flex-1」「行 flex-wrap」改成下面等价的版式断言。
     renderApp(<ChangelogPage />, {
       api: released({ state: 'ok', commits: [commit(A, { event: 'rollback' })], asOf: AS_OF }),
     });
     const [row] = await commitRows();
-    const titleCol = row?.querySelector('p')?.parentElement;
+    const titleCol = row?.querySelector('[data-commit-row]');
     expect(titleCol?.className).toContain('min-w-0');
     expect(titleCol?.className).toContain('flex-1');
-    expect(row?.querySelector('[data-commit-row]')?.className).toContain('flex-wrap');
+    const nameLine = row?.querySelector('[data-row-name-line]');
+    expect(nameLine?.className).toContain('whitespace-nowrap');
+    const title = nameLine?.querySelector('p');
+    expect(title?.className).toContain('truncate');
+    expect(title?.getAttribute('title')).toBe(`标题 ${A.slice(0, 4)}`);
+    expect(row?.querySelector('[data-released-at]')?.className).toContain('shrink-0');
     // 回滚标成状态标签（data-tone），不是手写的小块
     expect(row?.querySelector('[data-tone="stall"]')?.textContent).toBe('回滚');
     expect(screen.queryByRole('heading', { name: 'CHANGELOG.md 对照' })).toBeNull();
     expect(screen.queryByRole('button', { name: /还没收进版本/ })).toBeNull();
+  });
+});
+
+describe('/changelog 页：照路由页样板的标题块和行尾菜单', () => {
+  test('标题块三行：最近一次的标题和提交号、多久前发布加状态、绝对时间和发布回滚几次；三行都不折', async () => {
+    renderApp(<ChangelogPage />, {
+      api: released({
+        state: 'ok',
+        commits: [
+          commit(A, { title: '探针每次结论落一条历史 (#1225)' }),
+          commit(B, { event: 'rollback', at: '2026-10-06T05:00:00.000Z' }),
+        ],
+        asOf: AS_OF,
+      }),
+    });
+    await commitRows();
+    const hero = document.querySelector('[data-changelog-hero]') as HTMLElement;
+    expect(hero.textContent).toContain('探针每次结论落一条历史 (#1225)');
+    expect(hero.textContent).toContain(A.slice(0, 12));
+    const line = hero.querySelector('[data-hero-line]') as HTMLElement;
+    expect(line.textContent).toContain('发布到法国');
+    expect(line.querySelector('[data-tone="done"]')?.textContent).toBe('最新');
+    expect(line.className).toContain('whitespace-nowrap');
+    expect(hero.querySelector('[data-hero-notes]')?.textContent).toContain('最近 2 次里发布 1、回滚 1');
+    // 标题块不在区块里（区块里没有自己的标题，#1902）
+    expect(commitsPanel().contains(hero)).toBe(false);
+  });
+
+  test('最近一次是回滚：结论写回滚，状态黄；读不到、没有记录时不画标题块', async () => {
+    renderApp(<ChangelogPage />, {
+      api: released({ state: 'ok', commits: [commit(A, { event: 'rollback' })], asOf: AS_OF }),
+    });
+    await commitRows();
+    const line = document.querySelector('[data-changelog-hero] [data-hero-line]') as HTMLElement;
+    expect(line.textContent).toContain('回滚到这个提交');
+    expect(line.querySelector('[data-tone="stall"]')?.textContent).toBe('回滚');
+    cleanup();
+    renderApp(<ChangelogPage />, { api: released({ state: 'ok', commits: [], asOf: AS_OF }) });
+    await screen.findByText('法国的发布历史里还没有发布记录');
+    expect(document.querySelector('[data-changelog-hero]')).toBeNull();
+  });
+
+  test('行尾「⋯」：复制完整的 40 位提交号', async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    renderApp(<ChangelogPage />, { api: released({ state: 'ok', commits: [commit(A)], asOf: AS_OF }) });
+    const [row] = await commitRows();
+    const trigger = within(row as HTMLElement).getByRole('button', { name: `更多操作：${A.slice(0, 12)}` });
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+    fireEvent.click(await screen.findByRole('menuitem', { name: '复制完整提交号' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(A));
   });
 });
