@@ -1143,6 +1143,17 @@ describe('Mirasim 的驱动（#345）', () => {
     expect(fake.specs[1]?.session).toEqual({ mode: 'resume', key: 'dsh:abc-123' });
   });
 
+  it('【故意造出的失败】时限照引擎给的交给插头：一次性段的总时长比 one-shot 早一分钟到，驱动先报 wall_clock_timeout（不交就落到插头默认的 2 小时，one-shot 60 分钟先杀、记成「引擎叫停」，#1859/#1877/#1933 因此被判成「我们自己停的」挂起）', async () => {
+    const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
+    await driver.run(mirasimSpec({ limits: { wallClockMs: 59 * 60_000 } }), {});
+    await driver.run(
+      mirasimSpec({ limits: { startupMs: 150_000, wallClockMs: 200_000, idleMs: 90_000 } }),
+      {},
+    );
+    expect(fake.specs[0]?.limits).toEqual({ wallClockMs: 59 * 60_000 });
+    expect(fake.specs[1]?.limits).toEqual({ startupMs: 150_000, wallClockMs: 200_000, idleMs: 90_000 });
+  });
+
   it('只留「中继额度」这一种路由：route 永远是 cloud（design 第三节第 12 条、MS-28：不许反代）', async () => {
     const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
     await driver.run(mirasimSpec(), {});
