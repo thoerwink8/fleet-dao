@@ -10,19 +10,19 @@ const webRoot = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
 /** 一处写死尺寸和换上的 token 类名。from 是原来的任意值类名，to 是现在的 token 类名。 */
 const SITES = [
-  { file: 'src/components/usage.tsx', where: '不全标', from: 'text-[10px]', to: 'text-micro' },
-  { file: 'src/components/usage.tsx', where: '合计只读到一部分', from: 'text-[11px]', to: 'text-caption' },
-  { file: 'src/components/usage.tsx', where: '合计一次都没读到', from: 'text-[11px]', to: 'text-caption' },
-  { file: 'src/components/usage.tsx', where: '合计附注', from: 'text-[11px]', to: 'text-caption' },
+  { file: 'src/components/usage.tsx', where: '不全标', from: 'text-[10px]', to: '<Tag tone="stall">' },
+  { file: 'src/components/usage.tsx', where: '合计只读到一部分', from: 'text-[11px]', to: 'text-meta' },
+  { file: 'src/components/usage.tsx', where: '合计一次都没读到', from: 'text-[11px]', to: 'text-meta' },
+  { file: 'src/components/usage.tsx', where: '合计附注', from: 'text-[11px]', to: 'text-meta' },
   {
     file: 'src/components/usage.tsx',
     where: '花费行',
     from: 'grid-cols-[3.5rem_minmax(0,1fr)]',
     to: 'grid-cols-usage',
   },
-  { file: 'src/components/usage.tsx', where: '花费明细', from: 'text-[11px]', to: 'text-caption' },
-  { file: 'src/components/usage.tsx', where: '分开看', from: 'text-[11px]', to: 'text-caption' },
-  { file: 'src/components/usage.tsx', where: '额度提示', from: 'text-[11px]', to: 'text-caption' },
+  { file: 'src/components/usage.tsx', where: '花费明细', from: 'text-[11px]', to: 'text-meta' },
+  { file: 'src/components/usage.tsx', where: '分开看', from: 'text-[11px]', to: 'text-meta' },
+  { file: 'src/components/usage.tsx', where: '额度提示', from: 'text-[11px]', to: 'text-meta' },
   { file: 'src/components/run-timeline.tsx', where: '时间刻度字号', from: 'text-[10px]', to: 'text-meta' },
   {
     file: 'src/components/run-timeline.tsx',
@@ -44,8 +44,8 @@ const SITES = [
     from: 'grid-cols-[auto_1fr]',
     to: 'grid-cols-auto-fr',
   },
-  { file: 'src/components/channel-status.tsx', where: '空探针格', from: 'rounded-[2px]', to: 'rounded-2' },
-  { file: 'src/components/channel-status.tsx', where: '探针格', from: 'rounded-[2px]', to: 'rounded-2' },
+  { file: 'src/components/channel-status.tsx', where: '空探针格', from: 'rounded-[2px]', to: 'rounded-sm' },
+  { file: 'src/components/channel-status.tsx', where: '探针格', from: 'rounded-[2px]', to: 'rounded-sm' },
   {
     file: 'src/components/pool-holds.tsx',
     where: '暂停明细',

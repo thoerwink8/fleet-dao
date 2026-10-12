@@ -90,12 +90,17 @@ export function healthReasons({ home }) {
   if (!s.ok) return { unreadable: `~/.claude/settings.json 读不了（${s.why}）` };
   const legacy = s.cmds.filter((c) => LEGACY_STYLE.test(c.command));
   if (legacy.length > 0) reasons.push(`还挂着以前手装在 fleet-guard 目录的钩子（${legacy.length} 条）`);
-  const start = s.cmds.some(
-    (c) =>
-      c.event === 'SessionStart' &&
-      (NOW_STYLE.exec(c.command)?.[1] === SESSION_SCRIPT || QUIET_START.test(c.command)),
-  );
-  if (!start) reasons.push('开会话钩子没登记到 ~/.fleet-dao/hooks/session-start.mjs（旧的位置，或者没有）');
+  // 决定 0083：流程钩子不再装在用户级。还登记着，就是上一代，同步会摘掉。
+  const PROCESS_SCRIPTS = new Set(['session-start.mjs', 'main-thread.mjs', 'stop.mjs', 'prompt-log.mjs']);
+  const processHooks = s.cmds.filter((c) => {
+    const name = NOW_STYLE.exec(c.command)?.[1];
+    return (name !== undefined && PROCESS_SCRIPTS.has(name)) || QUIET_START.test(c.command);
+  });
+  if (processHooks.length > 0) {
+    reasons.push(
+      `用户级还登记着流程钩子（${processHooks.length} 条；标准已经不装，只留在 fleet-dao 仓的项目设置里）`,
+    );
+  }
 
   const installed = readFlat(join(home, HOOKS_REL));
   if (installed === null) reasons.push('~/.fleet-dao/hooks/ 目录不存在');
@@ -154,6 +159,7 @@ function isMain() {
 }
 
 if (isMain()) {
+  if (process.env.FLEET_HEADLESS === '1') process.exit(0);
   let lines;
   try {
     // 只在要动手的时候才加载 session-start.mjs（它顶层会动态加载同步专用检出那一段）

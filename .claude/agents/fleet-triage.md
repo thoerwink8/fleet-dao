@@ -1,6 +1,6 @@
 ---
 name: fleet-triage
-description: 分类与准入检查（Haiku 5.5，只读）：单子、任务书、PR 改动范围逐条对规矩，每条附行号；脚本能判的先跑脚本（check-brief.mjs）。
+description: 分类与准入检查（Haiku 5.5，只读）：单子、任务书、PR 改动范围逐条对规矩，每条附行号；脚本能判的先跑脚本。
 model: claude-haiku-5-5
 effort: medium
 maxTurns: 15

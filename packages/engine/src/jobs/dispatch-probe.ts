@@ -1,8 +1,10 @@
-// 派单前探测（#1409）：选路选出要派的那一条之后、起会话之前，上一次探通超过 5 分钟就用定时探针同一份 conclude 再探一次，
-// 结论写回 routes 同一处。按量计费和 planProbe 写明不探的照旧不探、不改写，按上一次结论走：上一次不通就不派。
+// 派单前探测（#1409）：选路选出要派的那一条之后、起会话之前，上一次探通超过 15 分钟就用定时探针同一份 conclude 再探一次，
+// 结论写回 routes 同一处，历史那一行记 trigger 为 dispatch（#1798 片 4）。不分执行方式：cursor、grok、mirasim 和 Claude
+// 走同一条 15 分钟线（原先「上一次探通未满 2 小时就直接放行」那一支已随片 3 删掉，这里只剩 15 分钟这一条线）。
+// 按量计费和 planProbe 写明不探的照旧不探、不改写，按上一次结论走：上一次不通就不派。
 // 组织这会儿定不下来（unsettled）没有新结论：只有上一次探通才派，否则换下一条，不把路由写成不在线。
 // 组织认不出是该探却探不了：这一轮当不通，同样不改写。探不通写成 failed（不在线），探通后由原来的恢复路径拉起来。
-// 探通但结论写不进 routes：不能当通过去起会话（库里没有这一次的结论，5 分钟内不重复探也保不住），按不通换下一条。
+// 探通但结论写不进 routes：不能当通过去起会话（库里没有这一次的结论，15 分钟内不重复探也保不住），按不通换下一条。
 
 import type { RouteProbeKind } from '@fleet-dao/db';
 import type { ProbeCheck } from '@fleet-dao/shared';
@@ -35,7 +37,7 @@ function fail(label: string, detail: string, counted: boolean): ProbeAssignedRes
   return { kind: 'fail', label, detail, counted };
 }
 
-/** 上一次探通、并且距离现在不超过 5 分钟（含刚好 5 分钟）。时钟倒退、没探过、上次没通，都不算新鲜。 */
+/** 上一次探通、并且距离现在不超过 15 分钟（含刚好 15 分钟）。时钟倒退、没探过、上次没通，都不算新鲜。 */
 function freshOk(previous: ProbeTarget['previous'], now: Date): boolean {
   if (previous?.state !== 'ok') return false;
   const age = now.getTime() - previous.at.getTime();
@@ -67,6 +69,8 @@ async function writeConclusion(
     const saved = await deps.save({
       routeId,
       ...rest,
+      // 派前探的这一条：历史那一行记 trigger 为 dispatch（#1798 片 4）
+      trigger: 'dispatch',
       ...(kind !== undefined && kind !== null ? { kind } : {}),
     });
     return saved === 'route_not_found' ? { kind: 'route_not_found' } : { kind: 'saved' };
@@ -127,7 +131,7 @@ async function probeLocked(
     return followPrevious(input.label, target.previous, detail, 'unsettled' in plan);
   }
   if (freshOk(target.previous, now)) {
-    return pass(input.label, target.previous?.detail || '上一次探针结论还在 5 分钟内，不重复探', false);
+    return pass(input.label, target.previous?.detail || '上一次探针结论还在 15 分钟内，不重复探', false);
   }
 
   let concluded: Conclusion;
@@ -160,7 +164,7 @@ async function probeLocked(
 
   const written = await writeConclusion(deps, target.routeId, concluded);
   if (written.kind === 'route_not_found') return fail(input.label, '探的时候这条路由被删了', false);
-  // 结论没落进 routes 就不能当探通：5 分钟内不重复探靠的是库里这一条。写不进去按不通换下一条，不起会话。
+  // 结论没落进 routes 就不能当探通：15 分钟内不重复探靠的是库里这一条。写不进去按不通换下一条，不起会话。
   if (written.kind === 'write_failed') {
     return fail(input.label, unwritten(concluded.detail, written.error), true);
   }

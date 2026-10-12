@@ -7,10 +7,10 @@
 //   lib/route-state.ts：这里只画，不再判。只有故障画红；已关、未使用、池暂停不是坏了，不画红。
 // - 渠道名用目录里公开的名字；渠道下的上游模型串不露。
 // - 库读不到写「没查成」，不画空格子冒充没有历史。空格子只在读成了、次数不够 60 时补位。
-// - 尺寸 token：故障说明 grid-cols-auto-fr（标签 auto、剩余）；探针格圆角 rounded-2（原来 2px）。
+// - 尺寸 token：故障说明 grid-cols-auto-fr（标签 auto、剩余）；探针格圆角 rounded-sm（原来 2px）。
 
 import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
-import { ChevronRight, LoaderCircle, Search } from 'lucide-react';
+import { ChevronRight, LoaderCircle } from 'lucide-react';
 import type { ProbeHistoryCell, ProbeHistoryChannel } from '../api/types';
 import type { ChannelCard } from '../lib/channel-status';
 import { formatAgo, formatClock, formatIn } from '../lib/format';
@@ -20,12 +20,17 @@ import {
   formatProbeMs,
   PROBE_KIND_BG,
   PROBE_KIND_WORD,
+  type ProbeKind,
   probeKind,
 } from '../lib/probe-history-view';
 import type { Failover } from '../lib/provider-status';
 import { countsText, STATE_FILTERS, type StateFilter } from '../lib/route-state';
 import { cn } from '../lib/utils';
-import { StatusBadge, StatusDot } from './layout/status-badge';
+import { usePhone } from '../lib/viewport';
+import { FilterTabs } from './layout/filter-tabs';
+import { List, ListRow } from './layout/list';
+import { SearchInput } from './layout/search-input';
+import { StatusBadge } from './layout/status-badge';
 
 /** 渠道卡上的探针历史：读不到和还没有是两回事。 */
 export type ChannelHistory =
@@ -51,8 +56,8 @@ export function FailoverNote({
     <dl
       data-failover
       className={cn(
-        'grid grid-cols-auto-fr gap-x-2 gap-y-0.5 text-caption', // 原标签列 auto、剩余 1fr，grid-cols-auto-fr
-        compact ? 'mt-2 text-muted-foreground' : 'mb-3 rounded-md border bg-muted/40 px-3 py-2.5 text-sub',
+        'grid grid-cols-auto-fr gap-x-2 gap-y-0.5 text-meta', // 原标签列 auto、剩余 1fr，grid-cols-auto-fr
+        compact ? 'mt-2 text-muted-foreground' : 'mb-3 rounded-md border bg-muted px-3 py-2.5 text-body',
       )}
     >
       <dt className="text-ink-fail">为什么不可用</dt>
@@ -95,41 +100,26 @@ export function ChannelFilterBar({
 }) {
   return (
     <div className="mb-2 space-y-2">
-      <label className="relative block">
-        <span className="sr-only">搜索渠道</span>
-        <Search
-          className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
-          aria-hidden
-        />
-        <input
-          type="search"
-          value={search}
-          onChange={(e) => onSearch(e.target.value)}
-          placeholder="搜渠道、模型、路由号"
-          aria-label="搜索渠道"
-          className="h-9 w-full rounded-lg border bg-card pl-8 pr-2.5 text-sub outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-        />
-      </label>
-      <fieldset className="m-0 flex min-w-0 flex-wrap gap-1 border-0 p-0">
-        <legend className="sr-only">按状态筛选</legend>
-        {STATE_FILTERS.map((f) => (
-          <button
-            key={f.id}
-            type="button"
-            aria-pressed={filter === f.id}
-            data-filter={f.id}
-            onClick={() => onFilter(f.id)}
-            className={cn(
-              'inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-caption transition-colors hover:bg-muted',
-              filter === f.id && 'border-border-strong bg-muted font-medium',
-              f.id === 'fault' && counts.fault > 0 && 'text-ink-fail',
-            )}
-          >
-            {f.label}
-            <span className="num text-muted-foreground">{counts[f.id]}</span>
-          </button>
-        ))}
-      </fieldset>
+      <SearchInput
+        value={search}
+        onChange={onSearch}
+        placeholder="搜渠道、模型、路由号"
+        aria-label="搜索渠道"
+        className="md:max-w-none"
+      />
+      <FilterTabs
+        mode="toggle"
+        aria-label="按状态筛选"
+        value={filter}
+        onChange={onFilter}
+        items={STATE_FILTERS.map((f) => ({
+          id: f.id,
+          label: f.label,
+          count: counts[f.id],
+          // 有故障的时候「故障」这一档前面亮红点
+          ...(f.id === 'fault' && counts.fault > 0 ? { tone: 'fail' as const } : {}),
+        }))}
+      />
     </div>
   );
 }
@@ -153,19 +143,25 @@ export function ChannelList({
   onPick: (channelId: string) => void;
 }) {
   return (
-    <ol aria-label="渠道状态" className="space-y-1.5">
-      {cards.map((c) => (
-        <ChannelRow
-          key={c.channel.id}
-          card={c}
-          now={now}
-          selected={c.channel.id === selected}
-          probing={probing.has(c.channel.id)}
-          problems={problems.get(c.channel.id) ?? []}
-          onPick={() => onPick(c.channel.id)}
-        />
-      ))}
-    </ol>
+    <>
+      {/* 左边的数字圈是派活的先后：给一行列头说明，不让它没头没尾（#1903） */}
+      <div data-rank-header className="border-b px-4 py-1.5 text-meta text-muted-foreground">
+        左边的数字是优先级：数字小的先用
+      </div>
+      <List aria-label="渠道状态">
+        {cards.map((c) => (
+          <ChannelRow
+            key={c.channel.id}
+            card={c}
+            now={now}
+            selected={c.channel.id === selected}
+            probing={probing.has(c.channel.id)}
+            problems={problems.get(c.channel.id) ?? []}
+            onPick={() => onPick(c.channel.id)}
+          />
+        ))}
+      </List>
+    </>
   );
 }
 
@@ -194,54 +190,67 @@ function ChannelRow({
     problems.length > 0 ? (unreadable ? '额度读不到，要人处理' : '额度读数过期') : undefined,
   ].filter((x): x is string => x !== undefined);
   return (
-    <li
+    <ListRow
       data-channel={c.channel.id}
       data-state={c.interrupted ? 'interrupted' : c.state}
       data-kind={c.kind}
-      className={cn(
-        'rounded-lg border bg-card shadow-card-edge transition-colors hover:border-border-strong',
-        down && 'border-st-fail/40 bg-st-fail/5',
-        c.interrupted && 'border-st-fail/40 bg-st-fail/5',
-        quiet && 'bg-muted/30',
-        selected && 'border-border-strong ring-2 ring-ring/30',
-      )}
-    >
-      <button
-        type="button"
-        onClick={onPick}
-        aria-current={selected ? 'true' : undefined}
-        aria-label={`${c.channel.name}：${c.interrupted ? '检测中断' : c.label}，${summary.join('，')}`}
-        className="flex min-h-12 w-full items-center gap-2.5 px-3 py-2 text-left"
-      >
-        <span
-          title={c.rank ? `顺位第 ${c.rank}` : '没排进顺位'}
-          className="num grid size-5 shrink-0 place-items-center rounded-full bg-foreground/10 text-caption font-medium"
+      rail={down || c.interrupted ? 'fail' : undefined}
+      selected={selected}
+      summary={
+        // 整行是一个按钮：ListRow 的 onClick 够不到 aria-current 和 aria-label，所以按钮自己写，用负边距盖满行
+        <button
+          type="button"
+          onClick={onPick}
+          aria-current={selected ? 'true' : undefined}
+          aria-label={`${c.channel.name}：${c.interrupted ? '检测中断' : c.label}，${summary.join('，')}`}
+          className="-mx-4 -my-2.5 flex min-w-0 flex-1 items-center gap-3 px-4 py-2.5 text-left outline-none hover:bg-accent focus-visible:ring-focus focus-visible:ring-ring max-md:min-h-11"
         >
-          {c.rank ?? '–'}
-          <span className="sr-only">{c.rank ? `顺位第 ${c.rank}` : '没排进顺位'}</span>
-        </span>
-        <StatusDot tone={c.tone} />
-        <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-2">
-            <span className={cn('truncate text-sm font-semibold', quiet && 'text-muted-foreground')}>
-              {c.channel.name}
-            </span>
-            <StatusBadge tone={c.tone} label={c.label} className={cn(c.interrupted && 'font-semibold')} />
-            {probing ? (
-              <span className="inline-flex items-center gap-1 text-caption text-ink-run">
-                <LoaderCircle className="size-3 animate-spin" aria-hidden />
-                探测中
+          <span
+            title={c.rank ? `顺位第 ${c.rank}` : '没排进顺位'}
+            className="num grid size-5 shrink-0 place-items-center rounded-full bg-selected text-meta font-medium"
+          >
+            {c.rank ?? '–'}
+            <span className="sr-only">{c.rank ? `顺位第 ${c.rank}` : '没排进顺位'}</span>
+          </span>
+          {/* 一行一个名字一个状态（点加字，状态点不再单独画一遍）；下面一行小字不折，整句在悬停里（样板 #1914） */}
+          <span className="min-w-0 flex-1">
+            {/* 名字是认渠道的那一样，不截断：真放不下（320 宽加长状态）宁可状态换到下一行 */}
+            <span className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-0.5">
+              <span className={cn('text-body font-medium break-words', quiet && 'opacity-60')}>
+                {c.channel.name}
               </span>
-            ) : null}
+              <StatusBadge
+                tone={c.tone}
+                label={c.label}
+                variant="dot"
+                className={cn('shrink-0', c.interrupted && 'font-semibold')}
+              />
+              {probing ? (
+                <span className="inline-flex shrink-0 items-center gap-1 text-meta text-ink-run">
+                  <LoaderCircle className="size-3 animate-spin" aria-hidden />
+                  探测中
+                </span>
+              ) : null}
+            </span>
+            <span
+              data-row-meta
+              title={summary.join(' · ')}
+              className="num mt-0.5 block truncate whitespace-nowrap text-meta text-muted-foreground"
+            >
+              {summary.join(' · ')}
+            </span>
           </span>
-          <span className="num mt-0.5 line-clamp-2 break-words text-caption text-muted-foreground">
-            {summary.join(' · ')}
-          </span>
-        </span>
-        <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-      </button>
-    </li>
+          <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+        </button>
+      }
+    />
   );
+}
+
+/** 手机上整条色条的读屏汇总：近几次里通过、不通、疑似换模型各几次。 */
+function stripSummary(cells: readonly ProbeHistoryCell[]): string {
+  const count = (k: ProbeKind) => cells.filter((c) => probeKind(c) === k).length;
+  return `近 ${cells.length} 次真探：通过 ${count('passed')}、不通 ${count('failed')}、疑似换模型 ${count('doubt')}`;
 }
 
 /** 不够 60 格时左边的空位。键按「第几格」写死，不拿数组下标当键。 */
@@ -263,16 +272,17 @@ export function HistoryStrip({
   activeCellId: number | undefined;
   onPickCell: (channelId: string, cellId: number) => void;
 }) {
+  const phone = usePhone();
   if (history.state === 'loading') {
     return (
-      <p data-history="loading" className="mb-3 text-caption text-muted-foreground">
+      <p data-history="loading" className="mb-3 text-meta text-muted-foreground">
         正在读探针历史
       </p>
     );
   }
   if (history.state === 'unreadable') {
     return (
-      <p role="alert" data-history="unreadable" className="mb-3 text-caption text-ink-fail">
+      <p role="alert" data-history="unreadable" className="mb-3 text-meta text-ink-fail">
         {history.why}
       </p>
     );
@@ -284,23 +294,46 @@ export function HistoryStrip({
   const empties = emptySlotKeys(channelId, PROBE_HISTORY_SLOTS - cells.length);
   return (
     <div data-history="strip" data-channel-history={channelId} className="mb-3">
-      <p data-history-stats className="num text-caption text-muted-foreground">
+      <p
+        data-history-stats
+        title="近 60 次真探的均耗时和可用率；没真探的不进可用率，在下面的探测记录里折着"
+        className="num truncate whitespace-nowrap text-meta text-muted-foreground"
+      >
         近 60 次真探 · 均耗时 {formatProbeMs(strip?.avgDurationMs ?? null)} · 可用率{' '}
         {formatAvailability(strip?.passed ?? 0, strip?.attempted ?? 0)}
         {skippedCount > 0 ? ` · 另有 ${skippedCount} 条没真探，折在下面` : ''}
       </p>
-      <div className="mt-1.5 flex h-5 gap-px">
+      <div
+        className="mt-1.5 flex h-5 gap-px"
+        {...(phone ? { role: 'img', 'aria-label': stripSummary(cells), 'data-strip-display': 'true' } : {})}
+      >
         {empties.map((slot) => (
           <span
             key={slot}
             data-result="empty"
-            className="h-full min-w-0 flex-1 rounded-2 border border-dashed border-foreground/15" // 原圆角 2px，rounded-2
+            className="h-full min-w-0 flex-1 rounded-sm border border-dashed border-border-strong" // 原圆角 2px，rounded-sm
           />
         ))}
         {cells.map((cell) => {
           const kind = probeKind(cell);
           const word = PROBE_KIND_WORD[kind];
           const on = cell.id === activeCellId;
+          // 手机上 60 格只做展示：每格 3px 宽点不准，定位靠下面的探测记录行
+          if (phone) {
+            return (
+              <span
+                key={cell.id}
+                aria-hidden
+                data-result={kind}
+                data-cell={cell.id}
+                className={cn(
+                  'h-full min-w-0 flex-1 rounded-sm',
+                  PROBE_KIND_BG[kind],
+                  on && 'ring-2 ring-foreground',
+                )}
+              />
+            );
+          }
           return (
             <button
               key={cell.id}
@@ -311,7 +344,7 @@ export function HistoryStrip({
               title={`${formatClock(cell.probedAt)} ${cell.routeId} ${word.label} ${formatProbeMs(cell.durationMs, cell.result)}`}
               onClick={() => onPickCell(channelId, cell.id)}
               className={cn(
-                'h-full min-w-0 flex-1 rounded-2', // 原圆角 2px，rounded-2
+                'h-full min-w-0 flex-1 rounded-sm', // 原圆角 2px，rounded-sm
                 PROBE_KIND_BG[kind],
                 on && 'ring-2 ring-foreground',
               )}
@@ -323,9 +356,8 @@ export function HistoryStrip({
           );
         })}
       </div>
-      <p className="mt-1 text-micro text-muted-foreground">
-        {cells.length === 0 ? '还没有真探 · ' : null}绿通过 · 红不通 · 橙疑似换模型（身份题说出了旧答案）
-      </p>
+      {/* 颜色的图例在下面探测记录的图例里（同一套颜色，原来这里又写一遍），这里只在一格都没有时说一句 */}
+      {cells.length === 0 ? <p className="mt-1 text-meta text-muted-foreground">还没有真探</p> : null}
     </div>
   );
 }

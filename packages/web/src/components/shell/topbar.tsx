@@ -124,7 +124,7 @@ function EnvSwitcher() {
           {nodeId !== null ? (
             <span
               className={cn(
-                'rounded-full border px-1.5 text-meta whitespace-nowrap',
+                'rounded-sm border px-1.5 text-meta whitespace-nowrap',
                 state === 'fresh' ? 'text-muted-foreground' : 'border-st-stall-line text-ink-stall',
               )}
             >
@@ -183,7 +183,7 @@ function EnvSwitcher() {
 
 /**
  * 「实时」小灯：连着时是绿的、每收到一次推送闪一下；重连时变黄，被后端关掉（等着退避重连）时变红。
- * 手机上也要看得见：连着时只留一个点，断了连字一起显示——页面停更时人得知道。
+ * 手机上也要看得见，点后面一直带字。
  */
 function LiveIndicator() {
   const { status, lastEventAt } = useLiveState();
@@ -213,9 +213,8 @@ function LiveIndicator() {
               flash && 'scale-125 shadow-done-pop',
             )}
           />
-          <span className={cn(ok && 'sr-only md:not-sr-only')}>
-            {ok ? '实时' : status === 'down' ? '推送断了' : '连接中'}
-          </span>
+          {/* 手机上也写字：光一个绿点不知道指什么（#1899） */}
+          <span>{ok ? '实时' : status === 'down' ? '推送断了' : '连接中'}</span>
         </span>
       </TooltipTrigger>
       <TooltipContent>

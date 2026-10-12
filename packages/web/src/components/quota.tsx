@@ -6,17 +6,19 @@ import {
   isUseItOrLoseIt,
   upstreamStatusLabel,
   utilOf,
+  windowRawNote,
   windowTitle,
 } from '../lib/catalog';
 import { formatAgo, formatCount, formatIn, formatPercent, formatUsd } from '../lib/format';
 import { cn } from '../lib/utils';
+import { StatusBadge } from './layout/status-badge';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 
 /** 额度条的颜色：够用是中性色，75% 以上黄，90% 以上红。 */
 export function quotaTone(util: number): string {
   if (util >= 0.9) return 'bg-st-fail';
   if (util >= 0.75) return 'bg-st-stall';
-  return 'bg-foreground/55';
+  return 'bg-muted-foreground';
 }
 
 /** 额度条。用量没读到（undefined）时只画虚线空槽，不画成 0%。 */
@@ -32,7 +34,7 @@ export function QuotaBar({ util, className }: { util: number | undefined; classN
   }
   const pct = Math.max(0, Math.min(1, util));
   return (
-    <div className={cn('h-1.5 w-full overflow-hidden rounded-full bg-foreground/[0.08]', className)}>
+    <div className={cn('h-1.5 w-full overflow-hidden rounded-full bg-selected', className)}>
       <div
         className={cn('h-full rounded-full transition-[width] duration-700', quotaTone(pct))}
         style={{ width: `${Math.max(2, pct * 100)}%` }}
@@ -56,32 +58,20 @@ export function ReadingBadge({ w, className }: { w: QuotaWindowView; className?:
         title={`${measured ? '从官方或网页接口读到的' : '按我们自己的用量估的'}，但读数太旧，不是现值（读法 ${w.source}）`}
         data-source={w.source}
         data-stale-badge="true"
-        className={cn(
-          'inline-flex h-4 shrink-0 items-center gap-1 rounded bg-st-stall/14 px-1 text-micro leading-none whitespace-nowrap text-ink-stall',
-          className,
-        )}
+        className={cn('inline-flex shrink-0', className)}
       >
-        <span className="size-1.5 rounded-full bg-st-stall" />
-        读数过期
+        <StatusBadge tone="stall" label="读数过期" />
       </span>
     );
   }
+  // 实读是安静的绿点，估算是「存疑」色的点：两种都只有点和字，不抢数字的位置
   return (
     <span
       title={`${measured ? '从官方或网页接口读到的' : '读不到，按我们自己的用量估的'}（读法 ${w.source}）`}
       data-source={w.source}
-      className={cn(
-        'inline-flex h-4 shrink-0 items-center gap-1 rounded px-1 text-micro leading-none whitespace-nowrap',
-        measured
-          ? 'bg-muted text-muted-foreground'
-          : 'border border-dashed border-border-strong text-muted-foreground',
-        className,
-      )}
+      className={cn('inline-flex shrink-0', className)}
     >
-      <span
-        className={cn('size-1.5 rounded-full', measured ? 'bg-foreground/60' : 'border border-foreground/60')}
-      />
-      {measured ? '实读' : '估算'}
+      <StatusBadge tone={measured ? 'done' : 'doubt'} label={measured ? '实读' : '估算'} variant="dot" />
     </span>
   );
 }
@@ -139,7 +129,7 @@ export function isExpiredWindow(w: Pick<QuotaWindowView, 'staleSince' | 'resetsA
 export function ExpiredQuotaLine() {
   return (
     <div
-      className="rounded-lg border border-dashed bg-muted/40 px-2.5 py-1.5 text-caption text-muted-foreground"
+      className="rounded-md border border-dashed bg-muted px-2.5 py-1.5 text-meta text-muted-foreground"
       data-expired="true"
     >
       旧读数，已过期
@@ -161,9 +151,8 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
   return (
     <div
       className={cn(
-        'rounded-lg border p-2.5 transition-colors',
-        hot && 'border-brand bg-brand/[0.06] shadow-brand-ring',
-        full && 'border-st-fail/50 bg-st-fail/[0.06]',
+        'rounded-md border p-2.5 transition-colors',
+        hot && 'border-brand bg-accent shadow-brand-ring',
       )}
       data-hot={hot || undefined}
       data-full={full || undefined}
@@ -172,10 +161,7 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
     >
       {/* 表头已经写了是哪种窗：格子里只在多出信息（按模型组、上游自报的窗名）时才再写一遍，省下一行（驾驶舱改版 2026-10-07）。模型名放不下就换行，不单行截成「o...」。 */}
       {w.scope || w.window === 'other' ? (
-        <div
-          className="mb-1 min-w-0 break-words text-caption text-muted-foreground"
-          title={`上游原名：${w.label}`}
-        >
+        <div className="mb-1 min-w-0 break-words text-meta text-muted-foreground" title={windowRawNote(w)}>
           {windowTitle(w)}
         </div>
       ) : null}
@@ -185,19 +171,19 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
           <span className="num whitespace-normal">
             <span
               className={cn(
-                'text-stat-num font-semibold',
+                'text-body font-semibold',
                 full && 'text-ink-fail',
                 w.stale && 'text-muted-foreground',
               )}
             >
               {pair[0]}
             </span>
-            <span className="text-xs text-muted-foreground"> / {pair[1]}</span>
+            <span className="text-meta text-muted-foreground"> / {pair[1]}</span>
           </span>
         ) : util !== undefined ? (
           <span
             className={cn(
-              'num text-stat-num font-semibold',
+              'num text-body font-semibold',
               full && 'text-ink-fail',
               w.stale && 'text-muted-foreground',
             )}
@@ -205,18 +191,18 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
             {formatPercent(util)}
           </span>
         ) : upstreamFull ? (
-          <span className="text-stat-num font-semibold text-ink-fail">已用满</span>
+          <span className="text-body font-semibold text-ink-fail">已用满</span>
         ) : w.used !== undefined ? (
           <span className="num whitespace-normal">
-            <span className="text-stat-num font-semibold">{amount(w, w.used)}</span>
-            <span className="text-xs text-muted-foreground"> 已用，上限没读到</span>
+            <span className="text-body font-semibold">{amount(w, w.used)}</span>
+            <span className="text-meta text-muted-foreground"> 已用，上限没读到</span>
           </span>
         ) : (
-          <span className="text-sub font-medium text-ink-stall">用量没读到</span>
+          <span className="text-body font-medium text-ink-stall">用量没读到</span>
         )}
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
           {w.used !== undefined && util !== undefined ? (
-            <span className="num text-xs text-muted-foreground">{formatUtil(util)}</span>
+            <span className="num text-meta text-muted-foreground">{formatUtil(util)}</span>
           ) : null}
           <ReadingBadge w={w} />
         </span>
@@ -225,7 +211,7 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
         util={util ?? (upstreamFull ? 1 : undefined)}
         className={cn('mt-1.5', w.stale && 'opacity-40')}
       />
-      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 text-caption text-muted-foreground">
+      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 text-meta text-muted-foreground">
         {w.resetsAt ? (
           <span className={cn(hot && 'font-medium text-foreground')}>
             <span className="num">{formatIn(w.resetsAt, now)}</span>清零
@@ -234,6 +220,7 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
           <span>清零时间没读到</span>
         )}
         <span
+          data-tone={w.stale ? 'stall' : undefined}
           className={cn(w.stale && 'text-ink-stall')}
           title={w.stale ? '读数太旧，不能当现值用' : undefined}
         >
@@ -243,17 +230,15 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
         </span>
       </div>
       {hot && util !== undefined ? (
-        <div className="mt-1.5 text-caption font-medium text-foreground">
+        <div className="mt-1.5 text-meta font-medium text-foreground">
           快清零还剩 <span className="num">{formatPercent(1 - util)}</span>，先用它
         </div>
       ) : null}
-      {full ? (
-        <div className="mt-1.5 text-caption font-medium text-ink-fail">快用完了，调度会先绕开</div>
-      ) : null}
+      {full ? <div className="mt-1.5 text-meta font-medium text-ink-fail">快用完了，调度会先绕开</div> : null}
       {w.upstreamStatus && w.upstreamStatus !== 'allowed' ? (
         <div
           className={cn(
-            'mt-1.5 text-caption font-medium',
+            'mt-1.5 text-meta font-medium',
             w.upstreamStatus === 'limit_reached' ? 'text-ink-fail' : 'text-ink-stall',
           )}
           title={w.statusRaw ? `上游原话：${w.statusRaw}` : undefined}
@@ -262,18 +247,18 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
         </div>
       ) : null}
       {w.stale ? (
-        <div data-stale-note className="mt-1.5 text-caption font-medium text-ink-stall">
+        <div data-stale-note className="mt-1.5 text-meta font-medium text-ink-stall">
           读数过期，上面是 <span className="num">{formatAgo(w.readAt, now)}</span>
           {readingVerb(w.reading)}到的旧数，不是现值，不参与排序
         </div>
       ) : null}
       {w.staleSince ? (
-        <div className="mt-1.5 text-caption text-ink-stall">
+        <div className="mt-1.5 text-meta text-ink-stall">
           上游从 <span className="num">{formatAgo(w.staleSince, now)}</span>
           起没再报这个窗，数是之前的，不参与排序
         </div>
       ) : !known ? (
-        <div className="mt-1.5 text-caption text-muted-foreground">不参与「先用它」和排序</div>
+        <div className="mt-1.5 text-meta text-muted-foreground">不参与「先用它」和排序</div>
       ) : null}
     </div>
   );
@@ -282,7 +267,7 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
 /**
  * 额度页账号池里一个窗口的一格（#1805）：一行字（已用 / 上限 · 几时清零 · 来源）加一根细进度条，数字等宽。
  * 比 QuotaCell 少的说明（先用它、快用完、读数过期、上游状态……）收进悬停提示，颜色和小标记照样在：
- * 先用它描品牌色边，快用完红字，读数过期换「读数过期」牌。窗口名只在窄屏（表头藏起来的时候）或有额外信息（模型组、上游自报名）时写。
+ * 先用它铺淡底、清零时刻加粗，快用完红字，读数过期换「读数过期」牌。窗口名只在窄屏（表头藏起来的时候）或有额外信息（模型组、上游自报名）时写。
  */
 export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
   const util = utilOf(w);
@@ -310,7 +295,7 @@ export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
   const popNotes = [
     ...notes,
     `读法：${w.source}（${w.reading === 'measured' ? '从官方或网页接口读到的' : '读不到，按我们自己的用量估的'}）`,
-    extraLabel ? null : `上游原名：${w.label}`,
+    windowRawNote(w),
     w.statusRaw && w.upstreamStatus && w.upstreamStatus !== 'allowed' ? `上游原话：${w.statusRaw}` : null,
   ].filter((n): n is string => Boolean(n));
   return (
@@ -325,18 +310,21 @@ export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
           data-unknown={!known || undefined}
           title={notes.join('；')}
           className={cn(
-            'block w-full min-w-0 cursor-pointer rounded-lg border border-transparent px-2 py-1 text-left focus-visible:ring-focus focus-visible:ring-ring/50 focus-visible:outline-none',
-            hot && 'border-brand bg-brand/[0.06]',
-            full && 'border-st-fail/50 bg-st-fail/[0.06]',
+            'block w-full min-w-0 cursor-pointer rounded-md border border-transparent px-2 py-1 text-left focus-visible:ring-focus focus-visible:ring-ring focus-visible:outline-none',
+            // 先用它只铺一层悬停色的底、清零时刻加粗，不再描粗框（样板：层级靠字重和灰度，不靠边框，#1921）
+            hot && 'bg-accent',
           )}
         >
           <div
-            className={cn('truncate text-caption text-muted-foreground', !extraLabel && 'quota-cell-label')}
-            title={`上游原名：${w.label}`}
+            className={cn(
+              'min-w-0 break-words text-meta text-muted-foreground',
+              !extraLabel && 'quota-cell-label',
+            )}
+            title={windowRawNote(w)}
           >
             {windowTitle(w)}
           </div>
-          <div className="flex flex-wrap items-baseline gap-x-2 text-xs">
+          <div className="flex flex-wrap items-baseline gap-x-2 text-meta">
             {pair ? (
               <span className="num whitespace-normal">
                 <span className={strong}>{pair[0]}</span>
@@ -362,7 +350,7 @@ export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
             ) : null}
             <span
               className={cn(
-                'text-caption whitespace-nowrap text-muted-foreground',
+                'text-meta whitespace-nowrap text-muted-foreground',
                 hot && 'font-medium text-foreground',
               )}
             >
@@ -375,20 +363,20 @@ export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
               )}
             </span>
           </div>
-          <div className="mt-1 flex items-center gap-1.5">
+          <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
             <QuotaBar
               util={util ?? (upstreamFull ? 1 : undefined)}
-              className={cn('min-w-0 flex-1', w.stale && 'opacity-40')}
+              className={cn('min-w-12 flex-1', w.stale && 'opacity-40')}
             />
             <ReadingBadge w={w} />
             {/* 读数过期时小牌换成「读数过期」，估算这层来源就看不见了：估算的补一句，实读 / 估算不丢。 */}
             {w.stale && w.reading !== 'measured' ? (
-              <span className="shrink-0 text-micro text-muted-foreground">按本机用量估算</span>
+              <span className="shrink-0 text-meta text-muted-foreground">按本机用量估算</span>
             ) : null}
           </div>
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-auto max-w-xs space-y-1.5 text-sub" data-quota-notes>
+      <PopoverContent align="start" className="w-auto max-w-xs space-y-1.5 text-body" data-quota-notes>
         {popNotes.map((note) => (
           <p key={note}>{note}</p>
         ))}

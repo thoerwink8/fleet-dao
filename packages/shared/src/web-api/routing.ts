@@ -48,6 +48,12 @@ export const ROUTE_PROBE_EVERY_MINUTES = 15;
 /** 结论超过这么久没更新（连着三轮没跑）：驾驶舱标「探测过期」，探针可能停了。 */
 export const ROUTE_PROBE_STALE_MINUTES = 45;
 
+/**
+ * 探针的钟每 15 分钟走一次：`probe_next_at` 之后再加这么久还没探到，才算「检测中断 / 探针可能停了」
+ * （#1798 片 4：选路和页面同一条线，不再按执行方式从头算过期线）。
+ */
+export const ROUTE_PROBE_OVERDUE_MINUTES = 20;
+
 /** 这条路由的结论多久没更新算过期（探针可能停了）。hostId 留着给旧调用方，已不再按执行方式放宽。 */
 export function routeProbeStaleMinutes(_hostId?: string): number {
   return ROUTE_PROBE_STALE_MINUTES;
@@ -154,7 +160,7 @@ export const RoutingLayerRouteSchema = z.object({
   connect: LivenessFactSchema,
   quota: LivenessFactSchema,
   ban: LivenessFactSchema,
-  /** 探针最近一次下结论的时刻；没有 = 探针还没看过。过没过期按 routeProbeStaleMinutes（不分执行方式）；退避中按那一档放宽；历史按需探测原文不算过期。 */
+  /** 探针最近一次下结论的时刻；没有 = 探针还没看过。过没过期看 probeNextAt 加 ROUTE_PROBE_OVERDUE_MINUTES（#1798 片 4）。 */
   probedAt: Time.optional(),
   /** 探针原文（routes.probe_detail）。退避中的「下次约 HH:MM」写在这里，驾驶舱据此放宽「探针可能停了」。 */
   probeDetail: z.string().optional(),
@@ -479,15 +485,7 @@ export const SetPurposeModelEffortRequest = z.object({
 // 探完记 routing.probe.done（带每条路由的结论）。状态不另存：读的时候从这三种记录现算（shared 的 route-probe-now.ts）。
 
 /** 一条路由这一次的结论：探针的四种，加上 unsettled（会话用户挂的组织这会儿定不下来，没探）、gone（路由已经不在了）。 */
-export const RouteProbeOutcomeSchema = z.enum([
-  'ok',
-  'failed',
-  'not_wired',
-  'skipped',
-  'on_demand',
-  'unsettled',
-  'gone',
-]);
+export const RouteProbeOutcomeSchema = z.enum(['ok', 'failed', 'not_wired', 'skipped', 'unsettled', 'gone']);
 
 export const RouteProbeResultSchema = z.object({
   routeId: Id,

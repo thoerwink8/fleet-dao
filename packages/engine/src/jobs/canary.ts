@@ -348,8 +348,15 @@ function whyStuck(stage: CanaryStage, obs: CanaryObservation): string {
   if (stage === 'ledger') {
     const r = db.runs;
     parts.push(
-      `runs 记了 ${r.total} 笔（动手 ${r.manual}、验收 ${r.verify}）、结束了 ${r.ended} 笔、记上用量的 ${r.withUsage} 笔；每步耗时 ${db.timings} 笔`,
+      `runs 记了 ${r.total} 笔（动手 ${r.manual}、验收 ${r.verify}）、结束了 ${r.ended} 笔、记上用量（输入、输出都读到）的 ${r.withUsage} 笔；每步耗时 ${db.timings} 笔`,
     );
+    // 没记上的是哪个模型、为什么（「用量补记」写的原因；没写的照实说没写），不只报一个数（#1935）
+    const missing = r.missingUsage ?? [];
+    if (missing.length > 0) {
+      parts.push(
+        `用量没记上的：${missing.map((m) => `${m.model}（${m.note ?? '没写原因：不是经 Mirasim 起的，或还没轮到用量补记'}）`).join('；')}`,
+      );
+    }
   }
   if (stage === 'board') {
     const b = obs.board;

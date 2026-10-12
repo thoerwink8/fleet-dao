@@ -58,8 +58,11 @@ export async function startScheduleRun(db: Db, job: string, startedAt: Date = ne
 
 /** 四种结局的含义见 domain.ts 的 ScheduleOutcome；不是 ok 的都要写原因。 */
 export type ScheduleResult =
-  /** 跑完了：扫了 scanned 个对象（必须 > 0，一个都没扫到要写 unscanned）、发现 found 个问题。 */
-  | { outcome: 'ok'; scanned: number; found: number }
+  /**
+   * 跑完了：扫了 scanned 个对象（必须 > 0，一个都没扫到要写 unscanned）、发现 found 个问题。
+   * why 可选：这一轮怎么分的账（拉单：每种没派的原因各几张），只记事实、不是故障——found=0 时靠它分得开「没单」和「全被拦」。
+   */
+  | { outcome: 'ok'; scanned: number; found: number; why?: string }
   /** 跑完了但有一部分没查成（数据不全是状态不是故障），why 写缺了哪块。 */
   | { outcome: 'partial'; why: string; scanned?: number; found?: number }
   /** 跑完了但一个对象都没扫到，why 写为什么（例如上游名册是空的）。 */

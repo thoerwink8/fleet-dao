@@ -241,6 +241,8 @@ function Handles({ side, source = true, target = true }: { side: Side; source?: 
  * 画布最小缩放 0.15 时屏幕上仍是 12px（32 / 0.4 × 0.15）。
  */
 const FAR_HEAD_PX = farCardFontPx(32, ZOOM_OF.far);
+/** 写成 rem：节点尺寸跟根字号倍数放大（#1937），这个字号也要一起放大。 */
+const FAR_HEAD_SIZE = `${FAR_HEAD_PX / 16}rem`;
 /** 远档标题：字号名，跟着画布当前缩放，屏幕上不小于 --text-meta（12px）。 */
 const FAR_TITLE_FONT = farTitleFontSize();
 
@@ -585,7 +587,7 @@ export const RootNode = memo(function RootNode({ id, data }: Props) {
       <Handle id="l" type="source" position={Position.Left} isConnectable={false} />
       {level === 'far' ? (
         <div className="flex h-full flex-col items-center justify-center gap-1 px-4">
-          <div className="num leading-none font-semibold" style={{ fontSize: FAR_HEAD_PX }}>
+          <div className="num leading-none font-semibold" style={{ fontSize: FAR_HEAD_SIZE }}>
             {data.counts.total}
           </div>
           <div className="text-muted-foreground" style={{ fontSize: FAR_TITLE_FONT }}>

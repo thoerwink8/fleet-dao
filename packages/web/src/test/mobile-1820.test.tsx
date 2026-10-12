@@ -158,13 +158,17 @@ describe('任务详情手机首屏一行摘要', () => {
     viewport(390);
     open();
     await screen.findByRole('heading', { name: '每一笔' });
-    expect(document.querySelector('[data-description-hint]')).toBeNull();
-    expect(screen.getByText(/开单/)).toBeTruthy();
+    // #1920 起状态行是正文顶上的结论块（不再是页头说明）；页头 ⓘ 里放的是各块的长说明，结论块不在 ⓘ 里、直接看得到
+    const hero = document.querySelector('[data-now-banner]') as HTMLElement;
+    expect(hero).toBeTruthy();
+    expect(hero.closest('[data-description-hint]')).toBeNull();
+    expect(within(hero).getByText(/开单/)).toBeTruthy();
+    expect(within(hero).getByText('已完成')).toBeTruthy();
   });
 });
 
 describe('通知操作和标题同一行', () => {
-  test('一条通知是一行横排（不再 flex-col 把按钮挤到下一行），操作区在右侧、手机上是图标按钮', async () => {
+  test('一条通知：内容和操作区是同一个容器里的两个兄弟；操作按钮手机上也带字（不再是无字图标，#1904）', async () => {
     renderApp(<NotificationsPage />, { route: '/notifications' });
     const actions = await waitFor(() => {
       const el = document.querySelector('[data-notice-actions]');
@@ -173,15 +177,16 @@ describe('通知操作和标题同一行', () => {
     });
     const row = actions.closest('li[data-notice-row]') as HTMLElement;
     expect(row).toBeTruthy();
-    // 内容块和操作区是同一行里的两个兄弟，操作区在后（右侧），不是上下叠
+    // 内容块和操作区是兄弟；手机上操作排在内容下面一行，桌面（md）起并排在右侧
     const content = actions.previousElementSibling as HTMLElement;
     expect(content?.parentElement).toBe(actions.parentElement);
     expect(content?.textContent).toContain('分钟前');
-    expect(actions.parentElement?.className).not.toContain('flex-col');
-    // 按钮的文字手机上只给读屏（sr-only），可见的是图标
+    expect(actions.parentElement?.className).toContain('md:flex-row');
+    // 按钮上的字手机上也看得见（没有 sr-only 包着），主操作写「处理了」
     const done = within(actions).getByRole('button', { name: '处理了' });
-    expect(done.className).toContain('max-md:w-10');
-    expect(done.querySelector('.max-md\\:sr-only')?.textContent).toBe('处理了');
+    expect(done.textContent).toBe('处理了');
+    expect(done.querySelector('.sr-only, .max-md\\:sr-only')).toBeNull();
+    expect(within(actions).getByRole('button', { name: '打开' }).textContent).toBe('打开');
   });
 });
 

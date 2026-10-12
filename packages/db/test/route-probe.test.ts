@@ -203,7 +203,8 @@ describe('写：一条路由的结论', () => {
   it('不是 ok 的一律不在线：探通过的路由下一轮没探通就下线，原因照写', async () => {
     await saveRouteProbe(t.db, { routeId: 'car', state: 'ok', at: NOW, detail: '答上了：OK' });
     const later = new Date(NOW.getTime() + 15 * MIN);
-    for (const state of ['failed', 'not_wired', 'skipped', 'on_demand'] as const) {
+    // on_demand 已删（#1843）：库里的枚举不再收它
+    for (const state of ['failed', 'not_wired', 'skipped'] as const) {
       await saveRouteProbe(t.db, { routeId: 'car', state, at: later, detail: `原因：${state}` });
       expect(await routeRow('car')).toMatchObject({
         alive: false,

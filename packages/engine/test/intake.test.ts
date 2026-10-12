@@ -509,6 +509,25 @@ describe('runIntakeJob · 一轮', () => {
     expect(h.localMarked).toEqual([4]);
   });
 
+  it('【故意造出的失败】一张都没派的那一轮：库里的结局写明每种没派的原因各几张（不写，schedule_runs 只剩 found=0，看不出是没单还是全被拦，法国 10-12 每 5 分钟 found=0 查不出为什么）', async () => {
+    const h = harness(
+      {},
+      {
+        issues: [
+          issue({ number: 1, createdAt: OLD, milestone: null, labels: ['需求', '母单', '整理过'] }),
+          issue({ number: 3, createdAt: OLD, milestone: null, labels: ['需求', '本机做', '整理过'] }),
+        ],
+      },
+    );
+    const run = await runIntakeJob(h.deps);
+    expect(run).toMatchObject({ outcome: 'ok', found: 0 });
+    const recorded = h.finished[0]?.result;
+    expect(recorded).toMatchObject({ outcome: 'ok', found: 0 });
+    const why = recorded && 'why' in recorded ? recorded.why : undefined;
+    expect(why).toContain('没派的：');
+    expect(why).toMatch(/mother_ticket×1/);
+  });
+
   it('一张好单 → 起一条任务工作流，记 ok（扫了 仓+单，处理了 1）', async () => {
     const h = harness();
     const run = await runIntakeJob(h.deps);
@@ -522,7 +541,9 @@ describe('runIntakeJob · 一轮', () => {
       },
     ]);
     expect(run).toMatchObject({ runId: 7, outcome: 'ok', scanned: 2, found: 1 });
-    expect(h.finished).toEqual([{ id: 7, result: { outcome: 'ok', scanned: 2, found: 1 } }]);
+    expect(h.finished).toEqual([
+      { id: 7, result: { outcome: 'ok', scanned: 2, found: 1, why: expect.stringContaining('起了 1 条') } },
+    ]);
   });
 
   it('被开着的 PR 的「需求」栏挂着的单 → 不起，留一句话、贴一次「本机做」；同一个 PR 再来一轮不重复留言', async () => {

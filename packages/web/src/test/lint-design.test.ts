@@ -1,8 +1,8 @@
 // 设计规范检查（#1847，并入了 #182 / #1446 的 lint-arbitrary）。扫描脚本在 packages/web/scripts/lint-design.ts，
 // 规则表在 docs/design/驾驶舱界面.md 第八节。本测试盯三块：
-//   1) 每条规则 R0–R10：一条故意造红的写法要报出来，一条合规写法要放过；
-//   2) 旧账清单的判法：不在清单的文件一条都不许有，清单里的条数只许减（减了要改清单）；
-//   3) 整个 packages/web/src 对着 design-legacy.json 没有新违规。
+//   1) 每条规则 R0–R11：一条故意造红的写法要报出来，一条合规写法要放过；
+//   2) 计数；
+//   3) 整个 packages/web/src 严格模式一条违规都不许有（没有旧账清单，#1855）。
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +10,6 @@ import { describe, expect, test } from 'vitest';
 import {
   ALLOWLIST,
   check,
-  checkLegacy,
   countHits,
   formatHit,
   type Hit,
@@ -166,6 +165,22 @@ describe('每条规则：造红的报、合规的放', () => {
     expect(rulesOf(`"h-control size-row"`, 'src/components/ui/button.tsx')).toEqual([]);
     expect(rulesOf(`"flex-row grid-flow-row h-8 gap-3"`)).toEqual([]);
   });
+
+  test('R11 状态字不许裸文字：<Tag>关着</Tag>、<span>在跑</span> 报（故意造红）', () => {
+    expect(rulesOf(`<Tag>关着</Tag>`)).toEqual(['R11']);
+    expect(rulesOf(`<span className="text-meta">\n  在跑\n</span>`)).toEqual(['R11']);
+    expect(rulesOf(`<b>开着</b><i>已关</i>`)).toEqual(['R11', 'R11']);
+    const [hit] = scanSource(`\n<Tag>关着</Tag>`, PAGE);
+    expect(hit?.line).toBe(2);
+    expect(formatHit(hit as Hit)).toContain('StatusBadge');
+  });
+  test('R11 放行：经 StatusBadge 的 label、带别的字的句子、字符串里的词', () => {
+    expect(rulesOf(`<StatusBadge tone="stop" label="关着" />`)).toEqual([]);
+    expect(rulesOf(`<p>总开关关着只是不派活</p>`)).toEqual([]);
+    expect(rulesOf(`<span>在跑 3 个</span>`)).toEqual([]);
+    expect(rulesOf(`<span>已关 <b>3</b> 条路由</span>`)).toEqual([]);
+    expect(rulesOf(`const word = '在跑';`)).toEqual([]);
+  });
 });
 
 describe('词法和报错', () => {
@@ -211,34 +226,9 @@ describe('词法和报错', () => {
   });
 });
 
-describe('旧账清单：只减不加', () => {
-  const hits = scanSource(`"text-xs text-sm rounded-xl"`, PAGE);
-  const exists = () => true;
-
-  test('条数和清单一样：通过', () => {
-    expect(checkLegacy(hits, { [PAGE]: { R2: 2, R5: 1 } }, exists)).toEqual([]);
-  });
-  test('【故意造红】不在清单里的文件有一条就报', () => {
-    expect(checkLegacy(hits, {}, exists)).toHaveLength(3);
-  });
-  test('【故意造红】条数涨了：报', () => {
-    const errors = checkLegacy(hits, { [PAGE]: { R2: 1, R5: 1 } }, exists);
-    expect(errors[0]).toContain('旧账冻结 1 条，现在 2 条');
-  });
-  test('【故意造红】条数降了没改清单：报，要求改小', () => {
-    const errors = checkLegacy(hits, { [PAGE]: { R2: 3, R5: 1 } }, exists);
-    expect(errors).toEqual([expect.stringContaining('改成 2')]);
-  });
-  test('【故意造红】文件干净了、文件没了、规则写错：都报', () => {
-    expect(checkLegacy([], { [PAGE]: { R2: 2 } }, exists)).toEqual([expect.stringContaining('已经干净了')]);
-    expect(checkLegacy([], { 'src/gone.tsx': { R2: 1 } }, () => false)).toEqual([
-      expect.stringContaining('不存在了'),
-    ]);
-    expect(checkLegacy(hits, { [PAGE]: { R2: 2, R5: 1, R10: 1 } as never }, exists)).toEqual([
-      expect.stringContaining('R10'),
-    ]);
-  });
-  test('计数按文件、按规则', () => {
+describe('计数', () => {
+  test('按文件、按规则', () => {
+    const hits = scanSource('"text-xs text-sm rounded-xl"', PAGE);
     expect(countHits(hits)).toEqual({ [PAGE]: { R2: 2, R5: 1 } });
   });
 });
@@ -252,7 +242,7 @@ describe('令牌名不撞车', () => {
 });
 
 describe('整个 packages/web/src', () => {
-  test('对着 design-legacy.json 没有新违规（新文件一条都不许有）', () => {
+  test('严格模式：一条违规都没有', () => {
     expect(check()).toEqual([]);
   });
 });

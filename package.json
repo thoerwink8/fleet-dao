@@ -23,6 +23,7 @@
     "intents": "node packages/conventions/src/bin/intents.ts",
     "progress:note": "node packages/conventions/src/bin/progress.ts note",
     "progress:directive": "node packages/conventions/src/bin/progress.ts directive",
+    "progress:claim": "node packages/conventions/src/bin/progress.ts claim",
     "progress:done": "node packages/conventions/src/bin/progress.ts done",
     "progress:read": "node packages/conventions/src/bin/progress.ts read",
     "issue:close": "node packages/conventions/src/bin/issue-close.ts",
@@ -34,6 +35,8 @@
     "drill": "node packages/engine/src/bin/drill.ts",
     "release:onekey": "node agents/skills/commander/scripts/release-onekey.mjs",
     "pr:open": "node packages/conventions/src/bin/pr-open.ts",
+    "repo:check": "node agents/hooks/repo-contract.mjs check",
+    "repo:init": "node agents/hooks/repo-contract.mjs init",
     "agent-eval": "node packages/agent-eval/src/bin/agent-eval.ts"
   },
   "devDependencies": {

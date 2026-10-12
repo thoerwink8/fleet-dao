@@ -95,14 +95,8 @@ export type RetiredRunAsUser = (typeof RETIRED_RUN_AS_USERS)[number];
 export const ORG_KINDS = valuesOf<OrgKind>()(['solo', 'carpool']);
 export const RUN_OUTCOMES = valuesOf<RunOutcome>()(['ok', 'failed', 'stopped', 'stalled']);
 export const SCHEDULE_OUTCOMES = valuesOf<ScheduleOutcome>()(['ok', 'partial', 'unscanned', 'failed']);
-/** 路由探针的结论（domain.ts 的 RouteProbeState）：只有 ok 让路由在线。 */
-export const ROUTE_PROBE_STATES = valuesOf<RouteProbeState>()([
-  'ok',
-  'failed',
-  'not_wired',
-  'skipped',
-  'on_demand',
-]);
+/** 路由探针的结论（domain.ts 的 RouteProbeState）：只有 ok 让路由在线。按需探测 on_demand 已删（#1843）。 */
+export const ROUTE_PROBE_STATES = valuesOf<RouteProbeState>()(['ok', 'failed', 'not_wired', 'skipped']);
 export const PROGRESS_KINDS = valuesOf<ProgressKind>()([
   'plan',
   'say',

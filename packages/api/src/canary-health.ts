@@ -4,8 +4,12 @@
 // 公网看得到 /healthz：对外只说哪一步、几点，不带仓名、单号和断的原因原文（原因只进日志，细节在卡住报警里）。
 // 引擎总开关关着时（#1086）巡检的定时任务整个不跑（jobs/timers.ts 的 needsMaster 闸）、连跳过的轮次都不写 canary_runs，
 // 这一项认得出「总开关关着＝跳过」：照实说跳过、回待定、不拿断了的旧结论报 canary_broken、也不当通过（#1141 / #1808）。
-// 最近一轮结论早于当前部署（引擎进程起来的时刻）时同样待定，写明等新一轮——发版装上修复后不再拿修复前的断结论报红（#1808）。
+// 最近一轮结论早于当前部署（引擎进程起来的时刻）时同样回待定，写明等新一轮——发版装上修复后不再拿修复前的断结论报红（#1808）。
 // 最近一轮是「跳过」也回待定、不当通过（发版期间跳过曾被误判成修好，#1773 / #1808）。
+// 待定不当红、也不让 /healthz 变 503（#1909）：它照样抛，但抛的是 PublicHealthPending（health.ts）——健康页画成「待定」
+// 等着，不再是「断了」那种 503。发版后「结论早于当前部署」是预期窗口，发完版到下一轮巡检出结论之间不该当成断链（#1909：
+// 监督每轮读 /healthz 见到 503 会反复当断链开新单）。这个窗口有上限（CANARY_PENDING_MAX_MS）：过了还等不到新结论就不是
+// 发版窗口了，照实报红，别把「巡检真卡住」永远画成待定。
 // 不在正式环境（FLEET_ENV=production，法国是）的（开发、测试）报「未接」。这一项跟着巡检的结论自己变红，发版脚本只标待处理、不退回
 // （deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）。
 
@@ -17,13 +21,20 @@ import {
   latestCanaryRuns,
 } from '@fleet-dao/db';
 import type { EngineMasterState } from '@fleet-dao/shared';
-import { PublicHealthError } from './health.ts';
+import { PublicHealthError, PublicHealthPending } from './health.ts';
 
 /** 不在正式环境：这一项报「未接」（公网看得到）。 */
 export const CANARY_NOT_HERE = '只在正式环境跑';
 
 /** 最近一次通过距今超过这么久，算太久没跑完一轮：6 小时一轮、一轮最长 5 小时，再多给 1 小时。 */
 export const CANARY_STALE_MS = 12 * 60 * 60_000;
+
+/**
+ * 「结论早于当前部署」这种待定最多认多久（#1909）：新部署后下一轮巡检要等下一个钟点格子（每 6 小时一格，26 分），
+ * 一轮最长 5.5 小时（CANARY_RUN_TIMEOUT_MINUTES）。6 + 5.5 取 12 小时。过了还等不到晚于部署的结论，就不是发版窗口，
+ * 照实报红——把「巡检自己没跑成、卡住」永远画成待定，等于这一项再不报警。
+ */
+export const CANARY_PENDING_MAX_MS = 12 * 60 * 60_000;
 
 const BEIJING_OFFSET_MS = 8 * 60 * 60_000;
 
@@ -97,11 +108,23 @@ export function canaryHealth(
       detail: undefined,
     };
   }
-  // 结论早于当前部署：那轮是上一版的，等新一轮再判（#1808）。不拿它报 canary_broken，也不当通过。
+  // 结论早于当前部署：那轮是上一版的，等新一轮再判（#1808）。不拿它报 canary_broken，也不当通过，回待定、不当红（#1909）。
+  // 这个待定有上限：发版后等过了 CANARY_PENDING_MAX_MS 还等不到晚于部署的结论，就不是发版窗口了，照实报红——
+  // 把「巡检真卡住、没跑出新的一轮」永远画成待定，等于这一项再不报警。
   if (deployedAt && finished.endedAt.getTime() < deployedAt.getTime()) {
+    const waited = now.getTime() - deployedAt.getTime();
+    if (waited > CANARY_PENDING_MAX_MS) {
+      const hours = Math.floor(waited / (60 * 60_000));
+      return {
+        ok: false,
+        code: 'canary_pending_too_long',
+        message: `当前部署（${stamp(deployedAt)}）之后 ${hours} 小时没有新结论：巡检没跑出新的一轮`,
+        detail: undefined,
+      };
+    }
     return {
       ok: 'pending',
-      note: `这条结论早于当前部署（${stamp(deployedAt)}），等新一轮`,
+      note: `这条结论早于当前部署（${stamp(deployedAt)}），等新一轮（发版后最多 ${CANARY_PENDING_MAX_MS / (60 * 60_000)} 小时）`,
     };
   }
   const when = stamp(finished.endedAt);
@@ -150,7 +173,9 @@ export function canaryHealth(
 /**
  * 健康检查：现读库里最近的两轮和引擎总开关（#1141，设置表读不到照抛——报「没查成」，不当成关着、更不当成没问题）；
  * 读不到照抛（报「连不上」，不当成没问题）。好的时候带一句说明。
- * 待定（结论早于部署、跳过）抛 canary_pending：不当通过、也不报 canary_broken（#1808）。
+ * 待定（结论早于部署、跳过、总开关关着）抛 canary_pending（#1808），而且抛的是 PublicHealthPending（#1909）：
+ * 不当通过、也不报 canary_broken，更不让 /healthz 变 503——健康页画成「待定」等着，不当断链。
+ * 只有「发版后等太久还等不到新一轮结论」（canary_pending_too_long）这类真卡住照旧抛 PublicHealthError 报红。
  */
 export function canaryHealthCheck(
   db: Db,
@@ -167,7 +192,7 @@ export function canaryHealthCheck(
     const [latest, master] = await Promise.all([latestCanaryRuns(db), readMaster()]);
     const got = canaryHealth(latest, now(), master.on ? undefined : master, boot);
     if (got.ok === true) return got.note;
-    if (got.ok === 'pending') throw new PublicHealthError('canary_pending', got.note);
+    if (got.ok === 'pending') throw new PublicHealthPending(got.note);
     throw new PublicHealthError(got.code, got.message, got.detail);
   };
 }

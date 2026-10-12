@@ -236,6 +236,7 @@ export const toSegmentRun = (r: typeof runs.$inferSelect): SegmentRun =>
     cacheReadTokens: opt(r.cacheReadTokens),
     cacheWriteTokens: opt(r.cacheWriteTokens),
     costUsd: opt(r.costUsd),
+    usageNote: opt(r.usageNote),
     memoryPeakMb: opt(r.memoryPeakMb),
     failureReason: opt(r.failureReason),
     prNumber: opt(r.prNumber),

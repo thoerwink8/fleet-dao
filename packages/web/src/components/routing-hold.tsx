@@ -4,7 +4,7 @@
 
 import { SETTING_SCHEMAS } from '@fleet-dao/shared';
 import { type ReactNode, useState } from 'react';
-import { Link } from 'react-router';
+import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { ApiError, errorText, usePoolHolds, useUpdateSetting } from '../api/client';
 import {
@@ -15,8 +15,8 @@ import {
   withHold,
   withoutHold,
 } from '../lib/pool-holds';
-import { TAP, useRoutingEdit } from './routing-edit';
-import { Badge } from './ui/badge';
+import { RowMenuItem } from './layout/row-menu';
+import { useRoutingEdit } from './routing-edit';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -28,16 +28,21 @@ const FIELDS: { key: keyof HoldDraft; label: string; type?: string }[] = [
   { key: 'reviewBy', label: '最迟复查日期', type: 'date' },
 ];
 
-/** 这一行路由所属的账号池：设暂停、撤回，或标明已经暂停。 */
-export function PoolHoldControl({ poolId, routeId }: { poolId: string; routeId: string }) {
+/**
+ * 这一行路由所属的账号池：设暂停、撤回，或标明已经暂停（路由页样板 #1914 起拆成两块，调用方各摆各的）：
+ * 暂停了的样子由行上的状态（池暂停）表示，这里不另画标签；menu 是行尾「⋯」菜单里的一项；panel 是点了之后在行下面展开的表单。
+ * 整池暂停没读到（还在读、读失败）两块都是空的：失败另有横幅。
+ */
+export function usePoolHoldControl(poolId: string, routeId: string): { menu: ReactNode; panel: ReactNode } {
   const { disabledWhy } = useRoutingEdit();
   const holds = usePoolHolds();
   const update = useUpdateSetting();
+  const navigate = useNavigate();
   const [open, setOpen] = useState<'pause' | 'revoke' | null>(null);
   const [draft, setDraft] = useState<HoldDraft>({ ...EMPTY_DRAFT, poolId });
   const [revokeReason, setRevokeReason] = useState('');
   const v = holds.data;
-  if (!v || holds.error) return null;
+  if (!v || holds.error) return { menu: null, panel: null };
 
   const off = disabledWhy !== null;
   const recognized = v.holds.some((h) => h.poolId === poolId);
@@ -75,60 +80,40 @@ export function PoolHoldControl({ poolId, routeId }: { poolId: string; routeId: 
     );
   };
 
-  const badge = paused ? (
-    <Badge variant="outline" className="h-4 px-1 text-micro font-normal">
-      整池暂停
-    </Badge>
-  ) : null;
+  const itemWhy = disabledWhy ?? (update.isPending ? '正在保存，稍等' : undefined);
 
-  let action: ReactNode = null;
+  let menu: ReactNode = null;
   if (paused && opaque) {
-    action = (
-      <Link to="/settings" className="text-caption text-muted-foreground underline underline-offset-2">
-        去设置页撤回
-      </Link>
-    );
+    menu = <RowMenuItem onSelect={() => void navigate('/settings')}>去设置页撤回整池暂停</RowMenuItem>;
   } else if (paused && recognized) {
-    action = (
-      <Button
-        type="button"
-        size="xs"
-        variant="outline"
-        disabled={off || update.isPending}
-        onClick={() => setOpen(open === 'revoke' ? null : 'revoke')}
-      >
+    menu = (
+      <RowMenuItem disabled={off || update.isPending} title={itemWhy} onSelect={() => setOpen('revoke')}>
         {`撤回账号池 ${poolId} 的整池暂停`}
-      </Button>
+      </RowMenuItem>
     );
   } else if (!paused) {
-    action = (
-      <Button
-        type="button"
-        size="xs"
-        variant="outline"
-        className={TAP}
+    menu = (
+      <RowMenuItem
         disabled={off || update.isPending}
-        onClick={() => {
+        title={itemWhy}
+        onSelect={() => {
           setDraft({ ...EMPTY_DRAFT, poolId });
-          setOpen(open === 'pause' ? null : 'pause');
+          setOpen('pause');
         }}
       >
         {`暂停账号池 ${poolId}`}
-      </Button>
+      </RowMenuItem>
     );
   }
 
-  return (
+  const panel = (
     <>
-      <span className="inline-flex items-center gap-1">
-        {badge}
-        {action}
-      </span>
       {open === 'pause' ? (
-        <div className="order-1 mt-1 grid basis-full gap-2 rounded-lg border bg-muted/30 p-2">
+        <div className="mt-1 mb-2 grid gap-2 rounded-lg bg-muted p-3">
+          <p className="text-meta font-medium">{`暂停账号池 ${poolId}`}</p>
           {FIELDS.map((field) => (
             <div key={field.key} className="grid gap-1">
-              <Label htmlFor={`${routeId}-hold-${field.key}`} className="text-caption text-muted-foreground">
+              <Label htmlFor={`${routeId}-hold-${field.key}`} className="text-meta text-muted-foreground">
                 {field.label}
               </Label>
               <Input
@@ -142,7 +127,7 @@ export function PoolHoldControl({ poolId, routeId }: { poolId: string; routeId: 
             </div>
           ))}
           <div className="flex items-center justify-end gap-2">
-            {problem ? <span className="mr-auto text-caption text-muted-foreground">{problem}</span> : null}
+            {problem ? <span className="mr-auto text-meta text-muted-foreground">{problem}</span> : null}
             <Button type="button" size="xs" variant="ghost" onClick={() => setOpen(null)}>
               取消
             </Button>
@@ -161,9 +146,9 @@ export function PoolHoldControl({ poolId, routeId }: { poolId: string; routeId: 
         </div>
       ) : null}
       {open === 'revoke' ? (
-        <div className="order-1 mt-1 grid basis-full gap-2 rounded-lg border bg-muted/30 p-2">
+        <div className="mt-1 mb-2 grid gap-2 rounded-lg bg-muted p-3">
           <div className="grid gap-1">
-            <Label htmlFor={`${routeId}-hold-revoke`} className="text-caption text-muted-foreground">
+            <Label htmlFor={`${routeId}-hold-revoke`} className="text-meta text-muted-foreground">
               撤回原因
             </Label>
             <Input
@@ -195,4 +180,5 @@ export function PoolHoldControl({ poolId, routeId }: { poolId: string; routeId: 
       ) : null}
     </>
   );
+  return { menu, panel };
 }

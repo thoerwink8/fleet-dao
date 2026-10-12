@@ -242,16 +242,23 @@ export async function markCanaryCleaned(db: Db, id: number, at: Date): Promise<v
   if (rows.length === 0) throw new Error(`没有这一轮巡检：${id}`);
 }
 
-/** 这张单记进 runs 的账：一共几笔、结束了几笔、动手（manual）几笔、验收（verify）几笔、结束了又记上用量（输入 token）的几笔。 */
+/**
+ * 这张单记进 runs 的账：一共几笔、结束了几笔、动手（manual）几笔、验收（verify）几笔、结束了又记上用量的几笔。
+ * 「记上用量」＝输入、输出两样都读到了（#1935 收回 #1936 放宽的「四样任一」：经 Mirasim 起的会话结束时只有输出，
+ * 输入、缓存由「用量补记」按中转计量事后补齐，补不上就是没记上，不放过）。
+ * missingUsage：结束了、输入或输出没记上的那几笔是什么模型、为什么（runs.usage_note，「用量补记」写的；没写是 null），
+ * 巡检断在记账时原因里照它写明，不只报一个数。
+ */
 export interface CanaryLedger {
   total: number;
   ended: number;
   manual: number;
   verify: number;
   withUsage: number;
+  missingUsage: { model: string; note: string | null }[];
 }
 
-const NO_LEDGER: CanaryLedger = { total: 0, ended: 0, manual: 0, verify: 0, withUsage: 0 };
+const NO_LEDGER: CanaryLedger = { total: 0, ended: 0, manual: 0, verify: 0, withUsage: 0, missingUsage: [] };
 
 /** 巡检看一张单时从库里读到的事实（判断在引擎 jobs/canary.ts）。 */
 export interface CanaryDbFacts {
@@ -330,10 +337,23 @@ export async function canaryDbFacts(
       ended: sql<number>`count(${runs.endedAt})::int`,
       manual: sql<number>`count(*) filter (where ${runs.segment} = 'manual')::int`,
       verify: sql<number>`count(*) filter (where ${runs.segment} = 'verify')::int`,
-      withUsage: sql<number>`count(*) filter (where ${runs.endedAt} is not null and ${runs.inputTokens} is not null)::int`,
+      withUsage: sql<number>`count(*) filter (where ${runs.endedAt} is not null and ${runs.inputTokens} is not null and ${runs.outputTokens} is not null)::int`,
     })
     .from(runs)
     .where(and(eq(runs.issueNumber, input.issueNumber), gte(runs.startedAt, input.since)));
+  const missingUsage = await db
+    .select({ model: runs.model, note: runs.usageNote })
+    .from(runs)
+    .where(
+      and(
+        eq(runs.issueNumber, input.issueNumber),
+        gte(runs.startedAt, input.since),
+        isNotNull(runs.endedAt),
+        sql`(${runs.inputTokens} is null or ${runs.outputTokens} is null)`,
+      ),
+    )
+    .orderBy(asc(runs.startedAt), asc(runs.id))
+    .limit(10);
   const [timings] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(stepTimings)
@@ -348,7 +368,7 @@ export async function canaryDbFacts(
   return {
     repo,
     task,
-    runs: ledger ?? NO_LEDGER,
+    runs: ledger ? { ...ledger, missingUsage } : NO_LEDGER,
     timings: timings?.n ?? 0,
     openAlerts,
     lastIntake: intake ?? null,

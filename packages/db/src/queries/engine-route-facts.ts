@@ -50,8 +50,10 @@ export interface PurposeRouteFacts {
     /** 那次结论是什么、下结论时会话用户挂的是哪个组织（候选查询的 probeState、probeOrg）。 */
     probeState: RouteCandidate['probeState'];
     probeOrg: RouteCandidate['probeOrg'];
-    /** 探针原文（routes.probe_detail）。选路用来分辨「故意隔久一点」和「探针可能停了」。 */
+    /** 探针原文（routes.probe_detail）。只给人看，选路不再从里面抠节奏。 */
     probeDetail: RouteCandidate['probeDetail'];
+    /** 探针下一次该真探的时刻（routes.probe_next_at）：挂着别的组织没探那一支判过期用（#1798 片 4）。 */
+    probeNextAt: RouteCandidate['probeNextAt'];
     quota: 'ok' | 'exhausted' | 'unknown';
     windows: {
       label: string;
@@ -137,6 +139,7 @@ export async function routeFactsForPurpose(
       probeState: c.probeState,
       probeOrg: c.probeOrg,
       probeDetail: c.probeDetail,
+      probeNextAt: c.probeNextAt,
       quota: c.quota,
       windows: c.windows.map((w) => {
         const raw = windowByKey.get(`${c.poolId}\u0000${w.label}`);

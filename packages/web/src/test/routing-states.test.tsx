@@ -26,7 +26,7 @@ const routeItem = (routeId: string) => {
 
 /** 一条路由行上的状态芯片（第一个有字的圆角底色；开关的滑块也是圆的，但没有字）。 */
 const chipOf = (routeId: string) => {
-  const chip = [...routeItem(routeId).querySelectorAll('span.rounded-full')].find((el) =>
+  const chip = [...routeItem(routeId).querySelectorAll('span[data-variant]')].find((el) =>
     el.textContent?.trim(),
   );
   if (!(chip instanceof HTMLElement)) throw new Error(`路由 ${routeId} 上没有状态芯片`);
@@ -41,13 +41,13 @@ describe('路由页的状态词：后端的「死」拆开，用路由八态，�
     await opened();
     expect(chipOf('r-ca-opus').textContent).toContain('在线');
     expect(chipOf('r-rl-opus').textContent).toContain('已关');
-    expect(chipOf('r-rl-opus').className).not.toContain('text-ink-fail');
+    expect(chipOf('r-rl-opus').getAttribute('data-tone')).not.toBe('fail');
     await pickModel('Cursor Auto');
     expect(chipOf('r-cursor').textContent).toContain('故障');
-    expect(chipOf('r-cursor').className).toContain('text-ink-fail');
+    expect(chipOf('r-cursor').getAttribute('data-tone')).toBe('fail');
     await pickModel('Opus 5');
     expect(chipOf('r-ca-opus5').textContent).toContain('已下架');
-    expect(chipOf('r-ca-opus5').className).not.toContain('text-ink-fail');
+    expect(chipOf('r-ca-opus5').getAttribute('data-tone')).not.toBe('fail');
     for (const span of Array.from(document.querySelectorAll('span'))) {
       expect(['死', '活']).not.toContain(span.textContent);
     }
@@ -109,7 +109,7 @@ describe('路由页的状态词：后端的「死」拆开，用路由八态，�
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api });
     await opened();
     expect(chipOf('rt-q').textContent).toContain('暂时挡着');
-    expect(chipOf('rt-q').className).not.toContain('text-ink-fail');
+    expect(chipOf('rt-q').getAttribute('data-tone')).not.toBe('fail');
     expect(routeItem('rt-q').querySelector('.text-ink-fail')).toBeNull();
     expect(routeItem('rt-q').textContent).toContain('没过：适用的额度窗用满了');
     expect(modelRow('opus-5.5').textContent).toContain('：暂时挡着');

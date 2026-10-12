@@ -4,6 +4,7 @@
 
 import type { ReactNode } from 'react';
 import type { RoutingLayers } from '../api/types';
+import { Section } from './layout/section';
 
 /** 没有差集时的那一句。个数没随接口来就不编数字。 */
 function matchedSentence(roster: NonNullable<RoutingLayers['modelRoster']>): string {
@@ -38,7 +39,12 @@ export function ModelRosterNotice({ layers }: { layers: RoutingLayers }) {
     roster.notYet.length === 0 &&
     manual.length === 0
   ) {
-    body = <p>{matchedSentence(roster)}</p>;
+    // 都对得上是好消息：一行淡字，不占一张卡（#1916，样板：好消息不上色、不抢地方）
+    return (
+      <section aria-label="渠道模型表" className="mb-3 truncate text-meta text-muted-foreground">
+        {matchedSentence(roster)}
+      </section>
+    );
   } else if (
     roster.missingFromCatalog.length === 0 &&
     roster.goneRoutes.length === 0 &&
@@ -55,7 +61,7 @@ export function ModelRosterNotice({ layers }: { layers: RoutingLayers }) {
     body = (
       <div className="space-y-3">
         <div>
-          <h2 className="text-sm font-semibold">渠道里有、目录里还没有的模型</h2>
+          <h2 className="text-body font-semibold">渠道里有、目录里还没有的模型</h2>
           {roster.missingFromCatalog.length === 0 ? (
             <p className="mt-1 text-muted-foreground">没有</p>
           ) : (
@@ -69,7 +75,7 @@ export function ModelRosterNotice({ layers }: { layers: RoutingLayers }) {
           )}
         </div>
         <div>
-          <h2 className="text-sm font-semibold">目录里有、渠道已不认的路由</h2>
+          <h2 className="text-body font-semibold">目录里有、渠道已不认的路由</h2>
           {roster.goneRoutes.length === 0 ? (
             <p className="mt-1 text-muted-foreground">没有</p>
           ) : (
@@ -96,11 +102,8 @@ export function ModelRosterNotice({ layers }: { layers: RoutingLayers }) {
     );
   }
   return (
-    <section
-      aria-label="渠道模型表"
-      className="mb-4 rounded-xl border border-dashed bg-card px-4 py-3 text-sm"
-    >
-      {body}
-    </section>
+    <Section aria-label="渠道模型表" className="mb-4">
+      <div className="text-body">{body}</div>
+    </Section>
   );
 }

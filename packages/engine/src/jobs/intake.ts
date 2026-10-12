@@ -978,16 +978,21 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     await intakeRepos(deps, pulling, whitelist, t);
   }
   const found = t.started + t.commented;
-  deps.log('info', `拉单这一轮：${summarize(t)}`, { scanned: t.scanned, found });
+  // 每种没派的原因各几张：日志一行，库里的结局（schedule_runs.why）同一句——found=0 时只有它分得开「没单」和「全被拦」
+  const tally = summarize(t);
+  deps.log('info', `拉单这一轮：${tally}`, { scanned: t.scanned, found });
   if (t.unchecked.length > 0) {
     const n = t.unchecked.length;
-    const why = clip(`${n > 1 ? `${n} 处没查成：` : ''}${t.unchecked.join('；')}`, INTAKE_WHY_MAX);
+    const why = clip(
+      `${n > 1 ? `${n} 处没查成：` : ''}${t.unchecked.join('；')}；这一轮${tally}`,
+      INTAKE_WHY_MAX,
+    );
     // 开着开关的仓全都没读成：这一轮等于没拉
     if (t.reposOn > 0 && t.reposFailed === t.reposOn)
       return { outcome: 'failed', why, scanned: t.scanned, found };
     return { outcome: 'partial', why, scanned: t.scanned, found };
   }
-  return { outcome: 'ok', scanned: t.scanned, found };
+  return { outcome: 'ok', scanned: t.scanned, found, why: clip(tally, INTAKE_WHY_MAX) };
 }
 
 /**

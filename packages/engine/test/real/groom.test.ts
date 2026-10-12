@@ -115,4 +115,61 @@ describe('groomJob · 真装配', () => {
     });
     expect(got.ok === false && got.why).toContain('总开关关着');
   });
+
+  // #1798 片 4：整理待办选到一条路由时也先派前探一次（15 分钟新鲜线），探不通避开它再选，一轮最多 3 条。
+  it('派前探一次：探通了才起会话（选到的这一条先探过）', async () => {
+    const probed: string[] = [];
+    const { deps } = wiring({
+      probe: async (input) => {
+        probed.push(input.routeId);
+        return { kind: 'pass', label: input.label, detail: '答上了：OK', probed: true };
+      },
+    });
+    const got = await deps.runSession({
+      repo: REPO,
+      requestId: 'req-1',
+      prompt: 'p',
+      mainHead: 'a'.repeat(40),
+      timeoutMinutes: 40,
+    });
+    // 选路还是回「一条能用的路由都没有」：没探到就没有可探的，不改这一份的结论
+    expect(probed).toEqual([]);
+    expect(got.ok === false && got.why).toContain('一条能用的路由都没有');
+  });
+
+  it('探不通就避开它再选；三条都不通 → 明确失败，原因带上每条的结果', async () => {
+    const probed: string[] = [];
+    const { deps } = wiring({
+      pickRoute: async (input) => {
+        const next = ['r1', 'r2', 'r3', 'r4'].find((id) => !input.avoidRouteIds.includes(id));
+        if (next === undefined) return { ok: false, waitFor: 'none', detail: '避开之后没了' };
+        return {
+          ok: true,
+          route: {
+            routeId: next,
+            poolId: 'p',
+            modelId: `m-${next}`,
+            family: 'claude',
+            hostId: 'claude-code',
+          },
+          why: '有得派',
+        };
+      },
+      probe: async (input) => {
+        probed.push(input.routeId);
+        return { kind: 'fail', label: input.label, detail: `${input.routeId} 不通`, counted: true };
+      },
+    });
+    const got = await deps.runSession({
+      repo: REPO,
+      requestId: 'req-1',
+      prompt: 'p',
+      mainHead: 'a'.repeat(40),
+      timeoutMinutes: 40,
+    });
+    expect(probed).toEqual(['r1', 'r2', 'r3']); // 一轮最多 3 条
+    expect(got.ok).toBe(false);
+    expect(got.ok === false && got.why).toContain('派前探测都不通');
+    expect(got.ok === false && got.why).toContain('m-r1 不通（r1 不通）');
+  });
 });

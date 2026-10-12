@@ -111,25 +111,47 @@ export const SKILL_TARGETS: readonly SkillTarget[] = [
 export interface SubagentTarget {
   dir: Place;
   readers: readonly AgentId[];
-  /** 只装这几份（文件名，原件在仓里 agents/subagents/ 下同名）；不扫目录 */
+  /** 只装这几份（文件名，原件在仓里 agents/subagents/ 下同名，不许重）；不扫目录 */
   files: readonly string[];
 }
 
 /**
  * 用户级子代理定义装到哪、装哪几份。Claude Code 的用户级子代理在 ~/.claude/agents/<名>.md（code.claude.com/docs/en/sub-agents
- * 的 User-level 一档：这台上所有项目里都能用）。
+ * 的 User-level 一档：这台上所有项目里都能用；同名时项目级 .claude/agents/ 优先）。
  * - 只装 files 列的几份，不扫目录：~/.claude/agents/ 里机器上手写的（把内置子代理钉到别名模型的 Explore.md、Plan.md 这类）
- *   一律不碰、不删；仓里 .claude/agents/ 的 fleet-* 是本仓项目级的（决定 0036），随 git 走，不往家里装。
+ *   一律不碰、不删。
+ * - fleet-*.md：16 个子代理的通用版（决定 0079）。name、description、model 和仓里 .claude/agents/ 那份一致，正文去掉了
+ *   fleet-dao 专属的规矩，别的仓的会话也能用；在 fleet-dao 里项目级那份优先，本仓照旧用专属版（决定 0036）。
+ *   .claude/agents/ 那份不往家里装：里面是本仓的命令和路径。
  * - haiku55.md：别名 haiku 在本机指向 Haiku 4.5，要真 5.5 只能靠写死完整 id 的自定义子代理（决定 0035，#1393）。
- *   别的仓、别的机器没有 fleet-* 那批定义，靠它派 Haiku 5.5。
+ *   不放进 .claude/agents/：那里的会被引擎当成本仓子代理传给 --agents。
  * - 只给 Claude Code：Grok、Devin 借道读 ~/.claude 的规矩和钩子，认不认这里的子代理定义没核过，不算它们的。
  * 同名文件内容不同就先整份备份再换成仓里的、报出来（这几份归仓里管）。从 files 里去掉的，清单记着是本脚本装的才撤（先备份）。
- * 加减一份是改标准；agents/test/rules/subagent-model.rules.test.ts 钉着 haiku55.md 在列。
+ * 加减一份是改标准；agents/test/rules/subagent-model.rules.test.ts 钉着 haiku55 在列，
+ * agents/test/rules/project-subagents.rules.test.ts 钉着恰好是 agents/subagents/ 下这 17 份。
  */
 export const SUBAGENT_TARGET: SubagentTarget = {
   dir: { win32: '.claude\\agents', linux: '.claude/agents' },
   readers: ['claude'],
-  files: ['haiku55.md'],
+  files: [
+    'haiku55.md',
+    'fleet-scout.md',
+    'fleet-log-digest.md',
+    'fleet-triage.md',
+    'fleet-review-screen.md',
+    'fleet-fixer.md',
+    'fleet-brief-drafter.md',
+    'fleet-builder.md',
+    'fleet-ui-builder.md',
+    'fleet-ci-triager.md',
+    'fleet-ui-verifier.md',
+    'fleet-researcher.md',
+    'fleet-groomer.md',
+    'fleet-standard-editor.md',
+    'fleet-architect.md',
+    'fleet-debugger.md',
+    'fleet-reviewer.md',
+  ],
 };
 
 /** agents/hooks/ 下的脚本整份拷到这里（相对家目录）；各家设置里登记的命令指向这里。整个目录归本脚本管 */
@@ -185,6 +207,8 @@ export interface HookTarget {
  * SessionStart 的输出进会话上下文；PreToolUse 退出码 2 拦下、stderr 给模型看；Stop 平时只提醒（systemMessage），
  * 退出码恒为 0（Stop 上 exit 2 是「不许停」）。没开无人值守时 Stop 不输出 decision:block；只有这个会话自己跑了 unattended.mjs on 才挡收尾（决定 0028，推翻 0026 的「收尾不拦」；起后台活不自动开仍是 0026）。
  * 开会话那条要取远端、快进、跑一遍同步，给足 90 秒。
+ * 决定 0083：用户级只登记拦密钥（PreToolUse / BeforeTool）。开会话、收尾、落盘、主对话只在 fleet-dao 仓的项目设置
+ * `.claude/settings.json`。下面写的事件语义是这些脚本自己的，不是用户级还在登记它们。
  * 借道读这份的：Grok 默认扫 ~/.claude/settings.json 的钩子（~/.grok/docs/user-guide/10-hooks.md「Hook Locations」，
  * 输入是 camelCase、终端工具叫 run_terminal_command，开会话钩子的输出不进上下文）；Devin CLI 默认 read_config_from.claude
  * （docs.devin.ai/cli/extensibility/hooks/overview，终端工具叫 exec）。Cursor 的命令行默认也读（cursor.com/docs/reference/third-party-hooks，
@@ -229,7 +253,7 @@ export interface HookTarget {
  *   fail-open，所以钩子脚本自己出错时要按拦处理并退出 2）。工具名就是 Bash、Read、Grep，matcher 锚定成 ^(Bash|Read|Grep)$。
  *   Bash 在 Windows 上也是 Git Bash（packages/kaos/src/environment.ts）；钩子命令经 Node 的 shell: true 跑，Windows 上是
  *   cmd（packages/agent-core-v2/src/features/externalHooks/internal/runHook.ts），启动器照用。timeout 按秒算。
- *   开会话那条（SessionStart）只看不拦，输出不保证进会话上下文，登记它是为了开会话就同步规矩。
+ *   开会话那条以前登记在用户级，决定 0083 起过程钩子不在用户级给每个仓跑。决定 0085 只留一个加载器。
  */
 export const HOOK_TARGETS: readonly HookTarget[] = [
   {
@@ -238,7 +262,10 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
     readers: ['claude', 'grok', 'devin'],
     borrowed: ['grok', 'devin'],
     hooks: [
-      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
+      // 决定 0083：开会话、主对话、收尾、落盘不在用户级给每个仓跑。
+      // 决定 0085：用户级只加这一个加载器。有订阅标记的仓，它才把过程组写进那个仓的项目设置。
+      // 下次同步会摘掉这里不再列出的登记。
+      { event: 'SessionStart', script: 'plugin-loader.mjs', timeout: 10 },
       {
         event: 'PreToolUse',
         matcher:
@@ -247,24 +274,13 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
         timeout: 10,
       },
       { event: 'PreToolUse', matcher: '^(exec|read|grep)$', script: 'pretool.mjs', timeout: 10 },
-      // 主对话的两条（决定 0078）：引导先回、子代理一律后台跑。不写 matcher，每次工具调用都过；
-      // 判断、为什么、Grok 借道时怎么办写在 agents/hooks/main-thread.mjs 开头。
-      { event: 'PreToolUse', script: 'main-thread.mjs', timeout: 10 },
-      { event: 'Stop', script: 'stop.mjs', timeout: 10 },
-      // 创始人每条消息一到就原样落盘一份（2026-10-04 他问「丢失我的回复」）。为什么要有它、为什么
-      // 绝不 exit 2 / 绝不输出、超时为什么是 30000 这些，写在 agents/hooks/prompt-log.mjs 开头。
-      // UserPromptSubmit 不吃 matcher，别写；timeout 按毫秒算，写小了等于钩子从没跑成。
-      { event: 'UserPromptSubmit', script: 'prompt-log.mjs', timeout: 30000 },
     ],
   },
   {
     settings: { win32: '.codex\\hooks.json', linux: '.codex/hooks.json' },
     format: 'codex',
     readers: ['codex'],
-    hooks: [
-      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
-      { event: 'PreToolUse', matcher: '^Bash$', script: 'pretool-codex.mjs', timeout: 10 },
-    ],
+    hooks: [{ event: 'PreToolUse', matcher: '^Bash$', script: 'pretool-codex.mjs', timeout: 10 }],
   },
   {
     settings: { win32: '.gemini\\settings.json', linux: '.gemini/settings.json' },
@@ -272,7 +288,6 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
     nodeOnWindows: true,
     readers: ['gemini'],
     hooks: [
-      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90_000 },
       {
         event: 'BeforeTool',
         matcher: '^(run_shell_command|read_file|read_many_files|grep_search|search_file_content)$',
@@ -303,10 +318,7 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
     settings: { win32: '.kimi-code\\config.toml', linux: '.kimi-code/config.toml' },
     format: 'kimi',
     readers: ['kimi'],
-    hooks: [
-      { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
-      { event: 'PreToolUse', matcher: '^(Bash|Read|Grep)$', script: 'pretool-kimi.mjs', timeout: 10 },
-    ],
+    hooks: [{ event: 'PreToolUse', matcher: '^(Bash|Read|Grep)$', script: 'pretool-kimi.mjs', timeout: 10 }],
   },
 ];
 

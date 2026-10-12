@@ -21,6 +21,18 @@ export class PublicHealthError extends Error {
   }
 }
 
+/**
+ * 这一项现在定不下来、但不是坏（抛它 = 待定）：不当失败、不让 /healthz 变 503，健康页画成「待定」等着（#1909）。
+ * 和 PublicHealthError 分开是因为它不进「红」那一支：全流程巡检的结论早于当前部署时就是这样——那轮是上一版的，
+ * 拿它报红会把刚发完版的正常窗口画成断链。定不下来的窗口有上限（这种状态写这话的那一处给）：过了上限照实报红。
+ */
+export class PublicHealthPending extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PublicHealthPending';
+  }
+}
+
 /** 单项探活的上限：一项卡住不能把整个健康检查拖死。 */
 const CHECK_TIMEOUT_MS = 3_000;
 
@@ -29,9 +41,11 @@ export type HealthReport = {
   checks: Record<
     string,
     | { ok: true }
-    /** 好，另带一句说明（比如飞书网关几秒前来过）：检查返回了一句话。和「未接」靠有没有 status 分开。 */
+    /** 好，另带一句说明（比如飞书网关几秒前来过）：检查返回了一句话。和「未接」「待定」靠有没有 status 分开。 */
     | { ok: true; message: string }
     | { ok: true; status: 'not_wired'; message: string }
+    /** 待定：不是坏，但现在说不了「好」（比如结论早于当前部署）；不算失败、不让整体变 503。 */
+    | { ok: true; status: 'pending'; message: string }
     | { ok: false; code: string; message: string }
   >;
 };
@@ -67,6 +81,11 @@ export async function runHealthChecks(
           error: errMessage(err),
           ...(err instanceof PublicHealthError && err.detail ? { detail: err.detail } : {}),
         });
+        // 待定（#1909）：不是坏——这一项现在说不了「好」，但也不该把整体画成红、更不该 503（好比结论早于当前部署）。
+        // 只有明抛 PublicHealthPending 才判成待定；别的错误（含兜底「连不上」）照旧红。
+        if (err instanceof PublicHealthPending) {
+          return [name, { ok: true, status: 'pending', message: err.message }] as const;
+        }
         return [
           name,
           err instanceof PublicHealthError

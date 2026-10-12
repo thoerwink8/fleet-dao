@@ -1,6 +1,6 @@
 // 数据页共用的一条：刷新、最后更新、过期。dataUpdatedAt 用毫秒时间戳，0 表示从没读成过（不能拿它去算「刚刚」）。
 // 两种写法：默认 text 是「刷新」按钮加一行「最后更新 …」字；dot（主页用，#1819）是一个新鲜度点加图标刷新按钮，
-// 点的颜色看数据年龄和推送：1 分钟内绿、5 分钟内黄、更久或推送断开红；悬停写具体时间。
+// 新鲜度看数据年龄和推送：1 分钟内新鲜（不画，只留给读屏）、5 分钟内「数据有点旧」黄、更久或推送断开「数据已过期」红；悬停写具体时间。
 
 import { LoaderCircle, RefreshCw } from 'lucide-react';
 import type { ComponentProps } from 'react';
@@ -9,6 +9,8 @@ import { formatAgo } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
+import { StatusBadge } from './layout/status-badge';
+import type { LayoutTone } from './layout/tone';
 import { Button } from './ui/button';
 
 const MIN = 60_000;
@@ -26,10 +28,10 @@ export function freshnessOf(ageMs: number, push?: LiveStatus): Freshness {
   return 'stale';
 }
 
-const dotClass: Record<Freshness, string> = {
-  fresh: 'bg-st-done',
-  aging: 'bg-st-stall',
-  stale: 'bg-st-fail',
+const freshTone: Record<Freshness, LayoutTone> = {
+  fresh: 'done',
+  aging: 'wait',
+  stale: 'fail',
 };
 
 const freshWords: Record<Freshness, string> = {
@@ -75,14 +77,18 @@ export function RefreshBar({
       push === 'down' ? `${freshWords[level]}：推送断开，${when}` : `${freshWords[level]}：${when}`;
     return (
       <div className={cn('flex items-center gap-1', className)} data-refresh-bar="dot">
+        {/* 新鲜的时候不占版面（只留给读屏）：以前这里是个没有字的绿点，和「实时」旁边的点重复。旧了才写字、带色。 */}
         <span
           role="status"
           title={label}
           aria-label={label}
           data-freshness={level}
-          className="grid size-8 shrink-0 place-items-center max-md:size-10"
+          data-tone={freshTone[level]}
+          className={level === 'fresh' ? 'sr-only' : 'inline-flex shrink-0'}
         >
-          <span aria-hidden className={cn('size-3 rounded-full', dotClass[level])} />
+          {level === 'fresh' ? null : (
+            <StatusBadge tone={freshTone[level]} variant="outline" label={freshWords[level]} />
+          )}
         </span>
         <Button
           type="button"
@@ -107,7 +113,7 @@ export function RefreshBar({
     <div className={cn('flex flex-wrap items-center gap-2', phone && 'flex-row-reverse', className)}>
       <Button
         type="button"
-        variant="outline"
+        variant={phone ? 'ghost' : 'outline'}
         size={phone ? 'icon-lg' : 'sm'}
         aria-label={phone ? '刷新' : undefined}
         aria-disabled={isFetching}
@@ -123,18 +129,14 @@ export function RefreshBar({
       </Button>
       <span role="status">
         {never ? (
-          <span className="text-caption text-muted-foreground">还没读到过</span>
+          <span className="text-meta text-muted-foreground">还没读到过</span>
         ) : (
-          <span className="text-caption text-muted-foreground">
+          <span className="text-meta text-muted-foreground">
             最后更新 <span className="num">{formatAgo(new Date(shownAt).toISOString(), now)}</span>
           </span>
         )}
       </span>
-      {stale ? (
-        <span className="inline-flex h-5 items-center rounded-full bg-st-stall/14 px-1.5 text-caption font-medium text-ink-stall">
-          数据已过期
-        </span>
-      ) : null}
+      {stale ? <StatusBadge tone="stall" label="数据已过期" icon={false} /> : null}
     </div>
   );
 }

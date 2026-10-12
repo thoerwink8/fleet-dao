@@ -88,8 +88,13 @@ export interface Graph {
   edges: GraphEdge[];
   parentOf: Map<string, string>;
   childrenOf: Map<string, string[]>;
-  /** 节点集合的指纹：只有它变了才重新排版，状态变化（颜色、文字）不动位置。 */
+  /** 节点集合的指纹：只有它变了才重新排版，状态变化（颜色、文字）不动位置。根字号倍数也算在里面。 */
   structureKey: string;
+  /**
+   * 根字号倍数（lib/root-scale.ts，桌面 1.25，#1937）：卡里的字、内边距是 rem，跟着根字号放大，
+   * 所以节点尺寸、排版间距都乘它，整张图等比放大，和浏览器缩放 125% 一模一样；缩放档位、读得出的下限都不用改。
+   */
+  scale: number;
   /** 过滤后画出来的单子数 / 一共的单子数。 */
   shown: number;
   total: number;
@@ -238,7 +243,10 @@ export function buildGraph(input: {
   flow: readonly HomeFlowStage[];
   health?: HomeHealth | undefined;
   filter: BoardFilter;
+  /** 根字号倍数，缺省 1（见 Graph.scale）。 */
+  scale?: number | undefined;
 }): Graph {
+  const scale = input.scale !== undefined && input.scale > 0 ? input.scale : 1;
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const parentOf = new Map<string, string>();
@@ -255,7 +263,12 @@ export function buildGraph(input: {
   ) => {
     const size =
       data.kind === 'segment' ? { ...NODE_SIZE.segment, width: segmentWidth } : NODE_SIZE[data.kind];
-    const node: GraphNode = { id, data, ...size };
+    const node: GraphNode = {
+      id,
+      data,
+      width: Math.round(size.width * scale),
+      height: Math.round(size.height * scale),
+    };
     if (parent) node.side = parent.side;
     nodes.push(node);
     if (!parent) return;
@@ -306,8 +319,9 @@ export function buildGraph(input: {
     }
   }
 
-  const structureKey = nodes.map((n) => `${n.id}@${n.side ?? 'root'}`).join('|');
-  return { nodes, edges, parentOf, childrenOf, structureKey, shown, total: input.running.length };
+  const nodeKey = nodes.map((n) => `${n.id}@${n.side ?? 'root'}`).join('|');
+  const structureKey = scale === 1 ? nodeKey : `${nodeKey}#${scale}`;
+  return { nodes, edges, parentOf, childrenOf, structureKey, scale, shown, total: input.running.length };
 }
 
 export interface Phase {

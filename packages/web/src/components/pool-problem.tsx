@@ -20,25 +20,32 @@ export function usePoolProblems(): {
   return { problems, error: q.error };
 }
 
-/** 一个池的毛病，一行话，带「几小时前报的」。窄屏自己换行。 */
+/** 一个池的毛病，一行话，带「几小时前报的」。窄屏自己换行；oneLine 时不折、放不下截断，整句在悬停里（额度页的池行，#1921）。 */
 export function PoolProblemLine({
   problem,
   now,
   className,
+  oneLine = false,
 }: {
   problem: PoolProblem;
   now?: number;
   className?: string;
+  oneLine?: boolean;
 }) {
   return (
     <p
       data-pool-problem={problem.kind}
       data-pool={problem.poolId}
+      data-one-line={oneLine || undefined}
       title={problemLine(problem)}
-      className={cn('flex min-w-0 items-start gap-1.5 text-caption text-ink-stall', className)}
+      className={cn(
+        'flex min-w-0 gap-1.5 text-meta text-ink-stall',
+        oneLine ? 'items-center whitespace-nowrap' : 'items-start',
+        className,
+      )}
     >
-      <TriangleAlert className="mt-0.5 size-3 shrink-0" aria-hidden />
-      <span className="min-w-0 break-words">
+      <TriangleAlert className={cn('size-3 shrink-0', !oneLine && 'mt-0.5')} aria-hidden />
+      <span className={cn('min-w-0', oneLine ? 'truncate' : 'break-words')}>
         <span className="font-medium">{problem.kind === 'unreadable' ? '额度读不到' : '额度读数过期'}</span>：
         {problem.reason}。<span className="font-medium">要人做：</span>
         {problem.action}

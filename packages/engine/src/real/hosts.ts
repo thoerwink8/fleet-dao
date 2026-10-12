@@ -805,6 +805,9 @@ function mirasimDriver(
           ...(MIRASIM_MODELLESS_AGENTS.has(agent) ? { expectModel: effort.model } : { model: effort.model }),
           session:
             spec.session.mode === 'resume' ? { mode: 'resume', key: spec.session.id } : { mode: 'new' },
+          // 时限照引擎给的（和另外三家一样）：一次性段的总时长比 one-shot 早一分钟到、驱动先报 wall_clock_timeout，
+          // 探针按 PROBE_LIMITS。不交就落到插头默认的 2 小时，one-shot 60 分钟的兜底先杀，记成「引擎叫停」（#1859）
+          limits: spec.limits,
           testCommands: spec.testCommands,
         },
         {

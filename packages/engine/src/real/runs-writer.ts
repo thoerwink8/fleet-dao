@@ -78,6 +78,7 @@ export function realRuns(deps: RealRunsDeps): RunsWriter {
           cacheReadTokens: run.cacheReadTokens ?? null,
           cacheWriteTokens: run.cacheWriteTokens ?? null,
           costUsd: run.costUsd ?? null,
+          sessionId: run.sessionId ?? null,
           memoryPeakMb: run.memoryPeakMb ?? null,
           failureReason: run.failureReason ?? null,
         },

@@ -1,74 +1,53 @@
-// 按需探测的结论原文和认法（#1635）：固定那一句 + 上一次真探的结果和北京时间时刻；没真探过的写「还没真探过」，不编。
+// 探针退避节奏（#1424）。#1843（#1798 片 8）删了按需探测和只为抠原文存在的函数：
+// onDemandDetail、isOnDemandDetail、isDegradedDetail、probeCadenceMinutes、probeNextEveryMinutes、probeBackoffNextAt
+// 和它们的断言一起删了（概念没了：按需探测不再有，节奏和疑似换模型改读 routes 上的结构化列）。
 import { describe, expect, it } from 'vitest';
+import * as pace from '../src/route-probe-pace.ts';
 import {
-  isDegradedDetail,
-  isOnDemandDetail,
-  onDemandDetail,
-  probeCadenceMinutes,
+  probeBackoffMinutes,
+  probeBackoffNotice,
+  probeBackoffPhrase,
+  probeFailStreak,
 } from '../src/route-probe-pace.ts';
 
-describe('疑似换成旧模型 / 疑似降智的原文（#1748、#1798）', () => {
-  it('不通的结论直接以「疑似降智」或「疑似换成旧模型」起头：认', () => {
-    expect(isDegradedDetail('疑似降智：题 17 乘 23，应为 391，实答 381')).toBe(true);
-    expect(isDegradedDetail('疑似换成旧模型：题 日本首相，新答案应为 高市早苗，实答 石破茂')).toBe(true);
+describe('退避', () => {
+  it('连着不通 1、2、3、4、5 次：隔 15、30、60、120、240 分钟；不到 1 次按第 1 档，超过封顶', () => {
+    expect([1, 2, 3, 4, 5].map(probeBackoffMinutes)).toEqual([15, 30, 60, 120, 240]);
+    expect(probeBackoffMinutes(0)).toBe(15);
+    expect(probeBackoffMinutes(9)).toBe(240);
   });
-  it('按需探测接手后，上一次真探是疑似降智：也认（路由页、渠道状态页不能只写按需）', () => {
-    const text = onDemandDetail({
-      state: 'failed',
-      at: new Date('2026-10-10T01:05:00Z'),
-      detail: '疑似降智：题 17 乘 23，应为 391，实答 381',
-    });
-    expect(isOnDemandDetail(text)).toBe(true);
-    expect(isDegradedDetail(text)).toBe(true);
-  });
-  it('上一次真探是通的、普通不通、没真探过、空：不认', () => {
-    expect(isDegradedDetail(onDemandDetail({ state: 'ok', at: new Date(), detail: '答上了：OK' }))).toBe(
-      false,
-    );
-    expect(isDegradedDetail(onDemandDetail({ state: 'failed', at: new Date(), detail: '网络不通' }))).toBe(
-      false,
-    );
-    expect(isDegradedDetail(onDemandDetail(null))).toBe(false);
-    expect(isDegradedDetail('答上了：OK · 降智检测通过（17*23=391）')).toBe(false);
-    expect(isDegradedDetail(null)).toBe(false);
-    expect(isDegradedDetail(undefined)).toBe(false);
-  });
-});
 
-describe('按需探测的原文', () => {
-  it('上一次真探通：写通和北京时间时刻（UTC 01:05 = 北京 09:05）', () => {
-    const text = onDemandDetail({ state: 'ok', at: new Date('2026-10-10T01:05:00Z'), detail: '答上了：OK' });
-    expect(text).toBe('不主动探，要派给它时先探一次。上一次真探：通，10-10 09:05（答上了：OK）');
-    expect(isOnDemandDetail(text)).toBe(true);
+  it('退避那句按北京时间写（UTC 01:05 = 北京 09:05），原文里也认得回来', () => {
+    const phrase = probeBackoffPhrase(new Date('2026-10-10T01:05:00Z'));
+    expect(phrase).toBe('退避中，下次约 09:05 再探');
+    expect(probeBackoffNotice(`503 容量满。${phrase}（连着不通 1 次）`)).toBe(phrase);
+    expect(probeBackoffNotice('答上了：pong')).toBeNull();
+    expect(probeBackoffNotice(null)).toBeNull();
   });
-  it('上一次不通：写不通和原因', () => {
-    const text = onDemandDetail({
-      state: 'failed',
-      at: new Date('2026-10-10T01:05:00Z'),
-      detail: '网络不通',
-    });
-    expect(text).toContain('上一次真探：不通，10-10 09:05');
-    expect(text).toContain('网络不通');
-  });
-  it('没有上一次、或上一次没真探（skipped）：写还没真探过，不编时刻', () => {
-    expect(onDemandDetail(null)).toBe('不主动探，要派给它时先探一次。还没真探过');
-    expect(onDemandDetail({ state: 'skipped', at: new Date(), detail: '渠道已下架' })).toContain(
-      '还没真探过',
-    );
-  });
+
   it('【故意造出的失败】时刻不是有效时间：抛，不写一个编的钟点', () => {
-    expect(() => onDemandDetail({ state: 'ok', at: new Date(Number.NaN), detail: null })).toThrow();
+    expect(() => probeBackoffPhrase(new Date(Number.NaN))).toThrow();
   });
-  it('不是按需的原文认不出来', () => {
-    expect(isOnDemandDetail('答上了：OK')).toBe(false);
-    expect(isOnDemandDetail(null)).toBe(false);
+
+  it('原文里的「连着不通 N 次」（引擎老行兜底）；没写次数回 null，不当 0', () => {
+    expect(probeFailStreak('没通（连着不通 3 次）')).toBe(3);
+    expect(probeFailStreak('网络不通')).toBeNull();
+    expect(probeFailStreak(null)).toBeNull();
   });
 });
 
-describe('再探间隔（三档成功间隔由引擎写列，这里只认退避）', () => {
-  it('通了的按钟一轮；写了连着不通次数的按退避档', () => {
-    expect(probeCadenceMinutes('claude-code', '答上了：OK')).toBe(15);
-    expect(probeCadenceMinutes('cursor-agent', '答上了：OK')).toBe(15);
-    expect(probeCadenceMinutes('claude-code', '没通（连着不通 3 次）')).toBe(60);
+describe('按需探测和抠原文的函数已删（#1843）', () => {
+  it('这些导出都不在了', () => {
+    for (const name of [
+      'ROUTE_PROBE_ON_DEMAND_MARK',
+      'onDemandDetail',
+      'isOnDemandDetail',
+      'isDegradedDetail',
+      'probeCadenceMinutes',
+      'probeNextEveryMinutes',
+      'probeBackoffNextAt',
+    ]) {
+      expect(pace, name).not.toHaveProperty(name);
+    }
   });
 });

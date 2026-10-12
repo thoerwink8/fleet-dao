@@ -412,6 +412,10 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
         R.resolveNotification.response,
       );
     },
+    answerNotification: (id, body) =>
+      send('POST', apiUrl(R.answerNotification.path, { notificationId: id }), R.answerNotification.response, {
+        body: R.answerNotification.request.parse(body),
+      }),
     audit: (query) =>
       send(
         'GET',

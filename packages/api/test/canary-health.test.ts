@@ -12,8 +12,13 @@ import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fle
 import type { EngineMasterState } from '@fleet-dao/shared';
 import { silentLogger } from '@fleet-dao/store';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { CANARY_STALE_MS, canaryHealth, canaryHealthCheck } from '../src/canary-health.ts';
-import { PublicHealthError, runHealthChecks } from '../src/health.ts';
+import {
+  CANARY_PENDING_MAX_MS,
+  CANARY_STALE_MS,
+  canaryHealth,
+  canaryHealthCheck,
+} from '../src/canary-health.ts';
+import { PublicHealthError, PublicHealthPending, runHealthChecks } from '../src/health.ts';
 
 // 路径放进变量：api 的 tsconfig 不收 web 包的文件，照 deploy-lag.test.ts 的写法运行时再载
 const SCAN = '../../web/src/build/scan.ts';
@@ -108,7 +113,7 @@ describe('canary 项怎么判', () => {
     });
   });
 
-  it('最近一轮结论早于当前部署、断在收单（#1808）：待定，不报 canary_broken', () => {
+  it('最近一轮结论早于当前部署、断在收单（#1808）：待定，不报 canary_broken；写明发版后最多等多久（#1909）', () => {
     const finished = row({
       verdict: 'broken',
       stage: 'intake',
@@ -120,9 +125,23 @@ describe('canary 项怎么判', () => {
     const got = canaryHealth({ finished, running: null }, NOW, undefined, deployedAt);
     expect(got).toEqual({
       ok: 'pending',
-      note: '这条结论早于当前部署（09-27 20:00），等新一轮',
+      note: '这条结论早于当前部署（09-27 20:00），等新一轮（发版后最多 12 小时）',
     });
     expect(got).not.toMatchObject({ code: 'canary_broken' });
+  });
+
+  it('【故意造出的失败】结论早于部署、等过了上限还没有新结论（#1909）：报红，不永久画成待定', () => {
+    const finished = row({
+      verdict: 'broken',
+      stage: 'intake',
+      endedAt: ago(CANARY_PENDING_MAX_MS / 60_000 + 120),
+      why: '断在「收单」：库里还没有这张单的任务行',
+    });
+    // 部署早于那轮结论、且已经过了上限：不是发版窗口了，巡检没跑出新的一轮
+    const deployedAt = new Date(NOW.getTime() - CANARY_PENDING_MAX_MS - 60_000);
+    const got = canaryHealth({ finished, running: null }, NOW, undefined, deployedAt);
+    expect(got).toMatchObject({ ok: false, code: 'canary_pending_too_long' });
+    expect(got).not.toMatchObject({ ok: 'pending' });
   });
 
   it('结论晚于部署、断在收单（#1808）：照旧报 canary_broken', () => {
@@ -275,8 +294,23 @@ describe('canary 项怎么判', () => {
         undefined,
         ago(30),
       ),
+      // 结论早于部署、过了上限还没有新结论（#1909）：报红这一种
+      canaryHealth(
+        {
+          finished: row({
+            verdict: 'broken',
+            stage: 'intake',
+            endedAt: ago(CANARY_PENDING_MAX_MS / 60_000 + 120),
+            why: 'x',
+          }),
+          running: null,
+        },
+        NOW,
+        undefined,
+        new Date(NOW.getTime() - CANARY_PENDING_MAX_MS - 60_000),
+      ),
     ].map((h) => (h.ok === false ? h.message : h.note));
-    expect(said).toHaveLength(12);
+    expect(said).toHaveLength(13);
     for (const text of said) expect(scan.scanText('canary', text, scan.BUILTIN_TERMS), text).toEqual([]);
   });
 });
@@ -357,9 +391,9 @@ describe('canary 项读库（真库）', () => {
       () => null,
       (e: unknown) => e,
     );
-    expect(pending).toBeInstanceOf(PublicHealthError);
+    // 待定抛的是 PublicHealthPending（#1909）：不当红、也不让 /healthz 变 503（下面单独验）
+    expect(pending).toBeInstanceOf(PublicHealthPending);
     expect(pending).toMatchObject({
-      code: 'canary_pending',
       message: '跳过：引擎总开关从没打开过（默认关），巡检没跑、没验；最近一轮有结论的是 09-27 19:00「验收」',
     });
     const err = await canaryHealthCheck(t.db, masterOn, () => NOW, boot)().then(
@@ -368,5 +402,64 @@ describe('canary 项读库（真库）', () => {
     );
     expect(err).toBeInstanceOf(PublicHealthError);
     expect(err).toMatchObject({ code: 'canary_broken' });
+  });
+
+  it('待定（结论早于部署、跳过、总开关关着）不让 /healthz 变 503：这一项是待定、整体 200（#1909）', async () => {
+    await resetTestDb(t);
+    await registerScheduledJobs(t.db, [
+      { id: 'canary', name: '全流程巡检', schedule: '每 6 小时', expectEveryMinutes: 780 },
+    ]);
+    const masterOffState = async (): Promise<EngineMasterState> => ({ on: false, why: 'never_set' });
+    const broken = await startCanaryRun(t.db, {
+      scheduleRunId: await startScheduleRun(t.db, 'canary', ago(120)),
+      repo: 'acme/fleet-canary',
+      at: ago(120),
+    });
+    await finishCanaryRun(t.db, broken, {
+      verdict: 'broken',
+      stage: 'verify',
+      why: '断在「验收」：停下等人',
+      steps: [],
+      at: ago(90),
+    });
+    const boot = ago(24 * 60);
+    const report = await runHealthChecks(
+      [{ name: 'canary', check: canaryHealthCheck(t.db, masterOffState, () => NOW, boot) }],
+      silentLogger,
+    );
+    expect(report.ok).toBe(true);
+    expect(report.checks.canary).toEqual({
+      ok: true,
+      status: 'pending',
+      message: '跳过：引擎总开关从没打开过（默认关），巡检没跑、没验；最近一轮有结论的是 09-27 19:00「验收」',
+    });
+  });
+
+  it('【故意造出的失败】结论早于部署、过了上限还没新结论：这一项照旧红、整体 503（#1909）', async () => {
+    await resetTestDb(t);
+    await registerScheduledJobs(t.db, [
+      { id: 'canary', name: '全流程巡检', schedule: '每 6 小时', expectEveryMinutes: 780 },
+    ]);
+    const masterOn = async (): Promise<EngineMasterState> => ({ on: true });
+    const old = await startCanaryRun(t.db, {
+      scheduleRunId: await startScheduleRun(t.db, 'canary', ago(30 * 60)),
+      repo: 'acme/fleet-canary',
+      at: ago(30 * 60),
+    });
+    await finishCanaryRun(t.db, old, {
+      verdict: 'pass',
+      stage: 'board',
+      why: null,
+      steps: [],
+      at: ago(29 * 60),
+    });
+    // 部署早于那轮结论、且已经过了上限
+    const boot = new Date(NOW.getTime() - CANARY_PENDING_MAX_MS - 60_000);
+    const report = await runHealthChecks(
+      [{ name: 'canary', check: canaryHealthCheck(t.db, masterOn, () => NOW, boot) }],
+      silentLogger,
+    );
+    expect(report.ok).toBe(false);
+    expect(report.checks.canary).toMatchObject({ ok: false, code: 'canary_pending_too_long' });
   });
 });

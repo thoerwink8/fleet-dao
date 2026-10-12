@@ -64,9 +64,9 @@ describe('额度格', () => {
     expect(el.dataset.hot).toBeUndefined();
     expect(el.dataset.stale).toBe('true');
     // 页脚那一行「42 分钟前读」和过期说明各有一处「42 分钟前」，页脚那处标停滞色
-    expect(
-      screen.getAllByText('42 分钟前').some((n) => n.parentElement?.className.includes('text-ink-stall')),
-    ).toBe(true);
+    expect(screen.getAllByText('42 分钟前').some((n) => n.parentElement?.dataset.tone === 'stall')).toBe(
+      true,
+    );
     expect(el.querySelector('[data-stale-note]')).toBeTruthy();
   });
 
@@ -316,5 +316,138 @@ describe('窗口格子小标题', () => {
     });
     expect(el.querySelector('[title^="上游原名"]')).toBeNull();
     expect(el.textContent).not.toContain('5 小时窗');
+  });
+});
+
+describe('额度页照路由页样板（#1921）', () => {
+  test('顶上结论块：池名一行、先用哪个窗一句加状态、灰字补充一行，三行都不折', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    const hero = (await screen.findByText('Claude 订阅 · claude-b')).closest(
+      '[data-quota-hero]',
+    ) as HTMLElement;
+    expect(hero).toBeTruthy();
+    const line = hero.querySelector('[data-hero-line]') as HTMLElement;
+    expect(line.textContent).toContain('5 小时窗还剩 82%');
+    expect(line.textContent).toContain('该先用');
+    expect(line.className).toContain('whitespace-nowrap');
+    expect(line.getAttribute('title')).toContain('清零');
+    const notes = hero.querySelector('[data-hero-notes]') as HTMLElement;
+    expect(notes.className).toContain('truncate');
+    expect(notes.getAttribute('title')).toBe(notes.textContent);
+    expect(notes.textContent).toContain('个窗快用完');
+    expect(notes.textContent).toContain('过期或没查成的读数');
+  });
+
+  test('池行：在跑几个和到期并成一行灰字；池的毛病收成一行，整句在悬停里，摘要里照旧是整句', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    const row = (await screen.findByRole('rowheader', { name: /supergrok/ })) as HTMLElement;
+    const meta = row.querySelector('[data-pool-meta]') as HTMLElement;
+    expect(meta.textContent).toMatch(/在跑 \d+\/\d+ · .*到期/);
+    expect(meta.className).toContain('whitespace-nowrap');
+    const problem = row.querySelector('[data-pool-problem]') as HTMLElement;
+    expect(problem.dataset.oneLine).toBe('true');
+    expect(problem.getAttribute('title')).toContain('要人做');
+    const panel = openSummary('读数过期或没查成');
+    expect(panel.querySelector('[data-pool-problem]')?.hasAttribute('data-one-line')).toBe(false);
+  });
+
+  test('先用它的格子不再描粗框，只铺淡底', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    await screen.findByRole('rowheader', { name: /claude-b/ });
+    const hot = document.querySelector('[data-quota-line][data-hot]') as HTMLElement;
+    expect(hot).toBeTruthy();
+    expect(hot.className).toContain('bg-accent');
+    expect(hot.className).not.toContain('border-brand');
+  });
+});
+
+describe('额度页观感（#1898）', () => {
+  /** 在假数据上加一个没有任何额度窗的池、一个上游新出的窗口，再按需带上切号现状和对账两项。 */
+  function apiWith(extra: { orgSwitch?: boolean; reconcile?: boolean } = {}) {
+    const api = createMockApi({ live: false });
+    const readAt = new Date().toISOString();
+    return {
+      ...api,
+      pools: async () => {
+        const base = await api.pools();
+        const first = base.pools[0] as (typeof base.pools)[number];
+        const empty = { ...first, id: 'carpool-empty', windows: [], quotaStatus: 'fresh' as const };
+        const other = (label: string, scope?: string): QuotaWindowView => ({
+          window: 'other',
+          label,
+          ...(scope ? { scope } : {}),
+          unit: 'percent',
+          source: 'cursor-dashboard',
+          stale: false,
+          utilization: 0.12,
+          resetsAt: at(600),
+          reading: 'measured',
+          readAt,
+        });
+        const cursor = {
+          ...first,
+          id: 'cursor-x',
+          windows: [other('api_percent', 'api'), other('brand_new_key')],
+        };
+        return {
+          ...base,
+          pools: [...base.pools, empty, cursor],
+          ...(extra.orgSwitch
+            ? {
+                orgSwitch: {
+                  state: 'known' as const,
+                  live: 'carpool' as const,
+                  whites: 0,
+                  soloPaused: false,
+                  updatedAt: readAt,
+                },
+              }
+            : {}),
+          ...(extra.reconcile
+            ? { carpoolReconcile: { state: 'unavailable' as const, why: '还没读到拼车窗口' } }
+            : {}),
+        };
+      },
+    };
+  }
+
+  test('没有任何额度窗的池整行折成一行「无额度窗」，不补一排「—」', async () => {
+    renderApp(<QuotaPage />, { api: apiWith() });
+    const row = (await screen.findByText('carpool-empty')).closest('tr') as HTMLElement;
+    expect(within(row).getByText('无额度窗').hasAttribute('data-quota-empty')).toBe(true);
+    expect(row.querySelectorAll('td')).toHaveLength(0);
+    expect(row.textContent).not.toContain('—');
+  });
+
+  test('窗口名一律中文：api_percent 变「指定模型额度」，认不出的写「未命名窗口」，原键只在说明里', async () => {
+    renderApp(<QuotaPage />, { api: apiWith() });
+    const row = (await screen.findByText('cursor-x')).closest('tr') as HTMLElement;
+    expect(within(row).getByText('指定模型额度')).toBeTruthy();
+    const unnamed = within(row).getByText('未命名窗口');
+    expect(unnamed.getAttribute('title')).toBe('上游原名：brand_new_key');
+    expect(row.textContent).not.toContain('api_percent');
+    expect(row.textContent).not.toContain('brand_new_key');
+    expect(document.body.textContent).not.toContain('api_percent');
+  });
+
+  test('页内顶部只剩一条提醒：切号现状和对账合在一起', async () => {
+    renderApp(<QuotaPage />, { api: apiWith({ orgSwitch: true, reconcile: true }) });
+    const notice = await screen.findByTestId('quota-notice');
+    expect(notice.querySelectorAll('[role="alert"], [role="status"]')).toHaveLength(1);
+    expect(notice.textContent).toContain('挂着拼车');
+    expect(notice.textContent).toContain('额度对账看不到：还没读到拼车窗口');
+    expect(screen.queryByTestId('org-switch')).toBeNull();
+    expect(screen.queryByTestId('carpool-reconcile')).toBeNull();
+  });
+
+  test('图例收进表头的 ⓘ，表上面没有灰色图例；用量格不用整块红底', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    await screen.findByRole('columnheader', { name: /账号池/ });
+    expect(screen.getByRole('button', { name: '实读和估算是什么意思' })).toBeTruthy();
+    expect(screen.queryByText(/实读 = 从官方接口/)).toBeNull();
+    const full = document.querySelector('[data-quota-line][data-full]') as HTMLElement;
+    expect(full).toBeTruthy();
+    expect(full.className).not.toContain('bg-st-fail-soft');
+    expect(full.className).not.toContain('border-st-fail-line');
   });
 });

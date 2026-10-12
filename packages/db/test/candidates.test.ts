@@ -102,7 +102,8 @@ describe('某个用途的候选路由', () => {
     ]);
   });
 
-  it('按需探测（on_demand）的路由不出 offline 那条挡：alive 仍是 false，靠 probe_state 区分（#1635）', async () => {
+  // #1843 删了按需探测 on_demand（原来这类路由不出 offline 那条挡）：迁移把它改成 skipped，不在线一律挡，不再按 probe_state 放行。
+  it('没探的路由（skipped，含迁移改写过来的「改版后等下一轮探」）照样出 offline 那条挡', async () => {
     await addRoute(t.db, { id: 'hot', poolId: 'relay-a', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'cold', poolId: 'relay-b', modelId: 'opus-5.5', alive: false });
     await addRoute(t.db, {
@@ -121,9 +122,9 @@ describe('某个用途的候选路由', () => {
     await t.db
       .update(routes)
       .set({
-        probeState: 'on_demand',
+        probeState: 'skipped',
         probedAt: ago(3 * HOUR),
-        probeDetail: '不主动探，要派给它时先探一次。还没真探过',
+        probeDetail: '改版后等下一轮探',
       })
       .where(eq(routes.id, 'cold'));
     await t.db
@@ -132,7 +133,7 @@ describe('某个用途的候选路由', () => {
       .where(eq(routes.id, 'dead'));
     expect(await summary('execute')).toEqual([
       ['hot', []],
-      ['cold', []],
+      ['cold', ['offline']],
       ['dead', ['offline']],
     ]);
     expect((await t.db.select().from(routes).where(eq(routes.id, 'cold')))[0]?.alive).toBe(false);

@@ -151,6 +151,11 @@ export interface SpawnFacts {
   costUsd?: number;
   /** 实际回话的模型（只写观测值）。 */
   actualModel?: string;
+  /**
+   * 执行体报的会话号（只写真号，不写起会话前的临时号）：记进 runs.session_id。经 Mirasim 起的会话结束时用量多半还没回填，
+   * 「用量补记」凭它按会话补读（#1935）。
+   */
+  sessionId?: string;
   quotaExhausted?: boolean;
   /** 额度用满时上游给的清零时刻。 */
   resetsAt?: string;
@@ -500,6 +505,7 @@ function usageFields(facts: SpawnFacts | undefined): Partial<RunRecord> {
     ...(u?.cacheWriteTokens !== undefined ? { cacheWriteTokens: u.cacheWriteTokens } : {}),
     ...(facts.costUsd !== undefined ? { costUsd: facts.costUsd } : {}),
     ...(facts.memoryPeakMb !== undefined ? { memoryPeakMb: facts.memoryPeakMb } : {}),
+    ...(facts.sessionId !== undefined ? { sessionId: facts.sessionId } : {}),
   };
 }
 

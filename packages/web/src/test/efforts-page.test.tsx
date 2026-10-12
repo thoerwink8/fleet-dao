@@ -7,7 +7,7 @@ import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { ApiError } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import type { RoutingEfforts } from '../api/types';
-import EffortsPage from '../routes/efforts';
+import RoutingPage from '../routes/routing';
 import { renderApp } from './harness';
 
 afterEach(cleanup);
@@ -108,7 +108,7 @@ const withUncategorized = (): MockApi => {
 
 describe('思考档位页：看', () => {
   test('一行一条路由，按家族分组；配过的写配的那档，没配的写「默认（high）」；顶上数清', async () => {
-    renderApp(<EffortsPage />, { route: '/efforts' });
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
     await opened();
     // 种子里 Grok 那条配了 medium，Opus 的 Claude Code 那条没配
     expect(shown('r-grok')).toBe('medium');
@@ -128,8 +128,26 @@ describe('思考档位页：看', () => {
     expect(screen.queryAllByRole('radio')).toEqual([]);
   });
 
+  test('关着的行不换底色，用「关着」状态标签表示；路由列不露内部编号（#1902）', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
+    await opened();
+    const off = row('r-rl-opus');
+    expect(off.className).not.toContain('bg-muted');
+    expect(off.querySelector('div[class*="bg-muted"]')).toBeNull();
+    const badge = off.querySelector('[data-tone="stop"]');
+    expect(badge?.textContent).toBe('关着');
+    // 开着的行没有这枚标签
+    expect(row('r-ca-opus').querySelector('[data-tone="stop"]')).toBeNull();
+    // 路由号这类内部 id 只在悬停里，不写在行文字里（#1902）。
+    // 池号 #1916 起改成看得见：同一模型常有两条同渠道的路（Claude 订阅 · claude-a、claude-b），只写渠道名分不出来。
+    // 原断言「行文字里没有池号 relay」换成等价的新说法：行上写「渠道 · 池」，路由号仍不露。
+    expect(off.textContent).not.toContain('r-rl-opus');
+    expect(off.querySelector('[data-route-where]')?.textContent).toContain('中转站 · relay');
+    expect(off.textContent).toContain('中转站');
+  });
+
   test('组头可折叠：点一下收起这一家的行，再点展开', async () => {
-    renderApp(<EffortsPage />, { route: '/efforts' });
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
     await opened();
     const head = screen.getByRole('button', { name: /^Grok/ });
     fireEvent.click(head);
@@ -140,17 +158,17 @@ describe('思考档位页：看', () => {
   });
 
   test('这家认哪几档就给哪几项：Claude Code 五档都有，Grok 没有 max', async () => {
-    renderApp(<EffortsPage />, { route: '/efforts' });
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
     await opened();
     expect(options('r-ca-opus')).toEqual(['默认', 'low', 'medium', 'high', 'xhigh', 'max']);
     cleanup();
-    renderApp(<EffortsPage />, { route: '/efforts' });
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
     await opened();
     expect(options('r-grok')).toEqual(['默认', 'low', 'medium', 'high', 'xhigh']);
   });
 
   test('配不了的没有下拉，写为什么：cursor 整串模型名、Codex 没接上、判断题外壳', async () => {
-    renderApp(<EffortsPage />, { route: '/efforts' });
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
     await opened();
     await openFixedFold();
     expect(within(row('r-cursor')).queryAllByRole('combobox')).toEqual([]);
@@ -165,7 +183,7 @@ describe('思考档位页：看', () => {
 describe('思考档位页：说明与「配不了」组头（#1821）', () => {
   test('页头说明一行，细则收在「ⓘ」里；「配不了」组头写明原因', async () => {
     // 说明又长回 4 行，或「配不了」组头只剩数字不说为什么，这一条会红。
-    renderApp(<EffortsPage />, { route: '/efforts' });
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
     await opened();
     expect(screen.getByText(/每条路起会话想多深/)).toBeTruthy();
     expect(screen.queryByText(/单子只改一个文件/)).toBeNull();
@@ -177,7 +195,7 @@ describe('思考档位页：说明与「配不了」组头（#1821）', () => {
 
 describe('思考档位页：改', () => {
   test('改下拉就存：参数是那条路由和选的档、带上改之前看到的值，改完照库里的值显示；选「默认」清回没配', async () => {
-    const { api } = renderApp(<EffortsPage />, { route: '/efforts' });
+    const { api } = renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
     const spy = vi.spyOn(api, 'updateRouteEffort');
     await opened();
 
@@ -195,7 +213,7 @@ describe('思考档位页：改', () => {
   });
 
   test('选回已经显示的那一项不发请求', async () => {
-    const { api } = renderApp(<EffortsPage />, { route: '/efforts' });
+    const { api } = renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
     const spy = vi.spyOn(api, 'updateRouteEffort');
     await opened();
     choose('r-grok', 'medium');
@@ -215,7 +233,7 @@ describe('思考档位页：改', () => {
         ),
       )
       .mockRejectedValueOnce(new ApiError(409, 'conflict', '这条路由的档位刚被别人改过，刷新后再改'));
-    renderApp(<EffortsPage />, { api, route: '/efforts' });
+    renderApp(<RoutingPage />, { api, route: '/routing?tab=efforts' });
     await opened();
 
     choose('r-ca-opus', 'max');
@@ -250,7 +268,7 @@ describe('【故意造出的失败】没接上、没读成：照实写，不画�
       unavailable:
         '思考档位没接上：这里是开发环境的内存版，没有路由两层那张表（routing_catalog），真库上才有',
     }));
-    renderApp(<EffortsPage />, { api, route: '/efforts' });
+    renderApp(<RoutingPage />, { api, route: '/routing?tab=efforts' });
     expect((await screen.findByRole('note')).textContent).toMatch(/^思考档位没接上：/);
     expect(document.querySelector('[data-route]')).toBeNull();
   });
@@ -259,7 +277,7 @@ describe('【故意造出的失败】没接上、没读成：照实写，不画�
     const api = withEfforts(async () => {
       throw new ApiError(503, 'routing_efforts_unreadable', 'column "effort" does not exist');
     });
-    renderApp(<EffortsPage />, { api, route: '/efforts' });
+    renderApp(<RoutingPage />, { api, route: '/routing?tab=efforts' });
     // 红字后面带一个「重试」按钮（LoadError，#902 D5），文字只比前面那句
     expect((await screen.findByRole('alert')).textContent).toBe(
       '思考档位没读成：column "effort" does not exist重试',
@@ -268,14 +286,14 @@ describe('【故意造出的失败】没接上、没读成：照实写，不画�
 
   test('一条路由都没有：写明空着、去看什么，不当成「都没配」', async () => {
     const api = withEfforts(async () => ({ defaultEffort: 'high', models: [] }));
-    renderApp(<EffortsPage />, { api, route: '/efforts' });
+    renderApp(<RoutingPage />, { api, route: '/routing?tab=efforts' });
     expect(await screen.findByText('路由两层里一条路由都没有')).toBeTruthy();
   });
 });
 
 describe('思考档位页：过滤（#1803）', () => {
   test('「只看配过的」打开后没配过的行不显示，关掉回来', async () => {
-    renderApp(<EffortsPage />, { route: '/efforts' });
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
     await opened();
     expect(row('r-ca-opus')).toBeTruthy();
     const sw = screen.getByRole('switch', { name: '只看配过的' });
@@ -289,7 +307,7 @@ describe('思考档位页：过滤（#1803）', () => {
   });
 
   test('搜索按模型名、渠道名、路由号筛行；一条都没有写明搜的是什么', async () => {
-    renderApp(<EffortsPage />, { route: '/efforts' });
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
     await opened();
     const box = screen.getByRole('searchbox', { name: '搜索模型或渠道' });
     fireEvent.change(box, { target: { value: 'grok' } });
@@ -300,9 +318,146 @@ describe('思考档位页：过滤（#1803）', () => {
   });
 });
 
+describe('思考档位页签按样板重做（#1916）', () => {
+  test('同一模型的两条 Claude 订阅路由分得出来：行上写着各自的池（claude-a、claude-b）', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
+    await opened();
+    const a = row('r-ca-opus').querySelector('[data-route-where]')?.textContent ?? '';
+    const b = row('r-cb-opus').querySelector('[data-route-where]')?.textContent ?? '';
+    expect(a).toContain('Claude 订阅 · claude-a');
+    expect(b).toContain('Claude 订阅 · claude-b');
+    expect(a).not.toBe(b);
+  });
+
+  test('一行两行字：第一行模型名（关着才写状态），第二行小字不折行；档位下拉在行里；没有四列表头', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
+    await opened();
+    const r = row('r-ca-opus');
+    expect(r.querySelector('[data-row-frame]')?.getAttribute('data-tall')).toBe('true');
+    const where = r.querySelector('[data-route-where]') as HTMLElement;
+    expect(where.className).toContain('truncate');
+    expect(where.className).toContain('whitespace-nowrap');
+    // 路由号放悬停
+    expect(where.getAttribute('title')).toContain('r-ca-opus');
+    expect(within(r).getByRole('combobox')).toBeTruthy();
+    expect(screen.queryByText('改档位')).toBeNull();
+    // 家族组头还在、能折
+    expect(screen.getByRole('button', { name: /^Claude/ }).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  test('没配进用途的路由（模型目录里 Fable 那条）：行尾就地改档位，选项照后端给的 choices', async () => {
+    const { api } = renderApp(<RoutingPage />, { route: '/routing?tab=models' });
+    const spy = vi.spyOn(api, 'updateRouteEffort');
+    fireEvent.click(await screen.findByRole('button', { name: '查看 Fable 5.1 的路由' }));
+    const fable = await waitFor(() => row('r-rl-fable'));
+    const box = await within(fable).findByRole('combobox', { name: /的思考档位$/ });
+    fireEvent.pointerDown(box, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+    fireEvent.click(screen.getByRole('option', { name: 'low' }));
+    await waitFor(() =>
+      expect(spy).toHaveBeenCalledWith('fable-5.1', 'r-rl-fable', { effort: 'low', expected: null }),
+    );
+  });
+});
+
+describe('路由上就地改档位（#1914 第 5 轮：思考档位并进路由页）', () => {
+  /** 用途页里展开一条路由，返回它的明细（档位那一格在里面）。 */
+  const expand = async (routeId: string) => {
+    const btn = await waitFor(() => {
+      const el = document.querySelector(`button[aria-controls="facts-${routeId}"]`);
+      if (!(el instanceof HTMLElement)) throw new Error(`页面上没有路由 ${routeId} 的展开钮`);
+      return el;
+    });
+    if (btn.getAttribute('aria-expanded') !== 'true') fireEvent.click(btn);
+    const facts = document.getElementById(`facts-${routeId}`);
+    if (!facts) throw new Error(`路由 ${routeId} 没有明细`);
+    return facts;
+  };
+
+  test('展开一条路由：明细里有档位下拉，选项照后端给的 choices；改了就存，带改之前看到的值，行上小字写配的那档', async () => {
+    const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
+    const spy = vi.spyOn(api, 'updateRouteEffort');
+    const facts = await expand('r-ca-opus');
+    const box = await within(facts).findByRole('combobox', { name: /的思考档位$/ });
+    expect(box.textContent).toBe('默认');
+    expect(facts.textContent).toContain('默认（high）');
+    fireEvent.pointerDown(box, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+    expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual([
+      '默认',
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max',
+    ]);
+    fireEvent.click(screen.getByRole('option', { name: 'xhigh' }));
+    await waitFor(() => expect(within(facts).getByRole('combobox').textContent).toBe('xhigh'));
+    expect(spy).toHaveBeenLastCalledWith('opus-5.5', 'r-ca-opus', { effort: 'xhigh', expected: null });
+    // 配过的在路由行的小字里写出来（没配不写）
+    await waitFor(() =>
+      expect(row('r-ca-opus').querySelector('[data-route-effort-word]')?.textContent).toContain(
+        '档位上限 xhigh',
+      ),
+    );
+  });
+
+  test('配过档位的路由不展开也看得到；没配的小字里不写档位', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?purpose=verify' });
+    await screen.findByRole('list', { name: '模型' });
+    fireEvent.click(await screen.findByRole('button', { name: '查看 Grok 4.7 的路由' }));
+    await waitFor(() =>
+      expect(row('r-grok').querySelector('[data-route-effort-word]')?.textContent).toContain(
+        '档位上限 medium',
+      ),
+    );
+  });
+
+  test('配不了的路由：明细里没有下拉，写为什么', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
+    await screen.findByRole('list', { name: '模型' });
+    fireEvent.click(await screen.findByRole('button', { name: '查看 Cursor Auto 的路由' }));
+    const facts = await expand('r-cursor');
+    await waitFor(() =>
+      expect(facts.querySelector('[data-effort-fixed]')?.textContent).toMatch(/^配不了：没有单独的档位参数/),
+    );
+    expect(within(facts).queryAllByRole('combobox')).toEqual([]);
+  });
+
+  test('【故意造出的失败】就地改时后端不认（422）：退回库里的值，明细里写没改成和原因', async () => {
+    const api: MockApi = createMockApi({ live: false });
+    vi.spyOn(api, 'updateRouteEffort').mockRejectedValueOnce(
+      new ApiError(
+        422,
+        'effort_not_allowed',
+        'claude-code 不支持思考档位（effort）max（只认 low / medium / high）',
+      ),
+    );
+    renderApp(<RoutingPage />, { api, route: '/routing?purpose=execute' });
+    const facts = await expand('r-ca-opus');
+    const box = await within(facts).findByRole('combobox', { name: /的思考档位$/ });
+    fireEvent.pointerDown(box, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+    fireEvent.click(screen.getByRole('option', { name: 'max' }));
+    const alert = await within(facts).findByRole('alert');
+    expect(alert.textContent).toBe(
+      '没改成：claude-code 不支持思考档位（effort）max（只认 low / medium / high）',
+    );
+    await waitFor(() => expect(within(facts).getByRole('combobox').textContent).toBe('默认'));
+  });
+
+  test('【故意造出的失败】档位没读成：明细里照写没读成和原因，不画成「默认」', async () => {
+    const api: MockApi = createMockApi({ live: false });
+    api.routingEfforts = () => Promise.reject(new ApiError(503, 'routing_efforts_unreadable', '库连不上'));
+    renderApp(<RoutingPage />, { api, route: '/routing?purpose=execute' });
+    const facts = await expand('r-ca-opus');
+    await waitFor(() =>
+      expect(facts.querySelector('[data-route-effort]')?.textContent).toContain('思考档位没读成：库连不上'),
+    );
+    expect(within(facts).queryAllByRole('combobox')).toEqual([]);
+  });
+});
+
 describe('思考档位页：折叠（#1756）', () => {
   test('默认只显示能配的路由，配不了和未分类折叠、点开可见', async () => {
-    renderApp(<EffortsPage />, { api: withUncategorized(), route: '/efforts' });
+    renderApp(<RoutingPage />, { api: withUncategorized(), route: '/routing?tab=efforts' });
     await opened();
 
     // 顶上能配的直接在
@@ -341,7 +496,7 @@ describe('思考档位页：折叠（#1756）', () => {
   });
 
   test('有路能配的模型在顶上展开；配不了收进折叠，点开后照列', async () => {
-    renderApp(<EffortsPage />, { route: '/efforts' });
+    renderApp(<RoutingPage />, { route: '/routing?tab=efforts' });
     await opened();
     const order = Array.from(document.querySelectorAll('[data-model]')).map((el) =>
       el.getAttribute('data-model'),

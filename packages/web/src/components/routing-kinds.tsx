@@ -1,14 +1,13 @@
 // 路由页判态要的外部事实（渠道开关、模型下架、整池暂停）从目录和整池暂停现读，交给 lib/route-kinds.ts 判。
 // 没读到的不猜（见 KindEnv）。
 
-import { TriangleAlert } from 'lucide-react';
 import { useMemo } from 'react';
 import { usePoolHolds, useRouting } from '../api/client';
 import { useNow } from '../lib/hooks';
 import { poolIsHeld } from '../lib/pool-holds';
 import type { KindEnv } from '../lib/route-kinds';
 import { type RouteStateKind, routeStateLabel, routeStateTone, routeStateWhy } from '../lib/route-state';
-import { StatusBadge, StatusDot } from './layout/status-badge';
+import { StatusBadge, type StatusBadgeVariant, StatusDot } from './layout/status-badge';
 
 export function useKindEnv(): KindEnv {
   const routing = useRouting();
@@ -32,21 +31,32 @@ export function useKindEnv(): KindEnv {
 }
 
 /** 状态词的芯片。 */
-export function KindChip({ kind }: { kind: RouteStateKind }) {
+export function KindChip({ kind, variant }: { kind: RouteStateKind; variant?: StatusBadgeVariant }) {
   // 疑似换模型和探测记录里的「疑似换模型」同一个橙色，和不通的红分开（#1748、#1798）
-  if (kind === 'degraded') return <DoubtChip label={routeStateLabel[kind]} title={routeStateWhy[kind]} />;
-  return <StatusBadge tone={routeStateTone[kind]} label={routeStateLabel[kind]} />;
+  if (kind === 'degraded')
+    return <DoubtChip label={routeStateLabel[kind]} title={routeStateWhy[kind]} variant={variant} />;
+  return (
+    <StatusBadge
+      tone={routeStateTone[kind]}
+      label={routeStateLabel[kind]}
+      {...(variant ? { variant } : {})}
+    />
+  );
 }
 
 /** 橙色的「疑似换模型」芯片：身份题说出了旧答案，已按不在线处理，不是红的故障。 */
-export function DoubtChip({ label, title }: { label: string; title?: string }) {
+export function DoubtChip({
+  label,
+  title,
+  variant,
+}: {
+  label: string;
+  title?: string;
+  variant?: StatusBadgeVariant | undefined;
+}) {
   return (
-    <span
-      title={title}
-      className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-st-doubt/15 px-1.5 text-caption font-medium leading-none whitespace-nowrap text-ink-doubt"
-    >
-      <TriangleAlert className="size-3" aria-hidden />
-      {label}
+    <span title={title} className="inline-flex shrink-0">
+      <StatusBadge tone="doubt" label={label} {...(variant ? { variant } : {})} />
     </span>
   );
 }

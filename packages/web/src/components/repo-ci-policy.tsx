@@ -68,7 +68,7 @@ export function RepoCiPolicyControl({
   };
 
   return (
-    <div className="flex flex-col gap-1 self-center" data-testid={`ci-policy-${repoId}`}>
+    <div className="flex flex-col gap-1" data-testid={`ci-policy-${repoId}`}>
       <div className="flex items-center gap-x-2">
         <div className="flex min-w-0 items-center gap-1.5 text-meta text-muted-foreground">
           <StatusDot tone={row.mode === 'force' ? 'done' : 'doubt'} />

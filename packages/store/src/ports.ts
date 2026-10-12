@@ -7,6 +7,8 @@ import type {
   Channel,
   ChannelStateRecord,
   CiPolicy,
+  DecisionAnswer,
+  DecisionOption,
   HistoryResponse,
   Model,
   NodeReport,
@@ -166,7 +168,16 @@ export interface NotificationRecord {
    * 老数据（镜像里没存过的）没有。
    */
   dedupeKey?: string | undefined;
+  /** 「要你拍」的选项（#1915）；老的、补不出选项的没有。 */
+  options?: DecisionOption[] | undefined;
+  /** 拍过了：选了什么、什么时候、谁。 */
+  answer?: DecisionAnswer | undefined;
 }
+
+/** 回答「要你拍」的结局：存下了（连同存下的那条）；这条不是要人拍的、已经处理过、没有这条、选项编号认不出。 */
+export type AnswerNotificationResult =
+  | { kind: 'ok'; notification: NotificationRecord }
+  | { kind: 'not_decision' | 'already_resolved' | 'not_found' | 'unknown_option' };
 
 export interface SettingRecord {
   key: string;
@@ -374,6 +385,15 @@ export interface OpsStore {
     input: { id: string; by: Actor },
     audit: NewAuditEntry,
   ): Promise<'ok' | 'already_resolved' | 'not_found'>;
+  /**
+   * 回答一条还开着的「要你拍」（#1915）：点选项给 optionId，自己输入给 text（二选一，路由已核过）。答案（选项的字或原文、时刻、谁）
+   * 和处理掉（resolved_at/by）、操作记录同一事务；选了带 keepsOpen 的项（或这条有这种项时自己输入）只记答案、通知照旧开着
+   * （@fleet-dao/shared 的 answerResolves），开着时可以再拍、答案换成新的。选项编号不在这条的选项里回 unknown_option，什么都不改。
+   */
+  answerNotification(
+    input: { id: string; by: Actor; optionId?: string | undefined; text?: string | undefined },
+    audit: NewAuditEntry,
+  ): Promise<AnswerNotificationResult>;
   appendAudit(entry: NewAuditEntry): Promise<string>;
   /** 按 (at, id) 倒序。 */
   listAudit(query: { target?: string | undefined } & PageRequest): Promise<Page<AuditRecord>>;

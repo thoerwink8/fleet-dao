@@ -14,7 +14,7 @@ import {
   startCanaryRun,
 } from '../src/queries/canary.ts';
 import { upsertAlert } from '../src/queries/engine.ts';
-import { startRun } from '../src/queries/runs.ts';
+import { fillRunUsageFromMeter, noteRunUsage, startRun } from '../src/queries/runs.ts';
 import { finishScheduleRun, registerScheduledJobs, startScheduleRun } from '../src/queries/schedule.ts';
 import { CANARY_STAGE_NAMES, canaryRuns, pullRequests, repos, stepTimings } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
@@ -234,7 +234,7 @@ describe('巡检每一回从库里读的事实', () => {
     expect(await factsOf(1)).toEqual({
       repo: null,
       task: null,
-      runs: { total: 0, ended: 0, manual: 0, verify: 0, withUsage: 0 },
+      runs: { total: 0, ended: 0, manual: 0, verify: 0, withUsage: 0, missingUsage: [] },
       timings: 0,
       openAlerts: [],
       lastIntake: null,
@@ -275,6 +275,7 @@ describe('巡检每一回从库里读的事实', () => {
       endedAt: ago(30 * MIN),
       outcome: 'done',
       inputTokens: 1200,
+      outputTokens: 80,
     });
     await startRun(t.db, { segment: 'manual', issueNumber: 1, model: 'grok-5', startedAt: ago(20 * MIN) });
     await startRun(t.db, {
@@ -343,9 +344,72 @@ describe('巡检每一回从库里读的事实', () => {
     });
     const facts = await factsOf(1);
     expect(facts.task).toMatchObject({ id: task.id, state: 'running', phase: 'verify' });
-    expect(facts.runs).toEqual({ total: 3, ended: 2, manual: 2, verify: 1, withUsage: 1 });
+    expect(facts.runs).toEqual({
+      total: 3,
+      ended: 2,
+      manual: 2,
+      verify: 1,
+      withUsage: 1,
+      missingUsage: [{ model: 'opus-5.5', note: null }],
+    });
     expect(facts.timings).toBe(1);
     expect(facts.openAlerts).toEqual([{ dedupeKey: 'task:acme/canary#1:park:1', title: '没有可用的路由' }]);
+  });
+
+  it('「记上用量」要输入、输出都读到：只记上输出的（Mirasim 会话还没补记）不算，没记上的写明模型和原因（#1935 收回 #1936）', async () => {
+    const repo = await addRepo(t.db, 'canary');
+    await addTask(t.db, repo.id, { issueNumber: 1, state: 'running', phase: 'merge' });
+    // 动手、验收都走 Mirasim 中转：会话结束时快照只给本轮累计输出，输入、缓存要等「用量补记」按中转计量补
+    const { id: manual } = await startRun(t.db, {
+      segment: 'manual',
+      issueNumber: 1,
+      model: 'sonnet-5.5',
+      startedAt: ago(40 * MIN),
+      endedAt: ago(30 * MIN),
+      outcome: 'done',
+      outputTokens: 4210,
+    });
+    await startRun(t.db, {
+      segment: 'verify',
+      issueNumber: 1,
+      model: 'deepseek-flash',
+      startedAt: ago(20 * MIN),
+      endedAt: ago(10 * MIN),
+      outcome: 'done',
+      outputTokens: 311,
+    });
+    // 结束了、四样都没读到的一笔：不算记上了
+    await startRun(t.db, {
+      segment: 'verify',
+      issueNumber: 1,
+      model: 'opus-5.5',
+      startedAt: ago(9 * MIN),
+      endedAt: ago(8 * MIN),
+      outcome: 'done',
+    });
+    await noteRunUsage(t.db, { runId: manual, note: '等中转计量回填（2 次调用里 1 次还没填）', at: NOW });
+    const before = await factsOf(1);
+    expect(before.runs).toEqual({
+      total: 3,
+      ended: 3,
+      manual: 1,
+      verify: 2,
+      withUsage: 0,
+      missingUsage: [
+        { model: 'sonnet-5.5', note: '等中转计量回填（2 次调用里 1 次还没填）' },
+        { model: 'deepseek-flash', note: null },
+        { model: 'opus-5.5', note: null },
+      ],
+    });
+    // 补记读齐了：这一笔算记上了、原因清掉
+    await fillRunUsageFromMeter(t.db, {
+      runId: manual,
+      usage: { inputTokens: 7299, outputTokens: 4230, cacheReadTokens: 341543, cacheWriteTokens: 67436 },
+      at: NOW,
+    });
+    const after = await factsOf(1);
+    expect(after.runs.withUsage).toBe(1);
+    expect(after.runs.missingUsage.map((m) => m.model)).toEqual(['deepseek-flash', 'opus-5.5']);
   });
 });
 

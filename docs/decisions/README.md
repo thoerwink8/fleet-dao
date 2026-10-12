@@ -39,7 +39,7 @@
 | [0033](0033-fable-in-catalog-founder-only-opens.md) | Fable 进目录，默认关着、不在任何用途里；只有创始人本人在驾驶舱能打开、配进用途，引擎、临时指挥官、命令行、机器通行证一律不能（取代 0017 第 1、3 条，母单 #1354） | 采纳 |
 | [0034](0034-subagent-by-cost-effectiveness.md) | 子代理按性价比分 Haiku 5.5、Sonnet 5.5、Opus 5.5 三档：Haiku 一次没证据就升、其余同档两次失败升，派时写明模型、汇报实际 id；默认值仍只许 Opus 或 Sonnet；无人值守的监控以巡查脚本为主，`ALERT` 且有变化才叫短命 Haiku（部分取代 0017 第 2 条，「永不用 Fable」保留，#1372） | 采纳；Haiku 那一档的判据、`model: "haiku"` 的派法、「一次没证据就升」被 0035 取代 |
 | [0035](0035-haiku55-by-checkable-output.md) | Haiku 5.5 按「产出能被脚本或一条命令核对」用：别名 `haiku` 在本机是 4.5，真 5.5 走 `subagent_type: "haiku55"` 并核对实际 id；先 Haiku、核对不过再升 Sonnet；交代写全硬规矩；先砍固定开销；引擎侧由创始人在驾驶舱配（部分取代 0034） | 采纳 |
-| [0036](0036-project-subagents-default.md) | 本仓的 16 个子代理（Haiku 6、Sonnet 6、Opus 4）写进仓里 `.claude/agents/fleet-*.md`，派活默认用它们；模型用完整 id、tools 白名单、带 Edit 的进独立工作树、汇报首行写模型 id；`.claude/agents/` 进标准路径（补充 0034、0035） | 采纳 |
+| [0036](0036-project-subagents-default.md) | 本仓的 16 个子代理（Haiku 6、Sonnet 6、Opus 4）写进仓里 `.claude/agents/fleet-*.md`，派活默认用它们；模型用完整 id、tools 白名单、带 Edit 的进独立工作树、汇报首行写模型 id；`.claude/agents/` 进标准路径（补充 0034、0035） | 采纳；第 2 条后半句和第 7 条部分已被 0079 替代 |
 | [0037](0037-vendor-native-hooks.md) | 各家 AI 的原生钩子由 agents-sync 装；Codex 的信任由同步替本脚本那几条记上 | 采纳 |
 | [0038](0038-public-repo.md) | 仓：fleet-dao 公开，三样并进来，两个旧仓只读存档 | 采纳，未复核 |
 | [0039](0039-engine-and-cockpit.md) | 结构：一个仓两块，引擎和驾驶舱共用一个数据库 | 采纳，未复核 |
@@ -81,7 +81,15 @@
 | [0075](0075-france-engine-release-by-commit.md) | 法国自家的引擎按主线上的一个提交发布 | 部分被 0032 替代 |
 | [0076](0076-route-strictly-by-order.md) | 选路只按顺序：只因额度用完、人关了、报错往后挑；冷验收验不了由冷验收「两家都验」兜 | 采纳 |
 | [0077](0077-review-screen-effort-high.md) | 评审初筛 `fleet-review-screen` 的 effort 从 medium 调到 high（Haiku 5.5 两道题 medium 10 遍过 8、high 6 遍全过），别的子代理档和 effort 不变（补充 0036） | 采纳 |
-| [0078](0078-steer-reply-and-background-subagents.md) | 引导三条：引导一送到、调工具前先回一句；派 Agent 子代理一律后台跑，主对话留在这一轮等完成通知、单次前台等待不超过 60 秒（不分无人值守与否）；引导涉及在跑的子代理用 `SendMessage` 转 | 采纳；文末修订（#1743，创始人 2026-10-11 让指挥官测、没问题就合）：Mirasim 的引导要等这一轮结束、后台子代理都跑完才读进来，调工具前和收尾钩子从 Mirasim 取原文先转，不用结束这一轮 |
+| [0078](0078-steer-reply-and-background-subagents.md) | 引导三条：引导一送到、调工具前先回一句；派 Agent 子代理一律后台跑；引导涉及在跑的子代理用 `SendMessage` 转 | 部分被 0083 替代：先回、后台跑、SendMessage、一轮结束不杀子代理仍有效；钩子中转和「不分无人值守都不收尾」作废 |
+| [0079](0079-fleet-subagents-user-level.md) | 16 个 `fleet-*` 子代理的通用版（`agents/subagents/` 下同名，去掉本仓专属的命令和路径）随 `pnpm agents:sync` 和 `haiku55` 一起装到每台机器的 `~/.claude/agents/`，法国也装；`.claude/agents/` 的专属版本仓照用、不往家里装（部分取代 0036） | 采纳（创始人 2026-10-11 18:38「1. 装」、20:44「改成通用版，VPS 照装」） |
+| [0080](0080-steer-lineage-owner.md) | 创始人的话和引导按「Mirasim 会话」这条血缘认主：开会话只列同一个 Mirasim 会话换号前收到的话，不再全局广播；待处理引导记主人，只叫主人办，别的会话只计数，无主的先 `pnpm progress:claim` 认领 | 待创始人同意（改标准） |
+| [0081](0081-pnpm-entry-and-default-shared.md) | 仓合同 `agents/repo-contract.json`（首批：仓根 `pnpm dev/start/stop/check`、AGENTS.md、PROGRESS 两节、`.gitignore` 的 `_tmp/`）：开会话钩子在任何仓里每天最多提醒一次缺项，`pnpm repo:check`、`repo:init` 查和补，只提醒不拦；创始人说的原则默认各仓通用，引导条目标〔范围：通用｜只此仓〕，开会话和收尾钩子提醒 | 创始人 04:37 选定方案 B，PR #1934 合并即生效 |
+| [0082](0082-read-source-before-loosening.md) | 通用段底线补一句：读不到先追数据源；要放宽判据，PR 里贴上游真的不给的证据（#1936 放宽判据凑绿、#1946 才修根子）；`chain-first` 硬规矩跟着写 | 创始人 2026-10-12 在对话里选定（2.a），PR 合并即生效 |
+| [0083](0083-present-keeps-the-turn.md) | 人在场还有活就别收这一轮，新话先回，活没干完不许写成收工；删引导中继；流程钩子只留在 fleet-dao 项目设置 | 创始人 2026-10-12 17:14 选 1，PR 合并即生效 |
+| [0084](0084-progress-table.md) | 进度汇报：「要你拍的」编号在前，「在做的」一张表，带百分比、做到哪、下一步 | 创始人 2026-10-12 17:56「你改回标准里吧」，PR 合并即生效 |
+| [0085](0085-plugin-catalog.md) | 别的仓用订阅标记跟上 fleet-dao 的过程钩子，不整份抄；脚本装在 ~/.fleet-dao/hooks | 创始人 2026-10-12 18:11 选定；加载器在关 #1954 的 PR 里 |
+| [0086](0086-local-tool-baseline.md) | 本机工具基准：浏览器走官方命令行，CodeGraph 留着；不进同步、不推别的仓 | 创始人 2026-10-12 19:46「按照你的推荐走」 |
 
 ## 第 1–14 条的编号（#1476）
 

@@ -13,6 +13,7 @@ import {
   onFallback,
   pickPurpose,
   purposeLine,
+  purposeLineFull,
   routeSlots,
 } from './routing';
 import { actualRanks, modelSlotState, slotWord } from './routing-order';
@@ -91,14 +92,17 @@ describe('走的是不是首选', () => {
     const p = purpose('execute', [model('opus', [route('a', 'live'), route('b', 'dead')])], 'live');
     expect(firstLive(p)).toMatchObject({ modelIndex: 0, routeIndex: 0 });
     expect(onFallback(p)).toBe(false);
-    expect(purposeLine(p)).toEqual({ text: '首选活着：OPUS（Claude 订阅 · pool-a）', tone: 'done' });
+    // 结论只写短话（和状态标签同一行不折行，#1914 第 5 轮），走哪条路挪到灰字补充
+    expect(purposeLine(p)).toEqual({ text: '首选 OPUS', detail: '走 Claude 订阅 · pool-a', tone: 'done' });
+    expect(purposeLineFull(purposeLine(p))).toBe('首选 OPUS：走 Claude 订阅 · pool-a');
   });
 
   test('首选那条路死了、同模型第 2 条活着：写明在用它的第 2 条', () => {
     const p = purpose('execute', [model('opus', [route('a', 'dead'), route('b', 'live')])], 'live');
     expect(onFallback(p)).toBe(true);
     expect(purposeLine(p)).toEqual({
-      text: '首选那条路不行，顺位第一条活的是它的第 2 条：OPUS（Claude 订阅 · pool-b）',
+      text: '首选 OPUS',
+      detail: '首选那条路不行，顺位第一条活的是它的第 2 条：Claude 订阅 · pool-b',
       tone: 'stall',
     });
   });
@@ -111,7 +115,8 @@ describe('走的是不是首选', () => {
     );
     expect(firstLive(p)).toMatchObject({ modelIndex: 1, routeIndex: 1 });
     expect(purposeLine(p)).toEqual({
-      text: '首选 GROK 不可用，实际派 GPT',
+      text: '实际派 GPT',
+      detail: '首选 GROK 不可用',
       tone: 'stall',
     });
   });
@@ -126,7 +131,8 @@ describe('走的是不是首选', () => {
       'live',
     );
     expect(purposeLine(p)).toEqual({
-      text: '首选 GROK 已关，实际派 CURSOR',
+      text: '实际派 CURSOR',
+      detail: '首选 GROK 已关',
       tone: 'stall',
     });
   });
@@ -148,7 +154,8 @@ describe('走的是不是首选', () => {
     expect(liveRank).toBe(1);
     expect(slotWord(states[2] ?? 'on', liveRank ?? null, '模型')).toBe('实际第 1 位');
     expect(purposeLine(p, env)).toEqual({
-      text: '首选 KIMI 已关，实际派 OPUS',
+      text: '实际派 OPUS',
+      detail: '首选 KIMI 已关',
       tone: 'stall',
     });
   });
@@ -160,20 +167,23 @@ describe('走的是不是首选', () => {
     );
     expect(firstLive(p)).toBeUndefined();
     expect(purposeLine(p)).toEqual({
-      text: '没有确定活着的：2 条不知道（探针没看过、额度没读成）',
+      text: '没有确定活着的',
+      detail: '2 条不知道（探针没看过、额度没读成）',
       tone: 'stall',
     });
+    expect(purposeLineFull(purposeLine(p))).toBe('没有确定活着的：2 条不知道（探针没看过、额度没读成）');
   });
 
   test('【故意造出的失败】这个用途没有模型：照后端写的缺口说，派不了', () => {
     const p = purpose('verify', [], 'dead', ['这个用途没有模型，派不了']);
-    expect(purposeLine(p)).toEqual({ text: '这个用途没有模型，派不了', tone: 'fail' });
-    expect(purposeLine(purpose('verify', [], 'dead', [])).text).toBe('这个用途没有模型，派不了');
+    expect(purposeLine(p)).toEqual({ text: '派不了', detail: '这个用途没有模型，派不了', tone: 'fail' });
+    expect(purposeLine(purpose('verify', [], 'dead', [])).detail).toBe('这个用途没有模型，派不了');
   });
 
   test('【故意造出的失败】全死：派不出去，指向下面逐条的原因', () => {
     const p = purpose('execute', [model('opus', [route('a', 'dead')])], 'dead');
-    expect(purposeLine(p)).toEqual({ text: '一条活的都没有：下面逐条写了为什么', tone: 'fail' });
+    expect(purposeLine(p)).toEqual({ text: '一条活的都没有', detail: '下面逐条写了为什么', tone: 'fail' });
+    expect(purposeLineFull(purposeLine(p))).toBe('一条活的都没有：下面逐条写了为什么');
   });
 });
 

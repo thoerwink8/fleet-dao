@@ -54,7 +54,10 @@ describe('读不到时照实说，不冒充「没有」', () => {
     renderApp(<SchedulesPage />, { api: failing('jobs') });
     expect(await screen.findByText(/定时任务没读成/)).toBeTruthy();
     expect(screen.queryByText('还没有定时任务')).toBeNull();
-    expect(screen.getByText('上次失败').closest('div')?.parentElement?.textContent).toContain('—');
+    // 没读到时不画标题块（原来摘要条写「—」）：不拿 0 冒充「没有失败」，也不说「都正常」
+    expect(document.querySelector('[data-job-summary]')).toBeNull();
+    expect(document.body.textContent).not.toContain('都正常');
+    expect(document.body.textContent).not.toMatch(/上次失败 0|0 个定时任务/);
   });
 
   test('操作记录：没读成时不说「没有符合条件的记录」', async () => {

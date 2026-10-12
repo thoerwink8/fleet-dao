@@ -52,7 +52,7 @@ import {
   toTask,
   users,
 } from '@fleet-dao/db';
-import { ciPolicyOf, type ProgressKind, taskWorkflowId } from '@fleet-dao/shared';
+import { answerResolves, ciPolicyOf, type ProgressKind, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
   claimedCommandResult,
@@ -61,6 +61,7 @@ import {
   judgeExistingCommand,
   tookOverResult,
 } from './command-logic.ts';
+import { decisionAnswerOf } from './console-logic.ts';
 import {
   ATTEMPT_FREE_STATUS,
   claimedResult,
@@ -242,6 +243,50 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       isNull(idempotencyKeys.completedAt),
       eq(idempotencyKeys.claimedAt, new Date(token)),
     );
+
+  /** 通知行连同送达记录拼成接口的样子（送到哪 target 不往外给）。 */
+  async function notificationRecords(
+    page: readonly (typeof notifications.$inferSelect)[],
+  ): Promise<NotificationRecord[]> {
+    const deliveries =
+      page.length === 0
+        ? []
+        : await db
+            .select()
+            .from(notificationDeliveries)
+            .where(
+              inArray(
+                notificationDeliveries.notificationId,
+                page.map((n) => n.id),
+              ),
+            )
+            .orderBy(asc(notificationDeliveries.id));
+    return page.map(
+      (n): NotificationRecord => ({
+        id: n.id,
+        level: n.level,
+        title: n.title,
+        body: n.body,
+        link: opt(n.link),
+        taskId: opt(n.taskId),
+        createdAt: iso(n.createdAt),
+        resolvedAt: isoOpt(n.resolvedAt),
+        resolvedBy: opt(n.resolvedBy),
+        dedupeKey: n.dedupeKey,
+        options: opt(n.decisionOptions),
+        answer: opt(n.answer),
+        deliveries: deliveries
+          .filter((d) => d.notificationId === n.id)
+          .map((d) => ({
+            channel: d.channel,
+            messageId: opt(d.messageId),
+            attempts: d.attempts,
+            error: opt(d.lastError),
+            lastAttemptAt: isoOpt(d.lastAttemptAt),
+          })),
+      }),
+    );
+  }
 
   return {
     // —— 人 ——
@@ -577,43 +622,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         )
         .orderBy(sql`date_trunc('milliseconds', ${notifications.createdAt}) desc`, desc(notifications.id))
         .limit(limit + 1);
-      const page = rows.slice(0, limit);
-      const deliveries =
-        page.length === 0
-          ? []
-          : await db
-              .select()
-              .from(notificationDeliveries)
-              .where(
-                inArray(
-                  notificationDeliveries.notificationId,
-                  page.map((n) => n.id),
-                ),
-              )
-              .orderBy(asc(notificationDeliveries.id));
-      const items = page.map(
-        (n): NotificationRecord => ({
-          id: n.id,
-          level: n.level,
-          title: n.title,
-          body: n.body,
-          link: opt(n.link),
-          taskId: opt(n.taskId),
-          createdAt: iso(n.createdAt),
-          resolvedAt: isoOpt(n.resolvedAt),
-          resolvedBy: opt(n.resolvedBy),
-          dedupeKey: n.dedupeKey,
-          deliveries: deliveries
-            .filter((d) => d.notificationId === n.id)
-            .map((d) => ({
-              channel: d.channel,
-              messageId: opt(d.messageId),
-              attempts: d.attempts,
-              error: opt(d.lastError),
-              lastAttemptAt: isoOpt(d.lastAttemptAt),
-            })),
-        }),
-      );
+      const items = await notificationRecords(rows.slice(0, limit));
       const last = items.at(-1);
       return {
         items,
@@ -648,6 +657,36 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         await insertAudit(tx, entry);
         return 'ok';
       });
+    },
+    async answerNotification({ id, by, optionId, text }, entry) {
+      if (!isUuid(id)) return { kind: 'not_found' };
+      // 先锁住这一行再判：两个人同时拍，后到的看到已处理，不会把前一个的答案盖掉
+      const result = await db.transaction(async (tx) => {
+        const [row] = await tx.select().from(notifications).where(eq(notifications.id, id)).for('update');
+        if (!row) return { kind: 'not_found' as const };
+        if (row.level !== 'decision') return { kind: 'not_decision' as const };
+        if (row.resolvedAt) return { kind: 'already_resolved' as const };
+        const at = now();
+        const answer = decisionAnswerOf(row.decisionOptions, { optionId, text }, by.id, at.toISOString());
+        if (answer === 'unknown_option') return { kind: 'unknown_option' as const };
+        const [updated] = await tx
+          .update(notifications)
+          .set({
+            answer,
+            // 选了「留着」的项（keepsOpen）：答案记下，通知照旧开着（开着本身就起作用，如整池暂停）
+            ...(answerResolves(row.decisionOptions, optionId) ? { resolvedAt: at, resolvedBy: by.id } : {}),
+            updatedAt: at,
+          })
+          .where(eq(notifications.id, id))
+          .returning();
+        if (!updated) throw new Error(`通知 ${id} 锁住了却没改成`);
+        await insertAudit(tx, entry);
+        return { kind: 'ok' as const, row: updated };
+      });
+      if (result.kind !== 'ok') return result;
+      const [notification] = await notificationRecords([result.row]);
+      if (!notification) throw new Error(`通知 ${id} 存下答案后读不回来`);
+      return { kind: 'ok', notification };
     },
     async appendAudit(entry) {
       return insertAudit(db, entry);

@@ -16,6 +16,13 @@ export const LAYOUT_TONES: readonly LayoutTone[] = [
   'doubt',
 ];
 
+/**
+ * StatusBadge 和 Tag 共用的外形：同一个字高（h-5）、内边距（px-1.5）、字号字重、圆角（rounded-sm）。
+ * 两者只在「管什么」上分工，不在形状上分（规范第六节「StatusBadge 与 Tag 的分工」）。
+ */
+export const badgeShape =
+  'inline-flex h-5 shrink-0 items-center rounded-sm px-1.5 text-meta font-medium whitespace-nowrap';
+
 /** 状态文字（≥4.5:1 的墨色）。 */
 export const inkClass: Record<LayoutTone, string> = {
   run: 'text-ink-run',

@@ -18,7 +18,7 @@ function withLayers(layers: RoutingLayers | (() => Promise<RoutingLayers>)): Moc
 }
 
 const purposeLinks = async () =>
-  within(await screen.findByRole('navigation', { name: '用途' })).getAllByRole('link');
+  within(await screen.findByRole('navigation', { name: '用途' })).getAllByRole('button');
 
 /** 用途页里点一个模型的名字，下面看它的路由（一次只展开一个模型）。 */
 const pickModel = async (name: string) =>
@@ -43,28 +43,55 @@ describe('路由页：每一层现在活着吗', () => {
     expect(links[4]?.textContent).toContain('整理待办');
     expect(links[4]?.textContent).toContain('这里配指挥官用的模型');
     expect(screen.getByText('在对话里做，不选路', { exact: false })).toBeTruthy();
+    // 对题是用途那一排里只读的一项，说明在悬停里，不另占一行（#1914 第 4 轮）
+    const scope = document.querySelector('[data-tab-note]');
+    expect(scope?.getAttribute('title')).toBe('对题：在对话里做，不选路');
+    expect(scope?.closest('[data-tab-group]')?.getAttribute('data-tab-group')).toBe('aside');
+    expect(within(await screen.findByRole('navigation', { name: '用途' })).queryByText(/^对题：/)).toBeNull();
     expect(screen.getByText('不是流程里的一段')).toBeTruthy();
-    const current = links.filter((a) => a.getAttribute('aria-current') === 'true');
+    // 分组说明在组头上，不在任何一个筛选条里当选项（#1904）；三块页签、两组用途都是 FilterTabs
+    expect(screen.getByText('不是流程里的一段').closest('[role=group]')).toBeNull();
+    expect(screen.getByRole('tablist', { name: '路由页分块' }).getAttribute('data-variant')).toBe('primary');
+    for (const name of ['流程里的用途', '流程之外的用途']) {
+      expect(screen.getByRole('group', { name }).getAttribute('data-variant')).toBe('secondary');
+    }
+    const current = links.filter((a) => a.getAttribute('aria-pressed') === 'true');
     expect(current).toHaveLength(1);
     expect(current[0]?.textContent).toContain('验收');
     for (const gone of ['分诊', '需求文档', '方案', '调研', '第二意见', '开 PR 前验证']) {
       expect(screen.queryByText(gone)).toBeNull();
     }
+    // 页头一句汇总（#1914）：派得出去几个；不知道、派不出去是 0 就不写（红灯数为 0 不显示红），算的时刻在悬停里
     expect(screen.getByText('5 个派得出去')).toBeTruthy();
-    expect(screen.getByText('0 个不知道')).toBeTruthy();
-    expect(screen.getByText('0 个派不出去')).toBeTruthy();
+    expect(screen.queryByText(/个不知道/)).toBeNull();
+    expect(screen.queryByText(/个派不出去/)).toBeNull();
+    expect(document.querySelector('[data-routing-summary]')?.getAttribute('title')).toMatch(/现算$/);
     const page = document.body.textContent ?? '';
     expect(page).not.toContain('不算死');
     expect(page).not.toContain('上移');
     expect(page).not.toContain('下移');
-    expect(page).toContain('不算故障');
+    // 「活、不知道、满了不算故障」的说明收进页头 ⓘ（#1914），点开才看
+    expect(page).not.toContain('不算故障');
+    fireEvent.click(document.querySelector('[data-description-hint]') as HTMLElement);
+    const legend = await screen.findByText(/满了是等，不算故障/);
+    expect(legend.textContent).not.toContain('不算死');
   });
 
   test('点名验收：首选不可用时写人话「实际派谁」，不知道的原因照写，顺位第一条活的那条标出来', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=verify' });
     await purposeLinks();
-    // 用途按钮上只有名字和个数（这句话在按钮的悬停提示里），详情标题旁写一遍
-    expect(screen.getAllByText('首选 Grok 4.7 不可用，实际派 GPT 5.6 luna')).toHaveLength(1);
+    // 用途按钮上只有名字和个数（整句在按钮的悬停提示里），详情标题块里写一遍：短话「实际派谁」，为什么不是首选在灰字
+    expect(screen.getAllByText('实际派 GPT 5.6 luna')).toHaveLength(1);
+    // 标题块（#1914 第 4、5 轮）：用途名单独一行比页标题小一档；结论短话 15 正文字重、同一行跟结论标签；细节灰字在下面
+    const hero = document.querySelector('[data-purpose-hero]') as HTMLElement;
+    expect(within(hero).getByRole('heading', { level: 2 }).className).toContain('text-subtitle');
+    const conclusion = within(hero).getByText('实际派 GPT 5.6 luna').closest('p') as HTMLElement;
+    expect(conclusion.className).toEqual(expect.stringContaining('text-heading font-normal'));
+    expect(conclusion.querySelector('[data-variant]')?.textContent).toContain('派得出去');
+    expect(conclusion.getAttribute('title')).toBe('实际派 GPT 5.6 luna：首选 Grok 4.7 不可用');
+    const notes = hero.querySelector('[data-hero-notes]') as HTMLElement;
+    expect(notes.textContent).toContain('首选 Grok 4.7 不可用');
+    expect(notes.textContent).toContain('走 中转站 · relay');
     // 默认展开顺位第一条活的所在的模型
     expect(routeItem('r-rl-gpt').textContent).toContain('顺位第一条活的');
     // Grok 的额度读数是 42 分钟前的：额度不知道，整条不知道（不画成活）
@@ -168,9 +195,13 @@ describe('路由页：每一层现在活着吗', () => {
     expect(row.querySelector('[data-effort-tip]')?.getAttribute('title')).toMatch(
       /没有单独的档位参数.*不带方括号/,
     );
-    // membership 仍写出 data-row-note；行壳带 hideEffortRowNoteClass，行内不铺开
-    expect(row.querySelector('[class*="data-row-note"]')).toBeTruthy();
-    expect(row.querySelector('[data-row-note]')?.textContent).toMatch(/不带方括号/);
+    // 行里只有一行小字，长说明不铺开；全文在行尾「⋯」菜单的档位组头下面（#1914）
+    expect(row.textContent).not.toMatch(/不带方括号/);
+    const more = within(row).getByRole('button', { name: /^更多操作：Cursor Auto/ });
+    more.focus();
+    fireEvent.keyDown(more, { key: 'Enter' });
+    const menu = await screen.findByRole('menu');
+    expect(menu.textContent).toMatch(/没有单独的档位参数.*不带方括号/);
   });
 
   test('Jev 用途显示不用处理的说明', async () => {
@@ -216,7 +247,7 @@ describe('路由页：每一层现在活着吗', () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=judge', api });
     await purposeLinks();
     expect(screen.getByText('不知道', { selector: 'span' })).toBeTruthy();
-    expect(screen.getByText('按量计费，不自动探，不用处理')).toBeTruthy();
+    expect(screen.getByText(/按量计费，不自动探，不用处理/)).toBeTruthy();
   });
   test('写码：探了没通、模型下架、开关关着的都列出来，死因写全', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
@@ -280,6 +311,9 @@ describe('路由页：每一层现在活着吗', () => {
     });
     renderApp(<RoutingPage />, { route: '/routing', api });
     await purposeLinks();
+    // 派不出去的有数才写，红字；派得出去的 0 照写（不拿空冒充）
+    expect(screen.getByText('1 个派不出去').className).toContain('text-ink-fail');
+    expect(screen.getByText('0 个派得出去')).toBeTruthy();
     const a = routeItem('rt-a');
     expect(a.textContent).toMatch(/5h：1 小时 \d+ 分后清零|5h：1 小时后清零|5h：(89|90) 分钟后清零/);
     expect(a.textContent).toContain('7d：清零时刻没读到');
@@ -337,6 +371,8 @@ describe('路由页：每一层现在活着吗', () => {
     const reserved = routeItem('rt-reserved');
     expect(reserved.textContent).toContain('占 3/3（在跑 1、已选定还没开跑 2）');
     expect(reserved.textContent).toContain('满了，等空位，不算故障');
+    // 收成一个小图标，话在悬停和读屏里（#1914 第 4 轮：窄屏小字不再折两行）
+    expect(reserved.querySelector('[data-pool-full]')?.getAttribute('title')).toBe('满了，等空位，不算故障');
     const free = routeItem('rt-free');
     expect(free.textContent).toContain('在跑 1/3');
     expect(free.textContent).not.toContain('满了，等空位');
@@ -345,7 +381,7 @@ describe('路由页：每一层现在活着吗', () => {
   test('网址里点了已不存在的用途（plan）：照没点名算（先看靠后备撑着的验收），不留一块空详情', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=plan' });
     const links = await purposeLinks();
-    expect(links.find((a) => a.getAttribute('aria-current') === 'true')?.textContent).toContain('验收');
+    expect(links.find((a) => a.getAttribute('aria-pressed') === 'true')?.textContent).toContain('验收');
     expect(screen.queryByText('方案')).toBeNull();
   });
 

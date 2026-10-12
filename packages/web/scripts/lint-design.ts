@@ -1,22 +1,20 @@
 // 驾驶舱设计规范检查（#1847，规范 docs/design/驾驶舱界面.md 第八节）。并入了原来的 lint-arbitrary（#182、#1446）。
 // 扫 packages/web/src 下非测试的 .ts/.tsx：取出所有字符串字面量和模板串的静态段（className、cn()、cva、映射表都在里面），
 // 按空白切成类名，去掉变体前缀（md:、hover:、data-[…]:）后逐条按 R0–R10 判；.css 只判 R0。
-// 没迁完的文件记在 design-legacy.json（旧账清单）：每个文件每条规则的条数冻结，只许减不许加；不在清单里的文件一条都不许有。
+// 严格模式：整个 src 一条违规都不许有，没有旧账清单、没有例外名单（例外只在本文件的 allowed() 里，写明理由）。
 // 用法（在 packages/web 下）：
-//   node scripts/lint-design.ts                 对着旧账清单检查，有问题退出 1
+//   node scripts/lint-design.ts                 严格检查，有一条违规就退出 1
 //   node scripts/lint-design.ts --report        每条规则的总数和违规最多的前 20 个文件（PR 正文贴前后两次）
-//   node scripts/lint-design.ts --list          列出每一处（含旧账里的）
-//   node scripts/lint-design.ts --write-legacy  按当前统计重写旧账清单（只在片 1 生成、或并主线后重生成时用；迁移片手改条数）
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+//   node scripts/lint-design.ts --list          列出每一处
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const pkgDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const srcDir = join(pkgDir, 'src');
-export const LEGACY_PATH = join(pkgDir, 'design-legacy.json');
 const DOC = 'docs/design/驾驶舱界面.md';
 
-export type RuleId = 'R0' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R6' | 'R7' | 'R8' | 'R9' | 'R10';
+export type RuleId = 'R0' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R6' | 'R7' | 'R8' | 'R9' | 'R10' | 'R11';
 
 /** 每条规则：名字和规范节号（报错里带上，照着去查）。 */
 export const RULES: Record<RuleId, { name: string; section: string }> = {
@@ -31,6 +29,7 @@ export const RULES: Record<RuleId, { name: string; section: string }> = {
   R8: { name: '手写版式', section: '7' },
   R9: { name: '原生控件', section: '7' },
   R10: { name: '组件令牌', section: '2.7' },
+  R11: { name: '状态字裸文字', section: '4' },
 };
 export const RULE_IDS = Object.keys(RULES) as RuleId[];
 
@@ -85,7 +84,7 @@ export const ALLOWLIST: readonly AllowRule[] = [
   },
   {
     rule: 'R1',
-    pattern: /^bg-(?:primary|destructive|secondary|accent)\/\d+$/,
+    pattern: /^bg-(?:primary|brand|destructive|secondary|accent)\/\d+$/,
     files: /^src\/components\/ui\//,
     reason: '基础件的悬停、按下：按钮在自己的底色上加深或变浅一档，只在 components/ui/ 里写一次。',
   },
@@ -358,8 +357,8 @@ const SPACING_OK = new Set([
 ]);
 
 /** 判一个类名（已去掉变体），返回 [规则, 该换成什么]；合规返回 undefined。R8、R9 不在这里。 */
-/** 组件令牌（app.css「组件令牌」一节）：控件高、行高、区块内边距、区块间距、区块内间距。 */
-const COMPONENT_TOKEN = 'control|row|section-gap|section|stack';
+/** 组件令牌（app.css「组件令牌」一节）：控件高、行高、两行的行高、区块内边距、区块间距、区块内间距。 */
+const COMPONENT_TOKEN = 'control|row-tall|row|section-gap|section|stack';
 const COMPONENT_TOKEN_UTIL = new RegExp(
   `^(?:h|min-h|max-h|size|w|min-w|p|px|py|pt|pr|pb|pl|ps|pe|m|mx|my|mt|mr|mb|ml|ms|me|gap|gap-x|gap-y|space-x|space-y)-(?:${COMPONENT_TOKEN})$`,
 );
@@ -389,7 +388,10 @@ export function judgeUtility(util: string, file: string): [RuleId, string] | und
   if (size) {
     const v = size[1] as string;
     if (v in SIZE_FIX || /^[2-9]xl$/.test(v)) {
-      return ['R2', `${SIZE_FIX[v] ?? 'text-display'}（六档：meta、body、heading、title、display）`];
+      return [
+        'R2',
+        `${SIZE_FIX[v] ?? 'text-display'}（七档：meta、body、heading、subtitle、title、display，加只给画布用的 canvas）`,
+      ];
     }
     if (v === 'canvas' && !file.startsWith('src/components/home/board/')) {
       return ['R2', 'text-meta（text-canvas 只给 components/home/board/ 的画布用）'];
@@ -546,6 +548,17 @@ export function scanSource(src: string, file: string): Hit[] {
       });
     }
   }
+  // R11 状态字不许裸文字：列表行里的「在跑、关着、开着、已关」直接写成 JSX 正文（<Tag>关着</Tag>、<span>在跑</span>），
+  // 没有点或图标，颜色也不统一；一律经 StatusBadge（label 属性里的字不判）。
+  for (const m of code.matchAll(STATUS_WORD_TEXT)) {
+    hits.push({
+      file,
+      line: lineAt(starts, (m.index ?? 0) + 1),
+      rule: 'R11',
+      cls: `>${m[1]}<`,
+      fix: `<StatusBadge tone="…" label="${m[1]}" />（点加字；没有状态色的标签才用 <Tag>）`,
+    });
+  }
   if (layout) {
     for (const m of code.matchAll(/<select\b/g)) {
       hits.push({
@@ -571,6 +584,9 @@ export function scanSource(src: string, file: string): Hit[] {
   }
   return hits;
 }
+
+/** JSX 正文里整段就是一个状态字：>关着</、>在跑</ 前后只许有空白，后面直接是结束标签。 */
+const STATUS_WORD_TEXT = />\s*(在跑|关着|开着|已关)\s*<\//g;
 
 /** 这个文件从 lucide-react 引了哪些图标组件。 */
 function lucideImports(src: string): string[] {
@@ -607,12 +623,12 @@ export function scan(): Hit[] {
   return hits;
 }
 
-// ---------- 旧账清单 ----------
+// ---------- 统计 ----------
 
-export type Legacy = Record<string, Partial<Record<RuleId, number>>>;
+export type Counts = Record<string, Partial<Record<RuleId, number>>>;
 
-export function countHits(hits: readonly Hit[]): Legacy {
-  const out: Legacy = {};
+export function countHits(hits: readonly Hit[]): Counts {
+  const out: Counts = {};
   for (const h of [...hits].sort((a, b) => a.file.localeCompare(b.file))) {
     const row = out[h.file] ?? {};
     row[h.rule] = (row[h.rule] ?? 0) + 1;
@@ -624,64 +640,9 @@ export function countHits(hits: readonly Hit[]): Legacy {
   return out;
 }
 
-export function loadLegacy(path: string = LEGACY_PATH): Legacy {
-  if (!existsSync(path)) throw new Error(`读不到旧账清单 ${path}`);
-  return JSON.parse(readFileSync(path, 'utf8')) as Legacy;
-}
-
-/**
- * 对着旧账清单判：返回出错的话（空数组＝通过）。
- * 不在清单里的文件一条都不许有；在清单里的，每条规则条数必须和清单一样——多了是新写了违规，少了要把清单改小（降到 0 删掉）。
- */
-export function checkLegacy(
-  hits: readonly Hit[],
-  legacy: Legacy,
-  fileExists: (rel: string) => boolean,
-): string[] {
-  const errors: string[] = [];
-  const now = countHits(hits);
-  for (const [file, row] of Object.entries(now)) {
-    const frozen = legacy[file];
-    const fileHits = hits.filter((h) => h.file === file);
-    if (!frozen) {
-      errors.push(...fileHits.map(formatHit));
-      continue;
-    }
-    for (const rule of RULE_IDS) {
-      const have = row[rule] ?? 0;
-      const was = frozen[rule] ?? 0;
-      if (have > was) {
-        errors.push(
-          `${file} ${rule} ${RULES[rule].name}：旧账冻结 ${was} 条，现在 ${have} 条，不许加。这个文件里的 ${rule}：`,
-          ...fileHits.filter((h) => h.rule === rule).map((h) => `  ${formatHit(h)}`),
-        );
-      } else if (have < was) {
-        errors.push(
-          `${file} ${rule}：降到 ${have} 条了（清单写 ${was}），把 design-legacy.json 里这一项改成 ${have}${have === 0 ? '（0 就删掉这一项）' : ''}。`,
-        );
-      }
-    }
-  }
-  for (const [file, row] of Object.entries(legacy)) {
-    if (!fileExists(file)) {
-      errors.push(`design-legacy.json 里的 ${file} 不存在了，删掉这一行。`);
-      continue;
-    }
-    if (!now[file]) {
-      errors.push(`${file} 已经干净了，把它从 design-legacy.json 删掉。`);
-      continue;
-    }
-    for (const [rule, n] of Object.entries(row)) {
-      if (!(rule in RULES) || !Number.isInteger(n) || (n as number) <= 0) {
-        errors.push(`design-legacy.json 里 ${file} 的 ${rule}: ${n} 不对：规则只有 R0–R10，条数是正整数。`);
-      }
-    }
-  }
-  return errors;
-}
-
+/** 严格模式：整个 src 一条违规都不许有；返回出错信息（空数组＝通过）。 */
 export function check(): string[] {
-  return checkLegacy(scan(), loadLegacy(), (rel) => existsSync(join(pkgDir, rel)));
+  return scan().map(formatHit);
 }
 
 export function report(hits: readonly Hit[]): string {
@@ -711,21 +672,13 @@ function main() {
     for (const h of scan()) console.log(formatHit(h));
     return;
   }
-  if (argv.includes('--write-legacy')) {
-    const counts = countHits(scan());
-    writeFileSync(LEGACY_PATH, `${JSON.stringify(counts, null, 2)}\n`);
-    console.log(`写了 ${LEGACY_PATH}：${Object.keys(counts).length} 个文件。`);
-    return;
-  }
   const errors = check();
   for (const e of errors) console.error(e);
   if (errors.length > 0) {
-    console.error(
-      `\n设计规范检查没过（${errors.length} 条）。规范：${DOC}；旧账清单：packages/web/design-legacy.json。`,
-    );
+    console.error(`\n设计规范检查没过（${errors.length} 条）。规范：${DOC}。`);
     process.exit(1);
   }
-  console.log('设计规范检查通过（旧账清单之外没有新违规）。');
+  console.log('设计规范检查通过（严格模式，没有违规）。');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

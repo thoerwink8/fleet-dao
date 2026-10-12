@@ -71,7 +71,8 @@ function durationText(j: JobView): string {
   return '—';
 }
 
-export function JobListRow({ j, now }: { j: JobView; now: number }) {
+/** fullOutcome：上次结果写全、可换行，不截断（定时任务页把异常行置顶时用，#1902）。 */
+export function JobListRow({ j, now, fullOutcome }: { j: JobView; now: number; fullOutcome?: boolean }) {
   const tone = rowTone(j);
   const r = j.lastRun;
   return (
@@ -95,12 +96,16 @@ export function JobListRow({ j, now }: { j: JobView; now: number }) {
               ) : null}
             </span>
             {/* 宽屏有单独的「上次运行」列；窄屏那一列藏起来，结果挪到名字下面一行，不让失败、没查全藏在展开里。 */}
-            <span className={cn('block truncate text-meta md:hidden', outcomeClass(j))}>
+            <span className={cn('block text-meta md:hidden', !fullOutcome && 'truncate', outcomeClass(j))}>
               {outcomeText(j)}
             </span>
           </span>
           <span
-            className={cn('hidden w-64 shrink-0 truncate text-meta md:block', outcomeClass(j))}
+            className={cn(
+              'hidden w-64 shrink-0 text-meta md:block',
+              !fullOutcome && 'truncate',
+              outcomeClass(j),
+            )}
             title={outcomeText(j)}
           >
             {outcomeText(j)}
@@ -119,27 +124,35 @@ export function JobListRow({ j, now }: { j: JobView; now: number }) {
         </>
       }
     >
-      <KeyValue
-        layout="grid"
-        cols={4}
-        items={[
-          {
-            label: '周期',
-            value: <span className="num">{j.schedule}</span>,
-            hint: `期望${everyText(j.expectEveryMinutes)}成功一次`,
-          },
-          {
-            label: '上次运行',
-            value: outcomeText(j),
-            ...(r?.outcome === 'failed' ? { tone: 'fail' as const } : {}),
-            ...(r?.outcome === 'unscanned' || r?.outcome === 'partial' ? { tone: 'stall' as const } : {}),
-          },
-          { label: '上次跑成', value: <LastSuccess j={j} now={now} /> },
-          { label: '耗时', value: <span className="num">{durationText(j)}</span> },
-          { label: '编号', value: j.id, mono: true },
-        ]}
-      />
+      <JobDetails j={j} now={now} />
     </ListRow>
+  );
+}
+
+/** 一行展开后的明细：周期（期望多久成功一次）、完整的上次结果、上次跑成和开始时间、耗时、编号。定时任务页和法国页共用。 */
+export function JobDetails({ j, now }: { j: JobView; now: number }) {
+  const r = j.lastRun;
+  return (
+    <KeyValue
+      layout="grid"
+      cols={4}
+      items={[
+        {
+          label: '周期',
+          value: <span className="num">{j.schedule}</span>,
+          hint: `期望${everyText(j.expectEveryMinutes)}成功一次`,
+        },
+        {
+          label: '上次运行',
+          value: outcomeText(j),
+          ...(r?.outcome === 'failed' ? { tone: 'fail' as const } : {}),
+          ...(r?.outcome === 'unscanned' || r?.outcome === 'partial' ? { tone: 'stall' as const } : {}),
+        },
+        { label: '上次跑成', value: <LastSuccess j={j} now={now} /> },
+        { label: '耗时', value: <span className="num">{durationText(j)}</span> },
+        { label: '编号', value: j.id, mono: true },
+      ]}
+    />
   );
 }
 

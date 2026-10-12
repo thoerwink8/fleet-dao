@@ -16,6 +16,7 @@ import {
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import type { StageKind } from '@fleet-dao/shared';
+import { createPgStore } from '@fleet-dao/store';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { fixedEngineMaster, MASTER_ROUTE_RETRY_SECONDS } from '../../src/engine-master.ts';
 import { emptyLedger, serializeLedger } from '../../src/jobs/org-ledger.ts';
@@ -143,7 +144,7 @@ describe('选路', () => {
     expect(!none.ok && none.detail).toContain('不在线（探活或熔断判的）');
   });
 
-  it('在线是很久以前探的（探针可能停了）：照上一次的结论派，理由里写明是多久前的结论', async () => {
+  it('在线是很久以前探的：照派，理由里不再写「探针可能停了」（#1798 片 4 删了 probeNote）', async () => {
     await world(t.db);
     await saveRouteProbe(t.db, {
       routeId: 'solo',
@@ -153,10 +154,9 @@ describe('选路', () => {
     });
     const r = await pick();
     expect(r).toMatchObject({ ok: true, route: { routeId: 'solo' } });
-    expect(r.ok && r.why).toContain(
-      '在线是探针 2 小时前的结论，之后它没再给新结论（探针可能停了），照上一次的结论派',
-    );
-    // 另一条 5 分钟前刚探过：理由里不提
+    expect(r.ok && r.why).not.toContain('探针可能停了');
+    expect(r.ok && r.why).not.toContain('在线是探针');
+    // 另一条 5 分钟前刚探过：理由里也不提
     const fresh = await pick({ avoidRouteIds: ['solo'] });
     expect(fresh).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
     expect(fresh.ok && fresh.why).not.toContain('在线是探针');
@@ -231,6 +231,53 @@ describe('选路', () => {
       expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
       const none = await pick({ avoidRouteIds: ['carpool'] });
       expect(none).toMatchObject({ ok: false });
+    });
+
+    it('探针发现要人修的整池问题：写 pool-hold 那条「要你拍」，带选项（#1915：修好了放开是推荐）', async () => {
+      await world(t.db);
+      await poolHoldAfterProbe(
+        t.db,
+        { poolId: 'claude-solo', routeId: 'solo' } as unknown as Parameters<typeof poolHoldAfterProbe>[1],
+        { kind: 'failed', detail: '登录失效', poolHold: { title: '登录失效', body: '要重新登录' } },
+      );
+      const hold = (await alarms()).find((a) => a.dedupeKey === 'pool-hold:claude-solo');
+      expect(hold).toMatchObject({ level: 'decision', title: '账号池 claude-solo 整池暂停：登录失效' });
+      expect(hold?.decisionOptions?.map((o) => o.id)).toEqual(['fixed', 'hold', 'retire']);
+      expect(hold?.decisionOptions?.find((o) => o.recommended)?.id).toBe('fixed');
+    });
+
+    it('整池暂停的每个选项真有说的效果（#1931）：「先停着」「不要了」只记答案、池子照旧避开；「修好了，放开」转已处理、池子当场回来', async () => {
+      await world(t.db);
+      await poolHoldAfterProbe(
+        t.db,
+        { poolId: 'claude-solo', routeId: 'solo' } as unknown as Parameters<typeof poolHoldAfterProbe>[1],
+        { kind: 'failed', detail: '登录失效', poolHold: { title: '登录失效', body: '要重新登录' } },
+      );
+      const id = (await alarms()).find((a) => a.dedupeKey === 'pool-hold:claude-solo')?.id ?? '';
+      const store = createPgStore(t.db);
+      const by = { kind: 'user' as const, id: 'founder-a' };
+      const answer = (optionId: string) =>
+        store.answerNotification(
+          { id, by, optionId },
+          {
+            actor: by,
+            action: 'notification.answer',
+            target: `notification:${id}`,
+            via: 'cockpit',
+            ok: true,
+          },
+        );
+      expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      for (const keep of ['hold', 'retire']) {
+        expect((await answer(keep)).kind).toBe('ok');
+        const row = (await alarms()).find((a) => a.id === id);
+        expect(row?.answer?.optionId).toBe(keep);
+        expect(row?.resolvedAt).toBeNull();
+        expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      }
+      expect((await answer('fixed')).kind).toBe('ok');
+      expect((await alarms()).find((a) => a.id === id)?.resolvedAt).not.toBeNull();
+      expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'solo' } });
     });
 
     it('【故意造出的失败】缺字段（读不出）：这个池按暂停办，不当成能用；别的池照派', async () => {

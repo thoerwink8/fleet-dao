@@ -82,7 +82,7 @@ export const ProgressKindSchema = z.enum(['plan', 'say', 'tool', 'file', 'test',
 export const QuotaStatusSchema = z.enum(['allowed', 'warning', 'limit_reached']);
 export const QuotaUnitSchema = z.enum(['percent', 'usd', 'tokens', 'points']);
 export const ScheduleOutcomeSchema = z.enum(['ok', 'partial', 'unscanned', 'failed']);
-export const RouteProbeStateSchema = z.enum(['ok', 'failed', 'not_wired', 'skipped', 'on_demand']);
+export const RouteProbeStateSchema = z.enum(['ok', 'failed', 'not_wired', 'skipped']);
 /** 路由探针按活跃分的三档（#1798）：和 routes.probe_tier 同一套取值。 */
 export const ROUTE_PROBE_TIERS = ['active', 'idle', 'unused'] as const;
 export const RouteProbeTierSchema = z.enum(ROUTE_PROBE_TIERS);

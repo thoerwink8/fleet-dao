@@ -23,6 +23,9 @@
 //    只在这台配了登法国的 ssh 时查：~/.fleet-dao/france-ssh，或真开会话时进程里的 FLEET_FRANCE_SSH。没配不出声，不当成没到期。
 //    当库被测试调用时不读进程环境，免得测试机上的环境变量把 ssh 打出去；真开会话（本文件当主程序）才把进程环境传进去。
 //    查不成就说没查成。结果缓存 QUIET_MS，免得每条消息都 ssh。认不出的不当成没到期。
+// 6. 仓合同（决定 0081，repo-contract.mjs 的 contractLines）：会话所在仓按 fleet-dao 的 agents/repo-contract.json 查，
+//    有缺项说一段事实，每个仓每天最多一次，全过不出声。只在真开会话时接上（repoContract 参数），测试按需注入。
+//    引导条目的〔范围：通用｜只此仓〕：checkDirectives 在那一行后面补一句没标的、标了通用还没上推的。
 // 环境变量 FLEET_WORKER=1（commander 的 worker.mjs 起工人时设）：只做第 1、2 件，其余各段（创始人的事、整池暂停、工作树、工人状态）一律不出。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
@@ -40,10 +43,11 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { reconcile, sentByFounder } from './founder-inbox.mjs';
+import { lineageOf, reconcile, relayedUpTo, sentByFounder } from './founder-inbox.mjs';
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, gitWhy as why } from './git-run.mjs';
 import { logDir } from './prompt-log.mjs';
+import { contractLines, DIRECTIVE_HEADING, pendingItems, scopeNote } from './repo-contract.mjs';
 import {
   cleanId,
   isMachineOpening,
@@ -285,10 +289,30 @@ export function checkTemporary(cwd, git, now = Date.now()) {
  * 有没处理完的引导就报几条、让人接着办；没有这一节、不是 git 仓不出声；git 跑不起来、读不了明说没查成。
  * 只用本地 git grep 找已跟踪的 .md（不取远端，限时 GREP_MS），不拖慢开会话。返回要说的几行。
  */
-export const DIRECTIVE_HEADING = '## 创始人引导（待处理）';
+// 标题和条目的读法放在 repo-contract.mjs：收尾的 Stop 钩子、仓合同的 progress 一项读的是同一个
+export { DIRECTIVE_HEADING };
+
 const DIRECTIVE_NOT_CHECKED = '创始人引导待处理清单没查成';
 
-export function checkDirectives(cwd, git) {
+/**
+ * 引导认主（创始人 2026-10-11「现在你实现的引导方式会串会话」：同一个仓开着几个指挥官会话，每个都被叫去办全部待处理引导，撞车开出重复 PR）。
+ * 主人是记下它的那个会话的血缘（Mirasim 会话目录名，founder-inbox.mjs 的 lineageOf），写成 `〔主：<目录名>〕`：进度单 #1055 的评论里
+ * 由 pnpm progress:directive 写、pnpm progress:claim 改；别的仓「## 创始人引导（待处理）」清单的条目里手写。
+ * 开会话时本血缘的列出来叫它办；有主、主不是本血缘的只计数、不列原文；没写主或写「无主」的照列，但要先认领。
+ */
+export const NO_OWNER = '无主';
+const OWNER_MARK = /〔主：([^〕\s]+)〕/;
+
+/** 一段话里的主人标记 → 主人（没有就是「无主」），和去掉标记的正文 */
+function splitOwner(text) {
+  const m = OWNER_MARK.exec(text);
+  return { owner: m ? m[1] : NO_OWNER, text: text.replace(OWNER_MARK, '').trim() };
+}
+
+/** 本会话的血缘目录名；无血缘、没查成都是 null（有主的引导就一律不算本会话的） */
+const lineageDir = (lineage) => (lineage?.status === 'found' ? lineage.dir : null);
+
+export function checkDirectives(cwd, git, lineage = null) {
   const top = git(cwd, ['rev-parse', '--show-toplevel']);
   if (gitBroken(top))
     return [
@@ -323,29 +347,36 @@ export function checkDirectives(cwd, git) {
       out.push(`${DIRECTIVE_NOT_CHECKED}（${file}:${n}）：读不了（${err?.code ?? err?.message ?? err}）。`);
       continue;
     }
-    const items = directiveItems(text, Number(n));
+    const items = pendingItems(text, Number(n));
     if (items === null) {
       out.push(`${DIRECTIVE_NOT_CHECKED}（${file}:${n}）：标题下面认不出条目。`);
       continue;
     }
-    if (items.length > 0)
-      out.push(
-        `创始人引导还有 ${items.length} 条没处理（${file}:${n}）：${items.slice(0, 5).join('；')}${items.length > 5 ? ' 等' : ''}。先接着办，办完把那条标「已处理」或删掉。`,
+    // 认主：本血缘的、无主的列出来；有主、主不是本血缘的只计数
+    const mine = lineageDir(lineage);
+    const parts = items.map(splitOwner);
+    const shown = parts.filter((p) => p.owner === NO_OWNER || p.owner === mine);
+    const others = parts.length - shown.length;
+    const unowned = shown.filter((p) => p.owner === NO_OWNER).length;
+    const said = [];
+    if (shown.length > 0) {
+      const listed = shown
+        .slice(0, 5)
+        .map((p) => `${mine && p.owner === NO_OWNER ? '（无主）' : ''}${brief(p.text)}`);
+      said.push(
+        `创始人引导还有 ${shown.length} 条没处理（${file}:${n}）：${listed.join('；')}${shown.length > 5 ? ' 等' : ''}。先接着办，办完把那条标「已处理」或删掉。`,
       );
+      // 〔范围：通用｜只此仓〕（决定 0081）：只看待处理的、归本会话或无主的，已处理的老条目不追溯
+      const scope = scopeNote(shown.map((p) => p.text));
+      if (scope) said.push(scope);
+      if (mine && unowned > 0)
+        said.push(`无主的先在那一条写上〔主：${mine}〕认领再办（已写了别的主的不动）。`);
+    }
+    if (others > 0)
+      said.push(`别的会话还有 ${others} 条引导在办（${file}:${n}，写了别的〔主：…〕），不归你，别动。`);
+    if (said.length > 0) out.push(said.join(''));
   }
   return out;
-}
-
-/** 「## 创始人引导（待处理）」标题下一节里的条目：`- ` 开头、没标「已处理」的非空行；标题下到下一个一、二级标题为止 */
-function directiveItems(text, headingLine) {
-  const lines = text.split(/\r?\n/);
-  const items = [];
-  for (let i = headingLine; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (/^#{1,2}\s/.test(t)) break;
-    if (t.startsWith('- ') && !/已处理/.test(t)) items.push(brief(t.slice(2).trim()));
-  }
-  return items;
 }
 
 /** 这台同步到哪个提交、落后主线几个（g 已经钉在同步专用的检出上了；算不了就说算不了） */
@@ -492,7 +523,9 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
  * 创始人最近落盘的话（agents/hooks/prompt-log.mjs 在他每条消息一提交就写进 ~/.fleet-dao/prompt-log/<北京日期>.jsonl）。
  * 为什么开会话时列出来（创始人 2026-10-04「我发了hi但是好像你视而不见」）：他的话有两种丢法，一种是到了没处理，一种是排队时
  * 会话进程死了、从头没送到——钩子在提交那一刻就落了盘，新会话开场看一眼这份文件，上一个会话没来得及处理的话就在这里，不靠他重发。
- * 列最近 RECENT_MS 以内、本会话还没见过的全部（本会话自己落盘的话它早见过，不列），每条截到 RECENT_CHARS 字，总字数到 RECENT_TOTAL_CHARS
+ * 「上一个会话」只认同一条血缘：同一个 Mirasim 会话换了原生会话号（/compact、换模型）之前的那个号（founder-inbox.mjs 的 lineageOf）。
+ * 别的 Mirasim 会话收到的话不列（2026-10-11 串会话：全局列给每个会话，另一个项目的会话把 fleet-dao 的活当成自己的办了）；无血缘的不列。
+ * 列最近 RECENT_MS 以内、本会话还没见过的全部（当前这个号自己落盘的话它早见过，不列），每条截到 RECENT_CHARS 字，总字数到 RECENT_TOTAL_CHARS
  * 封顶（超了留最新的、写明更早的几条没列）；没有文件、没有最近的话都不出声；读不了文件（不是没有，是读不了）要说一句，不当成「没有」。
  * 机器派的会话（工人、反方）的提示现在不落盘（prompt-log.mjs）；这里再滤一遍，是为了 10-05 之前已经落盘的那些。
  * 第三种丢法（创始人 2026-10-06「你好像没接收到【选方案a】」）：他在一轮跑着时打的字走 Mirasim 的「引导」，那一轮被打断、出错就丢了，
@@ -506,15 +539,32 @@ export const RECENT_TOTAL_CHARS = 3000;
 /** 后台任务完成、系统提醒也会以「用户消息」的身份进 UserPromptSubmit，落盘时原样记（2026-10-04 实测），列的时候不算创始人的话 */
 const SYSTEM_PROMPT = /^\s*(?:<task-notification|<system-reminder|\[SYSTEM NOTIFICATION)/;
 
-export function recentPrompts({ home, now = Date.now(), dir = null, sessionId = null, env = process.env }) {
+export function recentPrompts({
+  home,
+  now = Date.now(),
+  dir = null,
+  sessionId = null,
+  env = process.env,
+  lineage = null,
+}) {
+  // 只认本血缘（同一个 Mirasim 会话用过的原生会话号，founder-inbox.mjs 的 lineageOf）：别的 Mirasim 会话收到的话一概不列
+  // （创始人 2026-10-11「现在你实现的引导方式会串会话」：原来这里把所有会话最近 60 分钟的话列给每个会话，另一个项目的会话当成自己的活办了）。
+  // 无血缘（不是 Mirasim 起的、这台没装）两行都不出，不拿别的会话的话顶；没查成明说。
+  const line = lineage ?? lineageOf({ home, sessionId, env });
+  if (line.status === 'none') return [];
+  if (line.status === 'unchecked')
+    return [
+      `创始人的话没核成：认不出本会话是哪个 Mirasim 会话（${line.why}）；本会话丢的话、换会话号之前收到的话这次没列。别拿别的会话的话当自己的活。`,
+    ];
+  const family = new Set(line.sessionIds);
   // 落盘目录和写的那边（prompt-log.mjs 的 logDir）同一份：原来这里不认 FLEET_PROMPT_LOG_DIR（全仓审查第 4 路 R4）
   const base = dir ?? logDir(process.env, home);
-  // 发了的账（Mirasim 的会话记录）：对账范围是「上一轮（含）以来」，可能比 RECENT_MS 早得多（founder-inbox.mjs 开头），收到的账也读到那么早
-  const sent = sentByFounder({ home, now, env });
+  // 发了的账（本血缘那一个 Mirasim 会话目录）：对账范围是「上一轮（含）以来」，可能比 RECENT_MS 早得多（founder-inbox.mjs 开头），收到的账也读到那么早
+  const sent = sentByFounder({ home, now, env, only: line.dir });
   const since = sent.absent ? now - RECENT_MS : Math.min(now - RECENT_MS, sent.since);
   const days = new Set([beijingToday(now), beijingToday(since)]);
   for (let t = since; t < now; t += 12 * 3_600_000) days.add(beijingToday(t));
-  /** 收到的账：Claude Code 真收到过的（哪个会话收的都记） */
+  /** 收到的账：本血缘里哪个原生会话号收到的都记，别的会话收到的不记 */
   const received = [];
   for (const day of days) {
     const file = join(base, `${day}.jsonl`);
@@ -532,6 +582,8 @@ export function recentPrompts({ home, now = Date.now(), dir = null, sessionId = 
         const at = Date.parse(e?.at);
         if (
           typeof e?.prompt === 'string' &&
+          typeof e.sessionId === 'string' &&
+          family.has(e.sessionId) &&
           !SYSTEM_PROMPT.test(e.prompt) &&
           !isMachineOpening(e.prompt) &&
           !isMachineSession({ env: {}, cwd: e.cwd }) &&
@@ -539,36 +591,34 @@ export function recentPrompts({ home, now = Date.now(), dir = null, sessionId = 
           at >= since &&
           at <= now + 60_000
         )
-          received.push({
-            at,
-            text: e.prompt,
-            sessionId: typeof e.sessionId === 'string' ? e.sessionId : null,
-          });
+          received.push({ at, text: e.prompt, sessionId: e.sessionId, line: line.dir });
       } catch {
         // 坏的一行跳过：别因为一行坏了就把别的话也藏起来
       }
     }
   }
   const lines = [];
-  // 发了的账和收到的账对一遍：发了、没收到的就是丢在 Mirasim「引导」里的那种（founder-inbox.mjs 开头）
-  // 「先答这些」只列发给本会话的（#1733：别的会话丢的不进这一行；取舍：也不另起一行，避免误答）
+  // 发了的账和收到的账对一遍：发了、没收到的就是丢在 Mirasim「引导」里的那种（founder-inbox.mjs 开头）。
+  // 发了的只读了本血缘那个目录，收到的也只留本血缘的：换了原生会话号之前丢的也补回本会话；别的会话丢的不进来（#1733）
   if (!sent.absent) {
     for (const p of sent.problems) lines.push(`创始人在 Mirasim 里发的话没读全：${p}；有没有丢的核不了。`);
-    const { lost } = reconcile(sent.entries, received);
-    const mine = sessionId ? lost.filter((e) => e.sessionId === sessionId) : [];
-    if (mine.length > 0) {
-      const shown = packNewestFirst(mine);
+    // 决定 0083 起不再往 steer-shown 写。旧记录还在：转过的仍算收到，免得开会话把已经转过的再列一遍（#1891）
+    const relay = relayedUpTo({ home, sessionIds: line.sessionIds, env });
+    for (const p of relay.problems) lines.push(`旧的引导记录没核成：${p}；这次分不清哪些已经转过。`);
+    const { lost } = reconcile(sent.entries, received, { relayed: { line: line.dir, at: relay.at } });
+    if (lost.length > 0) {
+      const shown = packNewestFirst(lost);
       lines.push(
-        `创始人发了、但 Claude Code 没收到的话（Mirasim 的「引导」在那一轮被打断或出错时丢了，他以为你看到了；共 ${mine.length} 条${shown.omitted}）：${shown.items.join(' ')} 先答这些，答完再接着干。`,
+        `创始人发了、但 Claude Code 没收到的话（Mirasim 的「引导」在那一轮被打断或出错时丢了，他以为你看到了；共 ${lost.length} 条${shown.omitted}）：${shown.items.join(' ')} 先答这些，答完再接着干。`,
       );
     }
   }
-  // 别的会话收到的：本会话自己收到的它早见过，不列
-  const others = received.filter((e) => now - e.at <= RECENT_MS && !(sessionId && e.sessionId === sessionId));
-  if (others.length > 0) {
-    const shown = packNewestFirst(others);
+  // 同一个 Mirasim 会话换原生会话号之前收到的（/compact、换模型）：当前这个号自己收到的它早见过，不列
+  const earlier = received.filter((e) => now - e.at <= RECENT_MS && e.sessionId !== sessionId);
+  if (earlier.length > 0) {
+    const shown = packNewestFirst(earlier);
     lines.push(
-      `创始人最近 ${Math.round(RECENT_MS / 60_000)} 分钟落盘的话（共 ${others.length} 条${shown.omitted}；上一个会话没来得及处理的在这里，已经办过的不用再办）：${shown.items.join(' ')}`,
+      `本会话（同一个 Mirasim 会话）换会话号之前最近 ${Math.round(RECENT_MS / 60_000)} 分钟收到的话（共 ${earlier.length} 条${shown.omitted}；换号前没来得及处理的在这里，已经办过的不用再办）：${shown.items.join(' ')}`,
     );
   }
   return lines;
@@ -673,8 +723,12 @@ export function progressRunner(timeoutMs = PROGRESS_MS) {
   };
 }
 
-/** 参数同 checkIdlePrs；返回要说的几行：没有待处理的、不是 fleet-dao 都不出声 */
-export function checkProgressIssue({ cwd, git, run, mirror = null }) {
+/**
+ * 参数同 checkIdlePrs，加 lineage（本会话的血缘）；返回要说的几行：没有待处理的、不是 fleet-dao 都不出声。
+ * 认主（见 NO_OWNER 上面）：progress.ts 的第 4 列是主人（旧版脚本没有这一列，就从正文里的〔主：…〕认，再没有算无主）。
+ * 本血缘的列全文叫它办；有主、主不是本血缘的只说条数；无主的照列开头，但先认领（pnpm progress:claim）。
+ */
+export function checkProgressIssue({ cwd, git, run, mirror = null, lineage = null }) {
   const top = git(cwd, ['rev-parse', '--show-toplevel']);
   if (!ok(top) || !top.stdout.trim()) return [];
   const root = top.stdout.trim();
@@ -691,15 +745,32 @@ export function checkProgressIssue({ cwd, git, run, mirror = null }) {
   if (items.some((c) => c.length < 3 || !/^\d+$/.test(c[0])))
     return [`${PROGRESS_NOT_CHECKED}：progress.ts 的输出认不出（${String(r.stdout).trim().slice(0, 60)}）。`];
   if (items.length === 0) return [];
-  const shown = items
-    .slice(0, 5)
-    .map(
-      ([id, head, text]) =>
-        `${id}（${head.replace(/^【[^】]*】/, '')}）${brief(text.replace(/^原话：/, ''))}`,
+  const mine = lineageDir(lineage);
+  const all = items.map(([id, head, text, col]) => {
+    const split = splitOwner(text);
+    const owner = col?.trim() || split.owner;
+    return { id, when: head.replace(/^【[^】]*】/, ''), text: split.text.replace(/^原话：/, ''), owner };
+  });
+  const ours = all.filter((d) => mine !== null && d.owner === mine);
+  const unowned = all.filter((d) => d.owner === NO_OWNER);
+  const others = all.length - ours.length - unowned.length;
+  const lines = [];
+  if (ours.length > 0)
+    lines.push(
+      `创始人引导有 ${ours.length} 条归本会话、没处理（进度单 #1055；本会话是 Mirasim 会话 ${mine}）：${ours.map((d) => `${d.id}（${d.when}）${d.text}`).join('；')}。先接着办，办完 pnpm progress:done <评论号>。`,
     );
-  return [
-    `创始人引导还有 ${items.length} 条没处理（进度单 #1055）：${shown.join('；')}${items.length > 5 ? ' 等' : ''}。先接着办，办完 pnpm progress:done <评论号>；全文 pnpm progress:read。`,
-  ];
+  if (unowned.length > 0) {
+    const shown = unowned.slice(0, 5).map((d) => `${d.id}（${d.when}）${brief(d.text)}`);
+    const how =
+      mine !== null
+        ? '先认领再办：pnpm progress:claim <评论号>（已归别的会话的会被拒）'
+        : '本会话认不出是哪个 Mirasim 会话、认领不了：是这个会话记的就接着办，不是就别动';
+    lines.push(
+      `无主的创始人引导 ${unowned.length} 条（进度单 #1055；旧的、或在 Mirasim 外记的）：${shown.join('；')}${unowned.length > 5 ? ' 等' : ''}。${how}；全文 pnpm progress:read。`,
+    );
+  }
+  if (others > 0) lines.push(`别的会话还有 ${others} 条创始人引导在办（进度单 #1055），不归你，别动。`);
+  return lines;
 }
 
 /** 和 packages/shared 的 DEFAULT_POOL_HOLD_OWNER 同一个字。钩子装到机器上，不能 import 那个包。 */
@@ -908,6 +979,7 @@ export function sessionStart({
   progress = progressRunner(),
   env = process.env,
   poolHolds = null,
+  repoContract = null,
 }) {
   // 工人不走三分钟门：它起来就要当前的远端。聊天这场每条消息都续上。
   // 问 GitHub、扫工作树看 session-net；git fetch 看 fetch-ok（子代理刚取成过就不再取）。两扇门都是三分钟。
@@ -932,12 +1004,15 @@ export function sessionStart({
   }
   // 同步专用检出里那份脚本和这个钩子一样来自 origin/main；没有再用会话所在检出里的
   const syncDir = source ? source.syncDirIn(home) : null;
+  // 本会话的血缘（同一个 Mirasim 会话用过的原生会话号）：他的话、引导都按它认主，别的会话的不给本会话
+  const lineage = lineageOf({ home, sessionId, env });
   return [
     ...(here.line ? [here.line] : []),
     ...unattendedLines({ dir: unattendedDir, sessionId: cleanId(sessionId), now }),
     ...checkTemporary(cwd, localGit, now),
     ...poolHoldPromptLines(holdRead, beijingToday(now)),
-    ...checkDirectives(cwd, localGit),
+    ...checkDirectives(cwd, localGit, lineage),
+    ...(repoContract ? repoContract(cwd) : []),
     ...(quiet
       ? []
       : checkProgressIssue({
@@ -945,8 +1020,9 @@ export function sessionStart({
           git: localGit,
           run: progress,
           mirror: syncDir ? join(syncDir, PROGRESS_SCRIPT) : null,
+          lineage,
         })),
-    ...recentPrompts({ home, now, sessionId }),
+    ...recentPrompts({ home, now, sessionId, env, lineage }),
     ...(quiet ? [] : sweepWorktrees(cwd, localGit, now, home)),
     ...workerLines(home, now),
     ...(quiet
@@ -1407,6 +1483,7 @@ function isMain() {
 }
 
 if (isMain()) {
+  if (process.env.FLEET_HEADLESS === '1') process.exit(0);
   let lines;
   try {
     let input = {};
@@ -1424,6 +1501,7 @@ if (isMain()) {
       localGit: gitRunner(GREP_MS),
       sessionId: input?.session_id ?? process.env.CLAUDE_CODE_SESSION_ID,
       poolHolds: () => readFrancePoolHolds({ home, env: process.env, spawn: spawnSync }),
+      repoContract: (dir) => contractLines({ cwd: dir, git: gitRunner(GREP_MS), home }),
     });
   } catch (err) {
     lines = [`开场核规矩没查成：开会话钩子自己出错了（${err?.message ?? err}）；${READ_MAIN}。`];

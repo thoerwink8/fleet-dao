@@ -4,10 +4,16 @@
 // 这些都写在条上一目了然，但用 wait / stall 提示色（黄系），不用 fail 红。红了表示「真坏了，要当场修」，
 // 这三件都不是「坏了」——额度本来就会被吃掉、探针本来就会报某些路由不通、引擎是按配置关的。
 // 把它们画成红就是在伪装失败。反过来，引擎开着却探不到在线的工人（down）是真坏了，红；没查成（unknown）不写成正常。
+//
+// 写法（#1899）：每格是一个 StatusBadge，tone 色加一个短状态字（正常 / 紧 / 有不通 / 已停用 / 没连上 / 没查成），
+// 不再靠灰色胶囊加颜色传意思。≥1440 且顶栏里真放得下时三格摊在顶栏；放不下或更窄（含手机）收成一个「状态」按钮，按钮上写汇总，点开是三格全文。
 
-import { CircleAlert, CircleCheck, CircleDashed, Gauge, Power, Waypoints } from 'lucide-react';
+import { useLayoutEffect, useRef, useState } from 'react';
+import { useMediaQuery } from '../../lib/hooks';
 import { cn } from '../../lib/utils';
-import { inkClass, type LayoutTone, lineClass, softClass, solidClass } from '../layout/tone';
+import { usePhone } from '../../lib/viewport';
+import { StatusBadge } from '../layout/status-badge';
+import type { LayoutTone } from '../layout/tone';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import type { HomeHealth } from './types';
 
@@ -16,60 +22,19 @@ type Kind = 'ok' | 'warn' | 'muted' | 'bad';
 /** 每格的状态色：正常 done、提示 wait（黄系）、真坏了 fail、没查成 stop。 */
 const KIND_TONE: Record<Kind, LayoutTone> = { ok: 'done', warn: 'wait', bad: 'fail', muted: 'stop' };
 
-/**
- * 每格的详情句怎么露：always 一直写；wide 只在 ≥1536 写（顶栏里地方紧，窄一点只留名字和颜色）；never 不写。
- * 不写的时候整格的悬停提示（title）里仍带着这句，颜色（提示黄、失败红）不受影响，问题照样一眼看得见。
- */
-export type DetailShow = 'always' | 'wide' | 'never';
+/** 汇总时哪个更要紧：真坏了 > 提示 > 没查成 > 正常。 */
+const KIND_RANK: Record<Kind, number> = { ok: 0, muted: 1, warn: 2, bad: 3 };
 
-function Chip({
-  icon: Icon,
-  label,
-  detail,
-  kind,
-  detailShow,
-}: {
-  icon: typeof Gauge;
-  label: string;
+/** ≥1440：三格摊在顶栏里放得下；更窄收进「状态」菜单。 */
+const WIDE_QUERY = '(min-width: 1440px)';
+
+export interface HealthItem {
+  key: 'quota' | 'routes' | 'engine';
+  name: string;
+  /** 短状态字，紧挨着名字写。 */
+  word: string;
   detail: string;
   kind: Kind;
-  detailShow: DetailShow;
-}) {
-  return (
-    <span
-      data-health-chip={kind}
-      data-tone={KIND_TONE[kind]}
-      title={detailShow === 'always' ? undefined : `${label}：${detail}`}
-      className={cn(
-        'inline-flex max-w-full shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-meta',
-        kind === 'ok' && 'border-border text-muted-foreground',
-        kind === 'warn' && cn(lineClass.wait, softClass.wait, inkClass.wait),
-        kind === 'bad' && cn(lineClass.fail, softClass.fail, inkClass.fail),
-        kind === 'muted' && 'border-dashed text-muted-foreground',
-      )}
-    >
-      {kind === 'ok' ? (
-        <CircleCheck className="size-3" aria-hidden />
-      ) : kind === 'warn' || kind === 'bad' ? (
-        <CircleAlert className="size-3" aria-hidden />
-      ) : (
-        <CircleDashed className="size-3" aria-hidden />
-      )}
-      <Icon className="size-3 opacity-70" aria-hidden />
-      <span className="shrink-0 font-medium whitespace-nowrap">{label}</span>
-      {/* 详情宽度用 max-w-health-detail。 */}
-      <span
-        className={cn(
-          'min-w-0 max-w-health-detail truncate text-meta opacity-90',
-          detailShow === 'wide' && 'hidden 2xl:inline',
-          detailShow === 'never' && 'hidden',
-        )}
-        title={detail}
-      >
-        {detail}
-      </span>
-    </span>
-  );
 }
 
 function kindOfQuota(state: HomeHealth['quota']['state']): Kind {
@@ -97,63 +62,114 @@ function kindOfEngine(state: HomeHealth['engine']['state']): Kind {
   }
 }
 
-/** 引擎进程那一格的名字和一句话：四种状态各说各的，名字都带「进程」，和顶栏的总开关分开，不共用「正常」。 */
-function engineWords(engine: HomeHealth['engine']): { label: string; detail: string } {
+/** 引擎进程那一格的短状态字和一句话：四种状态各说各的，名字都带「进程」，和顶栏的总开关分开，不共用「正常」。 */
+function engineWords(engine: HomeHealth['engine']): { word: string; detail: string } {
   switch (engine.state) {
     case 'on':
-      return { label: '引擎进程', detail: '正常' };
+      return { word: '正常', detail: '正常' };
     case 'off':
-      return { label: '引擎进程已停用', detail: engine.detail ?? '按配置没开' };
+      return { word: '已停用', detail: engine.detail ?? '按配置没开' };
     case 'down':
-      return { label: '引擎进程没连上', detail: engine.detail ?? '探不到在线的工人' };
+      return { word: '没连上', detail: engine.detail ?? '探不到在线的工人' };
     case 'unknown':
-      return { label: '引擎进程', detail: `没查成${engine.detail ? `：${engine.detail}` : ''}` };
+      return { word: '没查成', detail: `没查成${engine.detail ? `：${engine.detail}` : ''}` };
   }
 }
 
-/**
- * 手机上的写法（#1819）：额度、中转、引擎各一个状态点，三个点合成一个按钮（不小于 40×40），
- * 点开是原来三格的全文。颜色规矩同上：提示黄系不用红，红只给引擎没连上。
- */
-function CompactStrip({ health, className }: { health: HomeHealth; className?: string }) {
+/** 三格的名字、短状态字、详情句和状态。 */
+export function healthItems(health: HomeHealth): HealthItem[] {
+  const quotaKind = kindOfQuota(health.quota.state);
+  const routesKind = kindOfRoutes(health.routes.state);
   const engine = engineWords(health.engine);
-  const items = [
-    { icon: Gauge, label: '额度', detail: health.quota.detail, kind: kindOfQuota(health.quota.state) },
-    { icon: Waypoints, label: '中转', detail: health.routes.detail, kind: kindOfRoutes(health.routes.state) },
-    { icon: Power, label: engine.label, detail: engine.detail, kind: kindOfEngine(health.engine.state) },
+  return [
+    {
+      key: 'quota',
+      name: '额度',
+      word: quotaKind === 'ok' ? '正常' : quotaKind === 'warn' ? '紧' : '没查成',
+      detail: health.quota.detail,
+      kind: quotaKind,
+    },
+    {
+      key: 'routes',
+      name: '中转',
+      word: routesKind === 'ok' ? '正常' : routesKind === 'warn' ? '有不通' : '没查成',
+      detail: health.routes.detail,
+      kind: routesKind,
+    },
+    { key: 'engine', name: '引擎进程', ...engine, kind: kindOfEngine(health.engine.state) },
   ];
+}
+
+/** 汇总：最要紧的那格定颜色；全正常写「正常」，否则写几项要留意。 */
+export function healthSummary(items: readonly HealthItem[]): { tone: LayoutTone; label: string } {
+  const worst = items.reduce<Kind>((a, i) => (KIND_RANK[i.kind] > KIND_RANK[a] ? i.kind : a), 'ok');
+  const n = items.filter((i) => i.kind !== 'ok').length;
+  return { tone: KIND_TONE[worst], label: n === 0 ? '状态 正常' : `状态 ${n} 项要留意` };
+}
+
+/** 一格：StatusBadge（色 + 短状态字）。详情句在 ≥1536 接在后面，更窄只在悬停提示里。 */
+function Chip({ item, withDetail }: { item: HealthItem; withDetail: boolean }) {
+  return (
+    <span
+      data-health-chip={item.kind}
+      data-tone={KIND_TONE[item.kind]}
+      title={`${item.name}：${item.detail}`}
+      className="inline-flex max-w-full shrink-0 items-center gap-1.5"
+    >
+      <StatusBadge tone={KIND_TONE[item.kind]} variant="outline" label={`${item.name} ${item.word}`} />
+      {withDetail ? (
+        // 详情宽度用 max-w-health-detail。
+        <span className="hidden min-w-0 max-w-health-detail truncate text-meta text-muted-foreground 2xl:inline">
+          {item.detail}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+/** 「状态」菜单：按钮上写汇总，点开是三格全文。手机上按钮不小于 40 高。 */
+function StatusMenu({ items, className }: { items: readonly HealthItem[]; className?: string }) {
+  const summary = healthSummary(items);
+  return (
+    // 收起时也留一个 role=status「持续状态」：读屏读得到三格各自的状态字（按钮上只有汇总），france.test 守着它
+    <div role="status" aria-label="持续状态" className={cn('flex shrink-0 items-center', className)}>
+      <span className="sr-only">{items.map((i) => `${i.name}${i.word}`).join('，')}</span>
+      <MenuPopover items={items} summary={summary} />
+    </div>
+  );
+}
+
+function MenuPopover({
+  items,
+  summary,
+}: {
+  items: readonly HealthItem[];
+  summary: ReturnType<typeof healthSummary>;
+}) {
   return (
     <Popover>
       <PopoverTrigger asChild>
         <button
           type="button"
-          aria-label={`持续状态：${items.map((i) => `${i.label}${i.detail}`).join('；')}`}
+          aria-label={`持续状态：${items.map((i) => `${i.name}${i.word}`).join('；')}`}
           data-health-strip
-          data-health-compact
-          className={cn('flex h-10 min-w-10 items-center justify-center gap-2 rounded-md px-2', className)}
+          data-health-menu
+          className="flex min-h-10 shrink-0 items-center rounded-md px-1 transition-colors hover:bg-accent md:min-h-8"
         >
-          {items.map((i) => (
-            <span
-              key={i.label}
-              data-health-chip={i.kind}
-              aria-hidden
-              className={cn('size-3 rounded-full', solidClass[KIND_TONE[i.kind]])}
-            />
-          ))}
+          <StatusBadge tone={summary.tone} variant="outline" label={summary.label} />
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-72">
-        <ul className="space-y-2">
+      <PopoverContent align="start" className="w-80">
+        <ul className="space-y-3">
           {items.map((i) => (
-            <li key={i.label} className="flex items-start gap-2 text-body">
-              <span
-                aria-hidden
-                className={cn('mt-1.5 size-2.5 shrink-0 rounded-full', solidClass[KIND_TONE[i.kind]])}
-              />
-              <span className="min-w-0">
-                <span className="font-medium">{i.label}</span>
-                <span className="block text-meta text-muted-foreground">{i.detail}</span>
-              </span>
+            <li
+              key={i.key}
+              data-health-chip={i.kind}
+              data-tone={KIND_TONE[i.kind]}
+              className="flex flex-col items-start gap-1"
+            >
+              <StatusBadge tone={KIND_TONE[i.kind]} variant="outline" label={`${i.name} ${i.word}`} />
+              <span className="text-meta text-muted-foreground">{i.detail}</span>
             </li>
           ))}
         </ul>
@@ -162,47 +178,59 @@ function CompactStrip({ health, className }: { health: HomeHealth; className?: s
   );
 }
 
-export function HealthStrip({
-  health,
-  className,
-  detail = 'always',
-  compact = false,
-}: {
-  health: HomeHealth;
-  className?: string;
-  detail?: DetailShow;
-  /** 只画三个状态点（手机）。 */
-  compact?: boolean;
-}) {
-  if (compact) return <CompactStrip health={health} {...(className ? { className } : {})} />;
+/**
+ * 三格摊开放不放得下：量一次摊开要多宽，再盯着外框还剩多宽，放不下就收成「状态」按钮。
+ * 只看屏宽不够：顶栏里还有环境切换、总开关、搜索框，三格的说明又长短不一，桌面根字号放大到 125%（#1937）后更容易压到搜索框上。
+ * 量不到（测试环境宽度恒为 0、没有 ResizeObserver）当放得下，照屏宽档走。
+ */
+function useStripRoom(items: readonly HealthItem[], wanted: boolean) {
+  const box = useRef<HTMLDivElement>(null);
+  const strip = useRef<HTMLDivElement>(null);
+  const [needed, setNeeded] = useState(0);
+  const [avail, setAvail] = useState(0);
+  const key = items.map((i) => `${i.word}${i.detail}`).join('|');
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 三格的字变了要重量，key 就是这些字。
+  useLayoutEffect(() => {
+    setNeeded(0);
+  }, [key]);
+  useLayoutEffect(() => {
+    if (wanted && needed === 0 && strip.current) setNeeded(strip.current.scrollWidth);
+  });
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => setAvail(el.clientWidth));
+    ro.observe(el);
+    setAvail(el.clientWidth);
+    return () => ro.disconnect();
+  }, []);
+  const fits = needed === 0 || avail === 0 || needed <= avail;
+  return { box, strip, fits };
+}
+
+export function HealthStrip({ health, className }: { health: HomeHealth; className?: string }) {
+  const wide = useMediaQuery(WIDE_QUERY);
+  const phone = usePhone();
+  const items = healthItems(health);
+  const wanted = wide && !phone;
+  const { box, strip, fits } = useStripRoom(items, wanted);
   return (
-    <div
-      role="status"
-      aria-label="持续状态"
-      data-health-strip
-      className={cn('flex items-center gap-2', detail === 'wide' ? 'flex-nowrap' : 'flex-wrap', className)}
-    >
-      <Chip
-        icon={Gauge}
-        label="额度"
-        detail={health.quota.detail}
-        kind={kindOfQuota(health.quota.state)}
-        detailShow={detail}
-      />
-      <Chip
-        icon={Waypoints}
-        label="中转"
-        detail={health.routes.detail}
-        kind={kindOfRoutes(health.routes.state)}
-        detailShow={detail}
-      />
-      <Chip
-        icon={Power}
-        label={engineWords(health.engine).label}
-        detail={engineWords(health.engine).detail}
-        kind={kindOfEngine(health.engine.state)}
-        detailShow={detail}
-      />
+    <div ref={box} className="flex min-w-0 flex-1 items-center justify-end">
+      {wanted && fits ? (
+        <div
+          ref={strip}
+          role="status"
+          aria-label="持续状态"
+          data-health-strip
+          className={cn('flex min-w-0 flex-nowrap items-center gap-2 overflow-hidden', className)}
+        >
+          {items.map((i) => (
+            <Chip key={i.key} item={i} withDetail />
+          ))}
+        </div>
+      ) : (
+        <StatusMenu items={items} {...(className ? { className } : {})} />
+      )}
     </div>
   );
 }

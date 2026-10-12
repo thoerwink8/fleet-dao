@@ -66,7 +66,8 @@ describe('路由页分块：一次只显示一块', () => {
     renderApp(<RoutingPage />, { route: '/routing' });
     await screen.findByRole('navigation', { name: '用途' });
     const tabs = screen.getAllByRole('tab');
-    expect(tabs.map((t) => t.textContent)).toEqual(['用途', '模型目录', '渠道']);
+    // 思考档位并进路由页成了第四块（#1914 第 5 轮）
+    expect(tabs.map((t) => t.textContent)).toEqual(['用途', '模型目录', '渠道', '思考档位']);
     expect(screen.getByRole('tab', { name: '用途' }).getAttribute('aria-selected')).toBe('true');
     expect(screen.queryByRole('list', { name: '目录里的模型' })).toBeNull();
     expect(screen.queryByRole('list', { name: '渠道列表' })).toBeNull();
@@ -81,6 +82,11 @@ describe('路由页分块：一次只显示一块', () => {
     expect(await screen.findByRole('list', { name: '渠道列表' })).toBeTruthy();
     expect(screen.getByRole('tab', { name: '渠道' }).getAttribute('aria-selected')).toBe('true');
     expect(screen.queryByRole('list', { name: '目录里的模型' })).toBeNull();
+
+    fireEvent.keyDown(screen.getByRole('tab', { name: '渠道' }), { key: 'ArrowRight' });
+    expect(await screen.findByRole('searchbox', { name: '搜索模型或渠道' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: '思考档位' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.queryByRole('list', { name: '渠道列表' })).toBeNull();
 
     fireEvent.click(screen.getByRole('tab', { name: '用途' }));
     expect(await screen.findByRole('navigation', { name: '用途' })).toBeTruthy();
@@ -112,7 +118,8 @@ describe('模型目录：搜索、只看已开启、窗口化（300 个模型）
     const list = await screen.findByRole('list', { name: '目录里的模型' });
     const box = list.parentElement as HTMLElement;
     expect(box.getAttribute('data-windowed')).toBe('true');
-    fireEvent.scroll(box, { target: { scrollTop: 44 * 200 } });
+    // 行高 48（两行字的行，#1916 起和样板 row-tall 一样；原来 44）：滚到第 200 行
+    fireEvent.scroll(box, { target: { scrollTop: 48 * 200 } });
     await waitFor(() => expect(rowIds('li[data-catalog]', 'data-catalog')).toContain('m-200'));
     expect(rowIds('li[data-catalog]', 'data-catalog')).not.toContain('m-000');
     expect(rows('li[data-catalog]').length).toBeLessThan(30);
@@ -375,6 +382,8 @@ const classTokens = (el: Element) => (el.getAttribute('class') ?? '').split(/\s+
 
 function expectTap(el: Element) {
   const tokens = classTokens(el);
+  // 按钮：min-h-9 加 min-w-9；原生下拉（NativeSelect）手机上 max-md:min-h-10，更高
+  if (tokens.includes('max-md:min-h-10')) return;
   expect(tokens).toContain('min-h-9');
   expect(tokens).toContain('min-w-9');
 }
@@ -404,59 +413,80 @@ function mockMobile() {
 }
 
 describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
-  test('用途里的模型行：名字可换行，操作在下一行', async () => {
+  test('用途里的模型行：名字可换行，名字下面一行小字，开关和「⋯」在名字后面', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await screen.findByRole('list', { name: '模型' });
     const row = document.querySelector('li[data-model="opus-5.5"]') as HTMLElement;
-    const shell = row.firstElementChild as HTMLElement;
-    expect(classTokens(shell)).toEqual(expect.arrayContaining(['flex-col', 'md:flex-row']));
+    // 行框是版式组件 RowFrame（行高、内边距取令牌，#1914）
+    const shell = row.querySelector('[data-row-frame]') as HTMLElement;
+    expect(shell).toBeTruthy();
+    expect(classTokens(shell)).toEqual(
+      expect.arrayContaining(['min-h-row-tall', 'px-section', 'max-md:min-h-11']),
+    );
     const name = row.querySelector('[data-row-name]') as HTMLElement;
     expect(name.textContent).toBe('Opus 5.5');
     expect(classTokens(name)).toContain('break-words');
     expect(classTokens(name)).not.toContain('truncate');
+    // 一行小字：厂家 · 几条路几条活
+    expect(row.querySelector('[data-row-meta]')?.textContent).toContain('claude · 3 条路，2 条活');
     const actions = row.querySelector('[data-row-actions]') as HTMLElement;
     expect(name.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // 手机上可点区至少 40（拖动柄 36 起，「⋯」是 icon-sm：手机 40）
     expectTap(within(row).getByRole('button', { name: /^拖动 / }));
-    expectTap(within(row).getByRole('button', { name: /^置顶 / }));
-    expectTap(within(row).getByRole('button', { name: /^置底 / }));
+    expect(classTokens(within(actions).getByRole('button', { name: /^更多操作：/ }))).toEqual(
+      expect.arrayContaining(['max-md:min-h-10', 'max-md:min-w-10']),
+    );
     // 开关是小滑块，不撑成圆：可点的范围用伪元素往外扩
-    expect(classTokens(within(row).getByRole('switch'))).toEqual(
+    expect(classTokens(within(actions).getByRole('switch'))).toEqual(
       expect.arrayContaining(['relative', 'after:absolute', 'after:-inset-y-3']),
     );
-    expectTap(within(row).getByRole('button', { name: /^上移 / }));
-    expectTap(within(row).getByRole('button', { name: /^下移 / }));
-    expectTap(within(row).getByRole('combobox'));
-    expectTap(within(row).getByRole('button', { name: /移出用途/ }));
-    const [pause] = await screen.findAllByRole('button', { name: /暂停账号池/ });
-    expectTap(pause as HTMLElement);
+    // 上移、下移、置顶、置底、档位、移出、整池暂停都不在行里
+    expect(within(row).queryByRole('button', { name: /^(上移|下移|置顶|置底) / })).toBeNull();
+    expect(within(row).queryByRole('combobox')).toBeNull();
+    expect(screen.queryByRole('button', { name: /暂停账号池/ })).toBeNull();
   });
 
   test('手机宽度定高行加高，装得下两行', async () => {
+    // #1916 起一行固定两行字（名字加状态一行、小字一行，各不折），手机行高 56（比桌面 48 高，点得准）；
+    // 原来手机上一行拆成三行，用 80。断言仍是「手机比桌面高、两行字都在」。
     mockMobile();
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api: withModels(60) });
     await screen.findByRole('list', { name: '模型' });
     const model = document.querySelector('li[data-model]') as HTMLElement;
-    expect(model.style.height).toBe('80px');
+    expect(model.style.height).toBe('56px');
     cleanup();
     mockMobile();
     renderApp(<RoutingPage />, { route: '/routing?tab=models', api: withModels(60) });
     await screen.findByRole('list', { name: '目录里的模型' });
     const catalog = document.querySelector('li[data-catalog]') as HTMLElement;
-    expect(catalog.style.height).toBe('80px');
+    expect(catalog.style.height).toBe('56px');
+    expect(catalog.querySelector('[data-row-name-line]')).toBeTruthy();
+    expect(catalog.querySelector('[data-row-meta]')).toBeTruthy();
     cleanup();
     mockMobile();
     renderApp(<RoutingPage />, { route: '/routing?tab=channels' });
     await screen.findByRole('list', { name: '渠道列表' });
     const channel = document.querySelector('li[data-channel]') as HTMLElement;
-    expect(channel.style.height).toBe('80px');
+    expect(channel.style.height).toBe('56px');
+    expect(channel.querySelector('[data-row-name-line]')).toBeTruthy();
+    expect(channel.querySelector('[data-row-meta]')).toBeTruthy();
   });
 
   test('模型目录和渠道的第二行写出厂家、状态词、几条路几条活，不用 hidden 藏', async () => {
     renderApp(<RoutingPage />, { route: '/routing?tab=models' });
     await screen.findByRole('list', { name: '目录里的模型' });
     const grok = document.querySelector('li[data-catalog="grok-4.7"]') as HTMLElement;
+    // #1916 起行是样板的两行骨架（各宽度一样）：第一行名字加状态词，第二行小字写厂家和几条路几条活；
+    // 原来断言的是「手机 flex-col、桌面 flex-row」，换成等价的「两行分开、都看得见、各不折」
     const shell = grok.firstElementChild as HTMLElement;
-    expect(classTokens(shell)).toEqual(expect.arrayContaining(['flex-col', 'md:flex-row']));
+    expect(shell.hasAttribute('data-row-frame')).toBe(true);
+    const nameLine = grok.querySelector('[data-row-name-line]') as HTMLElement;
+    const metaLine = grok.querySelector('[data-row-meta]') as HTMLElement;
+    expect(classTokens(nameLine)).toContain('whitespace-nowrap');
+    expect(classTokens(metaLine)).toEqual(expect.arrayContaining(['truncate', 'whitespace-nowrap']));
+    expect(nameLine.querySelector('[data-status-word]')).toBeTruthy();
+    expect(metaLine.querySelector('[data-vendor]')).toBeTruthy();
+    expect(metaLine.querySelector('[data-route-summary]')).toBeTruthy();
     const vendor = grok.querySelector('[data-vendor]') as HTMLElement;
     const status = grok.querySelector('[data-status-word]') as HTMLElement;
     const summary = grok.querySelector('[data-route-summary]') as HTMLElement;
@@ -472,9 +502,9 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     renderApp(<RoutingPage />, { route: '/routing?tab=channels' });
     await screen.findByRole('list', { name: '渠道列表' });
     const channel = document.querySelector('li[data-channel="ch-claude"]') as HTMLElement;
-    expect(classTokens(channel.firstElementChild as HTMLElement)).toEqual(
-      expect.arrayContaining(['flex-col', 'md:flex-row']),
-    );
+    expect((channel.firstElementChild as HTMLElement).hasAttribute('data-row-frame')).toBe(true);
+    expect(channel.querySelector('[data-row-name-line] [data-status-word]')).toBeTruthy();
+    expect(channel.querySelector('[data-row-meta] [data-route-summary]')).toBeTruthy();
     const channelStatus = channel.querySelector('[data-status-word]') as HTMLElement;
     const channelSummary = channel.querySelector('[data-route-summary]') as HTMLElement;
     expect(channelStatus.textContent?.trim()).not.toBe('');
@@ -518,60 +548,50 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
     renderApp(<RoutingPage />, { route: '/routing?tab=models' });
     await screen.findByRole('list', { name: '目录里的模型' });
     const only = screen.getByRole('button', { name: '只看已开启' });
-    const idleOnly = only.className;
     expect(only.getAttribute('aria-pressed')).toBe('false');
+    expect(only.getAttribute('data-state')).toBe('off');
     fireEvent.click(only);
     expect(only.getAttribute('aria-pressed')).toBe('true');
-    expect(only.className).not.toBe(idleOnly);
-    expect(only.className).toContain('border-foreground');
-    expect(only.className).toContain('bg-foreground/10');
-    expect(idleOnly).not.toContain('bg-foreground/10');
+    expect(only.getAttribute('data-state')).toBe('on');
 
     const discovered = screen.getByRole('button', { name: '新发现' });
-    const idleDiscovered = discovered.className;
     fireEvent.click(discovered);
     expect(discovered.getAttribute('aria-pressed')).toBe('true');
-    expect(discovered.className).not.toBe(idleDiscovered);
-    expect(discovered.className).toContain('bg-foreground/10');
-    expect(discovered.className).toContain('border-foreground');
+    expect(discovered.getAttribute('data-state')).toBe('on');
 
     fireEvent.click(screen.getByRole('button', { name: '清除筛选' }));
     expect(only.getAttribute('aria-pressed')).toBe('false');
     expect(discovered.getAttribute('aria-pressed')).toBe('false');
 
     const vendor = screen.getByRole('combobox', { name: '按厂家筛选' }) as HTMLSelectElement;
-    const idleVendor = vendor.className;
     fireEvent.change(vendor, { target: { value: 'grok' } });
-    expect(vendor.className).not.toBe(idleVendor);
-    expect(vendor.className).toContain('border-foreground');
-    expect(vendor.className).toContain('bg-foreground/10');
+    expect(vendor.value).toBe('grok');
     await waitFor(() => expect(screen.getByText(/^显示 1 \/ 共/)).toBeTruthy());
 
     fireEvent.click(screen.getByRole('button', { name: '清除筛选' }));
     await waitFor(() => expect(screen.getByText(/^共 \d+ 个$/)).toBeTruthy());
     expect(vendor.value).toBe('');
-    expect(vendor.className).not.toContain('bg-foreground/10');
   });
 
-  test('顶部说明折成一行「怎么用」，点开才展开（手机和桌面一样）', async () => {
+  test('页头说明是真的一句话（不是「怎么用」占位），细则收进 ⓘ，点开才看（手机和桌面一样）', async () => {
     mockMobile();
     renderApp(<RoutingPage />, { route: '/routing' });
     await screen.findByRole('navigation', { name: '用途' });
+    expect(screen.queryByRole('button', { name: '怎么用' })).toBeNull();
     expect(screen.queryByText(/每个用途按顺序排哪些模型/)).toBeNull();
-    const toggle = screen.getByRole('button', { name: '怎么用' });
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    expect(screen.getByText(/每个用途按顺序排哪些模型/)).toBeTruthy();
+    fireEvent.click(document.querySelector('[data-description-hint]') as HTMLElement);
+    expect(await screen.findByText(/每个用途按顺序排哪些模型/)).toBeTruthy();
+    expect(screen.getByText(/每个用途里模型和渠道怎么排先后/)).toBeTruthy();
 
-    // 桌面也折起来：调整顺序的区域要占满页面主体高度，首屏留给顺序，不留给说明
+    // 桌面：一句说明直接写在标题下，细则还是在 ⓘ 里。调整顺序的区域要占满页面主体高度，首屏留给顺序
     cleanup();
     vi.restoreAllMocks();
     renderApp(<RoutingPage />, { route: '/routing' });
     await screen.findByRole('navigation', { name: '用途' });
+    expect(screen.getByText(/每个用途里模型和渠道怎么排先后/)).toBeTruthy();
     expect(screen.queryByText(/每个用途按顺序排哪些模型/)).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '怎么用' }));
-    expect(screen.getByText(/每个用途按顺序排哪些模型/)).toBeTruthy();
+    fireEvent.click(document.querySelector('[data-description-hint]') as HTMLElement);
+    expect(await screen.findByText(/每个用途按顺序排哪些模型/)).toBeTruthy();
   });
 
   test('手机宽度模型目录去掉内部定高滚动，行随页面滚；桌面仍是 440 高的窗口', async () => {
@@ -618,18 +638,18 @@ describe('路由页手机宽度：行布局、热区、筛选、标记', () => {
         (node) => node.textContent === label,
       );
       if (!el) throw new Error(`没有标记 ${label}（${id}）`);
-      return el.getAttribute('class') ?? '';
+      return el.querySelector('[data-tone]')?.getAttribute('data-tone') ?? '';
     };
     const discovered = await waitFor(() => mark('sonnet-5', '新发现'));
     const locked = mark('gpt-5.6-luna', '锁住');
-    expect(discovered).toMatch(/text-ink-done|text-ink-run/);
-    expect(locked).toContain('text-ink-stall');
+    expect(discovered).toBe('done');
+    expect(locked).toBe('stall');
     expect(discovered).not.toBe(locked);
     const retired = document.querySelector('li[data-catalog="opus-5"]');
     expect(retired?.querySelector('[data-catalog-mark="retired"]')).toBeNull();
     const chip = retired?.querySelector('[data-status-word] span');
     expect(chip?.textContent).toContain('已下架');
-    expect(chip?.className).toContain('text-ink-stop');
+    expect(chip?.closest('[data-tone]')?.getAttribute('data-tone')).toBe('stop');
   });
 });
 

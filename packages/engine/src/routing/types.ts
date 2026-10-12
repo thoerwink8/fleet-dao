@@ -94,8 +94,8 @@ export interface RouteFacts {
   executor?: string | null;
   /**
    * 路由探针最近一次下结论的时刻（routes.probed_at），探针还没看过为空。在线（被挡原因里没有 offline）的一定有：
-   * 库里约束 alive 为真时结论必须是 ok，没有就是输入拼错了（validate.ts 抛）。超过 routeProbeStaleMinutes(hostId)
-   * 没更新（探针可能停了）照派，派工理由里写明（choose.ts 的 probeNote）。
+   * 库里约束 alive 为真时结论必须是 ok，没有就是输入拼错了（validate.ts 抛）。结论过没过期由 filter.ts 按
+   * probe_next_at 判（#1798 片 4），不再在这里判。
    */
   probedAt: string | null;
   /** 那次结论是什么（routes.probe_state）：探针还没看过为空。不给 = 不知道（老的输入），按 offline 原样硬挡。 */
@@ -105,8 +105,16 @@ export interface RouteFacts {
    * 结论是 skipped、这里是另一个组织 = 那一轮另一个组织挂着、没探它，不是它坏了：它的组织挂上以后等下一轮探针（filter.ts）。
    */
   probeOrg?: OrgKind | null;
-  /** 探针原文。不给 = 老的输入，过期线只按执行方式。给了且写着退避或隔 60 分钟，过期线按那一档。 */
+  /**
+   * 探针原文（routes.probe_detail）。只给人看，选路不再从里面抠节奏（#1798 片 3/4）。
+   */
   probeDetail?: string | null;
+  /**
+   * 探针下一次该真探的时刻（routes.probe_next_at，引擎每轮现写）。挂着别的组织没探那一支靠它判过期
+   * （晚于它 ROUTE_PROBE_OVERDUE_MINUTES 还没探到 = 探针可能停了）。老输入（片 3 之前写的结论）为空，
+   * 那一支退回按上一次结论之后一轮算。
+   */
+  probeNextAt?: string | null;
   /** 候选查询算好的：ok / exhausted / unknown（没读成、读数过期、判不了扣不扣）。 */
   quota: 'ok' | 'exhausted' | 'unknown';
   windows: RouteWindow[];

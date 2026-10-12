@@ -10,7 +10,7 @@
 // - 长列表（超过 50 行）只画窗口里的行；拖到容器上下沿时容器自己滚（lib/list-window.ts）。窗口化的行是定高的，行高由调用方给定。
 
 import { founderOnlyFor } from '@fleet-dao/shared';
-import { ArrowDownToLine, ArrowUpToLine, ChevronDown, ChevronUp, Ellipsis, GripVertical } from 'lucide-react';
+import { GripVertical } from 'lucide-react';
 import {
   createContext,
   type DragEvent,
@@ -42,6 +42,8 @@ import {
 } from '../lib/list-window';
 import { useSelectedNodeId } from '../lib/node';
 import { cn } from '../lib/utils';
+import { RowMenuItem, revealOnRowHover } from './layout/row-menu';
+import { Tag } from './layout/tag';
 import { useSelectedNodeName } from './node-notice';
 import {
   AlertDialog,
@@ -53,15 +55,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from './ui/alert-dialog';
-import { Badge } from './ui/badge';
 import { Button } from './ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from './ui/dropdown-menu';
 import { Switch } from './ui/switch';
 
 interface Ask {
@@ -280,15 +274,14 @@ export const TAP = 'min-h-9 min-w-9 md:min-h-0 md:min-w-0';
 /** 开关本身是个小滑块：手机上不把它撑成 36px 的圆，只把可点的范围用透明伪元素往外扩（宽屏收回）。 */
 export const SWITCH_TAP = 'relative after:absolute after:-inset-x-1.5 after:-inset-y-3 md:after:hidden';
 
-/** 一行的操作：拖动手柄、置顶、置底。调用方决定摆在行里哪儿。 */
+/** 一行的先后操作：拖动柄（桌面，键盘 Alt+方向键也在它上面）和「⋯」菜单里的挪动项。调用方决定摆在行里哪儿。 */
 export interface RowControls {
   grip: ReactNode;
-  pins: ReactNode;
-  /** 手机上把这一行的上移、下移、置顶、置底收进「⋯」菜单时用（RowMenu）；宽屏仍用 grip、pins。 */
+  /** 上移、下移、置顶、置底：画进行尾「⋯」菜单（RowMoveItems），点了走和拖动同一条保存路径。 */
   moves: RowMoves;
 }
 
-/** 一行能做的挪动：菜单项照它画、点了走和置顶 / 置底按钮同一条保存路径。 */
+/** 一行能做的挪动：菜单项照它画、点了走和拖动同一条保存路径。 */
 export interface RowMoves {
   /** 这一行的名字（带「里的先后」），菜单按钮的无障碍名字用。 */
   label: string;
@@ -301,36 +294,14 @@ export interface RowMoves {
   move: (to: 'up' | 'down' | 'top' | 'bottom') => void;
 }
 
-/** 菜单里除了挪动之外的一项（开关、移出）。 */
-export interface RowMenuAction {
-  key: string;
-  label: string;
-  onSelect: () => void;
-  disabled?: boolean;
-  /** 置灰时的原因，悬停可见。 */
-  title?: string | undefined;
-  destructive?: boolean;
-}
-
-/** 不到 lg（1024）：一行放不下开关加四个挪动按钮，操作改收进「⋯」菜单（RowMenu）。 */
-export const COMPACT_MQ = '(max-width: 1023px)';
-
-/** 手机上菜单项的高度（Tailwind 的 10 = 40px）：和按钮一样要点得准。 */
-const MENU_ITEM = 'min-h-10 px-3';
+/** 行尾「⋯」的悬停提示。 */
+export const ROW_MENU_TITLE = '上移、下移、置顶、置底和更多操作';
 
 /**
- * 手机上一行的操作都收进行尾一个「⋯」菜单（#1806）：开关、上移、下移、置顶、置底，以及调用方给的别的项（移出）。
- * 一行里不再并排五六个小按钮。置灰的项悬停写原因：到头了、远程环境、正在保存。
+ * 「⋯」菜单里的四个挪动项（#1806 起手机这样，路由页样板 #1914 起桌面也这样）：行里不再并排四个箭头。
+ * 置灰的项悬停写原因：到头了、远程环境、正在保存。键盘照旧：聚焦拖动柄按 Alt+方向键。
  */
-export function RowMenu({
-  moves,
-  leading = [],
-  trailing = [],
-}: {
-  moves: RowMoves;
-  leading?: readonly RowMenuAction[];
-  trailing?: readonly RowMenuAction[];
-}) {
+export function RowMoveItems({ moves }: { moves: RowMoves }) {
   const reason = (edge: string | null) => moves.why ?? (moves.off ? '正在保存，稍等' : edge) ?? undefined;
   const moveItems: { key: 'up' | 'down' | 'top' | 'bottom'; label: string; edge: string | null }[] = [
     { key: 'up', label: '上移一位', edge: moves.atTop ? '已经在最前' : null },
@@ -338,53 +309,22 @@ export function RowMenu({
     { key: 'top', label: '置顶', edge: moves.atTop ? '已经在最前' : null },
     { key: 'bottom', label: '置底', edge: moves.atBottom ? '已经在最后' : null },
   ];
-  const action = (a: RowMenuAction) => (
-    <DropdownMenuItem
-      key={a.key}
-      className={MENU_ITEM}
-      disabled={a.disabled ?? false}
-      title={a.title}
-      variant={a.destructive ? 'destructive' : 'default'}
-      onSelect={a.onSelect}
-    >
-      {a.label}
-    </DropdownMenuItem>
-  );
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          className="min-h-10 min-w-10 shrink-0"
-          aria-label={`更多操作：${moves.label}`}
-          title="开关、上移、下移、置顶、置底、移出"
-        >
-          <Ellipsis aria-hidden />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-44">
-        {leading.map(action)}
-        {leading.length > 0 ? <DropdownMenuSeparator /> : null}
-        {moveItems.map((m) => {
-          const why = reason(m.edge);
-          return (
-            <DropdownMenuItem
-              key={m.key}
-              className={MENU_ITEM}
-              disabled={why !== undefined}
-              title={why}
-              onSelect={() => moves.move(m.key)}
-            >
-              {m.label}
-            </DropdownMenuItem>
-          );
-        })}
-        {trailing.length > 0 ? <DropdownMenuSeparator /> : null}
-        {trailing.map(action)}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <>
+      {moveItems.map((m) => {
+        const why = reason(m.edge);
+        return (
+          <RowMenuItem
+            key={m.key}
+            disabled={why !== undefined}
+            title={why}
+            onSelect={() => moves.move(m.key)}
+          >
+            {m.label}
+          </RowMenuItem>
+        );
+      })}
+    </>
   );
 }
 
@@ -596,7 +536,6 @@ export function SortableList<T>({
     };
     const atTop = at === 0;
     const atBottom = at === shownIds.length - 1;
-    const pinClass = 'shrink-0 aria-disabled:pointer-events-none aria-disabled:opacity-40';
     return {
       moves: {
         label,
@@ -615,7 +554,13 @@ export function SortableList<T>({
           type="button"
           variant="ghost"
           size="icon-xs"
-          className={cn('hidden shrink-0 cursor-grab md:inline-flex', TAP)}
+          // 桌面才拖（手机用「⋯」菜单挪）；鼠标设备上悬停这一行才露出，键盘聚焦时也露出。
+          // 浮在行左边的留白里（行是 relative），不占一列：平时不露出时左边不空一块
+          className={cn(
+            'absolute top-1/2 left-0 hidden -translate-y-1/2 cursor-grab text-muted-foreground md:inline-flex',
+            revealOnRowHover,
+            TAP,
+          )}
           draggable={!off}
           disabled={disabled}
           aria-disabled={saving || busy || undefined}
@@ -627,66 +572,6 @@ export function SortableList<T>({
         >
           <GripVertical aria-hidden />
         </Button>
-      ),
-      pins: (
-        <>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            className={cn(pinClass, TAP)}
-            disabled={disabled}
-            aria-disabled={saving || busy || atTop || undefined}
-            title={disabledWhy ?? (atTop ? '已经在最前' : '置顶（Alt+Home）')}
-            aria-label={`置顶 ${label}`}
-            onClick={() => pin('top')}
-            onKeyDown={(e) => onKeyDown(e, id)}
-          >
-            <ArrowUpToLine aria-hidden />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            className={cn(pinClass, TAP)}
-            disabled={disabled}
-            aria-disabled={saving || busy || atTop || undefined}
-            title={disabledWhy ?? (atTop ? '已经在最前' : '上移一位（Alt+↑）')}
-            aria-label={`上移 ${label}`}
-            onClick={() => step(-1)}
-            onKeyDown={(e) => onKeyDown(e, id)}
-          >
-            <ChevronUp aria-hidden />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            className={cn(pinClass, TAP)}
-            disabled={disabled}
-            aria-disabled={saving || busy || atBottom || undefined}
-            title={disabledWhy ?? (atBottom ? '已经在最后' : '下移一位（Alt+↓）')}
-            aria-label={`下移 ${label}`}
-            onClick={() => step(1)}
-            onKeyDown={(e) => onKeyDown(e, id)}
-          >
-            <ChevronDown aria-hidden />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            className={cn(pinClass, 'hidden md:inline-flex', TAP)}
-            disabled={disabled}
-            aria-disabled={saving || busy || atBottom || undefined}
-            title={disabledWhy ?? (atBottom ? '已经在最后' : '置底（Alt+End）')}
-            aria-label={`置底 ${label}`}
-            onClick={() => pin('bottom')}
-            onKeyDown={(e) => onKeyDown(e, id)}
-          >
-            <ArrowDownToLine aria-hidden />
-          </Button>
-        </>
       ),
     };
   };
@@ -707,6 +592,7 @@ export function SortableList<T>({
             : undefined
         }
         className={cn(
+          'relative',
           rowClassName?.(item),
           edge === 'before' && 'border-t-2 border-t-foreground',
           edge === 'after' && 'border-b-2 border-b-foreground',
@@ -773,9 +659,9 @@ export function FounderOnlyBadge({
   const rule = founderOnlyFor({ id: modelId, family: family ?? '', displayName });
   if (!rule) return null;
   return (
-    <Badge variant="outline" title={rule.reason} className="h-4 shrink-0 px-1 text-micro font-normal">
-      仅创始人可开
-    </Badge>
+    <span title={rule.reason} className="inline-flex shrink-0">
+      <Tag>仅创始人可开</Tag>
+    </span>
   );
 }
 

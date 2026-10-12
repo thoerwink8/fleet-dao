@@ -70,9 +70,8 @@ describe('额度：用量没读到不当 0%', () => {
   test('上游新出的窗口（other）长度不知道：不喊「先用它」', () => {
     expect(windowLength.other).toBeUndefined();
     expect(isUseItOrLoseIt(noUsage({ window: 'other', utilization: 0.1, resetsAt: at(1) }), NOW)).toBe(false);
-    expect(windowTitle({ window: 'other', label: 'auto_percent', scope: 'auto' })).toBe(
-      'auto_percent · auto',
-    );
+    expect(windowTitle({ window: 'other', label: 'auto_percent', scope: 'auto' })).toBe('自动模式额度');
+    expect(windowTitle({ window: 'other', label: 'brand_new_key' })).toBe('未命名窗口');
     expect(windowTitle({ window: '7d_model', label: '7d_opus', scope: 'opus' })).toBe('周窗 · 单模型 · opus');
   });
 

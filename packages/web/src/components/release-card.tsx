@@ -69,7 +69,8 @@ export function ReleaseCardBody({ card, now }: { card: ReleaseCard; now: number 
 export function ReleaseEntry({ card, now }: { card: ReleaseCard; now: number }) {
   const { gap, mainline } = card;
   return (
-    <div className="mt-2 space-y-2 border-t pt-2" data-release-entry>
+    // 挂在「在用版本」那一行的灰字下面、和名字对齐（#1914 样板铺开）：一行差几个，一行要发的主线头，再下面按钮
+    <div className="space-y-1.5" data-release-entry>
       {gap.state === 'ahead' ? (
         <p className="text-meta font-medium text-ink-stall" data-entry-gap="ahead">
           落后主线 {gap.count} 个提交
@@ -82,8 +83,14 @@ export function ReleaseEntry({ card, now }: { card: ReleaseCard; now: number }) 
         <Unread why={gap.why} />
       )}
       {mainline.state === 'ok' ? (
-        <p className="break-words text-meta" data-entry-head>
-          要发的主线头 <Sha short={mainline.commit.short} /> {mainline.commit.title}
+        <p
+          className="flex min-w-0 items-center gap-1.5 text-meta whitespace-nowrap"
+          data-entry-head
+          title={`要发的主线头 ${mainline.commit.short} ${mainline.commit.title}`}
+        >
+          <span className="shrink-0 text-muted-foreground">要发的主线头</span>
+          <Sha short={mainline.commit.short} />
+          <span className="min-w-0 truncate">{mainline.commit.title}</span>
         </p>
       ) : (
         <Unread why={mainline.why} />

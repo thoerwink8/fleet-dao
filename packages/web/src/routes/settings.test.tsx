@@ -301,3 +301,32 @@ describe('设置页谁改的、额度窗名、仓名悬停', () => {
     expect(short.textContent).toBe('aaaaaaaa…');
   });
 });
+
+describe('设置页保存按钮：能存是品牌实色，不能存是禁用样式（#1904）', () => {
+  test('没改动时禁用（data-state=disabled、灰底）；填了新值才变成品牌实色、能点', async () => {
+    const api = createMockApi({ live: false });
+    renderApp(<SettingsPage />, { api: api as unknown as FleetApi, route: '/settings' });
+    const input = (await screen.findByPlaceholderText('没设')) as HTMLInputElement;
+    const form = input.closest('form') as HTMLElement;
+    const save = within(form).getByRole('button', { name: '保存' }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    expect(save.getAttribute('data-state')).toBe('disabled');
+    expect(save.className).toContain('bg-muted');
+    expect(save.className).not.toContain('bg-brand');
+    fireEvent.change(input, { target: { value: '9' } });
+    await waitFor(() => expect(save.disabled).toBe(false));
+    expect(save.getAttribute('data-state')).toBe('ready');
+    expect(save.className).toContain('bg-brand');
+    expect(save.className).not.toContain('bg-muted');
+  });
+
+  test('留量线一块和别的区块一样用 Section 标题（text-heading），不再是自己写的小字标题', async () => {
+    const api = createMockApi({ live: false });
+    renderApp(<SettingsPage />, { api: api as unknown as FleetApi, route: '/settings' });
+    const form = (await screen.findByTestId('reserve-source')).closest('form') as HTMLElement;
+    // 标题在表单里（e2e 按「带这个标题的表单」找留量线）
+    const title = form.querySelector('section > header h2');
+    expect(title?.textContent).toBe('各渠道的额度留量线');
+    expect(title?.className).toContain('text-heading');
+  });
+});

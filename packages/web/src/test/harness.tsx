@@ -42,12 +42,12 @@ export function renderApp<A extends FleetApi = MockApi>(
   return { api, qc, ...view };
 }
 
-/** 额度页顶上的摘要胶囊：点开它，返回展开的明细（找不到就报错，不返回空）。 */
+/** 额度页顶上的摘要标签（FilterTabs 的按钮组，aria-pressed）：点开它，返回展开的明细（找不到就报错，不返回空）。一次只开一块。 */
 export function openSummary(title: string): HTMLElement {
   const btn = screen.getByText(title).closest('button');
-  if (!btn) throw new Error(`找不到摘要胶囊：${title}`);
-  if (btn.getAttribute('aria-expanded') !== 'true') fireEvent.click(btn);
-  const panel = document.getElementById(btn.getAttribute('aria-controls') ?? '');
-  if (!panel) throw new Error(`摘要胶囊没有展开：${title}`);
+  if (!btn) throw new Error(`找不到摘要标签：${title}`);
+  if (btn.getAttribute('aria-pressed') !== 'true') fireEvent.click(btn);
+  const panel = document.querySelector<HTMLElement>(`[data-quota-panel][aria-label="${title}"]`);
+  if (!panel) throw new Error(`摘要标签没有展开：${title}`);
   return panel;
 }

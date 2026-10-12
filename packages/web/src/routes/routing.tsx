@@ -1,24 +1,33 @@
 // 路由页（#574，specs/509 方案第八节「两层的每层都要能一眼看出这条现在活着吗」；#1366 第二部分改成分块）：
-// 「用途 / 模型目录 / 渠道」三块一次看一块。每个用途按顺序排哪些模型（紧凑行：序号、名字、状态点、开关；拖动、置顶、上移、下移、置底、Alt+上下键改先后），
-// 选中一个模型再看它下面每条路由现在活不活（桌面左右并排、各自占满页面高度、内部滚动；手机整页纵向铺开）；关着的行置灰写「已跳过」，实际顺位只数开着且没下架的（lib/routing-order.ts），已下架的行写「已下架」不写名次；模型目录、渠道各是一列带搜索的紧凑行。活不活由后端现算（db 的 routing-liveness.ts），这页不再判一遍。
+// 「用途 / 模型目录 / 渠道」三块一次看一块。每个用途按顺序排哪些模型，选中一个模型再看它下面每条路由现在活不活
+// （桌面左右并排、右边跟着滚；手机整页纵向铺开）；关着的行降对比度写「已跳过」，实际顺位只数开着且没下架的（lib/routing-order.ts），
+// 已下架的行写「已下架」不写名次；模型目录、渠道各是一列带搜索的紧凑行。活不活由后端现算（db 的 routing-liveness.ts），这页不再判一遍。
+// 路由页样板（#1914，创始人 2026-10-11「ui到底做完没？怎么这么丑」）：
+// - 这一页最该看的是「这个用途现在实际派给谁、为什么」：做成用途的标题块（用途名大一号，一句结论用正文字，细节灰字）。
+// - 一行只留拖动柄、序号、名字加一行小字、一个状态、开关；档位、移出、上移下移置顶置底收进行尾「⋯」（悬停才露出），键盘 Alt+方向键照旧。
+// - 页头右上只留一句汇总（红灯数为 0 不写红）和图标刷新，更新时间在悬停里；长说明都在 ⓘ。
 // 改这里之前必须知道：
 // - 不知道（探针没看过、额度没读成）不画成活，也不画成死：用停滞色，原因照写。
 // - 没接上（开发环境内存版）和没读成是两回事：前者整块写 unavailable，后者写「没读成」和原因。都不画空表冒充「都没配」。
 // - 先后、开关的写走 components/routing-edit.tsx（保存契约不变：带看到的旧顺序，别人先改了回 409）。
 
 import { routingPurposeOf, SCOPE_NO_ROUTE } from '@fleet-dao/shared';
-import { Route as RouteIcon, TriangleAlert } from 'lucide-react';
-import { type KeyboardEvent, useState } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { errMessage } from '@fleet-dao/shared/util';
+import { Route as RouteIcon } from 'lucide-react';
+import { useState } from 'react';
+import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
-import { usePoolHolds, useRoutingLayers } from '../api/client';
+import { usePoolHolds, useRoutingEfforts, useRoutingLayers } from '../api/client';
 import type { RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
 import { EmptyState } from '../components/layout/empty-state';
+import { FilterTabGroups, FilterTabNote, FilterTabs } from '../components/layout/filter-tabs';
+import { RowFrame } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
+import { Notice } from '../components/layout/notice';
 import { Page } from '../components/layout/page';
-import { Section } from '../components/layout/section';
+import { Section, SectionGrid } from '../components/layout/section';
 import { StatusBadge, StatusDot } from '../components/layout/status-badge';
-import { RefreshBar } from '../components/refresh-bar';
+import { Tag } from '../components/layout/tag';
 import {
   ChannelTab,
   LIST_HEIGHT,
@@ -29,7 +38,6 @@ import {
   revealOnMobile,
 } from '../components/routing-browse';
 import {
-  COMPACT_MQ,
   FounderOnlyBadge,
   ModelSwitch,
   RoutingEditProvider,
@@ -37,18 +45,20 @@ import {
   SortableList,
   useRoutingEdit,
 } from '../components/routing-edit';
+import { EFFORTS_STALE_AFTER_MS, EffortsTab } from '../components/routing-efforts';
 import { KindDot, useKindEnv } from '../components/routing-kinds';
-import { AddPurposeModel, PurposeModelControls } from '../components/routing-membership';
+import { AddPurposeModel, effortWord, PurposeModelMenu } from '../components/routing-membership';
 import {
   CollapsibleOffModelRoutes,
   effortBlockedTitle,
-  hideEffortRowNoteClass,
   ModelRoutes,
   OrderSummaryLine,
+  useRouteOrder,
 } from '../components/routing-routes';
 import { formatClock, TIME } from '../lib/format';
 import { useMediaQuery, useNow } from '../lib/hooks';
 import { filterActive, filterRows, type ListFilter, NO_FILTER, WINDOW_MIN_ROWS } from '../lib/list-window';
+import { readRootScale, scaledPx } from '../lib/root-scale';
 import { modelKind } from '../lib/route-kinds';
 import {
   countByVerdict,
@@ -57,96 +67,89 @@ import {
   pickPurpose,
   purposeLabel,
   purposeLine,
+  purposeLineFull,
   purposeVerdictLabel,
+  routeHost,
+  routeSlots,
+  routeTitle,
   verdictTone,
 } from '../lib/routing';
 import { actualRanks, modelSlotState, type SlotState, slotWord, summarizeOrder } from '../lib/routing-order';
-import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
 
 export function meta() {
   return [{ title: brand.title('路由') }];
 }
 
-const DESCRIPTION =
-  '每个用途按顺序排哪些模型、每个模型走哪几条路，现在派不派得出去。一条路接得上、额度够、没被禁令挡三件都过才算活。改先后：拖到新位置，或点每行的置顶、上移、下移、置底，或聚焦后按 Alt+上下键（Alt+Home 置顶、Alt+End 置底）；模型的先后只管这个用途，渠道的先后管这个模型在所有用途里。关着的行置灰、写「已跳过」：引擎自动跳过它、顺延给下一个，行上写的「实际第几位」只数开着且没下架的；已下架的不占名次，行上写「已下架」。模型、渠道、每条路由都有开关：模型开关关了，它在所有用途里不派；渠道开关关了，它下面的路由都不派。账号池可以在这里整池暂停。下一次选路就照新的。';
+/** 页头一行说明；细则收进标题旁的 ⓘ：首屏留给「谁在接活」和先后，不留给说明。 */
+const SUMMARY = '每个用途里模型和渠道怎么排先后，现在哪些派得出去。';
+
+const DESCRIPTION = (
+  <div className="space-y-2">
+    <p>
+      每个用途按顺序排哪些模型、每个模型走哪几条路，现在派不派得出去。一条路接得上、额度够、没被禁令挡三件都过才算活。
+    </p>
+    <p>
+      改先后：拖到新位置，或点每行行尾「⋯」里的上移、下移、置顶、置底，或聚焦拖动柄后按 Alt+上下键（Alt+Home
+      置顶、Alt+End
+      置底）；模型的先后只管这个用途，渠道的先后管这个模型在所有用途里。关着的行变淡、写「已跳过」：引擎自动跳过它、顺延给下一个，行上写的「实际第几位」只数开着且没下架的；已下架的不占名次，行上写「已下架」。
+    </p>
+    <p>
+      模型、渠道、每条路由都有开关：模型开关关了，它在所有用途里不派；渠道开关关了，它下面的路由都不派。账号池可以在路由的「⋯」里整池暂停。下一次选路就照新的。
+    </p>
+    <p>
+      思考档位（起会话想多深）：点开一条路由就能改；所有路的档位放在「思考档位」页签里一张表看。改了下一个会话就照新的，不用发版。
+    </p>
+    <p>
+      活 = 接得上、额度够、没被禁令挡三件都过；不知道 =
+      探针还没看过、额度没读成，不当活。引擎派活时另看账号池有没有空位（满了是等，不算故障）；探针的结论过期了，引擎照上一次的结论派、写明，这里标「探测过期」。
+    </p>
+  </div>
+);
 
 const TABS = [
   { id: 'purposes', label: '用途' },
   { id: 'models', label: '模型目录' },
   { id: 'channels', label: '渠道' },
+  // 思考档位并进路由页（#1914 第 5 轮）：所有路的档位一张表；每条路由展开后也能就地改
+  { id: 'efforts', label: '思考档位' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
 
 const parseTab = (raw: string | null): TabId => TABS.find((t) => t.id === raw)?.id ?? 'purposes';
 
-/** 路由两层每 30 秒重拉一次。超过 5 分钟还没再读成，刷新条标「数据已过期」（正常间隔里不标）。 */
+/** 路由两层每 30 秒重拉一次。刷新钮旁的新鲜度：1 分钟内不画，5 分钟内「数据有点旧」，更久「数据已过期」。 */
 const ROUTING_STALE_AFTER_MS = 5 * TIME.MIN;
-
-/** 一句话的颜色：好消息不上色（只用灰），要看的才上色。 */
-const lineInk = (tone: Tone) => (tone === 'done' ? 'text-muted-foreground' : toneText[tone]);
-
-/** 说明折成一行「怎么用」，点开才展开：调整顺序的区域要占满页面主体高度，首屏留给顺序，不留给说明。 */
-function RoutingDescription() {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-        className="block text-left underline-offset-2 hover:underline"
-      >
-        怎么用
-      </button>
-      {open ? <span className="mt-1 block">{DESCRIPTION}</span> : null}
-    </>
-  );
-}
 
 export default function Routing() {
   const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useRoutingLayers();
+  const efforts = useRoutingEfforts();
+  const now = useNow();
   const [params, setParams] = useSearchParams();
-  const refresh = (
-    <RefreshBar
-      onRefresh={() => void refetch()}
-      isFetching={isFetching}
-      dataUpdatedAt={dataUpdatedAt}
-      staleAfterMs={ROUTING_STALE_AFTER_MS}
-    />
-  );
-
-  if (error) {
-    return (
-      <Page title="路由" description={<RoutingDescription />} keepDescription actions={refresh}>
-        <LoadError what="路由两层" error={error} />
-      </Page>
-    );
-  }
-  if (isLoading || !data) {
-    return (
-      <Page title="路由" description={<RoutingDescription />} keepDescription actions={refresh}>
-        <LoadingRows rows={6} />
-      </Page>
-    );
-  }
-  if (data.unavailable) {
-    return (
-      <Page title="路由" description={<RoutingDescription />} keepDescription actions={refresh}>
-        <div
-          role="note"
-          className="rounded-xl border border-dashed bg-card px-6 py-10 text-center text-sm text-muted-foreground"
-        >
-          {data.unavailable}
-        </div>
-      </Page>
-    );
-  }
-
-  // 只画对照里的用途。接口要是还带回老的（分诊、方案、审查……），当没点名，不占一格。
-  const purposes = data.purposes.filter((p) => routingPurposeOf(p.purpose));
   const tab = parseTab(params.get('tab'));
+  // 刷新收成页头最右一个图标钮，最后更新时间在悬停里（和主页同一个样子，#1819）。
+  // 「思考档位」页签看的是档位那份（没有推送，60 秒自己重拉）：刷新两份都重读，新鲜度按档位那份算。
+  const refresh =
+    tab === 'efforts'
+      ? {
+          onRefresh: () => {
+            void efforts.refetch();
+            void refetch();
+          },
+          isFetching: efforts.isFetching,
+          // 共用秒表一拍最多慢 1 秒。刚读成的时间戳比「现在」新时压回这一拍，避免显示成「1 秒后」。
+          dataUpdatedAt: efforts.dataUpdatedAt > now ? now : efforts.dataUpdatedAt,
+          staleAfterMs: EFFORTS_STALE_AFTER_MS,
+          variant: 'dot' as const,
+        }
+      : {
+          onRefresh: () => void refetch(),
+          isFetching,
+          dataUpdatedAt,
+          staleAfterMs: ROUTING_STALE_AFTER_MS,
+          variant: 'dot' as const,
+        };
   const setTab = (id: TabId) =>
     setParams(
       (prev) => {
@@ -157,75 +160,72 @@ export default function Routing() {
       },
       { replace: true, preventScrollReset: true },
     );
+  const page = { title: '路由', description: SUMMARY, detail: DESCRIPTION, refresh };
+
+  // 从没读成：整页只写没读成和原因。读成过、刷新时失败：照旧画上一次读到的，顶上一条横幅带重试（不把看得到的清空）
+  if (error && !data) {
+    return (
+      <Page {...page}>
+        <LoadError what="路由两层" error={error} onRetry={() => void refetch()} />
+      </Page>
+    );
+  }
+  if (isLoading || !data) {
+    return (
+      <Page {...page}>
+        <LoadingRows rows={6} />
+      </Page>
+    );
+  }
+  if (data.unavailable) {
+    return (
+      <Page {...page}>
+        <Section>
+          <div role="note">
+            <EmptyState icon={RouteIcon} title={data.unavailable} />
+          </div>
+        </Section>
+      </Page>
+    );
+  }
+
+  // 只画对照里的用途。接口要是还带回老的（分诊、方案、审查……），当没点名，不占一格。
+  const purposes = data.purposes.filter((p) => routingPurposeOf(p.purpose));
 
   return (
     <Page
-      title="路由"
-      description={<RoutingDescription />}
-      keepDescription
-      // 一个用途都没有时不报「0 个派不出去」：那会读成没事
-      actions={
-        <>
-          {refresh}
-          {purposes.length > 0 ? <Summary purposes={purposes} asOf={data.asOf} /> : null}
-        </>
+      {...page}
+      // 一个用途都没有时不报「派得出去」：那会读成没事
+      actions={purposes.length > 0 ? <Summary purposes={purposes} asOf={data.asOf} /> : undefined}
+      tabs={
+        <FilterTabs
+          aria-label="路由页分块"
+          idPrefix="routing-tab"
+          items={TABS}
+          value={tab}
+          onChange={setTab}
+          className="w-fit"
+        />
       }
     >
+      {error ? (
+        <div className="mb-4">
+          <LoadError
+            text={`路由两层刷新没读成，下面是上一次读到的：${errMessage(error)}`}
+            error={error}
+            onRetry={() => void refetch()}
+          />
+        </div>
+      ) : null}
       <RoutingEditProvider>
-        <RoutingTabs tab={tab} onPick={setTab} />
         <div role="tabpanel" id="routing-panel" aria-labelledby={`routing-tab-${tab}`}>
           {tab === 'models' ? <ModelCatalogTab layers={data} /> : null}
           {tab === 'channels' ? <ChannelTab layers={data} /> : null}
+          {tab === 'efforts' ? <EffortsTab /> : null}
           {tab === 'purposes' ? <PurposesTab purposes={purposes} params={params} /> : null}
         </div>
       </RoutingEditProvider>
     </Page>
-  );
-}
-
-/** 三块的页签：一次只显示一块。方向键、Home、End 在页签间移动。 */
-function RoutingTabs({ tab, onPick }: { tab: TabId; onPick: (id: TabId) => void }) {
-  const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
-    const at = TABS.findIndex((t) => t.id === tab);
-    let to: number;
-    if (e.key === 'ArrowRight') to = (at + 1) % TABS.length;
-    else if (e.key === 'ArrowLeft') to = (at - 1 + TABS.length) % TABS.length;
-    else if (e.key === 'Home') to = 0;
-    else if (e.key === 'End') to = TABS.length - 1;
-    else return;
-    e.preventDefault();
-    const next = TABS[to];
-    if (!next) return;
-    onPick(next.id);
-    document.getElementById(`routing-tab-${next.id}`)?.focus();
-  };
-  return (
-    <div role="tablist" aria-label="路由页分块" className="mb-4 flex gap-1 border-b">
-      {TABS.map((t) => {
-        const active = t.id === tab;
-        return (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            id={`routing-tab-${t.id}`}
-            aria-selected={active}
-            aria-controls="routing-panel"
-            tabIndex={active ? 0 : -1}
-            onClick={() => onPick(t.id)}
-            onKeyDown={onKeyDown}
-            className={cn(
-              '-mb-px border-b-2 px-4 py-2 text-sm transition-colors hover:text-foreground',
-              active
-                ? 'border-foreground font-semibold text-foreground'
-                : 'border-transparent text-muted-foreground',
-            )}
-          >
-            {t.label}
-          </button>
-        );
-      })}
-    </div>
   );
 }
 
@@ -243,7 +243,7 @@ function PurposesTab({ purposes, params }: { purposes: RoutingLayerPurpose[]; pa
     );
   }
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-8">
       <PurposeList purposes={purposes} selected={selected.purpose} params={params} />
       <div id="routing-purpose-detail" className="min-w-0 scroll-mt-4">
         <PurposeDetail key={selected.purpose} purpose={selected} />
@@ -252,19 +252,35 @@ function PurposesTab({ purposes, params }: { purposes: RoutingLayerPurpose[]; pa
   );
 }
 
+/** 页头右上的一句汇总：派得出去几个；不知道、派不出去是 0 就不写（红灯数为 0 不显示红）。算的时刻在悬停里。 */
 function Summary({ purposes, asOf }: { purposes: RoutingLayerPurpose[]; asOf: string }) {
   const counts = countByVerdict(purposes);
+  const worst = counts.dead > 0 ? 'fail' : counts.unknown > 0 ? 'stall' : 'done';
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      <StatusBadge tone="done" label={`${counts.live} 个派得出去`} />
-      <StatusBadge tone="stall" label={`${counts.unknown} 个不知道`} />
-      <StatusBadge tone="fail" label={`${counts.dead} 个派不出去`} />
-      <span className="num text-caption text-muted-foreground">{formatClock(asOf)} 现算</span>
-    </div>
+    <p
+      data-routing-summary
+      title={`${formatClock(asOf)} 后端现算`}
+      className="flex items-center gap-2 text-body text-muted-foreground"
+    >
+      <StatusDot tone={worst} />
+      <span className="num text-foreground">{counts.live} 个派得出去</span>
+      {counts.unknown > 0 ? (
+        <>
+          <span aria-hidden>·</span>
+          <span className="num text-ink-stall">{counts.unknown} 个不知道</span>
+        </>
+      ) : null}
+      {counts.dead > 0 ? (
+        <>
+          <span aria-hidden>·</span>
+          <span className="num font-medium text-ink-fail">{counts.dead} 个派不出去</span>
+        </>
+      ) : null}
+    </p>
   );
 }
 
-/** 用途选择：一排紧凑的按钮（手机上横向滑动），不再是一张张带阴影的卡片；每个用途的先后在下面的大区域里调。 */
+/** 用途选择：流程里的一组、流程之外的一组（组头写「不是流程里的一段」），各带状态点和模型数。 */
 function PurposeList({
   purposes,
   selected,
@@ -274,80 +290,122 @@ function PurposeList({
   selected: string;
   params: URLSearchParams;
 }) {
+  const [, setParams] = useSearchParams();
+  const env = useKindEnv();
   const flow = purposes.filter((p) => routingPurposeOf(p.purpose)?.aside !== true);
   const aside = purposes.filter((p) => routingPurposeOf(p.purpose)?.aside === true);
+  const toItem = (p: RoutingLayerPurpose) => ({
+    id: p.purpose,
+    tone: verdictTone[p.verdict],
+    count: p.models.length,
+    label: (
+      <span
+        title={purposeLineFull(
+          purposeLine(p, { retired: env.modelRetired, channelOpen: env.channelEnabled }),
+        )}
+      >
+        <span className="sr-only">{purposeVerdictLabel[p.verdict]}：</span>
+        {purposeLabel(p.purpose)}
+        {/* 选中后标题块里写出来；按钮上只给读屏，不挤在筛选条里 */}
+        {p.purpose === 'groom' ? <span className="sr-only">（{GROOM_HINT}）</span> : null}
+      </span>
+    ),
+  });
+  // 别的网址参数（?node=、?tab=）带着走
+  const pick = (id: string) => {
+    const next = new URLSearchParams(params);
+    next.set('purpose', id);
+    setParams(next, { replace: true, preventScrollReset: true });
+  };
   return (
     <nav aria-label="用途" className="min-w-0">
-      {/* relative：横滑条里的 sr-only 文字是绝对定位，不套 relative 会跑到滚动区外撑宽页面（#1806） */}
-      <ul className="relative flex items-center gap-1.5 overflow-x-auto pb-1 md:flex-wrap md:overflow-visible">
-        {flow.map((p) => (
-          <PurposeItem key={p.purpose} purpose={p} selected={selected} params={params} />
-        ))}
-        {aside.length > 0 ? (
-          <>
-            <li className="shrink-0 px-1 text-caption text-muted-foreground">不是流程里的一段</li>
-            {aside.map((p) => (
-              <PurposeItem key={p.purpose} purpose={p} selected={selected} params={params} />
-            ))}
-          </>
-        ) : null}
-      </ul>
-      <p className="mt-1 text-caption text-muted-foreground">对题：{SCOPE_NO_ROUTE}</p>
+      <FilterTabGroups
+        value={selected}
+        onChange={pick}
+        groups={[
+          { key: 'flow', 'aria-label': '流程里的用途', items: flow.map(toItem) },
+          ...(aside.length > 0
+            ? [
+                {
+                  key: 'aside',
+                  heading: '不是流程里的一段',
+                  'aria-label': '流程之外的用途',
+                  items: aside.map(toItem),
+                  // 对题不选路：只读的一项，说明在悬停里，不另占一行
+                  note: <FilterTabNote label="对题" detail={SCOPE_NO_ROUTE} />,
+                },
+              ]
+            : []),
+        ]}
+      />
     </nav>
   );
 }
 
-function PurposeItem({
-  purpose: p,
-  selected,
-  params,
-}: {
-  purpose: RoutingLayerPurpose;
-  selected: string;
-  params: URLSearchParams;
-}) {
+const GROOM_HINT = '这里配指挥官用的模型';
+
+/** 行高（桌面、平板）：名字一行加一行小字。只在超过 50 个模型、要开窗口时用；不到 50 个按内容高度、整页滚。 */
+const ORDER_ROW_HEIGHT = 48;
+/** 超过 50 个模型时窗口的高度：13 行，再多内部滚。 */
+const ORDER_LIST_HEIGHT = ORDER_ROW_HEIGHT * 13;
+
+/**
+ * 用途的标题块：这一页最该看的一句——这个用途现在实际派给谁、为什么。
+ * 用途名大一号、带结论标签；下一行是那句结论（正文字）；再下一行是走哪条路、几个在跑（灰字）。
+ */
+function PurposeHero({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   const env = useKindEnv();
-  const active = p.purpose === selected;
-  // 别的网址参数（?node=、?tab=）带着走
-  const next = new URLSearchParams(params);
-  next.set('purpose', p.purpose);
+  const line = purposeLine(p, { retired: env.modelRetired, channelOpen: env.channelEnabled });
+  const first = firstLive(p);
+  // 灰字一行：结论的补充（走哪条路、为什么不是首选）+ 执行方式和在跑几个 + 用途自己的提示
+  // 窄屏放不下时截掉的是最后的「在跑几个」，所以用途自己的提示排在前面
+  const notes: string[] = [];
+  if (p.purpose === 'groom') notes.push(GROOM_HINT);
+  if (p.purpose === 'judge' && p.verdict === 'unknown') notes.push('按量计费，不自动探，不用处理');
+  if (line.detail && p.models.length > 0) notes.push(line.detail);
+  if (first) {
+    const via = routeTitle(first.route);
+    if (!line.detail?.includes(via)) notes.push(`走 ${via}`);
+    notes.push(`${routeHost(first.route)} · ${routeSlots(first.route).text}`);
+  }
+  const noteText = notes.join(' · ');
+  const badge = <StatusBadge tone={verdictTone[p.verdict]} label={purposeVerdictLabel[p.verdict]} />;
   return (
-    <li className="shrink-0">
-      <Link
-        to={{ search: `?${next}` }}
-        replace
-        preventScrollReset
-        aria-current={active ? 'true' : undefined}
-        title={purposeLine(p, { retired: env.modelRetired, channelOpen: env.channelEnabled }).text}
-        className={cn(
-          'inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3 text-sm transition-colors hover:border-border-strong md:min-h-8',
-          active ? 'border-foreground bg-foreground/10 font-semibold' : 'border-border bg-background',
-        )}
-      >
-        <StatusDot tone={verdictTone[p.verdict]} />
-        <span className="sr-only">{purposeVerdictLabel[p.verdict]}：</span>
-        <span>{purposeLabel(p.purpose)}</span>
-        {p.purpose === 'groom' ? (
-          <span className="hidden text-caption font-normal text-muted-foreground lg:inline">
-            这里配指挥官用的模型
+    // 三行、每行都不折（#1914 第 5 轮，创始人看 390 宽「变成 2 行了」）：用途名一行；结论短话带状态标签一行
+    // （短话放不下就截断、标签不挤走）；灰字补充一行（放不下截断，整句在悬停里）。
+    <header data-purpose-hero className="flex min-w-0 flex-col pt-2">
+      <div className="mb-3 flex min-w-0 items-baseline gap-2 whitespace-nowrap">
+        <h2 className="truncate text-subtitle">{purposeLabel(p.purpose)}</h2>
+        <span className="shrink-0 text-meta text-muted-foreground">{p.purpose}</span>
+      </div>
+      {/* 一个模型都没排：那句话就是缺口本身，下面缺口栏已经写了，不在这里再写一遍 */}
+      {p.models.length > 0 ? (
+        <p
+          data-hero-line
+          title={purposeLineFull(line)}
+          className="flex min-w-0 items-center gap-2.5 whitespace-nowrap text-heading font-normal"
+        >
+          {line.tone === 'done' ? null : <StatusDot tone={line.tone} className="shrink-0" />}
+          <span data-hero-text className="min-w-0 truncate">
+            {line.text}
           </span>
-        ) : null}
-        <span className="num text-caption font-normal text-muted-foreground">{p.models.length}</span>
-      </Link>
-    </li>
+          <span className="shrink-0">{badge}</span>
+        </p>
+      ) : (
+        <p>{badge}</p>
+      )}
+      {noteText ? (
+        <p data-hero-notes title={noteText} className="mt-1.5 truncate text-meta text-muted-foreground">
+          {noteText}
+        </p>
+      ) : null}
+    </header>
   );
 }
-
-/** 调整顺序用的行高（桌面）。档位配不了的长说明已收进悬停，单行即可；区域仍占满页面主体高度。手机沿用 MOBILE_ROW_HEIGHT。 */
-const ORDER_ROW_HEIGHT = 40;
-/** 不到 xl 宽（平板）时模型清单没有父元素给高度：固定放得下 13 行。 */
-const ORDER_LIST_HEIGHT = ORDER_ROW_HEIGHT * 13;
-const WIDE_MQ = '(min-width: 1280px)';
 
 function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   const now = useNow();
   const env = useKindEnv();
-  const line = purposeLine(p, { retired: env.modelRetired, channelOpen: env.channelEnabled });
   const first = firstLive(p);
   const edit = useRoutingEdit();
   const holds = usePoolHolds();
@@ -374,56 +432,35 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
   const currentPosition = current ? p.models.findIndex((m) => m.modelId === current.modelId) + 1 : 0;
   const currentOff = current !== undefined && modelIsOff(current);
   return (
-    <section aria-label={`${purposeLabel(p.purpose)}的调整顺序`} className="flex flex-col gap-3">
-      <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <h2 className="flex items-center gap-2 text-base font-semibold">
-          {purposeLabel(p.purpose)}
-          <span className="num text-caption font-normal text-muted-foreground">{p.purpose}</span>
-        </h2>
-        <StatusBadge tone={verdictTone[p.verdict]} label={purposeVerdictLabel[p.verdict]} />
-        {p.purpose === 'judge' && p.verdict === 'unknown' ? (
-          <span className="text-caption text-muted-foreground">按量计费，不自动探，不用处理</span>
-        ) : null}
-        {/* 一个模型都没排：那句话就是缺口本身，下面缺口栏已经写了，不在这里再写一遍 */}
-        {p.models.length > 0 ? (
-          <span className={cn('min-w-0 text-sub', lineInk(line.tone))}>{line.text}</span>
-        ) : null}
-      </header>
+    <section aria-label={`${purposeLabel(p.purpose)}的调整顺序`} className="flex flex-col gap-6">
+      <PurposeHero purpose={p} />
       {edit.disabledWhy ? (
-        <p
-          role="note"
-          className="rounded-lg border border-dashed bg-muted/40 px-3 py-2 text-sub text-muted-foreground"
-        >
-          {edit.disabledWhy}。先后、开关、添加和档位都不能改。
-        </p>
+        <Notice tone="info">{edit.disabledWhy}。先后、开关、添加和档位都不能改。</Notice>
       ) : null}
-      {holds.error ? (
-        <p role="status" className="text-sub text-ink-fail">
-          整池暂停没读成，路由先不能单独开。
-        </p>
-      ) : null}
-      {membershipError ? (
-        <p role="alert" className="rounded-lg border border-ink-fail px-3 py-2 text-sub text-ink-fail">
-          {membershipError}
-        </p>
-      ) : null}
+      {holds.error ? <Notice tone="fail">整池暂停没读成，路由先不能单独开。</Notice> : null}
+      {membershipError ? <Notice tone="fail">{membershipError}</Notice> : null}
       {p.problems.length > 0 ? (
-        <ul
-          aria-label="配置缺口"
-          className="space-y-1 rounded-lg border border-st-fail/40 bg-st-fail/10 px-3 py-2 text-sub text-ink-fail"
-        >
-          {p.problems.map((x) => (
-            <li key={x} className="flex gap-2">
-              <TriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-              {x}
-            </li>
-          ))}
-        </ul>
+        <Notice tone="fail">
+          <ul aria-label="配置缺口" className="space-y-1">
+            {p.problems.map((x) => (
+              <li key={x}>{x}</li>
+            ))}
+          </ul>
+        </Notice>
       ) : null}
-      {p.models.length === 0 ? <AddPurposeModel purpose={p} onError={setMembershipError} /> : null}
-      {p.models.length > 0 ? (
-        // 桌面（xl）：左模型先后、右这个模型下的路由先后，并排，各自占满页面主体高度、内部自己滚；窄屏纵向铺开
-        <div className="grid items-stretch gap-3 xl:h-routing-desk xl:grid-cols-routing-desk xl:grid-rows-routing-desk">
+      {p.models.length === 0 ? (
+        <Section>
+          <EmptyState
+            icon={RouteIcon}
+            title="这个用途还没排模型"
+            hint="从目录里挑一个，引擎就能往这里派"
+            action={<AddPurposeModel purpose={p} onError={setMembershipError} />}
+          />
+        </Section>
+      ) : (
+        // 桌面（xl）：左模型先后、右这个模型下的路由，并排，各按各的内容高度（items-start，不互相拉高）；
+        // 右边跟着页面滚动停在顶上（sticky），路由多了封顶在 routing-desk 高度、内部自己滚；窄屏纵向铺开
+        <SectionGrid cols={1} className="items-start xl:grid-cols-routing-desk">
           <ModelPriority
             purpose={p}
             selectedId={current?.modelId}
@@ -431,51 +468,77 @@ function PurposeDetail({ purpose: p }: { purpose: RoutingLayerPurpose }) {
             onError={setMembershipError}
           />
           {current ? (
-            <section
-              id="routing-model-detail"
-              aria-label={`${current.displayName} 的路由`}
-              className="flex h-full min-h-0 scroll-mt-4 flex-col overflow-hidden rounded-lg border bg-card"
-            >
-              <header className="flex flex-wrap items-baseline gap-x-2 border-b bg-muted/40 px-3 py-2">
-                <h3 className="text-sm font-semibold">{current.displayName} 的路由</h3>
-                <span className="text-caption text-muted-foreground">
-                  先后管这个模型在所有用途里 · {modelSummary(current)}
-                </span>
-              </header>
-              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-                {currentOff && foldOffRoutes ? (
-                  <CollapsibleOffModelRoutes
-                    key={current.modelId}
-                    model={current}
-                    position={currentPosition}
-                    now={now}
-                    firstLiveRoute={first?.model === current ? first.route.routeId : undefined}
-                  />
-                ) : (
-                  <ModelRoutes
-                    key={current.modelId}
-                    model={current}
-                    now={now}
-                    firstLiveRoute={first?.model === current ? first.route.routeId : undefined}
-                  />
-                )}
-              </div>
-            </section>
+            <RoutesCard
+              model={current}
+              off={currentOff && foldOffRoutes}
+              position={currentPosition}
+              now={now}
+              firstLiveRoute={first?.model === current ? first.route.routeId : undefined}
+            />
           ) : null}
-        </div>
-      ) : null}
-      <p className="text-caption text-muted-foreground">
-        活 = 接得上、额度够、没被禁令挡三件都过；不知道 =
-        探针还没看过、额度没读成，不当活。引擎派活时另看账号池有没有空位
-        （满了是等，不算故障）；探针的结论过期了，引擎照上一次的结论派、写明，这里标「探测过期」。
-      </p>
+        </SectionGrid>
+      )}
     </section>
   );
 }
 
+/** 右边：选中模型下的路由。先后不分用途，管这个模型在所有用途里。 */
+function RoutesCard({
+  model,
+  off,
+  position,
+  now,
+  firstLiveRoute,
+}: {
+  model: RoutingLayerModel;
+  off: boolean;
+  position: number;
+  now: number;
+  firstLiveRoute: string | undefined;
+}) {
+  const order = useRouteOrder(model);
+  return (
+    <Section
+      id="routing-model-detail"
+      aria-label={`${model.displayName} 的路由`}
+      title={`${model.displayName} 的路由`}
+      description={
+        <>
+          {/* 手机上卡头一行放不下（不许折行），这半句收起，ⓘ 里有 */}
+          <span className="max-md:hidden">所有用途共用这个先后 · </span>
+          {model.routes.length > 0 ? <OrderSummaryLine summary={order} noun="路由" /> : modelSummary(model)}
+        </>
+      }
+      flush
+      className="flex min-h-0 scroll-mt-4 flex-col xl:sticky xl:top-6 xl:max-h-routing-desk *:last:flex *:last:min-h-0 *:last:flex-1 *:last:flex-col"
+    >
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-1">
+        {off ? (
+          <CollapsibleOffModelRoutes
+            key={model.modelId}
+            model={model}
+            position={position}
+            now={now}
+            firstLiveRoute={firstLiveRoute}
+            summary={false}
+          />
+        ) : (
+          <ModelRoutes
+            key={model.modelId}
+            model={model}
+            now={now}
+            firstLiveRoute={firstLiveRoute}
+            summary={false}
+          />
+        )}
+      </div>
+    </Section>
+  );
+}
+
 /**
- * 这个用途下的模型优先级：一行一个模型的紧凑行（序号、拖动手柄、名字、状态点、开关），拖动或上移、下移、置顶、置底、Alt+上下键改先后，
- * 点名字在旁边看它的路由。关着的行置灰写「已跳过」，「实际第几位」只数开着且没下架的；已下架的写「已下架」，不写名次。
+ * 这个用途下的模型先后：一行一个模型（拖动柄、序号、名字加一行小字、一个状态、开关、「⋯」），拖动或「⋯」里的上移、下移、置顶、置底、
+ * Alt+上下键改先后，点名字在旁边看它的路由。关着的行变淡写「已跳过」，「实际第几位」只数开着且没下架的；已下架的写「已下架」，不写名次。
  * 超过 50 个模型才出搜索框和「只看已开启」，也只画窗口里的行；筛选时只显示了一部分，先后不能调（免得把看不见的行顺序弄乱）。
  */
 function ModelPriority({
@@ -492,7 +555,6 @@ function ModelPriority({
   const edit = useRoutingEdit();
   const env = useKindEnv();
   const mobile = useMediaQuery(MOBILE_MQ);
-  const wide = useMediaQuery(WIDE_MQ);
   const [filter, setFilter] = useState<ListFilter>(NO_FILTER);
   const long = p.models.length > WINDOW_MIN_ROWS;
   const filtering = long && filterActive(filter);
@@ -513,27 +575,29 @@ function ModelPriority({
   const summary = summarizeOrder(states, '模型');
   const why =
     edit.disabledWhy ?? (filtering ? '正在筛选，只显示了一部分：清掉搜索和「只看已开启」再调先后' : null);
-  // 视口：桌面宽屏填满父元素；平板固定 13 行；手机不超过 50 个就整页铺开（不设内部滚动），超过 50 个才开窗口
-  const viewport = wide
-    ? { height: 'fill' as const, rowHeight: ORDER_ROW_HEIGHT }
-    : mobile
-      ? long
-        ? { height: LIST_HEIGHT, rowHeight: MOBILE_ROW_HEIGHT }
-        : undefined
-      : { height: ORDER_LIST_HEIGHT, rowHeight: ORDER_ROW_HEIGHT };
+  // 不超过 50 个：按内容高度、随页面滚（不设内部滚动）；超过 50 个才开窗口（定高行、只画看得见的）
+  // 行高、窗口高是 16px 根字号下的设计值，乘根字号倍数（桌面 125%，#1937）才和 rem 写的行内容对得上
+  const scale = readRootScale();
+  const viewport = long
+    ? mobile
+      ? { height: scaledPx(LIST_HEIGHT, scale), rowHeight: scaledPx(MOBILE_ROW_HEIGHT, scale) }
+      : { height: scaledPx(ORDER_LIST_HEIGHT, scale), rowHeight: scaledPx(ORDER_ROW_HEIGHT, scale) }
+    : undefined;
   return (
-    <section
+    <Section
       aria-label="模型先后"
-      className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border bg-card"
+      title="模型先后"
+      description={
+        <>
+          {/* 手机上卡头和「添加模型」挤一行，前半句收起，不折行 */}
+          <span className="max-md:hidden">只管{purposeLabel(p.purpose)} · </span>
+          <OrderSummaryLine summary={summary} noun="模型" />
+        </>
+      }
+      actions={<AddPurposeModel purpose={p} onError={onError} />}
+      flush
+      className="flex min-h-0 flex-col *:last:flex *:last:min-h-0 *:last:flex-1 *:last:flex-col"
     >
-      <header className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b bg-muted/40 px-3 py-2">
-        <h3 className="text-sm font-semibold">模型先后</h3>
-        <span className="text-caption text-muted-foreground">只管这个用途 · 引擎从上往下试</span>
-        <span className="ml-auto">
-          <AddPurposeModel purpose={p} onError={onError} />
-        </span>
-      </header>
-      <OrderSummaryLine summary={summary} noun="模型" />
       {long ? (
         <ListFilterBar
           noun="模型"
@@ -544,13 +608,13 @@ function ModelPriority({
         />
       ) : null}
       {shown.length === 0 ? (
-        <p className="px-3 py-8 text-center text-sub text-muted-foreground">
-          没有符合的模型：换个搜索词，或关掉「只看已开启」
-        </p>
+        <EmptyState size="inline" title="没有符合的模型：换个搜索词，或关掉「只看已开启」" className="py-6" />
       ) : (
-        <div className="relative min-h-0 flex-1">
+        <div className="relative min-h-0 flex-1 py-1">
           <SortableList
             ariaLabel="模型"
+            // 行和行之间一根极细的分隔线，不画框（#1914 第 4 轮）
+            className="divide-y divide-border"
             items={shown}
             itemId={(m) => m.modelId}
             itemLabel={(m) => `${m.displayName}（${purposeLabel(p.purpose)}里的先后）`}
@@ -559,12 +623,7 @@ function ModelPriority({
             disabledWhy={why}
             {...(viewport ? { viewport } : {})}
             rowClassName={(m) =>
-              cn(
-                'border-b',
-                !viewport && 'min-h-11',
-                slotOf.get(m.modelId)?.state !== 'on' && 'bg-muted/40',
-                m.modelId === selectedId && 'bg-muted/70 shadow-row-selected',
-              )
+              m.modelId === selectedId ? 'bg-selected shadow-row-selected' : 'hover:bg-accent'
             }
             rowProps={(m) => ({ 'data-model': m.modelId })}
             onSave={(order, expected, movedId) =>
@@ -578,6 +637,7 @@ function ModelPriority({
                 position={p.models.findIndex((x) => x.modelId === m.modelId) + 1 || i + 1}
                 slot={slotOf.get(m.modelId) ?? { state: 'on', rank: null }}
                 selected={m.modelId === selectedId}
+                fixedHeight={viewport !== undefined}
                 onSelect={() => {
                   onSelect(m.modelId);
                   revealOnMobile('routing-model-detail');
@@ -587,14 +647,9 @@ function ModelPriority({
               />
             )}
           </SortableList>
-          {wide && shown.length > 0 && shown.length <= 4 ? (
-            <p className="pointer-events-none absolute inset-x-0 bottom-2 px-3 text-caption text-muted-foreground">
-              再往下没有更多模型
-            </p>
-          ) : null}
         </div>
       )}
-    </section>
+    </Section>
   );
 }
 
@@ -604,6 +659,7 @@ function ModelRow({
   position,
   slot,
   selected,
+  fixedHeight,
   onSelect,
   onError,
   controls,
@@ -613,111 +669,85 @@ function ModelRow({
   position: number;
   slot: { state: SlotState; rank: number | null };
   selected: boolean;
+  fixedHeight: boolean;
   onSelect: () => void;
   onError: (message: string | null) => void;
   controls: RowControls;
 }) {
   const enabledRouteIds = m.routes.filter((r) => r.enabled).map((r) => r.routeId);
-  const compact = useMediaQuery(COMPACT_MQ);
   const kind = modelKind(m, useKindEnv());
   const skipped = slot.state !== 'on';
-  // 档位配不了的长说明：行内藏掉，悬停操作区看全文（#1754）
+  // 档位配不了的长说明：行内不铺开，悬停小字看全文（#1754）；菜单里档位组头下面也写着
   const effortTitle = effortBlockedTitle(m.modelId, m.routes);
+  const effort = effortWord(m.effort);
+  const meta = [m.family, modelSummary(m), effort ? `档位 ${effort}` : null].filter(Boolean).join(' · ');
+  const word = slotWord(slot.state, slot.rank, '模型');
   return (
-    <div
-      className={cn(
-        'flex h-full flex-col justify-center gap-0.5 py-1 pr-2 pl-1.5 md:flex-row md:flex-wrap md:items-center md:justify-start md:gap-x-1.5 md:gap-y-0.5 md:py-0',
-        hideEffortRowNoteClass,
-      )}
-    >
-      <div className="flex min-w-0 items-center gap-1.5 md:h-auto md:min-w-min md:grow md:shrink-0">
-        {controls.grip}
-        <span
-          data-position
-          title="配置里的先后"
-          className="num grid size-5 shrink-0 place-items-center rounded-full bg-foreground/10 text-caption font-medium"
-        >
-          {position}
-        </span>
-        <button
-          type="button"
-          onClick={onSelect}
-          aria-pressed={selected}
-          aria-label={`查看 ${m.displayName} 的路由`}
-          title={modelSummary(m)}
-          className={cn(
-            'flex min-h-9 flex-1 items-center gap-2 text-left md:h-full md:min-h-0',
-            skipped && 'opacity-60',
-          )}
-        >
-          <KindDot kind={kind} whyNot="一条路由都没有" className="shrink-0" />
-          <span
-            data-row-name
-            className="whitespace-normal break-words text-sm font-semibold leading-snug md:shrink-0 md:whitespace-nowrap"
-          >
-            {m.displayName}
-          </span>
-          {m.family ? (
-            <span className="hidden truncate text-caption text-muted-foreground 2xl:inline">{m.family}</span>
-          ) : null}
-          {/* 几条路几条活：窄的时候放不下，悬停名字看（title），2xl 以上直接写在行里 */}
-          <span className="hidden shrink-0 text-caption text-muted-foreground 2xl:inline">
-            {modelSummary(m)}
-          </span>
-          <FounderOnlyBadge modelId={m.modelId} family={m.family} displayName={m.displayName} />
-          <span
-            data-slot-state={slot.state}
-            className={cn(
-              'ml-auto shrink-0 text-caption',
-              skipped
-                ? 'rounded bg-muted px-1.5 py-0.5 font-medium text-muted-foreground'
-                : 'num text-muted-foreground',
-              !skipped && slot.rank !== position && 'font-semibold text-foreground',
-            )}
-          >
-            {slotWord(slot.state, slot.rank, '模型')}
-          </span>
-        </button>
-      </div>
-      <div data-row-actions className="flex flex-wrap items-center justify-end gap-0.5 md:contents">
-        {/* md:contents 时外层不占盒，title 挂在这层才能悬停看到档位说明（#1754） */}
-        <span
-          data-effort-tip={effortTitle ? '' : undefined}
-          title={effortTitle}
-          className="inline-flex flex-wrap items-center gap-0.5"
-        >
-          <PurposeModelControls
-            purpose={purpose}
-            model={m}
-            onError={onError}
-            {...(compact
-              ? {
-                  menu: {
-                    moves: controls.moves,
-                    toggle: {
-                      enabled: enabledRouteIds.length > 0,
-                      expectedEnabled: enabledRouteIds,
-                      unavailable: m.routes.length === 0,
-                    },
-                  },
-                }
-              : {})}
-          />
-        </span>
-        {/* 不到 lg：开关和上移、下移、置顶、置底、移出都在「⋯」菜单里（#1806），行里只留档位和菜单按钮 */}
-        {compact ? null : (
-          <>
-            <ModelSwitch
-              modelId={m.modelId}
-              modelName={m.displayName}
-              enabled={enabledRouteIds.length > 0}
-              expectedEnabled={enabledRouteIds}
-              unavailable={m.routes.length === 0}
-            />
-            {controls.pins}
-          </>
+    <RowFrame tall className={cn(fixedHeight && 'h-full')}>
+      {controls.grip}
+      <span
+        data-position
+        title="配置里的先后"
+        className="num w-4 shrink-0 text-right text-body text-muted-foreground"
+      >
+        {position}
+      </span>
+      <button
+        type="button"
+        onClick={onSelect}
+        aria-pressed={selected}
+        aria-label={`查看 ${m.displayName} 的路由`}
+        title={modelSummary(m)}
+        className={cn(
+          'flex min-h-10 min-w-0 flex-1 items-center gap-2.5 rounded-md text-left outline-none focus-visible:ring-focus focus-visible:ring-ring md:min-h-0',
+          skipped && 'opacity-60',
         )}
-      </div>
-    </div>
+      >
+        <KindDot kind={kind} whyNot="一条路由都没有" className="shrink-0" />
+        {/* 小字一行不折（#1914 第 5 轮，320 宽量到折行）：放不下截断，整句在悬停里。
+            名字是认人的那一样，不截断：真长到放不下宁可换行（老规矩，test/routing-lists「名字可换行」） */}
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-x-2">
+            <span data-row-name className="text-body font-medium break-words">
+              {m.displayName}
+            </span>
+            <FounderOnlyBadge modelId={m.modelId} family={m.family} displayName={m.displayName} />
+          </span>
+          <span
+            data-row-meta
+            data-effort-tip={effortTitle ? '' : undefined}
+            title={effortTitle ? `档位配不了：${effortTitle}` : `${meta} · ${word}`}
+            className="block truncate whitespace-nowrap text-meta text-muted-foreground"
+          >
+            {/* 手机上一行放不下名字、状态和开关：厂家不写，实际第几位挪到这行小字里 */}
+            <span className="max-md:hidden">{meta}</span>
+            <span aria-hidden className="md:hidden">
+              {[modelSummary(m), effort ? `档位 ${effort}` : null, word].filter(Boolean).join(' · ')}
+            </span>
+          </span>
+        </span>
+      </button>
+      <span
+        data-slot-state={slot.state}
+        title={word}
+        className={cn(
+          'shrink-0 text-meta max-md:sr-only',
+          !skipped && 'num text-muted-foreground',
+          !skipped && slot.rank !== position && 'font-medium text-foreground',
+        )}
+      >
+        {skipped ? <Tag>{word}</Tag> : word}
+      </span>
+      <span data-row-actions className="flex shrink-0 items-center gap-1">
+        <ModelSwitch
+          modelId={m.modelId}
+          modelName={m.displayName}
+          enabled={enabledRouteIds.length > 0}
+          expectedEnabled={enabledRouteIds}
+          unavailable={m.routes.length === 0}
+        />
+        <PurposeModelMenu purpose={purpose} model={m} onError={onError} moves={controls.moves} />
+      </span>
+    </RowFrame>
   );
 }

@@ -1,6 +1,6 @@
 // 状态标签：点或图标 + 字，颜色只是辅助，意思靠字和图标传（规范第五节第 6 条）。合并了原来的 StatusChip。
 import { cn } from '../../lib/utils';
-import { iconOf, inkClass, type LayoutTone, lineClass, softClass, solidClass } from './tone';
+import { badgeShape, iconOf, inkClass, type LayoutTone, lineClass, softClass, solidClass } from './tone';
 
 /** 小圆点；在跑的会一圈圈往外扩。 */
 export function StatusDot({ tone, className }: { tone: LayoutTone; className?: string }) {
@@ -42,10 +42,11 @@ export function StatusBadge({
       data-tone={tone}
       data-variant={variant}
       className={cn(
-        'inline-flex h-5 shrink-0 items-center gap-1 rounded-full text-meta font-medium whitespace-nowrap',
-        variant === 'soft' && cn('px-1.5', softClass[tone], inkClass[tone]),
-        variant === 'outline' && cn('border px-1.5', lineClass[tone], inkClass[tone]),
-        variant === 'dot' && 'text-foreground',
+        badgeShape,
+        'gap-1',
+        variant === 'soft' && cn(softClass[tone], inkClass[tone]),
+        variant === 'outline' && cn('border', lineClass[tone], inkClass[tone]),
+        variant === 'dot' && 'px-0 text-foreground',
         className,
       )}
     >

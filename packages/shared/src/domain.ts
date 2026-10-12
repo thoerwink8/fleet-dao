@@ -282,9 +282,9 @@ export type RouteProbeTrigger = 'scheduled' | 'dispatch' | 'manual' | 'break' | 
  * ok = 真起了一次最小会话、答上了（额度用满被拒也算：登录、组织、上游都通，额度另有额度那一套挡）；
  * failed = 探了、没探通（原因写在 detail）；not_wired = 这种执行方式引擎还没接，探不了、也派不了；
  * skipped = 这一轮没探（按量计费、渠道下架、会话用户挂着别的组织……原因写在 detail），不算探过。
- * 只有 ok 让 alive 为真，其余一律不在线。
+ * 只有 ok 让 alive 为真，其余一律不在线。按需探测 on_demand 已删（#1843：迁移把剩下的行改成 skipped）。
  */
-export type RouteProbeState = 'ok' | 'failed' | 'not_wired' | 'skipped' | 'on_demand';
+export type RouteProbeState = 'ok' | 'failed' | 'not_wired' | 'skipped';
 
 export interface RouteProbe {
   state: RouteProbeState;
@@ -371,6 +371,8 @@ export interface SegmentRun {
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
   costUsd?: number;
+  /** 用量为什么没记全（库里 runs.usage_note，「用量补记」写）：四样 token 有缺时页面照它写原因。 */
+  usageNote?: string;
   /** 内存峰值（MiB）：只有挂在 cgroup 里的会话读得到，本机不给。 */
   memoryPeakMb?: number;
   failureReason?: string;

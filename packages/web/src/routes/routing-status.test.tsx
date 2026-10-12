@@ -180,6 +180,9 @@ describe('渠道状态页：渠道卡', () => {
     expect(card('ch-ds').textContent).toContain('按量计费，不自动探');
     expect(items.some((c) => c.textContent?.includes('顺位第 1'))).toBe(true);
     expect(list.textContent).not.toMatch(/grok-4\.7|deepseek-v4\.1-flash/);
+    // 四段脚注收进 ⓘ：点开才看（#1903）
+    expect(screen.queryByText(/绿灯只表示本节点最近一轮抽测通过/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '怎么看这些状态' }));
     expect(screen.getByText(/绿灯只表示本节点最近一轮抽测通过/)).toBeTruthy();
   });
 
@@ -283,9 +286,15 @@ describe('渠道状态页：渠道卡', () => {
   test('顶上的说明换成三档节奏的那一句，不再写「Mirasim、Cursor、Grok 探通后 2 小时一轮」', async () => {
     renderApp(<RoutingStatus />, { route: '/routing/status' });
     await screen.findByRole('list', { name: '渠道状态' });
-    expect(document.body.textContent).toContain(
-      '活跃路由每小时探一次，不活跃的每天一次，派活前 15 分钟内没探过会先探；中转渠道的活跃模型额外问一道身份题。',
-    );
+    // 页头一行写概要，探测节奏这一句收在标题旁的 ⓘ 里（#1897），点开才看
+    fireEvent.click(document.querySelector('[data-description-hint]') as HTMLElement);
+    expect(
+      await screen.findByText((text) =>
+        text.includes(
+          '活跃路由每小时探一次，不活跃的每天一次，派活前 15 分钟内没探过会先探；中转渠道的活跃模型额外问一道身份题。',
+        ),
+      ),
+    ).toBeTruthy();
     expect(document.body.textContent).not.toContain('2 小时一轮');
   });
 
@@ -724,7 +733,11 @@ describe('渠道状态页：探测记录（#1638）', () => {
     const cell = historyStrip().querySelector('[data-cell="2"]');
     expect(cell?.getAttribute('data-result')).toBe('doubt');
     expect(cell?.className).toContain('bg-st-doubt');
-    expect(historyStrip().textContent).toContain('橙疑似换模型');
+    // 颜色图例只留一份（#1922）：格子条下面那行「绿通过 · 红不通 · 橙疑似换模型」并进探测记录的图例，
+    // 图例里橙色色块就叫「疑似换模型」（原断言：格子条文字含「橙疑似换模型」）
+    const legend = document.querySelector('[data-probe-log="legend"]') as HTMLElement;
+    expect(legend.textContent).toContain('疑似换模型：身份题说出了旧答案');
+    expect(legend.querySelector('.bg-st-doubt')).toBeTruthy();
   });
 
   test('身份题那一行展开：题、新答案、旧答案、实答、自报身份；折叠时不铺；连通那行没有题', async () => {
@@ -1027,14 +1040,20 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
     renderApp(<RoutingStatus />, { route: '/routing/status', api: semanticsApi() });
     await waitFor(() => card('ch-off'));
     const shown = () =>
-      Array.from(document.querySelectorAll('ol[aria-label="渠道状态"] > [data-channel]')).map((el) =>
+      Array.from(document.querySelectorAll('ul[aria-label="渠道状态"] > [data-channel]')).map((el) =>
         el.getAttribute('data-channel'),
       );
-    fireEvent.click(document.querySelector('[data-filter="off"]') as Element);
+    fireEvent.click(
+      within(screen.getByRole('group', { name: '按状态筛选' })).getByRole('button', { name: /^已关/ }),
+    );
     expect(shown()).toEqual(['ch-off']);
-    fireEvent.click(document.querySelector('[data-filter="unused"]') as Element);
+    fireEvent.click(
+      within(screen.getByRole('group', { name: '按状态筛选' })).getByRole('button', { name: /^未使用/ }),
+    );
     expect(shown()).toEqual(['ch-dry']);
-    fireEvent.click(document.querySelector('[data-filter="all"]') as Element);
+    fireEvent.click(
+      within(screen.getByRole('group', { name: '按状态筛选' })).getByRole('button', { name: /^全部/ }),
+    );
     expect(shown().length).toBeGreaterThan(5);
   });
 
@@ -1042,10 +1061,10 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
     renderApp(<RoutingStatus />, { route: '/routing/status', api: semanticsApi() });
     await waitFor(() => card('ch-off'));
     const shown = () =>
-      Array.from(document.querySelectorAll('ol[aria-label="渠道状态"] > [data-channel]')).map((el) =>
+      Array.from(document.querySelectorAll('ul[aria-label="渠道状态"] > [data-channel]')).map((el) =>
         el.getAttribute('data-channel'),
       );
-    const first = document.querySelector('ol[aria-label="渠道状态"] > [data-channel]');
+    const first = document.querySelector('ul[aria-label="渠道状态"] > [data-channel]');
     expect(first?.getAttribute('data-kind')).toBe('fault');
     const box = screen.getByRole('searchbox', { name: '搜索渠道' });
     fireEvent.change(box, { target: { value: 'r-grok' } });

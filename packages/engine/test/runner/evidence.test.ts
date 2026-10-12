@@ -36,6 +36,32 @@ describe('segmentEvidence：交给失败分流的证据', () => {
       (segmentEvidence({ ...base, stderrTail: 'x'.repeat(10_000) }).message ?? '').length,
     ).toBeLessThanOrEqual(4000);
   });
+
+  it('【故意造出的失败】one-shot 的时限先到（驱动没先收场）：驱动交回的 aborted 只是在回应我们的 kill，码还是 wall_clock_timeout，分流认 WT1，不认成「我们自己停的」（#1859/#1877/#1933）', () => {
+    // 法国原样：Mirasim 驱动没拿到时限，one-shot 60 分钟杀，驱动报 aborted、尾巴是「引擎叫停」
+    const echoed: OneShotResult = {
+      ...base,
+      outcome: 'timeout',
+      exitCode: null,
+      stderrTail: '引擎叫停',
+      failureReason: 'exit=null killed=true；引擎叫停',
+      facts: { reason: 'aborted', detail: '引擎叫停' },
+    };
+    const e = segmentEvidence(echoed);
+    expect(e.code).toBe('wall_clock_timeout');
+    const verdict = classifyFailure({
+      source: 'session:manual',
+      routeBound: true,
+      retryable: null,
+      code: e.code ?? '',
+      message: e.message ?? '',
+    });
+    expect(verdict.rule).toBe('WT1');
+    // 驱动自己报的别的原因（额度用满、繁忙）照样优先：只换掉「回应我们的 kill」那一个
+    expect(segmentEvidence({ ...echoed, facts: { reason: 'quota_exhausted' } }).code).toBe('quota_exhausted');
+    // 不是超时（切号、人叫停走 killed）的 aborted 原样
+    expect(segmentEvidence({ ...echoed, outcome: 'killed' }).code).toBe('aborted');
+  });
 });
 
 describe('routeOutcomeOf：这一次算不算这条路由的账（#758）', () => {

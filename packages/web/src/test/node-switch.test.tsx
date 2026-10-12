@@ -259,6 +259,16 @@ describe('法国页：每个环境一列并排', () => {
     expect(document.querySelector('[data-env-column="local"]')?.getAttribute('data-env-selected')).toBe(
       'false',
     );
+    // 选中态只在列头（aria-current + 列头 data-selected），六行事实不带选中底色
+    expect(wsl.getAttribute('aria-current')).toBe('true');
+    expect(wsl.querySelector('[data-env-header]')?.getAttribute('data-selected')).toBe('true');
+    const localCol = document.querySelector('[data-env-column="local"]') as HTMLElement;
+    expect(localCol.hasAttribute('aria-current')).toBe(false);
+    expect(localCol.querySelector('[data-env-header]')?.getAttribute('data-selected')).toBe('false');
+    expect(wsl.className).not.toContain('bg-selected');
+    for (const fact of wsl.querySelectorAll('[data-env-fact]')) {
+      expect((fact as HTMLElement).className).not.toContain('bg-selected');
+    }
     // 两列都有六格
     for (const col of cols) {
       for (const label of ['引擎', '在用版本', '在跑的会话', '池占用', '健康', '最近拉单']) {

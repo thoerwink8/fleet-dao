@@ -2,14 +2,16 @@ import { ChevronRight } from 'lucide-react';
 import { useId, useState } from 'react';
 import { toast } from 'sonner';
 import { errorText, useGroomNow, useGroomStatus } from '../api/client';
-import type { GroomStatus } from '../api/types';
+import type { GroomStatus, RepoDispatch } from '../api/types';
 import { formatAgo, formatDateTime } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import type { Tone } from '../lib/status';
 import { cn } from '../lib/utils';
 import { useMasterView } from './engine-master';
+import { RowDetail, RowFrame } from './layout/list';
 import { LoadError } from './layout/load-state';
 import { StatusDot } from './layout/status-badge';
+import { RepoDispatchControl } from './repo-dispatch';
 import { RepoLink } from './repo-link';
 import {
   AlertDialog,
@@ -97,7 +99,12 @@ function IssueNums({
   return items.map((item, i) => (
     <span key={item.n}>
       {i > 0 ? '、' : null}
-      <RepoLink repo={repo} kind="issues" n={item.n} className="num underline underline-offset-2">
+      <RepoLink
+        repo={repo}
+        kind="issues"
+        n={item.n}
+        className="num underline underline-offset-2 max-md:inline-flex max-md:min-h-10 max-md:items-center"
+      >
         #{item.n}
       </RepoLink>
       {item.title ? <span className="ml-1 text-muted-foreground">{item.title}</span> : null}
@@ -133,15 +140,20 @@ function ResultSummary({
 }
 
 /**
- * 设置页每个仓「让 AI 接活」旁边的「指挥官整理待办」。
- * 次数和最近结果读 GET；按钮先确认（原因可空）再 POST。被拒时把后端的原话留下，不换成「出错了」。
+ * 设置页仓库一节的一行（#1917，照路由页样板）：仓名加一行小字（主线、整理到哪、今日剩余）、一个状态（让 AI 接活）、
+ * 「开启/关闭」和「整理」两个按钮同一行同宽。点仓名展开整理记录和长说明（RowDetail，和名字对齐）。
+ * 「指挥官整理待办」：次数和最近结果读 GET；按钮先确认（原因可空）再 POST。被拒时把后端的原话留下，不换成「出错了」。
  */
-export function RepoGroomControl({
+export function RepoRow({
   repoId,
   repo,
+  branch,
+  dispatch,
 }: {
   repoId: string;
   repo: { owner: string; name: string };
+  branch: string;
+  dispatch: RepoDispatch | undefined;
 }) {
   const name = `${repo.owner}/${repo.name}`;
   const query = useGroomStatus(repoId);
@@ -181,46 +193,89 @@ export function RepoGroomControl({
     );
   };
 
+  // 小字一行里「整理到哪」那一段：整理中 / 做成了 N 分钟前 / 还没整理过；还在读就不写
+  const groomWord = busy
+    ? '整理中'
+    : latest
+      ? `${STATE_WORD[latest.state]} ${formatAgo(whenOf(latest), now)}`
+      : status
+        ? '还没整理过'
+        : null;
+  const dispatchWord = dispatch ? (dispatch.on ? '接活中' : '关着') : null;
+  const metaText = [
+    `主线 ${branch}`,
+    groomWord ? `整理 ${groomWord}` : null,
+    status ? `今日剩余 ${status.quota.remaining}/${status.quota.max}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   return (
-    <section data-testid={`groom-${repoId}`} aria-label={`${name} 的指挥官整理待办`} className="contents">
-      {/* 行尾：状态点 + 一句状态 + 今日剩余 + 「详情」+「整理」按钮；整理记录点「详情」才展开。 */}
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 self-center">
-        <StatusDot tone={busy ? 'run' : latest ? STATE_TONE[latest.state] : 'stop'} />
-        <span className="text-meta">
-          {busy ? (
-            <span className="font-medium text-ink-stall">整理中</span>
-          ) : latest ? (
-            <>
-              <span className="font-medium">{STATE_WORD[latest.state]}</span>{' '}
-              <span className="num text-muted-foreground">{formatAgo(whenOf(latest), now)}</span>
-            </>
-          ) : status ? (
-            <span className="text-muted-foreground">还没整理过</span>
-          ) : (
-            <span className="text-muted-foreground">整理</span>
-          )}
-        </span>
-        {status ? (
-          <span className="num text-meta text-muted-foreground" data-testid={`groom-quota-${repoId}`}>
-            今日剩余 {status.quota.remaining}/{status.quota.max}
-          </span>
-        ) : null}
-        {masterOff ? <span className="text-meta text-muted-foreground">引擎总开关关着，不整理</span> : null}
+    <section data-testid={`groom-${repoId}`} aria-label={`${name} 的指挥官整理待办`}>
+      <RowFrame tall>
+        {/* 点仓名展开整理记录（和路由页「点名字展开」同一个做法） */}
         <button
           type="button"
           aria-expanded={open}
           aria-controls={detailId}
           aria-label={`${name} 的整理详情`}
           onClick={() => setOpen((v) => !v)}
-          className="inline-flex items-center gap-0.5 text-meta text-muted-foreground underline-offset-2 hover:text-foreground hover:underline max-md:min-h-10"
+          className="flex min-h-10 min-w-0 flex-1 flex-col justify-center rounded-md text-left outline-none focus-visible:ring-focus focus-visible:ring-ring md:min-h-0"
         >
-          详情
-          <ChevronRight className={cn('size-3.5 transition-transform', open && 'rotate-90')} aria-hidden />
+          <span className="flex min-w-0 max-w-full items-center gap-1">
+            <span className="num truncate text-body font-medium" title={name}>
+              {name}
+            </span>
+            <ChevronRight
+              className={cn(
+                'size-3.5 shrink-0 text-muted-foreground transition-transform duration-200',
+                open && 'rotate-90',
+              )}
+              aria-hidden
+            />
+          </span>
+          {/* 小字一行不折：放不下截断，整句在悬停里。手机上行里没有状态位，「接活中 / 关着」写在最前 */}
+          <span
+            data-row-meta
+            title={metaText}
+            className="block max-w-full truncate whitespace-nowrap text-meta text-muted-foreground"
+          >
+            {dispatchWord ? (
+              <span aria-hidden className="md:hidden">
+                <StatusDot tone={dispatch?.on ? 'done' : 'stop'} className="mr-1 align-middle" />
+                {dispatchWord} ·{' '}
+              </span>
+            ) : null}
+            <span className="num">主线 {branch}</span>
+            {groomWord ? (
+              <>
+                {' · '}
+                <span
+                  className={cn(
+                    busy && 'font-medium text-ink-stall',
+                    !busy && latest && STATE_TONE[latest.state] === 'fail' && 'text-ink-fail',
+                  )}
+                >
+                  整理 {groomWord}
+                </span>
+              </>
+            ) : null}
+            {status ? (
+              <>
+                {' · '}
+                <span className="num" data-testid={`groom-quota-${repoId}`}>
+                  今日剩余 {status.quota.remaining}/{status.quota.max}
+                </span>
+              </>
+            ) : null}
+          </span>
         </button>
+        <RepoDispatchControl repoId={repoId} name={name} row={dispatch} />
         <Button
           type="button"
           size="sm"
           variant="outline"
+          className="min-w-16"
           disabled={groom.isPending || busy || query.isLoading || masterOff}
           onClick={() => {
             if (masterOff) return;
@@ -228,15 +283,26 @@ export function RepoGroomControl({
             setAsking(true);
           }}
           aria-label={`让指挥官整理 ${name} 的待办`}
-          title={masterOff ? '引擎总开关关着，不整理' : undefined}
+          title={masterOff ? '引擎总开关关着，不整理' : '叫指挥官现在整理这个仓的待办'}
         >
           整理
         </Button>
-      </div>
+        {/* 总开关关着时按钮置灰的原因：悬停和读屏里；页上一行已经写了总开关关着，行里不再重复 */}
+        {masterOff ? <span className="sr-only">引擎总开关关着，不整理</span> : null}
+      </RowFrame>
 
       {open || query.error || writeError || (status && status.unreadable > 0) ? (
-        <div id={detailId} className="min-w-0 basis-full rounded-lg border border-dashed px-3 py-2">
-          <h3 className="text-meta font-medium">指挥官整理待办</h3>
+        <RowDetail id={detailId} indent={false} className="min-w-0 pb-3">
+          <h3 className="text-meta font-medium">
+            指挥官整理待办
+            {/* 手机上行里的小字截断了，展开后在这里补上今日剩余 */}
+            {status ? (
+              <span className="num font-normal text-muted-foreground md:hidden">
+                {' '}
+                · 剩 {status.quota.remaining}/{status.quota.max} 次
+              </span>
+            ) : null}
+          </h3>
           {open ? <GroomHelp /> : null}
           {query.isLoading ? <p className="mt-1 text-meta text-muted-foreground">在读…</p> : null}
           {query.error ? (
@@ -283,7 +349,7 @@ export function RepoGroomControl({
               {errorText(writeError)}
             </p>
           ) : null}
-        </div>
+        </RowDetail>
       ) : null}
 
       <AlertDialog open={asking} onOpenChange={setAsking}>

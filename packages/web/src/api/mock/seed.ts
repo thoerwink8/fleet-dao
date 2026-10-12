@@ -1222,6 +1222,17 @@ export function createSeed(now: number): MockState {
       level: 'decision',
       title: '等你点头：发布 v2.3',
       body: '对外发布到生产，能一键回滚到上一版。',
+      // 「要你拍」带选项（#1915）；下面 n-4 是没有选项的老通知，页面写「没有选项，请直接回复」
+      options: [
+        {
+          id: 'release',
+          label: '发布',
+          detail: '这条转已处理，记下交给指挥官现在发到生产，出问题一键回滚',
+          recommended: 'CI 全绿、金丝雀跑过，能一键回滚，风险小',
+        },
+        { id: 'tonight', label: '今晚再发', detail: '这条转已处理，记下交给指挥官等晚上没人用的时候发' },
+        { id: 'hold', label: '先不发', detail: '这条留着，这一版先压着，等我看过改动再拍', keepsOpen: true },
+      ],
       link: '/home3',
       taskId: 't-20',
       createdAt: at(-8),

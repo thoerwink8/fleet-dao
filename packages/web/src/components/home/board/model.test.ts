@@ -8,12 +8,25 @@ import {
   isNeedsYou,
   isStuck,
   lineage,
+  NODE_SIZE,
   nodeId,
   phasesOf,
   ROOT_ID,
   splitSides,
   worstTone,
 } from './model';
+
+describe('画布节点跟根字号放大（#1937）', () => {
+  test('倍数 1.25：节点尺寸乘 1.25，排版指纹带上倍数（不复用 1 倍的排版缓存）', () => {
+    const one = buildGraph({ running: [], flow: [], filter: { stuck: false } });
+    const big = buildGraph({ running: [], flow: [], filter: { stuck: false }, scale: 1.25 });
+    expect(big.nodes[0]?.width).toBe(Math.round(NODE_SIZE.root.width * 1.25));
+    expect(big.nodes[0]?.height).toBe(Math.round(NODE_SIZE.root.height * 1.25));
+    expect(one.nodes[0]?.width).toBe(NODE_SIZE.root.width);
+    expect(big.structureKey).not.toBe(one.structureKey);
+    expect([one.scale, big.scale]).toEqual([1, 1.25]);
+  });
+});
 
 const FLOW: HomeFlowStage[] = [
   { segment: 'scope', inFlight: 1, avgMs: 8 * 60_000, samples: 5 },

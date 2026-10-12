@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import {
   bridgeMirasimConnector,
   type LedgerFs,
+  type MeterFs,
   type MirasimConnect,
   parseSessionProxy,
   SESSION_USERS,
@@ -40,6 +41,7 @@ import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import { createEngineMasterGate, type EngineMasterGate } from '../engine-master.ts';
 import { foreignCanarySlugs } from '../jobs/canary-scope.ts';
+import { probeAssignedRoute } from '../jobs/dispatch-probe.ts';
 import { probeOrgNow } from '../jobs/route-probe.ts';
 import { routeProbeLock } from '../jobs/route-probe-now.ts';
 import type { InterruptedScheduleClose } from '../jobs/timers.ts';
@@ -79,6 +81,7 @@ import { productionMemoryPeak } from './memory-peak.ts';
 import { oneShotSessions } from './one-shot-sessions.ts';
 import { NO_FUSION_SESSIONS, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { orphanReaper } from './orphan-reap.ts';
+import type { AssignedProber } from './pick-then-probe.ts';
 import { type QuotaReadWiring, quotaReadJob } from './quota-read.ts';
 import { realReleaseEvidence } from './release-evidence.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
@@ -98,6 +101,7 @@ import { lazyOnSuccess, prepareSubagents, readSubagentGuard, subagentsOnce } fro
 import { createTaskActivities } from './task-activities.ts';
 import { createRunSegment } from './task-segment.ts';
 import { createColdVerify, mirrorFileDiff } from './task-verify.ts';
+import { usageBackfillJob } from './usage-backfill.ts';
 import { watchdogJob } from './watchdog.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
 
@@ -306,8 +310,8 @@ export function agentCommands(config: Pick<RealPortsConfig, 'claudeBin' | 'curso
 const MIRASIM_TOKEN_NAME = /^local-([1-9][0-9]{0,4})\.token$/;
 
 /** 一条以那个会话用户的身份跑的短命令：起个短命 scope（scopeId 每次都不同，同一时刻不撞）。 */
-function execAs(exec: UserExec, user: SessionUser, argv: string[], tag: string) {
-  return exec({ user, cwd: '/', argv, timeoutMs: 10_000, scopeId: `${tag}-${randomUUID()}` });
+function execAs(exec: UserExec, user: SessionUser, argv: string[], tag: string, timeoutMs = 10_000) {
+  return exec({ user, cwd: '/', argv, timeoutMs, scopeId: `${tag}-${randomUUID()}` });
 }
 
 /** ls 报「没有这个路径」的样子（GNU coreutils：退出 2，stderr 里这句）；和别的读不了（权限、没查成）分开报。 */
@@ -332,6 +336,31 @@ export async function catAsUser(
     else if (/Permission denied/.test(r.stderr)) err.code = 'EACCES';
     throw err;
   }
+  return r.stdout.toString('utf8');
+}
+
+/**
+ * 经 exec 以那个会话用户在几份文件里筛出含任一个 needle 的行（grep -h -F，按字面认，不当正则）：Mirasim 用量账本按月一份、几十 MB，
+ * 不整份 cat 过来（#1935）。一行都没对上（grep 退出 1）回空串；读不了（退出 2、超时、起不来）抛错，错误里只有路径和 grep 的
+ * stderr，没有内容。needle 只收 uuid 这类不带空白、不以 - 开头的串，免得被当成 grep 的参数。
+ */
+export async function grepAsUser(
+  exec: UserExec,
+  user: SessionUser,
+  needles: readonly string[],
+  paths: readonly string[],
+  tag = 'mirasim-grep',
+  timeoutMs = 10_000,
+): Promise<string> {
+  if (needles.length === 0 || paths.length === 0) return '';
+  for (const n of needles) {
+    if (!/^[0-9A-Za-z][0-9A-Za-z_:.-]*$/.test(n))
+      throw new Error(`筛账本的关键字认不出：${JSON.stringify(n)}`);
+  }
+  const argv = ['/bin/grep', '-h', '-F', ...needles.flatMap((n) => ['-e', n]), '--', ...paths];
+  const r = await execAs(exec, user, argv, tag, timeoutMs);
+  if (r.code === 1) return '';
+  if (r.code !== 0) throw new Error(describeFailure(`筛 ${paths.join('、')}`, r));
   return r.stdout.toString('utf8');
 }
 
@@ -556,6 +585,10 @@ export function mirasimDepsFor(
   connect(user: SessionUser): MirasimConnect;
   ledgerDir(user: SessionUser): string;
   ledgerFs(user: SessionUser): LedgerFs;
+  /** 这个会话用户的 Mirasim 用量账本目录（~/.mirasim/insights，中转计量回填在这里，#1935）。 */
+  meterDir(user: SessionUser): string;
+  /** 以他的身份读用量账本：ls、grep -F 都经 exec。 */
+  meterFs(user: SessionUser): MeterFs;
 } {
   const homeOf = (user: SessionUser) => home.replaceAll('{user}', user);
   return {
@@ -576,6 +609,11 @@ export function mirasimDepsFor(
     ledgerFs: (user) => ({
       readdir: (dir) => lsAsUser(exec, user, dir),
       readFile: (path) => catAsUser(exec, user, path),
+    }),
+    meterDir: (user) => `${homeOf(user)}/.mirasim/insights`,
+    meterFs: (user) => ({
+      readdir: (dir) => lsAsUser(exec, user, dir),
+      linesWith: (needles, paths) => grepAsUser(exec, user, needles, paths),
     }),
   };
 }
@@ -794,6 +832,13 @@ export function realPortsFromEnv(
     judgeSelfCheck: judgeSelfCheckJob({ db, env }),
     // 每周刷新 CI 测试耗时表（#921）：读本仓 ci.yml 日志、重写表、开 PR。不看总开关。
     ciTimings: ciTimingsJob({ db, github: gh }),
+    // 用量补记（#1935）：经 Mirasim 起的会话，以会话用户读他家里的用量账本（中转计量回填），把 runs 的输入、缓存、花费补齐。不看总开关。
+    usageBackfill: usageBackfillJob({
+      db,
+      user: sessionUser,
+      meterDir: mirasim.meterDir,
+      meterFs: mirasim.meterFs,
+    }),
   };
   const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});
   // 子代理（#1641）：claude-code 的干活会话带的 --agents 文件，引擎起来时从发布目录的 .claude/agents/ 生成一次；生成不成时
@@ -847,6 +892,9 @@ export function realPortsFromEnv(
   const reservations = realReservations({ db });
   // 派前探测不通时工作流放掉这次预占（#1409）：没进 runSegment，不能占到过期
   jobs.releaseReservation = (reservationId) => reservations.release(reservationId);
+  // 派前探测（#1798 片 4）：验收和整理选到一条就派前探一次，和动手那一段同一套（同一把锁，不让同一条路由同时起两个会话）；
+  // cursor、grok、mirasim 不再被 kept 放行，15 分钟新鲜线一律真探。
+  const probeAssigned: AssignedProber = (input) => probeAssignedRoute(routeProbe(), routeProbeLock, input);
   const runsDir = join(config.stateDir, 'runs');
   const tasks: EngineTasks = {
     ...createTaskActivities({ gh, trees, exec, log: taskLog }),
@@ -886,6 +934,7 @@ export function realPortsFromEnv(
       spawner: segmentSpawner,
       runs: taskRuns,
       reservations,
+      probe: probeAssigned,
       memoryAdmission: realMemoryAdmission(),
       runsDir,
       sessions: oneShots,
@@ -903,6 +952,7 @@ export function realPortsFromEnv(
     spawner: segmentSpawner,
     pickRoute: real.ports.pickRoute,
     sessions: oneShots,
+    probe: probeAssigned,
   });
   const evidence = realReleaseEvidence(extra.releasesDir ? { releasesDir: extra.releasesDir } : {});
   const drainControl: Omit<DrainControlDeps, 'drain' | 'log'> = {

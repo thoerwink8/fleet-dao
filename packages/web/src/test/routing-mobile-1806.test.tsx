@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 // 路由、渠道状态两页在手机上的版面（#1806）：
 // - 渠道状态：不到 lg（1024）只画列表，点一行从底部（手机）开详情抽屉，不再上下堆两栏。
-// - 路由：每行的开关、上移、下移、置顶、置底、移出收进行尾一个「⋯」菜单，菜单项照旧走原来的接口。
+// - 路由：每行的档位、上移、下移、置顶、置底、移出、整池暂停收进行尾一个「⋯」菜单，菜单项照旧走原来的接口；
+//   #1914 起各宽度同一个样子，开关留在行里。
 // - 页头右边那一排（状态胶囊、刷新）可以换行，不撑出屏幕；操作记录的 pre 自动换行。
 // 真正的横向溢出（scrollWidth 大于 clientWidth）要有版面引擎才量得出：这里只能断言类名和 happy-dom 里量得出的 0；
 // 真量宽度的在 e2e/specs/11-mobile-overflow.e2e.ts。
@@ -102,23 +103,30 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
     await waitFor(() => expect(document.querySelector('li[data-route]')).not.toBeNull());
   };
 
-  test('模型行：菜单里有关闭、上移、下移、置顶、置底、移出；行里不再有一排小按钮', async () => {
+  test('模型行：行里只有名字、状态、开关和「⋯」；菜单里有档位、上移、下移、置顶、置底、移出', async () => {
     mockPhone();
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await opened();
     const row = document.querySelector('li[data-model="opus-5.5"]') as HTMLElement;
-    expect(within(row).queryByRole('switch')).toBeNull();
+    // 开关留在行里（#1914：各宽度同一个样子，开关是一行唯一的直接操作）；别的都不在行里
+    expect(within(row).getByRole('switch', { name: 'Opus 5.5 的开关' })).toBeTruthy();
     expect(within(row).queryByRole('button', { name: /^上移 / })).toBeNull();
     expect(within(row).queryByRole('button', { name: /^把 .* 移出用途/ })).toBeNull();
+    expect(within(row).queryByRole('combobox')).toBeNull();
 
     openMenu(within(row).getByRole('button', { name: /^更多操作：Opus 5.5/ }));
     const menu = await screen.findByRole('menu');
     const names = within(menu)
       .getAllByRole('menuitem')
       .map((el) => el.textContent);
-    expect(names).toEqual(['关闭这个模型', '上移一位', '下移一位', '置顶', '置底', '移出动手']);
-    // 菜单项够高：min-h-10（40px）
-    for (const item of within(menu).getAllByRole('menuitem')) expect(classes(item)).toContain('min-h-10');
+    expect(names).toEqual(['上移一位', '下移一位', '置顶', '置底', '移出动手']);
+    expect(within(menu).getAllByRole('menuitemradio')[0]?.textContent).toBe('不另配');
+    // 菜单项够高：手机上 min-h-10（40px）
+    for (const item of within(menu).getAllByRole('menuitem'))
+      expect(classes(item)).toContain('max-md:min-h-10');
+    for (const item of within(menu).getAllByRole('menuitemradio')) {
+      expect(classes(item)).toContain('max-md:min-h-10');
+    }
     // 排头的上移、置顶是灰的，写了原因
     const up = within(menu).getByRole('menuitem', { name: '上移一位' });
     expect(up.getAttribute('data-disabled')).not.toBeNull();
@@ -141,7 +149,7 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
     });
   });
 
-  test('点「上移一位」（第二行）同样走 movePurposeModel；点「关闭这个模型」先弹确认', async () => {
+  test('点「上移一位」（第二行）同样走 movePurposeModel；点行里的模型开关先弹确认', async () => {
     mockPhone();
     const api = createMockApi({ live: false });
     const spy = vi.spyOn(api, 'movePurposeModel');
@@ -153,9 +161,9 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
     expect(spy.mock.calls[0]?.[2]).toMatchObject({ order: ['kimi-k3', 'opus-5.5', 'cursor-auto', 'opus-5'] });
 
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
     const again = document.querySelector('li[data-model="cursor-auto"]') as HTMLElement;
-    openMenu(within(again).getByRole('button', { name: /^更多操作：Cursor Auto/ }));
-    fireEvent.click(await screen.findByRole('menuitem', { name: /^(关闭|开启)这个模型$/ }));
+    fireEvent.click(within(again).getByRole('switch', { name: 'Cursor Auto 的开关' }));
     expect(await screen.findByRole('alertdialog')).toBeTruthy();
   });
 
@@ -174,34 +182,93 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
   });
 
-  test('模型下的路由行：菜单里有开关、上移、下移，点「下移一位」走 updateModelRoute 的 reorder', async () => {
+  test('模型下的路由行：开关在行里，菜单里有上移、下移、置顶、置底、整池暂停，点「下移一位」走 updateModelRoute 的 reorder', async () => {
     mockPhone();
     const api = createMockApi({ live: false });
     const spy = vi.spyOn(api, 'updateModelRoute');
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api });
     await opened();
     const item = document.querySelector('[data-route="r-ca-opus"]') as HTMLElement;
-    expect(within(item).queryByRole('switch')).toBeNull();
+    expect(within(item).getByRole('switch')).toBeTruthy();
+    await waitFor(() => expect(item.querySelector('[data-row-menu]')).not.toBeNull());
     openMenu(within(item).getByRole('button', { name: /^更多操作：/ }));
     const menu = await screen.findByRole('menu');
-    expect(
-      within(menu)
-        .getAllByRole('menuitem')
-        .map((el) => el.textContent),
-    ).toEqual(['关闭这条路由', '上移一位', '下移一位', '置顶', '置底']);
+    await waitFor(() =>
+      expect(
+        within(menu)
+          .getAllByRole('menuitem')
+          .map((el) => el.textContent),
+      ).toEqual(['上移一位', '下移一位', '置顶', '置底', '暂停账号池 claude-a']),
+    );
     fireEvent.click(within(menu).getByRole('menuitem', { name: '下移一位' }));
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
     expect(spy.mock.calls[0]?.[2]).toMatchObject({ op: 'reorder' });
   });
 
-  test('宽屏不变：开关、上移、下移、置顶、置底、移出各自一个按钮，没有「⋯」', async () => {
+  test('宽屏和手机同一个样子（#1914）：行里开关和「⋯」；「⋯」平时极淡占着位置、拖动柄平时藏着，悬停这一行才变实', async () => {
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await opened();
     const row = document.querySelector('li[data-model="opus-5.5"]') as HTMLElement;
     expect(within(row).getByRole('switch')).toBeTruthy();
-    expect(within(row).getByRole('button', { name: /^上移 / })).toBeTruthy();
-    expect(within(row).getByRole('button', { name: /^把 .* 移出用途/ })).toBeTruthy();
-    expect(within(row).queryByRole('button', { name: /^更多操作/ })).toBeNull();
+    expect(within(row).queryByRole('button', { name: /^上移 / })).toBeNull();
+    expect(within(row).queryByRole('button', { name: /^把 .* 移出用途/ })).toBeNull();
+    const more = within(row).getByRole('button', { name: /^更多操作：Opus 5.5/ });
+    const grip = within(row).getByRole('button', { name: /^拖动 / });
+    // 「⋯」固定占位但极淡（右边不空一块，#1914 第 4 轮）；拖动柄浮在留白里，平时整个藏着
+    expect(classes(more)).toEqual(
+      expect.arrayContaining(['pointer-fine:opacity-40', 'pointer-fine:group-hover/row:opacity-100']),
+    );
+    expect(classes(grip)).toEqual(
+      expect.arrayContaining(['pointer-fine:opacity-0', 'pointer-fine:group-hover/row:opacity-100']),
+    );
+    // 两行的行高取 row-tall（标准 48）
+    expect(classes(row.querySelector('[data-row-frame]'))).toContain('min-h-row-tall');
+    // 行框带 group/row，悬停才认得到这一行
+    expect(classes(row.querySelector('[data-row-frame]'))).toContain('group/row');
+  });
+
+  test('路由行小字截断时不截掉「顺位第一条活的」：它排在小字最前面（#1916）', async () => {
+    renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
+    const meta = (await waitFor(() => {
+      const el = document.querySelector('[data-route="r-ca-opus"] [data-route-meta]');
+      if (!el) throw new Error('还没画路由行');
+      return el;
+    })) as HTMLElement;
+    expect(classes(meta)).toEqual(expect.arrayContaining(['truncate', 'whitespace-nowrap']));
+    expect(meta.firstElementChild?.textContent).toBe('顺位第一条活的');
+    expect(meta.getAttribute('title')).toContain('顺位第一条活的');
+  });
+
+  test('用途标题块三行都不折（#1914 第 5 轮，创始人看 390 宽「变成 2 行了」）：结论短话截断、状态标签不收缩，灰字截断、整句在悬停', async () => {
+    // 每个用途都看：首选活着、靠后备、不知道的结论都要放得进一行
+    for (const purpose of ['execute', 'verify', 'judge', 'groom']) {
+      cleanup();
+      renderApp(<RoutingPage />, { route: `/routing?purpose=${purpose}` });
+      const hero = (await waitFor(() => {
+        const el = document.querySelector('[data-purpose-hero]');
+        if (!el) throw new Error('标题块还没画');
+        return el;
+      })) as HTMLElement;
+      expect(classes(hero.querySelector('h2')?.parentElement ?? null)).toContain('whitespace-nowrap');
+      const line = hero.querySelector('[data-hero-line]') as HTMLElement;
+      expect(classes(line)).toEqual(expect.arrayContaining(['whitespace-nowrap', 'min-w-0']));
+      expect(classes(line)).not.toContain('flex-wrap');
+      expect(classes(line.querySelector('[data-hero-text]'))).toEqual(
+        expect.arrayContaining(['truncate', 'min-w-0']),
+      );
+      // 状态标签不让位：放不下时截断的是短话，不是标签掉到下一行
+      expect(classes(line.querySelector('[data-variant]')?.parentElement ?? null)).toContain('shrink-0');
+      expect(
+        line.getAttribute('title')?.startsWith(line.querySelector('[data-hero-text]')?.textContent ?? '?'),
+      ).toBe(true);
+      // 结论短话不再带括号里的路由名（那段挪到灰字行）
+      expect(line.querySelector('[data-hero-text]')?.textContent).not.toContain('（');
+      const notes = hero.querySelector('[data-hero-notes]');
+      if (notes) {
+        expect(classes(notes)).toContain('truncate');
+        expect(notes.getAttribute('title')).toBe(notes.textContent);
+      }
+    }
   });
 });
 
@@ -222,6 +289,9 @@ describe('页头和操作记录不撑出屏幕', () => {
   test('操作记录里「之前 / 之后」的 pre 自动换行', async () => {
     const api = createMockApi({ live: false });
     renderApp(<AuditPage />, { route: '/audit', api });
+    // #1940：改动明细改成点行尾展开钮才画（不再每行常驻一个 details）；先把有改动的行都展开，再量 pre
+    const expands = await screen.findAllByRole('button', { name: '看改了什么' });
+    for (const b of expands) fireEvent.click(b);
     await waitFor(() => expect(document.querySelectorAll('details').length).toBeGreaterThan(0));
     const pres = Array.from(document.querySelectorAll('details pre'));
     expect(pres.length).toBeGreaterThan(0);

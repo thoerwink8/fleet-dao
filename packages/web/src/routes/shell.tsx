@@ -23,7 +23,7 @@ import { useNavRoom, usePhone } from '../lib/viewport';
 function Screen({ children }: { children: ReactNode }) {
   return (
     <div className="grid h-dvh place-items-center bg-background p-6">
-      <div className="flex max-w-sm flex-col items-center gap-3 text-center text-sm text-muted-foreground">
+      <div className="flex max-w-sm flex-col items-center gap-3 text-center text-body text-muted-foreground">
         <LogoMark className="size-10" />
         {children}
       </div>
@@ -109,7 +109,7 @@ function skipToContent(event: { preventDefault(): void }) {
 
 function Frame() {
   const location = useLocation();
-  // 侧栏收不收：人手动选过就按人选的；没选过按屏宽，≥1280 展开、768–1279 收成图标栏
+  // 侧栏收不收：人手动选过就按人选的；没选过按屏宽，≥1440 展开、768–1439 收成图标栏（#1937）
   const [picked, setPicked] = useLocalState<boolean | null>(`${brand.storagePrefix}sidebar-collapsed`, null);
   const navRoom = useNavRoom();
   const collapsed = picked ?? !navRoom;

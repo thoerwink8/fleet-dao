@@ -3,6 +3,8 @@
 // 每个写操作都留操作记录。路径取自 shared/web-api.ts 的 WebRoutes。
 
 import {
+  AnswerNotificationRequest,
+  AnswerNotificationResponse,
   AuditQuery,
   AuditResponse,
   BoardResponse,
@@ -55,6 +57,7 @@ import { meBody } from './auth.ts';
 import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reconcile-view.ts';
 import { registerCiPolicyRoutes } from './ci-policy-routes.ts';
 import { registerCredentialRoutes } from './credentials.ts';
+import { handOffDecision } from './decision-handoff.ts';
 import type { Deps } from './deps.ts';
 import { registerDispatchRoutes } from './dispatch-routes.ts';
 import { registerFranceReleaseRoutes } from './france-release.ts';
@@ -789,6 +792,44 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     );
     if (result === 'not_found') throw new ApiError(404, 'notification_not_found', '没有这条通知');
     return reply(c, ResolveNotificationResponse, { ok: true });
+  });
+
+  // 回答「要你拍」（#1915）：答案、转已处理、操作记录同一事务存下，再交给指挥官（进度单 #1055、任务单留言）。
+  // 交没交出去照实写在 handoff 里：存下了就回 200，交接没成不把已存的答案说成没存。
+  app.post(WebRoutes.answerNotification.path, async (c) => {
+    const id = c.req.param('notificationId');
+    const body = await readJson(c, AnswerNotificationRequest);
+    const actor = actorOf(c);
+    const result = await store.answerNotification(
+      { id, by: actor, optionId: body.optionId, text: body.text },
+      {
+        actor,
+        action: 'notification.answer',
+        target: `notification:${id}`,
+        after: body.optionId === undefined ? { text: body.text } : { optionId: body.optionId },
+        via: c.get('via'),
+        ok: true,
+      },
+    );
+    if (result.kind !== 'ok') {
+      if (result.kind === 'not_found') throw new ApiError(404, 'notification_not_found', '没有这条通知');
+      if (result.kind === 'not_decision')
+        throw new ApiError(409, 'notification_not_decision', '这条不是要你拍的，没有答案可记');
+      if (result.kind === 'already_resolved')
+        throw new ApiError(409, 'notification_already_resolved', '这条已经处理过了，答案没改');
+      throw new ApiError(400, 'unknown_option', '这条通知里没有这个选项');
+    }
+    const { notification } = result;
+    if (!notification.answer) throw new Error(`通知 ${id} 存下答案后读回来没有答案`);
+    const handoff = await handOffDecision(
+      { store, commenter: deps.decisionCommenter },
+      notification,
+      notification.answer,
+    );
+    for (const [where, r] of Object.entries(handoff)) {
+      if (r && !r.ok) deps.log.error('「要你拍」的答案没交给指挥官', { notification: id, where, why: r.why });
+    }
+    return reply(c, AnswerNotificationResponse, { ok: true, answer: notification.answer, handoff });
   });
 
   app.get(WebRoutes.audit.path, async (c) => {

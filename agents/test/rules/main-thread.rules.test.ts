@@ -316,36 +316,34 @@ describe('Grok 借道读同一份钩子登记（camelCase 输入、没有 transc
 });
 
 describe('登记和真跑', () => {
-  // agents 是单独的 TypeScript 项目，引不进 packages/agents-sync 的源码：按文字读同步工具的目标清单
+  const SETTINGS_PATH = fileURLToPath(new URL('../../../.claude/settings.json', import.meta.url));
+  const SETTINGS = readFileSync(SETTINGS_PATH, 'utf8');
   const TARGETS = readFileSync(
     fileURLToPath(new URL('../../../packages/agents-sync/src/targets.ts', import.meta.url)),
     'utf8',
   );
-  /** Claude 那份设置（~/.claude/settings.json）里登记 main-thread.mjs 的几行 */
-  const registrations = (text: string): string[] => {
-    const at = text.indexOf("format: 'claude'");
-    const end = text.indexOf('format:', at + 1);
-    if (at < 0 || end < 0) throw new Error('targets.ts 里认不出 Claude 那一家的登记');
-    return text
-      .slice(at, end)
-      .split('\n')
-      .filter((l) => l.includes("'main-thread.mjs'"))
-      .map((l) => l.trim());
-  };
-  const WANT = "{ event: 'PreToolUse', script: 'main-thread.mjs', timeout: 10 },";
+  const WANT = 'node "$CLAUDE_PROJECT_DIR/agents/hooks/main-thread.mjs"';
 
-  it('Claude 那份设置里，这个钩子挂在 PreToolUse 上、不写 matcher（每次工具调用都过）', () => {
-    expect(registrations(TARGETS)).toEqual([WANT]);
+  it('登记在本仓项目设置的 PreToolUse 上、不写 matcher；用户级清单里没有', () => {
+    const settings = JSON.parse(SETTINGS) as {
+      hooks: { PreToolUse: { matcher?: string; hooks: { command: string; timeout: number }[] }[] };
+    };
+    expect(settings.hooks.PreToolUse).toEqual([{ hooks: [{ type: 'command', command: WANT, timeout: 10 }] }]);
+    expect(TARGETS).not.toContain("'main-thread.mjs'");
   });
 
-  it('【故意造出的失败】登记里加了 matcher、或者整条删掉：上一条查得出来', () => {
-    const narrowed = TARGETS.replace(
-      WANT,
-      "{ event: 'PreToolUse', matcher: 'Bash', script: 'main-thread.mjs', timeout: 10 },",
-    );
-    expect(narrowed).not.toBe(TARGETS);
-    expect(registrations(narrowed)).not.toEqual([WANT]);
-    expect(registrations(TARGETS.replace(WANT, ''))).toEqual([]);
+  it('【故意造出的失败】项目设置里加了 matcher、或者整条删掉：上一条查得出来', () => {
+    const parsed = JSON.parse(SETTINGS) as {
+      hooks: { PreToolUse: { matcher?: string; hooks: { command: string }[] }[] };
+    };
+    const group = parsed.hooks.PreToolUse[0];
+    if (group === undefined) throw new Error('项目设置里没有 PreToolUse');
+    const before = JSON.stringify(parsed);
+    group.matcher = 'Bash';
+    expect(JSON.stringify(parsed)).not.toBe(before);
+    expect(group.matcher).toBe('Bash');
+    const cut = SETTINGS.replace(WANT, 'node "$CLAUDE_PROJECT_DIR/agents/hooks/gone.mjs"');
+    expect(cut).not.toContain(WANT);
   });
 
   // 同步起子进程：卡死由 runChild 给子进程的上限管（#264）

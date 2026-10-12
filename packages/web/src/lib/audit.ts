@@ -5,7 +5,7 @@ import type { AuditEntry, BoardTask, Me, SettingKey, StageKind } from '../api/ty
 import { describeAction } from './audit-actions';
 import { stageLabel } from './catalog';
 
-/** 事件名的中文（对照表在 audit-actions.ts）；没收录的原样返回，页面另标「（没翻译）」。 */
+/** 事件名的中文（对照表在 audit-actions.ts）；没收录的返回默认译名「其他操作」，原键由页面放小字。 */
 export function actionLabel(action: string): string {
   return describeAction(action).text;
 }

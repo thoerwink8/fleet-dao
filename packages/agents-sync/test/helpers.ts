@@ -14,7 +14,7 @@ import { delimiter, dirname, join } from 'node:path';
 import { expect } from 'vitest';
 import { BEGIN, END } from '../src/block.ts';
 import { type Ctx, readSources, type Sources } from '../src/sync.ts';
-import type { AgentId, Platform } from '../src/targets.ts';
+import { type AgentId, type Platform, SUBAGENT_TARGET } from '../src/targets.ts';
 import { runChild } from './child.ts';
 
 export const PLATFORM: Platform = process.platform === 'win32' ? 'win32' : 'linux';
@@ -54,6 +54,7 @@ export function get(base: string, rel: string): string {
 
 /** 假仓里的钩子脚本：名字和 targets.ts 登记的一样，内容是假的 */
 export const HOOK_FILES: Record<string, string> = {
+  'plugin-loader.mjs': '// 假的订阅加载器\n',
   'session-start.mjs': '// 假的开会话钩子\n',
   'pretool.mjs': '// 假的调工具前钩子\n',
   'pretool-codex.mjs': '// 假的 Codex 调工具前钩子\n',
@@ -83,15 +84,22 @@ export const PERMS_SPEC = {
 };
 export const PERMS_JSON = `${JSON.stringify({ ...PERMS_SPEC, 说明: '测试用' }, null, 2)}\n`;
 
-/** 假仓里的用户级子代理定义（agents/subagents/）：名字和 targets.ts 的 SUBAGENT_TARGET 一样，内容是假的 */
-export const SUBAGENT_MD =
-  '---\nname: haiku55\ndescription: 测试用\nmodel: claude-haiku-5-5\ntools: Read, Grep\n---\n假的子代理正文\n';
-export const SUBAGENT_FILES: Record<string, string> = { 'haiku55.md': SUBAGENT_MD };
+/** 假的子代理定义：name 是给的名字，别的是假的 */
+export const subagentMd = (name: string): string =>
+  `---\nname: ${name}\ndescription: 测试用\nmodel: claude-haiku-5-5\ntools: Read, Grep\n---\n假的子代理正文\n`;
+export const SUBAGENT_MD = subagentMd('haiku55');
+/**
+ * 假仓里的用户级子代理定义（仓内路径 → 原文）：agents/subagents/ 下 targets.ts 的 SUBAGENT_TARGET 列的每一份
+ * （haiku55.md 和 16 个 fleet-*.md），内容是假的
+ */
+export const SUBAGENT_FILES: Record<string, string> = Object.fromEntries(
+  SUBAGENT_TARGET.files.map((file) => [`agents/subagents/${file}`, subagentMd(file.replace(/\.md$/, ''))]),
+);
 
 /**
  * 假仓：agents/shared-rules.md 带通用段（rulesMd 为 null 时没有这份），AGENTS.md 只有本仓段；skills 为 null 时没有
  * agents/skills/ 这个目录，hooks 为 null 时没有 agents/hooks/，permissions 为 null 时没有权限源文件，
- * subagents 为 null 时没有 agents/subagents/
+ * subagents 为 null 时一份子代理定义都没有（键是仓内路径）
  */
 export function makeRepo(
   skills: Record<string, Record<string, string>> | null,
@@ -115,7 +123,7 @@ export function makeRepo(
   }
   if (permissions !== null) put(repo, 'agents/config/claude-permissions.json', permissions);
   if (subagents !== null) {
-    for (const [rel, content] of Object.entries(subagents)) put(repo, `agents/subagents/${rel}`, content);
+    for (const [rel, content] of Object.entries(subagents)) put(repo, rel, content);
   }
   return repo;
 }

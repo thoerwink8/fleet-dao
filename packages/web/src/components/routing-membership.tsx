@@ -20,10 +20,20 @@ import {
 import type { Model, RoutingLayerModel, RoutingLayerPurpose } from '../api/types';
 import { EFFORT_HINT } from '../lib/efforts';
 import { WINDOW_MIN_ROWS, windowRange } from '../lib/list-window';
+import { scaledPx, useRootScale } from '../lib/root-scale';
 import { purposeLabel } from '../lib/routing';
 import { supportedPurposeEfforts } from '../lib/routing-browse';
-import { cn } from '../lib/utils';
-import { RowMenu, type RowMoves, TAP, useRoutingEdit } from './routing-edit';
+import { Notice } from './layout/notice';
+import {
+  RowMenu,
+  RowMenuItem,
+  RowMenuLabel,
+  RowMenuRadioGroup,
+  RowMenuRadioItem,
+  RowMenuSeparator,
+} from './layout/row-menu';
+import { SearchInput } from './layout/search-input';
+import { ROW_MENU_TITLE, RowMoveItems, type RowMoves, TAP, useRoutingEdit } from './routing-edit';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -36,6 +46,7 @@ import {
 } from './ui/alert-dialog';
 import { Button } from './ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
+import { Input } from './ui/input';
 
 /** 没有名册命令、靠手工登记的渠道。种子里叫「Claude 订阅」，真渠道编号是 claude-sub。 */
 export function isManualChannel(
@@ -76,13 +87,13 @@ function addRows(models: readonly Model[]): AddRow[] {
   return rows;
 }
 
-function addRowStyle(index: number) {
+function addRowStyle(index: number, rowHeight: number) {
   return {
     position: 'absolute' as const,
     left: 0,
     right: 0,
-    top: index * ADD_ROW_HEIGHT,
-    height: ADD_ROW_HEIGHT,
+    top: index * rowHeight,
+    height: rowHeight,
   };
 }
 
@@ -100,17 +111,21 @@ function AddCandidateList({
   onPick: (modelId: string) => void;
 }) {
   const [scrollTop, setScrollTop] = useState(0);
-  const total = rows.length * ADD_ROW_HEIGHT;
+  // 设计值乘根字号倍数（桌面 125%，#1937），行里 rem 写的字和按钮放大了，行框跟着放大
+  const scale = useRootScale();
+  const rowHeight = scaledPx(ADD_ROW_HEIGHT, scale);
+  const listHeight = scaledPx(ADD_LIST_HEIGHT, scale);
+  const total = rows.length * rowHeight;
   const range = windowRange({
     count: rows.length,
-    rowHeight: ADD_ROW_HEIGHT,
-    height: ADD_LIST_HEIGHT,
+    rowHeight,
+    height: listHeight,
     scrollTop,
   });
   return (
     <div
       data-windowed={rows.length > WINDOW_MIN_ROWS ? 'true' : undefined}
-      style={{ height: Math.min(ADD_LIST_HEIGHT, total) }}
+      style={{ height: Math.min(listHeight, total) }}
       className="overflow-y-auto overscroll-contain"
       onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
     >
@@ -124,10 +139,10 @@ function AddCandidateList({
                 data-add-group={row.family}
                 aria-posinset={index + 1}
                 aria-setsize={rows.length}
-                style={addRowStyle(index)}
+                style={addRowStyle(index, rowHeight)}
                 className="border-b"
               >
-                <div className="flex h-full items-center px-2 text-caption font-semibold text-muted-foreground">
+                <div className="flex h-full items-center px-2 text-meta font-semibold text-muted-foreground">
                   {row.label}
                 </div>
               </li>
@@ -143,14 +158,14 @@ function AddCandidateList({
               data-add-model={m.id}
               aria-posinset={index + 1}
               aria-setsize={rows.length}
-              style={addRowStyle(index)}
+              style={addRowStyle(index, rowHeight)}
               className="flex items-center gap-2 border-b px-1"
             >
-              <span className="min-w-0 flex-1 truncate text-sm">
+              <span className="min-w-0 flex-1 truncate text-body">
                 <span className="font-medium">{m.displayName}</span>
-                <span className="ml-2 text-caption text-muted-foreground">{m.family}</span>
+                <span className="ml-2 text-meta text-muted-foreground">{m.family}</span>
               </span>
-              {only ? <span className="shrink-0 text-micro text-muted-foreground">仅创始人可开</span> : null}
+              {only ? <span className="shrink-0 text-meta text-muted-foreground">仅创始人可开</span> : null}
               <Button
                 type="button"
                 size="xs"
@@ -228,25 +243,21 @@ export function AddPurposeModel({
             <DialogTitle>往{purposeLabel(purpose.purpose)}里加模型</DialogTitle>
             <DialogDescription>只列目录里还没排进这个用途的。选定就加到末尾。</DialogDescription>
           </DialogHeader>
-          <label className="block">
-            <span className="sr-only">搜索要添加的模型</span>
-            <input
-              type="search"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="搜名字、编号"
-              aria-label="搜索要添加的模型"
-              className="h-9 w-full rounded-lg border bg-background px-2.5 text-sub outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-            />
-          </label>
+          <SearchInput
+            value={query}
+            onChange={setQuery}
+            placeholder="搜名字、编号"
+            aria-label="搜索要添加的模型"
+            className="md:max-w-none"
+          />
           {routing.error ? (
-            <p className="text-sub text-ink-fail">{errorText(routing.error)}</p>
+            <p className="text-body text-ink-fail">{errorText(routing.error)}</p>
           ) : !routing.data ? (
-            <p className="text-sub text-muted-foreground">目录还在读</p>
+            <p className="text-body text-muted-foreground">目录还在读</p>
           ) : available.length === 0 ? (
-            <p className="text-sub text-muted-foreground">没有可加的模型</p>
+            <p className="text-body text-muted-foreground">没有可加的模型</p>
           ) : rows.length === 0 ? (
-            <p className="text-sub text-muted-foreground">
+            <p className="text-body text-muted-foreground">
               没有能加的模型：换个搜索词，或目录里的都已经在这个用途里
             </p>
           ) : (
@@ -284,24 +295,25 @@ function effortBlockedWhy(modelId: string, routes: readonly { hostId: HostId }[]
   return '这几条路由没有共同认的档位';
 }
 
+/** 行上小字里写的档位（「档位 高」）；不另配不写。 */
+export function effortWord(effort: SessionEffort | null | undefined): string | null {
+  return effort ? EFFORT_WORD[effort] : null;
+}
+
 /**
- * 用途里这一行的档位和「移出」。档位只列这个模型的路由都认的。
- * 给了 menu（手机）：「移出」不再单独一个按钮，和开关、上移、下移一起收进行尾「⋯」菜单（#1806）；档位下拉留在行里。
+ * 用途里这一行的行尾「⋯」菜单（路由页样板 #1914）：档位（单选，只列这个模型的路由都认的）、上移、下移、置顶、置底、移出。
+ * 行里只留名字、状态和开关；这些都是偶尔才动的，收进菜单，各宽度同一个样子。
  */
-export function PurposeModelControls({
+export function PurposeModelMenu({
   purpose,
   model,
   onError,
-  menu,
+  moves,
 }: {
   purpose: RoutingLayerPurpose;
   model: RoutingLayerModel;
   onError: (message: string | null) => void;
-  menu?: {
-    moves: RowMoves;
-    /** 模型开关此刻的样子；一条路由都没有时 unavailable 为 true，菜单里这一项置灰。 */
-    toggle: { enabled: boolean; expectedEnabled: string[]; unavailable: boolean };
-  };
+  moves: RowMoves;
 }) {
   const edit = useRoutingEdit();
   const setEffort = useSetPurposeModelEffort();
@@ -352,80 +364,48 @@ export function PurposeModelControls({
 
   const locked = edit.disabledWhy;
   const blocked = blockedWhy !== null;
+  const effortLocked = locked !== null || setEffort.isPending || blocked;
+  const label = purposeLabel(purpose.purpose);
   return (
     <>
-      <select
-        aria-label={`${model.displayName} 的档位`}
-        value={blocked ? '' : value}
-        disabled={locked !== null || setEffort.isPending || blocked}
-        title={locked ?? blockedWhy ?? '这个用途下另配的档位。不另配就按每条路由自己的档起会话'}
-        onChange={(e) => void saveEffort(e.target.value)}
-        className={cn(
-          'h-6 max-w-28 shrink-0 rounded border bg-background px-1 text-caption disabled:cursor-not-allowed disabled:opacity-60',
-          TAP,
-        )}
-      >
-        <option value="">不另配</option>
-        {blocked
-          ? null
-          : options.map((effort) => (
-              <option key={effort} value={effort} title={EFFORT_HINT[effort]}>
-                {EFFORT_WORD[effort]}
-              </option>
-            ))}
-      </select>
-      {blockedWhy ? (
-        <span
-          data-row-note
-          title={blockedWhy}
-          className="order-last basis-full shrink-0 whitespace-normal break-words text-micro leading-snug text-muted-foreground md:w-full"
+      <RowMenu label={`更多操作：${moves.label}`} title={ROW_MENU_TITLE}>
+        {/* 档位：这个用途下另配的档。配不了的整组置灰，说明写在组头下面（以前铺在行里，#1754 收进悬停） */}
+        <RowMenuLabel hint={locked ?? blockedWhy ?? undefined}>
+          <span data-effort-label>{model.displayName} 的档位</span>
+        </RowMenuLabel>
+        <RowMenuRadioGroup
+          aria-label={`${model.displayName} 的档位`}
+          value={blocked ? '' : value}
+          onValueChange={(next) => void saveEffort(next)}
         >
-          {blockedWhy}
-        </span>
-      ) : null}
-      {menu ? (
-        <RowMenu
-          moves={menu.moves}
-          leading={[
-            {
-              key: 'toggle',
-              label: menu.toggle.enabled ? '关闭这个模型' : '开启这个模型',
-              disabled: locked !== null || menu.toggle.unavailable,
-              title: locked ?? (menu.toggle.unavailable ? '这个模型下一条路由都没有' : undefined),
-              onSelect: () =>
-                edit.toggleModel({
-                  modelId: model.modelId,
-                  modelName: model.displayName,
-                  enabled: menu.toggle.enabled,
-                  expectedEnabled: menu.toggle.expectedEnabled,
-                }),
-            },
-          ]}
-          trailing={[
-            {
-              key: 'remove',
-              label: `移出${purposeLabel(purpose.purpose)}`,
-              destructive: true,
-              disabled: locked !== null,
-              title: locked ?? `把 ${model.displayName} 移出${purposeLabel(purpose.purpose)}`,
-              onSelect: () => setConfirm(true),
-            },
-          ]}
-        />
-      ) : (
-        <Button
-          type="button"
-          size="xs"
-          variant="ghost"
-          className={TAP}
+          <RowMenuRadioItem value="" disabled={effortLocked} title="不另配就按每条路由自己的档起会话">
+            不另配
+          </RowMenuRadioItem>
+          {blocked
+            ? null
+            : options.map((effort) => (
+                <RowMenuRadioItem
+                  key={effort}
+                  value={effort}
+                  disabled={effortLocked}
+                  title={EFFORT_HINT[effort]}
+                >
+                  {EFFORT_WORD[effort]}
+                </RowMenuRadioItem>
+              ))}
+        </RowMenuRadioGroup>
+        <RowMenuSeparator />
+        <RowMoveItems moves={moves} />
+        <RowMenuSeparator />
+        <RowMenuItem
+          variant="destructive"
           disabled={locked !== null}
-          title={locked ?? `把 ${model.displayName} 移出${purposeLabel(purpose.purpose)}`}
-          aria-label={`把 ${model.displayName} 移出用途`}
-          onClick={() => setConfirm(true)}
+          title={locked ?? `把 ${model.displayName} 移出${label}`}
+          onSelect={() => setConfirm(true)}
         >
-          移出
-        </Button>
-      )}
+          移出{label}
+        </RowMenuItem>
+      </RowMenu>
       <AlertDialog open={confirm} onOpenChange={(open) => !open && !remove.isPending && setConfirm(false)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -492,36 +472,32 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
 
   return (
     <div className="space-y-2 border-b px-3 py-3">
-      <p className="text-caption text-muted-foreground">
+      <p className="text-meta text-muted-foreground">
         这个渠道没有名册，模型串要手工登记。刷新后这里只留个数。
       </p>
-      {error ? (
-        <p role="alert" className="rounded-md border border-ink-fail px-2 py-1.5 text-sub text-ink-fail">
-          {error}
-        </p>
-      ) : null}
+      {error ? <Notice tone="fail">{error}</Notice> : null}
       <form
         aria-label="手工登记模型串"
         className="flex flex-wrap items-center gap-2"
         onSubmit={(e) => void onRegister(e)}
       >
-        <input
+        <Input
           aria-label="模型串"
           value={key}
           disabled={locked !== null || register.isPending}
           onChange={(e) => setKey(e.target.value)}
           placeholder="例如 claude-sonnet-x"
-          className="h-8 min-w-0 flex-1 rounded-md border bg-background px-2 text-sub outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          className="min-w-0 flex-1"
         />
         <Button type="submit" size="sm" disabled={locked !== null || register.isPending || key.trim() === ''}>
           登记
         </Button>
-        {noted ? <p className="text-sub text-ink-done">已登记 {noted}</p> : null}
+        {noted ? <p className="text-body text-ink-done">已登记 {noted}</p> : null}
       </form>
       {keys.length > 0 ? (
         <ul aria-label="已登记的模型串" className="space-y-1">
           {keys.map((item) => (
-            <li key={item} className="flex items-center gap-2 text-sub">
+            <li key={item} className="flex items-center gap-2 text-body">
               <span className="min-w-0 flex-1 truncate">{item}</span>
               <Button
                 type="button"

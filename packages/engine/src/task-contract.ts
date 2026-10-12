@@ -327,6 +327,12 @@ export type MergeWait =
   | { state: 'head_moved'; head: string }
   /** 自动合并被撤掉了（人撤的，或 GitHub 因为头变了撤的）：回去重新挂。 */
   | { state: 'unarmed' }
+  /**
+   * PR 和主线冲突（GitHub 的 mergeable=false / mergeable_state=dirty，自动合并永远等不到）：工作流去并主线
+   * （能自动并的并上，并不动交回会话解），不留在等合并的循环里（#1838：#1824 卡了 7 小时 45 分就是这么来的）。
+   * 老历史里没有这个状态（那时候冲突只回 waiting）。
+   */
+  | { state: 'conflict'; detail: string }
   | { state: 'waiting'; detail: string };
 
 /** 派单前对选定的这一条路由探一次（#1409）。label 是写进任务状态的名字（模型 id）。 */
@@ -337,7 +343,7 @@ export interface ProbeAssignedInput {
 }
 
 /**
- * pass：可以派。结论已经在 routes 上（这一次写上了，或 5 分钟内刚探通、或规矩写明不探）。probed 为假是没真探。
+ * pass：可以派。结论已经在 routes 上（这一次写上了，或 15 分钟内刚探通、或规矩写明不探）。probed 为假是没真探。
  * fail：这一条本轮不能派。探通但结论写不进 routes 也算不通，不起会话。counted 为真才占「每轮最多当场探 3 条」的名额（组织认不出、路由被删了不占）。
  */
 export type ProbeAssignedResult =

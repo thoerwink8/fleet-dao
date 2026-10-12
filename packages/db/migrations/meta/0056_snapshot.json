@@ -1,5 +1,5 @@
 {
-  "id": "1382679a-f376-4b10-8842-89a8c73a52c2",
+  "id": "171c0ab8-c541-4311-9600-a62b813c53ac",
   "prevId": "b72f8004-4d59-4ac3-9381-3339ad0c6cac",
   "version": "7",
   "dialect": "postgresql",
@@ -5608,13 +5608,6 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
-        },
-        "ci_policy": {
-          "name": "ci_policy",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'force'"
         }
       },
       "indexes": {},
@@ -5628,12 +5621,7 @@
         }
       },
       "policies": {},
-      "checkConstraints": {
-        "repos_ci_policy_known": {
-          "name": "repos_ci_policy_known",
-          "value": "\"repos\".\"ci_policy\" in ('force', 'off')"
-        }
-      },
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.session_runs": {
@@ -6551,7 +6539,7 @@
     "public.route_probe_state": {
       "name": "route_probe_state",
       "schema": "public",
-      "values": ["ok", "failed", "not_wired", "skipped", "on_demand"]
+      "values": ["ok", "failed", "not_wired", "skipped"]
     },
     "public.run_outcome": {
       "name": "run_outcome",

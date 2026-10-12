@@ -2,8 +2,10 @@
 // Codex 的钩子还要信任了才跑：登记完替本脚本那几条记上信任（hooks-codex.ts）。
 // 设置文件里只动本脚本管的那几条：命令指向 ~/.fleet-dao/hooks/ 下的脚本，或者以前手装在 fleet-guard 目录的两条（接管时换掉）。
 // 别的钩子、别的设置一条不碰；设置文件读不懂（不是 JSON、整份不是对象、hooks 不是对象）就不动，报没做成——不当成空的重写。
-// 替别的用户写（--user，法国装机）时开会话那条不登记（HookSkip）：它要在这个用户自己能拉、能写的 fleet-dao 检出里快进、同步；
+// 决定 0083：用户级不再给每个仓登记过程钩子。决定 0085：用户级只多一个订阅加载器（plugin-loader.mjs）。
+// 这里不再列出的登记，下次同步摘掉。
 // 调工具前那条照装：法国会话用户家里就有 reclaude 的设备密钥，借道读这份设置的 Grok、Cursor 起的会话也要拦。
+// HookSkip 仍可按事件名少登记一类（调用方传入）。
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Backups } from './backup.ts';
@@ -91,7 +93,7 @@ export function ownedScript(command: unknown): { script: string; legacy: boolean
   const c = command.replaceAll('\\', '/');
   const now = /\/\.fleet-dao\/hooks\/([\w.-]+\.mjs)(?![\w.-])/.exec(c);
   if (now?.[1]) return { script: now[1], legacy: false };
-  // quiet-session-start.exe → session-start.mjs。认这个，同步才会把旧的 node "….mjs" 换成它，而不是当成别人的钩子留着
+  // quiet-session-start.exe → session-start.mjs。认这个，标准不再登记的流程钩子下次同步才会摘掉，而不是当成别人的钩子留着
   const quiet = /\/\.fleet-dao\/bin\/quiet-([\w.-]+)\.exe(?![\w.-])/.exec(c);
   if (quiet?.[1]) return { script: `${quiet[1]}.mjs`, legacy: false };
   const old = /\/fleet-guard\/(session-start|pretool)\.mjs(?![\w.-])/.exec(c);

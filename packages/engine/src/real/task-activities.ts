@@ -359,6 +359,11 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         if (pull.state !== 'open') return { state: 'closed' };
         if (pull.headSha !== expectedHead) return { state: 'head_moved', head: pull.headSha };
         if (!pull.autoMerge) return { state: 'unarmed' };
+        // 和主线冲突（#1838）：自动合并永远等不到（GitHub 不给冲突的 PR 起 CI、也不会合它，等下去只有超时）。
+        // 当场回 conflict 交工作流去并主线，不在这儿干等。老历史里没有这个状态（那时候只回 waiting）。
+        if (pull.mergeable === false || pull.mergeableState === 'dirty') {
+          return { state: 'conflict', detail: `PR #${prNumber} 和主线冲突，自动合并等不到：要并主线` };
+        }
         if (now().getTime() >= deadline) {
           return { state: 'waiting', detail: '自动合并挂着，GitHub 还没合（等必过检查和合并闸）' };
         }
