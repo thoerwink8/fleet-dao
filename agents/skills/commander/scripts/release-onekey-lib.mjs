@@ -1,19 +1,18 @@
 // 发版一键命令的薄封装（只到预检，真发版不在这里做）：把 release-train 包成更直观的命令。
 // 逻辑一点不重写：真正干活的还是 release-train-lib.mjs 的 runTrain，这里只做三件事——
 // 1. 多一个只读的 preflight 命令：借 runTrain 跑「start」，但在它刚开始第 1 步
-//    （release-train-lib 的 runFrom 打印「—— 第 1 步「暂停本机」——」那一行，即预检已通过、
-//    马上就要写暂停标记）那一刻从 io.out 里抛一个哨兵错误打断它，再把临时状态文件删掉。
-//    从头到尾 pause marker 都没写过（phase 1 的 writeMarker 在那一行打印之后才执行），
-//    什么都没暂停过；预检没过时 runTrain 自己停在 phase 0 的 failed，我们照旧删状态。
+//    （release-train-lib 的 runFrom 打印「—— 第 1 步「本机」——」那一行，即预检已通过、
+//    马上就要进暂停法国之前的占位步）那一刻从 io.out 里抛一个哨兵错误打断它，再把临时状态文件删掉。
+//    从头到尾什么都没暂停过（第 2 步才碰法国引擎）；预检没过时 runTrain 自己停在 phase 0 的 failed，我们照旧删状态。
 // 2. preflight 命令前面带一段中文摘要（主线 CI 怎么样、挂了自动合并的 PR 有哪几个、法国在跑几个会话）。
 // 3. start 命令在透传 runTrain 之前，用更直白的中文先拦一遍用法错误（sha 必填、founder-ok 必填）。
 //    过了这层照原样进 runTrain：参数、暂停、状态、退出码全一样，行为一字不改。
 // 改这里之前必须知道：
 // - 和 release-train-lib 一样，这份文件里没有任何真的起进程、连网、睡觉的代码：一切经 io 进来，
 //   agents/test/release-onekey.test.ts 换假 ssh、假 gh、假时钟。
-// - 打断预检靠的是 release-train-lib 里 runFrom 打出来的固定字样「—— 第 1 步」（PHASES[1]＝「暂停本机」）。
-//   它要是改了，这里就拦不住，预检过后会真的写暂停标记——agents/test/release-onekey.test.ts 里
-//   有一条盯住「拦截生效、且没写暂停标记」，字样改动会当场红。
+// - 打断预检靠的是 release-train-lib 里 runFrom 打出来的固定字样「—— 第 1 步」（PHASES[1]＝「本机」）。
+//   它要是改了，这里就拦不住，预检过后会真的去关法国引擎——agents/test/release-onekey.test.ts 里
+//   有一条盯住「拦截生效、且没关法国引擎」，字样改动会当场红。
 // - start/status/abort 全是透传 runTrain：这里不加新行为，不替它把关（它在 founder-ok 上有一道槛；
 //   这里先拦只为更早给中文说法，双保险而不是替代）。
 // - 退出码照 runTrain：0 做完了；1 用法不对或被拒；2 没做成；3 卡住。preflight 没过回 2
@@ -28,9 +27,9 @@ export const ONEKEY_USAGE = `用法：node release-onekey.mjs <命令>（在项�
         只读预检，什么都不改：主线 CI 绿不绿、法国读不读得到、有没有别的发布在跑、
         列出挂了自动合并的 PR 和法国在跑的会话数，前面带一段中文摘要。不给 --sha 就只查环境。
   start --sha <提交> --founder-ok "<创始人原话>" [--restore]
-        一键发版：暂停手头的活（本机＋法国）→ 等收尾 → 发版 → 验证 → 恢复 → 打印清单。
+        一键发版：暂停手头的活（法国引擎）→ 等收尾 → 发版 → 验证 → 恢复 → 打印清单。
         和 node release-train.mjs start 是同一条路：参数、暂停、状态、退出码全一样。
-  status          看这一趟走到哪、暂停标记在不在（同 release-train.mjs status）
+  status          看这一趟走到哪、法国总开关暂停前是什么（同 release-train.mjs status）
   abort           撤暂停、恢复原状（同 release-train.mjs abort）
 退出码：0 做完了；1 用法不对或被拒；2 没做成；3 卡住（到点还有拖后腿的，名单已列出）。`;
 
@@ -141,7 +140,7 @@ export async function runPreflight(io, target) {
       ? ['start', '--sha', '0'.repeat(40), '--founder-ok', '（只读预检，到不了发版那一步）']
       : ['start', '--sha', target.value, '--founder-ok', '（只读预检，到不了发版那一步）'];
   const code = await runTrain(trainArgv, ioWrapped);
-  // 预检是只读的：过没过都把临时状态删掉（pause marker 根本没写过，不用碰）
+  // 预检是只读的：过没过都把临时状态删掉（什么都没暂停过，不用碰）
   rmSync(stateFile(io.home), { force: true });
 
   const summary = await buildSummary(io, target);

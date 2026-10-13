@@ -114,17 +114,6 @@ describe('git-run.mjs：钩子跑 git 只有这一份', () => {
 });
 
 describe('原来各写一份的口径（R4）', () => {
-  it('工人目录：开会话钩子和 commander 技能是同一处', async () => {
-    const ss = await load<{ WORKERS_REL: string }>('session-start.mjs');
-    const wl = (await import(
-      pathToFileURL(fileURLToPath(new URL('../skills/commander/scripts/worker-lib.mjs', import.meta.url)))
-        .href
-    )) as { workersDir(home: string): string; ROUTING_DEFAULT_REL: string };
-    expect(wl.workersDir('H')).toBe(join('H', ss.WORKERS_REL));
-    const src = await load<{ SYNC_DIR: string }>('sync-source.mjs');
-    expect(wl.ROUTING_DEFAULT_REL.startsWith(`${src.SYNC_DIR}`)).toBe(true);
-  });
-
   it('开会话列创始人最近的话认 FLEET_PROMPT_LOG_DIR（和落盘那边一样），不只看家目录', async () => {
     const ss = await load<{
       recentPrompts(o: {

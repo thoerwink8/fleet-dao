@@ -1,6 +1,6 @@
-// 发版前先暂停手头的活（#618）：release-train-lib.mjs（一趟发版的各阶段）、worker-lib.mjs 的暂停标记、法国在跑会话数的只读查询
+// 发版前先暂停手头的活（#618）：release-train-lib.mjs（一趟发版的各阶段）、法国在跑会话数的只读查询
 // （france-sessions-query.mjs / france-sessions-lib.mjs）。
-// ssh、gh、git、pnpm、node 子进程、睡眠全部是假的（假时钟：sleep 只是把时间往前拨）；home 用真的临时目录，状态文件和暂停标记是真文件。
+// ssh、gh、git、pnpm、node 子进程、睡眠全部是假的（假时钟：sleep 只是把时间往前拨）；home 用真的临时目录，状态文件是真文件。
 // 真跑的那条路（release-train.mjs 外壳里的 ssh）在这里一次都不碰。故意造的失败：没带 --founder-ok、等收尾超时、法国读不到会话数、
 // 发完版历史末行是 unhealthy、发完恢复发版前的开关不成功（总开关开不回、仓开关开不回、没记发版前的状态）。
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -51,7 +51,6 @@ interface Train {
   releaseLaunchCommand(sha: string, token: string): string;
   parseLaunchReport(out: string): { state: string; exit: number | null; log: string; tail: string } | null;
   runTrain(argv: string[], io: TrainIo): Promise<number>;
-  parseWorkerStatus(out: string): { running: string[]; uncertain: string[]; unreadable: string[] };
   orderFromDescription(d: string): number[];
   rankIssues(
     issues: { number: number; title: string; labels?: { name: string }[] }[],
@@ -74,10 +73,6 @@ interface Train {
   ): { dead: boolean; unknown?: boolean; why: string };
   trainAlertNote(ctx: { home: string; now: Date; isAlive?: (pid: number) => boolean; host?: string }): string;
 }
-interface WorkerLib {
-  runWorker(argv: string[], io: Record<string, unknown>): Promise<number>;
-  readPauseMarker(home: string): { paused: boolean; why?: string };
-}
 interface SessionsLib {
   parseSessions(text: string): SessionsResult;
   fetchRunningSessions(o: Record<string, unknown>): Promise<SessionsResult>;
@@ -93,7 +88,6 @@ interface SessionsQuery {
 }
 
 const train = (await load('release-train-lib.mjs')) as Train;
-const workerLib = (await load('worker-lib.mjs')) as WorkerLib;
 const sessionsLib = (await load('france-sessions-lib.mjs')) as SessionsLib;
 const sessionsQuery = (await load('france-sessions-query.mjs')) as SessionsQuery;
 const franceQuery = (await load('france-query.mjs')) as { PSQL: string[] };
@@ -103,11 +97,6 @@ const OLD = '0123abcd'.repeat(5);
 const FOUNDER = '发版吧';
 const FOUNDER_RESTORE = '发吧，发完恢复引擎和各仓开关';
 const NODE = 'node-fake';
-const RUNNING_WORKER =
-  'w1：grok，档位 high，在跑，pid 123，从起来到现在 3 分钟\n  工作树 x（分支 y）\n  最后一句输出：在写\n  PR：没有';
-const DONE_WORKER =
-  'w1：grok，档位 high，已经不在跑了，pid 123，从起来到现在 30 分钟\n  工作树 x（分支 y）\n  最后一句输出：完成\n  PR：#9（MERGED）u';
-
 const ok = (stdout = ''): CmdResult => ({ status: 0, stdout, stderr: '' });
 /** check-runs?check_name=check 过滤后一页的回话（jq 之后的样子）。 */
 const checkPage = (runs: { status: string; conclusion: string | null }[], total = runs.length): CmdResult =>
@@ -132,7 +121,6 @@ function makeWorld() {
     err: [] as string[],
     ci: 'success' as 'success' | 'failure' | 'pending',
     prs: [] as { number: number; title: string; autoMergeRequest: unknown }[],
-    workers: '没有起过任何工人',
     lockBusy: false,
     franceHealthExit: 0,
     franceBad: 0,
@@ -183,7 +171,6 @@ function makeWorld() {
       if (args[0] === 'api' && args[1]?.includes('milestones')) return ok(JSON.stringify(w.milestones));
       if (args[0] === 'issue' && args[1] === 'list') return ok(JSON.stringify(w.issues));
     }
-    if (command === NODE && String(args[0]).endsWith('worker.mjs')) return ok(w.workers);
     if (command === NODE && String(args[0]).endsWith('france.mjs'))
       return {
         status: w.franceHealthExit,
@@ -280,7 +267,6 @@ const freshHome = () => {
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
-const markerFile = (home: string) => join(home, '.fleet-dao', 'release-train.paused');
 const stateOf = (home: string) =>
   JSON.parse(readFileSync(join(home, '.fleet-dao', 'release-train.json'), 'utf8')) as {
     status: string;
@@ -290,7 +276,7 @@ const stateOf = (home: string) =>
   };
 const text = (lines: string[]) => lines.join('\n');
 /**
- * 预检那次读到 0 个，之后法国一直有一个会话在跑：等收尾会一直等不到。本机工人、自动合并的 PR 只提示、不等了（母单 #1121），
+ * 预检那次读到 0 个，之后法国一直有一个会话在跑：等收尾会一直等不到。自动合并的 PR 只提示、不等了（母单 #1121），
  * 挡路的只剩法国会话和主线 CI。
  */
 const franceBusyAfterPreflight = (w: { sessions: () => Promise<SessionsResult> }) => {
@@ -320,79 +306,6 @@ describe('发版入口是目标提交自带的 release.sh（#1294）', () => {
   });
 });
 
-describe('暂停标记：worker.mjs start 见标记就拒', () => {
-  it('发版暂停期间 start 被拒（退出码 3、说明原因、什么都没起），status 照常', async () => {
-    const home = freshHome();
-    const { w, io } = makeWorld();
-    franceBusyAfterPreflight(w); // 等收尾会一直等不到
-    const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
-    expect(code).toBe(3);
-    expect(existsSync(markerFile(home))).toBe(true);
-    expect(workerLib.readPauseMarker(home).paused).toBe(true);
-
-    const calls: string[] = [];
-    const out: string[] = [];
-    const err: string[] = [];
-    const spy = (name: string) => () => {
-      calls.push(name);
-      return { status: 0, stdout: '', stderr: '' };
-    };
-    const workerIo = {
-      env: {},
-      home,
-      now: () => new Date(),
-      nodePath: NODE,
-      sleep: async () => {},
-      cwd: () => home,
-      git: spy('git'),
-      gh: spy('gh'),
-      pnpm: spy('pnpm'),
-      spawnDetached: () => {
-        calls.push('spawnDetached');
-        return { pid: 1 };
-      },
-      isRunning: () => false,
-      killTree: () => ({ ok: true }),
-      out: (t: string) => out.push(t),
-      err: (t: string) => err.push(t),
-    };
-    const started = await workerLib.runWorker(
-      [
-        'start',
-        '--model',
-        'grok',
-        '--name',
-        'x',
-        '--brief',
-        'b.md',
-        '--no-issue',
-        '试',
-        '--detached',
-        '测试里要脱离',
-      ],
-      workerIo,
-    );
-    expect(started).toBe(3);
-    expect(text(err)).toContain('发版暂停中');
-    expect(text(err)).toContain('release-train.mjs abort');
-    expect(calls).toEqual([]); // git、gh、pnpm、起进程一个都没碰
-
-    // status 照常：没有工人，退出 0
-    expect(await workerLib.runWorker(['status'], workerIo)).toBe(0);
-    expect(text(out)).toContain('没有起过任何工人');
-  });
-
-  it('标记在但内容读坏了也算暂停；没有标记不拦', () => {
-    const home = freshHome();
-    expect(workerLib.readPauseMarker(home).paused).toBe(false);
-    mkdirSync(join(home, '.fleet-dao'), { recursive: true });
-    writeFileSync(markerFile(home), '这不是 JSON');
-    const r = workerLib.readPauseMarker(home);
-    expect(r.paused).toBe(true);
-    expect(r.why).toContain('按暂停算');
-  });
-});
-
 describe('start 的前置：没带 --founder-ok 不发版', () => {
   it('没带 --founder-ok：拒，什么都没做（没暂停、没写状态、没读任何东西）', async () => {
     const home = freshHome();
@@ -402,7 +315,6 @@ describe('start 的前置：没带 --founder-ok 不发版', () => {
     expect(text(w.err)).toContain('--founder-ok');
     expect(w.calls).toEqual([]);
     expect(w.sshCalls).toEqual([]);
-    expect(existsSync(markerFile(home))).toBe(false);
     expect(existsSync(join(home, '.fleet-dao', 'release-train.json'))).toBe(false);
   });
 
@@ -447,7 +359,6 @@ describe('预检（只读）：不过就什么都不改', () => {
     const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
     expect(code).toBe(2);
     expect(text(w.err)).toContain('在跑几个会话读不到');
-    expect(existsSync(markerFile(home))).toBe(false);
     expect(w.sshCalls.some((c) => c.includes('engine off'))).toBe(false);
     expect(releaseCalls(w.sshCalls)).toEqual([]);
   });
@@ -461,7 +372,6 @@ describe('预检（只读）：不过就什么都不改', () => {
     expect(code).toBe(2);
     expect(text(w.err)).toContain('主线 CI 不是绿的');
     expect(text(w.err)).toContain('另一个发布正在跑');
-    expect(existsSync(markerFile(home))).toBe(false);
   });
 
   it('预检没过之后换一个目标可以直接重来（什么都没动过）', async () => {
@@ -475,7 +385,7 @@ describe('预检（只读）：不过就什么都不改', () => {
 });
 
 describe('等收尾：到点列出拖后腿的，不硬来', () => {
-  it('各阶段上限（毫秒）：等收尾只有主线 CI 20 分钟、法国会话 13 分钟；本机工人、自动合并的 PR 两项没有上限（只提示不等）', () => {
+  it('各阶段上限（毫秒）：等收尾只有主线 CI 20 分钟、法国会话 13 分钟；自动合并的 PR 没有上限（只提示不等）', () => {
     expect(train.DEFAULT_LIMITS).toMatchObject({
       ciMs: 20 * 60_000,
       franceMs: 13 * 60_000,
@@ -486,10 +396,9 @@ describe('等收尾：到点列出拖后腿的，不硬来', () => {
     expect(train.DEFAULT_LIMITS).not.toHaveProperty('prMs');
   });
 
-  it('法国会话到点没收：停下（退出码 3）、点名列出、标记还在、没发版；本机工人、自动合并的 PR 只提示、不算拖后腿', async () => {
+  it('法国会话到点没收：停下（退出码 3）、点名列出、没发版；自动合并的 PR 只提示、不算拖后腿', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    w.workers = RUNNING_WORKER;
     w.prs = [{ number: 77, title: '慢的那个', autoMergeRequest: { enabledAt: 'x' } }];
     franceBusyAfterPreflight(w);
     const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
@@ -497,16 +406,12 @@ describe('等收尾：到点列出拖后腿的，不硬来', () => {
     const err = text(w.err);
     expect(err).toContain('拖后腿');
     expect(err).toContain('法国在跑的会话：o/a#5 execute');
-    expect(err).not.toContain('本机工人：w1');
     expect(err).not.toContain('#77 慢的那个');
     // 提示打印出来了（打在 out 里），但没当成拖后腿
     const out = text(w.out);
-    expect(out).toContain('本机工人 1（只提示，不等）');
     expect(out).toContain('自动合并的 PR 1（只提示，不等）');
-    expect(out).toContain('本机工人：w1');
     expect(out).toContain('自动合并的 PR：#77 慢的那个');
     expect(releaseCalls(w.sshCalls)).toEqual([]);
-    expect(existsSync(markerFile(home))).toBe(true);
     const s = stateOf(home);
     expect(s.status).toBe('blocked');
     expect(s.phase).toBe(3);
@@ -514,17 +419,16 @@ describe('等收尾：到点列出拖后腿的，不硬来', () => {
     expect(w.sshCalls.some((c) => c.includes(' engine off '))).toBe(true); // 暂停已经做了
   });
 
-  it('【故意造出的失败】本机还有工人在跑、还有挂了自动合并没合的 PR，法国会话已经收完：不等，照样往下发版（只提示）', async () => {
+  it('【故意造出的失败】还有挂了自动合并没合的 PR，法国会话已经收完：不等，照样往下发版（只提示）', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    w.workers = RUNNING_WORKER;
     w.prs = [{ number: 77, title: '慢的那个', autoMergeRequest: { enabledAt: 'x' } }];
     franceFree(w);
     const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
     expect(code).toBe(0);
     const out = text(w.out);
     expect(out).toContain('这几样只提示、不等');
-    expect(out).toContain('本机工人：w1');
+    expect(out).toContain('自动合并的 PR：#77 慢的那个');
     expect(out).toContain('等收尾：都收完了');
     expect(releaseCalls(w.sshCalls).length).toBe(1);
   });
@@ -548,7 +452,6 @@ describe('等收尾：到点列出拖后腿的，不硬来', () => {
   it('等收尾期间主线 CI 红了：立刻停（不等到点）', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    w.workers = RUNNING_WORKER; // 本机工人只提示、不影响 CI 红了立刻停
     let calls = 0;
     const base = io(home);
     const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
@@ -570,7 +473,7 @@ describe('等收尾：到点列出拖后腿的，不硬来', () => {
   // 发出去的是要发的那个提交，看它自己的 CI；不看主线头。
   it('看的是要发的提交的 CI，不是主线头：预检、等收尾读的都是 commits/<提交号>/check-runs', async () => {
     const home = freshHome();
-    const { w, io } = makeWorld();
+    const { io } = makeWorld();
     const base = io(home);
     const refs: string[] = [];
     const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
@@ -769,21 +672,18 @@ describe('等收尾：到点列出拖后腿的，不硬来', () => {
 });
 
 describe('abort：恢复原状', () => {
-  it('卡住之后 abort：清标记、法国总开关开回暂停前的样子、状态记成已撤销', async () => {
+  it('卡住之后 abort：法国总开关开回暂停前的样子、状态记成已撤销', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     franceBusyAfterPreflight(w);
     expect(await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home))).toBe(3);
     expect(w.engineOn).toBe(false);
-    expect(existsSync(markerFile(home))).toBe(true);
 
     w.out.length = 0;
     expect(await train.runTrain(['abort'], io(home))).toBe(0);
-    expect(existsSync(markerFile(home))).toBe(false);
     expect(w.engineOn).toBe(true);
     expect(w.sshCalls.some((c) => c.includes(' engine on '))).toBe(true);
     expect(stateOf(home).status).toBe('aborted');
-    expect(workerLib.readPauseMarker(home).paused).toBe(false);
     expect(releaseCalls(w.sshCalls)).toEqual([]);
   });
 
@@ -810,10 +710,9 @@ describe('abort：恢复原状', () => {
     expect(await train.runTrain(['abort'], io(home))).toBe(0);
     expect(w.sshCalls.some((c) => c.includes(' engine on '))).toBe(false);
     expect(text(w.out)).toContain('已经动手发过版');
-    expect(existsSync(markerFile(home))).toBe(false);
   });
 
-  it('没有在走的一趟：abort 说明白、退出 0，留下的孤儿标记顺手清掉', async () => {
+  it('没有在走的一趟：abort 说明白、退出 0', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     expect(await train.runTrain(['abort'], io(home))).toBe(0);
@@ -823,10 +722,9 @@ describe('abort：恢复原状', () => {
 });
 
 describe('整趟走完', () => {
-  it('--sha：预检→暂停→等收尾→发版→等部署→验证→恢复→清单；发版在关总开关之后，发完恢复到发版前（原来开着，开回）', async () => {
+  it('--sha：预检→本机（占位）→暂停法国→等收尾→发版→等部署→验证→恢复→清单；发版在关总开关之后，发完恢复到发版前（原来开着，开回）', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    w.workers = DONE_WORKER;
     const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
     expect(w.err).toEqual([]);
     expect(code).toBe(0);
@@ -842,7 +740,6 @@ describe('整趟走完', () => {
     );
     expect(launch.includes(`bash ${train.RELEASE_SH}`)).toBe(false);
     expect(w.sshCalls.some((c) => c.endsWith('release.sh --check'))).toBe(true);
-    expect(existsSync(markerFile(home))).toBe(false); // 发完清了
     expect(w.engineOn).toBe(true); // 发版前开着，发完默认开回（不用 --restore、不用授权）
     expect(i(' engine on ')).toBeGreaterThan(i(`fleet-release-launch ${SHA}`)); // 发完才开
     expect(
@@ -863,7 +760,6 @@ describe('整趟走完', () => {
   it('发版前总开关就关着：发完仍关着，不去开（也不去碰各仓开关）', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    w.workers = DONE_WORKER;
     w.engineOn = false;
     const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
     expect(code).toBe(0);
@@ -979,7 +875,6 @@ describe('整趟走完', () => {
         restore: false,
         before: null,
         baseline: null,
-        marker: false,
         laggards: [],
         release: { started: true },
       }),
@@ -996,7 +891,6 @@ describe('整趟走完', () => {
   it('在用的版本还没有引擎总开关（engine 子命令不存在）：第 2 步记跳过，照常发版；连不上库之类照旧算读不到', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    w.workers = DONE_WORKER;
     w.engineLegacy = true;
     const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io(home));
     expect(w.err).toEqual([]);
@@ -1007,7 +901,6 @@ describe('整趟走完', () => {
     // 【故意造出的失败】真的读不到（连不上库）还是停下
     const home2 = freshHome();
     const { w: w2, io: io2 } = makeWorld();
-    w2.workers = DONE_WORKER;
     w2.engineStatusFails = true;
     expect(await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], io2(home2))).not.toBe(0);
     expect(text(w2.err)).toContain('总开关读不到');
@@ -1061,7 +954,7 @@ describe('整趟走完', () => {
     expect(releaseCalls(w.sshCalls).length).toBe(1);
   });
 
-  it('发完版历史末行是 unhealthy（没过健康检查）：停在等部署（退出码 2），标记还在，不恢复', async () => {
+  it('发完版历史末行是 unhealthy（没过健康检查）：停在等部署（退出码 2），不恢复', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     w.releaseWritesHistory = 'unhealthy';
@@ -1071,7 +964,6 @@ describe('整趟走完', () => {
     );
     expect(code).toBe(2);
     expect(text(w.err)).toContain('没过健康检查或已退回');
-    expect(existsSync(markerFile(home))).toBe(true);
     expect(w.engineOn).toBe(false);
     expect(stateOf(home).phase).toBe(5);
   });
@@ -1103,7 +995,6 @@ describe('整趟走完', () => {
     });
     expect(code).toBe(3);
     expect(text(w.err)).toContain('多出了异常');
-    expect(existsSync(markerFile(home))).toBe(true);
   });
 
   // #1740：第 6 步比「哪几条是新出现的」，只拦跟新版有关的；任务自己停下（kind task-park）只列出来
@@ -1151,7 +1042,7 @@ describe('整趟走完', () => {
   }
 
   it('预检 4 条，验证时多出「#1707 卡住了」和一条 task: 开头的提醒：第 6 步通过，另起一行列出单子停下的', async () => {
-    const { code, w, home } = await verifyWith([], [parkStalled, parkAlert]);
+    const { code, w } = await verifyWith([], [parkStalled, parkAlert]);
     expect(code).toBe(0);
     expect(text(w.err)).not.toContain('多出了异常');
     const out = text(w.out);
@@ -1160,17 +1051,15 @@ describe('整趟走完', () => {
     expect(line).toContain('#1707 卡住了');
     expect(line).toContain('#79 动手 3 轮都没过');
     expect(out.indexOf('验证：法国')).toBeLessThan(out.indexOf('发版期间单子停下的'));
-    expect(existsSync(markerFile(home))).toBe(false);
   });
 
   it('验证时多出一条定时任务没跑成（不是 task-park）：拦下，说明里只列这一条，不列单子停下的', async () => {
-    const { code, w, home } = await verifyWith([], [parkStalled, jobFailing]);
+    const { code, w } = await verifyWith([], [parkStalled, jobFailing]);
     expect(code).toBe(3);
     const err = text(w.err);
     expect(err).toContain('多出了异常');
     expect(err).toContain('定时任务「巡查」最近一轮没跑成');
     expect(err).not.toContain('#1707 卡住了');
-    expect(existsSync(markerFile(home))).toBe(true);
   });
 
   it('条数不变但换了一条（旧的消失、新的非 task-park 出现）：拦下', async () => {
@@ -1225,7 +1114,6 @@ describe('整趟走完', () => {
     expect(code).toBe(0);
     expect(healthCalls).toBe(2);
     expect(text(w.err)).not.toContain('多出了异常');
-    expect(existsSync(markerFile(home))).toBe(false);
   });
 
   it('只看 kind、不看文案：别的异常哪怕文案也写「没动」，没有 kind 照拦', async () => {
@@ -1250,7 +1138,6 @@ describe('整趟走完', () => {
     expect(code).toBe(3);
     expect(text(w.err)).toContain('多出了异常');
     expect(text(w.err)).toContain('29 分钟没动');
-    expect(existsSync(markerFile(home))).toBe(true);
   });
 
   it('暂停期同时多出「没动」和一条别的异常：别的那条照拦（「没动」不计，别的计）', async () => {
@@ -1307,7 +1194,6 @@ describe('整趟走完', () => {
     expect(healthCalls).toBe(2);
     expect(text(w.err)).not.toContain('多出了异常');
     expect(text(w.out)).toContain('路由结论没更新 1 处');
-    expect(existsSync(markerFile(home))).toBe(false);
   });
 
   it('暂停期多出路由旧结论，同时多出一条别的异常（服务不 active）：别的那条照拦', async () => {
@@ -1334,7 +1220,6 @@ describe('整趟走完', () => {
     expect(text(w.err)).toContain('多出了异常');
     expect(text(w.err)).toContain('不是 active');
     expect(text(w.err)).not.toContain('51 分钟没更新');
-    expect(existsSync(markerFile(home))).toBe(true);
   });
 
   it('【故意造出的失败】文案和路由旧结论一模一样但没带 kind：照拦，不靠文案放过', async () => {
@@ -1359,7 +1244,6 @@ describe('整趟走完', () => {
     expect(code).toBe(3);
     expect(text(w.err)).toContain('多出了异常');
     expect(text(w.err)).toContain('51 分钟没更新');
-    expect(existsSync(markerFile(home))).toBe(true);
   });
 
   it('新增的是「没读到」：照拦', async () => {
@@ -1400,7 +1284,6 @@ describe('整趟走完', () => {
     });
     expect(code).toBe(2);
     expect(text(w.err)).toContain('不是 JSON');
-    expect(existsSync(markerFile(home))).toBe(true);
   });
 });
 
@@ -1418,7 +1301,7 @@ describe('status', () => {
     const out = text(w.out);
     expect(out).toContain('卡住了');
     expect(out).toContain('第 3 步「等收尾」');
-    expect(out).toContain('暂停标记：在');
+    expect(out).toContain('法国总开关暂停前');
     expect(out).toContain('拖后腿：法国在跑的会话：o/a#5 execute');
   });
 
@@ -1483,7 +1366,6 @@ describe('驱动死了：认得出、接着走（#1674）', () => {
           recordedAt: beat,
         },
         baseline: { bad: 0, unread: 0, note: 2 },
-        marker: true,
         laggards: [],
         release: { started: true },
         driver: { pid: 4242, host: 'box', heartbeatAt: beat },
@@ -1583,7 +1465,6 @@ describe('驱动死了：认得出、接着走（#1674）', () => {
     expect(w.sshCalls.some((c) => c.includes(' dispatch o/b on'))).toBe(false);
     expect(stateOf(home).status).toBe('done');
     expect(driverOf(home)?.pid).toBe(5555); // 换成新驱动
-    expect(existsSync(markerFile(home))).toBe(false);
   });
 
   it('死在第 4 步、法国没发成：从第 4 步重发（发一次），再走完恢复', async () => {
@@ -1855,21 +1736,6 @@ describe('驱动死了：认得出、接着走（#1674）', () => {
 });
 
 describe('认输出的小函数', () => {
-  it('parseWorkerStatus：在跑的、说不准的、没查成的分开；已经不在跑了的不算', () => {
-    const out = [
-      RUNNING_WORKER,
-      DONE_WORKER.replace('w1', 'w2'),
-      'w3：没查成——meta.json 读不了',
-      'w4：codex，档位 high，不确定在跑没跑（起的时候没记上 pid：x），从起来到现在 3 分钟',
-    ].join('\n');
-    expect(train.parseWorkerStatus(out)).toEqual({ running: ['w1'], uncertain: ['w4'], unreadable: ['w3'] });
-    expect(train.parseWorkerStatus('没有起过任何工人')).toEqual({
-      running: [],
-      uncertain: [],
-      unreadable: [],
-    });
-  });
-
   it('orderFromDescription / rankIssues：先后段在前，其余挡路的先、母单最后、同级小号在前', () => {
     expect(
       train.orderFromDescription('x\n<!-- fleet:order -->\n1. #5\n2. #3 说明\n<!-- /fleet:order -->'),

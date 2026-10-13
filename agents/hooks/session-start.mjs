@@ -5,7 +5,7 @@
 //    Mirasim 每条消息都 --resume，这一钩子每轮都跑（Claude Code 要求 SessionStart 保持快：
 //    https://code.claude.com/docs/en/hooks ，2026-10-06）。git fetch、问 GitHub、扫工作树和 QUIET_MS 共用一扇门，
 //    记在 ~/.fleet-dao/session-net/：三分钟内做过就跳过，失败也记上一笔，免得断网时每条消息都等满超时。
-//    跳过时仍用手里已有的 origin/main 做本地核对。引导对账、临时调整、仓里的创始人引导、工人状态每轮都做。
+//    跳过时仍用手里已有的 origin/main 做本地核对。引导对账、临时调整、仓里的创始人引导每轮都做。
 //    工人（FLEET_WORKER=1）不走这扇门，起来就要当前的远端。
 // 2. 这台机器的规矩、技能、钩子、权限：同步脚本另有**一份只归它的检出**（~/.fleet-dao/origin-main，
 //    agents/hooks/sync-source.mjs），永远停在 origin/main 的分离头上，再跑一遍 agents-sync --apply；结论一句话。
@@ -26,7 +26,7 @@
 // 6. 仓合同（决定 0081，repo-contract.mjs 的 contractLines）：会话所在仓按 fleet-dao 的 agents/repo-contract.json 查，
 //    有缺项说一段事实，每个仓每天最多一次，全过不出声。只在真开会话时接上（repoContract 参数），测试按需注入。
 //    引导条目的〔范围：通用｜只此仓〕：checkDirectives 在那一行后面补一句没标的、标了通用还没上推的。
-// 环境变量 FLEET_WORKER=1（commander 的 worker.mjs 起工人时设）：只做第 1、2 件，其余各段（创始人的事、整池暂停、工作树、工人状态）一律不出。
+// 环境变量 FLEET_WORKER=1（机器派的会话设）：只做第 1、2 件，其余各段（创始人的事、整池暂停、工作树）一律不出。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
 import { spawn, spawnSync } from 'node:child_process';
@@ -54,10 +54,8 @@ import {
   cleanId,
   isMachineOpening,
   isMachineSession,
-  pidAlive,
   stateDir,
   sessionLines as unattendedLines,
-  WORKERS_REL,
 } from './unattended.mjs';
 
 export const SYNC_MS = 30_000;
@@ -1010,7 +1008,7 @@ export function sessionStart({
   if (doFetch && here.fetch?.ok === true) markFetchOk({ home, cwd, git: localGit, okOf: ok, now });
   // 失败也记上 session-net：断网时下一轮不再把 GitHub 超时重付一遍。fetch-ok 只在取成时记，子代理仍会再试。
   if (stamp !== null && !quiet) touch(stamp, now);
-  // 工人（FLEET_WORKER=1，worker-lib.mjs 起的）只要规矩同步：创始人引导、他最近的话、工作树清单、工人状态都是指挥官的事，
+  // 工人（FLEET_WORKER=1）只要规矩同步：创始人引导、他最近的话、工作树清单都是指挥官的事，
   // 注进工人的开场它会当成自己的活（2026-10-05 审计 N5），还白占 8–11 秒
   if (worker)
     return [...(here.line ? [here.line] : []), syncFleet({ home, git, sync, fetch: here.fetch, now })];
@@ -1042,7 +1040,6 @@ export function sessionStart({
         })),
     ...recentPrompts({ home, now, sessionId, env, lineage }),
     ...(quiet ? [] : sweepWorktrees(cwd, localGit, now, home)),
-    ...workerLines(home, now),
     ...(quiet
       ? []
       : checkIdlePrs({
@@ -1059,7 +1056,7 @@ export function sessionStart({
 // ── 拆成两半（片 B 第 8 条，2026-10-13）────────────────────────────────────────────────────────────────
 // 上面的 sessionStart 是一口气全做完的老路子（工人 FLEET_WORKER=1 起来就要当前的远端，还走它；测试也拿它测各件）。
 // 本机实测它中位 27.7 秒、最长 86 秒，Mirasim 每条消息 resume 都付一遍。现在真开会话走 fastSessionStart：
-// - 同步那半只做本地的：会话所在仓的本地核对（用手里已有的 origin/main，落后就快进）、临时调整表、引导、仓合同、他最近的话、工人状态，
+// - 同步那半只做本地的：会话所在仓的本地核对（用手里已有的 origin/main，落后就快进）、临时调整表、引导、仓合同、他最近的话，
 //   外加读后台上一次写下的结果（~/.fleet-dao/session-bg/<仓的指纹>.json）。目标中位 ≤1 秒。
 // - 取远端、规矩同步（agents-sync）、gh（进度单 #1055、绿了没挂的 PR）、扫工作树、ssh 法国查整池暂停：放进脱离的后台子进程
 //   （本文件 --background <会话目录>），写结果文件，下次开会话读。结果没有、过了 QUIET_MS、读不懂就再起一个；锁（同名 .lock）
@@ -1301,7 +1298,6 @@ export function fastSessionStart({
   const sw = got('sweep');
   if (sw?.ok && Array.isArray(sw.value)) lines.push(...sw.value);
   lines.push(...failed('sweep', '清工作树'));
-  lines.push(...workerLines(home, now));
   const idle = got('idle');
   if (idle?.ok && Array.isArray(idle.value)) lines.push(...idle.value);
   lines.push(...failed('idle', IDLE_NOT_CHECKED.replace(/没查成$/, '')));
@@ -1490,103 +1486,6 @@ function removeShell(dir) {
     // 下面照实看还在不在
   }
   return !existsSync(dir);
-}
-
-/** 独立工人跑了这么久还没退，开会话时提一句（Claude 无头模式做完才出字，不能拿「多久没输出」判）。 */
-export const WORKER_LONG_MS = 3 * 60 * 60_000;
-
-/**
- * 工人最后一句说得出人话的输出。Claude 工人的日志是 stream-json（一行一个事件）：结论在 result 事件里，
- * 说的话在 assistant 事件的 text 里；别家模型是普通文字。和 commander 技能 worker-lib.mjs 的 saidOf 一个意思，
- * 这里只取「最后说了什么」（判做没做完），不翻工具调用。钩子和技能装在两个目录，没法互相 import，所以各写一份。
- */
-function workerLastSaid(text) {
-  const rows = text
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean);
-  const tail = (t) => {
-    const r = String(t)
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean);
-    return r[r.length - 1] ?? '';
-  };
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    const row = rows[i];
-    if (!row.startsWith('{')) return row;
-    let ev;
-    try {
-      ev = JSON.parse(row);
-    } catch {
-      return row;
-    }
-    if (ev?.type === 'result' && typeof ev.result === 'string') return tail(ev.result);
-    if (ev?.type === 'assistant' && Array.isArray(ev.message?.content)) {
-      const said = ev.message.content.filter(
-        (b) => b?.type === 'text' && typeof b.text === 'string' && b.text.trim(),
-      );
-      if (said.length > 0) return tail(said[said.length - 1].text);
-    }
-  }
-  return '';
-}
-
-/**
- * 工人状态目录（相对家目录）：定义在 unattended.mjs（收尾钩子数在跑的工人也用它），这里原样再导出。
- * commander 技能的 worker-lib.mjs 另有一份（钩子和技能装在两个目录，互相 import 不了），
- * agents/test/hooks-shared.test.ts 钉着两边相等。
- */
-export { WORKERS_REL };
-
-/**
- * 本机独立工人（commander 技能的 worker.mjs 起的，状态在 ~/.fleet-dao/workers/<名字>/meta.json）现在怎样（#1016）。
- * 工人是脱离会话的进程：它被强杀、卡死、做完都不会通知谁，所以由每次开会话都会跑的这里看一眼，不靠工人自己活着来报。
- * 只报要人知道的三种：不在跑了又没交活、跑了很久还没退、做完了没收拾。读不了的记录照实报没查成。
- */
-export function workerLines(home, now = Date.now(), alive = pidAlive) {
-  const root = join(home, WORKERS_REL);
-  let names;
-  try {
-    names = readdirSync(root);
-  } catch {
-    return []; // 这台没起过工人
-  }
-  const lines = [];
-  for (const name of names) {
-    let m;
-    try {
-      m = JSON.parse(readFileSync(join(root, name, 'meta.json'), 'utf8'));
-    } catch (err) {
-      if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT') continue;
-      lines.push(`工人 ${name} 的记录没查成（meta.json 读不了或不是 JSON），用 worker.mjs status 看。`);
-      continue;
-    }
-    if (!m || typeof m !== 'object' || m.cleanedAt) continue;
-    if (!Number.isInteger(m.pid)) {
-      lines.push(`工人 ${name} 起的时候没记上进程号，不知道在不在跑：用 worker.mjs status 看。`);
-      continue;
-    }
-    let last = '';
-    try {
-      last = workerLastSaid(readFileSync(String(m.outLog), 'utf8'));
-    } catch {
-      // 还没有输出
-    }
-    const mins = Math.max(0, Math.round((now - Date.parse(String(m.startedAt))) / 60_000));
-    if (alive(m.pid)) {
-      if (now - Date.parse(String(m.startedAt)) > WORKER_LONG_MS)
-        lines.push(`工人 ${name} 跑了 ${mins} 分钟还没退，看一眼是不是卡住了（worker.mjs status）。`);
-      continue;
-    }
-    if (/^完成/.test(last))
-      lines.push(`工人 ${name} 做完了（${last.slice(0, 60)}），看完结果跑 worker.mjs clean --name ${name}。`);
-    else
-      lines.push(
-        `注意：工人 ${name} 不在跑了、也没交活（最后一句：${last ? last.slice(0, 80) : '没有输出'}）。它的工作树 ${m.worktree} 还在，接着做或 clean 掉。`,
-      );
-  }
-  return lines;
 }
 
 export function sweepWorktrees(cwd, git, now = Date.now(), home = undefined) {

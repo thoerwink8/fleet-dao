@@ -123,7 +123,6 @@ describe('规矩：仓合同（只提醒不拦）', () => {
     const env = {
       ...process.env,
       FLEET_UNATTENDED_DIR: state,
-      FLEET_WORKERS_DIR: temp('workers'),
       FLEET_WORKER: '',
       CLAUDE_CODE_SESSION_ID: '',
       FLEET_MIRASIM_DIR: join(state, 'no-mirasim'),

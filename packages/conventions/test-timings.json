@@ -32,8 +32,6 @@
     "agents/test/session-start.test.ts": 12445,
     "agents/test/skills.test.ts": 45,
     "agents/test/stop.test.ts": 182,
-    "agents/test/worker-supervise.test.ts": 147,
-    "agents/test/worker.test.ts": 320,
     "packages/adapters/test/adopt.test.ts": 3171,
     "packages/adapters/test/claude-args.test.ts": 490,
     "packages/adapters/test/claude-run.test.ts": 11450,
