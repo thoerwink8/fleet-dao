@@ -3,10 +3,37 @@
 // routing_catalog.effort 跟着写，但起会话不读它。档位是运行时配置、留在库里（决定 0011
 // 第 7 条），不走「改仓库再部署」；引擎起会话时现读（queries/engine-launch-facts.ts 的 routeLaunchFacts），改完下一个会话就照新的。
 // 这条路由的执行方式认不认这一档照 shared 的 routeEffortProblem 判（和骨架装载、引擎起会话同一份判法），判不过一行不写、回原因。
-import { type HostId, routeEffortProblem, type SessionEffort } from '@fleet-dao/shared';
+import { type HostId, routeEffortProblem, type SessionEffort, type StageKind } from '@fleet-dao/shared';
 import { and, asc, eq } from 'drizzle-orm';
 import type { Db } from './client.ts';
-import { channels, models, routes, routingCatalog, routingPurposeModels } from './schema/index.ts';
+import {
+  channels,
+  models,
+  routes,
+  routingCatalog,
+  routingPurposeModels,
+  routingPurposeRevisions,
+} from './schema/index.ts';
+
+/**
+ * 这个用途的版本加一（routing_purpose_revisions；没有这一行就写成 1）。和 routing-order.ts 的 bumpPurposeVersion 同一个写法：
+ * 先锁版本行（和 lockPurpose 同一顺序：先用途成员行、再版本行，不换序就不互相等），没有这一行才插。
+ */
+async function bumpPurposeRevision(tx: Db, purpose: StageKind): Promise<void> {
+  const [rev] = await tx
+    .select({ version: routingPurposeRevisions.version })
+    .from(routingPurposeRevisions)
+    .where(eq(routingPurposeRevisions.purpose, purpose))
+    .for('update');
+  if (rev) {
+    await tx
+      .update(routingPurposeRevisions)
+      .set({ version: rev.version + 1 })
+      .where(eq(routingPurposeRevisions.purpose, purpose));
+  } else {
+    await tx.insert(routingPurposeRevisions).values({ purpose, version: 1 });
+  }
+}
 
 /** 路由两层里的一条路由和它配的档位（驾驶舱「思考档位」页一行）。 */
 export interface RoutingEffortRow {
@@ -99,10 +126,18 @@ export async function setRoutingEffort(
       .set({ effort: after })
       .where(and(eq(routingCatalog.modelId, modelId), eq(routingCatalog.routeId, routeId)));
     // 起会话只读用途表。这一页按路由改，同根写到这个模型的每一个用途上（各用途原先不同档的，以这一次为准）。
+    // 用途表动了，那些用途的版本（routing_purpose_revisions）跟着加一：驾驶舱「用途」页带着自己看到的版本改档位，
+    // 版本不加它下一次改就会拿过期的版本、把这一次的档位悄悄盖掉（routing-order.ts 的 setPurposeModelEffort 照版本判冲突）。
+    const purposeRows = await tx
+      .select({ purpose: routingPurposeModels.purpose })
+      .from(routingPurposeModels)
+      .where(eq(routingPurposeModels.modelId, modelId))
+      .for('update');
     await tx
       .update(routingPurposeModels)
       .set({ effort: after })
       .where(eq(routingPurposeModels.modelId, modelId));
+    for (const { purpose } of purposeRows) await bumpPurposeRevision(tx, purpose);
     return { ok: true, before: row.effort, after };
   });
 }

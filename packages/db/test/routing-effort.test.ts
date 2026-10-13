@@ -3,9 +3,9 @@
 // 都明确拒、一行不写。
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { routingEffortRows, setRoutingEffort } from '../src/routing-effort.ts';
-import { routingCatalog } from '../src/schema/index.ts';
+import { routingCatalog, routingPurposeModels, routingPurposeRevisions } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRoute, catalog } from './helpers.ts';
+import { addRoute, catalog, setRoutingLayers } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -157,5 +157,45 @@ describe('改档位', () => {
       await setRoutingEffort(t.db, { modelId: 'opus-4.9', routeId: 'claude', effort: 'low', expected: null }),
     ).toEqual({ ok: false, kind: 'conflict', current: 'xhigh' });
     expect((await efforts()).claude).toBe('xhigh');
+  });
+});
+
+describe('这一页改档位，用途表的版本跟着加一（#1967）', () => {
+  // 「用途」页改档位带着它看到的版本（routing-order.ts 的 setPurposeModelEffort）。这一页按路由改、同根写到每个用途的档上，
+  // 版本不加，那个页下一次改就带着过期版本、把这一次的档位悄悄盖掉。所以这里钉住：改一次，每个用到的用途版本加一。
+  const versions = async () =>
+    Object.fromEntries(
+      (await t.db.select().from(routingPurposeRevisions)).map((r) => [r.purpose, r.version]),
+    );
+
+  it('把模型挂进两个用途：改一次这条路由的档，两个用途的版本都加一（原来没有版本行就写成 1）', async () => {
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['opus-4.9'], ui: ['opus-4.9'] },
+      models: { 'opus-4.9': ['claude', 'grok'] },
+    });
+    expect(await versions()).toEqual({}); // 一条版本行都还没有 = 都是版本 0
+
+    expect(
+      await setRoutingEffort(t.db, { modelId: 'opus-4.9', routeId: 'claude', effort: 'high' }),
+    ).toMatchObject({ ok: true });
+    expect(await versions()).toEqual({ execute: 1, ui: 1 });
+    expect(
+      (await t.db.select().from(routingPurposeModels)).map((r) => [r.purpose, r.modelId, r.effort]),
+    ).toEqual([
+      ['execute', 'opus-4.9', 'high'],
+      ['ui', 'opus-4.9', 'high'],
+    ]);
+
+    // 再改一次：接着加一，不是停在 1
+    await setRoutingEffort(t.db, { modelId: 'opus-4.9', routeId: 'grok', effort: 'medium' });
+    expect(await versions()).toEqual({ execute: 2, ui: 2 });
+  });
+
+  it('这个模型没挂进任何用途：改了路由表那一列，不凭空造出版本行', async () => {
+    expect(
+      await setRoutingEffort(t.db, { modelId: 'opus-4.9', routeId: 'claude', effort: 'high' }),
+    ).toMatchObject({ ok: true });
+    expect(await versions()).toEqual({});
+    expect((await efforts()).claude).toBe('high'); // routing_catalog 照样写
   });
 });
