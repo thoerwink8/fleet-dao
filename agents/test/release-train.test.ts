@@ -46,6 +46,8 @@ interface Train {
   DEFAULT_LIMITS: Record<string, number>;
   RELEASE_SH: string;
   releaseBootCommand(sha: string): string;
+  releaseLaunchCommand(sha: string, token: string): string;
+  parseLaunchReport(out: string): { state: string; exit: number | null; log: string; tail: string } | null;
   runTrain(argv: string[], io: TrainIo): Promise<number>;
   parseWorkerStatus(out: string): { running: string[]; uncertain: string[]; unreadable: string[] };
   orderFromDescription(d: string): number[];
@@ -105,6 +107,15 @@ const DONE_WORKER =
   'w1：grok，档位 high，已经不在跑了，pid 123，从起来到现在 30 分钟\n  工作树 x（分支 y）\n  最后一句输出：完成\n  PR：#9（MERGED）u';
 
 const ok = (stdout = ''): CmdResult => ({ status: 0, stdout, stderr: '' });
+/** release-launch.sh 的回话：state= / exit= / log= 三行，「---」后面是日志末尾。 */
+const launchReply = (state: string, exit: number | null = null, tail = ''): CmdResult =>
+  ok(`state=${state}\nexit=${exit ?? 'none'}\nlog=/srv/fleet-dao-releases/.train/x.log\n---\n${tail}\n`);
+/** ssh 被重置：和真 ssh 一样 status 255。 */
+const sshDropped = (): CmdResult => ({
+  status: 255,
+  stdout: '',
+  stderr: 'client_loop: send disconnect: Connection reset by peer',
+});
 
 /** 一个假世界：命令的回话都在这里改；calls 记下每条命令。 */
 function makeWorld() {
@@ -134,6 +145,8 @@ function makeWorld() {
     ] as { repo: string; auto_dispatch_since: string | null }[],
     history: `2026-10-05T01:00:00Z ${OLD} release`,
     releaseExit: 0,
+    launchCalls: 0,
+    launch: null as null | ((n: number, sha: string) => CmdResult),
     releaseWritesHistory: 'release',
     checkExit: 0,
     milestones: [
@@ -215,10 +228,13 @@ function makeWorld() {
       return ok('已开');
     }
     if (cmd.endsWith('release.sh --check')) return { status: w.checkExit, stdout: '', stderr: '' };
-    if (cmd.includes('fleet-release-boot ')) {
-      const sha = cmd.split(' ').at(-1);
+    if (cmd.includes('fleet-release-launch ')) {
+      // 假的 release-launch.sh：默认第一次就「发完了」（写历史、回 finished 和退出码）；w.launch 可换成别的回话（断线、还在跑……）
+      const sha = /fleet-release-launch ([0-9a-f]+) /.exec(cmd)?.[1];
+      w.launchCalls += 1;
+      if (w.launch) return w.launch(w.launchCalls, sha ?? '');
       w.history += `\n2026-10-05T14:30:00Z ${sha} ${w.releaseWritesHistory}`;
-      return { status: w.releaseExit, stdout: '', stderr: '' };
+      return launchReply('finished', w.releaseExit);
     }
     if (cmd.startsWith('tail -n 1')) return ok(`${w.history.split('\n').at(-1)}\n`);
     return { status: 127, stdout: '', stderr: `假法国不认识：${cmd}` };
@@ -286,7 +302,7 @@ const franceBusyAfterPreflight = (w: { sessions: () => Promise<SessionsResult> }
 const franceFree = (w: { sessions: () => Promise<SessionsResult> }) => {
   w.sessions = async () => ({ ok: true, running: 0, rows: [] });
 };
-const releaseCalls = (ssh: string[]) => ssh.filter((c) => c.includes('fleet-release-boot '));
+const releaseCalls = (ssh: string[]) => ssh.filter((c) => c.includes('fleet-release-launch '));
 
 describe('发版入口是目标提交自带的 release.sh（#1294）', () => {
   it('ssh 的是 release-boot，命令里不调用检出里那份', () => {
@@ -703,15 +719,19 @@ describe('整趟走完', () => {
     expect(code).toBe(0);
     const i = (needle: string) => w.sshCalls.findIndex((c) => c.includes(needle));
     expect(i(' engine off ')).toBeGreaterThan(-1);
-    expect(i(`fleet-release-boot ${SHA}`)).toBeGreaterThan(i(' engine off '));
-    expect(w.sshCalls.filter((c) => c.includes('fleet-release-boot '))).toEqual([
-      train.releaseBootCommand(SHA),
-    ]);
-    expect(train.releaseBootCommand(SHA).includes(`bash ${train.RELEASE_SH}`)).toBe(false);
+    expect(i(`fleet-release-launch ${SHA}`)).toBeGreaterThan(i(' engine off '));
+    expect(releaseCalls(w.sshCalls)).toHaveLength(1);
+    const launch = releaseCalls(w.sshCalls)[0] ?? '';
+    // 发布入口是 release-boot（base64 送过去），不是检出里那份 release.sh
+    const b64 = launch.split(' ').at(-1) ?? '';
+    expect(Buffer.from(b64, 'base64').toString('utf8')).toBe(
+      readFileSync(join(SCRIPTS, 'release-boot.sh'), 'utf8'),
+    );
+    expect(launch.includes(`bash ${train.RELEASE_SH}`)).toBe(false);
     expect(w.sshCalls.some((c) => c.endsWith('release.sh --check'))).toBe(true);
     expect(existsSync(markerFile(home))).toBe(false); // 发完清了
     expect(w.engineOn).toBe(true); // 发版前开着，发完默认开回（不用 --restore、不用授权）
-    expect(i(' engine on ')).toBeGreaterThan(i(`fleet-release-boot ${SHA}`)); // 发完才开
+    expect(i(' engine on ')).toBeGreaterThan(i(`fleet-release-launch ${SHA}`)); // 发完才开
     expect(
       w.sshCalls.some((c) => c.includes('engine on --reason') && c.includes('发版后恢复发版前的状态')),
     ).toBe(true);
@@ -749,7 +769,7 @@ describe('整趟走完', () => {
       ...base,
       ssh: (c) => {
         const r = base.ssh(c);
-        if (c.includes('fleet-release-boot ')) w.engineOn = true;
+        if (c.includes('fleet-release-launch ')) w.engineOn = true;
         return r;
       },
     });
@@ -812,7 +832,7 @@ describe('整趟走完', () => {
     const code = await train.runTrain(['start', '--sha', SHA, '--founder-ok', FOUNDER], {
       ...base,
       ssh: (c) => {
-        if (c.includes('fleet-release-boot ')) releaseDone = true;
+        if (c.includes('fleet-release-launch ')) releaseDone = true;
         // 发完版、验证之后（第 7 步）才读不到：用 --check 之后的第二次 engine status
         if (
           releaseDone &&
@@ -870,7 +890,7 @@ describe('整趟走完', () => {
     expect(code).toBe(0);
     expect(text(w.out)).toContain('在用的版本还没有引擎总开关');
     expect(w.sshCalls.some((c) => c.includes(' engine off '))).toBe(false);
-    expect(w.sshCalls.some((c) => c.includes(`fleet-release-boot ${SHA}`))).toBe(true);
+    expect(w.sshCalls.some((c) => c.includes(`fleet-release-launch ${SHA}`))).toBe(true);
     // 【故意造出的失败】真的读不到（连不上库）还是停下
     const home2 = freshHome();
     const { w: w2, io: io2 } = makeWorld();
@@ -1511,16 +1531,40 @@ describe('驱动死了：认得出、接着走（#1674）', () => {
     expect(w.sshCalls).toEqual([]);
   });
 
-  it('【故意造出的失败】死在第 4 步但法国发布锁被占着：不接着走、不重发', async () => {
+  it('重跑时法国上发布还在跑（锁占着）：不报锁冲突、不起第二个，回第 4 步接着轮询，发完才往下走（#1995）', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     w.lockBusy = true;
     deadAt4(home, w, 30);
+    // 法国上的发布服务还在跑：头两次回 attached，第三次发完
+    w.launch = (n, sha) => {
+      if (n < 3) return launchReply('attached');
+      w.history += `\n2026-10-05T14:30:00Z ${sha} release`;
+      return launchReply('finished', 0);
+    };
+    const code = await train.runTrain(startArgs, withDriver(io(home, LIMITS)));
+    expect(w.err).toEqual([]);
+    expect(code).toBe(0);
+    expect(text(w.out)).toContain('回第 4 步接着看它，不起第二个');
+    expect(text(w.out)).toContain('已经在跑（接着看，不起第二个');
+    expect(releaseCalls(w.sshCalls)).toHaveLength(3);
+    // 三次是同一条命令（同一个令牌）：法国上认得出「这是我起的」，不会起第二个
+    expect(new Set(releaseCalls(w.sshCalls)).size).toBe(1);
+    expect(stateOf(home).status).toBe('done');
+  });
+
+  it('【故意造出的失败】重跑时发布一直在跑、到总时限还没发完：判没成（退出码 2），不写成成功，也不重发', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.lockBusy = true;
+    deadAt4(home, w, 30);
+    w.launch = () => launchReply('attached');
     const code = await train.runTrain(startArgs, withDriver(io(home, LIMITS)));
     expect(code).toBe(2);
-    expect(text(w.err)).toContain('发布还在跑');
-    expect(releaseCalls(w.sshCalls)).toEqual([]);
-    expect(stateOf(home).status).toBe('running');
+    expect(text(w.err)).toContain('没看到发布结束');
+    expect(text(w.out)).not.toContain('这一趟做完了');
+    expect(stateOf(home).status).toBe('failed');
+    expect(stateOf(home).phase).toBe(4);
   });
 
   it('【故意造出的失败】死在第 4 步但读不到法国发布历史：不猜，退出码 2', async () => {
@@ -1537,31 +1581,98 @@ describe('驱动死了：认得出、接着走（#1674）', () => {
     expect(releaseCalls(w.sshCalls)).toEqual([]);
   });
 
-  it('第 4 步发版 ssh 期间定时刷新心跳：外壳每 tickMs 回调 onTick，状态里的心跳跟着走', async () => {
+  it('第 4 步发版轮询期间每圈刷新心跳：状态里的心跳跟着走（不再靠一条长 ssh 的 onTick）', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    const base = withDriver(io(home));
     const beats: string[] = [];
-    let sawTick: { tickMs: unknown; hasTick: boolean } | undefined;
-    const code = await train.runTrain(startArgs, {
-      ...base,
-      ssh: (c, opts) => {
-        const r = base.ssh(c);
-        if (!c.includes('fleet-release-boot ')) return r;
-        const o = opts as { tickMs?: number; onTick?: () => void } | undefined;
-        sawTick = { tickMs: o?.tickMs, hasTick: typeof o?.onTick === 'function' };
-        for (let i = 0; i < 3; i++) {
-          w.t += 60_000; // 假的 ssh 里过了 3 分钟，外壳每分钟回调一次
-          o?.onTick?.();
-          beats.push(driverOf(home)?.heartbeatAt ?? '');
-        }
-        return r;
-      },
-    });
+    w.launch = (n, sha) => {
+      beats.push(driverOf(home)?.heartbeatAt ?? '');
+      if (n < 4) return launchReply('attached');
+      w.history += `\n2026-10-05T14:30:00Z ${sha} release`;
+      return launchReply('finished', 0);
+    };
+    const code = await train.runTrain(startArgs, withDriver(io(home)));
     expect(code).toBe(0);
-    expect(sawTick).toEqual({ tickMs: 1000, hasTick: true });
-    expect(new Set(beats).size).toBe(3);
-    expect(Date.parse(beats[2] ?? '')).toBeGreaterThan(Date.parse(beats[0] ?? ''));
+    expect(beats).toHaveLength(4);
+    expect(new Set(beats).size).toBe(4); // 每圈一个新的心跳时刻
+    expect(Date.parse(beats[3] ?? '')).toBeGreaterThan(Date.parse(beats[0] ?? ''));
+  });
+
+  // 2026-10-13 连续两次发版都撞：ssh 被重置，法国上的发布其实跑完了，本机却报「第 4 步没成」（#1995）
+  it('ssh 中途断开但法国已发完：重连后读到发完（退出码 0），不当成失败、不起第二个发布', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.launch = (n, sha) => {
+      if (n === 1) return launchReply('started'); // 起了发布
+      if (n <= 3) return sshDropped(); // 之后连着被重置
+      w.history += `\n2026-10-05T14:30:00Z ${sha} release`; // 法国上早发完了
+      return launchReply('finished', 0, 'fleet-dao-release-exit=0');
+    };
+    const code = await train.runTrain(startArgs, withDriver(io(home)));
+    expect(w.err).toEqual([]);
+    expect(code).toBe(0);
+    expect(text(w.out)).toContain('ssh 断了或连不上');
+    expect(text(w.out)).toContain('发布不受影响');
+    expect(releaseCalls(w.sshCalls)).toHaveLength(4);
+    expect(new Set(releaseCalls(w.sshCalls)).size).toBe(1); // 每次都是同一条（同令牌）：不会起第二个
+    expect(stateOf(home).status).toBe('done'); // 往下走完了第 5 步以后（历史末行是目标）
+  });
+
+  it('【故意造出的失败】ssh 断开且法国没发（一直连不上、到总时限）：判没成（退出码 2），不写成成功', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.launch = () => sshDropped();
+    const code = await train.runTrain(startArgs, withDriver(io(home)));
+    expect(code).toBe(2);
+    expect(text(w.err)).toContain('没看到发布结束');
+    expect(text(w.err)).toContain('ssh 断了或连不上');
+    expect(text(w.out)).not.toContain('这一趟做完了');
+    expect(w.history.split('\n').at(-1)).toContain(OLD); // 历史末行没动：确实没发
+    const s = stateOf(home);
+    expect(s.status).toBe('failed');
+    expect(s.phase).toBe(4);
+  });
+
+  it('【故意造出的失败】断开后连上了，法国说发布服务没了且没留退出码（lost）：没成，点名看日志，不当成功', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.launch = (n) => (n === 1 ? sshDropped() : launchReply('lost', null, 'Killed'));
+    const code = await train.runTrain(startArgs, withDriver(io(home)));
+    expect(code).toBe(2);
+    expect(text(w.err)).toContain('没有退出码');
+    expect(stateOf(home).status).toBe('failed');
+  });
+
+  it('发完但 release.sh 退出码非 0（有红）：没成，不写成成功', async () => {
+    const home = freshHome();
+    const { w, io } = makeWorld();
+    w.launch = () => launchReply('finished', 1, '有红');
+    expect(await train.runTrain(startArgs, withDriver(io(home)))).toBe(2);
+    expect(text(w.err)).toContain('release.sh 退出码 1');
+  });
+
+  it('parseLaunchReport：认得对的回话；认不出的是 null（不当成功）', () => {
+    expect(train.parseLaunchReport('state=finished\nexit=0\nlog=/x.log\n---\na\nb\n')).toEqual({
+      state: 'finished',
+      exit: 0,
+      log: '/x.log',
+      tail: 'a / b',
+    });
+    expect(train.parseLaunchReport('state=attached\nexit=none\nlog=/x.log\n---\n')).toMatchObject({
+      state: 'attached',
+      exit: null,
+    });
+    expect(train.parseLaunchReport('')).toBeNull();
+    expect(train.parseLaunchReport('state=ok\nexit=0\n')).toBeNull();
+    expect(train.parseLaunchReport('state=finished\nexit=abc\n')).toBeNull();
+  });
+
+  it('releaseLaunchCommand：提交号、令牌不合格式就不拼命令', () => {
+    const cmd = train.releaseLaunchCommand(SHA, 'abc123');
+    expect(cmd.startsWith('bash -c ')).toBe(true);
+    expect(cmd.includes(` fleet-release-launch ${SHA} abc123 `)).toBe(true);
+    expect(() => train.releaseLaunchCommand('不是提交', 'abc')).toThrow();
+    expect(() => train.releaseLaunchCommand(SHA, 'a b;rm')).toThrow();
   });
 
   it('status 给出的接着走命令（提交号只写前 12 位）原样拿去 start：认得是同一个目标，接着走、不被拒', async () => {
@@ -1668,6 +1779,17 @@ describe('法国在跑会话数的只读查询', () => {
     expect(sessionsQuery.SQL).toMatch(/^select /);
     expect(sessionsQuery.SQL).not.toMatch(/\b(insert|update|delete|drop|alter|truncate|create|grant)\b/i);
     expect(sessionsQuery.SQL).toContain('ended_at is null');
+  });
+
+  // 2026-10-13：预检写「法国在跑的会话 0 个」，release.sh 排空却在等 execute 会话——三段一次性会话只写 runs，不写 session_runs（#1995）
+  it('查询两张表都数：session_runs（老 Fusion）和 runs（三段一次性会话，排空登记的就是它们）；只数前者会漏', () => {
+    const sql = sessionsQuery.SQL;
+    expect(sql).toMatch(/from session_runs s/);
+    expect(sql).toMatch(/from runs r/);
+    expect(sql).toMatch(
+      /count\(\*\) from session_runs where ended_at is null\) \+ \(select count\(\*\) from runs where ended_at is null/,
+    );
+    expect(sql).toContain("'segment:' || r.segment");
   });
 
   it('collect：读到几个就是几个；psql 起不来、退出非 0、回的不是 JSON、形状不对都是明确的失败，不是 0', () => {
