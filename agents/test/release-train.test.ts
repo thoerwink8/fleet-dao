@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { gunzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const SCRIPTS = fileURLToPath(new URL('../skills/commander/scripts/', import.meta.url));
@@ -45,6 +46,7 @@ interface TrainIo {
 interface Train {
   DEFAULT_LIMITS: Record<string, number>;
   RELEASE_SH: string;
+  LAUNCH_COMMAND_MAX: number;
   releaseBootCommand(sha: string): string;
   releaseLaunchCommand(sha: string, token: string): string;
   parseLaunchReport(out: string): { state: string; exit: number | null; log: string; tail: string } | null;
@@ -833,9 +835,9 @@ describe('整趟走完', () => {
     expect(i(`fleet-release-launch ${SHA}`)).toBeGreaterThan(i(' engine off '));
     expect(releaseCalls(w.sshCalls)).toHaveLength(1);
     const launch = releaseCalls(w.sshCalls)[0] ?? '';
-    // 发布入口是 release-boot（base64 送过去），不是检出里那份 release.sh
+    // 发布入口是 release-boot（gzip 后 base64 送过去），不是检出里那份 release.sh
     const b64 = launch.split(' ').at(-1) ?? '';
-    expect(Buffer.from(b64, 'base64').toString('utf8')).toBe(
+    expect(gunzipSync(Buffer.from(b64, 'base64')).toString('utf8')).toBe(
       readFileSync(join(SCRIPTS, 'release-boot.sh'), 'utf8'),
     );
     expect(launch.includes(`bash ${train.RELEASE_SH}`)).toBe(false);
@@ -1784,6 +1786,12 @@ describe('驱动死了：认得出、接着走（#1674）', () => {
     expect(cmd.includes(` fleet-release-launch ${SHA} abc123 `)).toBe(true);
     expect(() => train.releaseLaunchCommand('不是提交', 'abc')).toThrow();
     expect(() => train.releaseLaunchCommand(SHA, 'a b;rm')).toThrow();
+  });
+
+  it('releaseLaunchCommand：整条命令不超过 Windows 命令行上限（#2015，超了 ssh 收到半截 base64）', () => {
+    const cmd = train.releaseLaunchCommand(SHA, 'abc123');
+    expect(cmd.length).toBeLessThanOrEqual(train.LAUNCH_COMMAND_MAX);
+    expect(train.LAUNCH_COMMAND_MAX).toBeLessThan(8191);
   });
 
   it('status 给出的接着走命令（提交号只写前 12 位）原样拿去 start：认得是同一个目标，接着走、不被拒', async () => {

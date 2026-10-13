@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 发版车第 4 步在法国上跑的「起发布或看发布」入口（#1995）。release-train-lib.mjs 把本文件整段 ssh 到法国，
-# 用 `bash -c <本文件> fleet-release-launch <提交号> <令牌> <release-boot.sh 的 base64>` 跑。
+# 用 `bash -c <本文件> fleet-release-launch <提交号> <令牌> <release-boot.sh 先 gzip 再 base64>` 跑。
+# 为什么要压：Windows 上一条命令行最多约 8191 个字符，超了会被悄悄截断（#2015 里 base64 被截成 5226 字，解不开）。
 # 为什么：发布要几分钟，本机到法国的 ssh 会被重置；以前一条前台 ssh 撑完整个发布，ssh 一断本机就报「没成」，
 # 法国上发布其实跑完了。现在发布由 systemd 的临时服务 fleet-train-release-<提交前12位> 跑，ssh 断了它照跑；
 # 本机每个轮询周期把同一条命令再发一遍，本命令幂等：只回现状，该起才起。
@@ -78,7 +79,7 @@ if ! (
   exit 0
 fi
 
-printf '%s' "$b64" | base64 -d >"$bootfile" || {
+printf '%s' "$b64" | base64 -d | gzip -dc >"$bootfile" || {
   echo "state=refused"
   echo "解不开送过来的 release-boot.sh" >&2
   exit 64
