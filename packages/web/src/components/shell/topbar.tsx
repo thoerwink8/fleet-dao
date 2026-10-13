@@ -301,6 +301,7 @@ function NotificationBell() {
                 size="sm"
                 variant="ghost"
                 className="mt-2 h-7 shrink-0 px-2 text-meta text-muted-foreground"
+                loading={resolve.isPending}
                 disabled={resolve.isPending}
                 onClick={() =>
                   resolve.mutate(n.id, {

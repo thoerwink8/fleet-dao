@@ -159,9 +159,13 @@ describe('设置页：指挥官整理待办', () => {
     renderApp(<SettingsPage />, { api, route: '/settings' });
     const panel = await screen.findByTestId(`groom-${ORBIT}`);
     await waitFor(() => expect(groomButton(panel).disabled).toBe(false));
-    await confirm(panel);
-    const alert = await within(panel).findByRole('alert');
+    fireEvent.click(groomButton(panel));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认整理' }));
+    // 失败留在确认框里（#2012 的 onConfirm）：框里一行 role=alert 写后端的原因，框不关
+    const alert = await within(dialog).findByRole('alert');
     expect(alert.textContent).toContain(message);
+    expect(screen.queryByRole('alertdialog')).not.toBeNull();
     expect(toast.error).toHaveBeenCalledWith('没叫成', { description: message });
     expect(toast.success).not.toHaveBeenCalled();
     expect(panel.textContent).not.toContain('整理中');

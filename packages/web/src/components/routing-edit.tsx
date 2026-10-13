@@ -135,7 +135,6 @@ export function RoutingEditProvider({ children }: { children: ReactNode }) {
   const setModelMutation = useSetModelEnabled();
   const setChannelMutation = useSetChannelEnabled();
   const [asking, setAsking] = useState<Ask | null>(null);
-  const [dialogBusy, setDialogBusy] = useState(false);
 
   const disabledWhy =
     nodeId !== null ? `现在看的是${nodeName ?? nodeId}，这一页的先后和开关只能改本台的：去那台上操作` : null;
@@ -225,40 +224,31 @@ export function RoutingEditProvider({ children }: { children: ReactNode }) {
     [ask, disabledWhy, moveModelMutation, setChannelMutation, setModelMutation, updateRouteMutation],
   );
 
+  /** 确认键：成功关框并弹成功；失败打 toast、把错误抛回给框（框里写原因、留在原处，#2012）。 */
   const confirm = async () => {
     if (!asking) return;
-    setDialogBusy(true);
     try {
       await asking.run();
       toast.success(asking.done);
+      setAsking(null);
     } catch (e) {
       toastReorderFailed(e);
-    } finally {
-      setDialogBusy(false);
-      setAsking(null);
+      throw e;
     }
   };
 
   return (
     <RoutingEditContext value={edit}>
       {children}
-      <AlertDialog open={asking !== null} onOpenChange={(open) => !open && !dialogBusy && setAsking(null)}>
+      <AlertDialog open={asking !== null} onOpenChange={(open) => !open && setAsking(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{asking?.title}</AlertDialogTitle>
             <AlertDialogDescription>{asking?.description}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={dialogBusy}>先不</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={dialogBusy}
-              onClick={(e) => {
-                e.preventDefault();
-                void confirm();
-              }}
-            >
-              {asking?.verb}
-            </AlertDialogAction>
+            <AlertDialogCancel>先不</AlertDialogCancel>
+            <AlertDialogAction onConfirm={confirm}>{asking?.verb}</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

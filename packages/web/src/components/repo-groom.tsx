@@ -173,24 +173,20 @@ export function RepoRow({
   const older = status?.recent.slice(1) ?? [];
   const busy = status?.busy === true;
 
-  const confirm = () => {
+  // 确定键用 onConfirm 等结果（#2012）：成功才关框、清原因；失败留在框里统一写原因，这里只负责打 toast、把错误抛回给框。
+  const confirm = async () => {
     const text = reason.trim();
     setWriteError(null);
-    groom.mutate(
-      { repoId, body: text ? { reason: text } : {} },
-      {
-        onSuccess: () => {
-          setAsking(false);
-          setReason('');
-          toast.success(`已叫指挥官整理：${name}`);
-        },
-        onError: (e) => {
-          setAsking(false);
-          setWriteError(e);
-          toast.error('没叫成', { description: errorText(e) });
-        },
-      },
-    );
+    try {
+      await groom.mutateAsync({ repoId, body: text ? { reason: text } : {} });
+      setAsking(false);
+      setReason('');
+      toast.success(`已叫指挥官整理：${name}`);
+    } catch (e) {
+      setWriteError(e);
+      toast.error('没叫成', { description: errorText(e) });
+      throw e;
+    }
   };
 
   // 小字一行里「整理到哪」那一段：整理中 / 做成了 N 分钟前 / 还没整理过；还在读就不写
@@ -372,14 +368,8 @@ export function RepoRow({
           </div>
           <AlertDialogFooter>
             <AlertDialogCancel>先不</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={groom.isPending}
-              onClick={(e) => {
-                e.preventDefault();
-                confirm();
-              }}
-            >
-              {groom.isPending ? '正在提交' : '确认整理'}
+            <AlertDialogAction loading={groom.isPending} loadingText="正在提交…" onConfirm={confirm}>
+              确认整理
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
