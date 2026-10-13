@@ -1,7 +1,7 @@
 // 本机会话（#1991，母单 #1990）：创始人电脑上在跑的 AI 会话，让法国的看板看得见。
 // 创始人 2026-10-13：「我本机其实在做的任务……就好像我们现在在 marysim 里面做的任务，只要是在做的，有没有办法感知到？」
 //
-// 本机没有常驻后端、法国也连不进本机。做法：本机的钩子（agents/local-sessions/heartbeat.mjs，SessionStart / PreToolUse / Stop /
+// 本机没有常驻后端、法国也连不进本机。做法：本机的钩子（agents/local-sessions/heartbeat.mjs，SessionStart / Stop /
 // SessionEnd 各一条）每次触发就写一份这个会话的心跳文件；一个定时任务（agents/local-sessions/push.mjs，Windows 计划任务每 2 分钟）
 // 把心跳凑成一份 LocalSessionsReport，POST 给法国的 /api/nodes/sessions（和看板多机同一套通行证 FLEET_NODE_KEYS，环境编号按对上的
 // 那把钥匙认）。法国落进 node_sessions（一个环境一行、覆盖写），看板单开一块「本机会话」，不混进「在跑的」（那是引擎的单）。
