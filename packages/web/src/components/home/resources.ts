@@ -3,7 +3,9 @@
 //
 // 改这里之前必须知道：
 // - 读不到（cgroup 不在、内容认不出、这台不是 Linux、后端没给、那台没推过）一律是 unread + 原因，页面写「没读到」，不拿 0 顶。
-// - 这一刻没有会话在跑的单（排队、等人、等验）是 idle，卡片写「没在占用」，不画 0。
+// - 这一刻没有会话在跑的单（排队、等人、等验）：没有上一次会话是 idle，卡片写「没在占用」；有上一次收场的会话写
+//   「上次动手峰值 3.5G · CPU 12 分钟」（内存是那次的 memory.peak，CPU 是那次 cpu.stat 的 usage_usec 折成的秒数）。
+//   CPU 没记写「CPU 没读到」，内存没记写「上次峰值没读到」。都不画 0。
 // - 一张单同时几个会话（runIds 不止一个）按单合计：内存（memory.current）相加，CPU 相加（100% = 占满一个核），
 //   峰值是各会话 memory.peak 之和——各会话的峰值不一定同时出现，这是上界，悬停里照这个口径写。
 // - 有一个会话没读到，整张单就写没读到，不拿另一个会话的数冒充整张单的数。
@@ -24,6 +26,8 @@ export const STALE_INTERVALS = 3;
 
 export type TicketUsage =
   | { kind: 'idle' }
+  /** 没在跑，但上一次会话记过占用。text 是卡片上的那一行。 */
+  | { kind: 'last'; text: string; title: string }
   | { kind: 'ok'; sessions: number; memoryMb: number; peakMb?: number; cpuPercent?: number }
   | { kind: 'unread'; why: string };
 
@@ -37,6 +41,16 @@ export function missingWhy(opts: ResourceOptions = {}): string {
   return opts.remote ? '那台没推过资源读数（那台的版本还没有这一项）' : '这台后端没给资源读数';
 }
 
+/** 没在跑：有上一次会话就写它的峰值和 CPU，没有就写没在占用。 */
+function idleUsage(item: HomeRunning): TicketUsage {
+  if (!item.lastSession) return { kind: 'idle' };
+  return {
+    kind: 'last',
+    text: lastSessionLine(item.lastSession),
+    title: lastSessionTitle(item.lastSession),
+  };
+}
+
 /** 一张单此刻占的内存、CPU。口径见文件头。 */
 export function ticketUsage(
   item: HomeRunning,
@@ -45,8 +59,8 @@ export function ticketUsage(
 ): TicketUsage {
   const runIds = item.runIds;
   if (runIds === undefined) {
-    // 老后端没给会话编号：没人在做就是没在占用；有人在做却对不上号，照实写没读到
-    if (item.worker === undefined) return { kind: 'idle' };
+    // 老后端没给会话编号：没人在做就是没在占用（有上一次会话则写上次）；有人在做却对不上号，照实写没读到
+    if (item.worker === undefined) return idleUsage(item);
     return {
       kind: 'unread',
       why: opts.remote
@@ -54,7 +68,7 @@ export function ticketUsage(
         : '后端没给这张单的会话编号',
     };
   }
-  if (runIds.length === 0) return { kind: 'idle' };
+  if (runIds.length === 0) return idleUsage(item);
   if (!resources) return { kind: 'unread', why: missingWhy(opts) };
   if (resources.sessions.state === 'unread') return { kind: 'unread', why: resources.sessions.why };
   let memoryMb = 0;
@@ -118,6 +132,37 @@ export function formatMb(mb: number): string {
 /** CPU 写法：取整的百分比。 */
 export function formatCpu(percent: number): string {
   return `${Math.round(percent)}%`;
+}
+
+/** 一次会话的 CPU 秒数：不满一分钟写秒，满一分钟写分钟，满一小时再拆小时。 */
+export function formatCpuSeconds(seconds: number): string {
+  const whole = Math.max(0, Math.round(seconds));
+  if (whole < 60) return `${whole} 秒`;
+  const minutes = Math.round(whole / 60);
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `${hours} 小时` : `${hours} 小时 ${rest} 分钟`;
+}
+
+/** 没在跑时卡片上的那一行。内存、CPU 各自没读到就写明，不拿 0 顶。 */
+export function lastSessionLine(last: NonNullable<HomeRunning['lastSession']>): string {
+  const memory =
+    last.memory.state === 'ok' ? `上次动手峰值 ${formatMb(last.memory.peakMb)}` : '上次峰值没读到';
+  const cpu = last.cpu.state === 'ok' ? `CPU ${formatCpuSeconds(last.cpu.seconds)}` : 'CPU 没读到';
+  return `${memory} · ${cpu}`;
+}
+
+function lastSessionTitle(last: NonNullable<HomeRunning['lastSession']>): string {
+  const memory =
+    last.memory.state === 'ok'
+      ? `内存峰值 ${formatMb(last.memory.peakMb)}（cgroup memory.peak）`
+      : `内存峰值没读到：${last.memory.why}`;
+  const cpu =
+    last.cpu.state === 'ok'
+      ? `CPU 累计 ${formatCpuSeconds(last.cpu.seconds)}（cpu.stat 的 usage_usec，100% 占满一个核一分钟是 60 秒）`
+      : `CPU 没读到：${last.cpu.why}`;
+  return `上一次会话收场时记下的：${memory}；${cpu}。这一刻没有会话在跑。`;
 }
 
 /** 顶栏两格：内存、CPU 各一格。 */

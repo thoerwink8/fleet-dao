@@ -171,6 +171,10 @@ export interface SpawnFacts {
   memoryPeakMb?: number;
   /** 没读到内存峰值的原因（白话）：进日志和落盘的 result.json，runs 那一列留空（#948）。 */
   memoryPeakWhy?: string;
+  /** 这一次会话的 CPU 秒数（cpu.stat 的 usage_usec 向上取整）。没读到不给，不当成 0（#1980）。 */
+  cpuSeconds?: number;
+  /** 没读到 CPU 秒数的原因（白话）：进日志和落盘的 result.json，runs 那一列留空。 */
+  cpuWhy?: string;
 }
 
 export interface SpawnCommand {
@@ -452,6 +456,8 @@ async function persistArtifacts(runDir: string, result: OneShotResult): Promise<
     // 内存峰值（#948）：读到的数，或没读到的原因（runs 那一列没数时在这里看得到为什么）
     memoryPeakMb: result.facts?.memoryPeakMb,
     memoryPeakWhy: result.facts?.memoryPeakWhy,
+    cpuSeconds: result.facts?.cpuSeconds,
+    cpuWhy: result.facts?.cpuWhy,
     /** 落盘 TTL：调用方该在这之后清理。 */
     cleanupAfter: SESSION_ARTIFACT_TTL_MS,
   };
@@ -494,6 +500,11 @@ async function recordRun(input: OneShotInput, result: OneShotResult, runs: RunsW
   await runs.record(record);
 }
 
+/** 大于 0 的整数秒才记；0 和认不出的不写，免得整笔记账被拒。 */
+function isCpuSeconds(v: number | undefined): v is number {
+  return v !== undefined && Number.isSafeInteger(v) && v > 0;
+}
+
 /** 执行体读到的用量和花费记进这一笔；读不到的字段不写，不当成 0（#216）。 */
 function usageFields(facts: SpawnFacts | undefined): Partial<RunRecord> {
   if (!facts) return {};
@@ -505,6 +516,7 @@ function usageFields(facts: SpawnFacts | undefined): Partial<RunRecord> {
     ...(u?.cacheWriteTokens !== undefined ? { cacheWriteTokens: u.cacheWriteTokens } : {}),
     ...(facts.costUsd !== undefined ? { costUsd: facts.costUsd } : {}),
     ...(facts.memoryPeakMb !== undefined ? { memoryPeakMb: facts.memoryPeakMb } : {}),
+    ...(isCpuSeconds(facts.cpuSeconds) ? { cpuSeconds: facts.cpuSeconds } : {}),
     ...(facts.sessionId !== undefined ? { sessionId: facts.sessionId } : {}),
   };
 }

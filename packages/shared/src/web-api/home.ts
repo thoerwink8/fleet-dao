@@ -73,6 +73,22 @@ export const HomeRunningSchema = z.object({
    * 看板拿它到 HomeResources.sessions.byRun 里找这张单此刻占的内存、CPU。没有会话在跑是空数组；老后端没有这个键。
    */
   runIds: z.array(z.string().min(1)).optional(),
+  /**
+   * 上一次收场的会话（#1979 的内存峰值，#1980 加上 CPU 秒数）。没在跑时卡片写
+   * 「上次动手峰值 3.5G · CPU 12 分钟」。内存、CPU 各自没记是 unread，不写 0。老后端没有这个键。
+   */
+  lastSession: z
+    .object({
+      memory: z.discriminatedUnion('state', [
+        z.object({ state: z.literal('ok'), peakMb: z.number().int().min(0) }),
+        z.object({ state: z.literal('unread'), why: z.string().min(1) }),
+      ]),
+      cpu: z.discriminatedUnion('state', [
+        z.object({ state: z.literal('ok'), seconds: z.number().int().positive() }),
+        z.object({ state: z.literal('unread'), why: z.string().min(1) }),
+      ]),
+    })
+    .optional(),
 });
 
 /** 一样读数没读到：原因原样写给人看（文件不在、内容认不出、这台不是 Linux……），页面写「没读到」，不拿 0 顶。 */
