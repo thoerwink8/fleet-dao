@@ -1,6 +1,6 @@
 // 发版一键命令（release-onekey-lib.mjs）：薄封装 release-train，只到预检。
-// 假 ssh、假 gh、假时钟；home 用真临时目录（状态文件、暂停标记是真文件）。
-// 覆盖：preflight 成功（哨兵拦在第 1 步前、状态文件删掉、暂停标记没写）、preflight 失败、
+// 假 ssh、假 gh、假时钟；home 用真临时目录（状态文件是真文件）。
+// 覆盖：preflight 成功（哨兵拦在第 1 步前、状态文件删掉、后面的步没走）、preflight 失败、
 // --founder-ok 缺失拒绝、--tag 已删（决定 0032）、中文摘要（主线 CI / 自动合并的 PR / 法国在跑会话数）、
 // 已有一趟时 preflight 拒、start 透传 runTrain。
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -89,7 +89,6 @@ function makeWorld() {
         );
       if (args[0] === 'pr' && args[1] === 'list') return ok(JSON.stringify(w.prs));
     }
-    if (command === NODE && String(args[0]).endsWith('worker.mjs')) return ok('没有起过任何工人');
     if (command === NODE && String(args[0]).endsWith('france.mjs'))
       return {
         status: w.franceHealthExit,
@@ -154,12 +153,11 @@ const freshHome = () => {
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
-const markerFile = (home: string) => join(home, '.fleet-dao', 'release-train.paused');
 const stateFilePath = (home: string) => join(home, '.fleet-dao', 'release-train.json');
 const text = (lines: string[]) => lines.join('\n');
 
 describe('preflight：只读，什么都不改', () => {
-  it('全绿：回 0；哨兵拦在第 1 步前（暂停标记没写过）；临时状态文件删掉；输出含中文摘要', async () => {
+  it('全绿：回 0；哨兵拦在第 1 步前（第 1 步和之后的步一步都没走）；临时状态文件删掉；输出含中文摘要', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     w.prs = [
@@ -169,8 +167,8 @@ describe('preflight：只读，什么都不改', () => {
     w.sessions = async () => ({ ok: true, running: 3, rows: [] });
     const code = await onekey.runOnekey(['preflight', '--sha', SHA], io(home));
     expect(code).toBe(0);
-    // 拦截生效：第 1 步「暂停本机」没过去——从头到尾都没写过暂停标记
-    expect(existsSync(markerFile(home))).toBe(false);
+    // 拦截生效：第 1 步「本机」没过去——它和后面的暂停法国都没跑
+    expect(w.sshCalls.some((c) => c.includes(' engine off '))).toBe(false);
     // 临时状态文件删掉
     expect(existsSync(stateFilePath(home))).toBe(false);
     const o = text(w.out);
@@ -183,16 +181,15 @@ describe('preflight：只读，什么都不改', () => {
     expect(o).toContain('预检：法国现状');
     // 过了
     expect(o).toContain('预检过了');
-    expect(o).not.toContain('暂停本机：标记已写');
+    expect(o).not.toContain('本机：没有要暂停的东西');
   });
 
-  it('主线 CI 红：回 2；同样什么都没改（没标记、没状态）', async () => {
+  it('主线 CI 红：回 2；同样什么都没改（没状态）', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     w.ci = 'failure';
     const code = await onekey.runOnekey(['preflight', '--sha', SHA], io(home));
     expect(code).toBe(2);
-    expect(existsSync(markerFile(home))).toBe(false);
     expect(existsSync(stateFilePath(home))).toBe(false);
     expect(text(w.out)).toContain('预检没过');
   });
@@ -251,7 +248,6 @@ describe('start：先拦用法，过了照原样进 runTrain', () => {
     expect(text(w.err)).toContain('--founder-ok');
     expect(w.calls).toEqual([]);
     expect(w.sshCalls).toEqual([]);
-    expect(existsSync(markerFile(home))).toBe(false);
     expect(existsSync(stateFilePath(home))).toBe(false);
   });
 
@@ -271,7 +267,6 @@ describe('start：先拦用法，过了照原样进 runTrain', () => {
     expect(text(w.err)).toContain('--tag 已经没有了');
     expect(w.calls).toEqual([]);
     expect(w.sshCalls).toEqual([]);
-    expect(existsSync(markerFile(home))).toBe(false);
   });
 
   it('--sha 不给：拒（回 1）', async () => {
@@ -290,11 +285,11 @@ describe('start：先拦用法，过了照原样进 runTrain', () => {
     expect(text(w.err)).toContain('十六进制');
   });
 
-  it('过了检查的照原样进 runTrain：写了暂停标记（说明真走到了第 1 步）', async () => {
+  it('过了检查的照原样进 runTrain：走过了第 1 步（说明真走进了 runTrain）', async () => {
     const home = freshHome();
-    const { io } = makeWorld();
+    const { w, io } = makeWorld();
     // 法国有个会话一直在跑（预检那次读到 0 个，之后 1 个），让等收尾卡住，这趟不会走远但够看到「真在走 runTrain」
-    // （本机工人、自动合并的 PR 只提示不等了，卡不住它）
+    // （自动合并的 PR 只提示不等，卡不住它）
     const run0 = io(home);
     let polls = 0;
     run0.runningSessions = async () => {
@@ -304,9 +299,9 @@ describe('start：先拦用法，过了照原样进 runTrain', () => {
         : { ok: true, running: 1, rows: [{ repo: 'o/a', n: 5, stage: 'execute' }] };
     };
     const code = await onekey.runOnekey(['start', '--sha', SHA, '--founder-ok', FOUNDER], run0);
-    // 卡在等收尾（3），但暂停标记已经写了——证明 runTrain 真跑起来了
+    // 卡在等收尾（3），但第 1 步已经走过——证明 runTrain 真跑起来了
     expect(code).toBe(3);
-    expect(existsSync(markerFile(home))).toBe(true);
+    expect(text(w.out)).toContain('本机：没有要暂停的东西');
     const st = JSON.parse(readFileSync(stateFilePath(home), 'utf8')) as { status: string; phase: number };
     expect(st.status).toBe('blocked');
   });
@@ -330,7 +325,6 @@ describe('runPreflight 直接调（lib 面）', () => {
     expect(r.code).toBe(0);
     expect(r.lines.join('\n')).toContain('预检摘要');
     expect(r.lines.join('\n')).toContain('预检过了');
-    expect(existsSync(markerFile(home))).toBe(false);
     expect(existsSync(stateFilePath(home))).toBe(false);
   });
 });

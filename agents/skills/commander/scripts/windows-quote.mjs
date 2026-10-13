@@ -1,11 +1,6 @@
 // Windows：把一个参数转义成 cmd.exe 这层和目标程序自己的 argv 解析都能还原成原样的样子。算法出处
-// https://qntm.org/cmd（cross-spawn 等主流工具用的就是这套）。单独放一个文件（不放 worker.mjs 里）是因为
-// worker.mjs 顶层直接跑 runWorker（有副作用：读 process.argv、真的起子进程），测试没法直接 import 它；
-// 这两个函数是 worker.mjs 里唯一带真正算法、不只是转发 io 调用的部分——09-28 靠它们才排出两个真 bug
-// （pnpm/grok/codex 在这台都是 npm 装的 .cmd 套壳，spawnSync 不给 shell:true 就 ENOENT；给 shell:true 又是
-// Node 自己也警告的「参数只是拼接、没转义」），所以拆出来单独配单元测试（agents/test/worker.test.ts
-// 「Windows 引号」那节，golden 值是 09-28 拿真的 pnpm.cmd 和一串刁钻字符跑通之后现算的，不是凭空编的）：
-// 有回归就在那测破，不用每次改完再靠真跑 grok 才发现。
+// https://qntm.org/cmd（cross-spawn 等主流工具用的就是这套）。pnpm 在这台是 npm 装的 .cmd 套壳，
+// spawnSync 不给 shell:true 就 ENOENT，给了又不转义，所以发版车走这里。单元测试：agents/test/windows-quote.test.ts。
 export function windowsQuoteArg(arg) {
   let s = String(arg);
   s = s.replace(/(\\*)"/g, '$1$1\\"'); // 反斜杠后面跟双引号：反斜杠数量翻倍，再加一个转义的引号

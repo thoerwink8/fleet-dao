@@ -1,17 +1,17 @@
 // 发版前先暂停手头的活（#618，创始人 2026-10-05 约 21:00：「每次发版本时，尽量在感觉要发版本的时候，就先把手头的活暂停。等手头的工作都暂停完，
 // 就可以开始发版本。之后按照最优的顺序，把当前的任务清单依次执行下去。」）。release-train.mjs 是外壳（真的 ssh/gh/git/pnpm/睡眠），
-// 全部逻辑在这份 release-train-lib.mjs（同 worker-lib.mjs 注入 io 的写法）。node release-train.mjs 不带参数看用法。
+// 全部逻辑在这份 release-train-lib.mjs（io 全部注入）。node release-train.mjs 不带参数看用法。
 // 改这里之前必须知道：
 // - 这份文件里没有任何真的起进程、连网、睡觉的代码：一切经 io 进来，agents/test/release-train.test.ts 换成假 ssh、假 gh、假时钟。
 //   真跑的代码路径不许在测试里碰真 ssh（那条路只在 release-train.mjs 外壳里）。
-// - 阶段（方案 4.2，每阶段有上限，到点停下列出拖后腿的，不硬来）：0 预检（只读）→1 暂停本机→2 暂停法国→3 等收尾→
+// - 阶段（方案 4.2，每阶段有上限，到点停下列出拖后腿的，不硬来）：0 预检（只读）→1 本机（占位）→2 暂停法国→3 等收尾→
 //   4 发版（对外发布，必须带 --founder-ok）→5 等部署→6 验证→7 恢复→8 派清单。状态记在 ~/.fleet-dao/release-train.json，
 //   停在「卡住」（blocked）或「没成」（failed）时再跑一次 start（同一个目标）从停下的那一步接着走；换目标要先 abort。
 // - 驱动活着的证据（#1674）：每次落盘都把 driver { pid, host, heartbeatAt } 写进状态，等收尾、等部署的轮询里每圈也落一次。
 //   status、start 判「驱动死了」：同一台机器上 pid 不在，或心跳比该步上限（phaseBudgetMs）加余量（deadMarginMs）还老。
 //   start 同一个目标遇到驱动已死的 running，当成「没成」从停下的那一步接着走；停在第 4 步的先读法国 .history 判发没发成。
 //   巡查报总开关关着时读这份状态（trainAlertNote），写明是「发版车驱动死了没人恢复」还是别的。
-// - 暂停本机＝写 ~/.fleet-dao/release-train.paused，worker.mjs start 见标记就不起新工人（worker-lib.mjs 的 readPauseMarker）。
+// - 第 1 步「本机」是占位：脱离会话的工人一族已删（P5），本机没有要暂停的东西；步号不动，免得改状态文件里的 phase 和一键发版的哨兵字样。
 // - 暂停法国＝fleet-api engine off（关着时不拉单、不派活、不起干活的会话；在跑的做完当前一步）。第 2 步先记下总开关和各仓接活开关，
 //   第 7 步发完、健康检查过了，按记下的恢复：开着的开回、关着的保持关，恢复不成功就是没成（退出码 2，不当成成功）。
 //   release.sh 发完不再置关（决定 0032 第 4 条、#1256）；--restore 留着当「明写要开回」的写法，和默认一样，不再要创始人逐次授权（只是还原）。
@@ -29,7 +29,7 @@
 // - 退出码：0 做完了（或 abort 做完了）；1 用法不对或被拒（没带 --founder-ok、已有一趟在走）；2 没做成（读不到、命令失败）；
 //   3 卡住（到点还有拖后腿的，名单已列出；现场没动，要么再跑 start 再等，要么 abort）。
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
@@ -43,7 +43,6 @@ import {
   stateFile,
   trainAlertNote,
 } from './train-state-lib.mjs';
-import { pauseMarkerPath } from './worker-lib.mjs';
 
 export { DEFAULT_LIMITS, driverVerdict, PHASES, STATE_REL, trainAlertNote };
 
@@ -74,17 +73,17 @@ const BUSY = 75;
 export const USAGE = `用法：node release-train.mjs <命令>（在项目仓的检出里跑；发版会等很久，用 run_in_background 起）
   start --sha <提交> --founder-ok "<创始人原话>" [--restore]
         发版前先暂停手头的活，再发版，再恢复：
-        0 预检（只读：主线 CI 绿、没有别的发布在跑、法国能读、列出挂了自动合并的 PR）→ 1 暂停本机（写标记，worker.mjs start 拒起新工人）
+        0 预检（只读：主线 CI 绿、没有别的发布在跑、法国能读、列出挂了自动合并的 PR）→ 1 本机（占位，没有要暂停的）
         → 2 暂停法国（记下总开关和各仓开关，fleet-api engine off；本来就关着记「跳过」）→ 3 等收尾（等：主线 CI 绿、法国在跑会话 0，各有上限，到点停下列出拖后腿的；
-        本机在跑的工人、挂了自动合并没合的 PR 只提示、不等）→ 4 发版 → 5 等部署 → 6 验证 → 7 恢复 → 8 按最优顺序打印当前版本的清单
+        挂了自动合并没合的 PR 只提示、不等）→ 4 发版 → 5 等部署 → 6 验证 → 7 恢复 → 8 按最优顺序打印当前版本的清单
         --sha：ssh 到法国，用目标提交自带的 release.sh 发（release-boot.sh 先解开那一版的包再 exec，不跑检出里还停着的旧脚本；决定 0032，#1294）；
               发布在法国的 systemd 临时服务里跑，ssh 断了不影响，本机轮询到发完（最长 releaseMs），不当成失败（#1995）
         --founder-ok：发版是对外发布，必须带创始人原话，没带就拒（连暂停都不做）
         发完、健康检查过了，法国按暂停前记下的恢复：总开关和各仓接活开关开着的开回、关着的保持关（写操作记录；开不回去算没成、退出码 2）
         --restore：明写「发完开回去」，和不给一样（默认就恢复，不再要创始人逐次授权）
         停在「卡住」或「没成」时，同一个目标再跑一次 start 从停下的那一步接着走（恢复没成也是这样重试）
-  status          看这一趟走到哪、暂停标记在不在、拖后腿的是谁（只读）
-  abort           撤暂停、恢复原状：清本机标记；还没发版就把法国总开关开回暂停前的样子；已经动手发过版就保持关（不知道发成没有、健康没确认；
+  status          看这一趟走到哪、拖后腿的是谁（只读）
+  abort           撤暂停、恢复原状：还没发版就把法国总开关开回暂停前的样子；已经动手发过版就保持关（不知道发成没有、健康没确认；
                   确认没事后自己到环境页或 fleet-api engine on 开）。想让它确认健康后自动恢复，别 abort，同一个目标再跑一次 start
 退出码：0 做完了；1 用法不对或被拒；2 没做成（读不到、命令失败）；3 卡住（到点还有拖后腿的，名单已列出）。`;
 
@@ -184,21 +183,6 @@ function saveState(io, state) {
   writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`);
   renameSync(tmp, file);
 }
-
-const writeMarker = (io, state) => {
-  const file = pauseMarkerPath(io.home);
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(
-    file,
-    `${JSON.stringify({ since: iso(io), target: targetText(state.target), by: 'release-train' })}\n`,
-  );
-};
-const clearMarker = (io) => {
-  const file = pauseMarkerPath(io.home);
-  const was = existsSync(file);
-  rmSync(file, { force: true });
-  return was;
-};
 
 /** 老状态文件（决定 0032 之前）可能记着 kind 'tag'：status、abort 照样能显示它，start 不会再接它。 */
 function targetText(t) {
@@ -419,33 +403,6 @@ async function autoMergePrs(io) {
   }
 }
 
-/** worker.mjs status 的输出：谁在跑、谁说不准、谁没查成。 */
-export function parseWorkerStatus(stdout) {
-  const running = [];
-  const uncertain = [];
-  const unreadable = [];
-  for (const line of String(stdout ?? '').split(/\r?\n/)) {
-    if (line === '' || /^\s/.test(line)) continue; // 缩进的是详情行
-    const name = line.split('：')[0];
-    if (/^[^：]+：没查成——/.test(line)) unreadable.push(name);
-    else if (/不确定在跑没跑/.test(line)) uncertain.push(name);
-    else if (/，在跑，pid /.test(line)) running.push(name); // 「已经不在跑了，pid」不会命中
-  }
-  return { running, uncertain, unreadable };
-}
-
-async function localWorkers(io) {
-  const r = io.run(io.nodePath, [join(io.scriptsDir, 'worker.mjs'), 'status'], {
-    cwd: io.cwd(),
-    timeoutMs: 120_000,
-  });
-  if (didNotRun(r)) return { ok: false, why: `worker.mjs status 没跑起来：${tailOf(r)}` };
-  const w = parseWorkerStatus(r.stdout);
-  if (r.status !== 0 && w.unreadable.length === 0)
-    return { ok: false, why: `worker.mjs status 退出码 ${r.status}：${tailOf(r)}` };
-  return { ok: true, ...w };
-}
-
 /**
  * 暂停期必然出现、引擎一恢复就消失的异常类别 → 给人看的名字。按 `kind` 认，不匹配文案。
  * `task-idle`：引擎不派活不起会话，在动手的单必然「没动」（#1292）。
@@ -570,22 +527,10 @@ async function phasePreflight(io, state) {
   return { ok: true };
 }
 
-/** 1 暂停本机：写标记；列出在跑的工人（第 3 步等它们）。 */
-async function phasePauseLocal(io, state) {
-  writeMarker(io, state);
-  state.marker = true;
+/** 1 本机：占位，什么都不做（见头注释）。 */
+async function phaseLocal(io, state) {
   saveState(io, state);
-  const w = await localWorkers(io);
-  if (!w.ok)
-    sayTo(
-      io,
-      `暂停本机：标记已写，worker.mjs start 现在会拒起新工人；在跑的工人没读到（${w.why}），第 3 步再读`,
-    );
-  else
-    sayTo(
-      io,
-      `暂停本机：标记已写，worker.mjs start 现在会拒起新工人；在跑的工人 ${w.running.length} 个${w.running.length ? `（${w.running.join('、')}）` : ''}`,
-    );
+  sayTo(io, '本机：没有要暂停的东西');
   return { ok: true };
 }
 
@@ -636,7 +581,7 @@ async function phasePauseFrance(io, state) {
 }
 
 /**
- * 3 等收尾：等主线 CI 绿、法国在跑的会话 0，各有上限，到点停下列出拖后腿的。本机在跑的工人、自动合并的 PR 只提示（打印出来，
+ * 3 等收尾：等主线 CI 绿、法国在跑的会话 0，各有上限，到点停下列出拖后腿的。自动合并的 PR 只提示（打印出来，
  * 内容变了再打一次），不挡、不算拖后腿。
  */
 async function phaseWait(io, state) {
@@ -648,16 +593,6 @@ async function phaseWait(io, state) {
     saveState(io, state); // 心跳
     const at = io.now().getTime();
     const status = [];
-    const w = await localWorkers(io);
-    const wHeld = w.ok
-      ? [
-          ...w.running,
-          ...w.uncertain.map((n) => `${n}（不确定在不在跑）`),
-          ...w.unreadable.map((n) => `${n}（没查成）`),
-        ]
-      : [`本机工人读不到：${w.why}`];
-    status.push({ key: '本机工人', held: wHeld, hint: true });
-
     const prs = await autoMergePrs(io);
     status.push({
       key: '自动合并的 PR',
@@ -897,15 +832,12 @@ async function phaseVerify(io, state) {
 }
 
 /**
- * 7 恢复：本机清标记；法国按第 2 步记下的发版前状态还原（决定 0032 第 4 条、#1256）：总开关发版前开着的开回、关着的保持关；
+ * 7 恢复：法国按第 2 步记下的发版前状态还原（决定 0032 第 4 条、#1256）：总开关发版前开着的开回、关着的保持关；
  * 各仓「让 AI 接活」发版前开着的、现在不是开着的开回，关着的不动。恢复动作经 fleet-api 写操作记录。
  * 恢复不成功（读不到、开不回去、读回来不对）是「没成」：退出码 2、写明发版已经发出去了只是没恢复，同一个目标再跑一次 start 重试这一步。
  */
 async function phaseRestore(io, state) {
-  const was = clearMarker(io);
-  state.marker = false;
   saveState(io, state);
-  sayTo(io, `恢复：本机暂停标记${was ? '已清' : '本来就不在'}，worker.mjs start 又能起工人了`);
   const before = state.before;
   if (before === null || before === undefined || typeof before.master !== 'boolean')
     return failed(
@@ -1064,7 +996,7 @@ function listFailed(io, state, why) {
 
 const PHASE_FUNCS = [
   phasePreflight,
-  phasePauseLocal,
+  phaseLocal,
   phasePauseFrance,
   phaseWait,
   phaseRelease,
@@ -1099,7 +1031,7 @@ async function runFrom(io, state) {
         io,
         p >= PHASES.indexOf('恢复')
           ? '版本已经发出去了，这一步只是恢复发版前的开关没成。同一个目标再跑一次 start 只重试这一步'
-          : `现场没动（暂停标记${state.marker ? '还在' : '没写'}）。同一个目标再跑一次 start 从这一步接着走；不走了就 node release-train.mjs abort`,
+          : `现场没动。同一个目标再跑一次 start 从这一步接着走；不走了就 node release-train.mjs abort`,
       );
       return r.kind === 'blocked' ? 3 : 2;
     }
@@ -1169,7 +1101,6 @@ async function cmdStart(p, io) {
     restore,
     before: null,
     baseline: null,
-    marker: false,
     laggards: [],
     release: {},
   };
@@ -1229,13 +1160,9 @@ const refuse = (io, why) => {
 async function cmdStatus(io) {
   const read = readState(io);
   if (!read.ok) return fail(io, read.why);
-  const marker = existsSync(pauseMarkerPath(io.home));
   const s = read.state;
   if (!s) {
-    sayTo(
-      io,
-      `没有发版在走（没有 ${STATE_REL}）。暂停标记：${marker ? '在（没有对应的一趟：node release-train.mjs abort 清掉）' : '不在'}`,
-    );
+    sayTo(io, `没有发版在走（没有 ${STATE_REL}）`);
     return 0;
   }
   const words = { running: '在走', blocked: '卡住了', failed: '没成', done: '做完了', aborted: '已撤销' };
@@ -1246,7 +1173,7 @@ async function cmdStatus(io) {
   );
   sayTo(
     io,
-    `暂停标记：${marker ? '在' : '不在'}；法国总开关暂停前：${s.before ? (s.before.master ? '开着' : '关着') : '还没记'}；已发版：${s.release?.started ? '已动手' : '还没'}`,
+    `法国总开关暂停前：${s.before ? (s.before.master ? '开着' : '关着') : '还没记'}；已发版：${s.release?.started ? '已动手' : '还没'}`,
   );
   if (s.why) sayTo(io, `停下的原因：${s.why}`);
   for (const l of s.laggards ?? []) sayTo(io, `  拖后腿：${l}`);
@@ -1268,15 +1195,11 @@ async function cmdAbort(io) {
   const read = readState(io);
   if (!read.ok) return fail(io, read.why);
   const s = read.state;
-  const cleared = clearMarker(io);
   if (!s || s.status === 'done' || s.status === 'aborted') {
-    sayTo(io, `没有在走的一趟。暂停标记${cleared ? '是留下来的，已清' : '也不在'}`);
+    sayTo(io, '没有在走的一趟');
     return 0;
   }
-  sayTo(
-    io,
-    `撤销（目标 ${targetText(s.target)}，停在第 ${s.phase} 步）：本机暂停标记${cleared ? '已清' : '本来就不在'}`,
-  );
+  sayTo(io, `撤销（目标 ${targetText(s.target)}，停在第 ${s.phase} 步）`);
   let code = 0;
   if (s.before?.master === true && !s.release?.started) {
     const on = await engineSet(
@@ -1303,7 +1226,6 @@ async function cmdAbort(io) {
     sayTo(io, '法国总开关暂停前就是关着的（或还没暂停），没动');
   }
   s.status = 'aborted';
-  s.marker = false;
   s.why = '手动撤销';
   saveState(io, s);
   return code;
@@ -1312,7 +1234,7 @@ async function cmdAbort(io) {
 /**
  * 入口。io = {
  *   home, env, now(), sleep(ms), cwd(), nodePath, scriptsDir, limits（可省，默认 DEFAULT_LIMITS）, out(text), err(text),
- *   run(command, args, {cwd, timeoutMs}) → {status, stdout, stderr, error}   gh、git、pnpm、node（worker.mjs、france.mjs）,
+ *   run(command, args, {cwd, timeoutMs}) → {status, stdout, stderr, error}   gh、git、pnpm、node（france.mjs）,
  *   ssh(remoteCommand, {timeoutMs, tickMs?, onTick?}) → 同上（可返回 Promise）   到法国跑一条命令（名字读不到、连不上都在返回里：error 或 status 255）；
  *     给了 onTick 的（第 4 步发版）外壳在等 ssh 期间每 tickMs 调一次，用来刷驱动心跳,
  *   runningSessions() → Promise<{ok: true, running, rows} | {ok: false, kind, why}>   france-sessions-lib.mjs 的 fetchRunningSessions,

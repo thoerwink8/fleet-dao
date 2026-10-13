@@ -1,5 +1,4 @@
-// 起无头会话。命令和本机工人起 Claude 的是同一个：agents/skills/commander/scripts/worker-lib.mjs 的 launchOf 里写的 `reclaude`
-// （Claude 一律经 reclaude 起，通用段）；test/launcher.test.ts 钉着两边相等。AGENT_EVAL_CLAUDE 可以换命令名（只给没装 reclaude 的机器）。
+// 起无头会话。Claude 一律经 reclaude 起（通用段）；test/runner.test.ts 钉着默认命令。AGENT_EVAL_CLAUDE 可以换命令名（只给没装 reclaude 的机器）。
 // 没有限回合的参数：`claude --help` 里没有 --max-turns 一类（2026-10-09 核过），回合上限只能靠 10 分钟限时；
 // 定义里的 maxTurns 照样记进结果，不假装限住了。
 import { spawn, spawnSync } from 'node:child_process';

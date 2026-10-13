@@ -12,7 +12,7 @@ const minutes = (/** @type {number} */ ms) => Math.round(ms / 60_000);
 
 /**
  * 各阶段的上限（毫秒）和轮询间隔；测试里整份换小。等收尾只等两样：主线 CI 20 分钟、法国在跑的会话 13 分钟（沿用排空上限）；
- * 本机在跑的工人、自动合并的 PR 两项只提示不等（创始人 2026-10-06「不合理的想法你自由决定，都改掉」，母单 #1121：它们和法国发版无关，
+ * 自动合并的 PR 只提示不等（创始人 2026-10-06「不合理的想法你自由决定，都改掉」，母单 #1121：它们和法国发版无关，
  * 会把无关的事卡住；release.sh 自己还会排空一遍）。数值写在 agents/test/release-train.test.ts。
  */
 export const DEFAULT_LIMITS = {
@@ -29,7 +29,7 @@ export const DEFAULT_LIMITS = {
   deadMarginMs: 5 * 60_000,
 };
 
-export const PHASES = ['预检', '暂停本机', '暂停法国', '等收尾', '发版', '等部署', '验证', '恢复', '派清单'];
+export const PHASES = ['预检', '本机', '暂停法国', '等收尾', '发版', '等部署', '验证', '恢复', '派清单'];
 
 /** @typedef {{ pid?: number, host?: string, heartbeatAt?: string }} Driver */
 /** @typedef {{ phase: number, status?: string, updatedAt?: string, driver?: Driver, target?: { kind: string, value: string }, founderOk?: string }} TrainState */

@@ -252,12 +252,8 @@ describe('起会话的参数', () => {
     );
   });
 
-  it('命令和本机工人起 Claude 的是同一个（worker-lib.mjs 里写的 reclaude）', () => {
-    const lib = readFileSync(
-      join(REPO_ROOT, 'agents', 'skills', 'commander', 'scripts', 'worker-lib.mjs'),
-      'utf8',
-    );
-    expect(lib).toContain(`command: '${claudeCommand({})}'`);
+  it('Claude 一律经 reclaude 起；AGENT_EVAL_CLAUDE 可以换命令名', () => {
+    expect(claudeCommand({})).toBe('reclaude');
     expect(claudeCommand({ AGENT_EVAL_CLAUDE: 'claude' })).toBe('claude');
   });
 });

@@ -68,7 +68,6 @@ interface HookLib {
   checkTemporary(cwd: string, git: Git, now?: number): string[];
   checkDirectives(cwd: string, git: Git, lineage?: Lineage | null): string[];
   sweepWorktrees(cwd: string, git: Git, now?: number, home?: string): string[];
-  workerLines(home: string, now?: number, alive?: (pid: number) => boolean): string[];
   beijingToday(now?: number): string;
   render(lines: string[]): string;
   pickCwd(input: unknown): string;
@@ -835,7 +834,7 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     expect(lines.at(-1)).toMatch(/^规矩同步/);
   });
 
-  it('工人（FLEET_WORKER=1）开场只留规矩同步：不出创始人引导、临时调整、他最近的话、工作树清单、工人状态；不带它的会话照旧都出', () => {
+  it('工人（FLEET_WORKER=1）开场只留规矩同步：不出创始人引导、临时调整、他最近的话、工作树清单；不带它的会话照旧都出', () => {
     const w = world();
     writeFileSync(
       join(w.work, 'PROGRESS.md'),
@@ -844,23 +843,10 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     g(w.work, 'add', '-A');
     g(w.work, 'commit', '-q', '-m', 'progress');
     record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
-    // 工人状态目录里放一个不在跑的工人：普通会话会提醒，工人会话不该看到
-    const dir = join(w.home, '.fleet-dao', 'workers', 'gone');
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(
-      join(dir, 'meta.json'),
-      JSON.stringify({
-        name: 'gone',
-        pid: 2147483000,
-        startedAt: '2026-10-05T01:00:00Z',
-        worktree: '/w/gone',
-      }),
-    );
     const base = { cwd: w.work, home: w.home, git, sync: fakeSync().sync, now: NOW };
     const normal = hook.sessionStart({ ...base, env: {} }).join('\n');
     expect(normal).toContain('创始人引导还有 1 条没处理');
     expect(normal).toContain('临时调整到了最迟复查日期');
-    expect(normal).toContain('工人 gone');
 
     const lines = hook.sessionStart({ ...base, env: { FLEET_WORKER: '1' } });
     expect(lines).toHaveLength(1);
@@ -988,75 +974,6 @@ describe('刚动过的树不碰（可能有人正在里面干活）', SLOW, () =
     const lines = hook.sweepWorktrees(w.work, git);
     expect(existsSync(join(dir, '.git'))).toBe(true);
     expect(lines.join('\n')).toMatch(/还有 1 棵没清.*in-use/s);
-  });
-});
-
-// #1016：工人脱离会话跑，被强杀、卡死、做完都不会通知谁——由开会话钩子看一眼，不靠工人自己活着来报
-describe('本机独立工人现在怎样（worker.mjs 起的）', () => {
-  const NOW = Date.parse('2026-10-05T06:00:00Z');
-  function worker(home: string, name: string, meta: Record<string, unknown>, out = ''): void {
-    const dir = join(home, '.fleet-dao', 'workers', name);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'out.log'), out);
-    writeFileSync(
-      join(dir, 'meta.json'),
-      JSON.stringify({
-        name,
-        pid: 4242,
-        startedAt: '2026-10-05T05:30:00Z',
-        outLog: join(dir, 'out.log'),
-        worktree: `/w/fd-w-${name}`,
-        ...meta,
-      }),
-    );
-  }
-  const dead = () => false;
-  const live = () => true;
-
-  it('这台没起过工人：不出声', () => {
-    expect(hook.workerLines(temp('home'), NOW, dead)).toEqual([]);
-  });
-
-  it('不在跑了、最后一句不是「完成」：报没交活，带最后一句和工作树', () => {
-    const home = temp('home');
-    worker(home, 'w1', {}, '改到一半\n卡住：CI 红修不动\n');
-    const lines = hook.workerLines(home, NOW, dead);
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/工人 w1 不在跑了、也没交活（最后一句：卡住：CI 红修不动）/);
-    expect(lines[0]).toContain('/w/fd-w-w1');
-  });
-
-  it('【故意造出的失败】被强杀、一个字没输出：照样报没交活，不当成没事', () => {
-    const home = temp('home');
-    worker(home, 'w2', {});
-    expect(hook.workerLines(home, NOW, dead)[0]).toMatch(/工人 w2 不在跑了、也没交活（最后一句：没有输出）/);
-  });
-
-  it('做完了没收拾：提一句去 clean；clean 过的不再提', () => {
-    const home = temp('home');
-    worker(home, 'w3', {}, '完成：PR #1234\n');
-    worker(home, 'w4', { cleanedAt: '2026-10-05T05:50:00Z' }, '完成：PR #1235\n');
-    const lines = hook.workerLines(home, NOW, dead);
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/工人 w3 做完了（完成：PR #1234）.*clean --name w3/);
-  });
-
-  it('还在跑：三小时以内不出声，超过了提一句', () => {
-    const home = temp('home');
-    worker(home, 'w5', {});
-    expect(hook.workerLines(home, NOW, live)).toEqual([]);
-    worker(home, 'w6', { startedAt: '2026-10-05T02:00:00Z' });
-    expect(hook.workerLines(home, NOW, live).join('\n')).toMatch(/工人 w6 跑了 240 分钟还没退/);
-  });
-
-  it('【故意造出的失败】记录坏了、没记上进程号：明说没查成，不当成没有工人', () => {
-    const home = temp('home');
-    mkdirSync(join(home, '.fleet-dao', 'workers', 'bad'), { recursive: true });
-    writeFileSync(join(home, '.fleet-dao', 'workers', 'bad', 'meta.json'), '{不是 JSON');
-    worker(home, 'nopid', { pid: null });
-    const text = hook.workerLines(home, NOW, dead).join('\n');
-    expect(text).toMatch(/工人 bad 的记录没查成/);
-    expect(text).toMatch(/工人 nopid 起的时候没记上进程号/);
   });
 });
 
@@ -2510,7 +2427,7 @@ describe('整池暂停到期（#954）', SLOW, () => {
       true,
     );
     const workerReads = { n: 0 };
-    const workerLines = hook.sessionStart({
+    const machineLines = hook.sessionStart({
       cwd: w.work,
       home: w.home,
       git,
@@ -2523,6 +2440,6 @@ describe('整池暂停到期（#954）', SLOW, () => {
       },
     });
     expect(workerReads.n).toBe(0);
-    expect(workerLines.join('\n')).not.toContain('整池暂停');
+    expect(machineLines.join('\n')).not.toContain('整池暂停');
   });
 });
