@@ -82,7 +82,7 @@ RECLAUDE_SHA256=4f5d683b695ea392f53d4e8f2a916f092794f8d4196d5b7356afb0c9a9392f0a
 # uv：只用来给会话用户和 pilot 各装一份 ddgs（lib/cli-tools.sh）。装在 /opt/fleet-dao/uv/<版本>，归 root，不进谁的 PATH
 UV_VERSION=0.12.17
 UV_SHA256=fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63
-# ddgs：skill docs-lookup 首选的搜索命令行。它自己和它的依赖都钉死版本（依赖里 primp、lxml 带编译好的二进制）；
+# ddgs：会话里查网页用的搜索命令行。它自己和它的依赖都钉死版本（依赖里 primp、lxml 带编译好的二进制）；
 # 这些是 PyPI 上的包，只钉版本、不核校验和（核 sha256 的只有上面的 uv）。升 ddgs 时依赖跟着对一遍
 DDGS_VERSION=9.16.0
 DDGS_DEPS=(click==8.5.0 lxml==6.1.3 primp==2.0.1)
@@ -895,7 +895,7 @@ setup_agent_rules() {
   done
 }
 
-# skill docs-lookup 首选的搜索命令行，分发过去就得能用。排在装机最后：下载 uv 失败按装机的规矩判红停下时，
+# 会话里查网页用的搜索命令行，分发过去就得能用。排在装机最后：下载 uv 失败按装机的规矩判红停下时，
 # 上一步的规矩已经写完；uv tool install 失败只记红、接着装下一个用户（lib/cli-tools.sh）
 setup_cli_tools() {
   step "各用户的 ddgs（${AGENT_RULES_USERS[*]}；uv $UV_VERSION 钉版本、核 sha256，ddgs 和依赖钉版本）"

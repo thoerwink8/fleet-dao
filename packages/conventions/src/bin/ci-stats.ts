@@ -1,6 +1,6 @@
 // 量某个工作流最近几轮：node packages/conventions/src/bin/ci-stats.ts [--workflow ci.yml] [--n 40] [--event push|pull_request] [--since 2026-10-05T00:00:00Z] [--repo owner/名字]
 // 用本机登录好的 gh（`gh api`）读 GitHub，只读；读不到、认不出的时间一律报错退出 2，不当 0 秒。
-// 数字的含义见 ../ci-stats.ts；怎么量见 docs/ci-speedup-plan.md「怎么量」。被取消的轮次不算（没跑完整）。
+// 数字的含义见 ../ci-stats.ts；怎么量见 `pnpm ci:stats`。被取消的轮次不算（没跑完整）。
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { createdBefore, type JobInput, parseSince, type RunInput, rowOf, summarize } from '../ci-stats.ts';

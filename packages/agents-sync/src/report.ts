@@ -6,7 +6,7 @@ export type Kind = 'ok' | 'changed' | 'drift' | 'missing' | 'failed' | 'unknown'
 
 export interface Line {
   kind: Kind;
-  /** 这一项是谁（~/.codex/AGENTS.md、~/.claude/skills/grill-me）；同一项的读回不重复报 */
+  /** 这一项是谁（~/.codex/AGENTS.md、~/.claude/skills/commander）；同一项的读回不重复报 */
   key: string;
   text: string;
 }

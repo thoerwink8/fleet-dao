@@ -121,18 +121,16 @@ describe('docs/PROGRESS.md 骨架：钩子读的临时调整表还在，进度�
 
       const twice = {
         ...arch,
-        'progress-2026-10-01.md': `${arch['progress-2026-10-01.md']}\n${hook.TEMP_HEADING}\n`,
+        'progress-extra.md': `# 另一页\n\n${hook.TEMP_HEADING}\n`,
       };
-      expect(problems(progress, twice).join('\n')).toMatch(
-        /progress-2026-10-01\.md 里有「## 生效中的临时调整」/,
-      );
+      expect(problems(progress, twice).join('\n')).toMatch(/progress-extra\.md 里有「## 生效中的临时调整」/);
       expect(hook.checkTemporary(repoWith(progress, twice), GIT, NOW).join('\n')).toMatch(/不止一张/);
 
       const inboxBack = `${progress.trimEnd()}\n\n${hook.DIRECTIVE_HEADING}\n\n- x\n`;
       expect(problems(inboxBack, arch).join('\n')).toMatch(/引导记在进度单 #1055，不在这里/);
       const inboxMoved = {
         ...arch,
-        'progress-2026-10-03.md': `${arch['progress-2026-10-03.md']}\n${hook.DIRECTIVE_HEADING}\n`,
+        'progress-extra.md': `# 另一页\n\n${hook.DIRECTIVE_HEADING}\n`,
       };
       expect(problems(progress, inboxMoved).join('\n')).toMatch(/老读法会把它当成待办/);
 

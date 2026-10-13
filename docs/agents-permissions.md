@@ -142,19 +142,14 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
 - **仓里的 `auto` 和机器自己的 `bypassPermissions` 不冲突**（创始人 2026-10-01 下午）：仓里仍不许写 `bypassPermissions`（会推给无人值守的机器），但机器上自己设成 `bypassPermissions` 的**保留、只报不改**（上面「`defaultMode` 与机器上的 `bypassPermissions`」一节）。他自己那台开着 bypass，同步不会把它改回 `auto`。
 - **Kimi 的默认模式用 `auto`（不打断、自动判断）**，不用 `yolo`（日常自动、危险的仍问）：`yolo` 遇到要问的会在没人点的界面里卡住。
 - **本仓的 PreToolUse 钩子不受影响**：它拦「读到密钥文件、口令值」「打印进程命令行不打码」，不属于权限清单，照旧生效。
-- **打印进程命令行时要把密钥打码**（2026-10-02 加，创始人拍的）：进程的整条命令行是公开的（Linux 的
-  `/proc/<pid>/cmdline`、Windows 的 `Win32_Process.CommandLine`），口令当参数交给别的进程之后就躺在那里——`ps -ef`、
-  `wmic process`、`Get-CimInstance Win32_Process` 这类「看现在有哪些进程」的平常命令会把它们整段打出来（2026-10-02 就是这么漏的：
-  lark-mcp 那行的 `-s <secret>`）。要跑就接一条管道过 redactor（`~/.fleet-dao/hooks/redact-secrets.mjs`，随钩子一起装）：
+- **打印进程命令行时要把密钥打码**（2026-10-02 加，创始人拍的；#2046、决定 0089 起 Claude Code 里自动接）：进程的整条命令行是公开的（Linux 的 `/proc/<pid>/cmdline`、Windows 的 `Win32_Process.CommandLine`），口令当参数交给别的进程之后就躺在那里——`ps -ef`、`wmic process`、`Get-CimInstance Win32_Process` 这类「看现在有哪些进程」的命令会把它们整段打出来。现在的做法：在 Claude Code 里，整条命令只是看进程、过滤文字的，钩子（`~/.fleet-dao/hooks/pretool.mjs`）自动把命令改写成后面接 redactor（`~/.fleet-dao/hooks/redact-secrets.mjs`，随钩子一起装）再放行，会话不用自己记得接管道；看不清的写法（管道里有别的东西、认不出的包装）和别家的 CLI 仍然拦下，提示照下面的写法自己接上：
 
   ```
   ps -ef | node "$HOME/.fleet-dao/hooks/redact-secrets.mjs"
-  Get-CimInstance Win32_Process | Select-Object CommandLine | node "$HOME/.fleet-dao/hooks/redact-secrets.mjs"
+  Get-CimInstance Win32_Process | node "$HOME/.fleet-dao/hooks/redact-secrets.mjs"
   ```
 
-  不接的会被钩子拦下（只列进程名和 pid 的 `ps -A`、`ps -eo pid,comm`、`tasklist`、`Get-Process` 照样放行）。
-  打码的是 `-s` / `--secret` / `--token` / `--password` 这几类参数的值、名字带 secret / token / password 的 JSON 字段；
-  拿不准就遮。这是安全网、不是保险箱：变量展开出来的、编码过的照样漏（说明写在 `agents/hooks/redact.mjs` 开头）。
+  只列进程名和 pid 的 `ps -A`、`ps -eo pid,comm`、`tasklist`、`Get-Process` 照样放行；`systemctl status / show / cat` 也不再拦（只拦 `systemctl dump`）。打码的是 `-s` / `--secret` / `--token` / `--password` 这几类参数的值、名字带 secret / token / password 的 JSON 字段；拿不准就遮。这是安全网、不是保险箱：变量展开出来的、编码过的照样漏（说明写在 `agents/hooks/redact.mjs` 开头）。
 - **Codex 的 `allow` 是「不问、不进沙箱直接跑」**：`git`、`node`、`python`、`pnpm` 这类前缀放行后，带任何参数都不再问，和 Claude 里 `Bash(python:*)` 一样宽；只按前缀匹配、没有通配符，`git` 不会匹配 `gitk`（本机核过）。
 
 ## 生效的条件（做了什么、什么时候才算生效）
