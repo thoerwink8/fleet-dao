@@ -5,7 +5,6 @@
 // git、GitHub、发布脚本、库都换成假的；真机上那一半（真定时器）合并后在法国装上验，记在引入本文件的 PR 里。
 // 跑法：node --test deploy/test/auto-release.test.mjs（deploy/test/run.sh 会跑）。
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -40,6 +39,7 @@ import {
   TIER_PREFIX,
   TIER_RETRY_MS,
 } from '../france/auto-release/lib.mjs';
+import { runChild } from './child.mjs';
 
 const H0 = 'a'.repeat(40); // 在用的
 const H1 = 'b'.repeat(40); // 主线头
@@ -828,9 +828,8 @@ const FRANCE_LAG_2026_10_14 = [
 ];
 
 function gitOut(args) {
-  return spawnSync('git', args, {
+  return runChild('git', args, {
     cwd: fileURLToPath(new URL('../..', import.meta.url)),
-    encoding: 'utf8',
   });
 }
 
@@ -874,7 +873,7 @@ test('2026-10-14 落后的 5 个相关提交只改运行时副本，不需要为
   for (const check of HUMAN_TIER_COPY_CHECKS) {
     const blob = gitOut(['rev-parse', `${FRANCE_MAIN_2026_10_14}:${check.path}`]);
     const head = gitOut(['rev-parse', `HEAD:${check.path}`]);
-    const hashed = spawnSync('git', ['hash-object', '--', check.installed], { encoding: 'utf8' });
+    const hashed = runChild('git', ['hash-object', '--', check.installed]);
     assert.equal(blob.status, 0, check.path);
     assert.equal(hashed.status, 0, check.installed);
     const inst = hashed.stdout.trim();
@@ -883,9 +882,7 @@ test('2026-10-14 落后的 5 个相关提交只改运行时副本，不需要为
       `${check.path} 安装位置既不是 ${FRANCE_MAIN_2026_10_14} 也不是 HEAD`,
     );
     if (!check.unit) continue;
-    const shown = spawnSync('systemctl', ['show', '-p', 'NeedDaemonReload', '--value', check.unit], {
-      encoding: 'utf8',
-    });
+    const shown = runChild('systemctl', ['show', '-p', 'NeedDaemonReload', '--value', check.unit]);
     assert.equal(shown.status, 0, check.unit);
     assert.equal(shown.stdout.trim(), 'no', `${check.unit} 还要 daemon-reload，副本在磁盘上也不算已经装上`);
   }
