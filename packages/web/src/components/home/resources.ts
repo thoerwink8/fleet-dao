@@ -3,7 +3,9 @@
 //
 // 改这里之前必须知道：
 // - 读不到（cgroup 不在、内容认不出、这台不是 Linux、后端没给、那台没推过）一律是 unread + 原因，页面写「没读到」，不拿 0 顶。
-// - 这一刻没有会话在跑的单（排队、等人、等验）是 idle，卡片写「没在占用」，不画 0。
+// - 这一刻没有会话在跑的单（排队、等人、等验、停下等人）是 idle，不画 0：卡片写「没在跑」，再写上一次会话的内存峰值
+//   （后端 lastSession：收了的流水里最近一笔记着峰值的，并写明哪一段）；峰值没记写「上次没读到」，一笔都没收过就只写「没在跑」。
+//   上一次会话 CPU 用了多少秒库里还没记，悬停里照实写「还没记」，不编。
 // - 一张单同时几个会话（runIds 不止一个）按单合计：内存（memory.current）相加，CPU 相加（100% = 占满一个核），
 //   峰值是各会话 memory.peak 之和——各会话的峰值不一定同时出现，这是上界，悬停里照这个口径写。
 // - 有一个会话没读到，整张单就写没读到，不拿另一个会话的数冒充整张单的数。
@@ -20,9 +22,13 @@ export const CPU_TIGHT_PERCENT = 90;
 export const STALE_INTERVALS = 3;
 
 export type TicketUsage =
-  | { kind: 'idle' }
+  /** 这一刻没有会话在跑；last 是上一次会话的读数（后端的 lastSession，没收过会话就没有）。 */
+  | { kind: 'idle'; last?: LastSession }
   | { kind: 'ok'; sessions: number; memoryMb: number; peakMb?: number; cpuPercent?: number }
   | { kind: 'unread'; why: string };
+
+/** 上一次会话占了多少（收了的流水里最近一笔记着峰值的；没记写 unread）。 */
+export type LastSession = NonNullable<HomeRunning['lastSession']>;
 
 export interface ResourceOptions {
   /** 看的是别的环境推来的快照。 */
@@ -41,9 +47,10 @@ export function ticketUsage(
   opts: ResourceOptions = {},
 ): TicketUsage {
   const runIds = item.runIds;
+  const idle: TicketUsage = item.lastSession ? { kind: 'idle', last: item.lastSession } : { kind: 'idle' };
   if (runIds === undefined) {
     // 老后端没给会话编号：没人在做就是没在占用；有人在做却对不上号，照实写没读到
-    if (item.worker === undefined) return { kind: 'idle' };
+    if (item.worker === undefined) return idle;
     return {
       kind: 'unread',
       why: opts.remote
@@ -51,7 +58,7 @@ export function ticketUsage(
         : '后端没给这张单的会话编号',
     };
   }
-  if (runIds.length === 0) return { kind: 'idle' };
+  if (runIds.length === 0) return idle;
   if (!resources) return { kind: 'unread', why: missingWhy(opts) };
   if (resources.sessions.state === 'unread') return { kind: 'unread', why: resources.sessions.why };
   let memoryMb = 0;

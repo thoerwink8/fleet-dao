@@ -81,6 +81,32 @@ describe('/api/home（内存版）', () => {
     expect(home.running[0]?.waitingSince).toBeUndefined();
   });
 
+  it('引擎停下等人的单（#1967、#1971 停了 8 小时卡上写「在合并队列」「还没验」）：写 parked 加引擎记的原因，从停下那一刻算', async () => {
+    const h = harness();
+    const task = h.store.data.tasks.find((t) => t.id === IDS.task12);
+    if (!task) throw new Error('样例数据里没有任务');
+    // 三段流水推出来是「验收收了 → 合并」：停着的单不许照这个写
+    h.store.data.segmentRuns.push({
+      id: 'd2000000-0000-4000-8000-000000009999',
+      taskId: IDS.task12,
+      model: 'opus-5.5',
+      segment: 'verify',
+      startedAt: new Date(T0.getTime() - 30 * 60_000).toISOString(),
+      endedAt: new Date(T0.getTime() - 20 * 60_000).toISOString(),
+      outcome: 'done',
+    });
+    task.state = 'stalled';
+    task.stalled = { why: '动手 3 轮都没过', since: new Date(T0.getTime() - 19 * 60_000).toISOString() };
+    const home = HomeResponseSchema.parse(await (await getHome(h)).json());
+    expect(home.running[0]).toMatchObject({
+      state: 'stalled',
+      waitingReason: 'parked',
+      parked: '动手 3 轮都没过',
+      waitingSince: new Date(T0.getTime() - 19 * 60_000).toISOString(),
+    });
+    expect(home.running[0]?.waitingReason).not.toBe('merge_queue');
+  });
+
   describe('三段流水线图（running 的 segment / worker / lastEvent、flow 三格）', () => {
     const ago = (m: number) => new Date(T0.getTime() - m * 60_000).toISOString();
     let n = 0;
@@ -159,6 +185,36 @@ describe('/api/home（内存版）', () => {
         lastEvent: { tone: 'ok' },
       });
       expect(r?.worker).toBeUndefined();
+    });
+
+    it('没有会话在跑的单也写资源：最近一笔记着峰值的会话（段、收场时刻、峰值）；在跑的那笔不算', async () => {
+      const h = harness();
+      seg(h, {
+        segment: 'manual',
+        startedAt: ago(60),
+        endedAt: ago(40),
+        outcome: 'done',
+        memoryPeakMb: 3600,
+      });
+      // 最后一笔验收没记峰值：不拿它顶成「没读到」，往前找记着的那笔，并写明是哪一段
+      seg(h, { segment: 'verify', startedAt: ago(30), endedAt: ago(28), outcome: 'done' });
+      expect((await homeOf(h)).running[0]?.lastSession).toEqual({
+        state: 'ok',
+        segment: 'manual',
+        endedAt: ago(40),
+        memoryPeakMb: 3600,
+      });
+    });
+
+    it('【故意造出的失败】收了的会话一笔都没记峰值：写没读到和原因，不拿 0 顶；一笔都没收过的没有这一项', async () => {
+      const h = harness();
+      seg(h, { segment: 'manual', startedAt: ago(60), endedAt: ago(40), outcome: 'done' });
+      const last = (await homeOf(h)).running[0]?.lastSession;
+      expect(last?.state).toBe('unread');
+      expect(last && 'why' in last ? last.why : '').toContain('峰值');
+      const h2 = harness();
+      seg(h2, { segment: 'manual', startedAt: ago(12) });
+      expect((await homeOf(h2)).running[0]).not.toHaveProperty('lastSession');
     });
 
     it('验收收了：落在 merge，等合并队列；单子自己是合并中也归 merge', async () => {

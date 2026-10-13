@@ -11,6 +11,7 @@ import {
   Bot,
   CircleDashed,
   CircleDot,
+  Hand,
   Hourglass,
   MessageCircleQuestion,
   Pause,
@@ -50,12 +51,20 @@ export const WAIT_LABEL: Record<HomeRunning['waitingReason'], string> = {
   founder_decision: '等你拍',
   merge_queue: '等合并队列',
   paused: '已暂停',
+  parked: '等人看',
   nothing: '在跑',
 };
 
-/** 这张单等着创始人拍：单子自己卡在追问，或要你拍的那块里挂着它的事。 */
+/**
+ * 这张单等着创始人拍：单子自己卡在追问，或要你拍的那块里挂着它的事，或引擎停下等人（轮数用尽、同因连挂……，
+ * 要人点「继续」「放弃」「重做」；#1967、#1971 停了 8 小时，卡上写的是「在合并队列」「还没验」，没人看出来）。
+ */
 export function needsFounder(item: HomeRunning): boolean {
-  return item.waitingReason === 'founder_decision' || item.pendingDecision !== undefined;
+  return (
+    item.waitingReason === 'founder_decision' ||
+    item.waitingReason === 'parked' ||
+    item.pendingDecision !== undefined
+  );
 }
 
 /**
@@ -65,6 +74,8 @@ export function needsFounder(item: HomeRunning): boolean {
 export function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot } {
   // 被人暂停（#820 片 3）：等待色（黄系），不是失败红，也不是等你拍；人让它停的，点「继续」才走
   if (item.waitingReason === 'paused') return { tone: 'stall', icon: Pause };
+  // 引擎停下等人：等你色（要人点继续 / 放弃），排在「最近一次事件」前面——停下的原因比最近一笔流水要紧
+  if (item.waitingReason === 'parked') return { tone: 'human', icon: Hand };
   if (item.lastEvent?.tone === 'trouble') return { tone: 'fail', icon: TriangleAlert };
   if (needsFounder(item)) return { tone: 'human', icon: MessageCircleQuestion };
   switch (item.segment) {
@@ -86,6 +97,7 @@ export function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot 
 /** 卡片上那句「在哪一段」：排在对题、但一笔流水都还没有的，是排着队还没开始，不写「在对题」。 */
 export function statusTextOf(item: HomeRunning): string {
   if (item.waitingReason === 'paused') return '已暂停';
+  if (item.waitingReason === 'parked') return '停下等人';
   const notStarted = item.segment === 'scoping' && item.lastEvent === undefined && !needsFounder(item);
   return item.segment === null
     ? SEGMENT_NOT_WIRED
@@ -148,7 +160,11 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
             </div>
           ) : null}
 
-          {founder && item.pendingDecision ? (
+          {item.waitingReason === 'parked' && item.parked ? (
+            <div className="truncate text-meta text-ink-human" title={item.parked} data-parked-why>
+              为什么停：{item.parked}
+            </div>
+          ) : founder && item.pendingDecision ? (
             <div className="truncate text-meta text-ink-human" title={item.pendingDecision}>
               要你拍：{item.pendingDecision}
             </div>

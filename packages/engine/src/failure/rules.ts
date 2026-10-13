@@ -548,7 +548,21 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
     stepsOnly: true,
   },
-  // 冲突是必然失败，原地退避没用（windsurf-dao#1595）：同步主线、把冲突交回会话解决，记返工账。
+  // GitHub 写操作的幂等占用还在（packages/github 的 idempotency.ts）：上一下写到一半没收到回执（maybeLanded），键留着「写到一半」，
+  // 远端也没找到；占用 2 分钟（CLAIM_STALE_AFTER_MS = 120 秒）没续才算过期、才能接过来重写。原文每次一字不差，按「认不出」走
+  // 15 秒退避、第二次就以「同因连挂」挂起——根本等不到过期（#1971 开 PR 这一步 47 秒内挂起，8 小时没人动）。所以按等待办：
+  // 第一次等 150 秒（过期线 + 30 秒余量，翻倍），等满次数还撞就停下报人。CLAIM_LOST（占用被别的重试接过去了）同一类。
+  // 码只认端口交来的结构化码（ApplicationFailure.type），原文里出现这个词不算。
+  {
+    id: 'GH3',
+    title: 'GitHub 写操作还占着（上一下没收到回执），等占用过期再写',
+    kind: 'wait',
+    codes: ['in_flight', 'claim_lost'],
+    codeFieldOnly: true,
+    defaultWaitSeconds: 150,
+    routeOutcome: 'neutral',
+    stepsOnly: true,
+  },
   {
     id: 'MC1',
     title: '合并冲突',

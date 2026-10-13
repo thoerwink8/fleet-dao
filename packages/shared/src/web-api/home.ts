@@ -21,6 +21,9 @@ export const HomeDecisionSchema = z.object({
   link: z.string(),
 });
 
+/** 一样读数没读到：原因原样写给人看（文件不在、内容认不出、这台不是 Linux……），页面写「没读到」，不拿 0 顶。 */
+const ResourceUnreadSchema = z.object({ state: z.literal('unread'), why: z.string().min(1) });
+
 /** 「在跑的」一张单。segment 由三段流水（runs 表）推出，一笔都没记的老单是 null，不许按字段猜成失败。 */
 export const HomeRunningSchema = z.object({
   issueNumber: z.number().int().positive(),
@@ -40,10 +43,17 @@ export const HomeRunningSchema = z.object({
     'merge_queue',
     /** 被人暂停了（#820 片 3）：不是失败也不是等人，是人让它停的；note 在 paused 里。 */
     'paused',
+    /**
+     * 引擎停下等人（单子 state=stalled：轮数用尽、同因连挂、要人修……）：原因在 parked 里，等「继续」「放弃」「重做」。
+     * 排在三段推断前面：停着的单不许写成「在合并队列」「还没验」（#1967、#1971）。
+     */
+    'parked',
     'nothing',
   ]),
   /** 被人暂停时引擎写的那句「已暂停：被谁暂停、为什么」；waitingReason === 'paused' 才有。 */
   paused: z.string().optional(),
+  /** 引擎停下等人的原因（tasks.last_problem 原文）；waitingReason === 'parked' 才有。 */
+  parked: z.string().optional(),
   /** 从什么时候起在等；waitingReason === 'nothing' 时没有。 */
   waitingSince: Time.optional(),
   /** 单子进库的时刻（「已经多久」的起点）。 */
@@ -73,10 +83,23 @@ export const HomeRunningSchema = z.object({
    * 看板拿它到 HomeResources.sessions.byRun 里找这张单此刻占的内存、CPU。没有会话在跑是空数组；老后端没有这个键。
    */
   runIds: z.array(z.string().min(1)).optional(),
+  /**
+   * 上一次会话占了多少（这一刻没会话在跑时卡片也写得出资源）：收了的三段流水里最近一笔记着内存峰值的那笔（runs.memory_peak_mb，
+   * 会话跑着时每半秒读 memory.peak、收场写库）。收了的一笔都没记峰值是 unread 带原因；一笔都没收过没有这个键。
+   * CPU 用了多少秒库里还没记（#1980 跟进），这里不给，页面不拿 0 顶。
+   */
+  lastSession: z
+    .discriminatedUnion('state', [
+      z.object({
+        state: z.literal('ok'),
+        segment: z.enum(['scope', 'manual', 'verify']).nullable(),
+        endedAt: Time,
+        memoryPeakMb: z.number().int().min(0),
+      }),
+      ResourceUnreadSchema,
+    ])
+    .optional(),
 });
-
-/** 一样读数没读到：原因原样写给人看（文件不在、内容认不出、这台不是 Linux……），页面写「没读到」，不拿 0 顶。 */
-const ResourceUnreadSchema = z.object({ state: z.literal('unread'), why: z.string().min(1) });
 
 /**
  * 整机内存（/proc/meminfo，MiB）：已用 = 总量 − 可用（MemAvailable）。页面上的「已用 / 总量」和百分比都只由这两个数算，

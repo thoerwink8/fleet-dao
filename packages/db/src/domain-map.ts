@@ -71,6 +71,14 @@ export const toTask = (r: typeof tasks.$inferSelect): Task =>
     acceptance: r.acceptance,
     // 引擎暂停这张单（#820 片 3）时写 phase='paused'、doing='已暂停：…'；doing 是空的也不能当没暂停
     paused: r.phase === 'paused' ? (r.doing ?? '已暂停') : undefined,
+    // 停下等人（#1967、#1971）：原因引擎写在 last_problem；没写照实说没写，不留空
+    stalled:
+      r.state === 'stalled'
+        ? {
+            why: r.lastProblem ?? r.doing ?? '引擎没写停下的原因',
+            since: (r.updatedAt ?? r.createdAt).toISOString(),
+          }
+        : undefined,
     createdAt: r.createdAt.toISOString(),
   });
 

@@ -103,6 +103,25 @@ export function taskFlow(task: Pick<Task, 'state'>, runs: readonly SegmentRunVie
   return { segment: merging ? 'merge' : segment, ...(since ? { stageSince: since } : {}), ...base };
 }
 
+/**
+ * 上一次会话占了多少（HomeRunning.lastSession）：收了的流水里按收场先后最近一笔记着内存峰值的；在跑的不算（在跑的看实时读数）。
+ * 收了的一笔都没记峰值 → unread（写明几笔都没记）；一笔都没收过 → undefined。
+ */
+export function lastSessionOf(views: readonly SegmentRunView[]): HomeRunning['lastSession'] {
+  const ended = views
+    .filter((v) => !v.running && v.endedAt !== undefined)
+    .sort((a, b) => (b.endedAt ?? '').localeCompare(a.endedAt ?? ''));
+  if (ended.length === 0) return undefined;
+  const hit = ended.find((v) => v.memoryPeakMb !== undefined);
+  if (!hit || hit.endedAt === undefined || hit.memoryPeakMb === undefined) {
+    return {
+      state: 'unread',
+      why: `收了的 ${ended.length} 笔会话都没记内存峰值（会话跑着时没读到 memory.peak，或这一段不采样）`,
+    };
+  }
+  return { state: 'ok', segment: hit.segment, endedAt: hit.endedAt, memoryPeakMb: hit.memoryPeakMb };
+}
+
 /** 图头上的三格：在途几张（按泳道数）、近期跑完的平均耗时。 */
 export function flowStages(
   allRuns: readonly SegmentRunView[],

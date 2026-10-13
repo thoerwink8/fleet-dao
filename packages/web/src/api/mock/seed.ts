@@ -939,6 +939,8 @@ export function createSeed(now: number): MockState {
       outcome?: 'done' | 'timeout' | 'failed';
       reason?: string;
       tier?: 'fast' | 'medium' | 'heavyweight';
+      /** 收场写进 runs.memory_peak_mb 的峰值（MiB）；不给 = 没读到。 */
+      peakMb?: number;
     } = {},
   ): NonNullable<MTask['segmentRuns']>[number] {
     const channel =
@@ -968,6 +970,7 @@ export function createSeed(now: number): MockState {
             costUsd: 0.3,
           }),
       ...(extra.reason ? { failureReason: extra.reason } : {}),
+      ...(extra.peakMb !== undefined && end !== undefined ? { memoryPeakMb: extra.peakMb } : {}),
     };
   }
   const addSeg = (taskId: string, rows: NonNullable<MTask['segmentRuns']>) => {
@@ -1028,11 +1031,23 @@ export function createSeed(now: number): MockState {
       outcome: 'timeout',
       reason: '30 分钟没交活，按超时收了',
       tier: 'fast',
+      peakMb: 1_840,
     }),
   ]);
+  // #17 是引擎停下等人的单（state=stalled）：卡片写为什么停、从停下那一刻算，不按三段流水推成别的
+  {
+    const t17 = tasks.find((x) => x.task.id === 't-17');
+    if (t17) {
+      t17.task.stalled = {
+        why: '会话总时长到顶（wall_clock_timeout）：和上一次的原文一字不差，原路再试不会变；挂起并报警',
+        since: at(-69),
+      };
+    }
+  }
   addSeg('t-20', [
-    seg('t-20', 20, 'scope', 'opus-5.5', -75, -68),
-    seg('t-20', 20, 'manual', 'opus-5.5', -66, -31, { tier: 'heavyweight' }),
+    seg('t-20', 20, 'scope', 'opus-5.5', -75, -68, { peakMb: 420 }),
+    seg('t-20', 20, 'manual', 'opus-5.5', -66, -31, { tier: 'heavyweight', peakMb: 3_600 }),
+    // 验收这一笔没记峰值：卡片往前找记着的那笔（动手），写「上次动手峰值」
     seg('t-20', 20, 'verify', 'gpt-5.6-luna', -29, -22),
   ]);
   addSeg('t-21', [seg('t-21', 21, 'scope', 'sonnet-5', -4)]);

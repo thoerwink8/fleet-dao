@@ -420,8 +420,15 @@ function WaitLine({ item, tone, always }: { item: HomeRunning; tone: Tone; alway
   );
 }
 
-/** 最后一行：等你拍的写要拍什么；否则写最近一次事件；一笔流水都没有照实说。 */
+/** 最后一行：停下等人的写为什么停；等你拍的写要拍什么；否则写最近一次事件；一笔流水都没有照实说。 */
 function LastLine({ item, withAgo }: { item: HomeRunning; withAgo: boolean }) {
+  if (item.waitingReason === 'parked' && item.parked) {
+    return (
+      <div className="truncate text-canvas text-ink-human" title={item.parked} data-parked-why>
+        为什么停：{item.parked}
+      </div>
+    );
+  }
   if (needsFounder(item) && item.pendingDecision) {
     return (
       <div className="truncate text-canvas text-ink-human" title={item.pendingDecision}>

@@ -1,6 +1,7 @@
 // 主页的机器资源怎么读给人看（#1973）：整机内存 / CPU 的两格、每张卡片的占用。
-// 读不到一律写「没读到」带原因，不拿 0 顶；没有会话在跑的单写「没在占用」，不画 0。
+// 读不到一律写「没读到」带原因，不拿 0 顶；没有会话在跑的单写「没在跑」加上一次会话的峰值，不画 0。
 import { describe, expect, test } from 'vitest';
+import { usageShort, usageTitle } from './board/usage.tsx';
 import { formatMb, hostMeters, ticketUsage } from './resources.ts';
 import type { HomeResources, HomeRunning } from './types.ts';
 
@@ -49,6 +50,25 @@ describe('每张卡片的占用', () => {
   test('没有会话在跑（排队、等人、等验）：没在占用，不是 0', () => {
     expect(ticketUsage({ ...base, runIds: [] }, res())).toEqual({ kind: 'idle' });
     expect(ticketUsage({ ...base }, res())).toEqual({ kind: 'idle' });
+  });
+
+  test('没有会话在跑、上一次会话记着峰值：带上它，卡片写「上次动手峰值」（不是这一刻的占用）', () => {
+    const last = { state: 'ok', segment: 'manual', endedAt: AT, memoryPeakMb: 3_600 } as const;
+    const u = ticketUsage({ ...base, runIds: [], lastSession: last }, res());
+    expect(u).toEqual({ kind: 'idle', last });
+    expect(usageShort(u)).toBe('上次 3.5G');
+    expect(usageTitle(u)).toContain('上一次动手会话的内存峰值 3.5G');
+    expect(usageTitle(u)).toContain('CPU 用了多少还没记');
+  });
+
+  test('【故意造出的失败】上一次会话的峰值没读到：写没读到和原因，不拿 0 顶；一笔都没收过写还没起过会话', () => {
+    const unread = { state: 'unread', why: '收了的 2 笔会话都没记内存峰值' } as const;
+    const u = ticketUsage({ ...base, runIds: [], lastSession: unread }, res());
+    expect(usageShort(u)).toBe('上次没读到');
+    expect(usageTitle(u)).toContain('收了的 2 笔会话都没记内存峰值');
+    expect(usageTitle(u)).not.toMatch(/\b0(\.0)?G\b|0 ?M/);
+    expect(usageShort(ticketUsage({ ...base, runIds: [] }, res()))).toBe('没在跑');
+    expect(usageTitle(ticketUsage({ ...base, runIds: [] }, res()))).toContain('还没收过会话');
   });
 
   test('scope 刚出现、只有一次读数：CPU 算不出（不写 0），内存照写', () => {

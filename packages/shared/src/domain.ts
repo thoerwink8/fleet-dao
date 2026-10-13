@@ -98,6 +98,11 @@ export interface Task {
    * 暂停的单 state 仍是 running（只停这一张、能继续），所以是否暂停只看这个键，不看 state。
    */
   paused?: string;
+  /**
+   * 停下等人（state=stalled）：引擎写的为什么停（tasks.last_problem，没写就用 doing）和停下的时刻（tasks.updated_at）。
+   * 主页卡片拿它写真实原因，不再按三段流水推成「在合并队列」「还没验」（#1967、#1971 停了 8 小时卡上看不出）。没停下没有这个键。
+   */
+  stalled?: { why: string; since: string };
   createdAt: string;
 }
 

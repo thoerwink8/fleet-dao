@@ -10,6 +10,8 @@
 // 碰没碰「改标准」→ 挂自动合并 → 等合并 → 关单、收树。
 // 不强制 CI 的仓（patched('repo-ci-policy')，每次走到等 CI 之前现读）：开完 PR 跳过等 CI 和冷验收，查完改标准路径后引擎直接合并。
 // 返工只有这几种：没产生提交、CI 红了、合并冲突、验收没过；返工意见带进下一轮动手会话。验收最多 2 轮（specs/555）。
+// 验收没过、验收还没到 2 轮时，那一轮返工照给，不算进动手 3 轮那一条（patched('verify-rework-own-round')，#1967）：CI 红花掉前两轮时，
+// 验收意见也一定交到一轮会话手里，不在「动手 3 轮都没过」上停住。只多给这一次，第 2 轮验收再不过照旧停下。
 //
 // 停下等人（waiting.kind = human，驾驶舱点「继续」「放弃」发信号）只有这几处，而且每一处都写清卡在哪、要人干什么：
 // - 交代不全（缺栏）；没有可用的路由；失败分流判「挂起」（同因连着两次再犯、额度要等很久、登录失效……）；
@@ -57,6 +59,7 @@ import type { TierDecision } from '../runner/tier.ts';
 import {
   type AbandonCommand,
   MAX_IMPLEMENT_ROUNDS,
+  MAX_VERIFY_ROUNDS,
   type TaskRun,
   type TaskWorkflowInput,
   taskBranch,
@@ -84,6 +87,8 @@ class TaskFlow {
   private readonly rt: TaskRuntime;
   /** 这个仓现在的 CI 模式。只在 patched('repo-ci-policy') 里更新；老历史保持 force，开 PR 的验证句不变。 */
   private ciMode: 'force' | 'off' = 'force';
+  /** 刚从冷验收没过回来返工（下一轮动手开头读一次就清掉）：验收没到上限时这一轮动手不受动手轮数上限（#1967）。 */
+  private verifyRework = false;
 
   constructor(input: TaskWorkflowInput, acts: EngineActivities, limits: Limits) {
     this.rt = new TaskRuntime(input, acts, limits);
@@ -101,7 +106,12 @@ class TaskFlow {
 
     for (;;) {
       await rt.checkpoint();
-      if (rt.round >= MAX_IMPLEMENT_ROUNDS) {
+      // 验收没过要返工、验收还没到 2 轮的上限：这一轮动手照给（#1967：CI 红了 2 轮、第 3 轮才验，验收意见还没交给会话就因
+      // 动手轮数用完停下等了 8 小时）。只多给一次：第 2 轮验收再不过 verifyRound 就到顶，照旧停下。老历史没有这个标记。
+      const verifyGrace =
+        this.verifyRework && rt.verifyRound < MAX_VERIFY_ROUNDS && patched('verify-rework-own-round');
+      this.verifyRework = false;
+      if (rt.round >= MAX_IMPLEMENT_ROUNDS && !verifyGrace) {
         const problems = rt.feedback.join('；') || '（没有）';
         const mode = await rt.exhaustRounds(
           `动手 ${MAX_IMPLEMENT_ROUNDS} 轮都没过`,
@@ -187,7 +197,10 @@ class TaskFlow {
       }
 
       const verdict = await coldVerifyPr(rt, brief);
-      if (verdict === 'rework') return 'rework';
+      if (verdict === 'rework') {
+        this.verifyRework = true;
+        return 'rework';
+      }
       if (verdict === 'head_moved') {
         rt.verifyRound = 0;
         continue;

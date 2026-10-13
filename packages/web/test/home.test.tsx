@@ -561,6 +561,40 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
     ).toBe('/home3');
   });
 
+  test('引擎停下等人的卡（#1967、#1971）：写「停下等人」和引擎记的原因，不写「在合并队列」「还没验」；算等你的', async () => {
+    renderHome({
+      status: 'data',
+      data: {
+        ...SAMPLE,
+        running: [
+          ticket(1967, {
+            segment: 'merge',
+            waitingReason: 'parked',
+            parked: '动手 3 轮都没过',
+            waitingSince: '2026-10-02T08:00:00Z',
+            state: 'stalled',
+          }),
+          ticket(1971, {
+            segment: 'verify_pending',
+            waitingReason: 'parked',
+            parked: '认不出，按临时的办（IN_FLIGHT · 同一个写操作）：挂起并报警',
+            state: 'stalled',
+          }),
+        ],
+      },
+    });
+    await waitFor(() => expect(nodeOf('ticket:1967:')).toBeTruthy());
+    const a = nodeOf('ticket:1967:');
+    expect(a?.textContent).toContain('停下等人');
+    expect(a?.textContent).toContain('动手 3 轮都没过');
+    expect(a?.textContent).not.toContain('在合并队列');
+    expect(a?.querySelector('[data-needs-founder]')?.getAttribute('data-needs-founder')).toBe('true');
+    const b = nodeOf('ticket:1971:');
+    expect(b?.textContent).toContain('IN_FLIGHT');
+    expect(b?.textContent).not.toContain('还没验');
+    expect(b?.textContent).not.toContain('等第二意见');
+  });
+
   test('出问题（超时 / 失败）的卡画成 fail 红，和「还没验」「在等」分开', async () => {
     renderHome({
       status: 'data',

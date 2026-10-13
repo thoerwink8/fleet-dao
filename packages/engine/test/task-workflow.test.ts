@@ -401,6 +401,54 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     expect(guard.seen.map((i) => i.approved !== undefined)).toEqual([false, true, false, true]);
   });
 
+  it('CI 红了 2 轮、第 3 轮验收没过（#1967 卡了 8 小时）：验收意见照样交给一轮动手，不因动手轮数用完就停下等人', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) => (n <= 2 ? { state: 'red', failedChecks: ['check'] } : undefined),
+    });
+    const { tasks, calls } = scripted({
+      verify: (_i, n) =>
+        n === 1
+          ? { pass: false, problems: ['没做到验收条：第 4 条，Mirasim 校验存在绕过入口'], round: 1 }
+          : { pass: true, problems: [], round: 2 },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', verifyRounds: 2 });
+    // 第 4 轮动手拿到的是验收的问题表；没停下等人、没报警
+    expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS + 1);
+    expect(calls.segment.at(-1)?.feedback.join('\n')).toContain('Mirasim 校验存在绕过入口');
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('【故意造出的失败】验收 2 轮都没过：多给的那一轮只有一次，第 2 轮验收也不过就停下等人', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) => (n <= 2 ? { state: 'red', failedChecks: ['check'] } : undefined),
+    });
+    const { tasks, calls } = scripted({
+      verify: () => ({ pass: false, problems: ['没做到验收条：第 6 条'], round: 1 }),
+    });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '验收 2 轮都没过，停下');
+        expect(s.lastProblem).toMatch(/轮都没过/);
+        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS + 1);
+        expect(calls.verify).toHaveLength(MAX_VERIFY_ROUNDS);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收尾' });
+        return h.result();
+      },
+      { tasks },
+    );
+  });
+
   it('CI 连着红 3 轮：动手 3 轮不过，停下；点「继续」先看 PR 现在的 CI，还红就再给一整轮', async () => {
     const world = createFakeWorld({
       ci: (_i, n) => (n <= 4 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
