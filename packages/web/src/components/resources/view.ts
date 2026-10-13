@@ -1,4 +1,4 @@
-// 资源页（/resources，#1986）怎么把后端的读数写给人看：每个上线项目一行（CPU、内存、磁盘、放在哪），按目录的磁盘占用榜。
+// 资源页（/resources，#1986）怎么把后端的读数写给人看：每个上线项目一行（CPU、内存、磁盘、放在哪）。
 // 数据和主页同一份（HomeResources：5 秒随推送来；按目录的占用 10 分钟测一回、带着推），见 packages/api/src/host-resources.ts。
 //
 // 改这里之前必须知道：
@@ -334,49 +334,5 @@ export function appRows(
   return {
     kind: 'ok',
     rows: [...rows.filter((r) => !r.external), ...rows.filter((r) => r.external)],
-  };
-}
-
-export type BoardResult =
-  | {
-      kind: 'ok';
-      rows: (DiskPart & { appName: string; share?: number })[];
-      measuredAt: string;
-      everyMs: number;
-      tookMs: number;
-      databasesWhy?: string;
-    }
-  | { kind: 'pending'; why: string }
-  | { kind: 'unread'; why: string };
-
-/** 磁盘占用榜：目录、库按大小从大到小，读不到的压在最后；share 是占整盘的比例（整盘读不到就没有）。 */
-export function diskBoard(resources: HomeResources | undefined, opts: ResourceOptions = {}): BoardResult {
-  if (!resources) {
-    return {
-      kind: 'unread',
-      why: opts.remote ? '那台没推过资源读数（那台的版本还没有这一项）' : '这台后端没给资源读数',
-    };
-  }
-  const fp = resources.footprint;
-  if (!fp) return { kind: 'unread', why: notGiven('按目录的磁盘占用', opts) };
-  if (fp.state === 'pending') return { kind: 'pending', why: fp.why };
-  const names = new Map(
-    resources.apps?.state === 'ok' ? resources.apps.items.map((a) => [a.id, a.name] as const) : [],
-  );
-  const total = resources.disk?.state === 'ok' ? resources.disk.totalBytes : undefined;
-  const rows = diskParts(fp).map((p) => ({
-    ...p,
-    appName: names.get(p.appId) ?? p.appName ?? p.appId,
-    ...(total !== undefined && p.size.kind === 'ok' ? { share: p.size.bytes / total } : {}),
-  }));
-  const size = (r: DiskPart) => (r.size.kind === 'ok' ? r.size.bytes : -1);
-  rows.sort((a, b) => size(b) - size(a));
-  return {
-    kind: 'ok',
-    rows,
-    measuredAt: fp.measuredAt,
-    everyMs: fp.everyMs,
-    tookMs: fp.tookMs,
-    ...(fp.databases.state === 'unread' ? { databasesWhy: fp.databases.why } : {}),
   };
 }

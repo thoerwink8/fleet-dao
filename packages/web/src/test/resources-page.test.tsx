@@ -86,7 +86,7 @@ function withResources(resources: HomeResources | undefined) {
 
 const text = (sel: string) => document.querySelector(sel)?.textContent ?? '';
 
-test('三段都在：整机三格、每个项目一行、按目录的占用榜', async () => {
+test('三段都在：整机三格、每个项目一行、没有按目录的占用榜', async () => {
   renderApp(<ResourcesPage />, { api: withResources(FULL) });
   await waitFor(() => expect(document.querySelector('[data-resources-host]')).toBeTruthy());
   expect(text('[data-gauge="disk"]')).toContain('60.0G');
@@ -102,10 +102,8 @@ test('三段都在：整机三格、每个项目一行、按目录的占用榜',
   // 目录读不全：写不全，数前面带 ≥
   expect(text('[data-app="sessions"]')).toContain('≥ 1.0G');
   expect(text('[data-app="sessions"]')).toContain('不全');
-  expect(text('[data-resources-board]')).toContain('4 分钟前测的');
-  expect(text('[data-resources-board]')).toContain('不全：有 4 棵树没读到');
-  // 库没读成：榜上写明
-  expect(text('[data-resources-board]')).toContain('这台后端没连数据库');
+  // 按目录的占用榜收掉了（创始人 2026-10-13）：页上没有这一段
+  expect(document.querySelector('[data-resources-board]')).toBeNull();
   // 点开一行看全文（手机上没有悬停）
   fireEvent.click(screen.getByRole('button', { name: /AI 会话/ }));
   expect(text('[data-app-detail="sessions"]')).toContain('fleet-agents.slice');
@@ -132,7 +130,7 @@ test('老后端：没有磁盘、上线项目、按目录的占用，写明后�
   await waitFor(() => expect(document.querySelector('[data-resources-host]')).toBeTruthy());
   expect(text('[data-gauge="disk"]')).toContain('后端没给磁盘读数');
   expect(text('[data-resources-apps-missing]')).toContain('后端没给每个上线项目的占用');
-  expect(text('[data-resources-board-missing]')).toContain('后端没给按目录的磁盘占用');
+  expect(document.querySelector('[data-resources-board-missing]')).toBeNull();
 });
 
 test('整块没有资源读数：写明这台后端没给', async () => {
