@@ -9,12 +9,26 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse } from '@babel/parser';
 
 const pkgDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const srcDir = join(pkgDir, 'src');
 const DOC = 'docs/design/驾驶舱界面.md';
 
-export type RuleId = 'R0' | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R6' | 'R7' | 'R8' | 'R9' | 'R10' | 'R11';
+export type RuleId =
+  | 'R0'
+  | 'R1'
+  | 'R2'
+  | 'R3'
+  | 'R4'
+  | 'R5'
+  | 'R6'
+  | 'R7'
+  | 'R8'
+  | 'R9'
+  | 'R10'
+  | 'R11'
+  | 'R12';
 
 /** 每条规则：名字和规范节号（报错里带上，照着去查）。 */
 export const RULES: Record<RuleId, { name: string; section: string }> = {
@@ -30,6 +44,7 @@ export const RULES: Record<RuleId, { name: string; section: string }> = {
   R9: { name: '原生控件', section: '7' },
   R10: { name: '组件令牌', section: '2.7' },
   R11: { name: '状态字裸文字', section: '4' },
+  R12: { name: '写请求按钮没忙态', section: '三「会发写请求的按钮」' },
 };
 export const RULE_IDS = Object.keys(RULES) as RuleId[];
 
@@ -579,6 +594,194 @@ export function scanSource(src: string, file: string): Hit[] {
         if (iconTag.test(near)) {
           hits.push({ file, line: at, rule: 'R9', cls: `带图标的 <${m[1]}>`, fix: '<SearchInput>' });
         }
+      }
+    }
+  }
+  if (file.endsWith('.tsx')) hits.push(...scanWriteButtons(src, file));
+  return hits;
+}
+
+// ---------- R12 会发写请求的按钮要有忙态（#2009） ----------
+// 用真解析器读 JSX（@babel/parser；本仓的 TypeScript 是 7，没有进程内的编译器 API），不靠正则猜。
+// 判法：<Button>、<AlertDialogAction> 的 onClick 里（顺着同一文件里的函数名最多追三层）调了 mutate / mutateAsync，
+// 或 <form onSubmit> 里调了，它下面的 type="submit" 的 <Button>、<SaveButton>——这颗按钮必须带忙态：
+// loading=、onConfirm=（确认框等结果）、SaveButton 的 pending=，或 disabled= / aria-disabled= 里写着 pending（isPending）。
+// 例外：按钮开标签里，或它上一行，写一行注释 loading-ok: <理由>。
+
+interface AstNode {
+  type: string;
+  start?: number | null;
+  end?: number | null;
+  loc?: { start: { line: number }; end: { line: number } } | null;
+  [key: string]: unknown;
+}
+
+const MUTATE_NAMES = new Set(['mutate', 'mutateAsync']);
+const FN_TYPES = new Set(['ArrowFunctionExpression', 'FunctionExpression', 'FunctionDeclaration']);
+
+function isNode(v: unknown): v is AstNode {
+  return typeof v === 'object' && v !== null && typeof (v as { type?: unknown }).type === 'string';
+}
+
+function* children(node: AstNode): Generator<AstNode> {
+  for (const [key, value] of Object.entries(node)) {
+    if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments' || key === 'innerComments')
+      continue;
+    if (Array.isArray(value)) {
+      for (const v of value) if (isNode(v)) yield v;
+    } else if (isNode(value)) yield value;
+  }
+}
+
+function* walkAst(node: AstNode): Generator<AstNode> {
+  yield node;
+  for (const c of children(node)) yield* walkAst(c);
+}
+
+/** 文件里起了名字的函数：const x = () => …、function x() {…}、const x = useCallback(() => …, [])。 */
+function namedFunctions(ast: AstNode): Map<string, AstNode[]> {
+  const out = new Map<string, AstNode[]>();
+  const add = (name: string, fn: AstNode) => out.set(name, [...(out.get(name) ?? []), fn]);
+  for (const n of walkAst(ast)) {
+    if (n.type === 'FunctionDeclaration' && isNode(n.id) && n.id.type === 'Identifier')
+      add(n.id.name as string, n);
+    if (n.type !== 'VariableDeclarator' || !isNode(n.id) || n.id.type !== 'Identifier' || !isNode(n.init))
+      continue;
+    const init = n.init;
+    if (FN_TYPES.has(init.type)) add(n.id.name as string, init);
+    else if (init.type === 'CallExpression') {
+      const first = (init.arguments as unknown[])[0];
+      if (isNode(first) && FN_TYPES.has(first.type)) add(n.id.name as string, first);
+    }
+  }
+  return out;
+}
+
+/** 这段代码（顺着同一文件里的函数名最多追三层）有没有调 mutate / mutateAsync。 */
+function callsMutate(
+  node: AstNode,
+  fns: Map<string, AstNode[]>,
+  depth = 0,
+  seen = new Set<AstNode>(),
+): boolean {
+  if (seen.has(node)) return false;
+  seen.add(node);
+  for (const n of walkAst(node)) {
+    if (n.type === 'Identifier' && n !== node && depth < 3) {
+      // 直接把函数名当处理函数传（onClick={confirm}），或在里面调它
+      for (const fn of fns.get(n.name as string) ?? [])
+        if (callsMutate(fn, fns, depth + 1, seen)) return true;
+    }
+    if (n.type !== 'CallExpression' && n.type !== 'OptionalCallExpression') continue;
+    const callee = n.callee;
+    if (!isNode(callee)) continue;
+    if (callee.type === 'Identifier' && MUTATE_NAMES.has(callee.name as string)) return true;
+    if (
+      (callee.type === 'MemberExpression' || callee.type === 'OptionalMemberExpression') &&
+      isNode(callee.property) &&
+      callee.property.type === 'Identifier' &&
+      MUTATE_NAMES.has(callee.property.name as string)
+    )
+      return true;
+  }
+  return false;
+}
+
+function jsxName(el: AstNode): string | null {
+  const opening = el.openingElement;
+  if (!isNode(opening) || !isNode(opening.name) || opening.name.type !== 'JSXIdentifier') return null;
+  return opening.name.name as string;
+}
+
+function jsxAttr(el: AstNode, name: string): AstNode | null {
+  const opening = el.openingElement as AstNode;
+  for (const a of opening.attributes as AstNode[]) {
+    if (a.type === 'JSXAttribute' && isNode(a.name) && a.name.name === name) return a;
+  }
+  return null;
+}
+
+/** 属性值里的表达式（{…} 里的；字符串属性返回字面量节点）。 */
+function attrExpr(attr: AstNode | null): AstNode | null {
+  if (!attr || !isNode(attr.value)) return null;
+  const v = attr.value;
+  if (v.type === 'JSXExpressionContainer' && isNode(v.expression)) return v.expression;
+  return v;
+}
+
+function hasBusyState(el: AstNode, src: string, isSave: boolean): boolean {
+  if (jsxAttr(el, 'loading') || jsxAttr(el, 'onConfirm')) return true;
+  if (isSave && jsxAttr(el, 'pending')) return true;
+  for (const name of ['disabled', 'aria-disabled']) {
+    const e = attrExpr(jsxAttr(el, name));
+    if (e && /pending/i.test(src.slice(e.start ?? 0, e.end ?? 0))) return true;
+  }
+  return false;
+}
+
+/** 开标签里或它上一行有一行「loading-ok: <理由>」（理由不能空）。 */
+function exempted(el: AstNode, comments: AstNode[]): boolean {
+  const opening = el.openingElement as AstNode;
+  const first = el.loc?.start.line ?? 0;
+  const last = opening.loc?.end.line ?? first;
+  return comments.some((c) => {
+    const line = c.loc?.end.line ?? -1;
+    return line >= first - 1 && line <= last && /loading-ok:\s*\S/.test(String(c.value));
+  });
+}
+
+const R12_FIX =
+  '加 loading={x.isPending}（或 disabled 里带 isPending）；确认框的确定键用 onConfirm 等结果；真不要忙态写一行 // loading-ok: <理由>';
+
+export function scanWriteButtons(src: string, file: string): Hit[] {
+  if (!/\bmutate(?:Async)?\b/.test(src)) return [];
+  let ast: AstNode;
+  try {
+    ast = parse(src, { sourceType: 'module', plugins: ['typescript', 'jsx'] }) as unknown as AstNode;
+  } catch (e) {
+    // 读不懂就报出来，不当没事放过
+    return [
+      {
+        file,
+        line: 1,
+        rule: 'R12',
+        cls: '解析不了',
+        fix: `这个文件 JSX 解析没过，R12 判不了：${e instanceof Error ? e.message : String(e)}`,
+      },
+    ];
+  }
+  const comments = (ast.comments as AstNode[] | undefined) ?? [];
+  const fns = namedFunctions(ast);
+  const hits: Hit[] = [];
+  const flagged = new Set<AstNode>();
+  const flag = (el: AstNode, why: string) => {
+    if (flagged.has(el)) return;
+    flagged.add(el);
+    if (exempted(el, comments)) return;
+    hits.push({ file, line: el.loc?.start.line ?? 1, rule: 'R12', cls: why, fix: R12_FIX });
+  };
+  for (const el of walkAst(ast)) {
+    if (el.type !== 'JSXElement') continue;
+    const name = jsxName(el);
+    if (name === 'Button' || name === 'AlertDialogAction') {
+      const handler = attrExpr(jsxAttr(el, 'onClick'));
+      if (handler && callsMutate(handler, fns) && !hasBusyState(el, src, false)) {
+        flag(el, `<${name} onClick=…mutate>`);
+      }
+    }
+    if (name === 'form') {
+      const handler = attrExpr(jsxAttr(el, 'onSubmit'));
+      if (!handler || !callsMutate(handler, fns)) continue;
+      for (const inner of walkAst(el)) {
+        if (inner.type !== 'JSXElement') continue;
+        const innerName = jsxName(inner);
+        const isSave = innerName === 'SaveButton';
+        const submit =
+          isSave ||
+          (innerName === 'Button' &&
+            (attrExpr(jsxAttr(inner, 'type')) as AstNode | null)?.value === 'submit');
+        if (submit && !hasBusyState(inner, src, isSave))
+          flag(inner, `<form onSubmit=…mutate> 里的 <${innerName}>`);
       }
     }
   }

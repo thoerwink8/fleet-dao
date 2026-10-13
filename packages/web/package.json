@@ -38,6 +38,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@babel/parser": "^7.29.9",
     "@playwright/test": "^1.63.0",
     "@react-router/dev": "^8.4.0",
     "@tailwindcss/vite": "^4.3.3",

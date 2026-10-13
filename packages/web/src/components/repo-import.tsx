@@ -234,6 +234,7 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
             {/* 动作：没装全给「装 App」，没在驾驶舱给「加进驾驶舱」，在驾驶舱给「移出」。 */}
             <div className="flex shrink-0 items-center gap-1.5">
               {!repo.fullyInstalled && repo.canInstall ? (
+                // loading-ok: TODO #2012 只变灰（busy）、不转圈，第二期换成 loading
                 <Button
                   size="sm"
                   variant="outline"
@@ -273,6 +274,7 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
                   移出驾驶舱
                 </Button>
               ) : (
+                // loading-ok: TODO #2012 只变灰（busy）、不转圈，第二期换成 loading
                 <Button
                   size="sm"
                   disabled={busy || repo.empty || repo.archived}
@@ -311,16 +313,22 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
           <AlertDialogFooter>
             <AlertDialogCancel>先不</AlertDialogCancel>
             <AlertDialogAction
-              onClick={(e) => {
-                e.preventDefault();
-                if (!repo.reposId) return;
-                removeRepo.mutate(repo.reposId, {
-                  onSuccess: (r) =>
-                    r.removed
-                      ? toast.success(`已把 ${repo.fullName} 移出驾驶舱`)
-                      : toast.warning('没移出', { description: r.reason }),
-                  onError: (err) => toast.error('没能移出', { description: errorText(err) }),
-                });
+              // 等结果：移出了框才关（原来成功了框也不关，#2009）；后端说没移出（还挂着没结束的需求）或请求失败，
+              // 弹 toast 并留在框里写原因
+              onConfirm={async () => {
+                if (!repo.reposId) throw new Error('这个仓在驾驶舱里没有编号，移不了');
+                let r: Awaited<ReturnType<typeof removeRepo.mutateAsync>>;
+                try {
+                  r = await removeRepo.mutateAsync(repo.reposId);
+                } catch (err) {
+                  toast.error('没能移出', { description: errorText(err) });
+                  throw err;
+                }
+                if (!r.removed) {
+                  toast.warning('没移出', { description: r.reason });
+                  throw new Error(r.reason ?? '后端没说原因');
+                }
+                toast.success(`已把 ${repo.fullName} 移出驾驶舱`);
               }}
             >
               移出

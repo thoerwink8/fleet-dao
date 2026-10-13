@@ -331,6 +331,9 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
     devDependencies:
+      '@babel/parser':
+        specifier: ^7.29.9
+        version: 7.29.9
       '@playwright/test':
         specifier: ^1.63.0
         version: 1.63.0

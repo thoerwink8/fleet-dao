@@ -210,6 +210,7 @@ function SegmentRow({
           </Button>
         ) : null}
         {pin && !finished ? (
+          // loading-ok: TODO #2012 只变灰（busy）、不转圈，第二期换成 loading
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => void send(null)}>
             回到自动
           </Button>
@@ -225,6 +226,7 @@ function SegmentRow({
             现在就换：正在跑的这一轮马上停下，改用 {chosen?.name ?? pin?.modelId} 在原分支上接着做。
             这一轮已做的会从分支上接着做，已花的 token 不退。
           </span>
+          {/* loading-ok: TODO #2012 只变灰（busy）、不转圈，第二期换成 loading */}
           <Button size="sm" disabled={busy} data-repin-go onClick={() => void repinNow()}>
             确认现在就换
           </Button>

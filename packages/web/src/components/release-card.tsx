@@ -255,20 +255,18 @@ function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
   const head = mainline.state === 'ok' ? mainline.commit : null;
   const ready = action.state === 'ready' && head !== null;
   const last = lastLine(action.last, now);
-  const confirm = () => {
+  // 确认框等它：成功框关、弹成功；失败弹 toast 并抛给框——框留着写原因、能再点（#2009）
+  const confirm = async () => {
     if (head === null) return;
-    release.mutate(head.sha, {
-      onSuccess: () => {
-        setAsking(false);
-        toast.success(`已提交发布请求：${head.short}`, {
-          description: '法国接活后，这一行显示进度；发完引擎总开关和接活开关恢复到发版前的样子。',
-        });
-      },
-      onError: (e) => {
-        setAsking(false);
-        toast.error('没能提交发布请求', { description: errorText(e) });
-      },
-    });
+    try {
+      await release.mutateAsync(head.sha);
+      toast.success(`已提交发布请求：${head.short}`, {
+        description: '法国接活后，这一行显示进度；发完引擎总开关和接活开关恢复到发版前的样子。',
+      });
+    } catch (e) {
+      toast.error('没能提交发布请求', { description: errorText(e) });
+      throw e;
+    }
   };
   return (
     <div className="space-y-2" data-release-action={action.state}>
@@ -338,12 +336,7 @@ function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>先不</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={(e) => {
-                e.preventDefault();
-                confirm();
-              }}
-            >
+            <AlertDialogAction onConfirm={confirm} loadingLabel="正在提交发布请求">
               确认发布
             </AlertDialogAction>
           </AlertDialogFooter>

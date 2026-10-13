@@ -1,7 +1,7 @@
 // 设计陈列页（#1848，规范 docs/design/驾驶舱界面.md）：只在 dev:mock 构建里有。
 // 每个版式组件、基础件的各种状态，亮色和暗色各一屏；最后一张表是对比度现算（读浏览器算好的颜色，不抄表）。
 // 改了令牌或组件，先看这一页再看别的页；截图脚本固定截它。
-import { CircleDashed, Inbox, Plus } from 'lucide-react';
+import { CircleDashed, Inbox, Pause, Plus } from 'lucide-react';
 import { useLayoutEffect, useRef, useState } from 'react';
 import { Code } from '../components/layout/code';
 import { EmptyState } from '../components/layout/empty-state';
@@ -14,6 +14,7 @@ import { MetaLine } from '../components/layout/meta-line';
 import { NativeSelect } from '../components/layout/native-select';
 import { Notice } from '../components/layout/notice';
 import { Page } from '../components/layout/page';
+import { SaveButton } from '../components/layout/save-button';
 import { SearchInput } from '../components/layout/search-input';
 import { Section, SectionGrid } from '../components/layout/section';
 import { Stat, StatGrid } from '../components/layout/stat';
@@ -22,6 +23,16 @@ import { Tag } from '../components/layout/tag';
 import { inkClass, LAYOUT_TONES, type LayoutTone } from '../components/layout/tone';
 import { Toolbar } from '../components/layout/toolbar';
 import { useTheme } from '../components/theme-provider';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '../components/ui/alert-dialog';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -178,6 +189,43 @@ function ContrastTable() {
 }
 
 // ---------- 一整屏陈列（亮、暗各渲染一份） ----------
+
+/** 确认框忙态的样板（#2009）：点确定后等 2.5 秒，按选的结果成功关上或失败留着写原因。 */
+function ConfirmBusyDemo() {
+  const [open, setOpen] = useState<null | 'ok' | 'fail'>(null);
+  return (
+    <div className="flex flex-wrap items-center gap-2" data-design-confirm>
+      <Button variant="outline" size="sm" onClick={() => setOpen('ok')}>
+        确认框：会成功
+      </Button>
+      <Button variant="outline" size="sm" onClick={() => setOpen('fail')}>
+        确认框：会失败
+      </Button>
+      <AlertDialog open={open !== null} onOpenChange={(o) => !o && setOpen(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>发布到法国？</AlertDialogTitle>
+            <AlertDialogDescription>
+              样板：点「确认发布」等 2.5 秒。等的时候转圈、Esc
+              和「先不」都关不掉；成功关上，失败留在原处写原因。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>先不</AlertDialogCancel>
+            <AlertDialogAction
+              onConfirm={async () => {
+                await new Promise((r) => setTimeout(r, 2500));
+                if (open === 'fail') throw new Error('主线头已经不是 2005b290a 了，刷新后再发');
+              }}
+            >
+              确认发布
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
 
 function Gallery({ mode }: { mode: 'light' | 'dark' }) {
   const [tab, setTab] = useState('all');
@@ -415,6 +463,25 @@ function Gallery({ mode }: { mode: 'light' | 'dark' }) {
               <Button size="lg">lg 40</Button>
               <Button disabled>禁用</Button>
             </div>
+            {/* 忙态（#2009）：转圈不改按钮宽；有图标替掉图标，没图标盖在字上，loadingText 换字 */}
+            <div className="flex flex-wrap items-center gap-2" data-design-loading>
+              <Button loading>主要</Button>
+              <Button variant="outline" loading>
+                描边
+              </Button>
+              <Button variant="destructive" loading>
+                叫停
+              </Button>
+              <Button variant="outline" size="sm" loading>
+                <Pause />
+                暂停
+              </Button>
+              <Button loading loadingText="正在提交…">
+                发布
+              </Button>
+              <SaveButton canSave pending />
+            </div>
+            <ConfirmBusyDemo />
             <div className="flex flex-wrap items-center gap-2">
               <Badge>默认</Badge>
               <Badge variant="secondary">次要</Badge>
