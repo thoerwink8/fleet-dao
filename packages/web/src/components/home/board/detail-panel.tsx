@@ -164,6 +164,20 @@ function TicketPanel({
         </Section>
       ) : null}
 
+      {item.waitingReason === 'parked' ? (
+        <Section title="停下等人">
+          <div
+            className="rounded-lg border border-st-human-line bg-st-human-soft px-3 py-2 text-body break-words"
+            data-parked-why
+          >
+            {item.parked ?? '引擎没写停下的原因'}
+            <div className="mt-1 text-meta text-muted-foreground">
+              看过之后点上面的「继续」接着做，「放弃」不做了，「重做」从头再来。
+            </div>
+          </div>
+        </Section>
+      ) : null}
+
       <Section title="现在">
         <div className="space-y-1.5">
           <Row label="在哪一段">

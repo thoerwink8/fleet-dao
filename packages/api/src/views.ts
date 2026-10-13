@@ -459,26 +459,32 @@ export function homeRunning(input: {
       // 这一刻在跑的那几笔（#1973）：编号就是会话 scope 的编号，看板拿它找这张单此刻占的内存、CPU
       const runIds = views.filter((v) => v.running).map((v) => v.id);
       const decision = input.decisionOf(t.id);
+      // 引擎停下等人（state=stalled）排在三段推断前面：三段流水只看得出「验收收了」，看不出验收没过、开 PR 卡住（#1967、#1971）
+      const stalled = t.state === 'stalled' ? t.stalled : undefined;
       const waitingReason: HomeRunning['waitingReason'] = t.paused
         ? 'paused'
         : asking
           ? 'founder_decision'
-          : queued
-            ? 'queue'
-            : flow.segment === 'verify_pending'
-              ? 'verify_round'
-              : flow.segment === 'merge'
-                ? 'merge_queue'
-                : 'nothing';
+          : t.state === 'stalled'
+            ? 'parked'
+            : queued
+              ? 'queue'
+              : flow.segment === 'verify_pending'
+                ? 'verify_round'
+                : flow.segment === 'merge'
+                  ? 'merge_queue'
+                  : 'nothing';
       const waitingSince = t.paused
         ? undefined
         : asking
           ? decision?.since
-          : queued
-            ? queued.queuedAt
-            : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
-              ? flow.stageSince
-              : undefined;
+          : waitingReason === 'parked'
+            ? stalled?.since
+            : queued
+              ? queued.queuedAt
+              : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
+                ? flow.stageSince
+                : undefined;
       return {
         issueNumber: t.issueNumber,
         title: t.title,
@@ -486,6 +492,7 @@ export function homeRunning(input: {
         segment: flow.segment,
         waitingReason,
         ...(t.paused ? { paused: t.paused } : {}),
+        ...(waitingReason === 'parked' ? { parked: stalled?.why ?? '引擎没写停下的原因' } : {}),
         ...(waitingSince ? { waitingSince } : {}),
         taskSince: t.createdAt,
         ...(flow.stageSince ? { stageSince: flow.stageSince } : {}),

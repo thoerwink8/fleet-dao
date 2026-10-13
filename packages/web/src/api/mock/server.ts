@@ -2079,26 +2079,31 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           const flow = taskFlow(t.task, views);
           const runIds = views.filter((v) => v.running).map((v) => v.id);
           const decision = pendingOf(t);
+          const stalled = t.task.state === 'stalled' ? t.task.stalled : undefined;
           const waitingReason = t.task.paused
             ? ('paused' as const)
             : asking
               ? ('founder_decision' as const)
-              : queued
-                ? ('queue' as const)
-                : flow.segment === 'verify_pending'
-                  ? ('verify_round' as const)
-                  : flow.segment === 'merge'
-                    ? ('merge_queue' as const)
-                    : ('nothing' as const);
+              : t.task.state === 'stalled'
+                ? ('parked' as const)
+                : queued
+                  ? ('queue' as const)
+                  : flow.segment === 'verify_pending'
+                    ? ('verify_round' as const)
+                    : flow.segment === 'merge'
+                      ? ('merge_queue' as const)
+                      : ('nothing' as const);
           const waitingSince = t.task.paused
             ? undefined
             : asking
               ? decision?.since
-              : queued
-                ? queued.queuedAt
-                : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
-                  ? flow.stageSince
-                  : undefined;
+              : waitingReason === 'parked'
+                ? stalled?.since
+                : queued
+                  ? queued.queuedAt
+                  : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
+                    ? flow.stageSince
+                    : undefined;
           return {
             issueNumber: t.task.issueNumber,
             title: t.task.title,
@@ -2106,6 +2111,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             segment: flow.segment,
             waitingReason,
             ...(t.task.paused ? { paused: t.task.paused } : {}),
+            ...(waitingReason === 'parked' ? { parked: stalled?.why ?? '引擎没写停下的原因' } : {}),
             ...(waitingSince ? { waitingSince } : {}),
             taskSince: t.task.createdAt,
             ...(flow.stageSince ? { stageSince: flow.stageSince } : {}),

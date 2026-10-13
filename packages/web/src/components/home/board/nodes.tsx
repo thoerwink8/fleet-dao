@@ -14,7 +14,7 @@ import { inkClass, softClass, solidClass } from '../../layout/tone';
 import { ACTIONS, type ActionTarget, useTargetActions } from '../../task-actions';
 import { Kbd } from '../../ui/kbd';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../ui/tooltip';
-import { CardLink, needsFounder, statusTextOf, waitLineOf } from '../running-card';
+import { CardLink, needsFounder, parkedForHuman, statusTextOf, waitLineOf } from '../running-card';
 import type { HomeFlowStage, HomeRunning } from '../types';
 import {
   farCardFontPx,
@@ -420,8 +420,15 @@ function WaitLine({ item, tone, always }: { item: HomeRunning; tone: Tone; alway
   );
 }
 
-/** 最后一行：等你拍的写要拍什么；否则写最近一次事件；一笔流水都没有照实说。 */
+/** 最后一行：停下等人的写为什么停（最近一笔超时 / 失败的写那条失败）；等你拍的写要拍什么；否则写最近一次事件；一笔流水都没有照实说。 */
 function LastLine({ item, withAgo }: { item: HomeRunning; withAgo: boolean }) {
+  if (parkedForHuman(item) && item.parked) {
+    return (
+      <div className="truncate text-canvas text-ink-human" title={item.parked} data-parked-why>
+        为什么停：{item.parked}
+      </div>
+    );
+  }
   if (needsFounder(item) && item.pendingDecision) {
     return (
       <div className="truncate text-canvas text-ink-human" title={item.pendingDecision}>

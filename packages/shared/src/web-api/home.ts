@@ -21,6 +21,9 @@ export const HomeDecisionSchema = z.object({
   link: z.string(),
 });
 
+/** 一样读数没读到：原因原样写给人看（文件不在、内容认不出、这台不是 Linux……），页面写「没读到」，不拿 0 顶。 */
+const ResourceUnreadSchema = z.object({ state: z.literal('unread'), why: z.string().min(1) });
+
 /** 「在跑的」一张单。segment 由三段流水（runs 表）推出，一笔都没记的老单是 null，不许按字段猜成失败。 */
 export const HomeRunningSchema = z.object({
   issueNumber: z.number().int().positive(),
@@ -40,10 +43,17 @@ export const HomeRunningSchema = z.object({
     'merge_queue',
     /** 被人暂停了（#820 片 3）：不是失败也不是等人，是人让它停的；note 在 paused 里。 */
     'paused',
+    /**
+     * 引擎停下等人（单子 state=stalled：轮数用尽、同因连挂、要人修……）：原因在 parked 里，等「继续」「放弃」「重做」。
+     * 排在三段推断前面：停着的单不许写成「在合并队列」「还没验」（#1967、#1971）。
+     */
+    'parked',
     'nothing',
   ]),
   /** 被人暂停时引擎写的那句「已暂停：被谁暂停、为什么」；waitingReason === 'paused' 才有。 */
   paused: z.string().optional(),
+  /** 引擎停下等人的原因（tasks.last_problem 原文）；waitingReason === 'parked' 才有。 */
+  parked: z.string().optional(),
   /**
    * 等合并期间必过检查是红的：检查名（多个用顿号分开）。有了，卡片写「检查红了：」加这个，不写「等合并队列」。
    */
@@ -94,9 +104,6 @@ export const HomeRunningSchema = z.object({
     })
     .optional(),
 });
-
-/** 一样读数没读到：原因原样写给人看（文件不在、内容认不出、这台不是 Linux……），页面写「没读到」，不拿 0 顶。 */
-const ResourceUnreadSchema = z.object({ state: z.literal('unread'), why: z.string().min(1) });
 
 /**
  * 整机内存（/proc/meminfo，MiB）：已用 = 总量 − 可用（MemAvailable）。页面上的「已用 / 总量」和百分比都只由这两个数算，
