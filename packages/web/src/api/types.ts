@@ -17,6 +17,7 @@ import type {
   ChannelSchema,
   ChannelStateSchema,
   CliToolsResponseSchema,
+  CreateRequestRequest,
   CredentialsResponse,
   DecisionOptionSchema,
   EffortModelSchema,
@@ -66,6 +67,8 @@ import type {
   PoolViewSchema,
   PurposeMembershipResponse,
   QuotaWindowViewSchema,
+  REQUEST_FILTERS,
+  REQUEST_VIEWS,
   ReleaseCardSchema,
   ReleasedCommitsSchema,
   ReleaseRecoverResponse,
@@ -75,6 +78,7 @@ import type {
   RepoCiPolicyResponse,
   RepoDispatchResponse,
   RepoSchema,
+  RequestActionRequest,
   RouteEffortSchema,
   RouteProbeHistoryResponse,
   RouteProbeNowRequest,
@@ -91,6 +95,7 @@ import type {
   RoutingResponse,
   RunSchema,
   RunTranscriptResponse,
+  SendRequestMessageRequest,
   SetChannelEnabledRequest,
   SetChannelEnabledResponse,
   SetModelEnabledRequest,
@@ -110,6 +115,7 @@ import type {
   UpdateRepoCiPolicyResponse,
   UpdateRepoDispatchRequest,
   UpdateRepoDispatchResponse,
+  UpdateRequestDraftRequest,
   UpdateRouteEffortRequest,
   UpdateRouteEffortResponse,
   UpdateSettingRequest,
@@ -311,6 +317,34 @@ export type LiveEvent =
   | ({ type: 'change' } & z.infer<typeof ChangeEventSchema>)
   /** 这台机器此刻的内存、CPU（#1973）：直接换掉主页数据里的 resources，不重拉主页。 */
   | { type: 'resources'; resources: z.infer<typeof HomeResourcesSchema> };
+
+// —— 提需求（#2049 接口，#2060 开单，#2061 指挥官会话，#2062 页面）——
+export type {
+  RequestAction,
+  RequestActions,
+  RequestCard,
+  RequestChatStreamEvent,
+  RequestCommander,
+  RequestDetailResponse as RequestDetail,
+  RequestDraft,
+  RequestDraftField,
+  RequestIssueOpeningResponse as RequestIssueOpening,
+  RequestListResponse as RequestList,
+  RequestMessage,
+  RequestModelOption,
+  RequestPerson,
+  RequestReviewVerdict,
+  RequestRow,
+  RequestStatus,
+  RequestVerdict,
+} from '@fleet-dao/shared';
+export type RequestView = (typeof REQUEST_VIEWS)[number];
+export type RequestFilter = (typeof REQUEST_FILTERS)[number];
+export type RequestListQueryBody = { view: RequestView; filter: RequestFilter; q?: string | undefined };
+export type CreateRequestBody = z.input<typeof CreateRequestRequest>;
+export type SendRequestMessageBody = z.input<typeof SendRequestMessageRequest>;
+export type UpdateRequestDraftBody = z.input<typeof UpdateRequestDraftRequest>;
+export type RequestActionBody = z.input<typeof RequestActionRequest>;
 
 // —— 本机会话（#1991）、法国的工作树和一键清理（#1993）——
 export type {

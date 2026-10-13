@@ -23,22 +23,6 @@ const WEB_NOT_USED: Record<string, string> = {
   githubCallback: 'GitHub 授权回调，浏览器整页跳转，不走 fetch',
   githubAuthorize: '一键授权是浏览器整页跳到 GitHub，不走 fetch',
   githubSetup: 'GitHub 安装页的 Setup URL，浏览器整页跳转，不走 fetch',
-  // 提需求（#2049 是母单 #2047 的后端片 A）：页面在 D 片接，接上时从这里删掉
-  requests: '提需求页面在 #2047 的 D 片接',
-  createRequest: '提需求页面在 #2047 的 D 片接',
-  requestDetail: '提需求页面在 #2047 的 D 片接',
-  sendRequestMessage: '提需求页面在 #2047 的 D 片接',
-  updateRequestDraft: '提需求页面在 #2047 的 D 片接',
-  requestAction: '提需求页面在 #2047 的 D 片接',
-  markRequestRead: '提需求页面在 #2047 的 D 片接',
-  requestIssueOpening: '提需求页面在 #2047 的 D 片接',
-  answerRequestEngineAsk: '提需求页面在 #2047 的 D 片接',
-  commanderStream: '提需求页面在 #2047 的 D 片接',
-  nudgeCommander: '提需求页面在 #2047 的 D 片接',
-  stopCommander: '提需求页面在 #2047 的 D 片接',
-  setCommanderModel: '提需求页面在 #2047 的 D 片接',
-  requestReview: '提需求页面在 #2047 的 D 片接',
-  markReviewItem: '提需求页面在 #2047 的 D 片接',
 };
 const AUTH_NOT_USED: Record<string, string> = {
   // 飞书登录、回调是浏览器整页跳转（<a href>），不经 http.ts 的 fetch

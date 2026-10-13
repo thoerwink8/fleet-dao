@@ -227,6 +227,7 @@
    * 页面最大宽按宽屏铺满定（1920 屏去掉侧栏约 1690 宽，整块用上）；只在 2560 这类超宽屏上才封顶，免得一行字拉得太长。
    */
   --container-cockpit: 115rem; /* 1840 */
+  --container-chat: 38rem; /* 760（桌面根字号 20px 下 38rem = 760px）：提需求页对话居中一列的最大宽（宽屏两边留白是为了可读） */
   --container-settings-row: 6rem; /* 96 */
   /* 设置页左侧页内导航宽（lg 以上）。 */
   --container-settings-nav: 11rem; /* 176 */

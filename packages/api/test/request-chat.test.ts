@@ -177,6 +177,15 @@ describe('限额、引擎关着：回「指挥官暂停了：原因」，人话�
     expect(d.messages[1]?.body).toMatch(
       /^指挥官暂停了：引擎总开关关着（北京时间 \d\d-\d\d \d\d:\d\d 关上的），起不了指挥官/,
     );
+    // 暂停是接着自己那句当场回的：列表上不算未读、不挂「等我」
+    const res = await h.cockpit.request('/api/requests?view=active&filter=all', {
+      headers: { cookie: b.cookie },
+    });
+    const row = (
+      (await res.json()) as { items: { seq: number; unread: number; waiting: unknown }[] }
+    ).items.find((r) => r.seq === d.request.seq);
+    expect(row?.unread).toBe(0);
+    expect(row?.waiting).toBeUndefined();
   });
 
   it('【故意造出的失败】「提需求」用途一个模型都没配：不排，原因写没配；详情的可选模型写原因不冒充空', async () => {

@@ -9,6 +9,8 @@ export default [
     route('tasks', 'routes/tasks.tsx'),
     // 主页「在跑的」、追问的链接落在这里：/tasks/<任务编号，库内 id，例如 t-12>，不是 GitHub 单号
     route('tasks/:taskId', 'routes/task.tsx'),
+    // 提需求：和指挥官聊清楚再开单（#2062；?r=<需求号> 打开一条）
+    route('intake', 'routes/intake.tsx'),
     route('quota', 'routes/quota.tsx'),
     route('schedules', 'routes/schedules.tsx'),
     route('notifications', 'routes/notifications.tsx'),

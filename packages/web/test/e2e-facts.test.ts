@@ -12,6 +12,7 @@ const good = {
   approvalNotificationId: 'z',
   alertNotificationId: 'w',
   pools: { carpool: 'c', solo: 's' },
+  requests: { pending: 1, closed: 2, shared: 3 },
 };
 
 describe('parseFacts', () => {

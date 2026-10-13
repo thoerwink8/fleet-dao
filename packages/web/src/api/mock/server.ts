@@ -139,6 +139,7 @@ import type { z } from 'zod';
 import { ApiError, type FleetApi } from '../client';
 import type { AuditEntry, LiveEvent, Worktrees } from '../types';
 import type { MLog, MockState, MSubtask, MTask } from './model';
+import { createMockRequests, MOCK_PARTNER, type MockRequestsOptions, mockRequestsAs } from './requests';
 import { createSeed, fakeAction, fakeUsage } from './seed';
 import { LIVE_FIRST_REVEAL, LIVE_REVEAL_STEP, transcriptSeed } from './transcripts';
 import { cleanupResultOf, mockLocalSessions, mockWorktrees, seedCleanups } from './worktrees';
@@ -155,6 +156,8 @@ export interface MockOptions {
   transcriptFail?: readonly string[];
   /** 给 ch-cursor 多加这么多条没用途在用的路由（演示一个渠道几百条）；不给就不加。 */
   manyRoutes?: number;
+  /** 提需求的视角和接没接上（测试用；不给就看地址上的 ?mockAs=、?mockRequests=）。 */
+  requests?: Pick<MockRequestsOptions, 'as' | 'mode'>;
 }
 
 export interface MockApi extends FleetApi {
@@ -1156,6 +1159,18 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     opts.latencyMs
       ? new Promise<void>((r) => setTimeout(r, (opts.latencyMs ?? 0) * (0.6 + rand() * 0.8)))
       : Promise.resolve();
+  /** 提需求（#2062）：内存里一份需求、消息、每人的置顶和读到哪，判法和真后端同一份（shared 的 requestActions）。 */
+  const mockRequests = createMockRequests({
+    now,
+    me: { id: st.me.user.id, name: st.me.user.displayName },
+    repos: st.repos.map((r) => ({ id: r.id, slug: `${r.owner}/${r.name}` })),
+    latency: wait,
+    ...opts.requests,
+  });
+  // 换成合伙人的视角时，登录的人也是合伙人（页面按 /me 判「我」）
+  if (mockRequestsAs(opts.requests?.as) === 'partner') {
+    st.me = { ...st.me, user: { id: MOCK_PARTNER.id, displayName: MOCK_PARTNER.name, role: 'founder' } };
+  }
 
   /** 只推 shared/realtime.ts 名单里的表：真后端也只推这些，假数据不多给。 */
   function emit(table: RealtimeTable, id: string) {
@@ -1967,6 +1982,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
 
   const api: MockApi = {
     source: 'mock',
+    ...mockRequests,
     tick,
     stop() {
       if (timer) clearInterval(timer);

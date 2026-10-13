@@ -33,6 +33,7 @@ import { createPgStore, DEV_USER_ID, devFixtures, IDS } from '@fleet-dao/store';
 import { seedPg } from '@fleet-dao/store/testing';
 import { eq, inArray } from 'drizzle-orm';
 import { hashPassword } from '../../src/password.ts';
+import { type SeededRequests, seedRequests } from './seed-requests.ts';
 
 export const E2E_USERNAME = 'founder.a';
 export const E2E_PASSWORD = 'e2e-correct-horse-battery';
@@ -50,6 +51,8 @@ export interface E2eFacts {
   approvalNotificationId: string;
   alertNotificationId: string;
   pools: { carpool: string; solo: string };
+  /** 提需求的三条（#2062）：乙提的待甲拍板、甲已结案（开了 #12）、甲提的乙也说过话。 */
+  requests: SeededRequests;
 }
 
 const taskIds = {
@@ -483,6 +486,9 @@ export async function prepare(env: Record<string, string | undefined> = process.
     );
     if (set !== 'ok') throw new Error(`给创始人甲设账密没成：${String(set)}`);
 
+    // 提需求（#2062）：甲是拍板人；乙提的待拍板、甲已结案的、乙也说过话的各一条
+    const intake = await seedRequests(db, now);
+
     return {
       dbUrl: url,
       userId: DEV_USER_ID,
@@ -500,6 +506,7 @@ export async function prepare(env: Record<string, string | undefined> = process.
       approvalNotificationId: IDS.notification2,
       alertNotificationId: IDS.notification1,
       pools: { carpool, solo },
+      requests: intake,
     };
   } finally {
     await close();

@@ -255,6 +255,8 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
     files: [`${W}routes/audit.tsx`, `${W}lib/audit.ts`],
     specs: [spec('05-settings'), spec('07-other-pages'), spec('10-credentials'), spec('11-mobile-overflow')],
   },
+  // 提需求页（12，#2062）：列表三处、对话、拍板卡、删除恢复、接着这条提
+  { files: [`${W}routes/intake.tsx`, `${W}components/intake/`], specs: [spec('12-intake')] },
   // 占位页：没有任何 spec 点它们（specs 里没有 goto），改它们不跑 e2e，靠每夜全量里别页的回归兜底
   { files: [`${W}routes/soon.tsx`], specs: [] },
 ];

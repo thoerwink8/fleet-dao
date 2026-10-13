@@ -353,6 +353,8 @@ export function pgRequests(db: Db, now: () => Date, options: RequestsOptions = {
               sql`${requestMessages.id} > ${requestUserState.lastReadMessageId}`,
             ),
             or(isNull(requestMessages.authorId), ne(requestMessages.authorId, viewerId)),
+            // 「指挥官暂停了」是接着人刚说的那句当场回的，不算一条要回来看的新消息（列表上不挂「等我 1」）
+            sql`coalesce(${requestMessages.card}->>'type', '') <> 'paused'`,
           ),
         )
         .groupBy(requestMessages.requestId),
