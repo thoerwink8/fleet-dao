@@ -315,6 +315,32 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
     expect(run.why).toContain('没配');
   });
 
+  it('【故意造出的失败】等你拍板、引擎问你的飞书没推成或整部分抛了：这一轮不记 ok，写明是哪一部分', async () => {
+    const unchecked = await runHourlyReconcileJob(
+      harness({
+        awaitingPush: async () => ({
+          scanned: 1,
+          found: 0,
+          unchecked: [
+            '等你拍板，飞书没推成：驾驶舱地址没配：引擎环境里没有 FLEET_PUBLIC_URL，这条通知推不出去',
+          ],
+        }),
+      }).deps,
+    );
+    expect(unchecked.outcome).toBe('partial');
+    expect(unchecked.why).toContain('驾驶舱地址没配');
+
+    const threw = await runHourlyReconcileJob(
+      harness({
+        awaitingPush: async () => {
+          throw new Error('库连不上');
+        },
+      }).deps,
+    );
+    expect(threw.outcome).not.toBe('ok');
+    expect(threw.why).toContain('等你拍板、引擎问你的飞书推送没跑成：库连不上');
+  });
+
   it('【故意造出的失败】读合了的 PR 的记账没成：这一轮不记 ok，写明是记账那部分', async () => {
     const h = harness({
       ledgers: async () => {

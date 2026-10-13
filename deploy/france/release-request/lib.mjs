@@ -913,9 +913,9 @@ function buttonHint(state, kind) {
 
 /**
  * 推给飞书的一句话（#2026）：目标提交、结果、要点哪个按钮。kind：start 开始、done 成功、check 发完但体检没通过（算卡住）、
- * blocked 卡住、failed 失败。
+ * blocked 卡住、failed 失败。cockpit 是驾驶舱「法国」页的完整链接，每条通知都带（F1 #2051）；不给就不带（只给测试看正文用）。
  */
-export function releaseMessage(kind, state) {
+export function releaseMessage(kind, state, cockpit) {
   const sha = String(state.target?.value ?? '').slice(0, 12);
   const step = `第 ${state.phase} 步「${PHASES[state.phase] ?? '?'}」`;
   const bad = (state.check?.items ?? []).filter((x) => !x.ok).map((x) => x.name);
@@ -929,13 +929,18 @@ export function releaseMessage(kind, state) {
     blocked: `【发版卡住】${sha} 停在${step}：${state.why ?? ''}`,
     failed: `【发版失败】${sha} ${step}没成：${state.why ?? ''}`,
   }[kind];
-  return `${text}。${buttonHint(state, kind)}。`.replace(/\s+/g, ' ').slice(0, 900);
+  const body = `${text}。${buttonHint(state, kind)}。`.replace(/\s+/g, ' ').slice(0, 800);
+  return cockpit ? `${body} 驾驶舱：${cockpit}` : body;
 }
+
+/** 通知里的驾驶舱链接落在「法国」页（发版卡在那）。 */
+const COCKPIT_FRANCE_PATH = '/france';
 
 /** 推一条飞书；推不出去只记下来（stderr、进度里的 pushes），不拦发版、不当成推过。 */
 async function push(io, state, kind, persist = true) {
-  const text = releaseMessage(kind, state);
   try {
+    // 链接没配也抛：记成没推成，不拿一条没有驾驶舱链接的通知冒充推过
+    const text = releaseMessage(kind, state, io.cockpitLink(COCKPIT_FRANCE_PATH));
     await io.notify(text);
     state.pushes.push({ kind, ok: true });
   } catch (e) {
@@ -980,7 +985,7 @@ function writeOutcome(io, state, req, outcome) {
  *   发后体检（#2026）：currentRelease() → Promise<{ ok, sha } | { ok: false, why }>（current 链接）、
  *   healthz() → Promise<{ status, body, error? }>（后端 /healthz）、mainHead(sha) → Promise<{ ok, sha, behind } | { ok: false, why }>
  *   （取最新主线，主线头和它比 sha 多几个提交）、repoSwitches() → Promise<{ ok, repos: { 仓: since|null } } | { ok: false, why }>，
- *   notify(text) → Promise<void>（推飞书，推不出去就抛）,
+ *   notify(text) → Promise<void>（推飞书，推不出去就抛）, cockpitLink(path) → string（驾驶舱某一页的完整链接，没配就抛）,
  * }。返回退出码。
  */
 export async function runRequest(io) {

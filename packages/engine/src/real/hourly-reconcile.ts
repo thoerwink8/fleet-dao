@@ -17,6 +17,7 @@ import {
   issueWorkFacts,
   lastSessionByTree,
   latestAlertByPrefix,
+  listAwaitingMe,
   listManagedRepos,
   listOpenAlerts,
   listOpenTaskRows,
@@ -30,6 +31,7 @@ import {
   recordAlertFiling,
   recordWorktreeCleanupDone,
   recordWorktreeCleanupStart,
+  resolveAlertByKey,
   resolveAlertWithReason,
   saveWorktreeInventory,
   startScheduleRun,
@@ -48,7 +50,9 @@ import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
 import { alertRepoFromText } from '../jobs/alert-sweep.ts';
 import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
+import { pushAwaitingMe } from '../jobs/awaiting-push.ts';
 import { CLOSED_ISSUE_ABANDON_BY } from '../jobs/closed-issue-tasks.ts';
+import { COCKPIT_URL_ENV, cockpitLink } from '../jobs/cockpit-link.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import {
@@ -602,6 +606,7 @@ export function hourlyReconcileJob(
             });
           },
           send: feishuWebhookSender({ env: process.env }),
+          cockpit: (path) => cockpitLink(process.env[COCKPIT_URL_ENV], path),
         }),
       mainRedPush: () =>
         pushMainRed({
@@ -636,6 +641,34 @@ export function hourlyReconcileJob(
             });
           },
           send: feishuWebhookSender({ env: process.env }),
+          cockpit: (path) => cockpitLink(process.env[COCKPIT_URL_ENV], path),
+        }),
+      awaitingPush: () =>
+        pushAwaitingMe({
+          now,
+          list: async (since) =>
+            (await listAwaitingMe(w.db, { since })).map((x) => ({
+              kind: x.kind,
+              id: x.id,
+              taskId: x.taskId,
+              title: x.title,
+              detail: x.detail,
+            })),
+          sentBody: async (key) => (await alertByKey(w.db, key))?.body ?? null,
+          markSent: async (x) => {
+            // 推过记在提醒表里当去重；立刻标成已处理，不占驾驶舱「提醒」的位置（按键还查得到）
+            await upsertAlert(w.db, {
+              dedupeKey: x.dedupeKey,
+              level: 'daily',
+              taskId: null,
+              title: x.title,
+              body: x.body,
+              link: x.link,
+            });
+            await resolveAlertByKey(w.db, { dedupeKey: x.dedupeKey, by: 'engine:feishu-push', at: now() });
+          },
+          send: feishuWebhookSender({ env: process.env }),
+          cockpit: (path) => cockpitLink(process.env[COCKPIT_URL_ENV], path),
         }),
       now,
       log,

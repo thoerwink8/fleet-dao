@@ -4,6 +4,7 @@
 import type { ScheduleResult } from '@fleet-dao/db';
 import type { GhRequest, GhResponse } from '@fleet-dao/github';
 import { describe, expect, it } from 'vitest';
+import { cockpitLink } from '../src/jobs/cockpit-link.ts';
 import { type HourlyReconcileJobDeps, runHourlyReconcileJob } from '../src/jobs/hourly-reconcile.ts';
 import {
   judgeMainCi,
@@ -22,6 +23,7 @@ const SHA = 'a'.repeat(40);
 const SHA2 = 'b'.repeat(40);
 const URL = 'https://github.com/thoerwink8/fleet-dao/actions/runs/99';
 const URL2 = 'https://github.com/thoerwink8/fleet-dao/actions/runs/100';
+const COCKPIT = 'https://cockpit.example.test';
 const HOOK = 'https://open.feishu.cn/open-apis/bot/v2/hook/fake-hook-token-for-logs';
 const NOW = new Date('2026-10-10T01:41:00.000Z');
 
@@ -64,6 +66,7 @@ function world() {
         verdict = x.verdict;
       },
       send,
+      cockpit: (path) => cockpitLink(COCKPIT, path),
     });
   return {
     sent,
@@ -155,8 +158,33 @@ describe('pushMainRed', () => {
     expect(text).toContain(URL);
     expect(text).toContain('test (engine)');
     expect(text).toContain('lint');
+    expect(text).toContain('驾驶舱：https://cockpit.example.test/');
     expect(w.marked.map((m) => m.key)).toEqual([`feishu:main-red:${SHA}`]);
     expect(w.marked[0]?.body).toBe(text);
+  });
+
+  it('【故意造出的失败】驾驶舱地址没配：没查成，不推、不记已推、不改结论', async () => {
+    const sent: string[] = [];
+    const marked: string[] = [];
+    let remembered = 0;
+    const part = await pushMainRed({
+      listPushRuns: async () => [run()],
+      previousVerdict: async () => null,
+      sentBody: async () => null,
+      markSent: async (x) => {
+        marked.push(x.dedupeKey);
+      },
+      rememberVerdict: async () => {
+        remembered += 1;
+      },
+      send: async (text) => {
+        sent.push(text);
+      },
+      cockpit: (path) => cockpitLink(undefined, path),
+    });
+    expect(part.found).toBe(0);
+    expect(part.unchecked.join()).toContain('驾驶舱地址没配');
+    expect({ sent, marked, remembered }).toEqual({ sent: [], marked: [], remembered: 0 });
   });
 
   it('同一个提交再次变红不再推，结论仍改成红，之后别的提交转绿推已恢复', async () => {
@@ -177,6 +205,7 @@ describe('pushMainRed', () => {
     expect(text).toContain('已恢复');
     expect(text).toContain(SHA2.slice(0, 7));
     expect(text).toContain(urlB);
+    expect(text).toContain('驾驶舱：https://cockpit.example.test/');
     expect(w.marked.filter((m) => m.key === `feishu:main-recovered:${SHA2}`)).toHaveLength(1);
   });
 
@@ -671,6 +700,7 @@ describe('对账里的主线红', () => {
           remembered += 1;
         },
         send,
+        cockpit: (path) => cockpitLink(COCKPIT, path),
       }),
     );
     const result = await runHourlyReconcileJob(h.deps);

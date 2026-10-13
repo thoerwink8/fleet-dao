@@ -1,10 +1,8 @@
-// 意图（#553 第 4 条，specs/553-对题/方案.md 末节「2026-10-04 拍板」）的判法只有这一份：切段（这句归哪段）、同一条消息
-// 再来算重放还是改过、卡什么时候该发、卡上写什么、给指挥官看的样子。内存版和 Postgres 版存储（intent-store*.ts）都照它。
+// 意图（#553 第 4 条，specs/553-对题/方案.md 末节「2026-10-04 拍板」）的判法只有这一份：写回归纳、放下让不让，
+// 卡上写什么、给指挥官看的样子。内存版和 Postgres 版存储（intent-store*.ts）都照它。飞书收缩后（F1 #2051）网关不再写意图库，
+// 切段、重放和改过、撤回、卡的回执这些收话的判法已删；库里已有的意图和原话照旧能读。
 // 改这里之前必须知道：
 // - 原话原样：这里只排序、计数、拼卡上的字，从不改原话；AI 归纳只在指挥官写回之后才上卡，永远不进原话。
-// - 切段按顺序判，第一条命中就定：「@机器人 另起」→ 同一个话题 → 回复了某段里的话或某段的卡 → 同一会话 15 分钟内。
-//   「另起」放第一（方案 5.1 写的是第三）：它是人明说的口令，回复卡、在话题里说「另起」也该另起。
-//   要接的那段已经开成单或放下了，就另起一段、记下接着哪段，不往开成的单里塞。
 // - 时刻一律 ISO 字符串（和 ports.ts 一样）；卡上的时刻按北京时间（没有夏令时，固定 +8）。
 import { createHash } from 'node:crypto';
 import type {
@@ -22,13 +20,8 @@ export type IntentMessageSource = z.infer<typeof IntentMessageSourceSchema>;
 export type IntentDetail = z.infer<typeof IntentDetailSchema>;
 export type IntentCard = z.infer<typeof IntentCardSchema>;
 
-/** 同一会话里两句话隔多久以内算同一段。 */
-export const SEGMENT_WINDOW_MS = 15 * 60_000;
 /** 停下来多久出卡：私聊 90 秒，群里 5 分钟（不在两人说到一半时插一张卡）。@机器人 的马上出。 */
 export const CARD_QUIET_MS: Readonly<Record<IntentChatKind, number>> = { p2p: 90_000, group: 5 * 60_000 };
-/** 卡连着没发成：第 n 次之后隔多久再给网关（第 4 次起每小时一次，不停：卡是「说了就算交出去了」的回执）。 */
-const CARD_RETRY_MS = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000] as const;
-
 export interface IntentLink {
   issue: string;
   by: string;
@@ -99,167 +92,11 @@ export function contentHash(rawContent: string): string {
   return createHash('sha256').update(rawContent, 'utf8').digest('hex');
 }
 
-// —— 切段 ——
-
-export interface SegmentCandidate {
-  id: string;
-  seq: number;
-  status: IntentStatus;
-  threadId?: string | undefined;
-}
-
-export interface SegmentFacts {
-  sentAt: string;
-  threadId?: string | undefined;
-  /** 「@机器人 另起」。 */
-  newSegment: boolean;
-  /** 同一会话里同一个话题最近开的那段。 */
-  thread?: SegmentCandidate | undefined;
-  /** parentId 指到的那段：回复了某段里的话，或回复了某段的意图卡。 */
-  parent?: SegmentCandidate | undefined;
-  /** 同一会话、不在话题里、发出时刻不晚于这条的最近一条原话，和它所在的那段。 */
-  before?: { at: string; intent: SegmentCandidate } | undefined;
-  /** 同一会话、不在话题里、发出时刻晚于这条的最早一条（补漏乱序时才会有）。 */
-  after?: { at: string; intent: SegmentCandidate } | undefined;
-}
-
-export type SegmentRule = 'command' | 'thread' | 'reply' | 'window' | 'fresh';
-
-export type SegmentDecision =
-  | { kind: 'join'; intentId: string; rule: SegmentRule; adoptThread?: string | undefined }
-  | { kind: 'new'; rule: SegmentRule; continuesId?: string | undefined; threadId?: string | undefined };
-
-/** 这句归哪段：按顺序判，第一条命中就定（见文件开头）。 */
-export function decideSegment(f: SegmentFacts): SegmentDecision {
-  const into = (c: SegmentCandidate, rule: SegmentRule, threadId?: string): SegmentDecision =>
-    c.status === 'new'
-      ? {
-          kind: 'join',
-          intentId: c.id,
-          rule,
-          ...(threadId !== undefined && c.threadId === undefined ? { adoptThread: threadId } : {}),
-        }
-      : { kind: 'new', rule, continuesId: c.id, ...(threadId === undefined ? {} : { threadId }) };
-
-  if (f.newSegment) {
-    return { kind: 'new', rule: 'command', ...(f.threadId === undefined ? {} : { threadId: f.threadId }) };
-  }
-  if (f.threadId !== undefined) {
-    if (f.thread) return into(f.thread, 'thread', f.threadId);
-    if (f.parent) return into(f.parent, 'reply', f.threadId);
-    return { kind: 'new', rule: 'fresh', threadId: f.threadId };
-  }
-  if (f.parent) return into(f.parent, 'reply');
-  const at = Date.parse(f.sentAt);
-  const near = (x: { at: string } | undefined) =>
-    x !== undefined && Math.abs(at - Date.parse(x.at)) < SEGMENT_WINDOW_MS;
-  if (f.before && near(f.before)) return into(f.before.intent, 'window');
-  if (f.after && near(f.after)) return into(f.after.intent, 'window');
-  return { kind: 'new', rule: 'fresh' };
-}
-
-// —— 同一条消息再来 ——
-
-export type RepeatVerdict =
-  | { kind: 'replayed' }
-  | { kind: 'edit' }
-  /** 比存下的那版还旧的一版晚到了：记进旧版本里，最新的不动。 */
-  | { kind: 'older_edit' }
-  | { kind: 'reused'; why: string };
-
-/** 同一个消息编号再来：重放、改过的新一版、晚到的旧一版，还是网关出了错（换了人、换了会话、换了内容又没说改过）。 */
-export function judgeRepeat(
-  stored: Pick<IntentMessageRecord, 'senderUserId' | 'chatId' | 'contentHash' | 'edits' | 'editedAt'>,
-  incoming: { senderUserId: string; chatId: string; contentHash: string; editedAt?: string | undefined },
-): RepeatVerdict {
-  if (stored.senderUserId !== incoming.senderUserId) {
-    return { kind: 'reused', why: '这个飞书消息编号已经记在另一个人名下了' };
-  }
-  if (stored.chatId !== incoming.chatId) {
-    return { kind: 'reused', why: '这个飞书消息编号已经记在另一个会话里了' };
-  }
-  const known =
-    stored.contentHash === incoming.contentHash ||
-    stored.edits.some((e) => e.contentHash === incoming.contentHash);
-  if (known) return { kind: 'replayed' };
-  if (incoming.editedAt === undefined) {
-    return { kind: 'reused', why: '这个飞书消息编号已经存过别的内容，这次又没说是改过的' };
-  }
-  if (stored.editedAt === undefined || Date.parse(incoming.editedAt) > Date.parse(stored.editedAt)) {
-    return { kind: 'edit' };
-  }
-  return { kind: 'older_edit' };
-}
-
-/** 改过的新一版到了：旧的那版进 edits（旧的在前），最新的换上。 */
-export function applyEdit(
-  stored: IntentMessageRecord,
-  incoming: { text: string; rawContent: string; contentHash: string; editedAt: string; msgType: string },
-): IntentMessageRecord {
-  return {
-    ...stored,
-    msgType: incoming.msgType,
-    text: incoming.text,
-    rawContent: incoming.rawContent,
-    contentHash: incoming.contentHash,
-    editedAt: incoming.editedAt,
-    edits: [
-      ...stored.edits,
-      {
-        text: stored.text,
-        rawContent: stored.rawContent,
-        contentHash: stored.contentHash,
-        replacedAt: incoming.editedAt,
-      },
-    ],
-  };
-}
-
-/**
- * 晚到的旧一版（它的改动时刻比存下的最新一版早）：按每一版「从几点起是这样」排进旧版本，每一版被改掉的时刻是下一版
- * 的起点；最新的那版不动。第一版从发出时刻起。
- */
-export function insertOlderEdit(
-  stored: IntentMessageRecord,
-  incoming: { text: string; rawContent: string; contentHash: string; editedAt: string },
-): IntentMessageRecord {
-  const latestSince = stored.editedAt;
-  if (latestSince === undefined) throw new Error('存下的这条没改过，不会有比它旧的一版');
-  const chain: { text: string; rawContent: string; contentHash: string; since: string }[] = [];
-  let since = stored.sentAt;
-  for (const e of stored.edits) {
-    chain.push({ text: e.text, rawContent: e.rawContent, contentHash: e.contentHash, since });
-    since = e.replacedAt;
-  }
-  chain.push({
-    text: incoming.text,
-    rawContent: incoming.rawContent,
-    contentHash: incoming.contentHash,
-    since: incoming.editedAt,
-  });
-  chain.sort((a, b) => Date.parse(a.since) - Date.parse(b.since));
-  return {
-    ...stored,
-    edits: chain.map((v, i) => ({
-      text: v.text,
-      rawContent: v.rawContent,
-      contentHash: v.contentHash,
-      replacedAt: chain[i + 1]?.since ?? latestSince,
-    })),
-  };
-}
-
 // —— 卡什么时候该发 ——
 
 /** 卡上看得出的变化之后，卡该在什么时候发（改）：急的（@机器人、写回归纳、开成单、放下）马上，别的等停下来。 */
 export function cardDueAt(chatKind: IntentChatKind, now: Date, urgent: boolean): string {
   return new Date(now.getTime() + (urgent ? 0 : CARD_QUIET_MS[chatKind])).toISOString();
-}
-
-/** 卡第 attempts 次没发成之后，什么时候再给网关。 */
-export function cardRetryAt(attempts: number, now: Date): string {
-  const wait = CARD_RETRY_MS[Math.min(Math.max(attempts, 1), CARD_RETRY_MS.length) - 1] ?? 60 * 60_000;
-  return new Date(now.getTime() + wait).toISOString();
 }
 
 /** 这段改了：版本加 1；卡上看得出的（card 不是 null）卡的版本也加 1、按急不急定到期。改字只加版本。 */
@@ -274,36 +111,6 @@ export function bumped(i: IntentRecord, now: Date, card: { urgent: boolean } | n
 /** 这段一条可读的原话都没有（全撤回了）：开不了单。 */
 export const hasLiveMessage = (messages: readonly IntentMessageRecord[]) =>
   messages.some((m) => m.recalledAt === undefined);
-
-/**
- * 这一段有卡在等着发：定了到期时刻、卡上显示的不是最新一版（没发过也算）、而且有东西可发（卡发过、或还有一条可读的原话）。
- * pg 版把同样的三条写在 dueCards 的 SQL 里（card_due_at、card_shown_rev < card_rev、exists 一条没撤回的原话），改这里要对着改。
- */
-export const isCardPending = (card: IntentRecord['card'], hasLive: boolean): boolean =>
-  card.dueAt !== undefined &&
-  (card.shownRev === undefined || card.shownRev < card.rev) &&
-  (card.messageId !== undefined || hasLive);
-
-/** 到期的卡按到期先后、同一刻按段号排（pg 版是 order by card_due_at, seq）。 */
-export const byCardDue = (a: IntentRecord, b: IntentRecord): number =>
-  Date.parse(a.card.dueAt ?? '') - Date.parse(b.card.dueAt ?? '') || a.seq - b.seq;
-
-/** 回执里说的段不存在（认不出、不是合法编号）：跳过时写的原因。 */
-export const NO_SUCH_INTENT = '没有这段意图';
-
-/**
- * 撤回事件和库里已有的对不上会话：消息记在另一个会话（原话那边）、或这个消息编号的撤回已记在另一个会话（墓碑那边），
- * 回原因，没冲突回 undefined。原话那边先判。
- */
-export function recallConflict(
-  stored: { chatId: string } | undefined,
-  tombstone: { chatId: string } | undefined,
-  chatId: string,
-): string | undefined {
-  if (stored && stored.chatId !== chatId) return '要撤回的这条原话记在另一个会话里';
-  if (tombstone && tombstone.chatId !== chatId) return '这个消息编号的撤回已经记在另一个会话里';
-  return undefined;
-}
 
 export type LinkPlan =
   | { status: 'linked' | 'added' | 'updated'; next: IntentRecord }
@@ -349,40 +156,6 @@ export function planDrop(i: IntentRecord, input: { reason: string; operator: str
       ...bumped(i, now, { urgent: true }),
       status: 'dropped',
       dropped: { reason: input.reason, by: input.operator, at: now.toISOString() },
-    },
-  };
-}
-
-export type AckPlan = { kind: 'apply'; card: IntentRecord['card'] } | { kind: 'skip'; why: string };
-
-/** 卡的回执：发了、改了记下卡的编号和显示到第几版（是最新的就不用再发）；没发成记原因、过一阵再给。 */
-export function planAck(
-  i: IntentRecord,
-  ack: {
-    cardRev: number;
-    result: { status: 'sent' | 'updated'; messageId: string } | { status: 'failed'; error: string };
-  },
-  now: Date,
-): AckPlan {
-  if (ack.cardRev > i.card.rev) {
-    return { kind: 'skip', why: `回执说的是第 ${ack.cardRev} 版，库里最新才第 ${i.card.rev} 版` };
-  }
-  if (ack.result.status === 'failed') {
-    const attempts = i.card.attempts + 1;
-    return {
-      kind: 'apply',
-      card: { ...i.card, attempts, error: ack.result.error, dueAt: cardRetryAt(attempts, now) },
-    };
-  }
-  return {
-    kind: 'apply',
-    card: {
-      rev: i.card.rev,
-      shownRev: Math.max(i.card.shownRev ?? 0, ack.cardRev),
-      messageId: ack.result.messageId,
-      dueAt: ack.cardRev >= i.card.rev ? undefined : i.card.dueAt,
-      attempts: 0,
-      error: undefined,
     },
   };
 }
