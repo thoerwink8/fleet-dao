@@ -75,6 +75,13 @@ describe('全读到的一笔', () => {
     expect(v.unread).toEqual([]);
   });
 
+  it('CPU 秒数照给；0 和没记都不给，不当成 0（#1980）', () => {
+    expect(read(run({ cpuSeconds: 720 })).cpuSeconds).toBe(720);
+    expect(read(run({ cpuSeconds: 0 })).cpuSeconds).toBeUndefined();
+    expect(read(run()).cpuSeconds).toBeUndefined();
+    expect(read(run({ cpuSeconds: 0 })).unread).toEqual([]);
+  });
+
   it('对题、验收没有派工档是对的（只有动手段分档）：不记没读到', () => {
     for (const segment of ['scope', 'verify']) {
       expect(read(without(run({ segment }), 'tier')).unread).toEqual([]);

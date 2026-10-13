@@ -86,6 +86,69 @@ describe('taskFlow：现在在哪一段', () => {
   });
 });
 
+describe('lastSession：上一次收场的会话（#1980）', () => {
+  it('带上内存峰值和 CPU 秒数；还在跑的那笔不算上一次', () => {
+    const f = taskFlow({ state: 'running' }, [
+      view({
+        segment: 'manual',
+        startedAt: at(0),
+        endedAt: at(4),
+        outcome: 'done',
+        memoryPeakMb: 3584,
+        cpuSeconds: 720,
+      }),
+      view({ segment: 'verify', startedAt: at(5) }),
+    ]);
+    expect(f.worker).toBe('Opus 5.5');
+    expect(f.lastSession).toEqual({
+      memory: { state: 'ok', peakMb: 3584 },
+      cpu: { state: 'ok', seconds: 720 },
+    });
+  });
+
+  it('取最近一次收场的；CPU 没记、记了 0 都写没读到，不写 0', () => {
+    const f = taskFlow({ state: 'running' }, [
+      view({
+        segment: 'manual',
+        startedAt: at(0),
+        endedAt: at(5),
+        outcome: 'done',
+        memoryPeakMb: 3584,
+        cpuSeconds: 720,
+      }),
+      view({
+        segment: 'verify',
+        startedAt: at(6),
+        endedAt: at(8),
+        outcome: 'done',
+        memoryPeakMb: 100,
+        cpuSeconds: 0,
+      }),
+    ]);
+    expect(f.lastSession).toEqual({
+      memory: { state: 'ok', peakMb: 100 },
+      cpu: { state: 'unread', why: '上一次会话没记 CPU 秒数' },
+    });
+  });
+
+  it('内存峰值没记：写没读到，不拿 0 顶', () => {
+    const f = taskFlow({ state: 'running' }, [
+      view({ segment: 'manual', startedAt: at(0), endedAt: at(3), outcome: 'done', cpuSeconds: 45 }),
+    ]);
+    expect(f.lastSession).toEqual({
+      memory: { state: 'unread', why: '上一次会话没记内存峰值' },
+      cpu: { state: 'ok', seconds: 45 },
+    });
+  });
+
+  it('一笔都没收场：不给 lastSession', () => {
+    expect(
+      taskFlow({ state: 'running' }, [view({ segment: 'manual', startedAt: at(1) })]).lastSession,
+    ).toBeUndefined();
+    expect(taskFlow({ state: 'running' }, []).lastSession).toBeUndefined();
+  });
+});
+
 describe('flowStages：图头三格', () => {
   it('固定三项、按在途数泳道；平均只算 done 且起止读得出来的；没有样本不给平均', () => {
     const runs = [

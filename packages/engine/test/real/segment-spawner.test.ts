@@ -9,6 +9,7 @@ import type { RateLimitReading, RunFacts, SessionUser } from '@fleet-dao/adapter
 import type { Db, RouteLaunchFacts, TranscriptRow } from '@fleet-dao/db';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CarpoolRejection } from '../../src/jobs/carpool-outage.ts';
+import type { CpuUsageDeps } from '../../src/real/cpu-usage.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
 import type { MemoryPeakDeps } from '../../src/real/memory-peak.ts';
 import {
@@ -97,6 +98,8 @@ function harness(
     onCarpoolRejection?: (rejection: CarpoolRejection) => void;
     /** 给了就采 scope 的内存峰值（#948）；readText 假的，不碰真 cgroup。 */
     memoryPeak?: MemoryPeakDeps;
+    /** 给了就采 scope 的 CPU 秒数（#1980）；readText 假的，不碰真 cgroup。 */
+    cpuUsage?: CpuUsageDeps;
     /** 会话过程记录（#1640）写到哪；不给就不记。 */
     transcriptWrite?: (runId: string, rows: TranscriptRow[]) => Promise<void>;
   } = {},
@@ -144,6 +147,7 @@ function harness(
     resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
     ...(opts.db ? { db: opts.db } : {}),
     ...(opts.memoryPeak ? { memoryPeak: opts.memoryPeak } : {}),
+    ...(opts.cpuUsage ? { cpuUsage: opts.cpuUsage } : {}),
     ...(opts.transcriptWrite ? { transcriptWrite: opts.transcriptWrite, transcriptFlushMs: 5 } : {}),
     ...(opts.onCarpoolRejection ? { onCarpoolRejection: opts.onCarpoolRejection } : {}),
     log: (message, fields) => void logs.push(`${message} ${JSON.stringify(fields ?? {})}`),
@@ -250,6 +254,67 @@ describe('hostSegmentSpawner · 内存峰值（#948）', () => {
     const r = await h.run();
     expect(h.recorded[0]).not.toHaveProperty('memoryPeakMb');
     expect(r.facts).not.toHaveProperty('memoryPeakWhy');
+  });
+});
+
+describe('hostSegmentSpawner · CPU 秒数（#1980）', () => {
+  const FAKE_CPU = (readText: CpuUsageDeps['readText']): CpuUsageDeps => ({
+    readText,
+    cgroupRoot: '/sys/fs/cgroup',
+    slicePath: 'fleet.slice/fleet-agents.slice',
+    intervalMs: 5,
+  });
+  const afterAWhile = () => new Promise((r) => setTimeout(r, 40));
+  const stat = (usec: number) => `usage_usec ${usec}\nuser_usec 1\nsystem_usec 1\n`;
+
+  it('收场时把 cpu.stat 的 usage_usec 折成秒写进 runs；读的是这个会话自己的 scope', async () => {
+    const paths: string[] = [];
+    const h = harness({
+      cpuUsage: FAKE_CPU(async (path) => {
+        paths.push(path);
+        return stat(720_000_000);
+      }),
+      driverRun: async () => {
+        await afterAWhile();
+        return report();
+      },
+    });
+    const r = await h.run();
+    expect(r.outcome).toBe('done');
+    expect(h.recorded[0]?.cpuSeconds).toBe(720);
+    expect(paths[0]).toBe(
+      `/sys/fs/cgroup/fleet.slice/fleet-agents.slice/fleet-agent-${RUN_ID}.scope/cpu.stat`,
+    );
+  });
+
+  it('【故意造出的失败】cpu.stat 一直不在、或 usage_usec 是 0：runs 那一列留空、不写 0，原因进日志', async () => {
+    for (const readText of [
+      async () => {
+        throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' });
+      },
+      async () => stat(0),
+    ]) {
+      const h = harness({
+        cpuUsage: FAKE_CPU(readText),
+        driverRun: async () => {
+          await afterAWhile();
+          return report();
+        },
+      });
+      const r = await h.run();
+      expect(r.outcome).toBe('done');
+      expect(h.recorded[0]).not.toHaveProperty('cpuSeconds');
+      expect(h.recorded[0]?.cpuSeconds).not.toBe(0);
+      expect(r.facts?.cpuWhy).toBeTruthy();
+      expect(h.logs.join('\n')).toContain('会话 CPU 没读到');
+    }
+  });
+
+  it('不给 cpuUsage：不采、不记原因，那一列留空', async () => {
+    const h = harness();
+    const r = await h.run();
+    expect(h.recorded[0]).not.toHaveProperty('cpuSeconds');
+    expect(r.facts).not.toHaveProperty('cpuWhy');
   });
 });
 

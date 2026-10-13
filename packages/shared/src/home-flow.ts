@@ -38,6 +38,34 @@ export interface TaskFlow {
   stageSince?: string;
   worker?: string;
   lastEvent?: LastEvent;
+  /** 上一次收场的会话。还在跑的那笔不算；内存、CPU 没记各自写 unread，不写 0（#1980）。 */
+  lastSession?: LastSession;
+}
+
+type LastSession = NonNullable<HomeRunning['lastSession']>;
+
+const MEMORY_UNREAD = '上一次会话没记内存峰值';
+const CPU_UNREAD = '上一次会话没记 CPU 秒数';
+
+/** 收场先后：有结束时刻用结束时刻，没有就用起跑时刻。还在跑的、段名认不出的不算上一次。 */
+function lastSessionOf(runs: readonly SegmentRunView[]): LastSession | undefined {
+  let latest: SegmentRunView | undefined;
+  for (const r of runs) {
+    if (r.running || r.segment === null) continue;
+    const key = r.endedAt ?? r.startedAt ?? '';
+    const prev = latest ? (latest.endedAt ?? latest.startedAt ?? '') : '';
+    if (!latest || prev <= key) latest = r;
+  }
+  if (!latest) return undefined;
+  const peak = latest.memoryPeakMb;
+  const cpu = latest.cpuSeconds;
+  return {
+    memory:
+      peak !== undefined && peak > 0
+        ? { state: 'ok', peakMb: peak }
+        : { state: 'unread', why: MEMORY_UNREAD },
+    cpu: cpu !== undefined && cpu > 0 ? { state: 'ok', seconds: cpu } : { state: 'unread', why: CPU_UNREAD },
+  };
 }
 
 const RUNNING_OF: Record<SegmentKind, HomeSegment> = {
@@ -83,13 +111,15 @@ export function taskFlow(task: Pick<Task, 'state'>, runs: readonly SegmentRunVie
     }
   }
   const merging = task.state === 'merging';
+  const last = lastSessionOf(runs);
+  const past = last ? { lastSession: last } : {};
   if (!latest || latest.segment === null) {
-    if (merging) return { segment: 'merge' };
-    if (task.state === 'queued' || task.state === 'triaging') return { segment: 'scoping' };
-    return { segment: null };
+    if (merging) return { segment: 'merge', ...past };
+    if (task.state === 'queued' || task.state === 'triaging') return { segment: 'scoping', ...past };
+    return { segment: null, ...past };
   }
   const lastEvent = lastEventOf(latest);
-  const base = { ...(lastEvent ? { lastEvent } : {}) };
+  const base = { ...(lastEvent ? { lastEvent } : {}), ...past };
   if (latest.running) {
     return {
       segment: merging ? 'merge' : RUNNING_OF[latest.segment],

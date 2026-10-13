@@ -56,6 +56,7 @@ import { carpoolRegistry } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
 import { ciTimingsJob } from './ci-timings.ts';
 import { cliVersionsJob } from './cli-versions.ts';
+import { productionCpuUsage } from './cpu-usage.ts';
 import { drainNotifier } from './drain-alerts.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
 import { gitNetworkEnv } from './git-env.ts';
@@ -870,6 +871,8 @@ export function realPortsFromEnv(
     resources: { memoryHighMb: SESSION_MEMORY_HIGH_MB, memoryMaxMb: SESSION_MEMORY_MAX_MB, swapMaxMb: 0 },
     // 会话 scope 的内存峰值写进 runs（#948）：边跑边读 cgroup 的 memory.peak
     memoryPeak: productionMemoryPeak(),
+    // 会话用掉的 CPU 秒数写进 runs（#1980）：边跑边读 cpu.stat，收场再读一次 usage_usec
+    cpuUsage: productionCpuUsage(),
     // 拼车池上的会话被拒：证据当场交给切号判（#194 方案 4.3），不等路由探针那一轮；不等结果（切号要等这个会话收场）
     onCarpoolRejection: (rejection) => {
       void orgSwitch.now({ by: '拼车会话被拒', rejection });

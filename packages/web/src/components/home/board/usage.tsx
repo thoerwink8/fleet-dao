@@ -1,5 +1,5 @@
 // 一张单此刻占的内存和 CPU（#1973）：画布卡片、手机树形列表里展开的那张卡都用这一行。
-// 口径在 ../resources.ts 文件头（按单合计、没在跑写「没在占用」、读不到写「没读到」，都不画 0）。
+// 口径在 ../resources.ts 文件头（按单合计、没在跑且没有上次会话写「没在占用」、有上次写峰值和 CPU、读不到写「没读到」，都不画 0）。
 import { Cpu, MemoryStick } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { formatCpu, formatMb, type TicketUsage } from '../resources';
@@ -9,6 +9,8 @@ export function usageTitle(u: TicketUsage): string {
   switch (u.kind) {
     case 'idle':
       return '这一刻没有会话在跑（排队、等人、等验），不占这台机器的内存和 CPU';
+    case 'last':
+      return u.title;
     case 'unread':
       return `内存、CPU 没读到：${u.why}`;
     case 'ok': {
@@ -32,6 +34,13 @@ export function UsageLine({ usage, size = 'canvas' }: { usage: TicketUsage; size
     return (
       <div data-usage="idle" className={cn('truncate text-muted-foreground', text)} title={usageTitle(usage)}>
         没在占用
+      </div>
+    );
+  }
+  if (usage.kind === 'last') {
+    return (
+      <div data-usage="last" className={cn('truncate text-muted-foreground', text)} title={usageTitle(usage)}>
+        {usage.text}
       </div>
     );
   }
@@ -68,6 +77,7 @@ export function UsageLine({ usage, size = 'canvas' }: { usage: TicketUsage; size
 /** 远档卡片单号那一行右边的短写：「1.2G · 42%」；没在占用、没读到写短字。 */
 export function usageShort(u: TicketUsage): string {
   if (u.kind === 'idle') return '没在占用';
+  if (u.kind === 'last') return u.text;
   if (u.kind === 'unread') return '没读到';
   return `${formatMb(u.memoryMb)} · ${u.cpuPercent === undefined ? '采样中' : formatCpu(u.cpuPercent)}`;
 }
