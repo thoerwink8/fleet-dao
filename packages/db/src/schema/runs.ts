@@ -4,8 +4,8 @@
 // 是 #556-4/-5/-6 的活。
 //
 // 关键约束：
-// - 三段各跑一次，字段照 RunRecord：issueNumber / channel / token / costUsd / memoryPeakMb 读不到就不写，
-//   **不拿 0 顶**（#216）；没读到就是 NULL，不是 0。
+// - 三段各跑一次，字段照 RunRecord：issueNumber / channel / token / costUsd / memoryPeakMb / cpuSeconds 读不到就不写，
+//   **不拿 0 顶**（#216、#1980）；没读到就是 NULL，不是 0。cpu_seconds 是加法列，老行不回填。
 // - segment 是「scope | manual | verify」三择一（#554-1 的 RunRecord segment 枚举），写其他任何值都不收。
 // - outcome 是「done | timeout | killed | spawn_failed | admission_blocked | failed | org_switch」（#554-1 的枚举，
 //   org_switch 是切号先停下这一段、切完在原分支上重跑，#59），还在跑的为空；结束了（ended_at 非空）就必须有 outcome，
@@ -119,6 +119,11 @@ export const runs = pgTable(
     usageNote: text('usage_note'),
     /** 内存峰值（MiB）：只对挂在 cgroup 里的会话可读；本机不给。 */
     memoryPeakMb: integer('memory_peak_mb'),
+    /**
+     * 这一次会话用掉的 CPU 秒数（cgroup cpu.stat 的 usage_usec 向上取整成秒，收场时读，#1980）。
+     * 读不到留空，不写 0。老行不回填。
+     */
+    cpuSeconds: integer('cpu_seconds'),
     /** 失败原因（exit code、错误消息），outcome != 'done' 时给。 */
     failureReason: text('failure_reason'),
     /** 这一段交出来的 PR（manual / verify 才多半有；scope 也可能有：对题头可能没动主线就空）。 */
@@ -157,6 +162,7 @@ export const runs = pgTable(
       sql`coalesce(${t.inputTokens}, 0) >= 0 and coalesce(${t.outputTokens}, 0) >= 0 and coalesce(${t.cacheReadTokens}, 0) >= 0 and coalesce(${t.cacheWriteTokens}, 0) >= 0 and coalesce(${t.costUsd}, 0) >= 0`,
     ),
     check('runs_memory_nonneg', sql`${t.memoryPeakMb} is null or ${t.memoryPeakMb} >= 0`),
+    check('runs_cpu_seconds_positive', sql`${t.cpuSeconds} is null or ${t.cpuSeconds} > 0`),
     index('runs_task_idx').on(t.taskId, t.createdAt),
     index('runs_segment_created_idx').on(t.segment, t.createdAt),
     index('runs_workflow_idx').on(t.workflowId),

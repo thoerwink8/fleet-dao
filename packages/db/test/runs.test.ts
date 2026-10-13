@@ -47,6 +47,7 @@ describe('runs 表本身的约束', () => {
       cacheWriteTokens: null,
       costUsd: null,
       memoryPeakMb: null,
+      cpuSeconds: null,
       prNumber: null,
       branch: null,
       workflowId: null,
@@ -55,6 +56,20 @@ describe('runs 表本身的约束', () => {
     });
     expect(row?.endedAt).toEqual(NOW);
     expect(row?.outcome).toBe('done');
+  });
+
+  it('CPU 秒数：正整数记上；没给是 NULL；0 和负数拒收，不写 0（#1980）', async () => {
+    const id = randomUUID();
+    await insertRun({ id, segment: 'manual', cpuSeconds: 720, endedAt: NOW, outcome: 'done' });
+    expect((await t.db.select().from(runs).where(eq(runs.id, id)))[0]?.cpuSeconds).toBe(720);
+    await expectViolation(
+      insertRun({ segment: 'manual', cpuSeconds: 0, endedAt: NOW, outcome: 'done' }),
+      'runs_cpu_seconds_positive',
+    );
+    await expectViolation(
+      insertRun({ segment: 'manual', cpuSeconds: -1, endedAt: NOW, outcome: 'done' }),
+      'runs_cpu_seconds_positive',
+    );
   });
 
   it('派工档：照 tier.ts 的三档收，没记就是 NULL', async () => {

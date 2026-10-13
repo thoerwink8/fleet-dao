@@ -26,6 +26,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import type { CarpoolRejection } from '../jobs/carpool-outage.ts';
 import { hostName } from '../routing/names.ts';
 import type { OneShotSpawner, SpawnFacts, SpawnOutcome } from '../runner/one-shot.ts';
+import { type CpuUsageDeps, type CpuUsageResult, sampleCpuUsage } from './cpu-usage.ts';
 import {
   type HostDriver,
   type HostReport,
@@ -66,6 +67,11 @@ export interface SegmentSpawnerDeps {
    * 不给（测试、没有 cgroup 的开发机）就不采，那一列留空。
    */
   memoryPeak?: MemoryPeakDeps;
+  /**
+   * 会话 scope 的 CPU 秒数怎么读（real/cpu-usage.ts 的 productionCpuUsage）：给了就采、收场时把 cpu.stat 的
+   * usage_usec 折成秒写进 runs.cpu_seconds（#1980）。读不到留空，不写 0。不给（测试、没有 cgroup 的开发机）就不采。
+   */
+  cpuUsage?: CpuUsageDeps;
   /**
    * 会话过程记录怎么写（#1640，run_transcript）：不给就用 db 的 appendRunTranscript（有 db 才记）；测试换假的。
    * 写不进只记日志，不影响这一段的结局。
@@ -249,6 +255,15 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       if (peakResult.why !== undefined) log('会话内存峰值没读到', { runId, why: peakResult.why });
       return peakResult;
     };
+    // CPU 秒数（#1980）：和内存峰值同一段时间采这个 scope 的 cpu.stat；收场那一读在 stop() 里。scope 一收场 cgroup 就没了。
+    const cpu = deps.cpuUsage ? sampleCpuUsage(deps.cpuUsage, runId) : undefined;
+    let cpuResult: CpuUsageResult | undefined;
+    const finishCpu = async (): Promise<CpuUsageResult | undefined> => {
+      if (!cpu || cpuResult) return cpuResult;
+      cpuResult = await cpu.stop();
+      if (cpuResult.why !== undefined) log('会话 CPU 没读到', { runId, why: cpuResult.why });
+      return cpuResult;
+    };
     try {
       const report = await driver.run(spec, {
         signal: cmd.signal,
@@ -263,6 +278,15 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
         outcome.facts = {
           ...outcome.facts,
           ...(measured.mb !== undefined ? { memoryPeakMb: measured.mb } : { memoryPeakWhy: measured.why }),
+        };
+      }
+      const measuredCpu = await finishCpu();
+      if (measuredCpu) {
+        outcome.facts = {
+          ...outcome.facts,
+          ...(measuredCpu.seconds !== undefined
+            ? { cpuSeconds: measuredCpu.seconds }
+            : { cpuWhy: measuredCpu.why }),
         };
       }
       if (
@@ -296,6 +320,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
     } finally {
       await recorder?.close();
       await finishPeak().catch(() => undefined);
+      await finishCpu().catch(() => undefined);
       await deps.trees.remove(tmpDir).catch((err: unknown) => {
         log('一次性段会话的临时目录没删掉（引擎下次起来时的清理会收）', {
           runId,

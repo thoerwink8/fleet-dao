@@ -428,6 +428,13 @@
       "when": 1791818842659,
       "tag": "0060_amazing_phil_sheldon",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1791855152466,
+      "tag": "0061_right_ted_forrester",
+      "breakpoints": true
     }
   ]
 }

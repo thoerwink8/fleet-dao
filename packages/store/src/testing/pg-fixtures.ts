@@ -218,6 +218,7 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         cacheWriteTokens: r.cacheWriteTokens ?? null,
         costUsd: r.costUsd ?? null,
         memoryPeakMb: r.memoryPeakMb ?? null,
+        cpuSeconds: r.cpuSeconds ?? null,
         failureReason: r.failureReason ?? null,
         prNumber: r.prNumber ?? null,
         branch: r.branch ?? null,
