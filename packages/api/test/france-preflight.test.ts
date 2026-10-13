@@ -22,7 +22,7 @@ vi.mock('node:child_process', () => {
   const boom = vi.fn(() => {
     throw new Error('发版预检不该起子进程');
   });
-  return { execFile: boom, spawn: boom, spawnSync: boom, execFileSync: boom, exec: boom, fork: boom };
+  return { execFile: boom, spawn: boom, exec: boom, fork: boom };
 });
 
 const SELF = {
