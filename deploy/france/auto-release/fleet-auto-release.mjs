@@ -1,10 +1,21 @@
 // 自动发布单元的入口（法国，root）：fleet-auto-release.timer 每 5 分钟经 fleet-auto-release.service 拉起一轮。
-// 它现在只读不发（决定 0032、#1258）：发布走驾驶舱按钮。这里不调 release.sh。
+// 它读数，也在主线绿了、满 1 小时间隔时请求发版（决定 0088、#2039）：只写一份和驾驶舱按钮一样的请求文件，
+// 由法国上的接活单元（deploy/france/release-request）去发。这里不调 release.sh。
 // deploy/france.sh 把这个目录装到 /usr/local/lib/fleet-dao/auto-release/（装的是副本：主线上改了它，下一版发完由本入口自己
 // 跑 france.sh --auto-tier 换上，不用人重跑；只有防火墙、sudoers、建用户那几个文件改了才要人重跑，/healthz 才标「装机脚本落后」）。判断和流程在 lib.mjs，这里只接真的 git、GitHub 接口、库。
 // 手动跑一轮：systemctl start fleet-auto-release（别直接跑本文件：两轮叠着跑会互相盖状态文件）。
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { readLive } from './config.mjs';
 import {
@@ -23,6 +34,13 @@ import {
 
 const NODE = '/usr/bin/node';
 const SHA = /^[0-9a-f]{40}$/;
+// 驾驶舱按钮的接活（deploy/france/release-request，人工档）：请求目录、接活单元的两个文件、进度和暂停标记。路径同 release-request/lib.mjs。
+const REQUEST_DIR = '/var/lib/fleet-dao/release-request';
+const REQUEST_FILE = `${REQUEST_DIR}/request.json`;
+const RECEIVER_UNIT = '/etc/systemd/system/fleet-release-request.path';
+const RECEIVER_SCRIPT = '/usr/local/lib/fleet-dao/release-request/fleet-release-request.mjs';
+const TRAIN_STATE = `${RELEASES}/.train/release-train.json`;
+const TRAIN_MARKER = `${RELEASES}/.train/release-train.paused`;
 const tail = (text, n = 3) =>
   String(text ?? '')
     .trim()
@@ -117,6 +135,43 @@ export const realIo = {
     }
     if (!SHA.test(target)) throw new Error(`${RELEASES}/current 指着认不出的「${target.slice(0, 60)}」`);
     return target;
+  },
+  /** 法国上一次换版本是什么时候（手动自动都算）：current 这个符号链接自己的修改时间（换版本时新建的）。读不了抛。 */
+  async readReleasedAt() {
+    return lstatSync(`${RELEASES}/current`).mtime.toISOString();
+  },
+  /** 自动发版的闸要的事实（lib.mjs 的 gateVerdict 判）：接活单元装了没有、有没有没被接走的请求、暂停标记、进度记录、发布锁。读不了的抛。 */
+  async releaseGate() {
+    const missing = [RECEIVER_UNIT, RECEIVER_SCRIPT].filter((f) => !existsSync(f));
+    let trainText = null;
+    try {
+      trainText = readFileSync(TRAIN_STATE, 'utf8');
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw new Error(`读不了 ${TRAIN_STATE}：${e.message}`);
+    }
+    const lock = run('flock', ['-n', `${RELEASES}/.lock`, 'true'], { timeoutMs: 10_000 });
+    if (lock.code !== 0 && lock.code !== 1)
+      throw new Error(`flock 退出码 ${lock.code}：${tail(lock.stderr)}`);
+    return {
+      missing,
+      requestPending: existsSync(REQUEST_FILE),
+      marker: existsSync(TRAIN_MARKER),
+      trainText,
+      lockBusy: lock.code === 1,
+    };
+  },
+  /**
+   * 写发版请求：样子同驾驶舱后端（packages/api/src/release-request.ts 的 requestText：{ v, sha, at, by }，键的先后固定），
+   * 先写临时文件再 link 到 request.json（已有一份就失败，不盖掉别人的）。请求目录归 fleet，这里是 root，写得进。
+   */
+  async requestRelease({ sha, at, by }) {
+    const tmp = `${REQUEST_DIR}/.auto-${process.pid}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify({ v: 1, sha, at, by })}\n`, { mode: 0o644 });
+    try {
+      linkSync(tmp, REQUEST_FILE);
+    } finally {
+      unlinkSync(tmp);
+    }
   },
   /** 主线上 ci.yml 最近 CI_RUNS_PAGE 次 push 触发的运行（新的在前）：一轮只问这一次。 */
   async ciRuns() {

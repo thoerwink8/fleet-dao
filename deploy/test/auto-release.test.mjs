@@ -1,4 +1,4 @@
-// 自动发布单元（deploy/france/auto-release/lib.mjs）每条路：只读不发（决定 0032、#1258）。
+// 自动发布单元（deploy/france/auto-release/lib.mjs）每条路：读数 + 主线绿了请求发版（决定 0032 的只读，被 0088 加上自动发，#2039）。
 // 每一轮读主线头、它的 CI、在用的提交、落后几个，没有任何 v<N> 标记的仓上也照常；绝不调发布脚本、不看版本标记；
 // 发完版（驾驶舱按钮）之后顺带装机自动档、同步规矩，没成报警；配置对账；状态文件读不出就什么都不做；
 // 单元还会发版那会儿开的报警新版第一次跑撤一遍。
@@ -15,10 +15,13 @@ import {
   parseFingerprintKey,
 } from '../france/auto-release/config.mjs';
 import {
+  AUTO_RELEASE_BY,
+  AUTO_REQUEST_KEY,
   CI_WORKFLOW,
   CONFIG_PREFIX,
   CONFIG_UNCHECKED_KEY,
   ciVerdict,
+  gateVerdict,
   HUMAN_TIER_PATHS,
   parseMainLog,
   RETIRED_ALERT_PREFIXES,
@@ -222,7 +225,7 @@ test('【故意造出的失败】没有任何 v<N> 标记的仓上读数照常�
   const line = summary(st);
   assert.match(line, /主线头 bbbbbbbbbbbb，CI green/);
   assert.match(line, /在用 aaaaaaaaaaaa，落后主线 1 个提交/);
-  assert.match(line, /发布走驾驶舱按钮/);
+  assert.match(line, /自动发版：这台没接上自动发版/, '没接上自动发版的口子（老 io）就只读，原因写在读数里');
   assert.doesNotMatch(line, /标记/);
   assert.equal(m.saved.length, 0, '存状态归调用方（runRound），runOnce 自己不存');
 });
@@ -888,4 +891,181 @@ test('单元里已经没有发版的口子：入口不接发布脚本、不读�
   }
   assert.match(entry, /--no-tags/, '取主线时不取 tag');
   assert.doesNotMatch(entry, /spawn\(/, '没有起子进程发布的口子（只有 spawnSync 读 git、跑装机脚本）');
+});
+
+// ── 自动发版（决定 0088、#2039）：主线绿了就请求发，闸全过才写请求 ──
+
+const GOOD_GATE = { missing: [], requestPending: false, marker: false, trainText: null, lockBusy: false };
+
+/** 在 machine() 上接好自动发版的三个口子：上一次发版 2 小时前、闸全过、请求记账。 */
+function autoMachine() {
+  const m = machine();
+  m.releasedAt = new Date(T0 - 120 * MIN).toISOString();
+  m.releasedAtThrow = null;
+  m.gate = { ...GOOD_GATE };
+  m.gateThrow = null;
+  m.requests = [];
+  m.requestThrow = null;
+  m.io.readReleasedAt = async () => {
+    if (m.releasedAtThrow) throw new Error(m.releasedAtThrow);
+    return m.releasedAt;
+  };
+  m.io.releaseGate = async () => {
+    if (m.gateThrow) throw new Error(m.gateThrow);
+    return structuredClone(m.gate);
+  };
+  m.io.requestRelease = async (req) => {
+    if (m.requestThrow) throw new Error(m.requestThrow);
+    m.requests.push(req);
+  };
+  return m;
+}
+
+test('主线头落后在用的、CI 绿、距上次发版满 1 小时、闸全过：请求发主线头一次，请求里写明谁发的；5 分钟后那一轮不重复请求', async () => {
+  const m = autoMachine();
+  const st = await m.round();
+  assert.deepEqual(m.requests, [{ sha: H1, at: new Date(T0).toISOString(), by: AUTO_RELEASE_BY }]);
+  assert.equal(st.auto.sha, H1);
+  assert.equal(st.auto.at, new Date(T0).toISOString());
+  assert.equal(st.last.action, 'auto-release-requested');
+  assert.match(summary(st), /自动发版：已请求自动发版 bbbbbbbbbbbb/);
+  assert.ok(/^[\p{L}\p{N}_.@ -]{1,64}$/u.test(AUTO_RELEASE_BY), '「谁发的」要过接活单元的字符规则');
+  // 请求还没被接走、也还没发出去：下一轮不再写（距上一次请求才 5 分钟）
+  m.t += 5 * MIN;
+  const second = await m.round();
+  assert.equal(m.requests.length, 1);
+  assert.match(second.auto.note, /距上一次发版 5 分钟/);
+  assert.equal(second.auto.sha, H1, '上一次请求的记录带到下一轮');
+});
+
+test('【故意造出的失败】不到 1 小时不发：距离算「上一次发版（手动自动都算）」和「上一次自动请求」里更近的那个；满 60 分钟才发', async () => {
+  const m = autoMachine();
+  m.releasedAt = new Date(T0 - 59 * MIN).toISOString(); // 59 分钟前有人点按钮发过
+  const st = await m.round();
+  assert.equal(m.requests.length, 0);
+  assert.match(st.auto.note, /距上一次发版 59 分钟，满 60 分钟再发/);
+  m.t += 1 * MIN; // 刚好满 60 分钟
+  await m.round();
+  assert.equal(m.requests.length, 1, '满 60 分钟就发');
+  // 自动请求之后，哪怕在用的版本一直没换（请求没被接走），也要再隔 60 分钟才请求第二次
+  m.t += 59 * MIN;
+  await m.round();
+  assert.equal(m.requests.length, 1);
+  m.t += 1 * MIN;
+  await m.round();
+  assert.equal(m.requests.length, 2);
+});
+
+test('【故意造出的失败】头的 CI 不是绿的（红、没跑完、没查、读不到）：不发，等绿；绿了的下一轮才发', async () => {
+  for (const [what, ci] of [
+    ['红', runsBody(run(H1, 'completed', 'failure'))],
+    ['没跑完', runsBody(run(H1, 'in_progress', null))],
+    ['读不到', { status: 500, body: '' }],
+  ]) {
+    const m = autoMachine();
+    m.ci = ci;
+    const st = await m.round();
+    assert.equal(m.requests.length, 0, `CI ${what}不发`);
+    assert.match(st.auto.note, /CI 不是绿的/);
+  }
+  const m = autoMachine();
+  m.ci = runsBody(run(H1, 'in_progress', null));
+  await m.round();
+  m.ci = runsBody(run(H1, 'completed', 'success'));
+  m.t += 5 * MIN;
+  await m.round();
+  assert.equal(m.requests.length, 1, '绿了就发');
+});
+
+test('【故意造出的失败】没有要发的 / 不该自动发的：在用的就是主线头、法国还没发布过、在用的不在最近主线里、读不到在用的', async () => {
+  const same = autoMachine();
+  same.current = H1;
+  await same.round();
+  assert.equal(same.requests.length, 0);
+  assert.match(same.state.auto.note, /没有要发的/);
+
+  const never = autoMachine();
+  never.current = null;
+  await never.round();
+  assert.equal(never.requests.length, 0);
+  assert.match(never.state.auto.note, /第一次发版走驾驶舱按钮/);
+
+  const far = autoMachine();
+  far.current = 'e'.repeat(40);
+  await far.round();
+  assert.equal(far.requests.length, 0);
+  assert.match(far.state.auto.note, /不在主线最近的提交里/);
+
+  const dead = autoMachine();
+  dead.currentThrow = '读不到链接';
+  await dead.round();
+  assert.equal(dead.requests.length, 0, '在用的读不到，这一轮不判');
+});
+
+test('【故意造出的失败】发版闸：接活单元没装、上一份请求没被接走、有暂停标记、发布锁被占、进度是在走/卡住/没成/认不出：一律不发，原因写明', async () => {
+  const cases = [
+    [{ missing: ['/etc/systemd/system/fleet-release-request.path'] }, /接活单元没装/],
+    [{ requestPending: true }, /还没被接走/],
+    [{ marker: true }, /暂停标记/],
+    [{ lockBusy: true }, /发布锁被占着/],
+    [{ trainText: JSON.stringify({ status: 'running' }) }, /「running」状态/],
+    [{ trainText: JSON.stringify({ status: 'blocked' }) }, /「blocked」状态/],
+    [{ trainText: JSON.stringify({ status: 'failed' }) }, /「failed」状态/],
+    [{ trainText: 'not json' }, /认不出/],
+    [{ trainText: JSON.stringify({ phase: 3 }) }, /没有 status/],
+    [{ missing: undefined }, /没读到/],
+  ];
+  for (const [patch, want] of cases) {
+    const m = autoMachine();
+    m.gate = { ...GOOD_GATE, ...patch };
+    const st = await m.round();
+    assert.equal(m.requests.length, 0, JSON.stringify(patch));
+    assert.match(st.auto.note, want);
+  }
+  // 闸读的时候就抛、上一次发版时间读不到/认不出：同样不发
+  const gt = autoMachine();
+  gt.gateThrow = 'flock 退出码 9';
+  assert.match((await gt.round()).auto.note, /发版闸读不到：flock 退出码 9/);
+  assert.equal(gt.requests.length, 0);
+  const rt = autoMachine();
+  rt.releasedAtThrow = 'ENOENT';
+  assert.match((await rt.round()).auto.note, /上一次发版是什么时候没读到/);
+  assert.equal(rt.requests.length, 0);
+  const bad = autoMachine();
+  bad.releasedAt = 'yesterday';
+  assert.match((await bad.round()).auto.note, /认不出，不发/);
+  assert.equal(bad.requests.length, 0);
+  // 上一趟发完（done）或撤掉（aborted）的进度记录不挡
+  for (const status of ['done', 'aborted']) {
+    const ok = autoMachine();
+    ok.gate = { ...GOOD_GATE, trainText: JSON.stringify({ status }) };
+    await ok.round();
+    assert.equal(ok.requests.length, 1, `进度是 ${status} 不挡`);
+  }
+});
+
+test('发版请求写不出去：报警、下一轮再试，写成了撤警；请求被占着（EEXIST）也是同一条路', async () => {
+  const m = autoMachine();
+  m.requestThrow = 'EEXIST: file already exists';
+  const st = await m.round();
+  assert.equal(m.requests.length, 0);
+  assert.match(st.auto.note, /发版请求没写成：EEXIST/);
+  assert.equal(st.auto.at, null, '没写成不算请求过，不挡下一轮');
+  assert.deepEqual(
+    m.alerts.map((a) => a.key),
+    [AUTO_REQUEST_KEY],
+  );
+  assert.match(m.alerts[0].body, /点驾驶舱「发布到法国」/);
+  m.requestThrow = null;
+  m.t += 5 * MIN;
+  await m.round();
+  assert.equal(m.requests.length, 1);
+  assert.deepEqual(m.resolvedKeys, [AUTO_REQUEST_KEY], '写成了就撤警');
+});
+
+test('gateVerdict 单测：全过回 null；done/aborted 的进度不挡；事实不是对象一律不发', () => {
+  assert.equal(gateVerdict(GOOD_GATE), null);
+  assert.equal(gateVerdict({ ...GOOD_GATE, trainText: JSON.stringify({ status: 'done' }) }), null);
+  assert.match(gateVerdict(undefined), /没读到/);
+  assert.match(gateVerdict(null), /没读到/);
 });
