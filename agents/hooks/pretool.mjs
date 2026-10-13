@@ -2281,6 +2281,28 @@ export function subagentFreshness(raw, { fresh = freshBeforeSubagent, cwd = proc
   }
 }
 
+/**
+ * Agent（Task）的 model 是 fable、claude-fable-*，或带 [1m] 后缀就拦；认不出输入、不是 Agent、没写 model 都返回 null
+ * @param {string} raw 钩子的原始输入
+ * @returns {Block | null}
+ */
+export function agentModelVerdict(raw) {
+  /** @type {unknown} */
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const tool = prop(input, 'tool_name') ?? prop(input, 'toolName');
+  if (tool !== 'Agent' && tool !== 'Task') return null;
+  const model = prop(prop(input, 'tool_input') ?? prop(input, 'toolInput'), 'model');
+  if (typeof model !== 'string' || !(/fable/i.test(model) || /\[1m\]\s*$/i.test(model))) return null;
+  return block(
+    `fleet-guard：子代理的 model 不能写 ${model}（fable 和带 [1m] 的型号不派给子代理）；改用 opus、sonnet 或 haiku，或不写 model 让它继承。`,
+  );
+}
+
 function isMain() {
   const entry = process.argv[1];
   if (!entry) return false;
@@ -2296,6 +2318,13 @@ if (isMain()) {
   } catch (err) {
     process.stderr.write(`fleet-guard：读不到钩子输入（${errCode(err) ?? err}），按拦处理\n`);
     process.exit(2);
+  }
+  // N2：派子代理时 model 写 fable（fable、claude-fable-*）或带 [1m] 后缀的，拦。要放在下面 backgroundOnly 早退之前：
+  // Agent 在 BACKGROUND_ONLY_TOOLS 里，decide 一进来就放行。fork 继承主会话模型管不到；引擎侧的 matcher 不含 Agent，这条只管本机。
+  const fableBlock = agentModelVerdict(raw);
+  if (fableBlock) {
+    process.stderr.write(`${fableBlock.message}\n`);
+    process.exit(fableBlock.code);
   }
   let backgroundOnly = false;
   try {
