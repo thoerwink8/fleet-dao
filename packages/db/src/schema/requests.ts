@@ -5,9 +5,14 @@
 // - 删除是软删（deleted_at）；删了满 30 天由引擎的定时任务（request-sweep）连消息一起硬删，并写操作记录。消息、个人状态跟着级联删。
 // - 原话逐条存：request_messages 的人话不改、不删（结案后锁死由接口判）。
 // - 取值表不用 pg 枚举，用文字加检查约束（和 intents 一个做法）；值表和约定里的枚举逐一对齐（valuesOf）。
+// - 指挥官会话（C 片，#2061）一条需求一行 request_chats，跟着需求级联删；消息上的结构化卡片在 request_messages.card。
 import type {
   RequestAnswerState,
+  RequestCard,
   RequestChannel,
+  RequestChatJob,
+  RequestChatPhase,
+  RequestChatState,
   RequestDraft,
   RequestDraftField,
   RequestIssueRef,
@@ -160,9 +165,12 @@ export const requestMessages = pgTable(
     answerError: text('answer_error'),
     answeredBy: uuid('answered_by').references(() => users.id),
     answeredAt: timestamp('answered_at', tz),
+    /** 结构化卡片（C 片，#2061）：指挥官的问题和选项、建议改、换模型分隔线、暂停原因、别家意见。形状见 shared 的 RequestCardSchema。 */
+    card: jsonb('card').$type<RequestCard>(),
     createdAt: timestamp('created_at', tz).notNull(),
   },
   (t) => [
+    check('request_messages_card_object', sql`${t.card} is null or jsonb_typeof(${t.card}) = 'object'`),
     check('request_messages_kind_known', sql`${t.kind} in (${inList(REQUEST_MESSAGE_KIND_VALUES)})`),
     check(
       'request_messages_channel_known',
@@ -257,4 +265,66 @@ export const requestUserState = pgTable(
     lastReadMessageId: bigint('last_read_message_id', { mode: 'number' }),
   },
   (t) => [primaryKey({ columns: [t.requestId, t.userId] })],
+);
+
+export const REQUEST_CHAT_STATE_VALUES = valuesOf<RequestChatState>()(['idle', 'queued', 'running']);
+export const REQUEST_CHAT_JOB_VALUES = valuesOf<RequestChatJob>()(['reply', 'review']);
+export const REQUEST_CHAT_PHASE_VALUES = valuesOf<RequestChatPhase>()([
+  'thinking',
+  'reading_code',
+  'writing',
+]);
+
+/**
+ * 一条需求的指挥官会话（C 片，#2061；方案第五节）：后端排一轮（queued），引擎接手（running）、回完回到 idle。
+ * 会话活着 = workdir 不空（主线的只读检出还在、session_id 能 --resume）；闲置 30 分钟引擎收掉会话、删检出，清空这几列，
+ * 下次有人说话按存下来的消息和草稿重起。换模型也清掉会话（按存档重起）。
+ * stream_text / phase 是这一轮写到哪了：引擎边跑边写，后端的 SSE 照它推给页面。
+ */
+export const requestChats = pgTable(
+  'request_chats',
+  {
+    requestId: uuid('request_id')
+      .primaryKey()
+      .references(() => requests.id, { onDelete: 'cascade' }),
+    state: text('state').$type<RequestChatState>().notNull().default('idle'),
+    /** 排的是哪种活；idle 时空。 */
+    job: text('job').$type<RequestChatJob>(),
+    /** 谁叫的这一轮（说话的人、点按钮的人）。 */
+    queuedBy: uuid('queued_by').references(() => users.id),
+    queuedAt: timestamp('queued_at', tz),
+    startedAt: timestamp('started_at', tz),
+    /** 有人点了「停下」：排着的直接撤，跑着的引擎看到就停。 */
+    stopRequestedAt: timestamp('stop_requested_at', tz),
+    /** 回了几轮（每条最多 40 轮，可调）。 */
+    turns: integer('turns').notNull().default(0),
+    /** 活着的会话：执行体的会话号、路由、模型、检出目录。 */
+    sessionId: text('session_id'),
+    routeId: text('route_id'),
+    modelId: text('model_id'),
+    workdir: text('workdir'),
+    /** 会话已经看过的最后一条消息：续会话只喂这之后的。 */
+    lastMessageId: bigint('last_message_id', { mode: 'number' }),
+    lastTurnAt: timestamp('last_turn_at', tz),
+    phase: text('phase').$type<RequestChatPhase>(),
+    streamText: text('stream_text').notNull().default(''),
+    /** 上一次没接上的原因（「指挥官暂停了：……」）；接上了就清掉。 */
+    pausedWhy: text('paused_why'),
+    updatedAt: timestamp('updated_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    check('request_chats_state_known', sql`${t.state} in (${inList(REQUEST_CHAT_STATE_VALUES)})`),
+    check(
+      'request_chats_job_known',
+      sql`${t.job} is null or ${t.job} in (${inList(REQUEST_CHAT_JOB_VALUES)})`,
+    ),
+    check(
+      'request_chats_phase_known',
+      sql`${t.phase} is null or ${t.phase} in (${inList(REQUEST_CHAT_PHASE_VALUES)})`,
+    ),
+    // 闲着就没有活；排着、跑着一定有活
+    check('request_chats_job_shape', sql`(${t.state} = 'idle') = (${t.job} is null)`),
+    check('request_chats_turns_nonneg', sql`${t.turns} >= 0`),
+    index('request_chats_state_idx').on(t.state),
+  ],
 );

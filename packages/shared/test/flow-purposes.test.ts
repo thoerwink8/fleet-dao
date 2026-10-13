@@ -16,14 +16,23 @@ describe('三段 → 用途', () => {
     expect(SCOPE_NO_ROUTE).toBe('在对话里做，不选路');
   });
 
-  it('页面只列动手、动手 · 界面、验收、Jev 判断、整理待办；后两个单列，不是流程里的一段', () => {
+  it('页面只列动手、动手 · 界面、验收、Jev 判断、整理待办、提需求；后三个单列，不是流程里的一段', () => {
     expect(ROUTING_PURPOSES.map((p) => [p.purpose, p.label, p.aside])).toEqual([
       ['execute', '动手', false],
       ['ui', '动手 · 界面', false],
       ['verify', '验收', false],
       ['judge', 'Jev 判断', true],
       ['groom', '整理待办', true],
+      ['intake-chat', '提需求', true],
     ]);
+  });
+
+  it('提需求（intake-chat，#2061）出现在路由目录里；Fable 照样只有创始人本人能配进这个用途', () => {
+    expect(ROUTING_PURPOSE_IDS).toContain('intake-chat');
+    expect(routingPurposeLabel('intake-chat')).toBe('提需求');
+    const fable = { id: 'claude-fable-5.2', family: 'claude', displayName: 'Claude Fable 5.2' };
+    expect(hardBanFor(fable, 'intake-chat')).toBeUndefined();
+    expect(founderOnlyFor(fable)?.id).toBe('fable-founder-only');
   });
 
   it('整理待办（groom，#1338）出现在路由目录里，能按用途名认出来；Fable 不再是硬禁令，改成只有创始人本人能配进用途（决定 0033）', () => {

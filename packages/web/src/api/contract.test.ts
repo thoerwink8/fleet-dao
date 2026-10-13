@@ -33,6 +33,12 @@ const WEB_NOT_USED: Record<string, string> = {
   markRequestRead: '提需求页面在 #2047 的 D 片接',
   requestIssueOpening: '提需求页面在 #2047 的 D 片接',
   answerRequestEngineAsk: '提需求页面在 #2047 的 D 片接',
+  commanderStream: '提需求页面在 #2047 的 D 片接',
+  nudgeCommander: '提需求页面在 #2047 的 D 片接',
+  stopCommander: '提需求页面在 #2047 的 D 片接',
+  setCommanderModel: '提需求页面在 #2047 的 D 片接',
+  requestReview: '提需求页面在 #2047 的 D 片接',
+  markReviewItem: '提需求页面在 #2047 的 D 片接',
 };
 const AUTH_NOT_USED: Record<string, string> = {
   // 飞书登录、回调是浏览器整页跳转（<a href>），不经 http.ts 的 fetch

@@ -35,6 +35,8 @@ export const STAGE_NEEDS: Readonly<Record<StageKind, readonly Ability[]>> = {
   research: ['read'],
   // 临时指挥官整理待办：读仓库（只读检出）、读单子，产出结构化清单；不改文件
   groom: ['read', 'shell'],
+  // 驾驶舱「提需求」的指挥官会话（#2061）：读主线的只读检出、跑只读命令，交回回话和草稿补丁；不改文件
+  'intake-chat': ['read', 'shell'],
 };
 
 export const ABILITY_NAMES: Readonly<Record<Ability, string>> = {

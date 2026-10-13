@@ -5,7 +5,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { RateLimitReading, RunFacts, SessionUser } from '@fleet-dao/adapters';
+import { buildSessionEnv, type RateLimitReading, type RunFacts, type SessionUser } from '@fleet-dao/adapters';
 import type { Db, RouteLaunchFacts, TranscriptRow } from '@fleet-dao/db';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CarpoolRejection } from '../../src/jobs/carpool-outage.ts';
@@ -392,6 +392,67 @@ describe('hostSegmentSpawner · 成功', () => {
     expect(env).toMatchObject({ fleetApi: '', fleetToken: '', tmpDir: `/var/lib/fleet-work/_tmp/${RUN_ID}` });
     // 真正进会话环境的是 buildSessionEnv 过滤后的：这里确认传的是宿主环境的引用，由它去过滤
     expect(env?.base).toMatchObject({ PATH: '/usr/bin' });
+  });
+
+  it('指挥官会话（#2061）直接调 Spawner：带 resumeSessionId 就续那个会话（--resume），不带开新的；过程每一条交给调用方', async () => {
+    const seen: string[] = [];
+    const h = harness({
+      driverRun: async (_spec, hooks) => {
+        hooks.onTranscript?.(
+          { at: 't', kind: 'tool_call', text: 'Read src/a.ts', tool: 'Read' },
+          {} as never,
+        );
+        hooks.onTranscript?.({ at: 't', kind: 'assistant', text: '我读了' }, {} as never);
+        return report();
+      },
+    });
+    const base = {
+      argv: [],
+      cwd: '/w/intake',
+      stdin: '接着聊',
+      signal: new AbortController().signal,
+      timeoutMs: 10 * 60_000,
+      input: {
+        runId: 'run-chat-1',
+        segment: 'scope' as const,
+        modelId: 'm',
+        routeId: 'r1',
+        prompt: 'p',
+        cwd: '/w',
+      },
+    };
+    await h.spawn({ ...base, resumeSessionId: 'sess-42', onTranscript: (e) => void seen.push(e.kind) });
+    await h.spawn({ ...base, input: { ...base.input, runId: 'run-chat-2' } });
+    expect(h.calls.map((c) => c.spec.session)).toEqual([
+      { mode: 'resume', id: 'sess-42' },
+      { mode: 'new', id: '11111111-2222-4333-8444-555555555555' },
+    ]);
+    expect(seen).toEqual(['tool_call', 'assistant']);
+    // 会话真拿到的环境（buildSessionEnv 过滤后）没有 GitHub 令牌
+    const env = buildSessionEnv(h.calls[0]?.spec.env as Parameters<typeof buildSessionEnv>[0]);
+    expect(Object.keys(env).some((k) => /GITHUB|GH_TOKEN/i.test(k))).toBe(false);
+  });
+
+  it('【故意造出的失败】调用方的流抛错：只记日志，会话照样收场', async () => {
+    const h = harness({
+      driverRun: async (_spec, hooks) => {
+        hooks.onTranscript?.({ at: 't', kind: 'assistant', text: 'x' }, {} as never);
+        return report();
+      },
+    });
+    const out = await h.spawn({
+      argv: [],
+      cwd: '/w',
+      stdin: 's',
+      signal: new AbortController().signal,
+      timeoutMs: 60_000,
+      input: { runId: 'run-chat-3', segment: 'scope', modelId: 'm', routeId: 'r1', prompt: 'p', cwd: '/w' },
+      onTranscript: () => {
+        throw new Error('页面断了');
+      },
+    });
+    expect(out.exitCode).toBe(0);
+    expect(h.logs.some((l) => l.includes('会话过程的流没交出去') && l.includes('页面断了'))).toBe(true);
   });
 
   it('驱动自己的总时长比 one-shot 的时限早一分钟到', async () => {

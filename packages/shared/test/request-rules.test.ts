@@ -30,6 +30,7 @@ function facts(over: Partial<RequestFacts> = {}): RequestFacts {
     otherHumanSpoke: false,
     draftMissing: [],
     pinned: false,
+    commanderRunning: false,
     ...over,
   };
 }
@@ -158,6 +159,15 @@ describe('删除', () => {
 
   it('不是发起人：不能删', () => {
     expect(requestActions(facts(), OWNER, ctx).delete).toEqual({ allowed: false, why: '只有发起人能删' });
+  });
+
+  it('指挥官会话排着队或正在回话（#2061）：本来能删的也先停，原因写「指挥官正在回话，停下后才能删」', () => {
+    expect(requestActions(facts({ commanderRunning: true }), PARTNER, ctx).delete).toEqual({
+      allowed: false,
+      why: '指挥官正在回话，停下后才能删',
+    });
+    // 停下了就照常能删
+    expect(requestActions(facts({ commanderRunning: false }), PARTNER, ctx).delete.allowed).toBe(true);
   });
 
   it('删了的：别的都不能做，发起人 30 天内能恢复，满 30 天恢复不了', () => {

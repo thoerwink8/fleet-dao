@@ -7,6 +7,7 @@
 //
 // 改这里之前必须知道：
 // - 一次性：会话号一律开新的（session.mode = 'new'），不续、不 fork、不脱开引擎进程跑（不传 io）；这是 one-shot.ts 的第 1 条。
+//   唯一的例外是驾驶舱「提需求」的指挥官会话（real/intake-chat.ts，#2061）：它直接调这里、带 resumeSessionId 续同一个会话。
 // - 成败只认 adapters 的 judgeRun（和 Fusion 同一份判法）：它不是 ok，退出码就不会是 0。「终帧报错」「没有终帧」这些，
 //   即使进程自己退出码是 0，这里也报 1，不让 one-shot 把它判成 done。
 // - 读不到、认不出一律抛错（路由没给、库里没有这条路由、执行方式没接上、会话用户定不下来），runOneShot 把它记成
@@ -17,7 +18,7 @@
 //   晚一点到，是兜底（驱动卡死了）。
 // - 会话的临时目录（TMPDIR）：起之前交给会话用户，收场后删；删不掉只记日志（占盘，下次引擎起来的清理会收），不改结局。
 
-import { judgeRun, type RateLimitReading, type SessionUser } from '@fleet-dao/adapters';
+import { judgeRun, type RateLimitReading, type SessionUser, type TranscriptEntry } from '@fleet-dao/adapters';
 import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import type { Db, RouteLaunchFacts } from '@fleet-dao/db';
 import { appendRunTranscript, routeLaunchFacts, savePoolQuota, type TranscriptRow } from '@fleet-dao/db';
@@ -227,7 +228,10 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       // 两个来源原样交给驱动，合成哪一档只在 hosts.ts 的 sessionEffortFor：路由配的是上限，分档只往下压
       ...(route.effort !== null ? { effort: route.effort } : {}),
       ...(input.effort !== undefined ? { tierEffort: input.effort } : {}),
-      session: { mode: 'new', id: driver.newSessionId(runId).id },
+      // 指挥官会话（#2061）续同一个会话；三段一次性会话一律开新的（runOneShot 不给 resumeSessionId）
+      session: cmd.resumeSessionId
+        ? { mode: 'resume', id: cmd.resumeSessionId }
+        : { mode: 'new', id: driver.newSessionId(runId).id },
       purpose: 'work',
     };
     // 内存峰值（#948）：会话跑着时采它 scope 的 memory.peak，收场后交结果；scope 一收场 cgroup 就没了，只能边跑边读
@@ -262,10 +266,24 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       if (cpuResult.why !== undefined) log('会话 CPU 没读到', { runId, why: cpuResult.why });
       return cpuResult;
     };
+    // 过程记录和调用方的流（指挥官会话推给页面）都要：调用方的抛了只记日志
+    const listen = cmd.onTranscript;
+    const onTranscript =
+      recorder || listen
+        ? (entry: TranscriptEntry) => {
+            recorder?.record(entry);
+            if (!listen) return;
+            try {
+              listen(entry);
+            } catch (err) {
+              log('会话过程的流没交出去', { runId, error: errMessage(err) });
+            }
+          }
+        : undefined;
     try {
       const report = await driver.run(spec, {
         signal: cmd.signal,
-        ...(recorder ? { onTranscript: recorder.record } : {}),
+        ...(onTranscript ? { onTranscript } : {}),
         ...(deps.db
           ? { onRateLimit: (reading: RateLimitReading) => saveReading(deps.db as Db, route, reading) }
           : {}),

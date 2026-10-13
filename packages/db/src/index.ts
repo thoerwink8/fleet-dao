@@ -26,6 +26,7 @@ export * from './queries/pool-runs.ts';
 export * from './queries/probe.ts';
 export * from './queries/quota.ts';
 export * from './queries/reconcile.ts';
+export * from './queries/request-chat.ts';
 export * from './queries/requests.ts';
 export * from './queries/route-probe-now.ts';
 export * from './queries/run-transcript.ts';

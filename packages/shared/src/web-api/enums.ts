@@ -39,6 +39,7 @@ export const StageKindSchema = z.enum([
   'research',
   'judge',
   'groom',
+  'intake-chat',
 ]);
 export const TaskStateSchema = z.enum([
   'queued',

@@ -13,7 +13,8 @@ export type StageKind =
   | 'verify' // 开 PR 前别家验证（Fusion 第 5 步）：只派别家、只读
   | 'research' // 调研
   | 'judge' // Jev 判断题
-  | 'groom'; // 临时指挥官整理待办（母单 #1335 第 3 片）
+  | 'groom' // 临时指挥官整理待办（母单 #1335 第 3 片）
+  | 'intake-chat'; // 驾驶舱「提需求」的指挥官会话（母单 #2047 第 C 片）
 
 export type TaskState =
   | 'queued'
