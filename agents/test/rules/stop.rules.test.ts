@@ -1,6 +1,6 @@
 // 钉住 Stop 钩子（agents/hooks/stop.mjs）的规矩（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json）。
 // 规矩：
-// 1. 没开无人值守时（没人在这个会话里跑过 `unattended.mjs on`）只提醒、不拦、不接着聊——不管仓根干不干净、输入好不好，
+// 1. 没开无人值守时（没人在这个会话里跑过 `unattended.mjs on`）不拦、不接着聊（仓根临时文件的提醒已删）——不管仓根干不干净、输入好不好，
 //    退出码恒为 0，输出里不许有 decision（会拦下 Stop）、不许有 hookSpecificOutput（additionalContext 会让对话接着走）。
 // 2. 决定 0028（创始人 2026-10-07 约 02:27 推翻 0026 的「这一轮结束、收尾不拦」）：只有这个会话自己跑了 `on` 才挡；
 //    起子代理、监视、后台命令不自动开；off、done / needs-you、满 12 小时、空转到上限、工人都收口了都放行。
@@ -70,24 +70,12 @@ function parseSystemMessageOnly(stdout: string): void {
   expect(parsed).toEqual({ systemMessage: expect.any(String) });
 }
 
-describe('规矩：没开无人值守时，Stop 钩子只提醒、不拦、不接着聊', SLOW, () => {
-  it('仓根有像临时文件的：退出码 0，systemMessage 提醒，没有 decision、没有 hookSpecificOutput', () => {
+describe('规矩：没开无人值守时，Stop 钩子不拦、不接着聊', SLOW, () => {
+  it('仓根有没跟踪的截图：不再提醒——退出码 0，什么都不打印', () => {
     const dir = repoWithStray();
     const r = run(JSON.stringify({ hook_event_name: 'Stop', cwd: dir, stop_hook_active: false }));
     expect(r.status).toBe(0);
     parseSystemMessageOnly(r.stdout);
-    expect(r.stdout).toContain('stray.png');
-    expect(r.stdout).not.toContain('decision');
-    expect(r.stdout).not.toContain('hookSpecificOutput');
-  });
-
-  it('仓根未跟踪的 package.json、tsconfig.json、requirements.txt 不算临时文件，不提醒', () => {
-    const dir = temp('config-files');
-    g(dir, 'init', '-q', '-b', 'main');
-    for (const name of ['package.json', 'tsconfig.json', 'requirements.txt'])
-      writeFileSync(join(dir, name), 'x');
-    const r = run(JSON.stringify({ hook_event_name: 'Stop', cwd: dir, stop_hook_active: false }));
-    expect(r.status).toBe(0);
     expect(r.stdout.trim()).toBe('');
   });
 
@@ -99,7 +87,7 @@ describe('规矩：没开无人值守时，Stop 钩子只提醒、不拦、不�
     expect(r.stdout.trim()).toBe('');
   });
 
-  it('stop_hook_active 是 true（这一轮是别的 Stop 钩子带下去的）：不重复提醒，退出码仍是 0', () => {
+  it('stop_hook_active 是 true：退出码仍是 0，什么都不打印', () => {
     const dir = repoWithStray();
     const r = run(JSON.stringify({ hook_event_name: 'Stop', cwd: dir, stop_hook_active: true }));
     expect(r.status).toBe(0);
