@@ -9,11 +9,12 @@
 // 一张单的路：读交代 → [选路 → 建树（第一轮）→ 动手会话 → 读交付 → 推分支 → 开 PR（第一轮）→ 等 CI → 冷验收] 最多 3 轮 →
 // 碰没碰「改标准」→ 挂自动合并 → 等合并 → 关单、收树。
 // 不强制 CI 的仓（patched('repo-ci-policy')，每次走到等 CI 之前现读）：开完 PR 跳过等 CI 和冷验收，查完改标准路径后引擎直接合并。
-// 返工只有这几种：没产生提交、CI 红了、合并冲突、验收没过；返工意见带进下一轮动手会话。验收最多 2 轮（specs/555）。
+// 返工只有这几种：没产生提交、CI 红了、合并冲突、验收没过、等合并时必过检查确认仍红；返工意见带进下一轮动手会话。验收最多 2 轮（specs/555）。
 //
 // 停下等人（waiting.kind = human，驾驶舱点「继续」「放弃」发信号）只有这几处，而且每一处都写清卡在哪、要人干什么：
 // - 交代不全（缺栏）；没有可用的路由；失败分流判「挂起」（同因连着两次再犯、额度要等很久、登录失效……）；
 // - 动手 3 轮、验收 2 轮都没过；验收做不出来（读不到 diff、没有别家模型、会话没跑成）；
+// - 等合并时必过检查连着红、返工 3 轮用完（报警级别 decision，进「要你拍的」，不再等）；
 // - 改到了「改标准」的路径（人闸第四类，要创始人同意才挂自动合并）；
 // - PR 被关了、PR 的头被别人改了。
 // 「继续」之后从头再试这一步；「放弃」收尾退出（工作树存档后删，PR 和单子不动，由人处理）。
@@ -48,6 +49,7 @@
 //   老历史没有这个标记，照旧在 step 里重试。
 // - 「放弃」「叫停」都要把正在跑的长活动取消掉（runSegment、coldVerify、waitCi、waitMerged 都心跳，收得到取消）。
 
+import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { CancellationScope, isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { EngineActivities } from '../activity-options.ts';
 import type { Limits } from '../limits.ts';
@@ -103,10 +105,17 @@ class TaskFlow {
       await rt.checkpoint();
       if (rt.round >= MAX_IMPLEMENT_ROUNDS) {
         const problems = rt.feedback.join('；') || '（没有）';
+        // 等合并检查红了交回的意见以「检查红了：」开头。轮数用完进「要你拍的」。
+        // 前缀不在就不问 patched：CI 红了仍是「动手 N 轮都没过」，老历史重放不多一个标记。
+        const mergeChecksRed =
+          rt.feedback.some((line) => line.startsWith(CHECKS_RED_PREFIX)) && patched('merge-wait-red-checks');
         const mode = await rt.exhaustRounds(
-          `动手 ${MAX_IMPLEMENT_ROUNDS} 轮都没过`,
+          mergeChecksRed
+            ? `检查红了，返工 ${MAX_IMPLEMENT_ROUNDS} 轮用完`
+            : `动手 ${MAX_IMPLEMENT_ROUNDS} 轮都没过`,
           `最近的返工意见：${problems}。点「继续」再给一整轮；或「放弃」。`,
           `最近的返工意见：${problems}。点「继续」后动手和验收轮数都从 0 再计；或「放弃」。`,
+          mergeChecksRed ? 'decision' : 'stuck',
         );
         if (mode === 'legacy') rt.round = 0;
         // 停下前 PR 已开、头已记录：代码多半已经完整（停下常是 CI 台的基础设施问题）。点「继续」先看这个 PR 现在的 CI 和验收，
@@ -152,7 +161,11 @@ class TaskFlow {
         const merged = await armAndWaitMerged(rt);
         if (merged.kind === 'merged') return { commit: merged.commit };
         // 等合并时 PR 和主线真有冲突（#1838）：返工意见已记下，交回下一轮动手会话解冲突，不回等 CI。
-        if (merged.kind === 'rework') return 'rework';
+        // 检查红了交回动手（#1983）：上一轮验收是过的。轮数留着的话，下一轮会在验收上限上被误判成「验收没过」。
+        if (merged.kind === 'rework') {
+          if (rt.feedback.some((line) => line.startsWith(CHECKS_RED_PREFIX))) rt.verifyRound = 0;
+          return 'rework';
+        }
         rt.verifyRound = 0; // 头换了，验收对新的头重新数轮
         continue;
       }
@@ -197,7 +210,11 @@ class TaskFlow {
       const merged = await armAndWaitMerged(rt);
       if (merged.kind === 'merged') return { commit: merged.commit };
       // 等合并时 PR 和主线真有冲突（#1838）：返工意见已记下，交回下一轮动手会话解冲突，不回等 CI。
-      if (merged.kind === 'rework') return 'rework';
+      // 检查红了交回动手（#1983）：上一轮验收是过的。轮数留着的话，下一轮会在验收上限上被误判成「验收没过」。
+      if (merged.kind === 'rework') {
+        if (rt.feedback.some((line) => line.startsWith(CHECKS_RED_PREFIX))) rt.verifyRound = 0;
+        return 'rework';
+      }
       rt.verifyRound = 0; // 头换了，验收对新的头重新数轮
     }
   }

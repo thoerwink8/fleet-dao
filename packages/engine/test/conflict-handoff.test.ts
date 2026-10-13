@@ -78,4 +78,35 @@ describe('PR 正文里的根因', () => {
     expect(body).toContain('改后绿');
     expect(taskPrDid(12, 1, 1)).toEqual(['按 #12 的要求动手（第 1 轮）', '改了 1 个文件']);
   });
+
+  it('#1983 的正文写上断在哪、同一根子还有哪些路径，别的单子不带', () => {
+    const body = renderPrBody({
+      requirement: 1983,
+      did: taskPrDid(1983, 1, 1),
+      verified: ['相关测试'],
+    });
+    for (const line of [
+      'waitMerged',
+      '检查红了',
+      '等合并队列',
+      'merge-gate',
+      'cold-verify',
+      '20',
+      '要你拍的',
+      '合并闸误报',
+      'pending',
+      'PR 被关了',
+      '冲突',
+      '草稿',
+      '自动合并被撤',
+      '头被别人改了',
+      '落后主线',
+      '读检查失败',
+      'mergeNow',
+      '每小时对账',
+    ]) {
+      expect(body).toContain(line);
+    }
+    expect(taskPrDid(12, 1, 1)).toEqual(['按 #12 的要求动手（第 1 轮）', '改了 1 个文件']);
+  });
 });

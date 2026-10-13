@@ -81,6 +81,7 @@ import { registerEngineJobs } from './jobs.ts';
 import { judgeSelfCheckJob } from './judge-self-check.ts';
 import { realMemoryAdmission } from './memory-admission.ts';
 import { productionMemoryPeak } from './memory-peak.ts';
+import { readMergeWaitChecks } from './merge-wait-checks.ts';
 import { oneShotSessions } from './one-shot-sessions.ts';
 import { NO_FUSION_SESSIONS, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { orphanReaper } from './orphan-reap.ts';
@@ -911,7 +912,13 @@ export function realPortsFromEnv(
   const probeAssigned: AssignedProber = (input) => probeAssignedRoute(routeProbe(), routeProbeLock, input);
   const runsDir = join(config.stateDir, 'runs');
   const tasks: EngineTasks = {
-    ...createTaskActivities({ gh, trees, exec, log: taskLog }),
+    ...createTaskActivities({
+      gh,
+      trees,
+      exec,
+      log: taskLog,
+      readChecks: (repo, head, signal) => readMergeWaitChecks(gh, repo, head, signal),
+    }),
     async readCiPolicy(input) {
       if (input?.schemaVersion !== 1 || !input.repo?.owner || !input.repo?.name) {
         throw new PortError('INVALID_INPUT', '读 CI 模式：要有仓的 owner 和 name', { retryable: false });

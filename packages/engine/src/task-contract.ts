@@ -31,6 +31,11 @@ export const MAX_ROUND_RESETS = 3;
 export const SEGMENT_MINUTES = 60;
 /** 等合并时每次长轮询多少分钟（工作流一直轮到合并、关闭或人放弃）。 */
 export const MERGE_POLL_MINUTES = 15;
+/**
+ * 等合并时读到必过检查红了，隔这么多秒再读一次再决定返工（刚读到的红可能是旧的，和等 CI 确认红一样是 20 秒）。
+ * 写死：不是上面那一轮 15 分钟，也不是一直等。
+ */
+export const MERGE_RED_CONFIRM_SECONDS = 20;
 
 /** 直接合被拒、因为落后主线：同一个任务对同一张 PR 最多自动同步主线几次（第 N+1 次起停下报人，免得主线一直在动就一直转）。 */
 export const MAX_MAIN_SYNCS = 3;
@@ -333,6 +338,11 @@ export type MergeWait =
    * 老历史里没有这个状态（那时候冲突只回 waiting）。
    */
   | { state: 'conflict'; detail: string }
+  /**
+   * 必过检查红了（含合并闸、cold-verify）。和「还在跑」都可能是 mergeable_state=blocked，不能都当 waiting。
+   * 老历史里没有这个状态（那时候红了也回 waiting，工作流一直等）。
+   */
+  | { state: 'checks_red'; failedChecks: string[]; detail: string }
   | { state: 'waiting'; detail: string };
 
 /** 派单前对选定的这一条路由探一次（#1409）。label 是写进任务状态的名字（模型 id）。 */

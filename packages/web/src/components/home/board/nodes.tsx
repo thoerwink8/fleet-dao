@@ -14,7 +14,7 @@ import { inkClass, softClass, solidClass } from '../../layout/tone';
 import { ACTIONS, type ActionTarget, useTargetActions } from '../../task-actions';
 import { Kbd } from '../../ui/kbd';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../ui/tooltip';
-import { CardLink, needsFounder, statusTextOf, WAIT_LABEL } from '../running-card';
+import { CardLink, needsFounder, statusTextOf, waitLineOf } from '../running-card';
 import type { HomeFlowStage, HomeRunning } from '../types';
 import {
   farCardFontPx,
@@ -410,7 +410,7 @@ function WaitLine({ item, tone, always }: { item: HomeRunning; tone: Tone; alway
   }
   return (
     <div className="flex min-w-0 items-center gap-x-1.5 text-canvas">
-      <span className={cn('shrink-0 font-medium', inkClass[tone])}>{WAIT_LABEL[item.waitingReason]}</span>
+      <span className={cn('shrink-0 font-medium', inkClass[tone])}>{waitLineOf(item)}</span>
       {item.waitingSince ? (
         <span className="num truncate text-muted-foreground">
           · 已 <Elapsed since={item.waitingSince} />

@@ -1886,6 +1886,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             ...(flow.stageSince ? { stageSince: flow.stageSince } : {}),
             ...(flow.worker ? { worker: flow.worker } : {}),
             ...(decision ? { pendingDecision: decision.title } : {}),
+            ...(flow.segment === 'merge' && t.task.redChecks ? { redChecks: t.task.redChecks } : {}),
             ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
             ...(flow.lastSession ? { lastSession: flow.lastSession } : {}),
             link: `/tasks/${t.task.id}`,
