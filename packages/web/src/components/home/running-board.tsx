@@ -4,7 +4,7 @@ import { lazy, Suspense } from 'react';
 import { useMediaQuery } from '../../lib/hooks';
 import { Skeleton } from '../ui/skeleton';
 import { BoardTree } from './board/board-tree';
-import type { HomeFlowStage, HomeHealth, HomeRunning, HomeSlots } from './types';
+import type { HomeFlowStage, HomeHealth, HomeResources, HomeRunning, HomeSlots } from './types';
 
 // 画布（React Flow + ELK）按需加载：手机上只用树形列表，不必下载它。
 const BoardCanvas = lazy(() => import('./board/board-canvas').then((m) => ({ default: m.BoardCanvas })));
@@ -26,19 +26,22 @@ export function RunningBoard({
   flow,
   health,
   slots,
+  resources,
 }: {
   running: readonly HomeRunning[];
   flow: readonly HomeFlowStage[];
   health?: HomeHealth | undefined;
   slots?: HomeSlots | undefined;
+  /** 这台机器此刻的资源（#1973）：每张单的内存、CPU。 */
+  resources?: HomeResources | undefined;
 }) {
   const mobile = useMediaQuery('(max-width: 767px)');
-  if (mobile) return <BoardTree running={running} flow={flow} />;
+  if (mobile) return <BoardTree running={running} flow={flow} resources={resources} />;
   // 画布占满父容器（主页给它正文区的全部高宽），不再自己定高
   return (
     <div className="relative h-full min-h-0 w-full overflow-hidden" data-home-canvas>
       <Suspense fallback={<BoardSkeleton />}>
-        <BoardCanvas running={running} flow={flow} health={health} slots={slots} />
+        <BoardCanvas running={running} flow={flow} health={health} slots={slots} resources={resources} />
       </Suspense>
     </div>
   );

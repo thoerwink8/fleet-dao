@@ -85,6 +85,38 @@ describe('实时推送（SSE）', () => {
     expect(small.since(small.latestId())).toEqual([]);
   });
 
+  it('机器资源（#1973）：一连上先给最近一回，之后每读成一回推一条 resources；不带 id（不进补发、不顶掉 Last-Event-ID）', async () => {
+    const h = harness();
+    const make = (percent: number) => ({
+      at: new Date().toISOString(),
+      everyMs: 5000,
+      memory: { state: 'ok' as const, totalMb: 1000, availableMb: 400 },
+      cpu: { state: 'ok' as const, percent, cores: 2 },
+      sessions: { state: 'unread' as const, why: '这台没有 /sys/fs/cgroup/fleet.slice/fleet-agents.slice' },
+    });
+    const listeners = new Set<(r: ReturnType<typeof make>) => void>();
+    h.deps.hostResources = {
+      current: async () => make(10),
+      latest: () => make(10),
+      subscribe(l) {
+        listeners.add(l);
+        return () => listeners.delete(l);
+      },
+      start: () => () => {},
+    };
+    const { cookie } = await h.login();
+    const { reader } = await open(h, cookie);
+    const buf = await readUntil(reader, 'event: resources');
+    for (const l of listeners) l(make(55));
+    await readUntil(reader, '"percent":55', buf);
+    const got = events(buf.text).filter((e) => e.event === 'resources');
+    expect(got.map((e) => JSON.parse(e.data ?? '{}').cpu.percent)).toEqual([10, 55]);
+    expect(got.every((e) => e.id === undefined)).toBe(true);
+    await reader.cancel();
+    for (let i = 0; i < 50 && listeners.size > 0; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(listeners.size).toBe(0);
+  });
+
   it('没登录不给连；飞书网关的通行证也不给连（网关只能调约定里那几条，推送走长轮询待推送）', async () => {
     const h = harness();
     expect(await errorCode(await h.cockpit.request('/api/events'))).toBe('unauthenticated');

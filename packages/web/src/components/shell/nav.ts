@@ -75,7 +75,7 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         to: '/france',
         label: '法国',
         icon: SatelliteDish,
-        hint: '本台六项事实、引擎总开关、定时任务、发版；多一台机器时按台并排',
+        hint: '本台六项事实、引擎总开关、命令行工具、定时任务、发版；多一台机器时按台并排',
       },
       {
         to: '/schedules',

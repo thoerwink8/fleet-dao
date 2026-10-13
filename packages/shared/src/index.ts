@@ -4,6 +4,7 @@ export * from './bans.ts';
 export * from './carpool-burn.ts';
 export * from './changelog.ts';
 export * from './ci-policy.ts';
+export * from './cli-versions.ts';
 export type * from './domain.ts';
 export * from './effort.ts';
 export * from './feishu-api.ts';

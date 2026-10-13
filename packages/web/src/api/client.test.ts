@@ -14,6 +14,32 @@ function spy() {
   return { qc, called };
 }
 
+describe('机器资源的推送（#1973）：直接换掉主页里的 resources，不重拉', () => {
+  const resources = {
+    at: '2026-10-12T08:00:00.000Z',
+    everyMs: 5000,
+    memory: { state: 'ok' as const, totalMb: 12000, availableMb: 5000 },
+    cpu: { state: 'unread' as const, why: '刚开始采样' },
+    sessions: { state: 'ok' as const, byRun: {} },
+  };
+
+  test('主页已读到：只换 resources，别的字段原样，不作废任何缓存', () => {
+    const { qc, called } = spy();
+    const home = { running: [], decisions: [], asOf: 'x' };
+    qc.setQueryData(keys.home, home);
+    applyOne(qc, { type: 'resources', resources });
+    expect(qc.getQueryData(keys.home)).toEqual({ ...home, resources });
+    expect(called()).toEqual([]);
+  });
+
+  test('还没读到主页：不造一份假的主页', () => {
+    const { qc, called } = spy();
+    applyOne(qc, { type: 'resources', resources });
+    expect(qc.getQueryData(keys.home)).toBeUndefined();
+    expect(called()).toEqual([]);
+  });
+});
+
 describe('推送到缓存：按表名决定重拉什么', () => {
   test('需求表变了：重拉看板、任务详情、任务列表、主页', () => {
     const { qc, called } = spy();

@@ -282,7 +282,7 @@ describe('选路', () => {
 
     it('【故意造出的失败】缺字段（读不出）：这个池按暂停办，不当成能用；别的池照派', async () => {
       await world(t.db);
-      await putHolds({ 'claude-solo': hold({ reviewBy: undefined }) });
+      await putHolds({ 'claude-solo': hold({ decidedBy: '' }) });
       expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
       const none = await pick({ avoidRouteIds: ['carpool'] });
       expect(none).toMatchObject({ ok: false });

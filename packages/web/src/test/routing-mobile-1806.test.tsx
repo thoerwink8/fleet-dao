@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // 路由、渠道状态两页在手机上的版面（#1806）：
 // - 渠道状态：不到 lg（1024）只画列表，点一行从底部（手机）开详情抽屉，不再上下堆两栏。
-// - 路由：每行的档位、上移、下移、置顶、置底、移出、整池暂停收进行尾一个「⋯」菜单，菜单项照旧走原来的接口；
+// - 路由：每行的档位、上移、下移、置顶、置底、移出收进行尾一个「⋯」菜单，菜单项照旧走原来的接口；
 //   #1914 起各宽度同一个样子，开关留在行里。
 // - 页头右边那一排（状态胶囊、刷新）可以换行，不撑出屏幕；操作记录的 pre 自动换行。
 // 真正的横向溢出（scrollWidth 大于 clientWidth）要有版面引擎才量得出：这里只能断言类名和 happy-dom 里量得出的 0；
@@ -182,7 +182,7 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
   });
 
-  test('模型下的路由行：开关在行里，菜单里有上移、下移、置顶、置底、整池暂停，点「下移一位」走 updateModelRoute 的 reorder', async () => {
+  test('模型下的路由行：开关在行里，菜单里有上移、下移、置顶、置底，点「下移一位」走 updateModelRoute 的 reorder', async () => {
     mockPhone();
     const api = createMockApi({ live: false });
     const spy = vi.spyOn(api, 'updateModelRoute');
@@ -198,7 +198,7 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
         within(menu)
           .getAllByRole('menuitem')
           .map((el) => el.textContent),
-      ).toEqual(['上移一位', '下移一位', '置顶', '置底', '暂停账号池 claude-a']),
+      ).toEqual(['上移一位', '下移一位', '置顶', '置底']),
     );
     fireEvent.click(within(menu).getByRole('menuitem', { name: '下移一位' }));
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(1));

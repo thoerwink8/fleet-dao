@@ -13,6 +13,7 @@ import { StatusBadge, StatusDot } from '../../layout/status-badge';
 import { inkClass } from '../../layout/tone';
 import { ActionButtons } from '../../task-actions';
 import { Button } from '../../ui/button';
+import type { TicketUsage } from '../resources';
 import { CardLink, needsFounder, statusTextOf, WAIT_LABEL } from '../running-card';
 import type { HomeRunning } from '../types';
 import { targetOfItem, useBoardUi } from './board-ui';
@@ -27,6 +28,7 @@ import {
   ticketTone,
 } from './model';
 import { avgText, segmentHintOf, segmentName } from './nodes';
+import { UsageLine, usageTitle } from './usage';
 
 export function DetailPanel({
   data,
@@ -54,7 +56,13 @@ export function DetailPanel({
     >
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="p-4">
-          {item ? <TicketPanel item={item} onClose={onClose} /> : null}
+          {item ? (
+            <TicketPanel
+              item={item}
+              usage={data.kind === 'ticket' ? data.usage : undefined}
+              onClose={onClose}
+            />
+          ) : null}
           {data.kind === 'segment' ? (
             <SegmentPanel data={data} running={running} onClose={onClose} onSelect={onSelect} />
           ) : null}
@@ -113,7 +121,16 @@ function since(iso: string | undefined, now: number): string | undefined {
   return iso ? formatDuration(Math.max(0, now - Date.parse(iso))) : undefined;
 }
 
-function TicketPanel({ item, onClose }: { item: HomeRunning; onClose(): void }) {
+function TicketPanel({
+  item,
+  usage,
+  onClose,
+}: {
+  item: HomeRunning;
+  /** 这张单此刻占的内存、CPU（#1973）；从「要你拍」那片打开时没有。 */
+  usage?: TicketUsage | undefined;
+  onClose(): void;
+}) {
   const now = useNow();
   const ui = useBoardUi();
   const tone = ticketTone(item);
@@ -174,6 +191,16 @@ function TicketPanel({ item, onClose }: { item: HomeRunning; onClose(): void }) 
               </>
             )}
           </Row>
+          {usage ? (
+            <Row label="占用">
+              <span className="flex flex-col gap-0.5">
+                <UsageLine usage={usage} size="meta" />
+                {usage.kind === 'idle' ? null : (
+                  <span className="text-meta text-muted-foreground">{usageTitle(usage)}</span>
+                )}
+              </span>
+            </Row>
+          ) : null}
           <Row label="本段">
             <span className="num whitespace-nowrap">{since(item.stageSince, now) ?? '—'}</span>
           </Row>

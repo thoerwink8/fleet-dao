@@ -1,6 +1,8 @@
 // 假后端：实现 FleetApi，数据放在内存里，带一个模拟器让盘面「活」起来。
 // 每个返回都按 shared/web-api.ts 校验后才交出去（和真后端的 reply 一样），报错的 code 和白话也照真后端。
 // 页面上的操作会真的改这里的状态并留下操作记录；刷新页面就回到初始盘面。
+
+import type { HomeResourcesSchema, SessionUsageSchema } from '@fleet-dao/shared';
 import {
   AddPurposeModelRequest,
   AnswerNotificationRequest,
@@ -9,10 +11,12 @@ import {
   AUTO_DISPATCH_ENABLE,
   AuditResponse,
   AuthConfigResponse,
+  acceptPoolHoldsWrite,
   answerResolves,
   BoardResponse,
   CI_POLICY_SET,
   type CiPolicy,
+  CliToolsResponseSchema,
   CredentialsResponse,
   DEFAULT_SESSION_EFFORT,
   describeEngineMaster,
@@ -260,6 +264,85 @@ function mockRoutesMany(): boolean {
 }
 
 /** 看板多机的假环境（wsl）这一次是哪种样子：见 nodes() 的说明；地址上没写就是刚报过（fresh）。 */
+/** 机器资源（#1973）的假数据换哪一种：?mockResources=tight（紧）/ unread（cgroup、/proc 都读不到）/ missing（老后端没给）。 */
+function mockResourcesMode(): 'ok' | 'tight' | 'unread' | 'missing' {
+  const v =
+    typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('mockResources');
+  return v === 'tight' || v === 'unread' || v === 'missing' ? v : 'ok';
+}
+
+/** 同一个编号每次得到同一个 0–1 之间的数：假数据里每个会话的占用稳定，只在上面加一点随时间的晃动。 */
+function seedOf(id: string): number {
+  let h = 0;
+  for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return (h % 1000) / 1000;
+}
+
+/**
+ * 假后端的机器资源：形状和真后端（api/src/host-resources.ts）一样，数是编的，按时间轻轻晃动，推送每 5 秒来一回时看得出在动。
+ * 第一个会话故意只有一次读数（没有 CPU），演示「CPU 采样中」。
+ */
+type HomeResources = z.infer<typeof HomeResourcesSchema>;
+
+export function mockResources(runIds: readonly string[], at: Date): HomeResources | undefined {
+  const mode = mockResourcesMode();
+  if (mode === 'missing') return undefined;
+  const t = at.getTime() / 1000;
+  const wobble = (seed: number, amp: number) => Math.sin(t / 7 + seed * 6.28) * amp;
+  if (mode === 'unread') {
+    return {
+      at: at.toISOString(),
+      everyMs: MOCK_RESOURCES_EVERY_MS,
+      memory: { state: 'unread', why: '读不到 /proc/meminfo（这台不是 Linux，或没有 /proc）' },
+      cpu: { state: 'unread', why: '读不到 /proc/stat（这台不是 Linux，或没有 /proc）' },
+      sessions: {
+        state: 'unread',
+        why: '这台没有 /sys/fs/cgroup/fleet.slice/fleet-agents.slice（不在法国机器上，或会话资源池没挂）',
+      },
+    };
+  }
+  const tight = mode === 'tight';
+  const totalMb = 11_980;
+  const byRun: Record<string, z.infer<typeof SessionUsageSchema>> = {};
+  runIds.forEach((id, i) => {
+    const s = seedOf(id);
+    const memoryMb = Math.round(220 + s * 900 + wobble(s, 60) + (tight ? 900 : 0));
+    byRun[id] =
+      i === 0
+        ? { state: 'ok', memoryMb, memoryPeakMb: memoryMb + 40 }
+        : {
+            state: 'ok',
+            memoryMb,
+            memoryPeakMb: Math.round(memoryMb * 1.35),
+            cpuPercent: Math.max(
+              0,
+              Math.round((8 + s * 70 + wobble(s + 0.3, 9) + (tight ? 60 : 0)) * 10) / 10,
+            ),
+          };
+  });
+  const sessionsMb = Object.values(byRun).reduce((n, u) => n + (u.state === 'ok' ? u.memoryMb : 0), 0);
+  const usedMb = Math.min(totalMb - 200, 1_450 + sessionsMb);
+  const cores = 4;
+  // 和真后端一样：忙的核数和百分比出自同一个比例
+  const percent = Math.min(100, Math.max(0, Math.round((tight ? 93 : 34) + wobble(0.5, 6))));
+  return {
+    at: at.toISOString(),
+    everyMs: MOCK_RESOURCES_EVERY_MS,
+    memory: { state: 'ok', totalMb, availableMb: totalMb - usedMb },
+    cpu: {
+      state: 'ok',
+      percent,
+      busyCores: Math.round((percent / 100) * cores * 10) / 10,
+      cores,
+      load1: Math.round(((tight ? 5.6 : 1.4) + wobble(0.2, 0.4)) * 100) / 100,
+    },
+    sessions: { state: 'ok', byRun },
+  };
+}
+
+/** 假后端推机器资源的间隔，和真后端（RESOURCE_SAMPLE_MS）一样。 */
+const MOCK_RESOURCES_EVERY_MS = 5_000;
+
 function mockNodeMode(): 'fresh' | 'stale' | 'gone' | 'never' | 'off' {
   const v = typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('mockNode');
   return v === 'stale' || v === 'gone' || v === 'never' || v === 'off' ? v : 'fresh';
@@ -560,6 +643,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     };
   };
   const listeners = new Set<(e: LiveEvent) => void>();
+  /** 最近一次读主页时在跑的流水编号：推送报机器资源时按它编各会话的占用。 */
+  let liveRunIds: string[] = [];
   let counter = 0;
   /** 进合并队列的先后。 */
   const queuedAt = new Map<string, number>();
@@ -1765,7 +1850,9 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             (r) => !r.startedAt && !r.endedAt,
           );
           const asking = t.task.state === 'asking';
-          const flow = taskFlow(t.task, viewsOf(t));
+          const views = viewsOf(t);
+          const flow = taskFlow(t.task, views);
+          const runIds = views.filter((v) => v.running).map((v) => v.id);
           const decision = pendingOf(t);
           const waitingReason = t.task.paused
             ? ('paused' as const)
@@ -1803,8 +1890,12 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             link: `/tasks/${t.task.id}`,
             taskId: t.task.id,
             state: t.task.state,
+            runIds,
           };
         });
+      // 推送每 5 秒报一回资源时用这一份编号（下一次读主页再更新）
+      liveRunIds = running.flatMap((r) => r.runIds);
+      const resources = mockResources(liveRunIds, new Date());
       const flow = flowStages(st.tasks.flatMap(viewsOf), running);
       const taskDone = st.tasks.flatMap((t) =>
         t.subtasks
@@ -1881,6 +1972,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           running: st.pools.reduce((n, p) => n + poolRunning(p.id), 0),
           reserved: st.pools.reduce((n, p) => n + poolReserved(p.id), 0),
         },
+        ...(resources ? { resources } : {}),
         asOf: iso(),
       });
     },
@@ -2898,21 +2990,27 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       await wait();
       if (!Object.hasOwn(SETTING_SCHEMAS, key)) throw new ApiError(404, 'setting_not_found', '没有这项设置');
       const body = UpdateSettingRequest.parse(raw);
-      const schema: z.ZodType = SETTING_SCHEMAS[key as SettingKey];
-      const value = schema.safeParse(body.value);
-      if (!value.success)
-        throw new ApiError(400, 'invalid_request', '设置的值不符合约定', value.error.issues);
       const current = st.settings.find((s) => s.key === key) ?? { key, value: null, version: 0 };
       if (current.version !== body.version)
         throw new ApiError(409, 'conflict', '这项设置刚被别人改过，刷新后再改');
-      // 整池暂停：撤回、续期必须写原因（和后端同一条判法）
+      // 整池暂停：新写的必须过格式；认不出的原样没改才留（和后端同一条判法）。撤回、续期必须写原因。
+      let stored: unknown;
       if (key === POOL_HOLDS_SETTING) {
-        const missing = revocationProblem(current.value, value.data, body.reason);
+        const accepted = acceptPoolHoldsWrite(current.value, body.value);
+        if (!accepted.ok) throw new ApiError(400, 'invalid_request', accepted.message);
+        const missing = revocationProblem(current.value, accepted.value, body.reason);
         if (missing) throw new ApiError(400, 'reason_required', missing);
+        stored = accepted.value;
+      } else {
+        const schema: z.ZodType = SETTING_SCHEMAS[key as SettingKey];
+        const value = schema.safeParse(body.value);
+        if (!value.success)
+          throw new ApiError(400, 'invalid_request', '设置的值不符合约定', value.error.issues);
+        stored = value.data;
       }
       const next = {
         key,
-        value: value.data,
+        value: stored,
         version: current.version + 1,
         updatedAt: iso(),
         updatedBy: st.me.user.id,
@@ -2923,7 +3021,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         action: 'setting.update',
         target: `setting:${key}`,
         before: current.value,
-        after: value.data,
+        after: stored,
         via: 'cockpit',
         ...(body.reason ? { reason: body.reason } : {}),
       });
@@ -3022,6 +3120,127 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       };
       return ReleaseRequestResponse.parse({ requested: true, sha, at: iso() });
     },
+    async franceCliTools() {
+      await wait();
+      // 假数据：四种状态都有，截图和页面测试看得到。这台不是法国，数字不是真机读数。
+      const ago = new Date(now() - 8 * 60_000).toISOString();
+      const cell = (version: string) => ({ state: 'ok' as const, version });
+      const row = (
+        tool: string,
+        name: string,
+        installed:
+          | { state: 'ok'; version: string }
+          | { state: 'unread'; why: string }
+          | { state: 'unreadable'; why: string },
+        latest: { state: 'ok'; version: string } | { state: 'unreadable'; why: string },
+        status:
+          | { kind: 'current'; label: '最新' }
+          | { kind: 'behind'; count: number; label: string }
+          | { kind: 'behind-uncounted'; reason: string; label: '落后（数不出几个）' }
+          | { kind: 'unread'; reason: string; label: '读不到' }
+          | { kind: 'unreadable'; reason: string; label: '没查成' },
+      ) => ({
+        scope: 'user' as const,
+        owner: '',
+        tool,
+        name,
+        installed,
+        latest,
+        status,
+        checkedAt: ago,
+      });
+      const userRows = (behindCodex: boolean) => [
+        row('claude', 'Claude Code', cell('2.1.282'), cell('2.1.296'), {
+          kind: 'behind',
+          count: 14,
+          label: '落后 14 个版本',
+        }),
+        row(
+          'codex',
+          'Codex',
+          behindCodex ? cell('0.156.1') : cell('0.162.1'),
+          cell('0.162.1'),
+          behindCodex
+            ? { kind: 'behind', count: 6, label: '落后 6 个版本' }
+            : { kind: 'current', label: '最新' },
+        ),
+        row('grok', 'Grok', cell('1.0.41'), cell('1.0.50'), {
+          kind: 'behind',
+          count: 9,
+          label: '落后 9 个版本',
+        }),
+        row(
+          'cursor-agent',
+          'Cursor Agent',
+          { state: 'unread', why: '退出码 127（找不到命令）' },
+          cell('2026.10.08'),
+          { kind: 'unread', reason: '退出码 127（找不到命令）', label: '读不到' },
+        ),
+        row('reclaude', 'reclaude', cell('1.3.0'), cell('1.4.1'), {
+          kind: 'behind-uncounted',
+          reason: '发布源只给了最新版，没有版本列表，数不出落后几个',
+          label: '落后（数不出几个）',
+        }),
+        row(
+          'mirasim-server',
+          'Mirasim 服务端',
+          cell('0.0.355'),
+          { state: 'unreadable', why: '更新日志里没认出版本号' },
+          { kind: 'unreadable', reason: '更新日志里没认出版本号', label: '没查成' },
+        ),
+      ];
+      const stamp = (owner: string, rows: ReturnType<typeof userRows>) =>
+        rows.map((item) => ({ ...item, scope: 'user' as const, owner }));
+      return CliToolsResponseSchema.parse({
+        state: 'ok',
+        asOf: iso(),
+        groups: [
+          {
+            scope: 'user',
+            owner: 'fleet-agent-carpool',
+            title: 'fleet-agent-carpool',
+            rows: stamp('fleet-agent-carpool', userRows(true)),
+          },
+          { scope: 'user', owner: 'pilot', title: 'pilot', rows: stamp('pilot', userRows(false)) },
+          {
+            scope: 'npm',
+            owner: '',
+            title: '全局 npm',
+            rows: [
+              {
+                ...row('kimi-code', 'Kimi', cell('2.1.1'), cell('2.2.0'), {
+                  kind: 'behind',
+                  count: 3,
+                  label: '落后 3 个版本',
+                }),
+                scope: 'npm',
+              },
+              {
+                ...row('dsh', 'DeepSeek dsh', cell('0.1.5'), cell('0.1.5'), {
+                  kind: 'current',
+                  label: '最新',
+                }),
+                scope: 'npm',
+              },
+              {
+                ...row(
+                  'pi',
+                  'pi',
+                  { state: 'unread', why: '全局 npm 里没有 @earendil-works/pi-coding-agent' },
+                  cell('0.90.0'),
+                  {
+                    kind: 'unread',
+                    reason: '全局 npm 里没有 @earendil-works/pi-coding-agent',
+                    label: '读不到',
+                  },
+                ),
+                scope: 'npm',
+              },
+            ],
+          },
+        ],
+      });
+    },
     async francePreflight() {
       await wait();
       // 假数据不起子进程：装作这台后端没接上那一条发布命令（真法国机器才装得上）。
@@ -3036,8 +3255,16 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       listeners.add(listener);
       onStatus?.('open');
       const t = setTimeout(() => listener({ type: 'ready' }), 0);
+      // 机器资源和真后端一样每 5 秒推一回（只在开着模拟器时：测试里不起定时器）
+      const tick = opts.live
+        ? setInterval(() => {
+            const resources = mockResources(liveRunIds, new Date());
+            if (resources) listener({ type: 'resources', resources });
+          }, MOCK_RESOURCES_EVERY_MS)
+        : undefined;
       return () => {
         clearTimeout(t);
+        clearInterval(tick);
         listeners.delete(listener);
       };
     },

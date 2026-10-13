@@ -20,6 +20,7 @@ import type {
   Audit,
   AuthConfig,
   Board,
+  CliToolsResponse,
   Credentials,
   EnvResponse,
   FrancePreflightResponse,
@@ -209,6 +210,8 @@ export interface FleetApi {
   franceRelease(sha: string): Promise<ReleaseRequestResult>;
   /** /france 页「发版预检」按钮：点下让后端起 pnpm release:onekey preflight，命令写死、不收参数。 */
   francePreflight(): Promise<FrancePreflightResponse>;
+  /** /france 页「命令行工具」：在用版本、官方最新、现算的落后。只读。 */
+  franceCliTools(): Promise<CliToolsResponse>;
   /** 订阅实时推送，返回取消订阅的函数。onStatus 报连接状态（给顶栏的「实时」小灯）。 */
   subscribe(listener: (event: LiveEvent) => void, onStatus?: (status: LiveStatus) => void): () => void;
 }
@@ -271,6 +274,7 @@ export const keys = {
   franceReleaseState: ['france-release-state'] as const,
   franceReleaseCard: ['france-release-card'] as const,
   franceReleasedCommits: ['france-released-commits'] as const,
+  franceCliTools: ['france-cli-tools'] as const,
   env: ['env'] as const,
   home: ['home'] as const,
   nodes: ['nodes'] as const,
@@ -645,6 +649,16 @@ export function useFranceReleaseCard() {
   });
 }
 
+/** /france 页「命令行工具」（#1969）：和定时任务同一档，一分钟重拉一次。读不到后端也照实显示。 */
+export function useCliTools() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.franceCliTools,
+    queryFn: () => api.franceCliTools(),
+    refetchInterval: 60_000,
+  });
+}
+
 /**
  * /changelog 页「已发布的提交」（#1255）：读法国发布历史；发了新版会自己变，页面开着每 5 分钟重拉一次。读不到后端也照实显示「没查成」。
  */
@@ -732,6 +746,7 @@ function homeDataOf(data: HomeResponse): HomeData {
     health: data.health,
     flow: data.flow,
     slots: data.slots,
+    resources: data.resources,
   };
 }
 
@@ -1170,6 +1185,12 @@ function refresh(qc: QueryClient, queryKey?: readonly string[]) {
 export function applyLiveEvents(qc: QueryClient, events: readonly LiveEvent[]) {
   const keysToDrop = new Map<string, readonly string[]>();
   for (const e of events) {
+    if (e.type === 'resources') {
+      // 机器资源（#1973）：读数本身就在推送里，直接换掉本台主页数据里的 resources，不作废、不重拉主页。
+      // 还没读到过主页就不造一份（等主页读回来自带最近一回）；一批里有几回，后来的盖掉先来的
+      qc.setQueryData<HomeResponse>(keys.home, (old) => (old ? { ...old, resources: e.resources } : old));
+      continue;
+    }
     const targets = e.type === 'change' && isRealtimeTable(e.table) ? TABLE_KEYS[e.table] : undefined;
     if (!targets) {
       refresh(qc);

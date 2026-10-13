@@ -20,6 +20,7 @@ const MAIN_QUERY_KEYS = [
   ['jobs'],
   ['france-release-state'],
   ['france-release-card'],
+  ['france-cli-tools'],
   ['node', 'wsl'],
 ] as const;
 

@@ -438,7 +438,6 @@
     "packages/web/src/components/markdown-lite.test.tsx": 39,
     "packages/web/src/components/org-switch.test.tsx": 73,
     "packages/web/src/components/page.test.tsx": 81,
-    "packages/web/src/components/pool-holds.test.tsx": 591,
     "packages/web/src/components/quota.test.tsx": 51,
     "packages/web/src/components/shell/theme-switch.test.tsx": 237,
     "packages/web/src/lib/channel-status.test.ts": 13,
