@@ -369,12 +369,7 @@ function AppsSection({
   const result = appRows(resources, running, { remote });
   const totalCores = resources?.cpu.state === 'ok' ? resources.cpu.cores : undefined;
   return (
-    <Section
-      title="上线项目"
-      description="此刻的 CPU、内存，名下目录和库的磁盘"
-      flush
-      data-resources-apps
-    >
+    <Section title="上线项目" description="此刻的 CPU、内存，名下目录和库的磁盘" flush data-resources-apps>
       {result.kind === 'unread' ? (
         <div className="p-4 text-body text-muted-foreground" data-resources-apps-missing>
           没读到：{result.why}
