@@ -17,7 +17,7 @@
 //   第一行写一个 http:// 或 socks5:// 地址，前两条路都没成才经它取一次（via 为 'fallback'）。读法见 git-run.mjs 的 readFallbackProxy。
 //   三条路的预算见下面 SUBAGENT_* 的注释：环境 6 秒 / 直连 3 秒 / 备用 3 秒，靠总预算 9 秒压住，不会撑破钩子的 10 秒。
 // - 同一个仓三分钟内刚取成过就不再取（记在 ~/.fleet-dao/fetch-ok/）。开会话钩子取成功也会记一笔，
-//   接着起的子代理不再各付一次 6 秒。取失败不记：要建工作树的子代理仍拦，下一轮还会再试。
+//   接着起的子代理不再各付一次 6 秒。取失败不记：要建工作树的子代理仍给提示，下一轮还会再试。
 
 import { createHash } from 'node:crypto';
 import { mkdirSync, statSync, writeFileSync } from 'node:fs';
@@ -188,13 +188,14 @@ export function markFetchOk(o) {
 /**
  * 起子代理（Agent / Task）之前，把 origin/main 取到最新：子代理的工作树从它切（见文件头）。
  * 取成了、不是 Agent/Task、不在 git 仓里、没有 origin：什么都不说（返回 null）。
- * 取不成：要建工作树的（isolation 是 worktree）拦下，说清 origin/main 停在多久以前；不建工作树的不拦（它不从 origin/main 切）。
+ * 取不成：要建工作树的（isolation 是 worktree）给一句提示（不拦，决定 0089），说清 origin/main 停在多久以前、交代里先 fetch 再 rebase；
+ * 不建工作树的不说话（它不从 origin/main 切）。
  * `git(cwd, args, opts)` 同 fetchWithFallback；不抛。
  * 这个仓三分钟内刚取成过：不再取，直接放行。取失败不记成功。
  * `fallback` 是本机备用代理的读取结果（git-run.mjs 的 readFallbackProxy）：给了 proxy 就当第三条路；bad 为 true（那一行认不出）
- * 当没配，并在拦下的话里补一句。`budget` 给了就按总预算分配三条路的超时（pretool.mjs 给）。
+ * 当没配，并在提示里补一句。`budget` 给了就按总预算分配三条路的超时（pretool.mjs 给）。
  * @param {{ tool: unknown, toolInput: unknown, cwd: string, git: (cwd: string, args: string[], opts?: { direct?: boolean, proxy?: string, timeoutMs?: number }) => GitResult, okOf: (r: GitResult) => boolean, whyOf: (r: GitResult) => string, env?: Record<string, string | undefined>, home?: string, now?: number, fallback?: { proxy?: string, bad?: boolean }, budget?: { totalMs: number, directMs: number, fallbackMs: number }, clock?: () => number }} o
- * @returns {{ block: true, message: string } | null}
+ * @returns {{ block: false, message: string } | null}
  */
 export function freshBeforeSubagent(o) {
   if (o.tool !== 'Agent' && o.tool !== 'Task') return null;
@@ -227,10 +228,9 @@ export function freshBeforeSubagent(o) {
     ? '（~/.fleet-dao/fallback-proxy：备用代理那一行认不出，当没配；只认 http:// 或 socks5:// 开头的 host:port、不带用户名密码）'
     : '';
   return {
-    block: true,
+    block: false,
     message:
       `fleet-guard：要给子代理建工作树，但本机取不到远端（${got.why}）${badNote}。本机记着的 origin/main 停在 ${at}，` +
-      '子代理会在旧代码上干活、开出来的 PR 满是冲突。先让网络通了再起（自己跑一遍 git fetch origin 看报什么），' +
-      '或者这次不用 isolation: "worktree"、在交代里写明开工第一步先 git fetch origin main 再 git rebase origin/main。',
+      '子代理的工作树会从这里切。没拦：交代里写明开工第一步先 git fetch origin main 再 git rebase origin/main（取不到就照实回报）。',
   };
 }

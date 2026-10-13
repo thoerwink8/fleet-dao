@@ -48,7 +48,7 @@ interface Lib {
     home?: string;
     now?: number;
     fallback?: Fallback;
-  }): { block: true; message: string } | null;
+  }): { block: false; message: string } | null;
   FETCH_QUIET_MS: number;
   SUBAGENT_FETCH_MS: number;
   SUBAGENT_DIRECT_MS: number;
@@ -217,7 +217,7 @@ describe('起子代理前先把 origin/main 取到最新', () => {
     expect(s.calls.find((a) => a[0] === 'fetch')).toEqual(['fetch', '-q', 'origin', 'main']);
   });
 
-  it('三分钟内这个仓刚取成过：不再取，直接放行；过了再取。取失败不记，下一轮仍取、要建工作树仍拦', () => {
+  it('三分钟内这个仓刚取成过：不再取，直接放行；过了再取。取失败不记，下一轮仍取、要建工作树仍提示', () => {
     const home = mkdtempSync(join(tmpdir(), 'fresh-ok-'));
     const common = join(home, 'repo.git');
     const now = Date.now();
@@ -252,10 +252,11 @@ describe('起子代理前先把 origin/main 取到最新', () => {
 
     rmSync(dir, { recursive: true, force: true });
     const failed = go([refused(), refused()], now + 3_000);
-    expect(failed.out?.block).toBe(true);
+    expect(failed.out?.block).toBe(false);
+    expect(failed.out?.message).toContain('本机取不到远端');
     expect(failed.fetches).toBe(2);
     const again = go([refused(), refused()], now + 4_000);
-    expect(again.out?.block).toBe(true);
+    expect(again.out?.block).toBe(false);
     expect(again.fetches).toBe(2);
     expect(existsSync(dir)).toBe(false);
     rmSync(home, { recursive: true, force: true });
@@ -265,11 +266,13 @@ describe('起子代理前先把 origin/main 取到最新', () => {
     expect(run(repoGit([refused(), good()]).git, 'Agent', worktreeAgent)).toBeNull();
   });
 
-  it('【故意造出的失败】要建工作树、两条路都取不到：拦下，说清 origin/main 停在多久以前', () => {
+  it('【故意造出的失败】要建工作树、两条路都取不到：不拦（决定 0089），提示说清 origin/main 停在多久以前、交代里先 fetch 再 rebase', () => {
     const v = run(repoGit([refused(), refused()]).git, 'Agent', worktreeAgent);
-    expect(v?.block).toBe(true);
+    expect(v?.block).toBe(false);
     expect(v?.message).toContain('停在 abc1234（9 hours ago）');
     expect(v?.message).toContain('去掉代理直连也没成');
+    expect(v?.message).toContain('git fetch origin main');
+    expect(v?.message).toContain('git rebase origin/main');
   });
 
   it('不建工作树的子代理取不到远端：不拦（它不从 origin/main 切）', () => {
@@ -438,25 +441,25 @@ describe('起子代理前取远端：备用代理', () => {
     ).toBeNull();
   });
 
-  it('(b) 三条都不成：要建工作树的拦下，话里有三段原因', () => {
+  it('(b) 三条都不成：要建工作树的给提示（不拦），话里有三段原因', () => {
     const v = go(repo({ env: refused(), direct: timedOut(3000), fallback: timedOut(3000) }), {
       proxy: CLASH,
     });
-    expect(v?.block).toBe(true);
+    expect(v?.block).toBe(false);
     expect(v?.message).toContain('经环境里的代理没成');
     expect(v?.message).toContain('去掉代理直连也没成');
     expect(v?.message).toContain('经备用代理');
   });
 
-  it('(c) 没配备用代理：和以前一样拦，话里没有备用代理', () => {
+  it('(c) 没配备用代理：给提示，话里没有备用代理', () => {
     const v = go(repo({ env: refused(), direct: timedOut(3000), fallback: good() }));
-    expect(v?.block).toBe(true);
+    expect(v?.block).toBe(false);
     expect(v?.message).not.toContain('备用代理');
   });
 
   it('(d) 备用代理那行认不出：当没配（不去用它），话里写明认不出', () => {
     const v = go(repo({ env: refused(), direct: timedOut(3000), fallback: good() }), { bad: true });
-    expect(v?.block).toBe(true);
+    expect(v?.block).toBe(false);
     expect(v?.message).toContain('备用代理那一行认不出');
   });
 });
@@ -464,7 +467,7 @@ describe('起子代理前取远端：备用代理', () => {
 // 每条要起一个真的钩子进程、跑两三条 git（Windows 上慢，本机实测 5 秒多），默认 5 秒的超时太紧
 const SLOW_MS = 30_000;
 
-describe('真的钩子进程：远端取不到时，建工作树的子代理被拦、别的照放行', () => {
+describe('真的钩子进程：远端取不到时，建工作树的子代理放行并带提示、别的照放行', () => {
   const made: string[] = [];
   afterEach(() => {
     for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -497,11 +500,17 @@ describe('真的钩子进程：远端取不到时，建工作树的子代理被�
   };
 
   it(
-    'isolation: worktree 又取不到远端：退出码 2、说清原因',
+    'isolation: worktree 又取不到远端：退出码 0，stdout 的 additionalContext 和 systemMessage 说清原因',
     () => {
       const r = call(worktreeAgent);
-      expect(r.status).toBe(2);
-      expect(r.stderr).toContain('本机取不到远端');
+      expect(r.status).toBe(0);
+      const out = JSON.parse(r.stdout) as {
+        systemMessage?: string;
+        hookSpecificOutput?: { hookEventName?: string; additionalContext?: string };
+      };
+      expect(out.systemMessage).toContain('本机取不到远端');
+      expect(out.hookSpecificOutput?.hookEventName).toBe('PreToolUse');
+      expect(out.hookSpecificOutput?.additionalContext).toContain('本机取不到远端');
     },
     SLOW_MS,
   );
