@@ -18,6 +18,7 @@ import {
   listTaskRows,
   models,
   nodeReports,
+  nodeSessions,
   notificationDeliveries,
   notifications,
   openPoolRuns,
@@ -51,6 +52,7 @@ import {
   toSubtask,
   toTask,
   users,
+  worktreeInventory,
 } from '@fleet-dao/db';
 import { answerResolves, ciPolicyOf, type ProgressKind, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
@@ -72,7 +74,13 @@ import {
 } from './delivery-logic.ts';
 import { testRunOf } from './done-check.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
-import { nodeReportRow, readNodeSnapshot } from './node-logic.ts';
+import {
+  nodeReportRow,
+  nodeSessionsRow,
+  readNodeSessions,
+  readNodeSnapshot,
+  readWorktreeInventoryPayload,
+} from './node-logic.ts';
 import { nextCursorOf } from './paging.ts';
 import { planSteps } from './plan-logic.ts';
 import type {
@@ -792,6 +800,39 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         ...toNodeReportSummary(row),
         snapshot: readNodeSnapshot(row.nodeId, row.schemaVersion, row.payload),
       };
+    },
+
+    async putNodeSessions(input) {
+      const report = nodeSessionsRow(input);
+      const values = {
+        nodeId: input.nodeId,
+        schemaVersion: report.schemaVersion,
+        reportedAt: new Date(report.reportedAt),
+        receivedAt: now(),
+        payload: report,
+      };
+      const { nodeId: _key, ...overwrite } = values;
+      const [written] = await db
+        .insert(nodeSessions)
+        .values(values)
+        .onConflictDoUpdate({ target: nodeSessions.nodeId, set: overwrite })
+        .returning({ receivedAt: nodeSessions.receivedAt });
+      if (!written) throw new Error(`node_sessions 没写进 ${input.nodeId} 那一行`);
+      return { receivedAt: written.receivedAt.toISOString() };
+    },
+    async listNodeSessions() {
+      const rows = await db.select().from(nodeSessions);
+      return rows
+        .map((r) => ({
+          nodeId: r.nodeId,
+          receivedAt: r.receivedAt.toISOString(),
+          report: readNodeSessions(r.nodeId, r.payload),
+        }))
+        .sort((a, b) => (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0));
+    },
+    async getWorktreeInventory() {
+      const [row] = await db.select().from(worktreeInventory).where(eq(worktreeInventory.key, 'latest'));
+      return row ? readWorktreeInventoryPayload(row.payload) : null;
     },
 
     // —— fleet 命令 ——

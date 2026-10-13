@@ -13,6 +13,7 @@ import {
   insertSubtasks,
   models,
   nodeReports,
+  nodeSessions,
   notificationDeliveries,
   notifications,
   pools,
@@ -29,6 +30,7 @@ import {
   specs,
   tasks,
   users,
+  worktreeInventory,
 } from '@fleet-dao/db';
 import { sql } from 'drizzle-orm';
 import type { MemoryData } from '../memory-store.ts';
@@ -306,6 +308,22 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         payload: r.snapshot,
       })),
     );
+  }
+  if (data.nodeSessions?.length) {
+    await db.insert(nodeSessions).values(
+      data.nodeSessions.map((r) => ({
+        nodeId: r.nodeId,
+        schemaVersion: 1,
+        reportedAt: date(r.receivedAt),
+        receivedAt: date(r.receivedAt),
+        payload: r.report,
+      })),
+    );
+  }
+  if (data.worktreeInventory !== undefined && data.worktreeInventory !== null) {
+    await db
+      .insert(worktreeInventory)
+      .values({ key: 'latest', takenAt: new Date(0), payload: data.worktreeInventory });
   }
   if (data.jobs?.length) await db.insert(scheduledJobs).values(data.jobs);
   if (data.scheduleRuns?.length) {

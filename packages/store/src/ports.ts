@@ -10,6 +10,7 @@ import type {
   DecisionAnswer,
   DecisionOption,
   HistoryResponse,
+  LocalSessionsReport,
   Model,
   NodeReport,
   NodeSnapshot,
@@ -27,6 +28,7 @@ import type {
   Subtask,
   Task,
   TaskListGroup,
+  WorktreeInventory,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 
@@ -685,6 +687,21 @@ export interface NodeStore {
   listNodeReports(): Promise<NodeReportSummary[]>;
   /** 没收到过是 null。库里那份认不出（版本对不上、形状坏了）抛 InvalidNodeReportError，不当成没有。 */
   getNodeReport(nodeId: string): Promise<NodeReportRecord | null>;
+  /**
+   * 本机会话（#1991）：覆盖写这个环境那一行，receivedAt 记成此刻（Store 的钟）。先照 shared 的 LocalSessionsReportSchema 校验，
+   * 认不出抛 InvalidNodeReportError、什么都不写。
+   */
+  putNodeSessions(input: { nodeId: string; report: LocalSessionsReport }): Promise<{ receivedAt: string }>;
+  /** 收到过本机会话的环境，按 nodeId 排。库里那份认不出抛 InvalidNodeReportError，不当成没有。 */
+  listNodeSessions(): Promise<NodeSessionsRecord[]>;
+  /** 法国工作树最近一份清单（#1993，引擎写）；一次都没存过是 null。认不出抛错，不当成没有树。 */
+  getWorktreeInventory(): Promise<WorktreeInventory | null>;
+}
+
+export interface NodeSessionsRecord {
+  nodeId: string;
+  receivedAt: string;
+  report: LocalSessionsReport;
 }
 
 export type Store = UserStore &

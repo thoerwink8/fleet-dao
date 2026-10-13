@@ -51,7 +51,13 @@ import {
 } from './delivery-logic.ts';
 import { testRunOf } from './done-check.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
-import { nodeReportRow, readNodeSnapshot } from './node-logic.ts';
+import {
+  nodeReportRow,
+  nodeSessionsRow,
+  readNodeSessions,
+  readNodeSnapshot,
+  readWorktreeInventoryPayload,
+} from './node-logic.ts';
 import { byAtThenId, compareIds, pageOfSorted } from './paging.ts';
 import { planSteps } from './plan-logic.ts';
 import type {
@@ -190,6 +196,10 @@ export interface MemoryData {
   credentials: Map<string, PasswordCredentials>;
   /** 别的环境推来的快照（node_reports），一个环境一行。 */
   nodeReports: NodeReportRecord[];
+  /** 本机会话（node_sessions，#1991），一个环境一行；report 原样放（读回来再认一遍）。 */
+  nodeSessions: { nodeId: string; receivedAt: string; report: unknown }[];
+  /** 法国工作树最近一份清单（worktree_inventory，#1993）；没存过是 null。原样放，读回来再认一遍。 */
+  worktreeInventory: unknown;
 }
 
 export function emptyData(): MemoryData {
@@ -220,6 +230,8 @@ export function emptyData(): MemoryData {
     githubEvents: new Map(),
     credentials: new Map(),
     nodeReports: [],
+    nodeSessions: [],
+    worktreeInventory: null,
   };
 }
 
@@ -717,6 +729,29 @@ export function createMemoryStore(
         ...summaryOf(found),
         snapshot: readNodeSnapshot(found.nodeId, found.schemaVersion, structuredClone(found.snapshot)),
       };
+    },
+
+    async putNodeSessions(input) {
+      const report = nodeSessionsRow(input);
+      const receivedAt = now().toISOString();
+      data.nodeSessions = [
+        ...data.nodeSessions.filter((r) => r.nodeId !== input.nodeId),
+        { nodeId: input.nodeId, receivedAt, report: structuredClone(report) },
+      ];
+      return { receivedAt };
+    },
+    async listNodeSessions() {
+      return [...data.nodeSessions]
+        .sort((a, b) => compareIds(a.nodeId, b.nodeId))
+        .map((r) => ({
+          nodeId: r.nodeId,
+          receivedAt: r.receivedAt,
+          report: readNodeSessions(r.nodeId, structuredClone(r.report)),
+        }));
+    },
+    async getWorktreeInventory() {
+      if (data.worktreeInventory === null || data.worktreeInventory === undefined) return null;
+      return readWorktreeInventoryPayload(structuredClone(data.worktreeInventory));
     },
 
     // —— fleet 命令 ——
