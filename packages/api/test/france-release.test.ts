@@ -1,9 +1,29 @@
 // /api/france/release-state 和 /api/france/preflight（#618 发版一键）：
-// - release-state：复用 readFranceReleaseState 的逻辑——读 state 文件 + 暂停标记，三态各画各的；读不到一律 unreadable 写明原因。
-// - preflight：起子进程跑 pnpm release:onekey preflight（命令后端写死、不收参数）。
-// 故意造出的失败都写明原因，不拿「没在走」「预检过了」顶：读文件抛错、JSON 认不出、起进程没起成。
+// - release-state：读 state 文件 + 暂停标记，三态各画各的；读不到一律 unreadable 写明原因。
+// - preflight：进程内读七项事实（france-preflight.test.ts 逐项覆盖）。这里只钉接口：接上了就回退出码和一行一项，没接上回没接上。
+// 故意造出的失败都写明原因，不拿「没在走」「能发」顶。
+
 import { FrancePreflightResponseSchema, FranceReleaseStateSchema, WEB_API_PREFIX } from '@fleet-dao/shared';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+const procCalls = vi.hoisted(() => ({ execFile: 0, spawn: 0 }));
+
+vi.mock('node:child_process', async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  return {
+    ...actual,
+    execFile: (...args: unknown[]) => {
+      procCalls.execFile += 1;
+      return (actual.execFile as (...a: unknown[]) => unknown)(...args);
+    },
+    spawn: (...args: unknown[]) => {
+      procCalls.spawn += 1;
+      return (actual.spawn as (...a: unknown[]) => unknown)(...args);
+    },
+  };
+});
+
+import { PREFLIGHT_LABEL, PREFLIGHT_NOT_WIRED, type PreflightReaders } from '../src/france-preflight.ts';
 import type { FranceReleasePort } from '../src/france-release.ts';
 import { type Harness, harness } from './harness.ts';
 
@@ -11,24 +31,24 @@ const STATE_PATH = `${WEB_API_PREFIX}/france/release-state`;
 const PREFLIGHT_PATH = `${WEB_API_PREFIX}/france/preflight`;
 
 /** 状态文件的替身：默认两个文件都不在（没在走）。 */
-function port(over: Partial<FranceReleasePort> = {}): FranceReleasePort & { ran: { pnpmCalls: number } } {
-  const ran = { pnpmCalls: 0 };
+function port(over: Partial<FranceReleasePort> = {}): FranceReleasePort {
   return {
-    ran,
     async readStateFiles() {
       return { stateJson: null, marker: false };
     },
-    async runPreflight() {
-      ran.pnpmCalls += 1;
-      return {
-        code: 0,
-        signal: null,
-        stdout: '—— 预检摘要 ——\n主线 CI：绿\n预检过了',
-        stderr: '',
-        timedOut: false,
-      };
-    },
     ...over,
+  };
+}
+
+function passing(): PreflightReaders {
+  return {
+    mainline: async () => ({ short: 'abcdef123456', title: '刷新耗时表', ci: 'green', ciDetail: '' }),
+    deployed: async () => ({ short: 'bbbbbbbbbbbb', title: '上一版' }),
+    gap: async () => ({ kind: 'ahead', count: 3 }),
+    other: async () => ({ kind: 'clear', detail: '没有别的发布在走' }),
+    receiver: async () => ({ installed: true }),
+    master: async () => ({ on: true, detail: '开着' }),
+    sessions: async () => ({ count: 0, engineDown: false }),
   };
 }
 
@@ -187,70 +207,40 @@ describe('/api/france/release-state', () => {
 });
 
 describe('/api/france/preflight', () => {
-  it('预检过了：code=0、命令原样照写、stdout 和 stderr 分块给页面', async () => {
-    const p = port();
-    const { status, body } = await postPreflight(harness({ franceRelease: p }));
+  it('七项都读到且能发：code=0、一项一行、不起子进程', async () => {
+    const before = { ...procCalls };
+    const { status, body } = await postPreflight(harness({ francePreflight: () => passing() }));
     expect(status).toBe(200);
-    expect(p.ran.pnpmCalls).toBe(1);
     expect(body.state).toBe('done');
     if (body.state !== 'done') throw new Error('该是 done');
-    expect(body.command).toBe('pnpm release:onekey preflight');
+    expect(body.command).toBe(PREFLIGHT_LABEL);
     expect(body.code).toBe(0);
-    expect(body.stdout).toContain('预检过了');
-    expect(body.durationMs).toBeGreaterThanOrEqual(0);
+    expect(body.stdout).toContain('主线头和 CI：通过');
+    expect(body.stdout).toContain('法国在跑的会话数：通过 0 个');
+    expect(body.stderr).toBe('');
     expect(body.timedOut).toBe(false);
+    expect(body.signal).toBeNull();
+    expect(procCalls.execFile).toBe(before.execFile);
+    expect(procCalls.spawn).toBe(before.spawn);
   });
 
-  it('预检没过：code=2、stderr 留下「没成」那行；起进程没起来这条不走到这里', async () => {
-    const p = port({
-      runPreflight: async () => ({
-        code: 2,
-        signal: null,
-        stdout: '—— 预检摘要 ——',
-        stderr: '第 0 步「预检」没成：主线 CI 红',
-        timedOut: false,
-      }),
-    });
-    const { body } = await postPreflight(harness({ franceRelease: p }));
+  it('一项读不到：code=2，那一行写读不到和原因，别的行还在', async () => {
+    const readers = passing();
+    readers.mainline = async () => {
+      throw new Error('EACCES: 读不了主线');
+    };
+    const { body } = await postPreflight(harness({ francePreflight: () => readers }));
     expect(body.state).toBe('done');
     if (body.state !== 'done') throw new Error('该是 done');
     expect(body.code).toBe(2);
-    expect(body.stderr).toContain('主线 CI 红');
+    expect(body.stdout).toContain('主线头和 CI：读不到 EACCES: 读不了主线');
+    expect(body.stdout).toContain('发版接活单元：通过 装了');
   });
 
-  it('起进程都没起来（pnpm 不在 PATH）：unreadable + 原因，不拿 code 0 顶', async () => {
-    const p = port({
-      runPreflight: async () => {
-        throw new Error('spawn pnpm ENOENT');
-      },
-    });
-    const { body } = await postPreflight(harness({ franceRelease: p }));
-    expect(body.state).toBe('unreadable');
-    if (body.state !== 'unreadable') throw new Error('该是 unreadable');
-    expect(body.why).toContain('ENOENT');
-  });
-
-  it('这台后端没接上 franceRelease：unreadable，写明到法国那台才有这颗按钮', async () => {
+  it('这台后端没接上发版预检：unreadable，写明到法国那台才有这颗按钮', async () => {
     const { body } = await postPreflight(harness({}));
     expect(body.state).toBe('unreadable');
     if (body.state !== 'unreadable') throw new Error('该是 unreadable');
-    expect(body.why).toContain('没接上');
-  });
-
-  it('超时被杀（timedOut=true）：原样透出，让页面写「60 秒到点了被杀」', async () => {
-    const p = port({
-      runPreflight: async () => ({
-        code: null,
-        signal: 'SIGTERM',
-        stdout: '—— 预检摘要 ——\n主线 CI：绿\n法国在跑的会话：',
-        stderr: '',
-        timedOut: true,
-      }),
-    });
-    const { body } = await postPreflight(harness({ franceRelease: p }));
-    expect(body.state).toBe('done');
-    if (body.state !== 'done') throw new Error('该是 done');
-    expect(body.timedOut).toBe(true);
-    expect(body.signal).toBe('SIGTERM');
+    expect(body.why).toBe(PREFLIGHT_NOT_WIRED);
   });
 });

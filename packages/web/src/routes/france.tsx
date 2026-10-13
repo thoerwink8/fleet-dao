@@ -2,8 +2,9 @@
 // 侧栏只留「法国」。一页里有本台六项事实、引擎总开关、命令行工具（#1969）、定时任务、发版。多一台机器时六项按台并排（对照表的写法）。
 // 旧地址 /env 由 routes/env.tsx 转到这里。
 //
-// 「发版一键」只到预检：命令后端写死 pnpm release:onekey preflight，不收参数、不开任意 CLI 口子；预检是只读的——暂停、发版它都不做。
-// 真发版：点「在用版本」那一行里的「发布到法国」（#1232、#1255，components/release-card.tsx 的 ReleaseEntry；后端只写请求文件，法国上 root 的单元接活），或走 pnpm release:onekey start。
+// 「发版预检」在后端进程里读七项事实（主线头和 CI、法国在用的提交、落后几个、有没有别的发布、接活单元、引擎总开关、在跑的会话），
+// 一项一行写通过、卡住、留意；读不到就写原因。不起子进程，不暂停、不发版。
+// 真发版：点「在用版本」那一行里的「发布到法国」（#1232、#1255，components/release-card.tsx 的 ReleaseEntry）。后端只写请求文件，法国上 root 的接活单元来做。
 // 发版单位是主线提交（决定 0032）：那一行写明落后几个提交、要发的主线头提交号和标题；下面的「发版」卡只读。
 //
 // 数据从哪来：
@@ -138,9 +139,9 @@ function ReleaseBody({
           {release.state === 'running'
             ? `${release.phase} · ${release.target}${release.marker ? ' · 派活已暂停' : ' · 暂停标记没写'}${release.why ? ` · ${release.why}` : ''}`
             : release.state === 'paused'
-              ? '暂停标记在、但一趟的记录不在：之前 abort 没把标记清掉。要发版前先用 pnpm release:onekey abort 收掉它'
+              ? '暂停标记在、但一趟的记录不在。这不是正在发的一趟。真发版点上面「在用版本」里的「发布到法国」'
               : release.state === 'idle'
-                ? '发版前点「发版预检」核一遍（只读，不暂停、不发版）；真发版走 pnpm release:onekey start'
+                ? '发版前点「发版预检」看能不能发（只读，不暂停、不发版）。真发版点上面「在用版本」里的「发布到法国」'
                 : release.why}
         </p>
       </div>
@@ -159,12 +160,14 @@ function ReleaseBody({
               <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <StatusBadge
                   tone={result.code === 0 ? 'done' : 'fail'}
-                  label={result.code === 0 ? '预检过了' : '预检没过'}
+                  label={result.code === 0 ? '能发' : '不能发'}
                 />
-                {result.code === 0 ? null : (
-                  <span className="text-meta text-muted-foreground">
-                    退出码不是 0，看下面输出找哪一项卡住
-                  </span>
+                {result.code === 0 ? (
+                  result.stdout.includes('：留意') ? (
+                    <span className="text-meta text-muted-foreground">能发。有几项要留意，看下面</span>
+                  ) : null
+                ) : (
+                  <span className="text-meta text-muted-foreground">不能发，看下面哪一项卡住或读不到</span>
                 )}
               </p>
               <p className="mt-1.5 text-meta text-muted-foreground">
@@ -172,9 +175,9 @@ function ReleaseBody({
                 {' · '}
                 退出码 {result.code ?? '（没给）'}
                 {result.signal ? `，信号 ${result.signal}` : ''}
-                {' · 跑了 '}
-                {Math.round(result.durationMs / 100) / 10} 秒{result.timedOut ? '（60 秒到点了被杀）' : ''}
-                {result.truncated ? '（输出超 512KB 已截断）' : ''}
+                {' · 用了 '}
+                {Math.round(result.durationMs / 100) / 10} 秒{result.timedOut ? '（读超时被停）' : ''}
+                {result.truncated ? '（输出超长已截断）' : ''}
               </p>
               {result.stdout ? (
                 <pre className="mt-2 max-h-80 overflow-auto rounded-md bg-muted p-3 text-meta whitespace-pre-wrap">
@@ -183,9 +186,7 @@ function ReleaseBody({
               ) : null}
               {result.stderr ? (
                 <>
-                  <p className="mt-2 text-meta font-medium text-ink-stall">
-                    stderr（release-train 的报错 / 没成的行都在这）：
-                  </p>
+                  <p className="mt-2 text-meta font-medium text-ink-stall">报错：</p>
                   <pre className="mt-1 max-h-80 overflow-auto rounded-md bg-muted p-3 text-meta whitespace-pre-wrap">
                     {result.stderr}
                   </pre>
@@ -417,7 +418,7 @@ type ReadBlock = {
 /**
  * 多块合成标题栏那一条：点刷新每块都重读；「最后更新」取已经读成过的里面最旧的一块。
  * dataUpdatedAt 为 0 是「这块从没读成」，不是时刻，不拿来比——一块失败不能把整条写成「还没读到过」。
- * 各块自己的「重试」不在这里。发版预检是人点的命令，不跟着重放。
+ * 各块自己的「重试」不在这里。发版预检是人点的读取，不跟着重放。
  */
 function pageRead(blocks: readonly ReadBlock[]) {
   let oldest = 0;
@@ -939,7 +940,7 @@ export default function France() {
             </Section>
             <Section
               title="发版一键"
-              description="只到预检（只读）；真发版点「在用版本」那一行的「发布到法国」。"
+              description="发版预检只读，不暂停、不发版。真发版点「在用版本」那一行的「发布到法国」。"
             >
               {release.error ? (
                 <LoadError what="发版一键" error={release.error} onRetry={() => void release.refetch()} />

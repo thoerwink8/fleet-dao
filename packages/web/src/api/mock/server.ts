@@ -3710,11 +3710,10 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     async francePreflight() {
       await wait();
-      // 假数据不起子进程：装作这台后端没接上那一条发布命令（真法国机器才装得上）。
-      // 话术里别带真命令名。
+      // 假数据不起子进程：装作这台后端没接上发版预检（真法国机器才读得到那七项）。
       return FrancePreflightResponseSchema.parse({
         state: 'unreadable',
-        why: '这是假后端：这台机器上没装真的发布命令；只读预检和起飞用的正式环境才有这颗按钮',
+        why: '这是假后端：发版预检只在法国那台的驾驶舱上读得到',
         asOf: iso(),
       });
     },

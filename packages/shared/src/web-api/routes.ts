@@ -128,7 +128,7 @@ export const WebRoutes = {
     request: ReleaseRequestBody,
     response: ReleaseRequestResponse,
   },
-  /** /france 页「发版预检」按钮：起子进程跑 pnpm release:onekey preflight，命令写死、不收参数。 */
+  /** /france 页「发版预检」：后端进程内读七项事实，不起子进程、不收参数。退出码 0 能发，2 不能发。 */
   francePreflight: { method: 'POST', path: '/france/preflight', response: FrancePreflightResponseSchema },
   /** /france 页「命令行工具」（#1969、#1971）：在用版本、官方最新、现算的落后，升过的带上次升级时间和升上去的版本。只读，没有升级按钮。 */
   franceCliTools: { method: 'GET', path: '/france/cli-tools', response: CliToolsResponseSchema },

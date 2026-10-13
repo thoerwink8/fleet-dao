@@ -393,6 +393,16 @@ export async function buildReleaseCard(input: BuildReleaseCardInput): Promise<Ca
   return { ...rows, action: await buildAction(input, rows) };
 }
 
+/** 发版预检用的三行（主线头和 CI、法国在用的提交、落后几个）。和发版卡同一份读法，不另写一套。 */
+export async function readPreflightDistance(input: BuildReleaseCardInput): Promise<{
+  mainline: Card['mainline'];
+  deployed: Card['deployed'];
+  gap: Card['gap'];
+}> {
+  const rows = await buildRows(input);
+  return { mainline: rows.mainline, deployed: rows.deployed, gap: rows.gap };
+}
+
 /** 「已发布的提交」最多列几条（每条还要去 GitHub 读一次标题，不拉太长）。 */
 export const RELEASED_COMMITS_LIMIT = 20;
 

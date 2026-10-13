@@ -77,9 +77,6 @@ function request(over: Partial<ReleaseRequestPort> = {}): ReleaseRequestPort & {
 
 const idle: FranceReleasePort = {
   readStateFiles: async () => ({ stateJson: null, marker: false }),
-  runPreflight: async () => {
-    throw new Error('不该起预检');
-  },
 };
 const trainState = (status: string, extra: Record<string, unknown> = {}): FranceReleasePort => ({
   ...idle,

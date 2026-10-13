@@ -5,6 +5,7 @@ import type { CliToolsPort } from './cli-versions.ts';
 import type { Config } from './config.ts';
 import type { DecisionCommenter } from './decision-handoff.ts';
 import type { CockpitAlerts } from './feishu-alerts.ts';
+import type { PreflightReaders } from './france-preflight.ts';
 import type { FranceReleasePort } from './france-release.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
 import type { GitHubUserPort } from './github-user.ts';
@@ -145,10 +146,15 @@ export interface Deps {
    */
   hostResources?: HostResourceSampler | undefined;
   /**
-   * /france 页发版一键（#618，france-release.ts）：读 release-train 状态文件 + 起 pnpm release:onekey preflight。
+   * /france 页发版一键（#618，france-release.ts）：读 release-train 状态文件。
    * 只在正式环境装配（main.ts 的 liveFranceReleasePort）；没给时接口照样回 unreadable，页面画「没查成 + 原因」。
    */
   franceRelease?: FranceReleasePort | undefined;
+  /**
+   * /france 页「发版预检」（france-preflight.ts）：进程内读七项事实，不起子进程、不读 home。
+   * 只在正式环境装配。没给时接口回没接上，不拿「能发」顶。
+   */
+  francePreflight?: ((signal?: AbortSignal) => PreflightReaders | undefined) | undefined;
   /**
    * /france 页「命令行工具」（#1969，cli-versions.ts）：读引擎记下的在用版本和官方最新，落后现算。
    * 没给（开发、内存版没有这张表）时整段写没查成，不拿空列表冒充都是最新。
