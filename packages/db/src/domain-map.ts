@@ -17,7 +17,7 @@ import type {
   Subtask,
   Task,
 } from '@fleet-dao/shared';
-import { probePaceWritten } from '@fleet-dao/shared';
+import { probePaceWritten, redCheckNames } from '@fleet-dao/shared';
 import type {
   bans,
   channelStates,
@@ -71,6 +71,8 @@ export const toTask = (r: typeof tasks.$inferSelect): Task =>
     acceptance: r.acceptance,
     // 引擎暂停这张单（#820 片 3）时写 phase='paused'、doing='已暂停：…'；doing 是空的也不能当没暂停
     paused: r.phase === 'paused' ? (r.doing ?? '已暂停') : undefined,
+    // 等合并时必过检查红了：doing 以「检查红了：」开头，后面是检查名（#1983）
+    redChecks: redCheckNames(r.doing),
     createdAt: r.createdAt.toISOString(),
   });
 

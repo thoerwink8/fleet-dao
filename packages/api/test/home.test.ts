@@ -165,12 +165,28 @@ describe('/api/home（内存版）', () => {
       const h = harness();
       seg(h, { segment: 'verify', startedAt: ago(30), endedAt: ago(10), outcome: 'done' });
       expect((await homeOf(h)).running[0]).toMatchObject({ segment: 'merge', waitingReason: 'merge_queue' });
+      expect((await homeOf(h)).running[0]?.redChecks).toBeUndefined();
       const h2 = harness();
       const task = h2.store.data.tasks.find((t) => t.id === IDS.task12);
       if (!task) throw new Error('样例数据里没有任务');
       task.state = 'merging';
       seg(h2, { segment: 'manual', startedAt: ago(30) });
       expect((await homeOf(h2)).running[0]?.segment).toBe('merge');
+    });
+
+    it('等合并期间必过检查是红的：带上检查名，不靠「等合并队列」这一句（#1983）', async () => {
+      const h = harness();
+      seg(h, { segment: 'verify', startedAt: ago(30), endedAt: ago(10), outcome: 'done' });
+      const task = h.store.data.tasks.find((t) => t.id === IDS.task12);
+      if (!task) throw new Error('样例数据里没有任务');
+      task.redChecks = 'merge-gate';
+      const running = (await homeOf(h)).running[0];
+      expect(running).toMatchObject({
+        segment: 'merge',
+        waitingReason: 'merge_queue',
+        redChecks: 'merge-gate',
+      });
+      expect(JSON.stringify(running)).not.toContain('等合并队列');
     });
 
     it('这一段超时了：还在动手段、没人在做、最近事件是 trouble 并带原因；切号停下是 wait 不是失败', async () => {

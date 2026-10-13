@@ -98,6 +98,10 @@ export interface Task {
    * 暂停的单 state 仍是 running（只停这一张、能继续），所以是否暂停只看这个键，不看 state。
    */
   paused?: string;
+  /**
+   * 等合并且必过检查是红的：从 tasks.doing（前缀「检查红了：」）映射出来的检查名。没有这个键就不是这种情况。
+   */
+  redChecks?: string;
   createdAt: string;
 }
 

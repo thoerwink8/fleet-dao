@@ -8,9 +8,19 @@
 //   对新头重走 CI 和验收；并不动（真有冲突）把冲突文件名记进返工意见、回 'rework' 交回会话解；本来就没得并、只是 GitHub 数据旧了，
 //   睡一会儿再看。连着并满 MAX_MAIN_SYNCS 次还冲突就停下报人，不无限转。老历史里没有这一支。
 // - 老历史重放：这一支用 patched() 守住——老历史里 waitMerged 不会回 conflict，标记也不在历史里，patched() 为假就当没有。
+// - 等合并时必过检查转红（#1983，patched('merge-wait-red-checks')）：红了和还在跑都是 blocked，以前都当 waiting 一直等。
+//   第一次红就写「检查红了：」加检查名，隔 MERGE_RED_CONFIRM_SECONDS 再读；仍红就把检查名和原因交回返工。
+//   中间变回还在跑就清掉，接着等。老历史里 waitMerged 不回 checks_red；patched() 为假就当还在等。
 
+import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { patched } from '@temporalio/workflow';
-import { type GuardedPaths, MAX_MAIN_SYNCS, MERGE_POLL_MINUTES, type MergeWait } from '../task-contract.ts';
+import {
+  type GuardedPaths,
+  MAX_MAIN_SYNCS,
+  MERGE_POLL_MINUTES,
+  MERGE_RED_CONFIRM_SECONDS,
+  type MergeWait,
+} from '../task-contract.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import { headMovedDetail } from './task-support.ts';
 import { syncMainlineOnConflict } from './task-sync.ts';
@@ -66,6 +76,7 @@ function approve(rt: TaskRuntime, head: string, pending: GuardedPaths, before: G
  * （等 CI、验收、查路径）再来；别的情况一直等到合并才回。
  * 等合并期间 PR 和主线冲突（#1838）：不留在等合并的循环里，走并主线的路——并得干净回 head_moved 让调用方对新头重走；
  * 并不动回 'rework'，由调用方交回这一轮的动手会话解冲突。
+ * 必过检查红了：确认仍红也回 'rework'，意见里带检查名和原因。
  */
 export async function armAndWaitMerged(
   rt: TaskRuntime,
@@ -118,6 +129,8 @@ export async function armAndWaitMerged(
             ),
           ),
       );
+      // 不是连着两次红：中间有别的结果就把确认清掉（红一下又变回还在跑，不算要返工）。
+      if (w.state !== 'checks_red') rt.mergeRedNoted = false;
       if (w.state === 'merged') return { kind: 'merged', commit: w.mergeCommit };
       if (w.state === 'unarmed') {
         rt.status.lastProblem = '自动合并被撤掉了，重新挂';
@@ -161,6 +174,23 @@ export async function armAndWaitMerged(
           `PR #${prNumber} 的冲突数据还没重算完，等一会儿再看`,
           CONFLICT_REPOLL_SECONDS,
         );
+      }
+      if (w.state === 'checks_red') {
+        // 老历史重放：这一支是加进来的。patched() 为假就当还在等，不多调活动。
+        if (!patched('merge-wait-red-checks')) continue;
+        const names = w.failedChecks.length > 0 ? w.failedChecks.join('、') : '（没写是哪项）';
+        const line = `${CHECKS_RED_PREFIX}${names}`;
+        if (!rt.mergeRedNoted) {
+          rt.mergeRedNoted = true;
+          rt.status.lastProblem = line;
+          await rt.advance('merge', line);
+          await rt.pause('merge', w.detail || line, MERGE_RED_CONFIRM_SECONDS);
+          continue;
+        }
+        rt.mergeRedNoted = false;
+        rt.feedback = w.detail ? [line, w.detail] : [line];
+        rt.status.lastProblem = line;
+        return { kind: 'rework' };
       }
       // waiting：这一轮没合，接着等
     }

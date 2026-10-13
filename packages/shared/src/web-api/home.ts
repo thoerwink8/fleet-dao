@@ -44,6 +44,10 @@ export const HomeRunningSchema = z.object({
   ]),
   /** 被人暂停时引擎写的那句「已暂停：被谁暂停、为什么」；waitingReason === 'paused' 才有。 */
   paused: z.string().optional(),
+  /**
+   * 等合并期间必过检查是红的：检查名（多个用顿号分开）。有了，卡片写「检查红了：」加这个，不写「等合并队列」。
+   */
+  redChecks: z.string().min(1).optional(),
   /** 从什么时候起在等；waitingReason === 'nothing' 时没有。 */
   waitingSince: Time.optional(),
   /** 单子进库的时刻（「已经多久」的起点）。 */

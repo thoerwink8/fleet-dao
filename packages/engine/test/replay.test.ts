@@ -150,6 +150,33 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
     await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId);
   });
 
+  it('task-merging 老历史里 waitMerged 回了 checks_red、历史里没有标记：patched() 为假，照老步序重放得过（#1983）', async () => {
+    const marker = Buffer.from(JSON.stringify({ id: 'merge-wait-red-checks', deprecated: false })).toString(
+      'base64',
+    );
+    const { workflowId, history } = load('task-merging.json');
+    const done = completionOf(history, firstScheduled(history, 'waitMerged'));
+    expect(done).toBeDefined();
+    const attrs = done?.activityTaskCompletedEventAttributes;
+    expect(attrs).toBeDefined();
+    if (attrs) {
+      attrs.result = {
+        payloads: [
+          {
+            metadata: { encoding: 'anNvbi9wbGFpbg==' },
+            data: payloadOf({
+              state: 'checks_red',
+              failedChecks: ['merge-gate'],
+              detail: 'merge-gate：cold-verify 没过',
+            }),
+          },
+        ],
+      };
+    }
+    expect(JSON.stringify(history)).not.toContain(marker);
+    await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId);
+  });
+
   it('task-merge-conflict 夹具（新代码真走过的等合并遇冲突）：带 merge-wait-conflict 标记，重放得过（#1838）', async () => {
     const text = readFileSync(`${DIR}task-merge-conflict.json`, 'utf8');
     expect(text).toContain(MERGE_WAIT_MARKER); // 这份夹具真走过这一支，标记在历史里

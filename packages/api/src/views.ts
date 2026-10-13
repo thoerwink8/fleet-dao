@@ -491,6 +491,7 @@ export function homeRunning(input: {
         ...(flow.stageSince ? { stageSince: flow.stageSince } : {}),
         ...(flow.worker ? { worker: flow.worker } : {}),
         ...(decision ? { pendingDecision: decision.title } : {}),
+        ...(flow.segment === 'merge' && t.redChecks ? { redChecks: t.redChecks } : {}),
         ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
         link: `/tasks/${t.id}`,
         taskId: t.id,

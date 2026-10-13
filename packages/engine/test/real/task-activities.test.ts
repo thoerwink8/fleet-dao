@@ -118,6 +118,8 @@ function make(over: Partial<TaskActivitiesDeps> & { gh: Gh }) {
     pollEveryMs: 1,
     sleep: async () => undefined,
     log: (message, fields) => logs.push({ message, ...(fields ? { fields } : {}) }),
+    // 没单独给时当还在跑：老用例里「等必过检查」仍等到时限回 waiting。显式传 undefined 才是没接上。
+    readChecks: async () => ({ overall: 'pending', failed: [] }),
     ...over,
   });
   return { acts, logs };
@@ -809,6 +811,58 @@ describe('等合并', () => {
       readPull: async () => pullFacts({ autoMerge: true, mergeable: false, mergeableState: 'unknown' }),
     });
     expect(await wait(f.gh)).toMatchObject({ state: 'conflict' });
+  });
+
+  it('挂着自动合并、必过检查转红：当场回 checks_red（检查名和原因），不干等到长轮询时限（#1983）', async () => {
+    let clock = 0;
+    let reads = 0;
+    const f = fakeGh({
+      readPull: async () => pullFacts({ autoMerge: true, mergeable: true, mergeableState: 'blocked' }),
+    });
+    const got = await wait(
+      f.gh,
+      {
+        now: () => new Date(clock),
+        sleep: async (ms) => {
+          clock += ms * 1000;
+        },
+        readChecks: async () => {
+          reads += 1;
+          return { overall: 'red', failed: [{ name: 'merge-gate', detail: 'cold-verify 没过' }] };
+        },
+      },
+      ctx(),
+      15,
+    );
+    expect(got).toMatchObject({
+      state: 'checks_red',
+      failedChecks: ['merge-gate'],
+      detail: expect.stringContaining('cold-verify 没过'),
+    });
+    expect(reads).toBe(1);
+    expect(clock).toBe(0);
+  });
+
+  it('【故意造出的失败】会接着等、却没接上读检查：抛错，不回 waiting', async () => {
+    let clock = 0;
+    const f = fakeGh({
+      readPull: async () => pullFacts({ autoMerge: true, mergeable: true, mergeableState: 'blocked' }),
+    });
+    await expect(
+      wait(
+        f.gh,
+        {
+          now: () => new Date(clock),
+          sleep: async (ms) => {
+            clock += ms * 1000;
+          },
+          readChecks: undefined,
+        },
+        ctx(),
+        1,
+      ),
+    ).rejects.toMatchObject({ code: 'MERGE_CHECKS_UNWIRED' });
+    expect(clock).toBe(0);
   });
 
   it('等必过检查（mergeable_state=blocked、mergeable=true）：仍是 waiting，不当成冲突（#1838 别把排队当冲突）', async () => {
