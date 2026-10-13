@@ -1,10 +1,10 @@
-// 网关自己看着自己（watch.ts）：调不通后端 5 分钟往团队群报一次、通了说一声、时好时坏不来回报；心跳按时写；
-// 收到的耗时量出来。看守单独测用假时钟；最后一段接上真网关（真 HTTP 的假后端）跑一遍，看定时器、意图卡循环都接上了。
+// 网关自己看着自己（watch.ts）：调不通后端 5 分钟往团队群报一次、通了说一声、时好时坏不来回报；心跳按时写。
+// 看守单独测用假时钟；最后一段接上真网关（真 HTTP 的假后端）跑一遍，看定时器、用量上报循环都接上了。
 import { afterEach, describe, expect, it } from 'vitest';
 import { BackendError } from '../src/backend.ts';
 import { checkCard, HEALTH_PAGE_PATH } from '../src/cards.ts';
 import { createWatch, reasonOf, WATCH_LIMITS } from '../src/watch.ts';
-import { asMessage, messageEvent, TEAM } from './events.ts';
+import { TEAM } from './events.ts';
 import { apiError } from './fake-backend.ts';
 import { buttonsOf, FakeFeishu, textIn, titleOf, unavailable } from './fake-feishu.ts';
 import {
@@ -13,7 +13,7 @@ import {
   type LogLine,
   memoryLogger,
   PUBLIC_URL,
-  quietCards,
+  QUIET_USAGE,
   until,
 } from './harness.ts';
 
@@ -27,7 +27,7 @@ const NIGHT = Date.UTC(2026, 8, 26, 15, 30);
 /** 连不上后端：和 backend.ts 在 fetch 抛错时包出来的一样（系统错误码在 cause 的 cause 里，原文带着地址）。 */
 function refused(): BackendError {
   const sys = Object.assign(new Error('connect ECONNREFUSED 10.0.0.9:8787'), { code: 'ECONNREFUSED' });
-  return new BackendError('unreachable', 'GET /feishu/intent-cards：连不上后端（ECONNREFUSED）', {
+  return new BackendError('unreachable', 'POST /feishu/gateway/usage：连不上后端（ECONNREFUSED）', {
     cause: new TypeError('fetch failed', { cause: sys }),
   });
 }
@@ -43,7 +43,6 @@ function setup(o: { start?: number } = {}) {
     now: () => t,
     teamChatId: TEAM,
     publicUrl: PUBLIC_URL,
-    ackTargetMs: 2_000,
   });
   return {
     watch,
@@ -53,12 +52,12 @@ function setup(o: { start?: number } = {}) {
     at(ms: number) {
       t = base + ms;
     },
-    /** 意图卡走通一轮。 */
+    /** 用量上报走通一轮。 */
     ok() {
-      watch.ok('intents', 20);
+      watch.ok('usage');
     },
     fail() {
-      watch.fail('intents', refused());
+      watch.fail('usage', refused());
     },
     alerts: () => feishu.of('send').filter((c) => c.to && 'chatId' in c.to && c.to.chatId === TEAM),
   };
@@ -74,7 +73,7 @@ async function failUntil(s: ReturnType<typeof setup>, fromMs: number, untilMs: n
 }
 
 describe('调不通后端报警', () => {
-  it('意图卡调不通满 5 分钟：往团队群发一张报警卡，写明从几点起、为什么（不带地址）；之后一直不通也不再发', async () => {
+  it('用量上报调不通满 5 分钟：往团队群发一张报警卡，写明从几点起、为什么（不带地址）；之后一直不通也不再发', async () => {
     const s = setup();
     s.ok();
     await failUntil(s, 30 * SEC, 4 * MIN + 30 * SEC);
@@ -91,14 +90,16 @@ describe('调不通后端报警', () => {
     const words = textIn(card);
     expect(words).toContain('从 14:00 起一直没走通，到现在 5 分钟');
     expect(words).toContain(
-      '意图卡：最后一次走通 14:00；最近一次没走通 14:04：后端现在连不上（ECONNREFUSED）',
+      '用量上报：最后一次走通 14:00；最近一次没走通 14:04：后端现在连不上（ECONNREFUSED）',
     );
-    expect(words).toContain('这期间意图卡发不出来');
+    expect(words).toContain('手机上的通知可能发不出来');
     expect(words).toContain('这次只报这一次');
     expect(words).not.toContain('10.0.0.9');
-    // 退役的两条不再出现在卡上
+    // 退役的几条不再出现在卡上
     expect(words).not.toContain('推送');
     expect(words).not.toContain('盘面');
+    expect(words).not.toContain('意图卡');
+    expect(words).not.toContain('没记成');
     expect(buttonsOf(card)).toEqual([
       { label: '打开健康页', primary: true, url: `${PUBLIC_URL}${HEALTH_PAGE_PATH}` },
     ]);
@@ -149,7 +150,7 @@ describe('调不通后端报警', () => {
     expect(replies).toHaveLength(1);
     expect(replies[0]?.messageId).toBe(alertId);
     expect(replies[0]?.message).toEqual({
-      text: expect.stringContaining('通了：意图卡 14:21 起又走通了，断了 21 分钟'),
+      text: expect.stringContaining('通了：用量上报 14:21 起又走通了，断了 21 分钟'),
     });
     const grey = s.feishu.cardOf(alertId);
     expect((grey.header as { template: string }).template).toBe('grey');
@@ -207,7 +208,7 @@ describe('调不通后端报警', () => {
     expect(s.feishu.of('reply')).toHaveLength(2);
   });
 
-  it('夜里也照报（免打扰时段原来随旧推送从后端带回来，退役后不再按时段压）；网关起来后后端就连不上也照报', async () => {
+  it('夜里也照报（不按时段压）；网关起来后后端就连不上也照报', async () => {
     const s = setup({ start: NIGHT });
     await failUntil(s, 0, 5 * MIN);
     expect(s.alerts()).toHaveLength(1);
@@ -221,7 +222,7 @@ describe('调不通后端报警', () => {
     const card = s.feishu.cardOf(s.alerts()[0]?.sentId ?? '');
     expect(textIn(card)).toContain('网关 14:00 起来后一直没走通，到现在 5 分钟');
     expect(textIn(card)).toContain(
-      '意图卡：网关起来后没走通过；这段时间一轮都没跑完（网关的定时活停了，或卡在飞书那头？）',
+      '用量上报：网关起来后没走通过；这段时间一轮都没跑完（网关的定时活停了，或卡在飞书那头？）',
     );
 
     const stale = setup();
@@ -231,13 +232,13 @@ describe('调不通后端报警', () => {
     stale.at(5 * MIN + 30 * SEC);
     await stale.watch.check();
     const text = textIn(stale.feishu.cardOf(stale.alerts()[0]?.sentId ?? ''));
-    expect(text).toContain('意图卡：最后一次走通 14:00；这段时间一轮都没跑完');
+    expect(text).toContain('用量上报：最后一次走通 14:00；这段时间一轮都没跑完');
     expect(text).not.toContain('最近一次没走通');
   });
 
   it('没走通的原因：只说人话和错误码，不带地址；停机时自己撤回的请求不算没走通', () => {
     expect(reasonOf(refused())).toBe('后端现在连不上（ECONNREFUSED）');
-    expect(reasonOf(new BackendError('timeout', 'GET /feishu/intent-cards：5000 毫秒没回应'))).toBe(
+    expect(reasonOf(new BackendError('timeout', 'POST /feishu/gateway/usage：5000 毫秒没回应'))).toBe(
       '后端没及时回应',
     );
     expect(reasonOf(new BackendError('rejected', 'x', { status: 401 }))).toBe('后端拒收（HTTP 401）');
@@ -247,28 +248,22 @@ describe('调不通后端报警', () => {
     const s = setup();
     s.ok();
     s.at(10 * SEC);
-    s.watch.fail('intents', new BackendError('aborted', '网关在停机'));
+    s.watch.fail('usage', new BackendError('aborted', '网关在停机'));
     s.watch.heartbeat();
     const beat = s.logs.find((l) => l.message === '网关心跳');
     expect(beat?.fields?.lastError).toBeUndefined();
-    expect(beat?.fields?.intents).toMatchObject({ failed: 0 });
+    expect(beat?.fields?.usage).toMatchObject({ failed: 0 });
   });
 });
 
 describe('心跳', () => {
-  it('按时写一行：意图卡走通几轮、原话存下几句、补漏、收到的耗时；写完清零；退役的推送、盘面不再写', () => {
+  it('按时写一行：用量上报走通几轮、没走通几轮、最后一次走通和失败的原因；写完清零；退役的推送、盘面、收话、补漏不再写', () => {
     const s = setup();
     s.at(9 * MIN);
     s.fail();
     s.at(9 * MIN + 30 * SEC);
     s.ok();
     s.ok();
-    s.watch.intake(true);
-    s.watch.intake(false);
-    s.watch.backfill(2, 1);
-    s.watch.acked(300);
-    s.watch.acked(2_500);
-    s.watch.acked(null);
     s.at(10 * MIN);
     s.watch.heartbeat();
 
@@ -281,28 +276,25 @@ describe('心跳', () => {
         fields: {
           minutes: 10,
           link: 'ok',
-          intents: { ok: 2, failed: 1, lastOkAt: okAt },
-          intake: { stored: 1, failed: 1 },
-          backfill: { rounds: 1, filled: 2, failed: 1 },
-          messages: {
-            count: 3,
-            ackAvgMs: 1_400,
-            ackMaxMs: 2_500,
-            lastAckMs: 2_500,
-            ackSlow: 1,
-            noAck: 1,
-          },
+          usage: { ok: 2, failed: 1, lastOkAt: okAt },
           lastError: {
-            loop: 'intents',
+            loop: 'usage',
             at: new Date(T0 + 9 * MIN).toISOString(),
             reason: '后端现在连不上（ECONNREFUSED）',
           },
         },
       },
     ]);
+
+    // 写完清零
+    s.at(11 * MIN);
+    s.ok();
+    s.watch.heartbeat();
+    expect(beats()[1]?.fields).toMatchObject({ usage: { ok: 1, failed: 0 } });
+    expect(beats()[1]?.fields?.lastError).toBeUndefined();
   });
 
-  it('安静（没人说话、没卡要发）和挂了分得开：安静时意图卡照样一轮轮走通；挂了是一轮都没有、写 down；没有的平均写 null，不写 0', () => {
+  it('安静和挂了分得开：安静时用量上报照样一轮轮走通；挂了是一轮都没有、写 down', () => {
     const s = setup();
     s.at(19 * MIN + 30 * SEC);
     s.ok();
@@ -312,22 +304,11 @@ describe('心跳', () => {
     s.watch.heartbeat();
 
     const [quiet, dead] = s.logs.filter((l) => l.message === '网关心跳');
-    expect(quiet).toMatchObject({
-      level: 'info',
-      fields: {
-        link: 'ok',
-        intents: { ok: 1, failed: 0 },
-        messages: { count: 0, ackAvgMs: null, ackMaxMs: null, lastAckMs: null },
-      },
-    });
+    expect(quiet).toMatchObject({ level: 'info', fields: { link: 'ok', usage: { ok: 1, failed: 0 } } });
     expect(quiet?.fields?.lastError).toBeUndefined();
     expect(dead).toMatchObject({
       level: 'warn',
-      fields: {
-        minutes: 10,
-        link: 'down',
-        intents: { ok: 0, failed: 0 },
-      },
+      fields: { minutes: 10, link: 'down', usage: { ok: 0, failed: 0 } },
     });
   });
 
@@ -350,27 +331,26 @@ describe('接上真网关', () => {
     await h?.close();
   });
 
-  it('起来后按时写心跳（不等停机、没人说话也写）：意图卡一轮轮走通，记在里面', async () => {
-    h = await harness({ watch: { heartbeatMs: 150 } });
-    h.backend.on('GET', '/feishu/intent-cards', { body: quietCards() });
-    h.backend.on('GET', '/feishu/intake/cursors', { body: { chats: [], asOf: new Date().toISOString() } });
+  it('起来后按时写心跳（不等停机、没人说话也写）：用量上报一轮轮走通，记在里面', async () => {
+    h = await harness({ watch: { heartbeatMs: 150 }, timing: { usageEveryMs: 40 } });
+    h.backend.on('POST', '/feishu/gateway/usage', { body: QUIET_USAGE });
     h.gateway.start();
     const beats = () => h.logs.filter((l) => l.message === '网关心跳');
     await until(() => beats().length >= 2, 5_000);
     expect(beats()[0]).toMatchObject({ level: 'info', fields: { link: 'ok' } });
-    const counted = beats().map((b) => b.fields as { intents: { ok: number } });
-    expect(counted.some((c) => c.intents.ok > 0)).toBe(true);
+    const counted = beats().map((b) => b.fields as { usage: { ok: number } });
+    expect(counted.some((c) => c.usage.ok > 0)).toBe(true);
   });
 
-  it('网关起来后意图卡调不通：到时限往团队群报一次；后端好了，稳住后在报警下面回「通了」；停机时写一行心跳', async () => {
+  it('网关起来后用量上报调不通：到时限往团队群报一次；后端好了，稳住后在报警下面回「通了」；停机时写一行心跳', async () => {
     h = await harness({
       watch: { alertAfterMs: 300, recoverAfterMs: 100, checkEveryMs: 20, heartbeatMs: 60_000 },
+      timing: { usageEveryMs: 30 },
     });
     let healthy = false;
-    h.backend.on('GET', '/feishu/intent-cards', () =>
-      healthy ? { body: quietCards() } : apiError(503, 'unavailable', '后端暂时不可用'),
+    h.backend.on('POST', '/feishu/gateway/usage', () =>
+      healthy ? { body: QUIET_USAGE } : apiError(503, 'unavailable', '后端暂时不可用'),
     );
-    h.backend.on('GET', '/feishu/intake/cursors', { body: { chats: [], asOf: new Date().toISOString() } });
     h.gateway.start();
 
     const alertCard = () =>
@@ -397,44 +377,7 @@ describe('接上真网关', () => {
     await h.gateway.stop(2_000);
     const beat = h.logs.find((l) => l.message === '网关心跳');
     expect(beat?.fields?.link).toBe('ok');
-    expect((beat?.fields?.intents as { ok: number } | undefined)?.ok).toBeGreaterThan(0);
-  });
-
-  it('收到的耗时量出来：表情回应慢过 2 秒计一次；表情加不上改回一句「收到」也量；都没回上记成没回上，不写 0', async () => {
-    let clock = Date.now();
-    h = await harness({ now: () => clock });
-    h.backend.on('POST', '/feishu/intake/messages', { body: { status: 'stored', intentSeq: 1 } });
-    // 飞书那边表情回应花了 2.5 秒
-    const react = h.feishu.react.bind(h.feishu);
-    h.feishu.react = async (messageId, emoji) => {
-      clock += 2_500;
-      return react(messageId, emoji);
-    };
-    const say = async (text: string) => {
-      h.gateway.onMessage(await asMessage(messageEvent({ text })));
-      await h.gateway.idle();
-    };
-    await say('给登录页加手机验证码');
-    h.feishu.fail('react', unavailable());
-    await say('再加一个找回密码');
-    h.feishu.fail('react', unavailable());
-    h.feishu.fail('reply', unavailable());
-    await say('第三句');
-
-    const done = h.logs.filter((l) => l.message === '消息处理完').map((l) => l.fields?.ackMs);
-    expect(done).toEqual([2_500, 2_500, null]);
-    expect(h.gateway.stats.ack_slow).toBe(2);
-    expect(h.logs.filter((l) => l.message === '「收到」超过 2 秒')).toHaveLength(2);
-    h.gateway.watch.heartbeat();
-    const beat = h.logs.find((l) => l.message === '网关心跳');
-    expect(beat?.fields?.messages).toEqual({
-      count: 3,
-      ackAvgMs: 2_500,
-      ackMaxMs: 2_500,
-      lastAckMs: 2_500,
-      ackSlow: 2,
-      noAck: 1,
-    });
+    expect((beat?.fields?.usage as { ok: number } | undefined)?.ok).toBeGreaterThan(0);
   });
 });
 

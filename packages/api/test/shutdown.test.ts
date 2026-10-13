@@ -1,5 +1,5 @@
-// 优雅停机（src/shutdown.ts）：main.ts 的停机顺序抽成的可测函数——长轮询醒了不再查库、关库在在途请求做完之后、
-// 有上限不会无限等下去，各写一条故意造出来的失败场景钉住（#364：库关早了，长轮询查库会报错，回 500）。
+// 优雅停机（src/shutdown.ts）：main.ts 的停机顺序抽成的可测函数——关库在在途请求做完之后、
+// 有上限不会无限等下去，各写一条故意造出来的失败场景钉住（#364：库关早了，在途请求查库会报错，回 500）。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { closeConnectionWhenStopping, type DrainableServer, gracefulShutdown } from '../src/shutdown.ts';
 
@@ -77,24 +77,22 @@ describe('gracefulShutdown：停机的先后顺序和上限', () => {
     await new Promise((r) => setImmediate(r));
   };
 
-  it('两个 server 都发起 close、马上叫醒长轮询；在途连接很快做完，不用等满 drainMs 才去关库', async () => {
+  it('两个 server 都发起 close；在途连接很快做完，不用等满 drainMs 才去关库', async () => {
     const log = orderedLog();
     const servers = [fakeServer(log, 'cockpit', 50), fakeServer(log, 'agent', 50)];
     let closedDb = false;
     const done = gracefulShutdown({
       servers,
-      notifyLongPollers: () => log.push('notifyLongPollers'),
       drainMs: 10_000,
       close: async () => {
         log.push('close() 开始');
         closedDb = true;
       },
     });
-    await advance(0); // 让 close(cb) 的调用、notifyLongPollers 都先跑到
+    await advance(0); // 让 close(cb) 的调用都先跑到
     expect(log.events).toEqual([
       'cockpit.close 发起',
       'agent.close 发起',
-      'notifyLongPollers',
       'cockpit.closeIdleConnections',
       'agent.closeIdleConnections',
     ]);
@@ -121,7 +119,6 @@ describe('gracefulShutdown：停机的先后顺序和上限', () => {
     let closedDb = false;
     const done = gracefulShutdown({
       servers,
-      notifyLongPollers: () => {},
       drainMs: 1_000,
       close: async () => {
         closedDb = true;
@@ -141,7 +138,6 @@ describe('gracefulShutdown：停机的先后顺序和上限', () => {
     let caught: unknown;
     const done = gracefulShutdown({
       servers: [fakeServer(log, 'cockpit', 0)],
-      notifyLongPollers: () => {},
       drainMs: 1_000,
       close: async () => {
         throw boom;
@@ -159,7 +155,6 @@ describe('gracefulShutdown：停机的先后顺序和上限', () => {
     await expect(
       gracefulShutdown({
         servers: [],
-        notifyLongPollers: () => {},
         drainMs: 0,
         close: async () => {
           throw new Error('库连不上');
