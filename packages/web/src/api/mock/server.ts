@@ -2,7 +2,12 @@
 // 每个返回都按 shared/web-api.ts 校验后才交出去（和真后端的 reply 一样），报错的 code 和白话也照真后端。
 // 页面上的操作会真的改这里的状态并留下操作记录；刷新页面就回到初始盘面。
 
-import type { HomeResourcesSchema, SessionUsageSchema } from '@fleet-dao/shared';
+import type {
+  DiskFootprintSchema,
+  HomeResourcesSchema,
+  HostAppSchema,
+  SessionUsageSchema,
+} from '@fleet-dao/shared';
 import {
   AddPurposeModelRequest,
   AnswerNotificationRequest,
@@ -264,11 +269,14 @@ function mockRoutesMany(): boolean {
 }
 
 /** 看板多机的假环境（wsl）这一次是哪种样子：见 nodes() 的说明；地址上没写就是刚报过（fresh）。 */
-/** 机器资源（#1973）的假数据换哪一种：?mockResources=tight（紧）/ unread（cgroup、/proc 都读不到）/ missing（老后端没给）。 */
-function mockResourcesMode(): 'ok' | 'tight' | 'unread' | 'missing' {
+/**
+ * 机器资源（#1973、#1985）的假数据换哪一种：?mockResources=tight（紧）/ unread（cgroup、/proc、statfs 都读不到）/
+ * missing（老后端整块没给）/ old（老后端：有内存、CPU，没有磁盘、上线项目、按目录的占用）/ pending（按目录的还没测完第一回）。
+ */
+function mockResourcesMode(): 'ok' | 'tight' | 'unread' | 'missing' | 'old' | 'pending' {
   const v =
     typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('mockResources');
-  return v === 'tight' || v === 'unread' || v === 'missing' ? v : 'ok';
+  return v === 'tight' || v === 'unread' || v === 'missing' || v === 'old' || v === 'pending' ? v : 'ok';
 }
 
 /** 同一个编号每次得到同一个 0–1 之间的数：假数据里每个会话的占用稳定，只在上面加一点随时间的晃动。 */
@@ -299,6 +307,12 @@ export function mockResources(runIds: readonly string[], at: Date): HomeResource
         state: 'unread',
         why: '这台没有 /sys/fs/cgroup/fleet.slice/fleet-agents.slice（不在法国机器上，或会话资源池没挂）',
       },
+      disk: { state: 'unread', why: '/ 的 statfs 没读成：EACCES: permission denied' },
+      apps: {
+        state: 'unread',
+        why: '这台没有 /sys/fs/cgroup/cgroup.controllers（不是 cgroup v2，或不是 Linux）',
+      },
+      footprint: mockFootprint(at, 'unread'),
     };
   }
   const tight = mode === 'tight';
@@ -320,12 +334,18 @@ export function mockResources(runIds: readonly string[], at: Date): HomeResource
             ),
           };
   });
+  // 一个对不上单的会话（路由探针这类）：资源页把它归到「别的会话」
+  byRun['probe-route-7f3a'] = { state: 'ok', memoryMb: 186, memoryPeakMb: 240, cpuPercent: 3.1 };
   const sessionsMb = Object.values(byRun).reduce((n, u) => n + (u.state === 'ok' ? u.memoryMb : 0), 0);
+  const sessionsCpu = Object.values(byRun).reduce(
+    (n, u) => n + (u.state === 'ok' && u.cpuPercent !== undefined ? u.cpuPercent : 0),
+    0,
+  );
   const usedMb = Math.min(totalMb - 200, 1_450 + sessionsMb);
   const cores = 4;
   // 和真后端一样：忙的核数和百分比出自同一个比例
   const percent = Math.min(100, Math.max(0, Math.round((tight ? 93 : 34) + wobble(0.5, 6))));
-  return {
+  const base: HomeResources = {
     at: at.toISOString(),
     everyMs: MOCK_RESOURCES_EVERY_MS,
     memory: { state: 'ok', totalMb, availableMb: totalMb - usedMb },
@@ -337,6 +357,194 @@ export function mockResources(runIds: readonly string[], at: Date): HomeResource
       load1: Math.round(((tight ? 5.6 : 1.4) + wobble(0.2, 0.4)) * 100) / 100,
     },
     sessions: { state: 'ok', byRun },
+  };
+  if (mode === 'old') return base;
+  const GIB = 1024 ** 3;
+  const totalBytes = Math.round(193.7 * GIB);
+  const usedBytes = Math.round((tight ? 181.4 : 61.8) * GIB);
+  return {
+    ...base,
+    disk: {
+      state: 'ok',
+      path: '/',
+      totalBytes,
+      usedBytes,
+      // 剩余不含给 root 预留的那 5%：已用 + 剩余比总量小一点，和真机一样
+      availableBytes: Math.max(0, Math.round(totalBytes * 0.95) - usedBytes),
+    },
+    apps: { state: 'ok', items: mockApps(t, sessionsMb, sessionsCpu / 100, runIds.length + 1, tight) },
+    footprint: mode === 'pending' ? mockFootprint(at, 'pending') : mockFootprint(at, tight ? 'tight' : 'ok'),
+  };
+}
+
+type HostApp = z.infer<typeof HostAppSchema>;
+
+/** 假的上线项目：和真后端的登记表（packages/api/src/vps-apps.ts）同样几项，数是编的。 */
+function mockApps(
+  t: number,
+  sessionsMb: number,
+  sessionsCores: number,
+  sessions: number,
+  tight: boolean,
+): HostApp[] {
+  const w = (seed: number, amp: number) => Math.sin(t / 9 + seed * 6.28) * amp;
+  const cores = (base: number, seed: number) =>
+    Math.max(0, Math.round((base + w(seed, base / 3)) * 100) / 100);
+  return [
+    {
+      id: 'cockpit',
+      name: '驾驶舱',
+      place: '/srv/fleet-dao-releases/current（后端代码）',
+      units: ['fleet-api.service'],
+      diskNote: '代码在发布版本目录里，算在「发布版本」；静态页在香港那台',
+      usage: { state: 'ok', running: 1, memoryMb: Math.round(214 + w(0.1, 12)), cpuCores: cores(0.06, 0.1) },
+    },
+    {
+      id: 'engine',
+      name: '引擎',
+      place: '/var/lib/fleet-dao/engine',
+      units: ['fleet-engine.service'],
+      usage: { state: 'ok', running: 1, memoryMb: Math.round(388 + w(0.2, 20)), cpuCores: cores(0.12, 0.2) },
+    },
+    {
+      id: 'temporal',
+      name: 'Temporal',
+      place: '/opt/fleet-dao/temporal（程序）',
+      units: ['fleet-temporal.service'],
+      diskNote: '数据存在数据库里（temporal、temporal_visibility 两个库，算在「数据库」）',
+      usage: { state: 'ok', running: 1, memoryMb: Math.round(296 + w(0.3, 10)), cpuCores: cores(0.09, 0.3) },
+    },
+    {
+      id: 'postgres',
+      name: '数据库',
+      place: '/var/lib/postgresql/16/main（PostgreSQL 16）',
+      units: ['postgresql@16-main.service'],
+      usage: { state: 'ok', running: 1, memoryMb: Math.round(342 + w(0.4, 30)), cpuCores: cores(0.05, 0.4) },
+    },
+    {
+      id: 'sessions',
+      name: 'AI 会话',
+      place: '/var/lib/fleet-work（工作树）',
+      units: ['fleet-agents.slice'],
+      usage: {
+        state: 'ok',
+        running: Math.max(1, sessions),
+        memoryMb: sessionsMb,
+        memoryMaxMb: 10_664,
+        cpuCores: Math.round(sessionsCores * 100) / 100,
+      },
+    },
+    {
+      id: 'mirasim',
+      name: '会话用户的 Mirasim',
+      place: '/home/fleet-agent-carpool/.mirasim',
+      units: ['fleet-mirasim-session.service', 'fleet-mirasim-liveness.service'],
+      diskNote: '在会话用户家里，算在「AI 会话」',
+      usage: tight
+        ? {
+            state: 'unread',
+            why: '/sys/fs/cgroup/system.slice/fleet-mirasim-session.service/memory.current 的内容认不出（前 80 字节）："abc"',
+          }
+        : { state: 'ok', running: 1, memoryMb: Math.round(165 + w(0.5, 8)), memoryMaxMb: 4096 },
+    },
+    {
+      id: 'release',
+      name: '自动发布',
+      place: '/usr/local/lib/fleet-dao',
+      units: ['fleet-auto-release.service', 'fleet-release-request.service', 'fleet-cli-upgrade.service'],
+      usage: { state: 'idle' },
+    },
+    {
+      id: 'releases',
+      name: '发布版本',
+      place: '/srv/fleet-dao-releases',
+      units: [],
+      usage: { state: 'idle', why: '这一项没有进程，只占磁盘' },
+    },
+    {
+      id: 'self-proxy',
+      name: 'self-proxy',
+      place: '不归本仓管（README「两台机器」）',
+      units: ['self-proxy-direct.service', 'self-proxy-exit.service'],
+      external: true,
+      diskNote: '不归本仓管，没登记目录',
+      usage: { state: 'ok', running: 2, memoryMb: Math.round(58 + w(0.6, 3)), cpuCores: cores(0.02, 0.6) },
+    },
+    {
+      id: 'miraquota',
+      name: 'MiraQuota 同步',
+      place: '不归本仓管（等 miraquota-win#3 发版后停）',
+      units: ['miraquota-sync.service'],
+      external: true,
+      diskNote: '不归本仓管，没登记目录',
+      usage: { state: 'ok', running: 1, memoryMb: Math.round(71 + w(0.7, 4)), cpuCores: cores(0.01, 0.7) },
+    },
+  ];
+}
+
+type DiskFootprint = z.infer<typeof DiskFootprintSchema>;
+
+/** 假的按目录占用：会话工作树有几棵读不到（700、归会话用户）演示「不全」；会话用户的家后端看不见演示「没读到」。 */
+function mockFootprint(at: Date, mode: 'ok' | 'tight' | 'unread' | 'pending'): DiskFootprint {
+  if (mode === 'pending') {
+    return { state: 'pending', why: '正在测第一回（要遍历文件，测完就有；之后每 10 分钟测一次）' };
+  }
+  const GIB = 1024 ** 3;
+  const MIB = 1024 ** 2;
+  const g = (n: number) => Math.round(n * GIB);
+  const big = mode === 'tight' ? 4 : 1;
+  const ok = (bytes: number, unreadTrees = 0, unreadSample?: string) => ({
+    state: 'ok' as const,
+    bytes,
+    unreadTrees,
+    ...(unreadSample ? { unreadSample } : {}),
+  });
+  return {
+    state: 'ok',
+    measuredAt: new Date(at.getTime() - 4 * 60_000).toISOString(),
+    everyMs: 10 * 60_000,
+    tookMs: 18_400,
+    dirs: [
+      { path: '/srv/fleet-dao-releases', appId: 'releases', size: ok(g(6.4 * big)) },
+      { path: '/srv/fleet-dao', appId: 'releases', size: ok(g(1.2)) },
+      {
+        path: '/var/lib/fleet-work',
+        appId: 'sessions',
+        size:
+          mode === 'unread'
+            ? { state: 'unread', why: '读不了 /var/lib/fleet-work：EACCES: permission denied' }
+            : ok(
+                g(0.3),
+                7,
+                '/var/lib/fleet-work/thoerwink8_fleet-dao/fleet/1979-t3a9c0d1：EACCES: permission denied',
+              ),
+      },
+      { path: '/var/lib/fleet-sessions', appId: 'sessions', size: ok(312 * MIB) },
+      {
+        path: '/home/fleet-agent-carpool',
+        appId: 'sessions',
+        size: {
+          state: 'unread',
+          why: '读不了 /home/fleet-agent-carpool：EACCES: permission denied（后端开了 ProtectHome，看不见 /home）',
+        },
+      },
+      { path: '/var/lib/fleet-dao/engine', appId: 'engine', size: ok(g(2.7 * big)) },
+      { path: '/var/lib/fleet-dao/github', appId: 'engine', size: ok(g(3.9)) },
+      { path: '/var/log/fleet-dao', appId: 'engine', size: ok(48 * MIB) },
+      { path: '/opt/fleet-dao/temporal', appId: 'temporal', size: ok(412 * MIB) },
+      { path: '/usr/local/lib/fleet-dao', appId: 'release', size: ok(2 * MIB) },
+    ],
+    databases:
+      mode === 'unread'
+        ? { state: 'unread', why: '这台后端没连数据库（开发用的内存版）' }
+        : {
+            state: 'ok',
+            items: [
+              { name: 'fleet', appId: 'postgres', size: { state: 'ok', bytes: g(1.8 * big) } },
+              { name: 'temporal', appId: 'postgres', size: { state: 'ok', bytes: g(3.1) } },
+              { name: 'temporal_visibility', appId: 'postgres', size: { state: 'ok', bytes: 640 * MIB } },
+            ],
+          },
   };
 }
 

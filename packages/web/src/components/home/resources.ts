@@ -9,13 +9,16 @@
 // - 有一个会话没读到，整张单就写没读到，不拿另一个会话的数冒充整张单的数。
 // - 整机两格写具体数值再写百分比：内存「已用 / 总量」（都由 totalMb、availableMb 算），CPU「忙的核数 / 总核数」（busyCores
 //   是后端和 percent 同一对差算的）。数值缺了写没读到，不拿百分比 × 核数在前端编。
-// - 紧：内存已用 ≥ 85%、CPU ≥ 90%，画提示黄（stall，见 machine-meter.tsx），不画失败红——机器忙不是坏了（health-strip.tsx 头注释的规矩）。
+// - 紧：内存已用 ≥ 85%、CPU ≥ 90%、磁盘已用 ≥ 90%，画提示黄（stall，见 machine-meter.tsx），不画失败红——机器忙不是坏了（health-strip.tsx 头注释的规矩）。
+// - 整机磁盘（#1985）写「已用 / 总量」和百分比，由同一回 statfs 的 usedBytes、totalBytes 算；剩余（普通用户还写得进的）写在细节里。
 import type { HomeResources, HomeRunning } from './types';
 
 /** 内存已用到这个比例算紧。 */
 export const MEMORY_TIGHT_PERCENT = 85;
 /** CPU 忙到这个比例算紧。 */
 export const CPU_TIGHT_PERCENT = 90;
+/** 磁盘已用到这个比例算紧（#1985）：和内存、CPU 一样画提示黄，不画红。 */
+export const DISK_TIGHT_PERCENT = 90;
 /** 本台超过几个采样间隔没来新读数算旧了（推送断了、后端停了采样）。 */
 export const STALE_INTERVALS = 3;
 
@@ -84,7 +87,16 @@ export function ticketUsage(
 export type Amount = { kind: 'ok'; text: string } | { kind: 'unread'; why: string };
 
 export type Meter =
-  | { kind: 'ok'; percent: number; tight: boolean; text: string; amount: Amount; detail: string }
+  | {
+      kind: 'ok';
+      percent: number;
+      tight: boolean;
+      text: string;
+      amount: Amount;
+      detail: string;
+      /** 资源页大格下面的一句短话（可用多少、几个核、剩余多少）。 */
+      brief: string;
+    }
   | { kind: 'unread'; why: string };
 
 export interface HostMeters {
@@ -92,6 +104,8 @@ export interface HostMeters {
   missing?: string;
   memory: Meter;
   cpu: Meter;
+  /** 整机磁盘（#1985）。 */
+  disk: Meter;
   /** 本台的读数旧了（超过 STALE_INTERVALS 个间隔没来新的）。 */
   stale: boolean;
 }
@@ -114,7 +128,13 @@ export function hostMeters(
 ): HostMeters {
   if (!resources) {
     const why = missingWhy(opts);
-    return { missing: why, memory: { kind: 'unread', why }, cpu: { kind: 'unread', why }, stale: false };
+    return {
+      missing: why,
+      memory: { kind: 'unread', why },
+      cpu: { kind: 'unread', why },
+      disk: { kind: 'unread', why },
+      stale: false,
+    };
   }
   const m = resources.memory;
   const memory: Meter =
@@ -131,6 +151,7 @@ export function hostMeters(
             // 和百分比同一对数（总量、可用）算出来
             amount: { kind: 'ok' as const, text: `${formatMb(used)} / ${formatMb(m.totalMb)}` },
             detail: `已用 ${formatMb(used)} / 共 ${formatMb(m.totalMb)}，可用 ${formatMb(m.availableMb)}`,
+            brief: `可用 ${formatMb(m.availableMb)}`,
           };
         })();
   const c = resources.cpu;
@@ -142,6 +163,7 @@ export function hostMeters(
           percent: Math.round(c.percent),
           tight: c.percent >= CPU_TIGHT_PERCENT,
           text: formatCpu(c.percent),
+          brief: c.load1 === undefined ? `${c.cores} 核合计` : `1 分钟负载 ${c.load1.toFixed(2)}`,
           // 忙的核数是后端拿同一对差算的；老快照没有就写没读到，不拿百分比 × 核数在这里编
           amount:
             c.busyCores === undefined
@@ -159,5 +181,44 @@ export function hostMeters(
   const age = now - Date.parse(resources.at);
   // 远程快照本来就是隔一阵推一回，新鲜度由快照横幅说，这里不另判
   const stale = !opts.remote && age > resources.everyMs * STALE_INTERVALS;
-  return { memory, cpu, stale };
+  return { memory, cpu, disk: diskMeter(resources.disk, opts), stale };
+}
+
+/** 整机磁盘一格（#1985）：「已用 / 总量」和百分比都由 usedBytes、totalBytes 算；剩余写在细节里。老后端没给写没读到。 */
+export function diskMeter(disk: HomeResources['disk'], opts: ResourceOptions = {}): Meter {
+  if (disk === undefined) {
+    return {
+      kind: 'unread',
+      why: opts.remote
+        ? '那台推来的读数里没有磁盘（那台的版本还没有这一项）'
+        : '后端没给磁盘读数（后端的版本还没有这一项）',
+    };
+  }
+  if (disk.state === 'unread') return { kind: 'unread', why: disk.why };
+  const percent = Math.round((disk.usedBytes / disk.totalBytes) * 100);
+  return {
+    kind: 'ok',
+    percent,
+    tight: percent >= DISK_TIGHT_PERCENT,
+    text: `${percent}%`,
+    amount: { kind: 'ok', text: `${formatBytes(disk.usedBytes)} / ${formatBytes(disk.totalBytes)}` },
+    detail: `已用 ${formatBytes(disk.usedBytes)} / 共 ${formatBytes(disk.totalBytes)}，剩余 ${formatBytes(disk.availableBytes)}（${disk.path}）`,
+    brief: `剩余 ${formatBytes(disk.availableBytes)}`,
+  };
+}
+
+const KIB = 1024;
+const MIB = KIB * 1024;
+const GIB = MIB * 1024;
+const TIB = GIB * 1024;
+
+/**
+ * 字节写法：不到 1M 写「不到 1M」（真量出来的小目录，不写 0），三位数以内写 M，四位数起写一位小数的 G，到 T 写一位小数的 T。
+ * 和 formatMb 一个规矩：不出现「1006M」「1003G」这种又长又难读的。
+ */
+export function formatBytes(bytes: number): string {
+  if (bytes < MIB) return bytes === 0 ? '0' : '不到 1M';
+  if (Math.round(bytes / MIB) < 1000) return `${Math.round(bytes / MIB)}M`;
+  if (Math.round((bytes / GIB) * 10) / 10 < 1000) return `${(bytes / GIB).toFixed(1)}G`;
+  return `${(bytes / TIB).toFixed(1)}T`;
 }

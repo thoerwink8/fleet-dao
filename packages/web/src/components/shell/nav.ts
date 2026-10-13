@@ -4,6 +4,7 @@ import {
   Bell,
   CalendarClock,
   Gauge,
+  HardDrive,
   History,
   Home,
   ListChecks,
@@ -76,6 +77,12 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         label: '法国',
         icon: SatelliteDish,
         hint: '本台六项事实、引擎总开关、命令行工具、定时任务、发版；多一台机器时按台并排',
+      },
+      {
+        to: '/resources',
+        label: '资源',
+        icon: HardDrive,
+        hint: '整机内存、CPU、磁盘，每个上线项目各占多少、放在哪，按目录的磁盘占用',
       },
       {
         to: '/schedules',

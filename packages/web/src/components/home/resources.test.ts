@@ -151,6 +151,7 @@ describe('整机两格', () => {
       missing: '这台后端没给资源读数',
       memory: { kind: 'unread', why: '这台后端没给资源读数' },
       cpu: { kind: 'unread', why: '这台后端没给资源读数' },
+      disk: { kind: 'unread', why: '这台后端没给资源读数' },
       stale: false,
     });
     expect(hostMeters(undefined, NOW, { remote: true }).missing).toBe(
