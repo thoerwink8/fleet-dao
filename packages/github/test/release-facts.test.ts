@@ -119,6 +119,21 @@ describe('mainCi', () => {
       `/repos/o/r/commits/${SHA}/check-runs`,
       `https://api.github.com/repos/o/r/commits/${SHA}/check-runs?per_page=100&page=2`,
     ]);
+    // 跟发版车同一读法：按名字过滤，再翻页。不带 check_name 时 merge-gate 堆过 10 页就会把 check 读丢。
+    expect(calls[0]?.query).toMatchObject({ check_name: 'check', per_page: 100, filter: 'all' });
+  });
+
+  it('同名重跑的成功在第 2 页：翻页取全后认最新的一条', async () => {
+    const next = `<https://api.github.com/repos/o/r/commits/${SHA}/check-runs?per_page=100&page=2>; rel="next"`;
+    const { facts } = stub(
+      (req) => ({
+        check_runs: req.url?.includes('page=2')
+          ? [run({ id: 2, conclusion: 'success', started_at: '2026-10-07T09:30:00Z' })]
+          : [run({ id: 1, conclusion: 'failure', started_at: '2026-10-07T09:00:00Z' })],
+      }),
+      (req) => (req.url?.includes('page=2') ? null : next),
+    );
+    expect(await facts.mainCi(repo, SHA)).toEqual({ state: 'green', detail: '' });
   });
 
   it('形状认不出：抛错', async () => {

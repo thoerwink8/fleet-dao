@@ -3,8 +3,9 @@
 // 读不到、认不出一律抛错（GitHubError），由调用方各行各自判「没查成」，不拿空、0、「已是最新」顶。
 // 改这里之前必须知道：
 // - 汇总检查只认 ci.yml 的 `check` 这一项（必过检查的汇总，同 release-train-lib.mjs 的 mainCi）：一条都没有算「还在跑」，不算绿。
-// - 一个提交上 merge-gate 每轮都再报一条，check-run 能超过一页（100 条）。
-// - 汇总检查必须翻页取全（client.all，最多 10 页）；只读第一页会把 `check` 读丢，当成还没有结果。
+// - 一个提交上 merge-gate 每轮都再报一条，check-run 能堆到两百多条，把 `check` 挤出第一页。
+// - 汇总检查按名字过滤（check_name=check）再翻页取全（client.all，最多 10 页，跟 pulls.ts 的 checkRuns）。
+//   只读第一页、或不按名字过滤翻到上限，都会把 `check` 读丢，当成还没有结果。一页不是数组仍抛错，不当空。
 // - compare 的提交列表是旧到新、最多 100 个一页；差得多时只读最后一页（最近的），差几个以 GitHub 回的 ahead_by 为准。
 import { z } from 'zod';
 import { CheckRunSchema, evaluateChecks } from './checks.ts';
@@ -133,12 +134,14 @@ export function createReleaseFacts(client: GitHubClient): ReleaseFactsReader {
 
     async mainCi(repo, sha, signal) {
       const what = `读 ${sha.slice(0, 12)} 的检查结果`;
+      // merge-gate 每轮都再报一条，一个提交上能堆两百多条 check-run（实测 202），把 `check` 挤出第一页。
+      // 带 check_name=check（同发版车 mainCiByChecks），再用 client.all 翻页：同名重跑不在第一页也拿得到。
       const runs = await client.all<unknown>(
         {
           method: 'GET',
           path: `${base(repo)}/commits/${enc(sha)}/check-runs`,
           auth: auth(repo),
-          query: { per_page: 100, filter: 'all' },
+          query: { check_name: RELEASE_CHECK_NAME, per_page: 100, filter: 'all' },
           signal,
         },
         (d) => (d as { check_runs?: unknown })?.check_runs,
