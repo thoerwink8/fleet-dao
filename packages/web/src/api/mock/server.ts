@@ -505,11 +505,12 @@ function mockFootprint(at: Date, mode: 'ok' | 'tight' | 'unread' | 'pending'): D
     everyMs: 10 * 60_000,
     tookMs: 18_400,
     dirs: [
-      { path: '/srv/fleet-dao-releases', appId: 'releases', size: ok(g(6.4 * big)) },
-      { path: '/srv/fleet-dao', appId: 'releases', size: ok(g(1.2)) },
+      { path: '/srv/fleet-dao-releases', appId: 'releases', appName: '发布版本', size: ok(g(6.4 * big)) },
+      { path: '/srv/fleet-dao', appId: 'releases', appName: '发布版本', size: ok(g(1.2)) },
       {
         path: '/var/lib/fleet-work',
         appId: 'sessions',
+        appName: 'AI 会话',
         size:
           mode === 'unread'
             ? { state: 'unread', why: '读不了 /var/lib/fleet-work：EACCES: permission denied' }
@@ -519,20 +520,21 @@ function mockFootprint(at: Date, mode: 'ok' | 'tight' | 'unread' | 'pending'): D
                 '/var/lib/fleet-work/thoerwink8_fleet-dao/fleet/1979-t3a9c0d1：EACCES: permission denied',
               ),
       },
-      { path: '/var/lib/fleet-sessions', appId: 'sessions', size: ok(312 * MIB) },
+      { path: '/var/lib/fleet-sessions', appId: 'sessions', appName: 'AI 会话', size: ok(312 * MIB) },
       {
         path: '/home/fleet-agent-carpool',
         appId: 'sessions',
+        appName: 'AI 会话',
         size: {
           state: 'unread',
           why: '读不了 /home/fleet-agent-carpool：EACCES: permission denied（后端开了 ProtectHome，看不见 /home）',
         },
       },
-      { path: '/var/lib/fleet-dao/engine', appId: 'engine', size: ok(g(2.7 * big)) },
-      { path: '/var/lib/fleet-dao/github', appId: 'engine', size: ok(g(3.9)) },
-      { path: '/var/log/fleet-dao', appId: 'engine', size: ok(48 * MIB) },
-      { path: '/opt/fleet-dao/temporal', appId: 'temporal', size: ok(412 * MIB) },
-      { path: '/usr/local/lib/fleet-dao', appId: 'release', size: ok(2 * MIB) },
+      { path: '/var/lib/fleet-dao/engine', appId: 'engine', appName: '引擎', size: ok(g(2.7 * big)) },
+      { path: '/var/lib/fleet-dao/github', appId: 'engine', appName: '引擎', size: ok(g(3.9)) },
+      { path: '/var/log/fleet-dao', appId: 'engine', appName: '引擎', size: ok(48 * MIB) },
+      { path: '/opt/fleet-dao/temporal', appId: 'temporal', appName: 'Temporal', size: ok(412 * MIB) },
+      { path: '/usr/local/lib/fleet-dao', appId: 'release', appName: '自动发布', size: ok(2 * MIB) },
     ],
     databases:
       mode === 'unread'
@@ -540,9 +542,24 @@ function mockFootprint(at: Date, mode: 'ok' | 'tight' | 'unread' | 'pending'): D
         : {
             state: 'ok',
             items: [
-              { name: 'fleet', appId: 'postgres', size: { state: 'ok', bytes: g(1.8 * big) } },
-              { name: 'temporal', appId: 'postgres', size: { state: 'ok', bytes: g(3.1) } },
-              { name: 'temporal_visibility', appId: 'postgres', size: { state: 'ok', bytes: 640 * MIB } },
+              {
+                name: 'fleet',
+                appId: 'postgres',
+                appName: '数据库',
+                size: { state: 'ok', bytes: g(1.8 * big) },
+              },
+              {
+                name: 'temporal',
+                appId: 'postgres',
+                appName: '数据库',
+                size: { state: 'ok', bytes: g(3.1) },
+              },
+              {
+                name: 'temporal_visibility',
+                appId: 'postgres',
+                appName: '数据库',
+                size: { state: 'ok', bytes: 640 * MIB },
+              },
             ],
           },
   };

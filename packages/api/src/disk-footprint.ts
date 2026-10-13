@@ -164,6 +164,7 @@ export async function measureFootprint(input: {
       dirs.push({
         path,
         appId: app.id,
+        appName: app.name,
         size: await measureDir(path, input.fs, { deadline, seen, now: () => input.now().getTime() }),
       });
     }
@@ -182,6 +183,7 @@ export async function measureFootprint(input: {
         items: rows.map((r) => ({
           name: r.name,
           appId: dbApp.id,
+          appName: dbApp.name,
           size:
             r.bytes === undefined
               ? { state: 'unread' as const, why: '没有这个库的 CONNECT 权限，量不了' }

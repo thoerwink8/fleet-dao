@@ -144,8 +144,13 @@ describe('测一回', () => {
     expect(fp.databases).toEqual({
       state: 'ok',
       items: [
-        { name: 'fleet', appId: 'db', size: { state: 'ok', bytes: 2_000_000 } },
-        { name: 'locked', appId: 'db', size: { state: 'unread', why: '没有这个库的 CONNECT 权限，量不了' } },
+        { name: 'fleet', appId: 'db', appName: '数据库', size: { state: 'ok', bytes: 2_000_000 } },
+        {
+          name: 'locked',
+          appId: 'db',
+          appName: '数据库',
+          size: { state: 'unread', why: '没有这个库的 CONNECT 权限，量不了' },
+        },
       ],
     });
   });

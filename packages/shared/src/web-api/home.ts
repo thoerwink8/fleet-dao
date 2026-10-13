@@ -211,7 +211,14 @@ export const DiskFootprintSchema = z.discriminatedUnion('state', [
     everyMs: z.number().int().positive(),
     /** 这一回测了多久（毫秒）。 */
     tookMs: z.number().int().min(0),
-    dirs: z.array(z.object({ path: z.string().min(1), appId: z.string().min(1), size: DirSizeSchema })),
+    dirs: z.array(
+      z.object({
+        path: z.string().min(1),
+        appId: z.string().min(1),
+        appName: z.string().min(1).optional(),
+        size: DirSizeSchema,
+      }),
+    ),
     /** 库的大小（pg_database_size）：每个库一行，appId 是算在哪个应用名下。整块读不到是 unread。 */
     databases: z.discriminatedUnion('state', [
       z.object({
@@ -220,6 +227,8 @@ export const DiskFootprintSchema = z.discriminatedUnion('state', [
           z.object({
             name: z.string().min(1),
             appId: z.string().min(1),
+            // 应用的名字（上线项目那一段整块读不到时，榜上照样写得出归谁）
+            appName: z.string().min(1).optional(),
             size: z.discriminatedUnion('state', [
               z.object({ state: z.literal('ok'), bytes: z.number().int().min(0) }),
               ResourceUnreadSchema,

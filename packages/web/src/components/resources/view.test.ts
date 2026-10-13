@@ -253,6 +253,23 @@ describe('磁盘占用榜', () => {
     expect(b.rows[4]?.share).toBeUndefined();
   });
 
+  test('上线项目整段读不到时，榜上照样写归谁：用后端随这一项带来的应用名，不露编号', () => {
+    const r = resources({ apps: { state: 'unread', why: '没有 cgroup v2' } });
+    if (r.footprint?.state !== 'ok') throw new Error('造数错了');
+    r.footprint.dirs = [
+      {
+        path: '/srv/fleet-dao-releases',
+        appId: 'releases',
+        appName: '发布版本',
+        size: { state: 'ok', bytes: GIB, unreadTrees: 0 },
+      },
+    ];
+    const b = diskBoard(r);
+    expect(b.kind === 'ok' && b.rows.find((x) => x.label === '/srv/fleet-dao-releases')?.appName).toBe(
+      '发布版本',
+    );
+  });
+
   test('还没测完是 pending；老后端没给写明没给', () => {
     expect(diskBoard(resources({ footprint: { state: 'pending', why: '正在测' } }))).toEqual({
       kind: 'pending',

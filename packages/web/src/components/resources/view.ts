@@ -60,6 +60,8 @@ export interface DiskPart {
   /** 是目录（等宽字）还是库。 */
   kind: 'dir' | 'database';
   appId: string;
+  /** 后端随这一项带来的应用名（老后端没有）。 */
+  appName?: string;
   size: DiskCell;
 }
 
@@ -163,6 +165,7 @@ export function diskParts(footprint: Footprint | undefined): DiskPart[] {
     label: d.path,
     kind: 'dir',
     appId: d.appId,
+    ...(d.appName ? { appName: d.appName } : {}),
     size: sizeCell(d.size),
   }));
   const dbs: DiskPart[] =
@@ -172,6 +175,7 @@ export function diskParts(footprint: Footprint | undefined): DiskPart[] {
           label: `库 ${d.name}`,
           kind: 'database',
           appId: d.appId,
+          ...(d.appName ? { appName: d.appName } : {}),
           size: sizeCell(d.size),
         }))
       : [];
@@ -331,7 +335,7 @@ export function diskBoard(resources: HomeResources | undefined, opts: ResourceOp
   const total = resources.disk?.state === 'ok' ? resources.disk.totalBytes : undefined;
   const rows = diskParts(fp).map((p) => ({
     ...p,
-    appName: names.get(p.appId) ?? p.appId,
+    appName: names.get(p.appId) ?? p.appName ?? p.appId,
     ...(total !== undefined && p.size.kind === 'ok' ? { share: p.size.bytes / total } : {}),
   }));
   const size = (r: DiskPart) => (r.size.kind === 'ok' ? r.size.bytes : -1);

@@ -371,7 +371,7 @@ function AppsSection({
   return (
     <Section
       title="上线项目"
-      description="跑在这台上的应用：此刻的 CPU、内存，名下目录和库的磁盘"
+      description="此刻的 CPU、内存，名下目录和库的磁盘"
       flush
       data-resources-apps
     >
