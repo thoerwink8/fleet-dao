@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
-// 外壳里的 PWA 接线（#2050）：新提醒来了，窗口在前台不弹系统通知、不在前台弹、点一下回对应页；角标跟着待处理数走。
+// 外壳里的 PWA 接线（#2050）：新提醒来了，窗口在前台不弹系统通知、不在前台弹、点一下回对应页；
+// 角标跟着提需求「等我的」件数走（#2062 换的口子 useBadgeCount）。
 import { act, cleanup, screen, waitFor } from '@testing-library/react';
 import { Route, Routes, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -123,15 +124,13 @@ describe('外壳里的系统通知', () => {
     await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/tasks/7'));
   });
 
-  test('角标用待处理数：有件数写数字', async () => {
+  test('角标用提需求「等我的」件数（#2062）：有件数写数字；新提醒不改它', async () => {
     vi.spyOn(document, 'hasFocus').mockReturnValue(true);
     const { push } = setup();
     await ready();
-    const before = setAppBadge.mock.calls.length;
+    // 假后端种子里等我的三件：等我拍板 1、有我没读的 1、引擎在问我 1
+    await waitFor(() => expect(setAppBadge.mock.calls.at(-1)?.[0]).toBe(3));
     await push(incoming('new-3'));
-    await waitFor(() => expect(setAppBadge.mock.calls.length).toBeGreaterThan(before));
-    const last = setAppBadge.mock.calls.at(-1)?.[0];
-    expect(typeof last).toBe('number');
-    expect(last).toBeGreaterThan(0);
+    expect(setAppBadge.mock.calls.at(-1)?.[0]).toBe(3);
   });
 });

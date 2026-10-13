@@ -111,3 +111,11 @@ export function span(startIso: string | undefined, endIso: string | undefined, n
 export function clipText(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
+
+/** 头像上的一个字：中文名取最后一个字（「创始人甲」「创始人乙」取首字都是「创」，分不出人；飞书、钉钉也是取名），别的取首字母大写。 */
+export function nameInitial(name: string): string {
+  const chars = Array.from(name.trim());
+  const last = chars.at(-1);
+  if (last && /\p{Script=Han}/u.test(last)) return last;
+  return chars[0]?.toUpperCase() ?? '?';
+}

@@ -10,7 +10,16 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { createContext, type ReactNode, useContext, useEffect, useRef, useSyncExternalStore } from 'react';
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import { brand } from '#brand';
 import type { HomeData, HomeState } from '../components/home/types';
 import type {
@@ -21,6 +30,7 @@ import type {
   AuthConfig,
   Board,
   CliToolsResponse,
+  CreateRequestBody,
   Credentials,
   EnvResponse,
   FrancePreflightResponse,
@@ -56,6 +66,13 @@ import type {
   Repo,
   RepoCiPolicy,
   RepoDispatch,
+  RequestActionBody,
+  RequestChatStreamEvent,
+  RequestDetail,
+  RequestIssueOpening,
+  RequestList,
+  RequestListQueryBody,
+  RequestReviewVerdict,
   RouteProbeHistory,
   RouteProbeNowBody,
   RouteProbeNowResult,
@@ -65,6 +82,7 @@ import type {
   RoutingLayers,
   RunTranscript,
   RunTranscriptQuery,
+  SendRequestMessageBody,
   SetChannelEnabledBody,
   SetChannelEnabledResult,
   SetModelEnabledBody,
@@ -86,6 +104,7 @@ import type {
   UpdateModelRouteBody,
   UpdateRepoCiPolicyBody,
   UpdateRepoDispatchBody,
+  UpdateRequestDraftBody,
   UpdateRouteEffortBody,
   UpdateSettingBody,
   UpdateTaskRoutePinBody,
@@ -240,9 +259,52 @@ export interface FleetApi {
   francePreflight(): Promise<FrancePreflightResponse>;
   /** /france 页「命令行工具」（#1969、#1971）：在用版本、官方最新、落后，升过的带上次升级时间和升上去的版本。只读。 */
   franceCliTools(): Promise<CliToolsResponse>;
+  /**
+   * 提需求（#2049 接口、#2062 页面）：进行中 / 已归档 / 最近删除，三个筛选，按标题、原话、单号搜。
+   * 后端没接上需求表时回 unavailable 写原因（不拿空列表冒充没有）。
+   */
+  requests(query: RequestListQueryBody): Promise<RequestList>;
+  /** 一条需求的详情：消息、草稿、每个动作能不能做和为什么不能。没有这条 404。 */
+  request(seq: number): Promise<RequestDetail>;
+  /** 提一条新需求（先说一句）；只能给已导入的项目提。回新需求的详情。 */
+  createRequest(body: CreateRequestBody): Promise<RequestDetail>;
+  /** 发一条消息（说话人取登录会话）；结案后 409。回详情。 */
+  sendRequestMessage(seq: number, body: SendRequestMessageBody): Promise<RequestDetail>;
+  /** 改草稿栏：带看到的版本，别人先改了 409。回详情。 */
+  updateRequestDraft(seq: number, body: UpdateRequestDraftBody): Promise<RequestDetail>;
+  /** 提交拍板、确定、拍板、撤回、放下、归档、删除、恢复、置顶、改名。不合法 409 + 中文原因。回详情。 */
+  requestAction(seq: number, body: RequestActionBody): Promise<RequestDetail>;
+  /** 我读到这一条（只往前走）。 */
+  markRequestRead(seq: number, messageId: number): Promise<{ lastReadMessageId: number | null }>;
+  /** 「需求号 + 草稿版本号」这一键开没开成单（#2060）：确定、同意做超时了用它回显，不让人重点。 */
+  requestIssueOpening(seq: number, draftVersion: number): Promise<RequestIssueOpening>;
+  /** 回答引擎的提问：答复写回那条 GitHub 评论；写失败 502，同一个接口再调就是重试。回详情。 */
+  answerEngineAsk(seq: number, messageId: number, text: string): Promise<RequestDetail>;
+  /** 「让指挥官接着问」（#2061）。超了限额、引擎关着回 409「指挥官暂停了：原因」。回详情。 */
+  nudgeCommander(seq: number): Promise<RequestDetail>;
+  /** 停下正在回话的指挥官。回详情。 */
+  stopCommander(seq: number): Promise<RequestDetail>;
+  /** 只给这一条需求换指挥官模型；null = 回到「提需求」用途的默认。回详情。 */
+  setCommanderModel(seq: number, modelId: string | null): Promise<RequestDetail>;
+  /** 「让别家挑错」：排一次别家模型挑草稿的错。回详情。 */
+  requestReview(seq: number): Promise<RequestDetail>;
+  /** 别家意见的一条标采用或不用。回详情。 */
+  markReviewItem(
+    seq: number,
+    messageId: number,
+    body: { index: number; verdict: RequestReviewVerdict },
+  ): Promise<RequestDetail>;
+  /** 指挥官回话的流（SSE）：返回关掉的函数。回完推 done、断了推 error（写原因）。 */
+  commanderStream(seq: number, listener: (e: CommanderStreamMessage) => void): () => void;
   /** 订阅实时推送，返回取消订阅的函数。onStatus 报连接状态（给顶栏的「实时」小灯）。 */
   subscribe(listener: (event: LiveEvent) => void, onStatus?: (status: LiveStatus) => void): () => void;
 }
+
+/** 指挥官回话流里的一条：写到哪了、回完了、断了。 */
+export type CommanderStreamMessage =
+  | { type: 'commander'; event: RequestChatStreamEvent }
+  | { type: 'done' }
+  | { type: 'error'; why: string };
 
 /** 后端的错误：code 给程序判断，message 是给人看的白话（直接显示）。 */
 export class ApiError extends Error {
@@ -313,6 +375,8 @@ export const keys = {
   home: ['home'] as const,
   nodes: ['nodes'] as const,
   node: (nodeId: string) => ['node', nodeId] as const,
+  requests: (q: RequestListQueryBody) => ['requests', q.view, q.filter, q.q ?? ''] as const,
+  request: (seq: number) => ['request', String(seq)] as const,
 };
 
 // ---------- 兜底轮询（#1799） ----------
@@ -917,6 +981,182 @@ export function useNodeHome(nodeId: string | null): {
   };
 }
 
+// ---------- 提需求（#2062） ----------
+
+/**
+ * 需求列表每隔多久重拉：需求表不在推送名单里（动作会记操作记录，那条推送另外叫它重拉），
+ * 别人发的话只能靠轮询看到，所以比别的读页勤。指挥官的流式回话是 C 片的事。
+ */
+export const REQUEST_LIST_POLL_MS = 15_000;
+/** 开着的那条对话每隔多久重拉（看对方新说的话）。 */
+export const REQUEST_DETAIL_POLL_MS = 5_000;
+
+export function useRequestList(query: RequestListQueryBody, { enabled = true }: { enabled?: boolean } = {}) {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.requests(query),
+    queryFn: () => api.requests(query),
+    refetchInterval: REQUEST_LIST_POLL_MS,
+    refetchIntervalInBackground: false,
+    // 换筛选、换搜索词时留着上一份，不闪成骨架
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === query.view ? prev : undefined),
+    enabled,
+  });
+}
+
+/** 一条需求的详情。404 不重试（retryUnlessMissing），页面另记失败。 */
+export function useRequestDetail(seq: number | null) {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.request(seq ?? 0),
+    queryFn: () => api.request(seq ?? 0),
+    enabled: seq !== null,
+    retry: retryUnlessMissing,
+    refetchInterval: REQUEST_DETAIL_POLL_MS,
+    refetchIntervalInBackground: false,
+  });
+}
+
+/** 多选时选中的那几条的详情：菜单和批量操作只看 actions 里能做的，不在前端猜。 */
+export function useRequestDetails(seqs: readonly number[]) {
+  const api = useApi();
+  return useQueries({
+    queries: seqs.map((seq) => ({
+      queryKey: keys.request(seq),
+      queryFn: () => api.request(seq),
+      retry: retryUnlessMissing,
+    })),
+  });
+}
+
+/** 「等我的」件数（角标和筛选上的数）：进行中、全部那一份的 counts.todo。后端没接上需求表、读不到时是 undefined，不当 0。 */
+export function useRequestTodoCount(): number | undefined {
+  const { data } = useRequestList({ view: 'active', filter: 'all' });
+  if (!data || data.unavailable !== undefined) return undefined;
+  return data.counts.todo;
+}
+
+/** 写完把回来的详情直接放进缓存（页面马上是库里现在的样子），列表重拉。 */
+function useRequestWrite<V>(run: (api: FleetApi, vars: V) => Promise<RequestDetail>) {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: V) => run(api, vars),
+    onSuccess: (detail) => {
+      qc.setQueryData(keys.request(detail.request.seq), detail);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['requests'] });
+    },
+  });
+}
+
+export function useCreateRequest() {
+  return useRequestWrite((api, body: CreateRequestBody) => api.createRequest(body));
+}
+
+export function useSendRequestMessage() {
+  return useRequestWrite((api, v: { seq: number; body: SendRequestMessageBody }) =>
+    api.sendRequestMessage(v.seq, v.body),
+  );
+}
+
+export function useUpdateRequestDraft() {
+  return useRequestWrite((api, v: { seq: number; body: UpdateRequestDraftBody }) =>
+    api.updateRequestDraft(v.seq, v.body),
+  );
+}
+
+export function useRequestAction() {
+  return useRequestWrite((api, v: { seq: number; body: RequestActionBody }) =>
+    api.requestAction(v.seq, v.body),
+  );
+}
+
+export function useAnswerEngineAsk() {
+  return useRequestWrite((api, v: { seq: number; messageId: number; text: string }) =>
+    api.answerEngineAsk(v.seq, v.messageId, v.text),
+  );
+}
+
+export function useNudgeCommander() {
+  return useRequestWrite((api, seq: number) => api.nudgeCommander(seq));
+}
+
+export function useStopCommander() {
+  return useRequestWrite((api, seq: number) => api.stopCommander(seq));
+}
+
+export function useSetCommanderModel() {
+  return useRequestWrite((api, v: { seq: number; modelId: string | null }) =>
+    api.setCommanderModel(v.seq, v.modelId),
+  );
+}
+
+export function useRequestReview() {
+  return useRequestWrite((api, seq: number) => api.requestReview(seq));
+}
+
+export function useMarkReviewItem() {
+  return useRequestWrite(
+    (api, v: { seq: number; messageId: number; index: number; verdict: RequestReviewVerdict }) =>
+      api.markReviewItem(v.seq, v.messageId, { index: v.index, verdict: v.verdict }),
+  );
+}
+
+/** 查这一版开没开成单（确定、同意做超时以后）：直接调，不进缓存。 */
+export function useIssueOpeningLookup(): (seq: number, draftVersion: number) => Promise<RequestIssueOpening> {
+  const api = useApi();
+  return useCallback(
+    (seq: number, draftVersion: number) => api.requestIssueOpening(seq, draftVersion),
+    [api],
+  );
+}
+
+/**
+ * 指挥官正在回话时（排着、在跑）开着回话的流：写到哪了、「正在读代码……」；回完或断了关流，并重拉详情。
+ * 没在跑不开流（返回 null）。断了照实给出原因，页面写出来，不当成回完了。
+ */
+export function useCommanderStream(
+  seq: number,
+  running: boolean,
+): { live: RequestChatStreamEvent | null; broken: string | null } {
+  const api = useApi();
+  const qc = useQueryClient();
+  const [live, setLive] = useState<RequestChatStreamEvent | null>(null);
+  const [broken, setBroken] = useState<string | null>(null);
+  useEffect(() => {
+    if (!running) {
+      setLive(null);
+      return;
+    }
+    setBroken(null);
+    const stop = api.commanderStream(seq, (m) => {
+      if (m.type === 'commander') {
+        setLive(m.event);
+        return;
+      }
+      if (m.type === 'error') setBroken(m.why);
+      setLive(null);
+      void qc.invalidateQueries({ queryKey: keys.request(seq) });
+      void qc.invalidateQueries({ queryKey: ['requests'] });
+    });
+    return stop;
+  }, [api, qc, seq, running]);
+  return { live, broken };
+}
+
+/** 读到哪一条：成了列表重拉（未读、等我的跟着变），失败不打扰人（下次进来再记）。 */
+export function useMarkRequestRead() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ seq, messageId }: { seq: number; messageId: number }) =>
+      api.markRequestRead(seq, messageId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['requests'] }),
+  });
+}
+
 // ---------- 写 ----------
 
 export function useTaskAction() {
@@ -1302,13 +1542,14 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   channels: [['routing'], ['pools'], ['routing-layers'], keys.home],
   notifications: [['notifications'], keys.home],
   // 整理待办的现状是从操作记录现算的：点了、接手、做完都记在这张表，各仓这一块跟着变
-  audit_log: [['audit'], ['groom-status']],
+  // 提需求的每个动作（提交、拍板、归档、删除……）也记一条操作记录：需求列表和详情跟着重拉
+  audit_log: [['audit'], ['groom-status'], ['requests'], ['request']],
   // 引擎总开关（设置 engine.master，#1086）的状态在环境快照里，顶栏常驻显示它：设置一变，环境也跟着重拉
   settings: [['settings'], keys.env],
   // 别的环境推来了新快照：顶栏切换器和环境页的列表、选中的那个环境的主页和环境页都重拉。
   node_reports: [keys.nodes, ['node']],
-  // 提需求（#2060）：载荷里的 id 是需求号。读它的页面在 #2047 的 D 片接，接上时在这里挂查询键；现在没有页面读，不用重拉。
-  requests: [],
+  // 提需求（#2060）：需求一有动静（新消息、进度卡、引擎提问、单子状态）就推，载荷里的 id 是需求号；列表和详情跟着重拉
+  requests: [['requests'], ['request']],
 };
 
 function isRealtimeTable(table: string): table is RealtimeTable {

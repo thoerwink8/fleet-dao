@@ -176,6 +176,15 @@ function Row({
                   node: row.prNumber === null ? null : <span className="num">PR #{row.prNumber}</span>,
                 },
                 {
+                  key: 'request',
+                  node:
+                    row.requestSeq === undefined ? null : (
+                      <span className="num" title="这张单是驾驶舱「提需求」开出来的" data-from-request>
+                        来自需求 {row.requestSeq}
+                      </span>
+                    ),
+                },
+                {
                   key: 'when',
                   phone: true,
                   node: (
@@ -389,6 +398,12 @@ export default function TasksPage() {
               onRetry={() => void list.refetch()}
             />
           </div>
+        ) : null}
+        {list.data?.pages[0]?.requestSeqUnavailable ? (
+          <p className="mb-3 text-meta text-ink-stall" data-request-seq-unavailable>
+            「来自需求 N」没查成：{list.data.pages[0].requestSeqUnavailable}
+            （下面的单可能有从「提需求」开出来的）
+          </p>
         ) : null}
         <Section flush>
           {!list.data ? (

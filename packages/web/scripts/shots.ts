@@ -27,6 +27,13 @@ export const PAGES: readonly (readonly [string, string])[] = [
   ['france', '/france'],
   // 资源页（#1986）
   ['resources', '/resources'],
+  // 提需求（#2062）：列表、和指挥官聊、开了单看进度、让别家挑错
+  ['intake', '/intake'],
+  ['intake-chat', '/intake?r=46'],
+  ['intake-progress', '/intake?r=31'],
+  ['intake-review', '/intake?r=44'],
+  ['intake-deleted', '/intake?view=deleted'],
+  ['intake-continue', '/intake?r=new&from=31'],
   ['schedules', '/schedules'],
   ['changelog', '/changelog'],
   ['audit', '/audit'],

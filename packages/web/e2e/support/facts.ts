@@ -29,6 +29,8 @@ export const E2eFactsSchema = z.object({
   approvalNotificationId: z.string(),
   alertNotificationId: z.string(),
   pools: z.object({ carpool: z.string(), solo: z.string() }),
+  /** 提需求的三条（#2062）：乙提的待甲拍板、甲已结案（开了 #12）、甲提的乙也说过话。 */
+  requests: z.object({ pending: z.number(), closed: z.number(), shared: z.number() }),
 });
 export type E2eFacts = z.infer<typeof E2eFactsSchema>;
 

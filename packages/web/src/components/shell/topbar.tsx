@@ -26,7 +26,7 @@ import {
   useResolveNotification,
 } from '../../api/client';
 import type { Notification } from '../../api/types';
-import { formatAgo } from '../../lib/format';
+import { formatAgo, nameInitial } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import { freshnessNow, nodeAgeText, useNodeSelection, withNode } from '../../lib/node';
 import { pendingCount } from '../../lib/notice-count';
@@ -424,7 +424,7 @@ function UserMenu() {
             <img src={user.avatarUrl} alt="" className="size-7 rounded-full object-cover" />
           ) : (
             <span className="grid size-7 place-items-center rounded-full bg-foreground text-meta font-semibold text-background">
-              {user?.displayName.slice(0, 1) ?? '·'}
+              {user ? nameInitial(user.displayName) : '·'}
             </span>
           )}
         </Button>

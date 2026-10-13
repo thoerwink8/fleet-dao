@@ -17,7 +17,9 @@ import {
   ManualModelRequest,
   MovePurposeModelRequest,
   PasswordLoginRequest,
+  REQUEST_CHAT_SSE_EVENTS,
   RemovePurposeModelRequest,
+  RequestChatStreamEvent,
   RouteProbeNowRequest,
   SetChannelEnabledRequest,
   SetModelEnabledRequest,
@@ -499,6 +501,118 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       }),
     francePreflight: () => send('POST', apiUrl(R.francePreflight.path), R.francePreflight.response),
     franceCliTools: () => send('GET', apiUrl(R.franceCliTools.path), R.franceCliTools.response),
+    requests: (query) =>
+      send(
+        'GET',
+        apiUrl(R.requests.path, {}, { view: query.view, filter: query.filter, q: query.q || undefined }),
+        R.requests.response,
+      ),
+    request: (seq) =>
+      send('GET', apiUrl(R.requestDetail.path, { seq: String(seq) }), R.requestDetail.response),
+    async createRequest(body) {
+      return send('POST', apiUrl(R.createRequest.path), R.createRequest.response, {
+        body: R.createRequest.request.parse(body),
+      });
+    },
+    async sendRequestMessage(seq, body) {
+      return send(
+        'POST',
+        apiUrl(R.sendRequestMessage.path, { seq: String(seq) }),
+        R.sendRequestMessage.response,
+        { body: R.sendRequestMessage.request.parse(body) },
+      );
+    },
+    async updateRequestDraft(seq, body) {
+      return send(
+        'PUT',
+        apiUrl(R.updateRequestDraft.path, { seq: String(seq) }),
+        R.updateRequestDraft.response,
+        { body: R.updateRequestDraft.request.parse(body) },
+      );
+    },
+    async requestAction(seq, body) {
+      return send('POST', apiUrl(R.requestAction.path, { seq: String(seq) }), R.requestAction.response, {
+        body: R.requestAction.request.parse(body),
+      });
+    },
+    async markRequestRead(seq, messageId) {
+      return send('POST', apiUrl(R.markRequestRead.path, { seq: String(seq) }), R.markRequestRead.response, {
+        body: R.markRequestRead.request.parse({ messageId }),
+      });
+    },
+    requestIssueOpening: (seq, draftVersion) =>
+      send(
+        'GET',
+        apiUrl(R.requestIssueOpening.path, { seq: String(seq) }, { draftVersion: String(draftVersion) }),
+        R.requestIssueOpening.response,
+      ),
+    async answerEngineAsk(seq, messageId, text) {
+      return send(
+        'POST',
+        apiUrl(R.answerRequestEngineAsk.path, { seq: String(seq), messageId: String(messageId) }),
+        R.answerRequestEngineAsk.response,
+        { body: R.answerRequestEngineAsk.request.parse({ text }) },
+      );
+    },
+    async nudgeCommander(seq) {
+      return send('POST', apiUrl(R.nudgeCommander.path, { seq: String(seq) }), R.nudgeCommander.response);
+    },
+    async stopCommander(seq) {
+      return send('POST', apiUrl(R.stopCommander.path, { seq: String(seq) }), R.stopCommander.response);
+    },
+    async setCommanderModel(seq, modelId) {
+      return send(
+        'PUT',
+        apiUrl(R.setCommanderModel.path, { seq: String(seq) }),
+        R.setCommanderModel.response,
+        {
+          body: R.setCommanderModel.request.parse({ modelId }),
+        },
+      );
+    },
+    async requestReview(seq) {
+      return send('POST', apiUrl(R.requestReview.path, { seq: String(seq) }), R.requestReview.response);
+    },
+    async markReviewItem(seq, messageId, body) {
+      return send(
+        'POST',
+        apiUrl(R.markReviewItem.path, { seq: String(seq), messageId: String(messageId) }),
+        R.markReviewItem.response,
+        { body: R.markReviewItem.request.parse(body) },
+      );
+    },
+    commanderStream(seq, listener) {
+      // 指挥官回话的流（#2061）：只在会话排着、在跑时开；回完（done）或出错就关，页面再拉详情
+      const make = opts.eventSource ?? ((url: string) => new EventSource(url, { withCredentials: true }));
+      const src = make(apiUrl(R.commanderStream.path, { seq: String(seq) }));
+      const parse = (ev: Event): unknown => {
+        try {
+          return JSON.parse((ev as MessageEvent<string>).data);
+        } catch {
+          return undefined;
+        }
+      };
+      src.addEventListener(REQUEST_CHAT_SSE_EVENTS.commander, (ev) => {
+        const got = RequestChatStreamEvent.safeParse(parse(ev));
+        // 认不出的一条不拿去换掉页面上已有的那段话，当成出错让页面拉详情
+        listener(
+          got.success ? { type: 'commander', event: got.data } : { type: 'error', why: '推来的回话认不出' },
+        );
+      });
+      src.addEventListener(REQUEST_CHAT_SSE_EVENTS.done, () => {
+        listener({ type: 'done' });
+        src.close();
+      });
+      src.addEventListener(REQUEST_CHAT_SSE_EVENTS.error, (ev) => {
+        const raw = parse(ev) as { why?: unknown } | undefined;
+        listener({ type: 'error', why: typeof raw?.why === 'string' ? raw.why : '回话的流断了' });
+        src.close();
+      });
+      src.onerror = () => {
+        if (src.readyState === ES_CLOSED) listener({ type: 'error', why: '回话的流断了' });
+      };
+      return () => src.close();
+    },
     subscribe(listener, onStatus) {
       const make = opts.eventSource ?? ((url: string) => new EventSource(url, { withCredentials: true }));
       const url = apiUrl(R.events.path);

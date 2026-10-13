@@ -86,10 +86,10 @@ describe('推送到缓存：按表名决定重拉什么', () => {
     ]);
   });
 
-  test('操作记录变了：整理待办的现状跟着重拉（它是从记录现算的）', () => {
+  test('操作记录变了：整理待办的现状、提需求的列表和详情跟着重拉（都是从记录或动作现算的，需求表本身不推送）', () => {
     const { qc, called } = spy();
     applyOne(qc, { type: 'change', table: 'audit_log', id: 'a1' });
-    expect(called()).toEqual(['audit', 'groom-status']);
+    expect(called()).toEqual(['audit', 'groom-status', 'requests', 'request']);
   });
 
   test('认不出的表、断线重连：全部重拉——宁可多拉，不把漏收当没变化', () => {

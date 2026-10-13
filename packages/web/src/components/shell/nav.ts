@@ -8,6 +8,7 @@ import {
   History,
   Home,
   ListChecks,
+  MessageSquarePlus,
   Route,
   SatelliteDish,
   ScrollText,
@@ -41,6 +42,12 @@ export const NAV: { group: string; items: NavItem[] }[] = [
         label: '任务',
         icon: ListChecks,
         hint: '所有单子：在跑、排队、等人、做完、失败、叫停，能按仓筛、按单号和标题搜',
+      },
+      {
+        to: '/intake',
+        label: '提需求',
+        icon: MessageSquarePlus,
+        hint: '和指挥官聊清楚一件事，确定后开成单',
       },
       {
         to: '/notifications',
