@@ -1,0 +1,2 @@
+ALTER TABLE "runs" ADD COLUMN "cpu_seconds" integer;--> statement-breakpoint
+ALTER TABLE "runs" ADD CONSTRAINT "runs_cpu_seconds_positive" CHECK ("runs"."cpu_seconds" is null or "runs"."cpu_seconds" > 0);

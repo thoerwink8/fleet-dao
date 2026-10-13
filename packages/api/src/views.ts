@@ -492,6 +492,7 @@ export function homeRunning(input: {
         ...(flow.worker ? { worker: flow.worker } : {}),
         ...(decision ? { pendingDecision: decision.title } : {}),
         ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
+        ...(flow.lastSession ? { lastSession: flow.lastSession } : {}),
         link: `/tasks/${t.id}`,
         taskId: t.id,
         state: t.state,
