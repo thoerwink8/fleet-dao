@@ -49,8 +49,9 @@ export const RULES_USERS = ['fleet-agent-carpool', 'pilot'];
  * 和 france.sh 引用的每个仓里文件，要么在这里、要么在测试里登记的自动档清单里）。
  * 运行时直接读的副本（HUMAN_TIER_COPY_CHECKS）字节已经和主线一样的，不再算进落后：france-applied 只在整套跑完没红时才往前拨，
  * 副本已经换上、别的读回还有红时，标记会停在旧提交上，不该再叫人重跑整套。防火墙、sudoers、sshd、被 source 的脚本不在这条例外里。
- * 主线头上内容和装到的那一版一样的路径，默认不数：中间的提交改完又改回去，重跑整套不会换机器上的东西。
- * 能按副本核对、但核对不是 true 的不走这条例外：失败的整套先把中间版本写上，读回有红就不拨标记；主线再把文件改回标记那一版时 git diff 是空的，机器上仍可能是中间版本。
+ * 这些非副本路径也不按净 diff 收窄。失败的整套可以先把中间版本的规则写上，读回有红就不拨标记；主线再改回标记那一版时
+ * git diff 是空的，机器上仍可能是中间版本。旧逻辑靠 git log 保留中间变更和回退提交，重跑整套才会把规则重新加载回去。
+ * 能按副本核对、但核对不是 true 的同样留着，理由一样。
  */
 export const HUMAN_TIER_PATHS = [
   'deploy/lib/human-tier.sh',
@@ -118,19 +119,16 @@ export function copyAlreadyInstalled(blob, installedBlob, needDaemonReload) {
 
 /**
  * 数落后提交时还要交给 `git log` 的路径。satisfied 里严格等于 true 的副本路径拿掉。
- * changed 是主线头相对装到的提交、内容变了的路径（`git diff --name-only`）。给了才按它收窄；
- * 没给就是没查成，路径照旧留着，不能把「没比过」当成「没变」。
- * 能按副本核对、核对不是 true 的路径，即使不在 changed 里也留下：git diff 为空只说明主线头和标记那一版字节一样，
- * 证明不了机器上就是那一版（失败安装写下的中间版本）。
+ * changed 是主线头相对装到的提交、内容变了的路径（`git diff --name-only`），只留着让调用方把「比过了」传进来。
+ * 不按它收窄：没给是没比过；空数组只说明净 diff 为空。两种都不等于机器上就是标记那一版。
+ * 防火墙、sudoers、sshd、被 source 的脚本，以及核对不是 true 的副本，都留给 git log，中间变更和回退提交照旧算落后。
  * 返回空数组表示一段都不用数：调用方必须当成落后 0。拿空 pathspec 去 git log 会列出全部提交。
  */
 export function humanTierPathsStillBehind(satisfied, changed) {
-  const copyPaths = new Set(HUMAN_TIER_COPY_CHECKS.map((c) => c.path));
+  // 净 diff 不参与收窄。参数留着，避免调用方漏传时被当成「内容没变」。
+  void changed;
   const skip = new Set(HUMAN_TIER_COPY_CHECKS.filter((c) => satisfied?.[c.path] === true).map((c) => c.path));
-  const paths = HUMAN_TIER_PATHS.filter((p) => !skip.has(p));
-  if (!Array.isArray(changed)) return paths;
-  const keep = new Set(changed);
-  return paths.filter((p) => keep.has(p) || (copyPaths.has(p) && satisfied?.[p] !== true));
+  return HUMAN_TIER_PATHS.filter((p) => !skip.has(p));
 }
 /**
  * 这边发的报警都以它开头：规矩同步没成 `auto-release:rules:<提交号>`，装机自动档没装成 `auto-release:tier:<提交号>`，

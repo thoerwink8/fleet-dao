@@ -746,31 +746,43 @@ test('可按副本核对的路径都在人工档清单里，入口遇到空路�
   assert.match(entry, /if \(paths\.length === 0\) return \{ applied, log: '' \}/);
 });
 
-test('内容和装到的那一版一样的路径不再数；没给出差异时不能当成没变', () => {
+test('净 diff 为空也不拿掉防火墙、sudoers、sshd；没给出差异时同样不能当成没变', () => {
   const copiesOn = Object.fromEntries(HUMAN_TIER_COPY_CHECKS.map((c) => [c.path, true]));
-  assert.deepEqual(humanTierPathsStillBehind(copiesOn, []), []);
-  assert.deepEqual(humanTierPathsStillBehind(copiesOn, ['deploy/france/fleet-dao.nft']), [
+  const nonCopy = HUMAN_TIER_PATHS.filter((p) => !HUMAN_TIER_COPY_CHECKS.some((c) => c.path === p));
+  // 副本已经和主线一样才拿掉。净 diff 列出或列不出，都不收窄非副本路径。
+  assert.deepEqual(humanTierPathsStillBehind(copiesOn, []), nonCopy);
+  assert.deepEqual(humanTierPathsStillBehind(copiesOn, ['deploy/france/fleet-dao.nft']), nonCopy);
+  assert.deepEqual(humanTierPathsStillBehind(copiesOn, ['deploy/france/fleet-agent-scope.sh']), nonCopy);
+  assert.deepEqual(humanTierPathsStillBehind(copiesOn), nonCopy);
+  for (const must of [
     'deploy/france/fleet-dao.nft',
-  ]);
-  // 副本已经和主线一样：就算相对装到的提交内容变了，也不再数
-  assert.deepEqual(humanTierPathsStillBehind(copiesOn, ['deploy/france/fleet-agent-scope.sh']), []);
-  const withoutDiff = humanTierPathsStillBehind(copiesOn);
-  assert.ok(withoutDiff.includes('deploy/lib/human-tier.sh'));
-  assert.ok(withoutDiff.includes('deploy/france/fleet-dao.nft'));
+    'deploy/france/sudoers-fleet-dao',
+    'deploy/france/sshd-hardening.conf',
+    'deploy/france/sshd-session-user.conf',
+    'deploy/france/fail2ban-sshd.jail',
+    'deploy/lib/human-tier.sh',
+    'deploy/lib/session-user.sh',
+  ]) {
+    assert.ok(nonCopy.includes(must), `${must} 要留给 git log`);
+  }
 });
 
-test('失败安装留下中间版本、主线又改回标记那一版：git diff 为空时，副本核对没过的路径仍要数', () => {
+test('失败安装留下中间版本、主线又改回标记那一版：副本没对齐的和防火墙等路径都要数', () => {
   const copiesOn = Object.fromEntries(HUMAN_TIER_COPY_CHECKS.map((c) => [c.path, true]));
+  const nonCopy = HUMAN_TIER_PATHS.filter((p) => !HUMAN_TIER_COPY_CHECKS.some((c) => c.path === p));
   const drifted = { ...copiesOn, 'deploy/france/fleet-agent-scope.sh': false };
-  // changed 为空：主线头和标记那一版的字节一样。机器上这份仍是中间版本，不能报落后 0。
-  assert.deepEqual(humanTierPathsStillBehind(drifted, []), ['deploy/france/fleet-agent-scope.sh']);
+  const driftedExpect = HUMAN_TIER_PATHS.filter(
+    (p) => p === 'deploy/france/fleet-agent-scope.sh' || nonCopy.includes(p),
+  );
+  // changed 为空：主线头和标记那一版的字节一样。机器上的副本和防火墙仍可能是中间版本。
+  assert.deepEqual(humanTierPathsStillBehind(drifted, []), driftedExpect);
+  assert.deepEqual(humanTierPathsStillBehind(drifted, ['deploy/france/fleet-dao.nft']), driftedExpect);
   const unread = { ...copiesOn };
   delete unread['deploy/france/release-request/lib.mjs'];
-  assert.deepEqual(humanTierPathsStillBehind(unread, []), ['deploy/france/release-request/lib.mjs']);
-  assert.deepEqual(humanTierPathsStillBehind(drifted, ['deploy/france/fleet-dao.nft']), [
-    'deploy/france/fleet-dao.nft',
-    'deploy/france/fleet-agent-scope.sh',
-  ]);
+  const unreadExpect = HUMAN_TIER_PATHS.filter(
+    (p) => p === 'deploy/france/release-request/lib.mjs' || nonCopy.includes(p),
+  );
+  assert.deepEqual(humanTierPathsStillBehind(unread, []), unreadExpect);
 });
 
 test('解析：主线列表认不出就抛，不拿半截当全部', () => {

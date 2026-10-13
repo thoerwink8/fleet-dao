@@ -142,7 +142,8 @@ export const realIo = {
     if (applied === null) return { applied: null, log: '' };
     const satisfied = {};
     for (const c of HUMAN_TIER_COPY_CHECKS) satisfied[c.path] = installedCopyMatches(head, c);
-    // 比不了就抛：不能把「没比成」当成内容没变（那样会把真要重跑的报成落后 0）
+    // 比不了就抛：不能把「没比成」当成内容没变。比完也不按净 diff 收窄——
+    // 空的 diff 只说明主线头和标记那一版字节一样，证明不了防火墙、sudoers、sshd 没被失败安装写成中间版本。
     const diff = git(['diff', '--name-only', applied, head, '--', ...HUMAN_TIER_PATHS]);
     if (diff.code !== 0) {
       throw new Error(
