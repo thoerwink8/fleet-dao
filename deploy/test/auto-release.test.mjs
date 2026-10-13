@@ -5,8 +5,10 @@
 // git、GitHub、发布脚本、库都换成假的；真机上那一半（真定时器）合并后在法国装上验，记在引入本文件的 PR 里。
 // 跑法：node --test deploy/test/auto-release.test.mjs（deploy/test/run.sh 会跑）。
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   DESIRED_FILE,
   FINGERPRINT_ALGORITHM,
@@ -740,6 +742,98 @@ test('可按副本核对的路径都在人工档清单里，入口遇到空路�
   );
   assert.match(entry, /humanTierPathsStillBehind\(satisfied\)/);
   assert.match(entry, /if \(paths\.length === 0\) return \{ applied, log: '' \}/);
+});
+
+// 2026-10-14 法国 /healthz deploy_lag：france-applied 停在 10-11 的这一版，主线到 f1a9bade 之间人工档正好 5 个提交。
+// 核对过安装位置：这 5 个改的文件字节都已经是 f1a9bade，对应单元 NeedDaemonReload=no。防火墙、sudoers、sshd、
+// 被 source 的脚本在这段里没有提交。所以落后读数是标记没拨，不是这 5 个还没装上；整套 france.sh 不是为了它们。
+const FRANCE_APPLIED_2026_10_11 = '4877f26dbfeb41a7c22bed2a3486bf78eee59fb4';
+const FRANCE_MAIN_2026_10_14 = 'f1a9bade7bbf94e4b45a7dc03f7f5aeba0abf87a';
+const FRANCE_LAG_2026_10_14 = [
+  {
+    sha: 'cf009e9ab371e21a847c00f088843e8a0c0116d6',
+    paths: [
+      'deploy/france/release-request/fleet-release-request.mjs',
+      'deploy/france/release-request/lib.mjs',
+    ],
+  },
+  {
+    sha: '3f1f8b7db9284054074688bb837a9238e6a1d314',
+    paths: [
+      'deploy/france/fleet-release-request.service',
+      'deploy/france/release-request/fleet-release-request.mjs',
+      'deploy/france/release-request/lib.mjs',
+    ],
+  },
+  {
+    sha: '152dd2ca66c1c74b824bd7eca2440e9810e83af0',
+    paths: ['deploy/france/release-request/lib.mjs', 'deploy/france/release-request/session-wait.mjs'],
+  },
+  {
+    sha: '95463832324c768647f5aa68f1df9a8fd74d2397',
+    paths: [
+      'deploy/france/release-request/fleet-release-request.mjs',
+      'deploy/france/release-request/lib.mjs',
+    ],
+  },
+  {
+    sha: '125a216726f0d7e1c6d66b5dd2723ad0961d41d7',
+    paths: ['deploy/france/fleet-agent-scope.sh'],
+  },
+];
+
+function gitNameOnly(range, paths) {
+  const r = spawnSync(
+    'git',
+    ['log', '--first-parent', '--name-only', '--format=COMMIT %H', range, '--', ...paths],
+    { cwd: fileURLToPath(new URL('../..', import.meta.url)), encoding: 'utf8' },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  const rows = [];
+  for (const line of r.stdout.split('\n')) {
+    if (line.startsWith('COMMIT ')) rows.push({ sha: line.slice('COMMIT '.length), paths: [] });
+    else if (line !== '' && rows.length > 0) rows[rows.length - 1].paths.push(line);
+  }
+  return rows;
+}
+
+test('2026-10-14 落后的 5 个相关提交只改运行时副本，不需要为它们重跑整套 france.sh', () => {
+  const copy = new Set(HUMAN_TIER_COPY_CHECKS.map((c) => c.path));
+  const range = `${FRANCE_APPLIED_2026_10_11}..${FRANCE_MAIN_2026_10_14}`;
+  const rows = gitNameOnly(range, HUMAN_TIER_PATHS);
+  assert.deepEqual(
+    rows.map((row) => row.sha),
+    FRANCE_LAG_2026_10_14.map((row) => row.sha),
+  );
+  assert.equal(rows.length, 5);
+  for (let i = 0; i < rows.length; i += 1) {
+    assert.deepEqual(rows[i].paths, FRANCE_LAG_2026_10_14[i].paths);
+    for (const path of rows[i].paths) {
+      assert.ok(copy.has(path), `${rows[i].sha} 改了 ${path}，文件一样也不等于已经生效，要整套装机`);
+    }
+  }
+  const rest = humanTierPathsStillBehind(Object.fromEntries([...copy].map((path) => [path, true])));
+  assert.deepEqual(gitNameOnly(range, rest), []);
+  const scope = '/usr/local/sbin/fleet-agent-scope';
+  if (!existsSync(scope)) return;
+  const root = fileURLToPath(new URL('../..', import.meta.url));
+  for (const check of HUMAN_TIER_COPY_CHECKS) {
+    const blob = spawnSync('git', ['-C', root, 'rev-parse', `${FRANCE_MAIN_2026_10_14}:${check.path}`], {
+      encoding: 'utf8',
+    });
+    const hashed = spawnSync('git', ['hash-object', '--', check.installed], { encoding: 'utf8' });
+    assert.equal(hashed.status, 0, check.installed);
+    assert.equal(
+      hashed.stdout.trim(),
+      blob.stdout.trim(),
+      `${check.path} 安装位置还不是 ${FRANCE_MAIN_2026_10_14}`,
+    );
+    if (!check.unit) continue;
+    const shown = spawnSync('systemctl', ['show', '-p', 'NeedDaemonReload', '--value', check.unit], {
+      encoding: 'utf8',
+    });
+    assert.equal(shown.stdout.trim(), 'no', check.unit);
+  }
 });
 
 test('解析：主线列表认不出就抛，不拿半截当全部', () => {
