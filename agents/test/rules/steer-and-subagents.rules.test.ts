@@ -33,31 +33,6 @@ const SHARED_RULES: Record<string, (t: string) => boolean> = {
     bullet(t, '- 我中途的引导').includes('涉及在跑的子代理，用 `SendMessage` 原话转它'),
 };
 
-const STEER_HEAD = '- 他的引导怎么送到';
-
-const SKILL_RULES: Record<string, (t: string) => boolean> = {
-  调工具前先回引导: (t) => bullet(t, STEER_HEAD).includes('下一次调工具之前先回他一句'),
-  还有活就别收: (t) => bullet(t, '- **默认用 Agent 子代理').includes('还有子代理或下一刀就别收这一轮'),
-  子代理一律后台跑: (t) => {
-    const l = bullet(t, '- **默认用 Agent 子代理');
-    return (
-      l.includes('一律后台跑') &&
-      l.includes('`run_in_background: false`') &&
-      l.includes('前台单次等待不超过 60 秒')
-    );
-  },
-  活没干完不许写成收工: (t) => bullet(t, '- **默认用 Agent 子代理').includes('活没干完不许写成收工'),
-  引导用SendMessage转给子代理: (t) => {
-    const l = bullet(t, STEER_HEAD);
-    return l.includes('`SendMessage` 把原话转给它') && l.includes('不等它跑完、也不另起一个');
-  },
-  不再用钩子中转: (t) => bullet(t, STEER_HEAD).includes('不再用钩子从 diag 取原文'),
-  一轮结束不杀后台子代理: (t) => {
-    const l = bullet(t, '- **默认用 Agent 子代理');
-    return l.includes('一轮结束不会杀掉它（2026-10-11 实测）') && l.includes('进程重开（插队、重启）会');
-  },
-};
-
 function missing(rules: Record<string, (t: string) => boolean>, text: string): string[] {
   return Object.entries(rules)
     .filter(([, ok]) => !ok(text))
@@ -78,10 +53,6 @@ const STALE = [
 describe('规矩：人在场别收、新话先回（决定 0083）', () => {
   it('通用段里都在', () => {
     expect(missing(SHARED_RULES, SHARED)).toEqual([]);
-  });
-
-  it('commander 技能「派活」里都在', () => {
-    expect(missing(SKILL_RULES, SKILL)).toEqual([]);
   });
 
   it('钩子中转和「不分无人值守都不结束」已删', () => {

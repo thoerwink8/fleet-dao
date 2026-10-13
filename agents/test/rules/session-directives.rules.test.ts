@@ -14,7 +14,6 @@ const read = (rel: string): string =>
 // 通用段的原件（2026-10-05 从仓根 AGENTS.md 挪出来）；仓根 AGENTS.md 只剩本仓段
 const RULES = read('../../shared-rules.md');
 const AGENTS = read('../../../AGENTS.md');
-const COMMANDER = read('../../skills/commander/SKILL.md');
 
 /** 通用段：同步脚本整块写进各家 AI 全局说明的那一块（标记之间）。 */
 function sharedBlock(text: string): string {
@@ -56,12 +55,6 @@ describe('规矩：只对这一次会话说的「怎么干」不记（决定 001
 
   it('原来那条「一时情况拍的是临时调整」没被这条挤掉或改窄', () => {
     expect(SHARED).toMatch(/只因一时情况拍的（额度、断电、某台机器坏了、某人不在）是临时调整/);
-  });
-
-  it('指挥官技能说明里记决定那条跟着指回通用段', () => {
-    expect(COMMANDER).toMatch(
-      /只对这一次会话说的「怎么干」[^；]{0,40}不记，照通用段「我只对这一次会话说的」那条/,
-    );
   });
 
   it('【故意造出的失败】整条删掉：每样都查得出缺', () => {

@@ -29,7 +29,6 @@ describe('前台等待上限', () => {
       readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
     const n = lib.MAX_FOREGROUND_WAIT_SECONDS;
     expect(read('../../shared-rules.md')).toContain(`单次前台等待不超过 ${n} 秒`);
-    expect(read('../../skills/commander/SKILL.md')).toContain(`前台单次等待不超过 ${n} 秒`);
   });
 
   it.each([

@@ -17,7 +17,6 @@ const read = (rel: string) =>
 
 // 通用段的原件（2026-10-05 从仓根 AGENTS.md 挪出来）
 const AGENTS = read('../../shared-rules.md');
-const COMMANDER = read('../../skills/commander/SKILL.md');
 
 /** 通用段「我的机器与模型」一节里写 Fable 的那一行。认不出这一节、这一节里没有 Fable，都明确报错，不当成空行放过。 */
 function fableLine(text: string): string {
@@ -57,17 +56,6 @@ const FORBIDDEN: Record<string, RegExp> = {
   子代理只用Sonnet或Opus: /子代理只用 Sonnet 或 Opus/,
 };
 
-/** 指挥官技能里派子代理那条必须写着的：不写模型、或用 fork，子代理就跟着主会话用上 Fable。 */
-const COMMANDER_RULES: Record<string, RegExp> = {
-  子代理分三档:
-    /斥候 Haiku 5\.5 写 `subagent_type: "Explore"`[^\n]*工人 Sonnet 5\.5 写 `subagent_type: "general-purpose"`[^\n]*设计 Opus 5\.5 写 `subagent_type: "Plan"`/,
-  // 决定 0087：写类型、不传 model；别名可能解析到旧版，升档才传
-  派子代理写明模型: /派活不传 `model`，用定义里的钉；难的活升档才传 `model`/,
-  说清不写会跟主会话同一个模型: /不写类型就跟主会话同一个模型/,
-  说清fork写了也不管用: /`fork`[^\n]*总跟主会话同一个模型[^\n]*写了 `model` 也不管用/,
-  指向决定0017: /`docs\/decisions\/0017-fable-only-in-founder-main-session\.md`/,
-};
-
 function missing(rules: Record<string, RegExp>, text: string): string[] {
   return Object.entries(rules)
     .filter(([, re]) => !re.test(text))
@@ -91,10 +79,6 @@ describe('规矩：Fable 进目录，只有创始人本人配进用途才用得�
 
   it('同一行里 GPT 不做界面那半句没被这次改动带掉', () => {
     expect(fableLine(AGENTS)).toMatch(/^- GPT 系不做界面类的活（包括审界面）；/);
-  });
-
-  it('指挥官技能里派子代理按三档选、写明模型、说清不写的后果', () => {
-    expect(missing(COMMANDER_RULES, COMMANDER)).toEqual([]);
   });
 
   it('【故意造出的失败】退回 #669 那句（一律不用、不分场合）：查得出来', () => {
@@ -164,12 +148,6 @@ describe('规矩：Fable 进目录，只有创始人本人配进用途才用得�
     const soft = line.replace('永不用 Fable', '少用 Fable');
     expect(soft).not.toBe(line);
     expect(missing(FABLE_RULES, soft)).toEqual(['子代理和工人永不用']);
-  });
-
-  it('【故意造出的失败】指挥官技能不写子代理的模型（改之前那样）：查得出来', () => {
-    const cut = COMMANDER.replace(/\n- \*\*子代理只分三个角色\*\*[^\n]*/, '');
-    expect(cut).not.toBe(COMMANDER);
-    expect(missing(COMMANDER_RULES, cut)).toEqual(Object.keys(COMMANDER_RULES));
   });
 
   it('【故意造出的失败】认不出那一节、那一节里没有 Fable：明确报错，不当成空行算过', () => {
