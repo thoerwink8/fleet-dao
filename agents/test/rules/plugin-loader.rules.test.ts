@@ -103,7 +103,7 @@ const projectHooks = (): Settings => ({
           {
             type: 'command',
             command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/prompt-log.mjs"',
-            timeout: 30000,
+            timeout: 30,
           },
         ],
       },
@@ -118,8 +118,12 @@ describe('订阅目录（决定 0085）', () => {
       ['session-start.mjs', 'SessionStart', 90],
       ['main-thread.mjs', 'PreToolUse', 10],
       ['stop.mjs', 'Stop', 10],
-      ['prompt-log.mjs', 'UserPromptSubmit', 30000],
+      ['prompt-log.mjs', 'UserPromptSubmit', 30],
     ]);
+  });
+
+  it('所有钩子超时按秒写，不超过 600（写成毫秒是 30000 这种数）', () => {
+    for (const hook of PROCESS_HOOKS) expect(hook.timeout).toBeLessThanOrEqual(600);
   });
 
   it('空设置加上 process：五条命令都指向安装目录，不指向别的仓的 agents/hooks', () => {
@@ -145,7 +149,7 @@ describe('订阅目录（决定 0085）', () => {
     expect(scriptsOf(next).filter((name) => name === 'bootstrap.mjs')).toEqual(['bootstrap.mjs']);
     const added = next.hooks?.UserPromptSubmit?.[0]?.hooks[0];
     expect(added?.command).toBe(lib.commandFor(HOOKS, 'prompt-log.mjs'));
-    expect(added?.timeout).toBe(30000);
+    expect(added?.timeout).toBe(30);
   });
 
   it('没标记不给空设置造 hooks；有标记再拿掉，过程钩子没了，别人的钩子还在', () => {

@@ -5,7 +5,7 @@
 // 原来的第 2 条「前台派子代理就拒」由决定 0089（规则减法，创始人 2026-10-13 17:54）删掉：两天 0 次命中，规矩留在文字里。
 // 子代理里的调用（输入带 agent_id）不管。transcript 读不了：放行，但用 systemMessage 明说没查成，不当成没有引导。
 // 创始人 2026-10-10 13:02 选定（「都按你的推荐来。」）。
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -228,6 +228,21 @@ describe('读不了 transcript：放行，但明说没查成', () => {
     const v = check('不是 JSON');
     expect(v.deny).toBeUndefined();
     expect(v.notice).toMatch(/^引导检查没查成：/);
+  });
+});
+
+describe('往回读到上限还认不出引导', () => {
+  it('10MB 全是工具调用、没有文字的记录（引导在最前面、超出 4MB 上限）：判成没有待回的引导，不报没查成', () => {
+    const pad = 'x'.repeat(1000);
+    const rows: Row[] = [row.directive('很早以前的引导')];
+    for (let i = 0; i < 8500; i += 1) {
+      rows.push(row.toolUse(`m${i}`, `t${i}`), row.result(`t${i}`, pad));
+    }
+    const file = transcript(rows);
+    expect(statSync(file).size).toBeGreaterThan(10 * 1024 * 1024);
+    const v = check(input(file));
+    expect(v.deny).toBeUndefined();
+    expect(v.notice).toBeUndefined();
   });
 });
 

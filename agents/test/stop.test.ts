@@ -72,14 +72,14 @@ describe('repoRoot', () => {
 });
 
 describe('tempFilesAtRoot', () => {
-  it('仓根的截图、导出、日志：没跟踪的都报出来', () => {
+  it('仓根的截图、日志：没跟踪的都报出来', () => {
     const dir = repo();
     writeFileSync(join(dir, 'shot.png'), 'x');
-    writeFileSync(join(dir, 'export.json'), '{}');
+    writeFileSync(join(dir, 'shot2.webp'), 'x');
     writeFileSync(join(dir, 'run.log'), 'x');
-    writeFileSync(join(dir, 'notes.txt'), 'x');
+    writeFileSync(join(dir, 'other.jpg'), 'x');
     const names = hook.tempFilesAtRoot(dir, hook.gitRunner());
-    expect(names?.sort()).toEqual(['export.json', 'notes.txt', 'run.log', 'shot.png']);
+    expect(names?.sort()).toEqual(['other.jpg', 'run.log', 'shot.png', 'shot2.webp']);
   });
 
   it('已经跟踪的（提交过、或已 git add）不报：不是「没跟踪」', () => {
@@ -93,8 +93,8 @@ describe('tempFilesAtRoot', () => {
     const dir = repo();
     writeFileSync(join(dir, '.gitignore'), '*.png\n');
     writeFileSync(join(dir, 'shot.png'), 'x');
-    writeFileSync(join(dir, 'export.json'), '{}');
-    expect(hook.tempFilesAtRoot(dir, hook.gitRunner())).toEqual(['export.json']);
+    writeFileSync(join(dir, 'shot2.webp'), 'x');
+    expect(hook.tempFilesAtRoot(dir, hook.gitRunner())).toEqual(['shot2.webp']);
   });
 
   it('子目录里的不报：只看仓根这一层，不进 _tmp/ 之外的目录深挖', () => {

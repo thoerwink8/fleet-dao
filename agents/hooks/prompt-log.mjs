@@ -6,7 +6,7 @@
 // 不经过模型、不依赖那一轮活不活得下来，所以那份留痕跟会话的死活无关。
 //
 // 挂法：Claude Code 的 UserPromptSubmit 事件（不吃 matcher，永远是整条消息）。登记在 fleet-dao 仓的
-// .claude/settings.json（项目级，决定 0083），不装进用户级设置。超时按毫秒，项目设置里写 30000。
+// .claude/settings.json（项目级，决定 0083），不装进用户级设置。超时按秒（Claude Code 的 hook timeout 单位是秒），项目设置里写 30。
 //
 // 改这里之前必须知道：
 // - **只落盘，绝不插话、绝不拦**：正常路径 exit 0 且一个字符都不往 stdout 打。绝不 exit 2、

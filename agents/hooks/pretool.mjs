@@ -2170,10 +2170,10 @@ export function decide(raw, fallbackCwd = '') {
   }
   // 2026-10-05 撞过：git reset --hard 把主检出一份还没验证的活回滚丢了。限制 fleet 仓的 Bash/PowerShell
   // 两条钩子管得着的壳，和「不用 git stash」那条并列。要回滚先提交个工作分支再 reset；
-  // 想放下不要的活用 `git diff > 文件` 或 `git stash push -u -m '<tag>'`（stash 栈的坑见上一条，别合并到它）。
+  // 想放下不要的活先 `git diff > _tmp/xxx.patch` 留底，或提交到自己分支（stash 被上一条拦，别指给人用）。
   if (inFleet && /\bgit\b[^|;&\n]*\sreset\b[^|;&\n]*\s--hard\b/.test(cmd)) {
     return block(
-      "fleet-dao 里不用 git reset --hard：会把工作区覆盖掉，过去把主检出还没验证的活丢过。要回滚某个提交：先把当前进度 `git commit` 到分支或工作树，要丢弃改动用 `git stash push -u -m '<tag>'`，或先 `git diff > 文件` 再决定要不要真扔。",
+      'fleet-dao 里不用 git reset --hard：会把工作区覆盖掉，过去把主检出还没验证的活丢过。要回滚某个提交：先把当前进度 `git commit` 到分支或工作树，要丢弃改动先 `git diff > _tmp/xxx.patch` 留底，或提交到自己分支，再决定要不要真扔。',
     );
   }
   if (listing && kind !== 'shell') {

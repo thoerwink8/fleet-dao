@@ -19,7 +19,7 @@ import { gitRunner, gitOk as ok } from './git-run.mjs';
 import { cleanId, decideStop, isMachineSession, runningWorkers, stateDir } from './unattended.mjs';
 
 /** 仓根里一眼像临时文件的：截图、导出的数据、日志（AGENTS.md 通用段「放 _tmp/」那条列的几类） */
-const TEMP_LIKE = /\.(png|jpe?g|gif|json|log|txt)$/i;
+const TEMP_LIKE = /\.(png|jpe?g|gif|webp|log)$/i;
 
 /** 收尾钩子跑 git 的超时：只读本地两条，多等无益 */
 export const STOP_GIT_MS = 5_000;
