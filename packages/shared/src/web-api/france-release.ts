@@ -1,7 +1,7 @@
-// 法国发版一键（/france 页 #618）：这一台后端自己读的 release-train 状态 + 点「发版预检」由后端进程内读事实算（#2021，不起子进程）。
-// 只到预检；不发版。这里只定义能给页面看的形状：状态三态（在走/暂停中/没在走、读不到），预检一次一回（说明、退出码、输出、读了多久）。
+// 法国发版一键（/france 页 #618）：这一台后端自己跑的 release-train 状态 + 点「发版预检」在进程内读七项事实。
+// 只到预检；不发版。这里只定义能给页面看的形状：状态三态（在走/暂停中/没在走、读不到），预检一次一回（退出码、一项一行的输出、读了多久）。
 // 每一项各自带「查成了 / 没查成 + 原因」（同 env 页的 EnvFact）；读不到就写读不到，不拿空、0 或假 ok 顶（仓的底线）。
-// 这一节只在正式环境接得上（法国上的后端：读发布目录、进度记录目录和引擎的 drain.json）；
+// 这一节只在正式环境接得上（驾驶舱后端真的起在一份检出的仓里、~/.fleet-dao/ 下有 release-train 的状态文件）；
 // 开发、内存版后端 deps 没挂上时一律回 unreadable，页面画「没查成 + 原因」，不显示假数据。
 import { z } from 'zod';
 import { Time } from './internal.ts';
@@ -37,9 +37,9 @@ export const FranceReleaseStateSchema = z.discriminatedUnion('state', [
 ]);
 
 /**
- * 发版预检一次一回：后端自己读事实算（france-preflight.ts；不起子进程、不收参数）。
- * command：给人看的一句说明（没有命令可显示）。code：0 = 能发；2 = 不能发（有项卡住，什么都没改）。
- * stdout 每项一行（[通过] / [卡住] / [留意]）加结论；stderr 只列卡住的那几项。timedOut、truncated 保留给形状不变，现在恒为 false。
+ * 发版预检一次一回：后端进程内读七项事实，一项一行写在 stdout（通过 / 卡住 / 留意，读不到写原因）。不起子进程。
+ * code：0 = 能发；2 = 不能发。command 是「进程内读事实」，不是一条壳命令。
+ * 没接上（开发、内存版）走 unreadable。timedOut、truncated 这版固定是 false（不再有子进程超时和截断）。
  */
 export const FrancePreflightResponseSchema = z.discriminatedUnion('state', [
   z.object({
@@ -49,14 +49,14 @@ export const FrancePreflightResponseSchema = z.discriminatedUnion('state', [
     signal: z.string().nullable(),
     stdout: z.string(),
     stderr: z.string(),
-    /** 后端 ms 单位的耗时（前端给一个「跑了 12 秒」的小字）。 */
+    /** 后端 ms 单位的耗时（前端写成「用了 N 秒」）。 */
     durationMs: z.number().int().min(0),
-    /** 保留的字段：后端不再起子进程，恒为 false。 */
+    /** 这版预检不起子进程，固定 false。字段留着，旧页面还认这个形状。 */
     timedOut: z.boolean(),
     truncated: z.boolean(),
     asOf: Time,
   }),
-  /** 没接上这一节（开发、内存版）：读不到预检要用的东西，写原因。 */
+  /** 这台后端没接发版预检（开发、内存版）。 */
   z.object({ state: z.literal('unreadable'), why: z.string(), asOf: Time }),
 ]);
 

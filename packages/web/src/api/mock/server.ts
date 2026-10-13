@@ -3753,35 +3753,33 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     async francePreflight() {
       await wait();
-      // 假数据：照真预检的样子给一份，但每行都写明是演示。真的预检只在法国那台的后端里有。
-      // 发布按钮能点（默认）时给一份「能发」的；mockRelease=blocked 时给一份有卡住项的（确认框里确认键灰着，#2026 截图用）。
-      // mockRelease=preflight-blocked：按钮能点、预检有卡住项（确认框里确认键灰着的样子）
-      const blocked =
-        mockReleaseAction().state !== 'ready' ||
-        (typeof localStorage !== 'undefined' && localStorage.getItem('mockRelease') === 'preflight-blocked');
+      // 默认装作这台后端没接上发版预检（#2024：假后端不给假的七项）。截图、手点用：localStorage 的 mockRelease 写
+      // preflight-ok 给一份「能发」的演示清单，写 preflight-blocked 给一份有卡住项的（确认框里确认键灰着，#2026）。每行都写明是演示。
+      const mode = typeof localStorage !== 'undefined' ? localStorage.getItem('mockRelease') : null;
+      if (mode !== 'preflight-ok' && mode !== 'preflight-blocked') {
+        return FrancePreflightResponseSchema.parse({
+          state: 'unreadable',
+          why: '这是假后端：发版预检只在法国那台的驾驶舱上读得到',
+          asOf: iso(),
+        });
+      }
+      const blocked = mode === 'preflight-blocked';
       const lines = [
-        '[通过] 主线 CI：绿（演示数据）',
-        '[通过] 落后几个：法国落后主线 7 个提交，有东西可发（演示数据）',
-        '[通过] 别的发布：没有在走的（演示数据）',
-        blocked
-          ? '[卡住] 发版接活单元：法国还没装（演示数据）'
-          : '[通过] 发版接活单元：法国上装着（演示数据）',
-        '[留意] 引擎总开关：开着（发版会先关、发完恢复到发版前）（演示数据）',
-        '[留意] 法国在跑的会话：2 个（发版会等它们收尾）（演示数据）',
+        '主线头和 CI：通过 绿（演示数据）',
+        '法国在用提交：通过 提交 6896b3cb4d2e（演示数据）',
+        '落后几个：通过 落后 7 个提交（演示数据）',
+        '别的发布是否在走：通过 没有在走的（演示数据）',
+        blocked ? '发版接活单元：卡住 法国还没装（演示数据）' : '发版接活单元：通过 装了（演示数据）',
+        '引擎总开关：通过 开着，发版会先关、发完恢复到发版前（演示数据）',
+        '法国在跑的会话数：留意 2 个，发版会等它们收尾（演示数据）',
       ];
-      const stuck = lines.filter((l) => l.startsWith('[卡住]'));
       return FrancePreflightResponseSchema.parse({
         state: 'done',
-        command: '后端自己读事实（不起任何进程）',
-        code: stuck.length > 0 ? 2 : 0,
+        command: '进程内读事实',
+        code: blocked ? 2 : 0,
         signal: null,
-        stdout: [
-          '—— 发版预检（演示数据）——',
-          ...lines,
-          stuck.length > 0 ? `结论：不能发（${stuck.length} 项卡住）。` : '结论：能发。',
-          '',
-        ].join('\n'),
-        stderr: stuck.length > 0 ? `${stuck.join('\n')}\n` : '',
+        stdout: `${lines.join('\n')}\n`,
+        stderr: '',
         durationMs: 12,
         timedOut: false,
         truncated: false,

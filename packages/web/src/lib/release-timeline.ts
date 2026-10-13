@@ -133,13 +133,29 @@ export function lastLine(
 
 export type PreflightKind = 'ok' | 'block' | 'info';
 
-/** 预检输出（stdout）里带 [通过] / [卡住] / [留意] 的那几行；别的行（标题、结论）不要。 */
+const KIND_OF: Record<string, PreflightKind> = { 通过: 'ok', 卡住: 'block', 读不到: 'block', 留意: 'info' };
+
+/**
+ * 预检输出（stdout）里一项一行的那几行（packages/api/src/france-preflight.ts 的 renderPreflight：「名字：等级 详情」，
+ * 等级是 通过 / 卡住 / 留意 / 读不到，读不到算卡住）；老写法「[通过] 详情」也认。别的行（标题、结论）不要。
+ */
 export function preflightItems(stdout: string): { kind: PreflightKind; text: string }[] {
   const out: { kind: PreflightKind; text: string }[] = [];
-  for (const line of stdout.split(/\r?\n/)) {
-    const m = /^\[(通过|卡住|留意)\]\s*(.*)$/.exec(line.trim());
+  for (const raw of stdout.split(/\r?\n/)) {
+    const line = raw.trim();
+    const old = /^\[(通过|卡住|留意)\]\s*(.*)$/.exec(line);
+    if (old) {
+      out.push({ kind: KIND_OF[old[1] ?? ''] ?? 'block', text: old[2] ?? '' });
+      continue;
+    }
+    const m = /^([^：]+)：(通过|卡住|留意|读不到)(?:\s+(.*))?$/.exec(line);
     if (!m) continue;
-    out.push({ kind: m[1] === '通过' ? 'ok' : m[1] === '卡住' ? 'block' : 'info', text: m[2] ?? '' });
+    const level = m[2] ?? '';
+    const detail = m[3] ?? '';
+    out.push({
+      kind: KIND_OF[level] ?? 'block',
+      text: `${m[1]}：${level === '读不到' ? '读不到，' : ''}${detail}`,
+    });
   }
   return out;
 }

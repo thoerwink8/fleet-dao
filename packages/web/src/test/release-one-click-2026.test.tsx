@@ -276,7 +276,20 @@ describe('发后体检和「上一趟发完了」的说法', () => {
     expect(document.querySelector('[data-release-timeline]')).toBeNull();
   });
 
-  test('preflightItems：只收带 [通过]/[卡住]/[留意] 的行', () => {
+  test('preflightItems：后端「名字：等级 详情」一项一行，读不到算卡住', () => {
+    expect(
+      preflightItems(
+        '主线头和 CI：通过 绿（2005b290aaaa）\n别的发布是否在走：卡住 有一趟在走\n引擎总开关：留意 关着。发完保持关\n法国在跑的会话数：读不到 drain.json 读不成\n',
+      ),
+    ).toEqual([
+      { kind: 'ok', text: '主线头和 CI：绿（2005b290aaaa）' },
+      { kind: 'block', text: '别的发布是否在走：有一趟在走' },
+      { kind: 'info', text: '引擎总开关：关着。发完保持关' },
+      { kind: 'block', text: '法国在跑的会话数：读不到，drain.json 读不成' },
+    ]);
+  });
+
+  test('preflightItems：老写法 [通过]/[卡住]/[留意] 也认', () => {
     expect(
       preflightItems('—— 发版预检 ——\n[通过] a\n[卡住] b\n[留意] c\n结论：不能发（1 项卡住）。\n'),
     ).toEqual([

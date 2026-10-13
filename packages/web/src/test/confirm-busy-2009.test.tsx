@@ -92,6 +92,20 @@ describe('确认发布：后端慢时连点只发一次，等的时候转圈、�
       env: () => Promise.resolve(envOk()),
       jobs: () => Promise.resolve({ asOf: ASOF, jobs: [] } satisfies Jobs),
       franceReleaseCard: () => Promise.resolve(card()),
+      // 弹窗一打开现跑预检（#2026）：给一份全过的，确认键才能点（假后端默认回「没接上」）
+      francePreflight: () =>
+        Promise.resolve({
+          state: 'done' as const,
+          command: '进程内读事实',
+          code: 0,
+          signal: null,
+          stdout: '主线头和 CI：通过 绿\n',
+          stderr: '',
+          durationMs: 5,
+          timedOut: false,
+          truncated: false,
+          asOf: ASOF,
+        }),
       franceRelease: (sha: string) => {
         calls.push(sha);
         return d.promise.then(() => ({ requested: true, sha, at: ASOF }));

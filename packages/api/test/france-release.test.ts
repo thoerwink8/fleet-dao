@@ -1,13 +1,34 @@
-// /api/france/release-state（#618 发版一键）：读 state 文件 + 暂停标记，三态各画各的；读不到一律 unreadable 写明原因。
-// 发版预检在 france-preflight.test.ts（#2021：后端进程内读事实，不起子进程）。
-// 故意造出的失败都写明原因，不拿「没在走」顶：读文件抛错、JSON 认不出。
-// 也测引擎会话数的读法（drain.json 认得出 / 认不出 / 进程已不在）。
-import { FranceReleaseStateSchema, WEB_API_PREFIX } from '@fleet-dao/shared';
-import { describe, expect, it } from 'vitest';
-import { type FranceReleasePort, parseEngineDrain } from '../src/france-release.ts';
+// /api/france/release-state 和 /api/france/preflight（#618 发版一键）：
+// - release-state：读 state 文件 + 暂停标记，三态各画各的；读不到一律 unreadable 写明原因。
+// - preflight：进程内读七项事实（france-preflight.test.ts 逐项覆盖）。这里只钉接口：接上了就回退出码和一行一项，没接上回没接上。
+// 故意造出的失败都写明原因，不拿「没在走」「能发」顶。
+
+import { FrancePreflightResponseSchema, FranceReleaseStateSchema, WEB_API_PREFIX } from '@fleet-dao/shared';
+import { describe, expect, it, vi } from 'vitest';
+
+const procCalls = vi.hoisted(() => ({ execFile: 0, spawn: 0 }));
+
+vi.mock('node:child_process', async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  return {
+    ...actual,
+    execFile: (...args: unknown[]) => {
+      procCalls.execFile += 1;
+      return (actual.execFile as (...a: unknown[]) => unknown)(...args);
+    },
+    spawn: (...args: unknown[]) => {
+      procCalls.spawn += 1;
+      return (actual.spawn as (...a: unknown[]) => unknown)(...args);
+    },
+  };
+});
+
+import { PREFLIGHT_LABEL, PREFLIGHT_NOT_WIRED, type PreflightReaders } from '../src/france-preflight.ts';
+import type { FranceReleasePort } from '../src/france-release.ts';
 import { type Harness, harness } from './harness.ts';
 
 const STATE_PATH = `${WEB_API_PREFIX}/france/release-state`;
+const PREFLIGHT_PATH = `${WEB_API_PREFIX}/france/preflight`;
 
 /** 状态文件的替身：默认两个文件都不在（没在走）。 */
 function port(over: Partial<FranceReleasePort> = {}): FranceReleasePort {
@@ -15,10 +36,19 @@ function port(over: Partial<FranceReleasePort> = {}): FranceReleasePort {
     async readStateFiles() {
       return { stateJson: null, marker: false };
     },
-    async readEngineSessions() {
-      return { ok: true, running: 0, names: [], engineDown: false };
-    },
     ...over,
+  };
+}
+
+function passing(): PreflightReaders {
+  return {
+    mainline: async () => ({ short: 'abcdef123456', title: '刷新耗时表', ci: 'green', ciDetail: '' }),
+    deployed: async () => ({ short: 'bbbbbbbbbbbb', title: '上一版' }),
+    gap: async () => ({ kind: 'ahead', count: 3 }),
+    other: async () => ({ kind: 'clear', detail: '没有别的发布在走' }),
+    receiver: async () => ({ installed: true }),
+    master: async () => ({ on: true, detail: '开着' }),
+    sessions: async () => ({ count: 0, engineDown: false }),
   };
 }
 
@@ -31,6 +61,15 @@ async function readState(h: Harness) {
   const res = await h.cockpit.request(STATE_PATH, { headers: { cookie } });
   expect(res.status).toBe(200);
   return FranceReleaseStateSchema.parse(await res.json());
+}
+
+async function postPreflight(h: Harness) {
+  const { cookie, csrf } = await h.login();
+  const res = await h.cockpit.request(PREFLIGHT_PATH, {
+    method: 'POST',
+    headers: { cookie, 'x-csrf-token': csrf },
+  });
+  return { status: res.status, body: FrancePreflightResponseSchema.parse(await res.json()) };
 }
 
 describe('/api/france/release-state', () => {
@@ -167,47 +206,41 @@ describe('/api/france/release-state', () => {
   });
 });
 
-describe('parseEngineDrain（引擎手上的会话，读 drain.json）', () => {
-  const alive = () => true;
-  const file = (o: object) => JSON.stringify({ schema: 2, pid: 4242, sessions: [], ...o });
-
-  it('读到了：数会话、带环节和编号前 8 位', () => {
-    const r = parseEngineDrain(
-      file({
-        sessions: [
-          { runId: 'abcdef1234567890', stage: 'worker' },
-          { runId: '1234567890ab', stage: '' },
-        ],
-      }),
-      alive,
-    );
-    expect(r).toEqual({
-      ok: true,
-      running: 2,
-      names: ['worker(abcdef12)', '会话(12345678)'],
-      engineDown: false,
-    });
+describe('/api/france/preflight', () => {
+  it('七项都读到且能发：code=0、一项一行、不起子进程', async () => {
+    const before = { ...procCalls };
+    const { status, body } = await postPreflight(harness({ francePreflight: () => passing() }));
+    expect(status).toBe(200);
+    expect(body.state).toBe('done');
+    if (body.state !== 'done') throw new Error('该是 done');
+    expect(body.command).toBe(PREFLIGHT_LABEL);
+    expect(body.code).toBe(0);
+    expect(body.stdout).toContain('主线头和 CI：通过');
+    expect(body.stdout).toContain('法国在跑的会话数：通过 0 个');
+    expect(body.stderr).toBe('');
+    expect(body.timedOut).toBe(false);
+    expect(body.signal).toBeNull();
+    expect(procCalls.execFile).toBe(before.execFile);
+    expect(procCalls.spawn).toBe(before.spawn);
   });
 
-  it('引擎进程已经不在：0 个、标引擎没在跑', () => {
-    expect(parseEngineDrain(file({}), () => false)).toEqual({
-      ok: true,
-      running: 0,
-      names: [],
-      engineDown: true,
-    });
+  it('一项读不到：code=2，那一行写读不到和原因，别的行还在', async () => {
+    const readers = passing();
+    readers.mainline = async () => {
+      throw new Error('EACCES: 读不了主线');
+    };
+    const { body } = await postPreflight(harness({ francePreflight: () => readers }));
+    expect(body.state).toBe('done');
+    if (body.state !== 'done') throw new Error('该是 done');
+    expect(body.code).toBe(2);
+    expect(body.stdout).toContain('主线头和 CI：读不到 EACCES: 读不了主线');
+    expect(body.stdout).toContain('发版接活单元：通过 装了');
   });
 
-  it('读不到：不是 JSON、schema 不对、没写进程号，都回 ok:false + 原因，不当成 0 个', () => {
-    for (const text of [
-      '{oops',
-      JSON.stringify({ schema: 1, pid: 1 }),
-      'null',
-      JSON.stringify({ schema: 2 }),
-    ]) {
-      const r = parseEngineDrain(text, alive);
-      expect(r.ok, text).toBe(false);
-      if (!r.ok) expect(r.why).toContain('drain.json');
-    }
+  it('这台后端没接上发版预检：unreadable，写明到法国那台才有这颗按钮', async () => {
+    const { body } = await postPreflight(harness({}));
+    expect(body.state).toBe('unreadable');
+    if (body.state !== 'unreadable') throw new Error('该是 unreadable');
+    expect(body.why).toBe(PREFLIGHT_NOT_WIRED);
   });
 });

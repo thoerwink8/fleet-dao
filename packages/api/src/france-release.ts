@@ -1,12 +1,8 @@
-// 法国发版一键（/france 页 #618）：这一台后端自己替页面做两件事——
-// 1. GET /api/france/release-state：读 release-train 的进度记录和暂停标记，判断 release-train 此刻在走 / 暂停 / 没在走。
-//    读不到一律回 unreadable，不拿「没在走」顶（机底线）。
-// 2. POST /api/france/preflight：「发版预检」，在 france-preflight.ts（后端进程内直接读事实算，不起任何子进程、不碰 home；#2021）。
+// 法国发版一键（/france 页 #618）的进度：GET /api/france/release-state 读 release-train 的记录和暂停标记，
+// 判断这一趟在走 / 暂停 / 没在走。读不到一律回 unreadable，不拿「没在走」顶。
+// 「发版预检」不在这里起进程：见 france-preflight.ts，进程内读事实，不读 home。
 //
-// 读文件这一块包成 port（FranceReleasePort），deps 里给。这样：
-// - 单测（france-release.test.ts）换假的读文件，不真靠 home；
-// - 开发、内存版后端 deps 没给时接口照样回，写明「没接上」，不拿「没在走」「预检过了」顶。
-//
+// 读进度包成 FranceReleasePort，deps 里给。单测换假的读文件。开发、内存版没给时接口回没接上。
 // 形状约定见 packages/shared/src/web-api/france-release.ts。
 
 import { existsSync } from 'node:fs';
@@ -25,54 +21,14 @@ const MARKER_REL = join('.fleet-dao', 'release-train.paused');
 /** 法国上驾驶舱按钮那一趟（root 的 fleet-release-request 单元）写进度的地方（归 root，后端只读）：有就读它，没有才读本机 ~。 */
 export const TRAIN_DIR = '/srv/fleet-dao-releases/.train';
 
-/** 引擎手上在干的会话（drain.json 里那份）：读到了给个数和名字；读不到带原因，不当成 0 个。 */
-export type EngineSessions =
-  | { ok: true; running: number; names: string[]; engineDown: boolean }
-  | { ok: false; why: string };
-
-/** 引擎写排空状态的目录（同 release.sh 的 ENGINE_STATE_DEFAULT；engine.env 里 FLEET_ENGINE_STATE_DIR 没写时就是它，后端不读 engine.env）。 */
-export const ENGINE_STATE_DIR = '/var/lib/fleet-dao/engine';
-
 /**
- * drain.json 的内容读成在跑的会话（引擎权威口径，packages/engine/src/drain.ts 的 drainStatus；同 deploy/france/release-request/lib.mjs 的 parseDrain）。
- * 起会话过了闸才登记，探针这类辅助命令不登记，所以这里数的就是真在干的活。
- * pid 已经不在 = 引擎没在跑（手上没有会话）；pid 在、文件认不出 = 读不到，不当成 0 个。
- */
-export function parseEngineDrain(text: string, isAlive: (pid: number) => boolean): EngineSessions {
-  let st: { schema?: unknown; pid?: unknown; sessions?: unknown };
-  try {
-    st = JSON.parse(text) as typeof st;
-  } catch (e) {
-    return { ok: false, why: `drain.json 认不出：${errMessage(e)}` };
-  }
-  if (st === null || typeof st !== 'object' || st.schema !== 2) {
-    return {
-      ok: false,
-      why: `drain.json 的 schema 不是 2（${JSON.stringify((st as { schema?: unknown } | null)?.schema)}）`,
-    };
-  }
-  if (typeof st.pid !== 'number' || !Number.isInteger(st.pid) || st.pid <= 0) {
-    return { ok: false, why: 'drain.json 里没写引擎的进程号' };
-  }
-  if (!isAlive(st.pid)) return { ok: true, running: 0, names: [], engineDown: true };
-  const list = Array.isArray(st.sessions) ? (st.sessions as { runId?: unknown; stage?: unknown }[]) : [];
-  const names = list.map((x) => {
-    const stage = typeof x?.stage === 'string' && x.stage !== '' ? x.stage : '会话';
-    const run = typeof x?.runId === 'string' ? x.runId.slice(0, 8) : '';
-    return `${stage}(${run})`;
-  });
-  return { ok: true, running: names.length, names, engineDown: false };
-}
-
-/**
- * 一台后端的「读 release-train 状态 + 读引擎会话」接口。生产（main.ts 正式装配）给真实现：
- * 读的都是文件，不起子进程（后端的 systemd 单元沙箱里没有 home、不起进程，#2021）。
+ * 一台后端的「读 release-train 状态」接口。生产（main.ts 正式装配）给真实现：
+ * 法国上 root 写的进度目录优先；没有才看当前用户的 ~（指挥官在本机跑 release-train 的）。
+ * 发版预检不走这里：那条会碰到 home，法国后端 ProtectHome 读不了。
  */
 export interface FranceReleasePort {
   /** 读两个状态文件、拼出这一刻那一趟的状态。读不到抛错，由 readFranceReleaseState 包成 unreadable。 */
   readStateFiles(): Promise<{ stateJson: string | null; marker: boolean }>;
-  /** 引擎手上在干几个会话（读 drain.json）；读不到给 { ok: false, why }。 */
-  readEngineSessions(): Promise<EngineSessions>;
 }
 
 interface ReleaseTrainStateFile {
@@ -237,7 +193,7 @@ export async function readFranceReleaseState(
 }
 
 export function registerFranceReleaseRoutes(app: Hono<CockpitEnv>, deps: Deps): void {
-  // WebRoutes 写在前端共享里，路径都在 /api 之下
+  // WebRoutes 写在前端共享里，路径都在 /api 之下。预检的 POST 在 france-preflight.ts。
   app.get('/france/release-state', async (c) =>
     reply(c, FranceReleaseStateSchema, await readFranceReleaseState(deps.franceRelease, deps.now)),
   );
@@ -245,11 +201,8 @@ export function registerFranceReleaseRoutes(app: Hono<CockpitEnv>, deps: Deps): 
 
 // —— 生产装配（main.ts 挂）用到的真实现 ——
 
-/** 真 port：状态文件优先读驾驶舱按钮那一趟的目录，没有再读本机 ~（后端在沙箱里时 ~ 读不到，existsSync 回 false、不报错）；会话数读引擎的 drain.json。 */
-export function liveFranceReleasePort(
-  trainDir: string = TRAIN_DIR,
-  engineStateDir: string = ENGINE_STATE_DIR,
-): FranceReleasePort {
+/** 真 port：法国上 root 写的进度目录优先；没有就看当前用户的 ~。发版预检不走这个 port。 */
+export function liveFranceReleasePort(trainDir: string = TRAIN_DIR): FranceReleasePort {
   const home = homedir();
   const statePath = join(home, STATE_REL);
   const markerPath = join(home, MARKER_REL);
@@ -261,23 +214,6 @@ export function liveFranceReleasePort(
       const statePick = existsSync(trainState) ? trainState : statePath;
       const stateJson = existsSync(statePick) ? await readFile(statePick, 'utf8') : null;
       return { stateJson, marker: existsSync(trainMarker) || existsSync(markerPath) };
-    },
-    async readEngineSessions() {
-      let text: string;
-      try {
-        text = await readFile(join(engineStateDir, 'drain.json'), 'utf8');
-      } catch (e) {
-        return { ok: false, why: `读 ${join(engineStateDir, 'drain.json')} 失败：${errMessage(e)}` };
-      }
-      return parseEngineDrain(text, (pid) => {
-        try {
-          process.kill(pid, 0);
-          return true;
-        } catch (e) {
-          // EPERM = 进程在、只是不归这个用户；只有 ESRCH 才是不在
-          return (e as NodeJS.ErrnoException).code === 'EPERM';
-        }
-      });
     },
   };
 }

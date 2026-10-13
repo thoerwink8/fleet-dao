@@ -52,6 +52,7 @@ import { readEngineMaster } from './engine-switch.ts';
 import { recordExternalWatchRound } from './external-watch.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { memoryCockpitAlerts, pgCockpitAlerts } from './feishu-alerts.ts';
+import { productionPreflightReaders } from './france-preflight.ts';
 import { liveFranceReleasePort } from './france-release.ts';
 import { createGatewaySeen, feishuGatewayPart } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
@@ -320,8 +321,8 @@ async function assemble(): Promise<{
     runTranscript: pgRunTranscript(db),
     // 环境页（#820 片 1）的版本那一项：正式环境读发布目录现算；别处不给，页面写「没查成」
     ...(production ? { deployLag: () => readDeployLagInput() } : {}),
-    // /france 页发版一键（#618）：读 release-train 进度记录和引擎的 drain.json，「发版预检」据此在进程内算（#2021，不起子进程）。
-    // 只在正式环境装：开发、内存版读的不是法国的东西，不装、接口回「没接上」。
+    // /france 页发版一键（#618）：读 release-train 进度。只在正式环境装。
+    // 开发、内存版不装，接口回「没接上」，免得本机的数被看成法国的。
     ...(production ? { franceRelease: liveFranceReleasePort() } : {}),
     // /france 页「发版」卡（#1231）：主线头、CI、PR 现读 GitHub（同一份机器人凭据），法国在用的提交读发布目录；只在正式环境装
     ...(production ? { releaseCard: liveReleaseCardPort(github.releaseFacts) } : {}),
@@ -357,6 +358,8 @@ async function assemble(): Promise<{
       nodeReport: nodeReportPart(nodeReporter),
     }),
   };
+  // 发版预检：进程内读七项事实。发版卡或发布请求没装上时这里给出的函数回 undefined，接口写没接上。
+  if (production) deps.francePreflight = () => productionPreflightReaders(deps);
   return {
     deps,
     // 库的大小（#1985）：资源页按目录的磁盘占用那一回里查，10 分钟一次
