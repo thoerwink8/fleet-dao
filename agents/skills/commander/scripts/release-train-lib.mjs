@@ -32,6 +32,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { KIND_ROUTE_STALE, KIND_TASK_IDLE, KIND_TASK_PARK, scrubText } from './france-lib.mjs';
 import {
   DEFAULT_LIMITS,
@@ -103,6 +104,8 @@ const tailOf = (r, n = 3) =>
       .slice(-n)
       .join(' / '),
   );
+/** 第 4 步 ssh 命令的字数上限（#2015）：Windows 一条命令行约 8191 字符，再留 ssh 自己的参数和余量。 */
+export const LAUNCH_COMMAND_MAX = 7500;
 /** 单引号包起来交给法国的 shell：里面的单引号写成 '\'' */
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
@@ -116,15 +119,21 @@ export function releaseBootCommand(sha) {
   return `bash -c ${shq(RELEASE_BOOT_SH)} fleet-release-boot ${sha}`;
 }
 /**
- * 第 4 步每个轮询周期 ssh 上去的命令（#1995）：release-launch.sh 整段 + 提交号 + 本趟令牌 + release-boot.sh（base64）。
+ * 第 4 步每个轮询周期 ssh 上去的命令（#1995）：release-launch.sh 整段 + 提交号 + 本趟令牌 + release-boot.sh（gzip 后 base64）。
  * 法国上由 systemd 临时服务跑 release-boot.sh（它再 exec 目标提交自带的 release.sh），ssh 断了发布照跑。
  * 令牌让同一趟里重发这条命令不会起第二个；换一趟（新的令牌）遇到服务还在跑就接着看，不起第二个。
  */
 export function releaseLaunchCommand(sha, token) {
   if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new Error(`发版不接受这个提交号：${sha}`);
   if (!/^[A-Za-z0-9]{1,40}$/.test(token)) throw new Error(`发版令牌不合格式：${token}`);
-  const b64 = Buffer.from(RELEASE_BOOT_SH, 'utf8').toString('base64');
-  return `bash -c ${shq(RELEASE_LAUNCH_SH)} fleet-release-launch ${sha} ${token} ${b64}`;
+  const b64 = gzipSync(Buffer.from(RELEASE_BOOT_SH, 'utf8'), { level: 9 }).toString('base64');
+  const command = `bash -c ${shq(RELEASE_LAUNCH_SH)} fleet-release-launch ${sha} ${token} ${b64}`;
+  // Windows 一条命令行约 8191 字符封顶，超了 ssh 收到的是被截断的（#2015）。留余量，超了当场报错，不悄悄送半截。
+  if (command.length > LAUNCH_COMMAND_MAX)
+    throw new Error(
+      `发版命令 ${command.length} 字，超过 ${LAUNCH_COMMAND_MAX}（Windows 命令行约 8191 字符，超了会被截断）：release-launch.sh 或 release-boot.sh 太长了，要改成走标准输入送`,
+    );
+  return command;
 }
 
 /**

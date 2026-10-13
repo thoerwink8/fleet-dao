@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runChild } from './child.ts';
 
@@ -12,7 +13,7 @@ const SCRIPT = fileURLToPath(new URL('../skills/commander/scripts/release-launch
 const SHA = 'ab12cd34'.repeat(5);
 const UNIT = `fleet-train-release-${SHA.slice(0, 12)}`;
 const BOOT = '#!/usr/bin/env bash\necho 假的 release-boot\n';
-const B64 = Buffer.from(BOOT, 'utf8').toString('base64');
+const B64 = gzipSync(Buffer.from(BOOT, 'utf8')).toString('base64');
 
 const dirs: string[] = [];
 afterEach(() => {
