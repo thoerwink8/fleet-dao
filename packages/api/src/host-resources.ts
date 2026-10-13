@@ -34,6 +34,8 @@ export const AGENT_SLICE_PATH = 'fleet.slice/fleet-agents.slice';
 
 const SCOPE_RE = /^fleet-agent-(.+)\.scope$/;
 const MIB = 1024 * 1024;
+/** 字节 → MiB：真读到的不到 1M 往上记 1M，只有真的 0 才是 0（#1992：不把小读数四舍五入成 0）。 */
+const toMb = (bytes: number): number => (bytes > 0 ? Math.max(1, Math.round(bytes / MIB)) : 0);
 
 export interface StatfsResult {
   bsize: number;
@@ -168,6 +170,8 @@ async function readDisk(deps: HostReadDeps): Promise<HomeResources['disk']> {
 
 type UnitRead =
   | { kind: 'off' }
+  /** cgroup 还在、memory.current 是 0：里面没进程，不算在跑（#1992）。 */
+  | { kind: 'empty'; why: string }
   | { kind: 'ok'; memoryBytes: number; maxBytes?: number; usec: number }
   | { kind: 'unread'; why: string };
 
@@ -191,6 +195,12 @@ async function readUnit(deps: HostReadDeps, cgroup: string): Promise<UnitRead> {
       deps.readText(file('cpu.stat')),
     ]);
     const memoryBytes = parseBytes(current, file('memory.current'));
+    if (memoryBytes === 0) {
+      return {
+        kind: 'empty',
+        why: `${cgroup} 的 cgroup 还在，但 memory.current 是 0：里面没有进程，不算在跑`,
+      };
+    }
     const maxBytes = maxText.trim() === 'max' ? undefined : parseBytes(maxText, file('memory.max'));
     const usec = parseCpuUsageUsec(cpuText);
     return { kind: 'ok', memoryBytes, ...(maxBytes === undefined ? {} : { maxBytes }), usec };
@@ -249,7 +259,11 @@ async function readApps(
               ? undefined
               : cpuCores + (r.usec - before) / (elapsedMs * 1000);
         });
-        if (running === 0) return app.idleNote ? { state: 'idle', why: app.idleNote } : { state: 'idle' };
+        if (running === 0) {
+          const empty = reads.find((r) => r.kind === 'empty');
+          if (empty?.kind === 'empty') return { state: 'idle', why: empty.why };
+          return app.idleNote ? { state: 'idle', why: app.idleNote } : { state: 'idle' };
+        }
         return {
           state: 'ok',
           running,
@@ -348,10 +362,20 @@ async function readScope(
       }),
       deps.readText(file('cpu.stat')),
     ]);
-    const memoryMb = Math.round(parseBytes(current, file('memory.current')) / MIB);
-    const peak =
-      peakText === undefined ? undefined : Math.round(parseBytes(peakText, file('memory.peak')) / MIB);
+    const bytes = parseBytes(current, file('memory.current'));
     const usec = parseCpuUsageUsec(cpuText);
+    // 跑着的会话不可能 0（#1992）：scope 还在、里面没进程，明说成 empty，不报 ok 的 0
+    if (bytes === 0) {
+      return {
+        usage: {
+          state: 'empty',
+          why: `${dir} 还在，但 memory.current 是 0：里面没有进程（会话已收场、scope 没回收），不算在跑`,
+        },
+        usec,
+      };
+    }
+    const memoryMb = toMb(bytes);
+    const peak = peakText === undefined ? undefined : toMb(parseBytes(peakText, file('memory.peak')));
     const cpuPercent =
       prevUsec !== undefined && usec >= prevUsec && elapsedMs > 0
         ? Math.round(((usec - prevUsec) / (elapsedMs * 1000)) * 1000) / 10

@@ -199,6 +199,38 @@ describe('每个上线项目一行', () => {
     ]);
   });
 
+  test('【故意造出读到 0】空 scope（里面没进程）不算会话、不进合计；只剩空 scope 的那一组写「空 scope」，不写 0M / 0 核', () => {
+    const base = resources();
+    const why = 'scope 还在，但 memory.current 是 0';
+    const r = resources({
+      sessions: {
+        state: 'ok',
+        byRun: {
+          ...(base.sessions.state === 'ok' ? base.sessions.byRun : {}),
+          'mirasim-a': { state: 'empty', why },
+          'mirasim-b': { state: 'empty', why },
+          r9: { state: 'empty', why },
+        },
+      },
+    });
+    const rows = rowsOf(r, [running('acme/a', ['r2']), running('acme/c', ['r9'])]);
+    const kids = Object.fromEntries((rows.sessions?.children ?? []).map((c) => [c.name, c]));
+    // 真有的数照写；「别的会话」是 r1 + probe 两个，两个空 scope 不算进会话数、不进合计
+    expect(kids['acme/a']).toMatchObject({ sessions: 1, memory: { kind: 'ok', text: '300M' } });
+    expect(kids['别的会话（路由探针、对不上单的）']).toMatchObject({
+      sessions: 2,
+      emptyScopes: 2,
+      memory: { kind: 'ok', text: '600M' },
+    });
+    // 只剩空 scope 的仓：写「空 scope」带原因，0 个会话在跑
+    expect(kids['acme/c']).toMatchObject({
+      sessions: 0,
+      memory: { kind: 'empty', why },
+      cpu: { kind: 'empty', why },
+    });
+    expect(JSON.stringify(kids['acme/c'])).not.toMatch(/0M|0\.0 核/);
+  });
+
   test('按目录的还没测完：磁盘写还没测完（pending），不是 0', () => {
     const rows = rowsOf(resources({ footprint: { state: 'pending', why: '正在测第一回' } }));
     expect(rows.engine?.disk).toEqual({ kind: 'pending', why: '正在测第一回' });

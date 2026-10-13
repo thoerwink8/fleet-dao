@@ -15,6 +15,8 @@ export type Cell =
   | { kind: 'ok'; text: string; title?: string; tight?: boolean }
   | { kind: 'sampling'; why: string }
   | { kind: 'idle'; why?: string }
+  /** 会话 scope 都还在、里面没进程（memory.current 是 0，#1992）：写「空 scope」，不写 0M / 0 核。 */
+  | { kind: 'empty'; why: string }
   | { kind: 'none'; why: string }
   | { kind: 'unread'; why: string };
 
@@ -47,6 +49,8 @@ export interface SubRow {
   key: string;
   name: string;
   sessions: number;
+  /** 还在、但里面没进程的 scope 个数（#1992）：不算会话、不进合计，单独写出来好发现没回收的。 */
+  emptyScopes: number;
   /** 排序用；读不到是 -1。 */
   memoryMb: number;
   cpu: Cell;
@@ -238,6 +242,9 @@ function sessionChildren(resources: HomeResources, running: readonly HomeRunning
     let mem = 0;
     let cpu: number | undefined = 0;
     let unread: string | undefined;
+    let live = 0;
+    let emptyWhy: string | undefined;
+    let emptyScopes = 0;
     for (const id of ids) {
       const u = byRun[id];
       if (!u) continue;
@@ -245,13 +252,34 @@ function sessionChildren(resources: HomeResources, running: readonly HomeRunning
         unread = u.why;
         break;
       }
+      // 空 scope（里面没进程）不算会话、不进合计（#1992）
+      if (u.state === 'empty') {
+        emptyWhy ??= u.why;
+        emptyScopes += 1;
+        continue;
+      }
+      live += 1;
       mem += u.memoryMb;
       cpu = cpu === undefined || u.cpuPercent === undefined ? undefined : cpu + u.cpuPercent;
+    }
+    if (!unread && live === 0 && emptyWhy !== undefined) {
+      const empty: Cell = { kind: 'empty', why: emptyWhy };
+      rows.push({
+        key: repo || '_other',
+        name: repo || '别的会话（路由探针、对不上单的）',
+        sessions: 0,
+        emptyScopes,
+        memoryMb: -1,
+        memory: empty,
+        cpu: empty,
+      });
+      continue;
     }
     rows.push({
       key: repo || '_other',
       name: repo || '别的会话（路由探针、对不上单的）',
-      sessions: ids.length,
+      sessions: unread ? ids.length : live,
+      emptyScopes: unread ? 0 : emptyScopes,
       memoryMb: unread ? -1 : mem,
       memory: unread ? { kind: 'unread', why: unread } : { kind: 'ok', text: formatMb(mem) },
       cpu: unread

@@ -160,6 +160,12 @@ function CellText({ cell }: { cell: Cell }) {
           没在占用
         </span>
       );
+    case 'empty':
+      return (
+        <span className="text-muted-foreground" title={cell.why}>
+          空 scope
+        </span>
+      );
     case 'none':
       return (
         <span className="text-muted-foreground" title={cell.why}>
@@ -311,7 +317,9 @@ function AppDetail({ row, totalCores }: { row: AppRow; totalCores: number | unde
                       <span className="min-w-0 truncate" title={c.name}>
                         {c.name}
                       </span>
-                      <span className="shrink-0 text-meta text-muted-foreground">{c.sessions} 个会话</span>
+                      <span className="shrink-0 text-meta text-muted-foreground">
+                        {c.sessions} 个会话{c.emptyScopes ? ` · ${c.emptyScopes} 个空 scope` : ''}
+                      </span>
                     </span>
                   }
                   cpu={<CellText cell={c.cpu} />}
@@ -328,7 +336,14 @@ function AppDetail({ row, totalCores }: { row: AppRow; totalCores: number | unde
 }
 
 function cellWord(cell: Cell): string {
-  return { ok: '', sampling: '采样中', idle: '没在占用', none: '不单算', unread: '没读到' }[cell.kind];
+  return {
+    ok: '',
+    sampling: '采样中',
+    idle: '没在占用',
+    empty: '空 scope',
+    none: '不单算',
+    unread: '没读到',
+  }[cell.kind];
 }
 
 function diskWord(cell: DiskCell): string {
