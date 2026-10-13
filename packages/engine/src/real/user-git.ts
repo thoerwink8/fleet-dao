@@ -216,7 +216,7 @@ export async function headOfIncoming(t: UserTree): Promise<string> {
   return headOfRef(t, 'refs/fleet/incoming');
 }
 
-/** 工作树里所有没提交的改动（含新文件，不含忽略的）：起会话时告诉它上一个会话留下了什么（prompts.ts 的 leftoverBlock）。 */
+/** 工作树里所有没提交的改动（含新文件，不含忽略的）。 */
 export async function worktreeChanges(t: UserTree): Promise<string[]> {
   return lines(await git(t, ['status', '--porcelain'], '看工作树里有没有没提交的改动'));
 }

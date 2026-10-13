@@ -39,7 +39,6 @@ export interface ClaudeArgsSpec {
   /** 额外放行的工具，例如 `Bash(git diff:*)`。 */
   allowedTools?: readonly string[];
   effort?: ClaudeEffort;
-  appendSystemPrompt?: string;
   /**
    * false = 不把这次会话的记录存进执行体用户家里（`--no-session-persistence`，只对 -p 有效；之后续不上）。
    * 路由探针用：每 15 分钟一次的一问一答不留记录。干活的会话要能续，不给（默认存）。
@@ -130,7 +129,6 @@ export function buildClaudeArgs(spec: ClaudeArgsSpec): string[] {
     assertSessionEffort(spec.effort, SESSION_EFFORTS, 'Claude Code');
     args.push('--effort', spec.effort);
   }
-  if (spec.appendSystemPrompt) args.push('--append-system-prompt', spec.appendSystemPrompt);
   // --agents 放在 --allowedTools 前面：后者吃变长参数，放在它后面的会被当成工具名
   if (spec.agentsFile) args.push('--agents', spec.agentsFile);
   // 变长参数放最后、值并成一个参数：它后面再没有东西可吞

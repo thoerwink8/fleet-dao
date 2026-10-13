@@ -20,16 +20,9 @@ export interface SegmentPromptInput {
   feedback: readonly string[];
   /** 这一段上一次跑到一半被停下了（切号，#59）：为什么停的那一句；没被停过的不给。 */
   interrupted?: string;
-  /** 设置 engine.subagentHint（#1641）开着才为 true：多一条「可以派哪些子代理、什么时候派」。默认关。 */
+  /** 已废（子代理提示整条链路已删）：只为 task-segment.ts 还在传它而留，不读；等 #1972 合并后随那处一起删。 */
   subagentHint?: boolean;
 }
-
-/**
- * 提示词里那一句子代理的提示（短，决定 0087 三个角色）：查代码、初筛 diff 派斥候 Explore（Haiku），设计 Plan（Opus）只在疑难时派，
- * 写代码的会话自己写、不派工人 general-purpose。名字是 Claude Code 内置的，定义经 --agents 从 agents/subagents/ 压住内置的。
- */
-export const SUBAGENT_HINT =
-  '- 可以用 Agent 工具派子代理（`subagent_type` 写名字、不传 `model`）：查代码、交活前初筛 diff 派 `Explore`（斥候，Haiku 5.5，只读）；`Plan`（设计，Opus 5.5，只读）只在疑难时派；写代码自己写，不派 `general-purpose`。';
 
 function clip(text: string): string {
   const t = text.trim();
@@ -49,12 +42,10 @@ export function renderSegmentPrompt(input: SegmentPromptInput): string {
     '- 改完用 git add、git commit 提交（提交信息一句话说清改了什么、为什么，可以分几个提交）。没提交的改动不会进 PR，工作树里也别留没提交的文件。',
     '- 不要推送、不要开 PR、不要切换或新建分支、不要改 git 配置：引擎会读你的提交、推分支、开 PR。',
     '- 不要用 `fleet` 命令（这次没有后端可连）。',
-    '- 只跑跟你改动相关的测试，加格式和类型检查，别跑全量测试。仓里有 AGENTS.md 就照它的约定写代码。',
-    '- 同模块的历史单和它的 PR 在 `specs/` 与该单 `Refs` 里，先读：别人做过的就接着它做，别重做一遍（#995）。',
+    '- AGENTS.md 里开 PR、进度单、开单的约定这次不适用，引擎替你做。',
     ...(specDir === undefined ? [] : [`- 需求文档 \`${specDir}/需求.md\` 已经在主线上，不要改它。`]),
     '- 不要新建需求文档、结果文档：需求在单子里，做成了什么写在 PR 正文里（引擎开 PR）。',
-    ...(input.subagentHint ? [SUBAGENT_HINT] : []),
-    '- 最后一条回复写三句话以内：做了什么、怎么验证的、还欠什么。',
+    '- 最后一条回复逐条一行回验收条，再加一行欠什么。',
   ];
   const interrupted = input.interrupted?.trim();
   if (interrupted) {

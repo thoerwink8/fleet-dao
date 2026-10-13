@@ -1053,28 +1053,6 @@ describe('子代理（#1641）：树里的本地设置和提示词那一句', { 
     await expect(r.run(r.input(), ctx())).rejects.toMatchObject({ code: 'SEGMENT_SUBAGENT_GUARD' });
     expect(r.specs).toHaveLength(0);
   });
-
-  it('提示词那一句由设置项开关：关着（读到 false、没给、读不了）不加；开着加', async () => {
-    const promptWith = async (readSubagentHint?: () => Promise<boolean>) => {
-      const r = rig({
-        driverRun: async (spec) => {
-          commitInTree(spec);
-          return report();
-        },
-        ...(readSubagentHint ? { deps: { readSubagentHint } } : {}),
-      });
-      await r.run(r.input(), ctx());
-      return r.specs[0]?.prompt ?? '';
-    };
-    expect(await promptWith()).not.toContain('`Explore`');
-    expect(await promptWith(async () => false)).not.toContain('`Explore`');
-    expect(
-      await promptWith(async () => {
-        throw new Error('库读不了');
-      }),
-    ).not.toContain('`Explore`');
-    expect(await promptWith(async () => true)).toContain('`Explore`');
-  });
 });
 
 describe('落盘目录清理', () => {

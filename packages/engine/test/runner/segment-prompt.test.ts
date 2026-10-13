@@ -1,7 +1,7 @@
 // 动手会话的提示词（runner/segment-prompt.ts）：交代、一次性会话的规矩、返工意见都在，且规矩和引擎后面做的事对得上。
 import { describe, expect, it } from 'vitest';
 import { ManualBriefSchema } from '../../src/runner/brief.ts';
-import { FEEDBACK_ITEM_MAX, renderSegmentPrompt, SUBAGENT_HINT } from '../../src/runner/segment-prompt.ts';
+import { FEEDBACK_ITEM_MAX, renderSegmentPrompt } from '../../src/runner/segment-prompt.ts';
 
 const brief = ManualBriefSchema.parse({
   kind: 'manual',
@@ -29,9 +29,11 @@ describe('动手会话的提示词', () => {
     expect(text).not.toContain('结果.md');
   });
 
-  it('带一句「同模块的历史单和它的 PR 在 specs/ 与该单 Refs 里，先读」（#995 拍 3）：新旧单、有没有需求文档都带', () => {
+  it('不指向会话读不到的东西（Refs、GitHub 历史单），并说明 AGENTS.md 里开 PR、进度单、开单的约定这次不适用', () => {
     for (const specDir of ['specs/12-驾驶舱状态', undefined]) {
-      expect(render({ specDir })).toContain('同模块的历史单和它的 PR 在 `specs/` 与该单 `Refs` 里，先读');
+      const text = render({ specDir });
+      expect(text).not.toContain('Refs');
+      expect(text).toContain('AGENTS.md 里开 PR、进度单、开单的约定这次不适用，引擎替你做');
     }
   });
 
@@ -43,18 +45,12 @@ describe('动手会话的提示词', () => {
     expect(fresh).not.toContain('整理成');
   });
 
-  it('子代理提示（#1641，决定 0087 三个角色）：开关关着（不给、给 false）不加；开着加一句，点名 Explore、Plan，Plan 只在疑难时派，写代码不派 general-purpose', () => {
-    expect(render()).not.toContain('`Explore`');
-    expect(render({ subagentHint: false })).not.toContain('`Explore`');
-    const on = render({ subagentHint: true });
-    expect(on).toContain(SUBAGENT_HINT);
-    expect(on).toContain('`Explore`');
-    expect(on).toContain('`Plan`');
-    expect(on).toContain('不派 `general-purpose`');
-    expect(on).toContain('只在疑难时派');
-    expect(on).not.toMatch(/fleet-(scout|review-screen|reviewer|debugger)/);
-    // 一句话：加在「怎么干」那一节里，最后一条回复的规矩还是最后一条
-    expect(on.trimEnd().endsWith('还欠什么。')).toBe(true);
+  it('最后一条回复：逐条一行回验收条，再加一行欠什么（不再说「三句话以内」，和「逐条都要回」不冲突）；它是最后一条规矩', () => {
+    const text = render();
+    expect(text).not.toContain('三句话');
+    expect(text).toContain('逐条一行回验收条，再加一行欠什么');
+    expect(text).not.toContain('`Explore`');
+    expect(text.trimEnd().endsWith('再加一行欠什么。')).toBe(true);
   });
 
   it('返工意见按条编号带进来；一条没有就不出这一节（不留空标题）', () => {

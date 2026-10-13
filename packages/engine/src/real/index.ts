@@ -24,7 +24,6 @@ import {
   finishScheduleRun,
   listIntakeRepos,
   readEngineMasterRow,
-  readSubagentHint,
   recordRouteProbeDone,
   recordRouteProbeRequest,
   recordRouteProbeStart,
@@ -951,7 +950,6 @@ export function realPortsFromEnv(
       runsDir,
       sessions: oneShots,
       subagentGuard,
-      readSubagentHint: () => readSubagentHint(db),
       log: taskLog,
     }),
     coldVerify: createColdVerify({
