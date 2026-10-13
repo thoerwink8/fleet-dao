@@ -435,6 +435,13 @@
       "when": 1791855152466,
       "tag": "0061_right_ted_forrester",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1791864922654,
+      "tag": "0062_familiar_angel",
+      "breakpoints": true
     }
   ]
 }

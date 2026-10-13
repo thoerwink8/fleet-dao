@@ -17,12 +17,13 @@ import type {
   Subtask,
   Task,
 } from '@fleet-dao/shared';
-import { probePaceWritten, redCheckNames } from '@fleet-dao/shared';
+import { ciPolicyOf, probePaceWritten, redCheckNames } from '@fleet-dao/shared';
 import type {
   bans,
   channelStates,
   channels,
   families,
+  githubTokens,
   models,
   pools,
   progressEvents,
@@ -56,6 +57,24 @@ export const toRepo = (r: typeof repos.$inferSelect): Repo =>
     defaultBranch: r.defaultBranch,
     testCommand: r.testCommand,
   });
+
+/** 受管的仓，带「让 AI 接活」开关和 CI 模式（store 的 IntakeRepo 形状；#1989 加仓要回这个）。 */
+export const toIntakeRepo = (r: typeof repos.$inferSelect) => ({
+  ...toRepo(r),
+  autoDispatchSince: isoOpt(r.autoDispatchSince) ?? null,
+  ciPolicy: ciPolicyOf(r.ciPolicy),
+});
+
+/** 各人自己的 GitHub 授权那一行（#1989）；密文原样带出，解密在 api 层。 */
+export const toGitHubToken = (r: typeof githubTokens.$inferSelect) => ({
+  userId: r.userId,
+  githubId: r.githubId,
+  login: r.login,
+  accessTokenCipher: r.accessTokenCipher,
+  scopes: r.scopes,
+  expiresAt: isoOpt(r.expiresAt) ?? null,
+  updatedAt: r.updatedAt.toISOString(),
+});
 
 export const toTask = (r: typeof tasks.$inferSelect): Task =>
   build<Task>({
