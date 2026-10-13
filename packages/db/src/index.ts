@@ -7,6 +7,7 @@ export * from './migrate.ts';
 export * from './model-naming.ts';
 export * from './queries/alert-work.ts';
 export * from './queries/alerts.ts';
+export * from './queries/awaiting-me.ts';
 export * from './queries/canary.ts';
 export * from './queries/candidates.ts';
 export * from './queries/carpool-spend.ts';

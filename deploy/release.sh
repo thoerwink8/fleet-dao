@@ -1719,7 +1719,7 @@ check_gateway() { # 提交号
     red "香港飞书网关连上飞书之后没稳住（${SETTLE_SECONDS} 秒里退出或重启过）：香港 journalctl -u fleet-feishu -n 50"
     return 1
   fi
-  ok "香港飞书网关 ${sha:0:12} 在跑、连上了飞书长连接（pid $pid，这次起来后处理过 $(status_field "$st" messages) 条消息）"
+  ok "香港飞书网关 ${sha:0:12} 在跑、连上了飞书长连接（pid $pid）"
   case $(status_field "$st" backend) in
   reachable) ok "香港飞书网关经隧道连得上法国后端" ;;
   refused) pending "香港飞书网关连不上法国后端（连接被拒：法国 fleet-api 没起）；网关照实回「后端连不上」，没有崩" ;;
