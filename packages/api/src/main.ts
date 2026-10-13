@@ -13,6 +13,7 @@ import {
   type ReleaseFactsReader,
 } from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
+import { intakeChatLimitsFrom } from '@fleet-dao/shared';
 import {
   createMemoryStore,
   createPgStore,
@@ -73,6 +74,7 @@ import type { GitHubEventSink } from './ports.ts';
 import { pgProbeHistory } from './probe-history.ts';
 import { liveReleaseCardPort } from './release-card.ts';
 import { liveReleaseRequestPort } from './release-request.ts';
+import { pgRequestChat } from './request-chat-pg.ts';
 import type { RequestIssuePort } from './request-issue.ts';
 import { startRequestProgressWatch } from './request-progress.ts';
 import { pgRequests } from './request-store-pg.ts';
@@ -349,7 +351,13 @@ async function assemble(): Promise<{
     runTranscript: pgRunTranscript(db),
     // 提需求（#2049）：需求、消息、每人的置顶和读到哪；删了满 30 天的由引擎的 request-sweep 硬删
     // 开单、写回评论用「引擎」机器人（github.requestIssues）；单子正文里的链接用 FLEET_PUBLIC_URL（config.publicUrl，缺了启动就拒）
-    requests: pgRequests(db, now, { issues: github.requestIssues, cockpitUrl: config.publicUrl.origin }),
+    requests: pgRequests(db, now, {
+      issues: github.requestIssues,
+      cockpitUrl: config.publicUrl.origin,
+      limits: intakeChatLimitsFrom(process.env),
+    }),
+    // 提需求的指挥官会话（#2061）：排一轮进 request_chats，法国引擎每两秒接手；限额（每人 3 条、每条 40 轮）可用环境变量调
+    requestChat: pgRequestChat(db, now, { limits: intakeChatLimitsFrom(process.env) }),
     // 环境页（#820 片 1）的版本那一项：正式环境读发布目录现算；别处不给，页面写「没查成」
     ...(production ? { deployLag: () => readDeployLagInput() } : {}),
     // /france 页发版一键（#618）：读 release-train 进度。只在正式环境装。

@@ -30,6 +30,7 @@ import type { EngineMasterGate } from './engine-master.ts';
 import { createFakeWorld } from './fakes.ts';
 import { engineTimerJobs } from './jobs/engine-timers.ts';
 import { type GroomPoller, startGroomRequests } from './jobs/groom.ts';
+import { type IntakeChatPoller, startIntakeChat } from './jobs/intake-chat.ts';
 import { type RouteProbeNowPoller, startRouteProbeRequests } from './jobs/route-probe-now.ts';
 import { type EngineTimers, realTimerHost, startEngineTimers } from './jobs/timers.ts';
 import { startWorktreeCleanupRequests, type WorktreeCleanupPoller } from './jobs/worktree-cleanup.ts';
@@ -319,6 +320,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let stopMaster: (() => void) | undefined;
   let probeNow: RouteProbeNowPoller | undefined;
   let groomPoller: GroomPoller | undefined;
+  let intakeChatPoller: IntakeChatPoller | undefined;
   let worktreePoller: WorktreeCleanupPoller | undefined;
   try {
     // 引擎总开关（#1086）：接活之前先读一次（读不到按关），之后每 5 秒刷新；选路、一次性会话登记读缓存，定时器入口每轮现读
@@ -389,6 +391,11 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
         groomPoller = startGroomRequests(jobs.groom);
         console.info('整理待办的接手已起');
       }
+      // 「提需求」的指挥官会话（#2061）：每两秒看一眼有没有排着的一轮（总开关关着的后端排不进来；切号、排空由一次性会话清单停）
+      if (jobs.intakeChat) {
+        intakeChatPoller = startIntakeChat(jobs.intakeChat);
+        console.info('指挥官会话的接手已起');
+      }
       // 一键清理没用的工作树（#1993）：每几秒看一眼有没人点（总开关关着也看：这是看家的清扫，判据和每小时对账同一份）
       if (jobs.worktreeCleanup) {
         const make = jobs.worktreeCleanup;
@@ -418,6 +425,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     stopMaster?.();
     probeNow?.stop();
     groomPoller?.stop();
+    intakeChatPoller?.stop();
     worktreePoller?.stop();
     await status?.flush();
     status?.stop();

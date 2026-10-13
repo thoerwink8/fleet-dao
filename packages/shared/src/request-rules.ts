@@ -4,7 +4,8 @@
 // 改这里之前必须知道：
 // - 身份只认登录会话里的用户（viewer），不认请求里写的；拍板人按 users 表判（decides_requests），不按谁说了算。
 // - 结案锁死：已结案的不能再发消息、改草稿、改名；要改只能「接着这条提」另开一条。
-// - 删除只给「还没留下任何决定、也没牵扯别人」的：讨论中、只有发起人说过话（指挥官的话不算）、从没提交过拍板，且只有发起人能删。
+// - 删除只给「还没留下任何决定、也没牵扯别人」的：讨论中、只有发起人说过话（指挥官的话不算）、从没提交过拍板，且只有发起人能删；
+//   指挥官会话排着队或正在回话时也删不了，要先停（C 片，#2061）。
 // - 讨论中不能手动归档：要么接着聊，要么「放下」（写理由）。
 import {
   REQUEST_ACTIONS,
@@ -40,7 +41,11 @@ export interface RequestFacts {
   draftMissing: readonly string[];
   /** 看的这个人置顶了没有。 */
   pinned: boolean;
+  /** 指挥官会话排着队或正在回话（C 片，#2061）：这时删除不可用，要先停。 */
+  commanderRunning: boolean;
 }
+
+export const COMMANDER_RUNNING_DELETE_WHY = '指挥官正在回话，停下后才能删';
 
 /** 看的这个人：登录会话里的用户，加上 users 表里的拍板资格。 */
 export interface RequestViewer {
@@ -125,6 +130,7 @@ function deleteVerdict(r: RequestFacts, viewer: RequestViewer): RequestVerdict {
   if (r.otherHumanSpoke)
     return no('别人也说过话，不能删：别人说过的话不该被另一个人删掉，请「放下」（写理由）');
   if (viewer.id !== r.initiatorId) return no('只有发起人能删');
+  if (r.commanderRunning) return no(COMMANDER_RUNNING_DELETE_WHY);
   return yes;
 }
 

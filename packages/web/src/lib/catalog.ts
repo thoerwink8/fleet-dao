@@ -24,6 +24,7 @@ export const stageLabel: Record<StageKind, string> = {
   research: '调研',
   judge: '判断',
   groom: '整理待办',
+  'intake-chat': '提需求',
 };
 
 export const hostLabel: Record<HostId, string> = {

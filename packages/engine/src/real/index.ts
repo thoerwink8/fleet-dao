@@ -32,6 +32,7 @@ import {
   startScheduleRun,
 } from '@fleet-dao/db';
 import { createGitHub } from '@fleet-dao/github';
+import { intakeChatLimitsFrom } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { pgLedger, pgLocker } from '@fleet-dao/store';
 import type { Client } from '@temporalio/client';
@@ -74,6 +75,7 @@ import {
 } from './hosts.ts';
 import { type HourlyReconcileWiring, hourlyReconcileJob, worktreeCleanupJob } from './hourly-reconcile.ts';
 import { intakeJob } from './intake.ts';
+import { intakeChatJob } from './intake-chat.ts';
 import { issueGroomIdlePolicyFromEnv } from './issue-groom.ts';
 import { issueKindJevFromEnv } from './issue-kind-jev.ts';
 import { registerEngineJobs } from './jobs.ts';
@@ -979,6 +981,19 @@ export function realPortsFromEnv(
     pickRoute: real.ports.pickRoute,
     sessions: oneShots,
     probe: probeAssigned,
+  });
+  // 驾驶舱「提需求」的指挥官会话（#2061，母单 #2047 第 C 片）：和整理待办同一条路（选路用途 intake-chat、主线的只读检出、
+  // 同一份 Spawner、登记进一次性会话清单），多轮 --resume 续，闲置 30 分钟收掉；会话没有 GitHub 令牌
+  jobs.intakeChat = intakeChatJob({
+    db,
+    gh,
+    trees,
+    exec,
+    tmpDir: join(config.stateDir, 'tmp'),
+    spawner: segmentSpawner,
+    pickRoute: real.ports.pickRoute,
+    sessions: oneShots,
+    limits: intakeChatLimitsFrom(process.env),
   });
   const evidence = realReleaseEvidence(extra.releasesDir ? { releasesDir: extra.releasesDir } : {});
   const drainControl: Omit<DrainControlDeps, 'drain' | 'log'> = {

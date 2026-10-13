@@ -26,7 +26,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { redact } from '@fleet-dao/adapters';
+import { redact, type TranscriptEntry } from '@fleet-dao/adapters';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { MemoryAdmissionDeps } from '../real/memory-admission.ts';
 import { admitSessionMemory } from '../real/memory-admission.ts';
@@ -187,6 +187,13 @@ export interface SpawnCommand {
   input: OneShotInput & { runId: string };
   /** 这一次的时限（毫秒）：Spawner 自己的看守要比它晚到，让这里的 signal 先触发。 */
   timeoutMs: number;
+  /**
+   * 续哪个会话（--resume）：只有指挥官会话（real/intake-chat.ts，#2061）直接调 Spawner 时给；runOneShot 从不给
+   * （上面第 1 条：三段一次性会话不续）。不给 = 开新会话。
+   */
+  resumeSessionId?: string;
+  /** 会话过程每一条（指挥官会话流式推给页面用）：按流里的先后给，抛了只记日志、不影响会话。 */
+  onTranscript?: (entry: TranscriptEntry) => void;
 }
 export type OneShotSpawner = (cmd: SpawnCommand) => Promise<SpawnOutcome>;
 

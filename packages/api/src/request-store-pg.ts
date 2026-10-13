@@ -20,6 +20,8 @@ import { assertPublishable, isGitHubError } from '@fleet-dao/github';
 import {
   DELETED_WHY,
   draftMissing,
+  INTAKE_CHAT_LIMITS,
+  type IntakeChatLimits,
   idleDays,
   purgeAt,
   type RequestActionRequest,
@@ -40,6 +42,7 @@ import {
 import { errMessage } from '@fleet-dao/shared/util';
 import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import { ApiError } from './http.ts';
+import { commanderOf, commanderRunning } from './request-chat-pg.ts';
 import {
   checkOpening,
   ISSUES_NOT_HERE,
@@ -114,6 +117,8 @@ export interface RequestsOptions {
   cockpitUrl?: string | undefined;
   /** 卫生检查管哪个仓（默认 fleet-dao 自己）；测试夹具的仓不是它时指过去。 */
   hygieneRepo?: { owner: string; name: string } | undefined;
+  /** 指挥官会话的限额（C 片 #2061）：每人同时几条在聊、每条几轮；不给用默认。 */
+  limits?: IntakeChatLimits | undefined;
 }
 
 const iso = (d: Date) => d.toISOString();
@@ -166,6 +171,7 @@ const ACTION_WORDS: Record<RequestActionRequest['action'], string> = {
 };
 
 export function pgRequests(db: Db, now: () => Date, options: RequestsOptions = {}): RequestsPort {
+  const limits = options.limits ?? INTAKE_CHAT_LIMITS;
   /** 事务里调要把 tx 传进来：用外面的 db 会另占一条连接，单连接的库（PGlite）上就是自己等自己。 */
   async function userMap(ids: readonly string[], q: Db = db): Promise<Map<string, UserRowDb>> {
     const unique = [...new Set(ids)].filter((id) => UUID.test(id));
@@ -226,6 +232,7 @@ export function pgRequests(db: Db, now: () => Date, options: RequestsOptions = {
       otherHumanSpoke: other !== undefined,
       draftMissing: draftMissing(r.draftJson),
       pinned: (state?.pinnedAt ?? null) !== null,
+      commanderRunning: await commanderRunning(tx, r.id),
     };
     return { facts, viewer: await viewerOf(tx, viewerId), decider, state };
   }
@@ -766,6 +773,7 @@ export function pgRequests(db: Db, now: () => Date, options: RequestsOptions = {
               },
             }
           : {}),
+        ...(m.card ? { card: m.card } : {}),
         createdAt: iso(m.createdAt),
       });
       return {
@@ -782,6 +790,7 @@ export function pgRequests(db: Db, now: () => Date, options: RequestsOptions = {
           createdAt: iso(r.createdAt),
           continuedBy: continuedBy.map((c) => c.seq),
         },
+        commander: await commanderOf(db, r, limits),
         messages: messages.map(toMessage),
         lastReadMessageId: state?.lastReadMessageId ?? null,
         actions: requestActions(facts, viewer, { now: now(), deciderAvailable: decider !== null }),

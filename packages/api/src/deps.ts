@@ -26,6 +26,7 @@ import type {
 import type { ProbeHistoryPort } from './probe-history.ts';
 import type { ReleaseCardPort } from './release-card.ts';
 import type { ReleaseRequestPort } from './release-request.ts';
+import type { RequestChatPort } from './request-chat-pg.ts';
 import type { RequestsPort } from './request-store-pg.ts';
 import type { RoutingEffortsPort } from './routing-efforts.ts';
 import type { RoutingLayersPort } from './routing-layers.ts';
@@ -136,6 +137,11 @@ export interface Deps {
    * 别的接口回 503，不拿空列表冒充「没有需求」。
    */
   requests?: RequestsPort | undefined;
+  /**
+   * 提需求的指挥官会话（#2061，request-chat-pg.ts）：排一轮、停下、换模型、让别家挑错。没给（开发、内存版）时人话照存、指挥官不接，
+   * 那几个按钮的接口回 503 写明没接上，不当成排上了。
+   */
+  requestChat?: RequestChatPort | undefined;
   /**
    * 「要你拍」拍完交给指挥官（#1915，decision-handoff.ts）：往进度单 #1055、任务单留言，走引擎机器人的 GitHub 客户端。
    * 没给（开发环境、机器人凭据没读到）的答案照样存下，回包里 handoff 写没接上，不当成记上了。

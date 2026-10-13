@@ -62,6 +62,7 @@ import {
   CreateRequestRequest,
   MarkRequestReadRequest,
   MarkRequestReadResponse,
+  MarkReviewItemRequest,
   RequestActionRequest,
   RequestDetailResponse,
   RequestIssueOpeningQuery,
@@ -69,6 +70,7 @@ import {
   RequestListQuery,
   RequestListResponse,
   SendRequestMessageRequest,
+  SetRequestModelRequest,
   UpdateRequestDraftRequest,
 } from './requests.ts';
 import {
@@ -412,6 +414,31 @@ export const WebRoutes = {
     path: '/requests/:seq/read',
     request: MarkRequestReadRequest,
     response: MarkRequestReadResponse,
+  },
+  /**
+   * 「让指挥官接着问」（#2061）：两个人都说过话以后，不 @指挥官 它不说话，点这个让它接着问。
+   * 超了限额、引擎关着、额度熔断回 409「指挥官暂停了：原因」。回详情。
+   */
+  nudgeCommander: { method: 'POST', path: '/requests/:seq/commander/nudge', response: RequestDetailResponse },
+  /** 停下正在回话的指挥官（停下后才能删）。回详情。 */
+  stopCommander: { method: 'POST', path: '/requests/:seq/commander/stop', response: RequestDetailResponse },
+  /** 只给这一条需求换指挥官模型：只能选「提需求」用途里配了的；在对话里出一条分隔线，下一句按存档重起。回详情。 */
+  setCommanderModel: {
+    method: 'PUT',
+    path: '/requests/:seq/commander/model',
+    request: SetRequestModelRequest,
+    response: RequestDetailResponse,
+  },
+  /** 指挥官回话的流（SSE）：commander（状态、「正在读代码……」、写到哪了）、done、error。 */
+  commanderStream: { method: 'GET', path: '/requests/:seq/commander/stream' },
+  /** 「让别家挑错」：排一次别家模型挑草稿的错，意见存成一张卡。回详情。 */
+  requestReview: { method: 'POST', path: '/requests/:seq/review', response: RequestDetailResponse },
+  /** 别家意见的一条标采用或不用。回详情。 */
+  markReviewItem: {
+    method: 'POST',
+    path: '/requests/:seq/review/:messageId',
+    request: MarkReviewItemRequest,
+    response: RequestDetailResponse,
   },
   pools: { method: 'GET', path: '/pools', response: PoolsResponse },
   /** 整池暂停现状（#746）：开关、认不出的、旧提醒、到期没复查的；新建、撤回走 PUT /settings/engine.poolHolds。 */

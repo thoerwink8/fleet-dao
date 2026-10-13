@@ -178,6 +178,101 @@ export const RequestAnswerSchema = z.object({
   error: z.string().optional(),
 });
 export type RequestAnswer = z.infer<typeof RequestAnswerSchema>;
+// —— 指挥官会话（#2061，母单 #2047 第 C 片；方案第四、五节）——
+
+/** 指挥官会话现在：闲着、排着队等引擎接、正在回话（或在挑错）。 */
+export const REQUEST_CHAT_STATES = ['idle', 'queued', 'running'] as const;
+export const RequestChatStateSchema = z.enum(REQUEST_CHAT_STATES);
+export type RequestChatState = z.infer<typeof RequestChatStateSchema>;
+
+/** 排的是哪种活：指挥官回话、让别家挑错。 */
+export const REQUEST_CHAT_JOBS = ['reply', 'review'] as const;
+export const RequestChatJobSchema = z.enum(REQUEST_CHAT_JOBS);
+export type RequestChatJob = z.infer<typeof RequestChatJobSchema>;
+
+/** 回话进行到哪：想着、正在读代码、在写回话。页面照 REQUEST_CHAT_PHASE_WORDS 显示。 */
+export const REQUEST_CHAT_PHASES = ['thinking', 'reading_code', 'writing'] as const;
+export const RequestChatPhaseSchema = z.enum(REQUEST_CHAT_PHASES);
+export type RequestChatPhase = z.infer<typeof RequestChatPhaseSchema>;
+export const REQUEST_CHAT_PHASE_WORDS: Record<RequestChatPhase, string> = {
+  thinking: '指挥官在想……',
+  reading_code: '正在读代码……',
+  writing: '指挥官在写回话……',
+};
+
+/** 别家意见每一条：没标、采用、不用。 */
+export const REQUEST_REVIEW_VERDICTS = ['adopt', 'reject'] as const;
+export const RequestReviewVerdictSchema = z.enum(REQUEST_REVIEW_VERDICTS);
+export type RequestReviewVerdict = z.infer<typeof RequestReviewVerdictSchema>;
+
+/** 指挥官一次问的问题：2～4 个选项，页面另加「我自己说」。 */
+export const REQUEST_QUESTION_MIN_OPTIONS = 2;
+export const REQUEST_QUESTION_MAX_OPTIONS = 4;
+
+/**
+ * 消息上挂的结构化卡片（页面直接渲染成按钮、分隔线、意见卡）：
+ * - question：指挥官这一问，带 2～4 个选项和「我自己说」；
+ * - suggest：指挥官想改人改过的栏，服务端没改，转成一条「建议改」；
+ * - model_switch：换模型的分隔线（from / to 是模型编号，null = 用「提需求」用途配的默认）；
+ * - paused：指挥官没接上这句（超了限额、引擎关着、额度熔断、切号），写明原因；
+ * - review：别家挑错的意见，每条能标采用或不用；draftVersion 是挑的那一版草稿。
+ */
+export const RequestCardSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('question'),
+    question: z.string().trim().min(1).max(500),
+    options: z
+      .array(z.string().trim().min(1).max(200))
+      .min(REQUEST_QUESTION_MIN_OPTIONS)
+      .max(REQUEST_QUESTION_MAX_OPTIONS),
+    allowOwn: z.literal(true),
+  }),
+  z.object({
+    type: z.literal('suggest'),
+    field: z.enum(REQUEST_DRAFT_FIELDS),
+    value: z.unknown(),
+  }),
+  z.object({
+    type: z.literal('model_switch'),
+    from: z.string().nullable(),
+    to: z.string().nullable(),
+  }),
+  z.object({ type: z.literal('paused'), why: z.string().min(1) }),
+  z.object({
+    type: z.literal('review'),
+    draftVersion: z.number().int().positive(),
+    model: z.string(),
+    items: z
+      .array(z.object({ text: z.string().min(1).max(2000), verdict: RequestReviewVerdictSchema.nullable() }))
+      .max(20),
+  }),
+]);
+export type RequestCard = z.infer<typeof RequestCardSchema>;
+
+export const RequestModelOptionSchema = z.object({ id: z.string(), name: z.string() });
+export type RequestModelOption = z.infer<typeof RequestModelOptionSchema>;
+
+/** 详情里的指挥官会话：在不在跑（在跑时删不了）、用哪个模型、能换哪些、聊了几轮。 */
+export const RequestCommanderSchema = z.object({
+  state: RequestChatStateSchema,
+  /** 排着队或正在回话：这时删除不可用，要先停。 */
+  running: z.boolean(),
+  job: RequestChatJobSchema.optional(),
+  phase: RequestChatPhaseSchema.optional(),
+  /** 这条需求选的模型；没选是 null（用 defaultModel）。 */
+  model: RequestModelOptionSchema.nullable(),
+  /** 「提需求」用途（intake-chat）排第一的模型；用途没配是 null。 */
+  defaultModel: RequestModelOptionSchema.nullable(),
+  /** 能换的模型：只有「提需求」用途里配了的（Fable 只有创始人配进去才在这里）。 */
+  models: z.array(RequestModelOptionSchema),
+  /** 用途没配、没读成：写原因，不拿空列表冒充「没有可选的」。 */
+  modelsUnavailable: z.string().optional(),
+  turns: z.number().int().nonnegative(),
+  maxTurns: z.number().int().positive(),
+  /** 上一次没接上的原因（「指挥官暂停了：……」）；接上了就清掉。 */
+  pausedWhy: z.string().optional(),
+});
+export type RequestCommander = z.infer<typeof RequestCommanderSchema>;
 
 export const RequestMessageSchema = z.object({
   id: z.number().int().positive(),
@@ -194,6 +289,8 @@ export const RequestMessageSchema = z.object({
   answerState: RequestAnswerStateSchema.optional(),
   /** 引擎提问被回答过（或试过写回）才有。 */
   answer: RequestAnswerSchema.optional(),
+  /** 结构化卡片（C 片）：选项、建议改、换模型分隔线、暂停原因、别家意见。 */
+  card: RequestCardSchema.optional(),
   createdAt: z.string(),
 });
 export type RequestMessage = z.infer<typeof RequestMessageSchema>;
@@ -217,6 +314,8 @@ export const RequestDetailResponse = z.object({
     /** 「接着这条提」开出来的新需求号。 */
     continuedBy: z.array(z.number().int().positive()),
   }),
+  /** 指挥官会话（C 片）。 */
+  commander: RequestCommanderSchema,
   messages: z.array(RequestMessageSchema),
   /** 我读到哪一条（消息编号）；一条都没读过是 null。 */
   lastReadMessageId: z.number().int().positive().nullable(),
@@ -240,7 +339,36 @@ export const SendRequestMessageRequest = z.object({
   body: z.string().trim().min(1).max(20_000),
   channel: RequestChannelSchema.default('web'),
   mentions: z.array(z.uuid()).max(10).default([]),
+  /** @指挥官（正文里写「@指挥官」也算）：两个人都说过话以后，只有这样或点「让指挥官接着问」指挥官才说话。 */
+  mentionCommander: z.boolean().default(false),
 });
+
+/** 换这条需求的指挥官模型：只能是「提需求」用途里配了的；null = 回到用途的默认。 */
+export const SetRequestModelRequest = z.object({ modelId: z.string().trim().min(1).max(200).nullable() });
+
+/** 别家意见的一条标采用或不用。 */
+export const MarkReviewItemRequest = z.object({
+  index: z.number().int().nonnegative(),
+  verdict: RequestReviewVerdictSchema,
+});
+
+/**
+ * 指挥官回话的流（SSE，GET /requests/:seq/commander/stream）：会话状态一变就推一条 commander 事件，
+ * 回完（回到 idle）推 done，页面再拉详情。读不到会话状态推 error（写原因），不推一条空的冒充「没在跑」。
+ */
+export const REQUEST_CHAT_SSE_EVENTS = { commander: 'commander', done: 'done', error: 'error' } as const;
+export const RequestChatStreamEvent = z.object({
+  state: RequestChatStateSchema,
+  job: RequestChatJobSchema.optional(),
+  phase: RequestChatPhaseSchema.optional(),
+  /** 页面显示的那句（「正在读代码……」）。 */
+  phaseText: z.string().optional(),
+  /** 指挥官这一轮已经写出来的话（不含给服务端看的草稿补丁）。 */
+  text: z.string(),
+  /** 最新一条消息的编号：done 之后页面拉详情看到这一条为止。 */
+  lastMessageId: z.number().int().nonnegative(),
+});
+export type RequestChatStreamEvent = z.infer<typeof RequestChatStreamEvent>;
 
 export const UpdateRequestDraftRequest = z.object({
   /** 看到的草稿版本：别人先改了回 409。 */

@@ -470,6 +470,13 @@
       "when": 1791923526470,
       "tag": "0066_intake_issue_opening",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1791925765061,
+      "tag": "0067_intake_chat",
+      "breakpoints": true
     }
   ]
 }
