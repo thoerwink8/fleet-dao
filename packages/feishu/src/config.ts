@@ -15,14 +15,12 @@ export interface Config {
   backendUrl: string;
   /** 驾驶舱在浏览器里的地址，卡片上「打开驾驶舱」用。 */
   publicUrl: string;
-  /** 团队群：收原话，网关调不通后端的报警也发这里。 */
+  /** 团队群：网关调不通后端的报警发这里，进群说明也在这里说。 */
   teamChatId: string;
-  /** 端到端自测用的测试群：照样收原话，但不收报警。 */
+  /** 端到端自测用的测试群：进群说明照样说，但不收报警。 */
   testChatId: string | null;
-  /** 白名单：只替这几位办事，别人礼貌拒绝。 */
+  /** 白名单：不在里面的人进群算「白名单外」，后端提醒。 */
   founders: Founder[];
-  /** 收到消息先加的表情（飞书 emoji_type）。 */
-  ackEmoji: string;
 }
 
 export class ConfigError extends Error {
@@ -68,10 +66,6 @@ export function loadConfig(env: Env): Config {
 
   const founders = parseFounders(need('FEISHU_FOUNDERS'), problems);
 
-  const ackEmoji = env.FEISHU_ACK_EMOJI?.trim() || 'Get';
-  if (!/^[A-Za-z0-9_]{1,40}$/.test(ackEmoji))
-    problems.push(`FEISHU_ACK_EMOJI 不像飞书的 emoji_type：「${ackEmoji}」`);
-
   if (problems.length > 0) throw new ConfigError(problems);
   return {
     appId,
@@ -82,7 +76,6 @@ export function loadConfig(env: Env): Config {
     teamChatId,
     testChatId,
     founders,
-    ackEmoji,
   };
 }
 

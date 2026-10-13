@@ -7,14 +7,24 @@
 // - 先记后做：操作记录（谁、哪个提交、原话「驾驶舱点击发布」）写不进就不写请求文件；文件没写成再补一条 ok=false 的记录。
 // - 请求文件的样子固定：JSON.stringify({ v: 1, sha, at, by })，键的先后固定，接活的脚本（lib.mjs 的 parseRequest）按同一个样子认；
 //   写法是先写临时文件再 link 到 request.json（已有一份就失败，不盖掉别人的）。by 只留字母数字和 _.@ 空格 -，最长 64。
+// - 卡住、失败后的三个按钮（#2027，POST /france/release-recover）：重试（kind retry，带卡住那一趟的目标提交，从停下的那一步接着走）、
+//   恢复引擎开关（kind restore）、撤掉暂停（kind abort，等价 release-train abort）。请求文件多一个 kind 键：
+//   { v: 1, kind, sha?, at, by }（restore、abort 不带 sha）；发布请求仍是老样子（不带 kind），接活脚本按 kind 缺省当发布。
+//   能不能点由 release-card.ts 的 readRecover 现算（进度记录、暂停标记、引擎总开关），点的时候重算一遍，不信页面传来的；
+//   同样先记后做（操作记录 release.retry / release.restore / release.abort），写请求文件用同一个 link 套路。
 // - 页面上的按钮状态（card.action）和这里用同一份判断（release-card.ts 的 buildReleaseCard 算出来），点的时候重算一遍，不信页面传来的。
 
 import { constants, existsSync } from 'node:fs';
 import { link, open, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+  RELEASE_RECOVER_ACTION,
+  RELEASE_RECOVER_WORD,
   RELEASE_REQUEST_ACTION,
   RELEASE_REQUEST_WORD,
+  ReleaseRecoverBody,
+  type ReleaseRecoverKind,
+  ReleaseRecoverResponse,
   ReleaseRequestBody,
   ReleaseRequestResponse,
 } from '@fleet-dao/shared';
@@ -23,7 +33,7 @@ import type { Hono } from 'hono';
 import type { Deps } from './deps.ts';
 import { ApiError, readJson, reply } from './http.ts';
 import type { Actor } from './ports.ts';
-import { buildReleaseCard } from './release-card.ts';
+import { buildReleaseCard, readRecover } from './release-card.ts';
 import type { CockpitEnv } from './session.ts';
 
 export const RELEASE_REQUEST_DIR = '/var/lib/fleet-dao/release-request';
@@ -58,6 +68,23 @@ export function requestBy(displayName: string): string {
 /** 请求文件的内容：键的先后固定（接活脚本按同一个样子认）。 */
 export function requestText(sha: string, at: string, by: string): string {
   return `${JSON.stringify({ v: 1, sha, at, by })}\n`;
+}
+
+const RECOVER_LABEL: Record<ReleaseRecoverKind, string> = {
+  retry: '重试',
+  restore: '恢复引擎开关',
+  abort: '撤掉暂停',
+};
+
+/** 三个按钮的请求文件内容：重试带目标提交，恢复、撤掉不带；键的先后固定。 */
+export function recoverRequestText(
+  kind: ReleaseRecoverKind,
+  sha: string | null,
+  at: string,
+  by: string,
+): string {
+  return `${JSON.stringify(sha === null ? { v: 1, kind, at, by } : { v: 1, kind, sha, at, by })}
+`;
 }
 
 export function registerReleaseRequestRoutes(
@@ -132,6 +159,68 @@ export function registerReleaseRequestRoutes(
       throw new ApiError(502, 'request_not_written', `发布请求没写出去：${error}`);
     }
     return reply(c, ReleaseRequestResponse, { requested: true, sha: body.sha, at });
+  });
+
+  app.post('/france/release-recover', async (c) => {
+    const { kind } = await readJson(c, ReleaseRecoverBody);
+    const port = deps.releaseRequest;
+    if (!port) {
+      throw new ApiError(
+        503,
+        'release_not_wired',
+        '这台后端没接上发布请求（开发、内存版）：到法国那台的驾驶舱点',
+      );
+    }
+    const word = RELEASE_RECOVER_WORD[kind];
+    const installed = await port.receiverInstalled().catch((e: unknown) => ({
+      ok: false as const,
+      why: `法国装没装发版接活单元没查成：${errMessage(e)}`,
+    }));
+    if (!installed.ok) throw new ApiError(409, 'receiver_missing', installed.why);
+    const recover = await readRecover(port, deps.franceRelease, deps.store);
+    const want = recover[kind];
+    if (want === null) {
+      throw new ApiError(
+        409,
+        'recover_unavailable',
+        `现在没有可点的「${RECOVER_LABEL[kind]}」：进度可能刚变了，刷新页面再看`,
+      );
+    }
+    const sha = kind === 'retry' ? (recover.retry?.sha ?? null) : null;
+    const actor = actorOf(c);
+    const at = deps.now().toISOString();
+    const by = requestBy(c.get('user').displayName);
+    const entry = {
+      actor,
+      action: RELEASE_RECOVER_ACTION[kind],
+      target: sha === null ? 'release:train' : `commit:${sha.slice(0, 12)}`,
+      after: { kind, by, ...(sha === null ? {} : { sha }) },
+      reason: `${word}（创始人）`,
+      via: c.get('via'),
+    } as const;
+    // 先记后做：记录写不进就不写请求文件
+    await deps.store.appendAudit({ ...entry, ok: true });
+    try {
+      await port.writeRequest(recoverRequestText(kind, sha, at, by));
+    } catch (err) {
+      const exists = (err as { code?: string }).code === 'EEXIST';
+      const error = exists ? 'request_pending' : errMessage(err);
+      try {
+        await deps.store.appendAudit({ ...entry, ok: false, error });
+      } catch (auditErr) {
+        deps.log.error('发版按钮请求没写成，这条失败记录也没写进去', {
+          kind,
+          error,
+          auditError: errMessage(auditErr),
+        });
+      }
+      if (exists) {
+        throw new ApiError(409, 'request_pending', '上一份发布请求还没被法国接走，等它接了再点');
+      }
+      deps.log.error('发版按钮请求文件没写成', { kind, error });
+      throw new ApiError(502, 'request_not_written', `请求没写出去：${error}`);
+    }
+    return reply(c, ReleaseRecoverResponse, { requested: true, kind, at });
   });
 }
 

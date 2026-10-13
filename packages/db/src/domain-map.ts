@@ -17,12 +17,13 @@ import type {
   Subtask,
   Task,
 } from '@fleet-dao/shared';
-import { probePaceWritten } from '@fleet-dao/shared';
+import { ciPolicyOf, probePaceWritten, redCheckNames } from '@fleet-dao/shared';
 import type {
   bans,
   channelStates,
   channels,
   families,
+  githubTokens,
   models,
   pools,
   progressEvents,
@@ -57,6 +58,25 @@ export const toRepo = (r: typeof repos.$inferSelect): Repo =>
     testCommand: r.testCommand,
   });
 
+/** 受管的仓，带「让 AI 接活」开关和 CI 模式（store 的 IntakeRepo 形状；#1989 加仓要回这个）。 */
+export const toIntakeRepo = (r: typeof repos.$inferSelect) => ({
+  ...toRepo(r),
+  autoDispatchSince: isoOpt(r.autoDispatchSince) ?? null,
+  ciPolicy: ciPolicyOf(r.ciPolicy),
+});
+
+/** 各人自己的 GitHub 授权那一行（#1989）；密文原样带出，解密在 api 层。 */
+export const toGitHubToken = (r: typeof githubTokens.$inferSelect) => ({
+  userId: r.userId,
+  githubId: r.githubId,
+  login: r.login,
+  role: r.role === 'engine' ? ('engine' as const) : ('agent' as const),
+  accessTokenCipher: r.accessTokenCipher,
+  scopes: r.scopes,
+  expiresAt: isoOpt(r.expiresAt) ?? null,
+  updatedAt: r.updatedAt.toISOString(),
+});
+
 export const toTask = (r: typeof tasks.$inferSelect): Task =>
   build<Task>({
     id: r.id,
@@ -71,6 +91,16 @@ export const toTask = (r: typeof tasks.$inferSelect): Task =>
     acceptance: r.acceptance,
     // 引擎暂停这张单（#820 片 3）时写 phase='paused'、doing='已暂停：…'；doing 是空的也不能当没暂停
     paused: r.phase === 'paused' ? (r.doing ?? '已暂停') : undefined,
+    // 停下等人（#1967、#1971）：原因引擎写在 last_problem；没写照实说没写，不留空
+    stalled:
+      r.state === 'stalled'
+        ? {
+            why: r.lastProblem ?? r.doing ?? '引擎没写停下的原因',
+            since: (r.updatedAt ?? r.createdAt).toISOString(),
+          }
+        : undefined,
+    // 等合并时必过检查红了：doing 以「检查红了：」开头，后面是检查名（#1983）
+    redChecks: redCheckNames(r.doing),
     createdAt: r.createdAt.toISOString(),
   });
 

@@ -150,6 +150,8 @@ export interface HarnessOptions {
   taskRoutePins?: Deps['taskRoutePins'];
   /** 会话内容（#1640）；不给就是没接上（内存版、开发环境一样）。 */
   runTranscript?: Deps['runTranscript'];
+  /** 提需求（#2049）；不给就是没接上（内存版、开发环境一样）。 */
+  requests?: Deps['requests'];
   /** 被撤的任务重做；不给就是没接上（开发环境一样，重做回 503）。 */
   taskRedo?: Deps['taskRedo'];
   /** 会话用户切号的现状（#194，额度页顶上一行）；不给就是没接上（内存版、开发环境一样）。 */
@@ -158,12 +160,16 @@ export interface HarnessOptions {
   carpoolReconcile?: Deps['carpoolReconcile'];
   /** /france 页发版一键（#618）读状态文件、起子进程跑预检的替身；不给就是没接上（内存版、开发环境一样）。 */
   franceRelease?: Deps['franceRelease'];
+  /** 发版预检的七项读法。不给就是没接上。 */
+  francePreflight?: Deps['francePreflight'];
   /** /france 页「发版」卡（#1231）读 GitHub 和发布目录的替身；不给就是没接上（内存版、开发环境一样）。 */
   releaseCard?: Deps['releaseCard'];
   /** 「发布到法国」按钮写请求文件的替身（#1232）；不给就是没接上。 */
   releaseRequest?: Deps['releaseRequest'];
   /** 「要你拍」拍完往进度单、任务单留言的替身（#1915）；不给就是没接上。 */
   decisionCommenter?: Deps['decisionCommenter'];
+  /** 本人 GitHub 身份那一套（#1989）的替身；不给就是没接上（那几个接口回 503）。 */
+  githubUser?: Deps['githubUser'];
   /**
    * 新哈希用的 scrypt 参数。不传用 TEST_SCRYPT_PARAMS。
    * 传 null：不设到 Deps 上，跟生产 main.ts 一样走 SCRYPT_PARAMS（慢，一条测试里最多用一次）。
@@ -209,13 +215,16 @@ function wire<S extends Store>(
     ...(options.routingOrder ? { routingOrder: options.routingOrder } : {}),
     ...(options.taskRoutePins ? { taskRoutePins: options.taskRoutePins } : {}),
     ...(options.runTranscript ? { runTranscript: options.runTranscript } : {}),
+    ...(options.requests ? { requests: options.requests } : {}),
     ...(options.taskRedo ? { taskRedo: options.taskRedo } : {}),
     ...(options.orgSwitch ? { orgSwitch: options.orgSwitch } : {}),
     ...(options.carpoolReconcile ? { carpoolReconcile: options.carpoolReconcile } : {}),
     ...(options.franceRelease ? { franceRelease: options.franceRelease } : {}),
+    ...(options.francePreflight ? { francePreflight: options.francePreflight } : {}),
     ...(options.releaseCard ? { releaseCard: options.releaseCard } : {}),
     ...(options.releaseRequest ? { releaseRequest: options.releaseRequest } : {}),
     ...(options.decisionCommenter ? { decisionCommenter: options.decisionCommenter } : {}),
+    ...(options.githubUser ? { githubUser: options.githubUser } : {}),
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {
       async signal(workflowId, signal) {

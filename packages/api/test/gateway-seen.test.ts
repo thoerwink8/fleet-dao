@@ -1,5 +1,5 @@
 // /healthz 的 feishu_gateway：飞书网关（香港）还来不来。网关的真客户端（packages/feishu 的 createBackend，香港跑的同一份）
-// 对着后端长轮询意图卡，通行证验过的才记下；读的时候现算：意图卡轮询 5 分钟没来报红，后端刚起、网关还没来过是「没查成」
+// 对着后端报飞书用量，通行证验过的才记下；读的时候现算：用量上报 5 分钟没来报红，后端刚起、网关还没来过是「没查成」
 // （红，不当成好），没配通行证是「未接」。会随时间自己变红，发布脚本只标待处理（health.test.ts 核对名单）。
 import { createBackend } from '@fleet-dao/feishu';
 import { IntentRoutes } from '@fleet-dao/shared';
@@ -17,6 +17,7 @@ import { GATEWAY_PASS, type Harness, harness, T0 } from './harness.ts';
 
 const SEC = 1_000;
 const MIN = 60_000;
+const USAGE = { reportId: '11111111-1111-4111-8111-111111111111', calls: 0, at: T0.toISOString() };
 
 /** 别的项都好，只看飞书网关这一项。 */
 function healthOf(feishuGateway: Parameters<typeof serviceHealthChecks>[0]['feishuGateway']) {
@@ -62,44 +63,44 @@ function setup() {
 }
 
 describe('飞书网关还来不来', () => {
-  it('网关的真客户端来长轮询意图卡：记下来，这一项绿，写明几秒前来过', async () => {
+  it('网关的真客户端来报用量：记下来，这一项绿，写明几秒前来过', async () => {
     const s = setup();
     const gw = gatewayClient(s.h);
     s.at(20 * SEC);
-    await gw.intentCards(0);
+    await gw.reportUsage(USAGE);
     s.at(32 * SEC);
     expect(await s.report()).toEqual({
       status: 200,
-      item: { ok: true, message: '意图卡轮询 12 秒前来过' },
+      item: { ok: true, message: '用量上报 12 秒前来过' },
     });
   });
 
   it('通行证不对、没带：请求被拒，不算来过（后端起来 6 分钟了一次都没来：红）', async () => {
     const s = setup();
     const wrong = gatewayClient(s.h, 'not-the-gateway-pass-0123456789abcdef');
-    await expect(wrong.intentCards(0)).rejects.toMatchObject({ kind: 'rejected', status: 401 });
-    const bare = await s.h.cockpit.request('/api/feishu/intent-cards?waitSeconds=0');
+    await expect(wrong.reportUsage(USAGE)).rejects.toMatchObject({ kind: 'rejected', status: 401 });
+    const bare = await s.h.cockpit.request('/api/feishu/gateway/usage', { method: 'POST' });
     expect(bare.status).toBe(401);
     s.at(6 * MIN);
     expect(await s.report()).toEqual({
       status: 503,
-      item: { ok: false, code: 'silent', message: '后端起来 6 分钟了，意图卡轮询一次都没来过' },
+      item: { ok: false, code: 'silent', message: '后端起来 6 分钟了，用量上报一次都没来过' },
     });
   });
 
-  it('意图卡轮询 5 分钟没来：红，写明多久没来；又来了自己变绿', async () => {
+  it('用量上报 5 分钟没来：红，写明多久没来；又来了自己变绿', async () => {
     const s = setup();
     const gw = gatewayClient(s.h);
-    await gw.intentCards(0);
+    await gw.reportUsage(USAGE);
     s.at(GATEWAY_SILENT_MS);
     expect((await s.report()).status).toBe(200);
     s.at(GATEWAY_SILENT_MS + SEC);
     expect(await s.report()).toEqual({
       status: 503,
-      item: { ok: false, code: 'silent', message: '意图卡轮询 5 分钟没来过' },
+      item: { ok: false, code: 'silent', message: '用量上报 5 分钟没来过' },
     });
     s.at(GATEWAY_SILENT_MS + 30 * SEC);
-    await gw.intentCards(0);
+    await gw.reportUsage(USAGE);
     expect(await s.report()).toMatchObject({ status: 200, item: { ok: true } });
   });
 
@@ -108,7 +109,7 @@ describe('飞书网关还来不来', () => {
     s.at(12 * SEC);
     expect(await s.report()).toEqual({
       status: 503,
-      item: { ok: false, code: 'unchecked', message: '没查成：后端起来才 12 秒，意图卡轮询还没来过' },
+      item: { ok: false, code: 'unchecked', message: '没查成：后端起来才 12 秒，用量上报还没来过' },
     });
   });
 
@@ -154,20 +155,17 @@ describe('飞书网关还来不来', () => {
     });
   });
 
-  it('只认意图卡轮询：收原话、撤回、补漏游标、卡回执来过也记，但不顶替它（网关在、意图卡那条没在跑照样红）', async () => {
+  it('只认用量上报：进群记录来过也记，但不顶替它（网关在、用量上报那条没在跑照样红）', async () => {
     let t = T0.getTime();
     const seen: GatewaySeen = createGatewaySeen(() => new Date(t));
-    seen.saw(IntentRoutes.intakeMessage);
-    seen.saw(IntentRoutes.intakeRecall);
-    seen.saw(IntentRoutes.cursors);
-    seen.saw(IntentRoutes.ackCards);
+    seen.saw(IntentRoutes.intakeJoin);
     t += 6 * MIN;
     await expect(seen.check()).rejects.toMatchObject({ code: 'silent' });
-    // 原话还在送来：只多一句进日志的细节，对外照样红
-    seen.saw(IntentRoutes.intakeMessage);
+    // 进群记录还在送来：只多一句进日志的细节，对外照样红
+    seen.saw(IntentRoutes.intakeJoin);
     await expect(seen.check()).rejects.toMatchObject({
       code: 'silent',
-      detail: '网关还在（收原话在来），意图卡那条没在跑',
+      detail: '网关还在（进群记录在来），用量上报那条没在跑',
     });
   });
 });

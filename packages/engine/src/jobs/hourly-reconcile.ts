@@ -5,6 +5,7 @@
 // → GitHub 两个机器人的权限自检（jobs/github-app-check.ts：缺的、没查成的报提醒，好了自己撤）
 // → 整池暂停到期的飞书（jobs/pool-hold-push.ts：没配、没推成记没查成，不当成推过；不给 poolHoldPush 的单测这一项跳过）
 // → 主线红的飞书（jobs/main-red-push.ts：变红推一次、转绿推已恢复；没配、没推成、运行列表读不到记没查成，不当成推过；不给 mainRedPush 的单测这一项跳过）
+// → 等你拍板、引擎问你的飞书（jobs/awaiting-push.ts：每件事只推一次，F1 #2051；不给 awaitingPush 的单测这一项跳过）
 // → 结局记进 schedule_runs。
 // 核对在提醒之前：它新报的提醒这一轮还不满 24 小时，不会被再推；权限自检放最后：它新报、撤的提醒这一轮提醒那部分不再碰。
 // scanned = 看了几个对象（树、探针目录、审到的合并 PR、对上单的合并 PR、没处理的提醒、
@@ -13,6 +14,7 @@
 // 写明哪里没查成；不记成 ok（没跑成 ≠ 没问题）。
 
 import type { AlertRow, ScheduleResult } from '@fleet-dao/db';
+import type { WorktreeInventory } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { HourlyReconcileRun } from '../contract.ts';
 import { type AlertSweepDeps, sweepAlerts } from './alert-sweep.ts';
@@ -33,6 +35,7 @@ import {
   retireWorkflowAlerts,
 } from './reconcile-checks.ts';
 import { clip, type SweepPart } from './reconcile-common.ts';
+import { inventoryOf } from './worktree-cleanup.ts';
 import { sweepWorktrees, type WorktreeSweepDeps } from './worktree-sweep.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来。 */
@@ -69,6 +72,16 @@ export type HourlyReconcileJobDeps = WorktreeSweepDeps &
      * 没推成由它自己记进 unchecked，不许记成推过。
      */
     mainRedPush?: () => Promise<SweepPart>;
+    /**
+     * 等你拍板、引擎问你就往飞书推一条（每件事一次）。不给 = 这一轮不推（单测外壳）；真装配总会给。
+     * 没推成由它自己记进 unchecked，不许记成推过。
+     */
+    awaitingPush?: () => Promise<SweepPart>;
+    /**
+     * 工作树这一部分看完存一份清单（#1993，资源页「仓库」一段读它）。不给 = 这一轮不存（单测外壳）；真装配总会给。
+     * 存不进记进 unchecked，不许当成存了。
+     */
+    saveInventory?: (inventory: WorktreeInventory) => Promise<void>;
   };
 
 /** 这一轮没跑成：结局已经记进 schedule_runs，活动照样报失败，Temporal 里也看得见。 */
@@ -117,6 +130,13 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     });
   }
   const trees = await sweepWorktrees(deps, before);
+  if (deps.saveInventory) {
+    try {
+      await deps.saveInventory(inventoryOf(trees, { trigger: 'hourly', at: deps.now(), root: deps.root }));
+    } catch (err) {
+      trees.unchecked.push(`工作树清单没存成（资源页上还是上一份）：${errMessage(err)}`);
+    }
+  }
   // 核对在提醒之前：这一轮新报的还不满 24 小时，提醒那部分不会再推它们
   const retired = await retireWorkflowAlerts(deps);
   const merged = await checkMergedPrs(deps);
@@ -163,6 +183,19 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
       };
     }
   }
+  let awaitingPart: SweepPart = { scanned: 0, found: 0, unchecked: [] };
+  if (deps.awaitingPush) {
+    try {
+      awaitingPart = await deps.awaitingPush();
+    } catch (err) {
+      awaitingPart = {
+        failed: `等你拍板、引擎问你的飞书推送没跑成：${errMessage(err)}`,
+        scanned: 0,
+        found: 0,
+        unchecked: [],
+      };
+    }
+  }
   return combineParts([
     trees,
     retired,
@@ -177,6 +210,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     apps,
     poolHoldPart,
     mainRedPart,
+    awaitingPart,
   ]);
 }
 

@@ -14,7 +14,7 @@ import { inkClass } from '../../layout/tone';
 import { ActionButtons } from '../../task-actions';
 import { Button } from '../../ui/button';
 import type { TicketUsage } from '../resources';
-import { CardLink, needsFounder, statusTextOf, WAIT_LABEL } from '../running-card';
+import { CardLink, needsFounder, statusTextOf, waitLineOf } from '../running-card';
 import type { HomeRunning } from '../types';
 import { targetOfItem, useBoardUi } from './board-ui';
 import {
@@ -164,6 +164,20 @@ function TicketPanel({
         </Section>
       ) : null}
 
+      {item.waitingReason === 'parked' ? (
+        <Section title="停下等人">
+          <div
+            className="rounded-lg border border-st-human-line bg-st-human-soft px-3 py-2 text-body break-words"
+            data-parked-why
+          >
+            {item.parked ?? '引擎没写停下的原因'}
+            <div className="mt-1 text-meta text-muted-foreground">
+              看过之后点上面的「继续」接着做，「放弃」不做了，「重做」从头再来。
+            </div>
+          </div>
+        </Section>
+      ) : null}
+
       <Section title="现在">
         <div className="space-y-1.5">
           <Row label="在哪一段">
@@ -181,7 +195,7 @@ function TicketPanel({
               <span className="text-muted-foreground">没在等，正常往前走</span>
             ) : (
               <>
-                {WAIT_LABEL[item.waitingReason]}
+                {waitLineOf(item)}
                 {item.waitingSince ? (
                   <span className="num whitespace-nowrap text-muted-foreground">
                     {' · 已 '}
@@ -261,7 +275,7 @@ function TicketButton({ item, onSelect }: { item: HomeRunning; onSelect(id: stri
         </div>
         <div className="mt-1 truncate text-meta text-muted-foreground">
           {item.worker ?? '没有进程在跑'}
-          {item.waitingReason !== 'nothing' ? ` · ${WAIT_LABEL[item.waitingReason]}` : ''}
+          {item.waitingReason !== 'nothing' ? ` · ${waitLineOf(item)}` : ''}
         </div>
       </button>
     </li>

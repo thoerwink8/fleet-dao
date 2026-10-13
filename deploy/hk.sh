@@ -659,7 +659,7 @@ readback_gateway() {
     while IFS='=' read -r key val; do s[$key]=$val; done <<<"$st"
   done
   case ${s[connected]:-} in
-  yes) ok "飞书网关 ${s[current]:0:12} 在跑，长连接连着飞书（这次起来后处理过 ${s[messages]:-0} 条消息）" ;;
+  yes) ok "飞书网关 ${s[current]:0:12} 在跑，长连接连着飞书" ;;
   reconnecting) red "飞书网关在跑，但长连接断了、${GATEWAY_CONNECT_WAIT} 秒里没重连上：journalctl -u $GATEWAY_UNIT -n 50" ;;
   *) red "飞书网关在跑，但这次起来之后 ${GATEWAY_CONNECT_WAIT} 秒里没见它连上飞书：journalctl -u $GATEWAY_UNIT -n 50" ;;
   esac

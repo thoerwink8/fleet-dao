@@ -316,7 +316,7 @@ export interface WriteSpecDocInput extends Scope {
 // ---- 人、报警、计时
 
 export interface RaiseAlertInput extends Scope {
-  level: 'stuck' | 'info';
+  level: 'stuck' | 'info' | 'decision';
   title: string;
   detail: string;
   /** 同一件事只一张卡，状态变了原地更新。 */

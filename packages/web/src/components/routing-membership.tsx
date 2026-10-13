@@ -416,13 +416,7 @@ export function PurposeModelMenu({
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={remove.isPending}>先不</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={remove.isPending}
-              onClick={(e) => {
-                e.preventDefault();
-                void runRemove();
-              }}
-            >
+            <AlertDialogAction loading={remove.isPending} onConfirm={runRemove}>
               移出
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -441,6 +435,7 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
   const [keys, setKeys] = useState<string[]>([]);
   const [noted, setNoted] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [dropKey, setDropKey] = useState<string | null>(null);
   const locked = edit.disabledWhy;
 
   const onRegister = async (e: FormEvent) => {
@@ -467,6 +462,7 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
       setError(null);
     } catch (err) {
       setError(errorText(err));
+      throw err;
     }
   };
 
@@ -489,7 +485,12 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
           placeholder="例如 claude-sonnet-x"
           className="min-w-0 flex-1"
         />
-        <Button type="submit" size="sm" disabled={locked !== null || register.isPending || key.trim() === ''}>
+        <Button
+          type="submit"
+          size="sm"
+          loading={register.isPending}
+          disabled={locked !== null || register.isPending || key.trim() === ''}
+        >
           登记
         </Button>
         {noted ? <p className="text-body text-ink-done">已登记 {noted}</p> : null}
@@ -504,9 +505,10 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
                 size="xs"
                 variant="ghost"
                 className={TAP}
+                loading={revoke.isPending}
                 disabled={locked !== null || revoke.isPending}
                 aria-label={`撤掉 ${item}`}
-                onClick={() => void drop(item)}
+                onClick={() => setDropKey(item)}
               >
                 撤掉
               </Button>
@@ -514,6 +516,27 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
           ))}
         </ul>
       ) : null}
+      <AlertDialog open={dropKey !== null} onOpenChange={(open) => !open && setDropKey(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>撤掉这个模型串？</AlertDialogTitle>
+            <AlertDialogDescription>
+              从这张手工登记的名单里拿掉{dropKey ? `「${dropKey}」` : ''}。路由目录里的模型不动。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>先不</AlertDialogCancel>
+            <AlertDialogAction
+              onConfirm={async () => {
+                if (!dropKey) return;
+                await drop(dropKey);
+              }}
+            >
+              撤掉
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

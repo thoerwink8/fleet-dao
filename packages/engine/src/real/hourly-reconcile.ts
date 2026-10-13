@@ -4,7 +4,8 @@
 // GitHub（auditMergedPrs，和对账补漏同一个）；工作流在不在跑、挂没挂着问这次活动的 Temporal 客户端；这个
 // 阶段派不派得出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；GitHub 两个机器人的权限自检问
 // @fleet-dao/github 的 selfCheck（受管的仓从库里的 repos 表列）；提醒的读写、操作记录、结局记账是同一个库。
-import { readdir } from 'node:fs/promises';
+import { lstat, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { loadQuotaConfig } from '@fleet-dao/adapters/quota';
 import {
   alertByKey,
@@ -14,7 +15,9 @@ import {
   getApproval,
   insertAlertOnce,
   issueWorkFacts,
+  lastSessionByTree,
   latestAlertByPrefix,
+  listAwaitingMe,
   listManagedRepos,
   listOpenAlerts,
   listOpenTaskRows,
@@ -26,7 +29,11 @@ import {
   quotaTable,
   readPoolHoldsSetting,
   recordAlertFiling,
+  recordWorktreeCleanupDone,
+  recordWorktreeCleanupStart,
+  resolveAlertByKey,
   resolveAlertWithReason,
+  saveWorktreeInventory,
   startScheduleRun,
   stopTaskRows,
   subtaskTreeRefs,
@@ -34,6 +41,7 @@ import {
   taskStateOf,
   updateOpenAlert,
   upsertAlert,
+  worktreeAuditRows,
 } from '@fleet-dao/db';
 import { type GitHub, type RepoRef, readCi, readPull, requiredChecksFor } from '@fleet-dao/github';
 import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
@@ -42,7 +50,9 @@ import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
 import { alertRepoFromText } from '../jobs/alert-sweep.ts';
 import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
+import { pushAwaitingMe } from '../jobs/awaiting-push.ts';
 import { CLOSED_ISSUE_ABANDON_BY } from '../jobs/closed-issue-tasks.ts';
+import { COCKPIT_URL_ENV, cockpitLink } from '../jobs/cockpit-link.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import {
@@ -60,6 +70,7 @@ import {
   type WorkflowReader,
   type WorkflowView,
 } from '../jobs/reconcile-common.ts';
+import type { WorktreeCleanupDeps } from '../jobs/worktree-cleanup.ts';
 import type { PortContext } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
 import { taskAbandonSignal, taskStatusQuery } from '../task-contract.ts';
@@ -70,8 +81,46 @@ import { PROBE_DIR } from './route-probe.ts';
 import { isWorkflowGone } from './route-wake.ts';
 import type { SessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
-import { treeLeftovers } from './user-git.ts';
+import { treeBytes, treeLeftovers } from './user-git.ts';
 import { SESSION_TMP_DIR, type WorkTrees } from './worktrees.ts';
+
+/** 引擎镜像裸仓的根：和 github 包（github.ts 的 mirrorRoot）、cold-verify-run.ts 同一条路。 */
+export function defaultMirrorRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return join(env.FLEET_GITHUB_STATE_DIR?.trim() || '/var/lib/fleet-dao/github', 'mirrors');
+}
+
+/**
+ * 一个仓的镜像裸仓多大（字节，按占用的块算，和 du 一样；硬链接只算一次，不跟符号链接）。引擎自己的目录，不用借会话用户。
+ * 还没镜像过（目录不在）回 null；读不了照抛（没量成）。路径和 github 包的 mirrorPath 一样（owner、仓名都转小写）。
+ */
+export async function mirrorBytes(
+  root: string,
+  repo: { owner: string; name: string },
+): Promise<number | null> {
+  const top = join(root, repo.owner.toLowerCase(), `${repo.name.toLowerCase()}.git`);
+  try {
+    await lstat(top);
+  } catch (err) {
+    if ((err as { code?: unknown }).code === 'ENOENT') return null;
+    throw err;
+  }
+  const seen = new Set<string>();
+  let bytes = 0;
+  const stack = [top];
+  while (stack.length > 0) {
+    const dir = stack.pop() as string;
+    for (const e of await readdir(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      const st = await lstat(p);
+      const key = `${st.dev}:${st.ino}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      bytes += st.blocks * 512;
+      if (e.isDirectory()) stack.push(p);
+    }
+  }
+  return bytes;
+}
 
 /** 列一个目录：只认目录（符号链接不跟，算「不是目录」，没碰）。读不了照抛。 */
 export async function listDirEntries(dir: string): Promise<{ name: string; isDir: boolean }[]> {
@@ -199,6 +248,8 @@ export interface HourlyReconcileWiring {
   selfCheck: GitHubAppCheckDeps['apps']['selfCheck'];
   now?: () => Date;
   log?: HourlyReconcileJobDeps['log'];
+  /** 引擎镜像裸仓的根（<FLEET_GITHUB_STATE_DIR>/mirrors）；不给照环境变量拼，和 github 包的 mirrorPath 同一个。 */
+  mirrorRoot?: string;
   /** 以下测试用。 */
   gitBin?: string;
   shBin?: string;
@@ -213,6 +264,8 @@ export interface HourlyReconcileWiring {
   autoMergeAlerts?: HourlyReconcileJobDeps['autoMergeAlerts'];
   /** 测试用：换掉「单已关就撤任务」那部分的 Temporal / GitHub 口子；不给就用真的（问 Temporal 在跑的任务工作流、现读单状态）。 */
   closedIssueTasks?: HourlyReconcileJobDeps['closedIssueTasks'];
+  /** 测试用：换掉「等你拍板、引擎问你」的飞书推送；不给就照真的装（读库、经 FLEET_FEISHU_WEBHOOK 推）。 */
+  awaitingPush?: HourlyReconcileJobDeps['awaitingPush'];
 }
 
 /** 发「放弃」信号最多等多久（毫秒）：到点由连接取消调用，不在本地空等。 */
@@ -452,6 +505,17 @@ export function hourlyReconcileJob(
           known,
           { scratch },
         ),
+      size: (dir, user) =>
+        treeBytes({
+          exec: w.exec,
+          user,
+          dir,
+          scopePrefix: 'reconcile-du',
+          ...(w.shBin ? { sh: w.shBin } : {}),
+        }),
+      lastSessions: () => lastSessionByTree(w.db),
+      mirrorBytes: (repo) => mirrorBytes(w.mirrorRoot ?? defaultMirrorRoot(), repo),
+      saveInventory: (inv) => saveWorktreeInventory(w.db, inv),
       issue: (ref) => issueWorkFacts(w.db, ref),
       prHeads: (ref) => prHeadsOfBranch(w.db, ref),
       subtaskTrees: (ids) => subtaskTreeRefs(w.db, ids),
@@ -544,6 +608,7 @@ export function hourlyReconcileJob(
             });
           },
           send: feishuWebhookSender({ env: process.env }),
+          cockpit: (path) => cockpitLink(process.env[COCKPIT_URL_ENV], path),
         }),
       mainRedPush: () =>
         pushMainRed({
@@ -578,10 +643,63 @@ export function hourlyReconcileJob(
             });
           },
           send: feishuWebhookSender({ env: process.env }),
+          cockpit: (path) => cockpitLink(process.env[COCKPIT_URL_ENV], path),
         }),
+      awaitingPush:
+        w.awaitingPush ??
+        (() =>
+          pushAwaitingMe({
+            now,
+            list: async (since) =>
+              (await listAwaitingMe(w.db, { since })).map((x) => ({
+                kind: x.kind,
+                id: x.id,
+                taskId: x.taskId,
+                title: x.title,
+                detail: x.detail,
+              })),
+            sentBody: async (key) => (await alertByKey(w.db, key))?.body ?? null,
+            markSent: async (x) => {
+              // 推过记在提醒表里当去重；立刻标成已处理，不占驾驶舱「提醒」的位置（按键还查得到）
+              await upsertAlert(w.db, {
+                dedupeKey: x.dedupeKey,
+                level: 'daily',
+                taskId: null,
+                title: x.title,
+                body: x.body,
+                link: x.link,
+              });
+              await resolveAlertByKey(w.db, { dedupeKey: x.dedupeKey, by: 'engine:feishu-push', at: now() });
+            },
+            send: feishuWebhookSender({ env: process.env }),
+            cockpit: (path) => cockpitLink(process.env[COCKPIT_URL_ENV], path),
+          })),
       now,
       log,
       ...(w.inspectMax === undefined ? {} : { inspectMax: w.inspectMax }),
+    };
+  };
+}
+
+/**
+ * 一键清理没用的工作树（#1993，jobs/worktree-cleanup.ts）：清扫用和每小时对账**同一份**装配（同一个判据、同一个删树口子），
+ * 操作记录读写 audit_log（target worktrees），清单存 worktree_inventory。
+ */
+export function worktreeCleanupJob(
+  w: HourlyReconcileWiring,
+): (client: Client, taskQueue: string) => WorktreeCleanupDeps {
+  const hourly = hourlyReconcileJob(w);
+  return (client, taskQueue) => {
+    const deps = hourly(client, taskQueue);
+    return {
+      sweep: () => deps,
+      rows: (since) => worktreeAuditRows(w.db, since),
+      recordStart: (i) => recordWorktreeCleanupStart(w.db, i),
+      recordDone: (i) => recordWorktreeCleanupDone(w.db, i),
+      saveInventory: (inv) => saveWorktreeInventory(w.db, inv),
+      openAlerts: async () => (await listOpenAlerts(w.db, { limit: 500 })).alerts,
+      now: deps.now,
+      log: deps.log,
     };
   };
 }

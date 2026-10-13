@@ -8,11 +8,12 @@
 //    sonnet→4.6、opus→4.7）、inherit、Fable、旧版、换档、没写都红；effort 也钉死（medium / medium / high）。
 // 3. 权限：斥候 Explore 和设计 Plan 只读——disallowedTools 带 Edit、Write，tools 白名单里也不许有它们；三份都不写 isolation
 //    （工作树由派活时选；写了引擎会话里会整个挡掉）。
-// 4. 汇报：正文都要求汇报首行写自己的模型 id（派完核对实际 id 靠它）。斥候限回合数。
+// 4. 汇报：正文都要求汇报首行写自己的模型 id（派完核对实际 id 靠它）。三份都限回合数、都写 omitClaudeMd: true（决定 0089：
+//    主对话的回合、等待、报进度规矩不进子代理），工人正文自带底线。
 // 5. 只有一份原件：仓里不许再有 .claude/agents/（同名项目级会压住用户级，两份就会漂移）；引擎读的目录（adapters 的 SUBAGENTS_DIR）
 //    指到 agents/subagents；同步工具的名单（targets.ts 的 SUBAGENT_TARGET）恰好是这三份（按文本核，不跨包 import）。
 // 6. 通用版：三份装到每台机器、别的仓的会话也读，正文不许带 fleet-dao 专属的命令、路径和决定编号。
-// 7. 指挥官技能、参考页、标准路径清单都写着三个角色和这条测试；参考页写清 Workflow 里 agent() 怎么写。
+// 7. 标准路径清单盖着 agents/subagents/。（技能、参考页的文字不再钉，决定 0089。）
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -89,7 +90,11 @@ function problems(file: string, text: string): string[] {
     for (const t of list(fm.tools))
       if (['Edit', 'Write', 'NotebookEdit'].includes(t)) out.push(`${file}：只读的角色，tools 里不许有 ${t}`);
   }
-  if (name === 'Explore' && !/^\d+$/.test(fm.maxTurns ?? '')) out.push(`${file}：斥候要限 maxTurns`);
+  if (!/^\d+$/.test(fm.maxTurns ?? '')) out.push(`${file}：要限 maxTurns`);
+  // 决定 0089：子代理不读主对话的全局说明（回合、等待、报进度那套只管主对话），底线和四类写在定义正文里
+  if (fm.omitClaudeMd !== 'true') out.push(`${file}：要写 omitClaudeMd: true`);
+  if (role?.readOnly === false && !/没验证过不说完成/.test(body))
+    out.push(`${file}：正文没写底线「没验证过不说完成」`);
   if (!/汇报：第一行写 `模型: <你自己的模型 id>`/.test(body))
     out.push(`${file}：正文没要求汇报首行写自己的模型 id`);
   return out;
@@ -161,37 +166,9 @@ function textOf(file: string): string {
   return t;
 }
 
-const SKILL = read(`${ROOT}agents/skills/commander/SKILL.md`);
-const GUIDE = read(`${ROOT}agents/skills/commander/references/子代理选模型.md`);
 const STANDARD = read(`${ROOT}packages/conventions/standard-paths.json`);
 const TARGETS = read(`${ROOT}packages/agents-sync/src/targets.ts`);
 const ADAPTER = read(`${ROOT}packages/adapters/src/claude-code/subagents.ts`);
-
-/** 指挥官技能、参考页里必须写着的 */
-const DOC_RULES: Record<string, [which: 'SKILL' | 'GUIDE', re: RegExp]> = {
-  技能三个角色: [
-    'SKILL',
-    /斥候 Haiku 5\.5 写 `subagent_type: "Explore"`[^\n]*工人 Sonnet 5\.5 写 `subagent_type: "general-purpose"`[^\n]*设计 Opus 5\.5 写 `subagent_type: "Plan"`/,
-  ],
-  技能不传model升档才传: ['SKILL', /派活不传 `model`，用定义里的钉；难的活升档才传 `model`/],
-  技能不另造类型: ['SKILL', /不另造类型/],
-  技能指向测试: ['SKILL', /`agents\/test\/rules\/project-subagents\.rules\.test\.ts`/],
-  参考页三个角色表: ['GUIDE', /\n\| 斥候 \| `Explore` \| `claude-haiku-5-5` \| medium \|/],
-  参考页工人: ['GUIDE', /\n\| 工人 \| `general-purpose` \| `claude-sonnet-5-5` \| medium \|/],
-  参考页设计: ['GUIDE', /\n\| 设计 \| `Plan` \| `claude-opus-5-5` \| high \|/],
-  参考页Workflow: [
-    'GUIDE',
-    /`agent\(\)` 的 `agentType` 填 `"Explore"`、`"general-purpose"`、`"Plan"`，不传 `model` 就用定义里的钉/,
-  ],
-  参考页页面别改: ['GUIDE', /不在 Mirasim 智能体页面里编辑或开关/],
-  参考页只有ClaudeCode读: ['GUIDE', /只有 Claude Code 读这些定义文件/],
-};
-
-function missingDoc(t: { SKILL: string; GUIDE: string }): string[] {
-  return Object.entries(DOC_RULES)
-    .filter(([, [which, re]]) => !re.test(t[which]))
-    .map(([name]) => name);
-}
 
 describe('规矩：子代理只分三个角色，定义只有 agents/subagents/ 一份（决定 0087）', () => {
   it('名单：agents/subagents/ 下恰好 Explore.md、general-purpose.md、Plan.md', () => {
@@ -215,8 +192,7 @@ describe('规矩：子代理只分三个角色，定义只有 agents/subagents/ 
     expect(syncFiles(TARGETS)).toEqual(WANT_FILES);
   });
 
-  it('指挥官技能、参考页写着三个角色、派法、Workflow 写法；标准路径清单盖着 agents/subagents/', () => {
-    expect(missingDoc({ SKILL, GUIDE })).toEqual([]);
+  it('标准路径清单盖着 agents/subagents/', () => {
     expect(STANDARD).toContain('"agents/subagents/"');
     expect(STANDARD).not.toContain('".claude/agents/"');
   });
@@ -295,7 +271,10 @@ describe('规矩：子代理只分三个角色，定义只有 agents/subagents/ 
     ]);
     const noTurns = scout.replace(/^maxTurns: .*\n/m, '');
     expect(noTurns).not.toBe(scout);
-    expect(problems('Explore.md', noTurns)).toEqual(['Explore.md：斥候要限 maxTurns']);
+    expect(problems('Explore.md', noTurns)).toEqual(['Explore.md：要限 maxTurns']);
+    const noOmit = gp.replace(/^omitClaudeMd: .*\n/m, '');
+    expect(noOmit, '找不到 omitClaudeMd 那一行，这条失败造不出来').not.toBe(gp);
+    expect(problems('general-purpose.md', noOmit)).toEqual(['general-purpose.md：要写 omitClaudeMd: true']);
     const noReport = gp.replace('汇报：第一行写 `模型: <你自己的模型 id>`', '汇报：');
     expect(noReport).not.toBe(gp);
     expect(problems('general-purpose.md', noReport)).toEqual([
@@ -330,17 +309,5 @@ describe('规矩：子代理只分三个角色，定义只有 agents/subagents/ 
     expect(back, '找不到 SUBAGENTS_DIR 那一行，这条失败造不出来').not.toBe(ADAPTER);
     expect(engineDir(back)).toBe('.claude/agents');
     expect(() => engineDir('export const SUBAGENTS_DIR = "x";')).toThrow(/认不出 SUBAGENTS_DIR/);
-  });
-
-  it('【故意造出的失败】技能退回 fleet-* 名单、参考页删掉 Workflow 写法或「页面别改」：查得出来', () => {
-    const oldSkill = SKILL.replace(/斥候 Haiku 5\.5 写 `subagent_type: "Explore"`/, '读码派 `fleet-scout`');
-    expect(oldSkill, '技能里找不到那一句，这条失败造不出来').not.toBe(SKILL);
-    expect(missingDoc({ SKILL: oldSkill, GUIDE })).toEqual(['技能三个角色']);
-    const noWf = GUIDE.replace(/`agent\(\)` 的 `agentType` 填/, '`agent()` 随便填');
-    expect(noWf).not.toBe(GUIDE);
-    expect(missingDoc({ SKILL, GUIDE: noWf })).toEqual(['参考页Workflow']);
-    const noPage = GUIDE.replaceAll('不在 Mirasim 智能体页面里编辑或开关', '');
-    expect(noPage).not.toBe(GUIDE);
-    expect(missingDoc({ SKILL, GUIDE: noPage })).toEqual(['参考页页面别改']);
   });
 });

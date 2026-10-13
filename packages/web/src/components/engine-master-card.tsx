@@ -43,28 +43,23 @@ export function EngineMasterControl({ standbyNote }: { standbyNote?: ReactNode }
   const master = view.kind === 'ok' ? view.master : null;
   const target = master === null ? null : !master.on;
   const verb = target ? '开启' : '关闭';
-  const confirm = () => {
+  // 确认框等它：成功框关、弹成功；失败弹 toast 并抛给框——框留着写原因、能再点（#2009）
+  const confirm = async () => {
     if (target === null) return;
-    update.mutate(
-      {
+    try {
+      await update.mutateAsync({
         key: ENGINE_MASTER_SETTING,
         body: {
           value: target,
           version: row?.version ?? 0,
           reason: `法国页上点了${verb}引擎总开关`,
         },
-      },
-      {
-        onSuccess: () => {
-          setAsking(false);
-          toast.success(`已${verb}引擎总开关`);
-        },
-        onError: (e) => {
-          setAsking(false);
-          toast.error(`没能${verb}`, { description: errorText(e) });
-        },
-      },
-    );
+      });
+      toast.success(`已${verb}引擎总开关`);
+    } catch (e) {
+      toast.error(`没能${verb}`, { description: errorText(e) });
+      throw e;
+    }
   };
 
   const who = master === null ? null : changedBy(master);
@@ -106,14 +101,7 @@ export function EngineMasterControl({ standbyNote }: { standbyNote?: ReactNode }
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>先不</AlertDialogCancel>
-              <AlertDialogAction
-                onClick={(e) => {
-                  e.preventDefault();
-                  confirm();
-                }}
-              >
-                {verb}
-              </AlertDialogAction>
+              <AlertDialogAction onConfirm={confirm}>{verb}</AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>

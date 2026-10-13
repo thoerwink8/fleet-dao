@@ -2,7 +2,12 @@
 // 每个返回都按 shared/web-api.ts 校验后才交出去（和真后端的 reply 一样），报错的 code 和白话也照真后端。
 // 页面上的操作会真的改这里的状态并留下操作记录；刷新页面就回到初始盘面。
 
-import type { HomeResourcesSchema, SessionUsageSchema } from '@fleet-dao/shared';
+import type {
+  DiskFootprintSchema,
+  HomeResourcesSchema,
+  HostAppSchema,
+  SessionUsageSchema,
+} from '@fleet-dao/shared';
 import {
   AddPurposeModelRequest,
   AnswerNotificationRequest,
@@ -19,6 +24,7 @@ import {
   CliToolsResponseSchema,
   CredentialsResponse,
   DEFAULT_SESSION_EFFORT,
+  DisconnectGitHubResponse,
   describeEngineMaster,
   ENGINE_MASTER_SETTING,
   EnvResponseSchema,
@@ -28,6 +34,8 @@ import {
   flowStages,
   foldRouteProbeRequests,
   founderOnlyDenial,
+  GITHUB_INSTALL_REPO,
+  GITHUB_OAUTH_DISCONNECT,
   GROOM_ACTION,
   GROOM_TARGET,
   GroomNowRequest,
@@ -39,6 +47,11 @@ import {
   HomeResponseSchema,
   type HostId,
   hardBanFor,
+  ImportableReposResponse,
+  ImportRepoRequest,
+  ImportRepoResponse,
+  InstallAppRequest,
+  InstallAppResponse,
   JobsResponse,
   judgeGroomRequest,
   ManualModelRequest,
@@ -58,11 +71,15 @@ import {
   poolFull,
   poolHoldsView,
   probeHistoryStrips,
+  REPO_IMPORT_ADD,
+  REPO_IMPORT_REMOVE,
   type RealtimeTable,
   ReleaseCardSchema,
   ReleasedCommitsSchema,
+  ReleaseRecoverResponse,
   ReleaseRequestResponse,
   RemovePurposeModelRequest,
+  RemoveRepoResponse,
   RepoCiPolicyResponse,
   RepoDispatchResponse,
   ReposResponse,
@@ -120,10 +137,11 @@ import {
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import { ApiError, type FleetApi } from '../client';
-import type { AuditEntry, LiveEvent } from '../types';
+import type { AuditEntry, LiveEvent, Worktrees } from '../types';
 import type { MLog, MockState, MSubtask, MTask } from './model';
 import { createSeed, fakeAction, fakeUsage } from './seed';
 import { LIVE_FIRST_REVEAL, LIVE_REVEAL_STEP, transcriptSeed } from './transcripts';
+import { cleanupResultOf, mockLocalSessions, mockWorktrees, seedCleanups } from './worktrees';
 
 export interface MockOptions {
   /** 是否开模拟器；测试里关掉，手动调 tick()。 */
@@ -264,11 +282,14 @@ function mockRoutesMany(): boolean {
 }
 
 /** 看板多机的假环境（wsl）这一次是哪种样子：见 nodes() 的说明；地址上没写就是刚报过（fresh）。 */
-/** 机器资源（#1973）的假数据换哪一种：?mockResources=tight（紧）/ unread（cgroup、/proc 都读不到）/ missing（老后端没给）。 */
-function mockResourcesMode(): 'ok' | 'tight' | 'unread' | 'missing' {
+/**
+ * 机器资源（#1973、#1985）的假数据换哪一种：?mockResources=tight（紧）/ unread（cgroup、/proc、statfs 都读不到）/
+ * missing（老后端整块没给）/ old（老后端：有内存、CPU，没有磁盘、上线项目、按目录的占用）/ pending（按目录的还没测完第一回）。
+ */
+function mockResourcesMode(): 'ok' | 'tight' | 'unread' | 'missing' | 'old' | 'pending' {
   const v =
     typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('mockResources');
-  return v === 'tight' || v === 'unread' || v === 'missing' ? v : 'ok';
+  return v === 'tight' || v === 'unread' || v === 'missing' || v === 'old' || v === 'pending' ? v : 'ok';
 }
 
 /** 同一个编号每次得到同一个 0–1 之间的数：假数据里每个会话的占用稳定，只在上面加一点随时间的晃动。 */
@@ -299,6 +320,12 @@ export function mockResources(runIds: readonly string[], at: Date): HomeResource
         state: 'unread',
         why: '这台没有 /sys/fs/cgroup/fleet.slice/fleet-agents.slice（不在法国机器上，或会话资源池没挂）',
       },
+      disk: { state: 'unread', why: '/ 的 statfs 没读成：EACCES: permission denied' },
+      apps: {
+        state: 'unread',
+        why: '这台没有 /sys/fs/cgroup/cgroup.controllers（不是 cgroup v2，或不是 Linux）',
+      },
+      footprint: mockFootprint(at, 'unread'),
     };
   }
   const tight = mode === 'tight';
@@ -320,12 +347,23 @@ export function mockResources(runIds: readonly string[], at: Date): HomeResource
             ),
           };
   });
+  // 一个对不上单的会话（路由探针这类）：资源页把它归到「别的会话」
+  byRun['probe-route-7f3a'] = { state: 'ok', memoryMb: 186, memoryPeakMb: 240, cpuPercent: 3.1 };
+  // 法国真机上见过的（#1992）：会话收场了、scope 没回收，memory.current 是 0——不算在跑，页面写「空 scope」
+  byRun['mirasim-liveness-01'] = {
+    state: 'empty',
+    why: '/sys/fs/cgroup/fleet.slice/fleet-agents.slice/fleet-agent-mirasim-liveness-01.scope 还在，但 memory.current 是 0：里面没有进程（会话已收场、scope 没回收），不算在跑',
+  };
   const sessionsMb = Object.values(byRun).reduce((n, u) => n + (u.state === 'ok' ? u.memoryMb : 0), 0);
+  const sessionsCpu = Object.values(byRun).reduce(
+    (n, u) => n + (u.state === 'ok' && u.cpuPercent !== undefined ? u.cpuPercent : 0),
+    0,
+  );
   const usedMb = Math.min(totalMb - 200, 1_450 + sessionsMb);
   const cores = 4;
   // 和真后端一样：忙的核数和百分比出自同一个比例
   const percent = Math.min(100, Math.max(0, Math.round((tight ? 93 : 34) + wobble(0.5, 6))));
-  return {
+  const base: HomeResources = {
     at: at.toISOString(),
     everyMs: MOCK_RESOURCES_EVERY_MS,
     memory: { state: 'ok', totalMb, availableMb: totalMb - usedMb },
@@ -337,6 +375,211 @@ export function mockResources(runIds: readonly string[], at: Date): HomeResource
       load1: Math.round(((tight ? 5.6 : 1.4) + wobble(0.2, 0.4)) * 100) / 100,
     },
     sessions: { state: 'ok', byRun },
+  };
+  if (mode === 'old') return base;
+  const GIB = 1024 ** 3;
+  const totalBytes = Math.round(193.7 * GIB);
+  const usedBytes = Math.round((tight ? 181.4 : 61.8) * GIB);
+  return {
+    ...base,
+    disk: {
+      state: 'ok',
+      path: '/',
+      totalBytes,
+      usedBytes,
+      // 剩余不含给 root 预留的那 5%：已用 + 剩余比总量小一点，和真机一样
+      availableBytes: Math.max(0, Math.round(totalBytes * 0.95) - usedBytes),
+    },
+    apps: { state: 'ok', items: mockApps(t, sessionsMb, sessionsCpu / 100, runIds.length + 1, tight) },
+    footprint: mode === 'pending' ? mockFootprint(at, 'pending') : mockFootprint(at, tight ? 'tight' : 'ok'),
+  };
+}
+
+type HostApp = z.infer<typeof HostAppSchema>;
+
+/** 假的上线项目：和真后端的登记表（packages/api/src/vps-apps.ts）同样几项，数是编的。 */
+function mockApps(
+  t: number,
+  sessionsMb: number,
+  sessionsCores: number,
+  sessions: number,
+  tight: boolean,
+): HostApp[] {
+  const w = (seed: number, amp: number) => Math.sin(t / 9 + seed * 6.28) * amp;
+  const cores = (base: number, seed: number) =>
+    Math.max(0, Math.round((base + w(seed, base / 3)) * 100) / 100);
+  return [
+    {
+      id: 'cockpit',
+      name: '驾驶舱',
+      place: '/srv/fleet-dao-releases/current（后端代码）',
+      units: ['fleet-api.service'],
+      diskNote: '代码在发布版本目录里，算在「发布版本」；静态页在香港那台',
+      usage: { state: 'ok', running: 1, memoryMb: Math.round(214 + w(0.1, 12)), cpuCores: cores(0.06, 0.1) },
+    },
+    {
+      id: 'engine',
+      name: '引擎',
+      place: '/var/lib/fleet-dao/engine',
+      units: ['fleet-engine.service'],
+      usage: { state: 'ok', running: 1, memoryMb: Math.round(388 + w(0.2, 20)), cpuCores: cores(0.12, 0.2) },
+    },
+    {
+      id: 'temporal',
+      name: 'Temporal',
+      place: '/opt/fleet-dao/temporal（程序）',
+      units: ['fleet-temporal.service'],
+      diskNote: '数据存在数据库里（temporal、temporal_visibility 两个库，算在「数据库」）',
+      usage: { state: 'ok', running: 1, memoryMb: Math.round(296 + w(0.3, 10)), cpuCores: cores(0.09, 0.3) },
+    },
+    {
+      id: 'postgres',
+      name: '数据库',
+      place: '/var/lib/postgresql/16/main（PostgreSQL 16）',
+      units: ['postgresql@16-main.service'],
+      usage: { state: 'ok', running: 1, memoryMb: Math.round(342 + w(0.4, 30)), cpuCores: cores(0.05, 0.4) },
+    },
+    {
+      id: 'sessions',
+      name: 'AI 会话',
+      place: '/var/lib/fleet-work（工作树）',
+      units: ['fleet-agents.slice'],
+      usage: {
+        state: 'ok',
+        running: Math.max(1, sessions),
+        memoryMb: sessionsMb,
+        memoryMaxMb: 10_664,
+        cpuCores: Math.round(sessionsCores * 100) / 100,
+      },
+    },
+    {
+      id: 'mirasim',
+      name: '会话用户的 Mirasim',
+      place: '/home/fleet-agent-carpool/.mirasim',
+      units: ['fleet-mirasim-session.service', 'fleet-mirasim-liveness.service'],
+      diskNote: '在会话用户家里，算在「AI 会话」',
+      usage: tight
+        ? {
+            state: 'unread',
+            why: '/sys/fs/cgroup/system.slice/fleet-mirasim-session.service/memory.current 的内容认不出（前 80 字节）："abc"',
+          }
+        : { state: 'ok', running: 1, memoryMb: Math.round(165 + w(0.5, 8)), memoryMaxMb: 4096 },
+    },
+    {
+      id: 'release',
+      name: '自动发布',
+      place: '/usr/local/lib/fleet-dao',
+      units: ['fleet-auto-release.service', 'fleet-release-request.service', 'fleet-cli-upgrade.service'],
+      usage: { state: 'idle' },
+    },
+    {
+      id: 'releases',
+      name: '发布版本',
+      place: '/srv/fleet-dao-releases',
+      units: [],
+      usage: { state: 'idle', why: '这一项没有进程，只占磁盘' },
+    },
+    {
+      id: 'self-proxy',
+      name: 'self-proxy',
+      place: '不归本仓管（README「两台机器」）',
+      units: ['self-proxy-direct.service', 'self-proxy-exit.service'],
+      external: true,
+      diskNote: '不归本仓管，没登记目录',
+      usage: { state: 'ok', running: 2, memoryMb: Math.round(58 + w(0.6, 3)), cpuCores: cores(0.02, 0.6) },
+    },
+    {
+      id: 'miraquota',
+      name: 'MiraQuota 同步',
+      place: '不归本仓管（等 miraquota-win#3 发版后停）',
+      units: ['miraquota-sync.service'],
+      external: true,
+      diskNote: '不归本仓管，没登记目录',
+      usage: { state: 'ok', running: 1, memoryMb: Math.round(71 + w(0.7, 4)), cpuCores: cores(0.01, 0.7) },
+    },
+  ];
+}
+
+type DiskFootprint = z.infer<typeof DiskFootprintSchema>;
+
+/** 假的按目录占用：会话工作树有几棵读不到（700、归会话用户）演示「不全」；会话用户的家后端看不见演示「没读到」。 */
+function mockFootprint(at: Date, mode: 'ok' | 'tight' | 'unread' | 'pending'): DiskFootprint {
+  if (mode === 'pending') {
+    return { state: 'pending', why: '正在测第一回（要遍历文件，测完就有；之后每 10 分钟测一次）' };
+  }
+  const GIB = 1024 ** 3;
+  const MIB = 1024 ** 2;
+  const g = (n: number) => Math.round(n * GIB);
+  const big = mode === 'tight' ? 4 : 1;
+  const ok = (bytes: number, unreadTrees = 0, unreadSample?: string) => ({
+    state: 'ok' as const,
+    bytes,
+    unreadTrees,
+    ...(unreadSample ? { unreadSample } : {}),
+  });
+  return {
+    state: 'ok',
+    measuredAt: new Date(at.getTime() - 4 * 60_000).toISOString(),
+    everyMs: 10 * 60_000,
+    tookMs: 18_400,
+    dirs: [
+      { path: '/srv/fleet-dao-releases', appId: 'releases', appName: '发布版本', size: ok(g(6.4 * big)) },
+      { path: '/srv/fleet-dao', appId: 'releases', appName: '发布版本', size: ok(g(1.2)) },
+      {
+        path: '/var/lib/fleet-work',
+        appId: 'sessions',
+        appName: 'AI 会话',
+        size:
+          mode === 'unread'
+            ? { state: 'unread', why: '读不了 /var/lib/fleet-work：EACCES: permission denied' }
+            : ok(
+                g(0.3),
+                7,
+                '/var/lib/fleet-work/thoerwink8_fleet-dao/fleet/1979-t3a9c0d1：EACCES: permission denied',
+              ),
+      },
+      { path: '/var/lib/fleet-sessions', appId: 'sessions', appName: 'AI 会话', size: ok(312 * MIB) },
+      {
+        path: '/home/fleet-agent-carpool',
+        appId: 'sessions',
+        appName: 'AI 会话',
+        size: {
+          state: 'unread',
+          why: '读不了 /home/fleet-agent-carpool：EACCES: permission denied（后端开了 ProtectHome，看不见 /home）',
+        },
+      },
+      { path: '/var/lib/fleet-dao/engine', appId: 'engine', appName: '引擎', size: ok(g(2.7 * big)) },
+      { path: '/var/lib/fleet-dao/github', appId: 'engine', appName: '引擎', size: ok(g(3.9)) },
+      { path: '/var/log/fleet-dao', appId: 'engine', appName: '引擎', size: ok(48 * MIB) },
+      { path: '/opt/fleet-dao/temporal', appId: 'temporal', appName: 'Temporal', size: ok(412 * MIB) },
+      { path: '/usr/local/lib/fleet-dao', appId: 'release', appName: '自动发布', size: ok(2 * MIB) },
+    ],
+    databases:
+      mode === 'unread'
+        ? { state: 'unread', why: '这台后端没连数据库（开发用的内存版）' }
+        : {
+            state: 'ok',
+            items: [
+              {
+                name: 'fleet',
+                appId: 'postgres',
+                appName: '数据库',
+                size: { state: 'ok', bytes: g(1.8 * big) },
+              },
+              {
+                name: 'temporal',
+                appId: 'postgres',
+                appName: '数据库',
+                size: { state: 'ok', bytes: g(3.1) },
+              },
+              {
+                name: 'temporal_visibility',
+                appId: 'postgres',
+                appName: '数据库',
+                size: { state: 'ok', bytes: 640 * MIB },
+              },
+            ],
+          },
   };
 }
 
@@ -664,11 +907,92 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const mockCiPolicy = new Map<string, CiPolicy>();
   const mockCiRecent = new Map<string, { at: string; actor: string; from: CiPolicy; to: CiPolicy }[]>();
   const ciModeOf = (repoId: string): CiPolicy => mockCiPolicy.get(repoId) ?? 'force';
+  /** 「导入仓库」（#1989）的假数据：连着一份授权，几个仓覆盖个人/组织、已装/未装、已在驾驶舱几种样子。 */
+  const mockImportAuth = {
+    connected: true,
+    login: 'thoerwink8',
+    scopes: 'read:org repo',
+    connectedAt: new Date(now() - 86_400_000).toISOString(),
+  };
+  const mockImportRepos = () => [
+    {
+      githubId: 9001,
+      owner: 'thoerwink8',
+      name: 'widgets',
+      fullName: 'thoerwink8/widgets',
+      private: true,
+      defaultBranch: 'main',
+      ownerType: 'User' as const,
+      viewerCanAdmin: true,
+      archived: false,
+      empty: false,
+      agentInstalled: true,
+      engineInstalled: true,
+      fullyInstalled: true,
+      inCockpit: false,
+      canInstall: false,
+    },
+    {
+      githubId: 9002,
+      owner: 'thoerwink8',
+      name: 'notes',
+      fullName: 'thoerwink8/notes',
+      private: false,
+      defaultBranch: 'main',
+      ownerType: 'User' as const,
+      viewerCanAdmin: true,
+      archived: false,
+      empty: false,
+      agentInstalled: false,
+      engineInstalled: false,
+      fullyInstalled: false,
+      inCockpit: false,
+      canInstall: true,
+    },
+    {
+      githubId: 9003,
+      owner: 'adfx-studio',
+      name: 'daihuo-workbench',
+      fullName: 'adfx-studio/daihuo-workbench',
+      private: true,
+      defaultBranch: 'main',
+      ownerType: 'Organization' as const,
+      viewerCanAdmin: true,
+      archived: false,
+      empty: false,
+      agentInstalled: true,
+      engineInstalled: false,
+      fullyInstalled: false,
+      inCockpit: true,
+      reposId: st.repos[0]?.id ?? 'r-orbit',
+      canInstall: true,
+    },
+    {
+      githubId: 9004,
+      owner: 'some-org',
+      name: 'shared-lib',
+      fullName: 'some-org/shared-lib',
+      private: false,
+      defaultBranch: 'main',
+      ownerType: 'Organization' as const,
+      viewerCanAdmin: false,
+      archived: false,
+      empty: false,
+      agentInstalled: false,
+      engineInstalled: false,
+      fullyInstalled: false,
+      inCockpit: false,
+      canInstall: false,
+      installBlockedWhy: '要组织管理员先批准这个 App（你在这个组织里没有 admin）',
+    },
+  ];
   /**
    * 临时指挥官整理待办的记录（新的在前）。orbit 有一次做成、一次没做成，都在 24 小时内接手过，所以今日剩余 1/3。
    * 没有排队或在做的：按钮能点。点了以后插到最前。
    */
   const agoIso = (minutesAgo: number) => new Date(now() - minutesAgo * 60_000).toISOString();
+  /** 一键清理工作树的记录（新的在前），见 mock/worktrees.ts。 */
+  let mockCleanups: Worktrees['cleanups'] = seedCleanups(now());
   let mockGroom: GroomRequestView[] = [
     {
       requestId: 'groom-seed-ok',
@@ -708,24 +1032,122 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
 
   const iso = () => new Date(now()).toISOString();
   // 「发布到法国」按钮的假状态：默认能点；浏览器里 localStorage 的 mockRelease 写 blocked 就是接活单元没装的样子（截图用）
-  const releaseMock: {
-    last: {
-      state: string;
-      target: string | null;
-      at: string | null;
-      why: string | null;
-      phase: string | null;
+  // 点了「确认发布」之后：假的九步每 6 秒走一步，走完写一份发后体检（#2026）。localStorage 的 mockRelease 写 running /
+  // done-bad 直接画「停在等收尾」「发完但体检没通过」（截图用）。
+  const releaseMock: { startedAt: number | null; target: string | null; mode: string | null } = {
+    startedAt: null,
+    target: null,
+    // 点了「重试」「恢复引擎开关」「撤掉暂停」之后盖掉 localStorage 的 mockRelease（卡住、没成、留着标记的演示态就过去了）
+    mode: null,
+  };
+  const mockMode = () =>
+    releaseMock.mode ?? (typeof localStorage !== 'undefined' ? localStorage.getItem('mockRelease') : null);
+  const MOCK_STEP_MS = 6_000;
+  const MOCK_PHASES = ['预检', '暂停本机', '暂停法国', '等收尾', '发版', '等部署', '验证', '恢复', '派清单'];
+  const mockLast = () => {
+    const mode = mockMode();
+    // 卡住（等收尾超时）、没成（恢复那一步）的演示态：截图看「重试」「恢复引擎开关」（#2027）
+    if (mode === 'stuck' || mode === 'restore-failed') {
+      const phase = mode === 'stuck' ? 3 : 7;
+      const started = now() - 35 * 60_000;
+      return {
+        state: mode === 'stuck' ? 'blocked' : 'failed',
+        target: '提交 2005b2909c4f',
+        at: iso(),
+        why:
+          mode === 'stuck'
+            ? '等了 30 分钟，法国还有 2 个会话在跑（现场没动：引擎总开关已关、没发版；到驾驶舱点「重试」从这一步接着走）'
+            : '恢复没成：发版已经发出去了，但发版前开着的引擎总开关没能开回：数据库连不上。到驾驶舱「法国」页发版卡点「恢复引擎开关」（或环境页点开、fleet-api engine on）',
+        phase: `第 ${phase} 步「${MOCK_PHASES[phase]}」`,
+        timeline: {
+          phase,
+          startedAt: new Date(started).toISOString(),
+          steps: MOCK_PHASES.map((_, i) =>
+            i <= phase ? new Date(started + i * 4 * 60_000).toISOString() : null,
+          ),
+          waiting: null,
+          laggards: mode === 'stuck' ? ['会话 execute(1f3a9c2e)', '会话 verify(7b20d4aa)'] : [],
+        },
+        check: null,
+      };
+    }
+    const fixed = mode === 'running' || mode === 'done-bad';
+    const started = fixed ? now() - 4 * 60_000 : releaseMock.startedAt;
+    if (started === null) return { state: 'none', target: null, at: null, why: null, phase: null };
+    const target = releaseMock.target ?? '提交 2005b2909c4f';
+    const elapsed = now() - started;
+    const phase =
+      mode === 'running' ? 3 : mode === 'done-bad' ? 8 : Math.min(8, Math.floor(elapsed / MOCK_STEP_MS));
+    const done = mode === 'done-bad' || (!fixed && elapsed >= MOCK_PHASES.length * MOCK_STEP_MS);
+    const stepMs = fixed ? 25_000 : MOCK_STEP_MS;
+    const steps = MOCK_PHASES.map((_, i) =>
+      i <= phase ? new Date(started + i * stepMs).toISOString() : null,
+    );
+    const check = done
+      ? {
+          ok: mode !== 'done-bad',
+          items: [
+            { name: '目标提交在用', ok: true, text: '法国在用的就是 2005b2909c4f（演示数据）' },
+            { name: '/healthz', ok: true, text: '全好（演示数据）' },
+            mode === 'done-bad'
+              ? {
+                  name: '没有新异常',
+                  ok: false,
+                  text: '发版后新出现 1 条卡住报警：引擎挂了（svc:fleet-engine:down）（演示数据）',
+                }
+              : { name: '没有新异常', ok: true, text: '比发版前没有新的卡住报警（演示数据）' },
+            { name: '再跑一遍预检', ok: true, text: '已是最新、没有要发的（演示数据）' },
+            { name: '引擎总开关和发版前一致', ok: true, text: '发版前开着，现在一样（演示数据）' },
+            { name: '各仓接活开关没被动过', ok: true, text: '3 个仓和发版前一样（演示数据）' },
+          ],
+          at: iso(),
+        }
+      : null;
+    return {
+      state: done ? 'done' : 'running',
+      target,
+      at: iso(),
+      why: null,
+      phase: `第 ${phase} 步「${MOCK_PHASES[phase]}」`,
+      timeline: {
+        phase,
+        startedAt: new Date(started).toISOString(),
+        steps,
+        waiting: done
+          ? null
+          : phase === 3
+            ? '等法国在跑的 2 个会话收尾（execute(1f3a9c2e) verify(7b20d4aa)）（演示数据）'
+            : null,
+        laggards: [],
+      },
+      check,
     };
-  } = {
-    last: { state: 'none', target: null, at: null, why: null, phase: null },
   };
   const mockReleaseAction = () => {
-    const blocked = typeof localStorage !== 'undefined' && localStorage.getItem('mockRelease') === 'blocked';
+    const mode = mockMode();
+    const blocked = mode === 'blocked';
     return {
       state: blocked ? 'blocked' : 'ready',
       reasons: blocked ? ['法国还没装发版接活单元（要在法国以管理员身份跑一次整套装机脚本）'] : [],
       installed: !blocked,
-      last: releaseMock.last,
+      last: mockLast(),
+      // 三个按钮（#2027）：卡住给「重试」和「撤掉暂停」，没成在恢复给「恢复引擎开关」，只剩标记（paused）给「撤掉暂停」
+      recover: {
+        retry:
+          mode === 'stuck'
+            ? { sha: '2005b2909c4f8e0a1d3e5f7a9b1c3d5e7f9a1b3c', phase: '第 3 步「等收尾」' }
+            : null,
+        restore: mode === 'restore-failed' ? { target: '提交 2005b2909c4f' } : null,
+        abort:
+          mode === 'stuck'
+            ? {
+                outcome: 'reopen' as const,
+                text: '还没动手发版：引擎总开关会开回暂停前的样子（开着），清掉暂停标记，这一趟记为撤销。',
+              }
+            : mode === 'paused'
+              ? { outcome: 'clear_marker' as const, text: '只清掉留下来的暂停标记，引擎总开关不动。' }
+              : null,
+      },
     };
   };
   const nextId = (p: string) => `${p}-${++st.seq}`;
@@ -1735,6 +2157,101 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         changed,
       });
     },
+    // 设置页「导入仓库」（#1989）：假数据里造一份「我的 GitHub 仓」清单，含个人仓、组织仓、已装/未装、已在驾驶舱的。
+    async importableRepos() {
+      await wait();
+      return ImportableReposResponse.parse({
+        auth: mockImportAuth,
+        repos: [...mockImportRepos()],
+        ...(mockImportAuth.connected
+          ? {}
+          : { reason: '这是假数据：点「连接 GitHub」在真后端上会跳 GitHub 授权' }),
+      });
+    },
+    async importRepo(raw) {
+      await wait();
+      const body = ImportRepoRequest.parse(raw);
+      const repo = mockImportRepos().find((r) => r.githubId === body.githubId);
+      if (!repo) throw new ApiError(404, 'repo_not_visible', '这个仓不在你 GitHub 账号能看到的范围里');
+      const existing = st.repos.find(
+        (r) =>
+          r.owner.toLowerCase() === repo.owner.toLowerCase() &&
+          r.name.toLowerCase() === repo.name.toLowerCase(),
+      );
+      if (existing) {
+        return ImportRepoResponse.parse({
+          repoId: existing.id,
+          owner: existing.owner,
+          name: existing.name,
+          created: false,
+        });
+      }
+      const created = {
+        id: `mock-${body.githubId}`,
+        owner: repo.owner,
+        name: repo.name,
+        defaultBranch: repo.defaultBranch,
+        testCommand: 'pnpm check',
+      };
+      st.repos.push(created);
+      audit({
+        actor: meActor(),
+        action: REPO_IMPORT_ADD,
+        target: `repo:${repo.fullName.toLowerCase()}`,
+        after: { owner: repo.owner, name: repo.name },
+        via: 'cockpit',
+        reason: `从驾驶舱导入 ${repo.fullName}`,
+      });
+      return ImportRepoResponse.parse({
+        repoId: created.id,
+        owner: created.owner,
+        name: created.name,
+        created: true,
+      });
+    },
+    async removeRepo(repoId) {
+      await wait();
+      const repo = st.repos.find((r) => r.id === repoId);
+      if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
+      st.repos.splice(st.repos.indexOf(repo), 1);
+      audit({
+        actor: meActor(),
+        action: REPO_IMPORT_REMOVE,
+        target: `repo:${repo.owner}/${repo.name}`.toLowerCase(),
+        before: { owner: repo.owner, name: repo.name },
+        via: 'cockpit',
+        reason: `从驾驶舱移出 ${repo.owner}/${repo.name}`,
+      });
+      return RemoveRepoResponse.parse({ removed: true });
+    },
+    async installAppOnRepo(raw) {
+      await wait();
+      const body = InstallAppRequest.parse(raw);
+      const repo = mockImportRepos().find((r) => r.githubId === body.githubId);
+      if (!repo) throw new ApiError(404, 'repo_not_visible', '这个仓不在你 GitHub 账号能看到的范围里');
+      if (repo.ownerType === 'Organization' && !repo.viewerCanAdmin) {
+        throw new ApiError(403, 'needs_org_admin', '这是组织的仓，要组织管理员先批准这个 App');
+      }
+      audit({
+        actor: meActor(),
+        action: GITHUB_INSTALL_REPO,
+        target: `repo:${repo.fullName.toLowerCase()}`,
+        via: 'cockpit',
+        reason: `把 App 装到 ${repo.fullName}`,
+      });
+      return InstallAppResponse.parse({ installed: 2, agent: true, engine: true });
+    },
+    async disconnectGitHub() {
+      await wait();
+      audit({
+        actor: meActor(),
+        action: GITHUB_OAUTH_DISCONNECT,
+        target: `user:${st.me.user.id}`,
+        via: 'cockpit',
+        reason: '断开 GitHub 授权',
+      });
+      return DisconnectGitHubResponse.parse({ disconnected: true });
+    },
     async groomStatus(repoId) {
       await wait();
       const repo = st.repos.find((r) => r.id === repoId);
@@ -1854,26 +2371,31 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           const flow = taskFlow(t.task, views);
           const runIds = views.filter((v) => v.running).map((v) => v.id);
           const decision = pendingOf(t);
+          const stalled = t.task.state === 'stalled' ? t.task.stalled : undefined;
           const waitingReason = t.task.paused
             ? ('paused' as const)
             : asking
               ? ('founder_decision' as const)
-              : queued
-                ? ('queue' as const)
-                : flow.segment === 'verify_pending'
-                  ? ('verify_round' as const)
-                  : flow.segment === 'merge'
-                    ? ('merge_queue' as const)
-                    : ('nothing' as const);
+              : t.task.state === 'stalled'
+                ? ('parked' as const)
+                : queued
+                  ? ('queue' as const)
+                  : flow.segment === 'verify_pending'
+                    ? ('verify_round' as const)
+                    : flow.segment === 'merge'
+                      ? ('merge_queue' as const)
+                      : ('nothing' as const);
           const waitingSince = t.task.paused
             ? undefined
             : asking
               ? decision?.since
-              : queued
-                ? queued.queuedAt
-                : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
-                  ? flow.stageSince
-                  : undefined;
+              : waitingReason === 'parked'
+                ? stalled?.since
+                : queued
+                  ? queued.queuedAt
+                  : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
+                    ? flow.stageSince
+                    : undefined;
           return {
             issueNumber: t.task.issueNumber,
             title: t.task.title,
@@ -1881,11 +2403,13 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             segment: flow.segment,
             waitingReason,
             ...(t.task.paused ? { paused: t.task.paused } : {}),
+            ...(waitingReason === 'parked' ? { parked: stalled?.why ?? '引擎没写停下的原因' } : {}),
             ...(waitingSince ? { waitingSince } : {}),
             taskSince: t.task.createdAt,
             ...(flow.stageSince ? { stageSince: flow.stageSince } : {}),
             ...(flow.worker ? { worker: flow.worker } : {}),
             ...(decision ? { pendingDecision: decision.title } : {}),
+            ...(flow.segment === 'merge' && t.task.redChecks ? { redChecks: t.task.redChecks } : {}),
             ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
             ...(flow.lastSession ? { lastSession: flow.lastSession } : {}),
             link: `/tasks/${t.task.id}`,
@@ -2059,6 +2583,45 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         },
         nodes: remote,
       });
+    },
+    async localSessions() {
+      await wait();
+      return mockLocalSessions(now());
+    },
+    async worktrees() {
+      await wait();
+      // 排队几秒后假装引擎接手、再过几秒做完（照真引擎：判据同一份，在用、有改动的一律拒）
+      const t = now();
+      mockCleanups = mockCleanups.map((c) => {
+        const age = t - Date.parse(c.requestedAt);
+        if (c.status === 'queued' && age > 2_000)
+          return { ...c, status: 'running', startedAt: new Date(t).toISOString() };
+        if (c.status === 'running' && age > 5_000) {
+          return {
+            ...c,
+            status: 'done',
+            doneAt: new Date(t).toISOString(),
+            result: cleanupResultOf(mockWorktrees(t, [])),
+          };
+        }
+        return c;
+      });
+      return mockWorktrees(t, mockCleanups);
+    },
+    async worktreeCleanup(body) {
+      await wait();
+      const engine = mockEngine();
+      if (engine.state === 'off') throw new ApiError(409, 'engine_off', `清理不了：${engine.detail}`);
+      if (engine.state !== 'on')
+        throw new ApiError(503, `engine_${engine.state}`, `清理不了：${engine.detail}`);
+      const busy = mockCleanups.find((c) => c.status === 'queued' || c.status === 'running');
+      if (busy)
+        throw new ApiError(409, 'cleanup_busy', `已经有一次清理在做（${busy.requestId}），等它做完再点`);
+      const at = new Date(now()).toISOString();
+      const requestId = nextId('cleanup');
+      mockCleanups = [{ requestId, by: 'u-founder', requestedAt: at, status: 'queued' }, ...mockCleanups];
+      void body;
+      return { requestId, requestedAt: at };
     },
     async node(nodeId) {
       await wait();
@@ -3112,14 +3675,28 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async franceRelease(sha) {
       await wait();
       if (mockReleaseAction().state !== 'ready') throw new Error('现在不能发（假后端的按钮是置灰的）');
-      releaseMock.last = {
-        state: 'running',
-        target: `提交 ${sha.slice(0, 12)}`,
-        at: iso(),
-        why: null,
-        phase: '第 2 步「暂停法国」',
-      };
+      releaseMock.startedAt = now();
+      releaseMock.target = `提交 ${sha.slice(0, 12)}`;
       return ReleaseRequestResponse.parse({ requested: true, sha, at: iso() });
+    },
+    async franceReleaseRecover(kind) {
+      await wait();
+      const recover = mockReleaseAction().recover;
+      if (recover[kind] === null)
+        throw new ApiError(409, 'recover_unavailable', '现在没有可点的按钮（假后端）');
+      if (kind === 'retry') {
+        releaseMock.mode = '';
+        releaseMock.startedAt = now() - 3 * MOCK_STEP_MS; // 从第 3 步接着走
+        releaseMock.target = '提交 2005b2909c4f';
+      } else if (kind === 'restore') {
+        releaseMock.mode = '';
+        releaseMock.startedAt = now() - 20 * MOCK_STEP_MS; // 九步都走完
+        releaseMock.target = '提交 2005b2909c4f';
+      } else {
+        releaseMock.mode = '';
+        releaseMock.startedAt = null;
+      }
+      return ReleaseRecoverResponse.parse({ requested: true, kind, at: iso() });
     },
     async franceCliTools() {
       await wait();
@@ -3246,11 +3823,36 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     async francePreflight() {
       await wait();
-      // 假数据不起子进程：装作这台后端没接上那一条发布命令（真法国机器才装得上）。
-      // 话术里别带真命令名。
+      // 默认装作这台后端没接上发版预检（#2024：假后端不给假的七项）。截图、手点用：localStorage 的 mockRelease 写
+      // preflight-ok 给一份「能发」的演示清单，写 preflight-blocked 给一份有卡住项的（确认框里确认键灰着，#2026）。每行都写明是演示。
+      const mode = typeof localStorage !== 'undefined' ? localStorage.getItem('mockRelease') : null;
+      if (mode !== 'preflight-ok' && mode !== 'preflight-blocked') {
+        return FrancePreflightResponseSchema.parse({
+          state: 'unreadable',
+          why: '这是假后端：发版预检只在法国那台的驾驶舱上读得到',
+          asOf: iso(),
+        });
+      }
+      const blocked = mode === 'preflight-blocked';
+      const lines = [
+        '主线头和 CI：通过 绿（演示数据）',
+        '法国在用提交：通过 提交 6896b3cb4d2e（演示数据）',
+        '落后几个：通过 落后 7 个提交（演示数据）',
+        '别的发布是否在走：通过 没有在走的（演示数据）',
+        blocked ? '发版接活单元：卡住 法国还没装（演示数据）' : '发版接活单元：通过 装了（演示数据）',
+        '引擎总开关：通过 开着，发版会先关、发完恢复到发版前（演示数据）',
+        '法国在跑的会话数：留意 2 个，发版会等它们收尾（演示数据）',
+      ];
       return FrancePreflightResponseSchema.parse({
-        state: 'unreadable',
-        why: '这是假后端：这台机器上没装真的发布命令；只读预检和起飞用的正式环境才有这颗按钮',
+        state: 'done',
+        command: '进程内读事实',
+        code: blocked ? 2 : 0,
+        signal: null,
+        stdout: `${lines.join('\n')}\n`,
+        stderr: '',
+        durationMs: 12,
+        timedOut: false,
+        truncated: false,
         asOf: iso(),
       });
     },

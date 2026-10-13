@@ -1,6 +1,7 @@
 // 内存里的 Store：测试和本地开发用，也是 ports.ts 语义的参照实现。数据按 Postgres 的表来摆（packages/db 的 schema），
 // 行为照库的约束来（比较后再改、和操作记录同一「事务」、ok=false 的操作记录必须带原因……），
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
+import { randomUUID } from 'node:crypto';
 import {
   answerResolves,
   type Ban,
@@ -51,14 +52,22 @@ import {
 } from './delivery-logic.ts';
 import { testRunOf } from './done-check.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
-import { nodeReportRow, readNodeSnapshot } from './node-logic.ts';
+import {
+  nodeReportRow,
+  nodeSessionsRow,
+  readNodeSessions,
+  readNodeSnapshot,
+  readWorktreeInventoryPayload,
+} from './node-logic.ts';
 import { byAtThenId, compareIds, pageOfSorted } from './paging.ts';
 import { planSteps } from './plan-logic.ts';
 import type {
   AgentSession,
   AuditRecord,
   CommandClaim,
+  GitHubAppRole,
   GitHubDelivery,
+  GitHubTokenRecord,
   JobRecord,
   NewAuditEntry,
   NodeReportRecord,
@@ -75,6 +84,7 @@ import type {
   User,
 } from './ports.ts';
 import {
+  addRepoAudit,
   autoDispatchAudit,
   autoDispatchChanged,
   autoDispatchUnchanged,
@@ -92,6 +102,7 @@ import {
   matchesTaskSearch,
   NEW_TASK_STATE,
   nextTaskPriority,
+  removeRepoAudit,
   segmentRunMatch,
 } from './task-logic.ts';
 
@@ -188,8 +199,14 @@ export interface MemoryData {
   githubEvents: Map<string, GitHubDelivery>;
   /** 账密登录的几列（库里是 users 表上的列），按用户编号；没设过的人不在里面。 */
   credentials: Map<string, PasswordCredentials>;
+  /** 各人自己的 GitHub 授权（#1989，库里是 github_tokens），按用户编号；没授权过的人不在里面。 */
+  githubTokens: Map<string, GitHubTokenRecord>;
   /** 别的环境推来的快照（node_reports），一个环境一行。 */
   nodeReports: NodeReportRecord[];
+  /** 本机会话（node_sessions，#1991），一个环境一行；report 原样放（读回来再认一遍）。 */
+  nodeSessions: { nodeId: string; receivedAt: string; report: unknown }[];
+  /** 法国工作树最近一份清单（worktree_inventory，#1993）；没存过是 null。原样放，读回来再认一遍。 */
+  worktreeInventory: unknown;
 }
 
 export function emptyData(): MemoryData {
@@ -219,7 +236,10 @@ export function emptyData(): MemoryData {
     idempotency: new Map(),
     githubEvents: new Map(),
     credentials: new Map(),
+    githubTokens: new Map(),
     nodeReports: [],
+    nodeSessions: [],
+    worktreeInventory: null,
   };
 }
 
@@ -719,6 +739,29 @@ export function createMemoryStore(
       };
     },
 
+    async putNodeSessions(input) {
+      const report = nodeSessionsRow(input);
+      const receivedAt = now().toISOString();
+      data.nodeSessions = [
+        ...data.nodeSessions.filter((r) => r.nodeId !== input.nodeId),
+        { nodeId: input.nodeId, receivedAt, report: structuredClone(report) },
+      ];
+      return { receivedAt };
+    },
+    async listNodeSessions() {
+      return [...data.nodeSessions]
+        .sort((a, b) => compareIds(a.nodeId, b.nodeId))
+        .map((r) => ({
+          nodeId: r.nodeId,
+          receivedAt: r.receivedAt,
+          report: readNodeSessions(r.nodeId, structuredClone(r.report)),
+        }));
+    },
+    async getWorktreeInventory() {
+      if (data.worktreeInventory === null || data.worktreeInventory === undefined) return null;
+      return readWorktreeInventoryPayload(structuredClone(data.worktreeInventory));
+    },
+
     // —— fleet 命令 ——
     async getAgentSession(runId) {
       const run = data.runs.find((r) => r.id === runId);
@@ -1096,5 +1139,72 @@ export function createMemoryStore(
       repo.ciPolicy = mode;
       return ciPolicyChanged(mode, audit(full));
     },
+    async addRepo({ owner, name, defaultBranch, testCommand }, entry) {
+      const existing = data.repos.find(
+        (r) => r.owner.toLowerCase() === owner.toLowerCase() && r.name.toLowerCase() === name.toLowerCase(),
+      );
+      if (existing)
+        return {
+          repo: { ...repoOnly(existing), autoDispatchSince: null, ciPolicy: 'force' },
+          created: false,
+        };
+      const row: RepoRecord = { id: randomUUID(), owner, name, defaultBranch, testCommand };
+      // 先校验操作记录（写不进就整件事不成，和 pg 版同一事务一个意思），校验过了再落数据。
+      const full = addRepoAudit(entry, { owner, name, defaultBranch });
+      checkAudit(full);
+      const auditId = audit(full);
+      data.repos.push(row);
+      return {
+        repo: { ...repoOnly(row), autoDispatchSince: null, ciPolicy: 'force' },
+        created: true,
+        auditId,
+      };
+    },
+    async removeRepo({ repoId }, entry) {
+      const repo = data.repos.find((r) => r.id === repoId);
+      if (!repo) return 'not_found';
+      // 还挂着没结束的单就不删（和 pg 版同一个判法）：交回页面说清楚，不连坐删掉别人在干的需求。
+      if (data.tasks.some((t) => t.repoId === repoId && (t.state === 'queued' || t.state === 'running'))) {
+        return 'has_tasks';
+      }
+      const full = removeRepoAudit(entry, { owner: repo.owner, name: repo.name });
+      checkAudit(full);
+      audit(full);
+      data.repos = data.repos.filter((r) => r.id !== repoId);
+      return 'removed';
+    },
+    async getGitHubToken(userId, role) {
+      const row = data.githubTokens.get(githubTokenKey(userId, role));
+      return row ? { ...row } : null;
+    },
+    async listGitHubTokens(userId) {
+      const out: GitHubTokenRecord[] = [];
+      for (const role of ['agent', 'engine'] as const) {
+        const row = data.githubTokens.get(githubTokenKey(userId, role));
+        if (row) out.push({ ...row });
+      }
+      return out;
+    },
+    async putGitHubToken(input) {
+      data.githubTokens.set(githubTokenKey(input.userId, input.role), {
+        userId: input.userId,
+        githubId: input.githubId,
+        login: input.login,
+        role: input.role,
+        accessTokenCipher: input.accessTokenCipher,
+        scopes: input.scopes,
+        expiresAt: input.expiresAt,
+        updatedAt: now().toISOString(),
+      });
+    },
+    async deleteGitHubToken(userId, role) {
+      const roles: GitHubAppRole[] = role ? [role] : ['agent', 'engine'];
+      for (const item of roles) data.githubTokens.delete(githubTokenKey(userId, item));
+    },
   };
+}
+
+/** 一个人每个 App 一行。键把两边分开，断开时按人删光。 */
+function githubTokenKey(userId: string, role: GitHubAppRole): string {
+  return `${userId}:${role}`;
 }

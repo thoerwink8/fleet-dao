@@ -44,7 +44,7 @@
           {
             "type": "command",
             "command": "node \"$CLAUDE_PROJECT_DIR/agents/hooks/prompt-log.mjs\"",
-            "timeout": 30000
+            "timeout": 30
           }
         ]
       }

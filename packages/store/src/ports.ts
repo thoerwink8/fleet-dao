@@ -10,6 +10,7 @@ import type {
   DecisionAnswer,
   DecisionOption,
   HistoryResponse,
+  LocalSessionsReport,
   Model,
   NodeReport,
   NodeSnapshot,
@@ -27,6 +28,7 @@ import type {
   Subtask,
   Task,
   TaskListGroup,
+  WorktreeInventory,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 
@@ -653,6 +655,62 @@ export interface IntakeStore {
     input: { repoId: string; mode: CiPolicy },
     audit: Omit<NewAuditEntry, 'before' | 'after'>,
   ): Promise<CiPolicyChange | 'not_found'>;
+  /**
+   * 把一个仓接进驾驶舱（#1989）：驾驶舱「导入仓库」点一下就走这里。owner/name 不分大小写地唯一：
+   * 已经在库里的（不管大小写怎么写）原样返回那一行、不新建、不记操作记录（created=false）。
+   * 新行的「让 AI 接活」默认关着（和 #131 一致），ci_policy 走库默认（强制）。新建和操作记录同一事务。
+   */
+  addRepo(
+    input: { owner: string; name: string; defaultBranch: string; testCommand: string },
+    audit: Omit<NewAuditEntry, 'before' | 'after'>,
+  ): Promise<{ repo: IntakeRepo; created: boolean; auditId?: string | undefined }>;
+  /**
+   * 把一个仓移出驾驶舱（#1989）：删 repos 那一行。这个仓上还有没结束的需求（queued/running）时不删、返回 has_tasks——
+   * 库里 tasks 对 repos 是外键，硬删会连坐；把「还挂着活」这件事交回页面说清楚，不悄悄删掉别人在干的单。
+   * 没有这个仓返回 not_found。
+   */
+  removeRepo(
+    input: { repoId: string },
+    audit: Omit<NewAuditEntry, 'before' | 'after'>,
+  ): Promise<'removed' | 'has_tasks' | 'not_found'>;
+}
+
+/** 用户令牌是哪个 App 换来的。一边一份：GitHub 只让这份令牌看见签发它的那个 App。 */
+export type GitHubAppRole = 'agent' | 'engine';
+
+/** 各人自己的 GitHub 授权（#1989）。令牌密文进、密文出：明文只在 api 层过一下。 */
+export interface GitHubTokenStore {
+  /** 这个人存着的某一边 App 的授权；没授权过回 null。 */
+  getGitHubToken(userId: string, role: GitHubAppRole): Promise<GitHubTokenRecord | null>;
+  /** 这个人存着的两边（没有的那边不在里面）。 */
+  listGitHubTokens(userId: string): Promise<GitHubTokenRecord[]>;
+  /** 授权回来换到令牌：一个人每个 App 一行，再授权覆盖那一行。 */
+  putGitHubToken(input: PutGitHubTokenInput): Promise<void>;
+  /** 授权被 GitHub 撤了（401）、或人自己断开。不给 role 就两边都删。本来就没有也当成功。 */
+  deleteGitHubToken(userId: string, role?: GitHubAppRole): Promise<void>;
+}
+
+/** 库里 github_tokens 的一行（密文原样带出，解密在 api 层）。 */
+export interface GitHubTokenRecord {
+  userId: string;
+  githubId: number;
+  login: string;
+  role: GitHubAppRole;
+  /** 密文（v1.<iv>.<tag>.<密文>）；解密失败由 api 层如实报，不在这里判死。 */
+  accessTokenCipher: string;
+  scopes: string;
+  expiresAt: string | null;
+  updatedAt: string;
+}
+
+export interface PutGitHubTokenInput {
+  userId: string;
+  githubId: number;
+  login: string;
+  role: GitHubAppRole;
+  accessTokenCipher: string;
+  scopes: string;
+  expiresAt: string | null;
 }
 
 /** 别的环境推来的快照（node_reports 表一行），不带快照本体：列环境用。 */
@@ -685,6 +743,21 @@ export interface NodeStore {
   listNodeReports(): Promise<NodeReportSummary[]>;
   /** 没收到过是 null。库里那份认不出（版本对不上、形状坏了）抛 InvalidNodeReportError，不当成没有。 */
   getNodeReport(nodeId: string): Promise<NodeReportRecord | null>;
+  /**
+   * 本机会话（#1991）：覆盖写这个环境那一行，receivedAt 记成此刻（Store 的钟）。先照 shared 的 LocalSessionsReportSchema 校验，
+   * 认不出抛 InvalidNodeReportError、什么都不写。
+   */
+  putNodeSessions(input: { nodeId: string; report: LocalSessionsReport }): Promise<{ receivedAt: string }>;
+  /** 收到过本机会话的环境，按 nodeId 排。库里那份认不出抛 InvalidNodeReportError，不当成没有。 */
+  listNodeSessions(): Promise<NodeSessionsRecord[]>;
+  /** 法国工作树最近一份清单（#1993，引擎写）；一次都没存过是 null。认不出抛错，不当成没有树。 */
+  getWorktreeInventory(): Promise<WorktreeInventory | null>;
+}
+
+export interface NodeSessionsRecord {
+  nodeId: string;
+  receivedAt: string;
+  report: LocalSessionsReport;
 }
 
 export type Store = UserStore &
@@ -694,6 +767,7 @@ export type Store = UserStore &
   AgentStore &
   GitHubStore &
   IntakeStore &
+  GitHubTokenStore &
   NodeStore;
 
 /** 翻页游标看不懂：接口回 400（http.ts），不装成空页。判法在 ids.ts 的 parseCursor。 */

@@ -73,7 +73,7 @@ import {
   grokLaunchCommand,
   hostDrivers,
 } from './hosts.ts';
-import { hourlyReconcileJob } from './hourly-reconcile.ts';
+import { type HourlyReconcileWiring, hourlyReconcileJob, worktreeCleanupJob } from './hourly-reconcile.ts';
 import { intakeJob } from './intake.ts';
 import { issueGroomIdlePolicyFromEnv } from './issue-groom.ts';
 import { issueKindJevFromEnv } from './issue-kind-jev.ts';
@@ -81,12 +81,14 @@ import { registerEngineJobs } from './jobs.ts';
 import { judgeSelfCheckJob } from './judge-self-check.ts';
 import { realMemoryAdmission } from './memory-admission.ts';
 import { productionMemoryPeak } from './memory-peak.ts';
+import { readMergeWaitChecks } from './merge-wait-checks.ts';
 import { oneShotSessions } from './one-shot-sessions.ts';
 import { NO_FUSION_SESSIONS, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { orphanReaper } from './orphan-reap.ts';
 import type { AssignedProber } from './pick-then-probe.ts';
 import { type QuotaReadWiring, quotaReadJob } from './quota-read.ts';
 import { realReleaseEvidence } from './release-evidence.ts';
+import { requestSweepJob } from './request-sweep.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
 import { scheduleRouteBreakProbe } from './route-break-probe.ts';
 import { routeProbeJob } from './route-probe.ts';
@@ -756,6 +758,17 @@ export function realPortsFromEnv(
     config.sessionProxy,
     config.cursorVersionsDir,
   );
+  // 每小时对账和一键清理工作树共用的装配（#1993）：同一个工作树管家、同一个会话用户执行器、同一份判据
+  const reconcileWiring: HourlyReconcileWiring = {
+    db,
+    gh,
+    trees,
+    exec,
+    sessionOrg,
+    carpoolRegistry: () => carpoolCap.view(),
+    machine: config.machine,
+    selfCheck: (repos) => gh.selfCheck(repos),
+  };
   const jobs: EngineJobs = {
     githubReconcile: githubReconcileJob({
       db,
@@ -805,16 +818,9 @@ export function realPortsFromEnv(
     }),
     // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）；引擎这份 GitHub
     // （同一套 App 凭据）审合了的 PR、给排队的单补拉时现读挂在哪个版本、做两个机器人的权限自检
-    hourlyReconcile: hourlyReconcileJob({
-      db,
-      gh,
-      trees,
-      exec,
-      sessionOrg,
-      carpoolRegistry: () => carpoolCap.view(),
-      machine: config.machine,
-      selfCheck: (repos) => gh.selfCheck(repos),
-    }),
+    hourlyReconcile: hourlyReconcileJob(reconcileWiring),
+    // 一键清理没用的工作树（#1993）：和每小时对账同一份装配、同一个判据
+    worktreeCleanup: worktreeCleanupJob(reconcileWiring),
     // 全流程巡检（#223）：巡检仓写在引擎配置 FLEET_CANARY_REPO（没配这一轮记没跑成，看门狗报）；开单、写需求文档、挂版本都是「引擎」机器人
     canary: canaryJob({ db, gh, repo: env.FLEET_CANARY_REPO }),
     // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤
@@ -844,6 +850,8 @@ export function realPortsFromEnv(
     }),
     // 命令行工具版本（#1969）：probe 读在用版本，引擎进程拉官方最新。不升级。
     cliVersions: cliVersionsJob({ db }),
+    // 需求整理（#2049）：删了满 30 天的需求连消息硬删并写操作记录，已结案的按规矩自动归档。不看总开关。
+    requestSweep: requestSweepJob({ db }),
     // 命令行工具升级（#1971）：空闲时排空、写请求。引擎没有 root，不在这里装。不看总开关。
     cliUpgrade: cliUpgradeJob({
       db,
@@ -911,7 +919,13 @@ export function realPortsFromEnv(
   const probeAssigned: AssignedProber = (input) => probeAssignedRoute(routeProbe(), routeProbeLock, input);
   const runsDir = join(config.stateDir, 'runs');
   const tasks: EngineTasks = {
-    ...createTaskActivities({ gh, trees, exec, log: taskLog }),
+    ...createTaskActivities({
+      gh,
+      trees,
+      exec,
+      log: taskLog,
+      readChecks: (repo, head, signal) => readMergeWaitChecks(gh, repo, head, signal),
+    }),
     async readCiPolicy(input) {
       if (input?.schemaVersion !== 1 || !input.repo?.owner || !input.repo?.name) {
         throw new PortError('INVALID_INPUT', '读 CI 模式：要有仓的 owner 和 name', { retryable: false });

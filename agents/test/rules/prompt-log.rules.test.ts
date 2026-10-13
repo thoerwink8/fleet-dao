@@ -65,7 +65,7 @@ function beijingDay(ms: number) {
 
 // 同步起子进程：卡死由 runChild 给子进程的上限管，不靠 vitest 的超时（它打断不了同步用例，机器一忙又把慢报成红，#264）
 describe('规矩：创始人每条消息一到就落盘（2026-10-04 补）', { timeout: 0 }, () => {
-  it('挂在本仓项目设置的 UserPromptSubmit 上，超时 30000；用户级清单里没有', () => {
+  it('挂在本仓项目设置的 UserPromptSubmit 上，超时 30 秒；用户级清单里没有', () => {
     const settings = JSON.parse(
       readFileSync(fileURLToPath(new URL('../../../.claude/settings.json', import.meta.url)), 'utf8'),
     ) as {
@@ -75,8 +75,17 @@ describe('规矩：创始人每条消息一到就落盘（2026-10-04 补）', { 
     if (group === undefined) throw new Error('项目设置里没有 UserPromptSubmit');
     expect(group.matcher).toBeUndefined();
     expect(group.hooks[0]?.command).toContain('prompt-log.mjs');
-    expect(group.hooks[0]?.timeout).toBe(30000);
+    expect(group.hooks[0]?.timeout).toBe(30);
     expect(TARGETS).not.toContain('prompt-log.mjs');
+  });
+
+  it('项目设置里所有钩子的 timeout 按秒写，不超过 600', () => {
+    const settings = JSON.parse(
+      readFileSync(fileURLToPath(new URL('../../../.claude/settings.json', import.meta.url)), 'utf8'),
+    ) as { hooks: Record<string, { hooks: { timeout?: number }[] }[]> };
+    const all = Object.values(settings.hooks).flatMap((groups) => groups.flatMap((g) => g.hooks));
+    expect(all.length).toBeGreaterThan(0);
+    for (const h of all) expect(h.timeout ?? 0).toBeLessThanOrEqual(600);
   });
 
   it('绝不拦、绝不插话：正常路径 exit 0 且不往 stdout 打东西', () => {

@@ -491,7 +491,8 @@ export function phasesOf(item: HomeRunning): Phase[] {
   const tone = ticketTone(item);
   return PHASES.map((p, i) => ({
     ...p,
-    label: i === 2 && item.segment === 'verify_pending' ? '还没验' : p.label,
+    label:
+      i === 2 && item.segment === 'verify_pending' && item.waitingReason !== 'parked' ? '还没验' : p.label,
     state: current < 0 || i > current ? 'pending' : i < current ? 'done' : 'active',
     tone: i < current ? 'done' : tone,
   }));

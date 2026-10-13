@@ -1,7 +1,7 @@
 // 驾驶舱的所有读写都经过 FleetApi：方法和 shared/web-api.ts 的 WebRoutes 一一对应，形状全用那份定义。
 // 实现有两个：http.ts（真后端，带 CSRF 头、SSE 推送）和 mock/（假数据，开发和测试用），在 api/index.ts 里选。
 
-import { REALTIME_TABLES, type RealtimeTable } from '@fleet-dao/shared';
+import { REALTIME_TABLES, type RealtimeTable, type ReleaseRecoverKind } from '@fleet-dao/shared';
 import {
   type QueryClient,
   useInfiniteQuery,
@@ -29,8 +29,13 @@ import type {
   GroomNowResult,
   GroomStatus,
   HomeResponse,
+  ImportableRepos,
+  ImportRepoBody,
+  ImportRepoResult,
+  InstallAppResult,
   Jobs,
   LiveEvent,
+  LocalSessions,
   ManualModelBody,
   ManualModelResult,
   Me,
@@ -44,8 +49,10 @@ import type {
   PurposeMembership,
   ReleaseCard,
   ReleasedCommits,
+  ReleaseRecoverResult,
   ReleaseRequestResult,
   RemovePurposeModelBody,
+  RemoveRepoResult,
   Repo,
   RepoCiPolicy,
   RepoDispatch,
@@ -82,6 +89,9 @@ import type {
   UpdateRouteEffortBody,
   UpdateSettingBody,
   UpdateTaskRoutePinBody,
+  WorktreeCleanupAck,
+  WorktreeCleanupBody,
+  Worktrees,
 } from './types';
 
 export type LiveStatus = 'connecting' | 'open' | 'down';
@@ -112,6 +122,16 @@ export interface FleetApi {
   repoCiPolicy(): Promise<{ repos: RepoCiPolicy[] }>;
   /** 切换一个项目的 CI 模式（写操作记录）；本来就是这个模式时 changed=false。没有这个项目 404。 */
   updateRepoCiPolicy(repoId: string, body: UpdateRepoCiPolicyBody): Promise<UpdatedRepoCiPolicy>;
+  /** 设置页「导入仓库」（#1989）：我 GitHub 上看得见的仓 + 我这份授权现在怎样。没连 GitHub 时 repos 空、auth.connected=false。 */
+  importableRepos(): Promise<ImportableRepos>;
+  /** 把一个仓接进驾驶舱；created=false 表示本来就在（没重复建）。 */
+  importRepo(body: ImportRepoBody): Promise<ImportRepoResult>;
+  /** 把一个仓移出驾驶舱；还挂着没结束的单时 removed=false 带原因。 */
+  removeRepo(repoId: string): Promise<RemoveRepoResult>;
+  /** 把两个 App 装到某个仓（一键授权那一步）；组织仓要组织批准，装不上时 reason 写原因。 */
+  installAppOnRepo(body: { githubId: number }): Promise<InstallAppResult>;
+  /** 断开本人 GitHub 授权。 */
+  disconnectGitHub(): Promise<{ disconnected: boolean }>;
   /** 这个仓的「指挥官整理待办」：今日剩余、最近几次、有没有一次在排队或在做。没有这个项目 404。 */
   groomStatus(repoId: string): Promise<GroomStatus>;
   /**
@@ -130,6 +150,12 @@ export interface FleetApi {
   nodes(): Promise<Nodes>;
   /** 一个远程环境最近一次推来的主页、环境页快照加新鲜度（只读展示用）；没推过 404（node_never_reported）。 */
   node(nodeId: string): Promise<NodeDetail>;
+  /** 本机会话（#1991）：每台推过的机器此刻在跑、刚停、超过阈值没动的会话；推不来的写 stale / never（页面写「没上报」）。 */
+  localSessions(): Promise<LocalSessions>;
+  /** 法国的工作树（#1993）：引擎最近一份清单加最近几次一键清理。 */
+  worktrees(): Promise<Worktrees>;
+  /** 叫一次「清理没用的工作树」：引擎没开 409/503、已经有一次在排队 409，把后端的话抛出来。 */
+  worktreeCleanup(body: WorktreeCleanupBody): Promise<WorktreeCleanupAck>;
   board(repoId: string): Promise<Board>;
   /** 任务列表页（#1639）：所有仓、所有状态，最近更新在前，游标翻页，带各状态的数。 */
   tasks(query?: TaskListFilter & { cursor?: string | undefined; limit?: number }): Promise<TaskList>;
@@ -208,7 +234,9 @@ export interface FleetApi {
   franceReleasedCommits(): Promise<ReleasedCommits>;
   /** /france 页「发布到法国」按钮（#1232）：只收提交号，后端核它等于此刻主线头、写请求文件，法国上 root 的单元接活。 */
   franceRelease(sha: string): Promise<ReleaseRequestResult>;
-  /** /france 页「发版预检」按钮：点下让后端起 pnpm release:onekey preflight，命令写死、不收参数。 */
+  /** /france 页发版卡卡住、失败后的三个按钮（#2027）：重试、恢复引擎开关、撤掉暂停；只收种类，后端按进度记录核能不能点。 */
+  franceReleaseRecover(kind: ReleaseRecoverKind): Promise<ReleaseRecoverResult>;
+  /** /france 页「发版预检」：后端进程内读七项事实，不起子进程、不收参数。 */
   francePreflight(): Promise<FrancePreflightResponse>;
   /** /france 页「命令行工具」（#1969、#1971）：在用版本、官方最新、落后，升过的带上次升级时间和升上去的版本。只读。 */
   franceCliTools(): Promise<CliToolsResponse>;
@@ -221,12 +249,15 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly details: unknown;
-  constructor(status: number, code: string, message: string, details?: unknown) {
+  /** 给人看的 message 之外的原文（网络报错、对不上的字段）。页面收在「详情」里，不摊在主文案上。 */
+  readonly raw?: string;
+  constructor(status: number, code: string, message: string, details?: unknown, raw?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.details = details;
+    if (raw !== undefined) this.raw = raw;
   }
 }
 
@@ -254,7 +285,10 @@ export const keys = {
   repos: ['repos'] as const,
   repoDispatch: ['repo-dispatch'] as const,
   repoCiPolicy: ['repo-ci-policy'] as const,
+  importableRepos: ['importable-repos'] as const,
   groomStatus: (repoId: string) => ['groom-status', repoId] as const,
+  localSessions: ['local-sessions'] as const,
+  worktrees: ['worktrees'] as const,
   board: (repoId: string) => ['board', repoId] as const,
   task: (taskId: string) => ['task', taskId] as const,
   taskList: (filter: TaskListFilter) =>
@@ -370,6 +404,37 @@ export function useGroomStatus(repoId: string) {
     queryKey: keys.groomStatus(repoId),
     queryFn: () => api.groomStatus(repoId),
     refetchInterval: 30_000,
+  });
+}
+
+/** 本机会话（#1991）：本机每 2 分钟推一次，这里每 30 秒看一眼，够「刚停」「超过阈值没动」跟上。 */
+export function useLocalSessions() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.localSessions,
+    queryFn: () => api.localSessions(),
+    refetchInterval: 30_000,
+  });
+}
+
+/** 法国的工作树清单和最近几次清理：有一次在排队或在做时每 5 秒看一眼，平时每分钟。 */
+export function useWorktrees() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.worktrees,
+    queryFn: () => api.worktrees(),
+    refetchInterval: (q) =>
+      q.state.data?.cleanups.some((c) => c.status === 'queued' || c.status === 'running') ? 5_000 : 60_000,
+  });
+}
+
+/** 「清理没用的工作树」按钮：成了重拉清单；拒的话（409 / 503）原样交给页面写出来。 */
+export function useWorktreeCleanup() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: WorktreeCleanupBody) => api.worktreeCleanup(body),
+    onSettled: () => qc.invalidateQueries({ queryKey: keys.worktrees }),
   });
 }
 
@@ -579,13 +644,20 @@ export function usePoolHolds() {
   return useQuery({ queryKey: keys.poolHolds, queryFn: () => api.poolHolds(), refetchInterval: 60_000 });
 }
 
-/** 定时任务不在推送名单里，每 30 秒重拉一次。 */
+/**
+ * 法国页上两档刷新。快的：机器、定时任务、发版进度。慢的：环境、发版卡、命令行工具（GitHub 现读，不要拉太勤）。
+ * 页面上的「每 N 秒」用这两个数，不要再写死。
+ */
+export const POLL_FAST_MS = 30_000;
+export const POLL_SLOW_MS = 60_000;
+
+/** 定时任务不在推送名单里，按 POLL_FAST_MS 重拉。 */
 export function useJobs() {
   const api = useApi();
   return useQuery({
     queryKey: keys.jobs,
     queryFn: () => api.jobs(),
-    refetchInterval: 30_000,
+    refetchInterval: POLL_FAST_MS,
   });
 }
 
@@ -626,36 +698,36 @@ export function useSettings() {
 
 /**
  * /france 页发版一键（#618）：release-train 此刻的状态（在走 / 暂停 / 没在走 / 读不到）。
- * 30 秒重拉一次：release-train 自己跑起来这一步没人推，靠轮。读不到后端也照实显示「没查成」。
+ * 按 POLL_FAST_MS 重拉：release-train 自己跑起来这一步没人推，靠轮。读不到后端也照实显示「没查成」。
  */
 export function useFranceReleaseState() {
   const api = useApi();
   return useQuery({
     queryKey: keys.franceReleaseState,
     queryFn: () => api.franceReleaseState(),
-    refetchInterval: 30_000,
+    refetchInterval: POLL_FAST_MS,
   });
 }
 
 /**
- * /france 页「发版」卡（#1231）：1 分钟重拉一次（主线头、CI 在变；GitHub 现读，不要拉太勤）。读不到后端也照实显示「没查成」。
+ * /france 页「发版」卡（#1231）：按 POLL_SLOW_MS 重拉（主线头、CI 在变；GitHub 现读，不要拉太勤）。读不到后端也照实显示「没查成」。
  */
 export function useFranceReleaseCard() {
   const api = useApi();
   return useQuery({
     queryKey: keys.franceReleaseCard,
     queryFn: () => api.franceReleaseCard(),
-    refetchInterval: 60_000,
+    refetchInterval: POLL_SLOW_MS,
   });
 }
 
-/** /france 页「命令行工具」（#1969、#1971）：一分钟重拉一次。读不到后端也照实显示。 */
+/** /france 页「命令行工具」（#1969、#1971）：按 POLL_SLOW_MS 重拉。读不到后端也照实显示。 */
 export function useCliTools() {
   const api = useApi();
   return useQuery({
     queryKey: keys.franceCliTools,
     queryFn: () => api.franceCliTools(),
-    refetchInterval: 60_000,
+    refetchInterval: POLL_SLOW_MS,
   });
 }
 
@@ -689,8 +761,25 @@ export function useFranceRelease() {
 }
 
 /**
- * /france 页「发版预检」按钮（#618）：点下让后端起 pnpm release:onekey preflight。
- * 命令后端写死、不收参数；最长 60 秒（后端 timeout），前端用 useMutation 不缓存、不作废读。
+ * 发版卡卡住、失败后的三个按钮（#2027）：重试、恢复引擎开关、撤掉暂停。写请求，后端回 409 带原因（刚变了、没有可点的、没装接活单元……）。
+ * 做完重拉发版卡和进度，操作记录里也多一条。
+ */
+export function useFranceReleaseRecover() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (kind: ReleaseRecoverKind) => api.franceReleaseRecover(kind),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.franceReleaseCard });
+      qc.invalidateQueries({ queryKey: keys.franceReleaseState });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/**
+ * /france 页「发版预检」按钮（#618）：点下让后端在进程内读七项事实。
+ * 不收参数；前端用 useMutation 不缓存、不作废读。
  */
 export function useFrancePreflight() {
   const api = useApi();
@@ -699,14 +788,14 @@ export function useFrancePreflight() {
 
 /**
  * 环境页的读取（#820 片 1）：这一台环境现在怎样。顶栏徽标不用它（名字跟着 /me 带回），只有开着环境页时才拉。
- * 只读、不跨环境。每分钟重拉一次——健康、在跑的会话这些没有实时推送。
+ * 只读、不跨环境。按 POLL_SLOW_MS 重拉——健康、在跑的会话这些没有实时推送。
  */
 export function useEnv({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
   return useQuery({
     queryKey: keys.env,
     queryFn: () => api.env(),
-    refetchInterval: 60_000,
+    refetchInterval: POLL_SLOW_MS,
     enabled,
   });
 }
@@ -763,14 +852,14 @@ function homeStateOf(query: {
 
 /**
  * 看板多机：本台加每个远程环境（本机 WSL）的新鲜度。别的环境推来快照时 node_reports 推送叫它重拉；
- * 新鲜度按时间变（推送停了没有事件），所以每 30 秒也重拉一次。
+ * 新鲜度按时间变（推送停了没有事件），所以按 POLL_FAST_MS 也重拉一次。
  */
 export function useNodes() {
   const api = useApi();
   return useQuery({
     queryKey: keys.nodes,
     queryFn: () => api.nodes(),
-    refetchInterval: 30_000,
+    refetchInterval: POLL_FAST_MS,
   });
 }
 
@@ -797,7 +886,7 @@ export function useNodeSnapshots(ids: readonly string[]) {
     queries: ids.map((id) => ({
       queryKey: keys.node(id),
       queryFn: () => api.node(id),
-      refetchInterval: 30_000,
+      refetchInterval: POLL_FAST_MS,
       retry: retryUnlessMissing,
     })),
   });
@@ -1072,6 +1161,74 @@ export function useUpdateRepoCiPolicy() {
       api.updateRepoCiPolicy(repoId, body),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: keys.repoCiPolicy });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/**
+ * 「导入仓库」列表（#1989）：我 GitHub 上看得见的仓，每个标好装没装、在不在驾驶舱。
+ * 不自动轮询：这是「我点一下去 GitHub 装个 App，回来刷新才看得到」的那类，拉得太勤是白问 GitHub。
+ */
+export function useImportableRepos() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.importableRepos,
+    queryFn: () => api.importableRepos(),
+    retry: false,
+  });
+}
+
+/** 把一个仓接进/移出驾驶舱：等后端写完再重拉（接了要刷新列表和仓列表、记了操作记录）。 */
+export function useImportRepo() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { githubId: number }) => api.importRepo(body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.importableRepos });
+      qc.invalidateQueries({ queryKey: keys.repos });
+      qc.invalidateQueries({ queryKey: keys.repoDispatch });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+export function useRemoveRepo() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (repoId: string) => api.removeRepo(repoId),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.importableRepos });
+      qc.invalidateQueries({ queryKey: keys.repos });
+      qc.invalidateQueries({ queryKey: keys.repoDispatch });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/** 把两个 App 装到某个仓（一键授权那一步）。 */
+export function useInstallAppOnRepo() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { githubId: number }) => api.installAppOnRepo(body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.importableRepos });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/** 断开本人 GitHub 授权。 */
+export function useDisconnectGitHub() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.disconnectGitHub(),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.importableRepos });
       qc.invalidateQueries({ queryKey: ['audit'] });
     },
   });

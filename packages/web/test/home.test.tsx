@@ -228,12 +228,16 @@ describe('home（/）：四种状态', () => {
     expect(button.getAttribute('data-tone')).toBeNull();
   });
 
-  test('点按钮开抽屉：两个分页签，要你拍的单列通栏、时间不换行；Esc 关', () => {
+  test('点按钮开抽屉：三个分页签（第三页本机会话，#1991），要你拍的单列通栏、时间不换行；Esc 关', () => {
     renderHome({ status: 'data', data: SAMPLE });
     openDrawer();
     const drawer = document.querySelector('[data-home-drawer]');
     expect(drawer?.getAttribute('data-home-drawer')).toBe('floating');
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['要你拍的2', '做完的1']);
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
+      '要你拍的2',
+      '做完的1',
+      '本机会话',
+    ]);
     const card = document.querySelector('[data-decision-card]');
     expect(card).toBeTruthy();
     const list = card?.parentElement;
@@ -559,6 +563,62 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
         .getByRole('link', { name: /打开单子详情/ })
         .getAttribute('href'),
     ).toBe('/home3');
+  });
+
+  test('引擎停下等人的卡（#1967、#1971）：写「停下等人」和引擎记的原因，不写「在合并队列」「还没验」；算等你的', async () => {
+    renderHome({
+      status: 'data',
+      data: {
+        ...SAMPLE,
+        running: [
+          ticket(1967, {
+            segment: 'merge',
+            waitingReason: 'parked',
+            parked: '动手 3 轮都没过',
+            waitingSince: '2026-10-02T08:00:00Z',
+            state: 'stalled',
+          }),
+          ticket(1971, {
+            segment: 'verify_pending',
+            waitingReason: 'parked',
+            parked: '认不出，按临时的办（IN_FLIGHT · 同一个写操作）：挂起并报警',
+            state: 'stalled',
+          }),
+        ],
+      },
+    });
+    await waitFor(() => expect(nodeOf('ticket:1967:')).toBeTruthy());
+    const a = nodeOf('ticket:1967:');
+    expect(a?.textContent).toContain('停下等人');
+    expect(a?.textContent).toContain('动手 3 轮都没过');
+    expect(a?.textContent).not.toContain('在合并队列');
+    expect(a?.querySelector('[data-needs-founder]')?.getAttribute('data-needs-founder')).toBe('true');
+    const b = nodeOf('ticket:1971:');
+    expect(b?.textContent).toContain('IN_FLIGHT');
+    expect(b?.textContent).not.toContain('还没验');
+    expect(b?.textContent).not.toContain('等第二意见');
+  });
+
+  test('【故意造出的失败】停下等人、但最近一笔是超时 / 失败：照旧画成出问题（红），写最近那条失败，不算等你拍（#902 D2，e2e #14）', async () => {
+    renderHome({
+      status: 'data',
+      data: {
+        ...SAMPLE,
+        running: [
+          ticket(14, {
+            segment: 'doing',
+            waitingReason: 'parked',
+            parked: '引擎没写停下的原因',
+            state: 'stalled',
+            lastEvent: { text: '动手超时：30 分钟没交活', at: '2026-10-02T08:00:00Z', tone: 'trouble' },
+          }),
+        ],
+      },
+    });
+    await waitFor(() => expect(nodeOf('ticket:14:')).toBeTruthy());
+    const n = nodeOf('ticket:14:');
+    expect(n?.textContent).toContain('动手超时');
+    expect(n?.querySelector('[data-needs-founder]')?.getAttribute('data-needs-founder')).toBe('false');
   });
 
   test('出问题（超时 / 失败）的卡画成 fail 红，和「还没验」「在等」分开', async () => {

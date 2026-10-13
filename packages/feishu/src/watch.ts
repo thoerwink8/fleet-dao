@@ -1,5 +1,5 @@
-// 网关自己看着自己：定时活（意图卡长轮询）每一轮走没走通，收到消息多久回上「收到」。三个出口——
-// - 心跳：每 10 分钟一行「网关心跳」（意图卡走通几轮、原话存下几句没存成几句、补漏、收到的耗时），
+// 网关自己看着自己：定时活（向后端报飞书用量，每分钟一次）每一轮走没走通。三个出口——
+// - 心跳：每 10 分钟一行「网关心跳」（用量上报走通几轮、没走通几轮、这个月的用量档），
 //   走通了也写：日志安静了，看最近一行心跳就分得清是闲着还是挂了。
 // - 报警：定时活 5 分钟没走通，用网关自己的飞书连接往团队群发一张报警卡——不经过后端：后端连不上时它写不了提醒。
 //   同一次故障只报一次。
@@ -8,7 +8,7 @@
 // - 状态只在进程里（香港上网关不写磁盘）：网关重启后从起来那一刻重新算，重启前报过的那次不再接着管。
 // - 网关整个没了、自己报不了的时候看后端 /healthz 的 feishu_gateway（packages/api/src/gateway-seen.ts），两边同一个 5 分钟。
 // - 报警卡只在这里发（test/static.test.ts 核对）。
-// - 旧的推送、盘面两条定时活随 #1022 退役（后端接口删了）；免打扰时段原来随推送从后端带回来，也跟着没了：报警不再按时段压。
+// - 旧的推送、盘面两条定时活随 #1022 退役；意图卡长轮询、收话、补漏随飞书收缩（#2047 F1）退役。
 import { BackendError, describe } from './backend.ts';
 import { LINK_WORDS, type LinkAlert, linkAlertCard, type RenderContext } from './cards.ts';
 import type { Logger } from './log.ts';
@@ -16,10 +16,10 @@ import { type FeishuPort, feishuErrorKind } from './port.ts';
 import { nextNonce, uuidFor } from './util.ts';
 import { clip, duration, when } from './words.ts';
 
-/** 定时活：意图卡（#553 第 4 条）。 */
-export type LoopName = 'intents';
+/** 定时活：向后端报飞书用量（也是后端认「网关还在」的心跳，gateway-seen.ts）。 */
+export type LoopName = 'usage';
 
-export const LOOPS: readonly LoopName[] = ['intents'];
+export const LOOPS: readonly LoopName[] = ['usage'];
 
 export interface WatchLimits {
   /**
@@ -48,26 +48,16 @@ export interface WatchDeps {
   now: () => number;
   teamChatId: string;
   publicUrl: string;
-  /** 「收到」超过这么久算慢，计一次（gateway.ts 的 TARGET_ACK_MS，design 15.4：2 秒内先回「收到」）。 */
-  ackTargetMs: number;
   limits?: Partial<WatchLimits> | undefined;
-  /** 写心跳时顺手做的事（上报飞书用量）。不等它：心跳这行记的是上报前已经知道的档。 */
-  onHeartbeat?: (() => void) | undefined;
   /** 写进心跳的用量档。没给就不写这一项（旧的看守测试不带）。 */
   feishuUsage?: (() => { level: string; sentence: string | null }) | undefined;
 }
 
 export interface Watch {
-  /** 定时活走通了一轮（取到一批意图卡并回执完）；ms 是这一轮花了多久。 */
-  ok(loop: LoopName, ms: number): void;
+  /** 定时活走通了一轮（用量报上去并拿到回应）。 */
+  ok(loop: LoopName): void;
   /** 定时活这一轮没走通。 */
   fail(loop: LoopName, err: unknown): void;
-  /** 一条消息从收到到回上「收到」花了多久；null = 表情和那句「收到」都没回上。 */
-  acked(ms: number | null): void;
-  /** 收原话的一句处理完：后端存下了没有。 */
-  intake(stored: boolean): void;
-  /** 补漏走了一轮：补上了几条（0 = 查了但没有要补的；断了话它自己也在日志里说）。 */
-  backfill(filled: number, failed: number): void;
   /** 看一次要不要报警、报「通了」（定时器调；测试直接调）。同一时刻只跑一个。 */
   check(): Promise<void>;
   /** 写一行心跳，窗口里的计数清零（定时器调；停机时也写一行）。 */
@@ -94,17 +84,7 @@ interface Incident {
 function freshWindow(at: number) {
   return {
     startedAt: at,
-    intents: { ok: 0, failed: 0 },
-    intake: { stored: 0, failed: 0 },
-    backfill: { rounds: 0, filled: 0, failed: 0 },
-    messages: {
-      count: 0,
-      noAck: 0,
-      slow: 0,
-      totalMs: 0,
-      maxMs: 0,
-      lastMs: null as number | null,
-    },
+    usage: { ok: 0, failed: 0 },
     lastError: null as { loop: LoopName; at: number; reason: string } | null,
   };
 }
@@ -114,14 +94,13 @@ export function createWatch(deps: WatchDeps): Watch {
   const log = deps.log;
   const startedAt = deps.now();
   const loops: Record<LoopName, LoopState> = {
-    intents: { lastOkAt: null, upSince: null, lastFail: null },
+    usage: { lastOkAt: null, upSince: null, lastFail: null },
   };
   let win = freshWindow(startedAt);
   let incident: Incident | null = null;
   let checking: Promise<void> | null = null;
 
   const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
-  const avg = (total: number, n: number) => (n > 0 ? Math.round(total / n) : null);
   const ctx = (): RenderContext => ({
     publicUrl: deps.publicUrl,
     now: deps.now(),
@@ -182,7 +161,7 @@ export function createWatch(deps: WatchDeps): Watch {
         {
           text:
             `通了：${words} ${when(backAt, t)} 起又走通了，断了 ${duration(backAt - inc.since)}。` +
-            '断的时候没发出去的意图卡后端会接着发；那段时间发给我、回了「没记成」的话请重发。',
+            '断的这段时间手机通知可能没发出来，要看事情请打开驾驶舱。',
         },
         { uuid: uuidFor('link-up', alert.messageId) },
       );
@@ -244,7 +223,7 @@ export function createWatch(deps: WatchDeps): Watch {
       const s = loops[loop];
       s.lastOkAt = t;
       s.upSince ??= t;
-      win.intents.ok += 1;
+      win.usage.ok += 1;
     },
 
     fail(loop, err) {
@@ -256,31 +235,7 @@ export function createWatch(deps: WatchDeps): Watch {
       s.upSince = null;
       s.lastFail = { at: t, reason };
       win.lastError = { loop, at: t, reason };
-      win.intents.failed += 1;
-    },
-
-    acked(ms) {
-      const m = win.messages;
-      m.count += 1;
-      if (ms === null) {
-        m.noAck += 1;
-        return;
-      }
-      m.totalMs += ms;
-      m.maxMs = Math.max(m.maxMs, ms);
-      m.lastMs = ms;
-      if (ms > deps.ackTargetMs) m.slow += 1;
-    },
-
-    intake(stored) {
-      if (stored) win.intake.stored += 1;
-      else win.intake.failed += 1;
-    },
-
-    backfill(filled, failed) {
-      win.backfill.rounds += 1;
-      win.backfill.filled += filled;
-      win.backfill.failed += failed;
+      win.usage.failed += 1;
     },
 
     check() {
@@ -293,10 +248,8 @@ export function createWatch(deps: WatchDeps): Watch {
     },
 
     heartbeat() {
-      deps.onHeartbeat?.();
       const t = deps.now();
       const w = win;
-      const acked = w.messages.count - w.messages.noAck;
       // 现算：不等 check 开了故障才说 down
       const link = down(t).length > 0 ? 'down' : incident ? 'recovering' : 'ok';
       const usage = deps.feishuUsage?.();
@@ -304,17 +257,7 @@ export function createWatch(deps: WatchDeps): Watch {
         minutes: Math.round((t - w.startedAt) / 60_000),
         link,
         ...(incident ? { downSince: iso(incident.since), alerted: incident.alert !== null } : {}),
-        intents: { ok: w.intents.ok, failed: w.intents.failed, lastOkAt: iso(loops.intents.lastOkAt) },
-        intake: { stored: w.intake.stored, failed: w.intake.failed },
-        backfill: { rounds: w.backfill.rounds, filled: w.backfill.filled, failed: w.backfill.failed },
-        messages: {
-          count: w.messages.count,
-          ackAvgMs: avg(w.messages.totalMs, acked),
-          ackMaxMs: acked > 0 ? w.messages.maxMs : null,
-          lastAckMs: w.messages.lastMs,
-          ackSlow: w.messages.slow,
-          noAck: w.messages.noAck,
-        },
+        usage: { ok: w.usage.ok, failed: w.usage.failed, lastOkAt: iso(loops.usage.lastOkAt) },
         ...(w.lastError
           ? { lastError: { loop: w.lastError.loop, at: iso(w.lastError.at), reason: w.lastError.reason } }
           : {}),

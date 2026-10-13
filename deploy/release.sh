@@ -1719,7 +1719,7 @@ check_gateway() { # 提交号
     red "香港飞书网关连上飞书之后没稳住（${SETTLE_SECONDS} 秒里退出或重启过）：香港 journalctl -u fleet-feishu -n 50"
     return 1
   fi
-  ok "香港飞书网关 ${sha:0:12} 在跑、连上了飞书长连接（pid $pid，这次起来后处理过 $(status_field "$st" messages) 条消息）"
+  ok "香港飞书网关 ${sha:0:12} 在跑、连上了飞书长连接（pid $pid）"
   case $(status_field "$st" backend) in
   reachable) ok "香港飞书网关经隧道连得上法国后端" ;;
   refused) pending "香港飞书网关连不上法国后端（连接被拒：法国 fleet-api 没起）；网关照实回「后端连不上」，没有崩" ;;
@@ -1959,13 +1959,13 @@ do_check() {
   health_gate "$cur" "" || true
 }
 
-# 自动发布单元（只读）的读数（fleet-auto-release 每一轮写的状态文件）照实列出来：主线头、CI、在用的落后几个、这一轮读到了什么、规矩同步到哪、
+# 自动发布单元的读数（fleet-auto-release 每一轮写的状态文件）照实列出来：主线头、CI、在用的落后几个、这一轮读到了什么、自动发版为什么发或没发、规矩同步到哪、
 # 装机脚本装到哪。跟不跟得上主线的判定在后端 /healthz 的 deploy_lag 一项（下面健康检查里逐项列出）
 check_auto_release() {
   local out line
   step "自动发布"
   if [[ "$(systemctl is-active fleet-auto-release.timer 2>/dev/null)" == active ]]; then
-    ok "fleet-auto-release.timer 在跑（每 5 分钟读一轮主线，只读不发）"
+    ok "fleet-auto-release.timer 在跑（每 5 分钟读一轮主线，绿了请求发版）"
   else
     pending "fleet-auto-release.timer 没在跑：落后几个的读数不会更新（装：bash /srv/fleet-dao/deploy/france.sh）"
   fi

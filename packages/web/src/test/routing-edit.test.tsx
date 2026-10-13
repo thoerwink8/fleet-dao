@@ -355,7 +355,8 @@ describe('路由页：调先后和开关', () => {
     );
     await opened();
     fireEvent.click(within(routeItem('r-cb-opus')).getByRole('switch'));
-    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: '关闭' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: '关闭' }));
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith('没改成', {
         id: REORDER_FAILED_TOAST_ID,
@@ -363,6 +364,10 @@ describe('路由页：调先后和开关', () => {
       }),
     );
     expect(toast.success).not.toHaveBeenCalled();
+    // 失败留在原处（#2012 的 onConfirm）：框里写原因，开关还是原来的
+    expect(within(dialog).getByRole('alert').textContent).toContain('这条路由的开关刚被别人改过');
+    fireEvent.click(within(dialog).getByRole('button', { name: '先不' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
     expect(within(routeItem('r-cb-opus')).getByRole('switch').getAttribute('aria-checked')).toBe('true');
   });
 

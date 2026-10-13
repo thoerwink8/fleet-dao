@@ -54,6 +54,12 @@ import type { WorkTrees } from './worktrees.ts';
 /** 等合并时多久看一次 PR（毫秒）。 */
 export const MERGE_POLL_EVERY_MS = 20_000;
 
+/** 等合并这一下读到的必过检查。红了才带 failed；pending / none / green 不带。 */
+export interface MergeWaitChecks {
+  overall: 'green' | 'red' | 'pending' | 'none';
+  failed: { name: string; detail?: string }[];
+}
+
 export interface TaskActivitiesDeps {
   gh: Pick<
     EngineGitHub,
@@ -66,6 +72,11 @@ export interface TaskActivitiesDeps {
   pollEveryMs?: number;
   /** 休眠，叫停（signal 触发）时要抛出来；测试里换成立刻返回的。 */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /**
+   * 等合并时读这个头上的必过检查（含合并闸、cold-verify）。
+   * 不给、又会接着等：waitMerged 抛错，不把红了装成还在等。
+   */
+  readChecks?: ((repo: RepoRef, sha: string, signal: AbortSignal) => Promise<MergeWaitChecks>) | undefined;
   log?: (message: string, fields?: Record<string, unknown>) => void;
   /** 会话目录里跑的 git、sh（测试里换成 PATH 上的）。 */
   gitBin?: string;
@@ -81,6 +92,19 @@ type TaskActivities = Required<
 
 const refOf = (repo: { owner: string; name: string }): RepoRef => ({ owner: repo.owner, name: repo.name });
 const short = (sha: string) => sha.slice(0, 7);
+
+/** 必过检查红了：检查名和原因交给工作流。没写名字就标明，不回空的。 */
+function checksRedWait(checks: MergeWaitChecks): MergeWait {
+  const failed = checks.failed.filter((item) => item.name.trim().length > 0);
+  const failedChecks = failed.length > 0 ? failed.map((item) => item.name) : ['（没写是哪项）'];
+  const detail =
+    failed
+      .map((item) =>
+        item.detail && item.detail.trim().length > 0 ? `${item.name}：${item.detail}` : item.name,
+      )
+      .join('；') || '必过检查红了';
+  return { state: 'checks_red', failedChecks, detail };
+}
 
 /** GitHub 拒绝挂自动合并、因为 PR 已经满足全部合并条件（没什么可等的）。 */
 function isCleanStatus(error: unknown): boolean {
@@ -364,6 +388,15 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         if (pull.mergeable === false || pull.mergeableState === 'dirty') {
           return { state: 'conflict', detail: `PR #${prNumber} 和主线冲突，自动合并等不到：要并主线` };
         }
+        // 必过检查红了和还在跑都是 blocked（#1983）。红了当场交回去；没接上读检查就抛，不装成还在等。
+        const readChecks = deps.readChecks;
+        if (!readChecks) {
+          throw new PortError('MERGE_CHECKS_UNWIRED', '等合并没接上读检查：红了和还在跑分不清，不接着等', {
+            retryable: false,
+          });
+        }
+        const checks = await mapped(() => readChecks(repo, pull.headSha, ctx.signal));
+        if (checks.overall === 'red') return checksRedWait(checks);
         if (now().getTime() >= deadline) {
           return { state: 'waiting', detail: '自动合并挂着，GitHub 还没合（等必过检查和合并闸）' };
         }

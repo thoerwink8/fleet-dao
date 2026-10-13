@@ -1,5 +1,6 @@
 // 定时任务页的行和标题块（照路由页样板，#1914）：法国页的定时任务区块仍用 job-row 的多列行。
 // 一行两层：名字加一个状态（点加字）；下面一行灰字写上次结果和周期。右边是上次跑成的相对时间。点开看明细（JobDetails）。
+import { POLL_FAST_MS } from '../api/client';
 import type { JobView } from '../api/types';
 import { formatAgo, formatDateTime } from '../lib/format';
 import { jobStatusLabel, outcomeText } from '../lib/schedule';
@@ -141,7 +142,9 @@ export function SchedulesHero({ jobs, now }: { jobs: readonly JobView[]; now: nu
         <p className="truncate text-subtitle">
           <span className="num">{jobs.length}</span> 个定时任务
         </p>
-        <span className="min-w-0 truncate text-meta text-muted-foreground">每 30 秒自己刷新</span>
+        <span className="min-w-0 truncate text-meta text-muted-foreground">
+          每 {POLL_FAST_MS / 1000} 秒自己刷新
+        </span>
       </div>
       <p
         data-hero-line

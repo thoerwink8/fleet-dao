@@ -65,6 +65,8 @@ source "$DEPLOY_DIR/lib/auto-release-state.sh"
 source "$DEPLOY_DIR/lib/node-report-gate.sh"
 # shellcheck source=lib/human-tier.sh
 source "$DEPLOY_DIR/lib/human-tier.sh"
+# shellcheck source=lib/service-home.sh
+source "$DEPLOY_DIR/lib/service-home.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 钉死的版本与校验和：外部二进制装上机器就进了信任面，不用 latest ──
@@ -204,9 +206,9 @@ RETIRED_UNIT_DIR=/etc/systemd/system # 只有测试会改（#1223）
 RELEASE_REQUEST_DIR=/var/lib/fleet-dao/release-request
 TRAIN_DIR=$RELEASES_DIR/.train
 RELEASE_REQUEST_LIB=/usr/local/lib/fleet-dao/release-request
-RELEASE_REQUEST_FILES=(lib.mjs fleet-release-request.mjs)
+RELEASE_REQUEST_FILES=(lib.mjs session-wait.mjs fleet-release-request.mjs)
 RELEASE_REQUEST_UNITS=(fleet-release-request.service fleet-release-request.path)
-# 自动发布单元（docs/ops.md 第九节「自动发布」）：只读不发（0032）——读主线头、它的 CI、在用版本、落后几个；发完版（驾驶舱按钮）后顺带装自动档、同步规矩。装的是副本：
+# 自动发布单元（docs/ops.md 第九节「自动发布」）：读主线头、它的 CI、在用版本、落后几个，主线绿了请求发版（0088，写请求文件、由接活单元发）；发完版后顺带装自动档、同步规矩。装的是副本：
 # 主线上改了它，下一轮发完版自动换（--auto-tier）。它每一轮的读数、本脚本装到哪个提交（下面 APPLIED_FILE）都放在 AUTO_DIR，后端的 /healthz 读
 AUTO_RELEASE_LIB=/usr/local/lib/fleet-dao/auto-release
 AUTO_RELEASE_FILES=(lib.mjs fleet-auto-release.mjs config.mjs)
@@ -849,7 +851,7 @@ readback_retired_units() {
   if ((bad == 0)); then ok "已删的演示版单元和脚本都不在了（#1223）"; fi
 }
 
-# 自动发布单元：定时器每 5 分钟拉起一轮（deploy/france/auto-release），只读不发；发完版后以 root 跑 france.sh --auto-tier、替会话用户同步规矩。
+# 自动发布单元：定时器每 5 分钟拉起一轮（deploy/france/auto-release），读数、主线绿了请求发版（0088）；发完版后以 root 跑 france.sh --auto-tier、替会话用户同步规矩。
 # 脚本放 /usr/local/lib 下的副本（全链归 root），不从检出直接跑：检出它自己会快进，主线上一个坏提交不该把自动发布本身弄坏
 setup_auto_release() {
   step "自动发布单元（只读：主线头、CI、在用版本、落后几个；发完版后装自动档、同步规矩；读数在 $AUTO_DIR；发布走驾驶舱按钮）"
@@ -1488,8 +1490,8 @@ readback_wireguard() {
 readback_service_home() {
   local found
   # 不接 head：find 被管道截断会让整条命令算失败，结果就被当成「没找到」
-  local homes=(/home/fleet /var/lib/fleet-dao /var/log/fleet-dao "$PILOT_HOME") u
-  for u in "${SESSION_USERS[@]}"; do homes+=("/home/$u"); done
+  local -a homes
+  mapfile -t homes < <(service_home_dirs)
   found=$(find "${homes[@]}" -user root 2>/dev/null || true)
   if [[ -n "$found" ]]; then
     red "fleet、会话用户或 $PILOT_USER 的目录里有 $(wc -l <<<"$found") 个 root 属主的文件，比如：$(head -3 <<<"$found" | tr '\n' ' ')"
@@ -1575,6 +1577,7 @@ main() {
     setup_release_request
     setup_agent_rules
     setup_cli_tools
+    fix_service_home_owners
   else
     load_config
   fi

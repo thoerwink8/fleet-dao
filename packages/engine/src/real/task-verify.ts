@@ -39,6 +39,7 @@ import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
 import { familyPickerFrom } from '../cold-verify-pick.ts';
 import { runColdVerifyForPr } from '../cold-verify-run.ts';
+import { createStatusMemo } from '../cold-verify-status.ts';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../ports.ts';
 import type { RunsWriter } from '../runner/not-wired.ts';
 import { type OneShotDeps, OneShotError, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
@@ -77,6 +78,25 @@ export const VERIFY_HEARTBEAT_MS = 15_000;
 export const VERIFY_ADMISSION_RETRY_SECONDS = 60;
 /** 切号停下了这一次验收（#59），隔多久再验（秒）：切号停派十几秒、切完下一轮探针探过才派得到切过去的池。 */
 export const VERIFY_ORG_SWITCH_RETRY_SECONDS = 30;
+/**
+ * 同一个 PR 因同一个原因（总开关关着 / 选路在等 / 内存放不下）连续等待时，重试间隔每次翻倍，封顶这么多秒（#2007）。
+ * 为什么要涨：总开关关着一关几小时，固定 30 秒一圈就是一小时 120 次；每圈都动工作流、读 GitHub、占选路，白耗。
+ * 为什么封在 300：开关一开、路由一通最多再等 5 分钟就接上，不让人等太久。
+ * 原因变了、真派上了、或超过 VERIFY_BACKOFF_FORGET_MS 没再来（说明中间已经另走了路）就从头涨。
+ */
+export const VERIFY_RETRY_CAP_SECONDS = 300;
+/** 每次连续等待，间隔乘几。 */
+export const VERIFY_RETRY_FACTOR = 2;
+/** 这么久没再等过同一个 PR，连续次数作废（上限是封顶间隔的两倍，正常的重来早到了）。 */
+export const VERIFY_BACKOFF_FORGET_MS = VERIFY_RETRY_CAP_SECONDS * 2 * 1000;
+/** 退避记账最多记多少个 PR（防泄漏）。 */
+const VERIFY_BACKOFF_MAX_PRS = 500;
+
+/** 第 n 次（从 1 起）连续等待该隔几秒：base 按倍数涨，封顶 VERIFY_RETRY_CAP_SECONDS（base 本身已超封顶就不动它）。 */
+export function backedOffSeconds(base: number, n: number): number {
+  const cap = Math.max(base, VERIFY_RETRY_CAP_SECONDS);
+  return Math.min(cap, base * VERIFY_RETRY_FACTOR ** Math.max(0, n - 1));
+}
 
 export interface ColdVerifyActivityDeps {
   /** 读 PR、读改到的文件、贴提交状态（引擎机器人）。 */
@@ -289,11 +309,32 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
   const maxDiffChars = deps.maxDiffChars ?? MAX_DIFF_CHARS;
   const log = deps.log ?? (() => undefined);
   const spawn = hostSegmentSpawner(deps.spawner);
+  // 跨圈的内存记账（#2007，引擎重启丢了无所谓：状态最多多贴一次、间隔从头涨）：
+  // 每个 PR 最后贴成功的 cold-verify 状态；每个 PR 同一原因连续等了几次。
+  const statusMemo = createStatusMemo();
+  const backoff = new Map<string, { reason: string; count: number; at: number }>();
+  const nextBackoff = (prKey: string, reason: string, base: number): number => {
+    const t = now().getTime();
+    const prev = backoff.get(prKey);
+    const count =
+      prev !== undefined && prev.reason === reason && t - prev.at <= VERIFY_BACKOFF_FORGET_MS
+        ? prev.count + 1
+        : 1;
+    backoff.delete(prKey);
+    backoff.set(prKey, { reason, count, at: t });
+    while (backoff.size > VERIFY_BACKOFF_MAX_PRS) {
+      const oldest = backoff.keys().next();
+      if (oldest.done) break;
+      backoff.delete(oldest.value);
+    }
+    return backedOffSeconds(base, count);
+  };
 
   return async (input: ColdVerifyInput, ctx: PortContext): Promise<ColdVerifyResult> => {
     ctx.heartbeat();
     const repo = refOf(input.repo);
     const { prNumber, round } = input;
+    const prKey = `${repo.owner}/${repo.name}#${prNumber}`.toLowerCase();
 
     // 1. 读 GitHub（先于一切、在 runColdVerifyForPr 外面）：不通是 PortError，工作流按失败分流重试。
     const pull = await mapped(() => deps.gh.claims.readPull(repo, prNumber));
@@ -384,17 +425,27 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     const oneShot = oneShotFor();
 
     const retryFor = (reason: string): NonNullable<ColdVerifyResult['retry']> => {
+      // 切号只停十几秒，不涨间隔（也不动连续次数的记账）
       if (seen.orgSwitch) return { wait: 'slot', reason, afterSeconds: VERIFY_ORG_SWITCH_RETRY_SECONDS };
-      if (seen.admission) return { wait: 'slot', reason, afterSeconds: VERIFY_ADMISSION_RETRY_SECONDS };
+      // 其余几种「没路由 / 内存放不下」：同一原因连续等，间隔按倍数涨（#2007）。原因 = 哪一种 + 选路给的说法（总开关关着、
+      // 收尾中、各族在等什么）；这些说法是固定文案，不带会变的数，所以不会每圈都被当成「原因变了」。
+      if (seen.admission) {
+        const afterSeconds = nextBackoff(prKey, 'admission', VERIFY_ADMISSION_RETRY_SECONDS);
+        return { wait: 'slot', reason, afterSeconds };
+      }
       // 一个模型都派不出、或候选都在派前探测里被打掉：选路没给过秒数，用默认的那一档
-      if (seen.noModel || waits.length === 0)
-        return { wait: 'slot', reason, afterSeconds: ROUTE_RETRY_SECONDS };
+      if (seen.noModel || waits.length === 0) {
+        const afterSeconds = nextBackoff(prKey, `no-model|${reason}`, ROUTE_RETRY_SECONDS);
+        return { wait: 'slot', reason, afterSeconds };
+      }
       const slot = waits.filter((w) => w.waitFor === 'slot');
       const pool = slot.length > 0 ? slot : waits;
+      const why = [...new Set(waits.map((w) => w.detail))].sort().join('|');
+      const base = Math.min(...pool.map((w) => w.retryAfterSeconds ?? ROUTE_RETRY_SECONDS));
       return {
         wait: slot.length > 0 ? 'slot' : 'quota',
         reason,
-        afterSeconds: Math.min(...pool.map((w) => w.retryAfterSeconds ?? ROUTE_RETRY_SECONDS)),
+        afterSeconds: nextBackoff(prKey, `route|${why}`, base),
       };
     };
 
@@ -520,6 +571,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             }),
           );
         },
+        statusMemo: statusMemo.scoped(prKey),
         round,
         timeoutMinutes: deps.timeoutMinutes ?? VERIFY_MINUTES,
         waitReason: (verdict) => {
@@ -560,6 +612,9 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     if (ctx.signal.aborted) throw ctx.signal.reason ?? new Error('被叫停了');
     void sweepRunDirs(deps.runsDir, now(), SESSION_ARTIFACT_TTL_MS, log);
     if (seen.transient) throw seen.transient;
+    // 记账收口（#2007）：PR 关了、合了，状态记忆丢掉；这一圈没在等（真派上了、或出了结论）连续等待的次数归零
+    if (pull.state !== 'open') statusMemo.forget(prKey);
+    if (run.wait === undefined || run.verdict?.upstreamRetry !== undefined) backoff.delete(prKey);
 
     // 2. 把结局整理成工作流要的形状
     if (run.sourceProblem !== undefined) {

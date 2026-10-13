@@ -56,7 +56,12 @@ export interface MainRedPushDeps {
   rememberVerdict: (input: { verdict: MainCiVerdict; link: string }) => Promise<void>;
   /** 没配、推不出去照抛。抛出的话里不带 webhook 地址。 */
   send: (text: string) => Promise<void>;
+  /** 驾驶舱某一页的完整链接（每条通知都带，F1 #2051）；没配照抛。 */
+  cockpit: (path: string) => string;
 }
+
+/** 主线红、已恢复的通知链接落在驾驶舱主页。 */
+export const MAIN_CI_COCKPIT_PATH = '/';
 
 /**
  * 给定主线 ci.yml 最近一次已结束的 push 运行：conclusion 为 failure 判红，success 判绿。
@@ -119,13 +124,18 @@ function unread(why: string): string {
   return why.includes('没查成') ? why : `没查成：${why}`;
 }
 
-function redText(run: MainPushRun): string {
+function redText(run: MainPushRun, cockpit: string): string {
   const jobs = run.failedJobs.length > 0 ? run.failedJobs.join('、') : '（这一轮没有结论为 failure 的作业）';
-  return [`主线红了：提交 ${run.sha.slice(0, 7)}`, `运行：${run.url}`, `失败的作业：${jobs}`].join('\n');
+  return [
+    `主线红了：提交 ${run.sha.slice(0, 7)}`,
+    `运行：${run.url}`,
+    `失败的作业：${jobs}`,
+    `驾驶舱：${cockpit}`,
+  ].join('\n');
 }
 
-function recoveredText(run: MainPushRun): string {
-  return [`主线已恢复：提交 ${run.sha.slice(0, 7)}`, `运行：${run.url}`].join('\n');
+function recoveredText(run: MainPushRun, cockpit: string): string {
+  return [`主线已恢复：提交 ${run.sha.slice(0, 7)}`, `运行：${run.url}`, `驾驶舱：${cockpit}`].join('\n');
 }
 
 /** 新的在前：第一条 status 为 completed 的就是最近一次已结束的。进行中的跳过。 */
@@ -254,6 +264,12 @@ export async function pushMainRed(deps: MainRedPushDeps): Promise<SweepPart> {
   const problem = badRun(finished);
   if (problem) return { scanned: runs.length, found: 0, unchecked: [unread(problem)] };
 
+  let cockpit: string;
+  try {
+    cockpit = deps.cockpit(MAIN_CI_COCKPIT_PATH);
+  } catch (err) {
+    return { scanned: runs.length, found: 0, unchecked: [unread(`主线红：${errMessage(err)}`)] };
+  }
   const part = await deliver(
     deps,
     notifyGreen
@@ -261,14 +277,14 @@ export async function pushMainRed(deps: MainRedPushDeps): Promise<SweepPart> {
           scanned: runs.length,
           key: mainRecoveredPushKey(finished.sha),
           title: MAIN_RECOVERED_PUSH_TITLE,
-          text: recoveredText(finished),
+          text: recoveredText(finished, cockpit),
           link: finished.url,
         }
       : {
           scanned: runs.length,
           key: mainRedPushKey(finished.sha),
           title: MAIN_RED_PUSH_TITLE,
-          text: redText(finished),
+          text: redText(finished, cockpit),
           link: finished.url,
         },
   );

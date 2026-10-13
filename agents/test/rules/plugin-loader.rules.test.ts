@@ -103,7 +103,7 @@ const projectHooks = (): Settings => ({
           {
             type: 'command',
             command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/prompt-log.mjs"',
-            timeout: 30000,
+            timeout: 30,
           },
         ],
       },
@@ -118,8 +118,12 @@ describe('订阅目录（决定 0085）', () => {
       ['session-start.mjs', 'SessionStart', 90],
       ['main-thread.mjs', 'PreToolUse', 10],
       ['stop.mjs', 'Stop', 10],
-      ['prompt-log.mjs', 'UserPromptSubmit', 30000],
+      ['prompt-log.mjs', 'UserPromptSubmit', 30],
     ]);
+  });
+
+  it('所有钩子超时按秒写，不超过 600（写成毫秒是 30000 这种数）', () => {
+    for (const hook of PROCESS_HOOKS) expect(hook.timeout).toBeLessThanOrEqual(600);
   });
 
   it('空设置加上 process：五条命令都指向安装目录，不指向别的仓的 agents/hooks', () => {
@@ -145,7 +149,7 @@ describe('订阅目录（决定 0085）', () => {
     expect(scriptsOf(next).filter((name) => name === 'bootstrap.mjs')).toEqual(['bootstrap.mjs']);
     const added = next.hooks?.UserPromptSubmit?.[0]?.hooks[0];
     expect(added?.command).toBe(lib.commandFor(HOOKS, 'prompt-log.mjs'));
-    expect(added?.timeout).toBe(30000);
+    expect(added?.timeout).toBe(30);
   });
 
   it('没标记不给空设置造 hooks；有标记再拿掉，过程钩子没了，别人的钩子还在', () => {
@@ -200,9 +204,23 @@ describe('加载器真跑（决定 0085）', () => {
     return runChild(process.execPath, [LOADER], {
       cwd,
       input: JSON.stringify({ cwd }),
-      env: { ...process.env, ...env },
+      // 不往跑测试的这个会话自己的 CLAUDE_ENV_FILE 里写
+      env: { ...process.env, CLAUDE_ENV_FILE: '', ...env },
     });
   }
+
+  it('配了备用代理：往 CLAUDE_ENV_FILE 追加代理变量（每个仓开会话都走这个用户级钩子）；没配不写', () => {
+    const home = temp();
+    mkdirSync(join(home, '.fleet-dao'));
+    const envFile = join(temp(), 'env.sh');
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_ENV_FILE: envFile };
+    expect(run(temp(), env).status).toBe(0);
+    expect(existsSync(envFile)).toBe(false);
+    writeFileSync(join(home, '.fleet-dao', 'fallback-proxy'), 'http://127.0.0.1:7890\n');
+    const r = run(temp(), env);
+    expect(r.status, r.stderr).toBe(0);
+    expect(readFileSync(envFile, 'utf8')).toContain('export HTTPS_PROXY=http://127.0.0.1:7890\n');
+  });
 
   function readSettings(cwd: string): string | null {
     const file = join(cwd, '.claude', 'settings.json');

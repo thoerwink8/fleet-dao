@@ -325,9 +325,9 @@ describe('Kimi Code（~/.kimi-code/config.toml 的 [[hooks]] → pretool-kimi.mj
     expect(judge(call('Grep', { pattern: 'TODO', path: HOME, output_mode: 'content' })).code).toBe(2);
   });
 
-  it('Kimi 的 Bash 在 Windows 上也是 Git Bash：反引号照拦；timeout 按秒，超过前台等待上限照拦；参数里的 cwd 优先', () => {
+  it('Kimi 的 Bash 在 Windows 上也是 Git Bash：反引号照拦；前台等多久都放行（决定 0089）；参数里的 cwd 优先', () => {
     expect(judge(call('Bash', { command: `echo ${bt}date${bt}` })).code).toBe(2);
-    expect(judge(call('Bash', { command: 'pnpm test', timeout: 300 })).code).toBe(2);
+    expect(judge(call('Bash', { command: 'pnpm test', timeout: 300 }))).toEqual({ code: 0 });
     expect(judge(call('Bash', { command: 'pnpm test', timeout: 300, run_in_background: true }))).toEqual({
       code: 0,
     });

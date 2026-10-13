@@ -1,40 +1,20 @@
-// 法国发版一键（/france 页 #618）：这一台后端自己替页面做两件事——
-// 1. GET /api/france/release-state：读 ~/.fleet-dao/release-train.json 和 ~/.fleet-dao/release-train.paused，
-//    判断 release-train 此刻在走 / 暂停 / 没在走。读不到一律回 unreadable，不拿「没在走」顶（机底线）。
-// 2. POST /api/france/preflight：起子进程跑 `pnpm release:onekey preflight`，命令写死、不收参数（#618 的红色就是「不开放任意 CLI」）。
-//    60 秒超时、512KB maxBuffer（溢出的截掉、truncated=true）；起进程都没起来时回 unreadable + 原因。stdout/stderr 原样回给页面分块 show。
+// 法国发版一键（/france 页 #618）的进度：GET /api/france/release-state 读 release-train 的记录和暂停标记，
+// 判断这一趟在走 / 暂停 / 没在走。读不到一律回 unreadable，不拿「没在走」顶。
+// 「发版预检」不在这里起进程：见 france-preflight.ts，进程内读事实，不读 home。
 //
-// 这两个能力都包成一个 port（FranceReleasePort），deps 里给。这样：
-// - 单测（france-release.test.ts）换假的读文件、起子进程，不真起 pnpm、不真靠 home；
-// - 开发、内存版后端 deps 没给时接口照样回，写明「没接上」，不拿「没在走」「预检过了」顶。
-//
+// 读进度包成 FranceReleasePort，deps 里给。单测换假的读文件。开发、内存版没给时接口回没接上。
 // 形状约定见 packages/shared/src/web-api/france-release.ts。
 
-import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
-import {
-  type FrancePreflightResponse,
-  FrancePreflightResponseSchema,
-  type FranceReleaseState,
-  FranceReleaseStateSchema,
-} from '@fleet-dao/shared';
+import { type FranceReleaseState, FranceReleaseStateSchema } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { Hono } from 'hono';
 import type { Deps } from './deps.ts';
 import { reply } from './http.ts';
-import type { Logger } from './ports.ts';
 import type { CockpitEnv } from './session.ts';
-
-const execFileAsync = promisify(execFile);
-
-// 命令固定写死：这就是「不开放任意 CLI」的实现——页面和后端之间只走 POST /france/preflight 召唤，
-// 起什么、带什么参数都写在这份文件里，前端不给任何口子（#618 的红色）。
-const PREFLIGHT_TIMEOUT_MS = 60_000;
-const PREFLIGHT_MAX_BUFFER = 512 * 1024;
 
 const STATE_REL = join('.fleet-dao', 'release-train.json');
 const MARKER_REL = join('.fleet-dao', 'release-train.paused');
@@ -42,21 +22,13 @@ const MARKER_REL = join('.fleet-dao', 'release-train.paused');
 export const TRAIN_DIR = '/srv/fleet-dao-releases/.train';
 
 /**
- * 一台后端的「读 release-train 状态 + 跑预检」接口。生产（main.ts 正式装配）给真实现：
- * home 用当前用户的 ~、cwd 用进程自己启动的工作目录（release.sh 是 cd 到发布目录起的），
- * 起 pnpm 经 spawnSync（Windows 下 pnpm 是 .cmd 套壳，走 shell:true 同 release-onekey.mjs 的做法）。
+ * 一台后端的「读 release-train 状态」接口。生产（main.ts 正式装配）给真实现：
+ * 法国上 root 写的进度目录优先；没有才看当前用户的 ~（指挥官在本机跑 release-train 的）。
+ * 发版预检不走这里：那条会碰到 home，法国后端 ProtectHome 读不了。
  */
 export interface FranceReleasePort {
   /** 读两个状态文件、拼出这一刻那一趟的状态。读不到抛错，由 readFranceReleaseState 包成 unreadable。 */
   readStateFiles(): Promise<{ stateJson: string | null; marker: boolean }>;
-  /** 起子进程跑预检，返回退出码 / 信号 / stdout / stderr。起进程自己抛错（pnpm 不在 PATH、不能 fork）。 */
-  runPreflight(): Promise<{
-    code: number | null;
-    signal: string | null;
-    stdout: string;
-    stderr: string;
-    timedOut: boolean;
-  }>;
 }
 
 interface ReleaseTrainStateFile {
@@ -68,6 +40,13 @@ interface ReleaseTrainStateFile {
   updatedAt?: string;
   phase?: number;
   target?: { kind?: string; value?: string };
+  /** 九步时间线（#2026，法国接活脚本写）：这一趟开始、每一步开始的时间、此刻在等什么、拖后腿的。老记录没有。 */
+  startedAt?: string;
+  steps?: unknown;
+  waiting?: unknown;
+  laggards?: unknown;
+  /** 发版前记下的总开关状态（第 2 步写）：恢复引擎开关、撤掉暂停按它判断（#2027）。 */
+  before?: { master?: unknown } | null;
   // 真文件里字段不止这些（marker、france、release、verify、restore、changes、warn 等），但页面现在只用这几样；
   // 少写没用到的字段，将来的字段自然装进 extra，不在这里约束。
 }
@@ -103,15 +82,51 @@ function describeTarget(target: ReleaseTrainStateFile['target']): string {
 const TRAIN_STATUSES = ['running', 'blocked', 'failed', 'done', 'aborted'] as const;
 export type TrainStatus = (typeof TRAIN_STATUSES)[number];
 
+const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+const isoOrNull = (v: unknown): string | null => (typeof v === 'string' && ISO.test(v) ? v : null);
+
+/** 九步时间线（#2026）：phase 不是整数就没有时间线（认不出走到哪，不画）；steps、waiting 认不出的按没写。 */
+export function trainTimeline(parsed: ReleaseTrainStateFile): TrainTimeline | null {
+  const { phase } = parsed;
+  if (typeof phase !== 'number' || !Number.isInteger(phase) || phase < 0 || phase >= PHASE_NAMES.length) {
+    return null;
+  }
+  const raw = Array.isArray(parsed.steps) ? (parsed.steps as unknown[]) : [];
+  return {
+    phase,
+    startedAt: isoOrNull(parsed.startedAt),
+    steps: PHASE_NAMES.map((_, i) => isoOrNull(raw[i])),
+    waiting: typeof parsed.waiting === 'string' && parsed.waiting !== '' ? parsed.waiting : null,
+    laggards: Array.isArray(parsed.laggards)
+      ? (parsed.laggards as unknown[]).filter((x): x is string => typeof x === 'string')
+      : [],
+  };
+}
+
+export interface TrainTimeline {
+  phase: number;
+  startedAt: string | null;
+  steps: (string | null)[];
+  waiting: string | null;
+  laggards: string[];
+}
+
 /** 一份进度记录读成这一趟的样子；认不出（不是 JSON、没写 status、status 不认识）回 { ok: false }，不猜、不当成没在走。 */
 export function parseTrainState(json: string):
   | {
       ok: true;
       status: TrainStatus;
       phase: string;
+      /** phase 的下标（0..8）；认不出是 null。 */
+      phaseIndex: number | null;
+      /** 发版前引擎总开关是开着（true）还是关着（false）；没记下是 null。 */
+      beforeMaster: boolean | null;
       target: string;
+      /** 目标的 40 位提交号（kind sha 时）；对 last-request.json 里同一趟的体检结论用。 */
+      targetSha: string | null;
       why: string | null;
       updatedAt: string | null;
+      timeline: TrainTimeline | null;
     }
   | { ok: false; why: string } {
   let parsed: ReleaseTrainStateFile;
@@ -134,9 +149,19 @@ export function parseTrainState(json: string):
     ok: true,
     status,
     phase: describePhase(parsed.phase),
+    phaseIndex:
+      typeof parsed.phase === 'number' && Number.isInteger(parsed.phase) && parsed.phase >= 0
+        ? parsed.phase
+        : null,
+    beforeMaster: typeof parsed.before?.master === 'boolean' ? parsed.before.master : null,
     target: describeTarget(parsed.target),
+    targetSha:
+      typeof parsed.target?.value === 'string' && /^[0-9a-f]{40}$/.test(parsed.target.value)
+        ? parsed.target.value
+        : null,
     why: typeof parsed.why === 'string' ? parsed.why : null,
     updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null,
+    timeline: trainTimeline(parsed),
   };
 }
 
@@ -178,63 +203,17 @@ export async function readFranceReleaseState(
   };
 }
 
-export async function runFrancePreflight(
-  port: FranceReleasePort | undefined,
-  now: () => Date,
-): Promise<FrancePreflightResponse> {
-  const asOf = now().toISOString();
-  if (!port) {
-    return {
-      state: 'unreadable',
-      why: '这台后端没接上 release:onekey 的执行（开发、内存版）；到法国那台的驾驶舱开才有这颗按钮',
-      asOf,
-    };
-  }
-  const startedAt = now().getTime();
-  let r: Awaited<ReturnType<FranceReleasePort['runPreflight']>>;
-  try {
-    r = await port.runPreflight();
-  } catch (err) {
-    return { state: 'unreadable', why: `起 pnpm release:onekey preflight 没成：${errMessage(err)}`, asOf };
-  }
-  const durationMs = Math.max(0, now().getTime() - startedAt);
-  // 输出已经按 maxBuffer 截断（node 的 execFile 到 maxBuffer 自己就截掉并设 error.code='ERR_CHILD_PROCESS_STDIO_MAXBUFFER_EXCEEDED'，
-  // 但起子进程那一层把它当作完成、stdout/stderr 是截好的内容）。truncated 由 port 自己报更准确。
-  const stdout = r.stdout.length > PREFLIGHT_MAX_BUFFER ? r.stdout.slice(0, PREFLIGHT_MAX_BUFFER) : r.stdout;
-  const stderr = r.stderr.length > PREFLIGHT_MAX_BUFFER ? r.stderr.slice(0, PREFLIGHT_MAX_BUFFER) : r.stderr;
-  const truncated = r.stdout.length > PREFLIGHT_MAX_BUFFER || r.stderr.length > PREFLIGHT_MAX_BUFFER;
-  return {
-    state: 'done',
-    // 命令原样 show：让人看到这次跑的是哪条。命令固定写死，show 出来也不漏参数（没有参数可注）。
-    command: 'pnpm release:onekey preflight',
-    code: r.code,
-    signal: r.signal,
-    stdout,
-    stderr,
-    durationMs,
-    timedOut: r.timedOut,
-    truncated,
-    asOf,
-  };
-}
-
 export function registerFranceReleaseRoutes(app: Hono<CockpitEnv>, deps: Deps): void {
-  // WebRoutes 写在前端共享里，路径都在 /api 之下
+  // WebRoutes 写在前端共享里，路径都在 /api 之下。预检的 POST 在 france-preflight.ts。
   app.get('/france/release-state', async (c) =>
     reply(c, FranceReleaseStateSchema, await readFranceReleaseState(deps.franceRelease, deps.now)),
-  );
-  app.post('/france/preflight', async (c) =>
-    reply(c, FrancePreflightResponseSchema, await runFrancePreflight(deps.franceRelease, deps.now)),
   );
 }
 
 // —— 生产装配（main.ts 挂）用到的真实现 ——
 
-/**
- * 真 port：home 是当前用户的 ~；cwd 是 process.cwd()（release.sh 把驾驶舱后端在发布目录里起）；pnpm 走 shell:true 以便 Windows 下 .cmd 起得来。
- * 这和 release-onekey.mjs 里 run 的「Windows 下 pnpm 走 cmd.exe」等价——execFile 的 shell:true 在 Windows 上会让 cmd.exe 解析。
- */
-export function liveFranceReleasePort(log: Logger, trainDir: string = TRAIN_DIR): FranceReleasePort {
+/** 真 port：法国上 root 写的进度目录优先；没有就看当前用户的 ~。发版预检不走这个 port。 */
+export function liveFranceReleasePort(trainDir: string = TRAIN_DIR): FranceReleasePort {
   const home = homedir();
   const statePath = join(home, STATE_REL);
   const markerPath = join(home, MARKER_REL);
@@ -246,49 +225,6 @@ export function liveFranceReleasePort(log: Logger, trainDir: string = TRAIN_DIR)
       const statePick = existsSync(trainState) ? trainState : statePath;
       const stateJson = existsSync(statePick) ? await readFile(statePick, 'utf8') : null;
       return { stateJson, marker: existsSync(trainMarker) || existsSync(markerPath) };
-    },
-    async runPreflight() {
-      // env 用 process.env 原样过（带上代理变量，让 pnpm 找得到网络；release-onekey.mjs 里 gh 自己有直连再代理的两条路）。
-      // shell：Windows 下 pnpm 是 .cmd 套壳，要 cmd.exe 来解析；POSIX 下 shell:true 走 /bin/sh，pnpm 在 PATH 里就行。
-      // cwd：不发参数（继承 process.cwd()）——release.sh 是在发布目录里起的，预检读到的状态（在跑会话、落后主线）就是这台后端自己看到的那份。
-      try {
-        const r = await execFileAsync('pnpm', ['release:onekey', 'preflight'], {
-          encoding: 'utf8',
-          timeout: PREFLIGHT_TIMEOUT_MS,
-          maxBuffer: PREFLIGHT_MAX_BUFFER,
-          windowsHide: true,
-          shell: true,
-        });
-        return {
-          code: 0,
-          signal: null,
-          stdout: r.stdout ?? '',
-          stderr: r.stderr ?? '',
-          timedOut: false,
-        };
-      } catch (err: unknown) {
-        // 非零退出码、超时被杀、stdio 截断：node 都走 reject。这种是「起得来、跑完了但没过」，不是「起不来」——
-        // 照样回 done 让页面 show 输出和退出码。起不来（pnpm 不在 PATH、fork 失败）的 err 没有 stdout/stderr 字段，往上抛。
-        const e = err as {
-          code?: number | string | null;
-          signal?: string | null;
-          stdout?: string;
-          stderr?: string;
-          killed?: boolean;
-        };
-        if (typeof e.stdout === 'string' || typeof e.stderr === 'string') {
-          const timedOut = e.signal === 'SIGTERM' && e.killed === true;
-          return {
-            code: typeof e.code === 'number' ? e.code : null,
-            signal: typeof e.signal === 'string' ? e.signal : null,
-            stdout: e.stdout ?? '',
-            stderr: e.stderr ?? '',
-            timedOut,
-          };
-        }
-        log.warn('发版预检起子进程没成', { error: errMessage(err) });
-        throw err;
-      }
     },
   };
 }

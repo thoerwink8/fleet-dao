@@ -845,10 +845,10 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     },
 
     async raiseAlert(input) {
-      // 引擎的 info 只在封号、事件数到线、全熔断这类要人知道的事上发，量很小：和「卡住了」一样进提醒中心。
+      // decision 进「要你拍的」。stuck、info 仍进提醒：info 只在封号、事件数到线、全熔断这类事上发，量很小。
       const { id } = await upsertAlert(db, {
         dedupeKey: input.dedupeKey,
-        level: 'alert',
+        level: input.level === 'decision' ? 'decision' : 'alert',
         // 合并队列这类不属于某个需求的报警 taskId 是空的：不挂任务。
         taskId: UUID.test(input.taskId) ? input.taskId : null,
         title: input.title.slice(0, 300),

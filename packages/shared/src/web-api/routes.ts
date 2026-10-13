@@ -29,11 +29,14 @@ import {
   FranceReleaseStateSchema,
   ReleaseCardSchema,
   ReleasedCommitsSchema,
+  ReleaseRecoverBody,
+  ReleaseRecoverResponse,
   ReleaseRequestBody,
   ReleaseRequestResponse,
 } from './france-release.ts';
 import { HomeResponseSchema } from './home.ts';
 import { JobsResponse } from './jobs.ts';
+import { LocalSessionsResponseSchema } from './local-sessions.ts';
 import { NodeDetailResponseSchema, NodesResponseSchema } from './nodes.ts';
 import {
   AnswerNotificationRequest,
@@ -45,6 +48,26 @@ import {
   ResolveNotificationResponse,
 } from './notifications.ts';
 import { PoolsResponse } from './pools.ts';
+import {
+  DisconnectGitHubResponse,
+  ImportableReposResponse,
+  ImportRepoRequest,
+  ImportRepoResponse,
+  InstallAppRequest,
+  InstallAppResponse,
+  RemoveRepoResponse,
+} from './repo-import.ts';
+import {
+  CreateRequestRequest,
+  MarkRequestReadRequest,
+  MarkRequestReadResponse,
+  RequestActionRequest,
+  RequestDetailResponse,
+  RequestListQuery,
+  RequestListResponse,
+  SendRequestMessageRequest,
+  UpdateRequestDraftRequest,
+} from './requests.ts';
 import {
   AddPurposeModelRequest,
   ManualModelRequest,
@@ -86,6 +109,11 @@ import {
   UpdateTaskRoutePinResponse,
 } from './task.ts';
 import { TaskListQuery, TaskListResponse } from './task-list.ts';
+import {
+  WorktreeCleanupRequestSchema,
+  WorktreeCleanupResponseSchema,
+  WorktreesResponseSchema,
+} from './worktrees.ts';
 
 // —— 路由表（前端据此封装请求；路径都在 WEB_API_PREFIX 之下，:xxx 是路径参数）——
 
@@ -113,7 +141,14 @@ export const WebRoutes = {
     request: ReleaseRequestBody,
     response: ReleaseRequestResponse,
   },
-  /** /france 页「发版预检」按钮：起子进程跑 pnpm release:onekey preflight，命令写死、不收参数。 */
+  /** /france 页发版卡卡住、失败后的三个按钮（#2027）：重试、恢复引擎开关、撤掉暂停；只收种类，后端按进度记录核能不能点，记操作记录，写请求文件。 */
+  franceReleaseRecover: {
+    method: 'POST',
+    path: '/france/release-recover',
+    request: ReleaseRecoverBody,
+    response: ReleaseRecoverResponse,
+  },
+  /** /france 页「发版预检」：后端进程内读七项事实，不起子进程、不收参数。退出码 0 能发，2 不能发。 */
   francePreflight: { method: 'POST', path: '/france/preflight', response: FrancePreflightResponseSchema },
   /** /france 页「命令行工具」（#1969、#1971）：在用版本、官方最新、现算的落后，升过的带上次升级时间和升上去的版本。只读，没有升级按钮。 */
   franceCliTools: { method: 'GET', path: '/france/cli-tools', response: CliToolsResponseSchema },
@@ -135,6 +170,44 @@ export const WebRoutes = {
     request: UpdateRepoCiPolicyRequest,
     response: UpdateRepoCiPolicyResponse,
   },
+  /** 设置页「仓库」一节的「导入仓库」（#1989）：我 GitHub 上看得见的仓，每个标好装没装、在不在驾驶舱；外加我这份授权现在怎样。 */
+  importableRepos: { method: 'GET', path: '/repos/importable', response: ImportableReposResponse },
+  /** 把一个仓接进驾驶舱（写 repos 表，默认不打开自动派活）；记操作记录。 */
+  importRepo: {
+    method: 'POST',
+    path: '/repos/import',
+    request: ImportRepoRequest,
+    response: ImportRepoResponse,
+  },
+  /** 把一个仓移出驾驶舱（删 repos 那一行）；还挂着没结束的单时不删，回 removed=false 带原因。记操作记录。 */
+  removeRepo: { method: 'DELETE', path: '/repos/:repoId/cockpit', response: RemoveRepoResponse },
+  /** 把两个 App 装到某个仓（一键授权那一步，走本人 OAuth 用户令牌）；记操作记录。 */
+  installAppOnRepo: {
+    method: 'POST',
+    path: '/repos/install',
+    request: InstallAppRequest,
+    response: InstallAppResponse,
+  },
+  /** 断开本人这份 GitHub 授权。 */
+  disconnectGitHub: {
+    method: 'POST',
+    path: '/github/oauth/disconnect',
+    response: DisconnectGitHubResponse,
+  },
+  /**
+   * 「连接 GitHub」（#1989）：浏览器整页跳到 GitHub 授权页，回来落在设置页。
+   * 没有响应体（302 跳转），所以不写 response；挂在 /api 下过登录门——要登进驾驶舱的人才能连自己的 GitHub。
+   */
+  githubConnect: { method: 'GET', path: '/github/connect' },
+  /** GitHub 授权完回这里：拿 code 换令牌、存起来、跳回设置页。没有响应体（302）。 */
+  githubCallback: { method: 'GET', path: '/github/callback' },
+  /**
+   * 「一键授权」（#1989）：浏览器整页跳到 GitHub 授权页，回来后两个 App 都装到 ?githubId= 那个仓上。
+   * 没有响应体（302）。
+   */
+  githubAuthorize: { method: 'GET', path: '/github/authorize' },
+  /** GitHub 安装页装完回到这里（App 的 Setup URL）。没有响应体（302）。 */
+  githubSetup: { method: 'GET', path: '/github/setup' },
   /** 「让指挥官整理」按钮的现状（母单 #1335 第 3 片，#1338）：这个项目今日剩余次数、最近几次结果、有没有一次在排队或在做。没有这个项目 404。 */
   groomStatus: { method: 'GET', path: '/repos/:repoId/dispatch/groom', response: GroomStatusResponse },
   /**
@@ -151,6 +224,20 @@ export const WebRoutes = {
   nodes: { method: 'GET', path: '/nodes', response: NodesResponseSchema },
   /** 一个远程环境最近一次推来的主页、环境页快照（只读展示用）；没推过 404。 */
   node: { method: 'GET', path: '/nodes/:nodeId', response: NodeDetailResponseSchema },
+  /** 本机会话（#1991）：每台推过的机器此刻在跑、刚停、超过阈值没动的会话；收不到写「没上报」。推的写口不在这里（LOCAL_SESSIONS_PATH 的 POST）。 */
+  localSessions: { method: 'GET', path: '/nodes/sessions', response: LocalSessionsResponseSchema },
+  /** 法国的工作树（#1993）：最近一份清单（每个仓的镜像、每棵树的状态和原因）加最近几次一键清理。 */
+  worktrees: { method: 'GET', path: '/worktrees', response: WorktreesResponseSchema },
+  /**
+   * 一键清理没用的工作树（#1993）：记一条 worktrees.cleanup.request，引擎几秒内接手，判据和每小时对账同一份
+   * （有没提交、没推的改动，或正被任务、会话用着的一律拒删并写明原因）。已经有一次在排队或在做 409 cleanup_busy。
+   */
+  worktreeCleanup: {
+    method: 'POST',
+    path: '/worktrees/cleanup',
+    request: WorktreeCleanupRequestSchema,
+    response: WorktreeCleanupResponseSchema,
+  },
   board: { method: 'GET', path: '/repos/:repoId/board', response: BoardResponse },
   /** 任务列表页 /tasks（#1639）：按最近更新从新到旧，可按状态、仓、单号或标题筛，游标翻页，带各状态的数。 */
   tasks: { method: 'GET', path: '/tasks', query: TaskListQuery, response: TaskListResponse },
@@ -260,6 +347,48 @@ export const WebRoutes = {
     path: '/routing/channels/:channelId/models',
     request: ManualModelRequest,
     response: ManualModelResponse,
+  },
+  /**
+   * 提需求（#2049）：进行中 / 已归档 / 最近删除，「等我的 / 全部 / 我发起的」，按标题、原话、单号（#12）搜。
+   * 这台后端没接上需求表时回 200 + unavailable 写原因，不拿空列表冒充「没有需求」。
+   */
+  requests: { method: 'GET', path: '/requests', query: RequestListQuery, response: RequestListResponse },
+  /** 建需求：只能给 repos 表里的项目建；发起人取登录会话。成功 201，回详情。 */
+  createRequest: {
+    method: 'POST',
+    path: '/requests',
+    request: CreateRequestRequest,
+    response: RequestDetailResponse,
+  },
+  /** 一条需求的详情：消息、草稿、每个动作能不能做和为什么不能。没有这条 404。 */
+  requestDetail: { method: 'GET', path: '/requests/:seq', response: RequestDetailResponse },
+  /** 人发一条消息：说话人取登录会话；结案后 409。回详情。 */
+  sendRequestMessage: {
+    method: 'POST',
+    path: '/requests/:seq/messages',
+    request: SendRequestMessageRequest,
+    response: RequestDetailResponse,
+  },
+  /** 改草稿栏：带看到的版本，版本加 1，改过的栏标成人改过；版本对不上、不在讨论中 409。回详情。 */
+  updateRequestDraft: {
+    method: 'PUT',
+    path: '/requests/:seq/draft',
+    request: UpdateRequestDraftRequest,
+    response: RequestDetailResponse,
+  },
+  /** 提交拍板、确定、拍板、撤回、放下、归档、取消归档、删除、恢复、置顶、重命名。不合法 409 + 中文原因。回详情。 */
+  requestAction: {
+    method: 'POST',
+    path: '/requests/:seq/actions',
+    request: RequestActionRequest,
+    response: RequestDetailResponse,
+  },
+  /** 我读到这一条（算未读用，只往前走）。 */
+  markRequestRead: {
+    method: 'POST',
+    path: '/requests/:seq/read',
+    request: MarkRequestReadRequest,
+    response: MarkRequestReadResponse,
   },
   pools: { method: 'GET', path: '/pools', response: PoolsResponse },
   /** 整池暂停现状（#746）：开关、认不出的、旧提醒、到期没复查的；新建、撤回走 PUT /settings/engine.poolHolds。 */

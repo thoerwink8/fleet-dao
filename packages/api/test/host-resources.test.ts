@@ -11,6 +11,7 @@ import {
   RESOURCE_SAMPLE_MS,
   readHostResources,
 } from '../src/host-resources.ts';
+import type { VpsApp } from '../src/vps-apps.ts';
 
 const SLICE = '/cg/fleet.slice/fleet-agents.slice';
 
@@ -149,6 +150,33 @@ describe('读一回', () => {
     expect(resources.sessions.byRun.good).toEqual({ state: 'ok', memoryMb: 64 });
   });
 
+  test('【故意造出读到 0】scope 还在、memory.current 是 0（里面没进程）：写 empty 带原因，不是 ok 的 0；真有的数照写', async () => {
+    const files = {
+      '/proc/meminfo': MEMINFO,
+      '/proc/stat': stat(1, 1),
+      ...scope('mirasim-a', '0\n', '0\n', 0),
+      // 真有的数（哪怕很小）照写：300K 不当成 0
+      ...scope('tiny', String(300 * 1024), undefined, 5),
+      ...scope('real', String(64 * 1024 * 1024), undefined, 1),
+    };
+    const { resources } = await readHostResources(
+      fakeMachine(files, {
+        [SLICE]: ['fleet-agent-mirasim-a.scope', 'fleet-agent-tiny.scope', 'fleet-agent-real.scope'],
+      }),
+      undefined,
+      new Date(1_000),
+    );
+    expect(HomeResourcesSchema.parse(resources)).toEqual(resources);
+    if (resources.sessions.state !== 'ok') throw new Error('整池不该没读到');
+    const empty = resources.sessions.byRun['mirasim-a'];
+    expect(empty?.state).toBe('empty');
+    expect(empty?.state === 'empty' && empty.why).toContain('memory.current 是 0');
+    // 不到 1M 的真读数往上记成 1M（不四舍五入成 0）
+    expect(resources.sessions.byRun.tiny).toEqual({ state: 'ok', memoryMb: 1 });
+    expect(resources.sessions.byRun.real).toEqual({ state: 'ok', memoryMb: 64 });
+    expect(JSON.stringify(resources.sessions.byRun['mirasim-a'])).not.toMatch(/memoryMb|cpuPercent/);
+  });
+
   test('/proc/meminfo 内容认不出：内存 unread 带原因', async () => {
     const { resources } = await readHostResources(
       fakeMachine({ '/proc/meminfo': '乱码', '/proc/stat': stat(1, 1) }, { [SLICE]: [] }),
@@ -206,5 +234,198 @@ describe('采样器', () => {
     const n = pushed.length;
     await new Promise((r) => setTimeout(r, 70));
     expect(pushed.length).toBe(n);
+  });
+
+  test('有按目录的测量器：每回读数带上它最近一回；5 秒那一回只「戳」一下，不等遍历', async () => {
+    let pokes = 0;
+    const sampler = createHostResourceSampler({
+      read: fakeMachine({ '/proc/meminfo': MEMINFO, '/proc/stat': stat(1, 1) }, { [SLICE]: [] }),
+      now: () => new Date(1_000),
+      footprint: {
+        latest: () => ({ state: 'pending', why: '正在测第一回' }),
+        poke: () => {
+          pokes += 1;
+        },
+      },
+    });
+    const r = await sampler.current();
+    expect(r.footprint).toEqual({ state: 'pending', why: '正在测第一回' });
+    expect(pokes).toBe(1);
+  });
+});
+
+// —— #1985：整机磁盘、每个上线项目 ——
+
+const STATFS = { bsize: 4096, blocks: 50_000_000, bfree: 30_000_000, bavail: 27_500_000 };
+
+describe('整机磁盘（statfs）', () => {
+  test('已用 = (总块 − 空闲块) × 块大小；剩余 = bavail × 块大小', async () => {
+    const deps = { ...fakeMachine({}), statfs: async () => STATFS };
+    const { resources } = await readHostResources(deps, undefined, new Date(1_000));
+    expect(resources.disk).toEqual({
+      state: 'ok',
+      path: '/',
+      totalBytes: 50_000_000 * 4096,
+      usedBytes: 20_000_000 * 4096,
+      availableBytes: 27_500_000 * 4096,
+    });
+    expect(HomeResourcesSchema.parse(resources)).toEqual(resources);
+  });
+
+  test('【故意造出读不到】statfs 抛错：disk 是 unread 带原因，不是 0', async () => {
+    const deps = {
+      ...fakeMachine({}),
+      statfs: async () => {
+        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      },
+    };
+    const { resources } = await readHostResources(deps, undefined, new Date(1_000));
+    expect(resources.disk).toEqual({ state: 'unread', why: '/ 的 statfs 没读成：EACCES: permission denied' });
+  });
+
+  test('statfs 读回来总块数是 0：认不出，unread', async () => {
+    const deps = { ...fakeMachine({}), statfs: async () => ({ ...STATFS, blocks: 0 }) };
+    const { resources } = await readHostResources(deps, undefined, new Date(1_000));
+    expect(resources.disk?.state).toBe('unread');
+  });
+
+  test('没装 statfs（老装配）：不带 disk 这一项，页面写后端没给', async () => {
+    const { resources } = await readHostResources(fakeMachine({}), undefined, new Date(1_000));
+    expect(resources.disk).toBeUndefined();
+  });
+});
+
+describe('每个上线项目的 CPU、内存（各单元的 cgroup）', () => {
+  const APPS: VpsApp[] = [
+    {
+      id: 'api',
+      name: '驾驶舱',
+      place: '/srv/x',
+      units: [{ name: 'a.service', cgroup: 'system.slice/a.service' }],
+      dirs: [],
+      diskNote: 'x',
+    },
+    {
+      id: 'two',
+      name: '两个单元',
+      place: '/srv/y',
+      units: [
+        { name: 'b.service', cgroup: 'system.slice/b.service' },
+        { name: 'c.service', cgroup: 'system.slice/c.service' },
+      ],
+      dirs: [],
+      diskNote: 'x',
+    },
+    {
+      id: 'off',
+      name: '没在跑',
+      place: '/srv/z',
+      units: [{ name: 'd.service', cgroup: 'system.slice/d.service' }],
+      dirs: [],
+      diskNote: 'x',
+    },
+    {
+      id: 'disk',
+      name: '只占磁盘',
+      place: '/srv/w',
+      units: [],
+      dirs: ['/srv/w'],
+      idleNote: '这一项没有进程，只占磁盘',
+    },
+  ];
+  const unit = (name: string, mem: number, max: string, usec: number) => ({
+    [`/cg/system.slice/${name}/memory.current`]: String(mem * 1024 * 1024),
+    [`/cg/system.slice/${name}/memory.max`]: max,
+    [`/cg/system.slice/${name}/cpu.stat`]: `usage_usec ${usec}\n`,
+  });
+  const machine = (usec: number, extra: Record<string, string> = {}) => ({
+    ...fakeMachine({
+      '/cg/cgroup.controllers': 'cpu memory\n',
+      ...unit('a.service', 200, 'max\n', usec),
+      ...unit('b.service', 100, String(512 * 1024 * 1024), usec),
+      ...unit('c.service', 50, String(256 * 1024 * 1024), usec * 2),
+      ...extra,
+    }),
+    apps: APPS,
+  });
+
+  test('第一回：内存读成、上限是在跑单元 memory.max 之和（有一个是 max 就不给）；CPU 只有一回，不给（不是 0）', async () => {
+    const { resources } = await readHostResources(machine(1_000_000), undefined, new Date(10_000));
+    expect(HomeResourcesSchema.parse(resources)).toEqual(resources);
+    if (resources.apps?.state !== 'ok') throw new Error('整段不该没读到');
+    const [api, two, off, disk] = resources.apps.items;
+    expect(api).toMatchObject({
+      id: 'api',
+      name: '驾驶舱',
+      units: ['a.service'],
+      usage: { state: 'ok', running: 1, memoryMb: 200 },
+    });
+    expect(api?.usage.state === 'ok' && api.usage.memoryMaxMb).toBeUndefined();
+    expect(two?.usage).toEqual({ state: 'ok', running: 2, memoryMb: 150, memoryMaxMb: 768 });
+    // 单元的 cgroup 目录不在 = 没在跑：idle，不是 0
+    expect(off?.usage).toEqual({ state: 'idle' });
+    expect(disk?.usage).toEqual({ state: 'idle', why: '这一项没有进程，只占磁盘' });
+  });
+
+  test('第二回：CPU = usage_usec 的差 ÷ 墙钟，按核数（1 = 一个核），几个单元相加', async () => {
+    const first = await readHostResources(machine(1_000_000), undefined, new Date(10_000));
+    const { resources } = await readHostResources(machine(3_500_000), first.next, new Date(15_000));
+    if (resources.apps?.state !== 'ok') throw new Error('整段不该没读到');
+    // a：2.5 秒 / 5 秒 = 0.5 核；b 0.5 核 + c 1 核 = 1.5 核
+    expect(resources.apps.items[0]?.usage).toMatchObject({ cpuCores: 0.5 });
+    expect(resources.apps.items[1]?.usage).toMatchObject({ cpuCores: 1.5 });
+  });
+
+  test('【故意造出读不到】这台没有 cgroup v2：整段 unread 带原因', async () => {
+    const deps = { ...fakeMachine({}), apps: APPS };
+    const { resources } = await readHostResources(deps, undefined, new Date(1_000));
+    expect(resources.apps).toEqual({
+      state: 'unread',
+      why: '这台没有 /cg/cgroup.controllers（不是 cgroup v2，或不是 Linux）',
+    });
+  });
+
+  test('【故意造出读不到】一个单元的 memory.current 认不出：这个应用 unread 带文件名，别的照常', async () => {
+    const { resources } = await readHostResources(
+      machine(1, { '/cg/system.slice/a.service/memory.current': '乱码' }),
+      undefined,
+      new Date(1_000),
+    );
+    if (resources.apps?.state !== 'ok') throw new Error('整段不该没读到');
+    const api = resources.apps.items[0];
+    expect(api?.usage.state).toBe('unread');
+    expect(api?.usage.state === 'unread' && api.usage.why).toContain(
+      '/cg/system.slice/a.service/memory.current',
+    );
+    expect(resources.apps.items[1]?.usage.state).toBe('ok');
+  });
+
+  test('【故意造出读到 0】单元的 cgroup 在、memory.current 是 0：不算在跑，idle 带原因；同一应用里真在跑的照算', async () => {
+    const { resources } = await readHostResources(
+      machine(1, {
+        '/cg/system.slice/a.service/memory.current': '0\n',
+        '/cg/system.slice/c.service/memory.current': '0\n',
+      }),
+      undefined,
+      new Date(1_000),
+    );
+    if (resources.apps?.state !== 'ok') throw new Error('整段不该没读到');
+    const [api, two] = resources.apps.items;
+    expect(api?.usage.state).toBe('idle');
+    expect(api?.usage.state === 'idle' && api.usage.why).toContain('memory.current 是 0');
+    // b 真在跑照写；c 读到 0 不算进 running、不加上限
+    expect(two?.usage).toEqual({ state: 'ok', running: 1, memoryMb: 100, memoryMaxMb: 512 });
+  });
+
+  test('登记表里的补充带到页面：diskNote、external', async () => {
+    const deps = {
+      ...machine(1),
+      apps: [{ ...APPS[0], external: true } as VpsApp],
+    };
+    const { resources } = await readHostResources(deps, undefined, new Date(1_000));
+    expect(resources.apps?.state === 'ok' && resources.apps.items[0]).toMatchObject({
+      external: true,
+      diskNote: 'x',
+    });
   });
 });

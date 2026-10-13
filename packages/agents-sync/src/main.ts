@@ -83,3 +83,34 @@ if (
       process.exitCode = 1;
     }
 }
+
+// 本机会话心跳（agents/local-sessions）：装过的机器顺手换新脚本和钩子登记（install.mjs refresh；没装过它自己说一句、不动）。
+// 2026-10-13 起调工具前不再挂心跳、其余改 async：不经这一步，各台要等有人重跑 pnpm local-sessions:install 才换。
+if (
+  process.argv.includes('--apply') &&
+  !process.argv.includes('--user') &&
+  !process.argv.includes('--help')
+) {
+  const args = process.argv.slice(2);
+  const argValue = (name: string): string | undefined => {
+    const i = args.indexOf(name);
+    return i >= 0 ? args[i + 1] : undefined;
+  };
+  const repo = argValue('--repo') ?? fileURLToPath(new URL('../../..', import.meta.url));
+  const script = join(repo, 'agents', 'local-sessions', 'install.mjs');
+  if (existsSync(script)) {
+    try {
+      const output = execFileSync(
+        process.execPath,
+        [script, 'refresh', '--home', argValue('--home') ?? homedir()],
+        { encoding: 'utf8', timeout: 30_000, windowsHide: true },
+      );
+      process.stdout.write(`本机会话心跳（agents/local-sessions）\n${output}`);
+    } catch (err) {
+      const out = (err as { stdout?: string }).stdout ?? '';
+      process.stdout.write(`本机会话心跳（agents/local-sessions）\n${out}`);
+      process.stderr.write(`本机会话心跳换新没做成：${(err as Error).message.split('\n')[0]}\n`);
+      process.exitCode = 1;
+    }
+  }
+}

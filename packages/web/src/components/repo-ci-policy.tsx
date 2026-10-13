@@ -51,20 +51,15 @@ export function RepoCiPolicyControl({
   const target = row.mode === 'force' ? 'off' : 'force';
   const verb = target === 'off' ? '改成不强制' : '改成强制';
   const fleetDao = repoNameOf(name) === 'fleet-dao' && target === 'off';
-  const confirm = () => {
-    update.mutate(
-      { repoId, body: { mode: target } },
-      {
-        onSuccess: (r) => {
-          setAsking(false);
-          toast.success(r.changed ? `已把 ${name} ${verb} CI` : `${name} 本来就是${modeText(r.mode)}`);
-        },
-        onError: (e) => {
-          setAsking(false);
-          toast.error(`没能${verb}`, { description: errorText(e) });
-        },
-      },
-    );
+  // 确认框等它：成功框关、弹成功；失败弹 toast 并抛给框——框留着写原因、能再点（#2009）
+  const confirm = async () => {
+    try {
+      const r = await update.mutateAsync({ repoId, body: { mode: target } });
+      toast.success(r.changed ? `已把 ${name} ${verb} CI` : `${name} 本来就是${modeText(r.mode)}`);
+    } catch (e) {
+      toast.error(`没能${verb}`, { description: errorText(e) });
+      throw e;
+    }
   };
 
   return (
@@ -100,14 +95,7 @@ export function RepoCiPolicyControl({
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>先不</AlertDialogCancel>
-              <AlertDialogAction
-                onClick={(e) => {
-                  e.preventDefault();
-                  confirm();
-                }}
-              >
-                {verb}
-              </AlertDialogAction>
+              <AlertDialogAction onConfirm={confirm}>{verb}</AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>

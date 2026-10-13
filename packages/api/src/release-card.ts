@@ -14,13 +14,17 @@ import type { ReleaseFactsReader } from '@fleet-dao/github';
 import {
   type ReleaseCard,
   ReleaseCardSchema,
+  type ReleaseCheck,
+  ReleaseCheckSchema,
   type ReleasedCommits,
   ReleasedCommitsSchema,
+  type ReleaseRecover,
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { deployedAtFromHistory, RELEASES_DIR, readDeployLagInput } from '@fleet-dao/store';
 import type { Hono } from 'hono';
 import type { Deps } from './deps.ts';
+import { readEngineMaster } from './engine-switch.ts';
 import { type FranceReleasePort, parseTrainState } from './france-release.ts';
 import { reply } from './http.ts';
 import type { Store } from './ports.ts';
@@ -276,6 +280,84 @@ async function buildRows(input: BuildReleaseCardInput): Promise<Rows> {
 
 type Action = Card['action'];
 type Last = Action['last'];
+type TrainOk = Extract<ReturnType<typeof parseTrainState>, { ok: true }>;
+
+/** 三个按钮要的几样事实（#2027）：进度记录读成的这一趟（读不到、认不出是 null）、暂停标记、上一份请求还没被接走。 */
+export interface RecoverFacts {
+  train: TrainOk | null;
+  marker: boolean;
+  pending: boolean;
+}
+
+/** 重试能点的是：停在第 3 步「等收尾」卡住的那一趟，有 40 位目标提交。 */
+const RETRY_PHASE = 3;
+/** 恢复引擎开关能点的是：没成在第 7 步「恢复」。 */
+const RESTORE_PHASE = 7;
+/** 第 4 步「发版」起 release.sh 已经动手（接活脚本在第 4 步开头记 release.started）：撤掉暂停遵守「已动手发过版就保持关」。 */
+const RELEASE_STARTED_PHASE = 4;
+
+/**
+ * 卡住、失败后的三个按钮能不能点（#2027，纯函数，读不到的一律不给按钮——后端和法国脚本点的时候各再核一遍）。
+ * master：引擎总开关此刻开着（true）、关着（false）、读不到（null）；已经开着就不给「恢复引擎开关」，读不到照给（脚本会核）。
+ * 请求没被接走、发版在走时三个都不给：先等它。
+ */
+export function computeRecover(facts: RecoverFacts, master: boolean | null): ReleaseRecover {
+  const none: ReleaseRecover = { retry: null, restore: null, abort: null };
+  const { train, marker, pending } = facts;
+  if (pending || (train !== null && train.status === 'running')) return none;
+  let retry: ReleaseRecover['retry'] = null;
+  let restore: ReleaseRecover['restore'] = null;
+  if (train !== null && train.status === 'blocked' && train.phaseIndex === RETRY_PHASE && train.targetSha) {
+    retry = { sha: train.targetSha, phase: train.phase };
+  }
+  if (
+    train !== null &&
+    train.status === 'failed' &&
+    train.phaseIndex === RESTORE_PHASE &&
+    train.beforeMaster === true &&
+    master !== true
+  ) {
+    restore = { target: train.target };
+  }
+  let abort: ReleaseRecover['abort'] = null;
+  if (marker) {
+    const open = train !== null && (train.status === 'blocked' || train.status === 'failed');
+    if (!open) {
+      abort = {
+        outcome: 'clear_marker',
+        text: '只清掉留下来的暂停标记，引擎总开关不动。',
+      };
+    } else if (train.phaseIndex !== null && train.phaseIndex >= RELEASE_STARTED_PHASE) {
+      abort = {
+        outcome: 'keep_off',
+        text:
+          train.beforeMaster === true
+            ? '已经动手发过版，不知道发成没有：引擎总开关保持关（发版前是开着的），这一趟记为撤销；确认没事后到环境页点开。'
+            : '已经动手发过版：引擎总开关发版前就是关着的，保持关，这一趟记为撤销。',
+      };
+    } else if (train.beforeMaster === true) {
+      abort = {
+        outcome: 'reopen',
+        text: '还没动手发版：引擎总开关会开回暂停前的样子（开着），清掉暂停标记，这一趟记为撤销。',
+      };
+    } else {
+      abort = {
+        outcome: 'clear_marker',
+        text: '还没动手发版，引擎总开关暂停前就是关着的：不动它，只清暂停标记，这一趟记为撤销。',
+      };
+    }
+  }
+  return { retry, restore, abort };
+}
+
+/** 引擎总开关此刻开着、关着、读不到（设置表读不到就是 null，不当成关）。只在要用的时候才读。 */
+async function readMaster(store: Store): Promise<boolean | null> {
+  try {
+    return (await readEngineMaster(store)).on;
+  } catch {
+    return null;
+  }
+}
 
 const NO_LAST: Last = { state: 'none', target: null, at: null, why: null, phase: null };
 
@@ -283,13 +365,18 @@ const NO_LAST: Last = { state: 'none', target: null, at: null, why: null, phase:
 async function readLast(
   request: ReleaseRequestPort,
   franceRelease: FranceReleasePort | undefined,
-): Promise<{ last: Last; busy: boolean; busyWhy: string | null }> {
+): Promise<{ last: Last; busy: boolean; busyWhy: string | null; facts: RecoverFacts }> {
   let pending: boolean;
   try {
     pending = await request.pendingRequest();
   } catch (e) {
     const why = `读上一份请求在不在失败：${errMessage(e)}`;
-    return { last: { ...NO_LAST, state: 'unreadable', why }, busy: true, busyWhy: why };
+    return {
+      last: { ...NO_LAST, state: 'unreadable', why },
+      busy: true,
+      busyWhy: why,
+      facts: { train: null, marker: false, pending: true },
+    };
   }
   let train: { stateJson: string | null; marker: boolean } | undefined;
   let trainWhy: string | null = null;
@@ -308,21 +395,35 @@ async function readLast(
   }
   let refused: { at: string; sha: string | null; why: string } | null = null;
   let lastWhy: string | null = null;
+  let check: { sha: string | null; check: ReleaseCheck } | null = null;
   try {
     const text = await request.readLast();
     if (text !== null) {
-      const o = JSON.parse(text) as { outcome?: unknown; at?: unknown; sha?: unknown; why?: unknown };
+      const o = JSON.parse(text) as {
+        outcome?: unknown;
+        at?: unknown;
+        sha?: unknown;
+        why?: unknown;
+        check?: unknown;
+      };
       if (o.outcome === 'refused' && typeof o.at === 'string' && typeof o.why === 'string') {
         refused = { at: o.at, sha: typeof o.sha === 'string' ? o.sha : null, why: o.why };
       }
+      const c = ReleaseCheckSchema.safeParse(o.check);
+      if (c.success) check = { sha: typeof o.sha === 'string' ? o.sha : null, check: c.data };
     }
   } catch (e) {
     lastWhy = `读最近一次请求的结果失败：${errMessage(e)}`;
   }
+  const facts: RecoverFacts = {
+    train: parsed?.ok === true ? parsed : null,
+    marker: train?.marker === true,
+    pending,
+  };
   const running = parsed?.ok === true && parsed.status === 'running';
   const busyWhy = pending ? '上一份发布请求还没被法国接走' : running ? '已有发版在走' : trainWhy;
   const busy = pending || running || trainWhy !== null;
-  if (pending) return { last: { ...NO_LAST, state: 'pending' }, busy, busyWhy };
+  if (pending) return { last: { ...NO_LAST, state: 'pending' }, busy, busyWhy, facts };
   if (
     refused !== null &&
     (parsed?.ok !== true || parsed.updatedAt === null || refused.at >= parsed.updatedAt)
@@ -331,6 +432,7 @@ async function readLast(
       last: { state: 'refused', target: refused.sha, at: refused.at, why: refused.why, phase: null },
       busy,
       busyWhy,
+      facts,
     };
   }
   if (parsed?.ok === true) {
@@ -341,16 +443,21 @@ async function readLast(
         at: parsed.updatedAt,
         why: parsed.why,
         phase: parsed.phase,
+        timeline: parsed.timeline,
+        // 体检结论只认同一个提交的（last-request.json 是最近一次请求的，可能是另一趟的）
+        check:
+          check !== null && parsed.targetSha !== null && check.sha === parsed.targetSha ? check.check : null,
       },
       busy,
       busyWhy,
+      facts,
     };
   }
   const unreadable = trainWhy ?? lastWhy;
   if (unreadable !== null) {
-    return { last: { ...NO_LAST, state: 'unreadable', why: unreadable }, busy, busyWhy };
+    return { last: { ...NO_LAST, state: 'unreadable', why: unreadable }, busy, busyWhy, facts };
   }
-  return { last: NO_LAST, busy, busyWhy };
+  return { last: NO_LAST, busy, busyWhy, facts };
 }
 
 /** 「发布到法国」按钮：能不能点、不能点的原因（每条一句话）、最近一次点击的结果。读不到的一律按不能点算，不拿「没问题」顶。 */
@@ -373,7 +480,9 @@ export async function buildAction(input: BuildReleaseCardInput, rows: Rows): Pro
   } catch (e) {
     reasons.push(`法国装没装发版接活单元没查成：${errMessage(e)}`);
   }
-  const { last, busy, busyWhy } = await readLast(request, input.franceRelease);
+  const { last, busy, busyWhy, facts } = await readLast(request, input.franceRelease);
+  const needMaster = facts.train?.status === 'failed' && facts.train.phaseIndex === RESTORE_PHASE;
+  const recover = computeRecover(facts, needMaster ? await readMaster(input.store) : null);
   if (busy && busyWhy !== null) reasons.push(busyWhy);
   if (rows.mainline.state !== 'ok') reasons.push(`主线头没读到：${rows.mainline.why}`);
   else if (rows.mainline.ci.state === 'unreadable') reasons.push(`主线 CI 没读到：${rows.mainline.ci.why}`);
@@ -385,12 +494,33 @@ export async function buildAction(input: BuildReleaseCardInput, rows: Rows): Pro
   if (rows.deployed.state !== 'ok') reasons.push(`法国在用的提交没读到：${rows.deployed.why}`);
   if (rows.gap.state === 'same') reasons.push('法国已经是最新，没有要发的');
   else if (rows.gap.state === 'unreadable') reasons.push(`差几个没查成：${rows.gap.why}`);
-  return { state: reasons.length === 0 ? 'ready' : 'blocked', reasons, installed, last };
+  return { state: reasons.length === 0 ? 'ready' : 'blocked', reasons, installed, last, recover };
+}
+
+/** 三个按钮此刻能不能点（POST /france/release-recover 点的时候重算一遍，不信页面传来的）；读不到进度记录的一律不给。 */
+export async function readRecover(
+  request: ReleaseRequestPort,
+  franceRelease: FranceReleasePort | undefined,
+  store: Store,
+): Promise<ReleaseRecover> {
+  const { facts } = await readLast(request, franceRelease);
+  const needMaster = facts.train?.status === 'failed' && facts.train.phaseIndex === RESTORE_PHASE;
+  return computeRecover(facts, needMaster ? await readMaster(store) : null);
 }
 
 export async function buildReleaseCard(input: BuildReleaseCardInput): Promise<Card> {
   const rows = await buildRows(input);
   return { ...rows, action: await buildAction(input, rows) };
+}
+
+/** 发版预检用的三行（主线头和 CI、法国在用的提交、落后几个）。和发版卡同一份读法，不另写一套。 */
+export async function readPreflightDistance(input: BuildReleaseCardInput): Promise<{
+  mainline: Card['mainline'];
+  deployed: Card['deployed'];
+  gap: Card['gap'];
+}> {
+  const rows = await buildRows(input);
+  return { mainline: rows.mainline, deployed: rows.deployed, gap: rows.gap };
 }
 
 /** 「已发布的提交」最多列几条（每条还要去 GitHub 读一次标题，不拉太长）。 */

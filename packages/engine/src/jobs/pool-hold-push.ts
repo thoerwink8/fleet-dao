@@ -20,6 +20,8 @@ export interface PoolHoldPushDeps {
   markSent: (input: { dedupeKey: string; title: string; body: string; link: string }) => Promise<void>;
   /** 没配、推不出去照抛。抛出的话里不带 webhook 地址。 */
   send: (text: string) => Promise<void>;
+  /** 驾驶舱某一页的完整链接（每条通知都带，F1 #2051）；没配照抛。 */
+  cockpit: (path: string) => string;
 }
 
 export async function pushOverduePoolHolds(deps: PoolHoldPushDeps): Promise<SweepPart> {
@@ -44,9 +46,19 @@ export async function pushOverduePoolHolds(deps: PoolHoldPushDeps): Promise<Swee
     facts.problems.length > 0
       ? `整池暂停有认不出的条目（${facts.problems.map((p) => p.poolId ?? '整份').join('、')}），到期推送只含认得出的`
       : null;
-  const text = overduePoolHoldPushText(facts.holds, today);
-  if (!text) {
+  const body = overduePoolHoldPushText(facts.holds, today);
+  if (!body) {
     return { scanned, found: 0, unchecked: unread ? [unread] : [] };
+  }
+  let text: string;
+  try {
+    text = `${body}\n驾驶舱：${deps.cockpit(POOL_HOLD_PUSH_LINK)}`;
+  } catch (err) {
+    return {
+      scanned,
+      found: 0,
+      unchecked: [`整池暂停到期：${errMessage(err)}`, ...(unread ? [unread] : [])],
+    };
   }
 
   const key = poolHoldPushKey(today);

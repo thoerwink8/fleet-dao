@@ -64,6 +64,10 @@
         "value": "thoerwink8/fleet-dao-canary",
         "说明": "全流程巡检的巡检仓（owner/仓名，docs/ops.md 第五节「全流程巡检」）。公开值（仓名不算要保密的东西，创始人 2026-09-28：账号、仓名这类标识不算泄漏）。2026-10-06 从 fleet-dao-canary-fr 改回 fleet-dao-canary（#777）：当初分开两个仓，是怕本机 WSL 演练台的引擎和法国在同一个仓里互相当成自己的单，WSL 已撤（决定 0022），没有第二个引擎了，创始人也没让建 -fr 仓（该仓从来没建过，GitHub 上 404），留着会让法国引擎一起来每轮巡检都记「没跑成」。这个仓的「让 AI 接活」发版后默认关，创始人点开才巡检。再接别的环境的引擎要开巡检时，另建巡检仓，写在那一台自己的期望里，不能和这一项相同（#1136）"
       },
+      "FLEET_PUBLIC_URL": {
+        "private": "4d305fd23972f6ca41c506b52f0afaa370f21c67c0a2fe80280998d9268e01e5",
+        "说明": "浏览器看到的驾驶舱地址（香港的域名，值和 api.env 的同名项一样）：私有值。引擎往飞书推的通知（主线红、整池暂停到期、等你拍板、引擎问你）和发版通知（上线了、卡住、失败）每条都带驾驶舱链接，读的就是它；没配这些通知推不出去、记没查成（F1 #2051）。2026-10-14 指挥官在法国从 api.env 照抄进 engine.env，指纹按 engine.env 算（指纹带文件名，和 api.env 同名项的不一样）：node /srv/fleet-dao/deploy/france/auto-release/config.mjs fingerprint engine.env FLEET_PUBLIC_URL"
+      },
       "FLEET_SESSION_PROXY": {
         "value": "",
         "说明": "AI 会话出网经的代理（http://主机:端口，不带账号密码）：引擎起 grok、cursor-agent 的会话带上（Claude 不带，reclaude 自己管），装机时以会话用户跑这两家的官方安装脚本也经它（deploy/lib/session-proxy.sh 照期望读，不认 root 环境里的同名变量）。法国直连，留空＝不经代理（#731）"
@@ -119,8 +123,8 @@
         "说明": "引擎工人取活的任务队列（同 engine.env）：/healthz 的 engine 项查这条队列上有没有 poller"
       },
       "FLEET_NODE_KEYS": {
-        "private": "1650843456edc28f4e8c7c6a74b6b3ea06f0e024802bb38ae93cf3e9b072a2c6",
-        "说明": "看板多机（全仓审查第 1 路）：收别的环境推来的快照要认的通行证表，形如 {\"local\":\"<通行证的 sha256>\"}，里面只有哈希、没有明文；私有值。还没记指纹：第一次在法国跑 fleet-api node-key new local 贴进去之后，用法国自己的指纹钥匙算好再把这里的 null 换成指纹（docs/ops.md「接上法国看板」）。没配（空着）时 POST /api/nodes/report 回 503、不收任何快照，不是 401"
+        "private": "dbf08daccc1f9dde1a7d0bd523cb67b37c0930708c1b1b10222c1a7edb493aca",
+        "说明": "看板多机（全仓审查第 1 路）：收别的环境推来的快照要认的通行证表，形如 {\"local\":\"<通行证的 sha256>\"}，里面只有哈希、没有明文；私有值，这里记的是整行值的指纹（HMAC，不是密钥）。2026-10-13 指挥官按 #1991（本机会话推送）在法国 api.env 的表里加了一台环境 founder-pc（创始人本机）的通行证哈希，线上值变了，指纹随之重算为现在这个；表里其余几台以法国线上为准（local 那项没人持有时可删，见 docs/ops.md）。以后每次增删环境（fleet-api node-key new <环境> 贴进 api.env、重启 fleet-api 之后）都要重算：在法国以 root 跑 node /srv/fleet-dao/deploy/france/auto-release/config.mjs fingerprint <api.env 的路径> FLEET_NODE_KEYS，把打印的指纹换进这里的 private，提 PR 合进主线，再跑保险箱的 refresh.sh（docs/ops.md「配置进仓对账」「接上法国看板」）；不重算，对账报不一致、france.sh 读回判红。没配（空着）时 POST /api/nodes/report 回 503、不收任何快照，不是 401"
       },
       "FLEET_NODE_REPORT_URL": {
         "value": "",

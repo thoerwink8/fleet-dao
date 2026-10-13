@@ -15,6 +15,7 @@ import {
   HomeResponseSchema,
   JobsResponse,
   type LegacyRead,
+  LocalSessionsResponseSchema,
   MeResponse,
   NodeDetailResponseSchema,
   NodesResponseSchema,
@@ -62,10 +63,12 @@ import { registerCredentialRoutes } from './credentials.ts';
 import { handOffDecision } from './decision-handoff.ts';
 import type { Deps } from './deps.ts';
 import { registerDispatchRoutes } from './dispatch-routes.ts';
+import { registerFrancePreflightRoute } from './france-preflight.ts';
 import { registerFranceReleaseRoutes } from './france-release.ts';
 import { registerGroomRoutes } from './groom-routes.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
+import { readLocalSessions } from './local-sessions.ts';
 import { modelRosterFields } from './model-roster.ts';
 import { registerModelRosterRoutes } from './model-roster-routes.ts';
 import { readNodeDetail, readNodes } from './node-views.ts';
@@ -81,6 +84,8 @@ import {
 import { probeHistoryBody } from './probe-history.ts';
 import { registerReleaseCardRoutes } from './release-card.ts';
 import { registerReleaseRequestRoutes } from './release-request.ts';
+import { registerRepoImportRoutes } from './repo-import-routes.ts';
+import { registerRequestRoutes } from './request-routes.ts';
 import { soloReserveView } from './reserve-view.ts';
 import { registerRouteProbeRoutes } from './route-probe-now.ts';
 import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView } from './routing-efforts.ts';
@@ -105,6 +110,7 @@ import {
   subtaskViews,
   usageView,
 } from './views.ts';
+import { registerWorktreeRoutes } from './worktree-routes.ts';
 
 /** 读旧 pool-hold 提醒时最多翻几页没处理的提醒（每页 200 条）；翻不完明说没读全，不拿「没有」顶。 */
 const LEGACY_ALERT_PAGES = 5;
@@ -216,6 +222,11 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const engine = await engineProbe();
     return reply(c, NodesResponseSchema, await readNodes(deps, engine));
   });
+
+  // 本机会话（#1991）：要排在 /nodes/:nodeId 前面，不然 sessions 会被当成环境编号。
+  app.get(WebRoutes.localSessions.path, async (c) =>
+    reply(c, LocalSessionsResponseSchema, await readLocalSessions(deps)),
+  );
 
   app.get(WebRoutes.node.path, async (c) =>
     reply(c, NodeDetailResponseSchema, await readNodeDetail(deps, c.req.param('nodeId'))),
@@ -887,13 +898,17 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
 
   registerCredentialRoutes(app, deps);
   registerDispatchRoutes(app, deps, actorOf);
+  registerRepoImportRoutes(app, deps, actorOf);
   registerCiPolicyRoutes(app, deps, actorOf);
   registerRoutingOrderRoutes(app, deps, actorOf);
   registerRouteProbeRoutes(app, deps, actorOf, engineProbe);
   registerGroomRoutes(app, deps, actorOf, engineProbe);
+  registerWorktreeRoutes(app, deps, actorOf, engineProbe);
   registerRunTranscriptRoutes(app, deps);
+  registerRequestRoutes(app, deps);
   registerModelRosterRoutes(app, deps, actorOf);
   registerFranceReleaseRoutes(app, deps);
+  registerFrancePreflightRoute(app, deps);
   registerCliToolsRoutes(app, deps);
   registerReleaseCardRoutes(app, deps);
   registerReleaseRequestRoutes(app, deps, actorOf);

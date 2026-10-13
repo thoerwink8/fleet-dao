@@ -27,7 +27,13 @@ const CHECKED = [
   'hooks/main-thread.mjs',
   'hooks/fresh-main.mjs',
   'hooks/git-run.mjs',
+  'hooks/proxy-env.mjs',
   'hooks/unattended.mjs',
+  'local-sessions/lib.mjs',
+  'local-sessions/heartbeat.mjs',
+  'local-sessions/push.mjs',
+  'local-sessions/loop.mjs',
+  'local-sessions/install.mjs',
 ];
 
 /** 盖住类型检查的写法：@ts-nocheck、@ts-expect-error、@ts-expect-error，和 JSDoc 里写 any。回命中的那几处。 */

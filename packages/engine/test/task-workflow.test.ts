@@ -19,6 +19,8 @@ import {
   type CheckGuardedInput,
   MAX_IMPLEMENT_ROUNDS,
   MAX_VERIFY_ROUNDS,
+  MERGE_RED_CONFIRM_SECONDS,
+  type MergeWait,
   type RunSegmentResult,
   type TaskRun,
   type TaskStatus,
@@ -401,6 +403,54 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     expect(guard.seen.map((i) => i.approved !== undefined)).toEqual([false, true, false, true]);
   });
 
+  it('CI 红了 2 轮、第 3 轮验收没过（#1967 卡了 8 小时）：验收意见照样交给一轮动手，不因动手轮数用完就停下等人', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) => (n <= 2 ? { state: 'red', failedChecks: ['check'] } : undefined),
+    });
+    const { tasks, calls } = scripted({
+      verify: (_i, n) =>
+        n === 1
+          ? { pass: false, problems: ['没做到验收条：第 4 条，Mirasim 校验存在绕过入口'], round: 1 }
+          : { pass: true, problems: [], round: 2 },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', verifyRounds: 2 });
+    // 第 4 轮动手拿到的是验收的问题表；没停下等人、没报警
+    expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS + 1);
+    expect(calls.segment.at(-1)?.feedback.join('\n')).toContain('Mirasim 校验存在绕过入口');
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('【故意造出的失败】验收 2 轮都没过：多给的那一轮只有一次，第 2 轮验收也不过就停下等人', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) => (n <= 2 ? { state: 'red', failedChecks: ['check'] } : undefined),
+    });
+    const { tasks, calls } = scripted({
+      verify: () => ({ pass: false, problems: ['没做到验收条：第 6 条'], round: 1 }),
+    });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '验收 2 轮都没过，停下');
+        expect(s.lastProblem).toMatch(/轮都没过/);
+        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS + 1);
+        expect(calls.verify).toHaveLength(MAX_VERIFY_ROUNDS);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收尾' });
+        return h.result();
+      },
+      { tasks },
+    );
+  });
+
   it('CI 连着红 3 轮：动手 3 轮不过，停下；点「继续」先看 PR 现在的 CI，还红就再给一整轮', async () => {
     const world = createFakeWorld({
       ci: (_i, n) => (n <= 4 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
@@ -492,6 +542,91 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     expect(run.outcome).toBe('merged');
     expect(calls.merged).toBe(3);
     expect(calls.arm).toBe(1);
+  });
+
+  const checksRed: MergeWait = {
+    state: 'checks_red',
+    failedChecks: ['merge-gate'],
+    detail: 'merge-gate：cold-verify 没过',
+  };
+
+  it('等合并时必过检查转红：确认窗口里写上检查红了，第二次仍红就返工，意见里有检查名和原因（#1983）', async () => {
+    expect(MERGE_RED_CONFIRM_SECONDS).toBe(20);
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      merged: (n) => (n <= 2 ? checksRed : { state: 'merged', mergeCommit: 'abc1234567890' }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    const noted = world.states.filter((s) => s.doing.startsWith('检查红了：'));
+    expect(noted[0]).toMatchObject({ phase: 'merge', state: 'running', doing: '检查红了：merge-gate' });
+    expect(noted[0]?.doing).not.toContain('等合并');
+    expect(calls.segment).toHaveLength(2);
+    expect(calls.segment[0]?.feedback.join('\n')).not.toContain('检查红了');
+    const feedback = calls.segment[1]?.feedback.join('\n') ?? '';
+    expect(feedback).toContain('检查红了：merge-gate');
+    expect(feedback).toContain('cold-verify 没过');
+    // 同一轮里看两次才返工：第一次记下，确认后第二次仍红才进下一轮动手
+    expect(calls.merged).toBe(3);
+  });
+
+  it('等合并时红了一下又变回还在跑：不返工，接着等（#1983）', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      merged: (n) => {
+        if (n === 1 || n === 3) return checksRed;
+        if (n === 2) return { state: 'waiting', detail: '检查还在跑' };
+        return { state: 'merged', mergeCommit: 'abc1234567890' };
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment).toHaveLength(1);
+    expect(world.states.some((s) => s.doing === '检查红了：merge-gate')).toBe(true);
+    expect(calls.merged).toBe(4);
+  });
+
+  it('等合并时检查连着红、返工 3 轮用完：停下，报警进要你拍的，不再等（#1983）', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      merged: () => checksRed,
+    });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        // 每轮红两次之间隔 20 秒确认：让测试服务端把这几段跳过去
+        // （查询不解锁跳时，干等会卡在第一次确认上；跳完再查，不 await result()，#1764）
+        await env.sleep('5 minutes');
+        const s = await statusUntil(h, (st) => parked(st) || calls.merged > 6, '检查红了返工用完要停下');
+        expect(parked(s)).toBe(true);
+        expect(s.phase).toBe('parked');
+        expect(s.waiting?.detail).toContain('检查红了');
+        expect(s.doing).toContain('检查红了');
+        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS);
+        expect(calls.merged).toBe(MAX_IMPLEMENT_ROUNDS * 2);
+        expect(world.alerts[0]).toMatchObject({
+          level: 'decision',
+          title: expect.stringMatching(/^检查红了/),
+        });
+        expect(world.alerts[0]?.detail).toContain('merge-gate');
+        expect(world.alerts[0]?.detail).toContain('cold-verify 没过');
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '停' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
   });
 });
 

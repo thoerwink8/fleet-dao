@@ -4,7 +4,7 @@
 import { errMessage } from '@fleet-dao/shared/util';
 import { CalendarClock } from 'lucide-react';
 import { brand } from '#brand';
-import { useJobs } from '../api/client';
+import { POLL_FAST_MS, useJobs } from '../api/client';
 import { EmptyState } from '../components/layout/empty-state';
 import { List } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
@@ -18,14 +18,14 @@ export function meta() {
   return [{ title: brand.title('定时任务') }];
 }
 
-/** 定时任务每 30 秒重拉一次。超过 5 分钟还没再读成，刷新条标「数据已过期」（正常间隔里不标）。 */
+/** 定时任务按 POLL_FAST_MS 重拉。超过 5 分钟还没再读成，刷新条标「数据已过期」（正常间隔里不标）。 */
 const JOBS_STALE_AFTER_MS = 5 * TIME.MIN;
 
 const DETAIL = (
   <div className="space-y-2">
     <p>额度读取、巡检、对账、备份……每个都记下上次跑成的时间。「查了 0 个问题」和「这次没查成」分开显示。</p>
     <p>出问题的排在最前：失败标红，没查全、过期标黄。点一行看周期、完整结果、开始时间、耗时和编号。</p>
-    <p>定时任务的变化没有实时推送，这一页每 30 秒自己刷新一次。</p>
+    <p>定时任务的变化没有实时推送，这一页每 {POLL_FAST_MS / 1000} 秒自己刷新一次。</p>
   </div>
 );
 

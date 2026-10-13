@@ -171,13 +171,16 @@ async function buildSummary(io, target) {
 async function readMainCi(io) {
   const r = io.run('gh', [
     'api',
-    'repos/{owner}/{repo}/commits/main/check-runs?per_page=100',
+    // 按名字过滤：提交上检查多到一页装不下时，不过滤会把 check 挤出第一页（2026-10-13，同发版车那处）
+    'repos/{owner}/{repo}/commits/main/check-runs?check_name=check&per_page=100',
     '--jq',
-    '[.check_runs[] | select(.name=="check") | {status,conclusion}]',
+    '{total: .total_count, runs: [.check_runs[] | select(.name=="check") | {status,conclusion}]}',
   ]);
   if (r.error || r.status === null || r.status !== 0) return '读不到';
   try {
-    const runs = JSON.parse(String(r.stdout).trim() || '[]');
+    const body = JSON.parse(String(r.stdout).trim() || 'null');
+    if (!body || !Array.isArray(body.runs) || body.runs.length < body.total) return '读不到（回话不全）';
+    const runs = body.runs;
     if (runs.length === 0) return '还没有结果（还没跑）';
     if (runs.some((x) => x.status !== 'completed')) return '还在跑';
     return runs.every((x) => x.conclusion === 'success') ? '绿' : '红';

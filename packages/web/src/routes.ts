@@ -25,6 +25,8 @@ export default [
     route('env', 'routes/env.tsx'),
     // 法国页：本台六项事实、引擎总开关、命令行工具、定时任务、发版；多一台机器时按台并排。
     route('france', 'routes/france.tsx'),
+    // 资源页（#1986）：整机内存、CPU、磁盘，每个上线项目各占多少、放在哪，按目录的磁盘占用。
+    route('resources', 'routes/resources.tsx'),
     // 旧地址：模型目录做在路由页里，打开转到 /routing?tab=models。
     route('models', 'routes/models.tsx'),
     // 还没做的页：不进侧栏（驾驶舱改版 2026-10-07），地址留着、打开写明「还没做」。只剩账单、战绩、判断题记录。

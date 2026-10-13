@@ -87,6 +87,8 @@ export class TaskRuntime {
   guardApproval: { head: string; paths: GuardedPaths } | null = null;
   /** 直接合被拒、因为落后主线，引擎已经自动把这张 PR 同步过几次主线（上限 MAX_MAIN_SYNCS，之后停下报人）。 */
   mainSyncs = 0;
+  /** 等合并这一轮已经见过一次必过检查红（#1983）。确认窗口里再红一次才返工；中间变回还在跑就清掉。 */
+  mergeRedNoted = false;
   changedFiles: string[] = [];
   feedback: string[] = [];
   /**
@@ -344,9 +346,14 @@ export class TaskRuntime {
    * 超过就停住，写明交给指挥官，不再清零。同一次继续里原来的上限仍在。
    * 老历史没有 continue-resets-rounds：返回 legacy，调用方只把用尽的那一个计数清掉，不多读单子。
    */
-  async exhaustRounds(title: string, legacyDetail: string, detail: string): Promise<'legacy' | 'reset'> {
+  async exhaustRounds(
+    title: string,
+    legacyDetail: string,
+    detail: string,
+    level: 'stuck' | 'decision' = 'stuck',
+  ): Promise<'legacy' | 'reset'> {
     const reset = patched('continue-resets-rounds');
-    await this.park(title, reset ? detail : legacyDetail);
+    await this.park(title, reset ? detail : legacyDetail, level);
     // 点「继续」清掉没提交攒下的避让，和轮数清零同一处（#1408）。老历史没有这个标记，不碰。
     if (patched('avoid-empty-commit-route')) this.clearCommitAvoid();
     if (!reset) return 'legacy';
@@ -371,8 +378,11 @@ export class TaskRuntime {
     this.fellBackToMissRoute = false;
   }
 
-  /** 停下等人：报警、写库、等「继续」或「放弃」。继续了回来，调用方从头再试这一步。 */
-  async park(title: string, detail: string): Promise<void> {
+  /**
+   * 停下等人：报警、写库、等「继续」或「放弃」。继续了回来，调用方从头再试这一步。
+   * level 默认 stuck（提醒）。等合并检查红了、返工轮数用完传 decision，进「要你拍的」。
+   */
+  async park(title: string, detail: string, level: 'stuck' | 'decision' = 'stuck'): Promise<void> {
     this.guard();
     this.parks += 1;
     const before = this.continued;
@@ -385,7 +395,7 @@ export class TaskRuntime {
       await CancellationScope.nonCancellable(() =>
         this.acts.raiseAlert({
           taskId: this.input.taskId,
-          level: 'stuck',
+          level,
           title,
           detail,
           dedupeKey: `${workflowInfo().workflowId}:park:${this.parks}`,

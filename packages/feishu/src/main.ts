@@ -33,7 +33,6 @@ const gateway = createGateway({
   teamChatId: config.teamChatId,
   testChatId: config.testChatId,
   publicUrl: config.publicUrl,
-  ackEmoji: config.ackEmoji,
 });
 lark.wire(gateway);
 

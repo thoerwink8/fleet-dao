@@ -2,7 +2,7 @@
 # deploy/ 的全部检查：语法、shellcheck、自检的违规样本、发布脚本的来回（换版、自动退回、只留几版、飞书网关发不发）、
 # 香港网关入口（fleet-gateway-deploy）、飞书网关打包、静态文件发到香港哪几处（只发根地址）、香港上老的 /demo/ 目录删掉再读回 404（#1223）、
 # 公网上看得到的几样（占位页、健康页不带真名，release.json 只给隧道，整站不让搜索引擎收录；香港站点对 /demo 一律 404）、老机器上已删的演示版单元停掉删掉（no-demo）、
-# 健康页的判定、自动发布单元的读数和流程（auto-release：只读不发、没有 v<N> 标记也照常、CI 读不到不当成绿、规矩同步和装机自动档没成报警、状态文件读不出什么都不做、旧发版报警撤掉）、
+# 健康页的判定、自动发布单元的读数和流程（auto-release：读数、主线绿了请求发版（满 1 小时、闸全过才写请求）、没有 v<N> 标记也照常、CI 读不到不当成绿、规矩同步和装机自动档没成报警、状态文件读不出什么都不做、旧发版报警撤掉）、
 # 配置对账（config：线上手改报哪一项、私有值只报不一致不带值、期望和钥匙读不到记没查成；
 # versions 钉死几个大版本、没登记的差别报红，也在这个文件里）、
 # 会话出网经的代理（session-proxy：只认期望里登记的、读不出不当成直连、认的样子和规范写法，#731）、
@@ -54,7 +54,7 @@ SKIP_WHY=""
 # 第三台拖后腿，把 session-ports、web-publish、release-flow 挪去第一台，grok、public-site、agent-scope-org-use 挪去第二台，
 # 估三台各 80–100 秒。第二轮实测三台 101 / 84 / 95 秒，再把 release-flow、web-publish 从第一台挪去第三台。挪完看下一轮 CI 的「⏱」行，不匀了再挪。每一项的秒数都看日志里的「⏱」行。
 SHARDS=(
-  'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards session-proxy session-ports release-proxy node-report-gate release-boot sshd-hardening hk-firewall'
+  'login-user session-user listen root-exec-check gateway-deploy ops-only ports shards session-proxy session-ports release-proxy node-report-gate service-home release-boot sshd-hardening hk-firewall'
   'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use agent-scope-probe temporal-schema'
   'lint session-pnpm no-demo gateway-bundle backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish build-isolation'
 )

@@ -645,28 +645,44 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
 
 describe('命令行外壳：一律退出 0，输出是各家都认的开会话 JSON', SLOW, () => {
   // 钩子进程的工作目录放在临时目录：输入里没有会话目录时它退回到自己的工作目录，别让它去取仓的远端
+  // 真开会话走同步那半（fastSessionStart），联网几项由它起的脱离后台写结果文件：等后台写完再收拾临时目录，
+  // 不然 Windows 上后台还开着家目录里的文件、删不掉
   const run = (home: string, stdin: string) =>
     runChild(process.execPath, [HOOK], {
       input: stdin,
       cwd: temp('cwd'),
-      env: { ...process.env, HOME: home, USERPROFILE: home },
+      env: { ...process.env, HOME: home, USERPROFILE: home, FLEET_FRANCE_SSH: '', CLAUDE_ENV_FILE: '' },
     });
+  const waitBackground = (home: string) => {
+    const dir = join(home, '.fleet-dao', 'session-bg');
+    const until = Date.now() + 60_000;
+    const done = () => existsSync(dir) && readdirSync(dir).some((n) => n.endsWith('.json'));
+    while (!done() && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    expect(done(), '后台 60 秒内没写出结果').toBe(true);
+  };
 
-  it('这台没记检出、也没建过专用检出：退出 0，上下文里写明没查成', () => {
+  it('这台没记检出、也没建过专用检出：退出 0；后台写完，下次上下文里写明没跑', () => {
     const home = temp('home');
-    const r = run(home, JSON.stringify({ hook_event_name: 'SessionStart', cwd: temp('plain') }));
+    const stdin = JSON.stringify({ hook_event_name: 'SessionStart', cwd: temp('plain') });
+    const r = run(home, stdin);
     expect(r.status).toBe(0);
     const out = JSON.parse(r.stdout) as {
       hookSpecificOutput: { hookEventName: string; additionalContext: string };
     };
     expect(out.hookSpecificOutput.hookEventName).toBe('SessionStart');
-    expect(out.hookSpecificOutput.additionalContext).toContain('规矩同步没跑：');
+    expect(out.hookSpecificOutput.additionalContext).toContain('还没出结果');
+    waitBackground(home);
+    expect(JSON.parse(run(home, stdin).stdout).hookSpecificOutput.additionalContext).toContain(
+      '规矩同步没跑：',
+    );
   });
 
   it('输入读不懂：照样退出 0、照样说结论', () => {
-    const r = run(temp('home'), '不是 JSON');
+    const home = temp('home');
+    const r = run(home, '不是 JSON');
     expect(r.status).toBe(0);
     expect(JSON.parse(r.stdout).hookSpecificOutput.additionalContext).toContain('规矩同步');
+    waitBackground(home);
   });
 
   it('各家给会话目录的字段不一样', () => {

@@ -5,8 +5,10 @@ import type { CliToolsPort } from './cli-versions.ts';
 import type { Config } from './config.ts';
 import type { DecisionCommenter } from './decision-handoff.ts';
 import type { CockpitAlerts } from './feishu-alerts.ts';
+import type { PreflightReaders } from './france-preflight.ts';
 import type { FranceReleasePort } from './france-release.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
+import type { GitHubUserPort } from './github-user.ts';
 import type { HostResourceSampler } from './host-resources.ts';
 import type { IntentStore } from './intent-store.ts';
 import type { ModelRosterPort } from './model-roster.ts';
@@ -24,6 +26,7 @@ import type {
 import type { ProbeHistoryPort } from './probe-history.ts';
 import type { ReleaseCardPort } from './release-card.ts';
 import type { ReleaseRequestPort } from './release-request.ts';
+import type { RequestsPort } from './request-store-pg.ts';
 import type { RoutingEffortsPort } from './routing-efforts.ts';
 import type { RoutingLayersPort } from './routing-layers.ts';
 import type { RoutingOrderPort } from './routing-order.ts';
@@ -46,6 +49,12 @@ export interface Deps {
   store: Store;
   workflows: WorkflowControl;
   /**
+   * 本人 GitHub 身份那一套（#1989，设置页「导入仓库」）：列「我 GitHub 上能看到的仓」、把 App 装到某个仓。
+   * 走 OAuth 用户令牌，和 App 机器人令牌那条路分开。没给（开发、测试没有机器人凭据）时那几个接口回 503
+   * 写明「这台没接上 GitHub」，不拿空列表冒充「你没有仓」。
+   */
+  githubUser?: GitHubUserPort | undefined;
+  /**
    * 被撤或挂起的任务重做（shared/task-redo.ts）：同一张单另起一代。没给（开发环境没有 Temporal）时重做回 503，不假装起了。
    */
   taskRedo?: TaskRedoPort | undefined;
@@ -63,12 +72,12 @@ export interface Deps {
   /** 飞书网关来没来过：飞书接口的门口验过通行证就记一笔，/healthz 的 feishu_gateway 读它。没给就不记（开发、多数测试）。 */
   gatewaySeen?: GatewaySeen | undefined;
   /**
-   * 飞书群聊理成的意图（#553 第 4 条，intent-store.ts）：网关收原话、取意图卡都经它。没给的话网关的意图接口一律 503
-   * 「没接上」（原话没存，网关标「没记成」、之后补漏），不回 200 冒充存下了。
+   * 意图表的存取（#553 第 4 条，intent-store.ts）：网关的进群记录、飞书用量经它写。没给的话网关的两条接口一律 503
+   * 「没接上」，不回 200 冒充存下了。
    */
   intents?: IntentStore | undefined;
   /**
-   * 驾驶舱提醒（#795）：白名单外的人说话或进群、飞书用量到八成。没给时记录照样存，另记一条错误，不回 5xx
+   * 驾驶舱提醒（#795）：白名单外的人进群、飞书用量到八成。没给时记录照样存，另记一条错误，不回 5xx
    * （再送会把同一条证据再写一遍）。生产的两套装配都给。
    */
   alerts?: CockpitAlerts | undefined;
@@ -123,6 +132,11 @@ export interface Deps {
    */
   runTranscript?: RunTranscriptPort | undefined;
   /**
+   * 提需求（#2049，request-store-pg.ts）：需求、消息、每人的置顶和读到哪。没给（开发、内存版没有这三张表）的列表写 unavailable、
+   * 别的接口回 503，不拿空列表冒充「没有需求」。
+   */
+  requests?: RequestsPort | undefined;
+  /**
    * 「要你拍」拍完交给指挥官（#1915，decision-handoff.ts）：往进度单 #1055、任务单留言，走引擎机器人的 GitHub 客户端。
    * 没给（开发环境、机器人凭据没读到）的答案照样存下，回包里 handoff 写没接上，不当成记上了。
    */
@@ -138,10 +152,15 @@ export interface Deps {
    */
   hostResources?: HostResourceSampler | undefined;
   /**
-   * /france 页发版一键（#618，france-release.ts）：读 release-train 状态文件 + 起 pnpm release:onekey preflight。
+   * /france 页发版一键（#618，france-release.ts）：读 release-train 状态文件。
    * 只在正式环境装配（main.ts 的 liveFranceReleasePort）；没给时接口照样回 unreadable，页面画「没查成 + 原因」。
    */
   franceRelease?: FranceReleasePort | undefined;
+  /**
+   * /france 页「发版预检」（france-preflight.ts）：进程内读七项事实，不起子进程、不读 home。
+   * 只在正式环境装配。没给时接口回没接上，不拿「能发」顶。
+   */
+  francePreflight?: ((signal?: AbortSignal) => PreflightReaders | undefined) | undefined;
   /**
    * /france 页「命令行工具」（#1969，cli-versions.ts）：读引擎记下的在用版本和官方最新，落后现算。
    * 没给（开发、内存版没有这张表）时整段写没查成，不拿空列表冒充都是最新。
@@ -157,11 +176,6 @@ export interface Deps {
    * 没给时按钮置灰写没接上、POST 回 503，不当成发了。
    */
   releaseRequest?: ReleaseRequestPort | undefined;
-  /**
-   * 进程要停了（main.ts 收到 SIGTERM）：只有生产装配会给。意图卡的长轮询（intent-routes.ts）拿它跟请求自己的
-   * signal 合并着等，停机时马上醒、不再查库（#364：库关到一半时还查会报错，被当成「未处理的错误」500）。
-   */
-  shutdownSignal?: AbortSignal | undefined;
   log: Logger;
   now: () => Date;
   /**

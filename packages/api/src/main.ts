@@ -6,7 +6,12 @@
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
 //   发给工作流的信号只记日志，不接 Temporal。
 import { createDb, type Db } from '@fleet-dao/db';
-import { createGitHub, type ReleaseFactsReader } from '@fleet-dao/github';
+import {
+  createGitHub,
+  GITHUB_AUTHORIZE_URL,
+  type GitHubUserApi,
+  type ReleaseFactsReader,
+} from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
 import {
   createMemoryStore,
@@ -33,17 +38,26 @@ import { createChangeHub, startPgChangeFeed } from './changes.ts';
 import { pgCliTools } from './cli-versions.ts';
 import { ConfigError, engineEnabled, loadConfig } from './config.ts';
 import { probeDb } from './db-probe.ts';
+import { pgDatabaseSizes } from './db-sizes.ts';
 import type { DecisionCommenter } from './decision-handoff.ts';
 import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
+import {
+  createFootprintMeter,
+  type DatabaseSizes,
+  measureFootprint,
+  realFootprintFs,
+} from './disk-footprint.ts';
 import { readEngineMaster } from './engine-switch.ts';
 import { recordExternalWatchRound } from './external-watch.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { memoryCockpitAlerts, pgCockpitAlerts } from './feishu-alerts.ts';
+import { productionPreflightReaders } from './france-preflight.ts';
 import { liveFranceReleasePort } from './france-release.ts';
 import { createGatewaySeen, feishuGatewayPart } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { githubAppHealthCheck } from './github-app-health.ts';
+import type { GitHubUserPort } from './github-user.ts';
 import { serviceHealthChecks } from './health.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { createHostResourceSampler, realHostReader } from './host-resources.ts';
@@ -59,6 +73,7 @@ import type { GitHubEventSink } from './ports.ts';
 import { pgProbeHistory } from './probe-history.ts';
 import { liveReleaseCardPort } from './release-card.ts';
 import { liveReleaseRequestPort } from './release-request.ts';
+import { pgRequests } from './request-store-pg.ts';
 import { pgRoutingEfforts } from './routing-efforts.ts';
 import { pgRoutingLayers } from './routing-layers.ts';
 import { pgRoutingOrder } from './routing-order.ts';
@@ -76,8 +91,43 @@ const log = jsonLogger();
  * PR、CI 事件写镜像：@fleet-dao/github 的事件去处，要两个机器人的凭据（只在这里、启动时读一次）。读不到时后端照样起，
  * PR、CI 事件如实失败，健康检查的 github_events 报红（credentialsMissing）；补上凭据要重启后端。
  */
-/** 机器人凭据没读到：发版卡读 GitHub 的每一样都如实抛这个原因（卡上各行写没查成 + 原因）。 */
-function credentialsMissingFacts(why: string): ReleaseFactsReader {
+/**
+ * 把 @fleet-dao/github 的 userApi 收成后端用的 GitHubUserPort（#1989）。差别只有一处：那边 authorizeUrl 不带
+ * redirect_uri（GitHub 认 App 上登记的，我们每个环境不同），这里补上；configured() 看两个 App 有没有 client_secret。
+ */
+function adaptUserApi(api: GitHubUserApi): GitHubUserPort {
+  return {
+    configured: () => api.configured(),
+    exchangeCode: (input) => api.exchangeCode(input),
+    viewer: (token) => api.viewer(token),
+    listRepos: (token) => api.listRepos(token),
+    readTestCommand: (token, repo) => api.readTestCommand(token, repo),
+    installationsForApp: (role, token) => api.installationsForApp(role, token),
+    installationRepoIds: (token, id) => api.installationRepoIds(token, id),
+    addReposToInstallation: (token, id, repos) => api.addReposToInstallation(token, id, repos),
+    removeReposFromInstallation: (token, id, repos) => api.removeReposFromInstallation(token, id, repos),
+    authorizeUrl: ({ redirectUri, state, role = 'agent' }) => {
+      const url = new URL(GITHUB_AUTHORIZE_URL);
+      url.searchParams.set('client_id', api.clientIdFor(role));
+      url.searchParams.set('redirect_uri', redirectUri);
+      url.searchParams.set('state', state);
+      // 读仓列表、读安装、改安装这几样要的权限；不申请写代码的（令牌泄漏也能在 GitHub 上撤、影响面小）。
+      url.searchParams.set('scope', 'read:org repo');
+      return url.toString();
+    },
+    appInstallUrl: ({ role, ownerId, repositoryId, state }) => {
+      const url = new URL(`https://github.com/apps/${api.slugFor(role)}/installations/new/permissions`);
+      if (ownerId > 0) url.searchParams.set('target_id', String(ownerId));
+      url.searchParams.append('repository_ids[]', String(repositoryId));
+      url.searchParams.set('state', state);
+      return url.toString();
+    },
+  };
+}
+
+/** 机器人凭据没读到：发版卡读 GitHub 的每一样都如实抛这个原因（卡上各行写没查成 + 原因）。 */ function credentialsMissingFacts(
+  why: string,
+): ReleaseFactsReader {
   const fail = async (): Promise<never> => {
     throw new Error(`GitHub 机器人的凭据没读到（${why}）`);
   };
@@ -95,6 +145,8 @@ function githubMirror(db: Db): {
   sink: GitHubEventSink;
   credentialsMissing?: () => Promise<void>;
   releaseFacts: ReleaseFactsReader;
+  /** 本人身份那一套（#1989，设置页「导入仓库」）：列仓、装 App。凭据没读到就没有，那几个接口回 503。 */
+  userHit?: GitHubUserPort;
   /** 「要你拍」拍完往进度单、任务单留言（#1915）；凭据没读到就没有，答案照存、回包写没接上。 */
   decisionCommenter?: DecisionCommenter;
 } {
@@ -104,6 +156,7 @@ function githubMirror(db: Db): {
     return {
       sink: gh.eventSink({ async wake() {} }),
       releaseFacts: gh.releaseFacts,
+      userHit: adaptUserApi(gh.userApi),
       decisionCommenter: {
         async comment(input) {
           const got = await gh.commentIssue(input);
@@ -163,7 +216,11 @@ const nodeReporter = nodeReporterFor(config.nodeReport, {
   now,
 });
 
-async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
+async function assemble(): Promise<{
+  deps: Deps;
+  close: () => Promise<void>;
+  databaseSizes?: DatabaseSizes;
+}> {
   if (config.databaseUrl === null) {
     // 只有开发环境会走到这里（生产缺 DATABASE_URL 在 loadConfig 就拒绝启动了）。
     const changes = createChangeHub(log);
@@ -235,9 +292,10 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     workflows: temporal.control,
     taskRedo: temporal.taskRedo,
     github: github.sink,
+    ...(github.userHit ? { githubUser: github.userHit } : {}),
     ...(github.decisionCommenter ? { decisionCommenter: github.decisionCommenter } : {}),
     gatewaySeen,
-    // 飞书群聊理成的意图（#553 第 4 条）：网关收原话、取意图卡；指挥官经 fleet-api intent 读写同一张表
+    // 意图表（#553 第 4 条）：网关只往里记进群和飞书用量；已有的意图指挥官经 fleet-api intent 读写同一张表
     intents: createPgIntentStore(db, { now }),
     alerts: pgCockpitAlerts(db),
     // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在正式环境有
@@ -262,11 +320,13 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
     taskRoutePins: pgTaskRoutePins(db, now),
     // 任务详情每段的会话内容（#1640）：读引擎按条记下的 run_transcript
     runTranscript: pgRunTranscript(db),
+    // 提需求（#2049）：需求、消息、每人的置顶和读到哪；删了满 30 天的由引擎的 request-sweep 硬删
+    requests: pgRequests(db, now),
     // 环境页（#820 片 1）的版本那一项：正式环境读发布目录现算；别处不给，页面写「没查成」
     ...(production ? { deployLag: () => readDeployLagInput() } : {}),
-    // /france 页发版一键（#618）：读 ~/.fleet-dao/release-train.*、起 pnpm release:onekey preflight。
-    // 只在正式环境装：开发、内存版起这条命令会在开发者本机的仓里发，会害人以为发的是这台，所以不装、接口回「没接上」。
-    ...(production ? { franceRelease: liveFranceReleasePort(log) } : {}),
+    // /france 页发版一键（#618）：读 release-train 进度。只在正式环境装。
+    // 开发、内存版不装，接口回「没接上」，免得本机的数被看成法国的。
+    ...(production ? { franceRelease: liveFranceReleasePort() } : {}),
     // /france 页「发版」卡（#1231）：主线头、CI、PR 现读 GitHub（同一份机器人凭据），法国在用的提交读发布目录；只在正式环境装
     ...(production ? { releaseCard: liveReleaseCardPort(github.releaseFacts) } : {}),
     // /france 页「发布到法国」按钮（#1232）：写请求文件，法国上 root 的单元接活（人工档）；后端自己不起带 root 的进程
@@ -301,8 +361,12 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
       nodeReport: nodeReportPart(nodeReporter),
     }),
   };
+  // 发版预检：进程内读七项事实。发版卡或发布请求没装上时这里给出的函数回 undefined，接口写没接上。
+  if (production) deps.francePreflight = () => productionPreflightReaders(deps);
   return {
     deps,
+    // 库的大小（#1985）：资源页按目录的磁盘占用那一回里查，10 分钟一次
+    databaseSizes: pgDatabaseSizes((text) => client.unsafe(text)),
     close: async () => {
       stopDeployLagWatch();
       stopWatchdogWatch();
@@ -313,15 +377,20 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   };
 }
 
-const { deps, close } = await assemble();
-// 这台机器此刻的内存、CPU（#1973）：两种装配都读本机 /proc 和 cgroup；不是 Linux、没有会话资源池的照实写没读到
-const hostResources = createHostResourceSampler({ read: realHostReader(), now, log });
+const { deps, close, databaseSizes } = await assemble();
+// 这台机器此刻的内存、CPU（#1973）：两种装配都读本机 /proc 和 cgroup；不是 Linux、没有会话资源池的照实写没读到。
+// 整机磁盘、每个上线项目的 CPU 内存随这一回读（#1985）；按目录的磁盘占用由测量器 10 分钟最多测一回、在后台测，这一回只带结果
+const hostReader = realHostReader();
+const footprint = createFootprintMeter({
+  measure: () =>
+    measureFootprint({ apps: hostReader.apps ?? [], fs: realFootprintFs(), databases: databaseSizes, now }),
+  now,
+  log,
+});
+const hostResources = createHostResourceSampler({ read: hostReader, now, log, footprint });
 deps.hostResources = hostResources;
 snapshotDeps = deps;
 nodeReporter?.start();
-// 给停机时的意图卡长轮询用（intent-routes.ts）：main.ts 收到 SIGTERM 才会 abort，读不是装配的时候。
-const shutdownController = new AbortController();
-deps.shutdownSignal = shutdownController.signal;
 const { cockpit, agent, relay } = buildApps(deps);
 // 有页面开着（SSE 连着）才按间隔读、推；没人看时主页接口来要再现读
 const stopHostResources = hostResources.start(() => relay.connections() > 0);
@@ -391,9 +460,6 @@ async function shutdown(signal: string) {
   stopHostResources();
   await gracefulShutdown({
     servers,
-    // 意图卡的长轮询（intent-routes.ts）拿这个信号跟请求自己的 signal 合并着等：马上醒，直接回手上已有的
-    // 结果，不再查库——库要过一会儿（drainMs 之后）才真的关，这一步早一点发，长轮询就不会撞上正在关的库（#364）。
-    notifyLongPollers: () => shutdownController.abort(),
     drainMs: DRAIN_MS,
     close,
     onCloseError: (err) => log.error('退出时关连接出错', { error: String(err) }),

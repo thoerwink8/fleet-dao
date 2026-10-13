@@ -52,22 +52,17 @@ export function RepoDispatchControl({
   const noteText = dispatchNote(row);
   const target = !row.on;
   const verb = target ? '开启' : '关闭';
-  const confirm = () => {
-    update.mutate(
-      { repoId, body: { on: target } },
-      {
-        onSuccess: (r) => {
-          setAsking(false);
-          toast.success(
-            r.changed ? `已${verb}：${name} 的「让 AI 接活」` : `${name} 本来就是${r.on ? '开着' : '关着'}的`,
-          );
-        },
-        onError: (e) => {
-          setAsking(false);
-          toast.error(`没能${verb}`, { description: errorText(e) });
-        },
-      },
-    );
+  // 确认框等它：成功框关、弹成功；失败弹 toast 并抛给框——框留着写原因、能再点（#2009）
+  const confirm = async () => {
+    try {
+      const r = await update.mutateAsync({ repoId, body: { on: target } });
+      toast.success(
+        r.changed ? `已${verb}：${name} 的「让 AI 接活」` : `${name} 本来就是${r.on ? '开着' : '关着'}的`,
+      );
+    } catch (e) {
+      toast.error(`没能${verb}`, { description: errorText(e) });
+      throw e;
+    }
   };
 
   return (
@@ -106,14 +101,7 @@ export function RepoDispatchControl({
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>先不</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={(e) => {
-                e.preventDefault();
-                confirm();
-              }}
-            >
-              {verb}
-            </AlertDialogAction>
+            <AlertDialogAction onConfirm={confirm}>{verb}</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

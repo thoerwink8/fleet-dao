@@ -37,6 +37,11 @@ import type {
   GroomStatusResponse,
   HomeResourcesSchema,
   HomeResponseSchema,
+  ImportableReposResponse,
+  ImportRepoRequest,
+  ImportRepoResponse,
+  InstallAppRequest,
+  InstallAppResponse,
   JobsResponse,
   JobViewSchema,
   LivenessFactSchema,
@@ -63,8 +68,10 @@ import type {
   QuotaWindowViewSchema,
   ReleaseCardSchema,
   ReleasedCommitsSchema,
+  ReleaseRecoverResponse,
   ReleaseRequestResponse,
   RemovePurposeModelRequest,
+  RemoveRepoResponse,
   RepoCiPolicyResponse,
   RepoDispatchResponse,
   RepoSchema,
@@ -108,6 +115,9 @@ import type {
   UpdateSettingRequest,
   UpdateTaskRoutePinRequest,
   UpdateTaskRoutePinResponse,
+  WorktreeCleanupRequestSchema,
+  WorktreeCleanupResponseSchema,
+  WorktreesResponseSchema,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 
@@ -138,6 +148,14 @@ export type UpdatedRepoDispatch = z.infer<typeof UpdateRepoDispatchResponse>;
 export type RepoCiPolicy = z.infer<typeof RepoCiPolicyResponse>['repos'][number];
 export type UpdateRepoCiPolicyBody = z.input<typeof UpdateRepoCiPolicyRequest>;
 export type UpdatedRepoCiPolicy = z.infer<typeof UpdateRepoCiPolicyResponse>;
+/** 设置页「导入仓库」（#1989）：我 GitHub 上看得见的仓 + 我这份授权现在怎样。 */
+export type ImportableRepos = z.infer<typeof ImportableReposResponse>;
+export type ImportableRepo = ImportableRepos['repos'][number];
+export type GitHubAuthState = ImportableRepos['auth'];
+export type ImportRepoBody = z.input<typeof ImportRepoRequest>;
+export type ImportRepoResult = z.infer<typeof ImportRepoResponse>;
+export type RemoveRepoResult = z.infer<typeof RemoveRepoResponse>;
+export type InstallAppResult = z.infer<typeof InstallAppResponse>;
 /** 一个仓的「指挥官整理待办」：今日剩余次数、最近几次、有没有一次在做。 */
 export type GroomStatus = z.infer<typeof GroomStatusResponse>;
 export type GroomNowBody = z.input<typeof GroomNowRequest>;
@@ -281,7 +299,9 @@ export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;
 export type ReleasedCommits = z.infer<typeof ReleasedCommitsSchema>;
 /** 点「确认发布」之后后端回的：请求已写下（接活的是法国上 root 的单元，进度看发版卡）。 */
 export type ReleaseRequestResult = z.infer<typeof ReleaseRequestResponse>;
-/** /france 页「发版预检」一次一回：done 带输出、退出码；起进程都没起来走 unreadable。 */
+/** 点「重试」「恢复引擎开关」「撤掉暂停」之后后端回的：请求已写下（#2027）。 */
+export type ReleaseRecoverResult = z.infer<typeof ReleaseRecoverResponse>;
+/** /france 页「发版预检」一次一回：done 带七项事实和退出码（0 能发，2 不能发）；没接上走 unreadable。 */
 export type FrancePreflightResponse = z.infer<typeof FrancePreflightResponseSchema>;
 
 /** 实时推送（SSE，事件名见 SSE_EVENTS）：ready = 连上了，全量重拉一次；change = 某张表某一行变了；resync = 断过，全量重拉。 */
@@ -291,3 +311,18 @@ export type LiveEvent =
   | ({ type: 'change' } & z.infer<typeof ChangeEventSchema>)
   /** 这台机器此刻的内存、CPU（#1973）：直接换掉主页数据里的 resources，不重拉主页。 */
   | { type: 'resources'; resources: z.infer<typeof HomeResourcesSchema> };
+
+// —— 本机会话（#1991）、法国的工作树和一键清理（#1993）——
+export type {
+  LocalSessionsNode,
+  LocalSessionsResponse as LocalSessions,
+  LocalSessionView,
+  WorktreeCleanupResult,
+  WorktreeInventory,
+  WorktreeRow,
+  WorktreeState,
+  WorktreesResponse as Worktrees,
+} from '@fleet-dao/shared';
+export type WorktreeCleanupBody = z.input<typeof WorktreeCleanupRequestSchema>;
+export type WorktreeCleanupAck = z.infer<typeof WorktreeCleanupResponseSchema>;
+export type WorktreeCleanupView = z.infer<typeof WorktreesResponseSchema>['cleanups'][number];

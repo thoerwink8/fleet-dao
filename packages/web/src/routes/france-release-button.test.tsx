@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // /france 页「发布到法国」按钮（#1232）。做完的标准：
-// ① 能点时：点开弹窗写明要发的提交、CI 绿、带上哪几个 PR、发完引擎总开关和接活开关恢复到发版前的样子（#1256）；点「确认发布」才发，只带主线头的提交号；先不＝不发；
+// ① 能点时：点开弹窗现跑预检、清单摆在框里（#2026），写明要发的提交、带上哪几个 PR、发完引擎总开关恢复到发版前（#1256），各仓接活开关发版不动；点「确认发布」才发，只带主线头的提交号；先不＝不发；
 // ② 不能点（没装接活单元、CI 红或在跑、已是最新、已有发版在走）：按钮置灰、原因列在旁边，点不出弹窗；
 // ③ 后端拒了（头换了等）：不当成发出去了，按钮回来；④ 最近一次的结果（等法国接、被拒、做完）各写各的，读不到写没查成。
 // ⑤ 入口在「在用版本」那一行（#1255）：写落后几个提交、要发的主线头提交号和标题，按钮就在这一行里、全页只有这一颗；
@@ -75,6 +75,20 @@ function setup(c: ReleaseCard, release?: (sha: string) => Promise<unknown>) {
     env: () => Promise.resolve(envOk()),
     jobs: () => Promise.resolve({ asOf: ASOF, jobs: [] } satisfies Jobs),
     franceReleaseCard: () => Promise.resolve(c),
+    // 弹窗一打开现跑预检（#2026）：这里给一份全过的，确认键才能点
+    francePreflight: () =>
+      Promise.resolve({
+        state: 'done' as const,
+        command: '进程内读事实',
+        code: 0,
+        signal: null,
+        stdout: '主线头和 CI：通过 绿\n落后几个：通过 落后 7 个提交\n',
+        stderr: '',
+        durationMs: 5,
+        timedOut: false,
+        truncated: false,
+        asOf: ASOF,
+      }),
     franceRelease: async (sha: string) => {
       calls.push(sha);
       if (release) return release(sha);
@@ -88,7 +102,7 @@ function setup(c: ReleaseCard, release?: (sha: string) => Promise<unknown>) {
 const button = () => screen.findByRole('button', { name: '发布到法国' });
 
 describe('/france 页「发布到法国」按钮', () => {
-  test('能点：点开弹窗写明提交、CI 绿、带上的 PR、总开关保持关；确认才发，只带主线头的提交号', async () => {
+  test('能点：点开弹窗现跑预检、写明提交、带上的 PR、发完恢复总开关；确认才发，只带主线头的提交号', async () => {
     const { calls } = setup(card());
     const btn = await button();
     expect((btn as HTMLButtonElement).disabled).toBe(false);
@@ -96,12 +110,16 @@ describe('/france 页「发布到法国」按钮', () => {
     const dialog = await screen.findByRole('alertdialog');
     expect(within(dialog).getByText(HEAD.slice(0, 12))).toBeTruthy();
     expect(within(dialog).getByText(/刷新耗时表 \(#1230\)/)).toBeTruthy();
-    expect(within(dialog).getByText('主线 CI 是绿的。')).toBeTruthy();
+    expect(await within(dialog).findByText('主线头和 CI：绿')).toBeTruthy();
     expect(within(dialog).getByText(/会带上 7 个提交/)).toBeTruthy();
     expect(within(dialog).getByText(/任务页暂停继续/)).toBeTruthy();
-    expect(within(dialog).getByText(/发完把引擎总开关和接活开关恢复到发版前的样子/)).toBeTruthy();
+    expect(within(dialog).getByText(/发完把引擎总开关恢复到发版前/)).toBeTruthy();
+    expect(dialog.textContent).toContain('接活」开关发版不动');
+    expect(dialog.textContent).not.toContain('接活开关恢复到发版前');
     expect(dialog.textContent).not.toContain('保持关，要开就点');
     expect(calls).toEqual([]); // 点开弹窗还没发
+    const ok = within(dialog).getByRole('button', { name: '确认发布' });
+    await waitFor(() => expect(ok.hasAttribute('disabled')).toBe(false));
     fireEvent.click(within(dialog).getByRole('button', { name: '确认发布' }));
     await waitFor(() => expect(calls).toEqual([HEAD]));
   });
@@ -140,19 +158,27 @@ describe('/france 页「发布到法国」按钮', () => {
     expect(await screen.findByText('法国已经是最新，没有要发的')).toBeTruthy();
   });
 
-  test('后端拒了（比如头在点之前换了）：不当成发出去了，按钮回来能再点', async () => {
+  test('后端拒了（比如头在点之前换了）：不当成发出去了，框留着写原因（#2009），关掉后按钮回来能再点', async () => {
     const { calls } = setup(card(), async () => {
       throw new Error('主线头已经不是 2005b290a 了');
     });
     fireEvent.click(await button());
     const dialog = await screen.findByRole('alertdialog');
-    fireEvent.click(within(dialog).getByRole('button', { name: '确认发布' }));
+    const go = within(dialog).getByRole('button', { name: '确认发布' });
+    await waitFor(() => expect(go.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(go);
     await waitFor(() => expect(calls).toEqual([HEAD]));
+    // 失败留在原处：框里一行 role=alert 写后端的原因，确认键恢复（不再转圈）
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert.textContent).toContain('主线头已经不是 2005b290a 了');
+    const confirm = within(dialog).getByRole('button', { name: '确认发布' });
+    expect(confirm.getAttribute('aria-busy')).toBeNull();
+    fireEvent.click(within(dialog).getByRole('button', { name: '先不' }));
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
     expect(((await button()) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  test('最近一次的结果：等法国接、被拒（带原因）、做完（写总开关和接活开关恢复到发版前的样子）', async () => {
+  test('最近一次的结果：等法国接、被拒（带原因）、做完（写总开关恢复到发版前、接活开关发版不动，#2026）', async () => {
     const pending = { ...NONE, state: 'pending' } as const;
     setup(card({ state: 'blocked', reasons: ['上一份发布请求还没被法国接走'], last: pending }));
     expect(await screen.findByText(/发布请求已提交，等法国接活/)).toBeTruthy();
@@ -186,9 +212,12 @@ describe('/france 页「发布到法国」按钮', () => {
       }),
     );
     const done = await screen.findByText(/上一趟发完了/);
-    expect(done.textContent).toContain('引擎总开关和接活开关已恢复到发版前的样子');
+    expect(done.textContent).toContain('引擎总开关已恢复到发版前');
+    expect(done.textContent).toContain('各仓接活开关发版不动');
+    expect(done.textContent).not.toContain('接活开关已恢复');
     // 旧说法「发完保持关、要开就点总开关」不再有（发完恢复发版前的样子，不用人再去开）
-    expect(done.textContent).not.toContain('保持关');
+    expect(done.textContent).not.toContain('发完保持关');
+    expect(done.textContent).not.toContain('要开就点');
     expect(within(done).queryByRole('link', { name: '引擎总开关' })).toBeNull();
   });
 

@@ -14,7 +14,7 @@
 
 import type { SessionUser } from '@fleet-dao/adapters';
 import type { AlertRow, IssueWorkFacts, OpenSessionTree, SubtaskTreeRef } from '@fleet-dao/db';
-import type { DecisionOption, StageKind } from '@fleet-dao/shared';
+import type { DecisionOption, SizeRead, StageKind, WorktreeRow } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { subtaskBranch } from '../contract.ts';
@@ -90,7 +90,28 @@ export interface WorktreeSweepDeps {
   alerts: AlertStore;
   log: ReconcileLog;
   inspectMax?: number;
+  // —— 清单（#1993）：下面几样不给，清单里对应那一项写「这一轮没量」，删不删的判据不受影响 ——
+  /** 以会话用户的身份量这棵树多大（字节，du）。抛 = 没量成。 */
+  size?(dir: string, user: SessionUser): Promise<number>;
+  /** 每个目录里最近一次会话的时刻（收场的时刻，没收场是起的时刻）：session_runs 按 worktree_path 取最新。 */
+  lastSessions?(): Promise<Map<string, Date>>;
+  /** 受管的仓（没有树的仓也列一行）。 */
+  repos?(): Promise<{ owner: string; name: string }[]>;
+  /** 这个仓的镜像裸仓多大（字节）；还没镜像过回 null。抛 = 没量成。 */
+  mirrorBytes?(repo: { owner: string; name: string }): Promise<number | null>;
 }
+
+/** 一轮最多量几棵树的大小（每棵要以会话用户起一个短命 scope 跑 du）；多的写「没轮到」。 */
+export const SIZE_MAX = 150;
+
+/** 这一轮的清单（#1993）：还留着的树各一行、删了哪几棵、每个仓的镜像。jobs/worktree-cleanup.ts 的 inventoryOf 拼成整份。 */
+export interface SweepInventory {
+  trees: WorktreeRow[];
+  removed: string[];
+  repos: { repo: string; mirror: SizeRead }[];
+}
+
+export type SweepWithInventory = SweepPart & { inventory: SweepInventory };
 
 /** 仓那一层：<owner>_<name>（GitHub 的用户名、组织名里没有下划线，第一个下划线就是分界）。 */
 const REPO_DIR = /^([A-Za-z0-9][A-Za-z0-9-]*)_([A-Za-z0-9._-]+)$/;
@@ -163,10 +184,12 @@ type TreeOutcome =
   | { kind: 'in-use'; by: string }
   | { kind: 'gone' }
   | { kind: 'removed' }
-  /** 剩着东西，报了（或更新了）要人拍。 */
-  | { kind: 'escalated'; title: string }
+  /** 剩着东西，报了（或更新了）要人拍。what 是剩着的东西，一样一句。 */
+  | { kind: 'escalated'; title: string; what: string[] }
   /** 剩着东西，人已经看过那条要人拍、点了处理：留着，不再提醒。 */
-  | { kind: 'kept' }
+  | { kind: 'kept'; what: string[] }
+  /** 树里还有没结束的会话（#1993 从 unchecked 里分出来：清单上写「会话在用」）。这一轮照旧算没查成。 */
+  | { kind: 'session'; why: string }
   | { kind: 'unchecked'; why: string };
 
 interface IssueUse {
@@ -180,6 +203,8 @@ interface Sweep {
   part: SweepPart;
   /** 这一轮看过的树：路径 → 结局。 */
   outcomes: Map<string, TreeOutcome>;
+  /** 这一轮看过的树：路径 → 在哪个仓、叫什么（拼清单用）。 */
+  where: Map<string, { repo: Repo; repoDir: string; name: string }>;
   uses: Map<string, Promise<IssueUse>>;
   /** 没结束的会话在哪些目录里：一轮只查一次（查不成的这一轮每棵树都不碰）。 */
   sessions: Promise<Map<string, OpenSessionTree>> | null;
@@ -236,7 +261,8 @@ async function escalate(
   const dedupeKey = `${KEEP_ALERT_PREFIX}${ctx.rel}`;
   const existing = await deps.alerts.byKey(dedupeKey);
   // 人已经看过、点了处理（不是对账自己撤的）：留着，不再报。树里又清干净了，照样删
-  if (existing?.resolvedAt && existing.resolvedBy !== RECONCILE_ACTOR) return { kind: 'kept' };
+  if (existing?.resolvedAt && existing.resolvedBy !== RECONCILE_ACTOR)
+    return { kind: 'kept', what: ctx.what };
   const title = clip(`工作树里有没推的东西，删不删要你拍：${ctx.rel}`, 300);
   const body = [
     `${deps.machine}的 ${ctx.path}（${treeWords(ctx.tree)}）已经没有在跑的任务在用了，但里面还有：`,
@@ -264,7 +290,7 @@ async function escalate(
       options: keepTreeOptions(deps.machine),
     });
   }
-  return { kind: 'escalated', title };
+  return { kind: 'escalated', title, what: ctx.what };
 }
 
 /**
@@ -316,7 +342,7 @@ async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): P
   }
   if (live) {
     return {
-      kind: 'unchecked',
+      kind: 'session',
       why: `${rel} 里还有没结束的会话（${live.stage} 阶段，北京时间 ${stamp(live.queuedAt)} 起，会话 ${live.runId.slice(0, 8)}）：需求和子任务的工作流都不在跑了，会话可能还活着（没收的会话见 #247），没碰`,
     };
   }
@@ -379,6 +405,7 @@ function outcomeWhy(outcome: TreeOutcome, rel: string): string | null {
     case 'kept':
       return `树里还有没推、没提交的东西，人已经看过那条要人拍、决定留着（${rel}）`;
     case 'in-use':
+    case 'session':
     case 'unchecked':
       return null;
   }
@@ -487,11 +514,12 @@ async function settleTreeAlerts(s: Sweep, open: readonly AlertRow[]): Promise<vo
 export async function sweepWorktrees(
   deps: WorktreeSweepDeps,
   openAlerts: readonly AlertRow[] | null,
-): Promise<SweepPart> {
+): Promise<SweepWithInventory> {
   const s: Sweep = {
     deps,
     part: { scanned: 0, found: 0, unchecked: [] },
     outcomes: new Map(),
+    where: new Map(),
     uses: new Map(),
     sessions: null,
     repoDirs: new Map(),
@@ -507,6 +535,7 @@ export async function sweepWorktrees(
       scanned: 0,
       found: 0,
       unchecked: [],
+      inventory: { trees: [], removed: [], repos: [] },
     };
   }
   for (const entry of top) {
@@ -538,9 +567,13 @@ export async function sweepWorktrees(
       const outcome = t.isDir
         ? await sweepTree(s, repo, entry.name, t.name)
         : { kind: 'unchecked' as const, why: `${entry.name}/${t.name} 不是目录（没碰）` };
-      s.outcomes.set(`${deps.root}/${entry.name}/${t.name}`, outcome);
+      const path = `${deps.root}/${entry.name}/${t.name}`;
+      s.outcomes.set(path, outcome);
+      s.where.set(path, { repo, repoDir: entry.name, name: t.name });
       if (outcome.kind === 'removed' || outcome.kind === 'escalated') s.part.found += 1;
-      if (outcome.kind === 'unchecked' && outcome.why) s.part.unchecked.push(outcome.why);
+      if ((outcome.kind === 'unchecked' || outcome.kind === 'session') && outcome.why) {
+        s.part.unchecked.push(outcome.why);
+      }
     }
   }
   if (s.deferred > 0) {
@@ -549,5 +582,111 @@ export async function sweepWorktrees(
     );
   }
   if (openAlerts) await settleTreeAlerts(s, openAlerts);
-  return s.part;
+  return { ...s.part, inventory: await collectInventory(s) };
+}
+
+/** 一棵树的去向 → 清单上的状态和原因；删了、不在了的不进清单（回 null）。 */
+function rowState(outcome: TreeOutcome): { state: WorktreeRow['state']; why: string } | null {
+  switch (outcome.kind) {
+    case 'removed':
+    case 'gone':
+      return null;
+    case 'in-use':
+      return { state: 'running', why: `在用：任务工作流 ${outcome.by} 在跑` };
+    case 'session':
+      return { state: 'session', why: `在用：${outcome.why}` };
+    case 'escalated':
+      return {
+        state: 'leftover',
+        why: `没人用了，但里面还有：${outcome.what.join('；')}（删了就没了，报了要人拍）`,
+      };
+    case 'kept':
+      return { state: 'kept', why: `里面还有：${outcome.what.join('；')}；人看过那条要人拍、决定留着` };
+    case 'unchecked':
+      return outcome.why
+        ? { state: 'unchecked', why: `没查成，不删：${outcome.why}` }
+        : { state: 'deferred', why: '残留的树太多，这一轮没轮到看，下一轮看' };
+  }
+}
+
+/** 一轮看完之后拼清单：还留着的树各一行（量大小、对上最近一次会话），删了的列名字，每个仓量镜像。量不成的写原因，不写 0。 */
+async function collectInventory(s: Sweep): Promise<SweepInventory> {
+  const { deps } = s;
+  let last: Map<string, Date> | null = null;
+  let lastWhy: string | null = null;
+  if (deps.lastSessions) {
+    try {
+      last = await deps.lastSessions();
+    } catch (err) {
+      lastWhy = `每棵树最近一次会话没查成：${errMessage(err)}`;
+      s.part.unchecked.push(lastWhy);
+    }
+  }
+  const trees: WorktreeRow[] = [];
+  const removed: string[] = [];
+  let measured = 0;
+  for (const [path, outcome] of s.outcomes) {
+    const at = s.where.get(path);
+    if (!at) continue;
+    const rel = `${at.repoDir}/${at.name}`;
+    if (outcome.kind === 'removed') removed.push(rel);
+    const st = rowState(outcome);
+    if (!st) continue;
+    const kind = parseTreeName(at.name);
+    let size: SizeRead;
+    if (!deps.size) size = { state: 'unread', why: '这一轮没量' };
+    else if (measured >= SIZE_MAX)
+      size = { state: 'unread', why: `这一轮量的树太多（最多 ${SIZE_MAX} 棵），没轮到` };
+    else {
+      measured += 1;
+      try {
+        const user = await deps.ownerOf(path);
+        size = user
+          ? { state: 'ok', bytes: await deps.size(path, user) }
+          : { state: 'unread', why: '量的时候树已经不在了' };
+      } catch (err) {
+        size = { state: 'unread', why: `没量成：${errMessage(err)}` };
+      }
+    }
+    const lastAt = last?.get(path);
+    trees.push({
+      repo: `${at.repo.owner}/${at.repo.name}`,
+      tree: at.name,
+      what: kind ? treeWords(kind) : '认不出',
+      ...(kind ? { issueNumber: kind.issue } : {}),
+      ...st,
+      ...(lastAt ? { lastSessionAt: lastAt.toISOString() } : {}),
+      size,
+    });
+  }
+  // 每个仓一行：受管的仓 + 根下出现过的仓
+  const slugs = new Map<string, Repo>();
+  for (const { repo } of s.where.values()) slugs.set(`${repo.owner}/${repo.name}`, repo);
+  for (const dir of s.repoDirs.keys()) {
+    const repo = parseRepoDir(dir);
+    if (repo) slugs.set(`${repo.owner}/${repo.name}`, repo);
+  }
+  if (deps.repos) {
+    try {
+      for (const r of await deps.repos()) slugs.set(`${r.owner}/${r.name}`, r);
+    } catch (err) {
+      s.part.unchecked.push(`受管的仓没列成（只列了根下有树的仓）：${errMessage(err)}`);
+    }
+  }
+  const repos: SweepInventory['repos'] = [];
+  for (const [slug, repo] of [...slugs].sort(([a], [b]) => a.localeCompare(b))) {
+    let mirror: SizeRead;
+    if (!deps.mirrorBytes) mirror = { state: 'unread', why: '这一轮没量镜像' };
+    else {
+      try {
+        const bytes = await deps.mirrorBytes(repo);
+        mirror = bytes === null ? { state: 'unread', why: '这个仓还没有镜像' } : { state: 'ok', bytes };
+      } catch (err) {
+        mirror = { state: 'unread', why: `没量成：${errMessage(err)}` };
+      }
+    }
+    repos.push({ repo: slug, mirror });
+  }
+  trees.sort((a, b) => a.repo.localeCompare(b.repo) || a.tree.localeCompare(b.tree));
+  return { trees, removed: removed.sort(), repos };
 }

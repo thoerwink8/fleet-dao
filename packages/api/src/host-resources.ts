@@ -12,14 +12,17 @@
 // - scope 在两步之间收场（文件 ENOENT）就当它不在了，不算没读到；整个 slice 目录不在才是整池没读到。
 // - 只在有人看（有 SSE 连接）时才按间隔读；没人看时主页接口来要，最近一回旧了就现读一回。
 // - fleet-api.service 开了 ProtectControlGroups / ProtectKernelTunables：那只是把 /sys/fs/cgroup、/proc/sys 设成只读，读不受影响。
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, statfs } from 'node:fs/promises';
 import { posix } from 'node:path';
-import type { HomeResourcesSchema, SessionUsageSchema } from '@fleet-dao/shared';
+import type { DiskFootprintSchema, HomeResourcesSchema, SessionUsageSchema } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import type { Logger } from './ports.ts';
+import { VPS_APPS, type VpsApp } from './vps-apps.ts';
 
 type HomeResources = z.infer<typeof HomeResourcesSchema>;
 type SessionUsage = z.infer<typeof SessionUsageSchema>;
+type DiskFootprint = z.infer<typeof DiskFootprintSchema>;
+type HostApp = Extract<NonNullable<HomeResources['apps']>, { state: 'ok' }>['items'][number];
 
 /** 采样间隔，也是页面上读数最多旧多久（推送正常时）的上限。 */
 export const RESOURCE_SAMPLE_MS = 5_000;
@@ -31,6 +34,15 @@ export const AGENT_SLICE_PATH = 'fleet.slice/fleet-agents.slice';
 
 const SCOPE_RE = /^fleet-agent-(.+)\.scope$/;
 const MIB = 1024 * 1024;
+/** 字节 → MiB：真读到的不到 1M 往上记 1M，只有真的 0 才是 0（#1992：不把小读数四舍五入成 0）。 */
+const toMb = (bytes: number): number => (bytes > 0 ? Math.max(1, Math.round(bytes / MIB)) : 0);
+
+export interface StatfsResult {
+  bsize: number;
+  blocks: number;
+  bfree: number;
+  bavail: number;
+}
 
 export interface HostReadDeps {
   readText(path: string): Promise<string>;
@@ -38,6 +50,12 @@ export interface HostReadDeps {
   procRoot: string;
   cgroupRoot: string;
   slicePath: string;
+  /** 整机磁盘（#1985）：没装（老装配、测试）就不带 disk 这一项。 */
+  statfs?: (path: string) => Promise<StatfsResult>;
+  /** 量哪个挂载点：一般是 /。 */
+  diskPath?: string;
+  /** 上线项目登记表（#1985）：没装就不带 apps 这一项。 */
+  apps?: readonly VpsApp[];
 }
 
 export function realHostReader(overrides: Partial<HostReadDeps> = {}): HostReadDeps {
@@ -47,6 +65,9 @@ export function realHostReader(overrides: Partial<HostReadDeps> = {}): HostReadD
     procRoot: '/proc',
     cgroupRoot: CGROUP_ROOT,
     slicePath: AGENT_SLICE_PATH,
+    statfs: (path) => statfs(path),
+    diskPath: '/',
+    apps: VPS_APPS,
     ...overrides,
   };
 }
@@ -116,6 +137,153 @@ export interface ResourceMemo {
   at: number;
   host?: { busy: number; total: number };
   scopes: Map<string, number>;
+  /** 各 systemd 单元上一回的 usage_usec（#1985）。 */
+  units?: Map<string, number>;
+}
+
+/** 整机磁盘：statfs 一回。块数认不出（总块数 0、不是数）也算没读到。 */
+async function readDisk(deps: HostReadDeps): Promise<HomeResources['disk']> {
+  if (!deps.statfs) return undefined;
+  const path = deps.diskPath ?? '/';
+  try {
+    const s = await deps.statfs(path);
+    const nums = [s.bsize, s.blocks, s.bfree, s.bavail];
+    if (
+      nums.some((n) => !Number.isFinite(n) || n < 0) ||
+      s.blocks === 0 ||
+      s.bsize === 0 ||
+      s.bfree > s.blocks
+    ) {
+      return { state: 'unread', why: `${path} 的 statfs 读回来的块数认不出：${JSON.stringify(s)}` };
+    }
+    return {
+      state: 'ok',
+      path,
+      totalBytes: s.blocks * s.bsize,
+      usedBytes: (s.blocks - s.bfree) * s.bsize,
+      availableBytes: s.bavail * s.bsize,
+    };
+  } catch (err) {
+    return { state: 'unread', why: `${path} 的 statfs 没读成：${message(err)}` };
+  }
+}
+
+type UnitRead =
+  | { kind: 'off' }
+  /** cgroup 还在、memory.current 是 0：里面没进程，不算在跑（#1992）。 */
+  | { kind: 'empty'; why: string }
+  | { kind: 'ok'; memoryBytes: number; maxBytes?: number; usec: number }
+  | { kind: 'unread'; why: string };
+
+/** 一个单元一回：cgroup 目录不在 = 没在跑；memory.max 是 max 就没有上限。 */
+async function readUnit(deps: HostReadDeps, cgroup: string): Promise<UnitRead> {
+  const dir = posix.join(deps.cgroupRoot, cgroup);
+  const file = (name: string) => posix.join(dir, name);
+  let current: string;
+  try {
+    current = await deps.readText(file('memory.current'));
+  } catch (err) {
+    if (isMissing(err)) return { kind: 'off' };
+    return { kind: 'unread', why: `${file('memory.current')} 没读成：${message(err)}` };
+  }
+  try {
+    const [maxText, cpuText] = await Promise.all([
+      deps.readText(file('memory.max')).catch((err: unknown) => {
+        if (isMissing(err)) return 'max';
+        throw err;
+      }),
+      deps.readText(file('cpu.stat')),
+    ]);
+    const memoryBytes = parseBytes(current, file('memory.current'));
+    if (memoryBytes === 0) {
+      return {
+        kind: 'empty',
+        why: `${cgroup} 的 cgroup 还在，但 memory.current 是 0：里面没有进程，不算在跑`,
+      };
+    }
+    const maxBytes = maxText.trim() === 'max' ? undefined : parseBytes(maxText, file('memory.max'));
+    const usec = parseCpuUsageUsec(cpuText);
+    return { kind: 'ok', memoryBytes, ...(maxBytes === undefined ? {} : { maxBytes }), usec };
+  } catch (err) {
+    // 读到一半单元收场了：当它不在
+    if (isMissing(err)) return { kind: 'off' };
+    return { kind: 'unread', why: `${dir} 没读成：${message(err)}` };
+  }
+}
+
+/**
+ * 每个上线项目一回（#1985）：名下各单元的 cgroup 相加。CPU 口径：各单元 cpu.stat 的 usage_usec 这一回减上一回，
+ * 除以两回之间的墙钟（微秒），得到忙的核数（1 = 占满一个核）；有一个在跑的单元还只有一回读数，整个应用就不给 CPU（采样中）。
+ */
+async function readApps(
+  deps: HostReadDeps,
+  prev: ResourceMemo | undefined,
+  elapsedMs: number,
+): Promise<{ apps: HomeResources['apps']; units: Map<string, number> }> {
+  const units = new Map<string, number>();
+  if (!deps.apps) return { apps: undefined, units };
+  const controllers = posix.join(deps.cgroupRoot, 'cgroup.controllers');
+  try {
+    await deps.readText(controllers);
+  } catch (err) {
+    return {
+      apps: {
+        state: 'unread',
+        why: isMissing(err)
+          ? `这台没有 ${controllers}（不是 cgroup v2，或不是 Linux）`
+          : `${controllers} 没读成：${message(err)}`,
+      },
+      units,
+    };
+  }
+  const items = await Promise.all(
+    deps.apps.map(async (app): Promise<HostApp> => {
+      const reads = await Promise.all(app.units.map((u) => readUnit(deps, u.cgroup)));
+      const usage = ((): HostApp['usage'] => {
+        const bad = reads.find((r) => r.kind === 'unread');
+        if (bad?.kind === 'unread') return { state: 'unread', why: bad.why };
+        let running = 0;
+        let memoryBytes = 0;
+        let maxBytes: number | undefined = 0;
+        let cpuCores: number | undefined = 0;
+        reads.forEach((r, i) => {
+          const name = app.units[i]?.name;
+          if (r.kind !== 'ok' || !name) return;
+          running += 1;
+          memoryBytes += r.memoryBytes;
+          maxBytes = maxBytes === undefined || r.maxBytes === undefined ? undefined : maxBytes + r.maxBytes;
+          units.set(name, r.usec);
+          const before = prev?.units?.get(name);
+          cpuCores =
+            cpuCores === undefined || before === undefined || r.usec < before || elapsedMs <= 0
+              ? undefined
+              : cpuCores + (r.usec - before) / (elapsedMs * 1000);
+        });
+        if (running === 0) {
+          const empty = reads.find((r) => r.kind === 'empty');
+          if (empty?.kind === 'empty') return { state: 'idle', why: empty.why };
+          return app.idleNote ? { state: 'idle', why: app.idleNote } : { state: 'idle' };
+        }
+        return {
+          state: 'ok',
+          running,
+          memoryMb: Math.round(memoryBytes / MIB),
+          ...(maxBytes === undefined || maxBytes === 0 ? {} : { memoryMaxMb: Math.round(maxBytes / MIB) }),
+          ...(cpuCores === undefined ? {} : { cpuCores: Math.round(cpuCores * 100) / 100 }),
+        };
+      })();
+      return {
+        id: app.id,
+        name: app.name,
+        place: app.place,
+        units: app.units.map((u) => u.name),
+        ...(app.external ? { external: true } : {}),
+        ...(app.diskNote ? { diskNote: app.diskNote } : {}),
+        usage,
+      };
+    }),
+  );
+  return { apps: { state: 'ok', items }, units };
 }
 
 async function readMemory(deps: HostReadDeps): Promise<HomeResources['memory']> {
@@ -194,10 +362,20 @@ async function readScope(
       }),
       deps.readText(file('cpu.stat')),
     ]);
-    const memoryMb = Math.round(parseBytes(current, file('memory.current')) / MIB);
-    const peak =
-      peakText === undefined ? undefined : Math.round(parseBytes(peakText, file('memory.peak')) / MIB);
+    const bytes = parseBytes(current, file('memory.current'));
     const usec = parseCpuUsageUsec(cpuText);
+    // 跑着的会话不可能 0（#1992）：scope 还在、里面没进程，明说成 empty，不报 ok 的 0
+    if (bytes === 0) {
+      return {
+        usage: {
+          state: 'empty',
+          why: `${dir} 还在，但 memory.current 是 0：里面没有进程（会话已收场、scope 没回收），不算在跑`,
+        },
+        usec,
+      };
+    }
+    const memoryMb = toMb(bytes);
+    const peak = peakText === undefined ? undefined : toMb(parseBytes(peakText, file('memory.peak')));
     const cpuPercent =
       prevUsec !== undefined && usec >= prevUsec && elapsedMs > 0
         ? Math.round(((usec - prevUsec) / (elapsedMs * 1000)) * 1000) / 10
@@ -259,7 +437,13 @@ export async function readHostResources(
     });
     return { sessions: { state: 'ok', byRun }, scopes };
   };
-  const [memory, cpu, sessions] = await Promise.all([readMemory(deps), readCpu(deps, prev), readSessions()]);
+  const [memory, cpu, sessions, disk, apps] = await Promise.all([
+    readMemory(deps),
+    readCpu(deps, prev),
+    readSessions(),
+    readDisk(deps),
+    readApps(deps, prev, elapsed),
+  ]);
   return {
     resources: {
       at: at.toISOString(),
@@ -267,9 +451,22 @@ export async function readHostResources(
       memory,
       cpu: cpu.cpu,
       sessions: sessions.sessions,
+      ...(disk ? { disk } : {}),
+      ...(apps.apps ? { apps: apps.apps } : {}),
     },
-    next: { at: nowMs, ...(cpu.host ? { host: cpu.host } : {}), scopes: sessions.scopes },
+    next: {
+      at: nowMs,
+      ...(cpu.host ? { host: cpu.host } : {}),
+      scopes: sessions.scopes,
+      units: apps.units,
+    },
   };
+}
+
+/** 按目录的磁盘占用（disk-footprint.ts 的测量器）：采样器每回带上最近一回，并「戳」它一下（该测了它自己在后台测）。 */
+export interface FootprintSource {
+  latest(): DiskFootprint;
+  poke(): void;
 }
 
 export interface HostResourceSampler {
@@ -288,6 +485,8 @@ export function createHostResourceSampler(input: {
   now: () => Date;
   log?: Logger;
   everyMs?: number;
+  /** 按目录的磁盘占用（#1985）：给了就每回带上它最近一回；遍历在它自己那边跑，不在这一回里等。 */
+  footprint?: FootprintSource;
 }): HostResourceSampler {
   const everyMs = input.everyMs ?? RESOURCE_SAMPLE_MS;
   const listeners = new Set<(r: HomeResources) => void>();
@@ -296,11 +495,16 @@ export function createHostResourceSampler(input: {
   let inFlight: Promise<HomeResources> | undefined;
 
   const sample = (): Promise<HomeResources> => {
+    // 有人在看（推送一轮、主页来要）才走到这里：顺手戳一下测量器，该测了它自己在后台测
+    input.footprint?.poke();
     inFlight ??= readHostResources(input.read, memo, input.now())
       .then(({ resources, next }) => {
         memo = next;
-        last = resources;
-        return resources;
+        const withFootprint = input.footprint
+          ? { ...resources, footprint: input.footprint.latest() }
+          : resources;
+        last = withFootprint;
+        return withFootprint;
       })
       .finally(() => {
         inFlight = undefined;

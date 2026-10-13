@@ -12,6 +12,8 @@ import {
   FeishuAccessRequest,
   GroomNowRequest,
   HomeResourcesSchema,
+  ImportRepoRequest,
+  InstallAppRequest,
   ManualModelRequest,
   MovePurposeModelRequest,
   PasswordLoginRequest,
@@ -35,10 +37,30 @@ import {
 import { errMessage } from '@fleet-dao/shared/util';
 import type { z } from 'zod';
 import { PASSWORD_MAX, USERNAME_MAX } from '../lib/credentials';
+import { isStandalone } from '../lib/pwa/install';
 import { ApiError, type FleetApi, type LiveStatus } from './client';
 import type { LiveEvent } from './types';
 
 type Query = Record<string, string | number | undefined>;
+
+/** 发版预检要现读 GitHub，前端留够时间，避免还在读就被这里掐掉。 */
+export const REQUEST_TIMEOUT_MS = 90_000;
+
+const NETWORK_MESSAGE = '连不上驾驶舱后端。检查一下网络，过一会儿再试。';
+const SHAPE_MESSAGE = '驾驶舱读到的数据和这一页对不上。刷新再试；还这样就把「详情」里的原文留着。';
+
+function timeoutMessage(): string {
+  return `等了 ${REQUEST_TIMEOUT_MS / 1000} 秒还没回应，这一下已经停下。过一会儿再试。`;
+}
+
+function shapeRaw(issues: readonly { path: PropertyKey[]; message: string }[]): string {
+  return issues
+    .map((issue) => {
+      const path = issue.path.length > 0 ? issue.path.map((part) => String(part)).join('.') : '（根）';
+      return `${path}：${issue.message}`;
+    })
+    .join('\n');
+}
 
 /** EventSource.readyState 的 CLOSED（测试环境里可能没有 EventSource 这个全局）。 */
 const ES_CLOSED = 2;
@@ -66,7 +88,9 @@ const documentVisibility: PageVisibility | undefined =
   typeof document === 'undefined'
     ? undefined
     : {
-        hidden: () => document.visibilityState === 'hidden',
+        // 装好的 APP 是独立窗口、只有一个：放掉推送就收不到后台里的新提醒（系统通知靠它，#2050），所以 APP 里不当后台。
+        // 连接数那条限制只在浏览器里开了好几个标签页时才咬人
+        hidden: () => document.visibilityState === 'hidden' && !isStandalone(),
         onChange(fn) {
           document.addEventListener('visibilitychange', fn);
           return () => document.removeEventListener('visibilitychange', fn);
@@ -138,6 +162,9 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     }
     const init: RequestInit = { method, headers, credentials: 'same-origin' };
     if (body !== undefined) init.body = JSON.stringify(body);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    init.signal = ctrl.signal;
     let res: Response;
     let pending: Promise<Response> | undefined;
     try {
@@ -145,8 +172,11 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       if (rotatesSession) rotation = pending;
       res = await pending;
     } catch (err) {
-      throw new ApiError(0, 'network', `连不上驾驶舱后端：${errMessage(err)}`);
+      // 到点 abort 之后，fetch 怎么拒绝都算超时（有的环境不叫 AbortError）。
+      if (ctrl.signal.aborted) throw new ApiError(0, 'timeout', timeoutMessage(), null, errMessage(err));
+      throw new ApiError(0, 'network', NETWORK_MESSAGE, null, errMessage(err));
     } finally {
+      clearTimeout(timer);
       if (rotation === pending) rotation = undefined;
     }
     if (!res.ok) {
@@ -179,8 +209,9 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       throw new ApiError(
         res.status,
         'bad_response_shape',
-        '后端返回的数据不符合约定（shared/web-api.ts）',
+        SHAPE_MESSAGE,
         parsed.error.issues,
+        shapeRaw(parsed.error.issues),
       );
     }
     return parsed.data;
@@ -271,6 +302,23 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
         body: UpdateRepoCiPolicyRequest.parse(body),
       });
     },
+    importableRepos: () => send('GET', apiUrl(R.importableRepos.path), R.importableRepos.response),
+    async importRepo(body) {
+      return send('POST', apiUrl(R.importRepo.path), R.importRepo.response, {
+        body: ImportRepoRequest.parse(body),
+      });
+    },
+    async removeRepo(repoId) {
+      return send('DELETE', apiUrl(R.removeRepo.path, { repoId }), R.removeRepo.response);
+    },
+    async installAppOnRepo(body) {
+      return send('POST', apiUrl(R.installAppOnRepo.path), R.installAppOnRepo.response, {
+        body: InstallAppRequest.parse(body),
+      });
+    },
+    async disconnectGitHub() {
+      return send('POST', apiUrl(R.disconnectGitHub.path), R.disconnectGitHub.response);
+    },
     groomStatus: (repoId) => send('GET', apiUrl(R.groomStatus.path, { repoId }), R.groomStatus.response),
     async groomNow(repoId, body) {
       return send('POST', apiUrl(R.groomNow.path, { repoId }), R.groomNow.response, {
@@ -281,6 +329,13 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     env: () => send('GET', apiUrl(R.env.path), R.env.response),
     nodes: () => send('GET', apiUrl(R.nodes.path), R.nodes.response),
     node: (nodeId) => send('GET', apiUrl(R.node.path, { nodeId }), R.node.response),
+    localSessions: () => send('GET', apiUrl(R.localSessions.path), R.localSessions.response),
+    worktrees: () => send('GET', apiUrl(R.worktrees.path), R.worktrees.response),
+    async worktreeCleanup(body) {
+      return send('POST', apiUrl(R.worktreeCleanup.path), R.worktreeCleanup.response, {
+        body: R.worktreeCleanup.request.parse(body),
+      });
+    },
     board: (repoId) => send('GET', apiUrl(R.board.path, { repoId }), R.board.response),
     tasks: (query) =>
       send(
@@ -437,6 +492,10 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     franceRelease: (sha) =>
       send('POST', apiUrl(R.franceRelease.path), R.franceRelease.response, {
         body: R.franceRelease.request.parse({ sha }),
+      }),
+    franceReleaseRecover: (kind) =>
+      send('POST', apiUrl(R.franceReleaseRecover.path), R.franceReleaseRecover.response, {
+        body: R.franceReleaseRecover.request.parse({ kind }),
       }),
     francePreflight: () => send('POST', apiUrl(R.francePreflight.path), R.francePreflight.response),
     franceCliTools: () => send('GET', apiUrl(R.franceCliTools.path), R.franceCliTools.response),

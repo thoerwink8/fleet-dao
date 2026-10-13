@@ -10,5 +10,5 @@ export const PROCESS_HOOKS = [
   { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
   { event: 'PreToolUse', script: 'main-thread.mjs', timeout: 10 },
   { event: 'Stop', script: 'stop.mjs', timeout: 10 },
-  { event: 'UserPromptSubmit', script: 'prompt-log.mjs', timeout: 30000 },
+  { event: 'UserPromptSubmit', script: 'prompt-log.mjs', timeout: 30 },
 ];

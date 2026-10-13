@@ -324,6 +324,42 @@ describe('同一个原文再犯：重试不会变，直接停', () => {
   });
 });
 
+describe('GitHub 写操作的幂等占用还在（IN_FLIGHT，#1971 卡了 8 小时）', () => {
+  // 法国 2026-10-12 16:14:09Z 原样：开 PR 第一下没收到回执（fetch failed），幂等键留在「写到一半」；之后每次都撞同一句，
+  // 占用要 2 分钟（packages/github 的 CLAIM_STALE_AFTER_MS）没续才过期、才能接过来重写。
+  const MESSAGE =
+    '同一个写操作（github.open_pr thoerwink8/fleet-dao:fleet/1971-t01a1307a）别处正在做，稍后重试';
+  const IN_FLIGHT: FailureEvidence = {
+    source: 'openPr',
+    routeBound: false,
+    code: 'IN_FLIGHT',
+    retryable: true,
+    message: MESSAGE,
+    now: NOW,
+  };
+
+  it('不当成「认不出、原文一字不差」停下：等过占用过期（超过 2 分钟）再来，第二次照样等', () => {
+    const first = classifyFailure(IN_FLIGHT);
+    expect(first).toMatchObject({ action: 'retry', rule: 'GH3', alert: false, routeOutcome: 'neutral' });
+    expect(first.delaySeconds).toBeGreaterThan(120);
+    // 第二次原文一字不差：以前在这里就挂起了（15 秒退避根本等不到占用过期）
+    const second = classifyFailure({ ...IN_FLIGHT, attempts: { retries: 1 }, previousMessage: MESSAGE });
+    expect(second.action).toBe('retry');
+    expect(second.delaySeconds).toBeGreaterThan(120);
+  });
+
+  it('等的次数有上限：等满还撞就停下报警，写明等过几次', () => {
+    const { trail, last } = drive(IN_FLIGHT);
+    expect(trail).toEqual(['retry', 'retry', 'park']);
+    expect(last?.reason).toContain('已等过 2 次');
+  });
+
+  it('【故意造出的失败】只认端口交来的结构化码：原文里提到 IN_FLIGHT 不算', () => {
+    const v = classifyFailure({ source: 'openPr', routeBound: false, message: '测试输出里有一行 IN_FLIGHT' });
+    expect(v.rule).not.toBe('GH3');
+  });
+});
+
 describe('resume 切号停下的（org_switch，#59）和发布排空', () => {
   const SWITCH_MESSAGE = '切号：会话用户从拼车组织切到独享组织，先停下，切完接着干';
   const SWITCH = session({ code: 'org_switch', retryable: true, message: SWITCH_MESSAGE });

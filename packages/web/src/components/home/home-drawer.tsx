@@ -5,7 +5,7 @@
 // - 桌面（768–1919）：画布右上角一个按钮「要你拍的 N | 做完的」，点开浮在画布右侧的 360px 抽屉，不加遮罩，点画布空白处或按 Esc 关。
 // - ≥1920：抽屉停靠成右侧一列（不盖画布），可折叠；折叠状态记在 localStorage。
 // 有要你拍的（N>0）时按钮用「等你」色，不用红：红留给失败。
-import { CheckCheck, ChevronRight, Hand, PanelRightClose } from 'lucide-react';
+import { CheckCheck, ChevronRight, Hand, Laptop, PanelRightClose } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
@@ -20,6 +20,7 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from '../ui/sheet';
 import { DecisionCard } from './decision-card';
 import { DoneCard } from './done-card';
 import { DrawerFloatingContext } from './drawer-open';
+import { LocalSessionsPanel, useLocalBrief } from './local-sessions';
 import type { HomeDecision, HomeDone } from './types';
 
 /** 人没动过时，停靠的抽屉是不是收起：收起。 */
@@ -27,7 +28,8 @@ const DRAWER_COLLAPSED_DEFAULT = true;
 const MAX_DECISIONS = 3;
 const MAX_DONE = 6;
 
-type Tab = 'decisions' | 'done';
+/** local：本机会话（#1991），不混进画布上「在跑的」（那是引擎的单）。 */
+type Tab = 'decisions' | 'done' | 'local';
 
 function DrawerBody({
   tab,
@@ -46,9 +48,10 @@ function DrawerBody({
 }) {
   const shown = decisions.slice(0, MAX_DECISIONS);
   const more = decisions.length - shown.length;
-  const tabs: { id: Tab; label: string; count: number }[] = [
+  const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: 'decisions', label: '要你拍的', count: decisions.length },
     { id: 'done', label: '做完的', count: Math.min(done.length, MAX_DONE) },
+    { id: 'local', label: '本机会话' },
   ];
   return (
     <>
@@ -65,17 +68,19 @@ function DrawerBody({
               aria-controls={`home-drawer-panel-${t.id}`}
               onClick={() => onTab(t.id)}
               className={cn(
-                'relative flex h-10 items-center gap-1.5 rounded-t-md px-3 text-body text-muted-foreground transition-colors hover:text-foreground md:h-9',
+                'relative flex h-11 items-center gap-1.5 rounded-t-md px-3 text-body text-muted-foreground transition-colors hover:text-foreground md:h-9',
                 active && 'font-medium text-foreground',
               )}
             >
               {t.label}
-              <Tag
-                tone={t.id === 'decisions' && t.count > 0 ? 'human' : 'neutral'}
-                className="num rounded-full"
-              >
-                {t.count}
-              </Tag>
+              {t.count === undefined ? null : (
+                <Tag
+                  tone={t.id === 'decisions' && t.count > 0 ? 'human' : 'neutral'}
+                  className="num rounded-full"
+                >
+                  {t.count}
+                </Tag>
+              )}
               {active ? <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-brand" /> : null}
             </button>
           );
@@ -130,6 +135,8 @@ function DrawerBody({
               </p>
             ) : null}
           </>
+        ) : tab === 'local' ? (
+          <LocalSessionsPanel />
         ) : (
           <>
             <p className="mb-3 px-1 text-meta text-muted-foreground">最近合进去的 PR。</p>
@@ -191,7 +198,39 @@ function DrawerButton({ count, open, onOpen }: { count: number; open: boolean; o
         <CheckCheck className="size-3.5" aria-hidden />
         做完的
       </button>
+      <LocalButton onOpen={() => onOpen('local')} />
     </div>
+  );
+}
+
+/** 抽屉按钮第三段：「本机 2 在跑」「本机没上报」，点开本机会话那一页（#1991）。 */
+function LocalButton({
+  onOpen,
+  tall = false,
+  className,
+}: {
+  onOpen(): void;
+  tall?: boolean;
+  className?: string;
+}) {
+  const brief = useLocalBrief();
+  return (
+    <button
+      type="button"
+      data-local-button
+      data-tone={brief.tone}
+      aria-label={`${brief.text}，打开本机会话`}
+      onClick={onOpen}
+      className={cn(
+        'flex items-center gap-1.5 border-l px-3 text-body transition-colors hover:bg-accent focus-visible:z-10',
+        tall ? 'h-11' : 'h-8',
+        brief.tone ? inkClass[brief.tone] : 'text-muted-foreground',
+        className,
+      )}
+    >
+      <Laptop className="size-3.5" aria-hidden />
+      {brief.text}
+    </button>
   );
 }
 
@@ -270,6 +309,14 @@ export function HomeDrawer({
           </span>
           <ChevronRight className="size-4 shrink-0 opacity-60" aria-hidden />
         </button>
+        <LocalButton
+          tall
+          onOpen={() => {
+            setTab('local');
+            setFloating(true);
+          }}
+          className="shrink-0 border-b border-l-0 px-4"
+        />
         {afterStrip}
         {children}
         <Sheet open={floating} onOpenChange={setFloating}>

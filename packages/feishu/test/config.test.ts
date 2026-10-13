@@ -30,11 +30,11 @@ describe('配置', () => {
       publicUrl: 'https://cockpit.example.test',
       teamChatId: 'oc_team',
       testChatId: null,
-      ackEmoji: 'Get',
     });
-    // 旧推送、盘面那两项退役了：配置里不再有
+    // 旧推送、盘面那两项和收话的「收到」表情退役了：配置里不再有
     expect(c).not.toHaveProperty('askBudgetPerDay');
     expect(c).not.toHaveProperty('boardRefreshMs');
+    expect(c).not.toHaveProperty('ackEmoji');
     expect(c.founders).toEqual([
       { openId: 'ou_founder_a', name: '甲' },
       { openId: 'ou_founder_b', name: '乙' },
@@ -66,7 +66,6 @@ describe('配置', () => {
       FEISHU_TEAM_CHAT_ID: 'team',
       FEISHU_TEST_CHAT_ID: 'test',
       FEISHU_FOUNDERS: 'founder-a, ou_b, ou_b',
-      FEISHU_ACK_EMOJI: '收到',
     });
     expect(p).toEqual([
       'FEISHU_APP_ID 应以 cli_ 开头（飞书开发者后台「凭证与基础信息」里的 App ID）',
@@ -77,7 +76,6 @@ describe('配置', () => {
       'FEISHU_TEST_CHAT_ID 应以 oc_ 开头',
       'FEISHU_FOUNDERS 里「founder-a」不是 open_id（应以 ou_ 开头）',
       'FEISHU_FOUNDERS 里 ou_b 写了两次',
-      'FEISHU_ACK_EMOJI 不像飞书的 emoji_type：「收到」',
     ]);
   });
 

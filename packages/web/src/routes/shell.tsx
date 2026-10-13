@@ -17,6 +17,8 @@ import { Button } from '../components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '../components/ui/sheet';
 import { useLocalState } from '../lib/hooks';
 import { useNodeSelection } from '../lib/node';
+import { useAppBadge, useBadgeCount } from '../lib/pwa/hooks';
+import { showSystemNotification } from '../lib/pwa/notify';
 import { cn } from '../lib/utils';
 import { useNavRoom, usePhone } from '../lib/viewport';
 
@@ -93,6 +95,8 @@ function useNoticeToasts() {
         description: n.body,
         action: { label: '去看看', onClick: () => navigate(n.link ?? '/notifications') },
       });
+      // 窗口不在前台（APP 开着但切走了）时再弹一条系统通知；在前台只有上面的 toast。没授权、不支持都是不弹
+      showSystemNotification(n, navigate);
     }
   }, [data, navigate]);
 }
@@ -120,8 +124,9 @@ function Frame() {
   const { data: me } = useMe();
   useLiveSync(Boolean(me));
   useNoticeToasts();
+  useAppBadge(useBadgeCount());
 
-  // 看板多机：选了远程环境（?node=）时，只有主页和法国页读得到它的快照；别的页读的全是本台的库，整页明说、不渲染（也就不去读）
+  // 看板多机：选了远程环境（?node=）时，只有主页、法国页和资源页读得到它的快照；别的页读的全是本台的库，整页明说、不渲染（也就不去读）
   const { nodeId } = useNodeSelection();
   const onlyLocal = nodeId !== null && !isRemotePage(location.pathname);
 

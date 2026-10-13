@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./checks-red": "./src/checks-red.ts",
     "./flow-purposes": "./src/flow-purposes.ts",
     "./task-redo": "./src/task-redo.ts",
     "./task-signals": "./src/task-signals.ts",
