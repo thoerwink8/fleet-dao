@@ -2,7 +2,7 @@
 // 以登记为准而不是以跑过的记录为准：一次都没跑过的任务没有记录，只看记录就永远看不见它（没跑成 ≠ 没问题）。
 import type { ScheduleOutcome } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { and, asc, desc, eq, inArray, isNull, lt } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, lt } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { SCHEDULE_OUTCOMES } from '../schema/enums.ts';
 import { scheduledJobs, scheduleRuns } from '../schema/index.ts';
@@ -88,6 +88,16 @@ export async function finishScheduleRun(
     .where(eq(scheduleRuns.id, id))
     .returning({ id: scheduleRuns.id });
   if (updated.length === 0) throw new Error(`没有这次定时任务记录：${id}`);
+}
+
+/** 这一时刻之后拉单各轮发现的候选数。含还在跑的（found 是 null）。空闲升级靠它判断这一小时没有候选。 */
+export async function intakeFoundSince(db: Db, since: Date): Promise<(number | null)[]> {
+  const rows = await db
+    .select({ found: scheduleRuns.found })
+    .from(scheduleRuns)
+    .where(and(eq(scheduleRuns.job, 'intake'), gte(scheduleRuns.startedAt, since)))
+    .orderBy(asc(scheduleRuns.startedAt));
+  return rows.map((row) => row.found);
 }
 
 /** 进程被发版或重启腰斩、已经记下开始却没人收尾时，起来补记写的原因。 */
