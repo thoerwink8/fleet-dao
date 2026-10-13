@@ -421,6 +421,74 @@ describe('发版卡里的 action（按钮状态）', () => {
     const c = await readCard(setup({ france: trainState('done') }).h);
     expect(c.action.last).toMatchObject({ state: 'done', target: expect.stringContaining('提交') });
   });
+
+  it('九步时间线（#2026）：进度记录里的 phase、steps、waiting、laggards 原样给页面；老记录没有 steps 时九步都是 null', async () => {
+    const steps = [
+      '2026-10-07T11:00:00.000Z',
+      '2026-10-07T11:00:01.000Z',
+      '2026-10-07T11:00:02.000Z',
+      '2026-10-07T11:00:05.000Z',
+    ];
+    const c = await readCard(
+      setup({
+        france: trainState('running', {
+          phase: 3,
+          startedAt: steps[0],
+          steps: [...steps, null, null, null, null, null],
+          waiting: '等法国在跑的 1 个会话收尾（execute(abcdef12)）',
+          laggards: [],
+        }),
+      }).h,
+    );
+    expect(c.action.last.timeline).toEqual({
+      phase: 3,
+      startedAt: steps[0],
+      steps: [...steps, null, null, null, null, null],
+      waiting: '等法国在跑的 1 个会话收尾（execute(abcdef12)）',
+      laggards: [],
+    });
+    const old = await readCard(setup({ france: trainState('running') }).h);
+    expect(old.action.last.timeline).toMatchObject({ phase: 4, steps: Array(9).fill(null), waiting: null });
+  });
+
+  it('发后体检（#2026）：last-request.json 里同一个提交的 check 给页面；别的提交的不给（那是另一趟）', async () => {
+    const check = {
+      ok: false,
+      items: [
+        { name: '目标提交在用', ok: true, text: '法国在用的就是 2005b290aaaa' },
+        { name: '没有新异常', ok: false, text: '发版后新出现 1 条卡住报警' },
+      ],
+      at: '2026-10-07T11:40:00.000Z',
+    };
+    const lastText = (sha: string) =>
+      JSON.stringify({
+        v: 1,
+        at: '2026-10-07T11:40:00.000Z',
+        outcome: 'done',
+        sha,
+        by: '创始人',
+        why: null,
+        check,
+      });
+    const same = await readCard(
+      setup({ request: request({ readLast: async () => lastText(HEAD) }), france: trainState('done') }).h,
+    );
+    expect(same.action.last).toMatchObject({ state: 'done', check });
+    const other = await readCard(
+      setup({ request: request({ readLast: async () => lastText(LIVE) }), france: trainState('done') }).h,
+    );
+    expect(other.action.last.check).toBeNull();
+    // 认不出的 check（缺字段）不给，不拿半份冒充体检过
+    const broken = await readCard(
+      setup({
+        request: request({
+          readLast: async () => JSON.stringify({ outcome: 'done', sha: HEAD, check: { ok: true } }),
+        }),
+        france: trainState('done'),
+      }).h,
+    );
+    expect(broken.action.last.check).toBeNull();
+  });
 });
 
 describe('小零件', () => {

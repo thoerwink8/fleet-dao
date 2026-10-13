@@ -101,6 +101,8 @@ describe('确认发布：后端慢时连点只发一次，等的时候转圈、�
     fireEvent.click(await screen.findByRole('button', { name: '发布到法国' }));
     const dialog = await screen.findByRole('alertdialog');
     const ok = within(dialog).getByRole('button', { name: '确认发布' });
+    // 框里先现跑一遍预检（#2026），跑完没有卡住项确认键才能点
+    await waitFor(() => expect(ok.hasAttribute('disabled')).toBe(false));
     fireEvent.click(ok);
     fireEvent.click(ok);
     await waitFor(() => expect(ok.getAttribute('aria-busy')).toBe('true'));

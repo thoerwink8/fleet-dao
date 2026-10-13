@@ -12,7 +12,12 @@
 //   读不到的一律按拒绝，不当成「没问题」。
 // - 输出和记下来的字不带令牌；请求里的「谁点的」只收字母数字和 _.@ -，最长 64。
 // - 所有真的起进程、读文件、连网、睡觉都经 io：deploy/test/release-request.test.mjs 换成假的，一条拒绝路径一条故意造出失败的测试。
-// - 退出码：0 做完了；1 被拒（或没有请求）；2 没做成（命令失败）；3 卡住（等收尾到点还有会话在跑，再点一次从头走，现场没动）。
+// - 退出码：0 做完了、发后体检通过；1 被拒（或没有请求）；2 没做成（命令失败）；3 卡住（等收尾到点还有会话在跑，再点一次从头走，现场没动；
+//   或发完了、开关恢复了，但发后体检没通过）。
+// - 发后体检（#2026）：第 0 步记发版前异常基线（开着的卡住报警、/healthz 不好的项）、第 2 步记各仓接活开关；第 6 步核目标在用、/healthz、
+//   没有新异常（重启打断的几类 15 分钟内重试）、再跑一遍预检（已是最新）；第 7 步恢复后核引擎总开关和各仓接活开关和发版前一致。
+//   结论写进 release-train.json 的 check 和 last-request.json；开始、成功、卡住、失败各推飞书一条（engine.env 的 FLEET_FEISHU_WEBHOOK，
+//   和引擎推主线红同一个群机器人）。
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync } from 'node:fs';
 import { ciVerdict } from '../auto-release/lib.mjs';
 import { SESSION_WAIT_MS } from './session-wait.mjs';
@@ -47,8 +52,26 @@ export const LIMITS = {
   deployMs: 3 * 60_000,
   checkMs: 5 * 60_000,
   stepMs: 2 * 60_000,
+  /** 发后体检里「发布重启必然打断、条件会自己消失」的那几类（VERIFY_RETRY_PREFIXES、/healthz、读主线）最多重试多久（#2026）。 */
+  verifyMs: 15 * 60_000,
 };
+/** 退出码：3 也用于「发完了、开关恢复了，但发后体检没通过」（要人看，单元不显示 failed）。 */
 export const EXIT = { done: 0, refused: 1, failed: 2, blocked: 3 };
+
+/**
+ * 发后体检比「发版前异常基线」时，新出现的提醒里这几类是发布重启必然打断、条件过去就自己撤的：
+ * 每小时对账等定时任务被重启打断（看门狗 watchdog:job:*）、看门狗没按期跑完（watchdog-down:*）、跟不上主线（deploy-lag:*）。
+ * 在 LIMITS.verifyMs（15 分钟）里每 pollMs 重读一次，撤了就算过；到点还在才判没通过（指挥官版 2026-10-13 踩过：立刻判卡住是误报）。
+ */
+export const VERIFY_RETRY_PREFIXES = ['watchdog:job:', 'watchdog-down:', 'deploy-lag:'];
+
+/**
+ * 不算「新异常」的提醒：不是卡住报警这一级的（要你拍、日报）、任务自己挂起的（<工作流>:park:<n>，引擎照常干活的结果，
+ * 同指挥官版的 KIND_TASK_PARK）、旧提醒的再提醒（remind:*，原提醒在基线里就在）。
+ */
+export function ignoredAlert(a) {
+  return a.level !== 'alert' || /:park:/.test(a.key) || a.key.startsWith('remind:');
+}
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
 const WHO = /^[\p{L}\p{N}_.@ -]{1,64}$/u;
@@ -197,6 +220,88 @@ export function parseDrain(text, enginePid, serviceActive) {
 /** 等收尾报「在跑谁」的写法：和 release.sh 的 engine_drain_status 一致，环节（编号前 8 位）。 */
 export const sessionName = (s) => `${s.stage || '会话'}(${(s.runId || '').slice(0, 8)})`;
 
+/**
+ * `fleet-api alert show --json` 的输出（packages/api/src/alert-cli.ts 的 show：{ alerts: [{ id, key, level, title }], truncated }）。
+ * 认不出回 { ok: false, why }，不当成「没有提醒」。
+ */
+export function parseAlerts(r) {
+  if (r.error || r.status !== 0) {
+    return { ok: false, why: `fleet-api alert show 没跑成：${tail(r.error ?? (r.stderr || r.stdout))}` };
+  }
+  let o;
+  try {
+    o = JSON.parse(String(r.stdout).trim().split('\n').at(-1) ?? '');
+  } catch {
+    return { ok: false, why: `fleet-api alert show --json 的输出不是 JSON：${tail(r.stdout)}` };
+  }
+  if (o === null || typeof o !== 'object' || !Array.isArray(o.alerts)) {
+    return { ok: false, why: 'fleet-api alert show --json 的输出里没有 alerts 列表' };
+  }
+  const alerts = [];
+  for (const a of o.alerts) {
+    if (!a || typeof a.key !== 'string' || typeof a.level !== 'string') {
+      return { ok: false, why: 'fleet-api alert show --json 里有一条提醒认不出（缺 key 或 level）' };
+    }
+    alerts.push({ key: a.key, level: a.level, title: typeof a.title === 'string' ? a.title : a.key });
+  }
+  return { ok: true, alerts, truncated: o.truncated === true };
+}
+
+/**
+ * 后端 /healthz 的回话（packages/api/src/health.ts：{ ok, checks: { 名字: { ok, message? } } }，全好 200、有项不好 503；
+ * 同 release.sh 的 report_items）。回 { ok: true, bad: [{ name, why }] } 或读不到 { ok: false, why }。
+ */
+export function parseHealthz(r) {
+  if (r.error) return { ok: false, why: `/healthz 连不上：${tail(r.error)}` };
+  if (r.status !== 200 && r.status !== 503)
+    return { ok: false, why: `/healthz 回 HTTP ${r.status}，不是健康报告` };
+  let o;
+  try {
+    o = JSON.parse(String(r.body));
+  } catch {
+    return { ok: false, why: '/healthz 回的不是 JSON' };
+  }
+  const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
+  if (!isObj(o) || typeof o.ok !== 'boolean' || !isObj(o.checks)) {
+    return { ok: false, why: '/healthz 回的不是健康报告（缺 ok 或 checks）' };
+  }
+  const bad = [];
+  for (const [name, v] of Object.entries(o.checks)) {
+    if (isObj(v) && v.ok === true) continue;
+    bad.push({ name, why: isObj(v) && typeof v.message === 'string' && v.message ? v.message : '没给原因' });
+  }
+  return { ok: true, bad };
+}
+
+/** 各仓「让 AI 接活」开关的读数（psql -tA 的「owner/name|since」一行一个仓，since 空＝关着）→ { 仓: since | null }。 */
+export function parseRepoSwitches(text) {
+  const out = {};
+  for (const raw of String(text).split('\n')) {
+    const line = raw.trim();
+    if (line === '') continue;
+    const at = line.lastIndexOf('|');
+    if (at <= 0) return { ok: false, why: `接活开关的读数认不出：${line.slice(0, 80)}` };
+    const repo = line.slice(0, at);
+    const since = line.slice(at + 1).trim();
+    out[repo] = since === '' ? null : since;
+  }
+  return { ok: true, repos: out };
+}
+
+/** 两份接活开关读数哪几个仓不一样（同一时刻不同写法算同一个；关着只等于关着）。 */
+export function repoSwitchDiff(before, now) {
+  const same = (a, b) => (a === null || b === null ? a === b : Date.parse(a) === Date.parse(b));
+  const text = (v) => (v === null ? '关着' : '开着');
+  const diff = [];
+  for (const repo of new Set([...Object.keys(before), ...Object.keys(now)])) {
+    if (!(repo in now)) diff.push(`${repo}（发版前${text(before[repo])}，现在库里没有了）`);
+    else if (!(repo in before)) diff.push(`${repo}（发版前没有，现在${text(now[repo])}）`);
+    else if (!same(before[repo], now[repo]))
+      diff.push(`${repo}（发版前${text(before[repo])}，现在${text(now[repo])}）`);
+  }
+  return diff;
+}
+
 // —— 一次请求 ——
 
 const iso = (io) => io.now().toISOString();
@@ -272,6 +377,14 @@ function newState(io, req) {
     laggards: [],
     release: {},
     why: null,
+    /** 每一步从什么时候开始（下标同 PHASES；没走到的是 null）：驾驶舱的九步时间线读它（#2026）。 */
+    steps: PHASES.map(() => null),
+    /** 这一步此刻在等什么（一句话；不在等的是 null）：驾驶舱时间线「在等什么」。 */
+    waiting: null,
+    /** 发后体检（第 6 步验证 + 第 7 步恢复后的开关核对）：{ ok, items: [{ name, ok, text }], at }；还没体检是 null。 */
+    check: null,
+    /** 推过的飞书（开始、成功、卡住、失败）：{ kind, ok, why? }。 */
+    pushes: [],
     via: 'cockpit',
     requestedBy: req.by,
     requestedAt: req.at,
@@ -313,15 +426,75 @@ async function engineOn(io, reason) {
 
 const say = (io, text) => io.out(text);
 
+/** 此刻在等什么：写进进度（页面时间线读），同一句不重复写。 */
+function waitOn(io, state, text) {
+  if (state.waiting === text) return;
+  state.waiting = text;
+  io.writeState(state);
+}
+
+async function readAlerts(io) {
+  const r = await io.fleetApi('alert show --json', io.limits.stepMs);
+  return parseAlerts(r);
+}
+
+/**
+ * 0 预检：请求本身在进来之前已经核过（preflight）。这里记「发版前异常基线」：开着的提醒的键、/healthz 里不好的项，
+ * 第 6 步只拦基线里没有的（同指挥官版比 key 的集合，#1740）。提醒读不到就没法比：没成（什么都还没动）。
+ * /healthz 读不到不拦（后端可能正是要靠这次发版修），记下原因，第 6 步对它按「之前全没好过」比：之后哪项不好都算新的。
+ */
+async function phasePreflight(io, state) {
+  const alerts = await readAlerts(io);
+  if (!alerts.ok) return failed(`发版前异常基线读不到（什么都还没动）：${alerts.why}`);
+  let health;
+  try {
+    health = parseHealthz(await io.healthz());
+  } catch (e) {
+    health = { ok: false, why: e instanceof Error ? e.message : String(e) };
+  }
+  state.baseline = {
+    at: iso(io),
+    alerts: alerts.alerts.filter((a) => !ignoredAlert(a)).map((a) => a.key),
+    health: health.ok ? health.bad.map((b) => b.name) : [],
+    healthWhy: health.ok ? null : health.why,
+  };
+  io.writeState(state);
+  say(
+    io,
+    `预检：发版前开着的卡住报警 ${state.baseline.alerts.length} 条、/healthz 不好的 ${health.ok ? `${health.bad.length} 项` : `读不到（${health.why}）`}（记作基线，发后体检只拦新增）`,
+  );
+  return { ok: true };
+}
+
 async function phasePauseLocal(io) {
   say(io, '暂停本机：跳过（法国上没有指挥官本机的工人，本机暂停标记不适用）');
   return { ok: true };
 }
 
+/**
+ * 各仓「让 AI 接活」开关发版前的样子：这个脚本和 release.sh 都不动它们，发后体检核对「没被动过」。
+ * 上一回停下时记过的带过来（那时才是真的发版前）；读不到就没法核对：没成（只读过，什么都还没动）。
+ */
+async function recordRepos(io, state) {
+  if (state.before?.repos && typeof state.before.repos === 'object')
+    return { ok: true, repos: state.before.repos };
+  let r;
+  try {
+    r = await io.repoSwitches();
+  } catch (e) {
+    r = { ok: false, why: e instanceof Error ? e.message : String(e) };
+  }
+  if (!r.ok) return { ok: false, why: `各仓接活开关发版前的样子读不到（发后没法核对，没往下走）：${r.why}` };
+  return r;
+}
+
 async function phasePauseFrance(io, state) {
   const now = await engineRead(io);
   if (!now.ok) return failed(now.why);
+  const repos = await recordRepos(io, state);
+  if (!repos.ok) return failed(repos.why);
   if (state.before?.master === true && !now.on) {
+    state.before = { ...state.before, repos: repos.repos };
     // 上一回点发布停在「卡住」或「没成」、总开关是我们关的：发版前开着的已经记在上一回的进度记录里（runRequest 带过来的），
     // 别拿现在的「关着」盖掉它，不然这一回发完会把本来开着的引擎当成「本来就关着」留在关
     io.writeMarker({ since: iso(io), target: state.target.value.slice(0, 12), by: 'release-request' });
@@ -331,12 +504,13 @@ async function phasePauseFrance(io, state) {
     return { ok: true };
   }
   if (!now.on) {
-    state.before = { master: false, repos: null, recordedAt: iso(io) };
+    state.before = { master: false, repos: repos.repos, recordedAt: iso(io) };
     io.writeState(state);
     say(io, '暂停法国：跳过（引擎总开关本来就关着，没什么要暂停的）');
     return { ok: true };
   }
-  state.before = { master: true, repos: null, recordedAt: iso(io) };
+  state.before = { master: true, repos: repos.repos, recordedAt: iso(io) };
+  waitOn(io, state, '关引擎总开关');
   io.writeState(state);
   const off = await engineOff(io, `发版前暂停（驾驶舱点击发布，目标 ${state.target.value.slice(0, 12)}）`);
   if (!off.ok) return failed(off.why);
@@ -352,10 +526,11 @@ async function phasePauseFrance(io, state) {
  * 起会话过了闸才登记（track），额度探针、session-org 这类辅助命令根本不登记，所以常驻的探针 scope 数不进来（#2002）。
  * 不再数 fleet-agent- scope：那会把常驻的额度探针算成「在干的活」，探针不收尾，每次发布都等满超时（2026-10-13）。读不到不当成 0。
  */
-async function phaseWait(io) {
+async function phaseWait(io, state) {
   const started = io.now().getTime();
   let last = '';
   for (;;) {
+    if (last === '') waitOn(io, state, '读引擎手上在干的会话');
     const s = await io.drain();
     if (!s.ok) return failed(`法国在跑几个会话读不到：${s.why}`);
     if (s.engineDown) {
@@ -370,6 +545,7 @@ async function phaseWait(io) {
     const line = `等收尾：法国在跑 ${s.running.length} 个会话（${names.join(' ')}）`;
     if (line !== last) say(io, line);
     last = line;
+    waitOn(io, state, `等法国在跑的 ${s.running.length} 个会话收尾（${names.join(' ')}）`);
     const waited = io.now().getTime() - started;
     if (waited >= io.limits.sessionsMs) {
       const laggards = names.map((n) => `会话 ${n}`);
@@ -389,9 +565,11 @@ async function phaseRelease(io, state) {
   const sha = state.target.value;
   state.release = { ...(state.release ?? {}), started: true };
   io.writeState(state);
+  waitOn(io, state, `部署检出快进到 ${sha.slice(0, 12)}`);
   const prep = await io.prepareCheckout(sha);
   if (!prep.ok) return failed(`部署检出没准备好：${prep.why}`);
   say(io, `发版：跑 release.sh ${sha.slice(0, 12)}（${state.founderOk}）`);
+  waitOn(io, state, `release.sh ${sha.slice(0, 12)} 在跑（最多 ${minutes(io.limits.releaseMs)} 分钟）`);
   const r = await io.runRelease(sha, io.limits.releaseMs);
   state.target.sha = sha;
   if (r.error || r.status === null) {
@@ -410,6 +588,7 @@ async function phaseRelease(io, state) {
 async function phaseDeploy(io, state) {
   const sha = state.target.value;
   const started = io.now().getTime();
+  waitOn(io, state, `等法国在用的切到 ${sha.slice(0, 12)}`);
   for (;;) {
     const h = await io.historyLast();
     if (!h.ok) return failed(`法国发布历史读不到：${h.why}`);
@@ -428,6 +607,7 @@ async function phaseDeploy(io, state) {
     }
     await io.sleep(io.limits.pollMs);
   }
+  waitOn(io, state, 'release.sh --check 在跑');
   const chk = await io.releaseCheck(io.limits.checkMs);
   if (chk.error || chk.status === null)
     return failed(`release.sh --check 没跑成：${tail(chk.error ?? chk.stderr)}`);
@@ -435,23 +615,202 @@ async function phaseDeploy(io, state) {
   return { ok: true };
 }
 
-async function phaseVerify(io) {
-  const eng = await engineRead(io);
-  if (!eng.ok) return failed(eng.why);
-  say(io, `验证：release.sh --check 没有红；法国引擎总开关${eng.on ? '开着' : '关着'}`);
+/** 体检的一项：name 是页面上「没通过：哪几项」列的名字；retry＝发布重启必然打断、过一会儿会自己好的，在窗口里重试。 */
+const item = (name, ok, text, retry = false) => ({ name, ok, text, retry });
+
+/** 发后体检第一段（第 6 步，引擎还关着时）：目标在用、/healthz、异常基线、再跑一遍预检。每一项读不到都算没通过，不当成没事。 */
+async function verifyOnce(io, state) {
+  const sha = state.target.value;
+  const items = [];
+
+  // ① 目标提交已在用（发布目录的 current 链接）
+  let cur;
+  try {
+    cur = await io.currentRelease();
+  } catch (e) {
+    cur = { ok: false, why: e instanceof Error ? e.message : String(e) };
+  }
+  if (!cur.ok) items.push(item('目标提交在用', false, `法国在用的提交读不到：${cur.why}`));
+  else if (cur.sha !== sha)
+    items.push(
+      item(
+        '目标提交在用',
+        false,
+        `法国在用的是 ${String(cur.sha).slice(0, 12)}，不是目标 ${sha.slice(0, 12)}`,
+      ),
+    );
+  else items.push(item('目标提交在用', true, `法国在用的就是 ${sha.slice(0, 12)}`));
+
+  // ② /healthz：读得到，且没有发版前没坏、现在坏了的项
+  let h;
+  try {
+    h = parseHealthz(await io.healthz());
+  } catch (e) {
+    h = { ok: false, why: e instanceof Error ? e.message : String(e) };
+  }
+  if (!h.ok) items.push(item('/healthz', false, h.why, true));
+  else {
+    const known = new Set(state.baseline?.health ?? []);
+    const fresh = h.bad.filter((b) => !known.has(b.name));
+    items.push(
+      fresh.length === 0
+        ? item(
+            '/healthz',
+            true,
+            h.bad.length === 0 ? '全好' : `没有新坏的项（发版前就不好的 ${h.bad.length} 项照旧）`,
+          )
+        : item(
+            '/healthz',
+            false,
+            `发版后新坏了：${fresh.map((b) => `${b.name}（${b.why}）`).join('；')}`,
+            true,
+          ),
+    );
+  }
+
+  // ③ 异常基线：开着的卡住报警，基线里没有的就是新出现的；重启必然打断的那几类在窗口里重试
+  const a = await readAlerts(io);
+  if (!a.ok) items.push(item('没有新异常', false, `开着的提醒读不到：${a.why}`, true));
+  else {
+    const known = new Set(state.baseline?.alerts ?? []);
+    const fresh = a.alerts.filter((x) => !ignoredAlert(x) && !known.has(x.key));
+    const transient = fresh.filter((x) => VERIFY_RETRY_PREFIXES.some((p) => x.key.startsWith(p)));
+    const hard = fresh.filter((x) => !transient.includes(x));
+    const list = (xs) =>
+      xs
+        .slice(0, 8)
+        .map((x) => `${x.title}（${x.key}）`)
+        .join('；');
+    if (hard.length > 0)
+      items.push(item('没有新异常', false, `发版后新出现 ${hard.length} 条卡住报警：${list(hard)}`));
+    else if (transient.length > 0)
+      items.push(
+        item(
+          '没有新异常',
+          false,
+          `发布重启打断的 ${transient.length} 条还没撤（${minutes(io.limits.verifyMs)} 分钟内重试）：${list(transient)}`,
+          true,
+        ),
+      );
+    else
+      items.push(
+        item('没有新异常', true, `比发版前没有新的卡住报警（开着的 ${a.alerts.length} 条都在基线里或不算）`),
+      );
+  }
+
+  // ④ 再跑一遍预检：主线头应就是刚发的（已是最新、没有要发的）；发版期间又合进来的只提一句，不算这次发版的问题
+  let m;
+  try {
+    m = await io.mainHead(sha);
+  } catch (e) {
+    m = { ok: false, why: e instanceof Error ? e.message : String(e) };
+  }
+  if (!m.ok) items.push(item('再跑一遍预检', false, `主线头读不到：${m.why}`, true));
+  else if (m.sha === sha) items.push(item('再跑一遍预检', true, '已是最新、没有要发的'));
+  else if (m.behind > 0)
+    items.push(
+      item(
+        '再跑一遍预检',
+        true,
+        `这次要发的已在用；发版期间主线又合进了 ${m.behind} 个提交（主线头 ${m.sha.slice(0, 12)}），下一次再发`,
+      ),
+    );
+  else
+    items.push(
+      item(
+        '再跑一遍预检',
+        false,
+        `主线头 ${String(m.sha).slice(0, 12)} 和刚发的 ${sha.slice(0, 12)} 不是前后关系`,
+      ),
+    );
+  return items;
+}
+
+/**
+ * 6 验证（发后体检第一段）：verifyOnce 不全过、且没过的都是 retry 类时，每 pollMs 再查一次，最多 LIMITS.verifyMs；
+ * 到点还没过的照实记进 state.check。这一步自己不拦流程：版本已经发出去了，恢复（第 7 步）照走，开关不因体检没过留在关；
+ * 体检结论在最后汇总（runRequest），没通过推飞书「卡住」、退出码 3。
+ */
+async function phaseVerify(io, state) {
+  const started = io.now().getTime();
+  let items;
+  for (;;) {
+    items = await verifyOnce(io, state);
+    const bad = items.filter((x) => !x.ok);
+    if (bad.length === 0 || bad.some((x) => !x.retry)) break;
+    const waited = io.now().getTime() - started;
+    if (waited >= io.limits.verifyMs) break;
+    waitOn(
+      io,
+      state,
+      `发后体检重试（重启打断的，已等 ${minutes(waited)} 分钟，最多 ${minutes(io.limits.verifyMs)} 分钟）：${bad.map((x) => x.name).join('、')}`,
+    );
+    await io.sleep(io.limits.pollMs);
+  }
+  state.check = { ok: items.every((x) => x.ok), items: items.map(({ retry, ...x }) => x), at: iso(io) };
+  io.writeState(state);
+  for (const x of items) say(io, `体检：${x.ok ? '[通过]' : '[没过]'} ${x.name}：${x.text}`);
   return { ok: true };
+}
+
+/** 发后体检第二段（恢复之后）：引擎总开关、各仓接活开关和发版前一致。读不到算没通过。 */
+async function checkSwitches(io, state) {
+  const before = state.before ?? {};
+  const items = [];
+  const eng = await engineRead(io);
+  if (!eng.ok) items.push(item('引擎总开关和发版前一致', false, `读不到：${eng.why}`));
+  else if (eng.on !== before.master)
+    items.push(
+      item(
+        '引擎总开关和发版前一致',
+        false,
+        `发版前${before.master ? '开着' : '关着'}，现在${eng.on ? '开着' : '关着'}`,
+      ),
+    );
+  else items.push(item('引擎总开关和发版前一致', true, `发版前${before.master ? '开着' : '关着'}，现在一样`));
+
+  let r;
+  try {
+    r = await io.repoSwitches();
+  } catch (e) {
+    r = { ok: false, why: e instanceof Error ? e.message : String(e) };
+  }
+  if (!before.repos || typeof before.repos !== 'object')
+    items.push(item('各仓接活开关没被动过', false, '发版前没记下各仓接活开关，没法核对'));
+  else if (!r.ok) items.push(item('各仓接活开关没被动过', false, `现在读不到：${r.why}`));
+  else {
+    const diff = repoSwitchDiff(before.repos, r.repos);
+    const n = Object.keys(r.repos).length;
+    items.push(
+      diff.length === 0
+        ? item('各仓接活开关没被动过', true, `${n} 个仓和发版前一样（发版不动它们）`)
+        : item('各仓接活开关没被动过', false, `和发版前不一样：${diff.join('；')}`),
+    );
+  }
+  const prev = state.check ?? { items: [] };
+  const all = [...prev.items, ...items.map(({ retry, ...x }) => x)];
+  state.check = { ok: all.every((x) => x.ok), items: all, at: iso(io) };
+  io.writeState(state);
+  for (const x of items) say(io, `体检：${x.ok ? '[通过]' : '[没过]'} ${x.name}：${x.text}`);
 }
 
 /**
  * 7 恢复：清暂停标记；引擎总开关按第 2 步记下的发版前状态还原（决定 0032 第 4 条、#1256）：发版前开着的开回、关着的保持关。
  * 开回去经 fleet-api engine on（写操作记录，原因写明是发版后恢复）。没恢复成（读不到、开不回去、读回来还是关着）是「没成」：
  * 状态记 failed、页面上红、退出码 2，不当成成功；发版已经发出去了（后端见在用的已是它就不收第二次点击），所以到环境页点开总开关。
- * 各仓「让 AI 接活」开关这个脚本没有暂停过、release.sh 也不再动它们，进度记录里 repos 记 null，原样留着。
+ * 各仓「让 AI 接活」开关这个脚本没有暂停过、release.sh 也不再动它们：第 2 步记下发版前的样子（before.repos），
+ * 恢复完由 checkSwitches 核对总开关和它们都和发版前一致（发后体检第二段，#2026）。
  */
 async function phaseRestore(io, state) {
+  const r = await restoreMaster(io, state);
+  if (r.ok) await checkSwitches(io, state);
+  return r;
+}
+
+async function restoreMaster(io, state) {
   io.clearMarker();
   state.marker = false;
-  io.writeState(state);
+  waitOn(io, state, '把引擎总开关恢复到发版前');
   const before = state.before;
   if (before === null || before === undefined || typeof before.master !== 'boolean') {
     return failed(
@@ -489,7 +848,7 @@ async function phaseList(io, state) {
 }
 
 const PHASE_FUNCS = [
-  async () => ({ ok: true }), // 0 预检：进来之前 preflight 已经做完
+  phasePreflight, // 0 预检：请求进来之前 preflight 已经核过；这里记发版前异常基线
   phasePauseLocal,
   phasePauseFrance,
   phaseWait,
@@ -499,6 +858,68 @@ const PHASE_FUNCS = [
   phaseRestore,
   phaseList,
 ];
+
+/** 飞书上要点哪个按钮（一句话）：按停在哪一步、为什么停。 */
+function buttonHint(state, kind) {
+  if (kind === 'start') return '不用点什么，进度看驾驶舱「法国」页的发版卡';
+  if (kind === 'done') return '不用点什么';
+  if (kind === 'check') return '到驾驶舱「法国」页看发版卡里「发后体检」没通过的那几项';
+  if (state.phase === 3) return '等会话收完，到驾驶舱「法国」页再点「发布到法国」（从头走，现场没动）';
+  if (state.phase === 7) return '版本已经发出去了，到驾驶舱「环境」页把引擎总开关点开';
+  if (state.phase <= 3) return '到驾驶舱「法国」页看发版卡写的原因，处理好再点「发布到法国」（版本还没发）';
+  return '到驾驶舱「法国」页看发版卡写的原因（版本可能已经发出去了）';
+}
+
+/**
+ * 推给飞书的一句话（#2026）：目标提交、结果、要点哪个按钮。kind：start 开始、done 成功、check 发完但体检没通过（算卡住）、
+ * blocked 卡住、failed 失败。
+ */
+export function releaseMessage(kind, state) {
+  const sha = String(state.target?.value ?? '').slice(0, 12);
+  const step = `第 ${state.phase} 步「${PHASES[state.phase] ?? '?'}」`;
+  const bad = (state.check?.items ?? []).filter((x) => !x.ok).map((x) => x.name);
+  const text = {
+    start: `【发版开始】法国开始发 ${sha}（${state.requestedBy ?? '?'} 在驾驶舱点的）`,
+    done: `【发版成功】法国已在用 ${sha}，发后体检通过，引擎总开关已恢复到发版前`,
+    check: `【发版卡住】法国已在用 ${sha}、开关已恢复，但发后体检没通过：${bad.join('、')}`,
+    blocked: `【发版卡住】${sha} 停在${step}：${state.why ?? ''}`,
+    failed: `【发版失败】${sha} ${step}没成：${state.why ?? ''}`,
+  }[kind];
+  return `${text}。${buttonHint(state, kind)}。`.replace(/\s+/g, ' ').slice(0, 900);
+}
+
+/** 推一条飞书；推不出去只记下来（stderr、进度里的 pushes），不拦发版、不当成推过。 */
+async function push(io, state, kind) {
+  const text = releaseMessage(kind, state);
+  try {
+    await io.notify(text);
+    state.pushes.push({ kind, ok: true });
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    state.pushes.push({ kind, ok: false, why });
+    io.err(`飞书没推成（${kind}）：${why}`);
+  }
+  io.writeState(state);
+}
+
+/** 这一趟的结局写进 last-request.json（驾驶舱读：发后体检结论）；写不进只记 stderr，进度记录里也有同一份。 */
+function writeOutcome(io, state, req, outcome) {
+  try {
+    io.writeLast({
+      v: 1,
+      at: iso(io),
+      outcome,
+      sha: req.sha,
+      by: req.by,
+      why: state.why,
+      phase: state.phase,
+      check: state.check,
+      pushes: state.pushes,
+    });
+  } catch (e) {
+    io.err(`结局没写进 ${LAST_FILE}：${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
 /**
  * 入口：读一份请求、核、走一趟。io = {
@@ -511,6 +932,10 @@ const PHASE_FUNCS = [
  *     （等收尾的判据：引擎权威口径 drain.json，同 release.sh；引擎没在跑 engineDown=true、running 空），
  *   prepareCheckout(sha) → Promise<{ ok, why? }>,
  *   runRelease(sha, timeoutMs) / releaseCheck(timeoutMs) → Promise<{ status, stdout, stderr, error? }>, historyLast() → Promise<{ ok, line? , why? }>,
+ *   发后体检（#2026）：currentRelease() → Promise<{ ok, sha } | { ok: false, why }>（current 链接）、
+ *   healthz() → Promise<{ status, body, error? }>（后端 /healthz）、mainHead(sha) → Promise<{ ok, sha, behind } | { ok: false, why }>
+ *   （取最新主线，主线头和它比 sha 多几个提交）、repoSwitches() → Promise<{ ok, repos: { 仓: since|null } } | { ok: false, why }>，
+ *   notify(text) → Promise<void>（推飞书，推不出去就抛）,
  * }。返回退出码。
  */
 export async function runRequest(io) {
@@ -536,10 +961,13 @@ export async function runRequest(io) {
   }
   io.writeLast({ v: 1, at: iso(io), outcome: 'accepted', sha: req.sha, by: req.by, why: null });
   say(io, `收到驾驶舱的发布请求：${req.sha.slice(0, 12)}，${req.by} 在 ${req.at} 点的`);
+  await push(io, state, 'start');
   for (let p = 0; p < PHASE_FUNCS.length; p++) {
     state.phase = p;
     state.status = 'running';
     state.laggards = [];
+    state.waiting = null;
+    state.steps[p] = iso(io);
     io.writeState(state);
     say(io, `—— 第 ${p} 步「${PHASES[p]}」——`);
     let r;
@@ -552,16 +980,23 @@ export async function runRequest(io) {
       state.status = r.kind === 'blocked' ? 'blocked' : 'failed';
       state.why = r.why;
       state.laggards = r.laggards ?? [];
+      state.waiting = null;
       io.writeState(state);
       io.err(`第 ${p} 步「${PHASES[p]}」${r.kind === 'blocked' ? '卡住了' : '没成'}：${r.why}`);
+      await push(io, state, state.status);
+      writeOutcome(io, state, req, state.status);
       return r.kind === 'blocked' ? EXIT.blocked : EXIT.failed;
     }
   }
   state.status = 'done';
   state.why = null;
+  state.waiting = null;
   io.writeState(state);
-  say(io, '这一趟做完了。');
-  return EXIT.done;
+  const passed = state.check?.ok === true;
+  say(io, passed ? '这一趟做完了，发后体检通过。' : '这一趟发完了，但发后体检没通过（看上面的 [没过]）。');
+  await push(io, state, passed ? 'done' : 'check');
+  writeOutcome(io, state, req, 'done');
+  return passed ? EXIT.done : EXIT.blocked;
 }
 
 /** 起 fleet-api 的参数（真 io 和测试都用同一份写法）。 */

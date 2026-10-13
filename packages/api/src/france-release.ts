@@ -84,6 +84,11 @@ interface ReleaseTrainStateFile {
   updatedAt?: string;
   phase?: number;
   target?: { kind?: string; value?: string };
+  /** 九步时间线（#2026，法国接活脚本写）：这一趟开始、每一步开始的时间、此刻在等什么、拖后腿的。老记录没有。 */
+  startedAt?: string;
+  steps?: unknown;
+  waiting?: unknown;
+  laggards?: unknown;
   // 真文件里字段不止这些（marker、france、release、verify、restore、changes、warn 等），但页面现在只用这几样；
   // 少写没用到的字段，将来的字段自然装进 extra，不在这里约束。
 }
@@ -119,6 +124,35 @@ function describeTarget(target: ReleaseTrainStateFile['target']): string {
 const TRAIN_STATUSES = ['running', 'blocked', 'failed', 'done', 'aborted'] as const;
 export type TrainStatus = (typeof TRAIN_STATUSES)[number];
 
+const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+const isoOrNull = (v: unknown): string | null => (typeof v === 'string' && ISO.test(v) ? v : null);
+
+/** 九步时间线（#2026）：phase 不是整数就没有时间线（认不出走到哪，不画）；steps、waiting 认不出的按没写。 */
+export function trainTimeline(parsed: ReleaseTrainStateFile): TrainTimeline | null {
+  const { phase } = parsed;
+  if (typeof phase !== 'number' || !Number.isInteger(phase) || phase < 0 || phase >= PHASE_NAMES.length) {
+    return null;
+  }
+  const raw = Array.isArray(parsed.steps) ? (parsed.steps as unknown[]) : [];
+  return {
+    phase,
+    startedAt: isoOrNull(parsed.startedAt),
+    steps: PHASE_NAMES.map((_, i) => isoOrNull(raw[i])),
+    waiting: typeof parsed.waiting === 'string' && parsed.waiting !== '' ? parsed.waiting : null,
+    laggards: Array.isArray(parsed.laggards)
+      ? (parsed.laggards as unknown[]).filter((x): x is string => typeof x === 'string')
+      : [],
+  };
+}
+
+export interface TrainTimeline {
+  phase: number;
+  startedAt: string | null;
+  steps: (string | null)[];
+  waiting: string | null;
+  laggards: string[];
+}
+
 /** 一份进度记录读成这一趟的样子；认不出（不是 JSON、没写 status、status 不认识）回 { ok: false }，不猜、不当成没在走。 */
 export function parseTrainState(json: string):
   | {
@@ -126,8 +160,11 @@ export function parseTrainState(json: string):
       status: TrainStatus;
       phase: string;
       target: string;
+      /** 目标的 40 位提交号（kind sha 时）；对 last-request.json 里同一趟的体检结论用。 */
+      targetSha: string | null;
       why: string | null;
       updatedAt: string | null;
+      timeline: TrainTimeline | null;
     }
   | { ok: false; why: string } {
   let parsed: ReleaseTrainStateFile;
@@ -151,8 +188,13 @@ export function parseTrainState(json: string):
     status,
     phase: describePhase(parsed.phase),
     target: describeTarget(parsed.target),
+    targetSha:
+      typeof parsed.target?.value === 'string' && /^[0-9a-f]{40}$/.test(parsed.target.value)
+        ? parsed.target.value
+        : null,
     why: typeof parsed.why === 'string' ? parsed.why : null,
     updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : null,
+    timeline: trainTimeline(parsed),
   };
 }
 
