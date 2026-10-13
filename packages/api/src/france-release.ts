@@ -45,6 +45,8 @@ interface ReleaseTrainStateFile {
   steps?: unknown;
   waiting?: unknown;
   laggards?: unknown;
+  /** 发版前记下的总开关状态（第 2 步写）：恢复引擎开关、撤掉暂停按它判断（#2027）。 */
+  before?: { master?: unknown } | null;
   // 真文件里字段不止这些（marker、france、release、verify、restore、changes、warn 等），但页面现在只用这几样；
   // 少写没用到的字段，将来的字段自然装进 extra，不在这里约束。
 }
@@ -115,6 +117,10 @@ export function parseTrainState(json: string):
       ok: true;
       status: TrainStatus;
       phase: string;
+      /** phase 的下标（0..8）；认不出是 null。 */
+      phaseIndex: number | null;
+      /** 发版前引擎总开关是开着（true）还是关着（false）；没记下是 null。 */
+      beforeMaster: boolean | null;
       target: string;
       /** 目标的 40 位提交号（kind sha 时）；对 last-request.json 里同一趟的体检结论用。 */
       targetSha: string | null;
@@ -143,6 +149,11 @@ export function parseTrainState(json: string):
     ok: true,
     status,
     phase: describePhase(parsed.phase),
+    phaseIndex:
+      typeof parsed.phase === 'number' && Number.isInteger(parsed.phase) && parsed.phase >= 0
+        ? parsed.phase
+        : null,
+    beforeMaster: typeof parsed.before?.master === 'boolean' ? parsed.before.master : null,
     target: describeTarget(parsed.target),
     targetSha:
       typeof parsed.target?.value === 'string' && /^[0-9a-f]{40}$/.test(parsed.target.value)

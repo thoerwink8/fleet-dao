@@ -12,12 +12,15 @@
 //   读不到的一律按拒绝，不当成「没问题」。
 // - 输出和记下来的字不带令牌；请求里的「谁点的」只收字母数字和 _.@ -，最长 64。
 // - 所有真的起进程、读文件、连网、睡觉都经 io：deploy/test/release-request.test.mjs 换成假的，一条拒绝路径一条故意造出失败的测试。
-// - 退出码：0 做完了、发后体检通过；1 被拒（或没有请求）；2 没做成（命令失败）；3 卡住（等收尾到点还有会话在跑，再点一次从头走，现场没动；
+// - 退出码：0 做完了、发后体检通过；1 被拒（或没有请求）；2 没做成（命令失败）；3 卡住（等收尾到点还有会话在跑，点「重试」从这一步接着走，现场没动；
 //   或发完了、开关恢复了，但发后体检没通过）。
 // - 发后体检（#2026）：第 0 步记发版前异常基线（开着的卡住报警、/healthz 不好的项）、第 2 步记各仓接活开关；第 6 步核目标在用、/healthz、
 //   没有新异常（重启打断的几类 15 分钟内重试）、再跑一遍预检（已是最新）；第 7 步恢复后核引擎总开关和各仓接活开关和发版前一致。
 //   结论写进 release-train.json 的 check 和 last-request.json；开始、成功、卡住、失败各推飞书一条（engine.env 的 FLEET_FEISHU_WEBHOOK，
 //   和引擎推主线红同一个群机器人）。
+// - 请求的种类（#2027，请求文件的 kind，没写就是 release 发布，老后端照常）：retry 从停在第 3 步「等收尾」的那一趟接着走（不从头暂停）、
+//   restore 从没成在第 7 步「恢复」的那一趟把引擎总开关开回（发版前开着的才开）、abort 撤掉暂停（等价 release-train abort：
+//   还没动手发版就开回暂停前的样子，已动手发过版保持关）；不认识的 kind 拒绝并写原因，不当成发布。各种都落 last-request.json（kind、by）。
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync } from 'node:fs';
 import { ciVerdict } from '../auto-release/lib.mjs';
 import { SESSION_WAIT_MS } from './session-wait.mjs';
@@ -147,7 +150,21 @@ export function safeReadRequest(dir = REQUEST_DIR, file = REQUEST_FILE) {
   }
 }
 
-/** 请求文件的内容：后端 JSON.stringify({ v, sha, at, by }) 写的，键和样子都固定；认不出一律 { ok: false, why }。 */
+/** 请求的种类（#2027）：没写 kind 的老请求就是 release（发布）；认不出的种类拒绝，不静默当发布。 */
+export const REQUEST_KINDS = ['release', 'retry', 'restore', 'abort'];
+/** 各种类请求文件的键（排序后）：release 带 kind 与否都认（老后端不写）；restore、abort 不带提交号。 */
+const KEYS_OF = {
+  release: ['at,by,sha,v', 'at,by,kind,sha,v'],
+  retry: ['at,by,kind,sha,v'],
+  restore: ['at,by,kind,v'],
+  abort: ['at,by,kind,v'],
+};
+
+/**
+ * 请求文件的内容：后端 JSON.stringify 写的，键和样子都固定；认不出一律 { ok: false, why }。
+ * 发布：{ v, sha, at, by }（老样子，不带 kind）；#2027 加三种：{ v, kind: 'retry', sha, at, by }（从卡住那一步接着走）、
+ * { v, kind: 'restore', at, by }（恢复引擎总开关）、{ v, kind: 'abort', at, by }（撤掉暂停）。
+ */
 export function parseRequest(text) {
   let o;
   try {
@@ -161,14 +178,26 @@ export function parseRequest(text) {
   const keys = Object.keys(o).sort().join(',');
   const sha = typeof o.sha === 'string' && FULL_SHA.test(o.sha) ? o.sha : null;
   const by = typeof o.by === 'string' && WHO.test(o.by) ? o.by : null;
-  if (keys !== 'at,by,sha,v') return { ok: false, why: `请求文件的键不对（${keys.slice(0, 60)}）`, sha, by };
+  const kind = o.kind === undefined ? 'release' : o.kind;
+  if (typeof kind !== 'string' || !REQUEST_KINDS.includes(kind)) {
+    return {
+      ok: false,
+      why: `请求的种类认不出（${JSON.stringify(o.kind)?.slice(0, 30)}）：不当成发布，现场没动`,
+      sha,
+      by,
+    };
+  }
+  if (!KEYS_OF[kind].includes(keys)) {
+    return { ok: false, why: `请求文件的键不对（${keys.slice(0, 60)}）`, sha, by };
+  }
   if (o.v !== 1) return { ok: false, why: '请求文件的版本不是 1', sha, by };
-  if (sha === null) return { ok: false, why: '提交号不是完整的 40 位小写十六进制', sha, by };
+  const needSha = kind === 'release' || kind === 'retry';
+  if (needSha && sha === null) return { ok: false, why: '提交号不是完整的 40 位小写十六进制', sha, by };
   if (by === null) return { ok: false, why: '「谁点的」不合格（只收字母数字和 _.@ -，最长 64）', sha, by };
   if (typeof o.at !== 'string' || !AT.test(o.at) || Number.isNaN(Date.parse(o.at))) {
     return { ok: false, why: '请求里的时间不是 UTC 的 ISO 时间', sha, by };
   }
-  return { ok: true, sha, at: o.at, by };
+  return { ok: true, kind, sha: needSha ? sha : null, at: o.at, by };
 }
 
 /**
@@ -310,15 +339,23 @@ async function refuse(io, req, why) {
   const sha = req?.sha ?? null;
   io.err(`拒绝：${why}`);
   try {
-    io.writeLast({ v: 1, at: iso(io), outcome: 'refused', sha, by: req?.by ?? null, why });
+    io.writeLast({
+      v: 1,
+      at: iso(io),
+      outcome: 'refused',
+      sha,
+      by: req?.by ?? null,
+      ...(req?.kind && req.kind !== 'release' ? { kind: req.kind } : {}),
+      why,
+    });
   } catch (e) {
     io.err(`拒绝的原因也没写进 ${LAST_FILE}：${e instanceof Error ? e.message : String(e)}`);
   }
   return EXIT.refused;
 }
 
-/** 核请求本身（只读）：回 null 通过，或拒绝的原因。各条一条故意造出失败的测试。 */
-async function preflight(io, req) {
+/** 核请求本身（只读）：回 null 通过，或拒绝的原因。各条一条故意造出失败的测试。checkSha=false（恢复引擎开关）只核「没有发版在走」，不核提交和 CI。 */
+async function preflight(io, req, checkSha = true) {
   // 已有发版在走：进度记录说在走且那个进程还活着；或 release.sh 的发布锁被占着
   const read = io.readState();
   if (!read.ok) return `进度记录读不了，不敢覆盖它：${read.why}`;
@@ -335,6 +372,7 @@ async function preflight(io, req) {
     return `看发布锁没成（${e instanceof Error ? e.message : String(e)}），按有发布在跑算`;
   }
   if (busy) return '已有发布在跑（发布锁被占着：自动发布或人手动在发）';
+  if (!checkSha) return null;
 
   // 必须是主线上的提交：先取最新主线，再比祖先
   const main = await io.mainline(req.sha);
@@ -550,7 +588,7 @@ async function phaseWait(io, state) {
     if (waited >= io.limits.sessionsMs) {
       const laggards = names.map((n) => `会话 ${n}`);
       return blocked(
-        `等了 ${minutes(waited)} 分钟，法国还有 ${s.running.length} 个会话在跑（现场没动：引擎总开关已关、没发版；再点一次从头走）`,
+        `等了 ${minutes(waited)} 分钟，法国还有 ${s.running.length} 个会话在跑（现场没动：引擎总开关已关、没发版；到驾驶舱点「重试」从这一步接着走）`,
         laggards,
       );
     }
@@ -827,13 +865,15 @@ async function restoreMaster(io, state) {
     return { ok: true };
   }
   if (!eng.on) {
+    const resumed = state.resumes?.at(-1);
+    const how = resumed?.kind === 'restore' ? `驾驶舱点击恢复引擎开关，${resumed.by}` : '驾驶舱点击发布';
     const on = await engineOn(
       io,
-      `发版后恢复发版前的状态（驾驶舱点击发布，目标 ${state.target.value.slice(0, 12)}）`,
+      `发版后恢复发版前的状态（${how}，目标 ${state.target.value.slice(0, 12)}）`,
     );
     if (!on.ok) {
       return failed(
-        `恢复没成：发版已经发出去了，但发版前开着的引擎总开关没能开回：${on.why}。到驾驶舱环境页点开，或 fleet-api engine on`,
+        `恢复没成：发版已经发出去了，但发版前开着的引擎总开关没能开回：${on.why}。到驾驶舱「法国」页发版卡点「恢复引擎开关」（或环境页点开、fleet-api engine on）`,
       );
     }
   }
@@ -862,10 +902,11 @@ const PHASE_FUNCS = [
 /** 飞书上要点哪个按钮（一句话）：按停在哪一步、为什么停。 */
 function buttonHint(state, kind) {
   if (kind === 'start') return '不用点什么，进度看驾驶舱「法国」页的发版卡';
-  if (kind === 'done') return '不用点什么';
+  if (kind === 'done' || kind === 'retry' || kind === 'restore' || kind === 'aborted') return '不用点什么';
   if (kind === 'check') return '到驾驶舱「法国」页看发版卡里「发后体检」没通过的那几项';
-  if (state.phase === 3) return '等会话收完，到驾驶舱「法国」页再点「发布到法国」（从头走，现场没动）';
-  if (state.phase === 7) return '版本已经发出去了，到驾驶舱「环境」页把引擎总开关点开';
+  if (state.phase === 3)
+    return '等会话收完，到驾驶舱「法国」页发版卡点「重试」（从这一步接着走，现场没动）；不走了点「撤掉暂停」';
+  if (state.phase === 7) return '版本已经发出去了，到驾驶舱「法国」页发版卡点「恢复引擎开关」';
   if (state.phase <= 3) return '到驾驶舱「法国」页看发版卡写的原因，处理好再点「发布到法国」（版本还没发）';
   return '到驾驶舱「法国」页看发版卡写的原因（版本可能已经发出去了）';
 }
@@ -882,6 +923,9 @@ export function releaseMessage(kind, state) {
     start: `【发版开始】法国开始发 ${sha}（${state.requestedBy ?? '?'} 在驾驶舱点的）`,
     done: `【发版成功】法国已在用 ${sha}，发后体检通过，引擎总开关已恢复到发版前`,
     check: `【发版卡住】法国已在用 ${sha}、开关已恢复，但发后体检没通过：${bad.join('、')}`,
+    retry: `【发版重试】${sha} 从${step}接着走（${state.resumes?.at(-1)?.by ?? '?'} 在驾驶舱点的「重试」）`,
+    restore: `【恢复引擎开关】${sha} 已发出，${state.resumes?.at(-1)?.by ?? '?'} 在驾驶舱点了「恢复引擎开关」，从第 7 步「恢复」接着走`,
+    aborted: `【撤掉暂停】${sha ? `${sha} 那一趟` : '暂停标记'}已撤销：${state.why ?? ''}`,
     blocked: `【发版卡住】${sha} 停在${step}：${state.why ?? ''}`,
     failed: `【发版失败】${sha} ${step}没成：${state.why ?? ''}`,
   }[kind];
@@ -889,7 +933,7 @@ export function releaseMessage(kind, state) {
 }
 
 /** 推一条飞书；推不出去只记下来（stderr、进度里的 pushes），不拦发版、不当成推过。 */
-async function push(io, state, kind) {
+async function push(io, state, kind, persist = true) {
   const text = releaseMessage(kind, state);
   try {
     await io.notify(text);
@@ -899,7 +943,7 @@ async function push(io, state, kind) {
     state.pushes.push({ kind, ok: false, why });
     io.err(`飞书没推成（${kind}）：${why}`);
   }
-  io.writeState(state);
+  if (persist) io.writeState(state);
 }
 
 /** 这一趟的结局写进 last-request.json（驾驶舱读：发后体检结论）；写不进只记 stderr，进度记录里也有同一份。 */
@@ -909,8 +953,9 @@ function writeOutcome(io, state, req, outcome) {
       v: 1,
       at: iso(io),
       outcome,
-      sha: req.sha,
+      sha: state.target?.value ?? req.sha,
       by: req.by,
+      ...(req.kind !== 'release' ? { kind: req.kind } : {}),
       why: state.why,
       phase: state.phase,
       check: state.check,
@@ -948,6 +993,8 @@ export async function runRequest(io) {
   if (raw.kind === 'unsafe') return refuse(io, null, raw.why);
   const req = parseRequest(raw.text);
   if (!req.ok) return refuse(io, req, req.why);
+  if (req.kind === 'abort') return runAbort(io, req);
+  if (req.kind === 'retry' || req.kind === 'restore') return runResume(io, req);
 
   const why = await preflight(io, req);
   if (why !== null) return refuse(io, req, why);
@@ -962,7 +1009,12 @@ export async function runRequest(io) {
   io.writeLast({ v: 1, at: iso(io), outcome: 'accepted', sha: req.sha, by: req.by, why: null });
   say(io, `收到驾驶舱的发布请求：${req.sha.slice(0, 12)}，${req.by} 在 ${req.at} 点的`);
   await push(io, state, 'start');
-  for (let p = 0; p < PHASE_FUNCS.length; p++) {
+  return runPhases(io, state, req, 0);
+}
+
+/** 从第 from 步起把九步走完；停下（卡住、没成）或做完都写结局、推飞书，回退出码。 */
+async function runPhases(io, state, req, from) {
+  for (let p = from; p < PHASE_FUNCS.length; p++) {
     state.phase = p;
     state.status = 'running';
     state.laggards = [];
@@ -997,6 +1049,164 @@ export async function runRequest(io) {
   await push(io, state, passed ? 'done' : 'check');
   writeOutcome(io, state, req, 'done');
   return passed ? EXIT.done : EXIT.blocked;
+}
+
+/**
+ * 重试 / 恢复引擎开关（#2027）：接着上一趟停下的进度记录往下走，不从头暂停一遍。
+ * - retry：只接「卡住在第 3 步等收尾」、目标就是请求里的提交；现场没动（引擎总开关关着、没发版），从第 3 步重新等收尾，往后照走；
+ * - restore：只接「没成在第 7 步恢复」、发版前总开关是开着的；发版已经发出去了，从第 7 步重新把总开关开回、核对开关，再收尾。
+ * 都核「没有发版在走、发布锁没被占」；retry 还核目标仍是主线祖先、CI 绿（同发布）。每一条拒绝都写原因，不动进度记录。
+ */
+async function runResume(io, req) {
+  const retry = req.kind === 'retry';
+  const word = retry ? '重试' : '恢复引擎开关';
+  const read = io.readState();
+  if (!read.ok) return refuse(io, req, `进度记录读不了，不敢接着走：${read.why}`);
+  const prev = read.state;
+  const want = retry ? { status: 'blocked', phase: 3 } : { status: 'failed', phase: 7 };
+  if (!prev || prev.status !== want.status || prev.phase !== want.phase) {
+    const at = prev
+      ? `现在是「${prev.status}」，停在第 ${prev.phase} 步「${PHASES[prev.phase] ?? '?'}」`
+      : '没有进度记录';
+    return refuse(
+      io,
+      req,
+      `没有可${word}的：只有停在第 ${want.phase} 步「${PHASES[want.phase]}」且状态是${retry ? '卡住' : '没成'}的一趟才行（${at}）`,
+    );
+  }
+  if (retry && prev.target?.value !== req.sha) {
+    return refuse(
+      io,
+      req,
+      `重试的提交（${req.sha.slice(0, 12)}）不是卡住那一趟的目标（${String(prev.target?.value ?? '').slice(0, 12)}）：刷新页面再看`,
+    );
+  }
+  if (!retry && prev.before?.master !== true) {
+    return refuse(
+      io,
+      req,
+      '发版前引擎总开关就是关着（或没记下）：没有要恢复的，不替人开引擎；要开到环境页点开',
+    );
+  }
+  const why = await preflight(io, retry ? req : { ...req, sha: prev.target?.value }, retry);
+  if (why !== null) return refuse(io, req, why);
+
+  const state = prev;
+  state.status = 'running';
+  state.why = null;
+  state.laggards = [];
+  state.waiting = null;
+  state.via = 'cockpit';
+  state.pid = io.pid;
+  state.resumes = [
+    ...(Array.isArray(prev.resumes) ? prev.resumes : []),
+    { kind: req.kind, by: req.by, at: req.at },
+  ];
+  if (!Array.isArray(state.pushes)) state.pushes = [];
+  io.writeLast({
+    v: 1,
+    at: iso(io),
+    outcome: 'accepted',
+    sha: state.target.value,
+    by: req.by,
+    kind: req.kind,
+    why: null,
+  });
+  say(
+    io,
+    `收到驾驶舱的「${word}」请求：${req.by} 在 ${req.at} 点的；从第 ${want.phase} 步「${PHASES[want.phase]}」接着走`,
+  );
+  await push(io, state, req.kind);
+  return runPhases(io, state, req, want.phase);
+}
+
+function writeAbortOutcome(io, req, sha, why, outcome = 'aborted') {
+  try {
+    io.writeLast({ v: 1, at: iso(io), outcome, sha, by: req.by, kind: 'abort', why });
+  } catch (e) {
+    io.err(`结局没写进 ${LAST_FILE}：${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * 撤掉暂停（#2027，等价命令行 release-train abort）：清暂停标记；卡住或没成的一趟，还没动手发版就把引擎总开关开回暂停前的样子，
+ * 已经动手发过版（release.started）就保持关（不知道发成没有、健康没确认），状态记 aborted；没有进度记录、只剩标记的，只清标记。
+ * 发版在走（进程还活着）、发布锁被占着不动手；没有标记也没有没了结的一趟就拒（没什么可撤）。
+ */
+async function runAbort(io, req) {
+  const read = io.readState();
+  if (!read.ok) return refuse(io, req, `进度记录读不了，不敢动它：${read.why}`);
+  const s = read.state;
+  if (s?.status === 'running' && Number.isInteger(s.pid) && s.pid !== io.pid && io.pidAlive(s.pid)) {
+    return refuse(io, req, `发版还在走（进程 ${s.pid}，第 ${s.phase} 步）：不能撤，等它停下`);
+  }
+  let busy;
+  try {
+    busy = await io.releaseBusy();
+  } catch (e) {
+    return refuse(io, req, `看发布锁没成（${e instanceof Error ? e.message : String(e)}），按有发布在跑算`);
+  }
+  if (busy) return refuse(io, req, '已有发布在跑（发布锁被占着）：不动');
+  const open = s !== null && s !== undefined && s.status !== 'done' && s.status !== 'aborted';
+  if (!open && !io.markerExists()) {
+    return refuse(io, req, '没有暂停标记，也没有没了结的一趟：没什么要撤的');
+  }
+  io.writeLast({
+    v: 1,
+    at: iso(io),
+    outcome: 'accepted',
+    sha: s?.target?.value ?? null,
+    by: req.by,
+    kind: 'abort',
+    why: null,
+  });
+  say(io, `收到驾驶舱的「撤掉暂停」请求：${req.by} 在 ${req.at} 点的`);
+  if (!open) {
+    io.clearMarker();
+    const why = '没有在走的一趟：暂停标记是留下来的，已清；引擎总开关没动';
+    say(io, why);
+    await push(
+      io,
+      { target: { value: s?.target?.value ?? '' }, phase: 0, why, pushes: [] },
+      'aborted',
+      false,
+    );
+    writeAbortOutcome(io, req, s?.target?.value ?? null, why);
+    return EXIT.done;
+  }
+  const target = String(s.target?.value ?? '').slice(0, 12);
+  let note;
+  if (s.before?.master === true && !s.release?.started) {
+    const on = await engineOn(
+      io,
+      `撤销发版暂停，恢复暂停前的样子（驾驶舱点击撤掉暂停，${req.by}，目标 ${target}）`,
+    );
+    if (!on.ok) {
+      s.why = `撤掉暂停没成：总开关没能开回去（${on.why}）；暂停标记还留着，再点一次，或到环境页点开`;
+      io.writeState(s);
+      io.err(s.why);
+      writeAbortOutcome(io, req, s.target?.value ?? null, s.why, 'failed');
+      return EXIT.failed;
+    }
+    note = '还没动手发版：引擎总开关已开回暂停前的样子（开着）；各仓「让 AI 接活」开关暂停期间没动过';
+  } else if (s.release?.started) {
+    note =
+      s.before?.master === true
+        ? '已经动手发过版：不知道发成没有、健康没确认，引擎总开关保持关（发版前是开着的）；确认没事后到环境页点开'
+        : '已经动手发过版：引擎总开关发版前就是关着的，保持关';
+  } else {
+    note = '引擎总开关暂停前就是关着的（或还没暂停），没动';
+  }
+  io.clearMarker();
+  s.status = 'aborted';
+  s.marker = false;
+  s.why = `驾驶舱撤销（${req.by}）：${note}`;
+  s.waiting = null;
+  io.writeState(s);
+  say(io, `撤掉暂停（目标 ${target}，停在第 ${s.phase} 步）：${note}`);
+  await push(io, s, 'aborted');
+  writeAbortOutcome(io, req, s.target?.value ?? null, s.why);
+  return EXIT.done;
 }
 
 /** 起 fleet-api 的参数（真 io 和测试都用同一份写法）。 */

@@ -2,10 +2,12 @@
 // 只读展示：每一行各自带「查成了 / 没查成 + 原因」，没查成的行写明原因，不拿空、0 或「已是最新」顶。
 // 发布入口（#1255）：「发布到法国」按钮和弹窗放在「在用版本」那一行（ReleaseEntry，env-facts 的 versionExtra 挂上去），发版卡本身只读。
 // 四行事实用 KeyValue（片 7，#1853）；提交号用 Tag，CI 状态用 StatusBadge。
+
+import type { ReleaseRecoverKind } from '@fleet-dao/shared';
 import { type ReactNode, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { SESSION_WAIT_MS } from '../../../../deploy/france/release-request/session-wait.mjs';
-import { errorText, useFrancePreflight, useFranceRelease } from '../api/client';
+import { errorText, useFrancePreflight, useFranceRelease, useFranceReleaseRecover } from '../api/client';
 import type { ReleaseCard } from '../api/types';
 import { formatAgo } from '../lib/format';
 import { checkLine, lastLine, preflightItems, stepRows, timelineHead } from '../lib/release-timeline';
@@ -334,6 +336,114 @@ function preflightView(preflight: ReturnType<typeof useFrancePreflight>): {
   };
 }
 
+type Recover = NonNullable<ReleaseCard['action']['recover']>;
+
+const RECOVER_COPY: Record<
+  ReleaseRecoverKind,
+  { label: string; title: string; confirm: string; busy: string; done: string; fail: string }
+> = {
+  retry: {
+    label: '重试',
+    title: '重试：从卡住的这一步接着走？',
+    confirm: '确认重试',
+    busy: '正在提交重试请求',
+    done: '已提交重试请求',
+    fail: '没能提交重试请求',
+  },
+  restore: {
+    label: '恢复引擎开关',
+    title: '恢复引擎开关？',
+    confirm: '确认恢复',
+    busy: '正在提交恢复请求',
+    done: '已提交恢复引擎开关请求',
+    fail: '没能提交恢复引擎开关请求',
+  },
+  abort: {
+    label: '撤掉暂停',
+    title: '撤掉暂停？',
+    confirm: '确认撤掉',
+    busy: '正在提交撤掉暂停请求',
+    done: '已提交撤掉暂停请求',
+    fail: '没能提交撤掉暂停请求',
+  },
+};
+
+/** 确认框里写明每个按钮点了之后会怎样（后果）；撤掉暂停的后果由后端按进度记录算好带来。 */
+function recoverBody(kind: ReleaseRecoverKind, recover: Recover): string {
+  if (kind === 'retry') {
+    return `卡在${recover.retry?.phase ?? '等收尾'}：法国现场没动（引擎总开关还关着、没发版）。点「确认重试」从这一步接着等会话收尾，往后照走，不从头暂停一遍。`;
+  }
+  if (kind === 'restore') {
+    return `${recover.restore?.target ?? '这一版'} 已经发出去了，引擎总开关发版前是开着的、现在没开回。点「确认恢复」按发版前记下的状态把它开回，再核对各仓「让 AI 接活」开关没被动过。`;
+  }
+  return recover.abort?.text ?? '';
+}
+
+/**
+ * 卡住、失败后的三个按钮（#2027）：重试（从卡住那一步接着走）、恢复引擎开关（发完没开回）、撤掉暂停（等价命令行 abort）。
+ * 能不能点由后端按进度记录、暂停标记、引擎总开关算好带来（action.recover），这里只画；点了先弹确认框写明后果，
+ * 确认才发请求（后端再核一遍、记操作记录、写请求文件，法国上 root 的单元接活）。
+ */
+function ReleaseRecoverButtons({ recover }: { recover: Recover }) {
+  const mut = useFranceReleaseRecover();
+  const [asking, setAsking] = useState<ReleaseRecoverKind | null>(null);
+  const kinds = (['retry', 'restore', 'abort'] as const).filter((k) => recover[k] !== null);
+  if (kinds.length === 0) return null;
+  const copy = asking === null ? null : RECOVER_COPY[asking];
+  const confirm = async () => {
+    if (asking === null) return;
+    const c = RECOVER_COPY[asking];
+    try {
+      await mut.mutateAsync(asking);
+      toast.success(c.done, { description: '法国接活后，发版卡显示进度；操作记录里有这一条。' });
+    } catch (e) {
+      toast.error(c.fail, { description: errorText(e) });
+      throw e;
+    }
+  };
+  return (
+    <div className="space-y-1.5" data-release-recover>
+      <div className="flex flex-wrap gap-2">
+        {kinds.map((k) => (
+          <Button
+            key={k}
+            type="button"
+            size="sm"
+            variant={k === 'abort' ? 'outline' : 'default'}
+            loading={mut.isPending && mut.variables === k}
+            loadingLabel={RECOVER_COPY[k].busy}
+            onClick={() => setAsking(k)}
+            data-recover={k}
+          >
+            {RECOVER_COPY[k].label}
+          </Button>
+        ))}
+      </div>
+      <AlertDialog open={asking !== null} onOpenChange={(o) => (o ? undefined : setAsking(null))}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{copy?.title}</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-body">
+                <p data-recover-body>{asking === null ? '' : recoverBody(asking, recover)}</p>
+                <p className="text-meta text-muted-foreground">
+                  点了会记一条操作记录（谁、什么时候点的），法国接活后这里显示进度。
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>先不</AlertDialogCancel>
+            <AlertDialogAction onConfirm={confirm} {...(copy ? { loadingLabel: copy.busy } : {})}>
+              {copy?.confirm}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
 /**
  * 「发布到法国」按钮（#1232）：点开弹窗先现跑一遍预检、清单摆在框里（#2026），写明要发的提交、会带上哪几个 PR、发完引擎总开关恢复到发版前；
  * 预检有卡住项时「确认发布」灰着并写哪项。点「确认发布」才发：后端核它等于此刻主线头、记操作记录、写请求文件，法国上 root 的单元接活。
@@ -404,6 +514,7 @@ function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
         <ReleaseTimeline last={action.last} now={now} />
       ) : null}
       {action.last.check ? <ReleaseCheck check={action.last.check} /> : null}
+      {action.recover ? <ReleaseRecoverButtons recover={action.recover} /> : null}
       <AlertDialog open={asking && head !== null} onOpenChange={setAsking}>
         <AlertDialogContent>
           <AlertDialogHeader>

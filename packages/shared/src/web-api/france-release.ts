@@ -135,6 +135,23 @@ export const ReleaseLastSchema = z.object({
   check: ReleaseCheckSchema.nullable().optional(),
 });
 
+/**
+ * 卡住、失败后能点的按钮（#2027）：每个按钮能不能点由后端按进度记录、暂停标记、引擎总开关算好，页面只画。
+ * retry：停在第 3 步「等收尾」卡住的那一趟，点了从这一步接着走；restore：发版已发出、恢复那一步没成且总开关没开回；
+ * abort：暂停标记还留着（没有在走的一趟，或卡住、没成停着）；outcome 说点了之后引擎总开关怎样，text 是页面上写明的后果。
+ */
+export const ReleaseRecoverSchema = z.object({
+  retry: z.object({ sha: z.string(), phase: z.string() }).nullable(),
+  restore: z.object({ target: z.string() }).nullable(),
+  abort: z
+    .object({
+      outcome: z.enum(['clear_marker', 'reopen', 'keep_off']),
+      text: z.string(),
+    })
+    .nullable(),
+});
+export type ReleaseRecover = z.infer<typeof ReleaseRecoverSchema>;
+
 export const ReleaseCardSchema = z.object({
   /** ① 主线最新提交和它的 CI。 */
   mainline: z.discriminatedUnion('state', [
@@ -195,6 +212,8 @@ export const ReleaseCardSchema = z.object({
     /** 法国上装没装接活的单元（人工档，装一次要在法国跑 france.sh）。 */
     installed: z.boolean(),
     last: ReleaseLastSchema,
+    /** 卡住、失败后能点的按钮（#2027）；老后端没有这一块。 */
+    recover: ReleaseRecoverSchema.optional(),
   }),
   asOf: Time,
 });
@@ -240,3 +259,28 @@ export const ReleaseRequestResponse = z.object({
 /** 操作记录里这一点击的动作名和原话（对外发布那一道人闸：创始人在页面上点，就是同意）。 */
 export const RELEASE_REQUEST_ACTION = 'release.request';
 export const RELEASE_REQUEST_WORD = '驾驶舱点击发布';
+
+/**
+ * 卡住、失败后的三个按钮（#2027，POST /france/release-recover）：重试（从卡住那一步接着走）、恢复引擎开关（发完没开回）、
+ * 撤掉暂停（等价命令行 release-train abort）。只收种类；提交号和目标由后端按进度记录定，不信页面传来的。
+ */
+export const ReleaseRecoverKindSchema = z.enum(['retry', 'restore', 'abort']);
+export const ReleaseRecoverBody = z.object({ kind: ReleaseRecoverKindSchema });
+export const ReleaseRecoverResponse = z.object({
+  requested: z.literal(true),
+  kind: ReleaseRecoverKindSchema,
+  at: Time,
+});
+export type ReleaseRecoverKind = z.infer<typeof ReleaseRecoverKindSchema>;
+/** 三个按钮在操作记录里的动作名（谁、什么时候点的）。 */
+export const RELEASE_RECOVER_ACTION = {
+  retry: 'release.retry',
+  restore: 'release.restore',
+  abort: 'release.abort',
+} as const satisfies Record<ReleaseRecoverKind, string>;
+/** 三个按钮的名字和原话（操作记录「原因」里写）。 */
+export const RELEASE_RECOVER_WORD = {
+  retry: '驾驶舱点击重试',
+  restore: '驾驶舱点击恢复引擎开关',
+  abort: '驾驶舱点击撤掉暂停',
+} as const satisfies Record<ReleaseRecoverKind, string>;

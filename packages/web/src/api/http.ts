@@ -490,6 +490,10 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       send('POST', apiUrl(R.franceRelease.path), R.franceRelease.response, {
         body: R.franceRelease.request.parse({ sha }),
       }),
+    franceReleaseRecover: (kind) =>
+      send('POST', apiUrl(R.franceReleaseRecover.path), R.franceReleaseRecover.response, {
+        body: R.franceReleaseRecover.request.parse({ kind }),
+      }),
     francePreflight: () => send('POST', apiUrl(R.francePreflight.path), R.francePreflight.response),
     franceCliTools: () => send('GET', apiUrl(R.franceCliTools.path), R.franceCliTools.response),
     subscribe(listener, onStatus) {

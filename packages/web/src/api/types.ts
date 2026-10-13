@@ -68,6 +68,7 @@ import type {
   QuotaWindowViewSchema,
   ReleaseCardSchema,
   ReleasedCommitsSchema,
+  ReleaseRecoverResponse,
   ReleaseRequestResponse,
   RemovePurposeModelRequest,
   RemoveRepoResponse,
@@ -298,6 +299,8 @@ export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;
 export type ReleasedCommits = z.infer<typeof ReleasedCommitsSchema>;
 /** 点「确认发布」之后后端回的：请求已写下（接活的是法国上 root 的单元，进度看发版卡）。 */
 export type ReleaseRequestResult = z.infer<typeof ReleaseRequestResponse>;
+/** 点「重试」「恢复引擎开关」「撤掉暂停」之后后端回的：请求已写下（#2027）。 */
+export type ReleaseRecoverResult = z.infer<typeof ReleaseRecoverResponse>;
 /** /france 页「发版预检」一次一回：done 带七项事实和退出码（0 能发，2 不能发）；没接上走 unreadable。 */
 export type FrancePreflightResponse = z.infer<typeof FrancePreflightResponseSchema>;
 

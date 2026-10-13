@@ -76,6 +76,7 @@ import {
   type RealtimeTable,
   ReleaseCardSchema,
   ReleasedCommitsSchema,
+  ReleaseRecoverResponse,
   ReleaseRequestResponse,
   RemovePurposeModelRequest,
   RemoveRepoResponse,
@@ -1033,11 +1034,43 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   // 「发布到法国」按钮的假状态：默认能点；浏览器里 localStorage 的 mockRelease 写 blocked 就是接活单元没装的样子（截图用）
   // 点了「确认发布」之后：假的九步每 6 秒走一步，走完写一份发后体检（#2026）。localStorage 的 mockRelease 写 running /
   // done-bad 直接画「停在等收尾」「发完但体检没通过」（截图用）。
-  const releaseMock: { startedAt: number | null; target: string | null } = { startedAt: null, target: null };
+  const releaseMock: { startedAt: number | null; target: string | null; mode: string | null } = {
+    startedAt: null,
+    target: null,
+    // 点了「重试」「恢复引擎开关」「撤掉暂停」之后盖掉 localStorage 的 mockRelease（卡住、没成、留着标记的演示态就过去了）
+    mode: null,
+  };
+  const mockMode = () =>
+    releaseMock.mode ?? (typeof localStorage !== 'undefined' ? localStorage.getItem('mockRelease') : null);
   const MOCK_STEP_MS = 6_000;
   const MOCK_PHASES = ['预检', '暂停本机', '暂停法国', '等收尾', '发版', '等部署', '验证', '恢复', '派清单'];
   const mockLast = () => {
-    const mode = typeof localStorage !== 'undefined' ? localStorage.getItem('mockRelease') : null;
+    const mode = mockMode();
+    // 卡住（等收尾超时）、没成（恢复那一步）的演示态：截图看「重试」「恢复引擎开关」（#2027）
+    if (mode === 'stuck' || mode === 'restore-failed') {
+      const phase = mode === 'stuck' ? 3 : 7;
+      const started = now() - 35 * 60_000;
+      return {
+        state: mode === 'stuck' ? 'blocked' : 'failed',
+        target: '提交 2005b2909c4f',
+        at: iso(),
+        why:
+          mode === 'stuck'
+            ? '等了 30 分钟，法国还有 2 个会话在跑（现场没动：引擎总开关已关、没发版；到驾驶舱点「重试」从这一步接着走）'
+            : '恢复没成：发版已经发出去了，但发版前开着的引擎总开关没能开回：数据库连不上。到驾驶舱「法国」页发版卡点「恢复引擎开关」（或环境页点开、fleet-api engine on）',
+        phase: `第 ${phase} 步「${MOCK_PHASES[phase]}」`,
+        timeline: {
+          phase,
+          startedAt: new Date(started).toISOString(),
+          steps: MOCK_PHASES.map((_, i) =>
+            i <= phase ? new Date(started + i * 4 * 60_000).toISOString() : null,
+          ),
+          waiting: null,
+          laggards: mode === 'stuck' ? ['会话 execute(1f3a9c2e)', '会话 verify(7b20d4aa)'] : [],
+        },
+        check: null,
+      };
+    }
     const fixed = mode === 'running' || mode === 'done-bad';
     const started = fixed ? now() - 4 * 60_000 : releaseMock.startedAt;
     if (started === null) return { state: 'none', target: null, at: null, why: null, phase: null };
@@ -1091,12 +1124,30 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     };
   };
   const mockReleaseAction = () => {
-    const blocked = typeof localStorage !== 'undefined' && localStorage.getItem('mockRelease') === 'blocked';
+    const mode = mockMode();
+    const blocked = mode === 'blocked';
     return {
       state: blocked ? 'blocked' : 'ready',
       reasons: blocked ? ['法国还没装发版接活单元（要在法国以管理员身份跑一次整套装机脚本）'] : [],
       installed: !blocked,
       last: mockLast(),
+      // 三个按钮（#2027）：卡住给「重试」和「撤掉暂停」，没成在恢复给「恢复引擎开关」，只剩标记（paused）给「撤掉暂停」
+      recover: {
+        retry:
+          mode === 'stuck'
+            ? { sha: '2005b2909c4f8e0a1d3e5f7a9b1c3d5e7f9a1b3c', phase: '第 3 步「等收尾」' }
+            : null,
+        restore: mode === 'restore-failed' ? { target: '提交 2005b2909c4f' } : null,
+        abort:
+          mode === 'stuck'
+            ? {
+                outcome: 'reopen' as const,
+                text: '还没动手发版：引擎总开关会开回暂停前的样子（开着），清掉暂停标记，这一趟记为撤销。',
+              }
+            : mode === 'paused'
+              ? { outcome: 'clear_marker' as const, text: '只清掉留下来的暂停标记，引擎总开关不动。' }
+              : null,
+      },
     };
   };
   const nextId = (p: string) => `${p}-${++st.seq}`;
@@ -3627,6 +3678,25 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       releaseMock.startedAt = now();
       releaseMock.target = `提交 ${sha.slice(0, 12)}`;
       return ReleaseRequestResponse.parse({ requested: true, sha, at: iso() });
+    },
+    async franceReleaseRecover(kind) {
+      await wait();
+      const recover = mockReleaseAction().recover;
+      if (recover[kind] === null)
+        throw new ApiError(409, 'recover_unavailable', '现在没有可点的按钮（假后端）');
+      if (kind === 'retry') {
+        releaseMock.mode = '';
+        releaseMock.startedAt = now() - 3 * MOCK_STEP_MS; // 从第 3 步接着走
+        releaseMock.target = '提交 2005b2909c4f';
+      } else if (kind === 'restore') {
+        releaseMock.mode = '';
+        releaseMock.startedAt = now() - 20 * MOCK_STEP_MS; // 九步都走完
+        releaseMock.target = '提交 2005b2909c4f';
+      } else {
+        releaseMock.mode = '';
+        releaseMock.startedAt = null;
+      }
+      return ReleaseRecoverResponse.parse({ requested: true, kind, at: iso() });
     },
     async franceCliTools() {
       await wait();
