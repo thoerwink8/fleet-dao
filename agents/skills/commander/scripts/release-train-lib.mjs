@@ -18,12 +18,17 @@
 // - 第 4 步发版不跑法国检出里的 release.sh（那份经常还是上一版）。ssh 的是 releaseBootCommand：
 //   把同目录 release-boot.sh 送过去，解开目标提交的 deploy/ 再 exec 那一版（#1294）。没有或读不出就拒，不退回检出里那份。
 //   --check 仍跑检出里那份。
+// - 第 4 步不靠一条前台 ssh 撑完整个发布（#1995，2026-10-13 连着两次 ssh 被重置、发布其实跑完了却报「没成」）：
+//   releaseLaunchCommand（release-launch.sh）让法国用 systemd 临时服务 fleet-train-release-<前12位> 跑 release-boot.sh，
+//   日志末行 fleet-dao-release-exit=<n> 是发布结果；本机每 pollMs 把同一条幂等命令再发一遍读现状（started/attached/finished/lost/busy），
+//   ssh 断了只重连，总时限 releaseMs，到点才判没成。同一目标重跑 start：服务还在跑就接着看，不起第二个、不报锁冲突。
 // - 第 6 步验证只拦「预检基线里没有的、跟新版有关的」异常（服务、健康检查、发布历史、定时任务、探针这类），比 key 不比条数（#1740）。
 //   任务自己停下（kind task-park）是引擎照常干活的结果，不算新版的问题：不拦，只列出来给人看。
 // - 读不到就是读不到：读不到法国会话数、总开关、主线 CI 时不往下走（也不当成 0 或绿），回 { ok: false, why }。
 // - 所有打出来和记下来的字过 scrubText（令牌、邮箱、IP、长串抹掉）；ssh 的名字不进输出。
 // - 退出码：0 做完了（或 abort 做完了）；1 用法不对或被拒（没带 --founder-ok、已有一趟在走）；2 没做成（读不到、命令失败）；
 //   3 卡住（到点还有拖后腿的，名单已列出；现场没动，要么再跑 start 再等，要么 abort）。
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,6 +60,11 @@ export const RELEASE_BOOT_SH = readFileSync(
   fileURLToPath(new URL('./release-boot.sh', import.meta.url)),
   'utf8',
 );
+/** 第 4 步真正 ssh 上去跑的入口（#1995）：起（或接着看）一个脱离 ssh 的发布服务，回现状。幂等，每个轮询周期再发一遍。 */
+export const RELEASE_LAUNCH_SH = readFileSync(
+  fileURLToPath(new URL('./release-launch.sh', import.meta.url)),
+  'utf8',
+);
 export const HISTORY_FILE = `${RELEASES}/.history`;
 export const LOCK_FILE = `${RELEASES}/.lock`;
 /** flock -E：另一个发布占着锁时回这个码（75，是这里自己给 flock 指定的，release.sh 没有这个码）。 */
@@ -66,7 +76,8 @@ export const USAGE = `用法：node release-train.mjs <命令>（在项目仓的
         0 预检（只读：主线 CI 绿、没有别的发布在跑、法国能读、列出挂了自动合并的 PR）→ 1 暂停本机（写标记，worker.mjs start 拒起新工人）
         → 2 暂停法国（记下总开关和各仓开关，fleet-api engine off；本来就关着记「跳过」）→ 3 等收尾（等：主线 CI 绿、法国在跑会话 0，各有上限，到点停下列出拖后腿的；
         本机在跑的工人、挂了自动合并没合的 PR 只提示、不等）→ 4 发版 → 5 等部署 → 6 验证 → 7 恢复 → 8 按最优顺序打印当前版本的清单
-        --sha：ssh 到法国，用目标提交自带的 release.sh 发（release-boot.sh 先解开那一版的包再 exec，不跑检出里还停着的旧脚本；决定 0032，#1294）
+        --sha：ssh 到法国，用目标提交自带的 release.sh 发（release-boot.sh 先解开那一版的包再 exec，不跑检出里还停着的旧脚本；决定 0032，#1294）；
+              发布在法国的 systemd 临时服务里跑，ssh 断了不影响，本机轮询到发完（最长 releaseMs），不当成失败（#1995）
         --founder-ok：发版是对外发布，必须带创始人原话，没带就拒（连暂停都不做）
         发完、健康检查过了，法国按暂停前记下的恢复：总开关和各仓接活开关开着的开回、关着的保持关（写操作记录；开不回去算没成、退出码 2）
         --restore：明写「发完开回去」，和不给一样（默认就恢复，不再要创始人逐次授权）
@@ -103,6 +114,49 @@ const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 export function releaseBootCommand(sha) {
   if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new Error(`自举不接受这个提交号：${sha}`);
   return `bash -c ${shq(RELEASE_BOOT_SH)} fleet-release-boot ${sha}`;
+}
+/**
+ * 第 4 步每个轮询周期 ssh 上去的命令（#1995）：release-launch.sh 整段 + 提交号 + 本趟令牌 + release-boot.sh（base64）。
+ * 法国上由 systemd 临时服务跑 release-boot.sh（它再 exec 目标提交自带的 release.sh），ssh 断了发布照跑。
+ * 令牌让同一趟里重发这条命令不会起第二个；换一趟（新的令牌）遇到服务还在跑就接着看，不起第二个。
+ */
+export function releaseLaunchCommand(sha, token) {
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new Error(`发版不接受这个提交号：${sha}`);
+  if (!/^[A-Za-z0-9]{1,40}$/.test(token)) throw new Error(`发版令牌不合格式：${token}`);
+  const b64 = Buffer.from(RELEASE_BOOT_SH, 'utf8').toString('base64');
+  return `bash -c ${shq(RELEASE_LAUNCH_SH)} fleet-release-launch ${sha} ${token} ${b64}`;
+}
+
+/**
+ * release-launch.sh 的回话 → { state, exit: 数字|null, log, tail } ；认不出回 null（当成没读到，不当成成功）。
+ * state 取 started | attached | finished | lost | busy | refused。
+ */
+export function parseLaunchReport(stdout) {
+  const text = String(stdout ?? '');
+  const head = text.split(/\r?\n---\r?\n?/, 1)[0] ?? '';
+  const kv = new Map();
+  for (const line of head.split(/\r?\n/)) {
+    const m = /^(state|exit|log)=(.*)$/.exec(line.trim());
+    if (m) kv.set(m[1], m[2]);
+  }
+  const state = kv.get('state');
+  if (!['started', 'attached', 'finished', 'lost', 'busy', 'refused'].includes(state ?? '')) return null;
+  const exitText = kv.get('exit') ?? 'none';
+  if (exitText !== 'none' && !/^\d+$/.test(exitText)) return null;
+  const rest = text.includes('\n---') ? text.slice(text.indexOf('\n---') + 4) : '';
+  return {
+    state,
+    exit: exitText === 'none' ? null : Number(exitText),
+    log: kv.get('log') ?? '',
+    tail: scrubText(
+      rest
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .slice(-5)
+        .join(' / '),
+    ),
+  };
 }
 /** 命令（run/ssh）没跑成：起不来、被超时杀、ssh 自己连不上。 */
 const didNotRun = (r) => r.error || r.status === null || r.status === 255;
@@ -634,23 +688,81 @@ async function releaseBySha(io, state) {
     io,
     `发版：ssh 到法国，用目标提交 ${sha.slice(0, 12)} 自带的 release.sh（检出里那份不跑；创始人原话：「${state.founderOk}」）`,
   );
-  // 发版 ssh 最长 releaseMs：期间每 pollMs 由外壳回调刷一次心跳（外壳在等 ssh 时事件循环是空的，定时器能跑）
-  const r = await io.ssh(releaseBootCommand(sha), {
-    timeoutMs: io.limits.releaseMs,
-    tickMs: io.limits.pollMs,
-    onTick: () => saveState(io, state),
-  });
   state.target.sha = sha;
-  if (didNotRun(r))
-    return failed(
-      `release.sh 没跑完整（${tailOf(r)}）：不知道发出去没有，先到法国看 ${HISTORY_FILE}，再同一个目标跑 start（同一个提交重发什么都不变）`,
-    );
-  if (r.status === 0) return { ok: true };
-  if (r.status === 2) {
-    sayTo(io, 'release.sh 退出码 2：没有红，但有待配的事项（验证那一步会再看）');
-    return { ok: true };
+  // 令牌记在状态里：同一趟（含 start 重跑）认得出「这个服务是我起的」，接着看日志，不起第二个。
+  // 发布没成（退出码非 0、没了）时清掉，下一次 start 才会真的重发。
+  state.release ??= {};
+  if (typeof state.release.token !== 'string' || !/^[A-Za-z0-9]{1,40}$/.test(state.release.token))
+    state.release.token = randomBytes(8).toString('hex');
+  saveState(io, state);
+  const command = releaseLaunchCommand(sha, state.release.token);
+  const clearToken = () => {
+    delete state.release.token;
+    saveState(io, state);
+  };
+  // 发布由法国上的 systemd 临时服务跑，ssh 只是回现状：断了（255、超时）重连接着看，不当成发布失败。
+  // 总时限 releaseMs，到点还没看到发完才判没成。
+  const started = io.now().getTime();
+  let lastNote = '';
+  let lastWhy = '';
+  let drops = 0;
+  const note = (text) => {
+    if (text !== lastNote) sayTo(io, text);
+    lastNote = text;
+  };
+  for (;;) {
+    saveState(io, state); // 心跳
+    const r = await io.ssh(command, { timeoutMs: 60_000 });
+    if (didNotRun(r)) {
+      drops += 1;
+      lastWhy = `ssh 断了或连不上（${tailOf(r)}）`;
+      note(`发版：${lastWhy}，法国上的发布不受影响，重连接着看（已断 ${drops} 次）`);
+    } else if (r.status !== 0) {
+      clearToken();
+      return failed(`起发布服务没成（退出码 ${r.status}）：${tailOf(r, 5)}`);
+    } else {
+      const rep = parseLaunchReport(r.stdout);
+      if (rep === null) {
+        lastWhy = `法国回话认不出：${tailOf(r)}`;
+        note(`发版：${lastWhy}，再看一次`);
+      } else if (rep.state === 'refused') {
+        clearToken();
+        return failed(`法国拒了这次发版入口：${rep.tail || tailOf(r)}`);
+      } else if (rep.state === 'lost') {
+        clearToken();
+        return failed(
+          `法国上的发布服务没了，日志里也没有退出码（${rep.log}：${rep.tail}）：不知道发出去没有，先到法国看 ${HISTORY_FILE} 和这份日志，再同一个目标跑 start`,
+        );
+      } else if (rep.state === 'finished') {
+        if (rep.exit === null) {
+          clearToken();
+          return failed(`法国上的发布结束了但没有退出码（${rep.log}）：不当成功`);
+        }
+        if (rep.exit === 0) return { ok: true };
+        if (rep.exit === 2) {
+          sayTo(io, 'release.sh 退出码 2：没有红，但有待配的事项（验证那一步会再看）');
+          return { ok: true };
+        }
+        clearToken();
+        return failed(`release.sh 退出码 ${rep.exit}（有红或已退回）：${rep.tail}`);
+      } else if (rep.state === 'busy') {
+        lastWhy = '法国上别的发布占着锁（.lock），不是这一趟起的';
+        note(`发版：${lastWhy}，等它放锁再起`);
+      } else {
+        lastWhy = '发布还在跑';
+        note(
+          rep.state === 'started'
+            ? `发版：已在法国起发布服务（日志 ${rep.log}），本机轮询看结果；ssh 断了不影响它`
+            : `发版：法国上这个提交的发布服务已经在跑（接着看，不起第二个；日志 ${rep.log}）`,
+        );
+      }
+    }
+    if (io.now().getTime() - started >= io.limits.releaseMs)
+      return failed(
+        `等了 ${minutes(io.limits.releaseMs)} 分钟没看到发布结束（最后一次：${lastWhy}）：不知道发出去没有，先到法国看 ${HISTORY_FILE}，再同一个目标跑 start（发布还在跑就接着看，不会起第二个）`,
+      );
+    await io.sleep(io.limits.pollMs);
   }
-  return failed(`release.sh 退出码 ${r.status}（有红或已退回）：${tailOf(r, 5)}`);
 }
 
 /** 每 pollMs 试一次 check()，done 就回；到点回 { ok: false, why: 最后一次的原因 }。check 回 fatal 立刻带出去。 */
@@ -1040,8 +1152,11 @@ async function resumeDead(io, state, v) {
   if (state.phase === 4) {
     const lock = await io.ssh(`flock -n -E ${BUSY} ${LOCK_FILE} -c true`, { timeoutMs: 60_000 });
     if (didNotRun(lock)) return fail(io, `驱动死在发版那一步，法国读不到（看发布锁）：${tailOf(lock)}`);
-    if (lock.status === BUSY)
-      return fail(io, '驱动死在发版那一步，法国上发布还在跑（.lock 被占着）：等它跑完再 start');
+    if (lock.status === BUSY) {
+      // 锁占着多半是上一趟起的发布服务还在跑（#1995）：不再报冲突，回第 4 步接着看它（令牌对得上就不起第二个）
+      sayTo(io, '驱动死在发版那一步，法国上发布还在跑（.lock 被占着）：回第 4 步接着看它，不起第二个');
+      return runFrom(io, state);
+    }
     if (lock.status !== 0) return fail(io, `驱动死在发版那一步，看发布锁没成：${tailOf(lock)}`);
     const h = await historyTail(io);
     if (!h.ok) return fail(io, `驱动死在发版那一步，不知道发成没有，不敢猜：${h.why}`);
