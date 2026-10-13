@@ -1051,6 +1051,8 @@ export function createSeed(now: number): MockState {
     seg('t-20', 20, 'verify', 'gpt-5.6-luna', -29, -22),
   ]);
   addSeg('t-21', [seg('t-21', 21, 'scope', 'sonnet-5', -4)]);
+  // #5 对题过一次、被发版清空收了又回去排队，那一笔没记内存峰值：卡片写「上次峰值没读到」，不画 0
+  addSeg('t-s5', [seg('t-s5', 5, 'scope', 'opus-5.5', -28, -24)]);
   addSeg('t-c7', [
     seg('t-c7', 7, 'scope', 'opus-5.5', -90, -84),
     seg('t-c7', 7, 'manual', 'opus-5.5', -82, -57, { tier: 'fast' }),
