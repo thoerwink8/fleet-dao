@@ -2,6 +2,7 @@
 // 库里只存读数。这一份不写「落后」，发布源没给版本列表时也不拿单元素列表冒充。
 import { describe, expect, it } from 'vitest';
 import {
+  attachCliUpgrade,
   buildCliToolsResponse,
   cliToolStatus,
   compareVersions,
@@ -240,6 +241,68 @@ describe('两个用户分开列，全局 npm 不按用户重复', () => {
     expect(view.groups[2]?.rows.map((r) => r.tool)).toEqual(['kimi-code', 'dsh', 'pi']);
     expect(view.groups[2]?.rows.find((r) => r.tool === 'pi')?.status.label).toBe('读不到');
     expect(CliToolsResponseSchema.safeParse(view).success).toBe(true);
+  });
+});
+
+describe('升级结果挂到版本行上', () => {
+  it('升完的版本和上次升级时间挂到对应的人；没写渠道的也挂上跳过；全局 npm 不挂', () => {
+    const view = attachCliUpgrade(buildCliToolsResponse([], at), {
+      state: 'ok',
+      reason: null,
+      tools: [
+        {
+          id: 'claude-code',
+          version: '2.1.287',
+          upgradedAt: '2026-10-12T12:00:01.000Z',
+          outcome: 'ok',
+          detail: '升到 2.1.287',
+        },
+        {
+          id: 'grok',
+          version: '1.0.50',
+          upgradedAt: '2026-10-12T12:00:02.000Z',
+          outcome: 'ok',
+          detail: '升到 1.0.50',
+        },
+        {
+          id: 'cursor-agent',
+          version: '2026.10.01',
+          upgradedAt: null,
+          outcome: 'skipped',
+          detail: '没写渠道，不升',
+        },
+      ],
+    });
+    const claude = (owner: string) =>
+      view.groups.find((g) => g.owner === owner)?.rows.find((r) => r.tool === 'claude');
+    expect(claude('fleet-agent-carpool')?.upgrade).toMatchObject({
+      version: '2.1.287',
+      upgradedAt: '2026-10-12T12:00:01.000Z',
+      outcome: 'ok',
+    });
+    expect(claude('pilot')?.upgrade?.version).toBe('2.1.287');
+    const grok = (owner: string) =>
+      view.groups.find((g) => g.owner === owner)?.rows.find((r) => r.tool === 'grok');
+    expect(grok('fleet-agent-carpool')?.upgrade?.version).toBe('1.0.50');
+    expect(grok('pilot')?.upgrade).toBeNull();
+    expect(
+      view.groups.find((g) => g.owner === 'fleet-agent-carpool')?.rows.find((r) => r.tool === 'cursor-agent')
+        ?.upgrade?.outcome,
+    ).toBe('skipped');
+    expect(view.groups.find((g) => g.scope === 'npm')?.rows.every((r) => r.upgrade === null)).toBe(true);
+    expect(view.upgradeNote).toBeNull();
+    expect(CliToolsResponseSchema.safeParse(view).success).toBe(true);
+  });
+
+  it('【故意造出的失败】升级结果认不出：版本行还在，写明没查成，不假装还没升过', () => {
+    const view = attachCliUpgrade(buildCliToolsResponse([], at), {
+      state: 'unreadable',
+      reason: '升级结果不是 JSON',
+      tools: [],
+    });
+    expect(view.upgradeNote).toBe('升级结果不是 JSON');
+    expect(view.groups[0]?.rows.every((r) => r.upgrade === null)).toBe(true);
+    expect(view.groups[0]?.rows.length).toBeGreaterThan(0);
   });
 });
 

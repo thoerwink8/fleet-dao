@@ -40,6 +40,35 @@ describe('法国页命令行工具', () => {
     expect(row('fleet-agent-carpool', 'codex').textContent).toContain('在用 0.156.1');
     expect(row('pilot', 'codex').textContent).toContain('在用 0.162.1');
     expect(screen.queryByRole('button', { name: /升级/ })).toBeNull();
+    expect(screen.queryByText('已升级')).toBeNull();
+    expect(row('fleet-agent-carpool', 'claude').textContent ?? '').not.toContain('上次升级');
+  });
+
+  test('升完看得到新版本和上次升级时间', async () => {
+    const inner = createMockApi({ live: false });
+    const body = await inner.franceCliTools();
+    if (body.state !== 'ok') throw new Error('假数据应该查得成');
+    for (const group of body.groups) {
+      for (const item of group.rows) {
+        if (group.owner === 'fleet-agent-carpool' && item.tool === 'claude') {
+          item.upgrade = {
+            upgradedAt: '2026-10-12T12:00:01.000Z',
+            outcome: 'ok',
+            version: '2.1.287',
+            detail: '升到 2.1.287',
+          };
+        }
+      }
+    }
+    const api = { ...inner, franceCliTools: () => Promise.resolve(body) } as MockApi;
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
+    expect(await screen.findAllByText('Claude Code')).toHaveLength(2);
+    const line = row('fleet-agent-carpool', 'claude');
+    expect(line.textContent).toContain('2.1.287');
+    expect(line.textContent).toContain('上次升级');
+    expect(within(line).getByText('已升级')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /升级/ })).toBeNull();
+    expect(within(row('pilot', 'claude')).queryByText('已升级')).toBeNull();
   });
 
   test('【故意造出的失败】读不到写读不到和原因，没查成写原因，不写成最新', async () => {

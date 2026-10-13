@@ -393,10 +393,12 @@ export function buildCliToolsResponse(readings: readonly CliToolReading[], asOf:
       latest: latestCell(reading),
       status: statusOf(reading),
       checkedAt: reading ? iso(reading.checkedAt) : null,
+      upgrade: null as CliUpgradeStamp | null,
     };
   };
   return {
     state: 'ok' as const,
+    upgradeNote: null as string | null,
     groups: [
       ...CLI_SESSION_USERS.map((user) => ({
         scope: 'user' as const,
@@ -412,5 +414,80 @@ export function buildCliToolsResponse(readings: readonly CliToolReading[], asOf:
       },
     ],
     asOf: iso(asOf),
+  };
+}
+
+export const CLI_UPGRADE_OUTCOMES = ['ok', 'current', 'skipped', 'failed', 'rolled-back', 'refused'] as const;
+export type CliUpgradeOutcome = (typeof CLI_UPGRADE_OUTCOMES)[number];
+
+export interface CliUpgradeStamp {
+  upgradedAt: string | null;
+  outcome: CliUpgradeOutcome | null;
+  version: string | null;
+  detail: string;
+}
+
+/** 升级结果里的工具编号对到版本表的哪一行。没写的不挂。Claude、Codex 是全局二进制，两个用户都挂。 */
+const UPGRADE_LINKS: Record<string, { tool: string; owners?: readonly string[] }> = {
+  'claude-code': { tool: 'claude' },
+  codex: { tool: 'codex' },
+  grok: { tool: 'grok', owners: ['fleet-agent-carpool'] },
+  'cursor-agent': { tool: 'cursor-agent', owners: ['fleet-agent-carpool'] },
+  reclaude: { tool: 'reclaude', owners: ['fleet-agent-carpool'] },
+};
+
+export interface CliUpgradeAttachInput {
+  state: 'ok' | 'unreadable';
+  reason: string | null;
+  tools: readonly {
+    id: string;
+    version: string | null;
+    upgradedAt: string | null;
+    outcome: CliUpgradeOutcome | null;
+    detail: string;
+  }[];
+}
+
+type UpgradeRow = { scope: 'user' | 'npm'; owner: string; tool: string; upgrade: CliUpgradeStamp | null };
+type UpgradeView = {
+  state: 'ok';
+  upgradeNote: string | null;
+  groups: { rows: UpgradeRow[]; scope: 'user' | 'npm'; owner: string }[];
+};
+
+/**
+ * 把升级结果挂到版本表的对应行上。版本读数不动。
+ * 升级结果认不出：upgradeNote 写原因，行上不挂，不当成还没升过。
+ */
+export function attachCliUpgrade<T extends UpgradeView>(view: T, upgrade: CliUpgradeAttachInput): T {
+  if (upgrade.state === 'unreadable') {
+    return { ...view, upgradeNote: upgrade.reason?.trim() || '升级结果读不到' };
+  }
+  const stamps = new Map<string, CliUpgradeStamp>();
+  for (const tool of upgrade.tools) {
+    if (!UPGRADE_LINKS[tool.id]) continue;
+    stamps.set(tool.id, {
+      upgradedAt: tool.upgradedAt,
+      outcome: tool.outcome,
+      version: tool.version,
+      detail: tool.detail,
+    });
+  }
+  return {
+    ...view,
+    upgradeNote: null,
+    groups: view.groups.map((group) => ({
+      ...group,
+      rows: group.rows.map((row) => {
+        if (row.scope !== 'user') return { ...row, upgrade: null };
+        for (const [id, stamp] of stamps) {
+          const link = UPGRADE_LINKS[id];
+          if (!link || link.tool !== row.tool) continue;
+          if (link.owners && !link.owners.includes(row.owner)) continue;
+          return { ...row, upgrade: stamp };
+        }
+        return { ...row, upgrade: null };
+      }),
+    })),
   };
 }
