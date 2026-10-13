@@ -55,7 +55,7 @@ node deploy/reclaude-old-account-clean.mjs --all-homes --apply
 | `status=skipped` `reason=no-reclaude` | 这台没装 reclaude，那份 oauth 就是当前登录，不在本文范围 |
 | `other-homes=not-scanned` 或退出码 2 且写着 passwd | 别的用户没扫成 |
 
-`node deploy/machine-check.mjs` 会报 `old-claude-account`（只读，不删）。红了就跑上面的 `--apply`。没装 reclaude 的机器这项不报。
+不带 `--apply` 跑 `node deploy/reclaude-old-account-clean.mjs` 只读、不删，`status=dirty` 就跑上面的 `--apply`。没装 reclaude 的机器报 `skipped`。
 
 先停掉 `claude`，再停掉 `reclaude`，等进程真退出，然后 `--apply`。两头都会把旧登录写回去：`claude` 退出时写内存里那份；`reclaude` 发现本地凭证空了，会写日志 `检测到本地 Claude 凭证缺失/被清空，已用当前登录自动恢复`，把那份登录填回 `~/.claude.json` 和 `.credentials.json`。
 
@@ -64,7 +64,7 @@ node deploy/reclaude-old-account-clean.mjs --all-homes --apply
 - `status=clean`：这台清掉了。
 - oauth 又在，邮箱仍和 `device.json` 的 `user_email` 不同：reclaude 把这份当成当前登录，本地删文件留不住。不要隔几分钟删一次。记下这台机器、哪一家目录。要去掉它，是换 reclaude 里的这份登录，不是再删文件。
 
-（2026-09-26 在本机 Windows 上实测到的就是后一种：清完 `status=clean`，一拉起 reclaude，同一份 oauth 又回来了，`machine-check` 的 `old-claude-account` 照旧红。）
+（2026-09-26 在本机 Windows 上实测到的就是后一种：清完 `status=clean`，一拉起 reclaude，同一份 oauth 又回来了，清账号脚本不带 `--apply` 再跑仍然是 `dirty`。）
 
 ## 1.1 被封的号
 
@@ -89,11 +89,11 @@ pnpm mirasim:migrate --check
 #   退出 0：当前新版已核文件和目标；75：仍待迁移；1：没查成
 #   红：✗ … = reclaude（裸 reclaude = 自有流量会被 Mirasim 网关转出去，正是上报的来源）
 
-# ② 两道体检闸
-node deploy/machine-check.mjs | grep -i reclaude
-#   绿：没有 reclaude-launch-bare / reclaude-shim-missing / old-claude-account
-#   红：reclaude-launch-bare（装了 reclaude 却用裸 reclaude）、reclaude-shim-missing（命令指向不存在的启动器）、
-#       old-claude-account（第 1 节还没清）
+# ② 旧账号残留（只读，不带 --apply）
+node deploy/reclaude-old-account-clean.mjs
+#   绿：status=clean；skipped（没装 reclaude）不算绿也不算红
+#   红：status=dirty（第 1 节还没清）；退出码 2 或 unscanned = 没查成
+#   裸 reclaude 和启动器缺失由 ① 的 pnpm mirasim:migrate --check 报
 
 # ③ reclaude 自己记的上报状态
 python3 -c "import json;print(json.load(open('$HOME/.reclaude/state.json'))['daemon'].get('leak_report'))"
@@ -106,7 +106,7 @@ grep -rl "non_cc_client" ~/.mirasim/traffic/ | head
 ```
 
 判定口径（别搞反）：**账本里这些会话的用量显示「未知」是预期的**（接对之后请求不再经过 Mirasim 网关），
-不能用「用量有没有涨」当判据；判据是 ①② 两条闸 + ③④ 有没有**新的**上报。
+不能用「用量有没有涨」当判据；判据是 ①② 两步 + ③④ 有没有**新的**上报。
 
 ## 3. 绿了之后仍然会红的两件事（不是启动器的问题）
 
@@ -124,7 +124,7 @@ grep -rl "non_cc_client" ~/.mirasim/traffic/ | head
 
 - 第 1 节退出码 2、`status=unscanned`、`memory=not-scanned`、`memory=no-id-source` 都不是「查过没事」。
 - ① 读不到 `setting.json` 会报「没查成」，不是绿。
-- ② 体检项在「这台机器根本没装 reclaude」时显式 skip（`no-reclaude`），不是绿；`old-claude-account` 在读不到 `user_email` 时记没查成，不是绿。
+- ② 在「这台机器根本没装 reclaude」时显式 skip（`no-reclaude`），不是绿；读不到 `user_email` 时记没查成，不是绿。
 - ③ `state.json` 读不到 = 没查成。
 - ④ `~/.mirasim/traffic/` 不存在 = 没查成（不是「干净」）。
 

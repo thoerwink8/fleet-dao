@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034 # DDGS_HAVE、CLI_TOOL_BAD 是给调用方读的
-# 给一个用户装、查 ddgs（skill docs-lookup 首选的搜索命令行）：以他自己的身份 uv tool install，装在他自己家里
+# 给一个用户装、查 ddgs（会话里查网页用的搜索命令行）：以他自己的身份 uv tool install，装在他自己家里
 # （~/.local/share/uv/tools/ddgs，命令链到 ~/.local/bin/ddgs），写出来的都归他。只用系统的 Python，不让 uv 另下一个。
 # ddgs 自己和它的依赖都钉死版本（依赖里 primp、lxml 带编译好的二进制，不钉就是每次新装拿当时最新的）；
 # 这些是 PyPI 上的包，只钉版本、不核校验和。装和查都按虚拟环境里实际装着的逐个核对，不只看 ddgs 自己的版本号。
@@ -145,6 +145,6 @@ check_ddgs() { # 用户 版本 依赖（名==版本）…
   elif ! ddgs_pinned "$u" "$want" "$@"; then
     red "$u：$CLI_TOOL_BAD"
   else
-    ok "$u 的 ddgs 是 $DDGS_HAVE，依赖和钉住的一样（docs-lookup 首选的搜索命令行）"
+    ok "$u 的 ddgs 是 $DDGS_HAVE，依赖和钉住的一样（会话里查网页用的搜索命令行）"
   fi
 }
