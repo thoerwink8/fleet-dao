@@ -29,6 +29,8 @@ import {
   FranceReleaseStateSchema,
   ReleaseCardSchema,
   ReleasedCommitsSchema,
+  ReleaseRecoverBody,
+  ReleaseRecoverResponse,
   ReleaseRequestBody,
   ReleaseRequestResponse,
 } from './france-release.ts';
@@ -127,6 +129,13 @@ export const WebRoutes = {
     path: '/france/release',
     request: ReleaseRequestBody,
     response: ReleaseRequestResponse,
+  },
+  /** /france 页发版卡卡住、失败后的三个按钮（#2027）：重试、恢复引擎开关、撤掉暂停；只收种类，后端按进度记录核能不能点，记操作记录，写请求文件。 */
+  franceReleaseRecover: {
+    method: 'POST',
+    path: '/france/release-recover',
+    request: ReleaseRecoverBody,
+    response: ReleaseRecoverResponse,
   },
   /** /france 页「发版预检」：后端进程内读七项事实，不起子进程、不收参数。退出码 0 能发，2 不能发。 */
   francePreflight: { method: 'POST', path: '/france/preflight', response: FrancePreflightResponseSchema },
