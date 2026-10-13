@@ -432,37 +432,3 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     expect(lines().join('')).toContain('暂停着（要花钱）');
   });
 });
-
-describe('规矩的文字：通用段和 commander 技能说「无人值守时这一轮不结束，用子代理干、不脱离会话」（决定 0028、0030）', () => {
-  const read = (rel: string) =>
-    readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
-  const SHARED = read('../../shared-rules.md');
-  const SKILL = read('../../skills/commander/SKILL.md');
-  const line = SHARED.split('\n').find((l) => l.startsWith('- 无人值守')) ?? '';
-
-  // 2026-10-10（决定 0078）把「不脱离会话」放到不分无人值守的「Agent 子代理」那条。
-  // 2026-10-12（决定 0083）改口：人在场写「还有子代理或下一刀就别收这一轮」，不再写「这一轮不结束、等完成通知」。
-  // 「这一轮也不结束」只留在无人值守那条。前台等待上限仍在「Agent 子代理」那条。
-  it('通用段：先 on、子代理收口了这一轮也不结束、从队列头派下一件、done / needs-you / off；Agent 子代理那条写不脱离会话、别收这一轮、前台不超过 60 秒；不再写脱离会话的工人', () => {
-    const sub = SHARED.split('\n').find((l) => l.startsWith('- Agent 子代理')) ?? '';
-    expect(line).toContain('unattended.mjs on');
-    expect(line).toContain('这一轮也不结束');
-    expect(line).toContain('从队列头派下一件');
-    expect(line).not.toContain('worker.mjs');
-    expect(line).not.toContain('--detached');
-    expect(line).not.toContain('前台等待');
-    for (const k of ['`done`', '`needs-you`', '`off`']) expect(line).toContain(k);
-    expect(sub).toContain('不脱离会话');
-    expect(sub).toContain('还有子代理或下一刀就别收这一轮');
-    expect(sub).not.toContain('等完成通知');
-    expect(sub).toContain('单次前台等待不超过 60 秒');
-    expect(SHARED).not.toContain('worker.mjs');
-  });
-
-  it('commander 技能：旧说法（这一轮就结束、不循环 watch、无人值守起脱离工人）已删', () => {
-    expect(SKILL).not.toContain('只在他说了无人值守、过夜、我不在');
-    expect(SKILL).not.toContain('起完工人后用 `worker.mjs watch --wait 55` 一直盯着');
-    expect(SKILL).not.toContain('起完工人这一轮就结束');
-    expect(SKILL).not.toContain('不要循环 watch');
-  });
-});

@@ -2,7 +2,7 @@
 
 - 日期：2026-10-12（北京时间 17:14）
 - 谁拍的：创始人在对话里选定（原话见下）。改标准，引入它的 PR 合并即生效。
-- 状态：创始人已选定，PR 合并即生效。
+- 状态：生效（#1952）；第 1 条被 0089 替代（派完就收这一轮，删前台等待上限）。
 - 关联：`agents/shared-rules.md`、`agents/skills/commander/SKILL.md`、`agents/hooks/main-thread.mjs`、`agents/hooks/stop.mjs`、`packages/agents-sync/src/targets.ts`、仓根 `.claude/settings.json`、`docs/writing.md`。
 - 取代：0078 里「钩子从 Mirasim 取原文先转、不用结束这一轮」和「派了子代理这一轮就不结束，不分无人值守与否」。先回一句、子代理后台跑、`SendMessage` 转达、一轮结束不杀后台子代理，仍照 0078。
 

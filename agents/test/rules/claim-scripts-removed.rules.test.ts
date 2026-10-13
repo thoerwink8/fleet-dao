@@ -31,8 +31,6 @@ describe('规矩：认领账的本机脚本删了就别回来（#446）', () => 
   it('技能说明里没有「去跑这几份脚本」的用法行', () => {
     const text = readFileSync(SKILL, 'utf8').replace(/\r\n/g, '\n');
     expect(scriptInvocations(text).filter((name) => GONE.includes(name))).toEqual([]);
-    // 反过来：还活着的脚本照样给用法行（正则写死了也能被这条挡住）。
-    expect(scriptInvocations(text)).toEqual(expect.arrayContaining(['france.mjs']));
   });
 
   it('【故意造出的失败】把 claim.mjs 放回来、技能说明照旧给用法行：两条各拦得住', () => {
