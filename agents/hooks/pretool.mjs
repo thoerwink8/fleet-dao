@@ -2023,60 +2023,116 @@ export function isClaudeCodeInput(input) {
   );
 }
 
-// —— cd 进目录再查看 ——
-// 两天约 7800 次 `cd <目录> && cat/sed -n/head/…`（决定 0089）：Read、Grep、Glob 写绝对路径一次就到，git、pnpm 有 -C / --dir。
-// 只拦「整条就是 cd 一下、后面全是只读查看」的；夹了别的命令（cd x && pnpm test）、钩子看不清的写法（$( )、变量、重定向、循环）都不拦。
+// —— N1 递归删除护栏 ——
+// 2026-09-29 C 盘被 grok 删过一次，这类规则原来 0 条。只拦字面写出来的：rm -r*、Remove-Item -Recurse（及别名）、rd/rmdir/del/erase /s，
+// 目标是盘符根、C:\Windows 及其下、Program Files*、ProgramData、用户目录和 AppData 顶层、主检出的 .git。
+// 看得穿 sudo、bash -c、pwsh -Command、cmd /c；看不穿的（robocopy /MIR、Get-ChildItem | Remove-Item、node -e fs.rmSync、python shutil.rmtree）不管。
 
-const CD_NAMES = opts('cd pushd chdir set-location sl');
-/** 只读查看：cat、head、tail、grep、rg、ls、type、Get-Content（sed 要带 -n 才算） */
-const VIEWERS = opts('cat head tail grep egrep fgrep rg ls type get-content gc sed wc sort uniq');
+const RM_NAMES = opts('rm ri del erase rd rmdir remove-item');
 
 /**
- * @param {SimpleCmd} c
- * @returns {boolean}
+ * 一个删除目标写成统一的小写正斜杠形式；~、$HOME、%USERPROFILE%、$env:USERPROFILE 都换成 c:/users/~，
+ * /c/…、/mnt/c/…、/cygdrive/c/… 换成 c:/…
+ * @param {string} text
+ * @returns {string}
  */
-function isViewerCmd(c) {
-  if (c.redirects.length > 0) return false;
-  if (c.words.some((w) => w.value.includes('$') || /[`]/.test(w.raw))) return false;
-  const u = unwrap(c.words);
-  if (!u.leaf || u.leaf.viaXargs || u.leaf.name !== cmdName(c.words[0]?.value)) return false;
-  if (!VIEWERS.has(u.leaf.name)) return false;
-  if (u.leaf.name === 'sed') {
-    const flags = u.leaf.args.map((a) => a.value).filter((v) => /^-[A-Za-z]+$/.test(v));
-    return flags.some((v) => v.includes('n')) && !flags.some((v) => v.includes('i'));
-  }
-  return true;
+function normDeleteTarget(text) {
+  let p = text
+    .replace(/^['"]+|['"]+$/g, '')
+    .replace(/\\/g, '/')
+    .replace(/\/{2,}/g, '/')
+    .toLowerCase();
+  p = p
+    .replace(/^(?:~|\$\{?home\}?|%userprofile%|\$env:userprofile)(?=\/|$)/, 'c:/users/~')
+    .replace(/^(?:%systemroot%|%windir%|\$env:systemroot|\$env:windir)(?=\/|$)/, 'c:/windows')
+    .replace(/^(?:%programfiles%|\$env:programfiles)(?=\/|$)/, 'c:/program files')
+    .replace(/^(?:%programdata%|\$env:programdata)(?=\/|$)/, 'c:/programdata')
+    .replace(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?=\/|$)/, '$1:');
+  // 末尾的 / 、/* 、/. 、* 都是「这一层」
+  p = p.replace(/(?:\/\*|\/\.|\/|\*)+$/, '');
+  return p === '' && text.trim().startsWith('/') ? '/' : p;
 }
 
 /**
- * `cd <目录> && <只读查看>` 拦下；不是这种、认不出都返回 null
- * @param {string} cmd
+ * @param {string} target 已经 normDeleteTarget 过
+ * @param {string} cwd 小写正斜杠的会话目录
+ */
+function isProtectedDeleteTarget(target, cwd) {
+  const drive = '[a-z]:';
+  const home = `${drive}/users/[^/]+`;
+  return (
+    target === '/' ||
+    new RegExp(`^${drive}$`).test(target) ||
+    new RegExp(`^${drive}/(?:windows|programdata|program files[^/]*)(?:/|$)`).test(target) ||
+    new RegExp(`^${drive}/users$`).test(target) ||
+    new RegExp(`^${home}(?:/appdata)?$`).test(target) ||
+    /(?:^|\/)fleet-dao\/\.git(?:\/|$)/.test(target) ||
+    (/^(?:\.\/)?\.git(?:\/|$)/.test(target) && /(?:^|\/)fleet-dao$/.test(cwd))
+  );
+}
+
+/**
+ * 命令行里有没有递归删到受保护目录的；有返回 block
+ * @param {string} text
  * @param {Kind} kind
+ * @param {string} cwd
+ * @param {number} depth
  * @returns {Block | null}
  */
-export function cdReadVerdict(cmd, kind) {
-  /** @type {ReturnType<typeof scanCommand>} */
-  let scanned;
-  try {
-    scanned = scanCommand(cmd, kind);
-  } catch {
-    return null;
+function recursiveDeleteLine(text, kind, cwd, depth) {
+  if (depth > 4) return null;
+  for (const c of scanCommand(text, kind).pipelines.flat()) {
+    const u = unwrap(c.words);
+    if (u.nested) {
+      const r = recursiveDeleteLine(u.nested.text, u.nested.kind, cwd, depth + 1);
+      if (r) return r;
+      continue;
+    }
+    const leaf = u.leaf;
+    if (!leaf || !RM_NAMES.has(leaf.name)) continue;
+    const args = leaf.args;
+    const values = args.map((a) => a.value);
+    const cmdStyle =
+      ['del', 'erase', 'rd', 'rmdir'].includes(leaf.name) && values.some((v) => /^\/s(?:\/|$)/i.test(v));
+    const recursive =
+      cmdStyle ||
+      values.some(
+        (v) =>
+          (leaf.name === 'rm' && /^-[rRfivIdPx]*[rR][rRfivIdPx]*$/.test(v)) ||
+          v === '--recursive' ||
+          /^-rec(?:u(?:r(?:s(?:e)?)?)?)?$/i.test(v),
+      );
+    if (!recursive) continue;
+    for (const a of args) {
+      // /s /q /f 这类 cmd 开关和 -rf、-Force 这类选项不是目标；cmd 的开关只在 cmdStyle 时认，免得把 msys 的 /c 盘当成开关
+      if (a.value.startsWith('-') || (cmdStyle && /^\/[a-z?](?:\/[a-z?])*$/i.test(a.value))) continue;
+      // 反斜杠在 bash 的词里被当成转义吃掉了，C:\Windows 会变成 C:Windows：原文和去引号后的值都查
+      for (const t of new Set([a.value, a.raw])) {
+        const target = normDeleteTarget(t);
+        if (isProtectedDeleteTarget(target, cwd)) {
+          return block(
+            `fleet-guard：这条命令递归删除「${a.value}」，那是盘符根、系统目录、用户目录顶层或主检出的 .git，按拦处理。要清的是工作目录里的东西就写到具体的子目录；确实要删请创始人自己来。`,
+          );
+        }
+      }
+    }
   }
-  const { pipelines, complex } = scanned;
-  if (complex.length > 0 || pipelines.length < 2) return null;
-  const [first, ...rest] = pipelines;
-  const cd = first?.length === 1 ? first[0] : undefined;
-  if (!cd || cd.redirects.length > 0) return null;
-  const words = cd.words.map((w) => w.value);
-  if (!CD_NAMES.has(cmdName(words[0]))) return null;
-  const args = words.slice(1).filter((v, i) => !(i === 0 && /^-(?:literal)?path$/i.test(v)));
-  const dir = args[0];
-  if (args.length !== 1 || dir === undefined || dir === '' || dir.startsWith('-') || dir.includes('$'))
-    return null;
-  if (!rest.every((p) => p.length > 0 && p.every(isViewerCmd))) return null;
-  return block(
-    `fleet-guard：别 cd 进目录再查看（cd ${dir} 后面只是查看）：读文件用 Read、搜内容用 Grep、找文件用 Glob 工具，都写绝对路径（${dir}/<文件>）；git 用 \`git -C ${dir} …\`，pnpm 用 \`pnpm --dir ${dir} …\`。`,
-  );
+  return null;
+}
+
+/**
+ * @param {string} command heredoc 正文已经去掉
+ * @param {Kind} kind
+ * @param {string} cwd
+ * @returns {Block | null}
+ */
+function recursiveDeleteVerdict(command, kind, cwd) {
+  if (!/(?:^|[^\w-])(?:rm|ri|del|erase|rd|rmdir|remove-item)(?:\.exe)?(?![\w-])/i.test(command)) return null;
+  try {
+    return recursiveDeleteLine(command, kind, cwd.split('\\').join('/').toLowerCase(), 0);
+  } catch (err) {
+    return block(`fleet-guard：钩子没看懂这条删除命令（${messageOf(err) ?? err}），按拦处理`);
+  }
 }
 
 /**
@@ -2131,10 +2187,11 @@ export function decide(raw, fallbackCwd = '') {
   // Claude Code 里看得清的，改写成接上 redactor 放行（下面的检查照做完，都过了才放）；别的照拦。
   const listing = processListingVerdict(cmd, kind, claudeCode && (kind === 'bash' || kind === 'powershell'));
   if (listing && 'code' in listing) return listing;
-  if (claudeCode) {
-    const cdRead = cdReadVerdict(cmd, kind);
-    if (cdRead) return cdRead;
-  }
+  // heredoc 正文只是文字，不会被执行：开单、切号、stash、reset 这四条和删除护栏只判命令行本身（outer）。
+  // 引号里的（bash -c 'git stash'、ssh 机器 "git reset --hard"）照拦；反引号那条不动，不带引号的 heredoc 里反引号真会被 bash 执行。
+  const { outer } = splitHeredocs(cmd);
+  const del = recursiveDeleteVerdict(outer, kind, rawCwd);
+  if (del) return del;
   // 2026-09-26 撞过两回：子代理拼命令时反引号误跑了切号登录；总指挥 node -e "…`specs/…/需求.md`…" 把整份需求文档当脚本执行了。
   // PowerShell 里反引号是转义符，不归这条管；别家的终端是不是 bash 说不准，也不管。不分仓，全机都拦。
   if (kind === 'bash' && bashBacktickSubst(cmd)) {
@@ -2147,7 +2204,7 @@ export function decide(raw, fallbackCwd = '') {
   const otherRepo = repoFlag !== undefined && !/(?:^|\/)fleet-dao$/i.test(repoFlag);
   // 下面这句用法是照 packages/conventions/src/issue-new.ts 的 USAGE 抄的（钩子装到各台机器上单独跑，引用不了仓里的包）：
   // 开单脚本的参数一改，这里跟着改——#654 删了 --specs 这里漏改过，照着做被拒（agents/test/pretool-bom.test.ts 钉着）。
-  if (inFleet && /\bgh\s+issue\s+create\b/.test(cmd) && !otherRepo) {
+  if (inFleet && /\bgh\s+issue\s+create\b/.test(outer) && !otherRepo) {
     return block(
       'fleet-dao 开单一律用 `pnpm issue:new --kind <需求|缺陷|杂项> --milestone <版本全名|v<N>|未排期> --title "一句话" --body-file 正文.md`（正文要有写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节；母单加 --mother，子单加 --parent <母单号>，留给本机做的加 --local、开单那一刻就贴），不直接 gh issue create（会漏类别标签、里程碑和正文四节的检查）。',
     );
@@ -2157,13 +2214,13 @@ export function decide(raw, fallbackCwd = '') {
   // ssh 开头也不放行反引号、$( ) 里的：本机 bash 会先把它们执行掉，根本到不了远端。
   const rc = String.raw`\breclaude\s+(?:login|logout|org\s+use)\b`;
   const localSubst = new RegExp(String.raw`\x60[^\x60]*${rc}[^\x60]*\x60|\$\([^)]*${rc}`);
-  if (new RegExp(rc).test(cmd) && (!/^\s*ssh\s/.test(cmd) || localSubst.test(cmd))) {
+  if (new RegExp(rc).test(outer) && (!/^\s*ssh\s/.test(outer) || localSubst.test(outer))) {
     return block(
       "本机有 Claude 会话在跑：不许在本机跑 reclaude login / logout / org use（会让本机所有会话当场断掉）。要切号请创始人自己来；要在别的机器上跑，用 ssh <机器> '…'。",
     );
   }
   // stash 栈是整个仓（所有工作树）共用一个：两个会话同时 stash/pop 会拿到对方的改动（2026-09-26 撞过）
-  if (inFleet && /\bgit\b[^|;&\n]*\sstash\b(?!\s+(?:list|show)\b)/.test(cmd)) {
+  if (inFleet && /\bgit\b[^|;&\n]*\sstash\b(?!\s+(?:list|show)\b)/.test(outer)) {
     return block(
       'fleet-dao 里不用 git stash：stash 栈所有工作树共用，并行会话会互相拿错改动。临时存改动用 `git diff > 文件` / `git apply 文件`，或先提交到自己分支。',
     );
@@ -2171,7 +2228,7 @@ export function decide(raw, fallbackCwd = '') {
   // 2026-10-05 撞过：git reset --hard 把主检出一份还没验证的活回滚丢了。限制 fleet 仓的 Bash/PowerShell
   // 两条钩子管得着的壳，和「不用 git stash」那条并列。要回滚先提交个工作分支再 reset；
   // 想放下不要的活先 `git diff > _tmp/xxx.patch` 留底，或提交到自己分支（stash 被上一条拦，别指给人用）。
-  if (inFleet && /\bgit\b[^|;&\n]*\sreset\b[^|;&\n]*\s--hard\b/.test(cmd)) {
+  if (inFleet && /\bgit\b[^|;&\n]*\sreset\b[^|;&\n]*\s--hard\b/.test(outer)) {
     return block(
       'fleet-dao 里不用 git reset --hard：会把工作区覆盖掉，过去把主检出还没验证的活丢过。要回滚某个提交：先把当前进度 `git commit` 到分支或工作树，要丢弃改动先 `git diff > _tmp/xxx.patch` 留底，或提交到自己分支，再决定要不要真扔。',
     );
@@ -2224,6 +2281,28 @@ export function subagentFreshness(raw, { fresh = freshBeforeSubagent, cwd = proc
   }
 }
 
+/**
+ * Agent（Task）的 model 是 fable、claude-fable-*，或带 [1m] 后缀就拦；认不出输入、不是 Agent、没写 model 都返回 null
+ * @param {string} raw 钩子的原始输入
+ * @returns {Block | null}
+ */
+export function agentModelVerdict(raw) {
+  /** @type {unknown} */
+  let input;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const tool = prop(input, 'tool_name') ?? prop(input, 'toolName');
+  if (tool !== 'Agent' && tool !== 'Task') return null;
+  const model = prop(prop(input, 'tool_input') ?? prop(input, 'toolInput'), 'model');
+  if (typeof model !== 'string' || !(/fable/i.test(model) || /\[1m\]\s*$/i.test(model))) return null;
+  return block(
+    `fleet-guard：子代理的 model 不能写 ${model}（fable 和带 [1m] 的型号不派给子代理）；改用 opus、sonnet 或 haiku，或不写 model 让它继承。`,
+  );
+}
+
 function isMain() {
   const entry = process.argv[1];
   if (!entry) return false;
@@ -2239,6 +2318,13 @@ if (isMain()) {
   } catch (err) {
     process.stderr.write(`fleet-guard：读不到钩子输入（${errCode(err) ?? err}），按拦处理\n`);
     process.exit(2);
+  }
+  // N2：派子代理时 model 写 fable（fable、claude-fable-*）或带 [1m] 后缀的，拦。要放在下面 backgroundOnly 早退之前：
+  // Agent 在 BACKGROUND_ONLY_TOOLS 里，decide 一进来就放行。fork 继承主会话模型管不到；引擎侧的 matcher 不含 Agent，这条只管本机。
+  const fableBlock = agentModelVerdict(raw);
+  if (fableBlock) {
+    process.stderr.write(`${fableBlock.message}\n`);
+    process.exit(fableBlock.code);
   }
   let backgroundOnly = false;
   try {
