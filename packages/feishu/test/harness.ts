@@ -10,17 +10,13 @@ import { FakeFeishu } from './fake-feishu.ts';
 
 export const TOKEN = 'gateway-pass-for-tests-0123456789abcdef';
 
-/** 没到八成的用量：意图卡回应里带上，网关保持原样。 */
+/** 没到八成的用量：用量上报的回应里带上，网关保持原样。 */
 export const QUIET_USAGE = {
   month: '2026-10',
   calls: 0,
   limit: FEISHU_MONTHLY_CALL_LIMIT,
   readable: true,
 };
-
-export function quietCards(items: unknown[] = []) {
-  return { items, asOf: new Date().toISOString(), usage: QUIET_USAGE };
-}
 export const PUBLIC_URL = 'https://cockpit.example.test';
 
 export interface LogLine {
@@ -67,8 +63,7 @@ export async function harness(
     teamChatId: TEAM,
     testChatId: TEST_GROUP,
     publicUrl: PUBLIC_URL,
-    ackEmoji: 'Get',
-    timing: { intentCardsWaitSeconds: 0, ...opts.timing },
+    ...(opts.timing ? { timing: opts.timing } : {}),
     ...(opts.watch ? { watch: opts.watch } : {}),
   });
   return {

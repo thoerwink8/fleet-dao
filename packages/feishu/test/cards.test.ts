@@ -1,5 +1,5 @@
 // 卡片：全部 JSON 2.0、共享卡、一个主按钮、只用白名单里的组件、不超 30 KB、不出现内部代号。
-// 网关自己画的卡只剩报警卡（意图卡另在 intent-cards.test.ts）；自检器本身也要先证明能抓到违规
+// 网关自己画的卡只剩报警卡（意图卡随飞书收缩退役）；自检器本身也要先证明能抓到违规
 // （旧系统的日报卡用了 2.0 不支持的 note 组件，生产上一张都发不出去）。
 import { describe, expect, it } from 'vitest';
 import { checkCard, type LinkAlert, linkAlertCard, type RenderContext } from '../src/cards.ts';
@@ -12,7 +12,7 @@ const ctx: RenderContext = { publicUrl: 'https://cockpit.example.test', now: Dat
 const down: LinkAlert = {
   since: ctx.now - 6 * 60_000,
   at: ctx.now,
-  loops: [{ name: 'intents', lastOkAt: null, lastFail: { at: ctx.now - 30_000, reason: '后端现在连不上' } }],
+  loops: [{ name: 'usage', lastOkAt: null, lastFail: { at: ctx.now - 30_000, reason: '后端现在连不上' } }],
 };
 
 describe('卡片', () => {

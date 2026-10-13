@@ -58,6 +58,17 @@ import {
   RemoveRepoResponse,
 } from './repo-import.ts';
 import {
+  CreateRequestRequest,
+  MarkRequestReadRequest,
+  MarkRequestReadResponse,
+  RequestActionRequest,
+  RequestDetailResponse,
+  RequestListQuery,
+  RequestListResponse,
+  SendRequestMessageRequest,
+  UpdateRequestDraftRequest,
+} from './requests.ts';
+import {
   AddPurposeModelRequest,
   ManualModelRequest,
   ManualModelResponse,
@@ -336,6 +347,48 @@ export const WebRoutes = {
     path: '/routing/channels/:channelId/models',
     request: ManualModelRequest,
     response: ManualModelResponse,
+  },
+  /**
+   * 提需求（#2049）：进行中 / 已归档 / 最近删除，「等我的 / 全部 / 我发起的」，按标题、原话、单号（#12）搜。
+   * 这台后端没接上需求表时回 200 + unavailable 写原因，不拿空列表冒充「没有需求」。
+   */
+  requests: { method: 'GET', path: '/requests', query: RequestListQuery, response: RequestListResponse },
+  /** 建需求：只能给 repos 表里的项目建；发起人取登录会话。成功 201，回详情。 */
+  createRequest: {
+    method: 'POST',
+    path: '/requests',
+    request: CreateRequestRequest,
+    response: RequestDetailResponse,
+  },
+  /** 一条需求的详情：消息、草稿、每个动作能不能做和为什么不能。没有这条 404。 */
+  requestDetail: { method: 'GET', path: '/requests/:seq', response: RequestDetailResponse },
+  /** 人发一条消息：说话人取登录会话；结案后 409。回详情。 */
+  sendRequestMessage: {
+    method: 'POST',
+    path: '/requests/:seq/messages',
+    request: SendRequestMessageRequest,
+    response: RequestDetailResponse,
+  },
+  /** 改草稿栏：带看到的版本，版本加 1，改过的栏标成人改过；版本对不上、不在讨论中 409。回详情。 */
+  updateRequestDraft: {
+    method: 'PUT',
+    path: '/requests/:seq/draft',
+    request: UpdateRequestDraftRequest,
+    response: RequestDetailResponse,
+  },
+  /** 提交拍板、确定、拍板、撤回、放下、归档、取消归档、删除、恢复、置顶、重命名。不合法 409 + 中文原因。回详情。 */
+  requestAction: {
+    method: 'POST',
+    path: '/requests/:seq/actions',
+    request: RequestActionRequest,
+    response: RequestDetailResponse,
+  },
+  /** 我读到这一条（算未读用，只往前走）。 */
+  markRequestRead: {
+    method: 'POST',
+    path: '/requests/:seq/read',
+    request: MarkRequestReadRequest,
+    response: MarkRequestReadResponse,
   },
   pools: { method: 'GET', path: '/pools', response: PoolsResponse },
   /** 整池暂停现状（#746）：开关、认不出的、旧提醒、到期没复查的；新建、撤回走 PUT /settings/engine.poolHolds。 */

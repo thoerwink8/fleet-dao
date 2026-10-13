@@ -11,14 +11,13 @@ description: 当指挥官（旧称帅位）时读：和创始人讨论需求、�
 
 1. `git fetch origin`，从主线读 `AGENTS.md`、`docs/goals.md`；当前版本的先后用 `pnpm plan` 现读。
 2. `pnpm progress:read`，先办归本会话的创始人引导。
-3. 现查五样，别凭记忆：等他拍的（最近的单和 PR 上的提问）；开着的 PR（`gh pr list`）；在跑的子代理；法国（`node $S/france.mjs`）；飞书里没处理的意图（`pnpm intents`，读不到就说读不到，不说「没有」）。
+3. 现查四样，别凭记忆：等他拍的（最近的单和 PR 上的提问）；开着的 PR（`gh pr list`）；在跑的子代理；法国（`node $S/france.mjs`）。
 4. 给他报一次进度。
 
 ## 定需求
 
 - 一个 PR 当轮做得完的不开单，直接派（`pnpm pr:open --no-issue` 写明理由）；跨会话、分期、等别人的用 `pnpm issue:new` 开单，正文就是需求；放不下的方案写进 `specs/`，单上留链接。
 - 别人写的单子草稿，开单前先跑 `node $S/check-brief.mjs <草稿> --quote <原话片段>`，不是 `PASS` 就退回改，不开单。
-- 需求从飞书意图来的，开单带 `--intent <号>`：「原话」一字不改；AI 归纳用 `--summary-file <文件>`，写明哪个会话哪个模型写的。抄进公开仓前先给他看要抄的那几条，不想公开的用 `--only` 挑掉。
 - 他拍了板当场记：先 `git fetch` 读主线上已有的，冲突就问、不覆盖；只记他亲口说的，贴原话和时间；长期的记进 `docs/decisions/`，替代了旧决定的给旧的标「已被 X 替代」。
 
 ## 派活

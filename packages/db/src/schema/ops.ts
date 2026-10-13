@@ -67,6 +67,12 @@ export const users = pgTable(
      * 会话是自签 Cookie，不在库里，要让别处已登的会话失效只能靠这个。
      */
     sessionVersion: integer('session_version').notNull().default(0),
+    /**
+     * 提需求的拍板人（#2049，方案第一节第 7 条）：能登驾驶舱的都是 role=founder，分不出创始人和合伙人，所以加这一列。
+     * true：这个人发起的需求自己「确定」就开单，合伙人提交的拍板也由他拍。false：发起的需求要提交给 true 的那位拍板。
+     * 迁移 0065 把最早建的、在用的那位创始人设成 true；以后要改成按人设置，就是改这一列。
+     */
+    decidesRequests: boolean('decides_requests').notNull().default(false),
   },
   (t) => [
     uniqueIndex('users_username_lower_unique').on(sql`lower(${t.username})`),

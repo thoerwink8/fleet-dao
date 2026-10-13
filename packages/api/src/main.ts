@@ -73,6 +73,7 @@ import type { GitHubEventSink } from './ports.ts';
 import { pgProbeHistory } from './probe-history.ts';
 import { liveReleaseCardPort } from './release-card.ts';
 import { liveReleaseRequestPort } from './release-request.ts';
+import { pgRequests } from './request-store-pg.ts';
 import { pgRoutingEfforts } from './routing-efforts.ts';
 import { pgRoutingLayers } from './routing-layers.ts';
 import { pgRoutingOrder } from './routing-order.ts';
@@ -294,7 +295,7 @@ async function assemble(): Promise<{
     ...(github.userHit ? { githubUser: github.userHit } : {}),
     ...(github.decisionCommenter ? { decisionCommenter: github.decisionCommenter } : {}),
     gatewaySeen,
-    // 飞书群聊理成的意图（#553 第 4 条）：网关收原话、取意图卡；指挥官经 fleet-api intent 读写同一张表
+    // 意图表（#553 第 4 条）：网关只往里记进群和飞书用量；已有的意图指挥官经 fleet-api intent 读写同一张表
     intents: createPgIntentStore(db, { now }),
     alerts: pgCockpitAlerts(db),
     // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在正式环境有
@@ -319,6 +320,8 @@ async function assemble(): Promise<{
     taskRoutePins: pgTaskRoutePins(db, now),
     // 任务详情每段的会话内容（#1640）：读引擎按条记下的 run_transcript
     runTranscript: pgRunTranscript(db),
+    // 提需求（#2049）：需求、消息、每人的置顶和读到哪；删了满 30 天的由引擎的 request-sweep 硬删
+    requests: pgRequests(db, now),
     // 环境页（#820 片 1）的版本那一项：正式环境读发布目录现算；别处不给，页面写「没查成」
     ...(production ? { deployLag: () => readDeployLagInput() } : {}),
     // /france 页发版一键（#618）：读 release-train 进度。只在正式环境装。
@@ -388,9 +391,6 @@ const hostResources = createHostResourceSampler({ read: hostReader, now, log, fo
 deps.hostResources = hostResources;
 snapshotDeps = deps;
 nodeReporter?.start();
-// 给停机时的意图卡长轮询用（intent-routes.ts）：main.ts 收到 SIGTERM 才会 abort，读不是装配的时候。
-const shutdownController = new AbortController();
-deps.shutdownSignal = shutdownController.signal;
 const { cockpit, agent, relay } = buildApps(deps);
 // 有页面开着（SSE 连着）才按间隔读、推；没人看时主页接口来要再现读
 const stopHostResources = hostResources.start(() => relay.connections() > 0);
@@ -460,9 +460,6 @@ async function shutdown(signal: string) {
   stopHostResources();
   await gracefulShutdown({
     servers,
-    // 意图卡的长轮询（intent-routes.ts）拿这个信号跟请求自己的 signal 合并着等：马上醒，直接回手上已有的
-    // 结果，不再查库——库要过一会儿（drainMs 之后）才真的关，这一步早一点发，长轮询就不会撞上正在关的库（#364）。
-    notifyLongPollers: () => shutdownController.abort(),
     drainMs: DRAIN_MS,
     close,
     onCloseError: (err) => log.error('退出时关连接出错', { error: String(err) }),

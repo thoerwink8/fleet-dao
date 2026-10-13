@@ -88,6 +88,7 @@ import { orphanReaper } from './orphan-reap.ts';
 import type { AssignedProber } from './pick-then-probe.ts';
 import { type QuotaReadWiring, quotaReadJob } from './quota-read.ts';
 import { realReleaseEvidence } from './release-evidence.ts';
+import { requestSweepJob } from './request-sweep.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
 import { scheduleRouteBreakProbe } from './route-break-probe.ts';
 import { routeProbeJob } from './route-probe.ts';
@@ -849,6 +850,8 @@ export function realPortsFromEnv(
     }),
     // 命令行工具版本（#1969）：probe 读在用版本，引擎进程拉官方最新。不升级。
     cliVersions: cliVersionsJob({ db }),
+    // 需求整理（#2049）：删了满 30 天的需求连消息硬删并写操作记录，已结案的按规矩自动归档。不看总开关。
+    requestSweep: requestSweepJob({ db }),
     // 命令行工具升级（#1971）：空闲时排空、写请求。引擎没有 root，不在这里装。不看总开关。
     cliUpgrade: cliUpgradeJob({
       db,

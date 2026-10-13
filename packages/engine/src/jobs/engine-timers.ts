@@ -48,6 +48,12 @@ import {
   runQuotaReadJob,
 } from './quota-read.ts';
 import {
+  REQUEST_SWEEP_EVERY_MINUTES,
+  REQUEST_SWEEP_JOB,
+  REQUEST_SWEEP_OFFSET_MINUTES,
+  runRequestSweepJob,
+} from './request-sweep.ts';
+import {
   ROUTE_PROBE_EVERY_MINUTES,
   ROUTE_PROBE_JOB,
   ROUTE_PROBE_OFFSET_MINUTES,
@@ -94,6 +100,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
   const usageBackfill = need(jobs, 'usageBackfill');
   const cliVersions = need(jobs, 'cliVersions');
   const cliUpgrade = need(jobs, 'cliUpgrade');
+  const requestSweep = need(jobs, 'requestSweep');
   // 巡检的活动在工作流里跑，依赖不在这里装；但没装齐要在起的时候就发现，别等到工作流里的活动才报
   need(jobs, 'canary');
   return [
@@ -210,6 +217,15 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       catchupMinutes: CLI_UPGRADE_EVERY_MINUTES,
       overdueMinutes: OVERDUE_MINUTES,
       run: () => runCliUpgradeJob(cliUpgrade()),
+    },
+    {
+      // 需求整理（#2049）：删了满 30 天的硬删、该归档的归档。只读写库，不标 needsMaster
+      id: REQUEST_SWEEP_JOB.id,
+      everyMinutes: REQUEST_SWEEP_EVERY_MINUTES,
+      offsetMinutes: REQUEST_SWEEP_OFFSET_MINUTES,
+      catchupMinutes: REQUEST_SWEEP_EVERY_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
+      run: () => runRequestSweepJob(requestSweep()),
     },
   ];
 }

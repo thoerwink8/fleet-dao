@@ -9,7 +9,7 @@ import { createGateway, type Gateway } from '../src/gateway.ts';
 import { createLark, type Lark, sdkDetail } from '../src/lark.ts';
 import { FeishuError } from '../src/port.ts';
 import { measureFeishuCall } from '../src/usage-meter.ts';
-import { A, B, BOT, cardEvent, menuEvent, messageEvent, recallEvent, STRANGER, TEAM } from './events.ts';
+import { A, B, BOT, cardEvent, messageEvent, STRANGER, TEAM } from './events.ts';
 import { type FakeBackend, startFakeBackend } from './fake-backend.ts';
 import { type LogLine, memoryLogger, TOKEN, until } from './harness.ts';
 
@@ -38,10 +38,6 @@ function fakeOpenPlatform(overrides: Record<string, Route> = {}) {
       () => ({ code: 0, bot: { open_id: BOT.openId, app_name: BOT.name } }),
     ],
     [
-      /^POST \/open-apis\/im\/v1\/messages\/[^/]+\/reactions$/,
-      () => ({ code: 0, data: { reaction_id: 'r1' } }),
-    ],
-    [
       /^POST \/open-apis\/im\/v1\/messages\/[^/]+\/reply$/,
       () => ({ code: 0, data: { message_id: `om_bot_${++seq}`, chat_id: TEAM } }),
     ],
@@ -56,7 +52,6 @@ function fakeOpenPlatform(overrides: Record<string, Route> = {}) {
       }),
     ],
     [/^PATCH \/open-apis\/im\/v1\/messages\/[^/]+$/, () => ({ code: 0 })],
-    [/^POST \/open-apis\/im\/v1\/chats\/[^/]+\/top_notice\/put_top_notice$/, () => ({ code: 0 })],
   ];
   for (const [key, route] of Object.entries(overrides)) routes.unshift([new RegExp(`^${key}$`), route]);
 
@@ -127,7 +122,7 @@ afterEach(async () => {
 async function start(
   overrides: Record<string, Route> = {},
   log = memoryLogger([]),
-  timeouts?: { reactMs?: number; callMs?: number },
+  timeouts?: { callMs?: number },
 ): Promise<Stack> {
   const backend = await startFakeBackend();
   const open = fakeOpenPlatform(overrides);
@@ -151,7 +146,6 @@ async function start(
     ],
     teamChatId: TEAM,
     publicUrl: 'https://cockpit.example.test',
-    ackEmoji: 'Get',
   });
   lark.wire(gateway);
   await lark.connect();
@@ -162,81 +156,38 @@ async function start(
 const imCalls = (s: Stack) => s.open.calls.filter((c) => c.path.startsWith('/open-apis/im/'));
 
 describe('飞书 SDK 这一层', () => {
-  it('私聊一句话：经 SDK 分发、去重、排队到网关；原话原样转后端、表情回应是真发的请求；同一条消息重投只处理一次', async () => {
-    const s = await start();
-    s.backend.on('POST', '/feishu/intake/messages', { body: { status: 'stored', intentSeq: 1 } });
-    const event = messageEvent({ text: '给登录页加手机验证码', id: 'om_user_dup' });
-    await s.lark.dispatch(event);
-    await s.lark.dispatch(event);
-    await until(() => imCalls(s).length >= 1);
+  it('【收缩】私聊、群里的话（创始人的、陌生人的、别的群的）进来：不转后端、不加表情、不回话、不报错', async () => {
+    const lines: LogLine[] = [];
+    const s = await start({}, memoryLogger(lines));
+    await s.lark.dispatch(messageEvent({ text: '给登录页加手机验证码' }));
+    await s.lark.dispatch(messageEvent({ text: '随便聊聊', chat: 'group', chatId: TEAM }));
+    await s.lark.dispatch(messageEvent({ text: '陌生人在说话', from: STRANGER }));
+    await s.lark.dispatch(messageEvent({ text: '别的群', chat: 'group', chatId: 'oc_other_group' }));
     await s.gateway.idle();
-
-    // 只加了一个「收到」表情：不再回「我理解为」那张卡
-    const [react, ...rest] = imCalls(s);
-    expect(react).toMatchObject({
-      method: 'POST',
-      path: '/open-apis/im/v1/messages/om_user_dup/reactions',
-      data: { reaction_type: { emoji_type: 'Get' } },
-    });
-    expect(rest).toEqual([]);
-    // 重投两次，后端只收到一次
-    const sent = s.backend.calls('POST', '/feishu/intake/messages');
-    expect(sent).toHaveLength(1);
-    expect(sent[0]?.body).toMatchObject({
-      messageId: 'om_user_dup',
-      chatKind: 'p2p',
-      source: 'event',
-      text: '给登录页加手机验证码',
-    });
+    expect(s.backend.requests).toEqual([]);
+    expect(imCalls(s)).toEqual([]);
+    expect(lines.filter((l) => l.level === 'error')).toEqual([]);
   });
 
-  it('群里：不 @ 也收；别的群、机器人自己发的被拦下（计数，不回话）；两个人前后脚说话不会被并成一条', async () => {
+  it('机器人菜单、撤回事件：不再注册，SDK 分发器当没订阅（不转后端、不回话）', async () => {
     const s = await start();
-    s.backend.on('POST', '/feishu/intake/messages', { body: { status: 'stored', intentSeq: 1 } });
-    await s.lark.dispatch(messageEvent({ text: '随便聊聊', chat: 'group', chatId: TEAM, mentionBot: false }));
-    await s.lark.dispatch(
-      messageEvent({ text: '给登录页加验证码', chat: 'group', chatId: 'oc_other_group' }),
-    );
-    await s.lark.dispatch(messageEvent({ text: '甲的需求', chat: 'group', chatId: TEAM, from: A }));
-    await s.lark.dispatch(messageEvent({ text: '乙的需求', chat: 'group', chatId: TEAM, from: B }));
-    await until(() => s.backend.calls('POST', '/feishu/intake/messages').length === 3);
-    await s.gateway.idle();
-    expect(
-      s.backend
-        .calls('POST', '/feishu/intake/messages')
-        .map((r) => [r.headers['x-fleet-acting-feishu'], (r.body as { text: string }).text]),
-    ).toEqual([
-      [A, '随便聊聊'],
-      [A, '甲的需求'],
-      [B, '乙的需求'],
-    ]);
-    // 只有别的群那条被 SDK 的策略拦下：允许的群里不 @ 也收
-    expect(s.gateway.stats).toMatchObject({ rejected_group_not_allowed: 1 });
-    expect(s.gateway.stats.rejected_no_mention ?? 0).toBe(0);
-  });
-
-  it('机器人菜单：从 SDK 的分发器进来（Channel 自己不管这个事件），回到点菜单的人的私聊', async () => {
-    const s = await start();
-    await s.lark.dispatch(menuEvent({ key: 'new_task', from: B }));
-    await until(() => imCalls(s).length === 1);
-    await s.gateway.idle();
-    const [send] = imCalls(s);
-    expect(send).toMatchObject({
-      method: 'POST',
-      path: '/open-apis/im/v1/messages',
-      params: { receive_id_type: 'open_id' },
-      data: { receive_id: B, msg_type: 'text' },
+    await s.lark.dispatch({
+      schema: '2.0',
+      header: { event_id: 'evt_menu_1', event_type: 'application.bot.menu_v6', create_time: '1790000000000' },
+      event: { event_key: 'board', operator: { operator_id: { open_id: B } } },
     });
-  });
-
-  it('认不出的菜单事件（缺点菜单的人）：明确记一条日志，不装作处理了', async () => {
-    const lines: Array<{ message: string }> = [];
-    const s = await start({}, memoryLogger(lines as never));
-    const broken = menuEvent({ key: 'board' });
-    delete broken.event.operator;
-    await s.lark.dispatch(broken);
-    expect(lines.some((l) => l.message === '机器人菜单事件认不出，丢了')).toBe(true);
-    expect(imCalls(s)).toHaveLength(0);
+    await s.lark.dispatch({
+      schema: '2.0',
+      header: {
+        event_id: 'evt_recall_1',
+        event_type: 'im.message.recalled_v1',
+        create_time: '1790000000000',
+      },
+      event: { message_id: 'om_user_1', chat_id: TEAM, recall_time: '1790000000000' },
+    });
+    await s.gateway.idle();
+    expect(s.backend.requests).toEqual([]);
+    expect(imCalls(s)).toEqual([]);
   });
 
   it('卡片表单提交：输入框的值（form_value）能取到；但旧卡的按钮已停用，只回一句「已停用」，不调后端', async () => {
@@ -261,23 +212,8 @@ describe('飞书 SDK 这一层', () => {
     const sent = reply?.data as { content: string };
     const said = JSON.parse(sent.content) as { text: string };
     expect(said.text).toContain('已经停用');
+    expect(said.text).toContain('驾驶舱');
     expect(s.gateway.stats).toMatchObject({ disabled_button: 1 });
-  });
-
-  it('撤回事件：经 SDK 的分发器进来，转给后端', async () => {
-    const s = await start();
-    s.backend.on('POST', '/feishu/intake/messages', { body: { status: 'stored', intentSeq: 1 } });
-    s.backend.on('POST', '/feishu/intake/recalls', { body: { status: 'recalled', intentSeq: 1 } });
-    // 先在允许的群里说一句，网关才认得这个会话（撤回事件不带会话种类）
-    await s.lark.dispatch(messageEvent({ text: '给登录页加验证码', chat: 'group', chatId: TEAM }));
-    await until(() => s.backend.calls('POST', '/feishu/intake/messages').length === 1);
-    await s.lark.dispatch(recallEvent({ messageId: 'om_user_dup', chatId: TEAM }));
-    await until(() => s.backend.calls('POST', '/feishu/intake/recalls').length === 1);
-    expect(s.backend.calls('POST', '/feishu/intake/recalls')[0]?.body).toMatchObject({
-      messageId: 'om_user_dup',
-      chatId: TEAM,
-      source: 'event',
-    });
   });
 
   it('飞书的错误归类：230031 = 卡片超 14 天改不了；没回 message_id 算没发出去；连不上重试三次再报', async () => {
@@ -285,7 +221,7 @@ describe('飞书 SDK 这一层', () => {
     const s = await start({
       'PATCH /open-apis/im/v1/messages/om_old': () => ({ code: 230031, msg: 'card can not be updated' }),
       'POST /open-apis/im/v1/messages': () => ({ code: 0, data: {} }),
-      'POST /open-apis/im/v1/chats/oc_team/top_notice/put_top_notice': () => {
+      'POST /open-apis/im/v1/messages/om_flaky/reply': () => {
         flaky += 1;
         throw new Error('socket hang up');
       },
@@ -297,7 +233,7 @@ describe('飞书 SDK 这一层', () => {
     await expect(s.lark.port.send({ chatId: TEAM }, { text: 'x' }, { uuid: 'u1' })).rejects.toThrow(
       '没回 message_id',
     );
-    const err = await s.lark.port.pin(TEAM, 'om_x').catch((e: unknown) => e);
+    const err = await s.lark.port.reply('om_flaky', { text: 'x' }, { uuid: 'u2' }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(FeishuError);
     expect((err as FeishuError).kind).toBe('unavailable');
     expect(flaky).toBe(3);
@@ -307,41 +243,47 @@ describe('飞书 SDK 这一层', () => {
     let flaky = 0;
     const s = await start(
       {
-        'POST /open-apis/im/v1/chats/oc_team/top_notice/put_top_notice': () => {
+        'POST /open-apis/im/v1/messages/om_flaky/reply': () => {
           flaky += 1;
           throw new Error('socket hang up');
         },
-        'POST /open-apis/im/v1/messages/om_slow/reactions': hang,
+        'POST /open-apis/im/v1/messages/om_slow/reply': hang,
         'POST /open-apis/im/v1/messages': () => ({ code: 0, data: { message_id: 'om_ok', chat_id: TEAM } }),
       },
       memoryLogger([]),
-      { reactMs: 60, callMs: 120 },
+      { callMs: 120 },
     );
     const attempts: number[] = [];
     const track = <T>(fn: () => Promise<T>) => measureFeishuCall(fn, (n) => attempts.push(n));
-    await expect(track(() => s.lark.port.pin(TEAM, 'om_x'))).rejects.toMatchObject({ kind: 'unavailable' });
-    await expect(track(() => s.lark.port.react('om_slow', 'Get'))).rejects.toMatchObject({ kind: 'timeout' });
+    await expect(
+      track(() => s.lark.port.reply('om_flaky', { text: 'x' }, { uuid: 'u0' })),
+    ).rejects.toMatchObject({ kind: 'unavailable' });
+    await expect(
+      track(() => s.lark.port.reply('om_slow', { text: 'x' }, { uuid: 'u3' })),
+    ).rejects.toMatchObject({
+      kind: 'timeout',
+    });
     await track(() => s.lark.port.send({ chatId: TEAM }, { text: 'x' }, { uuid: 'u1' }));
     expect(flaky).toBe(3);
     // 连不上重试 3 次、超时 1 次、成功 1 次：每次交出去都算。
     expect(attempts).toEqual([3, 1, 1]);
   });
 
-  it('飞书接口挂住：表情回应 3 秒、其余 10 秒就算超时（这里按比例缩短），不重试，记错误；每个请求也带着超时，挂住的连接会被收掉', async () => {
+  it('飞书接口挂住：10 秒就算超时（这里缩短），不重试，记错误；每个请求也带着超时，挂住的连接会被收掉', async () => {
     const lines: Array<{ level: string; message: string; fields?: Record<string, unknown> }> = [];
     const s = await start(
       {
-        'POST /open-apis/im/v1/messages/om_slow/reactions': hang,
+        'POST /open-apis/im/v1/messages/om_slow/reply': hang,
         'POST /open-apis/im/v1/messages': hang,
       },
       memoryLogger(lines as never),
-      { reactMs: 60, callMs: 120 },
+      { callMs: 120 },
     );
     const t0 = Date.now();
-    await expect(s.lark.port.react('om_slow', 'Get')).rejects.toMatchObject({ kind: 'timeout' });
-    const reactMs = Date.now() - t0;
-    expect(reactMs).toBeGreaterThanOrEqual(55);
-    expect(reactMs).toBeLessThan(1_000);
+    await expect(s.lark.port.reply('om_slow', { text: 'x' }, { uuid: 'u0' })).rejects.toMatchObject({
+      kind: 'timeout',
+    });
+    expect(Date.now() - t0).toBeLessThan(1_000);
     const t1 = Date.now();
     await expect(s.lark.port.send({ chatId: TEAM }, { text: 'x' }, { uuid: 'u1' })).rejects.toMatchObject({
       kind: 'timeout',
@@ -349,14 +291,14 @@ describe('飞书 SDK 这一层', () => {
     expect(Date.now() - t1).toBeLessThan(1_000);
     // 超时不重试：各只发了一次。
     expect(imCalls(s).map((c) => c.path)).toEqual([
-      '/open-apis/im/v1/messages/om_slow/reactions',
+      '/open-apis/im/v1/messages/om_slow/reply',
       '/open-apis/im/v1/messages',
     ]);
     expect(s.open.calls.every((c) => c.timeout === 120)).toBe(true);
     expect(
       lines.filter((l) => l.level === 'error' && l.message === '飞书接口超时').map((l) => l.fields),
     ).toEqual([
-      { what: '加表情回应', ms: 60 },
+      { what: '回复消息', ms: 120 },
       { what: '发消息', ms: 120 },
     ]);
   });
