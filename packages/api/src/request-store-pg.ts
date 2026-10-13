@@ -4,8 +4,21 @@
 // - 能不能做只按 @fleet-dao/shared 的 request-rules.ts 判；每个写操作先锁住那一行、在锁里读齐事实再判，判不过 409 + 中文原因。
 // - 写操作和操作记录在同一个事务里：记不下就不改。
 // - 没接上（开发环境的内存版没有这三张表）由接口写 unavailable（读）或回 503（写），不拿空列表冒充「没有需求」。
-import { auditLog, type Db, repos, requestMessages, requests, requestUserState, users } from '@fleet-dao/db';
+import { createHash } from 'node:crypto';
 import {
+  applyRequestIssueState,
+  auditLog,
+  type Db,
+  repos,
+  requestIssueOpenings,
+  requestMessages,
+  requests,
+  requestUserState,
+  users,
+} from '@fleet-dao/db';
+import { assertPublishable, isGitHubError } from '@fleet-dao/github';
+import {
+  DELETED_WHY,
   draftMissing,
   idleDays,
   purgeAt,
@@ -15,6 +28,7 @@ import {
   type RequestDraftField,
   type RequestDraftPatch,
   type RequestFacts,
+  type RequestIssueOpeningResponse,
   type RequestListResponse,
   type RequestMessage,
   type RequestPerson,
@@ -23,8 +37,18 @@ import {
   type RequestWaiting,
   requestActions,
 } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import { ApiError } from './http.ts';
+import {
+  checkOpening,
+  ISSUES_NOT_HERE,
+  issueKey,
+  issueOfCommentRef,
+  openingKey,
+  type QuotedMessage,
+  type RequestIssuePort,
+} from './request-issue.ts';
 
 type RequestRowDb = typeof requests.$inferSelect;
 type MessageRowDb = typeof requestMessages.$inferSelect;
@@ -67,10 +91,30 @@ export interface RequestsPort {
   ): Promise<void>;
   act(seq: number, viewerId: string, input: RequestActionRequest): Promise<void>;
   markRead(seq: number, viewerId: string, messageId: number): Promise<number | null>;
+  /** 「需求号 + 草稿版本号」这一键的开单开没开成；没有这条需求返回 null。 */
+  openingState(seq: number, draftVersion: number): Promise<RequestIssueOpeningBody | null>;
+  /** 回答引擎的一条提问，写回那条评论下面；写失败记 failed 并抛 502（同一个调用再来一次就是重试）。 */
+  answerAsk(seq: number, viewerId: string, messageId: number, text: string): Promise<void>;
+  /** 这些单（仓 owner/name + 单号）是哪条需求开出来的；没有的不在结果里。键是 `owner/name#号`（小写）。 */
+  seqsForIssues(issues: readonly { repo: string; number: number }[]): Promise<Map<string, number>>;
 }
+
+export type RequestIssueOpeningBody = Omit<RequestIssueOpeningResponse, 'asOf'>;
 
 /** 开发环境、内存版：没有需求表。 */
 export const REQUESTS_NOT_HERE = '这台后端没接上需求表（开发环境的内存版没有），提需求用不了';
+
+/** 占了开单的行却一直没结果（后端中途断了）超过这么久，当作断了：可以重新占。 */
+export const OPENING_STALE_MS = 3 * 60_000;
+
+/** 开单、写回评论要的外部口。issues 没给就回 503 说没接上。 */
+export interface RequestsOptions {
+  issues?: RequestIssuePort | undefined;
+  /** 驾驶舱地址（config.publicUrl.origin）：写进单子正文的链接。 */
+  cockpitUrl?: string | undefined;
+  /** 卫生检查管哪个仓（默认 fleet-dao 自己）；测试夹具的仓不是它时指过去。 */
+  hygieneRepo?: { owner: string; name: string } | undefined;
+}
 
 const iso = (d: Date) => d.toISOString();
 const isoOpt = (d: Date | null) => (d === null ? undefined : d.toISOString());
@@ -121,11 +165,12 @@ const ACTION_WORDS: Record<RequestActionRequest['action'], string> = {
   rename: '改名',
 };
 
-export function pgRequests(db: Db, now: () => Date): RequestsPort {
-  async function userMap(ids: readonly string[]): Promise<Map<string, UserRowDb>> {
+export function pgRequests(db: Db, now: () => Date, options: RequestsOptions = {}): RequestsPort {
+  /** 事务里调要把 tx 传进来：用外面的 db 会另占一条连接，单连接的库（PGlite）上就是自己等自己。 */
+  async function userMap(ids: readonly string[], q: Db = db): Promise<Map<string, UserRowDb>> {
     const unique = [...new Set(ids)].filter((id) => UUID.test(id));
     if (unique.length === 0) return new Map();
-    const rows = await db.select().from(users).where(inArray(users.id, unique));
+    const rows = await q.select().from(users).where(inArray(users.id, unique));
     return new Map(rows.map((u) => [u.id, u]));
   }
 
@@ -215,6 +260,48 @@ export function pgRequests(db: Db, now: () => Date): RequestsPort {
 
   async function systemMessage(tx: Db, requestId: string, body: string) {
     await tx.insert(requestMessages).values({ requestId, kind: 'system', body, createdAt: now() });
+  }
+
+  const freshOpening = (o: { state: string; updatedAt: Date }) =>
+    o.state === 'opening' && now().getTime() - o.updatedAt.getTime() < OPENING_STALE_MS;
+
+  /** 这条需求正在开单（有一键占着行、还没结果、没超时）：对话、草稿、别的动作先别动，免得开出去的和库里的对不上。 */
+  async function assertNotOpening(tx: Db, requestId: string) {
+    const rows = await tx
+      .select()
+      .from(requestIssueOpenings)
+      .where(and(eq(requestIssueOpenings.requestId, requestId), eq(requestIssueOpenings.state, 'opening')));
+    const live = rows.find(freshOpening);
+    if (live) refused(`正在开单中（草稿第 ${live.draftVersion} 版）：等结果出来再动`);
+  }
+
+  /** 开单、写回评论的外部口；没接上明说，不假装开了。 */
+  function issuesPort(): RequestIssuePort {
+    if (!options.issues) throw new ApiError(503, 'issues_unavailable', ISSUES_NOT_HERE);
+    return options.issues;
+  }
+
+  function cockpitUrl(): string {
+    if (!options.cockpitUrl) {
+      throw new ApiError(
+        503,
+        'cockpit_url_unavailable',
+        '读不到驾驶舱地址（FLEET_PUBLIC_URL）：写不出单子正文里的链接，单没开',
+      );
+    }
+    return options.cockpitUrl.replace(/\/+$/, '');
+  }
+
+  /** GitHub 那边拒掉是内容的问题（卫生检查、标题正文不合规）的，回 409 让人改；别的回 502。 */
+  function githubFailure(err: unknown, what: string): ApiError {
+    const why = errMessage(err);
+    if (
+      isGitHubError(err) &&
+      ['HYGIENE_BLOCKED', 'HYGIENE_UNSCANNED', 'INVALID_INPUT', 'BODY_TOO_LONG'].includes(err.code)
+    ) {
+      return new ApiError(409, 'request_refused', `${what}没成：${why}`);
+    }
+    return new ApiError(502, 'github_failed', `${what}没成：${why}`);
   }
 
   /** 把一批需求拼成列表行（看的这个人的置顶、未读、等不等他）。 */
@@ -375,6 +462,227 @@ export function pgRequests(db: Db, now: () => Date): RequestsPort {
     return row?.n ?? 0;
   }
 
+  /**
+   * 「确定，开单」和拍板人「同意做」（方案第一节规则 6、第六节）：在 GitHub 上用「引擎」机器人开单，再把需求结案。三步：
+   * 1. 事务里锁住那一行、判能不能做和版本，拼正文过四节检查和卫生检查（不过 409，一次 GitHub 请求都没发），占开单记录一行
+   *    （键是需求号 + 草稿版本号，提出人此刻写进去）。占着的时候对话、草稿、别的动作都先别动（assertNotOpening）。
+   * 2. 不在事务里调 GitHub 开单（幂等：同一键重来拿回同一张）；开不成记 failed + 原因，回 409（内容问题）或 502。
+   * 3. 事务里把开单记录记成 opened、需求结案、记下这张单（状态「开着」）、追加一条系统消息。
+   * 同一版重复请求：开过且已结案的原样回成功（不再开）；开过但没来得及结案的跳过第 2 步直接结案。
+   */
+  async function openAndClose(
+    seq: number,
+    viewerId: string,
+    input: Extract<RequestActionRequest, { action: 'confirm' | 'approve' }>,
+  ): Promise<void> {
+    const issues = issuesPort();
+    const baseUrl = cockpitUrl();
+    const words = ACTION_WORDS[input.action];
+    // —— 第 1 步 ——
+    const plan = await db.transaction(async (tx) => {
+      const r = await lockRow(tx, seq);
+      const [existing] = await tx
+        .select()
+        .from(requestIssueOpenings)
+        .where(
+          and(
+            eq(requestIssueOpenings.requestId, r.id),
+            eq(requestIssueOpenings.draftVersion, input.draftVersion),
+          ),
+        );
+      // 同一版重复请求：开过且已经结案，原样回成功（页面超时后重点也只开这一张）
+      if (existing?.state === 'opened' && r.status === 'closed_do' && existing.openedBy === viewerId) {
+        return { done: true as const };
+      }
+      const { facts, viewer, decider } = await factsOf(tx, r, viewerId);
+      const at = now();
+      const v = requestActions(facts, viewer, { now: at, deciderAvailable: decider !== null })[input.action];
+      if (!v.allowed) refused(v.why ?? `不能${words}`);
+      if (input.draftVersion !== r.draftVersion) {
+        refused(
+          `草稿已经改到第 ${r.draftVersion} 版，你看到的是第 ${input.draftVersion} 版：刷新看过最新的再${words}`,
+        );
+      }
+      if (existing && freshOpening(existing)) {
+        refused(
+          `这一版（草稿第 ${input.draftVersion} 版）正在开单中：稍等，用「查开单结果」看有没有开成，不要重点`,
+        );
+      }
+      const [repo] = await tx.select().from(repos).where(eq(repos.id, r.repoId));
+      if (!repo) {
+        throw new ApiError(404, 'repo_not_found', '这个项目已移出驾驶舱：只能给已导入的项目开单');
+      }
+      const repoRef = { owner: repo.owner, name: repo.name };
+      // 开过但没来得及结案（上次第 3 步没写成）：单已经有了，直接结案
+      if (existing?.state === 'opened' && existing.issueNumber !== null && existing.issueUrl !== null) {
+        return {
+          done: false as const,
+          repoRef,
+          requestId: r.id,
+          opened: { number: existing.issueNumber, url: existing.issueUrl },
+        };
+      }
+      const people = await userMap(
+        [r.initiatorId, ...(input.action === 'approve' && r.deciderId ? [r.deciderId] : [viewerId])],
+        tx,
+      );
+      const humans = await tx
+        .select()
+        .from(requestMessages)
+        .where(and(eq(requestMessages.requestId, r.id), eq(requestMessages.kind, 'human')))
+        .orderBy(asc(requestMessages.id));
+      const authors = await userMap(
+        humans.map((m) => m.authorId ?? ''),
+        tx,
+      );
+      const messages: QuotedMessage[] = humans.map((m) => ({
+        authorName: authors.get(m.authorId ?? '')?.displayName ?? '（已不在的用户）',
+        channel: m.channel ?? 'web',
+        at: m.createdAt,
+        body: m.body,
+      }));
+      const deciderId = input.action === 'approve' ? (r.deciderId ?? viewerId) : viewerId;
+      const checked = checkOpening({
+        seq: r.seq,
+        draft: r.draftJson,
+        humanEdited: r.humanEditedFields,
+        messages,
+        requesterName: people.get(r.initiatorId)?.displayName ?? '（已不在的用户）',
+        deciderName: people.get(deciderId)?.displayName ?? '（已不在的用户）',
+        cockpitUrl: baseUrl,
+      });
+      if (!checked.ok) refused(checked.why);
+      // 正文写进 GitHub 前过卫生检查（和引擎开单、写评论同一套）：不过就不开，回原因
+      try {
+        assertPublishable(
+          repoRef,
+          `开 ${repo.owner}/${repo.name} 的单子`,
+          [
+            { path: '单子标题', text: checked.title },
+            { path: '单子正文', text: checked.body },
+          ],
+          options.hygieneRepo,
+        );
+      } catch (err) {
+        throw githubFailure(err, '开单');
+      }
+      await tx
+        .insert(requestIssueOpenings)
+        .values({
+          requestId: r.id,
+          draftVersion: input.draftVersion,
+          state: 'opening',
+          requestedBy: r.initiatorId,
+          openedBy: viewerId,
+          createdAt: at,
+          updatedAt: at,
+        })
+        .onConflictDoUpdate({
+          target: [requestIssueOpenings.requestId, requestIssueOpenings.draftVersion],
+          set: {
+            state: 'opening',
+            requestedBy: r.initiatorId,
+            openedBy: viewerId,
+            issueNumber: null,
+            issueUrl: null,
+            error: null,
+            updatedAt: at,
+          },
+        });
+      return {
+        done: false as const,
+        repoRef,
+        requestId: r.id,
+        title: checked.title,
+        body: checked.body,
+        labels: checked.labels,
+        opened: null,
+      };
+    });
+    if (plan.done) return;
+
+    const settle = (patch: Partial<typeof requestIssueOpenings.$inferInsert>) =>
+      db
+        .update(requestIssueOpenings)
+        .set({ ...patch, updatedAt: now() })
+        .where(
+          and(
+            eq(requestIssueOpenings.requestId, plan.requestId),
+            eq(requestIssueOpenings.draftVersion, input.draftVersion),
+          ),
+        );
+
+    // —— 第 2 步 ——
+    let issue: { number: number; url: string };
+    if (plan.opened !== null) {
+      issue = plan.opened;
+    } else {
+      try {
+        const got = await issues.openIssue({
+          repo: plan.repoRef,
+          key: openingKey(seq, input.draftVersion),
+          title: plan.title,
+          body: plan.body,
+          labels: plan.labels,
+        });
+        issue = { number: got.number, url: got.url };
+      } catch (err) {
+        const failure = githubFailure(err, '开单');
+        await settle({ state: 'failed', error: failure.message });
+        throw failure;
+      }
+      // 先单独记一笔「开成了」：第 3 步要是没写成，重来时认得出单已经有了，不会再去开
+      await settle({ state: 'opened', issueNumber: issue.number, issueUrl: issue.url, error: null });
+    }
+
+    // —— 第 3 步 ——
+    await db.transaction(async (tx) => {
+      const r = await lockRow(tx, seq);
+      const { facts, viewer, decider } = await factsOf(tx, r, viewerId);
+      const at = now();
+      const v = requestActions(facts, viewer, { now: at, deciderAvailable: decider !== null })[input.action];
+      if (!v.allowed || r.draftVersion !== input.draftVersion) {
+        refused(
+          `单已经开出（${plan.repoRef.owner}/${plan.repoRef.name}#${issue.number} ${issue.url}），可需求的状态在这期间变了，没能结案：请联系管理员核对`,
+        );
+      }
+      const [me] = await tx.select({ name: users.displayName }).from(users).where(eq(users.id, viewerId));
+      const who = me?.name ?? '有人';
+      await tx
+        .update(requests)
+        .set({
+          status: 'closed_do',
+          ...(input.action === 'confirm' ? { deciderId: viewerId } : {}),
+          closedAt: at,
+          lastActivityAt: at,
+          updatedAt: at,
+        })
+        .where(eq(requests.id, r.id));
+      await applyRequestIssueState(tx, {
+        seq,
+        repo: `${plan.repoRef.owner}/${plan.repoRef.name}`,
+        number: issue.number,
+        state: 'open',
+        at,
+      });
+      await systemMessage(
+        tx,
+        r.id,
+        input.action === 'confirm'
+          ? `${who} 确定开单（草稿第 ${r.draftVersion} 版），已结案。开出 #${issue.number}：${issue.url}`
+          : `${who} 拍板：同意做（草稿第 ${r.draftVersion} 版），已结案。开出 #${issue.number}：${issue.url}`,
+      );
+      await audit(
+        tx,
+        viewerId,
+        seq,
+        `request.${input.action}`,
+        { status: r.status, archived: false, deleted: false },
+        { status: 'closed_do', archived: false, deleted: false, issue: `#${issue.number}` },
+      );
+    });
+  }
+
   return {
     async list(viewerId, input) {
       const inView = await db.select().from(requests).where(viewWhere(input.view, viewerId));
@@ -429,6 +737,7 @@ export function pgRequests(db: Db, now: () => Date): RequestsPort {
         .orderBy(asc(requestMessages.id));
       const people = await userMap([
         ...messages.map((m) => m.authorId ?? ''),
+        ...messages.map((m) => m.answeredBy ?? ''),
         ...(r.deciderId ? [r.deciderId] : []),
       ]);
       const { facts, viewer, decider, state } = await factsOf(db, r, viewerId);
@@ -447,6 +756,16 @@ export function pgRequests(db: Db, now: () => Date): RequestsPort {
         ...(m.draftPatch ? { draftPatch: m.draftPatch } : {}),
         ...(m.githubCommentRef ? { githubCommentRef: m.githubCommentRef } : {}),
         ...(m.answerState ? { answerState: m.answerState } : {}),
+        ...(m.answerText !== null && m.answeredAt !== null
+          ? {
+              answer: {
+                text: m.answerText,
+                ...(m.answeredBy ? { by: person(people.get(m.answeredBy), m.answeredBy) } : {}),
+                at: iso(m.answeredAt),
+                ...(m.answerError ? { error: m.answerError } : {}),
+              },
+            }
+          : {}),
         createdAt: iso(m.createdAt),
       });
       return {
@@ -531,6 +850,7 @@ export function pgRequests(db: Db, now: () => Date): RequestsPort {
         const { facts, viewer, decider } = await factsOf(tx, r, viewerId);
         const v = requestActions(facts, viewer, { now: now(), deciderAvailable: decider !== null }).send;
         if (!v.allowed) refused(v.why ?? '不能发消息');
+        await assertNotOpening(tx, r.id);
         const mentions = [...new Set(input.mentions)];
         if (mentions.length > 0) {
           const known = await tx
@@ -573,6 +893,7 @@ export function pgRequests(db: Db, now: () => Date): RequestsPort {
         const { facts, viewer, decider } = await factsOf(tx, r, viewerId);
         const v = requestActions(facts, viewer, { now: now(), deciderAvailable: decider !== null }).editDraft;
         if (!v.allowed) refused(v.why ?? '不能改草稿');
+        await assertNotOpening(tx, r.id);
         if (input.baseVersion !== r.draftVersion) {
           refused(`草稿已经改到第 ${r.draftVersion} 版，你看到的是第 ${input.baseVersion} 版：刷新后再改`);
         }
@@ -609,6 +930,11 @@ export function pgRequests(db: Db, now: () => Date): RequestsPort {
     },
 
     async act(seq, viewerId, input) {
+      // 确定开单、同意做：要在 GitHub 上开单，不能整个包在一个事务里（见 openAndClose）
+      if (input.action === 'confirm' || input.action === 'approve') {
+        await openAndClose(seq, viewerId, input);
+        return;
+      }
       await db.transaction(async (tx) => {
         const r = await lockRow(tx, seq);
         const { facts, viewer, decider } = await factsOf(tx, r, viewerId);
@@ -617,6 +943,7 @@ export function pgRequests(db: Db, now: () => Date): RequestsPort {
           input.action
         ];
         if (!v.allowed) refused(v.why ?? `不能${ACTION_WORDS[input.action]}`);
+        await assertNotOpening(tx, r.id);
         if ('draftVersion' in input && input.draftVersion !== r.draftVersion) {
           refused(
             `草稿已经改到第 ${r.draftVersion} 版，你看到的是第 ${input.draftVersion} 版：刷新看过最新的再${ACTION_WORDS[input.action]}`,
@@ -656,14 +983,6 @@ export function pgRequests(db: Db, now: () => Date): RequestsPort {
             );
             break;
           }
-          case 'confirm':
-            await set({ status: 'closed_do', deciderId: viewerId, closedAt: at, lastActivityAt: at });
-            await systemMessage(tx, r.id, `${who} 确定开单（草稿第 ${r.draftVersion} 版），已结案`);
-            break;
-          case 'approve':
-            await set({ status: 'closed_do', closedAt: at, lastActivityAt: at });
-            await systemMessage(tx, r.id, `${who} 拍板：同意做（草稿第 ${r.draftVersion} 版），已结案`);
-            break;
           case 'reject':
             reason = input.reason;
             // 已结案·不做马上归档
@@ -763,6 +1082,146 @@ export function pgRequests(db: Db, now: () => Date): RequestsPort {
           .where(and(eq(requestUserState.requestId, r.id), eq(requestUserState.userId, viewerId)));
         return s?.last ?? null;
       });
+    },
+
+    async openingState(seq, draftVersion) {
+      const [r] = await db.select({ id: requests.id }).from(requests).where(eq(requests.seq, seq));
+      if (!r) return null;
+      const [o] = await db
+        .select()
+        .from(requestIssueOpenings)
+        .where(
+          and(eq(requestIssueOpenings.requestId, r.id), eq(requestIssueOpenings.draftVersion, draftVersion)),
+        );
+      if (!o) return { seq, draftVersion, state: 'none' };
+      const people = await userMap([o.requestedBy]);
+      const base = {
+        seq,
+        draftVersion,
+        requestedBy: person(people.get(o.requestedBy), o.requestedBy),
+        updatedAt: iso(o.updatedAt),
+      };
+      if (o.state === 'opened' && o.issueNumber !== null && o.issueUrl !== null) {
+        const [repo] = await db
+          .select({ owner: repos.owner, name: repos.name })
+          .from(requests)
+          .innerJoin(repos, eq(repos.id, requests.repoId))
+          .where(eq(requests.id, r.id));
+        return {
+          ...base,
+          state: 'opened',
+          issue: {
+            repo: repo ? `${repo.owner}/${repo.name}` : '（项目已移出驾驶舱）',
+            number: o.issueNumber,
+            url: o.issueUrl,
+          },
+        };
+      }
+      if (o.state === 'failed') return { ...base, state: 'failed', error: o.error ?? '没开成（原因没记下）' };
+      // 占着行却一直没结果：后端中途断了，当作没开成，可以重来
+      if (!freshOpening(o)) {
+        return {
+          ...base,
+          state: 'failed',
+          error: '上一次开单中途断了（超过 3 分钟没有结果），可以重新点一次',
+        };
+      }
+      return { ...base, state: 'opening' };
+    },
+
+    async answerAsk(seq, viewerId, messageId, text) {
+      const issues = issuesPort();
+      const plan = await db.transaction(async (tx) => {
+        const r = await lockRow(tx, seq);
+        if (r.deletedAt !== null) refused(DELETED_WHY);
+        const viewer = await viewerOf(tx, viewerId);
+        if (viewerId !== r.initiatorId && viewerId !== r.deciderId && !viewer.decidesRequests) {
+          throw new ApiError(403, 'not_allowed', '只有发起人或拍板人能回答引擎的提问');
+        }
+        const [m] = await tx
+          .select()
+          .from(requestMessages)
+          .where(and(eq(requestMessages.requestId, r.id), eq(requestMessages.id, messageId)));
+        if (!m) throw new ApiError(404, 'message_not_found', `需求 ${seq} 里没有消息 ${messageId}`);
+        if (m.kind !== 'engine_ask' || !m.githubCommentRef) refused('这条不是引擎的提问，没有可回答的');
+        if (m.answerState === 'written') refused('这条提问已经答过了，答复已经写回 GitHub');
+        const target = issueOfCommentRef(m.githubCommentRef);
+        if (!target) refused(`这条提问绑定的评论网址认不出（${m.githubCommentRef}），写不回去`);
+        const [me] = await tx.select({ name: users.displayName }).from(users).where(eq(users.id, viewerId));
+        const body = `> 回复 ${m.githubCommentRef}\n\n${text}\n\n— ${me?.name ?? '驾驶舱用户'}，来自驾驶舱 需求 ${seq}`;
+        try {
+          assertPublishable(target.repo, '写评论', [{ path: '评论正文', text: body }], options.hygieneRepo);
+        } catch (err) {
+          throw githubFailure(err, '回答');
+        }
+        // 答复文字先存下：写回失败了页面点重试不用重打
+        await tx
+          .update(requestMessages)
+          .set({ answerText: text, answeredBy: viewerId, answeredAt: now() })
+          .where(eq(requestMessages.id, m.id));
+        return { target, body, commentRef: m.githubCommentRef, requestId: r.id, messageId: m.id };
+      });
+
+      const key = `request-answer:${plan.messageId}:${createHash('sha1').update(text).digest('hex').slice(0, 12)}`;
+      let failure: ApiError | null = null;
+      try {
+        await issues.commentIssue({
+          repo: plan.target.repo,
+          issueNumber: plan.target.issueNumber,
+          key,
+          body: plan.body,
+        });
+      } catch (err) {
+        failure = githubFailure(err, '把答复写回 GitHub');
+      }
+      const at = now();
+      await db.transaction(async (tx) => {
+        await tx
+          .update(requestMessages)
+          .set(
+            failure
+              ? { answerState: 'failed', answerError: failure.message }
+              : { answerState: 'written', answerError: null, answeredAt: at },
+          )
+          .where(eq(requestMessages.id, plan.messageId));
+        await tx
+          .update(requests)
+          .set({ lastActivityAt: at, updatedAt: at })
+          .where(eq(requests.id, plan.requestId));
+        await audit(
+          tx,
+          viewerId,
+          seq,
+          failure ? 'request.answer_failed' : 'request.answer',
+          { messageId: plan.messageId },
+          { commentRef: plan.commentRef },
+          failure?.message,
+        );
+      });
+      if (failure) throw failure;
+    },
+
+    async seqsForIssues(issues) {
+      const out = new Map<string, number>();
+      if (issues.length === 0) return out;
+      const rows = await db
+        .select({ seq: requests.seq, issueRefs: requests.issueRefs })
+        .from(requests)
+        .where(
+          or(
+            ...issues.map(
+              (i) => sql`${requests.issueRefs} @> ${JSON.stringify([{ number: i.number }])}::jsonb`,
+            ),
+          ),
+        );
+      const want = new Set(issues.map((i) => issueKey(i.repo, i.number)));
+      for (const r of rows) {
+        for (const ref of r.issueRefs) {
+          const k = issueKey(ref.repo, ref.number);
+          if (want.has(k)) out.set(k, r.seq);
+        }
+      }
+      return out;
     },
   };
 }

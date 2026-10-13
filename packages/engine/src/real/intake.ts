@@ -21,6 +21,7 @@ import {
   listIntakeRepos,
   readIntakeBreaker,
   recentEndedTasks,
+  requesterForRequestIssue,
   resolveAlertWithReason,
   startScheduleRun,
   TASK_ADOPT_AUDIT_ACTION,
@@ -268,6 +269,12 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
       },
       async start({ repo, issueNumber, title, body, author }) {
         const member = memberFor(await usersOnce(), author);
+        // 驾驶舱「提需求」开的单是「引擎」机器人开的，GitHub 上的作者认不出是谁（母单 #2047 第 B 片）：
+        // 提出人以开单那一刻写进库的 requested_by 为准（按正文末尾「来自驾驶舱 需求 N」找）。只认自家机器人开的单。
+        const requester =
+          member?.role === 'bot'
+            ? await requesterForRequestIssue(w.db, { repoId: repo.id, issueNumber, body })
+            : null;
         const id = randomUUID();
         const slug = `${repo.owner}/${repo.name}`;
         const created = await store.createTaskFromIssue(
@@ -277,7 +284,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
             issueNumber,
             title,
             rawRequest: body,
-            requestedBy: member?.id ?? author?.login ?? 'github',
+            requestedBy: requester?.requestedBy ?? member?.id ?? author?.login ?? 'github',
           },
           {
             actor: actorFor(member),

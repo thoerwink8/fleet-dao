@@ -56,6 +56,8 @@ describe('约定与实现对得上', () => {
       if (name === 'runTranscript') continue;
       // 需求详情要真有那条需求、且接上了需求表（PGlite）才有 200：在 requests.test.ts 里先建再读、按同一份 schema 认
       if (name === 'requestDetail') continue;
+      // 开单查询要带 ?draftVersion= 且真有那条需求才有 200：在 request-issue.test.ts 里按同一份 schema 认
+      if (name === 'requestIssueOpening') continue;
       const res = await h.cockpit.request(fill(route.path), { headers: { cookie } });
       expect(res.status, name).toBe(200);
       const parsed = route.response.safeParse(await res.json());

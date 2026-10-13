@@ -1307,6 +1307,8 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   settings: [['settings'], keys.env],
   // 别的环境推来了新快照：顶栏切换器和环境页的列表、选中的那个环境的主页和环境页都重拉。
   node_reports: [keys.nodes, ['node']],
+  // 提需求（#2060）：载荷里的 id 是需求号。读它的页面在 #2047 的 D 片接，接上时在这里挂查询键；现在没有页面读，不用重拉。
+  requests: [],
 };
 
 function isRealtimeTable(table: string): table is RealtimeTable {

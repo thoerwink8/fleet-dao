@@ -202,7 +202,8 @@ describe('渠道状态页：渠道卡', () => {
       if (!(el instanceof HTMLElement)) throw new Error('还没有下次探测那一行');
       return el;
     });
-    expect(notice.textContent).toMatch(/^退避中，连着不通 6 次，下次约 \d{2}:\d{2}$/);
+    // 下次是 100 分钟后：跑在 22:20 以后就跨到第二天，页面照实写「明天 00:01」（CI 在 UTC 22 点后跑会撞上）
+    expect(notice.textContent).toMatch(/^退避中，连着不通 6 次，下次约 (明天 )?\d{2}:\d{2}$/);
     expect(notice.className).not.toContain('truncate');
     expect(routeRow('r-cursor').getAttribute('data-kind')).toBe('fault');
   });

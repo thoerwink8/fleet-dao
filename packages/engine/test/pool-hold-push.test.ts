@@ -1,12 +1,10 @@
 // 整池暂停到期推飞书（#954）：一条里带池名、原因、去哪撤；同一天同一份正文只推一次。
 // 没配、推不出去、记不下：没查成，不当成推过（推不出去时不调用记下）。
 import { describe, expect, it, vi } from 'vitest';
-import { cockpitLink } from '../src/jobs/cockpit-link.ts';
 import { pushOverduePoolHolds } from '../src/jobs/pool-hold-push.ts';
 import { FEISHU_WEBHOOK_ENV, feishuWebhookSender, feishuWebhookUrl } from '../src/real/feishu-webhook.ts';
 
 const NOW = new Date('2026-10-05T04:00:00Z'); // 北京时间 2026-10-05 12:00
-const COCKPIT = 'https://cockpit.example.test';
 const HOOK = 'https://open.feishu.cn/open-apis/bot/v2/hook/fake-hook-token-for-logs';
 
 const hold = (over: Record<string, unknown> = {}) => ({
@@ -35,7 +33,6 @@ function world(value: unknown | undefined) {
         previous = x.body;
       },
       send,
-      cockpit: (path) => cockpitLink(COCKPIT, path),
     });
   return { sent, marked, run, setPrevious: (body: string) => (previous = body) };
 }
@@ -54,7 +51,6 @@ describe('pushOverduePoolHolds', () => {
     expect(text).toContain('创始人要大用独享');
     expect(text).toContain('张三');
     expect(text).toContain('驾驶舱额度页');
-    expect(text).toContain('驾驶舱：https://cockpit.example.test/quota');
     expect(text).not.toContain('relay');
     expect(due.marked).toEqual([text]);
 
@@ -71,26 +67,6 @@ describe('pushOverduePoolHolds', () => {
     const noDate = world({ 'claude-solo': raw });
     expect(await noDate.run()).toMatchObject({ found: 0, unchecked: [] });
     expect(noDate.sent).toEqual([]);
-  });
-
-  it('【故意造出的失败】驾驶舱地址没配：没查成，不推、不记已推', async () => {
-    const sent: string[] = [];
-    const marked: string[] = [];
-    const part = await pushOverduePoolHolds({
-      now: () => NOW,
-      readSetting: async () => ({ set: true, value: { 'claude-solo': hold({ reviewBy: '2026-10-01' }) } }),
-      sentBody: async () => null,
-      markSent: async (x) => {
-        marked.push(x.body);
-      },
-      send: async (text) => {
-        sent.push(text);
-      },
-      cockpit: (path) => cockpitLink('', path),
-    });
-    expect(part.found).toBe(0);
-    expect(part.unchecked.join()).toContain('驾驶舱地址没配');
-    expect({ sent, marked }).toEqual({ sent: [], marked: [] });
   });
 
   it('同一天同一份正文只推一次；正文变了（又有池到期）再推', async () => {

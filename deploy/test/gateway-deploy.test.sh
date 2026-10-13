@@ -203,10 +203,12 @@ JOURNAL='{"level":"warn","message":"盘面快照没取到，先用缓存"}'
 st=$(cmd_status)
 check "主进程跑的是 D" "$(grep '^running=' <<<"$st")" "running=$D"
 check "还没打出「已连上」：no" "$(grep '^connected=' <<<"$st")" "connected=no"
-JOURNAL='{"level":"info","message":"飞书网关已连上","bot":"x"}'
+JOURNAL='{"level":"info","message":"飞书网关已连上","bot":"x"}
+{"level":"info","message":"消息处理完","path":"understand"}
+{"level":"info","message":"消息处理完","path":"menu"}'
 st=$(cmd_status)
 check "打出「已连上」：yes" "$(grep '^connected=' <<<"$st")" "connected=yes"
-check "状态里不再有 messages 一行（飞书收缩后网关不收话，数它没有意义）" "$(grep -c '^messages=' <<<"$st" || true)" "0"
+check "处理过 2 条消息" "$(grep '^messages=' <<<"$st")" "messages=2"
 JOURNAL+='
 {"level":"warn","message":"飞书长连接断了，正在重连"}'
 check "最后一条是「断了」：reconnecting" "$(cmd_status | grep '^connected=')" "connected=reconnecting"
