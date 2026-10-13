@@ -42,7 +42,7 @@ import type { LiveEvent } from './types';
 
 type Query = Record<string, string | number | undefined>;
 
-/** 发版预检后端最多等 60 秒，前端再留一点，避免预检还在跑就被这里掐掉。 */
+/** 发版预检要现读 GitHub，前端留够时间，避免还在读就被这里掐掉。 */
 export const REQUEST_TIMEOUT_MS = 90_000;
 
 const NETWORK_MESSAGE = '连不上驾驶舱后端。检查一下网络，过一会儿再试。';
@@ -489,6 +489,10 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     franceRelease: (sha) =>
       send('POST', apiUrl(R.franceRelease.path), R.franceRelease.response, {
         body: R.franceRelease.request.parse({ sha }),
+      }),
+    franceReleaseRecover: (kind) =>
+      send('POST', apiUrl(R.franceReleaseRecover.path), R.franceReleaseRecover.response, {
+        body: R.franceReleaseRecover.request.parse({ kind }),
       }),
     francePreflight: () => send('POST', apiUrl(R.francePreflight.path), R.francePreflight.response),
     franceCliTools: () => send('GET', apiUrl(R.franceCliTools.path), R.franceCliTools.response),

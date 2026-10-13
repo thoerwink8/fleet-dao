@@ -5,6 +5,7 @@ import {
   AUTO_DISPATCH_ENABLE,
   CI_POLICY_SET,
   GROOM_ACTION,
+  RELEASE_RECOVER_ACTION,
   RELEASE_REQUEST_ACTION,
   ROUTE_PROBE_ACTION,
 } from '@fleet-dao/shared';
@@ -27,6 +28,9 @@ export const AUDIT_ACTION_TEXT: Readonly<Record<string, string>> = {
   [AUTO_DISPATCH_DISABLE]: '关闭了「让 AI 接活」',
   [CI_POLICY_SET]: '改了 CI 模式',
   [RELEASE_REQUEST_ACTION]: '点了发布到法国',
+  [RELEASE_RECOVER_ACTION.retry]: '点了发版重试',
+  [RELEASE_RECOVER_ACTION.restore]: '点了恢复引擎开关',
+  [RELEASE_RECOVER_ACTION.abort]: '点了撤掉暂停',
   // 任务
   'task.create': '建了任务',
   'task.adopt': '接下了一张老单',

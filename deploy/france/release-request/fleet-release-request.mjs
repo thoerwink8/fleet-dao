@@ -3,7 +3,15 @@
 // deploy/france.sh（人工档，deploy/lib/human-tier.sh）把本目录装到 /usr/local/lib/fleet-dao/release-request/，别在机器上手改。
 // 手动看一趟：journalctl -u fleet-release-request -n 100；进度在 /srv/fleet-dao-releases/.train/release-train.json。
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -17,6 +25,7 @@ import {
   LAST_FILE,
   MARKER_FILE,
   parseDrain,
+  parseRepoSwitches,
   RELEASE_SH,
   RELEASES,
   runRequest,
@@ -82,6 +91,62 @@ function engineStateDir() {
   return ENGINE_STATE_DEFAULT;
 }
 
+/** engine.env 里一个键的值（root 读得到：/etc/fleet-dao 归 root:fleet 640）；没有、读不了回 ''。 */
+function engineEnv(key) {
+  try {
+    let v = '';
+    for (const line of readFileSync(ENGINE_ENV, 'utf8').split('\n')) {
+      if (line.startsWith(`${key}=`)) v = line.slice(key.length + 1).trim();
+    }
+    return v.replace(/^(['"])(.*)\1$/, '$2');
+  } catch {
+    return '';
+  }
+}
+
+/** 飞书群机器人地址只收这两种前缀（同 packages/engine/src/real/feishu-webhook.ts 的 feishuWebhookUrl）。 */
+const FEISHU_PREFIXES = [
+  'https://open.feishu.cn/open-apis/bot/v2/hook/',
+  'https://open.larksuite.com/open-apis/bot/v2/hook/',
+];
+
+/**
+ * 驾驶舱接口的地址：读 release.sh 里的 COCKPIT 常量（docs/ops.md 端口表：改监听地址要几处一起改，这里不另抄一份）。
+ * 读不到抛，体检那一项记读不到。
+ */
+function cockpitAddr() {
+  const m = /^COCKPIT=([0-9.:a-z-]+)/m.exec(readFileSync(RELEASE_SH, 'utf8'));
+  if (!m) throw new Error(`${RELEASE_SH} 里认不出 COCKPIT=`);
+  return m[1];
+}
+
+/** 以 fleet 经本机 socket 读库 fleet（peer 认证，同自动发布的 sql）；只读。 */
+function sqlRead(text) {
+  return run(
+    'runuser',
+    [
+      '-u',
+      'fleet',
+      '--',
+      'env',
+      'PGHOST=/var/run/postgresql',
+      'PGUSER=fleet',
+      'PGCONNECT_TIMEOUT=10',
+      'psql',
+      '-X',
+      '-q',
+      '-tA',
+      '-v',
+      'ON_ERROR_STOP=1',
+      '-d',
+      'fleet',
+      '-c',
+      text,
+    ],
+    { timeoutMs: 30_000 },
+  );
+}
+
 /** 落盘：先写临时文件再换名（TRAIN_DIR 归 root，fleet 碰不到，写它不会被符号链接带去别处）。 */
 function writeAtomic(file, text) {
   mkdirSync(TRAIN_DIR, { recursive: true, mode: 0o755 });
@@ -132,6 +197,7 @@ export const realIo = {
   clearMarker() {
     rmSync(MARKER_FILE, { force: true });
   },
+  markerExists: () => existsSync(MARKER_FILE),
   async releaseBusy() {
     const r = run('flock', ['-n', `${RELEASES}/.lock`, 'true'], { timeoutMs: 10_000 });
     if (r.status === 0) return false;
@@ -221,6 +287,79 @@ export const realIo = {
     } catch (e) {
       return { ok: false, why: `${HISTORY_FILE} 读不了（${e.code ?? e.message}）` };
     }
+  },
+  /** 法国在用的提交：发布目录的 current 链接（同 packages/store 的 readDeployLagInput）。 */
+  async currentRelease() {
+    try {
+      const target = readlinkSync(`${RELEASES}/current`);
+      if (!/^[0-9a-f]{40}$/.test(target))
+        return { ok: false, why: `current 指着认不出的「${target.slice(0, 60)}」` };
+      return { ok: true, sha: target };
+    } catch (e) {
+      return { ok: false, why: `读不了 ${RELEASES}/current（${e.code ?? e.message}）` };
+    }
+  },
+  async healthz() {
+    try {
+      const res = await fetch(`http://${cockpitAddr()}/healthz`, { signal: AbortSignal.timeout(10_000) });
+      return { status: res.status, body: await res.text() };
+    } catch (e) {
+      return { status: null, body: '', error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+  /** 取最新主线，主线头是哪个、比刚发的多几个提交（「再跑一遍预检」：已是最新＝0）。 */
+  async mainHead(sha) {
+    const f = git(['fetch', '--quiet', 'origin', '+refs/heads/main:refs/remotes/origin/main'], {
+      timeoutMs: 180_000,
+    });
+    if (f.status !== 0) return { ok: false, why: `从 GitHub 取主线没成：${tail(f.stderr || f.error)}` };
+    const h = git(['rev-parse', 'refs/remotes/origin/main']);
+    if (h.status !== 0) return { ok: false, why: `读主线头没成：${tail(h.stderr || h.error)}` };
+    const c = git(['rev-list', '--count', `${sha}..refs/remotes/origin/main`]);
+    if (c.status !== 0) return { ok: false, why: `数主线比刚发的多几个没成：${tail(c.stderr || c.error)}` };
+    return { ok: true, sha: h.stdout.trim(), behind: Number(c.stdout.trim()) };
+  },
+  /** 各仓「让 AI 接活」开关（repos.auto_dispatch_since；接活读的就是它，同 fleet-api dispatch status）。只读。 */
+  async repoSwitches() {
+    const r = sqlRead(
+      "select owner || '/' || name || '|' || coalesce(auto_dispatch_since::text, '') from repos order by owner, name;",
+    );
+    if (r.error || r.status !== 0)
+      return { ok: false, why: `读库没成（psql 退出码 ${r.status}）：${tail(r.error ?? r.stderr)}` };
+    return parseRepoSwitches(r.stdout);
+  },
+  /** 推一条飞书：和引擎推主线红同一个群机器人（engine.env 的 FLEET_FEISHU_WEBHOOK），推 3 次都不成就抛，话里不带地址。 */
+  async notify(text) {
+    const url = engineEnv('FLEET_FEISHU_WEBHOOK');
+    if (url === '') throw new Error(`飞书推送没配：${ENGINE_ENV} 里没有 FLEET_FEISHU_WEBHOOK`);
+    const prefix = FEISHU_PREFIXES.find((p) => url.startsWith(p));
+    if (!prefix || url.length <= prefix.length || /\s/.test(url))
+      throw new Error('飞书推送的地址不认（只收飞书、Lark 群机器人 webhook）');
+    let last = '没推成';
+    for (let i = 1; i <= 3; i++) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ msg_type: 'text', content: { text } }),
+          signal: AbortSignal.timeout(8_000),
+        });
+        const raw = await res.text();
+        let code;
+        try {
+          const o = JSON.parse(raw);
+          code = o.code ?? o.StatusCode;
+        } catch {
+          code = undefined;
+        }
+        if (res.ok && code === 0) return;
+        last = `飞书回了 HTTP ${res.status}，code=${String(code)}`;
+      } catch (e) {
+        last = (e instanceof Error ? e.message : String(e)).split(url).join('（地址已隐去）');
+      }
+      if (i < 3) await delay(200);
+    }
+    throw new Error(`飞书推了 3 次都没成：${last}`);
   },
 };
 

@@ -1,7 +1,7 @@
 // 驾驶舱的所有读写都经过 FleetApi：方法和 shared/web-api.ts 的 WebRoutes 一一对应，形状全用那份定义。
 // 实现有两个：http.ts（真后端，带 CSRF 头、SSE 推送）和 mock/（假数据，开发和测试用），在 api/index.ts 里选。
 
-import { REALTIME_TABLES, type RealtimeTable } from '@fleet-dao/shared';
+import { REALTIME_TABLES, type RealtimeTable, type ReleaseRecoverKind } from '@fleet-dao/shared';
 import {
   type QueryClient,
   useInfiniteQuery,
@@ -49,6 +49,7 @@ import type {
   PurposeMembership,
   ReleaseCard,
   ReleasedCommits,
+  ReleaseRecoverResult,
   ReleaseRequestResult,
   RemovePurposeModelBody,
   RemoveRepoResult,
@@ -233,7 +234,9 @@ export interface FleetApi {
   franceReleasedCommits(): Promise<ReleasedCommits>;
   /** /france 页「发布到法国」按钮（#1232）：只收提交号，后端核它等于此刻主线头、写请求文件，法国上 root 的单元接活。 */
   franceRelease(sha: string): Promise<ReleaseRequestResult>;
-  /** /france 页「发版预检」按钮：点下让后端起 pnpm release:onekey preflight，命令写死、不收参数。 */
+  /** /france 页发版卡卡住、失败后的三个按钮（#2027）：重试、恢复引擎开关、撤掉暂停；只收种类，后端按进度记录核能不能点。 */
+  franceReleaseRecover(kind: ReleaseRecoverKind): Promise<ReleaseRecoverResult>;
+  /** /france 页「发版预检」：后端进程内读七项事实，不起子进程、不收参数。 */
   francePreflight(): Promise<FrancePreflightResponse>;
   /** /france 页「命令行工具」（#1969、#1971）：在用版本、官方最新、落后，升过的带上次升级时间和升上去的版本。只读。 */
   franceCliTools(): Promise<CliToolsResponse>;
@@ -758,8 +761,25 @@ export function useFranceRelease() {
 }
 
 /**
- * /france 页「发版预检」按钮（#618）：点下让后端起 pnpm release:onekey preflight。
- * 命令后端写死、不收参数；最长 60 秒（后端 timeout），前端用 useMutation 不缓存、不作废读。
+ * 发版卡卡住、失败后的三个按钮（#2027）：重试、恢复引擎开关、撤掉暂停。写请求，后端回 409 带原因（刚变了、没有可点的、没装接活单元……）。
+ * 做完重拉发版卡和进度，操作记录里也多一条。
+ */
+export function useFranceReleaseRecover() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (kind: ReleaseRecoverKind) => api.franceReleaseRecover(kind),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.franceReleaseCard });
+      qc.invalidateQueries({ queryKey: keys.franceReleaseState });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/**
+ * /france 页「发版预检」按钮（#618）：点下让后端在进程内读七项事实。
+ * 不收参数；前端用 useMutation 不缓存、不作废读。
  */
 export function useFrancePreflight() {
   const api = useApi();

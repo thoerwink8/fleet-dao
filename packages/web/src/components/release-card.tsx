@@ -2,12 +2,15 @@
 // 只读展示：每一行各自带「查成了 / 没查成 + 原因」，没查成的行写明原因，不拿空、0 或「已是最新」顶。
 // 发布入口（#1255）：「发布到法国」按钮和弹窗放在「在用版本」那一行（ReleaseEntry，env-facts 的 versionExtra 挂上去），发版卡本身只读。
 // 四行事实用 KeyValue（片 7，#1853）；提交号用 Tag，CI 状态用 StatusBadge。
-import { useState } from 'react';
+
+import type { ReleaseRecoverKind } from '@fleet-dao/shared';
+import { type ReactNode, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { SESSION_WAIT_MS } from '../../../../deploy/france/release-request/session-wait.mjs';
-import { errorText, useFranceRelease } from '../api/client';
+import { errorText, useFrancePreflight, useFranceRelease, useFranceReleaseRecover } from '../api/client';
 import type { ReleaseCard } from '../api/types';
 import { formatAgo } from '../lib/format';
+import { checkLine, lastLine, preflightItems, stepRows, timelineHead } from '../lib/release-timeline';
 import { cn } from '../lib/utils';
 import { KeyValue } from './layout/key-value';
 import { StatusBadge } from './layout/status-badge';
@@ -217,52 +220,256 @@ function ReleaseRows({ card, now }: { card: ReleaseCard; now: number }) {
 
 type Last = ReleaseCard['action']['last'];
 
-/** 最近一次点击的结果一句话：读不到写没查成 + 原因，不当成没点过。 */
-function lastLine(last: Last, now: number): { text: string; tone: 'ok' | 'warn' | 'fail' | 'plain' } | null {
-  const when = last.at ? `（${formatAgo(last.at, now)}）` : '';
-  switch (last.state) {
-    case 'none':
-      return null;
-    case 'pending':
-      return { text: '发布请求已提交，等法国接活（接活后这里显示进度）', tone: 'warn' };
-    case 'refused':
-      return { text: `上一次被法国拒了${when}：${last.why ?? '（没写原因）'}。现场没动`, tone: 'fail' };
-    case 'running':
-      return { text: `发版在走：${last.phase ?? ''} · ${last.target ?? ''}${when}`, tone: 'warn' };
-    case 'blocked':
-      return { text: `发版卡住了：${last.phase ?? ''}${when}。${last.why ?? ''}`, tone: 'warn' };
-    case 'failed':
-      return { text: `发版没成：${last.phase ?? ''}${when}。${last.why ?? ''}`, tone: 'fail' };
-    case 'done':
-      return {
-        text: `上一趟发完了：${last.target ?? ''}${when}。引擎总开关和接活开关已恢复到发版前的样子`,
-        tone: 'ok',
-      };
-    case 'aborted':
-      return { text: `上一趟被撤销了：${last.target ?? ''}${when}`, tone: 'plain' };
-    case 'unreadable':
-      return { text: `上一次的结果没查成：${last.why ?? ''}`, tone: 'warn' };
+const STEP_TONE = {
+  done: { tone: 'done', label: '走过' },
+  current: { tone: 'run', label: '在走' },
+  blocked: { tone: 'stall', label: '卡住' },
+  failed: { tone: 'fail', label: '没成' },
+  todo: { tone: 'stop', label: '没到' },
+} as const;
+
+/** 九步时间线（#2026）：第几步、在等什么、已用多久；数据来自法国的 release-train.json。 */
+function ReleaseTimeline({ last, now }: { last: Last; now: number }) {
+  const timeline = last.timeline;
+  if (!timeline) return null;
+  const rows = stepRows(timeline, last.state, last.why, now);
+  return (
+    <div className="space-y-1.5" data-release-timeline={last.state}>
+      <p className="num text-meta font-medium" data-timeline-head>
+        {timelineHead(timeline, last.state, now)}
+      </p>
+      <ol className="space-y-1 text-meta">
+        {rows.map((r) => (
+          <li
+            key={r.index}
+            data-step={r.index}
+            data-step-state={r.state}
+            className={cn('flex min-w-0 items-start gap-2', r.state === 'todo' && 'text-muted-foreground')}
+          >
+            <span className="w-14 shrink-0">
+              <StatusBadge tone={STEP_TONE[r.state].tone} label={STEP_TONE[r.state].label} variant="dot" />
+            </span>
+            <span className="num w-6 shrink-0 text-muted-foreground">{r.index}</span>
+            <span className="w-16 shrink-0 font-medium">{r.name}</span>
+            <span className="min-w-0 break-words">{r.text}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/** 发后体检（#2026）：「通过」或「没通过：哪几项」，下面每项一行。 */
+function ReleaseCheck({ check }: { check: NonNullable<Last['check']> }) {
+  const line = checkLine(check);
+  return (
+    <div className="space-y-1" data-release-check={line.ok ? 'ok' : 'bad'}>
+      <p className={cn('text-meta font-medium', line.ok ? 'text-ink-done' : 'text-ink-fail')}>{line.text}</p>
+      <ul className="space-y-0.5 text-meta">
+        {check.items.map((x) => (
+          <li key={x.name} className="flex min-w-0 items-start gap-2" data-check-item={x.ok ? 'ok' : 'bad'}>
+            <span className="shrink-0">
+              <StatusBadge tone={x.ok ? 'done' : 'fail'} label={x.ok ? '通过' : '没过'} variant="dot" />
+            </span>
+            <span className="shrink-0 font-medium">{x.name}</span>
+            <span className="min-w-0 break-words text-muted-foreground">{x.text}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+const PREFLIGHT_TONE = {
+  ok: { tone: 'done', label: '通过' },
+  block: { tone: 'fail', label: '卡住' },
+  info: { tone: 'wait', label: '留意' },
+} as const;
+
+/** 确认框里的预检清单（#2026）：打开框时现读一遍；有卡住项、没读到、没跑成，确认键灰着并写哪项。 */
+function preflightView(preflight: ReturnType<typeof useFrancePreflight>): {
+  node: ReactNode;
+  blockedWhy: string | null;
+} {
+  const result = preflight.data;
+  if (preflight.isPending || (!result && !preflight.isError)) {
+    return {
+      node: <p className="text-meta text-muted-foreground">预检在跑（只读，不暂停、不发版）…</p>,
+      blockedWhy: '预检还没跑完',
+    };
   }
+  if (preflight.isError) {
+    const why = `预检没跑成：${errorText(preflight.error)}`;
+    return { node: <p className="text-meta text-ink-fail">{why}</p>, blockedWhy: why };
+  }
+  if (!result) return { node: null, blockedWhy: '预检还没跑完' };
+  if (result.state === 'unreadable') {
+    const why = `预检没查成：${result.why}`;
+    return { node: <p className="text-meta text-ink-stall">{why}</p>, blockedWhy: why };
+  }
+  const items = preflightItems(result.stdout);
+  const blocks = items.filter((i) => i.kind === 'block');
+  const blockedWhy =
+    items.length === 0
+      ? '预检没给出清单'
+      : blocks.length > 0 || result.code !== 0
+        ? `有 ${blocks.length} 项卡住，确认键先灰着：${blocks.map((b) => b.text).join('；')}`
+        : null;
+  return {
+    node: (
+      <ul className="space-y-1 text-meta" data-preflight-list>
+        {items.map((i) => (
+          <li key={i.text} className="flex min-w-0 items-start gap-2" data-preflight-item={i.kind}>
+            <span className="shrink-0">
+              <StatusBadge
+                tone={PREFLIGHT_TONE[i.kind].tone}
+                label={PREFLIGHT_TONE[i.kind].label}
+                variant="dot"
+              />
+            </span>
+            <span className="min-w-0 break-words">{i.text}</span>
+          </li>
+        ))}
+      </ul>
+    ),
+    blockedWhy,
+  };
+}
+
+type Recover = NonNullable<ReleaseCard['action']['recover']>;
+
+const RECOVER_COPY: Record<
+  ReleaseRecoverKind,
+  { label: string; title: string; confirm: string; busy: string; done: string; fail: string }
+> = {
+  retry: {
+    label: '重试',
+    title: '重试：从卡住的这一步接着走？',
+    confirm: '确认重试',
+    busy: '正在提交重试请求',
+    done: '已提交重试请求',
+    fail: '没能提交重试请求',
+  },
+  restore: {
+    label: '恢复引擎开关',
+    title: '恢复引擎开关？',
+    confirm: '确认恢复',
+    busy: '正在提交恢复请求',
+    done: '已提交恢复引擎开关请求',
+    fail: '没能提交恢复引擎开关请求',
+  },
+  abort: {
+    label: '撤掉暂停',
+    title: '撤掉暂停？',
+    confirm: '确认撤掉',
+    busy: '正在提交撤掉暂停请求',
+    done: '已提交撤掉暂停请求',
+    fail: '没能提交撤掉暂停请求',
+  },
+};
+
+/** 确认框里写明每个按钮点了之后会怎样（后果）；撤掉暂停的后果由后端按进度记录算好带来。 */
+function recoverBody(kind: ReleaseRecoverKind, recover: Recover): string {
+  if (kind === 'retry') {
+    return `卡在${recover.retry?.phase ?? '等收尾'}：法国现场没动（引擎总开关还关着、没发版）。点「确认重试」从这一步接着等会话收尾，往后照走，不从头暂停一遍。`;
+  }
+  if (kind === 'restore') {
+    return `${recover.restore?.target ?? '这一版'} 已经发出去了，引擎总开关发版前是开着的、现在没开回。点「确认恢复」按发版前记下的状态把它开回，再核对各仓「让 AI 接活」开关没被动过。`;
+  }
+  return recover.abort?.text ?? '';
 }
 
 /**
- * 「发布到法国」按钮（#1232）：点开弹窗写明要发的提交、CI 是绿的、会带上哪几个 PR、发完引擎总开关和接活开关恢复到发版前的样子（#1256）；点「确认发布」才发，
- * 后端核它等于此刻主线头、记操作记录、写请求文件，法国上 root 的单元接活。不能点（CI 不绿、已有发版在走、没装接活单元……）就置灰并写原因。
+ * 卡住、失败后的三个按钮（#2027）：重试（从卡住那一步接着走）、恢复引擎开关（发完没开回）、撤掉暂停（等价命令行 abort）。
+ * 能不能点由后端按进度记录、暂停标记、引擎总开关算好带来（action.recover），这里只画；点了先弹确认框写明后果，
+ * 确认才发请求（后端再核一遍、记操作记录、写请求文件，法国上 root 的单元接活）。
+ */
+function ReleaseRecoverButtons({ recover }: { recover: Recover }) {
+  const mut = useFranceReleaseRecover();
+  const [asking, setAsking] = useState<ReleaseRecoverKind | null>(null);
+  const kinds = (['retry', 'restore', 'abort'] as const).filter((k) => recover[k] !== null);
+  if (kinds.length === 0) return null;
+  const copy = asking === null ? null : RECOVER_COPY[asking];
+  const confirm = async () => {
+    if (asking === null) return;
+    const c = RECOVER_COPY[asking];
+    try {
+      await mut.mutateAsync(asking);
+      toast.success(c.done, { description: '法国接活后，发版卡显示进度；操作记录里有这一条。' });
+    } catch (e) {
+      toast.error(c.fail, { description: errorText(e) });
+      throw e;
+    }
+  };
+  return (
+    <div className="space-y-1.5" data-release-recover>
+      <div className="flex flex-wrap gap-2">
+        {kinds.map((k) => (
+          <Button
+            key={k}
+            type="button"
+            size="sm"
+            variant={k === 'abort' ? 'outline' : 'default'}
+            loading={mut.isPending && mut.variables === k}
+            loadingLabel={RECOVER_COPY[k].busy}
+            onClick={() => setAsking(k)}
+            data-recover={k}
+          >
+            {RECOVER_COPY[k].label}
+          </Button>
+        ))}
+      </div>
+      <AlertDialog open={asking !== null} onOpenChange={(o) => (o ? undefined : setAsking(null))}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{copy?.title}</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-body">
+                <p data-recover-body>{asking === null ? '' : recoverBody(asking, recover)}</p>
+                <p className="text-meta text-muted-foreground">
+                  点了会记一条操作记录（谁、什么时候点的），法国接活后这里显示进度。
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>先不</AlertDialogCancel>
+            <AlertDialogAction onConfirm={confirm} {...(copy ? { loadingLabel: copy.busy } : {})}>
+              {copy?.confirm}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+/**
+ * 「发布到法国」按钮（#1232）：点开弹窗先现跑一遍预检、清单摆在框里（#2026），写明要发的提交、会带上哪几个 PR、发完引擎总开关恢复到发版前；
+ * 预检有卡住项时「确认发布」灰着并写哪项。点「确认发布」才发：后端核它等于此刻主线头、记操作记录、写请求文件，法国上 root 的单元接活。
+ * 不能点（CI 不绿、已有发版在走、没装接活单元……）就置灰并写原因。发版在走、卡住、没成时下面画九步时间线；做完了写发后体检结论。
  */
 function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
   const release = useFranceRelease();
+  const preflight = useFrancePreflight();
   const [asking, setAsking] = useState(false);
   const { action, mainline, gap } = card;
   const head = mainline.state === 'ok' ? mainline.commit : null;
   const ready = action.state === 'ready' && head !== null;
   const last = lastLine(action.last, now);
+  const pf = preflightView(preflight);
+  const { mutate: runPreflight } = preflight;
+  // 框一打开就现跑一遍预检（只读）：确认之前该看的都摆在框里
+  useEffect(() => {
+    if (asking) runPreflight();
+  }, [asking, runPreflight]);
   // 确认框等它：成功框关、弹成功；失败弹 toast 并抛给框——框留着写原因、能再点（#2009）
   const confirm = async () => {
     if (head === null) return;
     try {
       await release.mutateAsync(head.sha);
       toast.success(`已提交发布请求：${head.short}`, {
-        description: '法国接活后，这一行显示进度；发完引擎总开关和接活开关恢复到发版前的样子。',
+        description: '法国接活后，这一行显示九步进度；发完引擎总开关恢复到发版前，再做发后体检。',
       });
     } catch (e) {
       toast.error('没能提交发布请求', { description: errorText(e) });
@@ -301,6 +508,13 @@ function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
           {last.text}
         </p>
       ) : null}
+      {action.last.state === 'running' ||
+      action.last.state === 'blocked' ||
+      action.last.state === 'failed' ? (
+        <ReleaseTimeline last={action.last} now={now} />
+      ) : null}
+      {action.last.check ? <ReleaseCheck check={action.last.check} /> : null}
+      {action.recover ? <ReleaseRecoverButtons recover={action.recover} /> : null}
       <AlertDialog open={asking && head !== null} onOpenChange={setAsking}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -314,7 +528,28 @@ function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
                   </Tag>{' '}
                   {head?.title}
                 </p>
-                <p className="text-ink-done">主线 CI 是绿的。</p>
+                <div className="space-y-1.5" data-release-preflight>
+                  <div className="flex items-center gap-2">
+                    <p className="font-medium">预检（打开这个框时现读的）</p>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="ml-auto"
+                      loading={preflight.isPending}
+                      loadingText="预检在跑…"
+                      onClick={() => preflight.mutate()}
+                    >
+                      重新预检
+                    </Button>
+                  </div>
+                  {pf.node}
+                  {pf.blockedWhy !== null && !preflight.isPending ? (
+                    <p className="text-meta text-ink-stall" data-preflight-blocked>
+                      {pf.blockedWhy}
+                    </p>
+                  ) : null}
+                </div>
                 {gap.state === 'ahead' ? (
                   <div>
                     <p>会带上 {gap.count} 个提交，最近合进去的 PR：</p>
@@ -328,16 +563,22 @@ function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
                   </div>
                 ) : null}
                 <p className="text-meta text-muted-foreground">
-                  点「确认发布」就是同意对外发布，并记一条操作记录。法国会先暂停引擎总开关、等在跑的会话收尾（最多{' '}
+                  点「确认发布」就是同意对外发布，并记一条操作记录。之后全自动：法国先暂停引擎总开关、等在跑的会话收尾（最多{' '}
                   {SESSION_WAIT_MS / 60_000}{' '}
-                  分钟），再发版、验证；发完把引擎总开关和接活开关恢复到发版前的样子（发前开着的开回，发前关着的保持关）。
+                  分钟），再发版；发完把引擎总开关恢复到发版前（发前开着的开回，发前关着的保持关），各仓「让
+                  AI 接活」开关发版不动；最后做发后体检。开始、成功、卡住、失败各推飞书一条。
                 </p>
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>先不</AlertDialogCancel>
-            <AlertDialogAction onConfirm={confirm} loadingLabel="正在提交发布请求">
+            <AlertDialogAction
+              onConfirm={confirm}
+              loadingLabel="正在提交发布请求"
+              disabled={pf.blockedWhy !== null}
+              title={pf.blockedWhy ?? undefined}
+            >
               确认发布
             </AlertDialogAction>
           </AlertDialogFooter>

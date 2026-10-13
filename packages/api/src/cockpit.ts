@@ -63,6 +63,7 @@ import { registerCredentialRoutes } from './credentials.ts';
 import { handOffDecision } from './decision-handoff.ts';
 import type { Deps } from './deps.ts';
 import { registerDispatchRoutes } from './dispatch-routes.ts';
+import { registerFrancePreflightRoute } from './france-preflight.ts';
 import { registerFranceReleaseRoutes } from './france-release.ts';
 import { registerGroomRoutes } from './groom-routes.ts';
 import { engineHealthProbe } from './home-engine.ts';
@@ -905,6 +906,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   registerRunTranscriptRoutes(app, deps);
   registerModelRosterRoutes(app, deps, actorOf);
   registerFranceReleaseRoutes(app, deps);
+  registerFrancePreflightRoute(app, deps);
   registerCliToolsRoutes(app, deps);
   registerReleaseCardRoutes(app, deps);
   registerReleaseRequestRoutes(app, deps, actorOf);

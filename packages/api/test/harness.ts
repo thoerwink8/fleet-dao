@@ -158,6 +158,8 @@ export interface HarnessOptions {
   carpoolReconcile?: Deps['carpoolReconcile'];
   /** /france 页发版一键（#618）读状态文件、起子进程跑预检的替身；不给就是没接上（内存版、开发环境一样）。 */
   franceRelease?: Deps['franceRelease'];
+  /** 发版预检的七项读法。不给就是没接上。 */
+  francePreflight?: Deps['francePreflight'];
   /** /france 页「发版」卡（#1231）读 GitHub 和发布目录的替身；不给就是没接上（内存版、开发环境一样）。 */
   releaseCard?: Deps['releaseCard'];
   /** 「发布到法国」按钮写请求文件的替身（#1232）；不给就是没接上。 */
@@ -215,6 +217,7 @@ function wire<S extends Store>(
     ...(options.orgSwitch ? { orgSwitch: options.orgSwitch } : {}),
     ...(options.carpoolReconcile ? { carpoolReconcile: options.carpoolReconcile } : {}),
     ...(options.franceRelease ? { franceRelease: options.franceRelease } : {}),
+    ...(options.francePreflight ? { francePreflight: options.francePreflight } : {}),
     ...(options.releaseCard ? { releaseCard: options.releaseCard } : {}),
     ...(options.releaseRequest ? { releaseRequest: options.releaseRequest } : {}),
     ...(options.decisionCommenter ? { decisionCommenter: options.decisionCommenter } : {}),

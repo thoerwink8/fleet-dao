@@ -29,6 +29,8 @@ import {
   FranceReleaseStateSchema,
   ReleaseCardSchema,
   ReleasedCommitsSchema,
+  ReleaseRecoverBody,
+  ReleaseRecoverResponse,
   ReleaseRequestBody,
   ReleaseRequestResponse,
 } from './france-release.ts';
@@ -128,7 +130,14 @@ export const WebRoutes = {
     request: ReleaseRequestBody,
     response: ReleaseRequestResponse,
   },
-  /** /france 页「发版预检」按钮：起子进程跑 pnpm release:onekey preflight，命令写死、不收参数。 */
+  /** /france 页发版卡卡住、失败后的三个按钮（#2027）：重试、恢复引擎开关、撤掉暂停；只收种类，后端按进度记录核能不能点，记操作记录，写请求文件。 */
+  franceReleaseRecover: {
+    method: 'POST',
+    path: '/france/release-recover',
+    request: ReleaseRecoverBody,
+    response: ReleaseRecoverResponse,
+  },
+  /** /france 页「发版预检」：后端进程内读七项事实，不起子进程、不收参数。退出码 0 能发，2 不能发。 */
   francePreflight: { method: 'POST', path: '/france/preflight', response: FrancePreflightResponseSchema },
   /** /france 页「命令行工具」（#1969、#1971）：在用版本、官方最新、现算的落后，升过的带上次升级时间和升上去的版本。只读，没有升级按钮。 */
   franceCliTools: { method: 'GET', path: '/france/cli-tools', response: CliToolsResponseSchema },
