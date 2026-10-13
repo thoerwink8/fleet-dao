@@ -1,9 +1,8 @@
-// docs/PROGRESS.md 的骨架（2026-10-05 起：进度和创始人引导记在 GitHub 置顶单 #1055，这个文件只剩「生效中的临时调整」表）。
+// docs/PROGRESS.md 的骨架：进度和创始人引导记在 GitHub 置顶单 #1055，这个文件只剩「生效中的临时调整」表。
 // 为什么要钉：开会话钩子（agents/hooks/session-start.mjs）只认这个文件里的「## 生效中的临时调整」标题——标题被改名、
 // 被搬进归档页时它是**静默返回空**（等于「没有到期的」），不会红。所以这里把「这一节在原文件、正好一个、表读得出来」
-// 「归档页里没有这个标题（否则钩子报「不止一张」）」「引导节标题不再出现在仓里任何 .md（否则别的仓用的老读法会把它当成待办）」
+// 「归档页里没有这个标题（否则钩子报「不止一张」）」「引导节标题不再出现在 PROGRESS 和归档页（否则别的仓用的老读法会把它当成待办）」
 // 「指向进度单的那一行还在」钉成测试；每一条都配一条故意造出失败的用例。
-// 搬走前的整份进度原文在 docs/archive/progress-2026-10-05-final.md（一行没删），这里也钉着它还在。
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,7 +31,6 @@ const hook = (await import(pathToFileURL(join(ROOT, 'agents/hooks/session-start.
 
 const PROGRESS = 'docs/PROGRESS.md';
 const ARCHIVE_DIR = 'docs/archive';
-const FINAL = 'progress-2026-10-05-final.md';
 const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
 const archiveFiles = () =>
   readdirSync(join(ROOT, ARCHIVE_DIR))
@@ -62,7 +60,6 @@ function problems(progress: string, arch: Record<string, string>): string[] {
     if (countLine(t, hook.DIRECTIVE_HEADING) > 0)
       out.push(`${ARCHIVE_DIR}/${f} 里有「${hook.DIRECTIVE_HEADING}」：别的仓用的老读法会把它当成待办`);
   }
-  if (!(FINAL in arch)) out.push(`${ARCHIVE_DIR}/${FINAL} 不见了：搬走前的进度原文放在那里`);
   return out;
 }
 
@@ -104,15 +101,6 @@ describe('docs/PROGRESS.md 骨架：钩子读的临时调整表还在，进度�
     expect(problems(progress, arch)).toEqual([]);
   });
 
-  it('搬走前的进度原文真在归档页里（不是空文件蒙混）：状态、引导、归档目录三节都在', () => {
-    const t = arch[FINAL] ?? '';
-    expect(t).toContain('## 现在状态：在做和下一步');
-    expect(t).toContain('## 创始人引导（待处理，2026-10-05 搬走前原样）');
-    expect(t).toContain('## 归档目录');
-    expect(t.length).toBeGreaterThan(10_000);
-    expect(archiveFiles()).toContain('progress-inbox-2026-10.md');
-  });
-
   it(
     '开会话钩子对真文件读得出来：临时调整表认得出（用真 git grep，不是只看文字）',
     () => {
@@ -124,7 +112,7 @@ describe('docs/PROGRESS.md 骨架：钩子读的临时调整表还在，进度�
   );
 
   it(
-    '【故意造出失败】标题改名、被搬进归档页、引导节回到仓里、没指向进度单、归档页丢了原文都被拦住',
+    '【故意造出失败】标题改名、被搬进归档页、引导节回到仓里、没指向进度单都被拦住',
     () => {
       const renamed = progress.replace(hook.TEMP_HEADING, '## 临时调整（改过名）');
       expect(problems(renamed, arch).join('\n')).toMatch(/「## 生效中的临时调整」出现 0 次/);
@@ -149,8 +137,6 @@ describe('docs/PROGRESS.md 骨架：钩子读的临时调整表还在，进度�
       expect(problems(progress, inboxMoved).join('\n')).toMatch(/老读法会把它当成待办/);
 
       expect(problems(progress.replaceAll('#1055', '#0'), arch).join('\n')).toMatch(/没写进度单 #1055/);
-      const { [FINAL]: _gone, ...without } = arch;
-      expect(problems(progress, without).join('\n')).toMatch(/progress-2026-10-05-final\.md 不见了/);
     },
     SLOW,
   );

@@ -71,10 +71,13 @@ const README = [
   '',
 ].join('\n');
 
+const AGENTS = ['# 协作约定', '', '设计看 `docs/design.md`，装机见 `deploy/france.sh`。', ''].join('\n');
+
 const BASE: Record<string, string> = {
   'docs/design.md': DESIGN,
   'docs/ops.md': OPS,
   'README.md': README,
+  'AGENTS.md': AGENTS,
   'deploy/france.sh': '',
   'deploy/hk.sh': '',
   'packages/x/src/a.ts': '',
@@ -99,6 +102,13 @@ describe('文档指针：底子本身都指得到', () => {
 describe('文档指针：故意弄断的，逐条报 文件:行', () => {
   const cases: [name: string, file: string, line: string, message: string][] = [
     ['反引号里的路径不在', 'README.md', '- 看 `docs/nope.md`。', 'docs/nope.md 在仓里没有'],
+    ['仓根 AGENTS.md 里的路径不在', 'AGENTS.md', '- 改界面先读 `docs/nope.md`。', 'docs/nope.md 在仓里没有'],
+    [
+      'AGENTS.md 里指的 design 章节不在',
+      'AGENTS.md',
+      '进队条件见 `docs/design.md` 第九节。',
+      'docs/design.md 里没有第九节',
+    ],
     [
       '反引号里命令带的路径不在',
       'docs/ops.md',
@@ -285,6 +295,11 @@ describe('文档指针：故意不查的', () => {
     ],
     ['外面的链接', 'README.md', ['[里程碑](https://github.com/o/r/milestones)、[这一段](#常用)']],
     ['路径后面紧跟中文，截不准的不查', 'docs/ops.md', ['放 specs/99-不存在/ 下面']],
+    [
+      'AGENTS.md 里带尖括号的占位写法',
+      'AGENTS.md',
+      ['要写方案才写，放 `specs/<编号>-<短名>/`；收尾 `pnpm progress:done <评论号>`。'],
+    ],
     ['不是指针的「节」', 'docs/design.md', ['见 docs/ops.md 的 PX 一节；前面各节；验证环节；第一个里程碑。']],
   ];
 
@@ -353,7 +368,9 @@ describe('文档指针：读不到的明确报「没查成」，不当成「没�
 describe('全仓的文档（main 上现有的，加上本 PR 改的）', () => {
   const report = checkDocPointers(fsRepo(ROOT));
 
-  it('只查 design、ops、README 和 docs/design/ 下的模块文件，specs/ 和 docs/decisions/ 是历史记录不查（#654）', () => {
+  it('只查 design、ops、README、仓根 AGENTS.md 和 docs/design/ 下的模块文件，specs/ 和 docs/decisions/ 是历史记录不查', () => {
+    // AGENTS.md 是每个 AI 的入口，里面的仓内路径改名挪文件会静默指空
+    expect(report.files).toContain('AGENTS.md');
     // 按盘上真实的 docs/design/*.md 独立算一遍（#139 起每片往里加一个模块文件），不是拿 docFiles 自己对自己
     const modules = readdirSync(join(ROOT, 'docs/design'))
       .filter((name) => name.endsWith('.md'))
@@ -377,11 +394,11 @@ describe('全仓的文档（main 上现有的，加上本 PR 改的）', () => {
 });
 
 describe('文档指针：docs/design/ 下的模块文件也在要查的名单里', () => {
-  it('没有 docs/design/ 目录时，docFiles 返回正好三份', () => {
+  it('没有 docs/design/ 目录时，docFiles 正好返回固定那几份', () => {
     expect(docFiles(memRepo(BASE))).toEqual([...DOCS]);
   });
 
-  it('有 jev.md 和 web.md 时返回五份且顺序固定，非 .md 不算', () => {
+  it('有 jev.md 和 web.md 时排在固定几份后面且顺序固定，非 .md 不算', () => {
     const repo = memRepo({
       ...BASE,
       'docs/design/web.md': '# web\n',
