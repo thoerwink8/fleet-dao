@@ -361,7 +361,7 @@ describe('进程内定时器（startTimers）', () => {
   });
 });
 
-describe('13 个定时任务的登记（engineTimerJobs）', () => {
+describe('14 个定时任务的登记（engineTimerJobs）', () => {
   const never = () => {
     throw new Error('这里不该被叫');
   };
@@ -379,6 +379,7 @@ describe('13 个定时任务的登记（engineTimerJobs）', () => {
     usageBackfill: never,
     cliVersions: never,
     cliUpgrade: never,
+    requestSweep: never,
   });
   const start = vi_fn();
   function vi_fn() {
@@ -403,7 +404,7 @@ describe('13 个定时任务的登记（engineTimerJobs）', () => {
     expect(jobs().map((j) => j.id)).toEqual(ENGINE_JOBS.map((j) => j.id));
   });
 
-  it('格子：对账 15、探针 15 错 7、读额度 15 错 4、拼车盯读每分钟、每小时对账 60 错 41、巡检 6 小时错 26、看门狗 5 错 4、拉单 5 错 3、判断题自检 30 错 17、耗时表每周一 06:00（北京时间）、用量补记 5 错 2、命令行工具版本 60 错 11、命令行工具升级 30 错 6', () => {
+  it('格子：对账 15、探针 15 错 7、读额度 15 错 4、拼车盯读每分钟、每小时对账 60 错 41、巡检 6 小时错 26、看门狗 5 错 4、拉单 5 错 3、判断题自检 30 错 17、耗时表每周一 06:00（北京时间）、用量补记 5 错 2、命令行工具版本 60 错 11、命令行工具升级 30 错 6、需求整理 60 错 23', () => {
     expect(jobs().map((j) => [j.id, j.everyMinutes, j.offsetMinutes ?? 0])).toEqual([
       ['github-reconcile', 15, 0],
       ['route-probe', 15, 7],
@@ -418,6 +419,7 @@ describe('13 个定时任务的登记（engineTimerJobs）', () => {
       ['usage-backfill', 5, 2],
       ['cli-versions', 60, 11],
       ['cli-upgrade', 30, 6],
+      ['request-sweep', 60, 23],
     ]);
   });
 
