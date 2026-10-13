@@ -791,6 +791,7 @@ const FULL_RUN_ONLY_FILES = [
   'deploy/lib/node-cache.sh',
   'deploy/lib/auto-release-state.sh',
   'deploy/lib/node-report-gate.sh',
+  'deploy/lib/service-home.sh',
   // 整套装机才用的单元和配置样例
   'deploy/france/fleet-temporal.service',
   'deploy/france/temporal.yaml',

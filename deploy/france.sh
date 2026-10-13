@@ -65,6 +65,8 @@ source "$DEPLOY_DIR/lib/auto-release-state.sh"
 source "$DEPLOY_DIR/lib/node-report-gate.sh"
 # shellcheck source=lib/human-tier.sh
 source "$DEPLOY_DIR/lib/human-tier.sh"
+# shellcheck source=lib/service-home.sh
+source "$DEPLOY_DIR/lib/service-home.sh"
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
 # ── 钉死的版本与校验和：外部二进制装上机器就进了信任面，不用 latest ──
@@ -1488,8 +1490,8 @@ readback_wireguard() {
 readback_service_home() {
   local found
   # 不接 head：find 被管道截断会让整条命令算失败，结果就被当成「没找到」
-  local homes=(/home/fleet /var/lib/fleet-dao /var/log/fleet-dao "$PILOT_HOME") u
-  for u in "${SESSION_USERS[@]}"; do homes+=("/home/$u"); done
+  local -a homes
+  mapfile -t homes < <(service_home_dirs)
   found=$(find "${homes[@]}" -user root 2>/dev/null || true)
   if [[ -n "$found" ]]; then
     red "fleet、会话用户或 $PILOT_USER 的目录里有 $(wc -l <<<"$found") 个 root 属主的文件，比如：$(head -3 <<<"$found" | tr '\n' ' ')"
@@ -1575,6 +1577,7 @@ main() {
     setup_release_request
     setup_agent_rules
     setup_cli_tools
+    fix_service_home_owners
   else
     load_config
   fi
