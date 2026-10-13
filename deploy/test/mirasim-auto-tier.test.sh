@@ -57,6 +57,11 @@ CALLS=()
 SERVER_INSTALLED=0
 id() { return 0; }
 systemctl() { # is-active 一律答 active（读回里自动发布 timer 那一项不是这里要测的）；别的只记
+  # 发布接活的刷新看的是另一项：这台测试不装它，答没在跑，避免去写真实安装路径
+  if [[ "$1" == is-active && "$2" == fleet-release-request.path ]]; then
+    echo inactive
+    return 3
+  fi
   if [[ "$1" == is-active ]]; then
     echo active
     return 0
@@ -73,10 +78,12 @@ put_file() { # 目标 属主:组 权限 内容
   printf '%s\n' "$content" >"$dest"
   changed "写 $dest"
 }
-# 自动档里的另外三步：只记顺序
+# 自动档里的另外几步：只记顺序。发布接活的刷新在这份测试里不装（另有 release-request-refresh）。
 setup_slice() { CALLS+=(setup_slice); }
 retire_old_units() { CALLS+=(retire_old_units); }
 setup_auto_release() { CALLS+=(setup_auto_release); }
+refresh_release_request_copies() { :; }
+readback_release_request_copies() { :; }
 readback_slice() { CALLS+=(readback_slice); }
 readback_retired_units() { CALLS+=(readback_retired_units); }
 

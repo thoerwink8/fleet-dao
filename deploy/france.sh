@@ -17,10 +17,11 @@
 #   bash deploy/france.sh           装：缺的补上，已有的不动（整套，含人工档）
 #   bash deploy/france.sh --check   只读回和自检，不改任何东西
 #   bash deploy/france.sh --auto-tier  只装「自动档」：自动发布脚本副本和单元、fleet-agents.slice、清掉老机器上已删的演示版单元和脚本（#1223）、
+#                                   已经在跑的发布接活的脚本副本（path 单元没在跑就不新开这个口子）、
 #                                   Mirasim 常驻单元（#1274；服务端本体不在记待配，单元文件内容变了才重启）
 #                                   （不碰防火墙、sudoers、用户、/etc/fleet-dao 里的钥匙和环境文件；幂等）。自动发布每发完一版以 root
 #                                   顺带跑它（docs/ops.md 第九节「装机层」）；规矩同步不在这里，由自动发布的规矩那一步做（同一条 agents-sync）。
-#                                   人工档（lib/human-tier.sh：建用户、防火墙、sudoers）只在整套跑时做。
+#                                   人工档（lib/human-tier.sh：建用户、防火墙、sudoers、第一次装发布接活）只在整套跑时做。
 set -Eeuo pipefail
 umask 022
 
@@ -1500,12 +1501,65 @@ readback_service_home() {
   fi
 }
 
+# 发布接活的脚本副本跟上在用的提交。path 单元已经在跑才换：第一次开这个口子仍是整套里的 setup_release_request
+# （给「驾驶舱上点一下就让 root 发版」开路，要人看着装）。这里不 enable、不建目录。单元文件没变就不 daemon-reload。
+# 服务是一次性的，换完 path 单元继续盯原来的请求目录。
+refresh_release_request_copies() {
+  if [[ "$(systemctl is-active fleet-release-request.path 2>/dev/null)" != active ]]; then
+    pending "发布接活还没装（path 单元没在跑）：自动档不新开这个口子，要人跑整套 france.sh"
+    return 0
+  fi
+  local f u src unit_changed=0
+  if [[ ! -d "$RELEASE_REQUEST_LIB" ]]; then
+    red "$RELEASE_REQUEST_LIB 不在：接活脚本没换，也不新建这个口子"
+    return 1
+  fi
+  for f in "${RELEASE_REQUEST_FILES[@]}"; do
+    src="$DEPLOY_DIR/france/release-request/$f"
+    if [[ ! -f "$src" ]]; then
+      red "没有 $src，接活脚本没换"
+      return 1
+    fi
+    put_file "$RELEASE_REQUEST_LIB/$f" root:root 644 "$(<"$src")"
+  done
+  for u in "${RELEASE_REQUEST_UNITS[@]}"; do
+    src="$DEPLOY_DIR/france/$u"
+    if [[ ! -f "$src" ]]; then
+      red "没有 $src，接活单元没换"
+      return 1
+    fi
+    put_file "/etc/systemd/system/$u" root:root 644 "$(<"$src")"
+    if ((WROTE)); then unit_changed=1; fi
+  done
+  if ((unit_changed)); then systemctl daemon-reload; fi
+}
+
+# 自动档只在口子已经开着时核对副本。没装过不算这里的红（第一次装仍是整套的事）。
+readback_release_request_copies() {
+  if [[ "$(systemctl is-active fleet-release-request.path 2>/dev/null)" != active ]]; then
+    return 0
+  fi
+  local f u
+  for f in "${RELEASE_REQUEST_FILES[@]}"; do
+    if ! cmp -s -- "$RELEASE_REQUEST_LIB/$f" "$DEPLOY_DIR/france/release-request/$f"; then
+      red "$RELEASE_REQUEST_LIB/$f 和仓里的不一样（或没装）"
+    fi
+  done
+  for u in "${RELEASE_REQUEST_UNITS[@]}"; do
+    if ! cmp -s -- "/etc/systemd/system/$u" "$DEPLOY_DIR/france/$u"; then
+      red "/etc/systemd/system/$u 和仓里的不一样（或没装）"
+    fi
+  done
+}
+
 # 自动档（--auto-tier）：自动发布每发完一版以 root 顺带跑。只放不碰防火墙、sudoers、用户、机器上钥匙和环境文件的步骤，
 # 每一步都幂等（内容一样就什么都不动）。前提是整套装过一遍了（会话用户、/srv 下的目录都在）；没装过的机器这里判红。
 setup_auto_tier() {
   setup_slice
   retire_old_units
   setup_auto_release
+  # 接活脚本 import 同级的 auto-release/lib.mjs：先换自动发布副本，再换接活副本。
+  refresh_release_request_copies
   # Mirasim 常驻单元（#1274：只在整套装机时装，后来改的单元文件一直落不到法国）：它只是个 systemd 单元，
   # 不碰权限和钥匙；服务端本体不在就记待配、不装（待配不算红）；单元文件内容真变了才重启，会话断开只此一次。
   # 放最后，它出问题不挡前面自动发布单元的装。
@@ -1527,6 +1581,7 @@ readback_auto_tier() {
   for u in "${AUTO_RELEASE_UNITS[@]}"; do
     if ! cmp -s -- "/etc/systemd/system/$u" "$DEPLOY_DIR/france/$u"; then red "/etc/systemd/system/$u 和仓里的不一样（或没装）"; fi
   done
+  readback_release_request_copies
   readback_mirasim_session_unit
 }
 

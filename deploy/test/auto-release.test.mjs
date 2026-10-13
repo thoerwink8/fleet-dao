@@ -788,13 +788,22 @@ test('失败安装留下中间版本、主线又改回标记那一版：副本�
 });
 
 // 2026-10-14 法国 /healthz deploy_lag（#2032）：france-applied 停在 10-11 的 4877f26d，
-// 主线数到 b62d7de 时人工档正好这 5 个提交。路径全是运行时直接读的副本（HUMAN_TIER_COPY_CHECKS）。
-// 法国上这几份安装位置的字节已经是 b62d7de，两个单元 NeedDaemonReload=no。
-// 防火墙、sudoers、sshd、被 source 的脚本在这段没有提交。整套 france.sh 不是为了这 5 个。
-// 正在跑的自动发布副本还是旧算法（不看安装字节），state.json 会继续写 behind=5，直到这份计数随发版换上。
+// 主线数到 232b228a 时人工档正好这 6 个提交。路径全是运行时直接读的副本（HUMAN_TIER_COPY_CHECKS）。
+// 在用的 b62d7de 上，fleet-agent-scope、session-wait、两个单元文件已经是 232b228a，NeedDaemonReload=no。
+// 两份接活脚本还是 b62d7de 的字节（232b228a 只改了通知文案）。防火墙、sudoers、sshd、被 source 的脚本这段没有提交。
+// 整套 france.sh 不是为了这 6 个：path 单元已经在跑，自动档换副本即可。正在跑的自动发布副本还是旧算法，
+// state.json 会继续按 git log 写 behind，直到这份计数和换副本随发版装上。
 const FRANCE_APPLIED_2026_10_11 = '4877f26dbfeb41a7c22bed2a3486bf78eee59fb4';
-const FRANCE_MAIN_2026_10_14 = 'b62d7de4352e53aac737a9ad968ff28e33ea0f28';
+const FRANCE_MAIN_2026_10_14 = '232b228adefadaccbc20360da7669d20f7fceaf9';
+const FRANCE_RELEASED_2026_10_14 = 'b62d7de4352e53aac737a9ad968ff28e33ea0f28';
 const FRANCE_LAG_2026_10_14 = [
+  {
+    sha: '232b228adefadaccbc20360da7669d20f7fceaf9',
+    paths: [
+      'deploy/france/release-request/fleet-release-request.mjs',
+      'deploy/france/release-request/lib.mjs',
+    ],
+  },
   {
     sha: 'cf009e9ab371e21a847c00f088843e8a0c0116d6',
     paths: [
@@ -844,9 +853,9 @@ function gitNameOnly(range, paths) {
   return rows;
 }
 
-test('2026-10-14 落后的 5 个相关提交只改运行时副本，不需要为它们重跑整套 france.sh', () => {
+test('2026-10-14 落后的 6 个相关提交只改运行时副本，不需要为它们重跑整套 france.sh', () => {
   const copy = new Set(HUMAN_TIER_COPY_CHECKS.map((c) => c.path));
-  assert.equal(FRANCE_LAG_2026_10_14.length, 5);
+  assert.equal(FRANCE_LAG_2026_10_14.length, 6);
   for (const row of FRANCE_LAG_2026_10_14) {
     assert.match(row.sha, /^[0-9a-f]{40}$/);
     assert.ok(row.paths.length > 0, row.sha);
@@ -872,14 +881,15 @@ test('2026-10-14 落后的 5 个相关提交只改运行时副本，不需要为
   if (!existsSync(scope)) return;
   for (const check of HUMAN_TIER_COPY_CHECKS) {
     const blob = gitOut(['rev-parse', `${FRANCE_MAIN_2026_10_14}:${check.path}`]);
-    const head = gitOut(['rev-parse', `HEAD:${check.path}`]);
+    const released = gitOut(['rev-parse', `${FRANCE_RELEASED_2026_10_14}:${check.path}`]);
     const hashed = runChild('git', ['hash-object', '--', check.installed]);
     assert.equal(blob.status, 0, check.path);
+    assert.equal(released.status, 0, check.path);
     assert.equal(hashed.status, 0, check.installed);
     const inst = hashed.stdout.trim();
     assert.ok(
-      inst === blob.stdout.trim() || inst === head.stdout.trim(),
-      `${check.path} 安装位置既不是 ${FRANCE_MAIN_2026_10_14} 也不是 HEAD`,
+      inst === blob.stdout.trim() || inst === released.stdout.trim(),
+      `${check.path} 安装位置既不是主线 ${FRANCE_MAIN_2026_10_14} 也不是在用的 ${FRANCE_RELEASED_2026_10_14}`,
     );
     if (!check.unit) continue;
     const shown = runChild('systemctl', ['show', '-p', 'NeedDaemonReload', '--value', check.unit]);
@@ -990,6 +1000,7 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
     'setup_slice',
     'retire_old_units',
     'setup_auto_release',
+    'refresh_release_request_copies',
     'setup_mirasim_session',
   ]) {
     const text = body(fn);
@@ -1000,16 +1011,16 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
       `${fn} 不许碰防火墙、sudoers、建用户`,
     );
   }
-  // 自动档入口只调这四个（Mirasim 常驻单元放最后，#1274；注释行不算）
+  // 自动档入口：接活副本夹在自动发布和 Mirasim 之间（注释行不算）。Mirasim 放最后，#1274。
   assert.match(
     body('setup_auto_tier').replace(/^\s*#.*\n/gm, ''),
-    /^\s*setup_slice\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_mirasim_session\s*$/,
+    /^\s*setup_slice\n\s*retire_old_units\n\s*setup_auto_release\n\s*refresh_release_request_copies\n\s*setup_mirasim_session\s*$/,
   );
   // 读回也读回它：缺了 MIRASIM_NO_AGENT_EGRESS=1 之类判红（check_mirasim_session_unit_file）
   const france2 = readFileSync(new URL('../france.sh', import.meta.url), 'utf8');
   assert.match(
     /^readback_auto_tier\(\) \{\n([\s\S]*?)\n\}/m.exec(france2)?.[1] ?? '',
-    /readback_mirasim_session_unit/,
+    /readback_release_request_copies[\s\S]*readback_mirasim_session_unit/,
   );
   // 反过来：人工档的函数都在 human-tier.sh，不在 france.sh 里
   for (const fn of ['setup_identity', 'setup_pilot', 'setup_sudoers', 'setup_firewall', 'render_firewall']) {

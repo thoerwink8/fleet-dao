@@ -1363,12 +1363,15 @@ test('装机：请求目录归 fleet、750；进度目录归 root、755；是人
   assert.equal(`${REQUEST_DIR}`, '/var/lib/fleet-dao/release-request');
   assert.match(france, /^TRAIN_DIR=\$RELEASES_DIR\/\.train$/m);
   assert.equal(TRAIN_DIR, '/srv/fleet-dao-releases/.train');
-  // 整套里调、读回里查；自动档三个函数里没有它
+  // 整套里调、读回里查。自动档不调用 setup_release_request（那一步会 enable，等于新开 root 发版口子）。
+  // path 单元已经在跑时，自动档只换副本（refresh_release_request_copies），不 enable、不建目录。
   assert.match(france, /^ {4}setup_release_request$/m);
   assert.match(france, /^ {2}readback_release_request$/m);
+  assert.match(france, /^refresh_release_request_copies\(\) \{/m);
   const autoTier = /^setup_auto_tier\(\) \{\n([\s\S]*?)\n\}/m.exec(france)?.[1] ?? '';
   assert.ok(autoTier.length > 10);
-  assert.doesNotMatch(autoTier, /release_request/, '发布按钮的接活不进自动档');
+  assert.match(autoTier, /refresh_release_request_copies/);
+  assert.doesNotMatch(autoTier, /setup_release_request/, '自动档不许新开发布接活这个口子');
   // 读回查属主权限
   assert.match(human, /"\$RELEASE_REQUEST_DIR fleet:fleet 750" "\$TRAIN_DIR root:root 755"/);
 });
