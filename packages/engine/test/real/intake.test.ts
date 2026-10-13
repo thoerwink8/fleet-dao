@@ -8,6 +8,8 @@ import {
   readIntakeBreaker,
   registerScheduledJobs,
   repos,
+  requestIssueOpenings,
+  requests,
   saveTaskSnapshot,
   scheduleRuns,
   settings,
@@ -289,6 +291,83 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     const runs = await t.db.select().from(scheduleRuns);
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({ job: 'intake', outcome: 'ok' });
+  });
+
+  describe('驾驶舱提需求开的单（母单 #2047 第 B 片）：谁要的认开单时写进库的提出人，不认 GitHub 上的作者', () => {
+    const FROM_COCKPIT = (seq: number) =>
+      `${BODY}\n## 来源\n\n提出人：合伙人\n来自驾驶舱 需求 ${seq}：https://fleet.example.com/intake?r=${seq}\n`;
+
+    async function seedCockpitRequest() {
+      const world = await seedWorld(t.db);
+      const [bot] = await t.db
+        .insert(users)
+        .values({ displayName: '引擎', role: 'bot', githubId: 999, githubLogin: 'fleet-engine[bot]' })
+        .returning();
+      const [partner] = await t.db
+        .insert(users)
+        .values({ displayName: '合伙人', role: 'founder', githubId: 2, githubLogin: 'partner' })
+        .returning();
+      if (!bot || !partner) throw new Error('没写进去');
+      const [request] = await t.db
+        .insert(requests)
+        .values({
+          repoId: world.repo.id,
+          initiatorId: partner.id,
+          status: 'closed_do',
+          deciderId: world.founder.id,
+          closedAt: NOW,
+          draftJson: { title: '给驾驶舱加状态' },
+          lastActivityAt: NOW,
+        })
+        .returning();
+      if (!request) throw new Error('没写进去');
+      await t.db.insert(requestIssueOpenings).values({
+        requestId: request.id,
+        draftVersion: 1,
+        state: 'opened',
+        requestedBy: partner.id,
+        openedBy: world.founder.id,
+        issueNumber: 12,
+        issueUrl: 'https://github.com/acme/demo/issues/12',
+        createdAt: NOW,
+        updatedAt: NOW,
+      });
+      return { ...world, partner, request };
+    }
+
+    const botIssue = (body: string) =>
+      groomIssue({ body, author: 'fleet-engine[bot]', authorId: 999, authorType: 'Bot', authorIsBot: true });
+
+    it('「引擎」机器人开的、正文写着来自驾驶舱 需求 N：任务行的 requested_by 是开单记录里的提出人', async () => {
+      const { partner, request } = await seedCockpitRequest();
+      const { gh } = fakeGh({ issues: [botIssue(FROM_COCKPIT(request.seq))] });
+      const { client } = fakeClient();
+      await runIntakeJob(wire(gh)(client, 'fleet'));
+      const rows = await t.db.select().from(tasks);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.requestedBy).toBe(partner.id);
+    });
+
+    it('【故意造出的失败】机器人开的单但正文没写来源：按作者认（机器人自己），不猜提出人', async () => {
+      const { request } = await seedCockpitRequest();
+      void request;
+      const { gh } = fakeGh({ issues: [botIssue(BODY)] });
+      const { client } = fakeClient();
+      await runIntakeJob(wire(gh)(client, 'fleet'));
+      const [row] = await t.db.select().from(tasks);
+      const bot = (await t.db.select().from(users)).find((u) => u.githubId === 999);
+      expect(bot).toBeDefined();
+      expect(row?.requestedBy).toBe(bot?.id);
+    });
+
+    it('【故意造出的失败】人开的单正文里抄了「来自驾驶舱 需求 N」：不认，谁开的算谁（不能借来源冒充别人）', async () => {
+      const { founder, request } = await seedCockpitRequest();
+      const { gh } = fakeGh({ issues: [groomIssue({ body: FROM_COCKPIT(request.seq) })] });
+      const { client } = fakeClient();
+      await runIntakeJob(wire(gh)(client, 'fleet'));
+      const [row] = await t.db.select().from(tasks);
+      expect(row?.requestedBy).toBe(founder.id);
+    });
   });
 
   it('开关全关：不读 GitHub、不读在跑的数，这一轮也记 ok（正常的空闲），scanned 算上受管的仓', async () => {

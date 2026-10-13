@@ -13,7 +13,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { pgRequests } from '../src/request-store-pg.ts';
 import { cookieNames, csrfTokenFor, signSessionClaims } from '../src/session.ts';
 import { nowSeconds } from '../src/tokens.ts';
-import { errorCode, harness, IDS, pgHarness, write } from './harness.ts';
+import { errorCode, harness, IDS, PUBLIC_ORIGIN, pgHarness, write } from './harness.ts';
+import { fakeIssues } from './request-fakes.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -42,7 +43,8 @@ function sessionFor(h: H, uid: string): S {
 async function setup() {
   current = await pgHarness(t);
   const h = current;
-  h.deps.requests = pgRequests(t.db, h.deps.now);
+  // 确定开单、同意做现在会在 GitHub 上开单（#2060）：这里换成假的机器人，开单细节在 request-issue-flow.test.ts
+  h.deps.requests = pgRequests(t.db, h.deps.now, { issues: fakeIssues().port, cockpitUrl: PUBLIC_ORIGIN });
   await t.db.update(users).set({ decidesRequests: true }).where(eq(users.id, IDS.founderA));
   return { h, a: sessionFor(h, IDS.founderA), b: sessionFor(h, IDS.founderB) };
 }

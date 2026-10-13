@@ -13,13 +13,15 @@ import {
   pools,
   progressEvents,
   quotaWindows,
+  requests,
   runs,
   sessionRuns,
   settings,
   tasks,
+  users,
 } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRepo, addRoute, addRun, addSubtask, addTask, catalog, NOW } from './helpers.ts';
+import { addRepo, addRoute, addRun, addSubtask, addTask, catalog, later, MIN, NOW } from './helpers.ts';
 
 let t: TestDb;
 /** 收到的原始载荷，原样 JSON.parse：键多了少了都要看得出来。 */
@@ -261,7 +263,36 @@ describe('写入即通知 fleet_changes', () => {
     await t.db
       .insert(auditLog)
       .values({ actorKind: 'engine', actorId: 'w1', action: 'x', target: 'task:x', via: 'engine' });
+    await addRequest(repo.id);
     await settle();
     expect([...new Set(tables())].sort()).toEqual([...REALTIME_TABLES].sort());
+  });
+
+  /** 提需求（#2060）：建一条需求，回它的需求号。 */
+  async function addRequest(repoId: string) {
+    const [u] = await t.db.insert(users).values({ displayName: '创始人', role: 'founder' }).returning();
+    if (!u) throw new Error('没建成用户');
+    const [r] = await t.db
+      .insert(requests)
+      .values({ repoId, initiatorId: u.id, draftJson: { title: '一条需求' }, lastActivityAt: NOW })
+      .returning();
+    if (!r) throw new Error('没建成需求');
+    return r;
+  }
+
+  it('需求的增、改各发一条，id 是需求号（页面按号重读；进度卡、引擎提问追加时同事务改了 last_activity_at）', async () => {
+    const repo = await addRepo(t.db);
+    const r = await addRequest(repo.id);
+    await settle();
+    expect(heard.filter((h) => (h as { table: string }).table === 'requests')).toEqual([
+      { table: 'requests', id: String(r.seq) },
+    ]);
+    heard = [];
+    await t.db
+      .update(requests)
+      .set({ lastActivityAt: later(MIN) })
+      .where(eq(requests.id, r.id));
+    await settle();
+    expect(heard).toEqual([{ table: 'requests', id: String(r.seq) }]);
   });
 });

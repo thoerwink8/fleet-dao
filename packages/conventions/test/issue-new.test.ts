@@ -2,7 +2,14 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { type GhResult, ghRunner, issueNew, prBodyAcceptanceItems } from '../src/issue-new.ts';
+import {
+  checkIssueBody,
+  type GhResult,
+  ghRunner,
+  issueBodyTooLong,
+  issueNew,
+  prBodyAcceptanceItems,
+} from '../src/issue-new.ts';
 import { parseOrder } from '../src/plan-view.ts';
 import { order } from './fake-github.ts';
 
@@ -248,6 +255,45 @@ describe('开单脚本：单子必带场景、原话、已知的模块（specs/5
     const { calls, run } = setup({ body: full({ 已知的模块: '暂无。' }) });
     await run(...base);
     expect(calls.length).toBeGreaterThan(0);
+  });
+});
+
+describe('checkIssueBody：开单脚本和驾驶舱提需求开单共用的那一份检查（母单 #2047 规则 1）', () => {
+  const OK =
+    '## 场景\n\n要加导出。\n\n## 原话\n\n「加导出」\n\n## 已知的模块\n\n暂无。\n\n## 怎么算做完\n\n- 测试 x。\n';
+
+  it('四节齐：通过', () => {
+    expect(checkIssueBody(OK).ok).toBe(true);
+  });
+
+  it('【故意造出的失败】缺「怎么算做完」：不过，原因和开单脚本拒开时是同一句', async () => {
+    const body = OK.replace(/## 怎么算做完[\s\S]*$/, '');
+    const r = checkIssueBody(body);
+    expect(r).toMatchObject({ ok: false, field: '怎么算做完' });
+    const { calls, run } = setup({ body });
+    await expect(run(...base)).rejects.toThrow(r.ok ? '' : r.why);
+    expect(calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】缺「场景」/ 空「原话」/ 写了涉及面：各自报，field 是栏目名', () => {
+    expect(checkIssueBody(OK.replace('## 场景\n\n要加导出。\n\n', ''))).toMatchObject({
+      ok: false,
+      field: '场景',
+    });
+    expect(checkIssueBody(OK.replace('「加导出」', ''))).toMatchObject({ ok: false, field: '原话' });
+    expect(checkIssueBody(`${OK}\n## 涉及面\n\n都要改。\n`)).toMatchObject({ ok: false, field: '涉及面' });
+  });
+
+  it('「怎么算做完」提到 PR 正文：默认不过；allow 之后通过并把命中的条目带回', () => {
+    const body = OK.replace('- 测试 x。', '- PR 正文里写明测试。');
+    expect(checkIssueBody(body)).toMatchObject({ ok: false, field: '怎么算做完' });
+    const allowed = checkIssueBody(body, { allowPrBodyAcceptance: true });
+    expect(allowed).toMatchObject({ ok: true, prBodyHits: ['- PR 正文里写明测试。'] });
+  });
+
+  it('issueBodyTooLong：没超回 undefined，超了回带字数的原因', () => {
+    expect(issueBodyTooLong(OK)).toBeUndefined();
+    expect(issueBodyTooLong('长'.repeat(65_001))).toMatch(/正文有 65001 字.*单没开/);
   });
 });
 

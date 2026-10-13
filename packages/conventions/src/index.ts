@@ -70,12 +70,15 @@ export {
   staleSinceOf,
 } from './issue-groom.ts';
 export {
+  checkIssueBody,
   checkRequiredSections,
   type Gh,
   type GhResult,
   ghRunner,
+  type IssueBodyCheck,
   type IssueNewDeps,
   type IssueNewResult,
+  issueBodyTooLong,
   issueNew,
   type MissingSection,
   requiredSectionProblems,

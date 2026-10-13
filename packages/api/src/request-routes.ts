@@ -2,11 +2,14 @@
 // 说话人、发起人、拍板人一律取登录会话里的用户（c.get('user')）；请求体里的身份字段按 zod 约定剥掉，不看。
 // 读接口没接上回 200 + unavailable（不拿空列表冒充没有）；写接口没接上回 503。
 import {
+  AnswerEngineAskRequest,
   CreateRequestRequest,
   MarkRequestReadRequest,
   MarkRequestReadResponse,
   RequestActionRequest,
   RequestDetailResponse,
+  RequestIssueOpeningQuery,
+  RequestIssueOpeningResponse,
   RequestListQuery,
   RequestListResponse,
   SendRequestMessageRequest,
@@ -78,6 +81,25 @@ export function registerRequestRoutes(app: Hono<CockpitEnv>, deps: Deps): void {
     const seq = seqOf(c);
     const input = await readJson(c, RequestActionRequest);
     await port().act(seq, c.get('user').id, input);
+    return detail(c, seq);
+  });
+
+  // 开单这一键（需求号 + 草稿版本号）开没开成：页面点「确定，开单」超时后用它回显，不让人重点
+  app.get(WebRoutes.requestIssueOpening.path, async (c) => {
+    const seq = seqOf(c);
+    const query = readQuery(c, RequestIssueOpeningQuery);
+    const body = await port().openingState(seq, query.draftVersion);
+    if (!body) throw new ApiError(404, 'request_not_found', `没有需求 ${seq}`);
+    return reply(c, RequestIssueOpeningResponse, { asOf: deps.now().toISOString(), ...body });
+  });
+
+  // 回答引擎的提问：答复写回那条 GitHub 评论下面；写失败记 failed 回 502，同一个接口再调一次就是重试
+  app.post(WebRoutes.answerRequestEngineAsk.path, async (c) => {
+    const seq = seqOf(c);
+    const raw = c.req.param('messageId') ?? '';
+    if (!/^[1-9]\d{0,15}$/.test(raw)) throw new ApiError(400, 'invalid_message_id', `消息号认不出：${raw}`);
+    const input = await readJson(c, AnswerEngineAskRequest);
+    await port().answerAsk(seq, c.get('user').id, Number(raw), input.text);
     return detail(c, seq);
   });
 
