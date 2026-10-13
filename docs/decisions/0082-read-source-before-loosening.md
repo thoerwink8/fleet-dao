@@ -2,7 +2,7 @@
 
 - 日期：2026-10-12（北京时间）
 - 谁拍的：创始人 2026-10-12 在对话里选定（原话见下）；改标准，引入它的 PR 合并即生效。
-- 状态：创始人已选定，PR 合并即生效。
+- 状态：生效（#1949）。
 - 关联：`agents/shared-rules.md`「底线」一条；`agents/skills/chain-first/SKILL.md`「硬规矩」一条；钉它的测试 `agents/test/rules/read-source-first.rules.test.ts`；字数账 `agents/rules-budget.json`。起因 #1936、#1946。
 - 取代：无。和底线原有的「代码里读不到……不拿空、0 或 ok 冒充没事」不冲突：那条管读不到时报什么，这条管读不到之后先去修哪儿。
 

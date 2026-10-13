@@ -8,11 +8,12 @@
 //    sonnet→4.6、opus→4.7）、inherit、Fable、旧版、换档、没写都红；effort 也钉死（medium / medium / high）。
 // 3. 权限：斥候 Explore 和设计 Plan 只读——disallowedTools 带 Edit、Write，tools 白名单里也不许有它们；三份都不写 isolation
 //    （工作树由派活时选；写了引擎会话里会整个挡掉）。
-// 4. 汇报：正文都要求汇报首行写自己的模型 id（派完核对实际 id 靠它）。斥候限回合数。
+// 4. 汇报：正文都要求汇报首行写自己的模型 id（派完核对实际 id 靠它）。三份都限回合数、都写 omitClaudeMd: true（决定 0089：
+//    主对话的回合、等待、报进度规矩不进子代理），工人正文自带底线。
 // 5. 只有一份原件：仓里不许再有 .claude/agents/（同名项目级会压住用户级，两份就会漂移）；引擎读的目录（adapters 的 SUBAGENTS_DIR）
 //    指到 agents/subagents；同步工具的名单（targets.ts 的 SUBAGENT_TARGET）恰好是这三份（按文本核，不跨包 import）。
 // 6. 通用版：三份装到每台机器、别的仓的会话也读，正文不许带 fleet-dao 专属的命令、路径和决定编号。
-// 7. 标准路径清单盖着 agents/subagents/。
+// 7. 标准路径清单盖着 agents/subagents/。（技能、参考页的文字不再钉，决定 0089。）
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -89,7 +90,11 @@ function problems(file: string, text: string): string[] {
     for (const t of list(fm.tools))
       if (['Edit', 'Write', 'NotebookEdit'].includes(t)) out.push(`${file}：只读的角色，tools 里不许有 ${t}`);
   }
-  if (name === 'Explore' && !/^\d+$/.test(fm.maxTurns ?? '')) out.push(`${file}：斥候要限 maxTurns`);
+  if (!/^\d+$/.test(fm.maxTurns ?? '')) out.push(`${file}：要限 maxTurns`);
+  // 决定 0089：子代理不读主对话的全局说明（回合、等待、报进度那套只管主对话），底线和四类写在定义正文里
+  if (fm.omitClaudeMd !== 'true') out.push(`${file}：要写 omitClaudeMd: true`);
+  if (role?.readOnly === false && !/没验证过不说完成/.test(body))
+    out.push(`${file}：正文没写底线「没验证过不说完成」`);
   if (!/汇报：第一行写 `模型: <你自己的模型 id>`/.test(body))
     out.push(`${file}：正文没要求汇报首行写自己的模型 id`);
   return out;
@@ -266,7 +271,10 @@ describe('规矩：子代理只分三个角色，定义只有 agents/subagents/ 
     ]);
     const noTurns = scout.replace(/^maxTurns: .*\n/m, '');
     expect(noTurns).not.toBe(scout);
-    expect(problems('Explore.md', noTurns)).toEqual(['Explore.md：斥候要限 maxTurns']);
+    expect(problems('Explore.md', noTurns)).toEqual(['Explore.md：要限 maxTurns']);
+    const noOmit = gp.replace(/^omitClaudeMd: .*\n/m, '');
+    expect(noOmit, '找不到 omitClaudeMd 那一行，这条失败造不出来').not.toBe(gp);
+    expect(problems('general-purpose.md', noOmit)).toEqual(['general-purpose.md：要写 omitClaudeMd: true']);
     const noReport = gp.replace('汇报：第一行写 `模型: <你自己的模型 id>`', '汇报：');
     expect(noReport).not.toBe(gp);
     expect(problems('general-purpose.md', noReport)).toEqual([
