@@ -167,7 +167,7 @@ describe('这一台的文件清单：只认测试文件，别的不猜', () => {
     expect(sourceClosure(GRAPH, ['engine'])).not.toContain('web');
     // agents 不在依赖图里，但 agents/test/france.test.ts 直接读 shared 的源码：shared 每一组都带（UNIVERSAL_PACKAGES）；
     // agents/test/worker.test.ts 读 db 的路由骨架，prompt-log.rules.test.ts 读 agents-sync 的 targets.ts，
-    // agents-md-budget.test.ts 读 conventions 的 rules-budget.ts（TEST_READS）。
+    // project-subagents.rules.test.ts 读 conventions 的 standard-paths.json（TEST_READS）。
     // db 读 adapters、core 是 db 测试自己的事：agents 的闭包里不带它们
     expect(sourceClosure(GRAPH, ['agents'])).toEqual(['agents-sync', 'conventions', 'db', 'shared']);
   });

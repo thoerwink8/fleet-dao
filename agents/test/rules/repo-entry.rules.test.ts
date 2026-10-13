@@ -1,11 +1,7 @@
-// 钉住「仓合同」这条规矩（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json；决定 0081）。
-// 2026-10-12 凌晨的断链（带货工作台仓）：创始人要「pnpm xxx 方式，可以命令启动」，AI 先给的是双击 start.cmd 加一串路径。
-// 第一版（#1934 初稿）只加了一条长规矩和 progress:directive 上的一句提示，创始人看过不满意：「不应该限制在我们当前有的仓，
-// 未来还会有其他仓呀……需要提醒的机制……好像也是存在断链的」，04:37 选了方案 B「只提醒不拦」。
-// 规矩只是文字（AGENTS.md / CLAUDE.md 只是上下文，不是强制），所以这里钉的是机制，不只是文字：
+// 钉住「仓合同」这条规矩（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json）。
+// 每个仓都该有 pnpm 命令入口，只提醒不拦。规矩文字只是上下文、不是强制，所以这里钉的是机制，不钉文字：
 // ① 合同写成数据（agents/repo-contract.json），首批四项；② 开会话钩子在任何仓里都按合同查、提醒；
-// ③ 引导条目的〔范围：…〕由开会话的 checkDirectives 提醒，只用 systemMessage、绝不拦（收尾的 Stop 钩子那一路由决定 0089 删掉）；
-// ④ fleet-dao 自己也过合同（不适用的写明豁免理由）。通用段的文字不再钉（决定 0089）。
+// ③ 收尾的 Stop 钩子不再提醒引导范围、不拦；④ fleet-dao 自己也过合同（不适用的写明豁免理由）。
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -90,7 +86,7 @@ function temp(name: string): string {
   return dir;
 }
 
-describe('规矩：仓合同（方案 B，只提醒不拦；决定 0081）', () => {
+describe('规矩：仓合同（只提醒不拦）', () => {
   it('合同写成数据，首批四项都在、判法对', () => {
     expect(contractProblems(CONTRACT_TEXT)).toEqual([]);
   });
@@ -112,7 +108,7 @@ describe('规矩：仓合同（方案 B，只提醒不拦；决定 0081）', () 
     for (const r of rs.filter((x) => x.status === 'skipped')) expect(r.reason, r.id).toBeTruthy();
   });
 
-  it('Stop 钩子真跑：新记的引导没标范围也不再提醒（决定 0089 规则减法删掉这条），没有 decision、没有 hookSpecificOutput', {
+  it('Stop 钩子真跑：新记的引导没标范围也不提醒，没有 decision、没有 hookSpecificOutput', {
     timeout: 0,
   }, () => {
     const dir = temp('repo');

@@ -1,11 +1,9 @@
-// 钉住子代理选模型的设置：决定 0034「默认值只许 Opus 或 Sonnet、子代理和工人永不用 Fable」（创始人 2026-10-09 00:09 授权
-// 「改成最具有性价比的调整方案……全程你拍板」）和决定 0087「子代理只分三个角色」（创始人 2026-10-12「Sonnet 是工人、Haiku 是斥候、Opus 是设计」）。
+// 钉住子代理选模型的设置：兜底默认值只许 Opus 或 Sonnet、子代理和工人不用 Fable，三个角色的模型钉不被环境变量压掉。
 // 改标准：改这个文件要创始人同意（packages/conventions/standard-paths.json 的 agents/test/rules/）。
-// 只钉设置（决定 0089：通用段、技能、决定书的文字不再钉）：agents/config/claude-permissions.json 的 env 由同步工具写进每台机器的
-// ~/.claude/settings.json。
+// 只钉设置、不钉文字：agents/config/claude-permissions.json 的 env 由同步工具写进每台机器的 ~/.claude/settings.json。
 // - CLAUDE_CODE_SUBAGENT_MODEL（没写类型、自定义又没写模型的子代理的兜底）只许 Opus 或 Sonnet：兜底落到 Haiku，写代码的活就悄悄
 //   跑在小模型上；不写就跟主会话，主会话可能是 Fable。这里自己判、不借同步工具的校验（permissions.ts 的 OPUS_OR_SONNET），
-//   那边哪天被放宽了，这条照样红。它排在定义之后，压不住三个角色（决定 0087 本机实测）。
+//   那边哪天被放宽了，这条照样红。它排在定义之后，压不住三个角色（本机实测过）。
 // - CLAUDE_CODE_SUBAGENT_MODEL_FORCE、CLAUDE_CODE_EFFORT_LEVEL、CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL 不许写：前两个压过定义里的
 //   model、effort，三个角色的钉就失效；第三个把 workflow 里的 agent() 全换成一个模型。
 import { readFileSync } from 'node:fs';
@@ -61,7 +59,7 @@ function withModel(value: string): string {
   );
 }
 
-describe('规矩：设置里的环境变量不压三个角色的钉，兜底只许 Opus 或 Sonnet（决定 0034、0087）', () => {
+describe('规矩：设置里的环境变量不压三个角色的钉，兜底只许 Opus 或 Sonnet', () => {
   it('仓里的子代理默认模型是 Opus 或 Sonnet', () => {
     expect(DEFAULT_ALLOWED).toContain(family(subagentModel(CONFIG)));
   });

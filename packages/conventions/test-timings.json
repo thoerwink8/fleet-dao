@@ -2,7 +2,6 @@
   "说明": "CI 测试按耗时装箱用的耗时表（packages/conventions/src/test-split.ts）：测试文件 → vitest 报的毫秒数（4 核运行机上并行跑时量的，几轮 CI 日志取中位数）。只影响分得匀不匀，不影响跑不跑：表里没有的按中位数估。用 pnpm ci:timings（可重复给 --run）从 CI 日志刷新，别手改。",
   "source": "ci.yml run 37607475735、ci.yml run 37605141982、ci.yml run 37604691186、ci.yml run 37604589570、ci.yml run 37594091884，共 5 轮取中位数（2026-10-07）",
   "files": {
-    "agents/test/agents-md-budget.test.ts": 5,
     "agents/test/bootstrap.test.ts": 124,
     "agents/test/checkjs-scripts.test.ts": 9,
     "agents/test/discuss.test.ts": 1909,
@@ -20,7 +19,6 @@
     "agents/test/release-train.test.ts": 389,
     "agents/test/rules/ask-scope.rules.test.ts": 8,
     "agents/test/rules/brief-progress.rules.test.ts": 5,
-    "agents/test/rules/claim-scripts-removed.rules.test.ts": 6,
     "agents/test/rules/design-skills.rules.test.ts": 8,
     "agents/test/rules/directive-inbox.rules.test.ts": 7,
     "agents/test/rules/fable-scope.rules.test.ts": 11,

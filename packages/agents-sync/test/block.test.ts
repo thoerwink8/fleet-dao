@@ -73,7 +73,7 @@ describe('仓里的通用段', () => {
     expect(got.block.startsWith(`${BEGIN}\n`)).toBe(true);
     expect(got.block.endsWith(`\n${END}`)).toBe(true);
     expect(got.block).toContain('\n## 怎么跟我说话\n');
-    expect(got.block).toContain('\n## 我的机器与模型\n');
+    expect(got.block).toContain('\n## 机器\n');
     expect(got.block).not.toContain('## 本仓');
   });
 

@@ -113,7 +113,7 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'feishu', 'web'] as const;
  * db/test/claim-ledger-gone.test.ts 读 core 的 alert-work.ts；
  * agents/test/worker.test.ts 读 db 的路由骨架 routing.default.json（本机启动器照它定思考档位，#470）；
  * agents/test/rules/prompt-log.rules.test.ts 读 agents-sync 的 targets.ts（钩子登记表，钉住 UserPromptSubmit 那条）；
- * agents/test/agents-md-budget.test.ts 读 conventions 的 rules-budget.ts（规矩字数账的算法，定时开瘦身单的 bin 也用它，#1737）。
+ * agents/test/rules/project-subagents.rules.test.ts 读 conventions 的 standard-paths.json（钉住标准路径清单盖着 agents/subagents/）。
  * shared 的单价测试不再读路由骨架：没登记的模型按未知单价算（#1355），不要求每个目录模型都写进价表。
  */
 export const TEST_READS: Record<string, string[]> = {

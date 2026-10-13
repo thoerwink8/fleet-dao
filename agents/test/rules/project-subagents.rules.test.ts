@@ -1,19 +1,17 @@
-// 钉住决定 0087「子代理只分三个角色」（创始人 2026-10-12「Sonnet 是工人、Haiku 是斥候、Opus 是设计」「你能删的删……每一台机器都要
-// 沿用这种方式」，20:26「2 同意（agents-sync 写到每台机器，这三份不在 Mirasim 智能体页面里改/开关）；3 需要都改」）。取代决定 0036、0079。
+// 钉住「子代理只分三个角色，定义只有一份」的设置和结构；正文措辞不钉（改一句话就红的是钉文字，不是钉行为）。
 // 改标准：改这个文件要创始人同意（packages/conventions/standard-paths.json 的 agents/test/rules/）。
 // 钉这几处：
 // 1. 名单：agents/subagents/ 下恰好三份，文件名和 name 就是 Claude Code 内置的 Explore、general-purpose、Plan（同名才压得住内置的）；
 //    多一份、少一份、换名、大小写不对都红。
-// 2. 模型：三份各钉自己那一档的完整 id（claude-haiku-5-5 / claude-sonnet-5-5 / claude-opus-5-5）。别名（Mirasim 网关下 haiku→4.5、
-//    sonnet→4.6、opus→4.7）、inherit、Fable、旧版、换档、没写都红；effort 也钉死（medium / medium / high）。
+// 2. 模型：三份各钉自己那一档的完整 id（claude-haiku-5-5 / claude-sonnet-5-5 / claude-opus-5-5）。别名（网关下会落到旧版）、
+//    inherit、Fable、旧版、换档、没写都红；effort 也钉死（medium / medium / high）。
 // 3. 权限：斥候 Explore 和设计 Plan 只读——disallowedTools 带 Edit、Write，tools 白名单里也不许有它们；三份都不写 isolation
 //    （工作树由派活时选；写了引擎会话里会整个挡掉）。
-// 4. 汇报：正文都要求汇报首行写自己的模型 id（派完核对实际 id 靠它）。三份都限回合数、都写 omitClaudeMd: true（决定 0089：
-//    主对话的回合、等待、报进度规矩不进子代理），工人正文自带底线。
+// 4. 三份都限回合数、都写 omitClaudeMd: true（主对话的回合、等待、报进度规矩不进子代理）。
 // 5. 只有一份原件：仓里不许再有 .claude/agents/（同名项目级会压住用户级，两份就会漂移）；引擎读的目录（adapters 的 SUBAGENTS_DIR）
 //    指到 agents/subagents；同步工具的名单（targets.ts 的 SUBAGENT_TARGET）恰好是这三份（按文本核，不跨包 import）。
 // 6. 通用版：三份装到每台机器、别的仓的会话也读，正文不许带 fleet-dao 专属的命令、路径和决定编号。
-// 7. 标准路径清单盖着 agents/subagents/。（技能、参考页的文字不再钉，决定 0089。）
+// 7. 标准路径清单盖着 agents/subagents/。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -68,7 +66,7 @@ function rosterProblems(files: readonly string[]): string[] {
 
 /** 一份定义的毛病；空数组才算对 */
 function problems(file: string, text: string): string[] {
-  const { fm, body } = parse(file, text);
+  const { fm } = parse(file, text);
   const out: string[] = [];
   const name = fm.name ?? '';
   const role = ROLES[name];
@@ -91,12 +89,8 @@ function problems(file: string, text: string): string[] {
       if (['Edit', 'Write', 'NotebookEdit'].includes(t)) out.push(`${file}：只读的角色，tools 里不许有 ${t}`);
   }
   if (!/^\d+$/.test(fm.maxTurns ?? '')) out.push(`${file}：要限 maxTurns`);
-  // 决定 0089：子代理不读主对话的全局说明（回合、等待、报进度那套只管主对话），底线和四类写在定义正文里
+  // 子代理不读主对话的全局说明（回合、等待、报进度那套只管主对话）
   if (fm.omitClaudeMd !== 'true') out.push(`${file}：要写 omitClaudeMd: true`);
-  if (role?.readOnly === false && !/没验证过不说完成/.test(body))
-    out.push(`${file}：正文没写底线「没验证过不说完成」`);
-  if (!/汇报：第一行写 `模型: <你自己的模型 id>`/.test(body))
-    out.push(`${file}：正文没要求汇报首行写自己的模型 id`);
   return out;
 }
 
@@ -170,12 +164,12 @@ const STANDARD = read(`${ROOT}packages/conventions/standard-paths.json`);
 const TARGETS = read(`${ROOT}packages/agents-sync/src/targets.ts`);
 const ADAPTER = read(`${ROOT}packages/adapters/src/claude-code/subagents.ts`);
 
-describe('规矩：子代理只分三个角色，定义只有 agents/subagents/ 一份（决定 0087）', () => {
+describe('规矩：子代理只分三个角色，定义只有 agents/subagents/ 一份', () => {
   it('名单：agents/subagents/ 下恰好 Explore.md、general-purpose.md、Plan.md', () => {
     expect(rosterProblems(files)).toEqual([]);
   });
 
-  it('每份定义：完整 id 和 effort 对档、只读的不带 Edit/Write、不写 isolation、斥候限回合、汇报首行写模型 id', () => {
+  it('每份定义：完整 id 和 effort 对档、只读的不带 Edit/Write、不写 isolation、限回合、不读主对话说明', () => {
     expect(files.flatMap((f) => problems(f, textOf(f)))).toEqual([]);
   });
 
@@ -258,7 +252,7 @@ describe('规矩：子代理只分三个角色，定义只有 agents/subagents/ 
     expect(problems('Plan.md', planWrites)).toHaveLength(2);
   });
 
-  it('【故意造出的失败】effort 改档、写上 isolation、斥候不限回合、去掉汇报首行、认不出 frontmatter：都查得出来', () => {
+  it('【故意造出的失败】effort 改档、写上 isolation、斥候不限回合、认不出 frontmatter：都查得出来', () => {
     const scout = textOf('Explore.md');
     const low = scout.replace(/^effort: .*$/m, 'effort: low');
     expect(low).not.toBe(scout);
@@ -275,11 +269,6 @@ describe('规矩：子代理只分三个角色，定义只有 agents/subagents/ 
     const noOmit = gp.replace(/^omitClaudeMd: .*\n/m, '');
     expect(noOmit, '找不到 omitClaudeMd 那一行，这条失败造不出来').not.toBe(gp);
     expect(problems('general-purpose.md', noOmit)).toEqual(['general-purpose.md：要写 omitClaudeMd: true']);
-    const noReport = gp.replace('汇报：第一行写 `模型: <你自己的模型 id>`', '汇报：');
-    expect(noReport).not.toBe(gp);
-    expect(problems('general-purpose.md', noReport)).toEqual([
-      'general-purpose.md：正文没要求汇报首行写自己的模型 id',
-    ]);
     expect(() => problems('Plan.md', '没有 frontmatter')).toThrow(/认不出 frontmatter/);
   });
 

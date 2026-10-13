@@ -185,7 +185,7 @@ describe('按改动算要跑什么', () => {
     ).toBe(true);
   });
 
-  it('改了 conventions：直接依赖它的 api、engine、github 都测，store 经 github 传上来（store 依赖 github），读 rules-budget.ts 的 agents 也测', () => {
+  it('改了 conventions：直接依赖它的 api、engine、github 都测，store 经 github 传上来（store 依赖 github），读 standard-paths.json 的 agents 也测', () => {
     expect(units(pr('packages/conventions/src/ci-plan.ts'))).toEqual([
       'agents',
       'api',
@@ -610,33 +610,12 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
   });
 
   /**
-   * 【故意造出的失败】上面那条平时绿着，看不出它还在不在查。真要拦住的是「漏记一处」，
-   * 所以这里把门开一次、关一次，对着看：开着时一处都不漏，关掉 AGENTS.md 这道门里的 agents 后
-   * 正好红在那一处。少了这条，改 AGENTS.md 不测 agents 又能悄悄过去
-   * （主线从 1bff4dbc（#527）起红了 8+ 个提交就是这么来的）。
+   * 改 AGENTS.md 要测 agents：repo-entry.rules.test.ts 对仓根跑仓合同，读的是 AGENTS.md 里的 repo-contract:skip 标记。
+   * 它经 checkRepo(仓根) 读、不写字面路径，上面的扫描器看不见，所以这道门直接钉在这里，不靠扫描反推。
    */
-  it('【故意造出的失败】把 agents 从 AGENTS.md 这道门里去掉：扫出来必须正好是那一处', () => {
-    // 开着：改 AGENTS.md 测 agents 和 agents-sync，读它的那条测试算进了门里，一处都不漏
+  it('改 AGENTS.md 测 agents 和 agents-sync，扫描器也不报漏记', () => {
     expect(testArgs(pr('AGENTS.md'))).toEqual(['agents/', 'packages/agents-sync/']);
     expect(scan((changed) => planCi({ event: 'pull_request', changed, graph: graph() }))).toEqual([]);
-    // 关掉：只把管 AGENTS.md 那道门的 agents 去掉，别的门一个都不碰
-    const shut = PATH_RULES.map((r) =>
-      r.match('AGENTS.md') && 'units' in r ? { ...r, units: r.units.filter((u) => u !== AGENTS_UNIT) } : r,
-    );
-    expect(
-      shut.filter((r, i) => r !== PATH_RULES[i]),
-      '没关掉任何门：管 AGENTS.md 的那道门写法换了，这条测试跟着改',
-    ).toHaveLength(1);
-    // 关掉后，上面那条正对着的那处漏记必须报出来——读 AGENTS.md 的每个测试都得报，一封不少、也不多报别人。
-    // 报几条是从 files 现算的：以后再加一个读 AGENTS.md 的测试（2026-10-01 加 ask-scope.rules.test.ts 时
-    // 这里写死成一条、主线当场红），不会因为写死的条数又红一次；反过来，门还开着却少报一条，照样红。
-    const readers = files
-      .filter(({ unit, rel }) => unit === AGENTS_UNIT && refs(rel).includes('AGENTS.md'))
-      .map(({ rel }) => `${rel} 读 AGENTS.md，改它的 PR 不测 agents`);
-    expect(readers.length, '没有测试读 AGENTS.md 了：这条查的漏记不存在，测试该删').toBeGreaterThan(0);
-    expect(
-      scan((changed) => planCi({ event: 'pull_request', changed, graph: graph(), rules: shut })),
-    ).toEqual(readers);
   });
 });
 
