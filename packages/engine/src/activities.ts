@@ -27,6 +27,7 @@ import type { RouteProbeNowDeps } from './jobs/route-probe-now.ts';
 import { routeProbeLock } from './jobs/route-probe-now.ts';
 import type { UsageBackfillJobDeps } from './jobs/usage-backfill.ts';
 import type { WatchdogDeps } from './jobs/watchdog.ts';
+import type { WorktreeCleanupDeps } from './jobs/worktree-cleanup.ts';
 import {
   type ActivityTiming,
   type EnginePorts,
@@ -217,6 +218,8 @@ export interface EngineJobs {
    * Temporal 客户端；taskQueue 同上：排队的单补拉起的工作流起在这里）。
    */
   hourlyReconcile?: (client: Client, taskQueue: string) => HourlyReconcileJobDeps;
+  /** 一键清理没用的工作树（jobs/worktree-cleanup.ts，#1993）：每几秒看一眼有没人点，接手跑一轮和每小时对账同一份判据的清扫。不给就不看。 */
+  worktreeCleanup?: (client: Client, taskQueue: string) => WorktreeCleanupDeps;
   /** 全流程巡检（#223）：在巡检仓开单、看它一路走完（叫停前几轮留下的单、查工作流用这次活动的 Temporal 客户端）。 */
   canary?: (client: Client) => CanaryDeps;
   /** 看门狗（#203）：按登记表看各定时任务新不新鲜、推撤提醒（只读写库）。 */

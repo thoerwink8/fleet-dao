@@ -772,6 +772,21 @@ async function gitReading(t: UserTree, args: string[], what: string): Promise<Us
   return r;
 }
 
+/**
+ * 以会话用户的身份量这棵树多大（字节，du -sk，按占用的块算、硬链接只算一次）：资源页「每个仓占多少」用（#1993）。
+ * 只读，在跑的树也能量。du 没跑成、有读不了的地方、输出认不出都抛（没量成），不当成 0。
+ */
+export async function treeBytes(t: UserTree): Promise<number> {
+  const r = await run(t, ['/usr/bin/du', '-sk', '--', t.dir], { timeoutMs: 60_000 });
+  if (r.code !== 0) {
+    throw new PortError('READ_FAILED', describeFailure('量这棵树多大（du）', r), { retryable: true });
+  }
+  const m = /^(\d+)\s/.exec(text(r));
+  if (!m?.[1])
+    throw new PortError('READ_FAILED', `du 的输出认不出：${text(r).slice(0, 80)}`, { retryable: false });
+  return Number(m[1]) * 1024;
+}
+
 /** \0 分隔的输出（-z、-print0）：一段一个，空的不要。 */
 const nulSeparated = (r: UserCommandResult) => r.stdout.toString('utf8').split('\0').filter(Boolean);
 

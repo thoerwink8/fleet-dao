@@ -73,7 +73,7 @@ import {
   grokLaunchCommand,
   hostDrivers,
 } from './hosts.ts';
-import { hourlyReconcileJob } from './hourly-reconcile.ts';
+import { type HourlyReconcileWiring, hourlyReconcileJob, worktreeCleanupJob } from './hourly-reconcile.ts';
 import { intakeJob } from './intake.ts';
 import { issueGroomIdlePolicyFromEnv } from './issue-groom.ts';
 import { issueKindJevFromEnv } from './issue-kind-jev.ts';
@@ -757,6 +757,17 @@ export function realPortsFromEnv(
     config.sessionProxy,
     config.cursorVersionsDir,
   );
+  // 每小时对账和一键清理工作树共用的装配（#1993）：同一个工作树管家、同一个会话用户执行器、同一份判据
+  const reconcileWiring: HourlyReconcileWiring = {
+    db,
+    gh,
+    trees,
+    exec,
+    sessionOrg,
+    carpoolRegistry: () => carpoolCap.view(),
+    machine: config.machine,
+    selfCheck: (repos) => gh.selfCheck(repos),
+  };
   const jobs: EngineJobs = {
     githubReconcile: githubReconcileJob({
       db,
@@ -806,16 +817,9 @@ export function realPortsFromEnv(
     }),
     // 每小时对账：同一个工作树管家（删树经 fleet-agent-scope）、同一个会话用户执行器（看树里还剩什么）；引擎这份 GitHub
     // （同一套 App 凭据）审合了的 PR、给排队的单补拉时现读挂在哪个版本、做两个机器人的权限自检
-    hourlyReconcile: hourlyReconcileJob({
-      db,
-      gh,
-      trees,
-      exec,
-      sessionOrg,
-      carpoolRegistry: () => carpoolCap.view(),
-      machine: config.machine,
-      selfCheck: (repos) => gh.selfCheck(repos),
-    }),
+    hourlyReconcile: hourlyReconcileJob(reconcileWiring),
+    // 一键清理没用的工作树（#1993）：和每小时对账同一份装配、同一个判据
+    worktreeCleanup: worktreeCleanupJob(reconcileWiring),
     // 全流程巡检（#223）：巡检仓写在引擎配置 FLEET_CANARY_REPO（没配这一轮记没跑成，看门狗报）；开单、写需求文档、挂版本都是「引擎」机器人
     canary: canaryJob({ db, gh, repo: env.FLEET_CANARY_REPO }),
     // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤
