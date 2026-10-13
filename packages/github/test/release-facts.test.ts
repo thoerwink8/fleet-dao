@@ -141,6 +141,13 @@ describe('mainCi', () => {
       code: 'UNEXPECTED_RESPONSE',
     });
   });
+
+  it('读汇总检查按名字过滤（check_name=check），别把几百条 merge-gate 也读回来（#2010 的回归）', async () => {
+    const { facts, calls } = stub(() => ({ check_runs: [run({})] }));
+    expect(await facts.mainCi(repo, SHA)).toEqual({ state: 'green', detail: '' });
+    // 关键：请求带上 check_name=check。不带时一个提交上 200 条 merge-gate 会把 check 挤出要读的范围（曾误判 pending、发布被挡）。
+    expect(calls[0]?.query).toMatchObject({ check_name: 'check' });
+  });
 });
 
 describe('compare', () => {

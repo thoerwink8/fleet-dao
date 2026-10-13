@@ -135,7 +135,7 @@ export function createReleaseFacts(client: GitHubClient): ReleaseFactsReader {
     async mainCi(repo, sha, signal) {
       const what = `读 ${sha.slice(0, 12)} 的检查结果`;
       // merge-gate 每轮都再报一条，一个提交上能堆两百多条 check-run（实测 202），把 `check` 挤出第一页。
-      // 带 check_name=check（同发版车 mainCiByChecks），再用 client.all 翻页：同名重跑不在第一页也拿得到。
+      // 带 check_name=check（同 #2006 发版车预检），再用 client.all 翻页取全：同名重跑不在第一页也拿得到。
       const runs = await client.all<unknown>(
         {
           method: 'GET',
