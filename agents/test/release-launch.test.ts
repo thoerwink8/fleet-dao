@@ -1,12 +1,12 @@
 // 发版车第 4 步在法国上跑的 release-launch.sh（#1995）：起发布服务、或接着看已有的那个。
 // 真的 bash 跑脚本，systemctl、systemd-run、flock 换成放在 PATH 最前面的假命令（不碰任何真服务）；发布目录用临时目录。
 // 钉住的是幂等：同一个令牌重发不起第二个；服务在跑就接着看；跑完回退出码；没了又没退出码不重起；别的发布占着锁不起。
-import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChild } from './child.ts';
 
 const SCRIPT = fileURLToPath(new URL('../skills/commander/scripts/release-launch.sh', import.meta.url));
 const SHA = 'ab12cd34'.repeat(5);
@@ -42,8 +42,7 @@ echo "$@" >>"$f/run-$u"; if [[ -n \${FAKE_RUN_FAIL:-} ]]; then exit 1; fi; echo 
   );
   stub('flock', `exit \${FAKE_LOCK_BUSY:-0}`);
   const run = (args: string[], env: Record<string, string> = {}) => {
-    const r = spawnSync('bash', [SCRIPT, ...args], {
-      encoding: 'utf8',
+    const r = runChild('bash', [SCRIPT, ...args], {
       env: {
         ...process.env,
         PATH: `${bin}${delimiter}${process.env.PATH ?? ''}`,
