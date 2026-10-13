@@ -83,6 +83,7 @@ import {
 import { probeHistoryBody } from './probe-history.ts';
 import { registerReleaseCardRoutes } from './release-card.ts';
 import { registerReleaseRequestRoutes } from './release-request.ts';
+import { registerRepoImportRoutes } from './repo-import-routes.ts';
 import { soloReserveView } from './reserve-view.ts';
 import { registerRouteProbeRoutes } from './route-probe-now.ts';
 import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView } from './routing-efforts.ts';
@@ -895,6 +896,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
 
   registerCredentialRoutes(app, deps);
   registerDispatchRoutes(app, deps, actorOf);
+  registerRepoImportRoutes(app, deps, actorOf);
   registerCiPolicyRoutes(app, deps, actorOf);
   registerRoutingOrderRoutes(app, deps, actorOf);
   registerRouteProbeRoutes(app, deps, actorOf, engineProbe);

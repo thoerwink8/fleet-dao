@@ -24,6 +24,7 @@ import {
   CliToolsResponseSchema,
   CredentialsResponse,
   DEFAULT_SESSION_EFFORT,
+  DisconnectGitHubResponse,
   describeEngineMaster,
   ENGINE_MASTER_SETTING,
   EnvResponseSchema,
@@ -33,6 +34,8 @@ import {
   flowStages,
   foldRouteProbeRequests,
   founderOnlyDenial,
+  GITHUB_INSTALL_REPO,
+  GITHUB_OAUTH_DISCONNECT,
   GROOM_ACTION,
   GROOM_TARGET,
   GroomNowRequest,
@@ -44,6 +47,11 @@ import {
   HomeResponseSchema,
   type HostId,
   hardBanFor,
+  ImportableReposResponse,
+  ImportRepoRequest,
+  ImportRepoResponse,
+  InstallAppRequest,
+  InstallAppResponse,
   JobsResponse,
   judgeGroomRequest,
   ManualModelRequest,
@@ -63,11 +71,14 @@ import {
   poolFull,
   poolHoldsView,
   probeHistoryStrips,
+  REPO_IMPORT_ADD,
+  REPO_IMPORT_REMOVE,
   type RealtimeTable,
   ReleaseCardSchema,
   ReleasedCommitsSchema,
   ReleaseRequestResponse,
   RemovePurposeModelRequest,
+  RemoveRepoResponse,
   RepoCiPolicyResponse,
   RepoDispatchResponse,
   ReposResponse,
@@ -895,6 +906,85 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const mockCiPolicy = new Map<string, CiPolicy>();
   const mockCiRecent = new Map<string, { at: string; actor: string; from: CiPolicy; to: CiPolicy }[]>();
   const ciModeOf = (repoId: string): CiPolicy => mockCiPolicy.get(repoId) ?? 'force';
+  /** 「导入仓库」（#1989）的假数据：连着一份授权，几个仓覆盖个人/组织、已装/未装、已在驾驶舱几种样子。 */
+  const mockImportAuth = {
+    connected: true,
+    login: 'thoerwink8',
+    scopes: 'read:org repo',
+    connectedAt: new Date(now() - 86_400_000).toISOString(),
+  };
+  const mockImportRepos = () => [
+    {
+      githubId: 9001,
+      owner: 'thoerwink8',
+      name: 'widgets',
+      fullName: 'thoerwink8/widgets',
+      private: true,
+      defaultBranch: 'main',
+      ownerType: 'User' as const,
+      viewerCanAdmin: true,
+      archived: false,
+      empty: false,
+      agentInstalled: true,
+      engineInstalled: true,
+      fullyInstalled: true,
+      inCockpit: false,
+      canInstall: false,
+    },
+    {
+      githubId: 9002,
+      owner: 'thoerwink8',
+      name: 'notes',
+      fullName: 'thoerwink8/notes',
+      private: false,
+      defaultBranch: 'main',
+      ownerType: 'User' as const,
+      viewerCanAdmin: true,
+      archived: false,
+      empty: false,
+      agentInstalled: false,
+      engineInstalled: false,
+      fullyInstalled: false,
+      inCockpit: false,
+      canInstall: true,
+    },
+    {
+      githubId: 9003,
+      owner: 'adfx-studio',
+      name: 'daihuo-workbench',
+      fullName: 'adfx-studio/daihuo-workbench',
+      private: true,
+      defaultBranch: 'main',
+      ownerType: 'Organization' as const,
+      viewerCanAdmin: true,
+      archived: false,
+      empty: false,
+      agentInstalled: true,
+      engineInstalled: false,
+      fullyInstalled: false,
+      inCockpit: true,
+      reposId: st.repos[0]?.id ?? 'r-orbit',
+      canInstall: true,
+    },
+    {
+      githubId: 9004,
+      owner: 'some-org',
+      name: 'shared-lib',
+      fullName: 'some-org/shared-lib',
+      private: false,
+      defaultBranch: 'main',
+      ownerType: 'Organization' as const,
+      viewerCanAdmin: false,
+      archived: false,
+      empty: false,
+      agentInstalled: false,
+      engineInstalled: false,
+      fullyInstalled: false,
+      inCockpit: false,
+      canInstall: false,
+      installBlockedWhy: '要组织管理员先批准这个 App（你在这个组织里没有 admin）',
+    },
+  ];
   /**
    * 临时指挥官整理待办的记录（新的在前）。orbit 有一次做成、一次没做成，都在 24 小时内接手过，所以今日剩余 1/3。
    * 没有排队或在做的：按钮能点。点了以后插到最前。
@@ -1967,6 +2057,101 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         recent: mockCiRecent.get(repoId) ?? [],
         changed,
       });
+    },
+    // 设置页「导入仓库」（#1989）：假数据里造一份「我的 GitHub 仓」清单，含个人仓、组织仓、已装/未装、已在驾驶舱的。
+    async importableRepos() {
+      await wait();
+      return ImportableReposResponse.parse({
+        auth: mockImportAuth,
+        repos: [...mockImportRepos()],
+        ...(mockImportAuth.connected
+          ? {}
+          : { reason: '这是假数据：点「连接 GitHub」在真后端上会跳 GitHub 授权' }),
+      });
+    },
+    async importRepo(raw) {
+      await wait();
+      const body = ImportRepoRequest.parse(raw);
+      const repo = mockImportRepos().find((r) => r.githubId === body.githubId);
+      if (!repo) throw new ApiError(404, 'repo_not_visible', '这个仓不在你 GitHub 账号能看到的范围里');
+      const existing = st.repos.find(
+        (r) =>
+          r.owner.toLowerCase() === repo.owner.toLowerCase() &&
+          r.name.toLowerCase() === repo.name.toLowerCase(),
+      );
+      if (existing) {
+        return ImportRepoResponse.parse({
+          repoId: existing.id,
+          owner: existing.owner,
+          name: existing.name,
+          created: false,
+        });
+      }
+      const created = {
+        id: `mock-${body.githubId}`,
+        owner: repo.owner,
+        name: repo.name,
+        defaultBranch: repo.defaultBranch,
+        testCommand: 'pnpm check',
+      };
+      st.repos.push(created);
+      audit({
+        actor: meActor(),
+        action: REPO_IMPORT_ADD,
+        target: `repo:${repo.fullName.toLowerCase()}`,
+        after: { owner: repo.owner, name: repo.name },
+        via: 'cockpit',
+        reason: `从驾驶舱导入 ${repo.fullName}`,
+      });
+      return ImportRepoResponse.parse({
+        repoId: created.id,
+        owner: created.owner,
+        name: created.name,
+        created: true,
+      });
+    },
+    async removeRepo(repoId) {
+      await wait();
+      const repo = st.repos.find((r) => r.id === repoId);
+      if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
+      st.repos.splice(st.repos.indexOf(repo), 1);
+      audit({
+        actor: meActor(),
+        action: REPO_IMPORT_REMOVE,
+        target: `repo:${repo.owner}/${repo.name}`.toLowerCase(),
+        before: { owner: repo.owner, name: repo.name },
+        via: 'cockpit',
+        reason: `从驾驶舱移出 ${repo.owner}/${repo.name}`,
+      });
+      return RemoveRepoResponse.parse({ removed: true });
+    },
+    async installAppOnRepo(raw) {
+      await wait();
+      const body = InstallAppRequest.parse(raw);
+      const repo = mockImportRepos().find((r) => r.githubId === body.githubId);
+      if (!repo) throw new ApiError(404, 'repo_not_visible', '这个仓不在你 GitHub 账号能看到的范围里');
+      if (repo.ownerType === 'Organization' && !repo.viewerCanAdmin) {
+        throw new ApiError(403, 'needs_org_admin', '这是组织的仓，要组织管理员先批准这个 App');
+      }
+      audit({
+        actor: meActor(),
+        action: GITHUB_INSTALL_REPO,
+        target: `repo:${repo.fullName.toLowerCase()}`,
+        via: 'cockpit',
+        reason: `把 App 装到 ${repo.fullName}`,
+      });
+      return InstallAppResponse.parse({ installed: 2, agent: true, engine: true });
+    },
+    async disconnectGitHub() {
+      await wait();
+      audit({
+        actor: meActor(),
+        action: GITHUB_OAUTH_DISCONNECT,
+        target: `user:${st.me.user.id}`,
+        via: 'cockpit',
+        reason: '断开 GitHub 授权',
+      });
+      return DisconnectGitHubResponse.parse({ disconnected: true });
     },
     async groomStatus(repoId) {
       await wait();

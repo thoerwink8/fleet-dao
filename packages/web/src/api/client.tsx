@@ -29,6 +29,10 @@ import type {
   GroomNowResult,
   GroomStatus,
   HomeResponse,
+  ImportableRepos,
+  ImportRepoBody,
+  ImportRepoResult,
+  InstallAppResult,
   Jobs,
   LiveEvent,
   LocalSessions,
@@ -47,6 +51,7 @@ import type {
   ReleasedCommits,
   ReleaseRequestResult,
   RemovePurposeModelBody,
+  RemoveRepoResult,
   Repo,
   RepoCiPolicy,
   RepoDispatch,
@@ -116,6 +121,16 @@ export interface FleetApi {
   repoCiPolicy(): Promise<{ repos: RepoCiPolicy[] }>;
   /** 切换一个项目的 CI 模式（写操作记录）；本来就是这个模式时 changed=false。没有这个项目 404。 */
   updateRepoCiPolicy(repoId: string, body: UpdateRepoCiPolicyBody): Promise<UpdatedRepoCiPolicy>;
+  /** 设置页「导入仓库」（#1989）：我 GitHub 上看得见的仓 + 我这份授权现在怎样。没连 GitHub 时 repos 空、auth.connected=false。 */
+  importableRepos(): Promise<ImportableRepos>;
+  /** 把一个仓接进驾驶舱；created=false 表示本来就在（没重复建）。 */
+  importRepo(body: ImportRepoBody): Promise<ImportRepoResult>;
+  /** 把一个仓移出驾驶舱；还挂着没结束的单时 removed=false 带原因。 */
+  removeRepo(repoId: string): Promise<RemoveRepoResult>;
+  /** 把两个 App 装到某个仓（一键授权那一步）；组织仓要组织批准，装不上时 reason 写原因。 */
+  installAppOnRepo(body: { githubId: number }): Promise<InstallAppResult>;
+  /** 断开本人 GitHub 授权。 */
+  disconnectGitHub(): Promise<{ disconnected: boolean }>;
   /** 这个仓的「指挥官整理待办」：今日剩余、最近几次、有没有一次在排队或在做。没有这个项目 404。 */
   groomStatus(repoId: string): Promise<GroomStatus>;
   /**
@@ -264,6 +279,7 @@ export const keys = {
   repos: ['repos'] as const,
   repoDispatch: ['repo-dispatch'] as const,
   repoCiPolicy: ['repo-ci-policy'] as const,
+  importableRepos: ['importable-repos'] as const,
   groomStatus: (repoId: string) => ['groom-status', repoId] as const,
   localSessions: ['local-sessions'] as const,
   worktrees: ['worktrees'] as const,
@@ -1115,6 +1131,74 @@ export function useUpdateRepoCiPolicy() {
       api.updateRepoCiPolicy(repoId, body),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: keys.repoCiPolicy });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/**
+ * 「导入仓库」列表（#1989）：我 GitHub 上看得见的仓，每个标好装没装、在不在驾驶舱。
+ * 不自动轮询：这是「我点一下去 GitHub 装个 App，回来刷新才看得到」的那类，拉得太勤是白问 GitHub。
+ */
+export function useImportableRepos() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.importableRepos,
+    queryFn: () => api.importableRepos(),
+    retry: false,
+  });
+}
+
+/** 把一个仓接进/移出驾驶舱：等后端写完再重拉（接了要刷新列表和仓列表、记了操作记录）。 */
+export function useImportRepo() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { githubId: number }) => api.importRepo(body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.importableRepos });
+      qc.invalidateQueries({ queryKey: keys.repos });
+      qc.invalidateQueries({ queryKey: keys.repoDispatch });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+export function useRemoveRepo() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (repoId: string) => api.removeRepo(repoId),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.importableRepos });
+      qc.invalidateQueries({ queryKey: keys.repos });
+      qc.invalidateQueries({ queryKey: keys.repoDispatch });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/** 把两个 App 装到某个仓（一键授权那一步）。 */
+export function useInstallAppOnRepo() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { githubId: number }) => api.installAppOnRepo(body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.importableRepos });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
+/** 断开本人 GitHub 授权。 */
+export function useDisconnectGitHub() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.disconnectGitHub(),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: keys.importableRepos });
       qc.invalidateQueries({ queryKey: ['audit'] });
     },
   });
