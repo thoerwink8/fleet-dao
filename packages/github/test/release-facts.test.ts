@@ -7,13 +7,33 @@ import { createReleaseFacts } from '../src/release-facts.ts';
 const repo = { owner: 'o', name: 'r' };
 const SHA = 'a'.repeat(40);
 
-/** 只替身 request：按路径回数据，记下每次请求。 */
-function stub(handler: (req: GhRequest) => unknown) {
+/** 只替身 request 和 all：按路径回数据，记下每次请求。all 会翻页（跟着 Link 头），替身里按 handler 每次回同一页、没有 Link 就一页结束。 */
+function stub(handler: (req: GhRequest) => unknown, pages: unknown[] = []) {
   const calls: GhRequest[] = [];
+  let pageIdx = 0;
   const client = {
     async request(req: GhRequest) {
       calls.push(req);
-      return { status: 200, data: handler(req), headers: new Headers() };
+      const data = pageIdx < pages.length ? pages[pageIdx] : handler(req);
+      return { status: 200, data, headers: new Headers() };
+    },
+    async all(req: GhRequest, itemsOf: (d: unknown) => unknown) {
+      const out: unknown[] = [];
+      // 真 all 对不是数组的一页会抛（client.ts 的 unexpected）；替身照做，别把「形状坏了」吞成空。
+      for (let i = 0; i < Math.max(pages.length, 1); i++) {
+        calls.push(req);
+        pageIdx = i;
+        const items = itemsOf(pages.length ? pages[i] : handler(req));
+        if (!Array.isArray(items)) {
+          pageIdx = 0;
+          const err = new Error('unexpected response shape');
+          (err as { code?: string }).code = 'UNEXPECTED_RESPONSE';
+          throw err;
+        }
+        out.push(...items);
+      }
+      pageIdx = 0;
+      return out;
     },
   } as unknown as GitHubClient;
   return { facts: createReleaseFacts(client), calls };
@@ -102,6 +122,21 @@ describe('mainCi', () => {
     await expect(stub(() => ({ check_runs: 'x' })).facts.mainCi(repo, SHA)).rejects.toMatchObject({
       code: 'UNEXPECTED_RESPONSE',
     });
+  });
+
+  it('读汇总检查按名字过滤（check_name=check），别把几百条 merge-gate 也读回来（#2010 的回归）', async () => {
+    const { facts, calls } = stub(() => ({ check_runs: [run({})] }));
+    expect(await facts.mainCi(repo, SHA)).toEqual({ state: 'green', detail: '' });
+    // 关键：请求带上 check_name=check。不带时一个提交上 200 条 merge-gate 会把 check 挤出要读的范围（曾误判 pending、发布被挡）。
+    expect(calls[0]?.query).toMatchObject({ check_name: 'check' });
+  });
+
+  it('同名重跑的几条在后面的页：翻页读全，认最新那条（取全，不只第一页）', async () => {
+    // 过滤之后同名重跑仍可能不止一页（跑得多）；client.all 跟在 Link 头翻页，替身这里给两页。
+    const page1 = { check_runs: [run({ id: 1, conclusion: 'failure', started_at: '2026-10-07T09:00:00Z' })] };
+    const page2 = { check_runs: [run({ id: 2, conclusion: 'success', started_at: '2026-10-07T09:30:00Z' })] };
+    const { facts } = stub(() => ({ check_runs: [] }), [page1, page2]);
+    expect(await facts.mainCi(repo, SHA)).toEqual({ state: 'green', detail: '' });
   });
 });
 
