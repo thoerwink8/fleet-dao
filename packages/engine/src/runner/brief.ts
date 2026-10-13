@@ -86,7 +86,7 @@ export function renderBrief(brief: AnyBrief): string {
     ...(brief.touches.length > 0 ? brief.touches.map((t) => `- ${t}`) : ['（没写）']),
   ];
   if (brief.specDir !== undefined) {
-    head.push('', `## 需求文档出处`, `\`${brief.specDir}\`（对照这份，不要凭印象）。`);
+    head.push('', `## 需求文档出处`, `\`${brief.specDir}\`。`);
   }
   if (brief.kind === 'scope') return head.join('\n');
   if (brief.kind === 'manual') {
