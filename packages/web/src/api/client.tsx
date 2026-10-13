@@ -31,6 +31,7 @@ import type {
   HomeResponse,
   Jobs,
   LiveEvent,
+  LocalSessions,
   ManualModelBody,
   ManualModelResult,
   Me,
@@ -82,6 +83,9 @@ import type {
   UpdateRouteEffortBody,
   UpdateSettingBody,
   UpdateTaskRoutePinBody,
+  WorktreeCleanupAck,
+  WorktreeCleanupBody,
+  Worktrees,
 } from './types';
 
 export type LiveStatus = 'connecting' | 'open' | 'down';
@@ -130,6 +134,12 @@ export interface FleetApi {
   nodes(): Promise<Nodes>;
   /** 一个远程环境最近一次推来的主页、环境页快照加新鲜度（只读展示用）；没推过 404（node_never_reported）。 */
   node(nodeId: string): Promise<NodeDetail>;
+  /** 本机会话（#1991）：每台推过的机器此刻在跑、刚停、超过阈值没动的会话；推不来的写 stale / never（页面写「没上报」）。 */
+  localSessions(): Promise<LocalSessions>;
+  /** 法国的工作树（#1993）：引擎最近一份清单加最近几次一键清理。 */
+  worktrees(): Promise<Worktrees>;
+  /** 叫一次「清理没用的工作树」：引擎没开 409/503、已经有一次在排队 409，把后端的话抛出来。 */
+  worktreeCleanup(body: WorktreeCleanupBody): Promise<WorktreeCleanupAck>;
   board(repoId: string): Promise<Board>;
   /** 任务列表页（#1639）：所有仓、所有状态，最近更新在前，游标翻页，带各状态的数。 */
   tasks(query?: TaskListFilter & { cursor?: string | undefined; limit?: number }): Promise<TaskList>;
@@ -255,6 +265,8 @@ export const keys = {
   repoDispatch: ['repo-dispatch'] as const,
   repoCiPolicy: ['repo-ci-policy'] as const,
   groomStatus: (repoId: string) => ['groom-status', repoId] as const,
+  localSessions: ['local-sessions'] as const,
+  worktrees: ['worktrees'] as const,
   board: (repoId: string) => ['board', repoId] as const,
   task: (taskId: string) => ['task', taskId] as const,
   taskList: (filter: TaskListFilter) =>
@@ -370,6 +382,37 @@ export function useGroomStatus(repoId: string) {
     queryKey: keys.groomStatus(repoId),
     queryFn: () => api.groomStatus(repoId),
     refetchInterval: 30_000,
+  });
+}
+
+/** 本机会话（#1991）：本机每 2 分钟推一次，这里每 30 秒看一眼，够「刚停」「超过阈值没动」跟上。 */
+export function useLocalSessions() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.localSessions,
+    queryFn: () => api.localSessions(),
+    refetchInterval: 30_000,
+  });
+}
+
+/** 法国的工作树清单和最近几次清理：有一次在排队或在做时每 5 秒看一眼，平时每分钟。 */
+export function useWorktrees() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.worktrees,
+    queryFn: () => api.worktrees(),
+    refetchInterval: (q) =>
+      q.state.data?.cleanups.some((c) => c.status === 'queued' || c.status === 'running') ? 5_000 : 60_000,
+  });
+}
+
+/** 「清理没用的工作树」按钮：成了重拉清单；拒的话（409 / 503）原样交给页面写出来。 */
+export function useWorktreeCleanup() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: WorktreeCleanupBody) => api.worktreeCleanup(body),
+    onSettled: () => qc.invalidateQueries({ queryKey: keys.worktrees }),
   });
 }
 

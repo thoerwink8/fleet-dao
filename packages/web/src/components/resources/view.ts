@@ -223,7 +223,10 @@ function appDisk(
 }
 
 /** AI 会话按仓折的子行：在跑的单按仓归，会话编号对上 sessions.byRun；对不上单的归「别的会话」。 */
-function sessionChildren(resources: HomeResources, running: readonly HomeRunning[]): SubRow[] | undefined {
+export function sessionChildren(
+  resources: HomeResources,
+  running: readonly HomeRunning[],
+): SubRow[] | undefined {
   if (resources.sessions.state !== 'ok') return undefined;
   const byRun = resources.sessions.byRun;
   const claimed = new Set<string>();

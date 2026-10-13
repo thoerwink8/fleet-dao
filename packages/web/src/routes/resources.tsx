@@ -24,6 +24,7 @@ import { StatusBadge } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
 import { SnapshotBanner, useSelectedNodeName } from '../components/node-notice';
 import { NotBuilt } from '../components/not-built';
+import { ReposSection } from '../components/resources/repos-section';
 import {
   type AppRow,
   appRows,
@@ -584,8 +585,8 @@ export default function Resources() {
   return (
     <Page
       title="资源"
-      description="整机此刻的内存、CPU、磁盘，每个上线项目各占多少、放在哪"
-      detail="CPU、内存每 5 秒随推送更新（读各 systemd 单元的 cgroup，1 核 = 占满一个核）；按目录的磁盘占用每 10 分钟测一次。读不到写「没读到」，读不全写「不全」，不拿 0 顶。"
+      description="整机此刻的内存、CPU、磁盘，每个上线项目、每个仓各占多少"
+      detail="CPU、内存每 5 秒随推送更新（读各 systemd 单元的 cgroup，1 核 = 占满一个核）；按目录的磁盘占用每 10 分钟测一次；仓和工作树的清单由引擎每小时对账时出一份，「清理没用的工作树」只删没人用、没有没提交或没推改动的树。读不到写「没读到」，读不全写「不全」，不拿 0 顶。"
       refresh={{
         variant: 'dot',
         onRefresh: () => void main.refetch(),
@@ -616,6 +617,12 @@ export default function Resources() {
         <SectionGrid cols={1}>
           <HostSection resources={state.data.resources} remote={isRemote} machine={machine} now={now} />
           <AppsSection resources={state.data.resources} running={state.data.running} remote={isRemote} />
+          <ReposSection
+            resources={state.data.resources}
+            running={state.data.running}
+            remote={isRemote}
+            now={now}
+          />
           <BoardSection resources={state.data.resources} remote={isRemote} now={now} />
         </SectionGrid>
       )}

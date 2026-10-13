@@ -108,6 +108,9 @@ import type {
   UpdateSettingRequest,
   UpdateTaskRoutePinRequest,
   UpdateTaskRoutePinResponse,
+  WorktreeCleanupRequestSchema,
+  WorktreeCleanupResponseSchema,
+  WorktreesResponseSchema,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 
@@ -291,3 +294,18 @@ export type LiveEvent =
   | ({ type: 'change' } & z.infer<typeof ChangeEventSchema>)
   /** 这台机器此刻的内存、CPU（#1973）：直接换掉主页数据里的 resources，不重拉主页。 */
   | { type: 'resources'; resources: z.infer<typeof HomeResourcesSchema> };
+
+// —— 本机会话（#1991）、法国的工作树和一键清理（#1993）——
+export type {
+  LocalSessionsNode,
+  LocalSessionsResponse as LocalSessions,
+  LocalSessionView,
+  WorktreeCleanupResult,
+  WorktreeInventory,
+  WorktreeRow,
+  WorktreeState,
+  WorktreesResponse as Worktrees,
+} from '@fleet-dao/shared';
+export type WorktreeCleanupBody = z.input<typeof WorktreeCleanupRequestSchema>;
+export type WorktreeCleanupAck = z.infer<typeof WorktreeCleanupResponseSchema>;
+export type WorktreeCleanupView = z.infer<typeof WorktreesResponseSchema>['cleanups'][number];
