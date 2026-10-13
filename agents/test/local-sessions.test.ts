@@ -1,28 +1,38 @@
 // 本机会话心跳（#1991）：钩子写心跳、推送、装和卸。
 // 故意造出的失败：钩子输入里带提示词、命令参数，落盘的心跳里一个字都没有；推不出去、法国回 401、没配 config 都写进 last-push.json；
 // settings.json 坏了不覆盖；常量和法国那边的 schema 对不上就红。
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { addHooks, heartbeatCommand, install, removeHooks, uninstall } from '../local-sessions/install.mjs';
+import {
+  addHooks,
+  heartbeatCommand,
+  install,
+  removeHooks,
+  status,
+  uninstall,
+} from '../local-sessions/install.mjs';
 import {
   buildReport,
   collect,
   DROP_AFTER_MS,
   gitInfo,
+  loopPidPath,
   MAX_SESSIONS,
   PUSH_EVERY_MS,
   PUSH_PATH,
   pushOnce,
   RECENT_STOP_MS,
   SCHEMA_VERSION,
+  STARTUP_VBS,
   sessionsDir,
   statusPath,
   TOKEN_HEADER,
   writeHeartbeat,
 } from '../local-sessions/lib.mjs';
+import { acquireLock } from '../local-sessions/loop.mjs';
 
 // 法国那边的定义（packages/shared）。agents 这个 tsc 项目只收 agents 自己的文件，静态引用会把 shared 整包拖进来，
 // 所以按路径动态引（vitest 照样跑真的那一份），只声明这里用到的几样。
@@ -290,6 +300,50 @@ describe('装和卸', () => {
       },
     };
   };
+  /** schtasks 拒绝访问（创始人这台电脑的真实情况）；别的命令（Query）也不成。 */
+  const deniedRun = (cmd: string, args: string[]) => ({
+    status: 1,
+    stdout: '',
+    stderr: `${cmd} ${args[0]}：错误：拒绝访问。`,
+  });
+  /** 假的循环进程：谁活着、谁被杀了、起过几回；起一次就在 loop.pid 里写一个新的进程号。 */
+  const fakeLoops = (home: string) => {
+    const alive = new Set<number>();
+    const killed: number[] = [];
+    const started: string[][] = [];
+    let next = 4000;
+    return {
+      alive,
+      killed,
+      started,
+      startupDir: join(tmp(), 'Startup'),
+      isAlive: (pid: number) => alive.has(pid),
+      kill: (pid: number) => {
+        killed.push(pid);
+        alive.delete(pid);
+      },
+      startLoop: (nodePath: string, loopPath: string) => {
+        started.push([nodePath, loopPath]);
+        const pid = next++;
+        alive.add(pid);
+        writeFileSync(loopPidPath(home), String(pid));
+      },
+      waitMs: 0,
+      sleep: async () => {},
+    };
+  };
+  const fallbackOpts = (home: string, loops: ReturnType<typeof fakeLoops>) => ({
+    home,
+    srcDir,
+    url: 'https://fleet.example',
+    token: 'tok-1',
+    platform: 'win32' as const,
+    run: deniedRun,
+    nodePath: 'C:/node/node.exe',
+    fetchImpl: okFetch,
+    now: () => T0,
+    ...loops,
+  });
   const okFetch = (async () => new Response('{"ok":true}', { status: 200 })) as unknown as typeof fetch;
   const settingsOf = (home: string) =>
     JSON.parse(readFileSync(join(home, '.claude', 'settings.json'), 'utf8'));
@@ -303,6 +357,7 @@ describe('装和卸', () => {
       JSON.stringify({ model: 'opus', hooks: { PreToolUse: [{ matcher: '*', hooks: [other] }] } }),
     );
     const { calls, run } = okRun();
+    const loops = fakeLoops(home);
     const opts = {
       home,
       srcDir,
@@ -313,12 +368,17 @@ describe('装和卸', () => {
       nodePath: 'C:/node/node.exe',
       fetchImpl: okFetch,
       now: () => T0,
+      ...loops,
     };
     const steps = await install(opts);
     expect(
       steps.every((s) => s.ok),
       JSON.stringify(steps),
     ).toBe(true);
+    // 计划任务建成了：写明用的是计划任务，不起循环、启动文件夹里没有自启文件
+    expect(steps.find((s) => s.step === '定时推送')?.detail).toMatch(/用的是计划任务/);
+    expect(loops.started).toEqual([]);
+    expect(existsSync(join(loops.startupDir, STARTUP_VBS))).toBe(false);
     await install(opts);
     const s = settingsOf(home);
     expect(s.model).toBe('opus');
@@ -371,21 +431,122 @@ describe('装和卸', () => {
     expect(steps).toEqual([{ ok: false, step: '配置', detail: expect.stringMatching(/--url/) }]);
   });
 
-  it('【故意造出的失败】计划任务没建成：报没成，不说装好了', async () => {
+  it('【故意造出的失败】计划任务拒绝访问：自动退回启动文件夹自启，起一个循环、读回 last-push.json，写明用的是自启', async () => {
     const home = tmp();
-    const steps = await install({
-      home,
-      srcDir,
-      url: 'https://fleet.example',
-      token: 't',
-      platform: 'win32',
-      run: () => ({ status: 1, stdout: '', stderr: '拒绝访问' }),
-    });
-    expect(steps.at(-1)).toMatchObject({
-      ok: false,
-      step: '定时推送',
-      detail: expect.stringMatching(/拒绝访问/),
-    });
+    mkdirSync(join(home, '.fleet-dao', 'local-sessions'), { recursive: true });
+    // 旧版手工放在根上的 loop.mjs：重装要删掉
+    writeFileSync(join(home, '.fleet-dao', 'local-sessions', 'loop.mjs'), '// old');
+    const loops = fakeLoops(home);
+    const steps = await install(fallbackOpts(home, loops));
+    expect(
+      steps.every((s) => s.ok),
+      JSON.stringify(steps),
+    ).toBe(true);
+    const way = steps.find((s) => s.step === '定时推送')?.detail ?? '';
+    expect(way).toMatch(/用的是启动文件夹自启/);
+    expect(way).toMatch(/拒绝访问/);
+    expect(steps.find((s) => s.step === '核对')?.ok).toBe(true);
+    expect(statusPath(home)).toBeTruthy();
+    expect(JSON.parse(readFileSync(statusPath(home), 'utf8'))).toMatchObject({ ok: true, sessions: 0 });
+    // vbs 指向 bin/loop.mjs；循环起了一个；旧位置的 loop.mjs 删了、新位置的拷到了
+    const vbs = readFileSync(join(loops.startupDir, STARTUP_VBS), 'utf8');
+    expect(vbs).toContain('loop.mjs');
+    expect(vbs).toContain(join(home, '.fleet-dao', 'local-sessions', 'bin', 'loop.mjs'));
+    expect(loops.started).toHaveLength(1);
+    expect(existsSync(join(home, '.fleet-dao', 'local-sessions', 'loop.mjs'))).toBe(false);
+    expect(existsSync(join(home, '.fleet-dao', 'local-sessions', 'bin', 'loop.mjs'))).toBe(true);
+    // status 写明哪一种、循环活着
+    const lines = status(home, { platform: 'win32', run: deniedRun, ...loops });
+    expect(lines).toContain(`定时推送：启动文件夹自启（${join(loops.startupDir, STARTUP_VBS)}）`);
+    expect(lines.find((l) => l.startsWith('循环进程'))).toMatch(/在跑（进程 4000）/);
+  });
+
+  it('【故意造出的失败】计划任务和自启都没成：退出非成功、两个原因都写、不说装好了、不往下试推', async () => {
+    const home = tmp();
+    const loops = fakeLoops(home);
+    // 启动文件夹建不出来：它的上一级是个文件
+    const blocker = join(tmp(), 'file');
+    writeFileSync(blocker, 'x');
+    const steps = await install({ ...fallbackOpts(home, loops), startupDir: join(blocker, 'Startup') });
+    expect(steps.at(-1)).toMatchObject({ ok: false, step: '定时推送' });
+    const detail = steps.at(-1)?.detail ?? '';
+    expect(detail).toMatch(/拒绝访问/);
+    expect(detail).toMatch(/退回启动文件夹自启也不行/);
+    expect(steps.some((s) => s.step === '试推')).toBe(false);
+    expect(steps.some((s) => s.detail.includes('装好了'))).toBe(false);
+    expect(loops.started).toEqual([]);
+  });
+
+  it('【故意造出的失败】自启写好了但循环没起来：报没成，不说装好了', async () => {
+    const home = tmp();
+    const loops = { ...fakeLoops(home), startLoop: () => {} };
+    const steps = await install(fallbackOpts(home, loops));
+    expect(steps.at(-1)).toMatchObject({ ok: false, step: '定时推送' });
+    expect(steps.at(-1)?.detail).toMatch(/循环进程没起来/);
+    expect(steps.some((s) => s.detail.includes('装好了'))).toBe(false);
+  });
+
+  it('【故意造出的失败】没有启动文件夹（认不出 APPDATA）：退回不了，报没成', async () => {
+    const home = tmp();
+    const { startupDir: _no, ...rest } = fakeLoops(home);
+    const steps = await install(fallbackOpts(home, rest as ReturnType<typeof fakeLoops>));
+    expect(steps.at(-1)).toMatchObject({ ok: false, step: '定时推送' });
+    expect(steps.at(-1)?.detail).toMatch(/没有 APPDATA/);
+  });
+
+  it('【故意造出的失败】重装不起第二个循环：先结束旧的再起新的，活着的只有一个', async () => {
+    const home = tmp();
+    const loops = fakeLoops(home);
+    expect((await install(fallbackOpts(home, loops))).every((s) => s.ok)).toBe(true);
+    expect([...loops.alive]).toEqual([4000]);
+    expect((await install(fallbackOpts(home, loops))).every((s) => s.ok)).toBe(true);
+    expect(loops.killed).toEqual([4000]);
+    expect(loops.started).toHaveLength(2);
+    expect([...loops.alive]).toEqual([4001]);
+  });
+
+  it('自启装过、后来计划任务能建了：自启那一套清掉，只留计划任务', async () => {
+    const home = tmp();
+    const loops = fakeLoops(home);
+    await install(fallbackOpts(home, loops));
+    const steps = await install({ ...fallbackOpts(home, loops), run: okRun().run });
+    expect(steps.find((s) => s.step === '定时推送')?.detail).toMatch(/用的是计划任务/);
+    expect(existsSync(join(loops.startupDir, STARTUP_VBS))).toBe(false);
+    expect(loops.alive.size).toBe(0);
+  });
+
+  it('【故意造出的失败】卸自启：删启动文件夹里的 vbs、结束循环进程、删整个目录，两种都清干净', async () => {
+    const home = tmp();
+    const loops = fakeLoops(home);
+    await install(fallbackOpts(home, loops));
+    expect(existsSync(join(loops.startupDir, STARTUP_VBS))).toBe(true);
+    const steps = uninstall({ home, platform: 'win32', run: deniedRun, ...loops });
+    expect(
+      steps.every((s) => s.ok),
+      JSON.stringify(steps),
+    ).toBe(true);
+    expect(existsSync(join(loops.startupDir, STARTUP_VBS))).toBe(false);
+    expect(loops.killed).toEqual([4000]);
+    expect(loops.alive.size).toBe(0);
+    expect(existsSync(join(home, '.fleet-dao', 'local-sessions'))).toBe(false);
+    // 计划任务那一路：有就删
+    const { calls, run } = okRun();
+    const steps2 = uninstall({ home: tmp(), platform: 'win32', run, ...fakeLoops(home) });
+    expect(steps2.every((s) => s.ok)).toBe(true);
+    expect(calls.map((c) => c[1])).toEqual(['/Query', '/Delete']);
+  });
+
+  it('循环抢锁：别的进程还活着就不起第二个；持有者已死或是自己才写上', () => {
+    const lock = join(tmp(), 'loop.pid');
+    writeFileSync(lock, '111');
+    expect(acquireLock({ lock, pid: 222, alive: (p) => p === 111 })).toBe(false);
+    expect(readFileSync(lock, 'utf8')).toBe('111');
+    expect(acquireLock({ lock, pid: 222, alive: () => false })).toBe(true);
+    expect(readFileSync(lock, 'utf8')).toBe('222');
+    expect(acquireLock({ lock, pid: 222, alive: () => true })).toBe(true);
+    writeFileSync(lock, 'garbage');
+    expect(acquireLock({ lock, pid: 333, alive: () => true })).toBe(true);
+    expect(readFileSync(lock, 'utf8')).toBe('333');
   });
 
   it('removeHooks 认不出的形状原样留着', () => {

@@ -44,6 +44,8 @@ export const DROP_AFTER_MS = 24 * 60 * 60_000;
 export const PUSH_TIMEOUT_MS = 20_000;
 /** Windows 计划任务的名字。 */
 export const TASK_NAME = 'fleet-local-sessions';
+/** 退回自启时放在启动文件夹里的 vbs 的文件名。 */
+export const STARTUP_VBS = 'fleet-local-sessions.vbs';
 /** 挂在哪几个事件上。 */
 export const HOOK_EVENTS = ['SessionStart', 'PreToolUse', 'Stop', 'SubagentStop', 'SessionEnd'];
 
@@ -72,6 +74,8 @@ export const sessionsDir = (home) => join(baseDir(home), 'sessions');
 export const binDir = (home) => join(baseDir(home), 'bin');
 /** @param {string} home */
 export const configPath = (home) => join(baseDir(home), 'config.json');
+/** @param {string} home */
+export const loopPidPath = (home) => join(baseDir(home), 'loop.pid');
 /** @param {string} home */
 export const statusPath = (home) => join(baseDir(home), 'last-push.json');
 

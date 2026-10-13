@@ -31,6 +31,7 @@ const CHECKED = [
   'local-sessions/lib.mjs',
   'local-sessions/heartbeat.mjs',
   'local-sessions/push.mjs',
+  'local-sessions/loop.mjs',
   'local-sessions/install.mjs',
 ];
 
