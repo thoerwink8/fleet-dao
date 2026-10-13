@@ -2,15 +2,14 @@
 
 ## 这里放什么
 
-网上公开的基础 skill（系统排错、前端设计这一类），**从公开仓原样拷进来、一个字不改**。自研的方法类 skill 不放这里，放 `agents/skills/`（创始人 2026-09-30 拍：自研和公开的分开，公开的拷贝式，不用软链接——Windows 上建软链要管理员权限，上游一改就直接进所有 AI，出问题回不了头）。
+网上公开的基础 skill（前端设计这一类），**从公开仓原样拷进来、一个字不改**。自研的方法类 skill 不放这里，放 `agents/skills/`（创始人 2026-09-30 拍：自研和公开的分开，公开的拷贝式，不用软链接——Windows 上建软链要管理员权限，上游一改就直接进所有 AI，出问题回不了头）。
 
 同步脚本 `packages/agents-sync` 把这里核过锁文件的 skill，和 `agents/skills/` 里自研的一起拷进各家 AI 的 skill 目录，一起撤；两边有同名的，直接报错、一个都不发。
 
-## 现在收了哪些（2 个）
+## 现在收了哪些（1 个）
 
 | skill | 来自 | 许可证 | 一句话 |
 |---|---|---|---|
-| `systematic-debugging` | obra/superpowers | MIT | 出了错先找根子，不许先打补丁 |
 | `frontend-design` | anthropics/skills | Apache-2.0 | 做界面要有自己的取舍，别出模板脸 |
 
 来源仓、40 位提交号、每个文件的哈希、谁在哪天审过、和本仓规矩冲突的地方（`notes`），都在 `vendor.lock.json`。
@@ -23,7 +22,7 @@
 | `requesting-code-review`（superpowers） | 流程就是「派一个子代理去审」，同上（那条已撤回）；本仓 PR 只看 CI。创始人 2026-09-30 00:08 列的第一批里有它，逐个文件通读时才发现，所以没收 |
 | `skill-creator`（anthropics/skills） | 默认流程靠派子代理、用 `claude -p` 循环几百次调 Claude（烧额度），教的描述写法和 `agents/test/skills.test.ts` 的 120 字上限冲突；同上是通读时才发现。本仓写 skill 照 `agents/skills/README.md` |
 | `using-superpowers`、`brainstorming`、`writing-plans`（superpowers） | 会和本仓的规矩抢谁说了算，或和 `best-practice-first`、`discuss` 重叠 |
-| `test-driven-development`、`verification-before-completion`、`receiving-code-review`、`using-git-worktrees`（superpowers），`webapp-testing`、`mcp-builder`（anthropics/skills） | 2026-09-30 收过，2026-10-13 规则减法删掉（决定 0089）：和通用段、工人交代重复，或本仓用不上（理由逐个写在 `vendor.lock.json` 的 `rejected`） |
+| `systematic-debugging`、`test-driven-development`、`verification-before-completion`、`receiving-code-review`、`using-git-worktrees`（superpowers），`webapp-testing`、`mcp-builder`（anthropics/skills） | 2026-09-30 收过，2026-10-13 规则减法删掉（决定 0089）：和通用段、工人交代重复，或本仓用不上，或近 14 天 0 次调用（理由逐个写在 `vendor.lock.json` 的 `rejected`） |
 
 没看过、不在第一批的：superpowers 的 `diagnosing-superpowers`、`executing-plans`、`finishing-a-development-branch`、`writing-skills`，和 anthropics/skills 里其余的 skill（其中 docx、pdf、pptx、xlsx 那四个是「源码可见、不是开源」的许可，不能放进公开仓）。要收哪个，走下面「加一个新的」。
 
@@ -55,7 +54,6 @@
 
 ## 用之前看一眼：和本仓规矩冲突的地方
 
-这些 skill 是别人写给别的环境的，遇到和本仓 `AGENTS.md`、创始人当轮指示冲突，以本仓和创始人为准。已知的几处（全文在 `vendor.lock.json` 的 `notes`）：
+这些 skill 是别人写给别的环境的，遇到和本仓 `AGENTS.md`、创始人当轮指示冲突，以本仓和创始人为准。已知的一处（全文在 `vendor.lock.json` 的 `notes`）：
 
 - **本机不跑全量测试**：skill 里的 `npm test`、「先跑整个项目的测试」，在本仓换成 `pnpm exec vitest run <文件>` 或 `pnpm test:changed`，全量交给 CI；本仓用 pnpm，不用 npm。
-- **密钥、令牌的值不进对话和日志**：`systematic-debugging` 的多层诊断示例（`echo "IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}"`、`env | grep …`）会把值打出来，本仓只报「有没有设」。

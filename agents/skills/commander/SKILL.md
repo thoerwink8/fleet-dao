@@ -1,47 +1,27 @@
 ---
 name: commander
-description: 当指挥官（旧称帅位）时读：和创始人讨论需求、写成单和验收、派给引擎或子代理（无人值守、过夜也用子代理）、盯到合并、记决定、报进度。创始人说「你来当指挥官」「接帅位」时也读。
+description: 当指挥官时读：和创始人讨论需求、写成单和验收、派给引擎或子代理（无人值守、过夜也用子代理）、盯到合并、记决定、报进度。创始人说「你来当指挥官」「接帅位」时也读。
 ---
 
-# `commander`：指挥官
+# commander：指挥官
 
-和创始人说话的那个会话就是指挥官：不设座位、不认领，换了会话照「起步」现查接着干。通用规矩看通用段，本仓怎么分活、引擎拉什么单看 `AGENTS.md`。下面的脚本在本技能 `scripts/` 下，写成 `$S`（Claude Code 是 `~/.claude/skills/commander/scripts`，别家是 `~/.agents/skills/commander/scripts`）。
+和创始人说话的会话就是指挥官，不设座位、不认领，换了会话现查接着干。脚本在本技能 `scripts/`，下面写成 `$S`（Claude Code：`~/.claude/skills/commander/scripts`；别家：`~/.agents/skills/commander/scripts`）。
 
-## 起步
-
-1. `git fetch origin`，从主线读 `AGENTS.md`、`docs/goals.md`；当前版本的先后用 `pnpm plan` 现读。
-2. `pnpm progress:read`，先办归本会话的创始人引导。
-3. 现查四样，别凭记忆：等他拍的（最近的单和 PR 上的提问）；开着的 PR（`gh pr list`）；在跑的子代理；法国（`node $S/france.mjs`）。
-4. 给他报一次进度。
+## 接手
+先读 `AGENTS.md`；`pnpm progress:read` 办归本会话的引导；要看版本先后用 `pnpm plan`，看法国用 `node $S/france.mjs`。状态一律现查，不凭记忆。`docs/goals.md` 定需求时再读。
 
 ## 定需求
-
 - 一个 PR 当轮做得完的不开单，直接派（`pnpm pr:open --no-issue` 写明理由）；跨会话、分期、等别人的用 `pnpm issue:new` 开单，正文就是需求；放不下的方案写进 `specs/`，单上留链接。
-- 别人写的单子草稿，开单前先跑 `node $S/check-brief.mjs <草稿> --quote <原话片段>`，不是 `PASS` 就退回改，不开单。
-- 他拍了板当场记：先 `git fetch` 读主线上已有的，冲突就问、不覆盖；只记他亲口说的，贴原话和时间；长期的记进 `docs/decisions/`，替代了旧决定的给旧的标「已被 X 替代」。
+- 他拍了板当场记：先读主线上已有的，冲突就问、不覆盖；只记他亲口说的，贴原话和时间；长期的记进 `docs/decisions/`，替代旧决定的，在旧决定头部写明被谁替代。
 
 ## 派活
-
-- 用 Agent 子代理，三个角色（定义只在 `agents/subagents/`）：斥候 `Explore`（只读：检索、归纳、验证、跑测试读结果）、工人 `general-purpose`（写代码、改文件、开 PR，界面活也归它）、设计 `Plan`（只读：方案、疑难根因、评审下结论）。不传 `model`；难的才升档：斥候传 `"sonnet"`，工人传 `"opus"`。能被脚本或一条命令核对的先给斥候，核对不过改派工人，不在同档重试；工人同档连败两次传 `"opus"`。Workflow 里 `agent()` 的 `agentType` 也填这三个名字。主会话在 Fable 上时别用 `fork`：它总跟主会话同一个模型。
-- 交代写清：要改什么、怎么算做完、范围和别碰什么；跑哪些测试；这个仓的规矩（PR 怎么开、署名行、临时文件放哪）；工作树的绝对路径；只要一次汇报，首行写自己的模型 id。id 对不上就当这次没做、升一档重派。派斥候把用到的硬规矩逐条写全、写明拿什么核对；据它的结论动手前，自己用一条命令抽查。
-- 一律后台跑。派完、手上没有下一刀就收这一轮，说清在跑什么、大概多久回；完成通知会叫回会话，不轮询、不 sleep 等。每个完成通知报他一行，再从队头派下一件。队列＝当前版本里程碑说明里的先后，减去在做的和等人拍的。本机同时跑的子代理不超过 4 个，斥候也算。
-- 子代理停住不动：`SendMessage` 问它卡在哪；真卡死就起新的，接着它的工作树干。
-- 无人值守：`node ~/.fleet-dao/hooks/unattended.mjs on` 之后收尾钩子不让这一轮结束。干活的最多 3 个，留 1 个给监控；每个完成通知 `pnpm progress:note` 一句、给他一行，再派下一件。队列空、子代理都收口跑 `unattended.mjs done "做完了什么"`，要他拍跑 `unattended.mjs needs-you`，他说停跑 `unattended.mjs off`。
-- 无人值守的监控是脚本：约每 10 分钟在主检出根目录跑 `node $S/patrol.mjs`，只看最后一行。`VERDICT: OK` 不叫模型；`VERDICT: ALERT <n>` 且 `DELTA` 不为 0，才派一个斥候，只给它那几行，它只回证据行、不归因；出现 `VERDICT: BROKEN`、连续 3 个周期没读到 `VERDICT`、要据斥候的结论动手前，亲自跑 `node $S/france.mjs`。跨天每天跑一次 `node $S/patrol.mjs --selftest`，最后一行不是 `SELFTEST: OK` 就当监控失效。基线只由脚本写。
+- 用 Agent 子代理，后台跑。三个角色，定义在 `agents/subagents/`：`Explore` 斥候（只读：检索、验证、跑测试读结果）、`general-purpose` 工人（写代码、开 PR，界面活也归它）、`Plan` 设计（只读：方案、疑难根因、评审）。默认不传 `model`，难的才升档（斥候 `"sonnet"`、工人 `"opus"`）。主会话在 Fable 上时别用 `fork`，它总跟主会话同一个模型。
+- 交代写清：要改什么、怎么算做完、范围和别碰什么、跑哪些测试、这个仓的 PR 规矩、工作树绝对路径。据斥候的结论动手前，自己用一条命令抽查。
+- 派完、手上没有下一刀就收这一轮；完成通知会叫回，给他报一行再派下一件。队列＝当前版本里程碑说明里的先后，减去在做的和等人拍的。子代理停住不动：`SendMessage` 问它卡在哪；真卡死就起新的，接着它的工作树干。
+- 无人值守：`node ~/.fleet-dao/hooks/unattended.mjs on` 之后收尾钩子不让这一轮结束。每个完成通知 `pnpm progress:note` 一句、再派下一件；队列空且子代理都收口跑 `unattended.mjs done "做完了什么"`，要他拍跑 `needs-you`，他说停跑 `off`。监控用 `node $S/patrol.mjs`，只看最后一行：`VERDICT: OK` 不叫模型，`ALERT` 才派斥候，`BROKEN` 亲自跑 `france.mjs`。
 
 ## 发版
-
-- 平时不用管（决定 0088）：主线头 CI 绿、距上次发版满 1 小时、没有发版在走或卡住，法国自己发；发前暂停在跑的会话，发完按会话号续上原会话。没发的原因看 `release.sh --check` 的「自动发布」一段。驾驶舱「发布到法国」按钮照常，不受 1 小时限制；他说「我点」就让他点，不用代跑。
-- 要马上发、手动用发版车：发版是对外发布，要他这一次的原话：`node $S/release-train.mjs start --sha <主线提交> --founder-ok "<原话>"`；`status` 看走到哪，`abort` 撤暂停。要发的提交得在主线上、它的 CI 是绿的。
-- 暂停、排空、发布、恢复开关都由脚本做。预检拦在「主线 CI 不是绿的」就先修主线，不绕过。卡住、ssh 断了、恢复开关没成：同一个目标再跑一次 `start`，它自己接着看；不人手重跑 `release.sh`。
-- 发完按脚本打印的清单初稿派：挡路的先、被依赖的先、要法国真机验的攒进同一个窗口。
-- 发版之外手动开引擎（`fleet-api engine on`）要他明说。
+平时不用管：主线头 CI 绿、满 1 小时、没有发版在走，法国自己发，发前暂停在跑的会话、发完续上；没发的原因看 `release.sh --check`。要马上发才用 `node $S/release-train.mjs start --sha <主线提交> --founder-ok "<他这一次的原话>"`（发版是对外发布），`status` 看进度、`abort` 撤暂停；预检拦在「主线 CI 不是绿的」就先修主线。
 
 ## 盯到合并
-
-- PR 照 `AGENTS.md`「PR」一节：开完不盯，红了才回来修，最多 3 轮。
-- 法国：`node $S/france.mjs` 的异常先看；急的（主线红、生产坏、数据、泄露、安全）当场修。
-
-## 交接
-
-上下文快满、或他要换会话时，最后一条写四段：在做什么；等他拍什么；开着的 PR 和在跑的子代理；下一步。事实都在 GitHub 和法国上，新会话照「起步」现查就接得上。
+PR 照 `AGENTS.md`，开完不盯，红了才回来修。法国异常先看 `france.mjs`；急的（主线红、生产坏、数据、泄露、安全）当场修。
