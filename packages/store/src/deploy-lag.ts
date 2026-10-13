@@ -223,7 +223,7 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
       code: 'system',
       message: `装机脚本落后主线 ${st.system.behind} 个相关提交、${spoken(ago(st.system.oldestAt))}，要人重跑`,
       steady: '装机脚本落后主线，要人重跑',
-      detail: `装到 ${short(st.system.appliedSha)}；防火墙、sudoers、建用户那几个文件（deploy/france/auto-release/lib.mjs 的 HUMAN_TIER_PATHS）之后改过：在法国以 root 跑 bash /srv/fleet-dao/deploy/france.sh（不自动跑；其余装机步骤发版时自动装）`,
+      detail: `装到 ${short(st.system.appliedSha)}；还没对上的人工档之后改过（运行时直接读的副本已经和主线一样的不算）：在法国以 root 跑 bash /srv/fleet-dao/deploy/france.sh（不自动跑；其余装机步骤发版时自动装）`,
     });
   }
   return done();

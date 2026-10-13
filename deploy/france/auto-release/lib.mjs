@@ -43,6 +43,8 @@ export const RULES_USERS = ['fleet-agent-carpool', 'pilot'];
  * 是「自动档」：发完版后由 tierStep 以 root 跑 `france.sh --auto-tier` 顺带装上，改了不算落后。
  * 新加碰防火墙 / sudoers / 建用户的步骤，写进 deploy/lib/human-tier.sh，它用到的仓里文件加到这里（测试核对：那个文件
  * 和 france.sh 引用的每个仓里文件，要么在这里、要么在测试里登记的自动档清单里）。
+ * 运行时直接读的副本（HUMAN_TIER_COPY_CHECKS）字节已经和主线一样的，不再算进落后：france-applied 只在整套跑完没红时才往前拨，
+ * 副本已经换上、别的读回还有红时，标记会停在旧提交上，不该再叫人重跑整套。防火墙、sudoers、sshd、被 source 的脚本不在这条例外里。
  */
 export const HUMAN_TIER_PATHS = [
   'deploy/lib/human-tier.sh',
@@ -67,6 +69,55 @@ export const HUMAN_TIER_PATHS = [
   // 会话用户的登录口子收口（#1785，setup_session_ssh）：sshd 的 Match User 段 + 动会话用户家里的钥匙；出站 22 的拒绝在上面的 fleet-dao.nft
   'deploy/france/sshd-session-user.conf',
 ];
+/**
+ * 人工档里「安装位置的字节和主线一样就算这次改动已经在机器上」的文件。运行时直接读这份文件，不靠另外加载。
+ * `unit` 有值的还要 systemd 已经加载（NeedDaemonReload 为假）；读不到就当没装上。
+ * 防火墙规则、sudoers、sshd、fail2ban、被 source 的脚本不放这里：磁盘上一样也不等于已经生效。
+ */
+export const HUMAN_TIER_COPY_CHECKS = [
+  { path: 'deploy/france/fleet-agent-scope.sh', installed: '/usr/local/sbin/fleet-agent-scope' },
+  {
+    path: 'deploy/france/release-request/lib.mjs',
+    installed: '/usr/local/lib/fleet-dao/release-request/lib.mjs',
+  },
+  {
+    path: 'deploy/france/release-request/session-wait.mjs',
+    installed: '/usr/local/lib/fleet-dao/release-request/session-wait.mjs',
+  },
+  {
+    path: 'deploy/france/release-request/fleet-release-request.mjs',
+    installed: '/usr/local/lib/fleet-dao/release-request/fleet-release-request.mjs',
+  },
+  {
+    path: 'deploy/france/fleet-release-request.service',
+    installed: '/etc/systemd/system/fleet-release-request.service',
+    unit: 'fleet-release-request.service',
+  },
+  {
+    path: 'deploy/france/fleet-release-request.path',
+    installed: '/etc/systemd/system/fleet-release-request.path',
+    unit: 'fleet-release-request.path',
+  },
+];
+
+/**
+ * 主线上的 blob 和安装位置 hash-object 的结果一样才算副本对齐。
+ * needDaemonReload：不是单元传 undefined；单元传 true（还要 reload）/ false（已经加载）/ null（读不到，当没装上）。
+ */
+export function copyAlreadyInstalled(blob, installedBlob, needDaemonReload) {
+  if (typeof blob !== 'string' || blob.length === 0 || blob !== installedBlob) return false;
+  if (needDaemonReload === undefined) return true;
+  return needDaemonReload === false;
+}
+
+/**
+ * 数落后提交时还要交给 `git log` 的路径。satisfied 里严格等于 true 的副本路径拿掉。
+ * 返回空数组表示一段都不用数：调用方必须当成落后 0。拿空 pathspec 去 git log 会列出全部提交。
+ */
+export function humanTierPathsStillBehind(satisfied) {
+  const skip = new Set(HUMAN_TIER_COPY_CHECKS.filter((c) => satisfied?.[c.path] === true).map((c) => c.path));
+  return HUMAN_TIER_PATHS.filter((p) => !skip.has(p));
+}
 /**
  * 这边发的报警都以它开头：规矩同步没成 `auto-release:rules:<提交号>`，装机自动档没装成 `auto-release:tier:<提交号>`，
  * 配置和期望不一致 `auto-release:config:<文件>:<键>`（一项一条），配置没查成 `auto-release:config-unchecked`，

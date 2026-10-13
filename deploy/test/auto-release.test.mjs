@@ -19,7 +19,10 @@ import {
   CONFIG_PREFIX,
   CONFIG_UNCHECKED_KEY,
   ciVerdict,
+  copyAlreadyInstalled,
+  HUMAN_TIER_COPY_CHECKS,
   HUMAN_TIER_PATHS,
+  humanTierPathsStillBehind,
   parseMainLog,
   RETIRED_ALERT_PREFIXES,
   RULES_PREFIX,
@@ -688,6 +691,55 @@ test('CI 结论：只认这个提交在 main 上那次 push 的 ci.yml，取最�
   );
   assert.equal(ciVerdict({ nope: 1 }, H1, at, now).verdict, 'unknown');
   assert.equal(ciVerdict(null, H1, at, now).verdict, 'unknown');
+});
+
+test('人工档副本已经和主线一样：数落后时拿掉这些路径；防火墙、sudoers、被 source 的脚本照旧算', () => {
+  const satisfied = Object.fromEntries(HUMAN_TIER_COPY_CHECKS.map((c) => [c.path, true]));
+  const left = humanTierPathsStillBehind(satisfied);
+  for (const c of HUMAN_TIER_COPY_CHECKS) {
+    assert.equal(left.includes(c.path), false, `${c.path} 副本已对齐，不该再数`);
+  }
+  for (const must of [
+    'deploy/france/fleet-dao.nft',
+    'deploy/france/sudoers-fleet-dao',
+    'deploy/lib/human-tier.sh',
+    'deploy/france/sshd-hardening.conf',
+    'deploy/lib/session-user.sh',
+  ]) {
+    assert.ok(left.includes(must), `${must} 文件在磁盘上一样也不等于规则已经加载`);
+  }
+  assert.ok(left.length > 0, '不能变成空 pathspec：git log 不带路径会把全部提交都数成落后');
+});
+
+test('副本没对齐或结论不是 true：路径还在，清单和 HUMAN_TIER_PATHS 一样', () => {
+  assert.deepEqual(humanTierPathsStillBehind({}), [...HUMAN_TIER_PATHS]);
+  assert.deepEqual(humanTierPathsStillBehind(undefined), [...HUMAN_TIER_PATHS]);
+  const bogus = { 'deploy/france/fleet-agent-scope.sh': 'true' };
+  assert.ok(humanTierPathsStillBehind(bogus).includes('deploy/france/fleet-agent-scope.sh'));
+});
+
+test('副本对齐只认 blob 相同；单元还要已经加载，读不到就当没装上', () => {
+  const blob = 'a'.repeat(40);
+  assert.equal(copyAlreadyInstalled(blob, blob, undefined), true);
+  assert.equal(copyAlreadyInstalled(blob, 'b'.repeat(40), undefined), false);
+  assert.equal(copyAlreadyInstalled(blob, blob, false), true);
+  assert.equal(copyAlreadyInstalled(blob, blob, true), false);
+  assert.equal(copyAlreadyInstalled(blob, blob, null), false);
+  assert.equal(copyAlreadyInstalled('', blob, undefined), false);
+});
+
+test('可按副本核对的路径都在人工档清单里，入口遇到空路径清单必须当成落后 0', () => {
+  assert.ok(HUMAN_TIER_COPY_CHECKS.length >= 4);
+  for (const c of HUMAN_TIER_COPY_CHECKS) {
+    assert.ok(HUMAN_TIER_PATHS.includes(c.path), c.path);
+    assert.match(c.installed, /^\//, c.path);
+  }
+  const entry = readFileSync(
+    new URL('../france/auto-release/fleet-auto-release.mjs', import.meta.url),
+    'utf8',
+  );
+  assert.match(entry, /humanTierPathsStillBehind\(satisfied\)/);
+  assert.match(entry, /if \(paths\.length === 0\) return \{ applied, log: '' \}/);
 });
 
 test('解析：主线列表认不出就抛，不拿半截当全部', () => {

@@ -1,7 +1,8 @@
 // 自动发布单元的入口（法国，root）：fleet-auto-release.timer 每 5 分钟经 fleet-auto-release.service 拉起一轮。
 // 它现在只读不发（决定 0032、#1258）：发布走驾驶舱按钮。这里不调 release.sh。
 // deploy/france.sh 把这个目录装到 /usr/local/lib/fleet-dao/auto-release/（装的是副本：主线上改了它，下一版发完由本入口自己
-// 跑 france.sh --auto-tier 换上，不用人重跑；只有防火墙、sudoers、建用户那几个文件改了才要人重跑，/healthz 才标「装机脚本落后」）。判断和流程在 lib.mjs，这里只接真的 git、GitHub 接口、库。
+// 跑 france.sh --auto-tier 换上，不用人重跑）。防火墙、sudoers、sshd、被 source 的脚本改了才要人重跑整套。
+// 运行时直接读的副本字节已经和主线一样的，不再算「装机脚本落后」。判断和流程在 lib.mjs，这里只接真的 git、GitHub 接口、库。
 // 手动跑一轮：systemctl start fleet-auto-release（别直接跑本文件：两轮叠着跑会互相盖状态文件）。
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
@@ -13,7 +14,9 @@ import {
   CHECKOUT,
   CI_RUNS_PAGE,
   CI_WORKFLOW,
-  HUMAN_TIER_PATHS,
+  copyAlreadyInstalled,
+  HUMAN_TIER_COPY_CHECKS,
+  humanTierPathsStillBehind,
   MAIN_HISTORY,
   RELEASES,
   REPO,
@@ -51,6 +54,23 @@ function gitOk(args, what, opts) {
   const r = git(args, opts);
   if (r.code !== 0) throw new Error(`${what}失败（git 退出码 ${r.code}）：${tail(r.stderr || r.stdout)}`);
   return r.stdout;
+}
+
+/** 安装位置的字节是不是主线这一版。比不了、单元还没加载，都当没装上（继续算落后，不假装已经换过）。 */
+function installedCopyMatches(head, check) {
+  const blob = git(['rev-parse', '--verify', `${head}:${check.path}`]);
+  if (blob.code !== 0) return false;
+  const hashed = run('git', ['hash-object', '--', check.installed]);
+  if (hashed.code !== 0) return false;
+  let needDaemonReload;
+  if (check.unit) {
+    const shown = run('systemctl', ['show', '-p', 'NeedDaemonReload', '--value', check.unit]);
+    const v = shown.code === 0 ? shown.stdout.trim() : '';
+    if (v === 'yes') needDaemonReload = true;
+    else if (v === 'no') needDaemonReload = false;
+    else needDaemonReload = null;
+  }
+  return copyAlreadyInstalled(blob.stdout.trim(), hashed.stdout.trim(), needDaemonReload);
 }
 
 /** 以 fleet 经本机 socket 连库 fleet（peer 认证，和备份任务一样）；值一律用 -v 传、SQL 里写 :'名字'，由 psql 加引号。 */
@@ -101,8 +121,13 @@ export const realIo = {
     }
     if (applied === '') throw new Error(`${APPLIED_FILE} 认不出（应为 commit=<提交号>）`);
     if (applied === null) return { applied: null, log: '' };
+    const satisfied = {};
+    for (const c of HUMAN_TIER_COPY_CHECKS) satisfied[c.path] = installedCopyMatches(head, c);
+    const paths = humanTierPathsStillBehind(satisfied);
+    // 空 pathspec 的 git log 会列出全部提交，把没改人工档的也算成落后
+    if (paths.length === 0) return { applied, log: '' };
     const log = gitOk(
-      ['log', '--first-parent', '--format=%H %cI', `${applied}..${head}`, '--', ...HUMAN_TIER_PATHS],
+      ['log', '--first-parent', '--format=%H %cI', `${applied}..${head}`, '--', ...paths],
       '数装机人工档的提交',
     );
     return { applied, log };

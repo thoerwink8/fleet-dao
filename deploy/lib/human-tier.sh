@@ -4,7 +4,8 @@
 # 其余（自动发布脚本副本、systemd 单元文件、fleet-agents.slice）是「自动档」，由自动发布每发完一版顺带跑
 # bash deploy/france.sh --auto-tier（docs/ops.md 第九节「装机层」）。
 # 为什么单独成一个文件：后端的 /healthz（deploy_lag）只在人工档这几个文件自上次装机后真变了才标「装机脚本落后、要人重跑」，
-# 判法是 git log <装到的提交>..<主线> -- <这几个文件>（deploy/france/auto-release/lib.mjs 的 HUMAN_TIER_PATHS）；
+# 判法是 git log <装到的提交>..<主线> -- <这几个文件>（deploy/france/auto-release/lib.mjs 的 HUMAN_TIER_PATHS）。
+# 运行时直接读的副本（fleet-agent-scope、接活脚本和它的单元）字节已经和主线一样、单元也加载了的，这次不再算落后。
 # 人工档的函数要是写在 france.sh 里，改它们和改自动档就分不出来了。改这里之前必须知道：
 # - 新加一个碰防火墙、sudoers、建用户的步骤，放这里，用到的仓里文件写进 HUMAN_TIER_PATHS（auto-release.test.mjs 核对：
 #   这里引用的每个仓里文件都被盖住）；
