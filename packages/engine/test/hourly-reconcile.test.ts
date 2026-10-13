@@ -61,6 +61,7 @@ function harness(over: Partial<HourlyReconcileJobDeps> = {}): Harness {
       listOpen: async () => ({ alerts: [], truncated: false }),
       byKey: async () => null,
       latestByPrefix: async () => null,
+      openByPrefix: async () => [],
       resolve: async () => 'not_found',
       raise: async () => {},
       insertOnce: async () => ({ created: true }),

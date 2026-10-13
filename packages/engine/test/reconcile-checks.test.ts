@@ -94,6 +94,11 @@ function world(
       async latestByPrefix() {
         return null;
       },
+      async openByPrefix(prefix) {
+        return rows
+          .filter((r) => r.resolvedAt === null && r.dedupeKey.startsWith(prefix))
+          .map((r) => ({ dedupeKey: r.dedupeKey, title: r.title }));
+      },
       async resolve(input) {
         resolved.push({ dedupeKey: input.dedupeKey, why: input.why });
         const row = rows.find((r) => r.dedupeKey === input.dedupeKey && r.resolvedAt === null);

@@ -98,6 +98,7 @@ function harness(
       listOpen: async () => ({ alerts: rows.filter((a) => a.resolvedAt === null), truncated: false }),
       byKey: async (key) => rows.find((a) => a.dedupeKey === key) ?? null,
       latestByPrefix: async () => null,
+      openByPrefix: async () => [],
       resolve: async (x) => {
         const hit = rows.find((a) => a.dedupeKey === x.dedupeKey);
         if (!hit || hit.resolvedAt) return hit ? 'already_resolved' : 'not_found';

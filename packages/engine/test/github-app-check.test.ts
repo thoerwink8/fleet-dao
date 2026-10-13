@@ -62,6 +62,8 @@ function world(
     },
     alerts: {
       byKey: async (key) => (open.has(key) ? openAlert(key) : null),
+      openByPrefix: async (prefix) =>
+        [...open].filter((k) => k.startsWith(prefix)).map((k) => ({ dedupeKey: k, title: '旧的' })),
       async raise(input) {
         raised.push({ dedupeKey: input.dedupeKey, level: input.level, title: input.title, body: input.body });
       },
@@ -180,6 +182,31 @@ describe('GitHub 机器人权限自检（每小时对账的一项）', () => {
     const w = world([item()], { repos: async () => [] });
     expect(await checkGitHubApps(w.deps)).toEqual({ scanned: 0, found: 0, unchecked: [] });
     expect(w.asked).toEqual([]);
+  });
+
+  it('【故意造出的失败】仓已经不受管了（移出驾驶舱）：留着的那条提醒撤掉，不让后端一直红', async () => {
+    // 这一轮只自检 acme/widgets，可还开着一条别的仓（acme/gone）的旧提醒——它再也轮不到被自检到。
+    // widgets 那条是「权限够了」撤的，gone 那条只有新的「不受管就撤」才会撤。
+    const w = world([item({ role: 'agent' }), item()], {
+      open: ['github-app:engine:acme/gone', 'github-app:engine:acme/widgets'],
+    });
+    expect(await checkGitHubApps(w.deps)).toEqual({ scanned: 2, found: 2, unchecked: [] });
+    expect(w.resolved).toContainEqual({
+      dedupeKey: 'github-app:engine:acme/gone',
+      by: RECONCILE_ACTOR,
+      why: 'acme/gone 已经不在受管的仓里了（「引擎」机器人的权限自检不再看它）',
+    });
+    // 这一轮自检过的那个仓走「权限够了」那段撤，不带「不受管」的原因。
+    const widgets = w.resolved.find((r) => r.dedupeKey === 'github-app:engine:acme/widgets');
+    expect(widgets?.why).toContain('权限够了');
+  });
+
+  it('受管的仓一个都没有：不去自检，旧提醒照撤、记撤了 1 个', async () => {
+    const w = world([item()], { repos: async () => [], open: ['github-app:agent:acme/x'] });
+    // 没有仓要自检，但那条开着的不受管提醒照撤。
+    expect(await checkGitHubApps(w.deps)).toEqual({ scanned: 0, found: 1, unchecked: [] });
+    expect(w.asked).toEqual([]);
+    expect(w.resolved.map((r) => r.dedupeKey)).toEqual(['github-app:agent:acme/x']);
   });
 
   it('缺好几样、也多了：标题一起写', () => {

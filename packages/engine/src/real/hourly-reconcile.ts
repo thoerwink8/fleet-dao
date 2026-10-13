@@ -556,6 +556,8 @@ export function hourlyReconcileJob(
         listOpen: (limit) => listOpenAlerts(w.db, { limit }),
         byKey: (key) => alertByKey(w.db, key),
         latestByPrefix: (prefix) => latestAlertByPrefix(w.db, prefix),
+        openByPrefix: async (prefix) =>
+          (await openAlertsByPrefix(w.db, prefix)).map((a) => ({ dedupeKey: a.dedupeKey, title: a.title })),
         resolve: (x) =>
           resolveAlertWithReason(w.db, {
             dedupeKey: x.dedupeKey,

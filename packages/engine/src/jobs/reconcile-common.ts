@@ -36,6 +36,8 @@ export interface AlertStore {
   byKey(dedupeKey: string): Promise<AlertRow | null>;
   /** 前缀对上的最新一条（处理没处理都算）。 */
   latestByPrefix(prefix: string): Promise<AlertRow | null>;
+  /** 前缀对上的、还开着的全部（老的在前）：一件事从「对不上」变成「不再看它」时，按前缀把这些撤掉。 */
+  openByPrefix(prefix: string): Promise<{ dedupeKey: string; title: string }[]>;
   /** 条件没了撤掉：正文开头写「已撤：why」、记操作记录。auditActor 不给就是 by。 */
   resolve(input: {
     dedupeKey: string;

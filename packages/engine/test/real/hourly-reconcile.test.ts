@@ -1043,6 +1043,7 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
         listOpen: async () => ({ alerts: [], truncated: false }),
         byKey: async () => null,
         latestByPrefix: async () => null,
+        openByPrefix: async () => [],
         resolve: async (x) => {
           resolved.push({ by: x.by, why: x.why });
           return 'ok';

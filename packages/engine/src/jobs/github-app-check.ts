@@ -16,7 +16,7 @@ export interface GitHubAppCheckDeps {
     /** 两个机器人在这些仓上的安装实际拿到的权限够不够（真实现是 @fleet-dao/github 的 GitHub.selfCheck）。 */
     selfCheck(repos: RepoRef[]): Promise<SelfCheckItem[]>;
   };
-  alerts: Pick<AlertStore, 'byKey' | 'raise' | 'resolve'>;
+  alerts: Pick<AlertStore, 'byKey' | 'raise' | 'resolve' | 'openByPrefix'>;
 }
 
 const ROLE_NAMES: Record<SelfCheckItem['role'], string> = {
@@ -26,6 +26,19 @@ const ROLE_NAMES: Record<SelfCheckItem['role'], string> = {
 
 export const githubAppAlertKey = (item: Pick<SelfCheckItem, 'role' | 'repo'>) =>
   `${GITHUB_APP_ALERT_PREFIX}${item.role}:${item.repo}`;
+
+/**
+ * 撤销提醒时按前缀找出「这一轮已经不看它了」的那些：仓从 repos 表里移出去了（人移出驾驶舱、别的对账删的行），
+ * 它那条 github-app:* 再也轮不到（每一轮只按这一轮自检过的 key 撤），会永远开着、后端 /healthz 的 github_app 一直红。
+ * 键的形状是 github-app:<机器人>:<owner/repo>，仓名里的 / 不是分隔符，所以从右边认：agent|engine 在前、仓在后。
+ */
+function githubAppAlertRepo(dedupeKey: string): { role: 'agent' | 'engine'; repo: string } | null {
+  for (const role of ['engine', 'agent'] as const) {
+    const head = `${GITHUB_APP_ALERT_PREFIX}${role}:`;
+    if (dedupeKey.startsWith(head)) return { role, repo: dedupeKey.slice(head.length) };
+  }
+  return null;
+}
 
 /** 一条提醒的标题和正文：缺什么、多了什么、没查成的原因；怎么改。 */
 export function githubAppAlert(item: SelfCheckItem): { title: string; body: string } {
@@ -46,7 +59,7 @@ export function githubAppAlert(item: SelfCheckItem): { title: string; body: stri
   };
 }
 
-/** 跑一遍：每个仓、每个机器人一条；不对的报（原地更新），对了的撤掉开着的那条。 */
+/** 跑一遍：每个仓、每个机器人一条；不对的报（原地更新），对了的撤掉开着的那条；不受管的仓留下的旧提醒也撤掉。 */
 export async function checkGitHubApps(deps: GitHubAppCheckDeps): Promise<SweepPart> {
   let repos: RepoRef[];
   try {
@@ -59,12 +72,21 @@ export async function checkGitHubApps(deps: GitHubAppCheckDeps): Promise<SweepPa
       unchecked: [],
     };
   }
-  if (repos.length === 0) return { scanned: 0, found: 0, unchecked: [] };
   let items: SelfCheckItem[];
-  try {
-    items = await deps.apps.selfCheck(repos);
-  } catch (err) {
-    return { failed: `GitHub 机器人权限自检没跑成：${errMessage(err)}`, scanned: 0, found: 0, unchecked: [] };
+  if (repos.length === 0) {
+    // 一个受管的仓都没有：没有要自检的，但前面那些仓留下的旧提醒得按下面的「不受管就撤」清掉。
+    items = [];
+  } else {
+    try {
+      items = await deps.apps.selfCheck(repos);
+    } catch (err) {
+      return {
+        failed: `GitHub 机器人权限自检没跑成：${errMessage(err)}`,
+        scanned: 0,
+        found: 0,
+        unchecked: [],
+      };
+    }
   }
   const unchecked: string[] = [];
   let found = 0;
@@ -90,6 +112,25 @@ export async function checkGitHubApps(deps: GitHubAppCheckDeps): Promise<SweepPa
     } catch (err) {
       unchecked.push(`${key} 的提醒没写成：${errMessage(err)}`);
     }
+  }
+  // 这一轮自检过的键；还开着的 github-app:* 里不在这一份里的，说明那个仓已经不受管了（移出驾驶舱、别的对账删的行）：
+  // 它再也不会被自检到、也就永远轮不到上面那段撤，撤掉它，别让后端 /healthz 的 github_app 为它一直红（#2023）。
+  const known = new Set(items.map((item) => githubAppAlertKey(item)));
+  try {
+    for (const alert of await deps.alerts.openByPrefix(GITHUB_APP_ALERT_PREFIX)) {
+      if (known.has(alert.dedupeKey)) continue;
+      const where = githubAppAlertRepo(alert.dedupeKey);
+      const done = await deps.alerts.resolve({
+        dedupeKey: alert.dedupeKey,
+        by: RECONCILE_ACTOR,
+        why: where
+          ? `${where.repo} 已经不在受管的仓里了（${ROLE_NAMES[where.role]}的权限自检不再看它）`
+          : '这条权限提醒对应的仓已经不在受管的仓里了（权限自检不再看它）',
+      });
+      if (done === 'ok') found += 1;
+    }
+  } catch (err) {
+    unchecked.push(`撤不受管的机器人权限提醒没成：${errMessage(err)}`);
   }
   return { scanned: items.length, found, unchecked };
 }
