@@ -89,6 +89,30 @@ export const ReleaseCardCiSchema = z.discriminatedUnion('state', [
  * 最近一次「发布到法国」点击的结果：none 没点过；pending 请求写了、法国还没接；refused 接活的核了没过（why 写原因，没动现场）；
  * running / blocked / failed / done / aborted 是进度记录里这一趟的状态；unreadable 读不到（带原因，不当成「没点过」）。
  */
+/**
+ * 九步时间线（#2026）：读法国 release-train.json 里接活脚本写的 phase、startedAt、steps（每一步开始的时间）、waiting（此刻在等什么）。
+ * 老进度记录没有 steps / waiting 的，steps 全是 null、waiting null（页面照样画九步，只是没时间）。
+ */
+export const ReleaseTimelineSchema = z.object({
+  /** 走到第几步（0..8，同 PHASES 下标）。 */
+  phase: z.number().int().min(0),
+  /** 这一趟什么时候开始的。 */
+  startedAt: Time.nullable(),
+  /** 每一步开始的时间（没走到的 null），长度 9。 */
+  steps: z.array(Time.nullable()),
+  /** 此刻在等什么（一句话）；没写的 null。 */
+  waiting: z.string().nullable(),
+  /** 卡住时拖后腿的（「会话 execute(abcdef12)」这类）。 */
+  laggards: z.array(z.string()),
+});
+
+/** 发后体检（#2026）：法国接活脚本写进 last-request.json 的 check；每项一个名字、过没过、一句话。 */
+export const ReleaseCheckSchema = z.object({
+  ok: z.boolean(),
+  items: z.array(z.object({ name: z.string(), ok: z.boolean(), text: z.string() })),
+  at: Time.nullable(),
+});
+
 export const ReleaseLastSchema = z.object({
   state: z.enum([
     'none',
@@ -105,6 +129,10 @@ export const ReleaseLastSchema = z.object({
   at: Time.nullable(),
   why: z.string().nullable(),
   phase: z.string().nullable(),
+  /** 进度记录里这一趟的九步时间线；不是进度记录来的（没点过、等接、被拒、读不到）没有。 */
+  timeline: ReleaseTimelineSchema.nullable().optional(),
+  /** 这一趟的发后体检结论（last-request.json 里同一个提交的 check）；还没体检、老脚本没写的没有。 */
+  check: ReleaseCheckSchema.nullable().optional(),
 });
 
 export const ReleaseCardSchema = z.object({
@@ -172,6 +200,8 @@ export const ReleaseCardSchema = z.object({
 });
 
 export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;
+export type ReleaseCheck = z.infer<typeof ReleaseCheckSchema>;
+export type ReleaseTimeline = z.infer<typeof ReleaseTimelineSchema>;
 
 /**
  * 「已发布的提交」（#1255，GET /france/released-commits）：更新日志页的只读列表，读法国的发布历史（release.sh 的 .history）。

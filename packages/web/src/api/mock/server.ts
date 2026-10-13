@@ -1031,16 +1031,64 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
 
   const iso = () => new Date(now()).toISOString();
   // 「发布到法国」按钮的假状态：默认能点；浏览器里 localStorage 的 mockRelease 写 blocked 就是接活单元没装的样子（截图用）
-  const releaseMock: {
-    last: {
-      state: string;
-      target: string | null;
-      at: string | null;
-      why: string | null;
-      phase: string | null;
+  // 点了「确认发布」之后：假的九步每 6 秒走一步，走完写一份发后体检（#2026）。localStorage 的 mockRelease 写 running /
+  // done-bad 直接画「停在等收尾」「发完但体检没通过」（截图用）。
+  const releaseMock: { startedAt: number | null; target: string | null } = { startedAt: null, target: null };
+  const MOCK_STEP_MS = 6_000;
+  const MOCK_PHASES = ['预检', '暂停本机', '暂停法国', '等收尾', '发版', '等部署', '验证', '恢复', '派清单'];
+  const mockLast = () => {
+    const mode = typeof localStorage !== 'undefined' ? localStorage.getItem('mockRelease') : null;
+    const fixed = mode === 'running' || mode === 'done-bad';
+    const started = fixed ? now() - 4 * 60_000 : releaseMock.startedAt;
+    if (started === null) return { state: 'none', target: null, at: null, why: null, phase: null };
+    const target = releaseMock.target ?? '提交 2005b2909c4f';
+    const elapsed = now() - started;
+    const phase =
+      mode === 'running' ? 3 : mode === 'done-bad' ? 8 : Math.min(8, Math.floor(elapsed / MOCK_STEP_MS));
+    const done = mode === 'done-bad' || (!fixed && elapsed >= MOCK_PHASES.length * MOCK_STEP_MS);
+    const stepMs = fixed ? 25_000 : MOCK_STEP_MS;
+    const steps = MOCK_PHASES.map((_, i) =>
+      i <= phase ? new Date(started + i * stepMs).toISOString() : null,
+    );
+    const check = done
+      ? {
+          ok: mode !== 'done-bad',
+          items: [
+            { name: '目标提交在用', ok: true, text: '法国在用的就是 2005b2909c4f（演示数据）' },
+            { name: '/healthz', ok: true, text: '全好（演示数据）' },
+            mode === 'done-bad'
+              ? {
+                  name: '没有新异常',
+                  ok: false,
+                  text: '发版后新出现 1 条卡住报警：引擎挂了（svc:fleet-engine:down）（演示数据）',
+                }
+              : { name: '没有新异常', ok: true, text: '比发版前没有新的卡住报警（演示数据）' },
+            { name: '再跑一遍预检', ok: true, text: '已是最新、没有要发的（演示数据）' },
+            { name: '引擎总开关和发版前一致', ok: true, text: '发版前开着，现在一样（演示数据）' },
+            { name: '各仓接活开关没被动过', ok: true, text: '3 个仓和发版前一样（演示数据）' },
+          ],
+          at: iso(),
+        }
+      : null;
+    return {
+      state: done ? 'done' : 'running',
+      target,
+      at: iso(),
+      why: null,
+      phase: `第 ${phase} 步「${MOCK_PHASES[phase]}」`,
+      timeline: {
+        phase,
+        startedAt: new Date(started).toISOString(),
+        steps,
+        waiting: done
+          ? null
+          : phase === 3
+            ? '等法国在跑的 2 个会话收尾（execute(1f3a9c2e) verify(7b20d4aa)）（演示数据）'
+            : null,
+        laggards: [],
+      },
+      check,
     };
-  } = {
-    last: { state: 'none', target: null, at: null, why: null, phase: null },
   };
   const mockReleaseAction = () => {
     const blocked = typeof localStorage !== 'undefined' && localStorage.getItem('mockRelease') === 'blocked';
@@ -1048,7 +1096,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       state: blocked ? 'blocked' : 'ready',
       reasons: blocked ? ['法国还没装发版接活单元（要在法国以管理员身份跑一次整套装机脚本）'] : [],
       installed: !blocked,
-      last: releaseMock.last,
+      last: mockLast(),
     };
   };
   const nextId = (p: string) => `${p}-${++st.seq}`;
@@ -3576,13 +3624,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async franceRelease(sha) {
       await wait();
       if (mockReleaseAction().state !== 'ready') throw new Error('现在不能发（假后端的按钮是置灰的）');
-      releaseMock.last = {
-        state: 'running',
-        target: `提交 ${sha.slice(0, 12)}`,
-        at: iso(),
-        why: null,
-        phase: '第 2 步「暂停法国」',
-      };
+      releaseMock.startedAt = now();
+      releaseMock.target = `提交 ${sha.slice(0, 12)}`;
       return ReleaseRequestResponse.parse({ requested: true, sha, at: iso() });
     },
     async franceCliTools() {
@@ -3710,10 +3753,36 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     async francePreflight() {
       await wait();
-      // 假数据不起子进程：装作这台后端没接上发版预检（真法国机器才读得到那七项）。
+      // 默认装作这台后端没接上发版预检（#2024：假后端不给假的七项）。截图、手点用：localStorage 的 mockRelease 写
+      // preflight-ok 给一份「能发」的演示清单，写 preflight-blocked 给一份有卡住项的（确认框里确认键灰着，#2026）。每行都写明是演示。
+      const mode = typeof localStorage !== 'undefined' ? localStorage.getItem('mockRelease') : null;
+      if (mode !== 'preflight-ok' && mode !== 'preflight-blocked') {
+        return FrancePreflightResponseSchema.parse({
+          state: 'unreadable',
+          why: '这是假后端：发版预检只在法国那台的驾驶舱上读得到',
+          asOf: iso(),
+        });
+      }
+      const blocked = mode === 'preflight-blocked';
+      const lines = [
+        '主线头和 CI：通过 绿（演示数据）',
+        '法国在用提交：通过 提交 6896b3cb4d2e（演示数据）',
+        '落后几个：通过 落后 7 个提交（演示数据）',
+        '别的发布是否在走：通过 没有在走的（演示数据）',
+        blocked ? '发版接活单元：卡住 法国还没装（演示数据）' : '发版接活单元：通过 装了（演示数据）',
+        '引擎总开关：通过 开着，发版会先关、发完恢复到发版前（演示数据）',
+        '法国在跑的会话数：留意 2 个，发版会等它们收尾（演示数据）',
+      ];
       return FrancePreflightResponseSchema.parse({
-        state: 'unreadable',
-        why: '这是假后端：发版预检只在法国那台的驾驶舱上读得到',
+        state: 'done',
+        command: '进程内读事实',
+        code: blocked ? 2 : 0,
+        signal: null,
+        stdout: `${lines.join('\n')}\n`,
+        stderr: '',
+        durationMs: 12,
+        timedOut: false,
+        truncated: false,
         asOf: iso(),
       });
     },

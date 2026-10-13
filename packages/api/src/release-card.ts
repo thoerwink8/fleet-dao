@@ -14,6 +14,8 @@ import type { ReleaseFactsReader } from '@fleet-dao/github';
 import {
   type ReleaseCard,
   ReleaseCardSchema,
+  type ReleaseCheck,
+  ReleaseCheckSchema,
   type ReleasedCommits,
   ReleasedCommitsSchema,
 } from '@fleet-dao/shared';
@@ -308,13 +310,22 @@ async function readLast(
   }
   let refused: { at: string; sha: string | null; why: string } | null = null;
   let lastWhy: string | null = null;
+  let check: { sha: string | null; check: ReleaseCheck } | null = null;
   try {
     const text = await request.readLast();
     if (text !== null) {
-      const o = JSON.parse(text) as { outcome?: unknown; at?: unknown; sha?: unknown; why?: unknown };
+      const o = JSON.parse(text) as {
+        outcome?: unknown;
+        at?: unknown;
+        sha?: unknown;
+        why?: unknown;
+        check?: unknown;
+      };
       if (o.outcome === 'refused' && typeof o.at === 'string' && typeof o.why === 'string') {
         refused = { at: o.at, sha: typeof o.sha === 'string' ? o.sha : null, why: o.why };
       }
+      const c = ReleaseCheckSchema.safeParse(o.check);
+      if (c.success) check = { sha: typeof o.sha === 'string' ? o.sha : null, check: c.data };
     }
   } catch (e) {
     lastWhy = `读最近一次请求的结果失败：${errMessage(e)}`;
@@ -341,6 +352,10 @@ async function readLast(
         at: parsed.updatedAt,
         why: parsed.why,
         phase: parsed.phase,
+        timeline: parsed.timeline,
+        // 体检结论只认同一个提交的（last-request.json 是最近一次请求的，可能是另一趟的）
+        check:
+          check !== null && parsed.targetSha !== null && check.sha === parsed.targetSha ? check.check : null,
       },
       busy,
       busyWhy,

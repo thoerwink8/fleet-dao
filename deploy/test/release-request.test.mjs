@@ -23,11 +23,16 @@ import {
   LIMITS,
   MAX_REQUEST_BYTES,
   PHASES,
+  parseAlerts,
   parseDrain,
+  parseHealthz,
+  parseRepoSwitches,
   parseRequest,
   RELEASE_SH,
   REQUEST_DIR,
   REQUEST_FILE,
+  releaseMessage,
+  repoSwitchDiff,
   runRequest,
   STATE_FILE,
   safeReadRequest,
@@ -55,7 +60,17 @@ const ciBody = (over = {}) =>
     ],
   });
 
-/** 假 io：记下每一次写和每一条命令；默认全部顺利。over 里的同名项盖掉默认。 */
+/** fleet-api alert show --json 的一行输出。 */
+const alertJson = (alerts) =>
+  `${JSON.stringify({ alerts: alerts.map((a, i) => ({ id: `id-${i}`, title: a.key, level: 'alert', createdAt: REQ_AT, ...a })), truncated: false, now: REQ_AT })}\n`;
+const healthBody = (checks = { db: { ok: true } }) =>
+  JSON.stringify({ ok: Object.values(checks).every((c) => c.ok), checks });
+const SINCE = '2026-10-07 08:00:00+00';
+
+/**
+ * 假 io：记下每一次写和每一条命令；默认全部顺利。over 里的同名项盖掉默认。
+ * opts.alerts(n)：第 n 次读开着的提醒（0 是发版前的基线）回哪几条；默认一条旧的、一直在。
+ */
 function fakeIo(over = {}, opts = {}) {
   let clock = T0;
   const log = {
@@ -70,8 +85,11 @@ function fakeIo(over = {}, opts = {}) {
     check: 0,
     checkouts: [],
     sleeps: 0,
+    pushes: [],
+    alertReads: 0,
   };
   let master = 'on';
+  const alertsAt = opts.alerts ?? (() => [{ key: 'old:one' }]);
   const io = {
     now: () => new Date(clock),
     sleep: async (ms) => {
@@ -97,6 +115,8 @@ function fakeIo(over = {}, opts = {}) {
     ciRuns: async () => ({ status: 200, body: ciBody() }),
     fleetApi: async (args) => {
       log.fleetApi.push(args);
+      if (args === 'alert show --json')
+        return { status: 0, stdout: alertJson(alertsAt(log.alertReads++)), stderr: '' };
       if (args === 'engine status')
         return { status: 0, stdout: `引擎总开关：${master === 'on' ? '开着' : '关着'}\n`, stderr: '' };
       if (args.startsWith('engine off')) {
@@ -125,11 +145,25 @@ function fakeIo(over = {}, opts = {}) {
       return { status: 0, stdout: '', stderr: '' };
     },
     historyLast: async () => ({ ok: true, line: `2026-10-07T12:10:00Z ${SHA} release` }),
-    limits: { pollMs: 1000, sessionsMs: 5000, deployMs: 3000 },
+    currentRelease: async () => ({ ok: true, sha: SHA }),
+    healthz: async () => ({ status: 200, body: healthBody() }),
+    mainHead: async () => ({ ok: true, sha: SHA, behind: 0 }),
+    repoSwitches: async () => ({
+      ok: true,
+      repos: { 'thoerwink8/fleet-dao': SINCE, 'thoerwink8/other': null },
+    }),
+    notify: async (text) => {
+      log.pushes.push(text);
+    },
+    limits: { pollMs: 1000, sessionsMs: 5000, deployMs: 3000, verifyMs: 4000 },
     ...over,
   };
   return { io, log, setMaster: (m) => (master = m) };
 }
+
+/** 不读提醒的那些假 fleetApi（只管引擎开关的）用它把提醒那一条接上。 */
+const withAlerts = (fn) => async (args) =>
+  args === 'alert show --json' ? { status: 0, stdout: alertJson([]), stderr: '' } : fn(args);
 
 const lastRefusal = (log) => log.lasts.find((l) => l.outcome === 'refused');
 /** 被拒：退出码 1、记了原因（含 needle）、没动引擎也没发版、没写进度。 */
@@ -183,7 +217,8 @@ test('顺利：九步各记一次进度，引擎先关、再 release.sh 发这�
   assert.equal(final.marker, false);
   assert.equal(final.founderOk, `${FOUNDER_WORD} ${REQ_AT} 创始人`);
   assert.equal(final.release.started, true);
-  assert.equal(log.lasts.at(-1).outcome, 'accepted');
+  assert.equal(log.lasts[0].outcome, 'accepted');
+  assert.equal(log.lasts.at(-1).outcome, 'done');
 });
 
 test('引擎本来就关着：跳过暂停，不再 off 一遍，照样发；发完仍关着（不替创始人开）', async () => {
@@ -199,10 +234,10 @@ test('引擎本来就关着：跳过暂停，不再 off 一遍，照样发；发
 
 test('在用的版本还没有引擎总开关子命令（打用法）：当关着读，照样发', async () => {
   const { io, log } = fakeIo({
-    fleetApi: async (args) => {
+    fleetApi: withAlerts(async (args) => {
       log.fleetApi.push(args);
       return { status: 1, stdout: '', stderr: '用法：fleet-api <命令>' };
-    },
+    }),
   });
   assert.equal(await runRequest(io), EXIT.done);
   assert.deepEqual(log.release, [SHA]);
@@ -335,7 +370,7 @@ for (const [name, ciRuns, needle] of [
 
 test('【故意造出的失败】读不到引擎总开关：这一步没成，不发版', async () => {
   const { io, log } = fakeIo({
-    fleetApi: async () => ({ status: 1, stdout: '', stderr: 'could not connect to database' }),
+    fleetApi: withAlerts(async () => ({ status: 1, stdout: '', stderr: 'could not connect to database' })),
   });
   assert.equal(await runRequest(io), EXIT.failed);
   assert.deepEqual(log.release, []);
@@ -347,10 +382,10 @@ test('【故意造出的失败】读不到引擎总开关：这一步没成，�
 
 test('【故意造出的失败】关了引擎读回来还是开着：不往下走', async () => {
   const { io, log } = fakeIo({
-    fleetApi: async (args) => {
+    fleetApi: withAlerts(async (args) => {
       log.fleetApi.push(args);
       return { status: 0, stdout: '引擎总开关：开着\n', stderr: '' };
-    },
+    }),
   });
   assert.equal(await runRequest(io), EXIT.failed);
   assert.match(log.states.at(-1).why, /还是开着/);
@@ -482,10 +517,14 @@ test('发版前就关着、发布过程中被人开了：不再关回去，也�
     setMaster('on'); // 发布过程中被人开了
     return r;
   };
-  assert.equal(await runRequest(io), EXIT.done);
+  // 发后体检照实报「总开关和发版前不一致」（不替人改回去）：版本发完了，退出码 3 要人看
+  assert.equal(await runRequest(io), EXIT.blocked);
   assert.equal(engineOffs(log).length, 0, '没有再关');
   assert.equal(engineOns(log).length, 0, '没有再开');
   assert.ok(log.out.some((l) => l.includes('发版期间有人开了')));
+  const bad = log.states.at(-1).check.items.find((x) => x.name === '引擎总开关和发版前一致');
+  assert.equal(bad.ok, false);
+  assert.match(bad.text, /发版前关着，现在开着/);
 });
 
 test('发版前开着、发布过程中被人先开回了：不重复开，算做完', async () => {
@@ -582,6 +621,309 @@ test('【故意造出的失败】上一回是做完了的（done）、这一回�
   setMaster('off');
   assert.equal(await runRequest(io), EXIT.done);
   assert.equal(engineOns(log).length, 0);
+});
+
+// —— 发后体检、九步时间线、飞书（#2026）——
+
+const checkOf = (log) => log.states.at(-1).check;
+const itemOf = (log, name) => checkOf(log).items.find((x) => x.name === name);
+
+test('发后体检全过：六项都通过，结论写进进度和 last-request.json，退出码 0', async () => {
+  const { io, log } = fakeIo();
+  assert.equal(await runRequest(io), EXIT.done);
+  const check = checkOf(log);
+  assert.equal(check.ok, true);
+  assert.deepEqual(
+    check.items.map((x) => x.name),
+    [
+      '目标提交在用',
+      '/healthz',
+      '没有新异常',
+      '再跑一遍预检',
+      '引擎总开关和发版前一致',
+      '各仓接活开关没被动过',
+    ],
+  );
+  assert.match(itemOf(log, '再跑一遍预检').text, /已是最新、没有要发的/);
+  const last = log.lasts.at(-1);
+  assert.equal(last.outcome, 'done');
+  assert.equal(last.sha, SHA);
+  assert.deepEqual(last.check, check);
+  assert.equal(log.states.at(-1).before.repos['thoerwink8/fleet-dao'], SINCE, '第 2 步记下了各仓接活开关');
+});
+
+test('【故意造出的失败】发版后新出现一条卡住报警：体检没通过（立刻判，不等），开关照样恢复，退出码 3，推飞书「卡住」', async () => {
+  const { io, log } = fakeIo(
+    {},
+    { alerts: (n) => (n === 0 ? [] : [{ key: 'svc:fleet-engine:down', title: '引擎挂了' }]) },
+  );
+  assert.equal(await runRequest(io), EXIT.blocked);
+  const it = itemOf(log, '没有新异常');
+  assert.equal(it.ok, false);
+  assert.match(it.text, /新出现 1 条卡住报警：引擎挂了（svc:fleet-engine:down）/);
+  assert.equal(log.sleeps, 0, '不是重启打断的那几类：不重试');
+  assert.equal(engineOns(log).length, 1, '版本已经发了，开关照样恢复');
+  assert.equal(log.states.at(-1).status, 'done');
+  assert.match(log.pushes.at(-1), /【发版卡住】.*发后体检没通过：没有新异常/);
+  assert.match(log.pushes.at(-1), /aaaaaaaaaaaa/);
+  assert.equal(log.lasts.at(-1).check.ok, false);
+});
+
+test('基线里就有的报警、任务挂起、再提醒、要你拍：都不算新异常', async () => {
+  const { io, log } = fakeIo(
+    {},
+    {
+      alerts: (n) =>
+        n === 0
+          ? [{ key: 'old:one' }]
+          : [
+              { key: 'old:one' },
+              { key: 'task:a/b#1:park:2' },
+              { key: 'remind:x:2026-10-07' },
+              { key: 'approval:9', level: 'decision' },
+            ],
+    },
+  );
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(itemOf(log, '没有新异常').ok, true);
+});
+
+test('发布重启打断的「每小时对账没跑成」（watchdog:job:*）：15 分钟窗口里重试，撤了就算过，不立刻判卡住', async () => {
+  // 第 0 次是基线；第 1、2 次（发后）还开着；第 3 次撤了
+  const { io, log } = fakeIo(
+    { limits: { pollMs: 1000, sessionsMs: 5000, deployMs: 3000, verifyMs: 60_000 } },
+    { alerts: (n) => (n === 1 || n === 2 ? [{ key: 'watchdog:job:hourly-reconcile:after-77' }] : []) },
+  );
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(itemOf(log, '没有新异常').ok, true);
+  assert.equal(log.sleeps, 2, '重试了两轮');
+  assert.ok(
+    log.states.some((s) => s.phase === 6 && /发后体检重试.*没有新异常/.test(s.waiting ?? '')),
+    '时间线写着在等什么',
+  );
+});
+
+test('【故意造出的失败】重启打断的那类过了窗口还没撤：体检没通过，写明还没撤', async () => {
+  const { io, log } = fakeIo(
+    {},
+    { alerts: (n) => (n === 0 ? [] : [{ key: 'watchdog:job:hourly-reconcile:after-77' }]) },
+  );
+  assert.equal(await runRequest(io), EXIT.blocked);
+  const it = itemOf(log, '没有新异常');
+  assert.equal(it.ok, false);
+  assert.match(it.text, /发布重启打断的 1 条还没撤/);
+  assert.ok(log.sleeps >= 4, '等满了窗口（verifyMs 4 秒、每轮 1 秒）');
+});
+
+test('【故意造出的失败】开着的提醒读不到（发后）：体检那一项没通过，不当成没有异常', async () => {
+  const { io, log } = fakeIo();
+  const base = io.fleetApi;
+  io.fleetApi = async (args) =>
+    args === 'alert show --json' && log.alertReads++ > 0
+      ? { status: 1, stdout: '', stderr: 'could not connect to database' }
+      : base(args);
+  assert.equal(await runRequest(io), EXIT.blocked);
+  assert.match(itemOf(log, '没有新异常').text, /读不到/);
+});
+
+test('【故意造出的失败】发版前异常基线读不到：第 0 步没成，什么都没动（没关引擎、没发版），推飞书「失败」', async () => {
+  const { io, log } = fakeIo({
+    fleetApi: async (args) => {
+      log.fleetApi.push(args);
+      if (args === 'alert show --json') return { status: 0, stdout: 'not json', stderr: '' };
+      return { status: 0, stdout: '引擎总开关：开着\n', stderr: '' };
+    },
+  });
+  assert.equal(await runRequest(io), EXIT.failed);
+  const last = log.states.at(-1);
+  assert.equal(last.phase, 0);
+  assert.match(last.why, /发版前异常基线读不到/);
+  assert.equal(engineOffs(log).length, 0);
+  assert.deepEqual(log.release, []);
+  assert.match(log.pushes.at(-1), /【发版失败】aaaaaaaaaaaa 第 0 步「预检」没成/);
+  assert.match(log.pushes.at(-1), /版本还没发/);
+  assert.equal(log.lasts.at(-1).outcome, 'failed');
+});
+
+test('【故意造出的失败】/healthz 有发版前好好的、发版后坏了的项：体检没通过；发版前就坏的不算', async () => {
+  const before = fakeIo({
+    healthz: async () => ({
+      status: 503,
+      body: healthBody({ db: { ok: true }, quota: { ok: false, message: '旧问题' } }),
+    }),
+  });
+  assert.equal(await runRequest(before.io), EXIT.done, '发版前就坏的项不算新坏');
+  assert.match(itemOf(before.log, '/healthz').text, /发版前就不好的 1 项照旧/);
+
+  let n = 0;
+  const after = fakeIo({
+    healthz: async () =>
+      n++ === 0
+        ? { status: 200, body: healthBody() }
+        : { status: 503, body: healthBody({ db: { ok: false, message: '连不上库' } }) },
+  });
+  assert.equal(await runRequest(after.io), EXIT.blocked);
+  assert.match(itemOf(after.log, '/healthz').text, /发版后新坏了：db（连不上库）/);
+});
+
+test('【故意造出的失败】/healthz 连不上：体检那一项没通过（窗口里重试过）', async () => {
+  let n = 0;
+  const { io, log } = fakeIo({
+    healthz: async () =>
+      n++ === 0 ? { status: 200, body: healthBody() } : { status: null, body: '', error: 'ECONNREFUSED' },
+  });
+  assert.equal(await runRequest(io), EXIT.blocked);
+  assert.match(itemOf(log, '/healthz').text, /连不上：ECONNREFUSED/);
+  assert.ok(log.sleeps >= 4);
+});
+
+test('【故意造出的失败】法国在用的不是目标提交：体检没通过', async () => {
+  const { io, log } = fakeIo({ currentRelease: async () => ({ ok: true, sha: 'b'.repeat(40) }) });
+  assert.equal(await runRequest(io), EXIT.blocked);
+  assert.match(itemOf(log, '目标提交在用').text, /在用的是 bbbbbbbbbbbb，不是目标 aaaaaaaaaaaa/);
+});
+
+test('再跑一遍预检：发版期间主线又合进了新提交，这次要发的已在用，算通过并写一句；主线头读不到算没通过', async () => {
+  const moved = fakeIo({ mainHead: async () => ({ ok: true, sha: 'c'.repeat(40), behind: 2 }) });
+  assert.equal(await runRequest(moved.io), EXIT.done);
+  assert.match(itemOf(moved.log, '再跑一遍预检').text, /又合进了 2 个提交/);
+
+  const unread = fakeIo({ mainHead: async () => ({ ok: false, why: '从 GitHub 取主线没成：超时' }) });
+  assert.equal(await runRequest(unread.io), EXIT.blocked);
+  assert.match(itemOf(unread.log, '再跑一遍预检').text, /主线头读不到/);
+});
+
+test('【故意造出的失败】发版期间有仓的接活开关被动了：体检「各仓接活开关没被动过」没通过，写清哪个仓', async () => {
+  let n = 0;
+  const { io, log } = fakeIo({
+    repoSwitches: async () => ({
+      ok: true,
+      repos: { 'thoerwink8/fleet-dao': n++ === 0 ? SINCE : null, 'thoerwink8/other': null },
+    }),
+  });
+  assert.equal(await runRequest(io), EXIT.blocked);
+  assert.match(itemOf(log, '各仓接活开关没被动过').text, /thoerwink8\/fleet-dao（发版前开着，现在关着）/);
+});
+
+test('【故意造出的失败】各仓接活开关发版前读不到：第 2 步没成，没关引擎、没发版', async () => {
+  const { io, log } = fakeIo({ repoSwitches: async () => ({ ok: false, why: 'psql 退出码 2' }) });
+  assert.equal(await runRequest(io), EXIT.failed);
+  assert.equal(log.states.at(-1).phase, 2);
+  assert.match(log.states.at(-1).why, /各仓接活开关发版前的样子读不到/);
+  assert.equal(engineOffs(log).length, 0);
+  assert.deepEqual(log.release, []);
+});
+
+test('九步时间线：每一步开始的时间都记在 steps 里，等收尾时 waiting 写着在等哪几个会话', async () => {
+  let n = 0;
+  const { io, log } = fakeIo({
+    drain: async () =>
+      n++ < 2
+        ? { ok: true, running: [{ runId: 'abcdef12-zz', stage: 'execute' }] }
+        : { ok: true, running: [] },
+  });
+  assert.equal(await runRequest(io), EXIT.done);
+  const final = log.states.at(-1);
+  assert.equal(final.steps.length, PHASES.length);
+  assert.ok(
+    final.steps.every((t) => typeof t === 'string' && !Number.isNaN(Date.parse(t))),
+    '九步都有开始时间',
+  );
+  assert.ok(Date.parse(final.steps[4]) > Date.parse(final.steps[3]), '等收尾等过，第 4 步比第 3 步晚开始');
+  assert.ok(
+    log.states.some((s) => s.phase === 3 && s.waiting === '等法国在跑的 1 个会话收尾（execute(abcdef12)）'),
+  );
+  assert.equal(final.waiting, null, '做完了不在等什么');
+});
+
+test('飞书：开始、成功各推一条，一句话里有目标提交、结果、要不要点按钮', async () => {
+  const { io, log } = fakeIo();
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(log.pushes.length, 2);
+  assert.match(log.pushes[0], /^【发版开始】法国开始发 aaaaaaaaaaaa（创始人 在驾驶舱点的）。不用点什么/);
+  assert.match(
+    log.pushes[1],
+    /^【发版成功】法国已在用 aaaaaaaaaaaa，发后体检通过，引擎总开关已恢复到发版前。不用点什么。$/,
+  );
+  assert.deepEqual(
+    log.states.at(-1).pushes.map((p) => [p.kind, p.ok]),
+    [
+      ['start', true],
+      ['done', true],
+    ],
+  );
+});
+
+test('飞书：等收尾卡住推「卡住」带要点的按钮；恢复没成推「失败」叫去环境页开总开关', async () => {
+  const stuck = fakeIo({
+    drain: async () => ({ ok: true, running: [{ runId: 'abcdef12-zz', stage: 'execute' }] }),
+  });
+  assert.equal(await runRequest(stuck.io), EXIT.blocked);
+  assert.match(stuck.log.pushes.at(-1), /^【发版卡住】aaaaaaaaaaaa 停在第 3 步「等收尾」：等了/);
+  assert.match(stuck.log.pushes.at(-1), /再点「发布到法国」/);
+  assert.equal(stuck.log.lasts.at(-1).outcome, 'blocked');
+
+  const restore = fakeIo({}, { onFails: true });
+  assert.equal(await runRequest(restore.io), EXIT.failed);
+  assert.match(restore.log.pushes.at(-1), /^【发版失败】aaaaaaaaaaaa 第 7 步「恢复」没成/);
+  assert.match(restore.log.pushes.at(-1), /环境」页把引擎总开关点开/);
+});
+
+test('【故意造出的失败】飞书推不出去：照样发版、做完，进度里记「没推成」和原因，不当成推过', async () => {
+  const { io, log } = fakeIo({
+    notify: async () => {
+      throw new Error('飞书推送没配：/etc/fleet-dao/engine.env 里没有 FLEET_FEISHU_WEBHOOK');
+    },
+  });
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.deepEqual(log.release, [SHA]);
+  const pushes = log.states.at(-1).pushes;
+  assert.equal(pushes.length, 2);
+  assert.ok(pushes.every((p) => p.ok === false && /没配/.test(p.why)));
+  assert.ok(log.err.some((l) => l.includes('飞书没推成')));
+});
+
+test('parseAlerts / parseHealthz / parseRepoSwitches：认不出的一律回读不到，不当成没事', () => {
+  assert.equal(
+    parseAlerts({ status: 0, stdout: alertJson([{ key: 'a:b' }]), stderr: '' }).alerts[0].key,
+    'a:b',
+  );
+  assert.equal(parseAlerts({ status: 1, stdout: '', stderr: 'boom' }).ok, false);
+  assert.equal(parseAlerts({ status: 0, stdout: '{"x":1}', stderr: '' }).ok, false);
+  assert.equal(parseAlerts({ status: 0, stdout: '{"alerts":[{"title":"t"}]}', stderr: '' }).ok, false);
+  assert.deepEqual(parseHealthz({ status: 200, body: healthBody() }), { ok: true, bad: [] });
+  assert.equal(parseHealthz({ status: 404, body: '' }).ok, false);
+  assert.equal(parseHealthz({ status: 200, body: '{"ok":true}' }).ok, false);
+  assert.deepEqual(parseRepoSwitches('a/b|2026-10-07 08:00:00+00\nc/d|\n'), {
+    ok: true,
+    repos: { 'a/b': '2026-10-07 08:00:00+00', 'c/d': null },
+  });
+  assert.equal(parseRepoSwitches('garbage').ok, false);
+  assert.deepEqual(
+    repoSwitchDiff({ 'a/b': '2026-10-07T08:00:00Z' }, { 'a/b': '2026-10-07 08:00:00+00' }),
+    [],
+  );
+});
+
+test('releaseMessage：五种结局的第一句各不相同，都带 12 位提交号', () => {
+  const st = {
+    target: { value: SHA },
+    phase: 5,
+    why: '历史末行是 unhealthy',
+    requestedBy: '创始人',
+    check: null,
+  };
+  for (const [kind, head] of [
+    ['start', '【发版开始】'],
+    ['done', '【发版成功】'],
+    ['check', '【发版卡住】'],
+    ['blocked', '【发版卡住】'],
+    ['failed', '【发版失败】'],
+  ]) {
+    const m = releaseMessage(kind, st);
+    assert.ok(m.startsWith(head), `${kind}：${m}`);
+    assert.ok(m.includes(SHA.slice(0, 12)));
+  }
 });
 
 // —— 读请求文件（真文件系统）——
@@ -696,6 +1038,7 @@ test('service 的 TimeoutStartSec 比脚本各步的上限加起来还长（不�
       LIMITS.releaseMs +
       LIMITS.deployMs +
       LIMITS.checkMs +
+      LIMITS.verifyMs +
       8 * LIMITS.stepMs +
       5 * 60_000) /
     60_000;
