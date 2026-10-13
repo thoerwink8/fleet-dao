@@ -107,6 +107,9 @@ const DONE_WORKER =
   'w1：grok，档位 high，已经不在跑了，pid 123，从起来到现在 30 分钟\n  工作树 x（分支 y）\n  最后一句输出：完成\n  PR：#9（MERGED）u';
 
 const ok = (stdout = ''): CmdResult => ({ status: 0, stdout, stderr: '' });
+/** check-runs?check_name=check 过滤后一页的回话（jq 之后的样子）。 */
+const checkPage = (runs: { status: string; conclusion: string | null }[], total = runs.length): CmdResult =>
+  ok(JSON.stringify({ total, runs }));
 /** release-launch.sh 的回话：state= / exit= / log= 三行，「---」后面是日志末尾。 */
 const launchReply = (state: string, exit: number | null = null, tail = ''): CmdResult =>
   ok(`state=${state}\nexit=${exit ?? 'none'}\nlog=/srv/fleet-dao-releases/.train/x.log\n---\n${tail}\n`);
@@ -169,12 +172,10 @@ function makeWorld() {
     w.calls.push(line);
     if (command === 'gh') {
       if (args[0] === 'api' && args[1]?.includes('check-runs'))
-        return ok(
-          JSON.stringify(
-            w.ci === 'pending'
-              ? [{ status: 'in_progress', conclusion: null }]
-              : [{ status: 'completed', conclusion: w.ci }],
-          ),
+        return checkPage(
+          w.ci === 'pending'
+            ? [{ status: 'in_progress', conclusion: null }]
+            : [{ status: 'completed', conclusion: w.ci }],
         );
       if (args[0] === 'pr' && args[1] === 'list') return ok(JSON.stringify(w.prs));
       if (args[0] === 'api' && args[1]?.includes('milestones')) return ok(JSON.stringify(w.milestones));
@@ -592,7 +593,7 @@ describe('等收尾：到点列出拖后腿的，不硬来', () => {
         if (c === 'gh' && a[0] === 'api' && a[1]?.includes('check-runs')) {
           // 只有要发的提交是红的；要是还去读 commits/main，这里回绿，预检就会错放行
           const red = a[1].includes(`commits/${SHA}/`);
-          return ok(JSON.stringify([{ status: 'completed', conclusion: red ? 'failure' : 'success' }]));
+          return checkPage([{ status: 'completed', conclusion: red ? 'failure' : 'success' }]);
         }
         return base.run(c, a);
       },
@@ -652,6 +653,116 @@ describe('等收尾：到点列出拖后腿的，不硬来', () => {
     expect(downCode).toBe(2);
     expect(text(down.w.err)).toContain('后备也读不到');
     expect(releaseCalls(down.w.sshCalls)).toEqual([]);
+  });
+
+  // 2026-10-13：提交上 210 条检查，第一页 100 条里一条 check 都没有，不过滤读成 0 条、发版被拦。
+  // 现在按名字过滤（check_name=check）取，并按 total_count 翻页取全。
+  const withChecks = (
+    base: ReturnType<ReturnType<typeof makeWorld>['io']>,
+    onCheck: (url: string) => CmdResult,
+    runs: { status: string; conclusion: string | null }[] | 'unreadable' = [],
+  ) =>
+    ({
+      ...base,
+      run: (c: string, a: string[]) => {
+        if (c === 'gh' && a[0] === 'api' && a[1]?.includes('check-runs')) return onCheck(a[1]);
+        if (c === 'gh' && a[0] === 'api' && a[1] === `repos/{owner}/{repo}/commits/${SHA}`)
+          return ok(`${SHA}\n`);
+        if (c === 'gh' && a[0] === 'api' && a[1]?.includes('actions/runs'))
+          return runs === 'unreadable'
+            ? ({ status: 1, stdout: '', stderr: 'gh: HTTP 500' } as CmdResult)
+            : ok(JSON.stringify(runs));
+        return base.run(c, a);
+      },
+    }) as typeof base;
+
+  it('检查多到一页装不下：按 check_name=check 过滤取，不被别的检查挤出第一页，判绿', async () => {
+    const { w, io } = makeWorld();
+    const urls: string[] = [];
+    const code = await train.runTrain(
+      ['start', '--sha', SHA, '--founder-ok', FOUNDER],
+      withChecks(io(freshHome()), (u) => {
+        urls.push(u);
+        // 不带过滤就是 100 条别的检查、没有 check；带了过滤才有
+        return u.includes('check_name=check')
+          ? checkPage([{ status: 'completed', conclusion: 'success' }])
+          : checkPage([]);
+      }),
+    );
+    expect(code).toBe(0);
+    for (const u of urls) expect(u).toContain('check_name=check');
+    expect(releaseCalls(w.sshCalls).length).toBeGreaterThan(0);
+  });
+
+  it('total_count 比本页多：翻到第二页取全，第二页里红的也算', async () => {
+    const { w, io } = makeWorld();
+    const code = await train.runTrain(
+      ['start', '--sha', SHA, '--founder-ok', FOUNDER],
+      withChecks(io(freshHome()), (u) =>
+        u.endsWith('&page=1')
+          ? checkPage([{ status: 'completed', conclusion: 'success' }], 2)
+          : checkPage([{ status: 'completed', conclusion: 'failure' }], 2),
+      ),
+    );
+    expect(code).toBe(2);
+    expect(text(w.err)).toContain('CI 是红的');
+    expect(releaseCalls(w.sshCalls)).toEqual([]);
+  });
+
+  it('【故意造出的失败】check 过滤后 0 条：即使 ci 工作流运行已全绿也不放行（pending，佐证写进原因）', async () => {
+    const { w, io } = makeWorld();
+    const code = await train.runTrain(
+      ['start', '--sha', SHA, '--founder-ok', FOUNDER],
+      withChecks(io(freshHome()), () => checkPage([]), [{ status: 'completed', conclusion: 'success' }]),
+    );
+    expect(code).toBe(2);
+    expect(text(w.err)).toContain('还没有汇总检查');
+    expect(text(w.err)).toContain('ci 工作流运行已全绿');
+    expect(releaseCalls(w.sshCalls)).toEqual([]);
+  });
+
+  it('【故意造出的失败】check 过滤后 0 条、ci 工作流没跑完 / 读不到：不放行', async () => {
+    for (const runs of [[{ status: 'in_progress', conclusion: null }], 'unreadable'] as const) {
+      const { w, io } = makeWorld();
+      const code = await train.runTrain(
+        ['start', '--sha', SHA, '--founder-ok', FOUNDER],
+        withChecks(io(freshHome()), () => checkPage([]), runs as never),
+      );
+      expect(code).toBe(2);
+      expect(text(w.err)).toContain('还没有汇总检查');
+      expect(releaseCalls(w.sshCalls)).toEqual([]);
+    }
+  });
+
+  it('【故意造出的失败】check 红：预检拒', async () => {
+    const { w, io } = makeWorld();
+    const code = await train.runTrain(
+      ['start', '--sha', SHA, '--founder-ok', FOUNDER],
+      withChecks(io(freshHome()), () => checkPage([{ status: 'completed', conclusion: 'failure' }])),
+    );
+    expect(code).toBe(2);
+    expect(text(w.err)).toContain('CI 是红的');
+    expect(releaseCalls(w.sshCalls)).toEqual([]);
+  });
+
+  it('【故意造出的失败】翻页时第二页读不出：unknown，不拿第一页的绿放行', async () => {
+    const { w, io } = makeWorld();
+    const code = await train.runTrain(
+      ['start', '--sha', SHA, '--founder-ok', FOUNDER],
+      withChecks(
+        io(freshHome()),
+        (u) =>
+          u.endsWith('&page=1')
+            ? checkPage([{ status: 'completed', conclusion: 'success' }], 2)
+            : ({ status: 1, stdout: '', stderr: 'gh: HTTP 502' } as CmdResult),
+        'unreadable',
+      ),
+    );
+    // 第一页读到的绿不算；check 读不出走既有后备（ci 工作流运行），后备也读不出就是 unknown、拒
+    expect(code).toBe(2);
+    expect(text(w.err)).toContain('第 2 页');
+    expect(text(w.err)).toContain('后备也读不到');
+    expect(releaseCalls(w.sshCalls)).toEqual([]);
   });
 });
 
