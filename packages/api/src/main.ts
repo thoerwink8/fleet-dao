@@ -99,17 +99,25 @@ function adaptUserApi(api: GitHubUserApi): GitHubUserPort {
     exchangeCode: (input) => api.exchangeCode(input),
     viewer: (token) => api.viewer(token),
     listRepos: (token) => api.listRepos(token),
+    readTestCommand: (token, repo) => api.readTestCommand(token, repo),
     installationsForApp: (role, token) => api.installationsForApp(role, token),
     installationRepoIds: (token, id) => api.installationRepoIds(token, id),
     addReposToInstallation: (token, id, repos) => api.addReposToInstallation(token, id, repos),
     removeReposFromInstallation: (token, id, repos) => api.removeReposFromInstallation(token, id, repos),
-    authorizeUrl: ({ redirectUri, state }) => {
+    authorizeUrl: ({ redirectUri, state, role = 'agent' }) => {
       const url = new URL(GITHUB_AUTHORIZE_URL);
-      url.searchParams.set('client_id', api.clientId);
+      url.searchParams.set('client_id', api.clientIdFor(role));
       url.searchParams.set('redirect_uri', redirectUri);
       url.searchParams.set('state', state);
       // 读仓列表、读安装、改安装这几样要的权限；不申请写代码的（令牌泄漏也能在 GitHub 上撤、影响面小）。
       url.searchParams.set('scope', 'read:org repo');
+      return url.toString();
+    },
+    appInstallUrl: ({ role, ownerId, repositoryId, state }) => {
+      const url = new URL(`https://github.com/apps/${api.slugFor(role)}/installations/new/permissions`);
+      if (ownerId > 0) url.searchParams.set('target_id', String(ownerId));
+      url.searchParams.append('repository_ids[]', String(repositoryId));
+      url.searchParams.set('state', state);
       return url.toString();
     },
   };

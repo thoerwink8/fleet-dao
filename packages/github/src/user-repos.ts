@@ -9,6 +9,7 @@
 // - token 只在这里过一下，不进日志（redact 按模式打码 ghp_ / gho_ / github_pat_ 这些前缀）。
 import type { GhResponse, GitHubClient, Logger } from './client.ts';
 import { GitHubError, redact } from './errors.ts';
+import { testCommandFromRepo } from './test-command.ts';
 
 /** 换用户令牌的两个端点（GitHub 的 OAuth 网页流）。 */
 export const GITHUB_AUTHORIZE_URL = 'https://github.com/login/oauth/authorize';
@@ -24,6 +25,8 @@ export interface UserRepo {
   private: boolean;
   /** 默认分支；网络不通或仓是空的时 GitHub 可能不给，退回 'main'。 */
   defaultBranch: string;
+  /** 主人账号的数字编号。装 App 的安装页要用它当 target_id；GitHub 没给时是 0。 */
+  ownerId: number;
   /** 主人是个人还是组织。组织仓要用 App 得组织先批准，页面上分开显示。 */
   ownerType: 'User' | 'Organization';
   /** 主人是组织时，本人对它的权限（admin = 能改安装；不是就是只读/写入者）。 */
@@ -41,7 +44,7 @@ interface RawRepo {
   default_branch?: unknown;
   archived?: unknown;
   size?: unknown;
-  owner?: { login?: unknown; type?: unknown } | null;
+  owner?: { login?: unknown; type?: unknown; id?: unknown } | null;
   permissions?: { admin?: unknown } | null;
 }
 
@@ -59,6 +62,7 @@ function toUserRepo(r: RawRepo): UserRepo | null {
     private: r.private === true,
     // 空仓 GitHub 不给 default_branch：退回 main（接进来时按它写 default_branch，之后对账能改）
     defaultBranch: typeof r.default_branch === 'string' && r.default_branch ? r.default_branch : 'main',
+    ownerId: typeof r.owner?.id === 'number' && r.owner.id > 0 ? r.owner.id : 0,
     ownerType,
     viewerCanAdmin: r.permissions?.admin === true,
     archived: r.archived === true,
@@ -67,22 +71,45 @@ function toUserRepo(r: RawRepo): UserRepo | null {
   };
 }
 
+export type GitHubAppRole = 'agent' | 'engine';
+
+/** 一份安装：all 表示这个账号下的仓都已经在里面，不能再 PUT 单个仓。 */
+export interface UserAppInstallation {
+  id: number;
+  selection: 'all' | 'selected';
+}
+
 /** 本人身份接口的这一口。 */
 export interface GitHubUserApi {
   /** OAuth 授权页要的 client_id（「干活的」那个 App 的）。没配好时是空串。 */
   readonly clientId: string;
+  /** 某一边 App 的 client_id。没配好时是空串。 */
+  clientIdFor(role: GitHubAppRole): string;
+  /** 某一边 App 的 slug（安装页地址用它）。 */
+  slugFor(role: GitHubAppRole): string;
   /** 两个 App 是不是都配好了 client_id/client_secret（缺了时「连接 GitHub」要如实回 503）。 */
   configured(): boolean;
-  /** 授权码换用户令牌；返回令牌明文和 GitHub 回的 scope。 */
-  exchangeCode(input: { code: string; redirectUri: string }): Promise<{
+  /**
+   * 授权码换用户令牌。code 是哪个 App 的授权页发的，就必须用那个 App 的 client_secret 换。
+   * 不传 role 时用「干活的」那个（连接 GitHub、只列仓）。
+   */
+  exchangeCode(input: { code: string; redirectUri: string; role?: GitHubAppRole }): Promise<{
     token: string;
     scopes: string;
     expiresAt: string | null;
   }>;
   /** 这个令牌是谁的、还在不在（失效 401 时调用方据此删掉库里那份）。 */
   viewer(token: string): Promise<{ id: number; login: string }>;
-  /** 这个 App 装到本人账号/组织下、本人看得见的安装：key 是 owner（个人登录名或组织名），value 是安装编号。 */
-  installationsForApp(role: 'agent' | 'engine', token: string): Promise<Map<string, number>>;
+  /**
+   * 这个 App 装到本人账号/组织下、本人看得见的安装。
+   * key 是 owner（小写）。令牌只能看见签发它的那个 App，所以 role 和 token 必须是同一边。
+   */
+  installationsForApp(role: GitHubAppRole, token: string): Promise<Map<string, UserAppInstallation>>;
+  /** 从默认分支上的 package.json / Makefile 推出测试命令。认不出就抛错，不编一条。 */
+  readTestCommand(
+    token: string,
+    repo: { owner: string; name: string; defaultBranch: string },
+  ): Promise<string>;
   /** 这个安装现在能访问的仓的编号集合。 */
   installationRepoIds(token: string, installationId: number): Promise<Set<number>>;
   /** 把一批仓加进这个安装（App 就此多出这些仓的权限）。 */
@@ -125,6 +152,12 @@ export function createGitHubUserApi(
     get clientId() {
       return options.appCredentials.agent.clientId ?? '';
     },
+    clientIdFor(role) {
+      return options.appCredentials[role].clientId ?? '';
+    },
+    slugFor(role) {
+      return options.appCredentials[role].slug;
+    },
     configured() {
       return Boolean(
         options.appCredentials.agent.clientId &&
@@ -133,10 +166,9 @@ export function createGitHubUserApi(
           options.appCredentials.engine.clientSecret,
       );
     },
-    async exchangeCode({ code, redirectUri }) {
-      // 两个 App 里随便拿一个的 client_secret 换：OAuth 用户令牌是「人」的，不分哪个 App；
-      // 但换来的令牌能不能改某个 App 的安装，看的是本人在那个 App 装的地方有没有 admin。
-      const { clientId, clientSecret } = oauthFor('agent');
+    async exchangeCode({ code, redirectUri, role = 'agent' }) {
+      // code 跟发起授权的那个 App 绑在一起，必须用同一边的 client_secret 换。
+      const { clientId, clientSecret } = oauthFor(role);
       const res = await fetch(GITHUB_TOKEN_URL, {
         method: 'POST',
         headers: { accept: 'application/json', 'content-type': 'application/json' },
@@ -195,11 +227,10 @@ export function createGitHubUserApi(
     },
 
     async installationsForApp(role, token) {
-      // GET /user/installations 只列本人能访问的安装；每条带一个账号（个人或组织）。
-      // 分页翻到底：一个人装的 App 可能分布在多个账号下。按 app_slug 只认这个 App 名下的
-      // （同一个人可能装了别的 App，不认 slug 会把别的 App 的安装编号当成我们的）。
+      // GET /user/installations 只列「签发这份令牌的那个 App」装在本人能访问的账号上的安装。
+      // 所以引擎那边必须用引擎的令牌来问，不能拿干活的那份顶。按 slug 再滤一次，别的 App 不认。
       const wantSlug = options.appCredentials[role].slug;
-      const out = new Map<string, number>();
+      const out = new Map<string, UserAppInstallation>();
       for await (const page of client.pages<{ installations?: unknown }>({
         method: 'GET',
         path: '/user/installations',
@@ -209,14 +240,57 @@ export function createGitHubUserApi(
         const list = (page.data as { installations?: unknown }).installations;
         if (!Array.isArray(list)) continue;
         for (const item of list) {
-          const inst = item as { id?: unknown; app_slug?: unknown; account?: { login?: unknown } | null };
+          const inst = item as {
+            id?: unknown;
+            app_slug?: unknown;
+            repository_selection?: unknown;
+            account?: { login?: unknown } | null;
+          };
           const account = inst.account?.login;
           if (typeof inst.id !== 'number' || typeof account !== 'string') continue;
           if (inst.app_slug !== wantSlug) continue;
-          out.set(account.toLowerCase(), inst.id);
+          out.set(account.toLowerCase(), {
+            id: inst.id,
+            selection: inst.repository_selection === 'all' ? 'all' : 'selected',
+          });
         }
       }
       return out;
+    },
+
+    async readTestCommand(token, repo) {
+      if (!repo.defaultBranch) {
+        throw new GitHubError('BAD_INPUT', '这个仓没有默认分支，读不出测试命令');
+      }
+      const root = await client.request<unknown>({
+        method: 'GET',
+        path: `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/contents/`,
+        auth: { as: 'user', token },
+        query: { ref: repo.defaultBranch },
+      });
+      if (!Array.isArray(root.data)) throw new GitHubError('BAD_INPUT', '仓根目录认不出');
+      const names = root.data.flatMap((item) => {
+        if (typeof item !== 'object' || item === null || !('name' in item)) return [];
+        return typeof item.name === 'string' ? [item.name] : [];
+      });
+      const readFile = async (name: string): Promise<string> => {
+        const file = await client.request<{ content?: unknown; encoding?: unknown }>({
+          method: 'GET',
+          path: `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}/contents/${encodeURIComponent(name)}`,
+          auth: { as: 'user', token },
+          query: { ref: repo.defaultBranch },
+        });
+        const content = file.data.content;
+        if (typeof content !== 'string' || file.data.encoding !== 'base64') {
+          throw new GitHubError('BAD_INPUT', `读不到 ${name}`);
+        }
+        return Buffer.from(content, 'base64').toString('utf8');
+      };
+      const packageJson = names.includes('package.json') ? await readFile('package.json') : null;
+      const makefile = packageJson === null && names.includes('Makefile') ? await readFile('Makefile') : null;
+      const derived = testCommandFromRepo({ packageJson, names, makefile });
+      if (!derived.ok) throw new GitHubError('BAD_INPUT', derived.reason);
+      return derived.command;
     },
 
     async installationRepoIds(token, installationId) {
