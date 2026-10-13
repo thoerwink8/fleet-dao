@@ -31,6 +31,9 @@ export const PROXY_VARS = [
   'ALL_PROXY',
 ];
 
+/** 直连那次给 git 的 -c：把配置里的代理盖成空 */
+export const DIRECT_CONFIG = ['-c', 'http.https://github.com/.proxy=', '-c', 'http.proxy='];
+
 /** 环境里有没有设代理（任一个非空） */
 export function hasProxy(env = process.env) {
   return PROXY_VARS.some((k) => typeof env[k] === 'string' && env[k] !== '');
@@ -55,7 +58,15 @@ export function gitRunner(timeoutMs = GIT_MS, directTimeoutMs = timeoutMs) {
     const timeout = opts.timeoutMs ?? (opts.direct ? directTimeoutMs : timeoutMs);
     const r = spawnSync(
       'git',
-      [...(opts.proxy ? ['-c', `http.proxy=${opts.proxy}`] : []), '-C', dir, ...args],
+      [
+        ...(opts.proxy ? ['-c', `http.proxy=${opts.proxy}`] : []),
+        // 直连要连 git 配置里的代理一起盖成空：agents-sync 会设 http.https://github.com/.proxy（git-proxy.ts），
+        // 它比环境变量优先，只去掉环境变量还是走代理（2026-10-13）
+        ...(opts.direct ? DIRECT_CONFIG : []),
+        '-C',
+        dir,
+        ...args,
+      ],
       {
         ...(opts.direct || opts.proxy ? { env: withoutProxy() } : {}),
         encoding: 'utf8',

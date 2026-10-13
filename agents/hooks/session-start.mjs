@@ -1292,7 +1292,7 @@ export function fastSessionStart({
   if (h?.ok) lines.push(...poolHoldPromptLines(h.value, beijingToday(now)));
   lines.push(...failed('holds', '整池暂停'));
   lines.push(...checkDirectives(cwd, localGit, lineage));
-  if (repoContract) lines.push(...repoContract(cwd));
+  lines.push(...(repoContract ? repoContract(cwd) : []));
   const p = got('progress');
   if (p?.ok && p.value?.missing) lines.push(progressMissing());
   else if (p?.ok && p.value?.run) lines.push(...progressLines(p.value.run, lineage));
@@ -1809,22 +1809,23 @@ if (isMain() && process.argv[2] === '--background') {
     } catch {
       // 输入读不懂不要紧：会话目录退回到钩子自己的工作目录
     }
-    const sessionId = input?.session_id ?? process.env.CLAUDE_CODE_SESSION_ID;
-    const repoContract = (dir) => contractLines({ cwd: dir, git: gitRunner(GREP_MS), home });
+    const shared = {
+      cwd: pickCwd(input),
+      home,
+      sessionId: input?.session_id ?? process.env.CLAUDE_CODE_SESSION_ID,
+      repoContract: (dir) => contractLines({ cwd: dir, git: gitRunner(GREP_MS), home }),
+    };
     lines =
       process.env.FLEET_WORKER === '1'
         ? // 工人起来就要当前的远端：照老路子一口气做完（它不是每条消息都 resume）
           sessionStart({
-            cwd: pickCwd(input),
-            home,
+            ...shared,
             git: gitRunner(),
             sync: syncRunner(),
             localGit: gitRunner(GREP_MS),
-            sessionId,
             poolHolds: () => readFrancePoolHolds({ home, env: process.env, spawn: spawnSync }),
-            repoContract,
           })
-        : fastSessionStart({ cwd: pickCwd(input), home, git: gitRunner(GREP_MS), sessionId, repoContract });
+        : fastSessionStart({ ...shared, git: gitRunner(GREP_MS) });
   } catch (err) {
     lines = [`开场核规矩没查成：开会话钩子自己出错了（${err?.message ?? err}）；${READ_MAIN}。`];
   }
