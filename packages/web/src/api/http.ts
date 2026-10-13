@@ -10,11 +10,10 @@ import {
   CSRF_HEADER,
   DevLoginRequest,
   FeishuAccessRequest,
-  GithubAuthorizeRequest,
-  GithubConnectRequest,
   GroomNowRequest,
   HomeResourcesSchema,
   ImportRepoRequest,
+  InstallAppRequest,
   ManualModelRequest,
   MovePurposeModelRequest,
   PasswordLoginRequest,
@@ -268,30 +267,28 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
         body: UpdateRepoDispatchRequest.parse(body),
       });
     },
-    githubRepos: () => send('GET', apiUrl(R.githubRepos.path), R.githubRepos.response),
-    connectGithub: (purpose) =>
-      send(
-        'POST',
-        apiUrl(R.connectGithub.path),
-        R.connectGithub.response,
-        purpose ? { body: GithubConnectRequest.parse({ purpose }) } : {},
-      ),
-    async authorizeGithubRepo(body) {
-      return send('POST', apiUrl(R.authorizeGithubRepo.path), R.authorizeGithubRepo.response, {
-        body: GithubAuthorizeRequest.parse(body),
-      });
-    },
-    async importRepo(body) {
-      return send('POST', apiUrl(R.importRepo.path), R.importRepo.response, {
-        body: ImportRepoRequest.parse(body),
-      });
-    },
-    removeRepo: (repoId) => send('DELETE', apiUrl(R.removeRepo.path, { repoId }), R.removeRepo.response),
     repoCiPolicy: () => send('GET', apiUrl(R.repoCiPolicy.path), R.repoCiPolicy.response),
     async updateRepoCiPolicy(repoId, body) {
       return send('PUT', apiUrl(R.updateRepoCiPolicy.path, { repoId }), R.updateRepoCiPolicy.response, {
         body: UpdateRepoCiPolicyRequest.parse(body),
       });
+    },
+    importableRepos: () => send('GET', apiUrl(R.importableRepos.path), R.importableRepos.response),
+    async importRepo(body) {
+      return send('POST', apiUrl(R.importRepo.path), R.importRepo.response, {
+        body: ImportRepoRequest.parse(body),
+      });
+    },
+    async removeRepo(repoId) {
+      return send('DELETE', apiUrl(R.removeRepo.path, { repoId }), R.removeRepo.response);
+    },
+    async installAppOnRepo(body) {
+      return send('POST', apiUrl(R.installAppOnRepo.path), R.installAppOnRepo.response, {
+        body: InstallAppRequest.parse(body),
+      });
+    },
+    async disconnectGitHub() {
+      return send('POST', apiUrl(R.disconnectGitHub.path), R.disconnectGitHub.response);
     },
     groomStatus: (repoId) => send('GET', apiUrl(R.groomStatus.path, { repoId }), R.groomStatus.response),
     async groomNow(repoId, body) {

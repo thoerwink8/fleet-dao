@@ -60,7 +60,7 @@ import type {
   AuditRecord,
   CommandClaim,
   GitHubDelivery,
-  GithubUserToken,
+  GitHubTokenRecord,
   JobRecord,
   NewAuditEntry,
   NodeReportRecord,
@@ -77,6 +77,7 @@ import type {
   User,
 } from './ports.ts';
 import {
+  addRepoAudit,
   autoDispatchAudit,
   autoDispatchChanged,
   autoDispatchUnchanged,
@@ -94,6 +95,7 @@ import {
   matchesTaskSearch,
   NEW_TASK_STATE,
   nextTaskPriority,
+  removeRepoAudit,
   segmentRunMatch,
 } from './task-logic.ts';
 
@@ -190,10 +192,10 @@ export interface MemoryData {
   githubEvents: Map<string, GitHubDelivery>;
   /** 账密登录的几列（库里是 users 表上的列），按用户编号；没设过的人不在里面。 */
   credentials: Map<string, PasswordCredentials>;
+  /** 各人自己的 GitHub 授权（#1989，库里是 github_tokens），按用户编号；没授权过的人不在里面。 */
+  githubTokens: Map<string, GitHubTokenRecord>;
   /** 别的环境推来的快照（node_reports），一个环境一行。 */
   nodeReports: NodeReportRecord[];
-  /** 登录人自己的 GitHub 用户令牌（github_user_tokens）。 */
-  githubTokens: GithubUserToken[];
 }
 
 export function emptyData(): MemoryData {
@@ -223,8 +225,8 @@ export function emptyData(): MemoryData {
     idempotency: new Map(),
     githubEvents: new Map(),
     credentials: new Map(),
+    githubTokens: new Map(),
     nodeReports: [],
-    githubTokens: [],
   };
 }
 
@@ -1101,88 +1103,57 @@ export function createMemoryStore(
       repo.ciPolicy = mode;
       return ciPolicyChanged(mode, audit(full));
     },
-    async importRepo(input, entry) {
-      const existing = await this.findRepoByName(input.owner, input.name);
-      if (existing) return { created: false, repo: existing };
-      const repo = {
-        id: randomUUID(),
-        owner: input.owner,
-        name: input.name,
-        defaultBranch: input.defaultBranch,
-        testCommand: input.testCommand,
-      };
-      const full = {
-        ...entry,
-        ok: true,
-        after: {
-          owner: input.owner,
-          name: input.name,
-          defaultBranch: input.defaultBranch,
-          testCommand: input.testCommand,
-          autoDispatchSince: null,
-        },
-      };
+    async addRepo({ owner, name, defaultBranch, testCommand }, entry) {
+      const existing = data.repos.find(
+        (r) => r.owner.toLowerCase() === owner.toLowerCase() && r.name.toLowerCase() === name.toLowerCase(),
+      );
+      if (existing)
+        return {
+          repo: { ...repoOnly(existing), autoDispatchSince: null, ciPolicy: 'force' },
+          created: false,
+        };
+      const row: RepoRecord = { id: randomUUID(), owner, name, defaultBranch, testCommand };
+      // 先校验操作记录（写不进就整件事不成，和 pg 版同一事务一个意思），校验过了再落数据。
+      const full = addRepoAudit(entry, { owner, name, defaultBranch });
       checkAudit(full);
-      data.repos.push(repo);
+      const auditId = audit(full);
+      data.repos.push(row);
       return {
+        repo: { ...repoOnly(row), autoDispatchSince: null, ciPolicy: 'force' },
         created: true,
-        repo: {
-          ...repo,
-          autoDispatchSince: null,
-          ciPolicy: 'force' as const,
-        },
-        auditId: audit(full),
+        auditId,
       };
     },
-    async removeRepo(repoId, entry) {
-      if (!isUuid(repoId)) return 'not_found';
+    async removeRepo({ repoId }, entry) {
       const repo = data.repos.find((r) => r.id === repoId);
       if (!repo) return 'not_found';
-      const tasks = data.tasks.filter((t) => t.repoId === repoId).length;
-      const pulls = data.pullRequests.filter((p) => p.repoId === repoId).length;
-      const alerts = 0;
-      if (tasks > 0 || pulls > 0 || alerts > 0) {
-        const full = {
-          ...entry,
-          ok: false as const,
-          error: 'in_use',
-          after: { tasks, pulls, alerts },
-        };
-        checkAudit(full);
-        return {
-          status: 'in_use' as const,
-          owner: repo.owner,
-          name: repo.name,
-          tasks,
-          pulls,
-          alerts,
-          auditId: audit(full),
-        };
+      // 还挂着没结束的单就不删（和 pg 版同一个判法）：交回页面说清楚，不连坐删掉别人在干的需求。
+      if (data.tasks.some((t) => t.repoId === repoId && (t.state === 'queued' || t.state === 'running'))) {
+        return 'has_tasks';
       }
-      data.repos = data.repos.filter((r) => r.id !== repoId);
-      const full = {
-        ...entry,
-        ok: true,
-        after: { owner: repo.owner, name: repo.name },
-      };
+      const full = removeRepoAudit(entry, { owner: repo.owner, name: repo.name });
       checkAudit(full);
-      return { status: 'removed' as const, owner: repo.owner, name: repo.name, auditId: audit(full) };
+      audit(full);
+      data.repos = data.repos.filter((r) => r.id !== repoId);
+      return 'removed';
     },
-    async getGithubToken(userId, role) {
-      if (!isUuid(userId)) return null;
-      const row = data.githubTokens.find((t) => t.userId === userId && t.role === role);
+    async getGitHubToken(userId) {
+      const row = data.githubTokens.get(userId);
       return row ? { ...row } : null;
     },
-    async saveGithubToken(token) {
-      if (!isUuid(token.userId)) throw new Error('用户编号不是 uuid');
-      const next = { ...token };
-      const index = data.githubTokens.findIndex((t) => t.userId === token.userId && t.role === token.role);
-      if (index >= 0) data.githubTokens[index] = next;
-      else data.githubTokens.push(next);
+    async putGitHubToken(input) {
+      data.githubTokens.set(input.userId, {
+        userId: input.userId,
+        githubId: input.githubId,
+        login: input.login,
+        accessTokenCipher: input.accessTokenCipher,
+        scopes: input.scopes,
+        expiresAt: input.expiresAt,
+        updatedAt: now().toISOString(),
+      });
     },
-    async deleteGithubToken(userId, role) {
-      if (!isUuid(userId)) return;
-      data.githubTokens = data.githubTokens.filter((t) => !(t.userId === userId && t.role === role));
+    async deleteGitHubToken(userId) {
+      data.githubTokens.delete(userId);
     },
   };
 }

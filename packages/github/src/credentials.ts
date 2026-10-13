@@ -3,7 +3,7 @@
 // 三种处置不同，别混成一种（windsurf-dao#573 ①）。报错里只写文件路径和缺哪个字段，绝不带文件内容。
 import { createPrivateKey, type KeyObject } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { GitHubError, registerSecret } from './errors.ts';
+import { GitHubError } from './errors.ts';
 
 /** agent = 「干活的」（只推分支、开 PR）；engine = 「引擎」（合并、改 issue、续互动限制）。 */
 export type AppRole = 'agent' | 'engine';
@@ -15,6 +15,12 @@ export interface AppCredentials {
   appId: number;
   /** JWT 的 iss 优先用它（官方推荐），没有才用 appId。 */
   clientId?: string | undefined;
+  /**
+   * OAuth 用户授权的 client_secret（#1989）：列「我 GitHub 上能看到的仓」、把 App 装到某个仓，都要用本人身份的
+   * OAuth 用户令牌，换令牌这一步要它。建 App 时 GitHub 回的那份里有；老凭据文件没有就是 undefined，
+   * 对应的「一键授权」在这一台上回 503 并说明，不拿 App 机器人令牌硬顶（那看不到别人的个人仓）。
+   */
+  clientSecret?: string | undefined;
   slug: string;
   privateKey: KeyObject;
   /** 凭据文件在哪；只给人看报错用。 */
@@ -80,6 +86,7 @@ export function loadAppCredentials(role: AppRole, file: string, read: ReadFile =
   const slug = o.slug;
   if (typeof slug !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw bad('缺 slug（App 的短名）');
   const clientId = typeof o.client_id === 'string' && o.client_id ? o.client_id : undefined;
+  const clientSecret = typeof o.client_secret === 'string' && o.client_secret ? o.client_secret : undefined;
 
   let pem: string;
   if (typeof o.pem === 'string' && o.pem.trim()) {
@@ -108,51 +115,7 @@ export function loadAppCredentials(role: AppRole, file: string, read: ReadFile =
     throw bad('私钥不是合法的 PEM');
   }
   if (privateKey.asymmetricKeyType !== 'rsa') throw bad('私钥不是 RSA（GitHub App 只签 RS256）');
-  return { role, appId, clientId, slug, privateKey, source: file };
-}
-
-/** 用户授权（OAuth）要用的 client_id / client_secret。不进 AppCredentials：那份会被日志带出去。 */
-export interface AppOAuth {
-  role: AppRole;
-  clientId: string;
-  clientSecret: string;
-  slug: string;
-}
-
-export function loadAppOAuth(role: AppRole, file: string, read: ReadFile = readUtf8): AppOAuth {
-  const who = ROLE_NAMES[role];
-  let text: string;
-  try {
-    text = read(file);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') {
-      throw new GitHubError('NOT_INSTALLED', `这台机器没装${who}的凭据：${file} 不存在`, {
-        details: { role, file },
-      });
-    }
-    throw new GitHubError('CREDENTIALS_UNREADABLE', `读${who}的凭据 ${file} 失败（${code ?? '未知错误'}）`, {
-      details: { role, file },
-    });
-  }
-  const bad = (what: string) =>
-    new GitHubError('BAD_CONFIG', `${who}的凭据配置错了（${file}）：${what}`, { details: { role, file } });
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    throw bad('不是合法的 JSON');
-  }
-  if (typeof raw !== 'object' || raw === null) throw bad('顶层不是对象');
-  const o = raw as Record<string, unknown>;
-  const slug = o.slug;
-  if (typeof slug !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw bad('缺 slug（App 的短名）');
-  const clientId = o.client_id;
-  if (typeof clientId !== 'string' || clientId === '') throw bad('缺 client_id');
-  const clientSecret = o.client_secret;
-  if (typeof clientSecret !== 'string' || clientSecret === '') throw bad('缺 client_secret');
-  registerSecret(clientSecret);
-  return { role, clientId, clientSecret, slug };
+  return { role, appId, clientId, clientSecret, slug, privateKey, source: file };
 }
 
 export function loadApps(

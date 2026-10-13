@@ -8,7 +8,6 @@ import { seedPg } from '../src/testing/pg-fixtures.ts';
 import { describeStoreContract, type MakeStore } from './store-contract.ts';
 import { describeCredentialsStoreContract } from './store-contract-credentials.ts';
 import { describeNodeStoreContract } from './store-contract-nodes.ts';
-import { describeRepoImportContract } from './store-contract-repos.ts';
 import { describeTaskListContract } from './store-contract-task-list.ts';
 
 let t: TestDb;
@@ -32,4 +31,3 @@ describeStoreContract('Postgres 版', make);
 describeCredentialsStoreContract('Postgres 版', make);
 describeNodeStoreContract('Postgres 版', make);
 describeTaskListContract('Postgres 版', make);
-describeRepoImportContract('Postgres 版', make);

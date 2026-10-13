@@ -654,65 +654,54 @@ export interface IntakeStore {
     audit: Omit<NewAuditEntry, 'before' | 'after'>,
   ): Promise<CiPolicyChange | 'not_found'>;
   /**
-   * 把一个 GitHub 仓加进驾驶舱（repos 一行）。不打开自动派单（auto_dispatch_since 留空）。
-   * owner/name 已有（大小写不敏感）则不插、不记操作记录。并发插进同一行时后一次同样当已有。
+   * 把一个仓接进驾驶舱（#1989）：驾驶舱「导入仓库」点一下就走这里。owner/name 不分大小写地唯一：
+   * 已经在库里的（不管大小写怎么写）原样返回那一行、不新建、不记操作记录（created=false）。
+   * 新行的「让 AI 接活」默认关着（和 #131 一致），ci_policy 走库默认（强制）。新建和操作记录同一事务。
    */
-  importRepo(input: ImportRepoInput, audit: Omit<NewAuditEntry, 'before' | 'after'>): Promise<ImportedRepo>;
+  addRepo(
+    input: { owner: string; name: string; defaultBranch: string; testCommand: string },
+    audit: Omit<NewAuditEntry, 'before' | 'after'>,
+  ): Promise<{ repo: IntakeRepo; created: boolean; auditId?: string | undefined }>;
   /**
-   * 从驾驶舱移出一个仓。还有任务、PR 或提醒跟进时不删，记一条失败的操作记录。
-   * 编号不是 uuid、没有这一行：not_found，不记。
+   * 把一个仓移出驾驶舱（#1989）：删 repos 那一行。这个仓上还有没结束的需求（queued/running）时不删、返回 has_tasks——
+   * 库里 tasks 对 repos 是外键，硬删会连坐；把「还挂着活」这件事交回页面说清楚，不悄悄删掉别人在干的单。
+   * 没有这个仓返回 not_found。
    */
   removeRepo(
-    repoId: string,
-    audit: Omit<NewAuditEntry, 'before' | 'after' | 'ok' | 'error'>,
-  ): Promise<RemoveRepoResult>;
+    input: { repoId: string },
+    audit: Omit<NewAuditEntry, 'before' | 'after'>,
+  ): Promise<'removed' | 'has_tasks' | 'not_found'>;
 }
 
-/** 驾驶舱用户自己的 GitHub 用户令牌。两个 App 各存一份。不进仓列表、不进操作记录。 */
-export type GithubAppRole = 'agent' | 'engine';
+/** 各人自己的 GitHub 授权（#1989）。令牌密文进、密文出：明文只在 api 层过一下。 */
+export interface GitHubTokenStore {
+  /** 这个人现在存着的那份授权；没授权过回 null。读不出来（解密失败）抛错，不当成「没授权」。 */
+  getGitHubToken(userId: string): Promise<GitHubTokenRecord | null>;
+  /** 授权回来换到令牌：一个人一行，再授权整行覆盖。 */
+  putGitHubToken(input: PutGitHubTokenInput): Promise<void>;
+  /** 授权被 GitHub 撤了（401）、或人自己断开：删掉这一行。本来就没有也当成功。 */
+  deleteGitHubToken(userId: string): Promise<void>;
+}
 
-export interface GithubUserToken {
+/** 库里 github_tokens 的一行（密文原样带出，解密在 api 层）。 */
+export interface GitHubTokenRecord {
   userId: string;
-  role: GithubAppRole;
-  githubLogin: string;
-  accessToken: string;
-  refreshToken?: string | undefined;
-  expiresAt?: string | undefined;
+  githubId: number;
+  login: string;
+  /** 密文（v1.<iv>.<tag>.<密文>）；解密失败由 api 层如实报，不在这里判死。 */
+  accessTokenCipher: string;
+  scopes: string;
+  expiresAt: string | null;
+  updatedAt: string;
 }
 
-export interface ImportRepoInput {
-  owner: string;
-  name: string;
-  defaultBranch: string;
-  testCommand: string;
-}
-
-export interface ImportedRepo {
-  created: boolean;
-  repo: IntakeRepo;
-  /** 新插进去才有。已有的不记操作记录。 */
-  auditId?: string | undefined;
-}
-
-export type RemoveRepoResult =
-  | { status: 'removed'; owner: string; name: string; auditId: string }
-  | {
-      status: 'in_use';
-      owner: string;
-      name: string;
-      tasks: number;
-      pulls: number;
-      alerts: number;
-      auditId: string;
-    }
-  | 'not_found';
-
-export interface GithubTokenStore {
-  /** 编号不是 uuid、或没有这一份：null。 */
-  getGithubToken(userId: string, role: GithubAppRole): Promise<GithubUserToken | null>;
-  /** 同一人、同一个 App 再存一次是覆盖。 */
-  saveGithubToken(token: GithubUserToken): Promise<void>;
-  deleteGithubToken(userId: string, role: GithubAppRole): Promise<void>;
+export interface PutGitHubTokenInput {
+  userId: string;
+  githubId: number;
+  login: string;
+  accessTokenCipher: string;
+  scopes: string;
+  expiresAt: string | null;
 }
 
 /** 别的环境推来的快照（node_reports 表一行），不带快照本体：列环境用。 */
@@ -754,8 +743,8 @@ export type Store = UserStore &
   AgentStore &
   GitHubStore &
   IntakeStore &
-  NodeStore &
-  GithubTokenStore;
+  GitHubTokenStore &
+  NodeStore;
 
 /** 翻页游标看不懂：接口回 400（http.ts），不装成空页。判法在 ids.ts 的 parseCursor。 */
 export class InvalidCursorError extends Error {

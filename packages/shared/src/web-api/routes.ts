@@ -32,16 +32,6 @@ import {
   ReleaseRequestBody,
   ReleaseRequestResponse,
 } from './france-release.ts';
-import {
-  GithubAuthorizeRequest,
-  GithubAuthorizeResponse,
-  GithubConnectRequest,
-  GithubConnectResponse,
-  GithubReposResponse,
-  ImportRepoRequest,
-  ImportRepoResponse,
-  RemoveRepoResponse,
-} from './github-repos.ts';
 import { HomeResponseSchema } from './home.ts';
 import { JobsResponse } from './jobs.ts';
 import { NodeDetailResponseSchema, NodesResponseSchema } from './nodes.ts';
@@ -55,6 +45,15 @@ import {
   ResolveNotificationResponse,
 } from './notifications.ts';
 import { PoolsResponse } from './pools.ts';
+import {
+  DisconnectGitHubResponse,
+  ImportableReposResponse,
+  ImportRepoRequest,
+  ImportRepoResponse,
+  InstallAppRequest,
+  InstallAppResponse,
+  RemoveRepoResponse,
+} from './repo-import.ts';
 import {
   AddPurposeModelRequest,
   ManualModelRequest,
@@ -129,34 +128,6 @@ export const WebRoutes = {
   franceCliTools: { method: 'GET', path: '/france/cli-tools', response: CliToolsResponseSchema },
   /** 设置页「仓库」一节：每个项目的「让 AI 接活」现在开还是关、什么时候开的。 */
   repoDispatch: { method: 'GET', path: '/repos/dispatch', response: RepoDispatchResponse },
-  /** 登录人自己 GitHub 上能看到的仓：个人还是组织、两个 App 装了没、在不在驾驶舱。没连接时 connected=false，不拿空列表冒充没有仓。 */
-  githubRepos: { method: 'GET', path: '/repos/github', response: GithubReposResponse },
-  /**
-   * 为列仓去 GitHub 授权（只用「干活的」那个 App 的用户令牌）。已经连上则 connected=true，不跳转。
-   * purpose=install-account：已经连上，再去 GitHub 把 App 装到别的账号（那边能看到还没装上的仓）。
-   */
-  connectGithub: {
-    method: 'POST',
-    path: '/repos/github/connect',
-    request: GithubConnectRequest,
-    response: GithubConnectResponse,
-  },
-  /** 一键把两个 App 装到这个仓。缺令牌或账号上还没有安装时 redirect 到 GitHub；装好了 installed=true。 */
-  authorizeGithubRepo: {
-    method: 'POST',
-    path: '/repos/github/authorize',
-    request: GithubAuthorizeRequest,
-    response: GithubAuthorizeResponse,
-  },
-  /** 加进驾驶舱：插一行，不打开自动派单。 */
-  importRepo: {
-    method: 'POST',
-    path: '/repos/import',
-    request: ImportRepoRequest,
-    response: ImportRepoResponse,
-  },
-  /** 移出驾驶舱。还有任务、PR 或提醒跟进时 409，行还在。 */
-  removeRepo: { method: 'DELETE', path: '/repos/:repoId', response: RemoveRepoResponse },
   /** 开、关一个项目的「让 AI 接活」（和命令行 fleet-api dispatch 同一个写入口，记操作记录）；没有这个项目 404。 */
   updateRepoDispatch: {
     method: 'PUT',
@@ -173,6 +144,37 @@ export const WebRoutes = {
     request: UpdateRepoCiPolicyRequest,
     response: UpdateRepoCiPolicyResponse,
   },
+  /** 设置页「仓库」一节的「导入仓库」（#1989）：我 GitHub 上看得见的仓，每个标好装没装、在不在驾驶舱；外加我这份授权现在怎样。 */
+  importableRepos: { method: 'GET', path: '/repos/importable', response: ImportableReposResponse },
+  /** 把一个仓接进驾驶舱（写 repos 表，默认不打开自动派活）；记操作记录。 */
+  importRepo: {
+    method: 'POST',
+    path: '/repos/import',
+    request: ImportRepoRequest,
+    response: ImportRepoResponse,
+  },
+  /** 把一个仓移出驾驶舱（删 repos 那一行）；还挂着没结束的单时不删，回 removed=false 带原因。记操作记录。 */
+  removeRepo: { method: 'DELETE', path: '/repos/:repoId/cockpit', response: RemoveRepoResponse },
+  /** 把两个 App 装到某个仓（一键授权那一步，走本人 OAuth 用户令牌）；记操作记录。 */
+  installAppOnRepo: {
+    method: 'POST',
+    path: '/repos/install',
+    request: InstallAppRequest,
+    response: InstallAppResponse,
+  },
+  /** 断开本人这份 GitHub 授权。 */
+  disconnectGitHub: {
+    method: 'POST',
+    path: '/github/oauth/disconnect',
+    response: DisconnectGitHubResponse,
+  },
+  /**
+   * 「连接 GitHub」（#1989）：浏览器整页跳到 GitHub 授权页，回来落在设置页。
+   * 没有响应体（302 跳转），所以不写 response；挂在 /api 下过登录门——要登进驾驶舱的人才能连自己的 GitHub。
+   */
+  githubConnect: { method: 'GET', path: '/github/connect' },
+  /** GitHub 授权完回这里：拿 code 换令牌、存起来、跳回设置页。没有响应体（302）。 */
+  githubCallback: { method: 'GET', path: '/github/callback' },
   /** 「让指挥官整理」按钮的现状（母单 #1335 第 3 片，#1338）：这个项目今日剩余次数、最近几次结果、有没有一次在排队或在做。没有这个项目 404。 */
   groomStatus: { method: 'GET', path: '/repos/:repoId/dispatch/groom', response: GroomStatusResponse },
   /**
@@ -340,10 +342,6 @@ export const AuthRoutes = {
   config: { method: 'GET', path: '/config', response: AuthConfigResponse },
   feishuLogin: { method: 'GET', path: '/feishu/login' },
   feishuCallback: { method: 'GET', path: '/feishu/callback' },
-  /** GitHub 用户授权回来。浏览器整页跳转，不走 fetch。 */
-  githubCallback: { method: 'GET', path: '/github/callback' },
-  /** GitHub App 装完回到的 Setup URL。两个 App 都要在 GitHub 上配成这个地址。 */
-  githubSetup: { method: 'GET', path: '/github/setup' },
   feishuAccess: {
     method: 'POST',
     path: '/feishu/access',

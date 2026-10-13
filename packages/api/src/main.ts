@@ -6,7 +6,12 @@
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
 //   发给工作流的信号只记日志，不接 Temporal。
 import { createDb, type Db } from '@fleet-dao/db';
-import { createGitHub, type ReleaseFactsReader } from '@fleet-dao/github';
+import {
+  createGitHub,
+  GITHUB_AUTHORIZE_URL,
+  type GitHubUserApi,
+  type ReleaseFactsReader,
+} from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
 import {
   createMemoryStore,
@@ -37,7 +42,6 @@ import { pgDatabaseSizes } from './db-sizes.ts';
 import type { DecisionCommenter } from './decision-handoff.ts';
 import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
-import { loadGithubUserDeps } from './github-user-deps.ts';
 import {
   createFootprintMeter,
   type DatabaseSizes,
@@ -52,6 +56,7 @@ import { liveFranceReleasePort } from './france-release.ts';
 import { createGatewaySeen, feishuGatewayPart } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { githubAppHealthCheck } from './github-app-health.ts';
+import type { GitHubUserPort } from './github-user.ts';
 import { serviceHealthChecks } from './health.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { createHostResourceSampler, realHostReader } from './host-resources.ts';
@@ -84,8 +89,35 @@ const log = jsonLogger();
  * PR、CI 事件写镜像：@fleet-dao/github 的事件去处，要两个机器人的凭据（只在这里、启动时读一次）。读不到时后端照样起，
  * PR、CI 事件如实失败，健康检查的 github_events 报红（credentialsMissing）；补上凭据要重启后端。
  */
-/** 机器人凭据没读到：发版卡读 GitHub 的每一样都如实抛这个原因（卡上各行写没查成 + 原因）。 */
-function credentialsMissingFacts(why: string): ReleaseFactsReader {
+/**
+ * 把 @fleet-dao/github 的 userApi 收成后端用的 GitHubUserPort（#1989）。差别只有一处：那边 authorizeUrl 不带
+ * redirect_uri（GitHub 认 App 上登记的，我们每个环境不同），这里补上；configured() 看两个 App 有没有 client_secret。
+ */
+function adaptUserApi(api: GitHubUserApi): GitHubUserPort {
+  return {
+    configured: () => api.configured(),
+    exchangeCode: (input) => api.exchangeCode(input),
+    viewer: (token) => api.viewer(token),
+    listRepos: (token) => api.listRepos(token),
+    installationsForApp: (role, token) => api.installationsForApp(role, token),
+    installationRepoIds: (token, id) => api.installationRepoIds(token, id),
+    addReposToInstallation: (token, id, repos) => api.addReposToInstallation(token, id, repos),
+    removeReposFromInstallation: (token, id, repos) => api.removeReposFromInstallation(token, id, repos),
+    authorizeUrl: ({ redirectUri, state }) => {
+      const url = new URL(GITHUB_AUTHORIZE_URL);
+      url.searchParams.set('client_id', api.clientId);
+      url.searchParams.set('redirect_uri', redirectUri);
+      url.searchParams.set('state', state);
+      // 读仓列表、读安装、改安装这几样要的权限；不申请写代码的（令牌泄漏也能在 GitHub 上撤、影响面小）。
+      url.searchParams.set('scope', 'read:org repo');
+      return url.toString();
+    },
+  };
+}
+
+/** 机器人凭据没读到：发版卡读 GitHub 的每一样都如实抛这个原因（卡上各行写没查成 + 原因）。 */ function credentialsMissingFacts(
+  why: string,
+): ReleaseFactsReader {
   const fail = async (): Promise<never> => {
     throw new Error(`GitHub 机器人的凭据没读到（${why}）`);
   };
@@ -103,6 +135,8 @@ function githubMirror(db: Db): {
   sink: GitHubEventSink;
   credentialsMissing?: () => Promise<void>;
   releaseFacts: ReleaseFactsReader;
+  /** 本人身份那一套（#1989，设置页「导入仓库」）：列仓、装 App。凭据没读到就没有，那几个接口回 503。 */
+  userHit?: GitHubUserPort;
   /** 「要你拍」拍完往进度单、任务单留言（#1915）；凭据没读到就没有，答案照存、回包写没接上。 */
   decisionCommenter?: DecisionCommenter;
 } {
@@ -112,6 +146,7 @@ function githubMirror(db: Db): {
     return {
       sink: gh.eventSink({ async wake() {} }),
       releaseFacts: gh.releaseFacts,
+      userHit: adaptUserApi(gh.userApi),
       decisionCommenter: {
         async comment(input) {
           const got = await gh.commentIssue(input);
@@ -176,7 +211,6 @@ async function assemble(): Promise<{
   close: () => Promise<void>;
   databaseSizes?: DatabaseSizes;
 }> {
-  const githubUsers = loadGithubUserDeps(log);
   if (config.databaseUrl === null) {
     // 只有开发环境会走到这里（生产缺 DATABASE_URL 在 loadConfig 就拒绝启动了）。
     const changes = createChangeHub(log);
@@ -204,7 +238,6 @@ async function assemble(): Promise<{
           log.info('（开发）收到 GitHub 事件', { event: event.event, repo: event.repo, wake: event.wake });
         },
       },
-      ...githubUsers,
     };
     return { deps, close: async () => {} };
   }
@@ -249,7 +282,7 @@ async function assemble(): Promise<{
     workflows: temporal.control,
     taskRedo: temporal.taskRedo,
     github: github.sink,
-    ...githubUsers,
+    ...(github.userHit ? { githubUser: github.userHit } : {}),
     ...(github.decisionCommenter ? { decisionCommenter: github.decisionCommenter } : {}),
     gatewaySeen,
     // 飞书群聊理成的意图（#553 第 4 条）：网关收原话、取意图卡；指挥官经 fleet-api intent 读写同一张表

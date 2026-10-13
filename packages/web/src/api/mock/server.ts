@@ -24,6 +24,7 @@ import {
   CliToolsResponseSchema,
   CredentialsResponse,
   DEFAULT_SESSION_EFFORT,
+  DisconnectGitHubResponse,
   describeEngineMaster,
   ENGINE_MASTER_SETTING,
   EnvResponseSchema,
@@ -33,11 +34,8 @@ import {
   flowStages,
   foldRouteProbeRequests,
   founderOnlyDenial,
-  GithubAuthorizeRequest,
-  GithubAuthorizeResponse,
-  GithubConnectRequest,
-  GithubConnectResponse,
-  GithubReposResponse,
+  GITHUB_INSTALL_REPO,
+  GITHUB_OAUTH_DISCONNECT,
   GROOM_ACTION,
   GROOM_TARGET,
   GroomNowRequest,
@@ -49,8 +47,11 @@ import {
   HomeResponseSchema,
   type HostId,
   hardBanFor,
+  ImportableReposResponse,
   ImportRepoRequest,
   ImportRepoResponse,
+  InstallAppRequest,
+  InstallAppResponse,
   JobsResponse,
   judgeGroomRequest,
   ManualModelRequest,
@@ -61,7 +62,6 @@ import {
   NodeDetailResponseSchema,
   NodesResponseSchema,
   NotificationsResponse,
-  ORG_APP_APPROVAL_NOTE,
   PASSWORD_MIN_LENGTH,
   POOL_HOLDS_SETTING,
   PoolHoldsResponse,
@@ -71,9 +71,8 @@ import {
   poolFull,
   poolHoldsView,
   probeHistoryStrips,
-  REPO_APPS_INSTALL,
-  REPO_IMPORT,
-  REPO_REMOVE,
+  REPO_IMPORT_ADD,
+  REPO_IMPORT_REMOVE,
   type RealtimeTable,
   ReleaseCardSchema,
   ReleasedCommitsSchema,
@@ -154,8 +153,6 @@ export interface MockOptions {
   transcriptFail?: readonly string[];
   /** 给 ch-cursor 多加这么多条没用途在用的路由（演示一个渠道几百条）；不给就不加。 */
   manyRoutes?: number;
-  /** 导入仓库：登录人有没有连上自己的 GitHub。默认连上，设置页不多一条提示。 */
-  githubConnected?: boolean;
 }
 
 export interface MockApi extends FleetApi {
@@ -899,63 +896,89 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const switchedOff = new Set(MOCK_SWITCHED_OFF_AT_START);
   /** 每个项目「让 AI 接活」打开的时刻：没有就是关着。种子里 orbit 开着、另两个关着，页面上两种样子都能看到。 */
   const mockDispatch = new Map<string, string>([['r-orbit', new Date(now() - 3 * 86_400_000).toISOString()]]);
-  /** 登录人自己 GitHub 上能看到的仓。新加进驾驶舱的不写进 mockDispatch（自动派单保持关）。 */
-  const githubConnected = opts.githubConnected !== false;
-  const githubRows: {
-    owner: string;
-    name: string;
-    ownerKind: 'user' | 'org';
-    defaultBranch: string;
-    canAdmin: boolean;
-    testCommand: string;
-    apps: { agent: 'installed' | 'missing' | 'unknown'; engine: 'installed' | 'missing' | 'unknown' };
-  }[] = [
-    {
-      owner: 'acme',
-      name: 'orbit',
-      ownerKind: 'org',
-      defaultBranch: 'main',
-      canAdmin: true,
-      testCommand: 'pnpm check',
-      apps: { agent: 'installed', engine: 'installed' },
-    },
-    {
-      owner: 'acme',
-      name: 'widget',
-      ownerKind: 'org',
-      defaultBranch: 'main',
-      canAdmin: true,
-      testCommand: 'pnpm test',
-      apps: { agent: 'missing', engine: 'missing' },
-    },
-    {
-      owner: 'lan',
-      name: 'notes',
-      ownerKind: 'user',
-      defaultBranch: 'main',
-      canAdmin: true,
-      testCommand: 'pnpm test',
-      apps: { agent: 'installed', engine: 'missing' },
-    },
-    {
-      owner: 'lan',
-      name: 'scratch',
-      ownerKind: 'user',
-      defaultBranch: 'main',
-      canAdmin: false,
-      testCommand: 'pnpm test',
-      apps: { agent: 'missing', engine: 'missing' },
-    },
-  ];
-  const githubRow = (owner: string, name: string) =>
-    githubRows.find(
-      (row) =>
-        row.owner.toLowerCase() === owner.toLowerCase() && row.name.toLowerCase() === name.toLowerCase(),
-    );
   /** 没写过的仓是强制。切换记录新的在前，最多留 5 条。 */
   const mockCiPolicy = new Map<string, CiPolicy>();
   const mockCiRecent = new Map<string, { at: string; actor: string; from: CiPolicy; to: CiPolicy }[]>();
   const ciModeOf = (repoId: string): CiPolicy => mockCiPolicy.get(repoId) ?? 'force';
+  /** 「导入仓库」（#1989）的假数据：连着一份授权，几个仓覆盖个人/组织、已装/未装、已在驾驶舱几种样子。 */
+  const mockImportAuth = {
+    connected: true,
+    login: 'thoerwink8',
+    scopes: 'read:org repo',
+    connectedAt: new Date(now() - 86_400_000).toISOString(),
+  };
+  const mockImportRepos = () => [
+    {
+      githubId: 9001,
+      owner: 'thoerwink8',
+      name: 'widgets',
+      fullName: 'thoerwink8/widgets',
+      private: true,
+      defaultBranch: 'main',
+      ownerType: 'User' as const,
+      viewerCanAdmin: true,
+      archived: false,
+      empty: false,
+      agentInstalled: true,
+      engineInstalled: true,
+      fullyInstalled: true,
+      inCockpit: false,
+      canInstall: false,
+    },
+    {
+      githubId: 9002,
+      owner: 'thoerwink8',
+      name: 'notes',
+      fullName: 'thoerwink8/notes',
+      private: false,
+      defaultBranch: 'main',
+      ownerType: 'User' as const,
+      viewerCanAdmin: true,
+      archived: false,
+      empty: false,
+      agentInstalled: false,
+      engineInstalled: false,
+      fullyInstalled: false,
+      inCockpit: false,
+      canInstall: true,
+    },
+    {
+      githubId: 9003,
+      owner: 'adfx-studio',
+      name: 'daihuo-workbench',
+      fullName: 'adfx-studio/daihuo-workbench',
+      private: true,
+      defaultBranch: 'main',
+      ownerType: 'Organization' as const,
+      viewerCanAdmin: true,
+      archived: false,
+      empty: false,
+      agentInstalled: true,
+      engineInstalled: false,
+      fullyInstalled: false,
+      inCockpit: true,
+      reposId: st.repos[0]?.id ?? 'r-orbit',
+      canInstall: true,
+    },
+    {
+      githubId: 9004,
+      owner: 'some-org',
+      name: 'shared-lib',
+      fullName: 'some-org/shared-lib',
+      private: false,
+      defaultBranch: 'main',
+      ownerType: 'Organization' as const,
+      viewerCanAdmin: false,
+      archived: false,
+      empty: false,
+      agentInstalled: false,
+      engineInstalled: false,
+      fullyInstalled: false,
+      inCockpit: false,
+      canInstall: false,
+      installBlockedWhy: '要组织管理员先批准这个 App（你在这个组织里没有 admin）',
+    },
+  ];
   /**
    * 临时指挥官整理待办的记录（新的在前）。orbit 有一次做成、一次没做成，都在 24 小时内接手过，所以今日剩余 1/3。
    * 没有排队或在做的：按钮能点。点了以后插到最前。
@@ -1979,187 +2002,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         changed,
       });
     },
-    async githubRepos() {
-      await wait();
-      if (!githubConnected) {
-        return GithubReposResponse.parse({
-          connected: false,
-          problem: '还没连接你的 GitHub。点「连接 GitHub」，用你自己的账号授权。',
-          truncated: false,
-          repos: [],
-        });
-      }
-      return GithubReposResponse.parse({
-        connected: true,
-        githubLogin: 'lan',
-        truncated: false,
-        repos: githubRows.map((row) => {
-          const known = st.repos.find(
-            (repo) =>
-              repo.owner.toLowerCase() === row.owner.toLowerCase() &&
-              repo.name.toLowerCase() === row.name.toLowerCase(),
-          );
-          return {
-            owner: row.owner,
-            name: row.name,
-            ownerKind: row.ownerKind,
-            defaultBranch: row.defaultBranch,
-            inCockpit: known !== undefined,
-            ...(known ? { repoId: known.id } : {}),
-            canAdmin: row.canAdmin,
-            apps: row.apps,
-            ...(row.ownerKind === 'org' ? { orgNote: ORG_APP_APPROVAL_NOTE } : {}),
-          };
-        }),
-      });
-    },
-    async connectGithub(purpose) {
-      await wait();
-      const parsed = GithubConnectRequest.parse({ purpose });
-      if (!githubConnected) {
-        return GithubConnectResponse.parse({
-          connected: false,
-          redirect: 'https://github.com/login/oauth/authorize?state=mock',
-        });
-      }
-      if (parsed.purpose === 'install-account') {
-        return GithubConnectResponse.parse({
-          connected: true,
-          redirect: 'https://github.com/apps/fleet-dao-agent/installations/new?state=mock',
-        });
-      }
-      return GithubConnectResponse.parse({ connected: true });
-    },
-    async authorizeGithubRepo(raw) {
-      await wait();
-      const body = GithubAuthorizeRequest.parse(raw);
-      if (!githubConnected) {
-        return GithubAuthorizeResponse.parse({
-          installed: false,
-          redirect: 'https://github.com/login/oauth/authorize?state=mock-auth',
-        });
-      }
-      const row = githubRow(body.owner, body.name);
-      if (!row) throw new ApiError(404, 'github_repo_not_visible', '你的 GitHub 上看不到这个仓');
-      if (!row.canAdmin)
-        throw new ApiError(403, 'github_repo_not_admin', '没有这个仓的管理权限，加不进、也装不上 App');
-      const known = st.repos.find(
-        (repo) =>
-          repo.owner.toLowerCase() === row.owner.toLowerCase() &&
-          repo.name.toLowerCase() === row.name.toLowerCase(),
-      );
-      for (const role of ['agent', 'engine'] as const) {
-        audit({
-          actor: meActor(),
-          action: REPO_APPS_INSTALL,
-          target: known ? `repo:${known.id}` : `github:${row.owner}/${row.name}`,
-          after: { app: role, owner: row.owner, name: row.name },
-          via: 'cockpit',
-          reason: '驾驶舱上点了一键授权',
-        });
-      }
-      row.apps = { agent: 'installed', engine: 'installed' };
-      return GithubAuthorizeResponse.parse({
-        installed: true,
-        agent: 'installed',
-        engine: 'installed',
-      });
-    },
-    async importRepo(raw) {
-      await wait();
-      const body = ImportRepoRequest.parse(raw);
-      if (!githubConnected) {
-        throw new ApiError(
-          409,
-          'github_not_connected',
-          '还没连接你的 GitHub。点「连接 GitHub」，用你自己的账号授权。',
-        );
-      }
-      const row = githubRow(body.owner, body.name);
-      if (!row) throw new ApiError(404, 'github_repo_not_visible', '你的 GitHub 上看不到这个仓');
-      if (!row.canAdmin)
-        throw new ApiError(403, 'github_repo_not_admin', '没有这个仓的管理权限，加不进、也装不上 App');
-      const existing = st.repos.find(
-        (repo) =>
-          repo.owner.toLowerCase() === row.owner.toLowerCase() &&
-          repo.name.toLowerCase() === row.name.toLowerCase(),
-      );
-      if (existing) {
-        return ImportRepoResponse.parse({
-          repoId: existing.id,
-          owner: existing.owner,
-          name: existing.name,
-          defaultBranch: existing.defaultBranch,
-          testCommand: row.testCommand,
-          autoDispatch: false,
-          created: false,
-        });
-      }
-      const id = nextId('r');
-      st.repos.push({
-        id,
-        owner: row.owner,
-        name: row.name,
-        defaultBranch: row.defaultBranch,
-        testCommand: row.testCommand,
-      });
-      audit({
-        actor: meActor(),
-        action: REPO_IMPORT,
-        target: `github:${row.owner}/${row.name}`,
-        after: {
-          owner: row.owner,
-          name: row.name,
-          defaultBranch: row.defaultBranch,
-          testCommand: row.testCommand,
-          autoDispatchSince: null,
-        },
-        via: 'cockpit',
-        reason: '驾驶舱上点了加进',
-      });
-      return ImportRepoResponse.parse({
-        repoId: id,
-        owner: row.owner,
-        name: row.name,
-        defaultBranch: row.defaultBranch,
-        testCommand: row.testCommand,
-        autoDispatch: false,
-        created: true,
-      });
-    },
-    async removeRepo(repoId) {
-      await wait();
-      const repo = st.repos.find((item) => item.id === repoId);
-      if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
-      const tasks = st.tasks.filter((item) => item.task.repoId === repoId).length;
-      if (tasks > 0) {
-        audit({
-          actor: meActor(),
-          action: REPO_REMOVE,
-          target: `repo:${repoId}`,
-          ok: false,
-          error: 'in_use',
-          after: { tasks, pulls: 0, alerts: 0 },
-          via: 'cockpit',
-          reason: '驾驶舱上点了移出',
-        });
-        throw new ApiError(
-          409,
-          'repo_in_use',
-          `这个仓在驾驶舱里还有任务、PR 或提醒跟进，移不出去（任务 ${tasks}、PR 0、提醒 0）。历史没删。`,
-        );
-      }
-      st.repos = st.repos.filter((item) => item.id !== repoId);
-      audit({
-        actor: meActor(),
-        action: REPO_REMOVE,
-        target: `repo:${repoId}`,
-        after: { owner: repo.owner, name: repo.name },
-        via: 'cockpit',
-        reason: '驾驶舱上点了移出',
-      });
-      return RemoveRepoResponse.parse({ removed: true, owner: repo.owner, name: repo.name });
-    },
     async repoCiPolicy() {
       await wait();
       return RepoCiPolicyResponse.parse({
@@ -2207,6 +2049,101 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         recent: mockCiRecent.get(repoId) ?? [],
         changed,
       });
+    },
+    // 设置页「导入仓库」（#1989）：假数据里造一份「我的 GitHub 仓」清单，含个人仓、组织仓、已装/未装、已在驾驶舱的。
+    async importableRepos() {
+      await wait();
+      return ImportableReposResponse.parse({
+        auth: mockImportAuth,
+        repos: [...mockImportRepos()],
+        ...(mockImportAuth.connected
+          ? {}
+          : { reason: '这是假数据：点「连接 GitHub」在真后端上会跳 GitHub 授权' }),
+      });
+    },
+    async importRepo(raw) {
+      await wait();
+      const body = ImportRepoRequest.parse(raw);
+      const repo = mockImportRepos().find((r) => r.githubId === body.githubId);
+      if (!repo) throw new ApiError(404, 'repo_not_visible', '这个仓不在你 GitHub 账号能看到的范围里');
+      const existing = st.repos.find(
+        (r) =>
+          r.owner.toLowerCase() === repo.owner.toLowerCase() &&
+          r.name.toLowerCase() === repo.name.toLowerCase(),
+      );
+      if (existing) {
+        return ImportRepoResponse.parse({
+          repoId: existing.id,
+          owner: existing.owner,
+          name: existing.name,
+          created: false,
+        });
+      }
+      const created = {
+        id: `mock-${body.githubId}`,
+        owner: repo.owner,
+        name: repo.name,
+        defaultBranch: repo.defaultBranch,
+        testCommand: 'pnpm check',
+      };
+      st.repos.push(created);
+      audit({
+        actor: meActor(),
+        action: REPO_IMPORT_ADD,
+        target: `repo:${repo.fullName.toLowerCase()}`,
+        after: { owner: repo.owner, name: repo.name },
+        via: 'cockpit',
+        reason: `从驾驶舱导入 ${repo.fullName}`,
+      });
+      return ImportRepoResponse.parse({
+        repoId: created.id,
+        owner: created.owner,
+        name: created.name,
+        created: true,
+      });
+    },
+    async removeRepo(repoId) {
+      await wait();
+      const repo = st.repos.find((r) => r.id === repoId);
+      if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
+      st.repos.splice(st.repos.indexOf(repo), 1);
+      audit({
+        actor: meActor(),
+        action: REPO_IMPORT_REMOVE,
+        target: `repo:${repo.owner}/${repo.name}`.toLowerCase(),
+        before: { owner: repo.owner, name: repo.name },
+        via: 'cockpit',
+        reason: `从驾驶舱移出 ${repo.owner}/${repo.name}`,
+      });
+      return RemoveRepoResponse.parse({ removed: true });
+    },
+    async installAppOnRepo(raw) {
+      await wait();
+      const body = InstallAppRequest.parse(raw);
+      const repo = mockImportRepos().find((r) => r.githubId === body.githubId);
+      if (!repo) throw new ApiError(404, 'repo_not_visible', '这个仓不在你 GitHub 账号能看到的范围里');
+      if (repo.ownerType === 'Organization' && !repo.viewerCanAdmin) {
+        throw new ApiError(403, 'needs_org_admin', '这是组织的仓，要组织管理员先批准这个 App');
+      }
+      audit({
+        actor: meActor(),
+        action: GITHUB_INSTALL_REPO,
+        target: `repo:${repo.fullName.toLowerCase()}`,
+        via: 'cockpit',
+        reason: `把 App 装到 ${repo.fullName}`,
+      });
+      return InstallAppResponse.parse({ installed: 2, agent: true, engine: true });
+    },
+    async disconnectGitHub() {
+      await wait();
+      audit({
+        actor: meActor(),
+        action: GITHUB_OAUTH_DISCONNECT,
+        target: `user:${st.me.user.id}`,
+        via: 'cockpit',
+        reason: '断开 GitHub 授权',
+      });
+      return DisconnectGitHubResponse.parse({ disconnected: true });
     },
     async groomStatus(repoId) {
       await wait();
@@ -2327,26 +2264,31 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           const flow = taskFlow(t.task, views);
           const runIds = views.filter((v) => v.running).map((v) => v.id);
           const decision = pendingOf(t);
+          const stalled = t.task.state === 'stalled' ? t.task.stalled : undefined;
           const waitingReason = t.task.paused
             ? ('paused' as const)
             : asking
               ? ('founder_decision' as const)
-              : queued
-                ? ('queue' as const)
-                : flow.segment === 'verify_pending'
-                  ? ('verify_round' as const)
-                  : flow.segment === 'merge'
-                    ? ('merge_queue' as const)
-                    : ('nothing' as const);
+              : t.task.state === 'stalled'
+                ? ('parked' as const)
+                : queued
+                  ? ('queue' as const)
+                  : flow.segment === 'verify_pending'
+                    ? ('verify_round' as const)
+                    : flow.segment === 'merge'
+                      ? ('merge_queue' as const)
+                      : ('nothing' as const);
           const waitingSince = t.task.paused
             ? undefined
             : asking
               ? decision?.since
-              : queued
-                ? queued.queuedAt
-                : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
-                  ? flow.stageSince
-                  : undefined;
+              : waitingReason === 'parked'
+                ? stalled?.since
+                : queued
+                  ? queued.queuedAt
+                  : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
+                    ? flow.stageSince
+                    : undefined;
           return {
             issueNumber: t.task.issueNumber,
             title: t.task.title,
@@ -2354,6 +2296,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             segment: flow.segment,
             waitingReason,
             ...(t.task.paused ? { paused: t.task.paused } : {}),
+            ...(waitingReason === 'parked' ? { parked: stalled?.why ?? '引擎没写停下的原因' } : {}),
             ...(waitingSince ? { waitingSince } : {}),
             taskSince: t.task.createdAt,
             ...(flow.stageSince ? { stageSince: flow.stageSince } : {}),

@@ -164,15 +164,13 @@ export interface HarnessOptions {
   releaseRequest?: Deps['releaseRequest'];
   /** 「要你拍」拍完往进度单、任务单留言的替身（#1915）；不给就是没接上。 */
   decisionCommenter?: Deps['decisionCommenter'];
+  /** 本人 GitHub 身份那一套（#1989）的替身；不给就是没接上（那几个接口回 503）。 */
+  githubUser?: Deps['githubUser'];
   /**
    * 新哈希用的 scrypt 参数。不传用 TEST_SCRYPT_PARAMS。
    * 传 null：不设到 Deps 上，跟生产 main.ts 一样走 SCRYPT_PARAMS（慢，一条测试里最多用一次）。
    */
   scryptParams?: ScryptParams | null;
-  /** 导入仓库用的 GitHub 用户令牌替身。不给就是没接上。 */
-  githubUser?: Deps['githubUser'];
-  appCoverage?: Deps['appCoverage'];
-  githubUserProblem?: string;
 }
 
 function wire<S extends Store>(
@@ -220,6 +218,7 @@ function wire<S extends Store>(
     ...(options.releaseCard ? { releaseCard: options.releaseCard } : {}),
     ...(options.releaseRequest ? { releaseRequest: options.releaseRequest } : {}),
     ...(options.decisionCommenter ? { decisionCommenter: options.decisionCommenter } : {}),
+    ...(options.githubUser ? { githubUser: options.githubUser } : {}),
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {
       async signal(workflowId, signal) {
@@ -234,9 +233,6 @@ function wire<S extends Store>(
         }),
     },
     ...(options.scryptParams === null ? {} : { scryptParams: options.scryptParams ?? TEST_SCRYPT_PARAMS }),
-    ...(options.githubUser ? { githubUser: options.githubUser } : {}),
-    ...(options.appCoverage ? { appCoverage: options.appCoverage } : {}),
-    ...(options.githubUserProblem ? { githubUserProblem: options.githubUserProblem } : {}),
   };
   const { cockpit, agent, relay } = buildApps(deps);
 

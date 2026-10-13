@@ -1602,6 +1602,19 @@
         "message": "推 fleet/307-x 被拒：远端头 4f5b1f4 不含起会话前的头 a81893a（像是被强推改写了历史），不能自动并，要人看"
       },
       "expect": { "action": "park", "rule": "MC3", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X106",
+      "provenance": "production",
+      "origin": "法国 2026-10-12 16:14:14Z 起的引擎日志（任务 task:thoerwink8/fleet-dao#1971 的 openPr 活动）：第一下 POST /pulls 没收到回执（fetch failed），幂等键留在写到一半，之后几次都撞这一句；占用要 2 分钟才过期",
+      "evidence": {
+        "source": "openPr",
+        "routeBound": false,
+        "code": "IN_FLIGHT",
+        "retryable": true,
+        "message": "同一个写操作（github.open_pr thoerwink8/fleet-dao:fleet/1971-t01a1307a）别处正在做，稍后重试"
+      },
+      "expect": { "action": "retry", "rule": "GH3", "delaySeconds": 150, "routeOutcome": "neutral" }
     }
   ],
   "skipped": [

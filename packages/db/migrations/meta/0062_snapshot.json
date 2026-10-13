@@ -1,5 +1,5 @@
 {
-  "id": "dd09da0e-baee-440a-97d6-f4b63013410b",
+  "id": "8f529b7e-bf2f-458e-bc48-99fce5989a1b",
   "prevId": "a01fe28b-03c9-4344-a6ce-846b12fe2bf5",
   "version": "7",
   "dialect": "postgresql",
@@ -1624,6 +1624,114 @@
       },
       "isRLSEnabled": false
     },
+    "public.github_tokens": {
+      "name": "github_tokens",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "github_id": {
+          "name": "github_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "login": {
+          "name": "login",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "access_token_cipher": {
+          "name": "access_token_cipher",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scopes": {
+          "name": "scopes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "github_tokens_github_id_idx": {
+          "name": "github_tokens_github_id_idx",
+          "columns": [
+            {
+              "expression": "github_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "github_tokens_user_id_users_id_fk": {
+          "name": "github_tokens_user_id_users_id_fk",
+          "tableFrom": "github_tokens",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "github_tokens_user_unique": {
+          "name": "github_tokens_user_unique",
+          "nullsNotDistinct": false,
+          "columns": ["user_id"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "github_tokens_cipher_not_empty": {
+          "name": "github_tokens_cipher_not_empty",
+          "value": "length(\"github_tokens\".\"access_token_cipher\") > 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.feishu_joins": {
       "name": "feishu_joins",
       "schema": "",
@@ -2948,82 +3056,6 @@
         "github_events_attempts_positive": {
           "name": "github_events_attempts_positive",
           "value": "\"github_events\".\"attempts\" > 0"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.github_user_tokens": {
-      "name": "github_user_tokens",
-      "schema": "",
-      "columns": {
-        "user_id": {
-          "name": "user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "app_role": {
-          "name": "app_role",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "github_login": {
-          "name": "github_login",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "access_token": {
-          "name": "access_token",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "refresh_token": {
-          "name": "refresh_token",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "github_user_tokens_user_id_users_id_fk": {
-          "name": "github_user_tokens_user_id_users_id_fk",
-          "tableFrom": "github_user_tokens",
-          "tableTo": "users",
-          "columnsFrom": ["user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "github_user_tokens_user_id_app_role_pk": {
-          "name": "github_user_tokens_user_id_app_role_pk",
-          "columns": ["user_id", "app_role"]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "github_user_tokens_role_known": {
-          "name": "github_user_tokens_role_known",
-          "value": "\"github_user_tokens\".\"app_role\" in ('agent', 'engine')"
         }
       },
       "isRLSEnabled": false

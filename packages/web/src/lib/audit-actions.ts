@@ -5,9 +5,6 @@ import {
   AUTO_DISPATCH_ENABLE,
   CI_POLICY_SET,
   GROOM_ACTION,
-  REPO_APPS_INSTALL,
-  REPO_IMPORT,
-  REPO_REMOVE,
   RELEASE_REQUEST_ACTION,
   ROUTE_PROBE_ACTION,
 } from '@fleet-dao/shared';
@@ -29,9 +26,6 @@ export const AUDIT_ACTION_TEXT: Readonly<Record<string, string>> = {
   [AUTO_DISPATCH_ENABLE]: '开启了「让 AI 接活」',
   [AUTO_DISPATCH_DISABLE]: '关闭了「让 AI 接活」',
   [CI_POLICY_SET]: '改了 CI 模式',
-  [REPO_IMPORT]: '把仓加进了驾驶舱',
-  [REPO_REMOVE]: '把仓移出了驾驶舱',
-  [REPO_APPS_INSTALL]: '给仓授权了 GitHub App',
   [RELEASE_REQUEST_ACTION]: '点了发布到法国',
   // 任务
   'task.create': '建了任务',
@@ -117,7 +111,6 @@ export function targetHref(target: string): string | null {
     case 'routing':
       return '/routing';
     case 'setting':
-    case 'github':
       return '/settings';
     case 'notification':
       return '/notifications';

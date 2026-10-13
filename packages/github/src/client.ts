@@ -30,11 +30,14 @@ export function parseRepoSlug(slug: string): RepoRef {
 }
 
 /**
- * app = App 自己的 JWT（只调 /app/…）；agent / engine = 那个机器人在某个仓上的安装令牌（scope 不写 = 'api'，见 token-scopes.ts）。
+ * app = App 自己的 JWT（只调 /app/…）；agent / engine = 那个机器人在某个仓上的安装令牌（scope 不写 = 'api'，见 token-scopes.ts）；
+ * user = 某人自己的 OAuth 用户令牌（#1989，明文令牌由调用方从库里解出来传进来）：列「我 GitHub 上能看到的仓」、
+ * 把人自己的安装加仓/减仓，GitHub 只认本人令牌，App 机器人令牌看不到别人的个人仓。
  */
 export type Auth =
   | { as: 'app'; role: AppRole }
   | { as: AppRole; repo: RepoRef; scope?: TokenScope | undefined }
+  | { as: 'user'; token: string }
   | { as: 'anonymous' };
 
 export type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
@@ -266,6 +269,7 @@ export class GitHubClient {
   private async credential(auth: Auth, signal?: AbortSignal): Promise<string | null> {
     if (auth.as === 'anonymous') return null;
     if (auth.as === 'app') return this.appJwt(auth.role);
+    if (auth.as === 'user') return auth.token;
     return (await this.installationToken(auth.as, auth.repo, signal, auth.scope)).token;
   }
 

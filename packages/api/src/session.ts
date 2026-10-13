@@ -19,7 +19,6 @@ import { derive, nowSeconds, randomToken, safeEqual, signPayload, verifyPayload 
 const SESSION_PURPOSE = 'fleet-session/v1';
 const CSRF_PURPOSE = 'fleet-csrf/v1';
 const OAUTH_PURPOSE = 'fleet-oauth/v1';
-const GITHUB_OAUTH_PURPOSE = 'fleet-github-oauth/v1';
 export const SESSION_TTL_SECONDS = 14 * 24 * 60 * 60;
 /** 飞书授权码 5 分钟有效，暂存给 10 分钟足够。 */
 const OAUTH_TTL_SECONDS = 10 * 60;
@@ -45,20 +44,6 @@ const OAuthState = z.object({
 });
 export type OAuthState = z.infer<typeof OAuthState>;
 
-const GithubOAuthState = z
-  .object({
-    state: z.string().min(16),
-    verifier: z.string().min(43),
-    uid: z.string().min(1),
-    role: z.enum(['agent', 'engine']),
-    owner: z.string().min(1).optional(),
-    name: z.string().min(1).optional(),
-    next: z.string(),
-    exp: z.number().int(),
-  })
-  .refine((s) => (s.owner === undefined) === (s.name === undefined));
-export type GithubOAuthState = z.infer<typeof GithubOAuthState>;
-
 /**
  * 能登录驾驶舱的人：users 表里在用的创始人。协作者和机器人只算 GitHub 作者白名单，进不了驾驶舱；
  * 以后要放别人进来，给 users 加显式字段（比如 cockpitAccess），不按角色推断。
@@ -76,8 +61,8 @@ export type CockpitEnv = {
 export interface CookieNames {
   session: string;
   oauth: string;
-  /** GitHub 用户授权的暂存，和飞书登录那颗分开，免得互相冲掉。 */
-  githubOauth: string;
+  /** 「连接 GitHub」那一次的暂存（#1989）：和飞书登录分开，免得两件事同时做时互相顶掉。 */
+  repoOauth: string;
 }
 
 /** https 下用 __Host- 前缀：浏览器保证它只能由本域、Secure、Path=/ 设置，子域和明文页面改不动。 */
@@ -86,9 +71,9 @@ export function cookieNames(config: Config): CookieNames {
     ? {
         session: '__Host-fleet_session',
         oauth: '__Host-fleet_oauth',
-        githubOauth: '__Host-fleet_github_oauth',
+        repoOauth: '__Host-fleet_repo_oauth',
       }
-    : { session: 'fleet_session', oauth: 'fleet_oauth', githubOauth: 'fleet_github_oauth' };
+    : { session: 'fleet_session', oauth: 'fleet_oauth', repoOauth: 'fleet_repo_oauth' };
 }
 
 export function isCockpitUser(user: User | null): user is CockpitUser {
@@ -176,17 +161,33 @@ export function saveOAuthState(c: Context, config: Config, state: Omit<OAuthStat
   });
 }
 
-export function saveGithubOAuthState(
+/** 读出并当场删掉登录暂存（一次性）。 */
+export function takeOAuthState(c: Context, config: Config, now: Date): OAuthState | null {
+  const name = cookieNames(config).oauth;
+  const raw = getCookie(c, name);
+  if (!raw) return null;
+  deleteCookie(c, name, { path: '/', secure: config.cookieSecure });
+  const parsed = OAuthState.safeParse(verifyPayload(config.sessionSecret, OAUTH_PURPOSE, raw));
+  if (!parsed.success || parsed.data.exp <= nowSeconds(now)) return null;
+  return parsed.data;
+}
+
+/**
+ * 「连接 GitHub」那一次的暂存（#1989）：和飞书登录同一个做法（自签 Cookie、10 分钟、一次性），
+ * 但写在另一个 Cookie 上——同一个浏览器里两件事可能同时做，共用一个会被后做的顶掉。
+ * 不存 code_verifier：GitHub 的网页流这一步用 client_secret，PKCE 是可选的；state 已够防串。
+ */
+export function saveRepoOAuthState(
   c: Context,
   config: Config,
-  state: Omit<GithubOAuthState, 'exp'>,
+  state: Omit<OAuthState, 'exp'>,
   now: Date,
 ): void {
-  const value = signPayload(config.sessionSecret, GITHUB_OAUTH_PURPOSE, {
+  const value = signPayload(config.sessionSecret, OAUTH_PURPOSE, {
     ...state,
     exp: nowSeconds(now) + OAUTH_TTL_SECONDS,
   });
-  setCookie(c, cookieNames(config).githubOauth, value, {
+  setCookie(c, cookieNames(config).repoOauth, value, {
     httpOnly: true,
     secure: config.cookieSecure,
     sameSite: 'Lax',
@@ -195,20 +196,9 @@ export function saveGithubOAuthState(
   });
 }
 
-/** 读出并当场删掉 GitHub 授权暂存（一次性）。 */
-export function takeGithubOAuthState(c: Context, config: Config, now: Date): GithubOAuthState | null {
-  const name = cookieNames(config).githubOauth;
-  const raw = getCookie(c, name);
-  if (!raw) return null;
-  deleteCookie(c, name, { path: '/', secure: config.cookieSecure });
-  const parsed = GithubOAuthState.safeParse(verifyPayload(config.sessionSecret, GITHUB_OAUTH_PURPOSE, raw));
-  if (!parsed.success || parsed.data.exp <= nowSeconds(now)) return null;
-  return parsed.data;
-}
-
-/** 读出并当场删掉登录暂存（一次性）。 */
-export function takeOAuthState(c: Context, config: Config, now: Date): OAuthState | null {
-  const name = cookieNames(config).oauth;
+/** 读回并当场删掉「连接 GitHub」那一次的暂存（一次性）。 */
+export function takeRepoOAuthState(c: Context, config: Config, now: Date): OAuthState | null {
+  const name = cookieNames(config).repoOauth;
   const raw = getCookie(c, name);
   if (!raw) return null;
   deleteCookie(c, name, { path: '/', secure: config.cookieSecure });

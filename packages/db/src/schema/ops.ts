@@ -75,29 +75,6 @@ export const users = pgTable(
   ],
 );
 
-/**
- * 登录人自己的 GitHub 用户令牌（驾驶舱导入仓库、一键给两个 App 授权）。
- * 一人一个 App 一行。令牌不进接口回应、不进操作记录。人被删掉时一起删。
- */
-export const githubUserTokens = pgTable(
-  'github_user_tokens',
-  {
-    userId: uuid('user_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    appRole: text('app_role').notNull(),
-    githubLogin: text('github_login').notNull(),
-    accessToken: text('access_token').notNull(),
-    refreshToken: text('refresh_token'),
-    expiresAt: timestamp('expires_at', tz),
-    updatedAt: timestamp('updated_at', tz).notNull().defaultNow(),
-  },
-  (t) => [
-    primaryKey({ columns: [t.userId, t.appRole] }),
-    check('github_user_tokens_role_known', sql`${t.appRole} in ('agent', 'engine')`),
-  ],
-);
-
 /** 提醒中心。同一件事只有一条（dedupe_key），状态变了原地更新，不另发。 */
 export const notifications = pgTable(
   'notifications',
