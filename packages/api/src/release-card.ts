@@ -64,7 +64,7 @@ export interface ReleaseCardPort {
 }
 
 type Card = ReleaseCard;
-type Rows = Omit<Card, 'action'>;
+export type Rows = Omit<Card, 'action'>;
 type CommitLine = Extract<Card['mainline'], { state: 'ok' }>['commit'];
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
@@ -112,7 +112,8 @@ export interface BuildReleaseCardInput {
   timeoutMs?: number;
 }
 
-async function buildRows(input: BuildReleaseCardInput): Promise<Rows> {
+/** 发版卡前四行（主线、法国在用、差几个、最近做完）；发版预检（france-preflight.ts）也读这一份。 */
+export async function buildRows(input: BuildReleaseCardInput): Promise<Rows> {
   const asOf = input.now().toISOString();
   const { port } = input;
   const allUnreadable = (why: string): Rows => ({

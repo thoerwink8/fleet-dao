@@ -61,10 +61,10 @@ function donePreflight(
 ): FrancePreflightResponse {
   return {
     state: 'done',
-    command: 'pnpm release:onekey preflight',
+    command: '后端自己读事实（不起任何进程）',
     code: 0,
     signal: null,
-    stdout: '—— 预检摘要 ——\n主线 CI：绿\n预检过了',
+    stdout: '—— 发版预检 ——\n[通过] 主线 CI：绿\n结论：能发。',
     stderr: '',
     durationMs: 1800,
     timedOut: false,
@@ -85,10 +85,10 @@ describe('/france 页发版一键卡', () => {
     const btn = await screen.findByRole('button', { name: '发版预检' });
     fireEvent.click(btn);
     expect(await screen.findByText('预检过了')).toBeTruthy();
-    // 命令原样 show，让人看到跑的是哪一条
-    expect(await screen.findByText('pnpm release:onekey preflight')).toBeTruthy();
-    // stdout 内容（release-train 自己的话）也进结果块
-    expect(await screen.findByText(/主线 CI：绿/)).toBeTruthy();
+    // 说明原样 show：后端自己读，没有命令，也不提 pnpm
+    expect(await screen.findByText('后端自己读事实（不起任何进程）')).toBeTruthy();
+    expect(screen.queryByText(/pnpm/)).toBeNull();
+    expect(await screen.findByText(/\[通过\] 主线 CI：绿/)).toBeTruthy();
   });
 
   test('在走 + 走到第 4 步「发版」：写明 phase、target、暂停标记', async () => {
@@ -110,13 +110,13 @@ describe('/france 页发版一键卡', () => {
     expect(await screen.findByText(/派活已暂停/)).toBeTruthy();
   });
 
-  test('孤儿暂停标记：state=paused 写「暂停标记没人收」+ 提示用 abort 收掉', async () => {
+  test('孤儿暂停标记：state=paused 写「暂停标记没人收」+ 提示收掉', async () => {
     renderWith({
       release: { state: 'paused', asOf: '2026-10-05T02:00:00.000Z' },
       preflight: donePreflight(),
     });
     expect(await screen.findByText('暂停标记没人收')).toBeTruthy();
-    expect(await screen.findByText(/pnpm release:onekey abort/)).toBeTruthy();
+    expect(await screen.findByText(/要发版前先收掉它/)).toBeTruthy();
   });
 
   test('读不到状态：写「没查成 + 原因」，不拿「没在走」顶', async () => {
@@ -139,14 +139,14 @@ describe('/france 页发版一键卡', () => {
       release: idleRelease,
       preflight: donePreflight({
         code: 2,
-        stdout: '—— 预检摘要 ——\n主线 CI：绿',
-        stderr: '第 0 步「预检」没成：主线 CI 红（fleet-dao #1107 挂着）',
+        stdout: '—— 发版预检 ——\n[卡住] 主线 CI：红',
+        stderr: '[卡住] 主线 CI：红（fleet-dao #1107 挂着）',
       }),
     });
     expect(await screen.findByText('没在走')).toBeTruthy();
     fireEvent.click(await screen.findByRole('button', { name: '发版预检' }));
     expect(await screen.findByText(/预检没过/)).toBeTruthy();
-    expect(await screen.findByText(/主线 CI 红（fleet-dao #1107 挂着）/)).toBeTruthy();
+    expect(await screen.findByText(/主线 CI：红（fleet-dao #1107 挂着）/)).toBeTruthy();
     expect(await screen.findByText(/退出码 2/)).toBeTruthy();
   });
 
@@ -155,13 +155,13 @@ describe('/france 页发版一键卡', () => {
       release: idleRelease,
       preflight: {
         state: 'unreadable',
-        why: '这台后端没接上 release:onekey 的执行（开发、内存版）；到法国那台的驾驶舱开才有这颗按钮',
+        why: '这台后端没接上发版预检要读的东西（开发、内存版）；到法国那台的驾驶舱开才有这颗按钮',
         asOf: '2026-10-05T02:00:00.000Z',
       },
     });
     expect(await screen.findByText('没在走')).toBeTruthy();
     fireEvent.click(await screen.findByRole('button', { name: '发版预检' }));
-    expect(await screen.findByText(/没接上 release:onekey 的执行/)).toBeTruthy();
+    expect(await screen.findByText(/没接上发版预检要读的东西/)).toBeTruthy();
   });
 
   test('预检请求没发出去（网络挂）：写明没发出去', async () => {

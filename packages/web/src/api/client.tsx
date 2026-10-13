@@ -233,7 +233,7 @@ export interface FleetApi {
   franceReleasedCommits(): Promise<ReleasedCommits>;
   /** /france 页「发布到法国」按钮（#1232）：只收提交号，后端核它等于此刻主线头、写请求文件，法国上 root 的单元接活。 */
   franceRelease(sha: string): Promise<ReleaseRequestResult>;
-  /** /france 页「发版预检」按钮：点下让后端起 pnpm release:onekey preflight，命令写死、不收参数。 */
+  /** /france 页「发版预检」按钮：点下让后端自己读事实算能不能发（不起子进程、不收参数，#2021）。 */
   francePreflight(): Promise<FrancePreflightResponse>;
   /** /france 页「命令行工具」（#1969、#1971）：在用版本、官方最新、落后，升过的带上次升级时间和升上去的版本。只读。 */
   franceCliTools(): Promise<CliToolsResponse>;
@@ -758,8 +758,8 @@ export function useFranceRelease() {
 }
 
 /**
- * /france 页「发版预检」按钮（#618）：点下让后端起 pnpm release:onekey preflight。
- * 命令后端写死、不收参数；最长 60 秒（后端 timeout），前端用 useMutation 不缓存、不作废读。
+ * /france 页「发版预检」按钮（#618）：点下让后端自己读事实算能不能发（#2021，不起子进程、不收参数）。
+ * 后端读 GitHub 限时 12 秒；前端用 useMutation 不缓存、不作废读。
  */
 export function useFrancePreflight() {
   const api = useApi();

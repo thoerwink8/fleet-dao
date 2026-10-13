@@ -3710,11 +3710,22 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     async francePreflight() {
       await wait();
-      // 假数据不起子进程：装作这台后端没接上那一条发布命令（真法国机器才装得上）。
-      // 话术里别带真命令名。
+      // 假数据：照真预检的样子给一份，但每行都写明是演示。真的预检只在法国那台的后端里有。
+      const lines = [
+        '[通过] 主线 CI：绿（演示数据）',
+        '[通过] 别的发布：没有在走的（演示数据）',
+        '[卡住] 法国在跑的会话：读不到（这是演示后端，没有引擎）',
+      ];
       return FrancePreflightResponseSchema.parse({
-        state: 'unreadable',
-        why: '这是假后端：这台机器上没装真的发布命令；只读预检和起飞用的正式环境才有这颗按钮',
+        state: 'done',
+        command: '后端自己读事实（不起任何进程）',
+        code: 2,
+        signal: null,
+        stdout: ['—— 发版预检（演示数据）——', ...lines, '结论：不能发（1 项卡住）。', ''].join('\n'),
+        stderr: `${lines[2]}\n`,
+        durationMs: 12,
+        timedOut: false,
+        truncated: false,
         asOf: iso(),
       });
     },

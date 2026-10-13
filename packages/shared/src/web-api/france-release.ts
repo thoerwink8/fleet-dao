@@ -1,7 +1,7 @@
-// 法国发版一键（/france 页 #618）：这一台后端自己跑的 release-train 状态 + 点「发版预检」起 pnpm release:onekey preflight。
-// 只到预检；不发版。这里只定义能给页面看的形状：状态三态（在走/暂停中/没在走、读不到），预检一次一回（命令、退出码、输出、读了多久）。
+// 法国发版一键（/france 页 #618）：这一台后端自己读的 release-train 状态 + 点「发版预检」由后端进程内读事实算（#2021，不起子进程）。
+// 只到预检；不发版。这里只定义能给页面看的形状：状态三态（在走/暂停中/没在走、读不到），预检一次一回（说明、退出码、输出、读了多久）。
 // 每一项各自带「查成了 / 没查成 + 原因」（同 env 页的 EnvFact）；读不到就写读不到，不拿空、0 或假 ok 顶（仓的底线）。
-// 这一节只在正式环境接得上（驾驶舱后端真的起在一份检出的仓里、~/.fleet-dao/ 下有 release-train 的状态文件）；
+// 这一节只在正式环境接得上（法国上的后端：读发布目录、进度记录目录和引擎的 drain.json）；
 // 开发、内存版后端 deps 没挂上时一律回 unreadable，页面画「没查成 + 原因」，不显示假数据。
 import { z } from 'zod';
 import { Time } from './internal.ts';
@@ -37,9 +37,9 @@ export const FranceReleaseStateSchema = z.discriminatedUnion('state', [
 ]);
 
 /**
- * 发版预检一次一回：起子进程 `pnpm release:onekey preflight`（命令固定写死，不收参数），最多 60 秒、512KB。
- * code：0 = 预检过了；非 0 原样回（1 用法不对、2 预检没过、3 卡住），页面给不同颜色。起进程都没起来时 code 给 null，另写 spawnError。
- * stdout / stderr 全回，前端原样分块展示；超长的后端已经截断（truncated 标 true）。
+ * 发版预检一次一回：后端自己读事实算（france-preflight.ts；不起子进程、不收参数）。
+ * command：给人看的一句说明（没有命令可显示）。code：0 = 能发；2 = 不能发（有项卡住，什么都没改）。
+ * stdout 每项一行（[通过] / [卡住] / [留意]）加结论；stderr 只列卡住的那几项。timedOut、truncated 保留给形状不变，现在恒为 false。
  */
 export const FrancePreflightResponseSchema = z.discriminatedUnion('state', [
   z.object({
@@ -51,12 +51,12 @@ export const FrancePreflightResponseSchema = z.discriminatedUnion('state', [
     stderr: z.string(),
     /** 后端 ms 单位的耗时（前端给一个「跑了 12 秒」的小字）。 */
     durationMs: z.number().int().min(0),
-    /** 60 秒超时被杀了；这种情况 code/signal 由 Node 给，原样透出。 */
+    /** 保留的字段：后端不再起子进程，恒为 false。 */
     timedOut: z.boolean(),
     truncated: z.boolean(),
     asOf: Time,
   }),
-  /** 起子进程都没起来：这台后端没接这一节（开发、内存版），或 pnpm 不在 PATH 里。 */
+  /** 没接上这一节（开发、内存版）：读不到预检要用的东西，写原因。 */
   z.object({ state: z.literal('unreadable'), why: z.string(), asOf: Time }),
 ]);
 

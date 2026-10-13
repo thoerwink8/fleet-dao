@@ -320,9 +320,9 @@ async function assemble(): Promise<{
     runTranscript: pgRunTranscript(db),
     // 环境页（#820 片 1）的版本那一项：正式环境读发布目录现算；别处不给，页面写「没查成」
     ...(production ? { deployLag: () => readDeployLagInput() } : {}),
-    // /france 页发版一键（#618）：读 ~/.fleet-dao/release-train.*、起 pnpm release:onekey preflight。
-    // 只在正式环境装：开发、内存版起这条命令会在开发者本机的仓里发，会害人以为发的是这台，所以不装、接口回「没接上」。
-    ...(production ? { franceRelease: liveFranceReleasePort(log) } : {}),
+    // /france 页发版一键（#618）：读 release-train 进度记录和引擎的 drain.json，「发版预检」据此在进程内算（#2021，不起子进程）。
+    // 只在正式环境装：开发、内存版读的不是法国的东西，不装、接口回「没接上」。
+    ...(production ? { franceRelease: liveFranceReleasePort() } : {}),
     // /france 页「发版」卡（#1231）：主线头、CI、PR 现读 GitHub（同一份机器人凭据），法国在用的提交读发布目录；只在正式环境装
     ...(production ? { releaseCard: liveReleaseCardPort(github.releaseFacts) } : {}),
     // /france 页「发布到法国」按钮（#1232）：写请求文件，法国上 root 的单元接活（人工档）；后端自己不起带 root 的进程

@@ -2,8 +2,8 @@
 // 侧栏只留「法国」。一页里有本台六项事实、引擎总开关、命令行工具（#1969）、定时任务、发版。多一台机器时六项按台并排（对照表的写法）。
 // 旧地址 /env 由 routes/env.tsx 转到这里。
 //
-// 「发版一键」只到预检：命令后端写死 pnpm release:onekey preflight，不收参数、不开任意 CLI 口子；预检是只读的——暂停、发版它都不做。
-// 真发版：点「在用版本」那一行里的「发布到法国」（#1232、#1255，components/release-card.tsx 的 ReleaseEntry；后端只写请求文件，法国上 root 的单元接活），或走 pnpm release:onekey start。
+// 「发版一键」只到预检：后端自己读事实算（不起子进程、不收参数，#2021）；预检是只读的——暂停、发版它都不做。
+// 真发版：点「在用版本」那一行里的「发布到法国」（#1232、#1255，components/release-card.tsx 的 ReleaseEntry；后端只写请求文件，法国上 root 的单元接活）。
 // 发版单位是主线提交（决定 0032）：那一行写明落后几个提交、要发的主线头提交号和标题；下面的「发版」卡只读。
 //
 // 数据从哪来：
@@ -138,9 +138,9 @@ function ReleaseBody({
           {release.state === 'running'
             ? `${release.phase} · ${release.target}${release.marker ? ' · 派活已暂停' : ' · 暂停标记没写'}${release.why ? ` · ${release.why}` : ''}`
             : release.state === 'paused'
-              ? '暂停标记在、但一趟的记录不在：之前 abort 没把标记清掉。要发版前先用 pnpm release:onekey abort 收掉它'
+              ? '暂停标记在、但一趟的记录不在：之前 abort 没把标记清掉。要发版前先收掉它（指挥官在本机跑 pnpm release:onekey abort）'
               : release.state === 'idle'
-                ? '发版前点「发版预检」核一遍（只读，不暂停、不发版）；真发版走 pnpm release:onekey start'
+                ? '发版前点「发版预检」核一遍（只读，不暂停、不发版）；真发版点上面「在用版本」那一行里的「发布到法国」'
                 : release.why}
         </p>
       </div>
@@ -162,19 +162,15 @@ function ReleaseBody({
                   label={result.code === 0 ? '预检过了' : '预检没过'}
                 />
                 {result.code === 0 ? null : (
-                  <span className="text-meta text-muted-foreground">
-                    退出码不是 0，看下面输出找哪一项卡住
-                  </span>
+                  <span className="text-meta text-muted-foreground">有项卡住，看下面带 [卡住] 的那几行</span>
                 )}
               </p>
               <p className="mt-1.5 text-meta text-muted-foreground">
                 <span className="num">{result.command}</span>
                 {' · '}
                 退出码 {result.code ?? '（没给）'}
-                {result.signal ? `，信号 ${result.signal}` : ''}
-                {' · 跑了 '}
-                {Math.round(result.durationMs / 100) / 10} 秒{result.timedOut ? '（60 秒到点了被杀）' : ''}
-                {result.truncated ? '（输出超 512KB 已截断）' : ''}
+                {' · 读了 '}
+                {Math.round(result.durationMs / 100) / 10} 秒
               </p>
               {result.stdout ? (
                 <pre className="mt-2 max-h-80 overflow-auto rounded-md bg-muted p-3 text-meta whitespace-pre-wrap">
@@ -184,7 +180,7 @@ function ReleaseBody({
               {result.stderr ? (
                 <>
                   <p className="mt-2 text-meta font-medium text-ink-stall">
-                    stderr（release-train 的报错 / 没成的行都在这）：
+                    卡住的几项（上面带 [卡住] 的，再列一遍）：
                   </p>
                   <pre className="mt-1 max-h-80 overflow-auto rounded-md bg-muted p-3 text-meta whitespace-pre-wrap">
                     {result.stderr}
