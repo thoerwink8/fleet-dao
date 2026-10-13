@@ -65,6 +65,7 @@ import type {
   AgentSession,
   AuditRecord,
   CommandClaim,
+  GitHubAppRole,
   GitHubDelivery,
   GitHubTokenRecord,
   JobRecord,
@@ -1172,23 +1173,38 @@ export function createMemoryStore(
       data.repos = data.repos.filter((r) => r.id !== repoId);
       return 'removed';
     },
-    async getGitHubToken(userId) {
-      const row = data.githubTokens.get(userId);
+    async getGitHubToken(userId, role) {
+      const row = data.githubTokens.get(githubTokenKey(userId, role));
       return row ? { ...row } : null;
     },
+    async listGitHubTokens(userId) {
+      const out: GitHubTokenRecord[] = [];
+      for (const role of ['agent', 'engine'] as const) {
+        const row = data.githubTokens.get(githubTokenKey(userId, role));
+        if (row) out.push({ ...row });
+      }
+      return out;
+    },
     async putGitHubToken(input) {
-      data.githubTokens.set(input.userId, {
+      data.githubTokens.set(githubTokenKey(input.userId, input.role), {
         userId: input.userId,
         githubId: input.githubId,
         login: input.login,
+        role: input.role,
         accessTokenCipher: input.accessTokenCipher,
         scopes: input.scopes,
         expiresAt: input.expiresAt,
         updatedAt: now().toISOString(),
       });
     },
-    async deleteGitHubToken(userId) {
-      data.githubTokens.delete(userId);
+    async deleteGitHubToken(userId, role) {
+      const roles: GitHubAppRole[] = role ? [role] : ['agent', 'engine'];
+      for (const item of roles) data.githubTokens.delete(githubTokenKey(userId, item));
     },
   };
+}
+
+/** 一个人每个 App 一行。键把两边分开，断开时按人删光。 */
+function githubTokenKey(userId: string, role: GitHubAppRole): string {
+  return `${userId}:${role}`;
 }

@@ -1,5 +1,5 @@
 // 设置页「仓库」一节里的「导入仓库」（#1989）：列出登录人自己 GitHub 上能看到的仓，
-// 一行一个仓，标好「个人 / 组织」「App 装了没」「在不在驾驶舱」，每行给「加进 / 移出驾驶舱」「装 App」两个动作。
+// 一行一个仓，标好「个人 / 组织」「App 装了没」「在不在驾驶舱」，每行给「加进 / 移出驾驶舱」「一键授权」。
 //
 // 版式照 docs/design/驾驶舱界面.md 第三节：页面 → 区块两层；区块里用 List / ListRow，不手写卡片；
 // 状态用 StatusBadge（有状态色的），分类用 Tag；行的次要操作收进 RowMenu。
@@ -15,7 +15,6 @@ import {
   useDisconnectGitHub,
   useImportableRepos,
   useImportRepo,
-  useInstallAppOnRepo,
   useRemoveRepo,
 } from '../api/client';
 import type { ImportableRepo } from '../api/types';
@@ -164,7 +163,7 @@ export function RepoImportSection() {
           {/* 个人仓 / 组织仓分开：组织仓要组织先批准 App，点一下只是「请求」。 */}
           <RepoGroup
             title="个人仓"
-            hint="你自己的仓，点「加进/装 App」当场生效。"
+            hint="你自己的仓，点「加进驾驶舱」或「一键授权」当场生效。"
             rows={repos.filter((r) => r.ownerType === 'User')}
           />
           <RepoGroup
@@ -194,9 +193,8 @@ function RepoGroup({ title, hint, rows }: { title: string; hint: string; rows: I
 function ImportRow({ repo }: { repo: ImportableRepo }) {
   const importRepo = useImportRepo();
   const removeRepo = useRemoveRepo();
-  const installApp = useInstallAppOnRepo();
   const [askingRemove, setAskingRemove] = useState(false);
-  const busy = importRepo.isPending || removeRepo.isPending || installApp.isPending;
+  const busy = importRepo.isPending || removeRepo.isPending;
 
   return (
     <>
@@ -213,7 +211,7 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
                 {repo.archived ? <Tag>已归档</Tag> : null}
               </span>
               <span data-row-meta className="truncate text-meta text-muted-foreground">
-                {repo.ownerType === 'Organization' ? '组织' : '个人'}
+                {repo.ownerType === 'Organization' ? '组织 · 要组织先批准这个 App' : '个人'}
                 {repo.installBlockedWhy ? ` · ${repo.installBlockedWhy}` : ''}
               </span>
             </div>
@@ -231,30 +229,11 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
             </span>
             {repo.inCockpit ? <StatusBadge tone="done" label="已在驾驶舱" /> : null}
 
-            {/* 动作：没装全给「装 App」，没在驾驶舱给「加进驾驶舱」，在驾驶舱给「移出」。 */}
+            {/* 动作：没装全给「一键授权」（整页跳 GitHub），没在驾驶舱给「加进驾驶舱」，在驾驶舱给「移出」。 */}
             <div className="flex shrink-0 items-center gap-1.5">
               {!repo.fullyInstalled && repo.canInstall ? (
-                // loading-ok: TODO #2012 只变灰（busy）、不转圈，第二期换成 loading
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() =>
-                    installApp.mutate(
-                      { githubId: repo.githubId },
-                      {
-                        onSuccess: (r) =>
-                          r.installed === 2
-                            ? toast.success(`两个 App 都装到了 ${repo.fullName}`)
-                            : toast.warning(r.reason ?? '只装上了一部分', {
-                                description: '先去 GitHub 把 App 装到你的账号，再回来点一次',
-                              }),
-                        onError: (e) => toast.error('没能装 App', { description: errorText(e) }),
-                      },
-                    )
-                  }
-                >
-                  装 App
+                <Button size="sm" variant="outline" asChild>
+                  <a href={`/api/github/authorize?githubId=${repo.githubId}`}>一键授权</a>
                 </Button>
               ) : null}
               {!repo.fullyInstalled && !repo.canInstall && !repo.installBlockedWhy ? (

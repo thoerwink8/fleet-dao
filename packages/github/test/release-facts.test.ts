@@ -1,20 +1,29 @@
 // 驾驶舱「发版」卡读 GitHub 的几样（release-facts.ts，「引擎」机器人只读）：主线头、提交、汇总检查、compare、最近合并的 PR、单的标题。
-// 故意造出的失败：形状认不出、一条检查都没有（不算绿）、差得多只读最后一页、没有合并了的 PR、号是 PR、请求本身失败往外抛。
+// 故意造出的失败：形状认不出、一条检查都没有（不算绿）、汇总检查被挤到第 2 页、差得多只读最后一页、没有合并了的 PR、号是 PR、请求本身失败往外抛。
 import { describe, expect, it } from 'vitest';
-import type { GhRequest, GitHubClient } from '../src/client.ts';
+import { type GhRequest, GitHubClient } from '../src/client.ts';
 import { createReleaseFacts } from '../src/release-facts.ts';
 
 const repo = { owner: 'o', name: 'r' };
 const SHA = 'a'.repeat(40);
 
-/** 只替身 request：按路径回数据，记下每次请求。 */
-function stub(handler: (req: GhRequest) => unknown) {
+/**
+ * 只替身 request：按路径回数据，记下每次请求。
+ * all / pages 用真客户端的翻页（跟 Link 头的 next）；一页取不出数组由它抛 UNEXPECTED_RESPONSE。
+ * linkFor 给第一页的下一页地址，用来把汇总检查挤到第 2 页。
+ */
+function stub(handler: (req: GhRequest) => unknown, linkFor?: (req: GhRequest) => string | null) {
   const calls: GhRequest[] = [];
   const client = {
     async request(req: GhRequest) {
       calls.push(req);
-      return { status: 200, data: handler(req), headers: new Headers() };
+      const headers = new Headers();
+      const link = linkFor?.(req);
+      if (link) headers.set('link', link);
+      return { status: 200, data: handler(req), headers };
     },
+    pages: GitHubClient.prototype.pages,
+    all: GitHubClient.prototype.all,
   } as unknown as GitHubClient;
   return { facts: createReleaseFacts(client), calls };
 }
@@ -98,10 +107,46 @@ describe('mainCi', () => {
     });
   });
 
+  it('check 被 100 条 merge-gate 挤到第 2 页：翻页取全后仍判绿', async () => {
+    const gates = Array.from({ length: 100 }, (_, i) => run({ id: i + 1, name: 'merge-gate' }));
+    const next = `<https://api.github.com/repos/o/r/commits/${SHA}/check-runs?per_page=100&page=2>; rel="next"`;
+    const { facts, calls } = stub(
+      (req) => ({ check_runs: req.url?.includes('page=2') ? [run({ id: 101 })] : gates }),
+      (req) => (req.url?.includes('page=2') ? null : next),
+    );
+    expect(await facts.mainCi(repo, SHA)).toEqual({ state: 'green', detail: '' });
+    expect(calls.map((c) => c.url ?? c.path)).toEqual([
+      `/repos/o/r/commits/${SHA}/check-runs`,
+      `https://api.github.com/repos/o/r/commits/${SHA}/check-runs?per_page=100&page=2`,
+    ]);
+    // 跟发版车同一读法：按名字过滤，再翻页。不带 check_name 时 merge-gate 堆过 10 页就会把 check 读丢。
+    expect(calls[0]?.query).toMatchObject({ check_name: 'check', per_page: 100, filter: 'all' });
+  });
+
+  it('同名重跑的成功在第 2 页：翻页取全后认最新的一条', async () => {
+    const next = `<https://api.github.com/repos/o/r/commits/${SHA}/check-runs?per_page=100&page=2>; rel="next"`;
+    const { facts } = stub(
+      (req) => ({
+        check_runs: req.url?.includes('page=2')
+          ? [run({ id: 2, conclusion: 'success', started_at: '2026-10-07T09:30:00Z' })]
+          : [run({ id: 1, conclusion: 'failure', started_at: '2026-10-07T09:00:00Z' })],
+      }),
+      (req) => (req.url?.includes('page=2') ? null : next),
+    );
+    expect(await facts.mainCi(repo, SHA)).toEqual({ state: 'green', detail: '' });
+  });
+
   it('形状认不出：抛错', async () => {
     await expect(stub(() => ({ check_runs: 'x' })).facts.mainCi(repo, SHA)).rejects.toMatchObject({
       code: 'UNEXPECTED_RESPONSE',
     });
+  });
+
+  it('读汇总检查按名字过滤（check_name=check），别把几百条 merge-gate 也读回来（#2010 的回归）', async () => {
+    const { facts, calls } = stub(() => ({ check_runs: [run({})] }));
+    expect(await facts.mainCi(repo, SHA)).toEqual({ state: 'green', detail: '' });
+    // 关键：请求带上 check_name=check。不带时一个提交上 200 条 merge-gate 会把 check 挤出要读的范围（曾误判 pending、发布被挡）。
+    expect(calls[0]?.query).toMatchObject({ check_name: 'check' });
   });
 });
 

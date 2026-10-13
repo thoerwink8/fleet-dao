@@ -41,6 +41,12 @@ const OAuthState = z.object({
   verifier: z.string().min(43),
   next: z.string(),
   exp: z.number().int(),
+  /** 一键授权要装的仓（GitHub 数字编号）。只连接、用来列仓时没有这项。 */
+  githubId: z.number().int().positive().optional(),
+  /** 这一跳在给哪个 App 换用户令牌。 */
+  role: z.enum(['agent', 'engine']).optional(),
+  /** oauth = 去授权页换令牌；setup = 人在 GitHub 安装页装完，回到 /github/setup。 */
+  step: z.enum(['oauth', 'setup']).optional(),
 });
 export type OAuthState = z.infer<typeof OAuthState>;
 

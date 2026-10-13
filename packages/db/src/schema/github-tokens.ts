@@ -2,7 +2,7 @@
 // 用本人身份的 OAuth 用户令牌——App 机器人令牌看不到别人的个人仓，也调不了那两个「对本人安装」的接口。
 //
 // 改这里之前必须知道：
-// - 一个人一行（user_id 唯一）：再授权就整行覆盖，不越积越多。
+// - 一个人每个 App 一行（user_id + role 唯一）：再授权就覆盖那一行，不越积越多。
 // - 只存密文：access_token_cipher 是 api 的 github-token.ts 用 FLEET_SESSION_SECRET 派生的密钥加密的
 //   （v1.<iv>.<tag>.<密文>），明文只在内存里过一下、不落库不进日志。授权被 GitHub 撤了（401）就把这行删掉。
 // - scope 记下 GitHub 回的那串（用来在页面上如实说明「只读还是能写」，不拿它当权限判断）。
@@ -23,6 +23,11 @@ export const githubTokens = pgTable(
     githubId: bigint('github_id', { mode: 'number' }).notNull(),
     /** GitHub 的登录名（显示用，不拿它认身份）。 */
     login: text('login').notNull(),
+    /**
+     * 这份令牌是哪个 App 换来的。GitHub 的用户令牌只能看见签发它的那个 App 的安装，
+     * 两个 App 各存一行，才能分别把仓装进去。
+     */
+    role: text('role').notNull().default('agent'),
     /** 密文，格式 v1.<iv>.<tag>.<密文>（base64url）。 */
     accessTokenCipher: text('access_token_cipher').notNull(),
     /** GitHub 回的 scope 原文（空格分隔）；只用于显示。 */
@@ -36,8 +41,9 @@ export const githubTokens = pgTable(
       .$onUpdate(() => new Date()),
   },
   (t) => [
-    unique('github_tokens_user_unique').on(t.userId),
+    unique('github_tokens_user_role_unique').on(t.userId, t.role),
     index('github_tokens_github_id_idx').on(t.githubId),
+    check('github_tokens_role_known', sql`${t.role} in ('agent', 'engine')`),
     check('github_tokens_cipher_not_empty', sql`length(${t.accessTokenCipher}) > 0`),
   ],
 );

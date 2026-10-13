@@ -70,6 +70,7 @@ export const toGitHubToken = (r: typeof githubTokens.$inferSelect) => ({
   userId: r.userId,
   githubId: r.githubId,
   login: r.login,
+  role: r.role === 'engine' ? ('engine' as const) : ('agent' as const),
   accessTokenCipher: r.accessTokenCipher,
   scopes: r.scopes,
   expiresAt: isoOpt(r.expiresAt) ?? null,
