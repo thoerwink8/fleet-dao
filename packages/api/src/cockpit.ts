@@ -17,6 +17,7 @@ import {
   type LegacyRead,
   MeResponse,
   NodeDetailResponseSchema,
+  LocalSessionsResponseSchema,
   NodesResponseSchema,
   NotificationsQuery,
   NotificationsResponse,
@@ -68,6 +69,7 @@ import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
 import { modelRosterFields } from './model-roster.ts';
 import { registerModelRosterRoutes } from './model-roster-routes.ts';
+import { readLocalSessions } from './local-sessions.ts';
 import { readNodeDetail, readNodes } from './node-views.ts';
 import { ORG_SWITCH_NOT_HERE, orgSwitchView } from './org-switch-view.ts';
 import {
@@ -93,6 +95,7 @@ import { eventsHandler, type SseRelay } from './sse.ts';
 import { taskListView } from './task-list.ts';
 import { TASK_ROUTE_PINS_NOT_HERE, taskRoutePinView } from './task-route-pins.ts';
 import { taskWorkflowIdForTask } from './temporal.ts';
+import { registerWorktreeRoutes } from './worktree-routes.ts';
 import {
   buildBoard,
   buildPools,
@@ -216,6 +219,11 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const engine = await engineProbe();
     return reply(c, NodesResponseSchema, await readNodes(deps, engine));
   });
+
+  // 本机会话（#1991）：要排在 /nodes/:nodeId 前面，不然 sessions 会被当成环境编号。
+  app.get(WebRoutes.localSessions.path, async (c) =>
+    reply(c, LocalSessionsResponseSchema, await readLocalSessions(deps)),
+  );
 
   app.get(WebRoutes.node.path, async (c) =>
     reply(c, NodeDetailResponseSchema, await readNodeDetail(deps, c.req.param('nodeId'))),
@@ -891,6 +899,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   registerRoutingOrderRoutes(app, deps, actorOf);
   registerRouteProbeRoutes(app, deps, actorOf, engineProbe);
   registerGroomRoutes(app, deps, actorOf, engineProbe);
+  registerWorktreeRoutes(app, deps, actorOf, engineProbe);
   registerRunTranscriptRoutes(app, deps);
   registerModelRosterRoutes(app, deps, actorOf);
   registerFranceReleaseRoutes(app, deps);

@@ -21,10 +21,11 @@ import {
   NodeReportSchema,
 } from '@fleet-dao/shared';
 import { InvalidNodeReportError } from '@fleet-dao/store';
-import { Hono } from 'hono';
+import { Hono, type MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { Deps } from './deps.ts';
 import { ApiError, errorBody, readJson, reply } from './http.ts';
+import { registerLocalSessionsReceiver } from './local-sessions.ts';
 
 /** 通行证明文的哈希（和 fleet-api node-key new 打印的、FLEET_NODE_KEYS 里贴的同一个算法）。 */
 export const nodeKeyHash = (token: string): string => createHash('sha256').update(token).digest('hex');
@@ -67,21 +68,26 @@ export function nodeReportRoutes(deps: Deps): Hono<{ Variables: { nodeId: string
     return new ApiError(status, code, message);
   };
 
+  const authenticate: MiddlewareHandler<{ Variables: { nodeId: string } }> = async (c, next) => {
+    if (Object.keys(config.nodeKeys).length === 0) {
+      throw reject(null, 503, 'node_keys_not_wired', NODE_KEYS_NOT_WIRED);
+    }
+    const token = c.req.header(NODE_REPORT_HEADER);
+    if (token === undefined) {
+      throw reject(null, 401, 'node_token_missing', `要带通行证：请求头 ${NODE_REPORT_HEADER}`);
+    }
+    const nodeId = nodeIdForToken(config.nodeKeys, token.trim());
+    if (nodeId === null) throw reject(null, 401, 'node_token_invalid', '通行证不对');
+    c.set('nodeId', nodeId);
+    await next();
+  };
+
+  // 本机会话（#1991）：同一个头、同一套钥匙，另一张表、另一个节流槽（和快照各推各的）。
+  registerLocalSessionsReceiver(app, deps, authenticate);
+
   app.post(
     NODE_REPORT_PATH,
-    async (c, next) => {
-      if (Object.keys(config.nodeKeys).length === 0) {
-        throw reject(null, 503, 'node_keys_not_wired', NODE_KEYS_NOT_WIRED);
-      }
-      const token = c.req.header(NODE_REPORT_HEADER);
-      if (token === undefined) {
-        throw reject(null, 401, 'node_token_missing', `要带通行证：请求头 ${NODE_REPORT_HEADER}`);
-      }
-      const nodeId = nodeIdForToken(config.nodeKeys, token.trim());
-      if (nodeId === null) throw reject(null, 401, 'node_token_invalid', '通行证不对');
-      c.set('nodeId', nodeId);
-      await next();
-    },
+    authenticate,
     oversize,
     async (c) => {
       const nodeId = c.get('nodeId');
