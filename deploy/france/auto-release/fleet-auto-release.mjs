@@ -16,6 +16,7 @@ import {
   CI_WORKFLOW,
   copyAlreadyInstalled,
   HUMAN_TIER_COPY_CHECKS,
+  HUMAN_TIER_PATHS,
   humanTierPathsStillBehind,
   MAIN_HISTORY,
   RELEASES,
@@ -123,7 +124,18 @@ export const realIo = {
     if (applied === null) return { applied: null, log: '' };
     const satisfied = {};
     for (const c of HUMAN_TIER_COPY_CHECKS) satisfied[c.path] = installedCopyMatches(head, c);
-    const paths = humanTierPathsStillBehind(satisfied);
+    // 比不了就抛：不能把「没比成」当成内容没变（那样会把真要重跑的报成落后 0）
+    const diff = git(['diff', '--name-only', applied, head, '--', ...HUMAN_TIER_PATHS]);
+    if (diff.code !== 0) {
+      throw new Error(
+        `比装机人工档的内容失败（git 退出码 ${diff.code}）：${tail(diff.stderr || diff.stdout)}`,
+      );
+    }
+    const changed = diff.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '');
+    const paths = humanTierPathsStillBehind(satisfied, changed);
     // 空 pathspec 的 git log 会列出全部提交，把没改人工档的也算成落后
     if (paths.length === 0) return { applied, log: '' };
     const log = gitOk(

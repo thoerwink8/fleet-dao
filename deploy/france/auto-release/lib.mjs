@@ -45,6 +45,7 @@ export const RULES_USERS = ['fleet-agent-carpool', 'pilot'];
  * 和 france.sh 引用的每个仓里文件，要么在这里、要么在测试里登记的自动档清单里）。
  * 运行时直接读的副本（HUMAN_TIER_COPY_CHECKS）字节已经和主线一样的，不再算进落后：france-applied 只在整套跑完没红时才往前拨，
  * 副本已经换上、别的读回还有红时，标记会停在旧提交上，不该再叫人重跑整套。防火墙、sudoers、sshd、被 source 的脚本不在这条例外里。
+ * 主线头上内容和装到的那一版一样的路径也不数：中间的提交改完又改回去，重跑整套不会换机器上的东西。
  */
 export const HUMAN_TIER_PATHS = [
   'deploy/lib/human-tier.sh',
@@ -112,11 +113,16 @@ export function copyAlreadyInstalled(blob, installedBlob, needDaemonReload) {
 
 /**
  * 数落后提交时还要交给 `git log` 的路径。satisfied 里严格等于 true 的副本路径拿掉。
+ * changed 是主线头相对装到的提交、内容变了的路径（`git diff --name-only`）。给了才按它收窄；
+ * 没给就是没查成，路径照旧留着，不能把「没比过」当成「没变」。
  * 返回空数组表示一段都不用数：调用方必须当成落后 0。拿空 pathspec 去 git log 会列出全部提交。
  */
-export function humanTierPathsStillBehind(satisfied) {
+export function humanTierPathsStillBehind(satisfied, changed) {
   const skip = new Set(HUMAN_TIER_COPY_CHECKS.filter((c) => satisfied?.[c.path] === true).map((c) => c.path));
-  return HUMAN_TIER_PATHS.filter((p) => !skip.has(p));
+  const paths = HUMAN_TIER_PATHS.filter((p) => !skip.has(p));
+  if (!Array.isArray(changed)) return paths;
+  const keep = new Set(changed);
+  return paths.filter((p) => keep.has(p));
 }
 /**
  * 这边发的报警都以它开头：规矩同步没成 `auto-release:rules:<提交号>`，装机自动档没装成 `auto-release:tier:<提交号>`，
