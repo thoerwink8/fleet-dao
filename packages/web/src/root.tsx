@@ -93,21 +93,34 @@ export default function App() {
   );
 }
 
+/** 顶层出错页：主文案只说发生了什么、能做什么；原始报错折叠在「详情」里（#2017）。 */
 export function ErrorBoundary() {
   const error = useRouteError();
-  const title = isRouteErrorResponse(error)
-    ? `${error.status} ${error.statusText}`
-    : `${brand.product}出错了`;
-  const detail = isRouteErrorResponse(error) ? String(error.data ?? '') : errMessage(error);
+  const notFound = isRouteErrorResponse(error) && error.status === 404;
+  const title = notFound ? '没有这个页面' : '页面出了点问题';
+  const hint = notFound
+    ? '地址可能写错了，或这个页面已经不在了。回到看板再找一下。'
+    : '这一页没能画出来，你的数据没有丢。刷新页面再试一次；还不行就回到看板，并把下面「详情」里的内容告诉我。';
+  const detail = isRouteErrorResponse(error)
+    ? [`${error.status} ${error.statusText}`, error.data ? String(error.data) : ''].filter(Boolean).join('\n')
+    : errMessage(error);
   return (
     <main className="grid h-dvh place-items-center bg-background p-6">
       <div className="max-w-md text-center">
         <LogoMark className="mx-auto size-10" />
         <h1 className="mt-4 text-heading font-semibold">{title}</h1>
-        <p className="mt-2 text-body break-words text-muted-foreground">{detail}</p>
+        <p className="mt-2 text-body text-muted-foreground" data-error-hint>
+          {hint}
+        </p>
         <Link to="/" className="mt-4 inline-block text-body underline underline-offset-4">
           回到看板
         </Link>
+        <details className="mt-4 text-left text-meta text-muted-foreground" data-error-detail>
+          <summary className="cursor-pointer text-center">详情</summary>
+          <pre className="mt-2 max-h-40 overflow-auto rounded-md bg-muted p-2 font-mono break-words whitespace-pre-wrap">
+            {detail}
+          </pre>
+        </details>
       </div>
     </main>
   );

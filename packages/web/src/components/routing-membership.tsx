@@ -435,6 +435,7 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
   const [keys, setKeys] = useState<string[]>([]);
   const [noted, setNoted] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [asking, setAsking] = useState<string | null>(null);
   const locked = edit.disabledWhy;
 
   const onRegister = async (e: FormEvent) => {
@@ -452,6 +453,7 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
     }
   };
 
+  // 失败把错误抛给确认框（框留着写原因）；页面上的 error 也照旧写一份
   const drop = async (modelKey: string) => {
     if (locked) return;
     try {
@@ -461,6 +463,7 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
       setError(null);
     } catch (err) {
       setError(errorText(err));
+      throw err;
     }
   };
 
@@ -503,10 +506,9 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
                 size="xs"
                 variant="ghost"
                 className={TAP}
-                loading={revoke.isPending}
-                disabled={locked !== null || revoke.isPending}
+                disabled={locked !== null}
                 aria-label={`撤掉 ${item}`}
-                onClick={() => void drop(item)}
+                onClick={() => setAsking(item)}
               >
                 撤掉
               </Button>
@@ -514,6 +516,22 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
           ))}
         </ul>
       ) : null}
+      <AlertDialog open={asking !== null} onOpenChange={(open) => !open && setAsking(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>撤掉 {asking}？</AlertDialogTitle>
+            <AlertDialogDescription>
+              这个模型串会从渠道的登记里拿掉，路由里挂着它的地方不再认它；要用得重新登记。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>先不</AlertDialogCancel>
+            <AlertDialogAction onConfirm={() => (asking ? drop(asking) : Promise.resolve())}>
+              撤掉
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

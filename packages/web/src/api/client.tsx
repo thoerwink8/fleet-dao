@@ -315,6 +315,12 @@ export const keys = {
 export const HOME_POLL_MS = 30_000;
 /** 其余读页（任务列表、通知、渠道状态、额度）的兜底轮询：推送正常时 60 秒。 */
 export const READ_POLL_MS = 60_000;
+/** 法国页各块自己重拉：节点列表、定时任务、发版状态每 30 秒（页面说明读这两个数，#2017）。 */
+export const FRANCE_FAST_POLL_MS = 30_000;
+/** 法国页：本台环境事实、发版卡、命令行工具每 1 分钟。 */
+export const FRANCE_SLOW_POLL_MS = 60_000;
+/** 法国页页头 ⓘ 里的刷新说明：间隔取自上面两个常量，和各块真正的重拉间隔是同一个数。 */
+export const FRANCE_REFRESH_NOTE = `各块自己刷新：节点、定时任务、发版状态每 ${FRANCE_FAST_POLL_MS / 1000} 秒，本台环境事实、发版卡、命令行工具每 ${FRANCE_SLOW_POLL_MS / 1000} 秒`;
 /** 推送不是 open（连接中、断了）时所有读页都缩到 10 秒：推送靠不住，轮询顶上。 */
 export const DOWN_POLL_MS = 10_000;
 
@@ -644,7 +650,7 @@ export function useJobs() {
   return useQuery({
     queryKey: keys.jobs,
     queryFn: () => api.jobs(),
-    refetchInterval: 30_000,
+    refetchInterval: FRANCE_FAST_POLL_MS,
   });
 }
 
@@ -692,7 +698,7 @@ export function useFranceReleaseState() {
   return useQuery({
     queryKey: keys.franceReleaseState,
     queryFn: () => api.franceReleaseState(),
-    refetchInterval: 30_000,
+    refetchInterval: FRANCE_FAST_POLL_MS,
   });
 }
 
@@ -704,7 +710,7 @@ export function useFranceReleaseCard() {
   return useQuery({
     queryKey: keys.franceReleaseCard,
     queryFn: () => api.franceReleaseCard(),
-    refetchInterval: 60_000,
+    refetchInterval: FRANCE_SLOW_POLL_MS,
   });
 }
 
@@ -714,7 +720,7 @@ export function useCliTools() {
   return useQuery({
     queryKey: keys.franceCliTools,
     queryFn: () => api.franceCliTools(),
-    refetchInterval: 60_000,
+    refetchInterval: FRANCE_SLOW_POLL_MS,
   });
 }
 
@@ -765,7 +771,7 @@ export function useEnv({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: keys.env,
     queryFn: () => api.env(),
-    refetchInterval: 60_000,
+    refetchInterval: FRANCE_SLOW_POLL_MS,
     enabled,
   });
 }
@@ -829,7 +835,7 @@ export function useNodes() {
   return useQuery({
     queryKey: keys.nodes,
     queryFn: () => api.nodes(),
-    refetchInterval: 30_000,
+    refetchInterval: FRANCE_FAST_POLL_MS,
   });
 }
 

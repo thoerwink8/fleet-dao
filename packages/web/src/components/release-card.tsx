@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { errorText, useFranceRelease } from '../api/client';
 import type { ReleaseCard } from '../api/types';
 import { formatAgo } from '../lib/format';
+import { RELEASE_WAIT_MAX_MINUTES } from '../lib/release-wait';
 import { cn } from '../lib/utils';
 import { KeyValue } from './layout/key-value';
 import { StatusBadge } from './layout/status-badge';
@@ -327,8 +328,8 @@ function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
                   </div>
                 ) : null}
                 <p className="text-meta text-muted-foreground">
-                  点「确认发布」就是同意对外发布，并记一条操作记录。法国会先暂停引擎总开关、等在跑的会话收尾（最多
-                  13
+                  点「确认发布」就是同意对外发布，并记一条操作记录。法国会先暂停引擎总开关、等在跑的会话收尾（最多{' '}
+                  {RELEASE_WAIT_MAX_MINUTES}{' '}
                   分钟），再发版、验证；发完把引擎总开关和接活开关恢复到发版前的样子（发前开着的开回，发前关着的保持关）。
                 </p>
               </div>

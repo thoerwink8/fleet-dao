@@ -24,6 +24,7 @@ import { Link } from 'react-router';
 import { brand } from '#brand';
 import {
   errorText,
+  FRANCE_REFRESH_NOTE,
   isNotFound,
   useCliTools,
   useEnv,
@@ -318,7 +319,7 @@ function MissingSnapshot({ nodeId }: { nodeId: string }) {
 }
 
 /**
- * 这一页几块自己重拉（本台、发版卡 1 分钟，其余 30 秒）。
+ * 这一页几块自己重拉（本台环境事实、发版卡、命令行工具 1 分钟，其余 30 秒；间隔取自 api/client 的两个常量）。
  * 超过 5 分钟最旧的一块还没再读成，刷新条才标「数据已过期」（正常间隔里不标）。
  */
 const FRANCE_STALE_AFTER_MS = 5 * TIME.MIN;
@@ -857,7 +858,7 @@ export default function France() {
     <Page
       title="法国"
       description="本台的六项事实、引擎总开关、命令行工具、定时任务和发版。"
-      detail="读不到的写「没查成」和原因，不拿 0 顶；每 30 秒自己刷新。多一台机器时按台并排比。"
+      detail={`读不到的写「没查成」和原因，不拿 0 顶；${FRANCE_REFRESH_NOTE}。多一台机器时按台并排比。`}
       refresh={{
         onRefresh: () => void read.refetch(),
         isFetching: read.isFetching,

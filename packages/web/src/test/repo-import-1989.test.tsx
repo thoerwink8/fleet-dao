@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // 设置页「导入仓库」（#1989）：列出本人 GitHub 上看得见的仓，个人/组织分开，能加进驾驶舱、能断开。
 // 走假数据（mock api），不联网。
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
 import SettingsPage from '../routes/settings';
@@ -51,6 +51,34 @@ describe('设置页导入仓库（#1989）', () => {
     renderApp(<SettingsPage />, { api: createMockApi({ live: false }), route: '/settings' });
     await screen.findByText('导入仓库');
     await waitFor(() => expect(screen.getAllByText(/GitHub/).length).toBeGreaterThan(0));
+  });
+});
+
+describe('断开 GitHub 授权（#2017）', () => {
+  test('点「断开」只开确认框、不发请求；点「先不」不发；确认后只发一次', async () => {
+    const api = createMockApi({ live: false });
+    const calls: number[] = [];
+    const inner = api.disconnectGitHub.bind(api);
+    api.disconnectGitHub = async () => {
+      calls.push(1);
+      return inner();
+    };
+    renderApp(<SettingsPage />, { api, route: '/settings' });
+    await screen.findByText('thoerwink8/widgets');
+    const open = () => fireEvent.click(document.querySelector('[data-disconnect-button]') as HTMLElement);
+    open();
+    const dialog = await screen.findByRole('alertdialog');
+    expect(calls).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole('button', { name: '先不' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(calls).toHaveLength(0);
+    open();
+    const ok = within(await screen.findByRole('alertdialog')).getByRole('button', { name: '断开' });
+    fireEvent.click(ok);
+    fireEvent.click(ok);
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(calls).toHaveLength(1);
   });
 });
 

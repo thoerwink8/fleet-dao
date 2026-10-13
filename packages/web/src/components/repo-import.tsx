@@ -52,6 +52,7 @@ function appInstallUrl(slug: 'agent' | 'engine'): string {
 export function RepoImportSection() {
   const query = useImportableRepos();
   const disconnect = useDisconnectGitHub();
+  const [askingDisconnect, setAskingDisconnect] = useState(false);
   // 钩子要在所有提前 return 之前调用（React 的规矩）：放最上面。
   const now = useNow();
 
@@ -126,20 +127,42 @@ export function RepoImportSection() {
           <Button
             size="sm"
             variant="outline"
-            loading={disconnect.isPending}
-            disabled={disconnect.isPending}
-            onClick={() => {
-              disconnect.mutate(undefined, {
-                onSuccess: () => toast.success('已断开 GitHub 授权'),
-                onError: (e) => toast.error('没能断开', { description: errorText(e) }),
-              });
-            }}
+            data-disconnect-button
+            onClick={() => setAskingDisconnect(true)}
           >
             <Unplug className="size-3.5" aria-hidden />
             断开
           </Button>
         </div>
       </div>
+
+      <AlertDialog open={askingDisconnect} onOpenChange={setAskingDisconnect}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>断开 GitHub 授权？</AlertDialogTitle>
+            <AlertDialogDescription>
+              驾驶舱会忘掉存着的授权，下面这份仓列表读不到了，要再点「连接
+              GitHub」才能恢复。已经接进驾驶舱的仓不受影响。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>先不</AlertDialogCancel>
+            <AlertDialogAction
+              onConfirm={async () => {
+                try {
+                  await disconnect.mutateAsync();
+                } catch (e) {
+                  toast.error('没能断开', { description: errorText(e) });
+                  throw e;
+                }
+                toast.success('已断开 GitHub 授权');
+              }}
+            >
+              断开
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {data.auth.unreadable ? (
         <Notice tone="stall" title="存着的授权读不出来">

@@ -2,7 +2,7 @@
 // 失败时（无权限 403、后端 500、没有 JSON 的错误页、断网）错误原样抛给调用方，不吞、不当成功，也不误跳登录页。
 import { CSRF_HEADER } from '@fleet-dao/shared';
 import { describe, expect, test, vi } from 'vitest';
-import type { FleetApi } from './client';
+import type { ApiError, FleetApi } from './client';
 import { createHttpApi } from './http';
 
 const ME = {
@@ -265,10 +265,12 @@ describe.each(WRITES)('写请求 $name', (w) => {
     expect(onUnauthorized).not.toHaveBeenCalled();
   });
 
-  test('【故意造出的失败】后端回一个没有 JSON 的 500 页：照实报「后端返回 500」，不当成功', async () => {
+  test('【故意造出的失败】后端回一个没有 JSON 的 500 页：报人话「后端出错了（500）」，不当成功，不露 HTML', async () => {
     const { fn } = fakeFetch(() => new Response('<html>oops</html>', { status: 500 }));
     const err = await w.call(createHttpApi({ fetch: fn })).catch((e: unknown) => e);
-    expect(err).toMatchObject({ status: 500, code: 'http_500', message: '后端返回 500' });
+    expect(err).toMatchObject({ status: 500, code: 'http_500' });
+    expect((err as Error).message).toContain('后端出错了（500）');
+    expect((err as Error).message).not.toContain('<html>');
   });
 
   test('【故意造出的失败】断网：报「连不上驾驶舱后端」，不当成功', async () => {
@@ -278,6 +280,10 @@ describe.each(WRITES)('写请求 $name', (w) => {
     const err = await w.call(createHttpApi({ fetch: fn })).catch((e: unknown) => e);
     expect(err).toMatchObject({ status: 0, code: 'network' });
     expect((err as Error).message).toContain('连不上驾驶舱后端');
+    // 提示是人话：说清能做什么；浏览器的原始报错不拼进主文案，只放 details 给「详情」用
+    expect((err as Error).message).not.toContain('Failed to fetch');
+    expect((err as Error).message).toContain('检查网络');
+    expect((err as ApiError).details).toEqual({ raw: 'Failed to fetch' });
   });
 });
 

@@ -68,7 +68,7 @@ function DrawerBody({
               aria-controls={`home-drawer-panel-${t.id}`}
               onClick={() => onTab(t.id)}
               className={cn(
-                'relative flex h-10 items-center gap-1.5 rounded-t-md px-3 text-body text-muted-foreground transition-colors hover:text-foreground md:h-9',
+                'relative flex h-11 items-center gap-1.5 rounded-t-md px-3 text-body text-muted-foreground transition-colors hover:text-foreground md:h-9',
                 active && 'font-medium text-foreground',
               )}
             >
@@ -90,7 +90,7 @@ function DrawerBody({
             type="button"
             size="icon"
             variant="ghost"
-            className="ml-auto size-10 md:size-8"
+            className="ml-auto size-11 md:size-8"
             onClick={onClose}
             aria-label="收起抽屉"
           >
@@ -159,7 +159,7 @@ function DrawerBody({
 /** 画布右上角的按钮：左半开「要你拍的」，右半开「做完的」。N>0 时左半用等你色。 */
 function DrawerButton({ count, open, onOpen }: { count: number; open: boolean; onOpen(tab: Tab): void }) {
   const half =
-    'flex h-8 items-center gap-1.5 px-3 text-body transition-colors hover:bg-accent focus-visible:z-10';
+    'flex h-11 items-center gap-1.5 px-3 text-body transition-colors md:h-8 hover:bg-accent focus-visible:z-10';
   return (
     <div
       data-drawer-button
@@ -214,7 +214,7 @@ function LocalButton({ onOpen, className }: { onOpen(): void; className?: string
       aria-label={`${brief.text}，打开本机会话`}
       onClick={onOpen}
       className={cn(
-        'flex h-8 items-center gap-1.5 border-l px-3 text-body transition-colors hover:bg-accent focus-visible:z-10',
+        'flex h-11 items-center gap-1.5 border-l px-3 text-body transition-colors md:h-8 hover:bg-accent focus-visible:z-10',
         brief.tone ? inkClass[brief.tone] : 'text-muted-foreground',
         className,
       )}

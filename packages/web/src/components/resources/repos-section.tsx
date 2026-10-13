@@ -3,7 +3,7 @@
 // 有没提交、没推的改动，或正被任务、会话用着的一律拒删，结果里写明拒了哪棵、为什么。
 // 怎么写每一格在 repos.ts；这里只管排版和按钮。
 import { FolderGit2, Trash2 } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { type ReactNode, useState } from 'react';
 import { toast } from 'sonner';
 import { errorText, useWorktreeCleanup, useWorktrees } from '../../api/client';
 import type { WorktreeCleanupView } from '../../api/types';
@@ -16,6 +16,16 @@ import { LoadError, LoadingRows } from '../layout/load-state';
 import { Notice } from '../layout/notice';
 import { Section } from '../layout/section';
 import { StatusBadge } from '../layout/status-badge';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '../ui/alert-dialog';
 import { Button } from '../ui/button';
 import { cleanupWord, type RepoDisk, type RepoRow, repoRows, type TreeView, treeStateWord } from './repos';
 import type { Cell } from './view';
@@ -220,29 +230,47 @@ export function ReposSection({
   const latest = q.data?.cleanups[0];
   const busy = latest?.status === 'queued' || latest?.status === 'running' || cleanup.isPending;
 
-  const onCleanup = () =>
-    cleanup.mutate(
-      {},
-      {
-        onSuccess: () => toast.success('已叫法国清理没用的工作树'),
-        onError: (e) => toast.error('没叫成', { description: errorText(e) }),
-      },
-    );
+  const [asking, setAsking] = useState(false);
+  const onCleanup = async () => {
+    try {
+      await cleanup.mutateAsync({});
+    } catch (e) {
+      toast.error('没叫成', { description: errorText(e) });
+      throw e;
+    }
+    toast.success('已叫法国清理没用的工作树');
+  };
 
-  // loading 只跟这一次点击（转圈）；「已经有一次在排队/在做」那一段整块置灰走 disabled（#1993）
+  // 点一下先问：清理会删工作树目录（有改动、被用着的会拒删，但删的那些回不来）。
+  // loading 只跟这一次点击（转圈，在确认框里）；「已经有一次在排队/在做」那一段整块置灰走 disabled（#1993）
   const button = remote ? null : (
-    <Button
-      size="sm"
-      variant="outline"
-      onClick={onCleanup}
-      loading={cleanup.isPending}
-      disabled={busy || !q.data}
-      data-cleanup-button
-    >
-      <Trash2 aria-hidden />
-      <span className="max-md:hidden">清理没用的工作树</span>
-      <span className="md:hidden">清理</span>
-    </Button>
+    <>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={() => setAsking(true)}
+        disabled={busy || !q.data}
+        data-cleanup-button
+      >
+        <Trash2 aria-hidden />
+        <span className="max-md:hidden">清理没用的工作树</span>
+        <span className="md:hidden">清理</span>
+      </Button>
+      <AlertDialog open={asking} onOpenChange={setAsking}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>清理法国上没用的工作树？</AlertDialogTitle>
+            <AlertDialogDescription>
+              会删掉没人用的工作树目录，删了就回不来。有没提交、没推的改动，或正被任务、会话用着的会拒删，结果在区块顶上写明。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>先不</AlertDialogCancel>
+            <AlertDialogAction onConfirm={onCleanup}>清理</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 
   const result = q.data ? repoRows(q.data, resources, running) : undefined;

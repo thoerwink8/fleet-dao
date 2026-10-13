@@ -92,7 +92,11 @@ function SummaryPanel({
           hint
         )}
       </p>
-      {items.length ? <List>{items}</List> : <EmptyState size="inline" title="没有" />}
+      {items.length ? (
+        <List>{items}</List>
+      ) : (
+        <EmptyState size="inline" title={`「${title}」下面现在没有东西`} />
+      )}
     </Section>
   );
 }

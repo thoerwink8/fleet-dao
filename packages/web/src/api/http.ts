@@ -96,6 +96,8 @@ export interface HttpApiOptions {
   eventSource?: (url: string) => EventSource;
   /** 测试里替换页面可见性；默认读 document（没有 document 的环境不管可见性）。 */
   page?: PageVisibility;
+  /** 一个请求（含读响应体）最多等多久，默认 REQUEST_TIMEOUT_MS；超了报 code 'timeout'。 */
+  timeoutMs?: number;
 }
 
 interface SendOptions {
@@ -106,8 +108,12 @@ interface SendOptions {
   rotatesSession?: boolean;
 }
 
+/** 一个请求最多等多久：后端 30 秒没回就当没回应（慢查询远在这之内）。 */
+export const REQUEST_TIMEOUT_MS = 30_000;
+
 export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
   const origin = opts.origin ?? '';
+  const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
   const doFetch = opts.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init));
   let csrf: string | undefined;
   // 改密码会让后端把这个人所有旧会话作废、只在 PUT 的响应里给这一处换新 Cookie（api/src/credentials.ts）。
@@ -140,52 +146,83 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     }
     const init: RequestInit = { method, headers, credentials: 'same-origin' };
     if (body !== undefined) init.body = JSON.stringify(body);
-    let res: Response;
-    let pending: Promise<Response> | undefined;
-    try {
-      pending = doFetch(url, init);
-      if (rotatesSession) rotation = pending;
-      res = await pending;
-    } catch (err) {
-      throw new ApiError(0, 'network', `连不上驾驶舱后端：${errMessage(err)}`);
-    } finally {
-      if (rotation === pending) rotation = undefined;
-    }
-    if (!res.ok) {
-      const raw: unknown = await res.json().catch(() => undefined);
-      const parsed = ApiErrorBody.safeParse(raw);
-      const err = parsed.success
-        ? new ApiError(
-            res.status,
-            parsed.data.error.code,
-            parsed.data.error.message,
-            parsed.data.error.details,
-          )
-        : new ApiError(res.status, `http_${res.status}`, `后端返回 ${res.status}`);
-      // 401 + 这两个 code 是「会话好好的，只是密码输错了」（登录页的账密、设置页的当前密码）：不是登录过期，
-      // 不能触发跳登录页——否则设置页输错当前密码会整页跳走，错误提示根本看不到。
-      const oldCookieTail = changingAtStart || passwordChanges > 0 || epochAtStart !== sessionEpoch;
-      if (res.status === 401 && !PASSWORD_CHECK_CODES.has(err.code) && !oldCookieTail)
-        opts.onUnauthorized?.();
-      if (err.code === 'csrf_token') csrf = undefined;
-      throw err;
-    }
-    if (!schema) {
-      // 204 这类没有响应体的成功也把（空的）响应体读完：不读的话，浏览器在页面随后的重拉里会把这一条标成「请求中断」（ERR_ABORTED）
-      await res.text().catch(() => undefined);
-      return undefined as z.output<S>;
-    }
-    const json: unknown = await res.json();
-    const parsed = schema.safeParse(json);
-    if (!parsed.success) {
-      throw new ApiError(
-        res.status,
-        'bad_response_shape',
-        '后端返回的数据不符合约定（shared/web-api.ts）',
-        parsed.error.issues,
+    // 超时：fetch 和读响应体共用一个计时（后端接了请求却一直不回，页面不能永远转圈）。推送（EventSource）不走这里。
+    const ctl = new AbortController();
+    init.signal = ctl.signal;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ctl.abort();
+    }, timeoutMs);
+    const timeoutError = () =>
+      new ApiError(
+        0,
+        'timeout',
+        `后端 ${Math.round(timeoutMs / 1000)} 秒没有回应，请稍后再试；反复出现请告诉我。`,
       );
+    try {
+      let res: Response;
+      let pending: Promise<Response> | undefined;
+      try {
+        pending = doFetch(url, init);
+        if (rotatesSession) rotation = pending;
+        res = await pending;
+      } catch (err) {
+        if (timedOut) throw timeoutError();
+        throw new ApiError(0, 'network', '连不上驾驶舱后端，网络可能断了；检查网络后再试一次。', {
+          raw: errMessage(err),
+        });
+      } finally {
+        if (rotation === pending) rotation = undefined;
+      }
+      if (!res.ok) {
+        const raw: unknown = await res.json().catch(() => undefined);
+        const parsed = ApiErrorBody.safeParse(raw);
+        const err = parsed.success
+          ? new ApiError(
+              res.status,
+              parsed.data.error.code,
+              parsed.data.error.message,
+              parsed.data.error.details,
+            )
+          : new ApiError(
+              res.status,
+              `http_${res.status}`,
+              `后端出错了（${res.status}），稍后再试；反复出现请告诉我。`,
+            );
+        // 401 + 这两个 code 是「会话好好的，只是密码输错了」（登录页的账密、设置页的当前密码）：不是登录过期，
+        // 不能触发跳登录页——否则设置页输错当前密码会整页跳走，错误提示根本看不到。
+        const oldCookieTail = changingAtStart || passwordChanges > 0 || epochAtStart !== sessionEpoch;
+        if (res.status === 401 && !PASSWORD_CHECK_CODES.has(err.code) && !oldCookieTail)
+          opts.onUnauthorized?.();
+        if (err.code === 'csrf_token') csrf = undefined;
+        throw err;
+      }
+      if (!schema) {
+        // 204 这类没有响应体的成功也把（空的）响应体读完：不读的话，浏览器在页面随后的重拉里会把这一条标成「请求中断」（ERR_ABORTED）
+        await res.text().catch(() => undefined);
+        return undefined as z.output<S>;
+      }
+      let json: unknown;
+      try {
+        json = await res.json();
+      } catch (err) {
+        if (timedOut) throw timeoutError();
+        throw err;
+      }
+      const parsed = schema.safeParse(json);
+      if (!parsed.success) {
+        throw new ApiError(
+          res.status,
+          'bad_response_shape',
+          '后端返回的数据页面看不懂，可能是页面和后端版本不一致；刷新页面再试，反复出现请告诉我。',
+          parsed.error.issues,
+        );
+      }
+      return parsed.data;
+    } finally {
+      clearTimeout(timer);
     }
-    return parsed.data;
   }
 
   function apiUrl(path: string, params?: Record<string, string>, query?: Query): string {

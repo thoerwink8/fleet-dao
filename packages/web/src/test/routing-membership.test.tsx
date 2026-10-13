@@ -261,7 +261,18 @@ describe('渠道：手工登记', () => {
     const drop = within(list).getByRole('button', { name: '撤掉 claude-sonnet-x' });
     expect(drop.className.split(/\s+/)).toEqual(expect.arrayContaining(['min-h-9', 'min-w-9']));
     fireEvent.click(drop);
+    // 点「撤掉」只开确认框，不发请求（#2017）；点「先不」也不发；确认后只发一次
+    const dialog = await screen.findByRole('alertdialog');
+    expect(revoke).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: '先不' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(revoke).not.toHaveBeenCalled();
+    fireEvent.click(drop);
+    const ok = within(await screen.findByRole('alertdialog')).getByRole('button', { name: '撤掉' });
+    fireEvent.click(ok);
+    fireEvent.click(ok);
     await waitFor(() => expect(screen.queryByRole('list', { name: '已登记的模型串' })).toBeNull());
+    expect(revoke).toHaveBeenCalledTimes(1);
     expect(revoke).toHaveBeenCalledWith('ch-claude', { modelKey: 'claude-sonnet-x' });
     expect(api.state().channels.some((c) => c.id === 'ch-claude')).toBe(true);
   });
@@ -340,9 +351,13 @@ describe('写失败要露出来', () => {
 
     failRevoke = true;
     fireEvent.click(within(list).getByRole('button', { name: '撤掉 claude-sonnet-x' }));
-    const revokeAlert = await screen.findByRole('alert');
-    expect(revokeAlert.textContent).toContain('撤掉没写上');
-    expect(screen.getByRole('list', { name: '已登记的模型串' }).textContent).toContain('claude-sonnet-x');
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: '撤掉' }));
+    await waitFor(() =>
+      expect(screen.getAllByRole('alert').some((a) => a.textContent?.includes('撤掉没写上'))).toBe(true),
+    );
+    // 确认框留着（失败不关），名单没动
+    expect(screen.getByRole('alertdialog')).toBeTruthy();
+    expect(document.querySelector('[aria-label="已登记的模型串"]')?.textContent).toContain('claude-sonnet-x');
     expect(screen.queryByText('已登记 claude-sonnet-x')).toBeTruthy();
   });
 });
