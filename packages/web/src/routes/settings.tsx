@@ -31,6 +31,7 @@ import { SaveButton } from '../components/layout/save-button';
 import { Section } from '../components/layout/section';
 import { StatusDot } from '../components/layout/status-badge';
 import { PageNav } from '../components/page-nav';
+import { PwaStatus } from '../components/pwa-status';
 import { RepoCiPolicyControl } from '../components/repo-ci-policy';
 import { useRepo } from '../components/repo-context';
 import { RepoRow } from '../components/repo-groom';
@@ -716,6 +717,10 @@ export default function Settings() {
             ) : settings.isFetched ? null : (
               <LoadingRows rows={1} />
             )}
+            {/* 装成 APP、系统通知、角标（#2050）：三样都是浏览器现读的，不依赖后端设置 */}
+            <div className="mt-3">
+              <PwaStatus />
+            </div>
           </SettingsSection>
 
           <SettingsSection
