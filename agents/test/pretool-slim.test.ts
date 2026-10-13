@@ -1,7 +1,6 @@
 // 调工具前钩子（agents/hooks/pretool.mjs）的「规则减法」（决定 0089，创始人 2026-10-13 17:54「都同意……你全都修复掉」）：
 // ① 前台等待上限整段删掉（两天拦 18 次全是误伤）：timeout、sleep 写多长都放行。
-// ② 新拦 `cd <目录> && <只读查看命令>`（两天约 7800 次）：提示改用 Read/Grep/Glob + 绝对路径、或 git -C / pnpm --dir；
-//    只拦 Claude Code 的输入（它有这几个工具）；钩子看不清的写法、夹了别的命令的，一律不当拦。
+// ② `cd <目录> && <只读查看命令>` 不拦（cdReadVerdict 已删）。
 // ③ 打印进程命令行：Claude Code 里看得清、整条只有看进程和过滤文字的，改成用 updatedInput 自动接 redact-secrets.mjs 放行；
 //    看不清的、夹了别的命令的、别家 AI 的，照旧拦下给配方。
 // ④ GENERIC_RE（*.key、*.pem 这类）在 heredoc 正文里只认带 / 或 \ 的路径：脚本里的 `item.key;` 不再当密钥文件；真密钥照拦。
@@ -74,57 +73,21 @@ describe('① 前台等待上限删掉', () => {
   });
 });
 
-describe('② cd 进目录再查看：拦，指到 Read/Grep/Glob 或 git -C', () => {
+describe('② cd 进目录再查看：不拦（没有安全后果，cd x && cat y 能跑出正确结果）', () => {
   it.each([
     ['Bash', 'cd /x && cat a'],
     ['Bash', 'cd /x && sed -n 1,9p a'],
-    ['Bash', "cd 'D:\\x' && head -5 a; tail b"],
     ['Bash', 'cd /x; ls -la'],
     ['Bash', 'cd /x && grep -n foo a | head -5'],
-    ['Bash', 'cd /x && rg foo src'],
     ['PowerShell', 'cd D:\\x; Get-Content a'],
     ['PowerShell', 'Set-Location D:\\x; type a'],
-  ])('%s：%s → 拦', (tool, command) => {
-    const v = lib.decide(cc(tool, { command }));
-    expect(v.code).toBe(2);
-    const first = v.message?.split('\n')[0] ?? '';
-    expect(first).toContain('Read');
-    expect(first).toContain('Grep');
-    expect(first).toContain('Glob');
-    expect(first).toContain('绝对路径');
-    expect(first).toContain('git -C');
+  ])('%s：%s → 放行（Claude Code 的输入和别家的都一样）', (tool, command) => {
+    expect(lib.decide(cc(tool, { command }))).toEqual({ code: 0 });
+    expect(lib.decide(bare(tool, { command }))).toEqual({ code: 0 });
   });
 
-  it('拦下的理由里带上 cd 的那个目录，照着改就行', () => {
-    expect(lib.decide(cc('Bash', { command: 'cd /srv/app && cat README.md' })).message).toContain('/srv/app');
-  });
-
-  it.each([
-    'cd /x && pnpm test',
-    'git -C /x log',
-    'cd /x && git status',
-    'cd /x && cat a && pnpm build',
-    'cd /x && sed -i s/a/b/ f',
-    'cd /x && sed s/a/b/ f',
-    'cat /x/a',
-    'ls /x',
-  ])('Bash：%s → 放行', (command) => {
-    expect(lib.decide(cc('Bash', { command }))).toEqual({ code: 0 });
-  });
-
-  it.each([
-    'cd $(git rev-parse --show-toplevel) && cat a',
-    'cd /x && cat a > b',
-    'cd /x && cat "$F"',
-    'cd /x && for f in *; do cat $f; done',
-    'cd',
-    'cd /x &&',
-  ])('钩子看不清的写法不当成拦：%s', (command) => {
-    expect(lib.decide(cc('Bash', { command })).code).toBe(0);
-  });
-
-  it('别家（不是 Claude Code 的输入，没有 Read/Grep/Glob 工具）：不拦', () => {
-    expect(lib.decide(bare('Bash', { command: 'cd /x && cat a' }))).toEqual({ code: 0 });
+  it('cdReadVerdict 这个导出没了', () => {
+    expect(lib.cdReadVerdict).toBeUndefined();
   });
 });
 

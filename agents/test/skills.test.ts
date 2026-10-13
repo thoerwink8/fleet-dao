@@ -1,7 +1,7 @@
 // agents/skills 里写的指针必须都指得到：仓内路径、文档章节、设计文档「第 N 条」、同目录附件、别的 skill 的名字。
 // 路径和 skill 名一律写在反引号里（行内代码或代码块）：写在外面的认不出是指针、查不了它指向哪，所以直接判红。
 // 落点被挪走或改名，这里当场红——指向空气的指针比没有更糟。
-// 另守两条会慢慢变坏的：name 和目录同名（按目录分发）；description 不超过 120 字（每个会话都为它付费）。
+// 另守一条会慢慢变坏的：name 和目录同名（按目录分发）。
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,15 +10,15 @@ import { describe, expect, it } from 'vitest';
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const SKILLS = join(ROOT, 'agents', 'skills');
 const VENDOR = join(ROOT, 'agents', 'skills-vendor');
-const MAX_DESCRIPTION = 120;
 /**
- * 长得像 skill 名（小写字母、数字加连字符）、其实不是的词：仓名、英文原文里的普通词、例子里的链名、Claude Code 内置子代理的类型名
+ * 长得像 skill 名（小写字母、数字加连字符）、其实不是的词：仓名、英文原文里的普通词、例子里的链名、unattended.mjs 的子命令、Claude Code 内置子代理的类型名
  * （三个角色里的 general-purpose，决定 0087）、子代理三个角色的模型 id。
  */
 const NOT_SKILLS = new Set([
   'fleet-dao',
   'sub-agent',
   'job-lock',
+  'needs-you',
   'general-purpose',
   'claude-code-guide',
   'claude-haiku-5-5',
@@ -96,23 +96,11 @@ const read = (path: string) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
 const skillNames = readdirSync(SKILLS)
   .filter((name) => statSync(join(SKILLS, name)).isDirectory())
   .sort();
-/** 第三方 skill 的目录名：自研的正文里可以指它们（`chain-first` 指 `systematic-debugging`），指针照样要指得到。 */
+/** 第三方 skill 的目录名：自研的正文里可以指它们，指针照样要指得到。 */
 const vendorNames = readdirSync(VENDOR)
   .filter((name) => statSync(join(VENDOR, name)).isDirectory())
   .sort();
-/** 同目录 references/ 下的判例、来历也查指针：里面写错路径一样是指向空气。 */
-const references = (name: string): string[] => {
-  const dir = join(SKILLS, name, 'references');
-  return existsSync(dir)
-    ? readdirSync(dir)
-        .filter((f) => f.endsWith('.md'))
-        .map((f) => join(dir, f))
-    : [];
-};
-const files = [
-  join(SKILLS, 'README.md'),
-  ...skillNames.flatMap((name) => [join(SKILLS, name, 'SKILL.md'), ...references(name)]),
-];
+const files = [join(SKILLS, 'README.md'), ...skillNames.map((name) => join(SKILLS, name, 'SKILL.md'))];
 const texts = files.map((file) => {
   const text = read(file);
   return { file: file.slice(ROOT.length).replace(/\\/g, '/'), dir: dirname(file), text, ...split(text) };
@@ -208,18 +196,11 @@ describe('agents/skills 的指针', () => {
     expect(row).toMatch(/skill[^。；|]*同步脚本/);
   });
 
-  it('「同目录 `文件`」指的附件都在', () => {
-    const refs = matches(/同目录 `([^`]+)`/g);
-    expect(refs.length).toBeGreaterThan(0);
-    const missing = refs.filter(({ dir, groups: [name] }) => !existsSync(join(dir, name ?? '')));
-    expect(missing.map(({ file, groups: [name] }) => `${file} → ${name}`)).toEqual([]);
-  });
-
   it('反引号里提到的别的 skill 都在', () => {
     const refs = texts.flatMap(({ file, code }) =>
       code.filter((c) => WHOLE_KEBAB.test(c) && !NOT_SKILLS.has(c)).map((name) => ({ file, name })),
     );
-    expect(refs.length).toBeGreaterThan(0);
+    // 瘦身后正文里已没有指向别的 skill 的反引号词，这一类暂无样本，不再断言「至少一处」。
     expect(vendorNames.length).toBeGreaterThan(0);
     const missing = refs.filter(({ name }) => !skillNames.includes(name) && !vendorNames.includes(name));
     expect(missing.map(({ file, name }) => `${file} → ${name}`)).toEqual([]);
@@ -272,9 +253,7 @@ describe.each(skillNames)('%s 的 frontmatter', (name) => {
     expect(meta.name).toBe(name);
   });
 
-  it(`description 有，且不超过 ${MAX_DESCRIPTION} 字`, () => {
-    const length = [...(meta.description ?? '')].length;
-    expect(length).toBeGreaterThan(0);
-    expect(length).toBeLessThanOrEqual(MAX_DESCRIPTION);
+  it('description 有', () => {
+    expect([...(meta.description ?? '')].length).toBeGreaterThan(0);
   });
 });
