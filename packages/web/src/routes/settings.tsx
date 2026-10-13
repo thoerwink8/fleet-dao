@@ -656,7 +656,7 @@ export default function Settings() {
 
             {/* 从自己的 GitHub 加仓 / 移仓（#1989）：列本人能看到的仓，勾选接进派单，一键装 App。 */}
             <div className="mt-4 border-t pt-4">
-              <h3 className="text-heading">从 GitHub 导入</h3>
+              <h3 className="text-heading">导入仓库</h3>
               <p className="mt-1 mb-3 text-meta text-muted-foreground">
                 连上你自己的 GitHub，这里列出你能看到的所有仓；接进来的仓「让 AI 接活」默认关着，要另外打开。
               </p>

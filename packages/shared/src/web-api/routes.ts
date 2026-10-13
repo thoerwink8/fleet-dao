@@ -175,6 +175,13 @@ export const WebRoutes = {
   githubConnect: { method: 'GET', path: '/github/connect' },
   /** GitHub 授权完回这里：拿 code 换令牌、存起来、跳回设置页。没有响应体（302）。 */
   githubCallback: { method: 'GET', path: '/github/callback' },
+  /**
+   * 「一键授权」（#1989）：浏览器整页跳到 GitHub 授权页，回来后两个 App 都装到 ?githubId= 那个仓上。
+   * 没有响应体（302）。
+   */
+  githubAuthorize: { method: 'GET', path: '/github/authorize' },
+  /** GitHub 安装页装完回到这里（App 的 Setup URL）。没有响应体（302）。 */
+  githubSetup: { method: 'GET', path: '/github/setup' },
   /** 「让指挥官整理」按钮的现状（母单 #1335 第 3 片，#1338）：这个项目今日剩余次数、最近几次结果、有没有一次在排队或在做。没有这个项目 404。 */
   groomStatus: { method: 'GET', path: '/repos/:repoId/dispatch/groom', response: GroomStatusResponse },
   /**

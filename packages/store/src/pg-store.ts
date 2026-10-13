@@ -1314,10 +1314,18 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         return 'removed';
       });
     },
-    async getGitHubToken(userId) {
+    async getGitHubToken(userId, role) {
       if (!isUuid(userId)) return null;
-      const [row] = await db.select().from(githubTokens).where(eq(githubTokens.userId, userId));
+      const [row] = await db
+        .select()
+        .from(githubTokens)
+        .where(and(eq(githubTokens.userId, userId), eq(githubTokens.role, role)));
       return row ? toGitHubToken(row) : null;
+    },
+    async listGitHubTokens(userId) {
+      if (!isUuid(userId)) return [];
+      const rows = await db.select().from(githubTokens).where(eq(githubTokens.userId, userId));
+      return rows.map(toGitHubToken);
     },
     async putGitHubToken(input) {
       await db
@@ -1326,12 +1334,13 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           userId: input.userId,
           githubId: input.githubId,
           login: input.login,
+          role: input.role,
           accessTokenCipher: input.accessTokenCipher,
           scopes: input.scopes,
           expiresAt: input.expiresAt === null ? null : new Date(input.expiresAt),
         })
         .onConflictDoUpdate({
-          target: githubTokens.userId,
+          target: [githubTokens.userId, githubTokens.role],
           set: {
             githubId: input.githubId,
             login: input.login,
@@ -1342,9 +1351,15 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           },
         });
     },
-    async deleteGitHubToken(userId) {
+    async deleteGitHubToken(userId, role) {
       if (!isUuid(userId)) return;
-      await db.delete(githubTokens).where(eq(githubTokens.userId, userId));
+      await db
+        .delete(githubTokens)
+        .where(
+          role
+            ? and(eq(githubTokens.userId, userId), eq(githubTokens.role, role))
+            : eq(githubTokens.userId, userId),
+        );
     },
   };
 }
