@@ -152,7 +152,9 @@ function RepoDetail({ row, now }: { row: RepoRow; now: number }) {
           ))}
         </ul>
       ) : (
-        <p className="mt-3 text-meta text-muted-foreground">这个仓在法国没有工作树。</p>
+        <p className="mt-3 text-meta text-muted-foreground">
+          {row.treesKnown ? '这个仓在法国没有工作树。' : '这一轮工作树没查成，树的列表不可信。'}
+        </p>
       )}
     </RowDetail>
   );
@@ -312,11 +314,21 @@ export function ReposSection({
                             {row.repo}
                           </span>
                           <span className="block truncate text-meta text-muted-foreground">
-                            {row.held ? `${row.held} 棵有改动或没查成，清理会拒删` : '没有要人看的树'}
+                            {!row.treesKnown
+                              ? '这一轮树没查成'
+                              : row.held
+                                ? `${row.held} 棵有改动或没查成，清理会拒删`
+                                : '没有要人看的树'}
                           </span>
                         </span>
                       }
-                      trees={<span className="num">{row.trees.length} 棵</span>}
+                      trees={
+                        row.treesKnown ? (
+                          <span className="num">{row.trees.length} 棵</span>
+                        ) : (
+                          <span className="text-muted-foreground">没查成</span>
+                        )
+                      }
                       cpu={<CellText cell={row.cpu} />}
                       memory={<CellText cell={row.memory} />}
                       disk={<DiskText disk={row.disk} />}

@@ -41,6 +41,8 @@ export interface RepoRow {
   memory: Cell;
   cpu: Cell;
   sessions: number;
+  /** 这一轮树查成了没有：整轮没跑成时是 false，页面写「没查成」，不写「0 棵」。 */
+  treesKnown: boolean;
   trees: TreeView[];
   /** 有改动、留着、没查成——一键清理会拒删的几棵（在用的不算）。 */
   held: number;
@@ -159,6 +161,7 @@ export function repoRows(
       memory: u?.memory ?? idle,
       cpu: u?.cpu ?? idle,
       sessions: u?.sessions ?? 0,
+      treesKnown: !inv.failed,
       trees,
       held: trees.filter((t) => t.state === 'leftover' || t.state === 'kept' || t.state === 'unchecked')
         .length,

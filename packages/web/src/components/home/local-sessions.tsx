@@ -19,7 +19,11 @@ export function useLocalBrief() {
 
 function NodeList({ node }: { node: NodeBlock }) {
   return (
-    <section data-local-node={node.id} data-reporting={node.reporting} className="grid gap-2">
+    <section
+      data-local-node={node.id}
+      data-reporting={node.reporting}
+      className="grid min-w-0 grid-cols-1 gap-2"
+    >
       <div className="flex items-center justify-between gap-2 px-1">
         <span className="min-w-0 truncate text-body font-medium">{node.machine}</span>
         <StatusBadge
@@ -72,7 +76,7 @@ export function LocalSessionsPanel() {
   if (!q.data) return null;
   const v = localView(q.data, now);
   return (
-    <div className="grid gap-4" data-local-sessions>
+    <div className="grid min-w-0 grid-cols-1 gap-4" data-local-sessions>
       <p className="px-1 text-meta text-muted-foreground">
         本机钩子写的心跳，每 2 分钟推到法国；只有仓、分支、工具名这类元信息。不是引擎的单。
       </p>

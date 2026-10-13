@@ -117,6 +117,7 @@ describe('清单不可用的三种', () => {
     if (r.kind !== 'failed') return;
     expect(r.why).toBe('根读不了：EACCES');
     expect(r.rows.find((x) => x.repo === 'acme/orbit')?.trees).toEqual([]);
+    expect(r.rows.every((x) => x.treesKnown === false)).toBe(true);
     expect(r.rows.find((x) => x.repo === 'acme/orbit')?.disk).toMatchObject({ kind: 'ok', bytes: 100 * MIB });
   });
 });
