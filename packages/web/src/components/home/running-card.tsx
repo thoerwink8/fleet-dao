@@ -56,14 +56,20 @@ export const WAIT_LABEL: Record<HomeRunning['waitingReason'], string> = {
 };
 
 /**
+ * 引擎停下等人、而且停下不是因为最近一笔做坏了（轮数用尽、开 PR 撞占用……）：画成等你、写「为什么停」。
+ * 最近一笔是超时 / 失败的停下照旧算「出问题」（红、写那条失败、进「只看卡住的」，#902 D2）：失败本身就是停下的原因。
+ */
+export function parkedForHuman(item: HomeRunning): boolean {
+  return item.waitingReason === 'parked' && item.lastEvent?.tone !== 'trouble';
+}
+
+/**
  * 这张单等着创始人拍：单子自己卡在追问，或要你拍的那块里挂着它的事，或引擎停下等人（轮数用尽、同因连挂……，
  * 要人点「继续」「放弃」「重做」；#1967、#1971 停了 8 小时，卡上写的是「在合并队列」「还没验」，没人看出来）。
  */
 export function needsFounder(item: HomeRunning): boolean {
   return (
-    item.waitingReason === 'founder_decision' ||
-    item.waitingReason === 'parked' ||
-    item.pendingDecision !== undefined
+    item.waitingReason === 'founder_decision' || parkedForHuman(item) || item.pendingDecision !== undefined
   );
 }
 
@@ -74,8 +80,8 @@ export function needsFounder(item: HomeRunning): boolean {
 export function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot } {
   // 被人暂停（#820 片 3）：等待色（黄系），不是失败红，也不是等你拍；人让它停的，点「继续」才走
   if (item.waitingReason === 'paused') return { tone: 'stall', icon: Pause };
-  // 引擎停下等人：等你色（要人点继续 / 放弃），排在「最近一次事件」前面——停下的原因比最近一笔流水要紧
-  if (item.waitingReason === 'parked') return { tone: 'human', icon: Hand };
+  // 引擎停下等人（最近一笔没做坏）：等你色（要人点继续 / 放弃）；最近一笔是超时 / 失败的落到下面的 fail 红
+  if (parkedForHuman(item)) return { tone: 'human', icon: Hand };
   if (item.lastEvent?.tone === 'trouble') return { tone: 'fail', icon: TriangleAlert };
   if (needsFounder(item)) return { tone: 'human', icon: MessageCircleQuestion };
   switch (item.segment) {
@@ -160,7 +166,7 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
             </div>
           ) : null}
 
-          {item.waitingReason === 'parked' && item.parked ? (
+          {parkedForHuman(item) && item.parked ? (
             <div className="truncate text-meta text-ink-human" title={item.parked} data-parked-why>
               为什么停：{item.parked}
             </div>

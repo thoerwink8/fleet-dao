@@ -595,6 +595,28 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
     expect(b?.textContent).not.toContain('等第二意见');
   });
 
+  test('【故意造出的失败】停下等人、但最近一笔是超时 / 失败：照旧画成出问题（红），写最近那条失败，不算等你拍（#902 D2，e2e #14）', async () => {
+    renderHome({
+      status: 'data',
+      data: {
+        ...SAMPLE,
+        running: [
+          ticket(14, {
+            segment: 'doing',
+            waitingReason: 'parked',
+            parked: '引擎没写停下的原因',
+            state: 'stalled',
+            lastEvent: { text: '动手超时：30 分钟没交活', at: '2026-10-02T08:00:00Z', tone: 'trouble' },
+          }),
+        ],
+      },
+    });
+    await waitFor(() => expect(nodeOf('ticket:14:')).toBeTruthy());
+    const n = nodeOf('ticket:14:');
+    expect(n?.textContent).toContain('动手超时');
+    expect(n?.querySelector('[data-needs-founder]')?.getAttribute('data-needs-founder')).toBe('false');
+  });
+
   test('出问题（超时 / 失败）的卡画成 fail 红，和「还没验」「在等」分开', async () => {
     renderHome({
       status: 'data',
