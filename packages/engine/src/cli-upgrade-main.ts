@@ -2,7 +2,7 @@
 // 不引用 @fleet-dao/*：发版还没切 current，这一版的依赖可能还没装好，只靠 Node 自己。
 // 引擎用户没有 root，装不到 /usr/lib/node_modules，也不许改会话用户家里的 grok。请求文件只当触发器用，装什么看期望文件。
 import { spawn } from 'node:child_process';
-import { access, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
   CLI_UPGRADE_DIR,
@@ -15,6 +15,7 @@ import {
   runUpgrade,
   type UpgradeState,
 } from './cli-upgrade.ts';
+import { writeAtomicOwnedByDir } from './write-owned-by-dir.ts';
 
 const NPM_MS = 10 * 60_000;
 const VERSION_MS = 20_000;
@@ -157,13 +158,6 @@ async function grokLatestVersion(): Promise<string | null> {
   return null;
 }
 
-async function writeAtomic(file: string, text: string): Promise<void> {
-  await mkdir(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  await writeFile(tmp, text, { mode: 0o644 });
-  await rename(tmp, file);
-}
-
 function failedState(why: 'idle' | 'release', requestAt: string | null, detail: string): UpgradeState {
   const at = new Date().toISOString();
   return {
@@ -230,13 +224,19 @@ async function main(): Promise<number> {
     raw = JSON.parse(await readFile(configPath, 'utf8'));
   } catch (err) {
     const detail = `期望文件读不到：${err instanceof Error ? err.message : String(err)}`;
-    await writeAtomic(statePath, `${JSON.stringify(failedState(why, requestAt, detail), null, 1)}\n`);
+    await writeAtomicOwnedByDir(
+      statePath,
+      `${JSON.stringify(failedState(why, requestAt, detail), null, 1)}\n`,
+    );
     console.error(detail);
     return 1;
   }
   const tools = readCliToolsConfig(raw);
   if (!tools.ok) {
-    await writeAtomic(statePath, `${JSON.stringify(failedState(why, requestAt, tools.error), null, 1)}\n`);
+    await writeAtomicOwnedByDir(
+      statePath,
+      `${JSON.stringify(failedState(why, requestAt, tools.error), null, 1)}\n`,
+    );
     console.error(tools.error);
     return 1;
   }
@@ -301,7 +301,7 @@ async function main(): Promise<number> {
       },
     },
   });
-  await writeAtomic(statePath, `${JSON.stringify(state, null, 1)}\n`);
+  await writeAtomicOwnedByDir(statePath, `${JSON.stringify(state, null, 1)}\n`);
   for (const [id, tool] of Object.entries(state.tools)) {
     console.log(`${tool.outcome} ${id} ${tool.version ?? '-'} ${tool.detail}`);
   }
