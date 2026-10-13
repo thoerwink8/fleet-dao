@@ -1,215 +1,328 @@
-// 提需求（版面评审用的假数据页，不连后端）：左「我的需求」、中「和指挥官聊」、右「单子草稿」。
-// 状态用 ?demo=a|b|c 切：a 聊到一半、b 草稿齐了、c 开单之后；?fail=1 让第一次写回评论失败，看「重试」。
-import { useEffect, useMemo, useRef, useState } from 'react';
+// 提需求（第二版，版面评审用的假数据页，不连后端）：电脑三栏，手机两个画面（列表 → 对话），同一个路由响应式切换。
+// 状态用查询串切：?demo=discuss|pending|closed；?as=cxy|fxc188 换视角；手机：?screen=list|chat、?sheet=1 打开只读草稿；?fail=1 让第一次写回评论失败。
+import { useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
-import { type AskState, ChatPane } from '../components/intake/chat-pane';
-import { ConvList } from '../components/intake/conv-list';
+import { toast } from 'sonner';
+import { ChatPane } from '../components/intake/chat-pane';
+import { ConvList, type ListFilter, waitCount } from '../components/intake/conv-list';
 import {
-  convList,
   type Draft,
   type DraftField,
   DUPLICATE,
   draftOf,
+  type Human,
   type Msg,
   messagesOf,
   type Option,
   REPOS,
+  reqList,
   type Scene,
+  type Status,
 } from '../components/intake/data';
-import { DraftPane, type DupView, missingOf } from '../components/intake/draft-pane';
+import { DraftPane, type DupView } from '../components/intake/draft-pane';
+import { PhoneChat } from '../components/intake/phone';
+import type { AskState } from '../components/intake/stream';
 import { useMediaQuery } from '../lib/hooks';
+import { usePhone } from '../lib/viewport';
 
 function sceneOf(v: string | null): Scene {
-  return v === 'b' || v === 'c' ? v : 'a';
+  return v === 'pending' || v === 'closed' ? v : 'discuss';
 }
 
 export default function Intake() {
   const [params] = useSearchParams();
   const scene = sceneOf(params.get('demo'));
-  const failFirst = params.get('fail') === '1';
-  return <IntakeDemo key={scene} scene={scene} failFirst={failFirst} />;
+  const as = params.get('as');
+  const viewer: Human = as === 'cxy' || as === 'fxc188' ? as : scene === 'discuss' ? 'fxc188' : 'cxy';
+  return (
+    <IntakeDemo
+      key={`${scene}-${viewer}`}
+      scene={scene}
+      viewer={viewer}
+      failFirst={params.get('fail') === '1'}
+      startScreen={params.get('screen') === 'chat' ? 'chat' : 'list'}
+      startSheet={params.get('sheet') === '1'}
+    />
+  );
 }
 
-function IntakeDemo({ scene, failFirst }: { scene: Scene; failFirst: boolean }) {
+function IntakeDemo({
+  scene,
+  viewer,
+  failFirst,
+  startScreen,
+  startSheet,
+}: {
+  scene: Scene;
+  viewer: Human;
+  failFirst: boolean;
+  startScreen: 'list' | 'chat';
+  startSheet: boolean;
+}) {
+  const phone = usePhone();
   const wide = useMediaQuery('(min-width: 1536px)');
   const [picked, setPicked] = useState<boolean | null>(null);
   const collapsed = picked ?? !wide;
+  const [screen, setScreen] = useState<'list' | 'chat'>(startScreen);
+  const [sheet, setSheet] = useState(startSheet);
 
+  const base = useMemo(() => reqList(scene), [scene]);
+  const [status, setStatus] = useState<Status>(base[0]?.status ?? 'discussing');
+  const [noReason, setNoReason] = useState('');
   const [repo, setRepo] = useState<string>(REPOS[0]);
+  const [model, setModel] = useState('指挥官默认：Sonnet 5.5');
   const [msgs, setMsgs] = useState<Msg[]>(() => messagesOf(scene));
-  const [draft, setDraft] = useState<Draft>(() => draftOf(scene));
-  const [edited, setEdited] = useState<ReadonlySet<DraftField>>(() =>
-    scene === 'b' ? new Set<DraftField>(['want']) : new Set<DraftField>(),
-  );
-  const [opened, setOpened] = useState(scene === 'c');
+  const [draft, setDraft] = useState<Draft>(() => draftOf());
+  const [edited, setEdited] = useState<ReadonlySet<DraftField>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [critiquing, setCritiquing] = useState(false);
   const [flash, setFlash] = useState<DraftField | null>(null);
-  const [dup, setDup] = useState<DupView | null>(scene === 'b' ? { kind: 'found', ...DUPLICATE } : null);
+  const [dup, setDup] = useState<DupView | null>(
+    scene === 'discuss' ? { kind: 'found', ...DUPLICATE } : null,
+  );
   const [askState, setAskState] = useState<AskState>('pending');
   const [askFail, setAskFail] = useState('');
-  const [pendingAnswer, setPendingAnswer] = useState<string | null>(null);
+  const [filter, setFilter] = useState<ListFilter>(waitCount(base, viewer) > 0 ? 'wait' : 'all');
   const failed = useRef(false);
+  const lastAnswer = useRef('');
   const seq = useRef(100);
   const nid = () => `n${seq.current++}`;
+  const clock = () => `22:${String(48 + (seq.current % 10)).padStart(2, '0')}`;
 
-  // B：草稿刚补齐，右栏滚到「怎么算做完」
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 只在挂载时滚一次
-  useEffect(() => {
-    if (scene !== 'b') return;
-    const t = window.setTimeout(() => jump('done'), 300);
-    return () => window.clearTimeout(t);
-  }, [scene]);
+  const partner = base[0]?.initiator === 'fxc188';
+  const closed = status === 'do' || status === 'no';
+  const spoken = new Set(msgs.flatMap((m) => (m.kind === 'say' && m.who !== 'ai' ? [m.who] : [])));
+  const multi = spoken.size >= 2;
 
-  const convs = useMemo(() => {
-    const list = convList(scene);
-    const first = list[0];
-    if (first && scene === 'a' && missingOf(draft).length === 0) first.status = 'ready';
-    return list;
-  }, [scene, draft]);
+  const req = useMemo(() => {
+    const first = base[0];
+    if (!first) throw new Error('没有当前需求');
+    return {
+      ...first,
+      status,
+      gh: status === 'do' ? ('working' as const) : undefined,
+      issue: status === 'do' ? 12 : undefined,
+      pr: status === 'do' ? 34 : undefined,
+      mineFor: status === 'pending' ? ('cxy' as const) : status === 'do' ? ('cxy' as const) : undefined,
+      waiting:
+        status === 'discussing'
+          ? multi
+            ? '继续聊；@指挥官 它才接话'
+            : '继续聊；齐了就提交'
+          : status === 'pending'
+            ? '等 cxy 拍板'
+            : status === 'do'
+              ? '引擎问你'
+              : null,
+    };
+  }, [base, status, multi]);
+  const reqs = useMemo(() => [req, ...base.slice(1)], [req, base]);
 
-  const stage = opened ? 'opened' : missingOf(draft).length === 0 ? 'ready' : 'chatting';
+  const lockText =
+    status === 'do'
+      ? '已结案 · 22:41 cxy 同意做 · 内容不再改'
+      : status === 'no'
+        ? `已结案 · cxy 不做：${noReason || '理由见对话'} · 内容不再改`
+        : null;
 
   const jump = (f: DraftField) => {
     document.getElementById(`draft-${f}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
     setFlash(f);
     window.setTimeout(() => setFlash(null), 1400);
   };
-
   const patch = (p: Partial<Draft>, f: DraftField) => {
     setDraft((d) => ({ ...d, ...p, version: d.version + 1 }));
     setEdited((s) => new Set(s).add(f));
   };
+  const push = (...m: Msg[]) => setMsgs((x) => [...x, ...m]);
 
-  // 脚本回复：A 里回答第一问后，指挥官补验收并补齐草稿；之后随便说什么都收下。
-  const reply = (userText: string) => {
+  const reply = (text: string) => {
     setBusy(true);
     window.setTimeout(() => {
       setBusy(false);
-      setMsgs((m) => {
-        const ready = missingOf(draft).length === 0;
-        if (ready) {
-          return [
-            ...m,
-            { kind: 'ai', id: nid(), text: `收到：${userText.slice(0, 20)}。我记进草稿的「要什么」了。` },
-          ];
-        }
-        return [
-          ...m,
-          {
-            kind: 'ai',
-            id: nid(),
-            text: '好。那「怎么算做完」我先写三条，你看看。\n\n另外你提到「从旧机器抄过来」，我没有往里加自动导入，放进了「不做什么」。',
-          },
-          { kind: 'patch', id: nid(), text: '草稿里补了：怎么算做完第 2 条', field: 'done' },
-        ];
+      push({
+        kind: 'say',
+        id: nid(),
+        who: 'ai',
+        at: clock(),
+        text: `@${viewer} 收到：${text.replace(/@指挥官\s*/g, '').slice(0, 24)}。我记进草稿的「要什么」了，没有别的要补就可以提交了。`,
       });
-      if (missingOf(draft).length > 0) {
-        const full = draftOf('b');
-        setDraft((d) => ({ ...d, done: full.done, not: full.not, version: d.version + 1 }));
-        setDup({ kind: 'found', ...DUPLICATE });
-        window.setTimeout(() => jump('done'), 100);
-      }
     }, 1500);
   };
 
   const send = (text: string) => {
-    if (askState === 'composing') {
-      setAskState('writing');
-      window.setTimeout(() => {
-        if (failFirst && !failed.current) {
-          failed.current = true;
-          setAskFail('GitHub 返回 502（评论接口暂时不可用）。你的话还在，点「重试」再写一次。');
-          setPendingAnswer(text);
-          setAskState('failed');
-          return;
-        }
-        setMsgs((m) => [...m, { kind: 'user', id: nid(), text }]);
-        setAskState('written');
-      }, 700);
-      return;
-    }
-    setMsgs((m) => [...m, { kind: 'user', id: nid(), text }]);
-    reply(text);
+    push({ kind: 'say', id: nid(), who: viewer, at: clock(), text });
+    const nowMulti = new Set([...spoken, viewer]).size >= 2;
+    if (!nowMulti || text.includes('@指挥官')) reply(text);
   };
+  const ask = () => reply('让指挥官接着问');
 
   const pick = (id: string, o: Option) => {
-    setMsgs((m) =>
-      m
-        .map((x) => (x.kind === 'ask' && x.id === id ? { ...x, answered: o.label } : x))
-        .concat({
-          kind: 'user',
-          id: nid(),
-          text: o.label,
-        }),
-    );
+    setMsgs((m) => m.map((x) => (x.kind === 'ask' && x.id === id ? { ...x, answered: o.label } : x)));
+    push({ kind: 'say', id: nid(), who: viewer, at: clock(), text: o.label });
     reply(o.label);
   };
 
-  const retry = () => {
+  const submit = () => {
+    if (partner) {
+      setStatus('pending');
+      push({
+        kind: 'sys',
+        id: nid(),
+        at: clock(),
+        text: `${viewer} 提交给 cxy 拍板（第 ${draft.version} 版草稿）`,
+      });
+    } else {
+      setStatus('do');
+      push({ kind: 'sys', id: nid(), at: clock(), text: `cxy 确定开单，开成 #12（第 ${draft.version} 版）` });
+    }
+  };
+  const yes = () => {
+    setStatus('do');
+    push({ kind: 'sys', id: nid(), at: clock(), text: `cxy 同意做，开成 #12（第 ${draft.version} 版）` });
+  };
+  const no = (reason: string) => {
+    setNoReason(reason);
+    setStatus('no');
+    push({ kind: 'sys', id: nid(), at: clock(), text: `cxy 不做：${reason}` });
+  };
+  const again = () => {
+    setStatus('discussing');
+    push({ kind: 'sys', id: nid(), at: clock(), text: 'cxy 点了「再聊聊」，退回讨论中' });
+  };
+
+  const changeModel = (m: string) => {
+    setModel(m);
+    push({ kind: 'divider', id: nid(), text: `以下由 ${m.replace('指挥官默认：', '')} 接着聊` });
+  };
+  const critique = () => {
+    setCritiquing(true);
+    window.setTimeout(() => {
+      setCritiquing(false);
+      push({
+        kind: 'sys',
+        id: nid(),
+        at: clock(),
+        text: '别家（GPT 5.6）挑了 2 处：怎么算做完第 3 条没说「失败的行里写什么」；「已知的模块」漏了测试文件。',
+      });
+    }, 1500);
+  };
+  const continueNew = () =>
+    toast.success('已新开 需求 45：接着 需求 42 / #12', {
+      description: '#12 还没合并：开单时指挥官会往 #12 补一条评论。',
+    });
+
+  const writeBack = (text: string) => {
+    lastAnswer.current = text;
     setAskState('writing');
     window.setTimeout(() => {
-      setMsgs((m) => [...m, { kind: 'user', id: nid(), text: pendingAnswer ?? '' }]);
+      if (failFirst && !failed.current) {
+        failed.current = true;
+        setAskFail('GitHub 返回 502（评论接口暂时不可用）。你写的话还在，点「重试」再写一次。');
+        setAskState('failed');
+        return;
+      }
       setAskState('written');
     }, 700);
   };
 
-  const suggest = (id: string, take: boolean) => {
-    setMsgs((m) =>
-      m.map((x) => (x.kind === 'suggest' && x.id === id ? { ...x, state: take ? 'taken' : 'skipped' } : x)),
-    );
-    if (take) {
-      setDraft((d) => ({
-        ...d,
-        want: `${d.want}已有的密钥只显示尾 4 位，不填就不改。`,
-        version: d.version + 1,
-      }));
-      jump('want');
-    }
-  };
+  const decide = status === 'pending' && viewer === 'cxy' ? { onYes: yes, onNo: no, onAgain: again } : null;
+  const waitingNote =
+    status === 'pending' && viewer !== 'cxy' ? '已提交给 cxy 拍板，等他点「同意做 / 不做 / 再聊聊」。' : null;
 
-  const confirm = () => {
-    setOpened(true);
-    setMsgs((m) => [...m, { kind: 'sys', id: nid(), text: `已开成 #12（第 ${draft.version} 版）` }]);
-  };
+  const stream = {
+    msgs,
+    viewer,
+    busy,
+    closed,
+    askState,
+    askFail,
+    onPickOption: pick,
+    onJump: jump,
+    onSuggest: (id: string, take: boolean) =>
+      setMsgs((m) =>
+        m.map((x) => (x.kind === 'suggest' && x.id === id ? { ...x, state: take ? 'taken' : 'skipped' } : x)),
+      ),
+    onAnswerStart: () => setAskState('composing'),
+    onAnswerCancel: () => setAskState('pending'),
+    onAnswerSend: writeBack,
+    onRetry: () => writeBack(lastAnswer.current),
+  } as const;
+
+  const list = (
+    <ConvList
+      reqs={reqs}
+      viewer={viewer}
+      selected={42}
+      onSelect={() => setScreen('chat')}
+      onNew={() => undefined}
+      filter={filter}
+      onFilter={setFilter}
+      collapsed={phone ? false : collapsed}
+      onToggle={() => setPicked(!collapsed)}
+      phone={phone}
+    />
+  );
+
+  if (phone) {
+    return (
+      <div className="flex h-full min-h-0 flex-col" data-intake-page data-phone data-status={status}>
+        {screen === 'list' ? (
+          list
+        ) : (
+          <PhoneChat
+            {...stream}
+            phone
+            req={req}
+            draft={draft}
+            sheet={sheet}
+            onSheet={setSheet}
+            onBack={() => setScreen('list')}
+            multi={multi}
+            lockText={lockText}
+            decide={decide}
+            waitingNote={waitingNote}
+            onSend={send}
+            onAsk={ask}
+          />
+        )}
+      </div>
+    );
+  }
 
   return (
-    <div className="flex h-full min-h-0" data-intake-page data-stage={stage}>
-      <ConvList
-        convs={convs}
-        selected="c1"
-        onSelect={() => undefined}
-        onNew={() => undefined}
-        collapsed={collapsed}
-        onToggle={() => setPicked(!collapsed)}
-      />
+    <div className="flex h-full min-h-0" data-intake-page data-status={status}>
+      {list}
       <ChatPane
+        {...stream}
+        req={req}
         repo={repo}
         onRepo={setRepo}
-        repoLocked={msgs.some((m) => m.kind === 'user')}
-        msgs={msgs}
-        busy={busy}
-        opened={opened}
-        askState={askState}
-        askFail={askFail}
+        model={model}
+        onModel={changeModel}
+        multi={multi}
+        lockText={lockText}
+        decide={decide}
+        waitingNote={waitingNote}
         onSend={send}
-        onPickOption={pick}
-        onJump={jump}
-        onSuggest={suggest}
-        onAnswerStart={() => setAskState('composing')}
-        onAnswerCancel={() => setAskState('pending')}
-        onRetry={retry}
+        onAsk={ask}
+        onContinue={continueNew}
       />
       <DraftPane
         draft={draft}
         edited={edited}
         flash={flash}
-        opened={opened}
-        partner
+        mode={closed ? 'closed' : status === 'pending' ? 'frozen' : 'edit'}
+        partner={partner}
+        submitted={status !== 'discussing'}
         dup={dup}
+        critiquing={critiquing}
         onChange={patch}
-        onConfirm={confirm}
+        onSubmit={submit}
+        onCritique={critique}
         onJoin={() => setDup({ kind: 'joined', issue: DUPLICATE.issue })}
         onDismiss={() => setDup({ kind: 'dismissed' })}
+        onContinue={continueNew}
       />
     </div>
   );
