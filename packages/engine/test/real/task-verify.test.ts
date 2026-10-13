@@ -13,6 +13,7 @@ import { type PickRouteInput, type PickRouteResult, type PortContext, PortError 
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
 import { oneShotSessions } from '../../src/real/one-shot-sessions.ts';
 import {
+  backedOffSeconds,
   type ColdVerifyActivityDeps,
   createColdVerify,
   type DiffFile,
@@ -22,7 +23,9 @@ import {
   renderDiff,
   SUMMARY_LINE_CHARS,
   summarizePatch,
+  VERIFY_BACKOFF_FORGET_MS,
   VERIFY_ORG_SWITCH_RETRY_SECONDS,
+  VERIFY_RETRY_CAP_SECONDS,
 } from '../../src/real/task-verify.ts';
 import { NoSlotError, type RunRecord, type RunStart } from '../../src/runner/not-wired.ts';
 import type { ColdVerifyInput } from '../../src/task-contract.ts';
@@ -504,7 +507,8 @@ describe('过一会儿再来就行：回 retry，贴的是 pending 不是 failur
     expect(got.unavailable).toBeUndefined();
     expect(got.pass).toBe(false);
     expect(r.specs).toHaveLength(0);
-    expect(r.posted.map((p) => p.state)).toEqual(['pending', 'pending']);
+    // 没挑中路由、没要起会话：只贴「在等」，不先贴「跑着」（#2007）
+    expect(r.posted.map((p) => p.state)).toEqual(['pending']);
     expect(r.posted.at(-1)?.description).toContain('在等');
   });
 
@@ -591,7 +595,7 @@ describe('过一会儿再来就行：回 retry，贴的是 pending 不是 failur
       afterSeconds: 60,
     });
     expect(r.specs).toHaveLength(0);
-    expect(r.posted.map((p) => p.state)).toEqual(['pending', 'pending']);
+    expect(r.posted.map((p) => p.state)).toEqual(['pending']);
   });
 
   it('选路没给秒数：用默认的 ROUTE_RETRY_SECONDS', async () => {
@@ -1264,7 +1268,7 @@ describe('验收会话撞上游临时故障：等一会儿再验，认不出就�
     expect(got.retry).toMatchObject({ wait: 'slot', afterSeconds: 20 });
     expect(got.retry?.reason).toContain('cursor 池并发满了');
     expect(r.specs).toHaveLength(0);
-    expect(r.posted.map((p) => p.state)).toEqual(['pending', 'pending']);
+    expect(r.posted.map((p) => p.state)).toEqual(['pending']);
   });
 
   it('认不出的失败 → 换下一条家族不同于作者的路由，验成', async () => {
@@ -1391,5 +1395,90 @@ describe('验收派前探测（#1798 片 4）', { timeout: 30_000 }, () => {
     expect(probed).toHaveLength(3); // 一轮最多探 3 条
     expect(r.specs).toHaveLength(0);
     expect(r.posted.map((p) => p.state)).not.toContain('failure');
+  });
+});
+
+// #2007：同一个 PR 因同一个原因连续等，间隔按倍数涨、封顶；状态只写一次。
+describe('没路由时的重试间隔递增、状态不重复写（#2007）', { timeout: 30_000 }, () => {
+  const MASTER_OFF = { ok: false, waitFor: 'slot', detail: '引擎总开关关着', retryAfterSeconds: 30 } as const;
+
+  it('backedOffSeconds：30→60→120→240→300 封顶；base 本身已超封顶不动它', () => {
+    expect([1, 2, 3, 4, 5, 6, 20].map((n) => backedOffSeconds(30, n))).toEqual([
+      30, 60, 120, 240, 300, 300, 300,
+    ]);
+    expect([1, 2, 3, 4].map((n) => backedOffSeconds(60, n))).toEqual([60, 120, 240, 300]);
+    expect(backedOffSeconds(900, 3)).toBe(900);
+    expect(VERIFY_RETRY_CAP_SECONDS).toBe(300);
+  });
+
+  it('【故意造出的失败】总开关关着连验 10 圈：间隔 30、60、120、240 后一直是 300；状态一共只写 1 条；一个会话都没起', async () => {
+    const r = rig({ picks: { gpt: MASTER_OFF } });
+    const seconds: number[] = [];
+    for (let i = 0; i < 10; i++) {
+      const got = await r.run(r.input(), ctx());
+      seconds.push(got.retry?.afterSeconds ?? -1);
+    }
+    expect(seconds).toEqual([30, 60, 120, 240, 300, 300, 300, 300, 300, 300]);
+    expect(r.posted).toHaveLength(1);
+    expect(r.posted[0]?.description).toContain('验收在等');
+    expect(r.specs).toHaveLength(0);
+  });
+
+  it('原因变了（总开关关着 → 别的说法）：间隔从头涨', async () => {
+    const picks: Parameters<typeof rig>[0] = { picks: { gpt: MASTER_OFF } };
+    const r = rig(picks);
+    await r.run(r.input(), ctx());
+    const second = await r.run(r.input(), ctx());
+    expect(second.retry?.afterSeconds).toBe(60);
+    const live = picks.picks as Record<string, unknown>;
+    live.gpt = { ok: false, waitFor: 'slot', detail: '收尾中', retryAfterSeconds: 30 };
+    const third = await r.run(r.input(), ctx());
+    expect(third.retry?.afterSeconds).toBe(30);
+  });
+
+  it('真派上了（路由有了）：先写「跑着」再写结论，连续次数归零，之后再等从 30 起', async () => {
+    const picks: Parameters<typeof rig>[0] = { picks: { gpt: MASTER_OFF } };
+    const r = rig(picks);
+    await r.run(r.input(), ctx());
+    await r.run(r.input(), ctx());
+    const live = picks.picks as Record<string, unknown>;
+    live.gpt = okRoute('gpt');
+    const done = await r.run(r.input(), ctx());
+    expect(done.pass).toBe(true);
+    expect(r.posted.map((p) => p.state)).toEqual(['pending', 'pending', 'success']);
+    expect(r.posted[1]?.description).toContain('跑着');
+    live.gpt = MASTER_OFF;
+    const again = await r.run(r.input(), ctx());
+    expect(again.retry?.afterSeconds).toBe(30);
+  });
+
+  it('内存放不下也涨：60 → 120；不同 PR 各记各的', async () => {
+    const admission = {
+      memoryAdmission: {
+        readText: async () => String(9500 * 1024 * 1024),
+        cgroupRoot: '/sys/fs/cgroup',
+        slicePath: 'fleet.slice/fleet-agents.slice',
+        sliceHighMb: 10_000,
+        reservePerSessionMb: 2048,
+      },
+    };
+    const r = rig({ picks: { gpt: okRoute('gpt') }, deps: admission });
+    const a1 = await r.run(r.input(), ctx());
+    const a2 = await r.run(r.input(), ctx());
+    const other = await r.run(r.input({ prNumber: 43 }), ctx());
+    expect([a1.retry?.afterSeconds, a2.retry?.afterSeconds, other.retry?.afterSeconds]).toEqual([
+      60, 120, 60,
+    ]);
+  });
+
+  it('隔太久没再来（超过 VERIFY_BACKOFF_FORGET_MS）：连续次数作废，从头涨', async () => {
+    let t = Date.parse('2026-10-13T00:00:00Z');
+    const r = rig({ picks: { gpt: MASTER_OFF }, deps: { now: () => new Date(t) } });
+    await r.run(r.input(), ctx());
+    const second = await r.run(r.input(), ctx());
+    expect(second.retry?.afterSeconds).toBe(60);
+    t += VERIFY_BACKOFF_FORGET_MS + 1000;
+    const third = await r.run(r.input(), ctx());
+    expect(third.retry?.afterSeconds).toBe(30);
   });
 });
