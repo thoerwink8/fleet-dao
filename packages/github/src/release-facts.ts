@@ -3,9 +3,11 @@
 // 读不到、认不出一律抛错（GitHubError），由调用方各行各自判「没查成」，不拿空、0、「已是最新」顶。
 // 改这里之前必须知道：
 // - 汇总检查只认 ci.yml 的 `check` 这一项（必过检查的汇总，同 release-train-lib.mjs 的 mainCi）：一条都没有算「还在跑」，不算绿。
+// - 一个提交上 merge-gate 每轮都再报一条，check-run 能超过一页（100 条）。
+// - 汇总检查必须翻页取全（client.all，最多 10 页）；只读第一页会把 `check` 读丢，当成还没有结果。
 // - compare 的提交列表是旧到新、最多 100 个一页；差得多时只读最后一页（最近的），差几个以 GitHub 回的 ahead_by 为准。
 import { z } from 'zod';
-import { type CheckRun, CheckRunSchema, evaluateChecks } from './checks.ts';
+import { CheckRunSchema, evaluateChecks } from './checks.ts';
 import { enc, type GitHubClient, type RepoRef, repoSlug, unexpected } from './client.ts';
 import { GitHubError } from './errors.ts';
 
@@ -71,7 +73,6 @@ const CompareSchema = z.object({
   ahead_by: z.number().int().min(0),
   commits: z.array(CommitSchema),
 });
-const CheckRunsSchema = z.object({ check_runs: z.array(CheckRunSchema) });
 const MergedPullListSchema = z.array(
   z.object({
     number: z.number().int(),
@@ -131,17 +132,21 @@ export function createReleaseFacts(client: GitHubClient): ReleaseFactsReader {
     commit: (repo, sha, signal) => getCommit(repo, sha, signal),
 
     async mainCi(repo, sha, signal) {
-      const res = await client.request({
-        method: 'GET',
-        path: `${base(repo)}/commits/${enc(sha)}/check-runs`,
-        auth: auth(repo),
-        query: { per_page: 100 },
-        signal,
-      });
-      const parsed = CheckRunsSchema.safeParse(res.data);
-      if (!parsed.success) throw unexpected(`读 ${sha.slice(0, 12)} 的检查结果`, res.data);
-      const runs: CheckRun[] = parsed.data.check_runs;
-      const e = evaluateChecks([RELEASE_CHECK_NAME], runs, []);
+      const what = `读 ${sha.slice(0, 12)} 的检查结果`;
+      const runs = await client.all<unknown>(
+        {
+          method: 'GET',
+          path: `${base(repo)}/commits/${enc(sha)}/check-runs`,
+          auth: auth(repo),
+          query: { per_page: 100, filter: 'all' },
+          signal,
+        },
+        (d) => (d as { check_runs?: unknown })?.check_runs,
+        10,
+      );
+      const parsed = z.array(CheckRunSchema).safeParse(runs);
+      if (!parsed.success) throw unexpected(what, runs[0]);
+      const e = evaluateChecks([RELEASE_CHECK_NAME], parsed.data, []);
       if (e.overall === 'green') return { state: 'green', detail: '' };
       if (e.overall === 'red') {
         const f = e.checks.find((c) => c.state === 'failure');
