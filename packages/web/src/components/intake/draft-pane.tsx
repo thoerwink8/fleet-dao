@@ -1,6 +1,6 @@
 // 右栏「单子草稿」（电脑）：逐栏可改（原话除外）；底部查重、还缺什么、提交拍板或确定开单、让别家挑错。
 // 待拍板时草稿冻结；结案后只读，加「在 GitHub 打开」和「接着这条提」。手机上同一份字段只读，放在从下往上弹出的面板里。
-import { ExternalLink, Lock, Plus, TriangleAlert, X } from 'lucide-react';
+import { ExternalLink, Lock, PanelRightClose, Plus, TriangleAlert, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { cn } from '../../lib/utils';
 import { NativeSelect } from '../layout/native-select';
@@ -243,6 +243,8 @@ export interface DraftProps extends Omit<FieldsProps, 'ro'> {
   onJoin: () => void;
   onDismiss: () => void;
   onContinue: () => void;
+  onClose: () => void;
+  repo: string;
 }
 
 export function DraftPane(p: DraftProps) {
@@ -252,8 +254,9 @@ export function DraftPane(p: DraftProps) {
   const label = p.partner ? '提交给 cxy 拍板' : '确定，开单';
   return (
     <aside
-      className="flex min-h-0 w-1/3 min-w-96 max-w-2xl shrink-0 flex-col border-l bg-panel"
+      className="flex h-full min-h-0 w-84 shrink-0 flex-col bg-panel"
       aria-label="单子草稿"
+      data-intake-panel
     >
       <header className="flex items-center gap-2 border-b px-4 py-2">
         <h2 className="text-heading">{mode === 'closed' ? '单子摘要' : '单子草稿'}</h2>
@@ -267,7 +270,11 @@ export function DraftPane(p: DraftProps) {
         <span className="ml-auto text-meta text-muted-foreground">
           {mode === 'edit' ? '每一栏都能直接改' : mode === 'frozen' ? '已提交，冻结中' : '已结案，只读'}
         </span>
+        <Button size="icon-sm" variant="ghost" onClick={p.onClose} aria-label="收起单子" title="收起单子">
+          <PanelRightClose />
+        </Button>
       </header>
+      <div className="border-b px-4 py-1.5 text-meta text-muted-foreground">仓 {p.repo}</div>
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-3 scrollbar-thin" data-intake-draft>
         <DraftFields draft={d} edited={p.edited} flash={p.flash} ro={ro} onChange={p.onChange} />
       </div>

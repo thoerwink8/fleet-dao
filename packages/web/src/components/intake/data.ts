@@ -42,6 +42,8 @@ export interface Req {
   issue?: number | undefined;
   pr?: number | undefined;
   updated: string;
+  /** 列表里「最后一条消息」的预览。 */
+  preview: string;
   /** 下一步轮到谁，例如「等 cxy 拍板」。 */
   waiting: string | null;
   /** 正等着当前这个人。 */
@@ -62,11 +64,18 @@ export function reqList(scene: Scene): Req[] {
     issue: scene === 'closed' ? 12 : undefined,
     pr: scene === 'closed' ? 34 : undefined,
     updated: '刚刚',
+    preview:
+      scene === 'discuss'
+        ? 'cxy：行，抖音先不做。@指挥官 看下草稿齐了没？'
+        : scene === 'pending'
+          ? 'fxc188 提交拍板（第 7 版）'
+          : '#12 已开成 · PR #34',
     waiting: scene === 'discuss' ? '指挥官（被 @）' : scene === 'pending' ? '等 cxy 拍板' : '引擎问你',
     mineFor: scene === 'discuss' ? undefined : 'cxy',
   };
   const rest: Req[] = [
     {
+      preview: '引擎：火山语音那张卡要不要也折叠？',
       no: 41,
       title: '额度页按账号池折叠',
       repo: 'fleet-dao',
@@ -81,6 +90,7 @@ export function reqList(scene: Scene): Req[] {
       mineFor: 'fxc188',
     },
     {
+      preview: 'cxy：按仓筛选放在顶上还是侧边？',
       no: 40,
       title: '任务列表加按仓筛选',
       repo: 'fleet-dao',
@@ -92,6 +102,7 @@ export function reqList(scene: Scene): Req[] {
       mineFor: 'fxc188',
     },
     {
+      preview: 'fxc188：提交拍板（第 4 版）',
       no: 36,
       title: '导出任务清单成表格',
       repo: 'fleet-dao',
@@ -103,6 +114,7 @@ export function reqList(scene: Scene): Req[] {
       mineFor: 'cxy',
     },
     {
+      preview: 'fxc188：提交拍板（第 3 版）',
       no: 33,
       title: '装新机器时的清单页',
       repo: 'daihuo-workbench',
@@ -114,6 +126,7 @@ export function reqList(scene: Scene): Req[] {
       mineFor: 'cxy',
     },
     {
+      preview: '#19 已合并 · PR #22',
       no: 35,
       title: '飞瓜被挤下线时给个提醒',
       repo: 'daihuo-workbench',
@@ -127,6 +140,7 @@ export function reqList(scene: Scene): Req[] {
       waiting: null,
     },
     {
+      preview: '#8 已上线 · PR #9',
       no: 31,
       title: '首页改版',
       repo: 'daihuo-workbench',
@@ -140,6 +154,7 @@ export function reqList(scene: Scene): Req[] {
       waiting: null,
     },
     {
+      preview: 'cxy：不做，现在的对比度够用',
       no: 30,
       title: '暗色主题再调一档对比度',
       repo: 'fleet-dao',
@@ -154,6 +169,7 @@ export function reqList(scene: Scene): Req[] {
   const list = [cur, ...rest];
   if (scene === 'closed') {
     list.splice(1, 0, {
+      preview: '接着 需求 42 / #12 · 指挥官在问',
       no: 44,
       title: '一次填好的表里加上抖音',
       repo: 'daihuo-workbench',
@@ -180,6 +196,8 @@ export type Msg =
   | { kind: 'patch'; id: string; text: string; field: DraftField }
   | { kind: 'suggest'; id: string; field: DraftField; text: string; state?: 'taken' | 'skipped' }
   | { kind: 'sys'; id: string; at?: string; text: string }
+  | { kind: 'brief'; id: string; at: string }
+  | { kind: 'submit'; id: string; who: Human; version: number; at: string }
   | { kind: 'divider'; id: string; text: string };
 
 export interface Quote {
@@ -254,7 +272,7 @@ export function messagesOf(scene: Scene): Msg[] {
       text: '我看了 `web/src/pages/Settings.tsx`：现在「方舟」「火山语音」「抖音」各是一张卡，每张卡一个保存钮，密钥存在 `secrets_history` 表里。\n\n你说的「几个」，是这三张卡，还是别的？',
     },
     { kind: 'say', id: 'm3', who: 'fxc188', at: '16:14', text: T3 },
-    { kind: 'patch', id: 'm4', text: '草稿里补了：场景、已知的模块', field: 'modules' },
+    { kind: 'patch', id: 'm4', text: '改了单子：场景、已知的模块', field: 'modules' },
     {
       kind: 'ask',
       id: 'm5',
@@ -273,26 +291,21 @@ export function messagesOf(scene: Scene): Msg[] {
       at: '16:33',
       text: '@fxc188 看了 `server/internal/api/secrets.go`：cxy 说得对，抖音的 cookie 在 `.env.local`，不在库里。我先把它写进草稿的「不做什么」，你们看行不行。',
     },
-    { kind: 'patch', id: 'm10', text: '草稿里补了：怎么算做完第 2 条、不做什么', field: 'done' },
+    { kind: 'patch', id: 'm10', text: '改了单子：怎么算做完 +2、不做什么', field: 'done' },
   ];
-  if (scene === 'discuss') {
-    return [
-      ...base,
-      {
-        kind: 'sys',
-        id: 'm11',
-        text: '两个人都说过话了：指挥官只在被 @指挥官 或点「让指挥官接着问」时才说话',
-      },
-      { kind: 'say', id: 'm12', who: 'cxy', at: '16:36', text: '行，抖音先不做。@指挥官 再想想有没有漏的？' },
-    ];
-  }
-  const submitted: Msg[] = [
-    ...base,
-    { kind: 'say', id: 'm12', who: 'cxy', at: '16:36', text: '行，抖音先不做。' },
-    { kind: 'sys', id: 'm13', at: '22:30', text: 'fxc188 提交给 cxy 拍板（第 7 版草稿）' },
+  const tail: Msg[] = [
+    { kind: 'say', id: 'm12', who: 'cxy', at: '16:36', text: '行，抖音先不做。@指挥官 看下草稿齐了没？' },
+    {
+      kind: 'say',
+      id: 'm13',
+      who: 'ai',
+      at: '16:36',
+      text: '四节都齐了。有一张 **#9** 看着相近，你们判断是不是一回事；没问题就可以提交了。',
+    },
+    { kind: 'brief', id: 'm14', at: '16:36' },
   ];
-  if (scene === 'pending') return submitted;
-  return [...submitted, { kind: 'sys', id: 'm14', at: '22:41', text: 'cxy 同意做，开成 #12（第 7 版）' }];
+  if (scene === 'discuss') return [...base, ...tail];
+  return [...base, ...tail, { kind: 'submit', id: 'm15', who: 'fxc188', version: 7, at: '22:30' }];
 }
 
 export interface Step {
