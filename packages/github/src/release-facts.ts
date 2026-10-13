@@ -5,7 +5,7 @@
 // - 汇总检查只认 ci.yml 的 `check` 这一项（必过检查的汇总，同 release-train-lib.mjs 的 mainCi）：一条都没有算「还在跑」，不算绿。
 // - compare 的提交列表是旧到新、最多 100 个一页；差得多时只读最后一页（最近的），差几个以 GitHub 回的 ahead_by 为准。
 import { z } from 'zod';
-import { type CheckRun, CheckRunSchema, evaluateChecks } from './checks.ts';
+import { CheckRunSchema, evaluateChecks } from './checks.ts';
 import { enc, type GitHubClient, type RepoRef, repoSlug, unexpected } from './client.ts';
 import { GitHubError } from './errors.ts';
 
@@ -71,7 +71,6 @@ const CompareSchema = z.object({
   ahead_by: z.number().int().min(0),
   commits: z.array(CommitSchema),
 });
-const CheckRunsSchema = z.object({ check_runs: z.array(CheckRunSchema) });
 const MergedPullListSchema = z.array(
   z.object({
     number: z.number().int(),
@@ -131,17 +130,23 @@ export function createReleaseFacts(client: GitHubClient): ReleaseFactsReader {
     commit: (repo, sha, signal) => getCommit(repo, sha, signal),
 
     async mainCi(repo, sha, signal) {
-      const res = await client.request({
-        method: 'GET',
-        path: `${base(repo)}/commits/${enc(sha)}/check-runs`,
-        auth: auth(repo),
-        query: { per_page: 100 },
-        signal,
-      });
-      const parsed = CheckRunsSchema.safeParse(res.data);
-      if (!parsed.success) throw unexpected(`读 ${sha.slice(0, 12)} 的检查结果`, res.data);
-      const runs: CheckRun[] = parsed.data.check_runs;
-      const e = evaluateChecks([RELEASE_CHECK_NAME], runs, []);
+      // 按名字过滤（check_name=check）：一个提交上能堆几百条 check-run（merge-gate 每轮都上报，实测 202 条），
+      // 不过滤就得翻十几页才找得到那一项；过滤后只剩要的那条（同 #2006 给本机发版车预检加的做法）。
+      // 仍翻页取全（用 client.all，跟在 Link 头）：「同名重跑只认最新」要拿到这一项的全部历史。
+      const runs = await client.all<unknown>(
+        {
+          method: 'GET',
+          path: `${base(repo)}/commits/${enc(sha)}/check-runs`,
+          auth: auth(repo),
+          query: { check_name: RELEASE_CHECK_NAME, per_page: 100 },
+          signal,
+        },
+        (d) => (d as { check_runs?: unknown })?.check_runs,
+        10,
+      );
+      const parsed = z.array(CheckRunSchema).safeParse(runs);
+      if (!parsed.success) throw unexpected(`读 ${sha.slice(0, 12)} 的检查结果`, runs[0]);
+      const e = evaluateChecks([RELEASE_CHECK_NAME], parsed.data, []);
       if (e.overall === 'green') return { state: 'green', detail: '' };
       if (e.overall === 'red') {
         const f = e.checks.find((c) => c.state === 'failure');
