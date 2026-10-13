@@ -2,6 +2,8 @@
 // 拦住绕过仓里脚本、会把本机会话全弄断、会把密钥文件的内容读进对话、会把别的进程的命令行（里面常有口令）打出来的调用。
 // 只是止血：正式的强制点在仓里（packages/conventions、卫生检查），这里挡的是会话自己手滑。
 // 协议：stdin 一份 JSON（tool_name、tool_input、cwd）；退出码 2 = 拦下，stderr 给模型看；0 = 放行。
+// Claude Code 的输入（isClaudeCodeInput）放行时还可能在 stdout 写一份 hookSpecificOutput：updatedInput 改写命令（打印进程命令行
+// 自动接 redactor），或 additionalContext 给模型一句提示（起子代理前取不到远端）。
 // 输入认不出一律按拦处理（退出码 2），不当成没事放行。
 // 规矩本身由 agents/test/rules/pretool.rules.test.ts 钉住：改这里的判断改了规矩，那边会红。
 import { readFileSync } from 'node:fs';
@@ -32,7 +34,11 @@ import { cleanId, stateDir, touchTool } from './unattended.mjs';
  *   | { leaf?: undefined, nested?: undefined, complex: string, name?: undefined, extra?: undefined, exclude: Set<Word> }} Unwrapped
  */
 /** @typedef {{ code: 2, message: string }} Block 拦下：退出码 2，message 给模型看 */
-/** @typedef {{ code: 0 } | Block} Verdict 钩子的结论：放行或拦下 */
+/**
+ * 放行；updatedInput 是改写过的整份 tool_input（Claude Code 的 hookSpecificOutput.updatedInput 整份替换），context 是给模型看的一句话
+ * @typedef {{ code: 0, updatedInput?: Record<string, unknown>, context?: string }} Allow
+ */
+/** @typedef {Allow | Block} Verdict 钩子的结论：放行或拦下 */
 /** @typedef {{ stdoutSafe?: boolean, stdinViewer?: boolean, receiver?: boolean }} LineCtx checkLine 的上下文（见 checkLine 上面的说明） */
 /** @typedef {{ u: Unwrapped, label: string | null, head: string | null }} CmdInfo 一条命令碰没碰到密钥路径、头一个词看不看得清 */
 /** @typedef {{ why: string }} Why 这条命令为什么算「打印进程命令行」 */
@@ -247,10 +253,50 @@ const NAMED_RE = new RegExp(
 );
 /** gh 没接系统钥匙串时把令牌明文存在这里（Linux 上常见） */
 const GH_HOSTS_RE = /(?<![\w.-])\.config\/gh\/hosts\.yml(?![\w.-])/i;
-const GENERIC_RE = new RegExp(
-  String.raw`(?:^|[${EDGE}])[^${EDGE}\[\]{}$!+]*[^${EDGE}\[\]{}$!+.]\.(?:pass|key|pem|p12|pfx|ppk|kdbx|jks|keystore)(?=$|[${EDGE}\]}])`,
-  'i',
-);
+const GENERIC_EXT = String.raw`[^${EDGE}\[\]{}$!+]*[^${EDGE}\[\]{}$!+.]\.(?:pass|key|pem|p12|pfx|ppk|kdbx|jks|keystore)(?=$|[${EDGE}\]}])`;
+const GENERIC_RE = new RegExp(`(?:^|[${EDGE}])${GENERIC_EXT}`, 'i');
+/**
+ * heredoc 正文里只认带路径分隔符的（/etc/ssl/server.key、C:\certs\a.pem）：正文多半是脚本，`item.key;`、`cfg.pem` 是属性名
+ * 不是文件（决定 0089：两天误拦一串写脚本的 heredoc）。正文外照旧按 GENERIC_RE 认（cat server.key 照拦）。
+ */
+const GENERIC_PATH_RE = new RegExp(String.raw`[\\/]${GENERIC_EXT}`, 'i');
+
+/**
+ * bash 的 heredoc 拆开：outer 是命令行本身（正文换成空行），bodies 是各段正文。<<< 不是 heredoc。认不出结束行的，后面全算正文。
+ * @param {string} text
+ * @returns {{ outer: string, bodies: string }}
+ */
+function splitHeredocs(text) {
+  const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
+  /** @type {string[]} */
+  const outer = [];
+  /** @type {string[]} */
+  const bodies = [];
+  /** @type {{ delim: string, strip: boolean }[]} */
+  const pending = [];
+  for (const line of lines) {
+    const cur = pending[0];
+    if (cur) {
+      const cmp = cur.strip ? line.replace(/^\t+/, '') : line;
+      if (cmp === cur.delim) {
+        pending.shift();
+        outer.push(line);
+      } else {
+        bodies.push(line);
+        outer.push('');
+      }
+      continue;
+    }
+    outer.push(line);
+    for (const m of line.matchAll(
+      /(?<!<)<<(?!<)(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z_][\w.-]*))/g,
+    )) {
+      const delim = m[2] ?? m[3] ?? m[4];
+      if (delim) pending.push({ delim, strip: m[1] === '-' });
+    }
+  }
+  return { outer: outer.join('\n'), bodies: bodies.join('\n') };
+}
 
 /** @param {string} name */
 function namedLabel(name) {
@@ -369,11 +415,14 @@ function secretUnder(rest, isSecret) {
 const WSL_UNC_RE = /(?:\/[?.]\/unc)?\/wsl(?:\$|\.localhost)\/[^/\s'"\x60;|&()<>,]+/gi;
 
 /**
- * 这段文字碰到了哪类密钥路径（给提示用的说法）；没碰到返回 null。反斜杠当路径分隔、再去掉转义和引号各看一遍
+ * 这段文字碰到了哪类密钥路径（给提示用的说法）；没碰到返回 null。反斜杠当路径分隔、再去掉转义和引号各看一遍。
+ * heredoc 为真（text 是 heredoc 正文）：*.key 这类只认带路径分隔符的（GENERIC_PATH_RE），别的名字照旧认。
  * @param {unknown} text
+ * @param {{ heredoc?: boolean }} [o]
  * @returns {string | null}
  */
-export function secretMention(text) {
+export function secretMention(text, { heredoc = false } = {}) {
+  const generic = heredoc ? GENERIC_PATH_RE : GENERIC_RE;
   const s = String(text);
   const slashed = s
     .replace(/\\/g, '/')
@@ -390,7 +439,7 @@ export function secretMention(text) {
     const named = NAMED_RE.exec(v);
     if (named?.groups?.name) return namedLabel(named.groups.name);
     if (GH_HOSTS_RE.test(v)) return 'gh 的登录令牌 ~/.config/gh/hosts.yml';
-    if (GENERIC_RE.test(v)) return '密钥文件（*.key、*.pem、*.pass 这类）';
+    if (generic.test(v)) return '密钥文件（*.key、*.pem、*.pass 这类）';
     for (const m of v.matchAll(DOTDIR_RE)) {
       const parts = (m.groups?.rest ?? '').split('/').filter(Boolean);
       // DOTDIR_RE 里 dir 是必有的一组；没有就是正则被改坏了，抛出去（和原来读 undefined 抛 TypeError 一样不放行）
@@ -1187,7 +1236,8 @@ function redactorAt(pipeline) {
 //
 // 得、程序名和 pid 不用管，但下面这几种写法一样把整条命令行打出来，认不出来就等于没有这一段：
 // ps -ef、pgrep -a、pstree -a、top -c、tasklist /v、/proc/<pid>/cmdline、wmic process、Win32_Process、
-// 挑出 CommandLine 那一列、systemctl status（CGroup 一节里每个进程一整行）。
+// 挑出 CommandLine 那一列、systemctl dump（status / show / cat 决定 0089 起不拦）。
+// Claude Code 里看得清的（整条只有看进程、过滤文字的）不拦，改写成接上 redactor 放行（decide 末尾的 updatedInput，决定 0089）。
 //
 // 这一段的处理是「拦住、给条明路」，不是「一律不许看」：看进程是调试的日常，不能堵死。要跑就接一条管道
 // 把输出过 redactor（agents/hooks/redact-secrets.mjs，和这条钩子一起装进 ~/.fleet-dao/hooks/）：
@@ -1244,55 +1294,14 @@ const PSTREE_ARGS = new Set([...'CHN']);
 const TOP_ARGS = new Set([...'dEenopUu']);
 
 /**
- * systemctl 的子命令里会打出进程命令行的（systemctl 1 的 man、systemd 254 实测）：
- * - status：活动状态后面就是 CGroup 一节，每行是「PID 完整命令行」，服务里跑的进程带的口令（--token、-s、连接串）整段打出来；
- * - show：不写 -p 时打全部属性，其中有 ExecStart（老版本 systemd < 239 写成 ExecStart={ 路径 ; 参数… }，参数一并在里面）、
- *   ExecMainStartTimestamp、ExecMainPID（MainPID 是主进程的 pid，进程一退就没了，也打）；挑列看的那几种写法另有 COMMANDLINE_COLUMN_RE 管；
- * - cat：把 unit 文件原样打出来，ExecStart= 那一行连参数一起；dump：内部状态，同样带 ExecStart 和 ExecMain*。
- * 不打的放行：is-active、is-enabled、is-failed（一个词）、start / stop / restart（动作）、list-units、list-unit-files、
- * list-dependencies（只有单元名）、enable、mask……「挑一条属性看」（show -p ActiveState）也算只打状态，见下面 execPropertyPicked。
+ * systemctl 的子命令里还拦的只有 dump（内部状态，带每个服务的 ExecStart 参数和 ExecMain*）。status、show、cat 由决定 0089
+ * 不再拦：天天用来看服务起没起，拦下全是误伤（规则减法，创始人 2026-10-13 17:54 同意）。
  */
-const SYSTEMCTL_PRINTS = new Set(['status', 'show', 'cat', 'dump']);
+const SYSTEMCTL_PRINTS = new Set(['dump']);
 /** systemctl 的全局选项里吃掉一个值的（systemctl 1）：--property 的 =值 和 -p 的值都在这里认，别的开关不吃后面的词 */
 const SYSTEMCTL_VALUE_LONG = opts('--property');
 /** systemctl 的短选项里吃掉一个值的：-H 主机、-M 容器、-p 属性（-pH、-Hfr 这类紧贴着写的也认） */
 const SYSTEMCTL_VALUE_SHORT = new Set([...'HMp']);
-/** systemctl show 的 -p / --property 后面挑的属性名里，有这些就是命令行（老版本 systemd 的 ExecStart={ 参数… } 也认前缀） */
-const SYSTEMCTL_EXEC_PROP =
-  /^(?:ExecStart|ExecStop|ExecReload|ExecStartPre|ExecStartPost|ExecStopPost|ExecCondition|ExecMainPID|ExecMainStartTimestamp|MainPID)$/i;
-
-/**
- * systemctl show 挑的这几条属性里有没有带命令行的：挑过（写了 -p / --property）且一条带命令行的都没有，才算「只打状态」放行。
- * 没挑过（show 后面什么都没写）打印全部属性、里面有 ExecStart，返回 true。属性值跟着 -p 一起写在值里面，按逗号、空格切开看。
- */
-/**
- * @param {Word[]} args
- * @returns {boolean}
- */
-function showPicksExecProps(args) {
-  /** @type {string[]} */
-  const picked = [];
-  let sawP = false;
-  for (let i = 0; i < args.length; i++) {
-    const v = args[i]?.value ?? '';
-    if (v === '--') break;
-    if (v.startsWith('--property')) {
-      sawP = true;
-      const val = v.includes('=') ? v.slice(v.indexOf('=') + 1) : (args[++i]?.value ?? '');
-      picked.push(...val.split(','));
-      continue;
-    }
-    if (!v.startsWith('-') || v === '-') continue;
-    const at = v.indexOf('p'); // -p 就是挑属性；写成 -tp 也只多认一个 p（systemctl 没有吃值的 t）
-    if (at < 1) continue;
-    sawP = true;
-    const rest = v.slice(at + 1);
-    picked.push(...(rest === '' ? (args[++i]?.value ?? '') : rest).split(','));
-  }
-  // 没挑过属性 = 全部属性都打（里面有 ExecStart）；挑过但一条带命令行的都没有 = 只看状态，放行
-  if (!sawP) return true;
-  return picked.some((p) => SYSTEMCTL_EXEC_PROP.test(p.trim()));
-}
 
 /** systemctl 的整个命令行会不会把进程命令行打出来：不是 systemctl 返回 null；是就返回 { why } */
 /**
@@ -1318,10 +1327,7 @@ function systemctlPrintsCommandLine(args) {
   }
   const sub = args[i]?.value.toLowerCase();
   if (sub === undefined || !SYSTEMCTL_PRINTS.has(sub)) return null;
-  if (sub === 'show' && !showPicksExecProps(args.slice(i + 1))) return null;
-  return {
-    why: `systemctl ${sub} 打出了进程的命令行（${sub === 'status' ? 'CGroup 一节里每个进程一整行' : 'ExecStart= 那一行'})`,
-  };
+  return { why: `systemctl ${sub} 打出了进程的命令行（ExecStart= 那几行带参数）` };
 }
 
 /**
@@ -1329,7 +1335,7 @@ function systemctlPrintsCommandLine(args) {
  * 只看写死的写法；拿变量当命令、或者把输出再加工一道的看不出来——那是这一段的边界，说清楚比假装拦住了好。
  * 只打进程名和 pid 的放行：tasklist（不带 /v）、Get-Process（不挑 CommandLine）、pgrep（-l 只打进程名，procps-ng 的
  * pgrep.c 里 -l 打的是 CMD、-a 才是整条 cmdline）、pstree（不带 -a）、top（不带 -c，默认只打程序名；~/.toprc 里存了
- * 「显示命令行」的认不出，这也是边界）、systemctl（status / show / cat / dump 之外的子命令只打状态或只报成败）。
+ * 「显示命令行」的认不出，这也是边界）、systemctl（只拦 dump）。
  */
 /**
  * @param {Leaf | undefined} leaf
@@ -1550,7 +1556,13 @@ function checkLine(text, kind, ctx, depth) {
  * @returns {Block | null}
  */
 function secretVerdict(command, kind) {
-  const label = secretMention(command);
+  /** @type {string | null} */
+  let label;
+  if (kind === 'powershell') label = secretMention(command);
+  else {
+    const { outer, bodies } = splitHeredocs(command);
+    label = secretMention(outer) ?? (bodies ? secretMention(bodies, { heredoc: true }) : null);
+  }
   if (label === null) return null;
   try {
     const r = checkLine(command, kind, {}, 0);
@@ -1580,7 +1592,7 @@ function processBlock(why) {
     [
       `fleet-guard：这条命令${why}，进程的命令行里常常带着别的进程的口令（命令行交给进程之后，它就落在那个进程的命令行里，谁都能读：MCP 服务的 -s <secret>、--token、数据库口令），按拦处理（密钥、令牌、口令的值不进对话）。`,
       REDACT_RECIPE,
-      '只看进程名和 pid 的打法不用它：ps -A、ps -l、ps -eo pid,comm、pgrep（-l 只打进程名，不带 -a）、pstree -p（不带 -a）、top（不带 -c）、tasklist（不带 /v）、Get-Process（不挑 CommandLine）、systemctl is-active / show -p ActiveState（挑的这几条属性里没有命令行）。',
+      '只看进程名和 pid 的打法不用它：ps -A、ps -l、ps -eo pid,comm、pgrep（-l 只打进程名，不带 -a）、pstree -p（不带 -a）、top（不带 -c）、tasklist（不带 /v）、Get-Process（不挑 CommandLine）、systemctl status / show / cat。',
     ].join('\n'),
   );
 }
@@ -1607,12 +1619,56 @@ function hasRedactor(command, kind, depth = 0) {
 }
 
 /**
- * 打印进程命令行的命令判一下：不是这类返回 null；认不出（钩子没看懂这条命令）也按拦处理
+ * 自动改写时整条命令行里只许有这些（看进程的、只处理文字的）：改写之后是 permissionDecision: allow 放行，
+ * 夹了别的命令（ps -ef; rm …）就等于替那条命令跳过了权限确认，所以只认这几样，别的照旧拦下给配方。
+ * awk、sed 不在里面（能跑命令、能写文件）。
+ */
+const PROC_REWRITE_OK = opts(
+  [
+    'ps pgrep pstree top tasklist wmic get-ciminstance get-wmiobject gcim gwmi get-process gps systemctl cat',
+    'grep egrep fgrep rg sort uniq head tail wc cut tr column nl findstr',
+    'select-object select sort-object format-table ft format-list fl format-wide fw out-string where-object where measure-object measure',
+  ].join(' '),
+);
+
+/**
+ * 这条命令行能不能自动接 redactor：每段都是 PROC_REWRITE_OK 里的、没有往文件写、没有钩子看不清的写法、不经 ssh / bash -c 转手
  * @param {string} command
  * @param {Kind} kind
- * @returns {Block | null}
  */
-function processListingVerdict(command, kind) {
+function rewritable(command, kind) {
+  const { pipelines, complex } = scanCommand(command, kind);
+  if (complex.length > 0) return false;
+  return pipelines.flat().every((c) => {
+    if (c.redirects.length > 0) return false;
+    if (c.words.some((w) => /[`]/.test(w.raw) || (kind === 'powershell' && w.value.startsWith('$'))))
+      return false;
+    const u = unwrap(c.words);
+    return u.leaf !== undefined && !u.leaf.viaXargs && PROC_REWRITE_OK.has(u.leaf.name);
+  });
+}
+
+/**
+ * 整条命令行的输出（bash 连 stderr）接一条管道过 redactor：bash 用 { …; } 包起来，PowerShell 用 & { … } 包起来，
+ * 原来的命令原样留在里面，末尾的注释也不会吃掉管道（换行再收括号）。
+ * @param {string} command
+ * @param {'bash' | 'powershell'} kind
+ */
+export function withRedactor(command, kind) {
+  return kind === 'powershell'
+    ? `& {\n${command}\n} | node ${REDACT}`
+    : `{\n${command}\n} 2>&1 | node ${REDACT}`;
+}
+
+/**
+ * 打印进程命令行的命令判一下：不是这类返回 null；认不出（钩子没看懂这条命令）也按拦处理。
+ * rewrite 为真（Claude Code 的 Bash、PowerShell）且整条看得清：返回 { rewrite: 为什么 }，由 decide 改写成接上 redactor 放行。
+ * @param {string} command
+ * @param {Kind} kind
+ * @param {boolean} [rewrite]
+ * @returns {Block | { rewrite: string } | null}
+ */
+function processListingVerdict(command, kind, rewrite = false) {
   /** @type {Why | null} */
   let hit;
   try {
@@ -1625,6 +1681,11 @@ function processListingVerdict(command, kind) {
     if (hasRedactor(command, kind)) return null;
   } catch {
     return processBlock(`${hit.why}，钩子又没看懂这条命令的管道`);
+  }
+  try {
+    if (rewrite && rewritable(command, kind)) return { rewrite: hit.why };
+  } catch {
+    // 看不清就不改写，照旧拦下给配方
   }
   return processBlock(hit.why);
 }
@@ -1943,63 +2004,79 @@ function readVerdict(tool, what, input, fallbackCwd) {
 }
 
 /** 判一条钩子输入（原文）：{ code: 0 } 放行，{ code: 2, message } 拦下。 */
-// 前台等待上限（创始人 2026-10-04「选 1」）：他在我干活时发的话只在两次工具调用的间隙送到，一条前台长等待中间没有间隙，
-// 话就卡在那儿、进程一断还会丢。所以单次前台等待不许超过这个数（无人值守不无人值守都一样，他随时可能插话）；
-// 更长的活用 run_in_background（跑完会重新叫醒我）、或拆成多次短等。后台跑的不受限。
-export const MAX_FOREGROUND_WAIT_SECONDS = 60;
-export const FRAMEWORK_DEFAULT_TIMEOUT_MS = 120_000;
+// 前台等待上限（单次不超过 60 秒）由决定 0089 删掉：两天拦 18 次全是误伤；长命令后台跑是规矩里的写法，不再由钩子拦。
 
 /**
- * 这次调用在前台最多要等几秒：超过上限返回 { seconds, what }，没超过、后台跑的、认不出的都是 null（认不出不当超了拦人）。
- * @param {unknown} toolInput
- * @param {string} cmd
- * @param {Kind} kind
- * @returns {{ seconds: number, what: string } | null}
+ * 是不是 Claude Code 自己的 PreToolUse 输入（code.claude.com/docs/en/hooks 的输入例子：transcript_path、permission_mode、
+ * hook_event_name、tool_use_id 都在）。别家借道读同一份登记的（Cursor、Devin、Grok）、vendor-pretool 翻好的（Codex、Gemini、Kimi）
+ * 不一定认 stdout 的 updatedInput，也不一定有 Read/Grep/Glob 工具：只对 Claude Code 改写命令、只对它拦 cd 读法。
+ * Codex 的输入也带 permission_mode，但多一个 turn_id，排掉。
+ * @param {Record<string, unknown>} input
  */
-export function foregroundWait(toolInput, cmd, kind) {
-  if (prop(toolInput, 'run_in_background') === true) return null;
-  const t = prop(toolInput, 'timeout');
-  // 120000 是框架给没写 timeout 的调用自动补的默认值（#827 合进来当天撞到：钩子把每条普通命令都拦了），
-  // 钩子分不出「没写」和「写了 120000」，只能放过这个数；显式写的 61000~119999、超过 120000 的照拦。
-  if (
-    typeof t === 'number' &&
-    Number.isFinite(t) &&
-    t > MAX_FOREGROUND_WAIT_SECONDS * 1000 &&
-    t !== FRAMEWORK_DEFAULT_TIMEOUT_MS
-  ) {
-    return { seconds: Math.round(t / 1000), what: `timeout=${t}ms` };
+export function isClaudeCodeInput(input) {
+  return (
+    input.hook_event_name === 'PreToolUse' &&
+    typeof input.transcript_path === 'string' &&
+    typeof input.permission_mode === 'string' &&
+    typeof input.tool_use_id === 'string' &&
+    !('turn_id' in input)
+  );
+}
+
+// —— cd 进目录再查看 ——
+// 两天约 7800 次 `cd <目录> && cat/sed -n/head/…`（决定 0089）：Read、Grep、Glob 写绝对路径一次就到，git、pnpm 有 -C / --dir。
+// 只拦「整条就是 cd 一下、后面全是只读查看」的；夹了别的命令（cd x && pnpm test）、钩子看不清的写法（$( )、变量、重定向、循环）都不拦。
+
+const CD_NAMES = opts('cd pushd chdir set-location sl');
+/** 只读查看：cat、head、tail、grep、rg、ls、type、Get-Content（sed 要带 -n 才算） */
+const VIEWERS = opts('cat head tail grep egrep fgrep rg ls type get-content gc sed wc sort uniq');
+
+/**
+ * @param {SimpleCmd} c
+ * @returns {boolean}
+ */
+function isViewerCmd(c) {
+  if (c.redirects.length > 0) return false;
+  if (c.words.some((w) => w.value.includes('$') || /[`]/.test(w.raw))) return false;
+  const u = unwrap(c.words);
+  if (!u.leaf || u.leaf.viaXargs || u.leaf.name !== cmdName(c.words[0]?.value)) return false;
+  if (!VIEWERS.has(u.leaf.name)) return false;
+  if (u.leaf.name === 'sed') {
+    const flags = u.leaf.args.map((a) => a.value).filter((v) => /^-[A-Za-z]+$/.test(v));
+    return flags.some((v) => v.includes('n')) && !flags.some((v) => v.includes('i'));
   }
-  /** @type {Record<string, number>} */
-  const units = { '': 1, s: 1, m: 60, h: 3600, d: 86400 };
-  if (kind === 'bash') {
-    for (const m of cmd.matchAll(/(?:^|[;&|\n(]|&&|\|\|)\s*sleep\s+(\d+(?:\.\d+)?)([smhd]?)\b/g)) {
-      const seconds = Number(m[1]) * (units[m[2] ?? ''] ?? Number.NaN);
-      if (seconds > MAX_FOREGROUND_WAIT_SECONDS) return { seconds, what: m[0].trim() };
-    }
-  } else {
-    for (const m of cmd.matchAll(/\bStart-Sleep\b([^;&|\n)]*)/gi)) {
-      const args = m[1] ?? '';
-      const ms = /-m(?:illiseconds)?\s+(\d+)/i.exec(args);
-      const sec = /-s(?:econds)?\s+(\d+(?:\.\d+)?)/i.exec(args) ?? /^\s+(\d+(?:\.\d+)?)\b/.exec(args);
-      const seconds = ms ? Number(ms[1]) / 1000 : sec ? Number(sec[1]) : 0;
-      if (seconds > MAX_FOREGROUND_WAIT_SECONDS) return { seconds, what: m[0].trim() };
-    }
-  }
-  return null;
+  return true;
 }
 
 /**
- * 这次调用是不是子代理（Agent 工具起的）发的：Claude Code 只在子代理里的钩子调用带 agent_id（code.claude.com/docs/en/hooks
- * 「When running with --agent or inside a subagent」：「Present only when the hook fires inside a subagent call. Use this to
- * distinguish subagent hook calls from main-thread calls」）。空串、不是字符串都不算，宁可按主会话的规矩多拦一次。
- * 为什么要分（创始人 2026-10-06「这种方式不太正确……把不合理的 subagent 方式改掉」）：前台等待上限、欠账催送、起后台活自动开无人值守，
- * 全是为了创始人的话能在两次调用之间送到**主会话**；子代理不和他对话，这几条套在它身上只剩代价——一次跑测试被拆成「后台起 + 每 55 秒
- * 醒一次看日志」，一个活 143 次调用、25 分钟、31 万 token（2026-10-06 #1118 实测）。密钥护栏、危险命令那些照旧管子代理。
- * @param {unknown} input
+ * `cd <目录> && <只读查看>` 拦下；不是这种、认不出都返回 null
+ * @param {string} cmd
+ * @param {Kind} kind
+ * @returns {Block | null}
  */
-export function isSubagentCall(input) {
-  const id = prop(input, 'agent_id');
-  return typeof id === 'string' && id.trim() !== '';
+export function cdReadVerdict(cmd, kind) {
+  /** @type {ReturnType<typeof scanCommand>} */
+  let scanned;
+  try {
+    scanned = scanCommand(cmd, kind);
+  } catch {
+    return null;
+  }
+  const { pipelines, complex } = scanned;
+  if (complex.length > 0 || pipelines.length < 2) return null;
+  const [first, ...rest] = pipelines;
+  const cd = first?.length === 1 ? first[0] : undefined;
+  if (!cd || cd.redirects.length > 0) return null;
+  const words = cd.words.map((w) => w.value);
+  if (!CD_NAMES.has(cmdName(words[0]))) return null;
+  const args = words.slice(1).filter((v, i) => !(i === 0 && /^-(?:literal)?path$/i.test(v)));
+  const dir = args[0];
+  if (args.length !== 1 || dir === undefined || dir === '' || dir.startsWith('-') || dir.includes('$'))
+    return null;
+  if (!rest.every((p) => p.length > 0 && p.every(isViewerCmd))) return null;
+  return block(
+    `fleet-guard：别 cd 进目录再查看（cd ${dir} 后面只是查看）：读文件用 Read、搜内容用 Grep、找文件用 Glob 工具，都写绝对路径（${dir}/<文件>）；git 用 \`git -C ${dir} …\`，pnpm 用 \`pnpm --dir ${dir} …\`。`,
+  );
 }
 
 /**
@@ -2043,13 +2120,7 @@ export function decide(raw, fallbackCwd = '') {
     return block(`fleet-guard：${tool} 的输入里认不出命令（${JSON.stringify(command)}），按拦处理`);
   }
   const cmd = command;
-  // 子代理不和创始人对话，前台等多久都不影响他的话送达：不设上限（isSubagentCall 的注释）
-  const wait = isSubagentCall(input) ? null : foregroundWait(toolInput, cmd, kind);
-  if (wait) {
-    return block(
-      `这条调用要在前台等约 ${wait.seconds} 秒（${wait.what}），超过单次上限 ${MAX_FOREGROUND_WAIT_SECONDS} 秒：创始人在这期间发的话要等它跑完才送到我手上，进程一断还会丢。长命令加 run_in_background: true（跑完会重新叫醒你），要等就拆成多次不超过 ${MAX_FOREGROUND_WAIT_SECONDS} 秒的短等；要等几个小时的活，派给 Agent 子代理、自己不在前台等。`,
-    );
-  }
+  const claudeCode = isClaudeCodeInput(input);
   const rawCwd = String(input.cwd ?? input.workspaceRoot ?? fallbackCwd);
   const cwd = rawCwd.split('\\').join('/').toLowerCase();
   const inFleet = cwd.includes('fleet-dao') || /fleet-dao/i.test(cmd);
@@ -2057,8 +2128,13 @@ export function decide(raw, fallbackCwd = '') {
   const secret = secretVerdict(cmd, kind) ?? broadSearchVerdict(cmd, kind, rawCwd);
   if (secret) return secret;
   // 命令的输出里带密钥：打印进程命令行（上面那一段）。密钥文件那条只看输入、看不到输出，所以单独判。
-  const listing = processListingVerdict(cmd, kind);
-  if (listing) return listing;
+  // Claude Code 里看得清的，改写成接上 redactor 放行（下面的检查照做完，都过了才放）；别的照拦。
+  const listing = processListingVerdict(cmd, kind, claudeCode && (kind === 'bash' || kind === 'powershell'));
+  if (listing && 'code' in listing) return listing;
+  if (claudeCode) {
+    const cdRead = cdReadVerdict(cmd, kind);
+    if (cdRead) return cdRead;
+  }
   // 2026-09-26 撞过两回：子代理拼命令时反引号误跑了切号登录；总指挥 node -e "…`specs/…/需求.md`…" 把整份需求文档当脚本执行了。
   // PowerShell 里反引号是转义符，不归这条管；别家的终端是不是 bash 说不准，也不管。不分仓，全机都拦。
   if (kind === 'bash' && bashBacktickSubst(cmd)) {
@@ -2100,12 +2176,19 @@ export function decide(raw, fallbackCwd = '') {
       "fleet-dao 里不用 git reset --hard：会把工作区覆盖掉，过去把主检出还没验证的活丢过。要回滚某个提交：先把当前进度 `git commit` 到分支或工作树，要丢弃改动用 `git stash push -u -m '<tag>'`，或先 `git diff > 文件` 再决定要不要真扔。",
     );
   }
+  if (listing && kind !== 'shell') {
+    return {
+      code: 0,
+      updatedInput: { ...(isObjectLike(toolInput) ? toolInput : {}), command: withRedactor(cmd, kind) },
+      context: `fleet-guard：这条命令${listing.rewrite}，钩子已在末尾接上 node ${REDACT} 把口令打码后再放行（输出里的 *** 就是打掉的值）。`,
+    };
+  }
   return { code: 0 };
 }
 
 /**
- * 起子代理前先把 origin/main 取到最新（子代理的工作树从它切）；要建工作树又取不成才拦（fresh-main.mjs 的 freshBeforeSubagent）。
- * 这一步自己出错不拦，但返回一句不拦的话给调用方写进 stderr：原来整段吞掉，子代理会从旧主线切工作树，没有任何提示（全仓审查第 4 路 S9）。
+ * 起子代理前先把 origin/main 取到最新（子代理的工作树从它切）；要建工作树又取不成只提示、不拦（fresh-main.mjs 的 freshBeforeSubagent，决定 0089）。
+ * 这一步自己出错也不拦，同样返回一句提示：原来整段吞掉，子代理会从旧主线切工作树，没有任何提示（全仓审查第 4 路 S9）。
  * 输入认不出不算它出错（返回 null），由 decide 按拦处理。
  * @param {string} raw 钩子的原始输入
  * @param {{ fresh?: typeof freshBeforeSubagent, cwd?: string }} [deps] 测试换掉取远端那一步
@@ -2172,12 +2255,36 @@ if (isMain()) {
   } catch {
     // 输入认不出由下面的 decide 按拦处理
   }
+  // 起子代理前取不到远端：不拦（决定 0089），提示给模型（additionalContext）也给创始人看（systemMessage）
   const fresh = subagentFreshness(raw);
-  if (fresh) process.stderr.write(`${fresh.message}\n`);
-  if (fresh?.block) process.exit(2);
+  if (fresh) {
+    process.stdout.write(
+      `${JSON.stringify({
+        systemMessage: fresh.message,
+        hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: fresh.message },
+      })}\n`,
+    );
+  }
   if (backgroundOnly) process.exit(0);
   // Devin 的输入里没有会话目录：钩子进程的工作目录就是会话目录
   const verdict = decide(raw, process.cwd());
-  if (verdict.code !== 0) process.stderr.write(`${verdict.message}\n`);
-  process.exit(verdict.code);
+  if (verdict.code !== 0) {
+    process.stderr.write(`${verdict.message}\n`);
+    process.exit(verdict.code);
+  }
+  if (verdict.updatedInput) {
+    // 文档（code.claude.com/docs/en/hooks「PreToolUse decision control」）：updatedInput 整份替换 tool_input，配 allow 放行
+    process.stdout.write(
+      `${JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+          permissionDecisionReason: verdict.context ?? '',
+          updatedInput: verdict.updatedInput,
+          ...(verdict.context ? { additionalContext: verdict.context } : {}),
+        },
+      })}\n`,
+    );
+  }
+  process.exit(0);
 }
