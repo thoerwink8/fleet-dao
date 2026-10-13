@@ -80,6 +80,7 @@ export function realRuns(deps: RealRunsDeps): RunsWriter {
           costUsd: run.costUsd ?? null,
           sessionId: run.sessionId ?? null,
           memoryPeakMb: run.memoryPeakMb ?? null,
+          cpuSeconds: run.cpuSeconds ?? null,
           failureReason: run.failureReason ?? null,
         },
         'runs 写入失败',

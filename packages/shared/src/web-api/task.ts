@@ -148,6 +148,8 @@ export const SegmentRunSchema = z.object({
   /** 执行体没报花费（订阅制）时按目录单价估的；报了花费的、在跑的、没起来的没有。 */
   estimate: CostEstimateSchema.optional(),
   memoryPeakMb: Count.optional(),
+  /** 这一次会话的 CPU 秒数（大于 0）。没记不给，不当 0（#1980）。 */
+  cpuSeconds: z.number().int().positive().optional(),
   failureReason: z.string().optional(),
   prNumber: z.number().int().positive().optional(),
   branch: z.string().optional(),

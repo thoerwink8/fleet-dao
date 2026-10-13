@@ -240,6 +240,7 @@ export const toSegmentRun = (r: typeof runs.$inferSelect): SegmentRun =>
     costUsd: opt(r.costUsd),
     usageNote: opt(r.usageNote),
     memoryPeakMb: opt(r.memoryPeakMb),
+    cpuSeconds: opt(r.cpuSeconds),
     failureReason: opt(r.failureReason),
     prNumber: opt(r.prNumber),
     branch: opt(r.branch),

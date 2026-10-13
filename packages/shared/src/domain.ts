@@ -379,6 +379,8 @@ export interface SegmentRun {
   usageNote?: string;
   /** 内存峰值（MiB）：只有挂在 cgroup 里的会话读得到，本机不给。 */
   memoryPeakMb?: number;
+  /** 这一次会话用掉的 CPU 秒数（cgroup cpu.stat 的 usage_usec 折成秒）。读不到不给，不当成 0（#1980）。 */
+  cpuSeconds?: number;
   failureReason?: string;
   prNumber?: number;
   branch?: string;

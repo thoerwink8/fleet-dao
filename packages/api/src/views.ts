@@ -493,6 +493,7 @@ export function homeRunning(input: {
         ...(decision ? { pendingDecision: decision.title } : {}),
         ...(flow.segment === 'merge' && t.redChecks ? { redChecks: t.redChecks } : {}),
         ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
+        ...(flow.lastSession ? { lastSession: flow.lastSession } : {}),
         link: `/tasks/${t.id}`,
         taskId: t.id,
         state: t.state,
