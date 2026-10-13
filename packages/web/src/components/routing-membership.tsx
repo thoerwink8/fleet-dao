@@ -416,13 +416,7 @@ export function PurposeModelMenu({
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={remove.isPending}>先不</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={remove.isPending}
-              onClick={(e) => {
-                e.preventDefault();
-                void runRemove();
-              }}
-            >
+            <AlertDialogAction loading={remove.isPending} onConfirm={runRemove}>
               移出
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -489,7 +483,12 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
           placeholder="例如 claude-sonnet-x"
           className="min-w-0 flex-1"
         />
-        <Button type="submit" size="sm" disabled={locked !== null || register.isPending || key.trim() === ''}>
+        <Button
+          type="submit"
+          size="sm"
+          loading={register.isPending}
+          disabled={locked !== null || register.isPending || key.trim() === ''}
+        >
           登记
         </Button>
         {noted ? <p className="text-body text-ink-done">已登记 {noted}</p> : null}
@@ -504,6 +503,7 @@ export function ManualModelForm({ channelId }: { channelId: string }) {
                 size="xs"
                 variant="ghost"
                 className={TAP}
+                loading={revoke.isPending}
                 disabled={locked !== null || revoke.isPending}
                 aria-label={`撤掉 ${item}`}
                 onClick={() => void drop(item)}

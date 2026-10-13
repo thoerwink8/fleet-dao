@@ -229,8 +229,16 @@ export function ReposSection({
       },
     );
 
+  // loading 只跟这一次点击（转圈）；「已经有一次在排队/在做」那一段整块置灰走 disabled（#1993）
   const button = remote ? null : (
-    <Button size="sm" variant="outline" onClick={onCleanup} disabled={busy || !q.data} data-cleanup-button>
+    <Button
+      size="sm"
+      variant="outline"
+      onClick={onCleanup}
+      loading={cleanup.isPending}
+      disabled={busy || !q.data}
+      data-cleanup-button
+    >
       <Trash2 aria-hidden />
       <span className="max-md:hidden">清理没用的工作树</span>
       <span className="md:hidden">清理</span>

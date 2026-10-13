@@ -122,6 +122,7 @@ export function PoolHoldBanner() {
                 <Button
                   type="button"
                   size="sm"
+                  loading={update.isPending}
                   disabled={update.isPending || problem !== null}
                   onClick={clear}
                 >
@@ -320,7 +321,13 @@ export function PoolSwitchForm({ poolId }: { poolId: string }) {
           <Button type="button" size="sm" variant="outline" onClick={close}>
             取消
           </Button>
-          <Button type="button" size="sm" disabled={update.isPending || problem !== null} onClick={confirm}>
+          <Button
+            type="button"
+            size="sm"
+            loading={update.isPending}
+            disabled={update.isPending || problem !== null}
+            onClick={confirm}
+          >
             {mode === 'off' ? '确认停用' : '确认打开'}
           </Button>
         </div>

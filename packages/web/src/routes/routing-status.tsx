@@ -355,15 +355,12 @@ export default function RoutingStatus() {
           <ChannelSummary ok={okCount} down={downCount} unknown={unknownCount} quiet={quietCount} />
           <Button
             size="sm"
+            loading={probeNow.isPending}
             onClick={() => fire()}
-            disabled={blocked !== undefined || allActive || probeNow.isPending}
+            disabled={blocked !== undefined || allActive}
             title={blocked ?? (allActive ? '全部路由正在探' : '让引擎现在就把全部路由探一遍')}
           >
-            {allActive || probeNow.isPending ? (
-              <LoaderCircle className="animate-spin" aria-hidden />
-            ) : (
-              <Radar aria-hidden />
-            )}
+            <Radar aria-hidden />
             全部立即探测
           </Button>
         </>
