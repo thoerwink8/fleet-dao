@@ -120,6 +120,7 @@
     "packages/api/test/intent-routes.test.ts": 236,
     "packages/api/test/intent-store.memory.test.ts": 24,
     "packages/api/test/intent-store.pg.test.ts": 3347,
+    "packages/api/test/intents-store-logic.test.ts": 5,
     "packages/api/test/judge-health.test.ts": 2748,
     "packages/api/test/keep-alive.test.ts": 1456,
     "packages/api/test/listen.test.ts": 257,

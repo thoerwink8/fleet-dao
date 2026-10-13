@@ -49,6 +49,8 @@ export const TaskListRowSchema = z.object({
   cost: TaskListCostSchema,
   /** 最近一笔带 PR 的流水上的 PR 号；还没有 PR 是 null。 */
   prNumber: z.number().int().positive().nullable(),
+  /** 这张单是驾驶舱哪条需求开出来的（「来自需求 N」）；不是提需求开的没有这个键。页面显示归 D 片。 */
+  requestSeq: z.number().int().positive().optional(),
 });
 
 const Count = z.number().int().min(0);
@@ -66,4 +68,9 @@ export const TaskListResponse = z.object({
     stopped: Count,
   }),
   nextCursor: Cursor.optional(),
+  /**
+   * 「来自需求 N」没查成的原因（需求表读不到）：有它时 items 里一律没有 requestSeq，页面写出这句，
+   * 不能当成「这些单都不是提需求开的」。这台后端没接需求表（开发环境）时没有这个键，也没有 requestSeq。
+   */
+  requestSeqUnavailable: z.string().optional(),
 });

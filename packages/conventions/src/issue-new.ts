@@ -219,6 +219,48 @@ function appendNoteToDoneSection(body: string, note: string): string {
   return lines.join('\n');
 }
 
+/**
+ * 开单前对一份正文的检查，`pnpm issue:new` 和驾驶舱「提需求」开单（packages/api 的 request-issue.ts）调的是这一个函数，不各写一份：
+ * 场景、原话、已知的模块、怎么算做完四节齐不齐（涉及面一律不写），以及「怎么算做完」里有没有提到 PR 正文（冷验收看不到）。
+ * 纯函数，不读文件、不碰 gh。不通过回一句中文原因（原话照搬，末尾都带「单没开」）。
+ * 提到 PR 正文但 allowPrBodyAcceptance 为真：通过，hits 里是命中的条目，调用方自己决定怎么把理由写进正文。
+ */
+export type IssueBodyCheck =
+  | { ok: true; doc: MdDoc; prBodyHits: string[] }
+  | { ok: false; why: string; field?: string | undefined };
+
+export function checkIssueBody(body: string, opts: { allowPrBodyAcceptance?: boolean } = {}): IssueBodyCheck {
+  const doc = parseMd('body.md', body);
+  const missing = checkRequiredSections(doc);
+  if (missing) return { ok: false, why: `${missing.why}，单没开。`, field: missing.label };
+  const done = doneSection(doc);
+  if (done !== 'ok') {
+    return {
+      ok: false,
+      field: '怎么算做完',
+      why: `正文里${done === 'missing' ? '没有「## 怎么算做完」一节' : '「怎么算做完」一节是空的'}，单没开：以后要做的事得写清怎么算做完（测试名、脚本、真机上看到什么）。`,
+    };
+  }
+  const prBodyHits = prBodyAcceptanceItems(sectionText(doc, '怎么算做完') ?? '');
+  if (prBodyHits.length > 0 && !opts.allowPrBodyAcceptance) {
+    return {
+      ok: false,
+      field: '怎么算做完',
+      why:
+        `「怎么算做完」里有条目提到 PR 正文（冷验收只看 diff 和单子，看不到 PR 正文，按没做到算）：\n` +
+        `${prBodyHits.join('\n')}\n` +
+        `改成 diff 里看得见的写法（注释、文档或测试名），或带 --allow-pr-body-acceptance "<理由>"。单没开。`,
+    };
+  }
+  return { ok: true, doc, prBodyHits };
+}
+
+/** 正文超过上限的话回一句原因（没超回 undefined）。开单脚本和驾驶舱开单共用。 */
+export function issueBodyTooLong(body: string): string | undefined {
+  if (body.length <= BODY_LIMIT) return undefined;
+  return `正文有 ${body.length} 字，超过 GitHub 一张单正文的上限（65536 字，这里留了余量按 ${BODY_LIMIT} 算），单没开：需求写一页以内；长的方案另放 specs/<号>-<短名>/方案.md，单上只留链接。`;
+}
+
 export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Promise<IssueNewResult> {
   const o = parse(argv);
   const bodyPath = isAbsolute(o.bodyFile) ? o.bodyFile : resolve(deps.cwd, o.bodyFile);
@@ -228,26 +270,10 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   } catch (e) {
     throw new Error(`--body-file 读不到：${bodyPath}（${message(e)}），单没开。`);
   }
-  const doc = parseMd('body.md', body);
-  const missing = checkRequiredSections(doc);
-  if (missing) throw new Error(`${missing.why}，单没开。`);
-  const done = doneSection(doc);
-  if (done !== 'ok') {
-    throw new Error(
-      `正文里${done === 'missing' ? '没有「## 怎么算做完」一节' : '「怎么算做完」一节是空的'}，单没开：以后要做的事得写清怎么算做完（测试名、脚本、真机上看到什么）。`,
-    );
-  }
-  const doneText = sectionText(doc, '怎么算做完') ?? '';
-  const prBodyHits = prBodyAcceptanceItems(doneText);
+  const checked = checkIssueBody(body, { allowPrBodyAcceptance: o.allowPrBodyAcceptance !== undefined });
+  if (!checked.ok) throw new Error(checked.why);
   let createBodyPath = bodyPath;
-  if (prBodyHits.length > 0) {
-    if (o.allowPrBodyAcceptance === undefined) {
-      throw new Error(
-        `「怎么算做完」里有条目提到 PR 正文（冷验收只看 diff 和单子，看不到 PR 正文，按没做到算）：\n` +
-          `${prBodyHits.join('\n')}\n` +
-          `改成 diff 里看得见的写法（注释、文档或测试名），或带 --allow-pr-body-acceptance "<理由>"。单没开。`,
-      );
-    }
+  if (checked.prBodyHits.length > 0) {
     body = appendNoteToDoneSection(
       body,
       `（开单时带了 --allow-pr-body-acceptance：${o.allowPrBodyAcceptance}）`,
@@ -255,11 +281,8 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     createBodyPath = join(tmpdir(), `fleet-issue-new-body-${process.pid}-${Date.now()}.md`);
     writeFileSync(createBodyPath, body, 'utf8');
   }
-  if (body.length > BODY_LIMIT) {
-    throw new Error(
-      `正文有 ${body.length} 字，超过 GitHub 一张单正文的上限（65536 字，这里留了余量按 ${BODY_LIMIT} 算），单没开：需求写一页以内；长的方案另放 specs/<号>-<短名>/方案.md，单上只留链接。`,
-    );
-  }
+  const tooLong = issueBodyTooLong(body);
+  if (tooLong) throw new Error(tooLong);
 
   // 开单之前查（开出来的新单不会和自己比）；只提示、不拦，查不动也往下开
   const similar = await deps.similar?.({ title: o.title, body });

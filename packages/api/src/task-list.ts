@@ -19,6 +19,7 @@ import {
 } from '@fleet-dao/shared';
 import type { SegmentRunRecord, TaskListPage } from '@fleet-dao/store';
 import type { z } from 'zod';
+import { issueKey } from './request-issue.ts';
 import { isTaskFinished, routeLookup, segmentRunViews, usageView } from './views.ts';
 
 type Response = z.input<typeof TaskListResponse>;
@@ -34,6 +35,12 @@ export interface TaskListInput {
   routes: readonly Route[];
   models: readonly Model[];
   channels: readonly Channel[];
+  /**
+   * 「来自需求 N」（#2060）：这一页的单子里是驾驶舱哪条需求开出来的，键是 `owner/name#单号`（小写，request-issue.ts 的 issueKey）。
+   * 没给（这台后端没接需求表）= 一个都不带；查不成给 requestSeqUnavailable 写原因，不能当成「都不是提需求开的」。
+   */
+  requestSeqs?: ReadonlyMap<string, number> | undefined;
+  requestSeqUnavailable?: string | undefined;
 }
 
 const lastStarted = (views: readonly SegmentRunView[]): SegmentRunView | undefined =>
@@ -88,6 +95,9 @@ export function taskListView(input: TaskListInput): Response {
       lastStarted(views)?.modelName ??
       (latestSession ? route(latestSession.routeId).modelName : null);
     const prNumber = lastStarted(views.filter((v) => v.prNumber !== undefined))?.prNumber ?? null;
+    const requestSeq = repo
+      ? input.requestSeqs?.get(issueKey(`${repo.owner}/${repo.name}`, task.issueNumber))
+      : undefined;
     return {
       taskId: task.id,
       repoId: task.repoId,
@@ -103,6 +113,7 @@ export function taskListView(input: TaskListInput): Response {
       updatedAt,
       cost: costOf(usageView(sessions, route, views).total),
       prNumber,
+      ...(requestSeq === undefined ? {} : { requestSeq }),
     };
   });
 
@@ -111,5 +122,8 @@ export function taskListView(input: TaskListInput): Response {
     items,
     counts: { all: Object.values(counts).reduce((a, b) => a + b, 0), ...counts },
     ...(input.page.nextCursor === undefined ? {} : { nextCursor: input.page.nextCursor }),
+    ...(input.requestSeqUnavailable === undefined
+      ? {}
+      : { requestSeqUnavailable: input.requestSeqUnavailable }),
   };
 }

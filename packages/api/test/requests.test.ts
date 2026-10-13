@@ -6,6 +6,7 @@ import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/tes
 import {
   type RequestDetailResponse,
   RequestDetailResponse as RequestDetailSchema,
+  RequestIssueOpeningResponse,
   RequestListResponse,
 } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
@@ -13,7 +14,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { pgRequests } from '../src/request-store-pg.ts';
 import { cookieNames, csrfTokenFor, signSessionClaims } from '../src/session.ts';
 import { nowSeconds } from '../src/tokens.ts';
-import { errorCode, harness, IDS, pgHarness, write } from './harness.ts';
+import { errorCode, harness, IDS, PUBLIC_ORIGIN, pgHarness, write } from './harness.ts';
+import { fakeIssues } from './request-fakes.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -42,7 +44,8 @@ function sessionFor(h: H, uid: string): S {
 async function setup() {
   current = await pgHarness(t);
   const h = current;
-  h.deps.requests = pgRequests(t.db, h.deps.now);
+  // 确定开单、同意做现在会在 GitHub 上开单（#2060）：这里换成假的机器人，开单细节在 request-issue-flow.test.ts
+  h.deps.requests = pgRequests(t.db, h.deps.now, { issues: fakeIssues().port, cockpitUrl: PUBLIC_ORIGIN });
   await t.db.update(users).set({ decidesRequests: true }).where(eq(users.id, IDS.founderA));
   return { h, a: sessionFor(h, IDS.founderA), b: sessionFor(h, IDS.founderB) };
 }
@@ -225,6 +228,29 @@ describe('状态机', () => {
     expect(two.request.draftVersion).toBe(3);
     expect(two.request.humanEdited.sort()).toEqual(['scene', 'want']);
     await expect409(await draft(h, a, d.request.seq, { baseVersion: 2, patch: { want: '旧版' } }), /第 3 版/);
+  });
+
+  it('开单查询：没开过 state=none，同意做后这一版是 opened 带单号；不带版本号 400、没这条 404', async () => {
+    const { h, a, b } = await setup();
+    const { seq, version } = await pendingFromPartner(h, a, b);
+    const opening = async (q: string) =>
+      h.cockpit.request(`/api/requests/${seq}/issue-opening${q}`, { headers: { cookie: a.cookie } });
+    const before = await opening(`?draftVersion=${version}`);
+    expect(before.status).toBe(200);
+    expect(RequestIssueOpeningResponse.parse(await before.json()).state).toBe('none');
+
+    await json(await act(h, a, seq, { action: 'approve', draftVersion: version }));
+    const after = await opening(`?draftVersion=${version}`);
+    expect(after.status).toBe(200);
+    const body = RequestIssueOpeningResponse.parse(await after.json());
+    expect(body.state).toBe('opened');
+    expect(body.issue?.number).toBeGreaterThan(0);
+
+    expect((await opening('')).status).toBe(400);
+    const missing = await h.cockpit.request(`/api/requests/9999/issue-opening?draftVersion=1`, {
+      headers: { cookie: a.cookie },
+    });
+    expect(missing.status).toBe(404);
   });
 
   it('讨论中能改名，改的是草稿标题', async () => {

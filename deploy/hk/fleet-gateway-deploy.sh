@@ -25,6 +25,8 @@ KEEP=5
 CONNECTED_MARK='"message":"飞书网关已连上"'
 RECONNECTED_MARK='"message":"飞书长连接重连上了"'
 DISCONNECTED_MARK='"message":"飞书长连接断了，正在重连"'
+# 网关处理完一条飞书消息打的那一行：数一数，看得到事件真的进来了
+MESSAGE_MARK='"message":"消息处理完"'
 
 fail() {
   echo "$*" >&2
@@ -236,6 +238,7 @@ cmd_status() {
   "") echo "connected=no" ;;
   *) echo "connected=yes" ;;
   esac
+  echo "messages=$(grep -cF -- "$MESSAGE_MARK" <<<"$log" || true)"
   echo "backend=$(backend_state)"
   missing=$(missing_keys)
   if [[ -n "$missing" ]]; then echo "config=missing $missing"; else echo "config=ok"; fi

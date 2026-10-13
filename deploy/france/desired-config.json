@@ -64,10 +64,6 @@
         "value": "thoerwink8/fleet-dao-canary",
         "说明": "全流程巡检的巡检仓（owner/仓名，docs/ops.md 第五节「全流程巡检」）。公开值（仓名不算要保密的东西，创始人 2026-09-28：账号、仓名这类标识不算泄漏）。2026-10-06 从 fleet-dao-canary-fr 改回 fleet-dao-canary（#777）：当初分开两个仓，是怕本机 WSL 演练台的引擎和法国在同一个仓里互相当成自己的单，WSL 已撤（决定 0022），没有第二个引擎了，创始人也没让建 -fr 仓（该仓从来没建过，GitHub 上 404），留着会让法国引擎一起来每轮巡检都记「没跑成」。这个仓的「让 AI 接活」发版后默认关，创始人点开才巡检。再接别的环境的引擎要开巡检时，另建巡检仓，写在那一台自己的期望里，不能和这一项相同（#1136）"
       },
-      "FLEET_PUBLIC_URL": {
-        "private": "4d305fd23972f6ca41c506b52f0afaa370f21c67c0a2fe80280998d9268e01e5",
-        "说明": "浏览器看到的驾驶舱地址（香港的域名，值和 api.env 的同名项一样）：私有值。引擎往飞书推的通知（主线红、整池暂停到期、等你拍板、引擎问你）和发版通知（上线了、卡住、失败）每条都带驾驶舱链接，读的就是它；没配这些通知推不出去、记没查成（F1 #2051）。2026-10-14 指挥官在法国从 api.env 照抄进 engine.env，指纹按 engine.env 算（指纹带文件名，和 api.env 同名项的不一样）：node /srv/fleet-dao/deploy/france/auto-release/config.mjs fingerprint engine.env FLEET_PUBLIC_URL"
-      },
       "FLEET_SESSION_PROXY": {
         "value": "",
         "说明": "AI 会话出网经的代理（http://主机:端口，不带账号密码）：引擎起 grok、cursor-agent 的会话带上（Claude 不带，reclaude 自己管），装机时以会话用户跑这两家的官方安装脚本也经它（deploy/lib/session-proxy.sh 照期望读，不认 root 环境里的同名变量）。法国直连，留空＝不经代理（#731）"

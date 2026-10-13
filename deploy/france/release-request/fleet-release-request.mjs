@@ -328,23 +328,6 @@ export const realIo = {
       return { ok: false, why: `读库没成（psql 退出码 ${r.status}）：${tail(r.error ?? r.stderr)}` };
     return parseRepoSwitches(r.stdout);
   },
-  /** 驾驶舱某一页的完整链接（F1 #2051：每条通知都带）：地址读引擎环境文件的 FLEET_PUBLIC_URL（同 api.env 的值，和引擎的通知同一个来源）；没配、认不出抛。 */
-  cockpitLink(path) {
-    const raw = engineEnv('FLEET_PUBLIC_URL');
-    if (raw === '')
-      throw new Error(`驾驶舱地址没配：${ENGINE_ENV} 里没有 FLEET_PUBLIC_URL，这条通知推不出去`);
-    let url;
-    try {
-      url = new URL(raw);
-    } catch {
-      throw new Error('驾驶舱地址不认：FLEET_PUBLIC_URL 不是网址，这条通知推不出去');
-    }
-    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash)
-      throw new Error(
-        '驾驶舱地址不认：FLEET_PUBLIC_URL 只收不带账号、查询串的 http(s) 网址，这条通知推不出去',
-      );
-    return `${url.origin}${url.pathname.replace(/\/+$/, '')}${path}`;
-  },
   /** 推一条飞书：和引擎推主线红同一个群机器人（engine.env 的 FLEET_FEISHU_WEBHOOK），推 3 次都不成就抛，话里不带地址。 */
   async notify(text) {
     const url = engineEnv('FLEET_FEISHU_WEBHOOK');

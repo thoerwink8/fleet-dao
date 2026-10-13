@@ -169,6 +169,16 @@ export const RequestRowSchema = z.object({
 });
 export type RequestRow = z.infer<typeof RequestRowSchema>;
 
+/** 引擎提问的答复（#2060）：答了什么、谁答的、写回成没成。 */
+export const RequestAnswerSchema = z.object({
+  text: z.string(),
+  by: RequestPersonSchema.optional(),
+  at: z.string(),
+  /** 写回 GitHub 失败的原因（answerState 是 failed 时有）：页面原样显示，点「重试」再写一次。 */
+  error: z.string().optional(),
+});
+export type RequestAnswer = z.infer<typeof RequestAnswerSchema>;
+
 export const RequestMessageSchema = z.object({
   id: z.number().int().positive(),
   kind: RequestMessageKindSchema,
@@ -179,8 +189,11 @@ export const RequestMessageSchema = z.object({
   /** @ 了谁（用户编号）。 */
   mentions: z.array(z.string()),
   draftPatch: z.record(z.string(), z.unknown()).optional(),
+  /** 引擎提问绑定的那条 GitHub 评论的网址（https://github.com/<owner>/<name>/issues/<号>#issuecomment-<评论号>）。 */
   githubCommentRef: z.string().optional(),
   answerState: RequestAnswerStateSchema.optional(),
+  /** 引擎提问被回答过（或试过写回）才有。 */
+  answer: RequestAnswerSchema.optional(),
   createdAt: z.string(),
 });
 export type RequestMessage = z.infer<typeof RequestMessageSchema>;
@@ -292,3 +305,35 @@ export const RequestListResponse = z.object({
   unavailable: z.string().optional(),
 });
 export type RequestListResponse = z.infer<typeof RequestListResponse>;
+
+// —— 开单和 GitHub 联动（#2060，母单 #2047 第 B 片；方案第一节规则 6、第六节）——
+
+/** 「需求号 + 草稿版本号」这一键的开单现在怎样：没开过、正在开、开成了、没开成。 */
+export const REQUEST_OPENING_STATES = ['none', 'opening', 'opened', 'failed'] as const;
+export const RequestOpeningStateSchema = z.enum(REQUEST_OPENING_STATES);
+export type RequestOpeningState = z.infer<typeof RequestOpeningStateSchema>;
+
+/** 页面点「确定，开单」超时了，用这个查这一键开没开成再回显，不让人重点。 */
+export const RequestIssueOpeningQuery = z.object({
+  draftVersion: z.coerce.number().int().positive(),
+});
+
+export const RequestIssueOpeningResponse = z.object({
+  asOf: z.string(),
+  seq: z.number().int().positive(),
+  draftVersion: z.number().int().positive(),
+  state: RequestOpeningStateSchema,
+  /** 开成了才有。 */
+  issue: z.object({ repo: z.string(), number: z.number().int().positive(), url: z.string() }).optional(),
+  /** 没开成的原因（中文，原样显示）。 */
+  error: z.string().optional(),
+  /** 开单写进库的提出人（引擎认人的依据）；没开过没有。 */
+  requestedBy: RequestPersonSchema.optional(),
+  updatedAt: z.string().optional(),
+});
+export type RequestIssueOpeningResponse = z.infer<typeof RequestIssueOpeningResponse>;
+
+/** 回答引擎的提问：答复写回那条 GitHub 评论下面。写失败了同一个接口再调一次就是重试。 */
+export const AnswerEngineAskRequest = z.object({
+  text: z.string().trim().min(1).max(5000),
+});

@@ -58,11 +58,14 @@ import {
   RemoveRepoResponse,
 } from './repo-import.ts';
 import {
+  AnswerEngineAskRequest,
   CreateRequestRequest,
   MarkRequestReadRequest,
   MarkRequestReadResponse,
   RequestActionRequest,
   RequestDetailResponse,
+  RequestIssueOpeningQuery,
+  RequestIssueOpeningResponse,
   RequestListQuery,
   RequestListResponse,
   SendRequestMessageRequest,
@@ -374,6 +377,26 @@ export const WebRoutes = {
     method: 'PUT',
     path: '/requests/:seq/draft',
     request: UpdateRequestDraftRequest,
+    response: RequestDetailResponse,
+  },
+  /**
+   * 查「需求号 + 草稿版本号」这一键的开单开没开成（#2060）：「确定，开单」或「同意做」超时了，页面用它回显，不让人重点。
+   * 没开过也是 200（state=none），不是 404；没有这条需求才 404。
+   */
+  requestIssueOpening: {
+    method: 'GET',
+    path: '/requests/:seq/issue-opening',
+    query: RequestIssueOpeningQuery,
+    response: RequestIssueOpeningResponse,
+  },
+  /**
+   * 回答引擎的一条提问（#2060）：答复写回那条 GitHub 评论下面（引擎机器人身份），answerState 记已写回；
+   * 写失败了记 failed + 原因（回 502），同一个接口再调一次就是重试。只有发起人或拍板人能答。回详情。
+   */
+  answerRequestEngineAsk: {
+    method: 'POST',
+    path: '/requests/:seq/messages/:messageId/answer',
+    request: AnswerEngineAskRequest,
     response: RequestDetailResponse,
   },
   /** 提交拍板、确定、拍板、撤回、放下、归档、取消归档、删除、恢复、置顶、重命名。不合法 409 + 中文原因。回详情。 */

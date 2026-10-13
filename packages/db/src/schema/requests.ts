@@ -26,6 +26,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 import { valuesOf } from './enums.ts';
@@ -150,9 +151,15 @@ export const requestMessages = pgTable(
     mentions: jsonb('mentions').$type<string[]>().notNull().default([]),
     /** 指挥官这一条对草稿的改动（C 片）。 */
     draftPatch: jsonb('draft_patch').$type<Record<string, unknown>>(),
-    /** 引擎提问绑定的 GitHub 评论（B 片）。 */
+    /** 引擎提问绑定的那条 GitHub 评论的网址（B 片，只有 engine_ask 有）：评论号在网址末尾的 #issuecomment-<号>。 */
     githubCommentRef: text('github_comment_ref'),
+    /** 引擎提问的答复：待答、已写回、写回失败（只有 engine_ask 有）。 */
     answerState: text('answer_state').$type<RequestAnswerState>(),
+    /** 答了什么、谁答的、几点答的；写回失败时 answer_error 写原因，答复文字留着，页面点重试不用重打。 */
+    answerText: text('answer_text'),
+    answerError: text('answer_error'),
+    answeredBy: uuid('answered_by').references(() => users.id),
+    answeredAt: timestamp('answered_at', tz),
     createdAt: timestamp('created_at', tz).notNull(),
   },
   (t) => [
@@ -172,7 +179,67 @@ export const requestMessages = pgTable(
     ),
     check('request_messages_body_length', sql`char_length(${t.body}) between 1 and 20000`),
     check('request_messages_mentions_array', sql`jsonb_typeof(${t.mentions}) = 'array'`),
+    // 引擎提问一定绑了评论、有答复状态；别的种类这两样都没有、也没有答复
+    check(
+      'request_messages_engine_ask_shape',
+      sql`(${t.kind} = 'engine_ask') = (${t.githubCommentRef} is not null) and (${t.kind} = 'engine_ask') = (${t.answerState} is not null)`,
+    ),
+    check(
+      'request_messages_answer_only_on_ask',
+      sql`${t.kind} = 'engine_ask' or (${t.answerText} is null and ${t.answerError} is null and ${t.answeredBy} is null and ${t.answeredAt} is null)`,
+    ),
+    // 同一条评论在同一条需求里只生成一条提问消息（进度同步重跑不重复）
+    uniqueIndex('request_messages_comment_unique')
+      .on(t.requestId, t.githubCommentRef)
+      .where(sql`${t.githubCommentRef} is not null`),
     index('request_messages_request_idx').on(t.requestId, t.id),
+  ],
+);
+
+export const REQUEST_OPENING_STATE_VALUES = ['opening', 'opened', 'failed'] as const;
+
+/**
+ * 开单记录（B 片，#2060）：幂等键是「需求号 + 草稿版本号」（主键就是它），同一版重复请求只开一张单。
+ * 页面超时后按这一键查开没开成。requested_by 写在这里（开单之前先占行、先写它），引擎拉到这张单时按它认提出人，
+ * 不看 GitHub 上的作者（单是「引擎」机器人开的）。
+ * - opening：占了行、正在调 GitHub；超过几分钟没结果的算断了，可以重新占。
+ * - opened：开成了，issue_number、issue_url 有值。
+ * - failed：没开成，error 写原因；可以重试（重新占行）。
+ */
+export const requestIssueOpenings = pgTable(
+  'request_issue_openings',
+  {
+    requestId: uuid('request_id')
+      .notNull()
+      .references(() => requests.id, { onDelete: 'cascade' }),
+    draftVersion: integer('draft_version').notNull(),
+    state: text('state').$type<(typeof REQUEST_OPENING_STATE_VALUES)[number]>().notNull(),
+    /** 提出人：点「确定，开单」或「同意做」那一刻，取需求的发起人（服务端从库里读，不收前端）。 */
+    requestedBy: uuid('requested_by')
+      .notNull()
+      .references(() => users.id),
+    /** 开单的人（点按钮的那位：发起人，或合伙人需求里的拍板人）。 */
+    openedBy: uuid('opened_by')
+      .notNull()
+      .references(() => users.id),
+    issueNumber: integer('issue_number'),
+    issueUrl: text('issue_url'),
+    error: text('error'),
+    createdAt: timestamp('created_at', tz).notNull(),
+    updatedAt: timestamp('updated_at', tz).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.requestId, t.draftVersion] }),
+    check('request_issue_openings_state_known', sql`${t.state} in (${inList(REQUEST_OPENING_STATE_VALUES)})`),
+    check('request_issue_openings_version_positive', sql`${t.draftVersion} >= 1`),
+    check(
+      'request_issue_openings_opened_shape',
+      sql`(${t.state} = 'opened') = (${t.issueNumber} is not null and ${t.issueUrl} is not null)`,
+    ),
+    check(
+      'request_issue_openings_failed_has_error',
+      sql`${t.state} <> 'failed' or (${t.error} is not null and char_length(${t.error}) > 0)`,
+    ),
   ],
 );
 

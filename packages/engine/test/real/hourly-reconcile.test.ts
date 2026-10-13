@@ -176,9 +176,6 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
       issueState: async () => 'open',
       abandon: async () => 'gone',
     },
-    // 等你拍板、引擎问你的飞书推送（F1 #2051）在本文件不往外推：默认空装（它自己的测试在 jobs/awaiting-push）。
-    // 不空装的话，工作树那几条用例这一轮报的「要人拍」会被它当场捡去推，没配飞书就记成没查成
-    awaitingPush: async () => ({ scanned: 0, found: 0, unchecked: [] }),
     ...over,
     workflows: wf,
   })({ workflow: {} as never } as never, 'fleet-test');

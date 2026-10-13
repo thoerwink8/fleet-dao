@@ -73,6 +73,8 @@ import type { GitHubEventSink } from './ports.ts';
 import { pgProbeHistory } from './probe-history.ts';
 import { liveReleaseCardPort } from './release-card.ts';
 import { liveReleaseRequestPort } from './release-request.ts';
+import type { RequestIssuePort } from './request-issue.ts';
+import { startRequestProgressWatch } from './request-progress.ts';
 import { pgRequests } from './request-store-pg.ts';
 import { pgRoutingEfforts } from './routing-efforts.ts';
 import { pgRoutingLayers } from './routing-layers.ts';
@@ -149,6 +151,8 @@ function githubMirror(db: Db): {
   userHit?: GitHubUserPort;
   /** 「要你拍」拍完往进度单、任务单留言（#1915）；凭据没读到就没有，答案照存、回包写没接上。 */
   decisionCommenter?: DecisionCommenter;
+  /** 提需求（#2060）开单、写回评论、读单子状态，都用「引擎」机器人；凭据没读到就没有，开单回 503，不假装开了。 */
+  requestIssues?: RequestIssuePort;
 } {
   try {
     const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db, { log }), log });
@@ -161,6 +165,18 @@ function githubMirror(db: Db): {
         async comment(input) {
           const got = await gh.commentIssue(input);
           return { url: got.url };
+        },
+      },
+      requestIssues: {
+        // 不走发件箱，同步调（母单 #2047 方案第六节）；正文过卫生检查、幂等都在 @fleet-dao/github 的 openIssue / commentIssue 里
+        async openIssue(input) {
+          return gh.openIssue({ ...input, milestone: null });
+        },
+        async commentIssue(input) {
+          return gh.commentIssue(input);
+        },
+        async readIssueState(input) {
+          return gh.readIssueState(input);
         },
       },
     };
@@ -280,6 +296,17 @@ async function assemble(): Promise<{
     : () => {};
   // 看门狗（#203）自己停了它自己报不了：后端每 5 分钟按登记表上它那一行看一次，停了推一条「看门狗停了」，好了自己撤
   const stopWatchdogWatch = production ? startWatchdogWatch({ db, now, log }) : () => {};
+  // 提需求开出的单子的进度（#2060）：每分钟从 GitHub 和引擎任务表读，写进需求、对话里追加进度卡，引擎的提问发到单上。
+  // 凭据没读到就不起（那时开单也是 503）；「已上线」要读发布目录，只在正式环境有。
+  const stopRequestProgressWatch = github.requestIssues
+    ? startRequestProgressWatch({
+        db,
+        issues: github.requestIssues,
+        deployedAt: production ? () => readDeployLagInput().deployedAt ?? null : undefined,
+        now,
+        log,
+      })
+    : () => {};
   // 飞书网关还来不来：飞书接口的门口记，/healthz 读的时候现算；没配通行证网关一律进不来，报「未接」
   const gatewaySeen = createGatewaySeen(now);
   const deps: Deps = {
@@ -321,7 +348,8 @@ async function assemble(): Promise<{
     // 任务详情每段的会话内容（#1640）：读引擎按条记下的 run_transcript
     runTranscript: pgRunTranscript(db),
     // 提需求（#2049）：需求、消息、每人的置顶和读到哪；删了满 30 天的由引擎的 request-sweep 硬删
-    requests: pgRequests(db, now),
+    // 开单、写回评论用「引擎」机器人（github.requestIssues）；单子正文里的链接用 FLEET_PUBLIC_URL（config.publicUrl，缺了启动就拒）
+    requests: pgRequests(db, now, { issues: github.requestIssues, cockpitUrl: config.publicUrl.origin }),
     // 环境页（#820 片 1）的版本那一项：正式环境读发布目录现算；别处不给，页面写「没查成」
     ...(production ? { deployLag: () => readDeployLagInput() } : {}),
     // /france 页发版一键（#618）：读 release-train 进度。只在正式环境装。
@@ -370,6 +398,7 @@ async function assemble(): Promise<{
     close: async () => {
       stopDeployLagWatch();
       stopWatchdogWatch();
+      stopRequestProgressWatch();
       await feed.stop();
       await temporal.close();
       await closeDb();

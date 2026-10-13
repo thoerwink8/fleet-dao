@@ -271,10 +271,36 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       store.listModels(),
       store.listChannels(),
     ]);
+    // 「来自需求 N」（#2060）：这一页的单子里哪些是提需求开出来的。需求表读不到就明说原因，不当成「都不是」
+    let requestSeqs: Map<string, number> | undefined;
+    let requestSeqUnavailable: string | undefined;
+    if (deps.requests) {
+      const repoById = new Map(repos.map((r) => [r.id, r]));
+      try {
+        requestSeqs = await deps.requests.seqsForIssues(
+          page.items.flatMap(({ task }) => {
+            const repo = repoById.get(task.repoId);
+            return repo ? [{ repo: `${repo.owner}/${repo.name}`, number: task.issueNumber }] : [];
+          }),
+        );
+      } catch (err) {
+        requestSeqUnavailable = `「来自需求 N」没查成：${errMessage(err)}`;
+      }
+    }
     return reply(
       c,
       TaskListResponse,
-      taskListView({ page, repos, segmentRuns, runs, routes, models, channels }),
+      taskListView({
+        page,
+        repos,
+        segmentRuns,
+        runs,
+        routes,
+        models,
+        channels,
+        requestSeqs,
+        requestSeqUnavailable,
+      }),
     );
   });
 
