@@ -22,6 +22,10 @@
     "hooks/founder-inbox.mjs",
     "hooks/fresh-main.mjs",
     "hooks/git-run.mjs",
-    "hooks/unattended.mjs"
+    "hooks/unattended.mjs",
+    "local-sessions/lib.mjs",
+    "local-sessions/heartbeat.mjs",
+    "local-sessions/push.mjs",
+    "local-sessions/install.mjs"
   ]
 }

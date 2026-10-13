@@ -216,7 +216,11 @@ export function describeNodeStoreContract(name: string, make: MakeStore): void {
       await store.putNodeSessions({ nodeId: 'founder-pc', report: sessions({ sessions: [] }) });
       const got = await store.listNodeSessions();
       expect(got).toHaveLength(1);
-      expect(got[0]).toMatchObject({ nodeId: 'founder-pc', receivedAt: at(2 * MIN), report: { sessions: [] } });
+      expect(got[0]).toMatchObject({
+        nodeId: 'founder-pc',
+        receivedAt: at(2 * MIN),
+        report: { sessions: [] },
+      });
     });
 
     it('【故意造出的失败】本机会话多带了内容（提示词）、环境编号认不出：拒收，什么都不写', async () => {

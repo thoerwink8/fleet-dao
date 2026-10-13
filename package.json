@@ -37,6 +37,9 @@
     "pr:open": "node packages/conventions/src/bin/pr-open.ts",
     "repo:check": "node agents/hooks/repo-contract.mjs check",
     "repo:init": "node agents/hooks/repo-contract.mjs init",
+    "local-sessions:install": "node agents/local-sessions/install.mjs install",
+    "local-sessions:uninstall": "node agents/local-sessions/install.mjs uninstall",
+    "local-sessions:status": "node agents/local-sessions/install.mjs status",
     "agent-eval": "node packages/agent-eval/src/bin/agent-eval.ts"
   },
   "devDependencies": {

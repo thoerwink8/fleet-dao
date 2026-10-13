@@ -53,7 +53,9 @@ describe('POST /api/worktrees/cleanup', () => {
     expect(res.status).toBe(200);
     const body = WorktreeCleanupResponseSchema.parse(await res.json());
     const rows = cleanupRows(h);
-    expect(rows.map((a) => [a.action, a.actor.kind, a.via])).toEqual([[WORKTREE_ACTION.request, 'user', 'cockpit']]);
+    expect(rows.map((a) => [a.action, a.actor.kind, a.via])).toEqual([
+      [WORKTREE_ACTION.request, 'user', 'cockpit'],
+    ]);
     expect(rows[0]?.after).toEqual({ requestId: body.requestId });
     expect(rows[0]?.reason).toBe('树太多');
     const got = await read(h, s.cookie);
@@ -80,7 +82,14 @@ describe('POST /api/worktrees/cleanup', () => {
         },
       ],
     ] as const) {
-      await h.store.appendAudit({ actor: engine, action, target: WORKTREE_TARGET, after, via: 'engine', ok: true });
+      await h.store.appendAudit({
+        actor: engine,
+        action,
+        target: WORKTREE_TARGET,
+        after,
+        via: 'engine',
+        ok: true,
+      });
     }
     const got = await read(h, s.cookie);
     expect(got.cleanups[0]).toMatchObject({

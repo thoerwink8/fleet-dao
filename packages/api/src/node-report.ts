@@ -85,50 +85,45 @@ export function nodeReportRoutes(deps: Deps): Hono<{ Variables: { nodeId: string
   // 本机会话（#1991）：同一个头、同一套钥匙，另一张表、另一个节流槽（和快照各推各的）。
   registerLocalSessionsReceiver(app, deps, authenticate);
 
-  app.post(
-    NODE_REPORT_PATH,
-    authenticate,
-    oversize,
-    async (c) => {
-      const nodeId = c.get('nodeId');
-      const now = deps.now();
-      const before = lastAccepted.get(nodeId);
-      if (before !== undefined && now.getTime() - before < NODE_REPORT_MIN_GAP_MS) {
-        const waitS = Math.ceil((NODE_REPORT_MIN_GAP_MS - (now.getTime() - before)) / 1000);
-        c.header('Retry-After', String(waitS));
-        throw reject(
-          nodeId,
-          429,
-          'too_frequent',
-          `同一个环境 ${NODE_REPORT_MIN_GAP_MS / 1000} 秒内只收一次，${waitS} 秒后再推`,
+  app.post(NODE_REPORT_PATH, authenticate, oversize, async (c) => {
+    const nodeId = c.get('nodeId');
+    const now = deps.now();
+    const before = lastAccepted.get(nodeId);
+    if (before !== undefined && now.getTime() - before < NODE_REPORT_MIN_GAP_MS) {
+      const waitS = Math.ceil((NODE_REPORT_MIN_GAP_MS - (now.getTime() - before)) / 1000);
+      c.header('Retry-After', String(waitS));
+      throw reject(
+        nodeId,
+        429,
+        'too_frequent',
+        `同一个环境 ${NODE_REPORT_MIN_GAP_MS / 1000} 秒内只收一次，${waitS} 秒后再推`,
+      );
+    }
+    lastAccepted.set(nodeId, now.getTime());
+    try {
+      const report = await readJson(c, NodeReportSchema);
+      if (Date.parse(report.reportedAt) > now.getTime() + NODE_REPORT_MAX_AHEAD_MS) {
+        throw new ApiError(
+          400,
+          'reported_at_in_future',
+          `reportedAt（${report.reportedAt}）比这台的钟快了 ${NODE_REPORT_MAX_AHEAD_MS / 60_000} 分钟以上：推送方的钟不对，快照没收`,
         );
       }
-      lastAccepted.set(nodeId, now.getTime());
+      let saved: Awaited<ReturnType<typeof store.putNodeReport>>;
       try {
-        const report = await readJson(c, NodeReportSchema);
-        if (Date.parse(report.reportedAt) > now.getTime() + NODE_REPORT_MAX_AHEAD_MS) {
-          throw new ApiError(
-            400,
-            'reported_at_in_future',
-            `reportedAt（${report.reportedAt}）比这台的钟快了 ${NODE_REPORT_MAX_AHEAD_MS / 60_000} 分钟以上：推送方的钟不对，快照没收`,
-          );
-        }
-        let saved: Awaited<ReturnType<typeof store.putNodeReport>>;
-        try {
-          saved = await store.putNodeReport({ nodeId, report });
-        } catch (err) {
-          if (err instanceof InvalidNodeReportError) throw new ApiError(400, 'invalid_snapshot', err.message);
-          throw err;
-        }
-        return reply(c, NodeReportAckSchema, { ok: true, receivedAt: saved.receivedAt });
+        saved = await store.putNodeReport({ nodeId, report });
       } catch (err) {
-        // 没收成：把槽位还回去，推送方改好了马上能再推
-        if (before === undefined) lastAccepted.delete(nodeId);
-        else lastAccepted.set(nodeId, before);
-        if (err instanceof ApiError && err.status < 500) log.warn('快照没收', { nodeId, code: err.code });
+        if (err instanceof InvalidNodeReportError) throw new ApiError(400, 'invalid_snapshot', err.message);
         throw err;
       }
-    },
-  );
+      return reply(c, NodeReportAckSchema, { ok: true, receivedAt: saved.receivedAt });
+    } catch (err) {
+      // 没收成：把槽位还回去，推送方改好了马上能再推
+      if (before === undefined) lastAccepted.delete(nodeId);
+      else lastAccepted.set(nodeId, before);
+      if (err instanceof ApiError && err.status < 500) log.warn('快照没收', { nodeId, code: err.code });
+      throw err;
+    }
+  });
   return app;
 }

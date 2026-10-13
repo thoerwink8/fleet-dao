@@ -39,7 +39,11 @@ async function recentRows(deps: Deps, now: Date): Promise<WorktreeAuditRow[]> {
   const rows: WorktreeAuditRow[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const got = await deps.store.listAudit({ target: WORKTREE_TARGET, limit: 200, ...(cursor ? { cursor } : {}) });
+    const got = await deps.store.listAudit({
+      target: WORKTREE_TARGET,
+      limit: 200,
+      ...(cursor ? { cursor } : {}),
+    });
     for (const item of got.items) {
       const at = new Date(item.at);
       if (at.getTime() < since) return rows;

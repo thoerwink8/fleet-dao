@@ -15,9 +15,9 @@ import {
   HomeResponseSchema,
   JobsResponse,
   type LegacyRead,
+  LocalSessionsResponseSchema,
   MeResponse,
   NodeDetailResponseSchema,
-  LocalSessionsResponseSchema,
   NodesResponseSchema,
   NotificationsQuery,
   NotificationsResponse,
@@ -67,9 +67,9 @@ import { registerFranceReleaseRoutes } from './france-release.ts';
 import { registerGroomRoutes } from './groom-routes.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
+import { readLocalSessions } from './local-sessions.ts';
 import { modelRosterFields } from './model-roster.ts';
 import { registerModelRosterRoutes } from './model-roster-routes.ts';
-import { readLocalSessions } from './local-sessions.ts';
 import { readNodeDetail, readNodes } from './node-views.ts';
 import { ORG_SWITCH_NOT_HERE, orgSwitchView } from './org-switch-view.ts';
 import {
@@ -95,7 +95,6 @@ import { eventsHandler, type SseRelay } from './sse.ts';
 import { taskListView } from './task-list.ts';
 import { TASK_ROUTE_PINS_NOT_HERE, taskRoutePinView } from './task-route-pins.ts';
 import { taskWorkflowIdForTask } from './temporal.ts';
-import { registerWorktreeRoutes } from './worktree-routes.ts';
 import {
   buildBoard,
   buildPools,
@@ -108,6 +107,7 @@ import {
   subtaskViews,
   usageView,
 } from './views.ts';
+import { registerWorktreeRoutes } from './worktree-routes.ts';
 
 /** 读旧 pool-hold 提醒时最多翻几页没处理的提醒（每页 200 条）；翻不完明说没读全，不拿「没有」顶。 */
 const LEGACY_ALERT_PAGES = 5;

@@ -37,11 +37,6 @@ import { JobsResponse } from './jobs.ts';
 import { LocalSessionsResponseSchema } from './local-sessions.ts';
 import { NodeDetailResponseSchema, NodesResponseSchema } from './nodes.ts';
 import {
-  WorktreeCleanupRequestSchema,
-  WorktreeCleanupResponseSchema,
-  WorktreesResponseSchema,
-} from './worktrees.ts';
-import {
   AnswerNotificationRequest,
   AnswerNotificationResponse,
   AuditQuery,
@@ -92,6 +87,11 @@ import {
   UpdateTaskRoutePinResponse,
 } from './task.ts';
 import { TaskListQuery, TaskListResponse } from './task-list.ts';
+import {
+  WorktreeCleanupRequestSchema,
+  WorktreeCleanupResponseSchema,
+  WorktreesResponseSchema,
+} from './worktrees.ts';
 
 // —— 路由表（前端据此封装请求；路径都在 WEB_API_PREFIX 之下，:xxx 是路径参数）——
 

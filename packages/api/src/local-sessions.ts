@@ -95,13 +95,16 @@ function freshnessOf(receivedAt: string, now: Date): 'fresh' | 'stale' {
 }
 
 /** GET /nodes/sessions。库里那份认不出回 500 写明，不当成没有会话。 */
-export async function readLocalSessions(deps: Pick<Deps, 'config' | 'store' | 'now'>): Promise<LocalSessionsResponse> {
+export async function readLocalSessions(
+  deps: Pick<Deps, 'config' | 'store' | 'now'>,
+): Promise<LocalSessionsResponse> {
   const now = deps.now();
   let records: Awaited<ReturnType<Deps['store']['listNodeSessions']>>;
   try {
     records = await deps.store.listNodeSessions();
   } catch (err) {
-    if (err instanceof InvalidNodeReportError) throw new ApiError(500, 'local_sessions_unreadable', err.message);
+    if (err instanceof InvalidNodeReportError)
+      throw new ApiError(500, 'local_sessions_unreadable', err.message);
     throw err;
   }
   const nodes = new Map<string, LocalSessionsNode>();
