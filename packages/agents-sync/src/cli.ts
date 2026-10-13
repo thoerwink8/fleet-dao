@@ -5,6 +5,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { Backups } from './backup.ts';
 import { installedAgents } from './detect.ts';
 import { applyGitExcludes, checkGitExcludes } from './git-excludes.ts';
+import { applyGitProxy, checkGitProxy } from './git-proxy.ts';
 import { applyHooks, checkHooks } from './hooks.ts';
 import { takeLock } from './lock.ts';
 import { manifestPath, readManifest } from './manifest.ts';
@@ -49,6 +50,7 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 agents/shared-rule
                              Devin（config.json 的 permissions）各自的写法；Grok 直接读 Claude 那份，不另写，
                              _tmp/ 加进这台的 git 全局忽略（core.excludesFile 没设过就新建一份；已经指到别的文件，
                              就在那份文件里接管一小块，不碰其余内容），
+                             ~/.fleet-dao/fallback-proxy 在时把 git 的 http.https://github.com/.proxy 设成它（不在就不设、报没配），
                              各家配置文件里本脚本管的几个开关改成该有的值（targets.ts 的 CONFIG_KEY_TARGETS，比如
                              ~/.grok/config.toml 的目录信任、反问选择题；别的内容不碰，读不懂就不动、报出来），
                              ~/.claude.json 里 mcpServers.playwright 已经配了的那条 args 加上 --output-dir
@@ -202,6 +204,9 @@ const POSITION_OFF_FOR_USER =
 const MCP_OFF_FOR_USER =
   '替别的用户写（--user）时不管 MCP 服务器配置（~/.claude.json）：那份是 Claude Code 每次会话自己读写的活文件，替别的用户写超出这张单的范围';
 
+const GIT_PROXY_SECTION =
+  'GitHub 的 git 代理（~/.fleet-dao/fallback-proxy → http.https://github.com/.proxy）';
+
 export function runCli(argv: readonly string[], deps: Deps): number {
   let args: Args | 'help';
   try {
@@ -316,6 +321,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         section('权限（agents/config/claude-permissions.json）', checkPermissions(ctx, src, permsOff));
         section('其他几家 AI 的权限（Kimi、Codex、Devin）', checkOtherPermissions(ctx, src, permsOff));
         section('全局 git 忽略（_tmp/）', checkGitExcludes(ctx));
+        section(GIT_PROXY_SECTION, checkGitProxy(ctx));
         section('各家配置里的开关', checkToolConfig(ctx));
         section(mcpSection, mcpOff ? [line('skip', 'MCP', mcpOff)] : checkMcp(ctx));
         section('同步位置', position ? checkPosition(position) : positionOff);
@@ -353,6 +359,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         );
         if (bad.length) section('读回', bad);
         section('全局 git 忽略（_tmp/）', applyGitExcludes(ctx, backups));
+        section(GIT_PROXY_SECTION, applyGitProxy(ctx));
         section('同步位置', position ? applyPosition(position, all, deps.now()) : positionOff);
       }
     }

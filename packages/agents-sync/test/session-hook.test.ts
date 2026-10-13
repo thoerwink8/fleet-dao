@@ -1,7 +1,7 @@
 // 装进去的开会话钩子真跑一遍：agents-sync --apply 装钩子、记下检出 → 主线往前走 → --check 看得见落后几个 →
 // 开会话时钩子快进检出、用检出里的 agents-sync 同步，规矩跟上主线 → 主线上的原件坏了，同步不成，会话里有明确的提醒。
 // 仓是临时拷的一份 fleet-dao（AGENTS.md、agents/（含通用段原件 shared-rules.md）、agents-sync 本身），origin 是临时的裸仓；家目录、PATH 都是临时的。
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -82,6 +82,24 @@ function machine() {
     return (JSON.parse(r.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput
       .additionalContext;
   };
+  /**
+   * 开会话钩子拆成两半之后（session-start.mjs 的 fastSessionStart）：取远端、同步在它起的脱离后台里跑，结果下次开会话才读到。
+   * 这里清掉上一次的后台结果、开一次会话（起后台）、等后台写完结果，再开一次会话读它。
+   */
+  const sessionFresh = () => {
+    const dir = join(home, '.fleet-dao', 'session-bg');
+    rmSync(dir, { recursive: true, force: true });
+    session();
+    const until = Date.now() + 120_000;
+    const settled = () =>
+      existsSync(dir) &&
+      readdirSync(dir).some((n) => n.endsWith('.json')) &&
+      !readdirSync(dir).some((n) => n.endsWith('.lock'));
+    while (!settled() && Date.now() < until)
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    expect(settled(), '后台 120 秒内没写完结果').toBe(true);
+    return session();
+  };
   /** 从另一份克隆往主线上推一个改了通用段原件（agents/shared-rules.md）的提交 */
   const pushAgents = (edit: (text: string) => string) => {
     const other = join(tempDir('other'), 'clone');
@@ -91,7 +109,7 @@ function machine() {
     git(other, 'commit', '-q', '-am', '改规矩');
     git(other, 'push', '-q', 'origin', 'HEAD:main');
   };
-  return { repo, home, sync, syncAt, session, pushAgents };
+  return { repo, home, sync, syncAt, session, sessionFresh, pushAgents };
 }
 
 describe('开会话钩子装上、真跑同步', { timeout: 180_000 }, () => {
@@ -119,7 +137,7 @@ describe('开会话钩子装上、真跑同步', { timeout: 180_000 }, () => {
     expect(behind.out).toContain('落后主线 1 个提交');
 
     // 开会话：钩子把同步专用的检出切到主线（专用检出没建过就现建一份）、同步，这台跟上主线
-    const said = m.session();
+    const said = m.sessionFresh();
     expect(said).toContain('规矩同步：这台刚同步到主线最新');
     expect(get(m.home, '.claude/CLAUDE.md')).toContain('- 测试加的一条规矩。');
     // --check 的 --repo 指的是「读哪份规矩」：这里给同步专用的检出（钩子用的就是它）
@@ -128,10 +146,10 @@ describe('开会话钩子装上、真跑同步', { timeout: 180_000 }, () => {
     expect(after.code, after.out).toBe(0);
 
     // 三分钟内再开会话不再同步；过了三分钟（删掉三分钟记号）同一天也照常再同步。主线上的 agents/shared-rules.md 标记坏了：同步不成，会话里明说
-    expect(m.session()).toContain('分钟内刚同步成功过');
+    expect(m.sessionFresh()).toContain('分钟内刚同步成功过');
     rmSync(join(m.home, '.fleet-dao', 'session-sync.ok'));
     m.pushAgents((t) => t.replace(END, ''));
-    const broken = m.session();
+    const broken = m.sessionFresh();
     expect(broken).toContain('规矩同步没查成');
     expect(broken).toContain('agents/shared-rules.md');
     expect(broken).toContain('落后主线 1 个提交');

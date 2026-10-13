@@ -27,6 +27,7 @@ const CHECKED = [
   'hooks/main-thread.mjs',
   'hooks/fresh-main.mjs',
   'hooks/git-run.mjs',
+  'hooks/proxy-env.mjs',
   'hooks/unattended.mjs',
   'local-sessions/lib.mjs',
   'local-sessions/heartbeat.mjs',

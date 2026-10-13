@@ -2,10 +2,11 @@
 // 创始人 2026-10-13：「我本机其实在做的任务……只要是在做的，有没有办法感知到？」
 //
 // 怎么跑：
-// - heartbeat.mjs 挂在 Claude Code 的 SessionStart / PreToolUse / Stop / SubagentStop / SessionEnd 上，每次触发把这个会话
+// - heartbeat.mjs 挂在 Claude Code 的 SessionStart / Stop / SubagentStop / SessionEnd 上（async，不让会话等），每次触发把这个会话
 //   （子代理单算一个）的心跳写进 ~/.fleet-dao/local-sessions/sessions/<编号>.json。不常驻、不联网、出什么错都 exit 0。
 // - push.mjs 由 Windows 计划任务每 2 分钟跑一次：把心跳凑成一份，POST 到法国的 /api/nodes/sessions（通行证和看板多机同一套），
-//   结果（成没成、为什么）写进 ~/.fleet-dao/local-sessions/last-push.json。
+//   结果（成没成、为什么）写进 ~/.fleet-dao/local-sessions/last-push.json。凑的时候读各会话记录的修改时间当「最后一次动」、
+//   从记录尾巴读最后在调的工具名（以前靠每次调工具都跑一次心跳，2026-10-13 摘掉）：看板误差不超过推送间隔 2 分钟。
 // - install.mjs 一条命令装、一条命令卸（pnpm local-sessions:install / local-sessions:uninstall）。
 //
 // 改这里之前必须知道（隐私边界，法国那边的 schema 是 strict，多一个字段就整份拒收）：
@@ -15,10 +16,14 @@
 //   ~/.fleet-dao/local-sessions/bin/ 用纯 node 跑，引不了仓里的 TypeScript。
 // - 不往 ~/.fleet-dao/hooks/ 放、不登记成 ~/.fleet-dao/bin/quiet-*.exe：那两处归 agents-sync 管，同步时会被当成它的钩子摘掉。
 import {
+  closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -46,8 +51,16 @@ export const PUSH_TIMEOUT_MS = 20_000;
 export const TASK_NAME = 'fleet-local-sessions';
 /** 退回自启时放在启动文件夹里的 vbs 的文件名。 */
 export const STARTUP_VBS = 'fleet-local-sessions.vbs';
-/** 挂在哪几个事件上。 */
-export const HOOK_EVENTS = ['SessionStart', 'PreToolUse', 'Stop', 'SubagentStop', 'SessionEnd'];
+/**
+ * 挂在哪几个事件上。调工具前（PreToolUse）不挂：每次调用都起一个 node（实测 138-250ms），推送却 2 分钟才一次；
+ * 两次之间在不在动，推的时候读会话记录（~/.claude/projects/…/<会话>.jsonl）的修改时间（transcriptOf、withTranscript）。
+ * 登记时一律 async：心跳不该让会话等它。
+ */
+export const HOOK_EVENTS = ['SessionStart', 'Stop', 'SubagentStop', 'SessionEnd'];
+/** Stop 之后会话记录还会晚写几秒（文档：记录是异步写的）：晚这么多以内仍算刚停，超过了才算又在跑。 */
+export const STOP_SLACK_MS = 30_000;
+/** 读会话记录尾巴找最后一个工具名，最多读这么多字节。 */
+const TAIL_BYTES = 64 * 1024;
 
 /**
  * 一个会话的心跳（和 shared 的 LocalSessionSchema 同形）。
@@ -263,12 +276,105 @@ export function writeHeartbeat(input, { home, now }) {
 }
 
 /**
+ * Claude Code 存会话记录的目录：CLAUDE_CONFIG_DIR 设了用它，否则 <home>/.claude。
+ * @param {string} home
+ * @param {NodeJS.ProcessEnv} [env]
+ */
+export const claudeDirOf = (home, env = process.env) => env.CLAUDE_CONFIG_DIR || join(home, '.claude');
+
+/**
+ * 一个心跳对应的会话记录在哪：主会话 projects/<任一目录>/<会话>.jsonl，子代理 projects/<任一目录>/<会话>/subagents/agent-<编号>.jsonl。
+ * 找不到是 null。projectDirs 是 projects 下的目录名（一轮推只列一次）。
+ * @param {string} projects
+ * @param {string[]} projectDirs
+ * @param {string} id 心跳的 id（子代理是 <会话>~<编号>）
+ * @returns {string | null}
+ */
+export function transcriptOf(projects, projectDirs, id) {
+  const [session, agent] = id.split('~');
+  if (!session || !/^[\w.-]+$/.test(session) || (agent !== undefined && !/^[\w.-]+$/.test(agent)))
+    return null;
+  const rel = agent === undefined ? `${session}.jsonl` : join(session, 'subagents', `agent-${agent}.jsonl`);
+  for (const d of projectDirs) {
+    const p = join(projects, d, rel);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+/**
+ * 会话记录尾巴里最后一个工具名；读不到、没有是 null。只取名字，参数一个字都不碰。
+ * @param {string} path
+ * @returns {string | null}
+ */
+function lastToolIn(path) {
+  let fd;
+  try {
+    fd = openSync(path, 'r');
+    const size = fstatSync(fd).size;
+    const len = Math.min(size, TAIL_BYTES);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    const re = /"type":"tool_use","id":"[^"]*","name":"([^"\\]{1,100})"/g;
+    let name = null;
+    for (const m of buf.toString('utf8').matchAll(re)) name = m[1] ?? name;
+    return clip(name, 100);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
+ * 拿会话记录补一份心跳（只改推出去的这份，不回写心跳文件）：记录比心跳新，最后一次动跟着记录走；
+ * 刚开场（start）之后记录在动，算在跑；Stop 之后记录又动了（超过 STOP_SLACK_MS），算又在跑；收场（end）的不改。
+ * 工具名有就换成记录里最后一个。没有记录原样返回。
+ * @param {Beat} beat
+ * @param {string | null} path
+ * @returns {Beat}
+ */
+export function withTranscript(beat, path) {
+  if (path === null) return beat;
+  let mtime;
+  try {
+    mtime = statSync(path).mtimeMs;
+  } catch {
+    return beat;
+  }
+  const seen = Date.parse(beat.lastSeenAt);
+  if (beat.last === 'end' || !(mtime > seen)) return beat;
+  const moved =
+    beat.last === 'start' || beat.last === 'tool' || (beat.last === 'stop' && mtime - seen > STOP_SLACK_MS);
+  return {
+    ...beat,
+    lastSeenAt: new Date(mtime).toISOString(),
+    ...(moved ? { last: /** @type {const} */ ('tool') } : {}),
+    lastTool: lastToolIn(path) ?? beat.lastTool,
+  };
+}
+
+/** @param {string} dir @returns {string[]} */
+function listDirs(dir) {
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * 推送那一头：读全部心跳，挑出该推的。早没了的（超过 DROP_AFTER_MS 没动、或收场超过 RECENT_STOP_MS）顺手删掉文件；
- * 认不出的文件不删、记进 problems 照实推上去。
- * @param {{ home: string, now: Date }} opts
+ * 认不出的文件不删、记进 problems 照实推上去。每份心跳先按会话记录补过（withTranscript）再判。
+ * @param {{ home: string, now: Date, claudeDir?: string }} opts
  * @returns {{ sessions: Beat[], problems: string[] }}
  */
-export function collect({ home, now }) {
+export function collect({ home, now, claudeDir }) {
+  // 不给就是 <home>/.claude：测试的假家里不会读到真机器的 CLAUDE_CONFIG_DIR；真推的 push.mjs 按 claudeDirOf 传进来
+  const projects = join(claudeDir ?? join(home, '.claude'), 'projects');
+  const projectDirs = listDirs(projects);
   const dir = sessionsDir(home);
   /** @type {Beat[]} */
   const sessions = [];
@@ -296,25 +402,26 @@ export function collect({ home, now }) {
       if (problems.length < 20) problems.push(`心跳文件 ${name} 认不出`.slice(0, 300));
       continue;
     }
-    const age = now.getTime() - Date.parse(parsed.lastSeenAt);
-    const ended = parsed.last === 'stop' || parsed.last === 'end';
-    if (age > DROP_AFTER_MS || (parsed.last === 'end' && age > RECENT_STOP_MS)) {
+    const beat = withTranscript(parsed, transcriptOf(projects, projectDirs, parsed.id));
+    const age = now.getTime() - Date.parse(beat.lastSeenAt);
+    const ended = beat.last === 'stop' || beat.last === 'end';
+    if (age > DROP_AFTER_MS || (beat.last === 'end' && age > RECENT_STOP_MS)) {
       rmSync(path, { force: true });
       continue;
     }
     if (ended && age > RECENT_STOP_MS) continue;
-    sessions.push(parsed);
+    sessions.push(beat);
   }
   sessions.sort((a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt));
   return { sessions: sessions.slice(0, MAX_SESSIONS), problems };
 }
 
 /**
- * @param {{ home: string, now: Date, machine?: string }} opts
+ * @param {{ home: string, now: Date, machine?: string, claudeDir?: string }} opts
  * @returns {Report}
  */
-export function buildReport({ home, now, machine }) {
-  const { sessions, problems } = collect({ home, now });
+export function buildReport({ home, now, machine, claudeDir }) {
+  const { sessions, problems } = collect({ home, now, ...(claudeDir ? { claudeDir } : {}) });
   return {
     schemaVersion: SCHEMA_VERSION,
     reportedAt: now.toISOString(),
@@ -359,15 +466,20 @@ export function readConfig(home) {
 
 /**
  * 推一次，结果写进 last-push.json（成没成、法国回了什么、为什么）。不抛：失败照实写下、返回。
- * @param {{ home: string, now: Date, fetchImpl?: typeof fetch }} opts
+ * @param {{ home: string, now: Date, fetchImpl?: typeof fetch, claudeDir?: string }} opts
  * @returns {Promise<PushStatus>}
  */
-export async function pushOnce({ home, now, fetchImpl = fetch }) {
+export async function pushOnce({ home, now, fetchImpl = fetch, claudeDir }) {
   /** @type {PushStatus} */
   let result;
   try {
     const config = readConfig(home);
-    const report = buildReport({ home, now, ...(config.machine ? { machine: config.machine } : {}) });
+    const report = buildReport({
+      home,
+      now,
+      ...(config.machine ? { machine: config.machine } : {}),
+      ...(claudeDir ? { claudeDir } : {}),
+    });
     const url = `${config.url.replace(/\/+$/, '')}${PUSH_PATH}`;
     const res = await fetchImpl(url, {
       method: 'POST',
