@@ -2,7 +2,7 @@
 
 - 日期：2026-10-11（北京时间）
 - 谁拍的：创始人提出要修（原话见下），方案由指挥官派的会话按「最佳做法」写；改标准，等创始人看过 PR 再合。
-- 状态：待创始人同意（改标准）。
+- 状态：生效（创始人 2026-10-13 统一同意）。
 - 关联：`agents/hooks/founder-inbox.mjs`（`lineageOf`）、`agents/hooks/session-start.mjs`（`recentPrompts`、`checkProgressIssue`、`checkDirectives`）、`packages/conventions/src/progress.ts`（`progressDirective` 写主人、`progressClaim`）、`agents/shared-rules.md`「进度当场记下来」那条、`agents/skills/commander/SKILL.md`「起步」第 2 步；钉它的测试 `agents/test/rules/steer-lineage.rules.test.ts`、`agents/test/rules/directive-inbox.rules.test.ts`。决定 0014（进度以 GitHub 为准）、0078（引导三条）；#1733（「发了没收到」只列本会话的）、#1743（Mirasim 引导按会话号转）。
 - 取代：无。0014 照旧有效；这份只给待处理引导加了主人，给开会话列「他最近的话」加了范围。
 

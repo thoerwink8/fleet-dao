@@ -133,8 +133,8 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | fleet-agents.slice | 法国 | fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给） |
 | fleet-api.service | 法国 | fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口） |
 | fleet-api.socket | 法国 | fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口） |
-| fleet-auto-release.service | 法国 | fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个） |
-| fleet-auto-release.timer | 法国 | fleet-dao 自动发布单元每 5 分钟读一轮主线（只读） |
+| fleet-auto-release.service | 法国 | fleet-dao 自动发布单元（读主线头、CI、在用版本、落后几个；主线绿了请求发版） |
+| fleet-auto-release.timer | 法国 | fleet-dao 自动发布单元每 5 分钟读一轮主线（读数，绿了请求发版） |
 | fleet-cli-upgrade.path | 法国 | fleet-dao 命令行工具的升级请求一到就接活 |
 | fleet-cli-upgrade.service | 法国 | fleet-dao 升级命令行工具 |
 | fleet-engine.service | 法国 | fleet-dao 引擎工人（Temporal worker） |
@@ -157,8 +157,8 @@ renderUnitsBlock 实际输出（跑 packages/conventions/src/ops-tables.ts 的 r
 | fleet-agents.slice | 法国 | fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给） |
 | fleet-api.service | 法国 | fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口） |
 | fleet-api.socket | 法国 | fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口） |
-| fleet-auto-release.service | 法国 | fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个） |
-| fleet-auto-release.timer | 法国 | fleet-dao 自动发布单元每 5 分钟读一轮主线（只读） |
+| fleet-auto-release.service | 法国 | fleet-dao 自动发布单元（读主线头、CI、在用版本、落后几个；主线绿了请求发版） |
+| fleet-auto-release.timer | 法国 | fleet-dao 自动发布单元每 5 分钟读一轮主线（读数，绿了请求发版） |
 | fleet-cli-upgrade.path | 法国 | fleet-dao 命令行工具的升级请求一到就接活 |
 | fleet-cli-upgrade.service | 法国 | fleet-dao 升级命令行工具 |
 | fleet-engine.service | 法国 | fleet-dao 引擎工人（Temporal worker） |
@@ -175,8 +175,8 @@ renderUnitsBlock 实际输出（跑 packages/conventions/src/ops-tables.ts 的 r
 deploy/france/fleet-agents.slice → fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给）
 deploy/france/fleet-api.service → fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口）
 deploy/france/fleet-api.socket → fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口）
-deploy/france/fleet-auto-release.service → fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个）
-deploy/france/fleet-auto-release.timer → fleet-dao 自动发布单元每 5 分钟读一轮主线（只读）
+deploy/france/fleet-auto-release.service → fleet-dao 自动发布单元（读主线头、CI、在用版本、落后几个；主线绿了请求发版）
+deploy/france/fleet-auto-release.timer → fleet-dao 自动发布单元每 5 分钟读一轮主线（读数，绿了请求发版）
 deploy/france/fleet-cli-upgrade.path → fleet-dao 命令行工具的升级请求一到就接活
 deploy/france/fleet-cli-upgrade.service → fleet-dao 升级命令行工具
 deploy/france/fleet-engine.service → fleet-dao 引擎工人（Temporal worker）
@@ -728,7 +728,7 @@ bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、自
 
 发版车不跑检出里那份。`release-train.mjs` 第 4 步 ssh 的命令是技能里的 `agents/skills/commander/scripts/release-boot.sh`（开会话钩子把技能同步到本机，不靠法国检出更新、也不等这一版先发过）：它把目标提交收进裸仓 `/srv/fleet-dao-releases/.repo.git`，把那一版的 `deploy/` 解到按提交号命名的私有目录 `/srv/fleet-dao-releases/.boot/<完整提交号>`（先解到临时目录、查过再整个挪进来，挪进来以后没人改它；两天前的旧目录顺手清掉），再 exec 它自带的 `release.sh`，参数原样带过去（完整提交号在最前，`--now`、`--unmerged` 照传）。改了 `release.sh` 的这一次发版就用那一版自己的脚本，检出还是旧的也一样。两次发版同时来（A、B 不同提交）各解各的目录，A 一定跑 A 版；两个发布谁先谁后，仍由被 exec 的那份 `release.sh` 拿发布锁（`.lock`）排，历史、排空、读回也都在那份里，这里不另做一套。那一版没有 `deploy/release.sh`、是符号链接、对象读不出、包解不开、提交取不到，命令退出 1，不改跑检出里这份。`--check` 和 `--rollback` 仍跑检出里的 `release.sh`。驾驶舱按钮发之前先把检出快进到目标提交（装在机器上的接活脚本原有的一步），所以它跑检出里的就是那一版。
 
-平时发版走驾驶舱「发布到法国」按钮（发版车同一趟流程；下一节）：点一下发主线头，发之前先排空引擎（本节末尾「发布前排空」）；自动发布单元只读不发（本节末尾「自动发布」）。上面几条留给人手动发、退回、重试。
+平时发版走驾驶舱「发布到法国」按钮（发版车同一趟流程；下一节）：点一下发主线头，发之前先排空引擎（本节末尾「发布前排空」）；自动发布单元在主线绿了、满 1 小时时替你点同一个按钮（本节末尾「自动发布」，决定 0088）。上面几条留给人手动发、退回、重试。
 
 发版前先用 `agents/skills/commander/scripts/release-train.mjs` 把手头的活暂停（创始人 2026-10-05 约 21:00 定的流程；用法见它的头注释）：本机写暂停标记、`worker.mjs start` 不再起新工人，法国引擎总开关关掉并等在跑的会话收尾（等收尾只等法国在跑的会话 0、主线 CI 绿；本机在跑的工人、挂了自动合并没合的 PR 只提示、不等，2026-10-06 母单 #1121：它们和法国发版无关；「CI 绿」读的是要发的提交的汇总检查 `check`：请求 `commits/<提交号>/check-runs?check_name=check&per_page=100` 按名字过滤，并按 `total_count` 翻页取全，任何一页读不出都算读不到——不然提交上检查多到一页装不下时 `check` 会被挤出第一页读成 0 条，2026-10-13 一个提交 210 条就这样把发版拦了；过滤后仍是 0 条判 pending，不因 ci 工作流运行已绿放行，那份结论只写进原因当佐证），收尾后才发，发完打印当前版本的清单。它的第 2、3 阶段（暂停法国、等收尾）就是法国引擎的排空，在 release.sh 之前做；release.sh 自己的「发布前排空」（本节末尾）照样跑，当最后一道兜底。发版是对外发布，`release-train.mjs start` 必须带创始人这一次发版的原话，发完、健康检查过了，法国引擎总开关和各仓「让 AI 接活」恢复到发版前（开着的开回、关着的保持关，见下面「自动发布」里「发完恢复到发版前的开关状态」）。驱动进程中途死了（#1674）：状态文件每次落盘都记 pid、机器名、心跳时刻（等收尾、等部署每圈刷新），`status` 见 pid 不在、或心跳比该步上限加 5 分钟余量还老，就写「驱动没了，停在第 N 步」并给出接着走的命令；同一个目标再跑 `start` 当成「没成」从停下的那一步接着走（停在第 4 步的先读法国 `.history` 末行：是目标且事件为 release/recovered 就跳到第 5 步，否则重发；发布锁被占着或读不到历史就不动）。巡查报「引擎总开关关着」时会顺带读这份状态，驱动死了写明「发版车驱动死在第 N 步，没人恢复」。
 
@@ -942,12 +942,12 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 
 ### 自动发布
 
-`fleet-auto-release`（design 第三节第 42 条）。**2026-10-07 起只读不发**（决定 `docs/decisions/0032-release-by-main-commit.md` 第 1、2、5 条、#1258）：发布只走驾驶舱「发布到法国」按钮（发版车同一趟流程，见下一节），这个单元**不再自己发版**——不调 `release.sh`、不看 `v<N>` 版本标记、不按「人手动切过」「发过没成」去拦谁。以前（2026-10-02 到 10-07）它按版本标记找要发的版本，没有标记就不发，那一整套（挑标记、标记那一版的 CI 闸、人按住 24 小时、没成隔 30 分钟重试、等引擎空闲、发布四步的记录）都删了；由来和旧写法见本节末尾和 git 历史。
+`fleet-auto-release`（design 第三节第 42 条）。**2026-10-13 起读数之外还会自动请求发版**（决定 `docs/decisions/0088-release-pause-resume-session.md` 第 1 条、#2039；此前 2026-10-07 到 10-13 只读不发，决定 0032 第 1、2、5 条、#1258）：发版本身仍只有一趟流程——驾驶舱「发布到法国」按钮（发版车同一趟流程，见下一节）；这个单元**不自己调 `release.sh`**，也不看 `v<N>` 版本标记，满足条件时只写一份和按钮一样的请求文件（`/var/lib/fleet-dao/release-request/request.json`，`by` 写「自动发版 决定0088」），由接活单元核请求、走发版。条件（`releaseStep`，每一轮判一次，哪条不满足就把原因写进状态的 `auto.note`、`release.sh --check` 的读数里看得到）：法国在用的落后主线头；头那次 `ci.yml` push 全绿（红了就等下一个绿的头，不回头发旧的）；距上一次发版（手动自动都算：`current` 链接的修改时间）和上一次自动请求都满 60 分钟，期间合进来的攒成一次；闸全过（接活单元装了、上一份请求已被接走、没有暂停标记、发布锁没被占、`release-train.json` 的 `status` 是 `done` 或 `aborted`——卡住、没成的要人处理，不自动再发）；任何一项读不到、认不出都不发。请求没写成（目录写不进、被占着）报 `auto-release:request`，写成了自己撤。驾驶舱按钮不经过这里，不受 60 分钟限制。第一次发布（法国还没发布过）仍走按钮。以前（2026-10-02 到 10-07）它按版本标记找要发的版本，没有标记就不发，那一整套（挑标记、标记那一版的 CI 闸、人按住 24 小时、没成隔 30 分钟重试、等引擎空闲、发布四步的记录）都删了；由来和旧写法见本节末尾和 git 历史。
 
 - 怎么跑起来：`fleet-auto-release.timer` 每 5 分钟（上一轮跑完再等 5 分钟，不叠着跑）以 root 拉起一轮 `/usr/local/lib/fleet-dao/auto-release/fleet-auto-release.mjs`。一轮最多 30 分钟（`TimeoutStartSec`；最长的是装机自动档 10 分钟和规矩同步每个用户 5 分钟）。
 - 每一轮读什么、写什么：读主线头和最近 300 个提交（`git fetch` 只取 `main`、不取 tag）；主线头自己那次 `ci.yml` push 的结论（一轮最多问一次 GitHub，不带凭据一个钟头 60 次；这个头已经读到全绿就不再问；限流、连不上、回的认不出记 `unknown` 和原因，不当成绿）；法国在用的提交（`current` 链接）；落后几个（在用的在主线最近提交里排第几，和驾驶舱「落后主线 N 个提交」同一个口径）；装机层装到哪、配置对账。写进 `/srv/fleet-dao-releases/.auto/state.json`（`schema: 1`；字段 `main`、`ci`、`current`、`last`、`rules`、`tier`、`system`、`config`、`alerts`……）。以前的 `marker`、`markerError`、`attempt`、`hold`、`waitingSince`、`sequence` 没有了；后端（`packages/store/src/deploy-lag.ts`）和指挥官的法国页（`agents/skills/commander/scripts/france-lib.mjs`）读到老状态里多出来的这几样也认，不报错。**没有任何 `v<N>` tag 的仓上读数照常**（以前会因为没有标记写成「不发」；测试 `deploy/test/auto-release.test.mjs` 第一条是故意造的失败）。
 - 「这一轮」`last.action`：`up-to-date`（在用的就是主线头）、`behind`（落后几个）、`not-in-recent`（在用的不在主线最近 300 个提交里）、`not-released`（还没发布过）、`main-unreadable`、`current-unreadable`（读不到，原因留着，不拿上一次的当这一次的）。主线或在用的读不到时，装机自动档和规矩同步这一轮不做。
-- **落后几个提交不是毛病**：发布只走按钮，没人点就不会上线，报警只会天天挂着。所以 `deploy_lag` 和后端的「线上版本跟不上主线」报警不再因为落后、CI 红、在用的不在主线上而红，落后几个只在驾驶舱版本项、`--check` 的读数里显示。
+- **落后几个提交不是毛病**：落后是常态（满 1 小时间隔内合进来的就是在攒，按钮也可以不点），报警只会天天挂着。所以 `deploy_lag` 和后端的「线上版本跟不上主线」报警不再因为落后、CI 红、在用的不在主线上而红，落后几个只在驾驶舱版本项、`--check` 的读数里显示。
 - 状态文件读不出（不是 JSON、格式版本不对、读不了）：这一轮什么都不做、不覆盖它（里面有没发出去的报警队列，从空的起会丢掉），报 `auto-release:state-unreadable`；人挪走它（`mv … state.json state.json.bad`）后下一轮从空的起、这条自己撤。
 - 单元还会发版那会儿开的报警（`auto-release:failed:`、`pending:`、`post-off:`、`marker:`、`marker-unreadable`、`engine-unknown`）：新版**第一次跑那一轮全撤一遍**（状态里 `retiredCleared` 记着做过了；撤不成——库连不上——下一轮接着撤），没发出去的丢掉。不撤的话库里开着的这几条会永远挂在驾驶舱上，没人再有机会解除。
 - **发布那一刻的四步**（决定 0011 第 4 条原话：「github actions 通过后可以暂停派活，然后引擎手头活都干完后，自动部署到引擎，然后接着进行活和派活」，0032 保留这个流程、去掉「按版本」）：**停派活 → 等在跑的收尾 → 部署 → 恢复派活**。这四步**复用已有的排空协议**（`packages/engine/src/drain-control.ts` + `.drain-request`），不新加全局开关、不加库里的列、不加迁移：
@@ -968,7 +968,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 - 读数：后端 `/healthz` 的 `deploy_lag`（健康页写「跟上主线」），读的时候现算：`current` 链接（在用哪版）、发布历史 `.history` 里这一版切上去的时刻（驾驶舱提醒「法国已发布」用，读不到是 null）、单元每一轮写的 `state.json`。
   - 当场红：读数读不到、认不出；单元 20 分钟没报到；主线头 20 分钟没读到（单元停了时只报「没报到」一条）；在用的读不到；还没发布过；规矩同步没成、同步到哪没读到；装机自动档没装成。
   - **不红**：落后主线几个提交、主线头的 CI 红或结论读不到、在用的不在主线最近 300 个提交里。（以前这几样按「落后多久」红，按版本发时还按版本标记数；发布改走按钮以后没有人会自动去发，所以不再报。）
-  - 装机层只有「人工档」会红：整套 france.sh 跑完没红时把装到的提交记进 `.auto/france-applied`；之后主线上人工档那几个文件（`deploy/lib/human-tier.sh`、`deploy/france/fleet-dao.nft`、`fleet-firewall.service`、`sudoers-fleet-dao`、`fleet-agent-scope.sh`、建用户的 `deploy/lib/session-user.sh`、`login-user.sh`、`session-ports.sh`、驾驶舱按钮的接活脚本，清单在 `deploy/france/auto-release/lib.mjs` 的 `HUMAN_TIER_PATHS`）改过、一天以上没重跑整套，红，写明要人重跑（它碰防火墙、sudoers、建用户，不自动跑）。运行时直接读的副本（`fleet-agent-scope`、驾驶舱按钮的接活脚本和它的两个单元；`lib.mjs` 的 `HUMAN_TIER_COPY_CHECKS`）字节已经和主线这一版一样、单元也不再要 daemon-reload 的，这次不算落后：`france-applied` 只在整套跑完没红时才往前拨，副本已经换上时再叫人重跑整套只是为了拨标记。防火墙、sudoers、sshd、被 source 的脚本不在这条例外里，文件一样也不等于已经加载。主线头上文件内容和装到的那一版一样的也不算（中间改完又改回去，重跑整套不会换机器上的东西）。其余装机步骤（自动发布单元的脚本副本和单元、`fleet-agents.slice`、清老单元的 `retire_old_units`、Mirasim 常驻单元 `fleet-mirasim-session.service`）是「自动档」，改了**不红**：见上一条。
+  - 装机层只有「人工档」会红：整套 france.sh 跑完没红时把装到的提交记进 `.auto/france-applied`；之后主线上人工档那几个文件（`deploy/lib/human-tier.sh`、`deploy/france/fleet-dao.nft`、`fleet-firewall.service`、`sudoers-fleet-dao`、`fleet-agent-scope.sh`、建用户的 `deploy/lib/session-user.sh`、`login-user.sh`、`session-ports.sh`、驾驶舱按钮的接活脚本，清单在 `deploy/france/auto-release/lib.mjs` 的 `HUMAN_TIER_PATHS`）改过、一天以上没重跑整套，红，写明要人重跑（它碰防火墙、sudoers、建用户，不自动跑）。运行时直接读的副本（`fleet-agent-scope`、驾驶舱按钮的接活脚本和它的两个单元；`lib.mjs` 的 `HUMAN_TIER_COPY_CHECKS`）字节已经和主线这一版一样、单元也不再要 daemon-reload 的，这次不算落后：`france-applied` 只在整套跑完没红时才往前拨，副本已经换上时再叫人重跑整套只是为了拨标记。防火墙、sudoers、sshd、被 source 的脚本不在这条例外里，文件一样也不等于已经加载。主线头上文件内容和装到的那一版一样的，默认也不算（中间改完又改回去，重跑整套不会换机器上的东西）。能按副本核对、核对没过的仍算：失败的整套先写下中间版本、读回有红就不拨标记，主线再改回标记那一版时 git diff 是空的，机器上仍可能是中间版本。其余装机步骤（自动发布单元的脚本副本和单元、`fleet-agents.slice`、清老单元的 `retire_old_units`、Mirasim 常驻单元 `fleet-mirasim-session.service`）是「自动档」，改了**不红**：见上一条。
   - 公网看得到 `/healthz`：对外的话不带提交号和路径，细节在 `release.sh --check` 列出的「自动发布」那一段和报警正文里。不在法国的正式机器上（开发、测试）报「未接」。
 - 看：`bash /srv/fleet-dao/deploy/release.sh --check` 列出的「自动发布」那一段（定时器在不在跑、上一轮什么时候、主线头和它的 CI、在用的落后几个、这一轮读到了什么、规矩同步到哪、装机自动档和装机脚本装到哪）；`journalctl -u fleet-auto-release -n 30`（每轮一行读数）；`systemctl list-timers fleet-auto-release.timer`；发布日志在 `/srv/fleet-dao-releases/.logs/`。
 - 停、开：`systemctl disable --now fleet-auto-release.timer` 停（在跑的那一轮照样跑完；20 分钟后 `/healthz` 报自动发布没报到，该报）；`systemctl enable --now fleet-auto-release.timer` 开；马上跑一轮：`systemctl start fleet-auto-release`（别直接跑那个 `.mjs`：两轮叠着跑会互相盖读数）。停着不影响发版（按钮不经它），只是读数不更新、发完版不自动装自动档和同步规矩。

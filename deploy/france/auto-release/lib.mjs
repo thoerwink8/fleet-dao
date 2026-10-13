@@ -1,13 +1,17 @@
-// 自动发布单元（法国，root；fleet-auto-release.timer 每 5 分钟拉起一轮）现在只剩读数，不再发版（决定 0032 第 5 条、#1258）。
-// 发布只由驾驶舱「发布到法国」按钮（或发版车，同一趟流程）发；这个单元每一轮做的只有：
+// 自动发布单元（法国，root；fleet-auto-release.timer 每 5 分钟拉起一轮）：读数，加上「主线绿了就发」（决定 0088、#2039）。
+// 发版本身仍只有一条路：驾驶舱按钮（或发版车）写请求文件、法国上的接活单元（deploy/france/release-request）核请求、走同一趟流程。
+// 这个单元自己不调 release.sh：它到点写同样的请求文件（releaseStep），由接活单元去发。这个单元每一轮做的有：
 //   读主线头和它自己那次 CI 的结论、读法国在用的提交、数落后几个，写进状态文件，后端的 /healthz（deploy_lag）和驾驶舱读它；
+//   主线头落后在用的、头的 CI 全绿、距上一次发版满 1 小时、没有发版在走也没有卡住的，就请求发这个头（releaseStep）；
 //   发完版之后顺带把装机的自动档（france.sh --auto-tier）装上、把各家 AI 的规矩同步给会话用户；
 //   拿法国 /etc/fleet-dao 下的环境文件跟在用那一版里的期望对账（#323，config.mjs）。
 // 这里是判断和「跑一轮」的流程；和系统打交道的（git、GitHub 接口、库、装机脚本）都从 io 进来：真的在
 // fleet-auto-release.mjs，测试换成假的（deploy/test/auto-release.test.mjs）。规矩和由来见 docs/ops.md 第九节「自动发布」。
 // 改这里之前必须知道：
-// - **这个单元不发版**：不调 release.sh、不看 `v<N>` 标记、不按人手动切过版本或发过没成去拦谁。没有任何 tag 的仓上读数照常
-//   （测试：没有标记也照样写出主线头、在用、落后几个）。要发版，走驾驶舱按钮。
+// - **这个单元不自己发版**：不调 release.sh、不看 `v<N>` 标记、不取 tag。要发只写请求文件（releaseStep），请求的核对（CI 绿、主线祖先、
+//   没有发版在走）接活单元还会再做一遍。没有任何 tag 的仓上读数照常（测试：没有标记也照样写出主线头、在用、落后几个）。
+// - 自动发版的闸（releaseGate 读来的事实交给 gateVerdict 判）：任何一项读不到、认不出都不发（原因写进状态的 auto.note），不当成可以发。
+//   两次发版（不分手动自动）至少隔 AUTO_RELEASE_GAP_MS；驾驶舱按钮不受这个间隔限制（它不经过这里）。
 // - 状态文件后端也读（packages/store/src/deploy-lag.ts 按 STATE_SCHEMA 认），指挥官的法国页也读（agents/skills/commander/scripts/
 //   france-lib.mjs 的 autoReleaseProblem）；改字段几边一起改，那边的测试拿这里造的状态核对。
 // - RULES_USERS 要和 deploy/france.sh 的 AGENT_RULES_USERS 一样；HUMAN_TIER_PATHS 要盖住人工档（deploy/lib/human-tier.sh）读的仓里文件（测试都核对）。
@@ -45,7 +49,8 @@ export const RULES_USERS = ['fleet-agent-carpool', 'pilot'];
  * 和 france.sh 引用的每个仓里文件，要么在这里、要么在测试里登记的自动档清单里）。
  * 运行时直接读的副本（HUMAN_TIER_COPY_CHECKS）字节已经和主线一样的，不再算进落后：france-applied 只在整套跑完没红时才往前拨，
  * 副本已经换上、别的读回还有红时，标记会停在旧提交上，不该再叫人重跑整套。防火墙、sudoers、sshd、被 source 的脚本不在这条例外里。
- * 主线头上内容和装到的那一版一样的路径也不数：中间的提交改完又改回去，重跑整套不会换机器上的东西。
+ * 主线头上内容和装到的那一版一样的路径，默认不数：中间的提交改完又改回去，重跑整套不会换机器上的东西。
+ * 能按副本核对、但核对不是 true 的不走这条例外：失败的整套先把中间版本写上，读回有红就不拨标记；主线再把文件改回标记那一版时 git diff 是空的，机器上仍可能是中间版本。
  */
 export const HUMAN_TIER_PATHS = [
   'deploy/lib/human-tier.sh',
@@ -115,14 +120,17 @@ export function copyAlreadyInstalled(blob, installedBlob, needDaemonReload) {
  * 数落后提交时还要交给 `git log` 的路径。satisfied 里严格等于 true 的副本路径拿掉。
  * changed 是主线头相对装到的提交、内容变了的路径（`git diff --name-only`）。给了才按它收窄；
  * 没给就是没查成，路径照旧留着，不能把「没比过」当成「没变」。
+ * 能按副本核对、核对不是 true 的路径，即使不在 changed 里也留下：git diff 为空只说明主线头和标记那一版字节一样，
+ * 证明不了机器上就是那一版（失败安装写下的中间版本）。
  * 返回空数组表示一段都不用数：调用方必须当成落后 0。拿空 pathspec 去 git log 会列出全部提交。
  */
 export function humanTierPathsStillBehind(satisfied, changed) {
+  const copyPaths = new Set(HUMAN_TIER_COPY_CHECKS.map((c) => c.path));
   const skip = new Set(HUMAN_TIER_COPY_CHECKS.filter((c) => satisfied?.[c.path] === true).map((c) => c.path));
   const paths = HUMAN_TIER_PATHS.filter((p) => !skip.has(p));
   if (!Array.isArray(changed)) return paths;
   const keep = new Set(changed);
-  return paths.filter((p) => keep.has(p));
+  return paths.filter((p) => keep.has(p) || (copyPaths.has(p) && satisfied?.[p] !== true));
 }
 /**
  * 这边发的报警都以它开头：规矩同步没成 `auto-release:rules:<提交号>`，装机自动档没装成 `auto-release:tier:<提交号>`，
@@ -140,6 +148,12 @@ export const RULES_PREFIX = `${ALERT_PREFIX}rules:`;
 export const TIER_PREFIX = `${ALERT_PREFIX}tier:`;
 /** 自动档没装成，同一个提交最快隔这么久再试一次（脚本幂等，网络、单元一时起不来的多半过会儿就好）。 */
 export const TIER_RETRY_MS = 30 * 60_000;
+/** 自动发版：两次发版（含手动）至少隔这么久，期间合进来的攒成一次发（决定 0088 第 1 条）。 */
+export const AUTO_RELEASE_GAP_MS = 60 * 60_000;
+/** 请求里「谁点的」：接活单元只收字母数字、汉字和 _.@ 空格 -（最长 64），发版进度和飞书里就显示这个。 */
+export const AUTO_RELEASE_BY = '自动发版 决定0088';
+/** 写不出发版请求时的报警（好了自己撤）。 */
+export const AUTO_REQUEST_KEY = `${ALERT_PREFIX}request`;
 export const CONFIG_PREFIX = `${ALERT_PREFIX}config:`;
 export const CONFIG_UNCHECKED_KEY = `${ALERT_PREFIX}config-unchecked`;
 /**
@@ -234,6 +248,8 @@ export function carryOver(prev) {
     tier: p.tier ?? null,
     system: p.system ?? null,
     config: null,
+    /** 自动发版最近一次请求的提交和时间（带到下一轮，算 1 小时间隔）；note 是这一轮为什么发或没发。 */
+    auto: p.auto ? { sha: p.auto.sha ?? null, at: p.auto.at ?? null, note: null } : null,
     /** 单元还会发版时开的那几类报警撤过了没有（RETIRED_ALERT_PREFIXES）。 */
     retiredCleared: p.retiredCleared === true,
     // 老状态里没发出去的、已经不归这个单元管的报警（发布没成之类）不再发
@@ -257,6 +273,7 @@ export async function runOnce(io, prev) {
     st.retiredCleared = true;
   }
   const current = await readStep(io, st, now);
+  if (current !== undefined) await releaseStep(io, st, now, current);
   if (current !== undefined) await tierStep(io, st, now, current);
   if (current !== undefined) await rulesStep(io, st, now, current);
   await configStep(io, st, io.now());
@@ -440,6 +457,98 @@ async function readCiBody(io) {
     unread = `连不上 GitHub：${why(e)}`;
   }
   return { body, unread };
+}
+
+/**
+ * 自动发版的闸：releaseGate 读来的事实 → 回 null（可以发）或不发的原因。读不到、认不出的一律是原因，不当成可以发。
+ * facts：{ missing: 缺的接活文件（数组，空 = 装了）, requestPending: 上一份请求还没被接走, marker: 有暂停标记,
+ * trainText: 发版进度文件原文（不在是 null）, lockBusy: 发布锁被占着 }。
+ */
+export function gateVerdict(facts) {
+  if (!facts || typeof facts !== 'object') return '发版闸的事实没读到';
+  if (!Array.isArray(facts.missing)) return '发版接活单元装没装没读到';
+  if (facts.missing.length > 0) return `发版接活单元没装（缺 ${facts.missing.join('、')}）`;
+  if (facts.requestPending) return '上一份发布请求还没被接走';
+  if (facts.marker) return '有发版暂停标记（上一趟没收尾或发版车停着）';
+  if (facts.lockBusy) return '发布锁被占着（有发布在跑）';
+  if (facts.trainText !== null && facts.trainText !== undefined) {
+    let t;
+    try {
+      t = JSON.parse(String(facts.trainText));
+    } catch {
+      return '发版进度记录认不出（不是 JSON），不敢覆盖';
+    }
+    if (t === null || typeof t !== 'object' || typeof t.status !== 'string') {
+      return '发版进度记录认不出（没有 status），不敢覆盖';
+    }
+    if (t.status !== 'done' && t.status !== 'aborted') {
+      return `上一趟发版是「${t.status}」状态，要人看，不自动再发`;
+    }
+  }
+  return null;
+}
+
+/**
+ * 自动发版（决定 0088 第 1 条）：法国在用的落后主线头、头的 CI 全绿、距上一次发版满 AUTO_RELEASE_GAP_MS、闸全过，
+ * 就请求发这个头（写和驾驶舱按钮一样的请求文件）。不过的把原因记进 st.auto.note（journal 和状态里看得到）。
+ * 只看主线头：头的 CI 红了就等下一个绿的头，不回头发旧的。写不出请求就报警，写成了撤。
+ */
+async function releaseStep(io, st, now, current) {
+  const note = (text) => {
+    st.auto = { sha: st.auto?.sha ?? null, at: st.auto?.at ?? null, note: text };
+  };
+  if (typeof io.requestRelease !== 'function') return note('这台没接上自动发版');
+  if (current === null) return note('法国还没发布过，第一次发版走驾驶舱按钮');
+  const head = st.main.head;
+  const idx = st.main.commits.findIndex(([sha]) => sha === current);
+  if (idx === 0) return note('在用的就是主线头，没有要发的');
+  if (idx < 0) return note('在用的不在主线最近的提交里，不自动发');
+  if (st.ci?.sha !== head || st.ci.verdict !== 'green') {
+    const v = st.ci?.sha === head ? st.ci.verdict : '没查';
+    return note(`主线头 ${short(head)} 的 CI 不是绿的（${v}），等绿`);
+  }
+  let lastRelease;
+  try {
+    lastRelease = await io.readReleasedAt();
+  } catch (e) {
+    return note(`上一次发版是什么时候没读到，不发：${why(e)}`);
+  }
+  const times = [lastRelease, st.auto?.at].filter(
+    (t) => typeof t === 'string' && !Number.isNaN(Date.parse(t)),
+  );
+  if (times.length === 0) return note('上一次发版是什么时候认不出，不发');
+  const waited = Number(now) - Math.max(...times.map((t) => Date.parse(t)));
+  if (waited < AUTO_RELEASE_GAP_MS) {
+    return note(
+      `距上一次发版 ${minutes(waited)} 分钟，满 ${minutes(AUTO_RELEASE_GAP_MS)} 分钟再发（期间合进来的攒成一次）`,
+    );
+  }
+  let blocked;
+  try {
+    blocked = gateVerdict(await io.releaseGate());
+  } catch (e) {
+    blocked = `发版闸读不到：${why(e)}`;
+  }
+  if (blocked) return note(`现在不发：${blocked}`);
+  try {
+    await io.requestRelease({ sha: head, at: iso(now), by: AUTO_RELEASE_BY });
+  } catch (e) {
+    note(`发版请求没写成：${why(e)}`);
+    raise(
+      st,
+      AUTO_REQUEST_KEY,
+      `自动发版的请求没写出去（${short(head)}）`,
+      `${why(e)}。下一轮自动再试；要马上发可以点驾驶舱「发布到法国」。`,
+    );
+    return;
+  }
+  resolveKeyLater(st, AUTO_REQUEST_KEY);
+  st.auto = {
+    sha: head,
+    at: iso(now),
+    note: `已请求自动发版 ${short(head)}（在用 ${short(current)}，落后 ${idx} 个提交）`,
+  };
+  act(st, now, 'auto-release-requested', `请求发 ${short(head)}`);
 }
 
 /** 装机层：france.sh 装到哪个提交、那之后主线上它管的文件改过几次。读不到记 error。 */
@@ -673,7 +782,7 @@ export function summary(st) {
     parts.push('主线头没读到过');
   }
   parts.push(`在用 ${short(st.current)}，${lagText(st)}`);
-  parts.push('只读：发布走驾驶舱按钮');
+  parts.push(`自动发版：${st.auto?.note ?? '这轮没判'}`);
   if (st.mainError) parts.push(`这轮主线没读到：${st.mainError}`);
   if (st.last) parts.push(`这轮：${st.last.action}${st.last.detail ? `（${st.last.detail}）` : ''}`);
   parts.push(

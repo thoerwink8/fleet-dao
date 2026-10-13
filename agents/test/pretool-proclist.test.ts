@@ -1,7 +1,7 @@
 // 调工具前钩子（agents/hooks/pretool.mjs）「打印进程命令行」那一段漏掉的写法（#792 的作者发现，2026-10-03）：
 // 原来只认 ps、/proc/*/cmdline、wmic process、Win32_Process、挑 CommandLine 那一列；pgrep -a、pstree -a、top -c、
 // tasklist /v 一样把别的进程的命令行（里面常有口令，2026-10-02 lark-mcp 的 -s <secret> 就是这么漏的）打进对话，却直接放了过去。
-// 同一天接着核：systemctl status（活动状态后面的 CGroup 一节，每个进程一整行）也在漏；剩下那几类（/proc/*/cmdline 直接读、
+// 同一天接着核：systemctl status 也算过（决定 0089 起 status / show / cat 不再拦，只留 dump）；剩下那几类（/proc/*/cmdline 直接读、
 // Get-CimInstance Win32_Process、wmic process、Get-Process | Select CommandLine）核过一遍，原来是盖住的，末尾留了几条回归用例。
 // 规矩本身（打印进程命令行要接 redact-secrets.mjs 才放行）由 agents/test/rules/pretool.rules.test.ts 钉着（改它是改标准）；
 // 这里只钉「这几种写法也是打印进程命令行」，规矩一条不动。下面每条「拦」的用例在修之前都是退出码 0（故意造出的失败）。
@@ -95,41 +95,18 @@ const cases: Case[] = [
   ['tasklist /v 接 redactor', 'PowerShell', `tasklist /v | node ${REDACT}`, 0],
   ['tasklist /svc 只多服务名', 'PowerShell', 'tasklist /svc', 0],
 
-  // —— systemctl status：活动状态后面就是 CGroup 一节，每个进程一整行（PID + 完整命令行）——
-  ['systemctl status', 'Bash', 'systemctl status fleet-api', 2, 'process'],
-  ['sudo systemctl status', 'Bash', 'sudo systemctl status fleet-api', 2, 'process'],
-  ['systemctl --user status', 'Bash', 'systemctl --user status fleet-api', 2, 'process'],
-  ['systemctl --no-pager -l status', 'Bash', 'systemctl --no-pager -l status fleet-api', 2, 'process'],
-  ['systemctl -H 那台机器上的 status', 'Bash', 'systemctl -H fr status fleet-api', 2, 'process'],
-  ['systemctl cat（unit 文件里的 ExecStart= 带参数）', 'Bash', 'systemctl cat fleet-api', 2, 'process'],
+  // —— systemctl：status / show / cat 不再拦（决定 0089 规则减法：天天用来看服务，拦下全是误伤）；dump 照拦 ——
+  ['systemctl status', 'Bash', 'systemctl status fleet-api', 0],
+  ['sudo systemctl status', 'Bash', 'sudo systemctl status fleet-api', 0],
+  ['systemctl --user status', 'Bash', 'systemctl --user status fleet-api', 0],
+  ['systemctl cat', 'Bash', 'systemctl cat fleet-api', 0],
+  ['systemctl show 不挑属性', 'Bash', 'systemctl show fleet-api', 0],
+  ['systemctl show -p ExecStart', 'Bash', 'systemctl show -p ExecStart fleet-api', 0],
+  ['ssh 到别的机器上 systemctl status', 'Bash', "ssh fr 'systemctl status fleet-api'", 0],
+  ['wsl 里 systemctl status', 'PowerShell', 'wsl -d fleet-local -- systemctl status fleet-api', 0],
   ['systemctl dump', 'Bash', 'systemctl dump', 2, 'process'],
-  ['systemctl status 接别的管道', 'Bash', 'systemctl status fleet-api | grep node', 2, 'process'],
-  ['ssh 到别的机器上 systemctl status', 'Bash', "ssh fr 'systemctl status fleet-api'", 2, 'process'],
-  ['wsl 里 systemctl status', 'PowerShell', 'wsl -d fleet-local -- systemctl status fleet-api', 2, 'process'],
-  [
-    'wsl -- systemctl status（任务里点名的写法）',
-    'PowerShell',
-    'wsl -- systemctl status fleet-api',
-    2,
-    'process',
-  ],
-  [
-    'systemctl show 不挑属性 = 全部属性（里面有 ExecStart）',
-    'Bash',
-    'systemctl show fleet-api',
-    2,
-    'process',
-  ],
-  ['systemctl show -p ExecStart', 'Bash', 'systemctl show -p ExecStart fleet-api', 2, 'process'],
-  ['systemctl show -p 的值紧贴着写', 'Bash', 'systemctl show -pExecStart fleet-api', 2, 'process'],
-  [
-    'systemctl show -p MainPID（进程一退就只剩 pid）',
-    'Bash',
-    'systemctl show -p MainPID fleet-api',
-    2,
-    'process',
-  ],
-  ['systemctl status 接 redactor', 'Bash', `systemctl status fleet-api | node ${REDACT}`, 0],
+  ['sudo systemctl --user dump', 'Bash', 'sudo systemctl --user dump', 2, 'process'],
+  ['systemctl dump 接 redactor', 'Bash', `systemctl dump | node ${REDACT}`, 0],
   ['systemctl is-active 只打一个词', 'Bash', 'systemctl is-active fleet-api', 0],
   ['systemctl show -p ActiveState 只看状态', 'Bash', 'systemctl show -p ActiveState fleet-api', 0],
   ['systemctl show -p ActiveState,SubState', 'Bash', 'systemctl show -p ActiveState,SubState fleet-api', 0],
@@ -155,7 +132,7 @@ const cases: Case[] = [
   ['Get-Process 只打名字和 pid', 'PowerShell', 'Get-Process', 0],
 ];
 
-describe('打印进程命令行：pgrep -a、pstree -a、top -c、tasklist /v、systemctl status 也算，接上 redactor 才放行', () => {
+describe('打印进程命令行：pgrep -a、pstree -a、top -c、tasklist /v、systemctl dump 也算，接上 redactor 才放行', () => {
   it.each(cases.map((c) => [c[0], c[1], c[3], c] as const))('%s（%s）→ 退出码 %i', (_n, _t, _w, c) => {
     const [, tool, command, want, why] = c;
     expectVerdict(run(tool, command), want, why);
@@ -169,11 +146,11 @@ describe('打印进程命令行：pgrep -a、pstree -a、top -c、tasklist /v、
     expect(run('Bash', `${PG} -af lark | ${pipe}`).code).toBe(0);
   });
 
-  it('systemctl status 拦下时给的配方，照着接一条 redactor 确实放行', () => {
-    const blocked = run('Bash', 'systemctl status fleet-api');
+  it('systemctl dump 拦下时给的配方，照着接一条 redactor 确实放行', () => {
+    const blocked = run('Bash', 'systemctl dump');
     expect(blocked.code).toBe(2);
     const pipe = /\|\s*(node \S+redact-secrets\.mjs\S*)/.exec(blocked.message ?? '')?.[1];
     expect(pipe).toBeDefined();
-    expect(run('Bash', `systemctl status fleet-api | ${pipe}`).code).toBe(0);
+    expect(run('Bash', `systemctl dump | ${pipe}`).code).toBe(0);
   });
 });

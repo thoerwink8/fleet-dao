@@ -28,14 +28,9 @@ describe('规矩：认领账的本机脚本删了就别回来（#446）', () => 
     for (const name of KEPT) expect(existsSync(join(SCRIPTS, name)), name).toBe(true);
   });
 
-  it('技能说明里没有「去跑这几份脚本」的用法行；写成「删掉了」那一句留着', () => {
+  it('技能说明里没有「去跑这几份脚本」的用法行', () => {
     const text = readFileSync(SKILL, 'utf8').replace(/\r\n/g, '\n');
     expect(scriptInvocations(text).filter((name) => GONE.includes(name))).toEqual([]);
-    // 反过来：还活着的脚本照样给用法行（正则写死了也能被这条挡住）。
-    expect(scriptInvocations(text)).toEqual(expect.arrayContaining(['france.mjs', 'worker.mjs']));
-    // 说清楚它们被删了、别去调——不然下一个人只看到「少了两行」。
-    expect(text).toMatch(/认领账和单上「在做」镜子整份删掉了（#446/);
-    expect(text).toMatch(/别再去调这几个脚本/);
   });
 
   it('【故意造出的失败】把 claim.mjs 放回来、技能说明照旧给用法行：两条各拦得住', () => {

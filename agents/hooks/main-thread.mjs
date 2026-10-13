@@ -1,14 +1,10 @@
 // PreToolUse 钩子。登记在 fleet-dao 仓的 .claude/settings.json（项目级，不写 matcher），不装进用户级设置（决定 0083）。
-// 只管主对话的两条（决定 0078 的前两条仍在；钩子中转由决定 0083 删掉）：
-// 1. 引导先回。创始人在一轮中途打的字叫「引导」：transcript 里是一行 attachment（type: queued_command，commandMode: prompt），
-//    附在下一次工具结果后面送进主对话。最后一条引导之后，主对话还没写过一段非空文字，就拒这次工具调用。
-//    新话在下一刀之前先回。还有子代理或下一刀就别收这一轮。活没干完不许写成收工。
-// 2. 子代理一律后台跑。主对话前台等子代理（Agent/Task 写了 run_in_background: false）时整段不调工具，引导转不进来。
-//    所以主对话里前台派子代理就拒（一轮结束不会杀掉后台子代理，2026-10-11 实测；进程重开——插队、重启——会）。
-//    不写 run_in_background 不拦：不写就是后台。不要干等它们的每一步；单次前台等待不超过 60 秒。
+// 只管主对话的一条（决定 0078 的第 1 条；钩子中转由决定 0083 删掉，「前台派子代理就拒」由决定 0089 删掉：两天 0 次命中）：
+// 引导先回。创始人在一轮中途打的字叫「引导」：transcript 里是一行 attachment（type: queued_command，commandMode: prompt），
+// 附在下一次工具结果后面送进主对话。最后一条引导之后，主对话还没写过一段非空文字，就拒这次工具调用。
 // 不再读 diag、不再起 ui-cli。以前转过的记在 ~/.fleet-dao/steer-shown/，开会话对账还读，这边只留路径、不再写。
 // 引擎的无头会话（FLEET_HEADLESS=1）读得到项目级设置，进到这里直接退出。
-// 子代理里的调用（输入带 agent_id）两条都不管。
+// 子代理里的调用（输入带 agent_id）不管。
 // 读不了 transcript：不拦（拦死所有工具代价太大），但用 systemMessage 明说「引导检查没查成：原因」，不当成没有引导静默过去。
 // 借道读 ~/.claude/settings.json 的几家：Grok 的输入是 camelCase、没有 transcript，认出来就不查、不说话；Devin、Cursor 的输入
 // 要是不带 transcript_path，每次都会明说没查成（照实说，不装作查过）。
@@ -23,12 +19,10 @@ import { fileURLToPath } from 'node:url';
 export const DIRECTIVE_SHOWN_CHARS = 200;
 /** 从尾部往回读，一块多大 */
 const CHUNK_BYTES = 256 * 1024;
-/** 最多往回读多少：再往前还认不出回话、引导、这一轮的开头，就算没查成（不读整份大文件） */
-const MAX_BACK_BYTES = 64 * 1024 * 1024;
+/** 最多往回读多少：未回的引导一定在记录末尾，读到这么远还没认出，就当没有待回的引导（不读整份大文件） */
+const MAX_BACK_BYTES = 4 * 1024 * 1024;
 /** 见到没回的引导先等这么久再读一遍：同一条回复里先写的文字，万一还没落盘，别把「已经回了话」误拦 */
 const SETTLE_MS = 300;
-/** 派子代理的工具名 */
-const SUBAGENT_TOOLS = new Set(['Agent', 'Task']);
 
 /** @typedef {{ deny?: string, notice?: string }} Verdict 拒（理由给模型看）、或要明说的话（systemMessage，给创始人看）；空对象是没意见 */
 /** @typedef {{ kind: 'pending', text: string } | { kind: 'clear' } | { kind: 'sidechain' }} Tail 最后一条引导回了没有 */
@@ -71,9 +65,8 @@ function* linesFromEnd(path) {
     let back = 0;
     let rest = Buffer.alloc(0);
     while (pos > 0) {
-      if (back >= MAX_BACK_BYTES) {
-        throw new Error(`往回读了 ${MAX_BACK_BYTES / 1024 / 1024} MB，还没认出回话、引导或这一轮的开头`);
-      }
+      // 到上限就收手：lastDirective 读完没碰到引导，结果是「没有待回的引导」
+      if (back >= MAX_BACK_BYTES) return;
       const len = Math.min(CHUNK_BYTES, pos);
       pos -= len;
       back += len;
@@ -163,7 +156,7 @@ function machineTurn(text) {
 
 /**
  * 从尾部往回看：先碰到主对话写的话 → 回了（或者后来没有新引导）；先碰到创始人的引导 → 没回；先碰到新一轮的开头 → 没有待回的引导。
- * 最后一行是子代理的（isSidechain: true）→ 这份是子代理的 transcript，不查。读不了就抛，由调用方明说没查成。
+ * 最后一行是子代理的（isSidechain: true）→ 这份是子代理的 transcript，不查。读不了就抛，由调用方明说没查成；往回读到 MAX_BACK_BYTES 还没认出就按没有待回的引导。
  * @param {string} path
  * @returns {Tail}
  */
@@ -193,7 +186,7 @@ export function lastDirective(path) {
 }
 
 /**
- * 子代理发的调用：Claude Code 只在子代理里的钩子调用带 agent_id（和 pretool.mjs 的 isSubagentCall 同一个判法）。
+ * 子代理发的调用：Claude Code 只在子代理里的钩子调用带 agent_id（code.claude.com/docs/en/hooks：只在子代理里出现）。
  * 空的、不是字符串的不算，宁可按主对话多拦一次。
  * @param {unknown} input
  */
@@ -226,8 +219,6 @@ const replyFirst = (text) => {
   const shown = Array.from(text).slice(0, DIRECTIVE_SHOWN_CHARS).join('');
   return `你刚收到创始人的引导『${shown}』：先用一句话回它（问题就答，指令就说改成什么；涉及在跑的子代理就用 SendMessage 转给它并说已转），再接着调工具。`;
 };
-const BACKGROUND_ONLY =
-  '子代理一律后台跑：去掉 run_in_background: false 再派（不写就是后台）。还有子代理或下一刀就别收这一轮，不要干等它们的每一步；单次前台等待不超过 60 秒。活没干完不许写成收工。前台等子代理时主对话不调工具，创始人的引导转不进来；一轮结束不会杀掉后台子代理（2026-10-11 实测），进程重开（插队、重启）会。';
 
 /**
  * 这次工具调用要不要拒。
@@ -246,7 +237,7 @@ export function check(raw, { settleMs = SETTLE_MS, sleep = sleepSync } = {}) {
   }
   if (!isObj(input)) return { notice: '引导检查没查成：钩子输入不是一个对象' };
   // Grok 借道读 ~/.claude/settings.json 的钩子（camelCase 输入，没有 transcript）：引导以 queued_command 附进 transcript
-  // 是 Claude Code 的做法，这两条只管 Claude Code。
+  // 是 Claude Code 的做法，这一条只管 Claude Code。
   if ('hookEventName' in input || ('toolName' in input && !('tool_name' in input))) return {};
   if (isSubagentCall(input)) return {};
 
@@ -273,15 +264,6 @@ export function check(raw, { settleMs = SETTLE_MS, sleep = sleepSync } = {}) {
   }
   if (sidechain) return {};
 
-  const tool = input.tool_name;
-  const toolInput = input.tool_input;
-  if (
-    typeof tool === 'string' &&
-    SUBAGENT_TOOLS.has(tool) &&
-    prop(toolInput, 'run_in_background') === false
-  ) {
-    reasons.push(BACKGROUND_ONLY);
-  }
   /** @type {Verdict} */
   const v = {};
   if (reasons.length > 0) v.deny = reasons.join('\n');

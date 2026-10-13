@@ -1,10 +1,10 @@
-# fleet-dao 自动发布单元：只读不发（决定 0032、#1258）。每一轮读主线头和它的 CI、法国在用哪一版、落后几个，写进
+# fleet-dao 自动发布单元：读数，加上主线绿了就请求发版（决定 0088、#2039；发版本身仍由接活单元走，见 fleet-release-request.service）。每一轮读主线头和它的 CI、法国在用哪一版、落后几个，写进
 # /srv/fleet-dao-releases/.auto/state.json（后端的 /healthz 和驾驶舱读它）；发完版（驾驶舱按钮）之后顺带装机的自动档（france.sh --auto-tier）、
-# 把规矩同步给会话用户；再对一遍 /etc/fleet-dao 下的环境文件。由 fleet-auto-release.timer 每 5 分钟拉起。发布本身不在这里：走驾驶舱「发布到法国」按钮。
+# 把规矩同步给会话用户；再对一遍 /etc/fleet-dao 下的环境文件。由 fleet-auto-release.timer 每 5 分钟拉起。发布本身不在这里：满足条件时这里只写一份和驾驶舱「发布到法国」按钮一样的请求文件（两次发版至少隔 1 小时），按钮照常能点。
 # deploy/france.sh 装（脚本装到 /usr/local/lib/fleet-dao/auto-release/；以后每发完一版它自己跑 france.sh --auto-tier 换上新的），别在机器上手改。规矩见 docs/ops.md 第九节「自动发布」。
 # 以 root 跑、不收紧：要跑 france.sh --auto-tier（写 /etc/systemd、起停单元）、替会话用户同步规矩。
 [Unit]
-Description=fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个）
+Description=fleet-dao 自动发布单元（读主线头、CI、在用版本、落后几个；主线绿了请求发版）
 Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
 After=network-online.target
 Wants=network-online.target
@@ -12,5 +12,5 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/node /usr/local/lib/fleet-dao/auto-release/fleet-auto-release.mjs
-# 一轮里最长的是装机自动档（脚本里限 10 分钟）和规矩同步（每个用户限 5 分钟）；不发版了，不会再有 60 分钟的发布
+# 一轮里最长的是装机自动档（脚本里限 10 分钟）和规矩同步（每个用户限 5 分钟）；发版本身在接活单元里，不占这一轮
 TimeoutStartSec=30min

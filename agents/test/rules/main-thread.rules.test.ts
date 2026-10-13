@@ -2,12 +2,10 @@
 // 1. 引导先回：创始人在一轮中途打的字（Claude Code 的 transcript 里是 attachment.type=queued_command、commandMode=prompt），
 //    附在下一次工具结果后面送进主对话。本机 178 条送到的引导里，AI 第一反应直接再调工具 107 条、先写话 45 条、本轮随即结束 26 条，
 //    创始人觉得「石沉大海」。所以最后一条引导之后主对话还没写过一段非空文字，就拒这次工具调用，理由里带上引导的前 200 字。
-// 2. 子代理一律后台跑：主对话前台等子代理时整段不调工具，引导转不进来，界面也只在派它的那一轮显示每一步
-//    （一轮结束不会杀掉后台子代理，2026-10-11 实测；进程重开会）。所以主对话调 Agent/Task 写了 run_in_background: false 就拒；
-//    不写不拦（不写就是后台：本机 transcript 里不写的 39 次全是后台起的）。
-// 子代理里的调用（输入带 agent_id）两条都不管。transcript 读不了：放行，但用 systemMessage 明说没查成，不当成没有引导。
+// 原来的第 2 条「前台派子代理就拒」由决定 0089（规则减法，创始人 2026-10-13 17:54）删掉：两天 0 次命中，规矩留在文字里。
+// 子代理里的调用（输入带 agent_id）不管。transcript 读不了：放行，但用 systemMessage 明说没查成，不当成没有引导。
 // 创始人 2026-10-10 13:02 选定（「都按你的推荐来。」）。
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -231,55 +229,45 @@ describe('读不了 transcript：放行，但明说没查成', () => {
     expect(v.deny).toBeUndefined();
     expect(v.notice).toMatch(/^引导检查没查成：/);
   });
+});
 
-  it('transcript 读不了也照样管前台子代理', () => {
-    const v = check(input(undefined, {}, 'Agent', { prompt: '干活', run_in_background: false }));
-    expect(v.deny).toContain('子代理一律后台跑');
-    expect(v.notice).toMatch(/^引导检查没查成：/);
+describe('往回读到上限还认不出引导', () => {
+  it('10MB 全是工具调用、没有文字的记录（引导在最前面、超出 4MB 上限）：判成没有待回的引导，不报没查成', () => {
+    const pad = 'x'.repeat(1000);
+    const rows: Row[] = [row.directive('很早以前的引导')];
+    for (let i = 0; i < 8500; i += 1) {
+      rows.push(row.toolUse(`m${i}`, `t${i}`), row.result(`t${i}`, pad));
+    }
+    const file = transcript(rows);
+    expect(statSync(file).size).toBeGreaterThan(10 * 1024 * 1024);
+    const v = check(input(file));
+    expect(v.deny).toBeUndefined();
+    expect(v.notice).toBeUndefined();
   });
 });
 
-describe('子代理一律后台跑', () => {
+describe('前台派子代理不再拦（决定 0089）', () => {
   const clean = () => transcript(turnStart());
 
   it.each([
     ['Agent', { prompt: '干活', subagent_type: 'general-purpose', run_in_background: false }],
     ['Task', { prompt: '干活', run_in_background: false }],
-  ])('主对话里 %s %j 写明前台：拒，并说清为什么', (tool, toolInput) => {
-    const v = check(input(clean(), {}, tool, toolInput));
-    expect(v.deny).toContain('子代理一律后台跑');
-    expect(v.deny).toContain('去掉 run_in_background: false');
-    expect(v.deny).toContain('60 秒');
-    expect(v.deny).toContain('一轮结束不会杀掉后台子代理（2026-10-11 实测），进程重开（插队、重启）会');
-    expect(v.deny).not.toContain('一轮结束会杀掉');
+    ['Agent', { prompt: '干活' }],
+    ['Agent', { prompt: '干活', run_in_background: true }],
+  ])('主对话里 %s %j：放行', (tool, toolInput) => {
+    expect(check(input(clean(), {}, tool, toolInput))).toEqual({});
   });
 
-  it('不写 run_in_background（默认就是后台）、写 true：放行', () => {
-    expect(check(input(clean(), {}, 'Agent', { prompt: '干活' }))).toEqual({});
-    expect(check(input(clean(), {}, 'Agent', { prompt: '干活', run_in_background: true }))).toEqual({});
-  });
-
-  it('引导没回、又前台派子代理：两条理由一起给，一次改对', () => {
+  it('引导没回、又前台派子代理：只给引导那一条理由', () => {
     const t = transcript([...turnStart(), row.directive('换个做法')]);
     const v = check(input(t, {}, 'Agent', { prompt: '干活', run_in_background: false }));
     expect(v.deny).toContain('『换个做法』');
-    expect(v.deny).toContain('子代理一律后台跑');
-  });
-
-  it('【故意造出的失败】把判法改成「不是 true 就拦」：不写的那次被误拦，上一条就会红', async () => {
-    const src = readFileSync(HOOK, 'utf8');
-    const want = "prop(toolInput, 'run_in_background') === false";
-    expect(src).toContain(want);
-    const mutant = join(dir, 'main-thread-mutant.mjs');
-    writeFileSync(mutant, src.replace(want, "prop(toolInput, 'run_in_background') !== true"));
-    const bad = (await import(pathToFileURL(mutant).href)) as MainThreadLib;
-    expect(
-      bad.check(input(clean(), {}, 'Agent', { prompt: '干活' }), { settleMs: 0, mirasim: NO_MIRASIM }).deny,
-    ).toContain('子代理一律后台跑');
+    expect(v.deny).not.toContain('子代理一律后台跑');
+    expect(v.deny).not.toContain('60 秒');
   });
 });
 
-describe('子代理里的调用两条都不管', () => {
+describe('子代理里的调用不管', () => {
   it('输入带 agent_id：引导没回也放行，前台派子代理也放行', () => {
     const t = transcript([...turnStart(), row.directive('先别动数据库')]);
     expect(check(input(t, { agent_id: 'a1b2' }))).toEqual({});

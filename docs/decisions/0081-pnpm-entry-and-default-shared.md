@@ -2,7 +2,7 @@
 
 - 日期：2026-10-12（北京时间）
 - 谁拍的：创始人 04:37 在带货工作台仓的 Mirasim 会话里选定方案 B（原话见下）；PR #1934 合并即生效。改标准。
-- 状态：创始人 04:37 选定方案 B，PR #1934 合并即生效。
+- 状态：生效（#1934）。
 - 关联：`agents/repo-contract.json`（合同）、`agents/hooks/repo-contract.mjs`（查、补、两个钩子用的提醒、命令行）、`agents/hooks/session-start.mjs`（`contractLines` 接线、`checkDirectives` 的范围一句）、`agents/hooks/stop.mjs`（`stopScopeCheck`）、根 `package.json` 的 `repo:check`、`repo:init`、`agents/shared-rules.md`「在任何仓里干活」一条、仓根 `AGENTS.md` 的两行豁免、`packages/conventions/standard-paths.json`（合同进改标准路径）；钉它的测试 `agents/test/rules/repo-entry.rules.test.ts`，逻辑测试 `agents/test/repo-contract.test.ts`。`docs/design.md` 第十五节第 8 条（标准推「仓」那一类）、第 12 条（自下而上）。
 - 取代：无。PR #1934 的第一版（通用段一条长规矩 + `pnpm progress:directive` 记完多打一句提示）没合进主线，由这一版替换。
 

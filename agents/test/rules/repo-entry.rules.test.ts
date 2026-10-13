@@ -4,8 +4,8 @@
 // 未来还会有其他仓呀……需要提醒的机制……好像也是存在断链的」，04:37 选了方案 B「只提醒不拦」。
 // 规矩只是文字（AGENTS.md / CLAUDE.md 只是上下文，不是强制），所以这里钉的是机制，不只是文字：
 // ① 合同写成数据（agents/repo-contract.json），首批四项；② 开会话钩子在任何仓里都按合同查、提醒；
-// ③ 引导条目的〔范围：…〕由开会话的 checkDirectives 和收尾的 Stop 钩子提醒，只用 systemMessage、绝不拦；
-// ④ 通用段几句话指到合同；⑤ fleet-dao 自己也过合同（不适用的写明豁免理由）。
+// ③ 引导条目的〔范围：…〕由开会话的 checkDirectives 提醒，只用 systemMessage、绝不拦（收尾的 Stop 钩子那一路由决定 0089 删掉）；
+// ④ fleet-dao 自己也过合同（不适用的写明豁免理由）。通用段的文字不再钉（决定 0089）。
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,10 +15,8 @@ import { runChild, runChildOk } from '../child.ts';
 
 const read = (rel: string): string =>
   readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
-const SHARED = read('../../shared-rules.md');
 const CONTRACT_TEXT = read('../../repo-contract.json');
 const SESSION_SRC = read('../../hooks/session-start.mjs');
-const STOP_SRC = read('../../hooks/stop.mjs');
 const PKG = JSON.parse(read('../../../package.json')) as { scripts: Record<string, string> };
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const LIB_PATH = fileURLToPath(new URL('../../hooks/repo-contract.mjs', import.meta.url));
@@ -81,26 +79,6 @@ function sessionWired(src: string): boolean {
     /import \{[^}]*contractLines[^}]*\} from '\.\/repo-contract\.mjs'/.test(src)
   );
 }
-/** Stop 钩子把范围检查接进了「只提醒」那一路（systemMessage 的 notes），不是 decision */
-function stopWired(src: string): boolean {
-  const main = src.slice(src.indexOf('if (isMain())'));
-  return /notes\.push\(scope\.systemMessage\)/.test(main) && /stopScopeCheck\(/.test(main);
-}
-
-const SHARED_RULES: Record<string, RegExp> = {
-  指到合同: /`agents\/repo-contract\.json`/,
-  入口四个命令: /`pnpm dev\/start\/stop\/check`/,
-  钩子列缺项: /开会话钩子列缺项/,
-  补用repo_init: /`pnpm repo:init`/,
-  只记pnpm命令: /我只记 pnpm 命令，不记路径和软件/,
-  原则默认通用: /我说的原则、偏好默认各仓通用/,
-  引导标范围: /引导条目标〔范围：通用｜只此仓〕/,
-};
-function missing(rules: Record<string, RegExp>, text: string): string[] {
-  return Object.entries(rules)
-    .filter(([, re]) => !re.test(text))
-    .map(([name]) => name);
-}
 
 const made: string[] = [];
 afterEach(() => {
@@ -117,18 +95,13 @@ describe('规矩：仓合同（方案 B，只提醒不拦；决定 0081）', () 
     expect(contractProblems(CONTRACT_TEXT)).toEqual([]);
   });
 
-  it('开会话钩子接上了合同检查；Stop 钩子把范围检查接在 systemMessage 那一路', () => {
+  it('开会话钩子接上了合同检查', () => {
     expect(sessionWired(SESSION_SRC)).toBe(true);
-    expect(stopWired(STOP_SRC)).toBe(true);
   });
 
   it('fleet-dao 根 package.json 有 repo:check、repo:init，指向同一份逻辑', () => {
     expect(PKG.scripts['repo:check']).toBe('node agents/hooks/repo-contract.mjs check');
     expect(PKG.scripts['repo:init']).toBe('node agents/hooks/repo-contract.mjs init');
-  });
-
-  it('通用段「在任何仓里干活」几句话指到合同、默认通用、标范围', () => {
-    expect(missing(SHARED_RULES, SHARED)).toEqual([]);
   });
 
   it('fleet-dao 自己也过合同：不适用的写明了豁免理由', () => {
@@ -139,7 +112,7 @@ describe('规矩：仓合同（方案 B，只提醒不拦；决定 0081）', () 
     for (const r of rs.filter((x) => x.status === 'skipped')) expect(r.reason, r.id).toBeTruthy();
   });
 
-  it('Stop 钩子真跑：新记的引导没标范围，只给 systemMessage，没有 decision、没有 hookSpecificOutput；同一会话第二次不说', {
+  it('Stop 钩子真跑：新记的引导没标范围也不再提醒（决定 0089 规则减法删掉这条），没有 decision、没有 hookSpecificOutput', {
     timeout: 0,
   }, () => {
     const dir = temp('repo');
@@ -167,14 +140,9 @@ describe('规矩：仓合同（方案 B，只提醒不拦；决定 0081）', () 
     });
     const first = runChild(process.execPath, [STOP], { input, env });
     expect(first.status).toBe(0);
-    const out = JSON.parse(first.stdout.trim());
-    expect(Object.keys(out)).toEqual(['systemMessage']);
-    expect(out.systemMessage).toContain('〔范围：');
+    expect(first.stdout).not.toContain('范围');
     expect(first.stdout).not.toContain('decision');
     expect(first.stdout).not.toContain('hookSpecificOutput');
-    const second = runChild(process.execPath, [STOP], { input, env });
-    expect(second.status).toBe(0);
-    expect(second.stdout).not.toContain('范围');
   });
 
   it('【故意造出的失败】合同里拿掉 entry、progress 换了一套标题：查得出来', () => {
@@ -186,36 +154,9 @@ describe('规矩：仓合同（方案 B，只提醒不拦；决定 0081）', () 
     expect(contractProblems('{坏的')[0]).toMatch(/合同读不出/);
   });
 
-  it('【故意造出的失败】拿掉钩子接线（开会话不传 repoContract、Stop 不推范围提醒）：查得出来', () => {
+  it('【故意造出的失败】拿掉钩子接线（开会话不传 repoContract）：查得出来', () => {
     const cutSession = SESSION_SRC.replace(/\n\s*repoContract: [^\n]*\n/, '\n');
     expect(cutSession).not.toBe(SESSION_SRC);
     expect(sessionWired(cutSession)).toBe(false);
-    const cutStop = STOP_SRC.replace(/notes\.push\(scope\.systemMessage\)/, 'void scope');
-    expect(cutStop).not.toBe(STOP_SRC);
-    expect(stopWired(cutStop)).toBe(false);
-  });
-
-  it('【故意造出的失败】Stop 范围提醒改成拦（decision:block）：接线判不过', () => {
-    const blocking = STOP_SRC.replace(
-      /notes\.push\(scope\.systemMessage\)/,
-      "process.stdout.write(JSON.stringify({ decision: 'block', reason: scope.systemMessage }))",
-    );
-    expect(stopWired(blocking)).toBe(false);
-  });
-
-  it('【故意造出的失败】通用段退回只有文字的长规矩（#1934 初稿）：查得出来', () => {
-    const s1 =
-      '- 能跑起来的仓，根 `package.json` 给 `pnpm dev`（起最新版）、`start`、`stop`、`check`（交活前检查），写进 README 第一屏；没 Node 也放个只有 `scripts` 的。我只记 pnpm 命令，不记路径、软件和环境变量。';
-    const cut = SHARED.replace(/- 仓要过 fleet-dao 的仓合同[^\n]*/, s1);
-    expect(cut).not.toBe(SHARED);
-    expect(missing(SHARED_RULES, cut)).toEqual([
-      '指到合同',
-      '入口四个命令',
-      '钩子列缺项',
-      '补用repo_init',
-      '只记pnpm命令',
-      '原则默认通用',
-      '引导标范围',
-    ]);
   });
 });
