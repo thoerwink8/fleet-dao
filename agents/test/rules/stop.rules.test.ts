@@ -81,6 +81,16 @@ describe('规矩：没开无人值守时，Stop 钩子只提醒、不拦、不�
     expect(r.stdout).not.toContain('hookSpecificOutput');
   });
 
+  it('仓根未跟踪的 package.json、tsconfig.json、requirements.txt 不算临时文件，不提醒', () => {
+    const dir = temp('config-files');
+    g(dir, 'init', '-q', '-b', 'main');
+    for (const name of ['package.json', 'tsconfig.json', 'requirements.txt'])
+      writeFileSync(join(dir, name), 'x');
+    const r = run(JSON.stringify({ hook_event_name: 'Stop', cwd: dir, stop_hook_active: false }));
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe('');
+  });
+
   it('仓根干净：退出码 0，什么都不打印——不拿「没什么可说」硬凑一条消息', () => {
     const dir = temp('clean');
     g(dir, 'init', '-q', '-b', 'main');

@@ -137,7 +137,7 @@ describe('调工具前钩子拦的规矩', () => {
     expect(lib.decide(JSON.stringify({ tool_name: 'Bash', tool_input: {} })).code).toBe(2);
   });
 
-  it('拦下 git reset --hard 时给的修复建议含 git stash 和保留 diff', () => {
+  it('拦下 git reset --hard 时给的修复建议不再叫人用 git stash（它自己被拦），改成保留 diff 或提交', () => {
     const v = lib.decide(
       JSON.stringify({
         tool_name: 'Bash',
@@ -146,8 +146,8 @@ describe('调工具前钩子拦的规矩', () => {
       }),
     );
     expect(v.code).toBe(2);
-    expect(v.message).toContain('git stash push -u');
-    expect(v.message).toContain('git diff > 文件');
+    expect(v.message).not.toContain('git stash push');
+    expect(v.message).toContain('git diff > _tmp/');
     expect(v.message).toContain('把主检出');
   });
 });

@@ -19,8 +19,8 @@ import { fileURLToPath } from 'node:url';
 export const DIRECTIVE_SHOWN_CHARS = 200;
 /** 从尾部往回读，一块多大 */
 const CHUNK_BYTES = 256 * 1024;
-/** 最多往回读多少：再往前还认不出回话、引导、这一轮的开头，就算没查成（不读整份大文件） */
-const MAX_BACK_BYTES = 64 * 1024 * 1024;
+/** 最多往回读多少：未回的引导一定在记录末尾，读到这么远还没认出，就当没有待回的引导（不读整份大文件） */
+const MAX_BACK_BYTES = 4 * 1024 * 1024;
 /** 见到没回的引导先等这么久再读一遍：同一条回复里先写的文字，万一还没落盘，别把「已经回了话」误拦 */
 const SETTLE_MS = 300;
 
@@ -65,9 +65,8 @@ function* linesFromEnd(path) {
     let back = 0;
     let rest = Buffer.alloc(0);
     while (pos > 0) {
-      if (back >= MAX_BACK_BYTES) {
-        throw new Error(`往回读了 ${MAX_BACK_BYTES / 1024 / 1024} MB，还没认出回话、引导或这一轮的开头`);
-      }
+      // 到上限就收手：lastDirective 读完没碰到引导，结果是「没有待回的引导」
+      if (back >= MAX_BACK_BYTES) return;
       const len = Math.min(CHUNK_BYTES, pos);
       pos -= len;
       back += len;
@@ -157,7 +156,7 @@ function machineTurn(text) {
 
 /**
  * 从尾部往回看：先碰到主对话写的话 → 回了（或者后来没有新引导）；先碰到创始人的引导 → 没回；先碰到新一轮的开头 → 没有待回的引导。
- * 最后一行是子代理的（isSidechain: true）→ 这份是子代理的 transcript，不查。读不了就抛，由调用方明说没查成。
+ * 最后一行是子代理的（isSidechain: true）→ 这份是子代理的 transcript，不查。读不了就抛，由调用方明说没查成；往回读到 MAX_BACK_BYTES 还没认出就按没有待回的引导。
  * @param {string} path
  * @returns {Tail}
  */
