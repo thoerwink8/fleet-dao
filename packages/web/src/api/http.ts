@@ -12,6 +12,8 @@ import {
   FeishuAccessRequest,
   GroomNowRequest,
   HomeResourcesSchema,
+  ImportRepoRequest,
+  InstallAppRequest,
   ManualModelRequest,
   MovePurposeModelRequest,
   PasswordLoginRequest,
@@ -270,6 +272,23 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       return send('PUT', apiUrl(R.updateRepoCiPolicy.path, { repoId }), R.updateRepoCiPolicy.response, {
         body: UpdateRepoCiPolicyRequest.parse(body),
       });
+    },
+    importableRepos: () => send('GET', apiUrl(R.importableRepos.path), R.importableRepos.response),
+    async importRepo(body) {
+      return send('POST', apiUrl(R.importRepo.path), R.importRepo.response, {
+        body: ImportRepoRequest.parse(body),
+      });
+    },
+    async removeRepo(repoId) {
+      return send('DELETE', apiUrl(R.removeRepo.path, { repoId }), R.removeRepo.response);
+    },
+    async installAppOnRepo(body) {
+      return send('POST', apiUrl(R.installAppOnRepo.path), R.installAppOnRepo.response, {
+        body: InstallAppRequest.parse(body),
+      });
+    },
+    async disconnectGitHub() {
+      return send('POST', apiUrl(R.disconnectGitHub.path), R.disconnectGitHub.response);
     },
     groomStatus: (repoId) => send('GET', apiUrl(R.groomStatus.path, { repoId }), R.groomStatus.response),
     async groomNow(repoId, body) {

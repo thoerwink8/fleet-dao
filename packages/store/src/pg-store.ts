@@ -14,6 +14,7 @@ import {
   type Db,
   githubEvents,
   githubEventVersions,
+  githubTokens,
   idempotencyKeys,
   listTaskRows,
   models,
@@ -41,6 +42,8 @@ import {
   toBan,
   toChannel,
   toChannelState,
+  toGitHubToken,
+  toIntakeRepo,
   toModel,
   toPool,
   toQuotaWindow,
@@ -95,6 +98,7 @@ import type {
   User,
 } from './ports.ts';
 import {
+  addRepoAudit,
   autoDispatchAudit,
   autoDispatchChanged,
   autoDispatchUnchanged,
@@ -107,6 +111,7 @@ import {
   isCiPolicyUnchanged,
   isTerminalTaskState,
   keepOnBoard,
+  removeRepoAudit,
 } from './task-logic.ts';
 
 export interface PgStoreOptions {
@@ -1272,6 +1277,74 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         const auditId = await insertAudit(tx, ciPolicyAudit(entry, before, after));
         return ciPolicyChanged(after, auditId);
       });
+    },
+    async addRepo({ owner, name, defaultBranch, testCommand }, entry) {
+      return db.transaction(async (tx) => {
+        // 已经在库里（不分大小写）就地返回，不新建、不记：ON CONFLICT 撞的是 repos_owner_name_unique，
+        // 但那条唯一约束是区分大小写的，所以这里先按 lower() 查一次（和 findRepoByName 同一个判法）。
+        const [existing] = await tx
+          .select()
+          .from(repos)
+          .where(
+            and(sql`lower(${repos.owner}) = lower(${owner})`, sql`lower(${repos.name}) = lower(${name})`),
+          );
+        if (existing) return { repo: toIntakeRepo(existing), created: false };
+        const [inserted] = await tx
+          .insert(repos)
+          .values({ owner, name, defaultBranch, testCommand })
+          .returning();
+        if (!inserted) throw new Error(`插入仓 ${owner}/${name} 没返回行`);
+        const auditId = await insertAudit(tx, addRepoAudit(entry, { owner, name, defaultBranch }));
+        return { repo: toIntakeRepo(inserted), created: true, auditId };
+      });
+    },
+    async removeRepo({ repoId }, entry) {
+      if (!isUuid(repoId)) return 'not_found';
+      return db.transaction(async (tx): Promise<'removed' | 'has_tasks' | 'not_found'> => {
+        const [row] = await tx.select().from(repos).where(eq(repos.id, repoId)).for('update');
+        if (!row) return 'not_found';
+        // 还挂着没结束的单就不删：tasks 对 repos 是外键，硬删会连坐（引擎在做的单、历史都跟着没）。
+        const [live] = await tx
+          .select({ n: sql<number>`count(*)::int` })
+          .from(tasks)
+          .where(and(eq(tasks.repoId, repoId), inArray(tasks.state, ['queued', 'running'])));
+        if ((live?.n ?? 0) > 0) return 'has_tasks';
+        await tx.delete(repos).where(eq(repos.id, repoId));
+        await insertAudit(tx, removeRepoAudit(entry, { owner: row.owner, name: row.name }));
+        return 'removed';
+      });
+    },
+    async getGitHubToken(userId) {
+      if (!isUuid(userId)) return null;
+      const [row] = await db.select().from(githubTokens).where(eq(githubTokens.userId, userId));
+      return row ? toGitHubToken(row) : null;
+    },
+    async putGitHubToken(input) {
+      await db
+        .insert(githubTokens)
+        .values({
+          userId: input.userId,
+          githubId: input.githubId,
+          login: input.login,
+          accessTokenCipher: input.accessTokenCipher,
+          scopes: input.scopes,
+          expiresAt: input.expiresAt === null ? null : new Date(input.expiresAt),
+        })
+        .onConflictDoUpdate({
+          target: githubTokens.userId,
+          set: {
+            githubId: input.githubId,
+            login: input.login,
+            accessTokenCipher: input.accessTokenCipher,
+            scopes: input.scopes,
+            expiresAt: input.expiresAt === null ? null : new Date(input.expiresAt),
+            updatedAt: now(),
+          },
+        });
+    },
+    async deleteGitHubToken(userId) {
+      if (!isUuid(userId)) return;
+      await db.delete(githubTokens).where(eq(githubTokens.userId, userId));
     },
   };
 }

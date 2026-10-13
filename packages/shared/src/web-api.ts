@@ -19,6 +19,7 @@ export * from './web-api/nodes.ts';
 export * from './web-api/notifications.ts';
 export * from './web-api/pools.ts';
 export * from './web-api/realtime.ts';
+export * from './web-api/repo-import.ts';
 export * from './web-api/routes.ts';
 export * from './web-api/routing.ts';
 export * from './web-api/settings.ts';

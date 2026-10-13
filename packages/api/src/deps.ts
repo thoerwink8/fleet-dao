@@ -7,6 +7,7 @@ import type { DecisionCommenter } from './decision-handoff.ts';
 import type { CockpitAlerts } from './feishu-alerts.ts';
 import type { FranceReleasePort } from './france-release.ts';
 import type { GatewaySeen } from './gateway-seen.ts';
+import type { GitHubUserPort } from './github-user.ts';
 import type { HostResourceSampler } from './host-resources.ts';
 import type { IntentStore } from './intent-store.ts';
 import type { ModelRosterPort } from './model-roster.ts';
@@ -45,6 +46,12 @@ export interface Deps {
   config: Config;
   store: Store;
   workflows: WorkflowControl;
+  /**
+   * 本人 GitHub 身份那一套（#1989，设置页「导入仓库」）：列「我 GitHub 上能看到的仓」、把 App 装到某个仓。
+   * 走 OAuth 用户令牌，和 App 机器人令牌那条路分开。没给（开发、测试没有机器人凭据）时那几个接口回 503
+   * 写明「这台没接上 GitHub」，不拿空列表冒充「你没有仓」。
+   */
+  githubUser?: GitHubUserPort | undefined;
   /**
    * 被撤或挂起的任务重做（shared/task-redo.ts）：同一张单另起一代。没给（开发环境没有 Temporal）时重做回 503，不假装起了。
    */

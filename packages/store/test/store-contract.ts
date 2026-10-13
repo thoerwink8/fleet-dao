@@ -1880,6 +1880,92 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           expect(await policy()).toBe('off');
         });
       });
+
+      describe('接进 / 移出驾驶舱（#1989）', () => {
+        const add = audit({
+          actor: { kind: 'user', id: DEV_USER_ID },
+          action: 'repo.import.add',
+          target: 'repo:me/notes',
+          via: 'cockpit',
+        });
+
+        it('接进来：建一行、默认关着自动派活、ci_policy 默认强制、记一条操作记录', async () => {
+          tick();
+          const added = await store.addRepo(
+            { owner: 'me', name: 'notes', defaultBranch: 'main', testCommand: 'pnpm check' },
+            add,
+          );
+          expect(added.created).toBe(true);
+          expect(added.repo).toMatchObject({
+            owner: 'me',
+            name: 'notes',
+            defaultBranch: 'main',
+            testCommand: 'pnpm check',
+            autoDispatchSince: null,
+            ciPolicy: 'force',
+          });
+          expect(added.auditId).toEqual(expect.any(String));
+          expect(await store.findRepoByName('ME', 'Notes')).toMatchObject({ name: 'notes' });
+          const audits = (await store.listAudit({ limit: 200 })).items.filter(
+            (a) => a.action === 'repo.import.add',
+          );
+          expect(audits).toHaveLength(1);
+          expect(audits[0]?.after).toEqual({ owner: 'me', name: 'notes', defaultBranch: 'main' });
+        });
+
+        it('已经有这个仓（大小写不同也算）：原样回那一行、不新建、不记', async () => {
+          const first = await store.addRepo(
+            { owner: 'me', name: 'notes', defaultBranch: 'main', testCommand: 'pnpm check' },
+            add,
+          );
+          const again = await store.addRepo(
+            { owner: 'ME', name: 'NOTES', defaultBranch: 'main', testCommand: 'pnpm check' },
+            add,
+          );
+          expect(again.created).toBe(false);
+          expect(again.repo.id).toBe(first.repo.id);
+          expect(
+            (await store.listAudit({ limit: 200 })).items.filter((a) => a.action === 'repo.import.add'),
+          ).toHaveLength(1);
+        });
+
+        it('操作记录写不进：仓也不建', async () => {
+          await expect(
+            store.addRepo(
+              { owner: 'me', name: 'notes', defaultBranch: 'main', testCommand: 'pnpm check' },
+              badAudit(),
+            ),
+          ).rejects.toThrow();
+          expect(await store.findRepoByName('me', 'notes')).toBeNull();
+        });
+
+        it('移出：删掉那一行、记一条；没有这个仓 not_found', async () => {
+          const added = await store.addRepo(
+            { owner: 'me', name: 'notes', defaultBranch: 'main', testCommand: 'pnpm check' },
+            add,
+          );
+          expect(
+            await store.removeRepo(
+              { repoId: added.repo.id },
+              audit({
+                actor: { kind: 'user', id: DEV_USER_ID },
+                action: 'repo.import.remove',
+                target: 'repo:me/notes',
+                via: 'cockpit',
+              }),
+            ),
+          ).toBe('removed');
+          expect(await store.findRepoByName('me', 'notes')).toBeNull();
+          for (const repoId of [OTHER_UUID, 'nope'])
+            expect(await store.removeRepo({ repoId }, badAudit()), repoId).toBe('not_found');
+        });
+
+        it('【故意造出的失败】还挂着没结束的单：不删（has_tasks），那一行还在', async () => {
+          // 样例库里的 canary 挂着 task12（running）
+          expect(await store.removeRepo({ repoId: IDS.repo }, badAudit())).toBe('has_tasks');
+          expect(await store.getRepo(IDS.repo)).not.toBeNull();
+        });
+      });
     });
   });
 }
