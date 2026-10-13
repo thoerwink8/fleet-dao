@@ -10,7 +10,8 @@ import {
 import { IDS } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { type CliDeps, main } from '../src/cli.ts';
-import { createMemoryIntentStore, type IntentStore } from '../src/intent-store.ts';
+import { createMemoryIntentStore, type IntentStore, type MemoryIntentStore } from '../src/intent-store.ts';
+import { seedMemory } from './intent-seed.ts';
 
 const T0 = new Date('2026-10-04T06:00:00.000Z');
 
@@ -60,32 +61,28 @@ function setup(
   return { intents, run, json, opened: () => opened };
 }
 
+/** 网关不再写意图库（F1 #2051），测试直接放进内存版：第 1 段两条原话（甲、乙）。 */
 async function seed(intents: IntentStore) {
-  const base = {
-    chatId: 'oc_team',
-    chatKind: 'group' as const,
-    source: 'event' as const,
-    msgType: 'text',
-    atBot: false,
-    newSegment: false,
-  };
-  await intents.intakeMessage({
-    ...base,
-    messageId: 'om_1',
-    sentAt: '2026-10-04T06:02:00.000Z',
-    text: '我觉得驾驶舱首页太乱了',
-    rawContent: '{"text":"我觉得驾驶舱首页太乱了"}',
-    senderUserId: IDS.founderA,
-    senderName: '甲',
-  });
-  await intents.intakeMessage({
-    ...base,
-    messageId: 'om_2',
-    sentAt: '2026-10-04T06:05:00.000Z',
-    text: '对，要一眼看到要我拍的\n第二行',
-    rawContent: '{"text":"对"}',
-    senderUserId: IDS.founderB,
-    senderName: '乙',
+  await seedMemory(
+    intents as MemoryIntentStore,
+    () => new Date(T0),
+  )({
+    messages: [
+      {
+        messageId: 'om_1',
+        sentAt: '2026-10-04T06:02:00.000Z',
+        text: '我觉得驾驶舱首页太乱了',
+        senderUserId: IDS.founderA,
+        senderName: '甲',
+      },
+      {
+        messageId: 'om_2',
+        sentAt: '2026-10-04T06:05:00.000Z',
+        text: '对，要一眼看到要我拍的\n第二行',
+        senderUserId: IDS.founderB,
+        senderName: '乙',
+      },
+    ],
   });
 }
 
@@ -179,19 +176,13 @@ describe('fleet-api intent：读', () => {
   it('超过 --limit：写明还有没列的（more），不让人把前几段当成全部', async () => {
     const s = setup();
     await seed(s.intents);
-    await s.intents.intakeMessage({
-      messageId: 'om_p',
+    await seedMemory(
+      s.intents as MemoryIntentStore,
+      () => new Date(T0),
+    )({
       chatId: 'oc_p2p_a',
       chatKind: 'p2p',
-      source: 'event',
-      msgType: 'text',
-      atBot: false,
-      newSegment: false,
-      sentAt: '2026-10-04T06:10:00.000Z',
-      text: '私聊里随口一句',
-      rawContent: '{"text":"私聊里随口一句"}',
-      senderUserId: IDS.founderA,
-      senderName: '甲',
+      messages: [{ messageId: 'om_p', sentAt: '2026-10-04T06:10:00.000Z', text: '私聊里随口一句' }],
     });
     const cut = IntentCliListOutput.parse((await s.json('list', '--limit', '1')).body);
     expect(cut.intents.map((i) => i.seq)).toEqual([1]);

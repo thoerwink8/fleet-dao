@@ -98,7 +98,7 @@ gw() {
       return 0
     fi
     if [[ -f "$GWD/flapping" ]]; then echo $(($(cat "$GWD/restarts" 2>/dev/null || echo 0) + 1)) >"$GWD/restarts"; fi
-    printf 'current=%s\nenabled=enabled\nactive=active\npid=42\nrestarts=%s\nrunning=%s\nconnected=%s\nmessages=0\n' \
+    printf 'current=%s\nenabled=enabled\nactive=active\npid=42\nrestarts=%s\nrunning=%s\nconnected=%s\n' \
       "$(cat "$GWD/current" 2>/dev/null)" "$(cat "$GWD/restarts" 2>/dev/null || echo 0)" \
       "$(cat "$GWD/current" 2>/dev/null)" "$GW_CONNECTED"
     printf 'backend=refused\nconfig=%s\n' "$GW_CONFIG"

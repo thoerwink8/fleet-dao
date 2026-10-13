@@ -17,6 +17,7 @@ import {
   issueWorkFacts,
   lastSessionByTree,
   latestAlertByPrefix,
+  listAwaitingMe,
   listManagedRepos,
   listOpenAlerts,
   listOpenTaskRows,
@@ -30,6 +31,7 @@ import {
   recordAlertFiling,
   recordWorktreeCleanupDone,
   recordWorktreeCleanupStart,
+  resolveAlertByKey,
   resolveAlertWithReason,
   saveWorktreeInventory,
   startScheduleRun,
@@ -48,7 +50,9 @@ import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
 import { alertRepoFromText } from '../jobs/alert-sweep.ts';
 import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
+import { pushAwaitingMe } from '../jobs/awaiting-push.ts';
 import { CLOSED_ISSUE_ABANDON_BY } from '../jobs/closed-issue-tasks.ts';
+import { COCKPIT_URL_ENV, cockpitLink } from '../jobs/cockpit-link.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
 import {
@@ -260,6 +264,8 @@ export interface HourlyReconcileWiring {
   autoMergeAlerts?: HourlyReconcileJobDeps['autoMergeAlerts'];
   /** 测试用：换掉「单已关就撤任务」那部分的 Temporal / GitHub 口子；不给就用真的（问 Temporal 在跑的任务工作流、现读单状态）。 */
   closedIssueTasks?: HourlyReconcileJobDeps['closedIssueTasks'];
+  /** 测试用：换掉「等你拍板、引擎问你」的飞书推送；不给就照真的装（读库、经 FLEET_FEISHU_WEBHOOK 推）。 */
+  awaitingPush?: HourlyReconcileJobDeps['awaitingPush'];
 }
 
 /** 发「放弃」信号最多等多久（毫秒）：到点由连接取消调用，不在本地空等。 */
@@ -602,6 +608,7 @@ export function hourlyReconcileJob(
             });
           },
           send: feishuWebhookSender({ env: process.env }),
+          cockpit: (path) => cockpitLink(process.env[COCKPIT_URL_ENV], path),
         }),
       mainRedPush: () =>
         pushMainRed({
@@ -636,7 +643,37 @@ export function hourlyReconcileJob(
             });
           },
           send: feishuWebhookSender({ env: process.env }),
+          cockpit: (path) => cockpitLink(process.env[COCKPIT_URL_ENV], path),
         }),
+      awaitingPush:
+        w.awaitingPush ??
+        (() =>
+          pushAwaitingMe({
+            now,
+            list: async (since) =>
+              (await listAwaitingMe(w.db, { since })).map((x) => ({
+                kind: x.kind,
+                id: x.id,
+                taskId: x.taskId,
+                title: x.title,
+                detail: x.detail,
+              })),
+            sentBody: async (key) => (await alertByKey(w.db, key))?.body ?? null,
+            markSent: async (x) => {
+              // 推过记在提醒表里当去重；立刻标成已处理，不占驾驶舱「提醒」的位置（按键还查得到）
+              await upsertAlert(w.db, {
+                dedupeKey: x.dedupeKey,
+                level: 'daily',
+                taskId: null,
+                title: x.title,
+                body: x.body,
+                link: x.link,
+              });
+              await resolveAlertByKey(w.db, { dedupeKey: x.dedupeKey, by: 'engine:feishu-push', at: now() });
+            },
+            send: feishuWebhookSender({ env: process.env }),
+            cockpit: (path) => cockpitLink(process.env[COCKPIT_URL_ENV], path),
+          })),
       now,
       log,
       ...(w.inspectMax === undefined ? {} : { inspectMax: w.inspectMax }),

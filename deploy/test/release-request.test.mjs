@@ -156,6 +156,7 @@ function fakeIo(over = {}, opts = {}) {
     notify: async (text) => {
       log.pushes.push(text);
     },
+    cockpitLink: (path) => `https://cockpit.example.test${path}`,
     limits: { pollMs: 1000, sessionsMs: 5000, deployMs: 3000, verifyMs: 4000 },
     ...over,
   };
@@ -844,7 +845,7 @@ test('飞书：开始、成功各推一条，一句话里有目标提交、结�
   assert.match(log.pushes[0], /^【发版开始】法国开始发 aaaaaaaaaaaa（创始人 在驾驶舱点的）。不用点什么/);
   assert.match(
     log.pushes[1],
-    /^【发版成功】法国已在用 aaaaaaaaaaaa，发后体检通过，引擎总开关已恢复到发版前。不用点什么。$/,
+    /^【发版成功】法国已在用 aaaaaaaaaaaa，发后体检通过，引擎总开关已恢复到发版前。不用点什么。 驾驶舱：https:\/\/cockpit\.example\.test\/france$/,
   );
   assert.deepEqual(
     log.states.at(-1).pushes.map((p) => [p.kind, p.ok]),
@@ -882,6 +883,23 @@ test('【故意造出的失败】飞书推不出去：照样发版、做完，�
   assert.equal(pushes.length, 2);
   assert.ok(pushes.every((p) => p.ok === false && /没配/.test(p.why)));
   assert.ok(log.err.some((l) => l.includes('飞书没推成')));
+});
+
+test('每条通知都带驾驶舱「法国」页的链接；【故意造出的失败】驾驶舱地址没配：照样发版，进度里记「没推成」，一条都不算推过', async () => {
+  const ok = fakeIo();
+  assert.equal(await runRequest(ok.io), EXIT.done);
+  assert.ok(ok.log.pushes.length >= 2);
+  assert.ok(ok.log.pushes.every((t) => t.endsWith('驾驶舱：https://cockpit.example.test/france')));
+
+  const bad = fakeIo({
+    cockpitLink: () => {
+      throw new Error('驾驶舱地址没配：引擎环境文件里没有 FLEET_PUBLIC_URL，这条通知推不出去');
+    },
+  });
+  assert.equal(await runRequest(bad.io), EXIT.done);
+  assert.deepEqual(bad.log.pushes, []);
+  const pushes = bad.log.states.at(-1).pushes;
+  assert.ok(pushes.length >= 2 && pushes.every((p) => p.ok === false && /驾驶舱地址没配/.test(p.why)));
 });
 
 test('parseAlerts / parseHealthz / parseRepoSwitches：认不出的一律回读不到，不当成没事', () => {

@@ -6,7 +6,8 @@ import { IDS } from '@fleet-dao/store';
 import { asc, eq, like, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPgIntentStore } from '../src/intent-store-pg.ts';
-import { describeIntentStoreContract, said, T0 } from './intent-store-contract.ts';
+import { seedPg } from './intent-seed.ts';
+import { describeIntentStoreContract, T0 } from './intent-store-contract.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -26,6 +27,7 @@ describeIntentStoreContract('Postgres 版', async (clock) => {
   await fresh();
   return {
     store: createPgIntentStore(t.db, { now: () => new Date(clock.now) }),
+    seed: seedPg(t.db, () => new Date(clock.now)),
     async audits() {
       const rows = await t.db
         .select()
@@ -41,7 +43,9 @@ describe('意图存储（Postgres 版）：库里的东西认不出', () => {
   it('【故意造出的失败】links 被改成认不出的样子：读的时候抛、写明哪一段哪一列，不当成没挂单', async () => {
     await fresh();
     const store = createPgIntentStore(t.db, { now: () => new Date(T0) });
-    await store.intakeMessage(said());
+    const seed = () =>
+      seedPg(t.db, () => new Date(T0))({ messages: [{ text: '一句话', sentAt: T0.toISOString() }] });
+    await seed();
     await t.db.execute(sql`alter table intents drop constraint intents_linked_has_links`);
     try {
       await t.db.update(intents).set({ links: sql`'[{"nope":1}]'::jsonb` }).where(eq(intents.seq, 1));
@@ -58,8 +62,11 @@ describe('意图存储（Postgres 版）：库里的东西认不出', () => {
   it('【故意造出的失败】原话的 edits 被改坏：读的时候抛，写明哪条原话', async () => {
     await fresh();
     const store = createPgIntentStore(t.db, { now: () => new Date(T0) });
-    const m = said();
-    await store.intakeMessage(m);
+    const seed = () =>
+      seedPg(t.db, () => new Date(T0))({ messages: [{ text: '一句话', sentAt: T0.toISOString() }] });
+    await seed();
+    const [m] = await t.db.select({ messageId: intentMessages.messageId }).from(intentMessages);
+    if (!m) throw new Error('没放进去');
     await t.db
       .update(intentMessages)
       .set({ edits: sql`'["不是一版"]'::jsonb`, editedAt: T0 })
@@ -70,7 +77,9 @@ describe('意图存储（Postgres 版）：库里的东西认不出', () => {
   it('【故意造出的失败】写回时操作记录写不进：归纳和开成的单一起不改', async () => {
     await fresh();
     const store = createPgIntentStore(t.db, { now: () => new Date(T0) });
-    await store.intakeMessage(said());
+    const seed = () =>
+      seedPg(t.db, () => new Date(T0))({ messages: [{ text: '一句话', sentAt: T0.toISOString() }] });
+    await seed();
     await expect(
       store.link(
         {
