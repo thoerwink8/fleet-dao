@@ -115,7 +115,7 @@ export const WebRoutes = {
   },
   /** /france 页「发版预检」按钮：起子进程跑 pnpm release:onekey preflight，命令写死、不收参数。 */
   francePreflight: { method: 'POST', path: '/france/preflight', response: FrancePreflightResponseSchema },
-  /** /france 页「命令行工具」：在用版本、官方最新、现算的落后。只读，不升级。 */
+  /** /france 页「命令行工具」（#1969、#1971）：在用版本、官方最新、现算的落后，升过的带上次升级时间和升上去的版本。只读，没有升级按钮。 */
   franceCliTools: { method: 'GET', path: '/france/cli-tools', response: CliToolsResponseSchema },
   /** 设置页「仓库」一节：每个项目的「让 AI 接活」现在开还是关、什么时候开的。 */
   repoDispatch: { method: 'GET', path: '/repos/dispatch', response: RepoDispatchResponse },

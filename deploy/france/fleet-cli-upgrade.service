@@ -1,0 +1,22 @@
+# 空闲时升级命令行工具（#1971）：引擎（fleet，没有 root）把请求写进
+# /var/lib/fleet-dao/cli-upgrade/request.json，fleet-cli-upgrade.path 看见就起这里。
+# 发版窗口不走这个单元，release.sh 在排空之后直接调同一份入口。
+# 以 root 跑：npm 全局装在 /usr，会话用户家里的 grok 也要能换。
+[Unit]
+Description=fleet-dao 升级命令行工具
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+# 目录给引擎用户写请求；结果文件由入口写成 0644，驾驶舱读得了
+ExecStartPre=/usr/bin/install -d -o fleet -g fleet -m 0775 /var/lib/fleet-dao/cli-upgrade
+ExecStart=/usr/bin/node /srv/fleet-dao-releases/current/packages/engine/src/cli-upgrade-main.ts
+# 退出码 1：某个工具没成、已经退回或记下，等人看。状态文件已经写好，不当成单元没跑完。
+# 退出码 2（请求认不出）才显示 failed。
+SuccessExitStatus=1
+# 要比引擎认定「单元没来」的 45 分钟短：到点这里被停，引擎才不会在会话起来之后还等着换二进制。
+TimeoutStartSec=40min
+KillMode=control-group

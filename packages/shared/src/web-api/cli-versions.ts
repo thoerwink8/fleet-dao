@@ -21,6 +21,16 @@ const CliToolStatusSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('unreadable'), reason: z.string().min(1), label: z.literal('没查成') }),
 ]);
 
+/** 这一行最近一轮升级（#1971）。还没升过、或不归升级管，是 null。 */
+export const CliToolUpgradeSchema = z.object({
+  /** 这一版是什么时候升上去的。这轮没换、或还没升过，是 null。 */
+  upgradedAt: Time.nullable(),
+  outcome: z.enum(['ok', 'current', 'skipped', 'failed', 'rolled-back', 'refused']).nullable(),
+  /** 升上去（或退回去）之后核对到的版本。没有是 null。 */
+  version: z.string().nullable(),
+  detail: z.string(),
+});
+
 export const CliToolRowSchema = z.object({
   scope: z.enum(['user', 'npm']),
   owner: z.string(),
@@ -31,6 +41,7 @@ export const CliToolRowSchema = z.object({
   status: CliToolStatusSchema,
   /** 从没读过是 null。 */
   checkedAt: Time.nullable(),
+  upgrade: CliToolUpgradeSchema.nullable(),
 });
 
 export const CliToolsResponseSchema = z.discriminatedUnion('state', [
@@ -44,6 +55,8 @@ export const CliToolsResponseSchema = z.discriminatedUnion('state', [
         rows: z.array(CliToolRowSchema),
       }),
     ),
+    /** 升级结果读不到时的原因。还没升过、或读到了，是 null。版本读数照常在。 */
+    upgradeNote: z.string().nullable(),
     asOf: Time,
   }),
   z.object({ state: z.literal('unreadable'), why: z.string().min(1), asOf: Time }),

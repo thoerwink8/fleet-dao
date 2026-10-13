@@ -155,5 +155,43 @@
         "说明": "香港的 WireGuard 公钥（france.sh 读）：当私有值记指纹"
       }
     }
+  },
+  "cliTools": {
+    "说明": "法国上的命令行工具跟哪个渠道（#1971）。空闲或发版重启窗口里由 root 升。没写 channel 的不升：Cursor、reclaude 有各自的更新路径。Claude Code 跟 npm 的 stable（官方说约晚一周、跳过有大问题的版本）。Codex、Grok 跟 latest 且发布满 3 天（latest+3d）才升。要用刚发的新模型，把那一项的 channel 改成 latest。",
+    "tools": {
+      "claude-code": {
+        "name": "Claude Code",
+        "via": "npm",
+        "package": "@anthropic-ai/claude-code",
+        "bin": "/usr/bin/claude",
+        "prefix": "/usr",
+        "channel": "stable"
+      },
+      "codex": {
+        "name": "Codex",
+        "via": "npm",
+        "package": "@openai/codex",
+        "bin": "/usr/bin/codex",
+        "prefix": "/usr",
+        "channel": "latest+3d"
+      },
+      "grok": {
+        "name": "Grok",
+        "via": "self-update",
+        "bin": "/home/fleet-agent-carpool/.grok/bin/grok",
+        "user": "fleet-agent-carpool",
+        "channel": "latest+3d"
+      },
+      "cursor-agent": {
+        "name": "Cursor",
+        "bin": "/home/fleet-agent-carpool/.local/bin/cursor-agent",
+        "user": "fleet-agent-carpool"
+      },
+      "reclaude": {
+        "name": "reclaude",
+        "bin": "/home/fleet-agent-carpool/.local/bin/reclaude",
+        "user": "fleet-agent-carpool"
+      }
+    }
   }
 }

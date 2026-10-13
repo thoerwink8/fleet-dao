@@ -62,6 +62,7 @@ DRAIN_SLACK=60                   # 再多等这么久才不等了、直接停（
 DRAIN_POLL=10                    # 多久看一次排空进度（秒）
 ENGINE_ENV=/etc/fleet-dao/engine.env
 ENGINE_STATE_DEFAULT=/var/lib/fleet-dao/engine # 引擎写 drain.json 的地方（engine.env 的 FLEET_ENGINE_STATE_DIR，没写取它）
+CLI_UPGRADE_DIR=${FLEET_CLI_UPGRADE_DIR:-/var/lib/fleet-dao/cli-upgrade} # 命令行工具升级的请求和结果（#1971）
 DRAIN_WROTE=0    # 这次写了排空请求、还没撤
 DRAIN_UNTIL=0    # 请求里的截止（秒）
 ENGINE_DRAINS=0  # 在跑的引擎会排空（认了 drain.json）
@@ -1222,6 +1223,8 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
   if has_part web; then sync_web "$sha" || return 1; fi
   if hk_static_ours; then retire_hk_dir || return 1; fi
   if has_part gateway; then deploy_gateway "$sha" || return 1; fi
+  # 升级单元跟着版本走。启用失败不挡这次发版（函数自己记一行，不记红）。
+  install_cli_upgrade_units "$dir"
 }
 
 # 香港的静态文件归发布管（发 web，或老配置里还有已删的那一样、要把它的目录清掉，#1223）：要试通上传的路、要核对老目录没了
@@ -1762,6 +1765,74 @@ prune() {
 # 这次给在跑的会话多少宽限（秒）：--now 不给
 drain_grace() { if ((NOW_MODE)); then echo 0; else echo "$DRAIN_GRACE"; fi; }
 
+# 发版窗口升级命令行工具（#1971）：引擎已经停、会话已经排空，这里换二进制。
+# 没做成不挡这次发版（不记红，避免整次发布因此退出 1）：每个工具自己退回或记下，等人看 state.json。
+# 这一版没有入口（测试桩、比这次更老的提交）就跳过。
+upgrade_cli_tools() { # 提交号
+  local sha=$1
+  local script=$RELEASES/$sha/packages/engine/src/cli-upgrade-main.ts
+  local config=$RELEASES/$sha/deploy/france/desired-config.json
+  if [[ ! -f "$script" ]]; then
+    echo "  · 这一版没有命令行工具升级入口，跳过"
+    return 0
+  fi
+  if [[ "$(systemctl is-active fleet-engine.service 2>/dev/null || true)" == active ]]; then
+    printf '  ✗ 引擎还在跑，这轮不换命令行工具（运行中的会话会从磁盘读可执行文件）\n'
+    return 0
+  fi
+  # 空闲升级可能还在装。先停掉，再删掉它的请求，免得新引擎起来把没对上的请求当成还要排空。
+  if [[ "$(systemctl is-active fleet-cli-upgrade.service 2>/dev/null || true)" == active ]]; then
+    systemctl stop fleet-cli-upgrade.service || printf '  ✗ 停不掉正在跑的命令行工具升级，接着用发版窗口这一路\n'
+  fi
+  if ! install -d -o fleet -g fleet -m 0775 -- "$CLI_UPGRADE_DIR"; then
+    printf '  ✗ 建不了 %s，这轮不升命令行工具（不挡这次发版）\n' "$CLI_UPGRADE_DIR"
+    return 0
+  fi
+  rm -f -- "$CLI_UPGRADE_DIR/request.json" "$CLI_UPGRADE_DIR/wanted.json" || printf '  ✗ 清不掉上一轮的升级请求，接着升\n'
+  step "升级命令行工具（发版窗口）"
+  if "$NODE" "$script" --release-window --config "$config" --dir "$CLI_UPGRADE_DIR"; then
+    ok "命令行工具这一轮核对完"
+  else
+    printf '  ✗ 命令行工具升级没全部成（已按工具退回或记下，不挡这次发版）。看 %s/state.json\n' "$CLI_UPGRADE_DIR"
+  fi
+  return 0
+}
+
+# 命令行工具升级的单元跟着版本走。这一版带了就装上、启用 path；没带就撤掉。
+# 启用失败只打印，不记红，不让一次发版因为 path 单元退回。
+install_cli_upgrade_units() { # 这一版的目录
+  local dir=$1
+  local svc=fleet-cli-upgrade.service
+  local pathu=fleet-cli-upgrade.path
+  if [[ ! -f "$dir/deploy/france/$svc" || ! -f "$dir/deploy/france/$pathu" ]]; then
+    if [[ -e "$FLEET_SYSTEMD_DIR/$svc" || -e "$FLEET_SYSTEMD_DIR/$pathu" ]]; then
+      systemctl disable --now --quiet "$pathu" 2>/dev/null || true
+      rm -f -- "$FLEET_SYSTEMD_DIR/$svc" "$FLEET_SYSTEMD_DIR/$pathu" || printf '  ✗ 撤不掉命令行工具升级单元\n'
+      systemctl daemon-reload || printf '  ✗ 撤掉命令行工具升级单元之后 daemon-reload 失败\n'
+      changed "这一版没有命令行工具升级单元，已撤掉"
+    fi
+    return 0
+  fi
+  put_file "$FLEET_SYSTEMD_DIR/$svc" root:root 644 "$(<"$dir/deploy/france/$svc")" || {
+    printf '  ✗ 写不了 %s（不挡这次发版）\n' "$svc"
+    return 0
+  }
+  local wrote_svc=$WROTE
+  put_file "$FLEET_SYSTEMD_DIR/$pathu" root:root 644 "$(<"$dir/deploy/france/$pathu")" || {
+    printf '  ✗ 写不了 %s（不挡这次发版）\n' "$pathu"
+    return 0
+  }
+  if ((wrote_svc || WROTE)); then
+    systemctl daemon-reload || printf '  ✗ 命令行工具升级单元 daemon-reload 失败（不挡这次发版）\n'
+  fi
+  if systemctl enable --now --quiet "$pathu"; then
+    ok "fleet-cli-upgrade.path 在盯升级请求"
+  else
+    printf '  ✗ 启用 fleet-cli-upgrade.path 失败（不挡这次发版）\n'
+  fi
+  return 0
+}
+
 # ── 三种用法 ──
 
 do_release() { # 要发的提交（空 = 主线最新）
@@ -1777,6 +1848,7 @@ do_release() { # 要发的提交（空 = 主线最新）
   schema_allows "$SHA" 切到 || return 1
   # 迁移之前停引擎：排空的这几分钟里旧引擎还在跑，不能让它对着新的库结构
   drain_engine || return 1
+  upgrade_cli_tools "$SHA"
   migrate "$SHA"
   load_catalog "$SHA" || return 1
   load_routing "$SHA" || return 1

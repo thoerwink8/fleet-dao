@@ -3149,6 +3149,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         latest,
         status,
         checkedAt: ago,
+        upgrade: null,
       });
       const userRows = (behindCodex: boolean) => [
         row('claude', 'Claude Code', cell('2.1.282'), cell('2.1.296'), {
@@ -3194,6 +3195,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         rows.map((item) => ({ ...item, scope: 'user' as const, owner }));
       return CliToolsResponseSchema.parse({
         state: 'ok',
+        upgradeNote: null,
         asOf: iso(),
         groups: [
           {

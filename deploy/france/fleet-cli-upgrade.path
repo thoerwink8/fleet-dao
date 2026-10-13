@@ -1,0 +1,11 @@
+# 引擎写下升级请求就接活。入口读完马上删掉请求文件，所以不会因为文件还在重复起。
+# 跟着版本走：release.sh 切版本时装上、启用；退回到没有这两份单元的版本就撤掉。
+[Unit]
+Description=fleet-dao 命令行工具的升级请求一到就接活
+
+[Path]
+PathExists=/var/lib/fleet-dao/cli-upgrade/request.json
+Unit=fleet-cli-upgrade.service
+
+[Install]
+WantedBy=multi-user.target

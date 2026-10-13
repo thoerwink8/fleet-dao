@@ -273,6 +273,7 @@ export type UpdateSettingBody = z.input<typeof UpdateSettingRequest>;
 
 /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
 export type FranceReleaseState = z.infer<typeof FranceReleaseStateSchema>;
+/** /france 页「命令行工具」（#1969、#1971）：在用版本、官方最新、落后，以及上次升级时间和升上去的版本。 */
 export type CliToolsResponse = z.infer<typeof CliToolsResponseSchema>;
 /** /france 页「发版」卡（#1231）：四行各自带「查成了 / 没查成 + 原因」。 */
 export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;
