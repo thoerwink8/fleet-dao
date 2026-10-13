@@ -6,7 +6,7 @@
 // 探针历史读不到（写没查成、不画格子）、运行中失败的渠道顺到谁没有。
 import { type ProbeHistoryCell, probeHistoryStrips } from '@fleet-dao/shared';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ApiError } from '../api/client';
 import { createMockApi } from '../api/mock/server';
 import type { Channel, ChannelState, Route, RouteProbeHistory, RouteProbeStatus } from '../api/types';
@@ -14,7 +14,16 @@ import { failoverOf } from '../lib/provider-status';
 import RoutingStatus from '../routes/routing-status';
 import { renderApp } from '../test/harness';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+/** 只把 Date 钉在本地今天的某个钟点（setTimeout 等不假，React / testing-library 的等待照常走）。 */
+const pinClock = (hour: number, minute: number) => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(2026, 9, 13, hour, minute, 0, 0));
+};
 
 const channel = (id: string, name: string, enabled = true): Channel => ({
   id,
@@ -186,25 +195,37 @@ describe('渠道状态页：渠道卡', () => {
     expect(screen.getByText(/绿灯只表示本节点最近一轮抽测通过/)).toBeTruthy();
   });
 
-  test('退避中：路由行写连着不通几次和下次几点，读的是 probeFailStreak、probeNextAt，不带截断，也不标检测中断', async () => {
+  /** 退避中的 cursor 路由：连不通 6 次，下次探测在「钉住的现在」之后 afterMin 分钟；返回「下次探测」那一行。 */
+  const backoffNotice = async (afterMin: number) => {
     const api = createMockApi({ live: false });
     const cursor = api.state().routes.find((r) => r.id === 'r-cursor');
     if (!cursor?.probe) throw new Error('假数据没有 cursor 路由');
     cursor.probeFailStreak = 6;
-    cursor.probeNextAt = new Date(Date.now() + 100 * 60_000).toISOString();
+    cursor.probeNextAt = new Date(Date.now() + afterMin * 60_000).toISOString();
     // 原文里写的退避不再有人读：故意写一个对不上的
     cursor.probe = { ...cursor.probe, detail: '连探两次都没通。退避中，下次约 03:00 再探（连着不通 2 次）' };
     renderApp(<RoutingStatus />, { api, route: '/routing/status' });
     await screen.findByRole('list', { name: '渠道状态' });
     fireEvent.click(within(card('ch-cursor')).getByRole('button'));
-    const notice = await waitFor(() => {
+    return waitFor(() => {
       const el = routeRow('r-cursor').querySelector('[data-probe-next]');
       if (!(el instanceof HTMLElement)) throw new Error('还没有下次探测那一行');
       return el;
     });
-    // 下次是 100 分钟后：跑在 22:20 以后就跨到第二天，页面照实写「明天 00:01」（CI 在 UTC 22 点后跑会撞上）
-    expect(notice.textContent).toMatch(/^退避中，连着不通 6 次，下次约 (明天 )?\d{2}:\d{2}$/);
+  };
+
+  test('退避中：路由行写连着不通几次和下次几点，读的是 probeFailStreak、probeNextAt，不带截断，也不标检测中断', async () => {
+    pinClock(10, 0); // 白天 10:00，100 分钟后还是当天，不随 CI 几点跑变
+    const notice = await backoffNotice(100);
+    expect(notice.textContent).toMatch(/^退避中，连着不通 6 次，下次约 \d{2}:\d{2}$/);
     expect(notice.className).not.toContain('truncate');
+    expect(routeRow('r-cursor').getAttribute('data-kind')).toBe('fault');
+  });
+
+  test('退避中的下次探测跨过零点：钉在 23:50，下次 00:04，页面写「下次约 明天 00:04」', async () => {
+    pinClock(23, 50);
+    const notice = await backoffNotice(14);
+    expect(notice.textContent).toBe('退避中，连着不通 6 次，下次约 明天 00:04');
     expect(routeRow('r-cursor').getAttribute('data-kind')).toBe('fault');
   });
 
@@ -243,6 +264,7 @@ describe('渠道状态页：渠道卡', () => {
   });
 
   test('路由行按新列显示：上次（时刻、种类、触发者）、下次（时刻、档），活跃 / 不活跃 / 不在用各一句', async () => {
+    pinClock(10, 0); // 活跃的下次是 55 分钟后：不钉的话 23:05 以后跑就变「明天」
     renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-relay' });
     await openQuiet();
     await waitFor(() => routeRow('r-rl-opus'));
