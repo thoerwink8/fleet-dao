@@ -14,7 +14,7 @@
 // 清单读不到、单没查成、gh 没跑成、输出认不出、改了哪些文件没查成、自动合并没挂成（PR 可能已经开了，照实写明开了哪个、卡在哪一步）。
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { type Gh, judgePaths, listOf, loadPathLists, prFiles, reasonOf } from './pr-arm.ts';
 import { issueColumnRefs, withIssueColumn } from './pr-columns.ts';
@@ -33,7 +33,7 @@ export function parseCreatedPr(stdout: string): { pr: number; url: string } {
 }
 
 export const PR_OPEN_USAGE = `用法：pnpm pr:open --title <标题> [--body-file <正文文件> | 生成正文的参数] [--draft] [--base <分支>] [--no-automerge]
-  在要开 PR 的分支上跑（先 git push）。开 PR，没碰改标准路径就当场挂自动合并（squash）。
+  在要开 PR 的分支上跑（命令会先 git push 当前分支，已推过则无事发生）。开 PR，没碰改标准路径就当场挂自动合并（squash）。
   正文有两种来源：
   ① --body-file <正文文件>：自己写（只有「做了什么」「需求」两栏，见 .github/pull_request_template.md）
   ② 不给 --body-file：命令自己生成。「做了什么」取这条分支相对 origin/<base> 的提交说明（多条列成短列表）；「需求」栏写：
@@ -43,14 +43,26 @@ export const PR_OPEN_USAGE = `用法：pnpm pr:open --title <标题> [--body-fil
                           开出的单一律贴「本机做」，引擎不拉。--local 仍可加，加了不报错
      --no-issue "<理由>"  确实没有单：理由原样写进「需求」栏（「无：<理由>」）
      --founder-quote "<原话>" --at "<时间>"  改标准、创始人已经同意：在「需求」栏下面写「人闸：改标准」、再写一段「创始人原话」，
-                          并挂自动合并（等价于 --founder-approved 加手写那一段）
+                          并挂自动合并（等价于 --founder-approved 加手写那一段）；也能配 --body-file，这两段追加到正文末尾
   需求栏要能读到 Closes #号 / Refs #号：读不到、单不存在就不开；挂了单的 PR 顺手挂上那张单的里程碑。
   --no-issue 在 --body-file 下也能用；需求栏已经挂了单就不能再带
   --founder-approved  改标准、创始人已经同意（自己写正文时用）：正文里要有一段贴着他的原话和时间（含「原话」二字）
   --no-automerge      只开 PR、不挂自动合并`;
 
+/**
+ * gh / git 在哪个目录跑：敲命令的目录（INIT_CWD）在脚本所在仓里就用它，否则（pnpm --dir 从别的目录调用，
+ * INIT_CWD 指到仓外，gh 会报 not a git repository）以脚本所在仓根为准。
+ */
+export function pickGitCwd(initCwd: string | undefined, root: string): string {
+  if (!initCwd) return root;
+  const rel = relative(resolve(root), resolve(initCwd));
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)) ? initCwd : root;
+}
+
 export interface OpenDeps {
   gh: Gh;
+  /** 跑 git（在要开 PR 的仓里）：开 PR 之前先推当前分支。 */
+  git: Gh;
   /** 仓根：读两份路径清单。 */
   root: string;
   /** 正文文件的相对路径从这里算。 */
@@ -225,6 +237,13 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
       return 1;
     }
     if (n === issueNumbers[0]) milestone = info.milestone;
+  }
+
+  // gh pr create 要远端有这条分支：先推（已推过则幂等）。推不成就不开，免得 gh 报一句看不懂的「must first push」
+  const pushed = deps.git(['push', '--set-upstream', 'origin', 'HEAD']);
+  if (pushed.code !== 0) {
+    err(`git push 当前分支没成（${reasonOf(pushed)}）：没开 PR。查明原因（权限、网络、远端拒绝）后重跑。`);
+    return 2;
   }
 
   const created = gh([

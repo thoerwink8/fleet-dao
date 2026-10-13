@@ -7,12 +7,13 @@
 //   这张单一律贴「本机做」（--local 加了不报错，也不多贴一次）：随 PR 开出的单已经有人在做，不靠人记得加 --local（#1199）。
 // - 改标准：--founder-quote "<原话>" --at "<时间>" 在「需求」栏下面另起一行写「人闸：改标准」、再写一段「创始人原话」，并等价于
 //   --founder-approved（旧的 --founder-approved 加手写段落照旧能用）。
-// 给了 --body-file 就一字不动交给 prOpen（原有用法照旧）；生成用的参数和 --body-file 不能混着用。
+// 给了 --body-file 就一字不动交给 prOpen（原有用法照旧）；生成用的参数和 --body-file 不能混着用，只有 --founder-quote 加 --at 例外：
+// 它们把「人闸：改标准」和「创始人原话」追加到自己写的正文末尾。
 // 退出码同 prOpen：0 开成了；1 用法不对、没单或单有问题（什么也没做，--new-issue 的单在 PR 之前开，PR 没开不回滚单，照报）；
 // 2 没做成（提交说明读不到、路径清单读不到、gh 没跑成……）。
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { type Gh as IssueGh, issueNew } from './issue-new.ts';
 import { type Gh, loadPathLists } from './pr-arm.ts';
@@ -141,26 +142,68 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
   const closesRaw = strs(values.closes);
   const refsRaw = strs(values.refs);
   const newIssue = typeof values['new-issue'] === 'string' ? values['new-issue'].trim() : undefined;
-  const generating =
-    closesRaw.length > 0 ||
-    refsRaw.length > 0 ||
-    values['new-issue'] !== undefined ||
-    values.kind !== undefined ||
-    values.milestone !== undefined ||
-    values.local !== undefined ||
-    values['founder-quote'] !== undefined ||
-    values.at !== undefined;
 
   // 给了 --body-file：原有用法，一字不动交给 prOpen
   if (typeof values['body-file'] === 'string') {
-    if (generating) {
+    const generatingBody =
+      closesRaw.length > 0 ||
+      refsRaw.length > 0 ||
+      values['new-issue'] !== undefined ||
+      values.kind !== undefined ||
+      values.milestone !== undefined ||
+      values.local !== undefined;
+    if (generatingBody) {
       err(
-        '--closes / --refs / --new-issue / --kind / --milestone / --local / --founder-quote / --at 是让命令生成正文用的，' +
+        '--closes / --refs / --new-issue / --kind / --milestone / --local 是让命令生成正文用的，' +
           '不能和 --body-file 一起用：要么去掉 --body-file 让它生成，要么把这些写进你自己的正文。什么也没做。',
       );
       return 1;
     }
-    return prOpen(argv, deps);
+    const q = typeof values['founder-quote'] === 'string' ? values['founder-quote'].trim() : undefined;
+    const t = typeof values.at === 'string' ? values.at.trim() : undefined;
+    if (values['founder-quote'] === undefined && values.at === undefined) return prOpen(argv, deps);
+    if (!q || !t) {
+      err(
+        '--founder-quote "<原话>" 和 --at "<时间>" 要一起给、都不能是空的（正文里要写明创始人哪天哪时说的）：什么也没做。',
+      );
+      return 1;
+    }
+    // 自己写的正文：人闸一行和原话追加到末尾，再交给 prOpen（等价于 --founder-approved）
+    const srcPath = isAbsolute(values['body-file'])
+      ? values['body-file']
+      : resolve(deps.cwd, values['body-file']);
+    let src: string;
+    try {
+      src = readFileSync(srcPath, 'utf8');
+    } catch (e) {
+      err(`正文文件读不到（${srcPath}）：${e instanceof Error ? e.message : String(e)}`);
+      return 1;
+    }
+    const tmp = mkdtempSync(join(tmpdir(), 'pr-open-fq-'));
+    try {
+      const merged = join(tmp, 'body.md');
+      const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
+      writeFileSync(
+        merged,
+        `${src.replace(/\r\n?/g, '\n').trimEnd()}\n\n${GATE_LINE}\n\n**创始人原话**：「${oneLine(q)}」（${oneLine(t)}）\n`,
+      );
+      return prOpen(
+        [
+          '--title',
+          typeof values.title === 'string' ? values.title : '',
+          '--body-file',
+          merged,
+          '--founder-approved',
+          ...(values.draft === true ? ['--draft'] : []),
+          ...(typeof values.base === 'string' ? ['--base', values.base] : []),
+          ...(values['no-automerge'] === true ? ['--no-automerge'] : []),
+          ...(typeof values['no-issue'] === 'string' ? ['--no-issue', values['no-issue']] : []),
+        ],
+        deps,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   }
 
   const title = typeof values.title === 'string' ? values.title.trim() : '';
