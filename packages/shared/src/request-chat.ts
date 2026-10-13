@@ -98,7 +98,12 @@ export function judgeCommanderTurn(input: {
     why: pausedWhy(why),
   });
   if (input.busy) return refuse('busy', '它还在回上一句，等它说完再叫');
-  if (!input.engine.on) return refuse('engine_off', `引擎关着（${input.engine.why}）`);
+  if (!input.engine.on) {
+    return refuse(
+      'engine_off',
+      `引擎总开关关着（${input.engine.why}），起不了指挥官：主页打开总开关后再发一句`,
+    );
+  }
   if (!input.modelsConfigured) {
     return refuse('no_model', '「提需求」用途（intake-chat）没配模型：请创始人在路由页给它配上');
   }

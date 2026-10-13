@@ -96,7 +96,9 @@ describe('限额：每人同时 3 条在聊、每条 40 轮，超了回「指挥
 
   it('引擎关着（额度熔断）、用途没配模型、还在回上一句：各写各的原因', () => {
     const off = judgeCommanderTurn({ ...base, engine: { on: false, why: '额度熔断' } });
-    expect(!off.ok && off.why).toBe('指挥官暂停了：引擎关着（额度熔断）');
+    expect(!off.ok && off.why).toBe(
+      '指挥官暂停了：引擎总开关关着（额度熔断），起不了指挥官：主页打开总开关后再发一句',
+    );
     const none = judgeCommanderTurn({ ...base, modelsConfigured: false });
     expect(!none.ok && none.why).toContain('intake-chat');
     const busy = judgeCommanderTurn({ ...base, busy: true });

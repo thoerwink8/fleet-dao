@@ -20,7 +20,6 @@ import {
 } from '@fleet-dao/db';
 import {
   commanderShouldReply,
-  describeEngineMaster,
   engineMasterOf,
   INTAKE_CHAT_LIMITS,
   INTAKE_CHAT_PURPOSE,
@@ -161,7 +160,17 @@ export function pgRequestChat(
   async function engineState(tx: Db): Promise<{ on: true } | { on: false; why: string }> {
     try {
       const state = engineMasterOf(await readEngineMasterRow(tx));
-      return state.on ? { on: true } : { on: false, why: describeEngineMaster(state) };
+      if (state.on) return { on: true };
+      // 括号里只写为什么关着（给提需求的人看），不抄总开关那一整句（「不拉单、不派活……」是给运维看的）
+      const why =
+        state.why === 'never_set'
+          ? '从没打开过，默认关'
+          : state.why === 'unreadable'
+            ? '设置认不出，按关算'
+            : state.at !== undefined
+              ? `北京时间 ${new Date(Date.parse(state.at) + 8 * 3_600_000).toISOString().slice(5, 16).replace('T', ' ')} 关上的`
+              : '有人关上了';
+      return { on: false, why };
     } catch (err) {
       return { on: false, why: `引擎总开关没查成：${errMessage(err)}` };
     }

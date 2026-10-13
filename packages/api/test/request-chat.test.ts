@@ -174,7 +174,9 @@ describe('限额、引擎关着：回「指挥官暂停了：原因」，人话�
     const { h, b } = await setup({ engineOn: false });
     const d = await json(await create(h, b));
     expect(d.messages.map((m) => m.kind)).toEqual(['human', 'system']);
-    expect(d.messages[1]?.body).toMatch(/^指挥官暂停了：引擎关着/);
+    expect(d.messages[1]?.body).toMatch(
+      /^指挥官暂停了：引擎总开关关着（北京时间 \d\d-\d\d \d\d:\d\d 关上的），起不了指挥官/,
+    );
   });
 
   it('【故意造出的失败】「提需求」用途一个模型都没配：不排，原因写没配；详情的可选模型写原因不冒充空', async () => {
