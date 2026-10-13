@@ -1,5 +1,10 @@
 // Store 契约：别的环境推来的快照（node_reports，看板多机）。内存版和 Postgres 版过同一套（store.memory.test.ts / store.pg.test.ts 调）。
-import { type NodeReport, nodeFreshness } from '@fleet-dao/shared';
+import {
+  type LocalSessionsReport,
+  type NodeReport,
+  nodeFreshness,
+  type WorktreeInventory,
+} from '@fleet-dao/shared';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { devFixtures } from '../src/dev-fixtures.ts';
 import type { MemoryData } from '../src/memory-store.ts';
@@ -179,6 +184,81 @@ export function describeNodeStoreContract(name: string, make: MakeStore): void {
       await expect(store.getNodeReport('future')).rejects.toThrow(/第 2 版/);
       await expect(store.getNodeReport('broken')).rejects.toBeInstanceOf(InvalidNodeReportError);
       expect((await store.listNodeReports()).map((r) => r.nodeId)).toEqual(['broken', 'future']);
+    });
+
+    // —— 本机会话（#1991）——
+    const sessions = (over: Partial<LocalSessionsReport> = {}): LocalSessionsReport => ({
+      schemaVersion: 1,
+      reportedAt: at(0),
+      machine: '创始人的电脑',
+      sessions: [
+        {
+          id: 's-1',
+          repo: 'thoerwink8/fleet-dao',
+          branch: 'main',
+          worktree: null,
+          subagent: false,
+          startedAt: at(-30 * MIN),
+          lastSeenAt: at(-MIN),
+          last: 'tool',
+          lastTool: 'Bash',
+        },
+      ],
+      problems: [],
+      ...over,
+    });
+
+    it('本机会话：没收到过是空；收下后读得回，再推整行覆盖，收到的时刻用 Store 的钟', async () => {
+      expect(await store.listNodeSessions()).toEqual([]);
+      const first = await store.putNodeSessions({ nodeId: 'founder-pc', report: sessions() });
+      expect(first.receivedAt).toBe(T0.toISOString());
+      clock.now = new Date(T0.getTime() + 2 * MIN);
+      await store.putNodeSessions({ nodeId: 'founder-pc', report: sessions({ sessions: [] }) });
+      const got = await store.listNodeSessions();
+      expect(got).toHaveLength(1);
+      expect(got[0]).toMatchObject({
+        nodeId: 'founder-pc',
+        receivedAt: at(2 * MIN),
+        report: { sessions: [] },
+      });
+    });
+
+    it('【故意造出的失败】本机会话多带了内容（提示词）、环境编号认不出：拒收，什么都不写', async () => {
+      const leaky = sessions();
+      (leaky.sessions[0] as Record<string, unknown>).prompt = '帮我改登录页';
+      await expect(store.putNodeSessions({ nodeId: 'founder-pc', report: leaky })).rejects.toBeInstanceOf(
+        InvalidNodeReportError,
+      );
+      await expect(store.putNodeSessions({ nodeId: 'Bad Id', report: sessions() })).rejects.toBeInstanceOf(
+        InvalidNodeReportError,
+      );
+      expect(await store.listNodeSessions()).toEqual([]);
+    });
+
+    it('【故意造出的失败】库里存着认不出的本机会话：读的时候抛错，不当成没有', async () => {
+      await fresh({
+        ...devFixtures(T0),
+        nodeSessions: [{ nodeId: 'founder-pc', receivedAt: at(0), report: { sessions: 'x' } }],
+      });
+      await expect(store.listNodeSessions()).rejects.toBeInstanceOf(InvalidNodeReportError);
+    });
+
+    // —— 工作树清单（#1993）——
+    it('工作树清单：没存过是 null；存着的读得回；坏的抛错，不当成没有树', async () => {
+      expect(await store.getWorktreeInventory()).toBeNull();
+      const inv: WorktreeInventory = {
+        takenAt: at(0),
+        trigger: 'hourly',
+        root: '/var/lib/fleet-work',
+        trees: [],
+        removed: ['acme_web/16-e'],
+        repos: [{ repo: 'acme/web', mirror: { state: 'ok', bytes: 1024 } }],
+        unchecked: [],
+      };
+      await fresh({ ...devFixtures(T0), worktreeInventory: inv });
+      expect(await store.getWorktreeInventory()).toEqual(inv);
+      await fresh({ ...devFixtures(T0), worktreeInventory: { trees: 1 } });
+      await expect(store.getWorktreeInventory()).rejects.toThrow(/认不出/);
     });
   });
 }

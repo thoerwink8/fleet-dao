@@ -77,12 +77,15 @@ function makeWorld() {
     w.calls.push(line);
     if (command === 'gh') {
       if (args[0] === 'api' && args[1]?.includes('check-runs'))
+        // 新读法：check_name=check 过滤、jq 之后的一页 {total, runs}
         return ok(
-          JSON.stringify(
-            w.ci === 'pending'
-              ? [{ status: 'in_progress', conclusion: null }]
-              : [{ status: 'completed', conclusion: w.ci }],
-          ),
+          JSON.stringify({
+            total: 1,
+            runs:
+              w.ci === 'pending'
+                ? [{ status: 'in_progress', conclusion: null }]
+                : [{ status: 'completed', conclusion: w.ci }],
+          }),
         );
       if (args[0] === 'pr' && args[1] === 'list') return ok(JSON.stringify(w.prs));
     }

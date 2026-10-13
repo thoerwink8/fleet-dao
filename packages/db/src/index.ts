@@ -37,6 +37,7 @@ export * from './queries/subtasks.ts';
 export * from './queries/task-list.ts';
 export * from './queries/task-route-pins.ts';
 export * from './queries/verify.ts';
+export * from './queries/worktree-inventory.ts';
 export * from './queries/worktrees.ts';
 export * from './quota-reserve-apply.ts';
 export * from './routing-apply.ts';

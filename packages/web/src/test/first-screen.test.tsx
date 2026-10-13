@@ -103,11 +103,12 @@ describe('首屏：读取和确认登录一起发，一轮发完', () => {
     expect(w.called('routingLayers')).toBe(false);
   });
 
-  test('顶栏的环境切换器不再为「切换仓」的计数去拉每个仓的看板：主页打开后一个看板都不读', async () => {
+  test('顶栏的切换项目下拉：关着的时候不为计数去拉每个仓的看板，主页打开后一个看板都不读', async () => {
     const w = waved();
     await open(w.api, '/');
     await w.release();
     await w.release();
+    // 计数在 RepoList 里，它只在下拉内容挂载时才拉；下拉关着就不拉（#1998）
     for (const r of REPOS) expect(w.called('board:' + r)).toBe(false);
   });
 

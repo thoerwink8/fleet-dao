@@ -300,6 +300,13 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     env: () => send('GET', apiUrl(R.env.path), R.env.response),
     nodes: () => send('GET', apiUrl(R.nodes.path), R.nodes.response),
     node: (nodeId) => send('GET', apiUrl(R.node.path, { nodeId }), R.node.response),
+    localSessions: () => send('GET', apiUrl(R.localSessions.path), R.localSessions.response),
+    worktrees: () => send('GET', apiUrl(R.worktrees.path), R.worktrees.response),
+    async worktreeCleanup(body) {
+      return send('POST', apiUrl(R.worktreeCleanup.path), R.worktreeCleanup.response, {
+        body: R.worktreeCleanup.request.parse(body),
+      });
+    },
     board: (repoId) => send('GET', apiUrl(R.board.path, { repoId }), R.board.response),
     tasks: (query) =>
       send(

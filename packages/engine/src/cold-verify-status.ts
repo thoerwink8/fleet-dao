@@ -88,6 +88,52 @@ export function coldVerifyWaiting(why: string): ColdVerifyStatus {
   return { state: 'pending', description: fit(`验收在等：${why}`) };
 }
 
+/** 两条状态是不是同一条（state 和 description 都一样；GitHub 同一 context 同一头只留最新一条，再写一遍只会白触发合并闸）。 */
+export function sameStatus(a: ColdVerifyStatus, b: ColdVerifyStatus): boolean {
+  return a.state === b.state && a.description === b.description;
+}
+
+/** 某个 PR 上最后一条贴成功的 cold-verify 状态（带它贴在哪个头上）。 */
+export interface ColdVerifyStatusMemo {
+  get(head: string): ColdVerifyStatus | undefined;
+  set(head: string, status: ColdVerifyStatus): void;
+}
+
+/** 记忆最多记多少个 PR（防泄漏）；满了丢最早记的那个。 */
+export const STATUS_MEMO_MAX_PRS = 500;
+
+/**
+ * 「每个 PR 最后贴了什么」的内存记忆（#2007）：没路由时验收每圈重来，不记就会每圈改写同一条状态、每次都触发一轮合并闸。
+ * 每个 PR 只记一条（头变了旧的就被换掉）；PR 关了、合了调 forget。只在内存里：引擎重启丢了无所谓，最多多写一次。
+ */
+export function createStatusMemo(max: number = STATUS_MEMO_MAX_PRS) {
+  const byPr = new Map<string, { head: string; status: ColdVerifyStatus }>();
+  return {
+    /** 这个 PR（key 由调用方给，要带仓）的那一份记忆。 */
+    scoped(prKey: string): ColdVerifyStatusMemo {
+      return {
+        get: (head) => {
+          const hit = byPr.get(prKey);
+          return hit !== undefined && hit.head === head ? hit.status : undefined;
+        },
+        set: (head, status) => {
+          byPr.delete(prKey);
+          byPr.set(prKey, { head, status });
+          while (byPr.size > max) {
+            const oldest = byPr.keys().next();
+            if (oldest.done) break;
+            byPr.delete(oldest.value);
+          }
+        },
+      };
+    },
+    forget(prKey: string): void {
+      byPr.delete(prKey);
+    },
+    size: () => byPr.size,
+  };
+}
+
 /** 到轮数上限了还不过：不再起第 2/3 轮，交人看。 */
 export function coldVerifyExhausted(round: number): ColdVerifyStatus {
   return {

@@ -136,10 +136,11 @@ import {
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import { ApiError, type FleetApi } from '../client';
-import type { AuditEntry, LiveEvent } from '../types';
+import type { AuditEntry, LiveEvent, Worktrees } from '../types';
 import type { MLog, MockState, MSubtask, MTask } from './model';
 import { createSeed, fakeAction, fakeUsage } from './seed';
 import { LIVE_FIRST_REVEAL, LIVE_REVEAL_STEP, transcriptSeed } from './transcripts';
+import { cleanupResultOf, mockLocalSessions, mockWorktrees, seedCleanups } from './worktrees';
 
 export interface MockOptions {
   /** 是否开模拟器；测试里关掉，手动调 tick()。 */
@@ -347,6 +348,11 @@ export function mockResources(runIds: readonly string[], at: Date): HomeResource
   });
   // 一个对不上单的会话（路由探针这类）：资源页把它归到「别的会话」
   byRun['probe-route-7f3a'] = { state: 'ok', memoryMb: 186, memoryPeakMb: 240, cpuPercent: 3.1 };
+  // 法国真机上见过的（#1992）：会话收场了、scope 没回收，memory.current 是 0——不算在跑，页面写「空 scope」
+  byRun['mirasim-liveness-01'] = {
+    state: 'empty',
+    why: '/sys/fs/cgroup/fleet.slice/fleet-agents.slice/fleet-agent-mirasim-liveness-01.scope 还在，但 memory.current 是 0：里面没有进程（会话已收场、scope 没回收），不算在跑',
+  };
   const sessionsMb = Object.values(byRun).reduce((n, u) => n + (u.state === 'ok' ? u.memoryMb : 0), 0);
   const sessionsCpu = Object.values(byRun).reduce(
     (n, u) => n + (u.state === 'ok' && u.cpuPercent !== undefined ? u.cpuPercent : 0),
@@ -984,6 +990,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
    * 没有排队或在做的：按钮能点。点了以后插到最前。
    */
   const agoIso = (minutesAgo: number) => new Date(now() - minutesAgo * 60_000).toISOString();
+  /** 一键清理工作树的记录（新的在前），见 mock/worktrees.ts。 */
+  let mockCleanups: Worktrees['cleanups'] = seedCleanups(now());
   let mockGroom: GroomRequestView[] = [
     {
       requestId: 'groom-seed-ok',
@@ -2476,6 +2484,45 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         },
         nodes: remote,
       });
+    },
+    async localSessions() {
+      await wait();
+      return mockLocalSessions(now());
+    },
+    async worktrees() {
+      await wait();
+      // 排队几秒后假装引擎接手、再过几秒做完（照真引擎：判据同一份，在用、有改动的一律拒）
+      const t = now();
+      mockCleanups = mockCleanups.map((c) => {
+        const age = t - Date.parse(c.requestedAt);
+        if (c.status === 'queued' && age > 2_000)
+          return { ...c, status: 'running', startedAt: new Date(t).toISOString() };
+        if (c.status === 'running' && age > 5_000) {
+          return {
+            ...c,
+            status: 'done',
+            doneAt: new Date(t).toISOString(),
+            result: cleanupResultOf(mockWorktrees(t, [])),
+          };
+        }
+        return c;
+      });
+      return mockWorktrees(t, mockCleanups);
+    },
+    async worktreeCleanup(body) {
+      await wait();
+      const engine = mockEngine();
+      if (engine.state === 'off') throw new ApiError(409, 'engine_off', `清理不了：${engine.detail}`);
+      if (engine.state !== 'on')
+        throw new ApiError(503, `engine_${engine.state}`, `清理不了：${engine.detail}`);
+      const busy = mockCleanups.find((c) => c.status === 'queued' || c.status === 'running');
+      if (busy)
+        throw new ApiError(409, 'cleanup_busy', `已经有一次清理在做（${busy.requestId}），等它做完再点`);
+      const at = new Date(now()).toISOString();
+      const requestId = nextId('cleanup');
+      mockCleanups = [{ requestId, by: 'u-founder', requestedAt: at, status: 'queued' }, ...mockCleanups];
+      void body;
+      return { requestId, requestedAt: at };
     },
     async node(nodeId) {
       await wait();

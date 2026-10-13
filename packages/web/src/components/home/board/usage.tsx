@@ -11,6 +11,8 @@ export function usageTitle(u: TicketUsage): string {
       return '这一刻没有会话在跑（排队、等人、等验），不占这台机器的内存和 CPU';
     case 'last':
       return u.title;
+    case 'empty':
+      return `会话的 scope 还在、里面没有进程，不算在跑：${u.why}`;
     case 'unread':
       return `内存、CPU 没读到：${u.why}`;
     case 'ok': {
@@ -41,6 +43,17 @@ export function UsageLine({ usage, size = 'canvas' }: { usage: TicketUsage; size
     return (
       <div data-usage="last" className={cn('truncate text-muted-foreground', text)} title={usageTitle(usage)}>
         {usage.text}
+      </div>
+    );
+  }
+  if (usage.kind === 'empty') {
+    return (
+      <div
+        data-usage="empty"
+        className={cn('truncate text-muted-foreground', text)}
+        title={usageTitle(usage)}
+      >
+        空 scope
       </div>
     );
   }
@@ -78,6 +91,7 @@ export function UsageLine({ usage, size = 'canvas' }: { usage: TicketUsage; size
 export function usageShort(u: TicketUsage): string {
   if (u.kind === 'idle') return '没在占用';
   if (u.kind === 'last') return u.text;
+  if (u.kind === 'empty') return '空 scope';
   if (u.kind === 'unread') return '没读到';
   return `${formatMb(u.memoryMb)} · ${u.cpuPercent === undefined ? '采样中' : formatCpu(u.cpuPercent)}`;
 }

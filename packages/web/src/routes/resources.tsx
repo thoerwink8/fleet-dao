@@ -1,13 +1,13 @@
-// 资源页（/resources，#1986）：法国这台机器此刻的整机内存、CPU、磁盘，每个上线项目各占多少、放在哪，按目录的磁盘占用榜。
+// 资源页（/resources，#1986）：法国这台机器此刻的整机内存、CPU、磁盘，每个上线项目各占多少、放在哪。
 // 创始人原话（2026-10-13）：「资源页展示的是每个上线项目占用多少，比如驾驶舱占用」「磁盘占用我需要的是整个 vps 使用多少/总量多少」。
 //
 // 数据从哪来：和主页同一份（useHome 的 resources；选了远程环境读那台推来的快照）。整机和每个项目的 CPU、内存每 5 秒随推送换；
 // 按目录的磁盘占用后端每 10 分钟测一回（遍历文件较重），带着推，这页写「N 分钟前测的」。不整页轮询。
 // 每一格怎么写（读成了、没在占用、没读到、不全）在 components/resources/view.ts，这里只管排版。
 //
-// 版式：三段（整机 → 上线项目 → 磁盘占用榜），区块里只有行和分隔线。上线项目一行：名字 + 放在哪 | CPU | 内存 | 磁盘，
+// 版式：三段（整机 → 上线项目 → 仓），区块里只有行和分隔线。上线项目一行：名字 + 放在哪 | CPU | 内存 | 磁盘，
 // 点开是单元、口径、名下的目录和库；手机上一行折成卡片（名字、路径各一行，三格并排在下面），字不截断。
-import { HardDrive, SearchX } from 'lucide-react';
+import { SearchX } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
@@ -17,24 +17,16 @@ import type { HomeResources, HomeRunning } from '../components/home/types';
 import { EmptyState } from '../components/layout/empty-state';
 import { List, ListRow, RowDetail } from '../components/layout/list';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
-import { Notice } from '../components/layout/notice';
 import { Page } from '../components/layout/page';
 import { Section, SectionGrid } from '../components/layout/section';
 import { StatusBadge } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
 import { SnapshotBanner, useSelectedNodeName } from '../components/node-notice';
 import { NotBuilt } from '../components/not-built';
-import {
-  type AppRow,
-  appRows,
-  type BoardResult,
-  type Cell,
-  type DiskCell,
-  type DiskPart,
-  diskBoard,
-} from '../components/resources/view';
+import { ReposSection } from '../components/resources/repos-section';
+import { type AppRow, appRows, type Cell, type DiskCell, type DiskPart } from '../components/resources/view';
 import { Button } from '../components/ui/button';
-import { formatAgo, formatDuration, TIME } from '../lib/format';
+import { formatAgo, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { useSelectedNodeId } from '../lib/node';
 import { useShownError } from '../lib/shown-error';
@@ -158,6 +150,12 @@ function CellText({ cell }: { cell: Cell }) {
       return (
         <span className="text-muted-foreground" title={cell.why}>
           没在占用
+        </span>
+      );
+    case 'empty':
+      return (
+        <span className="text-muted-foreground" title={cell.why}>
+          空 scope
         </span>
       );
     case 'none':
@@ -311,7 +309,9 @@ function AppDetail({ row, totalCores }: { row: AppRow; totalCores: number | unde
                       <span className="min-w-0 truncate" title={c.name}>
                         {c.name}
                       </span>
-                      <span className="shrink-0 text-meta text-muted-foreground">{c.sessions} 个会话</span>
+                      <span className="shrink-0 text-meta text-muted-foreground">
+                        {c.sessions} 个会话{c.emptyScopes ? ` · ${c.emptyScopes} 个空 scope` : ''}
+                      </span>
                     </span>
                   }
                   cpu={<CellText cell={c.cpu} />}
@@ -328,7 +328,14 @@ function AppDetail({ row, totalCores }: { row: AppRow; totalCores: number | unde
 }
 
 function cellWord(cell: Cell): string {
-  return { ok: '', sampling: '采样中', idle: '没在占用', none: '不单算', unread: '没读到' }[cell.kind];
+  return {
+    ok: '',
+    sampling: '采样中',
+    idle: '没在占用',
+    empty: '空 scope',
+    none: '不单算',
+    unread: '没读到',
+  }[cell.kind];
 }
 
 function diskWord(cell: DiskCell): string {
@@ -429,99 +436,6 @@ function AppsSection({
   );
 }
 
-// ---------- 磁盘占用榜 ----------
-
-function BoardSection({
-  resources,
-  remote,
-  now,
-}: {
-  resources: HomeResources | undefined;
-  remote: boolean;
-  now: number;
-}) {
-  const board: BoardResult = diskBoard(resources, { remote });
-  const description =
-    board.kind === 'ok'
-      ? `${formatAgo(board.measuredAt, now)}测的 · 每 ${Math.round(board.everyMs / TIME.MIN)} 分钟测一次 · 测了 ${formatDuration(board.tookMs)}`
-      : '每 10 分钟测一次（要遍历文件，不随每 5 秒的读数一起测）';
-  const max =
-    board.kind === 'ok'
-      ? Math.max(1, ...board.rows.map((r) => (r.size.kind === 'ok' ? r.size.bytes : 0)))
-      : 1;
-  return (
-    <Section title="磁盘占用（按目录）" description={description} flush data-resources-board>
-      {board.kind === 'pending' ? (
-        <div className="p-4">
-          <EmptyState icon={HardDrive} title="还没测完" hint={board.why} />
-        </div>
-      ) : board.kind === 'unread' ? (
-        <div className="p-4 text-body text-muted-foreground" data-resources-board-missing>
-          没读到：{board.why}
-        </div>
-      ) : (
-        <>
-          {board.databasesWhy ? (
-            <div className="px-4 pt-4 lg:px-5">
-              <Notice tone="stall" title="库的大小没读成">
-                {board.databasesWhy}
-              </Notice>
-            </div>
-          ) : null}
-          <List>
-            {board.rows.map((r) => (
-              <ListRow
-                key={r.key}
-                data-board-row={r.label}
-                summary={
-                  <span className="flex min-w-0 flex-1 items-center gap-4 py-1">
-                    <span className="min-w-0 flex-1">
-                      <span
-                        className={cn(
-                          'block truncate',
-                          r.kind === 'dir' ? 'font-mono text-meta md:text-body' : 'text-body',
-                        )}
-                        title={r.label}
-                      >
-                        {r.label}
-                      </span>
-                      <span className="block truncate text-meta text-muted-foreground">
-                        {r.appName}
-                        {r.share !== undefined ? ` · 占整盘 ${sharePercent(r.share)}` : ''}
-                        {r.size.kind === 'ok' && r.size.incomplete ? ` · ${r.size.incomplete}` : ''}
-                        {r.size.kind === 'unread' ? ` · ${r.size.why}` : ''}
-                      </span>
-                    </span>
-                    <span
-                      aria-hidden
-                      className="h-1.5 w-24 shrink-0 overflow-hidden rounded-full bg-selected max-sm:hidden"
-                    >
-                      {r.size.kind === 'ok' ? (
-                        <span
-                          className="block h-full rounded-full bg-muted-foreground"
-                          style={{ width: `${Math.max(1, (r.size.bytes / max) * 100)}%` }}
-                        />
-                      ) : null}
-                    </span>
-                    <span className="w-24 shrink-0 text-right text-body max-sm:w-auto">
-                      <DiskText cell={r.size} />
-                    </span>
-                  </span>
-                }
-              />
-            ))}
-          </List>
-        </>
-      )}
-    </Section>
-  );
-}
-
-function sharePercent(share: number): string {
-  const p = share * 100;
-  return p < 1 ? '不到 1%' : `${Math.round(p)}%`;
-}
-
 // ---------- 页 ----------
 
 function MissingEnv({ nodeId }: { nodeId: string }) {
@@ -569,8 +483,8 @@ export default function Resources() {
   return (
     <Page
       title="资源"
-      description="整机此刻的内存、CPU、磁盘，每个上线项目各占多少、放在哪"
-      detail="CPU、内存每 5 秒随推送更新（读各 systemd 单元的 cgroup，1 核 = 占满一个核）；按目录的磁盘占用每 10 分钟测一次。读不到写「没读到」，读不全写「不全」，不拿 0 顶。"
+      description="整机此刻的内存、CPU、磁盘，每个上线项目、每个仓各占多少"
+      detail="CPU、内存每 5 秒随推送更新（读各 systemd 单元的 cgroup，1 核 = 占满一个核）；按目录的磁盘占用每 10 分钟测一次；仓和工作树的清单由引擎每小时对账时出一份，「清理没用的工作树」只删没人用、没有没提交或没推改动的树。读不到写「没读到」，读不全写「不全」，不拿 0 顶。"
       refresh={{
         variant: 'dot',
         onRefresh: () => void main.refetch(),
@@ -601,7 +515,12 @@ export default function Resources() {
         <SectionGrid cols={1}>
           <HostSection resources={state.data.resources} remote={isRemote} machine={machine} now={now} />
           <AppsSection resources={state.data.resources} running={state.data.running} remote={isRemote} />
-          <BoardSection resources={state.data.resources} remote={isRemote} now={now} />
+          <ReposSection
+            resources={state.data.resources}
+            running={state.data.running}
+            remote={isRemote}
+            now={now}
+          />
         </SectionGrid>
       )}
     </Page>

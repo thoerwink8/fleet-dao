@@ -122,6 +122,26 @@ describe('每张卡片的占用', () => {
     });
   });
 
+  test('【故意造出读到 0】会话的 scope 是空的（里面没进程）：不写 0M / 0%，按没在跑写；一张单另有真在跑的照算', () => {
+    const why = 'scope 还在，但 memory.current 是 0';
+    const r = res({
+      sessions: {
+        state: 'ok',
+        byRun: { r1: { state: 'ok', memoryMb: 800, cpuPercent: 30 }, gone: { state: 'empty', why } },
+      },
+    });
+    const empty = ticketUsage({ ...base, worker: 'Opus', runIds: ['gone'] }, r);
+    expect(empty).toEqual({ kind: 'empty', why });
+    expect(usageShort(empty)).toBe('空 scope');
+    expect(usageTitle(empty)).toContain(why);
+    expect(ticketUsage({ ...base, worker: 'Opus', runIds: ['r1', 'gone'] }, r)).toEqual({
+      kind: 'ok',
+      sessions: 1,
+      memoryMb: 800,
+      cpuPercent: 30,
+    });
+  });
+
   test('scope 不在读数里：没读到，写明是哪一笔', () => {
     const got = ticketUsage({ ...base, worker: 'Opus', runIds: ['gone-run'] }, res());
     expect(got.kind).toBe('unread');

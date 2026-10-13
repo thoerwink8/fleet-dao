@@ -3,11 +3,15 @@
  * 认不出就抛 InvalidNodeReportError，不存半截、不拿坏的冒充有。
  */
 import {
+  type LocalSessionsReport,
+  LocalSessionsReportSchema,
   NODE_REPORT_SCHEMA_VERSION,
   NodeIdSchema,
   type NodeReport,
   NodeReportSchema,
   type NodeSnapshot,
+  type WorktreeInventory,
+  WorktreeInventorySchema,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import { InvalidNodeReportError, type NodeReportSummary } from './ports.ts';
@@ -37,6 +41,30 @@ export function nodeReportRow(input: { nodeId: string; report: NodeReport }): {
     row: { nodeId: input.nodeId, displayName: env.name.name, schemaVersion, codeSha, reportedAt },
     snapshot: { home, env },
   };
+}
+
+/** 本机会话（#1991）：写进去之前认一遍。环境编号、载荷认不出都抛 InvalidNodeReportError。 */
+export function nodeSessionsRow(input: { nodeId: string; report: LocalSessionsReport }): LocalSessionsReport {
+  if (!NodeIdSchema.safeParse(input.nodeId).success) {
+    throw new InvalidNodeReportError(`环境编号认不出：${JSON.stringify(input.nodeId)}`);
+  }
+  return readNodeSessions(input.nodeId, input.report);
+}
+
+/** 本机会话：库里读回来再认一遍；认不出抛错，不当成没有。 */
+export function readNodeSessions(nodeId: string, payload: unknown): LocalSessionsReport {
+  const parsed = LocalSessionsReportSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw new InvalidNodeReportError(`${nodeId} 推来的本机会话认不出：${issuesOf(parsed.error)}`);
+  }
+  return parsed.data;
+}
+
+/** 工作树清单（#1993）：读回来认一遍；认不出抛错，不当成没有树。 */
+export function readWorktreeInventoryPayload(payload: unknown): WorktreeInventory {
+  const parsed = WorktreeInventorySchema.safeParse(payload);
+  if (!parsed.success) throw new Error(`库里那份工作树清单认不出：${issuesOf(parsed.error)}`);
+  return parsed.data;
 }
 
 /** 库里读回来的快照本体：版本对不上、形状坏了都抛错，不当成没有。 */

@@ -34,11 +34,13 @@ describe('契约 ↔ 后端注册的路由', () => {
     const inContract = new Set(contract().map(key));
     // 飞书网关、意图卡走各自的模块和约定（feishu-routes.ts、intent-routes.ts），不属于驾驶舱前端的契约；
     // 别的环境推快照的写口（POST /api/nodes/report，node-report.ts）只认专用通行证、浏览器不调，也不在 WebRoutes 里
-    const own = (p: string) => !/^\/api\/(feishu|intents?|drafts?|nodes\/report)(\/|$)/.test(p);
+    // 本机推会话的写口（POST /api/nodes/sessions，#1991）同理；同一路径的 GET 是看板读的，在契约里。
+    const own = (r: Entry) =>
+      !/^\/api\/(feishu|intents?|drafts?|nodes\/report)(\/|$)/.test(r.path) &&
+      !(r.method === 'POST' && r.path === '/api/nodes/sessions');
     const extra = registered
       .filter(
-        (r) =>
-          (r.path.startsWith(`${WEB_API_PREFIX}/`) || r.path.startsWith(`${AUTH_PREFIX}/`)) && own(r.path),
+        (r) => (r.path.startsWith(`${WEB_API_PREFIX}/`) || r.path.startsWith(`${AUTH_PREFIX}/`)) && own(r),
       )
       .filter((r) => !inContract.has(key(r)));
     expect(extra.map(key), '后端有、契约里没有').toEqual([]);

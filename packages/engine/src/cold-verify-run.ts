@@ -28,10 +28,12 @@ import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { UNVERIFIABLE_AUTHOR_FAMILIES } from './author-families.ts';
 import {
   type ColdVerifyStatus,
+  type ColdVerifyStatusMemo,
   coldVerifyNotRun,
   coldVerifyPending,
   coldVerifyStatus,
   coldVerifyWaiting,
+  sameStatus,
   type WriteColdVerifyStatus,
 } from './cold-verify-status.ts';
 import type { RunRecord, RunsWriter } from './runner/not-wired.ts';
@@ -90,6 +92,11 @@ export interface ColdVerifyDeps {
   prepareCwd?: NonNullable<VerifierInvokeDeps['prepareCwd']>;
   /** 贴状态。给了才贴（不给 = 只跑不贴，测试/演练用）。 */
   writeStatus?: WriteColdVerifyStatus;
+  /**
+   * 这个 PR 上最后贴成功的状态的记忆（#2007，调用方持有、跨圈保留，不写库）。给了就：一模一样的状态不再贴；
+   * 「跑着」推迟到真挑中路由、要起会话时才贴。不给 = 老样子（每圈先贴「跑着」，来什么贴什么）。
+   */
+  statusMemo?: ColdVerifyStatusMemo;
   /** 这是第几轮（默认 1）；上限由调用方判（canStartRound），这一层照给的值跑。 */
   round?: 1 | 2;
   /** 超时（分钟），透传给 one-shot。 */
@@ -128,14 +135,21 @@ export async function runColdVerifyForPr(
   deps: ColdVerifyDeps,
 ): Promise<ColdVerifyRunResult> {
   const round = deps.round ?? 1;
+  const memo = deps.statusMemo;
+  // 贴一条状态；和这个头上最后贴成功的那条一模一样就不再贴（#2007）。贴失败照旧抛，记忆不更新（下一圈照贴）。
+  const put = async (head: string, status: ColdVerifyStatus): Promise<void> => {
+    if (deps.writeStatus === undefined) return;
+    const last = memo?.get(head);
+    if (last !== undefined && sameStatus(last, status)) return;
+    await deps.writeStatus({ prNumber, head, status });
+    memo?.set(head, status);
+  };
   const post = async (
     head: string | null,
     status: ColdVerifyStatus,
     rest: Omit<ColdVerifyRunResult, 'status' | 'head'> = {},
   ): Promise<ColdVerifyRunResult> => {
-    if (deps.writeStatus !== undefined && head !== null) {
-      await deps.writeStatus({ prNumber, head, status });
-    }
+    if (head !== null) await put(head, status);
     return { status, head, ...rest };
   };
 
@@ -151,9 +165,20 @@ export async function runColdVerifyForPr(
 
   // 开跑之前先贴 pending：合并闸显示「等验收」而不是「还没验」；贴不上（没权限、GitHub 不通）就在这里抛出去，
   // 别先花一次模型调用、跑完了结论又贴不上。
-  if (deps.writeStatus !== undefined) {
-    await deps.writeStatus({ prNumber, head: pr.head, status: coldVerifyPending(round) });
-  }
+  // 给了记忆（#2007，生产的路）：「跑着」推迟到真挑中路由、马上要起会话的那一刻再贴（下面包的 chooseModelForFamily）。
+  // 还是先于任何一次模型调用，「贴不上就别先花一次模型调用」的意图不变；但没路由的那些圈（总开关关着、选路在等）
+  // 不再每圈先贴「跑着」再贴「在等」、来回改写同一条状态、每次都触发一轮合并闸。没给记忆（老调用方、测试）= 老样子，先贴。
+  const running = coldVerifyPending(round);
+  let runningPosted = memo === undefined;
+  if (runningPosted) await put(pr.head, running);
+  const chooseModelForFamily: ChooseModelForFamily = async (family) => {
+    const picked = await deps.chooseModelForFamily(family);
+    if (!runningPosted && picked !== undefined && 'modelId' in picked) {
+      runningPosted = true;
+      await put(pr.head, running);
+    }
+    return picked;
+  };
 
   // 2. 取单子（要什么 / 怎么算做完 / 作者族）。读不到也贴 failure。
   let spec: ColdVerifySpec;
@@ -208,7 +233,7 @@ export async function runColdVerifyForPr(
     fetchDiff: async ({ baseSha }) => deps.sources.diff({ prNumber, baseSha }),
     fetchSpec: async () => ({ ...(spec.specDir !== undefined ? { specDir: spec.specDir } : {}) }),
     fetchNamedFiles: readNamedFilesAtHead({ head: pr.head, workflowId: spec.workflowId }),
-    chooseModelForFamily: deps.chooseModelForFamily,
+    chooseModelForFamily,
     cwd: deps.cwd,
     ...(deps.prepareCwd === undefined ? {} : { prepareCwd: deps.prepareCwd }),
     ...(deps.timeoutMinutes === undefined ? {} : { timeoutMinutes: deps.timeoutMinutes }),

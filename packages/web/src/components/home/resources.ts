@@ -29,6 +29,8 @@ export type TicketUsage =
   /** 没在跑，但上一次会话记过占用。text 是卡片上的那一行。 */
   | { kind: 'last'; text: string; title: string }
   | { kind: 'ok'; sessions: number; memoryMb: number; peakMb?: number; cpuPercent?: number }
+  /** 这张单的会话 scope 都还在、但里面没进程（memory.current 是 0，#1992）：写「空 scope」，不写 0M / 0%。 */
+  | { kind: 'empty'; why: string }
   | { kind: 'unread'; why: string };
 
 export interface ResourceOptions {
@@ -74,6 +76,8 @@ export function ticketUsage(
   let memoryMb = 0;
   let peakMb: number | undefined = 0;
   let cpuPercent: number | undefined = 0;
+  let live = 0;
+  let emptyWhy: string | undefined;
   for (const id of runIds) {
     const u = resources.sessions.byRun[id];
     if (!u) {
@@ -83,14 +87,21 @@ export function ticketUsage(
       };
     }
     if (u.state === 'unread') return { kind: 'unread', why: u.why };
+    // 空 scope（里面没进程）不算在跑、不进合计（#1992）
+    if (u.state === 'empty') {
+      emptyWhy ??= u.why;
+      continue;
+    }
+    live += 1;
     memoryMb += u.memoryMb;
     peakMb = peakMb === undefined || u.memoryPeakMb === undefined ? undefined : peakMb + u.memoryPeakMb;
     cpuPercent =
       cpuPercent === undefined || u.cpuPercent === undefined ? undefined : cpuPercent + u.cpuPercent;
   }
+  if (live === 0 && emptyWhy !== undefined) return { kind: 'empty', why: emptyWhy };
   return {
     kind: 'ok',
-    sessions: runIds.length,
+    sessions: live,
     memoryMb,
     ...(peakMb === undefined ? {} : { peakMb }),
     ...(cpuPercent === undefined ? {} : { cpuPercent: Math.round(cpuPercent * 10) / 10 }),
