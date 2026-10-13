@@ -224,10 +224,10 @@ async function publicFailures(log: Logger) {
       () => new Date(),
     ),
   );
-  // 飞书网关：意图卡轮询太久没来。只有一处 new PublicHealthError，这里造一种；每一种说法都在 gateway-seen.test.ts 用同一份名单扫
+  // 飞书网关：用量上报太久没来。只有一处 new PublicHealthError，这里造一种；每一种说法都在 gateway-seen.test.ts 用同一份名单扫
   let clock = Date.now();
   const seen = createGatewaySeen(() => new Date(clock));
-  seen.saw(IntentRoutes.cards);
+  seen.saw(IntentRoutes.usage);
   clock += 10 * 60_000;
   await run('feishu-gateway', true, async () => {
     await seen.check();
@@ -324,7 +324,7 @@ describe('公开的健康报告', () => {
       );
     const at = new Date();
     const seen = createGatewaySeen(() => at);
-    seen.saw(IntentRoutes.cards);
+    seen.saw(IntentRoutes.usage);
     const pending = {
       services: await services({ check: async () => {}, notWired: GATEWAY_NO_PASS }),
       noted: await services(seen),
@@ -344,7 +344,7 @@ describe('公开的健康报告', () => {
     });
     expect(pending.noted.checks.feishu_gateway).toEqual({
       ok: true,
-      message: '意图卡轮询 0 秒前来过',
+      message: '用量上报 0 秒前来过',
     });
     const hits = scanReports(scan, pending);
     expect(hits, scan.formatHits(hits)).toEqual([]);

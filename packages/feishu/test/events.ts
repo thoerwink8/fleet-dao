@@ -1,9 +1,9 @@
 // 真实形状的飞书事件：fixtures/ 里是长连接推来的原样（v2 结构，编号都是占位），改几个字段就是一条新事件。
 // 解析走 SDK 自己的分发器和归一化（和生产同一套），再经 lark.ts 的转换交给网关。
 import { readFileSync } from 'node:fs';
-import { EventDispatcher, LoggerLevel, normalize, normalizeCardAction } from '@larksuiteoapi/node-sdk';
-import { toAction, toInbound, toMenu, toRecall } from '../src/lark.ts';
-import type { InboundCardAction, InboundMenu, InboundMessage, InboundRecall } from '../src/port.ts';
+import { EventDispatcher, LoggerLevel, normalizeCardAction } from '@larksuiteoapi/node-sdk';
+import { toAction } from '../src/lark.ts';
+import type { InboundCardAction } from '../src/port.ts';
 
 export const BOT = { openId: 'ou_bot', name: 'fleet' };
 export const A = 'ou_founder_a';
@@ -22,65 +22,24 @@ export function fixture(name: string): Envelope {
 let seq = 0;
 const nextId = (prefix: string) => `${prefix}_${Date.now().toString(36)}_${++seq}`;
 
+/** 一条群聊或私聊消息的事件。网关已经不收话了：只用来钉「收到也什么都不做」。 */
 export function messageEvent(o: {
   text: string;
   from?: string;
   chat?: 'p2p' | 'group';
   chatId?: string;
-  /** 群里默认 @了机器人；私聊里要 @ 得明说。 */
-  mentionBot?: boolean;
-  /** @所有人。 */
-  mentionAll?: boolean;
-  replyTo?: string;
-  /** 在飞书话题里：话题编号；根消息是 rootId（没给就用 replyTo）。 */
-  thread?: string;
-  rootId?: string;
   id?: string;
-  senderType?: string;
-  /** 换消息类型和原始 content（不给就是 text 类型、content 由 text 拼）。 */
-  type?: string;
-  content?: string;
-  /** 毫秒；null = 事件里没带 create_time。 */
-  createTime?: number | null;
 }): Envelope {
   const group = o.chat === 'group';
   const e = fixture(group ? 'message-group-at' : 'message-p2p');
   const id = o.id ?? nextId('om_user');
   e.header.event_id = `evt_${id}`;
   e.event.sender.sender_id.open_id = o.from ?? A;
-  if (o.senderType) e.event.sender.sender_type = o.senderType;
   const m = e.event.message;
   m.message_id = id;
-  if (o.createTime === null) delete m.create_time;
-  else m.create_time = String(o.createTime ?? Date.now());
+  m.create_time = String(Date.now());
   if (o.chatId) m.chat_id = o.chatId;
-  const mention = o.mentionBot ?? group;
-  const prefix = `${mention ? '@_user_1 ' : ''}${o.mentionAll ? '@_all ' : ''}`;
-  m.message_type = o.type ?? 'text';
-  m.content = o.content ?? JSON.stringify({ text: `${prefix}${o.text}` });
-  const mentions = fixture('message-group-at').event.message.mentions;
-  m.mentions = [
-    ...(mention ? mentions : []),
-    ...(o.mentionAll
-      ? [{ key: '@_all', id: { union_id: '', user_id: '', open_id: '' }, name: '所有人' }]
-      : []),
-  ];
-  if (m.mentions.length === 0) delete m.mentions;
-  const root = o.rootId ?? o.replyTo;
-  if (o.replyTo) m.parent_id = o.replyTo;
-  else delete m.parent_id;
-  if (root) m.root_id = root;
-  else delete m.root_id;
-  if (o.thread) m.thread_id = o.thread;
-  return e;
-}
-
-export function recallEvent(o: { messageId: string; chatId?: string; recallTime?: number }): Envelope {
-  const e = fixture('recall');
-  e.header.event_id = nextId('evt_recall');
-  e.event.message_id = o.messageId;
-  e.event.chat_id = o.chatId ?? TEAM;
-  e.event.recall_time = String(o.recallTime ?? Date.now());
+  m.content = JSON.stringify({ text: `${group ? '@_user_1 ' : ''}${o.text}` });
   return e;
 }
 
@@ -101,48 +60,12 @@ export function cardEvent(o: {
   return e;
 }
 
-export function menuEvent(o: { key: string; from?: string; eventId?: string }): Envelope {
-  const e = fixture('menu');
-  e.header.event_id = o.eventId ?? nextId('evt_menu');
-  e.event.event_key = o.key;
-  e.event.operator.operator_id.open_id = o.from ?? A;
-  return e;
-}
-
 const parser = new EventDispatcher({ loggerLevel: LoggerLevel.error }).register({
-  'im.message.receive_v1': async (d: unknown) => d,
-  'im.message.recalled_v1': async (d: unknown) => d,
   'card.action.trigger': async (d: unknown) => d,
-  'application.bot.menu_v6': async (d: unknown) => d,
 });
 
-async function parse(envelope: Envelope): Promise<Envelope> {
-  return parser.invoke(envelope, { needCheck: false });
-}
-
-export async function asMessage(envelope: Envelope): Promise<InboundMessage> {
-  const msg = await normalize(await parse(envelope), {
-    botIdentity: BOT,
-    stripBotMentions: true,
-    includeRaw: true,
-  });
-  return toInbound(msg, BOT.openId);
-}
-
 export async function asAction(envelope: Envelope): Promise<InboundCardAction> {
-  const evt = normalizeCardAction(await parse(envelope), { includeRaw: true });
+  const evt = normalizeCardAction(await parser.invoke(envelope, { needCheck: false }), { includeRaw: true });
   if (!evt) throw new Error('SDK 认不出这条按钮事件');
   return toAction(evt);
-}
-
-export async function asMenu(envelope: Envelope): Promise<InboundMenu> {
-  const menu = toMenu(await parse(envelope));
-  if (!menu) throw new Error('认不出这条菜单事件');
-  return menu;
-}
-
-export async function asRecall(envelope: Envelope): Promise<InboundRecall> {
-  const recall = toRecall(await parse(envelope));
-  if (!recall) throw new Error('认不出这条撤回事件');
-  return recall;
 }

@@ -347,7 +347,6 @@
     "packages/feishu/test/cards.test.ts": 13,
     "packages/feishu/test/config.test.ts": 7,
     "packages/feishu/test/gateway.test.ts": 701,
-    "packages/feishu/test/intent-cards.test.ts": 1566,
     "packages/feishu/test/lark.test.ts": 1257,
     "packages/feishu/test/static.test.ts": 11,
     "packages/feishu/test/watch.test.ts": 1490,

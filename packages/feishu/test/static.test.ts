@@ -1,10 +1,9 @@
 // 不跑代码也能查的：往飞书发东西只有一个出口、样例里没有真凭据、
-// 跟别的包约好的名字（请求头）还对得上、时间预算加起来守得住设计目标、#1022 删掉的旧接口不再有人调。
+// 飞书收缩（#2047 F1）退役的东西不再有人提、#1022 删掉的旧接口不再有人调。
 import { readdirSync, readFileSync } from 'node:fs';
 import * as shared from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import { ACTING_HEADER } from '../src/backend.ts';
-import { DEFAULT_TIMING, TARGET_ACK_MS } from '../src/gateway.ts';
+import { DEFAULT_TIMING } from '../src/gateway.ts';
 
 const pkg = new URL('../', import.meta.url);
 const srcDir = new URL('src/', pkg);
@@ -41,13 +40,8 @@ describe('静态检查', () => {
       .filter((l) => /^[A-Z_]+=/.test(l))
       .map((l) => l.split('=', 2) as [string, string]);
     expect(assignments.length).toBeGreaterThan(5);
-    // 能出现的只有：空、占位符 <…>、数字默认值、默认表情、样例域名（真域名公开仓不写，见设计第十四节）。
-    const allowed = (v: string) =>
-      v === '' ||
-      /<[^>]+>/.test(v) ||
-      /^[0-9]+$/.test(v) ||
-      v === 'Get' ||
-      v === 'https://cockpit.example.com';
+    // 能出现的只有：空、占位符 <…>、样例域名（真域名公开仓不写，见设计第十四节）。
+    const allowed = (v: string) => v === '' || /<[^>]+>/.test(v) || v === 'https://cockpit.example.com';
     for (const [key, value] of assignments) {
       expect({ key, value, ok: allowed(value) }).toEqual({ key, value, ok: true });
     }
@@ -69,14 +63,6 @@ describe('静态检查', () => {
     }
   });
 
-  const backendSide = (shared as Record<string, unknown>).FEISHU_ACTING_HEADER;
-  it.skipIf(backendSide === undefined)(
-    '「代表哪位创始人」的请求头和后端的一致（后端的常量 FEISHU_ACTING_HEADER 在 PR #9 里加，合进 main 之前跳过）',
-    () => {
-      expect(backendSide).toBe(ACTING_HEADER);
-    },
-  );
-
   it('#1022 删掉的旧接口（旧推送、盘面、卡片登记、草稿、查进度、关注）网关源码里一条都不提，shared 里也没有它们的路由表', () => {
     const retired = /\/feishu\/(outbox|board|cards\/|drafts|follows|tasks|messages)|FeishuRoutes/;
     const mentioning = sources.filter((s) => retired.test(s.text)).map((s) => s.file);
@@ -84,22 +70,27 @@ describe('静态检查', () => {
     expect((shared as Record<string, unknown>).FeishuRoutes).toBeUndefined();
   });
 
-  it('时间预算守得住：转后端 5 秒（方案 5.4）之内回来，「收到」2 秒内加上', () => {
-    // 收原话给后端 5 秒（方案 5.4）；超时按没存成办（打「没记成」、记补漏），不再有「先回一张卡守住 10 秒」这套。
-    expect(DEFAULT_TIMING.intakeMs).toBe(5_000);
-    // 「收到」还是 2 秒的目标（design 15.4）：转后端比它慢没关系，表情是另外一步。
-    expect(DEFAULT_TIMING.intakeMs).toBeGreaterThanOrEqual(TARGET_ACK_MS);
+  it('飞书收缩（#2047 F1）：网关源码里没有收原话、撤回、补漏、意图卡、机器人菜单；也不碰意图库的接口', () => {
+    const retired =
+      /intakeMessage|intakeRecall|intakeCursors|intentCards|ackIntentCards|recordRejection|createIntentCards|toIntake|onMessage|onRecall|onMenu|menu_v6|recalled_v1|im\.message\.receive|\/feishu\/intake\/(messages|recalls|cursors|rejections)|\/feishu\/intent-cards/;
+    const mentioning = sources.filter((s) => retired.test(s.text)).map((s) => s.file);
+    expect(mentioning).toEqual([]);
+    expect(sources.map((s) => s.file)).not.toContain('intake.ts');
+    expect(sources.map((s) => s.file)).not.toContain('intent-cards.ts');
   });
 
-  it('旧的菜单 event_key 已经从样例配置里删掉（菜单停用了，开发者后台也该删）', () => {
+  it('时间预算守得住：向后端报用量的间隔远小于后端 5 分钟没来就报红的时限', () => {
+    expect(DEFAULT_TIMING.backendMs).toBe(5_000);
+    expect(DEFAULT_TIMING.usageEveryMs).toBeLessThan(5 * 60_000);
+  });
+
+  it('样例配置：只订阅进群事件和卡片回调；不再要求收消息、撤回、菜单，也不再有收到表情', () => {
     const env = read(new URL('deploy/feishu.env.example', pkg));
-    expect(env).toContain('im.message.recalled_v1');
     expect(env).toContain('im.chat.member.user.added_v1');
-    expect(env).toContain('im:message.group_msg');
-    expect(env).toContain('im:message:readonly');
     expect(env).toContain('im:chat:readonly');
-    // 不再要求配菜单：菜单停用了
-    expect(env).toContain('菜单和卡片按钮都已停用');
+    expect(env).toContain('im:message:send_as_bot');
+    expect(env).not.toContain('im:message.group_msg');
     expect(env).not.toMatch(/event_key/);
+    expect(env).not.toMatch(/^FEISHU_ACK_EMOJI=/m);
   });
 });

@@ -192,7 +192,7 @@ describe('接口跑在真库上', () => {
         feishu_gateway: {
           ok: false,
           code: 'unchecked',
-          message: '没查成：后端起来才 0 秒，意图卡轮询还没来过',
+          message: '没查成：后端起来才 0 秒，用量上报还没来过',
         },
         session_org: { ok: true },
         github_app: { ok: true },

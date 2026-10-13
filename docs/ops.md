@@ -904,7 +904,7 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 - 功能还没做的项报「未接」（`{ ok: true, status: "not_wired", message }`，message 带单号，比如飞书草稿开成 issue 的 #91）：不算失败、不让 `/healthz` 变 503，健康页写成「未接：…」、灰点；只认装配时的标记（`HealthCheck.notWired`，由「没接上的那个实现」自带，比如 `notWiredDraftOpener`），检查跑出来抛什么都判不成未接，接上以后读不到、出错照样红；健康页对样子不完整的「未接」（缺原因、status 认不出）也判红。驾驶舱同一个做法：还没做的一块整块显示「待实现」占位（阶段 + 单号，链到单，`components/not-built.tsx`），不把「没读到」说成「没查成」「离线」；接上了就去掉占位，之后读失败照实显示「没查成」。额度读取（#76，引擎 `quota-read` 每 15 分钟读进库）和路由探针（#129）都已接上，额度页、调度台顶上显示的是库里真的读数和在线状态。
 - 判断题（`judge` 项，健康页写「判断题」）：`/etc/fleet-dao/jev.json` 在不在定「未接」——后端起来时看一次，没写 `FLEET_JEV_CONFIG`、默认位置上又没有才算未接，补上文件要重启 `fleet-api` 才显示出来。有了就每次探，判法和引擎每次提问是同一份（`packages/jev` 的 `wiring.ts`）：配置读不出来、认不出，调度台判断阶段没有开着的路由，钥匙读不到，报红（`judge_config`）；最近一次真发给上游的调用没成报红（`judge_failing`），下一次调成了自动变绿。原因只进 `journalctl -u fleet-api`（哪道题、为什么、上游原文）；引擎那边起来时登记两道题的结果、每次起不来的原因在 `journalctl -u fleet-engine`。
 - 跟上主线（`deploy_lag` 项）：自动发布单元在不在跑、读数新不新、规矩和装机自动档成没成；落后主线几个只是读数、不算红，判法见本节末尾「自动发布」的读数。
-- 飞书网关（`feishu_gateway` 项）：香港的网关还来不来。网关带通行证调飞书接口，后端在门口记下每条接口最后一次来的时刻（只在进程里）；好的时候写「推送轮询 12 秒前来过，盘面快照 22 秒前来过」，推送轮询 5 分钟没来报红（`silent`），后端刚起、网关还没来过报「没查成」（`unchecked`，一般半分钟内就好），没配网关通行证报「未接」。判法在 `packages/api/src/gateway-seen.ts`；网关那边自己的心跳和报警见第十二节。
+- 飞书网关（`feishu_gateway` 项）：香港的网关还来不来。网关带通行证每分钟向后端报一次飞书用量（飞书收缩后它是网关唯一的定时活），后端在门口记下最后一次来的时刻（只在进程里）；好的时候写「用量上报 12 秒前来过」，用量上报 5 分钟没来报红（`silent`），后端刚起、网关还没来过报「没查成」（`unchecked`，一般半分钟内就好），没配网关通行证报「未接」。判法在 `packages/api/src/gateway-seen.ts`；网关那边自己的心跳和报警见第十二节。
 - 会话账号切换（`session_org` 项，健康页写「会话账号切换」）：引擎切会话用户挂的组织出了要人看的（第五节「会话用户挂的组织」那四种 `session-org:*` 提醒，含组织读数变了、引擎没切过号的 `session-org:drift`）就红，对外只说「会话账号切换有要人看的问题」，是哪一条只进 `journalctl -u fleet-api`；提醒撤了自己回绿。判法在 `packages/api/src/session-org-health.ts`。
 - GitHub 机器人权限（`github_app` 项，健康页写「GitHub 机器人权限」）：引擎每小时对账自检两个机器人的权限，缺的、多了不该有的、没查成的开着 `github-app:*` 提醒就红（第五节「每小时对账」），对外只说「GitHub 机器人的权限有要人看的问题」，哪个仓、缺哪样只进 `journalctl -u fleet-api`；权限改好、提醒撤了自己回绿。判法在 `packages/api/src/github-app-health.ts`。
 - 全流程巡检（`canary` 项，健康页写「全流程巡检」）：最近一轮巡检的结论和时间（第五节「全流程巡检」）。通过、而且 12 小时内通过过：绿，写「最近一轮 09-27 20:26 通过（用时 43 分钟）」；最近一轮断了（写断在哪一步）、巡检自己没跑成、一轮过了 5.5 小时还没有结论（巡检自己没收尾）、12 小时没通过一轮、一轮都还没跑完：红。断的原因原文只进 `journalctl -u fleet-api`，细节看卡住报警。不在法国的正式机器上报「未接」。判法在 `packages/api/src/canary-health.ts`。
@@ -1110,17 +1110,17 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 
 看：
 
-- 香港 `fleet-gateway-deploy status`：`current`（在用哪版）、`running`（主进程跑的是哪版）、`connected`（`yes`／`reconnecting`／`no`）、`messages`（这次起来后处理过几条消息）、`backend`（`reachable`；`refused` 法国后端没起；`timeout` 隧道不通；`unknown` 没配地址；`invalid` 地址认不出，要写成 `http://主机:端口`）、`config`（`ok` 或缺哪几项）。
-- `journalctl -u fleet-feishu -n 100`：一行一个 JSON，消息正文只记长度。每条消息一行「消息处理完」，带 `ackMs`（收到到回上「收到」花了多久，都没回上是 null）、`deliveryMs`（飞书从用户发出到推给网关花了多久）。
-- 心跳：`journalctl -u fleet-feishu -o cat --since -1h | grep 网关心跳 | tail -3`，每 10 分钟一行（停机时也写一行）：`link`（`ok`；`down` 有一条定时活超时限没走通；`recovering` 通了、还在等稳住）、`push`（这段时间推送轮了几轮、没走通几轮，发了、改了、推迟、不发、没发成各几件，经飞书的平均和最慢毫秒，最后一次走通的时刻）、`board`（盘面快照取到几次、没取到几次、平均和最慢）、`messages`（几条消息，「收到」的平均、最慢、最近一条，超 2 秒几条、没回上几条，确认卡超 10 秒几条）、`lastError`（这段时间最近一次没走通的原因）。安静时 `push.rounds` 照样在涨；一轮都没有、`link` 是 `down`，才是挂了；超过 10 分钟没有新的心跳，是网关进程没在跑。
-- 调不通后端时网关自己报：推送、盘面快照有一条 5 分钟没走通，往团队群发一张卡住报警（写明从几点起、最近一次为什么），日志里一行 error「网关调不通后端超过时限」；同一次只报一次，免打扰时段里的等时段过了再报；全部连续走通 1 分钟后在那张卡下面回「通了」、卡改灰。报警走网关自己的飞书连接，不经后端。时限和理由在 `packages/feishu/src/watch.ts` 开头；状态只在进程里，网关重启后从起来那一刻重新算。
+- 香港 `fleet-gateway-deploy status`：`current`（在用哪版）、`running`（主进程跑的是哪版）、`connected`（`yes`／`reconnecting`／`no`）、`messages`（数日志里的「消息处理完」；飞书收缩后网关不再收话，恒为 0）、`backend`（`reachable`；`refused` 法国后端没起；`timeout` 隧道不通；`unknown` 没配地址；`invalid` 地址认不出，要写成 `http://主机:端口`）、`config`（`ok` 或缺哪几项）。
+- `journalctl -u fleet-feishu -n 100`：一行一个 JSON。飞书收缩后（#2047）网关不再收群聊、私聊的话，也没有机器人菜单，不再有「消息处理完」那行。
+- 心跳：`journalctl -u fleet-feishu -o cat --since -1h | grep 网关心跳 | tail -3`，每 10 分钟一行（停机时也写一行）：`link`（`ok`；`down` 有一条定时活超时限没走通；`recovering` 通了、还在等稳住）、`usage`（这段时间向后端报飞书用量走通几轮、没走通几轮，最后一次走通的时刻）、`feishuUsage`（这个月飞书调用用量的档）、`lastError`（这段时间最近一次没走通的原因）。安静时 `usage.ok` 照样在涨；一轮都没有、`link` 是 `down`，才是挂了；超过 10 分钟没有新的心跳，是网关进程没在跑。
+- 调不通后端时网关自己报：向后端报用量 5 分钟没走通，往团队群发一张卡住报警（写明从几点起、最近一次为什么），日志里一行 error「网关调不通后端超过时限」；同一次只报一次，免打扰时段里的等时段过了再报；全部连续走通 1 分钟后在那张卡下面回「通了」、卡改灰。报警走网关自己的飞书连接，不经后端。时限和理由在 `packages/feishu/src/watch.ts` 开头；状态只在进程里，网关重启后从起来那一刻重新算。
 - 法国后端 `/healthz` 的 `feishu_gateway`（健康页「飞书网关」）从后端那头看网关来不来：网关整个没了、它自己报不了的时候靠它（第九节讲健康页的那几条）。
 - 法国 `release.sh --check`、香港 `hk.sh --check` 都报上面 `status` 的那几项；`release.sh --check` 的健康检查里也有 `feishu_gateway`。
 
 还欠：
 
 - 团队群：机器人不在任何群里时 `FEISHU_TEAM_CHAT_ID` 补不上，网关不起（发布记待配）。建好团队群、把机器人拉进去，重跑 `hk.sh`（补上群号），再发布一次。
-- 「收得到事件」要有人在飞书里给机器人发一条消息才验得到：`status` 的 `messages` 加一、日志里有「消息处理完」。
+- 「收得到事件」现在只验得到进群：有人（白名单外的）进团队群，群里会出现那句说明、驾驶舱提醒里多一条；群聊私聊的话网关不收。
 
 ## 十三、本机 WSL 演练台（fleet-local）：2026-10-06 已撤
 

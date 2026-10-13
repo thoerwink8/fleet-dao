@@ -1,6 +1,6 @@
 // 卡片一律 JSON 2.0（共享卡，两位创始人看到同一个状态）；版式统一，动态文字只放进 plain_text（不走 markdown，
-// 原话里的符号不会把版式搞乱）。旧的草稿、进度、盘面、推送卡随 #1022 退役；网关自己画的卡只剩这里的报警卡，
-// 意图卡在 intent-cards.ts。
+// 符号不会把版式搞乱）。旧的草稿、进度、盘面、推送卡随 #1022 退役，意图卡随飞书收缩（#2047 F1）退役；
+// 网关自己画的卡只剩这里的报警卡。
 import { z } from 'zod';
 import type { Card } from './port.ts';
 import { clip, duration, when } from './words.ts';
@@ -101,7 +101,7 @@ export interface LinkAlert {
   at: number;
   /** 没走通的那几条定时活。 */
   loops: Array<{
-    name: 'intents';
+    name: 'usage';
     lastOkAt: number | null;
     lastFail: { at: number; reason: string } | null;
   }>;
@@ -110,7 +110,7 @@ export interface LinkAlert {
 }
 
 /** 定时活给人看的名字（报警卡、「通了」那句）。 */
-export const LINK_WORDS = { intents: '意图卡' } as const;
+export const LINK_WORDS = { usage: '用量上报' } as const;
 
 export function linkAlertCard(a: LinkAlert, ctx: RenderContext): Card {
   const since = when(a.since, ctx.now);
@@ -131,8 +131,7 @@ export function linkAlertCard(a: LinkAlert, ctx: RenderContext): Card {
       : '这段时间一轮都没跑完（网关的定时活停了，或卡在飞书那头？）';
     elements.push(text(`· ${LINK_WORDS[l.name]}：${last}；${fail}`));
   }
-  elements.push(text('这期间意图卡发不出来、改不了（存下的原话后端都记着，通了会接着发）。'));
-  elements.push(text('发给我的话多半也记不下来（会回「没记成」），通了请重发。'));
+  elements.push(text('这期间后端看不到网关：手机上的通知可能发不出来，要看事情请直接打开驾驶舱。'));
   elements.push(
     text(
       a.backAt === undefined
@@ -171,10 +170,9 @@ const INTERNAL_CODES =
 const MAX_CARD_BYTES = 30 * 1024;
 
 /**
- * 返回问题清单；空 = 这张卡按我们的规矩是好的。buttons='none' 是有意不放按钮的卡（意图卡：飞书上不建开单界面），
- * 这时一个按钮都不许有；其余的卡正好一个主按钮。
+ * 返回问题清单；空 = 这张卡按我们的规矩是好的（正好一个主按钮）。
  */
-export function checkCard(c: Card, opts: { buttons?: 'one-primary' | 'none' } = {}): string[] {
+export function checkCard(c: Card): string[] {
   const problems: string[] = [];
   if (c.schema !== '2.0') problems.push('schema 不是 2.0');
   const config = c.config as { update_multi?: unknown } | undefined;
@@ -186,7 +184,6 @@ export function checkCard(c: Card, opts: { buttons?: 'one-primary' | 'none' } = 
 
   let elements = 0;
   let primaries = 0;
-  let buttons = 0;
   const names = new Set<string>();
   const walk = (node: unknown, inForm: boolean): void => {
     if (Array.isArray(node)) {
@@ -206,7 +203,6 @@ export function checkCard(c: Card, opts: { buttons?: 'one-primary' | 'none' } = 
         if (code) problems.push(`文字里有内部代号「${code[1]}」：${content.slice(0, 40)}`);
       }
       if (tag === 'button') {
-        buttons += 1;
         if (typeof o.type === 'string' && o.type.startsWith('primary')) primaries += 1;
         const behaviors = Array.isArray(o.behaviors) ? (o.behaviors as Record<string, unknown>[]) : [];
         if (behaviors.length === 0) problems.push('按钮没有 behaviors');
@@ -241,10 +237,6 @@ export function checkCard(c: Card, opts: { buttons?: 'one-primary' | 'none' } = 
   walk(c.header, false);
   walk(c.body, false);
   if (elements > 200) problems.push(`组件和元素共 ${elements} 个，超过 200`);
-  if (opts.buttons === 'none') {
-    if (buttons > 0) problems.push(`这张卡不该有按钮，却有 ${buttons} 个`);
-  } else if (primaries !== 1) {
-    problems.push(`主按钮有 ${primaries} 个，应当正好 1 个`);
-  }
+  if (primaries !== 1) problems.push(`主按钮有 ${primaries} 个，应当正好 1 个`);
   return problems;
 }
