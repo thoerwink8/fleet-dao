@@ -22,6 +22,7 @@ export const DETAIL_PAGE_PR_BODY = [
   '- `/efforts` 思考档位：没有这个毛病。整页一份列表。',
   '- `/env` 环境页远程列：有毛病，这次修。收到过快照的列按编号读 GET /api/nodes/:nodeId；本台列是 GET /api/env，不是按编号。',
   '- `/france` 法国总览：没有这个毛病。整页一份单例，不是按编号。',
+  '- `/resources` 资源页（#1986）：没有这个毛病。本台读主页那份单例；选了远程环境按编号读 GET /api/nodes/:nodeId，和主页一样经 useShownError 记住那次失败、404 写「没有这个环境」不重试。',
   '- `/models` 占位：没有这个毛病。soon.tsx，不按编号读。',
   '- `/billing` 占位：没有这个毛病。soon.tsx，不按编号读。',
   '- `/record` 占位：没有这个毛病。soon.tsx，不按编号读。',

@@ -6,6 +6,7 @@ import { afterEach, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
 import type { HomeResponse } from '../api/types';
 import type { HomeResources } from '../components/home/types';
+import { isRemotePage } from '../components/node-notice';
 import ResourcesPage from '../routes/resources';
 import { renderApp } from './harness';
 
@@ -138,4 +139,8 @@ test('整块没有资源读数：写明这台后端没给', async () => {
   renderApp(<ResourcesPage />, { api: withResources(undefined) });
   await waitFor(() => expect(document.querySelector('[data-resources-missing]')).toBeTruthy());
   expect(text('[data-resources-missing]')).toBe('这台后端没给资源读数');
+});
+
+test('选了远程环境时资源页照样渲染（外壳不换成「只看得了本台」）：首页小卡带 ?node= 跳过来不落空', () => {
+  expect(isRemotePage('/resources')).toBe(true);
 });
