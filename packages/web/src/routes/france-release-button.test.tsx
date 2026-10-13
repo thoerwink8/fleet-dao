@@ -140,7 +140,7 @@ describe('/france 页「发布到法国」按钮', () => {
     expect(await screen.findByText('法国已经是最新，没有要发的')).toBeTruthy();
   });
 
-  test('后端拒了（比如头在点之前换了）：不当成发出去了，按钮回来能再点', async () => {
+  test('后端拒了（比如头在点之前换了）：不当成发出去了，框留着写原因（#2009），关掉后按钮回来能再点', async () => {
     const { calls } = setup(card(), async () => {
       throw new Error('主线头已经不是 2005b290a 了');
     });
@@ -148,6 +148,12 @@ describe('/france 页「发布到法国」按钮', () => {
     const dialog = await screen.findByRole('alertdialog');
     fireEvent.click(within(dialog).getByRole('button', { name: '确认发布' }));
     await waitFor(() => expect(calls).toEqual([HEAD]));
+    // 失败留在原处：框里一行 role=alert 写后端的原因，确认键恢复（不再转圈）
+    const alert = await within(dialog).findByRole('alert');
+    expect(alert.textContent).toContain('主线头已经不是 2005b290a 了');
+    const confirm = within(dialog).getByRole('button', { name: '确认发布' });
+    expect(confirm.getAttribute('aria-busy')).toBeNull();
+    fireEvent.click(within(dialog).getByRole('button', { name: '先不' }));
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
     expect(((await button()) as HTMLButtonElement).disabled).toBe(false);
   });

@@ -119,6 +119,8 @@ type DialogState =
 
 interface TaskActionsApi {
   trigger(action: UiAction, target: ActionTarget): void;
+  /** 这张单的这个操作正在发（任务页那排按钮转圈用，#2009）。 */
+  pending(taskId: string, action: UiAction): boolean;
 }
 
 const Ctx = createContext<TaskActionsApi | null>(null);
@@ -127,9 +129,13 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
   // 只取 mutateAsync（它在各次渲染间不变）：整个 mutation 对象每次渲染都是新的，拿它当依赖会让 trigger 每次都变。
   const { mutateAsync } = useTaskAction();
   const [dialog, setDialog] = useState<DialogState>(null);
+  // 正在发的「单号:操作」：同一张单同一个操作在发的时候，那排按钮里对应那颗转圈、点不动
+  const [inFlight, setInFlight] = useState<ReadonlySet<string>>(() => new Set());
 
   const send = useCallback(
     async (target: ActionTarget, body: TaskActionBody, label: string) => {
+      const key = `${target.taskId}:${body.action}`;
+      setInFlight((s) => new Set(s).add(key));
       try {
         await mutateAsync({ taskId: target.taskId, body });
         toast.success(`${label}：${targetName(target)}`, {
@@ -144,6 +150,14 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
         });
       } catch (e) {
         toast.error(`${label}没成功`, { description: errorText(e) });
+        // 抛给确认框：框留着、写原因、能再点（#2009）
+        throw e;
+      } finally {
+        setInFlight((s) => {
+          const next = new Set(s);
+          next.delete(key);
+          return next;
+        });
       }
     },
     [mutateAsync],
@@ -154,12 +168,16 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
       if (action === 'stop') setDialog({ kind: 'stop', target });
       else if (action === 'pause') setDialog({ kind: 'pause', target });
       else if (action === 'redo') setDialog({ kind: 'redo', target });
-      else void send(target, { action }, ACTIONS[action].label);
+      // 继续不弹确认框：失败已经弹了 toast，这里不再往外抛
+      else send(target, { action }, ACTIONS[action].label).catch(() => {});
     },
     [send],
   );
 
-  const api = useMemo(() => ({ trigger }), [trigger]);
+  const api = useMemo(
+    () => ({ trigger, pending: (taskId: string, action: UiAction) => inFlight.has(`${taskId}:${action}`) }),
+    [trigger, inFlight],
+  );
   const close = () => setDialog(null);
 
   return (
@@ -180,12 +198,12 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
                 <AlertDialogCancel>先不</AlertDialogCancel>
                 <AlertDialogAction
                   variant="outline"
-                  onClick={() => void send(dialog.target, { action: 'pause', mode: 'hard' }, '暂停')}
+                  onConfirm={() => send(dialog.target, { action: 'pause', mode: 'hard' }, '暂停')}
                 >
                   立刻停下
                 </AlertDialogAction>
                 <AlertDialogAction
-                  onClick={() => void send(dialog.target, { action: 'pause', mode: 'soft' }, '暂停')}
+                  onConfirm={() => send(dialog.target, { action: 'pause', mode: 'soft' }, '暂停')}
                 >
                   做完这一段再停
                 </AlertDialogAction>
@@ -208,7 +226,7 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
                 <AlertDialogCancel>先不</AlertDialogCancel>
                 <AlertDialogAction
                   variant="destructive"
-                  onClick={() => void send(dialog.target, { action: 'stop' }, '叫停')}
+                  onConfirm={() => send(dialog.target, { action: 'stop' }, '叫停')}
                 >
                   叫停
                 </AlertDialogAction>
@@ -229,7 +247,7 @@ export function TaskActionsProvider({ children }: { children: ReactNode }) {
               </AlertDialogHeader>
               <AlertDialogFooter>
                 <AlertDialogCancel>先不</AlertDialogCancel>
-                <AlertDialogAction onClick={() => void send(dialog.target, { action: 'redo' }, '重做')}>
+                <AlertDialogAction onConfirm={() => send(dialog.target, { action: 'redo' }, '重做')}>
                   重做
                 </AlertDialogAction>
               </AlertDialogFooter>
@@ -266,7 +284,7 @@ export function useTargetActions(target: ActionTarget | undefined): RunnableActi
 
 /** 任务页和看板侧边详情上的一排字按钮。没有该画的动作时什么都不画。置灰的悬停写明原因。 */
 export function ActionButtons({ target, className }: { target: ActionTarget; className?: string }) {
-  const { trigger } = useTaskActions();
+  const { trigger, pending } = useTaskActions();
   const offers = taskActionButtons(target);
   if (!offers.length) return null;
   // 叫停与暂停、右侧「回主页」之间加竖线/间距，降低误点（#1751）
@@ -288,6 +306,8 @@ export function ActionButtons({ target, className }: { target: ActionTarget; cla
             size="sm"
             variant="outline"
             disabled={disabledReason !== undefined}
+            // 正在发这一个操作（继续是直接发的；暂停、叫停、重做在确认框里等）：这颗转圈、点不动
+            loading={pending(target.taskId, action)}
             title={disabledReason}
             className={cn('h-8', def.danger && 'text-ink-fail')}
             onClick={() => {

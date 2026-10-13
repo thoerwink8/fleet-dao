@@ -1,6 +1,6 @@
 // 设计规范检查（#1847，并入了 #182 / #1446 的 lint-arbitrary）。扫描脚本在 packages/web/scripts/lint-design.ts，
 // 规则表在 docs/design/驾驶舱界面.md 第八节。本测试盯三块：
-//   1) 每条规则 R0–R11：一条故意造红的写法要报出来，一条合规写法要放过；
+//   1) 每条规则 R0–R12：一条故意造红的写法要报出来，一条合规写法要放过；
 //   2) 计数；
 //   3) 整个 packages/web/src 严格模式一条违规都不许有（没有旧账清单，#1855）。
 import { readFileSync } from 'node:fs';
@@ -180,6 +180,112 @@ describe('每条规则：造红的报、合规的放', () => {
     expect(rulesOf(`<span>在跑 3 个</span>`)).toEqual([]);
     expect(rulesOf(`<span>已关 <b>3</b> 条路由</span>`)).toEqual([]);
     expect(rulesOf(`const word = '在跑';`)).toEqual([]);
+  });
+
+  // R12（#2009）：会发写请求的按钮要有忙态
+  test('R12 写请求按钮没忙态：onClick 直接、经函数名、经 useCallback 调 mutate 都报（故意造红）', () => {
+    const direct = `export function A() {
+  const save = useSave();
+  return <Button onClick={() => save.mutate({ on: true })}>保存</Button>;
+}`;
+    expect(rulesOf(direct)).toEqual(['R12']);
+    expect(scanSource(direct, PAGE)[0]?.line).toBe(3);
+    expect(formatHit(scanSource(direct, PAGE)[0] as Hit)).toContain('loading-ok');
+
+    // 确认框老写法：preventDefault 后调本文件里的 confirm()，confirm 里 mutate
+    const viaName = `export function B() {
+  const update = useUpdate();
+  const confirm = () => {
+    update.mutate({ on: false }, { onSuccess: () => {} });
+  };
+  return (
+    <AlertDialogAction
+      onClick={(e) => {
+        e.preventDefault();
+        confirm();
+      }}
+    >
+      关闭
+    </AlertDialogAction>
+  );
+}`;
+    expect(rulesOf(viaName)).toEqual(['R12']);
+
+    const viaCallback = `export function C() {
+  const { mutateAsync } = useTaskAction();
+  const send = useCallback(async () => { await mutateAsync({ id: 1 }); }, [mutateAsync]);
+  return <AlertDialogAction onClick={() => void send()}>叫停</AlertDialogAction>;
+}`;
+    expect(rulesOf(viaCallback)).toEqual(['R12']);
+
+    const form = `export function D() {
+  const save = useSave();
+  return (
+    <form onSubmit={(e) => { e.preventDefault(); save.mutate(1); }}>
+      <Button type="submit">保存</Button>
+      <SaveButton canSave />
+    </form>
+  );
+}`;
+    expect(rulesOf(form)).toEqual(['R12', 'R12']);
+  });
+
+  test('R12 放行：loading、onConfirm、disabled 带 pending、SaveButton pending、不发请求的按钮', () => {
+    expect(
+      rulesOf(`export function A() {
+  const save = useSave();
+  return (
+    <>
+      <Button loading={save.isPending} onClick={() => save.mutate(1)}>保存</Button>
+      <Button disabled={save.isPending} onClick={() => save.mutate(2)}>保存</Button>
+      <Button aria-disabled={pending} onClick={() => save.mutate(3)}>保存</Button>
+      <AlertDialogAction onConfirm={() => save.mutateAsync(4)}>确认</AlertDialogAction>
+      <Button onClick={() => setOpen(true)}>打开</Button>
+      <form onSubmit={() => save.mutate(5)}>
+        <SaveButton canSave pending={save.isPending} />
+        <Button type="button" onClick={() => setOpen(false)}>取消</Button>
+      </form>
+    </>
+  );
+}`),
+    ).toEqual([]);
+  });
+
+  test('R12 例外：开标签里或上一行写 loading-ok: <理由> 放行；只写 loading-ok: 没理由不放行', () => {
+    expect(
+      rulesOf(`export function A() {
+  const save = useSave();
+  return (
+    <>
+      {/* loading-ok: 只是本地开关，写请求在别处 */}
+      <Button onClick={() => save.mutate(1)}>一</Button>
+      <Button
+        // loading-ok: TODO #2012
+        onClick={() => save.mutate(2)}
+      >
+        二
+      </Button>
+    </>
+  );
+}`),
+    ).toEqual([]);
+    expect(
+      rulesOf(`export function A() {
+  const save = useSave();
+  return (
+    <>
+      {/* loading-ok: */}
+      <Button onClick={() => save.mutate(1)}>一</Button>
+    </>
+  );
+}`),
+    ).toEqual(['R12']);
+  });
+
+  test('R12 解析不了的文件报出来，不当没事放过', () => {
+    const [hit] = scanSource(`const x = save.mutate(1); <Button onClick={`, PAGE);
+    expect(hit?.rule).toBe('R12');
+    expect(hit?.cls).toBe('解析不了');
   });
 });
 
