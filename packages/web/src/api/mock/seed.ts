@@ -1822,6 +1822,8 @@ export function createSeed(now: number): MockState {
       judge: ['sonnet-5', 'deepseek-v4.1-flash'],
       // 临时指挥官整理待办（#1338）：和真骨架一样 Sonnet、Opus 在前
       groom: ['sonnet-5', 'opus-5.5'],
+      // 提需求的指挥官会话（#2061）：默认 Sonnet，人在对话里能换 Opus
+      'intake-chat': ['sonnet-5', 'opus-5.5'],
     },
     routing: {
       'opus-5.5': ['r-ca-opus', 'r-cb-opus', 'r-rl-opus'],
