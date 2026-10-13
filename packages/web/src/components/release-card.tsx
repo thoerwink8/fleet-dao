@@ -4,6 +4,7 @@
 // 四行事实用 KeyValue（片 7，#1853）；提交号用 Tag，CI 状态用 StatusBadge。
 import { useState } from 'react';
 import { toast } from 'sonner';
+import { SESSION_WAIT_MS } from '../../../../deploy/france/release-request/session-wait.mjs';
 import { errorText, useFranceRelease } from '../api/client';
 import type { ReleaseCard } from '../api/types';
 import { formatAgo } from '../lib/format';
@@ -327,8 +328,8 @@ function ReleaseAction({ card, now }: { card: ReleaseCard; now: number }) {
                   </div>
                 ) : null}
                 <p className="text-meta text-muted-foreground">
-                  点「确认发布」就是同意对外发布，并记一条操作记录。法国会先暂停引擎总开关、等在跑的会话收尾（最多
-                  13
+                  点「确认发布」就是同意对外发布，并记一条操作记录。法国会先暂停引擎总开关、等在跑的会话收尾（最多{' '}
+                  {SESSION_WAIT_MS / 60_000}{' '}
                   分钟），再发版、验证；发完把引擎总开关和接活开关恢复到发版前的样子（发前开着的开回，发前关着的保持关）。
                 </p>
               </div>

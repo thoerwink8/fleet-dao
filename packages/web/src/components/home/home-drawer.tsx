@@ -68,7 +68,7 @@ function DrawerBody({
               aria-controls={`home-drawer-panel-${t.id}`}
               onClick={() => onTab(t.id)}
               className={cn(
-                'relative flex h-10 items-center gap-1.5 rounded-t-md px-3 text-body text-muted-foreground transition-colors hover:text-foreground md:h-9',
+                'relative flex h-11 items-center gap-1.5 rounded-t-md px-3 text-body text-muted-foreground transition-colors hover:text-foreground md:h-9',
                 active && 'font-medium text-foreground',
               )}
             >
@@ -204,7 +204,15 @@ function DrawerButton({ count, open, onOpen }: { count: number; open: boolean; o
 }
 
 /** 抽屉按钮第三段：「本机 2 在跑」「本机没上报」，点开本机会话那一页（#1991）。 */
-function LocalButton({ onOpen, className }: { onOpen(): void; className?: string }) {
+function LocalButton({
+  onOpen,
+  tall = false,
+  className,
+}: {
+  onOpen(): void;
+  tall?: boolean;
+  className?: string;
+}) {
   const brief = useLocalBrief();
   return (
     <button
@@ -214,7 +222,8 @@ function LocalButton({ onOpen, className }: { onOpen(): void; className?: string
       aria-label={`${brief.text}，打开本机会话`}
       onClick={onOpen}
       className={cn(
-        'flex h-8 items-center gap-1.5 border-l px-3 text-body transition-colors hover:bg-accent focus-visible:z-10',
+        'flex items-center gap-1.5 border-l px-3 text-body transition-colors hover:bg-accent focus-visible:z-10',
+        tall ? 'h-11' : 'h-8',
         brief.tone ? inkClass[brief.tone] : 'text-muted-foreground',
         className,
       )}
@@ -301,11 +310,12 @@ export function HomeDrawer({
           <ChevronRight className="size-4 shrink-0 opacity-60" aria-hidden />
         </button>
         <LocalButton
+          tall
           onOpen={() => {
             setTab('local');
             setFloating(true);
           }}
-          className="min-h-11 shrink-0 border-b border-l-0 px-4"
+          className="shrink-0 border-b border-l-0 px-4"
         />
         {afterStrip}
         {children}

@@ -59,6 +59,7 @@ export const HUMAN_TIER_PATHS = [
   'deploy/france/fleet-release-request.service',
   'deploy/france/fleet-release-request.path',
   'deploy/france/release-request/lib.mjs',
+  'deploy/france/release-request/session-wait.mjs',
   'deploy/france/release-request/fleet-release-request.mjs',
   // sshd 抗扫描和 fail2ban 的 sshd jail（#1348，setup_sshd_hardening、setup_fail2ban_sshd）：改的是登录入口，配错了连 root 都登不上，要人跑整套
   'deploy/france/sshd-hardening.conf',

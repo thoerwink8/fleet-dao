@@ -727,6 +727,7 @@ test('人工档登记：接活的单元和脚本都在 HUMAN_TIER_PATHS 里（�
     'deploy/france/fleet-release-request.service',
     'deploy/france/fleet-release-request.path',
     'deploy/france/release-request/lib.mjs',
+    'deploy/france/release-request/session-wait.mjs',
     'deploy/france/release-request/fleet-release-request.mjs',
   ]) {
     assert.ok(HUMAN_TIER_PATHS.includes(f), `${f} 不在 HUMAN_TIER_PATHS`);

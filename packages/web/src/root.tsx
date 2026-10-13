@@ -1,4 +1,3 @@
-import { errMessage } from '@fleet-dao/shared/util';
 import { brand } from '#brand';
 import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
@@ -6,19 +5,11 @@ import './app.css';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MotionConfig } from 'motion/react';
 import { type ReactNode, useState } from 'react';
-import {
-  isRouteErrorResponse,
-  Link,
-  Links,
-  Meta,
-  Outlet,
-  Scripts,
-  ScrollRestoration,
-  useRouteError,
-} from 'react-router';
+import { Links, Meta, Outlet, Scripts, ScrollRestoration, useRouteError } from 'react-router';
 import { ApiProvider } from './api/client';
 import { getApi } from './api/index';
 import { FAVICON, LogoMark } from './components/logo';
+import { RouteErrorPage } from './components/route-error';
 import { ThemeProvider, useTheme } from './components/theme-provider';
 import { Toaster } from './components/ui/sonner';
 import { TooltipProvider } from './components/ui/tooltip';
@@ -94,21 +85,5 @@ export default function App() {
 }
 
 export function ErrorBoundary() {
-  const error = useRouteError();
-  const title = isRouteErrorResponse(error)
-    ? `${error.status} ${error.statusText}`
-    : `${brand.product}出错了`;
-  const detail = isRouteErrorResponse(error) ? String(error.data ?? '') : errMessage(error);
-  return (
-    <main className="grid h-dvh place-items-center bg-background p-6">
-      <div className="max-w-md text-center">
-        <LogoMark className="mx-auto size-10" />
-        <h1 className="mt-4 text-heading font-semibold">{title}</h1>
-        <p className="mt-2 text-body break-words text-muted-foreground">{detail}</p>
-        <Link to="/" className="mt-4 inline-block text-body underline underline-offset-4">
-          回到看板
-        </Link>
-      </div>
-    </main>
-  );
+  return <RouteErrorPage error={useRouteError()} />;
 }

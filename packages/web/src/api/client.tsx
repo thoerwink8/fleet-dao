@@ -246,12 +246,15 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly details: unknown;
-  constructor(status: number, code: string, message: string, details?: unknown) {
+  /** 给人看的 message 之外的原文（网络报错、对不上的字段）。页面收在「详情」里，不摊在主文案上。 */
+  readonly raw?: string;
+  constructor(status: number, code: string, message: string, details?: unknown, raw?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.details = details;
+    if (raw !== undefined) this.raw = raw;
   }
 }
 
@@ -638,13 +641,20 @@ export function usePoolHolds() {
   return useQuery({ queryKey: keys.poolHolds, queryFn: () => api.poolHolds(), refetchInterval: 60_000 });
 }
 
-/** 定时任务不在推送名单里，每 30 秒重拉一次。 */
+/**
+ * 法国页上两档刷新。快的：机器、定时任务、发版进度。慢的：环境、发版卡、命令行工具（GitHub 现读，不要拉太勤）。
+ * 页面上的「每 N 秒」用这两个数，不要再写死。
+ */
+export const POLL_FAST_MS = 30_000;
+export const POLL_SLOW_MS = 60_000;
+
+/** 定时任务不在推送名单里，按 POLL_FAST_MS 重拉。 */
 export function useJobs() {
   const api = useApi();
   return useQuery({
     queryKey: keys.jobs,
     queryFn: () => api.jobs(),
-    refetchInterval: 30_000,
+    refetchInterval: POLL_FAST_MS,
   });
 }
 
@@ -685,36 +695,36 @@ export function useSettings() {
 
 /**
  * /france 页发版一键（#618）：release-train 此刻的状态（在走 / 暂停 / 没在走 / 读不到）。
- * 30 秒重拉一次：release-train 自己跑起来这一步没人推，靠轮。读不到后端也照实显示「没查成」。
+ * 按 POLL_FAST_MS 重拉：release-train 自己跑起来这一步没人推，靠轮。读不到后端也照实显示「没查成」。
  */
 export function useFranceReleaseState() {
   const api = useApi();
   return useQuery({
     queryKey: keys.franceReleaseState,
     queryFn: () => api.franceReleaseState(),
-    refetchInterval: 30_000,
+    refetchInterval: POLL_FAST_MS,
   });
 }
 
 /**
- * /france 页「发版」卡（#1231）：1 分钟重拉一次（主线头、CI 在变；GitHub 现读，不要拉太勤）。读不到后端也照实显示「没查成」。
+ * /france 页「发版」卡（#1231）：按 POLL_SLOW_MS 重拉（主线头、CI 在变；GitHub 现读，不要拉太勤）。读不到后端也照实显示「没查成」。
  */
 export function useFranceReleaseCard() {
   const api = useApi();
   return useQuery({
     queryKey: keys.franceReleaseCard,
     queryFn: () => api.franceReleaseCard(),
-    refetchInterval: 60_000,
+    refetchInterval: POLL_SLOW_MS,
   });
 }
 
-/** /france 页「命令行工具」（#1969、#1971）：一分钟重拉一次。读不到后端也照实显示。 */
+/** /france 页「命令行工具」（#1969、#1971）：按 POLL_SLOW_MS 重拉。读不到后端也照实显示。 */
 export function useCliTools() {
   const api = useApi();
   return useQuery({
     queryKey: keys.franceCliTools,
     queryFn: () => api.franceCliTools(),
-    refetchInterval: 60_000,
+    refetchInterval: POLL_SLOW_MS,
   });
 }
 
@@ -758,14 +768,14 @@ export function useFrancePreflight() {
 
 /**
  * 环境页的读取（#820 片 1）：这一台环境现在怎样。顶栏徽标不用它（名字跟着 /me 带回），只有开着环境页时才拉。
- * 只读、不跨环境。每分钟重拉一次——健康、在跑的会话这些没有实时推送。
+ * 只读、不跨环境。按 POLL_SLOW_MS 重拉——健康、在跑的会话这些没有实时推送。
  */
 export function useEnv({ enabled = true }: { enabled?: boolean } = {}) {
   const api = useApi();
   return useQuery({
     queryKey: keys.env,
     queryFn: () => api.env(),
-    refetchInterval: 60_000,
+    refetchInterval: POLL_SLOW_MS,
     enabled,
   });
 }
@@ -822,14 +832,14 @@ function homeStateOf(query: {
 
 /**
  * 看板多机：本台加每个远程环境（本机 WSL）的新鲜度。别的环境推来快照时 node_reports 推送叫它重拉；
- * 新鲜度按时间变（推送停了没有事件），所以每 30 秒也重拉一次。
+ * 新鲜度按时间变（推送停了没有事件），所以按 POLL_FAST_MS 也重拉一次。
  */
 export function useNodes() {
   const api = useApi();
   return useQuery({
     queryKey: keys.nodes,
     queryFn: () => api.nodes(),
-    refetchInterval: 30_000,
+    refetchInterval: POLL_FAST_MS,
   });
 }
 
@@ -856,7 +866,7 @@ export function useNodeSnapshots(ids: readonly string[]) {
     queries: ids.map((id) => ({
       queryKey: keys.node(id),
       queryFn: () => api.node(id),
-      refetchInterval: 30_000,
+      refetchInterval: POLL_FAST_MS,
       retry: retryUnlessMissing,
     })),
   });

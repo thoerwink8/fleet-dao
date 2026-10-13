@@ -3,7 +3,7 @@
 // 有没提交、没推的改动，或正被任务、会话用着的一律拒删，结果里写明拒了哪棵、为什么。
 // 怎么写每一格在 repos.ts；这里只管排版和按钮。
 import { FolderGit2, Trash2 } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { type ReactNode, useState } from 'react';
 import { toast } from 'sonner';
 import { errorText, useWorktreeCleanup, useWorktrees } from '../../api/client';
 import type { WorktreeCleanupView } from '../../api/types';
@@ -16,6 +16,16 @@ import { LoadError, LoadingRows } from '../layout/load-state';
 import { Notice } from '../layout/notice';
 import { Section } from '../layout/section';
 import { StatusBadge } from '../layout/status-badge';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '../ui/alert-dialog';
 import { Button } from '../ui/button';
 import { cleanupWord, type RepoDisk, type RepoRow, repoRows, type TreeView, treeStateWord } from './repos';
 import type { Cell } from './view';
@@ -217,24 +227,16 @@ export function ReposSection({
 }) {
   const q = useWorktrees();
   const cleanup = useWorktreeCleanup();
+  const [askingCleanup, setAskingCleanup] = useState(false);
   const latest = q.data?.cleanups[0];
   const busy = latest?.status === 'queued' || latest?.status === 'running' || cleanup.isPending;
 
-  const onCleanup = () =>
-    cleanup.mutate(
-      {},
-      {
-        onSuccess: () => toast.success('已叫法国清理没用的工作树'),
-        onError: (e) => toast.error('没叫成', { description: errorText(e) }),
-      },
-    );
-
-  // loading 只跟这一次点击（转圈）；「已经有一次在排队/在做」那一段整块置灰走 disabled（#1993）
+  // 点一下先确认（#2017）。loading 只跟这一次请求（转圈）；已经有一次在排队或在做，整块置灰走 disabled（#1993、#2012）。
   const button = remote ? null : (
     <Button
       size="sm"
       variant="outline"
-      onClick={onCleanup}
+      onClick={() => setAskingCleanup(true)}
       loading={cleanup.isPending}
       disabled={busy || !q.data}
       data-cleanup-button
@@ -252,103 +254,131 @@ export function ReposSection({
       : '每个仓在法国占的磁盘、工作树和会话';
 
   return (
-    <Section title="仓库" description={description} actions={button} flush data-resources-repos>
-      {remote ? (
-        <div className="p-4 text-body text-muted-foreground">工作树清单只在法国这台有，切回本台看。</div>
-      ) : q.isLoading ? (
-        <div className="p-4">
-          <LoadingRows rows={3} />
-        </div>
-      ) : q.error ? (
-        <div className="p-4">
-          <LoadError what="工作树清单" error={q.error} onRetry={() => void q.refetch()} />
-        </div>
-      ) : !result ? null : result.kind === 'none' ? (
-        <div className="p-4">
-          <EmptyState icon={FolderGit2} title="还没有清单" hint={result.why} />
-        </div>
-      ) : result.kind === 'unread' ? (
-        <div className="p-4 text-body text-muted-foreground" data-repos-unread>
-          没读到：{result.why}
-        </div>
-      ) : (
-        <>
-          {cleanup.error || latest || result.kind === 'failed' ? (
-            <div className="grid gap-2 px-4 pt-4 lg:px-5">
-              {cleanup.error ? (
-                <Notice tone="fail" title="没叫成">
-                  {errorText(cleanup.error)}
-                </Notice>
-              ) : null}
-              {latest ? <CleanupNotice c={latest} now={now} /> : null}
-              {result.kind === 'failed' ? (
-                <Notice tone="fail" title="这一轮工作树没查成">
-                  {result.why}（下面只列镜像，树的列表不可信）
-                </Notice>
-              ) : null}
-            </div>
-          ) : null}
-          <List>
-            <ListRow
-              aria-hidden
-              className="max-md:hidden"
-              summary={
-                <>
-                  <span className="block min-w-0 flex-1">
-                    <RepoGrid
-                      head
-                      name="仓"
-                      trees="工作树"
-                      cpu="CPU"
-                      memory="内存"
-                      disk="磁盘（镜像 + 树）"
-                    />
-                  </span>
-                  <span className="size-4 shrink-0" />
-                </>
-              }
-            />
-            {result.rows.map((row) => (
+    <>
+      <Section title="仓库" description={description} actions={button} flush data-resources-repos>
+        {remote ? (
+          <div className="p-4 text-body text-muted-foreground">工作树清单只在法国这台有，切回本台看。</div>
+        ) : q.isLoading ? (
+          <div className="p-4">
+            <LoadingRows rows={3} />
+          </div>
+        ) : q.error ? (
+          <div className="p-4">
+            <LoadError what="工作树清单" error={q.error} onRetry={() => void q.refetch()} />
+          </div>
+        ) : !result ? null : result.kind === 'none' ? (
+          <div className="p-4">
+            <EmptyState icon={FolderGit2} title="还没有清单" hint={result.why} />
+          </div>
+        ) : result.kind === 'unread' ? (
+          <div className="p-4 text-body text-muted-foreground" data-repos-unread>
+            没读到：{result.why}
+          </div>
+        ) : (
+          <>
+            {cleanup.error || latest || result.kind === 'failed' ? (
+              <div className="grid gap-2 px-4 pt-4 lg:px-5">
+                {cleanup.error ? (
+                  <Notice tone="fail" title="没叫成">
+                    {errorText(cleanup.error)}
+                  </Notice>
+                ) : null}
+                {latest ? <CleanupNotice c={latest} now={now} /> : null}
+                {result.kind === 'failed' ? (
+                  <Notice tone="fail" title="这一轮工作树没查成">
+                    {result.why}（下面只列镜像，树的列表不可信）
+                  </Notice>
+                ) : null}
+              </div>
+            ) : null}
+            <List>
               <ListRow
-                key={row.repo}
-                data-repo={row.repo}
-                expandable
+                aria-hidden
+                className="max-md:hidden"
                 summary={
-                  <span className="block min-w-0 flex-1 py-1">
-                    <RepoGrid
-                      name={
-                        <span className="block min-w-0">
-                          <span className="num block truncate text-body font-medium" title={row.repo}>
-                            {row.repo}
-                          </span>
-                          <span className="block truncate text-meta text-muted-foreground">
-                            {!row.treesKnown
-                              ? '这一轮树没查成'
-                              : row.held
-                                ? `${row.held} 棵有改动或没查成，清理会拒删`
-                                : '没有要人看的树'}
-                          </span>
-                        </span>
-                      }
-                      trees={
-                        row.treesKnown ? (
-                          <span className="num">{row.trees.length} 棵</span>
-                        ) : (
-                          <span className="text-muted-foreground">没查成</span>
-                        )
-                      }
-                      cpu={<CellText cell={row.cpu} />}
-                      memory={<CellText cell={row.memory} />}
-                      disk={<DiskText disk={row.disk} />}
-                    />
-                  </span>
+                  <>
+                    <span className="block min-w-0 flex-1">
+                      <RepoGrid
+                        head
+                        name="仓"
+                        trees="工作树"
+                        cpu="CPU"
+                        memory="内存"
+                        disk="磁盘（镜像 + 树）"
+                      />
+                    </span>
+                    <span className="size-4 shrink-0" />
+                  </>
                 }
-                details={<RepoDetail row={row} now={now} />}
               />
-            ))}
-          </List>
-        </>
-      )}
-    </Section>
+              {result.rows.map((row) => (
+                <ListRow
+                  key={row.repo}
+                  data-repo={row.repo}
+                  expandable
+                  summary={
+                    <span className="block min-w-0 flex-1 py-1">
+                      <RepoGrid
+                        name={
+                          <span className="block min-w-0">
+                            <span className="num block truncate text-body font-medium" title={row.repo}>
+                              {row.repo}
+                            </span>
+                            <span className="block truncate text-meta text-muted-foreground">
+                              {!row.treesKnown
+                                ? '这一轮树没查成'
+                                : row.held
+                                  ? `${row.held} 棵有改动或没查成，清理会拒删`
+                                  : '没有要人看的树'}
+                            </span>
+                          </span>
+                        }
+                        trees={
+                          row.treesKnown ? (
+                            <span className="num">{row.trees.length} 棵</span>
+                          ) : (
+                            <span className="text-muted-foreground">没查成</span>
+                          )
+                        }
+                        cpu={<CellText cell={row.cpu} />}
+                        memory={<CellText cell={row.memory} />}
+                        disk={<DiskText disk={row.disk} />}
+                      />
+                    </span>
+                  }
+                  details={<RepoDetail row={row} now={now} />}
+                />
+              ))}
+            </List>
+          </>
+        )}
+      </Section>
+      <AlertDialog open={askingCleanup} onOpenChange={setAskingCleanup}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>清理没用的工作树？</AlertDialogTitle>
+            <AlertDialogDescription>
+              叫法国删掉没在用的工作树。正在用的、有没推提交的不会删，结果写在这一节。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>先不</AlertDialogCancel>
+            <AlertDialogAction
+              onConfirm={async () => {
+                try {
+                  await cleanup.mutateAsync({});
+                  toast.success('已叫法国清理没用的工作树');
+                } catch (err) {
+                  toast.error('没叫成', { description: errorText(err) });
+                  throw err;
+                }
+              }}
+            >
+              确认清理
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
