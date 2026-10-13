@@ -1,7 +1,7 @@
-# fleet-dao 自动发布单元每 5 分钟读一轮主线（fleet-auto-release.service，只读不发）。france.sh 装。
+# fleet-dao 自动发布单元每 5 分钟读一轮主线（fleet-auto-release.service：读数，主线绿了请求发版）。france.sh 装。
 # 停它：systemctl disable --now fleet-auto-release.timer（后端的 /healthz 会在 20 分钟后标「自动发布没报到」）。
 [Unit]
-Description=fleet-dao 自动发布单元每 5 分钟读一轮主线（只读）
+Description=fleet-dao 自动发布单元每 5 分钟读一轮主线（读数，绿了请求发版）
 
 [Timer]
 # 只写 OnUnitInactiveSec 的定时器在服务一次都没跑过时永远不响：装上 2 分钟后先跑一轮

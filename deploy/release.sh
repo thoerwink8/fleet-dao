@@ -1959,13 +1959,13 @@ do_check() {
   health_gate "$cur" "" || true
 }
 
-# 自动发布单元（只读）的读数（fleet-auto-release 每一轮写的状态文件）照实列出来：主线头、CI、在用的落后几个、这一轮读到了什么、规矩同步到哪、
+# 自动发布单元的读数（fleet-auto-release 每一轮写的状态文件）照实列出来：主线头、CI、在用的落后几个、这一轮读到了什么、自动发版为什么发或没发、规矩同步到哪、
 # 装机脚本装到哪。跟不跟得上主线的判定在后端 /healthz 的 deploy_lag 一项（下面健康检查里逐项列出）
 check_auto_release() {
   local out line
   step "自动发布"
   if [[ "$(systemctl is-active fleet-auto-release.timer 2>/dev/null)" == active ]]; then
-    ok "fleet-auto-release.timer 在跑（每 5 分钟读一轮主线，只读不发）"
+    ok "fleet-auto-release.timer 在跑（每 5 分钟读一轮主线，绿了请求发版）"
   else
     pending "fleet-auto-release.timer 没在跑：落后几个的读数不会更新（装：bash /srv/fleet-dao/deploy/france.sh）"
   fi
