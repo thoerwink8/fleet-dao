@@ -44,8 +44,6 @@
 //   不跑工具全靠 探针提示词（probePrompt）那句「不要调用任何工具」，服务端那边会不会听不是我们控制得了的——这是协议本身的限制，
 //   不是漏接了什么。
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import {
   type AgentRunOptions,
   assertSessionEffort,
@@ -64,7 +62,6 @@ import {
   grokRunFacts,
   type LedgerFs,
   type LineMeta,
-  MIRASIM_ROLES,
   type MirasimConnect,
   type MirasimRunOptions,
   type MirasimRunReport,
@@ -225,6 +222,11 @@ export interface HostRunSpec {
    * probe = 路由探针：一个命令都不许跑，能不存会话记录就不存。
    */
   purpose: 'work' | 'probe';
+  /**
+   * 这次起会话的用途（阶段类型，或探针的 probe）。Mirasim 起会话必给，插头按它核对，缺了拒。
+   * 别的执行方式不看。和上面的 purpose（work / probe，命令放不放行）不是同一件事。
+   */
+  routingPurpose?: string;
 }
 
 export interface HostRunHooks {
@@ -770,25 +772,6 @@ export function grokReport(report: GrokRunReport): HostReport {
  */
 const MIRASIM_MODELLESS_AGENTS = new Set(['pi']);
 
-/** 目录里的型号：模型 id 和路由的上游串。读不到就抛，不拿空目录放行。 */
-function mirasimModelDirectory(): readonly string[] {
-  const file = fileURLToPath(new URL('../../../../deploy/catalog.json', import.meta.url));
-  let raw: unknown;
-  try {
-    raw = JSON.parse(readFileSync(file, 'utf8')) as unknown;
-  } catch (err) {
-    throw new Error(`读不到模型目录 ${file}，Mirasim 起会话前对不上型号：${(err as Error).message}`);
-  }
-  const models: string[] = [];
-  const rec = raw as { models?: { id?: string }[]; routes?: { upstreamModel?: string | null }[] };
-  for (const m of rec.models ?? []) if (typeof m?.id === 'string' && m.id) models.push(m.id);
-  for (const r of rec.routes ?? []) {
-    if (typeof r?.upstreamModel === 'string' && r.upstreamModel) models.push(r.upstreamModel);
-  }
-  if (models.length === 0) throw new Error(`模型目录 ${file} 里没有型号，Mirasim 起会话对不上`);
-  return [...new Set(models)];
-}
-
 /** 认不出的模型串明确报错（不瞎猜执行体）：故意造这条失败的测试见 hosts.test.ts。 */
 export function mirasimAgentFor(upstreamModel: string, rosterExecutor?: string | null): string {
   const resolved = resolveMirasimExecutor({ rosterExecutor, upstreamModel });
@@ -814,16 +797,18 @@ function mirasimDriver(
       if (spec.session.mode === 'fork') {
         throw new Error('Mirasim 没有 fork：换了账号池要开新会话带接力任务书');
       }
-      const effort = applySessionEffort('mirasim', spec);
-      const agent = mirasimAgentFor(effort.model, spec.executor);
+      // 先认执行体（认不出是「执行体未知」，不是缺角色），再用原始档位核对：档位越界要在合成档位之前报出来。
+      // 不另传目录：插头和这里都用内置名册，省掉目录不能绕过。
+      const agent = mirasimAgentFor(spec.model, spec.executor);
       const modeless = MIRASIM_MODELLESS_AGENTS.has(agent);
       const launchProblem = mirasimLaunchProblem({
+        ...(spec.routingPurpose !== undefined ? { purpose: spec.routingPurpose } : {}),
         agent,
-        ...(modeless ? { expectModel: effort.model } : { model: effort.model }),
-        ...(effort.pass ? { effort: effort.pass } : {}),
-        catalog: { roles: MIRASIM_ROLES, models: mirasimModelDirectory() },
+        ...(modeless ? { expectModel: spec.model } : { model: spec.model }),
+        ...(spec.effort !== undefined ? { effort: spec.effort } : {}),
       });
       if (launchProblem) throw new Error(launchProblem);
+      const effort = applySessionEffort('mirasim', spec);
       const report = await run(
         {
           runId: spec.runId,
@@ -832,8 +817,9 @@ function mirasimDriver(
           agent,
           // 只留「中继额度」这一种路由（design 第三节第 12 条；MS-28：不许反代，只能用官方客户端）
           route: 'cloud',
+          ...(spec.routingPurpose !== undefined ? { purpose: spec.routingPurpose } : {}),
           ...(effort.pass ? { effort: effort.pass } : {}),
-          ...(MIRASIM_MODELLESS_AGENTS.has(agent) ? { expectModel: effort.model } : { model: effort.model }),
+          ...(modeless ? { expectModel: effort.model } : { model: effort.model }),
           session:
             spec.session.mode === 'resume' ? { mode: 'resume', key: spec.session.id } : { mode: 'new' },
           // 时限照引擎给的（和另外三家一样）：一次性段的总时长比 one-shot 早一分钟到、驱动先报 wall_clock_timeout，

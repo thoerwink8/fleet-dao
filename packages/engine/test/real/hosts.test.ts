@@ -1106,7 +1106,12 @@ describe('Mirasim 的驱动（#345）', () => {
     return { fake, driver: drivers({ mirasim: fake.run }).mirasim };
   };
   const mirasimSpec = (over: Partial<HostRunSpec> = {}) =>
-    spec({ model: 'deepseek-flash', session: { mode: 'new', id: 'ignored' }, ...over });
+    spec({
+      model: 'deepseek-flash',
+      session: { mode: 'new', id: 'ignored' },
+      routingPurpose: 'execute',
+      ...over,
+    });
 
   it('会话号不是我们起的：先回一眼看得出不是真号的临时号（cursor 同一个道理），server 的 accepted 帧才给真号', async () => {
     const { driver } = mirasimWith({ state: { text: 'OK' } });
@@ -1158,6 +1163,7 @@ describe('Mirasim 的驱动（#345）', () => {
     const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
     await driver.run(mirasimSpec(), {});
     expect(fake.specs[0]?.route).toBe('cloud');
+    expect(fake.specs[0]?.purpose).toBe('execute');
   });
 
   it('模型串按前缀或路由上记下的执行体：一般执行体带 model；只有执行体真是 pi 时不带 model，只带 expectModel（PI-02）', async () => {
@@ -1182,6 +1188,18 @@ describe('Mirasim 的驱动（#345）', () => {
     await expect(driver.run(mirasimSpec({ model: 'glm-6' }), {})).rejects.toThrow(
       'Mirasim 认不出这个模型该起哪个执行体：glm-6',
     );
+    expect(fake.count()).toBe(0);
+  });
+
+  it('没给用途、执行体不在名册、型号不在目录、档位越界：不起插头【故意造出的失败】', async () => {
+    const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
+    const { routingPurpose: _drop, ...noPurpose } = mirasimSpec();
+    await expect(driver.run(noPurpose, {})).rejects.toThrow(/缺用途/);
+    await expect(
+      driver.run(mirasimSpec({ executor: 'no-such-role', model: 'deepseek-flash' }), {}),
+    ).rejects.toThrow(/缺角色/);
+    await expect(driver.run(mirasimSpec({ model: 'kimi-code/k3' }), {})).rejects.toThrow(/型号不在目录里/);
+    await expect(driver.run(mirasimSpec({ effort: 'turbo' }), {})).rejects.toThrow(/档位越界/);
     expect(fake.count()).toBe(0);
   });
 
@@ -1325,7 +1343,7 @@ describe('思考档位（创始人 2026-09-28 傍晚拍：默认 high；驾驶�
       {},
     );
     await wired.grok.run(spec({ model: 'grok-4.7', session: { mode: 'new', id: id() } }), {});
-    await wired.mirasim.run(spec({ model: 'deepseek-flash' }), {});
+    await wired.mirasim.run(spec({ model: 'deepseek-flash', routingPurpose: 'execute' }), {});
     expect(claude.specs[0]?.effort).toBe('high');
     expect(grok.specs[0]?.reasoningEffort).toBe('high');
     expect(mira.specs[0]?.effort).toBe('high');
@@ -1335,7 +1353,7 @@ describe('思考档位（创始人 2026-09-28 傍晚拍：默认 high；驾驶�
       {},
     );
     await wired.grok.run(spec({ model: 'grok-4.7', session: { mode: 'new', id: id() }, effort: 'low' }), {});
-    await wired.mirasim.run(spec({ model: 'kimi-k3', effort: 'xhigh' }), {});
+    await wired.mirasim.run(spec({ model: 'kimi-k3', effort: 'xhigh', routingPurpose: 'execute' }), {});
     expect(claude.specs[1]?.effort).toBe('medium');
     expect(grok.specs[1]?.reasoningEffort).toBe('low');
     expect(mira.specs[1]).toMatchObject({ agent: 'kimi', model: 'kimi-k3', effort: 'xhigh' });
@@ -1361,9 +1379,9 @@ describe('思考档位（创始人 2026-09-28 傍晚拍：默认 high；驾驶�
     await expect(
       wired.grok.run(spec({ model: 'grok-4.7', session: { mode: 'new', id: id() }, effort: 'turbo' }), {}),
     ).rejects.toThrow('effort');
-    await expect(wired.mirasim.run(spec({ model: 'deepseek-flash', effort: 'turbo' }), {})).rejects.toThrow(
-      'effort',
-    );
+    await expect(
+      wired.mirasim.run(spec({ model: 'deepseek-flash', effort: 'turbo', routingPurpose: 'execute' }), {}),
+    ).rejects.toThrow('effort');
     await expect(wired['cursor-agent'].run(spec({ model: 'auto', effort: 'turbo' }), {})).rejects.toThrow(
       'effort',
     );
@@ -1481,7 +1499,10 @@ describe('驾驶舱配的档位和分档给的怎么合（#470，sessionEffortFo
       spec({ model: 'grok-4.7', session: { mode: 'new', id: id() }, effort: 'xhigh', tierEffort: 'medium' }),
       {},
     );
-    await wired.mirasim.run(spec({ model: 'deepseek-flash', tierEffort: 'medium' }), {});
+    await wired.mirasim.run(
+      spec({ model: 'deepseek-flash', tierEffort: 'medium', routingPurpose: 'execute' }),
+      {},
+    );
     const claudeSpec = claude.specs[0];
     if (!claudeSpec) throw new Error('Claude 的插头没被调用');
     // 插头起 reclaude 用的就是这份参数（runClaudeCode 里同一个 buildClaudeArgs）

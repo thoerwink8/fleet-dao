@@ -223,6 +223,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       ...(route.effort !== null ? { effort: route.effort } : {}),
       ...(input.effort !== undefined ? { tierEffort: input.effort } : {}),
       session: { mode: 'new', id: driver.newSessionId(runId).id },
+      ...(input.purpose !== undefined ? { routingPurpose: input.purpose } : {}),
       purpose: 'work',
     };
     // 内存峰值（#948）：会话跑着时采它 scope 的 memory.peak，收场后交结果；scope 一收场 cgroup 就没了，只能边跑边读

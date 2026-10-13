@@ -145,6 +145,7 @@ if (channel === 'cursor') {
         prompt,
         agent,
         route: route as MirasimRoute,
+        purpose: 'execute',
         ...(expectModel && expectModel !== '-' ? { expectModel } : {}),
         ...(model ? { model } : {}),
         session: resumeId ? { mode: 'resume', key: resumeId } : { mode: 'new' },

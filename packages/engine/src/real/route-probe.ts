@@ -332,6 +332,7 @@ export function sessionProber(driver: HostDriver, deps: ProberDeps): Prober {
           model: t.upstreamModel ?? t.modelId,
           ...(t.executor ? { executor: t.executor } : {}),
           session: { mode: 'new', id: driver.newSessionId(runId).id },
+          routingPurpose: 'probe',
           purpose: 'probe',
         },
         deps.onRateLimit ? { onRateLimit: (reading) => deps.onRateLimit?.(t, reading) } : {},

@@ -50,6 +50,7 @@ export {
 } from './mirasim/meter.ts';
 export {
   DEFAULT_MIRASIM_LIMITS,
+  MIRASIM_LAUNCH_PURPOSES,
   MIRASIM_ROLES,
   type MirasimAccepted,
   type MirasimLaunchCatalog,
@@ -59,6 +60,7 @@ export {
   type MirasimRunReport,
   type MirasimRunSpec,
   type MirasimSessionRef,
+  mirasimCatalogModels,
   mirasimLaunchProblem,
   mirasimRouting,
   mirasimRunFacts,

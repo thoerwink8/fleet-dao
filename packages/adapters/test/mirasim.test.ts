@@ -6,8 +6,10 @@ import { describe, expect, it } from 'vitest';
 import { judgeRun } from '../src/judge.ts';
 import { ledgerRouting, readMirasimLedger } from '../src/mirasim/ledger.ts';
 import {
+  type MirasimLaunchCatalog,
   type MirasimRunReport,
   type MirasimRunSpec,
+  mirasimLaunchProblem,
   mirasimRunFacts,
   mirasimRunSummary,
   runMirasim,
@@ -24,6 +26,20 @@ const FAST = { resubscribeMs: 30, replyMs: 500, stopConfirmMs: 600, ledgerWaitMs
 const kimi = mirasimRecording('mira-kimi');
 const pi = mirasimRecording('mira-pi');
 
+/** 协议夹具里的型号不在 deploy/catalog.json 里：开心路径显式带上这份，别靠省略目录绕过核对。 */
+const FIXTURE_CATALOG: MirasimLaunchCatalog = {
+  roles: ['kimi', 'pi', 'codex', 'grok', 'claude', 'dsh', 'zcode'],
+  models: [
+    'kimi-k3',
+    'kimi-code/k3',
+    'kimi-code/k2',
+    'kimi-code/k3-preview',
+    'gpt-5.6-luna',
+    'gpt-6-sol',
+    'claude-sonnet-5-5',
+  ],
+};
+
 const spec = (extra: Partial<MirasimRunSpec> = {}): MirasimRunSpec => ({
   runId: 'run-m1',
   cwd: tempDir(),
@@ -31,6 +47,8 @@ const spec = (extra: Partial<MirasimRunSpec> = {}): MirasimRunSpec => ({
   agent: 'kimi',
   route: 'cloud',
   expectModel: 'kimi-code/k3',
+  purpose: 'execute',
+  catalog: FIXTURE_CATALOG,
   session: { mode: 'new' },
   limits: FAST,
   testCommands: ['git commit'],
@@ -187,6 +205,45 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     ).rejects.toThrow(/型号不在目录里/);
     expect(server.connects).toBe(0);
     expect(server.framesOf('prompt')).toEqual([]);
+  });
+
+  it('不传目录也拦：缺角色、档位越界、型号不在目录里、缺用途、用途不认识，连都不连【故意造出的失败】', async () => {
+    const server = new FakeMirasim({});
+    // 协议夹具的目录是显式盖上去的。这里拆掉，走内置名册。
+    const bare = (extra: Partial<Omit<MirasimRunSpec, 'catalog' | 'purpose'>> = {}, purpose?: string) => {
+      const { catalog: _catalog, purpose: _purpose, ...rest } = spec();
+      return purpose === undefined ? { ...rest, ...extra } : { ...rest, ...extra, purpose };
+    };
+    await expect(
+      runMirasim(bare({ agent: 'no-such-role', model: 'deepseek-flash' }, 'execute'), {
+        connect: server.connect,
+      }),
+    ).rejects.toThrow(/缺角色：执行体「no-such-role」不在目录里/);
+    await expect(
+      runMirasim(bare({ effort: 'turbo' }, 'execute'), { connect: server.connect }),
+    ).rejects.toThrow(/档位越界：思考档位（effort）/);
+    await expect(
+      runMirasim(bare({ model: 'kimi-code/k3' }, 'execute'), { connect: server.connect }),
+    ).rejects.toThrow(/型号不在目录里：kimi-code\/k3/);
+    await expect(
+      runMirasim(bare({ model: 'sonnet' }, 'execute'), { connect: server.connect }),
+    ).rejects.toThrow(/型号不在目录里/);
+    await expect(runMirasim(bare(), { connect: server.connect })).rejects.toThrow(
+      /缺用途：没给这次起会话的用途/,
+    );
+    await expect(runMirasim(bare({}, 'not-a-purpose'), { connect: server.connect })).rejects.toThrow(
+      /用途不在目录里：not-a-purpose/,
+    );
+    expect(server.connects).toBe(0);
+    expect(server.framesOf('prompt')).toEqual([]);
+    expect(
+      mirasimLaunchProblem({
+        purpose: 'execute',
+        agent: 'dsh',
+        model: 'deepseek-flash',
+        effort: 'high',
+      }),
+    ).toBeNull();
   });
 
   it('带了档位就写进 prompt 帧', async () => {
@@ -983,7 +1040,15 @@ describe('Mirasim 连接', () => {
 
   it('法国上 Mirasim 服务不在、连不上：插头不吞掉这个错，原样报出来判失败【故意造出的失败】', async () => {
     const down = await runMirasim(
-      { runId: 'r1', cwd: tempDir(), prompt: 'x', agent: 'dsh', route: 'cloud', session: { mode: 'new' } },
+      {
+        runId: 'r1',
+        cwd: tempDir(),
+        prompt: 'x',
+        agent: 'dsh',
+        route: 'cloud',
+        purpose: 'execute',
+        session: { mode: 'new' },
+      },
       { connect: new FakeMirasim({ refuse: true }).connect },
     );
     expect(down.launchError).toBe('ECONNREFUSED');

@@ -111,6 +111,7 @@ try {
       prompt: PROMPT,
       agent: 'claude',
       route: 'cloud',
+      purpose: 'execute',
       expectModel: mainModel,
       model: mainModel,
       session: { mode: 'new' },
