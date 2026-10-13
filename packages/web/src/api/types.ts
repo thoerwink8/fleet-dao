@@ -16,6 +16,7 @@ import type {
   ChangeEventSchema,
   ChannelSchema,
   ChannelStateSchema,
+  CliToolsResponseSchema,
   CredentialsResponse,
   DecisionOptionSchema,
   EffortModelSchema,
@@ -29,12 +30,12 @@ import type {
   EnvScheduleSchema,
   EnvSessionsSchema,
   EnvVersionSchema,
-  FranceCliToolsSchema,
   FrancePreflightResponseSchema,
   FranceReleaseStateSchema,
   GroomNowRequest,
   GroomNowResponse,
   GroomStatusResponse,
+  HomeResourcesSchema,
   HomeResponseSchema,
   JobsResponse,
   JobViewSchema,
@@ -272,8 +273,8 @@ export type UpdateSettingBody = z.input<typeof UpdateSettingRequest>;
 
 /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
 export type FranceReleaseState = z.infer<typeof FranceReleaseStateSchema>;
-/** /france 页「命令行工具」（#1971）：各工具的版本、上次升级时刻、这一轮的结局。 */
-export type FranceCliTools = z.infer<typeof FranceCliToolsSchema>;
+/** /france 页「命令行工具」（#1969、#1971）：在用版本、官方最新、落后，以及上次升级时间和升上去的版本。 */
+export type CliToolsResponse = z.infer<typeof CliToolsResponseSchema>;
 /** /france 页「发版」卡（#1231）：四行各自带「查成了 / 没查成 + 原因」。 */
 export type ReleaseCard = z.infer<typeof ReleaseCardSchema>;
 /** /changelog 页「已发布的提交」（#1255）：读法国发布历史，每条提交号、标题、发于何时；读不到整份是 unreadable + 原因。 */
@@ -287,4 +288,6 @@ export type FrancePreflightResponse = z.infer<typeof FrancePreflightResponseSche
 export type LiveEvent =
   | { type: 'ready' }
   | { type: 'resync' }
-  | ({ type: 'change' } & z.infer<typeof ChangeEventSchema>);
+  | ({ type: 'change' } & z.infer<typeof ChangeEventSchema>)
+  /** 这台机器此刻的内存、CPU（#1973）：直接换掉主页数据里的 resources，不重拉主页。 */
+  | { type: 'resources'; resources: z.infer<typeof HomeResourcesSchema> };

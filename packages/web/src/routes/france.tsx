@@ -1,5 +1,5 @@
 // 法国页（#618 的总览 + #820 的对照 + #1086 的总开关，#1217 合成一页）：本机 WSL 撤了以后只剩法国一台，
-// 侧栏只留「法国」。一页里有本台六项事实、引擎总开关、定时任务、发版。多一台机器时六项按台并排（对照表的写法）。
+// 侧栏只留「法国」。一页里有本台六项事实、引擎总开关、命令行工具（#1969）、定时任务、发版。多一台机器时六项按台并排（对照表的写法）。
 // 旧地址 /env 由 routes/env.tsx 转到这里。
 //
 // 「发版一键」只到预检：命令后端写死 pnpm release:onekey preflight，不收参数、不开任意 CLI 口子；预检是只读的——暂停、发版它都不做。
@@ -14,7 +14,9 @@
 //
 // 版式（路由页样板 #1914 铺开）：最上面是本台的标题块（名字、一句结论带状态、一行灰字细节），下面总开关一行；
 // 只有一台时六项是一个区块里的六行（宽屏两栏各三行）；两台及以上每个环境一列、六项各占一行用 subgrid 对齐。
-// 再下面左边定时任务列表（出问题的排前面）、右边发版和命令行工具。每一项一行怎么画在 components/env-facts.tsx。
+// 六项和定时任务之间是命令行工具：两个会话用户和全局 npm，每行在用版本、官方最新、现算的状态；
+// 升过的同一行还有升上去的版本和上次升级时间（#1971）。没有升级按钮。
+// 再下面左边定时任务列表（出问题的排前面）、右边发版。每一项一行怎么画在 components/env-facts.tsx。
 
 import { ArrowRight, ChevronDown, Rocket, SearchX, ServerCog, Timer } from 'lucide-react';
 import { type CSSProperties, type ReactNode, useState } from 'react';
@@ -23,8 +25,8 @@ import { brand } from '#brand';
 import {
   errorText,
   isNotFound,
+  useCliTools,
   useEnv,
-  useFranceCliTools,
   useFrancePreflight,
   useFranceReleaseCard,
   useFranceReleaseState,
@@ -33,9 +35,9 @@ import {
   useNodes,
 } from '../api/client';
 import type {
+  CliToolsResponse,
   EnvFacts,
   EnvResponse,
-  FranceCliTools,
   FrancePreflightResponse,
   FranceReleaseState,
   JobView,
@@ -56,9 +58,10 @@ import { Page } from '../components/layout/page';
 import { Section, SectionGrid } from '../components/layout/section';
 import { StatusBadge, StatusDot } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
+import type { LayoutTone } from '../components/layout/tone';
 import { ReleaseCardBody, ReleaseEntry } from '../components/release-card';
 import { Button } from '../components/ui/button';
-import { formatAgo, formatDateTime, formatDuration, TIME } from '../lib/format';
+import { formatAgo, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { freshnessNow, nodeAgeText, useNodeSelection } from '../lib/node';
 import { useShownError } from '../lib/shown-error';
@@ -598,7 +601,13 @@ function FranceHero({
   );
 }
 
-function cliOutcome(outcome: FranceCliTools['tools'][number]['outcome']): { tone: Tone; label: string } {
+type CliOk = Extract<CliToolsResponse, { state: 'ok' }>;
+type CliGroup = CliOk['groups'][number];
+type CliRow = CliGroup['rows'][number];
+
+function upgradeBadge(
+  outcome: NonNullable<CliRow['upgrade']>['outcome'],
+): { tone: LayoutTone; label: string } | null {
   switch (outcome) {
     case 'ok':
       return { tone: 'done', label: '已升级' };
@@ -613,47 +622,114 @@ function cliOutcome(outcome: FranceCliTools['tools'][number]['outcome']): { tone
     case 'refused':
       return { tone: 'stall', label: '没换' };
     default:
-      return { tone: 'stop', label: '还没升过' };
+      return null;
   }
 }
 
-/** 命令行工具（#1971）：一行一个工具，版本和上次升级时刻都在这一行上。 */
-function CliToolsBody({ data, now }: { data: FranceCliTools; now: number }) {
-  if (data.state === 'unreadable') {
+function cliTone(kind: CliRow['status']['kind']): LayoutTone {
+  switch (kind) {
+    case 'current':
+      return 'done';
+    case 'behind':
+    case 'behind-uncounted':
+      return 'stall';
+    case 'unread':
+      return 'fail';
+    case 'unreadable':
+      return 'doubt';
+  }
+}
+
+function cliBit(prefix: string, cell: CliRow['installed']): string {
+  return cell.state === 'ok' ? `${prefix} ${cell.version}` : `${prefix} ${cell.why}`;
+}
+
+/** 六项下面的一块：两个用户和全局 npm 分开列。升过的同一行带升上去的版本和上次升级时间。没有升级按钮。 */
+function CliToolsBlock({ query, now }: { query: ReturnType<typeof useCliTools>; now: number }) {
+  const title = '命令行工具';
+  const description = '两个会话用户各一份，再加上全局 npm。升完能看到新版本和上次升级时间。没有升级按钮。';
+  if (query.error) {
     return (
-      <Notice tone="fail" title="没查成">
-        {data.reason ?? '读不到升级结果'}
-      </Notice>
+      <Section title={title} description={description} data-cli-tools>
+        <LoadError what="命令行工具" error={query.error} onRetry={() => void query.refetch()} />
+      </Section>
     );
   }
-  if (data.tools.length === 0) {
-    return <EmptyState size="inline" title="还没升过" hint="空闲或下一次发版时才会升。" />;
+  if (query.isLoading || !query.data) {
+    return (
+      <Section title={title} description={description} data-cli-tools>
+        <LoadingRows rows={4} />
+      </Section>
+    );
+  }
+  if (query.data.state === 'unreadable') {
+    return (
+      <Section title={title} description={description} tone="doubt" data-cli-tools>
+        <Notice tone="stall" title="没查成">
+          {query.data.why}
+        </Notice>
+      </Section>
+    );
   }
   return (
-    <List>
-      {data.tools.map((tool) => {
-        const badge = cliOutcome(tool.outcome);
-        const upgraded = tool.upgradedAt ? `上次升级 ${formatAgo(tool.upgradedAt, now)}` : '还没升过';
-        return (
-          <ListRow
-            key={tool.id}
-            tall
-            rail={badge.tone === 'fail' ? 'fail' : undefined}
-            title={tool.name}
-            meta={<MetaLine items={[tool.version ?? '还没有版本', upgraded]} />}
-            trailing={<StatusBadge tone={badge.tone} label={badge.label} variant="dot" />}
-          />
-        );
-      })}
-    </List>
+    <Section flush title={title} description={description} data-cli-tools>
+      {query.data.upgradeNote ? (
+        <div className="border-b p-4">
+          <Notice tone="stall" title="升级结果没查成">
+            {query.data.upgradeNote}
+          </Notice>
+        </div>
+      ) : null}
+      {query.data.groups.map((group) => (
+        <div
+          key={`${group.scope}:${group.owner}`}
+          data-cli-group={group.scope === 'npm' ? 'npm' : group.owner}
+        >
+          <p className="truncate border-b px-4 py-2 text-meta text-muted-foreground">{group.title}</p>
+          <List>
+            {group.rows.map((row) => {
+              const reason = 'reason' in row.status ? row.status.reason : null;
+              const installedWhy = row.installed.state === 'ok' ? null : row.installed.why;
+              const latestWhy = row.latest.state === 'ok' ? null : row.latest.why;
+              const extra = reason && reason !== installedWhy && reason !== latestWhy ? reason : null;
+              const badge = upgradeBadge(row.upgrade?.outcome ?? null);
+              const upgradedVersion =
+                row.upgrade?.version && (row.upgrade.outcome === 'ok' || row.upgrade.outcome === 'current')
+                  ? row.upgrade.version
+                  : null;
+              return (
+                <ListRow
+                  key={row.tool}
+                  tall
+                  rail={row.status.kind === 'current' ? undefined : cliTone(row.status.kind)}
+                  title={row.name}
+                  data-cli-tool={row.tool}
+                  meta={
+                    <MetaLine
+                      items={[
+                        cliBit('在用', row.installed),
+                        cliBit('官方最新', row.latest),
+                        row.checkedAt ? `检查于 ${formatAgo(row.checkedAt, now)}` : '还没检查',
+                        upgradedVersion,
+                        row.upgrade?.upgradedAt ? `上次升级 ${formatAgo(row.upgrade.upgradedAt, now)}` : null,
+                        extra,
+                      ]}
+                    />
+                  }
+                  trailing={
+                    <span className="flex shrink-0 items-center gap-1.5">
+                      {badge ? <StatusBadge tone={badge.tone} label={badge.label} /> : null}
+                      <StatusBadge tone={cliTone(row.status.kind)} label={row.status.label} />
+                    </span>
+                  }
+                />
+              );
+            })}
+          </List>
+        </div>
+      ))}
+    </Section>
   );
-}
-
-function cliToolsDescription(data: FranceCliTools | undefined): string {
-  const base = '空闲或发版重启时升；核对或冒烟不过就退回上一版。';
-  if (data?.state !== 'ok' || !data.checkedAt) return base;
-  const when = data.why === 'release' ? '发版' : '空闲';
-  return `${base}上次核对 ${formatDateTime(data.checkedAt)}（${when}）。`;
 }
 
 export default function France() {
@@ -662,8 +738,8 @@ export default function France() {
   const nodes = useNodes();
   const jobs = useJobs();
   const release = useFranceReleaseState();
-  const cliTools = useFranceCliTools();
   const card = useFranceReleaseCard();
+  const cli = useCliTools();
   const preflight = useFrancePreflight();
   const { nodeId } = useNodeSelection();
   const now = useNow();
@@ -709,7 +785,7 @@ export default function France() {
     <ReleaseEntry card={card.data} now={now} />
   );
 
-  const read = pageRead([env, nodes, jobs, release, card, ...snapshots]);
+  const read = pageRead([env, nodes, jobs, release, card, cli, ...snapshots]);
   const ready = !(nodesPending || env.isLoading || !env.data || !facts);
 
   const localCells = (kind: 'env' | 'france', look: 'row' | 'tile') =>
@@ -778,7 +854,7 @@ export default function France() {
   return (
     <Page
       title="法国"
-      description="本台的六项事实、引擎总开关、定时任务、发版和命令行工具。"
+      description="本台的六项事实、引擎总开关、命令行工具、定时任务和发版。"
       detail="读不到的写「没查成」和原因，不拿 0 顶；每 30 秒自己刷新。多一台机器时按台并排比。"
       refresh={{
         onRefresh: () => void read.refetch(),
@@ -804,6 +880,7 @@ export default function France() {
         <div className="space-y-4">
           <EngineMasterControl standbyNote={standby ? <StandbyNote /> : null} />
           {factsBlock}
+          <CliToolsBlock query={cli} now={now} />
         </div>
 
         <div className="grid items-start gap-4 xl:grid-cols-3">
@@ -866,15 +943,6 @@ export default function France() {
                 <LoadingRows rows={2} />
               ) : (
                 <ReleaseBody release={release.data} preflight={preflight} />
-              )}
-            </Section>
-            <Section title="命令行工具" description={cliToolsDescription(cliTools.data)}>
-              {cliTools.error ? (
-                <LoadError what="命令行工具" error={cliTools.error} onRetry={() => void cliTools.refetch()} />
-              ) : cliTools.isLoading || !cliTools.data ? (
-                <LoadingRows rows={3} />
-              ) : (
-                <CliToolsBody data={cliTools.data} now={now} />
               )}
             </Section>
           </div>

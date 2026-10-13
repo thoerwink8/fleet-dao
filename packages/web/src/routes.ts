@@ -23,7 +23,7 @@ export default [
     route('efforts', 'routes/efforts.tsx'),
     // 旧地址：环境页并进法国页（#1217），打开转到 /france。
     route('env', 'routes/env.tsx'),
-    // 法国页：本台六项事实、引擎总开关、定时任务、发版；多一台机器时按台并排。
+    // 法国页：本台六项事实、引擎总开关、命令行工具、定时任务、发版；多一台机器时按台并排。
     route('france', 'routes/france.tsx'),
     // 旧地址：模型目录做在路由页里，打开转到 /routing?tab=models。
     route('models', 'routes/models.tsx'),

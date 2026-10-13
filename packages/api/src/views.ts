@@ -13,6 +13,7 @@ import {
   type HomeDecisionSchema,
   type HomeDoneSchema,
   type HomeHealthSchema,
+  type HomeResourcesSchema,
   type HomeResponseSchema,
   type HomeRunningSchema,
   type HostId,
@@ -453,7 +454,10 @@ export function homeRunning(input: {
       const repo = input.repoOf(t.repoId);
       const queued = queuedByTask.get(t.id);
       const asking = t.state === 'asking';
-      const flow = taskFlow(t, input.segmentRunsOf(t.id));
+      const views = input.segmentRunsOf(t.id);
+      const flow = taskFlow(t, views);
+      // 这一刻在跑的那几笔（#1973）：编号就是会话 scope 的编号，看板拿它找这张单此刻占的内存、CPU
+      const runIds = views.filter((v) => v.running).map((v) => v.id);
       const decision = input.decisionOf(t.id);
       const waitingReason: HomeRunning['waitingReason'] = t.paused
         ? 'paused'
@@ -491,6 +495,7 @@ export function homeRunning(input: {
         link: `/tasks/${t.id}`,
         taskId: t.id,
         state: t.state,
+        runIds,
       };
     });
 }
@@ -597,6 +602,8 @@ export function buildHome(input: {
   models: Model[];
   channels: Channel[];
   now: Date;
+  /** 这台机器此刻的内存、CPU（#1973，host-resources.ts）；没装采样器就不带这一项。 */
+  resources?: z.input<typeof HomeResourcesSchema> | undefined;
 }): z.input<typeof HomeResponseSchema> {
   const taskById = new Map(input.tasks.map((t) => [t.id, t]));
   const taskByIssue = new Map(input.tasks.map((t) => [`${t.repoId}#${t.issueNumber}`, t]));
@@ -645,6 +652,7 @@ export function buildHome(input: {
       running: input.pools.reduce((n, p) => n + p.running, 0),
       reserved: input.pools.reduce((n, p) => n + p.reserved, 0),
     },
+    ...(input.resources ? { resources: input.resources } : {}),
     asOf: input.now.toISOString(),
   };
 }

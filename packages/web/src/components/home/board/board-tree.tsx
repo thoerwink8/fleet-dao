@@ -18,11 +18,13 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '../../ui/dropdown-menu';
+import { type TicketUsage, ticketUsage } from '../resources';
 import { RunningCard, statusTextOf, toneOf } from '../running-card';
-import type { HomeFlowStage, HomeRunning } from '../types';
+import type { HomeFlowStage, HomeResources, HomeRunning } from '../types';
 import { targetOfItem } from './board-ui';
 import { countTones, groupSegments, nodeId, type SegmentGroup, segmentKeyOf, worstTone } from './model';
 import { avgText, segmentHintOf, segmentName } from './nodes';
+import { UsageLine } from './usage';
 
 /**
  * 手机上一整段一张卡太占地方：没有单在途（total 为 0）的段折成一行字，排在有单的段后面。
@@ -46,10 +48,15 @@ export function idleLine(idle: readonly SegmentGroup[]): string {
 export function BoardTree({
   running,
   flow,
+  resources,
 }: {
   running: readonly HomeRunning[];
   flow: readonly HomeFlowStage[];
+  /** 这台机器此刻的资源（#1973）：展开的那张卡上写这张单占的内存、CPU。 */
+  resources?: HomeResources | undefined;
 }) {
+  const remote = useRemoteView() !== null;
+  const usageOf = (item: HomeRunning) => ticketUsage(item, resources, { remote });
   const [params, setParams] = useSearchParams();
   const stuck = params.get('stuck') === '1';
   const needsYou = params.get('you') === '1';
@@ -112,7 +119,7 @@ export function BoardTree({
       ) : null}
       <ul className="space-y-2" aria-label="三段里的单">
         {live.map((g) => (
-          <SegmentRow key={g.key} group={g} running={running} />
+          <SegmentRow key={g.key} group={g} running={running} usageOf={usageOf} />
         ))}
         {idle.length ? (
           <li data-flow-idle className="px-1 text-meta text-muted-foreground">
@@ -124,7 +131,15 @@ export function BoardTree({
   );
 }
 
-function SegmentRow({ group, running }: { group: SegmentGroup; running: readonly HomeRunning[] }) {
+function SegmentRow({
+  group,
+  running,
+  usageOf,
+}: {
+  group: SegmentGroup;
+  running: readonly HomeRunning[];
+  usageOf: (item: HomeRunning) => TicketUsage;
+}) {
   const [open, setOpen] = useState(group.items.length > 0);
   // 颜色按这一段的全部单算（过滤只藏单子，不改这一段的状态色）
   const counts = countTones(running.filter((r) => segmentKeyOf(r) === group.key));
@@ -167,7 +182,7 @@ function SegmentRow({ group, running }: { group: SegmentGroup; running: readonly
         {open && group.items.length ? (
           <ul className="divide-y border-t bg-muted">
             {group.items.map((it) => (
-              <TicketRow key={nodeId.ticket(it)} item={it} />
+              <TicketRow key={nodeId.ticket(it)} item={it} usage={usageOf(it)} />
             ))}
           </ul>
         ) : null}
@@ -180,7 +195,7 @@ function SegmentRow({ group, running }: { group: SegmentGroup; running: readonly
  * 手机上一张单压成一行：状态点、单号、标题（截成一行）、所处段、相对时间。点一下原地展开成整张卡（谁在做、本段多久、
  * 在等什么、最近事件、进详情的链接），再点收回。展开前不渲染卡片，一屏能放下十几张单。
  */
-function TicketRow({ item }: { item: HomeRunning }) {
+function TicketRow({ item, usage }: { item: HomeRunning; usage: TicketUsage }) {
   const [open, setOpen] = useState(false);
   const now = useSlowNow();
   const { tone } = toneOf(item);
@@ -213,6 +228,9 @@ function TicketRow({ item }: { item: HomeRunning }) {
       </div>
       {open ? (
         <div className="px-2 pb-2">
+          <div className="px-2 pb-1.5">
+            <UsageLine usage={usage} size="meta" />
+          </div>
           <RunningCard item={item} />
         </div>
       ) : null}

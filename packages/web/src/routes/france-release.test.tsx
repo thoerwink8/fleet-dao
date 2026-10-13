@@ -2,17 +2,11 @@
 // /france 页发版一键卡（#618）：release-train 状态（在走 / 暂停 / 没在走 / 没查成）+ 「发版预检」按钮。
 // 做完的标准：① 每种状态各画各的、读不到写明原因；② 预检按钮点下后 show 命令、退出码、stdout / stderr，
 //   退出码 0 标绿、非 0 标红；③ 预检请求起不来（网络挂）写明没发出去；④ unreadable 写明没接上，不拿「没在走」顶。
-import { cleanup, fireEvent, screen } from '@testing-library/react';
+import { cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
-import type {
-  EnvResponse,
-  FranceCliTools,
-  FrancePreflightResponse,
-  FranceReleaseState,
-  Jobs,
-} from '../api/types';
+import type { EnvResponse, FrancePreflightResponse, FranceReleaseState, Jobs } from '../api/types';
 import France from '../routes/france';
 import { renderApp } from '../test/harness';
 
@@ -43,7 +37,7 @@ interface PreflightCall {
   preflight: FrancePreflightResponse | { error: Error };
 }
 
-function apiWith({ release, preflight }: PreflightCall, cliTools?: FranceCliTools): MockApi {
+function apiWith({ release, preflight }: PreflightCall): MockApi {
   const inner = createMockApi({ live: false });
   return {
     ...inner,
@@ -52,13 +46,12 @@ function apiWith({ release, preflight }: PreflightCall, cliTools?: FranceCliTool
     franceReleaseState: () => Promise.resolve(release),
     francePreflight:
       'error' in preflight ? () => Promise.reject(preflight.error) : () => Promise.resolve(preflight),
-    ...(cliTools ? { franceCliTools: () => Promise.resolve(cliTools) } : {}),
   } as MockApi;
 }
 
-function renderWith(call: PreflightCall, cliTools?: FranceCliTools) {
+function renderWith(call: PreflightCall) {
   return renderApp(<France />, {
-    api: apiWith(call, cliTools) as unknown as FleetApi,
+    api: apiWith(call) as unknown as FleetApi,
     route: '/france',
   });
 }
@@ -82,34 +75,6 @@ function donePreflight(
 }
 
 const idleRelease: FranceReleaseState = { state: 'idle', asOf: '2026-10-05T02:00:00.000Z' };
-
-test('命令行工具：升完看得到版本和上次升级时间；还没升过写明', async () => {
-  renderWith(
-    { release: idleRelease, preflight: donePreflight() },
-    {
-      state: 'ok',
-      reason: null,
-      checkedAt: '2026-10-12T12:00:00.000Z',
-      why: 'idle',
-      tools: [
-        {
-          id: 'claude-code',
-          name: 'Claude Code',
-          version: '2.1.287',
-          upgradedAt: '2026-10-12T12:00:01.000Z',
-          channel: 'stable',
-          outcome: 'ok',
-          detail: '升到 2.1.287',
-        },
-      ],
-    },
-  );
-  expect(await screen.findByText('命令行工具')).toBeTruthy();
-  expect(await screen.findByText('Claude Code')).toBeTruthy();
-  expect(await screen.findByText('2.1.287')).toBeTruthy();
-  expect(await screen.findByText(/上次升级/)).toBeTruthy();
-  expect(await screen.findByText('已升级')).toBeTruthy();
-});
 
 describe('/france 页发版一键卡', () => {
   test('没在走 + 点「发版预检」预检过了：状态写没在走、结果块命令照写、退出码 0 那行绿', async () => {
@@ -163,8 +128,10 @@ describe('/france 页发版一键卡', () => {
       },
       preflight: donePreflight(),
     });
-    expect(await screen.findByText('没查成')).toBeTruthy();
     expect(await screen.findByText(/没接上 release-train 状态文件的读取/)).toBeTruthy();
+    const panel = screen.getByRole('heading', { name: '发版一键' }).closest('section');
+    if (!(panel instanceof HTMLElement)) throw new Error('找不到发版一键');
+    expect(within(panel).getByText('没查成')).toBeTruthy();
   });
 
   test('预检没过（退出码 2）：标红、原因行进 stderr 块', async () => {

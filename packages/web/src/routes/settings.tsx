@@ -31,7 +31,6 @@ import { SaveButton } from '../components/layout/save-button';
 import { Section } from '../components/layout/section';
 import { StatusDot } from '../components/layout/status-badge';
 import { PageNav } from '../components/page-nav';
-import { PoolHoldsPanel } from '../components/pool-holds';
 import { RepoCiPolicyControl } from '../components/repo-ci-policy';
 import { useRepo } from '../components/repo-context';
 import { RepoRow } from '../components/repo-groom';
@@ -683,7 +682,6 @@ export default function Settings() {
                   <SoloPaused s={find('engine.soloPaused')} />
                 </FieldGroup>
                 <QuotaReserve s={find('engine.quotaReserve')} />
-                <PoolHoldsPanel />
               </div>
             ) : settings.error ? (
               <LoadError error={settings.error} />

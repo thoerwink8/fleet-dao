@@ -74,6 +74,40 @@ describe('思维导图排版', () => {
     }
   });
 
+  test('单子排成几列（#1973）：仍然互不重叠、单子在段外侧、要你拍在它那张单外侧、两侧在引擎两边', async () => {
+    // 假数据的单复制几份（换单号），一侧单子够多，宽画布上会排成几列
+    const extra = running.flatMap((r, i) => [1, 2, 3].map((k) => ({ ...r, issueNumber: 9000 + i * 10 + k })));
+    const graph = buildGraph({
+      running: [...running, ...extra],
+      flow,
+      filter: { stuck: false },
+      aspect: 2.5,
+    });
+    expect(Math.max(graph.columns.right, graph.columns.left)).toBeGreaterThan(1);
+    const all = boxes(graph, await layoutGraph(graph));
+    const overlaps: string[] = [];
+    for (let i = 0; i < all.length; i++) {
+      for (let j = i + 1; j < all.length; j++) {
+        const a = all[i];
+        const b = all[j];
+        if (!a || !b) continue;
+        const apart = a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
+        if (!apart) overlaps.push(`${a.id} × ${b.id}`);
+      }
+    }
+    expect(overlaps).toEqual([]);
+    const at = new Map(all.map((b) => [b.id, b]));
+    const root = at.get(ROOT_ID);
+    if (!root) throw new Error('没有中心节点');
+    for (const [child, parent] of graph.parentOf) {
+      const c = at.get(child);
+      const p = at.get(parent);
+      if (!c?.side || !p) continue;
+      if (c.side === 'right') expect(c.x, child).toBeGreaterThanOrEqual(p.x + p.w);
+      else expect(c.x + c.w, child).toBeLessThanOrEqual(p.x);
+    }
+  });
+
   test('一张单都没有：三段照样排出来', async () => {
     const graph = graphOf([]);
     const pos = await layoutGraph(graph);

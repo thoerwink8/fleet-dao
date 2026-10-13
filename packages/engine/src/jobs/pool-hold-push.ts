@@ -6,7 +6,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import type { SweepPart } from './reconcile-common.ts';
 
 export const POOL_HOLD_PUSH_TITLE = '整池暂停到了复查日期，已推飞书';
-export const POOL_HOLD_PUSH_LINK = '/settings';
+export const POOL_HOLD_PUSH_LINK = '/quota';
 
 /** 一天一条。正文对得上才算推过；过了北京时间的今天，键换一天，该再推再推。 */
 export const poolHoldPushKey = (day: string): string => `feishu:pool-hold-overdue:${day}`;

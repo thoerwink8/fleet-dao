@@ -11,7 +11,7 @@ import {
   UpdateCredentialsRequest,
 } from './auth.ts';
 import { BoardResponse, ReposResponse } from './board.ts';
-import { FranceCliToolsSchema } from './cli-tools.ts';
+import { CliToolsResponseSchema } from './cli-versions.ts';
 import {
   GroomNowRequest,
   GroomNowResponse,
@@ -102,8 +102,6 @@ export const WebRoutes = {
   env: { method: 'GET', path: '/env', response: EnvResponseSchema },
   /** /france 页发版一键（#618）：release-train 此刻的状态（在走、暂停、没在走、读不到）。只读。 */
   franceReleaseState: { method: 'GET', path: '/france/release-state', response: FranceReleaseStateSchema },
-  /** /france 页「命令行工具」（#1971）：各工具现在的版本、上次升级时刻、这一轮的结局。只读。文件不在就是还没升过。 */
-  franceCliTools: { method: 'GET', path: '/france/cli-tools', response: FranceCliToolsSchema },
   /** /france 页「发版」卡（#1231）：主线最新提交和 CI、法国在用的提交、差几个、最近做完的一个任务。只读，每一行各自带没查成的原因。 */
   franceReleaseCard: { method: 'GET', path: '/france/release-card', response: ReleaseCardSchema },
   /** 更新日志页「已发布的提交」（#1255，决定 0032）：读法国的发布历史，每条写提交号、标题、发于何时。只读，读不到写没查成和原因。 */
@@ -117,6 +115,8 @@ export const WebRoutes = {
   },
   /** /france 页「发版预检」按钮：起子进程跑 pnpm release:onekey preflight，命令写死、不收参数。 */
   francePreflight: { method: 'POST', path: '/france/preflight', response: FrancePreflightResponseSchema },
+  /** /france 页「命令行工具」（#1969、#1971）：在用版本、官方最新、现算的落后，升过的带上次升级时间和升上去的版本。只读，没有升级按钮。 */
+  franceCliTools: { method: 'GET', path: '/france/cli-tools', response: CliToolsResponseSchema },
   /** 设置页「仓库」一节：每个项目的「让 AI 接活」现在开还是关、什么时候开的。 */
   repoDispatch: { method: 'GET', path: '/repos/dispatch', response: RepoDispatchResponse },
   /** 开、关一个项目的「让 AI 接活」（和命令行 fleet-api dispatch 同一个写入口，记操作记录）；没有这个项目 404。 */

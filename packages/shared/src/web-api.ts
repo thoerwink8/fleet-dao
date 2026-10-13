@@ -6,6 +6,7 @@
 export * from './web-api/auth.ts';
 export * from './web-api/board.ts';
 export * from './web-api/cli-tools.ts';
+export * from './web-api/cli-versions.ts';
 export * from './web-api/common.ts';
 export * from './web-api/dispatch.ts';
 export * from './web-api/engine-switch.ts';

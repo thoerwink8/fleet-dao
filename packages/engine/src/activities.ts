@@ -14,6 +14,7 @@ import {
 import type { CarpoolWatchDeps } from './jobs/carpool-watch.ts';
 import type { CiTimingsJobDeps } from './jobs/ci-timings.ts';
 import type { CliUpgradeJobDeps } from './jobs/cli-upgrade.ts';
+import type { CliVersionsJobDeps } from './jobs/cli-versions.ts';
 import { probeAssignedRoute } from './jobs/dispatch-probe.ts';
 import type { GitHubReconcileJobDeps } from './jobs/github-reconcile.ts';
 import type { GroomRunDeps } from './jobs/groom.ts';
@@ -230,6 +231,8 @@ export interface EngineJobs {
   usageBackfill?: () => UsageBackfillJobDeps;
   /** 命令行工具升级（#1971）：空闲时排空并写请求，root 的单元去装。不拉单。 */
   cliUpgrade?: () => CliUpgradeJobDeps;
+  /** 命令行工具版本（#1969）：读在用版本和官方最新。不升级、不拉单。 */
+  cliVersions?: () => CliVersionsJobDeps;
 }
 
 /**

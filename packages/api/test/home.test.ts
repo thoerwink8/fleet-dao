@@ -116,6 +116,35 @@ describe('/api/home（内存版）', () => {
       expect(home.running[0]?.taskSince).toBeDefined();
     });
 
+    it('在跑的那一笔的编号进 runIds（会话 scope 的编号，#1973）；收了的那笔不在里面', async () => {
+      const h = harness();
+      seg(h, { segment: 'scope', startedAt: ago(40), endedAt: ago(30), outcome: 'done' });
+      seg(h, { segment: 'manual', startedAt: ago(12) });
+      const home = await homeOf(h);
+      const open = h.store.data.segmentRuns.find((r) => r.segment === 'manual' && r.endedAt === undefined);
+      expect(home.running[0]?.runIds).toEqual([open?.id]);
+    });
+
+    it('机器资源（#1973）：装了采样器，主页带最近一回；没装就没有这一项，不造一份 0', async () => {
+      const h = harness();
+      seg(h, { segment: 'manual', startedAt: ago(12) });
+      expect((await homeOf(h)).resources).toBeUndefined();
+      const resources = {
+        at: T0.toISOString(),
+        everyMs: 5000,
+        memory: { state: 'unread' as const, why: '读不到 /proc/meminfo（这台不是 Linux）' },
+        cpu: { state: 'ok' as const, percent: 12.5, cores: 4 },
+        sessions: { state: 'ok' as const, byRun: {} },
+      };
+      h.deps.hostResources = {
+        current: async () => resources,
+        latest: () => resources,
+        subscribe: () => () => {},
+        start: () => () => {},
+      };
+      expect((await homeOf(h)).resources).toEqual(resources);
+    });
+
     it('动手收了、验收还没起：是 verify_pending，等第二意见，没有人在做，不是失败', async () => {
       const h = harness();
       seg(h, { segment: 'scope', startedAt: ago(60), endedAt: ago(50), outcome: 'done' });

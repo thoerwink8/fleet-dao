@@ -20,9 +20,9 @@ import type {
   Audit,
   AuthConfig,
   Board,
+  CliToolsResponse,
   Credentials,
   EnvResponse,
-  FranceCliTools,
   FrancePreflightResponse,
   FranceReleaseState,
   GroomNowBody,
@@ -202,8 +202,6 @@ export interface FleetApi {
   updateSetting(key: SettingKey, body: UpdateSettingBody): Promise<Setting>;
   /** /france 页发版一键（#618）：release-train 此刻在走 / 暂停 / 没在走 / 读不到。 */
   franceReleaseState(): Promise<FranceReleaseState>;
-  /** /france 页「命令行工具」（#1971）：版本和上次升级时刻。还没升过是空名单。 */
-  franceCliTools(): Promise<FranceCliTools>;
   /** /france 页「发版」卡（#1231）：主线最新提交和 CI、法国在用的提交、差几个、最近做完的一个任务，每行各自带没查成的原因。 */
   franceReleaseCard(): Promise<ReleaseCard>;
   /** /changelog 页「已发布的提交」（#1255）：法国发布历史里切上去的几条，每条提交号、标题、发于何时；读不到写没查成和原因。 */
@@ -212,6 +210,8 @@ export interface FleetApi {
   franceRelease(sha: string): Promise<ReleaseRequestResult>;
   /** /france 页「发版预检」按钮：点下让后端起 pnpm release:onekey preflight，命令写死、不收参数。 */
   francePreflight(): Promise<FrancePreflightResponse>;
+  /** /france 页「命令行工具」（#1969、#1971）：在用版本、官方最新、落后，升过的带上次升级时间和升上去的版本。只读。 */
+  franceCliTools(): Promise<CliToolsResponse>;
   /** 订阅实时推送，返回取消订阅的函数。onStatus 报连接状态（给顶栏的「实时」小灯）。 */
   subscribe(listener: (event: LiveEvent) => void, onStatus?: (status: LiveStatus) => void): () => void;
 }
@@ -637,16 +637,6 @@ export function useFranceReleaseState() {
   });
 }
 
-/** /france 页「命令行工具」（#1971）：30 秒重拉一次。读不到后端也照实显示「没查成」。 */
-export function useFranceCliTools() {
-  const api = useApi();
-  return useQuery({
-    queryKey: keys.franceCliTools,
-    queryFn: () => api.franceCliTools(),
-    refetchInterval: 30_000,
-  });
-}
-
 /**
  * /france 页「发版」卡（#1231）：1 分钟重拉一次（主线头、CI 在变；GitHub 现读，不要拉太勤）。读不到后端也照实显示「没查成」。
  */
@@ -655,6 +645,16 @@ export function useFranceReleaseCard() {
   return useQuery({
     queryKey: keys.franceReleaseCard,
     queryFn: () => api.franceReleaseCard(),
+    refetchInterval: 60_000,
+  });
+}
+
+/** /france 页「命令行工具」（#1969、#1971）：一分钟重拉一次。读不到后端也照实显示。 */
+export function useCliTools() {
+  const api = useApi();
+  return useQuery({
+    queryKey: keys.franceCliTools,
+    queryFn: () => api.franceCliTools(),
     refetchInterval: 60_000,
   });
 }
@@ -746,6 +746,7 @@ function homeDataOf(data: HomeResponse): HomeData {
     health: data.health,
     flow: data.flow,
     slots: data.slots,
+    resources: data.resources,
   };
 }
 
@@ -1184,6 +1185,12 @@ function refresh(qc: QueryClient, queryKey?: readonly string[]) {
 export function applyLiveEvents(qc: QueryClient, events: readonly LiveEvent[]) {
   const keysToDrop = new Map<string, readonly string[]>();
   for (const e of events) {
+    if (e.type === 'resources') {
+      // 机器资源（#1973）：读数本身就在推送里，直接换掉本台主页数据里的 resources，不作废、不重拉主页。
+      // 还没读到过主页就不造一份（等主页读回来自带最近一回）；一批里有几回，后来的盖掉先来的
+      qc.setQueryData<HomeResponse>(keys.home, (old) => (old ? { ...old, resources: e.resources } : old));
+      continue;
+    }
     const targets = e.type === 'change' && isRealtimeTable(e.table) ? TABLE_KEYS[e.table] : undefined;
     if (!targets) {
       refresh(qc);

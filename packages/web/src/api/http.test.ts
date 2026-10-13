@@ -197,6 +197,21 @@ describe('接真后端：实时推送（SSE）', () => {
     expect(events).toEqual([{ type: 'change', table: 'tasks', id: 't-1' }]);
   });
 
+  test('resources 事件按 HomeResourcesSchema 解析；认不出的丢掉，不拿去换掉上一回的读数（#1973）', () => {
+    const { es, events } = setup();
+    const resources = {
+      at: '2026-10-12T08:00:00.000Z',
+      everyMs: 5000,
+      memory: { state: 'unread', why: '读不到 /proc/meminfo（这台不是 Linux）' },
+      cpu: { state: 'ok', percent: 12, cores: 4 },
+      sessions: { state: 'ok', byRun: { r1: { state: 'ok', memoryMb: 300, cpuPercent: 4 } } },
+    };
+    es.emit('resources', JSON.stringify(resources));
+    es.emit('resources', '{不是 JSON');
+    es.emit('resources', JSON.stringify({ ...resources, memory: { state: 'ok', totalMb: 0 } }));
+    expect(events).toEqual([{ type: 'resources', resources }]);
+  });
+
   test('看不懂的 change 当成 resync（全部重拉），不当没发生', () => {
     const { es, events } = setup();
     es.emit('change', '{不是 JSON');

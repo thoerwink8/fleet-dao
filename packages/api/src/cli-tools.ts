@@ -1,11 +1,9 @@
-// 法国页「命令行工具」（#1971）：读 root 升级单元写下的 state.json。不引引擎：发版窗口和驾驶舱各读各的。
+// 法国页「命令行工具」的升级结果（#1971）：读 root 升级单元写下的 state.json。
+// 不单独开接口：cli-versions.ts 把它挂到同一份 GET /france/cli-tools 的对应行上。
 // 文件不在 = 还没升过。读不到、认不出回 unreadable，不拿空名单冒充查成了。
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type FranceCliTools, FranceCliToolsSchema } from '@fleet-dao/shared';
-import type { Hono } from 'hono';
-import { reply } from './http.ts';
-import type { CockpitEnv } from './session.ts';
 
 const DEFAULT_DIR = '/var/lib/fleet-dao/cli-upgrade';
 const OUTCOMES = new Set(['ok', 'current', 'skipped', 'failed', 'rolled-back', 'refused']);
@@ -78,8 +76,4 @@ export async function readFranceCliTools(
   });
   if (!parsed.success) return unreadable('升级结果的格式不对');
   return parsed.data;
-}
-
-export function registerFranceCliToolsRoutes(app: Hono<CockpitEnv>): void {
-  app.get('/france/cli-tools', async (c) => reply(c, FranceCliToolsSchema, await readFranceCliTools()));
 }

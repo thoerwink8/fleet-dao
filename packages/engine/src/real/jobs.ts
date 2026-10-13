@@ -11,6 +11,7 @@ import { CANARY_JOB } from '../jobs/canary.ts';
 import { CARPOOL_WATCH_JOB } from '../jobs/carpool-watch.ts';
 import { CI_TIMINGS_JOB } from '../jobs/ci-timings.ts';
 import { CLI_UPGRADE_JOB } from '../jobs/cli-upgrade.ts';
+import { CLI_VERSIONS_JOB } from '../jobs/cli-versions.ts';
 import { EXTERNAL_WATCHDOG_JOB } from '../jobs/external-watchdog.ts';
 import { GITHUB_RECONCILE_JOB } from '../jobs/github-reconcile.ts';
 import { HOURLY_RECONCILE_JOB } from '../jobs/hourly-reconcile.ts';
@@ -34,6 +35,7 @@ export const ENGINE_JOBS = [
   JUDGE_SELF_CHECK_JOB,
   CI_TIMINGS_JOB,
   USAGE_BACKFILL_JOB,
+  CLI_VERSIONS_JOB,
   CLI_UPGRADE_JOB,
 ] as const;
 

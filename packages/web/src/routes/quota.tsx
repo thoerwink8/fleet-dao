@@ -21,6 +21,7 @@ import { StatusBadge } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
 import type { LayoutTone } from '../components/layout/tone';
 import { PoolProblemLine, usePoolProblems } from '../components/pool-problem';
+import { PoolHoldBanner, PoolSwitch, PoolSwitchForm, PoolSwitchProvider } from '../components/pool-switch';
 import { ExpiredQuotaLine, isExpiredWindow, QuotaLine, quotaValue, readingVerb } from '../components/quota';
 import { QuotaNotice } from '../components/quota-notice';
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
@@ -56,6 +57,9 @@ const DESCRIPTION = (
       读数过期：超过一段时间没读到新数，旧数不当现值用、不参与排序。没查成：一条都没读到，不是「没用量」。用量没读到：只读到了清零时间。
     </p>
     <p>点表里任何一格，弹出这一格的说明（读法、上游原话、读数新不新）。</p>
+    <p>
+      每个池那一行的开关是停用：关掉只写一句原因，复查日期可不填。引擎探到封号或登录失效时，这一行写「封号」，开关不跟着动。
+    </p>
   </div>
 );
 
@@ -401,7 +405,12 @@ export default function Quota() {
                 <EmptyState icon={Gauge} title="还没有账号池" />
               </Section>
             ) : (
-              <Matrix pools={pools} kinds={kinds} now={now} problems={problems} />
+              <>
+                <PoolHoldBanner />
+                <PoolSwitchProvider>
+                  <Matrix pools={pools} kinds={kinds} now={now} problems={problems} />
+                </PoolSwitchProvider>
+              </>
             )}
             {poolProblems.error ? (
               <p data-pool-problems="unreadable" className="mt-2 text-meta text-ink-stall">
@@ -519,19 +528,22 @@ function Matrix({
                   >
                     <th scope="row" className="quota-pool-head min-w-0 font-normal">
                       {/* 一行池名（加没有额度窗时的一个状态），一行灰字（在跑几个、到期），有毛病再一行；每行都不折 */}
-                      <div className="flex min-w-0 items-baseline gap-2 whitespace-nowrap">
-                        <span className="num text-body font-medium">{p.id}</span>
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="num min-w-0 truncate text-body font-medium" title={p.id}>
+                          {p.id}
+                        </span>
                         {p.windows.length === 0 ? (
                           <span
                             data-quota-empty
                             className={cn(
-                              'text-meta',
+                              'shrink-0 text-meta',
                               p.quotaStatus === 'unread' ? 'text-ink-stall' : 'text-muted-foreground',
                             )}
                           >
                             {p.quotaStatus === 'unread' ? '没查成' : '无额度窗'}
                           </span>
                         ) : null}
+                        <PoolSwitch poolId={p.id} />
                       </div>
                       <PoolMeta pool={p} now={now} />
                       {problems.has(p.id) ? (
@@ -578,6 +590,7 @@ function Matrix({
                         </td>
                       );
                     })}
+                    <PoolSwitchForm poolId={p.id} />
                   </tr>
                 ))}
               </tbody>
