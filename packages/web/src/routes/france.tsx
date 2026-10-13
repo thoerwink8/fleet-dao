@@ -20,7 +20,7 @@
 // 再下面左边定时任务列表（出问题的排前面）、右边发版。每一项一行怎么画在 components/env-facts.tsx。
 
 import { ArrowRight, ChevronDown, Rocket, SearchX, ServerCog, Timer } from 'lucide-react';
-import { type CSSProperties, type ReactNode, useState } from 'react';
+import { type CSSProperties, type ReactNode, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
 import {
@@ -115,6 +115,8 @@ function ReleaseBody({
 }) {
   const result: FrancePreflightResponse | undefined = preflight.data;
   const state = releaseState(release);
+  // 同一帧里的第二下：isPending 还没画上去，只靠 disabled 挡不住，这里先记一笔。
+  const preflightSent = useRef(false);
   return (
     <div className="space-y-3">
       <div>
@@ -130,7 +132,15 @@ function ReleaseBody({
             loading={preflight.isPending}
             loadingText="预检在跑…"
             disabled={preflight.isPending}
-            onClick={() => preflight.mutate()}
+            onClick={() => {
+              if (preflightSent.current || preflight.isPending) return;
+              preflightSent.current = true;
+              return preflight.mutate(undefined, {
+                onSettled: () => {
+                  preflightSent.current = false;
+                },
+              });
+            }}
           >
             发版预检
           </Button>

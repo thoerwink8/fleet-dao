@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
 // /france 页发版一键卡（#618）：release-train 状态（在走 / 暂停 / 没在走 / 没查成）+ 「发版预检」按钮。
 // 做完的标准：① 每种状态各画各的、读不到写明原因；② 预检点下后写「进程内读事实」、退出码、一项一行，
-//   退出码 0 标「能发」、非 0 标「不能发」；③ 预检请求起不来（网络挂）写明没发出去；④ unreadable 写明没接上。
-import { cleanup, fireEvent, screen, within } from '@testing-library/react';
+//   退出码 0 标「能发」、非 0 标「不能发」；③ 预检请求起不来（网络挂）写明没发出去；④ unreadable 写明没接上；
+//   ⑤ 连点「发版预检」只发一次。
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
@@ -75,6 +76,15 @@ function donePreflight(
 }
 
 const idleRelease: FranceReleaseState = { state: 'idle', asOf: '2026-10-05T02:00:00.000Z' };
+
+/** 一个能等到本轮测试手动放行的 Promise（预检还没回来）。 */
+function deferred<T>() {
+  let resolve: (v: T) => void = () => {};
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 describe('/france 页发版一键卡', () => {
   test('没在走 + 点「发版预检」能发：状态写没在走、写进程内读事实、退出码 0 标能发', async () => {
@@ -178,5 +188,32 @@ describe('/france 页发版一键卡', () => {
     fireEvent.click(await screen.findByRole('button', { name: '发版预检' }));
     expect(await screen.findByText(/预检请求没发出去/)).toBeTruthy();
     expect(await screen.findByText(/网络断了（测试故意造的）/)).toBeTruthy();
+  });
+
+  test('连点「发版预检」只发一次：同一帧两下、忙着再点，francePreflight 只被调一次', async () => {
+    const d = deferred<FrancePreflightResponse>();
+    const calls: number[] = [];
+    const inner = createMockApi({ live: false });
+    const api = {
+      ...inner,
+      env: () => Promise.resolve(envOk()),
+      jobs: () => Promise.resolve(jobsEmpty()),
+      franceReleaseState: () => Promise.resolve(idleRelease),
+      francePreflight: () => {
+        calls.push(1);
+        return d.promise;
+      },
+    } as unknown as MockApi;
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
+    const btn = await screen.findByRole('button', { name: '发版预检' });
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    await waitFor(() => expect(btn.getAttribute('aria-busy')).toBe('true'));
+    fireEvent.click(btn);
+    expect(calls).toHaveLength(1);
+    await act(async () => {
+      d.resolve(donePreflight());
+    });
+    expect(await screen.findByText('能发')).toBeTruthy();
   });
 });
