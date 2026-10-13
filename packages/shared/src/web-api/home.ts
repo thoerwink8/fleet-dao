@@ -137,6 +137,9 @@ export const HostCpuSchema = z.discriminatedUnion('state', [
 /**
  * 一个会话（一个 scope）此刻的占用：memory.current、memory.peak（MiB），cpu.stat 的 usage_usec 两次读数的差算出的
  * CPU 占用（100 = 占满一个核）。cpuPercent 缺 = 这个 scope 刚出现、还只有一次读数，算不出差（不是 0）。
+ * 真读到的内存不到 1M 往上记 1M，不四舍五入成 0。
+ * empty（#1992）：scope 还在、memory.current 是 0——里面已经没有进程（会话收场了、scope 没回收）。跑着的会话不可能 0，
+ * 所以不当 ok 的 0 报：页面写「空 scope」，不算在跑、不进合计。why 给人看。
  */
 export const SessionUsageSchema = z.discriminatedUnion('state', [
   z.object({
@@ -145,6 +148,7 @@ export const SessionUsageSchema = z.discriminatedUnion('state', [
     memoryPeakMb: z.number().int().min(0).optional(),
     cpuPercent: z.number().min(0).optional(),
   }),
+  z.object({ state: z.literal('empty'), why: z.string().min(1) }),
   ResourceUnreadSchema,
 ]);
 

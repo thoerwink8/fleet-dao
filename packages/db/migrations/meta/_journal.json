@@ -442,6 +442,13 @@
       "when": 1791864922654,
       "tag": "0062_familiar_angel",
       "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1791872622341,
+      "tag": "0063_worktree_inventory_node_sessions",
+      "breakpoints": true
     }
   ]
 }

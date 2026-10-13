@@ -549,3 +549,26 @@ export const nodeReports = pgTable('node_reports', {
   /** { home, env }：两份现成的驾驶舱契约原样放。 */
   payload: jsonb('payload').notNull(),
 });
+
+/**
+ * 法国工作树的清单（#1993）：每小时对账、一键清理那一轮看到的每棵树的去向，最近一份覆盖写（key 恒为 latest）。
+ * 引擎写（只有它能以会话用户的身份看树），后端读。形状是 shared 的 WorktreeInventorySchema，读回来认不出明确报错。
+ */
+export const worktreeInventory = pgTable('worktree_inventory', {
+  key: text('key').primaryKey(),
+  takenAt: timestamp('taken_at', tz).notNull(),
+  payload: jsonb('payload').notNull(),
+});
+
+/**
+ * 本机会话（#1991）：创始人电脑上在跑的 AI 会话的心跳，由那台的定时任务凑成一份推来（POST /api/nodes/sessions），
+ * 一个环境一行、覆盖写。只有元信息（会话编号、仓、分支、是不是子代理、起止时刻、最后在调的工具名），没有提示词和代码。
+ * node_id 照 node_reports 的规矩：收的一方按对上的通行证认定。新不新鲜按 received_at 算。
+ */
+export const nodeSessions = pgTable('node_sessions', {
+  nodeId: text('node_id').primaryKey(),
+  schemaVersion: integer('schema_version').notNull(),
+  reportedAt: timestamp('reported_at', tz).notNull(),
+  receivedAt: timestamp('received_at', tz).notNull(),
+  payload: jsonb('payload').notNull(),
+});

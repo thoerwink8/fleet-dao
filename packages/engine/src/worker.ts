@@ -32,6 +32,7 @@ import { engineTimerJobs } from './jobs/engine-timers.ts';
 import { type GroomPoller, startGroomRequests } from './jobs/groom.ts';
 import { type RouteProbeNowPoller, startRouteProbeRequests } from './jobs/route-probe-now.ts';
 import { type EngineTimers, realTimerHost, startEngineTimers } from './jobs/timers.ts';
+import { startWorktreeCleanupRequests, type WorktreeCleanupPoller } from './jobs/worktree-cleanup.ts';
 import type { EnginePorts } from './ports.ts';
 
 export interface EngineConfig {
@@ -318,6 +319,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let stopMaster: (() => void) | undefined;
   let probeNow: RouteProbeNowPoller | undefined;
   let groomPoller: GroomPoller | undefined;
+  let worktreePoller: WorktreeCleanupPoller | undefined;
   try {
     // 引擎总开关（#1086）：接活之前先读一次（读不到按关），之后每 5 秒刷新；选路、一次性会话登记读缓存，定时器入口每轮现读
     if (master) {
@@ -387,6 +389,13 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
         groomPoller = startGroomRequests(jobs.groom);
         console.info('整理待办的接手已起');
       }
+      // 一键清理没用的工作树（#1993）：每几秒看一眼有没人点（总开关关着也看：这是看家的清扫，判据和每小时对账同一份）
+      if (jobs.worktreeCleanup) {
+        const make = jobs.worktreeCleanup;
+        const c = client;
+        worktreePoller = startWorktreeCleanupRequests(() => make(c, config.taskQueue));
+        console.info('工作树清理的接手已起');
+      }
     }
     shutdown = installGracefulShutdown({
       worker,
@@ -409,6 +418,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     stopMaster?.();
     probeNow?.stop();
     groomPoller?.stop();
+    worktreePoller?.stop();
     await status?.flush();
     status?.stop();
     await clientConnection?.close();

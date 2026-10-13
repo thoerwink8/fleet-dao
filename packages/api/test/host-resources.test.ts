@@ -150,6 +150,33 @@ describe('读一回', () => {
     expect(resources.sessions.byRun.good).toEqual({ state: 'ok', memoryMb: 64 });
   });
 
+  test('【故意造出读到 0】scope 还在、memory.current 是 0（里面没进程）：写 empty 带原因，不是 ok 的 0；真有的数照写', async () => {
+    const files = {
+      '/proc/meminfo': MEMINFO,
+      '/proc/stat': stat(1, 1),
+      ...scope('mirasim-a', '0\n', '0\n', 0),
+      // 真有的数（哪怕很小）照写：300K 不当成 0
+      ...scope('tiny', String(300 * 1024), undefined, 5),
+      ...scope('real', String(64 * 1024 * 1024), undefined, 1),
+    };
+    const { resources } = await readHostResources(
+      fakeMachine(files, {
+        [SLICE]: ['fleet-agent-mirasim-a.scope', 'fleet-agent-tiny.scope', 'fleet-agent-real.scope'],
+      }),
+      undefined,
+      new Date(1_000),
+    );
+    expect(HomeResourcesSchema.parse(resources)).toEqual(resources);
+    if (resources.sessions.state !== 'ok') throw new Error('整池不该没读到');
+    const empty = resources.sessions.byRun['mirasim-a'];
+    expect(empty?.state).toBe('empty');
+    expect(empty?.state === 'empty' && empty.why).toContain('memory.current 是 0');
+    // 不到 1M 的真读数往上记成 1M（不四舍五入成 0）
+    expect(resources.sessions.byRun.tiny).toEqual({ state: 'ok', memoryMb: 1 });
+    expect(resources.sessions.byRun.real).toEqual({ state: 'ok', memoryMb: 64 });
+    expect(JSON.stringify(resources.sessions.byRun['mirasim-a'])).not.toMatch(/memoryMb|cpuPercent/);
+  });
+
   test('/proc/meminfo 内容认不出：内存 unread 带原因', async () => {
     const { resources } = await readHostResources(
       fakeMachine({ '/proc/meminfo': '乱码', '/proc/stat': stat(1, 1) }, { [SLICE]: [] }),
@@ -371,6 +398,23 @@ describe('每个上线项目的 CPU、内存（各单元的 cgroup）', () => {
       '/cg/system.slice/a.service/memory.current',
     );
     expect(resources.apps.items[1]?.usage.state).toBe('ok');
+  });
+
+  test('【故意造出读到 0】单元的 cgroup 在、memory.current 是 0：不算在跑，idle 带原因；同一应用里真在跑的照算', async () => {
+    const { resources } = await readHostResources(
+      machine(1, {
+        '/cg/system.slice/a.service/memory.current': '0\n',
+        '/cg/system.slice/c.service/memory.current': '0\n',
+      }),
+      undefined,
+      new Date(1_000),
+    );
+    if (resources.apps?.state !== 'ok') throw new Error('整段不该没读到');
+    const [api, two] = resources.apps.items;
+    expect(api?.usage.state).toBe('idle');
+    expect(api?.usage.state === 'idle' && api.usage.why).toContain('memory.current 是 0');
+    // b 真在跑照写；c 读到 0 不算进 running、不加上限
+    expect(two?.usage).toEqual({ state: 'ok', running: 1, memoryMb: 100, memoryMaxMb: 512 });
   });
 
   test('登记表里的补充带到页面：diskNote、external', async () => {

@@ -13,6 +13,7 @@
 // 写明哪里没查成；不记成 ok（没跑成 ≠ 没问题）。
 
 import type { AlertRow, ScheduleResult } from '@fleet-dao/db';
+import type { WorktreeInventory } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { HourlyReconcileRun } from '../contract.ts';
 import { type AlertSweepDeps, sweepAlerts } from './alert-sweep.ts';
@@ -33,6 +34,7 @@ import {
   retireWorkflowAlerts,
 } from './reconcile-checks.ts';
 import { clip, type SweepPart } from './reconcile-common.ts';
+import { inventoryOf } from './worktree-cleanup.ts';
 import { sweepWorktrees, type WorktreeSweepDeps } from './worktree-sweep.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来。 */
@@ -69,6 +71,11 @@ export type HourlyReconcileJobDeps = WorktreeSweepDeps &
      * 没推成由它自己记进 unchecked，不许记成推过。
      */
     mainRedPush?: () => Promise<SweepPart>;
+    /**
+     * 工作树这一部分看完存一份清单（#1993，资源页「仓库」一段读它）。不给 = 这一轮不存（单测外壳）；真装配总会给。
+     * 存不进记进 unchecked，不许当成存了。
+     */
+    saveInventory?: (inventory: WorktreeInventory) => Promise<void>;
   };
 
 /** 这一轮没跑成：结局已经记进 schedule_runs，活动照样报失败，Temporal 里也看得见。 */
@@ -117,6 +124,13 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     });
   }
   const trees = await sweepWorktrees(deps, before);
+  if (deps.saveInventory) {
+    try {
+      await deps.saveInventory(inventoryOf(trees, { trigger: 'hourly', at: deps.now(), root: deps.root }));
+    } catch (err) {
+      trees.unchecked.push(`工作树清单没存成（资源页上还是上一份）：${errMessage(err)}`);
+    }
+  }
   // 核对在提醒之前：这一轮新报的还不满 24 小时，提醒那部分不会再推它们
   const retired = await retireWorkflowAlerts(deps);
   const merged = await checkMergedPrs(deps);

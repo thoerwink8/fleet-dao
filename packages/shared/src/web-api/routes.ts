@@ -34,6 +34,7 @@ import {
 } from './france-release.ts';
 import { HomeResponseSchema } from './home.ts';
 import { JobsResponse } from './jobs.ts';
+import { LocalSessionsResponseSchema } from './local-sessions.ts';
 import { NodeDetailResponseSchema, NodesResponseSchema } from './nodes.ts';
 import {
   AnswerNotificationRequest,
@@ -95,6 +96,11 @@ import {
   UpdateTaskRoutePinResponse,
 } from './task.ts';
 import { TaskListQuery, TaskListResponse } from './task-list.ts';
+import {
+  WorktreeCleanupRequestSchema,
+  WorktreeCleanupResponseSchema,
+  WorktreesResponseSchema,
+} from './worktrees.ts';
 
 // —— 路由表（前端据此封装请求；路径都在 WEB_API_PREFIX 之下，:xxx 是路径参数）——
 
@@ -191,6 +197,20 @@ export const WebRoutes = {
   nodes: { method: 'GET', path: '/nodes', response: NodesResponseSchema },
   /** 一个远程环境最近一次推来的主页、环境页快照（只读展示用）；没推过 404。 */
   node: { method: 'GET', path: '/nodes/:nodeId', response: NodeDetailResponseSchema },
+  /** 本机会话（#1991）：每台推过的机器此刻在跑、刚停、超过阈值没动的会话；收不到写「没上报」。推的写口不在这里（LOCAL_SESSIONS_PATH 的 POST）。 */
+  localSessions: { method: 'GET', path: '/nodes/sessions', response: LocalSessionsResponseSchema },
+  /** 法国的工作树（#1993）：最近一份清单（每个仓的镜像、每棵树的状态和原因）加最近几次一键清理。 */
+  worktrees: { method: 'GET', path: '/worktrees', response: WorktreesResponseSchema },
+  /**
+   * 一键清理没用的工作树（#1993）：记一条 worktrees.cleanup.request，引擎几秒内接手，判据和每小时对账同一份
+   * （有没提交、没推的改动，或正被任务、会话用着的一律拒删并写明原因）。已经有一次在排队或在做 409 cleanup_busy。
+   */
+  worktreeCleanup: {
+    method: 'POST',
+    path: '/worktrees/cleanup',
+    request: WorktreeCleanupRequestSchema,
+    response: WorktreeCleanupResponseSchema,
+  },
   board: { method: 'GET', path: '/repos/:repoId/board', response: BoardResponse },
   /** 任务列表页 /tasks（#1639）：按最近更新从新到旧，可按状态、仓、单号或标题筛，游标翻页，带各状态的数。 */
   tasks: { method: 'GET', path: '/tasks', query: TaskListQuery, response: TaskListResponse },

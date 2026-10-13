@@ -15,6 +15,7 @@ import {
   HomeResponseSchema,
   JobsResponse,
   type LegacyRead,
+  LocalSessionsResponseSchema,
   MeResponse,
   NodeDetailResponseSchema,
   NodesResponseSchema,
@@ -66,6 +67,7 @@ import { registerFranceReleaseRoutes } from './france-release.ts';
 import { registerGroomRoutes } from './groom-routes.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
+import { readLocalSessions } from './local-sessions.ts';
 import { modelRosterFields } from './model-roster.ts';
 import { registerModelRosterRoutes } from './model-roster-routes.ts';
 import { readNodeDetail, readNodes } from './node-views.ts';
@@ -106,6 +108,7 @@ import {
   subtaskViews,
   usageView,
 } from './views.ts';
+import { registerWorktreeRoutes } from './worktree-routes.ts';
 
 /** 读旧 pool-hold 提醒时最多翻几页没处理的提醒（每页 200 条）；翻不完明说没读全，不拿「没有」顶。 */
 const LEGACY_ALERT_PAGES = 5;
@@ -217,6 +220,11 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const engine = await engineProbe();
     return reply(c, NodesResponseSchema, await readNodes(deps, engine));
   });
+
+  // 本机会话（#1991）：要排在 /nodes/:nodeId 前面，不然 sessions 会被当成环境编号。
+  app.get(WebRoutes.localSessions.path, async (c) =>
+    reply(c, LocalSessionsResponseSchema, await readLocalSessions(deps)),
+  );
 
   app.get(WebRoutes.node.path, async (c) =>
     reply(c, NodeDetailResponseSchema, await readNodeDetail(deps, c.req.param('nodeId'))),
@@ -893,6 +901,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   registerRoutingOrderRoutes(app, deps, actorOf);
   registerRouteProbeRoutes(app, deps, actorOf, engineProbe);
   registerGroomRoutes(app, deps, actorOf, engineProbe);
+  registerWorktreeRoutes(app, deps, actorOf, engineProbe);
   registerRunTranscriptRoutes(app, deps);
   registerModelRosterRoutes(app, deps, actorOf);
   registerFranceReleaseRoutes(app, deps);
