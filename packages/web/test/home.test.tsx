@@ -228,12 +228,16 @@ describe('home（/）：四种状态', () => {
     expect(button.getAttribute('data-tone')).toBeNull();
   });
 
-  test('点按钮开抽屉：两个分页签，要你拍的单列通栏、时间不换行；Esc 关', () => {
+  test('点按钮开抽屉：三个分页签（第三页本机会话，#1991），要你拍的单列通栏、时间不换行；Esc 关', () => {
     renderHome({ status: 'data', data: SAMPLE });
     openDrawer();
     const drawer = document.querySelector('[data-home-drawer]');
     expect(drawer?.getAttribute('data-home-drawer')).toBe('floating');
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['要你拍的2', '做完的1']);
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
+      '要你拍的2',
+      '做完的1',
+      '本机会话',
+    ]);
     const card = document.querySelector('[data-decision-card]');
     expect(card).toBeTruthy();
     const list = card?.parentElement;
