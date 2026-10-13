@@ -1,32 +1,22 @@
-// /api/france/release-state 和 /api/france/preflight（#618 发版一键）：
-// - release-state：复用 readFranceReleaseState 的逻辑——读 state 文件 + 暂停标记，三态各画各的；读不到一律 unreadable 写明原因。
-// - preflight：起子进程跑 pnpm release:onekey preflight（命令后端写死、不收参数）。
-// 故意造出的失败都写明原因，不拿「没在走」「预检过了」顶：读文件抛错、JSON 认不出、起进程没起成。
-import { FrancePreflightResponseSchema, FranceReleaseStateSchema, WEB_API_PREFIX } from '@fleet-dao/shared';
+// /api/france/release-state（#618 发版一键）：读 state 文件 + 暂停标记，三态各画各的；读不到一律 unreadable 写明原因。
+// 发版预检在 france-preflight.test.ts（#2021：后端进程内读事实，不起子进程）。
+// 故意造出的失败都写明原因，不拿「没在走」顶：读文件抛错、JSON 认不出。
+// 也测引擎会话数的读法（drain.json 认得出 / 认不出 / 进程已不在）。
+import { FranceReleaseStateSchema, WEB_API_PREFIX } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import type { FranceReleasePort } from '../src/france-release.ts';
+import { type FranceReleasePort, parseEngineDrain } from '../src/france-release.ts';
 import { type Harness, harness } from './harness.ts';
 
 const STATE_PATH = `${WEB_API_PREFIX}/france/release-state`;
-const PREFLIGHT_PATH = `${WEB_API_PREFIX}/france/preflight`;
 
 /** 状态文件的替身：默认两个文件都不在（没在走）。 */
-function port(over: Partial<FranceReleasePort> = {}): FranceReleasePort & { ran: { pnpmCalls: number } } {
-  const ran = { pnpmCalls: 0 };
+function port(over: Partial<FranceReleasePort> = {}): FranceReleasePort {
   return {
-    ran,
     async readStateFiles() {
       return { stateJson: null, marker: false };
     },
-    async runPreflight() {
-      ran.pnpmCalls += 1;
-      return {
-        code: 0,
-        signal: null,
-        stdout: '—— 预检摘要 ——\n主线 CI：绿\n预检过了',
-        stderr: '',
-        timedOut: false,
-      };
+    async readEngineSessions() {
+      return { ok: true, running: 0, names: [], engineDown: false };
     },
     ...over,
   };
@@ -41,15 +31,6 @@ async function readState(h: Harness) {
   const res = await h.cockpit.request(STATE_PATH, { headers: { cookie } });
   expect(res.status).toBe(200);
   return FranceReleaseStateSchema.parse(await res.json());
-}
-
-async function postPreflight(h: Harness) {
-  const { cookie, csrf } = await h.login();
-  const res = await h.cockpit.request(PREFLIGHT_PATH, {
-    method: 'POST',
-    headers: { cookie, 'x-csrf-token': csrf },
-  });
-  return { status: res.status, body: FrancePreflightResponseSchema.parse(await res.json()) };
 }
 
 describe('/api/france/release-state', () => {
@@ -186,71 +167,47 @@ describe('/api/france/release-state', () => {
   });
 });
 
-describe('/api/france/preflight', () => {
-  it('预检过了：code=0、命令原样照写、stdout 和 stderr 分块给页面', async () => {
-    const p = port();
-    const { status, body } = await postPreflight(harness({ franceRelease: p }));
-    expect(status).toBe(200);
-    expect(p.ran.pnpmCalls).toBe(1);
-    expect(body.state).toBe('done');
-    if (body.state !== 'done') throw new Error('该是 done');
-    expect(body.command).toBe('pnpm release:onekey preflight');
-    expect(body.code).toBe(0);
-    expect(body.stdout).toContain('预检过了');
-    expect(body.durationMs).toBeGreaterThanOrEqual(0);
-    expect(body.timedOut).toBe(false);
-  });
+describe('parseEngineDrain（引擎手上的会话，读 drain.json）', () => {
+  const alive = () => true;
+  const file = (o: object) => JSON.stringify({ schema: 2, pid: 4242, sessions: [], ...o });
 
-  it('预检没过：code=2、stderr 留下「没成」那行；起进程没起来这条不走到这里', async () => {
-    const p = port({
-      runPreflight: async () => ({
-        code: 2,
-        signal: null,
-        stdout: '—— 预检摘要 ——',
-        stderr: '第 0 步「预检」没成：主线 CI 红',
-        timedOut: false,
+  it('读到了：数会话、带环节和编号前 8 位', () => {
+    const r = parseEngineDrain(
+      file({
+        sessions: [
+          { runId: 'abcdef1234567890', stage: 'worker' },
+          { runId: '1234567890ab', stage: '' },
+        ],
       }),
+      alive,
+    );
+    expect(r).toEqual({
+      ok: true,
+      running: 2,
+      names: ['worker(abcdef12)', '会话(12345678)'],
+      engineDown: false,
     });
-    const { body } = await postPreflight(harness({ franceRelease: p }));
-    expect(body.state).toBe('done');
-    if (body.state !== 'done') throw new Error('该是 done');
-    expect(body.code).toBe(2);
-    expect(body.stderr).toContain('主线 CI 红');
   });
 
-  it('起进程都没起来（pnpm 不在 PATH）：unreadable + 原因，不拿 code 0 顶', async () => {
-    const p = port({
-      runPreflight: async () => {
-        throw new Error('spawn pnpm ENOENT');
-      },
+  it('引擎进程已经不在：0 个、标引擎没在跑', () => {
+    expect(parseEngineDrain(file({}), () => false)).toEqual({
+      ok: true,
+      running: 0,
+      names: [],
+      engineDown: true,
     });
-    const { body } = await postPreflight(harness({ franceRelease: p }));
-    expect(body.state).toBe('unreadable');
-    if (body.state !== 'unreadable') throw new Error('该是 unreadable');
-    expect(body.why).toContain('ENOENT');
   });
 
-  it('这台后端没接上 franceRelease：unreadable，写明到法国那台才有这颗按钮', async () => {
-    const { body } = await postPreflight(harness({}));
-    expect(body.state).toBe('unreadable');
-    if (body.state !== 'unreadable') throw new Error('该是 unreadable');
-    expect(body.why).toContain('没接上');
-  });
-
-  it('超时被杀（timedOut=true）：原样透出，让页面写「60 秒到点了被杀」', async () => {
-    const p = port({
-      runPreflight: async () => ({
-        code: null,
-        signal: 'SIGTERM',
-        stdout: '—— 预检摘要 ——\n主线 CI：绿\n法国在跑的会话：',
-        stderr: '',
-        timedOut: true,
-      }),
-    });
-    const { body } = await postPreflight(harness({ franceRelease: p }));
-    expect(body.state).toBe('done');
-    if (body.state !== 'done') throw new Error('该是 done');
-    expect(body.timedOut).toBe(true);
-    expect(body.signal).toBe('SIGTERM');
+  it('读不到：不是 JSON、schema 不对、没写进程号，都回 ok:false + 原因，不当成 0 个', () => {
+    for (const text of [
+      '{oops',
+      JSON.stringify({ schema: 1, pid: 1 }),
+      'null',
+      JSON.stringify({ schema: 2 }),
+    ]) {
+      const r = parseEngineDrain(text, alive);
+      expect(r.ok, text).toBe(false);
+      if (!r.ok) expect(r.why).toContain('drain.json');
+    }
   });
 });

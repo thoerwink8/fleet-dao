@@ -42,7 +42,7 @@ import type { LiveEvent } from './types';
 
 type Query = Record<string, string | number | undefined>;
 
-/** 发版预检后端最多等 60 秒，前端再留一点，避免预检还在跑就被这里掐掉。 */
+/** 一次请求最多等多久。发版预检后端读 GitHub 限时 12 秒，这里留得更宽，避免预检还在读就被掐掉。 */
 export const REQUEST_TIMEOUT_MS = 90_000;
 
 const NETWORK_MESSAGE = '连不上驾驶舱后端。检查一下网络，过一会儿再试。';

@@ -145,7 +145,7 @@ export interface Deps {
    */
   hostResources?: HostResourceSampler | undefined;
   /**
-   * /france 页发版一键（#618，france-release.ts）：读 release-train 状态文件 + 起 pnpm release:onekey preflight。
+   * /france 页发版一键（#618，france-release.ts）：读 release-train 状态文件和引擎的会话数（发版预检用，france-preflight.ts，不起子进程）。
    * 只在正式环境装配（main.ts 的 liveFranceReleasePort）；没给时接口照样回 unreadable，页面画「没查成 + 原因」。
    */
   franceRelease?: FranceReleasePort | undefined;

@@ -1,62 +1,78 @@
 // 法国发版一键（/france 页 #618）：这一台后端自己替页面做两件事——
-// 1. GET /api/france/release-state：读 ~/.fleet-dao/release-train.json 和 ~/.fleet-dao/release-train.paused，
-//    判断 release-train 此刻在走 / 暂停 / 没在走。读不到一律回 unreadable，不拿「没在走」顶（机底线）。
-// 2. POST /api/france/preflight：起子进程跑 `pnpm release:onekey preflight`，命令写死、不收参数（#618 的红色就是「不开放任意 CLI」）。
-//    60 秒超时、512KB maxBuffer（溢出的截掉、truncated=true）；起进程都没起来时回 unreadable + 原因。stdout/stderr 原样回给页面分块 show。
+// 1. GET /api/france/release-state：读 release-train 的进度记录和暂停标记，判断 release-train 此刻在走 / 暂停 / 没在走。
+//    读不到一律回 unreadable，不拿「没在走」顶（机底线）。
+// 2. POST /api/france/preflight：「发版预检」，在 france-preflight.ts（后端进程内直接读事实算，不起任何子进程、不碰 home；#2021）。
 //
-// 这两个能力都包成一个 port（FranceReleasePort），deps 里给。这样：
-// - 单测（france-release.test.ts）换假的读文件、起子进程，不真起 pnpm、不真靠 home；
+// 读文件这一块包成 port（FranceReleasePort），deps 里给。这样：
+// - 单测（france-release.test.ts）换假的读文件，不真靠 home；
 // - 开发、内存版后端 deps 没给时接口照样回，写明「没接上」，不拿「没在走」「预检过了」顶。
 //
 // 形状约定见 packages/shared/src/web-api/france-release.ts。
 
-import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
-import {
-  type FrancePreflightResponse,
-  FrancePreflightResponseSchema,
-  type FranceReleaseState,
-  FranceReleaseStateSchema,
-} from '@fleet-dao/shared';
+import { type FranceReleaseState, FranceReleaseStateSchema } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { Hono } from 'hono';
 import type { Deps } from './deps.ts';
 import { reply } from './http.ts';
-import type { Logger } from './ports.ts';
 import type { CockpitEnv } from './session.ts';
-
-const execFileAsync = promisify(execFile);
-
-// 命令固定写死：这就是「不开放任意 CLI」的实现——页面和后端之间只走 POST /france/preflight 召唤，
-// 起什么、带什么参数都写在这份文件里，前端不给任何口子（#618 的红色）。
-const PREFLIGHT_TIMEOUT_MS = 60_000;
-const PREFLIGHT_MAX_BUFFER = 512 * 1024;
 
 const STATE_REL = join('.fleet-dao', 'release-train.json');
 const MARKER_REL = join('.fleet-dao', 'release-train.paused');
 /** 法国上驾驶舱按钮那一趟（root 的 fleet-release-request 单元）写进度的地方（归 root，后端只读）：有就读它，没有才读本机 ~。 */
 export const TRAIN_DIR = '/srv/fleet-dao-releases/.train';
 
+/** 引擎手上在干的会话（drain.json 里那份）：读到了给个数和名字；读不到带原因，不当成 0 个。 */
+export type EngineSessions =
+  | { ok: true; running: number; names: string[]; engineDown: boolean }
+  | { ok: false; why: string };
+
+/** 引擎写排空状态的目录（同 release.sh 的 ENGINE_STATE_DEFAULT；engine.env 里 FLEET_ENGINE_STATE_DIR 没写时就是它，后端不读 engine.env）。 */
+export const ENGINE_STATE_DIR = '/var/lib/fleet-dao/engine';
+
 /**
- * 一台后端的「读 release-train 状态 + 跑预检」接口。生产（main.ts 正式装配）给真实现：
- * home 用当前用户的 ~、cwd 用进程自己启动的工作目录（release.sh 是 cd 到发布目录起的），
- * 起 pnpm 经 spawnSync（Windows 下 pnpm 是 .cmd 套壳，走 shell:true 同 release-onekey.mjs 的做法）。
+ * drain.json 的内容读成在跑的会话（引擎权威口径，packages/engine/src/drain.ts 的 drainStatus；同 deploy/france/release-request/lib.mjs 的 parseDrain）。
+ * 起会话过了闸才登记，探针这类辅助命令不登记，所以这里数的就是真在干的活。
+ * pid 已经不在 = 引擎没在跑（手上没有会话）；pid 在、文件认不出 = 读不到，不当成 0 个。
+ */
+export function parseEngineDrain(text: string, isAlive: (pid: number) => boolean): EngineSessions {
+  let st: { schema?: unknown; pid?: unknown; sessions?: unknown };
+  try {
+    st = JSON.parse(text) as typeof st;
+  } catch (e) {
+    return { ok: false, why: `drain.json 认不出：${errMessage(e)}` };
+  }
+  if (st === null || typeof st !== 'object' || st.schema !== 2) {
+    return {
+      ok: false,
+      why: `drain.json 的 schema 不是 2（${JSON.stringify((st as { schema?: unknown } | null)?.schema)}）`,
+    };
+  }
+  if (typeof st.pid !== 'number' || !Number.isInteger(st.pid) || st.pid <= 0) {
+    return { ok: false, why: 'drain.json 里没写引擎的进程号' };
+  }
+  if (!isAlive(st.pid)) return { ok: true, running: 0, names: [], engineDown: true };
+  const list = Array.isArray(st.sessions) ? (st.sessions as { runId?: unknown; stage?: unknown }[]) : [];
+  const names = list.map((x) => {
+    const stage = typeof x?.stage === 'string' && x.stage !== '' ? x.stage : '会话';
+    const run = typeof x?.runId === 'string' ? x.runId.slice(0, 8) : '';
+    return `${stage}(${run})`;
+  });
+  return { ok: true, running: names.length, names, engineDown: false };
+}
+
+/**
+ * 一台后端的「读 release-train 状态 + 读引擎会话」接口。生产（main.ts 正式装配）给真实现：
+ * 读的都是文件，不起子进程（后端的 systemd 单元沙箱里没有 home、不起进程，#2021）。
  */
 export interface FranceReleasePort {
   /** 读两个状态文件、拼出这一刻那一趟的状态。读不到抛错，由 readFranceReleaseState 包成 unreadable。 */
   readStateFiles(): Promise<{ stateJson: string | null; marker: boolean }>;
-  /** 起子进程跑预检，返回退出码 / 信号 / stdout / stderr。起进程自己抛错（pnpm 不在 PATH、不能 fork）。 */
-  runPreflight(): Promise<{
-    code: number | null;
-    signal: string | null;
-    stdout: string;
-    stderr: string;
-    timedOut: boolean;
-  }>;
+  /** 引擎手上在干几个会话（读 drain.json）；读不到给 { ok: false, why }。 */
+  readEngineSessions(): Promise<EngineSessions>;
 }
 
 interface ReleaseTrainStateFile {
@@ -178,63 +194,20 @@ export async function readFranceReleaseState(
   };
 }
 
-export async function runFrancePreflight(
-  port: FranceReleasePort | undefined,
-  now: () => Date,
-): Promise<FrancePreflightResponse> {
-  const asOf = now().toISOString();
-  if (!port) {
-    return {
-      state: 'unreadable',
-      why: '这台后端没接上 release:onekey 的执行（开发、内存版）；到法国那台的驾驶舱开才有这颗按钮',
-      asOf,
-    };
-  }
-  const startedAt = now().getTime();
-  let r: Awaited<ReturnType<FranceReleasePort['runPreflight']>>;
-  try {
-    r = await port.runPreflight();
-  } catch (err) {
-    return { state: 'unreadable', why: `起 pnpm release:onekey preflight 没成：${errMessage(err)}`, asOf };
-  }
-  const durationMs = Math.max(0, now().getTime() - startedAt);
-  // 输出已经按 maxBuffer 截断（node 的 execFile 到 maxBuffer 自己就截掉并设 error.code='ERR_CHILD_PROCESS_STDIO_MAXBUFFER_EXCEEDED'，
-  // 但起子进程那一层把它当作完成、stdout/stderr 是截好的内容）。truncated 由 port 自己报更准确。
-  const stdout = r.stdout.length > PREFLIGHT_MAX_BUFFER ? r.stdout.slice(0, PREFLIGHT_MAX_BUFFER) : r.stdout;
-  const stderr = r.stderr.length > PREFLIGHT_MAX_BUFFER ? r.stderr.slice(0, PREFLIGHT_MAX_BUFFER) : r.stderr;
-  const truncated = r.stdout.length > PREFLIGHT_MAX_BUFFER || r.stderr.length > PREFLIGHT_MAX_BUFFER;
-  return {
-    state: 'done',
-    // 命令原样 show：让人看到这次跑的是哪条。命令固定写死，show 出来也不漏参数（没有参数可注）。
-    command: 'pnpm release:onekey preflight',
-    code: r.code,
-    signal: r.signal,
-    stdout,
-    stderr,
-    durationMs,
-    timedOut: r.timedOut,
-    truncated,
-    asOf,
-  };
-}
-
 export function registerFranceReleaseRoutes(app: Hono<CockpitEnv>, deps: Deps): void {
   // WebRoutes 写在前端共享里，路径都在 /api 之下
   app.get('/france/release-state', async (c) =>
     reply(c, FranceReleaseStateSchema, await readFranceReleaseState(deps.franceRelease, deps.now)),
   );
-  app.post('/france/preflight', async (c) =>
-    reply(c, FrancePreflightResponseSchema, await runFrancePreflight(deps.franceRelease, deps.now)),
-  );
 }
 
 // —— 生产装配（main.ts 挂）用到的真实现 ——
 
-/**
- * 真 port：home 是当前用户的 ~；cwd 是 process.cwd()（release.sh 把驾驶舱后端在发布目录里起）；pnpm 走 shell:true 以便 Windows 下 .cmd 起得来。
- * 这和 release-onekey.mjs 里 run 的「Windows 下 pnpm 走 cmd.exe」等价——execFile 的 shell:true 在 Windows 上会让 cmd.exe 解析。
- */
-export function liveFranceReleasePort(log: Logger, trainDir: string = TRAIN_DIR): FranceReleasePort {
+/** 真 port：状态文件优先读驾驶舱按钮那一趟的目录，没有再读本机 ~（后端在沙箱里时 ~ 读不到，existsSync 回 false、不报错）；会话数读引擎的 drain.json。 */
+export function liveFranceReleasePort(
+  trainDir: string = TRAIN_DIR,
+  engineStateDir: string = ENGINE_STATE_DIR,
+): FranceReleasePort {
   const home = homedir();
   const statePath = join(home, STATE_REL);
   const markerPath = join(home, MARKER_REL);
@@ -247,48 +220,22 @@ export function liveFranceReleasePort(log: Logger, trainDir: string = TRAIN_DIR)
       const stateJson = existsSync(statePick) ? await readFile(statePick, 'utf8') : null;
       return { stateJson, marker: existsSync(trainMarker) || existsSync(markerPath) };
     },
-    async runPreflight() {
-      // env 用 process.env 原样过（带上代理变量，让 pnpm 找得到网络；release-onekey.mjs 里 gh 自己有直连再代理的两条路）。
-      // shell：Windows 下 pnpm 是 .cmd 套壳，要 cmd.exe 来解析；POSIX 下 shell:true 走 /bin/sh，pnpm 在 PATH 里就行。
-      // cwd：不发参数（继承 process.cwd()）——release.sh 是在发布目录里起的，预检读到的状态（在跑会话、落后主线）就是这台后端自己看到的那份。
+    async readEngineSessions() {
+      let text: string;
       try {
-        const r = await execFileAsync('pnpm', ['release:onekey', 'preflight'], {
-          encoding: 'utf8',
-          timeout: PREFLIGHT_TIMEOUT_MS,
-          maxBuffer: PREFLIGHT_MAX_BUFFER,
-          windowsHide: true,
-          shell: true,
-        });
-        return {
-          code: 0,
-          signal: null,
-          stdout: r.stdout ?? '',
-          stderr: r.stderr ?? '',
-          timedOut: false,
-        };
-      } catch (err: unknown) {
-        // 非零退出码、超时被杀、stdio 截断：node 都走 reject。这种是「起得来、跑完了但没过」，不是「起不来」——
-        // 照样回 done 让页面 show 输出和退出码。起不来（pnpm 不在 PATH、fork 失败）的 err 没有 stdout/stderr 字段，往上抛。
-        const e = err as {
-          code?: number | string | null;
-          signal?: string | null;
-          stdout?: string;
-          stderr?: string;
-          killed?: boolean;
-        };
-        if (typeof e.stdout === 'string' || typeof e.stderr === 'string') {
-          const timedOut = e.signal === 'SIGTERM' && e.killed === true;
-          return {
-            code: typeof e.code === 'number' ? e.code : null,
-            signal: typeof e.signal === 'string' ? e.signal : null,
-            stdout: e.stdout ?? '',
-            stderr: e.stderr ?? '',
-            timedOut,
-          };
-        }
-        log.warn('发版预检起子进程没成', { error: errMessage(err) });
-        throw err;
+        text = await readFile(join(engineStateDir, 'drain.json'), 'utf8');
+      } catch (e) {
+        return { ok: false, why: `读 ${join(engineStateDir, 'drain.json')} 失败：${errMessage(e)}` };
       }
+      return parseEngineDrain(text, (pid) => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch (e) {
+          // EPERM = 进程在、只是不归这个用户；只有 ESRCH 才是不在
+          return (e as NodeJS.ErrnoException).code === 'EPERM';
+        }
+      });
     },
   };
 }
