@@ -1,5 +1,6 @@
-// 用户级开会话钩子（决定 0085）。只做一件事：当前仓有订阅标记，就按目录把过程组写进这个仓的项目设置；
+// 用户级开会话钩子（决定 0085）。当前仓有订阅标记，就按目录把过程组写进这个仓的项目设置；
 // 没有标记，就把本目录里的过程钩子从项目设置里拿掉，别的钩子不动。
+// 另：配了 ~/.fleet-dao/fallback-proxy 就往 $CLAUDE_ENV_FILE 写代理变量（proxy-env.mjs），Bash 里的 gh/curl 不穿 reclaude 的口。
 // 0083 删的是「每个仓都跑流程钩子」。这个加载器没标记就不写。
 // 引擎无头会话（FLEET_HEADLESS=1）直接退出，不改项目设置。
 // 订阅文件读不成：不改项目设置，退出 0，并在 stderr 说明。退出 0 是为了不挡住开会话。
@@ -8,6 +9,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROCESS_HOOKS } from './plugin-catalog.mjs';
+import { writeProxyEnv } from './proxy-env.mjs';
 
 const SCRIPT_RE = /(?:\/\.fleet-dao\/hooks\/|\/agents\/hooks\/)([\w.-]+\.mjs)(?![\w.-])/;
 
@@ -142,6 +144,8 @@ function isMain() {
 
 if (isMain()) {
   if (process.env.FLEET_HEADLESS === '1') process.exit(0);
+  // 备用代理进 Bash（proxy-env.mjs）：这是每个仓开会话都跑的用户级钩子，放这里每台、每个仓都有
+  for (const l of writeProxyEnv({ envFile: process.env.CLAUDE_ENV_FILE })) process.stderr.write(`${l}\n`);
   try {
     let input = {};
     try {

@@ -1,15 +1,16 @@
 // 本机会话心跳（#1991）：钩子写心跳、推送、装和卸。
 // 故意造出的失败：钩子输入里带提示词、命令参数，落盘的心跳里一个字都没有；推不出去、法国回 401、没配 config 都写进 last-push.json；
 // settings.json 坏了不覆盖；常量和法国那边的 schema 对不上就红。
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   addHooks,
   heartbeatCommand,
   install,
+  refresh,
   removeHooks,
   status,
   uninstall,
@@ -220,6 +221,82 @@ describe('凑一份推的', () => {
   });
 });
 
+describe('最后一次动读会话记录的修改时间（调工具前不再挂心跳）', () => {
+  /** 在 <home>/.claude/projects/<目录>/ 下造一份会话记录，修改时间设成 at */
+  const transcript = (home: string, rel: string, text: string, at: Date) => {
+    const p = join(home, '.claude', 'projects', 'D--frank-fleet-dao', rel);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, text);
+    utimesSync(p, at, at);
+    return p;
+  };
+  const toolLine = (name: string) =>
+    `${JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_1', name, input: { command: 'SECRET-ARG' } }] } })}\n`;
+
+  it('开场之后只有会话记录在动：最后一次动跟着记录走、算在跑，工具名从记录尾巴读；推上去的没有路径和参数', () => {
+    const home = tmp();
+    writeHeartbeat(
+      { session_id: 's-1', hook_event_name: 'SessionStart' },
+      { home, now: new Date(T0.getTime() - 20 * MIN) },
+    );
+    transcript(home, 's-1.jsonl', toolLine('Read') + toolLine('Bash'), new Date(T0.getTime() - 30_000));
+    const [s] = collect({ home, now: T0 }).sessions;
+    expect(s).toMatchObject({
+      id: 's-1',
+      lastSeenAt: new Date(T0.getTime() - 30_000).toISOString(),
+      last: 'tool',
+      lastTool: 'Bash',
+    });
+    const report = JSON.stringify(buildReport({ home, now: T0, machine: '本机' }));
+    expect(report).not.toMatch(/SECRET|projects|jsonl/);
+    expect(LocalSessionsReportSchema.safeParse(JSON.parse(report)).success).toBe(true);
+  });
+
+  it('一轮做完（Stop）之后记录只晚写了几秒：仍算刚停；隔了一阵又动了：算又在跑', () => {
+    const home = tmp();
+    const stopAt = new Date(T0.getTime() - 10 * MIN);
+    writeHeartbeat({ session_id: 's-1', hook_event_name: 'Stop' }, { home, now: stopAt });
+    const p = transcript(home, 's-1.jsonl', toolLine('Edit'), new Date(stopAt.getTime() + 2_000));
+    expect(collect({ home, now: T0 }).sessions[0]).toMatchObject({ last: 'stop' });
+    utimesSync(p, new Date(T0.getTime() - MIN), new Date(T0.getTime() - MIN));
+    expect(collect({ home, now: T0 }).sessions[0]).toMatchObject({
+      last: 'tool',
+      lastSeenAt: new Date(T0.getTime() - MIN).toISOString(),
+    });
+  });
+
+  it('子代理读它自己的记录（<会话>/subagents/agent-<编号>.jsonl）', () => {
+    const home = tmp();
+    writeHeartbeat(
+      { session_id: 's-1', agent_id: 'a9', agent_type: 'Explore', hook_event_name: 'SessionStart' },
+      { home, now: new Date(T0.getTime() - 20 * MIN) },
+    );
+    transcript(
+      home,
+      join('s-1', 'subagents', 'agent-a9.jsonl'),
+      toolLine('Grep'),
+      new Date(T0.getTime() - MIN),
+    );
+    expect(collect({ home, now: T0 }).sessions[0]).toMatchObject({
+      id: 's-1~a9',
+      last: 'tool',
+      lastTool: 'Grep',
+      lastSeenAt: new Date(T0.getTime() - MIN).toISOString(),
+    });
+  });
+
+  it('【故意造出的失败】找不到记录：照心跳原样推，不编最后一次动；收场的会话记录再新也不改成在跑', () => {
+    const home = tmp();
+    const at = new Date(T0.getTime() - 20 * MIN);
+    writeHeartbeat({ session_id: 'gone', hook_event_name: 'SessionStart' }, { home, now: at });
+    writeHeartbeat({ session_id: 'ended', hook_event_name: 'SessionEnd' }, { home, now: at });
+    transcript(home, 'ended.jsonl', toolLine('Bash'), new Date(T0.getTime() - MIN));
+    const got = Object.fromEntries(collect({ home, now: T0 }).sessions.map((s) => [s.id, s]));
+    expect(got.gone).toMatchObject({ lastSeenAt: at.toISOString(), last: 'start', lastTool: null });
+    expect(got.ended).toMatchObject({ last: 'end' });
+  });
+});
+
 describe('推送', () => {
   const configured = (home: string) => {
     mkdirSync(join(home, '.fleet-dao', 'local-sessions'), { recursive: true });
@@ -382,12 +459,12 @@ describe('装和卸', () => {
     await install(opts);
     const s = settingsOf(home);
     expect(s.model).toBe('opus');
-    expect(s.hooks.PreToolUse).toEqual([
-      { matcher: '*', hooks: [other] },
-      { matcher: '*', hooks: [{ type: 'command', command: heartbeatCommand(home), timeout: 5 }] },
-    ]);
+    // 调工具前不再登记心跳（每次调用 138-250ms，推送却 2 分钟一次；最后一次动改读会话记录的修改时间）
+    expect(s.hooks.PreToolUse).toEqual([{ matcher: '*', hooks: [other] }]);
     for (const e of ['SessionStart', 'Stop', 'SubagentStop', 'SessionEnd'])
-      expect(s.hooks[e]).toHaveLength(1);
+      expect(s.hooks[e]).toEqual([
+        { hooks: [{ type: 'command', command: heartbeatCommand(home), timeout: 5, async: true }] },
+      ]);
     expect(calls[0]?.slice(0, 4)).toEqual(['schtasks', '/Create', '/F', '/TN']);
     expect(readFileSync(join(home, '.fleet-dao', 'local-sessions', 'bin', 'run-push.vbs'), 'utf8')).toContain(
       'push.mjs',
@@ -547,6 +624,43 @@ describe('装和卸', () => {
     writeFileSync(lock, 'garbage');
     expect(acquireLock({ lock, pid: 333, alive: () => true })).toBe(true);
     expect(readFileSync(lock, 'utf8')).toBe('333');
+  });
+
+  it('【故意造出的失败】旧版登记的调工具前心跳（matcher *）：重装、refresh 都摘掉，别人的钩子留着；没装过的机器 refresh 什么都不动', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.claude'), { recursive: true });
+    const old = {
+      hooks: {
+        PreToolUse: [
+          { matcher: '*', hooks: [other] },
+          { matcher: '*', hooks: [{ type: 'command', command: heartbeatCommand(home), timeout: 5 }] },
+        ],
+        Stop: [{ hooks: [{ type: 'command', command: heartbeatCommand(home), timeout: 5 }] }],
+      },
+    };
+    writeFileSync(join(home, '.claude', 'settings.json'), JSON.stringify(old));
+    // 没装过（没有 config.json）：refresh 不动设置
+    expect(refresh({ home, srcDir })).toEqual([
+      { ok: true, step: '本机会话心跳', detail: expect.stringMatching(/没装/) },
+    ]);
+    expect(settingsOf(home)).toEqual(old);
+    // 装过：拷新脚本、改登记
+    mkdirSync(join(home, '.fleet-dao', 'local-sessions'), { recursive: true });
+    writeFileSync(
+      join(home, '.fleet-dao', 'local-sessions', 'config.json'),
+      JSON.stringify({ url: 'https://fleet.example', token: 't' }),
+    );
+    const steps = refresh({ home, srcDir });
+    expect(
+      steps.every((x) => x.ok),
+      JSON.stringify(steps),
+    ).toBe(true);
+    const s = settingsOf(home);
+    expect(s.hooks.PreToolUse).toEqual([{ matcher: '*', hooks: [other] }]);
+    expect(s.hooks.Stop[0].hooks[0]).toMatchObject({ async: true });
+    expect(existsSync(join(home, '.fleet-dao', 'local-sessions', 'bin', 'lib.mjs'))).toBe(true);
+    // 再跑一次：已经对了就不再写设置
+    expect(refresh({ home, srcDir }).find((x) => x.step === '钩子')?.detail).toMatch(/已经是/);
   });
 
   it('removeHooks 认不出的形状原样留着', () => {

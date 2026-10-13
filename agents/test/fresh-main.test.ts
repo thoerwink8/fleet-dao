@@ -523,3 +523,21 @@ describe('真的钩子进程：远端取不到时，建工作树的子代理放�
     SLOW_MS,
   );
 });
+
+describe('直连兜底连 git 配置里的代理一起去掉（2026-10-13）', () => {
+  it('【故意造出的失败】配置里设着 http.https://github.com/.proxy、http.proxy：direct 那次读到的都是空，不直连就照旧是配置里的值', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fresh-main-direct-'));
+    try {
+      runChild('git', ['init', '-q'], { cwd: dir });
+      runChild('git', ['config', 'http.https://github.com/.proxy', 'http://127.0.0.1:9'], { cwd: dir });
+      runChild('git', ['config', 'http.proxy', 'http://127.0.0.1:9'], { cwd: dir });
+      const run = (lib as unknown as { gitRunner: () => Git }).gitRunner();
+      for (const key of ['http.https://github.com/.proxy', 'http.proxy']) {
+        expect(run(dir, ['config', '--get', key]).stdout.trim()).toBe('http://127.0.0.1:9');
+        expect(run(dir, ['config', '--get', key], { direct: true }).stdout.trim()).toBe('');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -29,7 +29,8 @@
 // 环境变量 FLEET_WORKER=1（commander 的 worker.mjs 起工人时设）：只做第 1、2 件，其余各段（创始人的事、整池暂停、工作树、工人状态）一律不出。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -40,13 +41,14 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { lineageOf, reconcile, relayedUpTo, sentByFounder } from './founder-inbox.mjs';
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
-import { gitBroken, gitRunner, gitOk as ok, gitWhy as why } from './git-run.mjs';
+import { gitBroken, gitRunner, gitOk as ok, readFallbackProxy, gitWhy as why } from './git-run.mjs';
 import { logDir } from './prompt-log.mjs';
+import { proxyEnvOf, writeProxyEnv } from './proxy-env.mjs';
 import { contractLines, DIRECTIVE_HEADING, pendingItems, scopeNote } from './repo-contract.mjs';
 import {
   cleanId,
@@ -675,11 +677,8 @@ export function idlePrRunner(timeoutMs = IDLE_PR_MS) {
 
 /** 参数：cwd、git、run、fetch（第 1 件取远端的结果）、mirror（同步专用检出里那份脚本）；返回要说的几行：没有、不是 fleet-dao 都不出声 */
 export function checkIdlePrs({ cwd, git, run, fetch, mirror = null }) {
-  const top = git(cwd, ['rev-parse', '--show-toplevel']);
-  if (!ok(top) || !top.stdout.trim()) return [];
-  const root = top.stdout.trim();
-  const url = git(root, ['config', '--get', 'remote.origin.url']);
-  if (!ok(url) || !FLEET_ORIGIN.test(url.stdout.trim())) return [];
+  const root = fleetRoot(cwd, git);
+  if (root === null) return [];
   if (fetch && fetch.ok === false) return [`${IDLE_NOT_CHECKED}：取不到远端（${fetch.why}）。`];
   const script = [mirror, join(root, IDLE_SCRIPT)].find((s) => s && existsSync(s));
   if (!script) return [`${IDLE_NOT_CHECKED}：找不到 ${IDLE_SCRIPT.replaceAll('\\', '/')}。`];
@@ -729,14 +728,32 @@ export function progressRunner(timeoutMs = PROGRESS_MS) {
  * 本血缘的列全文叫它办；有主、主不是本血缘的只说条数；无主的照列开头，但先认领（pnpm progress:claim）。
  */
 export function checkProgressIssue({ cwd, git, run, mirror = null, lineage = null }) {
+  const root = fleetRoot(cwd, git);
+  if (root === null) return [];
+  const script = progressScript(root, mirror);
+  if (!script) return [progressMissing()];
+  return progressLines(run(script, root), lineage);
+}
+
+/** 会话所在的仓是 fleet-dao 的检出就返回仓根，不是（或不是 git 仓）返回 null */
+function fleetRoot(cwd, git) {
   const top = git(cwd, ['rev-parse', '--show-toplevel']);
-  if (!ok(top) || !top.stdout.trim()) return [];
+  if (!ok(top) || !top.stdout.trim()) return null;
   const root = top.stdout.trim();
   const url = git(root, ['config', '--get', 'remote.origin.url']);
-  if (!ok(url) || !FLEET_ORIGIN.test(url.stdout.trim())) return [];
-  const script = [mirror, join(root, PROGRESS_SCRIPT)].find((s) => s && existsSync(s));
-  if (!script) return [`${PROGRESS_NOT_CHECKED}：找不到 ${PROGRESS_SCRIPT.replaceAll('\\', '/')}。`];
-  const r = run(script, root);
+  if (!ok(url) || !FLEET_ORIGIN.test(url.stdout.trim())) return null;
+  return root;
+}
+
+const progressScript = (root, mirror) =>
+  [mirror, join(root, PROGRESS_SCRIPT)].find((s) => s && existsSync(s));
+const progressMissing = () => `${PROGRESS_NOT_CHECKED}：找不到 ${PROGRESS_SCRIPT.replaceAll('\\', '/')}。`;
+
+/**
+ * progress.ts read --pending 跑出来的结果 → 要说的几行（开会话的同步那半拿后台存下的结果调它，认主要用本会话的血缘）。
+ * @param {{ status: number | null, stdout: string, stderr: string, error?: { message?: string, code?: string } | null, timeoutMs?: number }} r
+ */
+export function progressLines(r, lineage = null) {
   if (r.error || r.status !== 0) return [`${PROGRESS_NOT_CHECKED}：${why(r)}。`];
   const rows = String(r.stdout)
     .split(/\r?\n/)
@@ -1037,6 +1054,274 @@ export function sessionStart({
         })),
     syncFleet({ home, git, sync, fetch: here.fetch, now }),
   ];
+}
+
+// ── 拆成两半（片 B 第 8 条，2026-10-13）────────────────────────────────────────────────────────────────
+// 上面的 sessionStart 是一口气全做完的老路子（工人 FLEET_WORKER=1 起来就要当前的远端，还走它；测试也拿它测各件）。
+// 本机实测它中位 27.7 秒、最长 86 秒，Mirasim 每条消息 resume 都付一遍。现在真开会话走 fastSessionStart：
+// - 同步那半只做本地的：会话所在仓的本地核对（用手里已有的 origin/main，落后就快进）、临时调整表、引导、仓合同、他最近的话、工人状态，
+//   外加读后台上一次写下的结果（~/.fleet-dao/session-bg/<仓的指纹>.json）。目标中位 ≤1 秒。
+// - 取远端、规矩同步（agents-sync）、gh（进度单 #1055、绿了没挂的 PR）、扫工作树、ssh 法国查整池暂停：放进脱离的后台子进程
+//   （本文件 --background <会话目录>），写结果文件，下次开会话读。结果没有、过了 QUIET_MS、读不懂就再起一个；锁（同名 .lock）
+//   BG_LOCK_MS 内是新的就不起第二个。
+// - 后台每一步出错都写进结果（{ ok: false, why }），整个崩了写 crashed：下次开场如实说「没查成」和原因，不吞掉、不当成没事。
+// - 后台子进程的环境：配了 ~/.fleet-dao/fallback-proxy 就把四个代理变量换成它（proxy-env.mjs），gh、ssh 不穿 reclaude 的口。
+
+/** 后台跑着的锁多久算还新（超过就当那个后台死了，照起新的） */
+export const BG_LOCK_MS = 5 * 60_000;
+/** 后台里问 GitHub 的脚本（进度单、绿了没挂的 PR）各给多久 */
+export const BG_SCRIPT_MS = 45_000;
+/** 后台结果多久没刷新就在开场多说一句 */
+const BG_STALE_MS = 30 * 60_000;
+const BG_WHAT = '开场的联网几项（取远端、规矩同步、GitHub 上的进度单和 PR、清工作树、法国整池暂停）';
+
+/** 后台结果文件：按仓的 git 公共目录分（和 fetch-ok、session-net 同一种指纹）；不在 git 仓里的共用 _none */
+function cachePathOf(home, common) {
+  const key = common ? createHash('sha256').update(common).digest('hex').slice(0, 16) : '_none';
+  return join(home, '.fleet-dao', 'session-bg', `${key}.json`);
+}
+
+/** 这个会话目录的后台结果文件在哪 */
+export function bgCachePath(home, cwd, git) {
+  return cachePathOf(
+    home,
+    commonOf((...a) => git(cwd, a)),
+  );
+}
+
+/** 锁里记的时刻还在 BG_LOCK_MS 以内 */
+function lockFresh(lock, now) {
+  try {
+    const at = JSON.parse(readFileSync(lock, 'utf8'))?.at;
+    const age = now - Number(at);
+    return Number.isFinite(age) && age > -5_000 && age < BG_LOCK_MS;
+  } catch {
+    return false;
+  }
+}
+
+/** 拿后台的锁：已有新锁拿不到；旧锁（后台死了）删掉重拿 */
+function takeBgLock(lock, now) {
+  if (lockFresh(lock, now)) return false;
+  try {
+    mkdirSync(dirname(lock), { recursive: true });
+    rmSync(lock, { force: true });
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, at: now }), { flag: 'wx' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeJsonAtomic(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(value));
+  renameSync(tmp, path);
+}
+
+/** 跑脚本的结果存进 JSON：error 只留 message、code（why() 只看这两样） */
+const plainRun = (r) => ({
+  status: r.status,
+  stdout: r.stdout ?? '',
+  stderr: r.stderr ?? '',
+  ...(r.timeoutMs ? { timeoutMs: r.timeoutMs } : {}),
+  ...(r.error ? { error: { message: r.error.message, code: r.error.code } } : {}),
+});
+
+/**
+ * 后台那半：取远端、规矩同步、整池暂停、进度单、绿了没挂的 PR、扫工作树，结果写进 bgCachePath。每一步单独兜住，出错记 { ok: false, why }。
+ * 另一个后台拿着新锁时什么都不做，返回 'busy'。
+ */
+export function runBackground({
+  cwd,
+  home,
+  git,
+  sync,
+  localGit = git,
+  now = Date.now(),
+  env = process.env,
+  idlePr = idlePrRunner(),
+  progress = progressRunner(),
+  poolHolds = null,
+  fallbackProxy = undefined,
+}) {
+  const common = commonOf((...a) => localGit(cwd, a));
+  const path = cachePathOf(home, common);
+  const lock = `${path}.lock`;
+  if (!takeBgLock(lock, now)) return 'busy';
+  try {
+    const steps = {};
+    const step = (name, fn) => {
+      try {
+        steps[name] = { ok: true, value: fn() };
+      } catch (err) {
+        steps[name] = { ok: false, why: err?.message ?? String(err) };
+      }
+    };
+    /** @type {{ common: string | null, ok: boolean, why: string } | null} */
+    let fetch = null;
+    if (common !== null) {
+      step('fetch', () => {
+        const got = fetchWithFallback(git, cwd, ['fetch', '-q', 'origin'], {
+          okOf: ok,
+          whyOf: why,
+          env,
+          ...(fallbackProxy ? { fallbackProxy } : {}),
+        });
+        fetch = { common, ok: got.ok, why: got.why };
+        if (got.ok) markFetchOk({ home, cwd, git: localGit, okOf: ok, now });
+        return { ok: got.ok, why: got.why };
+      });
+    }
+    step('sync', () => syncFleet({ home, git, sync, now }));
+    step('holds', () => (poolHolds ?? (() => readFrancePoolHolds({ home, env, now, spawn: spawnSync })))());
+    if (common !== null) {
+      const syncDir = source ? source.syncDirIn(home) : null;
+      step('progress', () => {
+        const root = fleetRoot(cwd, localGit);
+        if (root === null) return null;
+        const script = progressScript(root, syncDir ? join(syncDir, PROGRESS_SCRIPT) : null);
+        return script ? { run: plainRun(progress(script, root)) } : { missing: true };
+      });
+      step('idle', () =>
+        checkIdlePrs({
+          cwd,
+          git: localGit,
+          run: idlePr,
+          fetch,
+          mirror: syncDir ? join(syncDir, IDLE_SCRIPT) : null,
+        }),
+      );
+      step('sweep', () => sweepWorktrees(cwd, localGit, now, home));
+    }
+    writeJsonAtomic(path, { v: 1, at: now, steps });
+    return 'done';
+  } finally {
+    rmSync(lock, { force: true });
+  }
+}
+
+/** 读后台结果：{ kind: 'none' } 没有；{ kind: 'bad', why } 读不懂；{ kind: 'ok', value } */
+function readBgCache(path) {
+  let text;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { kind: 'none' };
+    return { kind: 'bad', why: err?.code ?? err?.message ?? String(err) };
+  }
+  try {
+    const value = JSON.parse(text);
+    if (
+      typeof value?.at !== 'number' ||
+      (typeof value.steps !== 'object' && typeof value.crashed !== 'string')
+    )
+      return { kind: 'bad', why: '形状认不出' };
+    return { kind: 'ok', value };
+  } catch {
+    return { kind: 'bad', why: '不是 JSON' };
+  }
+}
+
+const agoText = (ms) => {
+  const n = Math.round(ms / 60_000);
+  return n < 1 ? '后台刚' : `后台 ${n} 分钟前`;
+};
+
+/** 起脱离的后台：不继承输出（钩子的 stdout 一关 Claude Code 就往下走），备用代理换进它的环境 */
+function spawnDetached({ cwd, home }) {
+  try {
+    const fb = readFallbackProxy(home);
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--background', cwd], {
+      // 工作目录放系统临时目录：继承会话目录的话，Windows 上后台跑着时那个目录（常是工作树）删不掉；git 一律 -C 指目录，用不着它
+      cwd: tmpdir(),
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: fb.proxy ? proxyEnvOf(process.env, fb.proxy) : process.env,
+    });
+    child.on('error', () => {});
+    child.unref();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, why: err?.message ?? String(err) };
+  }
+}
+
+/**
+ * 同步那半（真开会话走这个）：只跑本地的，联网的几项读后台上一次的结果；该刷新就起一个后台。返回要说的几行。
+ * spawnBackground 测试换成假的；git 只跑本地命令（GREP_MS 那份就够）。
+ */
+export function fastSessionStart({
+  cwd,
+  home,
+  git,
+  localGit = git,
+  now = Date.now(),
+  sessionId = null,
+  unattendedDir = stateDir(),
+  env = process.env,
+  repoContract = null,
+  spawnBackground = spawnDetached,
+}) {
+  const here = checkHere(cwd, localGit, { network: false });
+  const path = cachePathOf(home, here.fetch?.common ?? null);
+  const cache = readBgCache(path);
+  const c = cache.kind === 'ok' ? cache.value : null;
+  const age = c ? now - c.at : null;
+  const ago = age === null ? '' : agoText(Math.max(0, age));
+  const steps = c && !c.crashed ? c.steps : {};
+  const got = (name) => steps[name];
+  const failed = (name, label) => {
+    const s = got(name);
+    return s && !s.ok ? [`${label}没查成：后台出错（${s.why}）。`] : [];
+  };
+  const lineage = lineageOf({ home, sessionId, env });
+  const lines = [];
+  if (here.line) lines.push(here.line);
+  const f = got('fetch');
+  if (f?.ok && f.value && f.value.ok === false)
+    lines.push(
+      `开场核规矩没查成：后台 git fetch 失败（${f.value.why}，${ago}）。规矩以 origin/main 为准，动手前用 git show origin/main:AGENTS.md 读一遍。`,
+    );
+  lines.push(...failed('fetch', '开场核规矩（取远端）'));
+  lines.push(...unattendedLines({ dir: unattendedDir, sessionId: cleanId(sessionId), now }));
+  lines.push(...checkTemporary(cwd, localGit, now));
+  const h = got('holds');
+  if (h?.ok) lines.push(...poolHoldPromptLines(h.value, beijingToday(now)));
+  lines.push(...failed('holds', '整池暂停'));
+  lines.push(...checkDirectives(cwd, localGit, lineage));
+  lines.push(...(repoContract ? repoContract(cwd) : []));
+  const p = got('progress');
+  if (p?.ok && p.value?.missing) lines.push(progressMissing());
+  else if (p?.ok && p.value?.run) lines.push(...progressLines(p.value.run, lineage));
+  lines.push(...failed('progress', PROGRESS_NOT_CHECKED.replace(/没查成$/, '')));
+  lines.push(...recentPrompts({ home, now, sessionId, env, lineage }));
+  const sw = got('sweep');
+  if (sw?.ok && Array.isArray(sw.value)) lines.push(...sw.value);
+  lines.push(...failed('sweep', '清工作树'));
+  lines.push(...workerLines(home, now));
+  const idle = got('idle');
+  if (idle?.ok && Array.isArray(idle.value)) lines.push(...idle.value);
+  lines.push(...failed('idle', IDLE_NOT_CHECKED.replace(/没查成$/, '')));
+  const s = got('sync');
+  if (s?.ok && typeof s.value === 'string') lines.push(`${s.value.replace(/。$/, '')}（${ago}跑的）。`);
+  else if (s && !s.ok) lines.push(`规矩同步没查成：后台出错（${s.why}）；${READ_MAIN}。`);
+
+  if (cache.kind === 'none') lines.push(`${BG_WHAT}还没出结果：已在后台起查，下次开会话再报；${READ_MAIN}。`);
+  else if (cache.kind === 'bad')
+    lines.push(`${BG_WHAT}没查成：后台的结果读不懂（${cache.why}），已重新在后台起查；${READ_MAIN}。`);
+  else if (c?.crashed) lines.push(`${BG_WHAT}没查成：后台出错（${c.crashed}，${ago}）；${READ_MAIN}。`);
+  else if (age !== null && age > BG_STALE_MS)
+    lines.push(`${BG_WHAT}是${ago}查的，之后没刷新成；这次已重新起查。`);
+
+  const due = c === null || age === null || !(age > -5_000 && age < QUIET_MS);
+  if (due && !lockFresh(`${path}.lock`, now)) {
+    const r = spawnBackground({ cwd, home });
+    if (!r.ok) lines.push(`${BG_WHAT}后台起不来（${r.why}），这次没查；${READ_MAIN}。`);
+  }
+  return lines;
 }
 
 /**
@@ -1483,9 +1768,40 @@ function isMain() {
   return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
 }
 
-if (isMain()) {
+if (isMain() && process.argv[2] === '--background') {
+  // 后台那半（fastSessionStart 起的脱离子进程）：输出没人看，结果全写进结果文件；整个崩了也写一笔 crashed，下次开场照实说
+  const home = homedir();
+  const cwd = process.argv[3] || process.cwd();
+  const localGit = gitRunner(GREP_MS);
+  try {
+    runBackground({
+      cwd,
+      home,
+      git: gitRunner(),
+      sync: syncRunner(),
+      localGit,
+      env: process.env,
+      // 后台不挡会话：问 GitHub 的两个脚本放宽到 BG_SCRIPT_MS（同步那半的 8 秒是为了不拖开会话，本机实测进度单 8 秒常超时）
+      idlePr: idlePrRunner(BG_SCRIPT_MS),
+      progress: progressRunner(BG_SCRIPT_MS),
+      fallbackProxy: readFallbackProxy(home).proxy,
+      poolHolds: () => readFrancePoolHolds({ home, env: process.env, spawn: spawnSync }),
+    });
+  } catch (err) {
+    try {
+      writeJsonAtomic(bgCachePath(home, cwd, localGit), {
+        v: 1,
+        at: Date.now(),
+        crashed: String(err?.message ?? err).slice(0, 300),
+      });
+    } catch {
+      // 连结果文件都写不了：下次开场读不到结果，会照实说「还没出结果」并再起一次
+    }
+  }
+} else if (isMain()) {
   if (process.env.FLEET_HEADLESS === '1') process.exit(0);
   let lines;
+  const home = homedir();
   try {
     let input = {};
     try {
@@ -1493,19 +1809,26 @@ if (isMain()) {
     } catch {
       // 输入读不懂不要紧：会话目录退回到钩子自己的工作目录
     }
-    const home = homedir();
-    lines = sessionStart({
+    const shared = {
       cwd: pickCwd(input),
       home,
-      git: gitRunner(),
-      sync: syncRunner(),
-      localGit: gitRunner(GREP_MS),
       sessionId: input?.session_id ?? process.env.CLAUDE_CODE_SESSION_ID,
-      poolHolds: () => readFrancePoolHolds({ home, env: process.env, spawn: spawnSync }),
       repoContract: (dir) => contractLines({ cwd: dir, git: gitRunner(GREP_MS), home }),
-    });
+    };
+    lines =
+      process.env.FLEET_WORKER === '1'
+        ? // 工人起来就要当前的远端：照老路子一口气做完（它不是每条消息都 resume）
+          sessionStart({
+            ...shared,
+            git: gitRunner(),
+            sync: syncRunner(),
+            localGit: gitRunner(GREP_MS),
+            poolHolds: () => readFrancePoolHolds({ home, env: process.env, spawn: spawnSync }),
+          })
+        : fastSessionStart({ ...shared, git: gitRunner(GREP_MS) });
   } catch (err) {
     lines = [`开场核规矩没查成：开会话钩子自己出错了（${err?.message ?? err}）；${READ_MAIN}。`];
   }
+  lines.push(...writeProxyEnv({ home, envFile: process.env.CLAUDE_ENV_FILE }));
   process.stdout.write(`${render(lines)}\n`);
 }

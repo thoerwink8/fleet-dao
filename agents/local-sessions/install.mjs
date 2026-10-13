@@ -7,8 +7,8 @@
 //
 // 装做四件事：① 把 lib.mjs、heartbeat.mjs、push.mjs 拷进 ~/.fleet-dao/local-sessions/bin/；② 写 config.json（地址、通行证、机器名，
 // 通行证只从环境变量 FLEET_NODE_TOKEN 读，不进命令行历史；已经有 config.json 又没给新的就留着旧的）；③ 在 ~/.claude/settings.json
-// 的 SessionStart / PreToolUse / Stop / SubagentStop / SessionEnd 各登记一条 node 跑 heartbeat.mjs（只动指向
-// ~/.fleet-dao/local-sessions/bin/ 的那几条，别人的钩子原样留着；重装不重复）；④ 定时推送，先试 Windows 计划任务 fleet-local-sessions
+// 的 SessionStart / Stop / SubagentStop / SessionEnd 各登记一条 node 跑 heartbeat.mjs（async；调工具前不挂，见 lib.mjs HOOK_EVENTS；
+// 只动指向 ~/.fleet-dao/local-sessions/bin/ 的那几条，别人的钩子原样留着；重装不重复）；④ 定时推送，先试 Windows 计划任务 fleet-local-sessions
 // （每 2 分钟经 wscript 静默跑一次 push.mjs，不闪黑窗口）；有的电脑不让建计划任务（schtasks 报「拒绝访问」），就自动退回
 // 「启动文件夹里的 fleet-local-sessions.vbs + bin/loop.mjs」：登录时 vbs 隐藏起 loop.mjs，它每 2 分钟调一次 push.mjs；
 // 退回时当场起一个循环、读回 last-push.json 核对。两种哪种装成了，输出里都写明。
@@ -152,13 +152,51 @@ export function addHooks(settings, command) {
   const hooks = isObj(base.hooks) ? { ...base.hooks } : {};
   for (const event of HOOK_EVENTS) {
     const groups = Array.isArray(hooks[event]) ? [...hooks[event]] : [];
-    groups.push({
-      ...(event === 'PreToolUse' ? { matcher: '*' } : {}),
-      hooks: [{ type: 'command', command, timeout: 5 }],
-    });
+    // async：Claude Code 起了就往下走，不等心跳写完（https://code.claude.com/docs/en/hooks「Run hooks in the background」）
+    groups.push({ hooks: [{ type: 'command', command, timeout: 5, async: true }] });
     hooks[event] = groups;
   }
   return { ...base, hooks };
+}
+
+/**
+ * 同步时顺手换新（agents-sync --apply 之后由 packages/agents-sync/src/main.ts 调）：这台装过（有 config.json）才动——
+ * 拷新脚本、把钩子登记换成现在这一代（旧版的调工具前心跳摘掉、其余加 async）；没装过什么都不动、说一句。
+ * 不碰定时推送、不试推：那些装的时候做过，换新只换脚本和登记。
+ * @param {{ home: string, srcDir: string }} o
+ * @returns {Step[]}
+ */
+export function refresh(o) {
+  if (!existsSync(configPath(o.home)))
+    return [{ ok: true, step: '本机会话心跳', detail: '这台没装（没有 config.json），不动' }];
+  /** @type {Step[]} */
+  const steps = [];
+  try {
+    mkdirSync(binDir(o.home), { recursive: true });
+    for (const s of SCRIPTS) copyFileSync(join(o.srcDir, s), join(binDir(o.home), s));
+    steps.push({ ok: true, step: '脚本', detail: `换成了仓里的（${binDir(o.home)}）` });
+  } catch (e) {
+    steps.push({ ok: false, step: '脚本', detail: `拷不进 ${binDir(o.home)}：${messageOf(e)}` });
+    return steps;
+  }
+  const settingsPath = join(o.home, '.claude', 'settings.json');
+  try {
+    const have = readSettings(settingsPath);
+    const want = addHooks(have, heartbeatCommand(o.home));
+    if (JSON.stringify(have) === JSON.stringify(want)) {
+      steps.push({ ok: true, step: '钩子', detail: `已经是现在这一代（${HOOK_EVENTS.join('、')}，async）` });
+    } else {
+      writeSettings(settingsPath, want);
+      steps.push({
+        ok: true,
+        step: '钩子',
+        detail: `换成了 ${HOOK_EVENTS.join('、')}（async，调工具前不再挂；新开的会话才生效）`,
+      });
+    }
+  } catch (e) {
+    steps.push({ ok: false, step: '钩子', detail: messageOf(e) });
+  }
+  return steps;
 }
 
 /**
@@ -496,6 +534,8 @@ async function main() {
       ...(url !== undefined || token ? { url: url ?? '', token: token ?? '' } : {}),
       ...(machine ? { machine } : {}),
     });
+  } else if (cmd === 'refresh') {
+    steps = refresh({ home: flag(rest, '--home') ?? home, srcDir: dirname(fileURLToPath(import.meta.url)) });
   } else if (cmd === 'uninstall') {
     steps = uninstall({ home, ...loopOpts });
   } else if (cmd === 'status') {
@@ -503,7 +543,7 @@ async function main() {
     return 0;
   } else {
     process.stderr.write(
-      '用法：install --url <法国地址> [--machine 名字]（通行证放 FLEET_NODE_TOKEN）| uninstall | status\n',
+      '用法：install --url <法国地址> [--machine 名字]（通行证放 FLEET_NODE_TOKEN）| refresh [--home 目录] | uninstall | status\n',
     );
     return 2;
   }

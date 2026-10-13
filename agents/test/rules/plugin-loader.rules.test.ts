@@ -204,9 +204,23 @@ describe('加载器真跑（决定 0085）', () => {
     return runChild(process.execPath, [LOADER], {
       cwd,
       input: JSON.stringify({ cwd }),
-      env: { ...process.env, ...env },
+      // 不往跑测试的这个会话自己的 CLAUDE_ENV_FILE 里写
+      env: { ...process.env, CLAUDE_ENV_FILE: '', ...env },
     });
   }
+
+  it('配了备用代理：往 CLAUDE_ENV_FILE 追加代理变量（每个仓开会话都走这个用户级钩子）；没配不写', () => {
+    const home = temp();
+    mkdirSync(join(home, '.fleet-dao'));
+    const envFile = join(temp(), 'env.sh');
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_ENV_FILE: envFile };
+    expect(run(temp(), env).status).toBe(0);
+    expect(existsSync(envFile)).toBe(false);
+    writeFileSync(join(home, '.fleet-dao', 'fallback-proxy'), 'http://127.0.0.1:7890\n');
+    const r = run(temp(), env);
+    expect(r.status, r.stderr).toBe(0);
+    expect(readFileSync(envFile, 'utf8')).toContain('export HTTPS_PROXY=http://127.0.0.1:7890\n');
+  });
 
   function readSettings(cwd: string): string | null {
     const file = join(cwd, '.claude', 'settings.json');
