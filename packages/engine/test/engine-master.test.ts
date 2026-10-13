@@ -191,6 +191,7 @@ describe('闸门测试：总开关关着，跑一轮所有定时任务', () => {
       usageBackfill: never,
       cliVersions: never,
       cliUpgrade: never,
+      requestSweep: never,
     } as unknown as EngineJobs;
   };
   const client = { workflow: { start: async () => ({}), getHandle: () => ({}) } } as never;

@@ -73,6 +73,7 @@ import type { GitHubEventSink } from './ports.ts';
 import { pgProbeHistory } from './probe-history.ts';
 import { liveReleaseCardPort } from './release-card.ts';
 import { liveReleaseRequestPort } from './release-request.ts';
+import { pgRequests } from './request-store-pg.ts';
 import { pgRoutingEfforts } from './routing-efforts.ts';
 import { pgRoutingLayers } from './routing-layers.ts';
 import { pgRoutingOrder } from './routing-order.ts';
@@ -319,6 +320,8 @@ async function assemble(): Promise<{
     taskRoutePins: pgTaskRoutePins(db, now),
     // 任务详情每段的会话内容（#1640）：读引擎按条记下的 run_transcript
     runTranscript: pgRunTranscript(db),
+    // 提需求（#2049）：需求、消息、每人的置顶和读到哪；删了满 30 天的由引擎的 request-sweep 硬删
+    requests: pgRequests(db, now),
     // 环境页（#820 片 1）的版本那一项：正式环境读发布目录现算；别处不给，页面写「没查成」
     ...(production ? { deployLag: () => readDeployLagInput() } : {}),
     // /france 页发版一键（#618）：读 release-train 进度。只在正式环境装。

@@ -18,6 +18,7 @@ import { HOURLY_RECONCILE_JOB } from '../jobs/hourly-reconcile.ts';
 import { INTAKE_JOB } from '../jobs/intake.ts';
 import { JUDGE_SELF_CHECK_JOB } from '../jobs/judge-self-check.ts';
 import { QUOTA_READ_JOB } from '../jobs/quota-read.ts';
+import { REQUEST_SWEEP_JOB } from '../jobs/request-sweep.ts';
 import { RETIRED_SCHEDULE_IDS } from '../jobs/retired-schedules.ts';
 import { ROUTE_PROBE_JOB } from '../jobs/route-probe.ts';
 import { USAGE_BACKFILL_JOB } from '../jobs/usage-backfill.ts';
@@ -37,6 +38,7 @@ export const ENGINE_JOBS = [
   USAGE_BACKFILL_JOB,
   CLI_VERSIONS_JOB,
   CLI_UPGRADE_JOB,
+  REQUEST_SWEEP_JOB,
 ] as const;
 
 /** 外部驱动：没有进程内定时器。登记编号和定时器编号的核对不要求它们对得上。 */

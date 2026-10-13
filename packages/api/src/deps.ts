@@ -26,6 +26,7 @@ import type {
 import type { ProbeHistoryPort } from './probe-history.ts';
 import type { ReleaseCardPort } from './release-card.ts';
 import type { ReleaseRequestPort } from './release-request.ts';
+import type { RequestsPort } from './request-store-pg.ts';
 import type { RoutingEffortsPort } from './routing-efforts.ts';
 import type { RoutingLayersPort } from './routing-layers.ts';
 import type { RoutingOrderPort } from './routing-order.ts';
@@ -130,6 +131,11 @@ export interface Deps {
    * 接口回 503 写明原因，不拿空列表冒充「没有记录」。
    */
   runTranscript?: RunTranscriptPort | undefined;
+  /**
+   * 提需求（#2049，request-store-pg.ts）：需求、消息、每人的置顶和读到哪。没给（开发、内存版没有这三张表）的列表写 unavailable、
+   * 别的接口回 503，不拿空列表冒充「没有需求」。
+   */
+  requests?: RequestsPort | undefined;
   /**
    * 「要你拍」拍完交给指挥官（#1915，decision-handoff.ts）：往进度单 #1055、任务单留言，走引擎机器人的 GitHub 客户端。
    * 没给（开发环境、机器人凭据没读到）的答案照样存下，回包里 handoff 写没接上，不当成记上了。
