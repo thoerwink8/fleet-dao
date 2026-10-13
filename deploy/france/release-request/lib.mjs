@@ -28,7 +28,10 @@ export const MARKER_FILE = `${TRAIN_DIR}/release-train.paused`;
 export const CHECKOUT = '/srv/fleet-dao';
 export const FLEET_API = `bash ${RELEASES}/current/packages/api/bin/fleet-api`;
 export const RELEASE_SH = `${CHECKOUT}/deploy/release.sh`;
-export const AGENT_SCOPE = '/usr/local/sbin/fleet-agent-scope';
+export const ENGINE_ENV = '/etc/fleet-dao/engine.env';
+/** 引擎写排空状态（drain.json）的地方：engine.env 的 FLEET_ENGINE_STATE_DIR，没写取它（同 release.sh 的 ENGINE_STATE_DEFAULT）。 */
+export const ENGINE_STATE_DEFAULT = '/var/lib/fleet-dao/engine';
+export const ENGINE_SERVICE = 'fleet-engine.service';
 export const HISTORY_FILE = `${RELEASES}/.history`;
 export const MAX_REQUEST_BYTES = 1024;
 /** 页面和火车的第几步（同 release-train-lib.mjs 的 PHASES 数组下标）。 */
@@ -143,6 +146,55 @@ export function parseRequest(text) {
   }
   return { ok: true, sha, at: o.at, by };
 }
+
+/**
+ * 引擎手上有哪些会话在干（权威口径，同 release.sh 的 engine_drain_status）：读引擎写的排空状态 drain.json
+ * （packages/engine/src/drain.ts 的 drainStatus）。起会话过了闸才登记（track），额度探针、session-org 这类辅助命令
+ * 根本不登记 —— 所以这里数的就是「真在干的活」，常驻的探针 scope 数不进来（#2002）。
+ * 就收 pid 对得上的那份：pid 对不上就是上一个进程留下的旧文件，不信（同 drain.ts 的头注释）。
+ * 回 { ok: true, running } | { ok: false, engineDown, why }：看不到的照实说，不当成 0 个。
+ * @param {string | null} text drain.json 的内容（读不到给 null）
+ * @param {string} enginePid systemd 的 fleet-engine.service MainPID
+ * @param {number | null} serviceActive 引擎在不在跑：false = 没在跑（没法排队、也没有会话在跑），null = 读不到
+ */
+export function parseDrain(text, enginePid, serviceActive) {
+  // 引擎根本没在跑：手上没有会话，也没什么要等（同 release.sh：引擎不在就跳过排空）。读不到状态（null）不当成「没在跑」。
+  if (serviceActive === false) return { ok: true, engineDown: true, running: [] };
+  if (text === null || text === undefined) return { ok: false, engineDown: false, why: 'drain.json 读不到' };
+  let st;
+  try {
+    st = JSON.parse(String(text));
+  } catch (e) {
+    return {
+      ok: false,
+      engineDown: false,
+      why: `drain.json 认不出：${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  if (st === null || typeof st !== 'object' || st.schema !== 2) {
+    return {
+      ok: false,
+      engineDown: false,
+      why: `drain.json 的 schema 不是 2（${JSON.stringify(st?.schema)}）`,
+    };
+  }
+  if (String(st.pid) !== String(enginePid)) {
+    return {
+      ok: false,
+      engineDown: false,
+      why: `drain.json 是上一个进程（${st.pid}）留下的，在跑的是 ${enginePid}`,
+    };
+  }
+  const list = Array.isArray(st.sessions) ? st.sessions : [];
+  const running = list.map((x) => ({
+    runId: x && typeof x.runId === 'string' ? x.runId : '',
+    stage: x && typeof x.stage === 'string' ? x.stage : '',
+  }));
+  return { ok: true, engineDown: false, running };
+}
+
+/** 等收尾报「在跑谁」的写法：和 release.sh 的 engine_drain_status 一致，环节（编号前 8 位）。 */
+export const sessionName = (s) => `${s.stage || '会话'}(${(s.runId || '').slice(0, 8)})`;
 
 // —— 一次请求 ——
 
@@ -294,23 +346,32 @@ async function phasePauseFrance(io, state) {
   return { ok: true };
 }
 
-/** 等法国在跑的会话收尾（fleet-agent-scope list：每行「编号 状态」，状态不是 inactive、failed 的算在跑）。读不到不当成 0。 */
+/**
+ * 等法国在跑的会话收尾。判据是引擎的权威口径（引擎进程内登记的会话，drain.json 里那份，同 release.sh 的 engine_drain_status）：
+ * 起会话过了闸才登记（track），额度探针、session-org 这类辅助命令根本不登记，所以常驻的探针 scope 数不进来（#2002）。
+ * 不再数 fleet-agent- scope：那会把常驻的额度探针算成「在干的活」，探针不收尾，每次发布都等满超时（2026-10-13）。读不到不当成 0。
+ */
 async function phaseWait(io) {
   const started = io.now().getTime();
   let last = '';
   for (;;) {
-    const s = await io.sessions();
+    const s = await io.drain();
     if (!s.ok) return failed(`法国在跑几个会话读不到：${s.why}`);
+    if (s.engineDown) {
+      say(io, '等收尾：引擎没在跑，法国没有会话在跑');
+      return { ok: true };
+    }
     if (s.running.length === 0) {
       say(io, '等收尾：法国没有会话在跑');
       return { ok: true };
     }
-    const line = `等收尾：法国在跑 ${s.running.length} 个会话（${s.running.join(' ')}）`;
+    const names = s.running.map(sessionName);
+    const line = `等收尾：法国在跑 ${s.running.length} 个会话（${names.join(' ')}）`;
     if (line !== last) say(io, line);
     last = line;
     const waited = io.now().getTime() - started;
     if (waited >= io.limits.sessionsMs) {
-      const laggards = s.running.map((n) => `会话 ${n}`);
+      const laggards = names.map((n) => `会话 ${n}`);
       return blocked(
         `等了 ${minutes(waited)} 分钟，法国还有 ${s.running.length} 个会话在跑（现场没动：引擎总开关已关、没发版；再点一次从头走）`,
         laggards,
@@ -445,7 +506,9 @@ const PHASE_FUNCS = [
  *   writeMarker(obj), clearMarker(), releaseBusy() → Promise<boolean>（抛 = 没查成）,
  *   mainline(sha) → Promise<{ ok: true, onMain, at } | { ok: false, why }>（取最新主线、比祖先、给提交时间）,
  *   ciRuns() → Promise<{ status, body }>, fleetApi(args, timeoutMs) → Promise<{ status, stdout, stderr }>,
- *   sessions() → Promise<{ ok: true, running: string[] } | { ok: false, why }>, prepareCheckout(sha) → Promise<{ ok, why? }>,
+ *   drain() → Promise<{ ok: true, engineDown: boolean, running: {runId, stage}[] } | { ok: false, engineDown: boolean, why }>
+ *     （等收尾的判据：引擎权威口径 drain.json，同 release.sh；引擎没在跑 engineDown=true、running 空），
+ *   prepareCheckout(sha) → Promise<{ ok, why? }>,
  *   runRelease(sha, timeoutMs) / releaseCheck(timeoutMs) → Promise<{ status, stdout, stderr, error? }>, historyLast() → Promise<{ ok, line? , why? }>,
  * }。返回退出码。
  */

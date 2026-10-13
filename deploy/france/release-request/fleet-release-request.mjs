@@ -4,15 +4,19 @@
 // 手动看一趟：journalctl -u fleet-release-request -n 100；进度在 /srv/fleet-dao-releases/.train/release-train.json。
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import {
-  AGENT_SCOPE,
   CHECKOUT,
+  ENGINE_ENV,
+  ENGINE_SERVICE,
+  ENGINE_STATE_DEFAULT,
   fleetApiCommand,
   HISTORY_FILE,
   LAST_FILE,
   MARKER_FILE,
+  parseDrain,
   RELEASE_SH,
   RELEASES,
   runRequest,
@@ -43,6 +47,40 @@ function run(cmd, args, { timeoutMs = 120_000 } = {}) {
 }
 
 const git = (args, opts) => run('git', ['-C', CHECKOUT, ...args], opts);
+
+/** 单元在不在跑：true/false；systemctl 起不来、读不成回 null（不当成「没在跑」）。 */
+function serviceActive(unit) {
+  const r = run('systemctl', ['is-active', unit], { timeoutMs: 15_000 });
+  if (r.error) return null;
+  const s = String(r.stdout).trim();
+  if (s === 'active') return true;
+  // systemctl is-active 对 inactive/failed/unknown 回非 0 也打状态字；只有当它打得出状态字时才信
+  if (['inactive', 'failed', 'unknown', 'activating', 'deactivating'].includes(s)) return false;
+  return null;
+}
+
+/** systemd 的一个属性值（同 release.sh 的 unit_prop）；读不到回 null。 */
+function unitProp(unit, prop) {
+  const r = run('systemctl', ['show', '-p', prop, '--value', unit], { timeoutMs: 15_000 });
+  if (r.error || r.status !== 0) return null;
+  const v = String(r.stdout).trim();
+  return v === '' ? null : v;
+}
+
+/** 引擎写 drain.json 的地方：engine.env 的 FLEET_ENGINE_STATE_DIR，没写取默认（同 release.sh 的 engine_drain_status）。 */
+function engineStateDir() {
+  try {
+    for (const line of readFileSync(ENGINE_ENV, 'utf8').split('\n')) {
+      if (line.startsWith('FLEET_ENGINE_STATE_DIR=')) {
+        const v = line.slice('FLEET_ENGINE_STATE_DIR='.length).trim();
+        if (v !== '') return v;
+      }
+    }
+  } catch {
+    // engine.env 不在、读不了：用默认目录
+  }
+  return ENGINE_STATE_DEFAULT;
+}
 
 /** 落盘：先写临时文件再换名（TRAIN_DIR 归 root，fleet 碰不到，写它不会被符号链接带去别处）。 */
 function writeAtomic(file, text) {
@@ -132,18 +170,24 @@ export const realIo = {
   async fleetApi(args, timeoutMs) {
     return run('bash', ['-c', fleetApiCommand(args)], { timeoutMs });
   },
-  async sessions() {
-    const r = run(AGENT_SCOPE, ['list'], { timeoutMs: 30_000 });
-    if (r.error || r.status !== 0)
-      return { ok: false, why: `${AGENT_SCOPE} list 没成：${tail(r.stderr || r.error)}` };
-    const running = [];
-    for (const line of r.stdout.split('\n')) {
-      if (line.trim() === '') continue;
-      const m = /^(\S+) ([a-z-]+)$/.exec(line.trim());
-      if (!m) return { ok: false, why: `会话列表认不出（有一行是「${line.slice(0, 80)}」）` };
-      if (m[2] !== 'inactive' && m[2] !== 'failed') running.push(m[1]);
+  /**
+   * 引擎手上在干的活（等收尾的判据，权威口径）：读引擎写的 drain.json（同 release.sh 的 engine_drain_status）——
+   * 起会话过了闸才登记，额度探针这类辅助 scope 不登记，所以数不进常驻探针（#2002）。引擎没在跑就没会话；读不到照实说，不当成 0。
+   */
+  async drain() {
+    const active = await serviceActive(ENGINE_SERVICE);
+    if (active === null) return { ok: false, engineDown: false, why: `${ENGINE_SERVICE} 在不在跑读不到` };
+    if (active === false) return { ok: true, engineDown: true, running: [] };
+    const pid = unitProp(ENGINE_SERVICE, 'MainPID');
+    if (pid === null) return { ok: false, engineDown: false, why: `${ENGINE_SERVICE} 的主进程号读不到` };
+    let text = null;
+    try {
+      text = readFileSync(join(engineStateDir(), 'drain.json'), 'utf8');
+    } catch (e) {
+      if (e.code !== 'ENOENT')
+        return { ok: false, engineDown: false, why: `drain.json 读不成：${e.code ?? e.message}` };
     }
-    return { ok: true, running };
+    return parseDrain(text, pid, active);
   },
   /** 部署检出快进到要发的提交（同自动发布的 prepareCheckout）：release.sh 取自己的新版本。 */
   async prepareCheckout(sha) {

@@ -23,6 +23,7 @@ import {
   LIMITS,
   MAX_REQUEST_BYTES,
   PHASES,
+  parseDrain,
   parseRequest,
   RELEASE_SH,
   REQUEST_DIR,
@@ -109,7 +110,8 @@ function fakeIo(over = {}, opts = {}) {
       }
       return { status: 1, stdout: '', stderr: '认不出的命令' };
     },
-    sessions: async () => ({ ok: true, running: [] }),
+    // 等收尾读的是引擎的权威口径（drain.json，#2002）：默认引擎没在跑、手上没有会话。
+    drain: async () => ({ ok: true, engineDown: false, running: [] }),
     prepareCheckout: async (sha) => {
       log.checkouts.push(sha);
       return { ok: true };
@@ -356,20 +358,69 @@ test('【故意造出的失败】关了引擎读回来还是开着：不往下�
 });
 
 test('【故意造出的失败】等了上限法国还有会话在跑：卡住（退出码 3），列出拖后腿的，没发版', async () => {
-  const { io, log } = fakeIo({ sessions: async () => ({ ok: true, running: ['s1', 's2'] }) });
+  const { io, log } = fakeIo({
+    drain: async () => ({
+      ok: true,
+      running: [
+        { runId: '11111111-aaaa', stage: 'execute' },
+        { runId: '22222222-bbbb', stage: 'verify' },
+      ],
+    }),
+  });
   assert.equal(await runRequest(io), EXIT.blocked);
   const last = log.states.at(-1);
   assert.equal(last.status, 'blocked');
   assert.equal(last.phase, 3);
-  assert.deepEqual(last.laggards, ['会话 s1', '会话 s2']);
+  assert.deepEqual(last.laggards, ['会话 execute(11111111)', '会话 verify(22222222)']);
   assert.deepEqual(log.release, []);
   assert.ok(log.sleeps >= 4, '等过几轮');
 });
 
-test('【故意造出的失败】会话列表读不到：不当成 0 个，这一步没成', async () => {
-  const { io, log } = fakeIo({ sessions: async () => ({ ok: false, why: '会话列表认不出' }) });
+test('一个常驻额度探针 scope 在跑（辅助 scope，不是在干的活）：「等收尾」不算它、直接过，不发满超时（#2002）', async () => {
+  // 引擎权威口径（drain.json）里手上一个会话都没有：额度探针 scope 是常驻的、不收尾，本来会被旧判法（数 fleet-agent- scope）数进去。
+  const { io, log } = fakeIo({ drain: async () => ({ ok: true, running: [] }) });
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.deepEqual(log.release, [SHA], '没卡在等收尾，照发');
+  assert.ok(
+    log.out.some((l) => l.includes('等收尾：法国没有会话在跑')),
+    '报「没有会话在跑」',
+  );
+  assert.equal(log.sleeps, 0, '一个探针 scope 都没数，没等');
+});
+
+test('【故意造出的失败】引擎手上几个会话读不到（drain.json 读不成 / pid 对不上 / 认不出）：不当成 0 个，这一步没成', async () => {
+  const { io, log } = fakeIo({ drain: async () => ({ ok: false, why: 'drain.json 读不成：EACCES' }) });
   assert.equal(await runRequest(io), EXIT.failed);
+  assert.equal(log.states.at(-1).phase, 3);
+  assert.match(log.states.at(-1).why, /读不到/);
   assert.deepEqual(log.release, []);
+});
+
+test('引擎没在跑（fleet-engine.service 不是 active）：手上没有会话，等收尾直接过', async () => {
+  const { io, log } = fakeIo({
+    drain: async () => ({ ok: true, engineDown: true, running: [] }),
+  });
+  // 未在跑的引擎没法排空、也没有会话在跑；这一步按「没有在跑的会话」过，和 release.sh 里引擎不在时跳过排空一致
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.deepEqual(log.release, [SHA]);
+  assert.ok(
+    log.out.some((l) => l.includes('引擎没在跑')),
+    '报「引擎没在跑」',
+  );
+});
+
+test('parseDrain：引擎没在跑（serviceActive=false）回「不在跑、没会话」；pid 对不上不当成 0', () => {
+  assert.deepEqual(parseDrain(null, '123', false), { ok: true, engineDown: true, running: [] });
+  const mismatch = parseDrain('{"schema":2,"pid":999,"sessions":[]}', '123', true);
+  assert.equal(mismatch.ok, false);
+  assert.ok(!mismatch.engineDown);
+  assert.match(mismatch.why, /上一个进程/);
+  const ok = parseDrain(
+    '{"schema":2,"pid":123,"sessions":[{"runId":"aaaaaaaa-1","stage":"execute"}]}',
+    '123',
+    true,
+  );
+  assert.deepEqual(ok, { ok: true, engineDown: false, running: [{ runId: 'aaaaaaaa-1', stage: 'execute' }] });
 });
 
 test('【故意造出的失败】部署检出没准备好：不跑 release.sh', async () => {
@@ -506,12 +557,14 @@ test('发版没过健康检查（历史末行 unhealthy）：不恢复，引擎�
 });
 
 test('上一回点发布停在「卡住」（会话没收完、引擎是我们关的）：再点一次，发版前开着的带过来，发完照样开回，不当成「本来就关着」', async () => {
-  const { io, log } = fakeIo({ sessions: async () => ({ ok: true, running: ['s1'] }) });
+  const { io, log } = fakeIo({
+    drain: async () => ({ ok: true, running: [{ runId: 'aaaa1111-xxxx', stage: 'execute' }] }),
+  });
   assert.equal(await runRequest(io), EXIT.blocked);
   const stuck = JSON.parse(JSON.stringify(log.states.at(-1)));
   assert.equal(stuck.before.master, true);
   // 第二回：会话收完了；进度记录是上一回停下的那份；引擎还是关着（上一回关的）
-  io.sessions = async () => ({ ok: true, running: [] });
+  io.drain = async () => ({ ok: true, running: [] });
   io.readState = () => ({ ok: true, state: stuck });
   log.fleetApi.length = 0;
   assert.equal(await runRequest(io), EXIT.done);
