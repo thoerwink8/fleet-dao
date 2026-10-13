@@ -52,6 +52,7 @@ function appInstallUrl(slug: 'agent' | 'engine'): string {
 export function RepoImportSection() {
   const query = useImportableRepos();
   const disconnect = useDisconnectGitHub();
+  const [askingDisconnect, setAskingDisconnect] = useState(false);
   // 钩子要在所有提前 return 之前调用（React 的规矩）：放最上面。
   const now = useNow();
 
@@ -127,12 +128,7 @@ export function RepoImportSection() {
             size="sm"
             variant="outline"
             disabled={disconnect.isPending}
-            onClick={() => {
-              disconnect.mutate(undefined, {
-                onSuccess: () => toast.success('已断开 GitHub 授权'),
-                onError: (e) => toast.error('没能断开', { description: errorText(e) }),
-              });
-            }}
+            onClick={() => setAskingDisconnect(true)}
           >
             <Unplug className="size-3.5" aria-hidden />
             断开
@@ -173,6 +169,33 @@ export function RepoImportSection() {
           />
         </>
       )}
+
+      <AlertDialog open={askingDisconnect} onOpenChange={setAskingDisconnect}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>断开 GitHub 授权？</AlertDialogTitle>
+            <AlertDialogDescription>
+              断开后，驾驶舱不再用这个身份读你的仓。仓本身和 GitHub 上的东西都不动。要再导入，重新连接即可。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>先不</AlertDialogCancel>
+            <AlertDialogAction
+              onConfirm={async () => {
+                try {
+                  await disconnect.mutateAsync();
+                  toast.success('已断开 GitHub 授权');
+                } catch (err) {
+                  toast.error('没能断开', { description: errorText(err) });
+                  throw err;
+                }
+              }}
+            >
+              断开
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

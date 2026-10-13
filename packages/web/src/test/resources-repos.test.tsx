@@ -2,7 +2,7 @@
 // 资源页「仓库」一节（#1993）整页：每仓一行（工作树几棵、磁盘），点开看每棵树的状态和原因；
 // 「清理没用的工作树」点了记一条请求、写「排队中」；故意造出的失败：被拒（已有一次在做）把后端的话写出来，
 // 清单还没出过写「还没有清单」，不画成 0 棵树；上次清理拒删的树（有没推的提交）原因写在结果里。
-import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, test } from 'vitest';
 import { ApiError } from '../api/client';
 import { createMockApi } from '../api/mock/server';
@@ -34,6 +34,8 @@ test('点「清理没用的工作树」：记一条请求，写「排队中」�
     return b;
   });
   fireEvent.click(button);
+  const dialog = await screen.findByRole('alertdialog');
+  fireEvent.click(within(dialog).getByRole('button', { name: '确认清理' }));
   await waitFor(() => expect(text('[data-resources-repos]')).toContain('清理排队中'));
   expect(document.querySelector<HTMLButtonElement>('[data-cleanup-button]')?.disabled).toBe(true);
 });
@@ -50,6 +52,8 @@ test('【故意造出的失败】被拒（已经有一次在做）：把后端�
     return b;
   });
   fireEvent.click(button);
+  const dialog = await screen.findByRole('alertdialog');
+  fireEvent.click(within(dialog).getByRole('button', { name: '确认清理' }));
   await waitFor(() => expect(text('[data-resources-repos]')).toContain('等它做完再点'));
 });
 

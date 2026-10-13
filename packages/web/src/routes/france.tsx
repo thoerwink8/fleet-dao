@@ -25,6 +25,8 @@ import { brand } from '#brand';
 import {
   errorText,
   isNotFound,
+  POLL_FAST_MS,
+  POLL_SLOW_MS,
   useCliTools,
   useEnv,
   useFrancePreflight,
@@ -855,7 +857,7 @@ export default function France() {
     <Page
       title="法国"
       description="本台的六项事实、引擎总开关、命令行工具、定时任务和发版。"
-      detail="读不到的写「没查成」和原因，不拿 0 顶；每 30 秒自己刷新。多一台机器时按台并排比。"
+      detail={`读不到的写「没查成」和原因，不拿 0 顶。环境、发版卡、命令行工具每 ${POLL_SLOW_MS / 1000} 秒刷新；机器、定时任务、发版进度每 ${POLL_FAST_MS / 1000} 秒刷新。多一台机器时按台并排比。`}
       refresh={{
         onRefresh: () => void read.refetch(),
         isFetching: read.isFetching,

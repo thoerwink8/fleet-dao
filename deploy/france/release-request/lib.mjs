@@ -15,6 +15,7 @@
 // - 退出码：0 做完了；1 被拒（或没有请求）；2 没做成（命令失败）；3 卡住（等收尾到点还有会话在跑，再点一次从头走，现场没动）。
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync } from 'node:fs';
 import { ciVerdict } from '../auto-release/lib.mjs';
+import { SESSION_WAIT_MS } from './session-wait.mjs';
 
 export const REQUEST_DIR = '/var/lib/fleet-dao/release-request';
 export const REQUEST_FILE = `${REQUEST_DIR}/request.json`;
@@ -40,7 +41,7 @@ export const PHASES = ['预检', '暂停本机', '暂停法国', '等收尾', '�
 export const FOUNDER_WORD = '驾驶舱点击发布（创始人）';
 /** 各步上限（毫秒）；测试里整份换小。service 的 TimeoutStartSec 必须比这些加起来大（release-request.test.mjs 核对）。 */
 export const LIMITS = {
-  sessionsMs: 13 * 60_000,
+  sessionsMs: SESSION_WAIT_MS,
   pollMs: 30_000,
   releaseMs: 30 * 60_000,
   deployMs: 3 * 60_000,

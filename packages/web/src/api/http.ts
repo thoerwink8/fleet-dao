@@ -42,6 +42,25 @@ import type { LiveEvent } from './types';
 
 type Query = Record<string, string | number | undefined>;
 
+/** 发版预检后端最多等 60 秒，前端再留一点，避免预检还在跑就被这里掐掉。 */
+export const REQUEST_TIMEOUT_MS = 90_000;
+
+const NETWORK_MESSAGE = '连不上驾驶舱后端。检查一下网络，过一会儿再试。';
+const SHAPE_MESSAGE = '驾驶舱读到的数据和这一页对不上。刷新再试；还这样就把「详情」里的原文留着。';
+
+function timeoutMessage(): string {
+  return `等了 ${REQUEST_TIMEOUT_MS / 1000} 秒还没回应，这一下已经停下。过一会儿再试。`;
+}
+
+function shapeRaw(issues: readonly { path: PropertyKey[]; message: string }[]): string {
+  return issues
+    .map((issue) => {
+      const path = issue.path.length > 0 ? issue.path.map((part) => String(part)).join('.') : '（根）';
+      return `${path}：${issue.message}`;
+    })
+    .join('\n');
+}
+
 /** EventSource.readyState 的 CLOSED（测试环境里可能没有 EventSource 这个全局）。 */
 const ES_CLOSED = 2;
 
@@ -140,6 +159,9 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     }
     const init: RequestInit = { method, headers, credentials: 'same-origin' };
     if (body !== undefined) init.body = JSON.stringify(body);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    init.signal = ctrl.signal;
     let res: Response;
     let pending: Promise<Response> | undefined;
     try {
@@ -147,8 +169,11 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       if (rotatesSession) rotation = pending;
       res = await pending;
     } catch (err) {
-      throw new ApiError(0, 'network', `连不上驾驶舱后端：${errMessage(err)}`);
+      // 到点 abort 之后，fetch 怎么拒绝都算超时（有的环境不叫 AbortError）。
+      if (ctrl.signal.aborted) throw new ApiError(0, 'timeout', timeoutMessage(), null, errMessage(err));
+      throw new ApiError(0, 'network', NETWORK_MESSAGE, null, errMessage(err));
     } finally {
+      clearTimeout(timer);
       if (rotation === pending) rotation = undefined;
     }
     if (!res.ok) {
@@ -181,8 +206,9 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       throw new ApiError(
         res.status,
         'bad_response_shape',
-        '后端返回的数据不符合约定（shared/web-api.ts）',
+        SHAPE_MESSAGE,
         parsed.error.issues,
+        shapeRaw(parsed.error.issues),
       );
     }
     return parsed.data;

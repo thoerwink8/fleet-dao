@@ -1,6 +1,7 @@
 // 读数据的两种过渡态：骨架行和出错重试。
 import { errMessage } from '@fleet-dao/shared/util';
 import { useQueryClient } from '@tanstack/react-query';
+import { ErrorDetail, errorRaw } from '../route-error';
 import { Button } from '../ui/button';
 import { Skeleton } from '../ui/skeleton';
 import { Notice } from './notice';
@@ -43,7 +44,10 @@ export function LoadError({
         </Button>
       }
     >
-      {text ?? `${what ? `${what}没读成` : '没查成'}：${errMessage(error)}`}
+      <ErrorDetail
+        summary={text ?? `${what ? `${what}没读成` : '没查成'}：${errMessage(error)}`}
+        raw={errorRaw(error)}
+      />
     </Notice>
   );
 }

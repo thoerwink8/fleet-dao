@@ -204,7 +204,7 @@ RETIRED_UNIT_DIR=/etc/systemd/system # 只有测试会改（#1223）
 RELEASE_REQUEST_DIR=/var/lib/fleet-dao/release-request
 TRAIN_DIR=$RELEASES_DIR/.train
 RELEASE_REQUEST_LIB=/usr/local/lib/fleet-dao/release-request
-RELEASE_REQUEST_FILES=(lib.mjs fleet-release-request.mjs)
+RELEASE_REQUEST_FILES=(lib.mjs session-wait.mjs fleet-release-request.mjs)
 RELEASE_REQUEST_UNITS=(fleet-release-request.service fleet-release-request.path)
 # 自动发布单元（docs/ops.md 第九节「自动发布」）：只读不发（0032）——读主线头、它的 CI、在用版本、落后几个；发完版（驾驶舱按钮）后顺带装自动档、同步规矩。装的是副本：
 # 主线上改了它，下一轮发完版自动换（--auto-tier）。它每一轮的读数、本脚本装到哪个提交（下面 APPLIED_FILE）都放在 AUTO_DIR，后端的 /healthz 读
