@@ -16,37 +16,6 @@
     }
   },
   "skills": {
-    "systematic-debugging": {
-      "source": "obra/superpowers",
-      "path": "skills/systematic-debugging",
-      "license": "MIT",
-      "reviewedAt": "2026-09-30",
-      "reviewedBy": "Claude Sonnet 5.5（指挥官会话，逐个文件通读，含脚本和隐藏字符扫描）",
-      "files": {
-        "condition-based-waiting-example.ts": "40ae5ebe497fdf310200e43fe986552546d0a22837c0d39e855db1cfd33eb88e",
-        "condition-based-waiting.md": "e89fec8400d6cd50f43407cec9fab50976ba4d55d0ec2eb51c0bd68036b54c26",
-        "defense-in-depth.md": "1e175fb86fc357e58c6aebf5441e481e1b7868b4380c0456b63a17eefbd18ba7",
-        "find-polluter.sh": "dd7b8f13c4cc2a24b33ff87b18da9248f3e1c80a085c3316224f69ff0fa5c43c",
-        "LICENSE": "a37e0e9697144819e1d965176ac4ae5bc3fa02d11e7812036bbcadf6dafe2400",
-        "root-cause-tracing.md": "75b933b6a8c40bdb2031b10f21654395b56ec6ab6bc7b018c18d3fe57aeb7fb8",
-        "SKILL.md": "808fc5717aa88ad65efff312b11c186294d3e6ee301afb584e2f86599b137787"
-      },
-      "added": {
-        "LICENSE": "上游仓根目录的 LICENSE（MIT 要求随拷贝带版权声明），原样拷入"
-      },
-      "leftOut": {
-        "CREATION-LOG.md": "上游作者写这个 skill 的过程记录，运行时用不到",
-        "test-academic.md": "上游给 skill 作者做压力测试用的场景题，运行时用不到",
-        "test-pressure-1.md": "同上；开头是「你必须选、别问」这类指令语气，分发出去没有用处只有风险",
-        "test-pressure-2.md": "同 test-pressure-1.md",
-        "test-pressure-3.md": "同 test-pressure-1.md"
-      },
-      "notes": [
-        "多层诊断的示例里 echo \"IDENTITY: ${IDENTITY:+SET}${IDENTITY:-UNSET}\" 和 env | grep IDENTITY 会把值打出来：按本仓底线，只报「有没有设」，不打密钥、令牌的值。",
-        "condition-based-waiting-example.ts 是别的项目的示例代码（引用它自己的模块），只当参考读；本仓的类型检查、格式检查不管它（biome.json 已排除 agents/skills-vendor）。",
-        "find-polluter.sh 里的 npm test 在本仓换成 pnpm exec vitest run <文件>。"
-      ]
-    },
     "frontend-design": {
       "source": "anthropics/skills",
       "path": "skills/frontend-design",
@@ -117,6 +86,10 @@
     "mcp-builder": {
       "source": "anthropics/skills",
       "reason": "2026-09-30 收过，2026-10-13 规则减法删掉（决定 0089）：本仓不写 MCP 服务；评测脚本调 Anthropic API 要花钱"
+    },
+    "systematic-debugging": {
+      "source": "obra/superpowers",
+      "reason": "2026-09-30 收过，2026-10-13 规则减法删掉（决定 0089）：近 14 天 0 次调用，是 superpowers 原样副本"
     }
   }
 }
