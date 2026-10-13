@@ -653,6 +653,66 @@ export interface IntakeStore {
     input: { repoId: string; mode: CiPolicy },
     audit: Omit<NewAuditEntry, 'before' | 'after'>,
   ): Promise<CiPolicyChange | 'not_found'>;
+  /**
+   * 把一个 GitHub 仓加进驾驶舱（repos 一行）。不打开自动派单（auto_dispatch_since 留空）。
+   * owner/name 已有（大小写不敏感）则不插、不记操作记录。并发插进同一行时后一次同样当已有。
+   */
+  importRepo(input: ImportRepoInput, audit: Omit<NewAuditEntry, 'before' | 'after'>): Promise<ImportedRepo>;
+  /**
+   * 从驾驶舱移出一个仓。还有任务、PR 或提醒跟进时不删，记一条失败的操作记录。
+   * 编号不是 uuid、没有这一行：not_found，不记。
+   */
+  removeRepo(
+    repoId: string,
+    audit: Omit<NewAuditEntry, 'before' | 'after' | 'ok' | 'error'>,
+  ): Promise<RemoveRepoResult>;
+}
+
+/** 驾驶舱用户自己的 GitHub 用户令牌。两个 App 各存一份。不进仓列表、不进操作记录。 */
+export type GithubAppRole = 'agent' | 'engine';
+
+export interface GithubUserToken {
+  userId: string;
+  role: GithubAppRole;
+  githubLogin: string;
+  accessToken: string;
+  refreshToken?: string | undefined;
+  expiresAt?: string | undefined;
+}
+
+export interface ImportRepoInput {
+  owner: string;
+  name: string;
+  defaultBranch: string;
+  testCommand: string;
+}
+
+export interface ImportedRepo {
+  created: boolean;
+  repo: IntakeRepo;
+  /** 新插进去才有。已有的不记操作记录。 */
+  auditId?: string | undefined;
+}
+
+export type RemoveRepoResult =
+  | { status: 'removed'; owner: string; name: string; auditId: string }
+  | {
+      status: 'in_use';
+      owner: string;
+      name: string;
+      tasks: number;
+      pulls: number;
+      alerts: number;
+      auditId: string;
+    }
+  | 'not_found';
+
+export interface GithubTokenStore {
+  /** 编号不是 uuid、或没有这一份：null。 */
+  getGithubToken(userId: string, role: GithubAppRole): Promise<GithubUserToken | null>;
+  /** 同一人、同一个 App 再存一次是覆盖。 */
+  saveGithubToken(token: GithubUserToken): Promise<void>;
+  deleteGithubToken(userId: string, role: GithubAppRole): Promise<void>;
 }
 
 /** 别的环境推来的快照（node_reports 表一行），不带快照本体：列环境用。 */
@@ -694,7 +754,8 @@ export type Store = UserStore &
   AgentStore &
   GitHubStore &
   IntakeStore &
-  NodeStore;
+  NodeStore &
+  GithubTokenStore;
 
 /** 翻页游标看不懂：接口回 400（http.ts），不装成空页。判法在 ids.ts 的 parseCursor。 */
 export class InvalidCursorError extends Error {

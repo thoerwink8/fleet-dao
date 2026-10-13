@@ -12,6 +12,7 @@ import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { z } from 'zod';
 import type { Config } from './config.ts';
 import type { Deps } from './deps.ts';
+import { registerGithubOAuthRoutes } from './github-repo-routes.ts';
 import { FeishuRejectedError, FeishuUnavailableError } from './feishu.ts';
 import { ApiError, readJson, reply } from './http.ts';
 import {
@@ -342,6 +343,7 @@ export function authRoutes(deps: Deps): Hono<CockpitEnv> {
     });
   }
 
+  registerGithubOAuthRoutes(app, deps);
   return app;
 }
 

@@ -34,6 +34,7 @@ import { PageNav } from '../components/page-nav';
 import { RepoCiPolicyControl } from '../components/repo-ci-policy';
 import { useRepo } from '../components/repo-context';
 import { RepoRow } from '../components/repo-groom';
+import { RepoImport } from '../components/repo-import';
 import { ModeSwitch } from '../components/shell/topbar';
 import { useTheme } from '../components/theme-provider';
 import { Button } from '../components/ui/button';
@@ -615,6 +616,7 @@ export default function Settings() {
           >
             {/* 总开关和按项目开关的关系（#1086）：总开关关＝全停，开＝只有接活开着的项目才派 */}
             <EngineMasterRelation />
+            <RepoImport />
             {repoFailure ? (
               <div className="mb-3">
                 <LoadError text={repoFailure} error={reposError ?? dispatch.error} />

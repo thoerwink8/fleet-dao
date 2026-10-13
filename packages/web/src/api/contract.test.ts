@@ -22,6 +22,8 @@ const AUTH_NOT_USED: Record<string, string> = {
   // 飞书登录、回调是浏览器整页跳转（<a href>），不经 http.ts 的 fetch
   feishuLogin: '浏览器整页跳转，不走 fetch',
   feishuCallback: '飞书回调，浏览器整页跳转，不走 fetch',
+  githubCallback: 'GitHub 授权回调，浏览器整页跳转，不走 fetch',
+  githubSetup: 'GitHub App 装完回到的 Setup URL，浏览器整页跳转，不走 fetch',
 };
 
 describe('契约 ↔ 前端 http.ts', () => {

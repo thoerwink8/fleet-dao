@@ -37,6 +37,7 @@ import { pgDatabaseSizes } from './db-sizes.ts';
 import type { DecisionCommenter } from './decision-handoff.ts';
 import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
+import { loadGithubUserDeps } from './github-user-deps.ts';
 import {
   createFootprintMeter,
   type DatabaseSizes,
@@ -175,6 +176,7 @@ async function assemble(): Promise<{
   close: () => Promise<void>;
   databaseSizes?: DatabaseSizes;
 }> {
+  const githubUsers = loadGithubUserDeps(log);
   if (config.databaseUrl === null) {
     // 只有开发环境会走到这里（生产缺 DATABASE_URL 在 loadConfig 就拒绝启动了）。
     const changes = createChangeHub(log);
@@ -202,6 +204,7 @@ async function assemble(): Promise<{
           log.info('（开发）收到 GitHub 事件', { event: event.event, repo: event.repo, wake: event.wake });
         },
       },
+      ...githubUsers,
     };
     return { deps, close: async () => {} };
   }
@@ -246,6 +249,7 @@ async function assemble(): Promise<{
     workflows: temporal.control,
     taskRedo: temporal.taskRedo,
     github: github.sink,
+    ...githubUsers,
     ...(github.decisionCommenter ? { decisionCommenter: github.decisionCommenter } : {}),
     gatewaySeen,
     // 飞书群聊理成的意图（#553 第 4 条）：网关收原话、取意图卡；指挥官经 fleet-api intent 读写同一张表

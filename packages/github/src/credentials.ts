@@ -3,7 +3,7 @@
 // 三种处置不同，别混成一种（windsurf-dao#573 ①）。报错里只写文件路径和缺哪个字段，绝不带文件内容。
 import { createPrivateKey, type KeyObject } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { GitHubError } from './errors.ts';
+import { GitHubError, registerSecret } from './errors.ts';
 
 /** agent = 「干活的」（只推分支、开 PR）；engine = 「引擎」（合并、改 issue、续互动限制）。 */
 export type AppRole = 'agent' | 'engine';
@@ -109,6 +109,50 @@ export function loadAppCredentials(role: AppRole, file: string, read: ReadFile =
   }
   if (privateKey.asymmetricKeyType !== 'rsa') throw bad('私钥不是 RSA（GitHub App 只签 RS256）');
   return { role, appId, clientId, slug, privateKey, source: file };
+}
+
+/** 用户授权（OAuth）要用的 client_id / client_secret。不进 AppCredentials：那份会被日志带出去。 */
+export interface AppOAuth {
+  role: AppRole;
+  clientId: string;
+  clientSecret: string;
+  slug: string;
+}
+
+export function loadAppOAuth(role: AppRole, file: string, read: ReadFile = readUtf8): AppOAuth {
+  const who = ROLE_NAMES[role];
+  let text: string;
+  try {
+    text = read(file);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      throw new GitHubError('NOT_INSTALLED', `这台机器没装${who}的凭据：${file} 不存在`, {
+        details: { role, file },
+      });
+    }
+    throw new GitHubError('CREDENTIALS_UNREADABLE', `读${who}的凭据 ${file} 失败（${code ?? '未知错误'}）`, {
+      details: { role, file },
+    });
+  }
+  const bad = (what: string) =>
+    new GitHubError('BAD_CONFIG', `${who}的凭据配置错了（${file}）：${what}`, { details: { role, file } });
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw bad('不是合法的 JSON');
+  }
+  if (typeof raw !== 'object' || raw === null) throw bad('顶层不是对象');
+  const o = raw as Record<string, unknown>;
+  const slug = o.slug;
+  if (typeof slug !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw bad('缺 slug（App 的短名）');
+  const clientId = o.client_id;
+  if (typeof clientId !== 'string' || clientId === '') throw bad('缺 client_id');
+  const clientSecret = o.client_secret;
+  if (typeof clientSecret !== 'string' || clientSecret === '') throw bad('缺 client_secret');
+  registerSecret(clientSecret);
+  return { role, clientId, clientSecret, slug };
 }
 
 export function loadApps(

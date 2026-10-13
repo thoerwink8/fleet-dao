@@ -35,6 +35,13 @@ import type {
   GroomNowRequest,
   GroomNowResponse,
   GroomStatusResponse,
+  GithubAuthorizeRequest,
+  GithubAuthorizeResponse,
+  GithubConnectResponse,
+  GithubReposResponse,
+  ImportRepoRequest,
+  ImportRepoResponse,
+  RemoveRepoResponse,
   HomeResourcesSchema,
   HomeResponseSchema,
   JobsResponse,
@@ -134,6 +141,14 @@ export type Repo = z.infer<typeof RepoSchema>;
 export type RepoDispatch = z.infer<typeof RepoDispatchResponse>['repos'][number];
 export type UpdateRepoDispatchBody = z.input<typeof UpdateRepoDispatchRequest>;
 export type UpdatedRepoDispatch = z.infer<typeof UpdateRepoDispatchResponse>;
+export type GithubRepos = z.infer<typeof GithubReposResponse>;
+export type GithubRepoRow = GithubRepos['repos'][number];
+export type GithubConnect = z.infer<typeof GithubConnectResponse>;
+export type GithubAuthorizeBody = z.input<typeof GithubAuthorizeRequest>;
+export type GithubAuthorizeResult = z.infer<typeof GithubAuthorizeResponse>;
+export type ImportRepoBody = z.input<typeof ImportRepoRequest>;
+export type ImportRepoResult = z.infer<typeof ImportRepoResponse>;
+export type RemoveRepoResult = z.infer<typeof RemoveRepoResponse>;
 /** 设置页「仓库」一节：每个项目现在强制 CI 还是不强制，以及最近几次切换。 */
 export type RepoCiPolicy = z.infer<typeof RepoCiPolicyResponse>['repos'][number];
 export type UpdateRepoCiPolicyBody = z.input<typeof UpdateRepoCiPolicyRequest>;

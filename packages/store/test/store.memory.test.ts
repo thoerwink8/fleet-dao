@@ -2,6 +2,7 @@ import { createMemoryStore } from '../src/memory-store.ts';
 import { describeStoreContract, type MakeStore } from './store-contract.ts';
 import { describeCredentialsStoreContract } from './store-contract-credentials.ts';
 import { describeNodeStoreContract } from './store-contract-nodes.ts';
+import { describeRepoImportContract } from './store-contract-repos.ts';
 import { describeTaskListContract } from './store-contract-task-list.ts';
 
 const make: MakeStore = async (data, clock) => {
@@ -19,3 +20,4 @@ describeStoreContract('内存版', make);
 describeCredentialsStoreContract('内存版', make);
 describeNodeStoreContract('内存版', make);
 describeTaskListContract('内存版', make);
+describeRepoImportContract('内存版', make);

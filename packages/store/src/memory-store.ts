@@ -1,6 +1,7 @@
 // 内存里的 Store：测试和本地开发用，也是 ports.ts 语义的参照实现。数据按 Postgres 的表来摆（packages/db 的 schema），
 // 行为照库的约束来（比较后再改、和操作记录同一「事务」、ok=false 的操作记录必须带原因……），
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
+import { randomUUID } from 'node:crypto';
 import {
   answerResolves,
   type Ban,
@@ -59,6 +60,7 @@ import type {
   AuditRecord,
   CommandClaim,
   GitHubDelivery,
+  GithubUserToken,
   JobRecord,
   NewAuditEntry,
   NodeReportRecord,
@@ -190,6 +192,8 @@ export interface MemoryData {
   credentials: Map<string, PasswordCredentials>;
   /** 别的环境推来的快照（node_reports），一个环境一行。 */
   nodeReports: NodeReportRecord[];
+  /** 登录人自己的 GitHub 用户令牌（github_user_tokens）。 */
+  githubTokens: GithubUserToken[];
 }
 
 export function emptyData(): MemoryData {
@@ -220,6 +224,7 @@ export function emptyData(): MemoryData {
     githubEvents: new Map(),
     credentials: new Map(),
     nodeReports: [],
+    githubTokens: [],
   };
 }
 
@@ -1095,6 +1100,89 @@ export function createMemoryStore(
       checkAudit(full);
       repo.ciPolicy = mode;
       return ciPolicyChanged(mode, audit(full));
+    },
+    async importRepo(input, entry) {
+      const existing = await this.findRepoByName(input.owner, input.name);
+      if (existing) return { created: false, repo: existing };
+      const repo = {
+        id: randomUUID(),
+        owner: input.owner,
+        name: input.name,
+        defaultBranch: input.defaultBranch,
+        testCommand: input.testCommand,
+      };
+      const full = {
+        ...entry,
+        ok: true,
+        after: {
+          owner: input.owner,
+          name: input.name,
+          defaultBranch: input.defaultBranch,
+          testCommand: input.testCommand,
+          autoDispatchSince: null,
+        },
+      };
+      checkAudit(full);
+      data.repos.push(repo);
+      return {
+        created: true,
+        repo: {
+          ...repo,
+          autoDispatchSince: null,
+          ciPolicy: 'force' as const,
+        },
+        auditId: audit(full),
+      };
+    },
+    async removeRepo(repoId, entry) {
+      if (!isUuid(repoId)) return 'not_found';
+      const repo = data.repos.find((r) => r.id === repoId);
+      if (!repo) return 'not_found';
+      const tasks = data.tasks.filter((t) => t.repoId === repoId).length;
+      const pulls = data.pullRequests.filter((p) => p.repoId === repoId).length;
+      const alerts = 0;
+      if (tasks > 0 || pulls > 0 || alerts > 0) {
+        const full = {
+          ...entry,
+          ok: false as const,
+          error: 'in_use',
+          after: { tasks, pulls, alerts },
+        };
+        checkAudit(full);
+        return {
+          status: 'in_use' as const,
+          owner: repo.owner,
+          name: repo.name,
+          tasks,
+          pulls,
+          alerts,
+          auditId: audit(full),
+        };
+      }
+      data.repos = data.repos.filter((r) => r.id !== repoId);
+      const full = {
+        ...entry,
+        ok: true,
+        after: { owner: repo.owner, name: repo.name },
+      };
+      checkAudit(full);
+      return { status: 'removed' as const, owner: repo.owner, name: repo.name, auditId: audit(full) };
+    },
+    async getGithubToken(userId, role) {
+      if (!isUuid(userId)) return null;
+      const row = data.githubTokens.find((t) => t.userId === userId && t.role === role);
+      return row ? { ...row } : null;
+    },
+    async saveGithubToken(token) {
+      if (!isUuid(token.userId)) throw new Error('用户编号不是 uuid');
+      const next = { ...token };
+      const index = data.githubTokens.findIndex((t) => t.userId === token.userId && t.role === token.role);
+      if (index >= 0) data.githubTokens[index] = next;
+      else data.githubTokens.push(next);
+    },
+    async deleteGithubToken(userId, role) {
+      if (!isUuid(userId)) return;
+      data.githubTokens = data.githubTokens.filter((t) => !(t.userId === userId && t.role === role));
     },
   };
 }

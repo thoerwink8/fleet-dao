@@ -33,6 +33,11 @@ import {
   flowStages,
   foldRouteProbeRequests,
   founderOnlyDenial,
+  GithubAuthorizeRequest,
+  GithubAuthorizeResponse,
+  GithubConnectRequest,
+  GithubConnectResponse,
+  GithubReposResponse,
   GROOM_ACTION,
   GROOM_TARGET,
   GroomNowRequest,
@@ -44,6 +49,8 @@ import {
   HomeResponseSchema,
   type HostId,
   hardBanFor,
+  ImportRepoRequest,
+  ImportRepoResponse,
   JobsResponse,
   judgeGroomRequest,
   ManualModelRequest,
@@ -54,6 +61,7 @@ import {
   NodeDetailResponseSchema,
   NodesResponseSchema,
   NotificationsResponse,
+  ORG_APP_APPROVAL_NOTE,
   PASSWORD_MIN_LENGTH,
   POOL_HOLDS_SETTING,
   PoolHoldsResponse,
@@ -63,11 +71,15 @@ import {
   poolFull,
   poolHoldsView,
   probeHistoryStrips,
+  REPO_APPS_INSTALL,
+  REPO_IMPORT,
+  REPO_REMOVE,
   type RealtimeTable,
   ReleaseCardSchema,
   ReleasedCommitsSchema,
   ReleaseRequestResponse,
   RemovePurposeModelRequest,
+  RemoveRepoResponse,
   RepoCiPolicyResponse,
   RepoDispatchResponse,
   ReposResponse,
@@ -142,6 +154,8 @@ export interface MockOptions {
   transcriptFail?: readonly string[];
   /** 给 ch-cursor 多加这么多条没用途在用的路由（演示一个渠道几百条）；不给就不加。 */
   manyRoutes?: number;
+  /** 导入仓库：登录人有没有连上自己的 GitHub。默认连上，设置页不多一条提示。 */
+  githubConnected?: boolean;
 }
 
 export interface MockApi extends FleetApi {
@@ -885,6 +899,59 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const switchedOff = new Set(MOCK_SWITCHED_OFF_AT_START);
   /** 每个项目「让 AI 接活」打开的时刻：没有就是关着。种子里 orbit 开着、另两个关着，页面上两种样子都能看到。 */
   const mockDispatch = new Map<string, string>([['r-orbit', new Date(now() - 3 * 86_400_000).toISOString()]]);
+  /** 登录人自己 GitHub 上能看到的仓。新加进驾驶舱的不写进 mockDispatch（自动派单保持关）。 */
+  const githubConnected = opts.githubConnected !== false;
+  const githubRows: {
+    owner: string;
+    name: string;
+    ownerKind: 'user' | 'org';
+    defaultBranch: string;
+    canAdmin: boolean;
+    testCommand: string;
+    apps: { agent: 'installed' | 'missing' | 'unknown'; engine: 'installed' | 'missing' | 'unknown' };
+  }[] = [
+    {
+      owner: 'acme',
+      name: 'orbit',
+      ownerKind: 'org',
+      defaultBranch: 'main',
+      canAdmin: true,
+      testCommand: 'pnpm check',
+      apps: { agent: 'installed', engine: 'installed' },
+    },
+    {
+      owner: 'acme',
+      name: 'widget',
+      ownerKind: 'org',
+      defaultBranch: 'main',
+      canAdmin: true,
+      testCommand: 'pnpm test',
+      apps: { agent: 'missing', engine: 'missing' },
+    },
+    {
+      owner: 'lan',
+      name: 'notes',
+      ownerKind: 'user',
+      defaultBranch: 'main',
+      canAdmin: true,
+      testCommand: 'pnpm test',
+      apps: { agent: 'installed', engine: 'missing' },
+    },
+    {
+      owner: 'lan',
+      name: 'scratch',
+      ownerKind: 'user',
+      defaultBranch: 'main',
+      canAdmin: false,
+      testCommand: 'pnpm test',
+      apps: { agent: 'missing', engine: 'missing' },
+    },
+  ];
+  const githubRow = (owner: string, name: string) =>
+    githubRows.find(
+      (row) =>
+        row.owner.toLowerCase() === owner.toLowerCase() && row.name.toLowerCase() === name.toLowerCase(),
+    );
   /** 没写过的仓是强制。切换记录新的在前，最多留 5 条。 */
   const mockCiPolicy = new Map<string, CiPolicy>();
   const mockCiRecent = new Map<string, { at: string; actor: string; from: CiPolicy; to: CiPolicy }[]>();
@@ -1911,6 +1978,187 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         ...(since ? { since } : {}),
         changed,
       });
+    },
+    async githubRepos() {
+      await wait();
+      if (!githubConnected) {
+        return GithubReposResponse.parse({
+          connected: false,
+          problem: '还没连接你的 GitHub。点「连接 GitHub」，用你自己的账号授权。',
+          truncated: false,
+          repos: [],
+        });
+      }
+      return GithubReposResponse.parse({
+        connected: true,
+        githubLogin: 'lan',
+        truncated: false,
+        repos: githubRows.map((row) => {
+          const known = st.repos.find(
+            (repo) =>
+              repo.owner.toLowerCase() === row.owner.toLowerCase() &&
+              repo.name.toLowerCase() === row.name.toLowerCase(),
+          );
+          return {
+            owner: row.owner,
+            name: row.name,
+            ownerKind: row.ownerKind,
+            defaultBranch: row.defaultBranch,
+            inCockpit: known !== undefined,
+            ...(known ? { repoId: known.id } : {}),
+            canAdmin: row.canAdmin,
+            apps: row.apps,
+            ...(row.ownerKind === 'org' ? { orgNote: ORG_APP_APPROVAL_NOTE } : {}),
+          };
+        }),
+      });
+    },
+    async connectGithub(purpose) {
+      await wait();
+      const parsed = GithubConnectRequest.parse({ purpose });
+      if (!githubConnected) {
+        return GithubConnectResponse.parse({
+          connected: false,
+          redirect: 'https://github.com/login/oauth/authorize?state=mock',
+        });
+      }
+      if (parsed.purpose === 'install-account') {
+        return GithubConnectResponse.parse({
+          connected: true,
+          redirect: 'https://github.com/apps/fleet-dao-agent/installations/new?state=mock',
+        });
+      }
+      return GithubConnectResponse.parse({ connected: true });
+    },
+    async authorizeGithubRepo(raw) {
+      await wait();
+      const body = GithubAuthorizeRequest.parse(raw);
+      if (!githubConnected) {
+        return GithubAuthorizeResponse.parse({
+          installed: false,
+          redirect: 'https://github.com/login/oauth/authorize?state=mock-auth',
+        });
+      }
+      const row = githubRow(body.owner, body.name);
+      if (!row) throw new ApiError(404, 'github_repo_not_visible', '你的 GitHub 上看不到这个仓');
+      if (!row.canAdmin)
+        throw new ApiError(403, 'github_repo_not_admin', '没有这个仓的管理权限，加不进、也装不上 App');
+      const known = st.repos.find(
+        (repo) =>
+          repo.owner.toLowerCase() === row.owner.toLowerCase() &&
+          repo.name.toLowerCase() === row.name.toLowerCase(),
+      );
+      for (const role of ['agent', 'engine'] as const) {
+        audit({
+          actor: meActor(),
+          action: REPO_APPS_INSTALL,
+          target: known ? `repo:${known.id}` : `github:${row.owner}/${row.name}`,
+          after: { app: role, owner: row.owner, name: row.name },
+          via: 'cockpit',
+          reason: '驾驶舱上点了一键授权',
+        });
+      }
+      row.apps = { agent: 'installed', engine: 'installed' };
+      return GithubAuthorizeResponse.parse({
+        installed: true,
+        agent: 'installed',
+        engine: 'installed',
+      });
+    },
+    async importRepo(raw) {
+      await wait();
+      const body = ImportRepoRequest.parse(raw);
+      if (!githubConnected) {
+        throw new ApiError(
+          409,
+          'github_not_connected',
+          '还没连接你的 GitHub。点「连接 GitHub」，用你自己的账号授权。',
+        );
+      }
+      const row = githubRow(body.owner, body.name);
+      if (!row) throw new ApiError(404, 'github_repo_not_visible', '你的 GitHub 上看不到这个仓');
+      if (!row.canAdmin)
+        throw new ApiError(403, 'github_repo_not_admin', '没有这个仓的管理权限，加不进、也装不上 App');
+      const existing = st.repos.find(
+        (repo) =>
+          repo.owner.toLowerCase() === row.owner.toLowerCase() &&
+          repo.name.toLowerCase() === row.name.toLowerCase(),
+      );
+      if (existing) {
+        return ImportRepoResponse.parse({
+          repoId: existing.id,
+          owner: existing.owner,
+          name: existing.name,
+          defaultBranch: existing.defaultBranch,
+          testCommand: row.testCommand,
+          autoDispatch: false,
+          created: false,
+        });
+      }
+      const id = nextId('r');
+      st.repos.push({
+        id,
+        owner: row.owner,
+        name: row.name,
+        defaultBranch: row.defaultBranch,
+        testCommand: row.testCommand,
+      });
+      audit({
+        actor: meActor(),
+        action: REPO_IMPORT,
+        target: `github:${row.owner}/${row.name}`,
+        after: {
+          owner: row.owner,
+          name: row.name,
+          defaultBranch: row.defaultBranch,
+          testCommand: row.testCommand,
+          autoDispatchSince: null,
+        },
+        via: 'cockpit',
+        reason: '驾驶舱上点了加进',
+      });
+      return ImportRepoResponse.parse({
+        repoId: id,
+        owner: row.owner,
+        name: row.name,
+        defaultBranch: row.defaultBranch,
+        testCommand: row.testCommand,
+        autoDispatch: false,
+        created: true,
+      });
+    },
+    async removeRepo(repoId) {
+      await wait();
+      const repo = st.repos.find((item) => item.id === repoId);
+      if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
+      const tasks = st.tasks.filter((item) => item.task.repoId === repoId).length;
+      if (tasks > 0) {
+        audit({
+          actor: meActor(),
+          action: REPO_REMOVE,
+          target: `repo:${repoId}`,
+          ok: false,
+          error: 'in_use',
+          after: { tasks, pulls: 0, alerts: 0 },
+          via: 'cockpit',
+          reason: '驾驶舱上点了移出',
+        });
+        throw new ApiError(
+          409,
+          'repo_in_use',
+          `这个仓在驾驶舱里还有任务、PR 或提醒跟进，移不出去（任务 ${tasks}、PR 0、提醒 0）。历史没删。`,
+        );
+      }
+      st.repos = st.repos.filter((item) => item.id !== repoId);
+      audit({
+        actor: meActor(),
+        action: REPO_REMOVE,
+        target: `repo:${repoId}`,
+        after: { owner: repo.owner, name: repo.name },
+        via: 'cockpit',
+        reason: '驾驶舱上点了移出',
+      });
+      return RemoveRepoResponse.parse({ removed: true, owner: repo.owner, name: repo.name });
     },
     async repoCiPolicy() {
       await wait();

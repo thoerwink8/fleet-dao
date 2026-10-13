@@ -1,3 +1,4 @@
+import type { AppCoveragePort, GithubUserPort } from '@fleet-dao/github';
 import type { Repo } from '@fleet-dao/shared';
 import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
 import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
@@ -53,6 +54,15 @@ export interface Deps {
   /** null = 飞书登录没配置（只允许在开发环境）。 */
   feishu: FeishuAuth | null;
   github: GitHubEventSink;
+  /**
+   * 登录人自己的 GitHub 用户令牌（导入仓库、一键授权）。没给时那几个接口回 503，并带上 githubUserProblem，
+   * 不拿空列表冒充「没有仓」。
+   */
+  githubUser?: GithubUserPort | undefined;
+  /** 两个 App 各自装到了哪些仓。没给时列表把「装了没」标成认不出，不标成没装。 */
+  appCoverage?: AppCoveragePort | undefined;
+  /** githubUser 没接上的原因（凭据读不到）。 */
+  githubUserProblem?: string | undefined;
   /** /healthz 逐项探的依赖；空 = 没有外部依赖（内存版）。 */
   health: HealthCheck[];
   /**

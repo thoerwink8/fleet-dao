@@ -10,8 +10,11 @@ import {
   CSRF_HEADER,
   DevLoginRequest,
   FeishuAccessRequest,
+  GithubAuthorizeRequest,
+  GithubConnectRequest,
   GroomNowRequest,
   HomeResourcesSchema,
+  ImportRepoRequest,
   ManualModelRequest,
   MovePurposeModelRequest,
   PasswordLoginRequest,
@@ -265,6 +268,25 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
         body: UpdateRepoDispatchRequest.parse(body),
       });
     },
+    githubRepos: () => send('GET', apiUrl(R.githubRepos.path), R.githubRepos.response),
+    connectGithub: (purpose) =>
+      send(
+        'POST',
+        apiUrl(R.connectGithub.path),
+        R.connectGithub.response,
+        purpose ? { body: GithubConnectRequest.parse({ purpose }) } : {},
+      ),
+    async authorizeGithubRepo(body) {
+      return send('POST', apiUrl(R.authorizeGithubRepo.path), R.authorizeGithubRepo.response, {
+        body: GithubAuthorizeRequest.parse(body),
+      });
+    },
+    async importRepo(body) {
+      return send('POST', apiUrl(R.importRepo.path), R.importRepo.response, {
+        body: ImportRepoRequest.parse(body),
+      });
+    },
+    removeRepo: (repoId) => send('DELETE', apiUrl(R.removeRepo.path, { repoId }), R.removeRepo.response),
     repoCiPolicy: () => send('GET', apiUrl(R.repoCiPolicy.path), R.repoCiPolicy.response),
     async updateRepoCiPolicy(repoId, body) {
       return send('PUT', apiUrl(R.updateRepoCiPolicy.path, { repoId }), R.updateRepoCiPolicy.response, {

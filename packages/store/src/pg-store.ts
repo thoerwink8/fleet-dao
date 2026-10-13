@@ -7,6 +7,7 @@
 //   和游标的精度一致，翻页不漏同一毫秒里的几条。
 
 import {
+  alertWork,
   auditLog,
   bans,
   channels,
@@ -14,6 +15,7 @@ import {
   type Db,
   githubEvents,
   githubEventVersions,
+  githubUserTokens,
   idempotencyKeys,
   listTaskRows,
   models,
@@ -82,6 +84,7 @@ import type {
   CommandClaim,
   GitHubDelivery,
   GitHubObjectVersion,
+  GithubUserToken,
   JobRecord,
   NewAuditEntry,
   NodeReportSummary,
@@ -1273,7 +1276,147 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         return ciPolicyChanged(after, auditId);
       });
     },
+    async importRepo(input, entry) {
+      const existing = await this.findRepoByName(input.owner, input.name);
+      if (existing) return { created: false, repo: existing };
+      try {
+        return await db.transaction(async (tx) => {
+          const [row] = await tx
+            .insert(repos)
+            .values({
+              owner: input.owner,
+              name: input.name,
+              defaultBranch: input.defaultBranch,
+              testCommand: input.testCommand,
+            })
+            .returning();
+          if (!row) throw new Error('仓没插进去');
+          const auditId = await insertAudit(tx, {
+            ...entry,
+            ok: true,
+            after: {
+              owner: row.owner,
+              name: row.name,
+              defaultBranch: row.defaultBranch,
+              testCommand: row.testCommand,
+              autoDispatchSince: null,
+            },
+          });
+          return { created: true as const, repo: intakeOf(row), auditId };
+        });
+      } catch (err) {
+        if (sqlState(err) === '23505') {
+          const again = await this.findRepoByName(input.owner, input.name);
+          if (again) return { created: false, repo: again };
+        }
+        throw err;
+      }
+    },
+    async removeRepo(repoId, entry) {
+      if (!isUuid(repoId)) return 'not_found';
+      return db.transaction(async (tx) => {
+        const [row] = await tx.select().from(repos).where(eq(repos.id, repoId)).for('update');
+        if (!row) return 'not_found' as const;
+        const tasksN = await countWhere(tx, tasks, eq(tasks.repoId, repoId));
+        const pullsN = await countWhere(tx, pullRequests, eq(pullRequests.repoId, repoId));
+        const alertsN = await countWhere(tx, alertWork, eq(alertWork.repoId, repoId));
+        if (tasksN > 0 || pullsN > 0 || alertsN > 0) {
+          const auditId = await insertAudit(tx, {
+            ...entry,
+            ok: false,
+            error: 'in_use',
+            after: { tasks: tasksN, pulls: pullsN, alerts: alertsN },
+          });
+          return {
+            status: 'in_use' as const,
+            owner: row.owner,
+            name: row.name,
+            tasks: tasksN,
+            pulls: pullsN,
+            alerts: alertsN,
+            auditId,
+          };
+        }
+        await tx.delete(repos).where(eq(repos.id, repoId));
+        const auditId = await insertAudit(tx, {
+          ...entry,
+          ok: true,
+          after: { owner: row.owner, name: row.name },
+        });
+        return { status: 'removed' as const, owner: row.owner, name: row.name, auditId };
+      });
+    },
+    async getGithubToken(userId, role) {
+      if (!isUuid(userId)) return null;
+      const [row] = await db
+        .select()
+        .from(githubUserTokens)
+        .where(and(eq(githubUserTokens.userId, userId), eq(githubUserTokens.appRole, role)));
+      return row ? tokenOf(row) : null;
+    },
+    async saveGithubToken(token) {
+      if (!isUuid(token.userId)) throw new Error('用户编号不是 uuid');
+      await db
+        .insert(githubUserTokens)
+        .values({
+          userId: token.userId,
+          appRole: token.role,
+          githubLogin: token.githubLogin,
+          accessToken: token.accessToken,
+          refreshToken: token.refreshToken ?? null,
+          expiresAt: token.expiresAt ? new Date(token.expiresAt) : null,
+          updatedAt: now(),
+        })
+        .onConflictDoUpdate({
+          target: [githubUserTokens.userId, githubUserTokens.appRole],
+          set: {
+            githubLogin: token.githubLogin,
+            accessToken: token.accessToken,
+            refreshToken: token.refreshToken ?? null,
+            expiresAt: token.expiresAt ? new Date(token.expiresAt) : null,
+            updatedAt: now(),
+          },
+        });
+    },
+    async deleteGithubToken(userId, role) {
+      if (!isUuid(userId)) return;
+      await db
+        .delete(githubUserTokens)
+        .where(and(eq(githubUserTokens.userId, userId), eq(githubUserTokens.appRole, role)));
+    },
   };
+}
+
+function intakeOf(row: typeof repos.$inferSelect) {
+  return {
+    ...toRepo(row),
+    autoDispatchSince: row.autoDispatchSince ? iso(row.autoDispatchSince) : null,
+    ciPolicy: ciPolicyOf(row.ciPolicy),
+  };
+}
+
+function tokenOf(row: typeof githubUserTokens.$inferSelect): GithubUserToken {
+  if (row.appRole !== 'agent' && row.appRole !== 'engine')
+    throw new Error(`令牌的 App 认不出：${row.appRole}`);
+  return {
+    userId: row.userId,
+    role: row.appRole,
+    githubLogin: row.githubLogin,
+    accessToken: row.accessToken,
+    ...(row.refreshToken ? { refreshToken: row.refreshToken } : {}),
+    ...(row.expiresAt ? { expiresAt: iso(row.expiresAt) } : {}),
+  };
+}
+
+async function countWhere(
+  tx: Db,
+  table: typeof tasks | typeof pullRequests | typeof alertWork,
+  where: ReturnType<typeof eq>,
+): Promise<number> {
+  const [row] = await tx.select({ n: sql<number>`count(*)::int` }).from(table).where(where);
+  const n = Number(row?.n);
+  if (!Number.isInteger(n)) throw new Error('数这个仓的引用没读到结果');
+  return n;
 }
 
 /** 收投递时按（对象，版）加的锁名：版本换成毫秒时刻再拼，写法不同（带不带毫秒）的同一时刻锁的是同一把。 */

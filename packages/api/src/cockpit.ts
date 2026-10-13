@@ -62,6 +62,7 @@ import { registerCredentialRoutes } from './credentials.ts';
 import { handOffDecision } from './decision-handoff.ts';
 import type { Deps } from './deps.ts';
 import { registerDispatchRoutes } from './dispatch-routes.ts';
+import { registerGithubRepoRoutes } from './github-repo-routes.ts';
 import { registerFranceReleaseRoutes } from './france-release.ts';
 import { registerGroomRoutes } from './groom-routes.ts';
 import { engineHealthProbe } from './home-engine.ts';
@@ -887,6 +888,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
 
   registerCredentialRoutes(app, deps);
   registerDispatchRoutes(app, deps, actorOf);
+  registerGithubRepoRoutes(app, deps, actorOf);
   registerCiPolicyRoutes(app, deps, actorOf);
   registerRoutingOrderRoutes(app, deps, actorOf);
   registerRouteProbeRoutes(app, deps, actorOf, engineProbe);

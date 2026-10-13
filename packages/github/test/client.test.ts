@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { signAppJwt } from '../src/app-auth.ts';
-import { loadAppCredentials } from '../src/credentials.ts';
+import { loadAppCredentials, loadAppOAuth } from '../src/credentials.ts';
 import { GitHubError } from '../src/errors.ts';
 import { testApps } from './fake-github.ts';
 import { json, repo, setup } from './helpers.ts';
@@ -395,11 +395,23 @@ describe('A2：凭据文件', () => {
       webhook_secret: 's',
       client_secret: 'c',
     });
-    expect(loadAppCredentials('agent', '/x', files({ '/x': inline }))).toMatchObject({
+    const loaded = loadAppCredentials('agent', '/x', files({ '/x': inline }));
+    expect(loaded).toMatchObject({
       appId: 7,
       slug: 'fleet-x',
       clientId: 'Iv1.x',
     });
+    expect(loaded).not.toHaveProperty('clientSecret');
+    expect(loadAppOAuth('agent', '/x', files({ '/x': inline }))).toMatchObject({
+      role: 'agent',
+      clientId: 'Iv1.x',
+      clientSecret: 'c',
+      slug: 'fleet-x',
+    });
+    const noSecret = JSON.stringify({ id: 7, slug: 'fleet-x', client_id: 'Iv1.x', pem });
+    expect(() => loadAppOAuth('agent', '/x', files({ '/x': noSecret }))).toThrow(
+      expect.objectContaining({ code: 'BAD_CONFIG' }),
+    );
     const split = JSON.stringify({ app_id: '8', slug: 'fleet-y', private_key_path: '/k.pem' });
     expect(loadAppCredentials('engine', '/y', files({ '/y': split, '/k.pem': pem }))).toMatchObject({
       appId: 8,

@@ -1,6 +1,7 @@
 // GitHub：两个 App 的令牌、会话外推分支、开 PR、等 CI、合并、issue 进度段与关单、互动限制续期、事件之后的处理、对账补漏。
 // 引擎的活动接口怎么对上这里，见 PR 正文；报错一律是 GitHubError（code / retryable / details，和引擎的 PortError 同形）。
 export { signAppJwt, TokenCache } from './app-auth.ts';
+export { type AppCoverage, type AppCoveragePort, createAppCoverage } from './app-coverage.ts';
 export {
   type BundleCommitsInput,
   type BundleCommitsResult,
@@ -53,12 +54,14 @@ export {
 export {
   type AppCredentials,
   type AppFiles,
+  type AppOAuth,
   type AppRole,
   appFilesFromEnv,
   botLogin,
   DEFAULT_APP_DIR,
   isBot,
   loadAppCredentials,
+  loadAppOAuth,
   loadApps,
 } from './credentials.ts';
 export { type ActivityContext, type BotIdentity, type Locker, memoryLocker } from './deps.ts';
@@ -70,7 +73,7 @@ export {
   type LatestStatus,
   type PullFacts,
 } from './engine-pulls.ts';
-export { GitHubError, isGitHubError, redact, redactDeep } from './errors.ts';
+export { GitHubError, isGitHubError, redact, redactDeep, registerSecret } from './errors.ts';
 export {
   createEventSink,
   type EventSink,
@@ -218,3 +221,20 @@ export {
   renderPrBody,
 } from './text.ts';
 export { TOKEN_SCOPES, type TokenScope } from './token-scopes.ts';
+export {
+  createGithubUserClient,
+  type GithubUserPort,
+  type OauthToken,
+} from './user-github.ts';
+export {
+  authorizeUrl,
+  installPlan,
+  type ListedGithubRepo,
+  newInstallationUrl,
+  type OwnerKind,
+  parseAccessToken,
+  parseInstallationList,
+  parseRepoPage,
+  testCommandFromRepo,
+  type UserInstallation,
+} from './user-oauth.ts';
