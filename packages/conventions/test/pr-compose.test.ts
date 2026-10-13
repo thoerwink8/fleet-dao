@@ -61,6 +61,7 @@ function world(o: Opts = {}) {
     return r;
   };
   const git: Gh = (args) => {
+    if (args[0] === 'push') return ok(); // pr-open 开 PR 前的 git push：本文件不关心，pr-open.test.ts 管
     gitCalls.push(args);
     return o.log ?? ok('加个东西\n');
   };
@@ -324,6 +325,27 @@ describe('pnpm pr:open 生成正文：闸门（失败要真失败）', () => {
     expect(await w.run('--body-file', 'body.md', '--closes', '7')).toBe(1);
     expect(w.calls).toEqual([]);
     expect(w.text()).toContain('不能和 --body-file 一起用');
+  });
+
+  it('--founder-quote 加 --at 能和 --body-file 一起用：人闸一行和原话追加到正文末尾，并挂自动合并', async () => {
+    const w = world({ replies: [CREATED, files('agents/shared-rules.md'), ok()] });
+    writeFileSync(join(w.cwd, 'body.md'), '**做了什么**：手写\n\n**需求**：\nCloses #7\n');
+    expect(
+      await w.run('--body-file', 'body.md', '--founder-quote', '全权授权', '--at', '2026-10-13 18:28'),
+    ).toBe(0);
+    expect(w.bodies).toEqual([
+      `**做了什么**：手写\n\n**需求**：\nCloses #7\n\n${GATE_LINE}\n\n**创始人原话**：「全权授权」（2026-10-13 18:28）\n`,
+    ]);
+    expect(verbs(w.calls)).toEqual(['pr create', 'api --paginate', 'pr merge']);
+    expect(w.text()).toContain('创始人原话');
+  });
+
+  it('【故意造出的失败】--body-file 配 --founder-quote 却缺 --at、或正文文件读不到：退出码 1，不跑 gh', async () => {
+    const w = world();
+    writeFileSync(join(w.cwd, 'body.md'), '**需求**：\nCloses #7\n');
+    expect(await w.run('--body-file', 'body.md', '--founder-quote', '可以')).toBe(1);
+    expect(await w.run('--body-file', 'nope.md', '--founder-quote', '可以', '--at', '18:30')).toBe(1);
+    expect(w.calls).toEqual([]);
   });
 
   it('【故意造出的失败】git log 没跑成、或分支上没有提交：退出码 2，没开 PR，不拿空说明冒充', async () => {

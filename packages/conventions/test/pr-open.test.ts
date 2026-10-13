@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { allGreen, armable, type Gh, idlePrs, loadPathLists, type RunResult } from '../src/pr-arm.ts';
-import { parseCreatedPr, prOpen } from '../src/pr-open.ts';
+import { parseCreatedPr, pickGitCwd, prOpen } from '../src/pr-open.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const ok = (stdout = ''): RunResult => ({ code: 0, stdout, stderr: '' });
@@ -31,10 +31,23 @@ const ISSUE_7 = ok('[false,null]');
  * replies 是开 PR 之后各次 gh 的回话；查单（gh api …/issues/<号>）的回话在 lookups 里，默认一次 ISSUE_7，
  * 查单的调用记在 lookups（不进 calls），免得每个用例都带上它。bodies 是每次 gh pr create 那一刻 --body-file 里的字。
  */
-function world(replies: RunResult[], body = BODY, lookups: RunResult[] = [ISSUE_7]) {
+function world(
+  replies: RunResult[],
+  body = BODY,
+  lookups: RunResult[] = [ISSUE_7],
+  pushReply: RunResult = ok(),
+) {
   const cwd = mkdtempSync(join(tmpdir(), 'pr-open-'));
   dirs.push(cwd);
   writeFileSync(join(cwd, 'body.md'), body);
+  /** git 和 gh 的先后：推分支必须在 gh pr create 之前。 */
+  const order: string[] = [];
+  const gitCalls: string[][] = [];
+  const git: Gh = (args) => {
+    gitCalls.push(args);
+    order.push(`git ${args[0]}`);
+    return pushReply;
+  };
   const calls: string[][] = [];
   const asked: string[][] = [];
   const bodies: string[] = [];
@@ -49,6 +62,7 @@ function world(replies: RunResult[], body = BODY, lookups: RunResult[] = [ISSUE_
       return l;
     }
     calls.push(args);
+    order.push(`gh ${args.slice(0, 2).join(' ')}`);
     const file = args[args.indexOf('--body-file') + 1];
     if (args[1] === 'create' && file) bodies.push(readFileSync(file, 'utf8'));
     const r = replies.shift();
@@ -58,15 +72,43 @@ function world(replies: RunResult[], body = BODY, lookups: RunResult[] = [ISSUE_
   const run = (...extra: string[]) =>
     prOpen(['--title', '加个东西', '--body-file', 'body.md', ...extra], {
       gh,
+      git,
       root: ROOT,
       cwd,
       out: (l) => out.push(l),
       err: (l) => err.push(l),
     });
-  return { cwd, calls, asked, bodies, out, err, run, text: () => [...out, ...err].join('\n') };
+  return {
+    cwd,
+    order,
+    gitCalls,
+    calls,
+    asked,
+    bodies,
+    out,
+    err,
+    run,
+    text: () => [...out, ...err].join('\n'),
+  };
 }
 
 const verbs = (calls: string[][]) => calls.map((c) => c.slice(0, 2).join(' '));
+
+describe('pickGitCwd：gh / git 在哪个目录跑', () => {
+  const root = join(tmpdir(), 'wt-a');
+  it('敲命令的目录在脚本所在仓里（含仓根）：用它', () => {
+    expect(pickGitCwd(join(root, 'packages', 'x'), root)).toBe(join(root, 'packages', 'x'));
+    expect(pickGitCwd(root, root)).toBe(root);
+  });
+  it('【故意造出的失败】pnpm --dir 从别的目录调用（INIT_CWD 在仓外）：以脚本所在仓根为准，不用 INIT_CWD', () => {
+    const elsewhere = join(tmpdir(), 'wt-b');
+    expect(pickGitCwd(elsewhere, root)).toBe(root);
+    expect(pickGitCwd(join(tmpdir(), 'wt-a-sibling'), root)).toBe(root);
+  });
+  it('没有 INIT_CWD：用仓根', () => {
+    expect(pickGitCwd(undefined, root)).toBe(root);
+  });
+});
 
 describe('parseCreatedPr：从 gh 输出认 PR 号', () => {
   it('正常输出（最后一行是 …/pull/<N>）能认出', () => {
@@ -148,8 +190,37 @@ describe('pnpm pr:open：开 PR、按路径判挂不挂自动合并', () => {
   it('【故意造出的失败】缺 --title：退出码 1，不跑 gh', () => {
     const w = world([]);
     expect(
-      prOpen(['--body-file', 'x'], { gh: () => ok(), root: ROOT, cwd: w.cwd, out: () => {}, err: () => {} }),
+      prOpen(['--body-file', 'x'], {
+        gh: () => ok(),
+        git: () => ok(),
+        root: ROOT,
+        cwd: w.cwd,
+        out: () => {},
+        err: () => {},
+      }),
     ).toBe(1);
+  });
+
+  it('没推过也能开：gh pr create 之前先 git push 当前分支（带 upstream，已推过则幂等）', () => {
+    const w = world([CREATED, files('a.ts'), ok()]);
+    expect(w.run()).toBe(0);
+    expect(w.gitCalls).toEqual([['push', '--set-upstream', 'origin', 'HEAD']]);
+    expect(w.order.slice(0, 2)).toEqual(['git push', 'gh pr create']);
+  });
+
+  it('【故意造出的失败】git push 失败：退出码 2，明确报错，不跑 gh pr create', () => {
+    const w = world([], BODY, [ISSUE_7], bad('remote: Permission denied', 128));
+    expect(w.run()).toBe(2);
+    expect(verbs(w.calls)).toEqual([]);
+    expect(w.text()).toContain('git push');
+    expect(w.text()).toContain('Permission denied');
+    expect(w.text()).toContain('没开 PR');
+  });
+
+  it('需求栏的单号查不到（退出码 1）时不推分支：该拒的先拒', () => {
+    const w = world([], BODY, [bad('HTTP 404 Not Found')]);
+    expect(w.run()).toBe(1);
+    expect(w.gitCalls).toEqual([]);
   });
 
   it('【故意造出的失败】gh pr create 没成：退出码 2，不往下查', () => {
@@ -196,6 +267,7 @@ describe('pnpm pr:open：开 PR、按路径判挂不挂自动合并', () => {
     dirs.push(empty);
     const code = prOpen(['--title', 't', '--body-file', 'body.md'], {
       gh: () => ok(),
+      git: () => ok(),
       root: empty,
       cwd: w.cwd,
       out: () => {},

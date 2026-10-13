@@ -4,14 +4,17 @@ import { fileURLToPath } from 'node:url';
 import { ghRunner } from '../issue-new.ts';
 import { liveGh, liveGit } from '../pr-arm.ts';
 import { prOpenCli } from '../pr-compose.ts';
+import { pickGitCwd } from '../pr-open.ts';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
 // pnpm 跑脚本时 cwd 换成了仓根，原来的目录在 INIT_CWD 里：正文文件的相对路径照人敲命令的地方算
 const cwd = process.env.INIT_CWD ?? process.cwd();
+// gh / git 跑在脚本所在仓里：INIT_CWD 在仓外（pnpm --dir <别处> 调用）时用仓根，否则 gh 报 not a git repository
+const gitCwd = pickGitCwd(process.env.INIT_CWD, root);
 
 process.exitCode = await prOpenCli(process.argv.slice(2), {
-  gh: liveGh(cwd),
-  git: liveGit(cwd),
+  gh: liveGh(gitCwd),
+  git: liveGit(gitCwd),
   issueGh: ghRunner(root),
   root,
   cwd,
