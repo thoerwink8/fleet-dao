@@ -49,6 +49,7 @@ import { Kbd } from '../ui/kbd';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
 import { PaletteSwatch } from './palette-swatch';
+import { RepoSwitcher } from './repo-switcher';
 import { TopbarSlot } from './topbar-slot';
 
 export function Topbar({ onSearch }: { onSearch(): void }) {
@@ -56,6 +57,7 @@ export function Topbar({ onSearch }: { onSearch(): void }) {
   const { nodeId } = useNodeSelection();
   return (
     <header className="flex h-topbar shrink-0 items-center gap-2 border-b bg-panel px-3 md:px-4">
+      <RepoSwitcher />
       <EnvSwitcher />
       <EngineMasterBadge />
       <button
