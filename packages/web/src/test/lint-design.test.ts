@@ -260,7 +260,7 @@ describe('每条规则：造红的报、合规的放', () => {
       {/* loading-ok: 只是本地开关，写请求在别处 */}
       <Button onClick={() => save.mutate(1)}>一</Button>
       <Button
-        // loading-ok: TODO #2012
+        // loading-ok: 忙态由外面的播放器接管
         onClick={() => save.mutate(2)}
       >
         二

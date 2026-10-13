@@ -126,10 +126,12 @@ function ReleaseBody({
             size="sm"
             variant="outline"
             className="ml-auto max-md:min-h-10"
+            loading={preflight.isPending}
+            loadingText="预检在跑…"
             disabled={preflight.isPending}
             onClick={() => preflight.mutate()}
           >
-            {preflight.isPending ? '预检在跑…' : '发版预检'}
+            发版预检
           </Button>
         </div>
         <p className="mt-1 text-meta text-muted-foreground">

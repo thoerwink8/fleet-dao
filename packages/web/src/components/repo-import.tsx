@@ -127,6 +127,7 @@ export function RepoImportSection() {
           <Button
             size="sm"
             variant="outline"
+            loading={disconnect.isPending}
             disabled={disconnect.isPending}
             onClick={() => setAskingDisconnect(true)}
           >
@@ -276,9 +277,9 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
                   移出驾驶舱
                 </Button>
               ) : (
-                // loading-ok: TODO #2012 只变灰（busy）、不转圈，第二期换成 loading
                 <Button
                   size="sm"
+                  loading={importRepo.isPending}
                   disabled={busy || repo.empty || repo.archived}
                   title={repo.empty ? '空仓：没有代码，接进来也没有活可派' : undefined}
                   onClick={() =>

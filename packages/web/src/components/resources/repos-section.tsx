@@ -231,11 +231,13 @@ export function ReposSection({
   const latest = q.data?.cleanups[0];
   const busy = latest?.status === 'queued' || latest?.status === 'running' || cleanup.isPending;
 
+  // 点一下先确认（#2017）。loading 只跟这一次请求（转圈）；已经有一次在排队或在做，整块置灰走 disabled（#1993、#2012）。
   const button = remote ? null : (
     <Button
       size="sm"
       variant="outline"
       onClick={() => setAskingCleanup(true)}
+      loading={cleanup.isPending}
       disabled={busy || !q.data}
       data-cleanup-button
     >
