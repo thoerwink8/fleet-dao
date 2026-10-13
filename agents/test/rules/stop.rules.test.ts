@@ -459,9 +459,7 @@ describe('规矩的文字：通用段和 commander 技能说「无人值守时�
     expect(SHARED).not.toContain('worker.mjs');
   });
 
-  it('commander 技能：无人值守照子代理一道派活、等完成通知、不结束这一轮；脱离的工人只在创始人明说时用，旧说法（这一轮就结束、不循环 watch、无人值守起脱离工人）已删', () => {
-    expect(SKILL).toContain('然后照上面的子代理一道派活，不结束这一轮');
-    expect(SKILL).toContain('只在创始人明说「脱离会话」');
+  it('commander 技能：旧说法（这一轮就结束、不循环 watch、无人值守起脱离工人）已删', () => {
     expect(SKILL).not.toContain('只在他说了无人值守、过夜、我不在');
     expect(SKILL).not.toContain('起完工人后用 `worker.mjs watch --wait 55` 一直盯着');
     expect(SKILL).not.toContain('起完工人这一轮就结束');

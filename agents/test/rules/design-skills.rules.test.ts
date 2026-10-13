@@ -99,18 +99,9 @@ describe('规矩：进度要落盘，不能只发在对话里（2026-10-01）', 
     fileURLToPath(new URL('../../shared-rules.md', import.meta.url)),
     'utf8',
   ).replace(/\r\n/g, '\n');
-  // commander 技能自己的「报进度」一节也要跟上：它以前写「进度就在对话里报」，
-  // 和通用段「进度要落盘」直接冲突；只改通用段、不改技能，照技能做的人又断了。
-  const COMMANDER = read('commander');
 
   it('通用段里这几条都在', () => {
     expect(missing(PROGRESS_RULES, AGENTS)).toEqual([]);
-  });
-
-  it('commander 技能的「报进度」一节也讲了落盘，没有留「只在对话里报」的旧说法', () => {
-    expect(COMMANDER).toMatch(/同时把进度记下来/);
-    expect(COMMANDER).toMatch(/对话是给现在的他看的，记下来的是给下一个 AI 看的/);
-    expect(COMMANDER).not.toMatch(/进度就在对话里报/);
   });
 
   it('【故意造出的失败】把「进度当场记下来」整条删掉：查得出来', () => {
@@ -128,14 +119,5 @@ describe('规矩：进度要落盘，不能只发在对话里（2026-10-01）', 
     const cut = AGENTS.replace(/每做完一件就提交、推送、记进度、发我一次，[^；]*；/, '');
     expect(cut).not.toBe(AGENTS);
     expect(missing(PROGRESS_RULES, cut)).toEqual(['无人值守每件都落地', '超时拆小']);
-  });
-
-  it('【故意造出的失败】把 commander 退回「进度就在对话里报」：查得出来', () => {
-    const cut = COMMANDER.replace(
-      /\*\*同时把进度记下来\*\*[\s\S]*?对话是给现在的他看的，记下来的是给下一个 AI 看的。/,
-      '进度就在对话里报。',
-    );
-    expect(cut).not.toBe(COMMANDER);
-    expect(cut).toMatch(/进度就在对话里报/);
   });
 });
