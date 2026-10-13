@@ -3,6 +3,9 @@
 // 读不到、认不出一律抛错（GitHubError），由调用方各行各自判「没查成」，不拿空、0、「已是最新」顶。
 // 改这里之前必须知道：
 // - 汇总检查只认 ci.yml 的 `check` 这一项（必过检查的汇总，同 release-train-lib.mjs 的 mainCi）：一条都没有算「还在跑」，不算绿。
+// - 一个提交上 merge-gate 每轮都再报一条，check-run 能堆到两百多条，把 `check` 挤出第一页。
+// - 汇总检查按名字过滤（check_name=check）再翻页取全（client.all，最多 10 页，跟 pulls.ts 的 checkRuns）。
+//   只读第一页、或不按名字过滤翻到上限，都会把 `check` 读丢，当成还没有结果。一页不是数组仍抛错，不当空。
 // - compare 的提交列表是旧到新、最多 100 个一页；差得多时只读最后一页（最近的），差几个以 GitHub 回的 ahead_by 为准。
 import { z } from 'zod';
 import { CheckRunSchema, evaluateChecks } from './checks.ts';
@@ -130,22 +133,22 @@ export function createReleaseFacts(client: GitHubClient): ReleaseFactsReader {
     commit: (repo, sha, signal) => getCommit(repo, sha, signal),
 
     async mainCi(repo, sha, signal) {
-      // 按名字过滤（check_name=check）：一个提交上能堆几百条 check-run（merge-gate 每轮都上报，实测 202 条），
-      // 不过滤就得翻十几页才找得到那一项；过滤后只剩要的那条（同 #2006 给本机发版车预检加的做法）。
-      // 仍翻页取全（用 client.all，跟在 Link 头）：「同名重跑只认最新」要拿到这一项的全部历史。
+      const what = `读 ${sha.slice(0, 12)} 的检查结果`;
+      // merge-gate 每轮都再报一条，一个提交上能堆两百多条 check-run（实测 202），把 `check` 挤出第一页。
+      // 带 check_name=check（同 #2006 发版车预检），再用 client.all 翻页取全：同名重跑不在第一页也拿得到。
       const runs = await client.all<unknown>(
         {
           method: 'GET',
           path: `${base(repo)}/commits/${enc(sha)}/check-runs`,
           auth: auth(repo),
-          query: { check_name: RELEASE_CHECK_NAME, per_page: 100 },
+          query: { check_name: RELEASE_CHECK_NAME, per_page: 100, filter: 'all' },
           signal,
         },
         (d) => (d as { check_runs?: unknown })?.check_runs,
         10,
       );
       const parsed = z.array(CheckRunSchema).safeParse(runs);
-      if (!parsed.success) throw unexpected(`读 ${sha.slice(0, 12)} 的检查结果`, runs[0]);
+      if (!parsed.success) throw unexpected(what, runs[0]);
       const e = evaluateChecks([RELEASE_CHECK_NAME], parsed.data, []);
       if (e.overall === 'green') return { state: 'green', detail: '' };
       if (e.overall === 'red') {
