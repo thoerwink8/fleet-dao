@@ -316,6 +316,13 @@ async function mainCiByRuns(io, ref) {
 /** check-runs 读不出时，点名的提交改看 ci 工作流运行；两处都读不出才是 unknown。 */
 async function mainCi(io, ref = 'main') {
   const byChecks = await mainCiByChecks(io, ref);
+  if (byChecks.verdict === 'pending' && byChecks.empty && ref !== 'main') {
+    // 汇总检查读到 0 条：判定仍是 pending（check 读不到不等于绿），ci 工作流运行只当佐证写进原因
+    const byRuns = await mainCiByRuns(io, ref);
+    const note =
+      byRuns.verdict === 'green' ? 'ci 工作流运行已全绿' : byRuns.why || `ci 工作流运行 ${byRuns.verdict}`;
+    return { verdict: 'pending', why: `${byChecks.why}（佐证：${note}）` };
+  }
   if (byChecks.verdict !== 'unknown' || ref === 'main') return byChecks;
   const byRuns = await mainCiByRuns(io, ref);
   if (byRuns.verdict === 'unknown')
@@ -323,24 +330,45 @@ async function mainCi(io, ref = 'main') {
   return byRuns;
 }
 
-async function mainCiByChecks(io, ref) {
-  const r = gh(io, [
-    'api',
-    `repos/{owner}/{repo}/commits/${ref}/check-runs?per_page=100`,
-    '--jq',
-    '[.check_runs[] | select(.name=="check") | {status,conclusion}]',
-  ]);
-  if (didNotRun(r) || r.status !== 0) return { verdict: 'unknown', why: `主线 CI 读不到：${tailOf(r)}` };
-  let runs;
-  try {
-    runs = JSON.parse(String(r.stdout).trim() || '[]');
-  } catch (e) {
-    return { verdict: 'unknown', why: `主线 CI 的回话不是 JSON（${e.message}）` };
+/**
+ * 按名字过滤取汇总检查（check_name=check）并按 total_count 翻页取全：
+ * 提交上检查多到一页装不下时（2026-10-13 一个提交 210 条，merge-gate 刷屏），不过滤会把 check 挤出第一页，读成 0 条。
+ * 任何一页读不出都回 unknown，不拿已读到的半截当结论。
+ */
+async function readCheckRuns(io, ref) {
+  const all = [];
+  for (let page = 1; page <= 10; page += 1) {
+    const r = gh(io, [
+      'api',
+      `repos/{owner}/{repo}/commits/${ref}/check-runs?check_name=check&per_page=100&page=${page}`,
+      '--jq',
+      '{total: .total_count, runs: [.check_runs[] | select(.name=="check") | {status,conclusion}]}',
+    ]);
+    if (didNotRun(r) || r.status !== 0) return { error: `主线 CI 读不到（第 ${page} 页）：${tailOf(r)}` };
+    let body;
+    try {
+      body = JSON.parse(String(r.stdout).trim() || 'null');
+    } catch (e) {
+      return { error: `主线 CI 的回话不是 JSON（${e.message}）` };
+    }
+    if (!body || !Array.isArray(body.runs) || !Number.isInteger(body.total))
+      return { error: '主线 CI 的回话认不出（缺 total_count 或不是列表）' };
+    all.push(...body.runs);
+    if (all.length >= body.total) return { runs: all };
+    if (body.runs.length === 0)
+      return { error: `主线 CI 翻页读不全（共 ${body.total} 条，只读到 ${all.length} 条）` };
   }
-  if (!Array.isArray(runs)) return { verdict: 'unknown', why: '主线 CI 的回话认不出（不是列表）' };
+  return { error: '主线 CI 翻页超过 10 页，读不全' };
+}
+
+async function mainCiByChecks(io, ref) {
+  const got = await readCheckRuns(io, ref);
+  if (got.error) return { verdict: 'unknown', why: got.error };
+  const runs = got.runs;
   if (runs.length === 0)
     return {
       verdict: 'pending',
+      empty: true,
       why: `${ref === 'main' ? '主线头' : '要发的提交 ' + ref.slice(0, 8)}还没有汇总检查（check）的结果`,
     };
   if (runs.some((x) => x.status !== 'completed'))
