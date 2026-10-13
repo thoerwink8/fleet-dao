@@ -37,6 +37,7 @@ import {
 import { errMessage } from '@fleet-dao/shared/util';
 import type { z } from 'zod';
 import { PASSWORD_MAX, USERNAME_MAX } from '../lib/credentials';
+import { isStandalone } from '../lib/pwa/install';
 import { ApiError, type FleetApi, type LiveStatus } from './client';
 import type { LiveEvent } from './types';
 
@@ -87,7 +88,9 @@ const documentVisibility: PageVisibility | undefined =
   typeof document === 'undefined'
     ? undefined
     : {
-        hidden: () => document.visibilityState === 'hidden',
+        // 装好的 APP 是独立窗口、只有一个：放掉推送就收不到后台里的新提醒（系统通知靠它，#2050），所以 APP 里不当后台。
+        // 连接数那条限制只在浏览器里开了好几个标签页时才咬人
+        hidden: () => document.visibilityState === 'hidden' && !isStandalone(),
         onChange(fn) {
           document.addEventListener('visibilitychange', fn);
           return () => document.removeEventListener('visibilitychange', fn);
