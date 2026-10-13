@@ -121,7 +121,7 @@ function Frame() {
   useLiveSync(Boolean(me));
   useNoticeToasts();
 
-  // 看板多机：选了远程环境（?node=）时，只有主页和法国页读得到它的快照；别的页读的全是本台的库，整页明说、不渲染（也就不去读）
+  // 看板多机：选了远程环境（?node=）时，只有主页、法国页和资源页读得到它的快照；别的页读的全是本台的库，整页明说、不渲染（也就不去读）
   const { nodeId } = useNodeSelection();
   const onlyLocal = nodeId !== null && !isRemotePage(location.pathname);
 

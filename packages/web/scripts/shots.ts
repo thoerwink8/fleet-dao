@@ -25,6 +25,8 @@ export const PAGES: readonly (readonly [string, string])[] = [
   ['efforts', '/routing?tab=efforts'],
   ['quota', '/quota'],
   ['france', '/france'],
+  // 资源页（#1986）
+  ['resources', '/resources'],
   ['schedules', '/schedules'],
   ['changelog', '/changelog'],
   ['audit', '/audit'],

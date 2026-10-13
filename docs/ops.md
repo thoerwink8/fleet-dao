@@ -135,6 +135,8 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | fleet-api.socket | 法国 | fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口） |
 | fleet-auto-release.service | 法国 | fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个） |
 | fleet-auto-release.timer | 法国 | fleet-dao 自动发布单元每 5 分钟读一轮主线（只读） |
+| fleet-cli-upgrade.path | 法国 | fleet-dao 命令行工具的升级请求一到就接活 |
+| fleet-cli-upgrade.service | 法国 | fleet-dao 升级命令行工具 |
 | fleet-engine.service | 法国 | fleet-dao 引擎工人（Temporal worker） |
 | fleet-firewall.service | 法国 | fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连 |
 | fleet-mirasim-liveness.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启） |
@@ -157,6 +159,8 @@ renderUnitsBlock 实际输出（跑 packages/conventions/src/ops-tables.ts 的 r
 | fleet-api.socket | 法国 | fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口） |
 | fleet-auto-release.service | 法国 | fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个） |
 | fleet-auto-release.timer | 法国 | fleet-dao 自动发布单元每 5 分钟读一轮主线（只读） |
+| fleet-cli-upgrade.path | 法国 | fleet-dao 命令行工具的升级请求一到就接活 |
+| fleet-cli-upgrade.service | 法国 | fleet-dao 升级命令行工具 |
 | fleet-engine.service | 法国 | fleet-dao 引擎工人（Temporal worker） |
 | fleet-firewall.service | 法国 | fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连 |
 | fleet-mirasim-liveness.service | 法国 | 会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启） |
@@ -173,6 +177,8 @@ deploy/france/fleet-api.service → fleet-dao 驾驶舱后端（驾驶舱接口 
 deploy/france/fleet-api.socket → fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口 + fleet 命令接口）
 deploy/france/fleet-auto-release.service → fleet-dao 自动发布单元（只读：主线头、CI、在用版本、落后几个）
 deploy/france/fleet-auto-release.timer → fleet-dao 自动发布单元每 5 分钟读一轮主线（只读）
+deploy/france/fleet-cli-upgrade.path → fleet-dao 命令行工具的升级请求一到就接活
+deploy/france/fleet-cli-upgrade.service → fleet-dao 升级命令行工具
 deploy/france/fleet-engine.service → fleet-dao 引擎工人（Temporal worker）
 deploy/france/fleet-firewall.service → fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连
 deploy/france/fleet-mirasim-liveness.service → 会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启）
@@ -248,6 +254,38 @@ deploy/hk/fleet-feishu.service → fleet-dao 飞书网关
 | `/etc/wireguard/wg-fleet.conf`、`wg-fleet.key` | root 600 | 隧道配置与私钥 |
 
 库（法国）：PostgreSQL 16 装的是 Ubuntu 自带的源（吃得到自动安全更新）。`fleet` 库属 fleet 角色，本机 socket + peer 认证（系统用户 fleet 就是库角色 fleet），不设口令；`temporal`、`temporal_visibility` 属 temporal 角色，走 127.0.0.1:5432 + 口令（`/etc/fleet-dao/temporal.env`）。Temporal 命名空间 `fleet`，已结束的工作流保留 30 天。
+
+### 上线项目登记表和资源采集（#1984）
+
+驾驶舱「资源」页（`/resources`）和首页机器小卡的数，由驾驶舱后端（`fleet` 用户，没有 root）在法国本机读。哪个应用算哪些 systemd 单元、哪些目录、哪些库，只登记在 `packages/api/src/vps-apps.ts` 一份；`packages/api/test/vps-apps.test.ts` 核对表里每个 `fleet-*` 单元在上面的单元表里、别的单元在本文里写到，`deploy/france` 下每个 `.service`、`.slice` 要么登记、要么写明为什么不算（现在只有 `fleet-firewall.service`：一次性载入 nft 表），目录不互相套。
+
+<!-- vps-apps:start -->
+
+| 应用 | 单元 | 目录、库 |
+|---|---|---|
+| 驾驶舱 | `fleet-api.service` | `/var/lib/fleet-dao/release-request`（代码在发布版本目录里；静态页在香港 `/srv/fleet-dao-web`，不在这台） |
+| 引擎 | `fleet-engine.service` | `/var/lib/fleet-dao/engine`、`/var/lib/fleet-dao/github`、`/var/log/fleet-dao` |
+| Temporal | `fleet-temporal.service` | `/opt/fleet-dao/temporal`（数据在库里，算在「数据库」） |
+| 数据库 | `postgresql@16-main.service` | 所有非模板库（`pg_database_size`，不读数据目录） |
+| AI 会话 | `fleet-agents.slice` | `/var/lib/fleet-work`、`/var/lib/fleet-sessions`、`/home/fleet-agent-carpool` |
+| 会话用户的 Mirasim | `fleet-mirasim-session.service`、`fleet-mirasim-liveness.service` | 在会话用户家里，算在「AI 会话」 |
+| 自动发布 | `fleet-auto-release.service`、`fleet-release-request.service`、`fleet-cli-upgrade.service` | `/usr/local/lib/fleet-dao`、`/var/lib/fleet-dao/cli-upgrade` |
+| 发布版本 | 没有进程 | `/srv/fleet-dao-releases`、`/srv/fleet-dao` |
+| self-proxy | `self-proxy-direct.service`、`self-proxy-exit.service` | 不归本仓管 |
+| MiraQuota 同步 | `miraquota-sync.service` | 不归本仓管 |
+
+<!-- vps-apps:end -->
+
+读哪些路径、要什么权限（`packages/api/src/host-resources.ts`、`disk-footprint.ts`）：
+
+| 读什么 | 多久一回 | 权限 | 读不到时 |
+|---|---|---|---|
+| 整机磁盘：`statfs('/')` | 每 5 秒，随内存、CPU 一起推（SSE 的 `resources` 事件） | 谁都能读 | 写「没读到」带原因 |
+| 每个应用的 CPU、内存：`/sys/fs/cgroup/<单元的 cgroup>/memory.current`、`memory.max`、`cpu.stat` | 每 5 秒；CPU 是 `usage_usec` 两回的差 ÷ 墙钟（1 = 占满一个核），只有一回时写「采样中」 | cgroup 世界可读；`ProtectControlGroups` 只设只读，不挡读 | 单元的 cgroup 目录不在 = 没在跑（「没在占用」）；没有 `/sys/fs/cgroup/cgroup.controllers` = 整段没读到 |
+| 按目录的磁盘：照登记表遍历（`lstat`，按块算，硬链接只算一次，不跟符号链接） | 每 10 分钟最多一回，只在有页面开着时测，测完缓存、带着推；一回最多测 3 分钟，到时限没测完写「不全」 | `fleet` 读得到的才算：`/var/lib/fleet-work` 里每棵树归会话用户、700，记成「不全：有 N 棵树没读到」；`/home` 被 `ProtectHome=yes` 挡住，写「没读到」 | 不加 root 小工具量全（要人以 root 重跑 france.sh，是人闸） |
+| 库的大小：`select datname, pg_database_size(datname) from pg_database where not datistemplate`（没有 CONNECT 权限的库单写没读到） | 和按目录的同一回 | 默认 PUBLIC 有 CONNECT | 整块没读成写「库的大小没读成」 |
+
+遍历和库查询都不在 5 秒那一回里做，不拖慢主页接口和引擎。
 
 ## 四、怎么跑装机脚本
 
