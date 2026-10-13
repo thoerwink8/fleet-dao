@@ -33,9 +33,16 @@ import { createChangeHub, startPgChangeFeed } from './changes.ts';
 import { pgCliTools } from './cli-versions.ts';
 import { ConfigError, engineEnabled, loadConfig } from './config.ts';
 import { probeDb } from './db-probe.ts';
+import { pgDatabaseSizes } from './db-sizes.ts';
 import type { DecisionCommenter } from './decision-handoff.ts';
 import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
+import {
+  createFootprintMeter,
+  type DatabaseSizes,
+  measureFootprint,
+  realFootprintFs,
+} from './disk-footprint.ts';
 import { readEngineMaster } from './engine-switch.ts';
 import { recordExternalWatchRound } from './external-watch.ts';
 import { createFeishuAuth } from './feishu.ts';
@@ -163,7 +170,11 @@ const nodeReporter = nodeReporterFor(config.nodeReport, {
   now,
 });
 
-async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
+async function assemble(): Promise<{
+  deps: Deps;
+  close: () => Promise<void>;
+  databaseSizes?: DatabaseSizes;
+}> {
   if (config.databaseUrl === null) {
     // 只有开发环境会走到这里（生产缺 DATABASE_URL 在 loadConfig 就拒绝启动了）。
     const changes = createChangeHub(log);
@@ -303,6 +314,8 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   };
   return {
     deps,
+    // 库的大小（#1985）：资源页按目录的磁盘占用那一回里查，10 分钟一次
+    databaseSizes: pgDatabaseSizes((text) => client.unsafe(text)),
     close: async () => {
       stopDeployLagWatch();
       stopWatchdogWatch();
@@ -313,9 +326,17 @@ async function assemble(): Promise<{ deps: Deps; close: () => Promise<void> }> {
   };
 }
 
-const { deps, close } = await assemble();
-// 这台机器此刻的内存、CPU（#1973）：两种装配都读本机 /proc 和 cgroup；不是 Linux、没有会话资源池的照实写没读到
-const hostResources = createHostResourceSampler({ read: realHostReader(), now, log });
+const { deps, close, databaseSizes } = await assemble();
+// 这台机器此刻的内存、CPU（#1973）：两种装配都读本机 /proc 和 cgroup；不是 Linux、没有会话资源池的照实写没读到。
+// 整机磁盘、每个上线项目的 CPU 内存随这一回读（#1985）；按目录的磁盘占用由测量器 10 分钟最多测一回、在后台测，这一回只带结果
+const hostReader = realHostReader();
+const footprint = createFootprintMeter({
+  measure: () =>
+    measureFootprint({ apps: hostReader.apps ?? [], fs: realFootprintFs(), databases: databaseSizes, now }),
+  now,
+  log,
+});
+const hostResources = createHostResourceSampler({ read: hostReader, now, log, footprint });
 deps.hostResources = hostResources;
 snapshotDeps = deps;
 nodeReporter?.start();

@@ -14,7 +14,7 @@ import { inkClass } from '../../layout/tone';
 import { ActionButtons } from '../../task-actions';
 import { Button } from '../../ui/button';
 import type { TicketUsage } from '../resources';
-import { CardLink, needsFounder, statusTextOf, WAIT_LABEL } from '../running-card';
+import { CardLink, needsFounder, statusTextOf, waitLineOf } from '../running-card';
 import type { HomeRunning } from '../types';
 import { targetOfItem, useBoardUi } from './board-ui';
 import {
@@ -195,7 +195,7 @@ function TicketPanel({
               <span className="text-muted-foreground">没在等，正常往前走</span>
             ) : (
               <>
-                {WAIT_LABEL[item.waitingReason]}
+                {waitLineOf(item)}
                 {item.waitingSince ? (
                   <span className="num whitespace-nowrap text-muted-foreground">
                     {' · 已 '}
@@ -275,7 +275,7 @@ function TicketButton({ item, onSelect }: { item: HomeRunning; onSelect(id: stri
         </div>
         <div className="mt-1 truncate text-meta text-muted-foreground">
           {item.worker ?? '没有进程在跑'}
-          {item.waitingReason !== 'nothing' ? ` · ${WAIT_LABEL[item.waitingReason]}` : ''}
+          {item.waitingReason !== 'nothing' ? ` · ${waitLineOf(item)}` : ''}
         </div>
       </button>
     </li>

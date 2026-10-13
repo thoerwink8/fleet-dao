@@ -103,6 +103,10 @@ export interface Task {
    * 主页卡片拿它写真实原因，不再按三段流水推成「在合并队列」「还没验」（#1967、#1971 停了 8 小时卡上看不出）。没停下没有这个键。
    */
   stalled?: { why: string; since: string };
+  /**
+   * 等合并且必过检查是红的：从 tasks.doing（前缀「检查红了：」）映射出来的检查名。没有这个键就不是这种情况。
+   */
+  redChecks?: string;
   createdAt: string;
 }
 

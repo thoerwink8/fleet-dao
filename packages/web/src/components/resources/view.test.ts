@@ -1,0 +1,285 @@
+// 资源页的读数怎么写给人看（#1986，view.ts）：读成了写数；没在跑写「没在占用」；读不到写「没读到」带原因；
+// 目录读不全写「不全：有 N 棵树没读到」；老后端没有 apps / footprint 写明没给。任何一种都不拿 0 顶。
+import { describe, expect, test } from 'vitest';
+import { diskMeter, formatBytes } from '../home/resources.ts';
+import type { HomeResources, HomeRunning } from '../home/types.ts';
+import { appRows, diskBoard, formatCores } from './view.ts';
+
+const GIB = 1024 ** 3;
+const MIB = 1024 ** 2;
+
+type App = Extract<NonNullable<HomeResources['apps']>, { state: 'ok' }>['items'][number];
+
+const app = (id: string, usage: App['usage'], extra: Partial<App> = {}): App => ({
+  id,
+  name: id,
+  place: `/srv/${id}`,
+  units: [`${id}.service`],
+  usage,
+  ...extra,
+});
+
+function resources(over: Partial<HomeResources> = {}): HomeResources {
+  return {
+    at: '2026-10-13T02:00:00.000Z',
+    everyMs: 5_000,
+    memory: { state: 'ok', totalMb: 12_000, availableMb: 6_000 },
+    cpu: { state: 'ok', percent: 20, busyCores: 1.2, cores: 6 },
+    sessions: {
+      state: 'ok',
+      byRun: {
+        r1: { state: 'ok', memoryMb: 500, cpuPercent: 40 },
+        r2: { state: 'ok', memoryMb: 300, cpuPercent: 10 },
+        probe: { state: 'ok', memoryMb: 100, cpuPercent: 5 },
+      },
+    },
+    disk: { state: 'ok', path: '/', totalBytes: 100 * GIB, usedBytes: 40 * GIB, availableBytes: 55 * GIB },
+    apps: {
+      state: 'ok',
+      items: [
+        app(
+          'cockpit',
+          { state: 'ok', running: 1, memoryMb: 220, cpuCores: 0.06 },
+          { diskNote: '代码在发布版本目录里' },
+        ),
+        app('engine', { state: 'ok', running: 1, memoryMb: 400 }),
+        app('release', { state: 'idle' }),
+        app('broken', { state: 'unread', why: 'memory.current 的内容认不出' }),
+        app('sessions', { state: 'ok', running: 3, memoryMb: 900, memoryMaxMb: 1000, cpuCores: 0.55 }),
+        app('postgres', { state: 'ok', running: 1, memoryMb: 300, cpuCores: 0.02 }),
+        app('self-proxy', { state: 'ok', running: 2, memoryMb: 50, cpuCores: 0 }, { external: true }),
+      ],
+    },
+    footprint: {
+      state: 'ok',
+      measuredAt: '2026-10-13T01:56:00.000Z',
+      everyMs: 600_000,
+      tookMs: 12_000,
+      dirs: [
+        {
+          path: '/var/lib/fleet-dao/engine',
+          appId: 'engine',
+          size: { state: 'ok', bytes: 3 * GIB, unreadTrees: 0 },
+        },
+        {
+          path: '/var/lib/fleet-work',
+          appId: 'sessions',
+          size: { state: 'ok', bytes: 300 * MIB, unreadTrees: 7 },
+        },
+        {
+          path: '/home/fleet-agent-carpool',
+          appId: 'sessions',
+          size: { state: 'unread', why: 'EACCES：后端看不见 /home' },
+        },
+        { path: '/var/lib/broken', appId: 'broken', size: { state: 'unread', why: '没有这个目录' } },
+        {
+          path: '/usr/local/lib/fleet-dao',
+          appId: 'release',
+          size: { state: 'ok', bytes: 2 * MIB, unreadTrees: 0 },
+        },
+      ],
+      databases: {
+        state: 'ok',
+        items: [{ name: 'fleet', appId: 'postgres', size: { state: 'ok', bytes: 2 * GIB } }],
+      },
+    },
+    ...over,
+  };
+}
+
+const running = (repo: string, runIds: string[]): HomeRunning => ({
+  issueNumber: 1,
+  title: 't',
+  repo,
+  segment: 'doing',
+  waitingReason: 'nothing',
+  link: '/tasks/t-1',
+  runIds,
+});
+
+function rowsOf(r: HomeResources | undefined, run: HomeRunning[] = [], remote = false) {
+  const out = appRows(r, run, { remote });
+  if (out.kind !== 'ok') throw new Error(`没出行：${out.why}`);
+  return Object.fromEntries(out.rows.map((row) => [row.id, row]));
+}
+
+describe('写法', () => {
+  test('字节：不到 1M 写「不到 1M」，不写 0；三位数 M、四位数起 G、到 T', () => {
+    expect(formatBytes(12 * 1024)).toBe('不到 1M');
+    expect(formatBytes(312 * MIB)).toBe('312M');
+    expect(formatBytes(1000 * MIB)).toBe('1.0G');
+    expect(formatBytes(61.8 * GIB)).toBe('61.8G');
+    expect(formatBytes(2048 * GIB)).toBe('2.0T');
+  });
+
+  test('核数：太小写两位，不写成 0.0 核', () => {
+    expect(formatCores(0.02)).toBe('0.02 核');
+    expect(formatCores(0.55)).toBe('0.6 核');
+  });
+});
+
+describe('整机磁盘格', () => {
+  test('读成了：已用 / 总量、百分比、剩余；≥ 90% 算紧', () => {
+    const m = diskMeter({
+      state: 'ok',
+      path: '/',
+      totalBytes: 100 * GIB,
+      usedBytes: 40 * GIB,
+      availableBytes: 55 * GIB,
+    });
+    expect(m).toMatchObject({ kind: 'ok', percent: 40, tight: false, brief: '剩余 55.0G' });
+    expect(m.kind === 'ok' && m.amount).toEqual({ kind: 'ok', text: '40.0G / 100.0G' });
+    const t = diskMeter({
+      state: 'ok',
+      path: '/',
+      totalBytes: 100 * GIB,
+      usedBytes: 91 * GIB,
+      availableBytes: 4 * GIB,
+    });
+    expect(t.kind === 'ok' && t.tight).toBe(true);
+  });
+
+  test('statfs 读不到：没读到带原因；老后端没给：写明没给', () => {
+    expect(diskMeter({ state: 'unread', why: 'EACCES' })).toEqual({ kind: 'unread', why: 'EACCES' });
+    expect(diskMeter(undefined)).toMatchObject({
+      kind: 'unread',
+      why: expect.stringContaining('后端没给磁盘读数'),
+    });
+    expect(diskMeter(undefined, { remote: true })).toMatchObject({
+      why: expect.stringContaining('那台推来的读数里没有磁盘'),
+    });
+  });
+});
+
+describe('每个上线项目一行', () => {
+  test('在跑的写数；CPU 只读到一回写采样中（不是 0）；内存有上限写「已用 / 上限」', () => {
+    const rows = rowsOf(resources());
+    expect(rows.cockpit?.cpu).toMatchObject({ kind: 'ok', text: '0.1 核' });
+    expect(rows.cockpit?.memory).toMatchObject({ kind: 'ok', text: '220M' });
+    expect(rows.engine?.cpu.kind).toBe('sampling');
+    expect(rows.sessions?.memory).toMatchObject({ kind: 'ok', text: '900M / 1.0G', tight: true });
+  });
+
+  test('没在跑：CPU、内存都写「没在占用」，不是 0', () => {
+    const rows = rowsOf(resources());
+    expect(rows.release?.cpu).toEqual({ kind: 'idle' });
+    expect(rows.release?.memory).toEqual({ kind: 'idle' });
+  });
+
+  test('cgroup 读不到：没读到带原因', () => {
+    const rows = rowsOf(resources());
+    expect(rows.broken?.cpu).toEqual({ kind: 'unread', why: 'memory.current 的内容认不出' });
+    expect(rows.broken?.disk).toEqual({ kind: 'unread', why: '没有这个目录' });
+  });
+
+  test('磁盘：名下目录 + 库相加；有读不全的写「不全」带棵数和整个没读到的目录数，数是下限', () => {
+    const rows = rowsOf(resources());
+    expect(rows.engine?.disk).toMatchObject({ kind: 'ok', text: '3.0G' });
+    expect(rows.postgres?.disk).toMatchObject({ kind: 'ok', text: '2.0G' });
+    expect(rows.sessions?.disk).toMatchObject({
+      kind: 'ok',
+      text: '300M',
+      incomplete: '不全：有 7 棵树没读到，有 1 个目录整个没读到',
+    });
+    // 名下没登记目录：写登记表里的补充，不写 0
+    expect(rows.cockpit?.disk).toEqual({ kind: 'none', why: '代码在发布版本目录里' });
+  });
+
+  test('别家的排在本仓的后面', () => {
+    const out = appRows(resources(), []);
+    expect(out.kind === 'ok' && out.rows.map((r) => r.id).at(-1)).toBe('self-proxy');
+  });
+
+  test('AI 会话按仓折成子行；对不上单的归「别的会话」，压在最后', () => {
+    const rows = rowsOf(resources(), [running('acme/a', ['r2']), running('acme/b', ['r1'])]);
+    expect(rows.sessions?.children?.map((c) => [c.name, c.memory, c.cpu])).toEqual([
+      ['acme/b', { kind: 'ok', text: '500M' }, { kind: 'ok', text: '0.4 核' }],
+      ['acme/a', { kind: 'ok', text: '300M' }, { kind: 'ok', text: '0.1 核' }],
+      ['别的会话（路由探针、对不上单的）', { kind: 'ok', text: '100M' }, { kind: 'ok', text: '0.1 核' }],
+    ]);
+  });
+
+  test('按目录的还没测完：磁盘写还没测完（pending），不是 0', () => {
+    const rows = rowsOf(resources({ footprint: { state: 'pending', why: '正在测第一回' } }));
+    expect(rows.engine?.disk).toEqual({ kind: 'pending', why: '正在测第一回' });
+  });
+
+  test('库整块没读成：数据库那一行写没读到', () => {
+    const r = resources();
+    if (r.footprint?.state !== 'ok') throw new Error('造数错了');
+    r.footprint.databases = { state: 'unread', why: '这台后端没连数据库' };
+    expect(rowsOf(r).postgres?.disk).toEqual({ kind: 'unread', why: '库的大小没读成：这台后端没连数据库' });
+  });
+
+  test('老后端没有 apps：整段写明后端没给；远程写那台没推；整块没给资源读数也写明', () => {
+    const r = resources();
+    delete r.apps;
+    expect(appRows(r, [])).toEqual({
+      kind: 'unread',
+      why: '后端没给每个上线项目的占用（后端的版本还没有这一项）',
+    });
+    expect(appRows(r, [], { remote: true })).toEqual({
+      kind: 'unread',
+      why: '那台推来的读数里没有每个上线项目的占用（那台的版本还没有这一项）',
+    });
+    expect(appRows(undefined, [])).toEqual({ kind: 'unread', why: '这台后端没给资源读数' });
+  });
+
+  test('老后端没有 footprint：每行磁盘写没读到、原因是没给', () => {
+    const r = resources();
+    delete r.footprint;
+    expect(rowsOf(r).engine?.disk).toEqual({
+      kind: 'unread',
+      why: '后端没给按目录的磁盘占用（后端的版本还没有这一项）',
+    });
+  });
+});
+
+describe('磁盘占用榜', () => {
+  test('按大小从大到小，读不到的压在最后；带占整盘的比例和不全', () => {
+    const b = diskBoard(resources());
+    if (b.kind !== 'ok') throw new Error('没出榜');
+    expect(b.rows.map((r) => r.label)).toEqual([
+      '/var/lib/fleet-dao/engine',
+      '库 fleet',
+      '/var/lib/fleet-work',
+      '/usr/local/lib/fleet-dao',
+      '/home/fleet-agent-carpool',
+      '/var/lib/broken',
+    ]);
+    expect(b.rows[0]?.share).toBeCloseTo(0.03);
+    expect(b.rows[2]?.size).toMatchObject({ incomplete: '不全：有 7 棵树没读到' });
+    expect(b.rows[4]?.size).toEqual({ kind: 'unread', why: 'EACCES：后端看不见 /home' });
+    expect(b.rows[4]?.share).toBeUndefined();
+  });
+
+  test('上线项目整段读不到时，榜上照样写归谁：用后端随这一项带来的应用名，不露编号', () => {
+    const r = resources({ apps: { state: 'unread', why: '没有 cgroup v2' } });
+    if (r.footprint?.state !== 'ok') throw new Error('造数错了');
+    r.footprint.dirs = [
+      {
+        path: '/srv/fleet-dao-releases',
+        appId: 'releases',
+        appName: '发布版本',
+        size: { state: 'ok', bytes: GIB, unreadTrees: 0 },
+      },
+    ];
+    const b = diskBoard(r);
+    expect(b.kind === 'ok' && b.rows.find((x) => x.label === '/srv/fleet-dao-releases')?.appName).toBe(
+      '发布版本',
+    );
+  });
+
+  test('还没测完是 pending；老后端没给写明没给', () => {
+    expect(diskBoard(resources({ footprint: { state: 'pending', why: '正在测' } }))).toEqual({
+      kind: 'pending',
+      why: '正在测',
+    });
+    const r = resources();
+    delete r.footprint;
+    expect(diskBoard(r)).toEqual({
+      kind: 'unread',
+      why: '后端没给按目录的磁盘占用（后端的版本还没有这一项）',
+    });
+  });
+});

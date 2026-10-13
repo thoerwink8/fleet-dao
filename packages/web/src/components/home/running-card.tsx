@@ -7,6 +7,7 @@
 //   等创始人拍的（founder_decision 或挂着待拍的事）看作「等你」（human）。
 // - 「等你拍」的点只用 human 色（全站颜色只表达状态；红留给失败），不另造一种红。
 
+import { CHECKS_RED_PREFIX } from '@fleet-dao/shared';
 import {
   Bot,
   CircleDashed,
@@ -55,6 +56,12 @@ export const WAIT_LABEL: Record<HomeRunning['waitingReason'], string> = {
   nothing: '在跑',
 };
 
+/** 在等什么这一句。等合并且必过检查红了时不写「等合并队列」。 */
+export function waitLineOf(item: HomeRunning): string {
+  if (item.waitingReason === 'merge_queue' && item.redChecks) return `${CHECKS_RED_PREFIX}${item.redChecks}`;
+  return WAIT_LABEL[item.waitingReason];
+}
+
 /**
  * 引擎停下等人、而且停下不是因为最近一笔做坏了（轮数用尽、开 PR 撞占用……）：画成等你、写「为什么停」。
  * 最近一笔是超时 / 失败的停下照旧算「出问题」（红、写那条失败、进「只看卡住的」，#902 D2）：失败本身就是停下的原因。
@@ -82,6 +89,8 @@ export function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot 
   if (item.waitingReason === 'paused') return { tone: 'stall', icon: Pause };
   // 引擎停下等人（最近一笔没做坏）：等你色（要人点继续 / 放弃）；最近一笔是超时 / 失败的落到下面的 fail 红
   if (parkedForHuman(item)) return { tone: 'human', icon: Hand };
+  // 等合并时必过检查红了（#1983）：失败红，不是排队的灰
+  if (item.segment === 'merge' && item.redChecks) return { tone: 'fail', icon: TriangleAlert };
   if (item.lastEvent?.tone === 'trouble') return { tone: 'fail', icon: TriangleAlert };
   if (needsFounder(item)) return { tone: 'human', icon: MessageCircleQuestion };
   switch (item.segment) {
@@ -104,6 +113,7 @@ export function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot 
 export function statusTextOf(item: HomeRunning): string {
   if (item.waitingReason === 'paused') return '已暂停';
   if (item.waitingReason === 'parked') return '停下等人';
+  if (item.segment === 'merge' && item.redChecks) return `${CHECKS_RED_PREFIX}${item.redChecks}`;
   const notStarted = item.segment === 'scoping' && item.lastEvent === undefined && !needsFounder(item);
   return item.segment === null
     ? SEGMENT_NOT_WIRED
@@ -155,9 +165,7 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
 
           {item.waitingReason !== 'nothing' ? (
             <div className="flex items-center gap-x-2 text-meta">
-              <span className={cn('shrink-0 font-medium', inkClass[tone])}>
-                {WAIT_LABEL[item.waitingReason]}
-              </span>
+              <span className={cn('shrink-0 font-medium', inkClass[tone])}>{waitLineOf(item)}</span>
               {item.waitingSince ? (
                 <span className="num shrink-0 whitespace-nowrap text-muted-foreground">
                   已 {since(item.waitingSince)}

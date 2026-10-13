@@ -3,6 +3,7 @@ export * from './agent-api.ts';
 export * from './bans.ts';
 export * from './carpool-burn.ts';
 export * from './changelog.ts';
+export * from './checks-red.ts';
 export * from './ci-policy.ts';
 export * from './cli-versions.ts';
 export type * from './domain.ts';

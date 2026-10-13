@@ -161,6 +161,8 @@ describe('库里的行 → 领域对象', () => {
     );
     expect(toTask({ ...task, phase: 'paused', doing: null }).paused).toBe('已暂停');
     expect(toTask({ ...task, phase: 'implement', doing: '动手第 1 轮' })).not.toHaveProperty('paused');
+    expect(toTask({ ...task, phase: 'merge', doing: '检查红了：merge-gate' }).redChecks).toBe('merge-gate');
+    expect(toTask({ ...task, phase: 'merge', doing: '等 PR #7 合并' })).not.toHaveProperty('redChecks');
     expect(toSessionRun(run)).toEqual({
       id: run.id,
       taskId: task.id,

@@ -1,23 +1,23 @@
-// 机器资源两格（#1973）：这台机器（本台是法国，选了远程环境是那一台）此刻的整机内存、CPU。
+// 机器资源三格（#1973、#1985）：这台机器（本台是法国，选了远程环境是那一台）此刻的整机内存、CPU、磁盘。
 // 桌面是画布左下「此刻」面板右边紧挨着的一张小卡（board-canvas.tsx 的坞），手机放在主页顶上细栏的第二行
-// （顶栏右段放不下，会压到搜索框）。
-// 学 macOS 菜单栏的资源小表（iStat Menus 那一类）：名字 + 具体数值（内存「已用 / 总量」、CPU「忙的核数 / 总核数」）
-// + 一根细条 + 百分比，常驻；点开是全文。数值和百分比出自同一回读数（resources.ts 的 hostMeters）。
-// 数据隔几秒经推送（SSE 的 resources 事件）换一回，细条的宽度跟着走，不整页重拉。
+// （顶栏右段放不下，会压到搜索框）。整张是链接，点一下到资源页（/resources，选了远程环境就带着 ?node=）。
+// 学 macOS 菜单栏的资源小表（iStat Menus 那一类）：名字 + 具体数值（内存「已用 / 总量」、CPU「忙的核数 / 总核数」、
+// 磁盘「已用 / 总量」）+ 一根细条 + 百分比，常驻；全文在每一格的悬停里，详细的在资源页。数值和百分比出自同一回读数
+// （resources.ts 的 hostMeters）。数据隔几秒经推送（SSE 的 resources 事件）换一回，细条的宽度跟着走，不整页重拉。
 //
 // 改这里之前必须知道：
-// - 读不到写「没读到」（stop 灰点），原因在悬停和点开的面板里；后端没给、那台没推过，面板写明没有。绝不写 0、不写正常。
-// - 紧（内存 ≥ 85%、CPU ≥ 90%）细条和数字用提示黄，不用失败红：机器忙不是坏了（health-strip.tsx 头注释「wait / stall
+// - 读不到写「没读到」（stop 灰点），原因在悬停里；后端没给、那台没推过，悬停写明没有。绝不写 0、不写正常。
+// - 紧（内存 ≥ 85%、CPU ≥ 90%、磁盘 ≥ 90%）细条和数字用提示黄，不用失败红：机器忙不是坏了（health-strip.tsx 头注释「wait / stall
 //   提示色（黄系）」的规矩）。色板里 wait 是灰（排队）、和平时的灰条分不开，所以取黄系里真是黄的 stall。
 // - 本台超过三个采样间隔没来新读数，写「读数旧了」：推送断了或后端停了采样，数还在但不是此刻的。
-// - 放不下时先收细条（< lg）、再收百分比（< sm，手机），数值一直留着：「内存 7.8G / 11.7G CPU 1.5 核 / 4 核」，
-//   点开一样是全文；按钮不小于 40 高。
-import { formatAgo } from '../../lib/format';
+// - 放不下时先收细条（< lg）、再收百分比（< sm，手机），数值一直留着；手机上三格挤不下一行时磁盘那格折到第二行
+//   （flex-wrap，靠右），不截字。按钮不小于 40 高。
+import { Link } from 'react-router';
 import { useNow } from '../../lib/hooks';
+import { useSelectedNodeId, withNode } from '../../lib/node';
 import { cn } from '../../lib/utils';
 import { StatusDot } from '../layout/status-badge';
 import type { LayoutTone } from '../layout/tone';
-import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { hostMeters, type Meter } from './resources';
 import type { HomeResources } from './types';
 
@@ -93,30 +93,6 @@ function Cell({ name, meter, stale, id }: { name: string; meter: Meter; stale: b
   );
 }
 
-/** 面板里的一行：名字 + 一句话。 */
-function Row({ name, meter }: { name: string; meter: Meter }) {
-  return (
-    <li className="flex flex-col gap-0.5">
-      <span className="flex items-center gap-2 text-body font-medium">
-        {name}
-        {meter.kind === 'ok' ? (
-          <span className={cn('num', meter.tight ? 'text-ink-stall' : 'text-foreground')}>
-            {amountText(meter)} · {meter.text}
-            {meter.tight ? ' · 紧' : ''}
-          </span>
-        ) : (
-          <span className="text-muted-foreground">没读到</span>
-        )}
-      </span>
-      <span className="text-meta text-muted-foreground">
-        {meter.kind === 'ok'
-          ? `${meter.detail}${meter.amount.kind === 'unread' ? `；数值没读到：${meter.amount.why}` : ''}`
-          : meter.why}
-      </span>
-    </li>
-  );
-}
-
 export function MachineMeter({
   resources,
   remote,
@@ -126,52 +102,33 @@ export function MachineMeter({
   resources: HomeResources | undefined;
   /** 看的是别的环境推来的快照：新鲜度由快照横幅说，这里不判旧。 */
   remote: boolean;
-  /** 面板标题里的机器名：本台不传写「这台机器」。 */
+  /** 读屏里的机器名：本台不传写「这台机器」。 */
   machine?: string | undefined;
   className?: string;
 }) {
+  const nodeId = useSelectedNodeId();
   const now = useNow();
   const m = hostMeters(resources, now, { remote });
   const word = (name: string, meter: Meter) =>
     `${name}${meter.kind === 'ok' ? ` ${amountText(meter)} ${meter.text}${meter.tight ? ' 紧' : ''}` : ' 没读到'}`;
-  const label = `机器资源：${word('内存', m.memory)}，${word('CPU', m.cpu)}${m.stale ? '，读数旧了' : ''}`;
+  const label = `${machine ?? '这台机器'}的资源：${word('内存', m.memory)}，${word('CPU', m.cpu)}，${word('磁盘', m.disk)}${
+    m.stale ? '，读数旧了' : ''
+  }。点开看每个上线项目各占多少`;
   return (
-    <Popover>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          data-machine-meter
-          aria-label={label}
-          className={cn(
-            'flex min-h-10 shrink-0 items-center gap-3 rounded-md px-1.5 transition-colors hover:bg-accent md:min-h-8',
-            className,
-          )}
-        >
-          <Cell id="memory" name="内存" meter={m.memory} stale={m.stale} />
-          <Cell id="cpu" name="CPU" meter={m.cpu} stale={m.stale} />
-          {m.stale ? <span className="text-meta text-muted-foreground max-md:hidden">读数旧了</span> : null}
-        </button>
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-80">
-        <div className="mb-3 text-heading">{machine ?? '这台机器'}</div>
-        {m.missing ? (
-          <p className="text-body text-muted-foreground" data-machine-missing>
-            {m.missing}
-          </p>
-        ) : (
-          <ul className="space-y-3">
-            <Row name="内存" meter={m.memory} />
-            <Row name="CPU" meter={m.cpu} />
-          </ul>
-        )}
-        {resources ? (
-          <p className="mt-3 border-t pt-2 text-meta text-muted-foreground">
-            读于 <span className="num">{formatAgo(resources.at, now)}</span>
-            {remote ? '（那台推来的快照）' : ` · 每 ${Math.round(resources.everyMs / 1000)} 秒更新`}
-            {m.stale ? '；读数旧了：推送断了或后端停了采样，数不是此刻的' : ''}
-          </p>
-        ) : null}
-      </PopoverContent>
-    </Popover>
+    <Link
+      to={withNode('/resources', nodeId)}
+      data-machine-meter
+      aria-label={label}
+      title={m.missing}
+      className={cn(
+        'flex min-h-10 shrink-0 flex-wrap items-center justify-end gap-x-3 gap-y-0.5 rounded-md px-1.5 transition-colors duration-100 hover:bg-accent md:min-h-8 md:flex-nowrap',
+        className,
+      )}
+    >
+      <Cell id="memory" name="内存" meter={m.memory} stale={m.stale} />
+      <Cell id="cpu" name="CPU" meter={m.cpu} stale={m.stale} />
+      <Cell id="disk" name="磁盘" meter={m.disk} stale={m.stale} />
+      {m.stale ? <span className="text-meta text-muted-foreground max-md:hidden">读数旧了</span> : null}
+    </Link>
   );
 }

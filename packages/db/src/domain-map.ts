@@ -17,7 +17,7 @@ import type {
   Subtask,
   Task,
 } from '@fleet-dao/shared';
-import { probePaceWritten } from '@fleet-dao/shared';
+import { probePaceWritten, redCheckNames } from '@fleet-dao/shared';
 import type {
   bans,
   channelStates,
@@ -79,6 +79,8 @@ export const toTask = (r: typeof tasks.$inferSelect): Task =>
             since: (r.updatedAt ?? r.createdAt).toISOString(),
           }
         : undefined,
+    // 等合并时必过检查红了：doing 以「检查红了：」开头，后面是检查名（#1983）
+    redChecks: redCheckNames(r.doing),
     createdAt: r.createdAt.toISOString(),
   });
 

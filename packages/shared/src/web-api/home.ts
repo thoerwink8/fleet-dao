@@ -54,6 +54,10 @@ export const HomeRunningSchema = z.object({
   paused: z.string().optional(),
   /** 引擎停下等人的原因（tasks.last_problem 原文）；waitingReason === 'parked' 才有。 */
   parked: z.string().optional(),
+  /**
+   * 等合并期间必过检查是红的：检查名（多个用顿号分开）。有了，卡片写「检查红了：」加这个，不写「等合并队列」。
+   */
+  redChecks: z.string().min(1).optional(),
   /** 从什么时候起在等；waitingReason === 'nothing' 时没有。 */
   waitingSince: Time.optional(),
   /** 单子进库的时刻（「已经多久」的起点）。 */
@@ -145,8 +149,114 @@ export const SessionUsageSchema = z.discriminatedUnion('state', [
 ]);
 
 /**
+ * 整台机器的磁盘（#1985）：根文件系统（path，一般是 /）的 statfs，字节。已用 = (总块数 − 空闲块数) × 块大小；
+ * 剩余 = 普通用户还写得进的（bavail × 块大小，不含给 root 预留的那一截），所以「已用 + 剩余」可能比总量小一点。
+ * 页面上的「已用 / 总量」和百分比都由 usedBytes、totalBytes 算，同一回读数。
+ */
+export const HostDiskSchema = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('ok'),
+    path: z.string().min(1),
+    totalBytes: z.number().int().positive(),
+    usedBytes: z.number().int().min(0),
+    availableBytes: z.number().int().min(0),
+  }),
+  ResourceUnreadSchema,
+]);
+
+/**
+ * 一个上线项目（法国上的一个应用，登记表 packages/api/src/vps-apps.ts）此刻的 CPU、内存：它名下各 systemd 单元的 cgroup 合计。
+ * - ok：至少一个单元在跑。memoryMb 是各单元 memory.current 之和；memoryMaxMb 是各在跑单元 memory.max 之和（有一个是 max 就不给）；
+ *   cpuCores 是各单元 cpu.stat 的 usage_usec 两回的差 ÷ 墙钟（1 = 占满一个核），缺 = 刚开始采样、还只有一回读数（不是 0）。
+ * - idle：登记的单元一个都没在跑（cgroup 目录不在）；why 是给人看的补充（例如「这一项没有进程，只占磁盘」）。
+ * - unread：读不到 + 原因（这台没有 cgroup v2、文件认不出……）。
+ */
+export const AppUsageSchema = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('ok'),
+    running: z.number().int().positive(),
+    memoryMb: z.number().int().min(0),
+    memoryMaxMb: z.number().int().positive().optional(),
+    cpuCores: z.number().min(0).optional(),
+  }),
+  z.object({ state: z.literal('idle'), why: z.string().min(1).optional() }),
+  ResourceUnreadSchema,
+]);
+
+export const HostAppSchema = z.object({
+  /** 登记表里的编号（磁盘占用里的 appId 对的就是它）。 */
+  id: z.string().min(1),
+  name: z.string().min(1),
+  /** 放在哪：主要路径，一句话。 */
+  place: z.string().min(1),
+  /** 名下的 systemd 单元（登记表里的）。 */
+  units: z.array(z.string().min(1)),
+  /** 不归本仓管的别家常驻服务（照样占这台机器）。 */
+  external: z.boolean().optional(),
+  /** 磁盘那一格的补充：名下没登记目录时说算在哪（例如「代码在发布版本目录里」）。 */
+  diskNote: z.string().min(1).optional(),
+  usage: AppUsageSchema,
+});
+
+/** 一个目录的大小：遍历文件、按占用的块算（和 du 一样，硬链接只算一次、不跟符号链接）。 */
+export const DirSizeSchema = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('ok'),
+    bytes: z.number().int().min(0),
+    /** 里面有几棵子树读不了（权限、中途没了）：大于 0 时数是下限，页面写「不全：有 N 棵树没读到」。 */
+    unreadTrees: z.number().int().min(0),
+    /** 第一棵读不了的子树和原因，给悬停看。 */
+    unreadSample: z.string().optional(),
+    /** 测到时限没测完：数是下限。 */
+    capped: z.boolean().optional(),
+  }),
+  ResourceUnreadSchema,
+]);
+
+/** 按目录的磁盘占用（#1985）：遍历较重，每 everyMs（10 分钟）测一回、缓存；还没测完第一回是 pending。 */
+export const DiskFootprintSchema = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('ok'),
+    /** 这一回测完的时刻。 */
+    measuredAt: Time,
+    everyMs: z.number().int().positive(),
+    /** 这一回测了多久（毫秒）。 */
+    tookMs: z.number().int().min(0),
+    dirs: z.array(
+      z.object({
+        path: z.string().min(1),
+        appId: z.string().min(1),
+        appName: z.string().min(1).optional(),
+        size: DirSizeSchema,
+      }),
+    ),
+    /** 库的大小（pg_database_size）：每个库一行，appId 是算在哪个应用名下。整块读不到是 unread。 */
+    databases: z.discriminatedUnion('state', [
+      z.object({
+        state: z.literal('ok'),
+        items: z.array(
+          z.object({
+            name: z.string().min(1),
+            appId: z.string().min(1),
+            // 应用的名字（上线项目那一段整块读不到时，榜上照样写得出归谁）
+            appName: z.string().min(1).optional(),
+            size: z.discriminatedUnion('state', [
+              z.object({ state: z.literal('ok'), bytes: z.number().int().min(0) }),
+              ResourceUnreadSchema,
+            ]),
+          }),
+        ),
+      }),
+      ResourceUnreadSchema,
+    ]),
+  }),
+  z.object({ state: z.literal('pending'), why: z.string().min(1) }),
+]);
+
+/**
  * 这台机器此刻的资源（#1973）：整机内存、CPU，加每个会话 scope 的占用。后端在本机读（/proc、cgroup），
  * 每 everyMs 读一回并经推送（SSE 的 resources 事件）发给开着的页面；主页接口带最近一回。
+ * disk、apps、footprint 是 #1985 加的：老后端、老环境推来的快照没有，页面写明「没给」，不画 0。
  */
 export const HomeResourcesSchema = z.object({
   /** 这一回读数的时刻。 */
@@ -160,6 +270,17 @@ export const HomeResourcesSchema = z.object({
     z.object({ state: z.literal('ok'), byRun: z.record(z.string(), SessionUsageSchema) }),
     ResourceUnreadSchema,
   ]),
+  /** 整台机器的磁盘（每 everyMs 随这一回一起读）。 */
+  disk: HostDiskSchema.optional(),
+  /** 每个上线项目此刻的 CPU、内存（每 everyMs 随这一回一起读），按登记表的先后；整块读不到是 unread。 */
+  apps: z
+    .discriminatedUnion('state', [
+      z.object({ state: z.literal('ok'), items: z.array(HostAppSchema) }),
+      ResourceUnreadSchema,
+    ])
+    .optional(),
+  /** 按目录的磁盘占用（最近测完的那一回，10 分钟一测；带着它推，测的时刻在里面）。 */
+  footprint: DiskFootprintSchema.optional(),
 });
 
 /**

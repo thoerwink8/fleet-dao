@@ -1250,6 +1250,33 @@ describe('报警、提问、人闸', () => {
       ].sort(),
     );
   });
+
+  it('decision 级报警进要你拍的；stuck、info 仍是 alert', async () => {
+    await world(t.db);
+    const { task } = await addTask(t.db);
+    const p = ports();
+    await p.raiseAlert(
+      {
+        taskId: task.id,
+        level: 'decision',
+        title: '检查红了，返工 3 轮用完',
+        detail: 'merge-gate 红了',
+        dedupeKey: 'wf:park:red',
+      },
+      ctx,
+    );
+    await p.raiseAlert(
+      { taskId: task.id, level: 'info', title: '知道了', detail: 'x', dedupeKey: 'wf:info' },
+      ctx,
+    );
+    const rows = await t.db.select().from(notifications);
+    expect(rows.map((r) => [r.dedupeKey, r.level]).sort()).toEqual(
+      [
+        ['wf:info', 'alert'],
+        ['wf:park:red', 'decision'],
+      ].sort(),
+    );
+  });
 });
 
 describe('计时、快照', () => {
