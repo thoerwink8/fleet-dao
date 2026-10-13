@@ -115,6 +115,28 @@ export const autoDispatchAudit = (
   after: { autoDispatchSince: after },
 });
 
+// —— 接进 / 移出驾驶舱（#1989）——
+
+/** 接进来的操作记录：before 是空（原来不在库里），after 写接了哪个仓。 */
+export const addRepoAudit = (
+  entry: Omit<NewAuditEntry, 'before' | 'after'>,
+  repo: { owner: string; name: string; defaultBranch: string },
+): NewAuditEntry => ({
+  ...entry,
+  before: null,
+  after: { owner: repo.owner, name: repo.name, defaultBranch: repo.defaultBranch },
+});
+
+/** 移出的操作记录：before 写移掉的是哪个仓，after 是空。 */
+export const removeRepoAudit = (
+  entry: Omit<NewAuditEntry, 'before' | 'after'>,
+  repo: { owner: string; name: string },
+): NewAuditEntry => ({
+  ...entry,
+  before: { owner: repo.owner, name: repo.name },
+  after: null,
+});
+
 // —— 任务列表页（#1639）——
 
 /** 各组的数，全 0 起步。 */
