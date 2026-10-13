@@ -343,8 +343,11 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
         log: (message) => console.warn(message),
       });
     }
-    // 接活之前先看一眼排空请求：发布正在排空时起来的（人手动重启了旧版本），一起来就不起新会话
+    // 接活之前先看一眼排空请求：发布正在排空时起来的（人手动重启了旧版本），一起来就不起新会话。
+    // 升级请求还在、结果还没对上：先把升级排空挂回去，发布请求随后可以接手（升级比发布低）。
     if (control) {
+      const { cliUpgradeDir, restoreCliUpgradeCordon } = await import('./cli-upgrade-files.ts');
+      await restoreCliUpgradeCordon(drain, cliUpgradeDir(env));
       await control.resumed();
       await control.tick();
       stopControl = control.start();

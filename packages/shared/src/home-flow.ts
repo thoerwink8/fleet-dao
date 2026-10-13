@@ -38,6 +38,34 @@ export interface TaskFlow {
   stageSince?: string;
   worker?: string;
   lastEvent?: LastEvent;
+  /** 上一次收场的会话。还在跑的那笔不算；内存、CPU 没记各自写 unread，不写 0（#1980）。 */
+  lastSession?: LastSession;
+}
+
+type LastSession = NonNullable<HomeRunning['lastSession']>;
+
+const MEMORY_UNREAD = '上一次会话没记内存峰值';
+const CPU_UNREAD = '上一次会话没记 CPU 秒数';
+
+/** 收场先后：有结束时刻用结束时刻，没有就用起跑时刻。还在跑的、段名认不出的不算上一次。 */
+function lastSessionOf(runs: readonly SegmentRunView[]): LastSession | undefined {
+  let latest: SegmentRunView | undefined;
+  for (const r of runs) {
+    if (r.running || r.segment === null) continue;
+    const key = r.endedAt ?? r.startedAt ?? '';
+    const prev = latest ? (latest.endedAt ?? latest.startedAt ?? '') : '';
+    if (!latest || prev <= key) latest = r;
+  }
+  if (!latest) return undefined;
+  const peak = latest.memoryPeakMb;
+  const cpu = latest.cpuSeconds;
+  return {
+    memory:
+      peak !== undefined && peak > 0
+        ? { state: 'ok', peakMb: peak }
+        : { state: 'unread', why: MEMORY_UNREAD },
+    cpu: cpu !== undefined && cpu > 0 ? { state: 'ok', seconds: cpu } : { state: 'unread', why: CPU_UNREAD },
+  };
 }
 
 const RUNNING_OF: Record<SegmentKind, HomeSegment> = {
@@ -83,13 +111,15 @@ export function taskFlow(task: Pick<Task, 'state'>, runs: readonly SegmentRunVie
     }
   }
   const merging = task.state === 'merging';
+  const last = lastSessionOf(runs);
+  const past = last ? { lastSession: last } : {};
   if (!latest || latest.segment === null) {
-    if (merging) return { segment: 'merge' };
-    if (task.state === 'queued' || task.state === 'triaging') return { segment: 'scoping' };
-    return { segment: null };
+    if (merging) return { segment: 'merge', ...past };
+    if (task.state === 'queued' || task.state === 'triaging') return { segment: 'scoping', ...past };
+    return { segment: null, ...past };
   }
   const lastEvent = lastEventOf(latest);
-  const base = { ...(lastEvent ? { lastEvent } : {}) };
+  const base = { ...(lastEvent ? { lastEvent } : {}), ...past };
   if (latest.running) {
     return {
       segment: merging ? 'merge' : RUNNING_OF[latest.segment],
@@ -101,25 +131,6 @@ export function taskFlow(task: Pick<Task, 'state'>, runs: readonly SegmentRunVie
   const since = latest.endedAt ?? latest.startedAt;
   const segment = latest.outcome === 'done' ? NEXT_OF[latest.segment] : RUNNING_OF[latest.segment];
   return { segment: merging ? 'merge' : segment, ...(since ? { stageSince: since } : {}), ...base };
-}
-
-/**
- * 上一次会话占了多少（HomeRunning.lastSession）：收了的流水里按收场先后最近一笔记着内存峰值的；在跑的不算（在跑的看实时读数）。
- * 收了的一笔都没记峰值 → unread（写明几笔都没记）；一笔都没收过 → undefined。
- */
-export function lastSessionOf(views: readonly SegmentRunView[]): HomeRunning['lastSession'] {
-  const ended = views
-    .filter((v) => !v.running && v.endedAt !== undefined)
-    .sort((a, b) => (b.endedAt ?? '').localeCompare(a.endedAt ?? ''));
-  if (ended.length === 0) return undefined;
-  const hit = ended.find((v) => v.memoryPeakMb !== undefined);
-  if (!hit || hit.endedAt === undefined || hit.memoryPeakMb === undefined) {
-    return {
-      state: 'unread',
-      why: `收了的 ${ended.length} 笔会话都没记内存峰值（会话跑着时没读到 memory.peak，或这一段不采样）`,
-    };
-  }
-  return { state: 'ok', segment: hit.segment, endedAt: hit.endedAt, memoryPeakMb: hit.memoryPeakMb };
 }
 
 /** 图头上的三格：在途几张（按泳道数）、近期跑完的平均耗时。 */

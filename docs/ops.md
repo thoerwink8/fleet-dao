@@ -402,7 +402,7 @@ cursor-agent 装在会话用户自己家里（官方安装脚本：一个版本�
 grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.grok/downloads/grok-linux-<架构>`，`~/.grok/bin/grok` 链过去。引擎每次起 grok 会话（探针也一样），以会话用户的身份先看 `FLEET_GROK_BIN`（engine.env，默认 `/home/{user}/.grok/bin/grok`）是不是能跑的文件，是就 exec 成它（`packages/engine/src/real/hosts.ts` 的 `grokLaunchCommand`）；不是就退出 127、报「没装 grok 命令行」，失败分流按执行方式配置不对（CF1）认，这条路由记一次失败。提示词经 `--prompt-file /dev/stdin` 走标准输入，插头在前面垫一个 `cat` 给它一根真管道：直接给 Node 的 socketpair，grok 读 `/dev/stdin` 报「No such device or address (os error 6)」（2026-09-27 法国实测；也按 CF1 认，不是没登录）。所以手动跑 `grok status`、`grok whoami` 这类要读标准输入的命令时，没有终端、没有管道也会报这一句，别认成没登录。
 
 1. 装（`france.sh` 做，`deploy/lib/grok.sh`）：`~/.grok/bin/grok` 不是能跑的文件时，以会话用户自己的身份把官方安装脚本 `https://x.ai/cli/install.sh` 整个下下来再跑（不以 root 装，不 `curl | bash`），装完再核一遍；在就不动（不重装、不升级）。跑安装脚本时 PATH 里只有系统目录、SHELL 给 `/bin/sh`：不然它会往他家的 `~/.local/bin` 里链 `grok` 和 `agent`（`agent` 这个名字 cursor-agent 的安装脚本也在用，会被盖掉），SHELL 是 bash、zsh、fish 还会改它们的启动文件（SHELL 空着也不行：安装脚本是 bash 跑的，bash 会自己照 passwd 填上登录 shell）。安装脚本和二进制都不核校验和：官方没给（安装脚本只核下下来的能跑），它只以会话用户的身份跑（理由写在 `deploy/lib/grok.sh` 开头）。读回以会话用户的身份照引擎的判法跑 `grok --version`：没装、跑不成、卡住、输出认不出都判红。手动装：`sudo -iu fleet-agent-carpool env PATH=/usr/local/bin:/usr/bin:/bin SHELL=/bin/sh bash -c 't=$(mktemp) && curl -fsSL https://x.ai/cli/install.sh -o "$t" && bash "$t"; rm -f "$t"'`。
-2. 升级：会话里关了更新检查（插头给 `GROK_DISABLE_AUTOUPDATER=1`，免得会话半路换二进制），所以它不自己升级。要升级：`sudo -iu fleet-agent-carpool /home/fleet-agent-carpool/.grok/bin/grok update`，升完 `bash deploy/france.sh --check` 看读回的版本，再等下一轮探针（或手动跑一轮）看 Grok 的路由还在线。
+2. 升级：会话里关了更新检查（插头给 `GROK_DISABLE_AUTOUPDATER=1`，免得会话半路换二进制），所以它不自己升级。空闲或发版重启窗口里，root 单元替它跑 `grok update`（渠道、冒烟、退回上一版见下面「命令行工具升级」）。要马上升、或自动那一轮没成要人看：`sudo -iu fleet-agent-carpool /home/fleet-agent-carpool/.grok/bin/grok update`，升完 `bash deploy/france.sh --check` 看读回的版本，再等下一轮探针（或手动跑一轮）看 Grok 的路由还在线。自动升级失败会锁住这一项，人看完删掉 `state.json` 里 grok 的 `failure` 才再自动升。
 3. 登录（要创始人做，一次）：`sudo -iu fleet-agent-carpool /home/fleet-agent-carpool/.grok/bin/grok login --device-code`，终端里打出一个链接和一串码：在任意设备的浏览器里打开链接、用 SuperGrok 的账号登录、确认那串码，终端自己往下走。登录态写在 `~/.grok/auth.json`（grok 自己写成 600），是普通文件，没有桌面也存得下、重启还在（不像 Cursor 要系统钥匙串，见上面），grok 自己续期（服务端没给期限的按 30 天算，随装文档 `~/.grok/docs/user-guide/02-authentication.md`），续不上了再登录一次。不用 `XAI_API_KEY`：那是 console.x.ai 的接口钥匙，扣接口的账，不走 SuperGrok 订阅。
 4. 查：`bash deploy/france.sh --check` 的读回里有「grok 登录态在：…属 fleet-agent-carpool、600、N 字节（内容没读）」；grok 认不认由路由探针判：调度台哪个阶段挂上 Grok 的路由、开着，下一轮探针就探它（探通了隔 2 小时才再真探，下面「路由探针」），不想等就手动跑一轮。
 5. 失败分流：没登录（「Not signed in. … grok login --device-code」）、登录过期续不上（「Token expired. Run `grok login` …」「Your session has expired. Run `grok login` …」这类），按 AU7「Grok 登录失效」整池暂停，「要人拍」的提醒写着在哪台机器以谁跑 `grok login --device-code`；不算路由的账；登录好了在驾驶舱点「继续」，下一轮探针探通也会自动撤掉整池暂停。点的型号它不认（「Couldn't set model … unknown model id」）按 MD1 换模型、报警。
@@ -419,7 +419,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 
 官方最新由引擎进程自己拉发布源，不经会话用户。npm 注册表认渠道标签 `latest`（Claude Code `@anthropic-ai/claude-code`、Codex `@openai/codex`、Grok `@xai-official/grok`、Kimi、dsh、pi）。Grok 用 `latest`，不取 alpha。reclaude 用 `https://dl.reclaude.ai/stable.json` 的 `version`。Cursor 先读 `https://cursor.com/docs/cli/changelog`（请求头要 markdown，`.md` 后缀是 404）里的 `vYYYY.MM.DD`，失败再回退 `https://cursor.com/install` 里的日期加 hash。Mirasim 读 `https://cdn-assets.mirasim.ai/mirasim/releases/latest.json` 顶层的 `version`（最新渠道；里面的 `stable` 是旧一档，不拿来当官方最新）。这份不给历史列表。它读不到才看 `https://mirasim.ai/changelog`，页面是 `Version<span>版本</span>` 且会跳号，只用来认最新版，不拿来数落后几个。读不到或认不出，那一行写「没查成」和原因。
 
-库表 `cli_tool_readings` 只存读数：在用版本或错误、官方最新或错误、发布源给的版本列表、检查时间。落后在读接口时现算，不入库。发布源没给版本列表（reclaude 的 stable.json、Cursor 回退到安装脚本、Mirasim 的 latest.json，以及跳号的更新日志）时这一列是空，不存成只含最新版的一项；状态是「落后（数不出几个）」，不当成落后 1 个，也不标成最新。这一块不升级。升级是另一张单。`probe` 写在 `deploy/france/fleet-agent-scope.sh` 里，装到 `/usr/local/sbin/` 要等下一次发版。旧脚本上没有 `probe`，页面记「读不到」和原因。
+库表 `cli_tool_readings` 只存读数：在用版本或错误、官方最新或错误、发布源给的版本列表、检查时间。落后在读接口时现算，不入库。发布源没给版本列表（reclaude 的 stable.json、Cursor 回退到安装脚本、Mirasim 的 latest.json，以及跳号的更新日志）时这一列是空，不存成只含最新版的一项；状态是「落后（数不出几个）」，不当成落后 1 个，也不标成最新。升级不另开一块：升完的版本和上次升级时间挂在同一行（见下面「命令行工具升级」）。这一块没有升级按钮。`probe` 写在 `deploy/france/fleet-agent-scope.sh` 里，装到 `/usr/local/sbin/` 要等下一次发版。旧脚本上没有 `probe`，页面记「读不到」和原因。
 
 会话用户的 Mirasim（#345 接上引擎、只开 DeepSeek Flash 一条路由，创始人 2026-09-27 拍「mirasim 额度不太够，先只用 DeepSeek 4.1 flash，接肯定还是要接」；本地模式常驻单元 #424 接上，france.sh 会装）：
 
@@ -741,6 +741,8 @@ FLEET_HK_PARTS=gateway                  # 往香港发哪几样：gateway 飞书
 | `fleet-engine` | fleet | `node packages/engine/src/main.ts`（Temporal worker，任务队列 fleet） | `engine.env`（`FLEET_ENGINE_PORTS=real` 真端口 / `fake` 假端口，必须写；真端口另要机器名、工作树的根、reclaude 的路径，见期望 `deploy/france/desired-config.json`）、`agent-token.env`、`github/`（两个 GitHub 机器人） |
 | `fleet-api` | fleet | `node packages/api/src/main.ts`：一个进程两个监听，驾驶舱接口 `10.99.0.2:8787`、fleet 命令接口 `127.0.0.1:8788`。端口由 `fleet-api.socket` 攥着，进程从 systemd 接手 fd | `api.env`、`agent-token.env`、`session-secret.env`、`gateway-token.env`、`github/`（两个机器人的 json） |
 | `fleet-api.socket` | root | 不跑进程：两个 `ListenStream` 攥着上面那两个地址（`FreeBind=yes`，隧道没起也能先听上）。重启 `fleet-api` 时新连接排在内核队列里 | 不读配置。改监听地址要 `api.env`、`deploy/release.sh` 的 `COCKPIT`、`AGENT_API` 两个常量、这个 socket 单元三处一起改 |
+| `fleet-cli-upgrade.path` | root | 不跑进程：看见 `/var/lib/fleet-dao/cli-upgrade/request.json` 就起下面那个单元。跟着版本走，`release.sh` 切版本时装上 | 不读环境文件。升什么看这一版的 `deploy/france/desired-config.json` 里 `cliTools` |
+| `fleet-cli-upgrade.service` | root | `node packages/engine/src/cli-upgrade-main.ts`：空闲时升命令行工具，核对版本、跑一次 `--help`，不过就装回上一版 | 同上。超时 40 分钟，到点杀掉，免得会话起来之后还在换二进制 |
 
 - 两个都是 `Restart=always`。引擎不开 `NoNewPrivileges`（要经 sudo 调 `fleet-agent-scope` 起会话），也不开挂载隔离（会话是它的子进程，会跟着看不见自己的家目录）；后端不起子进程，照常收紧。
 - `engine.env`、`api.env` 新机器由 france.sh 照这一档的期望建（私有值只留空位：飞书、GitHub 的凭据由人填在 `api.env`）。每一项「应该是什么」在仓里的 `deploy/france/desired-config.json`：公开值改期望、合进主线，发布时照期望写上、重启对应服务（本节末尾「配置进仓对账」）；只改机器的，下一轮自动发布就报不一致，发布也不替人改回（期望里 `selfHeal` 关着）。私有值只在机器上改，改完再发布一次就会重启对应服务。库连接写成 `DATABASE_URL=postgres:///fleet` 加 `PGHOST=/var/run/postgresql`：本机 socket、peer 认证，没有口令（postgres.js 不认连接串里的 `?host=`）。
@@ -875,6 +877,29 @@ ssh <法国> 'sha256sum < /etc/fleet-dao/gateway-token.env'; ssh <香港> 'sha25
 发布构建和密钥隔开（#79，已做）：装依赖、构建驾驶舱前端、打包飞书网关这三步不再以 fleet 直接跑，改走同一个构建沙箱。发布脚本以 root 起一次性 `systemd-run`（`InaccessiblePaths` + `NoNewPrivileges`），里面先以 root 跑 `unshare --pid --fork --mount-proc --kill-child`（root 才建得了 PID 命名空间，自建并换挂 `/proc`），再用 `setpriv --reuid=fleet --regid=fleet --init-groups --no-new-privs` 降成 fleet 跑构建命令（不用 `--uid=fleet` + `PrivateUsers`：法国 systemd 255 和 CI 上里面的 `unshare --pid` 报 `Operation not permitted`）。直接路径挡掉三处：`/etc/fleet-dao`（GitHub 机器人私钥、会话密钥、令牌）、本机库的 unix socket 目录（`/var/run/postgresql`；`/var/run` 指到 `/run` 时连实际路径一起挡）、`/var/lib/fleet-dao`。主机上同 UID 的 fleet 进程不出现在沙箱的 `/proc` 里，因此也不能经 `/proc/<pid>/root/…` 绕开那三处（只遮挂载、仍看主机 `/proc` 时这条绕路是通的）。跑之前先读回：直接路径或任一 `/proc/*/root/etc/fleet-dao` 在沙箱里仍可读、或者没有 `systemd-run` / `unshare` / `setpriv`、沙箱起不来、读回认不出，构建这一步红字停下，不切版本，也不退回用 fleet 直接构建。
 
 沙箱里还看得到的：fleet 的家目录（pnpm 和缓存在 `/home/fleet`，构建要用，家目录里 fleet 能读的文件构建时也能读）；出网（装依赖要连 registry.npmjs.org）；本机 TCP `127.0.0.1:5432`（只隔了 unix socket 目录，端口没隔；装机给 fleet 的是 socket 上的 peer、不设口令，TCP 那条要口令）；沙箱起来之后才在主机上挂进这三处下面的新挂载（`InaccessiblePaths` 挡不住后挂上的）；沙箱自己 PID 命名空间里的 `/proc`（能看本沙箱进程的环境与文件描述符，看不到主机上别的进程）。没有新建专用构建用户：构建仍是 fleet 这个 UID，靠挂载隔离 + 私有 PID/`/proc` 把密钥目录和主机同 UID 进程隔开。pnpm 11 默认仍不跑依赖的安装脚本（`pnpm-workspace.yaml` 的 `allowBuilds` 现在一个都没放行），这层还在，但不再是唯一的挡。
+
+### 命令行工具升级（#1971）
+
+法国上的 Claude Code、Codex 是 2026-09 用 root 的 `npm i -g` 装进 `/usr/lib/node_modules` 的（二进制在 `/usr/bin`）。Claude Code 官方的自动更新在这种「目录不归运行用户写」的装法下不生效。Cursor、reclaude 有各自的更新路径，不在这里升。Grok 装在会话用户家里（`~/.grok/bin/grok`），会话里关了自动更新，这里在空闲或发版窗口里替它跑 `grok update`。
+
+跟哪个渠道写在 `deploy/france/desired-config.json` 的 `cliTools`（对账认这个键、但不把它当环境文件）：
+
+- Claude Code：`stable`（npm 的 dist-tag。官方说大约晚一周，会跳过有大问题的版本）。
+- Codex、Grok：`latest+3d`（跟 `latest`，但发布满 3 天才升）。Grok 的官方指针只有版本号、没有发布时间，这台机器第一次看见这个版本的时刻算起，满 3 天才升。
+- 要用刚发的新模型：把那一项的 `channel` 改成 `latest`（不带天数），合进主线、发一版。没写 `channel` 的工具不升，只把现版本读给驾驶舱。
+
+两个时机，都不在会话运行中替换二进制（运行中的会话会从磁盘再读可执行文件，原地替换会让它崩）：
+
+1. 发版：`release.sh` 等会话收尾、停下引擎之后，切版本之前，直接跑要发的那一版的 `packages/engine/src/cli-upgrade-main.ts --release-window`。不多停一次。这一轮没全部成也不挡发版（不记红），每个工具自己退回或记下。
+2. 空闲：没有在跑的会话，并且拉单停着、或最近 1 小时每一轮拉单的候选都是 0。引擎写 `/var/lib/fleet-dao/cli-upgrade/request.json`，同时排空（不起新会话，到点也不停已经在跑的）。`fleet-cli-upgrade.path` 看见文件就以 root 起单元。升完引擎撤掉排空和请求。发布或停机已经在排空时，这一轮不另起。
+
+每个工具升完当场 `--version` 对上目标版本，再跑一次 `--help`（不调模型、不花钱）。对不上或冒烟不过，装回上一版（npm 装回精确版本；grok 把升级前拷下的二进制写回去）并记 `failure`。退不回去也记 `failure`，不留在坏版本上。有 `failure` 的工具不再装第二次。整轮只要还有工具带着 `failure`，引擎不再写新的升级请求。看完以后，删掉 `state.json` 里那个工具的 `failure` 字段才再升。驾驶舱「法国」页的「命令行工具」一块显示版本和上次升级时间；没成的推一条提醒（同一条，不另起）。
+
+单元 45 分钟还没写回结果：引擎撤掉排空、把请求改名为 `request.stuck`，下一轮空闲再试。这不算工具失败。看 `journalctl -u fleet-cli-upgrade`。单元自己的时限是 40 分钟，到点杀掉 npm 子进程。
+
+目录 `/var/lib/fleet-dao/cli-upgrade` 由 root 建成 `fleet:fleet` 0775。引擎写 `wanted.json`、`request.json`；root 写 `state.json`（0644，驾驶舱读得了）。发版窗口开始前会停掉还在跑的 `fleet-cli-upgrade.service`，并删掉 `wanted.json` 和 `request.json`，免得两路同时换二进制、也免得新引擎把没对上的空闲请求当成还要排空。
+
+退回上一版应用不会把命令行工具再升一遍，也不会自动把它们退回发版前的版本。某个工具退回是升级自己做的（装回它的上一版），和 `release.sh --rollback` 不是一回事。
 
 ### 自动发布
 

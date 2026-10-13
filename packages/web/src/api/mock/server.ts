@@ -41,7 +41,6 @@ import {
   hardBanFor,
   JobsResponse,
   judgeGroomRequest,
-  lastSessionOf,
   ManualModelRequest,
   ManualModelResponse,
   MeResponse,
@@ -1854,7 +1853,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           const views = viewsOf(t);
           const flow = taskFlow(t.task, views);
           const runIds = views.filter((v) => v.running).map((v) => v.id);
-          const lastSession = lastSessionOf(views);
           const decision = pendingOf(t);
           const stalled = t.task.state === 'stalled' ? t.task.stalled : undefined;
           const waitingReason = t.task.paused
@@ -1895,11 +1893,11 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             ...(flow.worker ? { worker: flow.worker } : {}),
             ...(decision ? { pendingDecision: decision.title } : {}),
             ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
+            ...(flow.lastSession ? { lastSession: flow.lastSession } : {}),
             link: `/tasks/${t.task.id}`,
             taskId: t.task.id,
             state: t.task.state,
             runIds,
-            ...(lastSession ? { lastSession } : {}),
           };
         });
       // 推送每 5 秒报一回资源时用这一份编号（下一次读主页再更新）
@@ -3157,6 +3155,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         latest,
         status,
         checkedAt: ago,
+        upgrade: null,
       });
       const userRows = (behindCodex: boolean) => [
         row('claude', 'Claude Code', cell('2.1.282'), cell('2.1.296'), {
@@ -3202,6 +3201,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         rows.map((item) => ({ ...item, scope: 'user' as const, owner }));
       return CliToolsResponseSchema.parse({
         state: 'ok',
+        upgradeNote: null,
         asOf: iso(),
         groups: [
           {

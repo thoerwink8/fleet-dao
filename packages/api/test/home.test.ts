@@ -187,7 +187,7 @@ describe('/api/home（内存版）', () => {
       expect(r?.worker).toBeUndefined();
     });
 
-    it('没有会话在跑的单也写资源：最近一笔记着峰值的会话（段、收场时刻、峰值）；在跑的那笔不算', async () => {
+    it('没有会话在跑的单也写资源：最近一笔收了的会话的内存峰值和 CPU 秒数；在跑的那笔不算', async () => {
       const h = harness();
       seg(h, {
         segment: 'manual',
@@ -196,13 +196,11 @@ describe('/api/home（内存版）', () => {
         outcome: 'done',
         memoryPeakMb: 3600,
       });
-      // 最后一笔验收没记峰值：不拿它顶成「没读到」，往前找记着的那笔，并写明是哪一段
+      // 最后一笔验收没记峰值也没记 CPU：两格都照实写没读到，不往前拿动手那笔顶（#1980 的口径）
       seg(h, { segment: 'verify', startedAt: ago(30), endedAt: ago(28), outcome: 'done' });
       expect((await homeOf(h)).running[0]?.lastSession).toEqual({
-        state: 'ok',
-        segment: 'manual',
-        endedAt: ago(40),
-        memoryPeakMb: 3600,
+        memory: { state: 'unread', why: '上一次会话没记内存峰值' },
+        cpu: { state: 'unread', why: '上一次会话没记 CPU 秒数' },
       });
     });
 
@@ -210,8 +208,8 @@ describe('/api/home（内存版）', () => {
       const h = harness();
       seg(h, { segment: 'manual', startedAt: ago(60), endedAt: ago(40), outcome: 'done' });
       const last = (await homeOf(h)).running[0]?.lastSession;
-      expect(last?.state).toBe('unread');
-      expect(last && 'why' in last ? last.why : '').toContain('峰值');
+      expect(last?.memory.state).toBe('unread');
+      expect(last?.memory.state === 'unread' ? last.memory.why : '').toContain('峰值');
       const h2 = harness();
       seg(h2, { segment: 'manual', startedAt: ago(12) });
       expect((await homeOf(h2)).running[0]).not.toHaveProperty('lastSession');

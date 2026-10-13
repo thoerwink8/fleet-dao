@@ -55,7 +55,9 @@ import { carpoolApiReader } from './carpool-api.ts';
 import { carpoolRegistry } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
 import { ciTimingsJob } from './ci-timings.ts';
+import { cliUpgradeJob } from './cli-upgrade.ts';
 import { cliVersionsJob } from './cli-versions.ts';
+import { productionCpuUsage } from './cpu-usage.ts';
 import { drainNotifier } from './drain-alerts.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
 import { gitNetworkEnv } from './git-env.ts';
@@ -842,6 +844,13 @@ export function realPortsFromEnv(
     }),
     // 命令行工具版本（#1969）：probe 读在用版本，引擎进程拉官方最新。不升级。
     cliVersions: cliVersionsJob({ db }),
+    // 命令行工具升级（#1971）：空闲时排空、写请求。引擎没有 root，不在这里装。不看总开关。
+    cliUpgrade: cliUpgradeJob({
+      db,
+      ...(extra.drain ? { drain: extra.drain } : {}),
+      master,
+      env,
+    }),
   };
   const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});
   // 子代理（#1641，决定 0087）：claude-code 的干活会话带的 --agents 文件，引擎起来时从发布目录的 agents/subagents/ 生成一次；生成不成时
@@ -870,6 +879,8 @@ export function realPortsFromEnv(
     resources: { memoryHighMb: SESSION_MEMORY_HIGH_MB, memoryMaxMb: SESSION_MEMORY_MAX_MB, swapMaxMb: 0 },
     // 会话 scope 的内存峰值写进 runs（#948）：边跑边读 cgroup 的 memory.peak
     memoryPeak: productionMemoryPeak(),
+    // 会话用掉的 CPU 秒数写进 runs（#1980）：边跑边读 cpu.stat，收场再读一次 usage_usec
+    cpuUsage: productionCpuUsage(),
     // 拼车池上的会话被拒：证据当场交给切号判（#194 方案 4.3），不等路由探针那一轮；不等结果（切号要等这个会话收场）
     onCarpoolRejection: (rejection) => {
       void orgSwitch.now({ by: '拼车会话被拒', rejection });

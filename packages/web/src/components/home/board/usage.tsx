@@ -1,26 +1,16 @@
-// 一张单占的内存和 CPU（#1973）：画布卡片、手机树形列表里展开的那张卡都用这一行。
-// 口径在 ../resources.ts 文件头（按单合计；没在跑写「没在跑」加上一次会话的峰值；读不到写「没读到」，都不画 0）。
+// 一张单此刻占的内存和 CPU（#1973）：画布卡片、手机树形列表里展开的那张卡都用这一行。
+// 口径在 ../resources.ts 文件头（按单合计、没在跑且没有上次会话写「没在占用」、有上次写峰值和 CPU、读不到写「没读到」，都不画 0）。
 import { Cpu, MemoryStick } from 'lucide-react';
-import { segmentLabel } from '../../../lib/segments';
 import { cn } from '../../../lib/utils';
-import { formatCpu, formatMb, type LastSession, type TicketUsage } from '../resources';
-
-/** 上一次会话是哪一段（「上次动手」）；段认不出就只写「上次」。 */
-function lastWhere(last: Extract<LastSession, { state: 'ok' }>): string {
-  return last.segment === null ? '上次会话' : `上次${segmentLabel[last.segment]}`;
-}
+import { formatCpu, formatMb, type TicketUsage } from '../resources';
 
 /** 悬停里的全文：几个会话、峰值口径、读不到的原因。 */
 export function usageTitle(u: TicketUsage): string {
   switch (u.kind) {
-    case 'idle': {
-      const head = '这一刻没有会话在跑（排队、等人、等验、停下等人），不占这台机器的内存和 CPU';
-      if (!u.last) return `${head}；这张单还没收过会话，没有上一次的读数`;
-      if (u.last.state === 'unread') return `${head}；上一次会话的内存峰值没读到：${u.last.why}`;
-      return `${head}；上一次${u.last.segment === null ? '' : segmentLabel[u.last.segment]}会话的内存峰值 ${formatMb(
-        u.last.memoryPeakMb,
-      )}（会话跑着时每半秒读 memory.peak，收场写库）；上一次会话 CPU 用了多少还没记`;
-    }
+    case 'idle':
+      return '这一刻没有会话在跑（排队、等人、等验），不占这台机器的内存和 CPU';
+    case 'last':
+      return u.title;
     case 'unread':
       return `内存、CPU 没读到：${u.why}`;
     case 'ok': {
@@ -37,28 +27,20 @@ export function usageTitle(u: TicketUsage): string {
   }
 }
 
-/** 卡片上的一行：图标 + 内存 + CPU；没在跑写上一次的峰值，没读到写一句。size 跟着卡片用 canvas 或 meta 字号。 */
+/** 卡片上的一行：图标 + 内存 + CPU；没在占用、没读到各写一句。size 跟着卡片用 canvas 或 meta 字号。 */
 export function UsageLine({ usage, size = 'canvas' }: { usage: TicketUsage; size?: 'canvas' | 'meta' }) {
   const text = size === 'canvas' ? 'text-canvas' : 'text-meta';
   if (usage.kind === 'idle') {
-    const last = usage.last;
     return (
-      <div
-        data-usage="idle"
-        data-usage-last={last?.state ?? 'none'}
-        className={cn('flex min-w-0 items-center gap-x-1.5 whitespace-nowrap text-muted-foreground', text)}
-        title={usageTitle(usage)}
-      >
-        <MemoryStick className="size-3 shrink-0" aria-hidden />
-        <span className="shrink-0">没在跑</span>
-        {last?.state === 'ok' ? (
-          <span className="min-w-0 truncate">
-            · {lastWhere(last)}峰值{' '}
-            <span className="num font-medium text-foreground">{formatMb(last.memoryPeakMb)}</span>
-          </span>
-        ) : last?.state === 'unread' ? (
-          <span className="min-w-0 truncate">· 上次峰值没读到</span>
-        ) : null}
+      <div data-usage="idle" className={cn('truncate text-muted-foreground', text)} title={usageTitle(usage)}>
+        没在占用
+      </div>
+    );
+  }
+  if (usage.kind === 'last') {
+    return (
+      <div data-usage="last" className={cn('truncate text-muted-foreground', text)} title={usageTitle(usage)}>
+        {usage.text}
       </div>
     );
   }
@@ -92,12 +74,10 @@ export function UsageLine({ usage, size = 'canvas' }: { usage: TicketUsage; size
   );
 }
 
-/** 远档卡片标题下面那一行的短写：在跑「1.2G · 42%」；没在跑「上次 3.5G」；没读到写短字。 */
+/** 远档卡片单号那一行右边的短写：「1.2G · 42%」；没在占用、没读到写短字。 */
 export function usageShort(u: TicketUsage): string {
-  if (u.kind === 'idle') {
-    if (!u.last) return '没在跑';
-    return u.last.state === 'ok' ? `上次 ${formatMb(u.last.memoryPeakMb)}` : '上次没读到';
-  }
+  if (u.kind === 'idle') return '没在占用';
+  if (u.kind === 'last') return u.text;
   if (u.kind === 'unread') return '没读到';
   return `${formatMb(u.memoryMb)} · ${u.cpuPercent === undefined ? '采样中' : formatCpu(u.cpuPercent)}`;
 }

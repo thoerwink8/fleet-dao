@@ -6,14 +6,16 @@
 // 真发版：点「在用版本」那一行里的「发布到法国」（#1232、#1255，components/release-card.tsx 的 ReleaseEntry；后端只写请求文件，法国上 root 的单元接活），或走 pnpm release:onekey start。
 // 发版单位是主线提交（决定 0032）：那一行写明落后几个提交、要发的主线头提交号和标题；下面的「发版」卡只读。
 //
-// 数据从哪来（不新开接口）：
-// - /api/env（本台六项事实）、/api/jobs（定时任务）、发版状态和预检、/api/nodes（远程环境列表和快照，多台时并排）。
+// 数据从哪来：
+// - /api/env（本台六项事实）、/api/jobs（定时任务）、发版状态和预检、/api/france/cli-tools（命令行工具的版本和上次升级）、
+//   /api/nodes（远程环境列表和快照，多台时并排）。
 // - 在法国真机的驾驶舱上打开，本台就是法国；在本地开发 / 演示 mock 上打开，本台是这台后端自己的数。
 // - 每一项都按后端给的 ok / reason 两态如实画：读不到就写「没查成 + 原因」，不拿 0 或假 ok 冒充（仓的底线）。
 //
 // 版式（路由页样板 #1914 铺开）：最上面是本台的标题块（名字、一句结论带状态、一行灰字细节），下面总开关一行；
 // 只有一台时六项是一个区块里的六行（宽屏两栏各三行）；两台及以上每个环境一列、六项各占一行用 subgrid 对齐。
-// 六项和定时任务之间是命令行工具：两个会话用户和全局 npm，每行在用版本、官方最新、现算的状态。只读，不升级。
+// 六项和定时任务之间是命令行工具：两个会话用户和全局 npm，每行在用版本、官方最新、现算的状态；
+// 升过的同一行还有升上去的版本和上次升级时间（#1971）。没有升级按钮。
 // 再下面左边定时任务列表（出问题的排前面）、右边发版。每一项一行怎么画在 components/env-facts.tsx。
 
 import { ArrowRight, ChevronDown, Rocket, SearchX, ServerCog, Timer } from 'lucide-react';
@@ -603,6 +605,27 @@ type CliOk = Extract<CliToolsResponse, { state: 'ok' }>;
 type CliGroup = CliOk['groups'][number];
 type CliRow = CliGroup['rows'][number];
 
+function upgradeBadge(
+  outcome: NonNullable<CliRow['upgrade']>['outcome'],
+): { tone: LayoutTone; label: string } | null {
+  switch (outcome) {
+    case 'ok':
+      return { tone: 'done', label: '已升级' };
+    case 'current':
+      return { tone: 'done', label: '已是这一版' };
+    case 'skipped':
+      return { tone: 'stop', label: '这轮不升' };
+    case 'failed':
+      return { tone: 'fail', label: '没成' };
+    case 'rolled-back':
+      return { tone: 'fail', label: '已退回' };
+    case 'refused':
+      return { tone: 'stall', label: '没换' };
+    default:
+      return null;
+  }
+}
+
 function cliTone(kind: CliRow['status']['kind']): LayoutTone {
   switch (kind) {
     case 'current':
@@ -621,10 +644,10 @@ function cliBit(prefix: string, cell: CliRow['installed']): string {
   return cell.state === 'ok' ? `${prefix} ${cell.version}` : `${prefix} ${cell.why}`;
 }
 
-/** 六项下面的一块：两个用户和全局 npm 分开列。状态是接口现算的，这一块不升级。 */
+/** 六项下面的一块：两个用户和全局 npm 分开列。升过的同一行带升上去的版本和上次升级时间。没有升级按钮。 */
 function CliToolsBlock({ query, now }: { query: ReturnType<typeof useCliTools>; now: number }) {
   const title = '命令行工具';
-  const description = '两个会话用户各一份，再加上全局 npm。只显示读数，不在这里升级。';
+  const description = '两个会话用户各一份，再加上全局 npm。升完能看到新版本和上次升级时间。没有升级按钮。';
   if (query.error) {
     return (
       <Section title={title} description={description} data-cli-tools>
@@ -650,6 +673,13 @@ function CliToolsBlock({ query, now }: { query: ReturnType<typeof useCliTools>; 
   }
   return (
     <Section flush title={title} description={description} data-cli-tools>
+      {query.data.upgradeNote ? (
+        <div className="border-b p-4">
+          <Notice tone="stall" title="升级结果没查成">
+            {query.data.upgradeNote}
+          </Notice>
+        </div>
+      ) : null}
       {query.data.groups.map((group) => (
         <div
           key={`${group.scope}:${group.owner}`}
@@ -662,6 +692,11 @@ function CliToolsBlock({ query, now }: { query: ReturnType<typeof useCliTools>; 
               const installedWhy = row.installed.state === 'ok' ? null : row.installed.why;
               const latestWhy = row.latest.state === 'ok' ? null : row.latest.why;
               const extra = reason && reason !== installedWhy && reason !== latestWhy ? reason : null;
+              const badge = upgradeBadge(row.upgrade?.outcome ?? null);
+              const upgradedVersion =
+                row.upgrade?.version && (row.upgrade.outcome === 'ok' || row.upgrade.outcome === 'current')
+                  ? row.upgrade.version
+                  : null;
               return (
                 <ListRow
                   key={row.tool}
@@ -675,12 +710,15 @@ function CliToolsBlock({ query, now }: { query: ReturnType<typeof useCliTools>; 
                         cliBit('在用', row.installed),
                         cliBit('官方最新', row.latest),
                         row.checkedAt ? `检查于 ${formatAgo(row.checkedAt, now)}` : '还没检查',
+                        upgradedVersion,
+                        row.upgrade?.upgradedAt ? `上次升级 ${formatAgo(row.upgrade.upgradedAt, now)}` : null,
                         extra,
                       ]}
                     />
                   }
                   trailing={
-                    <span className="shrink-0">
+                    <span className="flex shrink-0 items-center gap-1.5">
+                      {badge ? <StatusBadge tone={badge.tone} label={badge.label} /> : null}
                       <StatusBadge tone={cliTone(row.status.kind)} label={row.status.label} />
                     </span>
                   }

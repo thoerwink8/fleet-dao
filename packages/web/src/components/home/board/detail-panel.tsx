@@ -209,7 +209,7 @@ function TicketPanel({
             <Row label="占用">
               <span className="flex flex-col gap-0.5">
                 <UsageLine usage={usage} size="meta" />
-                {usage.kind === 'idle' && !usage.last ? null : (
+                {usage.kind === 'idle' ? null : (
                   <span className="text-meta text-muted-foreground">{usageTitle(usage)}</span>
                 )}
               </span>

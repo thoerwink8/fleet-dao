@@ -84,20 +84,20 @@ export const HomeRunningSchema = z.object({
    */
   runIds: z.array(z.string().min(1)).optional(),
   /**
-   * 上一次会话占了多少（这一刻没会话在跑时卡片也写得出资源）：收了的三段流水里最近一笔记着内存峰值的那笔（runs.memory_peak_mb，
-   * 会话跑着时每半秒读 memory.peak、收场写库）。收了的一笔都没记峰值是 unread 带原因；一笔都没收过没有这个键。
-   * CPU 用了多少秒库里还没记（#1980 跟进），这里不给，页面不拿 0 顶。
+   * 上一次收场的会话（#1979 的内存峰值，#1980 加上 CPU 秒数）。没在跑时卡片写
+   * 「上次动手峰值 3.5G · CPU 12 分钟」。内存、CPU 各自没记是 unread，不写 0。老后端没有这个键。
    */
   lastSession: z
-    .discriminatedUnion('state', [
-      z.object({
-        state: z.literal('ok'),
-        segment: z.enum(['scope', 'manual', 'verify']).nullable(),
-        endedAt: Time,
-        memoryPeakMb: z.number().int().min(0),
-      }),
-      ResourceUnreadSchema,
-    ])
+    .object({
+      memory: z.discriminatedUnion('state', [
+        z.object({ state: z.literal('ok'), peakMb: z.number().int().min(0) }),
+        z.object({ state: z.literal('unread'), why: z.string().min(1) }),
+      ]),
+      cpu: z.discriminatedUnion('state', [
+        z.object({ state: z.literal('ok'), seconds: z.number().int().positive() }),
+        z.object({ state: z.literal('unread'), why: z.string().min(1) }),
+      ]),
+    })
     .optional(),
 });
 

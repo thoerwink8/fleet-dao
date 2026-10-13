@@ -45,6 +45,8 @@ export interface RunInsert {
   /** 执行体报的会话号（收场才有）；没读到不给。 */
   sessionId?: string | null;
   memoryPeakMb?: number | null;
+  /** 这一次会话的 CPU 秒数；没读到不给（NULL），不写 0。 */
+  cpuSeconds?: number | null;
   failureReason?: string | null;
   prNumber?: number | undefined;
   branch?: string | undefined;
@@ -65,6 +67,7 @@ export interface RunFinishInput {
   cacheWriteTokens?: number | null;
   costUsd?: number | null;
   memoryPeakMb?: number | null;
+  cpuSeconds?: number | null;
   failureReason?: string | null;
   retryOf?: string[];
 }
@@ -120,6 +123,7 @@ export async function finishRun(
     ...(row.cacheWriteTokens !== undefined ? { cacheWriteTokens: row.cacheWriteTokens } : {}),
     ...(row.costUsd !== undefined ? { costUsd: row.costUsd } : {}),
     ...(row.memoryPeakMb !== undefined ? { memoryPeakMb: row.memoryPeakMb } : {}),
+    ...(row.cpuSeconds !== undefined ? { cpuSeconds: row.cpuSeconds } : {}),
     ...(row.failureReason !== undefined ? { failureReason: row.failureReason } : {}),
     updatedAt: now,
   };
@@ -446,6 +450,7 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
     // 只由「用量补记」和一次性回填写，记一笔时不碰
     usageNote: null,
     memoryPeakMb: row.memoryPeakMb ?? null,
+    cpuSeconds: row.cpuSeconds ?? null,
     failureReason: row.failureReason ?? null,
     prNumber: row.prNumber ?? null,
     branch: row.branch ?? null,
@@ -472,6 +477,7 @@ function pickRowWithoutId(r: RunRowSure) {
     cacheWriteTokens: sql`coalesce(${r.cacheWriteTokens}::bigint, ${runs.cacheWriteTokens})`,
     costUsd: sql`coalesce(${r.costUsd}::numeric, ${runs.costUsd})`,
     memoryPeakMb: sql`coalesce(${r.memoryPeakMb}::integer, ${runs.memoryPeakMb})`,
+    cpuSeconds: sql`coalesce(${r.cpuSeconds}::integer, ${runs.cpuSeconds})`,
     failureReason: sql`coalesce(${r.failureReason}, ${runs.failureReason})`,
   };
 }

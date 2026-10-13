@@ -19,7 +19,6 @@ import {
   type HostId,
   hardBanFor,
   type JobViewSchema,
-  lastSessionOf,
   type Model,
   type NotificationSchema,
   type Pool,
@@ -459,7 +458,6 @@ export function homeRunning(input: {
       const flow = taskFlow(t, views);
       // 这一刻在跑的那几笔（#1973）：编号就是会话 scope 的编号，看板拿它找这张单此刻占的内存、CPU
       const runIds = views.filter((v) => v.running).map((v) => v.id);
-      const lastSession = lastSessionOf(views);
       const decision = input.decisionOf(t.id);
       // 引擎停下等人（state=stalled）排在三段推断前面：三段流水只看得出「验收收了」，看不出验收没过、开 PR 卡住（#1967、#1971）
       const stalled = t.state === 'stalled' ? t.stalled : undefined;
@@ -501,11 +499,11 @@ export function homeRunning(input: {
         ...(flow.worker ? { worker: flow.worker } : {}),
         ...(decision ? { pendingDecision: decision.title } : {}),
         ...(flow.lastEvent ? { lastEvent: flow.lastEvent } : {}),
+        ...(flow.lastSession ? { lastSession: flow.lastSession } : {}),
         link: `/tasks/${t.id}`,
         taskId: t.id,
         state: t.state,
         runIds,
-        ...(lastSession ? { lastSession } : {}),
       };
     });
 }
