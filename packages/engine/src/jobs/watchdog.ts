@@ -326,7 +326,9 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
     if (done.ok) deps.log('info', '看门狗：撤了一条', { dedupeKey: a.dedupeKey, why });
   }
 
-  const merges = deps.mergeStall ? await mergeStallRound(s, deps.mergeStall, now) : { scanned: 0, found: 0 };
+  const merges: MergesRound = deps.mergeStall
+    ? await mergeStallRound(s, deps.mergeStall, now)
+    : { scanned: 0, found: 0, repos: null };
   found += merges.found;
   const scanned = others.length + merges.scanned;
 
@@ -334,8 +336,29 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
     const why = `${s.problems.length > 1 ? `${s.problems.length} 处没做成：` : ''}${s.problems.join('；')}`;
     return { outcome: 'failed', why: clip(why, WATCHDOG_WHY_MAX), scanned, found };
   }
-  if (scanned === 0) return { outcome: 'unscanned', why: '登记表上除了看门狗自己没有别的定时任务' };
+  // 「没东西可看」要说清是哪两样都没有（#prune：原来只写定时任务登记表，看不出哪些仓空着、看不出一个仓都没开着「让 AI 接活」）
+  if (scanned === 0)
+    return { outcome: 'unscanned', why: clip(emptyWhy(others.length, merges.repos), WATCHDOG_WHY_MAX) };
   return { outcome: 'ok', scanned, found };
+}
+
+/** 「没东西可看」（一个都没扫到）时写清两样：定时任务登记表上几个任务，哪些仓开着「让 AI 接活」（repos 是 null = 这一轮没读仓）。 */
+export function emptyWhy(otherJobs: number, repos: string[] | null): string {
+  const jobs =
+    otherJobs === 0
+      ? '定时任务登记表上除了看门狗自己没有别的任务'
+      : `定时任务登记表上有 ${otherJobs} 个任务（都没到该看的时候）`;
+  if (repos === null) return `${jobs}；这一轮没读各仓`;
+  if (repos.length === 0) return `${jobs}；也没有哪个仓开着「让 AI 接活」，没有仓可看`;
+  return `${jobs}；开着「让 AI 接活」的仓：${repos.join('、')}`;
+}
+
+/** 「主线 N 小时没合 PR」这一部分：报该报的、撤不用再报的。读不到事实记没查成，开着的一条都不撤。 */
+/** 「主线 N 小时没合 PR」这一部分的结果。repos：这一轮读了哪些开着「让 AI 接活」的仓（读不到是 null）。 */
+interface MergesRound {
+  scanned: number;
+  found: number;
+  repos: string[] | null;
 }
 
 /** 「主线 N 小时没合 PR」这一部分：报该报的、撤不用再报的。读不到事实记没查成，开着的一条都不撤。 */
@@ -343,9 +366,9 @@ async function mergeStallRound(
   s: RoundState,
   read: () => Promise<MergeStallFacts>,
   now: Date,
-): Promise<{ scanned: number; found: number }> {
+): Promise<MergesRound> {
   const facts = await attempt(s, '读不到各仓最近一次合并、在做的单（主线多久没合 PR 这一轮没查成）', read);
-  if (!facts.ok) return { scanned: 0, found: 0 };
+  if (!facts.ok) return { scanned: 0, found: 0, repos: null };
   const verdicts = judgeMergeStalls(facts.value, now);
   const wanted = new Set<string>();
   let found = 0;
@@ -371,7 +394,7 @@ async function mergeStallRound(
     );
     if (done.ok) s.deps.log('info', '看门狗：撤了一条', { dedupeKey: a.dedupeKey, why });
   }
-  return { scanned: facts.value.repos.length, found };
+  return { scanned: facts.value.repos.length, found, repos: facts.value.repos.map((r) => r.repo) };
 }
 
 /**

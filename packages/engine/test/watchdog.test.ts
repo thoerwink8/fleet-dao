@@ -7,6 +7,7 @@ import {
   finishScheduleRun,
   notifications,
   registerScheduledJobs,
+  repos,
   resolveAlertWithReason,
   type ScheduleResult,
   scheduleRuns,
@@ -402,12 +403,36 @@ describe('看门狗一轮（真库）', () => {
       outcome: 'unscanned',
       scanned: 0,
       found: 0,
-      why: '登记表上除了看门狗自己没有别的定时任务',
+      why: '定时任务登记表上除了看门狗自己没有别的任务；也没有哪个仓开着「让 AI 接活」，没有仓可看',
     });
     expect(firstLine((await alertOf('watchdog:job:old-job:after-3'))?.body)).toBe(
       '已撤：「old-job」不在定时任务登记表上了（不再要求它按期跑）',
     );
     expect(await openAlerts()).toEqual([]);
+
+    // 没接 mergeStall 的装配（这一轮没读仓）：说明里照实写，不冒充看过仓
+    const { mergeStall: _unused, ...noRepos } = deps();
+    expect(await runWatchdogJob(noRepos)).toMatchObject({
+      outcome: 'unscanned',
+      why: '定时任务登记表上除了看门狗自己没有别的任务；这一轮没读各仓',
+    });
+  });
+
+  it('一个任务都没登记：有仓开着「让 AI 接活」时算扫过那几个仓（不是 unscanned）；一个仓都没开写着没有仓可看', async () => {
+    await register();
+    const [shop] = await t.db
+      .insert(repos)
+      .values({ owner: 'acme', name: 'shop', testCommand: 'pnpm check', autoDispatchSince: LONG_AGO })
+      .returning();
+    expect(shop).toBeDefined();
+    expect(await runWatchdogJob(deps())).toMatchObject({ outcome: 'ok', scanned: 1, found: 0 });
+
+    // 仓的开关关了：又变成「一个都没扫到」，说明里写「没有哪个仓开着『让 AI 接活』」
+    await t.db.update(repos).set({ autoDispatchSince: null });
+    expect(await runWatchdogJob(deps())).toMatchObject({
+      outcome: 'unscanned',
+      why: '定时任务登记表上除了看门狗自己没有别的任务；也没有哪个仓开着「让 AI 接活」，没有仓可看',
+    });
   });
 
   it('记不上开始（看门狗没登记，外键不让写）：原样抛出，不去看、不碰提醒', async () => {
