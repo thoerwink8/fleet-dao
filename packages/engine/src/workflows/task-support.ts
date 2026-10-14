@@ -240,6 +240,40 @@ export function stripUndefined<T extends object>(o: T): T {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
 }
 
+/**
+ * 一步按失败分流要停下等人、但码在调用方给的「先自动处理一次」名单里（决定 0093，rt.step 的 escape）：不停下，抛给调用方去处理
+ * （空交付回去重派动手会话……）。只抛一次：调用方处理完再撞上同样的，照旧停下。
+ */
+export class AutoEscape extends Error {
+  readonly code: string;
+  readonly detail: string;
+  constructor(code: string, detail: string) {
+    super(`先自动处理一次：${code}`);
+    this.name = 'AutoEscape';
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+/**
+ * 动手会话没跑成、失败分流判停下等人时，先自动换一条路由（避开这个模型）重派一次的码（决定 0093，task-session.ts）：
+ * 被引擎在时限上叫停（aborted）、总时长到顶、起不来。只有人能修的（没权限、卫生检查、登录失效……）不在里面。
+ */
+export const AUTO_REDISPATCH_CODES: readonly string[] = [
+  'aborted',
+  'wall_clock_timeout',
+  'spawn_failed',
+  'spawn_timeout',
+  'startup_timeout',
+];
+
+/** 推分支报空交付（起会话前的头之后没有新提交）：自动回去重派一次动手会话，不停下等人（决定 0093）。 */
+export const EMPTY_DELIVERY_CODE = 'empty_delivery';
+
+/** CI 的结果没查成：先自己隔一会儿重查几次再停下等人（决定 0093）。 */
+export const CI_UNKNOWN_RECHECKS = 2;
+export const CI_UNKNOWN_RECHECK_SECONDS = 120;
+
 /** 推分支并主线撞上冲突，交回会话去解（不在 push 这一步里原地重试）。 */
 export class ConflictHandoff extends Error {
   readonly files: readonly string[];

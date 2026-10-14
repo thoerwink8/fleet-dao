@@ -300,7 +300,8 @@ export function prClaimedComment(prNumber: number): string {
 
 /** 单正文里认「要改工作流」的三节（不含「原话」：创始人的原话里顺口提到路径不算这张单要改它）。 */
 const WORKFLOW_SECTIONS = ['场景', '已知的模块', '怎么算做完'] as const;
-const WORKFLOW_PATH = /\.github\/workflows\/[\w.*-]*/;
+// 整个目录（`.github/workflows`，不带末尾斜杠）也算：写的是「改那个目录」
+const WORKFLOW_PATH = /\.github\/workflows(?:\/[\w.*-]*|(?![\w.-]))/;
 
 /**
  * 单正文的场景、已知的模块、怎么算做完三节里写到的第一个 `.github/workflows/` 路径；没写回 null。

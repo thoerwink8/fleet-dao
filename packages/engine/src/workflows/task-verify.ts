@@ -1,26 +1,31 @@
 // 任务工作流的冷验收一段。
 //
 // 改这里之前必须知道：挂自动合并一定在冷验收通过之后（合并闸认通过的 cold-verify）；头换了回 head_moved，由调用方对新的头重走。
+// 和等 CI 并行跑（决定 0093，task.ts 的 deliver）走 verifyAlongsideCi：只验一次、不动工作流的状态（不加轮数、不写意见、不停下），
+// 结果交给调用方等 CI 收场后再认；CI 不绿就不认，活动也不取消（让它自己跑完）。
 // 引擎自测（决定 0093）的精炼输出只在测的就是要验的这个头时带上（testOutput）；老历史里没有自测，不带，入参和原来一样。
 
 import type { TaskBrief } from '../runner/task-brief.ts';
-import { MAX_VERIFY_ROUNDS } from '../task-contract.ts';
+import { type ColdVerifyInput, type ColdVerifyResult, MAX_VERIFY_ROUNDS } from '../task-contract.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import { headMovedDetail, verifyStopDetail } from './task-support.ts';
 
 /**
  * 冷验收。没过：记下问题表回动手（'rework'）；做不出来：停下等人，不让写代码的会话白改一轮；这会儿验不了、过一会儿就行：睡一会儿再来，
  * 不算一轮；要验的头已经被别人换了：停下等人看过，回 'head_moved'，由调用方对新的头重走一遍。
+ * early：和 CI 同时验过、已经认下的那一次结果（决定 0093）。给了就当第一轮的结果用，不再调活动；后面的处理和串行一样。
  */
 export async function coldVerifyPr(
   rt: TaskRuntime,
   brief: TaskBrief,
+  early?: ColdVerifyResult,
 ): Promise<'pass' | 'rework' | 'head_moved'> {
   const wt = rt.worktree;
   if (!wt || rt.prNumber === null || rt.head === null) {
     throw new Error('验收之前还没有 PR（工作流自己的状态乱了）');
   }
   let current = brief;
+  let ready = early;
   for (;;) {
     if (rt.verifyRound >= MAX_VERIFY_ROUNDS) {
       const problems = rt.feedback.join('；') || '（没有）';
@@ -30,33 +35,17 @@ export async function coldVerifyPr(
         verifyStopDetail(rt.verifyProblems),
       );
       if (mode === 'legacy') rt.verifyRound = 0;
+      // 自动续的那一次（决定 0093，mode auto）：轮数已清零、下一轮动手避开最近的模型；这个头还没验过，接着验它
     }
     if (rt.brief) current = rt.brief;
     rt.verifyRound += 1;
-    await rt.advance('verify', `验收第 ${rt.verifyRound} 轮`);
-    const prNumber: number = rt.prNumber;
+    await rt.advance('verify', `验收第 ${rt.verifyRound} 轮${ready ? '（和 CI 同时验的）' : ''}`);
     const headSha: string = rt.head;
-    const tested = rt.selfCheckOutput?.head === headSha ? rt.selfCheckOutput.text : undefined;
     const mark = rt.routeWakeMark(); // 叫醒的记号在验之前取，理由见 task-session.ts 的 pickRoute
-    const res = await rt.step('coldVerify', () =>
-      rt.cancellable(() =>
-        rt.acts.coldVerify({
-          schemaVersion: 1,
-          taskId: rt.input.taskId,
-          repo: rt.input.repo,
-          issueNumber: rt.input.issueNumber,
-          prNumber,
-          branch: rt.branch,
-          baseSha: wt.baseSha,
-          headSha,
-          what: current.request,
-          howToFinish: current.acceptance,
-          authorFamilies: [...rt.families],
-          round: rt.verifyRound === 1 ? 1 : 2,
-          ...(tested ? { testOutput: tested } : {}),
-        }),
-      ),
-    );
+    const verifyInput = coldVerifyInput(rt, current, rt.verifyRound);
+    const res =
+      ready ?? (await rt.step('coldVerify', () => rt.cancellable(() => rt.acts.coldVerify(verifyInput))));
+    ready = undefined;
     if (res.headMoved !== undefined) {
       rt.verifyRound -= 1;
       await rt.park('PR 的头被别人改了', headMovedDetail(res.headMoved, headSha));
@@ -75,9 +64,56 @@ export async function coldVerifyPr(
       continue;
     }
     if (res.pass) return 'pass';
-    rt.verifyProblems = res.problems;
-    rt.feedback = res.problems.map((p) => `验收没过：${p}`);
-    rt.status.lastProblem = '验收没过';
+    noteVerifyProblems(rt, res.problems);
     return 'rework';
   }
+}
+
+/** 给冷验收活动的入参：验的是现在的头，round 是这一次算第几轮（1 或 2）。 */
+function coldVerifyInput(rt: TaskRuntime, brief: TaskBrief, round: number): ColdVerifyInput {
+  const wt = rt.worktree;
+  if (!wt || rt.prNumber === null || rt.head === null) {
+    throw new Error('验收之前还没有 PR（工作流自己的状态乱了）');
+  }
+  const headSha = rt.head;
+  const tested = rt.selfCheckOutput?.head === headSha ? rt.selfCheckOutput.text : undefined;
+  return {
+    schemaVersion: 1,
+    taskId: rt.input.taskId,
+    repo: rt.input.repo,
+    issueNumber: rt.input.issueNumber,
+    prNumber: rt.prNumber,
+    branch: rt.branch,
+    baseSha: wt.baseSha,
+    headSha,
+    what: brief.request,
+    howToFinish: brief.acceptance,
+    authorFamilies: [...rt.families],
+    round: round === 1 ? 1 : 2,
+    ...(tested ? { testOutput: tested } : {}),
+  };
+}
+
+/**
+ * 和等 CI 同时起的那一次验收（决定 0093）：只调一次活动，不加轮数、不写意见、不停下、不睡，结果原样交回，由调用方等 CI 收场后认。
+ * 活动没跑成也不抛（交回 error），放弃照常收得到（rt.cancellable）。轮数按「认了这一次」算（现在的轮数 + 1）。
+ */
+export function verifyAlongsideCi(
+  rt: TaskRuntime,
+  brief: TaskBrief,
+): Promise<{ ok: true; res: ColdVerifyResult } | { ok: false; error: unknown }> {
+  const input = coldVerifyInput(rt, rt.brief ?? brief, rt.verifyRound + 1);
+  return rt
+    .cancellable(() => rt.acts.coldVerify(input))
+    .then(
+      (res) => ({ ok: true as const, res }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+}
+
+/** 验收没过：记下原话（轮数用尽的通知要用）和返工意见。 */
+export function noteVerifyProblems(rt: TaskRuntime, problems: string[]): void {
+  rt.verifyProblems = problems;
+  rt.feedback = problems.map((p) => `验收没过：${p}`);
+  rt.status.lastProblem = '验收没过';
 }

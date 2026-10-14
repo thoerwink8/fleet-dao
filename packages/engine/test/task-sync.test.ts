@@ -83,8 +83,9 @@ describe('动手前并最新主线（#1246）', { timeout: 60_000 }, () => {
     });
     // 第 1 轮会话起之前没并过（树刚从最新主线切出来）；第 2 轮会话起之前并过一次
     expect(syncSeenBySegment).toEqual([0, 1]);
-    // 验收（冷调用）开始前不再并：验收看到的次数就是第 2 轮前的那一次，合并到收尾也只有一次
-    expect(syncSeenByVerify).toEqual([1]);
+    // 验收（冷调用）开始前不再并：最后一次验收看到的次数就是第 2 轮前的那一次，合并到收尾也只有一次
+    // （第 1 轮的验收和红了的 CI 同时起、结果被丢掉，决定 0093）
+    expect(syncSeenByVerify.at(-1)).toBe(1);
     expect(calls.segment[1]?.feedback.join('\n')).not.toContain('冲突');
   });
 

@@ -44,6 +44,7 @@ import {
 import { conflictFilesOf, conflictPendingOf, failureOf, iso, judgeRetrying } from './kit.ts';
 import {
   Abandoned,
+  AutoEscape,
   type Avoid,
   bump,
   ConflictHandoff,
@@ -53,6 +54,7 @@ import {
   RepinInterrupt,
   type ResumeFrom,
   stripUndefined,
+  widen,
   ZERO,
 } from './task-support.ts';
 
@@ -65,7 +67,13 @@ export class TaskRuntime {
   private routeWakes = 0;
   private abandon: AbandonCommand | null = null;
   private parks = 0;
-  private cancelRunning: (() => void) | null = null;
+  /**
+   * 正在跑的长活动的取消钩子。冷验收和等 CI 并行（决定 0093）时同时有好几个（和 CI 同时起的那次验收没被认时让它自己跑完，
+   * 可能一直跑到下一轮动手）：放弃要全取消，所以是一组、不是一个。
+   */
+  private readonly running = new Set<() => void>();
+  /** 动手会话那一段的取消钩子：hard 暂停、「现在就换」只取消它，不碰旁边还在跑的验收。 */
+  private cancelPausable: (() => void) | null = null;
   /** 正在跑的这个长活动是不是「hard 暂停能取消的」（只有动手会话）。 */
   private runningPausable = false;
   /** 有人要暂停（#820 片 3）：停在下一个检查点（checkpoint），点「继续」才放；已经有一个在了，后来的不覆盖（谁点的、为什么保持第一次）。 */
@@ -160,7 +168,7 @@ export class TaskRuntime {
       this.pauseReq = command;
       if (command.mode === 'hard' && this.runningPausable) {
         this.pauseCancelled = true;
-        this.cancelRunning?.();
+        this.cancelPausable?.();
       }
     });
     // 「现在就换」（#1216）：只有正在跑的动手会话能当场停（和 hard 暂停同一条取消的路）；没在跑就不理——新指定已经在库里，下一次选路照它。
@@ -169,14 +177,14 @@ export class TaskRuntime {
       if (!this.runningPausable || this.pauseCancelled || this.repinCancelled || this.abandon) return;
       this.repinReq = command;
       this.repinCancelled = true;
-      this.cancelRunning?.();
+      this.cancelPausable?.();
     });
     setHandler(taskRouteWakeSignal, () => {
       this.routeWakes += 1;
     });
     setHandler(taskAbandonSignal, (command) => {
       this.abandon ??= command;
-      this.cancelRunning?.();
+      this.cancelAll();
     });
     setHandler(taskStatusQuery, () => ({
       ...this.status,
@@ -202,6 +210,17 @@ export class TaskRuntime {
   async advance(phase: TaskPhase, doing: string): Promise<void> {
     this.set(phase, doing);
     if (patched('mirror-phase')) await this.mirror('running');
+  }
+
+  private cancelAll(): void {
+    for (const cancel of [...this.running]) cancel();
+  }
+
+  /**
+   * 自动处理了一次、不停下等人（决定 0093）：在任务进度里写一行（库里的 doing），阶段不变。
+   */
+  async note(line: string): Promise<void> {
+    await this.advance(this.status.phase, line);
   }
 
   guard(): void {
@@ -326,15 +345,21 @@ export class TaskRuntime {
 
   /** 把一段长活动放进可取消的范围：放弃的信号一到就取消它（活动心跳，收得到），结果抛 Abandoned。 */
   async cancellable<T>(fn: () => Promise<T>, options: { pausable?: boolean } = {}): Promise<T> {
-    // 放弃的信号可能在上一个 await（比如换阶段落库）期间就到了：那时还没有可取消的范围，cancelRunning 是空的，
+    // 放弃的信号可能在上一个 await（比如换阶段落库）期间就到了：那时还没有可取消的范围，running 里没有它，
     // 信号只记了下来；这里不先看一眼，长活动就照常起、再没人去取消它，一直跑到它自己的限时（#706）。
     // 老历史里这一步没有这道检查：patched() 为假就照旧。
     if (patched('cancellable-guard')) this.guard();
     // hard 暂停的信号在这一段起之前就到了（前面落库那一步期间）：不起，当场按被暂停处理
     if (options.pausable && this.pauseReq?.mode === 'hard') throw new PausedInterrupt(this.pauseReq);
     const scope = new CancellationScope({ cancellable: true });
-    this.cancelRunning = () => scope.cancel();
-    this.runningPausable = options.pausable === true;
+    const cancel = () => scope.cancel();
+    const pausable = options.pausable === true;
+    this.running.add(cancel);
+    // 只有动手会话那一段动这几样：旁边自己跑完的验收收场时不能把它们清掉
+    if (pausable) {
+      this.cancelPausable = cancel;
+      this.runningPausable = true;
+    }
     try {
       return await scope.run(fn);
     } catch (error) {
@@ -348,44 +373,81 @@ export class TaskRuntime {
       }
       throw error;
     } finally {
-      this.cancelRunning = null;
-      this.runningPausable = false;
-      this.pauseCancelled = false;
-      this.repinCancelled = false;
-      this.repinReq = null;
+      this.running.delete(cancel);
+      if (pausable) {
+        this.cancelPausable = null;
+        this.runningPausable = false;
+        this.pauseCancelled = false;
+        this.repinCancelled = false;
+        this.repinReq = null;
+      }
     }
   }
 
   /**
-   * 轮数用尽：先停下等人。点了「继续」之后，累计不超过 3 次就把动手和验收轮数都清零并重读单子；
-   * 超过就停住，写明交给指挥官，不再清零。同一次继续里原来的上限仍在。
-   * 老历史没有 continue-resets-rounds：返回 legacy，调用方只把用尽的那一个计数清掉，不多读单子。
+   * 轮数用尽。这张单头一回用尽（patched('auto-continue-rounds')，决定 0093）：不停下，自动换一条路由（避开最近动手的那个模型）
+   * 带上意见续一次，进度里写一行，回 auto；调用方直接起动手，不先重走 CI 和验收。之后用尽才停下等人：点了「继续」，累计不超过
+   * MAX_ROUND_RESETS 次（自动那一次也算）就把动手和验收轮数都清零并重读单子；超过就停住，写明交给指挥官，不再清零。
+   * 同一次继续里原来的上限仍在。老历史没有 continue-resets-rounds：返回 legacy，调用方只把用尽的那一个计数清掉，不多读单子。
    */
   async exhaustRounds(
     title: string,
     legacyDetail: string,
     detail: string,
     level: 'stuck' | 'decision' = 'stuck',
-  ): Promise<'legacy' | 'reset'> {
+  ): Promise<'legacy' | 'reset' | 'auto'> {
     const reset = patched('continue-resets-rounds');
+    if (reset && this.roundResets === 0 && patched('auto-continue-rounds')) {
+      this.roundResets += 1;
+      const avoided = this.avoidLastModel();
+      this.resetRounds();
+      await this.reloadBrief();
+      await this.note(
+        `${title}：自动换一条路由${avoided ? `（避开 ${avoided}）` : ''}带上意见再做一次，不停下等人（再用完才停）`,
+      );
+      return 'auto';
+    }
     await this.park(title, reset ? detail : legacyDetail, level);
     // 点「继续」清掉没提交攒下的避让，和轮数清零同一处（#1408）。老历史没有这个标记，不碰。
     if (patched('avoid-empty-commit-route')) this.clearCommitAvoid();
     if (!reset) return 'legacy';
     this.roundResets += 1;
     if (this.roundResets > MAX_ROUND_RESETS) {
-      const handoff = '已继续 3 次仍没过，交指挥官';
+      const handoff = `已继续 ${MAX_ROUND_RESETS} 次仍没过，交指挥官`;
       for (;;) {
         await this.park(handoff, handoff);
       }
     }
-    this.round = 0;
-    this.verifyRound = 0;
-    // 单子可能改了：重读之后开新会话，不续带着旧交代的那个
-    this.lastSession = null;
-    this.resumeStreak = 0;
+    this.resetRounds();
     await this.reloadBrief();
     return 'reset';
+  }
+
+  /** 两轮计数清零；单子可能改了：重读之后开新会话，不续带着旧交代的那个。 */
+  private resetRounds(): void {
+    this.round = 0;
+    this.verifyRound = 0;
+    this.lastSession = null;
+    this.resumeStreak = 0;
+  }
+
+  /**
+   * 自动续那一次换路由：把最近动手的那个模型记进这张单的避让。还没动过手回 null。
+   */
+  private avoidLastModel(): string | null {
+    const last = this.lastImplementRoute;
+    if (!last) return null;
+    this.avoidModel(last);
+    return last.modelId;
+  }
+
+  /**
+   * 自动处理时换路由（决定 0093）：把这个模型记进这张单的避让（和没提交的避让同一处，pickRoute 读它）。
+   * 没有别的候选时选路照旧派原来那条（commitMissRoute），不死等。人点「继续」时清掉。
+   */
+  avoidModel(route: RouteChoice): void {
+    this.commitAvoid = widen(this.commitAvoid, route, 'model');
+    this.commitMissRoute = route;
   }
 
   /** 「继续」之后，没提交攒下的避让不再带到后面的轮。 */
@@ -486,8 +548,9 @@ export class TaskRuntime {
   /**
    * 一步：活动自己的重试用完还失败，按失败分流走——有界重试（退避，或等上游给的时间）；再不行停下等人，「继续」之后从头再试。
    * 不绑路由的步骤用它；动手会话在 task-session.ts 里自己带换路由、换模型。
+   * autoCodes：判了停下等人、码（小写）在这里面的，不停下，抛 AutoEscape 交给调用方先自动处理一次。
    */
-  async step<T>(source: string, fn: () => Promise<T>): Promise<T> {
+  async step<T>(source: string, fn: () => Promise<T>, autoCodes: readonly string[] = []): Promise<T> {
     let counters = ZERO;
     let previousMessage: string | undefined;
     for (;;) {
@@ -515,6 +578,10 @@ export class TaskRuntime {
           counters = bump(counters, next);
           await this.pause(next.wait === 'quota' ? 'quota' : 'retry', next.reason, next.delaySeconds);
         } else {
+          // 调用方说这个码先自动处理一次（决定 0093）：不停下，交给调用方。老历史没有这个标记，照旧停下。
+          if (autoCodes.includes(failure.code.toLowerCase()) && patched('auto-before-park')) {
+            throw new AutoEscape(failure.code, failure.message);
+          }
           await this.park(
             next.humanFix ? `${next.reason}；要人：${next.humanFix}` : next.reason,
             failure.message,

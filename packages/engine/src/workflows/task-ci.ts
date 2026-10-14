@@ -1,10 +1,20 @@
 // 任务工作流的「等 CI」一段：红了、有冲突记下返工意见回动手；读不到、头被改写停下等人。
 //
+// CI 结果没查成（不是 PR 被关了、不是没配检查）先自己隔 CI_UNKNOWN_RECHECK_SECONDS 秒重查，最多 CI_UNKNOWN_RECHECKS 次，再停下等人
+// （决定 0093，patched('ci-unknown-recheck')，只在 waitForCiPolicy：waitForCi 只有老历史走）。
+//
 // 改这里之前必须知道：等 CI 是长活动（心跳、收得到取消），一律经 rt.cancellable；冲突先自动并主线，并得干净就接着等。
 
+import { patched } from '@temporalio/workflow';
 import type { CiResult, SyncResult } from '../decisions/types.ts';
 import type { TaskRuntime } from './task-runtime.ts';
-import { type CiStep, ciUnknownIsNoChecks, FORCE_CI_NO_CHECKS } from './task-support.ts';
+import {
+  CI_UNKNOWN_RECHECK_SECONDS,
+  CI_UNKNOWN_RECHECKS,
+  type CiStep,
+  ciUnknownIsNoChecks,
+  FORCE_CI_NO_CHECKS,
+} from './task-support.ts';
 import { conflictFeedback } from './task-sync.ts';
 
 /** 等 CI。红了、有冲突：记下返工意见，回动手。读不到、头被改写：停下等人，继续后再等。 */
@@ -90,6 +100,8 @@ export async function waitForCiPolicy(rt: TaskRuntime): Promise<CiStep> {
   if (!wt || rt.prNumber === null || rt.head === null) {
     throw new Error('等 CI 之前还没有 PR（工作流自己的状态乱了）');
   }
+  // 这一趟里 CI 结果没查成已经自动重查过几次
+  let rechecks = 0;
   for (;;) {
     await rt.advance('ci', `等 PR #${rt.prNumber} 的 CI`);
     const prNumber: number = rt.prNumber;
@@ -143,6 +155,20 @@ export async function waitForCiPolicy(rt: TaskRuntime): Promise<CiStep> {
         // PR 被关了不是「等 CI」：切模式也不许直接合一张已经关了的 PR。
         const closed = got.detail?.includes('PR 被关了') === true;
         const noChecks = ciUnknownIsNoChecks(got.detail);
+        // 没查成先自己隔一会儿重查（决定 0093），有上限。PR 被关了、强制 CI 的仓根本没配检查（要人去配）不重查。老历史没有这个标记，照旧停下
+        if (!closed && !noChecks && rechecks < CI_UNKNOWN_RECHECKS && patched('ci-unknown-recheck')) {
+          rechecks += 1;
+          const why = got.detail ?? '没有检查，或超时读不到';
+          await rt.note(
+            `PR #${prNumber} 的 CI 结果没查成（${why.slice(0, 200)}），${CI_UNKNOWN_RECHECK_SECONDS} 秒后自动重查（第 ${rechecks} 次，最多 ${CI_UNKNOWN_RECHECKS} 次）`,
+          );
+          await rt.pause(
+            'retry',
+            `CI 的结果没查成，${CI_UNKNOWN_RECHECK_SECONDS} 秒后重查`,
+            CI_UNKNOWN_RECHECK_SECONDS,
+          );
+          continue;
+        }
         if (!closed) {
           const title = noChecks ? FORCE_CI_NO_CHECKS : 'CI 的结果没查成';
           const detail = noChecks
