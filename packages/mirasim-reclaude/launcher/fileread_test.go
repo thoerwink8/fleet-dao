@@ -7,6 +7,17 @@ import (
 	"time"
 )
 
+// replaceAtomically 像 Mirasim 一样用 rename 替换文件。Windows 旧语义下目标正被读着（句柄开着）时替换会失败，
+// 隔 10ms 重试，最多 1 秒：测试要的是「替换最终发生」，不是撞上读的那一瞬。
+func replaceAtomically(tmp, path string) {
+	for i := 0; i < 100; i++ {
+		if os.Rename(tmp, path) == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // 读到别的进程写一半的索引：隔 50ms 重读，替换完成后读到完整内容。
 func TestReadJSONFileRetriesHalfWrittenFile(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "index.json")
@@ -17,7 +28,7 @@ func TestReadJSONFileRetriesHalfWrittenFile(t *testing.T) {
 		time.Sleep(60 * time.Millisecond)
 		tmp := p + ".tmp"
 		_ = os.WriteFile(tmp, []byte(`{"routes":{"claude:x":"local"}}`), 0600)
-		_ = os.Rename(tmp, p)
+		replaceAtomically(tmp, p)
 	}()
 	var d struct {
 		Routes map[string]string `json:"routes"`

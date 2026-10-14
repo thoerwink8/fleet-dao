@@ -49,11 +49,16 @@ export function runChild(command: string, args: readonly string[], options: Chil
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
-/** 退出码不是 0 就抛（带上 stderr），成功返回去掉首尾空白的标准输出。 */
+/** 失败时带进报错的输出上限：go test 把失败的用例名和原因写在标准输出末尾，只带 stderr 在 CI 日志里看不到挂的是哪条。 */
+export const FAILURE_TAIL_CHARS = 4000;
+
+/** 退出码不是 0 就抛（带上标准输出和 stderr 的尾部），成功返回去掉首尾空白的标准输出。 */
 export function runChildOk(command: string, args: readonly string[], options: ChildOptions = {}): string {
   const r = runChild(command, args, options);
   if (r.status !== 0) {
-    throw new Error(`${[command, ...args].join(' ').slice(0, 200)} 退出码 ${r.status}：${r.stderr.trim()}`);
+    const out = `${r.stdout.trim()}\n${r.stderr.trim()}`.trim();
+    const tail = out.length > FAILURE_TAIL_CHARS ? `…${out.slice(-FAILURE_TAIL_CHARS)}` : out;
+    throw new Error(`${[command, ...args].join(' ').slice(0, 200)} 退出码 ${r.status}：\n${tail}`);
   }
   return r.stdout.trim();
 }
