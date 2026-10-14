@@ -21,8 +21,18 @@ export const DIRECTIVE_SHOWN_CHARS = 200;
 const CHUNK_BYTES = 256 * 1024;
 /** 最多往回读多少：未回的引导一定在记录末尾，读到这么远还没认出，就当没有待回的引导（不读整份大文件） */
 const MAX_BACK_BYTES = 4 * 1024 * 1024;
-/** 见到没回的引导先等这么久再读一遍：同一条回复里先写的文字，万一还没落盘，别把「已经回了话」误拦 */
-const SETTLE_MS = 300;
+/**
+ * 见到没回的引导先等这么久再读一遍：同一条回复里先写的文字万一还没落盘，别把「已经回了话」误拦。
+ * 实测落盘能比工具调用晚近 1 秒（2026-10-13 12:25：文字 20.375 写下、Monitor 21.214 发起，钩子仍没读到），
+ * 所以最多读 SETTLE_TRIES 次、每次隔 SETTLE_MS；只在真有没回的引导时才等。
+ */
+const SETTLE_MS = 400;
+const SETTLE_TRIES = 4;
+/**
+ * 这几样工具本身就是在回话、转话：SendMessage 把引导转给在跑的子代理（拒的理由里就叫它这么做），送达类工具把答复送到创始人手上。
+ * 拦它们等于叫它照做又不让做。
+ */
+const REPLY_TOOLS = new Set(['SendMessage', 'mcp__mirasim__deliver_artifact', 'PushNotification']);
 
 /** @typedef {{ deny?: string, notice?: string }} Verdict 拒（理由给模型看）、或要明说的话（systemMessage，给创始人看）；空对象是没意见 */
 /** @typedef {{ kind: 'pending', text: string } | { kind: 'clear' } | { kind: 'sidechain' }} Tail 最后一条引导回了没有 */
@@ -240,6 +250,7 @@ export function check(raw, { settleMs = SETTLE_MS, sleep = sleepSync } = {}) {
   // 是 Claude Code 的做法，这一条只管 Claude Code。
   if ('hookEventName' in input || ('toolName' in input && !('tool_name' in input))) return {};
   if (isSubagentCall(input)) return {};
+  if (typeof input.tool_name === 'string' && REPLY_TOOLS.has(input.tool_name)) return {};
 
   /** @type {string[]} */
   const reasons = [];
@@ -252,7 +263,7 @@ export function check(raw, { settleMs = SETTLE_MS, sleep = sleepSync } = {}) {
   } else {
     try {
       let tail = lastDirective(path);
-      if (tail.kind === 'pending') {
+      for (let i = 0; i < SETTLE_TRIES && tail.kind === 'pending'; i++) {
         sleep(settleMs);
         tail = lastDirective(path);
       }

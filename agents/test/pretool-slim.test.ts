@@ -1,8 +1,10 @@
 // 调工具前钩子（agents/hooks/pretool.mjs）的「规则减法」（决定 0089，创始人 2026-10-13 17:54「都同意……你全都修复掉」）：
-// ① 前台等待上限整段删掉（两天拦 18 次全是误伤）：timeout、sleep 写多长都放行。
+// ① 前台等待上限整段删掉（两天拦 18 次全是误伤）：不拦。决定 0093 起，Claude Code 里 timeout 写得超过 60 秒的
+//    由钩子改成后台跑放行（updatedInput 加 run_in_background，见 pretool-background.test.ts）；别家的输入不改。
 // ② `cd <目录> && <只读查看命令>` 不拦（cdReadVerdict 已删）。
 // ③ 打印进程命令行：Claude Code 里看得清、整条只有看进程和过滤文字的，改成用 updatedInput 自动接 redact-secrets.mjs 放行；
-//    看不清的、夹了别的命令的、别家 AI 的，照旧拦下给配方。
+//    看不清的、夹了别的命令的、远端的也改写接上 redactor，但不替它们跳过权限确认（决定 0093）；
+//    往文件里写的（> 文件、tee）和别家 AI 的，照旧拦下给配方。
 // ④ GENERIC_RE（*.key、*.pem 这类）在 heredoc 正文里只认带 / 或 \ 的路径：脚本里的 `item.key;` 不再当密钥文件；真密钥照拦。
 // 命令字符串拆开拼：免得跑这条测试的命令、或者有人 grep 它时，本机的护栏把自己拦下。
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -57,12 +59,20 @@ afterAll(() => {
 
 describe('① 前台等待上限删掉', () => {
   it.each([
-    ['Bash', { command: 'pnpm test', timeout: 420_000 }],
     ['Bash', { command: 'sleep 600' }],
-    ['Bash', { command: 'git fetch && sleep 90 && echo ok', timeout: 100_000 }],
     ['PowerShell', { command: 'Start-Sleep -Seconds 600' }],
-  ])('%s %j：放行（Claude Code 的输入和别家的都一样）', (tool, input) => {
+  ])('%s %j：没写 timeout 的放行、不改写（Claude Code 的输入和别家的都一样）', (tool, input) => {
     expect(lib.decide(cc(tool, input))).toEqual({ code: 0 });
+    expect(lib.decide(bare(tool, input))).toEqual({ code: 0 });
+  });
+
+  it.each([
+    ['Bash', { command: 'pnpm test', timeout: 420_000 }],
+    ['Bash', { command: 'git fetch && sleep 90 && echo ok', timeout: 100_000 }],
+  ])('%s %j：不拦；Claude Code 里改成后台跑，别家的原样放行', (tool, input) => {
+    const v = lib.decide(cc(tool, input));
+    expect(v.code).toBe(0);
+    expect(v.updatedInput).toEqual({ ...input, run_in_background: true });
     expect(lib.decide(bare(tool, input))).toEqual({ code: 0 });
   });
 
@@ -112,13 +122,31 @@ describe('③ 打印进程命令行：Claude Code 里自动接 redactor 放行',
 
   it.each([
     ['Bash', `${PS} -ef; rm -rf /tmp/x`],
-    ['Bash', `${PS} -ef > /tmp/p.txt`],
     ['Bash', `ssh fr '${PS} -ef'`],
     ['Bash', `${PS} -ef | awk '{print $2}'`],
-  ])('夹了别的命令、看不清、远端的：照旧拦下给配方 %s：%s', (tool, command) => {
+  ])(
+    '夹了别的命令、看不清、远端的：也接上 redactor，但不带 allow（照常走权限确认）%s：%s',
+    (tool, command) => {
+      const v = lib.decide(cc(tool, { command }));
+      expect(v.code).toBe(0);
+      expect(String(v.updatedInput?.command)).toContain(`| node ${REDACT}`);
+      expect((v as { approve?: boolean }).approve).toBe(false);
+    },
+  );
+
+  it.each([
+    ['Bash', `${PS} -ef > /tmp/p.txt`],
+    ['Bash', `${PS} -ef | tee /tmp/p.txt`],
+  ])('往文件里写的：写进文件的那份不经过 redactor，照旧拦下给配方 %s：%s', (tool, command) => {
     const v = lib.decide(cc(tool, { command }));
     expect(v.code).toBe(2);
     expect(v.message).toContain('redact-secrets.mjs');
+  });
+
+  it('写到 /dev/null 的不算往文件写：照常改写放行', () => {
+    const v = lib.decide(cc('Bash', { command: `${PS} -ef 2>/dev/null` }));
+    expect(v.code).toBe(0);
+    expect(String(v.updatedInput?.command)).toContain(`| node ${REDACT}`);
   });
 
   it('自己已经接了 redactor：放行，不再改写', () => {
