@@ -10,6 +10,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { exitWith, runMain } from '../exit.ts';
 import { fsRepo } from '../repo.ts';
 import { listTestFiles, parseTimings, TIMINGS_FILE } from '../test-split.ts';
 import {
@@ -25,141 +26,145 @@ import {
   timingsSource,
 } from '../test-timings.ts';
 
-const root = fileURLToPath(new URL('../../../../', import.meta.url));
+// 退出不用 process.exit（Windows 上偶发崩成 3221226505，../exit.ts）：提前退出用 exitWith，runMain 接住设退出码。
+runMain(() => {
+  const root = fileURLToPath(new URL('../../../../', import.meta.url));
 
-function fail(why: string): never {
-  console.error(`耗时表没刷新：${why}`);
-  process.exit(2);
-}
+  function fail(why: string): never {
+    console.error(`耗时表没刷新：${why}`);
+    exitWith(2);
+  }
 
-function gh(args: string[]): string {
-  const r = spawnSync('gh', args, { cwd: root, encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 });
-  if (r.error) fail(`gh ${args.join(' ')} 跑不起来（${r.error.message}）`);
-  if (r.status !== 0) fail(`gh ${args.join(' ')} 退出 ${r.status}：${r.stderr.trim().slice(0, 300)}`);
-  return r.stdout;
-}
+  function gh(args: string[]): string {
+    const r = spawnSync('gh', args, { cwd: root, encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 });
+    if (r.error) fail(`gh ${args.join(' ')} 跑不起来（${r.error.message}）`);
+    if (r.status !== 0) fail(`gh ${args.join(' ')} 退出 ${r.status}：${r.stderr.trim().slice(0, 300)}`);
+    return r.stdout;
+  }
 
-let values: { run?: string[]; 'log-file'?: string[]; out?: string };
-try {
-  values = parseArgs({
-    options: {
-      run: { type: 'string', multiple: true },
-      'log-file': { type: 'string', multiple: true },
-      out: { type: 'string' },
-    },
-    strict: true,
-  }).values;
-} catch (e) {
-  fail(`参数不对（${e instanceof Error ? e.message : String(e)}）`);
-}
-
-/** 不给 --run 时：最近的、PR 触发的、绿的 ci.yml 运行里，头 TIMINGS_AUTO_RUNS 次有至少 TIMINGS_AUTO_MIN_BOXES 台测试台跑成功的。 */
-function pickAutoRuns(): string[] {
-  const text = gh([
-    'run',
-    'list',
-    '--workflow',
-    'ci.yml',
-    '--status',
-    'success',
-    '--event',
-    TIMINGS_RUN_EVENT,
-    '--limit',
-    String(TIMINGS_AUTO_SCAN),
-    '--json',
-    'databaseId,event',
-  ]);
-  let list: { databaseId?: unknown; event?: unknown }[];
+  let values: { run?: string[]; 'log-file'?: string[]; out?: string };
   try {
-    list = JSON.parse(text);
-  } catch {
-    fail('gh run list 的输出不是 JSON');
-  }
-  // 列表已按事件筛过。整批认完再往下问测试台：混进非 PR 的（或 event 认不出）就没查成，不用这批刷表。
-  const ids: string[] = [];
-  for (const item of list) {
-    if (typeof item.databaseId !== 'number') fail('gh run list 给的运行编号认不出');
-    const id = String(item.databaseId);
-    const why = notPullRequestRun(id, item.event);
-    if (why !== null) fail(`没查成：${why}`);
-    ids.push(id);
-  }
-  const picked: string[] = [];
-  for (const id of ids) {
-    const boxes = gh([
-      'run',
-      'view',
-      id,
-      '--json',
-      'jobs',
-      '--jq',
-      '[.jobs[] | select((.name | startswith("test (")) and .conclusion == "success")] | length',
-    ]);
-    if (!/^\d+\s*$/.test(boxes)) fail(`运行 ${id} 的测试台数认不出：${boxes.trim().slice(0, 80)}`);
-    if (Number(boxes) >= TIMINGS_AUTO_MIN_BOXES) picked.push(id);
-    if (picked.length === TIMINGS_AUTO_RUNS) break;
-  }
-  if (picked.length === 0)
-    fail(
-      `最近 ${list.length} 次 PR 触发的绿的 ci.yml 运行里没有一次真跑了 ${TIMINGS_AUTO_MIN_BOXES} 台以上的测试台（自己用 --run 指几轮）`,
-    );
-  return picked;
-}
-
-const logs: { name: string; text: string }[] = [];
-for (const file of values['log-file'] ?? []) {
-  try {
-    logs.push({ name: `日志文件 ${file.split(/[\\/]/).pop()}`, text: readFileSync(file, 'utf8') });
+    values = parseArgs({
+      options: {
+        run: { type: 'string', multiple: true },
+        'log-file': { type: 'string', multiple: true },
+        out: { type: 'string' },
+      },
+      strict: true,
+    }).values;
   } catch (e) {
-    fail(`读不到 ${file}（${e instanceof Error ? e.message : String(e)}）`);
+    fail(`参数不对（${e instanceof Error ? e.message : String(e)}）`);
   }
-}
-let runIds = values.run ?? [];
-if (runIds.length === 0 && logs.length === 0) runIds = pickAutoRuns();
-for (const run of runIds) {
-  if (!/^\d+$/.test(run)) fail(`run 编号认不出：${run}`);
-  logs.push({ name: `ci.yml run ${run}`, text: gh(['run', 'view', run, '--log']) });
-}
 
-const perRun: Map<string, number>[] = [];
-for (const l of logs) {
-  const m = parseRunLog(l.text);
-  if (m.size === 0)
-    fail(
-      `${l.name} 的日志里一个测试文件的耗时都没认出来（job 名不是 test (…)？报告器的格式变了？那一轮根本没跑测试？）`,
-    );
-  perRun.push(m);
-}
-const measured = medianOfRuns(perRun);
-if (measured === undefined) fail('一轮日志都没有');
-const source = timingsSource(
-  logs.map((l) => l.name),
-  new Date(),
-);
+  /** 不给 --run 时：最近的、PR 触发的、绿的 ci.yml 运行里，头 TIMINGS_AUTO_RUNS 次有至少 TIMINGS_AUTO_MIN_BOXES 台测试台跑成功的。 */
+  function pickAutoRuns(): string[] {
+    const text = gh([
+      'run',
+      'list',
+      '--workflow',
+      'ci.yml',
+      '--status',
+      'success',
+      '--event',
+      TIMINGS_RUN_EVENT,
+      '--limit',
+      String(TIMINGS_AUTO_SCAN),
+      '--json',
+      'databaseId,event',
+    ]);
+    let list: { databaseId?: unknown; event?: unknown }[];
+    try {
+      list = JSON.parse(text);
+    } catch {
+      fail('gh run list 的输出不是 JSON');
+    }
+    // 列表已按事件筛过。整批认完再往下问测试台：混进非 PR 的（或 event 认不出）就没查成，不用这批刷表。
+    const ids: string[] = [];
+    for (const item of list) {
+      if (typeof item.databaseId !== 'number') fail('gh run list 给的运行编号认不出');
+      const id = String(item.databaseId);
+      const why = notPullRequestRun(id, item.event);
+      if (why !== null) fail(`没查成：${why}`);
+      ids.push(id);
+    }
+    const picked: string[] = [];
+    for (const id of ids) {
+      const boxes = gh([
+        'run',
+        'view',
+        id,
+        '--json',
+        'jobs',
+        '--jq',
+        '[.jobs[] | select((.name | startswith("test (")) and .conclusion == "success")] | length',
+      ]);
+      if (!/^\d+\s*$/.test(boxes)) fail(`运行 ${id} 的测试台数认不出：${boxes.trim().slice(0, 80)}`);
+      if (Number(boxes) >= TIMINGS_AUTO_MIN_BOXES) picked.push(id);
+      if (picked.length === TIMINGS_AUTO_RUNS) break;
+    }
+    if (picked.length === 0)
+      fail(
+        `最近 ${list.length} 次 PR 触发的绿的 ci.yml 运行里没有一次真跑了 ${TIMINGS_AUTO_MIN_BOXES} 台以上的测试台（自己用 --run 指几轮）`,
+      );
+    return picked;
+  }
 
-const existing = listTestFiles(fsRepo(root));
-if (typeof existing === 'string') fail(existing);
-const path = values.out ?? join(root, TIMINGS_FILE);
-let oldText: string | undefined;
-try {
-  oldText = readFileSync(path, 'utf8');
-} catch {
-  oldText = undefined;
-}
-const old = parseTimings(oldText);
-if (typeof old === 'string') console.warn(`旧表认不出（${old}），这次只用新量的`);
-// 量到的文件一个都不在仓里：样例过时了、或仓被删空。这时候 mergeTimings 会把它们全当「仓里已没有」丢掉，
-// 结果是一张空表——写下去装箱全按估算，还不报错（出过一次：样例路径指向 #987 删掉的文件，
-// 主线因此红了半天）。空表不是「这次没什么可量」，是没量成，明确失败、一个字不写。
-if (measured.size > 0 && [...measured.keys()].every((f) => !existing.includes(f)))
-  fail(
-    `日志里量到的 ${measured.size} 个测试文件一个都不在仓里（样例过时了？仓被删空了？）：${[...measured.keys()].slice(0, 5).join('、')}`,
+  const logs: { name: string; text: string }[] = [];
+  for (const file of values['log-file'] ?? []) {
+    try {
+      logs.push({ name: `日志文件 ${file.split(/[\\/]/).pop()}`, text: readFileSync(file, 'utf8') });
+    } catch (e) {
+      fail(`读不到 ${file}（${e instanceof Error ? e.message : String(e)}）`);
+    }
+  }
+  let runIds = values.run ?? [];
+  if (runIds.length === 0 && logs.length === 0) runIds = pickAutoRuns();
+  for (const run of runIds) {
+    if (!/^\d+$/.test(run)) fail(`run 编号认不出：${run}`);
+    logs.push({ name: `ci.yml run ${run}`, text: gh(['run', 'view', run, '--log']) });
+  }
+
+  const perRun: Map<string, number>[] = [];
+  for (const l of logs) {
+    const m = parseRunLog(l.text);
+    if (m.size === 0)
+      fail(
+        `${l.name} 的日志里一个测试文件的耗时都没认出来（job 名不是 test (…)？报告器的格式变了？那一轮根本没跑测试？）`,
+      );
+    perRun.push(m);
+  }
+  const measured = medianOfRuns(perRun);
+  if (measured === undefined) fail('一轮日志都没有');
+  const source = timingsSource(
+    logs.map((l) => l.name),
+    new Date(),
   );
-const r = mergeTimings(typeof old === 'string' ? undefined : old, measured, existing, source);
-writeFileSync(path, renderTimings(r.timings));
-const missing = existing.filter((f) => r.timings.files[f] === undefined);
-console.log(
-  `${values.out ?? TIMINGS_FILE}：${logs.length} 轮取中位数，量到 ${measured.size} 个文件（更新 ${r.updated}、新增 ${r.added}），沿用旧值 ${r.kept} 个，删掉仓里已没有的 ${r.dropped.length} 个`,
-);
-if (missing.length > 0)
-  console.log(`表里还缺 ${missing.length} 个（装箱时按中位数估）：${missing.slice(0, 5).join('、')}`);
+
+  const existing = listTestFiles(fsRepo(root));
+  if (typeof existing === 'string') fail(existing);
+  const path = values.out ?? join(root, TIMINGS_FILE);
+  let oldText: string | undefined;
+  try {
+    oldText = readFileSync(path, 'utf8');
+  } catch {
+    oldText = undefined;
+  }
+  const old = parseTimings(oldText);
+  if (typeof old === 'string') console.warn(`旧表认不出（${old}），这次只用新量的`);
+  // 量到的文件一个都不在仓里：样例过时了、或仓被删空。这时候 mergeTimings 会把它们全当「仓里已没有」丢掉，
+  // 结果是一张空表——写下去装箱全按估算，还不报错（出过一次：样例路径指向 #987 删掉的文件，
+  // 主线因此红了半天）。空表不是「这次没什么可量」，是没量成，明确失败、一个字不写。
+  if (measured.size > 0 && [...measured.keys()].every((f) => !existing.includes(f)))
+    fail(
+      `日志里量到的 ${measured.size} 个测试文件一个都不在仓里（样例过时了？仓被删空了？）：${[...measured.keys()].slice(0, 5).join('、')}`,
+    );
+  const r = mergeTimings(typeof old === 'string' ? undefined : old, measured, existing, source);
+  writeFileSync(path, renderTimings(r.timings));
+  const missing = existing.filter((f) => r.timings.files[f] === undefined);
+  console.log(
+    `${values.out ?? TIMINGS_FILE}：${logs.length} 轮取中位数，量到 ${measured.size} 个文件（更新 ${r.updated}、新增 ${r.added}），沿用旧值 ${r.kept} 个，删掉仓里已没有的 ${r.dropped.length} 个`,
+  );
+  if (missing.length > 0)
+    console.log(`表里还缺 ${missing.length} 个（装箱时按中位数估）：${missing.slice(0, 5).join('、')}`);
+  return undefined;
+});

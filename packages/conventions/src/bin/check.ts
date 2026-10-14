@@ -36,4 +36,4 @@ const code = check({
   out: (l) => console.log(l),
   err: (l) => console.error(l),
 });
-process.exit(code);
+process.exitCode = code;

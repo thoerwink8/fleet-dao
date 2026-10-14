@@ -10,6 +10,7 @@ import { appendFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { applyReuse, assignTests, deferE2eToMain, planCi, planOutputs, readGraph } from '../ci-plan.ts';
+import { exitWith, runMain } from '../exit.ts';
 import { parseReuse } from '../main-reuse.ts';
 import { fsRepo } from '../repo.ts';
 import {
@@ -20,153 +21,157 @@ import {
   unitOfTestFile,
 } from '../test-split.ts';
 
-const USAGE = '用法：ci-plan.ts [--event pull_request|push] [--base origin/main|<提交>]';
-const root = fileURLToPath(new URL('../../../../', import.meta.url));
+// 退出不用 process.exit（Windows 上偶发崩成 3221226505，../exit.ts）：提前退出用 exitWith，runMain 接住设退出码。
+runMain(() => {
+  const USAGE = '用法：ci-plan.ts [--event pull_request|push] [--base origin/main|<提交>]';
+  const root = fileURLToPath(new URL('../../../../', import.meta.url));
 
-function fail(why: string): never {
-  console.error(`::error::没算成要跑什么：${why}`);
-  process.exit(2);
-}
+  function fail(why: string): never {
+    console.error(`::error::没算成要跑什么：${why}`);
+    exitWith(2);
+  }
 
-let event = 'pull_request';
-let base = 'origin/main';
-/** 主线那一轮的基准提交（--main-base）；空 = 没给，主线照旧全跑（退到全跑，绝不静默少跑）。 */
-let mainBase = '';
-/** 主线同树复用（--reuse，main-reuse.ts 那一步的输出，JSON）；空 = 没复用。认不出、树对不上都当没复用，照旧按区间算。 */
-let reuseText = '';
-try {
-  const { values } = parseArgs({
-    options: {
-      event: { type: 'string' },
-      base: { type: 'string' },
-      'main-base': { type: 'string' },
-      reuse: { type: 'string' },
+  let event = 'pull_request';
+  let base = 'origin/main';
+  /** 主线那一轮的基准提交（--main-base）；空 = 没给，主线照旧全跑（退到全跑，绝不静默少跑）。 */
+  let mainBase = '';
+  /** 主线同树复用（--reuse，main-reuse.ts 那一步的输出，JSON）；空 = 没复用。认不出、树对不上都当没复用，照旧按区间算。 */
+  let reuseText = '';
+  try {
+    const { values } = parseArgs({
+      options: {
+        event: { type: 'string' },
+        base: { type: 'string' },
+        'main-base': { type: 'string' },
+        reuse: { type: 'string' },
+      },
+      strict: true,
+    });
+    event = values.event ?? event;
+    base = values.base ?? base;
+    mainBase = values['main-base'] ?? mainBase;
+    reuseText = values.reuse ?? reuseText;
+  } catch (e) {
+    console.error(`参数不对（${e instanceof Error ? e.message : String(e)}）。${USAGE}`);
+    exitWith(2);
+  }
+
+  function git(args: string[]): string {
+    const r = spawnSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    if (r.error) fail(`git ${args.join(' ')} 跑不起来（${r.error.message}）`);
+    if (r.status !== 0) fail(`git ${args.join(' ')} 退出 ${r.status}：${r.stderr.trim()}`);
+    return r.stdout;
+  }
+
+  let changed: string[] = [];
+  /** 交给 planCi 的事件：主线给了基准就按「改动区间」算，跟 PR 同一份判法（planCi 只认 pull_request 才按改动）。 */
+  let planEvent = event;
+  if (event === 'pull_request') {
+    if (base.startsWith('-')) fail(`base 不像分支名：${base}`);
+    git(['rev-parse', '--verify', '--quiet', `${base}^{commit}`]);
+    changed = git(['diff', '--name-only', '-z', '--no-renames', `${base}...HEAD`])
+      .split('\0')
+      .filter((f) => f !== '');
+  } else if (event === 'push' && mainBase !== '') {
+    // 主线：跑「上次真绿的头 … 这次的头」这段累计改动（基准由 main-baseline.ts 查出，工作流经 --main-base 传进来）。
+    // 两点不是三点：要的是这段区间里改过什么；三个点从共同祖先算，落后/取消造成的分叉会少算。
+    // 基准认不出、diff 失败都 fail（退出 2、判红）；没给 --main-base 就照旧全跑，绝不静默少跑。
+    if (mainBase.startsWith('-')) fail(`主线基准不像提交：${mainBase}`);
+    git(['rev-parse', '--verify', '--quiet', `${mainBase}^{commit}`]);
+    changed = git(['diff', '--name-only', '-z', '--no-renames', mainBase, 'HEAD'])
+      .split('\0')
+      .filter((f) => f !== '');
+    planEvent = 'pull_request';
+  }
+
+  const repo = fsRepo(root);
+  const assigned = assignTests(
+    planCi({
+      event: planEvent,
+      changed,
+      graph: readGraph(repo),
+      specExists: (rel) => repo.exists(rel),
+    }),
+    {
+      all: listTestFiles(repo),
+      timings: parseTimings(repo.read(TIMINGS_FILE)),
+      read: (rel) => repo.read(rel),
     },
-    strict: true,
-  });
-  event = values.event ?? event;
-  base = values.base ?? base;
-  mainBase = values['main-base'] ?? mainBase;
-  reuseText = values.reuse ?? reuseText;
-} catch (e) {
-  console.error(`参数不对（${e instanceof Error ? e.message : String(e)}）。${USAGE}`);
-  process.exit(2);
-}
-
-function git(args: string[]): string {
-  const r = spawnSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-  if (r.error) fail(`git ${args.join(' ')} 跑不起来（${r.error.message}）`);
-  if (r.status !== 0) fail(`git ${args.join(' ')} 退出 ${r.status}：${r.stderr.trim()}`);
-  return r.stdout;
-}
-
-let changed: string[] = [];
-/** 交给 planCi 的事件：主线给了基准就按「改动区间」算，跟 PR 同一份判法（planCi 只认 pull_request 才按改动）。 */
-let planEvent = event;
-if (event === 'pull_request') {
-  if (base.startsWith('-')) fail(`base 不像分支名：${base}`);
-  git(['rev-parse', '--verify', '--quiet', `${base}^{commit}`]);
-  changed = git(['diff', '--name-only', '-z', '--no-renames', `${base}...HEAD`])
-    .split('\0')
-    .filter((f) => f !== '');
-} else if (event === 'push' && mainBase !== '') {
-  // 主线：跑「上次真绿的头 … 这次的头」这段累计改动（基准由 main-baseline.ts 查出，工作流经 --main-base 传进来）。
-  // 两点不是三点：要的是这段区间里改过什么；三个点从共同祖先算，落后/取消造成的分叉会少算。
-  // 基准认不出、diff 失败都 fail（退出 2、判红）；没给 --main-base 就照旧全跑，绝不静默少跑。
-  if (mainBase.startsWith('-')) fail(`主线基准不像提交：${mainBase}`);
-  git(['rev-parse', '--verify', '--quiet', `${mainBase}^{commit}`]);
-  changed = git(['diff', '--name-only', '-z', '--no-renames', mainBase, 'HEAD'])
-    .split('\0')
-    .filter((f) => f !== '');
-  planEvent = 'pull_request';
-}
-
-const repo = fsRepo(root);
-const assigned = assignTests(
-  planCi({
-    event: planEvent,
-    changed,
-    graph: readGraph(repo),
-    specExists: (rel) => repo.exists(rel),
-  }),
-  {
-    all: listTestFiles(repo),
-    timings: parseTimings(repo.read(TIMINGS_FILE)),
-    read: (rel) => repo.read(rel),
-  },
-);
-if (typeof assigned === 'string') fail(assigned);
-let { plan } = assigned;
-const { packed } = assigned;
-// e2e 出 PR 闸（决定 0093）：PR 上不跑，合并后主线推送那一轮按区间跑、当发版闸
-if (event === 'pull_request') plan = deferE2eToMain(plan);
-// 同树复用：只在主线推送、给了区间基准时认；这里再核一遍两棵树（main-reuse.ts 那一步核过，这里不信它的输出）。
-// 对不上、认不出一律当没复用：test、web、deploy 照区间全跑，并留 ::warning::。
-if (reuseText.trim() !== '') {
-  const reuse = parseReuse(reuseText);
-  if (event !== 'push' || mainBase === '') {
-    fail('--reuse 只能和 push 事件、--main-base 一起给');
-  } else if (reuse === null) {
-    console.log(`::warning::同树复用的记录认不出（${reuseText.slice(0, 200)}），不复用，照区间全跑`);
-  } else {
-    const headTree = git(['rev-parse', 'HEAD^{tree}']).trim();
-    const baseTree = git(['rev-parse', `${mainBase}^{tree}`]).trim();
-    if (headTree !== reuse.tree || baseTree !== reuse.baseTree) {
-      console.log(
-        `::warning::同树复用的记录和这一轮的检出对不上（树 ${headTree.slice(0, 7)} / 基准树 ${baseTree.slice(0, 7)}，记录是 ${reuse.tree.slice(0, 7)} / ${reuse.baseTree.slice(0, 7)}），不复用，照区间全跑`,
-      );
+  );
+  if (typeof assigned === 'string') fail(assigned);
+  let { plan } = assigned;
+  const { packed } = assigned;
+  // e2e 出 PR 闸（决定 0093）：PR 上不跑，合并后主线推送那一轮按区间跑、当发版闸
+  if (event === 'pull_request') plan = deferE2eToMain(plan);
+  // 同树复用：只在主线推送、给了区间基准时认；这里再核一遍两棵树（main-reuse.ts 那一步核过，这里不信它的输出）。
+  // 对不上、认不出一律当没复用：test、web、deploy 照区间全跑，并留 ::warning::。
+  if (reuseText.trim() !== '') {
+    const reuse = parseReuse(reuseText);
+    if (event !== 'push' || mainBase === '') {
+      fail('--reuse 只能和 push 事件、--main-base 一起给');
+    } else if (reuse === null) {
+      console.log(`::warning::同树复用的记录认不出（${reuseText.slice(0, 200)}），不复用，照区间全跑`);
     } else {
-      plan = applyReuse(plan, reuse);
+      const headTree = git(['rev-parse', 'HEAD^{tree}']).trim();
+      const baseTree = git(['rev-parse', `${mainBase}^{tree}`]).trim();
+      if (headTree !== reuse.tree || baseTree !== reuse.baseTree) {
+        console.log(
+          `::warning::同树复用的记录和这一轮的检出对不上（树 ${headTree.slice(0, 7)} / 基准树 ${baseTree.slice(0, 7)}，记录是 ${reuse.tree.slice(0, 7)} / ${reuse.baseTree.slice(0, 7)}），不复用，照区间全跑`,
+        );
+      } else {
+        plan = applyReuse(plan, reuse);
+      }
     }
   }
-}
-if (packed?.timingsProblem)
-  console.log(`::warning::${packed.timingsProblem}：测试照样每个都跑，只是分台可能不匀`);
-// 表缺的文件占比超过 10% 也提醒（只提醒、不挡）：判法只看检出来的表和测试文件（#299），不读 GitHub
-const stale = packed && packed.boxes.length > 0 ? timingsStaleWarning(packed) : undefined;
-if (stale !== undefined) console.log(`::warning::${stale}`);
-const outputs = planOutputs(plan);
+  if (packed?.timingsProblem)
+    console.log(`::warning::${packed.timingsProblem}：测试照样每个都跑，只是分台可能不匀`);
+  // 表缺的文件占比超过 10% 也提醒（只提醒、不挡）：判法只看检出来的表和测试文件（#299），不读 GitHub
+  const stale = packed && packed.boxes.length > 0 ? timingsStaleWarning(packed) : undefined;
+  if (stale !== undefined) console.log(`::warning::${stale}`);
+  const outputs = planOutputs(plan);
 
-/** 一台装了哪些单元：「engine 12、api 3」。 */
-const unitsOf = (files: readonly string[]) => {
-  const n = new Map<string, number>();
-  for (const f of files) n.set(unitOfTestFile(f) ?? '?', (n.get(unitOfTestFile(f) ?? '?') ?? 0) + 1);
-  return [...n].map(([u, c]) => `${u} ${c}`).join('、');
-};
-const human = [
-  plan.full ? '全跑' : '按改动跑',
-  ...plan.reasons.map((r) => `- ${r}`),
-  `biome：${plan.biome}（tsc：${outputs.tsc || '不跑'}）`,
-  plan.tests.length === 0
-    ? 'test：不跑'
-    : `test：${plan.tests.length} 台，${plan.tests.reduce((s, b) => s + b.files.length, 0)} 个测试文件，估计耗时合计 ${Math.round(plan.tests.reduce((s, b) => s + b.estMs, 0) / 1000)} 秒`,
-  ...plan.tests.map(
-    (b) =>
-      `- test (${b.label})：${b.files.length} 个文件，估 ${Math.round(b.estMs / 1000)} 秒（${unitsOf(b.files)}）`,
-  ),
-  `web：${plan.web}  e2e：${plan.e2e === 'all' ? '全套' : plan.e2e.length === 0 ? '不跑' : plan.e2e.join('、')}  deploy：${plan.deploy}`,
-];
-console.log(`改了 ${changed.length} 个文件（${event}${event === 'pull_request' ? `，比 ${base}` : ''}）`);
-for (const line of human) console.log(line);
+  /** 一台装了哪些单元：「engine 12、api 3」。 */
+  const unitsOf = (files: readonly string[]) => {
+    const n = new Map<string, number>();
+    for (const f of files) n.set(unitOfTestFile(f) ?? '?', (n.get(unitOfTestFile(f) ?? '?') ?? 0) + 1);
+    return [...n].map(([u, c]) => `${u} ${c}`).join('、');
+  };
+  const human = [
+    plan.full ? '全跑' : '按改动跑',
+    ...plan.reasons.map((r) => `- ${r}`),
+    `biome：${plan.biome}（tsc：${outputs.tsc || '不跑'}）`,
+    plan.tests.length === 0
+      ? 'test：不跑'
+      : `test：${plan.tests.length} 台，${plan.tests.reduce((s, b) => s + b.files.length, 0)} 个测试文件，估计耗时合计 ${Math.round(plan.tests.reduce((s, b) => s + b.estMs, 0) / 1000)} 秒`,
+    ...plan.tests.map(
+      (b) =>
+        `- test (${b.label})：${b.files.length} 个文件，估 ${Math.round(b.estMs / 1000)} 秒（${unitsOf(b.files)}）`,
+    ),
+    `web：${plan.web}  e2e：${plan.e2e === 'all' ? '全套' : plan.e2e.length === 0 ? '不跑' : plan.e2e.join('、')}  deploy：${plan.deploy}`,
+  ];
+  console.log(`改了 ${changed.length} 个文件（${event}${event === 'pull_request' ? `，比 ${base}` : ''}）`);
+  for (const line of human) console.log(line);
 
-const outFile = process.env.GITHUB_OUTPUT;
-if (outFile) {
-  try {
-    appendFileSync(
-      outFile,
-      Object.entries(outputs)
-        .map(([k, v]) => `${k}=${v}\n`)
-        .join(''),
-    );
-  } catch (e) {
-    fail(`写不进 GITHUB_OUTPUT（${e instanceof Error ? e.message : String(e)}）`);
+  const outFile = process.env.GITHUB_OUTPUT;
+  if (outFile) {
+    try {
+      appendFileSync(
+        outFile,
+        Object.entries(outputs)
+          .map(([k, v]) => `${k}=${v}\n`)
+          .join(''),
+      );
+    } catch (e) {
+      fail(`写不进 GITHUB_OUTPUT（${e instanceof Error ? e.message : String(e)}）`);
+    }
   }
-}
-const summary = process.env.GITHUB_STEP_SUMMARY;
-if (summary) {
-  try {
-    appendFileSync(summary, `### 这次跑什么\n\n${human.join('\n')}\n`);
-  } catch {
-    // 摘要只给人看；写不上不影响开关
+  const summary = process.env.GITHUB_STEP_SUMMARY;
+  if (summary) {
+    try {
+      appendFileSync(summary, `### 这次跑什么\n\n${human.join('\n')}\n`);
+    } catch {
+      // 摘要只给人看；写不上不影响开关
+    }
   }
-}
+  return undefined;
+});
