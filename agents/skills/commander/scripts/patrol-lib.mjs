@@ -38,8 +38,9 @@ import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
 /**
  * 一次巡查读到的。at 是法国的采集时间（ISO）。
  * healthz、history、trainStatus、trainSince、trainSha、autoNote、lag 是发版和健康页（老基线里没有这几项，只有判当前读数用到）。
- * trainSince 是这一趟的起点（进度记录的 startedAt，没有用 updatedAt；老格式都没有是 ''），trainSha 是这一趟发的提交（target.value，没有是 ''）。
- * @typedef {{ at: string, release: string, healthz: HealthzFact, history: HistoryFact[], trainStatus: string, trainSince?: string, trainSha?: string, autoNote: string, lag: LagFact, services: Record<string, string>, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notesOpen: number, notes: NoteFact[], push: PushFact, brief: BriefFact }} Facts
+ * trainSince 是这一趟的起点（进度记录的 startedAt，没有用 updatedAt；老格式都没有是 ''），trainSha 是这一趟发的提交（target.value，没有是 ''）；
+ * currentSha 是法国 current 指向的完整提交号（读不到是 ''）。
+ * @typedef {{ at: string, release: string, healthz: HealthzFact, history: HistoryFact[], trainStatus: string, trainSince?: string, trainSha?: string, currentSha?: string, autoNote: string, lag: LagFact, services: Record<string, string>, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notesOpen: number, notes: NoteFact[], push: PushFact, brief: BriefFact }} Facts
  */
 /** @typedef {'OK' | 'ALERT' | 'BROKEN'} Verdict */
 /** @typedef {{ verdict: Verdict, facts: Facts | null, alerts: string[], delta: string[], broken: string | null, notes: string[] }} Report */
@@ -389,6 +390,7 @@ export function parseRaw(text) {
       trainStatus: rel.trainStatus,
       trainSince: rel.trainSince,
       trainSha: rel.trainSha,
+      currentSha: one.cur ?? '',
       autoNote: rel.autoNote,
       lag: rel.lag,
       services,
@@ -486,6 +488,27 @@ export function trainReason(f) {
 }
 
 /**
+ * 两个提交号是同一个（一边是另一边的前缀也算，至少 7 位）。同 packages/engine/src/jobs/release-watch.ts 的 sameCommit。
+ * @param {string | undefined} a
+ * @param {string | undefined} b
+ */
+function sameCommit(a, b) {
+  if (!a || !b) return false;
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  if (Math.min(x.length, y.length) < 7) return false;
+  return x.startsWith(y) || y.startsWith(x);
+}
+
+/**
+ * 这一趟已经落地：进度 done、法国 current 就是这一趟的目标提交。同 release-watch.ts 的 trainLanded。
+ * @param {Facts} f
+ */
+export function trainLanded(f) {
+  return f.trainStatus === 'done' && sameCommit(f.currentSha, f.trainSha);
+}
+
+/**
  * 判 BROKEN 的几条（出事了，不是「要留意」）：健康页不是 200（列出红的检查）、最近一次发版是 unhealthy / auto-rollback、
  * 发版进度记录收了尾却没成或 running 超时（trainReason）、自动发布处于「要人看」（一趟正常在走时不算：那是因为它）。命中一条记一行；没有回空。
  * @param {Facts} f
@@ -498,7 +521,11 @@ export function brokenReasons(f) {
     out.push(`/healthz 回 ${f.healthz.code === 0 ? '不出来（连不上）' : f.healthz.code}${reds}`);
   }
   const last = f.history.at(-1);
-  if (last && BAD_RELEASE_EVENTS.includes(last.event)) out.push(`最近一次发版是 ${historyWord(last)}`);
+  // 末行「健康检查没过」说的就是已经落地的这个提交（没退回、停在这一版，接活脚本的发后体检过了）：旧话，不算（#2207）。
+  // 同 release-watch.ts 的 badHistoryTail；auto-rollback 的末行是退回去的上一版，current 也不是目标，照算
+  const superseded = last?.event === 'unhealthy' && trainLanded(f) && sameCommit(last.sha, f.currentSha);
+  if (last && BAD_RELEASE_EVENTS.includes(last.event) && !superseded)
+    out.push(`最近一次发版是 ${historyWord(last)}`);
   const train = trainReason(f);
   if (train) out.push(train);
   // 自动发布这句「要人看」只因为进度记录的状态（「上一趟发版是「X」状态」）时，进度记录这边自己判：正常在走、刚收尾成了（旧话）都不算；进度记录不在却这么说对不上，照报。
