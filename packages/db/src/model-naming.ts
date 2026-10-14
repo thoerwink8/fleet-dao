@@ -25,7 +25,7 @@ interface Flags {
   contextSet: boolean;
 }
 
-type SuffixKind = 'effort' | 'fast' | 'thinking' | 'build';
+type SuffixKind = 'effort' | 'subLowEffort' | 'fast' | 'thinking' | 'build';
 
 interface BaseRule {
   family: string;
@@ -41,7 +41,14 @@ interface ChannelRule {
 }
 
 const CONTEXT_TOKEN = /^(\d+(?:\.\d+)?)([km])$/i;
-const EFFORT_TAIL = /-(xhigh|max|high|medium|low)$/;
+const EFFORT_TAIL = /-(xhigh|extra-high|max|high|medium|low)$/;
+/** Cursor 的档位写法里不在档位表上的别名：extra-high 就是 xhigh。 */
+const EFFORT_ALIASES: Record<string, SessionEffort> = { 'extra-high': 'xhigh' };
+/**
+ * 比 low 还低的档（Cursor 的 -none、-minimal：不思考、几乎不思考）：档位表（SESSION_EFFORTS，起会话的上限）里没有这一级，
+ * 拆掉后缀、档位记空，模型照样认出来；路由按上游原串区分，-none 和别的档不会并成一条。
+ */
+const SUB_LOW_EFFORT_TAIL = /-(none|minimal)$/;
 
 function blankFlags(): Flags {
   return {
@@ -140,8 +147,16 @@ function stripSuffixes(body: string, allowed: readonly SuffixKind[], flags: Flag
   for (;;) {
     const effort = allow.has('effort') ? EFFORT_TAIL.exec(rest) : null;
     if (effort?.[1]) {
-      if (!setEffort(flags, effort[1])) return null;
+      if (!setEffort(flags, EFFORT_ALIASES[effort[1]] ?? effort[1])) return null;
       rest = rest.slice(0, -effort[0].length);
+      continue;
+    }
+    const subLow = allow.has('subLowEffort') ? SUB_LOW_EFFORT_TAIL.exec(rest) : null;
+    if (subLow) {
+      // 和别的档位一起出现（gpt-5.5-none-high）说不通，拆不出
+      if (flags.effortSet) return null;
+      flags.effortSet = true;
+      rest = rest.slice(0, -subLow[0].length);
       continue;
     }
     if (allow.has('fast') && rest.endsWith('-fast')) {
@@ -170,9 +185,16 @@ const claudeBase: BaseRule = {
   modelId: (match) => `${match[1]}-${(match[2] ?? '').replaceAll('-', '.')}`,
 };
 
+/** Cursor 的老写法：版本在前、型号在后（claude-4.6-sonnet、claude-4.5-opus）。目录 id 照新写法（sonnet-4.6）。 */
+const claudeVersionFirstBase: BaseRule = {
+  family: 'claude',
+  pattern: /^claude-(\d+(?:\.\d+)*)-(opus|sonnet|haiku|fable)$/,
+  modelId: (match) => `${match[2]}-${match[1]}`,
+};
+
 const gptBase: BaseRule = {
   family: 'gpt',
-  pattern: /^gpt-\d+(?:\.\d+)*(?:-(?:codex|sol|terra|luna|astra))?$/,
+  pattern: /^gpt-\d+(?:\.\d+)*(?:-(?:codex|sol|terra|luna|astra|mini|nano))?$/,
   modelId: (match) => match[0],
 };
 
@@ -184,8 +206,8 @@ const grokBase: BaseRule = {
 
 const geminiBase: BaseRule = {
   family: 'gemini',
-  // -preview 是同一个模型的预览构建，并到同一个模型 id；上游原串留在路由上。
-  pattern: /^gemini-\d+(?:\.\d+)*-(?:flash|pro)(?:-preview)?$/,
+  // -preview 是同一个模型的预览构建，并到同一个模型 id；上游原串留在路由上。flash、pro 之外还有代号（gemini-4-argon）。
+  pattern: /^gemini-\d+(?:\.\d+)*-(?:flash|pro|argon)(?:-preview)?$/,
   modelId: (match) => match[0].replace(/-preview$/, ''),
 };
 
@@ -203,7 +225,8 @@ const kimiCodeBase: BaseRule = {
 
 const kimiBase: BaseRule = {
   family: 'kimi',
-  pattern: /^kimi-[\w.]+$/,
+  // kimi-k2.7-code 是编程专用的那一个，自成一个模型
+  pattern: /^kimi-[\w.]+(?:-code)?$/,
   modelId: (match) => match[0],
 };
 
@@ -225,11 +248,12 @@ const deepseekBase: BaseRule = {
   modelId: (match) => match[0],
 };
 
-/** Cursor 名册：连字符档位，也有 [context=、reasoning=、fast=] 这种括号。 */
+/** Cursor 名册：连字符档位（含 -extra-high、-none、-minimal），也有 [context=、reasoning=、fast=] 这种括号。 */
 const CURSOR_RULES: ChannelRule = {
-  suffixes: ['effort', 'fast', 'thinking'],
+  suffixes: ['effort', 'subLowEffort', 'fast', 'thinking'],
   bases: [
     claudeBase,
+    claudeVersionFirstBase,
     grokBase,
     gptBase,
     geminiBase,

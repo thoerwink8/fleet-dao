@@ -174,6 +174,11 @@ export interface SpawnFacts {
   memoryPeakWhy?: string;
   /** 这一次会话的 CPU 秒数（cpu.stat 的 usage_usec 向上取整）。没读到不给，不当成 0（#1980）。 */
   cpuSeconds?: number;
+  /**
+   * 用量没照终帧读到时，记的是怎么来的、缺的为什么读不到（白话）：写进 runs.usage_note。会话被叫停、超时杀时各家插头给
+   * （real/hosts.ts），四样都照终帧读到了不给。
+   */
+  usageWhy?: string;
   /** 没读到 CPU 秒数的原因（白话）：进日志和落盘的 result.json，runs 那一列留空。 */
   cpuWhy?: string;
 }
@@ -515,6 +520,7 @@ function usageFields(facts: SpawnFacts | undefined): Partial<RunRecord> {
     ...(facts.memoryPeakMb !== undefined ? { memoryPeakMb: facts.memoryPeakMb } : {}),
     ...(isCpuSeconds(facts.cpuSeconds) ? { cpuSeconds: facts.cpuSeconds } : {}),
     ...(facts.sessionId !== undefined ? { sessionId: facts.sessionId } : {}),
+    ...(facts.usageWhy?.trim() ? { usageNote: facts.usageWhy.trim() } : {}),
   };
 }
 

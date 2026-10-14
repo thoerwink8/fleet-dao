@@ -104,6 +104,7 @@ export function outcomeOfReport(report: HostReport): SpawnOutcome {
   const killed = report.facts.killed !== undefined;
   const facts: SpawnFacts = {
     usage: report.usage,
+    ...(report.usageWhy !== undefined ? { usageWhy: report.usageWhy } : {}),
     ...(report.sessionCostUsd !== undefined ? { costUsd: report.sessionCostUsd } : {}),
     ...(report.actualModel !== undefined ? { actualModel: report.actualModel } : {}),
     // 只记真号：起会话前的临时号（cursor-pending: / mirasim-pending:）不是执行体的会话，拿它补读不到用量

@@ -194,6 +194,62 @@ describe('ClaudeStreamReader · 真跑夹具', () => {
     expect(b.result?.text).toBe('392');
   });
 
+  it('每条助手消息的用量按 message.id 加起来：输入、缓存读、缓存写和终帧一个不差（被叫停的段靠它记账）', () => {
+    // cc-bad-model 不在里头：那一份的助手消息是接口报错帧（is_api_error_message，模型名都不存在），
+    // 解析器按规矩不收这种帧的用量（#1641 那一支），见下面单写的一条
+    const names = [
+      'cc-haiku-bash',
+      'cc-haiku-bash-fail',
+      'cc-haiku-bash-timeout',
+      'cc-haiku-edit',
+      'cc-haiku-perm-denied',
+      'cc-haiku-read',
+      'cc-haiku-resume-a',
+      'cc-haiku-resume-b',
+      'cc-haiku-tool-error',
+      'cc-haiku-write',
+      'cc-opus-edit-bash',
+    ];
+    for (const name of names) {
+      const { summary } = readAll(name);
+      const raw = rawUsage(name).usage;
+      expect(summary.callUsage, name).toEqual({
+        inputTokens: raw.inputTokens,
+        cacheReadInputTokens: raw.cacheReadInputTokens,
+        cacheCreationInputTokens: raw.cacheCreationInputTokens,
+      });
+    }
+  });
+
+  it('接口报错帧（模型名都不存在）的用量不算进去：那不是模型跑出来的，不收（#1641 那一支提前返回）', () => {
+    const { summary } = readAll('cc-bad-model');
+    // 终帧照记，但流里那条 <synthetic> 的消息不参与求和
+    expect(summary.result?.isError).toBe(true);
+    expect(summary.callUsage).toBeUndefined();
+  });
+
+  it('被叫停、没走到终帧：callUsage 记下已经花掉的输入和缓存，输出不给（流里是写到一半的数）；一条带用量的消息都没有就不给', () => {
+    const lines = fixtureLines('claude-code', 'cc-haiku-edit').filter((l) => {
+      const f = JSON.parse(l) as Record<string, unknown>;
+      return f.type !== 'result';
+    });
+    const { cwd } = fixtureInit('cc-haiku-edit');
+    const reader = new ClaudeStreamReader({ runId: 'run-1', cwd, now: () => NOW });
+    for (const l of lines) reader.read(l);
+    const s = reader.summary();
+    expect(s.result).toBeUndefined();
+    expect(s.callUsage).toEqual({
+      inputTokens: 25,
+      cacheReadInputTokens: 55760,
+      cacheCreationInputTokens: 7703,
+    });
+    // 输出不在里面：流里的输出是消息写到一半的数，取了就是错的
+    expect(s.callUsage).not.toHaveProperty('outputTokens');
+    const bare = new ClaudeStreamReader({ runId: 'run-1', cwd, now: () => NOW });
+    bare.read(JSON.stringify({ type: 'system', subtype: 'init', session_id: 's' }));
+    expect(bare.summary().callUsage).toBeUndefined();
+  });
+
   it('lastContextTokens：最后一条助手消息的 input + 缓存读 + 缓存写；不是累计只加最后一条', () => {
     // cc-haiku-edit 里有 3 轮助手消息（工具调用来回一轮一轮变长），取的是最后一轮，不是第一轮或累加
     const { summary } = readAll('cc-haiku-edit');

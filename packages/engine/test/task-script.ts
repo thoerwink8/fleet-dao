@@ -139,7 +139,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     mergeNow: () => ({ merged: true, mergeCommit: 'abc1234567890' }),
     resume: () => ({ kind: 'new', reason: '测试默认不续' }),
     selfCheck: () => ({ state: 'skipped', reason: '测试默认不跑', steps: [] }),
-    spend: () => ({ tokens: 0, runs: 0, unmetered: 0 }),
+    spend: () => ({ tokens: 0, runs: 0, unmetered: 0, estimated: 0 }),
     ...over,
   };
   const tasks: EngineTasks = {
