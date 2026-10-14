@@ -18,6 +18,7 @@ import { CloseRefused, CloseUnchecked, issueClose } from './issue-close.ts';
 import type { Gh, GhResult } from './issue-new.ts';
 import { LOCAL_LABEL, MOTHER_LABEL } from './labels.ts';
 import { type IssueColumnLink, issueColumnLinks } from './pr-columns.ts';
+import { PROGRESS_ISSUE } from './progress.ts';
 
 export type MergeCloseOutcome =
   | { number: number; outcome: 'closed'; evidence: string }
@@ -38,6 +39,8 @@ const OPEN_PRS_PAGE = 100;
  * 单是不是开着、是不是 PR、别的 PR 还挂着没有，各用各的读法判，不在这里。
  */
 export function whyLeave(link: IssueColumnLink, labels: readonly string[]): string | undefined {
+  // 置顶的进度单永远开着（#2045 正文一句 Refs #1055 把它关了 22 小时）：不论 Refs 还是 Closes 都不替它关
+  if (link.number === PROGRESS_ISSUE) return `#${PROGRESS_ISSUE} 是置顶的进度单：永远开着，不替它关`;
   if (link.kind === 'refs' && link.slice) return 'Refs 那一行写明是分片、关不了它：有意只挂不关';
   if (labels.includes(MOTHER_LABEL)) return `贴了「${MOTHER_LABEL}」标签：母单由指挥官收口`;
   if (link.kind === 'refs' && labels.includes(LOCAL_LABEL)) {
@@ -91,7 +94,9 @@ async function settle(
   const n = link.number;
   const kept = (why: string): MergeCloseOutcome => ({ number: n, outcome: 'kept', why });
 
-  if (link.kind === 'refs' && link.slice) return kept(whyLeave(link, []) ?? '');
+  if ((link.kind === 'refs' && link.slice) || link.number === PROGRESS_ISSUE) {
+    return kept(whyLeave(link, []) ?? '');
+  }
   const issue = obj(await readJson(gh, ['api', `repos/{owner}/{repo}/issues/${n}`], `读 #${n}`), `#${n}`);
   if (
     issue.number !== n ||
