@@ -40,6 +40,12 @@ export interface MirasimLimits {
   ledgerWaitMs: number;
 }
 
+/**
+ * 订阅连不上时一共再试这么久。盖住一次看门狗重启：服务起来实测约 24 秒（boot 24197ms），再留余量。
+ * 以前连试 3 次、中间不等，令牌文件被换掉的那几十秒里直接判没查成。
+ */
+export const WATCH_CONNECT_BUDGET_MS = 60_000;
+
 export const DEFAULT_MIRASIM_LIMITS: MirasimLimits = {
   startupMs: 180_000,
   wallClockMs: 2 * 60 * 60_000,
@@ -98,6 +104,10 @@ export interface MirasimRunOptions {
   onAccepted?: (info: MirasimAccepted) => unknown;
   signal?: AbortSignal;
   now?: () => Date;
+  /**
+   * 订阅连不上时的退避等待。不给就真等（WATCH_CONNECT_BUDGET_MS）。测试用它把时钟拨快，不睡满 60 秒。
+   */
+  pause?: (ms: number) => Promise<void>;
   /**
    * 账本目录（Mirasim 服务那个用户家里的 ~/.mirasim/traffic）：结束后读本会话的上游调用。
    * 走中转（route=cloud）时不给就判「中转没查成」：快照说 done 不等于上游真干了活。
@@ -368,13 +378,18 @@ export async function runMirasim(
   };
   if (spec.session.mode === 'resume' && sessionKey !== spec.session.key) kill('session_mismatch');
 
-  // 4. 另开一条连接订阅（推送不保证送到发起连接，MS-03）
+  // 4. 另开一条连接订阅（推送不保证送到发起连接，MS-03）。
+  // 连不上（服务正在重启、令牌文件还没写回来）按退避再试，总时长盖住一次重启，不是连试 3 次就放弃。
+  const pause = options.pause ?? sleep;
   const openSub = async (): Promise<MirasimWire | undefined> => {
-    for (let attempt = 0; attempt < 3; attempt++) {
+    const deadline = Date.now() + WATCH_CONNECT_BUDGET_MS;
+    let wait = 500;
+    for (;;) {
       try {
         const wire = await options.connect();
         const st = await hello(wire, limits.replyMs);
         if (typeof st !== 'string') {
+          delete report.watchError;
           wire.send({ type: 'subscribe', sessionKey });
           return wire;
         }
@@ -383,8 +398,11 @@ export async function runMirasim(
       } catch (err) {
         report.watchError = `读状态的连接建不起来：${(err as Error).message}`;
       }
+      const left = deadline - Date.now();
+      if (left <= 0) return undefined;
+      await pause(Math.min(wait, left));
+      wait = Math.min(wait * 2, 8_000);
     }
-    return undefined;
   };
   sub = await openSub();
   let lastFingerprint = '';

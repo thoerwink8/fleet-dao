@@ -141,6 +141,7 @@ SSHD_SESSION_USER_DROPIN=/etc/ssh/sshd_config.d/51-fleet-dao-session-user.conf
 MIRASIM_SESSION_PORT=4318
 MIRASIM_SESSION_UNIT_FILE=/etc/systemd/system/fleet-mirasim-session.service
 # 它的健康检查（#1676）：定时器每 2 分钟读 /api/health，连续 3 次不是 ok:true 就重启它（deploy/lib/mirasim-liveness.sh）。
+# 有会话在跑且这一下是超时：只记不重启（#2186，忙的时候超时会把正在跑的会话杀掉）。
 # 脚本放 /usr/local/lib 下的副本（全链归 root），不从检出直接跑
 MIRASIM_LIVENESS_SCRIPT=/usr/local/lib/fleet-dao/mirasim-liveness.sh
 MIRASIM_LIVENESS_UNITS=(fleet-mirasim-liveness.service fleet-mirasim-liveness.timer)
