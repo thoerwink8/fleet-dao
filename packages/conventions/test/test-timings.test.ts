@@ -6,7 +6,14 @@ import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseTimings, TIMINGS_FILE } from '../src/test-split.ts';
-import { medianOfRuns, mergeTimings, parseRunLog, renderTimings } from '../src/test-timings.ts';
+import {
+  medianOfRuns,
+  mergeTimings,
+  overlayTimings,
+  parseRunLog,
+  parseVitestReport,
+  renderTimings,
+} from '../src/test-timings.ts';
 import { runChild } from './child.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -76,6 +83,50 @@ describe('几轮取中位数', () => {
       Object.fromEntries(medianOfRuns([new Map([['b.test.ts', 10]]), new Map([['b.test.ts', 30]])]) ?? []),
     ).toEqual({ 'b.test.ts': 30 });
     expect(medianOfRuns([])).toBeUndefined();
+  });
+});
+
+describe('从 vitest 报告认耗时（每夜全量那一轮）', () => {
+  const root = '/work/repo';
+  const report = (rs: unknown[]) => JSON.stringify({ testResults: rs });
+  it('结束 - 开始就是毫秒；只认仓内跑成的测试文件；Windows 反斜杠路径也认', () => {
+    const m = parseVitestReport(
+      report([
+        { name: '/work/repo/packages/api/test/a.test.ts', status: 'passed', startTime: 1000, endTime: 1750 },
+        { name: '/work/repo/packages/api/test/b.test.ts', status: 'failed', startTime: 0, endTime: 5 },
+        { name: '/elsewhere/packages/api/test/c.test.ts', status: 'passed', startTime: 0, endTime: 5 },
+        { name: '/work/repo/packages/api/src/helper.ts', status: 'passed', startTime: 0, endTime: 5 },
+      ]),
+      root,
+    );
+    expect(Object.fromEntries(m as Map<string, number>)).toEqual({ 'packages/api/test/a.test.ts': 750 });
+    const bs = String.fromCharCode(92);
+    const w = parseVitestReport(
+      report([
+        {
+          name: ['C:', 'w', 'r', 'agents', 'test', 'x.test.ts'].join(bs),
+          status: 'passed',
+          startTime: 0,
+          endTime: 9,
+        },
+      ]),
+      ['C:', 'w', 'r'].join(bs),
+    );
+    expect(Object.fromEntries(w as Map<string, number>)).toEqual({ 'agents/test/x.test.ts': 9 });
+  });
+  it('【故意造出失败的】不是 JSON、没有 testResults、有一条缺时间：返回一句为什么，不拿空表冒充', () => {
+    expect(parseVitestReport('{', root)).toContain('不是 JSON');
+    expect(parseVitestReport('{}', root)).toContain('testResults');
+    expect(
+      parseVitestReport(report([{ name: '/work/repo/agents/test/x.test.ts', status: 'passed' }]), root),
+    ).toContain('认不出');
+  });
+  it('缓存里的新表盖在仓里的表上：两边都有取新的，只在一边有的都留', () => {
+    const t = overlayTimings(
+      { source: 'repo', files: { 'a.test.ts': 1, 'b.test.ts': 2 } },
+      { source: 'nightly', files: { 'b.test.ts': 20, 'c.test.ts': 30 } },
+    );
+    expect(t).toEqual({ source: 'nightly', files: { 'a.test.ts': 1, 'b.test.ts': 20, 'c.test.ts': 30 } });
   });
 });
 
@@ -165,6 +216,42 @@ describe('入口 bin/ci-timings.ts（只用 --log-file，不连 GitHub）', { ti
     expect(existsSync(out2)).toBe(false);
   });
 
+  it('--report：只用 vitest 报告，旧表取仓里那份，写到 --out；来源写运行号和台数', () => {
+    const rep = join(tmp, 'report.json');
+    writeFileSync(
+      rep,
+      JSON.stringify({
+        testResults: [{ name: join(ROOT, SELF), status: 'passed', startTime: 100, endTime: 4100 }],
+      }),
+    );
+    const out = join(tmp, 'nightly.json');
+    const r = runChild(process.execPath, [bin, '--report', rep, '--out', out], {
+      env: { ...process.env, GITHUB_RUN_ID: '777' },
+    });
+    expect(r.status, r.stderr).toBe(0);
+    const t = parseTimings(readFileSync(out, 'utf8'));
+    if (typeof t === 'string') throw new Error(t);
+    expect(t.files[SELF]).toBe(4000);
+    expect(t.source).toContain('ci.yml run 777 的 1 台 vitest 报告');
+    // 仓里那份表的别的文件原样带着（报告只量到一个文件）
+    expect(Object.keys(t.files).length).toBeGreaterThan(100);
+  });
+
+  it('【故意造出失败的】--report 读不到、不是报告、和 --run 混给：退出 2，不写', () => {
+    const out = join(tmp, 'never.json');
+    const bad = join(tmp, 'not-a-report.txt');
+    writeFileSync(bad, 'hello');
+    for (const args of [
+      ['--report', join(tmp, '没有这个文件.json')],
+      ['--report', bad],
+      ['--report', bad, '--run', '1'],
+    ]) {
+      const r = run([...args, '--out', out]);
+      expect(r.status, r.stderr).toBe(2);
+    }
+    expect(existsSync(out)).toBe(false);
+  });
+
   it('【故意造出失败的】量到的文件一个都不在仓里（样例烂了、或仓被删空）：退出 2、一个字都不写，绝不写空表', () => {
     const log = join(tmp, 'stale.log');
     writeFileSync(
@@ -182,6 +269,8 @@ describe('入口 bin/ci-timings.ts（只用 --log-file，不连 GitHub）', { ti
     const empty = join(tmp, 'empty.log');
     writeFileSync(empty, 'changes\tx\tT  nothing here\n');
     const out = join(tmp, 'never.json');
+    const bad = join(tmp, 'not-a-report.txt');
+    writeFileSync(bad, 'hello');
     const r = run(['--log-file', empty, '--out', out]);
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('一个测试文件的耗时都没认出来');

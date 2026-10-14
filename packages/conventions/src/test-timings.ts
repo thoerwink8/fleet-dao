@@ -5,6 +5,7 @@
 //   带颜色转义码；`gh run view --log` 每行前面是「job 名<TAB>步骤名<TAB>时间戳 」。只认 job 名以 `test (` 开头的行：
 //   lint job 里 docs 那步也跑 agents/test，量的是另一种机器负载，不能混进来。
 // - 主线按「上次绿…这次」区间跑，一轮往往只跑一部分文件：没出现的文件沿用旧值，仓里已经没有的删掉。认出 0 个文件是失败，不写空表。
+import { relativeToRoot } from './ci-cache.ts';
 import { isTestFile, type Timings } from './test-split.ts';
 
 // 颜色转义码：终端里是 ESC，GitHub 存的日志里是字面的「^[」两个字符，两种都去掉。
@@ -49,7 +50,7 @@ export function medianOfRuns(runs: readonly ReadonlyMap<string, number>[]): Map<
 
 /** 耗时表文件头上那句说明（renderTimings 写进去；test/test-timings.test.ts 核对仓里那份就是它写出来的样子）。 */
 export const TIMINGS_NOTE =
-  'CI 测试按耗时装箱用的耗时表（packages/conventions/src/test-split.ts）：测试文件 → vitest 报的毫秒数（4 核运行机上并行跑时量的，几轮 CI 日志取中位数）。只影响分得匀不匀，不影响跑不跑：表里没有的按中位数估。用 pnpm ci:timings（可重复给 --run）从 CI 日志刷新，别手改。';
+  'CI 测试按耗时装箱用的耗时表（packages/conventions/src/test-split.ts）：测试文件 → vitest 报的毫秒数（4 核运行机上并行跑时量的，几轮 CI 日志取中位数）。只影响分得匀不匀，不影响跑不跑：表里没有的按所在包的均值估。每夜全量那一轮的 vitest 报告会存进 CI 缓存、供之后的 PR 分台用；仓里这份用 pnpm ci:timings（可重复给 --run）从 CI 日志刷新，别手改。';
 
 /**
  * 不指定运行时怎么挑：最近的、PR 触发的、绿的 ci.yml 里，最多往回翻这么多次，取头几轮真跑了测试的。
@@ -118,4 +119,35 @@ export function mergeTimings(
   }
   const sorted = Object.fromEntries(Object.entries(files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
   return { timings: { source, files: sorted }, updated, kept, dropped: dropped.sort(), added };
+}
+
+// ---- 每夜全量那一轮：直接用 vitest 的 JSON 报告出耗时（不翻日志，也不开 PR）
+
+/**
+ * 从一台的 vitest JSON 报告（--reporter=json）里认出每个测试文件的毫秒数（该文件结束时间 - 开始时间）。
+ * 报告认不出返回一句为什么；文件不在仓内（root 之外）的跳过；没跑成（状态不是 passed）的不量，量到的只信跑成的。
+ */
+export function parseVitestReport(text: string, root: string): Map<string, number> | string {
+  let r: unknown;
+  try {
+    r = JSON.parse(text);
+  } catch {
+    return 'vitest 的报告不是 JSON';
+  }
+  const results = (r as { testResults?: unknown } | null)?.testResults;
+  if (!Array.isArray(results)) return 'vitest 的报告里没有 testResults';
+  const out = new Map<string, number>();
+  for (const t of results as { name?: unknown; status?: unknown; startTime?: unknown; endTime?: unknown }[]) {
+    if (typeof t?.name !== 'string' || typeof t.startTime !== 'number' || typeof t.endTime !== 'number')
+      return 'vitest 的报告里有一条认不出（缺 name、startTime 或 endTime）';
+    const rel = relativeToRoot(root, t.name);
+    if (rel === undefined || t.status !== 'passed' || !isTestFile(rel)) continue;
+    out.set(rel, Math.max(0, Math.round(t.endTime - t.startTime)));
+  }
+  return out;
+}
+
+/** 缓存里的新表盖在仓里的表上：两边都有的取缓存的，只在一边有的都留（缓存是每夜量的，仓里那份可能更新了几个文件）。 */
+export function overlayTimings(base: Timings, over: Timings): Timings {
+  return { source: over.source, files: { ...base.files, ...over.files } };
 }

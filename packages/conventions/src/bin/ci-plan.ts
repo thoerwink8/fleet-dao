@@ -1,12 +1,13 @@
 // CI 的 changes job 入口（.github/workflows/ci.yml，判法在 ../ci-plan.ts）：
 //   node packages/conventions/src/bin/ci-plan.ts [--event pull_request|push|…] [--base origin/main] [--main-base <提交>]
+//     [--timings-file <每夜更新的耗时表>]
 // PR：用 git diff --name-only --no-renames <base>...HEAD 算改了什么（改名拆成删旧 + 加新，两头都算）；push 给了 --main-base 就按「基准…HEAD」这段累计改动算（同一份判法）；别的事件、push 没给基准全跑。
 // 结果写进 $GITHUB_OUTPUT（下游 job 的开关）和 $GITHUB_STEP_SUMMARY；本机不设这两个变量时只打出来。
 // 选中的测试文件按仓里的耗时表装进几台（../test-split.ts），每台的文件清单、估计秒数打在日志和摘要里。
 // 退出码 0 = 算出来了；2 = 没算成（base 拿不到、git diff 失败、列不出测试文件、装不了箱、写不进 $GITHUB_OUTPUT）——判红，不许静默少跑。
 // 耗时表读不出不算没算成：照样每个文件都分到一台，只打 ::warning::（它只影响分得匀不匀）。
 import { spawnSync } from 'node:child_process';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { applyReuse, assignTests, deferE2eToMain, planCi, planOutputs, readGraph } from '../ci-plan.ts';
@@ -20,6 +21,28 @@ import {
   timingsStaleWarning,
   unitOfTestFile,
 } from '../test-split.ts';
+import { overlayTimings } from '../test-timings.ts';
+
+/** 仓里的耗时表，加上缓存里（每夜全量量的）更新的那份（盖在上面）；缓存没有、读不出、认不出一律只用仓里的，并在日志里说明。 */
+function loadTimings(repoText: string | undefined, file: string): ReturnType<typeof parseTimings> {
+  const base = parseTimings(repoText);
+  if (file === '') return base;
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    console.log('::notice::没有每夜更新的耗时表缓存，分台用仓里的耗时表');
+    return base;
+  }
+  const fresh = parseTimings(text);
+  if (typeof fresh === 'string') {
+    console.log(`::warning::每夜更新的耗时表缓存认不出（${fresh}），分台用仓里的耗时表`);
+    return base;
+  }
+  if (typeof base === 'string') return fresh;
+  console.log(`::notice::分台用每夜更新的耗时表（${fresh.source}）盖在仓里的表上`);
+  return overlayTimings(base, fresh);
+}
 
 // 退出不用 process.exit（Windows 上偶发崩成 3221226505，../exit.ts）：提前退出用 exitWith，runMain 接住设退出码。
 runMain(() => {
@@ -37,6 +60,8 @@ runMain(() => {
   let mainBase = '';
   /** 主线同树复用（--reuse，main-reuse.ts 那一步的输出，JSON）；空 = 没复用。认不出、树对不上都当没复用，照旧按区间算。 */
   let reuseText = '';
+  /** 每夜全量那一轮存进 CI 缓存的更新耗时表（--timings-file）；空 = 没给。读不到、认不出都照仓里那份，并在日志里写明。 */
+  let timingsFile = '';
   try {
     const { values } = parseArgs({
       options: {
@@ -44,6 +69,7 @@ runMain(() => {
         base: { type: 'string' },
         'main-base': { type: 'string' },
         reuse: { type: 'string' },
+        'timings-file': { type: 'string' },
       },
       strict: true,
     });
@@ -51,6 +77,7 @@ runMain(() => {
     base = values.base ?? base;
     mainBase = values['main-base'] ?? mainBase;
     reuseText = values.reuse ?? reuseText;
+    timingsFile = values['timings-file'] ?? timingsFile;
   } catch (e) {
     console.error(`参数不对（${e instanceof Error ? e.message : String(e)}）。${USAGE}`);
     exitWith(2);
@@ -85,6 +112,7 @@ runMain(() => {
   }
 
   const repo = fsRepo(root);
+  const timings = loadTimings(repo.read(TIMINGS_FILE), timingsFile);
   const assigned = assignTests(
     planCi({
       event: planEvent,
@@ -94,7 +122,7 @@ runMain(() => {
     }),
     {
       all: listTestFiles(repo),
-      timings: parseTimings(repo.read(TIMINGS_FILE)),
+      timings,
       read: (rel) => repo.read(rel),
     },
   );

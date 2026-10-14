@@ -2,7 +2,7 @@
 // changes job 不装依赖，所以测试文件由这里按 TEST_INCLUDE 自己枚举（vitest.config.ts 的 include 就取这一份）；
 // 按仓里的耗时表（test-timings.json）用「最长的先放、放进当前最空的那台」（LPT）装进 k 台，每台拿到一份明确的文件清单。
 // 改这里之前必须知道：
-// - 耗时表只影响分得匀不匀，绝不影响跑不跑：表里没有的文件按中位数估，表读不出就每个文件按 FALLBACK_FILE_MS 估——
+// - 耗时表只影响分得匀不匀，绝不影响跑不跑：表里没有的文件按所在包的均值估（包里没量过的按全表均值），表读不出就每个文件按 FALLBACK_FILE_MS 估——
 //   照样每个文件都分到一台。CI 的判定只看检出来的文件（#299），所以表进仓、不在 CI 里现读 GitHub；`pnpm ci:timings` 刷新它。
 // - vitest 的位置参数是子串过滤（`a.test.ts` 也会拉上 `a.test.tsx`）：名字被别的测试文件「包含」的，两个必须同一台
 //   （withSiblings / 装箱时并成一件）。每台跑完还要拿 JSON 报告核对「实际跑的 == 分到的」（ci-box.ts），不等就红。
@@ -228,7 +228,7 @@ export interface PackInput {
 
 export interface Packed {
   boxes: TestBox[];
-  /** 给人看的说明（耗时表读不出、新文件按中位数估了几个、几个文件因子串过滤并成一件）。 */
+  /** 给人看的说明（耗时表读不出、新文件按均值估了几个、几个文件因子串过滤并成一件）。 */
   notes: string[];
   /** 耗时表读不出（报 ::warning::，照样装箱）。 */
   timingsProblem?: string;
@@ -255,9 +255,22 @@ export function timingsStaleWarning(
   return `耗时表缺 ${gap.missing}/${gap.total} 个要装的测试文件（${Math.round((gap.missing / gap.total) * 100)}%，超过 ${TIMINGS_MISSING_WARN_RATIO * 100}%），分台会不匀：${cmd}`;
 }
 
-function median(values: readonly number[]): number {
-  const s = [...values].sort((a, b) => a - b);
-  return s.length === 0 ? FALLBACK_FILE_MS : (s[Math.floor((s.length - 1) / 2)] as number);
+function mean(values: readonly number[]): number {
+  return values.length === 0
+    ? FALLBACK_FILE_MS
+    : Math.round(values.reduce((s, v) => s + v, 0) / values.length);
+}
+
+/**
+ * 表里没有的文件估多少毫秒：所在包（unitOfTestFile）里已量过的文件的均值，包里一个都没量过就按全表均值。
+ * 不用中位数：耗时分布右偏重（实测中位 82 毫秒、均值 1310 毫秒），新文件按中位数估会把总量低估一大截，普通台和 pg 台因此分得不匀。
+ */
+export function guessMs(file: string, timings: Timings): number {
+  const unit = unitOfTestFile(file);
+  const inUnit = Object.entries(timings.files)
+    .filter(([f]) => unitOfTestFile(f) === unit)
+    .map(([, ms]) => ms);
+  return inUnit.length > 0 ? mean(inUnit) : mean(Object.values(timings.files));
 }
 
 /** 台数：k = clamp(ceil(合计 / TARGET_BOX_MS), 1, MAX_BOXES)。 */
@@ -294,16 +307,14 @@ function lpt(items: readonly Item[], bins: number): Item[][] {
 export function packTests(input: PackInput): Packed | string {
   const notes: string[] = [];
   const timings = typeof input.timings === 'string' ? undefined : input.timings;
-  const known = timings ? Object.values(timings.files) : [];
-  const guess = timings ? median(known) : FALLBACK_FILE_MS;
   const unknown = input.files.filter((f) => timings?.files[f] === undefined);
   if (!timings)
     notes.push(`耗时表读不出（${input.timings}）：每个文件按 ${FALLBACK_FILE_MS / 1000} 秒估，分得可能不匀`);
   else if (unknown.length > 0)
     notes.push(
-      `耗时表里没有的 ${unknown.length} 个文件按中位数 ${guess} 毫秒估（${unknown.slice(0, 3).join('、')}${unknown.length > 3 ? '……' : ''}）`,
+      `耗时表里没有的 ${unknown.length} 个文件按所在包的均值估（${unknown.slice(0, 3).join('、')}${unknown.length > 3 ? '……' : ''}）`,
     );
-  const ms = (f: string) => timings?.files[f] ?? guess;
+  const ms = (f: string) => (timings ? (timings.files[f] ?? guessMs(f, timings)) : FALLBACK_FILE_MS);
 
   // 子串过滤绑在一起的文件并成一件（并查集）
   const parent = new Map(input.files.map((f) => [f, f]));
