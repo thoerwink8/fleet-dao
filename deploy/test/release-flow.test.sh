@@ -385,19 +385,21 @@ echo "== 后端重启后起不来（#2186：新版缺依赖反复崩）：切完
 # curl 换成桩：前 CURL_FAILS 次连不上，之后答话；次数记在文件上（api_wait_up 里不是子 shell，但 activate 的调用链里不保证）
 : >"$TMP/curl-n"
 CURL_FAILS=2
+# shellcheck disable=SC2317,SC2329 # 由 release.sh 里的 api_wait_up 间接调用
 curl() {
   printf 'x\n' >>"$TMP/curl-n"
   (($(wc -l <"$TMP/curl-n") > CURL_FAILS))
 }
-eval "$(declare -f real_api_wait_up | sed '1s/real_api_wait_up/api_wait_up/')"
+# shellcheck disable=SC2317,SC2329 # 由 activate 间接调用
+api_wait_up() { real_api_wait_up; }
 API_UP_WAIT=10
-api_wait_up >/dev/null
+real_api_wait_up >/dev/null
 check "前两次连不上、第三次答话：等到了（试了 3 次）" "$?:$(wc -l <"$TMP/curl-n" | tr -d ' ')" "0:3"
 : >"$TMP/curl-n"
 CURL_FAILS=1000
 API_UP_WAIT=2
 reset
-api_wait_up >/dev/null
+real_api_wait_up >/dev/null
 check "【故意造出的失败】一直不答：到点判红，返回 1" "$?:${#REDS[@]}" "1:1"
 check "红里写明起不来、看哪份日志" "$(printf '%s\n' "${REDS[@]}" | grep -c '还没在驾驶舱接口.*journalctl -u fleet-api')" 1
 # 接进切版本那一步：后端启用着、起不来，就不往香港发、activate 直接返回 1（do_release 接着自动退回）
