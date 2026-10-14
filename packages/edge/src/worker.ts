@@ -58,6 +58,34 @@ function fail(log: (line: string) => void, why: string): never {
   throw new Error(text);
 }
 
+/**
+ * 法国要查的是驾驶舱域名上的 /healthz。公网 IP 或隧道上的 8787 连不上是预期（ops 第二节），
+ * 配成那样会把法国误报成挂了，所以直接判这一轮没查成。
+ */
+export function franceHealthUrlProblem(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return 'FLEET_EDGE_FR_URL 不是合法地址';
+  }
+  const host = url.hostname;
+  const ip = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':');
+  if (
+    url.protocol !== 'https:' ||
+    url.username !== '' ||
+    url.password !== '' ||
+    url.pathname !== '/healthz' ||
+    url.search !== '' ||
+    url.hash !== '' ||
+    (url.port !== '' && url.port !== '443') ||
+    ip
+  ) {
+    return 'FLEET_EDGE_FR_URL 必须是 https://<驾驶舱域名>/healthz。法国 8787 只在隧道上，公网超时不当成法国挂了';
+  }
+  return null;
+}
+
 function requireConfig(env: EdgeEnv): RoundConfig {
   const missing: string[] = [];
   const hk = env.FLEET_EDGE_HK_URL?.trim() ?? '';
@@ -71,6 +99,8 @@ function requireConfig(env: EdgeEnv): RoundConfig {
   if (missing.length > 0) {
     throw new Error(`外部看门狗这一轮没查成：读不到 ${missing.join('、')}。不当成没挂。`);
   }
+  const frProblem = franceHealthUrlProblem(fr);
+  if (frProblem) throw new Error(`外部看门狗这一轮没查成：${frProblem}。不当成没挂。`);
   let webhook: string;
   try {
     webhook = feishuWebhookUrl(webhookRaw);
