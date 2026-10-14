@@ -21,6 +21,8 @@ const lease = (issueNumber: number): ExpiredLease => ({
 
 function world(o: {
   expired: ExpiredLease[];
+  unexpired?: ExpiredLease[];
+  unexpiredFails?: boolean;
   live?: number[] | Error;
   merged?: Record<number, number>;
   open: Record<number, string[]>;
@@ -32,6 +34,10 @@ function world(o: {
     async expired() {
       return o.expired;
     },
+    async unexpired() {
+      if (o.unexpiredFails) throw new Error('库连不上');
+      return o.unexpired ?? [];
+    },
     async liveIssues() {
       if (o.live instanceof Error) throw o.live;
       return new Set(o.live ?? []);
@@ -42,8 +48,8 @@ function world(o: {
     async extend(taskId, until) {
       steps.push(`extend ${taskId} ${until.getTime() - NOW.getTime()}`);
     },
-    async settle({ taskId, how }) {
-      steps.push(`settle ${taskId} ${how}`);
+    async settle({ taskId, how, early }) {
+      steps.push(`settle ${taskId} ${how}${early ? ' early' : ''}`);
       return 1;
     },
     async unmarkLocal({ issueNumber }) {
@@ -106,6 +112,30 @@ describe('sweepLocalLeases', () => {
     expect(r.returned).toBe(0);
     expect(r.unchecked.join()).toContain('GitHub 502');
     expect(w.steps).toEqual([]);
+  });
+
+  it('没到期的租约：单已关且 PR 合了就当轮收成做完（不用手动 work done）；单还开着、或 PR 镜像还没到的不动', async () => {
+    const fresh = (n: number): ExpiredLease => ({
+      taskId: `t${n}`,
+      issueNumber: n,
+      leaseUntil: new Date(NOW.getTime() + 3_600_000),
+    });
+    const w = world({
+      expired: [],
+      unexpired: [fresh(7), fresh(8), fresh(9)],
+      open: { 8: [LOCAL_LABEL] },
+      merged: { 7: 70 },
+    });
+    const r = await w.run();
+    expect(r).toMatchObject({ closed: 1, unchecked: [] });
+    expect(w.steps).toEqual(['settle t7 done early']);
+  });
+
+  it('【故意造出的失败】没到期的租约读不到：记没查成，到期的照常收', async () => {
+    const w = world({ expired: [lease(7)], unexpiredFails: true, open: { 7: [] } });
+    const r = await w.run();
+    expect(r.unchecked.join()).toContain('提前收没做成');
+    expect(r.returned).toBe(1);
   });
 
   it('单上本来没贴「本机做」：不摘，照样留言、退回', async () => {

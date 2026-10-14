@@ -1134,7 +1134,7 @@ rm -f /etc/systemd/system/fleet-feishu.service /usr/local/sbin/fleet-gateway-dep
 
 - 本机会话做一张单先 `pnpm work claim <单号>`（`pnpm issue:new --local` 开完自动领）：查过没有开着的 PR 在做，POST 到法国 `/api/nodes/claims` 在 `tasks` 登记（`executor = local`、`lease_until` 两小时、`claimed_by` 是通行证认出的环境编号），再贴「本机做」，打出分支名 `local/<单号>-<短名>`。通行证和地址用本机会话上报那份 `~/.fleet-dao/local-sessions/config.json`（下面一节装的），没装就领不了、退出码 1。引擎手上有这张单（排队、在跑、停下等人）回 409，不领。
 - 续租不用人记：拉单每轮看本机会话心跳（`node_sessions`），有会话在 `local/<单号>-` 分支上、不到两小时前动过就顺延；有开着的 PR 挂着这张单也顺延。跑超过两小时、期间不调工具的长活前手动 `pnpm work renew <单号>`。
-- 结束：`pnpm work done <单号>` 记做完；`--failed "原因"` 记没做成（还是本机的账，法国不自动接）；`--release "原因"` 放手、摘「本机做」，退回法国队列。
+- 结束：PR 合并、单被 Closes 关掉后拉单下一轮自动记做完（租约没到期也收，PR 镜像晚几分钟到就晚一轮），不用手动；没做成或放手才 `pnpm work done <单号>`：`--failed "原因"` 记没做成（还是本机的账，法国不自动接）；`--release "原因"` 放手、摘「本机做」，退回法国队列。
 - 到期没续上：拉单摘「本机做」、在单上留一句话（同一次到期只留一次），行改成 `stopped` + `engine`，下一轮引擎接。总开关关着时拉单不跑，租约也不收。
 - 查本机在做的单：`sudo -u fleet psql fleet -c "select issue_number, state, lease_until, claimed_by from tasks where executor = 'local' and state = 'running' order by lease_until"`；领、续、结束、到期收回都在操作记录里（`audit_log.action like 'task.local.%'`）。
 

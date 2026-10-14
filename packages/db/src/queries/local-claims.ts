@@ -3,7 +3,7 @@
 // 读不到、写不成照抛，不拿空顶。
 import type { LocalClaimRefusal, LocalFinishOutcome, TaskExecutor, TaskState } from '@fleet-dao/shared';
 import { LOCAL_LEASE_MS } from '@fleet-dao/shared';
-import { and, arrayContains, asc, eq, like, lt, or, sql } from 'drizzle-orm';
+import { and, arrayContains, asc, eq, gte, like, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, pullRequests, repos, tasks } from '../schema/index.ts';
 
@@ -241,6 +241,28 @@ export async function expiredLocalClaims(db: Db, repoId: string, now: Date): Pro
   return rows.flatMap((r) => (r.leaseUntil ? [{ ...r, leaseUntil: r.leaseUntil }] : []));
 }
 
+/** 这个仓里本机在做、租约还没到期的行（单关了就提前收的候选），按到期先后。 */
+export async function unexpiredLocalClaims(db: Db, repoId: string, now: Date): Promise<ExpiredLocalClaim[]> {
+  const rows = await db
+    .select({
+      taskId: tasks.id,
+      issueNumber: tasks.issueNumber,
+      leaseUntil: tasks.leaseUntil,
+      claimedBy: tasks.claimedBy,
+    })
+    .from(tasks)
+    .where(
+      and(
+        eq(tasks.repoId, repoId),
+        eq(tasks.executor, 'local'),
+        eq(tasks.state, 'running'),
+        gte(tasks.leaseUntil, now),
+      ),
+    )
+    .orderBy(asc(tasks.leaseUntil));
+  return rows.flatMap((r) => (r.leaseUntil ? [{ ...r, leaseUntil: r.leaseUntil }] : []));
+}
+
 /** 看到还活着的迹象（心跳、开着的 PR），租约顺延到 until。只动仍是本机在做的行；回改了几行。 */
 export async function extendLocalLease(db: Db, taskId: string, until: Date): Promise<number> {
   const rows = await db
@@ -254,10 +276,11 @@ export async function extendLocalLease(db: Db, taskId: string, until: Date): Pro
 /**
  * 法国拉单收回一条到期的租约：returned = 退回法国队列（stopped + engine）；done = 单已经关了、有合并的 PR 挂着（本机做完忘了报）；
  * closed = 单关了、没有合并的 PR（stopped，还是本机的账）。只动仍是本机在做、租约仍过期的行（中途续上了就不动）；回改了几行。
+ * early = true：单关了、PR 合了，租约没到期也收（不用等 2 小时、不用手动 pnpm work done）：不看租约时刻，只收 done。
  */
 export async function settleExpiredLocalClaim(
   db: Db,
-  input: { taskId: string; how: 'returned' | 'done' | 'closed'; why: string; now: Date },
+  input: { taskId: string; how: 'returned' | 'done' | 'closed'; why: string; now: Date; early?: boolean },
 ): Promise<number> {
   return db.transaction(async (tx) => {
     const set: { state: TaskState; executor?: TaskExecutor; claimedBy?: null; doing: string } =
@@ -274,7 +297,7 @@ export async function settleExpiredLocalClaim(
           eq(tasks.id, input.taskId),
           eq(tasks.executor, 'local'),
           eq(tasks.state, 'running'),
-          lt(tasks.leaseUntil, input.now),
+          ...(input.early ? [] : [lt(tasks.leaseUntil, input.now)]),
         ),
       )
       .returning({ id: tasks.id });
