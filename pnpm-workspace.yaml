@@ -14,7 +14,7 @@ allowBuilds:
 overrides:
   '@esbuild-kit/core-utils>esbuild': 0.25.4
 # 全局虚拟仓：本机多棵工作树共享一份 node_modules 链接，装第二棵起接近秒装。pnpm 检测到 CI 会自动关掉（官方文档）。
-# 法国发版的构建沙箱是 env -i、不算 CI，开着会把依赖链到家目录、服务看不到：deploy/release.sh 的 RELEASE_PNPM_INSTALL 显式关掉它，
+# 法国发版的构建沙箱是 env -i、不算 CI，开着会把依赖链到家目录、服务看不到：deploy/release.sh 的 RELEASE_PNPM_ENV 给构建沙箱里每条 pnpm 关掉它，
 # CI 的 release_smoke（deploy/release-smoke.sh）照那组参数装一遍核对。v11.23.0 起 pnpm 自己派生的进程带 NODE_PATH 加 ESM 解析钩子，
 # ESM 导入未声明的包不再失败；手动在 pnpm 之外起的 node 不带这个钩子（未声明依赖由 CI 的 deps 检查拦）。
 enableGlobalVirtualStore: true

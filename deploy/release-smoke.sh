@@ -3,10 +3,10 @@
 # CI 里照法国发版的样子装一版、看服务入口的模块都找得到（.github/workflows/ci.yml 的 lint 里跑）。
 # 为什么：CI 自己的 pnpm install 被 pnpm 认成 CI（全局虚拟仓自动关、布局和法国不同），在那上面跑测试绿了，法国照样可能起不来
 # （065445a4：法国的构建沙箱是 env -i，不算 CI，依赖链到家目录里，fleet-api 报 ERR_MODULE_NOT_FOUND）。
-# 这里和 release.sh 的 build_release 同一套：git archive 出这一版的文件 → env -i 下用 release.sh 的 RELEASE_PNPM_INSTALL 装 →
-# links_inside 查符号链接没指到目录外 → packages/conventions/src/bin/release-smoke.ts 从 fleet-api、fleet-engine 的入口把
+# 这里和 release.sh 的 build_release 同一套：git archive 出这一版的文件 → env -i 下带 RELEASE_PNPM_ENV 用 RELEASE_PNPM_INSTALL 装 →
+# 用 RELEASE_PNPM_WEB_BUILD 构建驾驶舱前端 → links_inside 查符号链接没指到目录外 → packages/conventions/src/bin/release-smoke.ts 从 fleet-api、fleet-engine 的入口把
 # 每条 import 用 node 解析一遍（只解析、不执行）。
-# 唯一不同：pnpm 仓库用 CI 缓存的那份（--config.store-dir），不从零下载；仓库在目录外不要紧，链到它的会被 links_inside 拦下。
+# 唯一不同：pnpm 仓库用 CI 缓存的那份（pnpm_config_store_dir），不从零下载；仓库在目录外不要紧，链到它的会被 links_inside 拦下。
 # 用法：bash deploy/release-smoke.sh [提交，默认 HEAD]。退出码：0 过；1 没过；2 没查成。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -37,19 +37,41 @@ node_bin=$(command -v node) || {
   echo "没查成：没有 node" >&2
   exit 2
 }
-echo "照法国装依赖：env -i pnpm ${RELEASE_PNPM_INSTALL[*]}（仓库 $store）"
-# env -i：和法国构建沙箱一样，不带 CI、GITHUB_ACTIONS 这类变量，pnpm 不会把自己当成在 CI 里
-if ! (cd -- "$REL" && env -i HOME="$TMP/home" PATH="$(dirname -- "$pnpm_bin"):$(dirname -- "$node_bin"):/usr/bin:/bin" \
-  "$pnpm_bin" "${RELEASE_PNPM_INSTALL[@]}" --config.store-dir="$store" >"$TMP/install.log" 2>&1); then
-  tail -20 "$TMP/install.log" >&2
+# env -i：和法国构建沙箱一样，不带 CI、GITHUB_ACTIONS 这类变量，pnpm 不会把自己当成在 CI 里；RELEASE_PNPM_ENV 和法国沙箱带的一样。
+# 仓库位置也用环境变量给（不是只给 install 的命令行开关）：之后的 pnpm run 见设置不一样会重装一遍，那就不是在验法国的样子了
+run_pnpm() { # 日志 参数…
+  local log=$1
+  shift
+  (cd -- "$REL" && env -i HOME="$TMP/home" PATH="$(dirname -- "$pnpm_bin"):$(dirname -- "$node_bin"):/usr/bin:/bin" \
+    LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "${RELEASE_PNPM_ENV[@]}" "pnpm_config_store_dir=$store" \
+    "$pnpm_bin" "$@" >"$log" 2>&1)
+}
+echo "照法国装依赖：env -i ${RELEASE_PNPM_ENV[*]} pnpm ${RELEASE_PNPM_INSTALL[*]}（仓库 $store）"
+if ! run_pnpm "$TMP/install.log" "${RELEASE_PNPM_INSTALL[@]}"; then
+  grep -av '^Progress: ' "$TMP/install.log" | tail -40 >&2
   echo "没过：照法国的参数 pnpm install 失败" >&2
   exit 1
 fi
-if ! links_inside "$REL"; then
-  echo "没过：装完的依赖有符号链接指到这一版目录外（$LINKS_OUTSIDE_WHY）：法国服务看不到，会起不来" >&2
+echo "照法国构建前端：pnpm ${RELEASE_PNPM_WEB_BUILD[*]}"
+if ! run_pnpm "$TMP/web.log" "${RELEASE_PNPM_WEB_BUILD[@]}"; then
+  grep -av '^Progress: ' "$TMP/web.log" | tail -60 >&2
+  echo "没过：照法国的样子构建驾驶舱前端失败（发版会在这一步停下、不切版本）" >&2
   exit 1
 fi
-echo "符号链接都在这一版目录里"
+if grep -aq 'Recreating ' "$TMP/web.log"; then
+  grep -a 'Recreating ' "$TMP/web.log" >&2
+  echo "没过：构建前 pnpm 把依赖重装了一遍（设置和装的时候不一致），法国上布局会变" >&2
+  exit 1
+fi
+if [[ ! -f "$REL/packages/web/dist/client/index.html" ]]; then
+  echo "没过：前端构建完没有 packages/web/dist/client/index.html" >&2
+  exit 1
+fi
+if ! links_inside "$REL"; then
+  echo "没过：装完、构建完有符号链接指到这一版目录外（$LINKS_OUTSIDE_WHY）：法国服务看不到，会起不来" >&2
+  exit 1
+fi
+echo "前端构建过了；符号链接都在这一版目录里"
 # 解析器用 PR 检出里的那份（不在被查的目录里跑代码），解析的是 $REL 里的文件
 (cd -- "$REL" && env -i HOME="$TMP/home" PATH="$(dirname -- "$node_bin"):/usr/bin:/bin" \
   "$node_bin" --experimental-import-meta-resolve "$REPO/packages/conventions/src/bin/release-smoke.ts" "$REL")
