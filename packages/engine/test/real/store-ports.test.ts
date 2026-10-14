@@ -1542,28 +1542,4 @@ describe('开 PR 前验证：只派别家、作者是哪几族、每一轮的记
       'Cursor Auto 由渠道自己挑模型（上游串 auto），认不出这次是哪一家在答',
     );
   });
-
-  it('作者是哪几族：这张单上起过的会话按路由查模型目录，验证会话不算', async () => {
-    await world(t.db);
-    const { routeId } = await addCursorRoute(t.db);
-    const { task } = await addTask(t.db);
-    await startedRun(task.id, 'solo', 'plan');
-    await startedRun(task.id, routeId, 'verify');
-    expect(await ports().authorFamilies({ taskId: task.id }, ctx)).toEqual({ families: ['claude'] });
-    await startedRun(task.id, routeId, 'execute');
-    expect(await ports().authorFamilies({ taskId: task.id }, ctx)).toEqual({
-      families: ['claude', 'cursor'],
-    });
-  });
-
-  it('【故意造出的失败】一个起过的会话都查不到（或任务编号不是 UUID）：AUTHORS_UNKNOWN、不可重试，不回空的', async () => {
-    await world(t.db);
-    const { task } = await addTask(t.db);
-    for (const taskId of [task.id, 'task-不是-uuid']) {
-      await expect(ports().authorFamilies({ taskId }, ctx)).rejects.toMatchObject({
-        code: 'AUTHORS_UNKNOWN',
-        retryable: false,
-      });
-    }
-  });
 });

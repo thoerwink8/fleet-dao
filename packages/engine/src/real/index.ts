@@ -179,7 +179,6 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     raiseAlert: store.raiseAlert,
     recordTiming: store.recordTiming,
     saveTaskState: store.saveTaskState,
-    authorFamilies: store.authorFamilies,
     createWorktree: github.createWorktree,
     removeWorktree: github.removeWorktree,
     pushBranch: github.pushBranch,
