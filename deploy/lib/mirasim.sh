@@ -20,8 +20,11 @@ MIRASIM_RUN_DIR='/home/{user}/.mirasim/run'
 
 mirasim_run_dir() { printf '%s' "${MIRASIM_RUN_DIR//\{user\}/$1}"; } # 会话用户
 
-# check_mirasim_session_unit 等 /api/health 的次数（每次间隔 1 秒，只在连接被拒时重试）
+# check_mirasim_session_unit 等 /api/health 的次数（每次间隔 1 秒）。
+# 连接被拒（curl 退出 7，刚重启还没 listen）用满 MIRASIM_HEALTH_TRIES。
+# 连上了但不回（退出 28）只用 MIRASIM_HEALTH_TIMEOUT_TRIES：每次要等满 --max-time，试太多次会把装机读回拖很长。
 MIRASIM_HEALTH_TRIES=${MIRASIM_HEALTH_TRIES:-15}
+MIRASIM_HEALTH_TIMEOUT_TRIES=${MIRASIM_HEALTH_TIMEOUT_TRIES:-3}
 
 # 读回：这个会话用户自己的 Mirasim 服务在不在。只看 <目录>/local-<端口>.token 恰好有一份，不读令牌内容——认不认由路由
 # 探针判（真连一次、问一句 OK）。目录不在、一份都没有：待配（还没装，不是坏了）；不止一份：判红（认不出该用哪份，只该
@@ -88,8 +91,12 @@ mirasim_server_installed() { # 用户
 # 和 check_mirasim（认令牌）分开：这条管 france.sh 自己装的那个单元，不是创始人手装的服务端本体。
 # 服务端本体不在：待配，不算坏——这轮 france.sh 不装单元，是「装服务端本体」这一步（要创始人或帅位做）还没做，
 # 不是这个单元坏了。本体在但单元没起、没活、/api/health 不通：判红——这时候是「该常驻却没常驻」。
-check_mirasim_session_unit() { # 用户 单元名 端口
+# 第 4 参数是 pending 时：单元在跑但 /api/health 试满仍超时（curl 退出 28）记待配、不记红。自动档用这个：
+# 一次超时不是「没装成」，否则 deploy_lag 会报 tier_failed、整份 /healthz 跟着 503。进程活着不回话由
+# fleet-mirasim-liveness 连续 3 次再重启。整套装机和 --check 不传这个参数，试满仍判红。
+check_mirasim_session_unit() { # 用户 单元名 端口 [pending]
   local u=$1 unit=$2 port=$3
+  local timeout_as=${4:-}
   local fix="创始人或帅位用 mirasim ssh connect（或桌面端 SSH 远程模式）连 $u@这台机器装一次服务端本体（docs/ops.md 第五节「会话用户的 Mirasim」）；装好前这个单元不装、Mirasim 路由派不出去"
   if ! mirasim_server_installed "$u"; then
     pending "$u 还没有 Mirasim 服务端本体（没有 $(mirasim_server_bin "$u")）：$fix"
@@ -100,16 +107,35 @@ check_mirasim_session_unit() { # 用户 单元名 端口
     return 0
   fi
   # 刚装、刚重启（自动档在单元文件变了时会重启）时 node 还没跑到 listen：连接被拒（curl 退出 7）就再等一会儿，
-  # 别把「还在起」判成红；连上了但不回、超时（退出 28）这类不重试，照实判红
-  local health rc=0 tries
+  # 别把「还在起」判成红。连上了但不回（退出 28）也再试少数几次：事件循环卡一下就会这样，一次 5 秒超时
+  # 不等于没装上。--noproxy 免得调用方环境里的 HTTP_PROXY 把回环探活送去代理、自己超时。
+  local health rc=0 tries timeouts=0
   for ((tries = 0; tries < MIRASIM_HEALTH_TRIES; tries++)); do
     rc=0
-    health=$(curl -fsS --max-time 5 "http://127.0.0.1:$port/api/health" 2>&1) || rc=$?
-    if ((rc != 7)); then break; fi
-    sleep 1
+    health=$(curl -fsS --noproxy '*' --max-time 5 "http://127.0.0.1:$port/api/health" 2>&1) || rc=$?
+    if ((rc == 0)); then break; fi
+    if ((rc == 7)); then
+      sleep 1
+      continue
+    fi
+    if ((rc == 28)); then
+      timeouts=$((timeouts + 1))
+      if ((timeouts < MIRASIM_HEALTH_TIMEOUT_TRIES)); then
+        sleep 1
+        continue
+      fi
+    fi
+    break
   done
   if ((rc != 0)); then
-    red "$unit 在跑但 http://127.0.0.1:$port/api/health 连不上或没回（curl 退出 $rc）：$(tail -c 300 <<<"$health")"
+    local msg
+    msg="$unit 在跑但 http://127.0.0.1:$port/api/health 连不上或没回（curl 退出 $rc）：$(tail -c 300 <<<"$health")"
+    # 只有「试满仍是超时」能降成待配。连接被拒、别的退出码，单元该在听却没听上，仍是红。
+    if [[ "$timeout_as" == pending && rc -eq 28 ]]; then
+      pending "$msg"
+    else
+      red "$msg"
+    fi
     return 0
   fi
   if [[ "$health" != *'"ok":true'* ]]; then

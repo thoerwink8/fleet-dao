@@ -1453,14 +1453,16 @@ readback_mirasim() {
   done
 }
 
-# 自动档只读回常驻单元这一层（活没活、health、单元文件内容对不对）；令牌 check_mirasim 是创始人手装服务端的事，不归自动档
+# 自动档只读回常驻单元这一层（活没活、health、单元文件内容对不对）；令牌 check_mirasim 是创始人手装服务端的事，不归自动档。
+# 健康检查超时记待配（第 4 参数 pending）：退出码 2，自动发布当装上了。一次 /api/health 超时不是「自动档没装成」，
+# 不然 deploy_lag 会报 tier_failed，整份 /healthz 跟着 503。一直不回话由 fleet-mirasim-liveness 重启。
 readback_mirasim_session_unit() {
   local u=${SESSION_USERS[0]}
   if ! id "$u" >/dev/null 2>&1; then
     pending "$u 这个用户还没有，Mirasim 常驻单元没查"
     return 0
   fi
-  check_mirasim_session_unit "$u" fleet-mirasim-session.service "$MIRASIM_SESSION_PORT"
+  check_mirasim_session_unit "$u" fleet-mirasim-session.service "$MIRASIM_SESSION_PORT" pending
   check_mirasim_session_unit_file "$u" "$MIRASIM_SESSION_UNIT_FILE" "$DEPLOY_DIR/france/fleet-mirasim-session.service" "$MIRASIM_SESSION_PORT"
 }
 
