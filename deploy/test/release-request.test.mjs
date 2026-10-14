@@ -28,6 +28,7 @@ import {
   parseHealthz,
   parseRepoSwitches,
   parseRequest,
+  RELEASE_ALERT_PREFIXES,
   RELEASE_SH,
   REQUEST_DIR,
   REQUEST_FILE,
@@ -87,6 +88,7 @@ function fakeIo(over = {}, opts = {}) {
     sleeps: 0,
     pushes: [],
     alertReads: 0,
+    drains: 0,
   };
   let master = 'on';
   const alertsAt = opts.alerts ?? (() => [{ key: 'old:one' }]);
@@ -131,8 +133,11 @@ function fakeIo(over = {}, opts = {}) {
       }
       return { status: 1, stdout: '', stderr: '认不出的命令' };
     },
-    // 等收尾读的是引擎的权威口径（drain.json，#2002）：默认引擎没在跑、手上没有会话。
-    drain: async () => ({ ok: true, engineDown: false, running: [] }),
+    // drain 接口保留，但第 3 步已不再读它（#2038）：读了就记一笔，测试核「没读」。
+    drain: async () => {
+      log.drains += 1;
+      return { ok: true, engineDown: false, running: [] };
+    },
     prepareCheckout: async (sha) => {
       log.checkouts.push(sha);
       return { ok: true };
@@ -187,23 +192,19 @@ function assertRefused(code, log, needle) {
 const engineOns = (log) => log.fleetApi.filter((a) => a.startsWith('engine on'));
 const engineOffs = (log) => log.fleetApi.filter((a) => a.startsWith('engine off'));
 
-test('顺利：九步各记一次进度，引擎先关、再 release.sh 发这个提交、验证、发完恢复到发版前（原来开着，开回），founderOk 带「驾驶舱点击发布」和点的人、时间', async () => {
+test('顺利：九步各记一次进度，不关引擎总开关（决定 0093）、release.sh 发这个提交、验证、核对开关和发版前一致，founderOk 带「驾驶舱点击发布」和点的人、时间', async () => {
   const { io, log } = fakeIo();
   assert.equal(await runRequest(io), EXIT.done);
   assert.deepEqual(log.release, [SHA]);
   assert.deepEqual(log.checkouts, [SHA]);
   assert.equal(log.check, 1);
-  assert.equal(log.markers, 1);
-  assert.equal(log.cleared, 1);
-  assert.ok(log.fleetApi.some((a) => a.startsWith('engine off --reason')));
-  assert.equal(engineOns(log).length, 1, '发完开回一次');
-  assert.match(
-    engineOns(log)[0],
-    /engine on --reason '发版后恢复发版前的状态/,
-    '原因写明是发版后恢复（进操作记录）',
-  );
-  assert.ok(log.fleetApi.indexOf(engineOns(log)[0]) > log.fleetApi.indexOf(engineOffs(log)[0]), '先关、后开');
-  assert.equal(log.out.filter((l) => l.includes('总开关已开回')).length, 1);
+  assert.equal(log.markers, 0, '不写暂停标记');
+  assert.equal(log.cleared, 1, '第 7 步照旧清标记');
+  assert.equal(engineOffs(log).length, 0, '第 2 步不调 engine off');
+  assert.equal(engineOns(log).length, 0, '第 7 步不碰总开关');
+  assert.ok(log.out.some((l) => l.includes('不关总开关：release.sh 切版本时只暂停在跑的任务（决定 0093）')));
+  assert.ok(log.out.some((l) => l.includes('等收尾：跳过（release.sh 切版本前自己暂停在跑的任务，#2038）')));
+  assert.equal(log.drains, 0, '第 3 步没读 drain');
   const phases = [...new Set(log.states.map((s) => s.phase))];
   assert.deepEqual(
     phases,
@@ -216,6 +217,9 @@ test('顺利：九步各记一次进度，引擎先关、再 release.sh 发这�
   assert.deepEqual(final.target, { kind: 'sha', value: SHA, sha: SHA });
   assert.equal(final.restore, true);
   assert.equal(final.marker, false);
+  assert.equal(final.pausedMaster, false);
+  assert.equal(final.before.master, true, '发版前开着，记下了');
+  assert.ok(!Number.isNaN(Date.parse(final.before.recordedAt)));
   assert.equal(final.founderOk, `${FOUNDER_WORD} ${REQ_AT} 创始人`);
   assert.equal(final.release.started, true);
   assert.equal(log.lasts[0].outcome, 'accepted');
@@ -381,68 +385,48 @@ test('【故意造出的失败】读不到引擎总开关：这一步没成，�
   assert.match(last.why, /读不到/);
 });
 
-test('【故意造出的失败】关了引擎读回来还是开着：不往下走', async () => {
+test('第 2 步不调 engine off：总开关一直开着，照样发，fleet-api 一条 engine off/on 都没有', async () => {
   const { io, log } = fakeIo({
     fleetApi: withAlerts(async (args) => {
       log.fleetApi.push(args);
       return { status: 0, stdout: '引擎总开关：开着\n', stderr: '' };
     }),
   });
-  assert.equal(await runRequest(io), EXIT.failed);
-  assert.match(log.states.at(-1).why, /还是开着/);
-  assert.deepEqual(log.release, []);
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.deepEqual(log.release, [SHA]);
+  assert.equal(engineOffs(log).length, 0);
+  assert.equal(engineOns(log).length, 0);
+  assert.ok(
+    log.fleetApi.every((a) => a === 'engine status'),
+    '只读总开关（提醒那条走 withAlerts，不进这里）',
+  );
 });
 
-test('【故意造出的失败】等了上限法国还有会话在跑：卡住（退出码 3），列出拖后腿的，没发版', async () => {
-  const { io, log } = fakeIo({
-    drain: async () => ({
+test('第 3 步不读 drain 直接过：引擎手上还有会话、甚至 drain 读不成，都不等、不拦，照发（#2038）', async () => {
+  for (const drain of [
+    async () => ({
       ok: true,
       running: [
         { runId: '11111111-aaaa', stage: 'execute' },
         { runId: '22222222-bbbb', stage: 'verify' },
       ],
     }),
-  });
-  assert.equal(await runRequest(io), EXIT.blocked);
-  const last = log.states.at(-1);
-  assert.equal(last.status, 'blocked');
-  assert.equal(last.phase, 3);
-  assert.deepEqual(last.laggards, ['会话 execute(11111111)', '会话 verify(22222222)']);
-  assert.deepEqual(log.release, []);
-  assert.ok(log.sleeps >= 4, '等过几轮');
-});
-
-test('一个常驻额度探针 scope 在跑（辅助 scope，不是在干的活）：「等收尾」不算它、直接过，不发满超时（#2002）', async () => {
-  // 引擎权威口径（drain.json）里手上一个会话都没有：额度探针 scope 是常驻的、不收尾，本来会被旧判法（数 fleet-agent- scope）数进去。
-  const { io, log } = fakeIo({ drain: async () => ({ ok: true, running: [] }) });
-  assert.equal(await runRequest(io), EXIT.done);
-  assert.deepEqual(log.release, [SHA], '没卡在等收尾，照发');
-  assert.ok(
-    log.out.some((l) => l.includes('等收尾：法国没有会话在跑')),
-    '报「没有会话在跑」',
-  );
-  assert.equal(log.sleeps, 0, '一个探针 scope 都没数，没等');
-});
-
-test('【故意造出的失败】引擎手上几个会话读不到（drain.json 读不成 / pid 对不上 / 认不出）：不当成 0 个，这一步没成', async () => {
-  const { io, log } = fakeIo({ drain: async () => ({ ok: false, why: 'drain.json 读不成：EACCES' }) });
-  assert.equal(await runRequest(io), EXIT.failed);
-  assert.equal(log.states.at(-1).phase, 3);
-  assert.match(log.states.at(-1).why, /读不到/);
-  assert.deepEqual(log.release, []);
-});
-
-test('引擎没在跑（fleet-engine.service 不是 active）：手上没有会话，等收尾直接过', async () => {
-  const { io, log } = fakeIo({
-    drain: async () => ({ ok: true, engineDown: true, running: [] }),
-  });
-  // 未在跑的引擎没法排空、也没有会话在跑；这一步按「没有在跑的会话」过，和 release.sh 里引擎不在时跳过排空一致
-  assert.equal(await runRequest(io), EXIT.done);
-  assert.deepEqual(log.release, [SHA]);
-  assert.ok(
-    log.out.some((l) => l.includes('引擎没在跑')),
-    '报「引擎没在跑」',
-  );
+    async () => ({ ok: false, why: 'drain.json 读不成：EACCES' }),
+  ]) {
+    let reads = 0;
+    const { io, log } = fakeIo({
+      drain: async () => {
+        reads += 1;
+        return drain();
+      },
+    });
+    assert.equal(await runRequest(io), EXIT.done);
+    assert.equal(reads, 0, '没读 drain');
+    assert.deepEqual(log.release, [SHA], '没卡在等收尾，照发');
+    assert.equal(log.sleeps, 0, '没等');
+    assert.ok(log.out.some((l) => l.includes('等收尾：跳过')));
+    assert.ok(!log.states.some((s) => s.status === 'blocked'), '没卡住过');
+  }
 });
 
 test('parseDrain：引擎没在跑（serviceActive=false）回「不在跑、没会话」；pid 对不上不当成 0', () => {
@@ -522,26 +506,32 @@ test('发版前就关着、发布过程中被人开了：不再关回去，也�
   assert.equal(await runRequest(io), EXIT.blocked);
   assert.equal(engineOffs(log).length, 0, '没有再关');
   assert.equal(engineOns(log).length, 0, '没有再开');
-  assert.ok(log.out.some((l) => l.includes('发版期间有人开了')));
+  assert.ok(log.out.some((l) => l.includes('发版期间有人动了')));
   const bad = log.states.at(-1).check.items.find((x) => x.name === '引擎总开关和发版前一致');
   assert.equal(bad.ok, false);
   assert.match(bad.text, /发版前关着，现在开着/);
 });
 
-test('发版前开着、发布过程中被人先开回了：不重复开，算做完', async () => {
+test('发版前开着、发布过程中被人关了：第 7 步不自动开回（不是我们关的），体检报「总开关和发版前不一致」，退出码 3', async () => {
   const { io, log, setMaster } = fakeIo();
   const base = io.runRelease;
   io.runRelease = async (sha) => {
     const r = await base(sha);
-    setMaster('on');
+    setMaster('off'); // 发布过程中被人关了
     return r;
   };
-  assert.equal(await runRequest(io), EXIT.done);
-  assert.equal(engineOns(log).length, 0, '已经是开着，不再写一条重复的操作记录');
+  assert.equal(await runRequest(io), EXIT.blocked);
+  assert.equal(engineOns(log).length, 0, '没替人开回');
+  assert.equal(engineOffs(log).length, 0);
+  assert.ok(log.out.some((l) => l.includes('这一趟没关过引擎总开关，不碰它')));
+  const bad = log.states.at(-1).check.items.find((x) => x.name === '引擎总开关和发版前一致');
+  assert.equal(bad.ok, false);
+  assert.match(bad.text, /发版前开着，现在关着/);
+  assert.equal(log.states.at(-1).status, 'done');
 });
 
-test('【故意造出的失败】发完恢复不成（engine on 失败）：没成，退出码 2，页面上是红的，写明发版已经发出去了、要到环境页点开，不当成成功', async () => {
-  const { io, log } = fakeIo({}, { onFails: true });
+test('【故意造出的失败】老现场发完开回不成（engine on 失败）：没成，退出码 2，页面上是红的，写明发版已经发出去了、要到环境页点开，不当成成功', async () => {
+  const { io, log } = await legacyRun({}, { onFails: true });
   assert.equal(await runRequest(io), EXIT.failed);
   const last = log.states.at(-1);
   assert.equal(last.status, 'failed');
@@ -554,8 +544,8 @@ test('【故意造出的失败】发完恢复不成（engine on 失败）：没�
   assert.ok(log.err.some((l) => l.includes('恢复没成')));
 });
 
-test('【故意造出的失败】engine on 说成了、读回来总开关还是关着：恢复没成，不信「成了」', async () => {
-  const { io, log } = fakeIo({}, { onSticks: true });
+test('【故意造出的失败】老现场 engine on 说成了、读回来总开关还是关着：恢复没成，不信「成了」', async () => {
+  const { io, log } = await legacyRun({}, { onSticks: true });
   assert.equal(await runRequest(io), EXIT.failed);
   assert.match(log.states.at(-1).why, /读回来总开关还是关着/);
 });
@@ -596,21 +586,65 @@ test('发版没过健康检查（历史末行 unhealthy）：不恢复，引擎�
   assert.equal(engineOns(log).length, 0);
 });
 
-test('上一回点发布停在「卡住」（会话没收完、引擎是我们关的）：再点一次，发版前开着的带过来，发完照样开回，不当成「本来就关着」', async () => {
-  const { io, log } = fakeIo({
-    drain: async () => ({ ok: true, running: [{ runId: 'aaaa1111-xxxx', stage: 'execute' }] }),
-  });
-  assert.equal(await runRequest(io), EXIT.blocked);
-  const stuck = JSON.parse(JSON.stringify(log.states.at(-1)));
-  assert.equal(stuck.before.master, true);
-  // 第二回：会话收完了；进度记录是上一回停下的那份；引擎还是关着（上一回关的）
-  io.drain = async () => ({ ok: true, running: [] });
-  io.readState = () => ({ ok: true, state: stuck });
-  log.fleetApi.length = 0;
+/**
+ * 老版本留下的「停在第 3 步卡住」的进度记录：那时发版前开着、总开关是老版本关的（marker 为真），没有 pausedMaster 键。
+ * 拿新版本顺利走一趟，截第 3 步那一刻的记录改成老样子（还没发版、还没体检）。
+ */
+async function legacyStuckState() {
+  const { io, log } = fakeIo();
+  assert.equal(await runRequest(io), EXIT.done);
+  const s = clone(log.states.filter((x) => x.phase === 3).at(-1));
+  assert.equal(s.release.started ?? false, false);
+  s.status = 'blocked';
+  s.why = '等了 13 分钟，法国还有 1 个会话在跑（老版本）';
+  s.laggards = ['会话 execute(aaaa1111)'];
+  s.before = { ...s.before, master: true };
+  s.marker = true;
+  delete s.pausedMaster;
+  return s;
+}
+
+/** 老现场再点一次发布：进度记录是老版本卡住的那份，引擎还关着（老版本关的）。 */
+async function legacyRun(over = {}, opts = {}) {
+  const stuck = await legacyStuckState();
+  const f = fakeIo({ readState: () => ({ ok: true, state: clone(stuck) }), ...over }, opts);
+  f.setMaster('off');
+  return f;
+}
+
+test('老现场（上一回老版本关了总开关、停在卡住）：再点发布，发版前开着的带过来、照旧记暂停标记，第 7 步开回', async () => {
+  const { io, log } = await legacyRun();
   assert.equal(await runRequest(io), EXIT.done);
   assert.equal(engineOffs(log).length, 0, '已经是关的，不再关');
+  assert.equal(log.markers, 1, '照旧记暂停标记');
   assert.equal(engineOns(log).length, 1, '发完开回');
-  assert.equal(log.states.at(-1).before.master, true);
+  assert.match(engineOns(log)[0], /engine on --reason '发版后恢复发版前的状态/, '原因写明是发版后恢复');
+  assert.equal(log.out.filter((l) => l.includes('总开关已开回')).length, 1);
+  const last = log.states.at(-1);
+  assert.equal(last.before.master, true);
+  assert.equal(last.pausedMaster, true);
+  assert.equal(last.marker, false);
+  assert.equal(last.check.ok, true, '开回后总开关和发版前一致');
+});
+
+test('【故意造出的失败】上一回是新版本没成的（没关过总开关）、现在总开关被人关了：不带上一回的「开着」，不当成我们关的，发完不开', async () => {
+  const { io, log, setMaster } = fakeIo();
+  io.readState = () => ({
+    ok: true,
+    state: {
+      schema: 1,
+      status: 'failed',
+      phase: 4,
+      pausedMaster: false,
+      before: { master: true, repos: null },
+      target: {},
+    },
+  });
+  setMaster('off');
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(engineOns(log).length, 0);
+  assert.equal(log.markers, 0);
+  assert.equal(log.states.at(-1).before.master, false, '按现在读到的记');
 });
 
 test('【故意造出的失败】上一回是做完了的（done）、这一回引擎发版前是关着：不带上一回的「开着」，发完保持关', async () => {
@@ -653,21 +687,74 @@ test('发后体检全过：六项都通过，结论写进进度和 last-request.
   assert.equal(log.states.at(-1).before.repos['thoerwink8/fleet-dao'], SINCE, '第 2 步记下了各仓接活开关');
 });
 
-test('【故意造出的失败】发版后新出现一条卡住报警：体检没通过（立刻判，不等），开关照样恢复，退出码 3，推飞书「卡住」', async () => {
+test('【故意造出的失败】发版后新出现一条和这次发版有关的卡住报警（auto-release:*）：体检没通过（立刻判，不等），开关不碰，退出码 3，推飞书「卡住」', async () => {
   const { io, log } = fakeIo(
     {},
-    { alerts: (n) => (n === 0 ? [] : [{ key: 'svc:fleet-engine:down', title: '引擎挂了' }]) },
+    { alerts: (n) => (n === 0 ? [] : [{ key: 'auto-release:fleet-dao:failed', title: '自动发布挂了' }]) },
   );
   assert.equal(await runRequest(io), EXIT.blocked);
   const it = itemOf(log, '没有新异常');
   assert.equal(it.ok, false);
-  assert.match(it.text, /新出现 1 条卡住报警：引擎挂了（svc:fleet-engine:down）/);
+  assert.match(it.text, /新出现 1 条和这次发版有关的卡住报警：自动发布挂了（auto-release:fleet-dao:failed）/);
   assert.equal(log.sleeps, 0, '不是重启打断的那几类：不重试');
-  assert.equal(engineOns(log).length, 1, '版本已经发了，开关照样恢复');
+  assert.equal(engineOns(log).length, 0, '这一趟没关过总开关，不碰');
   assert.equal(log.states.at(-1).status, 'done');
   assert.match(log.pushes.at(-1), /【发版卡住】.*发后体检没通过：没有新异常/);
   assert.match(log.pushes.at(-1), /aaaaaaaaaaaa/);
   assert.equal(log.lasts.at(-1).check.ok, false);
+});
+
+test('【故意造出的失败】发版后新出现 engine-drain 提醒：和这次发版有关，拦；同时出现的无关提醒列进说明', async () => {
+  const { io, log } = fakeIo(
+    {},
+    {
+      alerts: (n) =>
+        n === 0
+          ? []
+          : [
+              { key: 'engine-drain', title: '排空没收住' },
+              { key: 'wf:failure:x', title: '任务失败' },
+            ],
+    },
+  );
+  assert.equal(await runRequest(io), EXIT.blocked);
+  const it = itemOf(log, '没有新异常');
+  assert.equal(it.ok, false);
+  assert.match(it.text, /和这次发版有关的卡住报警：排空没收住（engine-drain）/);
+  assert.match(it.text, /和这次发版无关的提醒，不拦：任务失败（wf:failure:x）/);
+});
+
+test('发版后新出现和这次发版无关的提醒（任务失败 wf:failure:、对账 reconcile:）：不拦，体检通过，说明里列出来', async () => {
+  const { io, log } = fakeIo(
+    {},
+    {
+      alerts: (n) =>
+        n === 0
+          ? []
+          : [
+              { key: 'wf:failure:x', title: '任务失败' },
+              { key: 'reconcile:repo:a', title: '对账不平' },
+            ],
+    },
+  );
+  assert.equal(await runRequest(io), EXIT.done);
+  const it = itemOf(log, '没有新异常');
+  assert.equal(it.ok, true);
+  assert.match(
+    it.text,
+    /发版后新出现 2 条和这次发版无关的提醒，不拦：任务失败（wf:failure:x）；对账不平（reconcile:repo:a）/,
+  );
+  assert.equal(log.sleeps, 0);
+});
+
+test('RELEASE_ALERT_PREFIXES：发版相关的五类键前缀', () => {
+  assert.deepEqual(RELEASE_ALERT_PREFIXES, [
+    'auto-release:',
+    'engine-drain',
+    'engine-session-io',
+    'cli-upgrade:',
+    'retired-schedule:',
+  ]);
 });
 
 test('基线里就有的报警、任务挂起、再提醒、要你拍：都不算新异常', async () => {
@@ -815,14 +902,8 @@ test('【故意造出的失败】各仓接活开关发版前读不到：第 2 �
   assert.deepEqual(log.release, []);
 });
 
-test('九步时间线：每一步开始的时间都记在 steps 里，等收尾时 waiting 写着在等哪几个会话', async () => {
-  let n = 0;
-  const { io, log } = fakeIo({
-    drain: async () =>
-      n++ < 2
-        ? { ok: true, running: [{ runId: 'abcdef12-zz', stage: 'execute' }] }
-        : { ok: true, running: [] },
-  });
+test('九步时间线：每一步开始的时间都记在 steps 里，第 3 步不等（waiting 一直空着）', async () => {
+  const { io, log } = fakeIo();
   assert.equal(await runRequest(io), EXIT.done);
   const final = log.states.at(-1);
   assert.equal(final.steps.length, PHASES.length);
@@ -830,9 +911,10 @@ test('九步时间线：每一步开始的时间都记在 steps 里，等收尾�
     final.steps.every((t) => typeof t === 'string' && !Number.isNaN(Date.parse(t))),
     '九步都有开始时间',
   );
-  assert.ok(Date.parse(final.steps[4]) > Date.parse(final.steps[3]), '等收尾等过，第 4 步比第 3 步晚开始');
+  assert.ok(Date.parse(final.steps[4]) >= Date.parse(final.steps[3]), '第 4 步不比第 3 步早');
   assert.ok(
-    log.states.some((s) => s.phase === 3 && s.waiting === '等法国在跑的 1 个会话收尾（execute(abcdef12)）'),
+    log.states.filter((s) => s.phase === 3).every((s) => s.waiting === null),
+    '第 3 步不在等什么',
   );
   assert.equal(final.waiting, null, '做完了不在等什么');
 });
@@ -844,7 +926,7 @@ test('飞书：开始、成功各推一条，一句话里有目标提交、结�
   assert.match(log.pushes[0], /^【发版开始】法国开始发 aaaaaaaaaaaa（创始人 在驾驶舱点的）。不用点什么/);
   assert.match(
     log.pushes[1],
-    /^【发版成功】法国已在用 aaaaaaaaaaaa，发后体检通过，引擎总开关已恢复到发版前。不用点什么。$/,
+    /^【发版成功】法国已在用 aaaaaaaaaaaa，发后体检通过，引擎总开关和各仓接活开关和发版前一致。不用点什么。$/,
   );
   assert.deepEqual(
     log.states.at(-1).pushes.map((p) => [p.kind, p.ok]),
@@ -855,19 +937,32 @@ test('飞书：开始、成功各推一条，一句话里有目标提交、结�
   );
 });
 
-test('飞书：等收尾卡住推「卡住」带要点的按钮；恢复没成推「失败」叫点「恢复引擎开关」', async () => {
-  const stuck = fakeIo({
-    drain: async () => ({ ok: true, running: [{ runId: 'abcdef12-zz', stage: 'execute' }] }),
+test('飞书：老版本停在等收尾的「卡住」带要点的「重试」；老现场开回没成推「失败」叫点「恢复引擎开关」；新版本没关过的不叫点它', () => {
+  const stuck = releaseMessage('blocked', {
+    target: { value: SHA },
+    phase: 3,
+    why: '等了 13 分钟，法国还有 1 个会话在跑',
   });
-  assert.equal(await runRequest(stuck.io), EXIT.blocked);
-  assert.match(stuck.log.pushes.at(-1), /^【发版卡住】aaaaaaaaaaaa 停在第 3 步「等收尾」：等了/);
-  assert.match(stuck.log.pushes.at(-1), /点「重试」/);
-  assert.equal(stuck.log.lasts.at(-1).outcome, 'blocked');
+  assert.match(stuck, /^【发版卡住】aaaaaaaaaaaa 停在第 3 步「等收尾」：等了/);
+  assert.match(stuck, /点「重试」/);
+  const legacy = releaseMessage('failed', { target: { value: SHA }, phase: 7, why: '恢复没成' });
+  assert.match(legacy, /^【发版失败】aaaaaaaaaaaa 第 7 步「恢复」没成/);
+  assert.match(legacy, /点「恢复引擎开关」/);
+  const fresh = releaseMessage('failed', {
+    target: { value: SHA },
+    phase: 7,
+    why: '恢复没成',
+    pausedMaster: false,
+  });
+  assert.doesNotMatch(fresh, /恢复引擎开关/);
+});
 
-  const restore = fakeIo({}, { onFails: true });
+test('飞书：老现场开回没成（真走一趟）推「失败」叫点「恢复引擎开关」', async () => {
+  const restore = await legacyRun({}, { onFails: true });
   assert.equal(await runRequest(restore.io), EXIT.failed);
   assert.match(restore.log.pushes.at(-1), /^【发版失败】aaaaaaaaaaaa 第 7 步「恢复」没成/);
   assert.match(restore.log.pushes.at(-1), /点「恢复引擎开关」/);
+  assert.equal(restore.log.lasts.at(-1).outcome, 'failed');
 });
 
 test('【故意造出的失败】飞书推不出去：照样发版、做完，进度里记「没推成」和原因，不当成推过', async () => {
@@ -939,15 +1034,11 @@ const asRequest = (text) => ({ readRequest: () => ({ kind: 'ok', text }) });
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const SESSIONS = [{ runId: 'aaaa1111-xxxx', stage: 'execute' }];
 
-/** 先走一趟停在「卡住」（等收尾超时），回那份进度记录。 */
-async function stuckState() {
-  const { io, log } = fakeIo({ drain: async () => ({ ok: true, running: SESSIONS }) });
-  assert.equal(await runRequest(io), EXIT.blocked);
-  return clone(log.states.at(-1));
-}
-/** 先走一趟停在「没成在恢复」（engine on 失败，发版已发出去），回那份进度记录。 */
+/** 老版本留下的停在「卡住」（等收尾超时）的进度记录（新版本第 3 步不再卡住）。 */
+const stuckState = legacyStuckState;
+/** 老现场走一趟停在「没成在恢复」（engine on 失败，发版已发出去），回那份进度记录。 */
 async function restoreFailedState() {
-  const { io, log } = fakeIo({}, { onFails: true });
+  const { io, log } = await legacyRun({}, { onFails: true });
   assert.equal(await runRequest(io), EXIT.failed);
   return clone(log.states.at(-1));
 }
@@ -1025,16 +1116,22 @@ test('重试：停在「卡住（等收尾）」的那一趟，会话收完了�
   assert.ok(log.pushes.some((t) => t.startsWith('【发版重试】')));
 });
 
-test('重试：会话还没收完——再卡住一次（退出码 3），照样列拖后腿的，现场没动', async () => {
+test('重试：引擎手上还有会话——第 3 步不再等它（不读 drain），照样从第 3 步接着发完', async () => {
   const stuck = await stuckState();
-  const { io, log } = fakeIo({
+  let reads = 0;
+  const { io, log, setMaster } = fakeIo({
     ...asRequest(reqOf('retry')),
     readState: () => ({ ok: true, state: clone(stuck) }),
-    drain: async () => ({ ok: true, running: SESSIONS }),
+    drain: async () => {
+      reads += 1;
+      return { ok: true, running: SESSIONS };
+    },
   });
-  assert.equal(await runRequest(io), EXIT.blocked);
-  assert.equal(log.states.at(-1).status, 'blocked');
-  assert.deepEqual(log.release, []);
+  setMaster('off');
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(reads, 0);
+  assert.equal(log.states.at(-1).status, 'done');
+  assert.deepEqual(log.release, [SHA]);
 });
 
 for (const [name, mutate, needle] of [
@@ -1119,6 +1216,7 @@ for (const [name, mutate, needle] of [
     /发版前引擎总开关就是关着/,
   ],
   ['没记下发版前的状态', (s) => ({ ...s, before: null }), /发版前引擎总开关就是关着/],
+  ['这一趟没关过总开关（新版本）', (s) => ({ ...s, pausedMaster: false }), /这一趟没关过引擎总开关/],
 ]) {
   test(`【故意造出的失败】恢复引擎开关被拒（${name}）：写原因，不开引擎`, async () => {
     const failed = await restoreFailedState();
@@ -1214,6 +1312,40 @@ test('【故意造出的失败】撤掉暂停被拒：没有标记也没有没�
   });
   assertRefused(await runRequest(busy.io), busy.log, /发布锁被占着/);
   assert.equal(busy.log.cleared, 0);
+});
+
+test('恢复引擎开关：老版本没成在第 7 步的那一趟（记录里没有 pausedMaster、标记已被老版本清掉）——照样开回', async () => {
+  const failed = await restoreFailedState();
+  const old = clone(failed);
+  delete old.pausedMaster;
+  old.marker = false;
+  const { io, log, setMaster } = fakeIo({
+    ...asRequest(reqOf('restore')),
+    readState: () => ({ ok: true, state: clone(old) }),
+  });
+  setMaster('off');
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(engineOns(log).length, 1);
+  assert.equal(log.states.at(-1).check.ok, true);
+});
+
+test('撤掉暂停：新版本没关过总开关的一趟（没成在发版前）——不开引擎，只清标记、状态记 aborted', async () => {
+  const { io: io0, log: log0 } = fakeIo({
+    prepareCheckout: async () => ({ ok: false, why: '有没提交的改动' }),
+  });
+  assert.equal(await runRequest(io0), EXIT.failed);
+  const fresh = clone(log0.states.at(-1));
+  assert.equal(fresh.pausedMaster, false);
+  const { io, log, setMaster } = fakeIo({
+    ...asRequest(reqOf('abort')),
+    readState: () => ({ ok: true, state: clone(fresh) }),
+  });
+  setMaster('off'); // 被人关了：不是我们关的，不替人开
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.deepEqual(engineOns(log), []);
+  assert.equal(log.cleared, 1);
+  assert.equal(log.states.at(-1).status, 'aborted');
+  assert.match(log.states.at(-1).why, /这一趟没关过引擎总开关/);
 });
 
 // —— 读请求文件（真文件系统）——

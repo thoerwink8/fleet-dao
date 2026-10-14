@@ -100,8 +100,8 @@ describe('fleet-api task', () => {
         action: 'task.continue',
         target: 'issue:example/canary#12',
         ok: true,
-        via: 'engine',
-        actor: { kind: 'engine', id: 'ops:task' },
+        via: 'ops',
+        actor: { kind: 'ops', id: 'ops:task' },
         after: expect.objectContaining({
           who: 'root',
           issue: 'example/canary#12',

@@ -489,7 +489,7 @@ describe('排空的提醒文案', () => {
   it('写截止、在跑几个；不写会变的倒计时以外的东西', () => {
     const text = drainAlertText({ kind: 'start', cordon: release(), inFlight: [session('r1')] }, '法国', T0);
     expect(text.title).toContain(iso(T0 + RELEASE_GRACE_MS));
-    expect(text.body).toContain('约 10 分钟');
+    expect(text.body).toContain('约 2 分钟');
     expect(text.body).toContain('手上 1 个会话在跑');
     expect(text.body).toContain('在等额度');
   });

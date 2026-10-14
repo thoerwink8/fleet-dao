@@ -82,9 +82,9 @@ export interface PasswordCredentials {
   lockedUntil?: string | undefined;
 }
 
-/** 谁做的。user = 驾驶舱用户；ai = AI 帅位；engine = 引擎；agent = 会话里的 AI。 */
+/** 谁做的。user = 驾驶舱用户；ai = AI 帅位；engine = 引擎；agent = 会话里的 AI；ops = 服务器上的运维脚本（fleet-api 命令行）。 */
 export interface Actor {
-  kind: 'user' | 'ai' | 'engine' | 'agent';
+  kind: 'user' | 'ai' | 'engine' | 'agent' | 'ops';
   id: string;
 }
 

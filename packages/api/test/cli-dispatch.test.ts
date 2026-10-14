@@ -150,10 +150,10 @@ describe('开、关、只看', () => {
     const entry = t.store.data.audit[0];
     expect(entry).toMatchObject({
       at: since,
-      actor: { kind: 'engine', id: 'ops:dispatch' },
+      actor: { kind: 'ops', id: 'ops:dispatch' },
       action: AUTO_DISPATCH_ENABLE,
       target: `repo:${IDS.repo}`,
-      via: 'engine',
+      via: 'ops',
       ok: true,
       before: { autoDispatchSince: null },
       after: { autoDispatchSince: since },
@@ -265,10 +265,10 @@ describe('接在真库上（PGlite 跑真迁移）', () => {
     expect((await since())?.toISOString()).toBe(T0.toISOString());
     const [opened] = await audits();
     expect(opened).toMatchObject({
-      actorKind: 'engine',
+      actorKind: 'ops',
       actorId: 'ops:dispatch',
       action: AUTO_DISPATCH_ENABLE,
-      via: 'engine',
+      via: 'ops',
       ok: true,
       reason: '服务器上 root 跑的 fleet-api dispatch example/canary on',
     });
@@ -440,10 +440,10 @@ describe('dispatch --all off：发版后所有仓一起关（#1050）', () => {
     const added = t.store.data.audit.slice(before);
     expect(added).toHaveLength(1);
     expect(added[0]).toMatchObject({
-      actor: { kind: 'engine', id: 'ops:dispatch' },
+      actor: { kind: 'ops', id: 'ops:dispatch' },
       action: AUTO_DISPATCH_DISABLE,
       target: `repo:${IDS.repo}`,
-      via: 'engine',
+      via: 'ops',
       ok: true,
       reason: `${REASON}（服务器上 root 跑的 fleet-api dispatch example/canary off）`,
     });

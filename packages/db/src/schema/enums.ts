@@ -168,10 +168,10 @@ export const routeProbeState = pgEnum('route_probe_state', ROUTE_PROBE_STATES);
 export const userRole = pgEnum('user_role', ['founder', 'collaborator', 'bot']);
 /** 通知三级：要人拍 / 卡住报警 / 日报。 */
 export const notificationLevel = pgEnum('notification_level', ['decision', 'alert', 'daily']);
-/** 谁做的：人 / AI 帅位 / 引擎 / 会话里的 AI。 */
-export const actorKind = pgEnum('actor_kind', ['user', 'ai', 'engine', 'agent']);
+/** 谁做的：人 / AI 帅位 / 引擎 / 会话里的 AI / 服务器上的运维脚本（fleet-api 命令行）。 */
+export const actorKind = pgEnum('actor_kind', ['user', 'ai', 'engine', 'agent', 'ops']);
 /** 经哪里做的。 */
-export const auditVia = pgEnum('audit_via', ['cockpit', 'feishu', 'github', 'engine', 'agent']);
+export const auditVia = pgEnum('audit_via', ['cockpit', 'feishu', 'github', 'engine', 'agent', 'ops']);
 export const prState = pgEnum('pr_state', ['open', 'closed', 'merged']);
 /** PR 当前 head 上 CI 的汇总。 */
 export const prChecks = pgEnum('pr_checks', ['success', 'failure', 'pending', 'none']);

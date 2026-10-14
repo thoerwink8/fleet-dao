@@ -21,7 +21,7 @@ description: 当指挥官时读：和创始人讨论需求、写成单和验收�
 - 无人值守：`node ~/.fleet-dao/hooks/unattended.mjs on` 之后，有子代理、后台命令、监视在跑时这一轮照常结束，等完成通知叫回；什么都没在跑、队列还有活时收尾钩子把这一轮挡回来（连挡 3 次放行一次，决定 0093）。每个完成通知 `pnpm progress:note` 一句、再派下一件；队列空且子代理都收口跑 `unattended.mjs done "做完了什么"`，要他拍跑 `needs-you`，他说停跑 `off`。监控用 `node $S/patrol.mjs`，只看最后一行：`VERDICT: OK` 不叫模型，`ALERT` 才派斥候，`BROKEN` 亲自跑 `france.mjs`。
 
 ## 发版
-平时不用管：主线头 CI 绿、满 1 小时、没有发版在走，法国自己发，发前暂停在跑的会话、发完续上；没发的原因看 `release.sh --check`。要马上发才用 `node $S/release-train.mjs start --sha <主线提交> --founder-ok "<他这一次的原话>"`（发版是对外发布），`status` 看进度、`abort` 撤暂停；预检拦在「主线 CI 不是绿的」就先修主线。
+平时不用管：主线头 CI 全绿（含 E2E）、没有发版在走，法国自己发；发版不关引擎总开关，切版本那几分钟暂停在跑的任务、发完续上，驱动死了法国自己续上、报一条（决定 0093）；没发的原因看 `release.sh --check`。要马上发才用 `node $S/release-train.mjs start --sha <主线提交> --founder-ok "<他这一次的原话>"`（发版是对外发布），`status` 看进度；预检拦在「主线 CI 不是绿的」就先修主线。发后体检只拦和这次新版有关的提醒，别的提醒照常去修，不算发版没成。
 
 ## 盯到合并
 PR 照 `AGENTS.md`，开完不盯，红了才回来修。法国异常先看 `france.mjs`；急的（主线红、生产坏、数据、泄露、安全）当场修。

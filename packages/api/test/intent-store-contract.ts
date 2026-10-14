@@ -43,11 +43,11 @@ export function said(over: Partial<IntakeMessage> = {}): IntakeMessage {
 }
 
 const AUDIT: IntentAudit = {
-  actor: { kind: 'engine', id: 'ops:intent' },
+  actor: { kind: 'ops', id: 'ops:intent' },
   action: 'intent.link',
   target: 'intent',
   reason: '测试',
-  via: 'engine',
+  via: 'ops',
   ok: true,
 };
 const SUMMARY = { text: '首页改成一屏三块', by: '指挥官会话 · Claude Opus 5.5' };

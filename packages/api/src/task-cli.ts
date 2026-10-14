@@ -105,7 +105,7 @@ export async function openTaskControl(
   };
 }
 
-const OPS_TASK = { kind: 'engine', id: 'ops:task' } as const;
+const OPS_TASK = { kind: 'ops', id: 'ops:task' } as const;
 
 /** 做完、已叫停、失败：和 views.ts 的 isTaskFinished、驾驶舱按钮同一份终态。挂起（stalled）不在里面。 */
 function isFinished(state: TaskState): boolean {
@@ -133,7 +133,7 @@ async function record(deps: TaskRunDeps, args: TaskArgs, ref: string, entry: Rec
         ...(entry.taskId === undefined ? {} : { taskId: entry.taskId }),
       },
       reason: `${args.note}（${by}）`,
-      via: 'engine',
+      via: 'ops',
       ok: entry.ok,
       ...(entry.ok ? {} : { error: entry.result }),
     });

@@ -968,7 +968,7 @@ else
   skipped=1
 fi
 
-echo "== 排空引擎（发布不白杀在干的活）：构建之前写排空请求，迁移之前等排空、停引擎、撤请求；读不到、不会排空、等到上限都照实说"
+echo "== 排空引擎（发布不白杀在干的活）：构建完才写排空请求、给手上有会话的任务发暂停，迁移之前等排空、停引擎、撤请求；读不到、不会排空、等到上限都照实说；收尾只继续这次暂停的"
 if [[ -z "$NODE" ]]; then
   echo "  ✗ 没跑成：这台没有 node"
   fail=1
@@ -1010,6 +1010,30 @@ else
   }
   FLEET_SERVICES=fleet-engine
   DRAIN_POLL=0
+  # 假 fleet-api（#2038）：release pause 记下参数、回一份名单；release continue 收下标准输入里的名单、回结果（FAKE_CONT_RC 定退出码）
+  fake_api() { # 版本目录
+    mkdir -p "$1/packages/api/bin"
+    cat >"$1/packages/api/bin/fleet-api" <<FAKE
+#!/usr/bin/env bash
+echo "\$*" >>"$ENG/api-calls"
+entry='{"taskId":"t","repo":"o/r","issueNumber":1,"workflowId":"w","result":"RESULT","pausedOk":true}'
+case "\$1 \$2" in
+"release pause")
+  echo "paused o/r#1" >&2
+  printf '{"schema":1,"by":"发版","reason":"x","pausedAt":"x","entries":[%s]}\n' "\${entry/RESULT/paused}"
+  ;;
+"release continue")
+  cat >"$ENG/continue-stdin"
+  if [[ "\${FAKE_CONT_RC:-0}" == 1 ]]; then r=failed; echo "failed o/r#1：没发出「继续」：工作流服务连不上" >&2; else r=continued; echo "continued o/r#1" >&2; fi
+  printf '{"schema":1,"by":"发版","reason":"x","pausedAt":"x","entries":[%s]}\n' "\${entry/RESULT/\$r}"
+  exit "\${FAKE_CONT_RC:-0}"
+  ;;
+esac
+FAKE
+  }
+  for v in "$A" "$B" "$C" "$D" "$E"; do fake_api "$RELEASES/$v"; done
+  : >"$ENG/api-calls"
+  rm -f -- "$PAUSE_FILE"
 
   status_json 2
   rm -f -- "$ENG/request-seen"
@@ -1019,11 +1043,46 @@ else
   check "等两个会话交回（睡了两觉）才停引擎，停完起回来（切版本）" "$(tr '\n' ' ' <"$ENG/calls")" "stop start "
   check "排空请求写的是要切到的提交、人手动发" \
     "$("$NODE" -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(r.schema,r.sha===process.argv[2],r.by,(Date.parse(r.until)-Date.parse(r.requestedAt))/1000)' "$ENG/request-seen" "$A")" \
-    "1 true manual 600"
+    "1 true manual 120"
   check "停完撤了排空请求（新引擎起来不能再认它）" "$([[ -e "$DRAIN_REQUEST" ]] && echo 还在 || echo 撤了)" 撤了
   check "说了排空请求、排空了、停下引擎" \
     "$(said '排空请求：引擎不起新会话'):$(said '引擎排空了：手上没有会话'):$(said '停下引擎（切版本之前）')" "1:1:1"
   check "会排空的引擎：没有待处理" "${#PENDING[@]}" 0
+  check "切版本前用要切到的那一版的 fleet-api 给手上有会话的任务发暂停（暂停人发版）" \
+    "$(head -n 1 "$ENG/api-calls")" "release pause --reason 发版 ${A:0:12} t"
+  check "暂停名单落进 PAUSE_FILE（收尾继续读同一份）" \
+    "$("$NODE" -e 'const l=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(l.by,l.entries.length,l.entries[0].pausedOk)' "$PAUSE_FILE")" \
+    "发版 1 true"
+  check "说了发版暂停" "$(said '发版暂停：给 1 个手上有会话的任务发了 hard 暂停')" 1
+
+  # 收尾：引擎起来了，只对名单发「继续」，用在用那一版的 fleet-api；都发成了就删名单
+  : >"$ENG/api-calls"
+  RESUME_ON_FINISH=1
+  reset
+  finish_hook >"$TMP/out"
+  check "收尾对名单发了「继续」" "$(cat "$ENG/api-calls")" "release continue"
+  check "继续读的是暂停那一步的名单" "$(grep -c '"taskId":"t"' "$ENG/continue-stdin")" 1
+  check "都继续上了：名单删掉、没有待处理" "$([[ -e "$PAUSE_FILE" ]] && echo 还在 || echo 删了):${#PENDING[@]}" "删了:0"
+  # 继续发不出去：逐条记待处理，名单只留没继续上的，不当成发成了
+  printf '{"schema":1,"by":"发版","reason":"x","pausedAt":"x","entries":[{"taskId":"t","repo":"o/r","issueNumber":1,"workflowId":"w","result":"paused","pausedOk":true}]}\n' >"$PAUSE_FILE"
+  FAKE_CONT_RC=1
+  export FAKE_CONT_RC
+  reset
+  finish_hook >"$TMP/out"
+  check "继续发不出去：记待处理、写明哪张单" "$(printf '%s\n' "${PENDING[@]}" | grep -c '发版暂停的任务没继续上：o/r#1')" 1
+  check "继续发不出去：名单留着、只剩它" \
+    "$("$NODE" -e 'const l=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(l.entries.map((e)=>e.result).join())' "$PAUSE_FILE")" failed
+  unset FAKE_CONT_RC
+  # 引擎没在跑：不发，名单整份留着，记待处理
+  ENG_STATE=inactive
+  reset
+  finish_hook >"$TMP/out"
+  check "引擎没在跑：名单留着、记待处理" \
+    "$([[ -e "$PAUSE_FILE" ]] && echo 还在 || echo 删了):$(printf '%s\n' "${PENDING[@]}" | grep -c '发版暂停的任务还没继续：引擎没在跑')" "还在:1"
+  ENG_STATE=active
+  RESUME_ON_FINISH=0
+  rm -f -- "$PAUSE_FILE"
+  : >"$ENG/api-calls"
 
   : >"$ENG/calls"
   rm -f -- "$ENG/drain.json"
@@ -1057,7 +1116,7 @@ else
   check "会话一直不交回：等到上限照停、切到 E" "$(current_sha):$(tr '\n' ' ' <"$ENG/calls")" "$E:stop start "
   check "等到上限：记待处理、写明还剩谁" "$(printf '%s\n' "${PENDING[@]}" | grep -c '排空等到了上限.*execute(run-0-xx)')" 1
   ENG_STUCK=0
-  DRAIN_GRACE=600
+  DRAIN_GRACE=120
   DRAIN_STOP_REPORT=120
   DRAIN_SLACK=60
 
@@ -1076,7 +1135,7 @@ else
   NOW_MODE=1
   check "--now：宽限 0" "$(drain_grace)" 0
   NOW_MODE=0
-  check "不带 --now：宽限 600 秒" "$(drain_grace)" 600
+  check "不带 --now：宽限 120 秒（发了 hard 暂停以后只等停不下来的那几个，不再排空 10 分钟）" "$(drain_grace)" 120
 
   # 停下引擎以后失败了（没走到切版本）：收尾把引擎起回来、撤请求
   ENG_STATE=inactive
@@ -1098,7 +1157,8 @@ else
   check "引擎起不回来：记红，不当成没事" "$(reds_with '停下的引擎也起不回来')" 1
   eval "$systemctl_ok"
 
-  unset -f systemctl sleep status_json
+  unset -f systemctl sleep status_json fake_api
+  rm -f -- "$PAUSE_FILE"
   FLEET_SERVICES=""
   ENGINE_STOPPED=0
 fi

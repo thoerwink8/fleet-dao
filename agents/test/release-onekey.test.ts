@@ -288,15 +288,24 @@ describe('start：先拦用法，过了照原样进 runTrain', () => {
   it('过了检查的照原样进 runTrain：走过了第 1 步（说明真走进了 runTrain）', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
-    // 法国有个会话一直在跑（预检那次读到 0 个，之后 1 个），让等收尾卡住，这趟不会走远但够看到「真在走 runTrain」
-    // （自动合并的 PR 只提示不等，卡不住它）
-    const run0 = io(home);
-    let polls = 0;
-    run0.runningSessions = async () => {
-      polls += 1;
-      return polls === 1
-        ? { ok: true, running: 0, rows: [] }
-        : { ok: true, running: 1, rows: [{ repo: 'o/a', n: 5, stage: 'execute' }] };
+    // 预检那次要发的提交的 CI 是绿的，之后一直在跑：第 3 步（只等 CI，#2038）卡住，这趟不会走远但够看到「真在走 runTrain」
+    // （自动合并的 PR 只提示不等，卡不住它；法国会话第 3 步不再等）
+    const base0 = io(home);
+    let checks = 0;
+    const run0: OnekeyIo = {
+      ...base0,
+      run: (c, a) => {
+        if (c === 'gh' && a[0] === 'api' && a[1]?.includes('check-runs')) {
+          checks += 1;
+          if (checks >= 2)
+            return {
+              status: 0,
+              stdout: JSON.stringify({ total: 1, runs: [{ status: 'in_progress', conclusion: null }] }),
+              stderr: '',
+            };
+        }
+        return base0.run(c, a);
+      },
     };
     const code = await onekey.runOnekey(['start', '--sha', SHA, '--founder-ok', FOUNDER], run0);
     // 卡在等收尾（3），但第 1 步已经走过——证明 runTrain 真跑起来了

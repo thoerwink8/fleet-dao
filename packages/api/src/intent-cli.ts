@@ -212,11 +212,11 @@ export function describeIntent(d: IntentDetail): string {
 }
 
 const auditOf = (deps: IntentCliDeps, action: string, seq: number, said: string): IntentAudit => ({
-  actor: { kind: 'engine', id: 'ops:intent' },
+  actor: { kind: 'ops', id: 'ops:intent' },
   action,
   target: `intent:${seq}`,
   reason: `服务器上 ${deps.operator} 跑的 fleet-api intent ${said}`,
-  via: 'engine',
+  via: 'ops',
   ok: true,
 });
 

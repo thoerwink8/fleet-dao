@@ -30,9 +30,9 @@ export const PageQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 
-/** 谁做的：人（驾驶舱用户）、AI 帅位、引擎、会话里的 AI。 */
+/** 谁做的：人（驾驶舱用户）、AI 帅位、引擎、会话里的 AI、服务器上的运维脚本。 */
 export const ActorSchema = z.object({
-  kind: z.enum(['user', 'ai', 'engine', 'agent']),
+  kind: z.enum(['user', 'ai', 'engine', 'agent', 'ops']),
   id: Id,
   name: z.string().optional(),
 });

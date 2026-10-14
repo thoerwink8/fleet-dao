@@ -144,8 +144,8 @@ describe('session-mint', () => {
     expect(entry).toMatchObject({
       action: SESSION_MINT,
       target: 'cockpit',
-      via: 'engine',
-      actor: { kind: 'engine', id: 'ops:session-mint' },
+      via: 'ops',
+      actor: { kind: 'ops', id: 'ops:session-mint' },
       reason: '点验线上驾驶舱',
       ok: true,
     });

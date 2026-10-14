@@ -128,6 +128,16 @@ describe('on/off', () => {
     expect(last?.reason).toContain('fleet-api engine off');
   });
 
+  it('fleet-api engine off 写的操作记录记成运维脚本（actor.kind=ops、via=ops），不冒充引擎自己关的', async () => {
+    const t = setup();
+    expect(await t.run(['on'])).toBe(0);
+    expect(await t.run(['off'])).toBe(0);
+    const last = t.store.data.audit.filter((a) => a.target === `setting:${ENGINE_MASTER_SETTING}`).at(-1);
+    expect(last?.action).toBe('engine.master.disable');
+    expect(last?.actor).toEqual({ kind: 'ops', id: 'ops:engine' });
+    expect(last?.via).toBe('ops');
+  });
+
   it('没设过就关：不关不记（默认就是关），说一句本来就关着', async () => {
     const t = setup();
     const text = await engine({ store: t.store, args: { action: 'off' }, operator: 'root' });
