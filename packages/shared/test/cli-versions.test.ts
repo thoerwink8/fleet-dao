@@ -201,7 +201,7 @@ describe('两个用户分开列，全局 npm 不按用户重复', () => {
         {
           scope: 'user',
           owner: 'pilot',
-          tool: 'grok',
+          tool: 'codex',
           installedVersion: '1.0.50',
           installedError: null,
           latestVersion: '1.0.50',
@@ -227,7 +227,7 @@ describe('两个用户分开列，全局 npm 不按用户重复', () => {
     if (view.state !== 'ok') return;
     expect(view.groups.map((g) => g.title)).toEqual(['fleet-agent-carpool', 'pilot', '全局 npm']);
     const car = view.groups[0]?.rows.find((r) => r.tool === 'grok');
-    const pilot = view.groups[1]?.rows.find((r) => r.tool === 'grok');
+    const pilot = view.groups[1]?.rows.find((r) => r.tool === 'codex');
     expect(car?.status.kind).toBe('behind');
     expect(pilot?.status).toEqual({ kind: 'current', label: '最新' });
     expect(view.groups[0]?.rows.map((r) => r.tool)).toEqual([
@@ -238,6 +238,8 @@ describe('两个用户分开列，全局 npm 不按用户重复', () => {
       'reclaude',
       'mirasim-server',
     ]);
+    // pilot 上只装了这三样，别的不列（列了只会永远「读不到」）
+    expect(view.groups[1]?.rows.map((r) => r.tool)).toEqual(['claude', 'codex', 'reclaude']);
     expect(view.groups[2]?.rows.map((r) => r.tool)).toEqual(['kimi-code', 'dsh', 'pi']);
     expect(view.groups[2]?.rows.find((r) => r.tool === 'pi')?.status.label).toBe('读不到');
     expect(CliToolsResponseSchema.safeParse(view).success).toBe(true);
@@ -284,7 +286,7 @@ describe('升级结果挂到版本行上', () => {
     const grok = (owner: string) =>
       view.groups.find((g) => g.owner === owner)?.rows.find((r) => r.tool === 'grok');
     expect(grok('fleet-agent-carpool')?.upgrade?.version).toBe('1.0.50');
-    expect(grok('pilot')?.upgrade).toBeNull();
+    expect(grok('pilot')).toBeUndefined();
     expect(
       view.groups.find((g) => g.owner === 'fleet-agent-carpool')?.rows.find((r) => r.tool === 'cursor-agent')
         ?.upgrade?.outcome,

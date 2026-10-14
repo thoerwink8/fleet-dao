@@ -965,7 +965,7 @@ describe('单元表（第七片）', () => {
   it('本仓 deploy/ 能生成：每个单元都有说明', () => {
     const root = fileURLToPath(new URL('../../../', import.meta.url));
     const entries = readUnitEntries(fsRepo(root));
-    expect(entries.map((e) => e.file)).toContain('fleet-feishu.service');
+    expect(entries.map((e) => e.file)).toContain('fleet-engine.service');
     expect(entries.map((e) => e.file)).toContain('fleet-api.socket');
     for (const e of entries) expect(e.description).not.toBe('');
   });

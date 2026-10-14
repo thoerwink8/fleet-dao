@@ -73,6 +73,8 @@ export interface IssueNewResult {
   parent?: number | undefined;
   /** 贴了「本机做」（--local）时是 true。 */
   local?: true | undefined;
+  /** 开的是母单（--mother）时是 true；母单不派，开单后不戳法国。 */
+  mother?: true | undefined;
   /** 排进了版本的先后（挂版本的母单、单独的单）：排在第几位（从 1 数）、先后里一共几张。 */
   order?: { position: number; count: number } | undefined;
   /** 开单前查的可能重复的单（deps.similar 给了才有）；只提示，开单不受它影响。 */
@@ -334,13 +336,14 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   const number = Number(n);
   const { parent } = o;
   const local = o.local || undefined;
+  const mother = o.mother || undefined;
   if (parent !== undefined) await attachToParent(deps.gh, { number, url, parent, milestone });
   const order =
     version === undefined
       ? undefined
       : await orderIntoVersion(deps.gh, { number, url, version, after: o.orderAfter });
   const offDiff = checked.offDiffHits.length > 0 ? checked.offDiffHits : undefined;
-  return { number, url, milestone, parent, local, order, similar, offDiff };
+  return { number, url, milestone, parent, local, mother, order, similar, offDiff };
 }
 
 interface Options {

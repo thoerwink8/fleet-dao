@@ -25,6 +25,9 @@ import type { RepoView } from './repo.ts';
  */
 export const DOCS = ['docs/design.md', 'docs/ops.md', 'README.md', 'AGENTS.md'] as const;
 
+/** 仓根 AGENTS.md 只当目录，本仓协作的细则在这一份；和各包的 AGENTS.md 一样，在就查。 */
+export const WORKFLOW_DOC = 'docs/workflow.md';
+
 /**
  * docs/design/<模块>.md 是从 docs/design.md 拆出来的一片（#139）：正文整段搬过去，一个字没改。
  * 里面光写的「第 X 节」「X.Y」「「…」一节」指的是 design 那份，不是这份（它自己没有编号的节）；
@@ -34,13 +37,22 @@ export function bareDoc(file: string): string {
   return file.startsWith('docs/design/') ? 'docs/design.md' : file;
 }
 
-/** 这次要查的文件：上面固定的几份，加上 docs/design/ 下按名字排的 .md。目录不存在就只有固定的几份。 */
+/**
+ * 这次要查的文件：上面固定的几份，加上 docs/design/ 下按名字排的 .md，再加上各包自己的 AGENTS.md
+ * （仓根 AGENTS.md 只当目录，细则下沉到包里；包里的说明和代码脱节、路径指空了一样没人发现）。目录不存在就不加。
+ */
 export function docFiles(repo: RepoView): string[] {
   const extra = (repo.list('docs/design') ?? [])
     .filter((name) => name.endsWith('.md'))
     .sort()
     .map((name) => `docs/design/${name}`);
-  return [...DOCS, ...extra];
+  const pkgs = (repo.list('packages') ?? [])
+    .sort()
+    .map((name) => `packages/${name}/AGENTS.md`)
+    .filter((file) => repo.exists(file));
+  // 仓根 AGENTS.md 指过去的协作细则（进度和单、PR、改标准）：在就查
+  const workflow = repo.exists(WORKFLOW_DOC) ? [WORKFLOW_DOC] : [];
+  return [...DOCS, ...workflow, ...extra, ...pkgs];
 }
 
 export type PointerKind = 'link' | 'path' | 'section' | 'subsection' | 'quote' | 'item' | 'title';

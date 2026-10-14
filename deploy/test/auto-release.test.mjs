@@ -768,7 +768,6 @@ const FULL_RUN_ONLY_FILES = [
   'deploy/france/fleet-temporal-cli.sh',
   'deploy/france/fleet-engine.service',
   'deploy/france/fleet-api.service',
-  'deploy/france/bundle-gateway.sh',
 ];
 const refsOf = (file) => {
   const text = readFileSync(new URL(file, import.meta.url), 'utf8');

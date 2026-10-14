@@ -6,6 +6,9 @@
 //   agents/test/patrol.test.ts 扫这段脚本钉住不写库、不改文件。
 // - 读不成一律 BROKEN，不当 OK：ssh 连不上、输出是空的、少了哪一块、有认不出的行、库查询报错、采集时间和本机差超过
 //   STALE_MINUTES 分钟。
+// - 发版和健康页也读（2026-10-14 法国发版失败，巡检还报 OK 近一小时）：/healthz 非 200、最近一次发版是 unhealthy / auto-rollback、发版进度记录停在
+//   done / aborted 以外、自动发布状态里写着「要人看」，一律 BROKEN（列出红的检查）；在用版本落后主线超过 LIMITS.lagCommits 个提交
+//   且最老的那个落下超过 LIMITS.lagMinutes 分钟是 ALERT；这几块读不到、认不出也是 BROKEN。
 // - 基线只由这份脚本写（模型不写）：OK、ALERT 都把这一次的读数写成新基线，BROKEN 不写（不拿坏读数盖掉好基线）。
 // - 最后一行永远是 `VERDICT: OK`、`VERDICT: ALERT <条数>` 或 `VERDICT: BROKEN`；退出码 0、1、2 与之对应。
 import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
@@ -14,9 +17,13 @@ import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
 /** @typedef {{ n: number, repo: string, state: string, phase: string, minutes: number, doing: string }} TaskFact 一张没做完的单 */
 /** @typedef {{ job: string, outcome: string, minutes: number, why: string }} JobFact 最近一次跑完不是 ok 的定时任务 */
 /** @typedef {{ key: string, title: string }} NoteFact 一条开着的通知（不含提醒类） */
+/** @typedef {{ code: number, red: string[] }} HealthzFact /healthz 的状态码（连不上是 0）和红的检查名 */
+/** @typedef {{ at: string, sha: string, event: string }} HistoryFact 发布历史（.history）的一条 */
+/** @typedef {{ known: boolean, behind: number, minutes: number }} LagFact 在用版本落后主线几个提交、最老的落下几分钟（known=false：在用的不在主线最近的提交里） */
 /**
  * 一次巡查读到的。at 是法国的采集时间（ISO）。
- * @typedef {{ at: string, release: string, services: Record<string, string>, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notesOpen: number, notes: NoteFact[] }} Facts
+ * healthz、history、trainStatus、autoNote、lag 是发版和健康页（老基线里没有这几项，只有判当前读数用到）。
+ * @typedef {{ at: string, release: string, healthz: HealthzFact, history: HistoryFact[], trainStatus: string, autoNote: string, lag: LagFact, services: Record<string, string>, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notesOpen: number, notes: NoteFact[] }} Facts
  */
 /** @typedef {'OK' | 'ALERT' | 'BROKEN'} Verdict */
 /** @typedef {{ verdict: Verdict, facts: Facts | null, alerts: string[], delta: string[], broken: string | null, notes: string[] }} Report */
@@ -31,7 +38,17 @@ export const LIMITS = {
   memMinMb: 1024,
   /** 单卡住（stalled）或停下等人（phase=parked）超过这么多分钟 */
   stuckMinutes: 30,
+  /** 在用版本落后主线超过这么多个提交…… */
+  lagCommits: 5,
+  /** ……而且最老的那个没发的提交落下超过这么多分钟，才报（刚合进去的几个不算落后）。 */
+  lagMinutes: 60,
 };
+/** 发布历史最近一条是这些事件：这一版没发成，或退回了。 */
+export const BAD_RELEASE_EVENTS = ['unhealthy', 'auto-rollback'];
+/** 驾驶舱接口（deploy/release.sh 的 COCKPIT）。 */
+export const COCKPIT_HEALTHZ = 'http://10.99.0.2:8787/healthz';
+/** 发布目录（法国）。 */
+const RELEASES = '/srv/fleet-dao-releases';
 /** 要 active 的服务。 */
 export const SERVICES = ['fleet-api', 'fleet-engine'];
 /** 库查询那几块：每块跑完打 ok|<块>，报错打 ERR|<块>|<原因>。 */
@@ -59,6 +76,15 @@ export const REMOTE_SCRIPT = [
   '  fi',
   '}',
   'echo "at|$(date +%s)"',
+  // 发版和健康页（只读：curl 一个 GET、读发布目录里的几个文件）
+  `hz=$(curl -s -m 10 -w '\\n%{http_code}' ${COCKPIT_HEALTHZ} 2>&1)`,
+  `hzcode=$(printf '%s' "$hz" | tail -n 1 | tr -cd '0-9')`,
+  `hzred=$(printf '%s' "$hz" | grep -o '"[A-Za-z0-9_]*":{"ok":false' | cut -d'"' -f2 | paste -sd, -)`,
+  'echo "healthz|${hzcode:-000}|$hzred"',
+  `echo "cur|$(basename "$(readlink -f ${RELEASES}/current)")"`,
+  `if [ -r ${RELEASES}/.history ]; then tail -n 3 ${RELEASES}/.history | while read -r a b c rest; do echo "hist|$a|$b|$c"; done; else echo "hist|-|-|-"; fi`,
+  `if [ -r ${RELEASES}/.train/release-train.json ]; then echo "train|$(tr -d '[:space:]' < ${RELEASES}/.train/release-train.json)"; else echo "train|-"; fi`,
+  `if [ -r ${RELEASES}/.auto/state.json ]; then echo "state|$(tr -d '[:space:]' < ${RELEASES}/.auto/state.json)"; else echo "state|-"; fi`,
   'echo "release|$(basename "$(readlink -f /srv/fleet-dao-releases/current)" | cut -c1-8)"',
   `for u in ${SERVICES.join(' ')}; do echo "svc|$u|$(systemctl is-active "$u")"; done`,
   `echo "disk|$(df -P / | awk 'NR==2{sub("%","",$5); print $5}')"`,
@@ -79,6 +105,57 @@ const isInt = (s) => /^-?\d+$/.test(s);
 const isNum = (s) => /^-?\d+(?:\.\d+)?$/.test(s);
 /** @param {string} line */
 const shown = (line) => scrubText(line.length > 80 ? `${line.slice(0, 80)}…` : line);
+
+/**
+ * 发版进度记录、自动发布状态（法国打回来的是去掉空白的原 JSON；不在是 '-'）→ 进度状态、自动发布的话、落后几个提交。
+ * 进度记录在但认不出、状态文件不在或认不出（拿不到主线提交，落后算不出）都回失败，不拿空顶。
+ * @param {string} train
+ * @param {string} state
+ * @param {string} cur 在用的完整提交号
+ * @param {string} at 法国采集时间（ISO）
+ * @returns {{ ok: true, trainStatus: string, autoNote: string, lag: LagFact } | { ok: false, why: string }}
+ */
+function releaseFacts(train, state, cur, at) {
+  let trainStatus = '';
+  if (train !== '-') {
+    try {
+      const t = JSON.parse(train);
+      if (typeof t?.status !== 'string')
+        return { ok: false, why: '发版进度记录（release-train.json）认不出：没有 status' };
+      trainStatus = t.status;
+    } catch (e) {
+      return {
+        ok: false,
+        why: `发版进度记录（release-train.json）不是 JSON：${shown(String(e instanceof Error ? e.message : e))}`,
+      };
+    }
+  }
+  if (state === '-')
+    return { ok: false, why: '自动发布的状态文件（.auto/state.json）读不到：落后主线几个提交算不出' };
+  let st;
+  try {
+    st = JSON.parse(state);
+  } catch (e) {
+    return {
+      ok: false,
+      why: `自动发布的状态文件不是 JSON：${shown(String(e instanceof Error ? e.message : e))}`,
+    };
+  }
+  const commits = st?.main?.commits;
+  if (
+    !Array.isArray(commits) ||
+    commits.length === 0 ||
+    !commits.every((c) => Array.isArray(c) && typeof c[0] === 'string' && !Number.isNaN(Date.parse(c[1])))
+  )
+    return { ok: false, why: '自动发布的状态文件里没有主线提交列表（main.commits）：落后主线几个提交算不出' };
+  const autoNote = typeof st?.auto?.note === 'string' ? scrubText(st.auto.note) : '';
+  const idx = commits.findIndex((c) => c[0] === cur);
+  if (idx < 0)
+    return { ok: true, trainStatus, autoNote, lag: { known: false, behind: commits.length, minutes: 0 } };
+  const minutes =
+    idx === 0 ? 0 : Math.max(0, Math.floor((Date.parse(at) - Date.parse(commits[idx - 1][1])) / 60_000));
+  return { ok: true, trainStatus, autoNote, lag: { known: true, behind: idx, minutes } };
+}
 
 /**
  * 认法国回来的那一屏。成功 { ok: true, facts }；认不出、少了块、库查询报错都回 { ok: false, why }，不拿空顶。
@@ -104,11 +181,16 @@ export function parseRaw(text) {
   const notes = [];
   /** @type {Set<string>} */
   const blocksOk = new Set();
-  /** @type {{ at?: string, release?: string, diskPct?: number, memMb?: number, load?: number, master?: string, notesOpen?: number }} */
+  /** @type {{ at?: string, release?: string, diskPct?: number, memMb?: number, load?: number, master?: string, notesOpen?: number, healthz?: HealthzFact, cur?: string, train?: string, state?: string }} */
   const one = {};
+  /** @type {HistoryFact[]} */
+  const history = [];
+  let histMissing = false;
   for (const line of lines.slice(0, -1)) {
     const p = line.split('|');
     const kind = p[0];
+    // 整行后半是一整块原文（可能带「|」）的几种：只按第一个「|」切
+    const rest = line.slice(line.indexOf('|') + 1);
     if (kind === 'ERR')
       return { ok: false, why: `库查询「${p[1] ?? '?'}」报错：${shown(p.slice(2).join('|'))}` };
     if (kind === 'ok' && p.length === 2 && DB_BLOCKS.includes(p[1] ?? '')) blocksOk.add(p[1] ?? '');
@@ -119,6 +201,14 @@ export function parseRaw(text) {
     else if (kind === 'disk' && p.length === 2 && isInt(p[1] ?? '')) one.diskPct = Number(p[1]);
     else if (kind === 'mem' && p.length === 2 && isInt(p[1] ?? '')) one.memMb = Number(p[1]);
     else if (kind === 'load' && p.length === 2 && isNum(p[1] ?? '')) one.load = Number(p[1]);
+    else if (kind === 'healthz' && p.length === 3 && isInt(p[1] ?? ''))
+      one.healthz = { code: Number(p[1]), red: (p[2] ?? '').split(',').filter((x) => x !== '') };
+    else if (kind === 'cur' && p.length === 2) one.cur = p[1] ?? '';
+    else if (kind === 'hist' && p.length === 4) {
+      if (p[1] === '-') histMissing = true;
+      else history.push({ at: p[1] ?? '', sha: p[2] ?? '', event: p[3] ?? '' });
+    } else if (kind === 'train' && line.includes('|')) one.train = rest;
+    else if (kind === 'state' && line.includes('|')) one.state = rest;
     else if (kind === 'master' && p.length === 2) one.master = p[1] ?? '';
     else if (kind === 'notes' && p.length === 2 && isInt(p[1] ?? '')) one.notesOpen = Number(p[1]);
     else if (kind === 'task' && p.length >= 7 && isInt(p[1] ?? '') && isInt(p[5] ?? ''))
@@ -143,16 +233,36 @@ export function parseRaw(text) {
   }
   /** @type {string[]} */
   const missing = [];
-  for (const k of ['at', 'release', 'diskPct', 'memMb', 'load', 'master', 'notesOpen'])
+  for (const k of [
+    'at',
+    'release',
+    'diskPct',
+    'memMb',
+    'load',
+    'master',
+    'notesOpen',
+    'healthz',
+    'cur',
+    'train',
+    'state',
+  ])
     if (!(k in one)) missing.push(k);
+  if (histMissing || history.length === 0) missing.push('发布历史 .history（读不到或是空的）');
   for (const u of SERVICES) if (!(u in services)) missing.push(`svc ${u}`);
   for (const b of DB_BLOCKS) if (!blocksOk.has(b)) missing.push(`库查询 ${b}`);
   if (missing.length > 0) return { ok: false, why: `法国回来的少了：${missing.join('、')}` };
+  const rel = releaseFacts(one.train ?? '-', one.state ?? '-', one.cur ?? '', one.at ?? '');
+  if (!rel.ok) return { ok: false, why: rel.why };
   return {
     ok: true,
     facts: {
       at: one.at ?? '',
       release: one.release ?? '',
+      healthz: one.healthz ?? { code: 0, red: [] },
+      history: history.slice(-3),
+      trainStatus: rel.trainStatus,
+      autoNote: rel.autoNote,
+      lag: rel.lag,
       services,
       diskPct: one.diskPct ?? 0,
       memMb: one.memMb ?? 0,
@@ -171,6 +281,29 @@ const isStuck = (t) => (t.state === 'stalled' || t.phase === 'parked') && t.minu
 /** @param {TaskFact} t */
 const taskWord = (t) => `#${t.n}（${t.repo}）${t.state}${t.phase ? `/${t.phase}` : ''}`;
 
+/** 发布历史里的一条，给人看。 */
+const historyWord = (/** @type {HistoryFact} */ h) => `${h.event}（${h.sha.slice(0, 8)} ${h.at}）`;
+
+/**
+ * 判 BROKEN 的几条（出事了，不是「要留意」）：健康页不是 200（列出红的检查）、最近一次发版是 unhealthy / auto-rollback、
+ * 发版进度记录停在 done / aborted 以外、自动发布处于「要人看」。命中一条记一行；没有回空。
+ * @param {Facts} f
+ */
+export function brokenReasons(f) {
+  /** @type {string[]} */
+  const out = [];
+  if (f.healthz.code !== 200) {
+    const reds = f.healthz.red.length > 0 ? `，红的检查：${f.healthz.red.join('、')}` : '';
+    out.push(`/healthz 回 ${f.healthz.code === 0 ? '不出来（连不上）' : f.healthz.code}${reds}`);
+  }
+  const last = f.history.at(-1);
+  if (last && BAD_RELEASE_EVENTS.includes(last.event)) out.push(`最近一次发版是 ${historyWord(last)}`);
+  if (f.trainStatus !== '' && f.trainStatus !== 'done' && f.trainStatus !== 'aborted')
+    out.push(`发版进度记录停在「${f.trainStatus}」`);
+  if (f.autoNote.includes('要人看')) out.push(`自动发布处于「要人看」：${f.autoNote}`);
+  return out;
+}
+
 /**
  * 不变量：命中一条记一行。新通知要有基线才判（没有基线的第一次只记基线）。
  * @param {Facts} f
@@ -181,6 +314,11 @@ export function invariants(f, base) {
   const out = [];
   for (const u of SERVICES)
     if (f.services[u] !== 'active') out.push(`服务 ${u} 是 ${f.services[u] || '（空）'}`);
+  if (!f.lag.known) out.push(`在用的版本不在主线最近 ${f.lag.behind} 个提交里（落后太多，或不是主线上的）`);
+  else if (f.lag.behind > LIMITS.lagCommits && f.lag.minutes > LIMITS.lagMinutes)
+    out.push(
+      `在用的版本落后主线 ${f.lag.behind} 个提交，最老的没发的已落下 ${f.lag.minutes} 分钟（线：超过 ${LIMITS.lagCommits} 个且超过 ${LIMITS.lagMinutes} 分钟）`,
+    );
   if (f.release === '') out.push('在用的版本没读到（/srv/fleet-dao-releases/current 指不到）');
   if (f.diskPct > LIMITS.diskPct) out.push(`磁盘 ${f.diskPct}% 超过 ${LIMITS.diskPct}%`);
   if (f.memMb < LIMITS.memMinMb) out.push(`可用内存 ${f.memMb}M 少于 ${LIMITS.memMinMb}M`);
@@ -251,12 +389,13 @@ export function judge({ raw, now, base }) {
       `采集时间 ${f.at} 和本机 ${now.toISOString()} 差 ${Math.round(skew)} 分钟，超过 ${STALE_MINUTES}`,
     );
   const alerts = invariants(f, base);
+  const bad = brokenReasons(f);
   return {
-    verdict: alerts.length > 0 ? 'ALERT' : 'OK',
+    verdict: bad.length > 0 ? 'BROKEN' : alerts.length > 0 ? 'ALERT' : 'OK',
     facts: f,
     alerts,
     delta: delta(f, base),
-    broken: null,
+    broken: bad.length > 0 ? bad.join('；') : null,
     notes: base ? [] : ['基线 没有：这一次的读数写成第一份基线，新通知从下一次起判'],
   };
 }
@@ -267,9 +406,9 @@ export function judge({ raw, now, base }) {
  * @returns {string[]}
  */
 export function render(r) {
-  if (r.verdict === 'BROKEN' || !r.facts)
-    return ['PATROL 法国 没读成', `BROKEN ${r.broken ?? '没说为什么'}`, 'VERDICT: BROKEN'];
+  if (!r.facts) return ['PATROL 法国 没读成', `BROKEN ${r.broken ?? '没说为什么'}`, 'VERDICT: BROKEN'];
   const f = r.facts;
+  const last = f.history.at(-1);
   const at = `@${f.at}`;
   const active = SERVICES.filter((u) => f.services[u] === 'active').length;
   const lines = [
@@ -279,13 +418,20 @@ export function render(r) {
     `总开关 ${f.master === 'true' ? '开着' : `关着（${f.master}）`} ${at}`,
     `单 ${f.tasks.length} 张没做完，卡住或停下超过 ${LIMITS.stuckMinutes} 分钟的 ${f.tasks.filter(isStuck).length} 张 ${at}`,
     `定时任务 最近一次不是 ok 的 ${f.jobs.length} 个 ${at}`,
+    `健康页 /healthz ${f.healthz.code === 200 ? '200' : `${f.healthz.code === 0 ? '连不上' : f.healthz.code}（红的：${f.healthz.red.join('、') || '没列出'}）`} ${at}`,
+    `发版 最近一次 ${last ? historyWord(last) : '（没有）'}，进度记录 ${f.trainStatus || '无'}，落后主线 ${f.lag.known ? f.lag.behind : '?'} 个提交 ${at}`,
     `通知 开着 ${f.notesOpen} 条 ${at}`,
     ...r.notes,
     `DELTA ${r.delta.length}`,
     ...r.delta.map((d) => `  ${d}`),
     `ALERT ${r.alerts.length}`,
     ...r.alerts.map((a) => `  ${a}`),
-    r.verdict === 'ALERT' ? `VERDICT: ALERT ${r.alerts.length}` : 'VERDICT: OK',
+    ...(r.verdict === 'BROKEN' ? [`BROKEN ${r.broken ?? ''}`] : []),
+    r.verdict === 'BROKEN'
+      ? 'VERDICT: BROKEN'
+      : r.verdict === 'ALERT'
+        ? `VERDICT: ALERT ${r.alerts.length}`
+        : 'VERDICT: OK',
   ];
   return lines;
 }
@@ -345,7 +491,7 @@ export async function runPatrol(io) {
     }
     report.alerts = report.alerts.map((a) => (a.startsWith('引擎总开关关着') ? `${a}；发版车：${note}` : a));
   }
-  if (report.facts) {
+  if (report.facts && report.verdict !== 'BROKEN') {
     try {
       io.saveBaseline(baselineText(report.facts));
     } catch (e) {
@@ -380,13 +526,37 @@ export async function fetchFrance({ home, env, readText, timeoutMs = 55_000, spa
 
 /**
  * 造一份法国回来的样子（自检和测试用）。默认是一切正常；over 改哪项就坏哪项。
- * @param {{ at: Date, disk?: number, mem?: number, engine?: string, master?: string, tasks?: string[], jobs?: string[], notes?: string[], noEnd?: boolean, err?: string }} o
+ * @param {{ at: Date, disk?: number, mem?: number, engine?: string, master?: string, tasks?: string[], jobs?: string[], notes?: string[], noEnd?: boolean, err?: string, healthz?: number, healthRed?: string[], hist?: string[], noHist?: boolean, train?: string, trainRaw?: string, noState?: boolean, autoNote?: string, behind?: number, behindMinutes?: number }} o
  */
 export function sampleRaw(o) {
   const notes = o.notes ?? ['note|deploy-lag|发布落后'];
+  const cur = `abcd1234${'0'.repeat(32)}`;
+  const sha = (/** @type {number} */ i) => `${String(i).padStart(8, '0')}${'f'.repeat(32)}`;
+  const behind = o.behind ?? 0;
+  const oldest = o.behindMinutes ?? 5;
+  // 主线最近的提交，新的在前：先是 behind 个没发的（最老的那个落下 oldest 分钟），再是在用的，再是几个更早的
+  const commits = [
+    ...Array.from({ length: behind }, (_, i) => [
+      sha(i + 1),
+      new Date(o.at.getTime() - Math.round((oldest * (i + 1)) / behind) * 60_000).toISOString(),
+    ]),
+    [cur, new Date(o.at.getTime() - (oldest + 30) * 60_000).toISOString()],
+    [sha(900), new Date(o.at.getTime() - (oldest + 90) * 60_000).toISOString()],
+  ];
+  const state = JSON.stringify({
+    schema: 1,
+    main: { head: String(commits[0]?.[0]), commits },
+    auto: { sha: null, at: null, note: o.autoNote ?? '在用的就是主线头，没有要发的' },
+  });
+  const hist = o.hist ?? [`2026-10-08T23:00:00Z ${cur} release`];
   const lines = [
     `at|${Math.floor(o.at.getTime() / 1000)}`,
     'release|abcd1234',
+    `healthz|${o.healthz ?? 200}|${(o.healthRed ?? []).join(',')}`,
+    `cur|${cur}`,
+    ...(o.noHist ? ['hist|-|-|-'] : hist.map((h) => `hist|${h.trim().split(/ +/).slice(0, 3).join('|')}`)),
+    `train|${o.trainRaw ?? (o.train ? JSON.stringify({ status: o.train }) : '-')}`,
+    `state|${o.noState ? '-' : state}`,
     'svc|fleet-api|active',
     `svc|fleet-engine|${o.engine ?? 'active'}`,
     `disk|${o.disk ?? 40}`,
@@ -434,6 +604,34 @@ export function selftest(now) {
       },
       'ALERT',
       7,
+    ],
+    [
+      '2026-10-14 法国那次：/healthz 503、最近一次发版 unhealthy→auto-rollback→unhealthy、自动发布说要人看、落后 19 个提交',
+      {
+        ok: true,
+        stdout: sampleRaw({
+          at: now,
+          healthz: 503,
+          healthRed: ['db', 'temporal'],
+          hist: [
+            '2026-10-14T17:03:00Z abcd1234 release',
+            '2026-10-14T17:05:00Z abcd1234 unhealthy',
+            '2026-10-14T17:06:00Z 1111aaaa auto-rollback',
+            '2026-10-14T17:08:00Z 1111aaaa unhealthy',
+          ],
+          train: 'failed',
+          autoNote: '现在不发：上一趟发版是「failed」状态，要人看，不自动再发',
+          behind: 19,
+          behindMinutes: 90,
+        }),
+      },
+      'BROKEN',
+    ],
+    [
+      '落后 8 个提交、最老的落下 90 分钟',
+      { ok: true, stdout: sampleRaw({ at: now, behind: 8, behindMinutes: 90 }) },
+      'ALERT',
+      1,
     ],
     ['空输出', { ok: true, stdout: '' }, 'BROKEN'],
     ['ssh 连不上', { ok: false, kind: 'ssh-failed', why: '假的：连不上' }, 'BROKEN'],

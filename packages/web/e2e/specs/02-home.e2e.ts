@@ -1,4 +1,4 @@
-// 第二步：主页（一屏三块 + 持续状态）。每块的内容都来自真库，不是假数据。
+// 第二步：画布（/board，原来的主页；决定 0093 起主页是三块，见 02b-home-today）。每块的内容都来自真库，不是假数据。
 // 「在跑的」是初版那样的思维导图看板（React Flow + ELK：中心 → 三段 → 每张单；创始人 2026-10-07「react-flow 我还是喜欢初版那样」）：
 // 每张在跑的单是一个节点 [data-id^="ticket:"]，卡片上 data-running-card 写它在哪一段，三段节点上 data-flow-lane 写段名；
 // 排完版先「全部收进视野」，单子多时是远景（只剩单号），要看卡上的字先切到中景（midZoom）；
@@ -45,12 +45,12 @@ async function openDrawer(page: import('@playwright/test').Page, tab: '要你拍
   await page.getByRole('tab', { name: new RegExp(`^${tab}`) }).click();
 }
 
-test.describe('主页', () => {
+test.describe('画布（原主页）', () => {
   test.beforeEach(async ({ login }) => login());
 
   test('三块都显示真库里的东西，条数和后端 /api/home 一致', async ({ page, api, shot }) => {
     const home = (await api.get('/api/home')) as Home;
-    await page.goto('/');
+    await page.goto('/board');
     // 画布右上角的抽屉按钮写着要你拍的条数
     await expect(page.getByRole('button', { name: /^要你拍的 \d+ 条/ })).toBeVisible();
     await openDrawer(page);
@@ -85,7 +85,7 @@ test.describe('主页', () => {
     expect(seg(12)).toBe('doing');
     expect(seg(17)).toBe('verify_pending');
     expect(seg(15)).toBe('scoping');
-    await page.goto('/');
+    await page.goto('/board');
     await midZoom(page);
     await expect(card(page, 12)).toHaveAttribute('data-running-card', 'doing');
     await expect(card(page, 17)).toHaveAttribute('data-running-card', 'verify_pending');
@@ -100,7 +100,7 @@ test.describe('主页', () => {
   });
 
   test('单击看板上的单：右边滑出详情；点「打开单子详情」进到那张单的详情页', async ({ page, stack }) => {
-    await page.goto('/');
+    await page.goto('/board');
     await card(page, 12).click();
     const detail = page.locator('[data-board-detail]');
     await expect(detail).toContainText('登录页加验证码');
@@ -112,7 +112,7 @@ test.describe('主页', () => {
   // 画布为主体（#1801，创始人 2026-10-11「空间以画布为主体」）：正文区整块是画布，没有左列，
   // 「要你拍的」「做完的」收在右上角的抽屉里；1920、1366 两个视口都一样
   test('画布占满正文区、一进来就在首屏里；要你拍的、做完的在右上角抽屉里', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/board');
     const main = await page.getByRole('main').boundingBox();
     const canvas = await page.locator('[data-home-canvas]').boundingBox();
     expect(main && canvas, '画布和正文区都量得到').toBeTruthy();
@@ -130,7 +130,7 @@ test.describe('主页', () => {
   // 缺陷 D2（#902）在 #914 之后已经不成立：停滞（超时没交活）的 #14 现在落在「动手」、画成红色「出问题了」并写明「动手超时」，
   // 不再是蓝色「在跑」。留着这条用例钉住它。
   test('停滞的单在图上画成出问题、写明原因，不装作在好好跑', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/board');
     await midZoom(page);
     await expect(card(page, 14)).toContainText('动手超时');
     await expect(card(page, 14)).toHaveAttribute('data-needs-founder', 'false');
@@ -138,7 +138,7 @@ test.describe('主页', () => {
 
   // 原来 D9（#902）钉的是「泳道右边缘被面板截掉一截」；换成思维导图后同一件事是：排完版整张图收进画布里，一张卡都不被截。
   test('看板：排完版整张图收进画布里（中心、三段、每张单都在画布框里，不被截掉）', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/board');
     await expect(page.locator('[data-flow-board]')).toBeVisible();
     await expect(page.locator('.react-flow__node-segment')).toHaveCount(3);
     // 收进视野是一段 450 毫秒的动画：等它停下再量
@@ -169,7 +169,7 @@ test.describe('主页', () => {
     api,
   }) => {
     const home = (await api.get('/api/home')) as Home;
-    await page.goto('/');
+    await page.goto('/board');
     await expect(page.locator('.react-flow__node[data-id^="ticket:"]')).toHaveCount(home.running.length);
     await page.getByRole('button', { name: /^只看卡住的/ }).click();
     await expect(page).toHaveURL(/stuck=1/);
@@ -196,7 +196,7 @@ test.describe('主页', () => {
   test('引擎那一格读真实健康：没有引擎在跑就写「引擎进程没连上」并标红，不写正常', async ({ page, api }) => {
     const home = (await api.get('/api/home')) as Home;
     expect(['down', 'off']).toContain(home.health.engine.state);
-    await page.goto('/');
+    await page.goto('/board');
     // 窄于 1440 三格收在「状态」按钮里（#1899），点开才看得见；够宽时直接摊在顶栏
     const menu = page.locator('[data-health-menu]');
     await expect(menu.or(page.locator('[data-health-chip]').first())).toBeVisible();
@@ -214,7 +214,7 @@ test.describe('主页', () => {
   });
 
   test('react-flow 右下角的水印保留着（MIT 不强制，隐藏它要订阅 Pro，不擅自花钱）', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/board');
     await expect(page.locator('.react-flow__attribution')).toContainText('React Flow');
   });
 });
@@ -224,7 +224,7 @@ test.describe('主页：深色主题和手机宽度', () => {
 
   test('深色主题：跟随系统是深色时页面真换成深色，流水线图、卡片都看得清', async ({ page, shot }) => {
     await page.emulateMedia({ colorScheme: 'dark' });
-    await page.goto('/');
+    await page.goto('/board');
     await expect(page.locator('[data-flow-board]')).toBeVisible();
     // 背景是深色：取页面背景的亮度
     const luminance = await page.evaluate(() => {
@@ -241,7 +241,7 @@ test.describe('主页：深色主题和手机宽度', () => {
     shot,
   }) => {
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto('/');
+    await page.goto('/board');
     await expect(page.locator('[data-home-strip]')).toBeVisible();
     await expect(page.locator('[data-board-tree]')).toBeVisible();
     // 常驻侧栏在手机上不渲染，换成底部导航；顶栏没有汉堡按钮
@@ -273,7 +273,7 @@ test.describe('主页：深色主题和手机宽度', () => {
   }) => {
     const home = (await api.get('/api/home')) as Home;
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto('/');
+    await page.goto('/board');
     const tree = page.locator('[data-board-tree]');
     await expect(tree).toBeVisible();
     await expect(page.locator('.react-flow')).toHaveCount(0);

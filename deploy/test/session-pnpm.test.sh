@@ -6,8 +6,7 @@
 #   2. 装：核 sha512、核包名和版本，装出来的都归 root、别的身份改不动，入口关掉 node 的编译缓存；装完以别的身份跑得出版本；
 #      第二遍不下载、一处不改；装着的文件被改、被删、钉的校验和换了就重装
 #   3. 校验和对不上、下载失败、包名或版本不对、入口不在或越出包外、不是 tgz、版本和校验和的写法认不出：判红、返回 1，什么都不装
-#   4. 引擎给会话的 PATH：照在跑的引擎进程读（FLEET_CLI_BIN 在就用它、去掉两头空白；不在就按启动命令里 main.ts 的真实路径
-#      算 packages/cli/bin），主进程号不对、进程没了、读不到启动命令、启动命令认不出、入口解不出真实路径都明确失败，不拿空当 PATH
+#   4. 引擎给会话的 PATH：照在跑的引擎进程读（只取 PATH），主进程号不对、进程没了都明确失败，不拿空当 PATH
 #   5. 按一条 PATH 跑 pnpm --version：找不到、跑不起来、卡住、不理叫停、输出认不出、先找到的不是装的那个、版本不对、
 #      起命令那一步就没成、临时文件建不了，都判红或明确失败
 # 不出网：pnpm 包是现造的（package.json 加一个打印版本号的入口），用 file:// 地址「下载」。
@@ -201,24 +200,11 @@ fake_engine() { # 进程号 环境… -- 启动命令…
     shift
   done
 }
-mkdir -p "$T/rel/abc123/packages/engine/src"
-: >"$T/rel/abc123/packages/engine/src/main.ts"
-ln -s abc123 "$T/rel/current"
-MAIN=$T/rel/current/packages/engine/src/main.ts
 SYS=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-fake_engine 101 LANG=C.UTF-8 "PATH=$SYS" FLEET_CLI_BIN=/opt/cli/bin FLEET_AGENT_TOKEN_SECRET=不该带出来 -- /usr/bin/node "$MAIN"
+fake_engine 101 LANG=C.UTF-8 "PATH=$SYS" FLEET_AGENT_TOKEN_SECRET=不该带出来 -- /usr/bin/node /srv/engine/main.ts
 engine_session_path 101
-check "配了 FLEET_CLI_BIN：它在前，引擎自己的 PATH 接在后面" "$?:$SESSION_PATH" "0:/opt/cli/bin:$SYS"
+check "就是引擎自己的 PATH" "$?:$SESSION_PATH" "0:$SYS"
 check "别的环境变量不带出来" "$(grep -c 不该带出来 <<<"$SESSION_PATH$SESSION_PATH_WHY")" 0
-fake_engine 102 "PATH=$SYS" -- /usr/bin/node "$MAIN"
-engine_session_path 102
-check "没配：按 main.ts 的真实路径（current 是链接）算 packages/cli/bin" "$?:$SESSION_PATH" "0:$T/rel/abc123/packages/cli/bin:$SYS"
-fake_engine 103 "PATH=$SYS" "FLEET_CLI_BIN=  " -- /usr/bin/node --max-old-space-size=2048 "$MAIN"
-engine_session_path 103
-check "FLEET_CLI_BIN 只有空白算没配；node 带着参数也认得出入口" "$?:$SESSION_PATH" "0:$T/rel/abc123/packages/cli/bin:$SYS"
-fake_engine 104 "FLEET_CLI_BIN= /opt/cli/bin " -- /usr/bin/node "$MAIN"
-engine_session_path 104
-check "引擎自己没有 PATH：只剩 fleet 命令的目录，FLEET_CLI_BIN 去掉两头空白" "$?:$SESSION_PATH" "0:/opt/cli/bin"
 expect_no_path() { # 说明 进程号 原因里要有的（grep -E）
   engine_session_path "$2"
   check "$1：返回 1，SESSION_PATH 是空的" "$?:$SESSION_PATH" "1:"
@@ -228,13 +214,6 @@ expect_no_path "主进程号是 0（引擎没在跑）" 0 '引擎没在跑'
 expect_no_path "主进程号是空的" "" '引擎没在跑'
 expect_no_path "主进程号认不出" abc '引擎没在跑'
 expect_no_path "进程没了" 999 '读不到引擎进程（999）的环境'
-mkdir -p "$SESSION_PROC/105"
-printf 'PATH=%s\0' "$SYS" >"$SESSION_PROC/105/environ"
-expect_no_path "读不到启动命令" 105 '读不到引擎进程（105）的启动命令'
-fake_engine 106 "PATH=$SYS" -- /usr/bin/node /srv/别的/app.ts
-expect_no_path "启动命令里没有 main.ts" 106 '认不出引擎的启动命令'
-fake_engine 107 "PATH=$SYS" -- /usr/bin/node "$T/rel/没有这一版/packages/engine/src/main.ts"
-expect_no_path "入口解不出真实路径" 107 '解不出真实路径'
 
 echo "== 5. 按一条 PATH 跑 pnpm --version"
 fake_pnpm() { # 目录 正文

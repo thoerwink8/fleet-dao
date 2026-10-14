@@ -10,7 +10,6 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { probeDb } from '../src/db-probe.ts';
 import { EXTERNAL_WATCH_NOT_WIRED } from '../src/external-watch.ts';
-import { createGatewaySeen } from '../src/gateway-seen.ts';
 import { githubAppMissing } from '../src/github.ts';
 import { githubAppHealthCheck } from '../src/github-app-health.ts';
 import { serviceHealthChecks } from '../src/health.ts';
@@ -19,15 +18,7 @@ import { NODE_REPORT_NOT_WIRED, nodeReportPart } from '../src/node-reporter.ts';
 import { sessionOrgHealthCheck } from '../src/session-org-health.ts';
 import { notConnectedTemporal } from '../src/temporal.ts';
 import { WATCHDOG_NOT_HERE } from '../src/watchdog-health.ts';
-import {
-  agentRequest,
-  DEV_RUN_ID,
-  deliverGithub,
-  type HarnessOptions,
-  IDS,
-  pgHarness,
-  T0,
-} from './harness.ts';
+import { DEV_RUN_ID, deliverGithub, type HarnessOptions, IDS, pgHarness, T0 } from './harness.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -70,29 +61,6 @@ describe('接口跑在真库上', () => {
     expect(detail.usage.total.cost.subscription).toEqual({ runs: 1, usd: 0, missing: 1 });
     // 登录本身也落了库里的操作记录。
     expect(await t.db.select().from(auditLog).where(eq(auditLog.action, 'login'))).toHaveLength(1);
-  });
-
-  it('fleet 命令带同一个幂等键重试：库里只有一条进度，不发信号', async () => {
-    const h = await start();
-    // 幂等键去重在真库（不只是内存版）上也成立；fleet 命令只写库、不发信号（#901）。
-    const blocked = () =>
-      h.agent.request(
-        '/agent/v1/blocked',
-        agentRequest(
-          h.agentToken(),
-          'POST',
-          { reason: '真库上的一句', needs: 'access' },
-          { 'idempotency-key': 'pg-key-1' },
-        ),
-      );
-    expect((await blocked()).status).toBe(200);
-    expect((await blocked()).status).toBe(200);
-    const rows = await t.db
-      .select()
-      .from(progressEvents)
-      .where(and(eq(progressEvents.runId, DEV_RUN_ID), eq(progressEvents.kind, 'blocked')));
-    expect(rows.filter((r) => (r.payload as { reason?: string }).reason === '真库上的一句')).toHaveLength(1);
-    expect(h.signals).toHaveLength(0);
   });
 
   it('GitHub 事件进来（真库）：PR 事件原文落库、写镜像；同一投递再来不重复；issue 的事件记成不处理、不建任务', async () => {
@@ -158,8 +126,6 @@ describe('接口跑在真库上', () => {
         }),
         // 和 main.ts 在非正式环境的装配一样：没有发布目录、没有自动发布
         deployLag: { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE },
-        // 网关刚接上还没来过：没查成，照实报红（gateway-seen.test.ts 另测来过、太久没来）
-        feishuGateway: createGatewaySeen(() => new Date(T0)),
         // 库里真查：没有切号的提醒就是好的（session-org-health.test.ts 另测开着报红）
         sessionOrg: sessionOrgHealthCheck(t.db),
         // 库里真查：没有机器人权限的提醒就是好的（github-app-health.test.ts 另测开着报红）
@@ -186,11 +152,6 @@ describe('接口跑在真库上', () => {
         },
         judge: { ok: true, status: 'not_wired', message: JUDGE_NOT_WIRED },
         deploy_lag: { ok: true, status: 'not_wired', message: DEPLOY_LAG_NOT_HERE },
-        feishu_gateway: {
-          ok: false,
-          code: 'unchecked',
-          message: '没查成：后端起来才 0 秒，用量上报还没来过',
-        },
         session_org: { ok: true },
         github_app: { ok: true },
         watchdog: { ok: true, status: 'not_wired', message: WATCHDOG_NOT_HERE },

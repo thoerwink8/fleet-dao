@@ -7,12 +7,6 @@ export const WEB_API_PREFIX = '/api';
 export const AUTH_PREFIX = '/auth';
 export const CSRF_HEADER = 'X-CSRF-Token';
 
-/**
- * 飞书网关调 /api 的第二种进法（不用 Cookie、不用 CSRF）：`Authorization: Bearer <网关通行证>`，
- * 再用这个请求头写明代表哪位创始人（飞书 open_id）。后端按 open_id 认人，不是创始人就 403；操作记录写 via=feishu。
- */
-export const FEISHU_ACTING_HEADER = 'X-Fleet-Acting-Feishu';
-
 // —— 通用 ——
 
 /** 所有非 2xx 的返回体。code 给程序判断，message 是给人看的白话。 */

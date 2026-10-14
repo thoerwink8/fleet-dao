@@ -18,7 +18,6 @@ const PROD = {
   FLEET_PUBLIC_URL: 'https://cockpit.example.test',
   FLEET_COCKPIT_LISTEN: 'wg-france:8787',
   FLEET_SESSION_SECRET: 's'.repeat(40),
-  FLEET_AGENT_TOKEN_SECRET: 'a'.repeat(40),
   FLEET_GITHUB_WEBHOOK_SECRET: 'w'.repeat(20),
   FEISHU_APP_ID: 'cli_x',
   FEISHU_APP_SECRET: 'y',

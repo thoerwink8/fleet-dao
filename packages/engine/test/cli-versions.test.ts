@@ -83,9 +83,12 @@ describe('命令行工具版本这一轮', () => {
     expect(pi?.installedVersion).toBeNull();
     expect(pi?.installedError).toContain('全局 npm 里没有');
     expect(h.fetches.filter((t) => t === 'grok')).toEqual(['grok']);
-    expect(h.probes.filter((p) => p.tool === 'grok').map((p) => p.user)).toEqual([
-      'fleet-agent-carpool',
-      'pilot',
+    // pilot 上从没装过 Grok / Cursor / Mirasim：不探，探了只会永远失败
+    expect(h.probes.filter((p) => p.tool === 'grok').map((p) => p.user)).toEqual(['fleet-agent-carpool']);
+    expect(h.probes.filter((p) => p.user === 'pilot').map((p) => p.tool)).toEqual([
+      'claude',
+      'codex',
+      'reclaude',
     ]);
   });
 

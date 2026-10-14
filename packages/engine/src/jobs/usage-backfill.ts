@@ -7,11 +7,18 @@
 //   重复跑、两轮叠着跑都只写一次（db 的 fillRunUsageFromMeter）。
 // - 读不齐的不写数：还在等回填写「还在等」；会话结束过了 METER_LATE_MS 还没齐，原因里写「迟迟没回填」；中转没有记录、行认不出、
 //   一次计费调用都对不上的照实写读不成的原因。过了回看窗口的不再补，原因留着（任务详情、巡检照它写）。
+// - 读不成（账本里没有这一笔的计费调用、行认不出）的退避着读、读 UNREAD_MAX_ATTEMPTS 次定案不再补（见 UNREAD_BACKOFF_MS）；
+//   定案的数仍留空，不写成 0，原因留在 usage_note。
 // - 账本整个读不了（目录列不出、筛行失败）是这一轮没跑成，记 failed、看门狗报；单笔读不成是那一笔的事，这一轮记 partial。
 // - 不标 needsMaster：它不拉单、不起会话，总开关关着也要把已经跑完的会话的账补齐。
 
 import type { MeterReading, MeterWindow } from '@fleet-dao/adapters';
-import type { MeterPendingRun, MeterUsageWrite, ScheduleResult } from '@fleet-dao/db';
+import {
+  type MeterPendingRun,
+  type MeterUsageWrite,
+  type ScheduleResult,
+  USAGE_GAVE_UP_PREFIX,
+} from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 
@@ -24,6 +31,28 @@ export const USAGE_BACKFILL_LOOKBACK_MS = 24 * 60 * 60_000;
 export const USAGE_BACKFILL_BATCH = 50;
 /** 会话结束过了这么久还没回填齐，原因里写「迟迟没回填」（正常几分钟就齐）。 */
 export const METER_LATE_MS = 30 * 60_000;
+
+/**
+ * 读不成（账本里没有这一笔的计费调用、行认不出）的退避：第 n 次读不成之后等 UNREAD_BACKOFF_MS[n-1] 再读；读了 UNREAD_MAX_ATTEMPTS 次
+ * 还不成就定案不再补（USAGE_GAVE_UP_PREFIX）。「还在等回填」不算读不成，不走这套，照旧每轮看一次直到过了回看窗口。
+ * 过去同一笔读不成的每 5 分钟读一次、两天 288 次，每次都记一条 partial，看门狗和人都分不出新旧。
+ */
+export const UNREAD_BACKOFF_MS: readonly number[] = [10, 20, 40, 80, 160].map((m) => m * 60_000);
+export const UNREAD_MAX_ATTEMPTS = UNREAD_BACKOFF_MS.length + 1;
+
+/** 这一笔 usage_note 里记着的「已经读不成几次」；不是读不成的原因（等回填、没写过）是 0，没带次数的老写法算 1。 */
+export function unreadAttempts(note: string | null): number {
+  const m = /^用量没读成(?:（第 (\d+) 次[^）]*）)?：/.exec(note ?? '');
+  return m ? Number(m[1] ?? 1) : 0;
+}
+
+/** 这一笔此刻该不该读：读不成过的要等够退避。 */
+export function dueForRead(run: MeterPendingRun, now: Date): boolean {
+  const tried = unreadAttempts(run.usageNote);
+  if (tried === 0) return true;
+  const wait = UNREAD_BACKOFF_MS[Math.min(tried, UNREAD_BACKOFF_MS.length) - 1] ?? 0;
+  return now.getTime() - run.updatedAt.getTime() >= wait;
+}
 
 export const USAGE_BACKFILL_JOB = {
   id: 'usage-backfill',
@@ -63,7 +92,13 @@ export function meterNote(
   run: MeterPendingRun,
   now: Date,
 ): string {
-  if (reading.state === 'unknown') return `用量没读成：${reading.detail}`;
+  if (reading.state === 'unknown') {
+    const n = unreadAttempts(run.usageNote) + 1;
+    if (n >= UNREAD_MAX_ATTEMPTS) {
+      return `${USAGE_GAVE_UP_PREFIX}查了 ${n} 次都读不成，不再补；这一笔的用量留空（不是 0）：${reading.detail}`;
+    }
+    return `用量没读成（第 ${n} 次，还会再读）：${reading.detail}`;
+  }
   const waited = Math.floor((now.getTime() - run.endedAt.getTime()) / 60_000);
   if (now.getTime() - run.endedAt.getTime() > METER_LATE_MS) {
     return `会话结束 ${waited} 分钟了，中转计量还没回填齐（${reading.pending} / ${reading.calls} 次调用没填；正常几分钟就齐）`;
@@ -73,10 +108,13 @@ export function meterNote(
 
 async function round(deps: UsageBackfillJobDeps): Promise<ScheduleResult> {
   const now = deps.now();
-  const rows = await deps.pending({
-    endedAfter: new Date(now.getTime() - USAGE_BACKFILL_LOOKBACK_MS),
-    limit: USAGE_BACKFILL_BATCH,
-  });
+  // 读不成过的还在退避里的这一轮不碰（它们的原因已经在 usage_note 里）
+  const rows = (
+    await deps.pending({
+      endedAfter: new Date(now.getTime() - USAGE_BACKFILL_LOOKBACK_MS),
+      limit: USAGE_BACKFILL_BATCH,
+    })
+  ).filter((r) => dueForRead(r, now));
   // 扫的是近 24 小时那一段 runs：一笔要补的都没有也是扫过了（一次查询算一个），不是「一个都没扫到」
   if (rows.length === 0) return { outcome: 'ok', scanned: 1, found: 0 };
   const readings = await deps.readMeter(

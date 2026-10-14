@@ -6,7 +6,7 @@ import {
   UpdateRepoCiPolicyResponse,
 } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import { errorCode, harness, IDS, viaGateway, write } from './harness.ts';
+import { errorCode, harness, IDS, viaBearer, write } from './harness.ts';
 
 const READ = '/api/repos/ci-policy';
 const put = (repoId: string) => `/api/repos/${repoId}/ci-policy`;
@@ -126,14 +126,11 @@ describe('PUT /api/repos/:repoId/ci-policy', () => {
     expect(h.store.data.repos.find((r) => r.id === IDS.repo)?.ciPolicy).toBeUndefined();
   });
 
-  it('【故意造出的失败】飞书网关通行证不能改 CI 模式：403，模式一点没动', async () => {
+  it('【故意造出的失败】带 Authorization 令牌不能改 CI 模式：401，模式一点没动', async () => {
     const h = harness();
-    const res = await h.cockpit.request(
-      put(IDS.repo),
-      viaGateway('PUT', 'ou_dev_founder_a', { mode: 'off' }),
-    );
-    expect(res.status).toBe(403);
-    expect(await errorCode(res)).toBe('gateway_route_not_allowed');
+    const res = await h.cockpit.request(put(IDS.repo), viaBearer('PUT', { mode: 'off' }));
+    expect(res.status).toBe(401);
+    expect(await errorCode(res)).toBe('bearer_not_allowed');
     expect(h.store.data.repos.find((r) => r.id === IDS.repo)?.ciPolicy).toBeUndefined();
   });
 });

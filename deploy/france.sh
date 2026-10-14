@@ -174,10 +174,9 @@ PG_UNIT=postgresql@$PG_MAJOR-main.service
 # 发布时照期望写（只写期望变了的键，人手改的不改回），本脚本只管属主权限
 RELEASES_DIR=/srv/fleet-dao-releases
 APP_ENV_FILES=(engine api release) # /etc/fleet-dao/<名>.env ← 期望（deploy/france/desired-config.json）
-# 随机密钥（文件:键:用途），首次生成后不再动。gateway-token.env 香港也要放同一份（docs/ops.md 第九节）
-APP_SECRETS=("agent-token:FLEET_AGENT_TOKEN_SECRET:签 fleet 通行证（引擎签、后端验）"
-  "session-secret:FLEET_SESSION_SECRET:驾驶舱登录的 Cookie"
-  "gateway-token:FLEET_FEISHU_GATEWAY_TOKEN:飞书网关的通行证（香港放同一份）")
+# 随机密钥（文件:键:用途），首次生成后不再动。以前装过的 agent-token.env（fleet 命令的令牌密钥）、gateway-token.env（飞书网关通行证）
+# 随两个接口一起撤了：服务单元不再读它们，机器上已有的文件不删（要不要清由人定）
+APP_SECRETS=("session-secret:FLEET_SESSION_SECRET:驾驶舱登录的 Cookie")
 # 「引擎」GitHub App 的凭据（手放）：api.env 的 FLEET_GITHUB_WEBHOOK_SECRET 照它的 webhook_secret 填（lib/app-config.sh）
 ENGINE_APP_JSON=/etc/fleet-dao/github/gh-app-fleet-dao-engine.json
 # 卫生检查已知敏感值名单机制整个删掉了（创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）：早先版本放过的
@@ -194,8 +193,6 @@ SESSION_IO_DIR=/var/lib/fleet-sessions
 # 发布脚本往香港传驾驶舱静态文件用的钥匙（只有 root 读得到），和钉住的香港 sshd 主机钥匙
 WEB_UPLOAD_KEY=/etc/fleet-dao/web-upload.key
 HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
-# 发布脚本发飞书网关用的钥匙（另一把）：香港把它限死成只能跑 fleet-gateway-deploy
-GATEWAY_DEPLOY_KEY=/etc/fleet-dao/gateway-deploy.key
 # 已删的演示版（#1223，创始人 2026-10-07）：以前装过的推可见范围的脚本和单元，装机时停掉、删掉（retire_old_units），读回核对它们不在。
 # 它们的数据目录（/var/lib/fleet-dao/demo，#1223）不动：里面是旧的可见范围文件，要不要清由人定
 RETIRED_UNITS=(fleet-demo-scopes.path fleet-demo-scopes.timer fleet-demo-scopes.service) # #1223：先停触发的两个，再停服务本身
@@ -786,10 +783,9 @@ ensure_deploy_key() { # 私钥文件 注释 香港 hk.env 里的键 用途
 }
 
 setup_web_upload() {
-  step "发布脚本登香港用的钥匙（香港只许它们经隧道来：一把只能往 /srv/fleet-dao-web 写，一把只能发飞书网关）"
+  step "发布脚本登香港用的钥匙（香港只许它经隧道来，只能往 /srv/fleet-dao-web 写）"
   local line re
   ensure_deploy_key "$WEB_UPLOAD_KEY" fleet-dao-web-upload FLEET_WEB_UPLOAD_PUBLIC_KEY 传静态文件
-  ensure_deploy_key "$GATEWAY_DEPLOY_KEY" fleet-dao-gateway-deploy FLEET_GATEWAY_DEPLOY_PUBLIC_KEY 发飞书网关
   # 香港 sshd 的主机钥匙：经隧道取（隧道两头靠 WireGuard 钥匙互认，那头只可能是香港），钉住之后只认这一把
   if [[ -s "$HK_KNOWN_HOSTS" ]]; then
     fix_meta "$HK_KNOWN_HOSTS" root:root 600
@@ -1173,20 +1169,6 @@ readback_web_upload() {
     pending "香港还没认这把上传钥匙：把上面打印的公钥填进香港 hk.env 的 FLEET_WEB_UPLOAD_PUBLIC_KEY，重跑 hk.sh"
   else
     red "试着往香港传文件没成（rsync 退出码 $rc）：$(tail -3 <<<"$out" | tr '\n' ' ')"
-  fi
-  # 发网关的那把：问一次香港网关的状态（只读）
-  if [[ ! -s "$GATEWAY_DEPLOY_KEY" ]]; then
-    red "没有发网关用的钥匙 $GATEWAY_DEPLOY_KEY"
-    return 0
-  fi
-  rc=0
-  out=$(gateway_ssh "$GATEWAY_DEPLOY_KEY" "$HK_KNOWN_HOSTS" "root@$WG_HK_ADDR" status 2>&1) || rc=$?
-  if ((rc == 0)) && [[ "$out" == *$'\n'config=* || "$out" == config=* ]]; then
-    ok "法国经隧道问得到香港飞书网关的状态（fleet-gateway-deploy status）"
-  elif [[ "$out" == *"Permission denied"* ]]; then
-    pending "香港还没认发网关的钥匙：把上面打印的公钥填进香港 hk.env 的 FLEET_GATEWAY_DEPLOY_PUBLIC_KEY，重跑 hk.sh"
-  else
-    red "问香港飞书网关的状态没成（退出码 $rc）：$(tail -2 <<<"$out" | tr '\n' ' ')"
   fi
 }
 

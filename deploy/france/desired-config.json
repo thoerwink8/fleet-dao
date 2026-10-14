@@ -18,10 +18,6 @@
       },
       "TEMPORAL_NAMESPACE": "fleet",
       "FLEET_TASK_QUEUE": "fleet",
-      "FLEET_AGENT_API_URL": {
-        "value": "http://127.0.0.1:8788",
-        "说明": "AI 会话里的 fleet 命令连的后端地址（驾驶舱后端的 fleet 命令接口）"
-      },
       "DATABASE_URL": {
         "value": "postgres:///fleet",
         "说明": "本机库（同 api.env：unix socket + peer 认证，主机由 PGHOST 给）"
@@ -79,10 +75,6 @@
         "value": "10.99.0.2:8787",
         "说明": "驾驶舱接口只听隧道地址：香港经 WireGuard 转进来，公网上没有这个端口"
       },
-      "FLEET_AGENT_LISTEN": {
-        "value": "127.0.0.1:8788",
-        "说明": "fleet 命令接口只听本机回环：AI 会话在同一台机器上调"
-      },
       "DATABASE_URL": {
         "value": "postgres:///fleet",
         "说明": "本机库：unix socket + peer 认证，没有口令；主机由 PGHOST 给（postgres.js 不认连接串里的 ?host=）"
@@ -137,8 +129,8 @@
         "说明": "驾驶舱的域名（和香港 hk.env 的同一个）：私有值"
       },
       "FLEET_HK_PARTS": {
-        "value": "gateway web",
-        "说明": "往香港发哪几样：gateway 飞书网关、web 驾驶舱静态文件（根地址，对外发布）。演示版已删（创始人 2026-10-07，#1223），发布脚本会把香港上老的演示版目录删掉"
+        "value": "web",
+        "说明": "往香港发哪几样：web 驾驶舱静态文件（根地址，对外发布）。演示版已删（创始人 2026-10-07，#1223），发布脚本会把香港上老的演示版目录删掉；飞书网关已不发，老配置里的 gateway 认下来、忽略"
       }
     },
     "france.env": {

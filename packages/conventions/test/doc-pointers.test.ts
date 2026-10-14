@@ -2,7 +2,14 @@ import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { checkDocPointers, DOCS, docFiles, formatProblem, type PointerKind } from '../src/doc-pointers.ts';
+import {
+  checkDocPointers,
+  DOCS,
+  docFiles,
+  formatProblem,
+  type PointerKind,
+  WORKFLOW_DOC,
+} from '../src/doc-pointers.ts';
 import { fsRepo, type RepoView } from '../src/repo.ts';
 import { memRepo } from './helpers.ts';
 
@@ -368,7 +375,7 @@ describe('文档指针：读不到的明确报「没查成」，不当成「没�
 describe('全仓的文档（main 上现有的，加上本 PR 改的）', () => {
   const report = checkDocPointers(fsRepo(ROOT));
 
-  it('只查 design、ops、README、仓根 AGENTS.md 和 docs/design/ 下的模块文件，specs/ 和 docs/decisions/ 是历史记录不查', () => {
+  it('只查 design、ops、README、仓根和各包的 AGENTS.md、docs/design/ 下的模块文件，specs/ 和 docs/decisions/ 是历史记录不查', () => {
     // AGENTS.md 是每个 AI 的入口，里面的仓内路径改名挪文件会静默指空
     expect(report.files).toContain('AGENTS.md');
     // 按盘上真实的 docs/design/*.md 独立算一遍（#139 起每片往里加一个模块文件），不是拿 docFiles 自己对自己
@@ -377,7 +384,15 @@ describe('全仓的文档（main 上现有的，加上本 PR 改的）', () => {
       .sort()
       .map((name) => `docs/design/${name}`);
     expect(modules).toContain('docs/design/jev.md');
-    expect(report.files).toEqual([...DOCS, ...modules]);
+    // 各包自己的 AGENTS.md（仓根那份只当目录，细则下沉到包里）排在最后。这里不通读 packages/
+    // （通读全仓的测试要登记进 ci-cache 的 WHOLE_REPO_READERS）：现有的六份逐个点名，尾巴只许是包说明。
+    const head = [...DOCS, WORKFLOW_DOC, ...modules];
+    expect(report.files.slice(0, head.length)).toEqual(head);
+    const pkgAgents = report.files.slice(head.length);
+    for (const name of ['api', 'conventions', 'db', 'engine', 'store', 'web'])
+      expect(pkgAgents).toContain(`packages/${name}/AGENTS.md`);
+    expect(pkgAgents.filter((f) => !/^packages\/[^/]+\/AGENTS\.md$/.test(f))).toEqual([]);
+    expect(pkgAgents).toEqual([...pkgAgents].sort());
     expect(report.files.filter((f) => f.startsWith('specs/') || f.startsWith('docs/decisions/'))).toEqual([]);
   });
 
@@ -406,6 +421,19 @@ describe('文档指针：docs/design/ 下的模块文件也在要查的名单里
       'docs/design/jev.md': '# jev\n',
     });
     expect(docFiles(repo)).toEqual([...DOCS, 'docs/design/jev.md', 'docs/design/web.md']);
+  });
+
+  it('各包的 AGENTS.md 排在最后、按包名排；没有 AGENTS.md 的包不算，里面指空的路径照报', () => {
+    const repo = memRepo({
+      ...BASE,
+      'packages/y/AGENTS.md': '入口 `packages/y/src/gone.ts`。\n',
+      'packages/a/AGENTS.md': '入口 `packages/x/src/a.ts`。\n',
+      [WORKFLOW_DOC]: '装机见 `deploy/france.sh`。\n',
+    });
+    expect(docFiles(repo)).toEqual([...DOCS, WORKFLOW_DOC, 'packages/a/AGENTS.md', 'packages/y/AGENTS.md']);
+    expect(checkDocPointers(repo).problems.map(formatProblem)).toEqual([
+      'packages/y/AGENTS.md:1  packages/y/src/gone.ts 在仓里没有',
+    ]);
   });
 
   it('显式传入 files 时只查传入的，不顺带查 docs/design/', () => {

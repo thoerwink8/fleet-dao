@@ -9,6 +9,7 @@ import {
   Home,
   ListChecks,
   MessageSquarePlus,
+  Network,
   Route,
   SatelliteDish,
   ScrollText,
@@ -22,20 +23,29 @@ export interface NavItem {
   hint: string;
 }
 
+/** 主页：一打开就看到的三件事（决定 0093）。侧栏、底部导航里只有它常驻，其余都在「更多」里。 */
+export const NAV_HOME: NavItem = {
+  to: '/',
+  label: '主页',
+  icon: Home,
+  hint: '三块：要你拍的、在跑的、上线了的',
+};
+
 /**
+ * 「更多」里的页（导航降级，决定 0093：创始人一周只登几次，打开只看主页三块；别的页不删，收在这里）。
  * 侧栏只放做好了的页：没做的页（账单、战绩、判断题记录）不占导航，
  * 它们的地址还在、打开写明「还没做」（routes/soon.tsx）。/models 转到路由页的模型目录，/efforts 转到路由页的「思考档位」页签。
- * 分组按创始人回来看一眼的先后：先看盘面和要他拍的，再看调度，再看法国这台机器，最后是管理。
+ * 分组按回来看一眼的先后：先看盘面，再看调度，再看法国这台机器，最后是管理。
  */
-export const NAV: { group: string; items: NavItem[] }[] = [
+export const NAV_MORE: { group: string; items: NavItem[] }[] = [
   {
     group: '盘面',
     items: [
       {
-        to: '/',
-        label: '主页',
-        icon: Home,
-        hint: '一屏三块：要你拍的、在跑的、做完的',
+        to: '/board',
+        label: '画布',
+        icon: Network,
+        hint: '原来的主页：思维导图看板，中心引擎 → 对题 / 动手 / 验收 → 每张单',
       },
       {
         to: '/tasks',
@@ -118,5 +128,8 @@ export const NAV: { group: string; items: NavItem[] }[] = [
     ],
   },
 ];
+
+/** 命令面板、整份清单用：主页在最前，后面是「更多」的各组。 */
+export const NAV: { group: string; items: NavItem[] }[] = [{ group: '主页', items: [NAV_HOME] }, ...NAV_MORE];
 
 export const NAV_ITEMS: NavItem[] = NAV.flatMap((g) => g.items);

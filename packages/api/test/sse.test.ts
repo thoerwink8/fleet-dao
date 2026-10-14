@@ -9,7 +9,7 @@ import {
   IDS,
   openEvents as open,
   readUntil,
-  viaGateway,
+  viaBearer,
 } from './harness.ts';
 
 describe('实时推送（SSE）', () => {
@@ -117,11 +117,11 @@ describe('实时推送（SSE）', () => {
     expect(listeners.size).toBe(0);
   });
 
-  it('没登录不给连；飞书网关的通行证也不给连（网关只能调约定里那几条，推送走长轮询待推送）', async () => {
+  it('没登录不给连；带 Authorization 令牌也不给连', async () => {
     const h = harness();
     expect(await errorCode(await h.cockpit.request('/api/events'))).toBe('unauthenticated');
-    const res = await h.cockpit.request('/api/events', viaGateway('GET', 'ou_dev_founder_a'));
-    expect(res.status).toBe(403);
-    expect(await errorCode(res)).toBe('gateway_route_not_allowed');
+    const res = await h.cockpit.request('/api/events', viaBearer('GET'));
+    expect(res.status).toBe(401);
+    expect(await errorCode(res)).toBe('bearer_not_allowed');
   });
 });

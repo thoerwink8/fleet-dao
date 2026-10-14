@@ -93,8 +93,8 @@ test.describe('后端不可用', () => {
     await shot(page, '08-主页读不到');
     await request.post(`${stack.controlOrigin}/mode/up`);
     await alert.getByRole('button', { name: '重试' }).click();
-    await expect(page.locator('[data-flow-board]')).toBeVisible();
-    await expect(page.locator('.react-flow__node[data-id^="ticket:"]').first()).toBeVisible();
+    // 主页三块（决定 0093）：读回来了「在跑的」那块列出引擎的单
+    await expect(page.locator('[data-home-block="run"] [data-run-row="engine"]').first()).toBeVisible();
   });
 
   test('改设置时后端断了：保存失败要弹明确的话，设置没有被当成改成功', async ({

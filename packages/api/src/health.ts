@@ -107,9 +107,6 @@ export function serviceHealthChecks(parts: {
   judge: { check(): Promise<void>; readonly notWired?: string };
   /** 线上版本跟不跟得上主线（deploy-lag.ts）：只在正式环境查，别处报「未接」。 */
   deployLag: { check(): Promise<void>; readonly notWired?: string };
-  /** 飞书网关还来不来（gateway-seen.ts）：没配网关通行证报「未接」。 */
-  // biome-ignore lint/suspicious/noConfusingVoidType: 没说明的检查是 async () => {}（Promise<void>），换成 undefined 它们就对不上了
-  feishuGateway: { check(): Promise<void | string>; readonly notWired?: string };
   /** 会话用户切号（session-org-health.ts）：引擎切号没成、切完读回不在线、恢复时刻读不到的提醒还开着就报红。 */
   sessionOrg: () => Promise<void>;
   /** GitHub 两个机器人的权限（github-app-health.ts）：引擎每小时对账自检报的缺权限、没查成的提醒还开着就报红。 */
@@ -132,12 +129,6 @@ export function serviceHealthChecks(parts: {
     { name: 'judge', check: () => parts.judge.check(), ...notWired(parts.judge.notWired) },
     // 主线一动就可能落后，也会自己变红：发版脚本同样只标待处理、不退回
     { name: 'deploy_lag', check: () => parts.deployLag.check(), ...notWired(parts.deployLag.notWired) },
-    // 网关、隧道、香港出事就自己变红（后端刚起、网关还没回来时是「没查成」）：发版脚本同样只标待处理、不退回
-    {
-      name: 'feishu_gateway',
-      check: () => parts.feishuGateway.check(),
-      ...notWired(parts.feishuGateway.notWired),
-    },
     // 切号出了要人看的问题（上游额度、登录这些）会自己变红，人处理好或下一轮切成了自己撤：发版脚本同样只标待处理、不退回
     { name: 'session_org', check: parts.sessionOrg },
     // 机器人权限被人在 GitHub 上改了、新权限在安装处没点接受会自己变红（和这一版好不好无关），好了引擎下一轮撤提醒、跟着回绿：

@@ -1,12 +1,5 @@
-// 驾驶舱后端（Hono）：登录、接口、实时推送、发给工作流的信号、fleet 命令接口、GitHub 事件接收。
+// 驾驶舱后端（Hono）：登录、接口、实时推送、发给工作流的信号、GitHub 事件接收。
 
-export {
-  AGENT_TOKEN_MAX_TTL_SECONDS,
-  type AgentTokenCheck,
-  type AgentTokenClaims,
-  signAgentToken,
-  verifyAgentToken,
-} from './agent-token.ts';
 export { type Apps, buildApps } from './app.ts';
 export {
   type ChangeHub,

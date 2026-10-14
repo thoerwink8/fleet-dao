@@ -14,7 +14,7 @@ import {
 import { describe, expect, it } from 'vitest';
 import { encryptToken } from '../src/github-token.ts';
 import type { GitHubUserPort } from '../src/github-user.ts';
-import { DEV_USER_ID, errorCode, harness, viaGateway, write } from './harness.ts';
+import { DEV_USER_ID, errorCode, harness, viaBearer, write } from './harness.ts';
 
 const LIST = '/api/repos/importable';
 const IMPORT = '/api/repos/import';
@@ -160,9 +160,9 @@ describe('GET /api/repos/importable', () => {
     expect((await h.cockpit.request(LIST)).status).toBe(401);
   });
 
-  it('【故意造出的失败】飞书网关通行证不能调这个接口：403', async () => {
+  it('【故意造出的失败】带 Authorization 令牌不能调这个接口：401', async () => {
     const h = harness({ githubUser: fakeGitHub() });
-    expect((await h.cockpit.request(LIST, viaGateway('GET', 'ou_someone'))).status).toBe(403);
+    expect((await h.cockpit.request(LIST, viaBearer('GET'))).status).toBe(401);
   });
 });
 

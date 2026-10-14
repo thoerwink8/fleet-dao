@@ -13,6 +13,17 @@ export const CLI_USER_TOOLS = [
   { id: 'mirasim-server', name: 'Mirasim 服务端', release: 'mirasim' },
 ] as const;
 
+/**
+ * 每个用户上真装着哪些工具。pilot 是创始人登录用的系统用户，只装了 Claude Code、Codex、reclaude；Grok、Cursor Agent、
+ * Mirasim 服务端从来没装在它家里，每小时探一遍只会得到「没有这个文件」——那是名单列错了，不是读失败（cli-versions 过去 30 天
+ * 对 pilot 读 100% 失败的根子）。会话用户装全。名单只收真装着的：以后在 pilot 上装了新工具，来这里加一行。
+ */
+const CLI_TOOLS_ON_PILOT: readonly CliUserToolId[] = ['claude', 'codex', 'reclaude'];
+
+export function cliUserToolsOf(user: CliSessionUser): readonly (typeof CLI_USER_TOOLS)[number][] {
+  return user === 'pilot' ? CLI_USER_TOOLS.filter((t) => CLI_TOOLS_ON_PILOT.includes(t.id)) : CLI_USER_TOOLS;
+}
+
 export const CLI_NPM_TOOLS = [
   { id: 'kimi-code', name: 'Kimi', npm: '@moonshot-ai/kimi-code' },
   { id: 'dsh', name: 'DeepSeek dsh', npm: '@deepseek-ai/dsh' },
@@ -404,7 +415,7 @@ export function buildCliToolsResponse(readings: readonly CliToolReading[], asOf:
         scope: 'user' as const,
         owner: user,
         title: user,
-        rows: CLI_USER_TOOLS.map((tool) => row('user', user, tool.id, tool.name)),
+        rows: cliUserToolsOf(user).map((tool) => row('user', user, tool.id, tool.name)),
       })),
       {
         scope: 'npm' as const,

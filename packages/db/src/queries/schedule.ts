@@ -2,7 +2,7 @@
 // 以登记为准而不是以跑过的记录为准：一次都没跑过的任务没有记录，只看记录就永远看不见它（没跑成 ≠ 没问题）。
 import type { ScheduleOutcome } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { and, asc, desc, eq, gte, inArray, isNull, lt } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, like, lt, max, not, or } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { SCHEDULE_OUTCOMES } from '../schema/enums.ts';
 import { scheduledJobs, scheduleRuns } from '../schema/index.ts';
@@ -99,6 +99,12 @@ export async function intakeFoundSince(db: Db, since: Date): Promise<(number | n
     .orderBy(asc(scheduleRuns.startedAt));
   return rows.map((row) => row.found);
 }
+
+/**
+ * 引擎总开关关着、这一轮被跳过时记在 schedule_runs 的原因开头（记成 partial：看门狗的新鲜度当它跑成，不会误报「停了」）。
+ * 这是有意的暂停不是故障：「连着没跑全」（scheduleRedStreaks）不把它算进红的，也不让它打断一段真的红。
+ */
+export const MASTER_OFF_SKIP_WHY = '引擎总开关关着，这一轮不跑：';
 
 /** 进程被发版或重启腰斩、已经记下开始却没人收尾时，起来补记写的原因。 */
 export const INTERRUPTED_SCHEDULE_WHY = '进程中断没收尾，启动时补记';
@@ -238,4 +244,79 @@ export async function scheduleHealth(db: Db, now: Date = new Date()): Promise<Jo
       lastSuccess,
     };
   });
+}
+
+/**
+ * 一个定时任务「连着没跑全」的这一段：最近一次跑成（ok）或没东西可扫（unscanned）之后，每一次结束的都是 partial / failed。
+ * partial 在 scheduleHealth 里算「跑成」，所以一个任务可以一个月每次都只跑了一半而没人知道——这一段就是把它找出来。
+ */
+export interface RedStreak {
+  job: string;
+  /** 这一段有几次（已结束的 partial / failed）。 */
+  runs: number;
+  firstStartedAt: Date;
+  lastStartedAt: Date;
+  /** 最近一次的结局和原因。 */
+  lastOutcome: 'partial' | 'failed';
+  lastWhy: string | null;
+  /** 这一段从哪次之后算（上一次 ok / unscanned 的跑记录编号）；回看窗口里没有为 null。 */
+  afterRunId: number | null;
+}
+
+/** 回看多久：再早的红不管从哪次开始，都只当「已经红了很久」。 */
+const RED_STREAK_LOOKBACK_MS = 14 * 24 * 60 * 60_000;
+
+/**
+ * 每个任务当前连着没跑全的这一段（没有红的任务不在里面）。只看已结束的；还在跑的不算，也不打断这一段。
+ * 读不到照抛，由看门狗记这一轮没查成。
+ */
+export async function scheduleRedStreaks(db: Db, now: Date = new Date()): Promise<RedStreak[]> {
+  const since = new Date(now.getTime() - RED_STREAK_LOOKBACK_MS);
+  const [breaks, reds] = await Promise.all([
+    db
+      .select({ job: scheduleRuns.job, id: max(scheduleRuns.id) })
+      .from(scheduleRuns)
+      .where(and(inArray(scheduleRuns.outcome, ['ok', 'unscanned']), gte(scheduleRuns.startedAt, since)))
+      .groupBy(scheduleRuns.job),
+    db
+      .select({
+        job: scheduleRuns.job,
+        id: scheduleRuns.id,
+        startedAt: scheduleRuns.startedAt,
+        outcome: scheduleRuns.outcome,
+        why: scheduleRuns.why,
+      })
+      .from(scheduleRuns)
+      .where(
+        and(
+          inArray(scheduleRuns.outcome, ['partial', 'failed']),
+          gte(scheduleRuns.startedAt, since),
+          // 总开关关着的跳过不算红（有意的暂停）
+          or(isNull(scheduleRuns.why), not(like(scheduleRuns.why, `${MASTER_OFF_SKIP_WHY}%`))),
+        ),
+      )
+      .orderBy(asc(scheduleRuns.id)),
+  ]);
+  const breakAt = new Map(breaks.map((b) => [b.job, b.id ?? 0]));
+  const byJob = new Map<string, typeof reds>();
+  for (const r of reds) {
+    if (r.id <= (breakAt.get(r.job) ?? 0)) continue;
+    byJob.set(r.job, [...(byJob.get(r.job) ?? []), r]);
+  }
+  const out: RedStreak[] = [];
+  for (const [job, rows] of byJob) {
+    const first = rows[0];
+    const last = rows.at(-1);
+    if (!first || !last) continue;
+    out.push({
+      job,
+      runs: rows.length,
+      firstStartedAt: first.startedAt,
+      lastStartedAt: last.startedAt,
+      lastOutcome: last.outcome === 'failed' ? 'failed' : 'partial',
+      lastWhy: last.why,
+      afterRunId: breakAt.get(job) ?? null,
+    });
+  }
+  return out.sort((a, b) => (a.job < b.job ? -1 : 1));
 }

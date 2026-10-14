@@ -26,6 +26,11 @@ export interface ListenTarget {
   fetch: Fetch;
   /** 设了就在听上以后把这个监听的空闲超时设成它（驾驶舱接口要比香港 nginx 留得久，见 keep-alive.ts）。 */
   keepAliveMs?: number;
+  /**
+   * 可有可无：systemd 传了它的 fd 就接上服务，没传不算少、自己 bind 时也不起。给已撤掉的监听用——机器上老的 socket 单元
+   * 在发布时不会自动换（改监听地址是人工操作），仍会把旧端口的 fd 传进来，这里得认得、不能当成「多一个」退出。
+   */
+  optional?: boolean;
 }
 
 /**
@@ -62,9 +67,10 @@ const say = (a: { host: string; port: number }) => `${a.host}:${a.port}`;
  */
 export function matchListenTargets(
   addresses: readonly { host: string; port: number }[],
-  targets: readonly { name: string; at: Listen }[],
+  targets: readonly { name: string; at: Listen; optional?: boolean }[],
 ): number[] {
-  const remaining = new Set(targets.map((_, i) => i));
+  const remaining = new Set(targets.flatMap((t, i) => (t.optional ? [] : [i])));
+  const seen = new Set<number>();
   const order: number[] = [];
   for (const addr of addresses) {
     const i = targets.findIndex((t) => t.at.host === addr.host && t.at.port === addr.port);
@@ -75,11 +81,13 @@ export function matchListenTargets(
           .join('、')}）`,
       );
     }
-    if (!remaining.delete(i)) {
+    remaining.delete(i);
+    if (seen.has(i)) {
       throw new ListenFdError(
         `systemd 传了不止一个监听套接字在 ${say(addr)}（配置里的 ${targets[i]?.name} 只要一个）`,
       );
     }
+    seen.add(i);
     order.push(i);
   }
   if (remaining.size > 0) {
@@ -125,7 +133,7 @@ function listenOnFd(fd: number): Promise<{ server: ServerType; setReal: (fetch: 
 }
 
 /**
- * 起两个监听：systemd 传了监听套接字（LISTEN_PID / LISTEN_FDS）就用它们（发布重启时连接排队、不拒连，见
+ * 起监听：systemd 传了监听套接字（LISTEN_PID / LISTEN_FDS）就用它们（发布重启时连接排队、不拒连，见
  * deploy/france/fleet-api.socket）；没传就照旧自己 bind（本机开发、测试，或机器上还没装 socket 单元的生产）。
  */
 export async function startListeners(
@@ -134,16 +142,19 @@ export async function startListeners(
 ): Promise<ServerType[]> {
   const fds = listenFds(env);
   if (fds === null) {
-    return targets.map((t) =>
-      t.keepAliveMs !== undefined
-        ? serveCockpit(t.fetch, t.at, t.keepAliveMs)
-        : serve({ fetch: t.fetch, hostname: t.at.host, port: t.at.port }),
-    );
+    return targets
+      .filter((t) => !t.optional)
+      .map((t) =>
+        t.keepAliveMs !== undefined
+          ? serveCockpit(t.fetch, t.at, t.keepAliveMs)
+          : serve({ fetch: t.fetch, hostname: t.at.host, port: t.at.port }),
+      );
   }
-  if (fds.length !== targets.length) {
+  const required = targets.filter((t) => !t.optional).length;
+  if (fds.length < required || fds.length > targets.length) {
     clearListenEnv(env);
     throw new ListenFdError(
-      `systemd 传了 ${fds.length} 个监听套接字，配置要 ${targets.length} 个（${targets.map((t) => t.name).join('、')}）`,
+      `systemd 传了 ${fds.length} 个监听套接字，配置要 ${required} 个（${targets.map((t) => t.name).join('、')}）`,
     );
   }
   clearListenEnv(env);
@@ -152,7 +163,7 @@ export async function startListeners(
     opened.map(({ server }) => addressOf(server)),
     targets,
   );
-  const bySlot: ServerType[] = new Array(targets.length);
+  const bySlot: ServerType[] = [];
   order.forEach((targetIndex, fdIndex) => {
     const target = targets[targetIndex];
     const slot = opened[fdIndex];
@@ -161,5 +172,5 @@ export async function startListeners(
     if (target.keepAliveMs !== undefined) (slot.server as Server).keepAliveTimeout = target.keepAliveMs;
     bySlot[targetIndex] = slot.server;
   });
-  return bySlot;
+  return bySlot.filter((s): s is ServerType => s !== undefined);
 }

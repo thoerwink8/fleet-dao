@@ -60,7 +60,6 @@ describe('健康检查', () => {
       githubEvents: async () => {},
       judge: { check: async () => {} },
       deployLag: { check: async () => {} },
-      feishuGateway: { check: async () => {} },
       sessionOrg: async () => {},
       githubApp: async () => {},
       watchdog: { check: async () => {} },
@@ -178,8 +177,6 @@ describe('健康检查', () => {
     expect(listed).toContain('judge');
     // 主线一动就可能落后：自动发布正在追，和这一版好不好无关；少了它，每次发布都可能被它退回
     expect(listed).toContain('deploy_lag');
-    // 飞书网关不来：网关、隧道、香港出事都会，后端刚重启、网关还没回来时也是「没查成」；少了它，发版会被它退回
-    expect(listed).toContain('feishu_gateway');
     // 切号的提醒（额度、登录出事）跟着上游自己变红，引擎每 15 分钟判一次；少了它，发版会被它退回
     expect(listed).toContain('session_org');
     // 机器人权限被人改了、新权限没点接受跟着 GitHub 那边自己变红（引擎每小时自检一次）；少了它，发版会被它退回
@@ -193,7 +190,6 @@ describe('健康检查', () => {
       githubEvents: async () => {},
       judge: { check: async () => {} },
       deployLag: { check: async () => {} },
-      feishuGateway: { check: async () => {} },
       sessionOrg: async () => {},
       githubApp: async () => {},
       watchdog: { check: async () => {} },

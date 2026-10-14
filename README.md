@@ -25,13 +25,11 @@
 | `packages/db` | Postgres 表结构、迁移、查询、渠道目录装载器 |
 | `packages/engine` | 引擎：Temporal 工作流、失败分流与熔断、停滞判定 |
 | `packages/adapters` | 渠道插头：无头起各家写码助手、读过程记录；各渠道的额度读取 |
-| `packages/cli` | `fleet` 命令：AI 会话汇报进度、提问、交活 |
 | `packages/store` | 后端和引擎共用、不碰 HTTP 的那一层：Store 契约和两套实现（内存、Postgres）、GitHub 作者白名单、对账和进门的判法；只许 api、engine 依赖它，它不许依赖 api、engine |
 | `packages/api` | 驾驶舱后端：登录、接口、实时推送、给工作流发信号、fleet 命令接口、收 GitHub 事件 |
 | `packages/web` | 驾驶舱前端：看板和后台管理页面；本机假数据模式（`react-router dev --mode mock`）开发和截图用 |
 | `packages/github` | 引擎对 GitHub 的读写：推分支、开 PR、等 CI、合并、issue 进度段与关单、对账补漏 |
 | `packages/jev` | 流程里用来提速的判断环节（不是独立产品）：三道题的题库、提问接口、TypeSafe 后端，一律只记不拦 |
-| `packages/feishu` | 飞书网关（跑在香港） |
 | `packages/conventions` | design 第七节的约定写成检查：合并闸 merge-gate（引擎任务 PR 等冷验收）、开单脚本、文档指针检查、欠账检查、阶段收口 |
 | `packages/hygiene` | 公开仓卫生检查：全仓扫描和推送前的闸，只拦私钥、令牌、密码这类真密钥（账号、邮箱、IP 不拦） |
 | `packages/agents-sync` | 同步脚本：把通用段 `agents/shared-rules.md`、`agents/skills/`、`agents/hooks/` 装进这台机器上各家 AI 的全局入口，记下这台同步到哪个提交，另能查漂移、撤旧仓留下的东西 |
@@ -77,7 +75,8 @@
 | [docs/reclaude.md](docs/reclaude.md) | reclaude 的门口：文档、清理脚本、以及「〈编号〉账号被封了，根据文档清理痕迹」这句提示词 | 入口或提示词变了 |
 | [docs/reclaude-in-mirasim.md](docs/reclaude-in-mirasim.md) | Windows/Mac 的 Mirasim 自有/平台切换、旧安装自动迁移、检查/撤回，以及 Linux 与 Fleet 的分工。从 [docs/reclaude.md](docs/reclaude.md) 进 | 装法或启动器变了 |
 | [docs/reclaude-self-check.md](docs/reclaude-self-check.md) | 上机前自检和被封号的细则。从 [docs/reclaude.md](docs/reclaude.md) 进 | 清法与判据变了 |
-| [AGENTS.md](AGENTS.md) | 给 AI 的本仓约定 | 本仓规则变了 |
+| [AGENTS.md](AGENTS.md) | 给 AI 的本仓约定，只当目录（一屏读完，细则指到包和 docs/） | 本仓规则变了 |
+| `packages/<包>/AGENTS.md` | 给 AI 的包说明（engine、api、web、conventions、db、store）：干什么、入口、怎么测、坑、连带改什么 | 改了那个包的入口、命令、坑 |
 | [agents/shared-rules.md](agents/shared-rules.md) | 各仓通用的规矩（通用段），同步脚本写进各家 AI 的全局说明 | 改它是改标准；合进主线后开会话钩子自动同步到各台机器 |
 
 ## 协作
