@@ -9,7 +9,7 @@
 // 将来要起第二个引擎进程（多机、蓝绿并起）时，每一轮开头要先抢一把锁（比如 Postgres 咨询锁 pg_try_advisory_lock(任务编号)），
 // 抢不到就跳过这一轮——现在不做，不为没有的需求写代码。
 
-import { INTERRUPTED_SCHEDULE_WHY } from '@fleet-dao/db';
+import { INTERRUPTED_SCHEDULE_WHY, MASTER_OFF_SKIP_WHY } from '@fleet-dao/db';
 import { type EngineMasterGate, masterOffNote } from '../engine-master.ts';
 
 const MINUTE_MS = 60_000;
@@ -142,7 +142,7 @@ export function startTimers(jobs: readonly TimerJob[], host: TimerHost): EngineT
       try {
         // 引擎总开关（#1086）：拉单这类要总开关开着才跑；关着（含读不到、认不出）这一轮不跑，记一笔 partial 说明原因
         if (job.needsMaster && host.master && !(await host.master.refresh())) {
-          const why = `引擎总开关关着，这一轮不跑：${masterOffNote(host.master.state())}`;
+          const why = `${MASTER_OFF_SKIP_WHY}${masterOffNote(host.master.state())}`;
           host.log('info', `定时任务 ${job.id}：${why}`);
           try {
             await host.recordSkipped?.(job.id, why);
