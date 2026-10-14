@@ -88,8 +88,8 @@ DDGS_VERSION=9.16.0
 DDGS_DEPS=(click==8.5.0 lxml==6.1.3 primp==2.0.1)
 # AI 会话用的 pnpm（lib/session-pnpm.sh）：版本必须和仓根 package.json 的 packageManager 一样（deploy/test/session-pnpm.test.sh
 # 核对，漏改一处 CI 就红）；校验和是 npm 的 dist.integrity，升版本时照 `npm view pnpm@<版本> dist.integrity` 一起改
-PNPM_VERSION=11.1.2
-PNPM_INTEGRITY=sha512-QVocwll0cx51RVwUaDcb50xapft2IbUNQFbSIkUWCfEUEvI/1gLmFp8eBgRmZB95hZfhvpYaEGiINqZ7FlaUmQ==
+PNPM_VERSION=11.28.2
+PNPM_INTEGRITY=sha512-dVzi/jwFv9e7QStCr/PFxVzTjFKcbsqBBHVJeuNnRsVx5LbhgU5ufkuX1+6GS4oORGc8Oyl6UOCsKHccXOFdJw==
 # 会话用户的 cursor-agent（lib/cursor-agent.sh）：官方安装脚本，以会话用户自己的身份跑，只在没有时装，之后它自己升级；
 # 不钉版本、不核校验和（升级会删旧版本目录；为什么可以不核见 lib/cursor-agent.sh 开头）
 CURSOR_INSTALL_URL=https://cursor.com/install
