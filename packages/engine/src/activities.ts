@@ -9,6 +9,7 @@ import type { CiTimingsJobDeps } from './jobs/ci-timings.ts';
 import type { CliUpgradeJobDeps } from './jobs/cli-upgrade.ts';
 import type { CliVersionsJobDeps } from './jobs/cli-versions.ts';
 import type { ClosedIssueEventDeps } from './jobs/closed-issue-events.ts';
+import type { DailyBriefDeps } from './jobs/daily-brief.ts';
 import { probeAssignedRoute } from './jobs/dispatch-probe.ts';
 import type { GitHubReconcileJobDeps } from './jobs/github-reconcile.ts';
 import type { GroomRunDeps } from './jobs/groom.ts';
@@ -242,6 +243,8 @@ export interface EngineJobs {
   cliVersions?: () => CliVersionsJobDeps;
   /** 需求整理（#2049）：删了满 30 天的需求硬删、该归档的归档。不拉单。 */
   requestSweep?: () => RequestSweepJobDeps;
+  /** 每日简报（决定 0096）：每天 08:30 推飞书、在 #1055 发评论。不拉单。 */
+  dailyBrief?: () => DailyBriefDeps;
 }
 
 /**

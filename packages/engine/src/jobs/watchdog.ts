@@ -21,6 +21,7 @@
 // - 同一轮还看「发版要人看」「健康页（/healthz）非 200 持续 > 10 分钟」（jobs/release-watch.ts，法国 2026-10-14 发版失败后漏报）：
 //   键 watchdog:release:…、watchdog:healthz:…，读法国的发布目录和 /healthz（real/watchdog.ts）；和上面「连着没跑全」互不相干。
 // - 同一轮还看「提醒真的推到飞书了」（jobs/watchdog-push.ts）：推送渠道自己坏了靠推送报不出来，键 watchdog:push:feishu、进「要你拍」。
+// - 也看「今天的每日简报送到了」（jobs/watchdog-brief.ts）：09:00 以后没送到报 watchdog:brief:<北京日期>（卡住报警），送到了自己撤。
 
 import type { JobHealth, MergeStallFacts, RedStreak, ScheduleResult } from '@fleet-dao/db';
 import { WATCHDOG_JOB_ID } from '@fleet-dao/db';
@@ -45,6 +46,7 @@ import {
   RELEASE_WATCH_LINK,
   type ReleaseFacts,
 } from './release-watch.ts';
+import { type BriefWatchDeps, watchDailyBrief } from './watchdog-brief.ts';
 import { type PushWatchDeps, watchFeishuPush } from './watchdog-push.ts';
 import { type QuotaWatchDeps, watchQuotaFreshness } from './watchdog-quota.ts';
 
@@ -131,6 +133,10 @@ export interface WatchdogDeps {
    * 「提醒真的推到飞书了」要的读（jobs/watchdog-push.ts）。读不到照抛：这一轮记没查成，开着的不撤。不给（只测别的部分的单测）就不看这一条。
    */
   push?: Pick<PushWatchDeps, 'facts'>;
+  /**
+   * 「今天的每日简报送到了」要的读（jobs/watchdog-brief.ts）。读不到照抛：这一轮记没查成，开着的不撤。不给（只测别的部分的单测）就不看这一条。
+   */
+  brief?: Pick<BriefWatchDeps, 'status' | 'here'>;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
@@ -409,8 +415,21 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
     found += p.found;
     pushScanned = p.scanned;
   }
+  let briefScanned = 0;
+  if (deps.brief) {
+    const b = await watchDailyBrief({ ...deps.brief, alerts: deps.alerts, log: deps.log }, now);
+    s.problems.push(...b.problems);
+    found += b.found;
+    briefScanned = b.scanned;
+  }
   const scanned =
-    others.length + merges.scanned + quotaScanned + reds.scanned + releases.scanned + pushScanned;
+    others.length +
+    merges.scanned +
+    quotaScanned +
+    reds.scanned +
+    releases.scanned +
+    pushScanned +
+    briefScanned;
 
   if (s.problems.length > 0) {
     const why = `${s.problems.length > 1 ? `${s.problems.length} 处没做成：` : ''}${s.problems.join('；')}`;

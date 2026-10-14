@@ -15,6 +15,7 @@ import {
   alertByKey,
   clearHealthzBadSince,
   type Db,
+  dailyBriefStatus,
   feishuPushFacts,
   finishScheduleRun,
   latestAlertByPrefix,
@@ -99,6 +100,17 @@ export async function readReleaseFacts(dir: string): Promise<ReleaseFacts | null
   return { last: lastHistoryEntry(history), trainStatus, autoNote };
 }
 
+/** 发布目录在不在（在 = 这台是法国）。不在是 false，别的错照抛。 */
+export async function releasesDirExists(dir: string): Promise<boolean> {
+  try {
+    await stat(dir);
+    return true;
+  } catch (e) {
+    if (errno(e) === 'ENOENT') return false;
+    throw e;
+  }
+}
+
 /** 问 /healthz：200 才算好；连不上、超时是 { ok: false, status: null }，不抛。 */
 export async function probeHealthz(url: string, fetchImpl: typeof fetch = fetch): Promise<HealthzProbe> {
   try {
@@ -166,6 +178,11 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
     },
     // 「提醒真的推到飞书了」：后端记的推送状态和送达记录，同一个库
     push: { facts: (at) => feishuPushFacts(w.db, at) },
+    // 「今天的每日简报送到了」：简报那一行提醒、它的送达记录和定时任务这一轮的结局，同一个库
+    brief: {
+      status: (day, since) => dailyBriefStatus(w.db, day, since),
+      here: () => releasesDirExists(w.releasesDir ?? RELEASES_DIR),
+    },
     now,
     log,
   });

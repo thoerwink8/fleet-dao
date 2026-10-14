@@ -7,6 +7,7 @@
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api usage-backfill-once [--apply]   一次性回填没有会话号的老用量（默认只读）
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task continue|abandon|redo <owner/仓名> <单号> --note "<为什么>"   续、放弃、重做一张单
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api feishu-push status|test   提醒推飞书通不通；test 建一条测试提醒等它推出去
+#   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api daily-brief [--as-today]   手动跑一次每日简报（推飞书、#1055 评论）
 #   bash /srv/fleet-dao-releases/<版本>/packages/api/bin/fleet-api release pause|continue …   发版切版本前后暂停、继续手上有会话的任务（release.sh 调，名单走标准输出、标准输入）
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api seat|claim …   帅位只一个（#299）：本机经 ssh 调，写法见 seat --help
 # 换成 fleet 身份、带上 fleet-api.service 同一份 /etc/fleet-dao/api.env（连库用的 DATABASE_URL、PGHOST 这些）去跑：
@@ -33,6 +34,10 @@ elif [[ "${1:-}" == "groom" ]]; then
 # usage-backfill-once（#1948，一次性回填没有会话号的老用量）的本体同样在引擎包
 elif [[ "${1:-}" == "usage-backfill-once" ]]; then
   entry="$root/packages/engine/src/bin/usage-backfill-once.ts"
+  shift
+# daily-brief（决定 0096，手动跑一次每日简报）的本体同样在引擎包：收集、写法和引擎定时那一轮是同一份
+elif [[ "${1:-}" == "daily-brief" ]]; then
+  entry="$root/packages/engine/src/bin/daily-brief.ts"
   shift
 fi
 # 环境文件照同一版的 fleet-api.service 一行行搬过来（顺序、「-」都照抄）：只写 api.env 时，session-mint 读不到

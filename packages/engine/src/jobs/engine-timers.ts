@@ -25,6 +25,12 @@ import {
   runCliVersionsJob,
 } from './cli-versions.ts';
 import {
+  DAILY_BRIEF_EVERY_MINUTES,
+  DAILY_BRIEF_JOB,
+  DAILY_BRIEF_OFFSET_MINUTES,
+  runDailyBriefJob,
+} from './daily-brief.ts';
+import {
   GITHUB_RECONCILE_EVERY_MINUTES,
   GITHUB_RECONCILE_JOB,
   runGitHubReconcileJob,
@@ -97,6 +103,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
   const cliVersions = need(jobs, 'cliVersions');
   const cliUpgrade = need(jobs, 'cliUpgrade');
   const requestSweep = need(jobs, 'requestSweep');
+  const dailyBrief = need(jobs, 'dailyBrief');
   return [
     {
       id: GITHUB_RECONCILE_JOB.id,
@@ -200,6 +207,16 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       catchupMinutes: REQUEST_SWEEP_EVERY_MINUTES,
       overdueMinutes: OVERDUE_MINUTES,
       run: () => runRequestSweepJob(requestSweep()),
+    },
+    {
+      // 每日简报（决定 0096）：每天 08:30（北京时间）推飞书、在 #1055 发评论。不拉单、不起会话，不标 needsMaster；
+      // 停机错过了 08:30，当天起来照样补今天这一条（晚到的简报也比没有好；看门狗 09:00 起已经报了没送到）
+      id: DAILY_BRIEF_JOB.id,
+      everyMinutes: DAILY_BRIEF_EVERY_MINUTES,
+      offsetMinutes: DAILY_BRIEF_OFFSET_MINUTES,
+      catchupMinutes: DAILY_BRIEF_EVERY_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
+      run: () => runDailyBriefJob(dailyBrief()),
     },
   ];
 }
