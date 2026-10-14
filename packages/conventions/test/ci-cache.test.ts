@@ -236,7 +236,11 @@ describe('键：盖住测试的全部输入，不相干的不变', () => {
   });
 
   it('不相干的包、不读的文档变了：键不变（命中率的来源）', () => {
-    for (const f of ['packages/agent-eval/src/index.ts', 'packages/engine/src/index.ts', 'docs/PROGRESS.md']) {
+    for (const f of [
+      'packages/agent-eval/src/index.ts',
+      'packages/engine/src/index.ts',
+      'docs/PROGRESS.md',
+    ]) {
       expect(keyOf({ files: { [f]: 'changed' } }).key, f).toBe(base);
     }
   });
@@ -287,9 +291,13 @@ describe('键：盖住测试的全部输入，不相干的不变', () => {
   it('conventions 那一组：别的包的测试文件、package.json 变了键也变（ci-plan.test.ts 的扫描器通读全仓测试）；别的组不受影响', () => {
     const conv = (files: Record<string, string>) => keyOf({ box: testsOf('conventions'), files }).key;
     const baseConv = conv({});
-    expect(conv({ 'packages/agent-eval/test/index.test.ts': 'a test that reads outside' })).not.toBe(baseConv);
+    expect(conv({ 'packages/agent-eval/test/index.test.ts': 'a test that reads outside' })).not.toBe(
+      baseConv,
+    );
     expect(conv({ 'packages/agent-eval/test/brand-new.test.ts': 'x' })).not.toBe(baseConv);
-    expect(conv({ 'packages/agent-eval/package.json': '{"name":"@fleet-dao/cli","x":1}' })).not.toBe(baseConv);
+    expect(conv({ 'packages/agent-eval/package.json': '{"name":"@fleet-dao/cli","x":1}' })).not.toBe(
+      baseConv,
+    );
     expect(conv({ 'agents/test/skills.test.ts': 'changed' })).not.toBe(baseConv);
     // 只改别的包的非测试源码：不变
     expect(conv({ 'packages/agent-eval/src/index.ts': 'changed' })).toBe(baseConv);
@@ -805,7 +813,9 @@ describe('入口 bin/ci-cache.ts', { timeout: 0 }, () => {
     expect(run([]).status).toBe(2);
     expect(run(['key']).status).toBe(2);
     expect(run(['nope', '--event', 'pull_request', '--tmp', tmp]).status).toBe(2);
-    expect(run(['key', '--event', 'pull_request', '--tmp', tmp, '--args', 'packages/agent-eval/']).status).toBe(2);
+    expect(
+      run(['key', '--event', 'pull_request', '--tmp', tmp, '--args', 'packages/agent-eval/']).status,
+    ).toBe(2);
   });
 
   it('【故意造出的失败】主线推送：key 不开、plan 全跑、record 不写，都退出 0、什么清单都不碰', () => {

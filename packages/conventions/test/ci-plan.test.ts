@@ -174,7 +174,13 @@ describe('按改动算要跑什么', () => {
 
   it('只改一个没人依赖的包（agent-eval）：只测它、只类型检查它，不打包 web、不跑 deploy', () => {
     const p = pr('packages/agent-eval/src/cli.ts');
-    expect(p).toMatchObject({ full: false, biome: true, tsc: ['packages/agent-eval'], web: false, deploy: 'none' });
+    expect(p).toMatchObject({
+      full: false,
+      biome: true,
+      tsc: ['packages/agent-eval'],
+      web: false,
+      deploy: 'none',
+    });
     expect(units(p)).toEqual(['agent-eval']);
     // 装箱之后只跑 cli 自己的测试文件，一台
     const packed = assigned(p);
@@ -862,13 +868,13 @@ describe('入口', { timeout: 0 }, () => {
    * 【故意造出的失败】装箱这一步没算成：退出 2 判红，不静默少跑（原来那种「vitest 一个文件都没收到」的红要保住）。
    */
   it('【故意造出的失败】没单元有测试文件 / 列不出测试文件 / 读不了某个文件：一句为什么，不静默少跑', () => {
-    expect(assignTests({ ...pr('packages/agent-eval/src/cli.ts'), testUnits: ['没有这个包'] }, inputs)).toMatch(
-      /一个测试文件都没有/,
-    );
+    expect(
+      assignTests({ ...pr('packages/agent-eval/src/cli.ts'), testUnits: ['没有这个包'] }, inputs),
+    ).toMatch(/一个测试文件都没有/);
     // 列不出测试文件（检出坏了）：也是一句为什么，不是空清单
-    expect(assignTests(pr('packages/agent-eval/src/cli.ts'), { ...inputs, all: '列不出 packages/' })).toContain(
-      '列不出 packages/',
-    );
+    expect(
+      assignTests(pr('packages/agent-eval/src/cli.ts'), { ...inputs, all: '列不出 packages/' }),
+    ).toContain('列不出 packages/');
     // 读不了某个测试文件（认不出要不要 Temporal）：判红，不猜
     expect(assignTests(pr('packages/agent-eval/src/cli.ts'), { ...inputs, read: () => undefined })).toContain(
       '读不到测试文件',
