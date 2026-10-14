@@ -533,6 +533,8 @@ jobs:
         env:
           E2E_SPECS: ${{ needs.changes.outputs.e2e }}
           SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+          # 隔离集（packages/web/e2e/quarantine.json）不在这一步跑：下一步单跑、只报不挡
+          E2E_QUARANTINE: skip
         run: |
           set -euo pipefail
           if [ "$E2E_SPECS" = all ]; then
@@ -542,6 +544,19 @@ jobs:
             # shellcheck disable=SC2086  # 故意按空格拆成多个 spec 参数
             pnpm --filter @fleet-dao/web e2e $E2E_SPECS --shard="$SHARD" --pass-with-no-tests
           fi
+      # 隔离集（决定 0093）：常偶发、已开单限期修的用例照跑、照报，红了不挡这一轮（只这一步 continue-on-error，上一步红了照样红）。
+      # 只在第 1 台跑一遍全部隔离用例（不分片）；前一步红了也跑（always），结果、报告另放（results-quarantine.json、report-quarantine/）。
+      - name: 隔离集（只报不挡）
+        if: always() && matrix.shard == 1
+        continue-on-error: true
+        env:
+          E2E_QUARANTINE: only
+          E2E_SKIP_BUILD: '1'
+        run: pnpm --filter @fleet-dao/web e2e --pass-with-no-tests
+      # 偶发和隔离集的结局写进 job 摘要（判法 packages/conventions/src/e2e-flaky.ts）；近 10 轮统计、开单在 e2e-flaky.yml
+      - name: 偶发与隔离集汇总
+        if: always()
+        run: node packages/conventions/src/bin/e2e-flaky.ts summary _tmp/e2e/results.json _tmp/e2e/results-quarantine.json >> "$GITHUB_STEP_SUMMARY"
       # 总是留：跑过页面的截图（support/fixtures.ts 的 shot 夹具存的）是界面 PR 的截图证据，红了还有报告和各进程日志。都在仓根 _tmp/e2e/（公开仓：只有 e2e 自己造的假数据）
       - uses: actions/upload-artifact@v4
         if: always()
