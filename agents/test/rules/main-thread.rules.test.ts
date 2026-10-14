@@ -346,13 +346,18 @@ describe('登记和真跑', () => {
     fileURLToPath(new URL('../../../packages/agents-sync/src/targets.ts', import.meta.url)),
     'utf8',
   );
-  const WANT = 'node "$CLAUDE_PROJECT_DIR/agents/hooks/main-thread.mjs"';
+  // exec 形式：Claude Code 直接起 node，不先起 Git Bash（机器忙时那一层能卡十几秒，决定 0093 B1）
+  const WANT = '${CLAUDE_PROJECT_DIR}/agents/hooks/main-thread.mjs';
 
   it('登记在本仓项目设置的 PreToolUse 上、不写 matcher；用户级清单里没有', () => {
     const settings = JSON.parse(SETTINGS) as {
-      hooks: { PreToolUse: { matcher?: string; hooks: { command: string; timeout: number }[] }[] };
+      hooks: {
+        PreToolUse: { matcher?: string; hooks: { command: string; args?: string[]; timeout: number }[] }[];
+      };
     };
-    expect(settings.hooks.PreToolUse).toEqual([{ hooks: [{ type: 'command', command: WANT, timeout: 10 }] }]);
+    expect(settings.hooks.PreToolUse).toEqual([
+      { hooks: [{ type: 'command', command: 'node', args: [WANT], timeout: 10 }] },
+    ]);
     expect(TARGETS).not.toContain("'main-thread.mjs'");
   });
 
@@ -366,7 +371,7 @@ describe('登记和真跑', () => {
     group.matcher = 'Bash';
     expect(JSON.stringify(parsed)).not.toBe(before);
     expect(group.matcher).toBe('Bash');
-    const cut = SETTINGS.replace(WANT, 'node "$CLAUDE_PROJECT_DIR/agents/hooks/gone.mjs"');
+    const cut = SETTINGS.replace(WANT, '${CLAUDE_PROJECT_DIR}/agents/hooks/gone.mjs');
     expect(cut).not.toContain(WANT);
   });
 

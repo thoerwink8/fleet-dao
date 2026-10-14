@@ -110,6 +110,12 @@ class QuietHook {
       si.hStdOutput = hout;
       si.hStdError = herr;
     }
+    // Launcher process creation time (epoch ms), for agents/hooks/hook-timing.mjs to log the launch stage.
+    try {
+      DateTime t0 = Process.GetCurrentProcess().StartTime.ToUniversalTime();
+      long ms = (long)(t0 - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+      Environment.SetEnvironmentVariable("FLEET_HOOK_LAUNCHER_T0", ms.ToString());
+    } catch { }
     PROCESS_INFORMATION pi;
     string cmd = Quote(node) + " " + tail;
     if (!CreateProcess(node, cmd, IntPtr.Zero, IntPtr.Zero, true, CREATE_NO_WINDOW, IntPtr.Zero, null, ref si, out pi))

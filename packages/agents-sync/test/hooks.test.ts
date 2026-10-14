@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Backups } from '../src/backup.ts';
-import { applyHooks, checkHooks, type HookSkip, hookCommand, ownedScript } from '../src/hooks.ts';
+import { applyHooks, checkHooks, type HookSkip, handlerFor, hookCommand, ownedScript } from '../src/hooks.ts';
 import { exitCode } from '../src/report.ts';
 import { type AgentId, HOOK_TARGETS } from '../src/targets.ts';
 import {
@@ -36,13 +36,43 @@ const PRETOOL_MATCHERS = HOOK_TARGETS.flatMap((t) => t.hooks)
  * 装好以后 PreToolUse 下该有的几组：照 Claude 那份登记的顺序一条一组（决定 0083：用户级只留拦密钥）。
  * cmd 把脚本名换成这台机器上登记的命令。
  */
-const pretoolGroups = (cmd: (script: string) => string): Group[] =>
+const pretoolGroups = (m: { home: string; cmd: (script: string) => string }): Group[] =>
   (HOOK_TARGETS.find((t) => t.format === 'claude')?.hooks ?? [])
     .filter((h) => h.event === 'PreToolUse')
     .map((h) => ({
       ...(h.matcher === undefined ? {} : { matcher: h.matcher }),
-      hooks: [{ type: 'command', command: cmd(h.script), timeout: h.timeout }],
+      hooks: [
+        h.exec
+          ? // Claude 那组：exec 形式直接起 node，不经 Git Bash、不经启动器
+            {
+              type: 'command',
+              command: 'node',
+              args: [join(m.home, '.fleet-dao', 'hooks', h.script).replaceAll('\\', '/')],
+              timeout: h.timeout,
+              onFailure: 'block',
+            }
+          : {
+              type: 'command',
+              command: m.cmd(h.script),
+              timeout: h.timeout,
+              // Windows 上命令是启动器 exe：exec 形式（空 args，Grok 照常加载），不经 Git Bash
+              ...(m.cmd(h.script).endsWith('.exe') ? { args: [] } : {}),
+              onFailure: 'block',
+            },
+      ],
     }));
+
+/** 用户级开会话那条（加载器）：Windows 上是启动器 exe，写空 args 走 exec 形式 */
+const loaderGroup = (m: { cmd: (script: string) => string }): Group => ({
+  hooks: [
+    {
+      type: 'command',
+      command: m.cmd('plugin-loader.mjs'),
+      timeout: 10,
+      ...(m.cmd('plugin-loader.mjs').endsWith('.exe') ? { args: [] } : {}),
+    },
+  ],
+});
 
 function machine(
   installed: AgentId[] = ['claude'],
@@ -65,6 +95,8 @@ interface Handler {
   type?: string;
   command?: string;
   timeout?: number;
+  args?: string[];
+  onFailure?: string;
 }
 interface Group {
   matcher?: string;
@@ -115,10 +147,8 @@ describe('装', () => {
     expect(get(m.home, '.fleet-dao/hooks/session-start.mjs')).toBe(HOOK_FILES['session-start.mjs']);
     const s = m.settings();
     expect(Object.keys(s.hooks)).toEqual(['SessionStart', 'PreToolUse']);
-    expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m.cmd));
-    expect(s.hooks.SessionStart).toEqual([
-      { hooks: [{ type: 'command', command: m.cmd('plugin-loader.mjs'), timeout: 10 }] },
-    ]);
+    expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m));
+    expect(s.hooks.SessionStart).toEqual([loaderGroup(m)]);
     if (PLATFORM === 'win32') {
       expect(m.cmd('pretool.mjs')).toMatch(/\/\.fleet-dao\/bin\/quiet-pretool\.exe$/);
       expect(m.cmd('pretool.mjs')).not.toMatch(/[\s"$&|<>]/);
@@ -184,30 +214,95 @@ describe('装', () => {
     expect(old?.text).toContain('pretool.mjs 多登记了一条：挂在 PreToolUse 上、matcher 是 "Bash|PowerShell"');
     expectKind(m.apply(), SETTINGS, 'changed');
     const s = m.settings();
-    expect(s.hooks.PreToolUse).toEqual([before.hooks.PreToolUse[1], ...pretoolGroups(m.cmd)]);
+    expect(s.hooks.PreToolUse).toEqual([before.hooks.PreToolUse[1], ...pretoolGroups(m)]);
     expect(s.hooks.PostToolUse).toEqual(before.hooks.PostToolUse);
-    expect(s.hooks.SessionStart).toEqual([
-      { hooks: [{ type: 'command', command: m.cmd('plugin-loader.mjs'), timeout: 10 }] },
-    ]);
+    expect(s.hooks.SessionStart).toEqual([loaderGroup(m)]);
     expect(exitCode(m.check())).toBe(0);
+  });
+});
+
+// 调工具前那条超时即拦（决定 0093 B1）：Claude Code 默认钩子超时就放行，等于安全检查空过。
+// 不做「连续超时自动放行」：超时就拦，恢复路径见 docs/ops.md「钩子超时被拦」。
+describe('调工具前那条超时即拦', () => {
+  it('Claude 那份里调工具前的每一条都是 onFailure: block', () => {
+    const claude = HOOK_TARGETS.find((t) => t.format === 'claude');
+    const pre = (claude?.hooks ?? []).filter((h) => h.event === 'PreToolUse');
+    expect(pre.length).toBeGreaterThan(0);
+    for (const h of pre) expect([h.matcher, h.onFailure]).toEqual([h.matcher, 'block']);
+  });
+
+  it('以前登记的没写 onFailure（超时放行）：查判漂移，再写补上，别的不动', () => {
+    const m = machine();
+    m.apply();
+    const s = m.settings();
+    for (const g of s.hooks.PreToolUse ?? []) for (const h of g.hooks) delete h.onFailure;
+    put(m.home, '.claude/settings.json', JSON.stringify(s));
+    const drift = m.check().find((l) => l.key === SETTINGS);
+    expect(drift?.kind).toBe('drift');
+    expect(drift?.text).toContain('onFailure 是 undefined，应是 block');
+    expectKind(m.apply(), SETTINGS, 'changed');
+    expect(m.settings().hooks.PreToolUse).toEqual(pretoolGroups(m));
+    expect(exitCode(m.check())).toBe(0);
+  });
+
+  it('Claude 那组是 exec 形式直接起 node（不经 Git Bash、不经启动器）；以前登记的 shell 形式判漂移，再写换掉、不留两条', () => {
+    const m = machine();
+    m.apply();
+    const s = m.settings();
+    const first = s.hooks.PreToolUse?.[0]?.hooks[0];
+    expect(first?.command).toBe('node');
+    expect(first?.args).toEqual([join(m.home, '.fleet-dao', 'hooks', 'pretool.mjs').replaceAll('\\', '/')]);
+    const old = s.hooks.PreToolUse?.[0];
+    if (old)
+      old.hooks = [{ type: 'command', command: m.cmd('pretool.mjs'), timeout: 10, onFailure: 'block' }];
+    put(m.home, '.claude/settings.json', JSON.stringify(s));
+    expect(m.check().find((l) => l.key === SETTINGS)?.text).toContain('命令和本机该有的不一样');
+    expectKind(m.apply(), SETTINGS, 'changed');
+    expect(m.settings().hooks.PreToolUse).toEqual(pretoolGroups(m));
+  });
+
+  it.skipIf(PLATFORM !== 'win32')(
+    'Windows 上第二组（Devin、Grok）命令是启动器 exe、写空 args（Grok 照常加载），少了判漂移',
+    () => {
+      const m = machine();
+      m.apply();
+      const s = m.settings();
+      const second = s.hooks.PreToolUse?.[1]?.hooks[0];
+      expect(second?.command).toMatch(/\/quiet-pretool\.exe$/);
+      expect(second?.args).toEqual([]);
+      if (second) delete second.args;
+      put(m.home, '.claude/settings.json', JSON.stringify(s));
+      expect(m.check().find((l) => l.key === SETTINGS)?.text).toContain('args 是 null，应是 []');
+    },
+  );
+
+  it('别家写法不加 onFailure、args（它们没有这个开关，Kimi Code 多一个键整份配置读不起来）', () => {
+    for (const t of HOOK_TARGETS.filter((x) => x.format !== 'claude')) {
+      for (const spec of t.hooks) {
+        const h = handlerFor(t, { ...spec, onFailure: 'block', exec: true }, 'C:/Users/u', 'win32');
+        expect(Object.keys(h).sort()).toEqual(['command', 'timeout', 'type']);
+      }
+    }
   });
 });
 
 // 调工具前那条挂在哪些工具上（改标准：targets.ts 在 standard-paths.json 里）：跑命令的 Bash、PowerShell，
 // 读文件、搜内容的 Read、Grep——2026-09-27 帅位用命令读漏了 reclaude 的设备密钥，只拦命令、Read 照样能读进对话。
 // Glob 只列路径（和 ls 一样放行），不挂：挂上只会多一个要认的别家工具名（Grok 把 Glob 换成它的 list_dir）。
-// Devin 不换 Claude 的工具名、按不锚定的正则比它自己的小写名字，所以另一组锚定的 ^(exec|read|grep)$。
+// Devin 不换 Claude 的工具名、按不锚定的正则比它自己的小写名字，所以另一组锚定的；Grok 跳过第一组（exec 形式带非空 args），
+// 它的 run_terminal_command、read_file 也放进这一组（grep 两家同名）。
 describe('调工具前那条挂在哪些工具上', () => {
-  it('两组：Claude 的名字 Bash、PowerShell、Read、Grep 加起后台活的 Agent、Task、Monitor、Workflow，再加算「送到创始人手上」的 deliver_artifact、PushNotification（逐个全等比）；Devin 的名字 exec、read、grep（锚定）', () => {
+  it('两组：Claude 的名字 Bash、PowerShell、Read、Grep 加起后台活的 Agent、Task、Monitor、Workflow，再加算「送到创始人手上」的 deliver_artifact、PushNotification（逐个全等比）；Devin 的名字 exec、read、grep 加 Grok 的 run_terminal_command、read_file（锚定）', () => {
     expect(PRETOOL_MATCHERS).toEqual([
       'Bash|PowerShell|Read|Grep|Agent|Task|Monitor|Workflow|mcp__mirasim__deliver_artifact|PushNotification',
-      '^(exec|read|grep)$',
+      '^(exec|read|grep|run_terminal_command|read_file)$',
     ]);
   });
 
   it('Devin 那组锚定了：不会连 notebook_read、read_subagent、mcp_read_resource、MCP 工具一起匹配上', () => {
     const devin = new RegExp(PRETOOL_MATCHERS[1] ?? '');
-    for (const name of ['exec', 'read', 'grep']) expect([name, devin.test(name)]).toEqual([name, true]);
+    for (const name of ['exec', 'read', 'grep', 'run_terminal_command', 'read_file'])
+      expect([name, devin.test(name)]).toEqual([name, true]);
     for (const name of [
       'notebook_read',
       'read_subagent',
@@ -234,6 +329,8 @@ describe('调工具前那条挂在哪些工具上', () => {
       exec: { command: 'git status', shell_id: 'main' },
       read: { file_path: '/work/repo/README.md' },
       grep: { pattern: 'TODO', path: '/work/repo/src' },
+      run_terminal_command: { command: 'git status' },
+      read_file: { target_file: '/work/repo/README.md' },
       Agent: { prompt: '查一下', description: '查' },
       Task: { prompt: '查一下', description: '查' },
       Monitor: { command: 'until false; do sleep 1; done' },
@@ -263,7 +360,7 @@ describe('调工具前那条挂在哪些工具上', () => {
     });
     const s = m.settings();
     expect(Object.keys(s.hooks)).toEqual(['PreToolUse']);
-    expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m.cmd));
+    expect(s.hooks.PreToolUse).toEqual(pretoolGroups(m));
     expect(exitCode(m.check())).toBe(0);
     expect(m.apply().filter((l) => l.kind === 'changed')).toEqual([]);
   });
@@ -286,11 +383,8 @@ describe('别的钩子、别的设置一条不碰', () => {
     expect(s.env).toEqual(before.env);
     expect(s.autoUpdatesChannel).toBe('latest');
     expect(s.hooks.PostToolUse).toEqual(before.hooks.PostToolUse);
-    expect(s.hooks.PreToolUse).toEqual([before.hooks.PreToolUse?.[1], ...pretoolGroups(m.cmd)]);
-    expect(s.hooks.SessionStart).toEqual([
-      before.hooks.SessionStart?.[1],
-      { hooks: [{ type: 'command', command: m.cmd('plugin-loader.mjs'), timeout: 10 }] },
-    ]);
+    expect(s.hooks.PreToolUse).toEqual([before.hooks.PreToolUse?.[1], ...pretoolGroups(m)]);
+    expect(s.hooks.SessionStart).toEqual([before.hooks.SessionStart?.[1], loaderGroup(m)]);
     const all = JSON.stringify(s);
     expect(all).not.toContain('fleet-guard');
     const backups = join(m.home, '.fleet-dao', 'backups');
@@ -363,9 +457,7 @@ describe('读不懂、被人改坏：不当成空的重写，报出来', () => {
     expect(lines.find((l) => l.key === SETTINGS)?.text).toContain('disableAllHooks 开着');
     expect(m.settings().disableAllHooks).toBe(true);
     expect(m.settings().hooks.PreToolUse).toHaveLength(2);
-    expect(m.settings().hooks.SessionStart).toEqual([
-      { hooks: [{ type: 'command', command: m.cmd('plugin-loader.mjs'), timeout: 10 }] },
-    ]);
+    expect(m.settings().hooks.SessionStart).toEqual([loaderGroup(m)]);
     expectKind(m.check(), SETTINGS, 'drift');
     expectKind(m.apply(), SETTINGS, 'failed');
   });
@@ -382,7 +474,7 @@ describe('读不懂、被人改坏：不当成空的重写，报出来', () => {
     expect(drift).toContain('pretool.mjs 登记了 2 次');
     expect(drift).toContain('timeout 是 99，应是 10');
     m.apply();
-    expect(m.settings().hooks.PreToolUse).toEqual(pretoolGroups(m.cmd));
+    expect(m.settings().hooks.PreToolUse).toEqual(pretoolGroups(m));
     expect(exitCode(m.check())).toBe(0);
   });
 

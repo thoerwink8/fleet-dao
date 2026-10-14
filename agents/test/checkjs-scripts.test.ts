@@ -25,6 +25,7 @@ const CHECKED = [
   'hooks/pretool-agy.mjs',
   'hooks/pretool-kimi.mjs',
   'hooks/main-thread.mjs',
+  'hooks/hook-timing.mjs',
   'hooks/fresh-main.mjs',
   'hooks/git-run.mjs',
   'hooks/proxy-env.mjs',

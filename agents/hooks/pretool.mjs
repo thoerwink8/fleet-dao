@@ -17,6 +17,7 @@ import {
   SUBAGENT_FETCH_MS,
 } from './fresh-main.mjs';
 import { gitOk, gitRunner, gitWhy, readFallbackProxy } from './git-run.mjs';
+import { hookTimer } from './hook-timing.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 // 只标类型、不改判断：改判断就是改规矩，由 agents/test/rules/pretool.rules.test.ts 钉着。
@@ -2552,20 +2553,34 @@ function isMain() {
 }
 
 if (isMain()) {
+  // 各阶段耗时记进 ~/.fleet-dao/logs/hook-timing.jsonl（hook-timing.mjs），查超时用
+  const timer = hookTimer('pretool.mjs');
+  /** @type {string | undefined} */
+  let timedTool;
+  /**
+   * @param {number} code
+   * @returns {never}
+   */
+  function finish(code) {
+    timer.mark('write');
+    timer.done({ tool: timedTool, code });
+    process.exit(code);
+  }
   /** @type {string} */
   let raw;
   try {
     raw = readFileSync(0, 'utf8');
   } catch (err) {
     process.stderr.write(`fleet-guard：读不到钩子输入（${errCode(err) ?? err}），按拦处理\n`);
-    process.exit(2);
+    finish(2);
   }
+  timer.mark('read');
   // N2：派子代理时 model 写 fable（fable、claude-fable-*）或带 [1m] 后缀的，拦。要放在下面 backgroundOnly 早退之前：
   // Agent 在 BACKGROUND_ONLY_TOOLS 里，decide 一进来就放行。fork 继承主会话模型管不到；引擎侧的 matcher 不含 Agent，这条只管本机。
   const fableBlock = agentModelVerdict(raw);
   if (fableBlock) {
     process.stderr.write(`${fableBlock.message}\n`);
-    process.exit(fableBlock.code);
+    finish(fableBlock.code);
   }
   let backgroundOnly = false;
   try {
@@ -2574,6 +2589,7 @@ if (isMain()) {
     // Agent、Monitor、Workflow、送达类工具仍登记在这条钩子上，见到就放行（decide 不认识它们的名字，不放行会被拦）。
     // 不再给无人值守记「调了工具」：Stop 钩子改看输入里的 background_tasks。
     const tool = prop(input, 'tool_name') ?? prop(input, 'toolName');
+    if (typeof tool === 'string') timedTool = tool;
     backgroundOnly =
       typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool));
   } catch {
@@ -2589,12 +2605,16 @@ if (isMain()) {
       })}\n`,
     );
   }
-  if (backgroundOnly) process.exit(0);
+  if (backgroundOnly) {
+    timer.mark('decide');
+    finish(0);
+  }
   // Devin 的输入里没有会话目录：钩子进程的工作目录就是会话目录
   const verdict = decide(raw, process.cwd());
+  timer.mark('decide');
   if (verdict.code !== 0) {
     process.stderr.write(`${verdict.message}\n`);
-    process.exit(verdict.code);
+    finish(verdict.code);
   }
   if (verdict.updatedInput) {
     // 文档（code.claude.com/docs/en/hooks「PreToolUse decision control」）：updatedInput 整份替换 tool_input。
@@ -2612,5 +2632,5 @@ if (isMain()) {
       })}\n`,
     );
   }
-  process.exit(0);
+  finish(0);
 }
