@@ -63,6 +63,19 @@ export interface RouteRecord {
   successes: number;
 }
 
+/**
+ * 一个模型的动手战绩（db 的 ModelTrack 同形，engine 不依赖 db 各写一份）：近 7 天第一段动手是它、到了终态的单。
+ * 选路按它算每单期望成本和一轮做成率（rank.ts 的 modelOrder，PLAN 3f）。
+ */
+export interface ModelTrackFacts {
+  modelId: string;
+  tasks: number;
+  done: number;
+  oneRound: number;
+  segments: number;
+  segmentMinutes: number;
+}
+
 /** 一条路由的全部事实：候选查询的一行 + 给人看的名字 + 熔断 + 战绩。 */
 export interface RouteFacts {
   routeId: string;
@@ -227,6 +240,11 @@ export interface ChooseRouteInput {
    * 不给 = 没判（老的输入、纯函数测试）——真装配（store-ports 经 real/index.ts 接 carpoolRegistry）一定给，测试钉着。
    */
   carpoolRegistry?: CarpoolRegistryView;
+  /**
+   * 各模型的动手战绩（PLAN 3f）：只在用途列在 policy.trackScore.stages 里时用。不给 = 没读（或没读成），模型之间照人排的先后，
+   * 和以前一样；给了空数组 = 读成了、近期一单都没有，同样不动。
+   */
+  modelTracks?: ModelTrackFacts[];
   /** [0, 1) 的随机数，试探用；由工作流经 decide 生成、记进历史。试探开着时必须给。 */
   draw?: number;
   now: string;
@@ -267,7 +285,11 @@ export interface Block {
   until: string | null;
 }
 
-export type Nudge = 'fast-reset' | 'poor-record' | 'quota-unknown';
+/**
+ * track-score：这个模型的动手战绩分（每单期望分钟、一轮做成率），按它在模型之间挪了位置也写在这里；
+ * poor-one-round：一轮做成率明显差，不进这个用途（别的都派不了、也不是只差空位时兜底）。
+ */
+export type Nudge = 'fast-reset' | 'poor-record' | 'quota-unknown' | 'track-score' | 'poor-one-round';
 
 /** 每条路由的判定，按它写「这次为什么派 / 不派它」。 */
 export interface RouteVerdict {

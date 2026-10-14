@@ -3,10 +3,13 @@
 //   ① 快清零还没用完的往前提（清零早的在前）；② 战绩明显差的往后放，样本少不动；
 //   ③ 额度未知的排在读到了的后面。
 // （原先还有一条「备池排在主池后面」：两个会话用户同时跑时拼车号是备池，法国只留一个会话用户后作废，#59 删掉。）
+// 模型之间默认严格按用途里排的先后（#1089）。例外是动手（policy.trackScore.stages，PLAN 3f，决定 0093）：拿到了各模型的动手战绩时，
+// 打了分的模型按每单期望成本在它们自己占的位置之间重排（要明显更省才挪到人排的前面），一轮做成率明显差的挪到最后、由 choose.ts
+// 挡在动手外面（别的都派不了时兜底）；样本不够的模型留在人排的位置。有钉住的行时整段不动。
 
 import { duration, percent, remaining, windowName } from './names.ts';
 import type { RoutingPolicy } from './policy.ts';
-import type { Nudge, RouteFacts, RouteWindow, StageRouteEntry } from './types.ts';
+import type { ModelTrackFacts, Nudge, RouteFacts, RouteWindow, StageRouteEntry } from './types.ts';
 
 export interface FastResetHit {
   window: RouteWindow;
@@ -47,6 +50,74 @@ export function poorRecord(route: RouteFacts, policy: RoutingPolicy): boolean {
   return r !== null && r.samples >= policy.minSamples && r.successes / r.samples < policy.poorSuccessRate;
 }
 
+/** 一个模型按动手战绩打的分。 */
+export interface ModelScore {
+  track: ModelTrackFacts;
+  /** 样本够（tasks 不少于 minTasks）才算打了分。 */
+  scored: boolean;
+  /** 一轮做成率（oneRound / tasks）。 */
+  oneRoundRate: number;
+  /** 每做成一单期望花的分钟：段数 / 做成单数 ×（每段分钟 + 每轮额外分钟）；一单没做成为 Infinity。 */
+  expectedMinutes: number;
+  /** 打了分、一轮做成率低于线：不进这个用途（choose.ts 兜底时除外）。 */
+  poor: boolean;
+}
+
+export function scoreOf(track: ModelTrackFacts, policy: RoutingPolicy): ModelScore {
+  const ts = policy.trackScore;
+  const scored = track.tasks >= ts.minTasks && track.segments > 0;
+  const oneRoundRate = track.tasks > 0 ? track.oneRound / track.tasks : 0;
+  const perSegment = track.segments > 0 ? track.segmentMinutes / track.segments : 0;
+  const expectedMinutes =
+    track.done > 0
+      ? (track.segments / track.done) * (perSegment + ts.roundOverheadMinutes)
+      : Number.POSITIVE_INFINITY;
+  return { track, scored, oneRoundRate, expectedMinutes, poor: scored && oneRoundRate < ts.poorOneRoundRate };
+}
+
+/** 「近 7 天 16 单成 13、一轮成 1（6%）、均 2.4 段，每单约 95 分钟」。 */
+export function trackText(s: ModelScore): string {
+  const t = s.track;
+  const avg = t.tasks > 0 ? (t.segments / t.tasks).toFixed(1) : '0';
+  const cost = Number.isFinite(s.expectedMinutes)
+    ? `每单约 ${Math.round(s.expectedMinutes)} 分钟`
+    : '一单没做成';
+  return `近 7 天 ${t.tasks} 单成 ${t.done}、一轮成 ${t.oneRound}（${Math.round(s.oneRoundRate * 100)}%）、均 ${avg} 段，${cost}`;
+}
+
+/**
+ * 模型之间的先后（只在动手、读到了战绩时）：输入是人排的模型先后。
+ * 打了分、不差的模型按期望成本在它们自己占的位置之间重排——比人排在前面的那个明显省（低 promoteMargin 以上）才挪到它前面；
+ * 样本不够的留在原位；一轮做成率差的拿出来放到最后（按人排的先后）。
+ */
+export function modelOrder(
+  models: readonly string[],
+  scores: ReadonlyMap<string, ModelScore>,
+  policy: RoutingPolicy,
+): string[] {
+  const margin = policy.trackScore.promoteMargin;
+  const good = (m: string) => scores.get(m)?.scored === true && scores.get(m)?.poor !== true;
+  const poor = models.filter((m) => scores.get(m)?.poor === true);
+  const rest = models.filter((m) => !poor.includes(m));
+  const slots = rest.flatMap((m, i) => (good(m) ? [i] : []));
+  const sorted: string[] = [];
+  for (const m of rest.filter(good)) {
+    const cost = scores.get(m)?.expectedMinutes ?? Number.POSITIVE_INFINITY;
+    let at = sorted.length;
+    while (at > 0) {
+      const prev = scores.get(sorted[at - 1] as string)?.expectedMinutes ?? Number.POSITIVE_INFINITY;
+      if (cost < prev * (1 - margin)) at -= 1;
+      else break;
+    }
+    sorted.splice(at, 0, m);
+  }
+  const out = [...rest];
+  slots.forEach((slot, i) => {
+    out[slot] = sorted[i] as string;
+  });
+  return [...out, ...poor];
+}
+
 export interface Ranked {
   route: RouteFacts;
   entry: StageRouteEntry;
@@ -63,6 +134,9 @@ export function rank(
   stagePinned: boolean,
   policy: RoutingPolicy,
   now: number,
+  /** 动手按战绩排时给（choose.ts 只在用途在 trackScore.stages 里、拿到了战绩时给）；不给 = 模型之间照人排的。 */
+  scores?: ReadonlyMap<string, ModelScore>,
+  stageName = '这个用途',
 ): Ranked[] {
   const items: Ranked[] = rows.map(({ route, entry }, humanIndex) => {
     const pinned = stagePinned || entry.pinned;
@@ -105,6 +179,33 @@ export function rank(
     }
     return 0;
   };
+  // 动手按战绩排模型（有钉住的行就整段不动：钉住就是人要它在那个位置）
+  const byScore = scores && scores.size > 0 && !items.some((it) => it.pinned) ? scores : null;
+  const humanModels = [...new Set(items.map((it) => it.route.modelId))];
+  const models = byScore ? modelOrder(humanModels, byScore, policy) : humanModels;
+  if (byScore) {
+    for (const it of items) {
+      const s = byScore.get(it.route.modelId);
+      if (!s) continue;
+      if (s.poor) {
+        it.nudges.push({
+          kind: 'poor-one-round',
+          text: `动手战绩：${trackText(s)}；一轮做成率低于 ${Math.round(policy.trackScore.poorOneRoundRate * 100)}%，不进${stageName}（别的模型都派不了、又不只是在等空位时才兜底）`,
+        });
+        continue;
+      }
+      const from = humanModels.indexOf(it.route.modelId);
+      const to = models.indexOf(it.route.modelId);
+      const moved = to !== from ? `，按战绩排第 ${to + 1} 个模型（人排第 ${from + 1} 个）` : '';
+      it.nudges.push({
+        kind: 'track-score',
+        text: s.scored
+          ? `动手战绩：${trackText(s)}${moved}`
+          : `动手战绩样本不够（${s.track.tasks} 单，少于 ${policy.trackScore.minTasks}），按人排的位置${moved}`,
+      });
+    }
+  }
+
   // 微调只在同一个模型的几个渠道之间排：模型之间严格按用途里排的先后，后面模型的渠道不能插到前面模型前面。
   // 钉住的留在原位，每个模型里没钉住的按微调后的先后填回这个模型自己剩下的位置。
   const movableByModel = new Map<string, Ranked[]>();
@@ -115,5 +216,6 @@ export function rank(
     movableByModel.set(it.route.modelId, list);
   }
   for (const list of movableByModel.values()) list.sort(cmp);
+  if (byScore) return models.flatMap((m) => movableByModel.get(m) ?? []);
   return items.map((it) => (it.pinned ? it : (movableByModel.get(it.route.modelId)?.shift() as Ranked)));
 }

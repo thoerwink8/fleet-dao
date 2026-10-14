@@ -82,6 +82,39 @@ export interface RoutingPolicy {
    * 攒够会话用量后换成「该阶段在该池上的 p80 用量」。
    */
   needPerTask: Partial<Record<QuotaWindowKind, number>>;
+  /** 动手按模型战绩排（PLAN 3f，决定 0093），见 TrackScorePolicy。 */
+  trackScore: TrackScorePolicy;
+}
+
+/**
+ * 动手按模型的真实战绩排（PLAN 3f，决定 0093）。战绩由引擎从库里现算（db 的 modelExecuteTracks，近 7 天、按第一段动手的模型记）；
+ * 读不到就整段不做，退回人排的先后（选路理由里写明）。
+ */
+export interface TrackScorePolicy {
+  /**
+   * 哪些用途按它排。只放动手的两个用途：战绩是从动手段（runs.segment = manual）算的，拿去排冷验收、分诊等别的用途不对口；
+   * 一轮做成率差的模型照样能做那些（订阅不闲置）。
+   */
+  stages: StageKind[];
+  /** 样本（到了终态的单）少于这个数的模型不打分、不挡，留在人排的位置上。5：PLAN 3f 推演里定的线。 */
+  minTasks: number;
+  /**
+   * 一轮做成率低于这个数的模型不进这些用途（别的模型都派不了、也不是只差空位时才兜底）。0.15 的理由：法国库 10-14 查的近 7 天，
+   * 全部动手单一轮成约 24%（近 4 天 42 单成 10 单）、grok-4.7 约 51%、cursor-auto 约 17%、deepseek-flash 约 6%（16 单成 1 单）；
+   * 线划在全体平均的六成左右，只拦一轮几乎做不成的，不误伤偏弱但还在干活的。
+   */
+  poorOneRoundRate: number;
+  /**
+   * 每多一轮动手，除了会话本身还要再走一遍冷验收、CI、排队的分钟数，算进每单期望成本。15：main 上 CI 中位 9.3 分钟，
+   * 冷验收一段几分钟（_tmp/rethink/COMMON.md 已知事实）；不算它，段短轮多的模型（cursor-auto 一段 7 分钟、平均近 3 段）会被
+   * 当成比一轮就成的更省。
+   */
+  roundOverheadMinutes: number;
+  /**
+   * 打了分的模型要比人排在它前面的模型的期望成本至少低这么多比例，才挪到它前面。0.3：样本只有几单时成本抖得厉害，
+   * 差得不多就照人排的，免得一两单的运气把顺序翻来翻去（也免得把创始人排在后面的订阅大量拉进动手）。
+   */
+  promoteMargin: number;
 }
 
 export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<RoutingPolicy>({
@@ -104,6 +137,13 @@ export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<Rou
     period_usd: 0.02,
     points: 0.05,
     other: 0.05,
+  },
+  trackScore: {
+    stages: ['execute', 'ui'],
+    minTasks: 5,
+    poorOneRoundRate: 0.15,
+    roundOverheadMinutes: 15,
+    promoteMargin: 0.3,
   },
 });
 
@@ -138,5 +178,20 @@ export function resolveRoutingPolicy(partial?: Partial<RoutingPolicy>): RoutingP
   for (const [kind, need] of Object.entries(p.needPerTask)) {
     if (need !== undefined) ratio(`needPerTask.${kind}`, need);
   }
+  const ts = p.trackScore;
+  if (typeof ts !== 'object' || ts === null) throw bad('trackScore', '一组设置', ts);
+  if (!Array.isArray(ts.stages) || ts.stages.some((s) => !Object.hasOwn(STAGE_NEEDS, s))) {
+    throw bad('trackScore.stages', '用途名的数组', ts.stages);
+  }
+  if (!Number.isInteger(ts.minTasks) || ts.minTasks < 1)
+    throw bad('trackScore.minTasks', '不小于 1 的整数', ts.minTasks);
+  ratio('trackScore.poorOneRoundRate', ts.poorOneRoundRate);
+  if (
+    typeof ts.roundOverheadMinutes !== 'number' ||
+    !Number.isFinite(ts.roundOverheadMinutes) ||
+    ts.roundOverheadMinutes < 0
+  )
+    throw bad('trackScore.roundOverheadMinutes', '不小于 0 的分钟数', ts.roundOverheadMinutes);
+  ratio('trackScore.promoteMargin', ts.promoteMargin);
   return p;
 }

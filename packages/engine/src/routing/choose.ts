@@ -2,12 +2,14 @@
 // 纯函数、确定性：同样输入同样输出；不取时钟、不随机——现在几点、试探用的随机数都由调用方给，引擎记进历史。
 // 模型之间严格按用途顺序：往后挑只因额度用完（含留量线）、人关了或钉住别的、报错（探测不通、熔断）；
 // 不因为作者族、不因为本单之前用过哪一家而改顺序（冷验收验不了由冷验收自己兜，见 verifier-invoke.ts 的两家都验）。
+// 唯一的例外是动手按模型战绩排（rank.ts 的 modelOrder，PLAN 3f，决定 0093）：一轮做成率明显差的模型不进动手，
+// 但别的模型都派不了、又不只是在等空位时照样派它——打分绝不能把唯一能用的排没。
 
 import { blocksFor, type FilterContext, familyKey } from './filter.ts';
 import { type BlockGroup, groupOf } from './group.ts';
 import { routeLabel, STAGE_NAMES, stamp } from './names.ts';
 import { resolveRoutingPolicy } from './policy.ts';
-import { type Ranked, rank } from './rank.ts';
+import { type ModelScore, type Ranked, rank, scoreOf } from './rank.ts';
 import type {
   AllOpenCheck,
   Block,
@@ -56,11 +58,39 @@ function judgeStage(input: ChooseRouteInput, ctx: FilterContext): Judged[] {
   const rows = [...input.order]
     .sort((a, b) => a.position - b.position)
     .map((entry) => ({ route: factsOf.get(entry.routeId) as RouteFacts, entry }));
-  const ranked = rank(rows, input.stagePinned, ctx.policy, ctx.now);
+  const ranked = rank(
+    rows,
+    input.stagePinned,
+    ctx.policy,
+    ctx.now,
+    scoresOf(input, ctx),
+    STAGE_NAMES[input.stage],
+  );
   return ranked.map((item) => {
     const blocks = blocksFor(item.route, item.entry, ctx);
     return { item, blocks, group: groupOf(blocks) };
   });
+}
+
+/** 这个用途按动手战绩排、又拿到了战绩：每个模型的分。否则为空（模型之间照人排的）。 */
+function scoresOf(input: ChooseRouteInput, ctx: FilterContext): Map<string, ModelScore> | undefined {
+  if (!input.modelTracks || !ctx.policy.trackScore.stages.includes(input.stage)) return undefined;
+  return new Map(input.modelTracks.map((t) => [t.modelId, scoreOf(t, ctx.policy)]));
+}
+
+const isPoor = (j: Judged) => j.item.nudges.some((n) => n.kind === 'poor-one-round');
+
+/**
+ * 一轮做成率差的不进动手：别的模型有能派的、或只差空位（随时会好）时，把它从能派的里拿掉；
+ * 别的都硬挡、或在等额度清零、切号这类等不来的，就还派它——唯一能用的不能被打分排没。
+ */
+function gatePoor(judged: Judged[], ready: Judged[]): Judged[] {
+  if (!ready.some(isPoor)) return ready;
+  const others = judged.filter((j) => !isPoor(j));
+  const othersAlive = others.some(
+    (j) => j.group.kind === 'ready' || (j.group.kind === 'wait' && j.group.waitFor === 'slot'),
+  );
+  return othersAlive ? ready.filter((j) => !isPoor(j)) : ready;
 }
 
 export function chooseRoute(input: ChooseRouteInput): ChooseRouteResult {
@@ -93,7 +123,10 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
   const judged = judgeStage(input, ctx);
   const verdicts = judged.map((j, i) => verdictOf(j, i));
 
-  const ready = judged.filter((j) => j.group.kind === 'ready');
+  const ready = gatePoor(
+    judged,
+    judged.filter((j) => j.group.kind === 'ready'),
+  );
   const first = ready[0];
   if (first) {
     const explore = pickTrial(input, ready, policy);
@@ -171,6 +204,9 @@ function whyFirst(stageName: string, chosen: Judged, judged: Judged[]): string {
   }
   const note = quotaNote(item.route);
   if (note) parts.push(note);
+  const track = item.nudges.find((n) => n.kind === 'track-score' || n.kind === 'poor-one-round');
+  if (track)
+    parts.push(track.kind === 'poor-one-round' ? `${track.text}；别的都派不了，这次兜底派它` : track.text);
   // 人排在它前面、这次没派的：各自为什么（被挡，或被微调挪到了后面）。
   const passed = judged.filter((j) => j !== chosen && j.item.humanIndex < item.humanIndex);
   const notes = passed.map((j) => {
@@ -261,11 +297,12 @@ function allOpenTrial(judged: Judged[]): Judged | null {
 
 function waitOrNone(stageName: string, judged: Judged[], verdicts: RouteVerdict[]): ChooseRouteResult {
   const waiting = judged.filter((j) => j.group.kind === 'wait');
+  const cause = (j: Judged) =>
+    j.blocks.map((b) => b.text).join('、') ||
+    j.item.nudges.find((n) => n.kind === 'poor-one-round')?.text ||
+    '没有被挡';
   const summary = judged
-    .map(
-      (j) =>
-        `第 ${j.item.humanIndex + 1} 条 ${routeLabel(j.item.route)}：${j.blocks.map((b) => b.text).join('、')}`,
-    )
+    .map((j) => `第 ${j.item.humanIndex + 1} 条 ${routeLabel(j.item.route)}：${cause(j)}`)
     .join('；');
   if (waiting.length === 0) {
     return { kind: 'none', reason: `${stageName}阶段没有能派的路由（${summary}）`, verdicts };
