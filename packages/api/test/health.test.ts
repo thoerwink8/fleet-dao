@@ -4,7 +4,12 @@ import { silentLogger, sqlState, withStatementTimeout } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { probeDb } from '../src/db-probe.ts';
 import { EXTERNAL_WATCH_NOT_WIRED } from '../src/external-watch.ts';
-import { PublicHealthError, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
+import {
+  PublicHealthError,
+  PublicHealthWarning,
+  runHealthChecks,
+  serviceHealthChecks,
+} from '../src/health.ts';
 import type { Logger } from '../src/ports.ts';
 import { ENGINE_OFF, notConnectedTemporal } from '../src/temporal.ts';
 import { WATCHDOG_NOT_HERE } from '../src/watchdog-health.ts';
@@ -248,5 +253,56 @@ describe('查库限时', () => {
     await expect(probeDb(failing('08006'), 2_000)).rejects.toThrow('Failed query');
     expect(sqlState(new Error('x', { cause: { code: '57014' } }))).toBe('57014');
     expect(sqlState(new Error('没有错误码'))).toBeUndefined();
+  });
+
+  it('警告（PublicHealthWarning）不拖垮整体：那一项报 ok:true + status:warning，整体 ok；真故障照旧让整体不 ok', async () => {
+    const warn = await runHealthChecks(
+      [
+        { name: 'database', check: async () => {} },
+        {
+          name: 'github_app',
+          check: async () => {
+            throw new PublicHealthWarning(
+              'github_app_not_installed',
+              '有仓还没装好 GitHub 机器人',
+              '仓名只进日志',
+            );
+          },
+        },
+      ],
+      silentLogger,
+    );
+    expect(warn).toEqual({
+      ok: true,
+      checks: {
+        database: { ok: true },
+        github_app: {
+          ok: true,
+          status: 'warning',
+          code: 'github_app_not_installed',
+          message: '有仓还没装好 GitHub 机器人',
+        },
+      },
+    });
+    const bad = await runHealthChecks(
+      [
+        {
+          name: 'github_app',
+          check: async () => {
+            throw new PublicHealthWarning('w', '只是警告');
+          },
+        },
+        {
+          name: 'database',
+          check: async () => {
+            throw new PublicHealthError('db_down', '数据库连不上');
+          },
+        },
+      ],
+      silentLogger,
+    );
+    expect(bad.ok).toBe(false);
+    expect(bad.checks.github_app).toMatchObject({ ok: true, status: 'warning' });
+    expect(bad.checks.database).toMatchObject({ ok: false, code: 'db_down' });
   });
 });

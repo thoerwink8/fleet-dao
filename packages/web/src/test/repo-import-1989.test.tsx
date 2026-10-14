@@ -39,6 +39,29 @@ describe('设置页导入仓库（#1989）', () => {
     expect(within(row).queryByRole('button', { name: /^加进驾驶舱/ })).toBeNull();
   });
 
+  test('已在驾驶舱但机器人没装全：标「未接入」，明说先去 GitHub 装，给缺的 App 和设置页直达链接；装全的仓没有这条', async () => {
+    renderApp(<SettingsPage />, { api: createMockApi({ live: false }), route: '/settings' });
+    await screen.findByText('adfx-studio/daihuo-workbench');
+    const row = screen.getByText('adfx-studio/daihuo-workbench').closest('li') as HTMLElement;
+    expect(within(row).getByText('未接入')).toBeTruthy();
+    // 横幅在行后面（同一个列表容器里），按文字找
+    const notice = screen
+      .getByText('先去 GitHub 把两个机器人装到这个仓')
+      .closest('[role="status"]') as HTMLElement;
+    expect(within(notice).getByText('先去 GitHub 把两个机器人装到这个仓')).toBeTruthy();
+    // 这个仓只缺「引擎」：只给引擎的安装页，不给已装的「干活的」
+    const hrefs = within(notice)
+      .getAllByRole('link')
+      .map((a) => a.getAttribute('href'));
+    expect(hrefs).toEqual([
+      'https://github.com/apps/fleet-dao-engine/installations/new',
+      'https://github.com/organizations/adfx-studio/settings/installations',
+    ]);
+    // 没导入的仓不画「未接入」
+    const notes = screen.getByText('thoerwink8/notes').closest('li') as HTMLElement;
+    expect(within(notes).queryByText('未接入')).toBeNull();
+  });
+
   test('组织仓本人没 admin：写明要组织先批准，不给「装 App」按钮', async () => {
     renderApp(<SettingsPage />, { api: createMockApi({ live: false }), route: '/settings' });
     await screen.findByText('some-org/shared-lib');

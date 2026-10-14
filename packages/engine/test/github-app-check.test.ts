@@ -1,6 +1,6 @@
 // 每小时对账的第三项：GitHub 两个机器人的权限自检（jobs/github-app-check.ts）。缺权限、多了不该有的、没查成、列不了仓、
 // 自检整个没跑成，各故意造一次：都报出来（提醒或这一轮没查全），不许当成权限够；权限好了下一轮自己撤。
-import { type AlertRow, GITHUB_APP_ALERT_PREFIX } from '@fleet-dao/db';
+import { type AlertRow, GITHUB_APP_ALERT_PREFIX, GITHUB_APP_MISSING_ALERT_PREFIX } from '@fleet-dao/db';
 import type { RepoRef, SelfCheckItem } from '@fleet-dao/github';
 import { describe, expect, it } from 'vitest';
 import {
@@ -8,6 +8,7 @@ import {
   type GitHubAppCheckDeps,
   githubAppAlert,
   githubAppAlertKey,
+  githubAppMissingAlertKey,
 } from '../src/jobs/github-app-check.ts';
 import { RECONCILE_ACTOR } from '../src/jobs/reconcile-common.ts';
 
@@ -38,7 +39,7 @@ const openAlert = (dedupeKey: string): AlertRow => ({
 
 interface World {
   deps: GitHubAppCheckDeps;
-  raised: { dedupeKey: string; level: string; title: string; body: string }[];
+  raised: { dedupeKey: string; level: string; title: string; body: string; link?: string | undefined }[];
   resolved: { dedupeKey: string; by: string; why: string }[];
   asked: RepoRef[][];
 }
@@ -63,7 +64,13 @@ function world(
     alerts: {
       byKey: async (key) => (open.has(key) ? openAlert(key) : null),
       async raise(input) {
-        raised.push({ dedupeKey: input.dedupeKey, level: input.level, title: input.title, body: input.body });
+        raised.push({
+          dedupeKey: input.dedupeKey,
+          level: input.level,
+          title: input.title,
+          body: input.body,
+          link: input.link,
+        });
       },
       async resolve(input) {
         resolved.push({ dedupeKey: input.dedupeKey, by: input.by, why: input.why });
@@ -189,5 +196,86 @@ describe('GitHub 机器人权限自检（每小时对账的一项）', () => {
     ).toBe(
       '「引擎」机器人在 acme/widgets 上的权限不对：缺 statuses:write、checks:read；多了不该有的 issues:write',
     );
+  });
+
+  describe('机器人没装到某个仓（刚导入新仓）：降成要你拍的，不当权限故障', () => {
+    const notInstalled = (role: SelfCheckItem['role']) =>
+      item({ role, ok: false, notInstalled: true, why: `没装到 acme/widgets（${role}）` });
+
+    it('两个都没装：每个仓只报一条要你拍的，正文有两个 App 的安装页和 GitHub 设置页直达链接', async () => {
+      const w = world([notInstalled('agent'), notInstalled('engine')]);
+      const part = await checkGitHubApps(w.deps);
+      // 已经按要人拍的报出来了，不再记「没查全」
+      expect(part).toEqual({ scanned: 2, found: 1, unchecked: [] });
+      expect(w.raised).toHaveLength(1);
+      expect(w.raised[0]).toMatchObject({
+        dedupeKey: 'github-app-missing:acme/widgets',
+        level: 'decision',
+        link: '/settings',
+      });
+      expect(w.raised[0]?.title).toContain('先去 GitHub 把两个机器人装到这个仓');
+      const body = w.raised[0]?.body ?? '';
+      expect(body).toContain('https://github.com/apps/fleet-dao-agent/installations/new');
+      expect(body).toContain('https://github.com/apps/fleet-dao-engine/installations/new');
+      expect(body).toContain('https://github.com/settings/installations');
+      expect(githubAppMissingAlertKey('acme/widgets')).toBe(`${GITHUB_APP_MISSING_ALERT_PREFIX}acme/widgets`);
+      // 不与权限故障共用前缀（健康页按前缀分级）
+      expect(githubAppMissingAlertKey('acme/widgets').startsWith(GITHUB_APP_ALERT_PREFIX)).toBe(false);
+    });
+
+    it('只缺一个：正文只写缺的那个的安装页', async () => {
+      const w = world([item({ role: 'agent' }), notInstalled('engine')]);
+      await checkGitHubApps(w.deps);
+      const body = w.raised[0]?.body ?? '';
+      expect(body).toContain('fleet-dao-engine/installations/new');
+      expect(body).not.toContain('fleet-dao-agent/installations/new');
+    });
+
+    it('以前当权限故障报过的老提醒：撤掉，不然健康页还红', async () => {
+      const w = world([notInstalled('agent'), notInstalled('engine')], {
+        open: ['github-app:agent:acme/widgets'],
+      });
+      await checkGitHubApps(w.deps);
+      expect(w.resolved.map((r) => r.dedupeKey)).toEqual(['github-app:agent:acme/widgets']);
+    });
+
+    it('【不降级】一个没装、另一个权限缺：权限那条照旧是 alert 级', async () => {
+      const w = world([
+        item({ role: 'agent', ok: false, missing: ['statuses:write'] }),
+        notInstalled('engine'),
+      ]);
+      await checkGitHubApps(w.deps);
+      const keys = w.raised.map((r) => `${r.level} ${r.dedupeKey}`);
+      expect(keys).toContain('alert github-app:agent:acme/widgets');
+      expect(keys).toContain('decision github-app-missing:acme/widgets');
+    });
+
+    it('【不降级】没查成但不是「没装」（凭据读不到、GitHub 回的认不出）：仍是权限故障 alert，记没查全', async () => {
+      const w = world([
+        item({ role: 'agent' }),
+        item({ ok: false, why: '「引擎」机器人没查成：凭据读不到' }),
+      ]);
+      const part = await checkGitHubApps(w.deps);
+      expect(part.unchecked).toHaveLength(1);
+      expect(w.raised.map((r) => `${r.level} ${r.dedupeKey}`)).toEqual([
+        'alert github-app:engine:acme/widgets',
+      ]);
+    });
+
+    it('装好了：开着的 github-app-missing 自己撤；没开着的不去撤', async () => {
+      const w = world([item({ role: 'agent' }), item()], { open: ['github-app-missing:acme/widgets'] });
+      const part = await checkGitHubApps(w.deps);
+      expect(part).toEqual({ scanned: 2, found: 1, unchecked: [] });
+      expect(w.resolved).toEqual([
+        {
+          dedupeKey: 'github-app-missing:acme/widgets',
+          by: RECONCILE_ACTOR,
+          why: 'acme/widgets 的两个机器人都装上了（每小时对账自检读回）',
+        },
+      ]);
+      const quiet = world([item({ role: 'agent' }), item()]);
+      await checkGitHubApps(quiet.deps);
+      expect(quiet.resolved).toEqual([]);
+    });
   });
 });

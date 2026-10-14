@@ -7,6 +7,7 @@
 // 为什么组织仓和个人仓分开写：GitHub 的规矩——个人仓本人点一下就能装；组织仓要「组织已批准这个 App」，
 // 本人点了也只是「请求」。页面上把这条明写出来，不给一个点了没反应的按钮。
 
+import { APPS_NOT_INSTALLED_HINT, githubInstallLinks } from '@fleet-dao/shared';
 import { ExternalLink, FolderGit2, Plus, RefreshCw, Settings2, Unplug } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -252,6 +253,13 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
               />
             </span>
             {repo.inCockpit ? <StatusBadge tone="done" label="已在驾驶舱" /> : null}
+            {/* 已导入但机器人没装全：标「未接入」，下面一条横幅说清去哪装 */}
+            {repo.inCockpit && !repo.fullyInstalled ? (
+              // 窄屏行里放不下：只留给读屏，下面的横幅照样看得见
+              <span className="shrink-0 max-md:sr-only">
+                <StatusBadge tone="stall" label="未接入" />
+              </span>
+            ) : null}
 
             {/* 动作：没装全给「一键授权」（整页跳 GitHub），没在驾驶舱给「加进驾驶舱」，在驾驶舱给「移出」。 */}
             <div className="flex shrink-0 items-center gap-1.5">
@@ -286,10 +294,21 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
                     importRepo.mutate(
                       { githubId: repo.githubId },
                       {
-                        onSuccess: (r) =>
-                          r.created
-                            ? toast.success(`已把 ${repo.fullName} 接进驾驶舱（「让 AI 接活」默认关着）`)
-                            : toast.info(`${repo.fullName} 本来就在驾驶舱里`),
+                        onSuccess: (r) => {
+                          if (r.appsInstalled === true) {
+                            if (r.created) {
+                              toast.success(`已把 ${repo.fullName} 接进驾驶舱（「让 AI 接活」默认关着）`);
+                            } else toast.info(`${repo.fullName} 本来就在驾驶舱里`);
+                          } else {
+                            // 仍然导入了，但机器人没装（或没核成）：明说，别报喜
+                            toast.warning(
+                              r.appsInstalled === false
+                                ? `${repo.fullName} 已接进驾驶舱，但未接入：${APPS_NOT_INSTALLED_HINT}`
+                                : `${repo.fullName} 已接进驾驶舱，但没能核对机器人装没装`,
+                              { description: r.installCheckWhy ?? '链接在这一行下面。' },
+                            );
+                          }
+                        },
                         onError: (e) => toast.error('没能接进驾驶舱', { description: errorText(e) }),
                       },
                     )
@@ -303,6 +322,8 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
           </>
         }
       />
+
+      {repo.inCockpit && !repo.fullyInstalled ? <NotInstalledNotice repo={repo} /> : null}
 
       <AlertDialog open={askingRemove} onOpenChange={setAskingRemove}>
         <AlertDialogContent>
@@ -340,6 +361,43 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
         </AlertDialogContent>
       </AlertDialog>
     </>
+  );
+}
+
+/** 已导入但机器人没装全：明说先去 GitHub 装，给直达链接（装好后重新读取，或等每小时对账自己撤「要你拍的」）。 */
+function NotInstalledNotice({ repo }: { repo: ImportableRepo }) {
+  const missing = [
+    ...(repo.agentInstalled ? [] : (['agent'] as const)),
+    ...(repo.engineInstalled ? [] : (['engine'] as const)),
+  ];
+  const links = githubInstallLinks({ owner: repo.owner, ownerType: repo.ownerType, missing });
+  const who =
+    missing.length === 2
+      ? '「干活的」「引擎」两个机器人'
+      : missing[0] === 'agent'
+        ? '「干活的」机器人'
+        : '「引擎」机器人';
+  return (
+    <Notice tone="stall" role="status" title={APPS_NOT_INSTALLED_HINT} className="mt-1">
+      <p>
+        {repo.fullName} 已在驾驶舱，但{who}还没装到这个仓，AI 派不了活、合不了并。装好后点「重新读取」。
+      </p>
+      {/* 链接单独成一行一行排：窄屏上不和标题抢宽度 */}
+      <ul className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+        {links.map((l) => (
+          <li key={l.url}>
+            <a
+              className="inline-flex items-center gap-0.5 text-meta font-medium underline underline-offset-2"
+              href={l.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {l.label} <ExternalLink className="size-3" aria-hidden />
+            </a>
+          </li>
+        ))}
+      </ul>
+    </Notice>
   );
 }
 

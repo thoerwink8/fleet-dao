@@ -2,10 +2,14 @@
 // 设置里加了 statuses:write、安装处没点接受，#299 的「认领对得上」就贴不上）没有任何地方报出来。这里每轮对每个受管的仓
 // 查一次两个机器人实际拿到的权限，缺的、不该有的、没查成的各报一条「要人看」提醒（键 github-app:<机器人>:<仓>），好了下一轮
 // 自己撤；后端健康页的 github_app 项看这些提醒开没开着（同一个前缀 GITHUB_APP_ALERT_PREFIX）。
-// 改这里之前必须知道：没查成（没装到这个仓、凭据读不到、GitHub 回的认不出）也报提醒、这一轮记没查全，不当成权限够。
+// 改这里之前必须知道：没查成（凭据读不到、GitHub 回的认不出）也报提醒、这一轮记没查全，不当成权限够。
+// 唯一的例外是「机器人没装到这个仓」（SelfCheckItem.notInstalled，多半是刚导入新仓还没去 GitHub 装）：那是要人去点一下的配置问题，
+// 不是权限故障，改成每个仓一条「要你拍的」（github-app-missing:<仓>，带 GitHub 直达链接），后端健康页只报警告、不 503；
+// 装好了下一轮自己撤。别把别的没查成也塞进这一类。
 
-import { GITHUB_APP_ALERT_PREFIX } from '@fleet-dao/db';
+import { GITHUB_APP_ALERT_PREFIX, GITHUB_APP_MISSING_ALERT_PREFIX } from '@fleet-dao/db';
 import type { RepoRef, SelfCheckItem } from '@fleet-dao/github';
+import { APPS_NOT_INSTALLED_HINT, githubInstallLinks } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { type AlertStore, RECONCILE_ACTOR, type SweepPart } from './reconcile-common.ts';
 
@@ -26,6 +30,27 @@ const ROLE_NAMES: Record<SelfCheckItem['role'], string> = {
 
 export const githubAppAlertKey = (item: Pick<SelfCheckItem, 'role' | 'repo'>) =>
   `${GITHUB_APP_ALERT_PREFIX}${item.role}:${item.repo}`;
+
+export const githubAppMissingAlertKey = (repo: string) => `${GITHUB_APP_MISSING_ALERT_PREFIX}${repo}`;
+
+/** 「没装到这个仓」那条要你拍的：说明白先去 GitHub 装、直达链接写进正文，点开去设置页（那里也有链接）。 */
+export function githubAppMissingAlert(
+  repo: string,
+  roles: readonly SelfCheckItem['role'][],
+): { title: string; body: string; link: string } {
+  const names = roles.map((r) => ROLE_NAMES[r]).join('、');
+  const links = githubInstallLinks({ owner: repo.split('/')[0] ?? repo, missing: roles });
+  return {
+    title: `${repo}：${APPS_NOT_INSTALLED_HINT}（还没装：${names}）`,
+    body: [
+      `${repo} 已经导入驾驶舱，但 ${names}还没装到这个仓，要它们做的事（合并、改单、贴状态……）做不成。`,
+      `${APPS_NOT_INSTALLED_HINT}：点下面的链接，选 Only select repositories、只勾这个仓。`,
+      ...links.map((l) => `${l.label}：${l.url}`),
+      '装好后下一轮每小时对账自己撤。',
+    ].join('\n'),
+    link: '/settings',
+  };
+}
 
 /** 一条提醒的标题和正文：缺什么、多了什么、没查成的原因；怎么改。 */
 export function githubAppAlert(item: SelfCheckItem): { title: string; body: string } {
@@ -68,9 +93,28 @@ export async function checkGitHubApps(deps: GitHubAppCheckDeps): Promise<SweepPa
   }
   const unchecked: string[] = [];
   let found = 0;
+  // 没装到的单独成一类（每个仓一条），其余照旧
+  const missingByRepo = new Map<string, SelfCheckItem['role'][]>();
+  for (const item of items) {
+    if (item.notInstalled && !item.ok) {
+      missingByRepo.set(item.repo, [...(missingByRepo.get(item.repo) ?? []), item.role]);
+    }
+  }
   for (const item of items) {
     const key = githubAppAlertKey(item);
     try {
+      if (item.notInstalled && !item.ok) {
+        // 以前把它当权限故障报过的老提醒撤掉，不然健康页还红
+        const old = await deps.alerts.byKey(key);
+        if (old && old.resolvedAt === null) {
+          await deps.alerts.resolve({
+            dedupeKey: key,
+            by: RECONCILE_ACTOR,
+            why: `${item.repo} 没装机器人改成每个仓一条「要你拍的」报（${githubAppMissingAlertKey(item.repo)}）`,
+          });
+        }
+        continue;
+      }
       if (item.ok && item.extra.length === 0) {
         const open = await deps.alerts.byKey(key);
         if (open && open.resolvedAt === null) {
@@ -87,6 +131,34 @@ export async function checkGitHubApps(deps: GitHubAppCheckDeps): Promise<SweepPa
       if (item.why) unchecked.push(`${item.repo}：${item.why}`);
       await deps.alerts.raise({ dedupeKey: key, level: 'alert', taskId: null, ...githubAppAlert(item) });
       found += 1;
+    } catch (err) {
+      unchecked.push(`${key} 的提醒没写成：${errMessage(err)}`);
+    }
+  }
+  const repoNames = new Set(items.map((i) => i.repo));
+  for (const repo of repoNames) {
+    const key = githubAppMissingAlertKey(repo);
+    const roles = missingByRepo.get(repo);
+    try {
+      if (roles) {
+        await deps.alerts.raise({
+          dedupeKey: key,
+          level: 'decision',
+          taskId: null,
+          ...githubAppMissingAlert(repo, roles),
+        });
+        found += 1;
+        continue;
+      }
+      const open = await deps.alerts.byKey(key);
+      if (open && open.resolvedAt === null) {
+        await deps.alerts.resolve({
+          dedupeKey: key,
+          by: RECONCILE_ACTOR,
+          why: `${repo} 的两个机器人都装上了（每小时对账自检读回）`,
+        });
+        found += 1;
+      }
     } catch (err) {
       unchecked.push(`${key} 的提醒没写成：${errMessage(err)}`);
     }

@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url';
 import {
   type Db,
   GITHUB_APP_ALERT_PREFIX,
+  GITHUB_APP_MISSING_ALERT_PREFIX,
   type PgListen,
+  resolveAlertByKey,
   SESSION_ORG_ALERT_PREFIX,
   upsertAlert,
 } from '@fleet-dao/db';
@@ -82,6 +84,8 @@ const lockedDb = {
  */
 async function publicFailures(log: Logger) {
   const reports: Record<string, HealthReport> = {};
+  // 警告（ok:true）不进 reports（那里每份都得是红的），但同样要扫禁用词
+  let warning: HealthReport | undefined;
   let sites = 0;
   const run = async (name: string, site: boolean, check: () => Promise<void>, timeoutMs?: number) => {
     reports[name] = await runHealthChecks([{ name: 'item', check }], log, timeoutMs);
@@ -197,6 +201,19 @@ async function publicFailures(log: Logger) {
       body: '去 GitHub 的 App 设置里改，再到装它的地方点接受新权限',
     });
     await run('github-app', true, githubAppHealthCheck(judgeDb.db));
+    // 没装到某个仓的警告（PublicHealthWarning，不是 new PublicHealthError，不计入 sites）：同样不带仓名
+    await resolveAlertByKey(judgeDb.db, {
+      dedupeKey: `${GITHUB_APP_ALERT_PREFIX}engine:acme/fleet-dao`,
+      by: 'test',
+    });
+    await upsertAlert(judgeDb.db, {
+      dedupeKey: `${GITHUB_APP_MISSING_ALERT_PREFIX}acme/fleet-dao`,
+      level: 'decision',
+      taskId: null,
+      title: 'acme/fleet-dao：先去 GitHub 把两个机器人装到这个仓',
+      body: '占位',
+    });
+    warning = await runHealthChecks([{ name: 'item', check: githubAppHealthCheck(judgeDb.db) }], log);
     // 看门狗：只有一处 new PublicHealthError（说法有几种），这里造一种（还没登记）；每一种说法都在 watchdog-health.test.ts 用同一份名单扫
     await run('watchdog', true, async () => {
       await watchdogHealthCheck(judgeDb.db)();
@@ -242,7 +259,7 @@ async function publicFailures(log: Logger) {
   await run('node-report-stalled', true, async () => {
     await fresh.healthCheck.check();
   });
-  return { reports, sites };
+  return { reports, sites, warning };
 }
 
 describe('公开的健康报告', () => {
@@ -256,7 +273,7 @@ describe('公开的健康报告', () => {
       const keep = (message: string, fields?: Record<string, unknown>) => {
         logs.push(`${message} ${JSON.stringify(fields ?? {})}`);
       };
-      const { reports, sites } = await publicFailures({ info: keep, warn: keep, error: keep });
+      const { reports, sites, warning } = await publicFailures({ info: keep, warn: keep, error: keep });
       // 每一种都真造出来了（外加兜底的「连不上」）：一份都没有，下面就什么都扫不出来
       expect(Object.keys(reports)).toHaveLength(sites + 1);
       for (const [name, report] of Object.entries(reports)) {
@@ -267,7 +284,10 @@ describe('公开的健康报告', () => {
           message: expect.stringMatching(/\S/),
         });
       }
-      const hits = scanReports(scan, reports);
+      // 没装机器人的警告：仍是 200 的警告、不带仓名，也扫一遍
+      expect(warning?.ok).toBe(true);
+      expect(warning?.checks.item).toMatchObject({ ok: true, status: 'warning' });
+      const hits = scanReports(scan, warning ? { ...reports, 'github-app-missing': warning } : reports);
       expect(hits, scan.formatHits(hits)).toEqual([]);
       // 频道名、原始错误（带地址）没丢：只进了日志，报告里没有
       expect(logs.some((l) => l.includes('LISTEN fleet_changes'))).toBe(true);

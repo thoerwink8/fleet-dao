@@ -41,7 +41,7 @@ import {
   memoryLocker,
 } from './deps.ts';
 import { type ClaimsGitHub, createClaimsGitHub } from './engine-pulls.ts';
-import { GitHubError } from './errors.ts';
+import { GitHubError, isGitHubError } from './errors.ts';
 import { createEventSink, type EventSink, type WorkflowWaker } from './events.ts';
 import { execGit, type GitRunner } from './git.ts';
 import {
@@ -157,6 +157,11 @@ export interface SelfCheckItem {
   /** 机器人不该有却有的写权限（例如「干活的」有 issues:write）。 */
   extra: string[];
   why?: string | undefined;
+  /**
+   * 没查成的原因恰是「这个机器人没装到这个仓」（GitHub 对 /repos/{仓}/installation 回 404，NOT_INSTALLED）。
+   * 只有这一种可以当配置问题降级；凭据读不到、GitHub 回的认不出这些真故障不带它。
+   */
+  notInstalled?: boolean | undefined;
 }
 
 export interface GitHub {
@@ -448,6 +453,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
               missing: [],
               extra: [],
               why: `${ROLE_NAMES[role]}没查成：${errMessage(err)}`,
+              ...(isGitHubError(err, 'NOT_INSTALLED') ? { notInstalled: true } : {}),
             });
           }
         }

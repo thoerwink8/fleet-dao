@@ -194,6 +194,60 @@ describe('POST /api/repos/import', () => {
     expect(h.store.data.audit.filter((a) => a.action === REPO_IMPORT_ADD)).toHaveLength(1);
   });
 
+  it('导入时核机器人装没装：装了（widgets）appsInstalled=true、无链接', async () => {
+    const h = harness({ githubUser: fakeGitHub() });
+    const s = await h.login();
+    await connect(h);
+    const body = ImportRepoResponse.parse(
+      await (await h.cockpit.request(IMPORT, write('POST', s, { githubId: 101 }))).json(),
+    );
+    expect(body).toMatchObject({
+      appsInstalled: true,
+      agentInstalled: true,
+      engineInstalled: true,
+      installLinks: [],
+    });
+  });
+
+  it('导入时机器人没装（notes）：仍然导入（201），标未接入，给两个 App 的安装页和 GitHub 设置页直达链接', async () => {
+    const h = harness({ githubUser: fakeGitHub() });
+    const s = await h.login();
+    await connect(h);
+    const res = await h.cockpit.request(IMPORT, write('POST', s, { githubId: 102 }));
+    expect(res.status).toBe(201);
+    const body = ImportRepoResponse.parse(await res.json());
+    expect(body).toMatchObject({
+      created: true,
+      appsInstalled: false,
+      agentInstalled: false,
+      engineInstalled: false,
+    });
+    expect(body.installLinks.map((l) => l.url)).toEqual([
+      'https://github.com/apps/fleet-dao-agent/installations/new',
+      'https://github.com/apps/fleet-dao-engine/installations/new',
+      'https://github.com/settings/installations',
+    ]);
+    expect(h.store.data.repos.some((r) => r.id === body.repoId)).toBe(true);
+  });
+
+  it('【故意造出的失败】核对装没装时 GitHub 连不上：仍导入，appsInstalled=null 加原因，不当成装了', async () => {
+    const h = harness({
+      githubUser: fakeGitHub({
+        installationsForApp: async () => {
+          throw new Error('GitHub 502');
+        },
+      }),
+    });
+    const s = await h.login();
+    await connect(h);
+    const res = await h.cockpit.request(IMPORT, write('POST', s, { githubId: 102 }));
+    expect(res.status).toBe(201);
+    const body = ImportRepoResponse.parse(await res.json());
+    expect(body.appsInstalled).toBeNull();
+    expect(body.installCheckWhy).toContain('GitHub 502');
+    expect(body.installLinks).toEqual([]);
+  });
+
   it('已经在驾驶舱里：created=false，不重复建', async () => {
     const h = harness({ githubUser: fakeGitHub() });
     const s = await h.login();
