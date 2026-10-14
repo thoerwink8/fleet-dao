@@ -357,6 +357,7 @@ sudo -n /usr/local/sbin/fleet-agent-scope remove /var/lib/fleet-work/<owner>_<na
 - 会话降权用 `setpriv --init-groups --no-new-privs`：只在自己的组里，会话里的 sudo、setuid 程序都提不了权。不用 `systemd-run --uid`：它在 scope 里不清附加组，会话会带着 root 组（法国实测）。
 - 内存要真封顶，`--memory-max` 和 `--memory-swap-max` 得一起给：只给前者，超出的部分被换进 swap，会话不会被杀（法国实测）。
 - 引擎正常停（SIGTERM）：sudo 把信号转给会话，会话跟着退。引擎崩了（SIGKILL）：会话留在自己的 scope 里；引擎起来后 `list` 找回、`stop` 收掉。
+- 引擎杀一条以会话用户跑的短命令（超时、被叫停、停机时活动被取消；`packages/engine/src/real/exec.ts`）：SIGKILL 只到 sudo，转不进 scope——scope 里那一侧还活着、攥着输出管道，活动就一直不落定，工人卡在 DRAINING、停不下来，systemd 等满 6 分钟才 SIGKILL（#2238：10-15 凌晨四次发版都这样）。所以杀 sudo 的同时经帮手 `stop` 收掉整个 scope，再等 10 秒（`KILL_SETTLE_MS`）管道还不关就照「没正常退出」交回。兜底：工人的 `shutdownForceTime` = 宽限期 + 30 秒，到了不再等活动、直接退出；`main.ts` 收尾后 `process.exit`，不让残留的定时器、连接把进程吊着。
 - 引擎的 systemd 单元不能开 `NoNewPrivileges`：开了 sudo 提不了权。
 - 看用量（不用 root）：`systemctl status fleet-agents.slice`、`systemd-cgtop /fleet.slice/fleet-agents.slice`、`systemctl show fleet-agent-<编号>.scope -p MemoryCurrent,CPUUsageNSec,TasksCurrent`。
 - 池子的总量上限写在 `deploy/france/fleet-agents.slice` 里（`MemoryHigh`、`MemoryMax`），由 `deploy/france.sh` 装到 `/etc/systemd/system/`；改了这份文件重跑一遍 france.sh 再 `systemctl daemon-reload`（脚本会自己做）。临时想加别的（CPUWeight、TasksMax…）不改主文件，写 `/etc/systemd/system/fleet-agents.slice.d/override.conf` 再 `systemctl daemon-reload`；回滚就删掉它。

@@ -102,6 +102,9 @@ export interface CreateEngineWorkerOptions {
   log?: (message: string) => void;
 }
 
+/** 在途活动过了宽限还不交回，再等多久就强停工人（秒）。 */
+export const SHUTDOWN_FORCE_EXTRA_SECONDS = 30;
+
 export async function createEngineWorker(options: CreateEngineWorkerOptions): Promise<Worker> {
   const { config } = options;
   if (options.reapOrphanSessions) {
@@ -120,6 +123,9 @@ export async function createEngineWorker(options: CreateEngineWorkerOptions): Pr
       decide: options.decide ?? createDecide(options.triage ? { triage: options.triage } : {}),
     },
     shutdownGraceTime: `${config.shutdownGraceSeconds} seconds`,
+    // 兜底（#2238）：在途活动过了宽限、被取消了还不交回，最多再等 SHUTDOWN_FORCE_EXTRA_SECONDS 就不等了，进程照常收尾退出——
+    // 不然工人一直卡在 DRAINING、定时器照跑，systemd 到 TimeoutStopSec（6 分钟）才 SIGKILL，每趟发版白等 6 分钟还强杀在跑的东西
+    shutdownForceTime: `${config.shutdownGraceSeconds + SHUTDOWN_FORCE_EXTRA_SECONDS} seconds`,
     maxConcurrentActivityTaskExecutions: config.maxConcurrentActivities,
     ...(options.maxCachedWorkflows === undefined ? {} : { maxCachedWorkflows: options.maxCachedWorkflows }),
   });
