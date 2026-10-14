@@ -403,13 +403,14 @@ describe('走到哪一步、断没断（canaryNext）', () => {
     expect(canaryNext(s, { ...open, at: at(80) })).toMatchObject({ kind: 'broken', stage: 'ledger' });
   });
 
-  it('不强制 CI 的仓不做冷验收：没有验收那一笔不算记账没齐（#2082）；用量仍没记上照旧断', () => {
+  it('第 39 轮（巡检仓 #107、PR #108，不强制 CI）：动手 1、验收 0、用量记上，记账通过；强制 CI 或用量没记上仍断（#2082）', () => {
     const s = state({ stage: 'ledger', stageSince: at(60) });
     const repo = {
       id: 'repo-1',
       autoDispatchSince: new Date(T0.getTime() - 24 * 60 * 60_000),
       ciPolicy: 'off' as const,
     };
+    // 第 39 轮对得上的账：只有动手一笔、验收 0、这一笔输入输出都有、每步耗时在。runs 行本身没读到，形状按会话用量账和「没有验收会话」。
     const skipped = {
       ...finished(60),
       db: facts({
@@ -421,6 +422,15 @@ describe('走到哪一步、断没断（canaryNext）', () => {
     // 动手那一笔记上了用量、每步耗时在：记账走完，接着看驾驶舱（这一回里能走完）
     const d = canaryNext(s, { ...skipped, at: at(61) });
     expect(d.kind).toBe('pass');
+    // 当时线上 de5c29a8 不看 ciPolicy：同一本账、策略仍是强制，到期限断在记账
+    const forced = {
+      ...skipped,
+      db: facts({
+        ...skipped.db,
+        repo: { ...repo, ciPolicy: 'force' },
+      }),
+    };
+    expect(canaryNext(s, { ...forced, at: at(80) })).toMatchObject({ kind: 'broken', stage: 'ledger' });
     const noUsage = {
       ...skipped,
       db: facts({
