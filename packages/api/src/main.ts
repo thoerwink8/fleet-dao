@@ -484,7 +484,7 @@ log.info('驾驶舱后端已起', {
   nodeReport: config.nodeReport ? config.nodeReport.url.origin : false,
 });
 
-/** 退出时给在途的普通请求多久做完（做完了幂等回执才记得上，插头重试不会重做）；到点了收掉剩下的（SSE 这类）。 */
+/** 退出时给在途的普通请求多久做完（做完了幂等回执才记得上，插头重试不会重做）；到点了收掉剩下的。SSE 一开始就收，不等它。 */
 const DRAIN_MS = 10_000;
 
 async function shutdown(signal: string) {
@@ -496,6 +496,7 @@ async function shutdown(signal: string) {
   await gracefulShutdown({
     servers,
     drainMs: DRAIN_MS,
+    endStreams: () => relay.endAll(),
     close,
     onCloseError: (err) => log.error('退出时关连接出错', { error: String(err) }),
   });

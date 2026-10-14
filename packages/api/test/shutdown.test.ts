@@ -1,7 +1,12 @@
 // 优雅停机（src/shutdown.ts）：main.ts 的停机顺序抽成的可测函数——关库在在途请求做完之后、
 // 有上限不会无限等下去，各写一条故意造出来的失败场景钉住（#364：库关早了，在途请求查库会报错，回 500）。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { closeConnectionWhenStopping, type DrainableServer, gracefulShutdown } from '../src/shutdown.ts';
+import {
+  closeConnectionWhenStopping,
+  type DrainableServer,
+  gracefulShutdown,
+  IDLE_SWEEP_MS,
+} from '../src/shutdown.ts';
 
 describe('closeConnectionWhenStopping：停机之后的响应补 Connection: close', () => {
   it('还没停机：原样放行，不加头', async () => {
@@ -65,7 +70,7 @@ function fakeServer(
 
 describe('gracefulShutdown：停机的先后顺序和上限', () => {
   beforeEach(() => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -130,6 +135,65 @@ describe('gracefulShutdown：停机的先后顺序和上限', () => {
     await done;
     expect(closedDb).toBe(true); // 到点了，不管 cockpit.close 的回调有没有来，照样往下走
     expect(log.events).toContain('cockpit.closeAllConnections');
+  });
+
+  it('SSE（#2186）：停接新连接后立刻收场，收完变空闲的连接下一轮就关掉，排空不再等满 drainMs', async () => {
+    const log = orderedLog();
+    // 模拟一条 SSE 连接：收场之前它不空闲，closeIdleConnections 关不掉它；收场之后下一轮 closeIdle 就关掉、server.close 完成
+    let streamOpen = true;
+    let finish: (() => void) | undefined;
+    const server: DrainableServer = {
+      close(cb) {
+        log.push('close 发起');
+        finish = cb;
+      },
+      closeIdleConnections() {
+        if (!streamOpen && finish) {
+          log.push('空闲连接关掉');
+          const done = finish;
+          finish = undefined;
+          done();
+        }
+      },
+      closeAllConnections: () => log.push('closeAllConnections'),
+    };
+    let closedDb = false;
+    const done = gracefulShutdown({
+      servers: [server],
+      drainMs: 10_000,
+      endStreams: () => {
+        log.push('SSE 收场');
+        setTimeout(() => {
+          streamOpen = false;
+        }, 5);
+      },
+      close: async () => {
+        closedDb = true;
+      },
+    });
+    await advance(0);
+    expect(log.events.slice(0, 2)).toEqual(['close 发起', 'SSE 收场']);
+    await advance(IDLE_SWEEP_MS * 2);
+    await done;
+    expect(closedDb).toBe(true);
+    expect(log.events).toContain('空闲连接关掉');
+  });
+
+  it('【故意造出的失败】不给 endStreams、SSE 一直开着：照旧等满 drainMs 才往下走（这就是 #2186 那 10 秒挂起）', async () => {
+    const log = orderedLog();
+    let closedDb = false;
+    const done = gracefulShutdown({
+      servers: [fakeServer(log, 'cockpit', null)],
+      drainMs: 10_000,
+      close: async () => {
+        closedDb = true;
+      },
+    });
+    await advance(IDLE_SWEEP_MS * 10);
+    expect(closedDb).toBe(false);
+    await advance(10_000);
+    await done;
+    expect(closedDb).toBe(true);
   });
 
   it('关库失败：onCloseError 收到，流程照样走完（数据没救了，多等也没用）', async () => {
