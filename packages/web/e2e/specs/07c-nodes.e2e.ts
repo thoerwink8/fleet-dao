@@ -103,13 +103,15 @@ test.describe('看板多机', () => {
   }) => {
     // 钟一快进，轮询一下子到期好几回，新一轮请求把还在路上的上一轮环境列表取消掉：被取消的不是失败
     problems.allow('/api/nodes net::ERR_ABORTED');
-    await page.clock.install({ time: new Date() });
+    // 钟从「推成快照那一刻」起走，不从现在：快照可能是 2 分半内前面用例推的（beforeEach 不重推），从现在起快进 10 分钟
+    // 横幅会写 11、12 分钟（CI 上撞过）。从推成那一刻起，快进 10 分钟就正好失联 10 分钟。
+    await page.clock.install({ time: new Date(pushedAt) });
     await page.goto('/?node=wsl');
     const banner = page.locator('[data-snapshot-banner]');
     await expect(banner).toHaveAttribute('data-snapshot-banner', 'fresh');
     await page.clock.fastForward('10:00');
     await expect(banner).toHaveAttribute('data-snapshot-banner', 'stale');
-    await expect(banner).toContainText(/失联 1[01] 分钟/);
+    await expect(banner).toContainText('失联 10 分钟');
     await expect(banner).toContainText('不是现在的');
     const trigger = page.locator('[data-env-switcher]');
     await expect(trigger).toContainText('失联');

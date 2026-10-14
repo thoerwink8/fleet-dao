@@ -4,11 +4,16 @@
 // 两个视口各走一遍（1920×1080 是创始人的大屏、1366×768 是常见笔记本）；改库的用例只在 1920 那一遍里跑（onlyDesktop）。
 // 并行（决定 0093）：每个 worker 自己一整套环境（support/fixtures.ts 的 stack 夹具：自己的库、自己的端口），所以 worker 开到核数；
 // 一个文件整个落在一个 worker 里、按顺序走（fullyParallel: false：文件里的用例前后有依赖）。
+// 偶发（决定 0093）：首跑红的重试一次，重试过了 Playwright 标 flaky、这一轮不算红；JSON 报告留给偶发统计（packages/conventions/src/e2e-flaky.ts），
+// 近 10 轮首跑红 2 次的自动开单、放进隔离集（e2e/quarantine.json，E2E_QUARANTINE=skip|only 挑，support/quarantine.ts）。
 import { availableParallelism } from 'node:os';
 import { defineConfig } from '@playwright/test';
+import { quarantineFilter } from './support/quarantine.ts';
 import { VIEWPORT_ORDER, VIEWPORTS } from './support/viewports.ts';
 
 const channel = process.env.E2E_BROWSER_CHANNEL?.trim() || 'chrome';
+/** 单跑隔离集那一遍（CI 里接在正式那一遍后面）：结果、报告另放，不盖掉正式那一遍的（Playwright 开跑先清 outputDir）。 */
+const suffix = process.env.E2E_QUARANTINE?.trim() === 'only' ? '-quarantine' : '';
 
 /**
  * worker 数：E2E_WORKERS 给了就用它；E2E_REUSE=1（共用 e2e:serve 那一套）只能 1 个；CI 上开到核数（GitHub 的 Linux 机器 4 核）；
@@ -32,11 +37,17 @@ export default defineConfig({
   globalSetup: './support/global-setup.ts',
   workers: workers(),
   fullyParallel: false,
-  retries: 0,
+  retries: 1,
+  ...quarantineFilter(process.env.E2E_QUARANTINE),
   timeout: 60_000,
   expect: { timeout: 15_000 },
-  outputDir: '../../../_tmp/e2e/results',
-  reporter: [['list'], ['html', { outputFolder: '../../../_tmp/e2e/report', open: 'never' }]],
+  outputDir: `../../../_tmp/e2e/results${suffix}`,
+  reporter: [
+    ['list'],
+    ['html', { outputFolder: `../../../_tmp/e2e/report${suffix}`, open: 'never' }],
+    // 偶发统计读它（packages/conventions/src/e2e-flaky.ts）；隔离集那一遍写 results-quarantine.json，两份都随 artifact 上传
+    ['json', { outputFile: `../../../_tmp/e2e/results${suffix}.json` }],
+  ],
   use: {
     // baseURL 由 stack 夹具给（每个 worker 的门面端口不同，support/fixtures.ts）
     channel,

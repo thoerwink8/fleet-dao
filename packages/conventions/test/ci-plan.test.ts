@@ -1655,8 +1655,11 @@ describe('驾驶舱 e2e（#930；决定 0029：只点改动页；决定 0093：�
     expect(runs).toContain('pnpm --filter @fleet-dao/web e2e');
     expect(runs).toContain('playwright install --with-deps chromium');
     expect(runs).toContain('postgres:16');
-    // 红了不吞：没有 job 级或步骤级的 continue-on-error、没有 || true
-    expect(steps.some((s) => 'continue-on-error' in s)).toBe(false);
+    // 红了不吞：没有 job 级 continue-on-error；步骤级的只有隔离集那一步（决定 0093：照跑照报不挡），它只跑 E2E_QUARANTINE=only；没有 || true
+    expect(e2e).not.toHaveProperty('continue-on-error');
+    const lenient = steps.filter((s) => 'continue-on-error' in s);
+    expect(lenient.map((s) => s.name)).toEqual(['隔离集（只报不挡）']);
+    expect((lenient[0]?.env as Record<string, string> | undefined)?.E2E_QUARANTINE).toBe('only');
     expect(runs).not.toContain('|| true');
     // 跑 e2e 的那一步本身没有 if（该跑的 job 里它一定跑）
     const run = steps.find((s) => String(s.run ?? '').includes('pnpm --filter @fleet-dao/web e2e'));
@@ -1665,6 +1668,9 @@ describe('驾驶舱 e2e（#930；决定 0029：只点改动页；决定 0093：�
     // 清单经环境变量交给 shell（不把表达式插进脚本）：all 跑全套，否则把清单当参数传给 playwright
     expect((run?.env as Record<string, string> | undefined)?.E2E_SPECS).toBe(
       '${{ needs.changes.outputs.e2e }}',
+    );
+    expect((run?.env as Record<string, string> | undefined)?.E2E_QUARANTINE, '挡的那一步跳过隔离集').toBe(
+      'skip',
     );
     expect(String(run?.run)).not.toContain('${{');
     expect(String(run?.run)).toContain('"$E2E_SPECS" = all');
