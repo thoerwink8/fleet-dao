@@ -18,6 +18,8 @@
 //   最近一次跑全之后连着 3 次以上 partial / failed、且跨过 2 小时的报一张卡（键 watchdog:red:…），已经被上面「没跑成 / 停了」报过的任务不重复报。
 // - 同一轮还看「在用的账号池额度读数不超过 30 分钟」（决定 0093 从每小时对账搬来，对账只管和 GitHub 对账）：jobs/watchdog-quota.ts，
 //   键还是 reconcile:quota:<池>，只读库。
+// - 同一轮还看「发版要人看」「健康页（/healthz）非 200 持续 > 10 分钟」（jobs/release-watch.ts，法国 2026-10-14 发版失败后漏报）：
+//   键 watchdog:release:…、watchdog:healthz:…，读法国的发布目录和 /healthz（real/watchdog.ts）；和上面「连着没跑全」互不相干。
 
 import type { JobHealth, MergeStallFacts, RedStreak, ScheduleResult } from '@fleet-dao/db';
 import { WATCHDOG_JOB_ID } from '@fleet-dao/db';
@@ -33,6 +35,15 @@ import {
 } from './merge-stall.ts';
 import { clip, stamp } from './reconcile-common.ts';
 import { jobIdOfRedKey, judgeRedStreak, RED_STREAK_ALERT_PREFIX, RED_STREAK_LINK } from './red-streak.ts';
+import {
+  HEALTHZ_ALERT_PREFIX,
+  type HealthzProbe,
+  judgeHealthz,
+  judgeReleaseAttention,
+  RELEASE_ATTENTION_ALERT_PREFIX,
+  RELEASE_WATCH_LINK,
+  type ReleaseFacts,
+} from './release-watch.ts';
 import { type QuotaWatchDeps, watchQuotaFreshness } from './watchdog-quota.ts';
 
 /** 登记进 scheduled_jobs 的那一行。 */
@@ -97,6 +108,17 @@ export interface WatchdogDeps {
    * 不给（只测别的部分的单测）就不看这一项。
    */
   redStreaks?: (now: Date) => Promise<RedStreak[]>;
+  /**
+   * 发版和健康页（jobs/release-watch.ts）。facts 回 null = 这台不是法国（没有发布目录），这一项不看；读不到照抛：这一轮记没查成，
+   * 开着的不撤。不给（只测别的部分的单测）就不看这一项。
+   */
+  releaseWatch?: {
+    facts(): Promise<ReleaseFacts | null>;
+    /** 问 /healthz；连不上、超时也要回 { ok: false }，不许抛成「没查」。 */
+    probe(): Promise<HealthzProbe>;
+    /** 这一段不健康从几点起（设置表）：读、第一次不健康时记、健康了清。 */
+    badSince: { read(): Promise<Date | null>; write(since: Date): Promise<void>; clear(): Promise<void> };
+  };
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
@@ -364,7 +386,11 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
     found += q.found;
     quotaScanned = q.scanned;
   }
-  const scanned = others.length + merges.scanned + quotaScanned + reds.scanned;
+  const releases = deps.releaseWatch
+    ? await releaseWatchRound(s, deps.releaseWatch, now)
+    : { scanned: 0, found: 0 };
+  found += releases.found;
+  const scanned = others.length + merges.scanned + quotaScanned + reds.scanned + releases.scanned;
 
   if (s.problems.length > 0) {
     const why = `${s.problems.length > 1 ? `${s.problems.length} 处没做成：` : ''}${s.problems.join('；')}`;
@@ -374,6 +400,93 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
   if (scanned === 0)
     return { outcome: 'unscanned', why: clip(emptyWhy(others.length, merges.repos), WATCHDOG_WHY_MAX) };
   return { outcome: 'ok', scanned, found };
+}
+
+/** 撤掉前缀下不在 wanted 里的提醒，写明为什么；列不了、撤不掉记没查成。 */
+async function retireOthers(
+  s: RoundState,
+  prefix: string,
+  wanted: ReadonlySet<string>,
+  why: string,
+  what: string,
+): Promise<void> {
+  const open = await attempt(s, `列不了「${what}」开着的提醒（恢复了的这一轮撤不了）`, () =>
+    s.deps.alerts.openByPrefix(prefix),
+  );
+  for (const a of open.ok ? open.value : []) {
+    if (wanted.has(a.dedupeKey)) continue;
+    const done = await attempt(s, `提醒 ${a.dedupeKey} 没撤掉`, () =>
+      s.deps.alerts.resolve({ dedupeKey: a.dedupeKey, why }),
+    );
+    if (done.ok) s.deps.log('info', '看门狗：撤了一条', { dedupeKey: a.dedupeKey, why });
+  }
+}
+
+/**
+ * 「发版要人看」「健康页非 200 持续 > 10 分钟」这一部分：报该报的、撤不用再报的。读不到记没查成，开着的一条都不撤。
+ * 这台不是法国（facts 回 null）整块不看，也不问 /healthz。
+ */
+async function releaseWatchRound(
+  s: RoundState,
+  rw: NonNullable<WatchdogDeps['releaseWatch']>,
+  now: Date,
+): Promise<{ scanned: number; found: number }> {
+  const facts = await attempt(s, '读不到法国的发布目录（发版要不要人看这一轮没查成）', () => rw.facts());
+  if (!facts.ok) return { scanned: 0, found: 0 };
+  if (facts.value === null) return { scanned: 0, found: 0 };
+  let found = 0;
+  const raise = async (v: { key: string; title: string; body: string }, what: string) => {
+    const got = await attempt(s, `${what}的提醒没写进去`, () =>
+      raiseOnce(s.deps.alerts, { dedupeKey: v.key, title: v.title, body: v.body, link: RELEASE_WATCH_LINK }),
+    );
+    if (got.ok && got.value === 'raised')
+      s.deps.log('warn', '看门狗：推了一条', { dedupeKey: v.key, title: v.title });
+  };
+
+  const rel = judgeReleaseAttention(facts.value);
+  const wantedRelease = new Set<string>();
+  if (rel.kind === 'alert') {
+    found += 1;
+    wantedRelease.add(rel.key);
+    await raise(rel, '发版要人看');
+  }
+  await retireOthers(
+    s,
+    RELEASE_ATTENTION_ALERT_PREFIX,
+    wantedRelease,
+    '发版现在不用人看了（最近一次发版成功，或进度记录收尾了）',
+    '发版要人看',
+  );
+
+  // 健康页：问一次；非 200 记第一次的时刻，持续过了 HEALTHZ_DOWN_MS 才报；200 清掉记的时刻
+  const probe = await attempt(s, '问不了 /healthz（这一轮没查成）', () => rw.probe());
+  if (!probe.ok) return { scanned: 1, found };
+  const wantedHealthz = new Set<string>();
+  let since: Date | null = null;
+  const read = await attempt(s, '读不到健康页「从几点起不健康」的记录', () => rw.badSince.read());
+  if (read.ok) since = read.value;
+  if (probe.value.ok) {
+    if (read.ok && since !== null) await attempt(s, '清不掉健康页的不健康记录', () => rw.badSince.clear());
+  } else if (read.ok && since === null) {
+    since = now;
+    await attempt(s, '记不下健康页第一次不健康的时刻', () => rw.badSince.write(now));
+  }
+  if (!read.ok) return { scanned: 2, found };
+  const h = judgeHealthz(probe.value, since, now);
+  if (h.kind === 'alert') {
+    found += 1;
+    wantedHealthz.add(h.key);
+    await raise(h, '健康页非 200');
+  }
+  // 还没到时限（pending）的、或根本是好的：开着的撤；非 200 持续着的（alert）保留
+  await retireOthers(
+    s,
+    HEALTHZ_ALERT_PREFIX,
+    wantedHealthz,
+    probe.value.ok ? '/healthz 回 200 了' : '这一段不健康还没到 10 分钟（只在持续超过时报）',
+    '健康页非 200',
+  );
+  return { scanned: 2, found };
 }
 
 /** 「没东西可看」（一个都没扫到）时写清两样：定时任务登记表上几个任务，哪些仓开着「让 AI 接活」（repos 是 null = 这一轮没读仓）。 */

@@ -28,6 +28,16 @@ interface SampleOpts {
   notes?: string[];
   noEnd?: boolean;
   err?: string;
+  healthz?: number;
+  healthRed?: string[];
+  hist?: string[];
+  noHist?: boolean;
+  train?: string;
+  trainRaw?: string;
+  noState?: boolean;
+  autoNote?: string;
+  behind?: number;
+  behindMinutes?: number;
 }
 interface PatrolLib {
   REMOTE_SCRIPT: string;
@@ -268,5 +278,108 @@ describe('巡查脚本：总开关关着时带上发版车状态（#1674）', ()
   it('没接 trainNote：和以前一样', async () => {
     const r = await run(ok(closed()));
     expect(r.report.alerts[0]).toBe('引擎总开关关着（engine.master 是 false）');
+  });
+});
+
+describe('巡查脚本：发版事故和健康页（2026-10-14 法国发版失败，巡检却报 OK 近一小时）', () => {
+  const CUR = `abcd1234${'0'.repeat(32)}`;
+  const judge = (o: Partial<SampleOpts>) =>
+    lib.judge({ raw: ok(lib.sampleRaw({ at: NOW, ...o })), now: NOW, base: null });
+  /** 那次事故的读数：503、发布历史 release→unhealthy→auto-rollback→unhealthy、自动发布说要人看、落后 19 个提交 */
+  const incident = {
+    healthz: 503,
+    healthRed: ['db', 'temporal'],
+    hist: [
+      `2026-10-14T17:03:00Z ${CUR} release`,
+      `2026-10-14T17:05:00Z ${CUR} unhealthy`,
+      '2026-10-14T17:06:00Z 1111aaaa auto-rollback',
+      '2026-10-14T17:08:00Z 1111aaaa unhealthy',
+    ],
+    train: 'failed',
+    autoNote: '现在不发：上一趟发版是「failed」状态，要人看，不自动再发',
+    behind: 19,
+    behindMinutes: 90,
+  };
+
+  it('【故意造出的失败】重放那次事故（服务 2/2 active、定时任务全 ok，但 /healthz 503）：BROKEN，列出红的检查，不是 OK', async () => {
+    const r = await patrol(ok(lib.sampleRaw({ at: NOW, ...incident })), null);
+    expect(r.report.verdict).toBe('BROKEN');
+    expect(r.code).toBe(2);
+    expect(r.report.broken).toContain('/healthz 回 503，红的检查：db、temporal');
+    expect(r.report.broken).toContain('最近一次发版是 unhealthy');
+    expect(r.report.broken).toContain('发版进度记录停在「failed」');
+    expect(r.report.broken).toContain('自动发布处于「要人看」');
+    expect(r.lines.at(-1)).toBe('VERDICT: BROKEN');
+    expect(r.lines.join(' / ')).toContain('服务 2/2 active');
+    // BROKEN 不写基线
+    expect(r.saved).toEqual([]);
+  });
+
+  it('/healthz 连不上（状态码 000）也是 BROKEN，写明连不上', () => {
+    const r = judge({ healthz: 0 });
+    expect(r.verdict).toBe('BROKEN');
+    expect(r.broken).toContain('/healthz 回 不出来（连不上）');
+  });
+
+  it('最近一次发版是 auto-rollback、或 unhealthy：各自 BROKEN；最近一次是 release、recovered 就不是', () => {
+    for (const event of ['auto-rollback', 'unhealthy']) {
+      const r = judge({
+        hist: [`2026-10-14T17:00:00Z ${CUR} release`, `2026-10-14T17:05:00Z 1111aaaa ${event}`],
+      });
+      expect(r.verdict, event).toBe('BROKEN');
+      expect(r.broken).toContain(`最近一次发版是 ${event}`);
+    }
+    for (const event of ['release', 'recovered', 'rollback']) {
+      expect(judge({ hist: [`2026-10-14T17:05:00Z ${CUR} ${event}`] }).verdict, event).toBe('OK');
+    }
+  });
+
+  it('发版进度记录停在 failed 等 done、aborted 以外的状态：BROKEN；done、aborted、没有这份文件：不是', () => {
+    expect(judge({ train: 'failed' }).verdict).toBe('BROKEN');
+    expect(judge({ train: 'deploying' }).verdict).toBe('BROKEN');
+    for (const t of ['done', 'aborted', '-'])
+      expect(judge({ train: t === '-' ? undefined : t }).verdict, t).toBe('OK');
+  });
+
+  it('自动发布处于「要人看」（只有它这一条，别的都正常）：BROKEN', () => {
+    const r = judge({ autoNote: '现在不发：上一趟发版是「failed」状态，要人看，不自动再发' });
+    expect(r.verdict).toBe('BROKEN');
+    expect(r.broken).toContain('自动发布处于「要人看」');
+  });
+
+  it('落后主线超过 5 个提交且最老的落下超过 60 分钟：ALERT（不是 BROKEN）；任何一条没到线都不报', () => {
+    const r = judge({ behind: 8, behindMinutes: 90 });
+    expect(r.verdict).toBe('ALERT');
+    expect(r.alerts).toHaveLength(1);
+    expect(r.alerts[0]).toContain('落后主线 8 个提交');
+    expect(judge({ behind: 8, behindMinutes: 30 }).verdict).toBe('OK');
+    expect(judge({ behind: 5, behindMinutes: 300 }).verdict).toBe('OK');
+    expect(judge({ behind: 0 }).verdict).toBe('OK');
+  });
+
+  it('在用的版本不在主线最近的提交里：ALERT，不当成没落后', () => {
+    const raw = lib.sampleRaw({ at: NOW }).replace(/^cur\|.*$/m, `cur|${'9'.repeat(40)}`);
+    const r = lib.judge({ raw: ok(raw), now: NOW, base: null });
+    expect(r.verdict).toBe('ALERT');
+    expect(r.alerts[0]).toContain('不在主线最近');
+  });
+
+  it('【故意造出的失败】读不到这几块（没有发布历史、没有自动发布状态、进度记录不是 JSON、少了健康页那行）：都是 BROKEN，不当 OK', () => {
+    expect(judge({ noHist: true }).verdict).toBe('BROKEN');
+    expect(judge({ noState: true }).verdict).toBe('BROKEN');
+    expect(judge({ trainRaw: '{坏的' }).verdict).toBe('BROKEN');
+    const noHealthz = lib.sampleRaw({ at: NOW }).replace(/^healthz\|.*$/m, '');
+    const r = lib.judge({ raw: ok(noHealthz), now: NOW, base: null });
+    expect(r.verdict).toBe('BROKEN');
+    expect(r.broken).toContain('healthz');
+  });
+
+  it('远端那段 sh 读这几样：问 /healthz、读 .history、.train、.auto/state.json（都是读）', () => {
+    const s = lib.REMOTE_SCRIPT;
+    expect(s).toContain('http://10.99.0.2:8787/healthz');
+    expect(s).toContain('/srv/fleet-dao-releases/.history');
+    expect(s).toContain('/srv/fleet-dao-releases/.train/release-train.json');
+    expect(s).toContain('/srv/fleet-dao-releases/.auto/state.json');
+    expect(s).not.toMatch(/curl.*(?:-X|--data|-d )/);
   });
 });
