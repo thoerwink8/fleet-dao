@@ -153,10 +153,9 @@ describe('库里的行 → 领域对象', () => {
       state: 'queued',
       priority: 10,
       acceptance: [],
-      executor: 'engine',
       createdAt: ago(MIN).toISOString(),
     });
-    // 本机领的单（决定 0096）带领取的环境和租约到期时刻；引擎的单不带，退回法国后 claimed_by 清空也不带
+    // 本机领的单（决定 0096）带领取的环境和租约到期时刻；引擎的单（默认）什么都不带，退回法国后 claimed_by 清空也不带
     const lease = ago(-90 * MIN);
     expect(toTask({ ...task, executor: 'local', claimedBy: 'founder-pc', leaseUntil: lease })).toMatchObject({
       executor: 'local',

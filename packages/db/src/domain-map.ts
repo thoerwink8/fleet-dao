@@ -101,8 +101,8 @@ export const toTask = (r: typeof tasks.$inferSelect): Task =>
         : undefined,
     // 等合并时必过检查红了：doing 以「检查红了：」开头，后面是检查名（#1983）
     redChecks: redCheckNames(r.doing),
-    executor: r.executor,
-    // 只有本机领的单才带领取人和租约；引擎的单这两列多半是空，退回法国后 claimed_by 也清了
+    // 只有本机领的单才带 executor、领取人和租约；没有这个键就是引擎（默认），和内存版一致
+    executor: r.executor === 'local' ? 'local' : undefined,
     claimedBy: r.executor === 'local' ? opt(r.claimedBy) : undefined,
     leaseUntil: r.executor === 'local' ? isoOpt(r.leaseUntil) : undefined,
     createdAt: r.createdAt.toISOString(),
