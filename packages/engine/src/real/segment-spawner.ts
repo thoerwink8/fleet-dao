@@ -7,8 +7,11 @@
 //
 // 改这里之前必须知道：
 // - 开新还是续按入参：带了 resumeSessionId（动手段续上一段，决定 0088；驾驶舱「提需求」的指挥官会话，#2061）就
-//   session.mode = 'resume' 续那个号，不带就开新的。不 fork、不脱开引擎进程跑（不传 io）。续不续由调用方判（planSegmentResume），
-//   这里不再判一遍。
+//   session.mode = 'resume' 续那个号，不带就开新的。不 fork。续不续由调用方判（planSegmentResume），这里不再判一遍。
+// - 脱开引擎跑（cmd.detach，#2238，只有动手段给；session-handoff.ts 讲为什么）：执行方式是命令行那几家、装了 handoff，就把收发目录
+//   交给驱动（io），会话的输入输出走文件；引擎要走（handoff.signal）时驱动放手、这里写上放手标记交回 detached——会话的临时目录、
+//   收发目录都留着给下一个引擎。attach 是接回：清掉标记，驱动不起进程、从头重读输出等它收场。正常收场的连收发目录一起删。
+//   Mirasim、没给 detach 的（验收、整理、指挥官会话）照旧走管道。
 // - 成败只认 adapters 的 judgeRun（和 Fusion 同一份判法）：它不是 ok，退出码就不会是 0。「终帧报错」「没有终帧」这些，
 //   即使进程自己退出码是 0，这里也报 1，不让 one-shot 把它判成 done。
 // - 读不到、认不出一律抛错（路由没给、库里没有这条路由、执行方式没接上、会话用户定不下来），runOneShot 把它记成
@@ -39,6 +42,15 @@ import {
   wiredHostNames,
 } from './hosts.ts';
 import { type MemoryPeakDeps, type MemoryPeakResult, sampleMemoryPeak } from './memory-peak.ts';
+import {
+  clearDetached,
+  DETACHABLE_HOSTS,
+  ensureIoRoot,
+  ioDirOf,
+  markDetached,
+  removeIo,
+  type SessionHandoff,
+} from './session-handoff.ts';
 import { TranscriptRecorder } from './transcript-recorder.ts';
 import type { WorkTrees } from './worktrees.ts';
 
@@ -81,6 +93,10 @@ export interface SegmentSpawnerDeps {
   transcriptWrite?: (runId: string, rows: TranscriptRow[]) => Promise<void>;
   /** 过程记录攒批的节拍（毫秒）；测试调小。不给用 transcript-recorder.ts 的默认。 */
   transcriptFlushMs?: number;
+  /**
+   * 动手会话脱开引擎跑（#2238，session-handoff.ts）：收发目录的根和「引擎要走了」的信号。不给 = 一律走管道（测试、开发机）。
+   */
+  handoff?: SessionHandoff;
   /** 帮手脚本、sudo 前缀（测试里给假帮手）。 */
   helper?: string;
   sudo?: readonly string[];
@@ -202,9 +218,24 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
     const { input } = cmd;
     const runId = input.runId;
     const { route, driver, user } = await resolveSegmentRoute(deps, input.routeId);
+    const handoff = deps.handoff;
+    const detach = cmd.detach && handoff && DETACHABLE_HOSTS.has(driver.hostId) ? handoff : undefined;
+    const attach = cmd.detach?.attach === true;
+    if (attach && !detach) {
+      throw new Error(
+        `接回会话 ${runId} 没接成：${handoff ? `执行方式 ${driver.hostId} 不走文件` : '这个引擎没装收发目录'}，读不到它的输出`,
+      );
+    }
+    const io = detach
+      ? { dir: ioDirOf(detach.root, runId), release: detach.signal, ...(attach ? { attach: true } : {}) }
+      : undefined;
 
     const tmpDir = deps.trees.tmpFor(runId);
-    await deps.trees.adopt(tmpDir, user);
+    // 接回的临时目录还归会话在用：不重新交接
+    if (!attach) await deps.trees.adopt(tmpDir, user);
+    if (detach && !attach) await ensureIoRoot(detach.root);
+    // 接回：先删放手标记——删了收孤儿就不会再当它没人接
+    if (io && attach) await clearDetached(io.dir);
     const spec: HostRunSpec = {
       runId,
       user,
@@ -250,7 +281,8 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
           ...(deps.transcriptFlushMs === undefined ? {} : { flushEveryMs: deps.transcriptFlushMs }),
         })
       : undefined;
-    recorder?.prompt(cmd.stdin);
+    // 接回时提示词那一条（编号 0）上一个引擎记过了：占住编号，后面重读出来的条目编号和原来一样，库里按编号跳过重复的
+    recorder?.prompt(attach ? '' : cmd.stdin);
     const peak = deps.memoryPeak ? sampleMemoryPeak(deps.memoryPeak, runId) : undefined;
     let peakResult: MemoryPeakResult | undefined;
     const finishPeak = async (): Promise<MemoryPeakResult | undefined> => {
@@ -282,14 +314,67 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
             }
           }
         : undefined;
+    let detached = false;
+    const cleanup = async (): Promise<void> => {
+      if (io) {
+        await removeIo(io.dir).catch((err: unknown) => {
+          log('动手会话的收发目录没删掉（引擎下次起来时的清理会收）', {
+            runId,
+            dir: io.dir,
+            error: errMessage(err),
+          });
+        });
+      }
+      await deps.trees.remove(tmpDir).catch((err: unknown) => {
+        log('一次性段会话的临时目录没删掉（引擎下次起来时的清理会收）', {
+          runId,
+          tmpDir,
+          error: errMessage(err),
+        });
+      });
+    };
+    const leaveHandoff = io && detach ? detach.enter(runId) : undefined;
     try {
-      const report = await driver.run(spec, {
+      if (io) cmd.detach?.detachable?.();
+      const running = driver.run(spec, {
         signal: cmd.signal,
         ...(onTranscript ? { onTranscript } : {}),
+        ...(io ? { io } : {}),
         ...(deps.db
           ? { onRateLimit: (reading: RateLimitReading) => saveReading(deps.db as Db, route, reading) }
           : {}),
       });
+      let report: HostReport;
+      if (io && detach) {
+        // 引擎要走了：驱动放手以后这次调用永远不落定（detached.ts），所以和放手信号赛跑；放手先到就交回 detached
+        const released = new Promise<null>((resolve) => {
+          if (detach.signal.aborted) resolve(null);
+          else detach.signal.addEventListener('abort', () => resolve(null), { once: true });
+        });
+        const first = await Promise.race([running, released]);
+        if (first === null) {
+          detached = true;
+          running.catch(() => undefined);
+          const at = new Date();
+          try {
+            await markDetached(io.dir, at);
+          } catch (err) {
+            // 标记没写上：新引擎收孤儿时会把它当没人接的收掉，接回那一步读不到输出、照实报
+            log('放手标记没写上（新引擎起来可能把这个会话当孤儿收掉）', { runId, error: errMessage(err) });
+          }
+          log('引擎要走了：动手会话脱开接着跑，下一个引擎接回', { runId, dir: io.dir });
+          return {
+            exitCode: null,
+            stdout: '',
+            stderr: '',
+            killed: false,
+            detached: { at: at.toISOString() },
+          };
+        }
+        report = first;
+      } else {
+        report = await running;
+      }
       const outcome = outcomeOfReport(report);
       const measured = await finishPeak();
       if (measured) {
@@ -336,16 +421,12 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       }
       return outcome;
     } finally {
+      leaveHandoff?.();
       await recorder?.close();
       await finishPeak().catch(() => undefined);
       await finishCpu().catch(() => undefined);
-      await deps.trees.remove(tmpDir).catch((err: unknown) => {
-        log('一次性段会话的临时目录没删掉（引擎下次起来时的清理会收）', {
-          runId,
-          tmpDir,
-          error: errMessage(err),
-        });
-      });
+      // 放手了：临时目录、收发目录都留给接回的那个引擎
+      if (!detached) await cleanup();
     }
   };
 }

@@ -2,22 +2,28 @@
 // 选路预占着的名额。只在 worker.ts 的 createEngineWorker 里调一次（真端口才有）。
 //
 // 改这里之前必须知道：
-// - 三段的一次性会话（动手 runSegment、验收 coldVerify）不脱开引擎进程跑，上一轮引擎一退它们就断了：scope 要收、临时目录
-//   要清、库里没收场的 runs 行要收成没跑完——不收，切号就一直以为它们在跑、一直等（#157）；预占的名额不清，选路就一直当池占着（#757）。
+// - 走管道的一次性会话（验收、整理、Mirasim 上的动手）上一轮引擎一退就断了：scope 要收、临时目录要清、库里没收场的 runs 行要收成
+//   没跑完——不收，切号就一直以为它们在跑、一直等（#157）；预占的名额不清，选路就一直当池占着（#757）。
 //   所以这几步只能在接活之前跑：这时进程里没有任何会话，清的时候不会碰到这一轮刚起的。
-// - 老 Fusion 会话端口（startSession / awaitSession，会话脱开引擎跑、重启后接回）已经没有调用方，整条线随 #901 删了；
-//   所以这里不再留「还能接回的」：scope 在册就是上一轮的、没人会来接，一律收掉。
+// - 脱开引擎跑的动手会话（#2238，session-handoff.ts）：上一个引擎走时放了手、收发目录里有放手标记、还没过 HANDOFF_TTL_MS 的，
+//   scope、临时目录、runs 那一行都不碰——工作流马上会带 attach 来接回。没有标记的收发目录（收过场、或者被叫停的）删掉。
+//   到了 TTL 还带着标记的（没人来接：单子在引擎不在时被放弃了之类）由起来后的那一次延迟清扫照孤儿收掉。
 // - 列不出 scope 要明确报错，不当成一个都没有（照旧让工人起不来，比悄悄留着孤儿好）；临时目录列不出、删不掉只记日志，
 //   不挡工人接活（留着的只占盘，下次起来再清）。
 
 import { listAgentScopes, SESSION_USERS, stopScope } from '@fleet-dao/adapters';
 import { clearReservations, closeOpenRuns, type Db, resolveAlertWithReason } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
+import { awaitingAttach, HANDOFF_TTL_MS, type IoEntry, listIo, removeIo } from './session-handoff.ts';
 import type { WorkTrees } from './worktrees.ts';
 
 /** 工人起来时收掉上一轮引擎留下、还开着的 runs 行（#157）写的原因。 */
 export const ORPHAN_RUN_REASON =
-  '引擎重启时这一段还没收场：一次性会话不脱开引擎进程跑，上一轮引擎一退它就断了（新引擎起来时收掉了它的 scope），按没跑完收掉';
+  '引擎重启时这一段还没收场：会话走管道跑，上一轮引擎一退它就断了（新引擎起来时收掉了它的 scope），按没跑完收掉';
+
+/** 放手的会话过了时限没人接回、照孤儿收掉时 runs 那一行写的原因。 */
+export const UNCLAIMED_RUN_REASON =
+  '引擎重启时这一段脱开引擎接着跑，放手以后过了时限没人接回（单子多半在引擎不在时被放弃了），照孤儿收掉';
 
 /** 已退役的提醒编号（原来 session-io.ts 的 IO_ROOT_ALERT_KEY）。 */
 export const RETIRED_IO_ROOT_ALERT_KEY = 'engine-session-io';
@@ -25,7 +31,13 @@ export const RETIRED_IO_ROOT_ALERT_KEY = 'engine-session-io';
 export interface OrphanReapDeps {
   db: Db;
   /** 会话临时目录的管理（real/worktrees.ts）：只用列、删这两样。 */
-  trees: Pick<WorkTrees, 'listTmp' | 'remove'>;
+  trees: Pick<WorkTrees, 'listTmp' | 'remove' | 'tmpFor'>;
+  /** 动手会话的收发目录的根（#2238，session-handoff.ts）。不给 = 不认放手标记，scope 一律收（测试、开发机）。 */
+  ioRoot?: string;
+  /** 放手以后等人接回多久（默认 HANDOFF_TTL_MS）。 */
+  handoffTtlMs?: number;
+  /** 起来以后过多久清扫一次没人接回的（默认 = handoffTtlMs）；测试换掉。 */
+  later?: (fn: () => void, ms: number) => void;
   /** 经 sudo 调的帮手（fleet-agent-scope）；测试里换成假的。 */
   helper?: string;
   sudo?: readonly string[];
@@ -43,8 +55,49 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
     ...(deps.sudo ? { sudo: deps.sudo } : {}),
   };
 
-  /** 上一轮会话留下的临时目录：_tmp 下的全清掉。列不出来、删不掉都明说没清成（记日志），不抛。回删掉了几个。 */
-  async function sweepTmp(): Promise<number> {
+  const ttlMs = deps.handoffTtlMs ?? HANDOFF_TTL_MS;
+  const later =
+    deps.later ??
+    ((fn: () => void, ms: number) => {
+      setTimeout(fn, ms).unref?.();
+    });
+
+  /** 收发目录列一遍；列不出来只记日志、当一个都没有（那就和以前一样，scope 一律收）。 */
+  async function readIo(): Promise<IoEntry[]> {
+    if (!deps.ioRoot) return [];
+    try {
+      return await listIo(deps.ioRoot);
+    } catch (error) {
+      log('动手会话的收发目录列不出来：放了手的会话认不出，照孤儿收', { error: errMessage(error) });
+      return [];
+    }
+  }
+
+  /** 到了 TTL 还没人接回的：scope、收发目录、临时目录、runs 那一行照孤儿收。不抛，收不掉的记日志。 */
+  async function sweepUnclaimed(ids: readonly string[]): Promise<void> {
+    const left = new Map((await readIo()).map((e) => [e.runId, e]));
+    const unclaimed = ids.filter((id) => left.get(id)?.detachedAt !== undefined);
+    if (unclaimed.length === 0) return;
+    for (const id of unclaimed) {
+      log(`脱开跑的会话 ${id} 放手后 ${Math.round(ttlMs / 60_000)} 分钟没人接回，照孤儿收掉`);
+      const error = await stopScope({ id, user: SESSION_USERS[0], ...helperOpts });
+      if (error) log(`没人接回的会话 ${id} 收不掉`, { error });
+      const dir = left.get(id)?.dir;
+      if (dir)
+        await removeIo(dir).catch((e: unknown) => log('收发目录没删掉', { dir, error: errMessage(e) }));
+      await trees
+        .remove(trees.tmpFor(id))
+        .catch((e: unknown) => log('临时目录没删掉', { id, error: errMessage(e) }));
+    }
+    try {
+      await closeOpenRuns(db, { endedAt: clock(), reason: UNCLAIMED_RUN_REASON, only: unclaimed });
+    } catch (error) {
+      log('没人接回的会话那几行 runs 没收上', { error: errMessage(error) });
+    }
+  }
+
+  /** 上一轮会话留下的临时目录：_tmp 下的全清掉（等人接回的除外）。列不出来、删不掉都明说没清成（记日志），不抛。回删掉了几个。 */
+  async function sweepTmp(keep: ReadonlySet<string>): Promise<number> {
     let dirs: string[];
     try {
       dirs = await trees.listTmp();
@@ -55,6 +108,7 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
     let removed = 0;
     const failed: string[] = [];
     for (const dir of dirs) {
+      if (keep.has(dir.split('/').pop() ?? '')) continue;
       try {
         if (!(await trees.remove(dir)).gone) removed += 1;
       } catch (error) {
@@ -74,18 +128,36 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
     if (!listed.ok) {
       throw new Error(`查不了上一轮留下的会话（fleet-agent-scope list）：${listed.detail}`);
     }
+    const io = await readIo();
+    const keep = awaitingAttach(io, clock(), ttlMs);
     let reaped = 0;
     for (const scope of listed.scopes) {
       if (scope.state === 'inactive') continue;
+      if (keep.has(scope.id)) {
+        log(`上一个引擎放了手的会话 ${scope.id} 还在跑，留着等工作流接回`);
+        continue;
+      }
       log(`上一轮留下的会话 ${scope.id} 没人会再来接，收掉`);
       // stop 只按编号收；用户只过帮手参数的校验。
       const error = await stopScope({ id: scope.id, user: SESSION_USERS[0], ...helperOpts });
       if (error) throw new Error(`收不掉上一轮留下的会话 ${scope.id}：${error}`);
       reaped += 1;
     }
-    const swept = await sweepTmp();
+    const swept = await sweepTmp(keep);
     if (swept > 0) log(`删掉上一轮会话留下的临时目录 ${swept} 个`);
-    const closed = await closeOpenRuns(db, { endedAt: clock(), reason: ORPHAN_RUN_REASON });
+    // 收发目录：等人接回的留着，别的（收过场、被叫停、过了时限的）删掉
+    for (const e of io) {
+      if (keep.has(e.runId)) continue;
+      await removeIo(e.dir).catch((error: unknown) =>
+        log('上一轮会话留下的收发目录没删掉（下次起来再清）', { dir: e.dir, error: errMessage(error) }),
+      );
+    }
+    const closed = await closeOpenRuns(db, {
+      endedAt: clock(),
+      reason: ORPHAN_RUN_REASON,
+      except: [...keep],
+    });
+    if (keep.size > 0) later(() => void sweepUnclaimed([...keep]), ttlMs);
     if (closed.length > 0) {
       log(`上一轮引擎起的一次性会话没收场的 ${closed.length} 个，库里那几行收成没跑完：${closed.join('、')}`);
     }

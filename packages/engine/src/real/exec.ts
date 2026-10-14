@@ -9,6 +9,7 @@ import {
   type ScopeLimits,
   type SessionUser,
   scopePrefix,
+  stopScope,
 } from '@fleet-dao/adapters';
 
 export interface UserCommand {
@@ -44,6 +45,14 @@ const STDERR_TAIL = 4000;
 /** stdout 上限：bundle 最大 100 MiB（github 包的 MAX_BUNDLE_BYTES），多留一点。超了就杀掉、算失败。 */
 export const MAX_STDOUT_BYTES = 110 * 1024 * 1024;
 
+/**
+ * 超时、被叫停杀掉以后最多再等多久「进程关了管道」（毫秒）。经 sudo 起的命令：杀的是 sudo，SIGKILL 它转不了，scope 里以会话用户
+ * 跑的那一侧还活着、攥着输出管道，close 永远不来——活动就一直不落定，引擎收到停机信号也停不下来（工人卡在 DRAINING，
+ * systemd 6 分钟后 SIGKILL，#2238：10-15 凌晨 04:49、05:53、06:13、06:58 四次发版都这样）。所以杀的同时经帮手收掉整个 scope，
+ * 再等这么久还不关就不等了：照「没正常退出」交回。
+ */
+export const KILL_SETTLE_MS = 10_000;
+
 interface SpawnPlan {
   command: string;
   args: string[];
@@ -51,7 +60,14 @@ interface SpawnPlan {
   env: Record<string, string>;
 }
 
-function run(plan: SpawnPlan, command: UserCommand, maxStdout: number): Promise<UserCommandResult> {
+function run(
+  plan: SpawnPlan,
+  command: UserCommand,
+  maxStdout: number,
+  /** 收掉这条命令的 scope（会话用户那一侧的进程不随 sudo 死）；不给 = 没有 scope（本机直接起的）。 */
+  stop?: () => Promise<unknown>,
+  settleMs: number = KILL_SETTLE_MS,
+): Promise<UserCommandResult> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let bytes = 0;
@@ -60,11 +76,14 @@ function run(plan: SpawnPlan, command: UserCommand, maxStdout: number): Promise<
     let aborted = false;
     let overflow = false;
     let settled = false;
+    let killed = false;
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
     const child = spawn(plan.command, plan.args, { cwd: plan.cwd, env: plan.env, stdio: 'pipe' });
     const finish = (result: UserCommandResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(settleTimer);
       command.signal?.removeEventListener('abort', onAbort);
       resolve(result);
     };
@@ -74,6 +93,24 @@ function run(plan: SpawnPlan, command: UserCommand, maxStdout: number): Promise<
       } catch {
         // 已经退了
       }
+      if (killed) return;
+      killed = true;
+      // 经 sudo 起的：scope 里那一侧要经帮手收，不然它一直跑、一直攥着管道
+      if (stop) void stop().catch(() => undefined);
+      settleTimer = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish({
+          code: null,
+          stdout: Buffer.concat(chunks),
+          stderr:
+            `${stderr}\n杀掉以后 ${Math.round(settleMs / 1000)} 秒管道还没关（scope 那一侧没停下），不等了`.slice(
+              -STDERR_TAIL,
+            ),
+          timedOut,
+          aborted,
+        });
+      }, settleMs);
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -128,6 +165,8 @@ export interface ScopeExecOptions {
   sudo?: readonly string[];
   limits?: ScopeLimits;
   maxStdoutBytes?: number;
+  /** 杀掉以后最多再等多久管道关（默认 KILL_SETTLE_MS）；测试调小。 */
+  killSettleMs?: number;
 }
 
 /** 生产用：`sudo -n fleet-agent-scope run <编号> --user <用户> --cwd <目录> -- <命令…>`。 */
@@ -158,6 +197,8 @@ export function scopeExec(options: ScopeExecOptions = {}): UserExec {
       },
       command,
       options.maxStdoutBytes ?? MAX_STDOUT_BYTES,
+      () => stopScope(scope),
+      options.killSettleMs,
     );
   };
 }

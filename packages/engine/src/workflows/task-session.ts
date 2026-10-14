@@ -34,6 +34,8 @@ import type { TierDecision } from '../runner/tier.ts';
 import {
   ORG_SWITCH_CODE,
   ROUTE_RETRY_SECONDS,
+  type RunSegmentInput,
+  SEGMENT_DETACHED,
   SEGMENT_MINUTES,
   SEGMENT_STAGE,
   type SegmentEvidence,
@@ -143,32 +145,38 @@ export async function writeSession(
     let evidence: SegmentEvidence | null = null;
     let infra: unknown = null;
     try {
+      const segmentInput: RunSegmentInput = {
+        schemaVersion: 1,
+        taskId: rt.input.taskId,
+        repo: rt.input.repo,
+        issueNumber: rt.input.issueNumber,
+        route,
+        worktreePath: wt.path,
+        branch: rt.branch,
+        baseSha: rt.since,
+        brief,
+        tier,
+        feedback: rt.feedback,
+        timeoutMinutes:
+          patienceWaited > 0 ? segmentMinutesAfterPatience(SEGMENT_MINUTES, patienceWaited) : SEGMENT_MINUTES,
+        ...(interrupted ? { interrupted } : {}),
+        ...(resumeSessionId ? { resumeSessionId } : {}),
+        // 只记账（runs.pr_number，#216）：第一轮会话交付之后才开 PR，这时还没有
+        ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
+      };
       // pausable：hard 暂停（#820 片 3）能把这一段取消掉；取消后回到循环头，停在检查点等「继续」，继续了在原树原分支上重跑
-      const res = await rt.cancellable(
-        () =>
-          rt.acts.runSegment({
-            schemaVersion: 1,
-            taskId: rt.input.taskId,
-            repo: rt.input.repo,
-            issueNumber: rt.input.issueNumber,
-            route,
-            worktreePath: wt.path,
-            branch: rt.branch,
-            baseSha: rt.since,
-            brief,
-            tier,
-            feedback: rt.feedback,
-            timeoutMinutes:
-              patienceWaited > 0
-                ? segmentMinutesAfterPatience(SEGMENT_MINUTES, patienceWaited)
-                : SEGMENT_MINUTES,
-            ...(interrupted ? { interrupted } : {}),
-            ...(resumeSessionId ? { resumeSessionId } : {}),
-            // 只记账（runs.pr_number，#216）：第一轮会话交付之后才开 PR，这时还没有
-            ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
-          }),
-        { pausable: true },
-      );
+      let res = await rt.cancellable(() => rt.acts.runSegment(segmentInput), { pausable: true });
+      // 引擎换版本、重启时会话没停、脱开接着跑（#2238）：隔一会儿带上 attach 接回，等它收场——不算失败、不换路由、不重起。
+      // 老引擎还在排空时接回会当场再交回 detached，所以隔一会儿再接。老历史没有这个标记（也不会有 detached）
+      while (!res.ok && res.outcome === SEGMENT_DETACHED && res.detached && patched('segment-reattach')) {
+        const attach = res.detached;
+        await rt.pause(
+          'retry',
+          '引擎在换版本：动手会话脱开引擎接着跑，等新引擎接回',
+          SEGMENT_REATTACH_SECONDS,
+        );
+        res = await rt.cancellable(() => rt.acts.runSegment({ ...segmentInput, attach }), { pausable: true });
+      }
       if (res.ok) {
         rt.lastImplementRoute = route;
         const resumed = resumeSessionId !== undefined;
@@ -307,6 +315,9 @@ export async function writeSession(
     }
   }
 }
+
+/** 动手会话脱开引擎跑着、引擎在换版本（#2238）：隔多久去接回一次（老引擎还在排空时接回会再交回 detached）。 */
+export const SEGMENT_REATTACH_SECONDS = 20;
 
 /**
  * 重试、重派之前确认上一段真停了（决定 0093）：没收场就停下等人、写明原因，回 false（调用方回循环头，人点继续后再选再起）；
