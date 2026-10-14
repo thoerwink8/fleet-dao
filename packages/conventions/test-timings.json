@@ -737,7 +737,6 @@
     "packages/web/src/test/routing-mobile-1806.test.tsx": 3490,
     "packages/web/src/test/routing-page.test.tsx": 2805,
     "packages/web/src/test/routing-roster.test.tsx": 469,
-    "packages/web/src/test/routing-screenshots.test.ts": 8,
     "packages/web/src/test/routing-states.test.tsx": 1634,
     "packages/web/src/test/settings-1917.test.tsx": 1836,
     "packages/web/src/test/sheet-back-close.test.tsx": 405,
