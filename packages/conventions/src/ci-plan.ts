@@ -362,11 +362,17 @@ export const PATH_RULES: readonly Rule[] = [
     why: 'deploy/test 核对端口表、放文件的命令，db 的测试读它；conventions 的 ops-tables 测试拿真仓核对五张生成表',
   },
   // 决定 0087 的钉子测试 agents/test/rules/subagent-model.rules.test.ts 读 docs/decisions/0087-…md 核对要点都在：
-  // 只改这份决定文档也要测 agents（其余 decisions/ 是历史记录，#654，不进门）。0035 原先也读，0087 取代了那一半，不再读。
+  // 只改这份决定文档也要测 agents。0035 原先也读，0087 取代了那一半，不再读。
   {
     match: exact('docs/decisions/0087-three-subagent-roles.md'),
-    units: [AGENTS_UNIT],
-    why: 'subagent-model.rules.test.ts 读它核对决定 0087 的要点',
+    units: [AGENTS_UNIT, 'conventions'],
+    why: 'subagent-model.rules.test.ts 读它核对决定 0087 的要点；conventions 的 decisions-index 测试核对索引',
+  },
+  // 决定索引 README.md 由各份决定书头部生成，conventions 的 decisions-index.test.ts 拿真仓核对「生成结果 == 仓里文件」
+  {
+    match: under('docs/decisions/'),
+    units: ['conventions'],
+    why: 'decisions-index.test.ts 核对索引和各份头部一致（pnpm decisions:index 重新生成）',
   },
   // agents/ 是 agents-sync 的输入，也是 agents 单测的输入：通用段原件 agents/shared-rules.md 标记成对、skill 格式由
   // agents-sync 和 agents 的单测读真文件核对，通用段自己也被 agents 的钉子测试读（agents/test/rules/ 读这几条规矩在不在，#522）。

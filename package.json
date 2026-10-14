@@ -29,6 +29,7 @@
     "progress": "node packages/conventions/src/bin/progress.ts",
     "issue:close": "node packages/conventions/src/bin/issue-close.ts",
     "debt:check": "node packages/conventions/src/bin/debt-check.ts",
+    "decisions:index": "node packages/conventions/src/bin/decisions-index.ts",
     "plan": "node packages/conventions/src/bin/plan.ts",
     "github:audit": "node packages/conventions/src/bin/github-audit.ts",
     "branch:hygiene": "node packages/conventions/src/bin/branch-hygiene.ts",

@@ -222,10 +222,7 @@ describe('跑哪些测试：和 CI 按改动跑同一套判法', () => {
   };
 
   it('只改文档（没有受影响的包），没给「谁读文档」的判法：带上 CI 每个 PR 都跑的整份，不全跑、不算失败', () => {
-    const s = selectTests(
-      ['docs/decisions/0002-fusion.md', 'specs/164-会话内存与交活测试/方案.md', 'README.md'],
-      GRAPH,
-    );
+    const s = selectTests(['docs/design.md', 'specs/164-会话内存与交活测试/方案.md', 'README.md'], GRAPH);
     const whole = [...new Set([...LOCAL_ALWAYS_TESTS, ...ALWAYS_TESTS])];
     expect(s).toMatchObject({ kind: 'some', paths: whole });
     expect(vitestArgs(s)).toEqual(['run', ...whole]);

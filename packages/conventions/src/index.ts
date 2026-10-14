@@ -17,6 +17,15 @@ export {
   staleRefFindings,
   untrackedDeferrals,
 } from './debt.ts';
+// 决定索引由各份决定书头部生成（bin/decisions-index.ts）。
+export {
+  checkDecisionsIndex,
+  type DecisionEntry,
+  type DecisionsProblem,
+  generateDecisionsIndex,
+  readDecisions,
+  renderIndex,
+} from './decisions-index.ts';
 export {
   checkDocPointers,
   DOCS,

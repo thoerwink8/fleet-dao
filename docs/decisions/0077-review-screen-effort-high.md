@@ -1,5 +1,7 @@
 # 0077 评审初筛 fleet-review-screen 的 effort 从 medium 调到 high，别的子代理档和 effort 不变（补充 0036）
 
+- 索引状态：历史
+- 被取代：0087
 - 日期：2026-10-10（北京时间）
 - 谁拍的：创始人要求探查每个子代理的能力并按最佳实践定场景（原话在下面）；按探查数据调哪一处由指挥官定。
 - 现状：已被 0087 替代（`0087-three-subagent-roles.md`）：`fleet-review-screen` 删了，评审初筛归斥候 `Explore`（effort medium）。下面是当时的原文。

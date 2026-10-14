@@ -212,14 +212,18 @@ export const EXTERNAL_INPUT_FILES: readonly string[] = [
   ...ROOT_CONFIG_FILES,
   'AGENTS.md',
   'docs/ops.md',
-  // 决定 0087 的钉子测试读它（PATH_RULES 里同一道门）
-  'docs/decisions/0087-three-subagent-roles.md',
   '.github/pull_request_template.md',
   '.gitignore',
   '.claude/settings.json',
 ];
 /** 测试读的包外目录（整棵）：CI 工作流、装机脚本、agents（skill 和调工具前的钩子）、推前钩子。 */
-export const EXTERNAL_INPUT_DIRS: readonly string[] = ['.github/workflows', 'deploy', 'agents', '.githooks'];
+export const EXTERNAL_INPUT_DIRS: readonly string[] = [
+  '.github/workflows',
+  'deploy',
+  'agents',
+  '.githooks',
+  'docs/decisions',
+];
 
 /**
  * 测试会通读「所有包的测试源码、package.json」的单元：ci-plan.test.ts 的扫描器遍历每个包的 test/ 和 src 里的测试文件，
