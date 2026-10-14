@@ -107,8 +107,8 @@
         "说明": "引擎工人取活的任务队列（同 engine.env）：/healthz 的 engine 项查这条队列上有没有 poller"
       },
       "FLEET_NODE_KEYS": {
-        "private": "dbf08daccc1f9dde1a7d0bd523cb67b37c0930708c1b1b10222c1a7edb493aca",
-        "说明": "看板多机（全仓审查第 1 路）：收别的环境推来的快照要认的通行证表，形如 {\"local\":\"<通行证的 sha256>\"}，里面只有哈希、没有明文；私有值，这里记的是整行值的指纹（HMAC，不是密钥）。2026-10-13 指挥官按 #1991（本机会话推送）在法国 api.env 的表里加了一台环境 founder-pc（创始人本机）的通行证哈希，线上值变了，指纹随之重算为现在这个；表里其余几台以法国线上为准（local 那项没人持有时可删，见 docs/ops.md）。以后每次增删环境（fleet-api node-key new <环境> 贴进 api.env、重启 fleet-api 之后）都要重算：在法国以 root 跑 node /srv/fleet-dao/deploy/france/auto-release/config.mjs fingerprint <api.env 的路径> FLEET_NODE_KEYS，把打印的指纹换进这里的 private，提 PR 合进主线，再跑保险箱的 refresh.sh（docs/ops.md「配置进仓对账」「接上法国看板」）；不重算，对账报不一致、france.sh 读回判红。没配（空着）时 POST /api/nodes/report 回 503、不收任何快照，不是 401"
+        "private": "0cf58f9832982e7c66cbfa0c072ca14d02af94771390f29b66d7672456e433da",
+        "说明": "看板多机、本机会话上报：收别的环境推来的快照要认的通行证表，形如 {\"<环境编号>\":\"<通行证的 sha256>\"}，里面只有哈希、没有明文；私有值，这里记的是整行值的指纹（HMAC，不是密钥）。现在只有 founder-pc（创始人本机）一项，早不用的 local（本机 WSL 演练台，已撤）已删（#2236）。加一个环境：fleet-api node-key new <环境>，贴进 api.env；撤一个环境：在法国以 root 跑 node /srv/fleet-dao/deploy/france/auto-release/config.mjs drop-entry api.env FLEET_NODE_KEYS <环境>（只删那一项、不打印值，打印删完的指纹）。增删之后重启 fleet-api，把新指纹（drop-entry 打印的，或 config.mjs fingerprint api.env FLEET_NODE_KEYS 算的）换进这里的 private，提 PR 合进主线，再跑保险箱的 refresh.sh（docs/ops.md「配置进仓对账」「接上法国看板」）；不重算，对账报不一致、france.sh 读回判红。没配（空着）时 POST /api/nodes/report 回 503、不收任何快照，不是 401"
       },
       "FLEET_NODE_REPORT_URL": {
         "value": "",
