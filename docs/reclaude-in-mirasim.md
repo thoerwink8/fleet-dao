@@ -37,8 +37,9 @@ Go 核心共用，GitHub Actions 在 Windows、Intel Mac、Apple Silicon Mac 和
 ```bash
 pnpm agents:sync                   # 取得最新主线并自动安排旧封装迁移
 pnpm mirasim:migrate               # 当前检出的迁移器：等空闲、迁移、回读确认
-pnpm mirasim:migrate --check       # 只读，未迁移/未确认退出 75
+pnpm mirasim:migrate --check       # 只读：已是当前新版 0；被改回裸 claude 75；从没装过 75
 pnpm mirasim:migrate --rollback    # 等空闲，恢复迁移前的命令与参数
+pnpm mirasim:audit [--days N]      # 只读对账，见 3.2
 ```
 
 Node 须为 22.22 或以上。目标机器无需安装 Go：有 Go 时从本仓编译；没有时用已登录的 `gh` 下载主线成功工作流中与源码匹配的构建，核对 manifest、架构、SHA-256 和版本。构建不存在、下载/校验失败或目标 reclaude 不可用都明确报错，不把旧文件或自报版本当作新版。
@@ -52,6 +53,8 @@ Node 须为 22.22 或以上。目标机器无需安装 Go：有 Go 时从本仓�
 - `releases/<源码 hash>/`：新版产物。旧封装和历史版本保留，撤回不删除会话或账号数据。
 
 主动撤回后，同一源码版本不会被自动同步重新装回；后续新版本或显式 `pnpm mirasim:migrate` 可以再次迁移。
+
+启动命令是 Mirasim 设置里的一个字段，人在界面改、Mirasim 升级、升级失败提示都可能把它改掉。开会话同步会核一次：迁移记录是 `migrated`、当前命令却是裸 `claude`/`claude.exe`/空，就判为被改掉了（drift）。**只发现、不自动装回**，不改 Mirasim 设置：`migrate --auto` 打一行「Mirasim 的 claude 启动命令被改回了裸 claude（不经 reclaude，会话全走平台额度）。要恢复：pnpm mirasim:migrate；确定不用：pnpm mirasim:migrate --rollback；排查看 docs/reclaude-in-mirasim.md「排查」一节」并退出 76，`agents-sync` 把它写成一条 `✗` 漂移，开会话钩子带进会话上下文。改成别的自定义命令不算被改掉；主动撤回过（`restored`）静默跳过。
 
 直接用 `node packages/mirasim-reclaude/bin/migrate` 也能运行，专用同步检出无需安装 `node_modules`。`--no-wait` 只尝试当前空闲状态，没完成退出 75；错误退出 1，不能把等待当迁移成功。
 
@@ -72,6 +75,42 @@ pnpm mirasim:health          # 只读汇总：daemon、当前线路及最近测�
 pnpm mirasim:health --run    # 现在就预热、测速、检查更新（空闲才装）再汇总
 ```
 
+### 3.2 排查：额度走错了怎么查、怎么修
+
+另一台机器上贴这一句：
+
+```text
+Mirasim 额度可能走错了，根据文档排查
+```
+
+听到这句就只照这一节做，在那台机器的 fleet-dao 仓根目录跑，不另写一套。三条命令都只读，可以随便跑；要改设置的修法只用下表里那一条，跑之前先确认没有在途回合要紧（迁移器自己会等空闲，不打断回合）。
+
+症状：说好走自有却扣了平台额度，或说好走平台却没有平台账；开会话上下文里有「启动命令被改回了裸 claude」；reclaude 慢或连不上。
+
+1. `pnpm mirasim:migrate --check`：启动命令现状。
+2. `pnpm mirasim:audit`（默认近 3 天，`--days N` 改）：先打启动命令现状，再每条近期有回合的会话一行：会话 ID 前 8 位、最近回合时间、Mirasim 设的路由、启动器每次拉起的 `route/gateway` 及次数、账本里 `/v1/messages` 的平台中继和直连计数。只打这些，不打请求内容、提示词、令牌。
+3. `pnpm mirasim:health`：reclaude 自己的状况（daemon、线路测速、版本），见 3.1。
+
+| 看到 | 意思 | 在那台机器上怎么修 |
+|---|---|---|
+| `--check` 退出 0「已经是当前新版」 | 启动命令没问题 | 不用修，接着看 audit |
+| `--check` 退出 75「被改回了裸 claude」，或 audit 顶行同样说 | 装过新版启动器，后来启动命令被改掉，所有会话绕过 reclaude 走平台 | 要恢复：`pnpm mirasim:migrate`；确定不用：`pnpm mirasim:migrate --rollback` |
+| `--check` 退出 75「还没装过新版启动器」 | 从没装过（裸 claude 或旧封装） | `pnpm mirasim:migrate` |
+| `--check` 退出 75「装的是旧版启动器」 | 新版没装上 | `pnpm mirasim:migrate` |
+| audit 标红 (c) 有回合但启动器没有拉起记录 | 启动器被绕过；通常和上面「被改回裸 claude」同时出现 | 同「被改回裸 claude」那一行 |
+| audit 标红 (b) 启动器选了自有，账本里却有平台中继账 | 剥网关没生效，自有会话扣了平台额度 | 先 `pnpm mirasim:migrate` 装到当前版本再看；仍红就把 audit 那几行和 `launch.log` 里对应会话的 `event=launch`/`event=reject` 行贴到单上，不在机器上手改 |
+| audit 标红 (a) 启动器选了平台，回合里却没有平台中继账 | 平台会话没走平台（或回合根本没发出请求） | 看那条会话在 Mirasim 里是不是报错的回合；不是就同 (b) 贴单 |
+| 退出 2「没查成」 | 日志、路由索引、会话或账本读不到或有坏行 | 按报出的文件修读权限或等写完再跑；没查成不等于没事 |
+| `mirasim:health` 线路不健康、daemon 没起 | reclaude 自己的问题，额度来源没错 | `pnpm mirasim:health --run`；网络坏了看下面 |
+
+audit 的判断：启动器日志里 `gateway=kept` 按平台、`gateway=stripped` 按自有；旧版启动器没有这个词时按 `route=cloud`/`route=local`。早于日志最早一行的回合不判 (c)（日志满 1MB 会清空重写）。有标红退出 1。
+
+网络坏了怎么办：
+
+- 只是某个会话：在 Mirasim 里把这个会话切到「平台」，下一回合生效。
+- 整台临时不走 reclaude：`pnpm mirasim:migrate --rollback`，好了再 `pnpm mirasim:migrate`。注意它恢复的是迁移前那条命令；迁移前若是旧封装 `reclaude-mirasim`，仍经 reclaude，这种机器只能逐会话切「平台」。
+- 不要在 Mirasim 设置里删启动命令：删了没人知道，开会话同步会一直报「被改回了裸 claude」。
+
 ## 4. 服务器（Linux）与 Fleet
 
 法国维持两个明确入口：自有 Claude 直接由 reclaude 起，无头 Mirasim 固定 `cloud`。账号池、渠道切换与额度耗尽后的任务接续由 Fleet/Temporal 控制；不默认安装桌面混合来源启动器。自动迁移入口在 Linux 明确跳过。
@@ -86,7 +125,7 @@ Fleet 接收 Mirasim 的平台成功结果前核账本：至少有计费模型�
 
 测试 runner 上的 Mac 协议与进程树验证不等于用户 Mac 的 GUI 接入或服务端账单验收。实际完成程度始终以 PR 和单子评论里的证据为准（2026-10-02 那几节的旧进度原文在 git 历史里）。
 
-诊断日志在 Windows `%LOCALAPPDATA%\reclaude-mirasim\launch.log`、Mac `~/Library/Caches/reclaude-mirasim/launch.log`、Linux `~/.cache/reclaude-mirasim/launch.log`，只记录版本、会话 ID、来源、generation 与失败原因，不记录认证字段，不占 stdout。
+诊断日志在 Windows `%LOCALAPPDATA%\reclaude-mirasim\launch.log`、Mac `~/Library/Caches/reclaude-mirasim/launch.log`、Linux `~/.cache/reclaude-mirasim/launch.log`，只记录版本、会话 ID、来源、generation 与失败原因，不记录认证字段，不占 stdout。`event=launch` 行带 `gateway=kept|stripped|none`（保留平台网关 / 剥掉走自有 / 参数里本来没有），只记这个词，不记网关地址和令牌。
 
 ## 6. Mirasim 提示「Claude Code 升级失败」
 

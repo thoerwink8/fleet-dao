@@ -12,7 +12,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { startWsServer, tempDir } from '@fleet-dao/adapters/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { type MigrationOptions, migrate } from '../src/migrate.ts';
+import { DRIFT_NOTICE, type MigrationOptions, migrate } from '../src/migrate.ts';
 import { runChildOk } from './child.ts';
 
 const mini =
@@ -419,6 +419,112 @@ describe('旧接入迁移与回读', { timeout: 20_000 }, () => {
       expect((await migrate({ ...m.config, auto: true })).state).toBe('skipped');
       expect((await migrate({ ...m.config, auto: true, platform: 'linux' })).state).toBe('skipped');
       expect(m.frames.some((f) => f.type === 'setAgentLaunch')).toBe(false);
+    } finally {
+      await m.close();
+    }
+  });
+});
+
+describe('启动命令被改回裸 claude：只发现、不自动装回', { timeout: 20_000 }, () => {
+  const launchIn = (setting: string) => JSON.parse(readFileSync(setting, 'utf8')).agentLaunch.claude;
+  const recordIn = (file: string) => JSON.parse(readFileSync(file, 'utf8'));
+  /** 人在 Mirasim 界面清掉启动命令：只剩参数，listClis 回 defaultBin=claude。 */
+  const clearCommand = (setting: string) => {
+    const data = JSON.parse(readFileSync(setting, 'utf8'));
+    delete data.agentLaunch.claude.command;
+    writeFileSync(setting, JSON.stringify(data));
+  };
+  const setCommand = (setting: string, command: string) => {
+    const data = JSON.parse(readFileSync(setting, 'utf8'));
+    data.agentLaunch.claude.command = command;
+    writeFileSync(setting, JSON.stringify(data));
+  };
+  const sets = (frames: Record<string, unknown>[]) =>
+    frames.filter((f) => f.type === 'setAgentLaunch').length;
+  // 自动同步在 Linux 上第一步就跳过（无头渠道归 Fleet 管），判被改掉是桌面行为：按桌面平台跑，Linux CI 上也测得到。
+  const desktopAuto = { auto: true, platform: 'darwin' } as const;
+
+  it('装过又被清成裸 claude：自动同步只报告不改设置，check 报 drift 退 75 档', async () => {
+    const m = await machine();
+    try {
+      await migrate(m.config);
+      clearCommand(m.setting);
+      const before = sets(m.frames);
+      const auto = await migrate({ ...m.config, ...desktopAuto });
+      expect(auto.state).toBe('drift');
+      expect(auto.detail).toBe(DRIFT_NOTICE);
+      expect(auto.detail).toMatch(/pnpm mirasim:migrate；确定不用：pnpm mirasim:migrate --rollback/);
+      expect(sets(m.frames)).toBe(before);
+      expect(launchIn(m.setting)).toEqual({ args: '--original' });
+      const check = await migrate({ ...m.config, check: true });
+      expect(check.state).toBe('waiting');
+      expect(check.status).toBe('drift');
+      expect(check.detail).toContain('裸 claude');
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('被清成裸 claude 后显式 pnpm mirasim:migrate 装回，迁移前仍记最初那条', async () => {
+    const m = await machine();
+    try {
+      const first = await migrate(m.config);
+      clearCommand(m.setting);
+      const back = await migrate(m.config);
+      expect(back.state).toBe('migrated');
+      expect(launchIn(m.setting)).toEqual({ command: first.command, args: '--original' });
+      expect(recordIn(back.recordFile).previous).toEqual({ command: m.oldCommand, args: '--original' });
+      expect((await migrate({ ...m.config, check: true })).state).toBe('current');
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('被清成裸 claude 后确定不用：--rollback 只记主动撤回、不改命令，之后自动同步静默', async () => {
+    const m = await machine();
+    try {
+      await migrate(m.config);
+      setCommand(m.setting, 'claude');
+      const before = sets(m.frames);
+      const back = await migrate({ ...m.config, rollback: true });
+      expect(back.state).toBe('restored');
+      expect(recordIn(back.recordFile).state).toBe('restored');
+      expect(launchIn(m.setting).command).toBe('claude');
+      const auto = await migrate({ ...m.config, ...desktopAuto });
+      expect(auto.state).toBe('skipped');
+      expect(auto.status).toBe('restored');
+      expect(sets(m.frames)).toBe(before);
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('被改成别的自定义命令：不当成被改掉，自动同步仍不覆盖', async () => {
+    const m = await machine();
+    try {
+      await migrate(m.config);
+      setCommand(m.setting, '/custom/keep-my-launcher');
+      const before = sets(m.frames);
+      const auto = await migrate({ ...m.config, ...desktopAuto });
+      expect(auto.state).toBe('skipped');
+      expect(auto.status).toBe('custom');
+      expect(sets(m.frames)).toBe(before);
+      expect(launchIn(m.setting).command).toBe('/custom/keep-my-launcher');
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('从没装过的裸 claude：check 报没装过并给安装命令，自动同步不出声', async () => {
+    const m = await machine();
+    try {
+      setCommand(m.setting, 'claude');
+      const check = await migrate({ ...m.config, check: true });
+      expect(check.state).toBe('waiting');
+      expect(check.status).toBe('never');
+      expect(check.detail).toContain('pnpm mirasim:migrate');
+      expect((await migrate({ ...m.config, ...desktopAuto })).state).toBe('skipped');
+      expect(sets(m.frames)).toBe(0);
     } finally {
       await m.close();
     }

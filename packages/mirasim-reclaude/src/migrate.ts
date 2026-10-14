@@ -37,11 +37,19 @@ export interface MigrationOptions {
   prepare?: (input: PreparedBinary) => Promise<string>;
 }
 export interface MigrationResult {
-  state: 'migrated' | 'current' | 'restored' | 'waiting' | 'skipped';
+  state: 'migrated' | 'current' | 'restored' | 'waiting' | 'skipped' | 'drift';
   command: string;
   recordFile: string;
   detail: string;
+  /** 只读判断出的启动命令现状，见 classifyLaunch。 */
+  status?: LaunchStatus;
 }
+/**
+ * 启动命令现状。Mirasim 的启动命令随时可能被人或升级改掉，所以要分清：
+ * installed＝当前就是本工具装的启动器；drift＝装过但被改回了裸 claude；
+ * never＝从没装过（含只有旧封装）；restored＝主动撤回过；custom＝人自己的启动器。
+ */
+export type LaunchStatus = 'installed' | 'drift' | 'never' | 'restored' | 'custom';
 interface Launch {
   command: string;
   args?: string;
@@ -57,8 +65,15 @@ interface RecordData {
 }
 type Json = Record<string, unknown>;
 
+/** 裸 claude：空命令、claude、claude.exe（带不带路径都一样），都不经 reclaude。 */
+export function isBareClaude(command: string): boolean {
+  if (!command.trim()) return true;
+  return ['claude', 'claude.exe'].includes(basename(command.replaceAll('\\', '/')).toLowerCase());
+}
+
 function sameLaunch(a: Launch, b: Launch): boolean {
-  return a.command === b.command && (a.args ?? '') === (b.args ?? '');
+  const sameCommand = a.command === b.command || (isBareClaude(a.command) && isBareClaude(b.command));
+  return sameCommand && (a.args ?? '') === (b.args ?? '');
 }
 
 function object(value: unknown): Json | undefined {
@@ -90,7 +105,7 @@ function launchOf(data: Json): Launch {
   if (launch?.args !== undefined && typeof launch.args !== 'string')
     throw new Error('Mirasim 启动参数格式错误');
   return {
-    command: typeof command === 'string' ? command : 'claude',
+    command: typeof command === 'string' && command.trim() ? command : 'claude',
     ...(typeof launch?.args === 'string' ? { args: launch.args } : {}),
   };
 }
@@ -202,7 +217,9 @@ async function liveLaunchOf(wire: MirasimWire, replyMs = 5_000): Promise<Launch>
     const rows = frame.clis.map(object).filter((row) => row?.id === 'claude');
     if (rows.length !== 1) throw new Error('Mirasim 启动器列表没有唯一 Claude 条目');
     const launch = object(rows[0]?.launch);
-    const command = launch?.command ?? launch?.defaultBin;
+    // 人在界面清空命令时 command 可能是空串，此时 Mirasim 用 defaultBin。
+    const command =
+      typeof launch?.command === 'string' && launch.command.trim() ? launch.command : launch?.defaultBin;
     if (typeof command !== 'string' || !command.trim()) throw new Error('Mirasim 启动器列表缺少有效命令');
     if (launch?.args !== undefined && typeof launch.args !== 'string')
       throw new Error('Mirasim 启动器参数格式错误');
@@ -274,7 +291,7 @@ async function setLaunch(wires: MirasimWire[], wanted: Launch, replyMs = 5_000):
     let matched = false;
     while (Date.now() < end) {
       const actual = await liveLaunchOf(wire, replyMs);
-      if (actual.command === wanted.command && (actual.args ?? '') === (wanted.args ?? '')) {
+      if (sameLaunch(actual, wanted)) {
         matched = true;
         break;
       }
@@ -308,22 +325,81 @@ export async function migrate(o: MigrationOptions): Promise<MigrationResult> {
   }
 }
 
+function readRecord(recordFile: string): RecordData | undefined {
+  if (!existsSync(recordFile)) return undefined;
+  const data = readJson(recordFile, '迁移记录');
+  if (
+    data.schema !== 1 ||
+    typeof data.command !== 'string' ||
+    typeof data.sourceHash !== 'string' ||
+    typeof data.binaryHash !== 'string' ||
+    !object(data.previous) ||
+    typeof object(data.previous)?.command !== 'string' ||
+    !String(object(data.previous)?.command).trim() ||
+    (object(data.previous)?.args !== undefined && typeof object(data.previous)?.args !== 'string') ||
+    !/^[0-9a-f]{64}$/.test(data.sourceHash as string) ||
+    !/^[0-9a-f]{64}$/.test(data.binaryHash as string) ||
+    !['prepared', 'migrated', 'restored'].includes(String(data.state))
+  )
+    throw new Error('迁移记录格式错误');
+  return data as unknown as RecordData;
+}
+
+/**
+ * 只看启动命令和迁移记录判断现状，不连 Mirasim、不验版本。
+ * drift 只认裸 claude：其他自定义命令是人有意配的，不当成被改掉。
+ */
+export function classifyLaunch(before: Launch, saved: RecordData | undefined): LaunchStatus {
+  if (saved?.state === 'migrated' && before.command === saved.command) return 'installed';
+  if (saved?.state === 'migrated' && isBareClaude(before.command)) return 'drift';
+  if (saved?.state === 'restored') return 'restored';
+  if (!compatible(before.command)) return 'custom';
+  return 'never';
+}
+
+/** 读本机现状给对账用；没有 Mirasim 设置返回 undefined。 */
+export function readLaunchStatus(home: string): { status: LaunchStatus; command: string } | undefined {
+  const setting = join(home, '.mirasim', 'setting.json');
+  if (!existsSync(setting)) return undefined;
+  const before = launchOf(readJson(setting, 'Mirasim 设置'));
+  const saved = readRecord(join(home, '.fleet-dao', 'mirasim-reclaude', 'migration.json'));
+  return { status: classifyLaunch(before, saved), command: before.command };
+}
+
+/** 开会话时自动同步只发现、不装回：这一行进开会话钩子的上下文，让人和 AI 都看见。 */
+export const DRIFT_NOTICE =
+  'Mirasim 的 claude 启动命令被改回了裸 claude（不经 reclaude，会话全走平台额度）。要恢复：pnpm mirasim:migrate；确定不用：pnpm mirasim:migrate --rollback；排查看 docs/reclaude-in-mirasim.md「排查」一节';
+
 async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
   const root = join(o.home, '.fleet-dao', 'mirasim-reclaude');
   const recordFile = join(root, 'migration.json');
+  let status: LaunchStatus | undefined;
   const result = (state: MigrationResult['state'], command: string, detail: string): MigrationResult => ({
     state,
     command,
     recordFile,
     detail,
+    ...(status ? { status } : {}),
   });
   if (o.auto && o.platform === 'linux') return result('skipped', '', 'Linux 的无头渠道保持由 Fleet 控制');
   const setting = join(o.home, '.mirasim', 'setting.json');
   if (!existsSync(setting) && o.auto) return result('skipped', '', '没有 Mirasim 旧接入');
   const before = launchOf(readJson(setting, 'Mirasim 设置'));
+  const saved = readRecord(recordFile);
+  status = classifyLaunch(before, saved);
+  // 被改回裸 claude：自动同步不改 Mirasim 设置，只把现象和修法说出来，由人决定装回还是撤回。
+  if (o.auto && status === 'drift') return result('drift', before.command, DRIFT_NOTICE);
   if (o.auto && !isManagedLaunch(before.command))
     return result('skipped', before.command, '未检测到本工具管理的旧封装，不覆盖自定义启动器');
-  if (!compatible(before.command)) throw new Error('当前启动器是自定义命令，自动迁移不会覆盖它');
+  if (!compatible(before.command)) {
+    if (o.check)
+      return result(
+        'waiting',
+        before.command,
+        '当前是自定义启动命令，本工具不覆盖；要改用新版，先在 Mirasim 里换回 claude 再执行 pnpm mirasim:migrate',
+      );
+    throw new Error('当前启动器是自定义命令，自动迁移不会覆盖它');
+  }
   const sourceHash = runtimeSourceHash(o.repo);
   const destination = join(
     root,
@@ -332,25 +408,6 @@ async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
     o.platform === 'win32' ? 'mirasim-reclaude.exe' : 'mirasim-reclaude',
   );
   const input: PreparedBinary = { ...o, sourceHash, destination };
-  let saved: RecordData | undefined;
-  if (existsSync(recordFile)) {
-    const data = readJson(recordFile, '迁移记录');
-    if (
-      data.schema !== 1 ||
-      typeof data.command !== 'string' ||
-      typeof data.sourceHash !== 'string' ||
-      typeof data.binaryHash !== 'string' ||
-      !object(data.previous) ||
-      typeof object(data.previous)?.command !== 'string' ||
-      !String(object(data.previous)?.command).trim() ||
-      (object(data.previous)?.args !== undefined && typeof object(data.previous)?.args !== 'string') ||
-      !/^[0-9a-f]{64}$/.test(data.sourceHash as string) ||
-      !/^[0-9a-f]{64}$/.test(data.binaryHash as string) ||
-      !['prepared', 'migrated', 'restored'].includes(String(data.state))
-    )
-      throw new Error('迁移记录格式错误');
-    saved = data as unknown as RecordData;
-  }
   if (
     o.auto &&
     saved?.state === 'restored' &&
@@ -378,7 +435,16 @@ async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
     verifyTarget(before.command, o.home);
     return result('current', before.command, '已经是当前新版，未重启会话');
   }
-  if (o.check) return result('waiting', before.command, '旧接入尚需迁移');
+  if (o.check) return result('waiting', before.command, checkDetail(status));
+  if (o.rollback && saved && status === 'drift') {
+    // 已经是裸 claude（不经 reclaude）：确定不用就只把记录改成主动撤回，命令不动，自动同步不再提示。
+    atomicJson(recordFile, { ...saved, state: 'restored', updatedAt: new Date().toISOString() });
+    return result(
+      'restored',
+      before.command,
+      '已记为主动撤回：启动命令保持裸 claude（走平台额度），自动同步不再提示',
+    );
+  }
   if (o.rollback && (!saved || before.command !== saved.command))
     throw new Error('当前命令与迁移记录不一致，不能覆盖或撤回');
   const wires = await connectInstances(o.home, o.replyMs ?? 5_000);
@@ -414,7 +480,9 @@ async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
       if (!sameLaunch(await liveLaunchOf(wire, o.replyMs), before))
         throw new Error('准备期间 Mirasim 启动配置已修改，未覆盖');
     }
-    const previous = saved && before.command === saved.command ? saved.previous : before;
+    // 被改回裸 claude 后由人显式装回：迁移前仍是最初那条，撤回时回到它。
+    const previous =
+      saved && (before.command === saved.command || isBareClaude(before.command)) ? saved.previous : before;
     const next: RecordData = {
       schema: 1,
       previous,
@@ -436,5 +504,18 @@ async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
     return result('migrated', executable, '旧接入已迁移，后续回合使用新机制');
   } finally {
     for (const wire of wires) wire.close();
+  }
+}
+
+function checkDetail(status: LaunchStatus): string {
+  switch (status) {
+    case 'drift':
+      return 'Mirasim 的 claude 启动命令被改回了裸 claude（不经 reclaude，会话全走平台额度）；要恢复执行 pnpm mirasim:migrate，确定不用执行 pnpm mirasim:migrate --rollback';
+    case 'restored':
+      return '已主动撤回，不经新版启动器；要重新启用执行 pnpm mirasim:migrate';
+    case 'installed':
+      return '装的是旧版启动器，尚需更新；下次开会话会自动安排，或现在执行 pnpm mirasim:migrate';
+    default:
+      return '这台还没装过新版启动器（裸 claude 或旧封装）；执行 pnpm mirasim:migrate 安装';
   }
 }
