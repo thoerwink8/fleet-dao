@@ -911,7 +911,7 @@ export function fakeMirasimRun(script: (spec: MirasimRunSpec, n: number) => Fake
       ...(s.noAccept ? {} : { sessionKey }),
       terminal: { isError: false, detail: 'done' },
       session: mirasimState({ model: spec.model ?? spec.expectModel, ...s.state }),
-      // route=cloud（design 第三节第 12 条：只留这一种）时 mirasimRunFacts 要看账本才算数（MS-27）：默认给一行像真的
+      // route=cloud（决定 0049：只留这一种）时 mirasimRunFacts 要看账本才算数（MS-27）：默认给一行像真的
       // 2xx，不然每条不特意测账本的用例都会白白判成 relayUnknown。要测账本没查成、没有 2xx，用 s.report.ledger 覆盖。
       ...(spec.route === 'cloud'
         ? {

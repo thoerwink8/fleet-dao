@@ -1,4 +1,4 @@
-// GitHub 作者白名单（design 第三节第 4 条：两位创始人、协作者、自家机器人）：由 users 表拼出来。
+// GitHub 作者白名单（决定 0041：两位创始人、协作者、自家机器人）：由 users 表拼出来。
 // 公开仓里陌生人也能开单、评论；设计删了「进门标签」，这道白名单就是唯一的门，所以在代码里强制，不靠互动限制。
 import { z } from 'zod';
 import type { Actor, User } from './ports.ts';

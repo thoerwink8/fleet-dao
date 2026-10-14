@@ -1154,7 +1154,7 @@ describe('Mirasim 的驱动（#345）', () => {
     expect(fake.specs[1]?.limits).toEqual({ startupMs: 150_000, wallClockMs: 200_000, idleMs: 90_000 });
   });
 
-  it('只留「中继额度」这一种路由：route 永远是 cloud（design 第三节第 12 条、MS-28：不许反代）', async () => {
+  it('只留「中继额度」这一种路由：route 永远是 cloud（决定 0049、MS-28：不许反代）', async () => {
     const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
     await driver.run(mirasimSpec(), {});
     expect(fake.specs[0]?.route).toBe('cloud');

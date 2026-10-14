@@ -1,4 +1,4 @@
-// 欠账检查（#67）：「以后要做」的事必须是一张开着的 issue（design 第三节第 35 条）。分两半（#87：必过检查必须确定）：
+// 欠账检查（#67）：「以后要做」的事必须是一张开着的 issue（决定 0071）。分两半（#87：必过检查必须确定）：
 // - 只看文件的（checkDebtDocs，.github/workflows/debt.yml 在主线推送和每天跑，不进 pnpm check）：活文档（AGENTS.md、README.md、agents/shared-rules.md、
 //   docs/ 下除了 reference/、decisions/、archive/）里推后的话（「以后再做」「先不建」「再定」「留到下一轮」「后面阶段」这类）同一句里要带单号。
 //   不读 GitHub：同一份代码什么时候跑、单子开着还是关了，结果都一样，没网也照常跑。

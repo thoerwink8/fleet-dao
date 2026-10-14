@@ -201,7 +201,7 @@ export function bashBacktickSubst(cmd) {
 const block = (message) => ({ code: 2, message });
 
 // —— 密钥文件：值不进对话 ——
-// 2026-09-27 撞过：帅位想看 reclaude 的配置长什么样，for 循环把 ~/.reclaude/*.json 逐个 node -e 读出来、按字段名猜着遮值，
+// 帅位想看 reclaude 的配置长什么样，for 循环把 ~/.reclaude/*.json 逐个 node -e 读出来、按字段名猜着遮值，
 // 漏了设备密钥和一个账号名，原样打进了对话。命令碰到下面这些密钥路径时，只放行不读内容的（列目录、看权限、判断在不在），
 // 看结构走同目录的 secret-shape.mjs（只打字段名、类型、长度）。挡的是会话手滑、不是存心绕：钩子看不清的写法
 // （cd 进去、赋给变量、循环、$( )、脚本块）一律按拦处理。没碰到这些路径的命令一概不管（快路：先整条扫一遍名字）。
@@ -257,7 +257,7 @@ const GENERIC_EXT = String.raw`[^${EDGE}\[\]{}$!+]*[^${EDGE}\[\]{}$!+.]\.(?:pass
 const GENERIC_RE = new RegExp(`(?:^|[${EDGE}])${GENERIC_EXT}`, 'i');
 /**
  * heredoc 正文里只认带路径分隔符的（/etc/ssl/server.key、C:\certs\a.pem）：正文多半是脚本，`item.key;`、`cfg.pem` 是属性名
- * 不是文件（决定 0089：两天误拦一串写脚本的 heredoc）。正文外照旧按 GENERIC_RE 认（cat server.key 照拦）。
+ * 不是文件。正文外照旧按 GENERIC_RE 认（cat server.key 照拦）。
  */
 const GENERIC_PATH_RE = new RegExp(String.raw`[\\/]${GENERIC_EXT}`, 'i');
 
@@ -1230,14 +1230,14 @@ function redactorAt(pipeline) {
 // —— 命令的输出里带密钥：打印进程命令行 ——
 // 命令行把口令当参数交给别的进程之后，口令就落在那个进程的命令行里（Windows 的 Win32_Process.CommandLine、Linux 的
 // /proc/<pid>/cmdline），而进程的命令行是公开的、谁都能读。于是「看现在有哪些进程」这条平常的命令会把它们整段打出来：
-// 2026-10-02 就是这么漏的（Get-CimInstance Win32_Process 看 MCP 服务起了没，lark-mcp 那行的 -s <secret> 全打进了对话；
-// 2026-09-30 那次是读 MCP 运行目录的 JSON，里面把飞书 app secret 写在参数里，当时那套遮值只认 40 个字符以上的串，
+// 就是这么漏的（Get-CimInstance Win32_Process 看 MCP 服务起了没，lark-mcp 那行的 -s <secret> 全打进了对话；
+// 另一次是读 MCP 运行目录的 JSON，里面把飞书 app secret 写在参数里，当时那套遮值只认 40 个字符以上的串，
 // 32 个字符的密钥过去了）。密钥文件那条（上面）只管「输入的路径」，管不到「命令的输出」，所以另立这一段。
 //
 // 得、程序名和 pid 不用管，但下面这几种写法一样把整条命令行打出来，认不出来就等于没有这一段：
 // ps -ef、pgrep -a、pstree -a、top -c、tasklist /v、/proc/<pid>/cmdline、wmic process、Win32_Process、
-// 挑出 CommandLine 那一列、systemctl dump（status / show / cat 决定 0089 起不拦）。
-// Claude Code 里看得清的（整条只有看进程、过滤文字的）不拦，改写成接上 redactor 放行（decide 末尾的 updatedInput，决定 0089）。
+// 挑出 CommandLine 那一列、systemctl dump。
+// Claude Code 里看得清的（整条只有看进程、过滤文字的）不拦，改写成接上 redactor 放行。
 //
 // 这一段的处理是「拦住、给条明路」，不是「一律不许看」：看进程是调试的日常，不能堵死。要跑就接一条管道
 // 把输出过 redactor（agents/hooks/redact-secrets.mjs，和这条钩子一起装进 ~/.fleet-dao/hooks/）：
@@ -1294,8 +1294,8 @@ const PSTREE_ARGS = new Set([...'CHN']);
 const TOP_ARGS = new Set([...'dEenopUu']);
 
 /**
- * systemctl 的子命令里还拦的只有 dump（内部状态，带每个服务的 ExecStart 参数和 ExecMain*）。status、show、cat 由决定 0089
- * 不再拦：天天用来看服务起没起，拦下全是误伤（规则减法，创始人 2026-10-13 17:54 同意）。
+ * systemctl 的子命令里还拦的只有 dump（内部状态，带每个服务的 ExecStart 参数和 ExecMain*）。status、show、cat
+ * 不再拦：天天用来看服务起没起，拦下全是误伤。
  */
 const SYSTEMCTL_PRINTS = new Set(['dump']);
 /** systemctl 的全局选项里吃掉一个值的（systemctl 1）：--property 的 =值 和 -p 的值都在这里认，别的开关不吃后面的词 */
@@ -1693,7 +1693,7 @@ function processListingVerdict(command, kind, rewrite = false) {
 // —— 从上层目录往下搜 ——
 // 上面按名字认，认的是写出来的密钥路径。从家目录（或更上层）、~/.claude、~/.ssh 往下搜内容，路径里一个名字都不出现，
 // 却会把 ~/.reclaude/device.json、~/.claude/.credentials.json、~/.ssh/id_* 一起搜出来：Claude 的 Grep 连点开头的隐藏文件
-// 一起搜（2026-09-27 本机实测；它认 .gitignore，所以仓里的 .secrets/、*.pem 搜不到），grep -r 也搜。起点是这些目录、
+// 一起搜（它认 .gitignore，所以仓里的 .secrets/、*.pem 搜不到），grep -r 也搜。起点是这些目录、
 // 又要打出匹配的内容时按拦处理；只列文件名、只数个数的，或者 glob、文件类型限定到碰不到密钥文件名的（比如 *.ts），放行。
 // 起点写成变量（$REPO）的认不出、不拦；从家目录列出文件再交给别的命令读（find ~ | xargs grep）也认不出：这是止血，不是保险箱。
 
@@ -2004,7 +2004,7 @@ function readVerdict(tool, what, input, fallbackCwd) {
 }
 
 /** 判一条钩子输入（原文）：{ code: 0 } 放行，{ code: 2, message } 拦下。 */
-// 前台等待上限（单次不超过 60 秒）由决定 0089 删掉：两天拦 18 次全是误伤；长命令后台跑是规矩里的写法，不再由钩子拦。
+// 前台等待上限（单次不超过 60 秒）删掉：两天拦 18 次全是误伤；长命令后台跑是规矩里的写法，不再由钩子拦。
 
 /**
  * 是不是 Claude Code 自己的 PreToolUse 输入（code.claude.com/docs/en/hooks 的输入例子：transcript_path、permission_mode、
@@ -2024,7 +2024,7 @@ export function isClaudeCodeInput(input) {
 }
 
 // —— N1 递归删除护栏 ——
-// 2026-09-29 C 盘被 grok 删过一次，这类规则原来 0 条。只拦字面写出来的：rm -r*、Remove-Item -Recurse（及别名）、rd/rmdir/del/erase /s，
+// C 盘被 grok 删过一次，这类规则原来 0 条。只拦字面写出来的：rm -r*、Remove-Item -Recurse（及别名）、rd/rmdir/del/erase /s，
 // 目标是盘符根、C:\Windows 及其下、Program Files*、ProgramData、用户目录和 AppData 顶层、主检出的 .git。
 // 看得穿 sudo、bash -c、pwsh -Command、cmd /c；看不穿的（robocopy /MIR、Get-ChildItem | Remove-Item、node -e fs.rmSync、python shutil.rmtree）不管。
 
@@ -2192,7 +2192,7 @@ export function decide(raw, fallbackCwd = '') {
   const { outer } = splitHeredocs(cmd);
   const del = recursiveDeleteVerdict(outer, kind, rawCwd);
   if (del) return del;
-  // 2026-09-26 撞过两回：子代理拼命令时反引号误跑了切号登录；总指挥 node -e "…`specs/…/需求.md`…" 把整份需求文档当脚本执行了。
+  // 子代理拼命令时反引号误跑了切号登录；总指挥 node -e "…`specs/…/需求.md`…" 把整份需求文档当脚本执行了。
   // PowerShell 里反引号是转义符，不归这条管；别家的终端是不是 bash 说不准，也不管。不分仓，全机都拦。
   if (kind === 'bash' && bashBacktickSubst(cmd)) {
     return block(
@@ -2219,13 +2219,13 @@ export function decide(raw, fallbackCwd = '') {
       "本机有 Claude 会话在跑：不许在本机跑 reclaude login / logout / org use（会让本机所有会话当场断掉）。要切号请创始人自己来；要在别的机器上跑，用 ssh <机器> '…'。",
     );
   }
-  // stash 栈是整个仓（所有工作树）共用一个：两个会话同时 stash/pop 会拿到对方的改动（2026-09-26 撞过）
+  // stash 栈是整个仓（所有工作树）共用一个：两个会话同时 stash/pop 会拿到对方的改动
   if (inFleet && /\bgit\b[^|;&\n]*\sstash\b(?!\s+(?:list|show)\b)/.test(outer)) {
     return block(
       'fleet-dao 里不用 git stash：stash 栈所有工作树共用，并行会话会互相拿错改动。临时存改动用 `git diff > 文件` / `git apply 文件`，或先提交到自己分支。',
     );
   }
-  // 2026-10-05 撞过：git reset --hard 把主检出一份还没验证的活回滚丢了。限制 fleet 仓的 Bash/PowerShell
+  // git reset --hard 把主检出一份还没验证的活回滚丢了。限制 fleet 仓的 Bash/PowerShell
   // 两条钩子管得着的壳，和「不用 git stash」那条并列。要回滚先提交个工作分支再 reset；
   // 想放下不要的活先 `git diff > _tmp/xxx.patch` 留底，或提交到自己分支（stash 被上一条拦，别指给人用）。
   if (inFleet && /\bgit\b[^|;&\n]*\sreset\b[^|;&\n]*\s--hard\b/.test(outer)) {
@@ -2244,7 +2244,7 @@ export function decide(raw, fallbackCwd = '') {
 }
 
 /**
- * 起子代理前先把 origin/main 取到最新（子代理的工作树从它切）；要建工作树又取不成只提示、不拦（fresh-main.mjs 的 freshBeforeSubagent，决定 0089）。
+ * 起子代理前先把 origin/main 取到最新（子代理的工作树从它切）；要建工作树又取不成只提示、不拦。
  * 这一步自己出错也不拦，同样返回一句提示：原来整段吞掉，子代理会从旧主线切工作树，没有任何提示（全仓审查第 4 路 S9）。
  * 输入认不出不算它出错（返回 null），由 decide 按拦处理。
  * @param {string} raw 钩子的原始输入
@@ -2330,9 +2330,9 @@ if (isMain()) {
   try {
     /** @type {unknown} */
     const input = JSON.parse(raw);
-    // 无人值守开着时记一笔「这个会话调了工具」（Stop 钩子靠它判有没有在干活，决定 0028）；只记不判，出错吞掉。
-    // 决定 0026：不因起后台活自动开无人值守（这里只记、不开）。Agent、Monitor、Workflow、送达类工具仍登记在这条钩子上，
-    // 见到就放行（decide 不认识它们的名字，不放行会被拦）。决定 0027 起不再读欠账。
+    // 无人值守开着时记一笔「这个会话调了工具」；只记不判，出错吞掉。
+    // 不因起后台活自动开无人值守（这里只记、不开）。Agent、Monitor、Workflow、送达类工具仍登记在这条钩子上，
+    // 见到就放行（decide 不认识它们的名字，不放行会被拦）。不再读欠账。
     const id = cleanId(prop(input, 'session_id')) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
     if (id) touchTool({ dir: stateDir(), sessionId: id });
     const tool = prop(input, 'tool_name') ?? prop(input, 'toolName');
@@ -2341,7 +2341,7 @@ if (isMain()) {
   } catch {
     // 输入认不出由下面的 decide 按拦处理
   }
-  // 起子代理前取不到远端：不拦（决定 0089），提示给模型（additionalContext）也给创始人看（systemMessage）
+  // 起子代理前取不到远端：不拦，提示给模型（additionalContext）也给创始人看（systemMessage）
   const fresh = subagentFreshness(raw);
   if (fresh) {
     process.stdout.write(

@@ -3,8 +3,8 @@
 // 有没有没提交的改动无关。
 //
 // 为什么要有它：开会话钩子原来是在开发机自己的检出里 fetch + 快进 main 再同步，于是主检出只要被人（AI 自己就常这样）
-// 切到功能分支上干活，这台机器就一直停在旧规矩上，没人提醒不会好（2026-10-01 创始人：「我希望每台机器，能在我们改动后，
-// 自动就同步，而不是人为提醒」）。现在另立一份检出，它只归本工具，永远停在 origin/main 的分离头上；本机自己的检出
+// 切到功能分支上干活，这台机器就一直停在旧规矩上，没人提醒不会好；改动合进主线后
+// 每台机器要自己同步，不靠人提醒。现在另立一份检出，它只归本工具，永远停在 origin/main 的分离头上；本机自己的检出
 // 只被当「种子」读（它的 origin 地址、它的本地对象），一个写操作都没有。
 //
 // 规矩（改这里之前必须知道）：
@@ -12,7 +12,7 @@
 // - 专用检出里出现没提交的改动（人改的、上次 checkout 写到一半留下的）就整份挪到它旁边的 `<dir>.bak-<时间>`（不删），
 //   再从零建一个干净的换上去：这条路上永远不拿仓库里没推的内容去同步，也不丢东西。
 // - 建的时候显式写死 core.autocrlf=false：专用检出里读到的字节要和仓里存的字节一致。开着 autocrlf 时 checkout 会把
-//   文件换成 CRLF（本机 gitconfig 就是 true），读回来的内容就和仓里的 blob 不是一回事了（2026-10-01 实测）。
+//   文件换成 CRLF（本机 gitconfig 就是 true），读回来的内容就和仓里的 blob 不是一回事了。
 // - 这台机器的 git 跑不起来、取不到远端、checkout 没落到 origin/main 上，都是要明说的失败，不当成「已是最新」。
 // - 测试：packages/agents-sync/test/sync-source.test.ts（真 git、临时目录）；这条路上每处失败都配一条故意造出来的。
 //
@@ -136,7 +136,7 @@ function buildSyncDir(dir, url, localFrom, want, options, g) {
   }
   const init = g(dir, ['init', '-q']);
   if (!ranOk(init)) return `在 ${dir} 里 git init 没成（${why(init)}）`;
-  // 读到的字节要和仓里存的一致：本机 gitconfig 的 autocrlf=true 会把 checkout 出来的文件换成 CRLF（2026-10-01 实测）
+  // 读到的字节要和仓里存的一致：本机 gitconfig 的 autocrlf=true 会把 checkout 出来的文件换成 CRLF
   const cfg = g(dir, ['config', 'core.autocrlf', 'false']);
   if (!ranOk(cfg)) return `设不了 core.autocrlf（${why(cfg)}）`;
   const add = g(dir, ['remote', 'add', 'origin', url]);

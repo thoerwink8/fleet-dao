@@ -1802,7 +1802,7 @@ export function createSeed(now: number): MockState {
         probe: {
           state: 'skipped',
           at: at(-5),
-          detail: '按量计费的渠道不自动探：探一次就多一笔账（design 第三节第 21 条）',
+          detail: '按量计费的渠道不自动探：探一次就多一笔账',
         },
         probeTier: 'unused',
         probeFailStreak: 0,

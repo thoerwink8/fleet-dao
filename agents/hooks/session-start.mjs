@@ -1,29 +1,29 @@
 // SessionStart 钩子（agents-sync 装进 ~/.fleet-dao/hooks/，登记在 ~/.claude/settings.json；Grok、Devin、Cursor 默认借道读这份）。
 // 开会话、续会话时跑；stdout 打一段 JSON，hookSpecificOutput.additionalContext 进会话上下文（Grok 不收开会话钩子的输出）。三件事：
 // 1. 会话所在的仓：取一下远端；在 main 上、没有未提交的改动、落后了就快进；快进不了，或在别的分支上而 AGENTS.md 和主线不同，
-//    提醒一句（#72 撞过：会话读到旧的 AGENTS.md）。不是 git 仓、没有 origin/main 的不出声。
+//    提醒一句。不是 git 仓、没有 origin/main 的不出声。
 //    Mirasim 每条消息都 --resume，这一钩子每轮都跑（Claude Code 要求 SessionStart 保持快：
-//    https://code.claude.com/docs/en/hooks ，2026-10-06）。git fetch、问 GitHub、扫工作树和 QUIET_MS 共用一扇门，
+//    https://code.claude.com/docs/en/hooks ）。git fetch、问 GitHub、扫工作树和 QUIET_MS 共用一扇门，
 //    记在 ~/.fleet-dao/session-net/：三分钟内做过就跳过，失败也记上一笔，免得断网时每条消息都等满超时。
 //    跳过时仍用手里已有的 origin/main 做本地核对。引导对账、临时调整、仓里的创始人引导每轮都做。
 //    工人（FLEET_WORKER=1）不走这扇门，起来就要当前的远端。
 // 2. 这台机器的规矩、技能、钩子、权限：同步脚本另有**一份只归它的检出**（~/.fleet-dao/origin-main，
 //    agents/hooks/sync-source.mjs），永远停在 origin/main 的分离头上，再跑一遍 agents-sync --apply；结论一句话。
 //    在别的仓里开会话也照做。这台机器自己的 fleet-dao 检出在哪、在哪个分支、有没有没提交的改动，都不影响这一件
-//    （2026-10-01 创始人：「我希望每台机器，能在我们改动后，自动就同步，而不是人为提醒」）：主检出停在功能分支上
+//    （改动合进主线后每台机器要自己同步，不靠人提醒）：主检出停在功能分支上
 //    不再让这台机器停在旧规矩上。那边的检出只被当「种子」读，一个写操作都没有。
 //    上次同步成功不到 QUIET_MS 就不再跑：Cursor 讨论一次并行起好几个会话，每个都会触发这个钩子。
-//    过了这扇门，同一天也再取、再同步。不用日期文件把主线冻到明天（2026-10-07：当天 01:30 同步之后 #1147 到了主线，
+//    过了这扇门，同一天也再取、再同步。不用日期文件把主线冻到明天（当天 01:30 同步之后 #1147 到了主线，
 //    后面的会话都跳过，钩子停在旧的 node 命令上）。
 // 3. 会话所在仓的「## 生效中的临时调整」表（通用段「我拍了板」那条）：到了最迟复查日期的、缺列的、日期认不出的
-//    各说一行，提醒照读法②问创始人。2026-09-28 拍的临时调整抄进产品仓时丢了撤回条件和复查日期，额度恢复了新会话还照做。
+//    各说一行，提醒照读法②问创始人。以前拍的临时调整抄进产品仓时丢了撤回条件和复查日期，额度恢复了新会话还照做。
 // 4. 会话开在 fleet-dao 里时：我开的、检查全绿、没挂自动合并、没碰改标准的 PR（漏走 pnpm pr:open 的兜底），有才说一行；
 //    gh 没查成说一行没查成，不当成「没有」。这一件和进度单 #1055、扫工作树一起走第 1 件的三分钟门。
-// 5. 法国库里的整池暂停（设置 engine.poolHolds，#954）：复查日期到了（北京时间）提示一句（池、原因、负责人、到驾驶舱额度页打开）。没填复查日期的不提示。
+// 5. 法国库里的整池暂停：复查日期到了（北京时间）提示一句（池、原因、负责人、到驾驶舱额度页打开）。没填复查日期的不提示。
 //    只在这台配了登法国的 ssh 时查：~/.fleet-dao/france-ssh，或真开会话时进程里的 FLEET_FRANCE_SSH。没配不出声，不当成没到期。
 //    当库被测试调用时不读进程环境，免得测试机上的环境变量把 ssh 打出去；真开会话（本文件当主程序）才把进程环境传进去。
 //    查不成就说没查成。结果缓存 QUIET_MS，免得每条消息都 ssh。认不出的不当成没到期。
-// 6. 仓合同（决定 0081，repo-contract.mjs 的 contractLines）：会话所在仓按 fleet-dao 的 agents/repo-contract.json 查，
+// 6. 仓合同：会话所在仓按 fleet-dao 的 agents/repo-contract.json 查，
 //    有缺项说一段事实，每个仓每天最多一次，全过不出声。只在真开会话时接上（repoContract 参数），测试按需注入。
 //    引导条目的〔范围：通用｜只此仓〕：checkDirectives 在那一行后面补一句没标的、标了通用还没上推的。
 // 环境变量 FLEET_WORKER=1（机器派的会话设）：只做第 1、2 件，其余各段（创始人的事、整池暂停、工作树）一律不出。
@@ -61,7 +61,7 @@ import {
 export const SYNC_MS = 30_000;
 export const QUIET_MS = 3 * 60_000;
 const ORIGIN_MAIN = 'refs/remotes/origin/main';
-// 规矩在两份文件里：通用段的原件 agents/shared-rules.md（2026-10-05 从仓根 AGENTS.md 挪出来）、仓根 AGENTS.md 的本仓段
+// 规矩在两份文件里：通用段的原件 agents/shared-rules.md、仓根 AGENTS.md 的本仓段
 const RULE_FILES = ['AGENTS.md', 'agents/shared-rules.md'];
 const READ_MAIN =
   '规矩以 origin/main 的为准（git show origin/main:AGENTS.md、git show origin/main:agents/shared-rules.md）';
@@ -295,7 +295,7 @@ export { DIRECTIVE_HEADING };
 const DIRECTIVE_NOT_CHECKED = '创始人引导待处理清单没查成';
 
 /**
- * 引导认主（创始人 2026-10-11「现在你实现的引导方式会串会话」：同一个仓开着几个指挥官会话，每个都被叫去办全部待处理引导，撞车开出重复 PR）。
+ * 引导认主（同一个仓开着几个指挥官会话时，每个都被叫去办全部待处理引导，会撞车开出重复 PR）。
  * 主人是记下它的那个会话的血缘（Mirasim 会话目录名，founder-inbox.mjs 的 lineageOf），写成 `〔主：<目录名>〕`：进度单 #1055 的评论里
  * 由 pnpm progress:directive 写、pnpm progress:claim 改；别的仓「## 创始人引导（待处理）」清单的条目里手写。
  * 开会话时本血缘的列出来叫它办；有主、主不是本血缘的只计数、不列原文；没写主或写「无主」的照列，但要先认领。
@@ -366,7 +366,7 @@ export function checkDirectives(cwd, git, lineage = null) {
       said.push(
         `创始人引导还有 ${shown.length} 条没处理（${file}:${n}）：${listed.join('；')}${shown.length > 5 ? ' 等' : ''}。先接着办，办完把那条标「已处理」或删掉。`,
       );
-      // 〔范围：通用｜只此仓〕（决定 0081）：只看待处理的、归本会话或无主的，已处理的老条目不追溯
+      // 〔范围：通用｜只此仓〕：只看待处理的、归本会话或无主的，已处理的老条目不追溯
       const scope = scopeNote(shown.map((p) => p.text));
       if (scope) said.push(scope);
       if (mine && unowned > 0)
@@ -521,14 +521,14 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
 
 /**
  * 创始人最近落盘的话（agents/hooks/prompt-log.mjs 在他每条消息一提交就写进 ~/.fleet-dao/prompt-log/<北京日期>.jsonl）。
- * 为什么开会话时列出来（创始人 2026-10-04「我发了hi但是好像你视而不见」）：他的话有两种丢法，一种是到了没处理，一种是排队时
+ * 为什么开会话时列出来：他的话有两种丢法，一种是到了没处理，一种是排队时
  * 会话进程死了、从头没送到——钩子在提交那一刻就落了盘，新会话开场看一眼这份文件，上一个会话没来得及处理的话就在这里，不靠他重发。
  * 「上一个会话」只认同一条血缘：同一个 Mirasim 会话换了原生会话号（/compact、换模型）之前的那个号（founder-inbox.mjs 的 lineageOf）。
- * 别的 Mirasim 会话收到的话不列（2026-10-11 串会话：全局列给每个会话，另一个项目的会话把 fleet-dao 的活当成自己的办了）；无血缘的不列。
+ * 别的 Mirasim 会话收到的话不列；无血缘的不列。
  * 列最近 RECENT_MS 以内、本会话还没见过的全部（当前这个号自己落盘的话它早见过，不列），每条截到 RECENT_CHARS 字，总字数到 RECENT_TOTAL_CHARS
  * 封顶（超了留最新的、写明更早的几条没列）；没有文件、没有最近的话都不出声；读不了文件（不是没有，是读不了）要说一句，不当成「没有」。
  * 机器派的会话（工人、反方）的提示现在不落盘（prompt-log.mjs）；这里再滤一遍，是为了 10-05 之前已经落盘的那些。
- * 第三种丢法（创始人 2026-10-06「你好像没接收到【选方案a】」）：他在一轮跑着时打的字走 Mirasim 的「引导」，那一轮被打断、出错就丢了，
+ * 第三种丢法：他在一轮跑着时打的字走 Mirasim 的「引导」，那一轮被打断、出错就丢了，
  * Claude Code 从头没收到、prompt-log 里自然也没有。所以再拿 Mirasim 自己记的「发了的账」（founder-inbox.mjs）和这份「收到的账」对一遍，
  * 发了没收到的单独一行、放前面、叫会话先答。这一段在每一轮开头都跑（Mirasim 每轮都 --resume 起进程，SessionStart 每轮都触发），
  * 所以上一轮丢的引导下一轮一开头就补上了。对账范围是「上一轮（含）以来」不是固定 RECENT_MS（一轮能跑一个多小时），见 founder-inbox.mjs 开头；下面「列收到的话」仍只看 RECENT_MS。
@@ -536,7 +536,7 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
 export const RECENT_MS = 60 * 60_000;
 export const RECENT_CHARS = 200;
 export const RECENT_TOTAL_CHARS = 3000;
-/** 后台任务完成、系统提醒也会以「用户消息」的身份进 UserPromptSubmit，落盘时原样记（2026-10-04 实测），列的时候不算创始人的话 */
+/** 后台任务完成、系统提醒也会以「用户消息」的身份进 UserPromptSubmit，落盘时原样记，列的时候不算创始人的话 */
 const SYSTEM_PROMPT = /^\s*(?:<task-notification|<system-reminder|\[SYSTEM NOTIFICATION)/;
 
 export function recentPrompts({
@@ -548,7 +548,7 @@ export function recentPrompts({
   lineage = null,
 }) {
   // 只认本血缘（同一个 Mirasim 会话用过的原生会话号，founder-inbox.mjs 的 lineageOf）：别的 Mirasim 会话收到的话一概不列
-  // （创始人 2026-10-11「现在你实现的引导方式会串会话」：原来这里把所有会话最近 60 分钟的话列给每个会话，另一个项目的会话当成自己的活办了）。
+  // 只列本血缘的：列所有会话的话，另一个项目的会话会把它当成自己的活办掉。
   // 无血缘（不是 Mirasim 起的、这台没装）两行都不出，不拿别的会话的话顶；没查成明说。
   const line = lineage ?? lineageOf({ home, sessionId, env });
   if (line.status === 'none') return [];
@@ -599,10 +599,10 @@ export function recentPrompts({
   }
   const lines = [];
   // 发了的账和收到的账对一遍：发了、没收到的就是丢在 Mirasim「引导」里的那种（founder-inbox.mjs 开头）。
-  // 发了的只读了本血缘那个目录，收到的也只留本血缘的：换了原生会话号之前丢的也补回本会话；别的会话丢的不进来（#1733）
+  // 发了的只读了本血缘那个目录，收到的也只留本血缘的：换了原生会话号之前丢的也补回本会话；别的会话丢的不进来
   if (!sent.absent) {
     for (const p of sent.problems) lines.push(`创始人在 Mirasim 里发的话没读全：${p}；有没有丢的核不了。`);
-    // 决定 0083 起不再往 steer-shown 写。旧记录还在：转过的仍算收到，免得开会话把已经转过的再列一遍（#1891）
+    // 现在不再往 steer-shown 写。旧记录还在：转过的仍算收到，免得开会话把已经转过的再列一遍
     const relay = relayedUpTo({ home, sessionIds: line.sessionIds, env });
     for (const p of relay.problems) lines.push(`旧的引导记录没核成：${p}；这次分不清哪些已经转过。`);
     const { lost } = reconcile(sent.entries, received, { relayed: { line: line.dir, at: relay.at } });
@@ -1009,7 +1009,7 @@ export function sessionStart({
   // 失败也记上 session-net：断网时下一轮不再把 GitHub 超时重付一遍。fetch-ok 只在取成时记，子代理仍会再试。
   if (stamp !== null && !quiet) touch(stamp, now);
   // 工人（FLEET_WORKER=1）只要规矩同步：创始人引导、他最近的话、工作树清单都是指挥官的事，
-  // 注进工人的开场它会当成自己的活（2026-10-05 审计 N5），还白占 8–11 秒
+  // 注进工人的开场它会当成自己的活，还白占 8–11 秒
   if (worker)
     return [...(here.line ? [here.line] : []), syncFleet({ home, git, sync, fetch: here.fetch, now })];
   let holdRead = { ok: true, skipped: true };
@@ -1053,12 +1053,12 @@ export function sessionStart({
   ];
 }
 
-// ── 拆成两半（片 B 第 8 条，2026-10-13）────────────────────────────────────────────────────────────────
+// ── 拆成两半────────────────────────────────────────────────────────────────
 // 上面的 sessionStart 是一口气全做完的老路子（工人 FLEET_WORKER=1 起来就要当前的远端，还走它；测试也拿它测各件）。
 // 本机实测它中位 27.7 秒、最长 86 秒，Mirasim 每条消息 resume 都付一遍。现在真开会话走 fastSessionStart：
 // - 同步那半只做本地的：会话所在仓的本地核对（用手里已有的 origin/main，落后就快进）、临时调整表、引导、仓合同、他最近的话，
 //   外加读后台上一次写下的结果（~/.fleet-dao/session-bg/<仓的指纹>.json）。目标中位 ≤1 秒。
-// - 取远端、规矩同步（agents-sync）、gh（进度单 #1055、绿了没挂的 PR）、扫工作树、ssh 法国查整池暂停：放进脱离的后台子进程
+// - 取远端、规矩同步（agents-sync）、gh、扫工作树、ssh 法国查整池暂停：放进脱离的后台子进程
 //   （本文件 --background <会话目录>），写结果文件，下次开会话读。结果没有、过了 QUIET_MS、读不懂就再起一个；锁（同名 .lock）
 //   BG_LOCK_MS 内是新的就不起第二个。
 // - 后台每一步出错都写进结果（{ ok: false, why }），整个崩了写 crashed：下次开场如实说「没查成」和原因，不吞掉、不当成没事。
@@ -1323,7 +1323,7 @@ export function fastSessionStart({
 /**
  * 顺手清掉本仓 `.claude/worktrees/` 下攒着的旧树。
  *
- * 起因（创始人 2026-10-02，实战教训）：「任何 work tree 里的任务在完成之后，本地的 work tree 必须清掉……
+ * 起因：「任何 work tree 里的任务在完成之后，本地的 work tree 必须清掉……
  * 不要积累，因为 Mirasim 会因为 work tree 和会话越来越多导致越来越卡」。本机实测攒到 29 棵。
  * `.claude/worktrees/` 在 .gitignore 里，所以没有别的东西会管它：开会话钩子是唯一每次都会跑的地方。
  *
@@ -1336,10 +1336,10 @@ export function fastSessionStart({
  *    ——只按前三条就会把它删掉、把人家正在干的事打断。刚建出来、刚提交过的树都不碰。
  *    （代价是刚做完的树要等两小时才收走，而这条命中率低、留着也无害。）
  *
- * 超出这三条的一律不动、也不当成「查成」——2026-10-02 清那 29 棵时，就是靠第 2 条救回了决定 0006
+ * 超出这三条的一律不动、也不当成「查成」——清理 29 棵树那次，就是靠第 2 条救回了一份决定书
  * （`decision-align` 树里那份决定从没进过主线）。
  *
- * 留着的树要有主（#1007）。有没提交的改动或没推上去的提交：不删（那是别人的活，存成 ref 再从盘上
+ * 留着的树要有主。有没提交的改动或没推上去的提交：不删（那是别人的活，存成 ref 再从盘上
  * 收走也是删数据，没有人在旁边拍就不做），刚动过也记成一条认领——负责人是指挥官，期限是首次记下
  * 之后 24 小时，落在 ~/.fleet-dao/kept-worktrees.json。下次开会话再读同一条，过了期限还在就接着报。
  * 两小时只挡住删除：干净、提交都在远端、但刚动过的树可能有人正在用，先留着、不派认领。
@@ -1352,7 +1352,7 @@ export function fastSessionStart({
 
 /**
  * 多久没动过才收走（第 3 条）：另一个会话可能正开着一棵树干活。
- * 2026-10-05 从 30 分钟放到 2 小时：一个会话 PR 合了之后常常接着在同一棵树里切下一条分支，中间隔半小时以上很常见；
+ * 从 30 分钟放到 2 小时：一个会话 PR 合了之后常常接着在同一棵树里切下一条分支，中间隔半小时以上很常见；
  * 晚两小时收走一棵没用的树没有代价，早收走一棵在用的代价很大（见 lastTouched）。
  */
 export const SWEEP_IDLE_MS = 2 * 60 * 60_000;
@@ -1446,7 +1446,7 @@ function assignKept(home, repo, leftovers, unchecked, now) {
 
 /**
  * 这棵树最后一次被动是什么时候。只看树根目录的修改时间是错的：在里面改文件、提交、切分支都不动树根那一层，
- * 一棵正在用的树照样显得「搁了很久」——2026-10-05 审查会话正在用的树就是这么被删成空壳的。
+ * 一棵正在用的树照样显得「搁了很久」——审查会话正在用的树就是这么被删成空壳的。
  * 所以连它在 git 里的管理目录一起看（index 在暂存、提交、切分支时都会重写，HEAD 和 logs/HEAD 记切分支和提交）。
  * 读不出来返回 null，调用方当「可能在用」留着。
  */
@@ -1494,7 +1494,7 @@ export function sweepWorktrees(cwd, git, now = Date.now(), home = undefined) {
   const top = g('rev-parse', '--show-toplevel');
   if (!ok(top)) return [];
   const rootPath = top.stdout.trim();
-  // 2026-10-05：原来只列 `.claude/worktrees/` 一个目录，建到别处的树（代理自己挑的 `.worktrees/`、
+  // 原来只列 `.claude/worktrees/` 一个目录，建到别处的树（代理自己挑的 `.worktrees/`、
   // `wt/`）**根本看不见**，于是攒到 60 多棵；那些树里带着各自的 biome.json，biome 整仓扫一遍报
   // 「nested root configuration」，把这台机器上**所有会话**的推送都拦了。改成问 git 本仓注册了哪些树
   // ——建在哪都算，不再靠「它应该在哪个目录」这个约定。
@@ -1680,7 +1680,7 @@ if (isMain() && process.argv[2] === '--background') {
       sync: syncRunner(),
       localGit,
       env: process.env,
-      // 后台不挡会话：问 GitHub 的两个脚本放宽到 BG_SCRIPT_MS（同步那半的 8 秒是为了不拖开会话，本机实测进度单 8 秒常超时）
+      // 后台不挡会话：问 GitHub 的两个脚本放宽到 BG_SCRIPT_MS（同步那半只给 8 秒是为了不拖开会话，查进度单 8 秒常超时）
       idlePr: idlePrRunner(BG_SCRIPT_MS),
       progress: progressRunner(BG_SCRIPT_MS),
       fallbackProxy: readFallbackProxy(home).proxy,

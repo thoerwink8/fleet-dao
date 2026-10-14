@@ -1,10 +1,10 @@
-// 备用代理进会话的 Bash（片 B 第 9 条，2026-10-13）：开会话钩子（项目级 session-start.mjs、用户级 plugin-loader.mjs）
+// 备用代理进会话的 Bash：开会话钩子（项目级 session-start.mjs、用户级 plugin-loader.mjs）
 // 往 $CLAUDE_ENV_FILE 追加 export 行，让 Bash 里的 gh、curl、npm 走 ~/.fleet-dao/fallback-proxy（本机是 mihomo 的 127.0.0.1:7890）。
 // 为什么：会话进程环境里的 HTTPS_PROXY 是 reclaude 写进 ~/.claude/settings.json env 的 56879，改那里会被写回；
 // 非 Claude Code 的流量穿过它约 90 秒后设备被解绑（docs/reference/adapters.md CC-10）。本机实测：github 走 7890 ok 1.0s，
 // 走 56879 失败 10.5s，直连失败 21.8s。git 由 agents-sync 设 http.https://github.com/.proxy（packages/agents-sync/src/git-proxy.ts）。
 //
-// 改这里之前必须知道（https://code.claude.com/docs/en/hooks「Persist environment variables」，2026-10-13 核过）：
+// 改这里之前必须知道：
 // - CLAUDE_ENV_FILE 只给 SessionStart、Setup、CwdChanged、FileChanged 钩子；每条 Bash 命令前先跑这份文件。要追加，不覆盖别的钩子写的。
 // - 一行只写一个 `export NAME=value`：PowerShell 只认这种纯赋值行，有一行不是它就一个变量都不给。值里带 / 的变量 Windows 上的
 //   PowerShell 本来就收不到（文档原话），所以这份只管 Bash。

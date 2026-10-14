@@ -1,6 +1,6 @@
 // GitHub 进门的判法（不碰 HTTP）：事件放不放进来（白名单、fork、受管的仓）、投递编号去重、原文落库、重放。
 // 收 webhook 的 HTTP 入口（验签、读请求体）和 /healthz 的检查在 @fleet-dao/api 的 github.ts；对账补漏、引擎拉单都从这里进同一道门。
-// 改这里之前必须知道：公开仓里陌生人也能开单、评论，这道白名单是唯一的门（design 第三节第 4 条）。
+// 改这里之前必须知道：公开仓里陌生人也能开单、评论，这道白名单是唯一的门（决定 0041）。
 import { z } from 'zod';
 import {
   type GitHubDeliveryOutcome,

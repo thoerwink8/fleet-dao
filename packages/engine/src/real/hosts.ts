@@ -25,7 +25,7 @@
 //   普通文件、没有桌面也存得下，grok 自己续期）；没登录、过期了在 error 帧和 stderr 里说「Not signed in」「Run `grok login`」，
 //   失败分流按 AU7 认。和 Cursor 一样不绑会话用户、跑在法国唯一的会话用户下；装在他家里的 ~/.grok/bin/grok，由会话用户自己
 //   看它是不是能跑的文件（grokLaunchCommand），不是就报没装。
-// - mirasim（#345，只留「中继额度」路由的薄插头，design 第三节第 12 条）：和前三家都不同——不是我们 spawn 一个子进程，
+// - mirasim（#345，只留「中继额度」路由的薄插头，决定 0049）：和前三家都不同——不是我们 spawn 一个子进程，
 //   而是引擎自己的进程（fleet 用户）经回环 ws 连一份「已经在跑」的 Mirasim 服务；工具是在那份服务的进程里执行的，所以
 //   design 第十四节要求给会话用户单独起一份（登录一次），不借旧系统那份——配好之前这条路由保持关闭（目录样例的 enabled）。
 //   服务端认的是「执行体」（agent：claude / codex / pi / dsh……），不是路由的模型 id。执行体先看路由上记下的名册字段
@@ -799,7 +799,7 @@ function mirasimDriver(
           cwd: spec.cwd,
           prompt: spec.prompt,
           agent,
-          // 只留「中继额度」这一种路由（design 第三节第 12 条；MS-28：不许反代，只能用官方客户端）
+          // 只留「中继额度」这一种路由（决定 0049；MS-28：不许反代，只能用官方客户端）
           route: 'cloud',
           ...(effort.pass ? { effort: effort.pass } : {}),
           ...(MIRASIM_MODELLESS_AGENTS.has(agent) ? { expectModel: effort.model } : { model: effort.model }),

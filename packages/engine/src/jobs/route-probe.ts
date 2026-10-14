@@ -220,7 +220,7 @@ export function planProbe(
   if (t.billing === 'metered') {
     return {
       state: 'skipped',
-      detail: '按量计费的渠道不自动探：探一次就多一笔账（design 第三节第 21 条）',
+      detail: '按量计费的渠道不自动探：探一次就多一笔账',
     };
   }
   if (t.heldBySwitch !== undefined) {

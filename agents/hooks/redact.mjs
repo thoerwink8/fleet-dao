@@ -4,9 +4,9 @@
 // /proc/<pid>/cmdline 和 Windows 的 Win32_Process.CommandLine 里（进程的整个命令行是公开的，谁都能读）；
 // 打印进程命令行（ps -ef、ps aux、/proc/*/cmdline、wmic process、Get-CimInstance Win32_Process …）就等于把它们原样打进对话。
 // 出过两次（docs/ops.md 第九节「值不过屏幕」）：
-//  ① 2026-09-30 读 C:/Users/Administrator/.mirasim/mcp-runtime/claude-*.json——飞书的 app secret 写在文件的参数里，
+//  ① 读 C:/Users/Administrator/.mirasim/mcp-runtime/claude-*.json——飞书的 app secret 写在文件的参数里，
 //     当时那套遮值只认 40 个字符以上的串，32 个字符的密钥就这么过去了；
-//  ② 2026-10-02 跑一条列进程命令行的 PowerShell（Get-CimInstance Win32_Process … CommandLine）看 MCP 服务起了没，
+//  ② 跑一条列进程命令行的 PowerShell（Get-CimInstance Win32_Process … CommandLine）看 MCP 服务起了没，
 //     lark-mcp 那行命令里的 -s <secret> 整段打了进来。
 // 所以打印进程命令行时，输出接一条管道过这里：agents/hooks/redact-secrets.mjs（pretool.mjs 会拦着不接的不给过）。
 //
@@ -25,7 +25,7 @@ const FLAG_SECRET_WORD = /(?:secret|token|password|passwd|passphrase|credential|
 
 /**
  * 单字母写法：`-s`、`-p` 后面接的东西一律遮，除了 plainly 不是密钥的那几种形状（见 isPlainShortValue）：
- * -s 正是 2026-10-02 那次的样子（lark-mcp -s <secret>）。别的单字母参数（-f、-n、-e 之类）一个不碰。
+ * -s 正是那次泄露的样子（lark-mcp -s <secret>）。别的单字母参数（-f、-n、-e 之类）一个不碰。
  */
 const SHORT_FLAGS = ['s', 'p'];
 
@@ -162,7 +162,7 @@ function maskJsonFields(text) {
 }
 
 /**
- * URL 查询参数里的令牌（#1148）：mirasim 启动时把 `http://localhost:4318/?token=<令牌>` 整条打进 journalctl，
+ * URL 查询参数里的令牌：mirasim 启动时把 `http://localhost:4318/?token=<令牌>` 整条打进 journalctl，
  * 谁读日志谁就拿到能登录这台机器上 AI 会话的令牌。参数名（? 或 & 后面、= 前面）是下面这几类才遮：
  * 名字里带 token / secret / password / passwd / pwd / api_key / apikey 的（access_token、refresh_token、client_secret……），
  * 或者整个名字就是 key（`?key=` 只在 URL 查询里才认，别处的 key 满处都是）。名字不分大小写，_ 和 - 都认。

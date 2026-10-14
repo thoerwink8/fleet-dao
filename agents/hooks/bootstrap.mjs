@@ -1,6 +1,5 @@
 // 引导钩子：登记在**仓里的** .claude/settings.json（项目级 SessionStart），在 fleet-dao 检出里开会话时跑。
-// 起因（创始人 2026-10-04：「我另一台机器也有 fleet-dao 仓库，大概率挂的是旧钩子；怎么才能在一开始对话的时候就发现是旧钩子，
-// 并且主动清理换新」）：用户级的开会话钩子（~/.fleet-dao/hooks/session-start.mjs）自己会同步，可它得先是新的才会；老机器上
+// 起因：用户级的开会话钩子（~/.fleet-dao/hooks/session-start.mjs）自己会同步，可它得先是新的才会；老机器上
 // 挂的是更老的一代（以前手装在 fleet-guard 目录的、同步专用检出出现之前的），它们自己不会升级，也就永远没人替它们换。
 // 项目级钩子不一样：它跟着仓走，这台机器只要把检出拉到有这个文件的提交，之后每次在检出里开会话就先过这一关。
 //
@@ -72,7 +71,7 @@ export function shouldManage({ home, env = process.env }) {
   const legacy = s.ok && s.cmds.some((c) => LEGACY_STYLE.test(c.command));
   if (synced || legacy) return { manage: true };
   // 设置文件读不了（不是没有）：判不出这台有没有挂旧钩子，不能当成「没有」静默退出——
-  // 没有 synced.json 的老机器恰恰是这一关要管的那类（#829 的审查挑出来的）
+  // 没有 synced.json 的老机器恰恰是这一关要管的那类
   if (!s.ok) return { manage: false, unreadable: `~/.claude/settings.json 读不了（${s.why}）` };
   return {
     manage: false,
@@ -90,7 +89,7 @@ export function healthReasons({ home }) {
   if (!s.ok) return { unreadable: `~/.claude/settings.json 读不了（${s.why}）` };
   const legacy = s.cmds.filter((c) => LEGACY_STYLE.test(c.command));
   if (legacy.length > 0) reasons.push(`还挂着以前手装在 fleet-guard 目录的钩子（${legacy.length} 条）`);
-  // 决定 0083：流程钩子不再装在用户级。还登记着，就是上一代，同步会摘掉。
+  // 流程钩子不再装在用户级。还登记着，就是上一代，同步会摘掉。
   const PROCESS_SCRIPTS = new Set(['session-start.mjs', 'main-thread.mjs', 'stop.mjs', 'prompt-log.mjs']);
   const processHooks = s.cmds.filter((c) => {
     const name = NOW_STYLE.exec(c.command)?.[1];
