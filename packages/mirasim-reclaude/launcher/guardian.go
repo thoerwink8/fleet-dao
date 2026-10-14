@@ -74,6 +74,7 @@ func guardian() int {
 		fmt.Fprintln(os.Stderr, "reclaude 目标启动失败")
 		return 127
 	}
+	logLine("event=target-spawned ms=" + elapsedMs(processStart))
 	ended := make(chan error, 1)
 	go func() { ended <- c.Wait() }()
 	parentGone := make(chan struct{})

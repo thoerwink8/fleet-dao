@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -15,6 +16,13 @@ import (
 var version = "2.0.0"
 var sourceCommit = "development"
 var sourceHash = "development"
+
+// 进程起点：排查「启动慢」时，每条耗时日志都从这里算起，只记毫秒数，不记参数、内容和凭据。
+var processStart = time.Now()
+
+func elapsedMs(since time.Time) string {
+	return strconv.FormatInt(time.Since(since).Milliseconds(), 10)
+}
 
 func main() { os.Exit(run()) }
 
@@ -58,7 +66,9 @@ func run() int {
 	cfg := configuration{target: target, args: args, env: os.Environ(), mirasimHome: ms, cwd: cwd}
 	// Mirasim 把启动命令当 claude 本体：「--version」探版本、「update」升级都原样交给 reclaude，不在这里截。
 	if flagValue(args, "--input-format") != "stream-json" {
-		return runOnce(cfg)
+		code := runOnce(cfg)
+		logLine("event=once-exit code=" + strconv.Itoa(code) + " ms=" + elapsedMs(processStart))
+		return code
 	}
 	if err := supervise(cfg); err != nil {
 		return fail("session_failed", err)
