@@ -1,5 +1,5 @@
 {
-  "说明": "CI 测试按耗时装箱用的耗时表（packages/conventions/src/test-split.ts）：测试文件 → vitest 报的毫秒数（4 核运行机上并行跑时量的，几轮 CI 日志取中位数）。只影响分得匀不匀，不影响跑不跑：表里没有的按所在包的均值估。每夜全量那一轮的 vitest 报告会存进 CI 缓存、供之后的 PR 分台用；仓里这份用 pnpm ci:timings（可重复给 --run）从 CI 日志刷新，别手改。",
+  "说明": "CI 测试按耗时装箱用的耗时表（packages/conventions/src/test-split.ts）：测试文件 → vitest 报的毫秒数（4 核运行机上并行跑时量的，几轮 CI 日志取中位数）。只影响分得匀不匀，不影响跑不跑：表里没有的按所在包的均值估。用 pnpm ci:timings（可重复给 --run）从 CI 日志刷新，别手改。",
   "source": "ci.yml run 38593168600、ci.yml run 38584719116、ci.yml run 38582462324、ci.yml run 38582166075、ci.yml run 38579052779，共 5 轮取中位数（2026-10-14）",
   "files": {
     "agents/test/bootstrap.test.ts": 165,

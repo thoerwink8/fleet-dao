@@ -1,6 +1,5 @@
 // 刷新 CI 测试装箱用的耗时表（packages/conventions/test-timings.json，判法在 ../test-timings.ts）：
-//   pnpm ci:timings [--report <vitest 的 JSON 报告>]… [--run <ci.yml 的 run 编号>]… [--log-file <存下来的 gh run view --log 输出>]… [--out <写到哪，默认仓里那份>]
-// --report：CI 每夜全量那一轮各台存下的 vitest 报告（ci.yml 的 timings 步用，不需要 gh）；给了就只用报告、不翻日志，来源写成「ci.yml run <GITHUB_RUN_ID> 的 N 台报告」。
+//   pnpm ci:timings [--run <ci.yml 的 run 编号>]… [--log-file <存下来的 gh run view --log 输出>]… [--out <写到哪，默认仓里那份>]
 // --run、--log-file 可以重复给：每个文件取各轮的中位数（单轮里一个文件会因机器抖动慢一倍）。
 // 一个都不给：从最近的、PR 触发的、绿的 ci.yml 运行里取头 5 次真跑了测试台的（和引擎每周刷新同一条：
 // notPullRequestRun）。主线多半复用同树的 PR 检查、根本不跑测试；列表里混进非 PR 的就没查成，不用这批刷表。
@@ -19,7 +18,6 @@ import {
   mergeTimings,
   notPullRequestRun,
   parseRunLog,
-  parseVitestReport,
   renderTimings,
   TIMINGS_AUTO_MIN_BOXES,
   TIMINGS_AUTO_RUNS,
@@ -44,13 +42,12 @@ runMain(() => {
     return r.stdout;
   }
 
-  let values: { run?: string[]; 'log-file'?: string[]; report?: string[]; out?: string };
+  let values: { run?: string[]; 'log-file'?: string[]; out?: string };
   try {
     values = parseArgs({
       options: {
         run: { type: 'string', multiple: true },
         'log-file': { type: 'string', multiple: true },
-        report: { type: 'string', multiple: true },
         out: { type: 'string' },
       },
       strict: true,
@@ -112,9 +109,6 @@ runMain(() => {
     return picked;
   }
 
-  const reports = values.report ?? [];
-  if (reports.length > 0 && ((values.run ?? []).length > 0 || (values['log-file'] ?? []).length > 0))
-    fail('--report 不和 --run、--log-file 一起给（来源不是一种）');
   const logs: { name: string; text: string }[] = [];
   for (const file of values['log-file'] ?? []) {
     try {
@@ -124,27 +118,13 @@ runMain(() => {
     }
   }
   let runIds = values.run ?? [];
-  if (runIds.length === 0 && logs.length === 0 && reports.length === 0) runIds = pickAutoRuns();
+  if (runIds.length === 0 && logs.length === 0) runIds = pickAutoRuns();
   for (const run of runIds) {
     if (!/^\d+$/.test(run)) fail(`run 编号认不出：${run}`);
     logs.push({ name: `ci.yml run ${run}`, text: gh(['run', 'view', run, '--log']) });
   }
 
   const perRun: Map<string, number>[] = [];
-  const fromReports = new Map<string, number>();
-  for (const file of reports) {
-    let text: string;
-    try {
-      text = readFileSync(file, 'utf8');
-    } catch (e) {
-      return fail(`读不到 ${file}（${e instanceof Error ? e.message : String(e)}）`);
-    }
-    const m = parseVitestReport(text, root);
-    if (typeof m === 'string') fail(`${file}：${m}`);
-    if (m.size === 0) fail(`${file} 里一个跑成的测试文件都没有`);
-    for (const [f, ms] of m) fromReports.set(f, ms);
-  }
-  if (reports.length > 0) perRun.push(fromReports);
   for (const l of logs) {
     const m = parseRunLog(l.text);
     if (m.size === 0)
@@ -155,21 +135,17 @@ runMain(() => {
   }
   const measured = medianOfRuns(perRun);
   if (measured === undefined) fail('一轮日志都没有');
-  const source =
-    reports.length > 0
-      ? `ci.yml run ${process.env.GITHUB_RUN_ID ?? '本机'} 的 ${reports.length} 台 vitest 报告（${new Date().toISOString().slice(0, 10)}）`
-      : timingsSource(
-          logs.map((l) => l.name),
-          new Date(),
-        );
+  const source = timingsSource(
+    logs.map((l) => l.name),
+    new Date(),
+  );
 
   const existing = listTestFiles(fsRepo(root));
   if (typeof existing === 'string') fail(existing);
-  // 旧表：默认就是要写的那份；用报告出每夜的新表时 --out 指到临时目录，旧表取仓里那份
   const path = values.out ?? join(root, TIMINGS_FILE);
   let oldText: string | undefined;
   try {
-    oldText = readFileSync(reports.length > 0 ? join(root, TIMINGS_FILE) : path, 'utf8');
+    oldText = readFileSync(path, 'utf8');
   } catch {
     oldText = undefined;
   }
@@ -186,7 +162,7 @@ runMain(() => {
   writeFileSync(path, renderTimings(r.timings));
   const missing = existing.filter((f) => r.timings.files[f] === undefined);
   console.log(
-    `${values.out ?? TIMINGS_FILE}：${reports.length > 0 ? `${reports.length} 台报告` : `${logs.length} 轮取中位数`}，量到 ${measured.size} 个文件（更新 ${r.updated}、新增 ${r.added}），沿用旧值 ${r.kept} 个，删掉仓里已没有的 ${r.dropped.length} 个`,
+    `${values.out ?? TIMINGS_FILE}：${logs.length} 轮取中位数，量到 ${measured.size} 个文件（更新 ${r.updated}、新增 ${r.added}），沿用旧值 ${r.kept} 个，删掉仓里已没有的 ${r.dropped.length} 个`,
   );
   if (missing.length > 0)
     console.log(`表里还缺 ${missing.length} 个（装箱时按中位数估）：${missing.slice(0, 5).join('、')}`);

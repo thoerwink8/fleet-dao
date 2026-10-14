@@ -358,7 +358,7 @@ describe('13 个定时任务的登记（engineTimerJobs）', () => {
     expect(jobs().map((j) => j.id)).toEqual(ENGINE_JOBS.map((j) => j.id));
   });
 
-  it('格子：对账 15、探针 15 错 7、读额度 15 错 4、拼车盯读每分钟、每小时对账 60 错 41、看门狗 5 错 4、拉单 5 错 3、判断题自检 30 错 17、耗时表每周一 06:00（北京时间）、用量补记 5 错 2、命令行工具版本 60 错 11、命令行工具升级 30 错 6、需求整理 60 错 23', () => {
+  it('格子：对账 15、探针 15 错 7、读额度 15 错 4、拼车盯读每分钟、每小时对账 60 错 41、看门狗 5 错 4、拉单 5 错 3、判断题自检 30 错 17、耗时表每天 06:00（北京时间）、用量补记 5 错 2、命令行工具版本 60 错 11、命令行工具升级 30 错 6、需求整理 60 错 23', () => {
     expect(jobs().map((j) => [j.id, j.everyMinutes, j.offsetMinutes ?? 0])).toEqual([
       ['github-reconcile', 15, 0],
       ['route-probe', 15, 7],
@@ -368,7 +368,7 @@ describe('13 个定时任务的登记（engineTimerJobs）', () => {
       ['watchdog', 5, 4],
       ['intake', 5, 3],
       ['judge-self-check', 30, 17],
-      ['ci-timings', 7 * 24 * 60, 3 * 24 * 60 + 22 * 60],
+      ['ci-timings', 24 * 60, 22 * 60],
       ['usage-backfill', 5, 2],
       ['cli-versions', 60, 11],
       ['cli-upgrade', 30, 6],

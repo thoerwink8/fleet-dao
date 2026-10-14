@@ -90,21 +90,13 @@ jobs:
       - name: 已测的树 ${{ steps.tested.outputs.claim }}
         if: github.event_name == 'pull_request'
         run: echo "这一轮测的是这棵树（合并后主线那一轮据此复用，见 packages/conventions/src/main-reuse.ts）"
-      # 每夜全量那一轮（timings job）量的更新耗时表：取最近一份，盖在仓里的表上给分台用。取不到（缓存过期、还没存过）就照仓里的表，ci-plan 在日志里写明。
-      - name: 取每夜更新的耗时表（缓存，取不到照旧）
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/fleet-timings
-          key: test-timings-v1-restore
-          restore-keys: test-timings-v1-
       - id: plan
         env:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.base_ref }}
           MAIN_BASE: ${{ steps.mainbase.outputs.sha }}
           REUSE: ${{ steps.reuse.outputs.reuse }}
-          TIMINGS_FILE: ${{ runner.temp }}/fleet-timings/test-timings.json
-        run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE" --main-base "$MAIN_BASE" --reuse "$REUSE" --timings-file "$TIMINGS_FILE"
+        run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE" --main-base "$MAIN_BASE" --reuse "$REUSE"
 
   # 一堆「装一次依赖、跑一条命令」的小检查并进这一个 job：原来 biome、tsc、docs、hygiene 各占一台，每台都有 25 秒的 checkout + setup-node + install 固定开销，
   # 四台占四个并发槽。这几步各自最慢 20 秒上下，串起来仍短于最慢的测试台（db 约 87 秒），所以整轮墙钟不变。
@@ -261,7 +253,7 @@ jobs:
           echo "lint 里该跑的几步都过了、不该跑的都跳过了：biome=$BIOME tsc=$TSC docs=$DOCS"
 
   # 测试分几台：ci-plan.ts 选单元 → test-split.ts 按 test-timings.json 耗时装箱，一台一份明确的文件清单（job 名就是那一台，如「2/5 · pg」）。
-  # 耗时表：仓里一份（pnpm ci:timings 刷新），外加每夜全量那一轮存进缓存的更新一份（timings job），changes 把后者盖在前者上。不用 vitest --shard 按文件个数切：那样各台差得太远（#654 时 engine 三台 89/35/137 秒）。
+  # 耗时表只读仓里的 test-timings.json（引擎每天开 PR 从最近几轮 PR 的 CI 日志刷新，也可手跑 pnpm ci:timings）。不用 vitest --shard 按文件个数切：那样各台差得太远（#654 时 engine 三台 89/35/137 秒）。
   # 环境按这一台装进的文件算：要真 Postgres 的（matrix.pg）才起 postgres:16 容器，和法国同大版本；要 Temporal 命令行的（matrix.temporal）才装它，
   # 版本和校验和从 deploy/france.sh 读，CI 没给变量测试就直接红（test/support.ts）。
   # 每台跑完核对「实际跑的 == 分到的」（ci-box.ts verify）：vitest 的位置参数是子串过滤，多跑少跑都红，没跑成不许当通过。
@@ -422,15 +414,6 @@ jobs:
               exit 1
               ;;
           esac
-      # 非 PR 的运行（每夜全量、主线推送）把这一台的 vitest 报告留下，给下面的 timings job 汇总成新耗时表。
-      - name: 存这一台的 vitest 报告（非 PR）
-        if: always() && github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vitest-report-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/fleet-test-out/report.json
-          retention-days: 1
-          if-no-files-found: warn
       # 跑完核对「实际跑的测试文件 == 分到的这一台」（命中缓存的：盖住的 + 跑的 == 分到的）：少跑、多跑都红并点名。
       - name: 核对这一台跑的 == 分到的
         if: success()
@@ -451,38 +434,6 @@ jobs:
         with:
           path: ${{ runner.temp }}/fleet-test-cache
           key: ${{ steps.cache-key.outputs.cache_key }}
-
-  # 耗时表自动保鲜：非 PR 的运行（每夜全量、主线推送）里各测试台都绿了，就把它们的 vitest 报告汇总，盖在仓里的表上存进 CI 缓存
-  # （key test-timings-v1-<运行号>）；changes 取最近一份给 PR 分台用。只影响分得匀不匀，不影响跑不跑，所以不进 check 的 needs、红了不挡任何事。
-  # 不开 PR、不改主线（上一版「每周机器人开 PR」常因冲突、测试台红停在那，表停在 10-07）。
-  timings:
-    needs: test
-    if: github.event_name != 'pull_request' && needs.test.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: vitest-report-*
-          path: ${{ runner.temp }}/fleet-reports
-      - name: 汇总各台报告，盖在仓里的表上
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/fleet-timings"
-          args=()
-          for r in "$RUNNER_TEMP"/fleet-reports/*/report.json; do args+=(--report "$r"); done
-          node packages/conventions/src/bin/ci-timings.ts "${args[@]}" --out "$RUNNER_TEMP/fleet-timings/test-timings.json"
-      - uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/fleet-timings
-          key: test-timings-v1-${{ github.run_id }}
 
   # 驾驶舱前端打包（发布时也是这一道）：打不出来就红。
   web:
