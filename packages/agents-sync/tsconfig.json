@@ -1,4 +1,4 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["src", "test", "../mirasim-reclaude/src/managed-launch.ts"]
+  "include": ["src", "test"]
 }

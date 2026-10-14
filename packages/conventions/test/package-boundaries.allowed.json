@@ -22,11 +22,6 @@
       "file": "packages/agents-sync/src/main.ts",
       "spec": "../../mirasim-reclaude/bin/health",
       "why": "同上，不装依赖；用路径起 mirasim-reclaude 的 bin/health 当后台脱离子进程，没有 import"
-    },
-    {
-      "file": "packages/agents-sync/src/permissions.ts",
-      "spec": "../../mirasim-reclaude/src/managed-launch.ts",
-      "why": "决定 0092：装了启动器的桌面机不写子代理默认模型键，「装了启动器」和迁移器用同一个判据；那个文件只用 node: 内置，专用同步检出不装依赖也能跑"
     }
   ]
 }

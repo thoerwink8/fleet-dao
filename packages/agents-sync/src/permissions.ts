@@ -16,9 +16,9 @@
 // 见 permissions-vendors.ts，翻译成它的写法后走同一套；Devin 那边没有 autoMode、env 这两层（不写就整段不管）。
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { isManagedLaunch } from '../../mirasim-reclaude/src/managed-launch.ts';
 import type { Backups } from './backup.ts';
 import { readSettings } from './hooks.ts';
+import { isLauncherCommand } from './mirasim-launch.ts';
 import { type Line, line } from './report.ts';
 import { type Ctx, code, relOf, type Sources, writeAtomic } from './sync.ts';
 import { PERMISSIONS_TARGET, type Place } from './targets.ts';
@@ -110,7 +110,7 @@ export interface LauncherDesktop {
 
 /**
  * 判据（决定 0092）：不是 Linux，且 ~/.mirasim/setting.json 的 agentLaunch.claude.command 的文件名是新旧两代启动器之一
- * （isManagedLaunch，和迁移器同一个判据，借 mirasim-reclaude 那一个只用 node: 内置的文件）。
+ * （isLauncherCommand，和迁移器的 isManagedLaunch 同一个判据、各一份，见 mirasim-launch.ts 为什么不共用）。
  * 没有这个文件、没设启动命令：不是这类机器，不说什么。读不了、不是 JSON、启动命令不是字符串：按不是这类机器处理（照写），
  * 报告里说没查成——不报错、不中断同步，也不当成「查过了、没装」。
  */
@@ -139,7 +139,7 @@ export function launcherDesktop(ctx: Ctx): LauncherDesktop {
   const command = launch.command;
   if (command === undefined) return { on: false };
   if (typeof command !== 'string') return unsure('agentLaunch.claude.command 不是字符串');
-  return { on: isManagedLaunch(command) };
+  return { on: isLauncherCommand(command) };
 }
 
 /** 按这台的情况调整要写的东西：装了启动器的桌面机不写、并删掉子代理默认模型键 */
