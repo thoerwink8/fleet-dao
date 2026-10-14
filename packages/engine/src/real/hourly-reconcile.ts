@@ -72,7 +72,6 @@ import type { PortContext } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
 import { taskAbandonSignal, taskStatusQuery } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
-import { feishuWebhookSender } from './feishu-webhook.ts';
 import { mainCiRuns } from './main-ci-runs.ts';
 import { PROBE_DIR } from './route-probe.ts';
 import { isWorkflowGone } from './route-wake.ts';
@@ -600,7 +599,7 @@ export function hourlyReconcileJob(
               link: x.link,
             });
           },
-          send: feishuWebhookSender({ env: process.env }),
+          send: handOffToFeishuPush,
         }),
       mainRedPush: () =>
         pushMainRed({
@@ -634,7 +633,7 @@ export function hourlyReconcileJob(
               link: x.link,
             });
           },
-          send: feishuWebhookSender({ env: process.env }),
+          send: handOffToFeishuPush,
         }),
       now,
       log,
@@ -642,6 +641,13 @@ export function hourlyReconcileJob(
     };
   };
 }
+
+/**
+ * 主线红、整池暂停到期「推飞书」：引擎不自己发（引擎没有飞书凭据，原来的群机器人 webhook 从没人放过、一次都没推成）。
+ * markSent 写的那一行提醒（键 feishu:…）就是要推的消息，驾驶舱后端的飞书推送（packages/api 的 feishu-push.ts）照它推进团队群、
+ * 记送达；推不出去由看门狗的「飞书推送不通」报。所以这里的「发」只是交出去，不会失败。
+ */
+const handOffToFeishuPush = async (_text: string): Promise<void> => {};
 
 /**
  * 一键清理没用的工作树（#1993，jobs/worktree-cleanup.ts）：清扫用和每小时对账**同一份**装配（同一个判据、同一个删树口子），

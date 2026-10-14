@@ -27,6 +27,7 @@ interface SampleOpts {
   tasks?: string[];
   jobs?: string[];
   notes?: string[];
+  push?: string;
   noEnd?: boolean;
   err?: string;
   healthz?: number;
@@ -146,6 +147,33 @@ describe('巡查脚本：判法', () => {
       base: null,
     });
     expect(long.alerts).toHaveLength(1);
+  });
+
+  it('飞书推送：没配马上 ALERT；该推的到点超过 60 分钟、60 分钟里没送成过才 ALERT；有送成的、还不到点的不报', () => {
+    const judge = (push: string) =>
+      lib.judge({ raw: ok(lib.sampleRaw({ at: NOW, push })), now: NOW, base: null });
+    const off = judge('push|off|飞书机器人在 2 个群里|-1|0|-1');
+    expect(off.verdict).toBe('ALERT');
+    expect(off.alerts).toEqual(['飞书推送没配：飞书机器人在 2 个群里']);
+    const dead = judge('push|on||95|3|12960');
+    expect(dead.alerts[0]).toContain('飞书推送不通：3 条该推的没送到');
+    expect(dead.alerts[0]).toContain('最近一次送到是 12960 分钟前');
+    // 2026-10-05 那种：推送整条没了，后端从没记过状态——哪怕眼下没有该推的也报
+    expect(judge('push|none||-1|0|13835').alerts).toEqual([
+      '飞书推送没在跑：后端从没记过推送状态（设置 feishu.push 没有）',
+    ]);
+    expect(judge('push|on||95|3|20').verdict).toBe('OK');
+    expect(judge('push|on||30|1|-1').verdict).toBe('OK');
+    expect(lib.render(dead).join('\n')).toContain('飞书推送 不通');
+  });
+
+  it('【故意造出的失败】推送那一块认不出、库查询报错：BROKEN，不当推送通着', () => {
+    const bad = lib.sampleRaw({ at: NOW, push: 'push|maybe||1|1|1' });
+    expect(lib.judge({ raw: ok(bad), now: NOW, base: null }).verdict).toBe('BROKEN');
+    const err = lib
+      .sampleRaw({ at: NOW })
+      .replace('ok|push\n', 'ERR|push|relation "settings" does not exist\n');
+    expect(lib.judge({ raw: ok(err), now: NOW, base: null }).verdict).toBe('BROKEN');
   });
 
   it('【故意造出的失败】空输出：BROKEN，不当 OK', () => {
