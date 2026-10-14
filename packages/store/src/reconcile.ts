@@ -60,6 +60,11 @@ export interface ReconcileParts {
   reconciler: Pick<Reconciler, 'redeliverFailed' | 'poll'>;
   log: Logger;
   now: () => Date;
+  /**
+   * 已知「机器人没装到这个仓」的仓（owner/name）：不去轮询、不算没查全，why 里写一句跳过了几个。
+   * 只给明确判为没装的；读不出来由调用方抛错，这一轮就当没有（照旧去读、读不成照旧记 partial）。
+   */
+  knownNotInstalled?: () => Promise<ReadonlySet<string>>;
 }
 
 /** since：轮询、重投往回看到哪一刻（调用方给，比上一轮开始的时刻再早一些，重叠的部分去重账会认出来）。 */
@@ -73,6 +78,15 @@ export async function reconcileGitHub(
     return { outcome: 'unscanned', scanned: 0, found: 0, why: '没有受管的仓（repos 表是空的）', steps: [] };
   }
   const steps: ReconcileStep[] = [];
+  let skipped = new Set<string>();
+  if (parts.knownNotInstalled) {
+    try {
+      skipped = new Set(await parts.knownNotInstalled());
+    } catch (err) {
+      log.warn('查不出哪些仓已知没装机器人，这一轮一个都不跳', { error: errMessage(err) });
+    }
+  }
+  const skippedSlugs = repos.map((r) => `${r.owner}/${r.name}`).filter((slug) => skipped.has(slug));
 
   const redeliver = await reconciler.redeliverFailed(options.since);
   steps.push({ step: 'redeliver', ...redeliver });
@@ -80,6 +94,7 @@ export async function reconcileGitHub(
   let scanned = 0;
   for (const repo of repos) {
     const slug = `${repo.owner}/${repo.name}`;
+    if (skipped.has(slug)) continue;
     const poll = await reconciler.poll(slug, options.since);
     steps.push({ step: 'poll', repo: slug, ...poll });
     if (poll.outcome === 'ok') scanned += 1;
@@ -133,8 +148,14 @@ export async function reconcileGitHub(
   if (stuck.length > 0 && !notOk.some((s) => s.step === 'replay')) {
     notes.push(replayNotes.join('；'));
   }
+  if (skippedSlugs.length > 0) {
+    const shown = skippedSlugs.slice(0, 3).join('、');
+    notes.push(
+      `跳过 ${skippedSlugs.length} 个没装机器人的仓（已有提醒）：${shown}${skippedSlugs.length > 3 ? ' 等' : ''}`,
+    );
+  }
   const text = notes.join('；') || undefined;
-  if (scanned === repos.length && notOk.length === 0)
+  if (scanned === repos.length - skippedSlugs.length && scanned > 0 && notOk.length === 0)
     return { outcome: 'ok', scanned, found, why: text, steps };
   // 一个仓都没查成、也没补回任何东西：这一轮等于没查（和「查了、没发现」分开）
   if (scanned === 0 && found === 0) {

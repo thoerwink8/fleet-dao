@@ -7,6 +7,7 @@ import {
   notifications,
   pullRequests,
   repos,
+  resolveAlertWithReason,
   scheduleHealth,
   scheduleRuns,
   upsertAlert,
@@ -69,6 +70,8 @@ interface GitHubState {
   pulls: unknown[];
   /** 设了就所有接口都这样回（读不到 GitHub）。 */
   down?: number;
+  /** 这些仓的两个机器人没装（GitHub 对 /repos/<仓>/installation 回 404）。 */
+  notInstalled?: string[];
 }
 
 /**
@@ -81,6 +84,9 @@ function githubApi(state: GitHubState): typeof fetch {
     const reply = (status: number, body: unknown) =>
       new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
     if (state.down) return reply(state.down, { message: 'Server Error' });
+    for (const slug of state.notInstalled ?? []) {
+      if (url.pathname.startsWith(`/repos/${slug}/`)) return reply(404, { message: 'Not Found' });
+    }
     if (url.pathname.endsWith('/installation')) return reply(200, { id: 1 });
     if (url.pathname.endsWith('/access_tokens')) {
       return reply(201, {
@@ -221,6 +227,65 @@ describe('对账补漏跑一轮（真库，不起 Temporal）', { timeout: 60_00
     expect(row?.outcome).toBe(run.outcome);
     expect(row?.why).toMatch(/poll/);
     expect(await pullsOf(w.repoId)).toHaveLength(0);
+  });
+
+  describe('已知没装机器人的仓（开着 github-app-missing 提醒）', () => {
+    const FRESH = `${OWNER}/fresh`;
+    const missingAlert = () => ({
+      dedupeKey: `github-app-missing:${FRESH}`,
+      level: 'decision' as const,
+      taskId: null,
+      title: `${FRESH}：先去 GitHub 把两个机器人装到这个仓`,
+      body: '正文',
+      link: '/settings',
+    });
+    async function addFresh() {
+      await t.db.insert(repos).values({ owner: OWNER, name: 'fresh', testCommand: 'pnpm check' });
+    }
+
+    it('跳过它：另一个仓照查，这一轮 ok，why 写跳过了几个，不记 partial', async () => {
+      const w = await wiring({ pulls: [pull(41, -20)], notInstalled: [FRESH] });
+      await addFresh();
+      await upsertAlert(t.db, missingAlert());
+      const run = await runOnce({ githubReconcile: w.job });
+      expect(run).toMatchObject({ outcome: 'ok', scanned: 1, found: 1 });
+      expect(run.why).toBe(`跳过 1 个没装机器人的仓（已有提醒）：${FRESH}`);
+      const [row] = await runsOf();
+      expect(row).toMatchObject({ outcome: 'ok', why: run.why });
+    });
+
+    it('没有提醒：这个仓读不成，照旧 partial', async () => {
+      const w = await wiring({ pulls: [pull(41, -20)], notInstalled: [FRESH] });
+      await addFresh();
+      const run = await runOnce({ githubReconcile: w.job });
+      expect(run.outcome).toBe('partial');
+      expect(run.why).toContain(`poll ${FRESH}`);
+      expect(run.why).not.toContain('跳过');
+    });
+
+    it('提醒已处理（不再开着）：不跳，照旧 partial', async () => {
+      const w = await wiring({ pulls: [pull(41, -20)], notInstalled: [FRESH] });
+      await addFresh();
+      await upsertAlert(t.db, missingAlert());
+      await resolveAlertWithReason(t.db, {
+        dedupeKey: `github-app-missing:${FRESH}`,
+        by: 'founder',
+        why: '测试里撤掉',
+        at: new Date(),
+      });
+      const run = await runOnce({ githubReconcile: w.job });
+      expect(run.outcome).toBe('partial');
+    });
+
+    it('跳过的不算别的仓读不成：别的仓真失败照旧 partial，并带上跳过那句', async () => {
+      const w = await wiring({ pulls: [{ numero: 41 }], notInstalled: [FRESH] });
+      await addFresh();
+      await upsertAlert(t.db, missingAlert());
+      const run = await runOnce({ githubReconcile: w.job });
+      expect(run.outcome).not.toBe('ok');
+      expect(run.why).toContain(`poll ${SLUG}`);
+      expect(run.why).toContain(`跳过 1 个没装机器人的仓（已有提醒）：${FRESH}`);
+    });
   });
 
   it('对账本身抛错（读库失败）：记成 failed、这一轮抛 GitHubReconcileFailedError，定时任务页标「没跑成」', async () => {
