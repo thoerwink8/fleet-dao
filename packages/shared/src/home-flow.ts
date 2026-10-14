@@ -110,19 +110,17 @@ export function taskFlow(task: Pick<Task, 'state'>, runs: readonly SegmentRunVie
       if (!latest || (latest.startedAt ?? '') <= r.startedAt) latest = r;
     }
   }
-  const merging = task.state === 'merging';
   const last = lastSessionOf(runs);
   const past = last ? { lastSession: last } : {};
   if (!latest || latest.segment === null) {
-    if (merging) return { segment: 'merge', ...past };
-    if (task.state === 'queued' || task.state === 'triaging') return { segment: 'scoping', ...past };
+    if (task.state === 'queued') return { segment: 'scoping', ...past };
     return { segment: null, ...past };
   }
   const lastEvent = lastEventOf(latest);
   const base = { ...(lastEvent ? { lastEvent } : {}), ...past };
   if (latest.running) {
     return {
-      segment: merging ? 'merge' : RUNNING_OF[latest.segment],
+      segment: RUNNING_OF[latest.segment],
       ...(latest.startedAt ? { stageSince: latest.startedAt } : {}),
       worker: latest.modelName,
       ...base,
@@ -130,7 +128,7 @@ export function taskFlow(task: Pick<Task, 'state'>, runs: readonly SegmentRunVie
   }
   const since = latest.endedAt ?? latest.startedAt;
   const segment = latest.outcome === 'done' ? NEXT_OF[latest.segment] : RUNNING_OF[latest.segment];
-  return { segment: merging ? 'merge' : segment, ...(since ? { stageSince: since } : {}), ...base };
+  return { segment, ...(since ? { stageSince: since } : {}), ...base };
 }
 
 /** 图头上的三格：在途几张（按泳道数）、近期跑完的平均耗时。 */

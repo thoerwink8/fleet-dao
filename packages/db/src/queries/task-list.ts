@@ -28,7 +28,7 @@ const groupExpr = sql<TaskListGroup>`(case
   when ${tasks.state} = 'failed' then 'failed'
   when ${tasks.state} = 'stopped' then 'stopped'
   when ${tasks.phase} = 'paused' then 'waiting'
-  when ${tasks.state} in ('asking', 'stalled') then 'waiting'
+  when ${tasks.state} = 'stalled' then 'waiting'
   when ${tasks.state} = 'queued' then 'queued'
   else 'running' end)`;
 

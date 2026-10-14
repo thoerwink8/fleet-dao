@@ -4,7 +4,7 @@
 // - 暂停人固定写 RELEASE_PAUSE_BY（「发版」）：引擎把它写进 tasks.doing（「已暂停：被人暂停（发版）：…」），continue 凭它认出
 //   「是发版暂停的」。人手暂停的（暂停时已经停着、或停着的原因不是发版）不暂停、不继续，名单里照实记 skipped。
 // - 只给 release.sh 从引擎 drain.json 里读到的、手上有会话的任务发：在等 CI、等合并的单不打断（切版本那几十秒新引擎起来接着等）。
-//   停下等人（stalled、asking）的单不发：对它们发「继续」等于替人点了继续。
+//   停下等人（stalled）的单不发：对它们发「继续」等于替人点了继续。
 // - 续上原会话由引擎做（#2037：被 PausedInterrupt 停下的那一段工作流记下会话号，继续时按它 resume）。这里只发信号，
 //   continue 时顺带把每张单最近一段收场时报的会话号（runs.session_id）记进名单，发版报告和事后排查看得到。
 // - 发不出去的照实记 failed、退出码 1，不当成发成了。操作记录写不进不挡信号（pause 在迁移之前跑，库里可能还没有新的
@@ -129,7 +129,7 @@ export function parsePauseList(text: string): PauseList {
 }
 
 /** 停下等人的：对它们发暂停再发「继续」等于替人点了继续，不碰。 */
-const WAITING_FOR_HUMAN = new Set<Task['state']>(['stalled', 'asking']);
+const WAITING_FOR_HUMAN = new Set<Task['state']>(['stalled']);
 
 async function locate(
   deps: ReleaseCliDeps,

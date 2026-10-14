@@ -67,17 +67,11 @@ describe('taskFlow：现在在哪一段', () => {
     expect(f.segment).toBe('doing');
   });
 
-  it('单子自己在合并中：不管最近一笔是什么都归合并', () => {
-    expect(taskFlow({ state: 'merging' }, [view({ segment: 'manual' })]).segment).toBe('merge');
-    expect(taskFlow({ state: 'merging' }, []).segment).toBe('merge');
-  });
-
-  it('一笔流水都没有：排队 / 分诊中是还没开始对题；其余推不出，是 null，不猜', () => {
+  it('一笔流水都没有：排队是还没开始对题；其余推不出，是 null，不猜', () => {
     expect(taskFlow({ state: 'queued' }, []).segment).toBe('scoping');
-    expect(taskFlow({ state: 'triaging' }, []).segment).toBe('scoping');
     expect(taskFlow({ state: 'running' }, [])).toEqual({ segment: null });
     // 只有认不出的笔，也等于没有
-    expect(taskFlow({ state: 'planning' }, [view({ segment: 'fusion-execute' })])).toEqual({ segment: null });
+    expect(taskFlow({ state: 'running' }, [view({ segment: 'fusion-execute' })])).toEqual({ segment: null });
   });
 
   it('结局没记：事件照实写「收场时没记结局」，不当成完成也不当成失败', () => {

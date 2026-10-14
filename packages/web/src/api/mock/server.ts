@@ -1817,7 +1817,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       const state = tv.task.state;
       if (tv.paused || TERMINAL.has(state)) continue;
 
-      // 引擎只写 queued → running（动手会话）→ done/stopped/stalled 这几个状态（#556 起三段流程没了，不再写 triaging/planning）；
+      // 引擎只写 queued → running（动手会话）→ done/stopped/stalled 这几个状态（不再写 triaging/asking/planning/merging，库里枚举值留着）；
       // 排队的一到点就起会话、按方案拆出子任务。
       if (state === 'queued' && rand() < 0.05) {
         const plan = st.plans[tv.task.id];
@@ -1891,12 +1891,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           via: 'engine',
         });
         notify('daily', `#${tv.task.issueNumber} 已完成`, tv.task.title, '/home3', tv.task.id);
-      } else if (
-        tv.task.state === 'running' &&
-        subs.length &&
-        subs.every((x) => x.subtask.state === 'in_merge_queue' || x.subtask.state === 'merged')
-      ) {
-        setTaskState(tv, 'merging');
       }
     }
 
@@ -2364,7 +2358,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           const queued = [...t.runs, ...t.subtasks.flatMap((s) => s.runs)].find(
             (r) => !r.startedAt && !r.endedAt,
           );
-          const asking = t.task.state === 'asking';
           const views = viewsOf(t);
           const flow = taskFlow(t.task, views);
           const runIds = views.filter((v) => v.running).map((v) => v.id);
@@ -2372,28 +2365,24 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           const stalled = t.task.state === 'stalled' ? t.task.stalled : undefined;
           const waitingReason = t.task.paused
             ? ('paused' as const)
-            : asking
-              ? ('founder_decision' as const)
-              : t.task.state === 'stalled'
-                ? ('parked' as const)
-                : queued
-                  ? ('queue' as const)
-                  : flow.segment === 'verify_pending'
-                    ? ('verify_round' as const)
-                    : flow.segment === 'merge'
-                      ? ('merge_queue' as const)
-                      : ('nothing' as const);
+            : t.task.state === 'stalled'
+              ? ('parked' as const)
+              : queued
+                ? ('queue' as const)
+                : flow.segment === 'verify_pending'
+                  ? ('verify_round' as const)
+                  : flow.segment === 'merge'
+                    ? ('merge_queue' as const)
+                    : ('nothing' as const);
           const waitingSince = t.task.paused
             ? undefined
-            : asking
-              ? decision?.since
-              : waitingReason === 'parked'
-                ? stalled?.since
-                : queued
-                  ? queued.queuedAt
-                  : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
-                    ? flow.stageSince
-                    : undefined;
+            : waitingReason === 'parked'
+              ? stalled?.since
+              : queued
+                ? queued.queuedAt
+                : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
+                  ? flow.stageSince
+                  : undefined;
           return {
             issueNumber: t.task.issueNumber,
             title: t.task.title,

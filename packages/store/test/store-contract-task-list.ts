@@ -28,7 +28,7 @@ const SPECS: Spec[] = [
   { n: 5, state: 'stopped', changed: 40, title: '巡检' },
   { n: 6, state: 'running', changed: 50, title: '首页加定价区块', paused: '已暂停：先等等' },
   { n: 7, state: 'stalled', changed: 60, title: '数据库夜间备份' },
-  { n: 8, state: 'asking', changed: 70, title: '站内通知提醒' },
+  { n: 8, state: 'stalled', changed: 70, title: '站内通知提醒' },
   // 最后两张最近一次变化在同一刻：翻页跨过它们也不漏不重（同一时刻按编号倒序）
   { n: 9, state: 'done', changed: 80, title: '100% 覆盖率' },
   { n: 10, state: 'done', changed: 80, title: '1000 个商品导入' },
@@ -73,7 +73,7 @@ export function describeTaskListContract(name: string, make: MakeStore): void {
       expect(got.items).toHaveLength(10);
     });
 
-    it('各组的数：暂停和停滞、旧追问算等人；暂停的单带 paused', async () => {
+    it('各组的数：暂停和停滞算等人；暂停的单带 paused', async () => {
       const got = await page({ limit: 50 });
       expect(got.counts).toEqual({ running: 1, queued: 1, waiting: 3, done: 3, failed: 1, stopped: 1 });
       expect(got.items.find((i) => i.task.issueNumber === 6)?.task).toMatchObject({

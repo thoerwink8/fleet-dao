@@ -27,7 +27,7 @@ export function taskListGroupOf(task: Pick<Task, 'state'> & { paused?: string | 
   if (state === 'failed') return 'failed';
   if (state === 'stopped') return 'stopped';
   if (task.paused !== undefined) return 'waiting';
-  if (state === 'asking' || state === 'stalled') return 'waiting';
+  if (state === 'stalled') return 'waiting';
   if (state === 'queued') return 'queued';
   return 'running';
 }
