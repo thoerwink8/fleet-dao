@@ -1,11 +1,11 @@
 // 钩子各阶段耗时（agents/hooks/hook-timing.mjs）：每跑一次记一行，查「钩子超时」的根子用（决定 0093 B1）。
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { hookTimer, summarize } from '../hooks/hook-timing.mjs';
+import { runChild } from './child.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -71,10 +71,9 @@ describe('真跑 pretool.mjs', () => {
     const hook = fileURLToPath(new URL('../hooks/pretool.mjs', import.meta.url));
     const env = { ...process.env, HOME: home, USERPROFILE: home };
     const run = (command: string) =>
-      spawnSync(process.execPath, [hook], {
+      runChild(process.execPath, [hook], {
         input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd: home }),
         env,
-        encoding: 'utf8',
       });
     expect(run('echo hi').status).toBe(0);
     expect(run('reclaude login').status).toBe(2);

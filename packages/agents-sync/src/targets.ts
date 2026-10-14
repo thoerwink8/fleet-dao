@@ -218,7 +218,7 @@ export interface HookTarget {
  * Stop 事件借道的几家支不支持没一一核过：不支持就是从来不触发，装了也无害。
  * 调工具前那条超时即拦、并且快（决定 0093 B1）：Claude Code 默认钩子超时就放行，等于安全检查空过（7 天 133 次，每次 7–40 秒）。
  * 根子是起进程的那两层：shell 形式在 Windows 上一律先起 Git Bash，再起 .NET 的启动器 quiet-*.exe，机器忙时这两层各自能卡十几秒；
- * node 本身满载时也在 250ms 内（_tmp/audit2/devloop/hookbench.mjs）。所以 Claude 那组登记成 exec 形式直接起 node（exec），
+ * node 本身满载时也在 250ms 内（2026-10-14 本机满载实测，数字见 docs/ops.md 那一条）。所以 Claude 那组登记成 exec 形式直接起 node（exec），
  * 写 onFailure: 'block'，超时、起不来都拦下；不做「连续超时自动放行」（code.claude.com/docs/en/hooks「Exec form and shell form」
  * 「Block the action when a hook fails」，要 Claude Code ≥ 2.1.295）。Grok 见到非空 args 整条跳过（~/.grok/docs/user-guide/10-hooks.md
  * 「Unsupported Handler Fields」，空 args、onFailure 照常加载），所以第二组除了 Devin 的名字再加 Grok 自己的 run_terminal_command、
