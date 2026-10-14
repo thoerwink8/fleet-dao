@@ -97,6 +97,33 @@ export const KIND_ROUTE_STALE = 'route-stale';
 /** 由单的状态生成的异常（挂在任务上的提醒、「#N 卡住了」、「#N 最近的问题」）：任务自己停下，不是服务、发布这类基础设施的问题（#1740）。 */
 export const KIND_TASK_PARK = 'task-park';
 
+/**
+ * 「没处理的提醒」这类异常（法国库 notifications 表）的 where：buildView 给每条提醒和「还有 N 条提醒没处理」都用它，
+ * 发版车（release-train-lib.mjs）拿它把提醒项和健康项分开（不靠 what 的文案）。提醒的 key 是它的 dedupe_key。
+ */
+export const WHERE_NOTIFICATIONS = '驾驶舱「提醒」或飞书；法国库 notifications 表 resolved_at 为空的';
+/** @param {{ where?: unknown }} a 这条异常是不是「没处理的提醒」 */
+export const isNotificationIssue = (a) => a.where === WHERE_NOTIFICATIONS;
+
+/**
+ * 发版后验证只拦和这次发版有关的新提醒（dedupe_key 前缀）：auto-release: 自动发布单元；engine-drain 引擎排空；
+ * engine-session-io 会话 IO 目录；cli-upgrade: 发版顺带升级的命令行；retired-schedule: 发版时撤掉的旧定时任务。
+ * 法国上的 deploy/france/release-request/lib.mjs 装在 /usr/local/lib/fleet-dao/ 读不到这里，自己存一份同名列表；
+ * agents/test/release-train.test.ts 逐项比两边，漂了就红。
+ */
+export const RELEASE_ALERT_PREFIXES = [
+  'auto-release:',
+  'engine-drain',
+  'engine-session-io',
+  'cli-upgrade:',
+  'retired-schedule:',
+];
+/**
+ * 发布重启必然打断、条件过去就自己撤的新提醒：定时任务被重启打断（watchdog:job:）、看门狗没按期跑完（watchdog-down:）、
+ * 跟不上主线（deploy-lag:）。验证时也拦，但在窗口里重读、撤了就过。同上，和 release-request/lib.mjs 那份逐项相等。
+ */
+export const VERIFY_RETRY_PREFIXES = ['watchdog:job:', 'watchdog-down:', 'deploy-lag:'];
+
 /** 提醒标题里的挂起话术；只在读不到 dedupe_key 时才用它认。 */
 const PARK_TITLE = /验收 \d+ 轮都没过|动手 \d+ 轮都没过|验收做不出来/;
 
@@ -1060,7 +1087,7 @@ const WHERE = {
   autoRelease: '法国：systemctl status fleet-auto-release.timer；journalctl -u fleet-auto-release -n 30',
   releaseLog: '法国：journalctl -u fleet-auto-release -n 50；/srv/fleet-dao-releases/.logs/ 下最新的日志',
   installer: '法国以 root 跑 bash /srv/fleet-dao/deploy/france.sh（碰防火墙、sudoers，要人看着跑）',
-  notifications: '驾驶舱「提醒」或飞书；法国库 notifications 表 resolved_at 为空的',
+  notifications: WHERE_NOTIFICATIONS,
   job: (/** @type {string} */ id) =>
     `法国：journalctl -u fleet-engine | grep ${id}；库 schedule_runs 表 job='${id}'`,
   route: '法国：journalctl -u fleet-engine | grep route-probe；库 routes 表',

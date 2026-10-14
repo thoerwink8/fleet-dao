@@ -157,9 +157,9 @@ export async function readAlertWork(db: Db, notificationIds: readonly string[]):
 }
 
 export interface AuditWho {
-  actorKind: 'user' | 'ai' | 'engine' | 'agent';
+  actorKind: 'user' | 'ai' | 'engine' | 'agent' | 'ops';
   actorId: string;
-  via: 'cockpit' | 'feishu' | 'github' | 'engine' | 'agent';
+  via: 'cockpit' | 'feishu' | 'github' | 'engine' | 'agent' | 'ops';
 }
 
 /** 建一条静默：到期 = 库的 now() + minutes；同一事务记操作记录（alert.silence）。约束不过（前缀太宽、超 7 天）照抛。 */

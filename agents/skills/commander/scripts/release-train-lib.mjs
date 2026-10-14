@@ -4,17 +4,20 @@
 // 改这里之前必须知道：
 // - 这份文件里没有任何真的起进程、连网、睡觉的代码：一切经 io 进来，agents/test/release-train.test.ts 换成假 ssh、假 gh、假时钟。
 //   真跑的代码路径不许在测试里碰真 ssh（那条路只在 release-train.mjs 外壳里）。
-// - 阶段（方案 4.2，每阶段有上限，到点停下列出拖后腿的，不硬来）：0 预检（只读）→1 本机（占位）→2 暂停法国→3 等收尾→
-//   4 发版（对外发布，必须带 --founder-ok）→5 等部署→6 验证→7 恢复→8 派清单。状态记在 ~/.fleet-dao/release-train.json，
+// - 阶段（方案 4.2，每阶段有上限，到点停下列出拖后腿的，不硬来）：0 预检（只读）→1 本机（占位）→2 暂停法国（只记总开关）→
+//   3 等收尾（只等要发的提交的 CI）→4 发版（对外发布，必须带 --founder-ok）→5 等部署→6 验证→7 恢复（核对开关）→8 派清单。状态记在 ~/.fleet-dao/release-train.json，
 //   停在「卡住」（blocked）或「没成」（failed）时再跑一次 start（同一个目标）从停下的那一步接着走；换目标要先 abort。
-// - 驱动活着的证据（#1674）：每次落盘都把 driver { pid, host, heartbeatAt } 写进状态，等收尾、等部署的轮询里每圈也落一次。
+// - 驱动活着的证据（#1674）：每次落盘都把 driver { pid, host, heartbeatAt } 写进状态，等收尾、等部署、验证的轮询里每圈也落一次。
 //   status、start 判「驱动死了」：同一台机器上 pid 不在，或心跳比该步上限（phaseBudgetMs）加余量（deadMarginMs）还老。
 //   start 同一个目标遇到驱动已死的 running，当成「没成」从停下的那一步接着走；停在第 4 步的先读法国 .history 判发没发成。
-//   巡查报总开关关着时读这份状态（trainAlertNote），写明是「发版车驱动死了没人恢复」还是别的。
+//   巡查报总开关关着时读这份状态（trainAlertNote），写明是「发版车驱动死了没人恢复」还是别的（只剩老现场那一支会关着）。
 // - 第 1 步「本机」是占位：脱离会话的工人一族已删（P5），本机没有要暂停的东西；步号不动，免得改状态文件里的 phase 和一键发版的哨兵字样。
-// - 暂停法国＝fleet-api engine off（关着时不拉单、不派活、不起干活的会话；在跑的做完当前一步）。第 2 步先记下总开关和各仓接活开关，
-//   第 7 步发完、健康检查过了，按记下的恢复：开着的开回、关着的保持关，恢复不成功就是没成（退出码 2，不当成成功）。
-//   release.sh 发完不再置关（决定 0032 第 4 条、#1256）；--restore 留着当「明写要开回」的写法，和默认一样，不再要创始人逐次授权（只是还原）。
+// - 发版不关引擎总开关（#2038、决定 0093）：release.sh 切版本前自己给在跑的任务发 hard 暂停（暂停人「发版」）、
+//   只等不可暂停的几段最多 2 分钟，切完对这一批发「继续」。所以第 2 步只读总开关记下发版前的样子（before，pausedMaster: false），
+//   第 3 步只等要发的提交的 CI、不等法国会话收尾，第 7 步只核对总开关和发版前一致：不一致照实报，不替人开或关。
+//   兼容老现场：上一回老版本发版车停在「卡住」「没成」时总开关是它关的（before.master 为真、记录里没有 pausedMaster、现在关着），
+//   第 2 步认出来记 pausedMaster: true，第 7 步照老规矩开回总开关和记下的各仓接活开关，开不回去算没成（退出码 2）。
+//   release.sh 发完不置关（决定 0032 第 4 条、#1256）；--restore 留着当「明写要开回」的写法，和默认一样。
 // - 第 4 步发版不跑法国检出里的 release.sh（那份经常还是上一版）。ssh 的是 releaseBootCommand：
 //   把同目录 release-boot.sh 送过去，解开目标提交的 deploy/ 再 exec 那一版（#1294）。没有或读不出就拒，不退回检出里那份。
 //   --check 仍跑检出里那份。
@@ -22,9 +25,11 @@
 //   releaseLaunchCommand（release-launch.sh）让法国用 systemd 临时服务 fleet-train-release-<前12位> 跑 release-boot.sh，
 //   日志末行 fleet-dao-release-exit=<n> 是发布结果；本机每 pollMs 把同一条幂等命令再发一遍读现状（started/attached/finished/lost/busy），
 //   ssh 断了只重连，总时限 releaseMs，到点才判没成。同一目标重跑 start：服务还在跑就接着看，不起第二个、不报锁冲突。
-// - 第 6 步验证只拦「预检基线里没有的、跟新版有关的」异常（服务、健康检查、发布历史、定时任务、探针这类），比 key 不比条数（#1740）。
+// - 第 6 步验证只拦「预检基线里没有的、跟新版有关的」异常，比 key 不比条数（#1740）。健康项（服务、健康检查、发布历史、定时任务、
+//   探针这类）新出现就拦；提醒项（法国库里没处理的提醒，franceHealth 的 items 里 source 'alert'）只拦键前缀在 RELEASE_ALERT_PREFIXES
+//   里的（和这次发版有关的），重启打断的那几类（VERIFY_RETRY_PREFIXES）在 verifyMs 里重试、撤了就过；别的新提醒列出来不拦。
 //   任务自己停下（kind task-park）是引擎照常干活的结果，不算新版的问题：不拦，只列出来给人看。
-// - 读不到就是读不到：读不到法国会话数、总开关、主线 CI 时不往下走（也不当成 0 或绿），回 { ok: false, why }。
+// - 读不到就是读不到：读不到法国会话数（预检）、总开关、主线 CI 时不往下走（也不当成 0 或绿），回 { ok: false, why }。
 // - 所有打出来和记下来的字过 scrubText（令牌、邮箱、IP、长串抹掉）；ssh 的名字不进输出。
 // - 退出码：0 做完了（或 abort 做完了）；1 用法不对或被拒（没带 --founder-ok、已有一趟在走）；2 没做成（读不到、命令失败）；
 //   3 卡住（到点还有拖后腿的，名单已列出；现场没动，要么再跑 start 再等，要么 abort）。
@@ -33,7 +38,15 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
-import { KIND_ROUTE_STALE, KIND_TASK_IDLE, KIND_TASK_PARK, scrubText } from './france-lib.mjs';
+import {
+  isNotificationIssue,
+  KIND_ROUTE_STALE,
+  KIND_TASK_IDLE,
+  KIND_TASK_PARK,
+  RELEASE_ALERT_PREFIXES,
+  scrubText,
+  VERIFY_RETRY_PREFIXES,
+} from './france-lib.mjs';
 import {
   DEFAULT_LIMITS,
   driverVerdict,
@@ -72,19 +85,20 @@ const BUSY = 75;
 
 export const USAGE = `用法：node release-train.mjs <命令>（在项目仓的检出里跑；发版会等很久，用 run_in_background 起）
   start --sha <提交> --founder-ok "<创始人原话>" [--restore]
-        发版前先暂停手头的活，再发版，再恢复：
-        0 预检（只读：主线 CI 绿、没有别的发布在跑、法国能读、列出挂了自动合并的 PR）→ 1 本机（占位，没有要暂停的）
-        → 2 暂停法国（记下总开关和各仓开关，fleet-api engine off；本来就关着记「跳过」）→ 3 等收尾（等：主线 CI 绿、法国在跑会话 0，各有上限，到点停下列出拖后腿的；
-        挂了自动合并没合的 PR 只提示、不等）→ 4 发版 → 5 等部署 → 6 验证 → 7 恢复 → 8 按最优顺序打印当前版本的清单
+        发版：0 预检（只读：主线 CI 绿、没有别的发布在跑、法国能读、列出挂了自动合并的 PR）→ 1 本机（占位，没有要暂停的）
+        → 2 暂停法国（不关总开关：release.sh 切版本时只暂停在跑的任务（决定 0093）；这里只记下发版前总开关的样子）
+        → 3 等收尾（只等要发的提交的 CI 绿，有上限，到点停下列出拖后腿的；不等法国会话；挂了自动合并没合的 PR 只提示、不等）
+        → 4 发版 → 5 等部署 → 6 验证 → 7 恢复（核对总开关和发版前一致）→ 8 按最优顺序打印当前版本的清单
         --sha：ssh 到法国，用目标提交自带的 release.sh 发（release-boot.sh 先解开那一版的包再 exec，不跑检出里还停着的旧脚本；决定 0032，#1294）；
               发布在法国的 systemd 临时服务里跑，ssh 断了不影响，本机轮询到发完（最长 releaseMs），不当成失败（#1995）
-        --founder-ok：发版是对外发布，必须带创始人原话，没带就拒（连暂停都不做）
-        发完、健康检查过了，法国按暂停前记下的恢复：总开关和各仓接活开关开着的开回、关着的保持关（写操作记录；开不回去算没成、退出码 2）
-        --restore：明写「发完开回去」，和不给一样（默认就恢复，不再要创始人逐次授权）
+        --founder-ok：发版是对外发布，必须带创始人原话，没带就拒（什么都不做）
+        第 7 步：这一趟没关总开关，只核对和发版前一致，不一致照实报（不替人开或关）；只有上一回老版本发版车关过的（老现场）才开回
+        总开关和记下的各仓接活开关（写操作记录；开不回去算没成、退出码 2）
+        --restore：明写「发完开回去」，和不给一样
         停在「卡住」或「没成」时，同一个目标再跑一次 start 从停下的那一步接着走（恢复没成也是这样重试）
   status          看这一趟走到哪、拖后腿的是谁（只读）
-  abort           撤暂停、恢复原状：还没发版就把法国总开关开回暂停前的样子；已经动手发过版就保持关（不知道发成没有、健康没确认；
-                  确认没事后自己到环境页或 fleet-api engine on 开）。想让它确认健康后自动恢复，别 abort，同一个目标再跑一次 start
+  abort           撤掉这一趟：这一趟不关总开关，没什么要开回的；老现场（老版本关过总开关）还没发版就开回发版前的样子，已经动手发过版
+                  就保持关（不知道发成没有、健康没确认；确认没事后自己到环境页或 fleet-api engine on 开）
 退出码：0 做完了；1 用法不对或被拒；2 没做成（读不到、命令失败）；3 卡住（到点还有拖后腿的，名单已列出）。`;
 
 class UsageError extends Error {}
@@ -404,14 +418,19 @@ async function autoMergePrs(io) {
 }
 
 /**
- * 暂停期必然出现、引擎一恢复就消失的异常类别 → 给人看的名字。按 `kind` 认，不匹配文案。
- * `task-idle`：引擎不派活不起会话，在动手的单必然「没动」（#1292）。
- * `route-stale`：路由探针要引擎开着才跑，暂停加部署超过 45 分钟，在线路由的结论必然变旧（#1520）。
+ * 发版暂停期间必然出现、暂停一撤就消失的异常类别 → 给人看的名字。按 `kind` 认，不匹配文案。
+ * 这一趟不关总开关（决定 0093），但 release.sh 切版本时会暂停在跑的任务、重启引擎；老现场那一支总开关还关着。
+ * `task-idle`：任务被暂停、手上没会话，在动手的单会「没动」（#1292）。
+ * `route-stale`：路由探针要引擎开着才跑，老现场关着总开关时在线路由的结论必然变旧（#1520）。
  */
 const PAUSE_KINDS = new Map([
   [KIND_TASK_IDLE, '单没动、手上没会话'],
   [KIND_ROUTE_STALE, '路由结论没更新'],
 ]);
+
+// 第 6 步提醒项的口径（发版相关键前缀 RELEASE_ALERT_PREFIXES、重启打断重试类 VERIFY_RETRY_PREFIXES、
+// 认提醒项的 isNotificationIssue）都在 france-lib.mjs，这里只引用、照原名再导出。别的新提醒（任务失败、对账之类）列出来，不拦。
+export { RELEASE_ALERT_PREFIXES, VERIFY_RETRY_PREFIXES };
 
 /** 「单没动、手上没会话 2 处、路由结论没更新 0 处」：每个类别都列，0 也写出来。 */
 function pausedText(paused) {
@@ -422,8 +441,9 @@ function pausedText(paused) {
 /**
  * france.mjs --json：{ ok, code, bad, unread, note, paused, text }。退出码 2＝整个没读到。
  * 按异常的 `kind` 分类，不匹配文案（#1292、#1520）：PAUSE_KINDS 里的类别不计入 bad/unread/note，只按类别数进 paused。
- * 为什么放在这里过滤，而不是验证前先把引擎开回来：发版车第 2 步关引擎、第 7 步才按发版前状态恢复，
- * 发版前关着的要保持关，验证前开引擎会改变这个决定（并让引擎在验证期间重新接活）。预检基线和验证用同一个函数，口径一致。
+ * items 每条带 source：'alert'＝没处理的提醒（france-lib 的 isNotificationIssue 认 where；第 6 步按键前缀判和发版有没有关），
+ * 'health'＝健康项（新出现照旧拦）。
+ * 预检基线和验证用同一个函数，口径一致。
  */
 async function franceHealth(io) {
   const r = io.run(io.nodePath, [join(io.scriptsDir, 'france.mjs'), '--json'], {
@@ -460,6 +480,7 @@ async function franceHealth(io) {
       key: typeof a.key === 'string' && a.key !== '' ? a.key : `${a.kind ?? a.level}:${a.what}`,
       level: a.level,
       kind: a.kind,
+      source: isNotificationIssue(a) ? 'alert' : 'health',
       text,
     });
   }
@@ -534,55 +555,41 @@ async function phaseLocal(io, state) {
   return { ok: true };
 }
 
-/** 2 暂停法国：记下总开关和各仓开关，engine off；总开关本来就关着记「跳过」。 */
+/**
+ * 2 暂停法国：不关总开关（#2038、决定 0093）。release.sh 切版本前自己给在跑的任务发 hard 暂停、发完发「继续」；
+ * 这一步只读总开关记下发版前的样子（before.master，pausedMaster: false），给第 7 步核对。读不到不往下走。
+ * 兼容老现场：上一回老版本发版车停下时总开关是它关的（before.master 为真、记录里没有 pausedMaster、现在关着）：
+ * 保留那份记录（含各仓接活开关），记 pausedMaster: true，第 7 步照老规矩开回。
+ */
 async function phasePauseFrance(io, state) {
   const now = await engineStatus(io);
   if (!now.ok) return failed(now.why);
-  if (state.before?.master === true) {
-    // 接着上次走：暂停前的样子已经记过了，别拿现在的「关着」盖掉它
-    if (!now.on) {
-      sayTo(io, '暂停法国：总开关已经是关的（上次已关），暂停前是开着的，已记');
-      return { ok: true };
-    }
-  } else if (!now.on) {
-    state.before = { master: false, repos: null, recordedAt: iso(io) };
+  if (state.before?.master === true && state.before.pausedMaster !== false && !now.on) {
+    state.before = { ...state.before, pausedMaster: true };
     saveState(io, state);
-    sayTo(
-      io,
-      now.legacy
-        ? '暂停法国：跳过（在用的版本还没有引擎总开关，没什么要暂停的；发完这一版就有了）'
-        : '暂停法国：跳过（引擎总开关本来就关着，没什么要暂停的）',
-    );
+    sayTo(io, '暂停法国：总开关是上一回老版本发版车关的（发版前开着，已记），第 7 步开回');
     return { ok: true };
-  } else {
-    const repos = await io.franceRepos();
-    if (!repos.ok)
-      return failed(`法国各仓的「让 AI 接活」开关读不到，不敢关总开关（关了就恢复不了原样）：${repos.why}`);
-    state.before = {
-      master: true,
-      repos: repos.rows.map((r) => ({
-        repo: r.repo,
-        on: r.auto_dispatch_since !== null && r.auto_dispatch_since !== undefined,
-      })),
-      recordedAt: iso(io),
-    };
-    saveState(io, state);
   }
-  const off = await engineSet(io, false, `发版前暂停（release-train，目标 ${targetText(state.target)}）`);
-  if (!off.ok) return failed(off.why);
-  const back = await engineStatus(io);
-  if (!back.ok) return failed(`关完读回失败：${back.why}`);
-  if (back.on) return failed('engine off 说成了，读回来总开关还是开着：不往下走');
+  state.before = {
+    master: now.on,
+    ...(now.legacy ? { legacy: true } : {}),
+    pausedMaster: false,
+    repos: null,
+    recordedAt: iso(io),
+  };
+  saveState(io, state);
   sayTo(
     io,
-    `暂停法国：总开关已关（暂停前开着；各仓开关记了 ${state.before.repos?.filter((r) => r.on).length ?? 0} 个开着的、共 ${state.before.repos?.length ?? 0} 个）`,
+    now.legacy
+      ? '暂停法国：不关总开关：release.sh 切版本时只暂停在跑的任务（决定 0093）；在用的版本还没有引擎总开关，已记'
+      : `暂停法国：不关总开关：release.sh 切版本时只暂停在跑的任务（决定 0093）；发版前总开关${now.on ? '开着' : '关着'}，已记，第 7 步核对`,
   );
   return { ok: true };
 }
 
 /**
- * 3 等收尾：等主线 CI 绿、法国在跑的会话 0，各有上限，到点停下列出拖后腿的。自动合并的 PR 只提示（打印出来，
- * 内容变了再打一次），不挡、不算拖后腿。
+ * 3 等收尾：只等要发的提交的 CI 绿（上限 ciMs），红了立刻停。不等法国会话收尾（#2038）：release.sh 切版本前自己暂停在跑的任务。
+ * 自动合并的 PR 只提示（打印出来，内容变了再打一次），不挡、不算拖后腿。
  */
 async function phaseWait(io, state) {
   const started = io.now().getTime();
@@ -605,20 +612,12 @@ async function phaseWait(io, state) {
       return blocked(`主线 CI 红了：${ci.why}。先修主线，再来（同一个目标再跑一次 start）`, [ci.why]);
     status.push({ key: '主线 CI', held: ci.verdict === 'green' ? [] : [ci.why], limit: L.ciMs });
 
-    const s = await io.runningSessions();
-    status.push({
-      key: '法国在跑的会话',
-      held: s.ok
-        ? s.rows
-            .map((r) => `${r.repo ?? '（无单）'}${r.n ? `#${r.n}` : ''} ${r.stage}`)
-            .concat(s.running > s.rows.length ? [`……共 ${s.running} 个`] : [])
-        : [`读不到（${s.kind}）：${s.why}`],
-      limit: L.franceMs,
-    });
-
     const line = status.map((x) => `${x.key} ${x.held.length}${x.hint ? '（只提示，不等）' : ''}`).join('，');
     if (line !== lastLine) {
-      sayTo(io, `等收尾（已 ${minutes(at - started)} 分钟）：${line}`);
+      sayTo(
+        io,
+        `等收尾（已 ${minutes(at - started)} 分钟，只等 CI；法国会话不等，release.sh 切版本时自己暂停）：${line}`,
+      );
       lastLine = line;
     }
     const hints = status
@@ -637,7 +636,7 @@ async function phaseWait(io, state) {
     if (open.every((x) => at - started >= x.limit)) {
       const laggards = open.flatMap((x) => x.held.map((h) => `${x.key}：${h}`));
       return blocked(
-        `等了 ${minutes(at - started)} 分钟还有拖后腿的（没动现场；再等就同一个目标再跑一次 start，不等了就 abort 撤暂停）：\n- ${laggards.join('\n- ')}`,
+        `等了 ${minutes(at - started)} 分钟还有拖后腿的（没动现场；再等就同一个目标再跑一次 start，不等了就 abort）：\n- ${laggards.join('\n- ')}`,
         laggards,
       );
     }
@@ -782,47 +781,98 @@ async function phaseDeploy(io, state) {
 }
 
 /**
- * 6 验证：法国现状比预检基线没有「新出现」的异常（比 key 的集合，不比条数，#1740）；总开关读得到。
- * 任务停下（kind task-park：挂起提醒、「#N 卡住了」、「#N 最近的问题」）是引擎照常干活的结果，不算新版的问题：不拦，只在通过那行后另起一行列出来。
- * 旧状态文件的基线没有 keys 时退回按条数比。
- * PAUSE_KINDS 里的类别不算：「单没动、手上没会话」（kind task-idle，#1292）、「路由结论没更新」（kind route-stale，#1520），
- * 都是引擎暂停期必然出现、一恢复就消失的；同一个目标再跑 start 也刷新不了它们（引擎第 7 步才开回），拦了就是死循环。
+ * 第 6 步比一次：基线里没有的 key＝发版期间新出现的。健康项新出现就拦（hard）；提醒项只拦和发版有关的（RELEASE_ALERT_PREFIXES，hard）
+ * 和重启打断的（VERIFY_RETRY_PREFIXES，retrying，窗口里重试），别的新提醒进 unrelated 只列出来。
+ * 留意级（note）和任务停下（kind task-park）不拦；task-park 进 parked 列出来。旧状态文件的基线没有 keys 时 hasKeys 为假，调用方按条数比。
  */
-async function phaseVerify(io, state) {
-  const health = await franceHealth(io);
-  if (!health.ok) return failed(health.why);
-  const base = state.baseline ?? { bad: 0, unread: 0, note: 0 };
+function freshVerdict(health, base) {
   const hasKeys = Array.isArray(base.keys);
-  /** 基线里没有的 key＝发版期间新出现的。旧状态文件没有 keys 时 fresh 不用，下面退回按条数比。 */
   const known = new Set(hasKeys ? base.keys : []);
   const fresh = hasKeys ? health.items.filter((x) => !known.has(x.key)) : [];
-  if (hasKeys) {
-    const offending = fresh.filter((x) => x.level !== 'note' && x.kind !== KIND_TASK_PARK);
-    if (offending.length > 0)
+  const hard = [];
+  const retrying = [];
+  const unrelated = [];
+  for (const x of fresh) {
+    if (x.level === 'note' || x.kind === KIND_TASK_PARK) continue;
+    if (x.source !== 'alert') hard.push(x);
+    else if (VERIFY_RETRY_PREFIXES.some((p) => x.key.startsWith(p))) retrying.push(x);
+    else if (RELEASE_ALERT_PREFIXES.some((p) => x.key.startsWith(p))) hard.push(x);
+    else unrelated.push(x);
+  }
+  return { hasKeys, hard, retrying, unrelated, parked: fresh.filter((x) => x.kind === KIND_TASK_PARK) };
+}
+
+const listItems = (xs, n = 12) =>
+  xs
+    .slice(0, n)
+    .map((x) => x.text)
+    .join('\n');
+
+/**
+ * 6 验证：法国现状比预检基线没有「新出现」的、和这次发版有关的异常（比 key 的集合，不比条数，#1740）；总开关读得到。
+ * 健康项（服务、健康检查、发布历史、定时任务、探针）新出现就拦；提醒项只拦键前缀在 RELEASE_ALERT_PREFIXES 里的；
+ * 重启打断的那几类（VERIFY_RETRY_PREFIXES）在 limits.verifyMs 里每 pollMs 重读，撤了就过、到点还在才卡住。
+ * 别的新提醒、任务停下（kind task-park）是引擎照常干活的结果，不算新版的问题：不拦，只在通过那行后另起一行列出来。
+ * 旧状态文件的基线没有 keys 时退回按条数比。PAUSE_KINDS 里的类别不算（见 PAUSE_KINDS）。
+ */
+async function phaseVerify(io, state) {
+  const started = io.now().getTime();
+  const base = state.baseline ?? { bad: 0, unread: 0, note: 0 };
+  let health;
+  let v;
+  for (;;) {
+    saveState(io, state); // 心跳
+    health = await franceHealth(io);
+    if (!health.ok) return failed(health.why);
+    v = freshVerdict(health, base);
+    if (!v.hasKeys) {
+      if (health.bad + health.unread > base.bad + base.unread)
+        return blocked(
+          `发完版法国多出了异常（预检时 ${base.bad} 异常 ${base.unread} 没读到，现在 ${health.bad} 异常 ${health.unread} 没读到）：\n${health.text.split('\n').slice(0, 12).join('\n')}`,
+          [`异常 ${health.bad}、没读到 ${health.unread}`],
+        );
+      break;
+    }
+    if (v.hard.length > 0)
       return blocked(
-        `发完版法国多出了异常（预检时 ${base.bad} 异常 ${base.unread} 没读到，现在 ${health.bad} 异常 ${health.unread} 没读到；新出现的 ${offending.length} 条）：\n${offending
-          .slice(0, 12)
-          .map((x) => x.text)
-          .join('\n')}`,
-        [`新出现 ${offending.length} 条`],
+        `发完版法国多出了异常（预检时 ${base.bad} 异常 ${base.unread} 没读到，现在 ${health.bad} 异常 ${health.unread} 没读到；新出现的 ${v.hard.length} 条）：\n${listItems(v.hard)}`,
+        [`新出现 ${v.hard.length} 条`],
       );
-  } else if (health.bad + health.unread > base.bad + base.unread)
-    return blocked(
-      `发完版法国多出了异常（预检时 ${base.bad} 异常 ${base.unread} 没读到，现在 ${health.bad} 异常 ${health.unread} 没读到）：\n${health.text.split('\n').slice(0, 12).join('\n')}`,
-      [`异常 ${health.bad}、没读到 ${health.unread}`],
+    if (v.retrying.length === 0) break;
+    const waited = io.now().getTime() - started;
+    if (waited >= io.limits.verifyMs)
+      return blocked(
+        `发布重启打断的 ${v.retrying.length} 条等了 ${minutes(waited)} 分钟还没撤：
+${listItems(v.retrying)}`,
+        [`重启打断的 ${v.retrying.length} 条没撤`],
+      );
+    sayTo(
+      io,
+      `验证：发布重启打断的 ${v.retrying.length} 条还没撤（已等 ${minutes(waited)} 分钟，最多 ${minutes(io.limits.verifyMs)} 分钟，再看一次）：${v.retrying.map((x) => x.key).join('、')}`,
     );
+    await io.sleep(io.limits.pollMs);
+  }
   const eng = await engineStatus(io);
   if (!eng.ok) return failed(eng.why);
   sayTo(
     io,
     `验证：法国 ${health.bad} 处异常、${health.unread} 处没读到（预检基线 ${base.bad}、${base.unread}；暂停期必然出现的不计：${health.paused}）；${eng.text}`,
   );
-  const parked = fresh.filter((x) => x.kind === KIND_TASK_PARK);
-  if (parked.length > 0) {
-    const more = parked.length > 8 ? `……共 ${parked.length} 条` : '';
+  if (v.unrelated.length > 0) {
+    const more = v.unrelated.length > 8 ? `……共 ${v.unrelated.length} 条` : '';
     sayTo(
       io,
-      `发版期间单子停下的（引擎照常干活的结果，不算新版的问题，只列出来给人看）：${parked
+      `发版期间新出现的提醒，和这次发版无关（不拦，只列出来给人看）：${v.unrelated
+        .slice(0, 8)
+        .map((x) => x.text.replace(/^(?:· 留意：|⚠ )/, ''))
+        .join('；')}${more}`,
+    );
+  }
+  if (v.parked.length > 0) {
+    const more = v.parked.length > 8 ? `……共 ${v.parked.length} 条` : '';
+    sayTo(
+      io,
+      `发版期间单子停下的（引擎照常干活的结果，不算新版的问题，只列出来给人看）：${v.parked
         .slice(0, 8)
         .map((x) => x.text.replace(/^(?:· 留意：|⚠ )/, ''))
         .join('；')}${more}`,
@@ -832,29 +882,39 @@ async function phaseVerify(io, state) {
 }
 
 /**
- * 7 恢复：法国按第 2 步记下的发版前状态还原（决定 0032 第 4 条、#1256）：总开关发版前开着的开回、关着的保持关；
- * 各仓「让 AI 接活」发版前开着的、现在不是开着的开回，关着的不动。恢复动作经 fleet-api 写操作记录。
- * 恢复不成功（读不到、开不回去、读回来不对）是「没成」：退出码 2、写明发版已经发出去了只是没恢复，同一个目标再跑一次 start 重试这一步。
+ * 7 恢复（现在是核对）：这一趟不关总开关（决定 0093），所以只有老现场那一支（第 2 步认出上一回老版本关的，before.pausedMaster 为真）
+ * 才开回：总开关和发版前开着的各仓「让 AI 接活」，经 fleet-api 写操作记录；开不回去、读回来不对是「没成」（退出码 2），同一个目标再跑一次 start 重试这一步。
+ * 其余情况不碰总开关：读回来和发版前一致就说一致；不一致（发版期间有人开了或关了）照实报，不替人开或关，这一步照过。
+ * 第 2 步没记下发版前的样子（before 缺）不猜，没成。
  */
 async function phaseRestore(io, state) {
   saveState(io, state);
   const before = state.before;
   if (before === null || before === undefined || typeof before.master !== 'boolean')
     return failed(
-      '恢复没成：第 2 步没记下发版前的开关状态（state.before 缺），不敢猜着开或关；发版已经发出去了，到驾驶舱环境页核对总开关和各仓「让 AI 接活」',
+      '恢复没成：第 2 步没记下发版前的开关状态（state.before 缺），不敢猜着核对；发版已经发出去了，到驾驶舱环境页核对总开关和各仓「让 AI 接活」',
     );
   const eng = await engineStatus(io);
   if (!eng.ok) return failed(`恢复没成（发版已经发出去了）：${eng.why}`);
-  if (!before.master) {
-    sayTo(
+  if (!(before.master && before.pausedMaster !== false)) {
+    if (before.legacy || eng.legacy) {
+      sayTo(io, '恢复：发版前法国还没有引擎总开关，这一趟也没动过，没什么要核对的');
+      return { ok: true };
+    }
+    const word = (on) => (on ? '开着' : '关着');
+    if (eng.on === before.master) {
+      sayTo(io, `恢复：这一趟没关总开关（决定 0093），没动；核对和发版前一致（${word(eng.on)}）`);
+      return { ok: true };
+    }
+    state.restoreMismatch = { before: before.master, now: eng.on, at: iso(io) };
+    saveState(io, state);
+    warnTo(
       io,
-      eng.legacy
-        ? '恢复：发版前法国还没有引擎总开关，没什么要恢复的'
-        : `恢复：法国总开关发版前就关着，保持关${eng.on ? '（现在是开着的：发版期间有人开了，没动）' : ''}`,
+      `恢复：法国总开关和发版前不一致：发版前${word(before.master)}，现在${word(eng.on)}（发版期间有人${eng.on ? '开了' : '关了'}，或别的流程动过）。这一趟没关过总开关，不替人${eng.on ? '关' : '开'}：到驾驶舱环境页看是谁动的，要改自己改`,
     );
     return { ok: true };
   }
-  const reason = `发版后恢复发版前的状态（release-train，目标 ${targetText(state.target)}）`;
+  const reason = `发版后开回老版本发版车关的总开关（release-train，目标 ${targetText(state.target)}）`;
   const problems = [];
   if (!eng.on) {
     const on = await engineSet(io, true, reason);
@@ -876,7 +936,7 @@ async function phaseRestore(io, state) {
     );
   sayTo(
     io,
-    `恢复：法国总开关已开回（发版前开着），各仓开回 ${opened.length} 个${opened.length ? `（${opened.join('、')}）` : ''}`,
+    `恢复：法国总开关已开回（上一回老版本发版车关的，发版前开着），各仓开回 ${opened.length} 个${opened.length ? `（${opened.join('、')}）` : ''}`,
   );
   return { ok: true };
 }
@@ -1030,7 +1090,7 @@ async function runFrom(io, state) {
       warnTo(
         io,
         p >= PHASES.indexOf('恢复')
-          ? '版本已经发出去了，这一步只是恢复发版前的开关没成。同一个目标再跑一次 start 只重试这一步'
+          ? '版本已经发出去了，这一步只是核对或开回发版前的开关没成。同一个目标再跑一次 start 只重试这一步'
           : `现场没动。同一个目标再跑一次 start 从这一步接着走；不走了就 node release-train.mjs abort`,
       );
       return r.kind === 'blocked' ? 3 : 2;
@@ -1052,10 +1112,10 @@ async function cmdStart(p, io) {
     throw new UsageError(`--sha 要是十六进制的提交号（7–40 位），给的是「${scrubText(sha)}」`);
   const founderOk = p.options.get('founder-ok');
   if (founderOk === undefined || founderOk.trim() === '') {
-    warnTo(io, '发版是对外发布，必须带 --founder-ok "<创始人原话>"：没带，什么都没做（连暂停都没暂停）');
+    warnTo(io, '发版是对外发布，必须带 --founder-ok "<创始人原话>"：没带，什么都没做');
     return 1;
   }
-  // --restore 和不给一样：发完都恢复到发版前（还原不需要创始人逐次授权）；留着只是让老命令行、明写的人不报「不认识的参数」
+  // --restore 和不给一样：发完核对开关和发版前一致（老现场才开回，还原不需要创始人逐次授权）；留着只是让老命令行、明写的人不报「不认识的参数」
   const restore = p.flags.has('restore');
   const target = { kind: 'sha', value: sha };
 
@@ -1148,6 +1208,9 @@ async function resumeDead(io, state, v) {
   return runFrom(io, state);
 }
 
+/** 老现场：发版前总开关开着、且是老版本发版车关的（记录里没有 pausedMaster＝老版本写的，或第 2 步认出来记了 true）。 */
+const oldScene = (s) => s.before?.master === true && s.before.pausedMaster !== false;
+
 const fail = (io, why) => {
   warnTo(io, why);
   return 2;
@@ -1169,18 +1232,18 @@ async function cmdStatus(io) {
   const verdict = s.status === 'running' ? verdictOf(io, s) : null;
   sayTo(
     io,
-    `发版（${targetText(s.target)}，发完恢复发版前的开关）：${verdict?.dead ? '驱动没了' : (words[s.status] ?? s.status)}，第 ${s.phase} 步「${PHASES[s.phase] ?? '？'}」，${s.startedAt} 起，${s.updatedAt} 更新`,
+    `发版（${targetText(s.target)}，不关总开关，发完核对开关）：${verdict?.dead ? '驱动没了' : (words[s.status] ?? s.status)}，第 ${s.phase} 步「${PHASES[s.phase] ?? '？'}」，${s.startedAt} 起，${s.updatedAt} 更新`,
   );
   sayTo(
     io,
-    `法国总开关暂停前：${s.before ? (s.before.master ? '开着' : '关着') : '还没记'}；已发版：${s.release?.started ? '已动手' : '还没'}`,
+    `法国总开关发版前：${s.before ? (s.before.master ? '开着' : '关着') : '还没记'}${oldScene(s) ? '（上一回老版本发版车关的，第 7 步开回）' : ''}；已发版：${s.release?.started ? '已动手' : '还没'}`,
   );
   if (s.why) sayTo(io, `停下的原因：${s.why}`);
   for (const l of s.laggards ?? []) sayTo(io, `  拖后腿：${l}`);
   if (verdict?.dead) {
     sayTo(
       io,
-      `驱动没了，停在第 ${s.phase} 步「${PHASES[s.phase] ?? '？'}」：${verdict.why}。没人在恢复，法国引擎总开关可能还关着`,
+      `驱动没了，停在第 ${s.phase} 步「${PHASES[s.phase] ?? '？'}」：${verdict.why}${oldScene(s) ? '。没人在恢复，法国引擎总开关还是老版本发版车关的' : ''}`,
     );
     sayTo(
       io,
@@ -1201,29 +1264,31 @@ async function cmdAbort(io) {
   }
   sayTo(io, `撤销（目标 ${targetText(s.target)}，停在第 ${s.phase} 步）`);
   let code = 0;
-  if (s.before?.master === true && !s.release?.started) {
+  if (oldScene(s) && !s.release?.started) {
     const on = await engineSet(
       io,
       true,
-      `撤销发版暂停，恢复暂停前的样子（release-train abort，目标 ${targetText(s.target)}）`,
+      `撤销发版，开回老版本发版车关的总开关（release-train abort，目标 ${targetText(s.target)}）`,
     );
     const back = on.ok ? await engineStatus(io) : on;
     if (!on.ok || !back.ok || !back.on) {
       warnTo(
         io,
-        `法国总开关没能开回去（${on.ok ? (back.ok ? '读回来还是关着' : back.why) : on.why}）：暂停前它是开着的，到驾驶舱环境页或 fleet-api engine on 自己开`,
+        `法国总开关没能开回去（${on.ok ? (back.ok ? '读回来还是关着' : back.why) : on.why}）：发版前它是开着的，到驾驶舱环境页或 fleet-api engine on 自己开`,
       );
       code = 2;
-    } else sayTo(io, '法国总开关已开回暂停前的样子（开着）。各仓的「让 AI 接活」开关暂停期间没动过');
-  } else if (s.release?.started) {
+    } else
+      sayTo(
+        io,
+        '法国总开关已开回发版前的样子（开着；上一回老版本发版车关的）。各仓的「让 AI 接活」开关没动过',
+      );
+  } else if (oldScene(s)) {
     sayTo(
       io,
-      s.before?.master === true
-        ? '已经动手发过版：不知道发成没有、健康没确认，法国总开关保持关（发版前是开着的）。确认没事后到驾驶舱环境页或 fleet-api engine on 自己开'
-        : '已经动手发过版：法国总开关发版前就是关着的，保持关',
+      '已经动手发过版：不知道发成没有、健康没确认，法国总开关保持关（上一回老版本发版车关的，发版前是开着的）。确认没事后到驾驶舱环境页或 fleet-api engine on 自己开',
     );
   } else {
-    sayTo(io, '法国总开关暂停前就是关着的（或还没暂停），没动');
+    sayTo(io, '这一趟没关过法国总开关（决定 0093：release.sh 切版本时只暂停在跑的任务），没动');
   }
   s.status = 'aborted';
   s.why = '手动撤销';
@@ -1237,9 +1302,8 @@ async function cmdAbort(io) {
  *   run(command, args, {cwd, timeoutMs}) → {status, stdout, stderr, error}   gh、git、pnpm、node（france.mjs）,
  *   ssh(remoteCommand, {timeoutMs, tickMs?, onTick?}) → 同上（可返回 Promise）   到法国跑一条命令（名字读不到、连不上都在返回里：error 或 status 255）；
  *     给了 onTick 的（第 4 步发版）外壳在等 ssh 期间每 tickMs 调一次，用来刷驱动心跳,
- *   runningSessions() → Promise<{ok: true, running, rows} | {ok: false, kind, why}>   france-sessions-lib.mjs 的 fetchRunningSessions,
+ *   runningSessions() → Promise<{ok: true, running, rows} | {ok: false, kind, why}>   france-sessions-lib.mjs 的 fetchRunningSessions（只有预检读，列出来给人看）,
  *   pid?, host?, isAlive?(pid) → boolean   驱动自己的进程号、机器名、查某个 pid 在不在（都可省：省了就只靠心跳时刻判死活）,
- *   franceRepos() → Promise<{ok: true, rows: [{repo, auto_dispatch_since}]} | {ok: false, why}>   法国各仓的「让 AI 接活」开关,
  * }。返回退出码。
  */
 export async function runTrain(argv, io) {

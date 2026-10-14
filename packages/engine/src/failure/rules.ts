@@ -155,7 +155,7 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
     hint: '新引擎起来接着派',
   },
-  // 发布前排空到了宽限的截止（drain.ts，10 分钟），还在跑的会话按切号那一套停下；或者引擎收到停机信号的那一刻会话被信号杀掉
+  // 发布前排空到了宽限的截止（drain.ts，RELEASE_GRACE_MS），还在跑的会话按切号那一套停下；或者引擎收到停机信号的那一刻会话被信号杀掉
   // （kill-evidence.ts 对上了时刻）。是我们自己要停的：不算失败、不进路由失败率、不记账，新引擎起来按编号续同一个会话。
   {
     id: 'KL3',

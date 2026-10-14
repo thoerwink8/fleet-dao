@@ -1,7 +1,10 @@
 // 驾驶舱「发布到法国」按钮的接活（法国，root）：驾驶舱后端（fleet，没有 root）只往 /var/lib/fleet-dao/release-request/request.json 写一份请求，
-// root 的 fleet-release-request.path 盯着它，起 fleet-release-request.service 跑这里：核请求 → 走一趟和 release-train 同样的发版
-// （暂停法国引擎总开关、等在跑的会话收尾、release.sh <提交>、验证、发完恢复到发版前）→ 进度写进 /srv/fleet-dao-releases/.train/release-train.json
+// root 的 fleet-release-request.path 盯着它，起 fleet-release-request.service 跑这里：核请求 → 走一趟和 release-train 同样的九步
+// （记发版前开关和异常基线、release.sh <提交>、验证、核对开关和发版前一致）→ 进度写进 /srv/fleet-dao-releases/.train/release-train.json
 // （和 agents/skills/commander/scripts/release-train-lib.mjs 同一个格式，驾驶舱的 /france 页读它）。
+// 发版不关引擎总开关（#2038、决定 0093）：release.sh 切版本前自己给在跑的任务发暂停（暂停人「发版」）、只等不可暂停的几段，
+// 发完对这批发「继续」（deploy/release.sh 的 pause_tasks/resume_tasks）。所以这里第 2 步只读开关记下发版前的样子、第 3 步不再等收尾，
+// 第 7 步只核对；只有老版本关过的（进度里 marker 为真、pausedMaster 不是 false）才把总开关开回。
 // 这是人工档（deploy/lib/human-tier.sh）：装一次要创始人在法国以 root 跑 france.sh。deploy/france.sh 把本目录装到
 // /usr/local/lib/fleet-dao/release-request/（装的是副本；这里依赖同级的 ../auto-release/lib.mjs 判 CI，它由自动档装在 /usr/local/lib/fleet-dao/auto-release/）。
 // 改这里之前必须知道：
@@ -12,15 +15,16 @@
 //   读不到的一律按拒绝，不当成「没问题」。
 // - 输出和记下来的字不带令牌；请求里的「谁点的」只收字母数字和 _.@ -，最长 64。
 // - 所有真的起进程、读文件、连网、睡觉都经 io：deploy/test/release-request.test.mjs 换成假的，一条拒绝路径一条故意造出失败的测试。
-// - 退出码：0 做完了、发后体检通过；1 被拒（或没有请求）；2 没做成（命令失败）；3 卡住（等收尾到点还有会话在跑，点「重试」从这一步接着走，现场没动；
-//   或发完了、开关恢复了，但发后体检没通过）。
-// - 发后体检（#2026）：第 0 步记发版前异常基线（开着的卡住报警、/healthz 不好的项）、第 2 步记各仓接活开关；第 6 步核目标在用、/healthz、
-//   没有新异常（重启打断的几类 15 分钟内重试）、再跑一遍预检（已是最新）；第 7 步恢复后核引擎总开关和各仓接活开关和发版前一致。
+// - 退出码：0 做完了、发后体检通过；1 被拒（或没有请求）；2 没做成（命令失败）；3 卡住（发完了，但发后体检没通过；
+//   老版本留下的「停在第 3 步等收尾」的一趟也是 3，点「重试」从第 3 步接着走）。
+// - 发后体检（#2026）：第 0 步记发版前异常基线（开着的卡住报警、/healthz 不好的项）、第 2 步记总开关和各仓接活开关；第 6 步核目标在用、/healthz、
+//   没有和这次发版有关的新异常（RELEASE_ALERT_PREFIXES；重启打断的几类 15 分钟内重试；无关的只列出不拦）、再跑一遍预检（已是最新）；
+//   第 7 步核引擎总开关和各仓接活开关和发版前一致（被人动过的照实报不一致，不替人改回）。
 //   结论写进 release-train.json 的 check 和 last-request.json；开始、成功、卡住、失败各推飞书一条（engine.env 的 FLEET_FEISHU_WEBHOOK，
 //   和引擎推主线红同一个群机器人）。
-// - 请求的种类（#2027，请求文件的 kind，没写就是 release 发布，老后端照常）：retry 从停在第 3 步「等收尾」的那一趟接着走（不从头暂停）、
-//   restore 从没成在第 7 步「恢复」的那一趟把引擎总开关开回（发版前开着的才开）、abort 撤掉暂停（等价 release-train abort：
-//   还没动手发版就开回暂停前的样子，已动手发过版保持关）；不认识的 kind 拒绝并写原因，不当成发布。各种都落 last-request.json（kind、by）。
+// - 请求的种类（#2027，请求文件的 kind，没写就是 release 发布，老后端照常）：retry 从停在第 3 步「等收尾」的那一趟接着走（老版本留下的）、
+//   restore 从没成在第 7 步「恢复」的那一趟把引擎总开关开回（只认我们关过的：发版前开着、pausedMaster 不是 false）、abort 撤掉暂停（等价 release-train abort：
+//   我们关过的、还没动手发版就开回暂停前的样子，已动手发过版保持关）；不认识的 kind 拒绝并写原因，不当成发布。各种都落 last-request.json（kind、by）。
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync } from 'node:fs';
 import { ciVerdict } from '../auto-release/lib.mjs';
 import { SESSION_WAIT_MS } from './session-wait.mjs';
@@ -49,6 +53,7 @@ export const PHASES = ['预检', '暂停本机', '暂停法国', '等收尾', '�
 export const FOUNDER_WORD = '驾驶舱点击发布（创始人）';
 /** 各步上限（毫秒）；测试里整份换小。service 的 TimeoutStartSec 必须比这些加起来大（release-request.test.mjs 核对）。 */
 export const LIMITS = {
+  /** 老的「等收尾」上限：第 3 步已不再等（#2038），留着是因为发版确认框和 TimeoutStartSec 的核对还读同一个数。 */
   sessionsMs: SESSION_WAIT_MS,
   pollMs: 30_000,
   releaseMs: 30 * 60_000,
@@ -67,6 +72,23 @@ export const EXIT = { done: 0, refused: 1, failed: 2, blocked: 3 };
  * 在 LIMITS.verifyMs（15 分钟）里每 pollMs 重读一次，撤了就算过；到点还在才判没通过（指挥官版 2026-10-13 踩过：立刻判卡住是误报）。
  */
 export const VERIFY_RETRY_PREFIXES = ['watchdog:job:', 'watchdog-down:', 'deploy-lag:'];
+
+/**
+ * 发后体检「没有新异常」只拦和这次发版有关的新提醒（键前缀），再加上 VERIFY_RETRY_PREFIXES 那几类（照旧在窗口里重试）：
+ * - auto-release:      自动发布单元（fleet-auto-release）出的事
+ * - engine-drain       引擎排空（切版本那一段的排空请求、drain.json）
+ * - engine-session-io  会话 IO 目录（切版本前后会话的输入输出目录）
+ * - cli-upgrade:       命令行升级（发版时顺带升级的 claude 等命令行）
+ * - retired-schedule:  退役定时（发版时撤掉的旧定时任务）
+ * 别的新提醒（任务失败 wf:failure:、对账 reconcile: 等）是引擎照常干活的结果，和这次发版无关：列进说明文字，不让体检没通过。
+ */
+export const RELEASE_ALERT_PREFIXES = [
+  'auto-release:',
+  'engine-drain',
+  'engine-session-io',
+  'cli-upgrade:',
+  'retired-schedule:',
+];
 
 /**
  * 不算「新异常」的提醒：不是卡住报警这一级的（要你拍、日报）、任务自己挂起的（<工作流>:park:<n>，引擎照常干活的结果，
@@ -246,7 +268,7 @@ export function parseDrain(text, enginePid, serviceActive) {
   return { ok: true, engineDown: false, running };
 }
 
-/** 等收尾报「在跑谁」的写法：和 release.sh 的 engine_drain_status 一致，环节（编号前 8 位）。 */
+/** 报「在跑谁」的写法（老的等收尾用过；第 3 步已不再等）：和 release.sh 的 engine_drain_status 一致，环节（编号前 8 位）。 */
 export const sessionName = (s) => `${s.stage || '会话'}(${(s.runId || '').slice(0, 8)})`;
 
 /**
@@ -408,10 +430,12 @@ function newState(io, req) {
     updatedAt: iso(io),
     target: { kind: 'sha', value: req.sha },
     founderOk: `${FOUNDER_WORD} ${req.at} ${req.by}`,
-    restore: true, // 发完一律恢复到发版前（决定 0032 第 4 条、#1256）：开着的开回、关着的保持关
+    restore: true, // 发完核对开关和发版前一致；这一趟不关总开关（决定 0093），只有老版本关过的才开回
     before: null,
     baseline: null,
     marker: false,
+    /** 这一趟有没有关过引擎总开关：新版本恒为 false（老现场带过来的那一支记 true）；老版本的进度记录没有这个键＝关过。 */
+    pausedMaster: false,
     laggards: [],
     release: {},
     why: null,
@@ -431,7 +455,6 @@ function newState(io, req) {
 }
 
 const failed = (why) => ({ ok: false, kind: 'failed', why });
-const blocked = (why, laggards = []) => ({ ok: false, kind: 'blocked', why, laggards });
 
 async function engineRead(io) {
   const r = await io.fleetApi('engine status', io.limits.stepMs);
@@ -442,15 +465,6 @@ async function engineRead(io) {
   const m = /引擎总开关：(开着|关着)/.exec(String(r.stdout));
   if (!m) return { ok: false, why: `法国引擎总开关的回话认不出：${tail(r.stdout)}` };
   return { ok: true, on: m[1] === '开着' };
-}
-
-async function engineOff(io, reason) {
-  const r = await io.fleetApi(`engine off --reason ${shq(reason)}`, io.limits.stepMs);
-  if (r.status !== 0) return { ok: false, why: `fleet-api engine off 没成：${tail(r.stderr || r.stdout)}` };
-  const back = await engineRead(io);
-  if (!back.ok) return { ok: false, why: `关完读回失败：${back.why}` };
-  if (back.on) return { ok: false, why: 'engine off 说成了，读回来总开关还是开着：不往下走' };
-  return { ok: true };
 }
 
 async function engineOn(io, reason) {
@@ -526,6 +540,12 @@ async function recordRepos(io, state) {
   return r;
 }
 
+/**
+ * 2 暂停法国：不关总开关（#2038、决定 0093）。release.sh 切版本前自己给在跑的任务发暂停、发完发继续；
+ * 这里只读总开关和各仓接活开关，记下发版前的样子（第 7 步核对用），什么都不改。
+ * 兼容老现场：上一回老版本停在「卡住」或「没成」、总开关是老版本关的（runRequest 带过来 before.master 为真、现在关着），
+ * 别拿现在的「关着」盖掉发版前的「开着」，照旧记暂停标记，第 7 步知道是我们关的、要开回。
+ */
 async function phasePauseFrance(io, state) {
   const now = await engineRead(io);
   if (!now.ok) return failed(now.why);
@@ -533,67 +553,30 @@ async function phasePauseFrance(io, state) {
   if (!repos.ok) return failed(repos.why);
   if (state.before?.master === true && !now.on) {
     state.before = { ...state.before, repos: repos.repos };
-    // 上一回点发布停在「卡住」或「没成」、总开关是我们关的：发版前开着的已经记在上一回的进度记录里（runRequest 带过来的），
-    // 别拿现在的「关着」盖掉它，不然这一回发完会把本来开着的引擎当成「本来就关着」留在关
     io.writeMarker({ since: iso(io), target: state.target.value.slice(0, 12), by: 'release-request' });
     state.marker = true;
+    state.pausedMaster = true;
     io.writeState(state);
-    say(io, '暂停法国：总开关已经是关的（上一回停下时关的），发版前是开着的，已记');
+    say(io, '暂停法国：总开关是上一回老版本发版时关的（发版前开着，已记），发完开回');
     return { ok: true };
   }
-  if (!now.on) {
-    state.before = { master: false, repos: repos.repos, recordedAt: iso(io) };
-    io.writeState(state);
-    say(io, '暂停法国：跳过（引擎总开关本来就关着，没什么要暂停的）');
-    return { ok: true };
-  }
-  state.before = { master: true, repos: repos.repos, recordedAt: iso(io) };
-  waitOn(io, state, '关引擎总开关');
+  state.before = { master: now.on, repos: repos.repos, recordedAt: iso(io) };
+  state.pausedMaster = false;
   io.writeState(state);
-  const off = await engineOff(io, `发版前暂停（驾驶舱点击发布，目标 ${state.target.value.slice(0, 12)}）`);
-  if (!off.ok) return failed(off.why);
-  io.writeMarker({ since: iso(io), target: state.target.value.slice(0, 12), by: 'release-request' });
-  state.marker = true;
-  io.writeState(state);
-  say(io, '暂停法国：总开关已关（暂停前开着）');
+  say(
+    io,
+    `暂停法国：不关总开关：release.sh 切版本时只暂停在跑的任务（决定 0093）；发版前总开关${now.on ? '开着' : '关着'}，已记`,
+  );
   return { ok: true };
 }
 
 /**
- * 等法国在跑的会话收尾。判据是引擎的权威口径（引擎进程内登记的会话，drain.json 里那份，同 release.sh 的 engine_drain_status）：
- * 起会话过了闸才登记（track），额度探针、session-org 这类辅助命令根本不登记，所以常驻的探针 scope 数不进来（#2002）。
- * 不再数 fleet-agent- scope：那会把常驻的额度探针算成「在干的活」，探针不收尾，每次发布都等满超时（2026-10-13）。读不到不当成 0。
+ * 3 等收尾：不再等（#2038）。release.sh 切版本前自己给在跑的任务发 hard 暂停、只等不可暂停的几段最多 2 分钟。
+ * io.drain 保留在接口里（老测试、以后要看排空时用），这一步不读它。老版本留下的「停在第 3 步」的一趟点「重试」从这里接着走，直接过。
  */
-async function phaseWait(io, state) {
-  const started = io.now().getTime();
-  let last = '';
-  for (;;) {
-    if (last === '') waitOn(io, state, '读引擎手上在干的会话');
-    const s = await io.drain();
-    if (!s.ok) return failed(`法国在跑几个会话读不到：${s.why}`);
-    if (s.engineDown) {
-      say(io, '等收尾：引擎没在跑，法国没有会话在跑');
-      return { ok: true };
-    }
-    if (s.running.length === 0) {
-      say(io, '等收尾：法国没有会话在跑');
-      return { ok: true };
-    }
-    const names = s.running.map(sessionName);
-    const line = `等收尾：法国在跑 ${s.running.length} 个会话（${names.join(' ')}）`;
-    if (line !== last) say(io, line);
-    last = line;
-    waitOn(io, state, `等法国在跑的 ${s.running.length} 个会话收尾（${names.join(' ')}）`);
-    const waited = io.now().getTime() - started;
-    if (waited >= io.limits.sessionsMs) {
-      const laggards = names.map((n) => `会话 ${n}`);
-      return blocked(
-        `等了 ${minutes(waited)} 分钟，法国还有 ${s.running.length} 个会话在跑（现场没动：引擎总开关已关、没发版；到驾驶舱点「重试」从这一步接着走）`,
-        laggards,
-      );
-    }
-    await io.sleep(io.limits.pollMs);
-  }
+async function phaseWait(io) {
+  say(io, '等收尾：跳过（release.sh 切版本前自己暂停在跑的任务，#2038）');
+  return { ok: true };
 }
 
 async function phaseRelease(io, state) {
@@ -706,33 +689,50 @@ async function verifyOnce(io, state) {
     );
   }
 
-  // ③ 异常基线：开着的卡住报警，基线里没有的就是新出现的；重启必然打断的那几类在窗口里重试
+  // ③ 异常基线：开着的卡住报警，基线里没有的就是新出现的；只拦和这次发版有关的（RELEASE_ALERT_PREFIXES），
+  //   重启必然打断的那几类（VERIFY_RETRY_PREFIXES）在窗口里重试；别的新提醒列出来，不拦
   const a = await readAlerts(io);
   if (!a.ok) items.push(item('没有新异常', false, `开着的提醒读不到：${a.why}`, true));
   else {
     const known = new Set(state.baseline?.alerts ?? []);
     const fresh = a.alerts.filter((x) => !ignoredAlert(x) && !known.has(x.key));
-    const transient = fresh.filter((x) => VERIFY_RETRY_PREFIXES.some((p) => x.key.startsWith(p)));
-    const hard = fresh.filter((x) => !transient.includes(x));
+    const has = (prefixes) => (x) => prefixes.some((p) => x.key.startsWith(p));
+    const transient = fresh.filter(has(VERIFY_RETRY_PREFIXES));
+    const hard = fresh.filter((x) => !transient.includes(x) && has(RELEASE_ALERT_PREFIXES)(x));
+    const unrelated = fresh.filter((x) => !transient.includes(x) && !hard.includes(x));
     const list = (xs) =>
       xs
         .slice(0, 8)
         .map((x) => `${x.title}（${x.key}）`)
         .join('；');
+    const note =
+      unrelated.length > 0
+        ? `；发版后新出现 ${unrelated.length} 条和这次发版无关的提醒，不拦：${list(unrelated)}`
+        : '';
     if (hard.length > 0)
-      items.push(item('没有新异常', false, `发版后新出现 ${hard.length} 条卡住报警：${list(hard)}`));
+      items.push(
+        item(
+          '没有新异常',
+          false,
+          `发版后新出现 ${hard.length} 条和这次发版有关的卡住报警：${list(hard)}${note}`,
+        ),
+      );
     else if (transient.length > 0)
       items.push(
         item(
           '没有新异常',
           false,
-          `发布重启打断的 ${transient.length} 条还没撤（${minutes(io.limits.verifyMs)} 分钟内重试）：${list(transient)}`,
+          `发布重启打断的 ${transient.length} 条还没撤（${minutes(io.limits.verifyMs)} 分钟内重试）：${list(transient)}${note}`,
           true,
         ),
       );
     else
       items.push(
-        item('没有新异常', true, `比发版前没有新的卡住报警（开着的 ${a.alerts.length} 条都在基线里或不算）`),
+        item(
+          '没有新异常',
+          true,
+          `比发版前没有和这次发版有关的新卡住报警（开着的 ${a.alerts.length} 条）${note}`,
+        ),
       );
   }
 
@@ -833,11 +833,13 @@ async function checkSwitches(io, state) {
 }
 
 /**
- * 7 恢复：清暂停标记；引擎总开关按第 2 步记下的发版前状态还原（决定 0032 第 4 条、#1256）：发版前开着的开回、关着的保持关。
- * 开回去经 fleet-api engine on（写操作记录，原因写明是发版后恢复）。没恢复成（读不到、开不回去、读回来还是关着）是「没成」：
- * 状态记 failed、页面上红、退出码 2，不当成成功；发版已经发出去了（后端见在用的已是它就不收第二次点击），所以到环境页点开总开关。
- * 各仓「让 AI 接活」开关这个脚本没有暂停过、release.sh 也不再动它们：第 2 步记下发版前的样子（before.repos），
- * 恢复完由 checkSwitches 核对总开关和它们都和发版前一致（发后体检第二段，#2026）。
+ * 7 恢复（现在是核对）：清暂停标记；这一趟不关总开关（决定 0093），所以只有我们关过的才开回——进这一步时 state.marker 为真：
+ * 老现场那一支（第 2 步见上一回老版本关的、记了标记），或 restore 请求从老版本没成在这一步的那一趟接着走（runResume 置上）。
+ * 开回去经 fleet-api engine on（写操作记录，原因写明是发版后恢复）。没开回成（读不到、开不回去、读回来还是关着）是「没成」：
+ * 状态记 failed、页面上红、退出码 2，不当成成功；发版已经发出去了，到「法国」页点「恢复引擎开关」或环境页点开。
+ * 不是我们关的就不碰总开关：发版前开着、现在被人关了也不开（checkSwitches 照实报不一致，要人看）。
+ * 各仓「让 AI 接活」开关这个脚本和 release.sh 都不动：第 2 步记下发版前的样子（before.repos），
+ * 由 checkSwitches 核对总开关和它们都和发版前一致（发后体检第二段，#2026）。
  */
 async function phaseRestore(io, state) {
   const r = await restoreMaster(io, state);
@@ -846,9 +848,10 @@ async function phaseRestore(io, state) {
 }
 
 async function restoreMaster(io, state) {
+  const ours = state.marker === true;
   io.clearMarker();
   state.marker = false;
-  waitOn(io, state, '把引擎总开关恢复到发版前');
+  waitOn(io, state, ours ? '把引擎总开关恢复到发版前' : '核对引擎总开关');
   const before = state.before;
   if (before === null || before === undefined || typeof before.master !== 'boolean') {
     return failed(
@@ -857,6 +860,14 @@ async function restoreMaster(io, state) {
   }
   const eng = await engineRead(io);
   if (!eng.ok) return failed(`恢复没成（发版已经发出去了）：${eng.why}`);
+  if (!ours) {
+    const same = eng.on === before.master;
+    say(
+      io,
+      `恢复：这一趟没关过引擎总开关，不碰它（发版前${before.master ? '开着' : '关着'}，现在${eng.on ? '开着' : '关着'}${same ? '' : '：发版期间有人动了，没替人改回，体检报不一致'}）`,
+    );
+    return { ok: true };
+  }
   if (!before.master) {
     say(
       io,
@@ -905,8 +916,11 @@ function buttonHint(state, kind) {
   if (kind === 'done' || kind === 'retry' || kind === 'restore' || kind === 'aborted') return '不用点什么';
   if (kind === 'check') return '到驾驶舱「法国」页看发版卡里「发后体检」没通过的那几项';
   if (state.phase === 3)
-    return '等会话收完，到驾驶舱「法国」页发版卡点「重试」（从这一步接着走，现场没动）；不走了点「撤掉暂停」';
-  if (state.phase === 7) return '版本已经发出去了，到驾驶舱「法国」页发版卡点「恢复引擎开关」';
+    return '到驾驶舱「法国」页发版卡点「重试」（从第 3 步接着走，release.sh 切版本前自己暂停在跑的任务）；不走了点「撤掉暂停」';
+  if (state.phase === 7 && state.pausedMaster !== false)
+    return '版本已经发出去了，到驾驶舱「法国」页发版卡点「恢复引擎开关」';
+  if (state.phase === 7)
+    return '版本已经发出去了，到驾驶舱「法国」页看发版卡写的原因（这一趟没关过引擎总开关）';
   if (state.phase <= 3) return '到驾驶舱「法国」页看发版卡写的原因，处理好再点「发布到法国」（版本还没发）';
   return '到驾驶舱「法国」页看发版卡写的原因（版本可能已经发出去了）';
 }
@@ -921,8 +935,8 @@ export function releaseMessage(kind, state) {
   const bad = (state.check?.items ?? []).filter((x) => !x.ok).map((x) => x.name);
   const text = {
     start: `【发版开始】法国开始发 ${sha}（${state.requestedBy ?? '?'} 在驾驶舱点的）`,
-    done: `【发版成功】法国已在用 ${sha}，发后体检通过，引擎总开关已恢复到发版前`,
-    check: `【发版卡住】法国已在用 ${sha}、开关已恢复，但发后体检没通过：${bad.join('、')}`,
+    done: `【发版成功】法国已在用 ${sha}，发后体检通过，引擎总开关和各仓接活开关和发版前一致`,
+    check: `【发版卡住】法国已在用 ${sha}，但发后体检没通过：${bad.join('、')}`,
     retry: `【发版重试】${sha} 从${step}接着走（${state.resumes?.at(-1)?.by ?? '?'} 在驾驶舱点的「重试」）`,
     restore: `【恢复引擎开关】${sha} 已发出，${state.resumes?.at(-1)?.by ?? '?'} 在驾驶舱点了「恢复引擎开关」，从第 7 步「恢复」接着走`,
     aborted: `【撤掉暂停】${sha ? `${sha} 那一趟` : '暂停标记'}已撤销：${state.why ?? ''}`,
@@ -974,7 +988,7 @@ function writeOutcome(io, state, req, outcome) {
  *   mainline(sha) → Promise<{ ok: true, onMain, at } | { ok: false, why }>（取最新主线、比祖先、给提交时间）,
  *   ciRuns() → Promise<{ status, body }>, fleetApi(args, timeoutMs) → Promise<{ status, stdout, stderr }>,
  *   drain() → Promise<{ ok: true, engineDown: boolean, running: {runId, stage}[] } | { ok: false, engineDown: boolean, why }>
- *     （等收尾的判据：引擎权威口径 drain.json，同 release.sh；引擎没在跑 engineDown=true、running 空），
+ *     （引擎权威口径 drain.json，同 release.sh；第 3 步已不再读它（#2038），接口保留），
  *   prepareCheckout(sha) → Promise<{ ok, why? }>,
  *   runRelease(sha, timeoutMs) / releaseCheck(timeoutMs) → Promise<{ status, stdout, stderr, error? }>, historyLast() → Promise<{ ok, line? , why? }>,
  *   发后体检（#2026）：currentRelease() → Promise<{ ok, sha } | { ok: false, why }>（current 链接）、
@@ -1000,10 +1014,15 @@ export async function runRequest(io) {
   if (why !== null) return refuse(io, req, why);
 
   const state = newState(io, req);
-  // 上一回停在「卡住」「没成」、发版前总开关是开着的：带过来（见 phasePauseFrance）；做完的、撤销的不带，这一回重新读
+  // 老现场：上一回停在「卡住」「没成」、发版前总开关开着、且那一趟关过总开关（老版本的记录没有 pausedMaster＝关过）：
+  // 带过来（见 phasePauseFrance）；新版本那一趟没关过的、做完的、撤销的不带，这一回重新读
   const prevRead = io.readState();
   const prev = prevRead.ok ? prevRead.state : null;
-  if ((prev?.status === 'blocked' || prev?.status === 'failed') && prev.before?.master === true) {
+  if (
+    (prev?.status === 'blocked' || prev?.status === 'failed') &&
+    prev.before?.master === true &&
+    prev.pausedMaster !== false
+  ) {
     state.before = prev.before;
   }
   io.writeLast({ v: 1, at: iso(io), outcome: 'accepted', sha: req.sha, by: req.by, why: null });
@@ -1053,8 +1072,9 @@ async function runPhases(io, state, req, from) {
 
 /**
  * 重试 / 恢复引擎开关（#2027）：接着上一趟停下的进度记录往下走，不从头暂停一遍。
- * - retry：只接「卡住在第 3 步等收尾」、目标就是请求里的提交；现场没动（引擎总开关关着、没发版），从第 3 步重新等收尾，往后照走；
- * - restore：只接「没成在第 7 步恢复」、发版前总开关是开着的；发版已经发出去了，从第 7 步重新把总开关开回、核对开关，再收尾。
+ * - retry：只接「卡住在第 3 步等收尾」（老版本留下的）、目标就是请求里的提交；没发版，从第 3 步接着走（这一步现在直接过），往后照走；
+ * - restore：只接「没成在第 7 步恢复」、发版前总开关是开着的、且那一趟关过总开关（pausedMaster 不是 false；老版本在这一步没成前
+ *   已清了标记，这里置回 state.marker，第 7 步才知道要开回）；发版已经发出去了，从第 7 步重新把总开关开回、核对开关，再收尾。
  * 都核「没有发版在走、发布锁没被占」；retry 还核目标仍是主线祖先、CI 绿（同发布）。每一条拒绝都写原因，不动进度记录。
  */
 async function runResume(io, req) {
@@ -1088,6 +1108,13 @@ async function runResume(io, req) {
       '发版前引擎总开关就是关着（或没记下）：没有要恢复的，不替人开引擎；要开到环境页点开',
     );
   }
+  if (!retry && prev.pausedMaster === false) {
+    return refuse(
+      io,
+      req,
+      '这一趟没关过引擎总开关（决定 0093）：没有要恢复的，不替人开引擎；要开到环境页点开',
+    );
+  }
   const why = await preflight(io, retry ? req : { ...req, sha: prev.target?.value }, retry);
   if (why !== null) return refuse(io, req, why);
 
@@ -1103,6 +1130,7 @@ async function runResume(io, req) {
     { kind: req.kind, by: req.by, at: req.at },
   ];
   if (!Array.isArray(state.pushes)) state.pushes = [];
+  if (!retry) state.marker = true; // 上面核过：这一趟关过总开关，第 7 步要开回
   io.writeLast({
     v: 1,
     at: iso(io),
@@ -1129,7 +1157,7 @@ function writeAbortOutcome(io, req, sha, why, outcome = 'aborted') {
 }
 
 /**
- * 撤掉暂停（#2027，等价命令行 release-train abort）：清暂停标记；卡住或没成的一趟，还没动手发版就把引擎总开关开回暂停前的样子，
+ * 撤掉暂停（#2027，等价命令行 release-train abort）：清暂停标记；卡住或没成的一趟、总开关是我们关的（老版本），还没动手发版就开回暂停前的样子，
  * 已经动手发过版（release.started）就保持关（不知道发成没有、健康没确认），状态记 aborted；没有进度记录、只剩标记的，只清标记。
  * 发版在走（进程还活着）、发布锁被占着不动手；没有标记也没有没了结的一趟就拒（没什么可撤）。
  */
@@ -1176,7 +1204,10 @@ async function runAbort(io, req) {
   }
   const target = String(s.target?.value ?? '').slice(0, 12);
   let note;
-  if (s.before?.master === true && !s.release?.started) {
+  const paused = s.before?.master === true && s.pausedMaster !== false;
+  if (s.pausedMaster === false) {
+    note = '这一趟没关过引擎总开关（决定 0093），没动';
+  } else if (paused && !s.release?.started) {
     const on = await engineOn(
       io,
       `撤销发版暂停，恢复暂停前的样子（驾驶舱点击撤掉暂停，${req.by}，目标 ${target}）`,
@@ -1190,10 +1221,9 @@ async function runAbort(io, req) {
     }
     note = '还没动手发版：引擎总开关已开回暂停前的样子（开着）；各仓「让 AI 接活」开关暂停期间没动过';
   } else if (s.release?.started) {
-    note =
-      s.before?.master === true
-        ? '已经动手发过版：不知道发成没有、健康没确认，引擎总开关保持关（发版前是开着的）；确认没事后到环境页点开'
-        : '已经动手发过版：引擎总开关发版前就是关着的，保持关';
+    note = paused
+      ? '已经动手发过版：不知道发成没有、健康没确认，引擎总开关保持关（发版前是开着的）；确认没事后到环境页点开'
+      : '已经动手发过版：引擎总开关发版前就是关着的，保持关';
   } else {
     note = '引擎总开关暂停前就是关着的（或还没暂停），没动';
   }

@@ -1,6 +1,6 @@
 // 自动发布单元的入口（法国，root）：fleet-auto-release.timer 每 5 分钟经 fleet-auto-release.service 拉起一轮。
-// 它读数，也在主线绿了、满 1 小时间隔时请求发版（决定 0088、#2039）：只写一份和驾驶舱按钮一样的请求文件，
-// 由法国上的接活单元（deploy/france/release-request）去发。这里不调 release.sh。
+// 它读数，也在主线头 CI 全绿、没有发版在走时请求发版（决定 0088、#2039；#2038 起不再隔 1 小时）：只写一份和驾驶舱按钮一样的请求文件，
+// 由法国上的接活单元（deploy/france/release-request）去发。这里不调 release.sh；发版驱动死在中途留下的残局（暂停的任务、关着的总开关）这里收。
 // deploy/france.sh 把这个目录装到 /usr/local/lib/fleet-dao/auto-release/（装的是副本：主线上改了它，下一版发完由本入口自己
 // 跑 france.sh --auto-tier 换上，不用人重跑；只有防火墙、sudoers、建用户那几个文件改了才要人重跑，/healthz 才标「装机脚本落后」）。判断和流程在 lib.mjs，这里只接真的 git、GitHub 接口、库。
 // 手动跑一轮：systemctl start fleet-auto-release（别直接跑本文件：两轮叠着跑会互相盖状态文件）。
@@ -8,11 +8,11 @@ import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   linkSync,
-  lstatSync,
   mkdirSync,
   readFileSync,
   readlinkSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -26,10 +26,14 @@ import {
   CI_WORKFLOW,
   HUMAN_TIER_PATHS,
   MAIN_HISTORY,
+  PAUSE_FILE,
+  parseEngineStatus,
   RELEASES,
   REPO,
   runRound,
   STATE_FILE,
+  TRAIN_MARKER,
+  TRAIN_STATE,
 } from './lib.mjs';
 
 const NODE = '/usr/bin/node';
@@ -39,8 +43,8 @@ const REQUEST_DIR = '/var/lib/fleet-dao/release-request';
 const REQUEST_FILE = `${REQUEST_DIR}/request.json`;
 const RECEIVER_UNIT = '/etc/systemd/system/fleet-release-request.path';
 const RECEIVER_SCRIPT = '/usr/local/lib/fleet-dao/release-request/fleet-release-request.mjs';
-const TRAIN_STATE = `${RELEASES}/.train/release-train.json`;
-const TRAIN_MARKER = `${RELEASES}/.train/release-train.paused`;
+/** current 那一版的 fleet-api（release continue、engine on|status；同 release-request/lib.mjs 的 FLEET_API、release.sh 的 resume_tasks）。 */
+const FLEET_API = `${RELEASES}/current/packages/api/bin/fleet-api`;
 const tail = (text, n = 3) =>
   String(text ?? '')
     .trim()
@@ -96,6 +100,33 @@ function saveState(st) {
   renameSync(tmp, STATE_FILE);
 }
 
+/** 发版进度记录原文；不在回 null，别的读不了抛。 */
+function readTrainText() {
+  try {
+    return readFileSync(TRAIN_STATE, 'utf8');
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw new Error(`读不了 ${TRAIN_STATE}：${e.message}`);
+    return null;
+  }
+}
+
+/** 发布锁（release.sh 的 RELEASES/.lock）被占着没有：flock -n 抢一下就放。退出码不是 0/1 抛。 */
+function lockBusy() {
+  const lock = run('flock', ['-n', `${RELEASES}/.lock`, 'true'], { timeoutMs: 10_000 });
+  if (lock.code !== 0 && lock.code !== 1) throw new Error(`flock 退出码 ${lock.code}：${tail(lock.stderr)}`);
+  return lock.code === 1;
+}
+
+/** 进程活没活：kill 0 不发信号只问；EPERM 是活着但不归我们（同 release-request 的 pidAlive）。 */
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM';
+  }
+}
+
 export const realIo = {
   now: () => new Date(),
   async readMain() {
@@ -136,29 +167,79 @@ export const realIo = {
     if (!SHA.test(target)) throw new Error(`${RELEASES}/current 指着认不出的「${target.slice(0, 60)}」`);
     return target;
   },
-  /** 法国上一次换版本是什么时候（手动自动都算）：current 这个符号链接自己的修改时间（换版本时新建的）。读不了抛。 */
-  async readReleasedAt() {
-    return lstatSync(`${RELEASES}/current`).mtime.toISOString();
-  },
   /** 自动发版的闸要的事实（lib.mjs 的 gateVerdict 判）：接活单元装了没有、有没有没被接走的请求、暂停标记、进度记录、发布锁。读不了的抛。 */
   async releaseGate() {
     const missing = [RECEIVER_UNIT, RECEIVER_SCRIPT].filter((f) => !existsSync(f));
-    let trainText = null;
-    try {
-      trainText = readFileSync(TRAIN_STATE, 'utf8');
-    } catch (e) {
-      if (e.code !== 'ENOENT') throw new Error(`读不了 ${TRAIN_STATE}：${e.message}`);
-    }
-    const lock = run('flock', ['-n', `${RELEASES}/.lock`, 'true'], { timeoutMs: 10_000 });
-    if (lock.code !== 0 && lock.code !== 1)
-      throw new Error(`flock 退出码 ${lock.code}：${tail(lock.stderr)}`);
     return {
       missing,
       requestPending: existsSync(REQUEST_FILE),
       marker: existsSync(TRAIN_MARKER),
-      trainText,
-      lockBusy: lock.code === 1,
+      trainText: readTrainText(),
+      lockBusy: lockBusy(),
     };
+  },
+  /** release.sh 的暂停名单遗留（lib.mjs 的 recoverPaused 判）：在不在、放了多久（文件修改时间距今）、发布锁占没占。读不了的抛。 */
+  async pausedLeftover() {
+    let st = null;
+    try {
+      st = statSync(PAUSE_FILE);
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw new Error(`读不了 ${PAUSE_FILE}：${e.message}`);
+    }
+    return { exists: st !== null, ageMs: st ? Date.now() - st.mtimeMs : null, lockBusy: lockBusy() };
+  },
+  /** 替没收尾的发版发「继续」：current 那一版的 fleet-api release continue，名单从标准输入喂（同 release.sh 的 resume_tasks）。 */
+  async resumePaused() {
+    const r = run('bash', [FLEET_API, 'release', 'continue'], {
+      input: readFileSync(PAUSE_FILE, 'utf8'),
+      timeoutMs: 300_000,
+    });
+    return {
+      code: r.code,
+      out: `${r.stdout}\n${r.stderr}`,
+    };
+  },
+  /** 处理过的名单改名留着（不删：事后排查看得到暂停过谁），也不再重试。 */
+  async retirePaused(to) {
+    renameSync(PAUSE_FILE, to);
+  },
+  /** 老版发版驱动的残局（lib.mjs 的 recoverTrain 判）：暂停标记、进度记录原文、发布锁、驱动进程活没活、总开关此刻开没开。 */
+  async trainLeftover() {
+    const marker = existsSync(TRAIN_MARKER);
+    // 总开关只在有暂停标记时问（起一次 fleet-api 要几秒，没有标记就用不上）
+    let engine = { ok: false, why: '没有暂停标记，没问' };
+    if (marker) {
+      const s = run('bash', [FLEET_API, 'engine', 'status'], { timeoutMs: 60_000 });
+      engine = parseEngineStatus(s.code, `${s.stdout}\n${s.stderr}`);
+    }
+    return { marker, trainText: readTrainText(), lockBusy: lockBusy(), pidAlive, engine };
+  },
+  async engineOn(reason) {
+    const r = run('bash', [FLEET_API, 'engine', 'on', '--reason', reason], { timeoutMs: 60_000 });
+    return {
+      code: r.code,
+      out: `${r.stdout}\n${r.stderr}`,
+    };
+  },
+  /**
+   * 写一条操作记录（audit_log；列见 packages/db/src/schema/ops.ts）：actor 是运维脚本（actor_kind、via 都是 ops，迁移 0069），
+   * id 固定 ops:auto-release。写不进抛（lib.mjs 照实报警，不当成记上了）。
+   */
+  async audit({ action, target, reason, before, after }) {
+    sql(
+      `insert into audit_log (actor_kind, actor_id, action, target, before, after, reason, via, ok)
+values ('ops'::actor_kind, 'ops:auto-release', :'action', :'target', :'before'::jsonb, :'after'::jsonb, :'reason', 'ops'::audit_via, true);`,
+      {
+        action,
+        target,
+        reason,
+        before: JSON.stringify(before ?? null),
+        after: JSON.stringify(after ?? null),
+      },
+    );
+  },
+  async clearTrainMarker() {
+    unlinkSync(TRAIN_MARKER);
   },
   /**
    * 写发版请求：样子同驾驶舱后端（packages/api/src/release-request.ts 的 requestText：{ v, sha, at, by }，键的先后固定），

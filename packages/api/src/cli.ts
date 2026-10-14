@@ -22,6 +22,7 @@
 //   alert …（design 15.3「谁在处理」）：开着的提醒谁在处理、修到哪；静默。写法和退出码见 alert-cli.ts。
 //   intent …（#553 第 4 条）：指挥官经 ssh 读飞书意图的全部原话、开单时写回归纳和「已开成 #N」、放下。见 intent-cli.ts。
 //   task continue|abandon|redo <owner/仓名> <单号> --note "<为什么>"（#1402）：续、放弃、重做一张单。见 task-cli.ts。
+//   release pause|continue（#2038）：release.sh 切版本前给手上有会话的任务发 hard 暂停、切完只继续这一批。见 release-pause.ts。
 // 每条命令带 --help（或 -h）只打印用法。
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
 
@@ -40,6 +41,7 @@ import { INTENT_USAGE, IntentCliError, parseIntentArgs, runIntent } from './inte
 import type { IntentStore } from './intent-store.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
 import type { AuditRecord, AutoDispatchChange, IntakeRepo, Store, User } from './ports.ts';
+import { RELEASE_USAGE, runReleaseCommand } from './release-pause.ts';
 import { cookieNames, isCockpitUser, signSessionClaims } from './session.ts';
 import {
   type OpenedTaskControl,
@@ -158,13 +160,13 @@ export async function setPassword(input: {
     { userId: user.id, username, passwordHash, at: input.now() },
     {
       // 操作记录没有「服务器上的管理命令」这一种来源：记成引擎那一类，reason 写明是哪条命令
-      actor: { kind: 'engine', id: 'ops:set-password' },
+      actor: { kind: 'ops', id: 'ops:set-password' },
       action: 'credentials.set',
       target: `user:${user.id}`,
       before: { username: creds.username ?? null, hasPassword: creds.passwordHash !== undefined },
       after: { username, passwordChanged: true },
       reason: '服务器上 root 跑的 fleet-api set-password',
-      via: 'engine',
+      via: 'ops',
       ok: true,
     },
   );
@@ -288,13 +290,13 @@ export async function newNodeKey(input: {
   const hash = createHash('sha256').update(token).digest('hex');
   try {
     await input.store.appendAudit({
-      actor: { kind: 'engine', id: 'ops:node-key' },
+      actor: { kind: 'ops', id: 'ops:node-key' },
       action: NODE_KEY_NEW,
       target: `node:${input.id}`,
       // 只记哈希的前 12 位当指纹：对不上是哪一把时用，拿它还原不出通行证
       after: { fingerprint: hash.slice(0, 12) },
       reason: `服务器上 ${input.operator} 跑的 fleet-api node-key new ${input.id}`,
-      via: 'engine',
+      via: 'ops',
       ok: true,
     });
   } catch (err) {
@@ -399,7 +401,7 @@ export async function mintSession(input: {
   const exp = iat + args.ttlMinutes * 60;
   try {
     await store.appendAudit({
-      actor: { kind: 'engine', id: 'ops:session-mint' },
+      actor: { kind: 'ops', id: 'ops:session-mint' },
       action: SESSION_MINT,
       target: 'cockpit',
       after: {
@@ -410,7 +412,7 @@ export async function mintSession(input: {
         operator: input.operator,
       },
       reason: args.reason,
-      via: 'engine',
+      via: 'ops',
       ok: true,
     });
   } catch (err) {
@@ -464,7 +466,7 @@ export function parseDispatchAllArgs(argv: readonly string[]): DispatchAllArgs {
 export { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE };
 
 /** 操作记录没有「服务器上的管理命令」这一种来源：和 set-password 一样记成引擎那一类，reason 写明谁跑的哪条命令。 */
-const OPS_DISPATCH = { kind: 'engine', id: 'ops:dispatch' } as const;
+const OPS_DISPATCH = { kind: 'ops', id: 'ops:dispatch' } as const;
 
 /** GitHub 的写法：owner 是字母、数字、连字符，仓名再加 . 和 _。网址、只写仓名、多一段都认不出。 */
 const REPO_ARG = /^([A-Za-z0-9][A-Za-z0-9-]*)\/([A-Za-z0-9._-]+)$/;
@@ -603,7 +605,7 @@ export async function dispatch(input: {
             args.reason === undefined
               ? `服务器上 ${operator} 跑的 fleet-api dispatch ${label} ${args.action}`
               : `${args.reason}（服务器上 ${operator} 跑的 fleet-api dispatch ${label} ${args.action}）`,
-          via: 'engine',
+          via: 'ops',
           ok: true,
         },
       ),
@@ -686,7 +688,7 @@ export function parseEngineArgs(argv: readonly string[]): EngineArgs {
 }
 
 /** 操作记录没有「服务器上的管理命令」这一种来源：和 dispatch 一样记成引擎那一类，reason 写明谁跑的哪条命令。 */
-const OPS_ENGINE = { kind: 'engine', id: 'ops:engine' } as const;
+const OPS_ENGINE = { kind: 'ops', id: 'ops:engine' } as const;
 
 /**
  * fleet-api engine 本身（#1086）。status 只读打印；on、off 已经是要的状态就不改，不然经 setEngineMaster 改
@@ -711,7 +713,7 @@ export async function engine(input: { store: Store; args: EngineArgs; operator: 
             args.reason === undefined
               ? `服务器上 ${operator} 跑的 fleet-api engine ${args.action}`
               : `${args.reason}（服务器上 ${operator} 跑的 fleet-api engine ${args.action}）`,
-          via: 'engine',
+          via: 'ops',
           ok: true,
         },
       ),
@@ -842,6 +844,7 @@ const USAGES: Record<string, string> = {
   alert: ALERT_USAGE,
   intent: INTENT_USAGE,
   task: TASK_USAGE,
+  release: RELEASE_USAGE,
 };
 
 const isHelp = (arg: string | undefined) => arg === '--help' || arg === '-h';
@@ -946,6 +949,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
   if (command === 'alert') return runAlertCommand(rest, deps);
   if (command === 'intent') return runIntentCommand(rest, deps);
   if (command === 'task') return runTaskCommand(rest, deps);
+  if (command === 'release') return runReleaseCli(rest, deps);
   deps.err(Object.values(USAGES).join('\n'));
   return 2;
 }
@@ -1056,6 +1060,22 @@ async function runAlertCommand(rest: readonly string[], deps: CliDeps): Promise<
     if (opened) await (await opened.catch(() => undefined))?.close();
     if (alertsOpened) await (await alertsOpened.catch(() => undefined))?.close();
   }
+}
+
+/** release pause|continue（#2038）：release.sh 切版本前后调，见 release-pause.ts。参数、名单不对不连库。 */
+function runReleaseCli(rest: readonly string[], deps: CliDeps): Promise<number> {
+  return runReleaseCommand(rest, {
+    out: deps.out,
+    err: deps.err,
+    now: deps.now,
+    operator: operatorName(deps.env),
+    readStdin: deps.readStdin ?? (async () => ''),
+    openStore: () => deps.openStore(databaseUrl(deps.env)),
+    openWorkflows: async () => {
+      const control = await (deps.openTaskControl ?? openTaskControl)(deps.env);
+      return { workflows: control.workflows, close: () => control.close() };
+    },
+  });
 }
 
 /** task（#1402）：参数不对不连库。做成了打到标准输出；没做成只打标准错误，不打成功那一句。 */

@@ -23,6 +23,11 @@ import {
   ciVerdict,
   gateVerdict,
   HUMAN_TIER_PATHS,
+  MARKER_CLEAR_ACTION,
+  PAUSE_FILE,
+  PAUSED_ALERT_KEY,
+  PAUSED_STALE_MS,
+  parseEngineStatus,
   parseMainLog,
   RETIRED_ALERT_PREFIXES,
   RULES_PREFIX,
@@ -34,6 +39,10 @@ import {
   summary,
   TIER_PREFIX,
   TIER_RETRY_MS,
+  TRAIN_MARKER_KEY,
+  TRAIN_RESTORE_REASON,
+  TRAIN_RESTORED_KEY,
+  TRAIN_STALE_MS,
 } from '../france/auto-release/lib.mjs';
 
 const H0 = 'a'.repeat(40); // 在用的
@@ -897,19 +906,13 @@ test('单元里已经没有发版的口子：入口不接发布脚本、不读�
 
 const GOOD_GATE = { missing: [], requestPending: false, marker: false, trainText: null, lockBusy: false };
 
-/** 在 machine() 上接好自动发版的三个口子：上一次发版 2 小时前、闸全过、请求记账。 */
+/** 在 machine() 上接好自动发版的两个口子：闸全过、请求记账。 */
 function autoMachine() {
   const m = machine();
-  m.releasedAt = new Date(T0 - 120 * MIN).toISOString();
-  m.releasedAtThrow = null;
   m.gate = { ...GOOD_GATE };
   m.gateThrow = null;
   m.requests = [];
   m.requestThrow = null;
-  m.io.readReleasedAt = async () => {
-    if (m.releasedAtThrow) throw new Error(m.releasedAtThrow);
-    return m.releasedAt;
-  };
   m.io.releaseGate = async () => {
     if (m.gateThrow) throw new Error(m.gateThrow);
     return structuredClone(m.gate);
@@ -921,7 +924,7 @@ function autoMachine() {
   return m;
 }
 
-test('主线头落后在用的、CI 绿、距上次发版满 1 小时、闸全过：请求发主线头一次，请求里写明谁发的；5 分钟后那一轮不重复请求', async () => {
+test('CI 绿、闸全过就请求发主线头，请求里写明谁发的；同一个头 30 分钟内不重复请求；换了新头立刻发', async () => {
   const m = autoMachine();
   const st = await m.round();
   assert.deepEqual(m.requests, [{ sha: H1, at: new Date(T0).toISOString(), by: AUTO_RELEASE_BY }]);
@@ -930,30 +933,39 @@ test('主线头落后在用的、CI 绿、距上次发版满 1 小时、闸全�
   assert.equal(st.last.action, 'auto-release-requested');
   assert.match(summary(st), /自动发版：已请求自动发版 bbbbbbbbbbbb/);
   assert.ok(/^[\p{L}\p{N}_.@ -]{1,64}$/u.test(AUTO_RELEASE_BY), '「谁发的」要过接活单元的字符规则');
-  // 请求还没被接走、也还没发出去：下一轮不再写（距上一次请求才 5 分钟）
+  // 接活单元读走了请求、还没写进度（闸看着全过）：同一个头不再请求
   m.t += 5 * MIN;
   const second = await m.round();
   assert.equal(m.requests.length, 1);
-  assert.match(second.auto.note, /距上一次发版 5 分钟/);
+  assert.match(second.auto.note, /刚请求过 bbbbbbbbbbbb，等接活单元发/);
   assert.equal(second.auto.sha, H1, '上一次请求的记录带到下一轮');
-});
-
-test('【故意造出的失败】不到 1 小时不发：距离算「上一次发版（手动自动都算）」和「上一次自动请求」里更近的那个；满 60 分钟才发', async () => {
-  const m = autoMachine();
-  m.releasedAt = new Date(T0 - 59 * MIN).toISOString(); // 59 分钟前有人点按钮发过
-  const st = await m.round();
-  assert.equal(m.requests.length, 0);
-  assert.match(st.auto.note, /距上一次发版 59 分钟，满 60 分钟再发/);
-  m.t += 1 * MIN; // 刚好满 60 分钟
-  await m.round();
-  assert.equal(m.requests.length, 1, '满 60 分钟就发');
-  // 自动请求之后，哪怕在用的版本一直没换（请求没被接走），也要再隔 60 分钟才请求第二次
-  m.t += 59 * MIN;
+  m.t += 24 * MIN; // 距请求 29 分钟：还算刚请求过
   await m.round();
   assert.equal(m.requests.length, 1);
-  m.t += 1 * MIN;
+  // 换了新头（绿的）：不等 30 分钟，立刻发
+  m.main.unshift([H2, '2026-09-27T08:20:00Z']);
+  m.ci = runsBody(run(H2, 'completed', 'success'));
   await m.round();
   assert.equal(m.requests.length, 2);
+  assert.equal(m.requests[1].sha, H2);
+  // 同一个头满 30 分钟还没发上去（接活单元没接）：再请求一次
+  m.t += 30 * MIN;
+  await m.round();
+  assert.equal(m.requests.length, 3);
+  assert.equal(m.requests[2].sha, H2);
+});
+
+test('【故意造出的失败】上一次发版刚过几分钟、新头绿了照发：不再有两次发版之间的间隔', async () => {
+  const m = autoMachine();
+  // 上一轮刚请求发了 H0 之前的某个头（3 分钟前），现在在用 H0、主线头 H1 绿了
+  m.state = {
+    ...m.state,
+    auto: { sha: 'f'.repeat(40), at: new Date(T0 - 3 * MIN).toISOString(), note: null },
+  };
+  const st = await m.round();
+  assert.equal(m.requests.length, 1, '换了头就发，不等');
+  assert.equal(m.requests[0].sha, H1);
+  assert.equal(st.last.action, 'auto-release-requested');
 });
 
 test('【故意造出的失败】头的 CI 不是绿的（红、没跑完、没查、读不到）：不发，等绿；绿了的下一轮才发', async () => {
@@ -1022,19 +1034,11 @@ test('【故意造出的失败】发版闸：接活单元没装、上一份请�
     assert.equal(m.requests.length, 0, JSON.stringify(patch));
     assert.match(st.auto.note, want);
   }
-  // 闸读的时候就抛、上一次发版时间读不到/认不出：同样不发
+  // 闸读的时候就抛：同样不发
   const gt = autoMachine();
   gt.gateThrow = 'flock 退出码 9';
   assert.match((await gt.round()).auto.note, /发版闸读不到：flock 退出码 9/);
   assert.equal(gt.requests.length, 0);
-  const rt = autoMachine();
-  rt.releasedAtThrow = 'ENOENT';
-  assert.match((await rt.round()).auto.note, /上一次发版是什么时候没读到/);
-  assert.equal(rt.requests.length, 0);
-  const bad = autoMachine();
-  bad.releasedAt = 'yesterday';
-  assert.match((await bad.round()).auto.note, /认不出，不发/);
-  assert.equal(bad.requests.length, 0);
   // 上一趟发完（done）或撤掉（aborted）的进度记录不挡
   for (const status of ['done', 'aborted']) {
     const ok = autoMachine();
@@ -1068,4 +1072,407 @@ test('gateVerdict 单测：全过回 null；done/aborted 的进度不挡；事�
   assert.equal(gateVerdict({ ...GOOD_GATE, trainText: JSON.stringify({ status: 'done' }) }), null);
   assert.match(gateVerdict(undefined), /没读到/);
   assert.match(gateVerdict(null), /没读到/);
+});
+
+// ── 发版驱动死在中途的残局（#2038、决定 0093）：暂停名单没人发「继续」、老版驱动关了总开关没开回 ──
+
+const pausedOut = (entries, code = 0) => ({
+  code,
+  out: `${entries.map((e) => `${e.result} ${e.repo}#${e.issueNumber}`).join('\n')}\n${JSON.stringify({
+    schema: 1,
+    by: '发版',
+    reason: '发版 bbbbbbbbbbbb',
+    pausedAt: '2026-09-27T07:40:00Z',
+    continuedAt: '2026-09-27T08:00:00Z',
+    entries,
+  })}\n`,
+});
+const entry = (n, result, extra = {}) => ({
+  taskId: `t${n}`,
+  repo: 'o/r',
+  issueNumber: n,
+  workflowId: null,
+  result,
+  pausedOk: true,
+  ...extra,
+});
+const TRAIN_RUNNING = {
+  status: 'running',
+  phase: 3,
+  pid: 4242,
+  updatedAt: new Date(T0 - 40 * MIN).toISOString(),
+  before: { master: true, repos: {} },
+};
+
+/** autoMachine 上接好收残局的口子：默认在用的就是主线头（不发版，st.last 留给收残局那一步）、没有残局。 */
+function recoverMachine() {
+  const m = autoMachine();
+  m.current = H1;
+  m.paused = { exists: false, ageMs: null, lockBusy: false };
+  m.pausedThrow = null;
+  m.resume = pausedOut([entry(1, 'continued')]);
+  m.resumeThrow = null;
+  m.resumeCalls = 0;
+  m.retired = [];
+  m.retireThrow = null;
+  m.io.pausedLeftover = async () => {
+    if (m.pausedThrow) throw new Error(m.pausedThrow);
+    return structuredClone(m.paused);
+  };
+  m.io.resumePaused = async () => {
+    m.resumeCalls += 1;
+    if (m.resumeThrow) throw new Error(m.resumeThrow);
+    return m.resume;
+  };
+  m.io.retirePaused = async (to) => {
+    if (m.retireThrow) throw new Error(m.retireThrow);
+    m.retired.push(to);
+    m.paused = { exists: false, ageMs: null, lockBusy: false };
+  };
+  m.train = { marker: false, trainText: null, lockBusy: false, engine: { ok: true, on: false } };
+  m.alivePids = [];
+  m.trainThrow = null;
+  m.engineOnCalls = [];
+  m.engineOnResult = { code: 0, out: '已打开：引擎总开关：开着' };
+  m.engineStaysOff = false;
+  m.markerCleared = 0;
+  m.io.trainLeftover = async () => {
+    if (m.trainThrow) throw new Error(m.trainThrow);
+    return { ...structuredClone(m.train), pidAlive: (pid) => m.alivePids.includes(pid) };
+  };
+  m.io.engineOn = async (reason) => {
+    m.engineOnCalls.push(reason);
+    if (m.engineOnResult.code === 0 && !m.engineStaysOff) m.train.engine = { ok: true, on: true };
+    return m.engineOnResult;
+  };
+  m.clearThrow = null;
+  m.io.clearTrainMarker = async () => {
+    if (m.clearThrow) throw new Error(m.clearThrow);
+    m.markerCleared += 1;
+    m.train.marker = false;
+  };
+  m.audits = [];
+  m.auditThrow = null;
+  m.io.audit = async (rec) => {
+    if (m.auditThrow) throw new Error(m.auditThrow);
+    m.audits.push(rec);
+  };
+  return m;
+}
+
+test('暂停名单放了 20 分钟以上、发布锁空着：替它发「继续」，名单改名不再试，报一条列出继续了几个、哪些没成', async () => {
+  const m = recoverMachine();
+  m.paused = { exists: true, ageMs: PAUSED_STALE_MS + 5 * MIN, lockBusy: false };
+  m.resume = pausedOut(
+    [
+      entry(1, 'continued'),
+      entry(2, 'failed', { why: '工作流不在了' }),
+      entry(3, 'skipped', { pausedOk: false }),
+    ],
+    1,
+  );
+  const st = await m.round();
+  assert.equal(m.resumeCalls, 1);
+  assert.deepEqual(m.retired, [`${PAUSE_FILE}.handled-2026-09-27T08-00-00-000Z`]);
+  const a = m.alerts.find((x) => x.key === PAUSED_ALERT_KEY);
+  assert.ok(a, '报了一条');
+  assert.equal(a.title, '发版驱动没收尾，自动给 2 个发版暂停的任务发了继续');
+  assert.match(a.body, /继续了 1 个/);
+  assert.match(a.body, /没继续上 1 个，要人看：o\/r#2（工作流不在了）/);
+  assert.match(a.body, /退出码 1/);
+  assert.match(a.body, /已改名成 .*\.handled-/);
+  assert.equal(st.last.action, 'paused-resumed');
+  // 名单挪走了：下一轮不再发
+  m.t += 5 * MIN;
+  await m.round();
+  assert.equal(m.resumeCalls, 1);
+});
+
+test('暂停名单还新鲜（不到 20 分钟）、发布锁占着（有发布在跑）、名单不在：都不碰', async () => {
+  for (const paused of [
+    { exists: true, ageMs: PAUSED_STALE_MS - MIN, lockBusy: false },
+    { exists: true, ageMs: PAUSED_STALE_MS + 60 * MIN, lockBusy: true },
+    { exists: false, ageMs: null, lockBusy: false },
+  ]) {
+    const m = recoverMachine();
+    m.paused = paused;
+    await m.round();
+    assert.equal(m.resumeCalls, 0, JSON.stringify(paused));
+    assert.equal(m.retired.length, 0);
+    assert.equal(
+      m.alerts.some((a) => a.key === PAUSED_ALERT_KEY),
+      false,
+    );
+  }
+});
+
+test('【故意造出的失败】暂停名单读不到、放了多久认不出、继续起不来、回话认不出、名单改不了名：照实记下，不当成没有', async () => {
+  const unread = recoverMachine();
+  unread.pausedThrow = 'EACCES';
+  const st = await unread.round();
+  assert.equal(st.last.action, 'paused-unreadable');
+  assert.match(st.last.detail, /在不在读不到：EACCES/);
+  assert.equal(unread.resumeCalls, 0);
+
+  const noAge = recoverMachine();
+  noAge.paused = { exists: true, ageMs: null, lockBusy: false };
+  assert.match((await noAge.round()).last.detail, /放了多久读不到/);
+  assert.equal(noAge.resumeCalls, 0);
+
+  const crash = recoverMachine();
+  crash.paused = { exists: true, ageMs: PAUSED_STALE_MS, lockBusy: false };
+  crash.resumeThrow = 'bash 起不来或超时';
+  crash.retireThrow = 'EROFS';
+  await crash.round();
+  const a = crash.alerts.find((x) => x.key === PAUSED_ALERT_KEY);
+  assert.equal(a.title, '发版驱动没收尾，自动给 名单上 个发版暂停的任务发了继续');
+  assert.match(a.body, /结果认不出：bash 起不来或超时/);
+  assert.match(a.body, /退出码 -1/);
+  assert.match(a.body, /名单没改成 .*EROFS.*下一轮还会再发一次/);
+
+  const garbled = recoverMachine();
+  garbled.paused = { exists: true, ageMs: PAUSED_STALE_MS, lockBusy: false };
+  garbled.resume = { code: 2, out: '用法：fleet-api release pause|continue' };
+  await garbled.round();
+  const g = garbled.alerts.find((x) => x.key === PAUSED_ALERT_KEY);
+  assert.match(g.body, /结果认不出：用法/);
+  assert.match(g.body, /退出码 2/);
+  assert.equal(garbled.retired.length, 1, '没成也改名，不每 5 分钟重试');
+});
+
+const STALE_TRAIN = () => ({
+  marker: true,
+  trainText: JSON.stringify(TRAIN_RUNNING),
+  lockBusy: false,
+  engine: { ok: true, on: false },
+});
+
+test('老版驱动关了总开关没开回（标记在、驱动死了、半小时没动、锁空、总开关关着）：开回去、删标记、报一条；进度记录不改', async () => {
+  const m = recoverMachine();
+  m.train = STALE_TRAIN();
+  const st = await m.round();
+  assert.deepEqual(m.engineOnCalls, [TRAIN_RESTORE_REASON]);
+  assert.equal(m.markerCleared, 1);
+  const a = m.alerts.find((x) => x.key === TRAIN_RESTORED_KEY);
+  assert.equal(a.title, '发版驱动没收尾，自动开回了总开关');
+  assert.match(a.body, /第 3 步、running/);
+  assert.match(a.body, /状态没改，那一趟停在哪一步要人看/);
+  assert.equal(st.last.action, 'train-restored');
+  // 标记删了：下一轮不再开
+  m.t += 5 * MIN;
+  await m.round();
+  assert.equal(m.engineOnCalls.length, 1);
+  // 状态不是 running（卡住、没成）的，驱动进程号还活着也算没收尾
+  const failed = recoverMachine();
+  failed.alivePids = [4242];
+  failed.train = { ...STALE_TRAIN(), trainText: JSON.stringify({ ...TRAIN_RUNNING, status: 'failed' }) };
+  await failed.round();
+  assert.equal(failed.engineOnCalls.length, 1);
+});
+
+test('老版驱动的残局对不全就不碰总开关：驱动还活着、不到半小时、在走没记进程号、锁占着、没有进度记录、发版前就关着、没有标记', async () => {
+  const train = (patch) => JSON.stringify({ ...TRAIN_RUNNING, ...patch });
+  const cases = [
+    ['驱动还活着', {}, [4242]],
+    ['不到半小时', { trainText: train({ updatedAt: new Date(T0 - (TRAIN_STALE_MS - MIN)).toISOString() }) }],
+    ['在走没记进程号', { trainText: train({ pid: undefined }) }],
+    ['锁占着', { lockBusy: true }],
+    ['没有进度记录（不知道发版前开没开）', { trainText: null }],
+    ['发版前就关着', { trainText: train({ before: { master: false } }) }],
+    ['没有标记', { marker: false }],
+  ];
+  for (const [what, patch, alive = []] of cases) {
+    const m = recoverMachine();
+    m.train = { ...STALE_TRAIN(), ...patch };
+    m.alivePids = alive;
+    await m.round();
+    assert.equal(m.engineOnCalls.length, 0, what);
+    assert.equal(m.markerCleared, 0, what);
+    assert.equal(
+      m.alerts.some((a) => a.key === TRAIN_RESTORED_KEY),
+      false,
+      what,
+    );
+  }
+});
+
+test('【故意造出的失败】总开关开回没成（engine on 退出非 0、读回还是关着）、残局读不到、总开关读不到、进度认不出：不删标记，照实报或记', async () => {
+  const exit1 = recoverMachine();
+  exit1.train = STALE_TRAIN();
+  exit1.engineOnResult = { code: 1, out: '没改成（什么都没改）：连不上库' };
+  await exit1.round();
+  const a = exit1.alerts.find((x) => x.key === TRAIN_RESTORED_KEY);
+  assert.equal(a.title, '发版驱动没收尾，总开关没开回');
+  assert.match(a.body, /engine on 退出码 1：没改成/);
+  assert.equal(exit1.markerCleared, 0, '没开回不删标记');
+  assert.equal(exit1.state.last.action, 'train-restore-failed');
+  // 下一轮接着试；报警内容一样就不重发
+  exit1.t += 5 * MIN;
+  const sent = exit1.alerts.length;
+  await exit1.round();
+  assert.equal(exit1.engineOnCalls.length, 2);
+  assert.equal(exit1.alerts.length, sent, '同样的报警不每 5 分钟重发');
+
+  const stuck = recoverMachine();
+  stuck.train = STALE_TRAIN();
+  stuck.engineStaysOff = true;
+  await stuck.round();
+  assert.match(stuck.alerts.find((x) => x.key === TRAIN_RESTORED_KEY).body, /读回来还是关着/);
+  assert.equal(stuck.markerCleared, 0);
+
+  const unread = recoverMachine();
+  unread.trainThrow = 'flock 退出码 9';
+  assert.match((await unread.round()).last.detail, /残局读不到：flock 退出码 9/);
+
+  const noEngine = recoverMachine();
+  noEngine.train = { ...STALE_TRAIN(), engine: { ok: false, why: '总开关的回话认不出：x' } };
+  assert.match((await noEngine.round()).last.detail, /总开关读不到，不碰标记和总开关：总开关的回话认不出/);
+  assert.equal(noEngine.engineOnCalls.length, 0);
+
+  const garbled = recoverMachine();
+  garbled.train = { ...STALE_TRAIN(), trainText: 'not json' };
+  assert.match((await garbled.round()).last.detail, /进度记录认不出：不碰标记和总开关/);
+  assert.equal(garbled.engineOnCalls.length, 0);
+});
+
+test('parseEngineStatus：开着、关着认得出；退出非 0（含老版没有 engine 命令）、回话认不出都是读不到', () => {
+  assert.deepEqual(parseEngineStatus(0, '引擎总开关：开着：引擎在接活'), { ok: true, on: true });
+  assert.deepEqual(parseEngineStatus(0, '引擎总开关：关着（从没设过，默认关）'), { ok: true, on: false });
+  assert.equal(parseEngineStatus(2, '用法：fleet-api ...').ok, false);
+  assert.equal(parseEngineStatus(0, '').ok, false);
+});
+
+// ── 发版只认主线头那次 ci.yml 全绿（ciVerdict）：主线 CI 里的 E2E 不绿就不发 ──
+
+/** key 这一行起、缩进比它深的那一块（空行、整行注释跳过）；找不到回 null。 */
+function yamlBlock(lines, key, indent) {
+  const pad = ' '.repeat(indent);
+  const start = lines.findIndex((l) => l.startsWith(`${pad}${key}:`));
+  if (start < 0) return null;
+  const out = [lines[start]];
+  for (const l of lines.slice(start + 1)) {
+    if (l.trim() === '' || l.trim().startsWith('#')) continue;
+    if (l.length - l.trimStart().length <= indent) break;
+    out.push(l);
+  }
+  return out;
+}
+
+test('主线 CI（CI_WORKFLOW）推 main 时会跑，里面有跑 playwright 的 E2E job，汇总 check 的 needs 带着它（读真文件）', () => {
+  const text = readFileSync(new URL(`../../${CI_WORKFLOW}`, import.meta.url), 'utf8');
+  const lines = text.split('\n').map((l) => l.replace(/\s+#.*$/, '').replace(/\r$/, ''));
+  // on：push 到 main 会触发（有 branches 过滤的话要列着 main）
+  const on = yamlBlock(lines, 'on', 0);
+  assert.ok(on, 'ci.yml 有 on:');
+  const push = yamlBlock(on, 'push', 2);
+  assert.ok(push || /\bpush\b/.test(on[0]), '推送会触发 ci.yml');
+  if (push) {
+    const p = push.join('\n');
+    if (/branches:/.test(p)) {
+      assert.match(
+        p,
+        /branches:\s*\[[^\]]*\bmain\b|branches:\s*\n\s*-\s*['"]?main\b/,
+        'push 的 branches 里有 main',
+      );
+    }
+    assert.doesNotMatch(p, /branches-ignore/, 'push 不排除分支');
+  }
+  // jobs：跑 playwright 的 job（名字不限，现在叫 e2e）
+  const jobs = yamlBlock(lines, 'jobs', 0);
+  assert.ok(jobs, 'ci.yml 有 jobs:');
+  const names = jobs.map((l) => /^ {2}([\w-]+):\s*$/.exec(l)?.[1]).filter(Boolean);
+  const e2e = names.filter((n) => yamlBlock(jobs, n, 2).some((l) => /\bplaywright\b/.test(l)));
+  assert.ok(e2e.length > 0, `ci.yml 里有跑 playwright 的 job（现在的 job：${names.join('、')}）`);
+  for (const n of e2e) {
+    const own = yamlBlock(jobs, n, 2).find((l) => /^ {4}if:/.test(l)) ?? '';
+    assert.doesNotMatch(
+      own,
+      /event_name\s*==\s*'pull_request'|event_name\s*!=\s*'push'/,
+      `${n} 推主线时不能整个不跑`,
+    );
+  }
+  // check（必过检查、汇总）的 needs 带着它
+  const check = yamlBlock(jobs, 'check', 2);
+  assert.ok(check, 'ci.yml 有 check job');
+  const needsAt = check.findIndex((l) => /^ {4}needs:/.test(l));
+  assert.ok(needsAt >= 0, 'check 有 needs');
+  const inline = /needs:\s*\[([^\]]*)\]/.exec(check[needsAt]);
+  const single = /needs:\s*([\w-]+)\s*$/.exec(check[needsAt]);
+  const needs = inline ? inline[1].split(',').map((s) => s.trim()) : single ? [single[1]] : [];
+  if (!inline && !single) {
+    for (const l of check.slice(needsAt + 1)) {
+      const m = /^ {6}-\s*([\w-]+)/.exec(l);
+      if (!m) break;
+      needs.push(m[1]);
+    }
+  }
+  for (const n of e2e) assert.ok(needs.includes(n), `check 的 needs（${needs.join('、')}）要带 ${n}`);
+});
+
+test('总开关开着、驱动不在、锁空着：暂停标记是残留，删掉并记一条操作记录（运维脚本），自动发版不再被它挡', async () => {
+  for (const [what, trainText, alive] of [
+    ['进度记录不在', null, []],
+    ['进度是 failed', JSON.stringify({ ...TRAIN_RUNNING, status: 'failed' }), [4242]],
+    [
+      '在走但进程死了，刚刚还在更新',
+      JSON.stringify({ ...TRAIN_RUNNING, updatedAt: new Date(T0).toISOString() }),
+      [],
+    ],
+  ]) {
+    const m = recoverMachine();
+    m.train = { ...STALE_TRAIN(), trainText, engine: { ok: true, on: true } };
+    m.alivePids = alive;
+    const st = await m.round();
+    assert.equal(m.markerCleared, 1, what);
+    assert.equal(m.engineOnCalls.length, 0, `${what}：总开关开着不再开`);
+    assert.equal(m.audits.length, 1, what);
+    assert.equal(m.audits[0].action, MARKER_CLEAR_ACTION);
+    assert.match(m.audits[0].target, /release-train.paused$/);
+    assert.match(m.audits[0].reason, /残留的发版暂停标记.*总开关开着/);
+    assert.equal(st.last.action, 'marker-cleared', what);
+    assert.equal(
+      m.alerts.some((a) => a.key === TRAIN_MARKER_KEY),
+      false,
+    );
+  }
+  // 驱动还活着在走、锁占着、总开关读不到：标记不动
+  for (const [what, patch, alive] of [
+    ['驱动还活着在走', {}, [4242]],
+    ['锁占着', { lockBusy: true }, []],
+    ['总开关读不到', { engine: { ok: false, why: 'x' } }, []],
+  ]) {
+    const m = recoverMachine();
+    m.train = { ...STALE_TRAIN(), engine: { ok: true, on: true }, ...patch };
+    m.alivePids = alive;
+    await m.round();
+    assert.equal(m.markerCleared, 0, what);
+    assert.equal(m.audits.length, 0, what);
+  }
+});
+
+test('【故意造出的失败】删残留标记：操作记录写不进（先删后记：标记已删，报一条「删了、没记上」，不当成没事）；删不掉（报警、每轮再试、不写记录）', async () => {
+  const noAudit = recoverMachine();
+  noAudit.train = { ...STALE_TRAIN(), trainText: null, engine: { ok: true, on: true } };
+  noAudit.auditThrow = '写库没成（psql 退出码 2）：invalid input value for enum actor_kind: "ops"';
+  const st = await noAudit.round();
+  assert.equal(noAudit.markerCleared, 1, '标记已经删了');
+  const a = noAudit.alerts.find((x) => x.key === TRAIN_MARKER_KEY);
+  assert.equal(a.title, '删了残留的发版暂停标记，操作记录没写进去');
+  assert.match(a.body, /已删 .*release-train.paused；写操作记录（release.marker-cleared）没成：写库没成/);
+  assert.equal(st.last.action, 'marker-cleared-unaudited');
+
+  const stuck = recoverMachine();
+  stuck.train = { ...STALE_TRAIN(), trainText: null, engine: { ok: true, on: true } };
+  stuck.clearThrow = 'EROFS';
+  await stuck.round();
+  assert.equal(stuck.audits.length, 0, '没删成不写「删了」的记录');
+  assert.match(stuck.alerts.find((x) => x.key === TRAIN_MARKER_KEY).body, /删 .* 没成：EROFS/);
+  assert.equal(stuck.state.last.action, 'marker-clear-failed');
+  // 下一轮删成了：记上、撤警
+  stuck.clearThrow = null;
+  stuck.t += 5 * MIN;
+  await stuck.round();
+  assert.equal(stuck.markerCleared, 1);
+  assert.equal(stuck.audits.length, 1);
+  assert.deepEqual(stuck.resolvedKeys, [TRAIN_MARKER_KEY]);
 });

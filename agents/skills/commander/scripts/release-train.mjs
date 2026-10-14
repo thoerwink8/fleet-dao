@@ -1,5 +1,6 @@
 // release-train.mjs 是外壳：真的 ssh/gh/git/pnpm/node 子进程、睡眠。逻辑都在 release-train-lib.mjs。node release-train.mjs 不带参数看用法。
-// 发版前先暂停手头的活，等收尾，发版，恢复，按最优顺序打印清单（#618）。发版会等很久（最长约一个多小时），用 run_in_background 起。
+// 发版：预检，等要发的提交的 CI，发版，等部署，验证，核对开关，按最优顺序打印清单（#618）。不关总开关：release.sh 切版本时只暂停
+// 在跑的任务（决定 0093）。发版会等很久，用 run_in_background 起。
 // 改这里之前必须知道：
 // - 登法国的 ssh 名字读法复用 france-lib.mjs 的 readTarget（环境变量 FLEET_FRANCE_SSH，或 ~/.fleet-dao/france-ssh 的第一行）；
 //   ssh 的参数同 france-lib.mjs 的 sshArgs（不问口令、连 10 秒连不上就算、开压缩）。名字不进任何输出。
@@ -121,20 +122,6 @@ function ssh(remoteCommand, opts = {}) {
   return once('ssh', [...args, remoteCommand], { timeoutMs }, process.env);
 }
 
-/** 法国各仓的「让 AI 接活」开关：用 france-query 那一次只读快照里的 repos。 */
-async function franceRepos() {
-  const { franceFetcher } = await import('./france-lib.mjs');
-  const r = await franceFetcher({
-    home,
-    env: process.env,
-    scriptFile: `${SCRIPTS_DIR}/france-query.mjs`,
-  })();
-  if (!r.ok) return { ok: false, why: `${r.kind}：${r.why}` };
-  const repos = r.data.sections.repos;
-  if (!repos.ok) return { ok: false, why: repos.why };
-  return { ok: true, rows: repos.rows };
-}
-
 /** pid 还在不在：kill 0 不发信号只查；没权限（EPERM）也是在。 */
 const isAlive = (pid) => {
   try {
@@ -161,5 +148,4 @@ process.exitCode = await runTrain(process.argv.slice(2), {
   run,
   ssh,
   runningSessions: () => fetchRunningSessions(),
-  franceRepos,
 });

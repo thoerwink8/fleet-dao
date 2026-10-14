@@ -81,8 +81,8 @@ describe('node-key new', () => {
     expect(entry).toMatchObject({
       action: NODE_KEY_NEW,
       target: 'node:local',
-      via: 'engine',
-      actor: { kind: 'engine', id: 'ops:node-key' },
+      via: 'ops',
+      actor: { kind: 'ops', id: 'ops:node-key' },
     });
     const logged = JSON.stringify(s.memory.data.audit);
     expect(logged).not.toContain(TOKEN);

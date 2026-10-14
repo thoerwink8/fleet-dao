@@ -475,9 +475,9 @@ export interface ManualModelInput {
   channelId: string;
   modelKey: string;
   now: Date;
-  actorKind: 'user' | 'ai' | 'engine' | 'agent';
+  actorKind: 'user' | 'ai' | 'engine' | 'agent' | 'ops';
   actorId: string;
-  via: 'cockpit' | 'feishu' | 'github' | 'engine' | 'agent';
+  via: 'cockpit' | 'feishu' | 'github' | 'engine' | 'agent' | 'ops';
   reason?: string;
 }
 

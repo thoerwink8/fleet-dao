@@ -216,7 +216,7 @@ export const AuditEntrySchema = z.object({
   before: z.unknown().optional(),
   after: z.unknown().optional(),
   reason: z.string().optional(),
-  via: z.enum(['cockpit', 'feishu', 'github', 'engine', 'agent']),
+  via: z.enum(['cockpit', 'feishu', 'github', 'engine', 'agent', 'ops']),
   ok: z.boolean(),
   error: z.string().optional(),
 });

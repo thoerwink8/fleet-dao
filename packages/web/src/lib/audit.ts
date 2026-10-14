@@ -16,6 +16,7 @@ export const viaLabel: Record<AuditEntry['via'], string> = {
   github: 'GitHub',
   engine: '引擎',
   agent: '会话',
+  ops: '运维脚本',
 };
 
 export const actorKindLabel: Record<AuditEntry['actor']['kind'], string> = {
@@ -23,6 +24,7 @@ export const actorKindLabel: Record<AuditEntry['actor']['kind'], string> = {
   ai: brand.terms.marshal,
   engine: '引擎',
   agent: '会话里的 AI',
+  ops: '运维脚本',
 };
 
 /**
@@ -47,6 +49,13 @@ const ACTOR_ID_LABEL: Record<string, string> = {
   'engine:startup': '引擎·启动',
   'engine:pick-route': '引擎·选路',
   'engine:alert-dispatch': '引擎·派提醒',
+  'ops:engine': '运维脚本·引擎总开关',
+  'ops:task': '运维脚本·任务',
+  'ops:intent': '运维脚本·意图',
+  'ops:dispatch': '运维脚本·自动派单',
+  'ops:set-password': '运维脚本·设密码',
+  'ops:node-key': '运维脚本·节点密钥',
+  'ops:session-mint': '运维脚本·签会话',
 };
 
 /** 谁做的：是自己就写「我」；有名字用名字；否则把认得出的代号翻成人话，认不出的原样。 */

@@ -2,11 +2,11 @@
 // 逻辑一点不重写：真正干活的还是 release-train-lib.mjs 的 runTrain，这里只做三件事——
 // 1. 多一个只读的 preflight 命令：借 runTrain 跑「start」，但在它刚开始第 1 步
 //    （release-train-lib 的 runFrom 打印「—— 第 1 步「本机」——」那一行，即预检已通过、
-//    马上就要进暂停法国之前的占位步）那一刻从 io.out 里抛一个哨兵错误打断它，再把临时状态文件删掉。
-//    从头到尾什么都没暂停过（第 2 步才碰法国引擎）；预检没过时 runTrain 自己停在 phase 0 的 failed，我们照旧删状态。
+//    马上就要进第 2 步「暂停法国」之前的占位步）那一刻从 io.out 里抛一个哨兵错误打断它，再把临时状态文件删掉。
+//    从头到尾什么都没动过（第 2 步也只读总开关：发版不关总开关，release.sh 切版本时只暂停在跑的任务，决定 0093）；预检没过时 runTrain 自己停在 phase 0 的 failed，我们照旧删状态。
 // 2. preflight 命令前面带一段中文摘要（主线 CI 怎么样、挂了自动合并的 PR 有哪几个、法国在跑几个会话）。
 // 3. start 命令在透传 runTrain 之前，用更直白的中文先拦一遍用法错误（sha 必填、founder-ok 必填）。
-//    过了这层照原样进 runTrain：参数、暂停、状态、退出码全一样，行为一字不改。
+//    过了这层照原样进 runTrain：参数、状态、退出码全一样，行为一字不改。
 // 改这里之前必须知道：
 // - 和 release-train-lib 一样，这份文件里没有任何真的起进程、连网、睡觉的代码：一切经 io 进来，
 //   agents/test/release-onekey.test.ts 换假 ssh、假 gh、假时钟。
@@ -27,10 +27,11 @@ export const ONEKEY_USAGE = `用法：node release-onekey.mjs <命令>（在项�
         只读预检，什么都不改：主线 CI 绿不绿、法国读不读得到、有没有别的发布在跑、
         列出挂了自动合并的 PR 和法国在跑的会话数，前面带一段中文摘要。不给 --sha 就只查环境。
   start --sha <提交> --founder-ok "<创始人原话>" [--restore]
-        一键发版：暂停手头的活（法国引擎）→ 等收尾 → 发版 → 验证 → 恢复 → 打印清单。
-        和 node release-train.mjs start 是同一条路：参数、暂停、状态、退出码全一样。
-  status          看这一趟走到哪、法国总开关暂停前是什么（同 release-train.mjs status）
-  abort           撤暂停、恢复原状（同 release-train.mjs abort）
+        一键发版：记下发版前的总开关（不关它：release.sh 切版本时只暂停在跑的任务，决定 0093）→ 等要发的提交的 CI
+        → 发版 → 验证 → 核对开关和发版前一致 → 打印清单。
+        和 node release-train.mjs start 是同一条路：参数、状态、退出码全一样。
+  status          看这一趟走到哪、法国总开关发版前是什么（同 release-train.mjs status）
+  abort           撤掉这一趟（同 release-train.mjs abort；只有老版本发版车关过的总开关才开回）
 退出码：0 做完了；1 用法不对或被拒；2 没做成；3 卡住（到点还有拖后腿的，名单已列出）。`;
 
 const USAGE_HINT = '（node release-onekey.mjs 不带参数看用法）';
@@ -146,7 +147,7 @@ export async function runPreflight(io, target) {
   const summary = await buildSummary(io, target);
   const all = [...summary, ...lines.map((l) => scrubText(l)), ...errLines.map((l) => scrubText(l))];
   if (hit) {
-    all.push('预检过了：主线 CI 绿、法国读得到、没有别的发布在跑（暂停、发版什么都没做）');
+    all.push('预检过了：主线 CI 绿、法国读得到、没有别的发布在跑（开关、发版什么都没动）');
     return { code: 0, lines: all };
   }
   if (code === 2) return { code: 2, lines: all }; // 「预检没过」那句 runTrain 已打进 errLines；拦漏的哨兵行也在这
@@ -252,12 +253,12 @@ export async function runOnekey(argv, io) {
     const bad = checkTargetFormat(io, p);
     if (bad !== null) return bad;
     if (p.founderOk === undefined || p.founderOk.trim() === '') {
-      warn(io, '发版是对外发布，必须带 --founder-ok "<创始人原话>"：没带就什么都不做（连暂停都不暂停）');
+      warn(io, '发版是对外发布，必须带 --founder-ok "<创始人原话>"：没带就什么都不做');
       return 1;
     }
     say(
       io,
-      `一键发版：目标提交 ${String(p.sha).slice(0, 12)}，先把本机和法国手头的活暂停，收尾后发版，发完恢复发版前的开关（开着的开回、关着的保持关）。下面接入 release-train：`,
+      `一键发版：目标提交 ${String(p.sha).slice(0, 12)}，不关总开关（release.sh 切版本时只暂停在跑的任务，决定 0093），CI 绿了就发，发完核对开关和发版前一致（不一致照实报、不替人开关）。下面接入 release-train：`,
     );
     return runTrain(toTrainArgv(p), io);
   }

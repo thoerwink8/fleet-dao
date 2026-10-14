@@ -237,7 +237,7 @@ export const realIo = {
     return run('bash', ['-c', fleetApiCommand(args)], { timeoutMs });
   },
   /**
-   * 引擎手上在干的活（等收尾的判据，权威口径）：读引擎写的 drain.json（同 release.sh 的 engine_drain_status）——
+   * 引擎手上在干的活（权威口径；lib.mjs 第 3 步已不再等收尾（#2038），接口保留）：读引擎写的 drain.json（同 release.sh 的 engine_drain_status）——
    * 起会话过了闸才登记，额度探针这类辅助 scope 不登记，所以数不进常驻探针（#2002）。引擎没在跑就没会话；读不到照实说，不当成 0。
    */
   async drain() {

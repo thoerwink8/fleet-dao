@@ -62,7 +62,7 @@ describe('set-password', () => {
     expect(creds?.username).toBe('boss');
     expect(await verifyPassword(PASSWORD, creds?.passwordHash ?? '')).toBe(true);
     const entry = store.data.audit.at(-1);
-    expect(entry).toMatchObject({ action: 'credentials.set', target: `user:${DEV_USER_ID}`, via: 'engine' });
+    expect(entry).toMatchObject({ action: 'credentials.set', target: `user:${DEV_USER_ID}`, via: 'ops' });
     expect(JSON.stringify(store.data.audit)).not.toContain(PASSWORD);
   });
 

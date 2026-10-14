@@ -9,9 +9,11 @@
 #   bash deploy/release.sh --rollback            退回上一版（上一个在用过、没被判过不健康、目录还在的版本）
 #   bash deploy/release.sh --check               只读：在用哪版、有哪几版、服务与健康检查，不改任何东西
 #   bash deploy/release.sh <提交号> --unmerged   发还没合进主线的提交（只用来合并前在真机上验；历史里会标出来）
-#   发布、退回加 --now：不给在跑的会话宽限，马上停下（按编号续上）；急修、急退用
-# 要换引擎的版本时先排空（packages/engine/src/drain.ts）：一开始就写排空请求（$DRAIN_REQUEST），引擎马上不起新会话，在跑的最多再做
-# DRAIN_GRACE 秒（和构建一起走），到点没做完的由引擎按切号那一套停下、新引擎起来按编号续上；排空完停引擎，再迁移、切版本。
+#   发布、退回加 --now：不给停不下来的会话宽限，马上停下（按编号续上）；急修、急退用
+# 要换引擎的版本时（#2038、决定 0093）：构建期间引擎照常干活。构建完才写排空请求（$DRAIN_REQUEST，引擎不起新会话），
+# 给引擎手上有会话的任务发 hard 暂停（暂停人「发版」，名单落 $PAUSE_FILE），等会话收掉（停不下来的最多再做 DRAIN_GRACE 秒，
+# 到点由引擎按切号那一套停下、按编号续上）就停引擎，再迁移、切版本；新引擎起来后只对名单里这一批发「继续」（续上原会话见 #2037）。
+# 发版不碰引擎总开关和各仓「让 AI 接活」开关：停接新活只在切版本这一段，由排空请求管，脚本退了请求就撤。
 # 每一版在 /srv/fleet-dao-releases/<提交号>，current 指着在用的那版；留最近 5 版。目录、单元、本机配置、怎么看、
 # 怎么退：docs/ops.md 第九节。退出码同装机脚本：0 全绿，1 有红（含「没过健康检查、已退回」），2 没红但有待配。
 set -Eeuo pipefail
@@ -53,10 +55,14 @@ SETTLE_SECONDS=10     # 服务起来后再看这么久：这段时间里退出�
 ENGINE_POLL_WAIT=90   # 引擎工人起来后要先打包工作流，才去任务队列取活
 AUTO_STATE=$RELEASES/.auto/state.json         # 自动发布每一轮的读数（deploy/france/auto-release 写，--check 列出来）
 NOW_MODE=0 # --now：不给在跑的会话宽限
-# 发布前排空引擎（packages/engine/src/drain.ts、drain-control.ts）。改宽限要和引擎的 RELEASE_GRACE_MS、fleet-engine.service 的
+# 切版本前排空引擎（packages/engine/src/drain.ts、drain-control.ts）。改宽限要和引擎的 RELEASE_GRACE_MS、fleet-engine.service 的
 # TimeoutStopSec 一起改（packages/engine/test/drain.test.ts 核对）。请求只在发布锁占着时算数：这个脚本中途没了，引擎不会一直停着不派
-DRAIN_GRACE=600                  # 宽限（秒）：在跑的会话最多再做这么久
+DRAIN_GRACE=120                  # 宽限（秒）：发了 hard 暂停以后，停不下来的会话（验收这类不可暂停的段）最多再做这么久
 DRAIN_REQUEST=$RELEASES/.drain-request
+# 发版暂停的任务名单（packages/api/src/release-pause.ts 的 PauseList）：暂停、继续两步读同一份；继续发不出去的留在里面，
+# 自动发布单元（deploy/france/auto-release）见它放久了、又没有发布在跑，就接着发「继续」并报警（驱动中途没了的兜底）
+PAUSE_FILE=$RELEASES/.release-paused.json
+RESUME_ON_FINISH=0 # 占着发布锁的发布、退回：收尾时对名单发「继续」（--check 不碰）
 DRAIN_STOP_REPORT=120            # 到截止引擎叫停会话以后，等它们交回最多这么久（秒，和引擎的 STOP_REPORT_MS 同一个数）
 DRAIN_SLACK=60                   # 再多等这么久才不等了、直接停（秒）
 DRAIN_POLL=10                    # 多久看一次排空进度（秒）
@@ -470,7 +476,7 @@ drain_request() { # 要切到的提交号 宽限（秒）
   mv -f -- "$tmp" "$DRAIN_REQUEST"
   DRAIN_WROTE=1
   if ((ENGINE_DRAINS)); then
-    changed "排空请求：引擎不起新会话，在跑的最晚做到 $(date -u -d "@$DRAIN_UNTIL" +%H:%M:%SZ)（$((grace / 60)) 分钟），到点没做完的停下、新引擎起来按编号续上"
+    changed "排空请求：引擎不起新会话，停不下来的会话最晚做到 $(date -u -d "@$DRAIN_UNTIL" +%H:%M:%SZ)（$grace 秒），到点没做完的停下、新引擎起来按编号续上"
   fi
 }
 
@@ -522,8 +528,122 @@ drain_engine() {
   changed "停下引擎（切版本之前）"
 }
 
+# ── 发版暂停、继续（#2038）──
+
+# 引擎手上有会话的任务编号（drain.json 的 sessions[].taskId，去重，空格分开）；pid 对不上、读不成就什么都不打（调用方当没有）
+engine_session_tasks() { # 引擎主进程号
+  local dir
+  dir=$(kv_get "$ENGINE_ENV" FLEET_ENGINE_STATE_DIR)
+  "$NODE" -e '
+    const fs = require("fs");
+    const [file, pid] = process.argv.slice(1);
+    let st;
+    try { st = JSON.parse(fs.readFileSync(file, "utf8")); } catch { process.exit(0); }
+    if (!st || st.schema !== 2 || String(st.pid) !== pid || !Array.isArray(st.sessions)) process.exit(0);
+    const ids = [...new Set(st.sessions.map((x) => x && x.taskId).filter((x) => typeof x === "string" && /^[0-9a-zA-Z-]{1,64}$/.test(x)))];
+    console.log(ids.join(" "));
+  ' "${dir:-$ENGINE_STATE_DEFAULT}/drain.json" "$1"
+}
+
+# 名单里的一项数：paused / continued / failed（JSON 从标准输入）
+pause_count() { # 结果
+  "$NODE" -e '
+    let t = ""; process.stdin.on("data", (d) => (t += d)).on("end", () => {
+      try { console.log(JSON.parse(t).entries.filter((e) => e.result === process.argv[1]).length); } catch { console.log(0); }
+    });' "$1"
+}
+
+# 把这次的名单并进 $PAUSE_FILE：上一次没收尾留下的（暂停成了、这次没再列的）照留，免得被盖掉、永远没人继续
+pause_merge() { # 这次的名单 JSON
+  local tmp=$PAUSE_FILE.tmp
+  "$NODE" -e '
+    const fs = require("fs");
+    const [file, fresh] = process.argv.slice(1);
+    const now = JSON.parse(fresh);
+    let old = null;
+    try { old = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+    if (old && Array.isArray(old.entries)) {
+      const seen = new Set(now.entries.map((e) => e.taskId));
+      now.entries.push(...old.entries.filter((e) => e.pausedOk && !seen.has(e.taskId)));
+    }
+    process.stdout.write(JSON.stringify(now) + "\n");
+  ' "$PAUSE_FILE" "$1" >"$tmp" && chmod 600 -- "$tmp" && mv -f -- "$tmp" "$PAUSE_FILE"
+}
+
+# 切版本前给引擎手上有会话的任务发 hard 暂停：暂停人写「发版」，会话当场停、任务停在检查点等「继续」。用要切到的那一版的
+# fleet-api（release pause 是这一版才有的命令）。发不出去的不挡发版：那些会话照旧在截止停下、按编号续上，记待处理
+pause_tasks() { # 要切到的提交号
+  local sha=$1 pid ids out errf rc=0 n api line
+  if ((ENGINE_DRAINS == 0)); then return 0; fi
+  pid=$(unit_prop fleet-engine.service MainPID)
+  ids=$(engine_session_tasks "$pid") || ids=""
+  if [[ -z "$ids" ]]; then
+    echo "  · 引擎手上没有任务的会话：不用暂停"
+    return 0
+  fi
+  api=$RELEASES/$sha/packages/api/bin/fleet-api
+  if [[ ! -f "$api" ]]; then
+    pending "这一版没有 fleet-api（$api）：在跑的任务没发暂停，会话在截止停下、按编号续上"
+    return 0
+  fi
+  errf=$(mktemp)
+  # shellcheck disable=SC2086 # 编号已按 [0-9a-zA-Z-] 过滤，按空格拆开正是要的
+  out=$(bash "$api" release pause --reason "发版 ${sha:0:12}" $ids 2>"$errf") || rc=$?
+  while IFS= read -r line; do [[ -n "$line" ]] && echo "    $line"; done <"$errf"
+  rm -f -- "$errf"
+  out=$(printf '%s\n' "$out" | tail -n 1)
+  if ((rc != 0 && rc != 1)) || ! pause_merge "$out" 2>/dev/null; then
+    pending "给在跑的任务发暂停没成（fleet-api release pause 退出码 $rc）：会话在截止停下、按编号续上"
+    return 0
+  fi
+  n=$(pause_count paused <<<"$out")
+  changed "发版暂停：给 $n 个手上有会话的任务发了 hard 暂停（暂停人「发版」，名单 $PAUSE_FILE），切完只对它们发「继续」"
+  if ((rc == 1)); then
+    pending "有 $(pause_count failed <<<"$out") 个任务暂停没发出去（见上面 failed 那几行）：它们的会话在截止停下、按编号续上"
+  fi
+}
+
+# 切完（或发布没成、引擎起回来了）对名单里这一批发「继续」：人手暂停的不动（fleet-api release continue 认暂停人）。
+# 继续发不出去的逐条记待处理，名单里只留它们（自动发布单元放久了接着发）；引擎没在跑就整份留着
+resume_tasks() {
+  local api out errf rc=0 line tmp
+  if [[ ! -f "$PAUSE_FILE" ]]; then return 0; fi
+  if ! has_service fleet-engine || [[ "$(systemctl is-active fleet-engine.service 2>/dev/null)" != active ]]; then
+    pending "发版暂停的任务还没继续：引擎没在跑（名单留在 $PAUSE_FILE；引擎起来后再跑一次发布，或等自动发布单元接着发「继续」）"
+    return 0
+  fi
+  api=$RELEASES/current/packages/api/bin/fleet-api
+  errf=$(mktemp)
+  out=$(bash "$api" release continue <"$PAUSE_FILE" 2>"$errf") || rc=$?
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    echo "    $line"
+    if [[ "$line" == failed\ * ]]; then pending "发版暂停的任务没继续上：${line#failed }"; fi
+  done <"$errf"
+  rm -f -- "$errf"
+  out=$(printf '%s\n' "$out" | tail -n 1)
+  if ((rc == 0)); then
+    rm -f -- "$PAUSE_FILE"
+    changed "发版暂停的任务已发「继续」：$(pause_count continued <<<"$out") 个（人手暂停的、已结束的没动）"
+  elif ((rc == 1)); then
+    tmp=$PAUSE_FILE.tmp
+    if "$NODE" -e '
+      let t = ""; process.stdin.on("data", (d) => (t += d)).on("end", () => {
+        const l = JSON.parse(t); l.entries = l.entries.filter((e) => e.pausedOk && e.result === "failed");
+        process.stdout.write(JSON.stringify(l) + "\n");
+      });' <<<"$out" >"$tmp"; then
+      chmod 600 -- "$tmp" && mv -f -- "$tmp" "$PAUSE_FILE"
+    else
+      rm -f -- "$tmp"
+    fi
+    changed "发版暂停的任务已发「继续」：$(pause_count continued <<<"$out") 个；没发出去的留在 $PAUSE_FILE"
+  else
+    pending "对发版暂停的任务发「继续」没跑成（fleet-api release continue 退出码 $rc）：名单留在 $PAUSE_FILE，自动发布单元会接着发"
+  fi
+}
+
 # 收尾（common.sh 的 finish 先调它）：撤掉没撤的排空请求；这次停下了引擎、没走到切版本（没起回来），照原样起回来——
-# 引擎不能因为发布没成就一直停着
+# 引擎不能因为发布没成就一直停着；然后对发版暂停的任务发「继续」（发布成没成都发，任务不能因为发版一直停着）
 finish_hook() {
   drain_withdraw
   if ((ENGINE_STOPPED)) && has_service fleet-engine &&
@@ -535,6 +655,7 @@ finish_hook() {
     fi
   fi
   ENGINE_STOPPED=0
+  if ((RESUME_ON_FINISH)); then resume_tasks; fi
 }
 
 # ── 取代码、构建 ──
@@ -1837,15 +1958,16 @@ install_cli_upgrade_units() { # 这一版的目录
 do_release() { # 要发的提交（空 = 主线最新）
   local cur before=""
   fetch_code "$1"
-  # 排空请求在构建之前写：宽限和构建一起走
-  drain_request "$SHA" "$(drain_grace)"
+  # 构建期间引擎照常派活、会话照常干（#2038）：停接新活只在下面切版本这一段
   build_release "$SHA"
   cur=$(current_sha)
   hk_reachable || return 1
   # 直接发一个老提交也一样把关：库里的迁移比它带的多就不切（drizzle 碰到比代码新的迁移记录什么也不做、也不报错，
   # 光靠迁移那一步拦不住）。放在迁移之前：老版本的迁移程序连库都不碰
   schema_allows "$SHA" 切到 || return 1
-  # 迁移之前停引擎：排空的这几分钟里旧引擎还在跑，不能让它对着新的库结构
+  # 迁移之前停引擎：先不起新会话，给手上有会话的任务发 hard 暂停，等会话收掉再停（旧引擎不能对着新的库结构）
+  drain_request "$SHA" "$(drain_grace)"
+  pause_tasks "$SHA"
   drain_engine || return 1
   upgrade_cli_tools "$SHA"
   migrate "$SHA"
@@ -1865,8 +1987,8 @@ do_release() { # 要发的提交（空 = 主线最新）
       changed "历史里把 ${SHA:0:12} 记回健康（之前判过不健康，这次健康检查过了）"
     fi
     ok "发布完成：在用 ${SHA:0:12}"
-    # 发完不碰引擎总开关和各项目的「让 AI 接活」（决定 0032 第 4 条、#1256）：发版前后的开关状态由发版车（release-train）和驾驶舱按钮的
-    # 接活脚本（deploy/france/release-request）记下、发完照记下的恢复；直接跑 release.sh（自动发布、手动）本来就没暂停过它们，原样留着。
+    # 发版前后都不碰引擎总开关和各项目的「让 AI 接活」（决定 0093）：停接新活只靠切版本这一段的排空请求，
+    # 发版暂停的任务在收尾（finish_hook → resume_tasks）只对名单里这一批发「继续」。
   elif [[ "$(current_sha)" != "$SHA" ]]; then
     # socket 没装上（停不掉旧服务、enable 失败）时 activate 在切 current 之前就返回：版本没动，不用退
     red "${SHA:0:12} 没切过去（见上面的红），在用的还是 $(short "$cur" 还没有)"
@@ -1911,6 +2033,7 @@ do_rollback() {
   schema_allows "$prev" || return 1
   hk_reachable || return 1
   drain_request "$prev" "$(drain_grace)"
+  pause_tasks "$prev"
   drain_engine || return 1
   apply_config "$prev" rollback || return 1
   if activate "$prev" rollback && health_gate "$prev" ""; then
@@ -2077,6 +2200,7 @@ main() {
   fi
   ensure_dir "$RELEASES" root:root 755
   take_lock
+  RESUME_ON_FINISH=1
   # 最后一道：脚本怎么退都撤掉排空请求（引擎那头只在发布锁占着时认它，这里撤是为了马上接着派）
   trap 'drain_withdraw' EXIT
   if [[ "$mode" == rollback ]]; then do_rollback; else do_release "$target"; fi

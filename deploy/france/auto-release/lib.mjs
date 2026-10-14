@@ -2,7 +2,8 @@
 // 发版本身仍只有一条路：驾驶舱按钮（或发版车）写请求文件、法国上的接活单元（deploy/france/release-request）核请求、走同一趟流程。
 // 这个单元自己不调 release.sh：它到点写同样的请求文件（releaseStep），由接活单元去发。这个单元每一轮做的有：
 //   读主线头和它自己那次 CI 的结论、读法国在用的提交、数落后几个，写进状态文件，后端的 /healthz（deploy_lag）和驾驶舱读它；
-//   主线头落后在用的、头的 CI 全绿、距上一次发版满 1 小时、没有发版在走也没有卡住的，就请求发这个头（releaseStep）；
+//   主线头落后在用的、头的 CI 全绿、没有发版在走也没有卡住的，就请求发这个头（releaseStep；不再隔 1 小时，#2038、决定 0093）；
+//   发版驱动中途死了留下的残局自动收：发版暂停的任务放久了没人发「继续」、老版驱动关了总开关没开回（recoverStep）；
 //   发完版之后顺带把装机的自动档（france.sh --auto-tier）装上、把各家 AI 的规矩同步给会话用户；
 //   拿法国 /etc/fleet-dao 下的环境文件跟在用那一版里的期望对账（#323，config.mjs）。
 // 这里是判断和「跑一轮」的流程；和系统打交道的（git、GitHub 接口、库、装机脚本）都从 io 进来：真的在
@@ -11,7 +12,7 @@
 // - **这个单元不自己发版**：不调 release.sh、不看 `v<N>` 标记、不取 tag。要发只写请求文件（releaseStep），请求的核对（CI 绿、主线祖先、
 //   没有发版在走）接活单元还会再做一遍。没有任何 tag 的仓上读数照常（测试：没有标记也照样写出主线头、在用、落后几个）。
 // - 自动发版的闸（releaseGate 读来的事实交给 gateVerdict 判）：任何一项读不到、认不出都不发（原因写进状态的 auto.note），不当成可以发。
-//   两次发版（不分手动自动）至少隔 AUTO_RELEASE_GAP_MS；驾驶舱按钮不受这个间隔限制（它不经过这里）。
+//   两次发版之间不设间隔（发版不再关总开关、只暂停在跑的任务，#2038）；只防同一个头 REQUEST_DEDUPE_MS 内重复请求。
 // - 状态文件后端也读（packages/store/src/deploy-lag.ts 按 STATE_SCHEMA 认），指挥官的法国页也读（agents/skills/commander/scripts/
 //   france-lib.mjs 的 autoReleaseProblem）；改字段几边一起改，那边的测试拿这里造的状态核对。
 // - RULES_USERS 要和 deploy/france.sh 的 AGENT_RULES_USERS 一样；HUMAN_TIER_PATHS 要盖住人工档（deploy/lib/human-tier.sh）读的仓里文件（测试都核对）。
@@ -87,8 +88,31 @@ export const RULES_PREFIX = `${ALERT_PREFIX}rules:`;
 export const TIER_PREFIX = `${ALERT_PREFIX}tier:`;
 /** 自动档没装成，同一个提交最快隔这么久再试一次（脚本幂等，网络、单元一时起不来的多半过会儿就好）。 */
 export const TIER_RETRY_MS = 30 * 60_000;
-/** 自动发版：两次发版（含手动）至少隔这么久，期间合进来的攒成一次发（决定 0088 第 1 条）。 */
-export const AUTO_RELEASE_GAP_MS = 60 * 60_000;
+/**
+ * 自动发版防重复：同一个主线头请求过之后这么久内不再写请求。不是间隔（换了头照发）：接活单元读走请求文件到写进发版进度之间
+ * 有个空档，那时闸看着全过，不挡这一下会对同一个头再请求一次。
+ */
+export const REQUEST_DEDUPE_MS = 30 * 60_000;
+/** release.sh 的 PAUSE_FILE：切版本前给在跑的任务发 hard 暂停的名单，发完由它用 fleet-api release continue 续上（#2038、决定 0093）。 */
+export const PAUSE_FILE = `${RELEASES}/.release-paused.json`;
+/** 暂停名单放了这么久、发布锁也空着：发版驱动没收尾（死在中途），这边替它发「继续」。 */
+export const PAUSED_STALE_MS = 20 * 60_000;
+/** 自动替发「继续」之后报一条（不自动撤，人看过手动解除）。 */
+export const PAUSED_ALERT_KEY = `${ALERT_PREFIX}paused-tasks`;
+/** 老版发版驱动（发版前关总开关的那版）的进度记录和暂停标记；路径同 release-request/lib.mjs。 */
+export const TRAIN_STATE = `${RELEASES}/.train/release-train.json`;
+export const TRAIN_MARKER = `${RELEASES}/.train/release-train.paused`;
+/** 进度记录这么久没更新、驱动也不在了：当它死在中途，把它关掉的总开关开回去。 */
+export const TRAIN_STALE_MS = 30 * 60_000;
+/** 总开关开回（或没开回）的报警：不自动撤，进度记录的状态没改，要人看。 */
+export const TRAIN_RESTORED_KEY = `${ALERT_PREFIX}train-restored`;
+/** 残留暂停标记删不掉、或删了没记上操作记录的报警。 */
+export const TRAIN_MARKER_KEY = `${ALERT_PREFIX}train-marker`;
+/** 删残留暂停标记的操作记录：动作和原因（actor 是运维脚本，见 fleet-auto-release.mjs 的 audit）。 */
+export const MARKER_CLEAR_ACTION = 'release.marker-cleared';
+export const MARKER_CLEAR_REASON = '自动发布删掉残留的发版暂停标记（发版驱动没收尾）';
+/** 开回总开关时写进操作记录的原因。 */
+export const TRAIN_RESTORE_REASON = '发版驱动没收尾，自动发布恢复发版前开着的总开关';
 /** 请求里「谁点的」：接活单元只收字母数字、汉字和 _.@ 空格 -（最长 64），发版进度和飞书里就显示这个。 */
 export const AUTO_RELEASE_BY = '自动发版 决定0088';
 /** 写不出发版请求时的报警（好了自己撤）。 */
@@ -187,7 +211,7 @@ export function carryOver(prev) {
     tier: p.tier ?? null,
     system: p.system ?? null,
     config: null,
-    /** 自动发版最近一次请求的提交和时间（带到下一轮，算 1 小时间隔）；note 是这一轮为什么发或没发。 */
+    /** 自动发版最近一次请求的提交和时间（带到下一轮，防同一个头 REQUEST_DEDUPE_MS 内重复请求）；note 是这一轮为什么发或没发。 */
     auto: p.auto ? { sha: p.auto.sha ?? null, at: p.auto.at ?? null, note: null } : null,
     /** 单元还会发版时开的那几类报警撤过了没有（RETIRED_ALERT_PREFIXES）。 */
     retiredCleared: p.retiredCleared === true,
@@ -212,6 +236,7 @@ export async function runOnce(io, prev) {
     st.retiredCleared = true;
   }
   const current = await readStep(io, st, now);
+  await recoverStep(io, st, now);
   if (current !== undefined) await releaseStep(io, st, now, current);
   if (current !== undefined) await tierStep(io, st, now, current);
   if (current !== undefined) await rulesStep(io, st, now, current);
@@ -428,8 +453,10 @@ export function gateVerdict(facts) {
 }
 
 /**
- * 自动发版（决定 0088 第 1 条）：法国在用的落后主线头、头的 CI 全绿、距上一次发版满 AUTO_RELEASE_GAP_MS、闸全过，
- * 就请求发这个头（写和驾驶舱按钮一样的请求文件）。不过的把原因记进 st.auto.note（journal 和状态里看得到）。
+ * 自动发版（决定 0088 第 1 条；#2038、决定 0093 起不再隔 1 小时）：法国在用的落后主线头、头的 CI 全绿、闸全过，
+ * 就请求发这个头（写和驾驶舱按钮一样的请求文件）。发版不再关总开关、只暂停在跑的任务，攒着发没有好处，绿了就发。
+ * 只防一件事：同一个头 REQUEST_DEDUPE_MS 内请求过就不再写（接活单元读走请求到写进度之间的空档，闸看着全过）。
+ * 不过的把原因记进 st.auto.note（journal 和状态里看得到）。
  * 只看主线头：头的 CI 红了就等下一个绿的头，不回头发旧的。写不出请求就报警，写成了撤。
  */
 async function releaseStep(io, st, now, current) {
@@ -446,21 +473,9 @@ async function releaseStep(io, st, now, current) {
     const v = st.ci?.sha === head ? st.ci.verdict : '没查';
     return note(`主线头 ${short(head)} 的 CI 不是绿的（${v}），等绿`);
   }
-  let lastRelease;
-  try {
-    lastRelease = await io.readReleasedAt();
-  } catch (e) {
-    return note(`上一次发版是什么时候没读到，不发：${why(e)}`);
-  }
-  const times = [lastRelease, st.auto?.at].filter(
-    (t) => typeof t === 'string' && !Number.isNaN(Date.parse(t)),
-  );
-  if (times.length === 0) return note('上一次发版是什么时候认不出，不发');
-  const waited = Number(now) - Math.max(...times.map((t) => Date.parse(t)));
-  if (waited < AUTO_RELEASE_GAP_MS) {
-    return note(
-      `距上一次发版 ${minutes(waited)} 分钟，满 ${minutes(AUTO_RELEASE_GAP_MS)} 分钟再发（期间合进来的攒成一次）`,
-    );
+  const askedAt = st.auto?.sha === head ? Date.parse(st.auto.at ?? '') : Number.NaN;
+  if (!Number.isNaN(askedAt) && Number(now) - askedAt < REQUEST_DEDUPE_MS) {
+    return note(`刚请求过 ${short(head)}，等接活单元发`);
   }
   let blocked;
   try {
@@ -488,6 +503,261 @@ async function releaseStep(io, st, now, current) {
     note: `已请求自动发版 ${short(head)}（在用 ${short(current)}，落后 ${idx} 个提交）`,
   };
   act(st, now, 'auto-release-requested', `请求发 ${short(head)}`);
+}
+
+/**
+ * fleet-api engine status 的回话 → { ok, on } 或 { ok: false, why }（真 io 用它解析；判法同 release-request/lib.mjs 的 engineRead）。
+ * 认不出、退出码不是 0（含老版没有 engine 命令）都是读不到，不当成关着。
+ */
+export function parseEngineStatus(code, stdout) {
+  if (code !== 0) return { ok: false, why: `fleet-api engine status 退出码 ${code}：${why(stdout)}` };
+  const m = /引擎总开关：(开着|关着)/.exec(String(stdout));
+  if (!m) return { ok: false, why: `总开关的回话认不出：${why(stdout)}` };
+  return { ok: true, on: m[1] === '开着' };
+}
+
+/**
+ * 发版驱动（release.sh 或接活单元）中途死了留下的残局，这一轮自动收（#2038、决定 0093）。两件，各自独立：
+ * - 暂停名单遗留（recoverPaused）：release.sh 切版本前给在跑的任务发了 hard 暂停、名单落在 PAUSE_FILE，正常由它收尾时发「继续」；
+ *   它死在中途（被杀、机器重启），那些任务就一直停着没人管。
+ * - 老版驱动关了总开关没开回（recoverTrain）：发版前关总开关的那版驱动死在中途，留下暂停标记，引擎一直不接活，
+ *   而且暂停标记还挡着自动发版（gateVerdict），新版就永远发不上来。
+ * io 没接这几个口子（老测试、没装好的机器）就跳过，不当成没有残局。
+ */
+async function recoverStep(io, st, now) {
+  await recoverPaused(io, st, now);
+  await recoverTrain(io, st, now);
+}
+
+/** 继续的结果（fleet-api release continue 打到标准输出最后一行的名单 JSON）：认不出回 null。 */
+function parseContinueResult(out) {
+  const lines = String(out ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('{'));
+  for (const line of lines.reverse()) {
+    try {
+      const l = JSON.parse(line);
+      if (l && Array.isArray(l.entries)) return l;
+    } catch {
+      // 下一行
+    }
+  }
+  return null;
+}
+
+const entryName = (e) =>
+  e && typeof e.repo === 'string' && Number.isInteger(e.issueNumber)
+    ? `${e.repo}#${e.issueNumber}`
+    : `任务 ${String(e?.taskId ?? '？')}`;
+
+/**
+ * 暂停名单遗留：名单在、发布锁空着（有发布在跑时名单是那一趟的，不碰）、放了 PAUSED_STALE_MS 以上，就是驱动没收尾。
+ * 用 current 那一版的 fleet-api release continue 替它发「继续」（只动发版暂停的，人手暂停的它自己认得出不动）。
+ * 不管成没成都把名单改名成 .handled-<时间>：继续不幂等地重试会每 5 分钟发一次、报一次，没成的列进报警要人看就够了。
+ * 名单读不到、认不出照实记下，不当成没有。
+ */
+async function recoverPaused(io, st, now) {
+  if ([io.pausedLeftover, io.resumePaused, io.retirePaused].some((fn) => typeof fn !== 'function')) return;
+  let f;
+  try {
+    f = await io.pausedLeftover();
+  } catch (e) {
+    act(st, now, 'paused-unreadable', `发版暂停名单 ${PAUSE_FILE} 在不在读不到：${why(e)}`);
+    return;
+  }
+  if (!f || typeof f !== 'object' || typeof f.exists !== 'boolean') {
+    act(st, now, 'paused-unreadable', `发版暂停名单 ${PAUSE_FILE} 在不在认不出`);
+    return;
+  }
+  if (!f.exists) return;
+  if (f.lockBusy !== false) return; // 有发布在跑（或锁读不到）：名单是那一趟的，由它收尾
+  if (!Number.isFinite(f.ageMs)) {
+    act(st, now, 'paused-unreadable', `发版暂停名单 ${PAUSE_FILE} 放了多久读不到`);
+    return;
+  }
+  if (f.ageMs < PAUSED_STALE_MS) return;
+  let r;
+  try {
+    r = await io.resumePaused();
+  } catch (e) {
+    r = { code: -1, out: why(e) };
+  }
+  const handled = `${PAUSE_FILE}.handled-${iso(now).replace(/[:.]/g, '-')}`;
+  let moved = '';
+  try {
+    await io.retirePaused(handled);
+  } catch (e) {
+    moved = `名单没改成 ${handled}（${why(e)}），下一轮还会再发一次「继续」；`;
+  }
+  const list = parseContinueResult(r?.out);
+  const tried = list ? list.entries.filter((e) => e?.pausedOk) : null;
+  const done = tried ? tried.filter((e) => e.result === 'continued') : [];
+  const bad = tried ? tried.filter((e) => e.result === 'failed') : [];
+  const n = tried ? tried.length : '名单上';
+  const result = tried
+    ? `继续了 ${done.length} 个；` +
+      (bad.length
+        ? `没继续上 ${bad.length} 个，要人看：${bad.map((e) => `${entryName(e)}${e.why ? `（${e.why}）` : ''}`).join('、')}；`
+        : '')
+    : `结果认不出：${why(r?.out)}；`;
+  raise(
+    st,
+    PAUSED_ALERT_KEY,
+    `发版驱动没收尾，自动给 ${n} 个发版暂停的任务发了继续`,
+    `发版暂停名单 ${PAUSE_FILE} 放了 ${minutes(f.ageMs)} 分钟、发布锁空着：发版驱动死在中途、没发「继续」。` +
+      `已用 current 那一版的 fleet-api release continue 替它发了：${result}退出码 ${r?.code ?? '？'}。` +
+      `${moved}名单${moved ? '' : `已改名成 ${handled}，`}不再重试。看过了手动解除这条。`,
+  );
+  act(st, now, 'paused-resumed', `替没收尾的发版发了「继续」：退出码 ${r?.code ?? '？'}`);
+}
+
+/**
+ * 总开关开着、驱动不在、锁空着时的暂停标记是残留：删掉，再写一条操作记录（audit_log，actor 是运维脚本 ops:auto-release）。
+ * 先删后记：操作记录写的是已经发生的事；先记后删，删没成就留下一条假的「删了」。记没写进去也不回头装回标记（它会一直挡发版），
+ * 报一条说「删了、没记上」——报警本身就是这次动作的记录，不当成没事。
+ */
+async function clearLeftoverMarker(io, st, now, t) {
+  const state = t === null ? '进度记录不在' : `进度记录是「${t.status}」（第 ${t.phase ?? '？'} 步）`;
+  const reason = `${MARKER_CLEAR_REASON}：总开关开着、${state}、发布锁空着`;
+  try {
+    await io.clearTrainMarker();
+  } catch (e) {
+    keepRaised(
+      st,
+      TRAIN_MARKER_KEY,
+      '残留的发版暂停标记没删掉，自动发版被它挡着',
+      `${reason}，删 ${TRAIN_MARKER} 没成：${why(e)}。每轮自动再试；也可以在法国以 root 手动删。`,
+    );
+    act(st, now, 'marker-clear-failed', why(e));
+    return;
+  }
+  try {
+    await io.audit({
+      action: MARKER_CLEAR_ACTION,
+      target: `file:${TRAIN_MARKER}`,
+      reason,
+      before: { marker: true, train: t === null ? null : { status: t.status, phase: t.phase ?? null } },
+      after: { marker: false },
+    });
+  } catch (e) {
+    raise(
+      st,
+      TRAIN_MARKER_KEY,
+      '删了残留的发版暂停标记，操作记录没写进去',
+      `${reason}，已删 ${TRAIN_MARKER}；写操作记录（${MARKER_CLEAR_ACTION}）没成：${why(e)}。这条报警就是这次删除的记录，看过了手动解除。`,
+    );
+    act(st, now, 'marker-cleared-unaudited', `删了残留的发版暂停标记，操作记录没写进：${why(e)}`);
+    return;
+  }
+  resolveKeyLater(st, TRAIN_MARKER_KEY);
+  act(st, now, 'marker-cleared', '删了残留的发版暂停标记（总开关开着、驱动不在），已记操作记录');
+}
+
+/**
+ * 老版发版驱动的残局：暂停标记在、驱动已经不在了（进度记录不在，或状态不是 running，或记的进程已经死了）、发布锁空着，
+ * 再看总开关（读不到就什么都不碰）：
+ * - 总开关开着：标记是残留（人开回了总开关、或驱动开回后没来得及删），删掉它，不然它一直挡自动发版（gateVerdict）；
+ *   删了写一条操作记录（clearLeftoverMarker）。
+ * - 总开关关着：发版前是开着的（before.master === true）、进度 TRAIN_STALE_MS 没更新，才开回去（少一项都可能是驱动还活着、
+ *   或人有意关着，不碰）。开回去读回确认，成了删暂停标记。
+ * 进度记录（release-train.json）一概不改：那一趟到底停在哪一步要人看，报一条。
+ */
+async function recoverTrain(io, st, now) {
+  const need = [io.trainLeftover, io.engineOn, io.clearTrainMarker, io.audit];
+  if (need.some((fn) => typeof fn !== 'function')) return;
+  let f;
+  try {
+    f = await io.trainLeftover();
+  } catch (e) {
+    act(st, now, 'train-unreadable', `老版发版驱动的残局读不到：${why(e)}`);
+    return;
+  }
+  if (!f || typeof f !== 'object') {
+    act(st, now, 'train-unreadable', '老版发版驱动的残局认不出');
+    return;
+  }
+  if (!f.marker) return;
+  let t = null;
+  if (f.trainText !== null && f.trainText !== undefined) {
+    try {
+      t = JSON.parse(String(f.trainText));
+    } catch {
+      t = undefined;
+    }
+    if (t === null || typeof t !== 'object' || typeof t.status !== 'string') {
+      act(st, now, 'train-unreadable', '有发版暂停标记，进度记录认不出：不碰标记和总开关');
+      return;
+    }
+  }
+  if (t !== null) {
+    const alive = typeof f.pidAlive === 'function' ? f.pidAlive(t.pid) : f.pidAlive;
+    const pidDead = Number.isInteger(t.pid) && alive === false;
+    if (t.status === 'running' && !pidDead) return; // 驱动可能还在走
+  }
+  if (f.lockBusy !== false) return; // 有发布在跑（或锁读不到）
+  if (!f.engine?.ok) {
+    act(st, now, 'train-unreadable', `总开关读不到，不碰标记和总开关：${f.engine?.why ?? '没读'}`);
+    return;
+  }
+  if (f.engine.on) {
+    await clearLeftoverMarker(io, st, now, t);
+    return;
+  }
+  if (t === null || t.before?.master !== true) return; // 没有进度记录、或发版前总开关就关着（没记下）：不猜着开
+  const updated = Date.parse(String(t.updatedAt));
+  if (Number.isNaN(updated)) {
+    act(st, now, 'train-unreadable', '发版进度记录的 updatedAt 认不出：不自动开总开关');
+    return;
+  }
+  if (Number(now) - updated < TRAIN_STALE_MS) return;
+  let r;
+  try {
+    r = await io.engineOn(TRAIN_RESTORE_REASON);
+  } catch (e) {
+    r = { code: -1, out: why(e) };
+  }
+  let back = null;
+  if (r?.code === 0) {
+    try {
+      back = (await io.trainLeftover())?.engine ?? null;
+    } catch {
+      back = null;
+    }
+  }
+  // 写最后更新的时刻、不写「几分钟没更新」：没开回那条每轮都判，正文不变才不每 5 分钟重发（keepRaised）
+  const stale = `发版进度记录（第 ${t.phase ?? '？'} 步、${t.status}）从 ${iso(updated)} 起没再更新`;
+  if (r?.code !== 0 || !back?.ok || !back.on) {
+    const whyNot =
+      r?.code !== 0
+        ? `fleet-api engine on 退出码 ${r?.code ?? '？'}：${why(r?.out)}`
+        : back?.ok
+          ? 'engine on 说成了，读回来还是关着'
+          : '开完读不回总开关';
+    keepRaised(
+      st,
+      TRAIN_RESTORED_KEY,
+      '发版驱动没收尾，总开关没开回',
+      `${stale}、驱动已经不在，发版前开着的总开关还关着。自动开回没成：${whyNot}。每轮自动再试；` +
+        `也可以在驾驶舱环境页手动打开，再删掉 ${TRAIN_MARKER}。`,
+    );
+    act(st, now, 'train-restore-failed', whyNot);
+    return;
+  }
+  let cleared = '';
+  try {
+    await io.clearTrainMarker();
+  } catch (e) {
+    cleared = `暂停标记 ${TRAIN_MARKER} 没删成（${why(e)}），它会一直挡着自动发版，要手动删；`;
+  }
+  raise(
+    st,
+    TRAIN_RESTORED_KEY,
+    '发版驱动没收尾，自动开回了总开关',
+    `${stale}、驱动已经不在：已把发版前开着的总开关开回去（读回是开着）。${cleared}` +
+      `发版进度记录 ${TRAIN_STATE} 的状态没改，那一趟停在哪一步要人看；看过了手动解除这条。`,
+  );
+  act(st, now, 'train-restored', '发版驱动没收尾，开回了总开关');
 }
 
 /** 装机层：france.sh 装到哪个提交、那之后主线上它管的文件改过几次。读不到记 error。 */
