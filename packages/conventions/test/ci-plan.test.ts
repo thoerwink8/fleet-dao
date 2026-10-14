@@ -172,6 +172,31 @@ describe('按改动算要跑什么', () => {
     expect(pr('docs/design.md', 'specs/1-x/方案.md').biome).toBe(false);
   });
 
+  it('只改 packages/*/AGENTS.md：当纯文档，不测那个包也不连带依赖它的包（文档指针检查每个 PR 都跑）', () => {
+    for (const f of [
+      'packages/conventions/AGENTS.md',
+      'packages/shared/AGENTS.md',
+      'packages/db/AGENTS.md',
+    ]) {
+      const p = pr(f);
+      expect(p, f).toMatchObject({
+        full: false,
+        tests: [],
+        testUnits: [],
+        web: false,
+        deploy: 'none',
+        tsc: [],
+        biome: false,
+      });
+    }
+    // 同一包里别的文件照旧测包；AGENTS.md 只在包根才算（更深的路径不是包说明）
+    expect(units(pr('packages/conventions/src/x.ts'))).toContain('conventions');
+    expect(units(pr('packages/conventions/AGENTS.md', 'packages/conventions/src/x.ts'))).toContain(
+      'conventions',
+    );
+    expect(pr('packages/conventions/test/AGENTS.md').testUnits).toContain('conventions');
+  });
+
   it('只改一个没人依赖的包（agent-eval）：只测它、只类型检查它，不打包 web、不跑 deploy', () => {
     const p = pr('packages/agent-eval/src/cli.ts');
     expect(p).toMatchObject({

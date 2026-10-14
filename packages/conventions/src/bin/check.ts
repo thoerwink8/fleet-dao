@@ -1,9 +1,11 @@
 // pnpm check 的入口：biome + tsc -b + 改到的测试 + 卫生检查，四样都跑完再判红；--all 才全量 vitest run（判法见 ../check.ts）。
 //   pnpm check [--all]
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { check, type Step } from '../check.ts';
+import { check, failedFilesFromJson, type Step, withRetry } from '../check.ts';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
 
@@ -18,13 +20,48 @@ function node(name: string, script: string, args: string[]): Step {
   };
 }
 
+/**
+ * 全量 vitest：default 和 json 两个 reporter 同时开（终端输出不变，json 写进临时文件）。首轮红了，按 json 里失败的文件单独重跑一次，
+ * 重跑仍红才算红（withRetry）。vitest 起不来、崩了没写结果时读不出失败清单，原样红。
+ */
+function vitestAll(): Step {
+  const vitest = join(root, 'node_modules/vitest/vitest.mjs');
+  const spawn = (args: string[]) => {
+    const r = spawnSync(process.execPath, [vitest, ...args], { cwd: root, stdio: 'inherit' });
+    return { status: r.status, signal: r.signal, error: r.error };
+  };
+  return {
+    name: '测试（全量 vitest run）',
+    run() {
+      const dir = mkdtempSync(join(tmpdir(), 'fleet-check-'));
+      const json = join(dir, 'result.json');
+      try {
+        return withRetry({
+          run: () => spawn(['run', '--reporter=default', '--reporter=json', `--outputFile.json=${json}`]),
+          failedFiles: () => {
+            try {
+              return failedFilesFromJson(readFileSync(json, 'utf8'), root);
+            } catch (e) {
+              return `读不到结果文件（${e instanceof Error ? e.message : String(e)}）`;
+            }
+          },
+          rerun: (files) => spawn(['run', ...files]),
+          out: (l) => console.log(l),
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  };
+}
+
 const code = check({
   argv: process.argv.slice(2),
   steps: (all) => [
     { step: node('格式（biome）', 'node_modules/@biomejs/biome/bin/biome', ['check', '.']) },
     { step: node('类型（tsc -b）', 'node_modules/typescript/bin/tsc', ['-b']) },
     all
-      ? { step: node('测试（全量 vitest run）', 'node_modules/vitest/vitest.mjs', ['run']) }
+      ? { step: vitestAll() }
       : {
           // test:changed：2 = 没算出改到什么（origin/main 读不到、git 没成），3 = 判出要全跑、本机拒跑；都不是「没有要跑的」。
           step: node('测试（改到的，相对 origin/main）', 'packages/conventions/src/bin/test-changed.ts', []),

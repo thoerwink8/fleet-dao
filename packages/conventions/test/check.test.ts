@@ -1,6 +1,6 @@
 // pnpm check：参数解析、四样都跑完再统一判红、--all 走全量、算不出改到的测试时报失败。
 import { describe, expect, it } from 'vitest';
-import { check, judge, parseCheckArgs, type StepRun } from '../src/check.ts';
+import { check, failedFilesFromJson, judge, parseCheckArgs, type StepRun, withRetry } from '../src/check.ts';
 
 function harness(results: Record<string, StepRun | Error>) {
   const ran: string[] = [];
@@ -87,5 +87,91 @@ describe('check', () => {
     const h = harness({});
     expect(h.code(['--x'])).toBe(2);
     expect(h.ran).toEqual([]);
+  });
+});
+
+describe('failedFilesFromJson', () => {
+  it('只取 failed 的文件，换成相对仓根的 / 路径，去重排序', () => {
+    const json = JSON.stringify({
+      testResults: [
+        { name: 'C:\\repo\\packages\\b\\test\\b.test.ts', status: 'failed' },
+        { name: 'C:\\repo\\packages\\a\\test\\a.test.ts', status: 'passed' },
+        { name: 'C:/repo/packages/a/test/z.test.ts', status: 'failed' },
+      ],
+    });
+    expect(failedFilesFromJson(json, 'C:\\repo\\')).toEqual([
+      'packages/a/test/z.test.ts',
+      'packages/b/test/b.test.ts',
+    ]);
+  });
+
+  it('读不出：返回原因，不返回空清单', () => {
+    expect(failedFilesFromJson('{', '/r')).toContain('不是 JSON');
+    expect(failedFilesFromJson('{}', '/r')).toContain('testResults');
+  });
+});
+
+describe('withRetry（--all 的失败重跑）', () => {
+  const mk = (first: StepRun, files: string[] | string, second: StepRun) => {
+    const reran: string[][] = [];
+    const out: string[] = [];
+    const r = withRetry({
+      run: () => first,
+      failedFiles: () => files,
+      rerun: (f) => {
+        reran.push(f);
+        return second;
+      },
+      out: (l) => out.push(l),
+    });
+    return { r, reran, out };
+  };
+
+  it('首轮过：不重跑', () => {
+    const h = mk({ status: 0 }, ['a'], { status: 1 });
+    expect(h.r).toEqual({ status: 0 });
+    expect(h.reran).toEqual([]);
+  });
+
+  it('首轮红、重跑过：算过，救回的文件带出去', () => {
+    const h = mk({ status: 1 }, ['packages/a/test/a.test.ts'], { status: 0 });
+    expect(h.r).toEqual({ status: 0, rescued: ['packages/a/test/a.test.ts'] });
+    expect(h.reran).toEqual([['packages/a/test/a.test.ts']]);
+    expect(h.out.join('\n')).toContain('packages/a/test/a.test.ts');
+  });
+
+  it('重跑仍红：红，不带 rescued', () => {
+    const h = mk({ status: 1 }, ['a'], { status: 1 });
+    expect(h.r).toEqual({ status: 1 });
+  });
+
+  it('读不出失败清单、清单为空、起不来、被信号杀掉：原样红，不重跑', () => {
+    for (const [first, files] of [
+      [{ status: 1 }, '没写结果'],
+      [{ status: 1 }, []],
+      [{ status: null, signal: 'SIGKILL' }, ['a']],
+      [{ status: null, error: new Error('x') }, ['a']],
+    ] as [StepRun, string[] | string][]) {
+      const h = mk(first, files, { status: 0 });
+      expect(h.r).toBe(first);
+      expect(h.reran).toEqual([]);
+    }
+  });
+
+  it('check 汇总：救回的文件明说列出，步骤仍算过', () => {
+    const out: string[] = [];
+    const code = check({
+      argv: ['--all'],
+      steps: () => [
+        { step: { name: 'vitest', run: () => ({ status: 0, rescued: ['packages/a/test/a.test.ts'] }) } },
+      ],
+      now: () => 0,
+      out: (l) => out.push(l),
+      err: () => {},
+    });
+    expect(code).toBe(0);
+    const text = out.join('\n');
+    expect(text).toContain('首轮失败、重跑通过');
+    expect(text).toContain('vitest：packages/a/test/a.test.ts');
   });
 });
