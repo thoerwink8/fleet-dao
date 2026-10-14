@@ -1,11 +1,13 @@
-// 真机验收：在巡检仓上走一遍 开 issue → 开分支 → 推一个提交 → 开 PR → 等 CI → 合并 → 更新 issue 进度段 → 关单，
+// 真机验收：在一个**专供测试自己的仓**上走一遍 开 issue → 开分支 → 推一个提交 → 开 PR → 等 CI → 合并 → 更新 issue 进度段 → 关单，
 // 每一步都用这个包的真实现、真 GitHub、真凭据，并核对回读（作者、头、合并人、正文、state_reason）。
 //
 // 在法国 VPS 上以引擎的运行用户跑（凭据只有它读得到）：
-//   node packages/store/test/e2e/github-e2e.ts --repo <owner>/fleet-dao-canary [--record <目录>]
+//   node packages/store/test/e2e/github-e2e.ts --repo <owner>/<测试仓> [--record <目录>]
 // （#901 ⑤：原来在 packages/github/test/e2e/；github 包不再依赖 db，这个脚本要 PGlite 做幂等账，挪到了 store。）
 // 凭据从 /etc/fleet-dao/github 读（FLEET_GITHUB_APP_DIR 可改）；幂等账用内存里的 Postgres（PGlite，跑真迁移），不碰生产库。
-// 只写巡检仓：一张 issue（最后关掉）、一个分支（合并后删掉）、主线上一个改 README 的小提交。别的仓一个字不写。
+// 只写指定的那个测试仓：一张 issue（最后关掉）、一个分支（合并后删掉）、主线上一个改 README 的小提交。别的仓一个字不写。
+// 仓名要以 -e2e 或 -sandbox 结尾，且不许是引擎在接活的仓（fleet-dao 主线、开着「让 AI 接活」的仓都写不得）：
+// 决定 0093 / #2121 删了全流程巡检，原来那个巡检仓 fleet-dao-canary 已经不在引擎里了，不该再拿它当靶子。
 // --record：把用到的 GitHub 返回脱敏后存成测试夹具（令牌那一类接口一律不录）。
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -33,13 +35,18 @@ const repoArg = flag('--repo');
 const recordDir = flag('--record');
 if (!repoArg) {
   console.error(
-    '用法：node packages/store/test/e2e/github-e2e.ts --repo <owner>/fleet-dao-canary [--record <目录>]',
+    '用法：node packages/store/test/e2e/github-e2e.ts --repo <owner>/<测试仓> [--record <目录>]（仓名要以 -e2e 或 -sandbox 结尾）',
   );
   process.exit(2);
 }
 const repo = parseRepoSlug(repoArg);
-if (!/canary/i.test(repo.name)) {
-  console.error(`只许在巡检仓上跑（仓名里要有 canary），现在是 ${repoSlug(repo)}`);
+// 决定 0093 / #2121 删了全流程巡检，巡检仓不再是引擎的一部分：这里只认「测试自己的仓」，且不许碰引擎在接活的仓
+if (!/(-e2e|-sandbox)$/.test(repo.name)) {
+  console.error(`只许在测试自己的仓上跑（仓名要以 -e2e 或 -sandbox 结尾），现在是 ${repoSlug(repo)}`);
+  process.exit(2);
+}
+if (repo.name === 'fleet-dao') {
+  console.error(`不许拿引擎在接活的主线仓当靶子（${repoSlug(repo)}）：这条会往主线上推提交`);
   process.exit(2);
 }
 
