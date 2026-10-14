@@ -249,6 +249,9 @@ build_sandbox_run() { # 工作目录 命令…
     joined+="${joined:+ }-$p"
   done
   if [[ -n "$FLEET_BUILD_PATH_PREFIX" ]]; then path=$FLEET_BUILD_PATH_PREFIX:$path; fi
+  # pnpm 的设置只给 pnpm 带（见 RELEASE_PNPM_ENV）；探针、tar 这些命令行里不出现
+  local -a pnpm_env=()
+  if [[ "${1:-}" == pnpm ]]; then pnpm_env=("${RELEASE_PNPM_ENV[@]}"); fi
   systemd-run --wait --pipe --collect --quiet \
     --service-type=exec \
     --expand-environment=no \
@@ -259,7 +262,7 @@ build_sandbox_run() { # 工作目录 命令…
       /usr/bin/setpriv --reuid=fleet --regid=fleet --init-groups --no-new-privs -- \
       /usr/bin/env -i HOME=/home/fleet USER=fleet LOGNAME=fleet \
       "PATH=$path" LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
-      "${PROXY_ENVS[@]}" "$@"
+      "${pnpm_env[@]}" "${PROXY_ENVS[@]}" "$@"
 }
 
 # 读回：fleet 在沙箱里还能不能把 /etc/fleet-dao 当目录用（直接路径，或经 /proc/<pid>/root 绕路）。
@@ -704,12 +707,21 @@ fetch_code() { # 要发的提交（空 = 主线最新）
   fi
 }
 
-# 发版装依赖的参数（CI 的 release_install 也从这里读，照法国一样装）：
+# 发版装依赖、构建的 pnpm 设置（CI 的 release_smoke，deploy/release-smoke.sh，也从这里读，照法国一样装、一样构建）：
+# - RELEASE_PNPM_ENV 进构建沙箱的环境，沙箱里每一条 pnpm 都带上（build_sandbox_run 只给 pnpm 命令加）：关掉全局虚拟仓。pnpm-workspace.yaml 给本机开了它，pnpm 只在
+#   认出 CI 时自动关；法国的构建沙箱是 env -i，不算 CI，开着就把 node_modules 链到 ~fleet/.local/share/pnpm/store/v11/links，
+#   服务单元 ProtectHome=yes 看不到，fleet-api 起来报 ERR_MODULE_NOT_FOUND（065445a4）。只给 install 带命令行开关不够：
+#   之后的 pnpm run 见设置和装的时候不一样，先「Recreating node_modules」按全局虚拟仓重装一遍（ba28fdc9 的前端构建就这么坏的）。
 # - copy：依赖整份拷进这一版，不和 fleet 的 pnpm 仓库共用文件（共用的话，换属主会连带改掉仓库里的文件）。
-# - 关掉全局虚拟仓：pnpm-workspace.yaml 给本机开了它，pnpm 只在认出 CI 时自动关；法国的构建沙箱是 env -i，不算 CI，
-#   开着就把 node_modules 链到 ~fleet/.local/share/pnpm/store/v11/links，服务单元 ProtectHome=yes 看不到，
-#   fleet-api 起来报 ERR_MODULE_NOT_FOUND（065445a4 那次）。
-RELEASE_PNPM_INSTALL=(install --frozen-lockfile --package-import-method=copy --config.enable-global-virtual-store=false --reporter=append-only)
+RELEASE_PNPM_ENV=(pnpm_config_enable_global_virtual_store=false)
+RELEASE_PNPM_INSTALL=(install --frozen-lockfile --package-import-method=copy --reporter=append-only)
+RELEASE_PNPM_WEB_BUILD=(--filter ./packages/web run build)
+
+# 构建日志的末尾原样写进发布日志：红字那一行只放得下一句，真正的报错常在几十行之前
+log_tail() { # 日志 行数
+  echo "  ── 构建日志末尾 $2 行（全文 $1）──"
+  grep -av '^Progress: ' -- "$1" 2>/dev/null | tail -n "$2" | sed 's/^/    | /'
+}
 
 # 一版目录里的符号链接都得落在这一版里面：服务以 ProtectHome、只读挂载跑，指到外面（家目录里的 pnpm 仓库等）的到时候看不到。
 # 第一条越界的写进 LINKS_OUTSIDE_WHY、返回 1；find、realpath 失败也返回 1（不当成没有）。
@@ -763,14 +775,16 @@ build_release() { # 提交号
   fi
   echo "  装依赖（pnpm ${RELEASE_PNPM_INSTALL[*]}，日志 $dir/.fleet-build.log）"
   if ! as_build_in "$stage" pnpm "${RELEASE_PNPM_INSTALL[@]}" >>"$log" 2>&1; then
+    log_tail "$log" 60
     red "pnpm install --frozen-lockfile 失败（没切版本）：$(tail -5 "$log" | tr '\n' ' ')"
     return 1
   fi
+  build_web "$stage" "$log" || return 1
+  # 装完、构建完一起查（构建里的 pnpm run 也可能重装一遍依赖）
   if ! links_inside "$stage"; then
-    red "装完的依赖有符号链接指到这一版目录外（$LINKS_OUTSIDE_WHY）：服务起来找不到包，没切版本"
+    red "这一版目录里有符号链接指到目录外（$LINKS_OUTSIDE_WHY）：服务起来找不到包，没切版本"
     return 1
   fi
-  build_web "$stage" "$log"
   # 换属主：之后 fleet 只读。-h：符号链接只改它自己，不跟过去改别处
   chown -R -h root:root -- "$stage"
   chmod -R u+rwX,go+rX,go-w -- "$stage"
@@ -822,8 +836,9 @@ build_web() { # 临时目录 日志
   local stage=$1 log=$2
   if web_script "$stage" build; then
     echo "  构建驾驶舱前端（packages/web）"
-    if ! as_build_in "$stage" pnpm --filter ./packages/web run build >>"$log" 2>&1; then
-      red "驾驶舱前端构建失败（没切版本）：$(tail -5 "$log" | tr '\n' ' ')"
+    if ! as_build_in "$stage" pnpm "${RELEASE_PNPM_WEB_BUILD[@]}" >>"$log" 2>&1; then
+      log_tail "$log" 60
+      red "驾驶舱前端构建失败（没切版本）：$(grep -aE 'Error|error' "$log" | tail -3 | tr '\n' ' ')"
       return 1
     fi
     if [[ ! -f "$stage/packages/web/dist/client/index.html" ]]; then
