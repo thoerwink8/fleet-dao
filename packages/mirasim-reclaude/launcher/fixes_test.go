@@ -121,7 +121,7 @@ func TestLocalWithInjectedGatewayRereadsIndex(t *testing.T) {
 		b, _ := json.Marshal(map[string]any{"routes": map[string]string{"claude:" + f.sid: "cloud"}, "keys": []string{"claude:" + f.sid}})
 		tmp := f.index + ".tmp"
 		_ = os.WriteFile(tmp, b, 0600)
-		_ = os.Rename(tmp, f.index)
+		replaceAtomically(tmp, f.index)
 	}()
 	if x := a.turn(t, "first"); x["route"] != "cloud" {
 		t.Fatalf("重读后索引已是平台，应走平台：%v", x)
