@@ -481,3 +481,35 @@ describe('文档指针：docs/design/ 里光写的「第 X 节」「「…」一
     ]);
   });
 });
+
+describe('文档指针：「「X」一节」只在 X 像本文档标题时才查，真问题照抓', () => {
+  it('#2129 原句：提示词里的一节（带括号注释，不是文档标题）不报', () => {
+    const { report } = withLines('docs/design.md', [
+      '原文放进提示词「已给你的文件（别再读）」一节，合计上限 6 万字。',
+    ]);
+    expect(report.problems).toEqual([]);
+  });
+
+  it('括号前是真标题开头、但整段对不上，照报', () => {
+    const { report, first } = withLines('docs/design.md', ['见「仓库结构（旧）」一节。']);
+    expect(report.problems).toEqual([
+      { file: 'docs/design.md', line: first, message: 'docs/design.md 里没有叫「仓库结构（旧）」的一节' },
+    ]);
+  });
+
+  it('指向仓外 _tmp 的路径照报', () => {
+    const { report, first } = withLines('docs/design.md', ['方案见 `_tmp/rethink/PLAN.md`。'], {
+      '_tmp/other.md': '',
+    });
+    expect(report.problems).toEqual([
+      { file: 'docs/design.md', line: first, message: '_tmp/rethink/PLAN.md 在仓里没有' },
+    ]);
+  });
+
+  it('指向别的仓的路径（没写「别的仓」前缀）照报', () => {
+    const { report, first } = withLines('docs/design.md', ['脚本在 `deploy/other-repo-only.sh`。']);
+    expect(report.problems).toEqual([
+      { file: 'docs/design.md', line: first, message: 'deploy/other-repo-only.sh 在仓里没有' },
+    ]);
+  });
+});
