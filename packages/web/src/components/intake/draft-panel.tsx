@@ -2,6 +2,7 @@
 // 每一栏都能改（原话除外：原话是人说过的话，系统逐字拼，谁也不能改）；改一栏就带着看到的草稿版本号提交，
 // 别人先改了后端回 409「已经改到第 N 版」，写在那一栏下面、重拉最新的。待拍板时草稿锁着，结案后只读。
 // 手机上同一份字段只读，放在从下往上弹出的面板里（手机不改草稿）。查重、「让别家挑错」是 B、C 片的，这里不放。
+import { REQUEST_KINDS } from '@fleet-dao/shared';
 import { Lock, PanelRightClose, Pencil, Plus, ScanSearch } from 'lucide-react';
 import { Fragment, type ReactNode, useState } from 'react';
 import { toast } from 'sonner';
@@ -9,6 +10,7 @@ import { errorText, useRequestReview, useUpdateRequestDraft } from '../../api/cl
 import type { RequestDetail, RequestDraft, RequestDraftField } from '../../api/types';
 import { formatDateTime } from '../../lib/format';
 import { cn } from '../../lib/utils';
+import { NativeSelect } from '../layout/native-select';
 import { Tag } from '../layout/tag';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -92,7 +94,20 @@ function FieldBlock({
   };
   const body: ReactNode = editing ? (
     <div className="space-y-1.5">
-      {SHORT.has(field) ? (
+      {field === 'kind' ? (
+        // 类别只能是开单认的那三个（写别的开单会失败）：下拉选，原来写了认不出的值也列出来、标明要改
+        <NativeSelect value={text} onChange={(e) => setText(e.target.value)} aria-label={FIELD_LABELS[field]}>
+          {text && !(REQUEST_KINDS as readonly string[]).includes(text) ? (
+            <option value={text}>{text}（认不出，要改）</option>
+          ) : null}
+          {text ? null : <option value="">选一个（空着按「需求」开）</option>}
+          {REQUEST_KINDS.map((k) => (
+            <option key={k} value={k}>
+              {k}
+            </option>
+          ))}
+        </NativeSelect>
+      ) : SHORT.has(field) ? (
         <Input
           value={text}
           onChange={(e) => setText(e.target.value)}

@@ -116,8 +116,11 @@ test.describe('提需求', () => {
     await page.goto('/intake?view=deleted');
     await expect(listRow(page, title)).toBeVisible();
     await shot(page, '12-提需求-最近删除');
-    await listRow(page, title).click();
-    await expect(stream(page).getByText('这条需求已经删了')).toBeVisible();
+    // 刚 goto 完、页面还没接上点击时点到的会丢（CI 上见过一次，#2085）：没打开就再点
+    await expect(async () => {
+      await listRow(page, title).click();
+      await expect(stream(page).getByText('这条需求已经删了')).toBeVisible({ timeout: 2000 });
+    }).toPass({ timeout: 15_000 });
     await page.getByRole('button', { name: '恢复' }).first().click();
     await expect(page.getByText(`需求 ${seq} 已恢复`).first()).toBeVisible();
     const back = (await api.get(`/api/requests/${seq}`)) as Detail;

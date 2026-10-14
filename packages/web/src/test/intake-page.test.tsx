@@ -375,6 +375,23 @@ describe('单子面板', () => {
     expect(panel.querySelector('[data-draft-field="want"]')?.textContent).toContain('人改过');
   });
 
+  test('类别是下拉，只有需求、缺陷、杂项三个（写别的开单会失败）', async () => {
+    wide();
+    localStorage.setItem('fleet-dao.intake-panel', 'true');
+    renderApp(<Intake />, { route: '/intake?r=46', api: createMockApi({ live: false }) });
+    const panel = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>('[data-intake-panel]');
+      if (!el) throw new Error('面板还没出来');
+      return el;
+    });
+    fireEvent.click(within(panel).getByRole('button', { name: '改类别' }));
+    const select = within(panel).getByRole('combobox', { name: '类别' }) as HTMLSelectElement;
+    const values = Array.from(select.options)
+      .map((o) => o.value)
+      .filter(Boolean);
+    expect(values).toEqual(['需求', '缺陷', '杂项']);
+  });
+
   test('【故意造出的失败】别人先改了（409）：写在那一栏下面，不当成存上了', async () => {
     wide();
     localStorage.setItem('fleet-dao.intake-panel', 'true');
