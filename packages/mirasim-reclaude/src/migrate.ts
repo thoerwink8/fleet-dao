@@ -153,7 +153,7 @@ function verifyTarget(file: string, home: string): void {
   if (info?.status !== 'ready') throw new Error('新启动器目标检查没有确认成功');
 }
 
-function runningSessions(home: string): number {
+export function runningSessions(home: string): number {
   const folder = join(home, '.mirasim', 'sessions', 'claude');
   if (!existsSync(folder)) return 0;
   let count = 0;

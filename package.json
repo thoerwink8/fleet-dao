@@ -15,6 +15,7 @@
     "test": "vitest run",
     "agents:sync": "node packages/agents-sync/bin/agents-sync-now",
     "mirasim:migrate": "node packages/mirasim-reclaude/bin/migrate",
+    "mirasim:health": "node packages/mirasim-reclaude/bin/health",
     "test:changed": "node packages/conventions/src/bin/test-changed.ts",
     "ci:timings": "node packages/conventions/src/bin/ci-timings.ts",
     "ci:stats": "node packages/conventions/src/bin/ci-stats.ts",
