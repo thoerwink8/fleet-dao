@@ -26,6 +26,9 @@ export const RequestAnswerStateSchema = z.enum(REQUEST_ANSWER_STATES);
 export type RequestAnswerState = z.infer<typeof RequestAnswerStateSchema>;
 
 /** 开出的单现在怎样：开着、已合并、已上线、关掉了。B 片从 GitHub 和引擎任务表接；上线或关掉满 3 天自动归档。 */
+/** 草稿「类别」能写的值：和开单的类别标签（conventions 的 KIND_LABELS）一样，测试核对两边一致。空着按「需求」开。 */
+export const REQUEST_KINDS = ['需求', '缺陷', '杂项'] as const;
+
 export const REQUEST_ISSUE_STATES = ['open', 'merged', 'deployed', 'closed'] as const;
 export const RequestIssueStateSchema = z.enum(REQUEST_ISSUE_STATES);
 export type RequestIssueState = z.infer<typeof RequestIssueStateSchema>;
