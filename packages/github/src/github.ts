@@ -50,6 +50,7 @@ import {
   type GroomLabelEvent,
   readGroomFacts,
   readIssueLabelEvents,
+  removeIssueLabel,
   setIssueMilestone,
 } from './groom.ts';
 import {
@@ -258,6 +259,11 @@ export interface GitHub {
     input: { repo: RepoRef; issueNumber: number; label: string },
     ctx?: ActivityContext,
   ): Promise<string[]>;
+  /** 从一张单上摘一个标签（决定 0096，没贴着不算错）。 */
+  removeIssueLabel(
+    input: { repo: RepoRef; issueNumber: number; label: string },
+    ctx?: ActivityContext,
+  ): Promise<void>;
   /** 给一张单挂里程碑（#448）：返回挂完之后的里程碑。 */
   setIssueMilestone(
     input: { repo: RepoRef; issueNumber: number; milestone: number },
@@ -368,6 +374,9 @@ export function createGitHub(options: GitHubOptions): GitHub {
     readIssueLabelEvents: (input) => readIssueLabelEvents(deps, input),
     async addIssueLabel(input, ctx = {}) {
       return addIssueLabel(deps, input, ctx);
+    },
+    async removeIssueLabel(input, ctx = {}) {
+      return removeIssueLabel(deps, input, ctx);
     },
     async setIssueMilestone(input, ctx = {}) {
       return setIssueMilestone(deps, input, ctx);

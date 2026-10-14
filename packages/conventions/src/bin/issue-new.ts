@@ -3,10 +3,12 @@
 // （照报的话去 GitHub 找、补）。帅位座位整张删掉（#531）：开单时替帅位在库里认领那一步（claimLocal）一并删——本机不再在库里认领。
 // 本机做的单「怎么算做完」里有要 diff 外证据的条目：照开，开完打一段提示改写（交给引擎的单这种在 issueNew 里就拒开了）。
 // 开单前先查同仓开着的单和最近合并的 PR 里有没有可能重复的（#995 拍 3，../issue-similar.ts）：列在开单结果后面，只提示、不影响退出码。
+// 带 --local 的开完当场领单（决定 0096，../work.ts 的 pnpm work claim）：登记进法国、带租约、打出分支名；没登记上退出码 1，照报的话补登。
 import { fileURLToPath } from 'node:url';
 import { ghRunner, issueNew } from '../issue-new.ts';
 import { renderSimilar, similarIssues } from '../issue-similar.ts';
 import { describeOffDiff, OFF_DIFF_REWRITE } from '../off-diff-acceptance.ts';
+import { liveClaimsPost, readClaimsEndpoint, work } from '../work.ts';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
 
@@ -30,6 +32,15 @@ try {
     );
   }
   if (r.similar) for (const line of renderSimilar(r.similar, r.number)) console.log(line);
+  if (r.local) {
+    const claimed = await work(['claim', String(r.number)], {
+      gh,
+      post: liveClaimsPost(() => readClaimsEndpoint()),
+      out: (line) => console.log(line),
+      err: (line) => console.error(`单开了，可本机领单没成：${line}。补领：pnpm work claim ${r.number}`),
+    });
+    if (claimed !== 0) process.exitCode = 1;
+  }
 } catch (e) {
   console.error(e instanceof Error ? e.message : String(e));
   process.exitCode = 1;

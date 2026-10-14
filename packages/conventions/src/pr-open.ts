@@ -10,6 +10,8 @@
 //   --no-issue "<理由>"，理由原样写进需求栏（「无：<理由>」，栏里原有的字留着——栏名那行冒号后面的原话、下面各行的原话段
 //   和说明都留着，#1890）。挂了单的 PR 顺手挂上那张单所在的里程碑（单没挂里程碑就不挂；
 //   这一步没成只提醒、不改退出码）。
+// - 同一张单不开第二个 PR（决定 0096）：「需求」栏 Closes 的单，已经有别的开着的 PR 在做（Closes 它，或分支是 fleet/<单号>-、
+//   local/<单号>-，认法是 pr-claims.ts 的 otherPrOnIssue，引擎开 PR 前用同一份）就不开，退出码 1；PR 列表读不到退出码 2。
 // 退出码：0 开成了（挂上了，或照规矩不挂、写明为什么）；1 用法不对、需求栏没挂单或单不存在（什么也没做）；2 没做成：
 // 清单读不到、单没查成、gh 没跑成、输出认不出、改了哪些文件没查成、自动合并没挂成（PR 可能已经开了，照实写明开了哪个、卡在哪一步）。
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -17,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { type Gh, judgePaths, listOf, loadPathLists, prFiles, reasonOf } from './pr-arm.ts';
+import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
 import { founderQuote, issueColumnRefs, withIssueColumn } from './pr-columns.ts';
 
 /**
@@ -161,6 +164,7 @@ export function prOpen(argv: string[], deps: OpenDeps): number {
       base: typeof values.base === 'string' ? values.base : undefined,
       noAutomerge: values['no-automerge'] === true,
       issueNumbers,
+      closes: linked.closes,
     });
   } finally {
     if (tmpBody) rmSync(join(tmpBody, '..'), { recursive: true, force: true });
@@ -206,6 +210,56 @@ interface OpenPlan {
   noAutomerge: boolean;
   /** 需求栏挂的单：先 Closes 后 Refs，从小到大；空＝带了 --no-issue。 */
   issueNumbers: number[];
+  /** 其中 Closes 的那些（这个 PR 做完就关的单）：开之前查有没有别的 PR 在做。 */
+  closes: number[];
+}
+
+/** 开着的 PR 里有没有别的在做 closes 里的单。有回不开的原因和退出码；没有回 null。 */
+function closesFence(deps: OpenDeps, closes: readonly number[]): { message: string; code: number } | null {
+  if (closes.length === 0) return null;
+  const branch = deps.git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (branch.code !== 0) return { message: `当前分支没读成（${reasonOf(branch)}）：没开 PR。`, code: 2 };
+  const listed = deps.gh([
+    'pr',
+    'list',
+    '--state',
+    'open',
+    '--limit',
+    '500',
+    '--json',
+    'number,body,headRefName',
+  ]);
+  if (listed.code !== 0) {
+    return {
+      message: `开着的 PR 没列成（${reasonOf(listed)}），判不了同一张单有没有别人在做：没开 PR。`,
+      code: 2,
+    };
+  }
+  let pulls: OpenPullRef[];
+  try {
+    const raw: unknown = JSON.parse(listed.stdout);
+    if (!Array.isArray(raw) || raw.length >= 500) throw new Error('不是列表，或 500 个以上没翻全');
+    pulls = raw.map((p: { number?: unknown; body?: unknown; headRefName?: unknown }) => {
+      if (typeof p.number !== 'number' || typeof p.headRefName !== 'string') throw new Error('PR 认不出');
+      return { number: p.number, body: typeof p.body === 'string' ? p.body : '', headRef: p.headRefName };
+    });
+  } catch (e) {
+    return {
+      message: `开着的 PR 认不出（${e instanceof Error ? e.message : String(e)}）：没开 PR。`,
+      code: 2,
+    };
+  }
+  const own = branch.stdout.trim();
+  for (const n of closes) {
+    const other = otherPrOnIssue(pulls, n, own);
+    if (other !== null) {
+      return {
+        message: `#${n} 已经有开着的 PR #${other} 在做（Closes 它，或分支是这张单的固定前缀）：不开第二个。先看 #${other}，合了这张单就收；要换人做先关掉 #${other}。`,
+        code: 1,
+      };
+    }
+  }
+  return null;
 }
 
 function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
@@ -241,6 +295,14 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
       return 1;
     }
     if (n === issueNumbers[0]) milestone = info.milestone;
+  }
+
+  // 同一张单别有第二个 PR（决定 0096）：Closes 的单已经有别的开着的 PR 在做（「需求」栏 Closes 它，或分支是 fleet/<单号>-、local/<单号>-）
+  // 就不开。自己这条分支已经开过的不算（重跑幂等）。读不到就不开：不当成没有
+  const fence = closesFence(deps, plan.closes);
+  if (fence !== null) {
+    err(fence.message);
+    return fence.code;
   }
 
   // gh pr create 要远端有这条分支：先推（已推过则幂等）。推不成就不开，免得 gh 报一句看不懂的「must first push」

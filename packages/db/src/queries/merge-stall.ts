@@ -7,7 +7,7 @@ import type { Db } from '../client.ts';
 import { pullRequests, repos, tasks } from '../schema/index.ts';
 import { readIntakeWaiting } from './intake-history.ts';
 
-/** 引擎手上在做、做下去会出 PR 的单：引擎只写 running（动手会话在跑）。停滞（stalled）的不算：那要人动，不是引擎可接的。 */
+/** 引擎手上在做、做下去会出 PR 的单：引擎只写 running（动手会话在跑）。停滞（stalled）的不算：那要人动，不是引擎可接的。本机领的（executor = local）也不算。 */
 export const IN_FLIGHT_TASK_STATES = ['running'] as const satisfies readonly TaskState[];
 
 export interface RepoMergeFacts {
@@ -48,7 +48,13 @@ export async function mergeStallFacts(db: Db): Promise<MergeStallFacts> {
     const [busy] = await db
       .select({ n: count() })
       .from(tasks)
-      .where(and(eq(tasks.repoId, r.id), inArray(tasks.state, [...IN_FLIGHT_TASK_STATES])));
+      .where(
+        and(
+          eq(tasks.repoId, r.id),
+          eq(tasks.executor, 'engine'),
+          inArray(tasks.state, [...IN_FLIGHT_TASK_STATES]),
+        ),
+      );
     const n = waiting?.byRepo[r.id];
     out.push({
       repoId: r.id,

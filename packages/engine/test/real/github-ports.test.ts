@@ -68,6 +68,8 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
       return { head: input.head, pushed: true };
     }),
     openPr: record('openPr', () => ({ number: 101, url: 'https://github.com/acme/widgets/pull/101' })),
+    // 开 PR 前列开着的 PR（同一张单有没有别人在做，决定 0096）：默认一个都没有；用例给 over.claims 换成要的列表
+    claims: { openPulls: record('claims', () => []) },
     waitCi: record('waitCi', (input: { head: string }) => ({ state: 'green', head: input.head })),
     fetchBranchHead: record('fetchBranchHead', () => ({ head: m.head })),
     syncMainline: record('syncMainline', (input: { head: string }) => ({
@@ -733,6 +735,27 @@ describe('开 PR、CI、合并', () => {
     expect(calls.openPr?.[0]).not.toHaveProperty('inheritFrom');
     expect(calls.readSpecDoc).toBeUndefined();
     expect(calls.readIssuePlan).toBeUndefined();
+  });
+
+  it('【故意造出的失败】同一张单已有别的开着的 PR（本机 local/12-…，或需求栏 Closes #12）：不开第二个，ISSUE_CLAIMED 不重试', async () => {
+    for (const other of [
+      { number: 88, body: '', headRef: 'local/12-login' },
+      { number: 89, body: '**需求**：\nCloses #12\n', headRef: 'feat/x' },
+    ]) {
+      const { ports, calls } = setup({ claims: () => [other] });
+      const err = await ports
+        .openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx)
+        .catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: 'ISSUE_CLAIMED', retryable: false });
+      expect(String((err as Error).message)).toContain(`#${other.number}`);
+      expect(calls.openPr).toBeUndefined();
+    }
+  });
+
+  it('自己这条分支上已经开着的 PR 不算（重放幂等）', async () => {
+    const { ports, calls } = setup({ claims: () => [{ number: 101, body: '', headRef: BRANCH }] });
+    await ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx);
+    expect(calls.openPr).toHaveLength(1);
   });
 
   it('没有需求号的杂活也一样开', async () => {

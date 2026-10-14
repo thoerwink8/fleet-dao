@@ -1,0 +1,130 @@
+// 本机领单的租约（决定 0096，shared 的 local-claims.ts）：拉单每一轮、每个开着开关的仓，先收一遍到期的本机租约，再做准入。
+// 放在拉单里而不是另起定时任务：退回的单本来就是给拉单接的；总开关关着时拉单不跑，那时退回也没人接，等开了再收不迟。
+//
+// 一条到期的租约怎么收：
+//   单已经关了 → 有合并的 PR 挂着记做完（本机做完忘了报），没有记 stopped（还是本机的账）；
+//   还活着（本机会话心跳里有会话在 local/<单号>- 分支上、不到租约时长前还动过；或这张单有开着的 PR）→ 租约顺延；
+//   都没有 → 摘「本机做」、在单上留一句话、行改成 stopped + engine（拉单按「stopped 且没有任何一代」接手，和接手老行同一条路）。
+// 先动 GitHub 再改行：改行写不成，下一轮整件事重来（摘标签不在就当摘了，留言按键只留一次）；反过来先改行，标签摘不掉，单就卡在「本机做」上没人接。
+// 读不到、写不成记进 unchecked（这一轮记没查成），不当成「没有到期的」。
+import { LOCAL_LABEL } from '@fleet-dao/conventions';
+import { LOCAL_LEASE_MS } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
+
+export interface ExpiredLease {
+  taskId: string;
+  issueNumber: number;
+  leaseUntil: Date;
+}
+
+export interface LocalLeaseRepo {
+  id: string;
+  owner: string;
+  name: string;
+}
+
+export interface LocalLeaseDeps {
+  /** 这个仓里本机在做、租约已过的行。读不到照抛。 */
+  expired(repo: LocalLeaseRepo, now: Date): Promise<ExpiredLease[]>;
+  /** 本机会话心跳里还在 local/<单号>- 分支上活着的单号。读不到照抛：不当成都死了。 */
+  liveIssues(repo: LocalLeaseRepo, now: Date): Promise<Set<number>>;
+  /** 这张单有没有合并了的 PR 挂着（PR 镜像里「需求」栏挂着它，或分支是这张单的固定前缀）；有回 PR 号。 */
+  mergedPr(repo: LocalLeaseRepo, issueNumber: number): Promise<number | null>;
+  /** 租约顺延到 until。 */
+  extend(taskId: string, until: Date): Promise<void>;
+  /** 收掉这条租约（行仍是本机在做、仍过期才改）。 */
+  settle(input: {
+    taskId: string;
+    how: 'returned' | 'done' | 'closed';
+    why: string;
+    now: Date;
+  }): Promise<number>;
+  /** 摘「本机做」（没贴着不算错）。 */
+  unmarkLocal(input: { repo: LocalLeaseRepo; issueNumber: number }): Promise<void>;
+}
+
+export interface LeaseSweepResult {
+  extended: number;
+  returned: number;
+  closed: number;
+  unchecked: string[];
+}
+
+/** 退回法国时留在单上的话。 */
+export function leaseExpiredComment(issueNumber: number, leaseUntil: Date): string {
+  return [
+    `本机领这张单的租约在 ${leaseUntil.toISOString()} 到期：${LOCAL_LEASE_MS / 3_600_000} 小时里本机没有会话在 \`local/${issueNumber}-\` 分支上动过、没有开着的 PR 挂着它、也没有续租，当作本机会话已经断了。`,
+    '',
+    `已摘掉「${LOCAL_LABEL}」，退回法国队列：交代齐的话引擎下一轮会接。要本机接着做，先 \`pnpm work claim ${issueNumber}\` 重新领（引擎已经接了就领不到）。`,
+  ].join('\n');
+}
+
+export async function sweepLocalLeases(
+  deps: LocalLeaseDeps,
+  repo: LocalLeaseRepo,
+  ctx: {
+    /** 这一轮读到的开着的单（号 → 标签）：在里面的才算开着。 */
+    open: ReadonlyMap<number, readonly string[]>;
+    /** 开着的 PR 挂着哪些单（单号 → PR 号）。读不到照抛。 */
+    prClaims: () => Promise<Map<number, number>>;
+    comment: (input: { issueNumber: number; key: string; body: string }) => Promise<{ created: boolean }>;
+    now: Date;
+    log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
+  },
+): Promise<LeaseSweepResult> {
+  const slug = `${repo.owner}/${repo.name}`;
+  const out: LeaseSweepResult = { extended: 0, returned: 0, closed: 0, unchecked: [] };
+  let expired: ExpiredLease[];
+  try {
+    expired = await deps.expired(repo, ctx.now);
+  } catch (err) {
+    out.unchecked.push(`${slug}：本机到期的租约没读成（${errMessage(err)}）`);
+    return out;
+  }
+  if (expired.length === 0) return out;
+  let live: Set<number> | null = null;
+  try {
+    live = await deps.liveIssues(repo, ctx.now);
+  } catch (err) {
+    // 心跳读不到：不拿它判死活，这一轮只按 PR 判；到期又没 PR 的这一轮先不退回
+    out.unchecked.push(`${slug}：本机会话心跳没读成，到期的租约这一轮只顺延不退回（${errMessage(err)}）`);
+  }
+  for (const lease of expired) {
+    const ref = `${slug}#${lease.issueNumber}`;
+    try {
+      const labels = ctx.open.get(lease.issueNumber);
+      if (labels === undefined) {
+        const merged = await deps.mergedPr(repo, lease.issueNumber);
+        const how = merged !== null ? 'done' : 'closed';
+        const why =
+          merged !== null
+            ? `本机租约到期时单已关、PR #${merged} 已合：记做完`
+            : '本机租约到期时单已关、没有合并的 PR：记停下';
+        if ((await deps.settle({ taskId: lease.taskId, how, why, now: ctx.now })) > 0) out.closed += 1;
+        continue;
+      }
+      const pr = (await ctx.prClaims()).get(lease.issueNumber);
+      if (live === null || live.has(lease.issueNumber) || pr !== undefined) {
+        await deps.extend(lease.taskId, new Date(ctx.now.getTime() + LOCAL_LEASE_MS));
+        out.extended += 1;
+        continue;
+      }
+      if (labels.includes(LOCAL_LABEL)) await deps.unmarkLocal({ repo, issueNumber: lease.issueNumber });
+      await ctx.comment({
+        issueNumber: lease.issueNumber,
+        key: `local-lease-expired:${lease.leaseUntil.toISOString()}`,
+        body: leaseExpiredComment(lease.issueNumber, lease.leaseUntil),
+      });
+      const why = `本机租约 ${lease.leaseUntil.toISOString()} 到期，没有心跳、没有开着的 PR：退回法国队列`;
+      if ((await deps.settle({ taskId: lease.taskId, how: 'returned', why, now: ctx.now })) > 0) {
+        out.returned += 1;
+        ctx.log('info', `拉单：${ref} 本机租约到期，已摘「${LOCAL_LABEL}」、退回法国队列`, {
+          leaseUntil: lease.leaseUntil.toISOString(),
+        });
+      }
+    } catch (err) {
+      out.unchecked.push(`${ref}：本机租约没收成（${errMessage(err)}）`);
+    }
+  }
+  return out;
+}

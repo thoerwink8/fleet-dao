@@ -1,5 +1,5 @@
 // 干活的记录：仓、需求、子任务、会话、叫停请求、进度、追问、人闸批准、状态变化、PR 镜像、需求文档索引。
-import type { RunAsUser } from '@fleet-dao/shared';
+import type { RunAsUser, TaskExecutor } from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -93,10 +93,21 @@ export const tasks = pgTable(
     lastProblem: text('last_problem'),
     /** 由 saveTaskSnapshot 显式写；从没做过快照的任务是空，不是「没变化」。 */
     updatedAt: timestamp('updated_at', tz),
+    /**
+     * 谁在做（决定 0096，shared 的 local-claims.ts）：engine = 法国引擎；local = 本机会话领的（经 /api/nodes/claims 登记）。
+     * 状态仍只用引擎认的那几个：本机在做是 running，退回法国是 stopped + engine。引擎的统计、熔断、对账只数 engine 的行。
+     */
+    executor: text('executor').$type<TaskExecutor>().notNull().default('engine'),
+    /** 本机领单的租约到哪一刻；不是本机在做的是空。 */
+    leaseUntil: timestamp('lease_until', tz),
+    /** 哪个环境领的（通行证认出的环境编号）；不是本机领的是空。 */
+    claimedBy: text('claimed_by'),
   },
   (t) => [
     unique('tasks_repo_issue_unique').on(t.repoId, t.issueNumber),
     check('tasks_issue_number_positive', sql`${t.issueNumber} > 0`),
+    check('tasks_executor_known', sql`${t.executor} in ('engine', 'local')`),
+    index('tasks_local_lease_idx').on(t.leaseUntil).where(sql`${t.executor} = 'local'`),
   ],
 );
 

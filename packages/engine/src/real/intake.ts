@@ -16,13 +16,17 @@ import { randomUUID } from 'node:crypto';
 import { LOCAL_LABEL } from '@fleet-dao/conventions';
 import {
   type Db,
+  expiredLocalClaims,
+  extendLocalLease,
   finishScheduleRun,
   firstTaskCreatedSince,
   listIntakeRepos,
+  mergedPrForIssue,
   readIntakeBreaker,
   recentEndedTasks,
   requesterForRequestIssue,
   resolveAlertWithReason,
+  settleExpiredLocalClaim,
   startScheduleRun,
   TASK_ADOPT_AUDIT_ACTION,
   taskAdoptsSince,
@@ -34,6 +38,7 @@ import {
   writeIntakeWaiting,
 } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
+import { liveLocalIssues } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { actorFor, createPgStore, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
@@ -50,7 +55,7 @@ import { groomRequestDeps } from './groom-request.ts';
 /** 拉单要用到的这几下（不要整个 GitHub）。 */
 export type IntakeGitHub = Pick<
   GitHub,
-  'readGroomFacts' | 'readIssuePlan' | 'readSpecDoc' | 'commentIssue' | 'addIssueLabel'
+  'readGroomFacts' | 'readIssuePlan' | 'readSpecDoc' | 'commentIssue' | 'addIssueLabel' | 'removeIssueLabel'
 > & { claims: Pick<GitHub['claims'], 'openPulls'> };
 
 export interface IntakeWiring {
@@ -96,6 +101,25 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         }));
       },
       recordWaiting: ({ at, byRepo }) => writeIntakeWaiting(w.db, { at, byRepo, by: BREAKER_ACTOR }),
+      // 本机领单的租约（决定 0096）：到期的行、心跳（本机会话推来的 node_sessions）、PR 镜像都从库里读，摘标签用「引擎」机器人
+      localLeases: {
+        expired: (repo, at) => expiredLocalClaims(w.db, repo.id, at),
+        async liveIssues(repo, at) {
+          return liveLocalIssues(await store.listNodeSessions(), `${repo.owner}/${repo.name}`, at);
+        },
+        mergedPr: (repo, issueNumber) => mergedPrForIssue(w.db, repo.id, issueNumber),
+        async extend(taskId, until) {
+          await extendLocalLease(w.db, taskId, until);
+        },
+        settle: (input) => settleExpiredLocalClaim(w.db, input),
+        async unmarkLocal({ repo, issueNumber }) {
+          await w.gh.removeIssueLabel({
+            repo: { owner: repo.owner, name: repo.name },
+            issueNumber,
+            label: LOCAL_LABEL,
+          });
+        },
+      },
       async whitelist() {
         return githubWhitelist(await usersOnce());
       },

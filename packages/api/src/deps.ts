@@ -9,6 +9,7 @@ import type { PreflightReaders } from './france-preflight.ts';
 import type { FranceReleasePort } from './france-release.ts';
 import type { GitHubUserPort } from './github-user.ts';
 import type { HostResourceSampler } from './host-resources.ts';
+import type { LocalClaimsPort } from './local-claims.ts';
 import type { ModelRosterPort } from './model-roster.ts';
 import type { OrgSwitchPort } from './org-switch-view.ts';
 import type { ScryptParams } from './password.ts';
@@ -115,6 +116,10 @@ export interface Deps {
    * 内存版没有那张表）的任务详情写 unavailable、改接口回 503，不拿空列表冒充「没指定」。
    */
   taskRoutePins?: TaskRoutePinsPort | undefined;
+  /**
+   * 本机领单（决定 0096，local-claims.ts）：本机会话经 POST /api/nodes/claims 领单、续租、结束，写 tasks 那一行。没给（开发、内存版）回 503。
+   */
+  localClaims?: LocalClaimsPort | undefined;
   /**
    * 任务详情每一段的「会话内容」（#1640，run-transcript.ts）：读引擎按条记下的 run_transcript。没给（开发、内存版没有那张表）的
    * 接口回 503 写明原因，不拿空列表冒充「没有记录」。
