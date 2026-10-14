@@ -222,7 +222,7 @@ deploy/france/fleet-temporal.service → fleet-dao Temporal 服务端（Postgres
 | `/var/lib/fleet-dao`、`/var/log/fleet-dao` | fleet:fleet 750 | 运行数据、日志（服务日志主要在 journald）。引擎自己的临时文件（从镜像打的 bundle）和存档（没合并就收的树里没提交的改动）在 `/var/lib/fleet-dao/engine/` 的 `tmp/`、`archive/` 下（任务工作流动手会话的落盘在同级的 `runs/<执行编号>/`：提示词、输出、结局各一个文件，24 小时后由引擎顺手清），GitHub 的镜像仓在 `/var/lib/fleet-dao/github/` |
 | `/var/lib/fleet-dao/demo` | fleet:fleet 750 | 已删（创始人 2026-10-07，#1223）：演示版留下的旧可见范围文件，不再有人读写；装机不再建它（#1278），机器上已有的目录和里面的旧文件要不要清由人定（删数据，不自动清） |
 | `/var/lib/fleet-work` | root:root 755 | AI 会话的工作树：`<owner>_<name>/<分支>` 是子任务的树，`<owner>_<name>/<需求号>.<阶段>[.<子任务>]` 是分诊、写文档、审查的检出副本，`_route-probe/<会话用户>` 是路由探针起会话的目录（第五节「路由探针」），`_tmp/<会话编号>` 是每个会话自己的临时目录（会话的 TMPDIR，会话收场就删，工人起来时清上一轮剩下的）。中间各级归 root、别人写不进；每棵树归会话用户、700，建、交、删都经 `fleet-agent-scope`（第五节）。没有在跑的任务在用的树由引擎的每小时对账收（第五节「每小时对账」）：什么都不剩的删掉（能重新生成的编译和工具缓存不算），剩着没推的东西的报「要人拍」 |
-| `/etc/fleet-dao` | root:fleet 750 | 本机配置与密钥：`france.env`、`temporal.env`（库口令）、`temporal.yaml`、`nftables.nft`、`github/`（两个 GitHub 机器人的 json，手放；目录配置不在这里：它是仓里的 `deploy/catalog.json`，跟着版本走，第九节「目录配置」，早先放在这里的 `catalog.json` 发布不再读，留着无害）；`reclaude-api.key`（reclaude 网页「设置 → API Key」生成的账号级 Key，只一行，读拼车额度用，手放；网页上重新生成后旧的立刻作废，要换这份再刷新保险箱）；`jev.json`（判断题的机器配置：TypeSafe 的地址、钥匙文件在哪，样例 `packages/jev/config.example.json`，手放；引擎和驾驶舱后端都读，`FLEET_JEV_CONFIG` 可改位置）、`typesafe.key`（TypeSafe 的钥匙，只一行，手放）；应用的 `engine.env`、`api.env`、`release.env`（每一项「应该是什么」写在仓里的期望 `deploy/france/desired-config.json`：新机器由 france.sh 照它建，私有值只留空位、由人放；之后发布时照要发的那一版的期望写，自动发布每一轮对账，第九节「配置进仓对账」），随机密钥 `session-secret.env`（首次生成，之后不动；以前生成过的 `agent-token.env`、`gateway-token.env` 随 fleet 命令接口和飞书网关通行证撤了，服务不再读，文件留在机器上没删）。文件一律 root:fleet 640；只有 `web-upload.key`（往香港传静态文件的钥匙）、`gateway-deploy.key`（往香港发飞书网关的钥匙）、`hk-known-hosts`（钉住的香港主机钥匙）和 `config-fingerprint.key`（配置对账算私有值指纹的钥匙，france.sh 首次生成，第九节「配置进仓对账」）是 root:root 600 |
+| `/etc/fleet-dao` | root:fleet 750 | 本机配置与密钥：`france.env`、`temporal.env`（库口令）、`temporal.yaml`、`nftables.nft`、`github/`（两个 GitHub 机器人的 json，手放；目录配置不在这里：它是仓里的 `deploy/catalog.json`，跟着版本走，第九节「目录配置」，早先放在这里的 `catalog.json` 发布不再读，留着无害）；`reclaude-api.key`（reclaude 网页「设置 → API Key」生成的账号级 Key，只一行，读拼车额度用，手放；网页上重新生成后旧的立刻作废，要换这份再刷新保险箱）；`jev.json`（判断题的机器配置：TypeSafe 的地址、钥匙文件在哪，样例 `packages/jev/config.example.json`，手放；引擎和驾驶舱后端都读，`FLEET_JEV_CONFIG` 可改位置）、`typesafe.key`（TypeSafe 的钥匙，只一行，手放）；应用的 `engine.env`、`api.env`、`release.env`（每一项「应该是什么」写在仓里的期望 `deploy/france/desired-config.json`：新机器由 france.sh 照它建，私有值只留空位、由人放；之后发布时照要发的那一版的期望写，自动发布每一轮对账，第九节「配置进仓对账」），随机密钥 `session-secret.env`（首次生成，之后不动；以前生成过的 `agent-token.env`、`gateway-token.env` 随 fleet 命令接口和飞书网关通行证撤了，france.sh 装机时删掉，#2226）。文件一律 root:fleet 640；只有 `web-upload.key`（往香港传静态文件的钥匙）、`hk-known-hosts`（钉住的香港主机钥匙）和 `config-fingerprint.key`（配置对账算私有值指纹的钥匙，france.sh 首次生成，第九节「配置进仓对账」）是 root:root 600 |
 | `/opt/fleet-dao/temporal` | root:root 755 | `server-1.32.0/`（temporal-server、temporal-sql-tool）、`cli-1.9.1/`（temporal），`bin/` 链接到在用的版本 |
 | `/opt/fleet-dao/uv` | root:root 755 | `<版本>/uv`：只用来给会话用户和 pilot 各装一份 ddgs（第五节），不进谁的 PATH |
 | `/opt/fleet-dao/pnpm` | root:root 755 | `<版本>/`：AI 会话用的 pnpm（npm 上的 `pnpm-<版本>.tgz`，版本跟仓根 `package.json` 的 `packageManager`，核过 `france.sh` 顶部钉的 sha512），`.sha256` 记着装完时每个文件的指纹（第五节「会话的 PATH 与 pnpm」） |
@@ -512,7 +512,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 
 - 驾驶舱后端（`fleet-api`，只在正式环境）每 30 秒把该推的提醒用飞书应用机器人（`api.env` 的 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，和飞书登录同一个应用，期望配置里登记了，缺了对账报）发进团队群，每条一行送达记录（`notification_deliveries`，去处 `feishu` / `team`，拿到 `message_id` 才算送到）。代码在 `packages/api/src/feishu-push.ts`，判法在 `packages/db/src/queries/feishu-push.ts`。
 - 推送分级（创始人规矩：只为四类人闸和 AI 判定要他的事打扰他，AI 自己能修的不打扰）。该推的：没处理、24 小时内建的，而且是——要你拍（`decision`，四类人闸和 AI 明确判定要他的都是这一级）、每日简报（`feishu:brief:<北京日期>`）、推送测试（`feishu:test:`，`feishu-push test` 建的）马上推；卡住报警（`alert`，再提醒 `remind:`、路由疑似降智 `probe-iq:` 除外）开满 120 分钟还没撤（没自愈）才推（阈值 `FEISHU_PUSH_ESCALATE_MS`，理由和回放数据写在常量旁：挂起解除当场撤、误报的根修掉之后，七天回放按 60 分钟每天约 4.7 条、120 分钟约 2.7 条；60～120 分钟才撤的几乎都是指挥官或系统自己收的）；主线红（`feishu:main-red:`）开满 60 分钟没撤才推（`FEISHU_MAIN_RED_ESCALATE_MS`）；主线已恢复只在它之前 24 小时内真推出去过主线红才推。其余（再提醒、路由疑似降智（已按不在线处理、自己复探）、日报、整池暂停到期、`feishu:main-ci-verdict` 记账行）不推，进每日简报。一条只推一次（重开的报警不重推）；没送成按 2、4、8、16 分钟退避再试，试满 5 次不再试。发消息带提醒编号当 `uuid`，飞书一小时内不会发重。
-- 团队群：机器人所在的群只有一个，那就是团队群（和 `deploy/hk.sh` 补 `FEISHU_TEAM_CHAT_ID` 同一个判法），不另配群号。机器人不在群里、在好几个群里：记「没配」（设置 `feishu.push`，`why` 写清），看门狗马上报。每次调飞书接口都记进飞书用量（`feishu_usage_months`，和网关同一本账）。
+- 团队群：机器人所在的群只有一个，那就是团队群（和 `deploy/hk.sh` 补 `FEISHU_TEAM_CHAT_ID` 同一个判法），不另配群号。机器人不在群里、在好几个群里：记「没配」（设置 `feishu.push`，`why` 写清），看门狗马上报。飞书免费版每月 1 万次调用：没东西要推就不调，不另记用量（原来记用量的 `feishu_usage_*` 表随网关一起删了，#2226）。
 - 看通不通：`bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api feishu-push status`（推送状态、该推没送到几条、最近一次送到、结论）；真发一条：`… fleet-api feishu-push test`（建一条测试提醒，等在跑的后端推出去，读回送达记录，送到了退出 0；测试提醒随后标成已处理）。库里：`runuser -u fleet -- psql -d fleet -c "select n.created_at, left(n.title, 40), d.attempts, d.delivered_at, left(d.last_error, 80) from notifications n left join notification_deliveries d on d.notification_id = n.id order by n.created_at desc limit 20"`；日志 `journalctl -u fleet-api --since -1h | grep 飞书推送`。
 - 推送渠道自己坏了，靠推送报不出来：看门狗（下面）和指挥官巡检（`patrol.mjs` 的「飞书推送」一行）各看一遍，不通进「要你拍」、巡检出 ALERT。
 
@@ -714,7 +714,7 @@ systemctl disable --now wg-quick@wg-fleet
 rm /root/.ssh/authorized_keys2
 ```
 
-4. 删数据（先问人）：`certbot delete --cert-name <驾驶舱域名>`，删 `/srv/fleet-dao-web`、`/srv/fleet-dao-gateway`、`/opt/fleet-dao`、`/var/www/fleet-dao-acme`、`/etc/fleet-dao`、`/etc/wireguard/wg-fleet.*`，`userdel -r fleet`。
+4. 删数据（先问人）：`certbot delete --cert-name <驾驶舱域名>`，删 `/srv/fleet-dao-web`、`/opt/fleet-dao`、`/var/www/fleet-dao-acme`、`/etc/fleet-dao`、`/etc/wireguard/wg-fleet.*`，`userdel -r fleet`。
 
 只退一步：`git revert` 那次提交 → 机器上 pull → 重跑；脚本会把它管的文件改回仓里的样子，新加过又撤掉的东西按上面手动删。
 
@@ -807,7 +807,7 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 - 两个都是 `Restart=always`。引擎不开 `NoNewPrivileges`（要经 sudo 调 `fleet-agent-scope` 起会话），也不开挂载隔离（会话是它的子进程，会跟着看不见自己的家目录）；后端不起子进程，照常收紧。
 - `engine.env`、`api.env` 新机器由 france.sh 照这一档的期望建（私有值只留空位：飞书、GitHub 的凭据由人填在 `api.env`）。每一项「应该是什么」在仓里的 `deploy/france/desired-config.json`：公开值改期望、合进主线，发布时照期望写上、重启对应服务（本节末尾「配置进仓对账」）；只改机器的，下一轮自动发布就报不一致，发布也不替人改回（期望里 `selfHeal` 关着）。私有值只在机器上改，改完再发布一次就会重启对应服务。库连接写成 `DATABASE_URL=postgres:///fleet` 加 `PGHOST=/var/run/postgresql`：本机 socket、peer 认证，没有口令（postgres.js 不认连接串里的 `?host=`）。
 - `api.env` 也要连 Temporal：`TEMPORAL_ADDRESS`、`TEMPORAL_NAMESPACE` 和 `engine.env` 那两行同一份值，发给工作流的信号和 `/healthz` 的 `temporal` 项都用；`FLEET_TASK_QUEUE` 只给 `/healthz` 的 `engine` 项查任务队列上有没有 poller 用，不给都有默认值（`127.0.0.1:7243`、`fleet`、`fleet`），Temporal 没起来时后端照样能起，健康检查会如实报红。
-- 随机密钥各一个文件，france.sh 首次生成，之后不动、不打印：`session-secret.env`（`FLEET_SESSION_SECRET`）。以前还有 `agent-token.env`（fleet 命令令牌）、`gateway-token.env`（飞书网关通行证），随两个接口撤了，服务不再读，机器上的文件没删。
+- 随机密钥各一个文件，france.sh 首次生成，之后不动、不打印：`session-secret.env`（`FLEET_SESSION_SECRET`）。以前还有 `agent-token.env`（fleet 命令令牌）、`gateway-token.env`（飞书网关通行证），随两个接口撤了，装机时删掉（`RETIRED_FILES`，#2226）。
 - france.sh 读这些环境文件和 systemd 同一种读法（`deploy/lib/app-config.sh` 的 `env_parse`）：行首的空白、`=` 两边的空白不算，值去掉一层引号，同一个键写了几行、服务里生效的是最后一行。读回说的就是服务里生效的那个值；同一个键写了几行直接判红（删成一行，脚本不猜该留哪一行）。文件读不到、引号到文件末尾都没配上，判红、不改文件。这些文件和随机密钥文件的路径是目录、符号链接（含断链）的，也判红、跳过，什么都不改（属主权限会跟着链接改到别处，写文件会把链接换掉）。
 - france.sh 只在文件不在时照期望建一份（`deploy/lib/app-config.sh` 的 `env_from_desired`，内容由 `config.mjs render` 出：公开值照期望写、私有值只留 `KEY=` 空位，值不进仓）；已有的文件不补键（只修属主权限、删退役的键）——原来照仓里的样例补「样例后来加的键」，样例删了（#323）：期望后来加的键，发布时照期望写上（本节末尾「配置进仓对账」）。`FLEET_ENGINE_PORTS` 也照期望写（碰不碰真仓、真会话，法国是 `real`；要换先改期望），没写（或被注释掉）读回判红。`engine.env` 里要钉在约定值上的两项——`FLEET_WORK_DIR`（`/var/lib/fleet-work`，fleet-agent-scope 只认这一个）、`FLEET_ENGINE_STATE_DIR`（`/var/lib/fleet-dao/engine`）——由读回核对：值不对、写了几行判红，没写、被注释掉记待配。读回也核对 `engine.env`、`api.env`、`release.env` 和随机密钥文件都是 root:fleet 640：组读不到时 root 读回照样读得到、服务却起不来。
 - `api.env` 的 `FLEET_GITHUB_WEBHOOK_SECRET` 要和 GitHub 上「引擎」App 设置里的 Webhook secret 一致（App 级 webhook 挂在引擎机器人上，事件地址见第二节），不是随便生成一个：值就在 `/etc/fleet-dao/github/gh-app-fleet-dao-engine.json` 的 `webhook_secret` 里。这一项空着时 france.sh 照它填上（不打印）；json 里没有、或者值里有写进环境文件会变样的字符（引号、反斜杠、`$`、反引号、空白、非 ASCII；`+ / =` 这类照收），就记待配、不瞎填；这一行被注释掉了也记待配，不替人放开；`api.env` 读不到、这个键写了几行，判红、不改（也不新建一份只有密钥的 `api.env`）。读回只比两边一致不一致，不打印值。改 webhook 密钥：先在 App 设置页改，再把新值填进 json 和 `api.env`（`api.env` 里已有值的，france.sh 不动），发布一次重启后端。
@@ -1103,15 +1103,11 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 
 ## 十二、香港飞书网关（已删）
 
-飞书网关（原香港飞书网关包，跑在香港的 `fleet-feishu.service`）已从仓里删掉：它只剩上报飞书接口用量一件定时活（飞书收缩后不再收话，见决定 0090），手机通知由引擎经群机器人 webhook 直接推（第五节「飞书群机器人」）。发布脚本、`hk.sh`、读回、健康检查里网关的部分一并删了；`release.env` 的 `FLEET_HK_PARTS` 和 `hk.env` 里老的 `gateway`、`FLEET_GATEWAY_DEPLOY_PUBLIC_KEY` 认下来、忽略。后端给网关用的两条接口（进群记录、用量上报）、网关通行证（`FLEET_FEISHU_GATEWAY_TOKEN`）、fleet 命令接口（`/agent/v1`、`FLEET_AGENT_LISTEN`、`FLEET_AGENT_TOKEN_SECRET`）和 `fleet-api intent` 命令随决定 0093 也删了；意图表（`intents`、`intent_messages` 等）和飞书用量表（`feishu_usage_*`）里的数据留着，代码不再读写，删表属删数据，要创始人点头。
+飞书网关（原香港飞书网关包，跑在香港的 `fleet-feishu.service`）已从仓里删掉：它只剩上报飞书接口用量一件定时活（飞书收缩后不再收话，见决定 0090），手机通知由引擎经群机器人 webhook 直接推（第五节「飞书群机器人」）。发布脚本、`hk.sh`、读回、健康检查里网关的部分一并删了；`release.env` 的 `FLEET_HK_PARTS` 和 `hk.env` 里老的 `gateway`、`FLEET_GATEWAY_DEPLOY_PUBLIC_KEY` 认下来、忽略。后端给网关用的两条接口（进群记录、用量上报）、网关通行证（`FLEET_FEISHU_GATEWAY_TOKEN`）、fleet 命令接口（`/agent/v1`、`FLEET_AGENT_LISTEN`、`FLEET_AGENT_TOKEN_SECRET`）和 `fleet-api intent` 命令随决定 0093 也删了；意图表（`intents`、`intent_messages`、`intent_recalls`）、进群和拒收记录（`feishu_joins`、`feishu_rejections`）、飞书用量表（`feishu_usage_months`、`feishu_usage_reports`）随迁移 `0071_drop_feishu_intent_tables` 删了（#2226）；删前法国导出过一份，在法国 `/var/backups/fleet-dao/dropped-tables-20261015.sql.gz`（root 600，结构加数据，`gunzip -c … | psql` 可原样建回）。
 
-香港那台旧网关进程 2026-10-14 已停并取消开机自启（`systemctl disable --now fleet-feishu.service`，只动了这个单元；停后法国后端日志里每分钟一条的「记下飞书用量」不再出现）。要彻底清，在香港上再做：
-
-```
-rm -f /etc/systemd/system/fleet-feishu.service /usr/local/sbin/fleet-gateway-deploy && systemctl daemon-reload
-```
-
-留在香港上的 `/srv/fleet-dao-gateway`、`/etc/fleet-dao/feishu.env`、`/etc/fleet-dao/gateway-token.env`、`/opt/fleet-dao/node-v*` 是数据或文件，删之前先问人；`/root/.ssh/authorized_keys2` 里发网关的那一行，重跑一遍 `hk.sh` 就不再写进去。法国上的 `agent-token.env`、`gateway-token.env` 同理：服务单元不再读，文件没删。
+机器上的残留由装机脚本清（#2226），可重复跑、读回核对：
+- 香港 `hk.sh`（`retire_gateway`，读回 `readback_retired_gateway`）：停掉、删掉 `fleet-feishu.service`；`/srv/fleet-dao-gateway` 和 `/usr/local/sbin/fleet-gateway-deploy` 先打包进 `/var/backups/fleet-dao/retired-feishu-gateway-<时刻>.tar.gz`（root 600）再删；`/etc/fleet-dao/feishu.env`（连同 `feishu.env.bak-*`）、`gateway-token.env`、网关专用的 `/opt/fleet-dao/node`、`node-v*` 不备份直接删；`/root/.ssh/authorized_keys2` 整份重写，不再有发网关的那一行。打包不成就不删、判红。
+- 法国 `france.sh`（`retire_old_units`，整套和发版后的自动档都跑）：删 `agent-token.env`、`gateway-token.env`、`gateway-deploy.key`（`RETIRED_FILES`），读回核对它们不在。
 
 ## 十三、接别的环境的看板，和本机会话上报
 

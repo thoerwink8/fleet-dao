@@ -56,6 +56,16 @@ SITE_AVAILABLE=/etc/nginx/sites-available/fleet-dao
 SITE_ENABLED=/etc/nginx/sites-enabled/fleet-dao
 # 没配域名时的 server_name：.invalid 永远解析不到——站点装着、配置验得过，但谁也访问不到
 PLACEHOLDER_NAME=fleet-dao.invalid
+# 已退役的飞书网关（#2184 删了它的部署，#2226 清机器上的残留）：装机时停掉、删掉它的单元；它的发布目录和收版本的脚本先打包进
+# RETIRED_BACKUP_DIR（root 600）再删；令牌文件、它专用的 node 运行时不备份直接删。读回核对这些都不在、authorized_keys2 里没有
+# 发网关的那一行（setup_web_upload 整份重写时就不再写它）。已经没有就什么都不动（幂等）。下面几个变量只有测试会改
+RETIRED_UNITS=(fleet-feishu.service)
+RETIRED_UNIT_DIR=/etc/systemd/system
+RETIRED_KEEP=(/srv/fleet-dao-gateway /usr/local/sbin/fleet-gateway-deploy) # 删前打包
+# 直接删：网关的飞书凭据、它的旧备份、网关通行证、/opt/fleet-dao 下网关专用的 node（官方发行包，机器上别的服务不用它）。可带通配
+RETIRED_DROP=(/etc/fleet-dao/feishu.env '/etc/fleet-dao/feishu.env.bak-*' /etc/fleet-dao/gateway-token.env
+  /opt/fleet-dao/node '/opt/fleet-dao/node-v*')
+RETIRED_BACKUP_DIR=/var/backups/fleet-dao
 
 FLEET_DOMAIN=""
 FLEET_ACME_EMAIL=""
@@ -139,6 +149,81 @@ setup_web_upload() {
 # -munge：传来的符号链接落地时改成无效的样子，nginx 跟着它读不到目录外的文件）。
 $(web_key_line)"
   put_file "$UPLOAD_KEYS_FILE" root:root 600 "$content"
+}
+
+# RETIRED_DROP 展开后机器上真有的：一行一个，没有就什么都不打印
+retired_drop_present() {
+  local p f
+  for p in "${RETIRED_DROP[@]}"; do
+    # shellcheck disable=SC2086 # 要的就是按通配展开；路径里没有空白
+    for f in $p; do
+      if [[ -e "$f" || -L "$f" ]]; then printf '%s\n' "$f"; fi
+    done
+  done
+}
+
+# 清掉已退役的飞书网关（#2226）。停不掉、打包不成、删不掉都判红，打包不成的不删
+retire_gateway() {
+  step "清掉已退役的飞书网关（#2226）"
+  local u f touched=0 keep=() tarball
+  for u in "${RETIRED_UNITS[@]}"; do
+    f=$RETIRED_UNIT_DIR/$u
+    if [[ ! -e "$f" && ! -L "$f" && "$(systemctl is-active "$u" 2>/dev/null)" != active ]]; then continue; fi
+    if ! systemctl disable --now "$u" >/dev/null 2>&1 && [[ "$(systemctl is-active "$u" 2>/dev/null)" == active ]]; then
+      red "$u 停不掉（#2226）：systemctl status $u 看现场"
+      continue
+    fi
+    if ! rm -f -- "$f"; then
+      red "$f 删不掉（#2226）"
+      continue
+    fi
+    touched=1
+    changed "停掉并删掉 $u（#2226）"
+  done
+  if ((touched)) && ! systemctl daemon-reload; then red "systemctl daemon-reload 失败（#2226）"; fi
+  for f in "${RETIRED_KEEP[@]}"; do
+    if [[ -e "$f" || -L "$f" ]]; then keep+=("${f#/}"); fi
+  done
+  if ((${#keep[@]})); then
+    tarball=$RETIRED_BACKUP_DIR/retired-feishu-gateway-$(date -u +%Y%m%dT%H%M%SZ).tar.gz
+    if install -d -o root -g root -m 700 -- "$RETIRED_BACKUP_DIR" &&
+      (umask 077 && tar -czf "$tarball" -C / -- "${keep[@]}") && tar -tzf "$tarball" >/dev/null; then
+      chmod 600 -- "$tarball"
+      changed "打包 ${keep[*]} 进 $tarball（sha256 $(sha256sum <"$tarball" | cut -c1-16)…）"
+      for f in "${keep[@]}"; do
+        if rm -rf -- "/${f:?}"; then changed "删掉 /$f（#2226）"; else red "/$f 删不掉（#2226）"; fi
+      done
+    else
+      rm -f -- "$tarball"
+      red "打包 ${keep[*]} 没成（#2226）：没删，看 $RETIRED_BACKUP_DIR 的空间和权限后重跑"
+    fi
+  fi
+  while IFS= read -r f; do
+    if rm -rf -- "${f:?}"; then changed "删掉 $f（#2226）"; else red "$f 删不掉（#2226）"; fi
+  done < <(retired_drop_present)
+}
+
+# 读回：已退役的飞书网关留下的单元、目录、文件都不在，authorized_keys2 里没有发网关的那一行
+readback_retired_gateway() {
+  local u f bad=0
+  for u in "${RETIRED_UNITS[@]}"; do
+    if [[ -e "$RETIRED_UNIT_DIR/$u" || -L "$RETIRED_UNIT_DIR/$u" ]] || [[ "$(systemctl is-active "$u" 2>/dev/null)" == active ]]; then
+      red "已退役的 $u 还在（#2226）：重跑 hk.sh 清掉"
+      bad=1
+    fi
+  done
+  # shellcheck disable=SC2046 # retired_drop_present 一行一个路径，路径里没有空白
+  for f in "${RETIRED_KEEP[@]}" $(retired_drop_present); do
+    if [[ -e "$f" || -L "$f" ]]; then
+      red "已退役的飞书网关留下的 $f 还在（#2226）：重跑 hk.sh 清掉"
+      bad=1
+    fi
+  done
+  if [[ -f "$UPLOAD_KEYS_FILE" ]] && grep -q 'fleet-gateway-deploy' -- "$UPLOAD_KEYS_FILE"; then
+    red "$UPLOAD_KEYS_FILE 里还有发飞书网关的那一行（#2226）：重跑 hk.sh 整份重写"
+    bad=1
+  fi
+  if ((bad == 0)); then ok "已退役的飞书网关留下的单元、目录、令牌文件都不在了（#2226）"; fi
 }
 
 load_config() {
@@ -436,6 +521,7 @@ readback() {
   readback_upstream
   readback_cert
   readback_web_upload
+  readback_retired_gateway
   readback_release
 }
 
@@ -648,6 +734,7 @@ main() {
     load_config
     setup_wireguard
     setup_web_upload
+    retire_gateway
     setup_fail2ban
     setup_site
     setup_tls

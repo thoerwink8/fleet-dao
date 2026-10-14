@@ -5,7 +5,7 @@
 #   老目录、老配置键），新写的代码里不许再冒出一个 demo；
 # - deploy/france/fleet-demo-scopes.{sh,service,path,timer}、deploy/test/demo-scopes.test.sh 不在仓里；
 # - deploy/france/desired-config.json 里没有演示版的键；
-# - france.sh 真有「停掉并删掉老单元、读回核对它们不在」那两步。
+# - france.sh 真有「停掉并删掉老单元、读回核对它们不在」那两步；同一步还删已退役的令牌文件（RETIRED_FILES，#2226）。
 # 【故意造出的失败】查法本身也要查得出：往一份副本里种一行没带 #1223 的 demo、种一个老名字的文件，查法必须报出来；
 # 种的是带 #1223 的那种，查法必须放过——查法坏了（什么都查不出）这里就红，不会悄悄过。
 # 用法：bash deploy/test/no-demo.test.sh（不用 root）。退出码：0 通过，1 不通过。
@@ -90,6 +90,7 @@ ok() { LOG+=("ok $1"); }
 RETIRED_UNITS=(fleet-demo-scopes.path fleet-demo-scopes.timer fleet-demo-scopes.service)
 RETIRED_UNIT_DIR=$TMP/units
 RETIRED_BIN=$TMP/sbin/fleet-demo-scopes
+RETIRED_FILES=() # 演示版这几段不摆令牌文件，最后一段另测（#2226）
 STATE=$TMP/state # 每个单元一个文件，里面写 active / inactive
 RELOADS=0
 STUCK=0 # 1 = 停不掉
@@ -154,6 +155,34 @@ rm -f -- "$RETIRED_UNIT_DIR/fleet-demo-scopes.service"
 echo inactive >"$STATE/fleet-demo-scopes.service"
 retire_old_units
 check "只剩一部分（另一个单元早就没了）：剩下的照清，没有红" "$(left):${#REDS[@]}" ":0"
+
+echo "== 已退役的令牌文件（#2226）：france.sh 的清单里有那三个，装机删掉、再跑不动，删不掉、还在判红"
+for f in agent-token.env gateway-token.env gateway-deploy.key; do
+  check "$f 在 RETIRED_FILES 里" "$(grep -c "^RETIRED_FILES=.*/$f" "$DEPLOY/france.sh")" 1
+done
+install_old
+mkdir -p "$TMP/etc"
+# shellcheck disable=SC2034 # 摘出来的函数读它
+RETIRED_FILES=("$TMP/etc/agent-token.env" "$TMP/etc/gateway-token.env" "$TMP/etc/gateway-deploy.key")
+: >"$TMP/etc/agent-token.env"
+: >"$TMP/etc/gateway-deploy.key"
+retire_old_units
+check "两份在、一份早没了：在的删掉，记两笔（加三个单元、一个脚本共六笔），没有红" \
+  "$(ls -A "$TMP/etc"):${#LOG[@]}:${#REDS[@]}" ":6:0"
+REDS=()
+LOG=()
+readback_retired_units
+check "读回：令牌文件都不在了，通过" "${#REDS[@]}:$(printf '%s\n' "${LOG[@]}" | grep -c '令牌文件都不在了')" "0:1"
+LOG=()
+retire_old_units
+check "再来一遍：幂等，什么都不动" "${#LOG[@]}:${#REDS[@]}" "0:0"
+mkdir -p "$TMP/etc/gateway-token.env"
+: >"$TMP/etc/gateway-token.env/x"
+retire_old_units
+check "【故意造出的失败】删不掉（是个非空目录）：判红，不当成删了" "$(printf '%s\n' "${REDS[@]}" | grep -c 'gateway-token.env 删不掉')" 1
+REDS=()
+readback_retired_units
+check "【故意造出的失败】读回：还在的判红" "$(printf '%s\n' "${REDS[@]}" | grep -c '令牌文件.*gateway-token.env 还在')" 1
 
 if ((fail)); then
   echo "no-demo：不通过"
