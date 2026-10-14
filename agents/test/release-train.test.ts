@@ -1321,7 +1321,8 @@ describe('status', () => {
 
 describe('驱动死了：认得出、接着走（#1674）', () => {
   const MIN = 60_000;
-  const LIMITS = { releaseMs: 15 * MIN, deadMarginMs: 5 * MIN };
+  // 轮询按真实的 30 秒：总时限 15 分钟配 1 秒一圈要转 900 圈，CI 忙时单条测试超过 5 秒
+  const LIMITS = { releaseMs: 15 * MIN, deadMarginMs: 5 * MIN, pollMs: 30_000 };
   const withDriver = (io: TrainIo, extra: Partial<TrainIo> = {}): TrainIo => ({
     ...io,
     pid: 4242,
