@@ -9,6 +9,8 @@
 // - 测试不只读自己包里的文件（读别的包的源码、夹具，读 docs/ops.md、AGENTS.md、deploy/ 下的脚本）。PATH_RULES 和 TEST_READS
 //   就是这些「谁的测试读谁」的清单；test/ci-plan.test.ts 扫所有测试文件里指向包外的路径，漏记一条就红。
 // - 这里判「少跑」等于放行没测过的改动，改它要连测试一起看。
+
+import { deployReaders } from './deploy-readers.ts';
 import { type Reuse, reuseOf } from './main-reuse.ts';
 import { crossPackageTargets, packageOffSurface } from './package-surface.ts';
 import type { RepoView } from './repo.ts';
@@ -73,6 +75,11 @@ export interface CiPlan {
   /** deploy/test/run.sh：all 全套；ops 只跑读 docs/ops.md 的两块（`run.sh --ops`：端口表、place-file）；none 不跑。 */
   deploy: DeployMode;
   /**
+   * 只改了 deploy/（PR）时测试不全跑，只跑读 deploy/ 的测试文件（deploy-readers.ts 从代码里算，决定 0093）：assignTests 看到它就把这些文件
+   * 加进要测的清单，没有别的要测的单元也照样装箱。主线推送、别的事件不会有它（那些全跑，是这条少测的兜底）。
+   */
+  deployTests?: true;
+  /**
    * 只有主线推送会有：这一轮的 test、web、deploy 不重测，复用了一次同树、同基准树、成功的 PR 检查（main-reuse.ts 判）。
    * 有它时 tests 空、web 假、deploy none——汇总 job 据此认「这三个 job 本该跳过」，同时核对它是主线事件上带来的、字段齐全。
    */
@@ -136,7 +143,13 @@ export const TEST_READS: Record<string, string[]> = {
 
 export type Rule =
   | { match: (f: string) => boolean; full: string }
-  | { match: (f: string) => boolean; units: string[]; deploy?: 'all' | 'ops'; why: string };
+  | {
+      match: (f: string) => boolean;
+      units: string[];
+      deploy?: 'all' | 'ops';
+      deployTests?: true;
+      why: string;
+    };
 
 const exact = (p: string) => (f: string) => f === p;
 const under = (p: string) => (f: string) => f.startsWith(p);
@@ -347,13 +360,31 @@ export const ROOT_CONFIG_FILES: readonly string[] = [
 /** 测试夹具：别的包的测试也读（PATH_RULES 全跑；ci-cache.ts 的缓存键也认这一条）。 */
 export const FIXTURE_PATH = /^packages\/[^/]+\/test\/(?:.+\/)?fixtures\//;
 
+/** deploy/ 的默认去处：全跑（本机 test:changed、推前预检、主线推送都走这条）。 */
+export const DEPLOY_FULL_RULE: Rule = {
+  match: under('deploy/'),
+  full: '装机脚本：deploy/test 全跑，好几个包的测试也直接读 deploy/ 下的文件',
+};
+/**
+ * PR 上改 deploy/ 的去处（planCi 的 narrowDeploy）：deploy/test 全套照跑，单元测试只跑读 deploy/ 的文件，不开 web 打包、不跑 tsc
+ * （deploy/ 不在任何 tsconfig 里，web 的打包不读它）。约 12/40 的 PR 因为只改了 deploy/ 开满 8 台。
+ * 主线推送不走这条（全跑），发版只认主线全绿，所以读 deploy/ 的测试没被认出来也有兜底（决定 0093 第 6 条）。
+ */
+export const DEPLOY_NARROW_RULE: Rule = {
+  match: under('deploy/'),
+  units: [],
+  deploy: 'all',
+  deployTests: true,
+  why: '装机脚本：deploy/test 全套，加上读 deploy/ 的测试文件（代码里算出来的，不是清单）',
+};
+
 /** 包外路径的去处，按顺序取第一条。包内的（packages/<包>/…）不在这里，按依赖图算。 */
 export const PATH_RULES: readonly Rule[] = [
   ...ROOT_CONFIG_FILES.map((p) => ({ match: exact(p), full: '根配置，所有包都受影响' })),
   { match: under('.github/workflows/'), full: 'CI 工作流本身' },
   { match: under('packages/shared/'), full: '几乎所有包都依赖 shared' },
   { match: (f) => FIXTURE_PATH.test(f), full: '测试夹具，别的包的测试也读' },
-  { match: under('deploy/'), full: '装机脚本：deploy/test 全跑，好几个包的测试也直接读 deploy/ 下的文件' },
+  DEPLOY_FULL_RULE,
   // deploy/test 里读 docs/ops.md 的只有端口表那段和 place-file.test.sh：只改文档跑这两块（run.sh --ops），不拖上全套
   {
     match: exact('docs/ops.md'),
@@ -529,6 +560,11 @@ export interface PlanInput {
   rules?: readonly Rule[];
   /** 仓里有没有这个文件：e2e 清单里改到的 spec 文件被删了就不再点名。不给 = 都当还在。 */
   specExists?: (rel: string) => boolean;
+  /**
+   * 改 deploy/ 时不全跑、只跑读它的测试（DEPLOY_NARROW_RULE）。只有真 PR 传 true（bin/ci-plan.ts）；
+   * 主线推送（按区间算也走这里）、本机预检不传，deploy/ 照旧全跑。
+   */
+  narrowDeploy?: boolean;
 }
 
 /** TEST_READS 的一项读的是这份改动里的东西：包名对 pkgs，带 / 的是文件（以 / 结尾是目录）对改动的文件。 */
@@ -559,6 +595,8 @@ interface Sorted {
   reasons: string[];
   /** 取最大的：有一条要全套就全套。 */
   deploy: DeployMode;
+  /** 有规则要求加跑读 deploy/ 的测试文件（DEPLOY_NARROW_RULE）。 */
+  deployTests: boolean;
   /** 有文件认不出（不在依赖图里的包目录、不在任何规则里的路径）：这次改了什么不确定，e2e 不许当成不用跑。 */
   unknown: boolean;
 }
@@ -583,6 +621,7 @@ function sortChanges(
     readers: new Set(),
     reasons: [],
     deploy: 'none',
+    deployTests: false,
     unknown: false,
   };
   for (const f of changed) {
@@ -596,6 +635,7 @@ function sortChanges(
     if (rule) {
       for (const u of rule.units) s.readers.add(u);
       if (rule.deploy === 'all' || (rule.deploy === 'ops' && s.deploy === 'none')) s.deploy = rule.deploy;
+      if (rule.deployTests) s.deployTests = true;
       s.reasons.push(`${f}：${rule.why}${rule.units.length > 0 ? `，测 ${rule.units.join('、')}` : ''}`);
       continue;
     }
@@ -611,7 +651,17 @@ function sortChanges(
   return s;
 }
 
-export function planCi({ event, changed, graph, rules = PATH_RULES, specExists }: PlanInput): CiPlan {
+export function planCi({
+  event,
+  changed,
+  graph,
+  rules: baseRules = PATH_RULES,
+  specExists,
+  narrowDeploy = false,
+}: PlanInput): CiPlan {
+  const rules = narrowDeploy
+    ? baseRules.map((r) => (r === DEPLOY_FULL_RULE ? DEPLOY_NARROW_RULE : r))
+    : baseRules;
   if (event !== 'pull_request') return fullPlan([`${event} 事件：全跑（主线上兜底）`]);
   if (typeof graph === 'string') return fullPlan([`包依赖图读不出（${graph}）：全跑`]);
   if (changed.length === 0) return fullPlan(['改动列表是空的：认不出这次改了什么，全跑']);
@@ -647,6 +697,7 @@ export function planCi({ event, changed, graph, rules = PATH_RULES, specExists }
     web: touched.has('web'),
     e2e,
     deploy: DEPLOY_READS_PACKAGES.some((p) => touched.has(p)) ? 'all' : s.deploy,
+    ...(s.deployTests ? { deployTests: true as const } : {}),
   };
 }
 
@@ -702,6 +753,8 @@ export interface TestInputs {
   timings: Timings | string;
   /** 读测试文件的内容（认哪些要 Temporal 命令行）。 */
   read: (rel: string) => string | undefined;
+  /** 仓的视图：plan.deployTests 时顺着 import 找读 deploy/ 的测试要用（deploy-readers.ts）；没给又要找，返回一句为什么。 */
+  repo?: RepoView;
 }
 
 /**
@@ -714,10 +767,19 @@ export function assignTests(
   plan: CiPlan,
   input: TestInputs,
 ): { plan: CiPlan; packed: Packed | undefined } | string {
-  if (!plan.full && plan.testUnits.length === 0) return { plan, packed: undefined };
+  if (!plan.full && plan.testUnits.length === 0 && !plan.deployTests) return { plan, packed: undefined };
   if (typeof input.all === 'string') return `列不出测试文件：${input.all}`;
   const units = plan.full ? undefined : new Set(plan.testUnits);
-  const picked = input.all.filter((f) => units === undefined || units.has(unitOfTestFile(f) ?? ''));
+  let readers: ReadonlySet<string> = new Set();
+  if (plan.deployTests && !plan.full) {
+    if (input.repo === undefined) return '要找读 deploy/ 的测试文件，却没给仓的视图（repo）';
+    const found = deployReaders(input.repo, input.all);
+    if (typeof found === 'string') return `找不出读 deploy/ 的测试文件：${found}`;
+    readers = new Set(found);
+  }
+  const picked = input.all.filter(
+    (f) => units === undefined || units.has(unitOfTestFile(f) ?? '') || readers.has(f),
+  );
   if (picked.length === 0) {
     const what = plan.full ? '全部' : plan.testUnits.join('、');
     return `要测 ${what}，却一个测试文件都没有（vitest 没收到文件会红）`;
@@ -731,7 +793,12 @@ export function assignTests(
   }
   const packed = packTests({ files, universe: input.all, timings: input.timings, temporal });
   if (typeof packed === 'string') return `装不了箱：${packed}`;
-  return { plan: { ...plan, tests: packed.boxes, reasons: [...plan.reasons, ...packed.notes] }, packed };
+  const note =
+    readers.size > 0 ? [`读 deploy/ 的测试文件 ${readers.size} 个，不全跑（主线推送全跑兜底）`] : [];
+  return {
+    plan: { ...plan, tests: packed.boxes, reasons: [...plan.reasons, ...note, ...packed.notes] },
+    packed,
+  };
 }
 
 /**
@@ -740,11 +807,12 @@ export function assignTests(
  * e2e 不复用：PR 上不跑 e2e（deferE2eToMain），没有可复用的结果，主线这一轮照区间算出的清单跑。
  */
 export function applyReuse(plan: CiPlan, reuse: Reuse): CiPlan {
+  const { deployTests: _, ...rest } = plan;
   const wasTesting = plan.full
     ? '全部测试'
     : `${plan.tests.reduce((n, b) => n + b.files.length, 0)} 个测试文件`;
   return {
-    ...plan,
+    ...rest,
     full: false,
     testUnits: [],
     tests: [],
@@ -772,6 +840,8 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
     e2e: e2eOutput(plan.e2e),
     deploy: plan.deploy,
     deploy_matrix: JSON.stringify(deployMatrix(plan.deploy)),
+    // 测试窄跑了（只改 deploy/）：PR 那一轮不留「已测的树」声明，主线不复用它、自己全跑（ci.yml 的 tested 步）
+    narrowed: plan.deployTests === true ? 'true' : '',
     // 复用的那次 PR 检查的运行号；没复用是空串。汇总 job 核它和 plan 里的是同一份。
     reused: plan.reused ? String(plan.reused.run) : '',
   };
@@ -840,7 +910,7 @@ function parsePlan(text: unknown): CiPlan | string {
   if ('reused' in o && o.reused !== undefined) {
     const reused = reuseOf(o.reused);
     if (reused === null) return 'changes 给的 plan 里 reused（同树复用）字段不齐全';
-    if (o.full || o.testUnits?.length || o.tests?.length || o.web || o.deploy !== 'none')
+    if (o.full || o.testUnits?.length || o.deployTests || o.tests?.length || o.web || o.deploy !== 'none')
       return 'plan 说复用了同树的 PR 检查，却还有要测的 test、web、deploy';
     return { ...(o as CiPlan), reused };
   }
@@ -878,7 +948,7 @@ function testsProblem(plan: CiPlan): string | undefined {
       seen.add(f);
     }
   }
-  const want = plan.full || plan.testUnits.length > 0;
+  const want = plan.full || plan.testUnits.length > 0 || plan.deployTests === true;
   if (want !== plan.tests.length > 0) {
     return want ? 'plan 有要测的单元，却一台测试都没装（没装箱？）' : 'plan 没有要测的单元，却装了测试台';
   }

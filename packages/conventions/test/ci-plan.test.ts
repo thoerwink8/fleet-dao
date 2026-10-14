@@ -920,13 +920,15 @@ describe('ci.yml 和这里对得上', () => {
     expect(lint, 'lint job 不见了').not.toBe('');
     expect(lint).toContain('pnpm exec biome check .');
     expect(lint).toContain('pnpm exec tsc -b');
-    expect(lint).toContain(`pnpm exec vitest run ${ALWAYS_TESTS.join(' ')}`);
+    // 每次都跑的测试一样一样各自起（红了看得出是哪一类），合起来正好是 ALWAYS_TESTS（test-changed.test.ts 另核 ci.yml 和它对得上）
+    for (const t of ALWAYS_TESTS) expect(lint).toContain(`pnpm exec vitest run ${t}`);
     // 三样在同一步里各自后台跑、各写各的结果（并行跑的那步真跑一遍，见下面「lint 的并行步」）；汇总读的是这一步
     // 写出来的三样结果，不读哪一步的 conclusion（continue-on-error 的步 conclusion 会被改写成 success）。
     expect(lint).toMatch(/^\s+id: checks$/m);
     expect(lint).toContain('steps.checks.outputs.biome');
     expect(lint).toContain('steps.checks.outputs.tsc');
-    expect(lint).toContain('steps.checks.outputs.docs');
+    expect(lint).toContain('steps.checks.outputs.doc_pointers');
+    expect(lint).toContain('steps.checks.outputs.agents_test');
     expect(lint).not.toMatch(/steps\.\w+\.conclusion/);
     // 判红的那步要真的非零退出（只 echo 不算红）。
     expect(lint).toMatch(/::error::lint 里有检查不对/);
@@ -986,32 +988,73 @@ describe('ci.yml 和这里对得上', () => {
 
     it('每一样的分组标题带上它自己跑了几秒（三样并行，墙钟 = 最慢那样，不记看不出该省哪个）', () => {
       const { r } = go({ BIOME_WANT: 'true', TSC: 'all' }, []);
-      for (const name of ['biome', 'tsc', 'docs'])
+      for (const name of ['biome', 'tsc', 'doc_pointers', 'agents_test'])
         expect(r.stdout, name).toMatch(new RegExp(`::group::${name}（退出码 0，\\d+ 秒）`));
     });
 
-    it('三样都绿：三样都写 success，tsc 带上算出来的项目', () => {
+    it('四样都绿：四样都写 success，tsc 带上算出来的项目', () => {
       const { outputs, calls } = go({ BIOME_WANT: 'true', TSC: 'packages/cli packages/core' }, []);
-      expect(outputs).toEqual({ biome: 'success', tsc: 'success', docs: 'success' });
+      expect(outputs).toEqual({
+        biome: 'success',
+        tsc: 'success',
+        doc_pointers: 'success',
+        agents_test: 'success',
+      });
       expect(calls).toContain('exec tsc -b packages/cli packages/core');
       expect(calls).toContain('exec biome check .');
     });
 
-    it('【故意造出的失败】biome 红了：tsc、docs 照样跑完、照样 success，biome 写 failure（#566 不许再漏）', () => {
+    it('【故意造出的失败】biome 红了：tsc、doc_pointers、agents_test 照样跑完、照样 success，biome 写 failure（#566 不许再漏）', () => {
       const { outputs, calls } = go({ BIOME_WANT: 'true', TSC: 'all' }, ['biome']);
-      expect(outputs).toEqual({ biome: 'failure', tsc: 'success', docs: 'success' });
+      expect(outputs).toEqual({
+        biome: 'failure',
+        tsc: 'success',
+        doc_pointers: 'success',
+        agents_test: 'success',
+      });
       expect(calls).toContain('exec tsc -b');
       expect(calls).toContain('doc-pointers.test.ts');
+      expect(calls).toContain('agents/test/');
     });
 
-    it('【故意造出的失败】三样全红：三样都写 failure，一个不少', () => {
+    it('【故意造出的失败】只有文档指针那一样红：只它写 failure，agents_test 照跑照 success（红在哪一类一眼看得出）', () => {
+      const { outputs } = go({ BIOME_WANT: 'true', TSC: 'all' }, ['doc-pointers']);
+      expect(outputs).toEqual({
+        biome: 'success',
+        tsc: 'success',
+        doc_pointers: 'failure',
+        agents_test: 'success',
+      });
+    });
+
+    it('【故意造出的失败】只有 agents/test 那一样红：只它写 failure，doc_pointers 照 success', () => {
+      const { outputs } = go({ BIOME_WANT: 'true', TSC: 'all' }, ['agents/test']);
+      expect(outputs).toEqual({
+        biome: 'success',
+        tsc: 'success',
+        doc_pointers: 'success',
+        agents_test: 'failure',
+      });
+    });
+
+    it('【故意造出的失败】四样全红：四样都写 failure，一个不少', () => {
       const { outputs } = go({ BIOME_WANT: 'true', TSC: 'all' }, ['biome', 'tsc', 'vitest']);
-      expect(outputs).toEqual({ biome: 'failure', tsc: 'failure', docs: 'failure' });
+      expect(outputs).toEqual({
+        biome: 'failure',
+        tsc: 'failure',
+        doc_pointers: 'failure',
+        agents_test: 'failure',
+      });
     });
 
-    it('开关说不跑（只改了 .md）：biome、tsc 写 skipped、没被叫，docs 照跑', () => {
+    it('开关说不跑（只改了 .md）：biome、tsc 写 skipped、没被叫，doc_pointers、agents_test 照跑', () => {
       const { outputs, calls } = go({ BIOME_WANT: 'false', TSC: '' }, []);
-      expect(outputs).toEqual({ biome: 'skipped', tsc: 'skipped', docs: 'success' });
+      expect(outputs).toEqual({
+        biome: 'skipped',
+        tsc: 'skipped',
+        doc_pointers: 'success',
+        agents_test: 'success',
+      });
       expect(calls).not.toContain('biome');
       expect(calls).not.toContain('tsc');
     });
@@ -1095,7 +1138,8 @@ describe('ci.yml 和这里对得上', () => {
     const base: Record<string, string> = {
       BIOME: 'success',
       TSC: 'success',
-      DOCS: 'success',
+      DOC_POINTERS: 'success',
+      AGENTS_TEST: 'success',
       BIOME_WANT: 'true',
       TSC_WANT: 'all',
       HYGIENE: 'success',
@@ -1132,12 +1176,19 @@ describe('ci.yml 和这里对得上', () => {
       expect(r.stdout).toContain('tsc（failure');
     });
 
-    it('【故意造出的失败】docs 红了、被跳过了（docs 每次都得跑）：都红', () => {
+    it('【故意造出的失败】doc_pointers、agents_test 红了、被跳过了（每次都得跑）：都红，且只点名红的那一样', () => {
       // 空值 = 并行那步中途崩了、没写出结果：同样红
-      for (const DOCS of ['failure', 'skipped', 'cancelled', '']) {
-        const r = run({ DOCS });
-        expect(r.status, DOCS).toBe(1);
-        expect(r.stdout, DOCS).toContain(`docs（${DOCS}，本该 success）`);
+      for (const [env, other] of [
+        ['DOC_POINTERS', 'agents_test'],
+        ['AGENTS_TEST', 'doc_pointers'],
+      ] as const) {
+        const name = env.toLowerCase();
+        for (const v of ['failure', 'skipped', 'cancelled', '']) {
+          const r = run({ [env]: v });
+          expect(r.status, `${env}=${v}`).toBe(1);
+          expect(r.stdout, `${env}=${v}`).toContain(`${name}（${v}，本该 success）`);
+          expect(r.stdout, `${env}=${v}`).not.toContain(`${other}（`);
+        }
       }
     });
 
