@@ -1,5 +1,5 @@
 // agents-sync 可执行入口：接上真的参数、环境、输出和身份。
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -112,5 +112,29 @@ if (
       process.stderr.write(`本机会话心跳换新没做成：${(err as Error).message.split('\n')[0]}\n`);
       process.exitCode = 1;
     }
+  }
+}
+
+// reclaude 健康维护（预热 daemon、测速记录、更新检查）：后台脱离执行，不等它、不拖慢开会话；
+// 失败只写 ~/.fleet-dao/mirasim-reclaude/health.log，不让同步失败。没装 reclaude 时子进程自己直接退出。
+if (process.argv.includes('--apply') && !process.argv.includes('--help') && process.platform !== 'linux') {
+  try {
+    const args = process.argv.slice(2);
+    const at = args.indexOf('--home');
+    const healthHome = (at >= 0 ? args[at + 1] : undefined) ?? homedir();
+    const child = spawn(
+      process.execPath,
+      [
+        fileURLToPath(new URL('../../mirasim-reclaude/bin/health', import.meta.url)),
+        '--sync',
+        '--home',
+        healthHome,
+      ],
+      { detached: true, stdio: 'ignore', windowsHide: true },
+    );
+    child.on('error', () => {});
+    child.unref();
+  } catch {
+    // 起不来也不影响同步
   }
 }

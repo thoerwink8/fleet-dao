@@ -17,6 +17,11 @@
       "file": "packages/agents-sync/src/main.ts",
       "spec": "../../mirasim-reclaude/bin/migrate",
       "why": "同上，不装依赖；用路径起 mirasim-reclaude 的 bin 当子进程，没有 import；package.json 声明保留作变更边"
+    },
+    {
+      "file": "packages/agents-sync/src/main.ts",
+      "spec": "../../mirasim-reclaude/bin/health",
+      "why": "同上，不装依赖；用路径起 mirasim-reclaude 的 bin/health 当后台脱离子进程，没有 import"
     }
   ]
 }

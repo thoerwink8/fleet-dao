@@ -55,6 +55,23 @@ Node 须为 22.22 或以上。目标机器无需安装 Go：有 Go 时从本仓�
 
 直接用 `node packages/mirasim-reclaude/bin/migrate` 也能运行，专用同步检出无需安装 `node_modules`。`--no-wait` 只尝试当前空闲状态，没完成退出 75；错误退出 1，不能把等待当迁移成功。
 
+### 3.1 预热、测速记录与 reclaude 更新
+
+桌面机（非 Linux、装了 reclaude）每次开会话同步，`agents-sync --apply` 会后台脱离起一个 `packages/mirasim-reclaude/bin/health --sync`，不等它、失败只写日志、不让同步失败：
+
+- 预热：每次都跑 `reclaude daemon --detach`（幂等），让 daemon 在 Mirasim 用之前已经热好。
+- 测速：距上次满 6 小时才跑 `reclaude config gateway test`，连同 `reclaude status` 里正在用的 `gateway_url` 和 `gateway_healthy`，追加一行 JSON（`at`、`platform`、`current`、`healthy`、`results[]`）到 `~/.fleet-dao/mirasim-reclaude/gateway-test.jsonl`，超 1MB 截掉旧的一半。线路始终是 reclaude 的 auto 模式，这里不设线路。
+- 更新：同样每 6 小时 `reclaude update --check`，结果记在 `reclaude-update.json`。有新版时，只有 Mirasim 没有在途 Claude 回合（沿用迁移的空闲判断，读 `~/.mirasim/sessions/claude/*/record.json`）才跑 `reclaude update`，更新不压在 Mirasim 启动路径上；有在途回合或判不了空闲只记「有新版待装」，下一轮再试。
+- 所有子进程带超时（测速 15 秒、update 5 分钟、其余 10 秒）；超时、起不来、输出认不出都记「没查成」，不当正常。只调 reclaude 命令，不读 reclaude 的设备密钥目录。
+- 节流时间在 `health-state.json`，运行日志在 `health.log`（同目录，同样超 1MB 截半）。
+
+看现状：
+
+```bash
+pnpm mirasim:health          # 只读汇总：daemon、当前线路及最近测速、各线路最近 5 次中位数、reclaude 版本和有无新版、上次检查时间
+pnpm mirasim:health --run    # 现在就预热、测速、检查更新（空闲才装）再汇总
+```
+
 ## 4. 服务器（Linux）与 Fleet
 
 法国维持两个明确入口：自有 Claude 直接由 reclaude 起，无头 Mirasim 固定 `cloud`。账号池、渠道切换与额度耗尽后的任务接续由 Fleet/Temporal 控制；不默认安装桌面混合来源启动器。自动迁移入口在 Linux 明确跳过。
