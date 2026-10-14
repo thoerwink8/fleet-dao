@@ -53,11 +53,12 @@ export interface CiPlan {
   web: boolean;
   /**
    * 驾驶舱用户视角 e2e（真 Postgres + 真后端 + 真前端 + Chromium，packages/web/e2e，#930）：一个 job、要几分钟。
-   * 决定 0029（#1186）：PR 只点改动页，输出是「跑哪些 spec」而不是「跑不跑」：
-   * - `'all'`：全套 spec。非 PR 事件（每夜 schedule、主线推送）、依赖图读不出、空改动、认不出的路径、
+   * 决定 0093：e2e 不在 PR 闸，在发版闸——PR 上一律不跑（deferE2eToMain），合并后主线推送那一轮按「上次真绿的头…这次」
+   * 的累计改动跑映射到的 spec，发版只认主线头 CI 全绿，所以 e2e 红了不发。输出是「跑哪些 spec」而不是「跑不跑」（决定 0029）：
+   * - `'all'`：全套 spec。每夜 schedule、主线推送查不到基准、依赖图读不出、空改动、认不出的路径、
    *   改到 e2e 夹具、playwright 配置、ci.yml、映射表本身、映射不到页面的 web 文件，都是全套（不确定就全跑）。
    * - 非空数组：只跑这几个 spec（仓内相对路径，来自 E2E_PAGE_MAP 或改到的 spec 文件自己）。
-   * - 空数组：这次不跑 e2e（只改 api、只改测试文件、改的页面没有 spec 盖着），回归靠每夜全量兜底；汇总 job 把 e2e job 的 skipped 当「本该跳过」。
+   * - 空数组：这次不跑 e2e（PR、只改 api、只改测试文件、改的页面没有 spec 盖着），回归靠每夜全量兜底；汇总 job 把 e2e job 的 skipped 当「本该跳过」。
    * 注意它和 full 不同步：全跑（deploy/ 脚本、根配置这类升的全跑）不一定开 e2e，见 planCi。
    */
   e2e: E2eSpecs;
@@ -157,8 +158,9 @@ const under = (p: string) => (f: string) => f.startsWith(p);
  * `e2e` 与 `test` 两项状态。
  */
 /**
- * ** 再拆开（决定 0029，#1186）**：PR 只点改动页，全量回归留给每夜（非 PR 事件在 planCi 里一律 'all'）。
+ * ** 再拆开（决定 0029，#1186）**：只点改动页，全量回归留给每夜（schedule 在 planCi 里一律 'all'）。
  * 上面那段说的「web、api 一碰就整套」不再是现状：现在按改到的文件算出要跑哪几个 spec（e2eSpecsFor）。
+ * 决定 0093 起这份清单只在主线推送那一轮用（按「上次真绿的头…这次」的累计改动算），PR 上不跑（deferE2eToMain）。
  *
  * 判法，逐个改动文件：
  * - 全套：`.github/workflows/ci.yml`、本文件（映射表就写在这里，改了表要全跑一遍验表）、
@@ -296,6 +298,25 @@ export function e2eSpecsFor(changed: readonly string[], specExists?: (rel: strin
 
 /** 这份 e2e 清单要不要起 e2e job。 */
 export const e2eRuns = (e: E2eSpecs): boolean => e === 'all' || e.length > 0;
+
+/**
+ * e2e 出 PR 闸（决定 0093）：PR 那一轮不跑 e2e，planCi 照常算出的清单只写进理由（合并后主线那一轮会跑哪些）。
+ * 为什么：e2e 只占 2.5% 的 job，却占 19% 的 runner 分钟，把 PR 墙钟从 2 分多拉到 7 分多；它红的多半是时序竞态。
+ * 移到主线推送那一轮当发版闸（发版只认主线头 CI 全绿），坏前端照样发不出去，PR 不再陪跑。
+ * 汇总 job 在 PR 事件上也核这一条：PR 的 plan 里 e2e 有清单就红（ciVerdict）。本机 test:changed 不经这里，照样提示该点哪几页。
+ */
+export function deferE2eToMain(plan: CiPlan): CiPlan {
+  if (!e2eRuns(plan.e2e)) return plan;
+  const what = plan.e2e === 'all' ? '全套' : plan.e2e.join('、');
+  return {
+    ...plan,
+    e2e: [],
+    reasons: [
+      ...plan.reasons,
+      `e2e 不在 PR 闸（决定 0093）：合并后主线推送那一轮跑（这次映射到 ${what}），红了不发版`,
+    ],
+  };
+}
 
 /** 写进 $GITHUB_OUTPUT 的 e2e 值：'all' | 空格隔开的 spec 路径（相对 packages/web，e2e job 在那里跑 playwright）| 空串（不跑）。 */
 export function e2eOutput(e: E2eSpecs): string {
@@ -653,6 +674,7 @@ export function assignTests(
 /**
  * 主线这一轮复用了一次同树的 PR 检查（main-reuse.ts 已经核过树和基准树）：test、web、deploy 不再测。biome、tsc 的开关不动
  * （lint 本来就每轮自己跑一遍）。plan 先按区间算好、装好箱再交进来：被跳过的是「本来要测的」，不是「什么都不用测」。
+ * e2e 不复用：PR 上不跑 e2e（deferE2eToMain），没有可复用的结果，主线这一轮照区间算出的清单跑。
  */
 export function applyReuse(plan: CiPlan, reuse: Reuse): CiPlan {
   const wasTesting = plan.full
@@ -664,13 +686,12 @@ export function applyReuse(plan: CiPlan, reuse: Reuse): CiPlan {
     testUnits: [],
     tests: [],
     web: false,
-    e2e: [],
     deploy: 'none',
     reused: reuse,
     reasons: [
       ...plan.reasons,
       `同树复用：这次主线提交的树和 PR #${reuse.pr} 的检查（运行 ${reuse.run}）测的是同一棵、基准也是上次真绿的头；` +
-        `本来要测的（${wasTesting}${plan.web ? '、web' : ''}${e2eRuns(plan.e2e) ? '、e2e' : ''}${plan.deploy === 'none' ? '' : `、deploy ${plan.deploy}`}）不再重测`,
+        `本来要测的（${wasTesting}${plan.web ? '、web' : ''}${plan.deploy === 'none' ? '' : `、deploy ${plan.deploy}`}）不再重测；e2e 照区间跑`,
     ],
   };
 }
@@ -755,8 +776,8 @@ function parsePlan(text: unknown): CiPlan | string {
   if ('reused' in o && o.reused !== undefined) {
     const reused = reuseOf(o.reused);
     if (reused === null) return 'changes 给的 plan 里 reused（同树复用）字段不齐全';
-    if (o.full || o.testUnits?.length || o.tests?.length || o.web || e2eRuns(o.e2e) || o.deploy !== 'none')
-      return 'plan 说复用了同树的 PR 检查，却还有要测的 test、web、e2e、deploy';
+    if (o.full || o.testUnits?.length || o.tests?.length || o.web || o.deploy !== 'none')
+      return 'plan 说复用了同树的 PR 检查，却还有要测的 test、web、deploy';
     return { ...(o as CiPlan), reused };
   }
   return o as CiPlan;
@@ -835,6 +856,9 @@ export function ciVerdict(needs: unknown, event?: string): { ok: boolean; lines:
     bad('changes 给 e2e job 的开关（outputs.e2e）和 plan 里的 e2e 不是同一份');
   if (plan.full && (FULL_JOBS.some((j) => !expected(plan, j)) || plan.deploy !== 'all'))
     bad('plan 说全跑，却有 job 没开（或 deploy 不是全套）');
+  // e2e 不在 PR 闸（决定 0093，deferE2eToMain）：PR 的 plan 里 e2e 有清单，说明算计划那步没把它挪到主线
+  if (event === 'pull_request' && e2eRuns(plan.e2e))
+    bad('PR 的 plan 里 e2e 有清单：e2e 不在 PR 闸，只在主线推送那一轮跑（决定 0093）');
   // 同树复用（主线推送才有）：test、web、deploy 本该跳过的依据。只认主线事件、且 changes 的输出和 plan 里是同一次运行；
   // 事件没给（旧调用）、不是 push 都不认——一个 PR 的 plan 不能靠它把测试变成「本该跳过」。
   const claimedRun = n.changes?.outputs?.reused;
@@ -843,7 +867,7 @@ export function ciVerdict(needs: unknown, event?: string): { ok: boolean; lines:
       bad(`plan 说复用了同树的 PR 检查，但这一轮不是主线推送（事件：${event ?? '没给'}）`);
     if (claimedRun !== String(plan.reused.run)) bad('changes 的 reused 输出和 plan 里复用的运行号不是同一份');
     lines.push(
-      `✓ 同树复用：test、web、deploy 复用 PR #${plan.reused.pr} 的检查（运行 ${plan.reused.run}），不重测`,
+      `✓ 同树复用：test、web、deploy 复用 PR #${plan.reused.pr} 的检查（运行 ${plan.reused.run}），不重测；e2e 照区间跑`,
     );
   } else if (typeof claimedRun === 'string' && claimedRun !== '') {
     bad('changes 给了 reused 输出，plan 里却没有复用的记录');

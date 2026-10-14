@@ -23,8 +23,9 @@ E2E_PG_ADMIN_URL=postgres://postgres:<密码>@127.0.0.1:5432/postgres pnpm --fil
 ## 在 CI 里怎么跑（#930）
 
 `.github/workflows/ci.yml` 的 `e2e` job：Linux、容器里的 `postgres:16-alpine`（取自 `public.ecr.aws/docker/library/`，避开 Docker Hub 匿名限速）（`E2E_PG_ADMIN_URL` 指向它）、Playwright 的 Chromium（`E2E_BROWSER_CHANNEL=chromium`，`playwright install --with-deps chromium`，浏览器按 Playwright 版本缓存）。
-- 只在改到 `packages/web`、`api`、`db`、`shared`、依赖文件（`package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`）、`ci.yml` 自己，或认不出改了什么时才跑（判法 `packages/conventions/src/ci-plan.ts` 的 `touchesE2e`），别的 PR 跳过。
-- 红了挡合并：必过检查 `check` 等它，该跑的它必须绿（`ciVerdict`）。不管成败，报告、截图、各进程日志都当 artifact 上传、留 7 天（`e2e-<运行号>`，#1061）。
+- 不在 PR 闸、在发版闸（决定 0093）：PR 上不跑；合并后主线推送那一轮按「上次真绿的头…这次」的累计改动跑映射到的 spec（判法 `packages/conventions/src/ci-plan.ts` 的 `e2eSpecsFor` 和 `deferE2eToMain`），改到夹具、playwright 配置、备库、`ci.yml`、映射表就全套；每夜一轮全套兜底。
+- 红了这一轮主线 CI 就红（必过检查 `check` 等它，该跑的它必须绿，`ciVerdict`），法国的自动发版只发主线头 CI 全绿的提交，所以不发。不管成败，报告、截图、各进程日志都当 artifact 上传、留 7 天（`e2e-<运行号>`，#1061）。
+- 改了页面的 PR 想合前就点一遍：本机跑（`pnpm test:changed` 会列出该点哪几个 spec）。
 - 和本机的差别：本机是 Windows + 本机 Chrome + 自己起的 Windows 版 PG；CI 是 Linux + 下载的 Chromium + 容器 PG。库名、端口、用例顺序一样。
 - CI 的 `test` job 只收 `*.test.ts(x)`，`*.e2e.ts` 不在其内，`pnpm test` 不会误跑它。
 
