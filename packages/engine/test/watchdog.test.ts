@@ -2,6 +2,9 @@
 // 真 Temporal 测试服务端上的工作流。需求里的每一种都故意造一次：停了（stale）、连着失败（failing）、从没跑过（never）、
 // 恢复了自动撤（写清为什么）、读不到登记表算没查成、推送没写进去记没跑成下一轮重推。看门狗自己停了由后端现算，
 // 在 packages/api 的 watchdog-health.test.ts。
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   auditLog,
   finishScheduleRun,
@@ -16,7 +19,12 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import {
+  lastHistoryEntry,
+  parseHealthzResponse,
+  releaseAttentionReasons,
+} from '../src/jobs/release-watch.ts';
 import {
   jobIdOfKey,
   runWatchdogJob,
@@ -600,5 +608,222 @@ describe('总开关关着的跳过不算「连着没跑全」', () => {
     await run('real-red', -10, { outcome: 'partial', why: '读不到', scanned: 1, found: 1 });
     await runWatchdogJob(deps());
     expect((await openAlerts()).map((a) => a.dedupeKey)).toEqual(['watchdog:red:real-red:no-ok']);
+  });
+});
+
+describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法国发版失败后漏报）', () => {
+  const SHA = 'abcd1234'.padEnd(40, '0');
+  let dir: string;
+  let health: { status: number; body: unknown } | 'down';
+  let probes = 0;
+
+  const fetchHealth = (async () => {
+    probes += 1;
+    if (health === 'down') throw new Error('connect ECONNREFUSED 10.99.0.2:8787');
+    return new Response(JSON.stringify(health.body), { status: health.status });
+  }) as unknown as typeof fetch;
+
+  const history = (...rows: string[]) => writeFileSync(join(dir, '.history'), `${rows.join('\n')}\n`);
+  const BAD_HISTORY = [
+    `2026-10-14T17:03:00Z ${SHA} release`,
+    `2026-10-14T17:05:00Z ${SHA} unhealthy`,
+    '2026-10-14T17:06:00Z 1111aaaa2222 auto-rollback',
+    '2026-10-14T17:08:00Z 1111aaaa2222 unhealthy',
+  ];
+  const RED_503 = {
+    status: 503,
+    body: {
+      ok: false,
+      checks: { db: { ok: true }, temporal: { ok: false, code: 'down', message: '连不上 Temporal' } },
+    },
+  };
+
+  const wd = (): WatchdogDeps =>
+    watchdogJob({
+      db: t.db,
+      now: () => clock,
+      log: (level, text) => logs.push(`${level}:${text}`),
+      releasesDir: dir,
+      healthzUrl: 'http://127.0.0.1:1/healthz',
+      fetchImpl: fetchHealth,
+    })();
+
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'watchdog-release-'));
+    mkdirSync(join(dir, '.train'), { recursive: true });
+    mkdirSync(join(dir, '.auto'), { recursive: true });
+    health = { status: 200, body: { ok: true, checks: {} } };
+    probes = 0;
+    await register();
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const openKeys = async () => (await openAlerts()).map((a) => a.dedupeKey);
+
+  it('【故意造出的失败】重放那次事故：发布历史最近一条 unhealthy、进度记录 failed、自动发布说要人看 → 一张「发版要人看」卡；/healthz 503 满 10 分钟才报，写红的检查；恢复后两张都自己撤', async () => {
+    history(...BAD_HISTORY);
+    writeFileSync(join(dir, '.train', 'release-train.json'), JSON.stringify({ status: 'failed' }));
+    writeFileSync(
+      join(dir, '.auto', 'state.json'),
+      JSON.stringify({ auto: { note: '现在不发：上一趟发版是「failed」状态，要人看，不自动再发' } }),
+    );
+    health = RED_503;
+
+    // 第 0 分钟：发版那张立刻报；健康页刚发现，不到 10 分钟不报
+    expect(await runWatchdogJob(wd())).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(await openKeys()).toEqual([`watchdog:release:1111aaaa2222:unhealthy`]);
+    const rel = (await openAlerts())[0];
+    expect(rel?.title).toBe('发版要人看：新版没发成或退回了，自动发版停着');
+    expect(rel?.body).toContain('发布历史最近一条是「健康检查没过」');
+    expect(rel?.body).toContain('发版进度记录停在「failed」');
+    expect(rel?.body).toContain('自动发布说：现在不发：上一趟发版是「failed」状态，要人看');
+    expect(rel?.link).toBe('/france');
+
+    clock = at(9);
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toHaveLength(1);
+
+    // 第 10 分钟起：健康页那张报出来，写从几点起、红的检查
+    clock = at(10);
+    expect(await runWatchdogJob(wd())).toMatchObject({ outcome: 'ok', found: 2 });
+    expect(await openKeys()).toContain(`watchdog:healthz:since-${T0.getTime()}`);
+    const hz = (await openAlerts()).find((a) => a.dedupeKey.startsWith('watchdog:healthz:'));
+    expect(hz?.title).toBe('健康页（/healthz）非 200，已持续超过 10 分钟');
+    expect(hz?.body).toContain('HTTP 503');
+    expect(hz?.body).toContain('temporal：连不上 Temporal');
+    expect(hz?.body).not.toContain('db：');
+
+    // 再看一轮没变：不改卡
+    const before = (await alertOf(hz?.dedupeKey ?? ''))?.updatedAt;
+    clock = at(15);
+    await runWatchdogJob(wd());
+    expect((await alertOf(hz?.dedupeKey ?? ''))?.updatedAt).toEqual(before);
+
+    // 恢复：/healthz 回 200、发布历史最近一条是 release、进度记录收尾 → 两张都撤，写明为什么
+    health = { status: 200, body: { ok: true, checks: {} } };
+    history(...BAD_HISTORY, `2026-10-14T18:00:00Z ${'9'.repeat(40)} release`);
+    writeFileSync(join(dir, '.train', 'release-train.json'), JSON.stringify({ status: 'done' }));
+    writeFileSync(join(dir, '.auto', 'state.json'), JSON.stringify({ auto: { note: '在用的就是主线头' } }));
+    clock = at(20);
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([]);
+    expect((await alertOf(hz?.dedupeKey ?? ''))?.body).toContain('已撤：/healthz 回 200 了');
+    expect((await alertOf(rel?.dedupeKey ?? ''))?.body).toContain('已撤：发版现在不用人看了');
+  });
+
+  it('非 200 没满 10 分钟就恢复：从不报，也清掉记的时刻（下次重新数）', async () => {
+    history(`2026-10-14T17:03:00Z ${SHA} release`);
+    health = RED_503;
+    await runWatchdogJob(wd());
+    clock = at(8);
+    await runWatchdogJob(wd());
+    health = { status: 200, body: {} };
+    clock = at(9);
+    await runWatchdogJob(wd());
+    expect(await allAlerts()).toHaveLength(0);
+    // 又坏：从这一刻重新数，满 10 分钟前不报
+    health = RED_503;
+    clock = at(12);
+    await runWatchdogJob(wd());
+    clock = at(21);
+    await runWatchdogJob(wd());
+    expect(await allAlerts()).toHaveLength(0);
+    clock = at(22);
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([`watchdog:healthz:since-${at(12).getTime()}`]);
+  });
+
+  it('【故意造出的失败】后端连不上（fetch 抛）也算非 200：满 10 分钟报，写连不上', async () => {
+    history(`2026-10-14T17:03:00Z ${SHA} release`);
+    health = 'down';
+    await runWatchdogJob(wd());
+    clock = at(10);
+    await runWatchdogJob(wd());
+    const [a] = await openAlerts();
+    expect(a?.dedupeKey).toBe(`watchdog:healthz:since-${T0.getTime()}`);
+    expect(a?.body).toContain('连不上');
+  });
+
+  it('发布历史最近一条是 auto-rollback 也要人看；最近一条是 recovered / rollback / release 不报', async () => {
+    history(`2026-10-14T17:03:00Z ${SHA} release`, '2026-10-14T17:06:00Z 1111aaaa2222 auto-rollback');
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual(['watchdog:release:1111aaaa2222:auto-rollback']);
+    for (const event of ['recovered', 'rollback', 'release']) {
+      history(`2026-10-14T17:03:00Z ${SHA} ${event}`);
+      clock = new Date(clock.getTime() + 5 * MIN);
+      await runWatchdogJob(wd());
+      expect(await openKeys(), event).toEqual([]);
+    }
+  });
+
+  it('不是法国（没有发布目录）：这两项不看，也不去问 /healthz', async () => {
+    const r = await runWatchdogJob(
+      watchdogJob({
+        db: t.db,
+        now: () => clock,
+        log: () => {},
+        releasesDir: join(dir, 'not-there'),
+        fetchImpl: fetchHealth,
+      })(),
+    );
+    expect(r).toMatchObject({ outcome: 'unscanned' });
+    expect(probes).toBe(0);
+    expect(await allAlerts()).toHaveLength(0);
+  });
+
+  it('【故意造出的失败】目录在、发布历史读不到：这一轮记没跑成（不当成发版没事），开着的发版提醒不撤', async () => {
+    history(...BAD_HISTORY);
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toHaveLength(1);
+    rmSync(join(dir, '.history'));
+    clock = at(5);
+    await expect(runWatchdogJob(wd())).rejects.toThrow(WatchdogFailedError);
+    expect(await openKeys()).toHaveLength(1);
+    expect((await watchdogRuns()).at(-1)?.why).toContain('发布历史读不到');
+  });
+
+  it('和「连着没跑全」互不相干：发版出事不会多出 watchdog:red: 的卡', async () => {
+    history(...BAD_HISTORY);
+    await runWatchdogJob(wd());
+    expect((await allAlerts()).every((a) => !a.dedupeKey.startsWith('watchdog:red:'))).toBe(true);
+  });
+});
+
+describe('发版和健康页的判法（纯函数）', () => {
+  it('发布历史最后一行认不出抛，不当成没事；空的是 null', () => {
+    expect(lastHistoryEntry('')).toBeNull();
+    expect(lastHistoryEntry('2026-10-14T17:03:00Z abc release unmerged\n')).toEqual({
+      at: '2026-10-14T17:03:00Z',
+      sha: 'abc',
+      event: 'release',
+    });
+    expect(() => lastHistoryEntry('乱七八糟')).toThrow('认不出');
+  });
+
+  it('/healthz 的回应：200 好；503 列红的检查；不是健康报告的正文（502 页面）只报状态码', () => {
+    expect(parseHealthzResponse(200, '{}')).toEqual({ ok: true });
+    expect(
+      parseHealthzResponse(
+        503,
+        JSON.stringify({ checks: { a: { ok: false, message: 'x' }, b: { ok: true } } }),
+      ),
+    ).toMatchObject({ ok: false, status: 503, failing: [{ name: 'a', message: 'x' }] });
+    expect(parseHealthzResponse(502, '<html>Bad Gateway</html>')).toMatchObject({
+      ok: false,
+      status: 502,
+      failing: [],
+    });
+  });
+
+  it('进度记录 done、aborted 不算要人看，其他状态算；自动发布没说「要人看」不算', () => {
+    const f = (trainStatus: string | null, autoNote: string | null = null) => ({
+      last: null,
+      trainStatus,
+      autoNote,
+    });
+    expect(releaseAttentionReasons(f('done'))).toEqual([]);
+    expect(releaseAttentionReasons(f('aborted'))).toEqual([]);
+    expect(releaseAttentionReasons(f(null, '主线头 CI 不是绿的，等绿'))).toEqual([]);
+    expect(releaseAttentionReasons(f('deploying'))).toHaveLength(1);
   });
 });

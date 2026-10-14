@@ -15,6 +15,7 @@ export * from './queries/cli-versions.ts';
 export * from './queries/engine.ts';
 export * from './queries/engine-master.ts';
 export * from './queries/groom.ts';
+export * from './queries/healthz-watch.ts';
 export * from './queries/history.ts';
 export * from './queries/idempotency.ts';
 export * from './queries/intake.ts';
