@@ -439,16 +439,18 @@ async function afterProbeAlerts(db: Db, t: ProbeTarget, a: ProbeAttempt): Promis
 
 /**
  * 全部路由，被人拍了整池暂停（开关 engine.poolHolds）的池打上 heldBySwitch，探针不探它们。开关认不出的池（整份或那一项）也按暂停办，
- * 原因写「设置认不出」。库读不了照抛（这一轮记没跑成）。
+ * 原因写「设置认不出」。只被 pool-hold: 提醒顶着的池打上 heldByAlert：定时这一轮照档复探，探通了撤提醒。库读不了照抛（这一轮记没跑成）。
  */
 export async function probeTargetsWithHolds(db: Db, now: Date): Promise<ProbeTarget[]> {
   const [targets, held] = await Promise.all([routeProbeTargets(db), loadHeldPools(db, now)]);
   const reasons = new Map(held.facts.holds.map((h) => [h.poolId, h.reason]));
-  return targets.map((t) =>
-    held.switched.has(t.poolId)
-      ? { ...t, heldBySwitch: reasons.get(t.poolId) ?? '暂停设置认不出，按暂停办' }
-      : t,
-  );
+  const alertOnly = new Set(held.alertOnly);
+  return targets.map((t) => {
+    if (held.switched.has(t.poolId)) {
+      return { ...t, heldBySwitch: reasons.get(t.poolId) ?? '暂停设置认不出，按暂停办' };
+    }
+    return alertOnly.has(t.poolId) ? { ...t, heldByAlert: true } : t;
+  });
 }
 
 export interface RouteProbeWiring {

@@ -507,7 +507,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     async pickRoute(input): Promise<PickRouteResult> {
       // 上一次起会话的渠道运行中失败、失败分流判了该换渠道（#1118）：先标 disabled 写原因，下面选路读到就不再选它；标不成照抛
       if (input.failedChannel) {
-        // 老历史重放：标 disabled 写原因。断链探测已挪到收场记账（runs-writer.record，#1809），这里不再排。
+        // 老历史重放：标 disabled 写原因，不排探测。
         await markChannelDisabled(db, {
           channelId: input.failedChannel.channelId,
           routeId: input.failedChannel.routeId,
