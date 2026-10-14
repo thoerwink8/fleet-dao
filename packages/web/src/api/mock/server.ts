@@ -1816,34 +1816,16 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     for (const tv of st.tasks) {
       const state = tv.task.state;
       if (tv.paused || TERMINAL.has(state)) continue;
-      const front = latestActive(tv.runs);
 
-      if (state === 'queued' && rand() < 0.03) {
-        const rid = pickRoute('triage');
+      // 引擎只写 queued → running（动手会话）→ done/stopped/stalled 这几个状态（#556 起三段流程没了，不再写 triaging/planning）；
+      // 排队的一到点就起会话、按方案拆出子任务。
+      if (state === 'queued' && rand() < 0.05) {
+        const plan = st.plans[tv.task.id];
+        const rid = pickRoute(plan?.[0]?.stage === 'ui' ? 'ui' : 'execute');
         if (rid) {
-          startRun(tv, undefined, 'triage', rid, '分诊阶段排第一');
-          setTaskState(tv, 'triaging');
-        }
-      } else if (state === 'triaging' && front && rand() < 0.1) {
-        endRun(front, 'ok');
-        log(tv, {
-          source: 'session',
-          kind: 'done',
-          runId: front.id,
-          text: '交活：分诊完成——写码类、说清楚了、不用等人拍板',
-        });
-        startRun(tv, undefined, 'spec', pickRoute('spec') ?? front.routeId, '需求文档阶段排第一');
-        setTaskState(tv, 'planning');
-      } else if (state === 'planning' && front) {
-        if (front.stage === 'spec' && rand() < 0.08) {
-          endRun(front, 'ok');
           if (!tv.task.specDir) tv.task.specDir = `specs/${tv.task.issueNumber}`;
-          startRun(tv, undefined, 'plan', pickRoute('plan') ?? front.routeId, '方案阶段已钉住，排第一');
-          emit('tasks', tv.task.id);
-        } else if (front.stage === 'plan' && rand() < 0.05) {
-          endRun(front, 'ok');
-          log(tv, { source: 'session', kind: 'done', runId: front.id, text: '交活：方案写完，拆成子任务' });
           materializePlan(tv);
+          log(tv, { source: 'engine', kind: 'state', text: '引擎起了动手会话，按方案拆出子任务' });
         }
       }
 
