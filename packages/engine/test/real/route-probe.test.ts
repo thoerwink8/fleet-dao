@@ -166,7 +166,7 @@ const answered = (): FakeRunScript => ({ result: { text: REPLY } });
 describe('探通：在线，结论和时刻写进库，定时任务页那一行对得上', () => {
   it('上一次探通了的在线路由：定时这一轮不复探；池只被 pool-hold: 提醒顶着时照档复探，探通了撤掉提醒', async () => {
     await t.client.query(
-      "update routes set alive = true, probe_state = 'ok', probe_detail = '答上了：pong', probed_at = $1::timestamptz where id = 'carpool'",
+      "update routes set alive = true, probe_state = 'ok', probe_detail = '答上了：pong', probe_org = 'carpool', probed_at = $1::timestamptz where id = 'carpool'",
       [new Date(NOW.getTime() - 65 * 60_000).toISOString()],
     );
     const quiet = setup(answered);

@@ -679,7 +679,12 @@ describe('按活跃分三档（#1798 片 3）', () => {
     at: minutesAgo(minutes),
     detail: `没通（连着不通 ${streak} 次）`,
   });
-  const okAgo = (m: number) => ({ state: 'ok' as const, at: minutesAgo(m), detail: '答上了：OK' });
+  const okAgo = (m: number) => ({
+    state: 'ok' as const,
+    at: minutesAgo(m),
+    detail: '答上了：OK',
+    org: 'carpool' as const,
+  });
   const scheduled = (t: ProbeTarget) =>
     planScheduledProbe(t, probers, t.orgKind === null ? null : ON_CARPOOL, NOW);
   const cursorAuto = (over: Partial<ProbeTarget> = {}) =>
@@ -723,6 +728,18 @@ describe('按活跃分三档（#1798 片 3）', () => {
       expect(nextProbeAt('idle', NOW, 3)).toEqual(minutesLater(60));
       expect(nextProbeAt('idle', NOW, 9)).toEqual(minutesLater(240));
       expect(nextProbeAt('idle', null, 0)?.getTime()).toBeLessThan(NOW.getTime());
+    });
+  });
+
+  it('Claude 订阅池上一次探通时没记组织、或记的是别的组织：这个在线不是在它的组织下得出的，照档复探', () => {
+    const unknownOrg = { ...okAgo(65), org: null };
+    expect('probe' in scheduled(target({ probeRank: 1, previous: unknownOrg }))).toBe(true);
+    expect(
+      'probe' in scheduled(target({ probeRank: 1, previous: { ...okAgo(65), org: 'solo' as const } })),
+    ).toBe(true);
+    // 照档：活跃 60 分钟，没到不探
+    expect(scheduled(target({ probeRank: 1, previous: { ...okAgo(30), org: null } }))).toMatchObject({
+      deferred: expect.stringContaining('活跃档'),
     });
   });
 
