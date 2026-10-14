@@ -1090,3 +1090,97 @@ test('命令行 render：打印照期望建的文件；不认识的文件、期�
   assert.equal(r.code, 2);
   assert.match(r.err, /读不到期望/);
 });
+
+test('drop-entry：只删 JSON 表里的一项（FLEET_NODE_KEYS 撤 local），别的键、别的项不动；值不打印；可重复跑；认不出不写（#2236）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-config-drop-'));
+  try {
+    const etc = join(dir, 'etc');
+    mkdirSync(etc);
+    writeFileSync(join(dir, 'key'), KEY_TEXT);
+    const h1 = 'a1'.repeat(32);
+    const h2 = 'b2'.repeat(32);
+    const keys = JSON.stringify({ local: h1, 'founder-pc': h2 });
+    const before = `# 注释\nFLEET_ENV=production\nFLEET_NODE_KEYS=${keys}\nFEISHU_APP_SECRET=${SECRET}\n`;
+    writeFileSync(join(etc, 'api.env'), before);
+    const run = async (...argv) => {
+      const out = [];
+      const err = [];
+      const code = await cli([...argv, '--etc', etc, '--key', join(dir, 'key')], {
+        out: (s) => out.push(s),
+        err: (s) => err.push(s),
+        stdin: () => '',
+      });
+      return { code, text: `${out.join('\n')}\n${err.join('\n')}` };
+    };
+    const want = JSON.stringify({ 'founder-pc': h2 });
+    const wantFp = fingerprintOf(KEY, 'api.env', 'FLEET_NODE_KEYS', want);
+    const noValuesIn = (text) => {
+      for (const v of [h1, h2, SECRET]) assert.ok(!text.includes(v), `输出里出现了值「${v.slice(0, 8)}…」`);
+    };
+
+    // 只算不写：打印删完的指纹，文件一个字不动
+    let r = await run('drop-entry', 'api.env', 'FLEET_NODE_KEYS', 'local', '--dry-run');
+    assert.equal(r.code, 0, r.text);
+    assert.match(r.text, /^note 只算没写.*剩 1 项/m);
+    assert.ok(r.text.includes(wantFp), r.text);
+    noValuesIn(r.text);
+    assert.equal(readFileSync(join(etc, 'api.env'), 'utf8'), before);
+
+    // 真删：只有那一行变了，别的键、注释原样；照 systemd 读回来是删完的表
+    r = await run('drop-entry', 'api.env', 'FLEET_NODE_KEYS', 'local');
+    assert.equal(r.code, 0, r.text);
+    assert.match(r.text, /^changed api\.env 的 FLEET_NODE_KEYS 删掉了 local，剩 1 项/m);
+    assert.ok(r.text.includes(wantFp), r.text);
+    noValuesIn(r.text);
+    const after = readFileSync(join(etc, 'api.env'), 'utf8');
+    assert.equal(after, before.replace(`FLEET_NODE_KEYS=${keys}`, `FLEET_NODE_KEYS=${want}`));
+    const got = parseEnv(after).entries.find((e) => e.key === 'FLEET_NODE_KEYS');
+    assert.deepEqual(JSON.parse(got.value), { 'founder-pc': h2 });
+    // 删完的指纹就是对账拿线上值算的那个
+    r = await run('fingerprint', 'api.env', 'FLEET_NODE_KEYS');
+    assert.equal(r.text.trim(), wantFp);
+
+    // 再跑一遍：本来就没有，什么都不写，退出码 0
+    r = await run('drop-entry', 'api.env', 'FLEET_NODE_KEYS', 'local');
+    assert.equal(r.code, 0, r.text);
+    assert.match(r.text, /^ok api\.env 的 FLEET_NODE_KEYS 里本来就没有 local（1 项，没写/m);
+    assert.equal(readFileSync(join(etc, 'api.env'), 'utf8'), after);
+
+    // 删到空表：写成 {}（后端认得，等于不收）
+    r = await run('drop-entry', 'api.env', 'FLEET_NODE_KEYS', 'founder-pc');
+    assert.equal(r.code, 0, r.text);
+    assert.equal(
+      parseEnv(readFileSync(join(etc, 'api.env'), 'utf8')).entries.find((e) => e.key === 'FLEET_NODE_KEYS')
+        .value,
+      '{}',
+    );
+
+    // 【故意造出的失败】认不出就不写：不是 JSON、写了两行、没有这个键、条目名不合法、文件不在
+    const bad = [
+      [`FLEET_NODE_KEYS=not-json-${h1}\n`, /不是 JSON（值不打印）/],
+      [`FLEET_NODE_KEYS=["${h1}"]\n`, /不是一个 JSON 对象/],
+      [`FLEET_NODE_KEYS=${keys}\nFLEET_NODE_KEYS=${keys}\n`, /写了 2 行/],
+      ['FLEET_ENV=production\n', /没有生效的 FLEET_NODE_KEYS/],
+    ];
+    for (const [text, why] of bad) {
+      writeFileSync(join(etc, 'api.env'), text);
+      r = await run('drop-entry', 'api.env', 'FLEET_NODE_KEYS', 'local');
+      assert.equal(r.code, 2, r.text);
+      assert.match(r.text, why);
+      noValuesIn(r.text);
+      assert.equal(readFileSync(join(etc, 'api.env'), 'utf8'), text, '认不出：一个字没写');
+    }
+    writeFileSync(join(etc, 'api.env'), before);
+    r = await run('drop-entry', 'api.env', 'FLEET_NODE_KEYS', 'Local!');
+    assert.equal(r.code, 2);
+    assert.match(r.text, /条目名 Local! 不合法/);
+    r = await run('drop-entry', 'france.env', 'FLEET_NODE_KEYS', 'local');
+    assert.equal(r.code, 2);
+    assert.match(r.text, /不认识的文件 france\.env/);
+    r = await run('drop-entry', 'api.env', 'FLEET_NODE_KEYS');
+    assert.equal(r.code, 64);
+    assert.equal(readFileSync(join(etc, 'api.env'), 'utf8'), before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

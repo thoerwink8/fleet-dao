@@ -1212,9 +1212,12 @@ running_release() { # 单元
 # - 带、机器上没有（头一次上 socket 激活）：服务自己正占着端口，得先停掉才腾得出来装；装上 socket 单元、
 #   enable --now，端口这时候起归 systemd 攥着；调用方（activate）看 SOCKET_FORCE_RESTART 知道这一轮要重启服务——
 #   服务这时候还没起（刚被停掉），要靠后面重启逻辑把它起来，起来时从 systemd 接手 fd，不再自己 bind。
-# - 带、机器上已经有在跑：不碰 socket 单元——改 socket 的监听地址是人工操作（会牵扯改 api.env、release.sh 的
-#   COCKPIT 常量、docs/ops.md 端口表，一起改一起发），不是发布脚本自动做的事；只照常重启服务，这正是
-#   要的效果：重启时连接排在内核队列里，不会被拒。
+# - 带、机器上已经有：照这一版的换（socket 单元是这一版的一部分，机器上留着上一版的监听地址，新后端会认出多一个 fd
+#   退出）。和这一版一字不差就不碰，只照常重启服务——重启时连接排在内核队列里，不会被拒。只差注释：写上、daemon-reload，
+#   不重启 socket。监听那几行（去掉注释、空行以后的正文）变了：停服务、写上、daemon-reload、restart socket（端口换成
+#   这一版写的那几个）、读回 socket 真在听这几个地址，再由调用方看 SOCKET_FORCE_RESTART 把服务起来；这几秒会拒连，
+#   只在监听地址真变了的那一次。哪一步不成就把旧文件放回去、重启 socket、起旧服务（restore_socket_unit），版本不动。
+#   改监听地址仍要几处一起改（api.env、release.sh 的 COCKPIT 常量、docs/ops.md 端口表），一起发。
 # - 不带（退回到没有它的老版本）、机器上有：撤掉 socket 单元（disable --now、删文件、daemon-reload），回到服务
 #   自己绑端口——不撤的话老代码不会去读 systemd 传来的 fd，端口反而没人监听。
 # 装不上（停不掉旧服务、daemon-reload 失败、enable 失败）在切 current 之前就返回：版本不动。
@@ -1243,11 +1246,94 @@ restore_pre_socket_listen() { # 单元名 这次停过服务没有(0/1)
   red "头一次装 $u.socket 没装上，停下的 $u.service 也起不回来：端口没人听。systemctl start $u.service；journalctl -u $u.service -n 50"
 }
 
+# socket 单元里真正起作用的那几行：去掉注释、空行和行首行尾空白。只差注释的两版不用重启 socket
+socket_body() { # 文件
+  sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e '/^[#;]/d' -- "$1"
+}
+
+# socket 单元正在听的地址，一行一个（systemctl show 的 Listen：「地址 (Stream)」，几个之间空格隔开）
+socket_listens() { # 单元名
+  systemctl show -p Listen --value "$1.socket" 2>/dev/null | grep -oE '[^ ]+ \(Stream\)' | sed 's/ (Stream)$//' | sort
+}
+
+# 读回：socket 单元正在听的就是文件里写的 ListenStream（不多不少）
+socket_listens_match() { # 单元名
+  local u=$1 want have
+  want=$(grep -E '^[[:space:]]*ListenStream=' -- "$FLEET_SYSTEMD_DIR/$u.socket" | sed -E 's/^[[:space:]]*ListenStream=//; s/[[:space:]]*$//' | sort)
+  have=$(socket_listens "$u")
+  if [[ -n "$want" && "$want" == "$have" ]]; then return 0; fi
+  red "$u.socket 在听的（$(tr '\n' ' ' <<<"$have")）和单元文件写的（$(tr '\n' ' ' <<<"$want")）对不上：journalctl -u $u.socket -n 50"
+  return 1
+}
+
+# 换 socket 单元没换成：把旧文件放回去、重启 socket、起旧服务。起不来另记一笔红；返回 0，原来的失败已经记过红
+restore_socket_unit() { # 单元名 旧文件的副本 这次停过服务没有(0/1)
+  local u=$1 saved=$2 stopped=$3
+  local socket_file=$FLEET_SYSTEMD_DIR/$u.socket
+  if ! cp -p -- "$saved" "$socket_file" || ! systemctl daemon-reload || ! systemctl restart "$u.socket"; then
+    red "换 $u.socket 没换成，放回旧的也没成：systemctl status $u.socket；journalctl -u $u.socket -n 50"
+  fi
+  rm -f -- "$saved"
+  if [[ "$stopped" != 1 ]]; then return 0; fi
+  if systemctl start "$u.service" && [[ "$(systemctl is-active "$u.service" 2>/dev/null)" == active ]]; then
+    changed "换 $u.socket 没换成：放回旧的，把停下的 $u.service 拉回来"
+    return 0
+  fi
+  red "换 $u.socket 没换成，停下的 $u.service 也起不回来：systemctl start $u.service；journalctl -u $u.service -n 50"
+}
+
+# 机器上已有 socket 单元、和这一版的不一样：照这一版换（见上面「带、机器上已经有」）
+replace_socket_unit() { # 单元名 这一版的目录
+  local u=$1 dir=$2
+  local socket_file=$FLEET_SYSTEMD_DIR/$u.socket new=$dir/.units/$u.socket saved stopped=0
+  if cmp -s -- "$socket_file" <(printf '%s\n' "$(<"$new")"); then return 0; fi
+  if [[ "$(socket_body "$socket_file")" == "$(socket_body "$new")" ]]; then
+    put_file "$socket_file" root:root 644 "$(<"$new")"
+    if ! systemctl daemon-reload; then
+      red "systemctl daemon-reload 失败（换 $u.socket 的注释之后）"
+      return 1
+    fi
+    return 0
+  fi
+  saved=$(mktemp "$FLEET_SYSTEMD_DIR/.$u.socket.old.XXXXXX")
+  cp -p -- "$socket_file" "$saved"
+  if [[ "$(systemctl is-active "$u.service" 2>/dev/null)" == active ]]; then
+    if ! systemctl stop "$u.service"; then
+      rm -f -- "$saved"
+      red "换 $u.socket 之前，停不掉正接着它的 $u.service"
+      return 1
+    fi
+    stopped=1
+  fi
+  put_file "$socket_file" root:root 644 "$(<"$new")"
+  if ! systemctl daemon-reload; then
+    red "systemctl daemon-reload 失败（换 $u.socket 之后）"
+    restore_socket_unit "$u" "$saved" "$stopped"
+    return 1
+  fi
+  if ! systemctl restart "$u.socket"; then
+    red "换上这一版的 $u.socket 起不来：journalctl -u $u.socket -n 50 看现场"
+    restore_socket_unit "$u" "$saved" "$stopped"
+    return 1
+  fi
+  if ! socket_listens_match "$u"; then
+    restore_socket_unit "$u" "$saved" "$stopped"
+    return 1
+  fi
+  rm -f -- "$saved"
+  changed "照这一版换了 $u.socket（监听地址变了：重启了 socket，$u 跟着重启）"
+  SOCKET_FORCE_RESTART=1
+}
+
 sync_socket_unit() { # 单元名 这一版的目录
   local u=$1 dir=$2
   local socket_file=$FLEET_SYSTEMD_DIR/$u.socket has_now=0 stopped=0
   SOCKET_FORCE_RESTART=0
   if [[ -e "$socket_file" ]]; then has_now=1; fi
+  if [[ -f "$dir/.units/$u.socket" && "$has_now" == 1 ]]; then
+    replace_socket_unit "$u" "$dir"
+    return
+  fi
   if [[ -f "$dir/.units/$u.socket" && "$has_now" == 0 ]]; then
     if [[ "$(systemctl is-active "$u.service" 2>/dev/null)" == active ]]; then
       if ! systemctl stop "$u.service"; then
