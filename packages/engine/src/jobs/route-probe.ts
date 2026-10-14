@@ -385,6 +385,8 @@ export const ROUTE_PROBE_UNCHANGED_REFRESH_MS = 24 * 60 * 60_000;
 export function isUnchangedSkip(c: Conclusion, now: Date): boolean {
   const prev = c.target.previous;
   if (!prev) return false;
+  // Claude 订阅池（带组织类型）的「看过的时刻」和「那时挂的组织」选路、切号要靠它判「那一轮挂着别的组织、没探它」，每轮照写
+  if (c.target.orgKind !== null) return false;
   if (c.state !== 'skipped' && c.state !== 'not_wired') return false;
   // 真探过的（带耗时或原文）一定写
   if (c.durationMs !== null || c.requestText !== null || c.responseText !== null) return false;
