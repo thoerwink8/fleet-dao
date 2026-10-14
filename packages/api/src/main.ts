@@ -357,6 +357,7 @@ async function assemble(): Promise<{
       claim: (i) => claimLocalTask(db, i),
       renew: (i) => renewLocalTask(db, i),
       finish: (i) => finishLocalTask(db, i),
+      workflows: temporal.control,
     }),
     // 任务详情每段的会话内容（#1640）：读引擎按条记下的 run_transcript
     runTranscript: pgRunTranscript(db),
