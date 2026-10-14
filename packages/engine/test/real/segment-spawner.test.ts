@@ -885,9 +885,11 @@ describe('hostSegmentSpawner · 脱开引擎跑、引擎重启后接回（#2238�
     new Promise((resolve) => {
       // 真驱动起会话前建好收发目录（detached.ts 的 prepareIo）
       if (hooks.io && !hooks.io.attach) mkdirSync(hooks.io.dir, { recursive: true });
-      hooks.signal?.addEventListener('abort', () =>
-        resolve(report({ facts: okFacts({ exitCode: null, killed: 'aborted' }), answer: '' })),
-      );
+      const stopped = () =>
+        resolve(report({ facts: okFacts({ exitCode: null, killed: 'aborted' }), answer: '' }));
+      // 进来前就叫停了（接回时时限早过了：0 毫秒的计时器可能先于驱动响）：当场收，不然这个假驱动一直等
+      if (hooks.signal?.aborted) stopped();
+      hooks.signal?.addEventListener('abort', stopped);
       void spec;
     });
 
