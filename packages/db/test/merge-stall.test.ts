@@ -39,7 +39,7 @@ describe('mergeStallFacts', () => {
     await pr(on.id, 9, ago(2 * HOUR));
     await pr(on.id, 11, null);
     await pr(off.id, 3, ago(HOUR));
-    for (const state of ['running', 'merging', 'planning', 'stalled', 'asking', 'done', 'queued'] as const) {
+    for (const state of ['running', 'stalled', 'done', 'queued'] as const) {
       await addTask(t.db, on.id, { state });
     }
     await addTask(t.db, off.id, { state: 'running' });
@@ -53,7 +53,7 @@ describe('mergeStallFacts', () => {
           repo: 'acme/on',
           dispatchSince: ago(48 * HOUR),
           lastMerged: { number: 9, at: ago(2 * HOUR) },
-          inFlight: 3,
+          inFlight: 1,
           waiting: 2,
         },
       ],

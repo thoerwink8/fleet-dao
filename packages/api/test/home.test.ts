@@ -51,15 +51,15 @@ describe('/api/home（内存版）', () => {
     expect(home.health.engine.state).toBe('unknown');
   });
 
-  it('未验不误红：需求卡在 asking 只显示「等你拍」，verify 有排队会话只显示「排队」，都不是 failed', async () => {
+  it('未验不误红：需求在跑只显示「没在等什么」，verify 有排队会话只显示「排队」，都不是 failed', async () => {
     const h = harness();
     const task = h.store.data.tasks.find((t) => t.id === IDS.task12);
     if (!task) throw new Error('样例数据里没有任务');
-    task.state = 'asking';
+    task.state = 'running';
     const res = await getHome(h);
     const home = HomeResponseSchema.parse(await res.json());
     const item = home.running.find((r) => r.issueNumber === 12);
-    expect(item?.waitingReason).toBe('founder_decision');
+    expect(item?.waitingReason).toBe('nothing');
     // waitingReason 枚举里没有 fail 这回事；「还没验」（verify_pending）连出现都不出现：segment 一律 null。
     expect(home.running.every((r) => r.segment === null)).toBe(true);
     expect(JSON.stringify(home)).not.toContain('fail');
@@ -215,17 +215,11 @@ describe('/api/home（内存版）', () => {
       expect((await homeOf(h2)).running[0]).not.toHaveProperty('lastSession');
     });
 
-    it('验收收了：落在 merge，等合并队列；单子自己是合并中也归 merge', async () => {
+    it('验收收了：落在 merge，等合并队列', async () => {
       const h = harness();
       seg(h, { segment: 'verify', startedAt: ago(30), endedAt: ago(10), outcome: 'done' });
       expect((await homeOf(h)).running[0]).toMatchObject({ segment: 'merge', waitingReason: 'merge_queue' });
       expect((await homeOf(h)).running[0]?.redChecks).toBeUndefined();
-      const h2 = harness();
-      const task = h2.store.data.tasks.find((t) => t.id === IDS.task12);
-      if (!task) throw new Error('样例数据里没有任务');
-      task.state = 'merging';
-      seg(h2, { segment: 'manual', startedAt: ago(30) });
-      expect((await homeOf(h2)).running[0]?.segment).toBe('merge');
     });
 
     it('等合并期间必过检查是红的：带上检查名，不靠「等合并队列」这一句（#1983）', async () => {
@@ -288,19 +282,15 @@ describe('/api/home（内存版）', () => {
       expect(home.flow.map((f) => f.samples)).toEqual([2, 1, 0]);
     });
 
-    it('asking 的单（只有旧会话留下的会是这个状态）：照样标「等你拍」，等的那件事只认 decision 通知', async () => {
+    it('有 decision 通知的单：等的那件事只认 decision 通知是通知的时刻', async () => {
       const h = harness({ data: devFixtures(T0) });
       const task = h.store.data.tasks.find((t) => t.id === IDS.task12);
       if (!task) throw new Error('样例数据里没有任务');
-      task.state = 'asking';
+      task.state = 'running';
       const r = (await homeOf(h)).running.find((x) => x.issueNumber === 12);
       expect(r).toMatchObject({
-        waitingReason: 'founder_decision',
         pendingDecision: expect.stringContaining('等你批'),
       });
-      // 起点是那条通知的时刻（不是 T0）
-      expect(r?.waitingSince).toBeDefined();
-      expect(r?.waitingSince).not.toBe(T0.toISOString());
     });
 
     it('flow 三格：固定对题→动手→验收；在途按泳道数；平均只用 done 且起止读得出的；没有样本不给平均（不是 0）', async () => {

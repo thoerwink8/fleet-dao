@@ -513,7 +513,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 看门狗（下面「看门狗」，每 5 分钟一轮）同一轮看每个开着「让 AI 接活」的仓：从最近一次合并（没合过从开关打开那一刻）算起超过 4 小时没合任何 PR，而且引擎手上有单在做（分诊、写方案、在干、在合并）或有过了准入只因没空位没起的单，就推一条卡住报警 `watchdog:merge:<owner/name>:<after-<PR号>|since-<毫秒>>`，点进去是任务页。合了一个、没有待做的单了、开关关了，下一轮自己撤、正文开头写为什么；同一段人点了「处理」不再打开。
 - 等空位的单数：拉单每轮记进设置表 `engine.intakeWaiting`（`select value from settings where key = 'engine.intakeWaiting'`）。
 - 读不到合并记录、任务、这一行：看门狗这一轮记没跑成，开着的那条不撤。
-- 删掉的巡检留下的：`canary_runs` 表停写、留着历史行（删表属删数据，要人拍）；还开着的 `canary:*` 提醒由每小时对账撤；巡检仓 `thoerwink8/fleet-dao-canary` 不再用，开关该关：`fleet-api dispatch thoerwink8/fleet-dao-canary off`；发版前还在跑的 `canary` 工作流最多 5.5 小时自己超时，等不及就 `fleet-temporal workflow terminate --workflow-id canary`。
+- 删掉的巡检留下的：`canary_runs` 表停写、留着历史行（删表属删数据，要人拍）；还开着的 `canary:*` 提醒由每小时对账撤；巡检仓 `thoerwink8/fleet-dao-canary` 不再用，开关已关（2026-10-14 在法国关掉，操作记录 1798）；发版前还在跑的 `canary` 工作流最多 5.5 小时自己超时，等不及就 `fleet-temporal workflow terminate --workflow-id canary`。
 
 看门狗（#203，design 第六节「断链怎么被发现」第 5 层）：
 

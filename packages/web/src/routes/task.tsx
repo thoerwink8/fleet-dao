@@ -196,8 +196,6 @@ export function taskConclusion(
       return { tone, label, text: last ? `被叫停，停在${segOf(last)}` : '被叫停，还没跑过' };
     case 'stalled':
       return { tone, label, text: last ? `${segOf(last)}之后没动静` : '一直没动静' };
-    case 'asking':
-      return { tone, label, text: '等你回话' };
     case 'queued':
       return { tone, label, text: '还没开跑，等空位' };
     default:

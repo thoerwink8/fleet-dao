@@ -7,13 +7,8 @@ import type { Db } from '../client.ts';
 import { pullRequests, repos, tasks } from '../schema/index.ts';
 import { readIntakeWaiting } from './intake-history.ts';
 
-/** 引擎手上在做、做下去会出 PR 的单：分诊、写方案、在干、在合并。在等人（asking、stalled）的不算：那要人动，不是引擎可接的。 */
-export const IN_FLIGHT_TASK_STATES = [
-  'triaging',
-  'planning',
-  'running',
-  'merging',
-] as const satisfies readonly TaskState[];
+/** 引擎手上在做、做下去会出 PR 的单：引擎只写 running（动手会话在跑）。停滞（stalled）的不算：那要人动，不是引擎可接的。 */
+export const IN_FLIGHT_TASK_STATES = ['running'] as const satisfies readonly TaskState[];
 
 export interface RepoMergeFacts {
   repoId: string;

@@ -431,8 +431,7 @@ export function pendingDecisionByTask(input: {
 
 /**
  * 「在跑的」：没结束的需求（done / stopped / failed 之外）。在哪一段、谁在做、最近一次事件从三段流水推（home-flow.ts 的
- * taskFlow），「还没验」不许按字段猜成失败；一笔流水都没记的老单 segment 是 null。waitingReason：有人在等创始人回答
- * （state=asking，只有旧会话留下的单会是这个状态）→ founder_decision；被人暂停（#820 片 3，Task.paused）→ paused，排在最前（有 decision 级通知就从它的时刻起算，没有就不给起点）；有 run 排队没开工 → queue；动手收了验收还没起 → verify_round；
+ * taskFlow），「还没验」不许按字段猜成失败；一笔流水都没记的老单 segment 是 null。waitingReason：被人暂停（#820 片 3，Task.paused）→ paused，排在最前（有 decision 级通知就从它的时刻起算，没有就不给起点）；有 run 排队没开工 → queue；动手收了验收还没起 → verify_round；
  * 在合并 → merge_queue；其余 nothing。额度、内存、CI 这几种等 segment 之外的信号才分得出，分不出时不猜。
  */
 export function homeRunning(input: {
@@ -454,7 +453,6 @@ export function homeRunning(input: {
     .map((t) => {
       const repo = input.repoOf(t.repoId);
       const queued = queuedByTask.get(t.id);
-      const asking = t.state === 'asking';
       const views = input.segmentRunsOf(t.id);
       const flow = taskFlow(t, views);
       // 这一刻在跑的那几笔（#1973）：编号就是会话 scope 的编号，看板拿它找这张单此刻占的内存、CPU
@@ -464,28 +462,24 @@ export function homeRunning(input: {
       const stalled = t.state === 'stalled' ? t.stalled : undefined;
       const waitingReason: HomeRunning['waitingReason'] = t.paused
         ? 'paused'
-        : asking
-          ? 'founder_decision'
-          : t.state === 'stalled'
-            ? 'parked'
-            : queued
-              ? 'queue'
-              : flow.segment === 'verify_pending'
-                ? 'verify_round'
-                : flow.segment === 'merge'
-                  ? 'merge_queue'
-                  : 'nothing';
+        : t.state === 'stalled'
+          ? 'parked'
+          : queued
+            ? 'queue'
+            : flow.segment === 'verify_pending'
+              ? 'verify_round'
+              : flow.segment === 'merge'
+                ? 'merge_queue'
+                : 'nothing';
       const waitingSince = t.paused
         ? undefined
-        : asking
-          ? decision?.since
-          : waitingReason === 'parked'
-            ? stalled?.since
-            : queued
-              ? queued.queuedAt
-              : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
-                ? flow.stageSince
-                : undefined;
+        : waitingReason === 'parked'
+          ? stalled?.since
+          : queued
+            ? queued.queuedAt
+            : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
+              ? flow.stageSince
+              : undefined;
       return {
         issueNumber: t.issueNumber,
         title: t.title,

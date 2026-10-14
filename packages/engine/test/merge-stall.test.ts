@@ -176,7 +176,7 @@ describe('看门狗一轮里的「多久没合 PR」（真库）', () => {
     const idle = await repo('idle', at(-48));
     await merged(busy.id, 3, at(-6));
     await merged(idle.id, 4, at(-6));
-    await task(idle.id, 'asking');
+    await task(idle.id, 'stalled');
     await writeIntakeWaiting(t.db, { at: at(-0.1), byRepo: { [busy.id]: 2, [idle.id]: 0 }, by: 'test' });
 
     await runWatchdogJob(deps());
@@ -186,7 +186,7 @@ describe('看门狗一轮里的「多久没合 PR」（真库）', () => {
   it('开关关了：撤，写明不再看', async () => {
     const r = await repo('app', at(-48));
     await merged(r.id, 5, at(-5));
-    await task(r.id, 'merging');
+    await task(r.id, 'running');
     await runWatchdogJob(deps());
     await t.client.query('update repos set auto_dispatch_since = null where id = $1', [r.id]);
     await runWatchdogJob(deps());

@@ -3,8 +3,8 @@ import type { Me } from '../api/types';
 import { isMine, taskTone } from './status';
 
 describe('颜色只表达状态', () => {
-  test('等人回答的需求是「等你」色', () => {
-    expect(taskTone({ state: 'asking' })).toBe('human');
+  test('停滞的需求是停滞色', () => {
+    expect(taskTone({ state: 'stalled' })).toBe('stall');
   });
 });
 

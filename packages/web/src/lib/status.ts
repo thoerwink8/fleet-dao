@@ -94,8 +94,6 @@ export function taskTone(t: { state: TaskState }): Tone {
   switch (t.state) {
     case 'queued':
       return 'wait';
-    case 'asking':
-      return 'human';
     case 'done':
       return 'done';
     case 'stopped':
