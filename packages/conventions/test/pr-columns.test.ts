@@ -2,6 +2,8 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  founderQuote,
+  founderQuoteLine,
   GATE_LINE,
   issueColumnLinks,
   issueColumnRefs,
@@ -200,5 +202,39 @@ describe('issueColumnLinks：合并收口和对账靠它分开「做完了没人
   it('没写、只写「无」、不在需求栏里：读不到', () => {
     expect(issueColumnLinks('**需求**：无')).toEqual([]);
     expect(issueColumnLinks('**做了什么**：Refs #9')).toEqual([]);
+  });
+});
+
+describe('创始人原话（founderQuote）：pr-open 的 --founder-approved 和合并闸同用的判据', () => {
+  it('认 founderQuoteLine 写出来的那一行（pnpm pr:open --founder-quote 写的就是它）', () => {
+    const line = founderQuoteLine('我都同意。\n只要有益处', ' 2026-10-14 16:30 +0800 ');
+    expect(line).toBe('**创始人原话**：「我都同意。 只要有益处」（2026-10-14 16:30 +0800）');
+    expect(founderQuote(`**需求**：\nCloses #7\n${GATE_LINE}\n\n${line}\n`)).toEqual({
+      quote: '我都同意。 只要有益处',
+      at: '2026-10-14 16:30 +0800',
+    });
+  });
+
+  it('手写的时间放在栏名后面、跟在别的栏名后面也认', () => {
+    expect(founderQuote('创始人原话（2026-10-05 15:00）：「可以」')).toEqual({
+      quote: '可以',
+      at: '2026-10-05 15:00',
+    });
+    expect(founderQuote('**需求**：创始人原话(10-11 03:48):「修」')).toEqual({
+      quote: '修',
+      at: '10-11 03:48',
+    });
+  });
+
+  it('【故意造出的失败】只有「原话」二字、原话或时间空、写在 HTML 注释里：都读不到', () => {
+    for (const body of [
+      '贴了原话',
+      '**创始人原话**：「」（2026-10-14）',
+      '**创始人原话**：「同意」（）',
+      '**创始人原话**：「同意」',
+      '<!-- **创始人原话**：「同意」（2026-10-14） -->',
+    ]) {
+      expect(founderQuote(body), body).toBeUndefined();
+    }
   });
 });

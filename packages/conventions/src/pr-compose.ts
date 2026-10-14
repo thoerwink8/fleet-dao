@@ -17,7 +17,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { type Gh as IssueGh, issueNew } from './issue-new.ts';
 import { type Gh, loadPathLists } from './pr-arm.ts';
-import { GATE_LINE, ISSUE_COLUMN } from './pr-columns.ts';
+import { founderQuoteLine, GATE_LINE, ISSUE_COLUMN } from './pr-columns.ts';
 import { type OpenDeps, PR_OPEN_USAGE, prOpen } from './pr-open.ts';
 
 export interface CliDeps extends OpenDeps {
@@ -67,7 +67,7 @@ export function composeBody(p: BodyParts): string {
     ...need,
   ];
   if (p.founder) {
-    lines.push('', `**创始人原话**：「${oneLine(p.founder.quote)}」（${oneLine(p.founder.at)}）`);
+    lines.push('', founderQuoteLine(p.founder.quote, p.founder.at));
   }
   return `${lines.join('\n')}\n`;
 }
@@ -182,10 +182,9 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
     const tmp = mkdtempSync(join(tmpdir(), 'pr-open-fq-'));
     try {
       const merged = join(tmp, 'body.md');
-      const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
       writeFileSync(
         merged,
-        `${src.replace(/\r\n?/g, '\n').trimEnd()}\n\n${GATE_LINE}\n\n**创始人原话**：「${oneLine(q)}」（${oneLine(t)}）\n`,
+        `${src.replace(/\r\n?/g, '\n').trimEnd()}\n\n${GATE_LINE}\n\n${founderQuoteLine(q, t)}\n`,
       );
       return prOpen(
         [

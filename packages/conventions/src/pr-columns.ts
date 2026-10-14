@@ -120,6 +120,35 @@ export function withIssueColumn(body: string, value: string): string {
 /** 改标准的 PR 在「需求」栏下面另起一行写这个（人闸第四类）；没有程序读它，给创始人和接手的人看。 */
 export const GATE_LINE = '人闸：改标准';
 
+/** 创始人同意改标准的那一段：pnpm pr:open --founder-quote 写进正文的样子就是它（pr-compose.ts 两处都用它拼）。 */
+export function founderQuoteLine(quote: string, at: string): string {
+  const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
+  return `**创始人原话**：「${oneLine(quote)}」（${oneLine(at)}）`;
+}
+
+/**
+ * 「创始人原话」那一行：栏名可加粗、可跟在别的栏名后面（「**需求**：创始人原话（时间）：「…」」）；时间写在原话后面
+ * （founderQuoteLine 写的）或栏名后面（手写的「创始人原话（时间）：「…」」）都认。原话在「」里，一直到行尾。
+ */
+const FOUNDER_QUOTE =
+  /创始人原话\s*(?:[（(]([^（）()\n]*)[)）])?\s*(?:\*\*)?\s*[：:]\s*(?:\*\*)?\s*「(.*)」\s*(?:[（(]([^（）()\n]*)[)）])?\s*$/;
+
+/**
+ * 正文里创始人同意改标准的记录：认 founderQuoteLine 写出来的那一行（手写的、时间放在栏名后面的也认）；
+ * 原话、时间都非空才算，读不到返回 undefined。开 PR 那一步（pr-open.ts 的 --founder-approved）和合并闸（merge-gate.ts）
+ * 都用它判，两边的判据只有这一处。HTML 注释（模板提示）不算。
+ */
+export function founderQuote(body: string): { quote: string; at: string } | undefined {
+  for (const line of stripComments(body.replace(/\r\n?/g, '\n')).split('\n')) {
+    const m = FOUNDER_QUOTE.exec(line);
+    if (!m) continue;
+    const quote = (m[2] ?? '').trim();
+    const at = (m[3] ?? m[1] ?? '').trim();
+    if (quote && at) return { quote, at };
+  }
+  return undefined;
+}
+
 /** 不是任何真仓的名字：拿它当 closingIssues 的 repo，写明是别的仓的（owner/仓#号）都被挡掉，只剩没写仓名的。 */
 const THIS_REPO = '(本仓)';
 /** 「Refs #12」「refs: #12」：只挂不关的写法（母单分片）；owner/仓#号 不算（# 前面只许空白）。 */
