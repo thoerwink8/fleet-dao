@@ -432,50 +432,6 @@ export const RULES: readonly FailureRule[] = [
     codeFieldOnly: true,
     routeOutcome: 'neutral',
   },
-  // 开 PR 时照需求 issue 对齐类别标签，issue 自己贴了不止一个类别：没法判以哪个为准，照抄过去 pr-fields 会一直红。
-  // 只有人能改 issue：挂起报警，改成一个再点「继续」，PR 跟着对齐。
-  {
-    id: 'LB1',
-    title: '需求 issue 的类别标签不止一个',
-    kind: 'stop',
-    codes: ['issue_category_conflict'],
-    codeFieldOnly: true,
-    routeOutcome: 'neutral',
-    humanFix: '在需求 issue 上只留一个类别标签（需求、缺陷、杂项里挑一个），再点「继续」',
-  },
-  {
-    id: 'HM1',
-    title: '要人拍板或缺配置',
-    kind: 'stop',
-    codes: ['needs_human', 'config_missing'],
-    routeOutcome: 'neutral',
-  },
-  // 开 PR 要填「对应计划」（#41 的 pr-fields 缺了就红，正文对不上就只有人改），那一行要从需求文档里取。
-  // 文档还没进主线、文档里没有那一行、那一行后面空着——都是人写文档的事，会话改不了它，重试、退回会话都没用：
-  // 挂起报警，等人把「对应计划：plan.md P<阶段>「…」」补上再点「继续」。
-  {
-    id: 'SD1',
-    title: '需求文档里没有可用的「对应计划」那一行',
-    kind: 'stop',
-    codes: ['spec_plan_missing'],
-    codeFieldOnly: true,
-    routeOutcome: 'neutral',
-    humanFix:
-      '在需求文档的「对应计划：」那一行写上 plan.md 的阶段加那一条的原话，比如 P1「工作流」；没有 plan.md 就写「无」',
-  },
-  // 开 PR 前验证（0003 第 5 条第 5 步）要照需求文档的「怎么算做完」逐条问、要知道写这张单的是哪一族：文档不在主线上、
-  // 没有那一节、那一节空着、单子正文没指需求文档，或者这张单一个起过的会话都查不到——都不是会话能改的，重试、换路由
-  // 都还是它。不验，也不当成验过了：挂起报警，等人补上再点「继续」。
-  {
-    id: 'VF1',
-    title: '开 PR 前验证缺材料（需求文档、「怎么算做完」、作者是哪一族）',
-    kind: 'stop',
-    codes: ['spec_doc_missing', 'criteria_missing', 'authors_unknown'],
-    codeFieldOnly: true,
-    routeOutcome: 'neutral',
-    humanFix:
-      '在需求 issue 正文里写全「场景」「原话」「已知的模块」「怎么算做完」四栏（「怎么算做完」逐条写上）；老单指着的 specs 需求文档要已经在主线上；作者查不到就看这张单的会话记录，补好再点「继续」',
-  },
   // 无头会话没人批权限：同一会话里会一直被拒（原文自己说了别重试），是这条路由的起法不对。
   {
     id: 'PM2',

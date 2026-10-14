@@ -24,7 +24,6 @@
 // routing:all-open）。组织还没读完、库读失败照抛，不返回「解了」。
 
 import {
-  authorFamiliesOfTask,
   authorFamilyOf,
   type Db,
   type EndedPoolRun,
@@ -168,10 +167,7 @@ export interface StorePortsDeps {
   reservationTtlMs?: number;
 }
 
-type StorePorts = Pick<
-  EnginePorts,
-  'pickRoute' | 'raiseAlert' | 'recordTiming' | 'saveTaskState' | 'authorFamilies'
-> & {
+type StorePorts = Pick<EnginePorts, 'pickRoute' | 'raiseAlert' | 'recordTiming' | 'saveTaskState'> & {
   /**
    * 这个阶段现在是不是全熔断。和 pickRoute 同一个 loadStage、同一套熔断判定；暂停的账号池同样避开。
    * 不带某一步的模型过滤（提醒是整个阶段的），不调 allOpenAlarm、不写任何表。读不了就抛。
@@ -834,19 +830,6 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         ...(await carpoolRegistryFor(facts.routes)),
         ...(deps.routingPolicy ? { policy: deps.routingPolicy } : {}),
       });
-    },
-
-    async authorFamilies(input) {
-      // 写这张单的会话用过的族：判验证是不是别家就靠它。一个都查不到不回空的（空的等于谁都能验）
-      const families = UUID.test(input.taskId) ? await authorFamiliesOfTask(db, input.taskId) : [];
-      if (families.length === 0) {
-        throw new PortError(
-          'AUTHORS_UNKNOWN',
-          `任务 ${input.taskId} 一个起过的会话都查不到：不知道写它的是哪一族，判不了验证模型是不是别家，不验`,
-          { retryable: false },
-        );
-      }
-      return { families };
     },
 
     async raiseAlert(input) {
