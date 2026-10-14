@@ -252,8 +252,10 @@ describe('巡检每一回从库里读的事实', () => {
     const latest = await startScheduleRun(t.db, 'intake', ago(5 * MIN));
     await finishScheduleRun(t.db, latest, { outcome: 'failed', why: '白名单读不到' }, ago(5 * MIN));
     const facts = await factsOf(12);
-    expect(facts.repo).toMatchObject({ id: repo.id });
+    expect(facts.repo).toMatchObject({ id: repo.id, ciPolicy: 'force' });
     expect(facts.repo?.autoDispatchSince?.getTime()).toBe(ago(600 * MIN).getTime());
+    await t.db.update(repos).set({ ciPolicy: 'off' }).where(eq(repos.id, repo.id));
+    expect((await factsOf(12)).repo?.ciPolicy).toBe('off');
     expect(facts.task).toBeNull();
     expect(facts.lastIntake).toEqual({
       startedAt: ago(5 * MIN),
