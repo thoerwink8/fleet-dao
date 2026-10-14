@@ -46,6 +46,8 @@ type managedChild struct {
 	generation int
 	mode       string
 	exitCode   int
+	startedAt  time.Time
+	sawOutput  bool
 }
 
 func scanFrames(r io.Reader, generation int, kind string, events chan<- event) {
@@ -135,7 +137,7 @@ func startManaged(cfg configuration, args []string, sel selection, generation in
 		}
 		return nil, fmt.Errorf("启动监管执行体失败")
 	}
-	child := &managedChild{cmd: c, in: &controlWriter{pipe: in}, done: make(chan struct{}), temps: temps, generation: generation, mode: sel.mode}
+	child := &managedChild{cmd: c, in: &controlWriter{pipe: in}, done: make(chan struct{}), temps: temps, generation: generation, mode: sel.mode, startedAt: time.Now()}
 	go func() {
 		scanFrames(out, generation, "output", events)
 		err := c.Wait()
@@ -151,7 +153,7 @@ func startManaged(cfg configuration, args []string, sel selection, generation in
 		stopManaged(child)
 		return nil, fmt.Errorf("启动控制帧发送失败")
 	}
-	logLine("event=launch route=" + sel.mode + " sid=" + sel.sessionID + " generation=" + strconv.Itoa(generation))
+	logLine("event=launch route=" + sel.mode + " sid=" + sel.sessionID + " generation=" + strconv.Itoa(generation) + " sinceProcessMs=" + elapsedMs(processStart))
 	return child, nil
 }
 
@@ -194,13 +196,18 @@ func supervise(cfg configuration) error {
 	replay := []frame{}
 	waitingReplay := ""
 	var replayDeadline time.Time
+	var turnAt time.Time
+	turnFirst := false
 	background := map[string]bool{}
 	model := flagValue(cfg.args, "--model")
 	selectRoute := func() (selection, error) {
 		if !isClaudeModel(model) {
 			return selection{mode: "gateway"}, nil
 		}
-		return resolver.resolve(native)
+		at := time.Now()
+		sel, err := resolver.resolve(native)
+		logLine("event=route-resolved route=" + sel.mode + " ms=" + elapsedMs(at))
+		return sel, err
 	}
 	start := func(sel selection, restarting bool) error {
 		args := cfg.args
@@ -273,6 +280,9 @@ func supervise(cfg configuration) error {
 			hostQueue = nil
 		}
 		if len(queue) > 0 && ready() {
+			if turnAt.IsZero() {
+				turnAt, turnFirst = time.Now(), false
+			}
 			if child != nil {
 				select {
 				case <-child.done:
@@ -302,6 +312,7 @@ func supervise(cfg configuration) error {
 					return err
 				}
 				fmt.Fprintln(os.Stderr, "mirasim-reclaude: switch_refused", platformSwitchRefusal)
+				turnAt = time.Time{}
 				continue
 			}
 			if child == nil {
@@ -409,6 +420,14 @@ func supervise(cfg configuration) error {
 			case "output":
 				f := e.data
 				typ := f.text("type")
+				if child != nil && !child.sawOutput {
+					child.sawOutput = true
+					logLine("event=first-frame generation=" + strconv.Itoa(generation) + " route=" + child.mode + " type=" + typ + " ms=" + elapsedMs(child.startedAt))
+				}
+				if busy && !turnAt.IsZero() && !turnFirst && typ != "control_response" && typ != "control_request" {
+					turnFirst = true
+					logLine("event=turn-first-output generation=" + strconv.Itoa(generation) + " type=" + typ + " ms=" + elapsedMs(turnAt))
+				}
 				if typ == "control_response" {
 					r := f.object("response")
 					if r == nil || r.text("request_id") == "" {
@@ -477,6 +496,10 @@ func supervise(cfg configuration) error {
 				}
 				if typ == "result" && parent == "" {
 					busy = false
+					if !turnAt.IsZero() {
+						logLine("event=turn-result generation=" + strconv.Itoa(generation) + " ms=" + elapsedMs(turnAt))
+						turnAt = time.Time{}
+					}
 				}
 				if err := writeFrame(os.Stdout, f); err != nil {
 					return err
