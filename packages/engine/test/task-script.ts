@@ -20,6 +20,8 @@ import type {
   ReadDeliveryInput,
   RunSegmentInput,
   RunSegmentResult,
+  SegmentSettledInput,
+  SegmentSettledResult,
   SelfCheckInput,
   SelfCheckResult,
   TaskSpendResult,
@@ -77,6 +79,8 @@ export interface Script {
   selfCheck: (input: SelfCheckInput, n: number) => SelfCheckResult;
   /** 这张单花掉多少 token（单任务预算）。默认 0。 */
   spend: (n: number) => TaskSpendResult;
+  /** 上一段收场了没有（决定 0093）；默认收场了。 */
+  settled: (input: SegmentSettledInput, n: number) => SegmentSettledResult;
 }
 
 export interface Calls {
@@ -101,6 +105,7 @@ export interface Calls {
   selfCheck: SelfCheckInput[];
   /** 查花费的次数。不进 order。 */
   spend: number;
+  settled: SegmentSettledInput[];
 }
 
 export const OK_SEGMENT: RunSegmentResult = { ok: true, runId: 'run-1', answer: '已提交' };
@@ -122,6 +127,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     resume: [],
     selfCheck: [],
     spend: 0,
+    settled: [],
   };
   const script: Script = {
     brief: () => ({ ok: true, brief: goodBrief() }),
@@ -140,6 +146,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     resume: () => ({ kind: 'new', reason: '测试默认不续' }),
     selfCheck: () => ({ state: 'skipped', reason: '测试默认不跑', steps: [] }),
     spend: () => ({ tokens: 0, runs: 0, unmetered: 0, estimated: 0 }),
+    settled: () => ({ settled: true }),
     ...over,
   };
   const tasks: EngineTasks = {
@@ -206,6 +213,10 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     async selfCheck(input) {
       calls.selfCheck.push(input);
       return script.selfCheck(input, calls.selfCheck.length);
+    },
+    async segmentSettled(input) {
+      calls.settled.push(input);
+      return script.settled(input, calls.settled.length);
     },
     async taskSpend() {
       calls.spend += 1;

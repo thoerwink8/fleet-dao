@@ -19,6 +19,11 @@
 // - 跑成的这一段记进 rt.lastSession（纯状态）：返工轮由 task.ts 决定续不续它（决定 0093，patched('rework-resume')），续法同上。
 // - 单任务 token 预算（决定 0093，patched('task-token-budget')）：每次起会话之前查这张单花掉的 token，超了停下等人（rt.park），
 //   点「继续」再给一份。开工时解析的上限里没有这一项（老历史）就不查；查不成照旧起会话，不挡干活。
+// - 分档冷却和有界耐心（决定 0093，patched('route-patience')，借 magpie gateway-routing）：失败分流按错种给歇多久
+//   （额度歇到清零、限流按 Retry-After、其他 1 分钟起翻倍）；上游临时故障判停下时先不停，歇一会儿重新选路再起，
+//   从第一次该停下起最多 ROUTE_PATIENCE_SECONDS（默认 60 秒，上限 240 秒），歇掉的从这一段的会话时限里扣；用完照旧停下并写明。
+//   重试、重派、耐心再起之前都先问 segmentSettled：上一段没收场就不起第二段（同一张单不并发两段），停下写明原因；
+//   问不成（库一时不通）只记日志，照今天的做法接着走。
 // - 停下之前先自动处理一次（决定 0093，patched('auto-redispatch-session')）：失败分流判停下、码是被引擎在时限上叫停（aborted）、
 //   总时长到顶、起不来（AUTO_REDISPATCH_CODES）的，这一段里先避开这个模型换一条路由重派一次，进度里写一行；再判停下才停。
 
@@ -52,9 +57,11 @@ import {
   NO_OTHER_FAMILY,
   NO_OTHER_ROUTE,
   PausedInterrupt,
+  patienceStep,
   RESUME_STARTED_SLACK_MS,
   RepinInterrupt,
   type ResumeFrom,
+  segmentMinutesAfterPatience,
   tokenBudgetStop,
   widen,
   withDispatchProbeNote,
@@ -82,6 +89,10 @@ export async function writeSession(
   let failedChannel: FailedChannel | undefined;
   // 这一段已经自动换路由重派过一次（决定 0093）：再判停下就真停下
   let redispatched = false;
+  // 有界耐心（决定 0093）：第一次该停下的时刻、歇了几次、一共歇了多少秒（从会话时限里扣）
+  let patienceFrom: number | null = null;
+  let patienceRounds = 0;
+  let patienceWaited = 0;
   // 动手前判这张单是不是界面活（#1264）：界面活按 ui 用途选路并带 uiWork，GPT 不派；判不出按界面活处理。
   // 判法是纯代码、不起活动；老历史（没有这个标记）重放照旧按 execute 选。
   const ui: UiJudgement | undefined = patched('ui-work-implement')
@@ -147,7 +158,10 @@ export async function writeSession(
             brief,
             tier,
             feedback: rt.feedback,
-            timeoutMinutes: SEGMENT_MINUTES,
+            timeoutMinutes:
+              patienceWaited > 0
+                ? segmentMinutesAfterPatience(SEGMENT_MINUTES, patienceWaited)
+                : SEGMENT_MINUTES,
             ...(interrupted ? { interrupted } : {}),
             ...(resumeSessionId ? { resumeSessionId } : {}),
             // 只记账（runs.pr_number，#216）：第一轮会话交付之后才开 PR，这时还没有
@@ -218,9 +232,12 @@ export async function writeSession(
     if (failure.code !== ORG_SWITCH_CODE) previousMessage = failure.message;
     rt.status.lastProblem = next.reason;
     counters = bump(counters, next);
+    // 老历史没有这个标记：不问上一段收场没有、不耐心等，照旧
+    const patienceOn = patched('route-patience');
     if (next.action === 'retry') {
       // 原路再试：还是这条路由（额度要等的，等到清零再来，不算墙钟）
       stick = route.routeId;
+      if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
       await rt.pause(next.wait === 'quota' ? 'quota' : 'retry', next.reason, next.delaySeconds);
     } else if (next.action === 'swapRoute' || next.action === 'swapModel') {
       stick = undefined;
@@ -238,6 +255,31 @@ export async function writeSession(
         previousMessage = undefined;
       }
     } else {
+      // 上游临时故障（限流、繁忙……）次数用完：先有界耐心地歇一会儿、重新选路再起（决定 0093），预算用完才照旧停下
+      if (patienceOn && next.transient === true) {
+        const now = Date.now();
+        if (patienceFrom === null) patienceFrom = now;
+        const step = patienceStep({ sinceSeconds: (now - patienceFrom) / 1000, round: patienceRounds });
+        if (step.kind === 'pause') {
+          if (!(await settledBeforeRestart(rt, attemptAt))) continue;
+          patienceRounds += 1;
+          patienceWaited += step.seconds;
+          stick = undefined;
+          await rt.note(
+            `第 ${rt.round} 轮：${route.modelId} ${next.reason}；所有路由都在忙，耐心等 ${step.seconds} 秒再选路（第 ${patienceRounds} 次，从会话时限里扣）`,
+          );
+          await rt.pause('retry', next.reason, step.seconds);
+          continue;
+        }
+        await rt.park(`${next.reason}；${step.reason}`, failure.message);
+        patienceFrom = null;
+        patienceRounds = 0;
+        counters = ZERO;
+        avoid = NO_AVOID;
+        stick = undefined;
+        previousMessage = undefined;
+        continue;
+      }
       // 被引擎在时限上叫停、总时长到顶、起不来（决定 0093）：先自动换一条路由（避开这个模型）重派一次，进度里写一行，不停下等人。
       // 这一段里只自动一次；再撞上照旧停下。只有人能修的码不在名单里。老历史没有这个标记，照旧停下。
       if (
@@ -245,6 +287,7 @@ export async function writeSession(
         AUTO_REDISPATCH_CODES.includes(failure.code.toLowerCase()) &&
         patched('auto-redispatch-session')
       ) {
+        if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
         redispatched = true;
         stick = undefined;
         // 避让记在这张单上（没提交的避让那一处）：没有别的候选时选路照旧派原来那条，不死等
@@ -263,6 +306,33 @@ export async function writeSession(
       previousMessage = undefined;
     }
   }
+}
+
+/**
+ * 重试、重派之前确认上一段真停了（决定 0093）：没收场就停下等人、写明原因，回 false（调用方回循环头，人点继续后再选再起）；
+ * 收场了回 true。问不成（活动没装、库一时不通）只记日志、回 true：照今天的做法接着走，不把「没查成」当成「还在跑」。
+ */
+async function settledBeforeRestart(rt: TaskRuntime, attemptAt: number): Promise<boolean> {
+  let got: { settled: true } | { settled: false; runId: string; detail: string };
+  try {
+    got = await rt.cancellable(() =>
+      rt.acts.segmentSettled({
+        schemaVersion: 1,
+        taskId: rt.input.taskId,
+        startedAfter: iso(attemptAt - RESUME_STARTED_SLACK_MS),
+      }),
+    );
+  } catch (error) {
+    if (error instanceof Abandoned || isCancellation(error)) throw error;
+    log.warn('上一段收场没有没查成，照旧接着走', { error: failureOf(error, 'segmentSettled').message });
+    return true;
+  }
+  if (got.settled) return true;
+  await rt.park(
+    '上一段会话还没收场，不起第二段（同一张单不并发两段）',
+    `${got.detail}；确认那个会话停了再点「继续」`,
+  );
+  return false;
 }
 
 /**

@@ -109,6 +109,14 @@ export interface FailureVerdict {
   routeOutcome: 'fail' | 'neutral';
   /** 既没有原文，也没有认得出的码：「缺原因」单独计数，别和「认不出」混在一起（旧系统 82 条这样的没人数）。 */
   missingReason?: true;
+  /**
+   * 原路再试前歇多久按哪一档、依据什么定（决定 0093，借 magpie gateway-routing 的分档冷却）：
+   * quota = 额度用完，歇到清零时刻（resets：读到了上游给的时刻；estimate：没读到，按默认估计）；
+   * rate = 限流、繁忙，按上游给的时间（retry-after），没给按默认起翻倍（backoff）；
+   * other = 别的临时失败，绑路由的从 routeRetryBaseSeconds 起翻倍、封顶 retryMaxSeconds（backoff）。
+   * 只在原路再试（retry）时给；返工、续干、停下不给。
+   */
+  cooldown?: { tier: 'quota' | 'rate' | 'other'; by: 'resets' | 'retry-after' | 'estimate' | 'backoff' };
 }
 
 /** 上限与时长：每种打断原因的「总次数 + 最长等待」两个上限都从这里来（509 §九、0010 第 7 条）。 */
@@ -120,6 +128,11 @@ export interface FailurePolicy {
   /** 退避：从这里起翻倍，封顶 retryMaxSeconds（与引擎兜底梯同一条算法）。 */
   retryBaseSeconds: number;
   retryMaxSeconds: number;
+  /**
+   * 绑路由的别的临时失败（认不出的、没写起步时长的临时规则）从这里起翻倍，封顶 retryMaxSeconds（决定 0093：
+   * magpie 按错种分档冷却，「其他」1 分钟起翻倍）。不绑路由的（建树、推分支）仍从 retryBaseSeconds 起。
+   */
+  routeRetryBaseSeconds: number;
   /** 最长等待：额度要等更久才恢复，就停下报警，不闷头睡几天。 */
   waitMaxSeconds: number;
 }
@@ -129,6 +142,7 @@ export const DEFAULT_FAILURE_POLICY: Readonly<FailurePolicy> = Object.freeze({
   reworkRounds: 2,
   retryBaseSeconds: 15,
   retryMaxSeconds: 600,
+  routeRetryBaseSeconds: 60,
   waitMaxSeconds: 6 * 3600,
 });
 
@@ -137,6 +151,7 @@ const FAILURE_POLICY_BOUNDS = {
   reworkRounds: count(0),
   retryBaseSeconds: nonNegative,
   retryMaxSeconds: nonNegative,
+  routeRetryBaseSeconds: nonNegative,
   waitMaxSeconds: nonNegative,
 } as const;
 

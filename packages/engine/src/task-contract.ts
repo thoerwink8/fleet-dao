@@ -443,6 +443,18 @@ export type PlanSegmentResumeResult =
   | { kind: 'resume'; sessionId: string; runId: string }
   | { kind: 'new'; reason: string };
 
+/**
+ * 重试、重派之前确认上一段真停了（决定 0093，同一张单不并发两段）：从 startedAfter 起这张单最近的动手那一行收场了没有。
+ */
+export interface SegmentSettledInput {
+  schemaVersion: 1;
+  taskId: string;
+  startedAfter: string;
+}
+
+/** settled：收场了，或库里压根没有那一段（没起来）。没收场回那一行的编号。库读不了抛错（工作流按今天的做法接着走）。 */
+export type SegmentSettledResult = { settled: true } | { settled: false; runId: string; detail: string };
+
 export interface ReleaseReservationInput {
   schemaVersion: 1;
   reservationId: string;

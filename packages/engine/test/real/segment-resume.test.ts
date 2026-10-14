@@ -5,7 +5,11 @@ import type { RouteLaunchFacts, RunRow } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import type { PortContext } from '../../src/ports.ts';
 import type { HostDriver, WiredHost } from '../../src/real/hosts.ts';
-import { createPlanSegmentResume, resumeVerdict } from '../../src/real/segment-resume.ts';
+import {
+  createPlanSegmentResume,
+  createSegmentSettled,
+  resumeVerdict,
+} from '../../src/real/segment-resume.ts';
 import type { PlanSegmentResumeInput } from '../../src/task-contract.ts';
 
 const CARPOOL = 'fleet-agent-carpool' as SessionUser;
@@ -187,5 +191,42 @@ describe('判续会话', () => {
         { ...side, user: 'fleet-agent-b' },
       ),
     ).toEqual({ kind: 'new', reason: '换了会话用户（fleet-agent-a → fleet-agent-b）' });
+  });
+});
+
+describe('segmentSettled：重试、重派之前上一段收场了没有（决定 0093，同一张单不并发两段）', () => {
+  const ask = { schemaVersion: 1 as const, taskId: TASK, startedAfter: '2026-10-14T07:00:00Z' };
+  const settled = (rows: (RunRow | null)[]) => {
+    let i = 0;
+    return createSegmentSettled({
+      latestManualRun: async () => rows[Math.min(i++, rows.length - 1)] ?? null,
+      settleMs: 50,
+      pollMs: 1,
+      sleep: async () => {},
+    });
+  };
+
+  it('收场了的、库里压根没有那一段（没起来）：算收场', async () => {
+    expect(await settled([row()])(ask, ctx)).toEqual({ settled: true });
+    expect(await settled([null])(ask, ctx)).toEqual({ settled: true });
+  });
+
+  it('一开始没收场、等着等着收场了：算收场', async () => {
+    expect(await settled([row({ endedAt: null }), row()])(ask, ctx)).toEqual({ settled: true });
+  });
+
+  it('【故意造出的失败】一直没收场：回没收场和那一行的编号，不当成收场了', async () => {
+    const got = await settled([row({ id: 'run-live', endedAt: null })])(ask, ctx);
+    expect(got).toMatchObject({ settled: false, runId: 'run-live' });
+  });
+
+  it('【故意造出的失败】库读不了原样抛、入参认不出抛，不回「收场了」', async () => {
+    const broken = createSegmentSettled({
+      latestManualRun: async () => {
+        throw new Error('db down');
+      },
+    });
+    await expect(broken(ask, ctx)).rejects.toThrow('db down');
+    await expect(settled([row()])({ ...ask, startedAfter: 'nope' }, ctx)).rejects.toThrow('startedAfter');
   });
 });

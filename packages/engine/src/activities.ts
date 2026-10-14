@@ -54,6 +54,8 @@ import type {
   ReleaseReservationResult,
   RunSegmentInput,
   RunSegmentResult,
+  SegmentSettledInput,
+  SegmentSettledResult,
   SelfCheckInput,
   SelfCheckResult,
   TaskSpendInput,
@@ -260,6 +262,8 @@ export interface EngineTasks {
   mergeNow?: (input: MergeNowInput, ctx: PortContext) => Promise<MergeNowResult>;
   /** 判这一段能不能续上一段的会话（决定 0088）。续不上回原因，不抛。 */
   planSegmentResume?: (input: PlanSegmentResumeInput, ctx: PortContext) => Promise<PlanSegmentResumeResult>;
+  /** 上一段收场了没有（决定 0093）：重试、重派前问，没收场不起第二段。库读不了抛。 */
+  segmentSettled?: (input: SegmentSettledInput, ctx: PortContext) => Promise<SegmentSettledResult>;
   /** 动手会话收场后在会话的树里跑测试和 tsc（决定 0093）。没跑成回 skipped，不抛。 */
   selfCheck?: (input: SelfCheckInput, ctx: PortContext) => Promise<SelfCheckResult>;
   /** 这张单到现在花掉多少 token（单任务预算，决定 0093）。 */
@@ -278,6 +282,7 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   readCiPolicy: true,
   mergeNow: true,
   planSegmentResume: true,
+  segmentSettled: true,
   selfCheck: true,
   taskSpend: true,
 };

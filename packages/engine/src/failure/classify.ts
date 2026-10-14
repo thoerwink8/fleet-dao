@@ -68,6 +68,8 @@ interface Ctx {
   upstreamWait: number | undefined;
 }
 
+type Cooldown = NonNullable<FailureVerdict['cooldown']>;
+
 interface Step {
   action: 'retry' | 'park';
   delaySeconds: number;
@@ -75,6 +77,8 @@ interface Step {
   wait: boolean;
   /** 额度池回去选路等：不原地睡（原因里这么写）。 */
   reroute?: true;
+  /** 原路再试前歇多久按哪一档定（决定 0093）。 */
+  cooldown?: Cooldown;
 }
 
 const PARK: Step = { action: 'park', delaySeconds: 0, counter: null, wait: false };
@@ -169,6 +173,7 @@ export function classifyFailure(
     resumeSame: step.action === 'retry' || (step.action === 'park' && plan.resumeAfterPark === true),
     routeOutcome: plan.routeOutcome,
     ...(missingReason ? { missingReason: true as const } : {}),
+    ...(step.cooldown && step.action === 'retry' ? { cooldown: step.cooldown } : {}),
   };
 }
 
@@ -199,14 +204,15 @@ function decide(plan: Plan, ctx: Ctx): Step {
       const skip = repeatSkip(plan, ctx, used.retries);
       if (skip) return stopWith(plan, skip);
       if (used.retries >= retryCap(plan, policy)) return stopWith(plan, `已重试 ${used.retries} 次`);
+      // 绑路由的别的临时失败（决定 0093，magpie 分档冷却的「其他」）：1 分钟起翻倍、封顶；规则自己写了起步的照规则
+      const base =
+        plan.retryBaseSeconds ?? (ctx.routeBound ? policy.routeRetryBaseSeconds : policy.retryBaseSeconds);
       return {
         action: 'retry',
-        delaySeconds: Math.min(
-          (plan.retryBaseSeconds ?? policy.retryBaseSeconds) * 2 ** used.retries,
-          policy.retryMaxSeconds,
-        ),
+        delaySeconds: Math.min(base * 2 ** used.retries, policy.retryMaxSeconds),
         counter: 'retries',
         wait: false,
+        cooldown: { tier: 'other', by: 'backoff' },
       };
     }
     case 'wait': {
@@ -218,9 +224,14 @@ function decide(plan: Plan, ctx: Ctx): Step {
           `上游要 ${duration(wait)}后才恢复，超过最长等待 ${duration(policy.waitMaxSeconds)}`,
         );
       }
+      // 分档（决定 0093，magpie 分档冷却）：额度用完歇到清零（读到时刻用读数，没读到按估计并写明）；限流、繁忙按上游给的
+      // 时间，没给按默认起翻倍
+      const cooldown: Cooldown = plan.quota
+        ? { tier: 'quota', by: wait === undefined ? 'estimate' : 'resets' }
+        : { tier: 'rate', by: wait === undefined ? 'backoff' : 'retry-after' };
       // 订阅池（带组织类型）不原地睡：马上回去选路，续同一个会话等这条路由（选路隔一会儿再看），切了号就照常选到切过去的池
       if (plan.quota && ctx.evidence.orgKind) {
-        return { action: 'retry', delaySeconds: 0, counter: 'retries', wait: true, reroute: true };
+        return { action: 'retry', delaySeconds: 0, counter: 'retries', wait: true, reroute: true, cooldown };
       }
       const delaySeconds =
         wait ??
@@ -228,7 +239,7 @@ function decide(plan: Plan, ctx: Ctx): Step {
           (plan.defaultWaitSeconds ?? policy.retryBaseSeconds) * 2 ** used.retries,
           policy.waitMaxSeconds,
         );
-      return { action: 'retry', delaySeconds, counter: 'retries', wait: true };
+      return { action: 'retry', delaySeconds, counter: 'retries', wait: true, cooldown };
     }
   }
 }
@@ -265,10 +276,27 @@ function actionText(step: Step, plan: Plan, ctx: Ctx): string {
       ctx.upstreamWait === undefined ? '' : `（约 ${duration(ctx.upstreamWait)}后清零）`
     }，会话用户切了号就换到切过去的那个池接着干`;
   }
-  if (step.wait) return `${first}等 ${duration(step.delaySeconds)}再试`;
+  if (step.wait) return `${first}${waitText(step)}`;
   return `${first}第 ${ctx.used.retries + 1} 次重试，${
     step.delaySeconds === 0 ? '马上' : `${duration(step.delaySeconds)}后`
   }`;
+}
+
+/** 等上游的那一句：按哪一档、依据什么歇（决定 0093）。读不到的写明是估计，不当成读数。 */
+function waitText(step: Step): string {
+  const d = duration(step.delaySeconds);
+  switch (step.cooldown?.by) {
+    case 'resets':
+      return `歇到额度清零再试（按读到的清零时刻，等 ${d}）`;
+    case 'estimate':
+      return `清零时刻没读到，按估计歇 ${d}再试`;
+    case 'retry-after':
+      return `按上游给的时间歇 ${d}再试`;
+    case 'backoff':
+      return `上游没给时间，按默认起翻倍歇 ${d}再试`;
+    default:
+      return `等 ${d}再试`;
+  }
 }
 
 function fillFix(template: string, e: FailureEvidence): string {
@@ -288,8 +316,9 @@ function upstreamWait(e: FailureEvidence, scan: Scan, nowMs: number | undefined)
     return Math.round(e.retryAfterSeconds);
   }
   const resetsAt = parseTime(e.resetsAt);
-  if (resetsAt !== undefined && nowMs !== undefined)
-    return Math.max(0, Math.round((resetsAt - nowMs) / 1000));
+  // 已经过了的清零时刻是旧读数，不当成「马上就好」（等 0 秒原路再撞）：当没读到，往下找，再没有按估计（决定 0093）
+  if (resetsAt !== undefined && nowMs !== undefined && resetsAt > nowMs)
+    return Math.round((resetsAt - nowMs) / 1000);
   return waitFromText(scan.text, nowMs);
 }
 
@@ -298,8 +327,13 @@ function unreadableFields(e: FailureEvidence): string[] {
   if (e.now !== undefined && parseTime(e.now) === undefined) {
     out.push(`now 认不出（${e.now}），不写到期时刻`);
   }
-  if (e.resetsAt !== undefined && parseTime(e.resetsAt) === undefined) {
+  const resetsAt = parseTime(e.resetsAt);
+  if (e.resetsAt !== undefined && resetsAt === undefined) {
     out.push(`resetsAt 认不出（${e.resetsAt}），按默认时长`);
+  }
+  const nowMs = parseTime(e.now);
+  if (resetsAt !== undefined && nowMs !== undefined && resetsAt <= nowMs) {
+    out.push(`resetsAt 已经过了（${e.resetsAt}），是旧读数，不算`);
   }
   const after = e.retryAfterSeconds;
   if (after !== undefined && !(typeof after === 'number' && Number.isFinite(after) && after >= 0)) {

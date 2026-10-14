@@ -5,6 +5,7 @@
 import type { StageKind } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { classifyFailure } from '../failure/classify.ts';
+import { isUpstreamBlip } from '../failure/rules.ts';
 import type { FailureEvidence, FailurePolicy, FailureVerdict } from '../failure/types.ts';
 import type { Limits } from '../limits.ts';
 
@@ -105,6 +106,13 @@ export interface NextAction {
    * 新的失败不再设。
    */
   failChannel?: true;
+  /**
+   * 上游临时故障（规则表上标了 blip 的：限流、繁忙、容量满……，决定 0093）：判停下时工作流先有界耐心地换路再试，
+   * 预算用完才停下。在分流这一侧算好进历史，工作流不现读规则表。缺 = 不是（老历史照旧）。
+   */
+  transient?: true;
+  /** 原路再试前按哪一档歇（分流的 cooldown，决定 0093）。 */
+  cooldown?: FailureVerdict['cooldown'];
 }
 
 /** 分流本身：可以换（演练「分流出错」用）；不给就是 failure/classify.ts 的 classifyFailure。 */
@@ -209,6 +217,8 @@ export function nextAction(input: FailureInput, triage: FailureTriage = classify
     rule: v.rule,
     ...(shared ? { shared } : {}),
     ...(v.humanFix ? { humanFix: v.humanFix } : {}),
+    ...(isUpstreamBlip(v.rule) ? { transient: true as const } : {}),
+    ...(v.cooldown ? { cooldown: v.cooldown } : {}),
   };
   return out;
 }

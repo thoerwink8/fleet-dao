@@ -1257,6 +1257,8 @@ describe('任务工作流 · 切号停下动手那一段（org_switch，#59）',
       world,
       async (q) => {
         const h = await start(q, input());
+        // 认不出的原路重试 1 分钟起（决定 0093 分档冷却）：只查状态时测试服务端不跳时间，这里把时间拨过去
+        await env.sleep('2 minutes');
         // 第 3 回（切过去之后）又是同一句：不再原路重试，停下等人（原来是换路由）
         const s = await statusUntil(h, parked, '同一句原文再犯，停下等人');
         expect(s.lastProblem).toContain('一字不差');
