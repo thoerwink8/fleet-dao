@@ -131,7 +131,7 @@ Fleet 接收 Mirasim 的平台成功结果前核账本：至少有计费模型�
 - Mirasim 回收空闲进程发停止信号：优雅停掉执行体、退出 0，记 `event=stopped`。
 - 切路由只在实际结果变了（保留网关↔剥掉）才重建执行进程；default(保留)↔cloud、default(无网关)↔local 不重启。
 - 索引说 `local`、Mirasim 却注入了带令牌的回环网关（这个进程第一次选路时）：隔 300ms 重读索引最多 3 次，仍矛盾按索引执行并记 `event=route-conflict`。Mirasim「这一回合由空间/远程作者付」的判定只在它内存里，落盘的 `turnPayers` 是调用发生后才记的账，启动器回合开始前读不到，所以这种回合仍按索引走。
-- 读索引和 `record.json`：Windows 上用放开删除共享的句柄（不挡 Mirasim 的 rename 原子替换）；撞上共享冲突或读到半截 JSON 隔 50ms 重读最多 3 次。先直接读本会话的 `record.json`，对不上才扫全部，无关会话的坏记录不挡新会话。多个索引时按 Mirasim 的命名（服务端工作区根目录路径的 base64url）和索引 `keys` 里的登记找会话所属索引。
+- 读索引和 `record.json`：Windows 上用放开删除共享的句柄、读完立刻关；这只是必要条件，旧 rename 语义的 Windows 上启动器读文件那一瞬间 Mirasim 的覆盖仍会失败（Mirasim 失败即丢弃这次写入），窗口很短；撞上共享冲突或读到半截 JSON 隔 50ms 重读最多 3 次。先直接读本会话的 `record.json`，对不上才扫全部，无关会话的坏记录不挡新会话。多个索引时按 Mirasim 的命名（服务端工作区根目录路径的 base64url）和索引 `keys` 里的登记找会话所属索引。
 
 ## 6. Mirasim 提示「Claude Code 升级失败」
 
