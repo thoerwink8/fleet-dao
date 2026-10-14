@@ -194,7 +194,7 @@ export class GitHubClient {
       this.installations.delete(key);
       throw new GitHubError(
         'NOT_INSTALLED',
-        `${ROLE_NAMES[role]}没装到 ${repoSlug(repo)}（或这个仓不存在）：到 App 设置页把它装到这个仓`,
+        `${ROLE_NAMES[role]}没装到 ${repoSlug(repo)}（或这个仓不存在）：到 App 设置页把它装到这个仓（只勾这个仓即可；仓在别的账号或组织下时，App 要先在设置的 Advanced 里设成公开，私有的只能装在建它的账号下）`,
         { details: { role, repo: repoSlug(repo) }, status: 404 },
       );
     }

@@ -114,7 +114,7 @@ describe('GitHub 机器人权限自检（每小时对账的一项）', () => {
 
   it('【故意造出的失败】没查成（没装到这个仓）：报提醒、这一轮记没查全，不当成权限够', async () => {
     const why =
-      '「引擎」机器人没查成：「引擎」机器人没装到 acme/widgets（或这个仓不存在）：到 App 设置页把它装到这个仓';
+      '「引擎」机器人没查成：「引擎」机器人没装到 acme/widgets（或这个仓不存在）：到 App 设置页把它装到这个仓（只勾这个仓即可；仓在别的账号或组织下时，App 要先在设置的 Advanced 里设成公开，私有的只能装在建它的账号下）';
     const w = world([item({ role: 'agent' }), item({ ok: false, why })]);
     const part = await checkGitHubApps(w.deps);
     expect(part).toEqual({ scanned: 2, found: 1, unchecked: [`acme/widgets：${why}`] });
