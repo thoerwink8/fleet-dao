@@ -86,10 +86,22 @@ export async function readReleaseFacts(dir: string): Promise<ReleaseFacts | null
   if (history === null) throw new Error(`${dir}/.history 不在，但目录在：发布历史读不到`);
   const train = await readOptional(join(dir, '.train', 'release-train.json'));
   let trainStatus: string | null = null;
+  let trainSince: string | null = null;
+  let trainSha: string | null = null;
   if (train !== null) {
-    const v = JSON.parse(train) as { status?: unknown } | null;
+    // 写的是 deploy/france/release-request/lib.mjs（newState + writeState：startedAt、每次写盘刷 updatedAt、target.value）；
+    // 老格式只有 status，起点时间、提交号缺着是 null（判法照旧当要人看，见 jobs/release-watch.ts 的 trainVerdict）
+    const v = JSON.parse(train) as {
+      status?: unknown;
+      startedAt?: unknown;
+      updatedAt?: unknown;
+      target?: { value?: unknown } | null;
+    } | null;
     if (typeof v?.status !== 'string') throw new Error('发版进度记录认不出（没有 status）');
     trainStatus = v.status;
+    const since = typeof v.startedAt === 'string' ? v.startedAt : v.updatedAt;
+    trainSince = typeof since === 'string' ? since : null;
+    trainSha = typeof v.target?.value === 'string' ? v.target.value : null;
   }
   const state = await readOptional(join(dir, '.auto', 'state.json'));
   let autoNote: string | null = null;
@@ -97,7 +109,7 @@ export async function readReleaseFacts(dir: string): Promise<ReleaseFacts | null
     const v = JSON.parse(state) as { auto?: { note?: unknown } | null } | null;
     autoNote = typeof v?.auto?.note === 'string' ? v.auto.note : null;
   }
-  return { last: lastHistoryEntry(history), trainStatus, autoNote };
+  return { last: lastHistoryEntry(history), trainStatus, trainSince, trainSha, autoNote };
 }
 
 /** 发布目录在不在（在 = 这台是法国）。不在是 false，别的错照抛。 */

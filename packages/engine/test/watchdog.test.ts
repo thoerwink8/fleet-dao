@@ -5,6 +5,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   auditLog,
   finishScheduleRun,
@@ -21,9 +22,11 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
+  judgeReleaseAttention,
   lastHistoryEntry,
   parseHealthzResponse,
   releaseAttentionReasons,
+  TRAIN_STUCK_MS,
 } from '../src/jobs/release-watch.ts';
 import {
   jobIdOfKey,
@@ -714,6 +717,57 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
     expect((await alertOf(rel?.dedupeKey ?? ''))?.body).toContain('已撤：发版现在不用人看了');
   });
 
+  it('重放 2026-10-14 22:58Z：一趟正常自动发版在走（真格式进度记录 running）不报，挂在上一版身上的误报撤掉；超过阈值才报、键写正在发的；发完撤', async () => {
+    const PREV = 'df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e';
+    const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
+    history(`2026-10-14T22:49:55Z ${PREV} release`);
+    const train = (status: string) =>
+      writeFileSync(
+        join(dir, '.train', 'release-train.json'),
+        JSON.stringify({
+          schema: 1,
+          status,
+          phase: 4,
+          startedAt: at(-5).toISOString(),
+          updatedAt: at(-5).toISOString(),
+          target: { kind: 'sha', value: NEW },
+          waiting: 'release.sh 2f5dc42f4636 在跑（最多 30 分钟）',
+        }),
+      );
+    train('running');
+    writeFileSync(
+      join(dir, '.auto', 'state.json'),
+      JSON.stringify({ auto: { note: '现在不发：上一趟发版是「running」状态，要人看，不自动再发' } }),
+    );
+    // 旧版看门狗开的那条误报（键挂在上一版身上）
+    await upsertAlert(t.db, {
+      dedupeKey: 'watchdog:release:df3692b292a7:release',
+      level: 'alert',
+      taskId: null,
+      title: '发版要人看：新版没发成或退回了，自动发版停着',
+      body: '发版进度记录停在「running」',
+    });
+
+    // 进行中 5 分钟：不报，那条误报撤掉
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([]);
+    expect((await alertOf('watchdog:release:df3692b292a7:release'))?.body).toContain(
+      '已撤：发版现在不用人看了',
+    );
+
+    // 过了阈值还 running：报，键是正在发的这一趟
+    clock = at(TRAIN_STUCK_MS / MIN - 4);
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual(['watchdog:release:train:2f5dc42f4636:running']);
+
+    // 发完（历史多一条 release、进度 done）：自己撤
+    history(`2026-10-14T22:49:55Z ${PREV} release`, `2026-10-14T23:04:53Z ${NEW} release`);
+    train('done');
+    clock = at(TRAIN_STUCK_MS / MIN);
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([]);
+  });
+
   it('非 200 没满 10 分钟就恢复：从不报，也清掉记的时刻（下次重新数）', async () => {
     history(`2026-10-14T17:03:00Z ${SHA} release`);
     health = RED_503;
@@ -824,9 +878,76 @@ describe('发版和健康页的判法（纯函数）', () => {
       trainStatus,
       autoNote,
     });
-    expect(releaseAttentionReasons(f('done'))).toEqual([]);
-    expect(releaseAttentionReasons(f('aborted'))).toEqual([]);
-    expect(releaseAttentionReasons(f(null, '主线头 CI 不是绿的，等绿'))).toEqual([]);
-    expect(releaseAttentionReasons(f('deploying'))).toHaveLength(1);
+    expect(releaseAttentionReasons(f('done'), T0)).toEqual([]);
+    expect(releaseAttentionReasons(f('aborted'), T0)).toEqual([]);
+    expect(releaseAttentionReasons(f(null, '主线头 CI 不是绿的，等绿'), T0)).toEqual([]);
+    expect(releaseAttentionReasons(f('deploying'), T0)).toHaveLength(1);
+    expect(releaseAttentionReasons(f('failed'), T0)).toHaveLength(1);
+  });
+
+  describe('进度记录 running：正常在走不报，超过 TRAIN_STUCK_MS 才算卡住（2026-10-14 22:58Z 每趟自动发版都误报）', () => {
+    const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
+    const LAST = `2026-10-14T22:49:55Z df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e release`;
+    const START = new Date('2026-10-14T22:57:55.841Z');
+    const running = (over: Record<string, unknown> = {}) => ({
+      last: lastHistoryEntry(LAST),
+      trainStatus: 'running',
+      trainSince: START.toISOString(),
+      trainSha: NEW,
+      autoNote: '现在不发：上一趟发版是「running」状态，要人看，不自动再发',
+      ...over,
+    });
+    const after = (min: number) => new Date(START.getTime() + min * MIN);
+
+    it('进行中 5 分钟：不报，自动发布因为它说的「要人看」也不报', () => {
+      expect(releaseAttentionReasons(running(), after(5))).toEqual([]);
+      expect(judgeReleaseAttention(running(), after(1))).toEqual({ kind: 'fine' });
+      expect(judgeReleaseAttention(running(), after(TRAIN_STUCK_MS / MIN))).toEqual({ kind: 'fine' });
+    });
+
+    it('【故意造出的失败】超过阈值：报，键和正文写正在发的提交，不挂在上一版（df3692b2）身上', () => {
+      const v = judgeReleaseAttention(running(), after(TRAIN_STUCK_MS / MIN + 1));
+      expect(v).toMatchObject({ kind: 'alert', key: 'watchdog:release:train:2f5dc42f4636:running' });
+      if (v.kind !== 'alert') throw new Error('应当报');
+      expect(v.key).not.toContain('df3692b292a7');
+      expect(v.title).toBe('发版卡住：2f5dc42f4636 这一趟超过 70 分钟没收尾，自动发版停着');
+      expect(v.body).toContain('正在发 2f5dc42f4636 的这一趟从 10-15 06:57 起停在「running」');
+      // 卡住时自动发布那句「要人看」照写
+      expect(v.body).toContain('自动发布说：现在不发');
+    });
+
+    it('done 不报（上一版、这一版都不报）', () => {
+      expect(judgeReleaseAttention(running({ trainStatus: 'done' }), after(500))).toEqual({ kind: 'fine' });
+    });
+
+    it('旧格式（只有 status，没有起点时间）：running 判不了多久，照旧报，写明老格式', () => {
+      const v = judgeReleaseAttention(
+        { last: lastHistoryEntry(LAST), trainStatus: 'running', autoNote: null },
+        after(1),
+      );
+      expect(v).toMatchObject({ kind: 'alert', key: 'watchdog:release:train:unknown:running' });
+      if (v.kind !== 'alert') throw new Error('应当报');
+      expect(v.body).toContain('没有起止时间（老格式）');
+    });
+
+    it('收了尾却没成（failed）：立刻报，键认这一趟的提交', () => {
+      const v = judgeReleaseAttention(running({ trainStatus: 'failed' }), after(3));
+      expect(v).toMatchObject({
+        kind: 'alert',
+        key: 'watchdog:release:train:2f5dc42f4636:failed',
+        title: '发版要人看：2f5dc42f4636 这一趟停在「failed」，自动发版停着',
+      });
+    });
+
+    it('阈值不小于发版接活脚本各步上限加起来（到上限它自己写成没成；没到的一律当正常在走）', async () => {
+      // 发版接活脚本是 deploy/ 下的 .mjs（不在引擎的类型检查里），按文件地址引
+      const { LIMITS: L } = (await import(
+        pathToFileURL(join(import.meta.dirname, '../../../deploy/france/release-request/lib.mjs')).href
+      )) as { LIMITS: Record<'releaseMs' | 'deployMs' | 'checkMs' | 'verifyMs' | 'stepMs', number> };
+      const worst = L.releaseMs + L.deployMs + L.checkMs + L.verifyMs + 8 * L.stepMs;
+      expect(TRAIN_STUCK_MS).toBeGreaterThanOrEqual(worst);
+      // 最多多 5 分钟余量：巡查（agents/test/patrol.test.ts）对 LIMITS.trainStuckMinutes 做同样的核对，两边落在同一条线上
+      expect(TRAIN_STUCK_MS).toBeLessThanOrEqual(worst + 5 * 60_000);
+    });
   });
 });

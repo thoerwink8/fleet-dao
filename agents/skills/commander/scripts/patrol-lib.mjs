@@ -7,7 +7,8 @@
 // - 读不成一律 BROKEN，不当 OK：ssh 连不上、输出是空的、少了哪一块、有认不出的行、库查询报错、采集时间和本机差超过
 //   STALE_MINUTES 分钟。
 // - 发版和健康页也读（2026-10-14 法国发版失败，巡检还报 OK 近一小时）：/healthz 非 200、最近一次发版是 unhealthy / auto-rollback、发版进度记录停在
-//   done / aborted 以外、自动发布状态里写着「要人看」，一律 BROKEN（列出红的检查）；在用版本落后主线超过 LIMITS.lagCommits 个提交
+//   failed / blocked 这类收了尾却没成的状态或 running 超过 LIMITS.trainStuckMinutes（trainReason）、自动发布状态里写着「要人看」，一律 BROKEN（列出红的检查）；
+//   running 没超时是一趟正常发版在走（自动发版每 5 分钟一班），它和那段时间自动发布说的「要人看」都不算；在用版本落后主线超过 LIMITS.lagCommits 个提交
 //   且最老的那个落下超过 LIMITS.lagMinutes 分钟是 ALERT；这几块读不到、认不出也是 BROKEN。
 // - 飞书推送通不通（push 那一块）：判法照 packages/db/src/queries/feishu-push.ts 的 feishuPushProblem 写（这份脚本在仓外跑、
 //   引不了那边的代码，改那边要一起改这里的 SQL）。推送渠道自己坏了靠推送报不出来，这里每次巡查都看一次，不只靠「新通知」。
@@ -36,8 +37,9 @@ import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
  */
 /**
  * 一次巡查读到的。at 是法国的采集时间（ISO）。
- * healthz、history、trainStatus、autoNote、lag 是发版和健康页（老基线里没有这几项，只有判当前读数用到）。
- * @typedef {{ at: string, release: string, healthz: HealthzFact, history: HistoryFact[], trainStatus: string, autoNote: string, lag: LagFact, services: Record<string, string>, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notesOpen: number, notes: NoteFact[], push: PushFact, brief: BriefFact }} Facts
+ * healthz、history、trainStatus、trainSince、trainSha、autoNote、lag 是发版和健康页（老基线里没有这几项，只有判当前读数用到）。
+ * trainSince 是这一趟的起点（进度记录的 startedAt，没有用 updatedAt；老格式都没有是 ''），trainSha 是这一趟发的提交（target.value，没有是 ''）。
+ * @typedef {{ at: string, release: string, healthz: HealthzFact, history: HistoryFact[], trainStatus: string, trainSince?: string, trainSha?: string, autoNote: string, lag: LagFact, services: Record<string, string>, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notesOpen: number, notes: NoteFact[], push: PushFact, brief: BriefFact }} Facts
  */
 /** @typedef {'OK' | 'ALERT' | 'BROKEN'} Verdict */
 /** @typedef {{ verdict: Verdict, facts: Facts | null, alerts: string[], delta: string[], broken: string | null, notes: string[] }} Report */
@@ -60,6 +62,12 @@ export const LIMITS = {
   pushStaleMinutes: 60,
   /** 今天的每日简报到 08:30 以后过这么多分钟还没送到才报（同 daily-brief.ts 的 DAILY_BRIEF_GRACE_MINUTES） */
   briefGraceMinutes: 30,
+  /**
+   * 发版进度记录停在 running 超过这么多分钟（从 startedAt 算）才算卡住。和引擎看门狗同一个数、同一判法：
+   * packages/engine/src/jobs/release-watch.ts 的 TRAIN_STUCK_MS / trainVerdict（依据写在那边：发版接活脚本各步上限加起来 69 分钟，
+   * 到上限它自己写成没成；过了还 running 只能是驱动没了）。这份在仓外跑、引不了那边；两边的测试各自钉它落在 LIMITS 各步加起来到多 5 分钟之间。
+   */
+  trainStuckMinutes: 70,
 };
 /** 发布历史最近一条是这些事件：这一版没发成，或退回了。 */
 export const BAD_RELEASE_EVENTS = ['unhealthy', 'auto-rollback'];
@@ -176,16 +184,22 @@ const shown = (line) => scrubText(line.length > 80 ? `${line.slice(0, 80)}…` :
  * @param {string} state
  * @param {string} cur 在用的完整提交号
  * @param {string} at 法国采集时间（ISO）
- * @returns {{ ok: true, trainStatus: string, autoNote: string, lag: LagFact } | { ok: false, why: string }}
+ * @returns {{ ok: true, trainStatus: string, trainSince: string, trainSha: string, autoNote: string, lag: LagFact } | { ok: false, why: string }}
  */
 function releaseFacts(train, state, cur, at) {
   let trainStatus = '';
+  let trainSince = '';
+  let trainSha = '';
   if (train !== '-') {
     try {
       const t = JSON.parse(train);
       if (typeof t?.status !== 'string')
         return { ok: false, why: '发版进度记录（release-train.json）认不出：没有 status' };
       trainStatus = t.status;
+      // 同 packages/engine/src/real/watchdog.ts 的 readReleaseFacts：startedAt，没有用 updatedAt；老格式缺着是 ''
+      const since = typeof t.startedAt === 'string' ? t.startedAt : t.updatedAt;
+      trainSince = typeof since === 'string' ? since : '';
+      trainSha = typeof t.target?.value === 'string' ? t.target.value : '';
     } catch (e) {
       return {
         ok: false,
@@ -214,10 +228,24 @@ function releaseFacts(train, state, cur, at) {
   const autoNote = typeof st?.auto?.note === 'string' ? scrubText(st.auto.note) : '';
   const idx = commits.findIndex((c) => c[0] === cur);
   if (idx < 0)
-    return { ok: true, trainStatus, autoNote, lag: { known: false, behind: commits.length, minutes: 0 } };
+    return {
+      ok: true,
+      trainStatus,
+      trainSince,
+      trainSha,
+      autoNote,
+      lag: { known: false, behind: commits.length, minutes: 0 },
+    };
   const minutes =
     idx === 0 ? 0 : Math.max(0, Math.floor((Date.parse(at) - Date.parse(commits[idx - 1][1])) / 60_000));
-  return { ok: true, trainStatus, autoNote, lag: { known: true, behind: idx, minutes } };
+  return {
+    ok: true,
+    trainStatus,
+    trainSince,
+    trainSha,
+    autoNote,
+    lag: { known: true, behind: idx, minutes },
+  };
 }
 
 /**
@@ -359,6 +387,8 @@ export function parseRaw(text) {
       healthz: one.healthz ?? { code: 0, red: [] },
       history: history.slice(-3),
       trainStatus: rel.trainStatus,
+      trainSince: rel.trainSince,
+      trainSha: rel.trainSha,
       autoNote: rel.autoNote,
       lag: rel.lag,
       services,
@@ -425,8 +455,39 @@ const taskWord = (t) => `#${t.n}（${t.repo}）${t.state}${t.phase ? `/${t.phase
 const historyWord = (/** @type {HistoryFact} */ h) => `${h.event}（${h.sha.slice(0, 8)} ${h.at}）`;
 
 /**
+ * 发版进度记录这一项：'none' 没有或收尾成了（done / aborted）；'running' 正常在走（没到 LIMITS.trainStuckMinutes）；
+ * 'stuck' 在走超时，或 running 却没有时间判不了多久（老格式，照旧算）；'stopped' 收了尾却没成（failed、blocked……）。
+ * 「此刻」用法国的采集时间 f.at（和进度记录同一台机器的钟）。同 packages/engine/src/jobs/release-watch.ts 的 trainVerdict。
+ * @param {Facts} f
+ * @returns {'none' | 'running' | 'stuck' | 'stopped'}
+ */
+export function trainKind(f) {
+  const s = f.trainStatus;
+  if (s === '' || s === 'done' || s === 'aborted') return 'none';
+  if (s !== 'running') return 'stopped';
+  const since = Date.parse(f.trainSince ?? '');
+  if (!Number.isFinite(since)) return 'stuck';
+  return Date.parse(f.at) - since > LIMITS.trainStuckMinutes * 60_000 ? 'stuck' : 'running';
+}
+
+/**
+ * 进度记录要人看的那一句（写明这一趟发的是哪个提交，不挂在上一版身上）；不用看是 null。
+ * @param {Facts} f
+ * @returns {string | null}
+ */
+export function trainReason(f) {
+  const kind = trainKind(f);
+  const sha = f.trainSha ? f.trainSha.slice(0, 12) : '（进度记录没写提交）';
+  if (kind === 'stopped') return `发版进度记录停在「${f.trainStatus}」（这一趟发的是 ${sha}）`;
+  if (kind !== 'stuck') return null;
+  if (!Number.isFinite(Date.parse(f.trainSince ?? '')))
+    return `发版进度记录停在「running」（这一趟发的是 ${sha}），记录里没有起止时间（老格式），判不了是不是还在正常走`;
+  return `正在发 ${sha} 的这一趟从 ${f.trainSince} 起停在「running」，超过 ${LIMITS.trainStuckMinutes} 分钟没收尾（多半是驱动没了）`;
+}
+
+/**
  * 判 BROKEN 的几条（出事了，不是「要留意」）：健康页不是 200（列出红的检查）、最近一次发版是 unhealthy / auto-rollback、
- * 发版进度记录停在 done / aborted 以外、自动发布处于「要人看」。命中一条记一行；没有回空。
+ * 发版进度记录收了尾却没成或 running 超时（trainReason）、自动发布处于「要人看」（一趟正常在走时不算：那是因为它）。命中一条记一行；没有回空。
  * @param {Facts} f
  */
 export function brokenReasons(f) {
@@ -438,9 +499,15 @@ export function brokenReasons(f) {
   }
   const last = f.history.at(-1);
   if (last && BAD_RELEASE_EVENTS.includes(last.event)) out.push(`最近一次发版是 ${historyWord(last)}`);
-  if (f.trainStatus !== '' && f.trainStatus !== 'done' && f.trainStatus !== 'aborted')
-    out.push(`发版进度记录停在「${f.trainStatus}」`);
-  if (f.autoNote.includes('要人看')) out.push(`自动发布处于「要人看」：${f.autoNote}`);
+  const train = trainReason(f);
+  if (train) out.push(train);
+  // 自动发布这句「要人看」只因为进度记录的状态（「上一趟发版是「X」状态」）时，进度记录这边自己判：正常在走、刚收尾成了（旧话）都不算；进度记录不在却这么说对不上，照报。
+  // 同 packages/engine/src/jobs/release-watch.ts 的 trainNote
+  const kind = trainKind(f);
+  const trainOnly =
+    f.autoNote.includes('上一趟发版是「') &&
+    (kind === 'running' || (kind === 'none' && f.trainStatus !== ''));
+  if (f.autoNote.includes('要人看') && !trainOnly) out.push(`自动发布处于「要人看」：${f.autoNote}`);
   return out;
 }
 
@@ -565,7 +632,7 @@ export function render(r) {
     `单 ${f.tasks.length} 张没做完，卡住或停下超过 ${LIMITS.stuckMinutes} 分钟的 ${f.tasks.filter(isStuck).length} 张 ${at}`,
     `定时任务 最近一次不是 ok 的 ${f.jobs.length} 个 ${at}`,
     `健康页 /healthz ${f.healthz.code === 200 ? '200' : `${f.healthz.code === 0 ? '连不上' : f.healthz.code}（红的：${f.healthz.red.join('、') || '没列出'}）`} ${at}`,
-    `发版 最近一次 ${last ? historyWord(last) : '（没有）'}，进度记录 ${f.trainStatus || '无'}，落后主线 ${f.lag.known ? f.lag.behind : '?'} 个提交 ${at}`,
+    `发版 最近一次 ${last ? historyWord(last) : '（没有）'}，进度记录 ${f.trainStatus || '无'}${f.trainSha ? `（${f.trainSha.slice(0, 12)}）` : ''}，落后主线 ${f.lag.known ? f.lag.behind : '?'} 个提交 ${at}`,
     `通知 开着 ${f.notesOpen} 条 ${at}`,
     `飞书推送 ${pushProblem(f.push) ? '不通' : '通着'}（该推没送到 ${f.push.undelivered} 条，最近一次送到${f.push.lastOkMinutes < 0 ? '：从没有' : ` ${f.push.lastOkMinutes} 分钟前`}） ${at}`,
     `每日简报 ${f.brief.day} ${f.brief.minutes < LIMITS.briefGraceMinutes ? '还没到点' : briefProblem(f.brief) ? '没送到' : '送到了'} ${at}`,
