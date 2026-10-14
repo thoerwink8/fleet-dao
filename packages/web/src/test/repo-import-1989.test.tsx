@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // 设置页「导入仓库」（#1989）：列出本人 GitHub 上看得见的仓，个人/组织分开，能加进驾驶舱、能断开。
 // 走假数据（mock api），不联网。
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
 import SettingsPage from '../routes/settings';
@@ -19,6 +19,35 @@ describe('设置页导入仓库（#1989）', () => {
     expect(screen.getByText('adfx-studio/daihuo-workbench')).toBeTruthy();
     expect(screen.getByText(/个人仓/)).toBeTruthy();
     expect(screen.getByText(/组织的仓/)).toBeTruthy();
+  });
+
+  test('点「加进驾驶舱」后这一行当场变成已导入（假后端也要刷新列表）；移出后变回去', async () => {
+    renderApp(<SettingsPage />, { api: createMockApi({ live: false }), route: '/settings' });
+    await screen.findByText('thoerwink8/widgets');
+    // 接进来之后项目列表里也会出现这个仓：只认带「加进 / 移出驾驶舱」按钮的那一行（导入列表里的）
+    const rowOf = () =>
+      screen
+        .getAllByText('thoerwink8/widgets')
+        .map((e) => e.closest('li') as HTMLElement)
+        .find((li) => within(li).queryByRole('button', { name: /驾驶舱/ })) as HTMLElement;
+    fireEvent.click(within(rowOf()).getByRole('button', { name: /加进驾驶舱/ }));
+    await waitFor(() => expect(within(rowOf()).getByRole('button', { name: /移出驾驶舱/ })).toBeTruthy());
+    expect(within(rowOf()).queryByRole('button', { name: /^加进驾驶舱/ })).toBeNull();
+    expect(within(rowOf()).getByText('已在驾驶舱')).toBeTruthy();
+
+    fireEvent.click(within(rowOf()).getByRole('button', { name: /移出驾驶舱/ }));
+    fireEvent.click(await screen.findByRole('button', { name: '移出' }));
+    await waitFor(() => expect(within(rowOf()).getByRole('button', { name: /加进驾驶舱/ })).toBeTruthy());
+  });
+
+  test('窄屏：已导入行的徽章只留给读屏、状态写进第二行小字，仓名不被两个按钮挤没（#2211）', async () => {
+    renderApp(<SettingsPage />, { api: createMockApi({ live: false }), route: '/settings' });
+    await screen.findByText('adfx-studio/daihuo-workbench');
+    const row = screen.getByText('adfx-studio/daihuo-workbench').closest('li') as HTMLElement;
+    const badge = within(row).getByText('已在驾驶舱');
+    expect(badge.closest('[class~="max-md:sr-only"]')).toBeTruthy();
+    const meta = row.querySelector('[data-row-meta]') as HTMLElement;
+    expect(meta.querySelector('[class~="md:hidden"]')?.textContent).toContain('已在驾驶舱');
   });
 
   test('没装 App、又不在驾驶舱的仓：给「加进驾驶舱」按钮', async () => {
