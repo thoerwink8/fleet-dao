@@ -140,6 +140,7 @@ describe('登记编号和定时器编号对得上', () => {
       cliVersions: never,
       cliUpgrade: never,
       requestSweep: never,
+      dailyBrief: never,
     };
     const timerIds = engineTimerJobs({ jobs, client: {} as never, taskQueue: 'fleet' }).map((j) => j.id);
 

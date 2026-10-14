@@ -12,7 +12,13 @@ import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fle
 import { silentLogger } from '@fleet-dao/store';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createFeishuBot, createFeishuPusher, type FeishuBot, pushMessage } from '../src/feishu-push.ts';
+import {
+  createFeishuBot,
+  createFeishuPusher,
+  type FeishuBot,
+  postRow,
+  pushMessage,
+} from '../src/feishu-push.ts';
 import { parseFeishuPushArgs, runFeishuPush } from '../src/feishu-push-cli.ts';
 
 let t: TestDb;
@@ -219,6 +225,37 @@ describe('pushMessage', () => {
     expect(msg.title).toBe('【卡住了】卡了');
     expect(msg.lines).toHaveLength(12);
     expect(msg.link).toBe('https://cockpit.example/');
+  });
+
+  it('每日简报：标题不再加类别，正文放到 120 行', () => {
+    const msg = pushMessage(
+      {
+        id: 'b',
+        level: 'daily',
+        dedupeKey: 'feishu:brief:2026-10-15',
+        title: '【每日简报】2026-10-15',
+        body: Array.from({ length: 150 }, (_, i) => `行${i}`).join('\n'),
+        link: '/notifications',
+        createdAt: new Date(),
+        attempts: 0,
+      },
+      PUBLIC,
+    );
+    expect(msg.title).toBe('【每日简报】2026-10-15');
+    expect(msg.lines).toHaveLength(120);
+    expect(msg.link).toBe('https://cockpit.example/notifications');
+  });
+});
+
+describe('postRow', () => {
+  it('行里的 https 链接做成可点的，其余是文字；没链接就是一段文字', () => {
+    expect(postRow('· 卡了（开了 2 小时）— https://github.com/o/r/issues/7，去看')).toEqual([
+      { tag: 'text', text: '· 卡了（开了 2 小时）— ' },
+      { tag: 'a', text: 'https://github.com/o/r/issues/7', href: 'https://github.com/o/r/issues/7' },
+      { tag: 'text', text: '，去看' },
+    ]);
+    expect(postRow('没有链接')).toEqual([{ tag: 'text', text: '没有链接' }]);
+    expect(postRow('')).toEqual([{ tag: 'text', text: '' }]);
   });
 });
 

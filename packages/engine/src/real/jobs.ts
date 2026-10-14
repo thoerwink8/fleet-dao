@@ -11,6 +11,7 @@ import { CARPOOL_WATCH_JOB } from '../jobs/carpool-watch.ts';
 import { CI_TIMINGS_JOB } from '../jobs/ci-timings.ts';
 import { CLI_UPGRADE_JOB } from '../jobs/cli-upgrade.ts';
 import { CLI_VERSIONS_JOB } from '../jobs/cli-versions.ts';
+import { DAILY_BRIEF_JOB } from '../jobs/daily-brief.ts';
 import { EXTERNAL_WATCHDOG_JOB } from '../jobs/external-watchdog.ts';
 import { GITHUB_RECONCILE_JOB } from '../jobs/github-reconcile.ts';
 import { HOURLY_RECONCILE_JOB } from '../jobs/hourly-reconcile.ts';
@@ -37,6 +38,7 @@ export const ENGINE_JOBS = [
   CLI_VERSIONS_JOB,
   CLI_UPGRADE_JOB,
   REQUEST_SWEEP_JOB,
+  DAILY_BRIEF_JOB,
 ] as const;
 
 /** 外部驱动：没有进程内定时器。登记编号和定时器编号的核对不要求它们对得上。 */

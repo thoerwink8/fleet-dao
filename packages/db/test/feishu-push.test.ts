@@ -1,6 +1,7 @@
 // 提醒推飞书的查询：哪些该推、到点、退避、试满不再试；送达记录；推送状态；看门狗「推送不通」的判法。
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
+  FEISHU_PUSH_ESCALATE_MS,
   FEISHU_PUSH_MAX_ATTEMPTS,
   feishuPushableSince,
   feishuPushFacts,
@@ -37,33 +38,66 @@ async function note(
 
 const keys = async (now = NOW) => (await pendingFeishuPushes(t.db, now, 50)).map((p) => p.dedupeKey);
 
-describe('feishuPushableSince', () => {
-  it('要你拍、feishu: 开头的马上推；卡住报警开着 10 分钟才推；日报和主线结论记账行不推', () => {
-    expect(feishuPushableSince({ level: 'decision', dedupeKey: 'x', createdAt: NOW })).toEqual(NOW);
-    expect(feishuPushableSince({ level: 'daily', dedupeKey: 'feishu:main-red:abc', createdAt: NOW })).toEqual(
-      NOW,
-    );
-    expect(feishuPushableSince({ level: 'alert', dedupeKey: 'x', createdAt: NOW })).toEqual(
-      new Date(NOW.getTime() + 10 * MIN),
-    );
-    expect(feishuPushableSince({ level: 'daily', dedupeKey: 'groom:done:1', createdAt: NOW })).toBeNull();
-    expect(
-      feishuPushableSince({ level: 'daily', dedupeKey: 'feishu:main-ci-verdict', createdAt: NOW }),
-    ).toBeNull();
+describe('feishuPushableSince（推送分级）', () => {
+  const since = (level: 'decision' | 'alert' | 'daily', dedupeKey: string, redPushedBefore?: boolean) =>
+    feishuPushableSince({
+      level,
+      dedupeKey,
+      createdAt: NOW,
+      ...(redPushedBefore === undefined ? {} : { redPushedBefore }),
+    });
+  const escalated = new Date(NOW.getTime() + 60 * MIN);
+
+  it('要你拍、每日简报、推送测试马上推', () => {
+    expect(since('decision', 'x')).toEqual(NOW);
+    expect(since('daily', 'feishu:test:2026-10-15T00:00:00.000Z')).toEqual(NOW);
+    expect(since('daily', 'feishu:brief:2026-10-15')).toEqual(NOW);
+  });
+
+  it('卡住报警、主线红开满 60 分钟没撤才推（和配置的 FEISHU_PUSH_ESCALATE_MS 一致）', () => {
+    expect(FEISHU_PUSH_ESCALATE_MS).toBe(60 * MIN);
+    expect(since('alert', 'task:o/r#1:park:1')).toEqual(escalated);
+    expect(since('daily', 'feishu:main-red:abc')).toEqual(escalated);
+  });
+
+  it('主线已恢复：之前真推出去过主线红才推，没推过不打扰', () => {
+    expect(since('daily', 'feishu:main-recovered:abc', true)).toEqual(NOW);
+    expect(since('daily', 'feishu:main-recovered:abc', false)).toBeNull();
+    expect(since('daily', 'feishu:main-recovered:abc')).toBeNull();
+  });
+
+  it('其余进每日简报、不推：再提醒、日报、整池暂停到期、主线结论记账行', () => {
+    expect(since('alert', 'remind:abc:2026-10-14')).toBeNull();
+    expect(since('daily', 'groom:done:1')).toBeNull();
+    expect(since('daily', 'feishu:pool-hold-overdue:2026-10-14')).toBeNull();
+    expect(since('daily', 'feishu:main-ci-verdict')).toBeNull();
   });
 });
 
 describe('pendingFeishuPushes', () => {
   it('只给该推、到点、没处理、24 小时内的，老的在前', async () => {
     await note('decide', 'decision', ago(5 * MIN));
-    await note('alert-old-enough', 'alert', ago(11 * MIN));
-    await note('alert-too-new', 'alert', ago(3 * MIN));
-    await note('feishu:main-red:abc', 'daily', ago(1 * MIN));
+    await note('alert-old-enough', 'alert', ago(61 * MIN));
+    await note('alert-too-new', 'alert', ago(30 * MIN));
+    await note('alert-healed', 'alert', ago(2 * HOUR), { resolvedAt: ago(70 * MIN) });
+    await note('remind:abc:2026-10-14', 'alert', ago(3 * HOUR));
+    await note('feishu:brief:2026-10-15', 'daily', ago(1 * MIN));
+    await note('feishu:main-red:abc', 'daily', ago(20 * MIN));
     await note('feishu:main-ci-verdict', 'daily', ago(1 * MIN));
     await note('groom:done:1', 'daily', ago(1 * MIN));
     await note('handled', 'decision', ago(5 * MIN), { resolvedAt: ago(1 * MIN) });
     await note('too-old', 'decision', ago(25 * HOUR));
-    expect(await keys()).toEqual(['alert-old-enough', 'decide', 'feishu:main-red:abc']);
+    expect(await keys()).toEqual(['alert-old-enough', 'decide', 'feishu:brief:2026-10-15']);
+    // 主线红开满 60 分钟还没撤（没转绿）：推
+    expect(await keys(new Date(NOW.getTime() + 41 * MIN))).toContain('feishu:main-red:abc');
+  });
+
+  it('主线已恢复：之前 24 小时内真推出去过主线红才推', async () => {
+    const red = await note('feishu:main-red:aaa', 'daily', ago(3 * HOUR), { resolvedAt: ago(1 * HOUR) });
+    await note('feishu:main-recovered:aaa', 'daily', ago(1 * HOUR));
+    expect(await keys()).toEqual([]);
+    await recordFeishuDelivery(t.db, { notificationId: red, at: ago(2 * HOUR), messageId: 'om_red' });
+    expect(await keys()).toEqual(['feishu:main-recovered:aaa']);
   });
 
   it('送到了不再给；没送成按退避再给，试满不再给', async () => {
