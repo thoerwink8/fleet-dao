@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -384,13 +384,15 @@ describe('全仓的文档（main 上现有的，加上本 PR 改的）', () => {
       .sort()
       .map((name) => `docs/design/${name}`);
     expect(modules).toContain('docs/design/jev.md');
-    // 各包自己的 AGENTS.md（仓根那份只当目录，细则下沉到包里）也按盘上真实的独立算
-    const pkgAgents = readdirSync(join(ROOT, 'packages'))
-      .sort()
-      .map((name) => `packages/${name}/AGENTS.md`)
-      .filter((file) => existsSync(join(ROOT, file)));
-    expect(pkgAgents).toContain('packages/engine/AGENTS.md');
-    expect(report.files).toEqual([...DOCS, WORKFLOW_DOC, ...modules, ...pkgAgents]);
+    // 各包自己的 AGENTS.md（仓根那份只当目录，细则下沉到包里）排在最后。这里不通读 packages/
+    // （通读全仓的测试要登记进 ci-cache 的 WHOLE_REPO_READERS）：现有的六份逐个点名，尾巴只许是包说明。
+    const head = [...DOCS, WORKFLOW_DOC, ...modules];
+    expect(report.files.slice(0, head.length)).toEqual(head);
+    const pkgAgents = report.files.slice(head.length);
+    for (const name of ['api', 'conventions', 'db', 'engine', 'store', 'web'])
+      expect(pkgAgents).toContain(`packages/${name}/AGENTS.md`);
+    expect(pkgAgents.filter((f) => !/^packages\/[^/]+\/AGENTS\.md$/.test(f))).toEqual([]);
+    expect(pkgAgents).toEqual([...pkgAgents].sort());
     expect(report.files.filter((f) => f.startsWith('specs/') || f.startsWith('docs/decisions/'))).toEqual([]);
   });
 
