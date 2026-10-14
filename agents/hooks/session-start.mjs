@@ -44,7 +44,7 @@ import {
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { lineageOf, reconcile, relayedUpTo, sentByFounder } from './founder-inbox.mjs';
+import { lineageOf, ownerPresence, reconcile, relayedUpTo, sentByFounder } from './founder-inbox.mjs';
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, readFallbackProxy, gitWhy as why } from './git-run.mjs';
 import { logDir } from './prompt-log.mjs';
@@ -703,6 +703,8 @@ export function checkIdlePrs({ cwd, git, run, fetch, mirror = null }) {
  * 优先用同步专用检出里那份脚本，没有再用会话所在检出里的。
  */
 export const PROGRESS_MS = 8_000;
+/** 引导挂了多久、本会话又接不了，就交给创始人拍 */
+export const STALE_DIRECTIVE_MS = 24 * 60 * 60_000;
 const PROGRESS_SCRIPT = join('packages', 'conventions', 'src', 'bin', 'progress.ts');
 const PROGRESS_NOT_CHECKED = '创始人引导（进度单 #1055）没查成';
 
@@ -751,7 +753,7 @@ const progressMissing = () => `${PROGRESS_NOT_CHECKED}：找不到 ${PROGRESS_SC
  * progress.ts read --pending 跑出来的结果 → 要说的几行（开会话的同步那半拿后台存下的结果调它，认主要用本会话的血缘）。
  * @param {{ status: number | null, stdout: string, stderr: string, error?: { message?: string, code?: string } | null, timeoutMs?: number }} r
  */
-export function progressLines(r, lineage = null) {
+export function progressLines(r, lineage = null, { presence = null, adopt = null, now = Date.now() } = {}) {
   if (r.error || r.status !== 0) return [`${PROGRESS_NOT_CHECKED}：${why(r)}。`];
   const rows = String(r.stdout)
     .split(/\r?\n/)
@@ -761,15 +763,53 @@ export function progressLines(r, lineage = null) {
     return [`${PROGRESS_NOT_CHECKED}：progress.ts 的输出认不出（${String(r.stdout).trim().slice(0, 60)}）。`];
   if (items.length === 0) return [];
   const mine = lineageDir(lineage);
-  const all = items.map(([id, head, text, col]) => {
+  const all = items.map(([id, head, text, col, created]) => {
     const split = splitOwner(text);
     const owner = col?.trim() || split.owner;
-    return { id, when: head.replace(/^【[^】]*】/, ''), text: split.text.replace(/^原话：/, ''), owner };
+    const at = Date.parse(created?.trim() ?? '');
+    return {
+      id,
+      when: head.replace(/^【[^】]*】/, ''),
+      text: split.text.replace(/^原话：/, ''),
+      owner,
+      age: Number.isFinite(at) ? now - at : null,
+    };
   });
+  const lines = [];
+  // 自动认领（只在指挥官会话：认得出本会话血缘；机器派的会话不走到这里）：主人会话确定已不在（ownerPresence 判 gone）的才认，
+  // 判不了的不认。认领在后台跑 progress.ts claim --auto，那边再核一遍、用原主做乐观锁；这里照实说「在认领」，不说「认领了」。
+  const adopted = [];
+  if (mine !== null && presence && adopt) {
+    for (const d of all) {
+      if (d.owner === mine || d.owner === NO_OWNER) continue;
+      const p = presence(d.owner);
+      if (p?.state !== 'gone') continue;
+      const started = adopt(d.id, d.owner);
+      if (started?.ok) {
+        adopted.push(d);
+        d.owner = mine;
+        d.why = p.why;
+      }
+    }
+  }
+  if (adopted.length > 0)
+    lines.push(
+      `主人会话已不在的创始人引导 ${adopted.length} 条，后台正在替本会话认领（开 PR 改主人）：${adopted.map((d) => `${d.id}（${d.why}）`).join('；')}。下面按归本会话列；认领没成的下次开场照实再列。`,
+    );
   const ours = all.filter((d) => mine !== null && d.owner === mine);
   const unowned = all.filter((d) => d.owner === NO_OWNER);
   const others = all.length - ours.length - unowned.length;
-  const lines = [];
+  // 挂了超过 24 小时、本会话又接不了的（无主、主人还在或判不了）：交给创始人拍
+  const stale = all.filter((d) => d.owner !== mine && d.age !== null && d.age > STALE_DIRECTIVE_MS);
+  if (stale.length > 0)
+    lines.push(
+      `要你拍的（放进报进度的「要你拍的」）：创始人引导 ${stale.length} 条挂了超过 24 小时、本会话接不了：${stale
+        .slice(0, 5)
+        .map((d) => `${d.id}（${d.when}，主：${d.owner}）${brief(d.text)}`)
+        .join(
+          '；',
+        )}${stale.length > 5 ? ' 等' : ''}。请他定：交给本会话办（pnpm progress claim <编号> --force --why "<他的话>"）、作废（pnpm progress done <编号> --drop）还是再等。`,
+    );
   if (ours.length > 0)
     lines.push(
       `创始人引导有 ${ours.length} 条归本会话、没处理（进度单 #1055；本会话是 Mirasim 会话 ${mine}）：${ours.map((d) => `${d.id}（${d.when}）${d.text}`).join('；')}。先接着办，办完 pnpm progress done <评论号>。`,
@@ -1198,7 +1238,7 @@ export function runBackground({
         const root = fleetRoot(cwd, localGit);
         if (root === null) return null;
         const script = progressScript(root, syncDir ? join(syncDir, PROGRESS_SCRIPT) : null);
-        return script ? { run: plainRun(progress(script, root)) } : { missing: true };
+        return script ? { run: plainRun(progress(script, root)), script, root } : { missing: true };
       });
       step('idle', () =>
         checkIdlePrs({
@@ -1266,6 +1306,30 @@ function spawnDetached({ cwd, home }) {
 }
 
 /**
+ * 后台替本会话认领一条主人已不在的引导：起 progress.ts claim <编号> --auto --expect-owner <原主>（脱离、不等），那边再核
+ * 一遍「指挥官会话、原主确定不在、主人没变」才开 PR 改主。起不来返回 { ok: false }，这条就不算在认领。测试用 setAdoptDirective 换掉。
+ */
+let adoptDirective = ({ script, root, id, owner, sessionId }) => {
+  try {
+    const child = spawn(process.execPath, [script, 'claim', String(id), '--auto', '--expect-owner', owner], {
+      cwd: root,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: { ...process.env, CLAUDE_CODE_SESSION_ID: sessionId },
+    });
+    child.on('error', () => {});
+    child.unref();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, why: err?.message ?? String(err) };
+  }
+};
+export function setAdoptDirective(fn) {
+  adoptDirective = fn;
+}
+
+/**
  * 同步那半（真开会话走这个）：只跑本地的，联网的几项读后台上一次的结果；该刷新就起一个后台。返回要说的几行。
  * spawnBackground 测试换成假的；git 只跑本地命令（GREP_MS 那份就够）。
  */
@@ -1311,7 +1375,20 @@ export function fastSessionStart({
   lines.push(...(repoContract ? repoContract(cwd) : []));
   const p = got('progress');
   if (p?.ok && p.value?.missing) lines.push(progressMissing());
-  else if (p?.ok && p.value?.run) lines.push(...progressLines(p.value.run, lineage));
+  else if (p?.ok && p.value?.run) {
+    const sid = cleanId(sessionId);
+    const { script, root } = p.value;
+    lines.push(
+      ...progressLines(p.value.run, lineage, {
+        now,
+        presence: (owner) => ownerPresence({ home, owner, now, env }),
+        adopt:
+          typeof script === 'string' && typeof root === 'string' && sid
+            ? (id, owner) => adoptDirective({ script, root, id, owner, sessionId: sid })
+            : null,
+      }),
+    );
+  }
   lines.push(...failed('progress', PROGRESS_NOT_CHECKED.replace(/没查成$/, '')));
   lines.push(...recentPrompts({ home, now, sessionId, env, lineage }));
   const sw = got('sweep');
