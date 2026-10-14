@@ -13,7 +13,7 @@
 // 4. 都没赶上的到 expires_at 自己不算（卡死了不一直占着），这一段要是后来又开跑，开跑时按当时的空位重新排、满了就不让起；
 // 5. 引擎重启时整表清掉（clearReservations）：上一轮的会话一个都起不来了。
 import { SEGMENT_STAGE, type StageKind } from '@fleet-dao/shared';
-import { and, eq, gt, gte, inArray, isNotNull, isNull, lte } from 'drizzle-orm';
+import { and, eq, gt, gte, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import {
   poolReservations,
@@ -58,6 +58,13 @@ export interface OpenPoolRun {
  * （Claude 订阅：拼车、独享）上的。now 只用来判预占过没过期，默认现在。
  * runs 里 route_id 为空的行不算：连不到路由就不知道它占的是哪个池的名额，算到哪个池都是猜。这种是 #157 加 route_id 之前的
  * 老行、不经选路起的会话；选路派出去的一次性会话开跑那一行都带 route_id（engine 的 runner/one-shot.ts）。
+ *
+ * 三张表在同一个事务里读，先按表名锁住（ACCESS SHARE）：pool_reservations、pools、routes、runs、session_runs。
+ * 以前三条查询各走各的连接，按 FROM 顺序锁（先 session_runs / pool_reservations / runs，后才 pools）。测试清库
+ * resetTestDb 以前跟着 pg_tables 的顺序 TRUNCATE，pools 排在 session_runs 前面。quota.test.ts 把 runs 改名后读，查 runs 的那条立刻失败，
+ * Promise.all 就此返回，另外两条还占着 session_runs 的锁；下一次清表先锁 pools 再等 session_runs，两边交叉，真 Postgres
+ * 报 deadlock detected。PGlite 只有一条连接，排队执行，撞不上。锁和清表现在都按表名，交叉等也不会死锁；一条失败整笔事务
+ * 退出，不会留下还占着锁的连接。
  */
 export async function openPoolRuns(
   db: Db,
@@ -65,8 +72,12 @@ export async function openPoolRuns(
 ): Promise<OpenPoolRun[]> {
   const orgOnly = options.orgPoolsOnly ? [isNotNull(pools.orgKind)] : [];
   const now = options.now ?? new Date();
-  const [sessions, oneShots, reservations] = await Promise.all([
-    db
+  return db.transaction(async (tx) => {
+    // 表名排序，和 resetTestDb 的 truncate 名单是同一套顺序。
+    await tx.execute(
+      sql`lock table pool_reservations, pools, routes, runs, session_runs in access share mode`,
+    );
+    const sessions = await tx
       .select({
         runId: sessionRuns.id,
         poolId: routes.poolId,
@@ -78,8 +89,8 @@ export async function openPoolRuns(
       .from(sessionRuns)
       .innerJoin(routes, eq(routes.id, sessionRuns.routeId))
       .innerJoin(pools, eq(pools.id, routes.poolId))
-      .where(and(isNull(sessionRuns.endedAt), ...orgOnly)),
-    db
+      .where(and(isNull(sessionRuns.endedAt), ...orgOnly));
+    const oneShots = await tx
       .select({
         runId: runs.id,
         poolId: routes.poolId,
@@ -90,8 +101,8 @@ export async function openPoolRuns(
       .from(runs)
       .innerJoin(routes, eq(routes.id, runs.routeId))
       .innerJoin(pools, eq(pools.id, routes.poolId))
-      .where(and(isNull(runs.endedAt), ...orgOnly)),
-    db
+      .where(and(isNull(runs.endedAt), ...orgOnly));
+    const reservations = await tx
       .select({
         runId: poolReservations.id,
         poolId: routes.poolId,
@@ -102,29 +113,29 @@ export async function openPoolRuns(
       .from(poolReservations)
       .innerJoin(routes, eq(routes.id, poolReservations.routeId))
       .innerJoin(pools, eq(pools.id, routes.poolId))
-      .where(and(gt(poolReservations.expiresAt, now), ...orgOnly)),
-  ]);
-  return [
-    ...sessions.map((s) => ({ ...s, kind: 'session' as const })),
-    ...oneShots.map((r) => ({
-      runId: r.runId,
-      poolId: r.poolId,
-      routeId: r.routeId,
-      kind: 'oneShot' as const,
-      queuedAt: r.startedAt,
-      startedAt: r.startedAt,
-      stage: stageOfSegment(r.segment),
-    })),
-    ...reservations.map((h) => ({
-      runId: h.runId,
-      poolId: h.poolId,
-      routeId: h.routeId,
-      kind: 'oneShot' as const,
-      queuedAt: h.reservedAt,
-      startedAt: null,
-      stage: stageOfSegment(h.segment),
-    })),
-  ].sort((a, b) => a.queuedAt.getTime() - b.queuedAt.getTime() || byId(a.runId, b.runId));
+      .where(and(gt(poolReservations.expiresAt, now), ...orgOnly));
+    return [
+      ...sessions.map((s) => ({ ...s, kind: 'session' as const })),
+      ...oneShots.map((r) => ({
+        runId: r.runId,
+        poolId: r.poolId,
+        routeId: r.routeId,
+        kind: 'oneShot' as const,
+        queuedAt: r.startedAt,
+        startedAt: r.startedAt,
+        stage: stageOfSegment(r.segment),
+      })),
+      ...reservations.map((h) => ({
+        runId: h.runId,
+        poolId: h.poolId,
+        routeId: h.routeId,
+        kind: 'oneShot' as const,
+        queuedAt: h.reservedAt,
+        startedAt: null,
+        stage: stageOfSegment(h.segment),
+      })),
+    ].sort((a, b) => a.queuedAt.getTime() - b.queuedAt.getTime() || byId(a.runId, b.runId));
+  });
 }
 
 /** 三段的一段对应的用途（shared 的 SEGMENT_STAGE）；对题段不选路，没有。 */

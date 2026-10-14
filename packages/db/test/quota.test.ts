@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   inFlightByPool,
@@ -12,7 +12,7 @@ import {
 } from '../src/queries/quota.ts';
 import { finishRun, startRun } from '../src/queries/runs.ts';
 import { pools, quotaWindows } from '../src/schema/index.ts';
-import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
+import { createTestDb, realTestPgUrl, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
   addRoute,
@@ -386,6 +386,90 @@ describe('额度写入与额度表', () => {
       await t.client.exec('alter table runs_unreadable rename to runs');
     }
   });
+
+  // 根因：openPoolRuns（inFlightByPool / quotaTable 都走它）原来用三条并行查询，各按 FROM 顺序锁表
+  // （先 session_runs / pool_reservations，后才 pools）。resetTestDb 按 pg_tables 的顺序 TRUNCATE，pools 排在
+  // session_runs 前面。上面那条把 runs 改名后，查 runs 的那条立刻失败，Promise.all 就此返回，另外两条还占着锁，
+  // 下一条用例的清表撞上来，两边锁顺序相反，真 Postgres 报 deadlock detected。PGlite 只有一条连接，排队执行，撞不上。
+  // savePoolQuota 先 FOR UPDATE 锁住池那一行，同一池两笔窗口顺序相反的写入会排队，不是这条死锁。
+  // 这里把交叉等锁造死：先独占 routes，让读停在锁到一半的地方，再按清表去锁同一批表。修之前会死锁，修后两边都按表名排序加锁。
+  // PGlite 构不出两笔事务交叉等锁，这条只在真库跑。
+  it.skipIf(!realTestPgUrl())(
+    '读在跑数和清表按表名同一顺序加锁：一边停在 routes 上，另一边来清表，也不会死锁',
+    async () => {
+      await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
+      const repo = await addRepo(t.db);
+      const task = await addTask(t.db, repo.id);
+      await addRun(t.db, { taskId: task.id, routeId: 'a-opus', startedAt: ago(MIN) });
+
+      let resolveRelease: () => void = () => {};
+      const released = new Promise<void>((r) => {
+        resolveRelease = r;
+      });
+      let releasedOnce = false;
+      const release = () => {
+        if (releasedOnce) return;
+        releasedOnce = true;
+        resolveRelease();
+      };
+      const blocker = t.db.transaction(async (tx) => {
+        await tx.execute(sql`lock table routes in access exclusive mode`);
+        await released;
+      });
+      const messagesOf = (e: unknown) => {
+        const messages: string[] = [];
+        for (let x: unknown = e; x instanceof Error; x = x.cause) messages.push(x.message);
+        return messages.join('\n');
+      };
+      const lockWaits = async () => {
+        const { rows } = await t.client.query<{ n: number }>(
+          `select count(*)::int as n from pg_stat_activity
+           where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid()`,
+        );
+        return rows[0]?.n ?? 0;
+      };
+      const until = async (pred: () => Promise<boolean>, why: string) => {
+        const deadline = Date.now() + 5_000;
+        for (;;) {
+          if (await pred()) return;
+          if (Date.now() > deadline) throw new Error(`等不到：${why}`);
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      };
+
+      let read: Promise<{ ok: true } | { ok: false; e: unknown }> = Promise.resolve({ ok: true });
+      let reset: Promise<{ ok: true } | { ok: false; e: unknown }> = Promise.resolve({ ok: true });
+      try {
+        await until(async () => {
+          const { rows } = await t.client.query<{ n: number }>(
+            `select count(*)::int as n from pg_locks l
+             join pg_class c on c.oid = l.relation
+             where c.relname = 'routes' and l.mode = 'AccessExclusiveLock' and l.granted`,
+          );
+          return (rows[0]?.n ?? 0) > 0;
+        }, 'routes 上的排他锁');
+        read = inFlightByPool(t.db).then(
+          () => ({ ok: true as const }),
+          (e: unknown) => ({ ok: false as const, e }),
+        );
+        await until(async () => (await lockWaits()) >= 1, '读在跑数停在锁上');
+        // 清表按「pools 在 session_runs 前」锁（pg_tables 的顺序就是这样）。exists 那条会把所有表先共享锁一遍，
+        // 也被 routes 挡住，到不了 TRUNCATE；这里直接 TRUNCATE，锁的就是清表真正排他的那一下。
+        reset = t.client.exec('truncate pools, session_runs, routes cascade').then(
+          () => ({ ok: true as const }),
+          (e: unknown) => ({ ok: false as const, e }),
+        );
+        await until(async () => (await lockWaits()) >= 2, '清表也停在锁上');
+        release();
+        const [readR, resetR] = await Promise.all([read, reset, blocker]);
+        expect(readR.ok, readR.ok ? '' : messagesOf(readR.e)).toBe(true);
+        expect(resetR.ok, resetR.ok ? '' : messagesOf(resetR.e)).toBe(true);
+      } finally {
+        release();
+        await Promise.allSettled([read, reset, blocker]);
+      }
+    },
+  );
 
   it('超额是真实情况：利用率可以大于 1，算用满，剩余按 0 显示', async () => {
     await save(readOk('relay-a', ago(MIN), [{ label: '5h', window: '5h', utilization: 1.25 }]));
