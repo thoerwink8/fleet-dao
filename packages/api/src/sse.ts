@@ -24,6 +24,13 @@ export interface SseRelay {
   latestId(): string;
   /** lastEventId 之后的事件（按顺序）；补不全就返回 null。 */
   since(lastEventId: string): StampedEvent[] | null;
+  /** 一条 SSE 连接登记「收场」：endAll() 时叫它。返回撤销登记。 */
+  onEnd(end: () => void): () => void;
+  /**
+   * 停机时收掉所有 SSE 连接（之后再来的也立刻收）。SSE 自己不会结束，不收的话停机排空每次都要等满上限，
+   * 这段时间端口在 systemd 手里排队、没人 accept，/healthz 连得上却挂着（#2186）。浏览器会自动重连到新进程，带 Last-Event-ID 补发。
+   */
+  endAll(): void;
 }
 
 /** 缓冲留最近这么多条；忙的时候大约是几分钟的变化，断开更久就走 resync。 */
@@ -35,6 +42,8 @@ export function createSseRelay(feed: ChangeFeed, options: { bufferSize?: number 
   const size = options.bufferSize ?? DEFAULT_BUFFER;
   const buffer: StampedEvent[] = [];
   const listeners = new Set<(event: StampedEvent) => void>();
+  const enders = new Set<() => void>();
+  let ended = false;
   let seq = 0;
   feed.subscribe((event) => {
     seq += 1;
@@ -61,6 +70,21 @@ export function createSseRelay(feed: ChangeFeed, options: { bufferSize?: number 
       if (n + 1 < oldest) return null;
       return buffer.filter((e) => e.seq > n);
     },
+    onEnd(end) {
+      if (ended) {
+        end();
+        return () => {};
+      }
+      enders.add(end);
+      return () => {
+        enders.delete(end);
+      };
+    },
+    endAll() {
+      ended = true;
+      for (const end of [...enders]) end();
+      enders.clear();
+    },
   };
 }
 
@@ -80,7 +104,12 @@ export function eventsHandler(deps: Deps, relay: SseRelay) {
     c.header('X-Accel-Buffering', 'no');
     const lastEventId = c.req.header('last-event-id');
     return streamSSE(c, async (stream) => {
-      const closed = new Promise<void>((resolve) => stream.onAbort(resolve));
+      // 浏览器断开、或停机收场（relay.endAll）：回调返回，流随之关掉
+      let offEnd = () => {};
+      const closed = new Promise<void>((resolve) => {
+        stream.onAbort(resolve);
+        offEnd = relay.onEnd(resolve);
+      });
       // 所有写入排成一条链，按调用先后发出，补发的和新来的不会交错。
       let chain: Promise<unknown> = Promise.resolve();
       const send = (msg: SSEMessage) => {
@@ -115,6 +144,7 @@ export function eventsHandler(deps: Deps, relay: SseRelay) {
         await closed;
       } finally {
         clearInterval(heartbeat);
+        offEnd();
         unsubscribe();
         unsubscribeResources?.();
       }
