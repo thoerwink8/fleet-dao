@@ -1308,3 +1308,141 @@ describe('invokeVerifier：两家都验时两家的会话并行起（#1704）', 
     expect(base.recorded.map((r) => r.outcome)).toContain('done');
   });
 });
+
+describe('invokeVerifier：材料带 PR 正文和测试输出，只判验收条，diff 外证据转人、建议不挡（决定 0093）', () => {
+  const run = async (stdout: string, input: Partial<VerifierInvokeInput> = {}) => {
+    const { oneShot, commands } = fakeOneShot({ exitCode: 0, stdout, stderr: '', killed: false });
+    const out = await invokeVerifier({ ...BASE_INPUT, ...input }, DEPS(oneShot));
+    return { out, prompt: commands[0]?.stdin ?? '', spawned: commands.length };
+  };
+
+  it('提示词里有 PR 正文和测试输出两节，并写明 PR 正文只当线索、不许拿「PR 正文没写」挡', async () => {
+    const { prompt } = await run(MODEL_STDOUT_PASS, {
+      prBody: '这次把 A 加上了。\n截图见下。',
+      testOutput: 'Test Files  1 passed (1)\n      Tests  3 passed (3)',
+    });
+    expect(prompt).toContain('## PR 正文');
+    expect(prompt).toContain('这次把 A 加上了。');
+    expect(prompt).toContain('## 引擎跑过的测试输出');
+    expect(prompt).toContain('Tests  3 passed (3)');
+    expect(prompt).toContain('不许拿「PR 正文没写」挡');
+    expect(prompt).toContain('## 不归我验');
+    expect(prompt).toContain('只算建议');
+  });
+
+  it('没给 PR 正文和测试输出：这两节不出现', async () => {
+    const { prompt } = await run(MODEL_STDOUT_PASS);
+    expect(prompt).not.toContain('## PR 正文');
+    expect(prompt).not.toContain('## 引擎跑过的测试输出');
+  });
+
+  it('测试输出超长只给末尾并写明', async () => {
+    const tail = 'FAIL test/x.test.ts 最后这一行';
+    const { prompt } = await run(MODEL_STDOUT_PASS, { testOutput: `${'x'.repeat(40_000)}\n${tail}` });
+    expect(prompt).toContain(tail);
+    expect(prompt).toContain('只给末尾');
+    expect(prompt).not.toContain('x'.repeat(31_000));
+  });
+
+  it('「不归我验」带出来、结论 pass：pass=true，outOfScope 是那几条，notes 写明转给人', async () => {
+    const { out } = await run(
+      [
+        '## 问题',
+        '',
+        '## 不归我验',
+        '- 第 2 条：要页面截图，diff 里看不出',
+        '',
+        '## 建议',
+        '- 函数名可以再短一点',
+        '',
+        'verdict: pass',
+      ].join('\n'),
+    );
+    expect(out.pass).toBe(true);
+    expect(out.problems).toEqual([]);
+    expect(out.outOfScope).toEqual(['第 2 条：要页面截图，diff 里看不出']);
+    expect(out.suggestions).toEqual(['函数名可以再短一点']);
+    expect(out.notes).toContain('不归我验 1 条');
+  });
+
+  it('只有「不归我验」却写了 fail：按过算，不回炉、不当没验成换路由', async () => {
+    const { out, spawned } = await run(
+      ['## 问题', '', '## 不归我验', '- 第 1 条：要法国线上的数据', '', 'verdict: fail'].join('\n'),
+    );
+    expect(spawned).toBe(1);
+    expect(out.pass).toBe(true);
+    expect(out.problems).toEqual([]);
+    expect(out.outOfScope).toEqual(['第 1 条：要法国线上的数据']);
+    expect(out.notes).toContain('按过算');
+  });
+
+  it('有算挡的问题又有「不归我验」：照常没过，outOfScope 一起带出', async () => {
+    const { out } = await run(
+      [
+        '## 问题',
+        `- ${BLOCKER_KINDS[0]}：第 1 条要 A，diff 里没有`,
+        '',
+        '## 不归我验',
+        '- 第 2 条：要截图',
+        '',
+        'verdict: fail',
+      ].join('\n'),
+    );
+    expect(out.pass).toBe(false);
+    expect(out.problems).toEqual([`${BLOCKER_KINDS[0]}：第 1 条要 A，diff 里没有`]);
+    expect(out.outOfScope).toEqual(['第 2 条：要截图']);
+  });
+
+  it('「## 问题」里混进的建议不挡，挪进 suggestions', async () => {
+    const { out } = await run(MODEL_STDOUT_PASS_WITH_STYLE);
+    expect(out.pass).toBe(true);
+    expect(out.suggestions).toEqual([
+      '命名可以更一致一点（风格意见，specs/555 不许算挡）',
+      '这块代码可以更短（风格意见）',
+    ]);
+  });
+
+  it('「不归我验」写「（没有）」不算一条', async () => {
+    const { out } = await run(['## 问题', '', '## 不归我验', '- 无', '', 'verdict: pass'].join('\n'));
+    expect(out.outOfScope).toBeUndefined();
+  });
+
+  it('两家都验：两家的「不归我验」合起来，带族名', async () => {
+    const stdout = ['## 问题', '', '## 不归我验', '- 第 2 条：要截图', '', 'verdict: pass'].join('\n');
+    const { oneShot } = fakeOneShot({ exitCode: 0, stdout, stderr: '', killed: false });
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, modelFamiliesAvoid: [], requireTwoFamilies: true },
+      { ...DEPS(oneShot), chooseModelForFamily: async (family) => ({ modelId: `${family}-m` }) },
+    );
+    expect(out.pass).toBe(true);
+    expect(out.outOfScope).toEqual(['gpt：第 2 条：要截图', 'grok：第 2 条：要截图']);
+  });
+
+  it('起会话没起来（桥接连 Mirasim 超时）：换同一族下一条路由再验一次，验成了照常回结论', async () => {
+    const base = fakeOneShot({ exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false });
+    const tried: string[] = [];
+    const oneShot: OneShotDeps = {
+      ...base.oneShot,
+      spawn: async (cmd) => {
+        const model = cmd.argv[cmd.argv.indexOf('--model') + 1] ?? '';
+        tried.push(model);
+        if (model === 'claude-mirasim') {
+          return { exitCode: 1, stdout: '', stderr: '没起来：桥接连 Mirasim 超时（100 秒）', killed: false };
+        }
+        return { exitCode: 0, stdout: MODEL_STDOUT_PASS, stderr: '', killed: false };
+      },
+    };
+    const routes = ['claude-mirasim', 'claude-solo'];
+    const out = await invokeVerifier(BASE_INPUT, {
+      ...DEPS(oneShot),
+      chooseModelForFamily: async (family) => {
+        if (family !== 'claude') return undefined;
+        const next = routes.shift();
+        return next === undefined ? undefined : { modelId: next, routeId: `route-${next}` };
+      },
+    });
+    expect(tried).toEqual(['claude-mirasim', 'claude-solo']);
+    expect(out.pass).toBe(true);
+    expect(out.session?.routeId).toBe('route-claude-solo');
+  });
+});

@@ -3,7 +3,7 @@
 // Cursor 230 条，对上正文「Cursor 一家差两百多个串」。
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { discoveredModelId, nameUpstreamModel } from '../src/model-naming.ts';
+import { authorFamilyOf, discoveredModelId, nameUpstreamModel } from '../src/model-naming.ts';
 
 const rosterDiff = JSON.parse(
   readFileSync(new URL('./fixtures/roster-diff-2026-10-08.json', import.meta.url), 'utf8'),
@@ -254,5 +254,30 @@ describe('上游串拆名', () => {
     expect(discoveredModelId('cursor', 'gpt-5.5-extra-high')).toBe('cursor:gpt-5.5-extra-high');
     expect(discoveredModelId('mirasim', 'qwen-3.7-coder')).toBe('mirasim:qwen-3.7-coder');
     expect(discoveredModelId('cursor', 'claude-opus-4-8-thinking-high-fast')).toBe('opus-4.8');
+  });
+});
+
+describe('authorFamilyOf：冷验收认作者族，目录拆不出的按原串开头再认一次', () => {
+  it('目录认得的族原样回（含 cursor、glm、jev）', () => {
+    expect(authorFamilyOf('gpt', 'gpt-6-sol')).toBe('gpt');
+    expect(authorFamilyOf('cursor', 'cursor-auto')).toBe('cursor');
+    expect(authorFamilyOf('glm', 'glm-5.3-flash')).toBe('glm');
+    expect(authorFamilyOf('jev', 'jev-1.13')).toBe('jev');
+  });
+
+  it('unclassified 的按原串开头认：法国目录里那几类都认得出', () => {
+    expect(authorFamilyOf('unclassified', 'cursor:claude-4.6-opus-max-thinking')).toBe('claude');
+    expect(authorFamilyOf('unclassified', 'cursor:gpt-5.4-mini-high')).toBe('gpt');
+    expect(authorFamilyOf('unclassified', 'cursor:gemini-4-argon-high')).toBe('gemini');
+    expect(authorFamilyOf('unclassified', 'cursor:kimi-k2.7-code')).toBe('kimi');
+    expect(authorFamilyOf('unclassified', 'cursor:muse-spark-1.3-minimal')).toBe('muse');
+    expect(authorFamilyOf('unclassified', 'mirasim:gemini-4-argon')).toBe('gemini');
+    expect(authorFamilyOf('unclassified', 'cursor:composer-3')).toBe('cursor');
+  });
+
+  it('认不出的仍是 unclassified，不猜（gptx、空串）', () => {
+    expect(authorFamilyOf('unclassified', 'cursor:gptx-1')).toBe('unclassified');
+    expect(authorFamilyOf('unclassified', 'mirasim:')).toBe('unclassified');
+    expect(authorFamilyOf('unclassified', 'something-new')).toBe('unclassified');
   });
 });

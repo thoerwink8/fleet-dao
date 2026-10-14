@@ -6,8 +6,10 @@
 // 改这里之前必须知道：
 // - 结论只有引擎机器人贴的 cold-verify 才算数：没贴上、贴在旧头上都等于没验。所以开跑前先贴 pending（贴不上就不起会话），
 //   会话跑完贴 success / failure；贴不上抛错，工作流按失败分流处理，不当成验过。
-// - 「做不出来」和「没过」是两回事：读不到 PR 或 diff、diff 太大、所有候选（含作者族的同族兜底验）都试过还没验成，
+// - 「做不出来」和「没过」是两回事：读不到 PR、一个文件的 diff 都看不到、所有候选（含作者族的同族兜底验）都试过还没验成，
 //   回 unavailable（工作流停下报人，不让写代码的会话白改一轮）；只有会话跑成、写出了算挡的问题才回 pass: false 加 problems。
+// - 材料（决定 0093）：diff、需求原文之外，PR 正文和引擎跑过的测试输出（有才给）也交给验收。验收回的「不归我验」（要截图、
+//   现场、线上数据、审计结果才判得了的验收条）不算没过、不回炉：这里留言到单上转给人（指挥官），结论里带 outOfScope。
 //   会话没跑成（额度用完、超时、结论认不出……）先换下一条路由、下一族再验（verifier-invoke.ts，#1731），试遍了才 unavailable，
 //   说明里列出试过的路由和原因。
 // - 过一会儿就行的（没空位、内存放不下、额度要等、引擎在停机、上游临时故障、一个验收模型都派不出）回 retry，工作流隔一会儿再来，
@@ -16,10 +18,11 @@
 // - PR 的头不是要验的那个了（有人推过新提交）回 headMoved，工作流对新的头重走一遍。
 // - 读 GitHub 先于一切、在 runColdVerifyForPr 外面做：GitHub 一时不通是 PortError（工作流按失败分流重试），不是「读不到 PR」那种要报人的结论。
 // - 验收会话手上没有仓库的检出：只给一个空的临时目录（归那条路由的会话用户，会话收场就删），diff 全在提示词里。
-//   diff 超过 MAX_DIFF_CHARS：回 unavailable，不截断了假装看全。
+//   diff 超过 MAX_DIFF_CHARS：放不下的文件跳过并写明，不截断了假装看全。
 // - 有文本文件 GitHub 的文件接口没给 patch（大文件，#1308）：先用引擎镜像里的 git 补读（基线...头）；补出来超过
-//   MAX_FILE_DIFF_LINES 行就只给摘要（行数、头尾各几十行），diff 里明说「这个文件太大，只给了摘要」；接口和 git 两条路都读不到
-//   才回 unavailable，原因写明是哪个文件、哪一步没成，不当成通过。
+//   MAX_FILE_DIFF_LINES 行就只给摘要（行数、头尾各几十行），diff 里明说「这个文件太大，只给了摘要」；接口和 git 两条路都读不到、
+//   或加上它总长超过 MAX_DIFF_CHARS 的，这个文件跳过：diff 里写明「跳过：原因」，验收不凭它挡也不凭它放，只靠它才判得了的
+//   验收条回「不归我验」转给人。每个有文本改动的文件都跳过了（一点内容都看不到）才回 unavailable。
 // - 迁移工具生成的快照（packages/db/migrations/meta/*_snapshot.json）按生成文件处理：不逐行给，只写同一 PR 里有没有
 //   对得上的迁移 sql、_journal.json、schema 改动，让验收核对对不对得上。
 // - 叫停（工作流放弃、活动被取消）：ctx.signal 接进会话的看守，会话被杀；随后把取消原样抛出去。
@@ -33,7 +36,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { COLD_VERIFY_CONTEXT } from '@fleet-dao/conventions';
-import type { RepoRef } from '@fleet-dao/github';
+import type { GitHub, RepoRef } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
@@ -99,8 +102,11 @@ export function backedOffSeconds(base: number, n: number): number {
 }
 
 export interface ColdVerifyActivityDeps {
-  /** 读 PR、读改到的文件、贴提交状态（引擎机器人）。 */
-  gh: Pick<EngineGitHub, 'pullFiles' | 'claims'>;
+  /**
+   * 读 PR、读改到的文件、贴提交状态（引擎机器人）。commentIssue：验收回了「不归我验」时留言到单上转给人（决定 0093）；
+   * 不给 = 留不了言，只写进结论的 notes。
+   */
+  gh: Pick<EngineGitHub, 'pullFiles' | 'claims'> & Partial<Pick<GitHub, 'commentIssue'>>;
   /** 选路（store-ports 的 pickRoute）：按族问「这一族此刻有没有能派的路由」。 */
   pickRoute: (input: PickRouteInput, ctx: PortContext) => Promise<PickRouteResult>;
   /** 生产 Spawner 要的东西（路由查询、各家执行方式的驱动、会话临时目录、资源上限）；会话用户的空目录也经它的 trees 备。 */
@@ -139,6 +145,8 @@ export interface DiffFile {
   patch?: string;
   previous?: string;
   changes?: number;
+  /** 这个文件的 diff 读不到、放不下，跳过了：原因。diff 里只写这一句，不给内容。 */
+  skipped?: string;
 }
 
 /** 补读一个文件的 diff：回从第一个 `@@` 起的 unified patch；读不到抛。 */
@@ -203,7 +211,8 @@ function generatedSnapshotNote(f: DiffFile, all: readonly DiffFile[]): string {
 
 /**
  * 文件接口没给 patch 的文本文件，用 git 补读；补出来超过 MAX_FILE_DIFF_LINES 行就换成摘要。
- * 生成文件（迁移快照）不读，二进制 / 纯改名（changes 为 0）也不读。读不到抛，写明是哪个文件、哪一步没成。
+ * 生成文件（迁移快照）不读，二进制 / 纯改名（changes 为 0）也不读。读不到不抛：这个文件标「跳过」并写明是哪一步没成，
+ * 验收照常看别的文件（决定 0093：读不到的快照、二进制、超大文件不该让整次验收停下等人）。
  */
 export async function fillMissingPatches(
   files: readonly DiffFile[],
@@ -212,23 +221,31 @@ export async function fillMissingPatches(
 ): Promise<DiffFile[]> {
   const out: DiffFile[] = [];
   for (const f of files) {
-    if (f.patch !== undefined || f.changes === 0 || GENERATED_SNAPSHOT.test(f.filename)) {
+    if (
+      f.patch !== undefined ||
+      f.changes === 0 ||
+      f.skipped !== undefined ||
+      GENERATED_SNAPSHOT.test(f.filename)
+    ) {
       out.push(f);
       continue;
     }
-    const gone = `文件 ${f.filename} 的 diff GitHub 没给（改了 ${f.changes ?? '不知道多少'} 行，多半是文件太大）`;
+    const gone = `GitHub 没给这个文件的 diff（改了 ${f.changes ?? '不知道多少'} 行，多半是文件太大）`;
     if (read === undefined) {
-      throw new Error(`${gone}，也没有用 git 补读的办法：验收看不全，不截断了假装看全`);
+      out.push({ ...f, skipped: `${gone}，也没有用 git 补读的办法` });
+      continue;
     }
     beat();
     let patch: string;
     try {
       patch = await read(f.previous === undefined ? [f.filename] : [f.previous, f.filename]);
     } catch (error) {
-      throw new Error(`${gone}，用 git 补读也失败了（${errMessage(error)}）：验收看不全，不当成通过`);
+      out.push({ ...f, skipped: `${gone}，用 git 补读也失败了（${errMessage(error)}）` });
+      continue;
     }
     if (patch.trim() === '') {
-      throw new Error(`${gone}，用 git 补读回来的是空的（和 GitHub 说的改动对不上）：验收看不全，不当成通过`);
+      out.push({ ...f, skipped: `${gone}，用 git 补读回来的是空的（和 GitHub 说的改动对不上）` });
+      continue;
     }
     out.push({
       ...f,
@@ -238,17 +255,26 @@ export async function fillMissingPatches(
   return out;
 }
 
+/** 跳过的文件在 diff 里写的那一句。 */
+function skippedNote(why: string): string {
+  return `（跳过：${why}。这个文件的内容验收看不到：不凭它挡、也不凭它放；只靠它才判得了的验收条写进「不归我验」。）`;
+}
+
 /**
  * PR 改到的文件 → 喂给验收会话的 unified diff 和文件名单。
- * 看不全就抛（不截断）：有文本文件 GitHub 没给 diff（太大；要先过 fillMissingPatches 补读）、总长超过上限。二进制、纯改名、
- * 只改权限的文件没有文本改动，注明一句，不算看不全（GitHub 对它们回的 changes 是 0）。迁移快照按生成文件写一段说明。
+ * 不截断：GitHub 没给 diff 又没补读成的文件、加上它总长就超过上限的文件，整个跳过并写明原因（skipped 列出来）。
+ * 二进制、纯改名、只改权限的文件没有文本改动，注明一句（GitHub 对它们回的 changes 是 0）。迁移快照按生成文件写一段说明。
+ * 有文本改动的文件全被跳过（一点内容都看不到）才抛：那样验收什么都判不了。
  */
 export function renderDiff(
   files: readonly DiffFile[],
   maxChars: number = MAX_DIFF_CHARS,
-): { diffText: string; changedFiles: string[] } {
+): { diffText: string; changedFiles: string[]; skipped: string[] } {
   const parts: string[] = [];
+  const skipped: string[] = [];
   let total = 0;
+  let textual = 0;
+  let shown = 0;
   for (const f of files) {
     const before = f.previous ?? f.filename;
     const head = [
@@ -258,26 +284,38 @@ export function renderDiff(
         : []),
       f.status === 'added' ? '--- /dev/null' : `--- a/${before}`,
       f.status === 'removed' ? '+++ /dev/null' : `+++ b/${f.filename}`,
-    ];
+    ].join('\n');
     let body: string;
+    let skip: string | undefined;
     if (GENERATED_SNAPSHOT.test(f.filename)) body = generatedSnapshotNote(f, files);
-    else if (f.patch !== undefined) body = f.patch;
+    else if (f.skipped !== undefined) {
+      skip = f.skipped;
+      body = '';
+    } else if (f.patch !== undefined) body = f.patch;
     else if (f.changes === 0) body = '（没有文本改动：二进制文件、纯改名或只改了权限）';
     else {
-      throw new Error(
-        `文件 ${f.filename} 的 diff GitHub 没给（改了 ${f.changes ?? '不知道多少'} 行，多半是文件太大）：验收看不全，不截断了假装看全`,
-      );
+      skip = `GitHub 没给这个文件的 diff（改了 ${f.changes ?? '不知道多少'} 行，多半是文件太大）`;
+      body = '';
     }
-    const piece = `${head.join('\n')}\n${body}`;
+    const hasText = !GENERATED_SNAPSHOT.test(f.filename) && f.changes !== 0;
+    if (hasText) textual += 1;
+    if (skip === undefined && total + head.length + body.length + 2 > maxChars) {
+      skip = `diff 太大，放不下这个文件（这个文件 ${body.length} 个字符，一次验收最多 ${maxChars} 个）`;
+    }
+    if (skip !== undefined) {
+      skipped.push(`${f.filename}：${skip}`);
+      body = skippedNote(skip);
+    } else if (hasText) shown += 1;
+    const piece = `${head}\n${body}`;
     total += piece.length + 1;
-    if (total > maxChars) {
-      throw new Error(
-        `diff 太大（超过 ${maxChars} 个字符，已经看了 ${parts.length + 1}/${files.length} 个文件）：一次验收看不全，不截断了假装看全`,
-      );
-    }
     parts.push(piece);
   }
-  return { diffText: parts.join('\n'), changedFiles: files.map((f) => f.filename) };
+  if (textual > 0 && shown === 0) {
+    throw new Error(
+      `改到的 ${textual} 个文件的 diff 一个都看不到（${skipped.join('；').slice(0, 600)}）：验收什么都判不了，不当成通过`,
+    );
+  }
+  return { diffText: parts.join('\n'), changedFiles: files.map((f) => f.filename), skipped };
 }
 
 /** 选路回「过一会儿再来」的那几次（按族问，每族一条）。 */
@@ -464,7 +502,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
                 `PR #${prNumber} 的头是 ${short(pull.headSha)}，不是要验的 ${short(input.headSha)}（有人推过新提交）`,
               );
             }
-            return { head: input.headSha, baseSha: input.baseSha, branch: input.branch };
+            return { head: input.headSha, baseSha: input.baseSha, branch: input.branch, body: pull.body };
           },
           diff: async () => {
             const { fileDiff } = deps;
@@ -494,6 +532,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
               workflowId: ctx.workflowId ?? taskWorkflowId(input.repo, input.issueNumber),
               what: input.what,
               howToFinish: input.howToFinish,
+              ...(input.testOutput === undefined ? {} : { testOutput: input.testOutput }),
             };
           },
           authorFamilies: async () => input.authorFamilies,
@@ -654,11 +693,62 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
         unavailable: '验收说没过，却没有写出任何一条问题：没法交给写代码的会话去改，要人看',
       });
     }
+    const outOfScope = verdict.outOfScope ?? [];
+    const handoff =
+      outOfScope.length > 0 ? await handOff(input, outOfScope, verdict.suggestions ?? []) : undefined;
+    const notes = [verdict.notes, handoff].filter((n): n is string => n !== undefined && n !== '').join('；');
     return withUiNote({
       pass: verdict.pass,
       problems: verdict.problems,
       round: verdict.round,
-      ...(verdict.notes === undefined ? {} : { notes: verdict.notes }),
+      ...(notes === '' ? {} : { notes }),
+      ...(outOfScope.length > 0 ? { outOfScope } : {}),
     });
   };
+
+  /**
+   * 「不归我验」的验收条留言到单上，转给人（指挥官）验：不回炉、不挡合并闸（决定 0093）。同一个头只留一次（幂等键带头）。
+   * 留不成不改结论（验收本身已经做完），写进 notes 和日志，人在驾驶舱的结论里也看得到。
+   */
+  async function handOff(
+    input: ColdVerifyInput,
+    items: readonly string[],
+    suggestions: readonly string[],
+  ): Promise<string> {
+    const commentIssue = deps.gh.commentIssue;
+    if (commentIssue === undefined) return `不归我验的 ${items.length} 条没处留言（没接留言口），要人看结论`;
+    const body = handoffBody(input, items, suggestions);
+    try {
+      await commentIssue({
+        repo: refOf(input.repo),
+        issueNumber: input.issueNumber,
+        key: `cold-verify-out-of-scope:${input.prNumber}:${input.headSha}`,
+        body,
+      });
+      return `不归我验的 ${items.length} 条已留言到单 #${input.issueNumber}，转给人验`;
+    } catch (error) {
+      log('验收「不归我验」的条目没留成言（结论不改）', {
+        issueNumber: input.issueNumber,
+        prNumber: input.prNumber,
+        error: errMessage(error),
+      });
+      return `不归我验的 ${items.length} 条没留成言（${errMessage(error).slice(0, 200)}），要人看结论`;
+    }
+  }
+}
+
+/** 转给人验的留言正文：哪个 PR、哪个头、哪几条、为什么验收方验不了；建议附在后面（不挡）。 */
+export function handoffBody(
+  input: Pick<ColdVerifyInput, 'prNumber' | 'headSha'>,
+  items: readonly string[],
+  suggestions: readonly string[] = [],
+): string {
+  return [
+    `冷验收转人验：PR #${input.prNumber}（头 ${short(input.headSha)}）有 ${items.length} 条验收条要 diff 以外的证据（截图、现场、线上数据、审计结果），验收方判不了，不算没过、不回炉，请人验：`,
+    '',
+    ...items.map((item) => `- ${item}`),
+    ...(suggestions.length > 0
+      ? ['', '验收方另外的建议（不挡）：', ...suggestions.map((x) => `- ${x}`)]
+      : []),
+  ].join('\n');
 }

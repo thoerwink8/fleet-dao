@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { authorFamiliesOfTask } from '../src/queries/verify.ts';
+import { families, models } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addRoute, addRun, addTask, ago, catalog, MIN } from './helpers.ts';
 
@@ -39,6 +40,27 @@ describe('写这张单的会话用过哪几族', () => {
     await addRun(t.db, { taskId: task.id, routeId: 'kimi-r', stage: 'execute', ...started });
     await addRun(t.db, { taskId: task.id, routeId: 'claude-r', stage: 'plan', ...started });
     expect(await authorFamiliesOfTask(t.db, task.id)).toEqual(['claude', 'kimi']);
+  });
+
+  it('目录里拆不出（unclassified）的按模型 id 认出族；认不出的仍报 unclassified，不猜', async () => {
+    await t.db
+      .insert(families)
+      .values({ id: 'unclassified', displayName: '拆不出', vendor: '?' })
+      .onConflictDoNothing();
+    await t.db.insert(models).values([
+      { id: 'cursor:gpt-5.4-mini-high', family: 'unclassified', displayName: 'gpt-5.4-mini-high' },
+      { id: 'cursor:mystery-1', family: 'unclassified', displayName: 'mystery-1' },
+    ]);
+    await addRoute(t.db, { id: 'cursor-gpt-r', poolId: 'relay-a', modelId: 'cursor:gpt-5.4-mini-high' });
+    await addRoute(t.db, { id: 'cursor-x-r', poolId: 'relay-a', modelId: 'cursor:mystery-1' });
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id);
+    await addRun(t.db, { taskId: task.id, routeId: 'cursor-gpt-r', stage: 'execute', ...started });
+    await addRun(t.db, { taskId: task.id, routeId: 'gpt-r', stage: 'execute', ...started });
+    expect(await authorFamiliesOfTask(t.db, task.id)).toEqual(['gpt']);
+    const other = await addTask(t.db, repo.id);
+    await addRun(t.db, { taskId: other.id, routeId: 'cursor-x-r', stage: 'execute', ...started });
+    expect(await authorFamiliesOfTask(t.db, other.id)).toEqual(['unclassified']);
   });
 
   it('【失败】一个会话都没有：回空数组（调用方明确报错，不当成谁都能验）', async () => {

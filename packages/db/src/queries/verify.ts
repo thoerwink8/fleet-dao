@@ -1,6 +1,7 @@
 // 别家验证要的：写这张单的会话用过哪几族（验证只派别家）。
 import { and, eq, isNotNull, notInArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
+import { authorFamilyOf } from '../model-naming.ts';
 import { models, routes, sessionRuns } from '../schema/index.ts';
 
 /**
@@ -11,11 +12,12 @@ const NOT_AUTHORING = ['verify', 'review', 'judge'] as const;
 
 /**
  * 写这张单的会话用过的路由的族（去重、按字母排）：这张单上真起过（有开工时刻）的会话，按路由查模型目录里的族。
- * 一个都没有返回空数组——调用方要明确报错（判不了是不是别家），不当成「谁都能验」。
+ * 目录里记成 unclassified 的按模型 id 再认一次（authorFamilyOf：`cursor:gpt-5.4-mini-high` 也算 gpt，作者族认得出来
+ * 冷验收才不用两家都验）。一个都没有返回空数组——调用方要明确报错（判不了是不是别家），不当成「谁都能验」。
  */
 export async function authorFamiliesOfTask(db: Db, taskId: string): Promise<string[]> {
   const rows = await db
-    .selectDistinct({ family: models.family })
+    .selectDistinct({ family: models.family, modelId: models.id })
     .from(sessionRuns)
     .innerJoin(routes, eq(routes.id, sessionRuns.routeId))
     .innerJoin(models, eq(models.id, routes.modelId))
@@ -26,5 +28,5 @@ export async function authorFamiliesOfTask(db: Db, taskId: string): Promise<stri
         notInArray(sessionRuns.stage, [...NOT_AUTHORING]),
       ),
     );
-  return rows.map((r) => r.family).sort();
+  return [...new Set(rows.map((r) => authorFamilyOf(r.family, r.modelId)))].sort();
 }

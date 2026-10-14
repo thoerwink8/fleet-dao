@@ -217,6 +217,8 @@ export interface ColdVerifyInput {
   /** 写这张单的会话用过的路由的族（验收换一个不同的族）。 */
   authorFamilies: string[];
   round: 1 | 2;
+  /** 引擎在会话收场后自己跑过的测试输出（有才给）：放进验收材料（决定 0093）。老历史里没有这个字段。 */
+  testOutput?: string;
 }
 
 export interface ColdVerifyResult {
@@ -238,6 +240,11 @@ export interface ColdVerifyResult {
   retry?: { wait: 'slot' | 'quota'; reason: string; afterSeconds: number };
   /** 要验的头已经不是 PR 现在的头了（有人推过新提交）：现在的头。工作流停下等人看过，再对新的头重走一遍。老历史里没有这个字段。 */
   headMoved?: string;
+  /**
+   * 验收方判「不归我验」的验收条（要截图、现场、线上数据、审计结果才判得了）：不算没过、不回炉，活动已留言到单上转给人。
+   * 老历史里没有这个字段。
+   */
+  outOfScope?: string[];
 }
 
 /** 改到了哪些要人拍的路径。空＝除了 CI 和冷验收没有别的门。 */
