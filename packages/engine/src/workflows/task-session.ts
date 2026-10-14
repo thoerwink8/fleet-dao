@@ -273,7 +273,7 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
   const budget: unknown = rt.limits.taskTokenBudget;
   if (typeof budget !== 'number' || budget <= 0) return;
   if (!patched('task-token-budget')) return;
-  let spent: { tokens: number; unmetered: number };
+  let spent: { tokens: number; unmetered: number; estimated?: number };
   try {
     spent = await rt.cancellable(() => rt.acts.taskSpend({ schemaVersion: 1, taskId: rt.input.taskId }));
   } catch (error) {
@@ -281,11 +281,17 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
     log.warn('查这张单花掉的 token 没查成，照旧起会话', { error: failureOf(error, 'taskSpend').message });
     return;
   }
-  if (spent.tokens <= budget * rt.budgetGrants) return;
-  const stop = tokenBudgetStop(spent, budget, rt.budgetGrants);
+  // 被叫停、超时杀掉的会话多半到不了 CLI 的收尾用量帧，用量就空着；按这张单别的行估出来的下限一起算进预算，
+  // 不然一张单反复被叫停可以一直换会话、账面一次都不超。老历史没有这个字段，估出来的是 0，照旧（patched('task-budget-unmetered-estimate')）。
+  const counted = spent.tokens + (patched('task-budget-unmetered-estimate') ? (spent.estimated ?? 0) : 0);
+  if (counted <= budget * rt.budgetGrants) return;
+  const stop = tokenBudgetStop({ tokens: counted, unmetered: spent.unmetered }, budget, rt.budgetGrants, {
+    measured: spent.tokens,
+    estimated: counted - spent.tokens,
+  });
   await rt.park(stop.title, stop.detail);
   // 人看过、点了「继续」：再给到比花掉的多一份
-  rt.budgetGrants = Math.floor(spent.tokens / budget) + 1;
+  rt.budgetGrants = Math.floor(counted / budget) + 1;
 }
 
 /**

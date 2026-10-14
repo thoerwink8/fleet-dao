@@ -490,7 +490,7 @@ describe('runsOfTask：一张单的三段流水（任务详情读）', () => {
 });
 
 describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
-  it('这张单动手和验收的四样 token 相加；别的单、别的段不算；用量全空的行不算钱、数出来', async () => {
+  it('这张单动手和验收的四样 token 相加；别的单、别的段不算；用量全空的行不算钱、数出来、按量到的行估一个下限', async () => {
     const repo = await addRepo(t.db);
     const task = await addTask(t.db, repo.id, { issueNumber: 77 });
     const other = await addTask(t.db, repo.id, { issueNumber: 78 });
@@ -507,7 +507,32 @@ describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
     await row({ taskId: task.id });
     await row({ taskId: task.id, segment: 'scope', inputTokens: 999_999 });
     await row({ taskId: other.id, inputTokens: 999_999 });
-    expect(await taskTokenSpend(t.db, task.id)).toEqual({ tokens: 1038, runs: 3, unmetered: 1 });
-    expect(await taskTokenSpend(t.db, randomUUID())).toEqual({ tokens: 0, runs: 0, unmetered: 0 });
+    // 量到的 1038 摊在两条量到的行上（600 + 600 = 1200 秒），空着的那一行也跑了 600 秒：估出来是 519
+    expect(await taskTokenSpend(t.db, task.id)).toEqual({
+      tokens: 1038,
+      runs: 3,
+      unmetered: 1,
+      estimated: 519,
+    });
+    expect(await taskTokenSpend(t.db, randomUUID())).toEqual({
+      tokens: 0,
+      runs: 0,
+      unmetered: 0,
+      estimated: 0,
+    });
+  });
+
+  it('一行用量都没记到（全被叫停）：没有速率可估，估出来是 0，只数出有几行没读到', async () => {
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id, { issueNumber: 79 });
+    await t.db
+      .insert(runs)
+      .values({ segment: 'manual', model: 'grok-4.7', taskId: task.id, startedAt: ago(10 * MIN) });
+    expect(await taskTokenSpend(t.db, task.id)).toEqual({
+      tokens: 0,
+      runs: 1,
+      unmetered: 1,
+      estimated: 0,
+    });
   });
 });

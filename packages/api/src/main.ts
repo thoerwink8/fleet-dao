@@ -29,6 +29,7 @@ import {
   pgLocker,
   readDeployLagInput,
   startDeployLagWatch,
+  startReleaseWaitWatch,
   withStatementTimeout,
 } from '@fleet-dao/store';
 import { signAgentToken } from './agent-token.ts';
@@ -294,6 +295,8 @@ async function assemble(): Promise<{
   const stopDeployLagWatch = production
     ? startDeployLagWatch({ db, read: () => readDeployLagInput(), now, log })
     : () => {};
+  // 合并后等发版那一段（step_timings 的 wait 行）：工作流合并完就收场，这一段由这边看发布历史补记，指挥官复验「合并到上线」用它
+  const stopReleaseWaitWatch = production ? startReleaseWaitWatch({ db, now, log }) : () => {};
   // 看门狗（#203）自己停了它自己报不了：后端每 5 分钟按登记表上它那一行看一次，停了推一条「看门狗停了」，好了自己撤
   const stopWatchdogWatch = production ? startWatchdogWatch({ db, now, log }) : () => {};
   // 提需求开出的单子的进度（#2060）：每分钟从 GitHub 和引擎任务表读，写进需求、对话里追加进度卡，引擎的提问发到单上。
@@ -398,6 +401,7 @@ async function assemble(): Promise<{
     databaseSizes: pgDatabaseSizes((text) => client.unsafe(text)),
     close: async () => {
       stopDeployLagWatch();
+      stopReleaseWaitWatch();
       stopWatchdogWatch();
       stopRequestProgressWatch();
       await feed.stop();

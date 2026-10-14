@@ -77,6 +77,8 @@ export function realRuns(deps: RealRunsDeps): RunsWriter {
           memoryPeakMb: run.memoryPeakMb ?? null,
           cpuSeconds: run.cpuSeconds ?? null,
           failureReason: run.failureReason ?? null,
+          // 用量没照终帧读到（被叫停、超时杀）：记的是怎么来的、缺的为什么读不到；照终帧读到了不带，库里已有的不清
+          usageNote: run.usageNote ?? null,
         },
         'runs 写入失败',
       );

@@ -190,6 +190,48 @@ describe('grok 过程记录', () => {
     });
   });
 
+  it('每次模型调用那帧 usage 逐帧加起来：五份真跑记录里和终帧的用量四样一个不差（被叫停的段靠它记账）', () => {
+    for (const name of ['grok-bash-fail', 'grok-edit-commit', 'grok-plan', 'grok-read', 'grok-resume']) {
+      const { summary } = readAll(name);
+      const end = summary.end?.usage;
+      expect(end, name).toBeDefined();
+      const calls = summary.callUsage;
+      expect(calls, name).toBeDefined();
+      // 逐帧相加＝终帧：终帧多给的 total_tokens 不在四样里，不比对
+      expect(
+        {
+          inputTokens: calls?.inputTokens,
+          outputTokens: calls?.outputTokens,
+          cacheReadTokens: calls?.cacheReadTokens,
+          cacheWriteTokens: calls?.cacheWriteTokens,
+        },
+        name,
+      ).toEqual({
+        inputTokens: end?.inputTokens,
+        outputTokens: end?.outputTokens,
+        cacheReadTokens: end?.cacheReadTokens,
+        cacheWriteTokens: end?.cacheWriteTokens,
+      });
+      expect(calls?.reasoningTokens, name).toBe(end?.reasoningTokens);
+    }
+  });
+
+  it('被叫停、没走到终帧：callUsage 记下各次调用已经花掉的；一帧 usage 都没有就不给', () => {
+    // 真跑记录里砍掉终帧（被引擎叫停就是这个样子）：前三帧的用量还在
+    const frames = fixtureLines('grok', 'grok-read')
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((f) => f.type !== 'end');
+    const reader = new GrokStreamReader({ runId: 'r1', cwd: '/w', now: () => NOW });
+    for (const f of frames) reader.read(JSON.stringify(f));
+    const s = reader.summary();
+    expect(s.end).toBeUndefined();
+    expect(s.modelCalls).toBe(2);
+    expect(s.callUsage).toMatchObject({ inputTokens: 30389, outputTokens: 116, cacheReadTokens: 24064 });
+    const nothing = new GrokStreamReader({ runId: 'r1', cwd: '/w', now: () => NOW });
+    nothing.read(JSON.stringify({ type: 'text', data: 'x' }));
+    expect(nothing.summary().callUsage).toBeUndefined();
+  });
+
   it('命令失败、error 帧、认不出的帧：记原因、计数', () => {
     const reader = new GrokStreamReader({ runId: 'r1', cwd: '/w', now: () => NOW });
     reader.read(

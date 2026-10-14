@@ -64,6 +64,11 @@ const RunRecordFields = z.object({
   routeOutcome: z.enum(['ok', 'fail', 'neutral']),
   /** 失败原因（exit code、错误消息），outcome != 'done' 时给。 */
   failureReason: z.string().optional(),
+  /**
+   * 用量为什么没记全、记的是怎么来的（写进 runs.usage_note）：会话被叫停、超时杀，没走到执行体报用量的终帧时给（例如
+   * 「cursor 只在终帧报用量……读不到」「按每次调用的用量帧加起来」）。四样都读到了、照终帧记的不给。
+   */
+  usageNote: z.string().min(1).optional(),
 });
 
 /** 只有动手段分档：对题不分档、验收是冷调用，带了派工档就是调用方弄错了。 */

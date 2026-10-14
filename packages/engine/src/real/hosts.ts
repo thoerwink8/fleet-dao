@@ -259,6 +259,11 @@ export interface HostReport {
    */
   sessionId?: string;
   usage: HostUsage;
+  /**
+   * 用量没照终帧读到时（会话被叫停、超时杀，没走到终帧）：记下的是怎么来的、缺的为什么读不到。进 runs.usage_note，页面和
+   * 单任务预算照它标「读不到」，不拿空当没花。照终帧读到了不给。
+   */
+  usageWhy?: string;
   /** 只有 Claude 报：会话累计花费（续会话含前几轮）、会话结束时的上下文大小。 */
   sessionCostUsd?: number;
   /** 实际回话的模型：Claude 流里的、grok 终帧 modelUsage 的键（grok-4.7-build）；cursor 没有。 */
@@ -469,12 +474,7 @@ export function claudeReport(report: ClaudeCodeRunReport): HostReport {
     hostId: 'claude-code',
     facts: claudeRunFacts(report),
     ...defined('sessionId', report.stream.sessionId),
-    usage: {
-      ...defined('inputTokens', r?.usage?.inputTokens),
-      ...defined('outputTokens', r?.usage?.outputTokens),
-      ...defined('cacheReadTokens', r?.usage?.cacheReadInputTokens),
-      ...defined('cacheWriteTokens', r?.usage?.cacheCreationInputTokens),
-    },
+    ...claudeUsage(report.stream),
     ...defined('sessionCostUsd', r?.sessionCostUsd),
     ...defined('actualModel', report.stream.observedModel),
     ...defined('contextTokens', report.stream.lastContextTokens),
@@ -485,6 +485,42 @@ export function claudeReport(report: ClaudeCodeRunReport): HostReport {
     stderrTail: report.stderrTail,
   };
 }
+
+/**
+ * Claude 这一轮的用量：有终帧照终帧；没走到终帧（被叫停、超时杀）按流里主会话每条消息的用量加起来记输入和缓存，
+ * 输出读不到（流里的输出数是消息写到一半时的，偏小很多）。一条带用量的消息都没有，四样都读不到。
+ */
+function claudeUsage(stream: ClaudeCodeRunReport['stream']): Pick<HostReport, 'usage' | 'usageWhy'> {
+  const u = stream.result?.usage;
+  if (u) {
+    return {
+      usage: {
+        ...defined('inputTokens', u.inputTokens),
+        ...defined('outputTokens', u.outputTokens),
+        ...defined('cacheReadTokens', u.cacheReadInputTokens),
+        ...defined('cacheWriteTokens', u.cacheCreationInputTokens),
+      },
+    };
+  }
+  const calls = stream.callUsage;
+  if (!calls) return { usage: {}, usageWhy: USAGE_UNREAD.claude };
+  return {
+    usage: {
+      inputTokens: calls.inputTokens,
+      cacheReadTokens: calls.cacheReadInputTokens,
+      cacheWriteTokens: calls.cacheCreationInputTokens,
+    },
+    usageWhy:
+      '会话没走到终帧（被叫停、超时杀或中途退出）：输入、缓存读、缓存写按流里每条消息的用量加起来；输出读不到（流里的输出数是写到一半的）',
+  };
+}
+
+/** 会话没走到终帧、过程里也没有逐次的用量时写的「读不到」。 */
+export const USAGE_UNREAD = {
+  claude: '会话没走到终帧（被叫停、超时杀或中途退出），流里也没有一条带用量的消息：这一段花掉的 token 读不到',
+  cursor: 'cursor 只在终帧报用量，会话没走到终帧（被叫停、超时杀或中途退出）：这一段花掉的 token 读不到',
+  grok: '会话没走到终帧（被叫停、超时杀或中途退出），过程里也没有一帧 usage：这一段花掉的 token 读不到',
+} as const;
 
 // ---- cursor-agent
 
@@ -652,6 +688,8 @@ export function cursorReport(report: CursorRunReport): HostReport {
       ...defined('cacheReadTokens', r?.usage?.cacheReadTokens),
       ...defined('cacheWriteTokens', r?.usage?.cacheWriteTokens),
     },
+    // 流里只有终帧带用量（fixtures 里七份真跑记录）：没走到终帧就是读不到
+    ...(r?.usage ? {} : { usageWhy: USAGE_UNREAD.cursor }),
     ...defined('answer', r?.text),
     ...defined('rawError', facts.lastWords),
     wallMs: report.wallMs,
@@ -742,17 +780,31 @@ export function grokReport(report: GrokRunReport): HostReport {
     hostId: 'grok',
     facts,
     ...defined('sessionId', end?.sessionId ?? (opened ? report.session.id : undefined)),
-    usage: {
-      ...defined('inputTokens', end?.usage?.inputTokens),
-      ...defined('outputTokens', end?.usage?.outputTokens),
-      ...defined('cacheReadTokens', end?.usage?.cacheReadTokens),
-      ...defined('cacheWriteTokens', end?.usage?.cacheWriteTokens),
-    },
+    ...grokUsage(s),
     ...defined('actualModel', end?.models[0]),
     ...defined('answer', report.stream.answer),
     ...defined('rawError', facts.lastWords),
     wallMs: report.wallMs,
     stderrTail: report.stderrTail,
+  };
+}
+
+/**
+ * grok 这一轮的用量：有终帧照终帧；没走到终帧（被叫停、超时杀）按过程里每次模型调用的 usage 帧加起来（真跑记录里逐帧加和
+ * 终帧四样一个不差），最后一次没跑完的调用不在里面；一帧 usage 都没有就读不到。
+ */
+function grokUsage(s: GrokRunReport['stream']): Pick<HostReport, 'usage' | 'usageWhy'> {
+  const pick = (u: GrokRunReport['stream']['callUsage']): HostUsage => ({
+    ...defined('inputTokens', u?.inputTokens),
+    ...defined('outputTokens', u?.outputTokens),
+    ...defined('cacheReadTokens', u?.cacheReadTokens),
+    ...defined('cacheWriteTokens', u?.cacheWriteTokens),
+  });
+  if (s.end?.usage) return { usage: pick(s.end.usage) };
+  if (!s.callUsage) return { usage: {}, usageWhy: USAGE_UNREAD.grok };
+  return {
+    usage: pick(s.callUsage),
+    usageWhy: `会话没走到终帧（被叫停、超时杀或中途退出）：按过程里 ${s.modelCalls} 次模型调用的用量帧加起来，最后一次没跑完的调用不在里面`,
   };
 }
 

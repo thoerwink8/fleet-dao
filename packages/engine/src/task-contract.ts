@@ -415,8 +415,13 @@ export interface TaskSpendInput {
 export interface TaskSpendResult {
   tokens: number;
   runs: number;
-  /** 用量还空着的行数（中转会话的用量稍后才补）：花掉的只多不少。 */
+  /** 用量还空着的行数（被叫停、超时杀，或中转会话的用量稍后才补）：花掉的只多不少。 */
   unmetered: number;
+  /**
+   * 那几行估出来的下限（按这张单记到用量的行的每分钟速率乘它们跑过的分钟数；一行记到的都没有是 0）。预算判断把它一起算进去，
+   * 页面上写明是估的。
+   */
+  estimated: number;
 }
 
 /**
