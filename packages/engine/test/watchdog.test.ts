@@ -5,6 +5,7 @@
 import {
   auditLog,
   finishScheduleRun,
+  MASTER_OFF_SKIP_WHY,
   notifications,
   registerScheduledJobs,
   repos,
@@ -573,5 +574,31 @@ describe('同一个任务连着没跑全（partial 算跑成，所以单靠新�
     await runWatchdogJob(deps());
     expect(await reds()).toEqual([]);
     expect((await openAlerts()).map((a) => a.dedupeKey.split(':')[1])).toEqual(['job']);
+  });
+});
+
+describe('总开关关着的跳过不算「连着没跑全」', () => {
+  it('拉单连着 4 次因总开关关着记 partial、跨过 2 小时：不报；中间夹着真的 partial 也不被它打断', async () => {
+    await register({ id: 'intake', name: '拉单', expectEveryMinutes: 100_000 });
+    for (const m of [-200, -140, -80, -20]) {
+      await run('intake', m, {
+        outcome: 'partial',
+        why: `${MASTER_OFF_SKIP_WHY}总开关关着`,
+        scanned: 0,
+        found: 0,
+      });
+    }
+    await runWatchdogJob(deps());
+    expect((await openAlerts()).filter((a) => a.dedupeKey.startsWith('watchdog:red:'))).toEqual([]);
+
+    // 真的 partial 三次跨 2 小时，中间夹两次跳过：照样报
+    await register({ id: 'real-red', name: '真红', expectEveryMinutes: 100_000 });
+    await run('real-red', -200, { outcome: 'partial', why: '读不到', scanned: 1, found: 1 });
+    await run('real-red', -150, { outcome: 'partial', why: `${MASTER_OFF_SKIP_WHY}x`, scanned: 0, found: 0 });
+    await run('real-red', -100, { outcome: 'partial', why: '读不到', scanned: 1, found: 1 });
+    await run('real-red', -50, { outcome: 'partial', why: `${MASTER_OFF_SKIP_WHY}x`, scanned: 0, found: 0 });
+    await run('real-red', -10, { outcome: 'partial', why: '读不到', scanned: 1, found: 1 });
+    await runWatchdogJob(deps());
+    expect((await openAlerts()).map((a) => a.dedupeKey)).toEqual(['watchdog:red:real-red:no-ok']);
   });
 });

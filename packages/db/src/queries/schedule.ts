@@ -2,7 +2,7 @@
 // 以登记为准而不是以跑过的记录为准：一次都没跑过的任务没有记录，只看记录就永远看不见它（没跑成 ≠ 没问题）。
 import type { ScheduleOutcome } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { and, asc, desc, eq, gte, inArray, isNull, lt, max } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, like, lt, max, not, or } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { SCHEDULE_OUTCOMES } from '../schema/enums.ts';
 import { scheduledJobs, scheduleRuns } from '../schema/index.ts';
@@ -99,6 +99,12 @@ export async function intakeFoundSince(db: Db, since: Date): Promise<(number | n
     .orderBy(asc(scheduleRuns.startedAt));
   return rows.map((row) => row.found);
 }
+
+/**
+ * 引擎总开关关着、这一轮被跳过时记在 schedule_runs 的原因开头（记成 partial：看门狗的新鲜度当它跑成，不会误报「停了」）。
+ * 这是有意的暂停不是故障：「连着没跑全」（scheduleRedStreaks）不把它算进红的，也不让它打断一段真的红。
+ */
+export const MASTER_OFF_SKIP_WHY = '引擎总开关关着，这一轮不跑：';
 
 /** 进程被发版或重启腰斩、已经记下开始却没人收尾时，起来补记写的原因。 */
 export const INTERRUPTED_SCHEDULE_WHY = '进程中断没收尾，启动时补记';
@@ -281,7 +287,14 @@ export async function scheduleRedStreaks(db: Db, now: Date = new Date()): Promis
         why: scheduleRuns.why,
       })
       .from(scheduleRuns)
-      .where(and(inArray(scheduleRuns.outcome, ['partial', 'failed']), gte(scheduleRuns.startedAt, since)))
+      .where(
+        and(
+          inArray(scheduleRuns.outcome, ['partial', 'failed']),
+          gte(scheduleRuns.startedAt, since),
+          // 总开关关着的跳过不算红（有意的暂停）
+          or(isNull(scheduleRuns.why), not(like(scheduleRuns.why, `${MASTER_OFF_SKIP_WHY}%`))),
+        ),
+      )
       .orderBy(asc(scheduleRuns.id)),
   ]);
   const breakAt = new Map(breaks.map((b) => [b.job, b.id ?? 0]));
