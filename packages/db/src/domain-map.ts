@@ -274,7 +274,6 @@ export const toSegmentRun = (r: typeof runs.$inferSelect): SegmentRun =>
     branch: opt(r.branch),
     workflowId: opt(r.workflowId),
     sessionId: opt(r.sessionId),
-    retryOf: opt(r.retryOf),
   });
 
 export const toProgressEvent = (r: typeof progressEvents.$inferSelect): ProgressEvent =>

@@ -1128,8 +1128,7 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
     // 没有任何判法的（已删的「提醒派单」推出来的老键、工作流通报）：该过期
     await alert('unclaimed:abc:1', { title: '老提醒没人接' });
     await alert('wf:failure:account-banned', { title: '账号被封了' });
-    // 有判法的：条件还在（mq 工作流在跑、全熔断还在）就留着，再老也不撤
-    await alert('mq:acme/widgets:decide', { title: '合并队列判断出错' });
+    // 有判法的：条件还在（全熔断还在）就留着，再老也不撤
     await alert('routing:all-open:execute', { title: '「execute」阶段的路由全都熔断了' });
     // 别处自己会撤的、要人拍的：不归这条兜底
     await alert('deploy-lag:2026-10-01', { title: '线上版本跟不上主线' });
@@ -1139,7 +1138,6 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
     for (const key of [
       'unclaimed:abc:1',
       'wf:failure:account-banned',
-      'mq:acme/widgets:decide',
       'routing:all-open:execute',
       'deploy-lag:2026-10-01',
       'auto-release:failed:abc',
@@ -1155,9 +1153,8 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
     await alert('unclaimed:two-days', { title: '才两天' });
     await backdate('unclaimed:two-days', new Date(now.getTime() - 2 * 24 * HOUR));
 
-    const wf = fakeWorkflows({ 'mq:acme/widgets': { state: 'running' } });
     const run = await runHourlyReconcileJob(
-      deps({ now: () => now, workflows: wf.reader, stageAllOpen: async () => ({ allOpen: true }) }),
+      deps({ now: () => now, stageAllOpen: async () => ({ allOpen: true }) }),
     );
     expect(run.outcome).toBe('ok');
 
@@ -1168,7 +1165,6 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
       expect(gone?.body.startsWith('已撤：过期：'), key).toBe(true);
     }
     for (const key of [
-      'mq:acme/widgets:decide',
       'routing:all-open:execute',
       'deploy-lag:2026-10-01',
       'auto-release:failed:abc',
@@ -1237,21 +1233,21 @@ describe('没人处理的卡住报警：超过 24 小时再推一次，一天最
 
   it('人在再提醒上点了处理：原来那条跟着撤（处理人记那个人）；原来那条处理了：再提醒跟着撤', async () => {
     probeDir();
-    const a = await alert('mq:acme/widgets:decide', { title: '合并队列判断出错，卡住了' });
+    const a = await alert('routing:all-open:execute', { title: '「execute」阶段的路由全都熔断了' });
     const b = await alert('reconcile:pr:acme/widgets#9');
     const long = new Date(Date.now() - 30 * HOUR);
-    await backdate('mq:acme/widgets:decide', long);
+    await backdate('routing:all-open:execute', long);
     await backdate('reconcile:pr:acme/widgets#9', long);
-    const running = fakeWorkflows({ 'mq:acme/widgets': { state: 'running' } });
-    await runHourlyReconcileJob(deps({ workflows: running.reader }));
+    const allOpen = { stageAllOpen: async () => ({ allOpen: true as const }) };
+    await runHourlyReconcileJob(deps(allOpen));
     const [ra] = await remindersOf(a.id);
     const [rb] = await remindersOf(b.id);
     if (!ra || !rb) throw new Error('该有再提醒');
 
     await resolvedByHuman({ id: ra.id }, 'founder-a');
     await resolvedByHuman({ id: b.id }, 'founder-b');
-    await runHourlyReconcileJob(deps({ workflows: running.reader }));
-    expect(await alertByKey(t.db, 'mq:acme/widgets:decide')).toMatchObject({
+    await runHourlyReconcileJob(deps(allOpen));
+    expect(await alertByKey(t.db, 'routing:all-open:execute')).toMatchObject({
       resolvedBy: 'founder-a',
       body: expect.stringMatching(/^已撤：人在再提醒上点了处理/),
     });

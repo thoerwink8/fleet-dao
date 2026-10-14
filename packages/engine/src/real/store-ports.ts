@@ -865,26 +865,16 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         startedAt: new Date(input.startedAt),
         endedAt: new Date(input.endedAt),
       };
-      if (input.kind === 'activity') {
-        await recordStepTiming(db, {
-          kind: 'activity',
-          ...common,
-          activity: input.activity,
-          attempt: input.attempt,
-          scheduledAt: new Date(input.scheduledAt),
-          queueMs: input.queueMs,
-          runMs: input.runMs,
-          outcome: input.outcome,
-          ...(input.errorCode ? { errorCode: input.errorCode } : {}),
-        });
-        return;
-      }
       await recordStepTiming(db, {
-        kind: 'wait',
+        kind: 'activity',
         ...common,
-        waitFor: input.waitFor,
-        detail: input.detail,
-        waitMs: input.waitMs,
+        activity: input.activity,
+        attempt: input.attempt,
+        scheduledAt: new Date(input.scheduledAt),
+        queueMs: input.queueMs,
+        runMs: input.runMs,
+        outcome: input.outcome,
+        ...(input.errorCode ? { errorCode: input.errorCode } : {}),
       });
     },
 

@@ -10,7 +10,7 @@
 // - outcome 是「done | timeout | killed | spawn_failed | admission_blocked | failed | org_switch」（#554-1 的枚举，
 //   org_switch 是切号先停下这一段、切完在原分支上重跑，#59），还在跑的为空；结束了（ended_at 非空）就必须有 outcome，
 //   反之亦然——和 session_runs_outcome_iff_ended 同一个做法。
-// - retryOf 自引用，指到不存在的行要拒收（外键）。
+// - retryOf 自引用，指到不存在的行要拒收（外键）。没有代码写它；列和外键留着，删列就是删数据。
 // - 一次性会话开跑就写一行「没结束」的（ended_at、outcome 都空），收场时补完（#157）：切号数带组织类型的池上还没结束的会话、
 //   选路数池的并发（#735）都靠 route_id 连到池（db 的 queries/pool-runs.ts），没写 route_id 的行两边都看不见。
 // - tier 是派工档，叫法和取值照 packages/engine/src/runner/tier.ts 的 TierEnum（fast | medium | heavyweight），

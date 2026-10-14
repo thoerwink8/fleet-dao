@@ -52,7 +52,6 @@ export interface RunInsert {
   branch?: string | undefined;
   workflowId?: string | undefined;
   temporalRunId?: string;
-  retryOf?: string[];
 }
 
 export interface RunFinishInput {
@@ -69,7 +68,6 @@ export interface RunFinishInput {
   memoryPeakMb?: number | null;
   cpuSeconds?: number | null;
   failureReason?: string | null;
-  retryOf?: string[];
 }
 
 export type RunRow = typeof runs.$inferSelect;

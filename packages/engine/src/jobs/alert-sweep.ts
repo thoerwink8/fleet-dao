@@ -31,7 +31,6 @@
 // - <工作流>:history 事件数到线：工作流结束了就撤。
 // - canary:*（已删的全流程巡检留下的，决定 0093）：见到就撤。
 // - req:<…>:failed 需求没做完：需求的状态不再是 failed（重开了、又跑了、做完了、人叫停了）就撤。
-// - mq:<仓>:decide 合并队列判断出错：队列正常收工了（COMPLETED）或工作流已经不在了就撤；还在跑时判不了。
 // - approval:<批准> 要人批：批了、拒了，或者在等它的工作流（子任务的；Fusion 的是需求工作流）不在跑了、不在等这一次了就撤。
 // - routing:all-open:<阶段> 某阶段的路由全都熔断了：这个阶段有不在熔断的候选路由了就撤（只读判法，和选路同一套；
 //   读不了记没查成，不撤）。
@@ -309,18 +308,6 @@ export const RULES: readonly Rule[] = [
       const state = await deps.taskState(alert.taskId);
       if (state === null || state === 'failed') return { keep: true };
       return { resolve: `需求现在是「${TASK_STATE_WORDS[state]}」，不再是没做完` };
-    },
-  },
-  {
-    name: '合并队列判断出错',
-    pattern: /^(mq:.+):decide$/,
-    async judge(deps, _alert, m) {
-      const st = await deps.workflows.state(m[1] as string);
-      if (st.state === 'missing') return { resolve: `合并队列${notRunningWords(st)}` };
-      if (st.state === 'closed' && st.status === 'COMPLETED') {
-        return { resolve: '合并队列已经排空、正常收工了：判断出错的那一步后来过去了' };
-      }
-      return { keep: true };
     },
   },
   {

@@ -27,12 +27,12 @@ const failure = (code: string, retryable: boolean | null = null) => ({
 
 describe('上限：读时现算默认值', () => {
   it('老输入缺新字段按默认值补，不写回输入；非法值不认', () => {
-    const old = { reviewRounds: 5 } as const;
+    const old = { ciMinutes: 5 } as const;
     const resolved = resolveLimits(old);
-    expect(resolved.reviewRounds).toBe(5);
+    expect(resolved.ciMinutes).toBe(5);
     expect(resolved.stallSeconds).toBe(360);
-    expect(old).toEqual({ reviewRounds: 5 });
-    expect(resolveLimits({ ciFixRounds: -1, heartbeatSeconds: Number.NaN }).ciFixRounds).toBe(3);
+    expect(old).toEqual({ ciMinutes: 5 });
+    expect(resolveLimits({ ciMinutes: -1, heartbeatSeconds: Number.NaN }).ciMinutes).toBe(40);
     expect(resolveLimits(undefined)).toEqual(DEFAULT_LIMITS);
   });
 

@@ -311,9 +311,6 @@ export interface RaiseAlertInput extends Scope {
   dedupeKey: string;
 }
 
-/** 在等什么：deps 等依赖、overlap 等改同一块的子任务、capacity 等需求内并发、slot 等账号池空位、quota 等额度、human 等人（暂停、挂起、回答、批准）、merge-queue 等合并队列、retry 退避中。 */
-export type WaitKind = 'deps' | 'overlap' | 'capacity' | 'slot' | 'quota' | 'human' | 'merge-queue' | 'retry';
-
 /** 一次活动尝试：排队（排进任务队列 → 工人开始干）和干活（开始 → 结束）分开记。 */
 export interface ActivityTiming {
   kind: 'activity';
@@ -334,23 +331,7 @@ export interface ActivityTiming {
   errorCode?: string;
 }
 
-/** 工作流层面的一段等待（等依赖、等空位、等人……）。 */
-export interface WaitTiming {
-  kind: 'wait';
-  workflowId: string;
-  runId: string;
-  workflowType: string;
-  taskId?: string;
-  subtaskId?: string;
-  subtaskKey?: string;
-  waitFor: WaitKind;
-  detail: string;
-  startedAt: string;
-  endedAt: string;
-  waitMs: number;
-}
-
-export type TimingEntry = ActivityTiming | WaitTiming;
+export type TimingEntry = ActivityTiming;
 
 export interface EnginePorts {
   pickRoute(input: PickRouteInput, ctx: PortContext): Promise<PickRouteResult>;

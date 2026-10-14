@@ -432,18 +432,6 @@ export const RULES: readonly FailureRule[] = [
     codeFieldOnly: true,
     routeOutcome: 'neutral',
   },
-  // 开 PR 前验证要发给别家的材料（「怎么算做完」、方案摘要、改动清单拼成的提示词）没过卫生检查：材料是工作流从需求文档、
-  // 方案、改动里取的，重试、退回会话都还是它——不发，挂起报警，要人看是误报还是材料里真带了值。
-  {
-    id: 'HY4',
-    title: '发给别家验证的材料没过卫生检查',
-    kind: 'stop',
-    codes: ['material_blocked'],
-    codeFieldOnly: true,
-    routeOutcome: 'neutral',
-    humanFix:
-      '材料来自需求文档的「怎么算做完」、方案摘要和改动清单：误报就把这一条加进卫生检查的白名单再继续；真带了值就先把它从需求文档或分支里拿掉再继续',
-  },
   // 开 PR 时照需求 issue 对齐类别标签，issue 自己贴了不止一个类别：没法判以哪个为准，照抄过去 pr-fields 会一直红。
   // 只有人能改 issue：挂起报警，改成一个再点「继续」，PR 跟着对齐。
   {

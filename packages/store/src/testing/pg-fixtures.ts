@@ -225,7 +225,6 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         prNumber: r.prNumber ?? null,
         branch: r.branch ?? null,
         workflowId: r.workflowId ?? null,
-        retryOf: r.retryOf ?? null,
       })),
     );
   }
