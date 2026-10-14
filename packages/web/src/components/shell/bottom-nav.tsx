@@ -1,17 +1,13 @@
-// 手机底部导航：主页、任务、通知、更多（打开原来的导航抽屉，其余页面都在里面）。
-// 四项每项至少 40×40，实际按钮占满整条（h-14），拇指够得着；通知带待处理角标。
-import { Bell, Home, ListChecks, Menu } from 'lucide-react';
+// 手机底部导航：主页、更多（打开导航抽屉，其余页面都在里面；决定 0093 导航降级，主页三块就是要看的全部）。
+// 每项至少 40×40，实际按钮占满整条（h-14），拇指够得着；待处理的数挂在「更多」上（通知中心在里面）。
+import { Home, Menu } from 'lucide-react';
 import { NavLink } from 'react-router';
 import { useNotifications } from '../../api/client';
 import { useNodeSelection, withNode } from '../../lib/node';
 import { pendingCount } from '../../lib/notice-count';
 import { cn } from '../../lib/utils';
 
-const ITEMS = [
-  { to: '/', label: '主页', icon: Home },
-  { to: '/tasks', label: '任务', icon: ListChecks },
-  { to: '/notifications', label: '通知', icon: Bell },
-] as const;
+const ITEMS = [{ to: '/', label: '主页', icon: Home }] as const;
 
 const cell =
   'relative flex h-14 min-w-10 flex-1 flex-col items-center justify-center gap-0.5 text-meta text-muted-foreground transition-colors active:bg-accent';
@@ -36,28 +32,26 @@ export function BottomNav({ onMore }: { onMore(): void }) {
           {({ isActive }) => (
             <>
               {isActive ? <span className="absolute top-0 h-0.5 w-8 rounded-full bg-brand" /> : null}
-              <span className="relative">
-                <Icon className="size-5" aria-hidden />
-                {to === '/notifications' && badge !== 0 ? (
-                  <span
-                    className={cn(
-                      'num absolute -top-1.5 left-3 grid min-w-4 place-items-center rounded-full px-1 text-meta font-semibold',
-                      badge === '!'
-                        ? 'bg-destructive text-destructive-foreground'
-                        : 'bg-st-human text-background',
-                    )}
-                  >
-                    {badge}
-                  </span>
-                ) : null}
-              </span>
+              <Icon className="size-5" aria-hidden />
               {label}
             </>
           )}
         </NavLink>
       ))}
       <button type="button" onClick={onMore} className={cell} aria-label="更多，打开全部页面">
-        <Menu className="size-5" aria-hidden />
+        <span className="relative">
+          <Menu className="size-5" aria-hidden />
+          {badge !== 0 ? (
+            <span
+              className={cn(
+                'num absolute -top-1.5 left-3 grid min-w-4 place-items-center rounded-full px-1 text-meta font-semibold',
+                badge === '!' ? 'bg-destructive text-destructive-foreground' : 'bg-st-human text-background',
+              )}
+            >
+              {badge}
+            </span>
+          ) : null}
+        </span>
         更多
       </button>
     </nav>

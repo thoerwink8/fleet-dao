@@ -1248,6 +1248,17 @@ export function createSeed(now: number): MockState {
       deliveries: delivered(-46),
     },
     {
+      // 看门狗报的卡（决定 0093：主线 N 小时没合 PR）：进主页「要你拍的」，没有选项，给「处理」和「看看」。键和正文照引擎真写的格式
+      id: 'n-10',
+      level: 'alert',
+      title: 'acme/orbit 主线 4 小时 12 分没合 PR',
+      body: '上次合并是 PR #1745（4 小时 12 分前），这段时间引擎手上有 2 张单在做、1 张只因没空位没起。\n看看是不是卡在验收或合并队列。',
+      link: '/tasks',
+      dedupeKey: 'watchdog:merge:acme/orbit:after-1745',
+      createdAt: at(-15),
+      deliveries: delivered(-15),
+    },
+    {
       id: 'n-8',
       level: 'daily',
       title: '昨日日报',

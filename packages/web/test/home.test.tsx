@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// 主页（/）三块骨架的测试：
+// 画布（/board，原来的主页，决定 0093 挪进「更多」）的测试：
 // - 路由进来的四种状态：loading（骨架屏）/ error（照实说没读成）/ notWired（整块待实现）/ data（真的有数据，三块各自画出来）。
 // - 「verify_pending」「还没验」不画成失败红：卡片上有专属的 badge，不接 fail 颜色。
 // - 「在跑的」是初版那样的思维导图看板（中心 → 三段 → 单子）；手机上是树形列表。
@@ -16,7 +16,7 @@ import type { HomeData, HomeState } from '../src/components/home/types';
 import { TaskActionsProvider } from '../src/components/task-actions';
 import { ThemeProvider } from '../src/components/theme-provider';
 import { TooltipProvider } from '../src/components/ui/tooltip';
-import Home from '../src/routes/home';
+import Home from '../src/routes/board';
 
 // 每次测试换掉 useHome 的返回——home-api 切片还没出来，真的 useHome 写死 NotWired，这里把四态各造一次。
 vi.mock('../src/api/client', async () => {
@@ -168,7 +168,7 @@ describe('home（/）：四种状态', () => {
 
   test('error：写「没读成」，没有待实现占位', () => {
     renderHome({ status: 'error', error: new Error('500') });
-    expect(screen.getByText(/主页没读成/)).toBeTruthy();
+    expect(screen.getByText(/画布没读成/)).toBeTruthy();
     expect(screen.queryByText(/这块还没做/)).toBeNull();
   });
 
@@ -714,7 +714,7 @@ describe('home（/）：在跑的思维导图看板（初版看板的样子，�
   test('读不到：写明没读成并带「重试」，点了真的重试；不是空图', () => {
     const retry = vi.fn();
     renderHome({ status: 'error', error: new Error('500'), retry });
-    expect(screen.getByText(/主页没读成：500/)).toBeTruthy();
+    expect(screen.getByText(/画布没读成：500/)).toBeTruthy();
     expect(document.querySelector('[data-flow-board]')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '重试' }));
     expect(retry).toHaveBeenCalledTimes(1);

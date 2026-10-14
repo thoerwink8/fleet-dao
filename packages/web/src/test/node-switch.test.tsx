@@ -239,6 +239,8 @@ describe('选了远程环境：其余页', () => {
 
   test('侧栏换页不丢选择：在主页点「环境」，网址还带 ?node=wsl', async () => {
     await mount(apiFor('fresh'), '/?node=wsl');
+    // 主页以外的页收在侧栏「更多」里（决定 0093）：先点开
+    fireEvent.click(await screen.findByRole('button', { name: /更多/ }));
     const link = (await screen.findAllByRole('link', { name: /^法国/ })).find((a) =>
       a.getAttribute('href')?.startsWith('/france'),
     ) as HTMLElement;
