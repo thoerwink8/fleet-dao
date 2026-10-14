@@ -20,7 +20,7 @@ import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
 /** @typedef {{ ok: false, kind: string, why: string }} Failure 没做成：kind 同 france-lib；why 给人看 */
 /** @typedef {{ n: number, repo: string, state: string, phase: string, minutes: number, doing: string }} TaskFact 一张没做完的单 */
 /** @typedef {{ job: string, outcome: string, minutes: number, why: string }} JobFact 最近一次跑完不是 ok 的定时任务 */
-/** @typedef {{ key: string, title: string }} NoteFact 一条开着的通知（不含提醒类） */
+/** @typedef {{ key: string, title: string, level?: string }} NoteFact 一条开着的通知（不含提醒类）；level 是 decision | alert | daily（老基线里没有） */
 /** @typedef {{ code: number, red: string[] }} HealthzFact /healthz 的状态码（连不上是 0）和红的检查名 */
 /** @typedef {{ at: string, sha: string, event: string }} HistoryFact 发布历史（.history）的一条 */
 /** @typedef {{ known: boolean, behind: number, minutes: number }} LagFact 在用版本落后主线几个提交、最老的落下几分钟（known=false：在用的不在主线最近的提交里） */
@@ -70,6 +70,9 @@ const RELEASES = '/srv/fleet-dao-releases';
 /** 要 active 的服务。 */
 export const SERVICES = ['fleet-api', 'fleet-engine'];
 /** 库查询那几块：每块跑完打 ok|<块>，报错打 ERR|<块>|<原因>。 */
+/** notifications.level 的取值（packages/db/src/schema/enums.ts notificationLevel）。 */
+const NOTE_LEVELS = new Set(['decision', 'alert', 'daily']);
+
 export const DB_BLOCKS = ['master', 'tasks', 'jobs', 'notecount', 'notes', 'push', 'brief'];
 /** 远端命令：脚本从标准输入喂。 */
 export const PATROL_REMOTE_COMMAND = 'sh -s';
@@ -152,7 +155,7 @@ export const REMOTE_SCRIPT = [
   `q tasks "select 'task', t.issue_number, r.name, t.state, coalesce(t.phase, ''), floor(extract(epoch from now() - coalesce(t.updated_at, t.created_at)) / 60)::int, replace(left(coalesce(t.doing, ''), 80), ${NO_NEWLINE}, ' ') from tasks t join repos r on r.id = t.repo_id where t.state not in ('done', 'stopped', 'failed', 'queued') order by t.issue_number"`,
   `q jobs "select 'job', r.job, r.outcome, floor(extract(epoch from now() - coalesce(r.ended_at, r.started_at)) / 60)::int, replace(left(coalesce(r.why, ''), 100), ${NO_NEWLINE}, ' ') from schedule_runs r join scheduled_jobs j on j.id = r.job and j.removed_at is null where r.id in (select max(id) from schedule_runs where outcome is not null group by job) and r.outcome not in ('ok', 'partial') order by r.job"`,
   `q notecount "select 'notes', count(*) from notifications where resolved_at is null and dedupe_key not like 'remind:%'"`,
-  `q notes "select 'note', left(dedupe_key, 80), replace(left(title, 100), ${NO_NEWLINE}, ' ') from notifications where resolved_at is null and dedupe_key not like 'remind:%' order by id desc limit 50"`,
+  `q notes "select 'note', level, left(dedupe_key, 80), replace(left(title, 100), ${NO_NEWLINE}, ' ') from notifications where resolved_at is null and dedupe_key not like 'remind:%' order by id desc limit 50"`,
   `q push "${PUSH_SQL}"`,
   `q brief "${BRIEF_SQL}"`,
   'echo end',
@@ -320,8 +323,8 @@ export function parseRaw(text) {
         attempts: Number(p[6]),
         why: scrubText(p.slice(7).join('|')),
       };
-    else if (kind === 'note' && p.length >= 3)
-      notes.push({ key: scrubText(p[1] ?? ''), title: scrubText(p.slice(2).join('|')) });
+    else if (kind === 'note' && p.length >= 4 && NOTE_LEVELS.has(p[1] ?? ''))
+      notes.push({ level: p[1] ?? '', key: scrubText(p[2] ?? ''), title: scrubText(p.slice(3).join('|')) });
     else return { ok: false, why: `认不出这一行：${shown(line)}` };
   }
   /** @type {string[]} */
@@ -442,7 +445,7 @@ export function brokenReasons(f) {
 }
 
 /**
- * 不变量：命中一条记一行。新通知要有基线才判（没有基线的第一次只记基线）。
+ * 不变量：命中一条记一行。新通知要有基线才判（没有基线的第一次只记基线），daily 级的只进变化不算命中。
  * @param {Facts} f
  * @param {Facts | null} base
  */
@@ -470,7 +473,9 @@ export function invariants(f, base) {
   if (brief) out.push(brief);
   if (base) {
     const old = new Set(base.notes.map((n) => n.key));
-    for (const n of f.notes) if (!old.has(n.key)) out.push(`新通知 ${n.key}：${n.title}`);
+    // daily（发版开始/成功、日报、新模型入目录）只进变化，不叫醒人：自动发版一晚十来班，算 ALERT 会把要人看的淹掉
+    for (const n of f.notes)
+      if (!old.has(n.key) && n.level !== 'daily') out.push(`新通知 ${n.key}：${n.title}`);
   }
   return out;
 }
@@ -672,7 +677,7 @@ export async function fetchFrance({ home, env, readText, timeoutMs = 55_000, spa
  * @param {{ at: Date, disk?: number, mem?: number, engine?: string, master?: string, tasks?: string[], jobs?: string[], notes?: string[], push?: string, brief?: string, noEnd?: boolean, err?: string, healthz?: number, healthRed?: string[], hist?: string[], noHist?: boolean, train?: string, trainRaw?: string, noState?: boolean, autoNote?: string, behind?: number, behindMinutes?: number }} o
  */
 export function sampleRaw(o) {
-  const notes = o.notes ?? ['note|deploy-lag|发布落后'];
+  const notes = o.notes ?? ['note|alert|deploy-lag|发布落后'];
   const cur = `abcd1234${'0'.repeat(32)}`;
   const sha = (/** @type {number} */ i) => `${String(i).padStart(8, '0')}${'f'.repeat(32)}`;
   const behind = o.behind ?? 0;
@@ -746,7 +751,7 @@ export function selftest(now) {
           master: 'false',
           tasks: ['task|12|fleet-dao|stalled||45|等路由'],
           jobs: ['job|probe|failed|7|探针连不上'],
-          notes: ['note|deploy-lag|发布落后', 'note|task-stuck:12|单卡住了'],
+          notes: ['note|alert|deploy-lag|发布落后', 'note|alert|task-stuck:12|单卡住了'],
           push: 'push|on||95|3|12960',
         }),
       },

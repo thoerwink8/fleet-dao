@@ -105,7 +105,7 @@ describe('巡查脚本：判法', () => {
       master: 'false',
       tasks: ['task|12|fleet-dao|running|parked|45|等人'],
       jobs: ['job|probe|failed|7|探针连不上'],
-      notes: ['note|deploy-lag|发布落后', 'note|task-stuck:12|单卡住了'],
+      notes: ['note|alert|deploy-lag|发布落后', 'note|alert|task-stuck:12|单卡住了'],
     });
     const r = lib.judge({ raw: ok(raw), now: NOW, base });
     expect(r.verdict).toBe('ALERT');
@@ -113,12 +113,33 @@ describe('巡查脚本：判法', () => {
     expect(lib.render(r).at(-1)).toBe('VERDICT: ALERT 7');
   });
 
+  it('新通知只有 decision、alert 算 ALERT；daily（发版成功、日报）只进变化', () => {
+    const base = baseOf(good());
+    const raw = lib.sampleRaw({
+      at: NOW,
+      notes: [
+        'note|alert|deploy-lag|发布落后',
+        'note|daily|release:done:abc|【发版成功】法国已在用 abc',
+        'note|decision|github-app-missing:o/r|o/r：先去 GitHub 把两个机器人装到这个仓',
+      ],
+    });
+    const r = lib.judge({ raw: ok(raw), now: NOW, base });
+    expect(r.alerts).toEqual(['新通知 github-app-missing:o/r：o/r：先去 GitHub 把两个机器人装到这个仓']);
+    expect(r.delta).toContain('+ 通知 release:done:abc：【发版成功】法国已在用 abc');
+    expect(lib.render(r).at(-1)).toBe('VERDICT: ALERT 1');
+  });
+
+  it('note 行少了 level 认不出（SQL 和解析要一起改）', () => {
+    const raw = lib.sampleRaw({ at: NOW, notes: ['note|deploy-lag|发布落后'] });
+    expect(lib.judge({ raw: ok(raw), now: NOW, base: baseOf(good()) }).verdict).toBe('BROKEN');
+  });
+
   it('和基线比：只报变了的（新单、状态变了、新通知、消失的通知），分钟数每次变不算', () => {
     const base = baseOf(good());
     const raw = lib.sampleRaw({
       at: new Date(NOW.getTime() + 60_000),
       tasks: ['task|12|fleet-dao|merging||9|在合并', 'task|13|fleet-dao|running||1|刚起'],
-      notes: ['note|other|别的'],
+      notes: ['note|alert|other|别的'],
     });
     const r = lib.judge({ raw: ok(raw), now: NOW, base });
     expect(r.delta).toEqual([
