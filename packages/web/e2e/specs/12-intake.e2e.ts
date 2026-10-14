@@ -23,6 +23,13 @@ test.describe('提需求', () => {
     stack,
   }) => {
     await page.goto('/intake');
+    // 窄于 1536 的屏上列表默认收成一条窄栏（只有头像），先展开再看标题
+    const list = page.locator('[aria-label="需求列表"]');
+    await expect(list).toBeVisible();
+    if ((await list.getAttribute('data-collapsed')) !== null) {
+      await page.getByRole('button', { name: '展开需求列表' }).click();
+      await expect(list).not.toHaveAttribute('data-collapsed');
+    }
     await expect(listRow(page, '任务列表按仓筛')).toBeVisible();
     await expect(listRow(page, '设置页密钥一次填好')).toBeVisible();
     await expect(listRow(page, '额度页按账号池折叠')).toBeVisible();
