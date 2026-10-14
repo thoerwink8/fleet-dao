@@ -11,7 +11,6 @@
 //   或这张单有开着的 PR，都算还活着，租约顺延。
 // - 本机经 /api/nodes/claims 写（和本机会话心跳同一个通行证 X-Fleet-Node-Token），本机不放机器人凭据。
 import { z } from 'zod';
-import { type LocalSessionsReport, localSessionState } from './web-api/local-sessions.ts';
 
 /** 本机领单的租约时长：这么久没续上就退回法国。 */
 export const LOCAL_LEASE_MS = 2 * 60 * 60_000;
@@ -22,21 +21,7 @@ export const LOCAL_CLAIMS_PATH = '/nodes/claims';
 export const TASK_EXECUTORS = ['engine', 'local'] as const;
 export type TaskExecutor = (typeof TASK_EXECUTORS)[number];
 
-/** 本机做这张单的分支前缀：local/<单号>-。 */
-export function localBranchPrefix(issue: number): string {
-  return `local/${issue}-`;
-}
-
-const ISSUE_BRANCH = /^(fleet|local)\/(\d+)-/;
-
-/** 分支名照固定前缀认出是哪条线、哪张单（fleet/<单号>- 是引擎，local/<单号>- 是本机）；认不出是 null。 */
-export function issueOfBranch(ref: string): { executor: TaskExecutor; issue: number } | null {
-  const m = ISSUE_BRANCH.exec(ref);
-  if (!m?.[1] || !m[2]) return null;
-  const issue = Number(m[2]);
-  if (!Number.isSafeInteger(issue) || issue <= 0) return null;
-  return { executor: m[1] === 'fleet' ? 'engine' : 'local', issue };
-}
+// 分支前缀的认法（localBranchPrefix、issueOfBranch）在 conventions 的 issue-branch.ts：pnpm work、pnpm pr:open 在零安装区也要用。
 
 const RepoSlug = z.string().regex(/^[\w.-]+\/[\w.-]+$/, 'owner/name');
 const IssueNo = z.number().int().positive();
@@ -78,36 +63,3 @@ export const LocalClaimResponseSchema = z.discriminatedUnion('ok', [
   z.object({ ok: z.literal(false), code: z.enum(LOCAL_CLAIM_REFUSALS), why: z.string() }),
 ]);
 export type LocalClaimResponse = z.infer<typeof LocalClaimResponseSchema>;
-
-/**
- * 本机会话心跳里，还在 local/<单号>- 分支上活着的单号（某仓的）：整份推来的时刻不到租约时长、会话没收场（last ≠ end）、
- * 多久没动不到租约时长。心跳里的时刻读不出就跳过那一个会话（不当成活着）。
- */
-export function liveLocalIssues(
-  nodes: readonly { receivedAt: string; report: LocalSessionsReport }[],
-  repo: string,
-  now: Date,
-): Set<number> {
-  const live = new Set<number>();
-  for (const n of nodes) {
-    const received = Date.parse(n.receivedAt);
-    if (Number.isNaN(received) || now.getTime() - received >= LOCAL_LEASE_MS) continue;
-    for (const s of n.report.sessions) {
-      if (s.repo?.toLowerCase() !== repo.toLowerCase() || !s.branch || s.last === 'end') continue;
-      const ref = issueOfBranch(s.branch);
-      if (ref?.executor !== 'local') continue;
-      let idleMs: number;
-      try {
-        idleMs = localSessionState(
-          s,
-          { reportedAt: n.report.reportedAt, receivedAt: n.receivedAt },
-          now,
-        ).idleMs;
-      } catch {
-        continue;
-      }
-      if (idleMs < LOCAL_LEASE_MS) live.add(ref.issue);
-    }
-  }
-  return live;
-}

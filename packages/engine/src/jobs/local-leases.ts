@@ -7,9 +7,42 @@
 //   都没有 → 摘「本机做」、在单上留一句话、行改成 stopped + engine（拉单按「stopped 且没有任何一代」接手，和接手老行同一条路）。
 // 先动 GitHub 再改行：改行写不成，下一轮整件事重来（摘标签不在就当摘了，留言按键只留一次）；反过来先改行，标签摘不掉，单就卡在「本机做」上没人接。
 // 读不到、写不成记进 unchecked（这一轮记没查成），不当成「没有到期的」。
-import { LOCAL_LABEL } from '@fleet-dao/conventions';
-import { LOCAL_LEASE_MS } from '@fleet-dao/shared';
+import { issueOfBranch, LOCAL_LABEL } from '@fleet-dao/conventions';
+import { LOCAL_LEASE_MS, type LocalSessionsReport, localSessionState } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
+
+/**
+ * 本机会话心跳里，还在 local/<单号>- 分支上活着的单号（某仓的）：整份推来的时刻不到租约时长、会话没收场（last ≠ end）、
+ * 多久没动不到租约时长。心跳里的时刻读不出就跳过那一个会话（不当成活着）。
+ */
+export function liveLocalIssues(
+  nodes: readonly { receivedAt: string; report: LocalSessionsReport }[],
+  repo: string,
+  now: Date,
+): Set<number> {
+  const live = new Set<number>();
+  for (const n of nodes) {
+    const received = Date.parse(n.receivedAt);
+    if (Number.isNaN(received) || now.getTime() - received >= LOCAL_LEASE_MS) continue;
+    for (const s of n.report.sessions) {
+      if (s.repo?.toLowerCase() !== repo.toLowerCase() || !s.branch || s.last === 'end') continue;
+      const ref = issueOfBranch(s.branch);
+      if (ref?.executor !== 'local') continue;
+      let idleMs: number;
+      try {
+        idleMs = localSessionState(
+          s,
+          { reportedAt: n.report.reportedAt, receivedAt: n.receivedAt },
+          now,
+        ).idleMs;
+      } catch {
+        continue;
+      }
+      if (idleMs < LOCAL_LEASE_MS) live.add(ref.issue);
+    }
+  }
+  return live;
+}
 
 export interface ExpiredLease {
   taskId: string;

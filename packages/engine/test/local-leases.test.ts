@@ -1,9 +1,15 @@
 // 拉单收本机领单到期的租约（决定 0096，jobs/local-leases.ts）：单关了记做完/停下；还活着（心跳、开着的 PR）顺延；
 // 都没有就摘「本机做」、留言、退回法国队列。先动 GitHub 再改行；读不到记没查成，不当成没有。
 import { LOCAL_LABEL } from '@fleet-dao/conventions';
+import type { LocalSession } from '@fleet-dao/shared';
 import { LOCAL_LEASE_MS } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import { type ExpiredLease, type LocalLeaseDeps, sweepLocalLeases } from '../src/jobs/local-leases.ts';
+import {
+  type ExpiredLease,
+  type LocalLeaseDeps,
+  liveLocalIssues,
+  sweepLocalLeases,
+} from '../src/jobs/local-leases.ts';
 
 const NOW = new Date('2026-10-14T12:00:00Z');
 const REPO = { id: 'r1', owner: 'acme', name: 'app' };
@@ -106,5 +112,61 @@ describe('sweepLocalLeases', () => {
     const w = world({ expired: [lease(7)], open: { 7: [] } });
     await w.run();
     expect(w.steps).toEqual(['comment 7 local-lease-expired', 'settle t7 returned']);
+  });
+});
+
+const MIN = 60_000;
+const at = (ms: number) => new Date(NOW.getTime() + ms).toISOString();
+
+function session(over: Partial<LocalSession>): LocalSession {
+  return {
+    id: 's',
+    repo: 'acme/app',
+    branch: 'local/7-x',
+    worktree: 'a2',
+    subagent: true,
+    startedAt: at(-60 * MIN),
+    lastSeenAt: at(-MIN),
+    last: 'tool',
+    lastTool: 'Bash',
+    ...over,
+  };
+}
+
+function node(sessions: LocalSession[], receivedAgo = MIN) {
+  return {
+    receivedAt: at(-receivedAgo),
+    report: {
+      schemaVersion: 1 as const,
+      reportedAt: at(-receivedAgo),
+      machine: 'pc',
+      sessions,
+      problems: [],
+    },
+  };
+}
+
+describe('liveLocalIssues：心跳里还活着的本机单', () => {
+  it('local/<单号>- 分支上、不到租约时长前动过、没收场的才算；仓要对上；引擎分支不算', () => {
+    const live = liveLocalIssues(
+      [
+        node([
+          session({ id: 'a', branch: 'local/7-x' }),
+          session({ id: 'b', branch: 'local/8-x', last: 'stop', lastSeenAt: at(-30 * MIN) }),
+          session({ id: 'c', branch: 'local/9-x', lastSeenAt: at(-LOCAL_LEASE_MS - MIN) }),
+          session({ id: 'd', branch: 'local/10-x', last: 'end' }),
+          session({ id: 'e', branch: 'fleet/11-tabcdef12' }),
+          session({ id: 'f', branch: 'local/12-x', repo: 'acme/other' }),
+          session({ id: 'g', branch: 'feat/x' }),
+        ]),
+      ],
+      'ACME/app',
+      NOW,
+    );
+    expect([...live].sort((a, b) => a - b)).toEqual([7, 8]);
+  });
+
+  it('【故意造出的失败】整份推来已经超过租约时长：不拿旧心跳当活着', () => {
+    expect(liveLocalIssues([node([session({})], LOCAL_LEASE_MS + MIN)], 'acme/app', NOW).size).toBe(0);
   });
 });

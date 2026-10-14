@@ -14,12 +14,7 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import {
-  LOCAL_CLAIMS_PATH,
-  type LocalClaimRequest,
-  LocalClaimResponseSchema,
-  localBranchPrefix,
-} from '@fleet-dao/shared';
+import { localBranchPrefix } from './issue-branch.ts';
 import type { Gh } from './issue-new.ts';
 import { LOCAL_LABEL } from './labels.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
@@ -27,6 +22,20 @@ import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
 /** 和 agents/local-sessions/lib.mjs 的 TOKEN_HEADER 同一个头。 */
 const TOKEN_HEADER = 'X-Fleet-Node-Token';
 const POST_TIMEOUT_MS = 20_000;
+/** 法国收本机领单的路径：shared 的 WEB_API_PREFIX + LOCAL_CLAIMS_PATH（这里是零安装区，引不了包，test/work.test.ts 钉着两边一致）。 */
+export const CLAIMS_URL_PATH = '/api/nodes/claims';
+
+/** 发给法国的那一条：形状和 shared 的 LocalClaimRequestSchema 一致（法国按它 strict 收，多一个字段 400）。 */
+export type LocalClaimRequest =
+  | { action: 'claim'; repo: string; issue: number; title: string }
+  | { action: 'renew'; repo: string; issue: number }
+  | {
+      action: 'finish';
+      repo: string;
+      issue: number;
+      outcome: 'done' | 'failed' | 'released';
+      reason?: string;
+    };
 
 export const WORK_USAGE =
   '用法：pnpm work claim <单号> | pnpm work renew <单号> | pnpm work done <单号> [--failed "原因" | --release "原因"]';
@@ -59,7 +68,7 @@ export type ClaimsPost = (body: LocalClaimRequest) => Promise<{ status: number; 
 export function liveClaimsPost(endpoint: () => ClaimsEndpoint, fetchImpl: typeof fetch = fetch): ClaimsPost {
   return async (body) => {
     const { url, token } = endpoint();
-    const res = await fetchImpl(`${url.replace(/\/+$/, '')}/api${LOCAL_CLAIMS_PATH}`, {
+    const res = await fetchImpl(`${url.replace(/\/+$/, '')}${CLAIMS_URL_PATH}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', [TOKEN_HEADER]: token },
       body: JSON.stringify(body),
@@ -174,9 +183,14 @@ async function send(
     throw new Error(`没登记上：法国回 ${res.status}，内容认不出：${res.text.slice(0, 200)}`);
   }
   if (res.status >= 200 && res.status < 300) {
-    const parsed = LocalClaimResponseSchema.safeParse(json);
-    if (!parsed.success || !parsed.data.ok) throw new Error(`没登记上：法国回 ${res.status}，内容认不出`);
-    return { ok: true, leaseUntil: parsed.data.leaseUntil };
+    const r = (typeof json === 'object' && json !== null ? json : {}) as {
+      ok?: unknown;
+      leaseUntil?: unknown;
+    };
+    if (r.ok !== true || (r.leaseUntil !== null && typeof r.leaseUntil !== 'string')) {
+      throw new Error(`没登记上：法国回 ${res.status}，内容认不出`);
+    }
+    return { ok: true, leaseUntil: r.leaseUntil };
   }
   const why = (json as { error?: { message?: unknown } })?.error?.message;
   throw new Error(

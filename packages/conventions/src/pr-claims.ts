@@ -1,7 +1,7 @@
 // 一张单有没有开着的 PR 在做（决定 0096）：引擎拉单、引擎开 PR 前、本机领单（pnpm work claim）、本机开 PR 前（pnpm pr:open）同一份认法。
 // 挂法两种：「需求」栏（Closes / Refs #号，同仓的，认法是 issueColumnRefs）；分支是这张单的固定前缀 fleet/<单号>-（引擎）、
-// local/<单号>-（本机）（shared 的 issueOfBranch）。
-import { issueOfBranch } from '@fleet-dao/shared';
+// local/<单号>-（本机）（issue-branch.ts）。
+import { issueOfBranch } from './issue-branch.ts';
 import { issueColumnRefs } from './pr-columns.ts';
 
 export interface OpenPullRef {

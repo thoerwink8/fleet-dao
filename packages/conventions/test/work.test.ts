@@ -2,11 +2,36 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { LocalClaimRequest } from '@fleet-dao/shared';
+import { LOCAL_CLAIMS_PATH, TASK_EXECUTORS, WEB_API_PREFIX } from '@fleet-dao/shared';
 import { afterEach, describe, expect, it } from 'vitest';
+import { type BranchExecutor, issueOfBranch, localBranchPrefix } from '../src/issue-branch.ts';
 import type { GhResult } from '../src/issue-new.ts';
 import { otherPrOnIssue, prClaimedIssues } from '../src/pr-claims.ts';
-import { branchSlug, readClaimsEndpoint, work } from '../src/work.ts';
+import {
+  branchSlug,
+  CLAIMS_URL_PATH,
+  type LocalClaimRequest,
+  readClaimsEndpoint,
+  work,
+} from '../src/work.ts';
+
+describe('零安装区自带的几份和 shared 对得上', () => {
+  it('领单路径、执行者取值', () => {
+    expect(CLAIMS_URL_PATH).toBe(`${WEB_API_PREFIX}${LOCAL_CLAIMS_PATH}`);
+    const executors: readonly BranchExecutor[] = TASK_EXECUTORS;
+    expect(executors).toEqual(['engine', 'local']);
+  });
+});
+
+describe('issueOfBranch：分支的固定前缀', () => {
+  it('fleet/<单号>- 是引擎，local/<单号>- 是本机；别的认不出', () => {
+    expect(issueOfBranch('fleet/12-tabcdef12')).toEqual({ executor: 'engine', issue: 12 });
+    expect(issueOfBranch(`${localBranchPrefix(34)}fix-login`)).toEqual({ executor: 'local', issue: 34 });
+    for (const ref of ['rethink/a2', 'local/x-1', 'local/0-a', 'fleet/12', 'main']) {
+      expect(issueOfBranch(ref)).toBeNull();
+    }
+  });
+});
 
 const ok = (stdout = ''): GhResult => ({ code: 0, stdout, stderr: '' });
 const bad = (stderr: string): GhResult => ({ code: 1, stdout: '', stderr });

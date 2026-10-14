@@ -50,6 +50,7 @@ export {
   toMilestoneDetail,
   toPlanIssue,
 } from './github-api.ts';
+export { type BranchExecutor, issueOfBranch, localBranchPrefix } from './issue-branch.ts';
 export {
   CLOSE_USAGE,
   CloseRefused,
