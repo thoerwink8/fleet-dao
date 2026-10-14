@@ -343,6 +343,6 @@ describe('GitHub 对账：定时任务只报告、不挡 PR，也不进必过检
     expect(yml).not.toMatch(/^ {2}push:/m);
     expect(yml).toMatch(/^ {2}schedule:/m);
     expect(yml).toMatch(/^ {2}workflow_dispatch:/m);
-    expect(yml).toMatch(/run: node packages\/conventions\/src\/bin\/github-audit\.ts --comment --soft\s*$/m);
+    expect(yml).toMatch(/run: node packages\/conventions\/src\/bin\/github-audit\.ts --comment\s*$/m);
   });
 });
