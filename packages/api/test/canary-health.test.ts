@@ -144,7 +144,7 @@ describe('canary 项怎么判', () => {
     expect(got).not.toMatchObject({ ok: 'pending' });
   });
 
-  it('第 39 轮记账结论（10-14 08:40，#2082）：部署早于结论时报 canary_broken；这版发出去之后同一条改待定，不再因此报红', () => {
+  it('记账断结论早于部署时刻则待定，部署早于结论则仍报 canary_broken（#1808）', () => {
     const endedAt = new Date('2026-10-14T00:40:00.000Z');
     const now = new Date('2026-10-14T01:10:00.000Z');
     const finished = row({
@@ -153,9 +153,9 @@ describe('canary 项怎么判', () => {
       issueNumber: 107,
       startedAt: new Date('2026-10-14T00:26:00.000Z'),
       endedAt,
-      why: '超过期限 10 分钟还没走完：runs 记了 1 笔（动手 1、验收 0）',
+      why: '超过期限还没走完',
     });
-    // 08:15 那次发版（de5c29a8）早于 08:40 的结论：健康页照旧红，文案就是监督读到的那句
+    // 公开文案只带到结论时刻。部署早于这条结论时仍是 canary_broken。
     expect(
       canaryHealth({ finished, running: null }, now, undefined, new Date('2026-10-14T00:15:00.000Z')),
     ).toMatchObject({
@@ -163,7 +163,7 @@ describe('canary 项怎么判', () => {
       code: 'canary_broken',
       message: '最近一轮（10-14 08:40 有结论）断在「记账」',
     });
-    // 这版发出版本时刻晚于那条结论：无待验，不当 canary_broken，也不让 /healthz 因这一项变 503
+    // 部署时刻晚于这条结论：待定，不当 canary_broken，也不让 /healthz 因这一项变 503
     const afterRelease = canaryHealth(
       { finished, running: null },
       now,
@@ -342,7 +342,7 @@ describe('canary 项怎么判', () => {
         undefined,
         new Date(NOW.getTime() - CANARY_PENDING_MAX_MS - 60_000),
       ),
-      // 第 39 轮：部署早于 08:40 的记账结论仍报红；发出去之后同一条改待定（#2082）
+      // 记账断结论：部署早于结论仍报红；部署晚于结论改待定（#1808）
       canaryHealth(
         {
           finished: row({

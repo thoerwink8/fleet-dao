@@ -260,9 +260,6 @@ function stageDone(stage: CanaryStage, obs: CanaryObservation, state: CanaryStat
     case 'ledger': {
       const r = db.runs;
       // 不强制 CI 的仓不做冷验收（#1877），没有验收那一笔不算没记账。强制 CI 仍要有。
-      // 第 39 轮：巡检仓 #107（2026-10-14T00:26:02Z 开、00:28:50Z 做完关），PR #108（fa83e10，00:28:44Z 合并）
-      // 正文是「不做冷验收」那一句。动手只有会话 967332b7（用量账输入 117001、输出 1499，两边都有），没有验收会话。
-      // 当时在跑的 de5c29a8 仍要求验收笔数 > 0，记账空等 10 分钟，00:40Z 结论断在记账（#2082）。runs 那一行本机读不到。
       const verifyOk = r.verify > 0 || db.repo?.ciPolicy === 'off';
       return r.manual > 0 && verifyOk && r.ended === r.total && r.withUsage > 0 && db.timings > 0;
     }
