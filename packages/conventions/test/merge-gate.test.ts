@@ -11,6 +11,7 @@ import {
   gatePr,
   runMergeGate,
 } from '../src/merge-gate.ts';
+import { founderQuoteLine, GATE_LINE } from '../src/pr-columns.ts';
 
 const HEAD = 'a'.repeat(40);
 const MERGE = 'b'.repeat(40);
@@ -26,6 +27,10 @@ interface World {
   prReads: number;
   /** 读了几次提交状态。 */
   statusReads: number;
+  /** PR 改到的文件（GitHub 文件列表的样子）。 */
+  files: unknown[];
+  /** 读了几次文件列表。 */
+  fileReads: number;
 }
 
 function world(
@@ -45,6 +50,8 @@ function world(
     open: [],
     prReads: 0,
     statusReads: 0,
+    files: [],
+    fileReads: 0,
     ...over,
   };
   const boom = (k: keyof GitHubReads) => {
@@ -55,6 +62,11 @@ function world(
       boom('pr');
       w.prReads += 1;
       return { ...w.pr, number: n };
+    },
+    async files() {
+      boom('files');
+      w.fileReads += 1;
+      return w.files;
     },
     async statuses() {
       boom('statuses');
@@ -106,18 +118,14 @@ describe('合并闸：验收场景', () => {
     expect(unknown.prReads).toBe(1);
   });
 
-  it('③ 【#1114 钉住】改到迁移（含 DROP）、ci.yml、鉴权、部署脚本的 PR：合并闸不再要第二意见——没有任何第二意见状态也放行，改了哪些文件闸压根不读', async () => {
+  it('③ 【#1114 钉住】改到迁移（含 DROP）、ci.yml、鉴权、部署脚本的 PR：合并闸不再要第二意见——没有任何第二意见状态也放行；文件只用来判改标准', async () => {
     const w = world({
-      prOver: {
-        changed_files: 4,
-        // 闸读不到、也不看这些：留在 PR 上只为说明场景
-        files: [
-          'packages/db/migrations/0042_drop_x.sql',
-          '.github/workflows/ci.yml',
-          'packages/api/src/auth.ts',
-          'deploy/france.sh',
-        ],
-      },
+      files: [
+        'packages/db/migrations/0042_drop_x.sql',
+        '.github/workflows/ci.yml',
+        'packages/api/src/auth.ts',
+        'deploy/france.sh',
+      ].map((filename) => ({ filename, status: 'modified' })),
       // 老的 second-opinion 状态就算是 failure / pending / 压根没有，也不影响结论
       statuses: [{ context: 'second-opinion', state: 'failure', description: '旧的状态' }],
     });
@@ -126,11 +134,12 @@ describe('合并闸：验收场景', () => {
     expect(r.notChecked).toBe(false);
     expect(r.lines.join('\n')).not.toContain('第二意见');
     expect(w.statusReads).toBe(0);
-    // 读写的口子里没有「读文件」那几个：闸没法看改了哪些文件
-    expect(Object.keys(w.gh).sort()).toEqual(['openPrs', 'pr', 'statuses', 'writeStatus']);
+    // 读文件只有一个口子（files），用来判改标准；没有读内容、读别的仓的
+    expect(Object.keys(w.gh).sort()).toEqual(['files', 'openPrs', 'pr', 'statuses', 'writeStatus']);
+    expect(w.fileReads).toBe(1);
   });
 
-  it('正文里怎么写都一样：闸按分支名认引擎的 PR，不看正文', async () => {
+  it('没碰改标准时正文里怎么写都一样：闸按分支名认引擎的 PR', async () => {
     for (const body of ['先审后合——改部署', '直接合——小改', '']) {
       expect((await gatePr(80, deps(world({ prOver: { body } })))).state, body).toBe('success');
     }
@@ -264,6 +273,150 @@ describe('合并闸：#555-2 引擎任务工作流开的 PR，合前一次冷调
     expect(r.state).toBe('failure');
     expect(r.notChecked).toBe(true);
     expect(r.lines[0]).toMatch(/head.ref 认不出/);
+  });
+});
+
+describe('合并闸：改标准（人闸第四类，决定 0093）——碰了标准路径，正文里要有创始人原话', () => {
+  const STD = 'packages/conventions/standard-paths.json';
+  const QUOTE = founderQuoteLine('我都同意。', '2026-10-14 16:30 +0800');
+  const touched = (filename: string, extra: Record<string, unknown> = {}) => ({
+    filename,
+    status: 'modified',
+    ...extra,
+  });
+
+  it('碰了标准、正文没有原话 → failure，点名命中的路径和「缺创始人原话」', async () => {
+    const w = world({
+      files: [touched('packages/web/src/x.ts'), touched(STD), touched('agents/skills/a/SKILL.md')],
+      prOver: { body: `**做了什么**：改清单\n\n**需求**：\nCloses #7\n${GATE_LINE}\n` },
+    });
+    const r = await gatePr(80, deps(w));
+    expect(r).toMatchObject({ state: 'failure', notChecked: false });
+    expect(r.lines).toHaveLength(1);
+    expect(r.lines[0]).toMatch(/^改标准缺创始人原话：碰了 /);
+    expect(r.lines[0]).toContain(STD);
+    expect(r.lines[0]).toContain('agents/skills/a/SKILL.md');
+    expect(r.lines[0]).not.toContain('packages/web/src/x.ts');
+  });
+
+  it('【故意造出的失败】只写了「原话」二字、原话或时间是空的：都不算同意', async () => {
+    for (const body of [
+      '正文里提到原话，但没贴',
+      '**创始人原话**：「」（2026-10-14 16:30）',
+      '**创始人原话**：「同意」（ ）',
+      '**创始人原话**：「同意」',
+      '<!-- **创始人原话**：「同意」（2026-10-14） -->',
+    ]) {
+      const r = await gatePr(80, deps(world({ files: [touched(STD)], prOver: { body } })));
+      expect(r.state, body).toBe('failure');
+      expect(r.lines[0], body).toMatch(/缺创始人原话/);
+    }
+  });
+
+  it('碰了标准、正文有 pnpm pr:open --founder-quote 写的那一行 → 不因此判红', async () => {
+    const r = await gatePr(
+      80,
+      deps(
+        world({
+          files: [touched(STD)],
+          prOver: { body: `**需求**：\nCloses #7\n${GATE_LINE}\n\n${QUOTE}\n` },
+        }),
+      ),
+    );
+    expect(r).toMatchObject({ state: 'success', notChecked: false });
+    expect(r.lines).toEqual([
+      '能合：不是引擎任务 PR，只看 CI。',
+      `改标准：碰了 ${STD}，正文贴了创始人原话（2026-10-14 16:30 +0800）。`,
+    ]);
+  });
+
+  it('手写的「创始人原话（时间）：「…」」也认（pr-open 的 --founder-approved 认的同一种）', async () => {
+    const r = await gatePr(
+      80,
+      deps(
+        world({
+          files: [touched(STD)],
+          prOver: { body: '**需求**：创始人原话（2026-10-11 03:48）：「你站在我的角度上去修」' },
+        }),
+      ),
+    );
+    expect(r.state).toBe('success');
+  });
+
+  it('改名：从标准目录挪出去也算碰了（旧名字也判）', async () => {
+    const r = await gatePr(
+      80,
+      deps(
+        world({
+          files: [touched('docs/x.md', { status: 'renamed', previous_filename: 'agents/skills/a/SKILL.md' })],
+        }),
+      ),
+    );
+    expect(r.state).toBe('failure');
+    expect(r.lines[0]).toContain('agents/skills/a/SKILL.md');
+  });
+
+  it('引擎 PR 冷验收没过、又缺原话：两样都报，不通过的排前面', async () => {
+    const r = await gatePr(
+      80,
+      deps(world({ files: [touched(STD)], prOver: { head: { sha: HEAD, ref: 'fleet/12-t1a2b3c4d' } } })),
+    );
+    expect(r.state).toBe('failure');
+    expect(r.lines[0]).toMatch(/^还没验：/);
+    expect(r.lines[1]).toMatch(/^改标准缺创始人原话/);
+  });
+
+  it('没碰标准：结论和原来一样，正文怎么写都不管', async () => {
+    const w = world({
+      files: [touched('packages/web/src/x.ts'), touched('docs/design.md')],
+      prOver: { body: '' },
+    });
+    const r = await gatePr(80, deps(w));
+    expect(r).toMatchObject({ state: 'success', notChecked: false });
+    expect(r.lines).toEqual(['能合：不是引擎任务 PR，只看 CI。']);
+  });
+
+  it('清单用的是传进来的那份（闸跑在主线检出上，读主线的清单）：清单里没有的路径不拦', async () => {
+    const w = world({ files: [touched(STD)] });
+    const r = await gatePr(80, {
+      ...deps(w),
+      standardPaths: async () => [{ path: 'agents/shared-rules.md', why: '通用段' }],
+    });
+    expect(r.state).toBe('success');
+  });
+
+  it('【故意造出的失败】文件列表读不到、超过上限读不全、认不出、清单读不到：没查成，不当成没碰', async () => {
+    const cases: [Parameters<typeof world>[0], GateDeps['standardPaths'], RegExp][] = [
+      [{ broken: { files: 'GitHub 回了 502' } }, undefined, /读不到 PR #80 改了哪些文件（GitHub 回了 502）/],
+      [
+        { broken: { files: 'PR #80 改的文件有 3000 个以上，GitHub 最多给这么多，读不全（拆小再开）' } },
+        undefined,
+        /3000 个以上.*读不全/,
+      ],
+      [{ files: [{ status: 'modified' }] }, undefined, /文件列表认不出：第 1 条没有 filename/],
+      [
+        {},
+        async () => {
+          throw new Error('清单认不出：paths 是空的');
+        },
+        /改标准的路径清单读不到（清单认不出：paths 是空的）/,
+      ],
+    ];
+    for (const [over, standardPaths, line] of cases) {
+      const w = world(over);
+      const r = await gatePr(80, { ...deps(w), ...(standardPaths ? { standardPaths } : {}) });
+      expect(r.state).toBe('failure');
+      expect(r.notChecked).toBe(true);
+      expect(r.lines.join('\n')).toMatch(line);
+    }
+  });
+
+  it('【故意造出的失败】正文不是字符串（也不是 null）：PR 认不出，没查成', async () => {
+    const r = await gatePr(80, deps(world({ prOver: { body: 42 } })));
+    expect(r).toMatchObject({ state: 'failure', notChecked: true });
+    expect(r.lines[0]).toMatch(/body 认不出/);
+    // 空正文 GitHub 给 null：照常判
+    expect((await gatePr(80, deps(world({ prOver: { body: null } })))).state).toBe('success');
   });
 });
 
@@ -526,6 +679,22 @@ describe('读写 GitHub（假的 fetch）', () => {
     await expect(gateGitHub(ghApi(env, junk.fn)).statuses(HEAD)).rejects.toThrow('第 1 页认不出（不是列表）');
     const endless = fakeFetch(() => ({ json: page1 }));
     await expect(gateGitHub(ghApi(env, endless.fn)).statuses(HEAD)).rejects.toThrow('没读完');
+  });
+
+  it('PR 文件列表翻页读满；认不出抛；30 页都满（GitHub 上限 3000 个）判读不全', async () => {
+    const full = Array.from({ length: 100 }, (_, i) => ({ filename: `f${i}`, status: 'modified' }));
+    const f = fakeFetch((url) =>
+      /&page=[12]$/.test(url) ? { json: full } : { json: [{ filename: 'last', status: 'added' }] },
+    );
+    await expect(gateGitHub(ghApi(env, f.fn)).files(80)).resolves.toHaveLength(201);
+    expect(f.calls.map((c) => c.url)).toEqual(
+      [1, 2, 3].map((p) => `https://api.example/repos/o/r/pulls/80/files?per_page=100&page=${p}`),
+    );
+    const junk = fakeFetch(() => ({ json: { files: [] } }));
+    await expect(gateGitHub(ghApi(env, junk.fn)).files(80)).rejects.toThrow('第 1 页认不出（不是列表）');
+    const capped = fakeFetch(() => ({ json: full }));
+    await expect(gateGitHub(ghApi(env, capped.fn)).files(80)).rejects.toThrow('3000 个以上');
+    expect(capped.calls).toHaveLength(30);
   });
 
   it('没有令牌、没有仓名、GitHub 回错都抛，报错里不带令牌', async () => {
