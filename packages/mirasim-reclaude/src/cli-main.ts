@@ -13,7 +13,9 @@ const home = value('--home') ?? homedir();
 const repo = value('--repo') ?? fileURLToPath(new URL('../../..', import.meta.url));
 const worker = args.includes('--worker');
 const usage =
-  'pnpm mirasim:migrate [--check | --rollback] [--no-wait]\n旧接入空闲后更新；有在途回合时等待，不重启整个 Mirasim。';
+  'pnpm mirasim:migrate [--check | --rollback] [--no-wait]\n旧接入空闲后更新；有在途回合时等待，不重启整个 Mirasim。\n--auto 发现启动命令被改回裸 claude 时只报告、不改设置，退出 76。';
+// --auto 发现启动命令被改掉：只报告，用独立退出码让同步把这行当成「漂移」交给开会话钩子。
+const DRIFT_EXIT = 76;
 const known = new Set([
   '--home',
   '--repo',
@@ -26,6 +28,7 @@ const known = new Set([
   '--help',
   '--auto',
 ]);
+const say = (detail: string) => console.log(detail.startsWith('Mirasim') ? detail : `Mirasim：${detail}`);
 try {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] as string;
@@ -37,8 +40,8 @@ try {
   if (args.includes('--help')) console.log(usage);
   else if (args.includes('--auto')) {
     const result = await automaticMigration({ home, repo, platform: process.platform, arch: process.arch });
-    if (result.state !== 'skipped') console.log(`Mirasim：${result.detail}`);
-    process.exitCode = 0;
+    if (result.state !== 'skipped') say(result.detail);
+    process.exitCode = result.state === 'drift' ? DRIFT_EXIT : 0;
   } else {
     if (worker)
       atomicJson(workerFile(home), {
@@ -60,7 +63,7 @@ try {
         wait: !args.includes('--no-wait') && !args.includes('--check'),
         maxWaitMs: Math.max(0, until - Date.now()),
       });
-      console.log(`Mirasim：${result.detail}`);
+      say(result.detail);
       if (
         result.state === 'waiting' &&
         Date.now() < until &&

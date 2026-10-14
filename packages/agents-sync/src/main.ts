@@ -78,9 +78,17 @@ if (
         { encoding: 'utf8', timeout: 60_000, windowsHide: true },
       );
       if (output.trim()) process.stdout.write(output);
-    } catch {
-      process.stderr.write('Mirasim 旧封装自动迁移未确认；原配置保留，可用 pnpm mirasim:migrate 检查\n');
-      process.exitCode = 1;
+    } catch (err) {
+      // 退出 76：启动命令被改回裸 claude，迁移器只报告不改设置。按「✗ 漂移」行写出，开会话钩子才会把它带进会话上下文。
+      const failed = err as { status?: number; stdout?: string };
+      if (failed.status === 76 && failed.stdout?.trim()) {
+        for (const line of failed.stdout.split(/\r?\n/).filter((l) => l.trim()))
+          process.stdout.write(`  ✗ ${line.trim()}\n`);
+        process.exitCode = 1;
+      } else {
+        process.stderr.write('Mirasim 旧封装自动迁移未确认；原配置保留，可用 pnpm mirasim:migrate 检查\n');
+        process.exitCode = 1;
+      }
     }
 }
 

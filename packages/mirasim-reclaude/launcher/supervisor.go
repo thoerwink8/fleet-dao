@@ -84,34 +84,50 @@ func writeFrame(w io.Writer, f frame) error {
 // 未标路由时，只有回环地址加上平台令牌才保留注入。
 // 只写了本机代理、没有令牌，是捕获地址，不是平台身份，按自有剥掉。
 // 明确的 cloud 缺令牌仍拒绝，不回落到自有。
-func applyRouteSettings(mode string, args []string, env []string) ([]string, []string, []string, error) {
+// gateway 是日志用的一个词，供对账判断这次实际走哪份额度：
+// kept＝保留了 Mirasim 回环网关（走平台），stripped＝剥掉了（走自有），none＝参数和环境里本来就没有回环网关。
+func applyRouteSettings(mode string, args []string, env []string) ([]string, []string, []string, string, error) {
 	if mode == "local" || mode == "default" {
 		if mode == "default" {
 			loopback, credential, err := gatewayFacts(args)
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, nil, nil, "", err
 			}
 			if loopback && credential {
-				return args, env, nil, nil
+				return args, env, nil, "kept", nil
 			}
 		}
-		out, temps, _, err := rewriteArgs(args)
+		out, temps, argsChanged, err := rewriteArgs(args)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, "", err
 		}
-		env, _ = stripEnv(env)
-		return out, env, temps, nil
+		env, envChanged := stripEnv(env)
+		if argsChanged || envChanged {
+			return out, env, temps, "stripped", nil
+		}
+		return out, env, temps, "none", nil
 	}
 	if mode != "gateway" {
 		if err := verifyGatewaySettings(args); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, "", err
 		}
 	}
-	return args, env, nil, nil
+	return args, env, nil, gatewayPresence(args, env), nil
+}
+
+// gatewayPresence 只为日志判断参数或环境里有没有回环网关；读不到按没有记，不影响启动。
+func gatewayPresence(args []string, env []string) string {
+	if loopback, _, err := gatewayFacts(args); err == nil && loopback {
+		return "kept"
+	}
+	if _, changed := stripEnv(env); changed {
+		return "kept"
+	}
+	return "none"
 }
 
 func startManaged(cfg configuration, args []string, sel selection, generation int, events chan<- event) (*managedChild, error) {
-	args, env, temps, err := applyRouteSettings(sel.mode, args, cfg.env)
+	args, env, temps, gateway, err := applyRouteSettings(sel.mode, args, cfg.env)
 	if err != nil {
 		logLine("event=reject route=" + sel.mode + " " + err.Error())
 		return nil, err
@@ -153,7 +169,7 @@ func startManaged(cfg configuration, args []string, sel selection, generation in
 		stopManaged(child)
 		return nil, fmt.Errorf("启动控制帧发送失败")
 	}
-	logLine("event=launch route=" + sel.mode + " sid=" + sel.sessionID + " generation=" + strconv.Itoa(generation) + " sinceProcessMs=" + elapsedMs(processStart))
+	logLine("event=launch route=" + sel.mode + " gateway=" + gateway + " sid=" + sel.sessionID + " generation=" + strconv.Itoa(generation) + " sinceProcessMs=" + elapsedMs(processStart))
 	return child, nil
 }
 
@@ -520,7 +536,7 @@ func runOnce(cfg configuration) int {
 			return fail("route_unreadable", err)
 		}
 	}
-	args, env, temps, err := applyRouteSettings(sel.mode, args, cfg.env)
+	args, env, temps, _, err := applyRouteSettings(sel.mode, args, cfg.env)
 	if err != nil {
 		code := "settings_unreadable"
 		if sel.mode == "cloud" {

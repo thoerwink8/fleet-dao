@@ -1,9 +1,11 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { startWsServer, tempDir } from '@fleet-dao/adapters/testing';
 import { describe, expect, it } from 'vitest';
 import { automaticMigration } from '../src/auto.ts';
+import { DRIFT_NOTICE } from '../src/migrate.ts';
+import { runChild } from './child.ts';
 
 describe('同步中的自动迁移', () => {
   it('没有旧封装或 Linux 无头环境：不配置 Mirasim，也不建立后台任务', async () => {
@@ -69,5 +71,47 @@ describe('同步中的自动迁移', () => {
       await server.close();
       rmSync(taskRoot, { recursive: true, force: true, maxRetries: 40, retryDelay: 50 });
     }
+  });
+
+  it('装过的命令被清成裸 claude：只打一行人话、退出 76，不改设置、不排后台；主动撤回过则静默', async () => {
+    const home = tempDir();
+    const repo = tempDir();
+    const ms = join(home, '.mirasim');
+    mkdirSync(join(ms, 'sessions', 'claude', 'one'), { recursive: true });
+    writeFileSync(
+      join(ms, 'sessions', 'claude', 'one', 'record.json'),
+      JSON.stringify({ runState: 'running', sessionId: 'one' }),
+    );
+    // Mirasim 界面清掉命令后 setting.json 里没有 agentLaunch。
+    writeFileSync(join(ms, 'setting.json'), JSON.stringify({ claudeModel: 'keep' }));
+    const root = join(home, '.fleet-dao', 'mirasim-reclaude');
+    mkdirSync(root, { recursive: true });
+    const record = {
+      schema: 1,
+      previous: { command: '/legacy/reclaude-mirasim.exe' },
+      command: join(root, 'releases', 'x', 'mirasim-reclaude'),
+      sourceHash: 'a'.repeat(64),
+      binaryHash: 'b'.repeat(64),
+      updatedAt: new Date().toISOString(),
+      state: 'migrated',
+    };
+    writeFileSync(join(root, 'migration.json'), JSON.stringify(record));
+    const o = { home, repo, platform: 'darwin', arch: process.arch };
+    const drift = await automaticMigration(o);
+    expect(drift.state).toBe('drift');
+    expect(drift.detail).toBe(DRIFT_NOTICE);
+    expect(existsSync(join(root, 'worker.json'))).toBe(false);
+    expect(JSON.parse(readFileSync(join(ms, 'setting.json'), 'utf8'))).toEqual({ claudeModel: 'keep' });
+
+    if (process.platform !== 'linux') {
+      // 同步拿退出码 76 认出这行，按「✗ 漂移」交给开会话钩子。
+      const bin = resolve(import.meta.dirname, '..', 'bin', 'migrate');
+      const cli = runChild(process.execPath, [bin, '--auto', '--home', home, '--repo', repo]);
+      expect(cli.status).toBe(76);
+      expect(cli.stdout.trim()).toBe(DRIFT_NOTICE);
+    }
+
+    writeFileSync(join(root, 'migration.json'), JSON.stringify({ ...record, state: 'restored' }));
+    expect((await automaticMigration(o)).state).toBe('skipped');
   });
 });

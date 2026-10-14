@@ -39,13 +39,17 @@ func TestLaunchLogRecordsTimingWithoutContent(t *testing.T) {
 		}
 	}
 	for _, line := range strings.Split(log, "\n") {
+		// 自有会话把 Mirasim 回环网关剥掉：对账靠这个词，且只记词、不记地址。
+		if strings.Contains(line, "event=launch ") && !strings.Contains(line, " gateway=stripped ") {
+			t.Fatalf("launch 行没记 gateway=stripped：%s", line)
+		}
 		if strings.Contains(line, "event=first-frame") || strings.Contains(line, "event=turn-result") {
 			if !strings.Contains(line, " ms=") {
 				t.Fatalf("没有毫秒数：%s", line)
 			}
 		}
 	}
-	if strings.Contains(log, "secret-user-text") || strings.Contains(log, "synthetic-only") {
+	if strings.Contains(log, "secret-user-text") || strings.Contains(log, "synthetic-only") || strings.Contains(log, "127.0.0.1:12345") {
 		t.Fatalf("耗时日志泄漏了会话内容或凭据：\n%s", log)
 	}
 }
