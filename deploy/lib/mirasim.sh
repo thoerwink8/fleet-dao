@@ -128,7 +128,8 @@ check_mirasim_session_unit() { # 用户 单元名 端口 [pending]
     break
   done
   if ((rc != 0)); then
-    local msg="$unit 在跑但 http://127.0.0.1:$port/api/health 连不上或没回（curl 退出 $rc）：$(tail -c 300 <<<"$health")"
+    local msg
+    msg="$unit 在跑但 http://127.0.0.1:$port/api/health 连不上或没回（curl 退出 $rc）：$(tail -c 300 <<<"$health")"
     # 只有「试满仍是超时」能降成待配。连接被拒、别的退出码，单元该在听却没听上，仍是红。
     if [[ "$timeout_as" == pending && rc -eq 28 ]]; then
       pending "$msg"
