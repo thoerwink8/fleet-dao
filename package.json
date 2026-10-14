@@ -37,6 +37,7 @@
     "release:onekey": "node agents/skills/commander/scripts/release-onekey.mjs",
     "pr:open": "node packages/conventions/src/bin/pr-open.ts",
     "work": "node packages/conventions/src/bin/work.ts",
+    "line:stats": "node packages/db/src/bin/line-stats.ts",
     "repo:check": "node agents/hooks/repo-contract.mjs check",
     "repo:init": "node agents/hooks/repo-contract.mjs init",
     "local-sessions": "node agents/local-sessions/install.mjs",
