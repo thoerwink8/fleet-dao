@@ -611,8 +611,9 @@ describe('CI 每次都跑的测试：ci.yml 和 ALWAYS_TESTS 对得上；本机�
     for (const p of CI_ALWAYS) expect(filesOf([p]).length, p).toBeGreaterThan(0);
   });
 
-  it('【故意造出的失败】ci.yml 的 docs 那步多跑一份：读出来的跟着多那一份，和 ALWAYS_TESTS 对不上', () => {
-    const more = YML.replace(ALWAYS_TESTS.join(' '), `${ALWAYS_TESTS.join(' ')} packages/hygiene/test/`);
+  it('【故意造出的失败】ci.yml 里每次都跑的那几步多跑一份：读出来的跟着多那一份，和 ALWAYS_TESTS 对不上', () => {
+    const last = ALWAYS_TESTS[ALWAYS_TESTS.length - 1] as string;
+    const more = YML.replace(`vitest run ${last}`, `vitest run ${last} packages/hygiene/test/`);
     expect(more, 'ci.yml 里找不到 docs 那步的写法了：这条的改法跟着换').not.toBe(YML);
     expect(ciAlwaysTests(more).sort()).toEqual([...ALWAYS_TESTS, 'packages/hygiene/test/'].sort());
   });

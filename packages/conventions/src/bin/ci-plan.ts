@@ -91,11 +91,14 @@ runMain(() => {
       changed,
       graph: readGraph(repo),
       specExists: (rel) => repo.exists(rel),
+      // 改 deploy/ 只跑读它的测试：只在真 PR 上（主线推送按区间算也走 planCi，但 event 是 push，deploy/ 照旧全跑，决定 0093）
+      narrowDeploy: event === 'pull_request',
     }),
     {
       all: listTestFiles(repo),
       timings: parseTimings(repo.read(TIMINGS_FILE)),
       read: (rel) => repo.read(rel),
+      repo,
     },
   );
   if (typeof assigned === 'string') fail(assigned);

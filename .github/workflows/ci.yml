@@ -3,6 +3,8 @@ name: ci
 # 各 job 看它给的开关；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」。
 # 主线推送只跑「上一次主线真绿的头…这次的头」这段累计改动该跑的（基准查不到就全跑）。不做「取消前一轮」：发布闸认的是「这个提交自己那次绿」，取消了它就断。
 # 同树复用：这次提交的树和某次绿的 PR 检查测的是同一棵、基准树也一样，test、web、deploy 就不重测（同树同结果；对不上一律全跑并留 ::warning::）。
+# PR 只改了 deploy/ 时不全跑（决定 0093，B8）：deploy 全套照跑，单元测试只跑读 deploy/ 的那些文件（packages/conventions/src/deploy-readers.ts 从代码里算，不是清单），
+# 不开 web 打包、不跑 tsc。主线推送、每夜、手动一律仍全跑——发版只认主线全绿，所以这里少测的有兜底。
 # e2e 不在 PR 闸（决定 0093）：PR 上不跑，主线推送这一轮照区间跑映射到的 spec，不复用；发版只认主线头 CI 全绿，所以 e2e 是发版闸。
 #
 # 改这里之前必须知道：
@@ -75,21 +77,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           MAIN_BASE: ${{ steps.mainbase.outputs.sha }}
         run: node packages/conventions/src/bin/main-reuse.ts --base "$MAIN_BASE" --workflow ci.yml >> "$GITHUB_OUTPUT"
-      # PR：留下「这一轮测的是哪棵树、比的基准树是哪棵」，供合并后主线那一轮查。只放在步骤名里，只读令牌就查得到；只有整轮成功才会被认。
-      # HEAD 不是合并提交就写「无」，主线那边认不出就不复用。步骤名的写法由 main-reuse.ts 的 claimStepName 定，test/main-reuse.test.ts 核对这里对得上。
-      - id: tested
-        if: github.event_name == 'pull_request'
-        run: |
-          set -euo pipefail
-          parents=$(git rev-list --parents -n 1 HEAD | wc -w)
-          if [ "$parents" = 3 ]; then
-            echo "claim=tree=$(git rev-parse 'HEAD^{tree}') base=$(git rev-parse 'HEAD^1^{tree}')" >> "$GITHUB_OUTPUT"
-          else
-            echo "claim=无（HEAD 不是合并提交）" >> "$GITHUB_OUTPUT"
-          fi
-      - name: 已测的树 ${{ steps.tested.outputs.claim }}
-        if: github.event_name == 'pull_request'
-        run: echo "这一轮测的是这棵树（合并后主线那一轮据此复用，见 packages/conventions/src/main-reuse.ts）"
       - id: plan
         env:
           EVENT: ${{ github.event_name }}
@@ -97,6 +84,26 @@ jobs:
           MAIN_BASE: ${{ steps.mainbase.outputs.sha }}
           REUSE: ${{ steps.reuse.outputs.reuse }}
         run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE" --main-base "$MAIN_BASE" --reuse "$REUSE"
+      # PR：留下「这一轮测的是哪棵树、比的基准树是哪棵」，供合并后主线那一轮查。只放在步骤名里，只读令牌就查得到；只有整轮成功才会被认。
+      # HEAD 不是合并提交就写「无」，主线那边认不出就不复用。步骤名的写法由 main-reuse.ts 的 claimStepName 定，test/main-reuse.test.ts 核对这里对得上。
+      # 窄跑的（只改 deploy/，单元测试只跑了读 deploy/ 的）不留树声明：合并后主线那一轮不许复用它，得自己全跑——这才是少测的兜底（决定 0093 第 6 条）。
+      - id: tested
+        if: github.event_name == 'pull_request'
+        env:
+          NARROWED: ${{ steps.plan.outputs.narrowed }}
+        run: |
+          set -euo pipefail
+          parents=$(git rev-list --parents -n 1 HEAD | wc -w)
+          if [ "$NARROWED" = true ]; then
+            echo "claim=无（只改 deploy/，测试窄跑，主线要全跑）" >> "$GITHUB_OUTPUT"
+          elif [ "$parents" = 3 ]; then
+            echo "claim=tree=$(git rev-parse 'HEAD^{tree}') base=$(git rev-parse 'HEAD^1^{tree}')" >> "$GITHUB_OUTPUT"
+          else
+            echo "claim=无（HEAD 不是合并提交）" >> "$GITHUB_OUTPUT"
+          fi
+      - name: 已测的树 ${{ steps.tested.outputs.claim }}
+        if: github.event_name == 'pull_request'
+        run: echo "这一轮测的是这棵树（合并后主线那一轮据此复用，见 packages/conventions/src/main-reuse.ts）"
 
   # 一堆「装一次依赖、跑一条命令」的小检查并进这一个 job：原来 biome、tsc、docs、hygiene 各占一台，每台都有 25 秒的 checkout + setup-node + install 固定开销，
   # 四台占四个并发槽。这几步各自最慢 20 秒上下，串起来仍短于最慢的测试台（db 约 87 秒），所以整轮墙钟不变。
@@ -107,7 +114,8 @@ jobs:
   # 各步的分工：
   # - biome：只改 .md 时不跑（biome 不认 md）。
   # - tsc -b：跟着 biome；只查受影响的项目，全跑时查整棵树。
-  # - docs：doc-pointers 测试（文档里的路径、章节指针）和 agents/test（技能指针），每个 PR 都跑、不裁剪：挪文件会让指针指空。
+  # - doc_pointers、agents_test：文档里的路径、章节指针（doc-pointers 测试），和 agents/test（技能指针、规矩钉子）。每个 PR 都跑、不裁剪：挪文件会让指针指空。
+  #   原来合成一步 docs，红了看不出是指针指空还是技能规矩红；拆成两样各自后台跑、各写各的结果，汇总点名红的是哪一样，墙钟不变（并行，最慢那样说了算）。
   # - 卫生检查两步：每个 PR 都跑，只报不挡（不进汇总判红，也不进必过名单）。真挡的是推之前的 pre-push 钩子和引擎推分支时的扫描（创始人 2026-09-28 拍，
   #   specs/169-Fusion形态/需求.md）；这里是早一步看到、接住钩子没装的情况。
   #   PR 检出到 pr/ 只当数据扫，执行的是主线上的 packages/hygiene（检出到 trusted/），且排在 pnpm install 和一切跑 PR 代码的步骤之前：
@@ -182,9 +190,9 @@ jobs:
           cache-dependency-path: pr/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
 
-      # biome、tsc、docs 三样各自后台跑、各写各的日志和退出码，一样红不影响另外两样（#566：串行时 biome 先红就把 tsc 跳过）。
-      # 结果写成 biome/tsc/docs = success | failure | skipped，由汇总逐样核对；这一步自己崩了、输出没写全，汇总读到空值同样判红。
-      - name: biome、tsc、docs 并行跑
+      # biome、tsc、doc_pointers、agents_test 四样各自后台跑、各写各的日志和退出码，一样红不影响另外几样（#566：串行时 biome 先红就把 tsc 跳过）。
+      # 结果写成 biome/tsc/doc_pointers/agents_test = success | failure | skipped，由汇总逐样核对；这一步自己崩了、输出没写全，汇总读到空值同样判红。
+      - name: biome、tsc、doc_pointers、agents_test 并行跑
         id: checks
         env:
           BIOME_WANT: ${{ steps.plan.outputs.biome }}
@@ -205,8 +213,9 @@ jobs:
           names=()
           if [ "$BIOME_WANT" = true ]; then start biome pnpm exec biome check .; names+=(biome); else echo "biome=skipped" >>"$GITHUB_OUTPUT"; fi
           if [ -n "$TSC" ]; then start tsc run_tsc; names+=(tsc); else echo "tsc=skipped" >>"$GITHUB_OUTPUT"; fi
-          start docs pnpm exec vitest run packages/conventions/test/doc-pointers.test.ts agents/test/
-          names+=(docs)
+          start doc_pointers pnpm exec vitest run packages/conventions/test/doc-pointers.test.ts
+          start agents_test pnpm exec vitest run agents/test/
+          names+=(doc_pointers agents_test)
           wait
           for name in "${names[@]}"; do
             rc=$(cat "$LOGS/$name.rc" 2>/dev/null || echo missing)
@@ -217,12 +226,13 @@ jobs:
           done
 
       # 汇总：该跑的必须 success、不该跑的必须 skipped，哪一样不对 job 就红、连名字一起报。卫生检查两步只报不挡，红了只打 ::warning::。
-      - name: 汇总（biome / tsc / docs 有一步不对这里就红）
+      - name: 汇总（biome / tsc / doc_pointers / agents_test 有一样不对这里就红）
         if: always()
         env:
           BIOME: ${{ steps.checks.outputs.biome }}
           TSC: ${{ steps.checks.outputs.tsc }}
-          DOCS: ${{ steps.checks.outputs.docs }}
+          DOC_POINTERS: ${{ steps.checks.outputs.doc_pointers }}
+          AGENTS_TEST: ${{ steps.checks.outputs.agents_test }}
           BIOME_WANT: ${{ steps.plan.outputs.biome }}
           TSC_WANT: ${{ steps.plan.outputs.tsc }}
           HYGIENE: ${{ steps.hygiene.outcome }}
@@ -242,7 +252,8 @@ jobs:
           tsc_want=no; if [ -n "$TSC_WANT" ]; then tsc_want=yes; fi
           verify biome "$BIOME" "$biome_want"
           verify tsc "$TSC" "$tsc_want"
-          verify docs "$DOCS" yes
+          verify doc_pointers "$DOC_POINTERS" yes
+          verify agents_test "$AGENTS_TEST" yes
           if [ "$HYGIENE" = failure ] || [ "$HYGIENE_HISTORY" = failure ]; then
             echo "::warning::卫生检查没过（只报不挡，看上面那两步的日志）"
           fi
@@ -250,7 +261,7 @@ jobs:
             echo "::error::lint 里有检查不对：$bad"
             exit 1
           fi
-          echo "lint 里该跑的几步都过了、不该跑的都跳过了：biome=$BIOME tsc=$TSC docs=$DOCS"
+          echo "lint 里该跑的几步都过了、不该跑的都跳过了：biome=$BIOME tsc=$TSC doc_pointers=$DOC_POINTERS agents_test=$AGENTS_TEST"
 
   # 测试分几台：ci-plan.ts 选单元 → test-split.ts 按 test-timings.json 耗时装箱，一台一份明确的文件清单（job 名就是那一台，如「2/5 · pg」）。
   # 耗时表只读仓里的 test-timings.json（引擎每天开 PR 从最近几轮 PR 的 CI 日志刷新，也可手跑 pnpm ci:timings）。不用 vitest --shard 按文件个数切：那样各台差得太远（#654 时 engine 三台 89/35/137 秒）。
