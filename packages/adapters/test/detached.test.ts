@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ClaudeCodeRunSpec } from '../src/claude-code/run.ts';
 import { judgeClaudeRun, runClaudeCode } from '../src/claude-code/run.ts';
-import type { LineMeta } from '../src/cli-run.ts';
+import { assertRunnable, type LineMeta } from '../src/cli-run.ts';
 import { IO_FILES, parseExitFile, prepareIo, WRAPPER } from '../src/detached.ts';
 import { fakeAgent, fixtureInit, fixtureLines, fixturePath, pidAlive, tempDir } from './helpers.ts';
 
@@ -58,6 +58,20 @@ describe('退出码文件', () => {
   it('外壳接住挂断、TERM：写退出码之前不会被带走', () => {
     expect(WRAPPER).toContain("trap '' HUP");
     expect(WRAPPER).toContain("trap 'got=1' TERM INT");
+  });
+});
+
+describe('接回不查提示词', () => {
+  it('【故意造出的失败】引擎接回时不重拼提示词、给的是空的：接回照放行；起新会话提示词空着照拒（#2238：10-15 07:44 法国第一次接回就被「提示词是空的」拒了，单被挂起）', async () => {
+    const cwd = tempDir();
+    const command = fakeAgent({});
+    await expect(
+      assertRunnable(command, '', cwd, { dir: tempDir('fleet-io-'), attach: true }),
+    ).resolves.toBeUndefined();
+    await expect(assertRunnable(command, '  ', cwd, { dir: tempDir('fleet-io-') })).rejects.toThrow(
+      '提示词是空的',
+    );
+    await expect(assertRunnable(command, '', cwd)).rejects.toThrow('提示词是空的');
   });
 });
 
@@ -129,18 +143,21 @@ describe.skipIf(!onPosix)('走文件跑会话', { timeout: 30_000 }, () => {
     expect(merged.map((e) => e.kind)).toEqual(['tool', 'tool', 'tool', 'tool', 'file', 'say']);
   });
 
-  it('会话在引擎不在时跑完了：接回读到外壳写的退出码，照常收场；确认过的全都只重放', async () => {
+  it('会话在引擎不在时跑完了：接回读到外壳写的退出码，照常收场；确认过的全都只重放（接回给的提示词是空的，引擎就是这样给的）', async () => {
     const io = tempDir('fleet-io-');
     const s = spec();
     const command = fakeAgent({ replay: fixturePath('claude-code', FIXTURE) });
     await runClaudeCode(s, { command, io: { dir: io, pollMs: 20 } });
     const seen: Seen[] = [];
-    const report = await runClaudeCode(s, {
-      command,
-      io: { dir: io, attach: true, pollMs: 20 },
-      replayUntil: ALL.length + 1,
-      onEvent: (e, m) => seen.push({ kind: e.kind, seq: m.seq, replay: m.replay }),
-    });
+    const report = await runClaudeCode(
+      { ...s, prompt: '' },
+      {
+        command,
+        io: { dir: io, attach: true, pollMs: 20 },
+        replayUntil: ALL.length + 1,
+        onEvent: (e, m) => seen.push({ kind: e.kind, seq: m.seq, replay: m.replay }),
+      },
+    );
     expect(report.exitCode).toBe(0);
     expect(report.exitLost).toBeUndefined();
     expect(judgeClaudeRun(report).outcome).toBe('ok');
