@@ -1359,3 +1359,13 @@ describe('--write 一次换五个区块（第十一片）', () => {
     expect(problems.every((p) => p.notQueried)).toBe(true);
   });
 });
+
+// 「CI 核对」（docs/design.md）：五张生成表和真仓的 deploy/ 对得上。改了 docs/ops.md 或 deploy/ 时 ci-plan 会选中本包（ci-plan.ts 的 PATH_RULES），
+// 所以表漂移了 CI 一定红；红了的修法：node packages/conventions/src/bin/ops-tables.ts --write。
+describe('真仓：docs/ops.md 的五张生成表和 deploy/ 一致', () => {
+  it('checkOpsBlocks 对真仓没有问题', () => {
+    const root = fileURLToPath(new URL('../../../', import.meta.url));
+    const problems = checkOpsBlocks(fsRepo(root));
+    expect(problems.map((p) => p.text)).toEqual([]);
+  });
+});

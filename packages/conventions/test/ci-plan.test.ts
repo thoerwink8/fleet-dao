@@ -326,7 +326,7 @@ describe('按改动算要跑什么', () => {
       deploy: 'none',
       testUnits: ['agents', 'agents-sync'],
     });
-    expect(pr('docs/ops.md')).toMatchObject({ deploy: 'ops', testUnits: ['db'] });
+    expect(pr('docs/ops.md')).toMatchObject({ deploy: 'ops', testUnits: ['conventions', 'db'] });
     expect(testArgs(pr('agents/skills/discuss/SKILL.md'))).toEqual(['agents/', 'packages/agents-sync/']);
     // 调工具前的钩子：引擎起 Claude 会话也直接用仓里这份（adapters 的测试真跑它）
     expect(testArgs(pr('agents/hooks/pretool.mjs'))).toEqual([

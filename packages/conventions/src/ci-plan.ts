@@ -357,9 +357,9 @@ export const PATH_RULES: readonly Rule[] = [
   // deploy/test 里读 docs/ops.md 的只有端口表那段和 place-file.test.sh：只改文档跑这两块（run.sh --ops），不拖上全套
   {
     match: exact('docs/ops.md'),
-    units: ['db'],
+    units: ['conventions', 'db'],
     deploy: 'ops',
-    why: 'deploy/test 核对端口表、放文件的命令，db 的测试读它',
+    why: 'deploy/test 核对端口表、放文件的命令，db 的测试读它；conventions 的 ops-tables 测试拿真仓核对五张生成表',
   },
   // 决定 0087 的钉子测试 agents/test/rules/subagent-model.rules.test.ts 读 docs/decisions/0087-…md 核对要点都在：
   // 只改这份决定文档也要测 agents（其余 decisions/ 是历史记录，#654，不进门）。0035 原先也读，0087 取代了那一半，不再读。
