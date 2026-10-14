@@ -3,7 +3,7 @@
 // 1. 入口（boot.ts）先等停机前就已经在处理的请求做完（waitLegacy，上限 drainMs）。这段时间服务器继续 accept：
 //    /healthz 照常答，别的新请求由 drainGate 立刻回「正在停」。装了 fleet-api.socket 时，一停 accept 内核仍会把
 //    TCP 握完、HTTP 堆在队列里，外面看就是端口通、请求挂起——所以这段不能先 server.close()。
-// 2. 再到 gracefulShutdown：这时才停接新连接（两个 server 都 close），给还粘着的连接一个短窗口，到点收掉
+// 2. 再到 gracefulShutdown：这时才停接新连接（听上的 server 都 close），给还粘着的连接一个短窗口，到点收掉
 //    （SSE 这类不会自己结束），最后才去关变更推送、Temporal、数据库。关库早了，在途请求会看见「库关着」这种和
 //    真实故障分不清的错误。fleet-api.service 的 TimeoutStopSec 要比两段加起来长，不然 systemd 会先 SIGKILL。
 import type { Fetch } from './keep-alive.ts';

@@ -55,6 +55,20 @@ describe('matchListenTargets：几个已经听上的地址按 host:port 和配�
     ).toThrow(/10\.99\.0\.2:8787（配置里的 cockpit 只要一个）/);
   });
 
+  it('可有可无的目标（已撤的口）：传了就对上号，没传不算缺', () => {
+    const withRetired = [targets[0], { ...targets[1], optional: true }] as typeof targets;
+    expect(
+      matchListenTargets(
+        [
+          { host: '127.0.0.1', port: 8788 },
+          { host: '10.99.0.2', port: 8787 },
+        ],
+        withRetired,
+      ),
+    ).toEqual([1, 0]);
+    expect(matchListenTargets([{ host: '10.99.0.2', port: 8787 }], withRetired)).toEqual([0]);
+  });
+
   it('缺一个：报错写清缺了哪个（名字和地址）', () => {
     expect(() => matchListenTargets([{ host: '10.99.0.2', port: 8787 }], targets)).toThrow(
       /没传监听套接字给：agent 127\.0\.0\.1:8788/,

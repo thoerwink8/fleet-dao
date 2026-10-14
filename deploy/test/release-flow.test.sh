@@ -1295,18 +1295,19 @@ echo "== fleet-api.socket：构建收进 .units；头一次装、已有、退回
 sock_unit=$HERE/../france/fleet-api.socket
 svc_unit=$HERE/../france/fleet-api.service
 ops_doc=$HERE/../../docs/ops.md
-check "socket 单元：两个 ListenStream 就是 release.sh 的 COCKPIT、AGENT_API" \
-  "$(grep -cE "^ListenStream=($COCKPIT|$AGENT_API)$" "$sock_unit")" 2
+check "socket 单元：只有一个 ListenStream，就是 release.sh 的 COCKPIT" \
+  "$(grep -cE "^ListenStream=($COCKPIT)$" "$sock_unit")" 1
+check "socket 单元：没有别的 ListenStream" "$(grep -c '^ListenStream=' "$sock_unit")" 1
 check "socket 单元：FreeBind、Service、WantedBy" \
   "$(grep -cE '^(FreeBind=yes|Service=fleet-api\.service|WantedBy=sockets\.target)$' "$sock_unit")" 3
 check "服务单元：Requires socket" "$(grep -c '^Requires=fleet-api\.socket$' "$svc_unit")" 1
 check "服务单元：After 最前面是 socket" "$(grep -c '^After=fleet-api\.socket ' "$svc_unit")" 1
 ops_socket=$(grep -c 'fleet-api\.socket' "$ops_doc" || true)
 ops_three=$(grep -c '三处一起改' "$ops_doc" || true)
-ops_addrs=$(grep -c 'api\.env.*COCKPIT.*AGENT_API' "$ops_doc" || true)
+ops_addrs=$(grep -c 'api\.env.*release\.sh.*COCKPIT' "$ops_doc" || true)
 check "ops 端口表和单元表写了 fleet-api.socket" "$((ops_socket >= 2))" 1
 check "ops 写明改监听地址要三处一起改" "$((ops_three >= 1))" 1
-check "ops 把 api.env 和 release.sh 的两个常量写在一起" "$((ops_addrs >= 1))" 1
+check "ops 把 api.env 和 release.sh 的常量写在一起" "$((ops_addrs >= 1))" 1
 
 saved_cache=$CACHE
 saved_units=("${APP_UNITS[@]+"${APP_UNITS[@]}"}")

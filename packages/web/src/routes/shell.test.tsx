@@ -78,15 +78,15 @@ describe('外壳按屏宽重排（#1801）', () => {
     localStorage.clear();
   });
 
-  test('390 宽：底部导航四项（主页、任务、通知、更多），顶栏没有汉堡按钮，常驻侧栏不渲染', async () => {
+  test('390 宽：底部导航两项（主页、更多；决定 0093 导航降级），顶栏没有汉堡按钮，常驻侧栏不渲染', async () => {
     viewport(390);
     renderShell();
     await settled();
     const nav = screen.getByRole('navigation', { name: '底部导航' });
     expect(nav).toBeTruthy();
-    // 通知项带待处理角标（数字），文字里先后是角标、名字
+    // 「更多」带待处理角标（数字），文字里先后是角标、名字
     const items = [...nav.querySelectorAll('a, button')].map((el) => el.textContent?.replace(/^\d+|^!/, ''));
-    expect(items).toEqual(['主页', '任务', '通知', '更多']);
+    expect(items).toEqual(['主页', '更多']);
     expect(screen.queryByRole('button', { name: '打开导航' })).toBeNull();
     expect(document.querySelector('aside')).toBeNull();
   });
@@ -99,6 +99,31 @@ describe('外壳按屏宽重排（#1801）', () => {
     const dialog = await screen.findByRole('dialog');
     expect(dialog.textContent).toContain('渠道状态');
     expect(dialog.textContent).toContain('设置');
+    // 原来的主页画布、任务、通知中心都在抽屉里
+    expect(dialog.textContent).toContain('画布');
+    expect(dialog.textContent).toContain('任务');
+    expect(dialog.textContent).toContain('通知中心');
+  });
+
+  test('桌面侧栏只常驻主页；其余收在「更多」里，点开才列出，点过记着', async () => {
+    viewport(1440);
+    const first = renderShell();
+    await settled();
+    const nav = screen.getByRole('navigation', { name: '主导航' });
+    const links = () => [...nav.querySelectorAll('a')].map((a) => a.textContent);
+    expect(links()).toEqual(['主页']);
+    const toggle = screen.getByRole('button', { name: /更多/ });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(links()).toContain('画布');
+    expect(links()).toContain('任务');
+    expect(links()).toContain('设置');
+    first.unmount();
+    // 刷新后照人点的：还是展开的
+    renderShell();
+    await settled();
+    expect(screen.getByRole('button', { name: /更多/ }).getAttribute('aria-expanded')).toBe('true');
   });
 
   test('390 宽：顶栏有总开关状态点（点开是总开关卡片），顶栏和底部导航的按钮都不小于 40×40', async () => {

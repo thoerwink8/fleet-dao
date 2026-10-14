@@ -96,8 +96,8 @@ describe('主页上看一个远程环境（/?node=）', () => {
     expect(screen.queryByText('没有这个环境')).toBeNull();
     broken = false;
     fireEvent.click(screen.getByRole('button', { name: '重试' }));
-    // 要你拍的收进了画布右上角的抽屉按钮（#1801），读成了就有它
-    expect(await screen.findByRole('button', { name: /要你拍的 \d+ 条/ })).toBeTruthy();
+    // 主页三块（决定 0093）：读成了就有「要你拍的」那块
+    await waitFor(() => expect(document.querySelector('[data-home-block="ask"]')).not.toBeNull());
     expect(screen.queryByText(/这个环境没读成/)).toBeNull();
   });
 });

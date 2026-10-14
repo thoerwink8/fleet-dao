@@ -8,7 +8,7 @@ import {
   UpdateRepoDispatchResponse,
 } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import { errorCode, harness, IDS, viaGateway, write } from './harness.ts';
+import { errorCode, harness, IDS, viaBearer, write } from './harness.ts';
 
 const READ = '/api/repos/dispatch';
 const put = (repoId: string) => `/api/repos/${repoId}/dispatch`;
@@ -131,11 +131,11 @@ describe('PUT /api/repos/:repoId/dispatch', () => {
     expect(h.store.data.repos.find((r) => r.id === IDS.repo)?.autoDispatchSince).toBeUndefined();
   });
 
-  it('【故意造出的失败】飞书网关通行证不能开关接活：403，库里一点没动', async () => {
+  it('【故意造出的失败】带 Authorization 令牌不能开关接活：401，库里一点没动', async () => {
     const h = harness();
-    const res = await h.cockpit.request(put(IDS.repo), viaGateway('PUT', 'ou_dev_founder_a', { on: true }));
-    expect(res.status).toBe(403);
-    expect(await errorCode(res)).toBe('gateway_route_not_allowed');
+    const res = await h.cockpit.request(put(IDS.repo), viaBearer('PUT', { on: true }));
+    expect(res.status).toBe(401);
+    expect(await errorCode(res)).toBe('bearer_not_allowed');
     expect(h.store.data.repos.find((r) => r.id === IDS.repo)?.autoDispatchSince).toBeUndefined();
   });
 

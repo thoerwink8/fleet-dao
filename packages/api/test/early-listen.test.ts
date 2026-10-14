@@ -20,11 +20,9 @@ function freePort(): Promise<number> {
 
 async function devEnv(): Promise<NodeJS.ProcessEnv> {
   const cockpit = await freePort();
-  const agent = await freePort();
   return {
     FLEET_ENV: 'development',
     FLEET_COCKPIT_LISTEN: `127.0.0.1:${cockpit}`,
-    FLEET_AGENT_LISTEN: `127.0.0.1:${agent}`,
   };
 }
 
@@ -75,9 +73,7 @@ describe('openEarly：先听上，setFetch 之后换成正式处理', () => {
     expect(first.status).toBe(503);
     expect(await first.json()).toMatchObject({ checks: { startup: { code: 'starting' } } });
 
-    early.setFetch('cockpit', () =>
-      Promise.resolve(Response.json({ ok: true, checks: { database: { ok: true } } })),
-    );
+    early.setFetch(() => Promise.resolve(Response.json({ ok: true, checks: { database: { ok: true } } })));
     const second = await fetch(url);
     expect(second.status).toBe(200);
     expect(await second.json()).toEqual({ ok: true, checks: { database: { ok: true } } });

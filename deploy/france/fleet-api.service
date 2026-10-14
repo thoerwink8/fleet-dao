@@ -1,9 +1,9 @@
-# fleet-dao 驾驶舱后端：一个进程两个监听——驾驶舱接口（隧道地址 10.99.0.2:8787，香港经它转 /api、/auth、
-# /github/webhook、/healthz）与 fleet 命令接口（127.0.0.1:8788，只给本机的 AI 会话）。
+# fleet-dao 驾驶舱后端：一个进程一个监听——驾驶舱接口（隧道地址 10.99.0.2:8787，香港经它转 /api、/auth、
+# /github/webhook、/healthz）。fleet 命令接口（127.0.0.1:8788）随 fleet 命令一起撤了。
 # deploy/release.sh 从要发布的那个提交里取这份，装到 /etc/systemd/system/；改这份、再发布一次，别在机器上手改。
-# 本机配置：/etc/fleet-dao/api.env（每一项应该是什么在仓里的 deploy/france/desired-config.json），密钥在 france.sh 生成的三个文件里。
+# 本机配置：/etc/fleet-dao/api.env（每一项应该是什么在仓里的 deploy/france/desired-config.json），密钥在 france.sh 生成的 session-secret.env 里。
 [Unit]
-Description=fleet-dao 驾驶舱后端（驾驶舱接口 + fleet 命令接口）
+Description=fleet-dao 驾驶舱后端（驾驶舱接口）
 Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
 # 端口归 fleet-api.socket 攥着（它 FreeBind，隧道没起也能先听上）。没装那个单元的机器用的是没有 Requires 这行的旧单元，
 # 服务自己 bind。退回到不带 socket 的版本时，发布脚本先撤 socket 再换回旧单元，不会留着 Requires 去等一个不存在的单元。
@@ -18,9 +18,7 @@ Type=simple
 User=fleet
 Group=fleet
 WorkingDirectory=/srv/fleet-dao-releases/current
-EnvironmentFile=/etc/fleet-dao/agent-token.env
 EnvironmentFile=/etc/fleet-dao/session-secret.env
-EnvironmentFile=/etc/fleet-dao/gateway-token.env
 # release.env 的 FLEET_SERVICES 说本机开不开引擎：没开，/healthz 的 engine 项报「未接」而不是红（packages/api/src/config.ts 的
 # engineEnabled）。放在 api.env 前面：同名的键以后读的为准。前面的「-」：机器上没有这个文件也照样起，按开着算（多报红、不漏报）
 EnvironmentFile=-/etc/fleet-dao/release.env

@@ -1,6 +1,7 @@
-// 装配并换成正式处理。进程入口是 main.ts：它先听上（装配前 /healthz 回「还在启动」），再 import 这份。
-// 两个监听——驾驶舱接口（生产上是法国机器的隧道地址，香港经它访问）与 fleet 命令接口（只本机回环）。
-// 地址、端口、密钥都从本机配置（环境变量）读，见 config.ts。
+// 装配并换成正式处理。进程入口是 main.ts：它先听上驾驶舱接口（装配前 /healthz 回「还在启动」），再 import 这份。
+// 一个监听——驾驶舱接口（生产上是法国机器的隧道地址，香港经它访问）。
+// 地址、端口、密钥都从本机配置（环境变量）读，见 config.ts。入口已经读过一遍，这里用 takeEarly() 拿，不读第二遍
+// （开发模式再读会另生成一套密钥）。
 // - 有 DATABASE_URL：真库（Postgres Store + LISTEN fleet_changes）+ 真 Temporal（懒连接，Temporal 没起来时
 //   这一步不报错，健康检查会如实报红）。生产必须有。GitHub 事件原文落库；
 //   PR、CI 事件经 @fleet-dao/github 写镜像（机器人凭据在 /etc/fleet-dao/github，读不到时如实失败、健康检查报红）。
@@ -19,11 +20,9 @@ import {
   createMemoryStore,
   createPgStore,
   DEPLOY_LAG_NOT_HERE,
-  DEV_RUN_ID,
   DEV_USER_ID,
   deployFacts,
   devFixtures,
-  IDS,
   jsonLogger,
   pgAlertWork,
   pgLedger,
@@ -33,7 +32,6 @@ import {
   startReleaseWaitWatch,
   withStatementTimeout,
 } from '@fleet-dao/store';
-import { signAgentToken } from './agent-token.ts';
 import { buildApps } from './app.ts';
 import { pgCarpoolReconcile } from './carpool-reconcile-view.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
@@ -62,8 +60,6 @@ import type { GitHubUserPort } from './github-user.ts';
 import { serviceHealthChecks } from './health.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { createHostResourceSampler, realHostReader } from './host-resources.ts';
-import { createMemoryIntentStore } from './intent-store.ts';
-import { createPgIntentStore } from './intent-store-pg.ts';
 import { judgeHealthCheck } from './judge-health.ts';
 import { pgModelRoster } from './model-roster.ts';
 import { nodeReporterFor, nodeReportPart } from './node-reporter.ts';
@@ -228,7 +224,7 @@ async function assemble(): Promise<{
   databaseSizes?: DatabaseSizes;
 }> {
   if (config.databaseUrl === null) {
-    // 只有开发环境会走到这里（生产缺 DATABASE_URL 在 loadConfig 就拒绝启动了）。
+    // 只有开发环境会走到这里（生产缺 DATABASE_URL 在入口读配置时就拒绝启动了）。
     const changes = createChangeHub(log);
     const store = createMemoryStore(devFixtures(now()), {
       onChange: (table, id) => changes.publish({ type: 'change', table, id }),
@@ -240,7 +236,6 @@ async function assemble(): Promise<{
       log,
       now,
       feishu,
-      intents: createMemoryIntentStore({ now }),
       alerts: memoryCockpitAlerts(store.data.notifications),
       health: nodeReporter ? [nodeReporter.healthCheck] : [],
       workflows: {
@@ -311,8 +306,6 @@ async function assemble(): Promise<{
     github: github.sink,
     ...(github.userHit ? { githubUser: github.userHit } : {}),
     ...(github.decisionCommenter ? { decisionCommenter: github.decisionCommenter } : {}),
-    // 意图表（#553 第 4 条）：网关只往里记进群和飞书用量；已有的意图指挥官经 fleet-api intent 读写同一张表
-    intents: createPgIntentStore(db, { now }),
     alerts: pgCockpitAlerts(db),
     // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在正式环境有
     alertWork: pgAlertWork(db, production ? () => deployFacts(readDeployLagInput()) : () => null),
@@ -410,7 +403,7 @@ const hostResources = createHostResourceSampler({ read: hostReader, now, log, fo
 deps.hostResources = hostResources;
 snapshotDeps = deps;
 nodeReporter?.start();
-const { cockpit, agent, relay } = buildApps(deps);
+const { cockpit, relay } = buildApps(deps);
 // 有页面开着（SSE 连着）才按间隔读、推；没人看时主页接口来要再现读
 const stopHostResources = hostResources.start(() => relay.connections() > 0);
 
@@ -420,32 +413,16 @@ const isStopping = () => stopping;
 const legacy = { n: 0 };
 
 // 监听在 main.ts 里已经听上（装配前 /healthz 回「还在启动」）。这里换成正式处理，不再 bind 第二次。
-early.setFetch(
-  'cockpit',
-  drainGate(closeConnectionWhenStopping(cockpit.fetch, isStopping), isStopping, legacy),
-);
-early.setFetch('agent', drainGate(agent.fetch, isStopping, legacy));
+early.setFetch(drainGate(closeConnectionWhenStopping(cockpit.fetch, isStopping), isStopping, legacy));
 const servers = early.servers;
 
 log.info('驾驶舱后端已起', {
   env: config.env,
   store: config.databaseUrl === null ? 'memory' : 'postgres',
   cockpit: `${config.cockpitListen.host}:${config.cockpitListen.port}`,
-  agent: `${config.agentListen.host}:${config.agentListen.port}`,
   devLogin: config.devLogin ? DEV_USER_ID : false,
   // 往哪个看板推快照（只写对方的域名，不写通行证）
   nodeReport: config.nodeReport ? config.nodeReport.url.origin : false,
-  // 给 fleet 命令联调用的令牌：只在内存样例数据下给，对应样例里正在跑的那次会话；密钥是本次启动临时生成的。
-  ...(config.env === 'development' && config.databaseUrl === null
-    ? {
-        devFleetToken: signAgentToken(config.agentTokenSecret, {
-          taskId: IDS.task12,
-          subtaskId: IDS.sub12a,
-          runId: DEV_RUN_ID,
-          ttlSeconds: 8 * 60 * 60,
-        }),
-      }
-    : {}),
 });
 
 /** 退出时给在途的普通请求多久做完（做完了幂等回执才记得上，插头重试不会重做）；到点了收掉剩下的（SSE 这类）。 */

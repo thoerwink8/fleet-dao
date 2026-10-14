@@ -230,9 +230,13 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
       err(`${e instanceof Error ? e.message : String(e)}：没开 PR。`);
       return 2;
     }
-    if (info === 'missing' || info.isPr) {
+    if (info === 'missing') {
+      err(`需求栏写的 #${n} 在本仓里不存在：没开 PR。改成真的单号，或者确实没有单就加 --no-issue "<理由>"。`);
+      return 1;
+    }
+    if (info.isPr) {
       err(
-        `需求栏写的 #${n} ${info === 'missing' ? '在本仓里不存在' : '是个 PR、不是单'}：没开 PR。改成真的单号，或者确实没有单就加 --no-issue "<理由>"。`,
+        `#${n} 是个 PR、不是单：这是 PR，请用 --no-issue 并写理由（--no-issue "<为什么不挂单>"），或改成真的单号。没开 PR。`,
       );
       return 1;
     }

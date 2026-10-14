@@ -43,7 +43,8 @@ export interface EarlyListeners {
   /** loadConfig 的结果，boot 不用再读一遍环境。 */
   config: Config;
   servers: ServerType[];
-  setFetch: (which: 'cockpit' | 'agent', fetch: Fetch) => void;
+  /** 装配完成，换成驾驶舱的正式处理。 */
+  setFetch: (fetch: Fetch) => void;
 }
 
 let held: EarlyListeners | undefined;
@@ -65,20 +66,25 @@ function untilListening(server: ServerType): Promise<void> {
   });
 }
 
-/** boot.ts 取 main.ts 已经听上的那一对。没听上就抛，不自己再 bind 一次。 */
+/** boot.ts 取 main.ts 已经听上的驾驶舱接口。没听上就抛，不自己再 bind 一次。 */
 export function takeEarly(): EarlyListeners {
   if (!held) throw new EarlyListenError('还没先听上（入口是 packages/api/src/main.ts）');
   return held;
 }
 
 /**
- * 按配置把两个监听听上，处理函数先是 startupResponse。env 默认 process.env；测试传一份假的，不碰真环境。
- * 调用两次会把前一次的句柄盖掉（正式进程只调一次）。
+ * 已撤的 fleet 命令口。老机器上的 fleet-api.socket 发布时不会自动换，仍可能把 127.0.0.1:8788 的 fd 传进来。
+ * 认得它、回 410，不当成多出来的 fd 退出。人工撤掉 socket 单元里那一行以后，这一项删掉。
+ */
+export const RETIRED_AGENT_LISTEN = { host: '127.0.0.1', port: 8788 };
+
+/**
+ * 按配置把驾驶舱接口听上，处理函数先是 startupResponse。env 默认 process.env；测试传一份假的，不碰真环境。
+ * 自己 bind 时不起已撤的那个口；systemd 传了它的 fd 才接上、回 410。调用两次会把前一次的句柄盖掉（正式进程只调一次）。
  */
 export async function openEarly(env: NodeJS.ProcessEnv = process.env): Promise<EarlyListeners> {
   const config = loadConfig(env);
   let cockpit: Fetch = (req) => Promise.resolve(startupResponse(req.url));
-  let agent: Fetch = (req) => Promise.resolve(startupResponse(req.url));
   const servers = await startListeners(
     [
       {
@@ -88,9 +94,10 @@ export async function openEarly(env: NodeJS.ProcessEnv = process.env): Promise<E
         keepAliveMs: COCKPIT_KEEP_ALIVE_MS,
       },
       {
-        name: 'fleet 命令接口',
-        at: config.agentListen,
-        fetch: (req, fetchEnv) => agent(req, fetchEnv),
+        name: '已撤的 fleet 命令接口',
+        at: RETIRED_AGENT_LISTEN,
+        fetch: () => new Response('fleet 命令接口已撤', { status: 410 }),
+        optional: true,
       },
     ],
     env,
@@ -100,9 +107,8 @@ export async function openEarly(env: NodeJS.ProcessEnv = process.env): Promise<E
   held = {
     config,
     servers,
-    setFetch(which, fetch) {
-      if (which === 'cockpit') cockpit = fetch;
-      else agent = fetch;
+    setFetch(fetch) {
+      cockpit = fetch;
     },
   };
   return held;

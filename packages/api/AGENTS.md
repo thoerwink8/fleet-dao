@@ -1,11 +1,11 @@
 # packages/api：驾驶舱后端
 
-Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推送（SSE）、GitHub 事件接收、给 Temporal 工作流发信号，另有一个只听本机回环的 fleet 命令接口。读数据只从 Postgres 读、不直接查 GitHub（例外和理由见 design 第四节「架构」）。
+Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推送（SSE）、GitHub 事件接收、给 Temporal 工作流发信号。读数据只从 Postgres 读、不直接查 GitHub（例外和理由见 design 第四节「架构」）。
 
 ## 入口
 
-- `packages/api/src/main.ts`：进程入口。先听两个端口（驾驶舱接口、fleet 命令接口），装配完成前 `/healthz` 回「还在启动」；再加载 `boot.ts` 换成正式处理。有 `DATABASE_URL` 走真库 + 真 Temporal，没有就用内存样例数据，飞书登录没配时 `POST /auth/dev-login` 免登（只许本机回环）。停机排空期间继续答 `/healthz`，普通新请求回「正在停」。
-- `packages/api/src/app.ts`：`buildApps` 装两个应用；驾驶舱挂 `/auth`、`/api`、`/github`，命令接口挂 `/agent/v1`。新路由在这里挂。
+- `packages/api/src/main.ts`：进程入口。先听驾驶舱接口，装配完成前 `/healthz` 回「还在启动」；再加载 `boot.ts` 换成正式处理。老机器若还把已撤的 `127.0.0.1:8788` 的 fd 传进来，`early-listen.ts` 认得、回 410。有 `DATABASE_URL` 走真库 + 真 Temporal，没有就用内存样例数据，飞书登录没配时 `POST /auth/dev-login` 免登（只许本机回环）。停机排空期间继续答 `/healthz`，普通新请求回「正在停」。
+- `packages/api/src/app.ts`：`buildApps` 装驾驶舱应用；挂 `/auth`、`/api`、`/github`。新路由在这里挂。
 - `packages/api/src/config.ts`：地址、端口、密钥都从环境变量读。
 - `packages/api/bin/`：法国上的管理命令 `fleet-api`，用法见 ops 第九节「发布应用（deploy/release.sh）」前后的 `fleet-api` 段落。
 
@@ -18,7 +18,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 
 - 接口契约只有一份：`packages/shared/src/web-api.ts` 的 `WebRoutes`、`AuthRoutes`。`packages/api/test/web-routes-contract.test.ts` 两头核对（契约里有、后端没注册；后端注册了、契约里没有，都红）。
 - 「只有创始人本人能开」（决定 0033）：打开 Fable 的路由/模型、加进或拖动用途，一律调 `packages/api/src/founder-only.ts` 的 `guardFounderOnly`，不另写判法；`packages/api/test/fable-founder-only.test.ts` 两道门都测。
-- 飞书网关的意图接口、别的环境推快照的写口挂在登录门前面，只认各自的通行证；改挂载顺序会把它们关到登录门后面（见 `app.ts` 注释）。
+- 别的环境推快照的写口挂在登录门前面，只认专用通行证；改挂载顺序会把它关到登录门后面（见 `app.ts` 注释）。
 - 读不到就如实报红：GitHub 机器人凭据、Temporal 连不上都不能当成没事，健康检查照实报。
 
 ## 改它时要连带改

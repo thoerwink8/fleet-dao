@@ -1,5 +1,4 @@
 // 共用的类型、数据结构校验（zod）与常量
-export * from './agent-api.ts';
 export * from './bans.ts';
 export * from './carpool-burn.ts';
 export * from './changelog.ts';
@@ -8,7 +7,6 @@ export * from './ci-policy.ts';
 export * from './cli-versions.ts';
 export type * from './domain.ts';
 export * from './effort.ts';
-export * from './feishu-api.ts';
 export * from './flow-purposes.ts';
 export * from './groom.ts';
 export * from './home-flow.ts';

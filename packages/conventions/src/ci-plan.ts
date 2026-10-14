@@ -72,7 +72,7 @@ export interface CiPlan {
    * 注意它和 full 不同步：全跑（deploy/ 脚本、根配置这类升的全跑）不一定开 e2e，见 planCi。
    */
   e2e: E2eSpecs;
-  /** deploy/test/run.sh：all 全套；ops 只跑读 docs/ops.md 的两块（`run.sh --ops`：端口表、place-file）；none 不跑。 */
+  /** deploy/test/run.sh：all 全套；ops 只跑读 docs/ops.md 的那块（`run.sh --ops`：端口表）；none 不跑。 */
   deploy: DeployMode;
   /**
    * 只改了 deploy/（PR）时测试不全跑，只跑读 deploy/ 的测试文件（deploy-readers.ts 从代码里算，决定 0093）：assignTests 看到它就把这些文件
@@ -96,7 +96,7 @@ export type DeployMode = (typeof DEPLOY_MODES)[number];
  */
 export const DEPLOY_SHARDS = 3;
 
-/** deploy 那一 job 的矩阵：all 切成 DEPLOY_SHARDS 台、ops 一台（只跑读 docs/ops.md 的两块）、none 空。 */
+/** deploy 那一 job 的矩阵：all 切成 DEPLOY_SHARDS 台、ops 一台（只跑读 docs/ops.md 的端口表那块）、none 空。 */
 export interface DeployLeg {
   label: string;
   /** run.sh 的参数。 */
@@ -151,6 +151,7 @@ export type Rule =
     };
 
 const exact = (p: string) => (f: string) => f === p;
+const PKG_AGENTS_DOC = /^packages\/[^/]+\/AGENTS\.md$/;
 const under = (p: string) => (f: string) => f.startsWith(p);
 
 /**
@@ -205,10 +206,15 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
   // 登录页（01）。password-field 登录页和设置页「账密登录」共用
   { files: [`${W}routes/login.tsx`], specs: [spec('01-login')] },
   { files: [`${W}components/password-field.tsx`], specs: [spec('01-login'), spec('10-credentials')] },
-  // 主页（02）；07c 在主页上切环境，08 从别页点回主页
+  // 主页三块（02b）、画布（02，原来的主页，决定 0093 挪到 /board）；07c 在主页、画布上切环境，08 从别页点回主页
   {
-    files: [`${W}routes/home.tsx`, `${W}components/home/`, `${W}components/not-built.tsx`],
-    specs: [spec('02-home'), spec('07c-nodes'), spec('08-backend-down')],
+    files: [
+      `${W}routes/home.tsx`,
+      `${W}routes/board.tsx`,
+      `${W}components/home/`,
+      `${W}components/not-built.tsx`,
+    ],
+    specs: [spec('02-home'), spec('02b-home-today'), spec('07c-nodes'), spec('08-backend-down')],
   },
   // 主页和单子详情共用
   { files: [`${W}lib/segments.ts`], specs: [spec('02-home'), spec('03-task')] },
@@ -379,17 +385,20 @@ export const DEPLOY_NARROW_RULE: Rule = {
 
 /** 包外路径的去处，按顺序取第一条。包内的（packages/<包>/…）不在这里，按依赖图算。 */
 export const PATH_RULES: readonly Rule[] = [
+  // 各包自己的说明（packages/<包>/AGENTS.md）只有文档指针检查读（doc-pointers.test.ts，每个 PR 都跑），没有哪个包的测试读它：
+  // 当纯文档，不测那个包（（排在 packages/shared 那条全跑之前）原先落进「包内文件」，会连它和依赖它的包一起测）。
+  { match: (f) => PKG_AGENTS_DOC.test(f), units: [], why: '包说明（文档指针检查读它，每个 PR 都跑）' },
   ...ROOT_CONFIG_FILES.map((p) => ({ match: exact(p), full: '根配置，所有包都受影响' })),
   { match: under('.github/workflows/'), full: 'CI 工作流本身' },
   { match: under('packages/shared/'), full: '几乎所有包都依赖 shared' },
   { match: (f) => FIXTURE_PATH.test(f), full: '测试夹具，别的包的测试也读' },
   DEPLOY_FULL_RULE,
-  // deploy/test 里读 docs/ops.md 的只有端口表那段和 place-file.test.sh：只改文档跑这两块（run.sh --ops），不拖上全套
+  // deploy/test 里读 docs/ops.md 的只有端口表那段：只改文档只跑这一块（run.sh --ops），不拖上全套
   {
     match: exact('docs/ops.md'),
     units: ['conventions', 'db'],
     deploy: 'ops',
-    why: 'deploy/test 核对端口表、放文件的命令，db 的测试读它；conventions 的 ops-tables 测试拿真仓核对五张生成表',
+    why: 'deploy/test 核对端口表，db 的测试读它；conventions 的 ops-tables 测试拿真仓核对五张生成表',
   },
   // 决定 0087 的钉子测试 agents/test/rules/subagent-model.rules.test.ts 读 docs/decisions/0087-…md 核对要点都在：
   // 只改这份决定文档也要测 agents。0035 原先也读，0087 取代了那一半，不再读。

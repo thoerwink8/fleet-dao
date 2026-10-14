@@ -172,6 +172,31 @@ describe('按改动算要跑什么', () => {
     expect(pr('docs/design.md', 'specs/1-x/方案.md').biome).toBe(false);
   });
 
+  it('只改 packages/*/AGENTS.md：当纯文档，不测那个包也不连带依赖它的包（文档指针检查每个 PR 都跑）', () => {
+    for (const f of [
+      'packages/conventions/AGENTS.md',
+      'packages/shared/AGENTS.md',
+      'packages/db/AGENTS.md',
+    ]) {
+      const p = pr(f);
+      expect(p, f).toMatchObject({
+        full: false,
+        tests: [],
+        testUnits: [],
+        web: false,
+        deploy: 'none',
+        tsc: [],
+        biome: false,
+      });
+    }
+    // 同一包里别的文件照旧测包；AGENTS.md 只在包根才算（更深的路径不是包说明）
+    expect(units(pr('packages/conventions/src/x.ts'))).toContain('conventions');
+    expect(units(pr('packages/conventions/AGENTS.md', 'packages/conventions/src/x.ts'))).toContain(
+      'conventions',
+    );
+    expect(pr('packages/conventions/test/AGENTS.md').testUnits).toContain('conventions');
+  });
+
   it('只改一个没人依赖的包（agent-eval）：只测它、只类型检查它，不打包 web、不跑 deploy', () => {
     const p = pr('packages/agent-eval/src/cli.ts');
     expect(p).toMatchObject({
@@ -310,7 +335,7 @@ describe('按改动算要跑什么', () => {
     expect(pr('packages/jev/src/index.ts').deploy).toBe('none');
   });
 
-  it('只改 docs/ops.md：deploy 只跑读它的两块（run.sh --ops），和要全套的一起改照旧全套', () => {
+  it('只改 docs/ops.md：deploy 只跑读它的端口表那块（run.sh --ops），和要全套的一起改照旧全套', () => {
     expect(pr('docs/ops.md').deploy).toBe('ops');
     expect(pr('docs/ops.md', 'docs/design.md', 'specs/1-x/方案.md').deploy).toBe('ops');
     // 顺序不影响：全套压过 ops
@@ -704,7 +729,7 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     expect(v.lines.join('\n')).toContain('✗ lint：failure');
   });
 
-  it('deploy=ops：deploy job 要跑且绿（只跑两块也是跑），跳过、红了都不过', () => {
+  it('deploy=ops：deploy job 要跑且绿（只跑端口表那块也是跑），跳过、红了都不过', () => {
     const ops = assigned(pr('docs/ops.md'));
     const over = { test: { result: 'success' } };
     expect(ciVerdict(needs({ ...over, deploy: { result: 'success' } }, ops)).ok).toBe(true);
@@ -748,7 +773,7 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     const full = assigned(planCi({ event: 'push', changed: [], graph: graph() }));
     const broken = { ...full, web: false };
     expect(ciVerdict(needs({ web: { result: 'skipped' } }, broken)).ok).toBe(false);
-    // 全跑却只跑 deploy 的两块：job 照样 success，但 plan 本身不对
+    // 全跑却只跑 deploy 的端口表那块：job 照样 success，但 plan 本身不对
     const opsOnly: CiPlan = { ...full, deploy: 'ops' };
     const allGreen = {
       web: { result: 'success' },

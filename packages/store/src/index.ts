@@ -13,7 +13,6 @@ export * from './pg-store.ts';
 export * from './ports.ts';
 export * from './reconcile.ts';
 export * from './release-waits.ts';
-export * from './well-formed.ts';
 export {
   actorFor,
   GhUser,

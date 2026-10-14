@@ -46,7 +46,6 @@ HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
 HK_TUNNEL=10.99.0.1            # 香港在隧道上的地址：静态文件经它发，发完也经它核对（不依赖公网解析）
 HK_PARTS=(web)                 # 往香港发的一样：驾驶舱静态文件（根地址）（release.env 的 FLEET_HK_PARTS 选）
 COCKPIT=10.99.0.2:8787         # 驾驶舱接口（api.env 的 FLEET_COCKPIT_LISTEN）
-AGENT_API=127.0.0.1:8788       # fleet 命令接口（api.env 的 FLEET_AGENT_LISTEN）
 TASK_QUEUE=fleet               # 引擎工人取活的任务队列（engine.env 的 FLEET_TASK_QUEUE）
 # 迁移连本机库：unix socket + peer 认证（同 api.env；postgres.js 不认连接串里的 ?host=，主机走 PGHOST）
 DB_ENV=(DATABASE_URL=postgres:///fleet PGHOST=/var/run/postgresql PGUSER=fleet)
@@ -1167,7 +1166,7 @@ running_release() { # 单元
 #   enable --now，端口这时候起归 systemd 攥着；调用方（activate）看 SOCKET_FORCE_RESTART 知道这一轮要重启服务——
 #   服务这时候还没起（刚被停掉），要靠后面重启逻辑把它起来，起来时从 systemd 接手 fd，不再自己 bind。
 # - 带、机器上已经有在跑：不碰 socket 单元——改 socket 的监听地址是人工操作（会牵扯改 api.env、release.sh 的
-#   COCKPIT/AGENT_API 常量、docs/ops.md 端口表，一起改一起发），不是发布脚本自动做的事；只照常重启服务，这正是
+#   COCKPIT 常量、docs/ops.md 端口表，一起改一起发），不是发布脚本自动做的事；只照常重启服务，这正是
 #   要的效果：重启时连接排在内核队列里，不会被拒。
 # - 不带（退回到没有它的老版本）、机器上有：撤掉 socket 单元（disable --now、删文件、daemon-reload），回到服务
 #   自己绑端口——不撤的话老代码不会去读 systemd 传来的 fd，端口反而没人监听。
@@ -1637,12 +1636,6 @@ check_api() { # 切之前的逐项结果
   fi
   ok "fleet-api：驾驶舱接口 $COCKPIT 在答健康报告（HTTP $code）"
   compare_api_items "$before" "$items" || bad=1
-  if ! timeout 5 bash -c "exec 3<>/dev/tcp/${AGENT_API%:*}/${AGENT_API#*:}" 2>/dev/null; then
-    red "fleet-api：fleet 命令接口 $AGENT_API 连不上"
-    bad=1
-  else
-    ok "fleet-api：fleet 命令接口 $AGENT_API 在听"
-  fi
   return "$bad"
 }
 
