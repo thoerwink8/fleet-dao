@@ -42,7 +42,7 @@ describe('parseManifest', () => {
 describe('extractImports + findUndeclared', () => {
   const manifests = [
     m('', 'root', ['vitest', 'esbuild']),
-    m('packages/api', '@fleet-dao/api', ['zod', '@fleet-dao/shared']),
+    m('packages/api', '@demo/api', ['zod', '@fleet-dao/shared']),
     m('packages/hygiene', '@fleet-dao/hygiene', []),
   ];
 
@@ -86,7 +86,7 @@ describe('extractImports + findUndeclared', () => {
       {
         path: 'packages/api/src/c.ts',
         contents:
-          "import { z } from 'zod';\nimport { s } from '@fleet-dao/shared';\nimport { t } from 'vitest';\nimport { u } from '@fleet-dao/api/x';\nimport fs from 'node:fs';\nimport p from 'path';\nimport { v } from './v.ts';\nexport default [z, s, t, u, fs, p, v];\n",
+          "import { z } from 'zod';\nimport { s } from '@fleet-dao/shared';\nimport { t } from 'vitest';\nimport { u } from '@demo/api/x';\nimport fs from 'node:fs';\nimport p from 'path';\nimport { v } from './v.ts';\nexport default [z, s, t, u, fs, p, v];\n",
       },
       { path: 'deploy/web/x.mjs', contents: "import { build } from 'esbuild';\nexport default build;\n" },
     ]);
