@@ -1543,3 +1543,74 @@ describe('开 PR 前验证：只派别家、作者是哪几族、每一轮的记
     );
   });
 });
+
+describe('选路：动手按模型战绩（PLAN 3f，决定 0093）', () => {
+  const logs: { message: string; fields: Record<string, unknown> }[] = [];
+  const logged = () =>
+    createStorePorts({
+      db: t.db,
+      now: () => NOW,
+      draw: () => 0.5,
+      log: (message, fields) => logs.push({ message, fields: fields ?? {} }),
+      sessionOrg: onCarpool,
+    });
+  beforeEach(() => {
+    logs.length = 0;
+  });
+
+  /** n 张单，第一段动手都在 routeId 上、两段才做成（不是一轮）。 */
+  async function twoRoundTasks(routeId: string, n: number) {
+    for (let i = 0; i < n; i += 1) {
+      const { task } = await addTask(t.db);
+      await t.client.query(`update tasks set state = 'done' where id = $1`, [task.id]);
+      for (const k of [0, 1]) {
+        await startRun(t.db, {
+          id: randomUUID(),
+          segment: 'manual',
+          taskId: task.id,
+          model: 'opus-5.5',
+          routeId,
+          startedAt: new Date(NOW.getTime() - (60 - k * 20 + i) * MIN),
+          endedAt: new Date(NOW.getTime() - (50 - k * 20 + i) * MIN),
+          outcome: 'done',
+          routeOutcome: 'ok',
+        });
+      }
+    }
+  }
+
+  it('一轮做成率差的模型不进动手：Opus 5 单一轮成 0，派到后面的 Grok，理由写明；日志记各模型的战绩', async () => {
+    await world(t.db);
+    const { routeId } = await addGrokRoute(t.db, { stages: ['execute'] });
+    await twoRoundTasks('solo', 5);
+    const r = await pick({ stage: 'execute' }, logged());
+    expect(r).toMatchObject({ ok: true, route: { routeId } });
+    expect(r.ok && r.why).toContain('一轮做成率低于 15%，不进写码');
+    const line = logs.find((l) => l.message === '动手战绩（选路按它排模型）');
+    expect(line?.fields.tracks).toBe('opus-5.5 5 单成 5、一轮成 0、共 10 段 100 分钟');
+    // 冷验收等别的用途不受影响：照人排的派 Opus
+    expect(await pick({ stage: 'triage' }, logged())).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+  });
+
+  it('只有它能派：照样派（不把唯一能用的排没）', async () => {
+    await world(t.db);
+    await twoRoundTasks('solo', 5);
+    const r = await pick({ stage: 'execute' }, logged());
+    expect(r).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+  });
+
+  it('战绩读不成：照人排的先后派，理由和日志写明，不当成没有战绩', async () => {
+    await world(t.db);
+    await addGrokRoute(t.db, { stages: ['execute'] });
+    await twoRoundTasks('solo', 5);
+    await t.client.exec('alter table tasks rename to tasks_unreadable');
+    try {
+      const r = await pick({ stage: 'execute', taskId: randomUUID() }, logged());
+      expect(r).toMatchObject({ ok: true, route: { routeId: 'solo' } });
+      expect(r.ok && r.why).toContain('动手战绩没读成');
+      expect(logs.some((l) => l.message === '动手战绩没读成，这次模型之间照人排的先后')).toBe(true);
+    } finally {
+      await t.client.exec('alter table tasks_unreadable rename to tasks');
+    }
+  });
+});

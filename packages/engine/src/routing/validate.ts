@@ -71,6 +71,33 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
       );
     }
   }
+  // 动手战绩认不出就不往下判：拿坏的数会把能干的模型挡在动手外面，或把一轮做不成的排到最前
+  if (input.modelTracks !== undefined) {
+    if (!Array.isArray(input.modelTracks)) throw new RoutingInputError('选路判不了：动手战绩不是一张表');
+    const seen = new Set<string>();
+    for (const t of input.modelTracks) {
+      if (typeof t?.modelId !== 'string' || !t.modelId || seen.has(t.modelId)) {
+        throw new RoutingInputError(`选路判不了：动手战绩的模型认不出或重复（${String(t?.modelId)}）`);
+      }
+      seen.add(t.modelId);
+      for (const k of ['tasks', 'done', 'oneRound', 'segments'] as const)
+        count(t[k], `模型 ${t.modelId} 的动手战绩 ${k}`);
+      if (t.done > t.tasks || t.oneRound > t.done || t.segments < t.tasks) {
+        throw new RoutingInputError(
+          `选路判不了：模型 ${t.modelId} 的动手战绩对不上（单 ${t.tasks}、成 ${t.done}、一轮成 ${t.oneRound}、段 ${t.segments}）`,
+        );
+      }
+      if (
+        typeof t.segmentMinutes !== 'number' ||
+        !Number.isFinite(t.segmentMinutes) ||
+        t.segmentMinutes < 0
+      ) {
+        throw new RoutingInputError(
+          `选路判不了：模型 ${t.modelId} 的动手战绩分钟数认不出（${String(t.segmentMinutes)}）`,
+        );
+      }
+    }
+  }
   if (trialEnabled) {
     const d = input.draw;
     if (typeof d !== 'number' || !Number.isFinite(d) || d < 0 || d >= 1) {

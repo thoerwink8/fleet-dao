@@ -29,6 +29,7 @@ import {
   type EndedPoolRun,
   endedPoolRuns,
   markChannelDisabled,
+  modelExecuteTracks,
   openAlertKeysOfTask,
   openAlertsByPrefix,
   openPoolRuns,
@@ -63,9 +64,11 @@ import {
   type ChooseRouteInput,
   type ChooseRouteResult,
   chooseRoute,
+  DEFAULT_ROUTING_POLICY,
   familyAvoidIsRetry,
   stageAllOpen as judgeStageAllOpen,
   type LiveOrgReading,
+  type ModelTrackFacts,
   type OrgPlanView,
   type RouteFacts,
   type RouteRecord,
@@ -443,6 +446,39 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
 
   const planOf = deps.orgPlan ?? ((input) => orgPlanView(db, input));
 
+  // 动手按模型战绩排（PLAN 3f，决定 0093）：用途在 trackScore.stages 里才读。读不成退回人排的先后、理由和日志里写明，不拿空当「都没战绩」
+  // 不在这里 resolveRoutingPolicy：策略认不出要在选路时按 ROUTING_INPUT 报，不能让建端口就抛
+  const givenStages: unknown = deps.routingPolicy?.trackScore?.stages;
+  const trackStages: readonly StageKind[] = Array.isArray(givenStages)
+    ? givenStages
+    : DEFAULT_ROUTING_POLICY.trackScore.stages;
+  let lastTrackLog = '';
+  async function tracksFor(
+    stage: StageKind,
+    now: Date,
+  ): Promise<{ modelTracks?: ModelTrackFacts[]; note?: string }> {
+    if (!trackStages.includes(stage)) return {};
+    try {
+      const tracks = await modelExecuteTracks(db, new Date(now.getTime() - RECORD_DAYS * DAY_MS));
+      // 战绩变了才记一笔（等路由时每隔一两分钟就选一次，不刷屏）：驾驶舱没有战绩页，看各模型的分就看这行日志
+      const summary = tracks
+        .map(
+          (t) =>
+            `${t.modelId} ${t.tasks} 单成 ${t.done}、一轮成 ${t.oneRound}、共 ${t.segments} 段 ${Math.round(t.segmentMinutes)} 分钟`,
+        )
+        .join('；');
+      if (summary !== lastTrackLog) {
+        lastTrackLog = summary;
+        log('动手战绩（选路按它排模型）', { stage, tracks: summary || '近 7 天没有到终态的动手单' });
+      }
+      return { modelTracks: tracks };
+    } catch (error) {
+      const why = String(error).slice(0, 200);
+      log('动手战绩没读成，这次模型之间照人排的先后', { stage, error: why });
+      return { note: `动手战绩没读成（${why}），这次模型之间照人排的先后` };
+    }
+  }
+
   /**
    * 引擎切号的打算：读成了挂的是哪个、候选里又有不是它的组织的池才问（和切号同一个判法）。别的时候不给，选路照老样子。
    */
@@ -615,6 +651,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ...(await carpoolRegistryFor(all.routes)),
         };
         const policy = deps.routingPolicy ? { policy: deps.routingPolicy } : {};
+        const tracks = await tracksFor(input.stage, now);
         const base = {
           stage: input.stage,
           configured: facts.configured,
@@ -625,9 +662,10 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           draw: drawn,
           ...orgFacts,
           ...(input.uiWork ? { uiWork: true } : {}),
+          ...(tracks.modelTracks ? { modelTracks: tracks.modelTracks } : {}),
           ...policy,
         } satisfies Omit<ChooseRouteInput, 'avoid' | 'taskRouteId'>;
-        const notes: string[] = [];
+        const notes: string[] = tracks.note ? [tracks.note] : [];
         const missing = (id: string, what: string) =>
           all.unwiredIds.has(id)
             ? `${what} ${id} 的执行方式引擎还没接上，照常选`
