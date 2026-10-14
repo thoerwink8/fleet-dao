@@ -100,6 +100,7 @@ export {
   type GroomMilestone,
   readGroomFacts,
   readIssueLabelEvents,
+  removeIssueLabel,
   setIssueMilestone,
 } from './groom.ts';
 export { guardedByHygiene, HYGIENE_REPO } from './hygiene-scope.ts';

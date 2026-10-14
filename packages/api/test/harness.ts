@@ -134,6 +134,8 @@ export interface HarnessOptions {
   routingOrder?: Deps['routingOrder'];
   /** 按单指定模型（驾驶舱改版 2026-10-07）；不给就是没接上（内存版、开发环境一样）。 */
   taskRoutePins?: Deps['taskRoutePins'];
+  /** 本机领单（决定 0096）；不给就是没接上（内存版、开发环境一样，回 503）。 */
+  localClaims?: Deps['localClaims'];
   /** 会话内容（#1640）；不给就是没接上（内存版、开发环境一样）。 */
   runTranscript?: Deps['runTranscript'];
   /** 提需求（#2049）；不给就是没接上（内存版、开发环境一样）。 */
@@ -198,6 +200,7 @@ function wire<S extends Store>(
     ...(options.routingEfforts ? { routingEfforts: options.routingEfforts } : {}),
     ...(options.routingOrder ? { routingOrder: options.routingOrder } : {}),
     ...(options.taskRoutePins ? { taskRoutePins: options.taskRoutePins } : {}),
+    ...(options.localClaims ? { localClaims: options.localClaims } : {}),
     ...(options.runTranscript ? { runTranscript: options.runTranscript } : {}),
     ...(options.requests ? { requests: options.requests } : {}),
     ...(options.taskRedo ? { taskRedo: options.taskRedo } : {}),

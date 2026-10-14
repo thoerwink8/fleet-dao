@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
-import { GATE_CONTEXT } from '@fleet-dao/conventions';
+import { GATE_CONTEXT, otherPrOnIssue } from '@fleet-dao/conventions';
 import type { GitHub, PrBodyInput } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { CiResult, SyncResult } from '../decisions/types.ts';
@@ -449,6 +449,21 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     },
 
     async openPr(input, ctx) {
+      // 开之前查同一张单有没有别人开着的 PR（本机的 local/<单号>-、或「需求」栏挂着它，决定 0096）：有就不开，停下等人看
+      const issue = input.body.requirement;
+      if (issue !== undefined) {
+        const pulls = await mapped(() =>
+          gh.claims.openPulls({ owner: input.repo.owner, name: input.repo.name }),
+        );
+        const other = otherPrOnIssue(pulls, issue, input.branch);
+        if (other !== null) {
+          throw new PortError(
+            'ISSUE_CLAIMED',
+            `#${issue} 已经有开着的 PR #${other} 在做（本机或别的分支），不再开第二个；看 #${other} 合不合，合了这张单就收，不合关掉它再点继续`,
+            { retryable: false, details: { otherPr: other } },
+          );
+        }
+      }
       const r = await mapped(() =>
         gh.openPr(
           {

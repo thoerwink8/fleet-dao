@@ -50,6 +50,7 @@ export {
   toMilestoneDetail,
   toPlanIssue,
 } from './github-api.ts';
+export { type BranchExecutor, issueOfBranch, localBranchPrefix } from './issue-branch.ts';
 export {
   CLOSE_USAGE,
   CloseRefused,
@@ -174,6 +175,7 @@ export {
   readPlan,
   renderPlan,
 } from './plan-view.ts';
+export { type OpenPullRef, otherPrOnIssue, prClaimedIssues } from './pr-claims.ts';
 export {
   ISSUE_COLUMN,
   issueColumnRefs,

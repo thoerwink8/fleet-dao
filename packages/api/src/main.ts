@@ -5,7 +5,7 @@
 //   PR、CI 事件经 @fleet-dao/github 写镜像（机器人凭据在 /etc/fleet-dao/github，读不到时如实失败、健康检查报红）。
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
 //   发给工作流的信号只记日志，不接 Temporal。
-import { createDb, type Db } from '@fleet-dao/db';
+import { claimLocalTask, createDb, type Db, finishLocalTask, renewLocalTask } from '@fleet-dao/db';
 import {
   createGitHub,
   GITHUB_AUTHORIZE_URL,
@@ -60,6 +60,7 @@ import { createHostResourceSampler, realHostReader } from './host-resources.ts';
 import { judgeHealthCheck } from './judge-health.ts';
 import { COCKPIT_KEEP_ALIVE_MS } from './keep-alive.ts';
 import { ListenFdError, startListeners } from './listen.ts';
+import { pgLocalClaims } from './local-claims.ts';
 import { pgModelRoster } from './model-roster.ts';
 import { nodeReporterFor, nodeReportPart } from './node-reporter.ts';
 import { pgOrgSwitch } from './org-switch-view.ts';
@@ -338,6 +339,12 @@ async function assemble(): Promise<{
     routingOrder: pgRoutingOrder(db, now),
     // 按单指定模型：引擎给这张单的一段选路时现读的就是这张表，改了下一次选路照新的
     taskRoutePins: pgTaskRoutePins(db, now),
+    // 本机领单（决定 0096）：本机会话经通行证写 tasks 那一行（executor = local、带租约），法国拉单按它不接、到期收回
+    localClaims: pgLocalClaims({
+      claim: (i) => claimLocalTask(db, i),
+      renew: (i) => renewLocalTask(db, i),
+      finish: (i) => finishLocalTask(db, i),
+    }),
     // 任务详情每段的会话内容（#1640）：读引擎按条记下的 run_transcript
     runTranscript: pgRunTranscript(db),
     // 提需求（#2049）：需求、消息、每人的置顶和读到哪；删了满 30 天的由引擎的 request-sweep 硬删

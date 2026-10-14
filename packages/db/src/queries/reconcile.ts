@@ -83,7 +83,10 @@ export interface OpenTaskRow {
   state: TaskState;
 }
 
-/** 状态不是做完、叫停、失败的任务行，按仓、单号排。给每小时对账收遗留行用。 */
+/**
+ * 状态不是做完、叫停、失败的引擎任务行，按仓、单号排。给每小时对账收遗留行用。
+ * 本机领着的（executor = local，决定 0096）不在里面：它贴着「本机做」、没有工作流是常态，由拉单按租约收。
+ */
 export async function listOpenTaskRows(db: Db): Promise<OpenTaskRow[]> {
   return db
     .select({
@@ -95,7 +98,7 @@ export async function listOpenTaskRows(db: Db): Promise<OpenTaskRow[]> {
     })
     .from(tasks)
     .innerJoin(repos, eq(repos.id, tasks.repoId))
-    .where(notInArray(tasks.state, [...TERMINAL_TASK_STATES]))
+    .where(and(notInArray(tasks.state, [...TERMINAL_TASK_STATES]), eq(tasks.executor, 'engine')))
     .orderBy(asc(repos.owner), asc(repos.name), asc(tasks.issueNumber));
 }
 
