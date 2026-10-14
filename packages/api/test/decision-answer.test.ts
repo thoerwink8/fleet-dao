@@ -1,5 +1,5 @@
 // 「要你拍」带选项（#1915）：接口给出选项；点选项、自己输入都记下答案并转已处理；答案交给指挥官——进度单 #1055 收到一条
-// 待处理的创始人引导（progress:read、开会话钩子认得出），挂了任务的任务单也收到一句；没接上 GitHub 的照实写在 handoff 里。
+// 待处理的创始人引导（progress read、开会话钩子认得出），挂了任务的任务单也收到一句；没接上 GitHub 的照实写在 handoff 里。
 import { progressKindOf, progressOwnerOf } from '@fleet-dao/conventions';
 import {
   AnswerNotificationResponse,

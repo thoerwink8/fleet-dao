@@ -1,6 +1,6 @@
 // 钉住调工具前钩子（agents/hooks/pretool.mjs）「只是提到密钥路径不算碰到」的规矩（改标准：改这个文件要创始人同意，
 // packages/conventions/standard-paths.json；决定 0093，创始人 2026-10-14 16:30「我都同意……」）。
-// 两周 82 次密钥拦截里大半是只提到：grep 的模式、一段话（progress:note、git commit -m、psql 的 SQL）、heredoc 写进文档的路径、
+// 两周 82 次密钥拦截里大半是只提到：grep 的模式、一段话（progress note、git commit -m、psql 的 SQL）、heredoc 写进文档的路径、
 // node -e 里的属性名 r.key、ls / stat / test 只看元数据。这些放行；真读内容的、看不清的照拦。
 // 样本取自本机两周的真实命令（只取命令不取输出），IP、主机名、用户名、PR 号脱敏；命令字符串拆开拼，免得本机护栏拦自己。
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -35,7 +35,7 @@ describe('只是提到密钥路径：放行', () => {
   it.each([
     ['Bash', `grep -rn "${RSA}\\|${DKEY}" agents/hooks`],
     ['Bash', `rg -n '${RC}/${DEV}' docs`],
-    ['Bash', `pnpm progress:note "查清了：pretool 把提到 ${DKEY} 的话也当成读密钥"`],
+    ['Bash', `pnpm progress note "查清了：pretool 把提到 ${DKEY} 的话也当成读密钥"`],
     [
       'Bash',
       `node -e "const r=JSON.parse(require('fs').readFileSync('out.json','utf8'));for(const x of r)console.log(x.key, x.value)"`,

@@ -1437,7 +1437,7 @@ function isSink(info) {
 }
 
 // —— 只是提到，不算碰到 ——
-// 两周 82 次密钥拦截里大半是「提到」：grep 的模式里写着 id_rsa、pnpm progress:note 的一段话里写着 device.key、
+// 两周 82 次密钥拦截里大半是「提到」：grep 的模式里写着 id_rsa、pnpm progress note 的一段话里写着 device.key、
 // node -e 脚本里的 r.key、SQL 里的 n.key、heredoc 写进文档的路径。下面这几种词不算碰到：
 // - grep、rg、Select-String 这类的搜索模式（搜的是别的文件，模式只是一串字）；
 // - 带空白的一整段话（一段话不是一个路径），除非它是 -e / -c / --eval / -Command 后面的脚本、awk / sed / jq 的程序：

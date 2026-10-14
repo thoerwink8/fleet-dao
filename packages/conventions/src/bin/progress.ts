@@ -1,4 +1,4 @@
-// 进度单入口：pnpm progress:note / progress:directive / progress:claim / progress:done / progress:read（见 ../progress.ts）。
+// 进度单入口：pnpm progress note / progress directive / progress claim / progress done / progress read（见 ../progress.ts）。
 // 退出码 0 = 成了；1 = 拒绝（参数不对、评论不是该办的那种、已归别的会话）；2 = 没查成、没写成（gh 报错、读回来认不出、认不出本会话的主）。
 // `read --pending` 给开会话钩子用：只列没处理的引导，一条一行（编号<TAB>第一行<TAB>正文压成一行<TAB>主人）。
 // directive、claim 的主人＝本会话的血缘：CLAUDE_CODE_SESSION_ID 所属的 Mirasim 会话目录名（agents/hooks/founder-inbox.mjs 的 lineageOf）。
@@ -59,7 +59,7 @@ try {
     const owner = line.status === 'found' ? line.dir : NO_OWNER;
     const c = await progressDirective(positionals.join(' '), values.at ?? '', owner, { gh });
     console.log(
-      `记下创始人引导（待处理，主：${c.owner}）：${c.url}（评论号 ${c.id}；办完 pnpm progress:done ${c.id}）`,
+      `记下创始人引导（待处理，主：${c.owner}）：${c.url}（评论号 ${c.id}；办完 pnpm progress done ${c.id}）`,
     );
   } else if (cmd === 'claim') {
     const line = await myLineage();

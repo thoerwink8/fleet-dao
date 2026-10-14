@@ -297,7 +297,7 @@ const DIRECTIVE_NOT_CHECKED = '创始人引导待处理清单没查成';
 /**
  * 引导认主（同一个仓开着几个指挥官会话时，每个都被叫去办全部待处理引导，会撞车开出重复 PR）。
  * 主人是记下它的那个会话的血缘（Mirasim 会话目录名，founder-inbox.mjs 的 lineageOf），写成 `〔主：<目录名>〕`：进度单 #1055 的评论里
- * 由 pnpm progress:directive 写、pnpm progress:claim 改；别的仓「## 创始人引导（待处理）」清单的条目里手写。
+ * 由 pnpm progress directive 写、pnpm progress claim 改；别的仓「## 创始人引导（待处理）」清单的条目里手写。
  * 开会话时本血缘的列出来叫它办；有主、主不是本血缘的只计数、不列原文；没写主或写「无主」的照列，但要先认领。
  */
 export const NO_OWNER = '无主';
@@ -697,7 +697,7 @@ export function checkIdlePrs({ cwd, git, run, fetch, mirror = null }) {
 }
 
 /**
- * fleet-dao 的创始人引导记在 GitHub 置顶单 #1055（pnpm progress:directive），不在仓里的文件里：这里起
+ * fleet-dao 的创始人引导记在 GitHub 置顶单 #1055（pnpm progress directive），不在仓里的文件里：这里起
  * `progress.ts read --pending` 读没处理的几条，硬超时 PROGRESS_MS。不是 fleet-dao 不出声（别的仓仍读自己的
  * 「## 创始人引导（待处理）」一节，见 checkDirectives）；查不成出一行「没查成」，不挡开会话。
  * 优先用同步专用检出里那份脚本，没有再用会话所在检出里的。
@@ -723,7 +723,7 @@ export function progressRunner(timeoutMs = PROGRESS_MS) {
 /**
  * 参数同 checkIdlePrs，加 lineage（本会话的血缘）；返回要说的几行：没有待处理的、不是 fleet-dao 都不出声。
  * 认主（见 NO_OWNER 上面）：progress.ts 的第 4 列是主人（旧版脚本没有这一列，就从正文里的〔主：…〕认，再没有算无主）。
- * 本血缘的列全文叫它办；有主、主不是本血缘的只说条数；无主的照列开头，但先认领（pnpm progress:claim）。
+ * 本血缘的列全文叫它办；有主、主不是本血缘的只说条数；无主的照列开头，但先认领（pnpm progress claim）。
  */
 export function checkProgressIssue({ cwd, git, run, mirror = null, lineage = null }) {
   const root = fleetRoot(cwd, git);
@@ -772,16 +772,16 @@ export function progressLines(r, lineage = null) {
   const lines = [];
   if (ours.length > 0)
     lines.push(
-      `创始人引导有 ${ours.length} 条归本会话、没处理（进度单 #1055；本会话是 Mirasim 会话 ${mine}）：${ours.map((d) => `${d.id}（${d.when}）${d.text}`).join('；')}。先接着办，办完 pnpm progress:done <评论号>。`,
+      `创始人引导有 ${ours.length} 条归本会话、没处理（进度单 #1055；本会话是 Mirasim 会话 ${mine}）：${ours.map((d) => `${d.id}（${d.when}）${d.text}`).join('；')}。先接着办，办完 pnpm progress done <评论号>。`,
     );
   if (unowned.length > 0) {
     const shown = unowned.slice(0, 5).map((d) => `${d.id}（${d.when}）${brief(d.text)}`);
     const how =
       mine !== null
-        ? '先认领再办：pnpm progress:claim <评论号>（已归别的会话的会被拒）'
+        ? '先认领再办：pnpm progress claim <评论号>（已归别的会话的会被拒）'
         : '本会话认不出是哪个 Mirasim 会话、认领不了：是这个会话记的就接着办，不是就别动';
     lines.push(
-      `无主的创始人引导 ${unowned.length} 条（进度单 #1055；旧的、或在 Mirasim 外记的）：${shown.join('；')}${unowned.length > 5 ? ' 等' : ''}。${how}；全文 pnpm progress:read。`,
+      `无主的创始人引导 ${unowned.length} 条（进度单 #1055；旧的、或在 Mirasim 外记的）：${shown.join('；')}${unowned.length > 5 ? ' 等' : ''}。${how}；全文 pnpm progress read。`,
     );
   }
   if (others > 0) lines.push(`别的会话还有 ${others} 条创始人引导在办（进度单 #1055），不归你，别动。`);

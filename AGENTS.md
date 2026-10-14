@@ -1,14 +1,13 @@
 # fleet-dao 协作约定
 
-<!-- repo-contract:skip entry 本机不起引擎和驾驶舱，它们跑在法国；本仓的命令入口是 pnpm plan、pnpm pr:open、pnpm progress:* -->
-<!-- repo-contract:skip progress 创始人引导记在置顶进度单（pnpm progress:directive），docs/PROGRESS.md 不放那一节 -->
+<!-- repo-contract:skip progress 创始人引导记在置顶进度单（pnpm progress directive），docs/PROGRESS.md 不放那一节 -->
 
 通用规矩在 `agents/shared-rules.md`（同步进每台机器的全局说明），这份只写本仓。词义固定：单＝GitHub issue；主线＝origin/main；法国＝法国 VPS 上的引擎；本机＝创始人的电脑；创始人＝仓的主人；项目＝驾驶舱的顶层（一个项目一个仓）。
 
 目标看 `docs/goals.md`，设计看 `docs/design.md`；改驾驶舱界面先读 `docs/design/驾驶舱界面.md`；账号被封了清痕迹只看 `docs/reclaude.md`。
 
 ## 进度和单
-- 进度记在置顶单 #1055：`pnpm progress:note "一句话"`；创始人的引导和决定当场 `pnpm progress:directive "原话" --at "时间"`，办完 `pnpm progress:done <评论号>`，无主的先 `pnpm progress:claim <评论号>`；接手先 `pnpm progress:read`。
+- 进度记在置顶单 #1055：`pnpm progress note "一句话"`；创始人的引导和决定当场 `pnpm progress directive "原话" --at "时间"`，办完 `pnpm progress done <评论号>`，无主的先 `pnpm progress claim <评论号>`；接手先 `pnpm progress read`。
 - 计划以 GitHub 为准，`pnpm plan` 现读。创始人开的单进当前版本；AI 发现的不急的开小单进未排期，告诉他排第几。
 - 需求写在单上，四节：场景、原话、已知的模块、怎么算做完；用 `pnpm issue:new` 开（参数见它报错里的用法，本机做的加 `--local`）。要写方案才写，放 `specs/<编号>-<短名>/`，不改已有的。
 - 引擎自己挑单，进队条件见 `docs/design.md` 第九节。要它接：四节齐、范围写死、验收条写成 diff 里看得见的、不贴「本机做」「待补」「要人拍」。引擎不直写主线，它的单它自己关。

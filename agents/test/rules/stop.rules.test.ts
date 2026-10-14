@@ -179,7 +179,7 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     expect(reason).toContain('Agent 子代理');
     expect(reason).toContain('完成通知');
     expect(reason).toContain('patrol.mjs');
-    expect(reason).toContain('progress:note');
+    expect(reason).toContain('progress note');
     expect(reason).toContain('别空转');
     for (const k of ['done', 'needs-you', 'off']) expect(reason).toContain(`unattended.mjs ${k}`);
     expect(reason).not.toContain('--detached');

@@ -7,7 +7,7 @@
 // - push.mjs 由 Windows 计划任务每 2 分钟跑一次：把心跳凑成一份，POST 到法国的 /api/nodes/sessions（通行证和看板多机同一套），
 //   结果（成没成、为什么）写进 ~/.fleet-dao/local-sessions/last-push.json。凑的时候读各会话记录的修改时间当「最后一次动」、
 //   从记录尾巴读最后在调的工具名（以前靠每次调工具都跑一次心跳，摘掉）：看板误差不超过推送间隔 2 分钟。
-// - install.mjs 一条命令装、一条命令卸（pnpm local-sessions:install / local-sessions:uninstall）。
+// - install.mjs 一条命令装、一条命令卸（pnpm local-sessions install / local-sessions uninstall）。
 //
 // 改这里之前必须知道（隐私边界，法国那边的 schema 是 strict，多一个字段就整份拒收）：
 // - 只写元信息：会话编号、仓（owner/name 或目录名）、分支、工作树目录名（不是整条路径）、是不是子代理和类型、起的时刻、最后一次动、
@@ -443,7 +443,7 @@ export function readConfig(home) {
     raw = readFileSync(path, 'utf8');
   } catch {
     throw new Error(
-      `没配 ${path}：重装一次（pnpm local-sessions:install --url <法国地址>，通行证放环境变量 FLEET_NODE_TOKEN）`,
+      `没配 ${path}：重装一次（pnpm local-sessions install --url <法国地址>，通行证放环境变量 FLEET_NODE_TOKEN）`,
     );
   }
   /** @type {unknown} */

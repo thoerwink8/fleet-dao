@@ -1420,7 +1420,7 @@ describe('fleet-dao 的创始人引导在进度单 #1055 上（开会话钩子�
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('无主的创始人引导 2 条（进度单 #1055');
     expect(lines[0]).toContain('11（2026-10-05 17:50）太慢了');
-    expect(lines[0]).toContain('pnpm progress:claim');
+    expect(lines[0]).toContain('pnpm progress claim');
     expect(f.calls.map(([script]) => script)).toEqual([SCRIPT]);
     expect(check(dir, fakeRun({ stdout: '' }).run)).toEqual([]);
   });
@@ -2257,9 +2257,9 @@ describe('引导认主：进度单 #1055 上的待处理引导只叫主人那个
       /^创始人引导有 1 条归本会话、没处理（进度单 #1055；本会话是 Mirasim 会话 dir-a）/,
     );
     expect(lines[0]).toContain(LONG);
-    expect(lines[0]).toContain('pnpm progress:done');
+    expect(lines[0]).toContain('pnpm progress done');
     expect(lines[1]).toMatch(
-      /^无主的创始人引导 1 条.*33（2026-10-11 18:15）老的一条.*先认领再办：pnpm progress:claim <评论号>/,
+      /^无主的创始人引导 1 条.*33（2026-10-11 18:15）老的一条.*先认领再办：pnpm progress claim <评论号>/,
     );
     expect(lines[2]).toBe('别的会话还有 1 条创始人引导在办（进度单 #1055），不归你，别动。');
     expect(lines.join('\n')).not.toContain('字号太大');

@@ -102,7 +102,7 @@ const REPO_ONLY: ReadonlyArray<readonly [string, RegExp, string]> = [
   ['pnpm', /pnpm/, '开 PR 用 `pnpm pr:open`'],
   [
     'pr:open 这类本仓脚本',
-    /\b(pr:open|issue:new|issue:close|agents:sync|progress:note)\b/,
+    /\b(pr:open|issue:new|issue:close|agents:sync|progress note)\b/,
     '收尾跑 issue:close',
   ],
   ['fleet 命令', /(^|[^\w-])fleet(?![\w-])/m, '用 `fleet say` 报进度'],

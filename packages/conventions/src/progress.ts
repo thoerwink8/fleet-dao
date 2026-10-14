@@ -1,4 +1,4 @@
-// pnpm progress:note / progress:directive / progress:claim / progress:done / progress:read：进度和创始人中途给的引导，记在 GitHub 的
+// pnpm progress note / progress directive / progress claim / progress done / progress read：进度和创始人中途给的引导，记在 GitHub 的
 // 置顶单 #1055「进度与创始人引导」下面（一条评论一件事），不再写进 docs/PROGRESS.md 走 PR（那样每条进度都占一次 CI 和合并）。
 // 评论的样子（第一行是标记，命令靠它认条）：
 //   进度：      【进度】2026-10-05 17:30
@@ -25,9 +25,9 @@ const OWNER_NAME = /^[\w-]{1,128}$/;
 export const ownerLine = (owner: string): string => `〔主：${owner}〕`;
 
 export const PROGRESS_USAGE =
-  '用法：pnpm progress:note "<一句话进度>"｜pnpm progress:directive "<创始人原话>" --at "<原话的时间，如 2026-10-05 16:20>"｜' +
-  'pnpm progress:claim <评论号> [--force --why "原会话为什么没了"]｜' +
-  'pnpm progress:done <评论号> [--note "办成了什么"]｜pnpm progress:read [--pending] [--limit <条数，默认 10>]';
+  '用法：pnpm progress note "<一句话进度>"｜pnpm progress directive "<创始人原话>" --at "<原话的时间，如 2026-10-05 16:20>"｜' +
+  'pnpm progress claim <评论号> [--force --why "原会话为什么没了"]｜' +
+  'pnpm progress done <评论号> [--note "办成了什么"]｜pnpm progress read [--pending] [--limit <条数，默认 10>]';
 
 /** 参数不对、评论不是该办的那种：拒绝。入口退出码 1。 */
 export class ProgressRefused extends Error {

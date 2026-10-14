@@ -94,7 +94,7 @@ if (
 }
 
 // 本机会话心跳（agents/local-sessions）：装过的机器顺手换新脚本和钩子登记（install.mjs refresh；没装过它自己说一句、不动）。
-// 调工具前不再挂心跳、其余改 async：不经这一步，各台要等有人重跑 pnpm local-sessions:install 才换。
+// 调工具前不再挂心跳、其余改 async：不经这一步，各台要等有人重跑 pnpm local-sessions install 才换。
 if (
   process.argv.includes('--apply') &&
   !process.argv.includes('--user') &&
