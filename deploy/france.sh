@@ -141,6 +141,7 @@ SSHD_SESSION_USER_DROPIN=/etc/ssh/sshd_config.d/51-fleet-dao-session-user.conf
 MIRASIM_SESSION_PORT=4318
 MIRASIM_SESSION_UNIT_FILE=/etc/systemd/system/fleet-mirasim-session.service
 # 它的健康检查（#1676）：定时器每 2 分钟读 /api/health，连续 3 次不是 ok:true 就重启它（deploy/lib/mirasim-liveness.sh）。
+# 有会话在跑且这一下是超时：只记不重启（#2186，忙的时候超时会把正在跑的会话杀掉）。
 # 脚本放 /usr/local/lib 下的副本（全链归 root），不从检出直接跑
 MIRASIM_LIVENESS_SCRIPT=/usr/local/lib/fleet-dao/mirasim-liveness.sh
 MIRASIM_LIVENESS_UNITS=(fleet-mirasim-liveness.service fleet-mirasim-liveness.timer)
@@ -174,8 +175,7 @@ PG_UNIT=postgresql@$PG_MAJOR-main.service
 # 发布时照期望写（只写期望变了的键，人手改的不改回），本脚本只管属主权限
 RELEASES_DIR=/srv/fleet-dao-releases
 APP_ENV_FILES=(engine api release) # /etc/fleet-dao/<名>.env ← 期望（deploy/france/desired-config.json）
-# 随机密钥（文件:键:用途），首次生成后不再动。以前装过的 agent-token.env（fleet 命令的令牌密钥）、gateway-token.env（飞书网关通行证）
-# 随两个接口一起撤了：服务单元不再读它们，机器上已有的文件不删（要不要清由人定）
+# 随机密钥（文件:键:用途），首次生成后不再动。以前装过的 agent-token.env、gateway-token.env 随接口撤了，由 retire_old_units 删（RETIRED_FILES）
 APP_SECRETS=("session-secret:FLEET_SESSION_SECRET:驾驶舱登录的 Cookie")
 # 「引擎」GitHub App 的凭据（手放）：api.env 的 FLEET_GITHUB_WEBHOOK_SECRET 照它的 webhook_secret 填（lib/app-config.sh）
 ENGINE_APP_JSON=/etc/fleet-dao/github/gh-app-fleet-dao-engine.json
@@ -198,6 +198,9 @@ HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
 RETIRED_UNITS=(fleet-demo-scopes.path fleet-demo-scopes.timer fleet-demo-scopes.service) # #1223：先停触发的两个，再停服务本身
 RETIRED_BIN=/usr/local/sbin/fleet-demo-scopes # #1223
 RETIRED_UNIT_DIR=/etc/systemd/system # 只有测试会改（#1223）
+# 已退役组件留下的令牌文件，没人再读（#2226）：fleet 命令的令牌密钥、飞书网关通行证（服务单元早不读了）、往香港发飞书网关的钥匙
+# （香港网关已删，#2184）。不备份，装机时直接删，读回核对它们不在
+RETIRED_FILES=(/etc/fleet-dao/agent-token.env /etc/fleet-dao/gateway-token.env /etc/fleet-dao/gateway-deploy.key)
 # 驾驶舱「发布到法国」按钮的接活（人工档，lib/human-tier.sh 的 setup_release_request）：后端（fleet）写请求到 RELEASE_REQUEST_DIR，
 # root 的 path 单元接活、走一趟发版，进度写在 TRAIN_DIR（root 的，fleet 写不进）。脚本是 deploy/france/release-request 的副本
 RELEASE_REQUEST_DIR=/var/lib/fleet-dao/release-request
@@ -806,10 +809,10 @@ setup_web_upload() {
 $line"
 }
 
-# 已删的演示版（#1223）：以前装过的单元停掉、禁用、删掉，脚本删掉。已经没有就什么都不动（幂等）。
+# 已删的演示版（#1223）：以前装过的单元停掉、禁用、删掉，脚本删掉；已退役的令牌文件（RETIRED_FILES，#2226）删掉。已经没有就什么都不动（幂等）。
 # 停不掉、删不掉判红（读回 readback_retired_units 还会再核对一遍），不当成没事
 retire_old_units() {
-  step "清掉已删的演示版留下的单元和脚本（#1223）"
+  step "清掉已删的演示版留下的单元和脚本（#1223）、已退役的令牌文件（#2226）"
   local u f touched=0
   for u in "${RETIRED_UNITS[@]}"; do
     f=$RETIRED_UNIT_DIR/$u
@@ -829,11 +832,15 @@ retire_old_units() {
   if [[ -e "$RETIRED_BIN" || -L "$RETIRED_BIN" ]]; then
     if rm -f -- "$RETIRED_BIN"; then changed "删掉 $RETIRED_BIN（#1223）"; else red "$RETIRED_BIN 删不掉（#1223）"; fi
   fi
+  for f in "${RETIRED_FILES[@]}"; do
+    if [[ ! -e "$f" && ! -L "$f" ]]; then continue; fi
+    if rm -f -- "$f"; then changed "删掉已退役的令牌文件 $f（#2226）"; else red "$f 删不掉（#2226）"; fi
+  done
 }
 
 # 读回：已删的单元和脚本真不在了（文件没有、也没在跑）
 readback_retired_units() {
-  local u bad=0
+  local u f bad=0
   for u in "${RETIRED_UNITS[@]}"; do
     if [[ -e "$RETIRED_UNIT_DIR/$u" || -L "$RETIRED_UNIT_DIR/$u" ]] || [[ "$(systemctl is-active "$u" 2>/dev/null)" == active ]]; then
       red "已删的 $u 还在（#1223）：停掉、删掉 $RETIRED_UNIT_DIR/$u 后 systemctl daemon-reload"
@@ -845,6 +852,14 @@ readback_retired_units() {
     bad=1
   fi
   if ((bad == 0)); then ok "已删的演示版单元和脚本都不在了（#1223）"; fi
+  bad=0
+  for f in "${RETIRED_FILES[@]}"; do
+    if [[ -e "$f" || -L "$f" ]]; then
+      red "已退役的令牌文件 $f 还在（#2226）：重跑 france.sh 删掉"
+      bad=1
+    fi
+  done
+  if ((bad == 0)); then ok "已退役的令牌文件都不在了（#2226）"; fi
 }
 
 # 自动发布单元：定时器每 5 分钟拉起一轮（deploy/france/auto-release），读数、主线绿了请求发版（0088）；发完版后以 root 跑 france.sh --auto-tier、替会话用户同步规矩。
@@ -1492,7 +1507,8 @@ readback_service_home() {
   fi
 }
 
-# 自动档（--auto-tier）：自动发布每发完一版以 root 顺带跑。只放不碰防火墙、sudoers、用户、机器上钥匙和环境文件的步骤，
+# 自动档（--auto-tier）：自动发布每发完一版以 root 顺带跑。只放不碰防火墙、sudoers、用户、机器上钥匙和环境文件的步骤
+# （例外只有 retire_old_units 删已退役、没人读的令牌文件），
 # 每一步都幂等（内容一样就什么都不动）。前提是整套装过一遍了（会话用户、/srv 下的目录都在）；没装过的机器这里判红。
 setup_auto_tier() {
   setup_slice

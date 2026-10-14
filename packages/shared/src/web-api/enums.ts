@@ -53,6 +53,8 @@ export const TaskStateSchema = z.enum([
   'failed',
   'stalled',
 ]);
+/** 谁在做这张单：引擎（法国）或本机（决定 0096，本机领的带租约）。 */
+export const TaskExecutorSchema = z.enum(['engine', 'local']);
 export const SubtaskStateSchema = z.enum([
   'pending',
   'waiting_deps',

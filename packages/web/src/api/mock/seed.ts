@@ -113,6 +113,8 @@ export function createSeed(now: number): MockState {
     spec?: string;
     runs?: SessionRun[];
     subtasks?: MSubtask[];
+    /** 本机领的单（决定 0096）：领它的环境和租约到期（距现在多少分钟）。 */
+    local?: { by: string; leaseIn: number };
   }
   function task(s: TaskSpec): MTask {
     const t: MTask['task'] = {
@@ -127,6 +129,11 @@ export function createSeed(now: number): MockState {
       createdAt: at(s.created),
     };
     if (s.spec) t.specDir = s.spec;
+    if (s.local) {
+      t.executor = 'local';
+      t.claimedBy = s.local.by;
+      t.leaseUntil = at(s.local.leaseIn);
+    }
     return { task: t, runs: s.runs ?? [], subtasks: s.subtasks ?? [], paused: false };
   }
   /** 分诊、需求文档、方案三段需求级会话。 */
@@ -403,6 +410,7 @@ export function createSeed(now: number): MockState {
       state: 'running',
       priority: 4,
       created: -40,
+      local: { by: 'founder-pc', leaseIn: 85 },
       runs: [
         ...frontRuns('t-16', -38, false),
         run({

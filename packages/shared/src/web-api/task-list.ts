@@ -3,7 +3,7 @@
 import { z } from 'zod';
 import { TASK_LIST_GROUPS } from '../task-list.ts';
 import { PageQuery } from './common.ts';
-import { TaskStateSchema } from './enums.ts';
+import { TaskExecutorSchema, TaskStateSchema } from './enums.ts';
 import { Cursor, Id, Time } from './internal.ts';
 
 export const TaskListGroupSchema = z.enum(TASK_LIST_GROUPS);
@@ -37,6 +37,12 @@ export const TaskListRowSchema = z.object({
   state: TaskStateSchema,
   /** 被人暂停了：引擎写的那句「已暂停：被谁暂停、为什么」；没暂停没有这个键。 */
   paused: z.string().optional(),
+  /** 谁在做：engine = 法国引擎，local = 本机领的（决定 0096，tasks.executor）。老后端、老环境推来的快照没有这个键，当引擎。 */
+  executor: TaskExecutorSchema.optional(),
+  /** 本机领的单：领它的环境编号（通行证认出的，如 founder-pc；tasks.claimed_by）。引擎的单没有这个键。 */
+  claimedBy: z.string().optional(),
+  /** 本机领的单：租约到期的时刻（tasks.lease_until）；到点没续就退回法国队列。引擎的单没有这个键。 */
+  leaseUntil: Time.optional(),
   /** 筛选分到哪一组。 */
   group: TaskListGroupSchema,
   /** 现在在哪一段（对题、动手、验收、验收还没起、合并）；三段流水推不出的是 null。 */

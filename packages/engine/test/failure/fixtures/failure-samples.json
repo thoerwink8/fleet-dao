@@ -1529,6 +1529,24 @@
         "message": "同一个写操作（github.open_pr thoerwink8/fleet-dao:fleet/1971-t01a1307a）别处正在做，稍后重试"
       },
       "expect": { "action": "retry", "rule": "GH3", "delaySeconds": 150, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X107",
+      "provenance": "production",
+      "origin": "法国 2026-10-14 #2186 两次动手（runs 1b772cfb、86663296，deepseek-flash）：看门狗 fleet-mirasim-liveness 在会话跑到一半时因健康检查超时重启了 fleet-mirasim-session，令牌文件不在，引擎同一秒列不到令牌。原文两次一字不差，第二次被「认不出」挂起",
+      "evidence": {
+        "hostId": "mirasim",
+        "code": "no_result",
+        "message": "会话结束，没有终帧：读状态的连接建不起来：/home/u/.mirasim/run 下没有 local-<端口>.token：这个会话用户还没单独起一份 Mirasim 服务"
+      },
+      "expect": {
+        "action": "retry",
+        "rule": "MR1",
+        "alert": false,
+        "routeOutcome": "neutral",
+        "counter": null,
+        "delaySeconds": 0
+      }
     }
   ],
   "skipped": [

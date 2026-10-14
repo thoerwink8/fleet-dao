@@ -157,6 +157,7 @@ describe('pnpm work：本机领单、续租、结束', () => {
     });
     expect(await w.run('claim', '42')).toBe(1);
     expect(w.text()).toContain('法国引擎手上有这张单');
+    expect(w.text()).toContain('停下等人的单 claim 会自己接手');
     expect(w.gh.some((a) => a[1] === 'edit')).toBe(false);
   });
 

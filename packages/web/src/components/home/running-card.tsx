@@ -22,7 +22,7 @@ import {
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import { brand } from '#brand';
-import { formatAgo, formatDuration } from '../../lib/format';
+import { formatAgo, formatClock, formatDuration } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import type { Tone } from '../../lib/status';
 import { cn } from '../../lib/utils';
@@ -39,6 +39,36 @@ export const SEGMENT_LABEL: Record<NonNullable<HomeRunning['segment']>, string> 
   verify_pending: '还没验',
   merge: '在合并队列',
 };
+
+/** 本机领的单（决定 0096：tasks.executor = local，带租约）。老后端、老快照没有 executor，当引擎。 */
+export function isLocalTask(item: Pick<HomeRunning, 'executor'>): boolean {
+  return item.executor === 'local';
+}
+
+/**
+ * 本机领的单「谁在做」：本机 · 领它的是哪台。machineOf 把环境编号换成机器名（本机会话上报里有，没有就写环境编号）；
+ * 通行证没记领取人的写「没记是哪台」，不猜。
+ */
+export function localWhoOf(
+  item: Pick<HomeRunning, 'claimedBy'>,
+  machineOf?: (nodeId: string) => string | undefined,
+): string {
+  const id = item.claimedBy;
+  return `本机 · ${id === undefined ? '没记是哪台' : (machineOf?.(id) ?? id)}`;
+}
+
+/** 本机领的单租约到几点；过了点还没续也没退回的写「租约已过期」（法国下一轮拉单会收回），没给到期时刻照实说。 */
+export function leaseTextOf(item: Pick<HomeRunning, 'leaseUntil'>, now: number): string {
+  if (item.leaseUntil === undefined) return '租约到期时刻没给';
+  const clock = formatClock(item.leaseUntil);
+  return Date.parse(item.leaseUntil) < now ? `租约已过期（${clock}）` : `租约到 ${clock}`;
+}
+
+/** 卡片、详情上「谁在做」那一格：本机领的写本机，引擎的写模型名，这一刻没有进程在跑的照实说。 */
+export function workerTextOf(item: HomeRunning, machineOf?: (nodeId: string) => string | undefined): string {
+  if (isLocalTask(item)) return localWhoOf(item, machineOf);
+  return item.worker ?? '没有进程在跑';
+}
 
 /** segment 推不出（老单、runs 里没有流水）时卡上怎么写：不猜、不画成「卡住了」。 */
 const SEGMENT_NOT_WIRED = '在跑（还没记在哪一段）';
@@ -113,6 +143,8 @@ export function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot 
 export function statusTextOf(item: HomeRunning): string {
   if (item.waitingReason === 'paused') return '已暂停';
   if (item.waitingReason === 'parked') return '停下等人';
+  // 本机领的单没有三段流水（本机自己做，不走法国的 runs）：写本机在做，不写「还没记在哪一段」
+  if (isLocalTask(item) && item.segment === null) return '本机在做';
   if (item.segment === 'merge' && item.redChecks) return `${CHECKS_RED_PREFIX}${item.redChecks}`;
   const notStarted = item.segment === 'scoping' && item.lastEvent === undefined && !needsFounder(item);
   return item.segment === null
@@ -146,9 +178,22 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
 
           <div className="flex items-center gap-x-2 text-meta text-muted-foreground">
             <Bot className="size-3 shrink-0" aria-hidden />
-            <span className={cn('max-w-1/2 shrink-0 truncate', item.worker ? 'text-foreground' : undefined)}>
-              {item.worker ?? '没有进程在跑'}
+            <span
+              className={cn(
+                'max-w-1/2 shrink-0 truncate',
+                item.worker || isLocalTask(item) ? 'text-foreground' : undefined,
+              )}
+            >
+              {workerTextOf(item)}
             </span>
+            {isLocalTask(item) ? (
+              <>
+                <span aria-hidden>·</span>
+                <span className="num shrink-0 whitespace-nowrap" data-lease>
+                  {leaseTextOf(item, now)}
+                </span>
+              </>
+            ) : null}
             {item.stageSince ? (
               <>
                 <span aria-hidden>·</span>

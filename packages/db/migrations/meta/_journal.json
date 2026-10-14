@@ -498,6 +498,13 @@
       "when": 1792001745082,
       "tag": "0070_task_executor_lease",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1792014591854,
+      "tag": "0071_drop_feishu_intent_tables",
+      "breakpoints": true
     }
   ]
 }

@@ -109,6 +109,12 @@ export interface Task {
    * 等合并且必过检查是红的：从 tasks.doing（前缀「检查红了：」）映射出来的检查名。没有这个键就不是这种情况。
    */
   redChecks?: string;
+  /** 谁在做（tasks.executor）：engine 法国引擎、local 本机领的（决定 0096）。 */
+  executor?: 'engine' | 'local';
+  /** 本机领的单：领它的环境编号（tasks.claimed_by）。 */
+  claimedBy?: string;
+  /** 本机领的单：租约到期时刻（tasks.lease_until，ISO）。 */
+  leaseUntil?: string;
   createdAt: string;
 }
 

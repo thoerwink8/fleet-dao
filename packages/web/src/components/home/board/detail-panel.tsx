@@ -14,7 +14,15 @@ import { inkClass } from '../../layout/tone';
 import { ActionButtons } from '../../task-actions';
 import { Button } from '../../ui/button';
 import type { TicketUsage } from '../resources';
-import { CardLink, needsFounder, statusTextOf, waitLineOf } from '../running-card';
+import {
+  CardLink,
+  isLocalTask,
+  leaseTextOf,
+  needsFounder,
+  statusTextOf,
+  waitLineOf,
+  workerTextOf,
+} from '../running-card';
 import type { HomeRunning } from '../types';
 import { targetOfItem, useBoardUi } from './board-ui';
 import {
@@ -184,7 +192,11 @@ function TicketPanel({
             <span className={cn('font-medium', inkClass[tone])}>{statusTextOf(item)}</span>
           </Row>
           <Row label="谁在做">
-            {item.worker ? (
+            {isLocalTask(item) ? (
+              <span className="num">
+                {workerTextOf(item)} · {leaseTextOf(item, now)}
+              </span>
+            ) : item.worker ? (
               <span className="num">{item.worker}</span>
             ) : (
               <span className="text-muted-foreground">没有进程在跑</span>
@@ -274,7 +286,7 @@ function TicketButton({ item, onSelect }: { item: HomeRunning; onSelect(id: stri
           <StatusBadge tone={tone} label={statusTextOf(item)} />
         </div>
         <div className="mt-1 truncate text-meta text-muted-foreground">
-          {item.worker ?? '没有进程在跑'}
+          {workerTextOf(item)}
           {item.waitingReason !== 'nothing' ? ` · ${waitLineOf(item)}` : ''}
         </div>
       </button>

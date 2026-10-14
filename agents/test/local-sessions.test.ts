@@ -33,7 +33,7 @@ import {
   TOKEN_HEADER,
   writeHeartbeat,
 } from '../local-sessions/lib.mjs';
-import { acquireLock } from '../local-sessions/loop.mjs';
+import { acquireLock, reviveLoop } from '../local-sessions/loop.mjs';
 
 // 法国那边的定义（packages/shared）。agents 这个 tsc 项目只收 agents 自己的文件，静态引用会把 shared 整包拖进来，
 // 所以按路径动态引（vitest 照样跑真的那一份），只声明这里用到的几样。
@@ -624,6 +624,24 @@ describe('装和卸', () => {
     writeFileSync(lock, 'garbage');
     expect(acquireLock({ lock, pid: 333, alive: () => true })).toBe(true);
     expect(readFileSync(lock, 'utf8')).toBe('333');
+  });
+
+  it('【故意造出的失败】循环死了锁还在（睡眠、重启、被杀）：心跳钩子拉起新的；锁在且进程活着、锁不在都不动', () => {
+    const home = tmp();
+    const dir = join(home, '.fleet-dao', 'local-sessions');
+    mkdirSync(dir, { recursive: true });
+    let started = 0;
+    const start = () => {
+      started += 1;
+    };
+    expect(reviveLoop({ home, alive: () => false, start })).toBe('no-lock');
+    writeFileSync(join(dir, 'loop.pid'), '4242');
+    expect(reviveLoop({ home, alive: () => true, start })).toBe('alive');
+    expect(started).toBe(0);
+    expect(reviveLoop({ home, alive: () => false, start })).toBe('started');
+    writeFileSync(join(dir, 'loop.pid'), 'garbage');
+    expect(reviveLoop({ home, alive: () => true, start })).toBe('started');
+    expect(started).toBe(2);
   });
 
   it('【故意造出的失败】旧版登记的调工具前心跳（matcher *）：重装、refresh 都摘掉，别人的钩子留着；没装过的机器 refresh 什么都不动', () => {
