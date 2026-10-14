@@ -5,7 +5,8 @@
 // 改这里之前必须知道：
 // - 闸分两类。「硬闸」任何情况下都不放行（--force 也不行）：不是 issue / 已关、作者不在白名单、母单子单、本机做、已派过
 //   （有一代任务工作流在跑或已结束；只有任务行、没有任何一代、行是 queued 或 stopped 的不算，接手那一行再派）、
-//   任务工作流没查成（不确定，不当成没有工作流）、碰 workflows、
+//   任务工作流没查成（不确定，不当成没有工作流）、碰 workflows、碰改标准的路径（standard-paths.json 列的，判法同拉单的
+//   standardPathIn；引擎的 PR 正文没有创始人原话，合并闸永远判红，决定 0093）、
 //   已有 PR 挂着、版本认不出（没查成）、交代不全（任务工作流第一步会拒收，放行了只会起一条马上失败的工作流）。
 //   「就绪度闸」--force 可以放行：不是当前版本（含未排期）、改动规模是最重档、历史失败超限。放行必须带 --note，进操作记录。
 // - 硬闸遇到第一个就停（后面的不必读）；就绪度闸全部判完一次说全，让人看清 force 放行的是哪几样。
@@ -15,6 +16,7 @@
 // - 和 #1336（拉单挑单规则重做）并行改：这里只调 intake.ts 已经导出的 workflowPathIn、prClaimedIssues 这些，不改它们。
 //   #1336 合并后如果加了新的准入闸（比如「验收条是 diff 里看得见的」），要把它也排进这里（硬还是就绪度，按 FORCEABLE 分），见 PR 说明。
 
+import { loadStandardPaths, type StandardPath } from '@fleet-dao/conventions';
 import { familyGate, localGate, versionGate } from '@fleet-dao/core';
 import { type EngineMasterState, engineMasterOf, type MasterSettingRow } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
@@ -27,6 +29,7 @@ import {
   type IntakeIssue,
   type IntakePlan,
   type IntakeRepo,
+  standardPathIn,
   workflowPathIn,
 } from './intake.ts';
 
@@ -49,6 +52,7 @@ export type DispatchGateReason =
   | 'already_dispatched'
   | 'workflow_unknown'
   | 'touches_workflows'
+  | 'touches_standard'
   | 'pr_claimed'
   | 'version_unreadable'
   | 'brief_incomplete'
@@ -112,6 +116,8 @@ export interface DispatchIssueDeps {
   taskGenerations: IntakeDeps['taskGenerations'];
   openPrClaims: IntakeDeps['openPrClaims'];
   readSpecDoc: IntakeDeps['readSpecDoc'];
+  /** 改标准的路径清单；不给读引擎自己带的那一份。读不到、认不出照抛：不当成「没有标准路径」。 */
+  standardPaths?(): Promise<StandardPath[]>;
   /** 这张单以前的任务工作流里失败收场的有几条。读不到照抛：不当成 0。 */
   failedAttempts(repo: IntakeRepo, issueNumber: number): Promise<number>;
   start: IntakeDeps['start'];
@@ -195,6 +201,15 @@ async function hardFailure(
       failure: fail(
         'touches_workflows',
         `正文写了 ${workflowPath}，引擎的令牌推不了改工作流的提交，派了只会白烧一轮`,
+      ),
+    };
+  }
+  const standard = standardPathIn(issue.body, await (deps.standardPaths ?? loadStandardPaths)());
+  if (standard !== null) {
+    return {
+      failure: fail(
+        'touches_standard',
+        `正文要动改标准的路径 ${standard.path}（清单的 ${standard.rule.path}）：引擎开的 PR 正文没有创始人原话，合并闸会一直判红，派了只会做完卡在合并；本机做`,
       ),
     };
   }

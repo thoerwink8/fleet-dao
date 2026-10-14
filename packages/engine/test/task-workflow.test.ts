@@ -2179,11 +2179,61 @@ describe('任务工作流 · 没提交就避开上一轮路由（#1408）', { ti
     expect(picks[1]?.avoidModelIds).toEqual([]);
     expect(picks[2]?.avoidRouteIds).toEqual(['r1', 'r2']);
     expect(picks[2]?.avoidModelIds).toEqual(['m1']);
+    // 避开模型时连它那一族一起避开（决定 0093）
+    expect(picks[2]?.avoidFamilies).toEqual(['claude']);
+    expect(picks[1]?.avoidFamilies).toBeUndefined();
     expect(calls.segment[2]?.route).toMatchObject({ routeId: 'r3', modelId: 'm2' });
     const opinion = calls.segment[2]?.feedback.join('\n') ?? '';
     expect(opinion).toContain('上一轮用的是路由 r2');
     expect(opinion).toContain('这一轮避开它');
-    expect(opinion).toContain('也避开模型 m1');
+    expect(opinion).toContain('也避开模型 m1和它那一族（claude');
+  });
+
+  it('连着两轮没有提交、别的族没有路由：退回只避开模型，同族换一个模型', async () => {
+    const world = createFakeWorld({
+      routes: [
+        { routeId: 'r1', poolId: 'p1', modelId: 'm1', family: 'claude', hostId: 'claude-code' },
+        { routeId: 'r2', poolId: 'p2', modelId: 'm1', family: 'claude', hostId: 'claude-code' },
+        { routeId: 'r4', poolId: 'p4', modelId: 'm3', family: 'claude', hostId: 'claude-code' },
+      ],
+    });
+    const { tasks, calls } = scripted({ delivery: deliveryAfterMisses(2) });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 3 });
+    expect(calls.segment[2]?.route.modelId).toBe('m3');
+    const picks = routePicks(world);
+    expect(picks.at(-2)?.avoidFamilies).toEqual(['claude']);
+    expect(picks.at(-1)?.avoidFamilies).toBeUndefined();
+    expect(picks.at(-1)?.avoidModelIds).toEqual(['m1']);
+  });
+
+  it('交给冷验收的作者族用选路给的作者族（unclassified 的 cursor 模型记成 gpt）', async () => {
+    const world = createFakeWorld({
+      routes: [
+        {
+          routeId: 'rc',
+          poolId: 'pc',
+          modelId: 'cursor:gpt-5.4-mini-high',
+          family: 'unclassified',
+          authorFamily: 'gpt',
+          hostId: 'api-shell',
+        },
+      ],
+    });
+    const { tasks, calls } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.verify[0]?.authorFamilies).toEqual(['gpt']);
   });
 
   it('避开之后没有别的路由：仍派原来的路由，lastProblem 写明没有别的路由可换', async () => {

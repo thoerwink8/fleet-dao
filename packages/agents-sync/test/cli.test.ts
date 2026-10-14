@@ -407,3 +407,36 @@ describe('清单在但读不了', () => {
     },
   );
 });
+
+// 决定 0093：法国引擎一次性会话的用户家里装着 commander、discuss 这些通用 skill，grok、cursor 起的动手会话一启动就去读
+// （近 7 天 147 段动手会话里 88 段读过，读完才开始干活）。--no-skills 给这种用户：不装，以前装的照清单撤掉。
+describe('--no-skills：引擎一次性会话的用户家里不装 skill', () => {
+  it('写：清单里记着的撤掉、清单清空；查判对、那一行说明为什么；不是本脚本装的不碰', {
+    timeout: 30_000,
+  }, () => {
+    const home = tempDir('home');
+    const repo = makeRepo({ commander: { 'SKILL.md': '---\nname: commander\n---\n指挥官\n' } });
+    expect(run(['--apply', '--home', home, '--repo', repo]).code).toBe(0);
+    expect(existsSync(join(home, '.claude/skills/commander/SKILL.md'))).toBe(true);
+    put(home, '.claude/skills/mine/SKILL.md', '别人装的\n');
+
+    const off = run(['--apply', '--no-skills', '--home', home, '--repo', repo]);
+    expect(off.code).toBe(0);
+    expect(existsSync(join(home, '.claude/skills/commander'))).toBe(false);
+    expect(get(home, '.claude/skills/mine/SKILL.md')).toBe('别人装的\n');
+    expect(get(home, '.fleet-dao/agents-sync.json')).not.toContain('commander');
+
+    const check = run(['--check', '--no-skills', '--home', home, '--repo', repo]);
+    expect(check.code).toBe(0);
+    expect(check.out).toContain('不装（--no-skills）');
+    // 不带 --no-skills 查：缺了仓里的 skill，判缺失（两种用户的判据各是各的）
+    expect(run(['--check', '--home', home, '--repo', repo]).code).toBe(1);
+  });
+
+  it('--retire-old 带 --no-skills：退出 64', () => {
+    const home = tempDir('home');
+    const r = run(['--retire-old', '--old-repo', home, '--no-skills', '--home', home]);
+    expect(r.code).toBe(64);
+    expect(r.err).toContain('--no-skills 只给 --check、--apply 用');
+  });
+});

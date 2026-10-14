@@ -68,6 +68,9 @@ export const USAGE = `agents-sync —— 把 fleet-dao 仓里 agents/shared-rule
                      写出来的东西也归他）
   --repo <目录>      fleet-dao 仓的位置（默认：本脚本所在的仓）
   --old-repo <目录>  旧仓在这台机器上的位置（--retire-old 要）
+  --no-skills        这个家不装 skill，以前本脚本装的撤掉（清单里没记的不碰）：给引擎一次性会话的用户（法国的会话用户）。
+                     那里的会话照单子干活，家目录里的通用 skill（commander、discuss 这些）和单子无关，
+                     各家 CLI 一启动就扫到、会去读（决定 0093）
 
 每项一行：✓ 一致、↻ 这次改了、✗ 漂移 / 缺失 / 没做成、… 没查成、· 没装（跳过）。
 退出码：0 都对（没装的不算）；1 有漂移、缺失或没做成；2 没有 ✗ 但有没查成的（含另一个同步正在写）；64 用法不对。
@@ -109,6 +112,7 @@ interface Args {
   user?: string;
   repo?: string;
   oldRepo?: string;
+  noSkills?: boolean;
 }
 
 class UsageError extends Error {}
@@ -123,7 +127,11 @@ function parse(argv: readonly string[]): Args | 'help' {
       modes.push(a);
       continue;
     }
-    const takes: Record<string, keyof typeof opts> = {
+    if (a === '--no-skills') {
+      opts.noSkills = true;
+      continue;
+    }
+    const takes: Record<string, 'home' | 'user' | 'repo' | 'oldRepo'> = {
       '--home': 'home',
       '--user': 'user',
       '--repo': 'repo',
@@ -143,6 +151,7 @@ function parse(argv: readonly string[]): Args | 'help' {
   }
   if (mode !== '--retire-old' && opts.oldRepo !== undefined)
     throw new UsageError('--old-repo 只给 --retire-old 用');
+  if (mode === '--retire-old' && opts.noSkills) throw new UsageError('--no-skills 只给 --check、--apply 用');
   return { mode, ...opts };
 }
 
@@ -206,6 +215,10 @@ const POSITION_OFF_FOR_USER =
 const MCP_OFF_FOR_USER =
   '替别的用户写（--user）时不管 MCP 服务器配置（~/.claude.json）：那份是 Claude Code 每次会话自己读写的活文件，替别的用户写超出这张单的范围';
 
+/** --no-skills 时 skill 那一行报的原因。 */
+export const NO_SKILLS_WHY =
+  '不装（--no-skills）：引擎一次性会话的用户，会话照单子干活，通用 skill 和单子无关，装了各家 CLI 一启动就会去读';
+
 const GIT_PROXY_SECTION =
   'GitHub 的 git 代理（~/.fleet-dao/fallback-proxy → http.https://github.com/.proxy）';
 
@@ -234,7 +247,9 @@ export function runCli(argv: readonly string[], deps: Deps): number {
       deps.stderr(`没查成：${read.why}（仓：${repo}）\n`);
       return 2;
     }
-    sources = read.value;
+    sources = args.noSkills
+      ? { ...read.value, skills: new Map(), vendor: new Set(), skillsOff: NO_SKILLS_WHY }
+      : read.value;
   }
   let oldRepo: string | undefined;
   if (args.oldRepo !== undefined) {

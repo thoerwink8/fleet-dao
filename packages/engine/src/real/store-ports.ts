@@ -64,6 +64,7 @@ import {
   type ChooseRouteInput,
   type ChooseRouteResult,
   chooseRoute,
+  familyAvoidIsRetry,
   stageAllOpen as judgeStageAllOpen,
   type LiveOrgReading,
   type OrgPlanView,
@@ -742,9 +743,13 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ...(facts.problems.length > 0 ? [`路由两层的配置缺口：${facts.problems.join('、')}`] : []),
         ];
         const noOther =
-          families.length > 0
-            ? [`没有别家可验：写这张单的是 ${families.join('、')} 族，这一步只派别家，不拿同族顶`]
-            : [];
+          families.length === 0
+            ? []
+            : familyAvoidIsRetry(input.stage)
+              ? [
+                  `换一族没有能派的路由：这张单最近动手没做成的是 ${families.join('、')} 族，同族换模型多半重蹈覆辙；引擎会退回只避开模型再选`,
+                ]
+              : [`没有别家可验：写这张单的是 ${families.join('、')} 族，这一步只派别家，不拿同族顶`];
         // 路由两层排了这个用途、可流程配置里这一步的模型一条路由都没有：明说，不当成「这个用途一条都没配」
         if (input.models && facts.configured && facts.order.length === 0) {
           const models = input.models.length > 0 ? input.models.join('、') : '一个都没配';

@@ -298,9 +298,11 @@ describe('静默启动器不分配控制台', () => {
       sources(makeRepo({})),
       new Backups(home, PLATFORM, new Date('2026-09-26T06:00:00Z')),
     );
-    const exe = join(home, '.fleet-dao', 'bin', 'quiet-stop.exe');
+    // 用户级只登记调工具前钩子（Stop 那条随 #1952 挪进本仓的项目级，不再装 quiet-stop.exe）：拿 quiet-pretool 测同一个启动器
+    const exe = join(home, '.fleet-dao', 'bin', 'quiet-pretool.exe');
+    expect(existsSync(exe)).toBe(true);
     writeFileSync(
-      join(home, '.fleet-dao', 'hooks', 'stop.mjs'),
+      join(home, '.fleet-dao', 'hooks', 'pretool.mjs'),
       "let s = ''; process.stdin.on('data', (d) => { s += d; }); process.stdin.on('end', () => { process.stdout.write('OUT' + s); process.stderr.write('ERR' + s); process.exit(7); });\n",
     );
     const ran = runChild(exe, [], { input: 'abc', windowsHide: true });

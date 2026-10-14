@@ -1,7 +1,6 @@
-// 只改文档时本机该跑哪些测试：找出「源码里写着这份文档的路径」的测试文件（test-changed.ts 用）。
-// 为什么有这个文件：ci-plan.ts 的 PATH_RULES 把 docs/、specs/、README.md 判成「不测任何包」，本机 test:changed 于是只剩 CI 每个 PR
-// 都跑的那份 ALWAYS_TESTS——其中 agents/test/ 是整个目录（30 个测试文件、一千多条测试，一百秒上下），可真正读 docs/ 下文件的只有
-// 个位数。CI 里那份并行跑、不占墙钟，本机几个会话抢着跑就是时间。
+// 改到文档时本机该带哪些测试：找出「源码里写着这份文档的路径」的测试文件（test-changed.ts 用）。
+// 为什么有这个文件：ci-plan.ts 的 PATH_RULES 把 docs/、specs/、README.md 判成「不测任何包」，可 agents/test/ 里有几份读文档的；
+// 整个 agents/test/（30 个测试文件、一千多条测试，一百秒上下）只在 CI 每个 PR 都跑（ALWAYS_TESTS），本机只带读到改动的这几份。
 // 改这里之前必须知道：
 // - 判法是「测试源码里出现这份文档的路径（或它上面带斜杠的目录，如 docs/archive）」，也认 join(ROOT, 'docs', 'PROGRESS.md') 这种
 //   一段一段写的；多选不要紧（只是多跑一条），漏选才要紧，所以宁可宽：测试里当夹具提到路径的也会被选上。
@@ -38,7 +37,7 @@ export function docNeedles(doc: string): RegExp[] {
 
 /**
  * 读了这些文档的测试文件（仓内相对路径，排好序）。列不出测试文件、读不到某个测试文件时返回一句为什么。
- * 不含 doc-pointers.test.ts 这种每次都跑的：调用方自己带。
+ * 不含 doc-pointers.test.ts 这种本机每次都带的：调用方自己带。
  */
 export function docReaders(repo: RepoView, docs: readonly string[]): string[] | string {
   const files = listTestFiles(repo);

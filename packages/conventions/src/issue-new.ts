@@ -10,6 +10,8 @@
 // （帅位留给本机做的，接活不自动派）：和类别标签在同一次建单里贴上，不事后补——开单那个事件一到，没贴的已经被派走了。
 // 「怎么算做完」里写「PR 正文 / PR 描述 / PR body」就拒开（#1792 / #1764）：冷验收只看 diff 和单子，看不到 PR 正文，
 // 写进去引擎永远验不过、白跑两轮。要硬开带 --allow-pr-body-acceptance "<理由>"，理由追加进那一节末尾。
+// 「怎么算做完」里要 diff 外证据的（截图、线上、现场、审计、看日志、飞书收到……，判据在 off-diff-acceptance.ts，决定 0093）：
+// 交给引擎的单拒开；带 --local 的照开，开完提示改写。引擎拉单（packages/engine 的 jobs/intake.ts）用同一份判据再挡一道。
 // 单子正文就是需求的唯一的家（#654）：整份正文原样进 issue，不再另写一份 specs/<号>-<短名>/需求.md 镜像（两份各改各的，
 // 对账、检查的活全是它引出来的）。正文放不下 GitHub 的上限的：需求一页以内，长的方案另放 specs/<号>-<短名>/方案.md，单上只留链接。
 // 挂版本的母单、单独的单开好就排进那个版本里程碑说明的先后（<!-- fleet:order --> 之间，#807）：每天的 GitHub 对账查「挂在版本里
@@ -35,6 +37,13 @@ import {
   milestoneVersion,
 } from './labels.ts';
 import { type MdDoc, norm, parseMd, sectionRange } from './markdown.ts';
+import {
+  describeOffDiff,
+  OFF_DIFF_REWRITE,
+  type OffDiffItem,
+  offDiffAcceptanceItems,
+  splitAcceptanceItems,
+} from './off-diff-acceptance.ts';
 import { addToOrder, type OrderParse, parseOrder } from './plan-view.ts';
 
 export interface GhResult {
@@ -68,6 +77,8 @@ export interface IssueNewResult {
   order?: { position: number; count: number } | undefined;
   /** 开单前查的可能重复的单（deps.similar 给了才有）；只提示，开单不受它影响。 */
   similar?: SimilarReport | undefined;
+  /** 本机做的单「怎么算做完」里要 diff 外证据的条目：照开，入口提示改写（交给引擎的单这种直接拒开）。 */
+  offDiff?: OffDiffItem[] | undefined;
 }
 
 export const USAGE =
@@ -77,7 +88,8 @@ export const USAGE =
   '涉及面一律不写（那是算出来的、不是知道的）；--mother 多贴「母单」标签；' +
   '--parent 开子单：先挂到那张母单下面再挂里程碑；--local 多贴「本机做」：帅位留给本机做，接活不自动派；' +
   '挂版本的母单、单独的单开完自动排进版本里程碑说明的先后末尾，--order-after 插在那张后面；子单、未排期不排；' +
-  '「怎么算做完」里写「PR 正文 / PR 描述 / PR body」默认拒开（冷验收看不到），要硬开带 --allow-pr-body-acceptance）';
+  '「怎么算做完」里写「PR 正文 / PR 描述 / PR body」默认拒开（冷验收看不到），要硬开带 --allow-pr-body-acceptance；' +
+  '「怎么算做完」里要 diff 外证据的（截图、线上、现场、审计、看日志、飞书收到……）交给引擎的单直接拒开，本机做的单（--local）照开、开完提示改写）';
 
 /** --milestone 写这个值：这张单没有版本（未排期）。不去查 GitHub 的里程碑列表，建单也不带 --milestone。 */
 const UNSCHEDULED = '未排期';
@@ -181,29 +193,6 @@ export function prBodyAcceptanceItems(doneSectionBody: string): string[] {
   return splitAcceptanceItems(doneSectionBody).filter((item) => PR_BODY_IN_DONE.test(item));
 }
 
-/** 验收条：列表项各成一条；非列表的连续非空行合成一段；空行切开。 */
-function splitAcceptanceItems(text: string): string[] {
-  const items: string[] = [];
-  let current: string[] = [];
-  const flush = () => {
-    const t = current.join('\n').trim();
-    if (t) items.push(t);
-    current = [];
-  };
-  for (const raw of text.replace(/\r\n?/g, '\n').split('\n')) {
-    if (/^\s*(?:[-*]|\d+[.)])\s+\S/.test(raw)) {
-      flush();
-      current.push(raw.trim());
-    } else if (raw.trim() === '') {
-      flush();
-    } else {
-      current.push(raw.trim());
-    }
-  }
-  flush();
-  return items;
-}
-
 /** 把一行说明追加进「怎么算做完」节末（下一节标题之前）；没有这一节就附在文末。 */
 function appendNoteToDoneSection(body: string, note: string): string {
   const doc = parseMd('body.md', body);
@@ -224,12 +213,17 @@ function appendNoteToDoneSection(body: string, note: string): string {
  * 场景、原话、已知的模块、怎么算做完四节齐不齐（涉及面一律不写），以及「怎么算做完」里有没有提到 PR 正文（冷验收看不到）。
  * 纯函数，不读文件、不碰 gh。不通过回一句中文原因（原话照搬，末尾都带「单没开」）。
  * 提到 PR 正文但 allowPrBodyAcceptance 为真：通过，hits 里是命中的条目，调用方自己决定怎么把理由写进正文。
+ * 「怎么算做完」里有要 diff 外证据的条目（截图、线上、现场、审计、看日志、飞书收到……，判据在 off-diff-acceptance.ts，决定 0093）：
+ * 交给引擎的单（local 不为真，驾驶舱开的单都是）拒开；本机做的单（--local）通过，offDiffHits 里是命中的条目，调用方提示改写。
  */
 export type IssueBodyCheck =
-  | { ok: true; doc: MdDoc; prBodyHits: string[] }
+  | { ok: true; doc: MdDoc; prBodyHits: string[]; offDiffHits: OffDiffItem[] }
   | { ok: false; why: string; field?: string | undefined };
 
-export function checkIssueBody(body: string, opts: { allowPrBodyAcceptance?: boolean } = {}): IssueBodyCheck {
+export function checkIssueBody(
+  body: string,
+  opts: { allowPrBodyAcceptance?: boolean; local?: boolean } = {},
+): IssueBodyCheck {
   const doc = parseMd('body.md', body);
   const missing = checkRequiredSections(doc);
   if (missing) return { ok: false, why: `${missing.why}，单没开。`, field: missing.label };
@@ -252,7 +246,17 @@ export function checkIssueBody(body: string, opts: { allowPrBodyAcceptance?: boo
         `改成 diff 里看得见的写法（注释、文档或测试名），或带 --allow-pr-body-acceptance "<理由>"。单没开。`,
     };
   }
-  return { ok: true, doc, prBodyHits };
+  const offDiffHits = offDiffAcceptanceItems(sectionText(doc, '怎么算做完') ?? '');
+  if (offDiffHits.length > 0 && !opts.local) {
+    return {
+      ok: false,
+      field: '怎么算做完',
+      why:
+        `「怎么算做完」里有条目要 diff 外的证据，引擎做不出来也验不过：\n${describeOffDiff(offDiffHits)}\n` +
+        `${OFF_DIFF_REWRITE}本机做的单带 --local 开。单没开。`,
+    };
+  }
+  return { ok: true, doc, prBodyHits, offDiffHits };
 }
 
 /** 正文超过上限的话回一句原因（没超回 undefined）。开单脚本和驾驶舱开单共用。 */
@@ -270,7 +274,10 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   } catch (e) {
     throw new Error(`--body-file 读不到：${bodyPath}（${message(e)}），单没开。`);
   }
-  const checked = checkIssueBody(body, { allowPrBodyAcceptance: o.allowPrBodyAcceptance !== undefined });
+  const checked = checkIssueBody(body, {
+    allowPrBodyAcceptance: o.allowPrBodyAcceptance !== undefined,
+    local: o.local,
+  });
   if (!checked.ok) throw new Error(checked.why);
   let createBodyPath = bodyPath;
   if (checked.prBodyHits.length > 0) {
@@ -332,7 +339,8 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     version === undefined
       ? undefined
       : await orderIntoVersion(deps.gh, { number, url, version, after: o.orderAfter });
-  return { number, url, milestone, parent, local, order, similar };
+  const offDiff = checked.offDiffHits.length > 0 ? checked.offDiffHits : undefined;
+  return { number, url, milestone, parent, local, order, similar, offDiff };
 }
 
 interface Options {

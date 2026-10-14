@@ -20,6 +20,8 @@
 //   RESERVATION_TTL_MS，到点自己不算。开跑时名额已经没了（预占过期、空位给了别的单）抛 SEGMENT_NO_SLOT，可以重试：重新选路就行。
 // - 续会话（input.resumeSessionId，决定 0088）：工作流判定能续才给，这里原样交给 one-shot 续那个号，提示词只出被打断的原因
 //   和返工意见（renderResumePrompt）。续起来没跑成照常回 ok:false，工作流下一次退回开新会话。
+// - 新开的会话（不续的）起之前，把单子「已知的模块」列的文件以会话用户从工作树读出来放进提示词（runner/preload.ts，决定 0093）。
+//   读一个失败只记进那一节（「引擎没读到」），不挡会话；被叫停照抛。
 // - one-shot 的落盘目录（brief.txt、stdout.txt……）24 小时后由这里顺手清；清不掉只记日志。
 
 import { randomUUID } from 'node:crypto';
@@ -32,6 +34,7 @@ import { type PortContext, PortError } from '../ports.ts';
 import { segmentEvidence } from '../runner/evidence.ts';
 import type { RunsWriter } from '../runner/not-wired.ts';
 import { OneShotError, type OneShotResult, runOneShot, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
+import { type PreloadRead, preloadFromBytes, preloadPaths } from '../runner/preload.ts';
 import { renderSegmentPrompt } from '../runner/segment-prompt.ts';
 import { manualBriefOf } from '../runner/task-brief.ts';
 import { type RunSegmentInput, type RunSegmentResult, SEGMENT_STAGE } from '../task-contract.ts';
@@ -41,6 +44,7 @@ import type { ChannelAttempts, SegmentReservations } from './runs-writer.ts';
 import { type SubagentGuard, writeSegmentLocalSettings } from './segment-settings.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
 import { prepareSegmentTree, type SegmentTreeDeps } from './segment-tree.ts';
+import { readTreeFile } from './user-git.ts';
 
 /** 内存放不下时最多等多久（毫秒）、多久再试一次。 */
 export const ADMISSION_WAIT_MS = 10 * 60_000;
@@ -251,6 +255,26 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
         log('子代理提示的开关没读到，按关', { error: errMessage(error) });
       }
     }
+    // 3.5 首轮预载：新开的会话把单子列的文件先读好放进提示词（续的会话里已经有了）
+    const preload: PreloadRead[] = [];
+    if (!input.resumeSessionId) {
+      const t = {
+        exec: deps.tree.exec,
+        user: routeInfo.user,
+        dir: input.worktreePath,
+        scopePrefix: `preload-${treeRunId}`,
+        signal: ctx.signal,
+        ...(deps.tree.shBin ? { sh: deps.tree.shBin } : {}),
+      };
+      for (const path of preloadPaths(input.brief.touches)) {
+        try {
+          preload.push(preloadFromBytes(path, await readTreeFile(t, path)));
+        } catch (error) {
+          if (ctx.signal.aborted) throw ctx.signal.reason ?? error;
+          preload.push({ path, kind: 'error', why: errMessage(error) });
+        }
+      }
+    }
     const prompt = renderSegmentPrompt({
       brief: manualBriefOf(input.brief, { branch: input.branch, baseSha: input.baseSha }),
       specDir: input.brief.specDir,
@@ -258,6 +282,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       ...(input.interrupted ? { interrupted: input.interrupted } : {}),
       ...(subagentHint ? { subagentHint } : {}),
       ...(input.resumeSessionId ? { resumed: true } : {}),
+      ...(preload.length > 0 ? { preload } : {}),
     });
     // 4. 起会话。叫停（ctx.signal）接进会话的看守；切号叫停（ticket）交给 one-shot，结局记 org_switch。
     const stopSignal = ctx.signal;

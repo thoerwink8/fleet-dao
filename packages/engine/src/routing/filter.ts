@@ -13,6 +13,7 @@ import {
   reserveHitText,
   resolveMirasimExecutor,
   resolvePoolReserve,
+  SEGMENT_STAGE,
   type StageKind,
   UI_PURPOSE,
 } from '@fleet-dao/shared';
@@ -60,6 +61,14 @@ export interface FilterContext {
   carpoolRegistry?: CarpoolRegistryView | undefined;
   /** 界面类的活：禁令按 UI 判（ChooseRouteInput.uiWork）。 */
   uiWork: boolean;
+}
+
+/**
+ * 整族避开是不是动手换路由（决定 0093：自动处理时避开最近的模型和它那一族）：动手的用途（execute、ui）是；别的（验收、审）是「只派别家」。
+ * 两种的话不一样：动手是同族换模型多半重蹈覆辙，派不出会退回只避开模型；验收是不拿同族顶。
+ */
+export function familyAvoidIsRetry(stage: StageKind): boolean {
+  return stage === SEGMENT_STAGE.manual || stage === UI_PURPOSE;
 }
 
 /** 族名比较用的写法：去掉首尾空白、小写。 */
@@ -321,12 +330,17 @@ export function routerPicksModel(route: Pick<RouteFacts, 'upstreamModel' | 'upst
 
 function avoidReason(route: RouteFacts, ctx: FilterContext): string | null {
   const family = familyKey(route.authorFamily ?? route.family);
+  const retry = familyAvoidIsRetry(ctx.stage);
   if (ctx.avoid.families.has(family) || ctx.avoid.families.has(familyKey(route.family))) {
-    return `这一步只派别家：${route.modelName} 是 ${route.family} 族，写这张单的就有这一族`;
+    return retry
+      ? `这张单换路由要换一族：${route.modelName} 是 ${route.authorFamily ?? route.family} 族，最近动手没做成的就是这一族`
+      : `这一步只派别家：${route.modelName} 是 ${route.family} 族，写这张单的就有这一族`;
   }
   // 只派别家要认得出是哪一家：渠道自己挑模型的，挑中的可能正是写这张单的那家
   if (ctx.avoid.families.size > 0 && routerPicksModel(route)) {
-    return `这一步只派别家：${route.modelName} 由渠道自己挑模型（上游串 ${route.upstreamModel}），认不出这次是哪一家在答`;
+    return retry
+      ? `这张单换路由要换一族：${route.modelName} 由渠道自己挑模型（上游串 ${route.upstreamModel}），认不出这次是哪一族在答`
+      : `这一步只派别家：${route.modelName} 由渠道自己挑模型（上游串 ${route.upstreamModel}），认不出这次是哪一家在答`;
   }
   if (ctx.avoid.routeIds.has(route.routeId)) return '这个任务要避开这条路由（刚在它上面出过错）';
   if (ctx.avoid.poolIds.has(route.poolId)) return `这个任务要避开${route.poolName}整个池`;

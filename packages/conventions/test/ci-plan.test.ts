@@ -186,8 +186,15 @@ describe('按改动算要跑什么', () => {
     ).toBe(true);
   });
 
-  it('改了 conventions：直接依赖它的 api、engine、github 都测，store 经 github 传上来（store 依赖 github），读 standard-paths.json 的 agents 也测', () => {
+  it('改了 conventions 面上的文件：直接依赖它的 api、engine、github 都测，store 经 github 传上来（store 依赖 github）；改 standard-paths.json 再加读它的 agents', () => {
     expect(units(pr('packages/conventions/src/ci-plan.ts'))).toEqual([
+      'api',
+      'conventions',
+      'engine',
+      'github',
+      'store',
+    ]);
+    expect(units(pr('packages/conventions/standard-paths.json'))).toEqual([
       'agents',
       'api',
       'conventions',
@@ -195,6 +202,34 @@ describe('按改动算要跑什么', () => {
       'github',
       'store',
     ]);
+  });
+
+  it('只改包的面以外（入口脚本、包内模块、测试）：只测这个包自己，不连带依赖它的（本机改 check.ts 原来连 engine 一起跑，五分钟）', () => {
+    for (const f of [
+      'packages/conventions/src/check.ts',
+      'packages/conventions/src/bin/check.ts',
+      'packages/conventions/test/check.test.ts',
+      'packages/github/test/client.test.ts',
+    ]) {
+      const pkg = f.split('/')[1] as string;
+      expect(units(pr(f)), f).toEqual([pkg]);
+      expect(pr(f).reasons.join(' '), f).toContain('只改到包的面以外');
+    }
+    // 面以外的和面上的一起改：照面上的连带
+    expect(units(pr('packages/conventions/src/check.ts', 'packages/conventions/src/index.ts'))).toEqual(
+      units(pr('packages/conventions/src/index.ts')),
+    );
+    // 删掉的、仓里没有的文件认不出在不在面上：照在面上算（多测不少测）
+    expect(units(pr('packages/conventions/src/gone.ts'))).toEqual(
+      units(pr('packages/conventions/src/index.ts')),
+    );
+    // 手搭的图没有 offSurface：整个包都算面
+    const g = graph();
+    const bare: PackageGraph = { deps: g.deps };
+    expect(
+      planCi({ event: 'pull_request', changed: ['packages/conventions/src/check.ts'], graph: bare })
+        .testUnits,
+    ).toEqual(units(pr('packages/conventions/src/index.ts')));
   });
 
   it('改了 db：db 和所有依赖它的（engine、api、store、jev）都测，读 db 路由骨架的 agents 也测；pg 的测试单独一台。github 不在里面（#901 ⑤：它不再依赖 db，改 db 不用重测它）', () => {
@@ -526,6 +561,9 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
    * 或在 TEST_READS 上。被读的包源码一改就全跑的（shared）算盖住了。
    * 只改夹具才全跑的不算：改 adapters 的源码不会因此选上 db。
    */
+  /** TEST_READS 的一项盖住了 target 这个包：写的是包名，或是这个包里的文件（带 /）。 */
+  const readsPackage = (reads: readonly string[], target: string) =>
+    reads.some((r) => r === target || r.startsWith(`packages/${target}/`));
   const sourceForcesFull = (target: string) => {
     const probe = `packages/${target}/src/x.ts`;
     const rule = PATH_RULES.find((r) => r.match(probe));
@@ -541,7 +579,7 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
         if (target === undefined || target === unit) continue;
         const has =
           (g.deps[unit] ?? []).includes(target) ||
-          (reads[unit] ?? []).includes(target) ||
+          readsPackage(reads[unit] ?? [], target) ||
           sourceForcesFull(target);
         if (!has) missed.push(`${rel} 读 ${ref}（${unit}→${target}），依赖图和 TEST_READS 都没有这条边`);
       }
@@ -551,7 +589,7 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
 
   it('依赖图或 TEST_READS 盖住扫出来的每一条跨包读；api→web、feishu→web、db→adapters 都在（#984）', () => {
     const has = (from: string, to: string) =>
-      (graph().deps[from] ?? []).includes(to) || (TEST_READS[from] ?? []).includes(to);
+      (graph().deps[from] ?? []).includes(to) || readsPackage(TEST_READS[from] ?? [], to);
     expect(has('api', 'web'), 'api→web').toBe(true);
     expect(has('feishu', 'web'), 'feishu→web').toBe(true);
     expect(has('db', 'adapters'), 'db→adapters').toBe(true);

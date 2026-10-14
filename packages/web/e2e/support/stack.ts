@@ -14,7 +14,7 @@ import { randomBytes } from 'node:crypto';
 import { createWriteStream, existsSync, mkdirSync } from 'node:fs';
 import { createServer as createHttpServer, request as httpRequest, type Server } from 'node:http';
 import { createRequire } from 'node:module';
-import type { AddressInfo } from 'node:net';
+import { type AddressInfo, connect } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type E2eFacts, parseFacts } from './facts.ts';
@@ -230,13 +230,47 @@ export interface StackOptions {
   tag: string;
 }
 
+/**
+ * E2E_PG_ADMIN_URL 指着本机（127.0.0.1、localhost）又连不上时，起栈前就停下、说怎么起（pnpm pg:local start，
+ * packages/db/src/local-pg.ts）——不然要等备库那一步报一串连接错。指着别的机器的不在这里查。
+ */
+export async function assertLocalPgUp(adminUrl: string | undefined): Promise<void> {
+  if (!adminUrl) return;
+  let host: string;
+  let port: number;
+  try {
+    const u = new URL(adminUrl);
+    host = u.hostname;
+    port = Number(u.port || 5432);
+  } catch {
+    return;
+  }
+  if (host !== '127.0.0.1' && host !== 'localhost') return;
+  const up = await new Promise<boolean>((resolve) => {
+    const s = connect({ host: '127.0.0.1', port });
+    const done = (ok: boolean) => {
+      s.destroy();
+      resolve(ok);
+    };
+    s.setTimeout(2000, () => done(false));
+    s.once('connect', () => done(true));
+    s.once('error', () => done(false));
+  });
+  if (!up) {
+    throw new Error(
+      `E2E_PG_ADMIN_URL 指着本机 127.0.0.1:${port}，连不上：本机的 Postgres 没起。起：pnpm pg:local start（端口不是 55432 的加 FLEET_LOCAL_PG_PORT=${port}，见 packages/web/e2e/README.md）`,
+    );
+  }
+}
+
 /** 起一整套：备库 → 开关代理 → 门面 → 后端，等后端和门面都通了才返回。前端要先打包好（buildWeb）。 */
 export async function startStack({ dbName, slot, tag }: StackOptions): Promise<Stack> {
   if (!process.env.E2E_PG_ADMIN_URL?.trim()) {
     throw new Error(
-      'E2E_PG_ADMIN_URL 没设：驾驶舱 e2e 要一台真 Postgres（例如 postgres://postgres:<密码>@127.0.0.1:55432/postgres），不退回内存库。起法见 packages/web/e2e/README.md',
+      'E2E_PG_ADMIN_URL 没设：驾驶舱 e2e 要一台真 Postgres（例如 postgres://postgres:<密码>@127.0.0.1:55432/postgres），不退回内存库。本机（Windows）起：pnpm pg:local start，起好照它打出的那行设；别的起法见 packages/web/e2e/README.md',
     );
   }
+  await assertLocalPgUp(process.env.E2E_PG_ADMIN_URL);
   const facts = runPrepare(dbName);
   const { api: apiPort, agent: agentPort } = stackPorts(slot);
   const sw = await startSwitchProxy(apiPort);

@@ -20,6 +20,7 @@ import {
   MAX_STARTS_PER_HOUR,
   MAX_STARTS_PER_ROUND,
   MERGE_GATE_REQUIRES_COLD_VERIFY,
+  offDiffKey,
   prClaimedIssues,
   runIntakeJob,
   screenListed,
@@ -839,6 +840,38 @@ describe('runIntakeJob · 一轮', () => {
     const second = await runIntakeJob(h.deps);
     expect(h.comments).toHaveLength(1); // 键一样，没再留
     expect(second.found).toBe(0);
+  });
+
+  it('【故意造出的失败】「怎么算做完」要截图（不是 issue:new 开的单也挡）→ 不起，留言写清哪一条、认出的词、怎么改；同样的条目第二轮不再留（决定 0093）', async () => {
+    const body = bodyWith(
+      ['`packages/web/src/pages/`'],
+      ['1. 页面上能看到「验收中」', '2. 带 1366、390 两张截图'],
+    );
+    const h = harness({}, { issues: [issue({ body })] });
+    const first = await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.comments).toHaveLength(1);
+    expect(h.comments[0]?.key).toMatch(/^intake-off-diff:/);
+    expect(h.comments[0]?.body).toMatch(
+      /diff 外的证据[\s\S]*带 1366、390 两张截图（认出：截图）[\s\S]*测试输出里看得见/,
+    );
+    expect(first.found).toBe(1);
+    await runIntakeJob(h.deps);
+    expect(h.comments).toHaveLength(1);
+    expect(h.started).toEqual([]);
+  });
+
+  it('「怎么算做完」改成测试里看得见的写法 → 照常起；键随命中的条目变', async () => {
+    const body = bodyWith(
+      ['`packages/web/src/pages/`'],
+      ['1. `packages/web/test/a.test.ts` 断言出现「验收中」'],
+    );
+    const h = harness({}, { issues: [issue({ body })] });
+    await runIntakeJob(h.deps);
+    expect(h.started).toHaveLength(1);
+    expect(offDiffKey([{ item: 'a', words: ['截图'] }])).not.toBe(
+      offDiffKey([{ item: 'b', words: ['截图'] }]),
+    );
   });
 
   it('缺的内容变了 → 键变了，是另一条留言', async () => {
