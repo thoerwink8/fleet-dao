@@ -194,7 +194,10 @@ SESSION_IO_DIR=/var/lib/fleet-sessions
 WEB_UPLOAD_KEY=/etc/fleet-dao/web-upload.key
 HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
 # 已删的演示版（#1223，创始人 2026-10-07）：以前装过的推可见范围的脚本和单元，装机时停掉、删掉（retire_old_units），读回核对它们不在。
-# 它们的数据目录（/var/lib/fleet-dao/demo，#1223）不动：里面是旧的可见范围文件，要不要清由人定
+# 它们的数据目录（旧的可见范围文件，没有单元、代码再读它）先打包进 RETIRED_BACKUP_DIR（root 600，旁边一份 .sha256）再删（#2236）
+RETIRED_DATA_DIR=/var/lib/fleet-dao/demo # #1223
+RETIRED_BACKUP_DIR=/var/backups/fleet-dao
+RETIRED_DATA_TAR=retired-showcase-data # 备份文件名的前缀：<前缀>-<时刻>.tar.gz
 RETIRED_UNITS=(fleet-demo-scopes.path fleet-demo-scopes.timer fleet-demo-scopes.service) # #1223：先停触发的两个，再停服务本身
 RETIRED_BIN=/usr/local/sbin/fleet-demo-scopes # #1223
 RETIRED_UNIT_DIR=/etc/systemd/system # 只有测试会改（#1223）
@@ -809,11 +812,11 @@ setup_web_upload() {
 $line"
 }
 
-# 已删的演示版（#1223）：以前装过的单元停掉、禁用、删掉，脚本删掉；已退役的令牌文件（RETIRED_FILES，#2226）删掉。已经没有就什么都不动（幂等）。
-# 停不掉、删不掉判红（读回 readback_retired_units 还会再核对一遍），不当成没事
+# 已删的演示版（#1223）：以前装过的单元停掉、禁用、删掉，脚本删掉，数据目录打包备份后删掉（#2236）；已退役的令牌文件（RETIRED_FILES，#2226）删掉。
+# 已经没有就什么都不动（幂等）。停不掉、删不掉、打包不成（不删）判红（读回 readback_retired_units 还会再核对一遍），不当成没事
 retire_old_units() {
-  step "清掉已删的演示版留下的单元和脚本（#1223）、已退役的令牌文件（#2226）"
-  local u f touched=0
+  step "清掉已删的演示版留下的单元、脚本和数据目录（#1223）、已退役的令牌文件（#2226）"
+  local u f touched=0 tarball sum
   for u in "${RETIRED_UNITS[@]}"; do
     f=$RETIRED_UNIT_DIR/$u
     if [[ ! -e "$f" && ! -L "$f" && "$(systemctl is-active "$u" 2>/dev/null)" != active ]]; then continue; fi
@@ -831,6 +834,24 @@ retire_old_units() {
   if ((touched)) && ! systemctl daemon-reload; then red "systemctl daemon-reload 失败（#1223）"; fi
   if [[ -e "$RETIRED_BIN" || -L "$RETIRED_BIN" ]]; then
     if rm -f -- "$RETIRED_BIN"; then changed "删掉 $RETIRED_BIN（#1223）"; else red "$RETIRED_BIN 删不掉（#1223）"; fi
+  fi
+  if [[ -e "$RETIRED_DATA_DIR" || -L "$RETIRED_DATA_DIR" ]]; then
+    tarball=$RETIRED_BACKUP_DIR/$RETIRED_DATA_TAR-$(date -u +%Y%m%dT%H%M%SZ).tar.gz
+    if install -d -o root -g root -m 700 -- "$RETIRED_BACKUP_DIR" &&
+      (umask 077 && tar -czf "$tarball" -C "${RETIRED_DATA_DIR%/*}" -- "${RETIRED_DATA_DIR##*/}") &&
+      tar -tzf "$tarball" >/dev/null && chmod 600 -- "$tarball" &&
+      sum=$(sha256sum <"$tarball" | cut -d' ' -f1) && [[ "$sum" =~ ^[0-9a-f]{64}$ ]] &&
+      (umask 077 && printf '%s  %s\n' "$sum" "${tarball##*/}" >"$tarball.sha256"); then
+      changed "打包演示版的数据目录 $RETIRED_DATA_DIR 进 $tarball（root 600，sha256 $sum，记在 $tarball.sha256）（#2236）"
+      if rm -rf -- "${RETIRED_DATA_DIR:?}"; then
+        changed "删掉演示版的数据目录 $RETIRED_DATA_DIR（#2236）"
+      else
+        red "$RETIRED_DATA_DIR 删不掉（#2236）：备份在 $tarball"
+      fi
+    else
+      rm -f -- "$tarball" "$tarball.sha256"
+      red "打包 $RETIRED_DATA_DIR 没成（#2236）：没删，看 $RETIRED_BACKUP_DIR 的空间和权限后重跑"
+    fi
   fi
   for f in "${RETIRED_FILES[@]}"; do
     if [[ ! -e "$f" && ! -L "$f" ]]; then continue; fi
@@ -852,6 +873,22 @@ readback_retired_units() {
     bad=1
   fi
   if ((bad == 0)); then ok "已删的演示版单元和脚本都不在了（#1223）"; fi
+  bad=0
+  if [[ -e "$RETIRED_DATA_DIR" || -L "$RETIRED_DATA_DIR" ]]; then
+    red "演示版的数据目录 $RETIRED_DATA_DIR 还在（#2236）：重跑 france.sh，打包备份后删掉"
+    bad=1
+  fi
+  for f in "$RETIRED_BACKUP_DIR/$RETIRED_DATA_TAR"-*.tar.gz; do
+    if [[ ! -e "$f" ]]; then continue; fi
+    if [[ ! -f "$f.sha256" ]] || ! (cd -- "$RETIRED_BACKUP_DIR" && sha256sum --status -c -- "${f##*/}.sha256"); then
+      red "演示版数据目录的备份 $f 和它的 .sha256 对不上（或没有 .sha256）（#2236）"
+      bad=1
+    elif [[ "$(stat -c %a -- "$f")" != 600 ]]; then
+      red "演示版数据目录的备份 $f 权限不是 600（#2236）"
+      bad=1
+    fi
+  done
+  if ((bad == 0)); then ok "演示版的数据目录不在了，备份（有的话）和 sha256 对得上（#2236）"; fi
   bad=0
   for f in "${RETIRED_FILES[@]}"; do
     if [[ -e "$f" || -L "$f" ]]; then
@@ -1508,7 +1545,7 @@ readback_service_home() {
 }
 
 # 自动档（--auto-tier）：自动发布每发完一版以 root 顺带跑。只放不碰防火墙、sudoers、用户、机器上钥匙和环境文件的步骤
-# （例外只有 retire_old_units 删已退役、没人读的令牌文件），
+# （例外只有 retire_old_units 删已退役、没人读的令牌文件和演示版的数据目录），
 # 每一步都幂等（内容一样就什么都不动）。前提是整套装过一遍了（会话用户、/srv 下的目录都在）；没装过的机器这里判红。
 setup_auto_tier() {
   setup_slice

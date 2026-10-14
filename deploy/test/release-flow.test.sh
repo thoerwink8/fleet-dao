@@ -1374,7 +1374,15 @@ systemctl() {
     esac
   done
   case "$cmd" in
-  show) return 0 ;;
+  show)
+    # socket 正在听的地址：照单元文件里写的报（SC_LISTEN_STALE=1 时报换之前的那几个：restart 了却没换上）
+    if [[ "$*" == *"-p Listen"* && -n "$unit" && -f "$FLEET_SYSTEMD_DIR/$unit" ]]; then
+      local from=$FLEET_SYSTEMD_DIR/$unit
+      if [[ "${SC_LISTEN_STALE:-0}" == 1 ]]; then from=$TMP/listen-stale; fi
+      sed -n 's/^ListenStream=\(.*\)$/\1 (Stream)/p' -- "$from"
+    fi
+    return 0
+    ;;
   daemon-reload)
     # 第一次装 socket 之后的 daemon-reload 失败：后面恢复时的那次要能成功
     if ((${SC_RELOAD_FAILS:-0} > 0)); then
@@ -1402,6 +1410,11 @@ systemctl() {
   start | restart)
     # enable-now,start：socket 起不来之后，把旧服务拉回来也失败
     if [[ ",$SC_FAIL," == *",start,"* && "$unit" == fleet-api.service ]]; then return 1; fi
+    # restart-socket：换上新 socket 单元以后 restart 失败（放回旧的那次 restart 要能成）
+    if [[ "$cmd" == restart && "$unit" == fleet-api.socket ]] && ((${SC_SOCKET_RESTART_FAILS:-0} > 0)); then
+      SC_SOCKET_RESTART_FAILS=$((SC_SOCKET_RESTART_FAILS - 1))
+      return 1
+    fi
     if [[ -n "$unit" ]]; then SC_ACTIVE[$unit]=active; fi
     ;;
   enable)
@@ -1422,6 +1435,8 @@ reset_sc() {
   : >"$SC"
   SC_FAIL=""
   SC_RELOAD_FAILS=0
+  SC_SOCKET_RESTART_FAILS=0
+  SC_LISTEN_STALE=0
   SC_ACTIVE=()
 }
 SVC_OLD='[Unit]
@@ -1437,6 +1452,15 @@ After=fleet-api.socket
 ExecStart=/bin/sleep infinity
 '
 SOCK_BODY='[Socket]
+ListenStream=10.99.0.2:8787
+FreeBind=yes
+Service=fleet-api.service
+[Install]
+WantedBy=sockets.target
+'
+# 老机器上装着的：还带着已撤的 fleet 命令接口（127.0.0.1:8788）那一行
+SOCK_OLD='# 旧注释
+[Socket]
 ListenStream=10.99.0.2:8787
 ListenStream=127.0.0.1:8788
 FreeBind=yes
@@ -1479,16 +1503,80 @@ check "头一次装：socket 先于服务起来" "$((sock_n > stop_n && start_n 
 check "头一次装：socket 单元写上了驾驶舱那个地址" \
   "$(grep -c '^ListenStream=10.99.0.2:8787$' "$FLEET_SYSTEMD_DIR/fleet-api.socket")" 1
 
-printf '%s' 'KEEP-SOCKET' >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
+printf '%s' "$SOCK_BODY" >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
 printf '%s' "$SVC_OLD" >"$FLEET_SYSTEMD_DIR/fleet-api.service"
 prep_ver "$B" "$SVC_NEW" "$SOCK_BODY"
 reset_sc
 SC_ACTIVE[fleet-api.service]=active
 reset
 activate "$B" release >/dev/null 2>&1
-check "已有 socket：systemctl 一次都没碰它" "$(grep -c 'fleet-api.socket' "$SC" || true)" 0
-check "已有 socket：文件一个字没改" "$(cat -- "$FLEET_SYSTEMD_DIR/fleet-api.socket")" KEEP-SOCKET
+check "已有 socket、和这一版一字不差：systemctl 一次都没碰它" "$(grep -c 'fleet-api.socket' "$SC" || true)" 0
+check "已有 socket、和这一版一字不差：文件没动" "$(cat -- "$FLEET_SYSTEMD_DIR/fleet-api.socket")" "$(printf '%s' "$SOCK_BODY")"
 check "已有 socket：服务照常重启" "$(($(sc_n "restart fleet-api.service") > 0))" 1
+
+# 只差注释：写上这一版的、daemon-reload，不重启 socket、不停服务
+printf '# 老注释\n%s' "$SOCK_BODY" >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
+prep_ver "$B" "$SVC_NEW" "$SOCK_BODY"
+reset_sc
+SC_ACTIVE[fleet-api.service]=active
+SC_ACTIVE[fleet-api.socket]=active
+reset
+activate "$B" release >/dev/null 2>&1
+check "已有 socket、只差注释：换成这一版的" "$(cat -- "$FLEET_SYSTEMD_DIR/fleet-api.socket")" "$(printf '%s' "$SOCK_BODY")"
+check "已有 socket、只差注释：没重启 socket" "$(sc_n "restart fleet-api.socket")" 0
+check "已有 socket、只差注释：没停服务" "$(sc_n "stop fleet-api.service")" 0
+check "已有 socket、只差注释：没有红" "${#REDS[@]}" 0
+
+# 监听变了（老机器上还带着已撤的 127.0.0.1:8788）：停服务 → 写上 → daemon-reload → restart socket → 读回在听的地址 → 起服务
+printf '%s' "$SOCK_OLD" >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
+prep_ver "$B" "$SVC_NEW" "$SOCK_BODY"
+reset_sc
+SC_ACTIVE[fleet-api.service]=active
+SC_ACTIVE[fleet-api.socket]=active
+reset
+activate "$B" release >/dev/null 2>&1
+stop_n=$(sc_n "stop fleet-api.service")
+reload_n=$(sc_n "daemon-reload")
+sock_n=$(sc_n "restart fleet-api.socket")
+show_n=$(sc_n "show -p Listen --value fleet-api.socket")
+start_n=$(grep -nxE -- '(re)?start fleet-api.service' "$SC" | head -1 | cut -d: -f1)
+check "监听变了：换成这一版的 socket（没有 8788 了）" "$(grep -c '^ListenStream=127.0.0.1:8788$' "$FLEET_SYSTEMD_DIR/fleet-api.socket" || true):$(grep -c '^ListenStream=10.99.0.2:8787$' "$FLEET_SYSTEMD_DIR/fleet-api.socket")" 0:1
+check "监听变了：先停服务、再 daemon-reload、再 restart socket" "$((stop_n > 0 && reload_n > stop_n && sock_n > reload_n))" 1
+check "监听变了：restart 之后读回 socket 在听的地址" "$((show_n > sock_n))" 1
+check "监听变了：读回之后才把服务起来" "$((${start_n:-0} > show_n))" 1
+check "监听变了：服务回到 active" "${SC_ACTIVE[fleet-api.service]}" active
+check "监听变了：没有红、没留下旧文件的副本" "${#REDS[@]}:$(find "$FLEET_SYSTEMD_DIR" -name '.fleet-api.socket.old.*' | wc -l)" 0:0
+
+# 换上的 socket restart 不起来：放回旧的、重启 socket、拉回停下的服务；报红，不切版本
+prep_ver "$C" "$SVC_NEW" "$SOCK_BODY"
+printf '%s' "$SOCK_OLD" >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
+reset_sc
+SC_SOCKET_RESTART_FAILS=1
+SC_ACTIVE[fleet-api.service]=active
+SC_ACTIVE[fleet-api.socket]=active
+reset
+before_cur=$(readlink -- "$RELEASES/current" 2>/dev/null || true)
+activate "$C" release >/dev/null 2>&1
+check "socket restart 不起来：activate 返回失败" "$?" 1
+check "socket restart 不起来：报红" "$(reds_with '换上这一版的 fleet-api.socket 起不来')" 1
+check "socket restart 不起来：旧文件放回去了" "$(cat -- "$FLEET_SYSTEMD_DIR/fleet-api.socket")" "$(printf '%s' "$SOCK_OLD")"
+check "socket restart 不起来：停下的服务拉回来了" "${SC_ACTIVE[fleet-api.service]}" active
+check "socket restart 不起来：没切版本" "$(readlink -- "$RELEASES/current" 2>/dev/null || true)" "$before_cur"
+check "socket restart 不起来：没留下旧文件的副本" "$(find "$FLEET_SYSTEMD_DIR" -name '.fleet-api.socket.old.*' | wc -l)" 0
+
+# restart 了却没听上这一版写的地址（读回对不上）：同样放回旧的
+printf '%s' "$SOCK_OLD" >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
+printf '%s' "$SOCK_OLD" >"$TMP/listen-stale"
+reset_sc
+SC_LISTEN_STALE=1
+SC_ACTIVE[fleet-api.service]=active
+SC_ACTIVE[fleet-api.socket]=active
+reset
+activate "$C" release >/dev/null 2>&1
+check "读回对不上：activate 返回失败" "$?" 1
+check "读回对不上：报红、写清在听的和文件写的" "$(reds_with '在听的（10.99.0.2:8787 127.0.0.1:8788 ）和单元文件写的（10.99.0.2:8787 ）对不上')" 1
+check "读回对不上：旧文件放回去了" "$(cat -- "$FLEET_SYSTEMD_DIR/fleet-api.socket")" "$(printf '%s' "$SOCK_OLD")"
+check "读回对不上：停下的服务拉回来了" "${SC_ACTIVE[fleet-api.service]}" active
 
 printf '%s' 'SOCKET-ON-DISK' >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
 printf '%s' "$SVC_NEW" >"$FLEET_SYSTEMD_DIR/fleet-api.service"

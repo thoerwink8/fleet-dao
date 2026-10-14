@@ -1,16 +1,14 @@
-// 两个监听支持 systemd socket activation（sd_listen_fds(3)）：装一个 `fleet-api.socket` 单元、重启服务时监听套接字
-// 一直归 systemd 攥着，新连接排在内核队列里，不会被拒。这份代码只管进程这一侧「有 fd 就接、没有就自己 bind」，
-// deploy 侧装 socket 单元、改 fleet-api.service 的 Requires/After 不在这个 PR 里（#364 的结果.md 里写了why：动这几个
-// 文件会跟另一位工人正在做的引擎排空发布撞车，留给后续单，接的时候这份代码不用再改）——这几条分支目前不会被
-// LISTEN_FDS 触发，是给那条后续单接好的口子，不是「已经生效」。改这里之前必须知道：
+// 监听支持 systemd socket activation（sd_listen_fds(3)）：生产装了 `fleet-api.socket` 单元（deploy/france/fleet-api.socket，
+// deploy/release.sh 装），重启服务时监听套接字一直归 systemd 攥着，新连接排在内核队列里，不会被拒。这份代码只管进程这一侧
+// 「有 fd 就接、没有就自己 bind」。改这里之前必须知道：
 // - LISTEN_FDS 从 fd 3 开始连续排（sd_listen_fds(3) 的约定），读完要从 process.env 删掉 LISTEN_PID / LISTEN_FDS /
 //   LISTEN_FDNAMES（同样是 sd_listen_fds 的 unset 语义），不然子进程会把这几个 fd 也当成「我也有监听套接字」接着用。
-// - 一个 socket 单元里两个 ListenStream（驾驶舱接口、fleet 命令接口）的 fd，systemd 按声明顺序传，但
-//   FileDescriptorName 对整个单元生效，两个监听分不清谁是谁——这里改成先听上、再拿 server.address() 和配置比地址，
-//   不猜顺序、不靠名字。
+// - 一个 socket 单元里几个 ListenStream 的 fd，systemd 按声明顺序传，但 FileDescriptorName 对整个单元生效，分不清谁是谁——
+//   这里先听上、再拿 server.address() 和配置比地址，不猜顺序、不靠名字。
 // - 地址对不上、多一个、少一个、LISTEN_PID 不是自己、LISTEN_FDS 认不出，一律明确报错退出，不悄悄改口自己 bind：
-//   那样会把「systemd 传错了」悄悄变成「端口被占用」之类的另一种故障，反而更难查。
-// - 没有 LISTEN_FDS（本机开发、测试，或机器上还没装 fleet-api.socket 的生产）照旧自己 bind，这不算错误。
+//   那样会把「systemd 传错了」悄悄变成「端口被占用」之类的另一种故障，反而更难查。socket 单元里的地址由发布脚本照
+//   这一版的模板换（release.sh 的 sync_socket_unit），不会留着上一版的地址。
+// - 没有 LISTEN_FDS（本机开发、测试）照旧自己 bind，这不算错误。
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createAdaptorServer, type ServerType, serve } from '@hono/node-server';
@@ -26,11 +24,6 @@ export interface ListenTarget {
   fetch: Fetch;
   /** 设了就在听上以后把这个监听的空闲超时设成它（驾驶舱接口要比香港 nginx 留得久，见 keep-alive.ts）。 */
   keepAliveMs?: number;
-  /**
-   * 可有可无：systemd 传了它的 fd 就接上服务，没传不算少、自己 bind 时也不起。给已撤掉的监听用——机器上老的 socket 单元
-   * 在发布时不会自动换（改监听地址是人工操作），仍会把旧端口的 fd 传进来，这里得认得、不能当成「多一个」退出。
-   */
-  optional?: boolean;
 }
 
 /**
@@ -67,9 +60,9 @@ const say = (a: { host: string; port: number }) => `${a.host}:${a.port}`;
  */
 export function matchListenTargets(
   addresses: readonly { host: string; port: number }[],
-  targets: readonly { name: string; at: Listen; optional?: boolean }[],
+  targets: readonly { name: string; at: Listen }[],
 ): number[] {
-  const remaining = new Set(targets.flatMap((t, i) => (t.optional ? [] : [i])));
+  const remaining = new Set(targets.keys());
   const seen = new Set<number>();
   const order: number[] = [];
   for (const addr of addresses) {
@@ -134,7 +127,7 @@ function listenOnFd(fd: number): Promise<{ server: ServerType; setReal: (fetch: 
 
 /**
  * 起监听：systemd 传了监听套接字（LISTEN_PID / LISTEN_FDS）就用它们（发布重启时连接排队、不拒连，见
- * deploy/france/fleet-api.socket）；没传就照旧自己 bind（本机开发、测试，或机器上还没装 socket 单元的生产）。
+ * deploy/france/fleet-api.socket）；没传就照旧自己 bind（本机开发、测试）。
  */
 export async function startListeners(
   targets: readonly ListenTarget[],
@@ -142,19 +135,16 @@ export async function startListeners(
 ): Promise<ServerType[]> {
   const fds = listenFds(env);
   if (fds === null) {
-    return targets
-      .filter((t) => !t.optional)
-      .map((t) =>
-        t.keepAliveMs !== undefined
-          ? serveCockpit(t.fetch, t.at, t.keepAliveMs)
-          : serve({ fetch: t.fetch, hostname: t.at.host, port: t.at.port }),
-      );
+    return targets.map((t) =>
+      t.keepAliveMs !== undefined
+        ? serveCockpit(t.fetch, t.at, t.keepAliveMs)
+        : serve({ fetch: t.fetch, hostname: t.at.host, port: t.at.port }),
+    );
   }
-  const required = targets.filter((t) => !t.optional).length;
-  if (fds.length < required || fds.length > targets.length) {
+  if (fds.length !== targets.length) {
     clearListenEnv(env);
     throw new ListenFdError(
-      `systemd 传了 ${fds.length} 个监听套接字，配置要 ${required} 个（${targets.map((t) => t.name).join('、')}）`,
+      `systemd 传了 ${fds.length} 个监听套接字，配置要 ${targets.length} 个（${targets.map((t) => t.name).join('、')}）`,
     );
   }
   clearListenEnv(env);
