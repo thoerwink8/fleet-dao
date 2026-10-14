@@ -27,6 +27,7 @@ import {
   listPaths,
   listPending,
   MAIN,
+  mergeLogs,
   parseDirective,
   proposeFile,
   readPromptLog,
@@ -83,6 +84,12 @@ const gitHere: Git = (args) =>
 interface Hooks {
   lineageOf(o: { home: string; sessionId: unknown }): LineageInfo;
   ownerPresence(o: { home: string; owner: string }): { state: 'gone' | 'here' | 'unknown'; why: string };
+  sentByFounder(o: {
+    home: string;
+    only: string;
+  }):
+    | { absent: true }
+    | { absent: false; entries: Array<{ at: number; text: string; sessionId: string | null }> };
 }
 /** 钩子家的脚本，按路径动态加载（同步专用检出里也是这样排的） */
 const hooks = async (): Promise<Hooks> =>
@@ -249,10 +256,25 @@ try {
     console.log(`贴到 #${PROGRESS_ISSUE} 了：${c.url}`);
   } else if (cmd === 'directive') {
     const text = positionals.join(' ');
+    const line = await myLineage();
+    const sent =
+      line.status === 'found'
+        ? (await hooks()).sentByFounder({ home: homedir(), only: line.dir })
+        : { absent: true as const };
+    const fallbackId = line.status === 'found' ? (line.sessionIds[0] ?? null) : null;
+    const mirasim =
+      'entries' in sent
+        ? sent.entries.map((e) => ({
+            at: new Date(e.at),
+            sessionId: e.sessionId ?? fallbackId,
+            prompt: e.text,
+            source: 'Mirasim 会话记录',
+          }))
+        : [];
     const r = resolveDirective(
       { text: text || undefined, at: values.at, owner: values.owner },
-      await myLineage(),
-      readPromptLog(promptLogDir(), new Date()),
+      line,
+      mergeLogs(readPromptLog(promptLogDir(), new Date()), mirasim),
       sessionId(),
     );
     const made = await recordDirective(r, deps);

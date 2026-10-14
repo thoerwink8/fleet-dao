@@ -204,6 +204,20 @@ export interface PromptEntry {
   at: Date;
   sessionId: string | null;
   prompt: string;
+  /** 从哪读到的（文件头「来源」那一行）；不给算 prompt-log */
+  source?: string;
+}
+
+/**
+ * 两份账合起来：prompt-log（Claude Code 收到的）加 Mirasim 自己的会话记录（他发出去的提问和中途引导，founder-inbox.mjs 的
+ * sentByFounder）。会话开在仓外（指挥官常开在家目录）时项目级的 prompt-log 钩子不跑，只有 Mirasim 那份有他的话。
+ */
+export function mergeLogs(
+  log: { entries: PromptEntry[] } | { why: string },
+  mirasim: PromptEntry[],
+): { entries: PromptEntry[] } | { why: string } {
+  if (mirasim.length === 0) return log;
+  return { entries: [...('entries' in log ? log.entries : []), ...mirasim] };
 }
 
 /** 系统消息、斜杠命令、后台通知不是他说的话 */
@@ -316,14 +330,20 @@ export function resolveDirective(
       );
     if (pick === null)
       throw new DirectiveRefused(`没给原话，prompt-log 也取不到（${pickWhy}）。${HAND_FILL}`);
-    return { text: pick.prompt.trim(), at: stampZ(pick.at), atDate: pick.at, owner, source: 'prompt-log' };
+    return {
+      text: pick.prompt.trim(),
+      at: stampZ(pick.at),
+      atDate: pick.at,
+      owner,
+      source: pick.source ?? 'prompt-log',
+    };
   }
   if (input.at !== undefined && input.at.trim()) {
     const n = normalizeAt(input.at);
     return { text, at: n.text, atDate: n.date, owner, source: '手填' };
   }
   if (pick !== null && pick.prompt.trim() === text)
-    return { text, at: stampZ(pick.at), atDate: pick.at, owner, source: 'prompt-log' };
+    return { text, at: stampZ(pick.at), atDate: pick.at, owner, source: pick.source ?? 'prompt-log' };
   throw new DirectiveRefused(
     `缺 --at "<原话的时间>"：给的原话和 prompt-log 里本会话最近一句对不上（${pick === null ? pickWhy : '不是同一句'}），时间借不来。没记。`,
   );
@@ -370,7 +390,7 @@ export async function readAt(git: Git, ref: string, path: string): Promise<Direc
 
 /** ref 上全部待处理的引导（旧到新）。先用 git grep 挑出待处理的文件，再逐个读：条数多少都不分页、不联网。 */
 export async function listPending(git: Git, ref: string): Promise<Directive[]> {
-  const r = await git(['grep', '-l', '-F', '-x', `- 状态：${PENDING}`, ref, '--', `${DIRECTIVES_DIR}/`]);
+  const r = await git(['grep', '-l', '-e', `^- 状态：${PENDING}$`, ref, '--', `${DIRECTIVES_DIR}/`]);
   if (r.code === 1 && !r.stderr.trim()) return [];
   if (r.code !== 0) throw new DirectiveUnchecked(`git 找待处理的引导报错：${one(r)}。`);
   const paths = r.stdout

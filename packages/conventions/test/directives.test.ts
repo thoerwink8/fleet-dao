@@ -13,6 +13,7 @@ import {
   type Git,
   latestFounderPrompt,
   listPending,
+  mergeLogs,
   newId,
   normalizeAt,
   parseDirective,
@@ -202,5 +203,26 @@ describe('仓里读写', () => {
       deps,
     );
     expect(got?.url).toContain('/pull/9');
+  });
+});
+
+describe('两份账合起来取原话', () => {
+  it('会话开在仓外、prompt-log 没有：用 Mirasim 会话记录里他最近一句，来源照实写', () => {
+    const line = { status: 'found' as const, dir: 'd', sessionIds: ['s'] };
+    const m = [
+      {
+        at: new Date('2026-10-14T16:39:00Z'),
+        sessionId: 's',
+        prompt: '工人名额自主调整',
+        source: 'Mirasim 会话记录',
+      },
+    ];
+    const r = resolveDirective({}, line, mergeLogs({ why: '没有今天的记录' }, m), 's');
+    expect(r).toMatchObject({
+      text: '工人名额自主调整',
+      at: '2026-10-15 00:39 +0800',
+      source: 'Mirasim 会话记录',
+    });
+    expect(mergeLogs({ why: 'x' }, [])).toEqual({ why: 'x' });
   });
 });
