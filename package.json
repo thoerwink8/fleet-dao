@@ -7,6 +7,9 @@
     "node": ">=22.22"
   },
   "scripts": {
+    "dev": "pnpm --filter @fleet-dao/web dev:mock",
+    "start": "node packages/db/src/bin/local-pg.ts start",
+    "stop": "node packages/db/src/bin/local-pg.ts stop",
     "check": "node packages/conventions/src/bin/check.ts",
     "hygiene": "node packages/hygiene/src/bin/check.ts",
     "prepare": "node packages/hygiene/src/bin/install-hooks.ts",
@@ -23,11 +26,7 @@
     "flow:stats": "node packages/conventions/src/bin/flow-stats.ts",
     "issue:new": "node packages/conventions/src/bin/issue-new.ts",
     "intents": "node packages/conventions/src/bin/intents.ts",
-    "progress:note": "node packages/conventions/src/bin/progress.ts note",
-    "progress:directive": "node packages/conventions/src/bin/progress.ts directive",
-    "progress:claim": "node packages/conventions/src/bin/progress.ts claim",
-    "progress:done": "node packages/conventions/src/bin/progress.ts done",
-    "progress:read": "node packages/conventions/src/bin/progress.ts read",
+    "progress": "node packages/conventions/src/bin/progress.ts",
     "issue:close": "node packages/conventions/src/bin/issue-close.ts",
     "debt:check": "node packages/conventions/src/bin/debt-check.ts",
     "plan": "node packages/conventions/src/bin/plan.ts",
@@ -37,9 +36,7 @@
     "pr:open": "node packages/conventions/src/bin/pr-open.ts",
     "repo:check": "node agents/hooks/repo-contract.mjs check",
     "repo:init": "node agents/hooks/repo-contract.mjs init",
-    "local-sessions:install": "node agents/local-sessions/install.mjs install",
-    "local-sessions:uninstall": "node agents/local-sessions/install.mjs uninstall",
-    "local-sessions:status": "node agents/local-sessions/install.mjs status",
+    "local-sessions": "node agents/local-sessions/install.mjs",
     "agent-eval": "node packages/agent-eval/src/bin/agent-eval.ts",
     "pg:local": "node packages/db/src/bin/local-pg.ts"
   },

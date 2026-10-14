@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // 本机会话心跳的装和卸（#1991）：一条命令装、一条命令卸，不用手改散落的文件。
 //
-//   FLEET_NODE_TOKEN=<通行证> pnpm local-sessions:install --url https://<法国驾驶舱地址> [--machine 创始人的电脑]
-//   pnpm local-sessions:uninstall
-//   pnpm local-sessions:status
+//   FLEET_NODE_TOKEN=<通行证> pnpm local-sessions install --url https://<法国驾驶舱地址> [--machine 创始人的电脑]
+//   pnpm local-sessions uninstall
+//   pnpm local-sessions status
 //
 // 装做四件事：① 把 lib.mjs、heartbeat.mjs、push.mjs 拷进 ~/.fleet-dao/local-sessions/bin/；② 写 config.json（地址、通行证、机器名，
 // 通行证只从环境变量 FLEET_NODE_TOKEN 读，不进命令行历史；已经有 config.json 又没给新的就留着旧的）；③ 在 ~/.claude/settings.json

@@ -177,7 +177,7 @@ export function sessionLines({ dir, sessionId, now = Date.now() }) {
   if (s === null || s.auto === true || now > Date.parse(s.expiresAt)) return [];
   if (s.state === 'on')
     return [
-      `无人值守开着（到 ${fmt(s.expiresAt)}）：有子代理、后台命令、监视在跑时这一轮可以结束，等它们的完成通知（不脱离会话）；什么都没在跑、队列还有活就派 Agent 子代理，不要空着收尾。有进展就 pnpm progress:note 记一句；全做完 node ${SCRIPT} done "做完了什么"，要创始人拍板 needs-you，他说停 off。`,
+      `无人值守开着（到 ${fmt(s.expiresAt)}）：有子代理、后台命令、监视在跑时这一轮可以结束，等它们的完成通知（不脱离会话）；什么都没在跑、队列还有活就派 Agent 子代理，不要空着收尾。有进展就 pnpm progress note 记一句；全做完 node ${SCRIPT} done "做完了什么"，要创始人拍板 needs-you，他说停 off。`,
     ];
   if (s.state === 'paused' && s.note) return [`无人值守暂停着（${s.note}）。这一轮可以结束。`];
   return [];
@@ -195,7 +195,7 @@ export function blockReason(state, now, streak = 1) {
     '现在没有在跑的子代理、后台命令、监视（有的话这一轮可以直接结束，它们的完成通知会叫醒你，不用轮询、不用 sleep 等）。队列里还有活就用 Agent 子代理派（三个角色，决定 0087：写代码的 subagent_type: "general-purpose"，能脚本核对的只读活先给 subagent_type: "Explore"，方案和疑难给 subagent_type: "Plan"，不传 model），派出去就可以结束这一轮；要盯法国就起 Monitor 跑 node ~/.claude/skills/commander/scripts/patrol.mjs（只在报 ALERT 且 DELTA 不为 0 时出一行），报了再叫一个短命的 Explore 子代理摘证据；子代理都收口、队列空了才跑 done 收尾。';
   return (
     `无人值守开着（还剩约 ${left} 分钟，什么都没在跑时连着第 ${streak} 次挡，到 ${MAX_STREAK} 次放行）：不要空着结束这一轮。${watching}` +
-    `每次子代理有进展（PR 开了、做完、卡住）就 pnpm progress:note 记一句、给创始人一行汇报，再接着盯；没有新结果就不写话、别空转、别重复上一句。` +
+    `每次子代理有进展（PR 开了、做完、卡住）就 pnpm progress note 记一句、给创始人一行汇报，再接着盯；没有新结果就不写话、别空转、别重复上一句。` +
     `全做完（工人都收口、队列空了）：node ${SCRIPT} done "做完了什么"；碰到要创始人拍的（对外发布、花钱、删数据、改标准）：` +
     `node ${SCRIPT} needs-you "要他拍什么"，再把问题放在最后一条；创始人说停：node ${SCRIPT} off。`
   );

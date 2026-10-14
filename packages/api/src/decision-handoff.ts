@@ -1,6 +1,6 @@
 // 「要你拍」拍完以后交给指挥官（#1915，「用户拍完之后，就应该交给指挥官去处理了」）：
 // 答案存下的同时，往进度单 #1055 记一条待处理的引导「创始人已选：<选项或原文>（通知 <id>）」——指挥官会话开场钩子和
-// `pnpm progress:read` 读的就是这种评论（格式和 packages/conventions 的 progress.ts 同一份，记成无主，由指挥官认领）；
+// `pnpm progress read` 读的就是这种评论（格式和 packages/conventions 的 progress.ts 同一份，记成无主，由指挥官认领）；
 // 通知挂了任务的，再给那个任务的单留一句。法国上没有 gh：评论走引擎机器人的 GitHub 客户端（@fleet-dao/github 的 commentIssue），
 // 不新造写法。没接上、没写成的照实回在 handoff 里，不拿「答案存下了」冒充「交出去了」。
 import { NO_OWNER, ownerLine, PENDING_TAG, PROGRESS_ISSUE, progressStamp } from '@fleet-dao/conventions';
