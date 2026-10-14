@@ -249,6 +249,9 @@ build_sandbox_run() { # 工作目录 命令…
     joined+="${joined:+ }-$p"
   done
   if [[ -n "$FLEET_BUILD_PATH_PREFIX" ]]; then path=$FLEET_BUILD_PATH_PREFIX:$path; fi
+  # pnpm 的设置只给 pnpm 带（见 RELEASE_PNPM_ENV）；探针、tar 这些命令行里不出现
+  local -a pnpm_env=()
+  if [[ "${1:-}" == pnpm ]]; then pnpm_env=("${RELEASE_PNPM_ENV[@]}"); fi
   systemd-run --wait --pipe --collect --quiet \
     --service-type=exec \
     --expand-environment=no \
@@ -259,7 +262,7 @@ build_sandbox_run() { # 工作目录 命令…
       /usr/bin/setpriv --reuid=fleet --regid=fleet --init-groups --no-new-privs -- \
       /usr/bin/env -i HOME=/home/fleet USER=fleet LOGNAME=fleet \
       "PATH=$path" LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
-      "${RELEASE_PNPM_ENV[@]}" "${PROXY_ENVS[@]}" "$@"
+      "${pnpm_env[@]}" "${PROXY_ENVS[@]}" "$@"
 }
 
 # 读回：fleet 在沙箱里还能不能把 /etc/fleet-dao 当目录用（直接路径，或经 /proc/<pid>/root 绕路）。
@@ -705,7 +708,7 @@ fetch_code() { # 要发的提交（空 = 主线最新）
 }
 
 # 发版装依赖、构建的 pnpm 设置（CI 的 release_smoke，deploy/release-smoke.sh，也从这里读，照法国一样装、一样构建）：
-# - RELEASE_PNPM_ENV 进构建沙箱的环境，沙箱里每一条 pnpm 都带上：关掉全局虚拟仓。pnpm-workspace.yaml 给本机开了它，pnpm 只在
+# - RELEASE_PNPM_ENV 进构建沙箱的环境，沙箱里每一条 pnpm 都带上（build_sandbox_run 只给 pnpm 命令加）：关掉全局虚拟仓。pnpm-workspace.yaml 给本机开了它，pnpm 只在
 #   认出 CI 时自动关；法国的构建沙箱是 env -i，不算 CI，开着就把 node_modules 链到 ~fleet/.local/share/pnpm/store/v11/links，
 #   服务单元 ProtectHome=yes 看不到，fleet-api 起来报 ERR_MODULE_NOT_FOUND（065445a4）。只给 install 带命令行开关不够：
 #   之后的 pnpm run 见设置和装的时候不一样，先「Recreating node_modules」按全局虚拟仓重装一遍（ba28fdc9 的前端构建就这么坏的）。
