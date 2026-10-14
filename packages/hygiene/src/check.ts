@@ -22,7 +22,21 @@ export interface CheckResult {
 
 export const FIX_HINT =
   '公开仓不放私钥、令牌、密码这类真密钥，也不放密钥文件（.gitignore 挡着的那几类，git add -f 也不行）。' +
+  '临时产物（_tmp/、.playwright-cli/、e2e/shots/ 下的截图和日志）只放本机，不进仓：git rm -r --cached <路径>。' +
   '真该放行的，加进 packages/hygiene/src/allowlist.ts 并写明理由。';
+
+/** 临时产物目录：.gitignore 里都挡着，被 git add -f 或早先误提交进仓的一律红（决定 0093，撤 _tmp 误提交）。 */
+export const TEMP_DIRS = [
+  '_tmp/',
+  '.playwright-cli/',
+  '.playwright-mcp/',
+  'packages/web/e2e/shots/',
+] as const;
+
+/** 清单里落在临时目录下的文件（相对仓根）。 */
+export function trackedTempFiles(files: readonly string[]): string[] {
+  return files.filter((f) => TEMP_DIRS.some((d) => f.startsWith(d)));
+}
 
 export function runCheck(options: CheckOptions): CheckResult {
   const list = options.list ?? listRepoFiles;
@@ -41,8 +55,11 @@ export function runCheck(options: CheckOptions): CheckResult {
   const summary =
     `卫生检查：扫了 ${report.scanned.length} 个文件，查出 ${report.findings.length} 条` +
     `（二进制 ${report.binary.length} 个只按文件名判、工作树里已删的 ${report.missing.length} 个没扫）`;
+  const temp = trackedTempFiles(files);
   const problems = [
     ...report.findings.map(formatFinding),
+    ...temp.slice(0, 20).map((f) => `${f} 临时产物不进仓（${TEMP_DIRS.find((d) => f.startsWith(d))}）`),
+    ...(temp.length > 20 ? [`……另有 ${temp.length - 20} 个临时产物文件`] : []),
     ...allowlist
       .filter((a) => a.reason.trim().length < 10)
       .map((a) => `白名单这条没写清理由：${a.rule} ${a.path}`),

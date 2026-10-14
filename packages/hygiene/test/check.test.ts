@@ -43,6 +43,19 @@ describe('runCheck', () => {
     expect(result.lines.join('\n')).not.toContain(leakWebhook);
   });
 
+  it('临时目录下的文件被提交：退出码 1，指出路径', () => {
+    const result = run({
+      ...clean,
+      '_tmp/a.png': Buffer.from('x'),
+      'packages/web/e2e/shots/1/b.png': Buffer.from('x'),
+    });
+    expect(result.code).toBe(1);
+    expect(result.lines.join(String.fromCharCode(10))).toContain('_tmp/a.png 临时产物不进仓');
+    expect(result.lines.join(String.fromCharCode(10))).toContain(
+      'packages/web/e2e/shots/1/b.png 临时产物不进仓',
+    );
+  });
+
   it('一个文件都没扫到：退出码 2，不算干净', () => {
     const result = run({});
     expect(result.code).toBe(2);
