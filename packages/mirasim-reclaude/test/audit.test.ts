@@ -91,6 +91,14 @@ describe('逐回合比对', () => {
     const r = judgeSession([turn], [{ at: turn.start - H, route: 'default', gateway: 'kept' }], directIn, 0);
     expect(r.flags.join()).toContain('(a)');
   });
+
+  it('default 且没给网关（none）＝经 reclaude 走自有：账本有中继账判 (b)', () => {
+    const r = judgeSession([turn], [{ at: turn.start - H, route: 'default', gateway: 'none' }], relayIn, 0);
+    expect(r.flags.join()).toContain('(b)');
+    expect(
+      judgeSession([turn], [{ at: turn.start - H, route: 'default', gateway: 'none' }], directIn, 0).flags,
+    ).toEqual([]);
+  });
 });
 
 function fixtureHome(): string {
@@ -204,5 +212,78 @@ describe('对账', () => {
     expect(r.stdout).not.toContain(SID_BYPASS);
     expect(r.stdout + r.stderr).not.toMatch(/secret-prompt|tok-secret/);
     expect(runChild(process.execPath, [bin, '--days', 'x'], { env }).status).toBe(2);
+  });
+
+  const cliEnv = (home: string) => ({
+    ...process.env,
+    LOCALAPPDATA: join(home, 'AppData', 'Local'),
+    XDG_CACHE_HOME: join(home, '.cache'),
+  });
+  const bin = resolve(import.meta.dirname, '..', 'bin', 'audit');
+  /** 只留对得上的自有会话：没有标红。 */
+  function cleanHome(): { home: string; env: NodeJS.ProcessEnv } {
+    const home = fixtureHome();
+    const env = cliEnv(home);
+    for (const sid of [SID_CLOUD, SID_BYPASS])
+      writeFileSync(join(home, '.mirasim', 'sessions', 'claude', sid, 'turns.jsonl'), '');
+    writeLog(launchLogPath(home, process.platform, env));
+    return { home, env };
+  }
+
+  it('命令行：没有标红时退出 0（对照）', () => {
+    const { home, env } = cleanHome();
+    const r = runChild(process.execPath, [bin, '--home', home], { env });
+    expect(r.stdout).toContain('没有标红');
+    expect(r.status).toBe(0);
+  });
+
+  it('命令行：有没开始时间的回合（放不进对账）退出 2「没查成」', () => {
+    const { home, env } = cleanHome();
+    writeFileSync(
+      join(home, '.mirasim', 'sessions', 'claude', SID_CLOUD, 'turns.jsonl'),
+      `${JSON.stringify({ phase: 'done', updatedAt: NOW - H })}\n`,
+    );
+    const r = runChild(process.execPath, [bin, '--home', home], { env });
+    expect(r.stdout + r.stderr).toContain('没查成');
+    expect(r.status).toBe(2);
+  });
+
+  it('命令行：启动命令被改回裸 claude（顶行标红）退出 1', () => {
+    const { home, env } = cleanHome();
+    mkdirSync(join(home, '.fleet-dao', 'mirasim-reclaude'), { recursive: true });
+    writeFileSync(
+      join(home, '.fleet-dao', 'mirasim-reclaude', 'migration.json'),
+      JSON.stringify({
+        schema: 1,
+        previous: { command: 'claude' },
+        command: '/r/mirasim-reclaude',
+        sourceHash: 'a'.repeat(64),
+        binaryHash: 'b'.repeat(64),
+        updatedAt: new Date(NOW).toISOString(),
+        state: 'migrated',
+      }),
+    );
+    writeFileSync(
+      join(home, '.mirasim', 'setting.json'),
+      JSON.stringify({ agentLaunch: { claude: { command: 'claude' } } }),
+    );
+    const r = runChild(process.execPath, [bin, '--home', home], { env });
+    expect(r.stdout.split('\n')[0]).toContain('裸 claude');
+    expect(r.status).toBe(1);
+  });
+
+  it('命令行：列出单会话启动命令覆盖，裸 claude 覆盖标红退出 1', () => {
+    const { home, env } = cleanHome();
+    writeFileSync(
+      join(home, '.mirasim', 'plugin-index', 'ws.json'),
+      JSON.stringify({
+        routes: { [`claude:${SID_LOCAL}`]: 'local' },
+        launches: { [`claude:${SID_BYPASS}`]: { command: 'claude.exe' } },
+      }),
+    );
+    const r = runChild(process.execPath, [bin, '--home', home], { env });
+    expect(r.stdout).toContain(SID_BYPASS.slice(0, 8));
+    expect(r.stdout).toMatch(/裸 claude/);
+    expect(r.status).toBe(1);
   });
 });

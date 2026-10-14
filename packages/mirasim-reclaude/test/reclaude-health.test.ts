@@ -174,6 +174,19 @@ describe.skipIf(process.platform === 'win32')('reclaude 健康维护（假 recla
     expect(f.calls()).toEqual(['update --check']);
   });
 
+  it('有一个会话记录读不了（其余都空闲）：按判不了空闲，只记待装，不跑 update', async () => {
+    const f = fake();
+    f.set('update --check', '当前版本: v1.4.1\n最新版本: v1.5.0\n');
+    const dir = join(f.home, '.mirasim', 'sessions', 'claude');
+    mkdirSync(join(dir, 'ok'), { recursive: true });
+    writeFileSync(join(dir, 'ok', 'record.json'), JSON.stringify({ runState: 'completed' }));
+    mkdirSync(join(dir, 'bad'), { recursive: true });
+    writeFileSync(join(dir, 'bad', 'record.json'), '{broken');
+    const r = await updateCheck(f.env);
+    expect(r.pending).toBe('unknown');
+    expect(f.calls()).toEqual(['update --check']);
+  });
+
   it('空闲且有新版：跑 update；没新版不跑', async () => {
     const f = fake();
     f.set('update --check', '当前版本: v1.4.1\n最新版本: v1.5.0\n');

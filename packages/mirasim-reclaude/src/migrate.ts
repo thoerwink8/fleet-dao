@@ -168,22 +168,37 @@ function verifyTarget(file: string, home: string): void {
   if (info?.status !== 'ready') throw new Error('新启动器目标检查没有确认成功');
 }
 
-export function runningSessions(home: string): number {
+/**
+ * 数在途的 Claude 回合。单个会话记录读不了、坏了或状态不认识，记进 unknown（没查成），不整个抛：
+ * 调用方按「判不了是否空闲」处理（不当空闲），其余会话照数。
+ */
+export function runningSessions(home: string): { running: number; unknown: string[] } {
   const folder = join(home, '.mirasim', 'sessions', 'claude');
-  if (!existsSync(folder)) return 0;
-  let count = 0;
-  for (const name of readdirSync(folder, { withFileTypes: true })) {
+  if (!existsSync(folder)) return { running: 0, unknown: [] };
+  let running = 0;
+  const unknown: string[] = [];
+  for (const name of readdirSync(folder, { withFileTypes: true }).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  )) {
     if (!name.isDirectory()) continue;
-    const record = readJson(join(folder, name.name, 'record.json'), 'Claude 会话记录');
+    let record: Json;
+    try {
+      record = readJson(join(folder, name.name, 'record.json'), 'Claude 会话记录');
+    } catch {
+      unknown.push(name.name);
+      continue;
+    }
     if (
       !['running', 'queued', 'completed', 'incomplete', 'failed', 'stopped', 'interrupted', 'idle'].includes(
         String(record.runState),
       )
-    )
-      throw new Error('Claude 会话状态不认识，不能确认空闲');
-    if (record.runState === 'running' || record.runState === 'queued') count++;
+    ) {
+      unknown.push(name.name);
+      continue;
+    }
+    if (record.runState === 'running' || record.runState === 'queued') running++;
   }
-  return count;
+  return { running, unknown };
 }
 
 async function configOf(wire: MirasimWire, replyMs = 5_000): Promise<Json> {
@@ -270,19 +285,26 @@ async function connectInstances(home: string, replyMs: number): Promise<MirasimW
   return wires;
 }
 
-async function idle(home: string, wires: MirasimWire[], o: MigrationOptions): Promise<boolean> {
+type Idleness = 'idle' | 'busy' | 'unknown';
+
+async function idle(home: string, wires: MirasimWire[], o: MigrationOptions): Promise<Idleness> {
   const deadline = Date.now() + (o.maxWaitMs ?? 6 * 60 * 60_000);
   let quiet = 0;
   for (;;) {
-    const running = runningSessions(home);
+    const { running, unknown } = runningSessions(home);
     for (const w of wires) await configOf(w, o.replyMs);
-    quiet = running === 0 ? quiet + 1 : 0;
-    if (quiet >= 2) return true;
-    if (running > 0 && !o.wait) return false;
-    if (Date.now() >= deadline) return false;
+    // 有会话记录没查成：判不了是否空闲，不当空闲（可能正写到一半，等着重查）。
+    const state: Idleness = running > 0 ? 'busy' : unknown.length ? 'unknown' : 'idle';
+    quiet = state === 'idle' ? quiet + 1 : 0;
+    if (quiet >= 2) return 'idle';
+    if (state !== 'idle' && !o.wait) return state;
+    // 到期还没连续两次确认空闲：照旧按没空闲算。
+    if (Date.now() >= deadline) return state === 'idle' ? 'busy' : state;
     await sleep(o.pollMs ?? 1_000);
   }
 }
+
+const UNKNOWN_IDLE = '有 Claude 会话记录读不了或状态不认识（没查成），判不了是否空闲，旧接入保留，等待重查';
 
 async function setLaunch(wires: MirasimWire[], wanted: Launch, replyMs = 5_000): Promise<void> {
   for (const wire of wires) {
@@ -450,8 +472,13 @@ async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
   const wires = await connectInstances(o.home, o.replyMs ?? 5_000);
   if (!wires.length) return result('waiting', before.command, 'Mirasim 配置连接还没就绪，未改启动命令');
   try {
-    if (!(await idle(o.home, wires, o)))
-      return result('waiting', before.command, '有在途 Claude 回合，旧接入保留，等待空闲');
+    const first = await idle(o.home, wires, o);
+    if (first !== 'idle')
+      return result(
+        'waiting',
+        before.command,
+        first === 'unknown' ? UNKNOWN_IDLE : '有在途 Claude 回合，旧接入保留，等待空闲',
+      );
     const current = launchOf(readJson(setting, 'Mirasim 设置'));
     if (!sameLaunch(current, before)) throw new Error('等待期间启动配置被其他操作修改，未覆盖');
     for (const wire of wires) {
@@ -470,8 +497,13 @@ async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
     chmodSync(executable, 0o755);
     verifyBinary(executable, input);
     verifyTarget(executable, o.home);
-    if (!(await idle(o.home, wires, o)))
-      return result('waiting', before.command, '准备版本期间有新回合开始，未切换');
+    const second = await idle(o.home, wires, o);
+    if (second !== 'idle')
+      return result(
+        'waiting',
+        before.command,
+        second === 'unknown' ? UNKNOWN_IDLE : '准备版本期间有新回合开始，未切换',
+      );
     if (runtimeSourceHash(o.repo) !== sourceHash)
       throw new Error('准备期间源码已更新，未把过期版本设为启动器');
     if (!sameLaunch(launchOf(readJson(setting, 'Mirasim 设置')), before))

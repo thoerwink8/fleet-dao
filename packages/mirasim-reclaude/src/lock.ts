@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+const EMPTY_LOCK_STALE_MS = 30_000;
 
 // 迁移可能等 6 小时，不能因锁的年龄抢走仍活着的进程。
 export function takeLock(home: string, name: 'migration' | 'worker'): (() => void) | undefined {
@@ -33,8 +35,24 @@ export function takeLock(home: string, name: 'migration' | 'worker'): (() => voi
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw new Error('迁移互斥记录读取失败');
     }
-    // 另一个进程刚创建文件，还没写完时只等，不误删。
-    if (!text) return undefined;
+    // 另一个进程刚创建文件，还没写完时只等，不误删。创建后写入前就崩溃的空锁永远不会再被写：
+    // 空着超过 30 秒按已退出回收（写一行 JSON 只要几毫秒）。
+    if (!text) {
+      let age: number;
+      try {
+        age = Date.now() - statSync(file).mtimeMs;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw new Error('迁移互斥记录读取失败');
+      }
+      if (age <= EMPTY_LOCK_STALE_MS) return undefined;
+      try {
+        if (readFileSync(file, 'utf8') === '') unlinkSync(file);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('空的迁移互斥记录无法回收');
+      }
+      continue;
+    }
     let pid: number;
     try {
       pid = JSON.parse(text).pid;

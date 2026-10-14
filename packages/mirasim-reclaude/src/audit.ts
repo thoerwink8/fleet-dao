@@ -111,6 +111,8 @@ export function expectedSource(l: Launch): 'platform' | 'own' | 'unknown' {
   if (l.gateway === 'stripped') return 'own';
   if (l.route === 'cloud') return 'platform';
   if (l.route === 'local') return 'own';
+  // 跟随全局、Mirasim 没给网关：经 reclaude 走自有。
+  if (l.route === 'default' && l.gateway === 'none') return 'own';
   return 'unknown';
 }
 
