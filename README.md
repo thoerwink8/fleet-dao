@@ -75,7 +75,8 @@
 | [docs/reclaude.md](docs/reclaude.md) | reclaude 的门口：文档、清理脚本、以及「〈编号〉账号被封了，根据文档清理痕迹」这句提示词 | 入口或提示词变了 |
 | [docs/reclaude-in-mirasim.md](docs/reclaude-in-mirasim.md) | Windows/Mac 的 Mirasim 自有/平台切换、旧安装自动迁移、检查/撤回，以及 Linux 与 Fleet 的分工。从 [docs/reclaude.md](docs/reclaude.md) 进 | 装法或启动器变了 |
 | [docs/reclaude-self-check.md](docs/reclaude-self-check.md) | 上机前自检和被封号的细则。从 [docs/reclaude.md](docs/reclaude.md) 进 | 清法与判据变了 |
-| [AGENTS.md](AGENTS.md) | 给 AI 的本仓约定 | 本仓规则变了 |
+| [AGENTS.md](AGENTS.md) | 给 AI 的本仓约定，只当目录（一屏读完，细则指到包和 docs/） | 本仓规则变了 |
+| `packages/<包>/AGENTS.md` | 给 AI 的包说明（engine、api、web、conventions、db、store）：干什么、入口、怎么测、坑、连带改什么 | 改了那个包的入口、命令、坑 |
 | [agents/shared-rules.md](agents/shared-rules.md) | 各仓通用的规矩（通用段），同步脚本写进各家 AI 的全局说明 | 改它是改标准；合进主线后开会话钩子自动同步到各台机器 |
 
 ## 协作

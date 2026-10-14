@@ -7,7 +7,7 @@
 // 改这里之前必须知道：
 // - 读法照搬 systemd（和 deploy/lib/app-config.sh 的 env_parse 同一套）：deploy/test/config.test.mjs 用那边测试的同一批样本钉住两边一样。
 // - 线上的值一律不进输出、报警、状态文件：只报文件、键名、期望里公开的值和「不一致」；私有值连期望也只有指纹，发布时也不写。
-// - 读不到、认不出一律「没查成」，不当成一致（AGENTS.md「底线」）；发布时照期望写，读不到、认不出、写完读回不对一律不写（写了的改回原样）。
+// - 读不到、认不出一律「没查成」，不当成一致（agents/shared-rules.md「底线」）；发布时照期望写，读不到、认不出、写完读回不对一律不写（写了的改回原样）。
 // - 本文件跟着 lib.mjs 一起装到 /usr/local/lib/fleet-dao/auto-release/（france.sh 的 AUTO_RELEASE_FILES），只能 import node 自带的。
 import { createHmac, randomBytes } from 'node:crypto';
 import {

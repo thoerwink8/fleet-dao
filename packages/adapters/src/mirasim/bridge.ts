@@ -4,7 +4,7 @@
 // stdout 一行要么是一个 Mirasim 的帧、要么是一条本文件自己的控制行（下面「协议」）。
 //
 // 只用 node 自带的模块（装在会话用户读得到的检出/发布目录里，跑它的时候不保证 node_modules 在——不能指望 workspace
-// 解析；#345 需求，见仓根 AGENTS.md「本机干活」一节）：node 22 全局就有 WebSocket，不用另外 import。
+// 解析；#345 需求）：node 22 全局就有 WebSocket，不用另外 import。
 //
 // 协议（stdout 的控制行，和 Mirasim 的帧用同一个 __bridge 字段分开——Mirasim 的帧不会有这个字段）：
 //   {"__bridge":"ready"}                      —— 连上了，往后 stdout 每行要么是 Mirasim 的帧、要么下面这两种

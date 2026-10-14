@@ -1,0 +1,32 @@
+# packages/db：表结构、迁移、查询
+
+Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架、额度留量线的默认值和本机测试库的起停。为什么用 Postgres 见 design 第四节「为什么用 Postgres」。
+
+## 入口
+
+- `packages/db/src/schema/`：全部表和枚举；`packages/db/src/queries/`：查询函数；`packages/db/src/index.ts`：对外导出。
+- `packages/db/migrations/`：迁移，drizzle-kit 生成的和手写的（触发器等，如 `0001_triggers.sql`）放在一起，按编号走。
+- `packages/db/drizzle.config.ts`：只用来生成迁移，不连库。
+- 命令（`pnpm --filter @fleet-dao/db <命令>`）：`db:generate`（生成迁移并格式化）、`db:migrate`、`db:seed`、`db:catalog`、`db:routing`，入口都在 `packages/db/src/bin/`。
+- `packages/db/src/bin/local-pg.ts`：仓根 `pnpm start` / `pnpm stop` / `pnpm pg:local` 都指向它，起停本机嵌入式 Postgres（默认端口 55432，判法在 `src/local-pg.ts`）。
+- `packages/db/routing.default.json`、`packages/db/quota-reserve.default.json`：路由骨架和额度留量线的默认值，只在新装机时写初始值。
+
+## 测试
+
+- `npx vitest run packages/db/test/<文件>`。默认每个测试文件一份 PGlite（内存 Postgres，跑真迁移），不要起库；占内存大。
+- 设了 `FLEET_TEST_PG_URL` 才连真库（CI 的 pg 台起 `postgres:16`）；连不上、迁移没跑成当场报错，不退回 PGlite。`test/real-pg.test.ts` 只在设了它时跑。
+- 驾驶舱 e2e 用的是另一个变量 `E2E_PG_ADMIN_URL`，见 `packages/web/e2e/README.md`。
+
+## 常见坑
+
+- 改了 `src/schema` 没生成迁移：`packages/db/test/schema-drift.test.ts` 当场红。
+- 迁移只进不退：发布时先迁移再切版本，退回上一版不撤迁移。新迁移要写成旧代码照样能跑（先加列、下一版再删旧的）。见 ops 第八节「改之前要知道的」。
+- 公开仓：种子（`src/seed.ts`）不放账号、池、路由、额度。种子只补缺，已有的行不跟着改值。
+- 实时推送靠触发器 `NOTIFY fleet_changes`：表名单在 `packages/shared/src/realtime.ts`，只增不改，`packages/db/test/notify.test.ts` 逐表核对。
+
+## 改它时要连带改
+
+- 改表结构：改 `src/schema/` → `pnpm --filter @fleet-dao/db db:generate` → 新的 `.sql` 和 `migrations/meta` 一起提交。
+- 新表要实时推送：加进 `REALTIME_TABLES`，迁移里建触发器。
+- 用到新列、新表的读写：`packages/store` 两套实现（见 `packages/store/AGENTS.md`）和 engine 的查询一起改。
+- 改了库、用户、备份相关的部署：同步 ops 第三节「用户、目录、库」、第十一节「备份与恢复」。
