@@ -1435,6 +1435,49 @@ describe('计时、快照', () => {
     );
     expect((await alertByKey(t.db, parkedKey))?.resolvedAt).toBeNull();
   });
+
+  it('挂起解除、接着干了（写 running）：当场撤这一代的挂起，不等每小时对账；别的代和别的键不动（#2212）', async () => {
+    await world(t.db);
+    const resumed = await addTask(t.db);
+    const wf = `task:${resumed.repo.owner}/${resumed.repo.name}#${resumed.task.issueNumber}`;
+    const key = `${wf}:park:1`;
+    const laterGen = `${wf}:r2:park:1`;
+    const unrelated = `${wf}:history`;
+    for (const dedupeKey of [key, laterGen, unrelated]) {
+      await upsertAlert(t.db, {
+        dedupeKey,
+        level: 'alert',
+        taskId: resumed.task.id,
+        title: '动手 3 轮都没过',
+        body: '点「继续」再来三轮',
+      });
+    }
+    const save = (phase: string, state: 'running' | 'stalled') =>
+      ports().saveTaskState(
+        {
+          taskId: resumed.task.id,
+          repoId: resumed.repo.id,
+          issueNumber: resumed.task.issueNumber,
+          state,
+          phase,
+          doing: phase === 'parked' ? '停下等人：动手 3 轮都没过' : '第 1 轮：grok-4.7 动手',
+          lastProblem: null,
+          subtasks: [],
+        },
+        { ...ctx, workflowId: wf },
+      );
+    // 还停着等人：不撤
+    await save('parked', 'stalled');
+    expect((await alertByKey(t.db, key))?.resolvedAt).toBeNull();
+    // 接着干了
+    await save('implement', 'running');
+    const withdrawn = await alertByKey(t.db, key);
+    expect(withdrawn?.resolvedAt).not.toBeNull();
+    expect(withdrawn?.resolvedBy).toBe('engine:task-workflow');
+    expect(withdrawn?.body).toMatch(/^已撤：任务已经不挂着了：挂起已经解除、接着干了/);
+    expect((await alertByKey(t.db, laterGen))?.resolvedAt).toBeNull();
+    expect((await alertByKey(t.db, unrelated))?.resolvedAt).toBeNull();
+  });
 });
 
 /**

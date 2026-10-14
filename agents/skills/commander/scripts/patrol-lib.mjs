@@ -80,7 +80,8 @@ export const BASELINE_SCHEMA = 1;
 const NO_NEWLINE = "E'\\n'";
 /**
  * 「该推」的 SQL（同 feishu-push.ts 的 pushableSince）：没处理、24 小时内建的；要你拍、每日简报（feishu:brief:）、推送测试（feishu:test:）马上推；
- * 卡住报警（再提醒 remind: 除外）、主线红（feishu:main-red:）开满 60 分钟没撤才推；主线已恢复只在它之前 24 小时内真推出去过主线红才推；
+ * 卡住报警（再提醒 remind:、路由疑似降智 probe-iq: 除外）开满 120 分钟、主线红（feishu:main-red:）开满 60 分钟没撤才推；
+ * 主线已恢复只在它之前 24 小时内真推出去过主线红才推；
  * 其余不推。值是从什么时候起该推，不该推是 null。
  */
 const PUSHABLE_SINCE = [
@@ -89,7 +90,7 @@ const PUSHABLE_SINCE = [
   "when n.level = 'decision' then n.created_at",
   "when starts_with(n.dedupe_key, 'feishu:main-red:') then n.created_at + interval '60 minutes'",
   "when starts_with(n.dedupe_key, 'feishu:main-recovered:') then case when exists (select 1 from notifications red join notification_deliveries rd on rd.notification_id = red.id and rd.channel = 'feishu' and rd.delivered_at is not null where starts_with(red.dedupe_key, 'feishu:main-red:') and red.created_at < n.created_at and red.created_at >= n.created_at - interval '24 hours') then n.created_at else null end",
-  "when n.level = 'alert' and not starts_with(n.dedupe_key, 'remind:') then n.created_at + interval '60 minutes'",
+  "when n.level = 'alert' and not starts_with(n.dedupe_key, 'remind:') and not starts_with(n.dedupe_key, 'probe-iq:') then n.created_at + interval '120 minutes'",
   'else null end',
 ].join(' ');
 /** 推送那一块：一行 push|状态|没配的原因|最老一条到点几分钟|该推没送到几条|最近一次送到几分钟前。 */

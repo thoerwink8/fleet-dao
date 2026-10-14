@@ -18,6 +18,8 @@ import {
   createColdVerify,
   type DiffFile,
   fillMissingPatches,
+  HEAD_SETTLE_READS,
+  HEAD_SETTLE_WAIT_MS,
   handoffBody,
   MAX_FILE_DIFF_LINES,
   mirrorFileDiff,
@@ -138,6 +140,8 @@ interface Posted {
 function rig(
   opts: {
     pull?: Partial<PullFacts>;
+    /** 给了就按次序一次读一个（读完了停在最后一个），没给每次都读 pull。 */
+    pulls?: Partial<PullFacts>[];
     files?: DiffFile[];
     picks?: PickScript;
     driverRun?: (spec: HostRunSpec, hooks: HostRunHooks, n: number) => Promise<HostReport>;
@@ -163,6 +167,9 @@ function rig(
   /** 收场时放掉的预占编号。 */
   const released: string[] = [];
   const asked: PickRouteInput[] = [];
+  /** 每次读 PR 记一笔；头对不上时每次等多久。 */
+  const reads: number[] = [];
+  const slept: number[] = [];
   let n = 0;
   const driver = (hostId: WiredHost): HostDriver => ({
     hostId,
@@ -180,7 +187,9 @@ function rig(
     claims: {
       async readPull() {
         if (opts.readPullError) throw opts.readPullError;
-        return pullFacts(opts.pull);
+        reads.push(reads.length + 1);
+        const seq = opts.pulls;
+        return pullFacts(seq ? seq[Math.min(reads.length, seq.length) - 1] : opts.pull);
       },
       async setStatus(_repo: unknown, sha: string, status: Omit<Posted, 'sha'>) {
         const err = opts.setStatusError?.(posted);
@@ -255,6 +264,9 @@ function rig(
       return `run-${String(ids).padStart(4, '0')}`;
     },
     heartbeatEveryMs: 5,
+    sleep: async (ms) => {
+      slept.push(ms);
+    },
     ...opts.deps,
   });
   const input = (over: Partial<ColdVerifyInput> = {}): ColdVerifyInput => ({
@@ -272,7 +284,7 @@ function rig(
     round: 1,
     ...over,
   });
-  return { run, input, ft, posted, specs, recorded, started, startedWith, released, asked };
+  return { run, input, ft, posted, specs, recorded, started, startedWith, released, asked, reads, slept };
 }
 
 describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
@@ -869,6 +881,29 @@ describe('PR 的头不是要验的那个了', { timeout: 30_000 }, () => {
     expect(got.pass).toBe(false);
     expect(r.specs).toHaveLength(0);
     expect(r.posted).toEqual([]);
+    // 一直对不上：读满 HEAD_SETTLE_READS 次才认
+    expect(r.reads).toHaveLength(HEAD_SETTLE_READS);
+    expect(r.slept).toEqual(Array(HEAD_SETTLE_READS - 1).fill(HEAD_SETTLE_WAIT_MS));
+  });
+
+  it('刚推完 GitHub 还没换头（#2181）：隔一会儿再读，换上了就照常验，不回 headMoved', async () => {
+    const r = rig({
+      pulls: [{ headSha: 'c'.repeat(40) }, { headSha: 'c'.repeat(40) }, {}],
+      picks: { gpt: okRoute('gpt') },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.headMoved).toBeUndefined();
+    expect(got.pass).toBe(true);
+    expect(r.reads).toHaveLength(3);
+    expect(r.slept).toEqual([HEAD_SETTLE_WAIT_MS, HEAD_SETTLE_WAIT_MS]);
+    expect(r.posted.at(-1)?.sha).toBe(HEAD);
+  });
+
+  it('头对得上：只读一次，不等', async () => {
+    const r = rig({ picks: { gpt: okRoute('gpt') } });
+    await r.run(r.input(), ctx());
+    expect(r.reads).toHaveLength(1);
+    expect(r.slept).toEqual([]);
   });
 });
 

@@ -15,7 +15,9 @@
 // - 过一会儿就行的（没空位、内存放不下、额度要等、引擎在停机、上游临时故障、一个验收模型都派不出）回 retry，工作流隔一会儿再来，
 //   不算一轮、不报人。上游临时故障认的是失败分流规则表上标了 blip 的那些（容量满、503、限流、连接被重置），不在这里另写关键词。
 //   一个模型都派不出（每一族选路都回「一条能用的都没有」，#1731）也按这一类：隔 ROUTE_RETRY_SECONDS 再来，不停下等人。
-// - PR 的头不是要验的那个了（有人推过新提交）回 headMoved，工作流对新的头重走一遍。
+// - PR 的头不是要验的那个了（有人推过新提交）回 headMoved，工作流对新的头重走一遍。引擎推完马上就来验（和等 CI 同时起），
+//   GitHub 改 PR 的头是异步的、比推送晚一两秒：读到的头对不上先隔 HEAD_SETTLE_WAIT_MS 再读，读满 HEAD_SETTLE_READS 次还对不上
+//   才算有人推过（#2181：推完 0.1 秒就读到推之前的头，判成「头被别人改了」停下等人两个多小时）。
 // - 读 GitHub 先于一切、在 runColdVerifyForPr 外面做：GitHub 一时不通是 PortError（工作流按失败分流重试），不是「读不到 PR」那种要报人的结论。
 // - 验收会话手上没有仓库的检出：只给一个空的临时目录（归那条路由的会话用户，会话收场就删），diff 全在提示词里。
 //   diff 超过 MAX_DIFF_CHARS：放不下的文件跳过并写明，不截断了假装看全。
@@ -77,6 +79,10 @@ export const SUMMARY_LINE_CHARS = 300;
 const GENERATED_SNAPSHOT = /^packages\/db\/migrations\/meta\/([^/]+)_snapshot\.json$/;
 /** 会话跑着时多久报一次活着（远小于心跳超时）。 */
 export const VERIFY_HEARTBEAT_MS = 15_000;
+/** PR 的头对不上要验的那个时最多读几次（含第一次）：GitHub 推完到 PR 换头一般一两秒，读 5 次、隔 2 秒，最多多等 8 秒。 */
+export const HEAD_SETTLE_READS = 5;
+/** 两次读之间隔多久。 */
+export const HEAD_SETTLE_WAIT_MS = 2_000;
 /** 内存放不下新会话时，隔多久再来（秒）。 */
 export const VERIFY_ADMISSION_RETRY_SECONDS = 60;
 /** 切号停下了这一次验收（#59），隔多久再验（秒）：切号停派十几秒、切完下一轮探针探过才派得到切过去的池。 */
@@ -133,6 +139,8 @@ export interface ColdVerifyActivityDeps {
   fileDiff?: FileDiffReader;
   now?: () => Date;
   /** 以下测试用。 */
+  /** 头对不上时两次读之间怎么等（默认真等 HEAD_SETTLE_WAIT_MS）。 */
+  sleep?: (ms: number) => Promise<void>;
   newRunId?: () => string;
   heartbeatEveryMs?: number;
   log?: (message: string, fields?: Record<string, unknown>) => void;
@@ -346,6 +354,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
   const heartbeatEveryMs = deps.heartbeatEveryMs ?? VERIFY_HEARTBEAT_MS;
   const maxDiffChars = deps.maxDiffChars ?? MAX_DIFF_CHARS;
   const log = deps.log ?? (() => undefined);
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const spawn = hostSegmentSpawner(deps.spawner);
   // 跨圈的内存记账（#2007，引擎重启丢了无所谓：状态最多多贴一次、间隔从头涨）：
   // 每个 PR 最后贴成功的 cold-verify 状态；每个 PR 同一原因连续等了几次。
@@ -375,7 +384,17 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     const prKey = `${repo.owner}/${repo.name}#${prNumber}`.toLowerCase();
 
     // 1. 读 GitHub（先于一切、在 runColdVerifyForPr 外面）：不通是 PortError，工作流按失败分流重试。
-    const pull = await mapped(() => deps.gh.claims.readPull(repo, prNumber));
+    // 头对不上先等 GitHub 把刚推的头换上去再读（见文件头）；文件也要在头对上之后读，不然拿到的是推之前的 diff。
+    let pull = await mapped(() => deps.gh.claims.readPull(repo, prNumber));
+    for (
+      let reads = 1;
+      reads < HEAD_SETTLE_READS && pull.state === 'open' && pull.headSha !== input.headSha;
+      reads++
+    ) {
+      await sleep(HEAD_SETTLE_WAIT_MS);
+      ctx.heartbeat();
+      pull = await mapped(() => deps.gh.claims.readPull(repo, prNumber));
+    }
     const files = await mapped(() => deps.gh.pullFiles({ repo, prNumber, signal: ctx.signal }));
     ctx.heartbeat();
 

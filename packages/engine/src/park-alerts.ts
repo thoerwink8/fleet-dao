@@ -12,5 +12,11 @@ export const TASK_DONE_PARK_WHY = '任务已经做完了，这条挂起不再成
 /** 任务被叫停时撤的：只撤这一代报的挂起，重做出来的别的代不动。 */
 export const TASK_STOPPED_PARK_WHY = '任务已经叫停了，这条挂起不再成立';
 
+/**
+ * 挂起解除、接着干了（人点了「继续」、自动续了一次、仓切成不强制 CI）：工作流回到 running 写快照当时撤这一代的挂起。
+ * 和每小时对账那一条（jobs/alert-sweep.ts 的「挂起」）同一个判据、同一句话，只是不再等对账那一轮。
+ */
+export const TASK_RESUMED_PARK_WHY = '任务已经不挂着了：挂起已经解除、接着干了';
+
 /** 收尾或叫停时写快照当时撤的，处理人都是它。对账补撤仍记 engine:hourly-reconcile。 */
 export const TASK_DONE_PARK_ACTOR = 'engine:task-workflow';
