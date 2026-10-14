@@ -1,27 +1,32 @@
-// 驾驶舱 e2e 的整套真环境（母单 #902）：真 Postgres 上的 fleet_e2e 库（备库 packages/api/test/e2e/prepare.ts）
-// + 真后端（packages/api/src/main.ts，和线上同一个入口，不是测试装配）+ 真前端（Vite 开发服务器，/api、/auth 照常代理）。
+// 驾驶舱 e2e 的整套真环境（母单 #902）：真 Postgres 上的 fleet_e2e* 库（备库 packages/api/test/e2e/prepare.ts）
+// + 真后端（packages/api/src/main.ts，和线上同一个入口，不是测试装配）+ 打包好的前端（dist/client，门面照线上 nginx 伺候，/api、/auth 转后端）。
 // 唯一多出来的一环是后端前面的「开关代理」：e2e 要验「后端读不到、报错时页面怎么显示」，不能真把后端杀了再拉起
 // （端口、进程清理都不稳），所以后端前面放一个 TCP 层的小代理，平时原样转发，测试一句话让它「断开」或「回 500」。
+// 每个 Playwright worker 一整套（决定 0093，support/fixtures.ts 的 stack 夹具）：各自的库（fleet_e2e_w<worker 号>，收工时删掉）、各自的端口，
+// 互不干扰，所以能开多个 worker 并着跑；前端只在 global-setup 打包一次，各套共用同一份产物。
 // 改这里之前必须知道：
 // - 要一台真 Postgres：E2E_PG_ADMIN_URL 没设就明确失败，不退回内存库冒充（备库那一步同样）。
-// - 端口都可以用环境变量改（E2E_WEB_PORT、E2E_API_PORT、E2E_PROXY_PORT），默认选了一组不撞开发默认值（5173/8787/8788）的。
-// - 后端按 FLEET_PUBLIC_URL 核对写请求的来源，所以浏览器必须开 http://localhost:<E2E_WEB_PORT>（不是 127.0.0.1）。
+// - 门面、开关代理在本进程里 listen 0（端口一直攥着）；后端和 fleet 命令口按 worker 号排（stackPorts），不撞别的 worker、不撞开发默认值。
+// - 后端按 FLEET_PUBLIC_URL 核对写请求的来源，所以浏览器必须开 http://localhost:<门面端口>（不是 127.0.0.1）。
 
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createWriteStream, existsSync, mkdirSync } from 'node:fs';
-import { createServer as createHttpServer, request as httpRequest } from 'node:http';
+import { createServer as createHttpServer, request as httpRequest, type Server } from 'node:http';
 import { createRequire } from 'node:module';
+import type { AddressInfo } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from '@playwright/test';
 import { type E2eFacts, parseFacts } from './facts.ts';
 import { E2E_NODE_KEYS } from './node-keys.ts';
+import { startWebServer, type WebServer } from './web-server.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(here, '..', '..', '..', '..');
 export const WEB_DIR = resolve(here, '..', '..');
 export const OUT_DIR = join(REPO_ROOT, '_tmp', 'e2e');
+/** 正式构建的产物（react-router build，ssr: false）：门面伺候的就是它。 */
+export const WEB_DIST = join(WEB_DIR, 'dist', 'client');
 
 export interface StackEnv {
   webOrigin: string;
@@ -32,44 +37,64 @@ export interface StackEnv {
   facts: E2eFacts;
 }
 
-const num = (name: string, fallback: number): number => {
-  const v = process.env[name];
-  if (v === undefined || v === '') return fallback;
-  const n = Number(v);
-  if (!Number.isInteger(n) || n < 1 || n > 65535)
-    throw new Error(`${name} 要是 1–65535 的整数，现在是「${v}」`);
-  return n;
-};
+function reactRouterBin(): string {
+  const bin = join(
+    dirname(createRequire(join(WEB_DIR, 'package.json')).resolve('@react-router/dev/package.json')),
+    'bin.cjs',
+  );
+  if (!existsSync(bin)) throw new Error(`找不到 react-router 的命令行：${bin}`);
+  return bin;
+}
 
-function runPrepare(): E2eFacts {
+/**
+ * 打包前端（每轮 e2e 一次，global-setup 调）：react-router build → dist/client。打不出来就抛，不拿旧产物凑。
+ * E2E_SKIP_BUILD=1 跳过（调用例时反复跑、确认产物是新的才用）。
+ */
+export function buildWeb(): void {
+  if (process.env.E2E_SKIP_BUILD === '1') {
+    if (!existsSync(join(WEB_DIST, 'index.html')))
+      throw new Error(`E2E_SKIP_BUILD=1 但 ${WEB_DIST} 里没有打包好的前端`);
+    return;
+  }
+  const started = Date.now();
+  const r = spawnSync(process.execPath, [reactRouterBin(), 'build'], {
+    cwd: WEB_DIR,
+    env: process.env,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (r.status !== 0) throw new Error(`前端打包没成（退出码 ${r.status}）：\n${r.stdout}\n${r.stderr}`);
+  console.log(`[e2e] 前端打包 ${Math.round((Date.now() - started) / 1000)} 秒`);
+}
+
+function runPrepare(dbName: string): E2eFacts {
   const r = spawnSync(process.execPath, ['packages/api/test/e2e/prepare.ts'], {
     cwd: REPO_ROOT,
-    env: process.env,
+    env: { ...process.env, E2E_DB_NAME: dbName },
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
   });
-  if (r.status !== 0) throw new Error(`备库没成（退出码 ${r.status}）：\n${r.stderr}`);
+  if (r.status !== 0) throw new Error(`备库 ${dbName} 没成（退出码 ${r.status}）：\n${r.stderr}`);
   const lastLine = r.stdout.trim().split('\n').at(-1) ?? '';
   return parseFacts(lastLine);
 }
 
-async function waitFor(
-  url: string,
-  what: string,
-  timeoutMs = 90_000,
-  ok = (s: number) => s < 500,
-): Promise<void> {
+/** 等 url 通（回 500 以下）。owner 给了：它一退出就不等了——端口被别人占着时，连上的是别人的服务，不能当成自己的起好了。 */
+async function waitFor(url: string, what: string, timeoutMs: number, owner?: ChildProcess): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last = '还没连上';
   while (Date.now() < deadline) {
+    if (owner && owner.exitCode !== null)
+      throw new Error(`${what}进程退出了（退出码 ${owner.exitCode}，端口被占着或起不来，看日志）`);
     try {
       const res = await fetch(url, { redirect: 'manual' });
-      if (ok(res.status)) return;
+      // 通了再看一眼自己的进程还在：端口被占时别人的服务也会回 200
+      if (res.status < 500 && (!owner || owner.exitCode === null)) return;
       last = `HTTP ${res.status}`;
     } catch (err) {
       last = String((err as Error).cause ?? err);
     }
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 200));
   }
   throw new Error(`等不到${what}（${url}，${Math.round(timeoutMs / 1000)} 秒，最后一次：${last}）`);
 }
@@ -95,10 +120,37 @@ function killTree(child: ChildProcess): void {
   else process.kill(-child.pid, 'SIGKILL');
 }
 
+const listen = (s: Server) =>
+  new Promise<number>((ok, fail) => {
+    s.once('error', fail);
+    s.listen(0, '127.0.0.1', () => ok((s.address() as AddressInfo).port));
+  });
+
+/**
+ * 后端和 fleet 命令口的端口：按 worker 号排（E2E_PORT_BASE 起，默认 21000，每个 worker 两个），不用「先占一个空闲端口再放掉交给子进程」：
+ * 放掉到子进程占上之间，别的 worker 的 listen(0) 可能正好拿走它，两套就串到同一个后端、同一个库上（本机实测撞过：A 的用例登进了 B 的库）。
+ * 端口被别的程序占着时后端起不来、进程退出，startStack 认这个、明说，不会连上别人的服务。
+ */
+export function stackPorts(slot: number): { api: number; agent: number } {
+  const raw = process.env.E2E_PORT_BASE?.trim() || '21000';
+  const base = Number(raw);
+  if (!Number.isInteger(base) || base < 1024 || base > 60000)
+    throw new Error(`E2E_PORT_BASE 要是 1024–60000 的整数，现在是「${raw}」`);
+  const offset = (slot % 2000) * 2;
+  return { api: base + offset, agent: base + offset + 1 };
+}
+
+/** 连接串加 statement_timeout=60000（见 startStack 里 DATABASE_URL 那段的说明）。 */
+export function withTimeout(dbUrl: string): string {
+  const url = new URL(dbUrl);
+  url.searchParams.set('statement_timeout', '60000');
+  return url.toString();
+}
+
 type Mode = 'up' | 'down' | 'error';
 
-/** 后端前面的开关代理：up 原样转发；down 直接断开连接（像后端没了）；error 对 /api 请求回 500。 */
-function startSwitchProxy(listenPort: number, controlPort: number, backendPort: number) {
+/** 后端前面的开关代理：up 原样转发；down 直接断开连接（像后端没了）；error 对 /api 请求回 500。两个口都现分。 */
+async function startSwitchProxy(backendPort: number) {
   let mode: Mode = 'up';
   const proxy = createHttpServer((req, res) => {
     if (mode === 'down') {
@@ -130,13 +182,11 @@ function startSwitchProxy(listenPort: number, controlPort: number, backendPort: 
     mode = m[1] as Mode;
     res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ mode }));
   });
-  const listen = (s: ReturnType<typeof createHttpServer>, port: number) =>
-    new Promise<void>((ok, fail) => {
-      s.once('error', fail);
-      s.listen(port, '127.0.0.1', () => ok());
-    });
+  const proxyPort = await listen(proxy);
+  const controlPort = await listen(control);
   return {
-    start: () => Promise.all([listen(proxy, listenPort), listen(control, controlPort)]).then(() => undefined),
+    proxyPort,
+    controlPort,
     stop: () => {
       proxy.closeAllConnections();
       control.closeAllConnections();
@@ -146,41 +196,14 @@ function startSwitchProxy(listenPort: number, controlPort: number, backendPort: 
   };
 }
 
-/**
- * Vite 开发服务器第一次遇到某个依赖会「优化依赖、重载页面」：不先走一遍，第一个用例会撞上这次重载而超时。
- * 登录后把每个页面都打开一遍，让依赖一次优化完。
- */
-async function warmUp(webOrigin: string, facts: E2eFacts): Promise<void> {
-  const browser = await chromium.launch({ channel: process.env.E2E_BROWSER_CHANNEL?.trim() || 'chrome' });
-  try {
-    const ctx = await browser.newContext();
-    const login = await ctx.request.post(`${webOrigin}/auth/password/login`, {
-      headers: { origin: webOrigin },
-      data: { username: facts.username, password: facts.password },
-    });
-    if (login.status() !== 204) throw new Error(`暖机登录没成：HTTP ${login.status()}`);
-    const page = await ctx.newPage();
-    const paths = [
-      '/login',
-      '/',
-      '/quota',
-      '/settings',
-      '/notifications',
-      '/routing',
-      '/routing?tab=efforts',
-      '/schedules',
-      '/audit',
-      '/changelog',
-      '/intake',
-      `/tasks/${facts.tasks.done}`,
-    ];
-    for (const p of paths) {
-      await page.goto(`${webOrigin}${p}`);
-      await page.waitForLoadState('networkidle');
-    }
-  } finally {
-    await browser.close();
-  }
+/** 收工删库（后端已经杀了）：删不掉只打一行，不让收尾把用例结果盖成红（库名下次备库会先删再建）。 */
+function dropDb(dbName: string): void {
+  const r = spawnSync(process.execPath, ['packages/api/test/e2e/prepare.ts', '--drop'], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, E2E_DB_NAME: dbName },
+    encoding: 'utf8',
+  });
+  if (r.status !== 0) console.error(`[e2e] 删库 ${dbName} 没成（退出码 ${r.status}）：${r.stderr.trim()}`);
 }
 
 /** 额度页的烧速只认离现在 15 分钟内的读数（见 prepare.ts 的 writeLedger）：用例开跑前重写一遍读数时刻。 */
@@ -198,23 +221,35 @@ export interface Stack {
   stop: () => void;
 }
 
-export async function startStack(): Promise<Stack> {
+export interface StackOptions {
+  /** 这一套的库名（fleet_e2e 开头；备库会先删同名库再建）。 */
+  dbName: string;
+  /** 这一套占第几组端口（stackPorts）：同一时刻跑着的几套必须各不相同（用 worker 号）。 */
+  slot: number;
+  /** 日志文件名前缀（_tmp/e2e/<tag>-api.log），分得清是哪个 worker 的。 */
+  tag: string;
+}
+
+/** 起一整套：备库 → 开关代理 → 门面 → 后端，等后端和门面都通了才返回。前端要先打包好（buildWeb）。 */
+export async function startStack({ dbName, slot, tag }: StackOptions): Promise<Stack> {
   if (!process.env.E2E_PG_ADMIN_URL?.trim()) {
     throw new Error(
       'E2E_PG_ADMIN_URL 没设：驾驶舱 e2e 要一台真 Postgres（例如 postgres://postgres:<密码>@127.0.0.1:55432/postgres），不退回内存库。起法见 packages/web/e2e/README.md',
     );
   }
-  const webPort = num('E2E_WEB_PORT', 15173);
-  const apiPort = num('E2E_API_PORT', 18787);
-  const proxyPort = num('E2E_PROXY_PORT', 18786);
-  const controlPort = num('E2E_CONTROL_PORT', 18785);
-  const agentPort = num('E2E_AGENT_PORT', 18788);
-  const webOrigin = `http://localhost:${webPort}`;
-
-  const facts = runPrepare();
-
+  const facts = runPrepare(dbName);
+  const { api: apiPort, agent: agentPort } = stackPorts(slot);
+  const sw = await startSwitchProxy(apiPort);
+  let web: WebServer;
+  try {
+    web = await startWebServer(WEB_DIST, sw.proxyPort);
+  } catch (err) {
+    sw.stop();
+    throw err;
+  }
+  const webOrigin = `http://localhost:${web.port}`;
   const api = startProcess(
-    'api',
+    `${tag}-api`,
     ['packages/api/src/main.ts'],
     {
       ...process.env,
@@ -223,7 +258,10 @@ export async function startStack(): Promise<Stack> {
       FLEET_MACHINE_NAME: '本机',
       // 看板多机（07c）：两个远程环境的通行证哈希，一个推快照、一个配了钥匙从不推（见 support/node-keys.ts）
       FLEET_NODE_KEYS: E2E_NODE_KEYS,
-      DATABASE_URL: facts.dbUrl,
+      // 语句超时放宽到 60 秒（线上 5 秒，pg-store.ts 的 withStatementTimeout 见连接串里写了就不加）：后端后台量磁盘时查所有库的大小
+      //（db-sizes.ts 的 pg_database_size），别的 worker 正在建库、删库时它要等锁，5 秒就超时；本机实测那一下超时后，同一后端里
+      // 并着的别的查询拿到错乱的结果（repo_missing、拼出「in (, , $1)」的 SQL），用例红在别处。超时放宽，等锁的那条等完就好。
+      DATABASE_URL: withTimeout(facts.dbUrl),
       FLEET_PUBLIC_URL: webOrigin,
       FLEET_COCKPIT_LISTEN: `127.0.0.1:${apiPort}`,
       FLEET_AGENT_LISTEN: `127.0.0.1:${agentPort}`,
@@ -232,36 +270,16 @@ export async function startStack(): Promise<Stack> {
     },
     REPO_ROOT,
   );
-  const sw = startSwitchProxy(proxyPort, controlPort, apiPort);
-  await sw.start();
-
-  const reactRouterBin = join(
-    dirname(createRequire(join(WEB_DIR, 'package.json')).resolve('@react-router/dev/package.json')),
-    'bin.cjs',
-  );
-  if (!existsSync(reactRouterBin)) throw new Error(`找不到 react-router 的命令行：${reactRouterBin}`);
-  const web = startProcess(
-    'vite',
-    [reactRouterBin, 'dev', '--port', String(webPort), '--host', 'localhost'],
-    { ...process.env, FLEET_API_ORIGIN: `http://127.0.0.1:${proxyPort}` },
-    WEB_DIR,
-  );
   const stop = () => {
+    web.close();
     sw.stop();
-    killTree(web);
     killTree(api);
+    dropDb(dbName);
   };
   try {
-    await waitFor(`http://127.0.0.1:${apiPort}/auth/config`, '后端', 60_000);
-    await waitFor(`${webOrigin}/login`, '前端', 120_000);
-    // 前端开发服务器第一次编译慢：先把首页的路由模块都请求一遍，免得第一个用例吃超时。
-    await waitFor(`${webOrigin}/auth/config`, '前端到后端的代理', 30_000);
-  } catch (err) {
-    stop();
-    throw err;
-  }
-  try {
-    await warmUp(webOrigin, facts);
+    const apiWhat = `后端（${tag}，端口 ${apiPort}，日志在 _tmp/e2e/${tag}-api.log）`;
+    await waitFor(`http://127.0.0.1:${apiPort}/auth/config`, apiWhat, 60_000, api);
+    await waitFor(`${webOrigin}/auth/config`, `门面到后端的转发（${tag}）`, 30_000, api);
   } catch (err) {
     stop();
     throw err;
@@ -269,8 +287,8 @@ export async function startStack(): Promise<Stack> {
   return {
     env: {
       webOrigin,
-      apiOrigin: `http://127.0.0.1:${proxyPort}`,
-      controlOrigin: `http://127.0.0.1:${controlPort}`,
+      apiOrigin: `http://127.0.0.1:${sw.proxyPort}`,
+      controlOrigin: `http://127.0.0.1:${sw.controlPort}`,
       facts,
     },
     stop,

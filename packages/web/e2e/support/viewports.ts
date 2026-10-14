@@ -1,9 +1,6 @@
-// 按触发事件挑这一轮走哪几个视口（全仓审查第 2 路清单 3）。
-// PR 上只走 1920 那一遍：e2e 是 PR 的 CI 墙钟最后收尾的那个 job（中位 358 秒），两个视口串行各走一遍。
-// 代价：只在窄屏才有的布局（比如窄于 1536 时收起的列表）PR 上测不到，要到主线推送那一轮才红、再修一次；
-// 这种少见，比每个碰界面的 PR 都多等一遍划算。改了窄屏布局的 PR，本机先跑一遍 1366（本机两个视口都走）。
-// 1366 留给每夜全量（schedule）和主线推送：那两种照旧两个视口都走。本机（没有 GITHUB_EVENT_NAME）也两个都走。
-// 主线推送和某个 PR 同一棵树时 CI 复用那次 PR 的结果、不再重跑（ci.yml 头注释），所以 1366 实际由每夜那一轮兜。
+// e2e 走的两个视口：1920×1080 是创始人的大屏、1366×768 是常见笔记本。每一轮两个都走（e2e 不在 PR 上跑了，决定 0093，
+// 原来为 PR 省时间只走 1920 的那条分支随之删掉）。
+// 两个视口是两个 Playwright 项目，各自的 worker 各起一套环境（support/fixtures.ts），1366 那一遍只读、看到的是刚备好的库。
 
 export const VIEWPORTS = {
   'laptop-1366': { width: 1366, height: 768 },
@@ -12,8 +9,5 @@ export const VIEWPORTS = {
 
 export type ViewportName = keyof typeof VIEWPORTS;
 
-/** 事件名（GitHub Actions 的 GITHUB_EVENT_NAME）→ 这一轮走的视口，按走的先后（1366 只读那一遍在前，见 playwright.config.ts）。 */
-export function viewportsFor(eventName: string | undefined): ViewportName[] {
-  if (eventName === 'pull_request') return ['desktop-1920'];
-  return ['laptop-1366', 'desktop-1920'];
-}
+/** 项目的先后（列表顺序；各自起环境，谁先谁后不影响结果）。 */
+export const VIEWPORT_ORDER: readonly ViewportName[] = ['laptop-1366', 'desktop-1920'];

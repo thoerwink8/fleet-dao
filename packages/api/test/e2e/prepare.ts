@@ -4,6 +4,7 @@
 //   E2E_PG_ADMIN_URL=postgres://postgres:<密码>@127.0.0.1:55432/postgres  node packages/api/test/e2e/prepare.ts
 //   环境变量 E2E_DB_NAME 改库名（必须 fleet_e2e 开头：这一步会先删同名的库再建，不许碰别的库）。
 //   加 --refresh-ledger：只把切号账本的读数时刻重写成「相对现在」，不动别的。
+//   加 --drop：只删 E2E_DB_NAME 那个库（e2e 每个 worker 收工时删自己的，packages/web/e2e/support/stack.ts）。
 //
 // 改这里之前必须知道：
 // - 目录（族、渠道、账号池、模型、路由）、路由两层骨架、额度留量线都走发布时同一条装载链（目录配置样例
@@ -129,6 +130,17 @@ export async function refreshLedger(env: Record<string, string | undefined> = pr
     await writeLedger(db, new Date());
   } finally {
     await close();
+  }
+}
+
+/** 删掉这一套的库（连着的会话一并断开）：e2e 的 worker 收工时调。库名同样只认 fleet_e2e 开头。 */
+export async function dropDb(env: Record<string, string | undefined> = process.env): Promise<void> {
+  const name = dbNameOf(env);
+  const admin = createDb({ url: adminUrlOf(env), max: 1 });
+  try {
+    await admin.client.unsafe(`drop database if exists ${name} with (force)`);
+  } finally {
+    await admin.close();
   }
 }
 
@@ -517,6 +529,8 @@ if (import.meta.main) {
   try {
     if (process.argv.includes('--refresh-ledger')) {
       await refreshLedger();
+    } else if (process.argv.includes('--drop')) {
+      await dropDb();
     } else {
       const facts = await prepare();
       process.stdout.write(`${JSON.stringify(facts)}\n`);

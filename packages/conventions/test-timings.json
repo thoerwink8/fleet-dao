@@ -472,7 +472,6 @@
     "packages/web/src/test/theme-tokens.test.ts": 17,
     "packages/web/src/test/usage-panel.test.tsx": 302,
     "packages/web/test/e2e-facts.test.ts": 6,
-    "packages/web/test/e2e-viewports.test.ts": 550,
     "packages/web/test/home.test.tsx": 3418,
     "packages/web/test/members-removed.test.ts": 17
   }

@@ -1,29 +1,14 @@
-// Playwright 的全局准备：起整套真环境，把地址和编号经环境变量交给工作进程；全部跑完（或中途退出）时收掉。
-// 调用例时想省掉每次起环境的一分多钟：另开一个终端跑 `pnpm e2e:serve`（它把环境信息写到 _tmp/e2e/stack.json），
-// 再用 E2E_REUSE=1 跑 playwright——这时不起也不收环境；改库的用例只能跑一次，要重跑得重启 e2e:serve（它每次都重建库）。
-import { readFileSync } from 'node:fs';
+// Playwright 的全局准备：前端打包一次（各 worker 的门面共用这份产物）。整套环境（库、后端、门面）由每个 worker 自己起
+// （support/fixtures.ts 的 stack 夹具），这里不起。
+// 调用例时想省掉每次起环境：另开一个终端跑 `pnpm e2e:serve`（它把环境信息写到 _tmp/e2e/stack.json），
+// 再用 E2E_REUSE=1 跑 playwright——这时不打包、不起环境，所有 worker 共用那一套（playwright.config.ts 把 worker 压成 1）；
+// 改库的用例只能跑一次，要重跑得重启 e2e:serve（它每次都重建库）。
 import { join } from 'node:path';
-import { OUT_DIR, type StackEnv, startStack } from './stack.ts';
+import { buildWeb, OUT_DIR } from './stack.ts';
 
 export const STACK_FILE = join(OUT_DIR, 'stack.json');
 
-export default async function globalSetup(): Promise<(() => void) | undefined> {
-  if (process.env.E2E_REUSE === '1') {
-    let env: StackEnv;
-    try {
-      env = JSON.parse(readFileSync(STACK_FILE, 'utf8')) as StackEnv;
-    } catch (err) {
-      throw new Error(
-        `E2E_REUSE=1 但读不到 ${STACK_FILE}（先在另一个终端跑 pnpm e2e:serve）：${String(err)}`,
-      );
-    }
-    process.env.E2E_STACK = JSON.stringify(env);
-    process.env.E2E_BASE_URL = env.webOrigin;
-    return undefined;
-  }
-  const stack = await startStack();
-  process.env.E2E_STACK = JSON.stringify(stack.env);
-  // 浏览器的 baseURL 以起好的前端地址为准（端口可能被环境变量改过）。
-  process.env.E2E_BASE_URL = stack.env.webOrigin;
-  return () => stack.stop();
+export default function globalSetup(): void {
+  if (process.env.E2E_REUSE === '1') return;
+  buildWeb();
 }
