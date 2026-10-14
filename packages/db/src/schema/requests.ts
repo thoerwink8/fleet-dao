@@ -1,10 +1,9 @@
 // 驾驶舱「提需求」（#2049，母单 #2047；方案 specs/2047-提需求/方案.md 第二节）：需求、消息、每人对需求的置顶和读到哪。
 // 接口约定在 @fleet-dao/shared 的 web-api/requests.ts，能不能做的判法在 request-rules.ts。
 // 改这里之前必须知道：
-// - 不复用 intents（旧表只读保留）。
 // - 删除是软删（deleted_at）；删了满 30 天由引擎的定时任务（request-sweep）连消息一起硬删，并写操作记录。消息、个人状态跟着级联删。
 // - 原话逐条存：request_messages 的人话不改、不删（结案后锁死由接口判）。
-// - 取值表不用 pg 枚举，用文字加检查约束（和 intents 一个做法）；值表和约定里的枚举逐一对齐（valuesOf）。
+// - 取值表不用 pg 枚举，用文字加检查约束（删改检查约束比删枚举值容易）；值表和约定里的枚举逐一对齐（valuesOf）。
 // - 指挥官会话（C 片，#2061）一条需求一行 request_chats，跟着需求级联删；消息上的结构化卡片在 request_messages.card。
 import type {
   RequestAnswerState,

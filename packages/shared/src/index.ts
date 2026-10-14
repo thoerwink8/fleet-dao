@@ -10,7 +10,6 @@ export * from './effort.ts';
 export * from './flow-purposes.ts';
 export * from './groom.ts';
 export * from './home-flow.ts';
-export * from './intent-api.ts';
 export * from './local-claims.ts';
 export * from './mirasim-executor.ts';
 export * from './model-prices.ts';
