@@ -99,7 +99,11 @@ test.describe('看板多机', () => {
   test('失联：浏览器的钟快进 10 分钟，横幅写「失联 10 分钟」、说不是现在的，顶栏标「失联」，下拉里那一项变灰', async ({
     page,
     shot,
+    problems,
   }) => {
+    // 一次快进 10 分钟会走过请求超时（90 秒）：/api/nodes 每 30 秒重拉，途中发出的那下被掐掉，浏览器记成中断。
+    // 新鲜度按页面的钟现算，不靠这次重拉（文件头）。别的失败（4xx/5xx、连不上）照旧算。
+    problems.allow('net::ERR_ABORTED');
     await page.clock.install({ time: new Date() });
     await page.goto('/?node=wsl');
     const banner = page.locator('[data-snapshot-banner]');
