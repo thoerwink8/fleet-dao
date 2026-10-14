@@ -2,9 +2,11 @@
 // 退出码：0 开了（挂版本的母单、单独的单也排进了版本的先后）；1 没开、开没开说不准，或者开了可没挂到母单下面、没排进先后
 // （照报的话去 GitHub 找、补）。帅位座位整张删掉（#531）：开单时替帅位在库里认领那一步（claimLocal）一并删——本机不再在库里认领。
 // 本机做的单「怎么算做完」里有要 diff 外证据的条目：照开，开完打一段提示改写（交给引擎的单这种在 issueNew 里就拒开了）。
+// 开给法国的单开完顺手经 ssh 调一次 fleet-api dispatch-issue（../issue-poke.ts，决定 0096），不等 5 分钟轮询；戳不成只提示。
 // 开单前先查同仓开着的单和最近合并的 PR 里有没有可能重复的（#995 拍 3，../issue-similar.ts）：列在开单结果后面，只提示、不影响退出码。
 import { fileURLToPath } from 'node:url';
 import { ghRunner, issueNew } from '../issue-new.ts';
+import { pokeFrance } from '../issue-poke.ts';
 import { renderSimilar, similarIssues } from '../issue-similar.ts';
 import { describeOffDiff, OFF_DIFF_REWRITE } from '../off-diff-acceptance.ts';
 
@@ -29,6 +31,8 @@ try {
       `提示：「怎么算做完」里这几条要 diff 外的证据（本机做的单照开）：\n${describeOffDiff(r.offDiff)}\n${OFF_DIFF_REWRITE}`,
     );
   }
+  // 开给法国的单（不是本机做、母单、子单）开完顺手戳一下，让法国立刻接（#决定0096 A6）；戳不成不影响开单，照实说
+  if (!r.local && !r.mother && r.parent === undefined) console.log(await pokeFrance(r.url));
   if (r.similar) for (const line of renderSimilar(r.similar, r.number)) console.log(line);
 } catch (e) {
   console.error(e instanceof Error ? e.message : String(e));
