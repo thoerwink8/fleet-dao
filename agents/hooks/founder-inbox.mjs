@@ -374,11 +374,13 @@ export const OWNER_IDLE_MS = 12 * 60 * 60_000;
  * @returns {{ state: 'gone' | 'here' | 'unknown', why: string }}
  */
 export function ownerPresence({ home, owner, now = Date.now(), env = process.env }) {
-  if (typeof owner !== 'string' || !SESSION_ID.test(owner)) return { state: 'unknown', why: '无主或主人名认不出' };
+  if (typeof owner !== 'string' || !SESSION_ID.test(owner))
+    return { state: 'unknown', why: '无主或主人名认不出' };
   const base = join(mirasimDir(env, home), 'sessions', 'claude');
   if (!existsSync(base)) return { state: 'unknown', why: '这台没装 Mirasim' };
   const dir = join(base, owner);
-  if (!existsSync(dir)) return { state: 'unknown', why: `本机没有 Mirasim 会话 ${owner}（可能是别的机器记的）` };
+  if (!existsSync(dir))
+    return { state: 'unknown', why: `本机没有 Mirasim 会话 ${owner}（可能是别的机器记的）` };
   let rec;
   try {
     rec = JSON.parse(readFileSync(join(dir, 'record.json'), 'utf8'));
@@ -405,7 +407,8 @@ export function ownerPresence({ home, owner, now = Date.now(), env = process.env
   }
   if (handedTo !== null) return { state: 'gone', why: `${owner} 已交接给 ${handedTo}，自己没在跑` };
   const updated = Date.parse(String(rec.updatedAt ?? ''));
-  if (!Number.isFinite(updated)) return { state: 'unknown', why: `${owner} 的 record.json 没有能认的 updatedAt` };
+  if (!Number.isFinite(updated))
+    return { state: 'unknown', why: `${owner} 的 record.json 没有能认的 updatedAt` };
   let last = updated;
   try {
     last = Math.max(last, statSync(join(dir, 'turns.jsonl')).mtimeMs);

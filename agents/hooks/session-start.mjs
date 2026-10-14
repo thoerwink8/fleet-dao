@@ -806,7 +806,9 @@ export function progressLines(r, lineage = null, { presence = null, adopt = null
       `要你拍的（放进报进度的「要你拍的」）：创始人引导 ${stale.length} 条挂了超过 24 小时、本会话接不了：${stale
         .slice(0, 5)
         .map((d) => `${d.id}（${d.when}，主：${d.owner}）${brief(d.text)}`)
-        .join('；')}${stale.length > 5 ? ' 等' : ''}。请他定：交给本会话办（pnpm progress claim <编号> --force --why "<他的话>"）、作废（pnpm progress done <编号> --drop）还是再等。`,
+        .join(
+          '；',
+        )}${stale.length > 5 ? ' 等' : ''}。请他定：交给本会话办（pnpm progress claim <编号> --force --why "<他的话>"）、作废（pnpm progress done <编号> --drop）还是再等。`,
     );
   if (ours.length > 0)
     lines.push(

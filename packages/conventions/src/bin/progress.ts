@@ -106,7 +106,13 @@ const deps = { git, gh };
 async function importFromInbox(id: number, change: (d: Directive) => string, what: string): Promise<string> {
   const c = await readInboxComment(id, { gh });
   const d = directiveFromComment({ ...c, text: textOf(c) });
-  const url = await proposeFile(deps, { id: d.id, path: d.path, content: change(d), title: `${what}创始人引导 ${d.id}（从 #1055 搬进仓）`, did: `${what}，从 #${PROGRESS_ISSUE} 收件箱搬到 ${d.path}` });
+  const url = await proposeFile(deps, {
+    id: d.id,
+    path: d.path,
+    content: change(d),
+    title: `${what}创始人引导 ${d.id}（从 #1055 搬进仓）`,
+    did: `${what}，从 #${PROGRESS_ISSUE} 收件箱搬到 ${d.path}`,
+  });
   await markMigrated(c, `${d.path}（${url}）`, { gh });
   return url;
 }
@@ -149,15 +155,20 @@ async function done(id: string, note: string | undefined, drop: boolean): Promis
   console.log(`标成${status}（从 #${PROGRESS_ISSUE} 收件箱搬进仓），PR 已挂自动合并：${url}`);
 }
 
-async function claim(id: string, values: { force?: boolean; why?: string; auto?: boolean; 'expect-owner'?: string }) {
+async function claim(
+  id: string,
+  values: { force?: boolean; why?: string; auto?: boolean; 'expect-owner'?: string },
+) {
   const owner = await myOwner();
   let why = values.why;
   if (values.auto) {
-    if (process.env.FLEET_WORKER === '1') throw new ProgressRefused('机器派的会话不自动认领引导（只有指挥官会话认）。没改。');
+    if (process.env.FLEET_WORKER === '1')
+      throw new ProgressRefused('机器派的会话不自动认领引导（只有指挥官会话认）。没改。');
     const was = values['expect-owner'];
     if (!was) throw new ProgressRefused('--auto 要带 --expect-owner <判断时看到的主人>。没改。');
     const p = (await hooks()).ownerPresence({ home: homedir(), owner: was });
-    if (p.state !== 'gone') throw new ProgressRefused(`原主 ${was} 不能确定已不在（${p.why}），不自动认领。没改。`);
+    if (p.state !== 'gone')
+      throw new ProgressRefused(`原主 ${was} 不能确定已不在（${p.why}），不自动认领。没改。`);
     why = `自动认领：${p.why}`;
   }
   const inMain = await (async () => {
@@ -171,21 +182,31 @@ async function claim(id: string, values: { force?: boolean; why?: string; auto?:
       { force: values.force || values.auto, why, expectOwner: values['expect-owner'] },
       deps,
     );
-    console.log(r === null ? `引导 ${id} 本来就归本会话（${owner}）。` : `认领了引导 ${id}（主：${owner}），PR 已挂自动合并：${r.url}`);
+    console.log(
+      r === null
+        ? `引导 ${id} 本来就归本会话（${owner}）。`
+        : `认领了引导 ${id}（主：${owner}），PR 已挂自动合并：${r.url}`,
+    );
     return;
   }
   const c = await readInboxComment(Number(id), { gh });
   if (values['expect-owner'] !== undefined && c.owner !== values['expect-owner'])
     throw new ProgressRefused(`评论 ${id} 的主人已不是 ${values['expect-owner']}，没改。`);
   if (c.owner !== '无主' && c.owner !== owner && !(values.force || values.auto))
-    throw new ProgressRefused(`评论 ${id} 已归别的会话（${c.owner}），没改。原会话确实没了才 --force --why。`);
+    throw new ProgressRefused(
+      `评论 ${id} 已归别的会话（${c.owner}），没改。原会话确实没了才 --force --why。`,
+    );
   const log = `${stamp(new Date())} 改主：${c.owner} → ${owner}${why?.trim() ? `（${why.trim()}）` : ''}`;
   const url = await importFromInbox(Number(id), (d) => withChange(d, { owner, log }), '认领');
-  console.log(`认领了引导 ${id}（主：${owner}，从 #${PROGRESS_ISSUE} 收件箱搬进仓），PR 已挂自动合并：${url}`);
+  console.log(
+    `认领了引导 ${id}（主：${owner}，从 #${PROGRESS_ISSUE} 收件箱搬进仓），PR 已挂自动合并：${url}`,
+  );
 }
 
 /** 待处理的：仓里主线上的，加收件箱里还没搬进仓的 */
-async function pendingRows(): Promise<Array<{ id: string; head: string; text: string; owner: string; created: string }>> {
+async function pendingRows(): Promise<
+  Array<{ id: string; head: string; text: string; owner: string; created: string }>
+> {
   const repo = await listPending(git, MAIN);
   const known = new Set((await listPaths(git, MAIN)).map((p) => p.replace(/^.*\//, '').replace(/\.md$/, '')));
   const rows = repo.map((d) => ({
@@ -245,7 +266,8 @@ try {
     await done(String(positionals[0] ?? ''), values.note, values.drop === true);
   } else if (cmd === 'read') {
     const limit = values.limit === undefined ? 10 : Number(values.limit);
-    if (!Number.isInteger(limit) || limit < 0) throw new ProgressRefused(`--limit ${values.limit} 不对，要非负整数。`);
+    if (!Number.isInteger(limit) || limit < 0)
+      throw new ProgressRefused(`--limit ${values.limit} 不对，要非负整数。`);
     if (!values.pending) await git(['fetch', '-q', 'origin', 'main']);
     const rows = await pendingRows();
     if (values.pending) {
@@ -256,7 +278,8 @@ try {
       console.log(`#${PROGRESS_ISSUE} 最近 ${recent.length} 条（旧到新）：`);
       for (const c of recent) console.log(`\n[${c.id}] ${c.body.trim()}`);
       console.log(`\n没处理的创始人引导 ${rows.length} 条（docs/directives 和 #${PROGRESS_ISSUE} 收件箱）：`);
-      for (const r of rows) console.log(`\n[${r.id}]（${r.head.replace(/^【[^】]*】/, '')}，主：${r.owner}）${r.text}`);
+      for (const r of rows)
+        console.log(`\n[${r.id}]（${r.head.replace(/^【[^】]*】/, '')}，主：${r.owner}）${r.text}`);
     }
   } else {
     throw new ProgressRefused(PROGRESS_USAGE);

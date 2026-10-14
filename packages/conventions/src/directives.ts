@@ -102,8 +102,10 @@ export const stampZ = (d: Date): string => `${stamp(d)} +0800`;
 export function normalizeAt(raw: string): { text: string; date: Date } {
   const s = raw.trim();
   const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?\s*(Z|[+-]\d{2}:?\d{2})?$/.exec(s);
-  if (!m) throw new DirectiveRefused(`--at「${raw}」认不出：要「2026-10-14 16:30」（北京时间）或带时区的时刻。`);
-  const zone = m[5] === undefined ? '+08:00' : m[5] === 'Z' ? 'Z' : m[5].replace(/^([+-]\d{2}):?(\d{2})$/, '$1:$2');
+  if (!m)
+    throw new DirectiveRefused(`--at「${raw}」认不出：要「2026-10-14 16:30」（北京时间）或带时区的时刻。`);
+  const zone =
+    m[5] === undefined ? '+08:00' : m[5] === 'Z' ? 'Z' : m[5].replace(/^([+-]\d{2}):?(\d{2})$/, '$1:$2');
   const date = new Date(`${m[1]}T${m[2]}:${m[3]}:${m[4] ?? '00'}${zone}`);
   if (Number.isNaN(date.getTime())) throw new DirectiveRefused(`--at「${raw}」不是有效时刻。`);
   return { text: stampZ(date), date };
@@ -165,7 +167,9 @@ export function parseDirective(raw: string, path: string): Directive {
   const q = text.indexOf('\n## 原话\n');
   const l = text.lastIndexOf('\n## 经过\n');
   if (!id || !status || !STATUSES.includes(status) || !at || !owner || !source || q < 0 || l < q)
-    throw new DirectiveUnchecked(`${path} 认不出（不是引导文件的样子：标题、状态、时间、主、来源、原话、经过）。`);
+    throw new DirectiveUnchecked(
+      `${path} 认不出（不是引导文件的样子：标题、状态、时间、主、来源、原话、经过）。`,
+    );
   const log = text
     .slice(l + '\n## 经过\n'.length)
     .split('\n')
@@ -203,7 +207,8 @@ export interface PromptEntry {
 }
 
 /** 系统消息、斜杠命令、后台通知不是他说的话 */
-const NOT_FOUNDER = /^\s*(?:<task-notification|<system-reminder|<prior-conversation|<command-|\[SYSTEM NOTIFICATION|\/[a-z])/i;
+const NOT_FOUNDER =
+  /^\s*(?:<task-notification|<system-reminder|<prior-conversation|<command-|\[SYSTEM NOTIFICATION|\/[a-z])/i;
 
 /**
  * 读 prompt-log 最近两天（北京时间今天、昨天）的记录。目录不存在、一份都读不到给 why；单行认不出跳过。
@@ -237,7 +242,11 @@ export function readPromptLog(dir: string, now: Date): { entries: PromptEntry[] 
         const o = JSON.parse(row) as Record<string, unknown>;
         const at = new Date(String(o.at));
         if (typeof o.prompt !== 'string' || Number.isNaN(at.getTime())) continue;
-        entries.push({ at, sessionId: typeof o.sessionId === 'string' ? o.sessionId : null, prompt: o.prompt });
+        entries.push({
+          at,
+          sessionId: typeof o.sessionId === 'string' ? o.sessionId : null,
+          prompt: o.prompt,
+        });
       } catch {
         // 一行认不出：跳过，别的照用
       }
@@ -248,7 +257,10 @@ export function readPromptLog(dir: string, now: Date): { entries: PromptEntry[] 
 }
 
 /** 本会话（这些原生会话号）创始人最近说的一句；没有给 null */
-export function latestFounderPrompt(entries: readonly PromptEntry[], sessionIds: readonly string[]): PromptEntry | null {
+export function latestFounderPrompt(
+  entries: readonly PromptEntry[],
+  sessionIds: readonly string[],
+): PromptEntry | null {
   const mine = new Set(sessionIds);
   let best: PromptEntry | null = null;
   for (const e of entries) {
@@ -299,8 +311,11 @@ export function resolveDirective(
   const text = input.text?.trim() ?? '';
   if (!text) {
     if (input.at !== undefined)
-      throw new DirectiveRefused('给了 --at 却没给原话：原话和时间要么都手填，要么都从 prompt-log 取。没记。');
-    if (pick === null) throw new DirectiveRefused(`没给原话，prompt-log 也取不到（${pickWhy}）。${HAND_FILL}`);
+      throw new DirectiveRefused(
+        '给了 --at 却没给原话：原话和时间要么都手填，要么都从 prompt-log 取。没记。',
+      );
+    if (pick === null)
+      throw new DirectiveRefused(`没给原话，prompt-log 也取不到（${pickWhy}）。${HAND_FILL}`);
     return { text: pick.prompt.trim(), at: stampZ(pick.at), atDate: pick.at, owner, source: 'prompt-log' };
   }
   if (input.at !== undefined && input.at.trim()) {
@@ -316,7 +331,10 @@ export function resolveDirective(
 
 // —— 仓里读写 ——
 
-export type Git = (args: string[], opts?: { env?: Record<string, string>; input?: string }) => Promise<GhResult>;
+export type Git = (
+  args: string[],
+  opts?: { env?: Record<string, string>; input?: string },
+) => Promise<GhResult>;
 
 export interface StoreDeps {
   git: Git;
@@ -324,7 +342,8 @@ export interface StoreDeps {
   now?: () => Date;
 }
 
-const one = (r: GhResult) => (r.stderr.trim() || r.stdout.trim() || '（没说）').replace(/\s+/g, ' ').slice(0, 300);
+const one = (r: GhResult) =>
+  (r.stderr.trim() || r.stdout.trim() || '（没说）').replace(/\s+/g, ' ').slice(0, 300);
 
 async function must(git: Git, args: string[], what: string, opts?: Parameters<Git>[1]): Promise<string> {
   const r = await git(args, opts);
@@ -334,7 +353,11 @@ async function must(git: Git, args: string[], what: string, opts?: Parameters<Gi
 
 /** ref 上全部引导文件的路径 */
 export async function listPaths(git: Git, ref: string): Promise<string[]> {
-  const out = await must(git, ['ls-tree', '-r', '--name-only', ref, '--', `${DIRECTIVES_DIR}/`], `列 ${ref} 的引导`);
+  const out = await must(
+    git,
+    ['ls-tree', '-r', '--name-only', ref, '--', `${DIRECTIVES_DIR}/`],
+    `列 ${ref} 的引导`,
+  );
   return out
     .split('\n')
     .map((l) => l.trim())
@@ -383,14 +406,24 @@ export async function proposeFile(
   const index = join(tmpdir(), `fleet-directive-${process.pid}-${Date.now()}.index`);
   const env = { GIT_INDEX_FILE: index };
   await must(git, ['read-tree', parent], '读主线的树', { env });
-  const blob = (await must(git, ['hash-object', '-w', '--stdin'], '写文件', { input: change.content })).trim();
-  await must(git, ['update-index', '--add', '--cacheinfo', `100644,${blob},${change.path}`], '放进索引', { env });
+  const blob = (
+    await must(git, ['hash-object', '-w', '--stdin'], '写文件', { input: change.content })
+  ).trim();
+  await must(git, ['update-index', '--add', '--cacheinfo', `100644,${blob},${change.path}`], '放进索引', {
+    env,
+  });
   const tree = (await must(git, ['write-tree'], '写树', { env })).trim();
   const commit = (
     await must(git, ['commit-tree', tree, '-p', parent, '-m', `${change.title}（决定 0093）`], '写提交')
   ).trim();
   const branch = branchOf(change.id);
-  const push = await git(['push', '-q', `--force-with-lease=refs/heads/${branch}:`, 'origin', `${commit}:refs/heads/${branch}`]);
+  const push = await git([
+    'push',
+    '-q',
+    `--force-with-lease=refs/heads/${branch}:`,
+    'origin',
+    `${commit}:refs/heads/${branch}`,
+  ]);
   if (push.code !== 0) {
     if (/stale info|rejected|already exists|fetch first/i.test(push.stderr))
       throw new DirectiveRefused(
@@ -399,8 +432,20 @@ export async function proposeFile(
     throw new DirectiveUnchecked(`git 推 ${branch} 报错：${one(push)}。没改成。`);
   }
   const body = `**做了什么**：${change.did}\n\n**需求**：无：创始人引导记录（docs/directives，决定 0093）\n`;
-  const pr = await gh(['pr', 'create', '--base', 'main', '--head', branch, '--title', change.title, '--body', body]);
-  if (pr.code !== 0) throw new DirectiveUnchecked(`推上了 ${branch}，gh 开 PR 报错：${one(pr)}。去 GitHub 补开。`);
+  const pr = await gh([
+    'pr',
+    'create',
+    '--base',
+    'main',
+    '--head',
+    branch,
+    '--title',
+    change.title,
+    '--body',
+    body,
+  ]);
+  if (pr.code !== 0)
+    throw new DirectiveUnchecked(`推上了 ${branch}，gh 开 PR 报错：${one(pr)}。去 GitHub 补开。`);
   const url = pr.stdout.trim().split('\n').pop() ?? '';
   const arm = await gh(['pr', 'merge', url || branch, '--auto', '--squash']);
   if (arm.code !== 0) throw new DirectiveUnchecked(`开了 ${url}，挂自动合并报错：${one(arm)}。手挂一下。`);
@@ -415,10 +460,20 @@ export async function recordDirective(
   deps: StoreDeps,
 ): Promise<{ id: string; path: string; url: string }> {
   await must(deps.git, ['fetch', '-q', 'origin', 'main'], '取主线');
-  const taken = new Set((await listPaths(deps.git, MAIN)).map((p) => p.replace(/^.*\//, '').replace(/\.md$/, '')));
+  const taken = new Set(
+    (await listPaths(deps.git, MAIN)).map((p) => p.replace(/^.*\//, '').replace(/\.md$/, '')),
+  );
   const id = newId(r.atDate, taken);
   const path = directivePath(id, r.atDate);
-  const content = formatDirective({ id, status: PENDING, at: r.at, owner: r.owner, source: r.source, text: r.text, log: [] });
+  const content = formatDirective({
+    id,
+    status: PENDING,
+    at: r.at,
+    owner: r.owner,
+    source: r.source,
+    text: r.text,
+    log: [],
+  });
   const url = await proposeFile(deps, {
     id,
     path,
@@ -451,13 +506,16 @@ export async function claimDirective(
   if (d.status !== PENDING) throw new DirectiveRefused(`引导 ${id} 已经是「${d.status}」，没改。`);
   if (d.owner === owner) return null;
   if (opts.expectOwner !== undefined && d.owner !== opts.expectOwner)
-    throw new DirectiveRefused(`引导 ${id} 的主人已从 ${opts.expectOwner} 变成 ${d.owner}（别的会话先认了），没改。`);
+    throw new DirectiveRefused(
+      `引导 ${id} 的主人已从 ${opts.expectOwner} 变成 ${d.owner}（别的会话先认了），没改。`,
+    );
   const why = opts.why?.trim() ?? '';
   if (d.owner !== NO_OWNER && !opts.force)
     throw new DirectiveRefused(
       `引导 ${id} 已归别的会话（${d.owner}），没改。原会话确实已经没了才用 --force --why "<为什么>"。`,
     );
-  if (d.owner !== NO_OWNER && !why) throw new DirectiveRefused('--force 要带 --why "<原会话为什么没了>"，没改。');
+  if (d.owner !== NO_OWNER && !why)
+    throw new DirectiveRefused('--force 要带 --why "<原会话为什么没了>"，没改。');
   const at = stamp((deps.now ?? (() => new Date()))());
   const log = `${at} 改主：${d.owner} → ${owner}${why ? `（${why}）` : ''}`;
   const url = await proposeFile(deps, {
@@ -471,7 +529,12 @@ export async function claimDirective(
 }
 
 /** 办完那一笔：新内容（调用方决定写进当前检出随活一起提交，还是单开 PR） */
-export function doneContent(d: Directive, note: string | undefined, now: Date, status: Status = DONE): string {
+export function doneContent(
+  d: Directive,
+  note: string | undefined,
+  now: Date,
+  status: Status = DONE,
+): string {
   if (d.status !== PENDING) throw new DirectiveRefused(`引导 ${d.id} 已经是「${d.status}」，没改。`);
   const n = note?.trim();
   return withChange(d, { status, log: `${stamp(now)} ${status}${n ? `：${n}` : ''}` });
@@ -498,7 +561,8 @@ export function directiveFromComment(c: {
     at = normalizeAt(written);
   } catch {
     const d = new Date(c.createdAt);
-    if (Number.isNaN(d.getTime())) throw new DirectiveUnchecked(`评论 ${c.id} 的时间认不出（「${written}」，也没有贴上的时刻）。`);
+    if (Number.isNaN(d.getTime()))
+      throw new DirectiveUnchecked(`评论 ${c.id} 的时间认不出（「${written}」，也没有贴上的时刻）。`);
     at = { text: stampZ(d), date: d };
   }
   const id = String(c.id);

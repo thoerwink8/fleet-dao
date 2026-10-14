@@ -6,8 +6,8 @@ import {
   INBOX_DAYS,
   inboxPending,
   kindOf,
-  markMigrated,
   MIGRATED_TAG,
+  markMigrated,
   NOTE_TAG,
   ownerOf,
   PENDING_TAG,
@@ -33,7 +33,12 @@ function world(initial: Fake[] = [], over: { fail?: (args: string[]) => GhResult
   let next = 1000;
   const calls: string[][] = [];
   const url = (id: number) => `https://github.com/o/r/issues/${PROGRESS_ISSUE}#issuecomment-${id}`;
-  const view = (c: Fake) => ({ id: c.id, body: c.body, html_url: url(c.id), created_at: '2026-10-05T01:00:00Z' });
+  const view = (c: Fake) => ({
+    id: c.id,
+    body: c.body,
+    html_url: url(c.id),
+    created_at: '2026-10-05T01:00:00Z',
+  });
   const gh = async (args: string[]): Promise<GhResult> => {
     calls.push(args);
     const forced = over.fail?.(args);
@@ -83,7 +88,9 @@ describe('progress：进度流水', () => {
   });
 
   it('最近 limit 条从最后一页往前读，不从第一页翻全量（2500 条也不报错）', async () => {
-    const w = world(Array.from({ length: 2500 }, (_, i) => ({ id: i + 1, body: `${NOTE_TAG}x\n\n第 ${i + 1} 条` })));
+    const w = world(
+      Array.from({ length: 2500 }, (_, i) => ({ id: i + 1, body: `${NOTE_TAG}x\n\n第 ${i + 1} 条` })),
+    );
     const got = await recentComments(3, { gh: w.gh });
     expect(got.map((c) => c.id)).toEqual([2498, 2499, 2500]);
     const pages = w.calls.filter((a) => a.some((x) => x.includes('/comments?')));
@@ -108,7 +115,9 @@ describe('progress：收件箱（驾驶舱来的引导）', () => {
     await expect(inboxPending({ gh: world([], { fail: () => fail('boom') }).gh })).rejects.toBeInstanceOf(
       ProgressUnchecked,
     );
-    await expect(inboxPending({ gh: async () => ok({ not: 'list' }) })).rejects.toBeInstanceOf(ProgressUnchecked);
+    await expect(inboxPending({ gh: async () => ok({ not: 'list' }) })).rejects.toBeInstanceOf(
+      ProgressUnchecked,
+    );
   });
 
   it('搬进仓：改成「已迁」并写明去处、回读核对；不是待处理的拒绝', async () => {
@@ -119,7 +128,9 @@ describe('progress：收件箱（驾驶舱来的引导）', () => {
     const c = await readInboxComment(7, { gh: w.gh });
     expect(ownerOf(c.body)).toBe('dir-a');
     await markMigrated(c, 'docs/directives/2026-10/7.md', { gh: w.gh });
-    expect(w.comments[0]?.body).toMatch(/^【创始人引导·已迁】2026-10-05 18:00\n〔主：dir-a〕[\s\S]*已迁到仓里：docs\/directives/);
+    expect(w.comments[0]?.body).toMatch(
+      /^【创始人引导·已迁】2026-10-05 18:00\n〔主：dir-a〕[\s\S]*已迁到仓里：docs\/directives/,
+    );
     await expect(readInboxComment(8, { gh: w.gh })).rejects.toBeInstanceOf(ProgressRefused);
     await expect(readInboxComment(7, { gh: w.gh })).rejects.toBeInstanceOf(ProgressRefused);
   });

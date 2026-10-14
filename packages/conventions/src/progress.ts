@@ -153,7 +153,10 @@ export async function inboxPending(deps: ProgressDeps): Promise<ProgressComment[
   const since = new Date(now.getTime() - INBOX_DAYS * 86_400_000).toISOString();
   const out: ProgressComment[] = [];
   for (let page = 1; page <= INBOX_PAGES_MAX; page += 1) {
-    const list = await readList(deps.gh, `${ISSUE_PATH}/comments?since=${since}&per_page=${PAGE}&page=${page}`);
+    const list = await readList(
+      deps.gh,
+      `${ISSUE_PATH}/comments?since=${since}&per_page=${PAGE}&page=${page}`,
+    );
     for (const c of list) {
       const p = parseComment(c);
       if (p.kind === 'pending') out.push(p);
@@ -171,7 +174,8 @@ export async function readInboxComment(id: number, deps: ProgressDeps): Promise<
   const c = parseComment(
     await readJson(deps.gh, ['api', `repos/{owner}/{repo}/issues/comments/${id}`], `读评论 ${id}`),
   );
-  if (!c.url.includes(`/issues/${PROGRESS_ISSUE}#`)) throw new ProgressRefused(`评论 ${id} 不在 #${PROGRESS_ISSUE} 下面，没改。`);
+  if (!c.url.includes(`/issues/${PROGRESS_ISSUE}#`))
+    throw new ProgressRefused(`评论 ${id} 不在 #${PROGRESS_ISSUE} 下面，没改。`);
   if (c.kind !== 'pending')
     throw new ProgressRefused(`评论 ${id} 不是待处理的创始人引导（${c.head.slice(0, 20)}），没改。`);
   return c;
@@ -181,19 +185,28 @@ export async function readInboxComment(id: number, deps: ProgressDeps): Promise<
 export async function markMigrated(c: ProgressComment, where: string, deps: ProgressDeps): Promise<void> {
   const rest = c.body.trimStart().slice(c.head.length);
   const next = `${MIGRATED_TAG}${c.head.slice(PENDING_TAG.length)}${rest}\n\n已迁到仓里：${where}（以后在那里认领、办完）`;
-  const res = await deps.gh(['api', '-X', 'PATCH', `repos/{owner}/{repo}/issues/comments/${c.id}`, '-f', `body=${next}`]);
+  const res = await deps.gh([
+    'api',
+    '-X',
+    'PATCH',
+    `repos/{owner}/{repo}/issues/comments/${c.id}`,
+    '-f',
+    `body=${next}`,
+  ]);
   if (res.code !== 0) throw new ProgressUnchecked(`gh 改评论 ${c.id} 报错：${detail(res)}。`);
   const after = parseComment(
     await readJson(deps.gh, ['api', `repos/{owner}/{repo}/issues/comments/${c.id}`], `改完回读评论 ${c.id}`),
   );
-  if (after.kind !== 'migrated') throw new ProgressUnchecked(`改完回读评论 ${c.id}：还不是「已迁」，去看一眼 ${after.url}。`);
+  if (after.kind !== 'migrated')
+    throw new ProgressUnchecked(`改完回读评论 ${c.id}：还不是「已迁」，去看一眼 ${after.url}。`);
 }
 
 // —— 内部 ——
 
 async function readList(gh: Gh, path: string): Promise<unknown[]> {
   const list = await readJson(gh, ['api', path], `读 #${PROGRESS_ISSUE} 的评论`);
-  if (!Array.isArray(list)) throw new ProgressUnchecked(`gh 读 #${PROGRESS_ISSUE} 的评论：读回来的不是列表。`);
+  if (!Array.isArray(list))
+    throw new ProgressUnchecked(`gh 读 #${PROGRESS_ISSUE} 的评论：读回来的不是列表。`);
   return list;
 }
 

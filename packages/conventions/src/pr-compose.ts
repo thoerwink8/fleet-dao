@@ -112,7 +112,8 @@ const issueNumber = (s: string): number | undefined => {
 /** 这条分支（HEAD）上的引导 id 是不是已办完（已处理或作废） */
 function directiveStatus(git: Gh, id: string): 'done' | 'pending' | 'missing' {
   const tree = git(['ls-tree', '-r', '--name-only', 'HEAD', '--', `${DIRECTIVES_DIR}/`]);
-  const path = tree.code === 0 ? tree.stdout.split('\n').find((l) => l.trim().endsWith(`/${id}.md`)) : undefined;
+  const path =
+    tree.code === 0 ? tree.stdout.split('\n').find((l) => l.trim().endsWith(`/${id}.md`)) : undefined;
   if (!path) return 'missing';
   const shown = git(['show', `HEAD:${path.trim()}`]);
   if (shown.code !== 0) return 'missing';
