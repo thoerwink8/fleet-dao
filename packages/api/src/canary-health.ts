@@ -157,16 +157,16 @@ function masterReleaseHealth(
   }
   if (release.kind === 'pausing') {
     const head = release.restoring
-      ? `发版正在把总开关开回（${release.phase}）`
+      ? `发版正在把总开关开回（${release.phase}），预计这一步走完`
       : release.stuck
-        ? `发版卡在${release.phase}，总开关按这一趟暂停，接着走完会开回`
-        : `发版进行中（${release.phase}），总开关按这一趟暂停，发完开回`;
+        ? `发版卡在${release.phase}，总开关按这一趟暂停，预计接着走完会开回`
+        : `发版进行中（${release.phase}），总开关按这一趟暂停，预计这一趟发完开回`;
     return { ok: 'pending', note: `跳过：${head}；巡检没跑、没验${last}` };
   }
   if (release.kind === 'held') {
     return {
       ok: 'pending',
-      note: `跳过：发版中途撤了（${release.phase}），总开关按规矩保持暂停，等人开回；巡检没跑、没验${last}`,
+      note: `跳过：发版中途撤了（${release.phase}），总开关按规矩保持关，原因是已经动手发过。预计重开时间没有，要人定了才开；巡检没跑、没验${last}`,
     };
   }
   return {
@@ -241,9 +241,16 @@ export function canaryHealth(
         detail: undefined,
       };
     }
+    const stageName = CANARY_STAGE_NAMES[finished.stage] ?? finished.stage;
+    // 开回总开关之后还没有晚于这次部署的结论：上一轮断在「记账」先不算复发（#2082）。
+    // 下一轮巡检（北京时间 2、8、14、20 点 26 分）走出记账之后才能核实。
+    const ledger =
+      finished.verdict === 'broken' && stageName === '记账'
+        ? '；上一轮断在「记账」早于这次部署，开回之后还没有新结论，先不算复发'
+        : '';
     return {
       ok: 'pending',
-      note: `这条结论早于当前部署（${stamp(deployedAt)}），等新一轮（发版后最多 ${CANARY_PENDING_MAX_MS / (60 * 60_000)} 小时）`,
+      note: `这条结论早于当前部署（${stamp(deployedAt)}），等新一轮（发版后最多 ${CANARY_PENDING_MAX_MS / (60 * 60_000)} 小时）${ledger}`,
     };
   }
   const when = stamp(finished.endedAt);
@@ -287,6 +294,28 @@ export function canaryHealth(
     Math.round((finished.endedAt.getTime() - finished.startedAt.getTime()) / 60_000),
   );
   return { ok: true, note: `最近一轮 ${when} 通过（用时 ${minutes} 分钟）${inFlight}` };
+}
+
+/**
+ * 总开关开回之后，「记账」断点复发了没有（#2082）。
+ * 还没有晚于开回时刻的一轮结论：核实不了，recurred 是 null，不当成没复发、也不当成又断了。
+ */
+export function ledgerRecurrence(input: {
+  /** 总开关开回的时刻。 */
+  restoredAt: Date;
+  /** 晚于开回、并且已经有结论的那一轮。没有是 null。 */
+  later: { endedAt: Date; stage: string; verdict: string } | null;
+}): { recurred: boolean | null; note: string } {
+  if (!input.later || input.later.endedAt.getTime() <= input.restoredAt.getTime()) {
+    return {
+      recurred: null,
+      note: '总开关开回之后还没有一轮新结论，记账断点有没有复发还核实不了',
+    };
+  }
+  if (input.later.verdict === 'broken' && input.later.stage === 'ledger') {
+    return { recurred: true, note: '总开关开回之后的一轮仍断在「记账」' };
+  }
+  return { recurred: false, note: '总开关开回之后的一轮没有断在「记账」' };
 }
 
 /**

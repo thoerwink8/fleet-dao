@@ -17,6 +17,7 @@ import {
   CANARY_STALE_MS,
   canaryHealth,
   canaryHealthCheck,
+  ledgerRecurrence,
   type MasterRelease,
   masterReleaseOf,
 } from '../src/canary-health.ts';
@@ -131,6 +132,47 @@ describe('canary 项怎么判', () => {
       note: '这条结论早于当前部署（09-27 20:00），等新一轮（发版后最多 12 小时）',
     });
     expect(got).not.toMatchObject({ code: 'canary_broken' });
+  });
+
+  it('结论早于部署、断在记账（#2082）：待定，写明开回之后还没有新结论，先不算复发', () => {
+    const finished = row({
+      verdict: 'broken',
+      stage: 'ledger',
+      endedAt: ago(120),
+      why: '断在「记账」',
+    });
+    const got = canaryHealth({ finished, running: null }, NOW, undefined, ago(30));
+    expect(got).toEqual({
+      ok: 'pending',
+      note: '这条结论早于当前部署（09-27 20:00），等新一轮（发版后最多 12 小时）；上一轮断在「记账」早于这次部署，开回之后还没有新结论，先不算复发',
+    });
+  });
+
+  it('总开关开回之后记账断了没有（#2082）：没有晚于开回的结论就核实不了', () => {
+    const restoredAt = new Date('2026-10-14T01:33:55.944Z');
+    // 监督看到的那轮断在 10-14 08:40 CST，早于 09:33 开回
+    expect(
+      ledgerRecurrence({
+        restoredAt,
+        later: { endedAt: new Date('2026-10-14T00:40:00.000Z'), stage: 'ledger', verdict: 'broken' },
+      }),
+    ).toEqual({
+      recurred: null,
+      note: '总开关开回之后还没有一轮新结论，记账断点有没有复发还核实不了',
+    });
+    expect(ledgerRecurrence({ restoredAt, later: null })).toMatchObject({ recurred: null });
+    expect(
+      ledgerRecurrence({
+        restoredAt,
+        later: { endedAt: new Date('2026-10-14T06:40:00.000Z'), stage: 'ledger', verdict: 'broken' },
+      }),
+    ).toEqual({ recurred: true, note: '总开关开回之后的一轮仍断在「记账」' });
+    expect(
+      ledgerRecurrence({
+        restoredAt,
+        later: { endedAt: new Date('2026-10-14T06:40:00.000Z'), stage: 'board', verdict: 'pass' },
+      }).recurred,
+    ).toBe(false);
   });
 
   it('【故意造出的失败】结论早于部署、等过了上限还没有新结论（#1909）：报红，不永久画成待定', () => {
@@ -297,7 +339,7 @@ describe('canary 项怎么判', () => {
     );
     expect(paused).toEqual({
       ok: 'pending',
-      note: '跳过：发版进行中（第 3 步「等收尾」），总开关按这一趟暂停，发完开回；巡检没跑、没验；最近一轮有结论的是 09-27 20:13「记账」',
+      note: '跳过：发版进行中（第 3 步「等收尾」），总开关按这一趟暂停，预计这一趟发完开回；巡检没跑、没验；最近一轮有结论的是 09-27 20:13「记账」',
     });
     expect(paused.ok === 'pending' ? paused.note : '').not.toContain('引擎总开关关着');
     expect(
@@ -310,7 +352,7 @@ describe('canary 项怎么判', () => {
       ),
     ).toMatchObject({
       ok: 'pending',
-      note: expect.stringContaining('发版卡在第 3 步「等收尾」，总开关按这一趟暂停，接着走完会开回'),
+      note: expect.stringContaining('发版卡在第 3 步「等收尾」，总开关按这一趟暂停，预计接着走完会开回'),
     });
     expect(
       canaryHealth(
@@ -437,6 +479,12 @@ describe('canary 项怎么判', () => {
         undefined,
         ago(30),
       ),
+      canaryHealth(
+        { finished: row({ verdict: 'broken', stage: 'ledger', endedAt: ago(120), why: 'x' }), running: null },
+        NOW,
+        undefined,
+        ago(30),
+      ),
       // 结论早于部署、过了上限还没有新结论（#1909）：报红这一种
       canaryHealth(
         {
@@ -453,7 +501,7 @@ describe('canary 项怎么判', () => {
         new Date(NOW.getTime() - CANARY_PENDING_MAX_MS - 60_000),
       ),
     ].map((h) => (h.ok === false ? h.message : h.note));
-    expect(said).toHaveLength(17);
+    expect(said).toHaveLength(18);
     for (const text of said) expect(scan.scanText('canary', text, scan.BUILTIN_TERMS), text).toEqual([]);
   });
 });
@@ -647,7 +695,9 @@ describe('canary 项读库（真库）', () => {
     );
     expect(pending).toBeInstanceOf(PublicHealthPending);
     expect(pending).toMatchObject({
-      message: expect.stringContaining('发版进行中（第 3 步「等收尾」），总开关按这一趟暂停，发完开回'),
+      message: expect.stringContaining(
+        '发版进行中（第 3 步「等收尾」），总开关按这一趟暂停，预计这一趟发完开回',
+      ),
     });
     expect(String((pending as { message?: string }).message)).not.toContain('引擎总开关关着');
 

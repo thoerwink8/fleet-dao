@@ -11,8 +11,9 @@
 // - 定时任务新不新鲜照 packages/db 的 scheduleHealth（看门狗 #203、驾驶舱定时任务页同一条线）。
 // - 页面上的字都过 scrubText（邮箱、IP、令牌、长串抹掉）；ssh 的名字不上页面（可能写的是 IP）。
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
 
@@ -325,12 +326,31 @@ function checkHost(host, from) {
 }
 
 /**
+ * 指挥官这台机器上登法国的那一把（#1775）。没有这个文件就回 null，ssh 仍用代理里已有的钥匙。
+ * @param {string} [home]
+ * @param {(path: string) => boolean} [exists]
+ * @returns {string | null}
+ */
+export function fleetLoginPath(home = homedir(), exists = existsSync) {
+  const path = join(home, '.ssh', 'fleet_login');
+  try {
+    return exists(path) ? path : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * ssh 的参数：不问口令（没钥匙就直接失败）、连 10 秒连不上就算。开压缩：本机到法国的线路慢（09-27 实测约 5KB/秒），
  * 回来的 JSON 压完小一大截，一次读从十几秒降到七秒上下（其中握手四秒多）。
+ * 法国 sshd 同一条连接最多试 3 把。本机有指定的那一把（默认 ~/.ssh/fleet_login）就只拿它试，免得代理里的钥匙把这 3 次占满。
  * @param {string} host
+ * @param {string | null} [identity] 不传就看本机有没有那一把；传 null 表示不指定
+ * @returns {string[]}
  */
-export function sshArgs(host) {
-  return [
+export function sshArgs(host, identity) {
+  const key = identity === undefined ? fleetLoginPath() : identity;
+  const args = [
     '-o',
     'BatchMode=yes',
     '-o',
@@ -341,9 +361,10 @@ export function sshArgs(host) {
     'ServerAliveInterval=10',
     '-o',
     'ServerAliveCountMax=3',
-    host,
-    REMOTE_COMMAND,
   ];
+  if (key) args.push('-o', 'IdentitiesOnly=yes', '-i', key);
+  args.push(host, REMOTE_COMMAND);
+  return args;
 }
 
 /**
@@ -434,12 +455,18 @@ export function runRemote({
         });
       if (tooBig)
         return finish({ ok: false, kind: 'bad-json', why: `法国回来的超过 ${maxBytes} 字节，不收` });
-      if (code === 255)
+      if (code === 255) {
+        // 255 有两种：线路没通，和钥匙被拒。钥匙被拒不要写成「连不上」，否则会被当成断网（#1775）。
+        const refused = /Permission denied \(publickey\)|Too many authentication failures/i.test(stderr);
+        const said = tail(stderr) || '没说为什么';
         return finish({
           ok: false,
           kind: 'ssh-failed',
-          why: `ssh 连不上法国：${tail(stderr) || '没说为什么'}`,
+          why: refused
+            ? `出示的钥匙没被法国接受（同一条连接最多试 3 把）：${said}。本机若有 ~/.ssh/fleet_login，会只拿这一把去试`
+            : `ssh 连不上法国：${said}`,
         });
+      }
       if (code !== 0)
         return finish({
           ok: false,

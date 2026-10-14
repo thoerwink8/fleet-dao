@@ -124,7 +124,8 @@ interface FranceLib {
     home: string;
     readText: (file: string) => string;
   }): { ok: true; host: string } | Failure;
-  sshArgs(host: string): string[];
+  fleetLoginPath(home?: string, exists?: (path: string) => boolean): string | null;
+  sshArgs(host: string, identity?: string | null): string[];
   runRemote(opts: {
     command: string;
     args: string[];
@@ -889,11 +890,25 @@ describe('登法国的 ssh 名字：从本机配置读，不进仓', () => {
   });
 
   it('ssh 的参数：不问口令、开压缩、限连接时长，名字放在选项后面，远端只跑固定的一条', () => {
-    const args = lib.sshArgs('fr');
+    const args = lib.sshArgs('fr', null);
     expect(args).toContain('BatchMode=yes');
     expect(args).toContain('Compression=yes');
     expect(args.some((a) => a.startsWith('ConnectTimeout='))).toBe(true);
+    expect(args).not.toContain('-i');
     expect(args.slice(-2)).toEqual(['fr', 'node --input-type=module - --collect']);
+    // 不传第二参：本机有那一把才指定，没有就和显式不指定一样
+    expect(lib.sshArgs('fr')).toEqual(lib.sshArgs('fr', lib.fleetLoginPath()));
+  });
+
+  it('指定了钥匙就只拿这一把（法国同一条连接最多试 3 把）', () => {
+    const args = lib.sshArgs('fr', '/tmp/fleet_login');
+    expect(args).toContain('IdentitiesOnly=yes');
+    expect(args[args.indexOf('-i') + 1]).toBe('/tmp/fleet_login');
+    expect(args.slice(-2)).toEqual(['fr', 'node --input-type=module - --collect']);
+    expect(lib.fleetLoginPath('/no/such', () => false)).toBeNull();
+    expect(lib.fleetLoginPath('/tmp/home', (p) => p.endsWith('/.ssh/fleet_login'))).toBe(
+      '/tmp/home/.ssh/fleet_login',
+    );
   });
 });
 
@@ -916,6 +931,23 @@ describe('经 ssh 跑查询：连不上、超时、脚本没跑成都分得开�
     expect(r).toMatchObject({ ok: false, kind: 'ssh-failed' });
     expect(r.ok ? '' : r.why).toContain('ssh 连不上法国：ssh: connect to host <IP> port 22');
     expect(r.ok ? '' : r.why).not.toContain('203.0.113.9');
+  });
+
+  it('公钥被拒或试太多把：写明是钥匙没被接受，不是连不上（#1775）', async () => {
+    for (const stderr of [
+      'root@203.0.113.9: Permission denied (publickey).\\n',
+      'Received disconnect from 203.0.113.9 port 22:2: Too many authentication failures\\n',
+    ]) {
+      const file = fakeSsh(tempDir(), `process.stderr.write('${stderr}'); process.exit(255);`);
+      const r = await lib.runRemote({ command: process.execPath, args: [file], script: 'x' });
+      expect(r).toMatchObject({ ok: false, kind: 'ssh-failed' });
+      const why = r.ok ? '' : r.why;
+      expect(why).toContain('出示的钥匙没被法国接受');
+      expect(why).toContain('最多试 3 把');
+      expect(why).toContain('fleet_login');
+      expect(why).not.toContain('连不上法国');
+      expect(why).not.toContain('203.0.113.9');
+    }
   });
 
   it('本机没有 ssh 命令：ssh-failed，叫装 OpenSSH', async () => {

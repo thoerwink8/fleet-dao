@@ -67,6 +67,7 @@ import { createPgIntentStore } from './intent-store-pg.ts';
 import { judgeHealthCheck } from './judge-health.ts';
 import { COCKPIT_KEEP_ALIVE_MS } from './keep-alive.ts';
 import { ListenFdError, startListeners } from './listen.ts';
+import { startMasterRestoreWatch } from './master-restore.ts';
 import { pgModelRoster } from './model-roster.ts';
 import { nodeReporterFor, nodeReportPart } from './node-reporter.ts';
 import { pgOrgSwitch } from './org-switch-view.ts';
@@ -298,6 +299,10 @@ async function assemble(): Promise<{
     : () => {};
   // 看门狗（#203）自己停了它自己报不了：后端每 5 分钟按登记表上它那一行看一次，停了推一条「看门狗停了」，好了自己撤
   const stopWatchdogWatch = production ? startWatchdogWatch({ db, now, log }) : () => {};
+  // 发版前开着、发完还关着：自己开回（#2084）。只在正式环境起，开发环境默认关着不能在这里打开。
+  const stopMasterRestoreWatch = production
+    ? startMasterRestoreWatch({ store, readTrain: readReleaseTrainJson, log })
+    : () => {};
   // 提需求开出的单子的进度（#2060）：每分钟从 GitHub 和引擎任务表读，写进需求、对话里追加进度卡，引擎的提问发到单上。
   // 凭据没读到就不起（那时开单也是 503）；「已上线」要读发布目录，只在正式环境有。
   const stopRequestProgressWatch = github.requestIssues
@@ -408,6 +413,7 @@ async function assemble(): Promise<{
     close: async () => {
       stopDeployLagWatch();
       stopWatchdogWatch();
+      stopMasterRestoreWatch();
       stopRequestProgressWatch();
       await feed.stop();
       await temporal.close();
