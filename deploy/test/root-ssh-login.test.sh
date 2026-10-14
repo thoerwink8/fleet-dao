@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
 # #2138：发版把会话口子里已有的公钥补进 root 的 authorized_keys（deploy/lib/root-ssh-login.sh）。
-# 不要 root、不要 sshd：钥匙在临时目录里现生成，只看补、不重复、原行不改、权限、符号链接。
+# 钥匙在临时目录里现生成，只看补、不重复、原行不改、权限、符号链接。第 5、7 节按是不是 root 分两种结果（CI 用 sudo）。
 #   1. 空的目标：两把公钥都补上，.ssh 700、authorized_keys 600，属主仍是当前用户
 #   2. 再跑一遍：不重复，输出「没新补」，字节不变
 #   3. 目标里已有另一把、还有一行带选项的：原字节还在，新钥匙另起一行
@@ -11,6 +11,8 @@
 #   7. 目标 644 收成 600。目标 000：普通用户读不了就不动；root 读得了就补上并收成 600
 #   8. .ssh 或 authorized_keys 是符号链接：不跟着写
 #   9. release.sh 只在 --check 之后、mode 不是 check 时调用，并清掉测试用的路径覆盖
+#  10. Match User root 写进临时 drop-in。有 sshd 才用真的 sshd -T：root 认会话口子，会话用户仍只认自己的。
+#      root 下若没有 /run/sshd（编译进的特权分离目录；Ubuntu 24.04 只开 ssh.socket、服务没起来时不存在）先建上。
 # 用法：bash deploy/test/root-ssh-login.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -437,6 +439,11 @@ EOF
     ROOT_SSH_LOGIN_SSHD_T='true' \
     ROOT_SSH_LOGIN_RELOAD='true' \
     ensure_root_login_sshd >/dev/null
+  # root 下 sshd -T 打配置前先查 /run/sshd。非 root 不查，所以本机过、CI（sudo）红。
+  # 缺了且是 root 才建（755、属主 root）。已有的不动，建不了就让下面的 sshd -T 照实报。
+  if ((EUID == 0)) && [[ ! -d /run/sshd ]]; then
+    mkdir -m 755 -- /run/sshd
+  fi
   root_cfg=$(sshd -T -f "$d/sshd_config" -C 'user=root,host=localhost,addr=127.0.0.1' 2>"$d/sshd.err") || root_cfg=""
   sess_cfg=$(sshd -T -f "$d/sshd_config" -C 'user=fleet-agent-carpool,host=localhost,addr=127.0.0.1' 2>>"$d/sshd.err") || sess_cfg=""
   root_ak=$(awk '$1 == "authorizedkeysfile" { $1 = ""; sub(/^ /, ""); print; exit }' <<<"$root_cfg")
