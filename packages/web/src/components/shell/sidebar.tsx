@@ -1,13 +1,14 @@
-import { Database, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
-import { NavLink } from 'react-router';
+import { ChevronRight, Database, Ellipsis, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { NavLink, useLocation } from 'react-router';
 import { brand } from '#brand';
 import { useApi, useNotifications } from '../../api/client';
+import { useLocalState } from '../../lib/hooks';
 import { useNodeSelection, withNode } from '../../lib/node';
 import { pendingCount } from '../../lib/notice-count';
 import { cn } from '../../lib/utils';
 import { LogoMark } from '../logo';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
-import { NAV, NAV_ITEMS, type NavItem } from './nav';
+import { NAV_HOME, NAV_ITEMS, NAV_MORE, type NavItem } from './nav';
 
 /** 侧栏角标：数字，或者「!」表示没读成（不拿 0 冒充没事）。 */
 function useBadges(): Record<string, number | '!'> {
@@ -107,7 +108,74 @@ function Item({
   );
 }
 
-/** 左侧导航。桌面上可以收成一列图标；手机上放进抽屉里。 */
+/** 这一页在不在「更多」里（/routing/status 这种挂在下面的也算）。 */
+function inMore(pathname: string): boolean {
+  return NAV_MORE.some((g) => g.items.some((i) => pathname === i.to || pathname.startsWith(`${i.to}/`)));
+}
+
+/** 「更多」的开关：收着时把里面的角标合起来挂在它上面，不让待处理的数藏起来。 */
+function MoreToggle({
+  open,
+  collapsed,
+  badge,
+  onToggle,
+}: {
+  open: boolean;
+  collapsed: boolean;
+  badge: number | '!';
+  onToggle: () => void;
+}) {
+  const button = (
+    <button
+      type="button"
+      aria-expanded={open}
+      aria-controls="nav-more"
+      aria-label={collapsed ? (open ? '收起更多' : '更多页面') : undefined}
+      data-nav-more-toggle
+      onClick={onToggle}
+      className={cn(
+        'relative flex h-10 w-full items-center gap-2.5 rounded-lg px-2.5 text-body text-muted-foreground transition-colors md:h-8',
+        'hover:bg-accent hover:text-foreground',
+        collapsed && 'justify-center px-0',
+      )}
+    >
+      {collapsed ? (
+        <Ellipsis className="size-4 shrink-0" aria-hidden />
+      ) : (
+        <ChevronRight
+          className={cn('size-4 shrink-0 transition-transform duration-200', open && 'rotate-90')}
+          aria-hidden
+        />
+      )}
+      {collapsed ? null : <span className="min-w-0 flex-1 truncate text-left">更多</span>}
+      {!open && (badge === '!' || badge > 0) ? (
+        <span
+          title={badge === '!' ? '没读成' : undefined}
+          className={cn(
+            'num grid min-w-4 place-items-center rounded-full px-1 text-meta font-semibold',
+            badge === '!' ? 'bg-destructive text-destructive-foreground' : 'bg-foreground text-background',
+            collapsed && 'absolute top-0.5 right-1.5',
+          )}
+        >
+          {badge}
+        </span>
+      ) : null}
+    </button>
+  );
+  if (!collapsed) return button;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipContent side="right">{open ? '收起更多' : '更多页面'}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
+ * 左侧导航。桌面上可以收成一列图标；手机上放进抽屉里。
+ * 常驻的只有主页（决定 0093 导航降级）；别的页收在「更多」里：人点过展开、收起就记着；没点过时正在看的页在里面就展开；
+ * 手机抽屉（onNavigate）本身就是「更多」，一打开就是展开的。
+ */
 export function SidebarNav({
   collapsed = false,
   onToggle,
@@ -118,6 +186,14 @@ export function SidebarNav({
   onNavigate?: () => void;
 }) {
   const badges = useBadges();
+  const { pathname } = useLocation();
+  // 人点过就按人点的；没点过跟着当前页：在「更多」里的页就展开
+  const [picked, setPicked] = useLocalState<boolean | null>(`${brand.storagePrefix}nav-more-open`, null);
+  const open = onNavigate !== undefined || (picked ?? inMore(pathname));
+  const moreBadge = Object.values(badges).reduce<number | '!'>(
+    (sum, b) => (sum === '!' || b === '!' ? '!' : sum + b),
+    0,
+  );
   return (
     <div className="flex h-full flex-col">
       <div
@@ -134,26 +210,41 @@ export function SidebarNav({
         )}
       </div>
       <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 scrollbar-thin" aria-label="主导航">
-        {NAV.map((g) => (
-          <div key={g.group} className="mt-3 first:mt-1">
-            {collapsed ? (
-              <div className="mx-auto my-2 h-px w-6 bg-border" />
-            ) : (
-              <div className="mb-1 px-2.5 text-meta font-medium text-muted-foreground">{g.group}</div>
-            )}
-            <div className="space-y-0.5">
-              {g.items.map((item) => (
-                <Item
-                  key={item.to}
-                  item={item}
-                  collapsed={collapsed}
-                  badge={badges[item.to] ?? 0}
-                  onNavigate={onNavigate}
-                />
-              ))}
-            </div>
+        <div className="mt-1 space-y-0.5">
+          <Item item={NAV_HOME} collapsed={collapsed} badge={0} onNavigate={onNavigate} />
+          {onNavigate === undefined ? (
+            <MoreToggle
+              open={open}
+              collapsed={collapsed}
+              badge={moreBadge}
+              onToggle={() => setPicked(!open)}
+            />
+          ) : null}
+        </div>
+        {open ? (
+          <div id="nav-more" data-nav-more>
+            {NAV_MORE.map((g) => (
+              <div key={g.group} className="mt-3">
+                {collapsed ? (
+                  <div className="mx-auto my-2 h-px w-6 bg-border" />
+                ) : (
+                  <div className="mb-1 px-2.5 text-meta font-medium text-muted-foreground">{g.group}</div>
+                )}
+                <div className="space-y-0.5">
+                  {g.items.map((item) => (
+                    <Item
+                      key={item.to}
+                      item={item}
+                      collapsed={collapsed}
+                      badge={badges[item.to] ?? 0}
+                      onNavigate={onNavigate}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
-        ))}
+        ) : null}
       </nav>
       <div className={cn('flex shrink-0 items-center gap-2 border-t px-3 py-2.5', collapsed && 'flex-col')}>
         <DataSource collapsed={collapsed} />

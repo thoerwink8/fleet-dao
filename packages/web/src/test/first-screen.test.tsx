@@ -86,12 +86,20 @@ async function open(api: FleetApi, route: string) {
 }
 
 describe('首屏：读取和确认登录一起发，一轮发完', () => {
-  test('主页：登录、仓列表、主页、提醒都在第 1 轮；推送等确认登录后再连；不拉路由', async () => {
+  test('主页：登录、仓列表、主页、提醒、本机会话、上线记录都在第 1 轮；推送等确认登录后再连；不拉路由', async () => {
     const w = waved();
     await open(w.api, '/');
     expect(screen.getByText('正在确认登录…')).toBeTruthy();
     expect(w.subscribed).toEqual([]);
-    for (const call of ['me', 'repos', 'home', 'notifications', 'nodes']) {
+    for (const call of [
+      'me',
+      'repos',
+      'home',
+      'notifications',
+      'nodes',
+      'localSessions',
+      'franceReleasedCommits',
+    ]) {
       expect([call, w.first(call)]).toEqual([call, 1]);
     }
     await w.release();

@@ -65,12 +65,25 @@ test.describe('看板多机', () => {
     await expect(trigger).toContainText('本机');
   });
 
-  test('切到远程：主页渲染它的快照，顶上写「报的，只读」；单子链接是 GitHub 链接，去答置灰；铃铛不露出来', async ({
+  test('切到远程：主页三块只读——要你拍的去答置灰，在跑的没有站内链接，上线记录写只在本台看', async ({
     page,
-    shot,
   }) => {
     await page.goto('/?node=wsl');
     await expect(page.getByRole('heading', { name: new RegExp(`主页 · ${WSL}`) })).toBeVisible();
+    await expect(page.locator('[data-snapshot-banner]')).toContainText('报的，只读');
+    await expect(page.locator('[data-home-block="run"]')).toBeVisible();
+    await expect(page.locator('[data-home-block="shipped"]')).toContainText('上线记录只在本台看');
+    expect(await page.locator('main a[href^="/tasks/"]').count()).toBe(0);
+    expect(await page.locator('main a[href^="/notifications"]').count()).toBe(0);
+    for (const b of await page.locator('[data-remote-disabled]').all()) await expect(b).toBeDisabled();
+  });
+
+  test('切到远程：画布渲染它的快照，顶上写「报的，只读」；单子链接是 GitHub 链接，去答置灰；铃铛不露出来', async ({
+    page,
+    shot,
+  }) => {
+    await page.goto('/board?node=wsl');
+    await expect(page.getByRole('heading', { name: new RegExp(`画布 · ${WSL}`) })).toBeVisible();
     const banner = page.locator('[data-snapshot-banner]');
     await expect(banner).toHaveAttribute('data-snapshot-banner', 'fresh');
     await expect(banner).toContainText(`${WSL}`);

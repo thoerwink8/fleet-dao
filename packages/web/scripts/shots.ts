@@ -17,6 +17,8 @@ const repoRoot = resolve(pkgDir, '../..');
 
 export const PAGES: readonly (readonly [string, string])[] = [
   ['home', '/'],
+  // 画布：原来的主页（决定 0093 挪进「更多」）
+  ['board', '/board'],
   ['tasks', '/tasks'],
   ['notifications', '/notifications'],
   ['routing', '/routing'],

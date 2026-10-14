@@ -1,0 +1,133 @@
+// @vitest-environment happy-dom
+// 主页三块（决定 0093）：要你拍的、在跑的、上线了的，从上到下；要你拍的点选项就是拍板，看门狗的卡点「处理」。
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import { ApiError } from '../api/client';
+import { createMockApi } from '../api/mock/server';
+import HomePage from '../routes/home';
+import { renderApp } from './harness';
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+const block = (name: 'ask' | 'run' | 'shipped') =>
+  document.querySelector(`[data-home-block="${name}"]`) as HTMLElement;
+
+async function ready() {
+  await waitFor(() => expect(document.querySelectorAll('[data-ask-row]').length).toBeGreaterThan(0));
+  await waitFor(() => expect(document.querySelectorAll('[data-shipped-row]').length).toBeGreaterThan(0));
+  await waitFor(() => expect(document.querySelectorAll('[data-run-row="local"]').length).toBeGreaterThan(0));
+}
+
+describe('主页三块', () => {
+  test('三块从上到下：要你拍的、在跑的、上线了的', async () => {
+    renderApp(<HomePage />);
+    await ready();
+    const order = [...document.querySelectorAll('[data-home-block]')].map((el) =>
+      el.getAttribute('data-home-block'),
+    );
+    expect(order).toEqual(['ask', 'run', 'shipped']);
+  });
+
+  test('要你拍的：人闸一行写要定什么、推荐哪个、为什么，选项是按钮；没选项的写请直接回复；看门狗的卡在后面', async () => {
+    renderApp(<HomePage />);
+    await ready();
+    const rows = [...block('ask').querySelectorAll('[data-ask-row]')] as HTMLElement[];
+    expect(rows.map((r) => r.getAttribute('data-ask-row'))).toEqual(['gate', 'gate', 'watchdog']);
+    const release = rows.find((r) => r.textContent?.includes('发布 v2.3')) as HTMLElement;
+    expect(release.querySelector('[data-ask-question]')?.textContent).toContain('对外发布到生产');
+    expect(release.querySelector('[data-ask-pick]')?.textContent).toContain('推荐：发布。CI 全绿');
+    const buttons = within(release)
+      .getAllByRole('button')
+      .map((b) => b.textContent);
+    expect(buttons).toEqual(['发布', '今晚再发', '先不发']);
+    const plain = rows.find((r) => r.textContent?.includes('#15 在问你')) as HTMLElement;
+    expect(plain.textContent).toContain('没有选项，请直接回复');
+    expect(
+      within(plain)
+        .getByRole('link', { name: /去回复/ })
+        .getAttribute('href'),
+    ).toBe('/notifications?level=decision');
+    // 别的卡住报警（额度读不到、子任务停滞）不进这里，在通知中心
+    expect(block('ask').textContent).not.toContain('额度读不到');
+  });
+
+  test('点推荐的选项就是拍板：调回答接口，这条从要你拍的里走掉', async () => {
+    const { api } = renderApp(<HomePage />);
+    const answer = vi.spyOn(api, 'answerNotification');
+    await ready();
+    const release = [...block('ask').querySelectorAll('[data-ask-row]')].find((r) =>
+      r.textContent?.includes('发布 v2.3'),
+    ) as HTMLElement;
+    await act(async () => {
+      fireEvent.click(within(release).getByRole('button', { name: '发布' }));
+    });
+    await waitFor(() => expect(answer).toHaveBeenCalledWith('n-1', { optionId: 'release' }));
+    await waitFor(() => expect(block('ask').textContent).not.toContain('发布 v2.3'));
+  });
+
+  test('看门狗的卡点「处理」：调处理接口', async () => {
+    const { api } = renderApp(<HomePage />);
+    const resolve = vi.spyOn(api, 'resolveNotification');
+    await ready();
+    const dog = block('ask').querySelector('[data-ask-row="watchdog"]') as HTMLElement;
+    expect(dog.textContent).toContain('主线 4 小时 12 分没合 PR');
+    await act(async () => {
+      fireEvent.click(within(dog).getByRole('button', { name: /处理/ }));
+    });
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith('n-10'));
+  });
+
+  test('在跑的：引擎的单和本机会话都在，一行写谁在做和卡没卡', async () => {
+    renderApp(<HomePage />);
+    await ready();
+    const run = block('run');
+    expect(run.querySelectorAll('[data-run-row="engine"]').length).toBeGreaterThan(0);
+    const local = run.querySelector('[data-run-row="local"]') as HTMLElement;
+    expect(local.textContent).toContain('本机 创始人的电脑 · Claude Code');
+    for (const row of run.querySelectorAll('[data-run-row]')) {
+      expect(row.querySelector('[data-tone]')).not.toBeNull();
+    }
+  });
+
+  test('上线了的：一句话改了什么，带上同一版还带的 PR', async () => {
+    renderApp(<HomePage />);
+    await ready();
+    const first = block('shipped').querySelector('[data-shipped-row]') as HTMLElement;
+    expect(first.textContent).toContain('主页改成三块：要你拍的、在跑的、上线了的');
+    expect(first.textContent).not.toContain('(#1745)');
+    expect(first.querySelector('[data-shipped-carried]')?.textContent).toContain('还带了 2 个：#1744');
+  });
+
+  test('没有要拍的：写「没有要你拍的」，不画空表', async () => {
+    const api = createMockApi({ live: false });
+    const real = api.notifications.bind(api);
+    api.notifications = async (q) => ({ ...(await real(q)), items: [] });
+    renderApp(<HomePage />, { api });
+    await waitFor(() => expect(block('ask')?.textContent).toContain('没有要你拍的'));
+  });
+
+  test('【故意造出的失败】通知没读成：要你拍的那块写没读成和重试，不写成「没有要你拍的」', async () => {
+    const api = createMockApi({ live: false });
+    api.notifications = () => Promise.reject(new ApiError(500, 'internal', '库连不上'));
+    renderApp(<HomePage />, { api });
+    await waitFor(() => expect(block('ask')?.textContent).toContain('要你拍的没读成'));
+    expect(block('ask').textContent).not.toContain('没有要你拍的');
+  });
+
+  test('【故意造出的失败】上线记录读不到：照实写没查成，不当成没发过', async () => {
+    const api = createMockApi({ live: false });
+    api.franceReleasedCommits = async () => ({
+      state: 'unreadable',
+      why: '读法国的发布历史失败',
+      asOf: new Date().toISOString(),
+    });
+    renderApp(<HomePage />, { api });
+    await waitFor(() =>
+      expect(block('shipped')?.textContent).toContain('上线记录没查成：读法国的发布历史失败'),
+    );
+    expect(screen.queryByText('法国的发布历史里还没有发布记录')).toBeNull();
+  });
+});
