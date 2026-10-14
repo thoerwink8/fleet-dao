@@ -1,11 +1,16 @@
 // 合并闸（#74）：在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个（design 第五节「流程只为快」）。
-// #1114 / 决定 0023 起判红只有一样：引擎任务工作流（#632）开的 PR（分支 fleet/<单号>-t<8 位>），当前头上要有通过的 cold-verify
-// （合前一次冷调用，换家族验「单子说要的东西真做了没有」，#555-2）——**闸只读这条状态，不在这里起模型调用**（判法要确定，
-// 同一份代码什么时候跑结果都一样，design 第五节）；冷调用在装配侧（引擎）跑、结论贴成状态。别的 PR 不验，也就没有这条状态——
-// 那是「不用验」，不是「没验成」，两者在 coldVerifyNeed 里分开。草稿、冲突 GitHub 自己拦，别的 PR 只看 CI。读不到、认不出写 failure（没查成）。
-// merge-gate.yml 在 PR 事件（头变了）或 cold-verify 状态写上来时跑它（后一种逐个重算所有开着的 PR）；主线推送只在闸认的东西
-// （判法、工作流本身）变了才触发、同样重算所有开着的 PR——判法收紧了，开着的 PR 上旧的 success 不能留着（#654 第二意见）；
-// 不检出、不跑 PR 里的代码：判法用跑这段代码的那一份（主线的）。
+// 判红只有两样：
+// - 改标准（人闸第四类，design 第五节「人闸第四类：改标准」）：PR 改到的文件（含改名前的名字）落进 standard-paths.json 的清单，
+//   正文里却没有创始人同意的记录（「创始人原话」那一行，原话、时间都不能空；认法是 pr-columns.ts 的 founderQuote，
+//   pnpm pr:open --founder-quote 写出来的就是它）。清单用跑这段代码的那一份（主线的）：PR 改不了自己的门槛。
+// - 引擎任务工作流（#632）开的 PR（分支 fleet/<单号>-t<8 位>）当前头上要有通过的 cold-verify（合前一次冷调用，换家族验
+//   「单子说要的东西真做了没有」，#555-2）——**闸只读这条状态，不在这里起模型调用**（判法要确定，同一份代码什么时候跑
+//   结果都一样，design 第五节）；冷调用在装配侧（引擎）跑、结论贴成状态。别的 PR 不验，也就没有这条状态——
+//   那是「不用验」，不是「没验成」，两者在 coldVerifyNeed 里分开。
+// 草稿、冲突 GitHub 自己拦。读不到、认不出（PR、文件列表、清单、提交状态）写 failure（没查成）。
+// merge-gate.yml 在 PR 事件（头变了、正文改了——补上原话要重算）或 cold-verify 状态写上来时跑它（后一种逐个重算所有开着的 PR）；
+// 主线推送只在闸认的东西（判法、清单、工作流本身）变了才触发、同样重算所有开着的 PR——判法收紧了，开着的 PR 上旧的 success
+// 不能留着（#654 第二意见）；不检出、不跑 PR 里的代码：判法和清单用跑这段代码的那一份（主线的）。
 import { readFileSync } from 'node:fs';
 import { isFlowBranch } from './flow-branch.ts';
 import type { GhApi } from './gh-api.ts';
@@ -17,6 +22,9 @@ import {
   GATE_CONTEXT,
   statusDescription,
 } from './merge-gates.ts';
+import { founderQuote } from './pr-columns.ts';
+import { type ChangedFile, type StandardPath, standardFiles } from './standard-paths.ts';
+import { loadStandardPaths } from './standard-paths-file.ts';
 
 export type GateState = 'success' | 'failure';
 
@@ -24,6 +32,8 @@ export type GateState = 'success' | 'failure';
 export interface GitHubReads {
   /** PR 现在的样子（GET /pulls/{n}）。 */
   pr(number: number): Promise<unknown>;
+  /** PR 改到的文件（GET /pulls/{n}/files，翻完页；超过 GitHub 给的上限读不全就抛）。 */
+  files(number: number): Promise<unknown[]>;
   /** 某个提交上各 context 最新的一条提交状态（翻完页）。 */
   statuses(sha: string): Promise<unknown[]>;
   /** 开着的 PR（翻完页）。 */
@@ -35,12 +45,26 @@ export interface GitHubReads {
 }
 
 const PRS_MAX_PAGES = 20;
+/** PR 的文件列表 GitHub 最多给 3000 个（每页 100、30 页）：30 页都满就是可能还有，读不全。 */
+const FILES_MAX_PAGES = 30;
 /** 一个提交上的状态：每个 context 最多 1000 条（GitHub 的上限），合并闸自己、冷验收两样。 */
 const STATUS_MAX_PAGES = 30;
 
 export function gateGitHub(api: GhApi): GitHubReads {
   return {
     pr: (number) => api.get(`/pulls/${number}`),
+    async files(number) {
+      const all: unknown[] = [];
+      for (let page = 1; page <= FILES_MAX_PAGES; page++) {
+        const got = await api.get(`/pulls/${number}/files?per_page=100&page=${page}`);
+        if (!Array.isArray(got)) throw new Error(`PR #${number} 的文件列表第 ${page} 页认不出（不是列表）`);
+        all.push(...got);
+        if (got.length < 100) return all;
+      }
+      throw new Error(
+        `PR #${number} 改的文件有 ${FILES_MAX_PAGES * 100} 个以上，GitHub 最多给这么多，读不全（拆小再开）`,
+      );
+    },
     async statuses(sha) {
       // 逐条的列表（新到旧）：翻完页，同一个 context 取最新的那条，旧的排在后面。
       const all: unknown[] = [];
@@ -80,6 +104,8 @@ export interface LiveMeta {
   /** PR 的分支名（head.ref）：认「引擎任务工作流开的 PR」用。 */
   headRef: string;
   open: boolean;
+  /** PR 正文（空正文 GitHub 给 null，当成空串）：认改标准的创始人原话用。 */
+  body: string;
 }
 
 /** 从现读回来的 PR 里取合并闸要的几样；认不出返回一句为什么。 */
@@ -92,11 +118,14 @@ export function metaOf(live: unknown): LiveMeta | string {
   if (typeof headRef !== 'string' || !headRef) return 'head.ref 认不出';
   const { state } = live;
   if (state !== 'open' && state !== 'closed') return 'state 认不出';
+  const { body } = live;
+  if (body !== null && body !== undefined && typeof body !== 'string') return 'body 认不出';
   return {
     number: live.number,
     head,
     headRef,
     open: state === 'open',
+    body: body ?? '',
   };
 }
 
@@ -119,11 +148,108 @@ export interface GateDeps {
    * 不能因为没传就把引擎分支的冷验收放掉。驾驶舱设成不强制的仓，由调用方显式传入 off。
    */
   ciPolicy?: 'force' | 'off';
+  /** 改标准的路径清单；不传读跑这段代码的那一份（standard-paths-file.ts，主线检出里的）。读不到、认不出就抛。 */
+  standardPaths?: () => Promise<StandardPath[]>;
+}
+
+/** 从文件列表里的一条取 standardFiles 要的几样；认不出返回一句为什么。 */
+function changedFileOf(item: unknown, i: number): ChangedFile | string {
+  if (!isObject(item) || typeof item.filename !== 'string' || !item.filename)
+    return `第 ${i + 1} 条没有 filename`;
+  if (typeof item.status !== 'string') return `第 ${i + 1} 条（${item.filename}）没有 status`;
+  const prev = item.previous_filename;
+  if (prev !== undefined && typeof prev !== 'string')
+    return `第 ${i + 1} 条（${item.filename}）的 previous_filename 认不出`;
+  return { filename: item.filename, status: item.status, ...(prev ? { previous: prev } : {}) };
+}
+
+interface Verdict {
+  ok: boolean;
+  notChecked: boolean;
+  lines: string[];
+}
+
+/** 改标准这一样：碰没碰清单、碰了正文里有没有创始人原话。读不到、认不出是没查成。 */
+async function standardVerdict(meta: LiveMeta, deps: GateDeps): Promise<Verdict> {
+  const notChecked = (why: string): Verdict => ({ ok: false, notChecked: true, lines: [`没查成：${why}。`] });
+  let list: StandardPath[];
+  try {
+    list = await (deps.standardPaths ?? loadStandardPaths)();
+  } catch (e) {
+    return notChecked(`改标准的路径清单读不到（${message(e)}）`);
+  }
+  let raw: unknown[];
+  try {
+    raw = await deps.gh.files(meta.number);
+  } catch (e) {
+    return notChecked(`读不到 PR #${meta.number} 改了哪些文件（${message(e)}），判不了碰没碰改标准`);
+  }
+  const files: ChangedFile[] = [];
+  for (const [i, item] of raw.entries()) {
+    const f = changedFileOf(item, i);
+    if (typeof f === 'string') return notChecked(`PR #${meta.number} 的文件列表认不出：${f}`);
+    files.push(f);
+  }
+  const hits = standardFiles(files, list);
+  if (hits.length === 0) return { ok: true, notChecked: false, lines: [] };
+  const named = hits.map((h) => h.file).join('、');
+  const quote = founderQuote(meta.body);
+  if (!quote)
+    return {
+      ok: false,
+      notChecked: false,
+      lines: [
+        `改标准缺创始人原话：碰了 ${named}；正文要有一行 **创始人原话**：「<原话>」（<时间>）（pnpm pr:open --founder-quote 写的就是）。`,
+      ],
+    };
+  return {
+    ok: true,
+    notChecked: false,
+    lines: [`改标准：碰了 ${named}，正文贴了创始人原话（${quote.at}）。`],
+  };
+}
+
+/** 合前一次冷调用（#555-2）这一样：强制 CI 的引擎任务 PR（分支名认）当前头上要有通过的 cold-verify。 */
+async function coldVerdict(meta: LiveMeta, deps: GateDeps): Promise<Verdict> {
+  // 不强制 CI 的仓显式传入 off 才跳过；没传仍要，不能把别的仓放开。
+  const policy = deps.ciPolicy ?? 'force';
+  const flow = isFlowBranch(meta.headRef);
+  const cold = coldVerifyNeed(flow, policy);
+  if (!cold.needed) {
+    const line =
+      policy === 'off' && flow
+        ? '能合：这个仓不强制 CI，引擎任务 PR 不看冷验收。'
+        : '能合：不是引擎任务 PR，只看 CI。';
+    return { ok: true, notChecked: false, lines: [line] };
+  }
+  let statuses: unknown[];
+  try {
+    statuses = await deps.gh.statuses(meta.head);
+  } catch (e) {
+    return {
+      ok: false,
+      notChecked: true,
+      lines: [`没查成：读不到当前头 ${meta.head.slice(0, 7)} 的提交状态（${message(e)}）。`],
+    };
+  }
+  const got = coldVerifyFrom(statuses);
+  // 认不出 = 没查成（不当成没问题）：不当作「还没验」往下判。
+  if (typeof got === 'string') {
+    return {
+      ok: false,
+      notChecked: true,
+      lines: [`没查成：当前头 ${meta.head.slice(0, 7)} 的提交状态认不出：${got}。`],
+    };
+  }
+  // 没有这条、或不是 success：都判问题（不许拿「没有」当「没问题」，通用段底线第三条）。
+  const problems = checkColdVerify(meta.head, got, cold);
+  if (problems.length > 0) return { ok: false, notChecked: false, lines: problems };
+  return { ok: true, notChecked: false, lines: ['能合：引擎任务 PR 的验收那一遍通过。'] };
 }
 
 /**
- * 判一个 PR。只读，不写状态。判红只有：引擎任务 PR 当前头上没有通过的 cold-verify；读不到、认不出（没查成）。
- * 草稿、冲突 GitHub 自己就合不了，这里不判（#654）；别的 PR 不读提交状态，直接放行（只看 CI）。
+ * 判一个 PR。只读，不写状态。判红只有：碰了改标准路径、正文里没有创始人原话；引擎任务 PR 当前头上没有通过的 cold-verify；
+ * 读不到、认不出（没查成）。草稿、冲突 GitHub 自己就合不了，这里不判（#654）。
  */
 export async function gatePr(number: number, deps: GateDeps): Promise<GateResult> {
   const { gh } = deps;
@@ -146,45 +272,16 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
   if (!meta.open)
     return { number, head: meta.head, closed: true, state: 'failure', notChecked: false, lines: [] };
 
-  const base = { number, head: meta.head };
-  // 合前一次冷调用（#555-2）要不要等：强制 CI 的引擎任务 PR 要（分支名认）。
-  // 不强制 CI 的仓显式传入 off 才跳过；没传仍要，不能把别的仓放开。
-  const policy = deps.ciPolicy ?? 'force';
-  const flow = isFlowBranch(meta.headRef);
-  const cold = coldVerifyNeed(flow, policy);
-  if (!cold.needed) {
-    const line =
-      policy === 'off' && flow
-        ? '能合：这个仓不强制 CI，引擎任务 PR 不看冷验收。'
-        : '能合：不是引擎任务 PR，只看 CI。';
-    return { ...base, state: 'success', notChecked: false, lines: [line] };
-  }
-
-  let statuses: unknown[];
-  try {
-    statuses = await gh.statuses(meta.head);
-  } catch (e) {
-    return {
-      ...base,
-      state: 'failure',
-      notChecked: true,
-      lines: [`没查成：读不到当前头 ${meta.head.slice(0, 7)} 的提交状态（${message(e)}）。`],
-    };
-  }
-  const got = coldVerifyFrom(statuses);
-  // 认不出 = 没查成（不当成没问题）：不当作「还没验」往下判。
-  if (typeof got === 'string') {
-    return {
-      ...base,
-      state: 'failure',
-      notChecked: true,
-      lines: [`没查成：当前头 ${meta.head.slice(0, 7)} 的提交状态认不出：${got}。`],
-    };
-  }
-  // 没有这条、或不是 success：都判问题（不许拿「没有」当「没问题」，通用段底线第三条）。
-  const problems = checkColdVerify(meta.head, got, cold);
-  if (problems.length > 0) return { ...base, state: 'failure', notChecked: false, lines: problems };
-  return { ...base, state: 'success', notChecked: false, lines: ['能合：引擎任务 PR 的验收那一遍通过。'] };
+  const verdicts = [await coldVerdict(meta, deps), await standardVerdict(meta, deps)];
+  const ok = verdicts.every((v) => v.ok);
+  return {
+    number,
+    head: meta.head,
+    state: ok ? 'success' : 'failure',
+    notChecked: verdicts.some((v) => v.notChecked),
+    // 不通过时只写不通过的那几样（「能合：……」夹在里面读着像能合）
+    lines: verdicts.filter((v) => ok || !v.ok).flatMap((v) => v.lines),
+  };
 }
 
 export interface RunResult {

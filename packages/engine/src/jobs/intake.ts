@@ -16,10 +16,8 @@
 // 贴了「待补」（整理会话判过期）或「要人拍」的任何单都不进候选。每个仓走完以后，有从没整理过的老单，或有空位却一条都没起、待办里还有
 // 候选，就叫一次整理（autoGroomWhy；6 小时间隔、每天 3 次、一次一个由 requestGroom 判）。
 // 排序（intake-pick.ts 的 comparePick）：版本先后列表里的序号 → 挂当前版本的 → 规模小 → 同档里贴了「交给引擎」的 → 历史失败少 → 开单早。
-// 巡检仓里 canary 开的那张（标题认法 isCanaryIssueTitle，不另贴标签）先于所有仓的普通单，不看上面这几档。
 // 起之前才现读这张单（开着、不是 PR、母单子单和「本机做」再核一遍）：只对真有空位的那几张读，不为每张开着的单读一次。
 // 空位 = 每轮最多 5 条、同时在跑最多 6 条、每小时最多起 20 条、熔断没停拉（最近 6 条结束的任务里失败过半就停，冷却 1 小时后放 1 条试探）。
-// 巡检单不计入每小时那 20 条、也不占名额（#1364：名额满了把巡检单挤掉，巡检会把通的链报成断）；本轮条数、在跑、熔断和其余准入闸照旧。
 // 母单子单、本机做、版本这几道的判法是 @fleet-dao/core 的 dispatch.ts 的纯函数（familyGate、localGate），这里只排顺序。
 //
 // 改这里之前必须知道：
@@ -32,13 +30,13 @@
 // - 交代不全的单只留一次言：留言的幂等键由缺的内容算出来，同一处缺法不会每 5 分钟再留一条；缺的变了才是新的一条。
 // - 每轮最多起 MAX_STARTS_PER_ROUND 条、同时在跑的任务工作流不超过 MAX_RUNNING_TASKS 条、每小时最多起 MAX_STARTS_PER_HOUR 条：
 //   开关刚打开、一堆单同时合格时，一批一批地起，不一次把机器的内存和额度吃满；没起的下一轮（5 分钟后）自然再来。
-//   巡检单不进每小时这 20 条（本轮、在跑照样占）。库里数「一小时起了几条」时也把它剔出去（real/intake.ts）：
-//   新建的数任务行建出时刻，接手没有工作流的老行另数这一小时里成功的 task.adopt（建出时刻已在这一小时的不重复数）。
+//   库里数「一小时起了几条」：新建的数任务行建出时刻，接手没有工作流的老行另数这一小时里成功的 task.adopt（建出时刻已在这一小时的不重复数）。
 // - 熔断（intake-pick.ts 的 decideBreaker）：最近 6 条结束的任务里失败 4 条以上就整个停拉；冷却 1 小时后只放 1 条试探，试探成功才恢复，
 //   试探失败再冷却 1 小时。进入和恢复各推一条通知。状态在设置表 engine.intakeBreaker 一行；读不到、认不出，这一轮一张单都不拉。
 // - 排序只在准入之后：先过完不用现读 GitHub 的关，排好序、有空位才现读这张单（screenPlan）再起，免得开着的老单每轮各读一次。
-// - 别的环境的巡检仓不收（#1136）：foreignCanaries 列出的 owner/name 这一轮不读单、不起任务。名单读不到就整轮没跑成，
-//   不拿空名单顶（那会把别人的巡检单拉进来）。没给这个函数 = 没有别的环境。
+// - 每轮记下每个开着开关的仓「过了准入、只因没空位没起」的单有几张（recordWaiting，设置表 engine.intakeWaiting）：
+//   看门狗的「主线 N 小时没合 PR」报警（jobs/merge-stall.ts，决定 0093）拿它判这个仓有没有引擎可接的单。
+//   单子读不到的仓不写进去（不拿 0 冒充）；写不进记没查成。
 
 import { createHash } from 'node:crypto';
 import {
@@ -74,8 +72,6 @@ import {
   type TaskBrief,
 } from '../runner/task-brief.ts';
 import { TIER_HEAVYWEIGHT_FILE_THRESHOLD } from '../runner/tier.ts';
-import { isCanaryIssueTitle } from './canary.ts';
-import { normalizeCanarySlug } from './canary-scope.ts';
 import { type IssueTaskRow, readDispatchStanding, type TaskGenerationFacts } from './dispatch-standing.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 import { AUTO_GROOM_TEXT, autoGroomWhy, type GroomRequestOutcome } from './groom-request.ts';
@@ -353,11 +349,6 @@ export function incompleteKey(problems: readonly BriefProblem[]): string {
 export interface IntakeDeps {
   /** 受管的仓（开关关着的也列出来：全关是正常的空闲，不是没扫到东西）。读不到照抛：这一轮记没跑成。 */
   repos(): Promise<IntakeRepo[]>;
-  /**
-   * 别的环境的巡检仓（owner/name，大小写无所谓）。这一轮不读这些仓的单（#1136）。
-   * 不给 = 没有别的环境。读不到照抛：不当成「没有别人的仓」。
-   */
-  foreignCanaries?(): Promise<readonly string[]>;
   /** 作者白名单。读不到照抛：不当成「没有可信的人」。 */
   whitelist(): Promise<GithubWhitelist>;
   /** 这个仓开着的单加仓里还开着的里程碑（带说明原文，排序读版本里的先后）。读不到照抛。 */
@@ -415,10 +406,10 @@ export interface IntakeDeps {
    */
   groomRequest?(input: { repo: IntakeRepo; why: string }): Promise<GroomRequestOutcome>;
   /**
-   * 这台引擎自己的巡检仓（owner/name，大小写无所谓）。巡检仓里标题是巡检单的那张不占每小时名额、排在所有候选最前；
-   * 这个仓的里程碑只是没写先后标记时不打日志（写乱了照打）。不给、认不出 = 没有巡检仓，一张单都不豁免。
+   * 记下这一轮每个开着开关、单子读成了的仓里「过了准入、只因没空位没起」的单几张（键是仓的编号）。看门狗的「主线 N 小时没合 PR」
+   * 报警读它（jobs/merge-stall.ts）。写不进照抛：这一轮记没查成。不给（测试）就不记。
    */
-  canaryRepo?: string | null;
+  recordWaiting?(input: { at: Date; byRepo: Record<string, number> }): Promise<void>;
   runs: ScheduleRunLog;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
@@ -458,8 +449,8 @@ interface Tally {
   /** 熔断这一轮还允许起几条（正常是 Infinity，起一条减一）和为什么。 */
   breakerAllow: number;
   breakerWhy: string;
-  /** 别的环境的巡检仓，这一轮不读的有几个（#1136）。 */
-  foreignSkipped: number;
+  /** 每个仓「过了准入、只因没空位没起」的有几张（仓编号 → 张数）；单子没读成的仓不在里面。 */
+  waiting: Map<string, number>;
 }
 
 function skip(t: Tally, slug: string, issue: number, s: IntakeSkip): void {
@@ -500,24 +491,6 @@ interface Candidate {
   issue: IntakeIssue;
   brief: TaskBrief;
   key: PickKey;
-  /** 巡检仓里 canary 开的那张：排最前，不占每小时名额。其余闸已经在准入里过完。 */
-  canary: boolean;
-}
-
-/** 这台引擎的巡检仓（大小写不论）。没配、认不出是 false。 */
-function isCanaryRepo(repo: IntakeRepo, canaryRepo: string | null | undefined): boolean {
-  const want = normalizeCanarySlug(canaryRepo);
-  if (!want) return false;
-  return normalizeCanarySlug(`${repo.owner}/${repo.name}`) === want;
-}
-
-/** 巡检仓里、标题和 canaryIssue 同一句。别的仓同标题、巡检仓里的普通单都不是。 */
-function isCanaryTicket(
-  repo: IntakeRepo,
-  issue: IntakeIssue,
-  canaryRepo: string | null | undefined,
-): boolean {
-  return isCanaryRepo(repo, canaryRepo) && isCanaryIssueTitle(issue.title);
 }
 
 /** 单子「已知的模块」里列了多少个不同的路径（超过 50 个算最重档，见 tier.ts）。 */
@@ -652,16 +625,14 @@ async function admitIssue(
       failures,
       createdAtMs: created,
     },
-    canary: isCanaryTicket(repo, issue, deps.canaryRepo),
   };
 }
 
 /**
  * 空位：每轮条数、同时在跑、每小时、熔断，哪一个先用完就按哪一个的原因不起。回 null＝还有位子。
  * 先看便宜的、说得最清楚的：本轮上限 → 在跑上限 → 每小时 → 熔断。
- * hourlyExempt：巡检单不看每小时名额（本轮、在跑、熔断照旧）。
  */
-function noRoom(deps: IntakeDeps, t: Tally, opts?: { hourlyExempt?: boolean }): IntakeSkip | null {
+function noRoom(deps: IntakeDeps, t: Tally): IntakeSkip | null {
   const maxStarts = deps.limits?.maxStartsPerRound ?? MAX_STARTS_PER_ROUND;
   const maxRunning = deps.limits?.maxRunningTasks ?? MAX_RUNNING_TASKS;
   const maxHourly = deps.limits?.maxStartsPerHour;
@@ -674,14 +645,12 @@ function noRoom(deps: IntakeDeps, t: Tally, opts?: { hourlyExempt?: boolean }): 
       why: `在干活 ${t.running} 条、停下等人 ${t.stalled} 条（不占名额），在干活的已到上限 ${maxRunning}，等有空的`,
     };
   }
-  if (!opts?.hourlyExempt) {
-    const hourly = hourlyRemaining(t.hourStarted, maxHourly);
-    if (hourly <= 0) {
-      return {
-        reason: 'hourly_cap',
-        why: `最近一小时已经起了 ${t.hourStarted} 条（每小时最多 ${maxHourly ?? MAX_STARTS_PER_HOUR} 条），等滚出一小时`,
-      };
-    }
+  const hourly = hourlyRemaining(t.hourStarted, maxHourly);
+  if (hourly <= 0) {
+    return {
+      reason: 'hourly_cap',
+      why: `最近一小时已经起了 ${t.hourStarted} 条（每小时最多 ${maxHourly ?? MAX_STARTS_PER_HOUR} 条），等滚出一小时`,
+    };
   }
   if (t.breakerAllow <= 0) return { reason: 'breaker_open', why: t.breakerWhy };
   return null;
@@ -691,9 +660,10 @@ function noRoom(deps: IntakeDeps, t: Tally, opts?: { hourlyExempt?: boolean }): 
 async function startCandidate(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, t: Tally): Promise<boolean> {
   const slug = `${repo.owner}/${repo.name}`;
   const { issue } = c;
-  const full = noRoom(deps, t, { hourlyExempt: c.canary });
+  const full = noRoom(deps, t);
   if (full) {
     skip(t, slug, issue.number, full);
+    t.waiting.set(repo.id, (t.waiting.get(repo.id) ?? 0) + 1);
     return false;
   }
   const late = screenPlan(await deps.plan(repo, issue.number));
@@ -714,8 +684,7 @@ async function startCandidate(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, 
   }
   t.started += 1;
   t.running += 1;
-  // 巡检单不占每小时那 20 个名额：这一轮后面的普通单还能起满，下一轮库里数的时候也把它剔出去
-  if (!c.canary) t.hourStarted += 1;
+  t.hourStarted += 1;
   t.breakerAllow -= 1;
   deps.log('info', `拉单：起了 ${slug}#${issue.number} 的任务工作流`, {
     tier: c.brief.tier.tier,
@@ -723,21 +692,8 @@ async function startCandidate(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, 
     serial: c.key.serial,
     current: c.key.current,
     failures: c.key.failures,
-    canary: c.canary,
   });
   return true;
-}
-
-/** 巡检仓只是没写先后标记时不记（这个仓不需要先后列表）。写乱了、别的仓缺标记，照旧记。 */
-const MISSING_ORDER_MARK = '说明里没有先后标记';
-
-function orderProblemsToLog(
-  repo: IntakeRepo,
-  problems: readonly string[],
-  canaryRepo: string | null | undefined,
-): string[] {
-  if (!isCanaryRepo(repo, canaryRepo)) return [...problems];
-  return problems.filter((p) => !p.includes(MISSING_ORDER_MARK));
 }
 
 interface PreparedRepo {
@@ -776,13 +732,12 @@ async function prepareRepo(
   const { book, problems } = readOrderBook(
     withOrder.map((m) => ({ ...m, description: m.description ?? '' })),
   );
-  const logged = orderProblemsToLog(repo, problems, deps.canaryRepo);
-  if (logged.length > 0) {
+  if (problems.length > 0) {
     deps.log(
       'info',
-      `拉单：${slug} 有版本的先后认不出，这些版本里的单排在没排进去的那档：${logged.join('；')}`,
+      `拉单：${slug} 有版本的先后认不出，这些版本里的单排在没排进去的那档：${problems.join('；')}`,
       {
-        problems: logged,
+        problems,
       },
     );
   }
@@ -848,8 +803,7 @@ async function groomRepo(
 }
 
 /**
- * 各仓先准入，再起。巡检单先于所有仓的普通单（普通仓按名单顺序，仓内仍按 comparePick）；
- * 它不占每小时名额。整理待办仍按仓、在这个仓的普通单起完之后判。
+ * 各仓先准入，再起（仓按名单顺序，仓内按 comparePick）。整理待办按仓、在这个仓的单起完之后判。
  */
 async function intakeRepos(
   deps: IntakeDeps,
@@ -863,24 +817,11 @@ async function intakeRepos(
     if (one) prepared.push(one);
   }
 
-  const canaryStarted = new Map<string, number>();
-  const canaries = prepared.flatMap((p) =>
-    p.admitted.filter((c) => c.canary).map((c) => ({ repo: p.repo, c })),
-  );
-  for (const item of sortCandidates(canaries, (x) => x.c.key)) {
-    if (await startOne(deps, item.repo, item.c, t)) {
-      canaryStarted.set(item.repo.id, (canaryStarted.get(item.repo.id) ?? 0) + 1);
-    }
-  }
-
   for (const p of prepared) {
+    t.waiting.set(p.repo.id, t.waiting.get(p.repo.id) ?? 0);
     const startedBefore = t.started;
-    const normals = sortCandidates(
-      p.admitted.filter((c) => !c.canary),
-      (x) => x.key,
-    );
-    for (const c of normals) await startOne(deps, p.repo, c, t);
-    const startedHere = t.started - startedBefore + (canaryStarted.get(p.repo.id) ?? 0);
+    for (const c of sortCandidates(p.admitted, (x) => x.key)) await startOne(deps, p.repo, c, t);
+    const startedHere = t.started - startedBefore;
     await groomRepo(deps, p.repo, p.admitted, p.skippedBefore, startedHere, t);
   }
 }
@@ -892,8 +833,7 @@ function milestoneNeedsOrder(m: MilestoneRef, issues: readonly IntakeIssue[]): b
 
 function summarize(t: Tally): string {
   const skipped = [...t.skipped].map(([reason, n]) => `${reason}×${n}`).join('、') || '无';
-  const foreign = t.foreignSkipped > 0 ? `；别的环境的巡检仓跳过 ${t.foreignSkipped} 个` : '';
-  return `起了 ${t.started} 条，留言 ${t.commented} 条；开头在干活 ${t.workingAtStart} 条、停下等人 ${t.stalled} 条（不占名额）；没派的：${skipped}${foreign}`;
+  return `起了 ${t.started} 条，留言 ${t.commented} 条；开头在干活 ${t.workingAtStart} 条、停下等人 ${t.stalled} 条（不占名额）；没派的：${skipped}`;
 }
 
 async function round(deps: IntakeDeps): Promise<ScheduleResult> {
@@ -904,20 +844,6 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     return { outcome: 'failed', why: `受管的仓读不到：${errMessage(err)}` };
   }
   if (repos.length === 0) return { outcome: 'unscanned', why: '库里没有受管的仓' };
-  let foreign = new Set<string>();
-  if (deps.foreignCanaries) {
-    try {
-      foreign = new Set((await deps.foreignCanaries()).map((s) => s.toLowerCase()));
-    } catch (err) {
-      return {
-        outcome: 'failed',
-        why: `各环境的巡检仓名单读不到，这一轮一张单都没拉：${errMessage(err)}`,
-        scanned: repos.length,
-      };
-    }
-  }
-  // 别人的巡检仓不读（#1136）。普通项目仓、自己的巡检仓照拉。
-  const pulling = repos.filter((r) => !foreign.has(`${r.owner}/${r.name}`.toLowerCase()));
   const t: Tally = {
     scanned: repos.length,
     started: 0,
@@ -932,9 +858,9 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     hourStarted: 0,
     breakerAllow: Number.POSITIVE_INFINITY,
     breakerWhy: '',
-    foreignSkipped: repos.length - pulling.length,
+    waiting: new Map(),
   };
-  if (pulling.some((r) => r.autoDispatchSince !== null)) {
+  if (repos.some((r) => r.autoDispatchSince !== null)) {
     if (!(deps.gateLive ?? MERGE_GATE_REQUIRES_COLD_VERIFY)) {
       return {
         outcome: 'failed',
@@ -975,7 +901,14 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
         scanned: repos.length,
       };
     }
-    await intakeRepos(deps, pulling, whitelist, t);
+    await intakeRepos(deps, repos, whitelist, t);
+    if (deps.recordWaiting) {
+      try {
+        await deps.recordWaiting({ at: deps.now(), byRepo: Object.fromEntries(t.waiting) });
+      } catch (err) {
+        t.unchecked.push(`每个仓等空位的单数没记下（看门狗判不了有没有待做的单）：${errMessage(err)}`);
+      }
+    }
   }
   const found = t.started + t.commented;
   // 每种没派的原因各几张：日志一行，库里的结局（schedule_runs.why）同一句——found=0 时只有它分得开「没单」和「全被拦」

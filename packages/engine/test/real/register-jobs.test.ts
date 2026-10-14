@@ -132,7 +132,6 @@ describe('登记编号和定时器编号对得上', () => {
       quotaRead: never,
       carpoolWatch: never,
       hourlyReconcile: never,
-      canary: never,
       watchdog: never,
       intake: never,
       judgeSelfCheck: never,

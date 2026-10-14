@@ -17,12 +17,11 @@ import {
   SUBAGENT_FETCH_MS,
 } from './fresh-main.mjs';
 import { gitOk, gitRunner, gitWhy, readFallbackProxy } from './git-run.mjs';
-import { cleanId, stateDir, touchTool } from './unattended.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 // 只标类型、不改判断：改判断就是改规矩，由 agents/test/rules/pretool.rules.test.ts 钉着。
 /** @typedef {'bash' | 'powershell' | 'shell'} Kind 命令行是哪一种终端的写法（别家的终端不一定是 bash） */
-/** @typedef {{ raw: string, value: string }} Word 一个词：raw 是原文（带引号、转义），value 是去掉引号转义之后的值 */
+/** @typedef {{ raw: string, value: string, complex?: string }} Word 一个词：raw 是原文（带引号、转义），value 是去掉引号转义之后的值；complex 是这个词里钩子看不清的写法 */
 /** @typedef {{ words: Word[], redirects: Word[] }} SimpleCmd 一条简单命令：词和往文件写的重定向 */
 /** @typedef {{ name: string, args: Word[], viaXargs: boolean }} Leaf 剥掉 sudo、env、xargs 这类前缀之后真正跑的命令 */
 /** @typedef {{ text: string, kind: Kind, cwd?: string | undefined }} Nested ssh、wsl、bash -c、pwsh -Command、cmd /c 里的另一条命令行 */
@@ -35,12 +34,13 @@ import { cleanId, stateDir, touchTool } from './unattended.mjs';
  */
 /** @typedef {{ code: 2, message: string }} Block 拦下：退出码 2，message 给模型看 */
 /**
- * 放行；updatedInput 是改写过的整份 tool_input（Claude Code 的 hookSpecificOutput.updatedInput 整份替换），context 是给模型看的一句话
- * @typedef {{ code: 0, updatedInput?: Record<string, unknown>, context?: string }} Allow
+ * 放行；updatedInput 是改写过的整份 tool_input（Claude Code 的 hookSpecificOutput.updatedInput 整份替换），context 是给模型看的一句话；
+ * approve 为真才带 permissionDecision: allow（跳过权限确认，只给 redactor 那种整条看得清的改写），否则改写后照常走权限
+ * @typedef {{ code: 0, updatedInput?: Record<string, unknown>, context?: string, approve?: boolean }} Allow
  */
 /** @typedef {Allow | Block} Verdict 钩子的结论：放行或拦下 */
 /** @typedef {{ stdoutSafe?: boolean, stdinViewer?: boolean, receiver?: boolean }} LineCtx checkLine 的上下文（见 checkLine 上面的说明） */
-/** @typedef {{ u: Unwrapped, label: string | null, head: string | null }} CmdInfo 一条命令碰没碰到密钥路径、头一个词看不看得清 */
+/** @typedef {{ u: Unwrapped, label: string | null, head: string | null, wordComplex?: string | undefined }} CmdInfo 一条命令碰没碰到密钥路径、头一个词看不看得清、碰到的那个词看不看得清 */
 /** @typedef {{ why: string }} Why 这条命令为什么算「打印进程命令行」 */
 
 /**
@@ -463,10 +463,12 @@ export function secretMention(text, { heredoc = false } = {}) {
 /**
  * 把命令切成管道和简单命令，只认词、引号、; && || | & 换行、往文件写的重定向。钩子看不清的写法（$( )、反引号、
  * 括号花括号、< 读入和 heredoc、PowerShell 的脚本块和表达式）记进 complex，照样往下切，好认出碰没碰到密钥路径。
+ * 落在哪个词里的，同时记在那个词的 complex 上（checkLine 只看碰到密钥路径的那条命令自己看不看得清）；
+ * 不落在词里的（重定向后面没写文件、管道一头是空的）记进 bare，整条命令行都算看不清。
  * 注释去掉：注释里写到的路径不算碰到。
  * @param {unknown} text
  * @param {Kind} kind
- * @returns {{ pipelines: SimpleCmd[][], complex: string[] }}
+ * @returns {{ pipelines: SimpleCmd[][], complex: string[], bare: string[] }}
  */
 function scanCommand(text, kind) {
   const ps = kind === 'powershell';
@@ -474,6 +476,15 @@ function scanCommand(text, kind) {
   const n = s.length;
   /** @type {string[]} */
   const complex = [];
+  /** @type {string[]} */
+  const bare = [];
+  /** 刚记下、还没落到词上的那条看不清的写法：下一次 add 落到那个词上 */
+  let pendingFlag = /** @type {string | null} */ (null);
+  /** @param {string} why */
+  const flag = (why) => {
+    complex.push(why);
+    pendingFlag ??= why;
+  };
   /** @type {SimpleCmd[][]} */
   const pipelines = [];
   /** @type {SimpleCmd[]} */
@@ -493,6 +504,10 @@ function scanCommand(text, kind) {
     word ??= { raw: '', value: '' };
     word.raw += raw;
     word.value += value;
+    if (pendingFlag !== null) {
+      word.complex ??= pendingFlag;
+      pendingFlag = null;
+    }
   };
   const endWord = () => {
     if (word === null) return;
@@ -511,12 +526,17 @@ function scanCommand(text, kind) {
     endWord();
     if (redirect) {
       complex.push('重定向后面没写文件');
+      bare.push('重定向后面没写文件');
       redirect = false;
     }
+    pendingFlag = null;
     if (cmd.words.length > 0 || cmd.redirects.length > 0) {
       pipe.push(cmd);
       cmd = { words: [], redirects: [] };
-    } else if (piped || afterPipe) complex.push('管道的一头是空的');
+    } else if (piped || afterPipe) {
+      complex.push('管道的一头是空的');
+      bare.push('管道的一头是空的');
+    }
     afterPipe = piped;
     inTest = false;
     if (!piped && pipe.length > 0) {
@@ -545,7 +565,7 @@ function scanCommand(text, kind) {
       for (;;) {
         const k = s.indexOf("'", j);
         if (k < 0) {
-          complex.push('引号没收尾');
+          flag('引号没收尾');
           v += s.slice(j);
           j = n;
           break;
@@ -579,12 +599,12 @@ function scanCommand(text, kind) {
           v += f;
           j += 2;
         } else {
-          if ((!ps && e === '`') || (e === '$' && f === '(')) complex.push('双引号里有 $( ) 或反引号');
+          if ((!ps && e === '`') || (e === '$' && f === '(')) flag('双引号里有 $( ) 或反引号');
           v += e;
           j++;
         }
       }
-      if (!closed) complex.push('引号没收尾');
+      if (!closed) flag('引号没收尾');
       add(s.slice(i, j), v);
       i = j;
     } else if (!ps && c === '$' && d === "'") {
@@ -594,30 +614,30 @@ function scanCommand(text, kind) {
         v += s[j] === '\\' ? (s[j + 1] ?? '') : s[j];
         j += s[j] === '\\' ? 2 : 1;
       }
-      if (j >= n) complex.push('引号没收尾');
+      if (j >= n) flag('引号没收尾');
       add(s.slice(i, j + 1), v);
       i = j + 1;
     } else if (c === '$' && d === '{') {
       const k = s.indexOf('}', i + 2);
       const inner = k < 0 ? s.slice(i) : s.slice(i, k + 1);
-      if (k < 0 || /[`$(]/.test(inner.slice(2))) complex.push('变量展开里套了别的');
+      if (k < 0 || /[`$(]/.test(inner.slice(2))) flag('变量展开里套了别的');
       add(inner);
       i += inner.length;
     } else if (c === '$' && d === '(') {
-      complex.push('$( )');
+      flag('$( )');
       add('$(');
       i += 2;
     } else if ((!ps && c === '`') || (ps && word === null && (c === '@' || c === '['))) {
-      complex.push(ps ? '@( )、[类型]:: 这类表达式' : '反引号');
+      flag(ps ? '@( )、[类型]:: 这类表达式' : '反引号');
       add(c);
       i++;
     } else if ('(){}'.includes(c) && !(inTest && (c === '(' || c === ')'))) {
-      complex.push('括号、花括号');
+      flag('括号、花括号');
       add(c);
       i++;
     } else if (c === '<' && !inTest) {
       // 从文件读入（sha256sum < 文件）照常认：读的那个文件和别的参数一样判；heredoc、<<<、<( )、<& 看不清
-      if (ps || d === '<' || d === '(' || d === '&') complex.push('< 读入、heredoc');
+      if (ps || d === '<' || d === '(' || d === '&') flag('< 读入、heredoc');
       add(c);
       i++;
     } else if (c === '>' && !inTest) {
@@ -640,7 +660,7 @@ function scanCommand(text, kind) {
     } else if (c === '&' && !inTest && ps && word === null && cmd.words.length === 0) {
       i++; // PowerShell 的调用运算符：& 'C:\…\node.exe' …
     } else if (c === '&' && !inTest && ps) {
-      complex.push('&');
+      flag('&');
       add(c);
       i++;
     } else if (c === '&' && !inTest) {
@@ -661,7 +681,7 @@ function scanCommand(text, kind) {
     }
   }
   endCmd(false);
-  return { pipelines, complex };
+  return { pipelines, complex, bare };
 }
 
 const BASH_KEYWORDS = new Set(
@@ -1416,20 +1436,163 @@ function isSink(info) {
   return info.u.name === 'ssh' ? info.u.nested !== undefined : HASHES.has(info.u.leaf?.name ?? '');
 }
 
+// —— 只是提到，不算碰到 ——
+// 两周 82 次密钥拦截里大半是「提到」：grep 的模式里写着 id_rsa、pnpm progress:note 的一段话里写着 device.key、
+// node -e 脚本里的 r.key、SQL 里的 n.key、heredoc 写进文档的路径。下面这几种词不算碰到：
+// - grep、rg、Select-String 这类的搜索模式（搜的是别的文件，模式只是一串字）；
+// - 带空白的一整段话（一段话不是一个路径），除非它是 -e / -c / --eval / -Command 后面的脚本、awk / sed / jq 的程序：
+//   脚本里 *.key、*.pem 这类只认带路径分隔符的写法（/etc/ssl/a.key 算，item.key、n.key 不算），和 heredoc 正文同一个口径，
+//   放密钥的目录和写死的密钥文件名（'.reclaude'、'device.json'、/etc/fleet-dao）照认；
+//   带 $( ) 或反引号的词会先被执行，不算一段话，整段认；
+//   以盘符、/、~、./ 开头的带空格的词按路径算（"C:/Users/A B/.ssh/id_rsa"）。
+// ssh、bash -c、pwsh -Command 转手的那条命令行照旧整段认，拆开后再按这套规矩判。
+
+/** 搜内容的命令：它们的模式词不算碰到 */
+const SEARCHERS = opts('grep egrep fgrep rg ag ack findstr select-string sls');
+/** 后面跟着一段脚本的开关 */
+const EVAL_FLAG_RE =
+  /^(?:-e|--eval|-p|--print|-c|--command|-command|-c(?:ommand)?|-e(?:xecute)?|--execute)$/i;
+/** 第一个不是选项的参数就是程序的 */
+const PROGRAM_FIRST = opts('awk gawk mawk nawk sed jq');
+/** 带空格也按路径算的开头 */
+const PATHLIKE_START =
+  /^(?:[A-Za-z]:[\\/]|[/~]|\.{1,2}[\\/]|\$HOME|\$\{HOME\}|%USERPROFILE%|\$env:USERPROFILE)/i;
+
+/**
+ * 搜内容的命令里哪些词是模式：-e / --regexp / -Pattern 后面的；都没写就是第一个不是选项的词。-f 是从文件读模式，那个文件照常判。
+ * @param {Leaf | undefined} leaf
+ * @returns {Set<Word>}
+ */
+function patternWords(leaf) {
+  /** @type {Set<Word>} */
+  const out = new Set();
+  if (leaf === undefined || !SEARCHERS.has(leaf.name)) return out;
+  const args = leaf.args;
+  const sls = leaf.name === 'select-string' || leaf.name === 'sls';
+  const isGrep = ['grep', 'egrep', 'fgrep'].includes(leaf.name);
+  const argShort = isGrep ? GREP_ARG_SHORT : RG_ARG_SHORT;
+  const argLong = isGrep ? GREP_ARG_LONG : RG_ARG_LONG;
+  let explicit = false;
+  /** @type {Word | undefined} */
+  let firstPositional;
+  for (let i = 0; i < args.length; i++) {
+    const w = args[i];
+    if (w === undefined) continue;
+    const v = w.value;
+    if (sls) {
+      if (/^-pattern$/i.test(v)) {
+        const next = args[i + 1];
+        if (next) out.add(next);
+        explicit = true;
+        i++;
+      } else if (/^-(?:path|literalpath|encoding|context)$/i.test(v)) i++;
+      else if (!v.startsWith('-') && firstPositional === undefined) firstPositional = w;
+      continue;
+    }
+    if (v === '--') {
+      firstPositional ??= args[i + 1];
+      break;
+    }
+    if (v === '-e' || v === '--regexp') {
+      const next = args[i + 1];
+      if (next) out.add(next);
+      explicit = true;
+      i++;
+      continue;
+    }
+    if (/^--regexp=/.test(v) || /^-e.+/.test(v)) {
+      out.add(w);
+      explicit = true;
+      continue;
+    }
+    if (v === '-f' || v === '--file' || /^--file=/.test(v) || /^-f.+/.test(v)) {
+      explicit = true;
+      if (v === '-f' || v === '--file') i++;
+      continue;
+    }
+    if (v.startsWith('--')) {
+      if (!v.includes('=') && argLong.has(v)) i++;
+      continue;
+    }
+    if (v.startsWith('-') && v !== '-' && !/^\/[A-Za-z]/.test(v)) {
+      const last = v[v.length - 1] ?? '';
+      if (v.length === 2 && argShort.has(last)) i++;
+      continue;
+    }
+    firstPositional ??= w;
+  }
+  if (!explicit && firstPositional !== undefined) out.add(firstPositional);
+  return out;
+}
+
+/**
+ * 一个词碰没碰到密钥路径（见上面「只是提到」）。code：它是不是一段脚本、程序。
+ * @param {Word} x
+ * @param {boolean} code
+ * @returns {string | null}
+ */
+function wordMention(x, code) {
+  const full = secretMention(x.raw) ?? secretMention(x.value);
+  if (full === null) return null;
+  if (!/\s/.test(x.value) || PATHLIKE_START.test(x.value) || x.complex !== undefined) return full;
+  return code ? secretMention(x.value, { heredoc: true }) : null;
+}
+
 /**
  * @param {SimpleCmd} c
  * @param {Kind} kind
  * @returns {CmdInfo}
  */
 function describeCmd(c, kind) {
+  // if / then / while 这类开头剥掉再看后面那条命令：if [ -s ~/.fleet-dao/vault-key.txt ] 是在判断在不在；for、case、done < 文件 不剥，照算看不清
+  if (kind !== 'powershell') {
+    let n = 0;
+    while (n < c.words.length - 1 && RECEIVER_SKIP.has(c.words[n]?.raw ?? '')) n++;
+    if (n > 0) c = { ...c, words: c.words.slice(n) };
+  }
   const u = unwrap(c.words);
-  const label = c.words
-    .filter((x) => !u.exclude.has(x))
-    .reduce(
-      (found, x) => found ?? secretMention(x.raw) ?? secretMention(x.value),
-      /** @type {string | null} */ (null),
-    );
-  return { u, label, head: headProblem(c.words, kind) };
+  const patterns = patternWords(u.leaf);
+  const programAt =
+    u.leaf && PROGRAM_FIRST.has(u.leaf.name) ? u.leaf.args.find((x) => !x.value.startsWith('-')) : undefined;
+  /** @type {string | null} */
+  let label = null;
+  /** @type {string | undefined} */
+  let wordComplex;
+  c.words.forEach((x, i) => {
+    if (u.exclude.has(x) || patterns.has(x)) return;
+    // 转手的那条命令行（ssh、bash -c、pwsh -Command）整段认，拆开后由 checkLine 再按这套规矩判
+    const m = u.nested
+      ? (secretMention(x.raw) ?? secretMention(x.value))
+      : wordMention(x, EVAL_FLAG_RE.test(c.words[i - 1]?.value ?? '') || x === programAt);
+    if (m === null) return;
+    label ??= m;
+    wordComplex ??= x.complex;
+  });
+  return { u, label, head: headProblem(c.words, kind), wordComplex };
+}
+
+/**
+ * 这一段文字里拆出来的词有没有一个「整段认」碰到密钥路径（不管是不是只提到）：转手的命令行拆开后一处都没碰到时，
+ * 用它分清是「只是提到」（放行）还是「转义把路径吃了、钩子对不上」（拦）。
+ * @param {string} text
+ * @param {Kind} kind
+ */
+function rawHit(text, kind) {
+  return scanCommand(text, kind).pipelines.some((p) =>
+    p.some((c) => c.words.some((x) => (secretMention(x.raw) ?? secretMention(x.value)) !== null)),
+  );
+}
+
+/**
+ * heredoc 正文交给的是不是只写文字的命令：cat / tee 写进文件、gh、git（-F -）、pnpm 收正文。别的（node -、python -、
+ * bash、ssh）会把正文当脚本跑。
+ * @param {SimpleCmd} c
+ */
+function heredocToText(c) {
+  const u = unwrap(c.words);
+  const name = u.leaf?.name ?? '';
+  if (name === 'cat') return c.redirects.length > 0;
+  return ['tee', 'gh', 'git', 'pnpm'].includes(name);
 }
 
 const SHAPE = '"$HOME/.fleet-dao/hooks/secret-shape.mjs"';
@@ -1475,7 +1638,18 @@ const RECEIVER_SKIP = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'unt
  */
 function checkLine(text, kind, ctx, depth) {
   if (depth > 4) return secretBlock('密钥路径', '套了太多层 ssh / bash -c');
-  const { pipelines, complex } = scanCommand(text, kind);
+  // heredoc 正文不当命令切：正文只是文字，交给写文字的命令（cat > 文档、gh、git -F -）不算碰到；交给会执行它的（node -、
+  // python -、bash、ssh）时，正文里带路径分隔符的密钥路径照拦
+  const { outer, bodies } = kind === 'powershell' ? { outer: text, bodies: '' } : splitHeredocs(text);
+  const { pipelines, bare } = scanCommand(outer, kind);
+  const bodyLabel = bodies ? secretMention(bodies, { heredoc: true }) : null;
+  if (bodyLabel !== null) {
+    const feeders = pipelines.flat().filter((c) => c.words.some((x) => /^<<(?!<)/.test(x.raw)));
+    const runner = feeders.find((c) => !heredocToText(c));
+    if (runner !== undefined || feeders.length === 0) {
+      return secretBlock(bodyLabel, '写在 heredoc 里交给会执行它的命令');
+    }
+  }
   // 管道那头接着值的远端脚本（… | ssh 机器 '…'，ops 第九节「值不过屏幕」把值落进 /etc/fleet-dao 的那几条）：它往密钥路径里写，
   // 用变量、$( )、if 是常事。这里不管看不清的写法，只看写死了密钥路径的命令读不读内容（if/then 这类剥掉再看，赋值、看不清的跳过）
   const receiver = ctx.receiver === true;
@@ -1488,12 +1662,16 @@ function checkLine(text, kind, ctx, depth) {
     }),
   );
   const hit = infos.flat().find((x) => x.label !== null);
-  if (hit === undefined) return null;
+  if (hit === undefined) return bodyLabel === null ? null : CLEAN;
+  // 只看碰到密钥路径的那几条命令自己看不看得清（碰到的那个词里的 $( )、赋值、循环、拿变量当命令），
+  // 别的命令里的 heredoc、变量赋值不连坐（两周误拦的大头：一条命令行里一处 ls 密钥目录、另一处写 heredoc 文档）
+  const hits = infos.flat().filter((x) => x.label !== null);
   const unclear = receiver
     ? undefined
-    : (complex[0] ??
-      infos.flat().find((x) => x.head !== null)?.head ??
-      infos.flat().find((x) => x.u.complex)?.u.complex);
+    : (bare[0] ??
+      hits.find((x) => x.wordComplex !== undefined)?.wordComplex ??
+      hits.find((x) => x.head !== null)?.head ??
+      hits.find((x) => x.u.complex)?.u.complex);
   // hit 是上面按 label !== null 找出来的，所以 label 一定有；?? 只为让类型跟上
   const hitLabel = hit.label ?? '';
   if (unclear) return secretBlock(hitLabel, `用了钩子看不清的写法（${unclear}）`);
@@ -1518,8 +1696,12 @@ function checkLine(text, kind, ctx, depth) {
           { stdoutSafe: toSink, stdinViewer: viewer, receiver: i > 0 && x.u.name === 'ssh' },
           depth + 1,
         );
-        // 外层看得见、拆出来的那条命令行里却找不到了（多半是转义把反斜杠吃了）：看不清就按拦处理
-        if (r === null) return secretBlock(x.label, `用了 ${x.u.name} 转手、拆开后钩子对不上路径`);
+        // 外层看得见、拆出来的那条命令行里却找不到了：拆开后的词里整段认还找得到，是只提到（搜索模式、一段话），放行；
+        // 找不到了（多半是转义把反斜杠吃了）：看不清就按拦处理
+        if (r === null) {
+          if (rawHit(x.u.nested.text, x.u.nested.kind)) continue;
+          return secretBlock(x.label, `用了 ${x.u.name} 转手、拆开后钩子对不上路径`);
+        }
         if (r !== CLEAN) return r;
       } else if (!nonReading(x.u.leaf, ctx) && !toSink) return secretBlock(x.label);
     }
@@ -1565,6 +1747,7 @@ function secretVerdict(command, kind) {
   }
   if (label === null) return null;
   try {
+    // heredoc 的拆法在 checkLine 里（ssh、bash -c 转手的那条也一样拆）
     const r = checkLine(command, kind, {}, 0);
     return r === null || r === CLEAN ? null : /** @type {Block} */ (r);
   } catch (err) {
@@ -1649,6 +1832,26 @@ function rewritable(command, kind) {
 }
 
 /**
+ * 这条命令行有没有往文件里写（> 文件、tee、Out-File、Set-Content、Add-Content；写到 /dev/null、$null 的不算）：
+ * 写进文件的那份不经过末尾接上的 redactor。看不清就按写了算。
+ * @param {string} command
+ * @param {Kind} kind
+ */
+function writesFile(command, kind) {
+  try {
+    return scanCommand(command, kind)
+      .pipelines.flat()
+      .some((c) => {
+        if (c.redirects.some((r) => !/^(?:\/dev\/null|\$null|nul)$/i.test(r.value))) return true;
+        const name = unwrap(c.words).leaf?.name ?? '';
+        return ['tee', 'tee-object', 'out-file', 'set-content', 'add-content', 'sc', 'ac'].includes(name);
+      });
+  } catch {
+    return true;
+  }
+}
+
+/**
  * 整条命令行的输出（bash 连 stderr）接一条管道过 redactor：bash 用 { …; } 包起来，PowerShell 用 & { … } 包起来，
  * 原来的命令原样留在里面，末尾的注释也不会吃掉管道（换行再收括号）。
  * @param {string} command
@@ -1662,11 +1865,12 @@ export function withRedactor(command, kind) {
 
 /**
  * 打印进程命令行的命令判一下：不是这类返回 null；认不出（钩子没看懂这条命令）也按拦处理。
- * rewrite 为真（Claude Code 的 Bash、PowerShell）且整条看得清：返回 { rewrite: 为什么 }，由 decide 改写成接上 redactor 放行。
+ * rewrite 为真（Claude Code 的 Bash、PowerShell）：返回 { rewrite: 为什么, simple }，由 decide 改写成接上 redactor；
+ * simple（整条看得清、只有看进程和处理文字的）才带 allow 放行，别的改写后照常走权限确认。
  * @param {string} command
  * @param {Kind} kind
  * @param {boolean} [rewrite]
- * @returns {Block | { rewrite: string } | null}
+ * @returns {Block | { rewrite: string, simple: boolean } | null}
  */
 function processListingVerdict(command, kind, rewrite = false) {
   /** @type {Why | null} */
@@ -1682,10 +1886,17 @@ function processListingVerdict(command, kind, rewrite = false) {
   } catch {
     return processBlock(`${hit.why}，钩子又没看懂这条命令的管道`);
   }
-  try {
-    if (rewrite && rewritable(command, kind)) return { rewrite: hit.why };
-  } catch {
-    // 看不清就不改写，照旧拦下给配方
+  if (rewrite && !writesFile(command, kind)) {
+    // Claude Code 里改写成整条接上 redactor：看得清、只有看进程和处理文字的（rewritable）才顺带放行；
+    // 别的（夹了循环、$( )、ssh 那头、PowerShell 脚本块）改写后照常走权限确认，不替它们跳过确认。
+    // 往文件里写的（> 文件、tee、Out-File）不改写：写进文件的那份不经过 redactor，照旧拦下给配方
+    let simple = false;
+    try {
+      simple = rewritable(command, kind);
+    } catch {
+      // 看不清就不顺带放行
+    }
+    return { rewrite: hit.why, simple };
   }
   return processBlock(hit.why);
 }
@@ -2003,8 +2214,26 @@ function readVerdict(tool, what, input, fallbackCwd) {
   return { code: 0 };
 }
 
+// —— 前台等太久：改成后台跑 ——
+// 创始人的插话只在两次调用间隙送到，前台等一两分钟他的话就卡着。以前拦下让模型自己加 run_in_background 重试（两周 51 次，
+// 每次多一轮），现在 Claude Code 的 Bash、PowerShell 写了 timeout 超过 60 秒又没后台跑的，钩子直接改成后台跑放行
+// （updatedInput，不带 permissionDecision：改写后的输入照常走权限确认，本机 claude -p 实测改写生效、没被自动放行）。
+// 跑完有完成通知叫醒会话。别家（Codex、Gemini、Kimi、Grok、Devin）不一定认 updatedInput，不改。
+
+/** 前台等待上限（毫秒）：timeout 写得比它大的改成后台跑 */
+export const FOREGROUND_MAX_MS = 60_000;
+
+/**
+ * 这次调用要不要改成后台跑：timeout 是超过 FOREGROUND_MAX_MS 的数，run_in_background 不是 true
+ * @param {unknown} toolInput
+ * @returns {boolean}
+ */
+export function longForeground(toolInput) {
+  const t = prop(toolInput, 'timeout');
+  return typeof t === 'number' && t > FOREGROUND_MAX_MS && prop(toolInput, 'run_in_background') !== true;
+}
+
 /** 判一条钩子输入（原文）：{ code: 0 } 放行，{ code: 2, message } 拦下。 */
-// 前台等待上限（单次不超过 60 秒）删掉：两天拦 18 次全是误伤；长命令后台跑是规矩里的写法，不再由钩子拦。
 
 /**
  * 是不是 Claude Code 自己的 PreToolUse 输入（code.claude.com/docs/en/hooks 的输入例子：transcript_path、permission_mode、
@@ -2233,13 +2462,25 @@ export function decide(raw, fallbackCwd = '') {
       'fleet-dao 里不用 git reset --hard：会把工作区覆盖掉，过去把主检出还没验证的活丢过。要回滚某个提交：先把当前进度 `git commit` 到分支或工作树，要丢弃改动先 `git diff > _tmp/xxx.patch` 留底，或提交到自己分支，再决定要不要真扔。',
     );
   }
+  const bg = claudeCode && kind !== 'shell' && longForeground(toolInput);
+  const bgNote = bg
+    ? `fleet-guard：这条要在前台等 ${Math.round(Number(prop(toolInput, 'timeout')) / 1000)} 秒（超过 ${FOREGROUND_MAX_MS / 1000} 秒），钩子已改成后台跑（run_in_background: true），跑完的完成通知会叫醒你；别 sleep 等、别轮询。`
+    : '';
+  const base = isObjectLike(toolInput) ? toolInput : {};
   if (listing && kind !== 'shell') {
     return {
       code: 0,
-      updatedInput: { ...(isObjectLike(toolInput) ? toolInput : {}), command: withRedactor(cmd, kind) },
-      context: `fleet-guard：这条命令${listing.rewrite}，钩子已在末尾接上 node ${REDACT} 把口令打码后再放行（输出里的 *** 就是打掉的值）。`,
+      approve: listing.simple,
+      updatedInput: { ...base, command: withRedactor(cmd, kind), ...(bg ? { run_in_background: true } : {}) },
+      context: [
+        `fleet-guard：这条命令${listing.rewrite}，钩子已在末尾接上 node ${REDACT} 把口令打码后再放行（输出里的 *** 就是打掉的值）。`,
+        bgNote,
+      ]
+        .filter(Boolean)
+        .join('\n'),
     };
   }
+  if (bg) return { code: 0, updatedInput: { ...base, run_in_background: true }, context: bgNote };
   return { code: 0 };
 }
 
@@ -2330,11 +2571,8 @@ if (isMain()) {
   try {
     /** @type {unknown} */
     const input = JSON.parse(raw);
-    // 无人值守开着时记一笔「这个会话调了工具」；只记不判，出错吞掉。
-    // 不因起后台活自动开无人值守（这里只记、不开）。Agent、Monitor、Workflow、送达类工具仍登记在这条钩子上，
-    // 见到就放行（decide 不认识它们的名字，不放行会被拦）。不再读欠账。
-    const id = cleanId(prop(input, 'session_id')) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
-    if (id) touchTool({ dir: stateDir(), sessionId: id });
+    // Agent、Monitor、Workflow、送达类工具仍登记在这条钩子上，见到就放行（decide 不认识它们的名字，不放行会被拦）。
+    // 不再给无人值守记「调了工具」：Stop 钩子改看输入里的 background_tasks。
     const tool = prop(input, 'tool_name') ?? prop(input, 'toolName');
     backgroundOnly =
       typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool));
@@ -2359,13 +2597,15 @@ if (isMain()) {
     process.exit(verdict.code);
   }
   if (verdict.updatedInput) {
-    // 文档（code.claude.com/docs/en/hooks「PreToolUse decision control」）：updatedInput 整份替换 tool_input，配 allow 放行
+    // 文档（code.claude.com/docs/en/hooks「PreToolUse decision control」）：updatedInput 整份替换 tool_input。
+    // approve（redactor 改写）配 allow 放行；别的（改成后台跑）不带决定，改写后的输入照常走权限确认
     process.stdout.write(
       `${JSON.stringify({
         hookSpecificOutput: {
           hookEventName: 'PreToolUse',
-          permissionDecision: 'allow',
-          permissionDecisionReason: verdict.context ?? '',
+          ...(verdict.approve
+            ? { permissionDecision: 'allow', permissionDecisionReason: verdict.context ?? '' }
+            : {}),
           updatedInput: verdict.updatedInput,
           ...(verdict.context ? { additionalContext: verdict.context } : {}),
         },

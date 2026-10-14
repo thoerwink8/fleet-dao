@@ -31,6 +31,7 @@ import {
   tasksCreatedSince,
   upsertAlert,
   writeIntakeBreaker,
+  writeIntakeWaiting,
 } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
@@ -38,8 +39,6 @@ import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { actorFor, createPgStore, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
 import { type Client, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
-import { CANARY_ISSUE_TITLE_POSIX } from '../jobs/canary.ts';
-import { normalizeCanarySlug } from '../jobs/canary-scope.ts';
 import { ORPHAN_TASK_ADOPT_NOTE } from '../jobs/dispatch-standing.ts';
 import { requestGroom } from '../jobs/groom-request.ts';
 import { type IntakeDeps, prClaimedIssues } from '../jobs/intake.ts';
@@ -63,31 +62,6 @@ export interface IntakeWiring {
   startTimeoutMs?: number;
   /** 测试用：换掉「合并闸认冷验收了没有」（jobs/intake.ts 的 MERGE_GATE_REQUIRES_COLD_VERIFY）。 */
   gateLive?: boolean;
-  /**
-   * 别的环境的巡检仓（#1136）。读不到照抛，拉单这一轮记没跑成，不拿空名单顶。
-   * 不给 = 没有别的环境（测试、还没接第二台）。
-   */
-  foreignCanaries?: () => Promise<readonly string[]>;
-  /**
-   * 这台引擎自己的巡检仓（FLEET_CANARY_REPO，owner/name）。
-   * 给了：这个仓里标题是巡检单的任务行不计入每小时条数，拉单也认这个仓。不给 = 没有。
-   */
-  canaryRepo?: string | null;
-}
-
-/** 每小时条数里剔掉的巡检单。没配、认不出回 null（一条不剔，不当成某个仓）。 */
-function hourlyExclude(raw: string | null | undefined): {
-  owner: string;
-  name: string;
-  titlePosix: string;
-} | null {
-  const slug = normalizeCanarySlug(raw);
-  if (!slug) return null;
-  const slash = slug.indexOf('/');
-  const owner = slug.slice(0, slash);
-  const name = slug.slice(slash + 1);
-  if (!owner || !name) return null;
-  return { owner, name, titlePosix: CANARY_ISSUE_TITLE_POSIX };
 }
 
 const DEFAULT_START_TIMEOUT_MS = 15_000;
@@ -121,8 +95,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           autoDispatchSince: r.autoDispatchSince ? r.autoDispatchSince.toISOString() : null,
         }));
       },
-      ...(w.foreignCanaries ? { foreignCanaries: w.foreignCanaries } : {}),
-      canaryRepo: w.canaryRepo ?? null,
+      recordWaiting: ({ at, byRepo }) => writeIntakeWaiting(w.db, { at, byRepo, by: BREAKER_ACTOR }),
       async whitelist() {
         return githubWhitelist(await usersOnce());
       },
@@ -210,10 +183,9 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
       failures: (repo, issueNumber) => taskFailureCount(w.db, repo.id, issueNumber),
       async startedSince(since) {
         // 老行的建出时刻不在这一小时里。接手成功才记 task.adopt，和新建的行加在一起，才是这一小时真正起了几条。
-        const exclude = hourlyExclude(w.canaryRepo);
         const [created, adopted] = await Promise.all([
-          tasksCreatedSince(w.db, since, exclude),
-          taskAdoptsSince(w.db, since, exclude),
+          tasksCreatedSince(w.db, since),
+          taskAdoptsSince(w.db, since),
         ]);
         return created + adopted;
       },

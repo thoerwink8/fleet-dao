@@ -4,10 +4,8 @@
 // 用假的钟和假的 setTimeout，不真等。
 import { closeInterruptedScheduleRuns, registerScheduledJobs, startScheduleRun } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS } from '@fleet-dao/db/testing';
-import { WorkflowExecutionAlreadyStartedError } from '@temporalio/client';
 import { describe, expect, it } from 'vitest';
 import type { EngineJobs } from '../src/activities.ts';
-import { CANARY_RUN_TIMEOUT_MINUTES, type CanaryDeps } from '../src/jobs/canary.ts';
 import { engineTimerJobs } from '../src/jobs/engine-timers.ts';
 import {
   latestSlot,
@@ -211,7 +209,7 @@ describe('进程内定时器（startTimers）', () => {
       expect((await runStarts(new Date(T0 + 9 * MIN))).calls).toBe(0);
     });
 
-    it('停得太久（最近一格离现在超过补跑窗口，比如巡检只补一小时内的）：不补，等下一格', async () => {
+    it('停得太久（最近一格离现在超过补跑窗口，补跑窗口给得比一格短的）：不补，等下一格', async () => {
       const f = fakeHost(T0 + 3 * 60 * MIN + 30 * MIN, async () => new Date(T0));
       const calls = { n: 0 };
       startTimers(
@@ -286,18 +284,15 @@ describe('进程内定时器（startTimers）', () => {
       state: () => ({ on: false, why: 'never_set' }) as const,
     });
 
-    it('关着：run 不跑、recordSkipped 记一笔原因、onMasterSkip 做这一跳过的收尾', async () => {
+    it('关着：run 不跑、recordSkipped 记一笔原因', async () => {
       const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
-      const seen = { ran: 0, swept: 0, skipped: [] as string[] };
+      const seen = { ran: 0, skipped: [] as string[] };
       startTimers(
         [
           job({
             needsMaster: true,
             run: async () => {
               seen.ran += 1;
-            },
-            onMasterSkip: async () => {
-              seen.swept += 1;
             },
           }),
         ],
@@ -309,43 +304,19 @@ describe('进程内定时器（startTimers）', () => {
       );
       await f.advanceTo(T0 + 8 * MIN);
       expect(seen.ran).toBe(0);
-      expect(seen.swept).toBe(2);
       expect(seen.skipped).toHaveLength(2);
       expect(seen.skipped[0]).toContain('总开关');
     });
 
-    it('【故意造出的失败】onMasterSkip 抛了：只记 error 日志，不停掉定时，下一格照常跳', async () => {
+    it('开着：run 照跑、不记跳过', async () => {
       const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
-      const seen = { skipped: 0 };
-      startTimers(
-        [
-          job({
-            needsMaster: true,
-            run: async () => {},
-            onMasterSkip: async () => {
-              throw new Error('收尾没做成（测试故意造的）');
-            },
-          }),
-        ],
-        { ...f.host, master: offMaster(), recordSkipped: async () => void seen.skipped++ },
-      );
-      await f.advanceTo(T0 + 13 * MIN);
-      expect(seen.skipped).toBe(3);
-      expect(f.logs.filter((l) => l.startsWith('error:') && l.includes('收尾没做成'))).toHaveLength(3);
-    });
-
-    it('开着：不碰 onMasterSkip，run 照跑', async () => {
-      const f = fakeHost(T0 + 1 * MIN, async () => new Date(T0));
-      const seen = { ran: 0, swept: 0, skipped: 0 };
+      const seen = { ran: 0, skipped: 0 };
       startTimers(
         [
           job({
             needsMaster: true,
             run: async () => {
               seen.ran += 1;
-            },
-            onMasterSkip: async () => {
-              seen.swept += 1;
             },
           }),
         ],
@@ -356,12 +327,12 @@ describe('进程内定时器（startTimers）', () => {
         },
       );
       await f.advanceTo(T0 + 8 * MIN);
-      expect(seen).toEqual({ ran: 2, swept: 0, skipped: 0 });
+      expect(seen).toEqual({ ran: 2, skipped: 0 });
     });
   });
 });
 
-describe('14 个定时任务的登记（engineTimerJobs）', () => {
+describe('13 个定时任务的登记（engineTimerJobs）', () => {
   const never = () => {
     throw new Error('这里不该被叫');
   };
@@ -371,7 +342,6 @@ describe('14 个定时任务的登记（engineTimerJobs）', () => {
     quotaRead: never,
     carpoolWatch: never,
     hourlyReconcile: never,
-    canary: never,
     watchdog: never,
     intake: never,
     judgeSelfCheck: never,
@@ -381,37 +351,20 @@ describe('14 个定时任务的登记（engineTimerJobs）', () => {
     cliUpgrade: never,
     requestSweep: never,
   });
-  const start = vi_fn();
-  function vi_fn() {
-    const calls: { type: string; options: Record<string, unknown> }[] = [];
-    let error: unknown;
-    return {
-      calls,
-      failWith: (e: unknown) => {
-        error = e;
-      },
-      fn: async (type: string, options: Record<string, unknown>) => {
-        calls.push({ type, options });
-        if (error) throw error;
-        return { firstExecutionRunId: 'r' };
-      },
-    };
-  }
-  const client = { workflow: { start: start.fn, getHandle: () => ({}) } } as never;
+  const client = {} as never;
   const jobs = () => engineTimerJobs({ jobs: fakeJobs(), client, taskQueue: 'fleet' });
 
   it('和登记表（scheduled_jobs）一一对得上、顺序一样', () => {
     expect(jobs().map((j) => j.id)).toEqual(ENGINE_JOBS.map((j) => j.id));
   });
 
-  it('格子：对账 15、探针 15 错 7、读额度 15 错 4、拼车盯读每分钟、每小时对账 60 错 41、巡检 6 小时错 26、看门狗 5 错 4、拉单 5 错 3、判断题自检 30 错 17、耗时表每周一 06:00（北京时间）、用量补记 5 错 2、命令行工具版本 60 错 11、命令行工具升级 30 错 6、需求整理 60 错 23', () => {
+  it('格子：对账 15、探针 15 错 7、读额度 15 错 4、拼车盯读每分钟、每小时对账 60 错 41、看门狗 5 错 4、拉单 5 错 3、判断题自检 30 错 17、耗时表每周一 06:00（北京时间）、用量补记 5 错 2、命令行工具版本 60 错 11、命令行工具升级 30 错 6、需求整理 60 错 23', () => {
     expect(jobs().map((j) => [j.id, j.everyMinutes, j.offsetMinutes ?? 0])).toEqual([
       ['github-reconcile', 15, 0],
       ['route-probe', 15, 7],
       ['quota-read', 15, 4],
       ['carpool-watch', 1, 0],
       ['hourly-reconcile', 60, 41],
-      ['canary', 360, 26],
       ['watchdog', 5, 4],
       ['intake', 5, 3],
       ['judge-self-check', 30, 17],
@@ -423,13 +376,11 @@ describe('14 个定时任务的登记（engineTimerJobs）', () => {
     ]);
   });
 
-  it('补跑窗口：都是一格（停机一阵再起来只补最近一轮）；巡检例外，错过的那一轮一小时内补上', () => {
+  it('补跑窗口：都是一格（停机一阵再起来只补最近一轮）', () => {
     for (const j of jobs()) {
-      expect(j.catchupMinutes, j.id).toBe(j.id === 'canary' ? 60 : j.everyMinutes);
+      expect(j.catchupMinutes, j.id).toBe(j.everyMinutes);
       // 耗时表要下日志，超时线是 60 分钟；其余仍是原来的 15 分钟
       expect(j.overdueMinutes, j.id).toBe(j.id === 'ci-timings' ? 60 : 15);
-      // 起来补记没收尾记录：巡检按工作流时限，其余按这一轮的工作上限（overdueMinutes）
-      expect(j.abandonAfterMinutes, j.id).toBe(j.id === 'canary' ? CANARY_RUN_TIMEOUT_MINUTES : undefined);
     }
   });
 
@@ -440,62 +391,10 @@ describe('14 个定时任务的登记（engineTimerJobs）', () => {
       expect(() => engineTimerJobs({ jobs: j, client, taskQueue: 'fleet' }), name).toThrow(name);
     }
   });
-
-  it('巡检这一轮只起工作流：固定编号 canary、任务队列照引擎的、一轮最长 5.5 小时', async () => {
-    const canary = jobs().find((j) => j.id === 'canary');
-    await canary?.run();
-    expect(start.calls).toHaveLength(1);
-    expect(start.calls[0]?.type).toBe('canaryWorkflow');
-    expect(start.calls[0]?.options).toMatchObject({
-      workflowId: 'canary',
-      taskQueue: 'fleet',
-      workflowRunTimeout: '330 minutes',
-      workflowIdConflictPolicy: 'FAIL',
-    });
-  });
-
-  it('巡检已经有一轮在跑：起第二条被 Temporal 拒掉，这一轮跳过、不报错（两轮叠着跑会在巡检仓里抢同一个文件）', async () => {
-    start.failWith(new WorkflowExecutionAlreadyStartedError('already', 'canary', 'canaryWorkflow'));
-    const canary = jobs().find((j) => j.id === 'canary');
-    await expect(canary?.run()).resolves.toBeUndefined();
-  });
-
-  it('【故意造出的失败】巡检起的时候连不上 Temporal：原样抛出（定时器记日志、下一格再来），不当成「已经有一轮在跑」', async () => {
-    start.failWith(new Error('14 UNAVAILABLE'));
-    const canary = jobs().find((j) => j.id === 'canary');
-    await expect(canary?.run()).rejects.toThrow('UNAVAILABLE');
-  });
-
-  it('巡检的 onMasterSkip（#1141）：总开关关着跳过时，用真端口装的依赖收前面断轮留下的东西（sweepCanaryLeftovers）', async () => {
-    const swept: string[] = [];
-    const j = fakeJobs();
-    j.canary = () =>
-      ({
-        repo: { owner: 'acme', name: 'canary' },
-        runs: { start: async () => 1, finish: async () => {}, closeInterrupted: async () => [] },
-        record: {
-          start: async () => 1,
-          progress: async () => true,
-          finish: async () => 'ok',
-          leftovers: async () => [],
-          abandon: async () => [],
-          cleaned: async () => {},
-        },
-        alerts: { raise: async () => {}, resolve: async (why: string) => void swept.push(`resolve:${why}`) },
-        now: () => new Date(),
-        log: () => {},
-      }) as unknown as CanaryDeps;
-    const canaryTimer = engineTimerJobs({ jobs: j, client, taskQueue: 'fleet' }).find(
-      (x) => x.id === 'canary',
-    );
-    await canaryTimer?.onMasterSkip?.();
-    expect(swept).toHaveLength(1);
-    expect(swept[0]).toContain('总开关');
-  });
 });
 
 describe('起来时补记进程中断没收尾的 schedule_runs（startEngineTimers，#1522）', () => {
-  it('先按一轮工作上限补记，再起定时器；巡检用工作流时限，不用 15 分钟', async () => {
+  it('先按一轮工作上限补记，再起定时器', async () => {
     const f = fakeHost(T0);
     const seen: { id: string; startedBefore: number }[] = [];
     const order: string[] = [];
@@ -510,11 +409,10 @@ describe('起来时补记进程中断没收尾的 schedule_runs（startEngineTim
           },
         }),
         job({
-          id: 'canary',
-          overdueMinutes: 15,
-          abandonAfterMinutes: 330,
+          id: 'intake',
+          overdueMinutes: 30,
           run: async () => {
-            order.push('run:canary');
+            order.push('run:intake');
           },
         }),
       ],
@@ -531,11 +429,11 @@ describe('起来时补记进程中断没收尾的 schedule_runs（startEngineTim
     expect(why).toContain('没收尾');
     expect(seen).toEqual([
       { id: 'route-probe', startedBefore: T0 - 15 * MIN },
-      { id: 'canary', startedBefore: T0 - 330 * MIN },
+      { id: 'intake', startedBefore: T0 - 30 * MIN },
     ]);
     expect(f.logs).toEqual(['info:进程中断没收尾，启动时补记了 3 条定时任务记录：8029、4596、2951']);
     expect(order[0]).toBe('close');
-    expect(order).toEqual(['close', 'run:route-probe', 'run:canary']);
+    expect(order).toEqual(['close', 'run:route-probe', 'run:intake']);
   });
 
   it(

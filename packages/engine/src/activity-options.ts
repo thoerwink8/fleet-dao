@@ -2,8 +2,6 @@
 // 没有心跳，工人一重启丢掉的活动要干等 74 分钟才判死）。工作流按这张表给每个活动配代理，不许在调用处另写。
 
 import type { ActivityOptions, RetryPolicy } from '@temporalio/common';
-import type { CanaryInput } from './contract.ts';
-import type { CanaryState, CanaryStepResult } from './jobs/canary.ts';
 import type { Limits } from './limits.ts';
 import type { EnginePorts } from './ports.ts';
 import type { TaskBriefResult } from './runner/task-brief.ts';
@@ -19,6 +17,8 @@ import {
   type MergeNowInput,
   type MergeNowResult,
   type MergeWait,
+  type PlanSegmentResumeInput,
+  type PlanSegmentResumeResult,
   type ProbeAssignedInput,
   type ProbeAssignedResult,
   type ReadCiPolicyInput,
@@ -39,13 +39,6 @@ type PortActivities = {
 
 /** 工作流看到的活动：端口（EnginePorts）里的，加上引擎自己的。 */
 export type EngineActivities = PortActivities & {
-  /** 引擎自己的活动：全流程巡检开一张单（jobs/canary.ts 的 openCanaryRound）；没跑成的已经记进库，回的是结论。 */
-  canaryOpen(input: CanaryInput): Promise<CanaryStepResult>;
-  /**
-   * 引擎自己的活动：全流程巡检看一回、判、记（jobs/canary.ts 的 checkCanaryRound）。状态包在 state 里：活动的计时按输入最外层的
-   * taskId 记到任务上，巡检自己看的这几下不能记成巡检单的每步耗时（那是记账那一步要核的）。
-   */
-  canaryCheck(input: { schemaVersion: 1; state: CanaryState }): Promise<CanaryStepResult>;
   // —— 任务工作流（task-contract.ts；#632）要的活动：现读单子、起一次无头动手会话、读交付、冷验收、合并这几步 ——
   /** 现读单子和它指着的需求文档，拼出动手的交代（runner/task-brief.ts）。单子读不到抛错；缺栏回 problems。 */
   readTaskBrief(input: ReadTaskBriefInput): Promise<TaskBriefResult>;
@@ -65,6 +58,8 @@ export type EngineActivities = PortActivities & {
   readCiPolicy(input: ReadCiPolicyInput): Promise<ReadCiPolicyResult>;
   /** 不强制 CI 的仓：直接合并这张 PR（不等检查）。 */
   mergeNow(input: MergeNowInput): Promise<MergeNowResult>;
+  /** 判这一段能不能续上一段的会话（决定 0088）：续不上回 new 加原因，不抛。 */
+  planSegmentResume(input: PlanSegmentResumeInput): Promise<PlanSegmentResumeResult>;
   /** 派单前对选定的这一条路由探一次（#1409）。没装探针报 JOB_NOT_CONFIGURED，不当成探通。 */
   probeAssignedRoute(input: ProbeAssignedInput): Promise<ProbeAssignedResult>;
   /** 派前探测不通、这轮不用这条路由：放掉选路预占的名额。没装放名额报 JOB_NOT_CONFIGURED，不装作放过。 */
@@ -77,7 +72,7 @@ export type ActivityName = keyof EngineActivities;
  * quick：毫秒到秒级的记账、选路由、报警——30 秒，丢了 1 分钟内重来。
  * git：推分支、开 PR、合并这类几秒到几分钟的——5 分钟，幂等，重试 3 次。
  * setup / ci：长活动——限时按活来，必须心跳，心跳超时 = 工人丢了。
- * job：全流程巡检的开单、看一回，以及派单前探测——10 分钟，不重试：开单没成的已经记进库、回的是结论，看一回连着没成的由工作流数着（CANARY_CHECK_FAILURE_LIMIT）。
+ * job：派单前探测——10 分钟，不重试。
  * 派前探测自己回通或不通，不靠这一层再探一遍（Claude 一次加上隔 20 秒重试，放不进选路那一档 30 秒）。
  * 别的定时任务（对账、探针、读额度、看门狗……）不是活动了（#1072）：引擎的定时器直接跑，一轮的限时在 jobs/engine-timers.ts。
  * segment：一次无头会话（动手、冷验收）——限时是会话最长时间加一刻钟收尾，必须心跳；只试一次：会话贵又不幂等，
@@ -99,8 +94,6 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   closeIssue: 'git',
   createWorktree: 'setup',
   waitCi: 'ci',
-  canaryOpen: 'job',
-  canaryCheck: 'job',
   probeAssignedRoute: 'job',
   releaseReservation: 'quick',
   readTaskBrief: 'git',
@@ -112,6 +105,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   waitMerged: 'poll',
   readCiPolicy: 'quick',
   mergeNow: 'git',
+  planSegmentResume: 'quick',
 };
 
 /** quick 一档（含排进合并队列、撤出）一次尝试的限时。合并队列的空闲收工时长不能比它短（limits.ts 的下限）。 */

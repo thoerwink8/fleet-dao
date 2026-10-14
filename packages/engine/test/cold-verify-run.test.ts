@@ -48,7 +48,7 @@ function sources(over: Partial<Parameters<typeof mkSources>[0]> = {}) {
 }
 
 function mkSources(o: {
-  pr?: () => Promise<{ head: string; baseSha: string; branch: string }>;
+  pr?: () => Promise<{ head: string; baseSha: string; branch: string; body?: string }>;
   diff?: () => Promise<{ diffText: string; changedFiles: string[] }>;
   spec?: () => Promise<ColdVerifySpec>;
   authors?: () => Promise<string[]>;
@@ -662,5 +662,46 @@ describe('runColdVerifyForPr：单子点名的文件从引擎镜像读', () => {
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('runColdVerifyForPr：PR 正文和测试输出交给冷调用（决定 0093）', () => {
+  async function inputWith(over: Parameters<typeof mkSources>[0]) {
+    const seen: VerifierInvokeInput[] = [];
+    await runColdVerifyForPr(42, {
+      sources: sources(over),
+      invoke: async (input) => {
+        seen.push(input);
+        return { pass: true, problems: [], round: input.round } as VerifierInvokeOutput;
+      },
+      oneShot: ONE_SHOT,
+      chooseModelForFamily: PICK_CLAUDE,
+      cwd: 'C:/work/x',
+    });
+    return seen[0];
+  }
+
+  it('PR 正文、测试输出有就带上', async () => {
+    const input = await inputWith({
+      pr: async () => ({ head: HEAD, baseSha: BASE, branch: 'feat/x', body: '做了 A。' }),
+      spec: async () => ({
+        taskId: TASK_ID,
+        issueNumber: 12,
+        what: '要 A',
+        howToFinish: ['代码里有 A'],
+        testOutput: 'Tests  3 passed (3)',
+      }),
+    });
+    expect(input?.prBody).toBe('做了 A。');
+    expect(input?.testOutput).toBe('Tests  3 passed (3)');
+  });
+
+  it('PR 正文是空串、没有测试输出：都不带', async () => {
+    const input = await inputWith({
+      pr: async () => ({ head: HEAD, baseSha: BASE, branch: 'feat/x', body: '  ' }),
+    });
+    expect(input).toBeDefined();
+    expect(input?.prBody).toBeUndefined();
+    expect(input?.testOutput).toBeUndefined();
   });
 });

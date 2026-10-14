@@ -12,6 +12,10 @@
 // - 派之前再探一次选定的那条（#1409，patched('dispatch-probe')）：不通就先放掉这次预占（patched('dispatch-probe-release')，
 //   没进起会话，不能占着池），再换下一条，每轮最多探 3 条；都探不通或都被挡就停下，不起会话。
 //   没提交避让滤光之后改派原来的那条，也先探再派。老历史没有这个标记，不探、不改选路之后的那一步。
+// - 暂停后继续，按会话号续上原会话（决定 0088，patched('segment-resume')）：hard 暂停取消的那一段记下起跑时刻和工作树，
+//   继续后选好路由先问 planSegmentResume（找那一段在 runs 里记的会话号，比执行方式、账号池、会话用户）；同一棵树、能续就带
+//   resumeSessionId 起，提示词只补被打断的原因。续不上（没会话号、换了执行方式或会话用户或树、没查成）照原来开新会话带
+//   interrupted，原因写进任务进度。判一次就清掉：续起来没跑成的，下一次开新会话。切号、「现在就换」停下的这次不续。
 
 import { isCancellation, patched } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -26,7 +30,7 @@ import {
   UI_PURPOSE,
 } from '../task-contract.ts';
 import { judgeImplementUiWork, UI_UNRECOGNIZED_NOTE, type UiJudgement } from '../ui-work.ts';
-import { failureOf } from './kit.ts';
+import { failureOf, iso } from './kit.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import {
   Abandoned,
@@ -41,7 +45,9 @@ import {
   NO_AVOID,
   NO_OTHER_ROUTE,
   PausedInterrupt,
+  RESUME_STARTED_SLACK_MS,
   RepinInterrupt,
+  type ResumeFrom,
   widen,
   withDispatchProbeNote,
   ZERO,
@@ -85,10 +91,26 @@ export async function writeSession(
     }
     rt.families.add(route.family);
     rt.attemptSeq += 1;
+    // 续会话（决定 0088）：上一段留了要续的记号才问；判一次就清掉
+    let resumeSessionId: string | undefined;
+    let resumeNote = '';
+    const from = rt.resumeFrom;
+    if (from) {
+      rt.resumeFrom = null;
+      const plan = await planResume(rt, from, route, wt.path);
+      if (plan.kind === 'resume') {
+        resumeSessionId = plan.sessionId;
+        resumeNote = '；续上一段的会话';
+      } else {
+        resumeNote = `；没续上会话（${plan.reason}），开新会话`;
+      }
+    }
     await rt.advance(
       'implement',
-      `第 ${rt.round} 轮：${route.modelId} 动手${unrecognized}${picked.probeNote ? `；${picked.probeNote}` : ''}`,
+      `第 ${rt.round} 轮：${route.modelId} 动手${unrecognized}${resumeNote}${picked.probeNote ? `；${picked.probeNote}` : ''}`,
     );
+    // 这一段的起跑时刻：被暂停取消时拿不到执行编号，续会话凭它去库里找这一段
+    const attemptAt = Date.now();
     let evidence: SegmentEvidence | null = null;
     let infra: unknown = null;
     try {
@@ -109,6 +131,7 @@ export async function writeSession(
             feedback: rt.feedback,
             timeoutMinutes: SEGMENT_MINUTES,
             ...(interrupted ? { interrupted } : {}),
+            ...(resumeSessionId ? { resumeSessionId } : {}),
             // 只记账（runs.pr_number，#216）：第一轮会话交付之后才开 PR，这时还没有
             ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
           }),
@@ -125,6 +148,13 @@ export async function writeSession(
         // 被人暂停停下的这一段（借 org_switch 的位置，task-contract.ts 的 PAUSED_BY_HUMAN）：不算失败、不记账、不换模型；
         // 回到循环头停在检查点，继续后在原分支原树上重跑，提示词带上被停下的原因
         interrupted = rt.pauseNote(error.command);
+        // 继续后按会话号续上这一段（决定 0088）。老历史没有这个标记：照旧开新会话
+        if (patched('segment-resume')) {
+          rt.resumeFrom = {
+            previous: { startedAfter: iso(attemptAt - RESUME_STARTED_SLACK_MS) },
+            worktreePath: wt.path,
+          };
+        }
         continue;
       }
       if (error instanceof RepinInterrupt) {
@@ -193,6 +223,33 @@ export async function writeSession(
       stick = undefined;
       previousMessage = undefined;
     }
+  }
+}
+
+/**
+ * 这一段能不能续上一段的会话：换了工作树不续（会话记录按目录存）；别的交给 planSegmentResume 现查。
+ * 查不成（活动没装、库一时不通）不挂起、不重试：退回开新会话，原因照写。放弃、叫停照常往外抛。
+ */
+async function planResume(
+  rt: TaskRuntime,
+  from: ResumeFrom,
+  route: RouteChoice,
+  worktreePath: string,
+): Promise<{ kind: 'resume'; sessionId: string } | { kind: 'new'; reason: string }> {
+  if (from.worktreePath !== worktreePath) return { kind: 'new', reason: '换了工作树' };
+  try {
+    const plan = await rt.cancellable(() =>
+      rt.acts.planSegmentResume({
+        schemaVersion: 1,
+        taskId: rt.input.taskId,
+        routeId: route.routeId,
+        previous: from.previous,
+      }),
+    );
+    return plan.kind === 'resume' ? { kind: 'resume', sessionId: plan.sessionId } : plan;
+  } catch (error) {
+    if (error instanceof Abandoned || isCancellation(error)) throw error;
+    return { kind: 'new', reason: `续会话没查成：${failureOf(error, 'planSegmentResume').message}` };
   }
 }
 

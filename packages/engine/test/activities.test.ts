@@ -39,14 +39,7 @@ describe('活动外壳', () => {
     const activities = createActivities(createFakeWorld().ports);
     expect(Object.keys(activities).sort()).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
     expect(
-      [
-        ...PORT_NAMES,
-        'canaryOpen',
-        'canaryCheck',
-        'probeAssignedRoute',
-        'releaseReservation',
-        ...TASK_ACTIVITY_NAMES,
-      ].sort(),
+      [...PORT_NAMES, 'probeAssignedRoute', 'releaseReservation', ...TASK_ACTIVITY_NAMES].sort(),
     ).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
   });
 

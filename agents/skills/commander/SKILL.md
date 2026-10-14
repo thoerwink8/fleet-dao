@@ -18,7 +18,7 @@ description: 当指挥官时读：和创始人讨论需求、写成单和验收�
 - 用 Agent 子代理，后台跑。三个角色，定义在 `agents/subagents/`：`Explore` 斥候（只读：检索、验证、跑测试读结果）、`general-purpose` 工人（写代码、开 PR，界面活也归它）、`Plan` 设计（只读：方案、疑难根因、评审）。默认不传 `model`，难的才升档（斥候 `"sonnet"`、工人 `"opus"`）。主会话在 Fable 上时别用 `fork`，它总跟主会话同一个模型。
 - 交代写清：要改什么、怎么算做完、范围和别碰什么、跑哪些测试、这个仓的 PR 规矩、工作树绝对路径。据斥候的结论动手前，自己用一条命令抽查。
 - 派完、手上没有下一刀就收这一轮；完成通知会叫回，给他报一行再派下一件。队列＝当前版本里程碑说明里的先后，减去在做的和等人拍的。子代理停住不动：`SendMessage` 问它卡在哪；真卡死就起新的，接着它的工作树干。
-- 无人值守：`node ~/.fleet-dao/hooks/unattended.mjs on` 之后收尾钩子不让这一轮结束。每个完成通知 `pnpm progress:note` 一句、再派下一件；队列空且子代理都收口跑 `unattended.mjs done "做完了什么"`，要他拍跑 `needs-you`，他说停跑 `off`。监控用 `node $S/patrol.mjs`，只看最后一行：`VERDICT: OK` 不叫模型，`ALERT` 才派斥候，`BROKEN` 亲自跑 `france.mjs`。
+- 无人值守：`node ~/.fleet-dao/hooks/unattended.mjs on` 之后，有子代理、后台命令、监视在跑时这一轮照常结束，等完成通知叫回；什么都没在跑、队列还有活时收尾钩子把这一轮挡回来（连挡 3 次放行一次，决定 0093）。每个完成通知 `pnpm progress:note` 一句、再派下一件；队列空且子代理都收口跑 `unattended.mjs done "做完了什么"`，要他拍跑 `needs-you`，他说停跑 `off`。监控用 `node $S/patrol.mjs`，只看最后一行：`VERDICT: OK` 不叫模型，`ALERT` 才派斥候，`BROKEN` 亲自跑 `france.mjs`。
 
 ## 发版
 平时不用管：主线头 CI 绿、满 1 小时、没有发版在走，法国自己发，发前暂停在跑的会话、发完续上；没发的原因看 `release.sh --check`。要马上发才用 `node $S/release-train.mjs start --sha <主线提交> --founder-ok "<他这一次的原话>"`（发版是对外发布），`status` 看进度、`abort` 撤暂停；预检拦在「主线 CI 不是绿的」就先修主线。

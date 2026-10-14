@@ -266,14 +266,16 @@ describe('one-shot.ts', () => {
     },
   );
 
-  it('不许续会话：拿 resumeSessionId 来当场抛', async () => {
-    const { deps, cleanup } = await fakeDeps({
+  it('续会话按入参：给了 resumeSessionId 原样交给 Spawner；不给、给空串都开新会话', async () => {
+    const { deps, calls, cleanup } = await fakeDeps({
       scripted: { exitCode: 0, stdout: 'x', stderr: '', killed: false },
     });
     try {
-      await expect(runOneShot({ ...BASE_INPUT, resumeSessionId: 'abc-123' }, deps)).rejects.toThrow(
-        /RESUME_FORBIDDEN|不许续会话/,
-      );
+      const resumed = await runOneShot({ ...BASE_INPUT, runId: 'run-r1', resumeSessionId: 'abc-123' }, deps);
+      expect(resumed.outcome).toBe('done');
+      await runOneShot({ ...BASE_INPUT, runId: 'run-r2' }, deps);
+      await runOneShot({ ...BASE_INPUT, runId: 'run-r3', resumeSessionId: '  ' }, deps);
+      expect(calls.map((c) => c.resumeSessionId)).toEqual(['abc-123', undefined, undefined]);
     } finally {
       await cleanup();
     }

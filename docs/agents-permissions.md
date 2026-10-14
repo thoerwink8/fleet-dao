@@ -142,8 +142,8 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
 - **原则：尽量宽松、只放不收**（创始人 2026-09-30）。他有时用 Mirasim 这类图形界面起 CLI，没法切模式、也没人点确认，凡是要问的都会卡死。所以 Claude **仓里**保持 `defaultMode: auto`，`Bash`、`PowerShell`、各工具和常用 MCP 服务整个放开，`deny` 是空的，早先那 9 条拒绝（`grep`、`cat`、`head`、`tail`、`find`、`rg`、`ag`、`ack`、`Select-String`）在 `retiredDeny` 里，各机器同步时摘掉。以后要收紧，先找创始人。
 - **仓里的 `auto` 和机器自己的 `bypassPermissions` 不冲突**（创始人 2026-10-01 下午）：仓里仍不许写 `bypassPermissions`（会推给无人值守的机器），但机器上自己设成 `bypassPermissions` 的**保留、只报不改**（上面「`defaultMode` 与机器上的 `bypassPermissions`」一节）。他自己那台开着 bypass，同步不会把它改回 `auto`。
 - **Kimi 的默认模式用 `auto`（不打断、自动判断）**，不用 `yolo`（日常自动、危险的仍问）：`yolo` 遇到要问的会在没人点的界面里卡住。
-- **本仓的 PreToolUse 钩子不受影响**：它拦「读到密钥文件、口令值」「打印进程命令行不打码」，不属于权限清单，照旧生效。
-- **打印进程命令行时要把密钥打码**（2026-10-02 加，创始人拍的；#2046、决定 0089 起 Claude Code 里自动接）：进程的整条命令行是公开的（Linux 的 `/proc/<pid>/cmdline`、Windows 的 `Win32_Process.CommandLine`），口令当参数交给别的进程之后就躺在那里——`ps -ef`、`wmic process`、`Get-CimInstance Win32_Process` 这类「看现在有哪些进程」的命令会把它们整段打出来。现在的做法：在 Claude Code 里，整条命令只是看进程、过滤文字的，钩子（`~/.fleet-dao/hooks/pretool.mjs`）自动把命令改写成后面接 redactor（`~/.fleet-dao/hooks/redact-secrets.mjs`，随钩子一起装）再放行，会话不用自己记得接管道；看不清的写法（管道里有别的东西、认不出的包装）和别家的 CLI 仍然拦下，提示照下面的写法自己接上：
+- **本仓的 PreToolUse 钩子不受影响**：它拦「读到密钥文件、口令值」「打印进程命令行不打码」，不属于权限清单，照旧生效。只是提到密钥路径的不拦（决定 0093）：grep、rg、Select-String 的搜索模式，一段话（progress:note、git commit -m、SQL），写进文档的 heredoc，脚本里的属性名，ls / stat / test 只看元数据；读内容、拿 `$( )` 先执行、交给 `node -`、`python -` 跑的照拦。Claude Code 里 timeout 写得超过 60 秒的 Bash、PowerShell 由它改成后台跑（加 `run_in_background`，改写后照常走权限确认），不拦。
+- **打印进程命令行时要把密钥打码**（2026-10-02 加，创始人拍的；#2046、决定 0089 起 Claude Code 里自动接）：进程的整条命令行是公开的（Linux 的 `/proc/<pid>/cmdline`、Windows 的 `Win32_Process.CommandLine`），口令当参数交给别的进程之后就躺在那里——`ps -ef`、`wmic process`、`Get-CimInstance Win32_Process` 这类「看现在有哪些进程」的命令会把它们整段打出来。现在的做法：在 Claude Code 里，整条命令只是看进程、过滤文字的，钩子（`~/.fleet-dao/hooks/pretool.mjs`）自动把命令改写成后面接 redactor（`~/.fleet-dao/hooks/redact-secrets.mjs`，随钩子一起装）再放行，会话不用自己记得接管道；夹了别的命令、看不清的写法（管道里有别的东西、认不出的包装、ssh 那头）也改写接上，但不替它跳过权限确认（决定 0093）；往文件里写的（> 文件、tee、Out-File，写进文件的那份不经过 redactor）和别家的 CLI 仍然拦下，提示照下面的写法自己接上：
 
   ```
   ps -ef | node "$HOME/.fleet-dao/hooks/redact-secrets.mjs"

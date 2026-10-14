@@ -6,7 +6,9 @@
 //   退出状态和工作树里的提交。规矩里的每一条都对应引擎后面做的一步：只读提交（所以没提交的改动不算）、自己推分支开 PR（所以不许推、
 //   不许切分支）。需求在单子里、结果在 PR 里（#654）：不要求会话写 需求.md、结果.md。
 // - 返工意见原样带进来（CI 失败日志、验收问题表、没提交）：按条编号，每条超长截断（日志动辄几万字）；一条也没有就不出这一节。
-// - 上一次被切号停下的（#59）多一节：树里留着它的提交和改动，告诉新会话接着干（一次性会话没有续会话，这是唯一的交接）。
+// - 上一次被切号、暂停停下的（#59、#820）多一节：树里留着它的提交和改动，告诉新会话接着干。
+// - 续上一段的会话（resumed，决定 0088）：会话里已经有整张单和前面的过程，提示词只补被打断的原因和返工意见，不重述交代
+//   （重述等于让它把整张单再读一遍，返工轮的缓存读和首轮一样多）。
 
 import { type ManualBrief, renderBrief } from './brief.ts';
 
@@ -20,6 +22,8 @@ export interface SegmentPromptInput {
   feedback: readonly string[];
   /** 这一段上一次跑到一半被停下了（切号，#59）：为什么停的那一句；没被停过的不给。 */
   interrupted?: string;
+  /** 续的是上一段的会话：只出被打断的原因和返工意见（renderResumePrompt）。 */
+  resumed?: boolean;
   /** 已废（子代理提示整条链路已删）：只为 task-segment.ts 还在传它而留，不读；等 #1972 合并后随那处一起删。 */
   subagentHint?: boolean;
 }
@@ -31,7 +35,36 @@ function clip(text: string): string {
     : `${t.slice(0, FEEDBACK_ITEM_MAX)}\n……（后面还有 ${t.length - FEEDBACK_ITEM_MAX} 个字，已截断）`;
 }
 
+function feedbackSection(feedback: readonly string[], title: string): string[] {
+  const items = feedback.map((f) => f.trim()).filter(Boolean);
+  if (items.length === 0) return [];
+  return ['', title, ...items.map((f, i) => `${i + 1}. ${clip(f)}`)];
+}
+
+/**
+ * 续上一段会话时的提示词：会话里已经有整张单、怎么干的规矩和前面的过程，这里只补这一次为什么接着干、要改什么。
+ * 被打断的说一句原因；返工意见按条给。两样都没有也给一句「接着做」，不交空提示词。
+ */
+export function renderResumePrompt(input: { interrupted?: string; feedback: readonly string[] }): string {
+  const interrupted = input.interrupted?.trim();
+  const out = [
+    interrupted
+      ? `刚才这个会话被引擎打断了（${clip(interrupted)}）。分支和工作树都没变，先看 git status、git log，接着刚才的进度往下做，别从头重来。`
+      : '接着这个会话往下做：分支和工作树都没变，单子和规矩照前面的。',
+    ...feedbackSection(input.feedback, '## 这一轮要改的（照着改，改完才算做完）'),
+    '',
+    '改完照旧 git add、git commit 提交，不推送、不开 PR；最后一条回复逐条一行回验收条，再加一行欠什么。',
+  ];
+  return out.join('\n');
+}
+
 export function renderSegmentPrompt(input: SegmentPromptInput): string {
+  if (input.resumed) {
+    return renderResumePrompt({
+      ...(input.interrupted ? { interrupted: input.interrupted } : {}),
+      feedback: input.feedback,
+    });
+  }
   const { brief, specDir, feedback } = input;
   const out = [
     renderBrief(brief),
@@ -55,10 +88,6 @@ export function renderSegmentPrompt(input: SegmentPromptInput): string {
       `上一次的会话被引擎停下（${clip(interrupted)}），这一次在同一个分支、同一棵工作树上接着干：树里可能已经有它的提交和没提交的改动。先看 git status、git log，接着它往下做，别从头重来，也别把那些改动当成别人的丢掉。`,
     );
   }
-  const items = feedback.map((f) => f.trim()).filter(Boolean);
-  if (items.length > 0) {
-    out.push('', '## 上几轮留下的返工意见（照着改，改完才算做完）');
-    out.push(...items.map((f, i) => `${i + 1}. ${clip(f)}`));
-  }
+  out.push(...feedbackSection(feedback, '## 上几轮留下的返工意见（照着改，改完才算做完）'));
   return out.join('\n');
 }

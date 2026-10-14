@@ -55,7 +55,7 @@
 - 装机：ops 第四节（怎么跑装机脚本）。
 - 发版：`deploy/release.sh`，见 ops 第九节（发布应用）。
 - 开发：`pnpm install`，Node 和 pnpm 的版本钉在 `package.json`；给 AI 的约定在 [AGENTS.md](AGENTS.md)。
-- 跑检查：本机推前只跑改动影响到的测试（`pnpm test:changed`，和 origin/main 比、按 CI 那套判法选包，引擎的会话交活只认它；它判出要全跑时本机不跑、退出码 3，打出改到的包各自单跑的命令 `pnpm exec vitest run packages/<包>/`，真要在本机全跑带 `--all`）和格式、类型；`pnpm check` 是全量（格式、类型、全部测试、卫生检查；文档里的路径、章节指针也在里面查），本机一般不跑。CI 按改动跑受影响的部分、并行跑，main 上全量（`.github/workflows/ci.yml`，见 design 第五节「CI 按改动跑」）；想先看一个分支 CI 会跑什么：`node packages/conventions/src/bin/ci-plan.ts`。
+- 跑检查：本机推前只跑改动影响到的测试（`pnpm test:changed`，和 origin/main 比、按 CI 那套判法选包，引擎的会话交活只认它；它判出要全跑时本机不跑、退出码 3，打出改到的包各自单跑的命令 `pnpm exec vitest run packages/<包>/`，真要在本机全跑带 `--all`）和格式、类型；`pnpm check` 默认 = 格式 + 类型 + 改到的测试（同 `pnpm test:changed`，相对 origin/main）+ 卫生检查，四样都跑完再判红，每样报耗时，任何一样没跑成都算红；`pnpm check --all` 才全量 vitest run（本机要 8 分钟以上，和 CI 重复，一般不跑）。CI 按改动跑受影响的部分、并行跑，main 上全量（`.github/workflows/ci.yml`，见 design 第五节「CI 按改动跑」）；想先看一个分支 CI 会跑什么：`node packages/conventions/src/bin/ci-plan.ts`。
 - 开单：`pnpm issue:new --kind 需求 --milestone v<N> --title "一句话" --body-file 正文.md`（未排期写 `--milestone 未排期`，母单加 `--mother`，子单加 `--parent <母单号>`），缺类别、里程碑，或正文里「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」有一节没写都不开；整份正文原样进 issue（没有 `--specs`，不再另存需求.md，#654）。
 - 关单：最后一个 PR 在「需求」栏下面另起一行写 `Closes #<号>`，合并时 GitHub 自己关。没有 PR 的收尾用 `pnpm issue:close <号>`：关成「完成」要有证据（合并了的 PR 提到它、或下面的子单都关了、或 `--note "做成了什么"`），没有就不关（退出码 1），子单还开着也不关；读不到 GitHub 报错不关（退出码 2）。见 design 第七节「关单要有证据」。
 - 欠账：`pnpm debt:check` 只看文件，查活文档里推后的话带着单号（debt.yml 在主线推送和每天跑，只报告、不挡合并，不读 GitHub；不在 PR 上跑）；加 `--live` 另读 GitHub，查挂的单号开没开着（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）。见 design 第七节「欠账不漏」。

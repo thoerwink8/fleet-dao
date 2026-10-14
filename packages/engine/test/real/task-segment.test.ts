@@ -309,6 +309,29 @@ describe('备树', { timeout: 60_000 }, () => {
     expect(r.specs[1]?.prompt).toContain('FAIL task.test.ts');
   });
 
+  it('续会话（决定 0088）：带了会话号就用 resume 起那个号，提示词只补被打断的原因和返工意见，不重述交代', async () => {
+    const r = rig({
+      driverRun: async (spec) => {
+        commitInTree(spec);
+        return report();
+      },
+    });
+    const got = await r.run(
+      r.input({
+        resumeSessionId: 'aaaaaaaa-1111-4222-8333-444444444444',
+        interrupted: '被人暂停（frank）：发版',
+        feedback: ['CI 红了：test (engine)'],
+      }),
+      ctx(),
+    );
+    expect(got.ok).toBe(true);
+    const spec = r.specs[0] as HostRunSpec;
+    expect(spec.session).toEqual({ mode: 'resume', id: 'aaaaaaaa-1111-4222-8333-444444444444' });
+    expect(spec.prompt).toContain('打断了（被人暂停（frank）：发版）');
+    expect(spec.prompt).toContain('CI 红了：test (engine)');
+    expect(spec.prompt).not.toContain('# 任务：给驾驶舱加状态');
+  });
+
   it('【故意造出的失败】起点不是完整提交号 / 路由用不了：抛 PortError（不重试），不建树、不起会话、不记 runs', async () => {
     const bad = rig();
     await expect(bad.run(bad.input({ baseSha: 'abc' }), ctx())).rejects.toMatchObject({

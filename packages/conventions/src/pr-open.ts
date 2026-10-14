@@ -1,8 +1,8 @@
 // 开 PR、挂自动合并收成一个必经命令（pnpm pr:open，全仓审查第 2 路清单 1 号）：最近 40 个 PR 里 9 个没挂自动合并、
 // CI 绿了闲着共 3993 秒，兜底的引擎又关着——挂不挂不再靠人记，开 PR 的这一步就判完、挂上。
 // - 没碰改标准路径（standard-paths.json）就当场 gh pr merge --auto --squash：CI 绿就合（#1114 起所有 PR 只看 CI）。
-// - 碰了改标准就不挂，打「人闸：改标准，等创始人同意」；带 --founder-approved 才挂（正文里要有一段含「原话」二字——
-//   贴着他的原话和时间；命令只查这两个字，不做更多猜测）。pnpm pr:open 的入口是 pr-compose.ts 的 prOpenCli：不给 --body-file
+// - 碰了改标准就不挂，打「人闸：改标准，等创始人同意」；带 --founder-approved 才挂（正文里要有「创始人原话」那一行——
+//   「」里是他的原话、括号里是时间，都不能空；认法是 pr-columns.ts 的 founderQuote，合并闸用同一个，开得出来的闸就认）。pnpm pr:open 的入口是 pr-compose.ts 的 prOpenCli：不给 --body-file
 //   时它生成正文（--founder-quote 生成那一段），再交给这里；这里的闸不管正文怎么来的。
 // - 草稿、带 --no-automerge 的不挂（工人领了改标准的活用后者）。
 // - 必挂单（#1052：37 个 PR 没一个挂单，v4 里程碑页上看不出进展）：正文「需求」栏里要读到 Closes #号 / Refs #号
@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { type Gh, judgePaths, listOf, loadPathLists, prFiles, reasonOf } from './pr-arm.ts';
-import { issueColumnRefs, withIssueColumn } from './pr-columns.ts';
+import { founderQuote, issueColumnRefs, withIssueColumn } from './pr-columns.ts';
 
 /**
  * 从 gh pr create 的输出里认 PR 号。gh 正常时最后一行是 PR 地址（…/pull/<N>）；输出里认不出 PR 号直接抛错——
@@ -46,7 +46,7 @@ export const PR_OPEN_USAGE = `用法：pnpm pr:open --title <标题> [--body-fil
                           并挂自动合并（等价于 --founder-approved 加手写那一段）；也能配 --body-file，这两段追加到正文末尾
   需求栏要能读到 Closes #号 / Refs #号：读不到、单不存在就不开；挂了单的 PR 顺手挂上那张单的里程碑。
   --no-issue 在 --body-file 下也能用；需求栏已经挂了单就不能再带
-  --founder-approved  改标准、创始人已经同意（自己写正文时用）：正文里要有一段贴着他的原话和时间（含「原话」二字）
+  --founder-approved  改标准、创始人已经同意（自己写正文时用）：正文里要有一行 **创始人原话**：「<原话>」（<时间>）
   --no-automerge      只开 PR、不挂自动合并`;
 
 /**
@@ -117,9 +117,9 @@ export function prOpen(argv: string[], deps: OpenDeps): number {
     return 1;
   }
   const founderApproved = values['founder-approved'] === true;
-  if (founderApproved && !body.includes('原话')) {
+  if (founderApproved && founderQuote(body) === undefined) {
     err(
-      '带了 --founder-approved，正文里却没有贴创始人原话的那一段（含「原话」二字，写明原话和时间）：什么也没做。',
+      '带了 --founder-approved，正文里却没有创始人原话那一行（写成 **创始人原话**：「<原话>」（<时间>），原话和时间都不能空；合并闸也照这个认）：什么也没做。',
     );
     return 1;
   }

@@ -280,6 +280,32 @@ export const CATALOG_NAMED_FAMILIES: readonly string[] = [
   ...new Set(Object.values(RULES_BY_CHANNEL).flatMap((rule) => rule.bases.map((base) => base.family))),
 ];
 
+/** 拆不出的模型 id（`渠道:原串`）里，原串开头认得出是哪家的那几个前缀。档位、后缀拆不出不要紧，族认得出就够冷验收用。 */
+const FAMILY_LEADS: readonly (readonly [RegExp, string])[] = [
+  [/^(?:claude|opus|sonnet|haiku|fable)(?:[-.\d]|$)/, 'claude'],
+  [/^gpt(?:[-.\d]|$)/, 'gpt'],
+  [/^grok(?:[-.\d]|$)/, 'grok'],
+  [/^gemini(?:[-.\d]|$)/, 'gemini'],
+  [/^kimi(?:[-./\d]|$)/, 'kimi'],
+  [/^glm(?:[-.\d]|$)/, 'glm'],
+  [/^muse(?:[-.\d]|$)/, 'muse'],
+  [/^deepseek(?:[-.\d]|$)/, 'deepseek'],
+  [/^composer(?:[-.\d]|$)/, 'cursor'],
+];
+
+/**
+ * 写这张单的模型算哪一族（冷验收换族用）：目录里认得的族原样回；目录记成 unclassified 的（档位拆不出，比如
+ * `cursor:gpt-5.4-mini-high`、`mirasim:gemini-4-argon`）按原串开头再认一次，认得出就回那一族，认不出仍回 unclassified。
+ * 为什么：作者族是 unclassified 时冷验收只能两家都验，白多一个会话；族其实一眼就看得出来。
+ */
+export function authorFamilyOf(family: string, modelId: string): string {
+  if (family !== 'unclassified') return family;
+  const raw = modelId.includes(':') ? modelId.slice(modelId.indexOf(':') + 1) : modelId;
+  const lower = raw.trim().toLowerCase();
+  for (const [lead, named] of FAMILY_LEADS) if (lead.test(lower)) return named;
+  return 'unclassified';
+}
+
 function matchBase(body: string, bases: readonly BaseRule[]): { modelId: string; family: string } | null {
   for (const rule of bases) {
     const match = rule.pattern.exec(body);

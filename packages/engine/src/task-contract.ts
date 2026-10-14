@@ -149,6 +149,11 @@ export interface RunSegmentInput {
    */
   interrupted?: string;
   /**
+   * 续哪个会话（决定 0088 第 3 条）：工作流经 planSegmentResume 判定能续才给。给了就用执行体的续会话起（--resume 一类），
+   * 提示词只补一句被打断的原因和返工意见，不重述整张单。续起来没跑成的，下一次退回开新会话。老历史里没有这个字段。
+   */
+  resumeSessionId?: string;
+  /**
    * 这张单的 PR：第一轮动手时还没开（引擎在会话交付之后才开），不给；开了以后每一轮都给。只记账（runs.pr_number，#216），
    * 会话不看它。老历史里没有这个字段。
    */
@@ -217,6 +222,8 @@ export interface ColdVerifyInput {
   /** 写这张单的会话用过的路由的族（验收换一个不同的族）。 */
   authorFamilies: string[];
   round: 1 | 2;
+  /** 引擎在会话收场后自己跑过的测试输出（有才给）：放进验收材料（决定 0093）。老历史里没有这个字段。 */
+  testOutput?: string;
 }
 
 export interface ColdVerifyResult {
@@ -238,6 +245,11 @@ export interface ColdVerifyResult {
   retry?: { wait: 'slot' | 'quota'; reason: string; afterSeconds: number };
   /** 要验的头已经不是 PR 现在的头了（有人推过新提交）：现在的头。工作流停下等人看过，再对新的头重走一遍。老历史里没有这个字段。 */
   headMoved?: string;
+  /**
+   * 验收方判「不归我验」的验收条（要截图、现场、线上数据、审计结果才判得了）：不算没过、不回炉，活动已留言到单上转给人。
+   * 老历史里没有这个字段。
+   */
+  outOfScope?: string[];
 }
 
 /** 改到了哪些要人拍的路径。空＝除了 CI 和冷验收没有别的门。 */
@@ -361,6 +373,25 @@ export type ProbeAssignedResult =
   | { kind: 'fail'; label: string; detail: string; counted: boolean };
 
 /** 派前探测不通、这轮不用这条路由：放掉选路时预占的名额（#1409）。没进起会话，不能占着池。 */
+/**
+ * 判这一段能不能续上一段的会话（决定 0088 第 3 条）。上一段用 runId 指名（跑完了的那一次）或 startedAfter（被取消的那一次，
+ * 工作流拿不到编号：找这之后起的最近一次动手）。routeId 是这一次选定的路由。
+ */
+export interface PlanSegmentResumeInput {
+  schemaVersion: 1;
+  taskId: string;
+  routeId: string;
+  previous: { runId: string } | { startedAfter: string };
+}
+
+/**
+ * resume：同一个执行方式、同一个账号池、同一个会话用户，上一段记下了会话号，可以续。
+ * new：续不上，reason 是白话原因（写进任务进度），退回原分支原树开新会话。
+ */
+export type PlanSegmentResumeResult =
+  | { kind: 'resume'; sessionId: string; runId: string }
+  | { kind: 'new'; reason: string };
+
 export interface ReleaseReservationInput {
   schemaVersion: 1;
   reservationId: string;

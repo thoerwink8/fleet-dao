@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { eq, isNull } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { closeOpenRuns, getRun, runsOfTask, startRun } from '../src/queries/runs.ts';
+import { closeOpenRuns, getRun, latestRunOfTask, runsOfTask, startRun } from '../src/queries/runs.ts';
 import { runs } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addRoute, addTask, ago, catalog, expectViolation, MIN, NOW } from './helpers.ts';
@@ -364,6 +364,56 @@ describe('runs 表读端', () => {
     const { id: blank } = await startRun(t.db, { segment: 'manual', model: 'kimi-k3' }, NOW);
     const rows = await t.db.select({ id: runs.id, tier: runs.tier }).from(runs);
     expect(Object.fromEntries(rows.map((r) => [r.id, r.tier]))).toEqual({ [id]: 'fast', [blank]: null });
+  });
+});
+
+describe('latestRunOfTask：续会话找上一段的会话号（决定 0088）', () => {
+  async function setup() {
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id, { issueNumber: 77 });
+    const other = await addTask(t.db, repo.id, { issueNumber: 78 });
+    const run = (over: Parameters<typeof startRun>[1]) => startRun(t.db, over, NOW).then((r) => r.id);
+    return { task, other, run };
+  }
+
+  it('只认这张单的这一段：不记 task_id 的、别的段的、别的单的都不算', async () => {
+    const { task, other, run } = await setup();
+    await run({ segment: 'manual', model: 'opus-5.5', issueNumber: 77, startedAt: ago(30 * MIN) });
+    const verify = await run({
+      segment: 'verify',
+      model: 'gpt-5.6',
+      taskId: task.id,
+      startedAt: ago(20 * MIN),
+    });
+    const otherTask = await run({
+      segment: 'manual',
+      model: 'opus-5.5',
+      taskId: other.id,
+      startedAt: ago(5 * MIN),
+    });
+    const mine = await run({ segment: 'manual', model: 'opus-5.5', taskId: task.id, startedAt: ago(MIN) });
+    const row = await latestRunOfTask(t.db, { taskId: task.id, segment: 'manual' });
+    expect(row?.id).toBe(mine);
+    expect(verify).not.toBe(mine);
+    expect(otherTask).not.toBe(mine);
+    expect(
+      await latestRunOfTask(t.db, { taskId: 'ffffffff-0000-4000-8000-000000000000', segment: 'manual' }),
+    ).toBe(null);
+  });
+
+  it('给了起跑时刻就只看那之后起的：被暂停取消的那一段凭它找', async () => {
+    const { task, run } = await setup();
+    await run({ segment: 'manual', model: 'opus-5.5', taskId: task.id, startedAt: ago(10 * MIN) });
+    const cut = new Date(NOW.getTime() - 5 * MIN);
+    expect(await latestRunOfTask(t.db, { taskId: task.id, segment: 'manual', startedAfter: cut })).toBe(null);
+    const after = await run({
+      segment: 'manual',
+      model: 'opus-5.5',
+      taskId: task.id,
+      startedAt: new Date(NOW.getTime() - MIN),
+    });
+    const row = await latestRunOfTask(t.db, { taskId: task.id, segment: 'manual', startedAfter: cut });
+    expect(row?.id).toBe(after);
   });
 });
 

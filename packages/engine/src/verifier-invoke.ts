@@ -5,8 +5,11 @@
 // packages/engine/src/workflows/verify.ts 调；那一份是 Fusion 句号后留下的。本切片**新增**给 v3 验收段用。
 //
 // 三条硬约束（specs/555-验收/需求.md）：
-// 1. **喂三样**：diff + 单子的「要什么」+「怎么算做完」。diff 不由本模块自己拼 `git diff`——**注入**进来
-//    （FetchDiff / FetchSpec），调用方（组装层）自己决定从哪读（GitHub、git 工作树、fake）。
+// 1. **喂材料**：diff + 单子的「要什么」+「怎么算做完」，有就再加 PR 正文、引擎跑过的测试输出（决定 0093：没给 PR 正文
+//    却判「PR 正文没写」是误判的来源）。diff 不由本模块自己拼 `git diff`——**注入**进来（FetchDiff / FetchSpec），
+//    调用方（组装层）自己决定从哪读（GitHub、git 工作树、fake）。验收只判「怎么算做完」各条在材料里成不成立：
+//    要 diff 以外证据（截图、现场、线上数据、审计结果）的条目回「不归我验」（outOfScope），不算没过，调用方转给人；
+//    建议类意见（含验收条原文写明「不挡」的）放 suggestions，不挡。
 // 2. **换家族**：docs/decisions/0006-discussion-model-order.md 钉的顺序 gpt → grok → claude → deepseek → kimi；
 //    modelFamiliesAvoid（写过这张单的所有族）要全部跳过。别家都挑不出 → 两家都验 → 只派得出一家就「同族兜底验」
 //    （#1731：用挑出来的那一家起一次全新的冷会话，结论照常算）→ 一家都派不出就回等待。不许拿默认模型顶上、不许假装 pass。
@@ -85,6 +88,10 @@ export const VerifierInvokeInputSchema = z
      * 为 true 时 modelFamiliesAvoid 和 otherAuthorFamilies 可以都为空。不为 true 时，别家一家都派不出也会改成两家都验。
      */
     requireTwoFamilies: z.boolean().optional(),
+    /** PR 正文（写代码的会话写的说明）：只当线索给验收看，不当证据。没有不给。 */
+    prBody: z.string().optional(),
+    /** 引擎在会话收场后自己跑过的测试输出（test:changed、tsc 之类）：有才给，当材料。 */
+    testOutput: z.string().optional(),
   })
   .refine(
     (v) =>
@@ -105,6 +112,13 @@ export const VerifierInvokeOutputSchema = z.object({
   notes: z.string().optional(),
   /** 第几轮跑出来的（透传 input.round）。 */
   round: z.union([z.literal(1), z.literal(2)]),
+  /**
+   * 「不归我验」：要 diff 以外的证据才判得了的验收条（截图、页面现场、线上数据、审计结果，或只靠被跳过的文件才判得了）。
+   * 不算没过、不回炉；调用方把它们转给人（留言到单上）。没有就不带。
+   */
+  outOfScope: z.array(z.string()).optional(),
+  /** 建议（不挡）：模型「## 建议」段里的话，原样带给人看。没有就不带。 */
+  suggestions: z.array(z.string()).optional(),
   /**
    * 真起了会话就有：哪一次执行、什么结局、哪个族哪条路由。没起会话（读不到 diff、没讨论成）没有。
    * 调用方靠结局认「内存放不下没派出去」这种过一会儿再来就行的，不要去解析 problems 的文字。
@@ -396,6 +410,15 @@ function renderPrompt(
   specDir: string | undefined,
   named: readonly NamedHeadFile[],
 ): string {
+  const prBody = input.prBody?.trim() ?? '';
+  const testOutput = input.testOutput?.trim() ?? '';
+  const materials = [
+    '上面的需求原文',
+    ...(prBody !== '' ? ['下面的 PR 正文'] : []),
+    ...(testOutput !== '' ? ['引擎跑过的测试输出'] : []),
+    'diff',
+    ...(named.length > 0 ? ['「单子点名但这次没改的文件」里的当前内容'] : []),
+  ];
   return [
     `# 任务：验收 PR #${input.prNumber}（第 ${input.round} 轮）`,
     '',
@@ -409,16 +432,23 @@ function renderPrompt(
     '## 验什么',
     `PR：#${input.prNumber}`,
     `分支：\`${input.branch}\`  基线：\`${input.baseSha}\``,
-    named.length > 0
-      ? '你手上没有仓库的检出（当前目录是空的）。能看的是下面的 diff、上面的需求原文，还有「单子点名但这次没改的文件」里的当前内容。某一条在这些材料里看不出做没做，按没做到算，'
-      : '你手上没有仓库的检出（当前目录是空的），只能看下面的 diff 和上面的需求原文。某一条在 diff 里看不出做没做，按没做到算，',
-    '不要凭想象放行；CI、测试跑没跑过不归你管（CI 另外要求必过），你只看这次改动对不对得上单子。不要改文件、不要提交、不要开 PR。',
+    `你手上没有仓库的检出（当前目录是空的）。能看的材料：${materials.join('、')}。`,
+    '你只做一件事：逐条判「怎么算做完」在这些材料里成不成立。',
+    `- 材料里看得出做到了：成立。材料里看得出没做到，或这一条本该在 diff、测试输出里看得见却找不到：写进「## 问题」（${BLOCKER_KINDS[0]}），不要凭想象放行。`,
+    '- 这一条要 diff 以外的证据才判得了（截图、页面现场、线上或法国的数据、审计结果、人手操作的结果），或只靠标了「跳过」的文件才判得了：',
+    '  不算没做到，写进「## 不归我验」，引擎转给人验。',
+    '- 验收条原文写明「只算建议」「不挡」「可选」的：不挡，有意见写进「## 建议」。',
+    '- PR 正文是写代码的会话自己写的说明，只当线索、不当做到了的证据；验收条没要求 PR 正文写什么，就不许拿「PR 正文没写」挡。',
+    '- CI 跑没跑过不归你管（CI 另外要求必过）；测试输出只当材料看。',
+    '不要改文件、不要提交、不要开 PR。',
     'diff 里标了「这个文件太大，只给了摘要」的文件，摘要里看不到的部分不算没做到，别拿它挡；标了「生成文件」的（迁移快照）不逐行看，',
-    '只核对它和同一 PR 里的迁移 sql、schema 改动对得上。',
+    '只核对它和同一 PR 里的迁移 sql、schema 改动对得上；标了「跳过」的文件看不到内容，不凭它挡、也不凭它放。',
     '',
     '## 改了哪些文件',
     ...diff.changedFiles.map((f) => `- ${f}`),
     ...renderNamedFiles(named),
+    ...renderTextBlock('PR 正文（写代码的会话写的，只当线索）', prBody, PR_BODY_MAX_CHARS, 'head'),
+    ...renderTextBlock('引擎跑过的测试输出', testOutput, TEST_OUTPUT_MAX_CHARS, 'tail'),
     '',
     '## diff（unified patch）',
     '```diff',
@@ -426,54 +456,90 @@ function renderPrompt(
     '```',
     '',
     '## 判法（只有三种能挡）',
-    '对照「要什么」和「怎么算做完」逐条核；**只有三种**能写进「## 问题」：',
-    `- ${BLOCKER_KINDS[0]}：单子要 A、代码做了 B（或没做）`,
-    `- ${BLOCKER_KINDS[1]}：有证据显示这次改动弄坏了原有功能`,
-    `- ${BLOCKER_KINDS[2]}：安全或丢数据`,
-    '风格、命名、设计好不好**不许写**进「## 问题」（可以放到「## 建议」段，但不影响结论）。',
+    '**只有三种**能写进「## 问题」：',
+    `- ${BLOCKER_KINDS[0]}：「怎么算做完」的某一条，单子要 A、材料里是 B（或没做）`,
+    `- ${BLOCKER_KINDS[1]}：diff 里有证据显示这次改动弄坏了原有功能`,
+    `- ${BLOCKER_KINDS[2]}：diff 里有证据显示安全或丢数据的问题`,
+    '风格、命名、设计好不好、「最好再加个……」**不许写**进「## 问题」，放「## 建议」，不影响结论。',
     '',
     '## 输出形状',
     `先写一段「## 问题」（每行一条，以 \`- ${BLOCKER_KINDS[0]}：\`、\`- ${BLOCKER_KINDS[1]}：\` 或 \`- ${BLOCKER_KINDS[2]}：\` 开头；没有问题就留空）；`,
-    '中间可以写「## 建议」段（不挡，不影响结论）；',
-    '**最后一行写** `verdict: pass` 或 `verdict: fail`（不许别的话、不许两个都写）。写 fail 就必须在「## 问题」里至少有一条。',
+    '再写「## 不归我验」（每行一条，`- 第 N 条：要什么证据、为什么 diff 里看不出`；没有就留空）；',
+    '可以写「## 建议」段（不挡，不影响结论）；',
+    '**最后一行写** `verdict: pass` 或 `verdict: fail`（不许别的话、不许两个都写）。只有「## 问题」里有条目才写 fail；',
+    '只有「不归我验」或「建议」的写 pass。',
   ].join('\n');
 }
 
+/** PR 正文、测试输出各最多带多少字符进提示词（正文留头、测试输出留尾：错误多在末尾）。 */
+const PR_BODY_MAX_CHARS = 20_000;
+const TEST_OUTPUT_MAX_CHARS = 30_000;
+
+/** 一段纯文本材料：空的不出这一节；超长截掉并写明。 */
+function renderTextBlock(title: string, text: string, max: number, keep: 'head' | 'tail'): string[] {
+  if (text === '') return [];
+  const clipped =
+    text.length <= max
+      ? { body: text, note: undefined }
+      : {
+          body: keep === 'head' ? text.slice(0, max) : text.slice(-max),
+          note: `（共 ${text.length} 个字符，超过 ${max}，只给${keep === 'head' ? '开头' : '末尾'} ${max} 个。）`,
+        };
+  const fence = fenceFor(clipped.body);
+  return ['', `## ${title}`, ...(clipped.note ? [clipped.note] : []), `${fence}text`, clipped.body, fence];
+}
+
 /**
- * 从模型 stdout 里抽出「## 问题」段的逐条 problem、最后一行 verdict、以及「被丢掉的风格意见计数」。
- * problems 只留以三种能挡开头的（specs/555：风格意见不许算挡）。
+ * 「## 标题」段下的逐条（`- ` 或 `* ` 开头）。续行只认紧跟在某一条后面、中间没有空行的；
+ * 结论行不算续行（不然「verdict: fail」会被并进最后一条的文字里）。没有这一段回空。
+ */
+function sectionItems(lines: readonly string[], heading: RegExp): string[] {
+  const start = lines.findIndex((l) => heading.test(l));
+  const raw: string[] = [];
+  if (start < 0) return raw;
+  let afterItem = false;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const l = lines[i] ?? '';
+    if (/^##\s+/.test(l)) break;
+    const t = l.trim();
+    if (t === '') {
+      afterItem = false;
+    } else if (t.startsWith('- ') || t.startsWith('* ')) {
+      raw.push(t.slice(2).trim());
+      afterItem = true;
+    } else if (readVerdict(t) !== null) {
+      break;
+    } else if (afterItem) {
+      raw[raw.length - 1] = `${raw[raw.length - 1]} ${t}`;
+    }
+  }
+  return raw.filter((item) => item !== '' && !/^[（(]?(无|没有|空)[）)。.]?$/.test(item));
+}
+
+/**
+ * 从模型 stdout 里抽出「## 问题」段的逐条 problem、「## 不归我验」「## 建议」两段、最后一行 verdict、
+ * 以及「被丢掉的风格意见计数」。problems 只留以三种能挡开头的（specs/555：风格意见不许算挡），丢掉的并进建议。
  */
 function parseStdout(stdout: string): {
   verdictLine: string;
   problems: string[];
+  outOfScope: string[];
+  suggestions: string[];
   droppedStyleNotes: number;
 } {
   const lines = stdout.split('\n');
   const nonEmpty = lines.map((l) => l.trim()).filter((l) => l !== '');
   const verdictLine = nonEmpty.at(-1) ?? '';
-  const start = lines.findIndex((l) => /^##\s+问题/.test(l));
-  const raw: string[] = [];
-  if (start >= 0) {
-    // 续行只认紧跟在某一条后面、中间没有空行的；结论行不算续行（不然「verdict: fail」会被并进最后一条问题的文字里）
-    let afterItem = false;
-    for (let i = start + 1; i < lines.length; i += 1) {
-      const l = lines[i] ?? '';
-      if (/^##\s+/.test(l)) break;
-      const t = l.trim();
-      if (t === '') {
-        afterItem = false;
-      } else if (t.startsWith('- ') || t.startsWith('* ')) {
-        raw.push(t.slice(2).trim());
-        afterItem = true;
-      } else if (readVerdict(t) !== null) {
-        break;
-      } else if (afterItem) {
-        raw[raw.length - 1] = `${raw[raw.length - 1]} ${t}`;
-      }
-    }
-  }
+  const raw = sectionItems(lines, /^##\s+问题/);
   const keep = raw.filter((p) => BLOCKER_KINDS.some((k) => p.startsWith(k)));
-  return { verdictLine, problems: keep, droppedStyleNotes: raw.length - keep.length };
+  const dropped = raw.filter((p) => !BLOCKER_KINDS.some((k) => p.startsWith(k)));
+  return {
+    verdictLine,
+    problems: keep,
+    outOfScope: sectionItems(lines, /^##\s+不归我验/),
+    suggestions: [...sectionItems(lines, /^##\s+建议/), ...dropped],
+    droppedStyleNotes: dropped.length,
+  };
 }
 
 /**
@@ -623,6 +689,8 @@ export async function invokeVerifier(
         modelId: string;
         passed: boolean;
         problems: string[];
+        outOfScope: string[];
+        suggestions: string[];
         notes: string[];
         session: NonNullable<VerifierInvokeOutput['session']>;
       }
@@ -769,8 +837,25 @@ export async function invokeVerifier(
       const notes: string[] = [who];
       if (stdoutPieces.droppedStyleNotes > 0) {
         notes.push(
-          `模型另外提了 ${stdoutPieces.droppedStyleNotes} 条不属于三种能挡的意见，按 specs/555 不许算挡，已丢`,
+          `模型另外在「## 问题」里写了 ${stdoutPieces.droppedStyleNotes} 条不属于三种能挡的意见，按 specs/555 不许算挡，已挪进建议`,
         );
+      }
+      const { outOfScope, suggestions } = stdoutPieces;
+      if (outOfScope.length > 0) notes.push(`不归我验 ${outOfScope.length} 条（要 diff 以外的证据，转给人）`);
+      if (word === 'fail' && stdoutPieces.problems.length === 0 && outOfScope.length > 0) {
+        // 只写了「不归我验」却给了 fail：那几条不算没做到（决定 0093），按过算，那几条转给人
+        notes.push('模型写了 verdict: fail，但只有「不归我验」、没有算挡的问题：按过算');
+        return {
+          kind: 'verdict',
+          family: picked.family,
+          modelId: picked.modelId,
+          passed: true,
+          problems: [],
+          outOfScope,
+          suggestions,
+          notes,
+          session,
+        };
       }
       if (word === 'fail' && stdoutPieces.problems.length === 0) {
         // 说没过却一条算挡的都没写：不当成过（模型明明说了不行），也不能把空问题表丢回给写代码的会话白改——算这一条没验成，换下一个候选
@@ -793,10 +878,25 @@ export async function invokeVerifier(
         modelId: picked.modelId,
         passed: word === 'pass' && stdoutPieces.problems.length === 0,
         problems: stdoutPieces.problems,
+        outOfScope,
+        suggestions,
         notes,
         session,
       };
     }
+  };
+
+  /** 各家的「不归我验」「建议」合起来（去重，两家时带上族名）；空的不带。 */
+  const extras = (
+    vs: readonly Extract<FamilyOutcome, { kind: 'verdict' }>[],
+  ): { outOfScope?: string[]; suggestions?: string[] } => {
+    const tag = (v: { family: string }, item: string) => (vs.length > 1 ? `${v.family}：${item}` : item);
+    const outOfScope = [...new Set(vs.flatMap((v) => v.outOfScope.map((o) => tag(v, o))))];
+    const suggestions = [...new Set(vs.flatMap((v) => v.suggestions.map((o) => tag(v, o))))];
+    return {
+      ...(outOfScope.length > 0 ? { outOfScope } : {}),
+      ...(suggestions.length > 0 ? { suggestions } : {}),
+    };
   };
 
   // 4. 一家验：不要求两家时，按顺序问不在避开族里的族，谁先给出结论就用谁，和一直以来一样。在等的族跳过、记下。
@@ -815,6 +915,7 @@ export async function invokeVerifier(
           notes: r.notes.join('；'),
           round: parsed.round,
           session: r.session,
+          ...extras([r]),
         };
       }
     }
@@ -878,6 +979,7 @@ export async function invokeVerifier(
       ].join('；'),
       round: parsed.round,
       session: verdicts[1]!.session,
+      ...extras(verdicts),
     };
   }
   const listed = misses.map((item) => `${item.route}：${item.tail}`).join('；');
@@ -894,6 +996,7 @@ export async function invokeVerifier(
       ].join('；'),
       round: parsed.round,
       session: only.session,
+      ...extras([only]),
     };
   }
   if (waiting.length > 0) return waitOut();

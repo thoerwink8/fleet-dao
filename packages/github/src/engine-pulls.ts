@@ -1,6 +1,6 @@
 // 引擎的通用 GitHub 读写口（都用「引擎」机器人）：现读 PR、列开着的 PR、读头上某个 context 最新的一条提交
 // 状态、贴提交状态（读得到 statuses 写权限才贴）、撤自动合并、关 PR、在 PR 上留言。
-// 挂自动合并（hourly-reconcile）、读 PR 和贴 cold-verify（task-activities、task-verify）、收 canary 的残留 PR 都走它。
+// 挂自动合并（hourly-reconcile）、读 PR 和贴 cold-verify（task-activities、task-verify）都走它。
 // 对外的 `gh.claims`、ClaimsGitHub、createClaimsGitHub 是 #348「认领对得上」留下的老名字（认领账 #556 整个删了），
 // 引擎那边一起改名之前先留着。
 // 改这里之前必须知道：合并闸只认「引擎」机器人贴的那条（@fleet-dao/conventions 的 ENGINE_BOT_LOGIN），所以贴一律用引擎的身份；

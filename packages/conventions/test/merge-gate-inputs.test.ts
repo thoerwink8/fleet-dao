@@ -1,7 +1,7 @@
 // 钉住合并闸能看的现状只有那几样（创始人 2026-09-27 晚拍，#299；2026-09-28 下午拍 #444 收窄成四样；2026-10-06 拍 #1114 去掉先审后合，
 // 决定 0023；design 第五节「发现问题当场修」第 5 条、AGENTS 本仓段）：CI 里跑的检查必须确定、只看检出来的文件；合并闸
-// merge-gate 汇总 PR 此刻的状态——PR 本身（分支名、开着还是关了；#654 起不看草稿、冲突、正文）和当前头上的提交状态
-// （只剩引擎任务 PR 的冷调用结论，#555-2）。冷调用的结论在同一次 statuses 调用里读回来——闸里起模型调用会破坏
+// merge-gate 汇总 PR 此刻的状态——PR 本身（分支名、开着还是关了、正文里的创始人原话；#654 起不看草稿、冲突）、
+// PR 改了哪些文件（判碰没碰改标准路径，决定 0093）和当前头上的提交状态（只剩引擎任务 PR 的冷调用结论，#555-2）。冷调用的结论在同一次 statuses 调用里读回来——闸里起模型调用会破坏
 // 「CI 检查必须确定」这条，所以冷调用在装配侧跑、结论贴成状态，闸只读。往合并闸里多加别的现状（单子开没开、时间、别的仓……）
 // 这里会红：要加得先改上面那两处的规矩，再改这里的清单。
 import { readFileSync } from 'node:fs';
@@ -16,7 +16,8 @@ const gates = src('merge-gates.ts');
 
 /** 合并闸从 GitHub 读、往 GitHub 写的口子（merge-gate.ts 的 GitHubReads），一样一行写清看的是什么。 */
 const ALLOWED_READS: Record<string, string> = {
-  pr: 'PR 本身：当前头、分支名、开着还是关了（草稿、冲突 GitHub 自己拦，必填栏没有了，#654）',
+  pr: 'PR 本身：当前头、分支名、开着还是关了、正文里的创始人原话（草稿、冲突 GitHub 自己拦，必填栏没有了，#654）',
+  files: 'PR 改了哪些文件：判碰没碰改标准路径（standard-paths.json，决定 0093）',
   statuses: '当前头上的提交状态（逐条的）：合前一次冷调用的结论（#555-2）',
   openPrs: '冷调用写上来时逐个重算开着的 PR：挑要算哪几个，不参与判',
   writeStatus: '写 merge-gate 这一个状态',
@@ -93,11 +94,15 @@ function pushPaths(yml: string): string[] {
   return paths as string[];
 }
 
-/** 闸的判定输入：入口文件和它 import 到的所有文件、这份工作流自己；在 push.paths 里漏列的。 */
+/** 闸读的数据文件（不是 import，按路径读）：改标准的路径清单（standard-paths-file.ts 读它）。 */
+const DATA_INPUTS = ['packages/conventions/standard-paths.json'];
+
+/** 闸的判定输入：入口文件和它 import 到的所有文件、读的数据文件、这份工作流自己；在 push.paths 里漏列的。 */
 function unwatchedInputs(yml: string): string[] {
   const watched = new Set(pushPaths(yml));
   const inputs = [
     ...importClosure('packages/conventions/src/bin/merge-gate.ts'),
+    ...DATA_INPUTS,
     '.github/workflows/merge-gate.yml',
   ];
   return inputs.filter((f) => !watched.has(f));
@@ -116,6 +121,7 @@ describe('合并闸的判定输入变了，开着的 PR 要重算（#654 第二�
   it('push.paths 里没有多余的：列的每个文件都真是闸的输入', () => {
     const inputs = new Set([
       ...importClosure('packages/conventions/src/bin/merge-gate.ts'),
+      ...DATA_INPUTS,
       '.github/workflows/merge-gate.yml',
     ]);
     expect(pushPaths(workflow).filter((p) => !inputs.has(p))).toEqual([]);
@@ -125,6 +131,18 @@ describe('合并闸的判定输入变了，开着的 PR 要重算（#654 第二�
     const narrowed = workflow.replace('      - packages/conventions/src/flow-branch.ts\n', '');
     expect(narrowed).not.toBe(workflow);
     expect(unwatchedInputs(narrowed)).toEqual(['packages/conventions/src/flow-branch.ts']);
+  });
+
+  it('闸读的数据文件就是 standard-paths-file.ts 读的那份；漏列在 push.paths 里查得出来', () => {
+    expect(src('standard-paths-file.ts')).toContain("'../standard-paths.json'");
+    const narrowed = workflow.replace('      - packages/conventions/standard-paths.json\n', '');
+    expect(narrowed).not.toBe(workflow);
+    expect(unwatchedInputs(narrowed)).toEqual(['packages/conventions/standard-paths.json']);
+  });
+
+  it('PR 正文改了也重算（edited）：补上创始人原话后闸要跟着变', () => {
+    const doc = parse(workflow) as { on?: { pull_request_target?: { types?: unknown } } } | null;
+    expect(doc?.on?.pull_request_target?.types).toContain('edited');
   });
 
   it('【故意造出的失败】工作流里没有 push 触发：抛错，不当成「没列」', () => {
