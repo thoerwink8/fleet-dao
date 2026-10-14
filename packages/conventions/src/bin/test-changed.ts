@@ -47,4 +47,4 @@ const code = testChanged({
   out: (line) => console.log(line),
   err: (line) => console.error(line),
 });
-process.exit(code);
+process.exitCode = code;

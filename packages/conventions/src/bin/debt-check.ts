@@ -7,60 +7,65 @@
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { checkDebtDocs, DEBT_REPORT_HEADER, liveDebt } from '../debt.ts';
+import { exitWith, runMain } from '../exit.ts';
 import { reportFindings } from '../findings.ts';
 import { liveGitHub, repoName } from '../github-api.ts';
 import { annotation } from '../pr-fields.ts';
 import { fsRepo } from '../repo.ts';
 
-const USAGE = '用法：debt-check.ts [--live [--comment]]';
-const root = fileURLToPath(new URL('../../../../', import.meta.url));
-const inActions = process.env.GITHUB_ACTIONS === 'true';
-const out = (line: string) => console.log(line);
-const err = (line: string) => console.error(inActions ? annotation(line) : line);
+// 退出不用 process.exit（Windows 上偶发崩成 3221226505，../exit.ts）：提前退出用 exitWith，runMain 接住设退出码。
+runMain(async () => {
+  const USAGE = '用法：debt-check.ts [--live [--comment]]';
+  const root = fileURLToPath(new URL('../../../../', import.meta.url));
+  const inActions = process.env.GITHUB_ACTIONS === 'true';
+  const out = (line: string) => console.log(line);
+  const err = (line: string) => console.error(inActions ? annotation(line) : line);
 
-let live = false;
-let comment = false;
-try {
-  const { values } = parseArgs({
-    options: { live: { type: 'boolean' }, comment: { type: 'boolean' } },
-    strict: true,
-  });
-  live = values.live === true;
-  comment = values.comment === true;
-  if (comment && !live) throw new Error('--comment 要和 --live 一起用');
-} catch (e) {
-  console.error(`参数不对（${e instanceof Error ? e.message : String(e)}）。${USAGE}`);
-  process.exit(2);
-}
+  let live = false;
+  let comment = false;
+  try {
+    const { values } = parseArgs({
+      options: { live: { type: 'boolean' }, comment: { type: 'boolean' } },
+      strict: true,
+    });
+    live = values.live === true;
+    comment = values.comment === true;
+    if (comment && !live) throw new Error('--comment 要和 --live 一起用');
+  } catch (e) {
+    console.error(`参数不对（${e instanceof Error ? e.message : String(e)}）。${USAGE}`);
+    exitWith(2);
+  }
 
-const repo = fsRepo(root);
-if (!live) {
-  const { code, lines } = checkDebtDocs(repo);
-  for (const line of lines) (code === 0 ? out : err)(line);
-  process.exitCode = code;
-} else {
-  const name = repoName(process.env, root);
-  if (!name) {
-    err('没查成：认不出是哪个仓（没有 GITHUB_REPOSITORY，origin 也不是 GitHub 地址）。');
-    process.exit(2);
+  const repo = fsRepo(root);
+  if (!live) {
+    const { code, lines } = checkDebtDocs(repo);
+    for (const line of lines) (code === 0 ? out : err)(line);
+    process.exitCode = code;
+  } else {
+    const name = repoName(process.env, root);
+    if (!name) {
+      err('没查成：认不出是哪个仓（没有 GITHUB_REPOSITORY，origin 也不是 GitHub 地址）。');
+      exitWith(2);
+    }
+    const gh = liveGitHub(name, process.env);
+    const r = await liveDebt({ repo, gh });
+    for (const line of r.docs.lines) (r.docs.code === 0 ? out : err)(line);
+    let code: 0 | 1 | 2 = r.docs.code;
+    const notQueried = [...r.notQueried];
+    let loose = r.findings;
+    if (comment && r.findings.length) {
+      const rep = await reportFindings(r.findings, gh, DEBT_REPORT_HEADER);
+      if (rep.posted.length) out(`留言了：${rep.posted.map((n) => `#${n}`).join('、')}。`);
+      if (rep.already) out(`${rep.already} 条以前留过言，这次没再留。`);
+      notQueried.push(...rep.errors);
+      loose = rep.unattached;
+    }
+    for (const f of loose) err(f.text);
+    for (const w of notQueried) err(`没查成：${w}。`);
+    if (notQueried.length) code = 2;
+    else if (loose.length && code === 0) code = 1;
+    if (code === 0 && r.findings.length === 0) out('挂的单号都开着。');
+    process.exitCode = code;
   }
-  const gh = liveGitHub(name, process.env);
-  const r = await liveDebt({ repo, gh });
-  for (const line of r.docs.lines) (r.docs.code === 0 ? out : err)(line);
-  let code: 0 | 1 | 2 = r.docs.code;
-  const notQueried = [...r.notQueried];
-  let loose = r.findings;
-  if (comment && r.findings.length) {
-    const rep = await reportFindings(r.findings, gh, DEBT_REPORT_HEADER);
-    if (rep.posted.length) out(`留言了：${rep.posted.map((n) => `#${n}`).join('、')}。`);
-    if (rep.already) out(`${rep.already} 条以前留过言，这次没再留。`);
-    notQueried.push(...rep.errors);
-    loose = rep.unattached;
-  }
-  for (const f of loose) err(f.text);
-  for (const w of notQueried) err(`没查成：${w}。`);
-  if (notQueried.length) code = 2;
-  else if (loose.length && code === 0) code = 1;
-  if (code === 0 && r.findings.length === 0) out('挂的单号都开着。');
-  process.exitCode = code;
-}
+  return undefined;
+});

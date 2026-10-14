@@ -3,11 +3,12 @@
 // 三个数的含义见 ../flow-stats.ts。
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
+import { ExitRequest, exitWith, runMain } from '../exit.ts';
 import { flowStats, formatFlowStats, parseDays } from '../flow-stats.ts';
 
 function fail(why: string): never {
   console.error(why.startsWith('没查成') ? why : `没查成：${why}`);
-  process.exit(2);
+  return exitWith(2);
 }
 
 function gh(path: string): unknown {
@@ -25,25 +26,30 @@ function gh(path: string): unknown {
   return fail(`gh api ${path.split('?')[0]}：${last}`);
 }
 
-let repo = 'thoerwink8/fleet-dao';
-let days = 7;
-try {
-  const { values } = parseArgs({
-    options: {
-      days: { type: 'string' },
-      repo: { type: 'string' },
-    },
-    strict: true,
-  });
-  if (values.repo !== undefined) repo = values.repo;
-  days = parseDays(values.days);
-} catch (e) {
-  fail(e instanceof Error ? e.message : String(e));
-}
+// 退出不用 process.exit（Windows 上偶发崩，../exit.ts）。
+runMain(() => {
+  let repo = 'thoerwink8/fleet-dao';
+  let days = 7;
+  try {
+    const { values } = parseArgs({
+      options: {
+        days: { type: 'string' },
+        repo: { type: 'string' },
+      },
+      strict: true,
+    });
+    if (values.repo !== undefined) repo = values.repo;
+    days = parseDays(values.days);
+  } catch (e) {
+    fail(e instanceof Error ? e.message : String(e));
+  }
 
-try {
-  const stats = flowStats(gh, { repo, days, now: new Date() });
-  process.stdout.write(formatFlowStats(stats));
-} catch (e) {
-  fail(e instanceof Error ? e.message : String(e));
-}
+  try {
+    const stats = flowStats(gh, { repo, days, now: new Date() });
+    process.stdout.write(formatFlowStats(stats));
+  } catch (e) {
+    if (e instanceof ExitRequest) throw e; // gh 没查成时已经报过、要退出
+    fail(e instanceof Error ? e.message : String(e));
+  }
+  return undefined;
+});

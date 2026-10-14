@@ -7,67 +7,72 @@
 // 本片不接 pnpm check、不接 CI：接线上文档是 #140 后面片的事。
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { exitWith, runMain } from '../exit.ts';
 import { checkOpsBlocks, writeOpsBlocks } from '../ops-tables.ts';
 import { fsRepo } from '../repo.ts';
 
-const USAGE =
-  '用法：ops-tables.ts (--check|--write) [文档路径]（默认 docs/ops.md 加 docs/ops/*.md 里找五个区块）';
-const root = fileURLToPath(new URL('../../../../', import.meta.url));
-const repo = fsRepo(root);
+// 退出不用 process.exit（Windows 上偶发崩成 3221226505，../exit.ts）：提前退出用 exitWith，runMain 接住设退出码。
+runMain(() => {
+  const USAGE =
+    '用法：ops-tables.ts (--check|--write) [文档路径]（默认 docs/ops.md 加 docs/ops/*.md 里找五个区块）';
+  const root = fileURLToPath(new URL('../../../../', import.meta.url));
+  const repo = fsRepo(root);
 
-const args = process.argv.slice(2);
-let mode: 'check' | 'write' | undefined;
-let docPath: string | undefined;
-for (const arg of args) {
-  if (arg === '--check' || arg === '--write') {
-    if (mode !== undefined) {
-      console.error(`参数不对：--check 和 --write 只能给一个。${USAGE}`);
-      process.exit(2);
+  const args = process.argv.slice(2);
+  let mode: 'check' | 'write' | undefined;
+  let docPath: string | undefined;
+  for (const arg of args) {
+    if (arg === '--check' || arg === '--write') {
+      if (mode !== undefined) {
+        console.error(`参数不对：--check 和 --write 只能给一个。${USAGE}`);
+        exitWith(2);
+      }
+      mode = arg === '--check' ? 'check' : 'write';
+    } else if (arg.startsWith('--')) {
+      console.error(`参数不对：认不出「${arg}」。${USAGE}`);
+      exitWith(2);
+    } else if (docPath === undefined) {
+      docPath = arg;
+    } else {
+      console.error(`参数不对：文档路径给了两次（${docPath}、${arg}）。${USAGE}`);
+      exitWith(2);
     }
-    mode = arg === '--check' ? 'check' : 'write';
-  } else if (arg.startsWith('--')) {
-    console.error(`参数不对：认不出「${arg}」。${USAGE}`);
-    process.exit(2);
-  } else if (docPath === undefined) {
-    docPath = arg;
-  } else {
-    console.error(`参数不对：文档路径给了两次（${docPath}、${arg}）。${USAGE}`);
-    process.exit(2);
   }
-}
-if (mode === undefined) {
-  console.error(`参数不对：要给 --check 或 --write。${USAGE}`);
-  process.exit(2);
-}
+  if (mode === undefined) {
+    console.error(`参数不对：要给 --check 或 --write。${USAGE}`);
+    exitWith(2);
+  }
 
-if (mode === 'check') {
-  const problems = checkOpsBlocks(repo, docPath);
-  if (problems.length === 0) {
-    console.log('五个区块都和 deploy/ 一致。');
-    process.exit(0);
+  if (mode === 'check') {
+    const problems = checkOpsBlocks(repo, docPath);
+    if (problems.length === 0) {
+      console.log('五个区块都和 deploy/ 一致。');
+      exitWith(0);
+    }
+    for (const p of problems) console.error(p.text);
+    // 有一条没查成（读不到文档、生成不出来）就退出 2：不能把「没查成」当成不一致、更不能当成通过。
+    exitWith(problems.some((p) => p.notQueried) ? 2 : 1);
   }
-  for (const p of problems) console.error(p.text);
-  // 有一条没查成（读不到文档、生成不出来）就退出 2：不能把「没查成」当成不一致、更不能当成通过。
-  process.exit(problems.some((p) => p.notQueried) ? 2 : 1);
-}
 
-// --write：五个区块都只替换标记之间的内容，标记之外一个字不动；有一个区块换不了，一个字都不写。
-const { changes, problems } = writeOpsBlocks(repo, docPath);
-if (problems.length > 0) {
-  for (const p of problems) console.error(p.text);
-  console.error('一个字都没写。');
-  process.exit(2);
-}
-if (changes.length === 0) {
-  console.log('五个区块本来就是最新的，没动。');
-  process.exit(0);
-}
-for (const c of changes) {
-  try {
-    writeFileSync(`${root}${c.path}`, c.text, 'utf8');
-  } catch (e) {
-    console.error(`没查成：写不进 ${c.path}（${e instanceof Error ? e.message : String(e)}）。`);
-    process.exit(2);
+  // --write：五个区块都只替换标记之间的内容，标记之外一个字不动；有一个区块换不了，一个字都不写。
+  const { changes, problems } = writeOpsBlocks(repo, docPath);
+  if (problems.length > 0) {
+    for (const p of problems) console.error(p.text);
+    console.error('一个字都没写。');
+    exitWith(2);
   }
-  console.log(`写好了：${c.path} 的区块换成了 deploy/ 生成的。`);
-}
+  if (changes.length === 0) {
+    console.log('五个区块本来就是最新的，没动。');
+    exitWith(0);
+  }
+  for (const c of changes) {
+    try {
+      writeFileSync(`${root}${c.path}`, c.text, 'utf8');
+    } catch (e) {
+      console.error(`没查成：写不进 ${c.path}（${e instanceof Error ? e.message : String(e)}）。`);
+      exitWith(2);
+    }
+    console.log(`写好了：${c.path} 的区块换成了 deploy/ 生成的。`);
+  }
+  return undefined;
+});
