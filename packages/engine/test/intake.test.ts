@@ -632,6 +632,13 @@ describe('runIntakeJob · 一轮', () => {
     expect(() => workflowPathIn(null)).toThrow(/读不到/);
   });
 
+  it('workflowPathIn：已知的模块只写了目录、不带末尾斜杠（`.github/workflows`）也认出来', () => {
+    const body = BODY.replace('- `packages/web/src/pages/`：驾驶舱页面', '- `.github/workflows`：加一步');
+    expect(body).not.toBe(BODY);
+    expect(workflowPathIn(body)).toBe('.github/workflows');
+    expect(workflowPathIn(BODY.replace('驾驶舱页面', '驾驶舱页面，和 .github/workflowsx 无关'))).toBeNull();
+  });
+
   it('正文读不到 → 这张单这一轮不拉、不贴标签不留言，记没查成（partial）', async () => {
     const h = harness({}, { issues: [issue({ body: null as unknown as string })] });
     const run = await runIntakeJob(h.deps);

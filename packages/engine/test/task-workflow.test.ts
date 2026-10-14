@@ -229,7 +229,8 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
       },
     );
     expect(run.outcome).toBe('merged');
-    expect(calls.verify).toEqual([]);
+    // 和等 CI 同时起的那一次验收（决定 0093）可能已经调了，但结果没被认：最多那一次，验收轮数没加
+    expect(calls.verify.length).toBeLessThanOrEqual(1);
     expect(calls.arm).toBe(0);
     expect(world.callsOf('closeIssue')[0]?.input).toMatchObject({
       comment: expect.stringContaining('deadbee'),
@@ -408,8 +409,9 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
       ci: (_i, n) => (n <= 2 ? { state: 'red', failedChecks: ['check'] } : undefined),
     });
     const { tasks, calls } = scripted({
-      verify: (_i, n) =>
-        n === 1
+      // 按头判：CI 红的两轮里和 CI 同时起的验收会被丢掉（决定 0093），不能按第几次调用排答案
+      verify: (i) =>
+        i.headSha === fakeHead(103)
           ? { pass: false, problems: ['没做到验收条：第 4 条，Mirasim 校验存在绕过入口'], round: 1 }
           : { pass: true, problems: [], round: 2 },
     });
@@ -428,7 +430,7 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     expect(world.alerts).toEqual([]);
   });
 
-  it('【故意造出的失败】验收 2 轮都没过：多给的那一轮只有一次，第 2 轮验收也不过就停下等人', async () => {
+  it('【故意造出的失败】验收 2 轮都没过：多给的那一轮只有一次；头一回用尽自动续一次，再用尽就停下等人', async () => {
     const world = createFakeWorld({
       ci: (_i, n) => (n <= 2 ? { state: 'red', failedChecks: ['check'] } : undefined),
     });
@@ -441,9 +443,10 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
       async (q) => {
         const h = await start(q, input());
         const s = await statusUntil(h, parked, '验收 2 轮都没过，停下');
-        expect(s.lastProblem).toMatch(/轮都没过/);
-        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS + 1);
-        expect(calls.verify).toHaveLength(MAX_VERIFY_ROUNDS);
+        expect(s.lastProblem).toMatch(/验收 2 轮都没过/);
+        // 前 4 轮（多给的那一轮在内）用尽动手轮数、自动续一次（决定 0093）；再 3 轮后验收第二回用尽才停下
+        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS + 1 + MAX_IMPLEMENT_ROUNDS);
+        expect(world.alerts.filter((a) => a.title.includes('轮都没过'))).toHaveLength(1);
         await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收尾' });
         return h.result();
       },
@@ -451,9 +454,9 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     );
   });
 
-  it('CI 连着红 3 轮：动手 3 轮不过，停下；点「继续」先看 PR 现在的 CI，还红就再给一整轮', async () => {
+  it('CI 连着红：动手 3 轮不过先自动续一次，再 3 轮不过才停下；点「继续」先看 PR 现在的 CI，还红就再给一整轮', async () => {
     const world = createFakeWorld({
-      ci: (_i, n) => (n <= 4 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
+      ci: (_i, n) => (n <= 7 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
     });
     const { tasks, calls } = scripted();
     const run = await withWorker(
@@ -463,21 +466,22 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
         const h = await start(q, input());
         const s = await statusUntil(h, parked, '动手 3 轮都不过，停下');
         expect(s.waiting?.detail).toContain('动手 3 轮都没过');
-        expect(calls.segment).toHaveLength(3);
+        expect(calls.segment).toHaveLength(6);
         await h.signal(taskContinueSignal, { by: 'frank' });
         return h.result() as Promise<TaskRun>;
       },
       { tasks },
     );
     expect(run.outcome).toBe('merged');
-    expect(calls.segment).toHaveLength(4);
+    expect(calls.segment).toHaveLength(7);
   });
 
   it('动手 3 轮不过停下时 PR 已开、头已记录（CI 台基础设施问题）：点「继续」先等 CI 和验收，不再起动手会话（#1582）', async () => {
     const world = createFakeWorld({
-      ci: (_i, n) => (n <= 3 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
+      ci: (_i, n) => (n <= 6 ? { state: 'red', failedChecks: ['test (engine)'] } : undefined),
     });
     const { tasks, calls } = scripted();
+    const ROUNDS = MAX_IMPLEMENT_ROUNDS * 2; // 头一回用尽自动续了一次（决定 0093）
     const run = await withWorker(
       env,
       world,
@@ -485,23 +489,22 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
         const h = await start(q, input());
         const s = await statusUntil(h, parked, '动手 3 轮都不过，停下');
         expect(s.waiting?.detail).toContain('动手 3 轮都没过');
-        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS);
-        expect(world.count('waitCi')).toBe(3);
-        expect(calls.verify).toHaveLength(0);
+        expect(calls.segment).toHaveLength(ROUNDS);
+        expect(world.count('waitCi')).toBe(ROUNDS);
         await h.signal(taskContinueSignal, { by: 'frank' });
         return h.result() as Promise<TaskRun>;
       },
       { tasks },
     );
     expect(run.outcome).toBe('merged');
-    // 继续之后没有新会话：会话次数还是停下前的 3 次，推分支和开 PR 也没有再来一遍
-    expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS);
-    expect(world.count('pushBranch')).toBe(MAX_IMPLEMENT_ROUNDS);
+    // 继续之后没有新会话：会话次数还是停下前的那么多，推分支和开 PR 也没有再来一遍
+    expect(calls.segment).toHaveLength(ROUNDS);
+    expect(world.count('pushBranch')).toBe(ROUNDS);
     expect(world.count('openPr')).toBe(1);
-    // 直接去看 PR 现在的 CI：第 4 次问回 green，然后冷验收，再挂自动合并
-    expect(world.count('waitCi')).toBe(4);
-    expect(calls.verify).toHaveLength(1);
-    expect(calls.order.slice(-4)).toEqual(['verify', 'guarded', 'arm', 'merged']);
+    // 直接去看 PR 现在的 CI：这一次回 green，然后冷验收（和 CI 同时起），再挂自动合并
+    expect(world.count('waitCi')).toBe(ROUNDS + 1);
+    expect(calls.order.slice(-3)).toEqual(['guarded', 'arm', 'merged']);
+    expect(calls.order.lastIndexOf('verify')).toBeLessThan(calls.order.lastIndexOf('arm'));
   });
 
   it('等合并时 PR 被关了：停下；重开后点「继续」，重新挂再等', async () => {
@@ -596,7 +599,7 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
     expect(calls.merged).toBe(4);
   });
 
-  it('等合并时检查连着红、返工 3 轮用完：停下，报警进要你拍的，不再等（#1983）', async () => {
+  it('等合并时检查连着红、返工 3 轮用完：头一回自动续一次，再用完停下，报警进要你拍的，不再等（#1983）', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
       merged: () => checksRed,
@@ -608,14 +611,14 @@ describe('任务工作流 · 停下等人', { timeout: 60_000 }, () => {
         const h = await start(q, input());
         // 每轮红两次之间隔 20 秒确认：让测试服务端把这几段跳过去
         // （查询不解锁跳时，干等会卡在第一次确认上；跳完再查，不 await result()，#1764）
-        await env.sleep('5 minutes');
-        const s = await statusUntil(h, (st) => parked(st) || calls.merged > 6, '检查红了返工用完要停下');
+        await env.sleep('10 minutes');
+        const s = await statusUntil(h, (st) => parked(st) || calls.merged > 12, '检查红了返工用完要停下');
         expect(parked(s)).toBe(true);
         expect(s.phase).toBe('parked');
         expect(s.waiting?.detail).toContain('检查红了');
         expect(s.doing).toContain('检查红了');
-        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS);
-        expect(calls.merged).toBe(MAX_IMPLEMENT_ROUNDS * 2);
+        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS * 2);
+        expect(calls.merged).toBe(MAX_IMPLEMENT_ROUNDS * 2 * 2);
         expect(world.alerts[0]).toMatchObject({
           level: 'decision',
           title: expect.stringMatching(/^检查红了/),
@@ -1779,11 +1782,12 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
     expect(MAX_VERIFY_ROUNDS).toBe(2);
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
-      brief: (n) => (n === 1 ? briefSaying('旧正文', ['旧验收条']) : briefSaying('新正文', ['新验收条'])),
+      // 头一回用尽自动续（决定 0093）也重读一次单子：前两次读到旧正文，点「继续」后读到新的
+      brief: (n) => (n <= 2 ? briefSaying('旧正文', ['旧验收条']) : briefSaying('新正文', ['新验收条'])),
       verify: (_input, n) =>
-        n === 4
+        n === 6
           ? { pass: true, problems: [], round: 2 }
-          : { pass: false, problems: ['还没做完'], round: n === 1 ? 1 : 2 },
+          : { pass: false, problems: ['还没做完'], round: n % 2 === 1 ? 1 : 2 },
     });
     const run = await withWorker(
       env,
@@ -1793,34 +1797,34 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
         await statusUntil(
           h,
           (s) => parked(s) && (s.waiting?.detail.includes('验收 2 轮都没过') ?? false),
-          '验收 2 轮用尽，停下',
+          '验收 2 轮第二回用尽，停下',
         );
-        expect(calls.segment).toHaveLength(3);
-        expect(calls.verify).toHaveLength(2);
+        expect(calls.segment).toHaveLength(5);
+        expect(calls.verify).toHaveLength(4);
         expect(calls.verify.every((item) => item.what === '旧正文')).toBe(true);
         await h.signal(taskContinueSignal, { by: 'frank' });
         await waitUntil(
           () =>
-            calls.segment.length > 3 || world.alerts.some((alert) => alert.title.includes('动手 3 轮都没过')),
+            calls.segment.length > 5 || world.alerts.some((alert) => alert.title.includes('动手 3 轮都没过')),
           '继续后要么再动手一轮，要么错误地立刻报动手用尽',
         );
         expect(world.alerts.some((alert) => alert.title.includes('动手 3 轮都没过'))).toBe(false);
-        expect(calls.verify[2]).toMatchObject({ what: '新正文', howToFinish: ['新验收条'], round: 1 });
+        expect(calls.verify[4]).toMatchObject({ what: '新正文', howToFinish: ['新验收条'], round: 1 });
         return h.result() as Promise<TaskRun>;
       },
       { tasks },
     );
     expect(run.outcome).toBe('merged');
-    expect(calls.brief).toBe(2);
-    expect(calls.segment).toHaveLength(4);
-    expect(calls.segment[3]?.brief).toMatchObject({ request: '新正文', acceptance: ['新验收条'] });
-    expect(calls.verify.map((item) => item.round)).toEqual([1, 2, 1, 2]);
+    expect(calls.brief).toBe(3);
+    expect(calls.segment).toHaveLength(6);
+    expect(calls.segment[5]?.brief).toMatchObject({ request: '新正文', acceptance: ['新验收条'] });
+    expect(calls.verify.map((item) => item.round)).toEqual([1, 2, 1, 2, 1, 2]);
     expect(
-      calls.verify.slice(2).every((item) => item.what === '新正文' && item.howToFinish[0] === '新验收条'),
+      calls.verify.slice(4).every((item) => item.what === '新正文' && item.howToFinish[0] === '新验收条'),
     ).toBe(true);
   });
 
-  it('同一次继续里动手仍停在上限；累计继续超过 3 次不再清零，停下并写明交指挥官', async () => {
+  it('同一次继续里动手仍停在上限；自动续那一次加点「继续」累计超过 3 次不再清零，停下并写明交指挥官', async () => {
     const world = createFakeWorld({
       ci: () => ({ state: 'red', failedChecks: ['test (engine)'] }),
     });
@@ -1835,8 +1839,9 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
           (s) => parked(s) && (s.waiting?.detail.includes('动手 3 轮都没过') ?? false),
           '动手 3 轮用尽',
         );
-        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS);
-        for (let time = 0; time < 3; time += 1) {
+        // 头一回用尽自动续了一次（决定 0093），第二回才停下
+        expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS * 2);
+        for (let time = 0; time < 2; time += 1) {
           const before = calls.segment.length;
           await h.signal(taskContinueSignal, { by: 'frank' });
           await waitUntil(
@@ -2221,7 +2226,7 @@ describe('任务工作流 · 没提交就避开上一轮路由（#1408）', { ti
 
   it('【故意造出的失败】点「继续」后避让必须是空的', async () => {
     const world = createFakeWorld();
-    const { tasks, calls } = scripted({ delivery: deliveryAfterMisses(3) });
+    const { tasks, calls } = scripted({ delivery: deliveryAfterMisses(6) }); // 头一回用尽自动续一次（决定 0093），第二回才停下
     const task = input();
     const run = await withWorker(
       env,
