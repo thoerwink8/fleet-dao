@@ -1,0 +1,39 @@
+// pnpm check 的入口：biome + tsc -b + 改到的测试 + 卫生检查，四样都跑完再判红；--all 才全量 vitest run（判法见 ../check.ts）。
+//   pnpm check [--all]
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { check, type Step } from '../check.ts';
+
+const root = fileURLToPath(new URL('../../../../', import.meta.url));
+
+/** 用当前 node 跑仓里装的脚本，子进程输出直通终端。 */
+function node(name: string, script: string, args: string[]): Step {
+  return {
+    name,
+    run() {
+      const r = spawnSync(process.execPath, [join(root, script), ...args], { cwd: root, stdio: 'inherit' });
+      return { status: r.status, signal: r.signal, error: r.error };
+    },
+  };
+}
+
+const code = check({
+  argv: process.argv.slice(2),
+  steps: (all) => [
+    { step: node('格式（biome）', 'node_modules/@biomejs/biome/bin/biome', ['check', '.']) },
+    { step: node('类型（tsc -b）', 'node_modules/typescript/bin/tsc', ['-b']) },
+    all
+      ? { step: node('测试（全量 vitest run）', 'node_modules/vitest/vitest.mjs', ['run']) }
+      : {
+          // test:changed：2 = 没算出改到什么（origin/main 读不到、git 没成），3 = 判出要全跑、本机拒跑；都不是「没有要跑的」。
+          step: node('测试（改到的，相对 origin/main）', 'packages/conventions/src/bin/test-changed.ts', []),
+          notRunCodes: [2, 3],
+        },
+    { step: node('卫生检查', 'packages/hygiene/src/bin/check.ts', []) },
+  ],
+  now: () => Date.now(),
+  out: (l) => console.log(l),
+  err: (l) => console.error(l),
+});
+process.exit(code);
