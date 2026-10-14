@@ -42,6 +42,7 @@ import {
   GroomNowResponse,
   type GroomRequestView,
   GroomStatusResponse,
+  githubInstallLinks,
   groomQuota,
   HARD_BANS,
   HomeResponseSchema,
@@ -2162,6 +2163,24 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     async importRepo(raw) {
       await wait();
+      // 机器人装没装：照清单里的标记如实回（没装全就是「未接入」，仍然导入）
+      const installFields = (r: {
+        owner: string;
+        ownerType: 'User' | 'Organization';
+        agentInstalled: boolean;
+        engineInstalled: boolean;
+      }) => {
+        const missing = (['agent', 'engine'] as const).filter((k) => !r[`${k}Installed`]);
+        return {
+          appsInstalled: missing.length === 0,
+          agentInstalled: r.agentInstalled,
+          engineInstalled: r.engineInstalled,
+          installLinks:
+            missing.length === 0
+              ? []
+              : githubInstallLinks({ owner: r.owner, ownerType: r.ownerType, missing }),
+        };
+      };
       const body = ImportRepoRequest.parse(raw);
       const repo = mockImportRepos().find((r) => r.githubId === body.githubId);
       if (!repo) throw new ApiError(404, 'repo_not_visible', '这个仓不在你 GitHub 账号能看到的范围里');
@@ -2176,6 +2195,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           owner: existing.owner,
           name: existing.name,
           created: false,
+          ...installFields(repo),
         });
       }
       const created = {
@@ -2199,6 +2219,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         owner: created.owner,
         name: created.name,
         created: true,
+        ...installFields(repo),
       });
     },
     async removeRepo(repoId) {

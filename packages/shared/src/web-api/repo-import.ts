@@ -14,6 +14,41 @@ export const GITHUB_OAUTH_CONNECT = 'github.oauth.connect';
 export const GITHUB_OAUTH_DISCONNECT = 'github.oauth.disconnect';
 export const GITHUB_INSTALL_REPO = 'github.install.repo';
 
+/** 两个机器人在 GitHub 上的 App 名。 */
+export const GITHUB_APP_SLUGS = { agent: 'fleet-dao-agent', engine: 'fleet-dao-engine' } as const;
+export type GitHubAppRoleName = keyof typeof GITHUB_APP_SLUGS;
+
+/** 没装机器人时在界面上明说的那一句（导入界面、「要你拍的」、警告共用，别各写各的）。 */
+export const APPS_NOT_INSTALLED_HINT = '先去 GitHub 把两个机器人装到这个仓';
+
+/** 一条去 GitHub 的直达链接。 */
+export const InstallLinkSchema = z.object({ label: z.string(), url: z.string() });
+export type InstallLink = z.infer<typeof InstallLinkSchema>;
+
+/**
+ * 去 GitHub 装机器人的直达链接：缺的每个 App 一条「装到这个仓」的页面，加一条 GitHub 安装设置页
+ * （个人账号的仓去 settings/installations，组织的仓去该组织的 settings/installations；owner 类型不明时给个人的）。
+ */
+export function githubInstallLinks(input: {
+  owner: string;
+  ownerType?: 'User' | 'Organization' | undefined;
+  missing: readonly GitHubAppRoleName[];
+}): InstallLink[] {
+  const links: InstallLink[] = input.missing.map((role) => ({
+    label: `装「${GITHUB_APP_SLUGS[role]}」`,
+    url: `https://github.com/apps/${GITHUB_APP_SLUGS[role]}/installations/new`,
+  }));
+  links.push(
+    input.ownerType === 'Organization'
+      ? {
+          label: `${input.owner} 的安装设置`,
+          url: `https://github.com/organizations/${encodeURIComponent(input.owner)}/settings/installations`,
+        }
+      : { label: 'GitHub 安装设置', url: 'https://github.com/settings/installations' },
+  );
+  return links;
+}
+
 /**
  * 一个仓在「导入仓库」列表里的一行。三件事各用一个字段说清，页面据此决定能不能一键加：
  * - 是不是组织的仓（组织仓要组织先批准 App，本人点了也只是「请求」）；
@@ -88,6 +123,17 @@ export const ImportRepoResponse = z.object({
   name: z.string(),
   /** false = 本来就在驾驶舱里（没重复建）。 */
   created: z.boolean(),
+  /**
+   * 两个机器人都装到这个仓了吗。false = 未接入：仍然导入了，但界面要明说 APPS_NOT_INSTALLED_HINT 并给 installLinks；
+   * null = 没查成（installCheckWhy 写原因），不当成装了也不当成没装。
+   */
+  appsInstalled: z.boolean().nullable(),
+  /** 具体缺哪个（appsInstalled=false 时有意义）。 */
+  agentInstalled: z.boolean(),
+  engineInstalled: z.boolean(),
+  /** 没装全时去 GitHub 的直达链接；装全了为空。 */
+  installLinks: z.array(InstallLinkSchema),
+  installCheckWhy: z.string().optional(),
 });
 export type ImportRepoResponse = z.infer<typeof ImportRepoResponse>;
 

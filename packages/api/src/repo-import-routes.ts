@@ -14,6 +14,7 @@ import {
   GITHUB_INSTALL_REPO,
   GITHUB_OAUTH_CONNECT,
   GITHUB_OAUTH_DISCONNECT,
+  githubInstallLinks,
   type ImportableRepo,
   ImportableReposResponse,
   ImportRepoRequest,
@@ -98,6 +99,40 @@ function toImportable(
     ...(cockpit.reposId === undefined ? {} : { reposId: cockpit.reposId }),
     canInstall: blocked === undefined && !fullyInstalled,
     ...(blocked === undefined ? {} : { installBlockedWhy: blocked }),
+  };
+}
+
+type Installs = Awaited<ReturnType<GitHubUserPort['installationsForApp']>>;
+
+/**
+ * 两个 App 在这个仓上装了没：按 owner 找各自的安装，再读该安装能访问的仓编号。
+ * selection=all 时这个账号下的仓都算装了，不用再去问仓编号（再 PUT 单个仓 GitHub 会拒）；没有那一边的令牌就当没装。
+ */
+async function repoInstallState(
+  p: GitHubUserPort,
+  repo: { id: number; owner: string },
+  ctx: {
+    agentInstalls: Installs;
+    engineInstalls: Installs;
+    agentToken: string | null;
+    engineToken: string | null;
+  },
+): Promise<{ agent: boolean; engine: boolean }> {
+  const key = repo.owner.toLowerCase();
+  const agentInstall = ctx.agentInstalls.get(key);
+  const engineInstall = ctx.engineInstalls.get(key);
+  const { agentToken, engineToken } = ctx;
+  const [agentIds, engineIds] = await Promise.all([
+    agentInstall === undefined || agentInstall.selection === 'all' || !agentToken
+      ? Promise.resolve(new Set<number>())
+      : p.installationRepoIds(agentToken, agentInstall.id),
+    engineInstall === undefined || engineInstall.selection === 'all' || !engineToken
+      ? Promise.resolve(new Set<number>())
+      : p.installationRepoIds(engineToken, engineInstall.id),
+  ]);
+  return {
+    agent: agentInstall?.selection === 'all' || agentIds.has(repo.id),
+    engine: engineInstall?.selection === 'all' || engineIds.has(repo.id),
   };
 }
 
@@ -227,21 +262,10 @@ export function registerRepoImportRoutes(
     const installedIds = new Map<number, { agent: boolean; engine: boolean }>();
     await Promise.all(
       repos.map(async (repo) => {
-        const key = repo.owner.toLowerCase();
-        const agentInstall = agentInstalls.get(key);
-        const engineInstall = engineInstalls.get(key);
-        const [agentIds, engineIds] = await Promise.all([
-          agentInstall === undefined || agentInstall.selection === 'all' || !agentToken
-            ? Promise.resolve(new Set<number>())
-            : p.installationRepoIds(agentToken, agentInstall.id),
-          engineInstall === undefined || engineInstall.selection === 'all' || !engineToken
-            ? Promise.resolve(new Set<number>())
-            : p.installationRepoIds(engineToken, engineInstall.id),
-        ]);
-        installedIds.set(repo.id, {
-          agent: agentInstall?.selection === 'all' || agentIds.has(repo.id),
-          engine: engineInstall?.selection === 'all' || engineIds.has(repo.id),
-        });
+        installedIds.set(
+          repo.id,
+          await repoInstallState(p, repo, { agentInstalls, engineInstalls, agentToken, engineToken }),
+        );
       }),
     );
 
@@ -261,7 +285,9 @@ export function registerRepoImportRoutes(
     const userId = c.get('user').id;
     const body = await readJson(c, ImportRepoRequest);
     const p = port();
-    const token = (await tokenOf(deps, userId, 'agent')) ?? (await tokenOf(deps, userId, 'engine'));
+    const agentToken = await tokenOf(deps, userId, 'agent');
+    const engineToken = await tokenOf(deps, userId, 'engine');
+    const token = agentToken ?? engineToken;
     if (!token) throw new ApiError(409, 'github_not_connected', '还没连接 GitHub，先在页面上连一下');
 
     // 从本人可见的仓里找这个编号：找不到 = 不是他的仓（或号是编的），不猜。
@@ -297,10 +323,37 @@ export function registerRepoImportRoutes(
         ok: true,
       },
     );
+    // 导入不因机器人没装而拒（仓照样接进来），但要当场核一遍并如实告诉界面：没装全就标「未接入」、给直达链接。
+    // 核不成（GitHub 连不上）回 null 加原因，不当成装了。
+    let install: { agent: boolean; engine: boolean } | null = null;
+    let installCheckWhy: string | undefined;
+    try {
+      const [agentInstalls, engineInstalls]: [Installs, Installs] = await Promise.all([
+        agentToken ? p.installationsForApp('agent', agentToken) : Promise.resolve(new Map()),
+        engineToken ? p.installationsForApp('engine', engineToken) : Promise.resolve(new Map()),
+      ]);
+      install = await repoInstallState(p, repo, { agentInstalls, engineInstalls, agentToken, engineToken });
+    } catch (err) {
+      installCheckWhy = `没能核对两个机器人装没装：${err instanceof Error ? err.message : String(err)}`;
+    }
+    const missing = (['agent', 'engine'] as const).filter((role) => install !== null && !install[role]);
     return reply(
       c,
       ImportRepoResponse,
-      { repoId: result.repo.id, owner: result.repo.owner, name: result.repo.name, created: result.created },
+      {
+        repoId: result.repo.id,
+        owner: result.repo.owner,
+        name: result.repo.name,
+        created: result.created,
+        appsInstalled: install === null ? null : missing.length === 0,
+        agentInstalled: install?.agent ?? false,
+        engineInstalled: install?.engine ?? false,
+        installLinks:
+          missing.length === 0
+            ? []
+            : githubInstallLinks({ owner: repo.owner, ownerType: repo.ownerType, missing }),
+        ...(installCheckWhy === undefined ? {} : { installCheckWhy }),
+      },
       result.created ? 201 : 200,
     );
   });
