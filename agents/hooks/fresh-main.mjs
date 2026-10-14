@@ -1,6 +1,6 @@
 // 取远端，取不成换一条路再取一次：开会话钩子（session-start.mjs）和起子代理前的钩子（pretool.mjs）共用。
 //
-// 为什么有它（创始人 2026-10-05：「其他分支做任务前，没有让 main 追平 origin/main，导致做的内容会落后」）：
+// 为什么有它：
 // 子代理的工作树是从**本地记着的** origin/main 切出来的，建树那一刻不会去取远端；本机取不到远端时
 // origin/main 就停在隔夜的提交上，子代理在旧代码上干活、开出来的 PR 一堆冲突。
 //
@@ -11,7 +11,7 @@
 //   不是代理坏了）：被拒当场就失败，所以第二次直连不会多花多少时间。代理挂着不回话的慢失败，靠每次各自的超时兜住。
 // - 两次都没成，把两次各自为什么写在一起返回；绝不把「没取成」说成成功（调用方据此明说「没查成」或拦下）。
 // - 只管 fetch，不动工作区、不动本地分支（钩子里改检出太冒险；追平本地 main 另有开会话钩子里的快进）。
-// - 第三条路：备用代理（2026-10-10 晚）。当晚 Claude 会话进程环境里的 HTTP(S)_PROXY（reclaude 的本地口）死了、连接被拒，
+// - 第三条路：备用代理。当晚 Claude 会话进程环境里的 HTTP(S)_PROXY（reclaude 的本地口）死了、连接被拒，
 //   直连 GitHub 又在 3 秒内没回，而本机 Clash 口 127.0.0.1:7890 是通的（手动 git -c http.proxy=… fetch 立刻成功），
 //   钩子只会「环境代理 → 直连」，子代理一个都派不出去。所以每台机器可以在 ~/.fleet-dao/fallback-proxy（不进仓、不是密钥）
 //   第一行写一个 http:// 或 socks5:// 地址，前两条路都没成才经它取一次（via 为 'fallback'）。读法见 git-run.mjs 的 readFallbackProxy。
@@ -29,7 +29,7 @@ import { hasProxy } from './git-run.mjs';
 
 /**
  * 这次失败是不是「几个进程同时在取同一个远端、别人刚把引用更新了」的竞争：
- * 2026-10-05 同时起十来个子代理时撞到 `cannot lock ref 'refs/remotes/origin/main': is at A but expected B`，
+ * 同时起十来个子代理时撞到 `cannot lock ref 'refs/remotes/origin/main': is at A but expected B`，
  * 被误当成取不到远端、拦了子代理——其实 origin/main 刚被别人更新到最新。这种失败原路再取一次就好，不是网络问题。
  * @param {GitResult} r
  */
@@ -106,9 +106,9 @@ const MIN_TRY_MS = 1_000;
 
 /**
  * 起子代理前取远端的时间预算：调工具前钩子总共只有 10 秒（targets.ts），三条路加起来要留出余量，总预算 9 秒。
- * 首选路（环境里的代理，reclaude 的口）给 6 秒——2026-10-05 同时起了十来个子代理，代理瞬时慢过 4 秒，三个带工作树的子代理被误拦；
- * 直连只是兜底给 3 秒（这台机器上直连经常直接超时，实测 21 秒才报错）；
- * 备用代理（~/.fleet-dao/fallback-proxy，本机的 Clash 口）给 3 秒——第三条路，为什么有它见文件头 2026-10-10 那段。
+ * 首选路（环境里的代理，reclaude 的口）给 6 秒——同时起了十来个子代理，代理瞬时慢过 4 秒，三个带工作树的子代理被误拦；
+ * 直连只是兜底给 3 秒（这台机器直连常常要 20 多秒才报超时）；
+ * 备用代理（~/.fleet-dao/fallback-proxy，本机的 Clash 口）给 3 秒——第三条路，为什么有它见文件头「第三条路」那段。
  * 三个数加起来是 12 秒，所以靠总预算压：环境代理被拒当场失败的（0 毫秒）不占预算，直连和备用代理都拿得满；
  * 环境代理拖满 6 秒时，直连让位（只拿「9 − 6 − 3」，不足 1 秒就不试），留 3 秒给备用代理；没配备用代理时直连照旧拿满 3 秒。
  */
@@ -188,7 +188,7 @@ export function markFetchOk(o) {
 /**
  * 起子代理（Agent / Task）之前，把 origin/main 取到最新：子代理的工作树从它切（见文件头）。
  * 取成了、不是 Agent/Task、不在 git 仓里、没有 origin：什么都不说（返回 null）。
- * 取不成：要建工作树的（isolation 是 worktree）给一句提示（不拦，决定 0089），说清 origin/main 停在多久以前、交代里先 fetch 再 rebase；
+ * 取不成：要建工作树的（isolation 是 worktree）给一句提示，说清 origin/main 停在多久以前、交代里先 fetch 再 rebase；
  * 不建工作树的不说话（它不从 origin/main 切）。
  * `git(cwd, args, opts)` 同 fetchWithFallback；不抛。
  * 这个仓三分钟内刚取成过：不再取，直接放行。取失败不记成功。

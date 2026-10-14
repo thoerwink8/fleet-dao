@@ -1,5 +1,5 @@
-// PreToolUse 钩子。登记在 fleet-dao 仓的 .claude/settings.json（项目级，不写 matcher），不装进用户级设置（决定 0083）。
-// 只管主对话的一条（决定 0078 的第 1 条；钩子中转由决定 0083 删掉，「前台派子代理就拒」由决定 0089 删掉：两天 0 次命中）：
+// PreToolUse 钩子。登记在 fleet-dao 仓的 .claude/settings.json（项目级，不写 matcher），不装进用户级设置。
+// 只管主对话的一条：
 // 引导先回。创始人在一轮中途打的字叫「引导」：transcript 里是一行 attachment（type: queued_command，commandMode: prompt），
 // 附在下一次工具结果后面送进主对话。最后一条引导之后，主对话还没写过一段非空文字，就拒这次工具调用。
 // 不再读 diag、不再起 ui-cli。以前转过的记在 ~/.fleet-dao/steer-shown/，开会话对账还读，这边只留路径、不再写。
@@ -146,7 +146,7 @@ function newTurn(o) {
 
 /**
  * 不是人说的、由 Claude Code 自己开的一轮：后台任务的完成通知把会话叫醒、Stop 钩子把收尾挡回来。
- * 2026-10-11 实测：把它们当成「收到了创始人的话」，Mirasim 的引导还没送到钩子就不转了。
+ * 把它们当成「收到了创始人的话」，Mirasim 的引导还没送到钩子就不转了。
  * @param {string} text
  */
 function machineTurn(text) {

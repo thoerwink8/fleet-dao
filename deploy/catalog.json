@@ -182,7 +182,7 @@
       "upstreamModel": "gpt-5.6-luna"
     },
     {
-      "_说明": "codex 经 Mirasim 起、走中转，点名 gpt-6.1-sol（模型 id 仍叫 gpt-6-sol）。创始人 2026-10-07：「reviewer默认改成gpt6.1sol 走mirasim渠道」，验收用途排第一；GPT 不做界面，不挂 ui。为什么不点 gpt-6-sol：它在 Mirasim 服务端 0.0.425 的静态表里，但不在中转给这个账号的名单里，服务端起会话时悄悄换成 gpt-6-astra，探针判回话的模型不是点名的那个（#1298，法国库 2026-10-08 查到）；2026-10-01 实测 codex 六个模型全成，读回就是 gpt-6.1-sol（docs/archive/progress-2026-10-01.md），0.0.425 对表外的串原样放行，所以改点这个串，待探针验证。",
+      "_说明": "codex 经 Mirasim 起、走中转，点名 gpt-6.1-sol（模型 id 仍叫 gpt-6-sol）；验收用途排第一；GPT 不做界面，不挂 ui。不点 gpt-6-sol：它不在中转给这个账号的名单里，服务端会悄悄换成 gpt-6-astra，探针会判回话的不是点名的模型。",
       "id": "mirasim-relay:gpt-6-sol:mirasim",
       "poolId": "mirasim-relay",
       "modelId": "gpt-6-sol",

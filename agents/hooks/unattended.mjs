@@ -1,9 +1,8 @@
-// 无人值守：活由 Agent 子代理干、不脱离会话（决定 0030，替代 0026 的脱离工人），这个会话自己「不结束这一轮」、等子代理的完成通知、收创始人的引导、汇报
-// （决定 0028，创始人 2026-10-07 约 02:27 推翻 0026 里「起完工人这一轮结束、收尾不拦」：「无人值守模式，会话不应该轮次中断」）。
+// 无人值守：活由 Agent 子代理干、不脱离会话，这个会话自己「不结束这一轮」、等子代理的完成通知、收创始人的引导、汇报
 // 三处用它：命令行（AI 按创始人的话开关）、Stop 钩子（stop.mjs：开着就把「结束这一轮」挡回去）、PreToolUse 钩子
 // （pretool.mjs：调了工具就记一笔「在干活」）。开会话钩子也读它，上下文被总结、会话重启之后还知道开着。
 //
-// 用法（AI 在创始人说「进入无人值守」「过夜」「我在睡觉」时跑 on，说「停」「退出无人值守」时跑 off）：
+// 用法（创始人说「进入无人值守」「过夜」「我在睡觉」时跑 on，说「停」「退出无人值守」时跑 off）：
 //   node ~/.fleet-dao/hooks/unattended.mjs on [--hours 12]      开（最长 12 小时，默认 12）；只在这个会话自己跑了 on 才挡
 //   node ~/.fleet-dao/hooks/unattended.mjs done "做完了什么"    全做完（子代理都收口、队列空了）：放行收尾
 //   node ~/.fleet-dao/hooks/unattended.mjs needs-you "要他拍什么"  碰人闸：放行收尾，把问题放最后一条等他
@@ -13,7 +12,7 @@
 // 改这里之前必须知道（规矩由 agents/test/rules/stop.rules.test.ts 钉住）：
 // - 只有这个会话自己跑了 on 才挡：状态按会话号存（~/.fleet-dao/unattended/<会话号>.json，会话号来自环境变量 CLAUDE_CODE_SESSION_ID，
 //   Stop、PreToolUse 的输入里同一个号），别的会话、别的机器、工人和反方（机器派的会话，on 直接拒）都不受影响。
-//   起子代理、监视、后台命令不自动开（决定 0026 第 2 条保留，不要把「起后台活自动开」加回来）。会话号拿不到，on 明确失败。
+//   起子代理、监视、后台命令不自动开。会话号拿不到，on 明确失败。
 // - 放行的几种：off；done / needs-you；开着满 12 小时；空转（挡回去之后连着多次一个工具都没调：给
 //   MAX_IDLE_BLOCKS 次，防死循环）；总次数上限；状态读不了 / 写不了
 //   （放行是为了不把人困住，但要说清楚是故障，不是正常收尾）。这几个数不要凭感觉改大——改大等于允许多烧额度。
@@ -42,7 +41,7 @@ const errCode = (e) => (typeof e === 'object' && e !== null && 'code' in e ? e.c
 const messageOf = (e) => (typeof e === 'object' && e !== null && 'message' in e ? e.message : undefined);
 
 export const DEFAULT_HOURS = 12;
-/** 开着最长这么久，到点自动放行（创始人 2026-10-07：开着超过 12 小时放行）。 */
+/** 开着最长这么久，到点自动放行。 */
 export const MAX_HOURS = 12;
 /** 被挡回去后连着这么多次没调过工具就放行：没有什么可盯的了，别空转。 */
 export const MAX_IDLE_BLOCKS = 3;
@@ -139,7 +138,7 @@ const fmt = (iso) => new Date(iso).toISOString().replace('T', ' ').slice(0, 16);
 
 /**
  * 机器自己起的会话的第一条提示：反方（「你是「反方」」，discuss 技能起的）。
- * 它也走 UserPromptSubmit，不是创始人说的话（2026-10-05 开会话钩子列「创始人最近的话」，真话被这类提示挤出最后 5 条）。
+ * 它也走 UserPromptSubmit，不是创始人说的话。
  * @param {unknown} prompt
  */
 export function isMachineOpening(prompt) {
@@ -211,7 +210,7 @@ export function decideStop({ dir, sessionId, now = Date.now() }) {
       };
     }
     const s = r.state;
-    // auto：旧版「起后台活自动开」留下的状态文件，决定 0026 起不认（只有这个会话自己跑 on 才挡）
+    // auto：旧版「起后台活自动开」留下的状态文件，现在不认（只有这个会话自己跑 on 才挡）
     if (s === null || s.state !== 'on' || s.auto === true) return { block: false };
     if (now > Date.parse(s.expiresAt)) {
       removeState(dir, sessionId);

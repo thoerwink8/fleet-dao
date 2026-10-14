@@ -7,7 +7,7 @@
 // - 一律 `git -C <目录>` 跑、不用 spawn 的 cwd：目录不在时 git 自己说「cannot change to」（退出码 128，当成「不是仓」），
 //   用 cwd 的话 spawn 直接报 ENOENT，和「git 不在」分不开。
 // - 超时、起不来、Windows 上 0xC0000xxx 那类大退出码都是「git 没跑起来」（gitBroken），和「git 说这里不是仓」分开：
-//   2026-09-30 本机 git 缺 DLL（退出码 3221225781）被说成「不是 git 仓」，把真毛病盖住了。
+// 本机 git 缺 DLL（退出码 3221225781）被说成「不是 git 仓」，把真毛病盖住了。
 
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -61,7 +61,7 @@ export function gitRunner(timeoutMs = GIT_MS, directTimeoutMs = timeoutMs) {
       [
         ...(opts.proxy ? ['-c', `http.proxy=${opts.proxy}`] : []),
         // 直连要连 git 配置里的代理一起盖成空：agents-sync 会设 http.https://github.com/.proxy（git-proxy.ts），
-        // 它比环境变量优先，只去掉环境变量还是走代理（2026-10-13）
+        // 它比环境变量优先，只去掉环境变量还是走代理
         ...(opts.direct ? DIRECT_CONFIG : []),
         '-C',
         dir,
@@ -128,7 +128,7 @@ export function gitBroken(r) {
 
 /**
  * 一次命令为什么没成：超时、起不来、输出的第一行，或者 Windows 上程序没起来给的大退出码
- * （0xC0000135 = 缺 DLL；本机 2026-09-30 撞过，光写十进制看不出来）。不只 git：跑 node、gh 的结果同一个形状也用它。
+ * （0xC0000135 = 缺 DLL，光写十进制看不出来）。不只 git：跑 node、gh 的结果同一个形状也用它。
  * @param {GitResult} r
  */
 export function gitWhy(r) {

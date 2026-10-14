@@ -1276,8 +1276,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             route.alive = false;
             return { routeId: id, outcome: 'skipped', detail, at: iso() };
           };
-          if (channel?.billing === 'metered')
-            return skip('按量计费的渠道不自动探：探一次就多一笔账（design 第三节第 21 条）');
+          if (channel?.billing === 'metered') return skip('按量计费的渠道不自动探：探一次就多一笔账');
           if (model?.retiredAt && Date.parse(model.retiredAt) <= t)
             return skip(`模型「${model.displayName}」已下架，不探`);
           if (switchedOff.has(id))
