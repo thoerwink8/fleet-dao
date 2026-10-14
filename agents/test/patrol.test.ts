@@ -1,7 +1,8 @@
 // 法国只读巡查（patrol-lib.mjs，决定 0034，#1372）：监控的主体是脚本，读不成一律 BROKEN、不当 OK；基线只由脚本写。
 // ssh 全是假的（fetchRaw 换掉）；基线文件换成内存里的一份。故意造的失败：空输出、截断、库查询报错、采集时间过旧、
 // 认不出的行、ssh 名字没配，都必须判 BROKEN；坏样本必须判 ALERT。
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -381,5 +382,68 @@ describe('巡查脚本：发版事故和健康页（2026-10-14 法国发版失�
     expect(s).toContain('/srv/fleet-dao-releases/.train/release-train.json');
     expect(s).toContain('/srv/fleet-dao-releases/.auto/state.json');
     expect(s).not.toMatch(/curl.*(?:-X|--data|-d )/);
+  });
+});
+
+describe('巡查脚本：发版文件原样传回来（回归：sh 的 echo 会把 JSON 字符串里的 \\n 变成真换行，法国回来的进度记录就「不是 JSON」）', () => {
+  /** 进度记录、状态文件里字符串内有转义的 \n、\t、\"、反斜杠：法国上真实的 why 字段就带 */
+  const train = JSON.stringify(
+    { status: 'failed', why: 'release.sh 第一行\n第二行\t制表\r"引号"\\反斜杠' },
+    null,
+    2,
+  );
+  const state = JSON.stringify(
+    {
+      main: { commits: [['a'.repeat(40), '2026-10-14T17:00:00Z']] },
+      auto: { note: '现在不发：要人看\n换行' },
+    },
+    null,
+    1,
+  );
+  let dir = '';
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = '';
+  });
+
+  /** 真用 sh 跑远端脚本里读这两份文件的两行（把发布目录换成临时目录），回它们打出来的行 */
+  function runRemoteLines(): string[] {
+    dir = mkdtempSync(join(tmpdir(), 'patrol-rel-'));
+    mkdirSync(join(dir, '.train'));
+    mkdirSync(join(dir, '.auto'));
+    writeFileSync(join(dir, '.train', 'release-train.json'), train);
+    writeFileSync(join(dir, '.auto', 'state.json'), state);
+    const rel = dir.replaceAll('\\', '/');
+    const lines = lib.REMOTE_SCRIPT.split('\n').filter((l) => /^if \[ -r \S+\/\.(train|auto)\//.test(l));
+    expect(lines).toHaveLength(2);
+    const script = lines.map((l) => l.replaceAll('/srv/fleet-dao-releases', rel)).join('\n');
+    return execFileSync('sh', ['-c', script], { encoding: 'utf8' })
+      .split('\n')
+      .filter((l) => l !== '');
+  }
+
+  it('进度记录、状态文件各占一行、能 JSON.parse，内容（去掉空白后）和原文件一致', () => {
+    const out = runRemoteLines();
+    expect(out).toHaveLength(2);
+    const [t, s] = out as [string, string];
+    expect(t.startsWith('train|')).toBe(true);
+    expect(s.startsWith('state|')).toBe(true);
+    expect(JSON.parse(t.slice('train|'.length)).why).toContain('第一行\n第二行');
+    expect(JSON.parse(s.slice('state|'.length)).auto.note).toBe('现在不发：要人看\n换行');
+  });
+
+  it('传回来的整屏过 parseRaw 不报「不是 JSON」（落后、自动发布「要人看」照样判出）', () => {
+    const [t, s] = runRemoteLines();
+    const raw = lib
+      .sampleRaw({ at: NOW })
+      .replace(/^train\|.*$/m, t ?? '')
+      .replace(/^state\|.*$/m, s ?? '');
+    const p = lib.parseRaw(raw);
+    expect(p.ok, p.ok ? '' : p.why).toBe(true);
+  });
+
+  it('远端脚本里读这两份文件不用 echo（dash 的 echo 会解释反斜杠）', () => {
+    for (const l of lib.REMOTE_SCRIPT.split('\n').filter((x) => /\.(train|auto)\//.test(x)))
+      expect(l).not.toMatch(/then echo "(train|state)\|\$\(/);
   });
 });
