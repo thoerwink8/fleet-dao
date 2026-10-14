@@ -5,7 +5,8 @@
 # deploy/release.sh 往香港发静态文件的那一段（release.env 的 FLEET_HK_PARTS 选）：web 把驾驶舱整套发到根地址、
 # 根上不是这一版的一律删（香港上老的 /demo/ 目录也在内，不再排除）。
 # 香港上老的 /demo/ 目录（演示版已删，创始人 2026-10-07，#1223）：发布时经上传的路删掉（一次性、幂等、目录不在也算过），
-# 读回它回 404 才算过；读不出来、删不掉、删完不是 404 都判红。香港站点配置（deploy/hk/nginx-*.conf）里 /demo 一律 404。
+# 删成了读回它回 404 才算过；读不出来、删完不是 404 判红。rsync 没成（超时、排队轮不到）只记待处理、不挡发版。
+# 香港站点配置（deploy/hk/nginx-*.conf）里 /demo 一律 404。
 # rsync、curl 换成桩（curl 按一个假香港的目录答、rsync 照参数在假香港上删目录），其余是 release.sh 里的真代码。
 # 用法：bash deploy/test/web-publish.test.sh。退出码：0 通过，1 不通过，2 有没跑成的。
 set -uo pipefail
@@ -170,8 +171,9 @@ check "发静态文件也排队：轮不到就报红，一次都没推" \
 reset
 RSYNC_RETIRE_FAIL=0
 retire_hk_dir >/dev/null
-check "删老目录也排队：轮不到就报红，一次都没推" \
-  "${#REDS[@]} $(printf '%s\n' "${REDS[@]}" | grep -c '删香港上老的') $(grep -c . "$TMP/rsync.log")" "1 1 0"
+rc=$?
+check "删老目录也排队：轮不到只记待处理、不挡发版，一次都没推" \
+  "$rc ${#REDS[@]} $(printf '%s\n' "${PENDING[@]}" | grep -c '删香港上老的') $(grep -c . "$TMP/rsync.log")" "0 0 1 0"
 HK_RSYNC_WAIT=120
 exec 8>&-
 reset
@@ -309,8 +311,8 @@ else
   retire
   rc=$?
   RSYNC_RETIRE_FAIL=0
-  check "删的时候 rsync 失败：判红、不读回、记录不删" \
-    "$rc:$(reds_with_text '删香港上老的'):$([[ -e "$HK_RETIRED_RECORD" ]] && echo 在 || echo 没了)" "1:1:在"
+  check "删的时候 rsync 失败：不挡发版、记待处理、不读回、记录不删" \
+    "$rc:${#REDS[@]}:$(printf '%s\n' "${PENDING[@]}" | grep -c '删香港上老的'):$([[ -e "$HK_RETIRED_RECORD" ]] && echo 在 || echo 没了)" "0:0:1:在"
   rm -f -- "$HK_RETIRED_RECORD"
 
   echo "== 健康检查：根地址的版本标记、健康页对；老目录读回 404"

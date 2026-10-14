@@ -1,7 +1,14 @@
 // 优雅停机（src/shutdown.ts）：main.ts 的停机顺序抽成的可测函数——关库在在途请求做完之后、
 // 有上限不会无限等下去，各写一条故意造出来的失败场景钉住（#364：库关早了，在途请求查库会报错，回 500）。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { closeConnectionWhenStopping, type DrainableServer, gracefulShutdown } from '../src/shutdown.ts';
+import {
+  closeConnectionWhenStopping,
+  type DrainableServer,
+  drainGate,
+  gracefulShutdown,
+  type LegacyInflight,
+  waitLegacy,
+} from '../src/shutdown.ts';
 
 describe('closeConnectionWhenStopping：停机之后的响应补 Connection: close', () => {
   it('还没停机：原样放行，不加头', async () => {
@@ -62,6 +69,73 @@ function fakeServer(
     closeAllConnections: () => log.push(`${name}.closeAllConnections`),
   };
 }
+
+describe('drainGate / waitLegacy：停机排空时继续答 /healthz', () => {
+  const okFetch = () => Promise.resolve(new Response('ok', { status: 200 }));
+
+  it('还没停：请求原样进去，做完把在途数减回来', async () => {
+    const legacy: LegacyInflight = { n: 0 };
+    let saw = 0;
+    const wrapped = drainGate(
+      () => {
+        saw = legacy.n;
+        return okFetch();
+      },
+      () => false,
+      legacy,
+    );
+    const res = (await wrapped(new Request('http://x/api'), undefined as never)) as Response;
+    expect(res.status).toBe(200);
+    expect(saw).toBe(1);
+    expect(legacy.n).toBe(0);
+  });
+
+  it('停了之后：普通请求立刻 503，不进业务、不计在途', async () => {
+    const legacy: LegacyInflight = { n: 0 };
+    let called = false;
+    const wrapped = drainGate(
+      () => {
+        called = true;
+        return okFetch();
+      },
+      () => true,
+      legacy,
+    );
+    const res = (await wrapped(new Request('http://x/api'), undefined as never)) as Response;
+    expect(called).toBe(false);
+    expect(legacy.n).toBe(0);
+    expect(res.status).toBe(503);
+    expect(res.headers.get('connection')).toBe('close');
+    expect(await res.json()).toEqual({ error: { code: 'stopping', message: '正在停，请再试一次' } });
+  });
+
+  it('停了之后：/healthz 仍交给里面，并补 Connection: close', async () => {
+    const wrapped = drainGate(
+      () => okFetch(),
+      () => true,
+      { n: 0 },
+    );
+    const res = (await wrapped(new Request('http://x/healthz'), undefined as never)) as Response;
+    expect(res.status).toBe(200);
+    expect(res.headers.get('connection')).toBe('close');
+    expect(await res.text()).toBe('ok');
+  });
+
+  it('在途请求做完就返回；一直不做完就到点返回', async () => {
+    const legacy: LegacyInflight = { n: 1 };
+    const start = Date.now();
+    const done = waitLegacy(legacy, 1_000);
+    setTimeout(() => {
+      legacy.n = 0;
+    }, 30);
+    await done;
+    expect(Date.now() - start).toBeLessThan(500);
+
+    const stuck = Date.now();
+    await waitLegacy({ n: 2 }, 40);
+    expect(Date.now() - stuck).toBeGreaterThanOrEqual(30);
+  });
+});
 
 describe('gracefulShutdown：停机的先后顺序和上限', () => {
   beforeEach(() => {

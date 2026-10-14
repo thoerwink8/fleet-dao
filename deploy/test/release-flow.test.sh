@@ -382,6 +382,44 @@ eval "$has_service_saved"
 unset -f systemctl
 api_report_before() { :; }
 
+echo "== 健康检查：装配中的占位报告接着等；连不上连着三次才放弃"
+# api_healthz 是在 $(...) 里被叫的，计数写在变量里出了子 shell 就没了，所以记在文件上
+api_healthz_saved=$(declare -f api_healthz)
+healthz_n() { wc -l <"$TMP/healthz-n" | tr -d ' '; }
+: >"$TMP/healthz-n"
+api_healthz() {
+  printf 'x\n' >>"$TMP/healthz-n"
+  if (($(healthz_n) < 3)); then
+    printf '503\t%s' '{"ok":false,"checks":{"startup":{"ok":false,"code":"starting","message":"还在启动"}}}'
+    return 0
+  fi
+  printf '200\t%s' '{"ok":true,"checks":{"database":{"ok":true}}}'
+}
+got=$(api_healthz_ready)
+rc=$?
+check "还在启动：等到正式报告" "$rc" 0
+check "还在启动：试了 3 次" "$(healthz_n)" 3
+check "还在启动：交回的是正式报告" "${got%%$'\t'*}" 200
+: >"$TMP/healthz-n"
+api_healthz() {
+  printf 'x\n' >>"$TMP/healthz-n"
+  return 1
+}
+got=$(api_healthz_ready)
+rc=$?
+check "连不上：试满 3 次就放弃" "$(healthz_n):$rc:$got" "3:1:连不上"
+: >"$TMP/healthz-n"
+API_HEALTHZ_LIMIT=3
+api_healthz() {
+  printf 'x\n' >>"$TMP/healthz-n"
+  printf '503\t%s' '{"ok":false,"checks":{"startup":{"ok":false,"code":"starting","message":"还在启动"}}}'
+}
+got=$(api_healthz_ready)
+rc=$?
+check "一直在启动：等到上限放弃，不当成正式报告" "$(healthz_n):$rc:$got" "3:2:还在启动"
+API_HEALTHZ_LIMIT=15
+eval "$api_healthz_saved"
+
 rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
 GATE=()
 MIG=()

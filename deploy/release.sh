@@ -3,7 +3,7 @@
 # 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移、装目录、装路由两层 → 照这一版的期望写本机配置（#323：只写期望变了的
 # 公开键）→ 切过去、按本机配置起应用服务
 # （release.env 的 FLEET_HK_PARTS 明写了 web，才把驾驶舱静态文件经隧道发到香港根地址；香港上老的目录发布时删掉，
-# 读回核对它回 404，#1223）→ 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。幂等：同一个提交跑第二遍什么都不变。
+# 读回核对它回 404，#1223；删目录的 rsync 没成只记待处理，不挡发版）→ 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。幂等：同一个提交跑第二遍什么都不变。
 # 发布和退回自己交给 systemd 跑（临时服务），终端断了照样跑完；日志在 /srv/fleet-dao-releases/.logs/。
 #   bash deploy/release.sh [<提交号>]            发布这个提交（不给就发主线最新）；只认主线上的提交
 #   bash deploy/release.sh --rollback            退回上一版（上一个在用过、没被判过不健康、目录还在的版本）
@@ -1413,10 +1413,11 @@ hk_page_code() { # 站内路径
 }
 
 # 删掉香港上已发的老目录（演示版已删，创始人 2026-10-07，#1223）。一次性、幂等：经上传的路删那一个目录（空的目录往上同步、
-# 只许删落在那一个目录里的东西，别的一个字不碰；目录本来就不在，rsync 什么都不报、也算过），再读回它回不回 404——不是 404、
-# 读不出来都判红，不当成没事。不看「现在回什么」再决定删不删：香港站点配置换新之后它一直回 404，目录却可能还躺在盘上。
-# 根地址那一处 rsync（web_plan）本来就会把它带走，这里再单独删一遍、核对一遍；web 不归发布管的老配置也照样清。
-# 清完把法国上老的发布记录也删掉（删不掉判红）
+# 只许删落在那一个目录里的东西，别的一个字不碰；目录本来就不在，rsync 什么都不报、也算过）。rsync 没成（超时、排队轮不到）
+# 只记待处理、不挡这次发版：#1223 已做完，站点对这个目录一律 404，一次传文件超时不该把整次发布打红、退回。
+# rsync 成了再读回它回不回 404——不是 404、读不出来都判红，不当成没事。不看「现在回什么」再决定删不删：香港站点配置换新之后
+# 它一直回 404，目录却可能还躺在盘上。根地址那一处 rsync（web_plan）本来就会把它带走，这里再单独删一遍、核对一遍；
+# web 不归发布管的老配置也照样清。清完把法国上老的发布记录也删掉（删不掉判红）；没删成的记录留着，下次再删。
 retire_hk_dir() {
   local code empty out rc=0
   empty=$(mktemp -d)
@@ -1424,8 +1425,10 @@ retire_hk_dir() {
     -e "$(web_upload_ssh "$UPLOAD_KEY" "$HK_KNOWN_HOSTS")" -- "$empty/" "root@$HK_TUNNEL:/" 2>&1) || rc=$?
   rmdir -- "$empty"
   if ((rc != 0)); then
-    red "删香港上老的 $HK_RETIRED_PATH 目录没成（rsync 退出码 $rc，#1223）：$(tail -3 <<<"$out" | tr '\n' ' ')"
-    return 1
+    # #1223 已做完：站点对这个目录一律 404。rsync 超时、排队轮不到不再把整次发版打红（2026-10-15 法国到 10.99.0.1 超时，发布因此退回）。
+    # 健康检查仍核对读回是 404。这次没删掉的留下发布记录，下次再删。
+    pending "删香港上老的 $HK_RETIRED_PATH 目录没成（rsync 退出码 $rc，#1223）：$(tail -3 <<<"$out" | tr '\n' ' ')。不挡这次发版；站点回不回 404 由健康检查核对，这次没删掉的下次再删"
+    return 0
   fi
   code=$(hk_page_code "$HK_RETIRED_PATH")
   if [[ "$code" == 000 ]]; then
@@ -1469,11 +1472,51 @@ report_items() {
     });'
 }
 
-# 驾驶舱接口上的 /healthz：打印「状态码<TAB>正文」；连不上返回 1
+# 驾驶舱接口上的 /healthz：打印「状态码<TAB>正文」；连不上返回 1。只探一次。
 api_healthz() {
   local out
   out=$(curl -sS --max-time 10 -w '\n%{http_code}' "http://$COCKPIT/healthz" 2>&1) || return 1
   printf '%s\t%s' "${out##*$'\n'}" "${out%$'\n'*}"
+}
+
+# 装配完成前的占位报告（packages/api/src/early-listen.ts）：只有 startup、code=starting。
+# 这不是正式健康报告——拿它去和切之前比，会把「还在启动」当成这一版没问题。
+health_report_starting() { # 正文
+  [[ "$1" == *'"startup"'* && "$1" == *'"code":"starting"'* ]]
+}
+
+# 切版本会重启后端。停机排空时旧进程继续答；新进程先回「还在启动」，装配完才是正式报告。
+# 交接那一两秒可能被掐一次：连不上连着 3 次才放弃。占位报告接着等，最多大约 15 秒，等到正式报告才返回。
+# 打印和 api_healthz 一样的「状态码<TAB>正文」。到点还在启动：打印「还在启动」、返回 2。连不上：打印「连不上」、返回 1。
+# 占位报告最多再等这么多次（每次 1 秒）。测试会改小。
+API_HEALTHZ_LIMIT=${API_HEALTHZ_LIMIT:-15}
+api_healthz_ready() {
+  local i got body fails=0
+  for ((i = 1; i <= API_HEALTHZ_LIMIT; i++)); do
+    if ! got=$(api_healthz); then
+      fails=$((fails + 1))
+      if ((fails >= 3)); then
+        printf '%s' '连不上'
+        return 1
+      fi
+      sleep 1
+      continue
+    fi
+    fails=0
+    body=${got#*$'\t'}
+    if health_report_starting "$body"; then
+      if ((i == API_HEALTHZ_LIMIT)); then
+        printf '%s' '还在启动'
+        return 2
+      fi
+      sleep 1
+      continue
+    fi
+    printf '%s' "$got"
+    return 0
+  done
+  printf '%s' '还在启动'
+  return 2
 }
 
 # 切之前后端的健康报告：切之后逐项对比，之前好的变坏了才算这一版的错。
@@ -1481,10 +1524,16 @@ api_healthz() {
 # 后端在跑却读不到（连不上、超时、回的不是健康报告）：打印原因、返回 1，调用方判红不切。拿空的「切之前」去比，
 # 切之后变红的项会被当成「之前就不好」、不退回（审查 S1）——读不到不等于没在跑。
 api_report_before() {
-  local got code items
+  local got code items rc=0
   if ! has_service fleet-api || [[ "$(systemctl is-active fleet-api.service 2>/dev/null)" != active ]]; then return 0; fi
-  if ! got=$(api_healthz); then
-    printf '驾驶舱接口 http://%s/healthz 连不上' "$COCKPIT"
+  # || 才能拿到非零退出码；写进 if 里 $? 已经是 if 自己的 0
+  got=$(api_healthz_ready) || rc=$?
+  if ((rc != 0)); then
+    if [[ "$got" == 还在启动 ]]; then
+      printf '驾驶舱接口 http://%s/healthz 还在启动，没有正式的健康报告' "$COCKPIT"
+    else
+      printf '驾驶舱接口 http://%s/healthz 连不上' "$COCKPIT"
+    fi
     return 1
   fi
   code=${got%%$'\t'*}
@@ -1569,9 +1618,15 @@ compare_api_items() { # 切之前的逐项结果 切之后的逐项结果
 }
 
 check_api() { # 切之前的逐项结果
-  local before=$1 got code body items bad=0
-  if ! got=$(api_healthz); then
-    red "fleet-api：驾驶舱接口 http://$COCKPIT/healthz 连不上"
+  local before=$1 got code body items bad=0 rc=0
+  # || 才能拿到非零退出码；写进 if 里 $? 已经是 if 自己的 0
+  got=$(api_healthz_ready) || rc=$?
+  if ((rc != 0)); then
+    if [[ "$got" == 还在启动 ]]; then
+      red "fleet-api：驾驶舱接口 http://$COCKPIT/healthz 还在启动，十几秒里没有正式的健康报告"
+    else
+      red "fleet-api：驾驶舱接口 http://$COCKPIT/healthz 连不上"
+    fi
     return 1
   fi
   code=${got%%$'\t'*}

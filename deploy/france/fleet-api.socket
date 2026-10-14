@@ -1,6 +1,8 @@
 # fleet-dao 驾驶舱后端的监听套接字：deploy/release.sh 从要发布的那个提交里取这份，装到 /etc/systemd/system/；
-# 改这份、再发布一次，别在机器上手改。装了它，fleet-api.service 重启（发布切版本就会重启）不再丢请求——两个端口
-# 一直归这个 socket 单元攥着，systemd 把重启期间进来的新连接排进内核队列，等新进程起来接着 accept，不回 502、不拒连
+# 改这份、再发布一次，别在机器上手改。装了它，两个端口一直归这个 socket 单元攥着（#364）。
+# 发布切版本会重启 fleet-api：停机排空期间旧进程继续 accept，/healthz 照常答；新进程一启动就听上，
+# 装配完成前回「还在启动」。只有排空结束到新进程听上的那一小段，新连接才排在内核队列里。
+# 排空整段都不 accept、又要等装配完才 listen 的话，TCP 是通的、HTTP 挂起，监督会把 /healthz 报成连不上。
 # （sd_listen_fds(3) 的约定，见 packages/api/src/listen.ts；Lennart Poettering「systemd for Developers I」原话
 # "we can restart the service while keeping around its sockets … Not a single connection is lost"，
 # https://0pointer.de/blog/projects/socket-activation.html）。#364：香港 nginx 经隧道转来的请求（webhook、驾驶舱）

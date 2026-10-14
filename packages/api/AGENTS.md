@@ -4,7 +4,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 
 ## 入口
 
-- `packages/api/src/main.ts`：进程入口，两个监听（驾驶舱接口、fleet 命令接口）；有 `DATABASE_URL` 走真库 + 真 Temporal，没有就用内存样例数据，飞书登录没配时 `POST /auth/dev-login` 免登（只许本机回环）。
+- `packages/api/src/main.ts`：进程入口。先听两个端口（驾驶舱接口、fleet 命令接口），装配完成前 `/healthz` 回「还在启动」；再加载 `boot.ts` 换成正式处理。有 `DATABASE_URL` 走真库 + 真 Temporal，没有就用内存样例数据，飞书登录没配时 `POST /auth/dev-login` 免登（只许本机回环）。停机排空期间继续答 `/healthz`，普通新请求回「正在停」。
 - `packages/api/src/app.ts`：`buildApps` 装两个应用；驾驶舱挂 `/auth`、`/api`、`/github`，命令接口挂 `/agent/v1`。新路由在这里挂。
 - `packages/api/src/config.ts`：地址、端口、密钥都从环境变量读。
 - `packages/api/bin/`：法国上的管理命令 `fleet-api`，用法见 ops 第九节「发布应用（deploy/release.sh）」前后的 `fleet-api` 段落。
