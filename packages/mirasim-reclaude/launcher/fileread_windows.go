@@ -10,6 +10,7 @@ import (
 )
 
 // Go 的 os.Open 在 Windows 上不带 FILE_SHARE_DELETE：启动器读着索引时，Mirasim 用 rename 原子替换它会失败。
+// 放开删除共享只是必要条件：旧 rename 语义下目标有句柄开着仍拒绝覆盖，所以读完立刻关句柄，把窗口压到最短。
 // 读 Mirasim 的文件一律用三种共享都放开的句柄。
 func openShared(path string) (*os.File, error) {
 	p, err := syscall.UTF16PtrFromString(path)
