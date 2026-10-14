@@ -80,6 +80,11 @@ export interface RouteFacts {
   /** 模型目录的显示名，例如 Opus 5.5（硬禁令也按它认 Fable）。 */
   modelName: string;
   family: string;
+  /**
+   * 作者族（db 的 authorFamilyOf）：目录记成 unclassified、按模型 id 开头认得出的那一族（`cursor:gpt-…` 算 gpt）。
+   * 「只派别家」的避让按它认；不给按 family 认（测试、老调用方）。
+   */
+  authorFamily?: string;
   hostId: HostId;
   /**
    * 插头实际发给上游的模型串和别名（routes.upstream_model / upstream_aliases，没填为 null / 空数组）。

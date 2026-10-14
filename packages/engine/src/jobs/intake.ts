@@ -9,7 +9,8 @@
 //   作者在白名单里（公开仓陌生人能开单，白名单是唯一的门）→ 不是母单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准）→
 //   还没派过（和点名派单共用 readDispatchStanding：没有任务行，或行是 queued/stopped 且 Temporal 里没有任何一代；
 //   有一代在跑或已结束算派过。问不清抛错，不当成没派过）→ 历史失败不超过 2 次 → 正文没写 .github/workflows/ 路径（#1194：引擎的令牌推不了改工作流的提交，写了的贴一次「本机做」、
-//   留一句话）→ 没被开着的 PR 的「需求」栏挂着（#1197：已经有人在做，同样贴一次「本机做」）→ 交代齐不齐（四节齐，「怎么算做完」至少一条；
+//   留一句话）→「已知的模块」「怎么算做完」没写改标准的路径（packages/conventions/standard-paths.json 列的，决定 0093：引擎的 PR 正文没有
+//   创始人原话，合并闸会永远判红；写了的同样贴一次「本机做」、留一句话）→ 没被开着的 PR 的「需求」栏挂着（#1197：已经有人在做，同样贴一次「本机做」）→ 交代齐不齐（四节齐，「怎么算做完」至少一条；
 //   缺则留一次言，不拉）→ 改动规模不是最重档（单子列的路径超过 50 个）。
 // 整理待办（#1338，临时指挥官，jobs/groom.ts）：开单时间早于「让 AI 接活」打开那一刻的老单，只有贴了「整理过」（整理会话判为仍成立）或
 // 「交给引擎」才进候选（指挥官：#1342 发到法国后引擎第一轮拉了两张前提已过期的老单）；开关之后新开的单照旧不需要。
@@ -46,7 +47,10 @@ import {
   HUMAN_DECISION_LABEL,
   issueColumnRefs,
   LOCAL_LABEL,
+  loadStandardPaths,
+  matchesStandardPath,
   parseMd,
+  type StandardPath,
   sectionText,
 } from '@fleet-dao/conventions';
 import {
@@ -65,6 +69,7 @@ import type { GithubWhitelist } from '@fleet-dao/store';
 import { isTrusted } from '@fleet-dao/store';
 import type { IntakeRun } from '../contract.ts';
 import {
+  asModuleRef,
   type BriefProblem,
   describeBriefProblems,
   moduleRefsOf,
@@ -162,6 +167,7 @@ export type IntakeSkipReason =
   | 'groom_pending'
   | 'not_groomed'
   | 'touches_workflows'
+  | 'touches_standard'
   | 'brief_incomplete'
   | 'too_large'
   | 'pull_request'
@@ -330,6 +336,68 @@ export function workflowPathComment(path: string): string {
   ].join('\n');
 }
 
+/** 单正文里认「要改标准」的两节：要动的文件和做完的样子（场景、原话里顺口提到的路径不算）。 */
+const STANDARD_SECTIONS = ['已知的模块', '怎么算做完'] as const;
+// 没写进反引号的路径：只认仓里这几个顶层目录开头的（和 conventions 的 modulePaths 同一个口径，不补上级目录）
+const BARE_PATH = /(?<![\w/.-])((?:packages|agents|docs|specs|deploy|scripts)\/[\w./*-]*[\w*/])/g;
+
+/** 一条清单（目录、通配、单个文件）在什么前缀底下：目录是它自己，通配是第一个 * 之前的那段，单个文件是它自己。 */
+function rulePrefix(rule: Pick<StandardPath, 'path'>): string {
+  const star = rule.path.indexOf('*');
+  return star < 0 ? rule.path : rule.path.slice(0, star);
+}
+
+/**
+ * 单子写到的一个路径碰没碰这一条清单：文件按清单的匹配法判；目录（`agents/subagents/`、`agents/skills`）落在清单的目录里，
+ * 或清单的东西在它底下，都算碰了（目录里改什么事先不知道，宁可多留给本机一张，不让引擎白烧一轮后卡在合并闸）。
+ */
+function refTouches(ref: { path: string; kind: 'file' | 'dir' }, rule: StandardPath): boolean {
+  if (ref.kind === 'file') return matchesStandardPath(ref.path, rule);
+  // 清单里单列的一个文件只认点名到它：列了它所在的目录（比如整个 packages/conventions/）不算
+  if (!rule.path.endsWith('/') && !rule.path.includes('*')) return false;
+  const dir = `${ref.path}/`;
+  const prefix = rulePrefix(rule);
+  return prefix.startsWith(dir) || dir.startsWith(prefix) || matchesStandardPath(dir, rule);
+}
+
+/**
+ * 单正文「已知的模块」「怎么算做完」两节里写到的第一个改标准的路径（清单在 packages/conventions/standard-paths.json）；没写回 null。
+ * 引擎开的 PR 正文里没有创始人原话，合并闸（merge-gate）碰了标准路径就判红，拉了只会做完卡在合并（决定 0093）。
+ * 正文不是文字（读不到）就抛：不当成「没写」。
+ */
+export function standardPathIn(
+  body: unknown,
+  rules: readonly StandardPath[],
+): { path: string; rule: StandardPath } | null {
+  if (typeof body !== 'string')
+    throw new Error(`单正文读不到（拿到的是 ${body === null ? 'null' : typeof body}）`);
+  const text = cleanBody(humanPart(body));
+  if (!text) return null;
+  const doc = parseMd('单正文', text);
+  for (const name of STANDARD_SECTIONS) {
+    const section = sectionText(doc, name) ?? '';
+    const refs = [
+      ...[...section.matchAll(/`([^`\n]+)`/g)].map((m) => asModuleRef(m[1] ?? '')),
+      ...[...section.replace(/`[^`\n]*`/g, ' ').matchAll(BARE_PATH)].map((m) => asModuleRef(m[1] ?? '')),
+    ].filter((r): r is NonNullable<typeof r> => r !== undefined);
+    for (const ref of refs) {
+      const rule = rules.find((r) => refTouches(ref, r));
+      if (rule) return { path: ref.path, rule };
+    }
+  }
+  return null;
+}
+
+/** 单子要改标准、引擎不拉时留在单子上的话。 */
+export function standardPathComment(path: string, rule: StandardPath): string {
+  return [
+    `引擎想拉起这张单，可正文里要动的 \`${path}\` 是改标准的路径（清单 packages/conventions/standard-paths.json 的 \`${rule.path}\`：${rule.why}）。`,
+    '改标准要创始人同意：PR 正文里得有他的原话，引擎开的 PR 没有，合并闸会一直判红，拉了只会做完卡在合并，先没派。',
+    '',
+    `已给这张单贴了「${LOCAL_LABEL}」，留给本机做（\`pnpm pr:open --founder-quote\` 带上原话），引擎以后不再拉它。`,
+  ].join('\n');
+}
+
 /** 交代不全时留在单子上的话。 */
 export function incompleteComment(problems: readonly BriefProblem[]): string {
   return [
@@ -368,6 +436,8 @@ export interface IntakeDeps {
   taskGenerations(repo: IntakeRepo, issueNumber: number): Promise<TaskGenerationFacts>;
   /** 这个仓开着的 PR 的「需求」栏挂着的单（单号 → PR 号，见 prClaimedIssues）。读不到（含 PR 列表翻不完）照抛：不当成「没有 PR」。 */
   openPrClaims(repo: IntakeRepo): Promise<Map<number, number>>;
+  /** 改标准的路径清单（standard-paths.json）；不给读引擎自己带的那一份。读不到、认不出照抛：不当成「没有标准路径」。 */
+  standardPaths?(): Promise<StandardPath[]>;
   /** 给单子贴「本机做」标签（幂等）。 */
   markLocal(input: { repo: IntakeRepo; issueNumber: number }): Promise<void>;
   /** 读主线上的需求文档；文件不在回 null，读失败照抛。 */
@@ -507,7 +577,7 @@ async function admitIssue(
   deps: IntakeDeps,
   repo: IntakeRepo,
   issue: IntakeIssue,
-  ctx: { current: number | undefined; book: OrderBook },
+  ctx: { current: number | undefined; book: OrderBook; rules: () => Promise<StandardPath[]> },
   whitelist: GithubWhitelist,
   prClaims: () => Promise<Map<number, number>>,
   t: Tally,
@@ -544,6 +614,17 @@ async function admitIssue(
       why: `正文写了 ${workflowPath}，引擎推不了改工作流的提交`,
       key: 'intake-touches-workflows',
       comment: workflowPathComment(workflowPath),
+    });
+    return null;
+  }
+  // 要改标准（standard-paths.json 列的路径）：引擎的 PR 正文没有创始人原话，合并闸永远判红，不拉（决定 0093）。清单读不到就抛，记没查成
+  const standard = standardPathIn(issue.body, await ctx.rules());
+  if (standard !== null) {
+    await holdForLocal(deps, t, repo, issue, {
+      reason: 'touches_standard',
+      why: `正文要动改标准的路径 ${standard.path}，引擎的 PR 过不了合并闸`,
+      key: 'intake-touches-standard',
+      comment: standardPathComment(standard.path, standard.rule),
     });
     return null;
   }
@@ -742,7 +823,16 @@ async function prepareRepo(
       },
     );
   }
-  const ctx = { current: currentVersion(listed.openMilestones)?.milestone.number, book };
+  // 改标准的路径清单：这一轮这个仓里第一张走到这道关的单才读，读一次
+  let rules: Promise<StandardPath[]> | undefined;
+  const ctx = {
+    current: currentVersion(listed.openMilestones)?.milestone.number,
+    book,
+    rules: () => {
+      rules ??= (deps.standardPaths ?? loadStandardPaths)();
+      return rules;
+    },
+  };
 
   const admitted: Candidate[] = [];
   for (const issue of listed.issues) {

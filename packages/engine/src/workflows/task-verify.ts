@@ -2,9 +2,10 @@
 //
 // 改这里之前必须知道：挂自动合并一定在冷验收通过之后（合并闸认通过的 cold-verify）；头换了回 head_moved，由调用方对新的头重走。
 // 和等 CI 并行跑（决定 0093，task.ts 的 deliver）走 verifyAlongsideCi：只验一次、不动工作流的状态（不加轮数、不写意见、不停下），
-// 结果交给调用方等 CI 收场后再认；CI 不绿就不认，活动也不取消（让它自己跑完）。
+// 结果交给调用方等 CI 收场后再认；CI 不绿就不认，并取消这一次验收（patched('verify-cancel-on-ci-red')，省一次验收会话的 token）。
 // 引擎自测（决定 0093）的精炼输出只在测的就是要验的这个头时带上（testOutput）；老历史里没有自测，不带，入参和原来一样。
 
+import { CancellationScope } from '@temporalio/workflow';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import { type ColdVerifyInput, type ColdVerifyResult, MAX_VERIFY_ROUNDS } from '../task-contract.ts';
 import type { TaskRuntime } from './task-runtime.ts';
@@ -94,21 +95,46 @@ function coldVerifyInput(rt: TaskRuntime, brief: TaskBrief, round: number): Cold
   };
 }
 
+/** 和等 CI 同时起的那一次验收：结果（不抛）和只取消它自己的钩子。 */
+export interface AlongsideVerify {
+  result: Promise<{ ok: true; res: ColdVerifyResult } | { ok: false; error: unknown }>;
+  /**
+   * CI 先不绿了、结果反正不认：取消这一次验收，省下验收会话的 token（决定 0093）。只取消它自己的范围，不碰动手会话、不算放弃。
+   * 活动已经跑完（结果已经交回工作流）再调也没事：SDK 只给还没收场的活动发取消，跑完的不发命令；结果在取消送到之前先回来的，
+   * result 照样是 ok（默认的取消方式等活动真收场才回，不会出现「工作流以为取消了、活动其实跑完了」）。只调一次。
+   */
+  cancel(): void;
+}
+
 /**
  * 和等 CI 同时起的那一次验收（决定 0093）：只调一次活动，不加轮数、不写意见、不停下、不睡，结果原样交回，由调用方等 CI 收场后认。
- * 活动没跑成也不抛（交回 error），放弃照常收得到（rt.cancellable）。轮数按「认了这一次」算（现在的轮数 + 1）。
+ * 活动没跑成、被 cancel 取消了也不抛（交回 error），放弃照常收得到（rt.cancellable）。轮数按「认了这一次」算（现在的轮数 + 1）。
+ * 活动包在自己的一层可取消范围里：建范围不发命令，老历史重放照旧；cancel 由调用方在 patched 里调。
  */
-export function verifyAlongsideCi(
-  rt: TaskRuntime,
-  brief: TaskBrief,
-): Promise<{ ok: true; res: ColdVerifyResult } | { ok: false; error: unknown }> {
+export function verifyAlongsideCi(rt: TaskRuntime, brief: TaskBrief): AlongsideVerify {
   const input = coldVerifyInput(rt, rt.brief ?? brief, rt.verifyRound + 1);
-  return rt
-    .cancellable(() => rt.acts.coldVerify(input))
+  // 这一层要在 rt.cancellable 的范围里建（父范围取建的那一刻的当前范围）：放弃取消外层时连着它一起取消
+  let own: CancellationScope | null = null;
+  let cancelled = false;
+  const result = rt
+    .cancellable(() => {
+      const scope = new CancellationScope({ cancellable: true });
+      own = scope;
+      if (cancelled) scope.cancel();
+      return scope.run(() => rt.acts.coldVerify(input));
+    })
     .then(
       (res) => ({ ok: true as const, res }),
       (error: unknown) => ({ ok: false as const, error }),
     );
+  return {
+    result,
+    cancel: () => {
+      if (cancelled) return;
+      cancelled = true;
+      (own as CancellationScope | null)?.cancel();
+    },
+  };
 }
 
 /** 验收没过：记下原话（轮数用尽的通知要用）和返工意见。 */

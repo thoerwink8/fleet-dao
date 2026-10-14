@@ -25,6 +25,7 @@
 
 import {
   authorFamiliesOfTask,
+  authorFamilyOf,
   type Db,
   type EndedPoolRun,
   endedPoolRuns,
@@ -375,6 +376,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       modelId: r.modelId,
       modelName: r.modelName,
       family: r.family,
+      authorFamily: authorFamilyOf(r.family, r.modelId),
       hostId: r.hostId,
       upstreamModel: r.upstreamModel,
       upstreamAliases: r.upstreamAliases,
@@ -658,6 +660,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
             poolId: r.poolId,
             modelId: r.modelId,
             family: r.family,
+            authorFamily: authorFamilyOf(r.family, r.modelId),
             hostId: r.hostId,
             channelId: fact.channelId,
             ...(fact.orgKind ? { orgKind: fact.orgKind } : {}),

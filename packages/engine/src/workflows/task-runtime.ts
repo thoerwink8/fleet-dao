@@ -46,6 +46,7 @@ import {
   Abandoned,
   AutoEscape,
   type Avoid,
+  avoidableFamily,
   bump,
   ConflictHandoff,
   type LastSession,
@@ -442,11 +443,18 @@ export class TaskRuntime {
   }
 
   /**
-   * 自动处理时换路由（决定 0093）：把这个模型记进这张单的避让（和没提交的避让同一处，pickRoute 读它）。
-   * 没有别的候选时选路照旧派原来那条（commitMissRoute），不死等。人点「继续」时清掉。
+   * 自动处理时换路由（决定 0093）：把这个模型记进这张单的避让（和没提交的避让同一处，pickRoute 读它）；认得出族的连这一族一起避开
+   * （patched('avoid-model-family')：同族换个模型多半重蹈覆辙）。别的族派不出时选路退回只避开模型，还没有别的候选就照旧派原来那条
+   * （commitMissRoute），不死等。人点「继续」时清掉。老历史没有这个标记，只避开模型。
    */
   avoidModel(route: RouteChoice): void {
     this.commitAvoid = widen(this.commitAvoid, route, 'model');
+    const family = avoidableFamily(route);
+    if (family !== null && patched('avoid-model-family')) {
+      const families = this.commitAvoid.families ?? [];
+      if (!families.includes(family))
+        this.commitAvoid = { ...this.commitAvoid, families: [...families, family] };
+    }
     this.commitMissRoute = route;
   }
 

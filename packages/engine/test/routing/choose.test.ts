@@ -214,6 +214,22 @@ describe('派不出（要报警，附每条被挡的原因）', () => {
     expect(picked(withOther)).toBe('k');
   });
 
+  it('整族避开按作者族认：目录记成 unclassified、作者族是 claude 的也避开（决定 0093）', () => {
+    const cursorClaude = route('c', {
+      family: 'unclassified',
+      authorFamily: 'claude',
+      modelId: 'cursor:opus-4',
+    });
+    const kimi = route('k', { family: 'kimi', modelId: 'kimi-k3', modelName: 'Kimi k3' });
+    const r = chooseRoute(input([cursorClaude, kimi], { stage: 'verify', avoid: { families: ['claude'] } }));
+    expect(picked(r)).toBe('k');
+    // 作者族认不出（没给）的照 family 认：unclassified 不算 claude
+    const bare = route('u', { family: 'unclassified', modelId: 'cursor:opus-4' });
+    expect(picked(chooseRoute(input([bare], { stage: 'verify', avoid: { families: ['claude'] } })))).toBe(
+      'u',
+    );
+  });
+
   it('别家在等空位：等它，不回派不出', () => {
     const kimi = route('k', { family: 'kimi', blockers: ['no-slot'], inFlight: 5 });
     const r = chooseRoute(input([route('a'), kimi], { stage: 'verify', avoid: { families: ['claude'] } }));

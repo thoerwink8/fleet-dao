@@ -24,6 +24,7 @@ import {
   runIntakeJob,
   screenListed,
   screenPlan,
+  standardPathIn,
   workflowPathIn,
 } from '../src/jobs/intake.ts';
 import type { BreakerEvent, BreakerFacts } from '../src/jobs/intake-pick.ts';
@@ -637,6 +638,73 @@ describe('runIntakeJob · 一轮', () => {
     expect(body).not.toBe(BODY);
     expect(workflowPathIn(body)).toBe('.github/workflows');
     expect(workflowPathIn(BODY.replace('驾驶舱页面', '驾驶舱页面，和 .github/workflowsx 无关'))).toBeNull();
+  });
+
+  it('「已知的模块」写了改标准的路径 → 不起，留一句话（带清单里那条）、贴一次「本机做」，再来一轮不重复留言（决定 0093）', async () => {
+    const body = BODY.replace(
+      '- `packages/web/src/pages/`：驾驶舱页面',
+      '- `agents/shared-rules.md`：通用段',
+    );
+    const h = harness({}, { issues: [issue({ body })] });
+    const run = await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.localMarked).toEqual([12]);
+    expect(h.comments).toHaveLength(1);
+    expect(h.comments[0]?.key).toBe('intake-touches-standard');
+    expect(h.comments[0]?.body).toContain('agents/shared-rules.md');
+    expect(h.comments[0]?.body).toContain('创始人');
+    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+    await runIntakeJob(h.deps);
+    expect(h.comments).toHaveLength(1);
+  });
+
+  it('改标准：目录和通配也认（技能目录、子代理目录、怎么算做完里裸写的路径）；只在场景、原话里提到的照拉', async () => {
+    const rules = [
+      { path: 'agents/subagents/', why: '子代理' },
+      { path: 'agents/**/*.md', why: '技能说明' },
+      { path: 'packages/conventions/standard-paths.json', why: '清单本身' },
+    ];
+    const withModule = (m: string) => BODY.replace('- `packages/web/src/pages/`：驾驶舱页面', m);
+    expect(standardPathIn(withModule('- `agents/subagents/`：角色'), rules)?.rule.path).toBe(
+      'agents/subagents/',
+    );
+    expect(standardPathIn(withModule('- `agents/skills/commander`：技能'), rules)?.rule.path).toBe(
+      'agents/**/*.md',
+    );
+    expect(standardPathIn(withModule('- `agents/skills/commander/SKILL.md`'), rules)?.path).toBe(
+      'agents/skills/commander/SKILL.md',
+    );
+    expect(
+      standardPathIn(
+        BODY.replace('1. 页面上能看到', '1. packages/conventions/standard-paths.json 多一条；'),
+        rules,
+      )?.path,
+    ).toBe('packages/conventions/standard-paths.json');
+    // 单列的一个文件只认点名到它：列了整个包的目录不算碰了
+    expect(standardPathIn(withModule('- `packages/conventions/src/`：开单校验'), rules)).toBeNull();
+    expect(standardPathIn(withModule('- `agents/test/x.test.ts`'), rules)).toBeNull();
+    expect(standardPathIn(BODY, rules)).toBeNull();
+    expect(
+      standardPathIn(
+        BODY.replace('创始人要在驾驶舱', '顺带看了 agents/shared-rules.md，创始人要在驾驶舱'),
+        rules,
+      ),
+    ).toBeNull();
+    expect(() => standardPathIn(undefined, rules)).toThrow(/读不到/);
+  });
+
+  it('改标准的清单读不到 → 这张单这一轮不拉、不贴标签不留言，记没查成（故意造出失败）', async () => {
+    const h = harness({
+      async standardPaths() {
+        throw new Error('清单认不出');
+      },
+    });
+    const run = await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.localMarked).toEqual([]);
+    expect(h.comments).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('清单认不出');
   });
 
   it('正文读不到 → 这张单这一轮不拉、不贴标签不留言，记没查成（partial）', async () => {

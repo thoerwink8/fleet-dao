@@ -67,6 +67,11 @@ export interface RouteChoice {
   poolId: string;
   modelId: string;
   family: string;
+  /**
+   * 作者族（db 的 authorFamilyOf，选路时算好）：目录记成 unclassified、按模型 id 开头认得出的那一族。换路由按族避开（决定 0093）
+   * 用它；老历史、假端口里没有，照 family 用。
+   */
+  authorFamily?: string;
   hostId: HostId;
   /**
    * Claude 订阅池的组织类型（pools.org_kind：拼车、独享，共用一个会话用户）：额度用满时不原地睡到清零（失败分流 QT1
