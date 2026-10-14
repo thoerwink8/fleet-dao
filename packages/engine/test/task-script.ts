@@ -14,6 +14,8 @@ import type {
   MergeNowInput,
   MergeNowResult,
   MergeWait,
+  PlanSegmentResumeInput,
+  PlanSegmentResumeResult,
   ReadCiPolicyResult,
   ReadDeliveryInput,
   RunSegmentInput,
@@ -61,6 +63,8 @@ export interface Script {
   /** 默认强制。不进 calls.order。 */
   ciPolicy: () => ReadCiPolicyResult;
   mergeNow: (n: number, input: MergeNowInput) => MergeNowResult;
+  /** 判续会话（决定 0088）。默认续不上：老用例照旧开新会话。抛了＝活动没查成。 */
+  resume: (input: PlanSegmentResumeInput, n: number) => PlanSegmentResumeResult;
 }
 
 export interface Calls {
@@ -79,6 +83,8 @@ export interface Calls {
   ciPolicy: number;
   /** 直接合并的次数。不进 order。 */
   merge: number;
+  /** 判续会话收到的入参。不进 order。 */
+  resume: PlanSegmentResumeInput[];
 }
 
 export const OK_SEGMENT: RunSegmentResult = { ok: true, runId: 'run-1', answer: '已提交' };
@@ -97,6 +103,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     merged: 0,
     ciPolicy: 0,
     merge: 0,
+    resume: [],
   };
   const script: Script = {
     brief: () => ({ ok: true, brief: goodBrief() }),
@@ -112,6 +119,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     merged: () => ({ state: 'merged', mergeCommit: 'abc1234567890' }),
     ciPolicy: () => ({ mode: 'force' }),
     mergeNow: () => ({ merged: true, mergeCommit: 'abc1234567890' }),
+    resume: () => ({ kind: 'new', reason: '测试默认不续' }),
     ...over,
   };
   const tasks: EngineTasks = {
@@ -164,6 +172,10 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     async mergeNow(input) {
       calls.merge += 1;
       return script.mergeNow(calls.merge, input);
+    },
+    async planSegmentResume(input) {
+      calls.resume.push(input);
+      return script.resume(input, calls.resume.length);
     },
   };
   return { tasks, calls };

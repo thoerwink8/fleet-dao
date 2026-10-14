@@ -50,6 +50,7 @@ import {
   NO_AVOID,
   PausedInterrupt,
   RepinInterrupt,
+  type ResumeFrom,
   stripUndefined,
   ZERO,
 } from './task-support.ts';
@@ -115,6 +116,11 @@ export class TaskRuntime {
   lastImplementRoute: RouteChoice | null = null;
   /** 这一轮选路时避让把候选滤光了，改派了原来的路由。 */
   fellBackToMissRoute = false;
+  /**
+   * 下一次动手会话打算续哪一段（决定 0088，task-session.ts）：判一次就清掉，续不上的不再试。
+   * 只在 patched('segment-resume') 之后才会被写上，老历史一直是 null。
+   */
+  resumeFrom: ResumeFrom | null = null;
   round = 0;
   verifyRound = 0;
   /** 因轮数用尽点过几次「继续」（清零的次数；超过 MAX_ROUND_RESETS 就不再清）。 */

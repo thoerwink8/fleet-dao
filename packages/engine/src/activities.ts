@@ -50,6 +50,8 @@ import type {
   MergeNowInput,
   MergeNowResult,
   MergeWait,
+  PlanSegmentResumeInput,
+  PlanSegmentResumeResult,
   ProbeAssignedInput,
   ReadCiPolicyInput,
   ReadCiPolicyResult,
@@ -263,6 +265,8 @@ export interface EngineTasks {
   readCiPolicy?: (input: ReadCiPolicyInput, ctx: PortContext) => Promise<ReadCiPolicyResult>;
   /** 不强制 CI：直接合并，不等检查。 */
   mergeNow?: (input: MergeNowInput, ctx: PortContext) => Promise<MergeNowResult>;
+  /** 判这一段能不能续上一段的会话（决定 0088）。续不上回原因，不抛。 */
+  planSegmentResume?: (input: PlanSegmentResumeInput, ctx: PortContext) => Promise<PlanSegmentResumeResult>;
 }
 
 /** 任务工作流的活动名全集（写成 Record 让编译器保证一个不漏）。 */
@@ -276,6 +280,7 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   waitMerged: true,
   readCiPolicy: true,
   mergeNow: true,
+  planSegmentResume: true,
 };
 export const TASK_ACTIVITY_NAMES = Object.keys(TASK_ACTIVITY_KEYS) as (keyof EngineTasks)[];
 

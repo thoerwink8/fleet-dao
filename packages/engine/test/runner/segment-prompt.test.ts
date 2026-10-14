@@ -1,7 +1,11 @@
 // 动手会话的提示词（runner/segment-prompt.ts）：交代、一次性会话的规矩、返工意见都在，且规矩和引擎后面做的事对得上。
 import { describe, expect, it } from 'vitest';
 import { ManualBriefSchema } from '../../src/runner/brief.ts';
-import { FEEDBACK_ITEM_MAX, renderSegmentPrompt } from '../../src/runner/segment-prompt.ts';
+import {
+  FEEDBACK_ITEM_MAX,
+  renderResumePrompt,
+  renderSegmentPrompt,
+} from '../../src/runner/segment-prompt.ts';
 
 const brief = ManualBriefSchema.parse({
   kind: 'manual',
@@ -15,6 +19,32 @@ const brief = ManualBriefSchema.parse({
 
 const render = (over: Partial<Parameters<typeof renderSegmentPrompt>[0]> = {}) =>
   renderSegmentPrompt({ brief, specDir: 'specs/12-驾驶舱状态', feedback: [], ...over });
+
+describe('续会话的提示词（决定 0088）', () => {
+  it('只补被打断的原因和这一轮要改的，不重述整张单：交代、规矩、验收条都不重复出现', () => {
+    const text = renderSegmentPrompt({
+      brief,
+      feedback: ['CI 红了：test (engine)'],
+      interrupted: '被人暂停（frank）：发版',
+      resumed: true,
+    });
+    expect(text).toContain('打断了（被人暂停（frank）：发版）');
+    expect(text).toContain('## 这一轮要改的');
+    expect(text).toContain('CI 红了：test (engine)');
+    expect(text).toContain('git commit');
+    expect(text).not.toContain('# 任务：给驾驶舱加状态');
+    expect(text).not.toContain('页面上能看到「验收中」');
+    expect(text).not.toContain('## 怎么干');
+    expect(text).not.toContain('需求文档');
+  });
+
+  it('没有打断原因、没有返工意见也交得出提示词：说一句接着做，不交空提示词', () => {
+    const text = renderResumePrompt({ feedback: [] });
+    expect(text).toContain('接着这个会话往下做');
+    expect(text).not.toContain('这一轮要改的');
+    expect(text.length).toBeGreaterThan(20);
+  });
+});
 
 describe('动手会话的提示词', () => {
   it('交代在最前面，一次性会话的规矩在后面：分支、提交、不推不开 PR、不用 fleet 命令；不要求写需求文档、结果文档（#654）', () => {

@@ -19,6 +19,8 @@ import {
   type MergeNowInput,
   type MergeNowResult,
   type MergeWait,
+  type PlanSegmentResumeInput,
+  type PlanSegmentResumeResult,
   type ProbeAssignedInput,
   type ProbeAssignedResult,
   type ReadCiPolicyInput,
@@ -65,6 +67,8 @@ export type EngineActivities = PortActivities & {
   readCiPolicy(input: ReadCiPolicyInput): Promise<ReadCiPolicyResult>;
   /** 不强制 CI 的仓：直接合并这张 PR（不等检查）。 */
   mergeNow(input: MergeNowInput): Promise<MergeNowResult>;
+  /** 判这一段能不能续上一段的会话（决定 0088）：续不上回 new 加原因，不抛。 */
+  planSegmentResume(input: PlanSegmentResumeInput): Promise<PlanSegmentResumeResult>;
   /** 派单前对选定的这一条路由探一次（#1409）。没装探针报 JOB_NOT_CONFIGURED，不当成探通。 */
   probeAssignedRoute(input: ProbeAssignedInput): Promise<ProbeAssignedResult>;
   /** 派前探测不通、这轮不用这条路由：放掉选路预占的名额。没装放名额报 JOB_NOT_CONFIGURED，不装作放过。 */
@@ -112,6 +116,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   waitMerged: 'poll',
   readCiPolicy: 'quick',
   mergeNow: 'git',
+  planSegmentResume: 'quick',
 };
 
 /** quick 一档（含排进合并队列、撤出）一次尝试的限时。合并队列的空闲收工时长不能比它短（limits.ts 的下限）。 */

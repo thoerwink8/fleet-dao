@@ -35,6 +35,18 @@ export class RepinInterrupt extends Error {
   }
 }
 
+/**
+ * 下一次动手会话打算续哪一段（决定 0088）：被暂停取消的那一段拿不到执行编号，记起跑时刻（startedAfter）让活动去库里找；
+ * 跑完了的那一段记编号。worktreePath 是那一段的工作树，换了树不续（会话记录按目录存）。
+ */
+export interface ResumeFrom {
+  previous: { runId: string } | { startedAfter: string };
+  worktreePath: string;
+}
+
+/** 找被取消那一段的起跑时刻往前放宽多少（毫秒）：工作流的时刻和活动写库的时刻都在法国这台机器上，留几秒余量。 */
+export const RESUME_STARTED_SLACK_MS = 5_000;
+
 export const ZERO: LadderCounters = { retries: 0, reworks: 0, routeSwaps: 0, modelSwaps: 0 };
 
 export interface Avoid {

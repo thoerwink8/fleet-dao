@@ -6,8 +6,9 @@
 // stdout、用量花费额度当 facts）。
 //
 // 改这里之前必须知道：
-// - 一次性：会话号一律开新的（session.mode = 'new'），不续、不 fork、不脱开引擎进程跑（不传 io）；这是 one-shot.ts 的第 1 条。
-//   唯一的例外是驾驶舱「提需求」的指挥官会话（real/intake-chat.ts，#2061）：它直接调这里、带 resumeSessionId 续同一个会话。
+// - 开新还是续按入参：带了 resumeSessionId（动手段续上一段，决定 0088；驾驶舱「提需求」的指挥官会话，#2061）就
+//   session.mode = 'resume' 续那个号，不带就开新的。不 fork、不脱开引擎进程跑（不传 io）。续不续由调用方判（planSegmentResume），
+//   这里不再判一遍。
 // - 成败只认 adapters 的 judgeRun（和 Fusion 同一份判法）：它不是 ok，退出码就不会是 0。「终帧报错」「没有终帧」这些，
 //   即使进程自己退出码是 0，这里也报 1，不让 one-shot 把它判成 done。
 // - 读不到、认不出一律抛错（路由没给、库里没有这条路由、执行方式没接上、会话用户定不下来），runOneShot 把它记成
@@ -228,7 +229,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       // 两个来源原样交给驱动，合成哪一档只在 hosts.ts 的 sessionEffortFor：路由配的是上限，分档只往下压
       ...(route.effort !== null ? { effort: route.effort } : {}),
       ...(input.effort !== undefined ? { tierEffort: input.effort } : {}),
-      // 指挥官会话（#2061）续同一个会话；三段一次性会话一律开新的（runOneShot 不给 resumeSessionId）
+      // 给了会话号就续它（动手段续上一段、指挥官会话），不给开新的
       session: cmd.resumeSessionId
         ? { mode: 'resume', id: cmd.resumeSessionId }
         : { mode: 'new', id: driver.newSessionId(runId).id },
