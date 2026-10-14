@@ -1,9 +1,11 @@
-// 测试开几个进程（按会话 scope 的内存上限算）。读不到、认不出上限的每条路都故意造一次。
+// 测试开几个进程（按会话 scope 的内存上限算；本机人手跑再按核数和负载降一档）。读不到、认不出上限的每条路都故意造一次。
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  localWorkers,
+  measureBusy,
   memoryLimitOf,
   RESERVE_MIB,
   realTestRunEnv,
@@ -17,7 +19,7 @@ import {
 const MIB = 1024 * 1024;
 const SCOPE = '/fleet.slice/fleet-agents.slice/fleet-agent-1.scope';
 
-/** 假的 Linux：files 里有的能读到，没有的是 ENOENT；给了 fail 的路径读的时候抛那个错。 */
+/** 假的 Linux（默认在 CI 里、整机空闲）：files 里有的能读到，没有的是 ENOENT；给了 fail 的路径读的时候抛那个错。 */
 function linux(
   files: Record<string, string>,
   over: Partial<TestRunEnv> = {},
@@ -26,8 +28,9 @@ function linux(
   const reads: string[] = [];
   const env: TestRunEnv = {
     platform: 'linux',
-    env: {},
+    env: { CI: 'true' },
     cpus: 6,
+    busy: () => 0,
     read(path) {
       reads.push(path);
       const code = fail[path];
@@ -167,6 +170,85 @@ describe('测试开几个进程：按本进程所在 cgroup 的内存上限算',
     const { env, reads } = linux({}, { env: { VITEST_MAX_WORKERS: '2' } });
     expect(testWorkers(env)).toEqual({ maxWorkers: undefined });
     expect(reads).toEqual([]);
+  });
+
+  describe('本机人手跑（不在 CI、不是引擎的会话）：按核数和整机负载降一档，减少负载下的 5 秒超时假红', () => {
+    const local = (over: Partial<TestRunEnv>, files: Record<string, string> = {}) =>
+      linux(files, { env: {}, ...over });
+
+    it('降一档：默认（核数 - 1）的一半，再不超过空着的核数 - 1，至少 1 个', () => {
+      expect(localWorkers(16, 0)).toBe(7);
+      expect(localWorkers(16, 0.5)).toBe(7);
+      expect(localWorkers(16, 0.75)).toBe(3);
+      expect(localWorkers(16, 1)).toBe(1);
+      expect(localWorkers(6, 0)).toBe(2);
+      expect(localWorkers(2, 0)).toBe(1);
+      expect(localWorkers(1, 0)).toBe(1);
+    });
+
+    it('【故意造出的失败】整机忙不忙量不出：只取一半，不当成空闲照满开', () => {
+      expect(localWorkers(16, undefined)).toBe(7);
+      const w = testWorkers(local({ platform: 'win32', cpus: 16, busy: () => undefined }).env);
+      expect(w.maxWorkers).toBe(7);
+      expect(w.note).toContain('量不出');
+    });
+
+    it('本机 Windows 16 核、忙 75%：开 3 个，说明里写核数、负载、默认几个、CI 不降', () => {
+      const { env, reads } = local({ platform: 'win32', cpus: 16, busy: () => 0.75 });
+      const w = testWorkers(env);
+      expect(w.maxWorkers).toBe(3);
+      expect(w.note).toContain('16 核');
+      expect(w.note).toContain('75%');
+      expect(w.note).toContain('默认 15 个');
+      expect(w.note).toContain('CI、引擎的会话不降');
+      expect(reads).toEqual([]);
+    });
+
+    it('同样的机器在 CI 里：照 vitest 默认，不问负载', () => {
+      const asked: string[] = [];
+      const { env } = linux({}, { platform: 'win32', cpus: 16, busy: () => (asked.push('busy'), 1) });
+      expect(testWorkers(env)).toEqual({ maxWorkers: undefined });
+      expect(asked).toEqual([]);
+    });
+
+    it('本机 Linux 有内存上限：内存放得下的和降一档的取小的，两条都写进说明', () => {
+      const w = testWorkers(local({}, session(1536, 2048)).env);
+      expect(w.maxWorkers).toBe(1);
+      expect(w.note).toContain('1536 MiB');
+      expect(w.note).toContain('降一档');
+      const roomy = testWorkers(local({}, session(64 * 1024)).env);
+      expect(roomy.maxWorkers).toBe(localWorkers(6, 0));
+    });
+
+    it('引擎的会话（环境里有 FLEET_RUN_ID）：不降，照旧只按内存上限（交活前自测限 8 分钟，降了容易超时记没跑）', () => {
+      const asked: string[] = [];
+      const busy = () => (asked.push('busy'), 1);
+      expect(testWorkers(local({ env: { FLEET_RUN_ID: 'r1' }, busy }, session(64 * 1024)).env)).toEqual({
+        maxWorkers: 5,
+      });
+      expect(
+        testWorkers(local({ env: { FLEET_RUN_ID: 'r1' }, busy }, session(1536, 2048)).env).maxWorkers,
+      ).toBe(1);
+      expect(testWorkers(local({ platform: 'win32', env: { FLEET_RUN_ID: 'r1' }, busy }).env)).toEqual({
+        maxWorkers: undefined,
+      });
+      expect(asked).toEqual([]);
+    });
+
+    it('给了 VITEST_MAX_WORKERS：本机也交给 vitest 自己认，不降', () => {
+      expect(testWorkers(local({ env: { VITEST_MAX_WORKERS: '12' } }).env)).toEqual({
+        maxWorkers: undefined,
+      });
+    });
+
+    it('真量一次：回 0–1 之间的数（量不出是 undefined，不回负数、不回大于 1）', () => {
+      const b = measureBusy(process.platform, 50);
+      if (b !== undefined) {
+        expect(b).toBeGreaterThanOrEqual(0);
+        expect(b).toBeLessThanOrEqual(1);
+      }
+      expect(realTestRunEnv().busy).toBeTypeOf('function');
+    });
   });
 
   describe('真读文件', () => {
