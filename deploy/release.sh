@@ -704,6 +704,37 @@ fetch_code() { # 要发的提交（空 = 主线最新）
   fi
 }
 
+# 发版装依赖的参数（CI 的 release_install 也从这里读，照法国一样装）：
+# - copy：依赖整份拷进这一版，不和 fleet 的 pnpm 仓库共用文件（共用的话，换属主会连带改掉仓库里的文件）。
+# - 关掉全局虚拟仓：pnpm-workspace.yaml 给本机开了它，pnpm 只在认出 CI 时自动关；法国的构建沙箱是 env -i，不算 CI，
+#   开着就把 node_modules 链到 ~fleet/.local/share/pnpm/store/v11/links，服务单元 ProtectHome=yes 看不到，
+#   fleet-api 起来报 ERR_MODULE_NOT_FOUND（065445a4 那次）。
+RELEASE_PNPM_INSTALL=(install --frozen-lockfile --package-import-method=copy --config.enable-global-virtual-store=false --reporter=append-only)
+
+# 一版目录里的符号链接都得落在这一版里面：服务以 ProtectHome、只读挂载跑，指到外面（家目录里的 pnpm 仓库等）的到时候看不到。
+# 第一条越界的写进 LINKS_OUTSIDE_WHY、返回 1；find、realpath 失败也返回 1（不当成没有）。
+LINKS_OUTSIDE_WHY=""
+links_inside() { # 目录
+  local base out line
+  LINKS_OUTSIDE_WHY=""
+  if ! base=$(realpath -e -- "$1"); then
+    LINKS_OUTSIDE_WHY="读不出 $1 的真实路径"
+    return 1
+  fi
+  if ! out=$(find "$base" -type l -print0 | xargs -0 -r realpath -m -- 2>&1); then
+    LINKS_OUTSIDE_WHY="列不出、解析不了符号链接：$(tail -2 <<<"$out" | tr '\n' ' ')"
+    return 1
+  fi
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if [[ "$line" != "$base" && "$line" != "$base"/* ]]; then
+      LINKS_OUTSIDE_WHY="例如指到 $line"
+      return 1
+    fi
+  done <<<"$out"
+  return 0
+}
+
 # 装成一版：构建沙箱里以 fleet 装依赖、构建前端（第三方代码不以 root 跑，也读不到密钥目录和本机库）；
 # 构建完整个目录换成 root 的、fleet 只读，再原子地挪到 <提交号>。root 要照着办事的东西（单元文件、完成标记）在换属主之后才由 root 从 git 里取、写，fleet 碰不到。
 # 沙箱建不成（没有 systemd-run / unshare、起不来、读回密钥目录仍然可见——含 /proc/<pid>/root 绕路）就红字停下：不切版本，也不退回 as_fleet_in
@@ -730,10 +761,13 @@ build_release() { # 提交号
     red "把 ${sha:0:12} 的代码解到 $stage 失败"
     return 1
   fi
-  echo "  装依赖（pnpm install --frozen-lockfile，日志 $dir/.fleet-build.log）"
-  # copy：依赖整份拷进这一版，不和 fleet 的 pnpm 仓库共用文件（共用的话，换属主会连带改掉仓库里的文件）
-  if ! as_build_in "$stage" pnpm install --frozen-lockfile --package-import-method=copy --reporter=append-only >>"$log" 2>&1; then
+  echo "  装依赖（pnpm ${RELEASE_PNPM_INSTALL[*]}，日志 $dir/.fleet-build.log）"
+  if ! as_build_in "$stage" pnpm "${RELEASE_PNPM_INSTALL[@]}" >>"$log" 2>&1; then
     red "pnpm install --frozen-lockfile 失败（没切版本）：$(tail -5 "$log" | tr '\n' ' ')"
+    return 1
+  fi
+  if ! links_inside "$stage"; then
+    red "装完的依赖有符号链接指到这一版目录外（$LINKS_OUTSIDE_WHY）：服务起来找不到包，没切版本"
     return 1
   fi
   build_web "$stage" "$log"

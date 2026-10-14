@@ -190,9 +190,9 @@ jobs:
           cache-dependency-path: pr/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
 
-      # biome、tsc、doc_pointers、agents_test 四样各自后台跑、各写各的日志和退出码，一样红不影响另外几样（#566：串行时 biome 先红就把 tsc 跳过）。
+      # biome、tsc、doc_pointers、agents_test、deps、release_smoke 各自后台跑、各写各的日志和退出码，一样红不影响另外几样（#566：串行时 biome 先红就把 tsc 跳过）。
       # 结果写成 biome/tsc/doc_pointers/agents_test = success | failure | skipped，由汇总逐样核对；这一步自己崩了、输出没写全，汇总读到空值同样判红。
-      - name: biome、tsc、doc_pointers、agents_test 并行跑
+      - name: biome、tsc、doc_pointers、agents_test、deps、release_smoke 并行跑
         id: checks
         env:
           BIOME_WANT: ${{ steps.plan.outputs.biome }}
@@ -215,7 +215,11 @@ jobs:
           if [ -n "$TSC" ]; then start tsc run_tsc; names+=(tsc); else echo "tsc=skipped" >>"$GITHUB_OUTPUT"; fi
           start doc_pointers pnpm exec vitest run packages/conventions/test/doc-pointers.test.ts
           start agents_test pnpm exec vitest run agents/test/
-          names+=(doc_pointers agents_test)
+          # 未声明依赖（代码 import 了、自己包和仓根 package.json 都没写）：能不能碰巧找到看安装布局，法国会起不来
+          start deps pnpm run deps:check
+          # 照法国发版的样子（env -i、release.sh 的装依赖参数）装一版，从 fleet-api、fleet-engine 入口把每条 import 解析一遍
+          start release_smoke pnpm run release:smoke
+          names+=(doc_pointers agents_test deps release_smoke)
           wait
           for name in "${names[@]}"; do
             rc=$(cat "$LOGS/$name.rc" 2>/dev/null || echo missing)
@@ -226,13 +230,15 @@ jobs:
           done
 
       # 汇总：该跑的必须 success、不该跑的必须 skipped，哪一样不对 job 就红、连名字一起报。卫生检查两步只报不挡，红了只打 ::warning::。
-      - name: 汇总（biome / tsc / doc_pointers / agents_test 有一样不对这里就红）
+      - name: 汇总（biome / tsc / doc_pointers / agents_test / deps / release_smoke 有一样不对这里就红）
         if: always()
         env:
           BIOME: ${{ steps.checks.outputs.biome }}
           TSC: ${{ steps.checks.outputs.tsc }}
           DOC_POINTERS: ${{ steps.checks.outputs.doc_pointers }}
           AGENTS_TEST: ${{ steps.checks.outputs.agents_test }}
+          DEPS: ${{ steps.checks.outputs.deps }}
+          RELEASE_SMOKE: ${{ steps.checks.outputs.release_smoke }}
           BIOME_WANT: ${{ steps.plan.outputs.biome }}
           TSC_WANT: ${{ steps.plan.outputs.tsc }}
           HYGIENE: ${{ steps.hygiene.outcome }}
@@ -254,6 +260,8 @@ jobs:
           verify tsc "$TSC" "$tsc_want"
           verify doc_pointers "$DOC_POINTERS" yes
           verify agents_test "$AGENTS_TEST" yes
+          verify deps "$DEPS" yes
+          verify release_smoke "$RELEASE_SMOKE" yes
           if [ "$HYGIENE" = failure ] || [ "$HYGIENE_HISTORY" = failure ]; then
             echo "::warning::卫生检查没过（只报不挡，看上面那两步的日志）"
           fi
@@ -261,7 +269,7 @@ jobs:
             echo "::error::lint 里有检查不对：$bad"
             exit 1
           fi
-          echo "lint 里该跑的几步都过了、不该跑的都跳过了：biome=$BIOME tsc=$TSC doc_pointers=$DOC_POINTERS agents_test=$AGENTS_TEST"
+          echo "lint 里该跑的几步都过了、不该跑的都跳过了：biome=$BIOME tsc=$TSC doc_pointers=$DOC_POINTERS agents_test=$AGENTS_TEST deps=$DEPS release_smoke=$RELEASE_SMOKE"
 
   # 测试分几台：ci-plan.ts 选单元 → test-split.ts 按 test-timings.json 耗时装箱，一台一份明确的文件清单（job 名就是那一台，如「2/5 · pg」）。
   # 耗时表只读仓里的 test-timings.json（引擎每天开 PR 从最近几轮 PR 的 CI 日志刷新，也可手跑 pnpm ci:timings）。不用 vitest --shard 按文件个数切：那样各台差得太远（#654 时 engine 三台 89/35/137 秒）。
