@@ -20,6 +20,9 @@
 // 11. **开跑那一行就是占上池的名额（#757）**：选路时预占的名额（reservationId）交给 runs.start，同一下换成这一行；没预占着、
 //    池又满了，start 抛 NoSlotError，这里报 NO_SLOT、不起会话（不是库写不进，别当成 RUN_START_FAILED）。没开跑就收场的那几条路
 //    （内存放不下、切号停下）不碰预占：内存放不下的调用方隔一会儿再来，名额还给它占着；放不放由调用方收场时定。
+// 12. **脱开引擎跑（input.detach，#2238，只有动手段给）**：Spawner 交回 detached（引擎要走了、会话没停）就抛 OneShotDetached，
+//    开跑那一行不收、不落盘——会话还在跑，下一个引擎带上 attach（原来的 runId、起的时刻）再调一次接回：不过内存准入、不再开跑，
+//    时限只剩原来的减去已经跑掉的，结局照常记到原来那一行。
 //
 // **Spawner 依赖注入**：真实的生产 spawn 走 `real/exec.ts` 那一份 `fleet-agent-scope`；测试里换 fake——
 // 不调真进程，不调 sudo，不调 systemd，不写 /sys/fs/cgroup。本机 Windows / macOS 上跑也是 fake。
@@ -94,6 +97,11 @@ export interface OneShotInput {
   effort?: string;
   /** 选路时给这一段预占的池的名额（#757，pool_reservations 的编号）：开跑那一行写进去时换成这一行。不经选路的不给。 */
   reservationId?: string;
+  /**
+   * 交给 Spawner 的脱开引擎跑的那一套（#2238，SpawnCommand.detach 原样交下去）：只有动手段给。给了，引擎要走时 Spawner 交回
+   * detached，这里抛 OneShotDetached（开跑那一行不收、不落盘）。attach 时 runId 必给。
+   */
+  detach?: { attach?: { startedAt: string } };
 }
 
 export const ONE_SHOT_OUTCOMES = [
@@ -136,6 +144,11 @@ export interface SpawnOutcome {
   stderr: string;
   /** 是不是我们自己的 watch 把进程杀了。 */
   killed: boolean;
+  /**
+   * 引擎要走了、会话没停（#2238）：Spawner 放手，会话接着在自己的 scope 里跑，下一个引擎从收发目录接回。给了就没有结局，
+   * 其余字段不作数。
+   */
+  detached?: { at: string };
   /** 执行体自己报的东西（用量、花费、实际模型、额度）。读不到的字段不给，不当成 0；假 Spawner 可以不给。 */
   facts?: SpawnFacts;
 }
@@ -200,6 +213,12 @@ export interface SpawnCommand {
   resumeSessionId?: string;
   /** 会话过程每一条（指挥官会话流式推给页面用）：按流里的先后给，抛了只记日志、不影响会话。 */
   onTranscript?: (entry: TranscriptEntry) => void;
+  /**
+   * 脱开引擎跑（#2238，只有动手段给）：执行方式支持的（命令行那几家），会话输入输出走收发目录、引擎要走时放手（交回 detached）；
+   * attach = 接回上一个引擎放手的那个会话，不起进程。Mirasim 不支持，照旧管道跑、引擎要走时照旧被停。
+   * detachable 在定了「脱开跑」、交给驱动之前调：发布排空不再等它、不再停它。
+   */
+  detach?: { attach?: boolean; detachable?: () => void };
 }
 export type OneShotSpawner = (cmd: SpawnCommand) => Promise<SpawnOutcome>;
 
@@ -241,10 +260,29 @@ export class OneShotError extends Error {
   }
 }
 
+/**
+ * 引擎要走了，脱开跑的会话被放手（#2238）：没有结局，开跑那一行还开着（会话还在跑），下一个引擎带上 runId、startedAt 接回。
+ */
+export class OneShotDetached extends Error {
+  readonly runId: string;
+  readonly startedAt: string;
+  constructor(runId: string, startedAt: string) {
+    super(`引擎要走了：会话 ${runId} 脱开引擎接着跑，下一个引擎从收发目录接回`);
+    this.name = 'OneShotDetached';
+    this.runId = runId;
+    this.startedAt = startedAt;
+  }
+}
+
 /** 起一次无头会话。返回一次性结果；成败判定在 verdict.ts。 */
 export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promise<OneShotResult> {
   const runId = input.runId ?? randomUUID();
-  const startedAt = (deps.now ?? (() => new Date()))().toISOString();
+  const attach = input.detach?.attach;
+  if (attach && input.runId === undefined) {
+    throw new OneShotError('BAD_RUN_INPUT', '接回会话要给原来那一次的 runId，没起会话、一行没写');
+  }
+  // 接回（#2238）：起的时刻照原来那一行，总时长照原来的起点算
+  const startedAt = attach?.startedAt ?? (deps.now ?? (() => new Date()))().toISOString();
   // 先照 runs 的约束对一遍再干别的：对不上的写进库会被拒，拖到开跑那一行才发现就成了 RUN_START_FAILED（被当成库一时不通、
   // 可以重试）；内存放不下、切号停下那几条路也会记一笔，所以要在它们前面
   const opening = runFields(input, runId, startedAt);
@@ -270,34 +308,41 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
     runsNotWired: false,
   });
 
-  // 切号已经叫停了（调用方等内存时叫停的也在这儿收）：先于内存准入看——放在准入后面，内存一直放不下时
-  // 这一段会一直回 admission_blocked、调用方一直等，切号等它收场等到超时。
-  if (deps.stop?.aborted) {
-    const result = halted(deps.stop, '还没起会话');
-    await recordRun(input, result, deps.runs);
-    return result;
-  }
-
-  // 内存准入（沿用 real/memory-admission.ts）：本机（没挂载）会 skip，放了 block 才拦。
-  if (deps.memoryAdmission !== undefined) {
-    const verdict = await admitSessionMemory(deps.memoryAdmission);
-    if (verdict.kind === 'wait') {
-      const blocked: OneShotResult = {
-        runId,
-        outcome: 'admission_blocked',
-        exitCode: null,
-        stdout: '',
-        stderrTail: '',
-        startedAt,
-        endedAt: (deps.now ?? (() => new Date()))().toISOString(),
-        failureReason: verdict.detail,
-        runsNotWired: false,
-      };
-      await recordRun(input, blocked, deps.runs);
-      return blocked;
+  // 接回（#2238）：会话已经在跑、开跑那一行已经在（上一个引擎写的），不再过内存准入、不再开跑；切号这时叫停了照样接上再停
+  // （信号一开始就是响的，驱动接回时当场收 scope），结局照下面的规矩记 org_switch
+  if (!attach) {
+    // 切号已经叫停了（调用方等内存时叫停的也在这儿收）：先于内存准入看——放在准入后面，内存一直放不下时
+    // 这一段会一直回 admission_blocked、调用方一直等，切号等它收场等到超时。
+    if (deps.stop?.aborted) {
+      const result = halted(deps.stop, '还没起会话');
+      await recordRun(input, result, deps.runs);
+      return result;
     }
-    if (verdict.kind === 'readError') {
-      throw new OneShotError('SPAWN_FAILED', `内存准入没查成（不能装放下、也不能装跳过）：${verdict.detail}`);
+
+    // 内存准入（沿用 real/memory-admission.ts）：本机（没挂载）会 skip，放了 block 才拦。
+    if (deps.memoryAdmission !== undefined) {
+      const verdict = await admitSessionMemory(deps.memoryAdmission);
+      if (verdict.kind === 'wait') {
+        const blocked: OneShotResult = {
+          runId,
+          outcome: 'admission_blocked',
+          exitCode: null,
+          stdout: '',
+          stderrTail: '',
+          startedAt,
+          endedAt: (deps.now ?? (() => new Date()))().toISOString(),
+          failureReason: verdict.detail,
+          runsNotWired: false,
+        };
+        await recordRun(input, blocked, deps.runs);
+        return blocked;
+      }
+      if (verdict.kind === 'readError') {
+        throw new OneShotError(
+          'SPAWN_FAILED',
+          `内存准入没查成（不能装放下、也不能装跳过）：${verdict.detail}`,
+        );
+      }
     }
   }
 
@@ -305,31 +350,37 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
   const tmpDir = deps.tmpDir ?? '_tmp';
   const runDir = runDirOf(tmpDir, runId);
   await mkdir(runDir, { recursive: true });
-  await writeFile(join(runDir, 'brief.txt'), input.prompt, 'utf8');
+  if (!attach) await writeFile(join(runDir, 'brief.txt'), input.prompt, 'utf8');
 
-  // 查内存、建落盘目录那会儿叫停的：同样不起会话，记一笔 org_switch（没起也有账）
-  if (deps.stop?.aborted) {
-    const result = halted(deps.stop, '还没起会话');
-    await settle(runDir, input, result, deps.runs);
-    return result;
-  }
-
-  // 开跑：先留一行没结束的。写不进去不起会话——起了就是一个切号看不见的会话（切号会把它当场掐断）。
-  try {
-    if (input.reservationId === undefined) await deps.runs.start(opening);
-    else await deps.runs.start(opening, { reservationId: input.reservationId });
-  } catch (err) {
-    if (err instanceof NoSlotError) {
-      throw new OneShotError('NO_SLOT', `池的名额满了，没起会话：${err.message}`);
+  if (!attach) {
+    // 查内存、建落盘目录那会儿叫停的：同样不起会话，记一笔 org_switch（没起也有账）
+    if (deps.stop?.aborted) {
+      const result = halted(deps.stop, '还没起会话');
+      await settle(runDir, input, result, deps.runs);
+      return result;
     }
-    throw new OneShotError(
-      'RUN_START_FAILED',
-      `开跑那一行写不进 runs，没起会话（不然切号看不见它在跑）：${errMessage(err)}`,
-    );
+
+    // 开跑：先留一行没结束的。写不进去不起会话——起了就是一个切号看不见的会话（切号会把它当场掐断）。
+    try {
+      if (input.reservationId === undefined) await deps.runs.start(opening);
+      else await deps.runs.start(opening, { reservationId: input.reservationId });
+    } catch (err) {
+      if (err instanceof NoSlotError) {
+        throw new OneShotError('NO_SLOT', `池的名额满了，没起会话：${err.message}`);
+      }
+      throw new OneShotError(
+        'RUN_START_FAILED',
+        `开跑那一行写不进 runs，没起会话（不然切号看不见它在跑）：${errMessage(err)}`,
+      );
+    }
   }
 
   const ac = new AbortController();
-  const killTimer = setTimeout(() => ac.abort(new Error('one-shot timeout')), timeoutMs);
+  // 接回的只剩原来的时限减去已经跑掉的（到了就当场按超时收）
+  const killAfterMs = attach
+    ? Math.max(0, timeoutMs - ((deps.now ?? (() => new Date()))().getTime() - Date.parse(startedAt)))
+    : timeoutMs;
+  const killTimer = setTimeout(() => ac.abort(new Error('one-shot timeout')), killAfterMs);
   // 切号停的（超时先到的算超时）
   const switched = () => deps.stop?.aborted === true && !ac.signal.aborted;
   let spawnResult: SpawnOutcome;
@@ -342,6 +393,7 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
       input: { ...input, runId },
       timeoutMs,
       ...(input.resumeSessionId?.trim() ? { resumeSessionId: input.resumeSessionId.trim() } : {}),
+      ...(input.detach ? { detach: { attach: attach !== undefined } } : {}),
     });
   } catch (err) {
     clearTimeout(killTimer);
@@ -390,6 +442,8 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
     throw new OneShotError('SPAWN_FAILED', `起子进程没起成：${reason}`);
   }
   clearTimeout(killTimer);
+  // 引擎要走了、会话脱开接着跑（#2238）：没有结局，开跑那一行不收、不落盘，交回编号和起的时刻给下一个引擎接回
+  if (spawnResult.detached) throw new OneShotDetached(runId, startedAt);
 
   const endedAt = (deps.now ?? (() => new Date()))().toISOString();
   const ended: OneShotOutcome = spawnResult.killed

@@ -107,6 +107,7 @@ import { realChannelAttempts, realReservations, realRuns } from './runs-writer.t
 import { createPlanSegmentResume, createSegmentSettled } from './segment-resume.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { createSelfCheck } from './self-check.ts';
+import { DEFAULT_SESSION_IO_ROOT, sessionHandoff } from './session-handoff.ts';
 import { SESSION_ORG_TIMEOUT_MS, type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
 import { lazyOnSuccess, prepareSubagents, readSubagentGuard, subagentsOnce } from './subagents-file.ts';
@@ -141,6 +142,10 @@ export interface RealPortsDeps {
    * 漏接要过不了类型检查，不靠默认。
    */
   carpoolRegistry: () => Promise<CarpoolRegistryView>;
+  /**
+   * 动手会话收发目录的根（#2238，session-handoff.ts）：收孤儿时认放手标记，等人接回的不收。不给 = 不认（测试）。
+   */
+  sessionIoRoot?: string;
   /** 以下测试用。 */
   session?: Partial<{ helper: string; sudo: readonly string[]; gitBin: string; shBin: string }>;
   now?: () => Date;
@@ -195,6 +200,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
       trees: deps.trees,
       ...(deps.session?.helper ? { helper: deps.session.helper } : {}),
       ...(deps.session?.sudo ? { sudo: deps.session.sudo } : {}),
+      ...(deps.sessionIoRoot ? { ioRoot: deps.sessionIoRoot } : {}),
       ...(deps.now ? { now: deps.now } : {}),
       ...(deps.log ? { log: deps.log } : {}),
     }),
@@ -655,6 +661,8 @@ export function realPortsFromEnv(
   stateDir: string;
   /** 排空要的几样（drain-control.ts）：读发布脚本的排空请求、查发布锁、到点停会话、报提醒。 */
   drainControl: Omit<DrainControlDeps, 'drain' | 'log'>;
+  /** 引擎要走了（停机信号）：脱开跑的动手会话放手、不停（#2238），返回放手了哪几个。 */
+  releaseSessions(why: string): string[];
 } {
   const config = realPortsConfigFromEnv(env);
   const { db, close } = createDb({ env: env as Record<string, string | undefined> });
@@ -696,6 +704,8 @@ export function realPortsFromEnv(
     read: () => readEngineMasterRow(db),
     log: (message) => console.info(message),
   });
+  // 动手会话脱开引擎跑（#2238）：发版重启引擎时放手、新引擎接回，不再停在跑的会话
+  const handoff = sessionHandoff(DEFAULT_SESSION_IO_ROOT);
   const real = createRealPorts({
     db,
     master,
@@ -704,6 +714,7 @@ export function realPortsFromEnv(
     trees,
     exec,
     sessionOrg,
+    sessionIoRoot: handoff.root,
     tmpDir: join(config.stateDir, 'tmp'),
     archiveDir: join(config.stateDir, 'archive'),
     ...(extra.drain ? { drain: extra.drain } : {}),
@@ -870,6 +881,7 @@ export function realPortsFromEnv(
   // run 函数）；内存准入、会话的资源上限、runs 记账都用生产的那份，两种会话共用同一个 Spawner 装配。
   const segmentSpawner: SegmentSpawnerDeps = {
     db,
+    handoff,
     drivers: hostDrivers({
       claudeCommand,
       cursorCommand,
@@ -1009,6 +1021,7 @@ export function realPortsFromEnv(
     jobs,
     tasks,
     drainControl,
+    releaseSessions: (why) => handoff.leave(why),
     stateDir: config.stateDir,
     registerJobs: async () => {
       await registerEngineJobs(db);

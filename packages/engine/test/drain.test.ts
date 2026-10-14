@@ -247,6 +247,34 @@ describe('停机信号（installGracefulShutdown）', () => {
     g.dispose();
   });
 
+  it('停机信号一来先放手脱开跑的动手会话（#2238）：不等它们、不停它们，只等走管道的那几个', async () => {
+    const d = createEngineDrain();
+    const s = new FakeSignals();
+    const { w, worker } = fakeWorker();
+    const released: string[] = [];
+    const logs: string[] = [];
+    const g = installGracefulShutdown({
+      worker,
+      drain: d,
+      stopSessions: () => [],
+      releaseSessions: (why) => {
+        released.push(why);
+        return ['run-g'];
+      },
+      log: (m) => logs.push(m),
+      signals: s,
+      now: () => T0,
+      sleep: () => new Promise(() => {}),
+    });
+    s.send('SIGTERM');
+    expect(released).toEqual(['收到 SIGTERM']);
+    // 在途清单里没有它们（detachable 撤掉了）：手上没有要等的，马上让工人停下
+    expect(await g.done).toBe('empty');
+    expect(w.shutdowns).toBe(1);
+    expect(logs.some((l) => l.includes('放手、不停') && l.includes('run-g'))).toBe(true);
+    g.dispose();
+  });
+
   it('发布请求的截止更早：停机信号不把它往后挪', () => {
     const d = createEngineDrain();
     d.cordon(release(T0 + 60_000));

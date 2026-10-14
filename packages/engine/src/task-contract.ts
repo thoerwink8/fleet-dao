@@ -158,6 +158,11 @@ export interface RunSegmentInput {
    * 会话不看它。老历史里没有这个字段。
    */
   prNumber?: number;
+  /**
+   * 接回（#2238）：上一次 runSegment 交回 SEGMENT_DETACHED，会话还在自己的 scope 里跑。给了就不建树、不拼提示词、不起会话，
+   * 从收发目录读回已有的输出、等它收场，结局照常记到原来那一行 runs。老历史里没有这个字段。
+   */
+  attach?: SegmentAttach;
 }
 
 /**
@@ -178,9 +183,29 @@ export type SegmentEvidence = Pick<
   'code' | 'message' | 'exitCode' | 'httpStatus' | 'resetsAt'
 > & { quotaExhausted: boolean };
 
+/**
+ * 动手会话脱开引擎跑着、引擎要走了（停机信号：发版切版本、重启）时这一段的结局（#2238）：会话没停，接着在自己的 scope 里跑、往
+ * 收发目录写；工作流隔一小会儿带上 attach 再调一次 runSegment，由下一个引擎从文件接回、等它收场。runs 那一行不收、不记账。
+ * evidence 的码是 engine_stop（失败分流 KL3：不算失败、不记账、续上），只给认不出 detached 的路兜底。
+ */
+export const SEGMENT_DETACHED = 'detached';
+
+/** 接回一段脱开引擎跑着的动手会话要的东西：哪一次（runs 编号）、什么时候起的（总时长照原来的起点算）。 */
+export interface SegmentAttach {
+  runId: string;
+  startedAt: string;
+}
+
 export type RunSegmentResult =
   | { ok: true; runId: string; answer: string; costUsd?: number; actualModel?: string }
-  | { ok: false; runId: string | null; outcome: string; evidence: SegmentEvidence };
+  | {
+      ok: false;
+      runId: string | null;
+      outcome: string;
+      evidence: SegmentEvidence;
+      /** outcome 是 SEGMENT_DETACHED 时给：带上它再调 runSegment 接回（RunSegmentInput.attach）。 */
+      detached?: SegmentAttach;
+    };
 
 export interface ReadDeliveryInput {
   schemaVersion: 1;

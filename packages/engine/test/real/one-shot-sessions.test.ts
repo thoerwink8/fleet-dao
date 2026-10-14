@@ -110,6 +110,42 @@ describe('发布排空的在途清单（#957）：登记就 track、收场一定
   });
 });
 
+describe('脱开引擎跑的动手会话（#2238）：排空不等、不停，切号照停', () => {
+  it('detachable：从在途清单撤掉、drainStop 不停它；切号的 stop 照样停、live 照样看得见', () => {
+    const drain = createEngineDrain();
+    const reg = oneShotSessions({ drain });
+    const t = reg.enter(who('grok'));
+    t.attempt('run-g');
+    t.running();
+    t.detachable();
+    expect(drain.inFlight()).toEqual([]);
+    // 之后再改阶段、换编号也不回到清单里
+    t.running();
+    expect(drain.inFlight()).toEqual([]);
+    expect(reg.drainStop('到了发布宽限的截止')).toEqual([]);
+    expect(t.signal.aborted).toBe(false);
+    expect(reg.live(pools('grok'))).toEqual(['run-g']);
+    expect(reg.stop(pools('grok'), '切号')).toEqual(['run-g']);
+    expect(t.signal.aborted).toBe(true);
+  });
+
+  it('接回（attach）的登记：在排空、总开关关着都不预先叫停（会话早就在跑，不是起新会话），也不进在途清单', () => {
+    const drain = createEngineDrain();
+    drain.cordon({ source: 'release', since: 'x', until: new Date(0).toISOString(), why: '发布 aaaa' });
+    const reg = oneShotSessions({
+      drain,
+      master: { isOn: () => false, state: () => ({ on: false }) } as never,
+    });
+    const fresh = reg.enter(who('grok'));
+    expect(fresh.signal.aborted).toBe(true);
+    const back = reg.enter({ ...who('grok'), attach: true });
+    expect(back.signal.aborted).toBe(false);
+    back.attempt('run-back');
+    back.running();
+    expect(drain.inFlight().map((x) => x.runId)).toEqual(['one-shot-1']);
+  });
+});
+
 describe('【故意造出的失败】生产装配漏接排空：real/index.ts 必须把 drain 交给登记、到点停会话也要停一次性会话', () => {
   const source = readFileSync(fileURLToPath(new URL('../../src/real/index.ts', import.meta.url)), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '')

@@ -5,15 +5,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RunFacts, SessionUser } from '@fleet-dao/adapters';
 import type { ChannelAttemptWrite, RouteLaunchFacts } from '@fleet-dao/db';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createEngineDrain, waitDrained } from '../../src/drain.ts';
 import { type PortContext, PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
 import { oneShotSessions } from '../../src/real/one-shot-sessions.ts';
+import { DETACHED_MARK, type SessionHandoff, sessionHandoff } from '../../src/real/session-handoff.ts';
 import { createRunSegment, type RunSegmentDeps, sweepRunDirs } from '../../src/real/task-segment.ts';
 import { NoSlotError, type RunRecord, type RunStart } from '../../src/runner/not-wired.ts';
-import type { RunSegmentInput } from '../../src/task-contract.ts';
+import { type RunSegmentInput, SEGMENT_DETACHED } from '../../src/task-contract.ts';
 import { goodBrief } from '../task-script.ts';
 import { fakeTrees, git, mirror } from './fixtures.ts';
 
@@ -93,6 +94,8 @@ function rig(
     driverRun?: (spec: HostRunSpec, hooks: HostRunHooks, n: number) => Promise<HostReport>;
     route?: RouteLaunchFacts | null;
     deps?: Partial<RunSegmentDeps>;
+    /** 动手会话脱开引擎跑（#2238）。 */
+    handoff?: SessionHandoff;
   } = {},
 ): Rig {
   // 一个用例里可以起几套（各有各的镜像、树、落盘目录）
@@ -140,6 +143,7 @@ function rig(
       trees: ft.trees,
       baseEnv: { PATH: '/usr/bin' },
       resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
+      ...(opts.handoff ? { handoff: opts.handoff } : {}),
     },
     runs: {
       async start(r, options) {
@@ -1130,5 +1134,85 @@ describe('落盘目录清理', () => {
     // 路径其实是个文件：读不了目录，记日志、不抛
     expect(await sweepRunDirs(join(dir, 'stray.txt'), now, 1, (m) => logs.push(m))).toBe(0);
     expect(logs[0]).toContain('读不了');
+  });
+});
+
+describe('脱开引擎跑、引擎重启后接回（#2238：发版不再停在跑的动手会话）', { timeout: 60_000 }, () => {
+  const grok = route({ hostId: 'grok', channelId: 'xai', poolId: 'grok', modelId: 'grok-4.7' });
+  /** 驱动跑着、直到被叫停；放手以后永远不落定（和 detached.ts 一样）。真驱动起会话前建好收发目录。 */
+  const runsUntilStopped = async (_spec: HostRunSpec, hooks: HostRunHooks): Promise<HostReport> => {
+    if (hooks.io && !hooks.io.attach) mkdirSync(hooks.io.dir, { recursive: true });
+    await new Promise<void>((resolve) => hooks.signal?.addEventListener('abort', () => resolve()));
+    return report({ facts: okFacts({ exitCode: null, killed: 'aborted' }) });
+  };
+
+  it('grok 上的动手会话：引擎要走了 → 不停会话，交回 detached（runs 编号、起的时刻），不记尝试、runs 那一行不收、不在排空清单里；新引擎带 attach 接回，不建树、不开跑，结局记到原来那一行', async () => {
+    const ioRoot = join(root, 'io');
+    const drain = createEngineDrain();
+    const sessions = oneShotSessions({ drain });
+    const oldEngine = sessionHandoff(ioRoot);
+    const r = rig({ route: grok, handoff: oldEngine, driverRun: runsUntilStopped, deps: { sessions } });
+    const pending = r.run(r.input(), ctx());
+    await vi.waitFor(() => expect(r.specs).toHaveLength(1));
+    // 脱开跑的不在发布排空的在途清单里：release.sh 不给它发暂停、排空不等它；到截止也不停它
+    expect(drain.inFlight()).toEqual([]);
+    expect(sessions.drainStop('到了发布宽限的截止')).toEqual([]);
+    expect(oldEngine.leave('收到 SIGTERM')).toEqual(['run-0002']);
+    const got = await pending;
+    expect(got).toMatchObject({
+      ok: false,
+      outcome: SEGMENT_DETACHED,
+      runId: 'run-0002',
+      evidence: { code: 'engine_stop' },
+      detached: { runId: 'run-0002', startedAt: expect.any(String) },
+    });
+    expect(r.recorded).toEqual([]);
+    expect(r.attempts).toEqual([]);
+    expect(existsSync(join(ioRoot, 'run-0002', DETACHED_MARK))).toBe(true);
+
+    // 新引擎：同一个收发目录的根，驱动从文件接回（这里直接交回跑完的报告）
+    const newEngine = sessionHandoff(ioRoot);
+    const r2 = rig({ route: grok, handoff: newEngine, driverRun: async () => report({ hostId: 'grok' }) });
+    const adoptsBefore = r2.ft.treeAdopts().length;
+    if (got.ok || !got.detached) throw new Error('上面没交回 detached');
+    const back = await r2.run(r2.input({ attach: got.detached }), ctx());
+    expect(back).toMatchObject({ ok: true, runId: 'run-0002' });
+    expect(r2.started).toEqual([]);
+    expect(r2.ft.treeAdopts()).toHaveLength(adoptsBefore);
+    expect(r2.recorded).toEqual([
+      expect.objectContaining({ runId: 'run-0002', outcome: 'done', startedAt: got.detached.startedAt }),
+    ]);
+    expect(r2.attempts).toEqual([expect.objectContaining({ runId: 'run-0002' })]);
+    expect(existsSync(join(ioRoot, 'run-0002'))).toBe(false);
+  });
+
+  it('接回时引擎又在走（发版连着发）：不碰会话、不登记，当场再交回 detached 等下一个引擎', async () => {
+    const leaving = sessionHandoff(join(root, 'io'));
+    leaving.leave('收到 SIGTERM');
+    const r = rig({ route: grok, handoff: leaving });
+    const attach = { runId: 'run-0009', startedAt: new Date().toISOString() };
+    expect(await r.run(r.input({ attach }), ctx())).toMatchObject({
+      ok: false,
+      outcome: SEGMENT_DETACHED,
+      detached: attach,
+    });
+    expect(r.specs).toEqual([]);
+    expect(r.recorded).toEqual([]);
+  });
+
+  it('Mirasim 上的动手会话不脱开：照旧在排空清单里、到截止被停（发版暂停那一套）', async () => {
+    const drain = createEngineDrain();
+    const sessions = oneShotSessions({ drain });
+    const r = rig({
+      route: route({ hostId: 'mirasim' }),
+      handoff: sessionHandoff(join(root, 'io')),
+      driverRun: runsUntilStopped,
+      deps: { sessions },
+    });
+    const pending = r.run(r.input(), ctx());
+    await vi.waitFor(() => expect(r.specs).toHaveLength(1));
+    expect(drain.inFlight()).toEqual([expect.objectContaining({ runId: 'run-0002' })]);
+    expect(sessions.drainStop('到了发布宽限的截止')).toEqual(['run-0002']);
+    expect(await pending).toMatchObject({ ok: false, outcome: 'org_switch' });
   });
 });
