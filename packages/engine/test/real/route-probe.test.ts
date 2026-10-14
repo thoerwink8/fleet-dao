@@ -2,7 +2,7 @@
 // 探通 → 在线；登录失效、设备被撤销 → 离线写明原因、整池暂停报警，恢复后下一轮转回在线、撤掉报警；额度用满被拒 → 算通、
 // 额度读数记账；回答认不出、超时、起不来、连不上、工作目录交不出去、账号池没定会话用户 → 离线写明原因。每条都故意造一次。
 // cursor 的 API 密钥另走一遍真插头、真起法（经假帮手真起进程，只在 Linux 上）：探针带上了它，哪里都搜不到值。
-// grok（#266）：探通、活跃档 60 分钟、没登录、登录过期、没装、型号不认、回话的不是点名那一代、stdin 不是真管道、额度用满，各造一次。
+// grok（#266）：探通、探通后定时轮不复探、没登录、登录过期、没装、型号不认、回话的不是点名那一代、stdin 不是真管道、额度用满，各造一次。
 import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -70,9 +70,9 @@ let root: string;
 beforeEach(async () => {
   await resetTestDb(t);
   await world(t.db);
-  // 夹具里「5 分钟前探通」落在活跃档 60 分钟间隔之内（#1798 片 3），这一轮会照旧不探；这里测的是探的行为，把上一次探通挪到间隔之外
+  // 夹具里的路由上一次探通了：在线的定时这一轮不复探（派之前再探）；这里测的是探的行为，把上一次改成「没真探过」
   await t.client.query(
-    "update routes set probed_at = probed_at - interval '65 minutes' where probe_state = 'ok'",
+    "update routes set alive = false, probe_state = 'skipped', probe_detail = '改版后等下一轮探' where probe_state = 'ok'",
   );
   // 真实的样子：独享池挂在独享组织上（这里的会话用户挂着拼车，setup 的 sessionOrg，这个池不探）
   await t.client.query("update pools set org_kind = 'solo' where id = 'claude-solo'");
@@ -164,6 +164,30 @@ const hold = async () =>
 const answered = (): FakeRunScript => ({ result: { text: REPLY } });
 
 describe('探通：在线，结论和时刻写进库，定时任务页那一行对得上', () => {
+  it('上一次探通了的在线路由：定时这一轮不复探；池只被 pool-hold: 提醒顶着时照档复探，探通了撤掉提醒', async () => {
+    await t.client.query(
+      "update routes set alive = true, probe_state = 'ok', probe_detail = '答上了：pong', probe_org = 'carpool', probed_at = $1::timestamptz where id = 'carpool'",
+      [new Date(NOW.getTime() - 65 * 60_000).toISOString()],
+    );
+    const quiet = setup(answered);
+    await quiet.round();
+    expect(quiet.fake.count()).toBe(0);
+    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok', probeNextAt: null });
+
+    await upsertAlert(t.db, {
+      dedupeKey: poolHoldKey('claude-carpool'),
+      level: 'decision',
+      taskId: null,
+      title: '拼车池登录失效',
+      body: '会话那边报的整池问题',
+    });
+    const s = setup(answered);
+    await s.round();
+    expect(s.fake.count()).toBe(1);
+    expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
+    expect((await hold())?.resolvedAt).not.toBeNull();
+  });
+
   it('拼车池的路由探通在线；独享池因为会话用户挂着拼车没探、codex 插头没接，都不在线且写明原因', async () => {
     const s = setup(answered);
     const run = await s.round();
@@ -588,11 +612,11 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
   let routeId: string;
   beforeEach(async () => {
     ({ routeId } = await addCursorRoute(t.db, { stages: ['verify'] }));
-    // 上一次探通是 3 小时前：活跃档 60 分钟，这一轮到点了
-    await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
-      routeId,
-      new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString(),
-    ]);
+    // 种子写的是「探通了」：在线的定时这一轮不复探；这里测探的行为，改成没真探过，这一轮到点
+    await t.client.query(
+      "update routes set alive = false, probe_state = 'skipped', probe_detail = '改版后等下一轮探', probed_at = $2::timestamptz where id = $1",
+      [routeId, new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString()],
+    );
   });
   const cursorHold = async () =>
     (await t.db.select().from(notifications)).find((n) => n.dedupeKey === poolHoldKey('cursor'));
@@ -629,7 +653,7 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
     expect(s.cursor.options[0]?.command).toEqual(['/opt/fake/fleet-agent-carpool/cursor-agent']);
   });
 
-  it('探通了：15 分钟后那一轮不再真探、不重写，结论照旧（还在线）；到 60 分钟（活跃档）再真探，不再按执行方式放慢到 2 小时', async () => {
+  it('探通了：之后定时那几轮（15 分钟、60 分钟、一天）都不再真探、不重写，结论照旧（还在线），派之前由派前探测再探', async () => {
     const s = setup(answered, { cursor: () => replied() });
     await s.round();
     expect(s.cursor.count()).toBe(1);
@@ -641,13 +665,15 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
     expect(s.cursor.count()).toBe(1);
     expect(second.online).toContain(routeId);
     expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
-    // Claude 的活跃路由也是 60 分钟一探（#1798 片 3），15 分钟后这一轮也不探
+    // Claude 的在线路由也一样不复探
     expect(s.fake.count()).toBe(1);
 
     s.advance(45);
     await s.round();
-    expect(s.cursor.count()).toBe(2);
-    expect((await row(routeId))?.probedAt).toEqual(new Date(NOW.getTime() + 60 * 60_000));
+    s.advance(24 * 60);
+    await s.round();
+    expect(s.cursor.count()).toBe(1);
+    expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
   });
 
   it('路由上点名了具体模型：探针就用它（不限定 auto）', async () => {
@@ -795,11 +821,11 @@ describe('grok 的路由（#266）：和干活的会话同一个驱动探，判�
   let routeId: string;
   beforeEach(async () => {
     ({ routeId } = await addGrokRoute(t.db, { stages: ['verify'] }));
-    // 上一次探通是 3 小时前：活跃档 60 分钟，这一轮到点了
-    await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
-      routeId,
-      new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString(),
-    ]);
+    // 种子写的是「探通了」：在线的定时这一轮不复探；这里测探的行为，改成没真探过，这一轮到点
+    await t.client.query(
+      "update routes set alive = false, probe_state = 'skipped', probe_detail = '改版后等下一轮探', probed_at = $2::timestamptz where id = $1",
+      [routeId, new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString()],
+    );
   });
   const grokHold = async () =>
     (await t.db.select().from(notifications)).find((n) => n.dedupeKey === poolHoldKey('grok'));
@@ -831,7 +857,7 @@ describe('grok 的路由（#266）：和干活的会话同一个驱动探，判�
     expect(s.grok.options[0]?.command).toEqual(['/opt/fake/fleet-agent-carpool/grok']);
   });
 
-  it('探通了：15 分钟后那一轮不再真探、不重写，结论照旧（还在线）；到 60 分钟（活跃档）再真探，不再按执行方式放慢到 2 小时', async () => {
+  it('探通了：之后定时那几轮（15 分钟、60 分钟、一天）都不再真探、不重写，结论照旧（还在线），派之前由派前探测再探', async () => {
     const s = setup(answered, { grok: () => replied() });
     await s.round();
     expect(s.grok.count()).toBe(1);
@@ -842,8 +868,10 @@ describe('grok 的路由（#266）：和干活的会话同一个驱动探，判�
     expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
     s.advance(45);
     await s.round();
-    expect(s.grok.count()).toBe(2);
-    expect((await row(routeId))?.probedAt).toEqual(new Date(NOW.getTime() + 60 * 60_000));
+    s.advance(24 * 60);
+    await s.round();
+    expect(s.grok.count()).toBe(1);
+    expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
   });
 
   it('没登录（error 帧和 stderr 各一遍、退出 1）：同一轮不再试；离线写清在哪台机器以哪个会话用户跑 grok login --device-code，整池暂停；登录后下一轮转回在线、撤掉', async () => {
@@ -956,11 +984,11 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
   let routeId: string;
   beforeEach(async () => {
     ({ routeId } = await addMirasimRoute(t.db, { stages: ['verify'] }));
-    // 上一次探通是 3 小时前：活跃档 60 分钟，这一轮到点了
-    await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
-      routeId,
-      new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString(),
-    ]);
+    // 种子写的是「探通了」：在线的定时这一轮不复探；这里测探的行为，改成没真探过，这一轮到点
+    await t.client.query(
+      "update routes set alive = false, probe_state = 'skipped', probe_detail = '改版后等下一轮探', probed_at = $2::timestamptz where id = $1",
+      [routeId, new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString()],
+    );
   });
 
   it('探通：在线；以唯一的会话用户、route=cloud、模型串按路由上的、执行体按上游串前缀（deepseek-flash → dsh）', async () => {
@@ -983,7 +1011,7 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
     expect(s.mirasim.options[0]?.ledgerDir).toBe('/fake/fleet-agent-carpool/.mirasim/traffic');
   });
 
-  it('探通了：15 分钟后那一轮不再真探、不重写，结论照旧（还在线）；到 60 分钟（活跃档）再真探，不再按执行方式放慢到 2 小时', async () => {
+  it('探通了：之后定时那几轮（15 分钟、60 分钟、一天）都不再真探、不重写，结论照旧（还在线），派之前由派前探测再探', async () => {
     const s = setup(answered, { mirasim: () => ({ state: { text: REPLY } }) });
     await s.round();
     expect(s.mirasim.count()).toBe(1);
@@ -994,8 +1022,10 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
     expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
     s.advance(45);
     await s.round();
-    expect(s.mirasim.count()).toBe(2);
-    expect((await row(routeId))?.probedAt).toEqual(new Date(NOW.getTime() + 60 * 60_000));
+    s.advance(24 * 60);
+    await s.round();
+    expect(s.mirasim.count()).toBe(1);
+    expect(await row(routeId)).toMatchObject({ alive: true, probeState: 'ok', probedAt: NOW });
   });
 
   it('路由上的模型串前缀认不出（glm-6）：起会话之前就被拦下，离线写明执行体未知，不落到 claude', async () => {
@@ -1004,12 +1034,12 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
       upstreamModel: 'glm-6',
       stages: ['research'],
     });
-    // 这条也是现插的种子（上一次「探通」是 5 分钟前）：不推过活跃档间隔，这一轮会当成「还没到点」整个跳过，
-    // 到不了「起会话之前就被拦下」这条判断——和 beforeEach 里那条同一个道理。
-    await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
-      bad.routeId,
-      new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString(),
-    ]);
+    // 这条也是现插的种子（上一次「探通」）：在线的定时这一轮不复探，到不了「起会话之前就被拦下」这条判断——
+    // 和 beforeEach 里那条同一个道理，改成没真探过。
+    await t.client.query(
+      "update routes set alive = false, probe_state = 'skipped', probe_detail = '改版后等下一轮探', probed_at = $2::timestamptz where id = $1",
+      [bad.routeId, new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString()],
+    );
     const s = setup(answered, { mirasim: () => ({ state: { text: REPLY } }) });
     await s.round();
     const down = await row(bad.routeId);
@@ -1082,11 +1112,11 @@ describe.skipIf(process.platform === 'win32')(
     let rig: CursorKeyRig;
     beforeEach(async () => {
       ({ routeId } = await addCursorRoute(t.db, { stages: ['verify'] }));
-      // 上一次探通是 3 小时前：活跃档 60 分钟，这一轮到点了
-      await t.client.query('update routes set probed_at = $2::timestamptz where id = $1', [
-        routeId,
-        new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString(),
-      ]);
+      // 种子写的是「探通了」：在线的定时这一轮不复探；这里测探的行为，改成没真探过，这一轮到点
+      await t.client.query(
+        "update routes set alive = false, probe_state = 'skipped', probe_detail = '改版后等下一轮探', probed_at = $2::timestamptz where id = $1",
+        [routeId, new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString()],
+      );
       rig = cursorKeyRig(root);
     });
     const cursorHold = async () =>

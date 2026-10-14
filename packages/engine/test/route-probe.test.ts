@@ -8,6 +8,7 @@ import {
   nextProbeAt,
   type ProbeAttempt,
   type Prober,
+  type ProbeTarget,
   planProbe,
   planScheduledProbe,
   probeTier,
@@ -27,7 +28,7 @@ const UNKNOWN = {
   why: '以会话用户 fleet-agent-carpool 跑 reclaude org list：reclaude 报登录失效',
 } as const;
 
-function target(over: Partial<RouteProbeTarget> = {}): RouteProbeTarget {
+function target(over: Partial<ProbeTarget> = {}): ProbeTarget {
   return {
     routeId: 'claude-carpool:opus-5.5:claude-code',
     hostId: 'claude-code',
@@ -678,10 +679,15 @@ describe('按活跃分三档（#1798 片 3）', () => {
     at: minutesAgo(minutes),
     detail: `没通（连着不通 ${streak} 次）`,
   });
-  const okAgo = (m: number) => ({ state: 'ok' as const, at: minutesAgo(m), detail: '答上了：OK' });
-  const scheduled = (t: RouteProbeTarget) =>
+  const okAgo = (m: number) => ({
+    state: 'ok' as const,
+    at: minutesAgo(m),
+    detail: '答上了：OK',
+    org: 'carpool' as const,
+  });
+  const scheduled = (t: ProbeTarget) =>
     planScheduledProbe(t, probers, t.orgKind === null ? null : ON_CARPOOL, NOW);
-  const cursorAuto = (over: Partial<RouteProbeTarget> = {}) =>
+  const cursorAuto = (over: Partial<ProbeTarget> = {}) =>
     target({
       routeId: 'cursor:cursor-auto:cursor-agent',
       hostId: 'cursor-agent',
@@ -711,11 +717,13 @@ describe('按活跃分三档（#1798 片 3）', () => {
       expect(probeTier(target({ probeRank: 5, lastRunAt: null }), NOW)).toBe('idle');
     });
 
-    it('下次探测：不在用没有；活跃 +60 分钟、不活跃 +1440 分钟；连着不通按退避档；没真探过一定已到期', () => {
+    it('下次探测：不在用没有；探通了没有（派前再探）；要靠它恢复的活跃 +60、不活跃 +1440；连着不通按退避档；没真探过一定已到期', () => {
       expect(nextProbeAt('unused', NOW, 0)).toBeNull();
       expect(nextProbeAt('unused', NOW, 3)).toBeNull();
-      expect(nextProbeAt('active', NOW, 0)).toEqual(minutesLater(60));
-      expect(nextProbeAt('idle', NOW, 0)).toEqual(minutesLater(1440));
+      expect(nextProbeAt('active', NOW, 0)).toBeNull();
+      expect(nextProbeAt('idle', NOW, 0)).toBeNull();
+      expect(nextProbeAt('active', NOW, 0, true)).toEqual(minutesLater(60));
+      expect(nextProbeAt('idle', NOW, 0, true)).toEqual(minutesLater(1440));
       expect(nextProbeAt('active', NOW, 1)).toEqual(minutesLater(15));
       expect(nextProbeAt('idle', NOW, 3)).toEqual(minutesLater(60));
       expect(nextProbeAt('idle', NOW, 9)).toEqual(minutesLater(240));
@@ -723,28 +731,42 @@ describe('按活跃分三档（#1798 片 3）', () => {
     });
   });
 
-  it('名次第 1：50 分钟前探通，定时这一轮不探（deferred）；65 分钟前探通，探', () => {
-    expect(scheduled(target({ probeRank: 1, previous: okAgo(50) }))).toEqual({
-      deferred: expect.stringContaining('隔 60 分钟再真探'),
+  it('Claude 订阅池上一次探通时没记组织、或记的是别的组织：这个在线不是在它的组织下得出的，照档复探', () => {
+    const unknownOrg = { ...okAgo(65), org: null };
+    expect('probe' in scheduled(target({ probeRank: 1, previous: unknownOrg }))).toBe(true);
+    expect(
+      'probe' in scheduled(target({ probeRank: 1, previous: { ...okAgo(65), org: 'solo' as const } })),
+    ).toBe(true);
+    // 照档：活跃 60 分钟，没到不探
+    expect(scheduled(target({ probeRank: 1, previous: { ...okAgo(30), org: null } }))).toMatchObject({
+      deferred: expect.stringContaining('活跃档'),
     });
-    expect('probe' in scheduled(target({ probeRank: 1, previous: okAgo(65) }))).toBe(true);
+  });
+
+  it('上一次探通了的：不管哪一档、隔了多久，定时这一轮都不复探（派之前由派前探测再探）', () => {
+    const online = { deferred: '在线：定时这一轮不复探，派之前再探' };
+    expect(scheduled(target({ probeRank: 1, previous: okAgo(65) }))).toEqual(online);
+    expect(scheduled(target({ probeRank: 5, lastRunAt: minutesAgo(120), previous: okAgo(65) }))).toEqual(
+      online,
+    );
+    expect(
+      scheduled(target({ probeRank: 5, lastRunAt: minutesAgo(7 * 60), previous: okAgo(25 * 60) })),
+    ).toEqual(online);
+    expect(scheduled(target({ probeRank: null, previous: okAgo(3 * 24 * 60) }))).toEqual(online);
+    expect(scheduled(cursorAuto({ probeRank: 1, previous: okAgo(65) }))).toEqual(online);
+  });
+
+  it('池只被 pool-hold: 提醒顶着（选路整池避开、派前探测碰不到）：上一次探通了也按档复探，探通了才撤得掉', () => {
+    const held = (m: number) => target({ probeRank: 1, heldByAlert: true, previous: okAgo(m) });
+    expect('deferred' in scheduled(held(50))).toBe(true);
+    expect('probe' in scheduled(held(65))).toBe(true);
     // 差半轮以内算到点：60 分钟的间隔，53 分钟前已经该探；52 分钟前还没到
-    expect('probe' in scheduled(target({ probeRank: 1, previous: okAgo(53) }))).toBe(true);
-    expect('deferred' in scheduled(target({ probeRank: 1, previous: okAgo(52) }))).toBe(true);
-  });
-
-  it('名次第 5、近 6 小时没开跑：23 小时前探通不探，25 小时前探通探', () => {
-    const idle = (m: number) => target({ probeRank: 5, lastRunAt: minutesAgo(7 * 60), previous: okAgo(m) });
-    expect(scheduled(idle(23 * 60))).toEqual({ deferred: expect.stringContaining('隔 1440 分钟再真探') });
-    expect('probe' in scheduled(idle(25 * 60))).toBe(true);
-    // 名次读不到（null）也是不活跃：不再每轮都探
-    expect('deferred' in scheduled(target({ probeRank: null, previous: okAgo(120) }))).toBe(true);
-  });
-
-  it('名次第 5、2 小时前开跑过：按活跃，60 分钟一探', () => {
-    const ran = (m: number) => target({ probeRank: 5, lastRunAt: minutesAgo(120), previous: okAgo(m) });
-    expect('deferred' in scheduled(ran(50))).toBe(true);
-    expect('probe' in scheduled(ran(65))).toBe(true);
+    expect('probe' in scheduled(held(53))).toBe(true);
+    expect('deferred' in scheduled(held(52))).toBe(true);
+    const idleHeld = (m: number) =>
+      target({ probeRank: 5, lastRunAt: minutesAgo(7 * 60), heldByAlert: true, previous: okAgo(m) });
+    expect(scheduled(idleHeld(23 * 60))).toEqual({ deferred: expect.stringContaining('隔 1440 分钟再真探') });
+    expect('probe' in scheduled(idleHeld(25 * 60))).toBe(true);
   });
 
   it('渠道被运行中失败标成 disabled、只有探通它才能恢复：排第 5 也按活跃档', () => {
@@ -753,12 +775,20 @@ describe('按活跃分三档（#1798 片 3）', () => {
     expect('probe' in scheduled(restoring(65))).toBe(true);
   });
 
-  it('不分执行方式：cursor-agent 活跃路由也是 60 分钟（50 分钟前不探，65 分钟前探），不再是 120', () => {
-    expect(scheduled(cursorAuto({ probeRank: 1, previous: okAgo(50) }))).toEqual({
+  it('不分执行方式：要复探的 cursor-agent、grok 路由也是 60 分钟（50 分钟前不探，65 分钟前探）', () => {
+    expect(scheduled(cursorAuto({ probeRank: 1, heldByAlert: true, previous: okAgo(50) }))).toEqual({
       deferred: expect.stringContaining('隔 60 分钟'),
     });
-    expect('probe' in scheduled(cursorAuto({ probeRank: 1, previous: okAgo(65) }))).toBe(true);
-    const grok = target({ hostId: 'grok', orgKind: null, probeRank: 1, previous: okAgo(65) });
+    expect('probe' in scheduled(cursorAuto({ probeRank: 1, heldByAlert: true, previous: okAgo(65) }))).toBe(
+      true,
+    );
+    const grok = target({
+      hostId: 'grok',
+      orgKind: null,
+      probeRank: 1,
+      heldByAlert: true,
+      previous: okAgo(65),
+    });
     expect('probe' in scheduled(grok)).toBe(true);
   });
 
@@ -858,7 +888,7 @@ describe('按活跃分三档（#1798 片 3）', () => {
     expect(h.saved.map((s) => s.routeId)).toEqual(['due']);
     expect(h.after.map((a) => a.routeId)).toEqual(['due']);
     expect(h.savedPace).toEqual([
-      { routeId: top.routeId, tier: 'active', nextAt: minutesLater(10) },
+      { routeId: top.routeId, tier: 'active', nextAt: null },
       { routeId: 'down', tier: 'active', nextAt: minutesLater(10) },
     ]);
     expect(h.logs).toContain('info:路由探针：还没到再探的时候，结论照旧');
@@ -891,15 +921,18 @@ describe('按活跃分三档（#1798 片 3）', () => {
   });
 
   it('没到期的说明里写明档和下次什么时候；退避中的写下次几点', () => {
-    expect(scheduled(target({ probeRank: 1, previous: okAgo(50) }))).toEqual({
+    expect(scheduled(target({ probeRank: 1, heldByAlert: true, previous: okAgo(50) }))).toEqual({
       deferred: '活跃档，探通了隔 60 分钟再真探；下次约 10 分钟后',
+    });
+    expect(scheduled(target({ probeRank: 1, previous: okAgo(50) }))).toEqual({
+      deferred: '在线：定时这一轮不复探，派之前再探',
     });
     expect(scheduled(target({ previous: failed(2, 20) }))).toEqual({
       deferred: '退避中，下次约 12:17 再探（连着不通 2 次）',
     });
   });
 
-  it('真探通了：failStreak 回 0，下次探测按档（活跃 +60、不活跃 +1440），定时这一轮写 trigger: scheduled', async () => {
+  it('真探通了：failStreak 回 0，没有下次探测（在线的派之前再探），定时这一轮写 trigger: scheduled', async () => {
     const h = harness(
       [
         target({ probeRank: 1, previous: failed(4, 113) }),
@@ -911,7 +944,7 @@ describe('按活跃分三档（#1798 片 3）', () => {
     expect(h.saved[0]).toMatchObject({
       state: 'ok',
       tier: 'active',
-      nextAt: minutesLater(60),
+      nextAt: null,
       failStreak: 0,
       trigger: 'scheduled',
     });
@@ -919,7 +952,7 @@ describe('按活跃分三档（#1798 片 3）', () => {
     expect(h.saved[1]).toMatchObject({
       state: 'ok',
       tier: 'idle',
-      nextAt: minutesLater(1440),
+      nextAt: null,
       failStreak: 0,
     });
   });
@@ -944,10 +977,13 @@ describe('按活跃分三档（#1798 片 3）', () => {
   });
 
   it('通了之后又不通：从 1 次数起，下次隔 15 分钟', async () => {
-    const relapsed = harness([target({ alive: true, probeRank: 1, previous: okAgo(65) })], async () => ({
-      kind: 'failed',
-      detail: '又不通',
-    }));
+    const relapsed = harness(
+      [target({ alive: true, probeRank: 1, heldByAlert: true, previous: okAgo(65) })],
+      async () => ({
+        kind: 'failed',
+        detail: '又不通',
+      }),
+    );
     await runRouteProbeJob(relapsed.deps);
     expect(relapsed.saved[0]?.detail).toContain('连着不通 1 次');
     expect(relapsed.saved[0]).toMatchObject({ failStreak: 1, nextAt: minutesLater(15) });
@@ -978,10 +1014,10 @@ describe('按活跃分三档（#1798 片 3）', () => {
     });
   });
 
-  it('派前、人点的探测（不走定时节奏）真探完也带档和下次探测，但不写 trigger', async () => {
+  it('派前、人点的探测（不走定时节奏）真探完也带档，探通了没有下次探测，不写 trigger', async () => {
     const h = harness([], answered);
     const c = await conclude(h.deps, target({ probeRank: 1, previous: okAgo(5) }));
-    expect(c).toMatchObject({ state: 'ok', tier: 'active', nextAt: minutesLater(60), failStreak: 0 });
+    expect(c).toMatchObject({ state: 'ok', tier: 'active', nextAt: null, failStreak: 0 });
     expect(c.trigger).toBeUndefined();
     expect(c.deferred).toBeUndefined();
   });

@@ -85,8 +85,11 @@ export interface RouteProbeTarget {
   lastRunAt: Date | null;
   /** 连着不通几次（routes.probe_fail_streak）。 */
   failStreak: number;
-  /** 上一次的结论；探针还没看过为空。 */
-  previous: { state: RouteProbeState; at: Date; detail: string | null } | null;
+  /**
+   * 上一次的结论；探针还没看过为空。org 是下那个结论时会话用户挂的组织（routes.probe_org；读不到、不是 Claude 订阅池为空，
+   * 老的调用方不给）。
+   */
+  previous: { state: RouteProbeState; at: Date; detail: string | null; org?: OrgKind | null } | null;
 }
 
 /** 排进了用途的路由，带着算名次要的开关。同一条路由可以在几个用途里各出现一次。 */
@@ -215,7 +218,7 @@ export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
     previous:
       route.probeState === null || route.probedAt === null
         ? null
-        : { state: route.probeState, at: route.probedAt, detail: route.probeDetail },
+        : { state: route.probeState, at: route.probedAt, detail: route.probeDetail, org: route.probeOrg },
   }));
 }
 

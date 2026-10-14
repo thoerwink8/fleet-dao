@@ -1,10 +1,11 @@
 // 路由探针（#129，design 第九节「路由探针」）：一轮 = 记下开始 → 读全部路由 → 会话用户该不该切号（#157，org-switch.ts；
 // 切了这一轮探完核对）→ 逐条定探不探 → 该探的真起一次最小会话 → 每条写一条结论（只有 ok 在线，其余一律不在线、
 // 写明原因；Claude 订阅池的还记下那时会话用户挂的组织，选路靠它分得清「那一轮挂着别的组织、没探它」和「探了没通」，#335）
-// → 结局记进 schedule_runs。定时这一轮按「活跃」分三档（#1798 片 3），钟仍每 15 分钟走一次，只探到期的（不分执行方式）：
-// 活跃（用途开着名次前 2、近 6 小时开跑过、或渠道被运行中失败标成 disabled 要靠它恢复）每 60 分钟探一次；在用但不活跃的每天一次
-// （1440 分钟）；没有用途在用的不探。连着不通按 15、30、60、120、240 分钟退避，封顶 240，探通回到档的间隔。能探但还没到期的
-// 这一轮不真探、不重写结论，只更新档和下次探测时刻（deferred）。只这一轮这样：派前探测和人点的立即探测不看节奏，该探还探。
+// → 结局记进 schedule_runs。钟每 15 分钟走一次，定时这一轮只管不在线的和没真探过的：上一次探通了的在线路由不复探
+// （下次探测时刻写空），派之前由派前探测（dispatch-probe.ts）确认、真干活坏了由熔断挡。例外是选路派不到、派前探测碰不到的两种：
+// 池只被 pool-hold: 提醒顶着、渠道被运行中失败标 disabled 要靠它恢复——照档复探（活跃 60 分钟、在用不活跃 1440 分钟，没有用途在用
+// 的不探）。连着不通按 15、30、60、120、240 分钟退避，封顶 240。能探但还没到期的这一轮不真探、不重写结论，只更新档和下次探测时刻
+// （deferred）。只这一轮这样：派前探测和人点的立即探测不看节奏，该探还探。
 // 会话用户挂的组织这会儿定不下来（读数刚变、引擎没切过号，real/session-org.ts）：Claude 订阅池这一轮也不探、结论照旧，这一轮记 partial、写明为什么。
 // 窗口已重置、这一轮没发过探测的组织，用现有探法补发一次最小请求，把下一个窗口开起来（#49）。已探过的不重复发，
 // 也不改写路由结论。派前探测和人点的立即探测不补发。
@@ -74,8 +75,18 @@ export const DISPATCH_PROBE_FRESH_MS = 15 * 60_000;
 /**
  * heldBySwitch：这个池被人拍了整池暂停（开关 engine.poolHolds，值是写在开关里的原因）。探它没有意义——封号、欠费这类要人修的事，
  * 探一次只会再撞一次；人撤了暂停，下一轮自然恢复探。只认开关；引擎自己写的 pool-hold: 提醒不在此列，它要靠探针探通来撤。
+ * heldByAlert：这个池只被引擎写的 pool-hold: 提醒顶着（登录失效、封号这类，会话失败也会写）。选路整池避开、派前探测碰不到它，
+ * 只有定时这一轮探通了才撤；所以上一次结论是在线也照档的间隔探，不按「在线不复探」跳过。
  */
-export type ProbeTarget = RouteProbeTarget & { heldBySwitch?: string };
+/**
+ * switchedInto：这一轮探之前刚切号切到了这个池的组织。切号要靠这一轮真探读回核对（OrgSwitchRound.after），
+ * 所以和 heldByAlert 一样照档的间隔复探，不因为上一次探通了就跳过。
+ */
+export type ProbeTarget = RouteProbeTarget & {
+  heldBySwitch?: string;
+  heldByAlert?: boolean;
+  switchedInto?: boolean;
+};
 
 /**
  * 真探一次的结果。answered = 答上了；quota = 额度用满被拒——登录、组织、上游都通，额度另有额度那一套挡（选路按额度
@@ -286,11 +297,20 @@ export function probeTier(target: ProbeTarget, now: Date): RouteProbeTier {
 }
 
 /**
- * 下一次该真探的时刻。unused 回 null（不探）；连着不通按退避那一档从上一次算起；其余按档的间隔。
- * lastAt 为空（没真探过）按 1970 年算：必然已到期。
+ * 下一次该真探的时刻。unused 回 null（不探）；连着不通按退避那一档从上一次算起。
+ * 上一次探通了（failStreak 0、lastAt 有值）回 null：在线的路由定时这一轮不复探，派之前由派前探测（dispatch-probe.ts，
+ * 结论超过 DISPATCH_PROBE_FRESH_MS 就真探一次）确认，真干活坏了由熔断挡住。只有 keepPace（渠道要靠它恢复、池被 pool-hold:
+ * 提醒顶着——这两种选路派不到它、派前探测碰不到；这一轮刚切号切到它的组织——要靠这一轮读回核对；
+ * Claude 订阅池上一次探通时记下的组织不是它自己的）才照档的间隔复探。lastAt 为空（没真探过）按 1970 年算：必然已到期。
  */
-export function nextProbeAt(tier: RouteProbeTier, lastAt: Date | null, failStreak: number): Date | null {
+export function nextProbeAt(
+  tier: RouteProbeTier,
+  lastAt: Date | null,
+  failStreak: number,
+  keepPace = false,
+): Date | null {
   if (tier === 'unused') return null;
+  if (failStreak === 0 && lastAt !== null && !keepPace) return null;
   const base = (lastAt ?? new Date(0)).getTime();
   const minutes =
     failStreak > 0
@@ -329,7 +349,11 @@ interface Pace {
 function paceOf(t: ProbeTarget, now: Date): Pace {
   const tier = probeTier(t, now);
   const failStreak = priorFailStreak(t);
-  const nextAt = nextProbeAt(tier, lastProbedAt(t, now), failStreak);
+  // Claude 订阅池上一次探通时记下的组织不是它自己的（老结论没记、那时读不到）：这个「在线」不是在它的组织下得出的，照档复探
+  const orgUnconfirmed = t.orgKind !== null && t.previous?.state === 'ok' && t.previous.org !== t.orgKind;
+  const keepPace =
+    t.restoresChannel === true || t.heldByAlert === true || t.switchedInto === true || orgUnconfirmed;
+  const nextAt = nextProbeAt(tier, lastProbedAt(t, now), failStreak, keepPace);
   const due = nextAt !== null && nextAt.getTime() <= now.getTime() + (ROUTE_PROBE_EVERY_MINUTES / 2) * 60_000;
   return { tier, nextAt, failStreak, due };
 }
@@ -341,7 +365,9 @@ const TIER_NAMES: Record<RouteProbeTier, string> = {
 };
 
 function deferredDetail(pace: Pace, now: Date): string {
-  if (pace.nextAt === null) return `${TIER_NAMES[pace.tier]}，不探`;
+  if (pace.nextAt === null) {
+    return pace.tier === 'unused' ? `${TIER_NAMES[pace.tier]}，不探` : '在线：定时这一轮不复探，派之前再探';
+  }
   if (pace.failStreak > 0) return `${probeBackoffPhrase(pace.nextAt)}（连着不通 ${pace.failStreak} 次）`;
   const wait = Math.max(0, Math.round((pace.nextAt.getTime() - now.getTime()) / 60_000));
   const every = pace.tier === 'active' ? ROUTE_PROBE_ACTIVE_EVERY_MINUTES : ROUTE_PROBE_IDLE_EVERY_MINUTES;
@@ -711,7 +737,12 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
   const switched = await switchBefore(deps);
   const sentOrgs = new Set<OrgKind>();
   const watching: RouteProbeJobDeps = { ...deps, probers: countingProbers(deps.probers, sentOrgs) };
-  const conclusions = await mapLimit(targets, watching.concurrency ?? ROUTE_PROBE_CONCURRENCY, (t) =>
+  // 刚切过去的组织：这一轮要真探读回核对，在线的也照档复探
+  const round =
+    switched === null
+      ? targets
+      : targets.map((t) => (t.orgKind === switched ? { ...t, switchedInto: true } : t));
+  const conclusions = await mapLimit(round, watching.concurrency ?? ROUTE_PROBE_CONCURRENCY, (t) =>
     conclude(watching, t, { pace: true }),
   );
   if (deps.orgSwitch) {
