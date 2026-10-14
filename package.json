@@ -2,7 +2,7 @@
   "name": "fleet-dao",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.1.2",
+  "packageManager": "pnpm@11.28.2",
   "engines": {
     "node": ">=22.22"
   },

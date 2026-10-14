@@ -13,3 +13,16 @@ allowBuilds:
 # @esbuild-kit/* 的稳定版就删这条。
 overrides:
   '@esbuild-kit/core-utils>esbuild': 0.25.4
+# 全局虚拟仓：本机多棵工作树共享一份 node_modules 链接，装第二棵起接近秒装。pnpm 检测到 CI 会自动关掉（官方文档），
+# 所以 CI 和法国不受影响。v11.23.0 起 pnpm 自己派生的进程带 NODE_PATH 加 ESM 解析钩子，ESM 导入未声明的包不再失败；
+# 手动在 pnpm 之外起的 node 不带这个钩子。
+enableGlobalVirtualStore: true
+# 全局虚拟仓里包的真实路径在 .pnpm-store 下，往上找不到 @types/react，react-router 的类型里 React 变 any（NavLink 的 isActive 报隐式 any）。
+# 把 @types/react 声明成它的可选对等依赖，pnpm 就把本工程那份链到它旁边。
+packageExtensions:
+  react-router:
+    peerDependencies:
+      '@types/react': '*'
+    peerDependenciesMeta:
+      '@types/react':
+        optional: true
