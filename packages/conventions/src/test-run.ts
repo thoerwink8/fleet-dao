@@ -1,5 +1,11 @@
-// 本仓的测试开几个进程：有内存上限（引擎的会话被关在有上限的 scope 里）就按上限算，没有上限（本机、CI）照 vitest 默认。
-// vitest.config.ts 用这里；只读 /proc、/sys/fs/cgroup 两处，其余都能换成假的来测。
+// 本仓的测试开几个进程：有内存上限（引擎的会话被关在有上限的 scope 里）就按上限算；CI、引擎的会话里没有上限照 vitest 默认；
+// 本机人手跑的（不在 CI、环境里没有 FLEET_RUN_ID）再按核数和整机负载降一档（localWorkers）。vitest.config.ts 用这里；只读 /proc、/sys/fs/cgroup
+// 两处和整机 CPU 忙不忙，其余都能换成假的来测。
+//
+// 为什么本机降一档（决定 0093）：vitest 默认开「核数 - 1」个进程，本机同时还有别的会话、浏览器、另一个测试槽
+// （test-slots.ts 同时放 2 个）在跑，十几个进程抢核时起子进程的测试常超 vitest 的 5 秒（单跑 1–2 秒的也会），假红。
+// 开一半、再按空着的核数往下压。CI（专用运行机，CI=true）不变；引擎的会话也不变：交活前的自测限 8 分钟
+// （docs/design.md「引擎自测」），法国 6 核降一档只剩 2 个，超时就记「没跑」，得不偿失。
 //
 // 为什么：vitest 默认开「核数 - 1」个进程（法国 6 核就是 5 个），不看内存上限；每个进程还要自己建一份内存里的 Postgres
 // （packages/db/src/testing.ts 的 PGlite 模板，跑完迁移再按测试文件克隆），一个进程常驻就要 0.9–1.3G。#160 的写码会话在
@@ -7,7 +13,7 @@
 // 要跑就用 VITEST_MAX_WORKERS=<进程数> 指定（vitest 自己认这个变量，盖过这里算的）。
 // 不用 process.constrainedMemory()：它「没有上限」和「没读到」都回 0，分不开。
 import { readFileSync } from 'node:fs';
-import { availableParallelism } from 'node:os';
+import { availableParallelism, cpus, loadavg } from 'node:os';
 
 /**
  * 每多开一个测试进程，峰值多出多少（MiB）。实测（同一组测试：packages/api、packages/db、packages/engine/test/real，57 个文件）：
@@ -46,6 +52,43 @@ export interface TestRunEnv {
   cpus: number;
   /** 读文件：不在（ENOENT）返回 undefined，别的错照抛。 */
   read(path: string): string | undefined;
+  /** 整机 CPU 忙的比例（0–1）；量不出是 undefined。只在本机人手跑时问。 */
+  busy(): number | undefined;
+}
+
+/** 照旧（不降一档）的环境：CI（GitHub Actions 设 CI=true，和 test-changed.ts 的认法一样）、引擎起的会话（带 FLEET_RUN_ID，同 test-changed.ts 的 ENGINE_SESSION_MARKER）。 */
+function keepsDefault(env: Readonly<Record<string, string | undefined>>): boolean {
+  const v = env.CI?.trim().toLowerCase();
+  const ci = v !== undefined && v !== '' && v !== 'false' && v !== '0';
+  return ci || Boolean(env.FLEET_RUN_ID?.trim());
+}
+
+/**
+ * 量整机 CPU 忙的比例。Windows 没有 loadavg（恒为 0），隔 ms 毫秒取两次各核的累计时间算；别的平台用 1 分钟 loadavg ÷ 核数
+ * （封顶 1）。量不出（时间没走、读数不对）回 undefined，调用方按「不知道」处理，不当成空闲。
+ */
+export function measureBusy(platform: NodeJS.Platform = process.platform, ms = 200): number | undefined {
+  if (platform !== 'win32') {
+    const load = loadavg()[0];
+    const n = availableParallelism();
+    return load === undefined || !Number.isFinite(load) || n <= 0
+      ? undefined
+      : Math.min(Math.max(load / n, 0), 1);
+  }
+  const sum = () =>
+    cpus().reduce(
+      (acc, c) => {
+        const t = c.times;
+        return { idle: acc.idle + t.idle, all: acc.all + t.user + t.nice + t.sys + t.idle + t.irq };
+      },
+      { idle: 0, all: 0 },
+    );
+  const a = sum();
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const b = sum();
+  const all = b.all - a.all;
+  if (!(all > 0)) return undefined;
+  return Math.min(Math.max(1 - (b.idle - a.idle) / all, 0), 1);
 }
 
 export function realTestRunEnv(): TestRunEnv {
@@ -53,6 +96,7 @@ export function realTestRunEnv(): TestRunEnv {
     platform: process.platform,
     env: process.env,
     cpus: availableParallelism(),
+    busy: () => measureBusy(),
     read(path) {
       try {
         return readFileSync(path, 'utf8');
@@ -120,7 +164,18 @@ export function workersThatFit(limitMib: number): number {
   return Math.max(Math.floor((limitMib - RESERVE_MIB) / WORKER_MIB), 1);
 }
 
-/** 按内存上限算测试开几个进程：不超过 vitest 默认的「核数 - 1」，至少 1 个。 */
+/**
+ * 本机人手跑时开几个：vitest 默认（核数 - 1）的一半，再不超过「空着的核数 - 1」（busy 量不出就只取一半），至少 1 个。
+ * 16 核空闲开 7 个；整机忙一半开 7 个；忙到 75% 开 3 个。
+ */
+export function localWorkers(cpuCount: number, busy: number | undefined): number {
+  const byDefault = Math.max(cpuCount - 1, 1);
+  const tier = Math.max(Math.floor(byDefault / 2), 1);
+  if (busy === undefined) return tier;
+  return Math.max(Math.min(tier, Math.floor(cpuCount * (1 - busy)) - 1), 1);
+}
+
+/** 测试开几个进程：CI、引擎的会话里只按内存上限算（不超过 vitest 默认的「核数 - 1」）；本机人手跑再按核数和负载降一档。至少 1 个。 */
 export function testWorkers(env: TestRunEnv = realTestRunEnv()): TestWorkers {
   const override = env.env.VITEST_MAX_WORKERS?.trim();
   if (override) {
@@ -130,18 +185,32 @@ export function testWorkers(env: TestRunEnv = realTestRunEnv()): TestWorkers {
     }
     return { maxWorkers: undefined };
   }
-  if (env.platform !== 'linux') return { maxWorkers: undefined };
-  const limit = memoryLimitOf(env);
-  if (limit.kind === 'none') return { maxWorkers: undefined };
   const byDefault = Math.max(env.cpus - 1, 1);
-  const maxWorkers = Math.min(byDefault, workersThatFit(limit.mib));
-  if (maxWorkers >= byDefault) return { maxWorkers };
-  const tight =
-    limit.mib < RESERVE_MIB + WORKER_MIB
-      ? `，连一个都不够（要 ${RESERVE_MIB + WORKER_MIB} MiB），照样开 1 个、会很慢`
-      : '';
+  const limit: MemoryLimit = env.platform === 'linux' ? memoryLimitOf(env) : { kind: 'none' };
+  const byMemory = limit.kind === 'limited' ? workersThatFit(limit.mib) : byDefault;
+  const memNote =
+    limit.kind === 'limited' && byMemory < byDefault
+      ? `内存上限 ${limit.mib} MiB（${limit.source}）${
+          limit.mib < RESERVE_MIB + WORKER_MIB
+            ? `，连一个都不够（要 ${RESERVE_MIB + WORKER_MIB} MiB），照样开 1 个、会很慢`
+            : ''
+        }`
+      : undefined;
+  if (keepsDefault(env.env)) {
+    if (limit.kind === 'none') return { maxWorkers: undefined };
+    const maxWorkers = Math.min(byDefault, byMemory);
+    if (maxWorkers >= byDefault) return { maxWorkers };
+    return { maxWorkers, note: `测试按${memNote}开 ${maxWorkers} 个进程（默认 ${byDefault} 个）` };
+  }
+  const busy = env.busy();
+  const local = localWorkers(env.cpus, busy);
+  const maxWorkers = Math.min(local, byMemory);
+  const load = busy === undefined ? '整机忙不忙量不出' : `整机 CPU 忙 ${Math.round(busy * 100)}%`;
+  const why = [`本机按 ${env.cpus} 核、${load}，降一档`, ...(memNote === undefined ? [] : [memNote])].join(
+    '；',
+  );
   return {
     maxWorkers,
-    note: `测试按内存上限 ${limit.mib} MiB（${limit.source}）开 ${maxWorkers} 个进程（默认 ${byDefault} 个）${tight}`,
+    note: `测试开 ${maxWorkers} 个进程（默认 ${byDefault} 个；${why}；CI、引擎的会话不降，要指定用 VITEST_MAX_WORKERS）`,
   };
 }
