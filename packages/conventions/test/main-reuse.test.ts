@@ -290,7 +290,7 @@ describe('applyReuse + 汇总（check）：复用后 test、web、deploy 本该�
   });
 
   it('主线推送上复用：三个 job 都 skipped 才过（skipped 不被当成「没跑」或失败）', () => {
-    const p = applyReuse(planFor('packages/cli/src/help.ts'), reuse);
+    const p = applyReuse(planFor('packages/agent-eval/src/cli.ts'), reuse);
     const v = ciVerdict(needs(p), 'push');
     expect(v.ok, v.lines.join('\n')).toBe(true);
     expect(v.lines.join('\n')).toContain('同树复用');
@@ -298,14 +298,14 @@ describe('applyReuse + 汇总（check）：复用后 test、web、deploy 本该�
   });
 
   it('【故意造出的失败】复用了却有 job 真跑了、或红了：不过（test 该 skipped 却 success）', () => {
-    const p = applyReuse(planFor('packages/cli/src/help.ts'), reuse);
+    const p = applyReuse(planFor('packages/agent-eval/src/cli.ts'), reuse);
     expect(ciVerdict(needs(p, { test: { result: 'success' } }), 'push').ok).toBe(false);
     expect(ciVerdict(needs(p, { deploy: { result: 'failure' } }), 'push').ok).toBe(false);
     expect(ciVerdict(needs(p, { lint: { result: 'failure' } }), 'push').ok).toBe(false);
   });
 
   it('【故意造出的失败】不是主线推送、没给事件：带复用记录的 plan 不认（PR 不能靠它把测试变成「本该跳过」）', () => {
-    const p = applyReuse(planFor('packages/cli/src/help.ts'), reuse);
+    const p = applyReuse(planFor('packages/agent-eval/src/cli.ts'), reuse);
     for (const event of ['pull_request', 'schedule', undefined]) {
       const v = ciVerdict(needs(p), event);
       expect(v.ok, String(event)).toBe(false);
@@ -314,15 +314,15 @@ describe('applyReuse + 汇总（check）：复用后 test、web、deploy 本该�
   });
 
   it('【故意造出的失败】reused 输出和 plan 里的不是一份、plan 里没有输出却有、记录不齐全、复用了却还有要测的：不过', () => {
-    const p = applyReuse(planFor('packages/cli/src/help.ts'), reuse);
+    const p = applyReuse(planFor('packages/agent-eval/src/cli.ts'), reuse);
     const wrongRun = needs(p, {
       changes: { result: 'success', outputs: { ...planOutputs(p), reused: '99' } },
     });
     expect(ciVerdict(wrongRun, 'push').ok).toBe(false);
-    const stray = needs(planFor('packages/cli/src/help.ts'), {
+    const stray = needs(planFor('packages/agent-eval/src/cli.ts'), {
       changes: {
         result: 'success',
-        outputs: { ...planOutputs(planFor('packages/cli/src/help.ts')), reused: '11' },
+        outputs: { ...planOutputs(planFor('packages/agent-eval/src/cli.ts')), reused: '11' },
       },
       test: { result: 'success' },
     });
@@ -337,7 +337,7 @@ describe('applyReuse + 汇总（check）：复用后 test、web、deploy 本该�
         'push',
       ).lines.join('\n'),
     ).toContain('reused');
-    const stillTesting = { ...p, tests: planFor('packages/cli/src/help.ts').tests };
+    const stillTesting = { ...p, tests: planFor('packages/agent-eval/src/cli.ts').tests };
     expect(
       ciVerdict(
         needs(p, {

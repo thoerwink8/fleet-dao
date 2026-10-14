@@ -13,7 +13,6 @@
 | [engine.md](engine.md) | 引擎（`packages/engine`）：Temporal 工作流与活动、超时与心跳、信号与更新、合并队列、定时任务、版本演进、Temporal 部署 | 57 条（A–H） |
 | [errors.md](errors.md) | 错误分类与处置（「下一步该做什么」动作表）、卡住判定、路由熔断、会话资源隔离与准入；含 49 条真实报错样本夹具 | 53 条（第 8 节） |
 | [github.md](github.md) | GitHub：两个机器人与发令牌、写入的幂等与回读、PR 与合并队列、事件接收、白名单作者、互动限制续期、issue 进度段原地更新 | 42 条（A–G） |
-| [feishu.md](feishu.md) | 飞书（`packages/feishu`）：接口与硬限制、确认卡、三类推送与关注、置顶盘面卡、菜单、回复即追问、端到端自测 | 29 条（T） |
 | [data-jev.md](data-jev.md) | 数据库表（`packages/db`）、Jev 判断题服务、驾驶舱各页要的数据（`packages/api`、`packages/web`） | 47 条（A–H） |
 | [deploy.md](deploy.md) | `deploy/` 一条命令装机、日常部署、备份与看门狗、新旧系统切换 | 44 条（P01–P44） |
 | [old-issues.md](old-issues.md) | 迁移旧单（实施计划 P6）：每张旧开放单的去向；新设计漏掉的 10 条需求（已并入设计 §十七）；9 条该写成测试的坑 | 9 条 |

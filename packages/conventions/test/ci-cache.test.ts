@@ -74,7 +74,6 @@ const GRAPH: PackageGraph = {
     web: ['shared'],
     db: ['shared'],
     api: ['db', 'shared'],
-    feishu: ['shared'],
     conventions: ['shared'],
     engine: ['api', 'conventions', 'db'],
     cli: ['shared'],
@@ -156,13 +155,11 @@ describe('这一台的文件清单：只认测试文件，别的不猜', () => {
     ]);
   });
 
-  it('源码闭包：单元自己 + 向下依赖 + TEST_READS（api 读 web、feishu 读 web、db 读 adapters 和 core、agents 读 db、agents-sync 和 conventions），不往上、不顺依赖往下传 TEST_READS', () => {
+  it('源码闭包：单元自己 + 向下依赖 + TEST_READS（api 读 web、db 读 adapters 和 core、agents 读 db、agents-sync 和 conventions），不往上、不顺依赖往下传 TEST_READS', () => {
     expect(sourceClosure(GRAPH, ['api'])).toEqual(['api', 'db', 'shared', 'web']);
-    // feishu 读 web（TEST_READS）；依赖图里 feishu 只依赖 shared，web 来自这一项
-    expect(sourceClosure(GRAPH, ['feishu'])).toContain('web');
     // db 读 adapters 的夹具和 core 的告警文案（TEST_READS）；假依赖图里 adapters 没有下游
     expect(sourceClosure(GRAPH, ['db'])).toEqual(['adapters', 'core', 'db', 'shared']);
-    expect(sourceClosure(GRAPH, ['cli'])).toEqual(['cli', 'shared']);
+    expect(sourceClosure(GRAPH, ['agent-eval'])).toEqual(['agent-eval', 'shared']);
     // engine 依赖 api，但 api 读 web 是 api 测试自己的事：engine 的闭包里不带 web
     expect(sourceClosure(GRAPH, ['engine'])).not.toContain('web');
     // agents 不在依赖图里，但 agents/test/france.test.ts 直接读 shared 的源码：shared 每一组都带（UNIVERSAL_PACKAGES）；
@@ -189,7 +186,7 @@ describe('这一台的文件清单：只认测试文件，别的不猜', () => {
     if (typeof real === 'string') throw new Error(real);
     const all = makeHasher(fsHashFs(ROOT)).filesUnder('') ?? [];
     expect(all.length, '真仓里一个文件都没列出来：这条查的东西不存在').toBeGreaterThan(500);
-    const roots = keyRoots(['cli'], sourceClosure(real, ['cli']));
+    const roots = keyRoots(['agent-eval'], sourceClosure(real, ['agent-eval']));
     return all.filter((f) => {
       if (f.startsWith('packages/') && !f.startsWith('packages/shared/') && !FIXTURE_PATH.test(f))
         return false;
@@ -239,7 +236,7 @@ describe('键：盖住测试的全部输入，不相干的不变', () => {
   });
 
   it('不相干的包、不读的文档变了：键不变（命中率的来源）', () => {
-    for (const f of ['packages/cli/src/index.ts', 'packages/engine/src/index.ts', 'docs/PROGRESS.md']) {
+    for (const f of ['packages/agent-eval/src/index.ts', 'packages/engine/src/index.ts', 'docs/PROGRESS.md']) {
       expect(keyOf({ files: { [f]: 'changed' } }).key, f).toBe(base);
     }
   });
@@ -249,7 +246,7 @@ describe('键：盖住测试的全部输入，不相干的不变', () => {
       ...EXTERNAL_INPUT_FILES,
       ...EXTERNAL_INPUT_DIRS.map((d) => `${d}/new-file`),
       'packages/web/test/fixtures/a.json',
-      'packages/cli/test/sub/fixtures/b.json',
+      'packages/agent-eval/test/sub/fixtures/b.json',
     ];
     for (const f of touched) expect(keyOf({ files: { [f]: 'changed!' } }).key, f).not.toBe(base);
   });
@@ -290,16 +287,16 @@ describe('键：盖住测试的全部输入，不相干的不变', () => {
   it('conventions 那一组：别的包的测试文件、package.json 变了键也变（ci-plan.test.ts 的扫描器通读全仓测试）；别的组不受影响', () => {
     const conv = (files: Record<string, string>) => keyOf({ box: testsOf('conventions'), files }).key;
     const baseConv = conv({});
-    expect(conv({ 'packages/cli/test/index.test.ts': 'a test that reads outside' })).not.toBe(baseConv);
-    expect(conv({ 'packages/cli/test/brand-new.test.ts': 'x' })).not.toBe(baseConv);
-    expect(conv({ 'packages/cli/package.json': '{"name":"@fleet-dao/cli","x":1}' })).not.toBe(baseConv);
+    expect(conv({ 'packages/agent-eval/test/index.test.ts': 'a test that reads outside' })).not.toBe(baseConv);
+    expect(conv({ 'packages/agent-eval/test/brand-new.test.ts': 'x' })).not.toBe(baseConv);
+    expect(conv({ 'packages/agent-eval/package.json': '{"name":"@fleet-dao/cli","x":1}' })).not.toBe(baseConv);
     expect(conv({ 'agents/test/skills.test.ts': 'changed' })).not.toBe(baseConv);
     // 只改别的包的非测试源码：不变
-    expect(conv({ 'packages/cli/src/index.ts': 'changed' })).toBe(baseConv);
+    expect(conv({ 'packages/agent-eval/src/index.ts': 'changed' })).toBe(baseConv);
     // 非 conventions 的组不盖全仓测试
-    expect(keyOf({ files: { 'packages/cli/test/index.test.ts': 'changed' } }).key).toBe(base);
-    expect(isWholeRepoInput('packages/cli/test/x.test.ts')).toBe(true);
-    expect(isWholeRepoInput('packages/cli/src/x.ts')).toBe(false);
+    expect(keyOf({ files: { 'packages/agent-eval/test/index.test.ts': 'changed' } }).key).toBe(base);
+    expect(isWholeRepoInput('packages/agent-eval/test/x.test.ts')).toBe(true);
+    expect(isWholeRepoInput('packages/agent-eval/src/x.ts')).toBe(false);
   });
 
   it('keyCovers 和 computeKey 说的是一回事：覆盖的路径改了键变、没覆盖的不变', () => {
@@ -308,7 +305,7 @@ describe('键：盖住测试的全部输入，不相干的不变', () => {
     const probes = [
       'packages/api/src/index.ts',
       'packages/web/src/index.ts',
-      'packages/cli/src/index.ts',
+      'packages/agent-eval/src/index.ts',
       'AGENTS.md',
       'docs/ops.md',
       'docs/PROGRESS.md',
@@ -808,11 +805,11 @@ describe('入口 bin/ci-cache.ts', { timeout: 0 }, () => {
     expect(run([]).status).toBe(2);
     expect(run(['key']).status).toBe(2);
     expect(run(['nope', '--event', 'pull_request', '--tmp', tmp]).status).toBe(2);
-    expect(run(['key', '--event', 'pull_request', '--tmp', tmp, '--args', 'packages/cli/']).status).toBe(2);
+    expect(run(['key', '--event', 'pull_request', '--tmp', tmp, '--args', 'packages/agent-eval/']).status).toBe(2);
   });
 
   it('【故意造出的失败】主线推送：key 不开、plan 全跑、record 不写，都退出 0、什么清单都不碰', () => {
-    const box = boxFile(['packages/cli/test/cli.test.ts']);
+    const box = boxFile(['packages/agent-eval/test/cli.test.ts']);
     expect(run(['key', '--event', 'push', '--tmp', tmp, '--box-file', box, '--label', '1/1']).outputs).toBe(
       'enabled=false\n',
     );
@@ -839,7 +836,7 @@ describe('入口 bin/ci-cache.ts', { timeout: 0 }, () => {
     if (typeof real === 'string') throw new Error(real);
     const all = listTestFiles(fsRepo(ROOT));
     if (typeof all === 'string') throw new Error(all);
-    const box = boxFile(all.filter((f) => f.startsWith('packages/cli/')));
+    const box = boxFile(all.filter((f) => f.startsWith('packages/agent-eval/')));
     const args = ['key', '--event', 'pull_request', '--tmp', tmp, '--box-file', box, '--label', '1/1'];
     const a = run(args);
     const b = run(args);

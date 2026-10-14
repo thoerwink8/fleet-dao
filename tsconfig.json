@@ -26,9 +26,6 @@
       "path": "packages/api"
     },
     {
-      "path": "packages/feishu"
-    },
-    {
       "path": "packages/hygiene"
     },
     {

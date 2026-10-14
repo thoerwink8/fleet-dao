@@ -63,16 +63,16 @@ describe('列测试文件：和 vitest 自己收的是一份（vitest.config.ts 
 
   it('测试文件的判法：包的 src/test 下、agents/test 下；node_modules、.git 里的不收', () => {
     for (const yes of [
-      'packages/cli/src/a.test.ts',
-      'packages/cli/src/deep/b.test.tsx',
-      'packages/cli/test/c.test.ts',
+      'packages/agent-eval/src/a.test.ts',
+      'packages/agent-eval/src/deep/b.test.tsx',
+      'packages/agent-eval/test/c.test.ts',
       'agents/test/d.test.ts',
     ]) {
       expect(isTestFile(yes), yes).toBe(true);
     }
     for (const no of [
-      'packages/cli/src/helper.ts',
-      'packages/cli/node_modules/x/y.test.ts',
+      'packages/agent-eval/src/helper.ts',
+      'packages/agent-eval/node_modules/x/y.test.ts',
       'agents/skills/x.test.ts',
       'docs/a.test.ts',
       'package.json',

@@ -4,7 +4,7 @@
 // - 配了 FLEET_NODE_REPORT_URL 和 FLEET_NODE_REPORT_TOKEN 才起（config.ts 的 nodeReport）；没配，/healthz 的 node_report 报「未接」，
 //   不起循环、不发一个请求。
 // - 推不成不吞：每次都记日志（错误原文带地址，只进日志），/healthz 的 node_report 报红，说连着几次没推成、上次推成是多久前。
-//   起来后第一轮还没推完也报「没查成」，不当成好（和 gateway-seen.ts 一个规矩）。
+//   起来后第一轮还没推完也报「没查成」，不当成好（同「健康项没查成不当成好」的规矩）。
 // - 会随网络、对方自己变红（和这一版好不好无关）：推送方配上之前，发版脚本的 DRIFTING_HEALTH_ITEMS 要加 node_report（deploy/，另一片做）。
 // - 代理：Node 自带的 fetch 默认不认 HTTP(S)_PROXY；要走代理就在 api.env 里设 NODE_USE_ENV_PROXY=1 加 HTTPS_PROXY（Node 22.21 起有），
 //   仓里没有 undici，不另做 FLEET_NODE_REPORT_PROXY。
@@ -185,7 +185,7 @@ export function createNodeReporter(input: NodeReporterInput): NodeReporter {
   };
 }
 
-/** 「12 秒」「7 分钟」「2 小时 5 分钟」（和 gateway-seen.ts 一个说法）。 */
+/** 「12 秒」「7 分钟」「2 小时 5 分钟」（读起来的说法统一）。 */
 function span(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 60) return `${s} 秒`;

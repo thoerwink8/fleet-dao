@@ -54,7 +54,6 @@ import { createFeishuAuth } from './feishu.ts';
 import { memoryCockpitAlerts, pgCockpitAlerts } from './feishu-alerts.ts';
 import { productionPreflightReaders } from './france-preflight.ts';
 import { liveFranceReleasePort } from './france-release.ts';
-import { createGatewaySeen, feishuGatewayPart } from './gateway-seen.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { githubAppHealthCheck } from './github-app-health.ts';
 import type { GitHubUserPort } from './github-user.ts';
@@ -310,8 +309,6 @@ async function assemble(): Promise<{
         log,
       })
     : () => {};
-  // 飞书网关还来不来：飞书接口的门口记，/healthz 读的时候现算；没配通行证网关一律进不来，报「未接」
-  const gatewaySeen = createGatewaySeen(now);
   const deps: Deps = {
     config,
     store,
@@ -324,7 +321,6 @@ async function assemble(): Promise<{
     github: github.sink,
     ...(github.userHit ? { githubUser: github.userHit } : {}),
     ...(github.decisionCommenter ? { decisionCommenter: github.decisionCommenter } : {}),
-    gatewaySeen,
     // 意图表（#553 第 4 条）：网关只往里记进群和飞书用量；已有的意图指挥官经 fleet-api intent 读写同一张表
     intents: createPgIntentStore(db, { now }),
     alerts: pgCockpitAlerts(db),
@@ -380,7 +376,6 @@ async function assemble(): Promise<{
       // 和引擎读同一份位置（FLEET_JEV_CONFIG，默认 /etc/fleet-dao/jev.json）：引擎问得了、这里才报绿
       judge: judgeHealthCheck({ db, location: jevConfigLocation(process.env) }),
       deployLag,
-      feishuGateway: feishuGatewayPart(config, gatewaySeen),
       // 引擎切号（#157）写的提醒：只有这台库上跑着的引擎会写，没开引擎的环境一直是好的
       sessionOrg: sessionOrgHealthCheck(db),
       // 引擎每小时对账自检两个机器人的权限、缺了写的提醒：同样只有这台库上跑着的引擎会写

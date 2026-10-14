@@ -239,8 +239,8 @@ describe('跑哪些测试：和 CI 按改动跑同一套判法', () => {
   });
 
   it('改一个包（决定 0093）：不拖上整个 agents/test/，CI 另外还跑里写着它', () => {
-    const s = selectTests(['packages/cli/src/help.ts'], GRAPH);
-    expect(s).toMatchObject({ kind: 'some', paths: ['packages/cli/', ...LOCAL_ALWAYS_TESTS] });
+    const s = selectTests(['packages/agent-eval/src/cli.ts'], GRAPH);
+    expect(s).toMatchObject({ kind: 'some', paths: ['packages/agent-eval/', ...LOCAL_ALWAYS_TESTS] });
     expect(s.ciOnly).toContain(AGENTS_CI_NOTE);
   });
 
@@ -365,12 +365,12 @@ describe('只改文档：只跑读这些文档的测试，不拖上 agents/test/
 
   it('文档和代码一起改：改到的包 + 两份指针检查 + 读这份文档的测试，只问文档那几份谁读', () => {
     const asked: string[][] = [];
-    const s = sel([PROGRESS, 'packages/cli/src/help.ts'], (docs) => {
+    const s = sel([PROGRESS, 'packages/agent-eval/src/cli.ts'], (docs) => {
       asked.push([...docs]);
       return realReaders(docs);
     });
     expect(asked).toEqual([[PROGRESS]]);
-    expect(s.paths).toContain('packages/cli/');
+    expect(s.paths).toContain('packages/agent-eval/');
     for (const p of LOCAL_ALWAYS_TESTS) expect(s.paths).toContain(p);
     expect(s.paths).toContain('agents/test/progress-structure.test.ts');
     expect(s.paths).not.toContain('agents/test/');
@@ -620,7 +620,7 @@ describe('CI 每次都跑的测试：ci.yml 和 ALWAYS_TESTS 对得上；本机�
   const CASES: { changed: string[]; graph?: string; code: number; agents?: boolean }[] = [
     { changed: [], code: 0, agents: false },
     { changed: ['docs/design.md'], code: 0, agents: false },
-    { changed: ['packages/cli/src/help.ts'], code: 0, agents: false },
+    { changed: ['packages/agent-eval/src/cli.ts'], code: 0, agents: false },
     { changed: ['agents/skills/discuss/SKILL.md'], code: 0, agents: true },
     { changed: ['packages/shared/src/domain.ts'], code: REFUSED_FULL_RUN },
     { changed: ['pnpm-lock.yaml'], code: REFUSED_FULL_RUN },
@@ -655,7 +655,7 @@ describe('CI 每次都跑的测试：ci.yml 和 ALWAYS_TESTS 对得上；本机�
   });
 
   it('【故意造出的失败】从改一个包的清单里摘掉任一份指针检查：多出来的漏跑正好是那一份，不是空、也不是别的', () => {
-    const list = listOf(run(['packages/cli/src/help.ts']));
+    const list = listOf(run(['packages/agent-eval/src/cli.ts']));
     const before = new Set(uncovered(list));
     for (const drop of LOCAL_ALWAYS_TESTS) {
       const cut = list.filter((p) => p !== drop);

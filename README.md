@@ -30,7 +30,6 @@
 | `packages/web` | 驾驶舱前端：看板和后台管理页面；本机假数据模式（`react-router dev --mode mock`）开发和截图用 |
 | `packages/github` | 引擎对 GitHub 的读写：推分支、开 PR、等 CI、合并、issue 进度段与关单、对账补漏 |
 | `packages/jev` | 流程里用来提速的判断环节（不是独立产品）：三道题的题库、提问接口、TypeSafe 后端，一律只记不拦 |
-| `packages/feishu` | 飞书网关（跑在香港） |
 | `packages/conventions` | design 第七节的约定写成检查：合并闸 merge-gate（引擎任务 PR 等冷验收）、开单脚本、文档指针检查、欠账检查、阶段收口 |
 | `packages/hygiene` | 公开仓卫生检查：全仓扫描和推送前的闸，只拦私钥、令牌、密码这类真密钥（账号、邮箱、IP 不拦） |
 | `packages/agents-sync` | 同步脚本：把通用段 `agents/shared-rules.md`、`agents/skills/`、`agents/hooks/` 装进这台机器上各家 AI 的全局入口，记下这台同步到哪个提交，另能查漂移、撤旧仓留下的东西 |

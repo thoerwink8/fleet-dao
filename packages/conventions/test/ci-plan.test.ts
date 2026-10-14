@@ -172,17 +172,17 @@ describe('按改动算要跑什么', () => {
     expect(pr('docs/design.md', 'specs/1-x/方案.md').biome).toBe(false);
   });
 
-  it('只改一个没人依赖的包（cli）：只测它、只类型检查它，不打包 web、不跑 deploy', () => {
-    const p = pr('packages/cli/src/help.ts');
-    expect(p).toMatchObject({ full: false, biome: true, tsc: ['packages/cli'], web: false, deploy: 'none' });
-    expect(units(p)).toEqual(['cli']);
+  it('只改一个没人依赖的包（agent-eval）：只测它、只类型检查它，不打包 web、不跑 deploy', () => {
+    const p = pr('packages/agent-eval/src/cli.ts');
+    expect(p).toMatchObject({ full: false, biome: true, tsc: ['packages/agent-eval'], web: false, deploy: 'none' });
+    expect(units(p)).toEqual(['agent-eval']);
     // 装箱之后只跑 cli 自己的测试文件，一台
     const packed = assigned(p);
     expect(labels(packed)).toEqual(['1/1']);
     expect(
       boxFiles(packed)
         .flat()
-        .every((f) => f.startsWith('packages/cli/')),
+        .every((f) => f.startsWith('packages/agent-eval/')),
     ).toBe(true);
   });
 
@@ -270,7 +270,7 @@ describe('按改动算要跑什么', () => {
   it('改了 engine（#88 的偶发超时只挡改到 engine 的 PR）：别的包的 PR 不测 engine', () => {
     expect(units(pr('packages/engine/src/worker.ts'))).toEqual(['engine']);
     for (const f of [
-      'packages/cli/src/help.ts',
+      'packages/agent-eval/src/cli.ts',
       'packages/web/src/app.css',
       'packages/agents-sync/src/sync.ts',
       'docs/ops.md',
@@ -279,10 +279,10 @@ describe('按改动算要跑什么', () => {
     }
   });
 
-  it('改了 web：打包驾驶舱前端、跑 deploy（发布、扫公开页面文字用它）；api、feishu 的测试读 web 的文件，也测，但不往下传到 engine', () => {
+  it('改了 web：打包驾驶舱前端、跑 deploy（发布、扫公开页面文字用它）；api 的测试读 web 的文件，也测，但不往下传到 engine', () => {
     const p = pr('packages/web/src/build/scan.ts');
     expect(p).toMatchObject({ web: true, deploy: 'all' });
-    expect(units(p)).toEqual(['api', 'feishu', 'web']);
+    expect(units(p)).toEqual(['api', 'web']);
   });
 
   it('改了 adapters 的源码：依赖它的跟着测；db 的测试读它的夹具，也测，不往下传到依赖 db 的（#984）', () => {
@@ -299,8 +299,7 @@ describe('按改动算要跑什么', () => {
     ]);
   });
 
-  it('改了 feishu、agents-sync：deploy/test 打包网关、跑同步脚本，要跑 deploy', () => {
-    expect(pr('packages/feishu/src/gateway.ts').deploy).toBe('all');
+  it('改了 agents-sync：deploy/test 跑同步脚本，要跑 deploy', () => {
     expect(pr('packages/agents-sync/src/sync.ts').deploy).toBe('all');
     expect(pr('packages/jev/src/index.ts').deploy).toBe('none');
   });
@@ -309,7 +308,7 @@ describe('按改动算要跑什么', () => {
     expect(pr('docs/ops.md').deploy).toBe('ops');
     expect(pr('docs/ops.md', 'docs/design.md', 'specs/1-x/方案.md').deploy).toBe('ops');
     // 顺序不影响：全套压过 ops
-    expect(pr('docs/ops.md', 'packages/feishu/src/gateway.ts').deploy).toBe('all');
+    expect(pr('docs/ops.md', 'packages/web/src/build/scan.ts').deploy).toBe('all');
     expect(pr('packages/agents-sync/src/sync.ts', 'docs/ops.md').deploy).toBe('all');
     expect(pr('docs/ops.md', 'deploy/france.sh').full).toBe(true);
     expect(pr('docs/ops.md', 'deploy/france.sh').deploy).toBe('all');
@@ -411,8 +410,8 @@ describe('要全跑、本机又不全跑时先跑哪些（fallbackUnits，给 te
       expect(pr(f).full, f).toBe(true);
       expect(fb(f), f).toEqual({ units: [], hubs: [], dependents: [] });
     }
-    expect(fb('pnpm-lock.yaml', 'packages/cli/src/help.ts')).toEqual({
-      units: ['cli'],
+    expect(fb('pnpm-lock.yaml', 'packages/agent-eval/src/cli.ts')).toEqual({
+      units: ['agent-eval'],
       hubs: [],
       dependents: [],
     });
@@ -587,11 +586,10 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
     return missed;
   };
 
-  it('依赖图或 TEST_READS 盖住扫出来的每一条跨包读；api→web、feishu→web、db→adapters 都在（#984）', () => {
+  it('依赖图或 TEST_READS 盖住扫出来的每一条跨包读；api→web、db→adapters 都在（#984）', () => {
     const has = (from: string, to: string) =>
       (graph().deps[from] ?? []).includes(to) || readsPackage(TEST_READS[from] ?? [], to);
     expect(has('api', 'web'), 'api→web').toBe(true);
-    expect(has('feishu', 'web'), 'feishu→web').toBe(true);
     expect(has('db', 'adapters'), 'db→adapters').toBe(true);
     expect(missingReadEdges(TEST_READS)).toEqual([]);
   });
@@ -761,8 +759,8 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
    * 「本该 skipped」，一个测试都不跑还算绿。有要测的单元却一台都没有，汇总必须红。
    */
   it('【故意造出的失败】有要测的单元却一台测试都没有（没装箱）：不过，不当成「本该 skipped」', () => {
-    const noBoxes = pr('packages/cli/src/help.ts');
-    expect(noBoxes.testUnits, '这条查的场景不成立了（planCi 现在自己装箱了？）').toEqual(['cli']);
+    const noBoxes = pr('packages/agent-eval/src/cli.ts');
+    expect(noBoxes.testUnits, '这条查的场景不成立了（planCi 现在自己装箱了？）').toEqual(['agent-eval']);
     expect(noBoxes.tests).toEqual([]);
     const v = ciVerdict(needs({ test: { result: 'skipped' } }, noBoxes));
     expect(v.ok).toBe(false);
@@ -778,7 +776,7 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
   /** 矩阵铺的是 outputs.tests：它和 plan 里核过的那份不是同一份（工作流被改坏），就红。 */
   it('【故意造出的失败】矩阵里的台和 plan 里的不是同一份：不过', () => {
     const n = needs();
-    const p = assigned(pr('packages/cli/src/help.ts'));
+    const p = assigned(pr('packages/agent-eval/src/cli.ts'));
     n.changes.outputs = { ...n.changes.outputs, plan: JSON.stringify(p), tests: '[]' };
     expect(ciVerdict(n).ok).toBe(false);
     expect(ciVerdict(n).lines.join('\n')).toContain('和 plan 里的测试台不是同一份');
@@ -864,15 +862,15 @@ describe('入口', { timeout: 0 }, () => {
    * 【故意造出的失败】装箱这一步没算成：退出 2 判红，不静默少跑（原来那种「vitest 一个文件都没收到」的红要保住）。
    */
   it('【故意造出的失败】没单元有测试文件 / 列不出测试文件 / 读不了某个文件：一句为什么，不静默少跑', () => {
-    expect(assignTests({ ...pr('packages/cli/src/help.ts'), testUnits: ['没有这个包'] }, inputs)).toMatch(
+    expect(assignTests({ ...pr('packages/agent-eval/src/cli.ts'), testUnits: ['没有这个包'] }, inputs)).toMatch(
       /一个测试文件都没有/,
     );
     // 列不出测试文件（检出坏了）：也是一句为什么，不是空清单
-    expect(assignTests(pr('packages/cli/src/help.ts'), { ...inputs, all: '列不出 packages/' })).toContain(
+    expect(assignTests(pr('packages/agent-eval/src/cli.ts'), { ...inputs, all: '列不出 packages/' })).toContain(
       '列不出 packages/',
     );
     // 读不了某个测试文件（认不出要不要 Temporal）：判红，不猜
-    expect(assignTests(pr('packages/cli/src/help.ts'), { ...inputs, read: () => undefined })).toContain(
+    expect(assignTests(pr('packages/agent-eval/src/cli.ts'), { ...inputs, read: () => undefined })).toContain(
       '读不到测试文件',
     );
   });
@@ -993,14 +991,14 @@ describe('ci.yml 和这里对得上', () => {
     });
 
     it('四样都绿：四样都写 success，tsc 带上算出来的项目', () => {
-      const { outputs, calls } = go({ BIOME_WANT: 'true', TSC: 'packages/cli packages/core' }, []);
+      const { outputs, calls } = go({ BIOME_WANT: 'true', TSC: 'packages/agent-eval packages/core' }, []);
       expect(outputs).toEqual({
         biome: 'success',
         tsc: 'success',
         doc_pointers: 'success',
         agents_test: 'success',
       });
-      expect(calls).toContain('exec tsc -b packages/cli packages/core');
+      expect(calls).toContain('exec tsc -b packages/agent-eval packages/core');
       expect(calls).toContain('exec biome check .');
     });
 
@@ -1371,10 +1369,10 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
   });
 
   it('只改一个包：台数按工作量定（包小就一台，不为了「并行」白起机器）', () => {
-    const p = assigned(pr('packages/cli/src/help.ts'));
+    const p = assigned(pr('packages/agent-eval/src/cli.ts'));
     expect(p.tests).toHaveLength(1);
     expect(labels(p)).toEqual(['1/1']);
-    expect(p.tests[0]?.files.every((f) => f.startsWith('packages/cli/'))).toBe(true);
+    expect(p.tests[0]?.files.every((f) => f.startsWith('packages/agent-eval/'))).toBe(true);
   });
 
   it('改了 engine：engine 的 88 个文件按耗时装进几台，最慢的几台差得不多（不再像 --shard 那样 89/35/137）', () => {
@@ -1574,7 +1572,7 @@ describe('驾驶舱 e2e（#930；决定 0029：只点改动页；决定 0093：�
     for (const f of [
       'docs/design.md',
       'packages/engine/src/index.ts',
-      'packages/cli/src/help.ts',
+      'packages/agent-eval/src/cli.ts',
       'packages/db/src/catalog.ts',
       'packages/shared/src/domain.ts',
       'pnpm-lock.yaml',
