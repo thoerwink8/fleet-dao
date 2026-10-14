@@ -287,7 +287,7 @@ func TestCloudMissingInjectionNeverStartsReclaude(t *testing.T) {
 		t.Run(settings, func(t *testing.T) {
 			f := newFixture(t, "cloud")
 			p := filepath.Join(f.home, "invoked")
-			a := startAppSettings(t, f, settings, "MIRASIM_TEST_INVOKED="+p)
+			a := startAppSettings(t, f, settings, append(noEnvGateway, "MIRASIM_TEST_INVOKED="+p)...)
 			a.user(t, "must-not-send")
 			_ = a.in.Close()
 			select {
@@ -364,7 +364,7 @@ func TestSwitchBothDirectionsKeepsNativeSession(t *testing.T) {
 func TestSwitchToPlatformWithoutLiveGatewayRefusesLoudlyAndKeepsSession(t *testing.T) {
 	f := newFixture(t, "local")
 	p := filepath.Join(f.home, "invoked")
-	a := startAppSettings(t, f, `{"env":{"KEEP_ME":"yes"}}`, "MIRASIM_TEST_INVOKED="+p)
+	a := startAppSettings(t, f, `{"env":{"KEEP_ME":"yes"}}`, append(noEnvGateway, "MIRASIM_TEST_INVOKED="+p)...)
 	x := a.turn(t, "first")
 	if x["route"] != "local" {
 		t.Fatal(x)
@@ -430,7 +430,7 @@ func TestNoOverridePreservesMirasimDefault(t *testing.T) {
 
 func TestUnmarkedProxyWithoutCredentialStripsToOwn(t *testing.T) {
 	f := newFixture(t, "")
-	a := startAppSettings(t, f, `{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:12345/synthetic","KEEP_ME":"yes"}}`)
+	a := startAppSettings(t, f, `{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:12345/synthetic","KEEP_ME":"yes"}}`, noEnvGateway...)
 	x := a.turn(t, "own")
 	if x["route"] != "local" {
 		t.Fatalf("未标且没有平台令牌应剥掉本机代理、走自有：%v", x)

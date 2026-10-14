@@ -11,8 +11,19 @@ func workspaceIndexName(workspace string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(workspace)) + ".json"
 }
 
-func gatewayFacts(args []string) (loopback bool, credential bool, err error) {
+// gatewayFacts 按 claude 实际生效的顺序判网关：先取进程环境，再由 --settings 的 env 覆盖。
+// Mirasim 0.0.498 起把平台网关放进进程环境、--settings 里不再带 env，只看参数会把平台会话误判成没有网关。
+func gatewayFacts(args []string, environ []string) (loopback bool, credential bool, err error) {
 	env := map[string]any{}
+	for _, kv := range environ {
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			for _, k := range injectedKeys {
+				if strings.EqualFold(kv[:i], k) {
+					env[k] = kv[i+1:]
+				}
+			}
+		}
+	}
 	for i := 0; i < len(args); i++ {
 		val := ""
 		if args[i] == "--settings" {
@@ -48,8 +59,8 @@ func gatewayFacts(args []string) (loopback bool, credential bool, err error) {
 	return isLoopbackURL(base), strings.TrimSpace(auth) != "" || strings.TrimSpace(key) != "", nil
 }
 
-func verifyGatewaySettings(args []string) error {
-	loopback, credential, err := gatewayFacts(args)
+func verifyGatewaySettings(args []string, environ []string) error {
+	loopback, credential, err := gatewayFacts(args, environ)
 	if err != nil {
 		return err
 	}
