@@ -1,7 +1,7 @@
 // 全流程巡检（#223）：每一轮的记录（canary_runs），和巡检每一回看那张单时从库里读的事实（任务行、runs 记的账、每步耗时、
 // 这张单的任务工作流报的要人看的提醒、最近一轮拉单）。判断不在这里：引擎的 jobs/canary.ts 拿这些事实判走到哪一步、断没断。
 // 读不到照抛（调用方记「没查成」），不拿空的顶。
-import { taskWorkflowId } from '@fleet-dao/shared';
+import { type CiPolicy, ciPolicyOf, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gte, isNotNull, isNull, lt, ne, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import type { CanaryStage, CanaryVerdict, RecordedCanaryStage } from '../schema/enums.ts';
@@ -262,8 +262,8 @@ const NO_LEDGER: CanaryLedger = { total: 0, ended: 0, manual: 0, verify: 0, with
 
 /** 巡检看一张单时从库里读到的事实（判断在引擎 jobs/canary.ts）。 */
 export interface CanaryDbFacts {
-  /** 巡检仓在库里的样子；不在库里（没受管）是 null。 */
-  repo: { id: string; autoDispatchSince: Date | null } | null;
+  /** 巡检仓在库里的样子；不在库里（没受管）是 null。ciPolicy：不强制时工作流不做冷验收。 */
+  repo: { id: string; autoDispatchSince: Date | null; ciPolicy: CiPolicy } | null;
   /** 这张单的任务行（拉单起任务工作流之前建的）；还没拉起来是 null。 */
   task: {
     id: string;
@@ -296,10 +296,18 @@ export async function canaryDbFacts(
   db: Db,
   input: { owner: string; name: string; issueNumber: number; since: Date; intakeJob: string },
 ): Promise<CanaryDbFacts> {
-  const [repo] = await db
-    .select({ id: repos.id, autoDispatchSince: repos.autoDispatchSince })
+  const [repoRow] = await db
+    .select({ id: repos.id, autoDispatchSince: repos.autoDispatchSince, ciPolicy: repos.ciPolicy })
     .from(repos)
     .where(and(eq(repos.owner, input.owner), eq(repos.name, input.name)));
+  // 认不出就抛：调用方记没查成，不把坏值当成「不强制」放行、也不当成强制卡住
+  const repo = repoRow
+    ? {
+        id: repoRow.id,
+        autoDispatchSince: repoRow.autoDispatchSince,
+        ciPolicy: ciPolicyOf(repoRow.ciPolicy),
+      }
+    : null;
   const [intake] = await db
     .select({
       startedAt: scheduleRuns.startedAt,

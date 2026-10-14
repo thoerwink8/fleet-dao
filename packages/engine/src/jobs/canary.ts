@@ -259,7 +259,10 @@ function stageDone(stage: CanaryStage, obs: CanaryObservation, state: CanaryStat
       );
     case 'ledger': {
       const r = db.runs;
-      return r.manual > 0 && r.verify > 0 && r.ended === r.total && r.withUsage > 0 && db.timings > 0;
+      // 不强制 CI 的仓工作流不做冷验收（#1877），runs 里没有验收那一笔是照设计，不是没记账。
+      // 强制 CI 仍要有验收那一笔。巡检第 39 轮仓已切成不强制、验收 0 笔，记账空等到期报红（#2082）。
+      const verifyOk = r.verify > 0 || db.repo?.ciPolicy === 'off';
+      return r.manual > 0 && verifyOk && r.ended === r.total && r.withUsage > 0 && db.timings > 0;
     }
     case 'board': {
       const b = obs.board;
@@ -356,6 +359,9 @@ function whyStuck(stage: CanaryStage, obs: CanaryObservation): string {
       parts.push(
         `用量没记上的：${missing.map((m) => `${m.model}（${m.note ?? '没写原因：不是经 Mirasim 起的，或还没轮到用量补记'}）`).join('；')}`,
       );
+    }
+    if (db.repo?.ciPolicy === 'off' && r.verify === 0) {
+      parts.push('这个仓不强制 CI，工作流不做冷验收，没有验收那一笔不算缺账');
     }
   }
   if (stage === 'board') {
