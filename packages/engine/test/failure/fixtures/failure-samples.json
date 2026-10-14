@@ -1186,20 +1186,6 @@
       "expect": { "action": "park", "rule": "CF1", "alert": true }
     },
     {
-      "id": "X79",
-      "provenance": "format",
-      "origin": "开 PR 前验证（#213）：真会话端口起验证会话前，整份提示词过卫生检查（real/sessions.ts 的 screenForOtherVendor），查出来就不发、报 MATERIAL_BLOCKED；报错里只有位置、行号、规则名",
-      "evidence": {
-        "source": "session:verify",
-        "routeBound": true,
-        "hostId": "cursor-agent",
-        "code": "MATERIAL_BLOCKED",
-        "retryable": false,
-        "message": "发给别家的验证材料没过卫生检查，没发给Cursor Agent：查出 1 处（验证提示词 第 12 行 token）"
-      },
-      "expect": { "action": "park", "rule": "HY4", "alert": true, "routeOutcome": "neutral" }
-    },
-    {
       "id": "X80",
       "provenance": "format",
       "origin": "开 PR 前验证（#213）读默认分支上的需求文档（real/github-ports.ts 的 readCriteria）：文件不在就报 SPEC_DOC_MISSING，不验",

@@ -406,7 +406,6 @@ export function factCells({
 
   if (facts.health.ok) {
     const h = facts.health.value;
-    const pending = h.pending?.length ?? 0;
     cells.push(
       <Read
         key="health"
@@ -415,10 +414,10 @@ export function factCells({
         value={h.failing.length === 0 ? '没红的' : `${h.failing.length} 项红`}
         sub={
           h.failing.length === 0
-            ? `${h.total} 项都通；未接 ${h.notWired.length} 项${pending > 0 ? `；待定 ${pending} 项` : ''}`
+            ? `${h.total} 项都通；未接 ${h.notWired.length} 项`
             : `红：${h.failing.join('、')}`
         }
-        tone={h.failing.length > 0 ? 'fail' : pending > 0 ? 'wait' : undefined}
+        tone={h.failing.length > 0 ? 'fail' : undefined}
       />,
     );
   } else cells.push(<NotRead key="health" {...base} {...HEADS.health} reason={facts.health.reason} />);

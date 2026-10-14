@@ -118,8 +118,8 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   taskSpend: 'quick',
 };
 
-/** quick 一档（含排进合并队列、撤出）一次尝试的限时。合并队列的空闲收工时长不能比它短（limits.ts 的下限）。 */
-export const QUICK_TIMEOUT_SECONDS = 30;
+/** quick 一档一次尝试的限时。 */
+const QUICK_TIMEOUT_SECONDS = 30;
 
 /** 重试也治不好的错误码：直接交给失败分流。 */
 export const NON_RETRYABLE_CODES: readonly string[] = [

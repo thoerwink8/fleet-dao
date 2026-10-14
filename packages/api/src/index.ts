@@ -26,7 +26,6 @@ export { githubAppMissing, githubEventsCheck, verifyGithubSignature } from './gi
 export {
   type HealthReport,
   PublicHealthError,
-  PublicHealthPending,
   runHealthChecks,
   serviceHealthChecks,
 } from './health.ts';

@@ -1280,7 +1280,7 @@ describe('报警、提问、人闸', () => {
 });
 
 describe('计时、快照', () => {
-  it('活动、等待各记一行，重试重写同一笔不重复', async () => {
+  it('活动记一行，重试重写同一笔不重复', async () => {
     await world(t.db);
     const p = ports();
     const activity = {
@@ -1299,22 +1299,8 @@ describe('计时、快照', () => {
     };
     await p.recordTiming(activity, ctx);
     await p.recordTiming(activity, ctx);
-    await p.recordTiming(
-      {
-        kind: 'wait',
-        workflowId: 'req:acme/widgets#12',
-        runId: 'temporal-run-1',
-        workflowType: 'requirementWorkflow',
-        waitFor: 'slot',
-        detail: '等空位',
-        startedAt: NOW.toISOString(),
-        endedAt: new Date(NOW.getTime() + MIN).toISOString(),
-        waitMs: MIN,
-      },
-      ctx,
-    );
     const rows = await t.db.select().from(stepTimings);
-    expect(rows.map((r) => r.kind).sort()).toEqual(['activity', 'wait']);
+    expect(rows.map((r) => r.kind)).toEqual(['activity']);
   });
 
   it('任务快照：任务不在库里明确报错', async () => {
