@@ -44,6 +44,11 @@ export interface RunInsert {
   costUsd?: number | null;
   /** 执行体报的会话号（收场才有）；没读到不给。 */
   sessionId?: string | null;
+  /**
+   * 用量没照终帧读到时记的「怎么来的、为什么缺」（白话）：会话被叫停、超时杀时各家插头给的那句写进 runs.usage_note。
+   * 没读到就不写（交给「用量补记」按会话号补）。
+   */
+  usageNote?: string | null;
   memoryPeakMb?: number | null;
   /** 这一次会话的 CPU 秒数；没读到不给（NULL），不写 0。 */
   cpuSeconds?: number | null;
@@ -170,24 +175,38 @@ export async function latestRunOfTask(
 
 /**
  * 一张单到现在花掉的 token（单任务预算用，决定 0093）：task_id 对得上的动手、验收两段，输入、输出、缓存读、缓存写四样相加。
- * 四样都还空着的行（中转会话的用量稍后才补）不算进去，数出有几行：花掉的只多不少，调用方写明。
+ * 四样都还空着的行（被引擎叫停、超时杀，或中转会话的用量稍后才补）算不出确数：按这张单已经记到用量的几行的每分钟速率（合并了
+ * 两样都记到的会话，没记到的算 0），乘它们跑过的分钟数，估个下限（estimated），数出有几行（unmetered）。预算判断把 estimated
+ * 一起算进去（只多不少），页面上写明是估的。
  */
 export async function taskTokenSpend(
   db: Db,
   taskId: string,
-): Promise<{ tokens: number; runs: number; unmetered: number }> {
+): Promise<{ tokens: number; runs: number; unmetered: number; estimated: number }> {
+  const perRun = sql`coalesce(${runs.inputTokens}, 0) + coalesce(${runs.outputTokens}, 0) + coalesce(${runs.cacheReadTokens}, 0) + coalesce(${runs.cacheWriteTokens}, 0)`;
+  const blank = sql`${runs.inputTokens} is null and ${runs.outputTokens} is null and ${runs.cacheReadTokens} is null and ${runs.cacheWriteTokens} is null`;
+  const seconds = sql`greatest(extract(epoch from (coalesce(${runs.endedAt}, now()) - ${runs.startedAt})), 0)`;
   const [row] = await db
     .select({
-      tokens: sql<string>`coalesce(sum(coalesce(${runs.inputTokens}, 0) + coalesce(${runs.outputTokens}, 0) + coalesce(${runs.cacheReadTokens}, 0) + coalesce(${runs.cacheWriteTokens}, 0)), 0)`,
+      tokens: sql<string>`coalesce(sum(case when ${blank} then 0 else ${perRun} end), 0)`,
       runs: sql<string>`count(*)`,
-      unmetered: sql<string>`count(*) filter (where ${runs.inputTokens} is null and ${runs.outputTokens} is null and ${runs.cacheReadTokens} is null and ${runs.cacheWriteTokens} is null)`,
+      unmetered: sql<string>`count(*) filter (where ${blank})`,
+      measuredSeconds: sql<string>`coalesce(sum(case when ${blank} then 0 else ${seconds} end), 0)`,
+      blankSeconds: sql<string>`coalesce(sum(case when ${blank} then ${seconds} else 0 end), 0)`,
     })
     .from(runs)
     .where(and(eq(runs.taskId, taskId), or(eq(runs.segment, 'manual'), eq(runs.segment, 'verify'))));
+  const tokens = Number(row?.tokens ?? 0);
+  const measuredSeconds = Number(row?.measuredSeconds ?? 0);
+  const blankSeconds = Number(row?.blankSeconds ?? 0);
+  // 没有一行记到用量：没有速率可估，回 0（调用方照 unmetered 说「读不到」，不当成没花）
+  const estimated =
+    measuredSeconds > 0 && tokens > 0 ? Math.round((tokens / measuredSeconds) * blankSeconds) : 0;
   return {
-    tokens: Number(row?.tokens ?? 0),
+    tokens,
     runs: Number(row?.runs ?? 0),
     unmetered: Number(row?.unmetered ?? 0),
+    estimated,
   };
 }
 
@@ -491,8 +510,8 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
     cacheWriteTokens: row.cacheWriteTokens ?? null,
     costUsd: row.costUsd ?? null,
     sessionId: row.sessionId ?? null,
-    // 只由「用量补记」和一次性回填写，记一笔时不碰
-    usageNote: null,
+    // 收场那一笔只在用量没照终帧读到时带（会话被叫停、超时杀：记的是怎么来的、缺的为什么读不到）；别的由「用量补记」和一次性回填写
+    usageNote: row.usageNote ?? null,
     memoryPeakMb: row.memoryPeakMb ?? null,
     cpuSeconds: row.cpuSeconds ?? null,
     failureReason: row.failureReason ?? null,
@@ -508,9 +527,10 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
 
 /** 再记时要改的列：收场才有的那几列用 coalesce(新值, 库里已有的)，没给就不清。 */
 function pickRowWithoutId(r: RunRowSure) {
-  const { id: _i, createdAt: _c, usageNote: _n, ...rest } = r;
+  const { id: _i, createdAt: _c, ...rest } = r;
   return {
     ...rest,
+    usageNote: sql`coalesce(${r.usageNote}, ${runs.usageNote})`,
     sessionId: sql`coalesce(${r.sessionId}, ${runs.sessionId})`,
     endedAt: sql`coalesce(${r.endedAt?.toISOString() ?? null}::timestamptz, ${runs.endedAt})`,
     outcome: sql`coalesce(${r.outcome}, ${runs.outcome})`,

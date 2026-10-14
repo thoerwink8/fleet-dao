@@ -245,13 +245,71 @@ describe('上游串拆名', () => {
     });
   });
 
+  it('Cursor：法国目录 2026-10-14 进了未归类的 39 个串全拆得出（版本在前的老写法、extra-high、none、minimal、mini、nano、代号、-code）', () => {
+    const want: Record<string, [string, string, string | null, boolean, boolean]> = {
+      'claude-4-sonnet': ['sonnet-4', 'claude', null, false, false],
+      'claude-4-sonnet-thinking': ['sonnet-4', 'claude', null, false, true],
+      'claude-4.5-opus-high': ['opus-4.5', 'claude', 'high', false, false],
+      'claude-4.5-opus-high-thinking': ['opus-4.5', 'claude', 'high', false, true],
+      'claude-4.5-sonnet': ['sonnet-4.5', 'claude', null, false, false],
+      'claude-4.5-sonnet-thinking': ['sonnet-4.5', 'claude', null, false, true],
+      'claude-4.6-opus-high': ['opus-4.6', 'claude', 'high', false, false],
+      'claude-4.6-opus-high-thinking': ['opus-4.6', 'claude', 'high', false, true],
+      'claude-4.6-opus-max': ['opus-4.6', 'claude', 'max', false, false],
+      'claude-4.6-opus-max-thinking': ['opus-4.6', 'claude', 'max', false, true],
+      'claude-4.6-sonnet-medium': ['sonnet-4.6', 'claude', 'medium', false, false],
+      'claude-4.6-sonnet-medium-thinking': ['sonnet-4.6', 'claude', 'medium', false, true],
+      'gemini-3.6-flash-minimal': ['gemini-3.6-flash', 'gemini', null, false, false],
+      'gemini-4-argon-high': ['gemini-4-argon', 'gemini', 'high', false, false],
+      'gemini-4-argon-low': ['gemini-4-argon', 'gemini', 'low', false, false],
+      'gemini-4-argon-medium': ['gemini-4-argon', 'gemini', 'medium', false, false],
+      'gpt-5-mini': ['gpt-5-mini', 'gpt', null, false, false],
+      'gpt-5.4-mini-high': ['gpt-5.4-mini', 'gpt', 'high', false, false],
+      'gpt-5.4-mini-low': ['gpt-5.4-mini', 'gpt', 'low', false, false],
+      'gpt-5.4-mini-medium': ['gpt-5.4-mini', 'gpt', 'medium', false, false],
+      'gpt-5.4-mini-none': ['gpt-5.4-mini', 'gpt', null, false, false],
+      'gpt-5.4-mini-xhigh': ['gpt-5.4-mini', 'gpt', 'xhigh', false, false],
+      'gpt-5.4-nano-high': ['gpt-5.4-nano', 'gpt', 'high', false, false],
+      'gpt-5.4-nano-low': ['gpt-5.4-nano', 'gpt', 'low', false, false],
+      'gpt-5.4-nano-medium': ['gpt-5.4-nano', 'gpt', 'medium', false, false],
+      'gpt-5.4-nano-none': ['gpt-5.4-nano', 'gpt', null, false, false],
+      'gpt-5.4-nano-xhigh': ['gpt-5.4-nano', 'gpt', 'xhigh', false, false],
+      'gpt-5.5-extra-high': ['gpt-5.5', 'gpt', 'xhigh', false, false],
+      'gpt-5.5-extra-high-fast': ['gpt-5.5', 'gpt', 'xhigh', true, false],
+      'gpt-5.5-none': ['gpt-5.5', 'gpt', null, false, false],
+      'gpt-5.5-none-fast': ['gpt-5.5', 'gpt', null, true, false],
+      'gpt-5.6-luna-none': ['gpt-5.6-luna', 'gpt', null, false, false],
+      'gpt-5.6-luna-none-fast': ['gpt-5.6-luna', 'gpt', null, true, false],
+      'gpt-5.6-sol-none': ['gpt-5.6-sol', 'gpt', null, false, false],
+      'gpt-5.6-sol-none-fast': ['gpt-5.6-sol', 'gpt', null, true, false],
+      'gpt-5.6-terra-none': ['gpt-5.6-terra', 'gpt', null, false, false],
+      'gpt-5.6-terra-none-fast': ['gpt-5.6-terra', 'gpt', null, true, false],
+      'kimi-k2.7-code': ['kimi-k2.7-code', 'kimi', null, false, false],
+      'muse-spark-1.3-minimal': ['muse-spark-1.3', 'muse', null, false, false],
+    };
+    expect(Object.keys(want)).toHaveLength(39);
+    for (const [raw, [modelId, family, effort, fast, thinking]] of Object.entries(want)) {
+      expect(named('cursor', raw), raw).toEqual({ modelId, family, effort, fast, thinking, context: null });
+    }
+  });
+
+  it('【故意造出的失败】名册里差集的每个 Cursor 串都拆得出：有一个拆不出这里就红，点名是哪个', () => {
+    const unsplit = rosterDiff.cursorMissing.filter(
+      (raw) => 'unclassified' in nameUpstreamModel('cursor', raw),
+    );
+    expect(unsplit).toEqual([]);
+  });
+
   it('拆不出的返回 unclassified，模型 id 用渠道编号加原串', () => {
-    expect(nameUpstreamModel('cursor', 'claude-4.6-sonnet-medium')).toEqual({ unclassified: true });
-    expect(nameUpstreamModel('cursor', 'gpt-5.5-extra-high')).toEqual({ unclassified: true });
     expect(nameUpstreamModel('mirasim', 'qwen-3.7-coder')).toEqual({ unclassified: true });
     expect(nameUpstreamModel('mirasim', 'claude-opus-5-5[2x]')).toEqual({ unclassified: true });
-    expect(discoveredModelId('cursor', 'claude-4.6-sonnet-medium')).toBe('cursor:claude-4.6-sonnet-medium');
-    expect(discoveredModelId('cursor', 'gpt-5.5-extra-high')).toBe('cursor:gpt-5.5-extra-high');
+    // 比 low 还低的档和别的档叠在一起说不通；-none 只认 Cursor 的写法
+    expect(nameUpstreamModel('cursor', 'gpt-5.5-none-high')).toEqual({ unclassified: true });
+    expect(nameUpstreamModel('cursor', 'gpt-5.5-high-none')).toEqual({ unclassified: true });
+    expect(nameUpstreamModel('mirasim', 'gpt-5.5-none')).toEqual({ unclassified: true });
+    expect(nameUpstreamModel('cursor', 'gptx-5-mini')).toEqual({ unclassified: true });
+    expect(nameUpstreamModel('cursor', 'claude-4.6-wizard')).toEqual({ unclassified: true });
+    expect(discoveredModelId('cursor', 'gpt-5.5-none-high')).toBe('cursor:gpt-5.5-none-high');
     expect(discoveredModelId('mirasim', 'qwen-3.7-coder')).toBe('mirasim:qwen-3.7-coder');
     expect(discoveredModelId('cursor', 'claude-opus-4-8-thinking-high-fast')).toBe('opus-4.8');
   });

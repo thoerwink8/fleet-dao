@@ -3,7 +3,9 @@
 // 几个看记录才知道的事：
 // - init.model 只是把请求原样回显（点一个不存在的模型也照回），实际模型看助手消息的 message.model；
 // - 模型不可用时 CLI 自己合成一条 model=<synthetic> 的助手消息，终帧 is_error=true 但 subtype 仍是 success；
-// - 一条助手消息按内容块拆成多帧（同一个 message.id），用量以终帧为准；
+// - 一条助手消息按内容块拆成多帧（同一个 message.id），用量以终帧为准；没走到终帧（被叫停、超时杀）时按 message.id 去重、
+//   把主会话每条消息的用量加起来当已经花掉的（callUsage）：fixtures 里的真跑记录输入、缓存读、缓存写和终帧一个不差，输出却只是
+//   写到一半时的数（偏小很多），所以输出不取；
 // - 2.1.281 给 opus-5-5 的工具表里没有步骤清单工具（haiku 有 TaskCreate 一类），步骤只能靠 fleet plan 主动报。
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import {
@@ -89,6 +91,12 @@ export interface ClaudeStreamSummary {
    * 没有 usage 字段的帧（未开始 API 调用的帧）不覆盖。
    */
   lastContextTokens?: number;
+  /**
+   * 主会话每条助手消息（按 message.id 去重，取最后一帧）的输入、缓存读、缓存写加起来：没有终帧时拿它当这一轮已经花掉的。
+   * 不带输出：流里的输出数是消息写到一半时的，只有终帧准。子代理和接口报错帧（is_api_error_message、模型名不存在的合成消息）
+   * 不算：前者是另一个上下文窗口，后者根本没跑到模型上。一条带用量的消息都没有就没有。
+   */
+  callUsage?: { inputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number };
   cliVersion?: string;
   permissionMode?: string;
   tools?: string[];
@@ -170,6 +178,8 @@ export class ClaudeStreamReader {
   /** 主会话里每次 Agent / Task 工具调用派的是哪个子代理（tool_use id → subagent_type）。 */
   readonly #agents = new Map<string, string>();
   readonly #files = new Set<string>();
+  /** 主会话每条助手消息最后一帧的用量（按 message.id）。 */
+  readonly #messageUsage = new Map<string, Record<string, unknown>>();
   readonly #s: ClaudeStreamSummary = {
     startedWork: false,
     toolCalls: 0,
@@ -197,7 +207,18 @@ export class ClaudeStreamReader {
   }
 
   summary(): ClaudeStreamSummary {
-    return { ...this.#s, filesChanged: [...this.#files] };
+    return { ...this.#s, filesChanged: [...this.#files], ...this.#callUsage() };
+  }
+
+  #callUsage(): Pick<ClaudeStreamSummary, 'callUsage'> {
+    if (this.#messageUsage.size === 0) return {};
+    const sum = { inputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+    for (const usage of this.#messageUsage.values()) {
+      sum.inputTokens += num(usage.input_tokens) ?? 0;
+      sum.cacheReadInputTokens += num(usage.cache_read_input_tokens) ?? 0;
+      sum.cacheCreationInputTokens += num(usage.cache_creation_input_tokens) ?? 0;
+    }
+    return { callUsage: sum };
   }
 
   read(raw: string): ClaudeLineEffect {
@@ -332,6 +353,8 @@ export class ClaudeStreamReader {
     // 子代理是另一个上下文窗口，不算进「主会话最后一条消息」；没有 usage 的帧（这条消息还没跑完 API 调用）不覆盖
     const usage = subagent ? undefined : rec(message.usage);
     if (usage) {
+      const id = str(message.id);
+      if (id) this.#messageUsage.set(id, usage);
       this.#s.lastContextTokens =
         (num(usage.input_tokens) ?? 0) +
         (num(usage.cache_read_input_tokens) ?? 0) +

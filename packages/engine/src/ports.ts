@@ -352,8 +352,6 @@ export interface EnginePorts {
   syncMainline(input: SyncMainlineInput, ctx: PortContext): Promise<SyncResult>;
   saveTaskState(input: TaskStateSnapshot, ctx: PortContext): Promise<void>;
   closeIssue(input: CloseIssueInput, ctx: PortContext): Promise<void>;
-  /** 写这张单的会话用过的路由的族（验证只派别家）。一个都查不到明确报错（AUTHORS_UNKNOWN，不可重试），不回空的。 */
-  authorFamilies(input: Scope, ctx: PortContext): Promise<{ families: string[] }>;
   raiseAlert(input: RaiseAlertInput, ctx: PortContext): Promise<{ alertId: string }>;
   recordTiming(input: TimingEntry, ctx: PortContext): Promise<void>;
 }

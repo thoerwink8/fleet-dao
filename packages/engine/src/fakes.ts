@@ -13,7 +13,6 @@ import {
   type PushBranchInput,
   type RaiseAlertInput,
   type RouteChoice,
-  type Scope,
   type SyncMainlineInput,
   type TaskStateSnapshot,
   type TimingEntry,
@@ -21,8 +20,6 @@ import {
 } from './ports.ts';
 
 export interface FakeScript {
-  /** 写这张单的会话用过的族：不给就是 claude 一族；给了 PortError 就抛它；n = 第几次问。 */
-  authors: (input: Scope, n: number) => string[] | PortError | undefined;
   ci: (input: WaitCiInput, n: number) => Partial<CiResult> | undefined;
   sync: (input: SyncMainlineInput, n: number) => Partial<SyncResult> | undefined;
   /** 推分支：给了就抛它（假的卫生检查拦下、没扫成……）；n = 第几次推（从 1 开始）。 */
@@ -209,11 +206,6 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       states.push(input);
     },
     async closeIssue() {},
-    async authorFamilies(input) {
-      const scripted = script.authors?.(input, next('authorFamilies'));
-      if (scripted instanceof PortError) throw scripted;
-      return { families: scripted ?? ['claude'] };
-    },
     async raiseAlert(input) {
       alerts.push(input);
       return { alertId: `alert-${next('alert')}` };

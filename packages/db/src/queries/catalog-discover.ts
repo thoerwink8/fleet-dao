@@ -1,6 +1,6 @@
 // 名册读成之后，把看见的上游串补进目录（#1355）。只补没有的行。已有的模型、路由不改，只清或打「渠道已下架」。
 import type { HostId } from '@fleet-dao/shared';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { DISCOVERED_ROUTE_PREFIX, discoveredModelId, nameUpstreamModel } from '../model-naming.ts';
 import { auditLog, families, models, pools, routes, routingCatalog } from '../schema/index.ts';
@@ -31,6 +31,8 @@ export interface DiscoverCounts {
   routesAdded: number;
   goneMarked: number;
   goneCleared: number;
+  /** 早先拆不出、进了未归类的自动入库路由，这次拆名规则认出来了，挪到认出的模型下的条数。 */
+  reclassified: number;
 }
 
 export interface DiscoverResult extends DiscoverCounts {
@@ -90,6 +92,7 @@ export async function discoverChannelModels(
   const newModelIds: string[] = [];
   let routesAdded = 0;
   let goneCleared = 0;
+  let reclassified = 0;
 
   const ensureFamily = async (familyId: string) => {
     if (familiesReady.has(familyId)) return;
@@ -102,11 +105,65 @@ export async function discoverChannelModels(
     familiesReady.add(familyId);
   };
 
+  /** 模型不在目录里就插进去（已有的不动），新插的记进 newModelIds。 */
+  const ensureModel = async (modelId: string, familyId: string, displayName: string): Promise<void> => {
+    await ensureFamily(familyId);
+    const inserted = await db
+      .insert(models)
+      .values({ id: modelId, family: familyId, displayName })
+      .onConflictDoNothing({ target: models.id })
+      .returning({ id: models.id });
+    if (inserted.length > 0) {
+      modelsAdded += 1;
+      newModelIds.push(modelId);
+    }
+  };
+
+  /**
+   * 早先拆不出、进了未归类的自动入库路由（编号 auto:<渠道>:<原串>、模型 id <渠道>:<原串>），拆名规则后来认出来了：挪到认出的模型下，
+   * 补上变体；它在模型顺序里那一行跟着挪（开关、档位照旧，排到那个模型的最后）。手工登记的、已经挂在认得的模型下的不碰。
+   */
+  const reclassify = async (route: (typeof existing)[number], key: string): Promise<boolean> => {
+    if (route.id !== `${DISCOVERED_ROUTE_PREFIX}${channelId}:${key}`) return false;
+    if (route.modelId !== `${channelId}:${key}`) return false;
+    const named = nameUpstreamModel(channelId, key);
+    if ('unclassified' in named) return false;
+    await ensureModel(named.modelId, named.family, named.modelId);
+    const [entry] = await db
+      .delete(routingCatalog)
+      .where(and(eq(routingCatalog.routeId, route.id), eq(routingCatalog.modelId, route.modelId)))
+      .returning();
+    await db
+      .update(routes)
+      .set({
+        modelId: named.modelId,
+        variantEffort: named.effort,
+        variantFast: named.fast,
+        variantThinking: named.thinking,
+        variantContext: named.context,
+      })
+      .where(eq(routes.id, route.id));
+    if (entry) {
+      const position = nextPos.get(named.modelId) ?? 0;
+      nextPos.set(named.modelId, position + 1);
+      await db.insert(routingCatalog).values({
+        modelId: named.modelId,
+        routeId: route.id,
+        position,
+        enabled: entry.enabled,
+        effort: entry.effort,
+      });
+    }
+    route.modelId = named.modelId;
+    return true;
+  };
+
   for (const key of modelKeys) {
     const hits = existing.filter((route) => listedKeys(route).includes(key));
     if (hits.length > 0) {
       for (const hit of hits) {
         matched.add(hit.id);
+        if (await reclassify(hit, key)) reclassified += 1;
         if (!hit.goneAt) continue;
         await db.update(routes).set({ goneAt: null }).where(eq(routes.id, hit.id));
         hit.goneAt = null;
@@ -119,16 +176,7 @@ export async function discoverChannelModels(
     const unclassified = 'unclassified' in named;
     const modelId = discoveredModelId(channelId, key);
     const familyId = unclassified ? 'unclassified' : named.family;
-    await ensureFamily(familyId);
-    const insertedModel = await db
-      .insert(models)
-      .values({ id: modelId, family: familyId, displayName: unclassified ? key : modelId })
-      .onConflictDoNothing({ target: models.id })
-      .returning({ id: models.id });
-    if (insertedModel.length > 0) {
-      modelsAdded += 1;
-      newModelIds.push(modelId);
-    }
+    await ensureModel(modelId, familyId, unclassified ? key : modelId);
 
     const routeId = `${DISCOVERED_ROUTE_PREFIX}${channelId}:${key}`;
     const insertedRoute = await db
@@ -166,7 +214,7 @@ export async function discoverChannelModels(
     }
   }
 
-  const counts = { modelsAdded, routesAdded, goneMarked, goneCleared };
+  const counts = { modelsAdded, routesAdded, goneMarked, goneCleared, reclassified };
   if (writeAudit) {
     await db.insert(auditLog).values({
       at: now,

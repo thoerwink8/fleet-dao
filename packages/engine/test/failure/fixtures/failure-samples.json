@@ -861,13 +861,6 @@
       "expect": { "action": "retry", "rule": "FB" }
     },
     {
-      "id": "X52",
-      "provenance": "format",
-      "origin": "引擎端口码 NEEDS_HUMAN（引擎兜底梯的结构化码表）",
-      "evidence": { "code": "NEEDS_HUMAN", "message": "要人拍板" },
-      "expect": { "action": "park", "rule": "HM1", "alert": true }
-    },
-    {
       "id": "X53",
       "provenance": "format",
       "origin": "引擎在会话被外面停掉时给的码（SESSION_STOPPED）",
@@ -1014,19 +1007,6 @@
       "expect": { "action": "park", "rule": "HY2", "alert": true, "routeOutcome": "neutral" }
     },
     {
-      "id": "X65",
-      "provenance": "format",
-      "origin": "引擎开 PR 的端口取需求文档的「对应计划」那一行（#41 的 pr-fields）：文档没有、那一行没有、后面空着都不填",
-      "evidence": {
-        "source": "openPr",
-        "routeBound": false,
-        "code": "SPEC_PLAN_MISSING",
-        "retryable": false,
-        "message": "specs/28-接真端口/需求.md 里没有「对应计划：」那一行（开 PR 的正文这一栏是必填）"
-      },
-      "expect": { "action": "park", "rule": "SD1", "alert": true, "routeOutcome": "neutral" }
-    },
-    {
       "id": "X66",
       "provenance": "format",
       "origin": "packages/github 的 pushBranch「推的必须含最新主线」（BEHIND_MAINLINE）；引擎推分支的端口推之前先并主线，撞上只可能是并完到推之间主线又动了",
@@ -1092,19 +1072,6 @@
         "message": "等了 45 秒进程还没起来"
       },
       "expect": { "action": "retry", "rule": "ST1" }
-    },
-    {
-      "id": "X72",
-      "provenance": "format",
-      "origin": "github 包开 PR 时照需求 issue 对齐类别标签，issue 自己同时贴了需求和缺陷：ISSUE_CATEGORY_CONFLICT，不可重试",
-      "evidence": {
-        "source": "openPr",
-        "routeBound": false,
-        "code": "ISSUE_CATEGORY_CONFLICT",
-        "retryable": false,
-        "message": "issue #12 同时贴了 需求、缺陷：类别只能有一个，PR #31 没法照抄。在 issue 上只留一个再继续"
-      },
-      "expect": { "action": "park", "rule": "LB1", "alert": true, "routeOutcome": "neutral" }
     },
     {
       "id": "X73",
@@ -1184,45 +1151,6 @@
         "message": "进程退出（退出码 127），没有终帧：spawn cursor-agent ENOENT：/home/<会话用户>/.local/share/cursor-agent/versions 下既没有 current，也没有能跑的版本目录（会话用户家里没装 cursor-agent）"
       },
       "expect": { "action": "park", "rule": "CF1", "alert": true }
-    },
-    {
-      "id": "X80",
-      "provenance": "format",
-      "origin": "开 PR 前验证（#213）读默认分支上的需求文档（real/github-ports.ts 的 readCriteria）：文件不在就报 SPEC_DOC_MISSING，不验",
-      "evidence": {
-        "source": "readCriteria",
-        "routeBound": false,
-        "code": "SPEC_DOC_MISSING",
-        "retryable": false,
-        "message": "主线上没有 specs/28-接真端口/需求.md：开 PR 前验证要照它的「怎么算做完」逐条核，读不到就不验（需求文档还没进主线？）"
-      },
-      "expect": { "action": "park", "rule": "VF1", "alert": true, "routeOutcome": "neutral" }
-    },
-    {
-      "id": "X81",
-      "provenance": "format",
-      "origin": "开 PR 前验证（#213）：需求文档在，但没有「怎么算做完」一节或那一节空着（core 的 criteriaOf），报 CRITERIA_MISSING",
-      "evidence": {
-        "source": "readCriteria",
-        "routeBound": false,
-        "code": "CRITERIA_MISSING",
-        "retryable": false,
-        "message": "specs/28-接真端口/需求.md：需求文档里没有「## 怎么算做完」一节，开 PR 前验证没法逐条核"
-      },
-      "expect": { "action": "park", "rule": "VF1", "alert": true, "routeOutcome": "neutral" }
-    },
-    {
-      "id": "X82",
-      "provenance": "format",
-      "origin": "开 PR 前验证（#213）查写这张单的会话用过哪几族（real/store-ports.ts 的 authorFamilies）：一个起过的会话都查不到就报 AUTHORS_UNKNOWN，不拿空的当谁都能验",
-      "evidence": {
-        "source": "authorFamilies",
-        "routeBound": false,
-        "code": "AUTHORS_UNKNOWN",
-        "retryable": false,
-        "message": "任务 3f2b1c4d-0000-4000-8000-000000000001 一个起过的会话都查不到：不知道写它的是哪一族，判不了验证模型是不是别家，不验"
-      },
-      "expect": { "action": "park", "rule": "VF1", "alert": true, "routeOutcome": "neutral" }
     },
     {
       "id": "X83",

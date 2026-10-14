@@ -583,6 +583,101 @@ describe('渠道模型名册', () => {
     expect(catalog).toMatchObject({ enabled: false, modelId: 'cursor:totally-unknown-model' });
   });
 
+  it('早先进了未归类的自动入库路由，拆名规则认出来以后下一次读成就挪到认出的模型下，开关和档位照旧', async () => {
+    await seedChannels(t.db);
+    await t.db.insert(families).values({ id: 'unclassified', displayName: '未归类', vendor: '未知' });
+    // 2026-10-14 法国目录里的样子：拆名规则补上之前入库的
+    await t.db.insert(models).values([
+      { id: 'cursor:gpt-5.5-extra-high', family: 'unclassified', displayName: 'gpt-5.5-extra-high' },
+      {
+        id: 'cursor:claude-4.6-sonnet-medium',
+        family: 'unclassified',
+        displayName: 'claude-4.6-sonnet-medium',
+      },
+    ]);
+    await t.db.insert(routes).values([
+      {
+        id: 'auto:cursor:gpt-5.5-extra-high',
+        channelId: 'cursor',
+        poolId: 'cursor',
+        modelId: 'cursor:gpt-5.5-extra-high',
+        hostId: 'cursor-agent',
+        upstreamModel: 'gpt-5.5-extra-high',
+      },
+      {
+        id: 'auto:cursor:claude-4.6-sonnet-medium',
+        channelId: 'cursor',
+        poolId: 'cursor',
+        modelId: 'cursor:claude-4.6-sonnet-medium',
+        hostId: 'cursor-agent',
+        upstreamModel: 'claude-4.6-sonnet-medium',
+      },
+    ]);
+    await t.db.insert(routingCatalog).values([
+      {
+        modelId: 'cursor:gpt-5.5-extra-high',
+        routeId: 'auto:cursor:gpt-5.5-extra-high',
+        position: 0,
+        enabled: true,
+        effort: 'xhigh',
+      },
+      {
+        modelId: 'cursor:claude-4.6-sonnet-medium',
+        routeId: 'auto:cursor:claude-4.6-sonnet-medium',
+        position: 0,
+        enabled: false,
+      },
+    ]);
+    const saved = await saveChannelModelReads(
+      t.db,
+      [ok('cursor', ['gpt-5.5-extra-high', 'claude-4.6-sonnet-medium', 'totally-unknown-model'])],
+      NOW,
+    );
+    expect(saved.newModelIds.sort()).toEqual(['cursor:totally-unknown-model', 'gpt-5.5', 'sonnet-4.6']);
+    const rows = await t.db.select().from(routes);
+    expect(rows.find((r) => r.id === 'auto:cursor:gpt-5.5-extra-high')).toMatchObject({
+      modelId: 'gpt-5.5',
+      variantEffort: 'xhigh',
+      variantFast: false,
+      variantThinking: false,
+      upstreamModel: 'gpt-5.5-extra-high',
+    });
+    expect(rows.find((r) => r.id === 'auto:cursor:claude-4.6-sonnet-medium')).toMatchObject({
+      modelId: 'sonnet-4.6',
+      variantEffort: 'medium',
+    });
+    expect(rows.find((r) => r.upstreamModel === 'totally-unknown-model')?.modelId).toBe(
+      'cursor:totally-unknown-model',
+    );
+    const catalog = await t.db.select().from(routingCatalog);
+    expect(catalog.find((r) => r.routeId === 'auto:cursor:gpt-5.5-extra-high')).toMatchObject({
+      modelId: 'gpt-5.5',
+      enabled: true,
+      effort: 'xhigh',
+      position: 0,
+    });
+    expect(catalog.find((r) => r.routeId === 'auto:cursor:claude-4.6-sonnet-medium')).toMatchObject({
+      modelId: 'sonnet-4.6',
+      enabled: false,
+    });
+    const audit = (await t.db.select().from(auditLog)).find((r) => r.action === 'catalog.discover');
+    expect(audit?.after).toMatchObject({ reclassified: 2, modelsAdded: 3, routesAdded: 1 });
+    expect((await t.db.select().from(models)).find((m) => m.id === 'gpt-5.5')).toMatchObject({
+      family: 'gpt',
+    });
+
+    // 再读一次什么都不挪
+    await saveChannelModelReads(
+      t.db,
+      [ok('cursor', ['gpt-5.5-extra-high', 'claude-4.6-sonnet-medium'])],
+      LATER,
+    );
+    const second = (await t.db.select().from(auditLog))
+      .filter((r) => r.action === 'catalog.discover')
+      .sort((a, b) => a.id - b.id)[1];
+    expect(second?.after).toMatchObject({ reclassified: 0, modelsAdded: 0 });
+  });
+
   it('渠道不再列出的路由标下架，不删；再次出现就清掉标记', async () => {
     await seedChannels(t.db);
     await saveChannelModelReads(t.db, [ok('mirasim', ['kimi-k3', 'claude-opus-5-5[1m]'])], NOW);
@@ -701,12 +796,18 @@ describe('渠道模型名册', () => {
       via: 'engine',
       reason: '名册读成，自动入库',
       ok: true,
-      after: { modelsAdded: 2, routesAdded: 2, goneMarked: 0, goneCleared: 0 },
+      after: { modelsAdded: 2, routesAdded: 2, goneMarked: 0, goneCleared: 0, reclassified: 0 },
     });
     await saveChannelModelReads(t.db, [ok('mirasim', ['claude-opus-5-5[1m]', 'gpt-6-sol'])], LATER);
     const again = (await t.db.select().from(auditLog)).sort((a, b) => a.id - b.id);
     expect(again).toHaveLength(2);
-    expect(again[1]?.after).toEqual({ modelsAdded: 0, routesAdded: 0, goneMarked: 0, goneCleared: 0 });
+    expect(again[1]?.after).toEqual({
+      modelsAdded: 0,
+      routesAdded: 0,
+      goneMarked: 0,
+      goneCleared: 0,
+      reclassified: 0,
+    });
     expect((await t.db.select().from(routes)).filter((r) => r.channelId === 'mirasim')).toHaveLength(2);
   });
 

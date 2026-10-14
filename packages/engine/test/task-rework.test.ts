@@ -307,7 +307,9 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
   it('花掉的超了预算：起会话之前停下等人，写明花了多少、预算多少；点「继续」再给一份接着干', async () => {
     const world = createFakeWorld();
     const over = DEFAULT_TASK_TOKEN_BUDGET + 1_000_000;
-    const { tasks, calls } = scripted({ spend: () => ({ tokens: over, runs: 9, unmetered: 1 }) });
+    const { tasks, calls } = scripted({
+      spend: () => ({ tokens: over, runs: 9, unmetered: 1, estimated: 0 }),
+    });
     const run = await withWorker(
       env,
       world,
@@ -327,6 +329,38 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
     expect(world.alerts[0]?.detail).toContain(String(over));
     expect(world.alerts[0]?.detail).toContain('p95');
     expect(world.alerts[0]?.detail).toContain('1 次会话用量还没补上');
+  });
+
+  it('量到的不多、被叫停那几行估出来的把预算顶超了：照样停下，写明哪部分是估的', async () => {
+    const world = createFakeWorld();
+    const measured = 1_000_000;
+    // 三次被叫停的会话记不到用量：按这张单量到的行的速率估出来的下限把它顶过预算
+    const estimated = DEFAULT_TASK_TOKEN_BUDGET;
+    const { tasks, calls } = scripted({
+      spend: () => ({ tokens: measured, runs: 9, unmetered: 3, estimated }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await pollQuery(() => statusOf(h), parked, '估出来超了预算停下');
+        expect(s.lastProblem).toContain('超了预算');
+        expect(calls.segment).toHaveLength(0);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      {
+        tasks,
+      },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(1);
+    const alert = world.alerts[0]?.detail ?? '';
+    expect(alert).toContain(String(measured + estimated)); // 判断用的是合计
+    expect(alert).toContain('3 次会话用量还没补上');
+    expect(alert).toContain('估出来的下限'); // 说清哪部分是估的，不当成量到的
+    expect(alert).toContain(`另 ${estimated} 是`);
   });
 
   it('没超：不停下；查花费没查成也照旧起会话', async () => {

@@ -94,7 +94,6 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   recordTiming: 'quick',
   saveTaskState: 'quick',
   raiseAlert: 'quick',
-  authorFamilies: 'quick',
   removeWorktree: 'git',
   pushBranch: 'git',
   openPr: 'git',
@@ -123,7 +122,6 @@ const QUICK_TIMEOUT_SECONDS = 30;
 
 /** 重试也治不好的错误码：直接交给失败分流。 */
 export const NON_RETRYABLE_CODES: readonly string[] = [
-  'NEEDS_HUMAN',
   'AUTH_REQUIRED',
   'PERMISSION_DENIED',
   'WORKFLOWS_PERMISSION',

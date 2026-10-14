@@ -91,19 +91,27 @@ export function selfCheckText(result: SelfCheckResult): string {
   return text.length > SELF_CHECK_DIGEST_MAX ? `${text.slice(0, SELF_CHECK_DIGEST_MAX - 1)}…` : text;
 }
 
-/** 单任务 token 预算超了停下时写给人的话（决定 0093）。 */
+/**
+ * 单任务 token 预算超了停下时写给人的话（决定 0093）。tokens 是算进判断的合计（量到的 + 估的）；分不清的传 estimated: 0。
+ * 估的那部分（被叫停的会话按量到的行推出来的下限）在人话里写明白是估的，别当成量到的。
+ */
 export function tokenBudgetStop(
   spent: { tokens: number; unmetered: number },
   budget: number,
   grants: number,
+  split: { measured: number; estimated: number } = { measured: spent.tokens, estimated: 0 },
 ): { title: string; detail: string } {
   const m = (n: number) => `${(n / 1_000_000).toFixed(1)}M`;
   const allowed = budget * grants;
   const unmetered = spent.unmetered > 0 ? `（另有 ${spent.unmetered} 次会话用量还没补上，实际只多不少）` : '';
+  const splitText =
+    split.estimated > 0
+      ? `（其中 ${split.measured} 是量到的，另 ${split.estimated} 是拿这张单量到的行估出来的下限：被叫停的会话记不到用量）`
+      : '';
   return {
     title: `这张单花掉的 token 超了预算（${m(spent.tokens)} / ${m(allowed)}）`,
     detail:
-      `动手和验收会话合计花掉 ${spent.tokens} token${unmetered}，超过 ${allowed}（单任务预算 ${budget}` +
+      `动手和验收会话合计花掉 ${spent.tokens} token${splitText}${unmetered}，超过 ${allowed}（单任务预算 ${budget}` +
       `${grants > 1 ? ` × 已给 ${grants} 份` : ''}）。预算按近 14 天每张单花费的 p95 定（决定 0093）。` +
       '点「继续」再给一份同样多的接着干；不要了点「放弃」。',
   };

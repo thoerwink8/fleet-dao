@@ -6,6 +6,8 @@
 // - 命令的退出码在 rawOutput.exit_code（type=Bash）；grep 没匹配时 exit_code=1，那不是失败；
 // - 待办清单有专门的 plan 帧，entries 是整张单子；
 // - end 永远是最后一行：sessionId、这一轮的 usage、total_cost_usd（只算这一轮，续跑那轮只有几分钱）、modelUsage 的键就是实际模型。
+// - 每次模型调用之后有一帧 usage（这一次调用的用量）：fixtures 里五份真跑记录，逐帧加起来和 end 的 usage 四样一个不差。会话被叫停、
+//   超时杀没走到 end 时，靠它记下已经花掉的（callUsage）；最后一次没跑完的调用没有 usage 帧，不在里面。
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import type { LineEffect } from '../cli-run.ts';
 import {
@@ -76,6 +78,8 @@ export interface GrokStreamSummary {
   answer?: string;
   maxTurnsReached: boolean;
   modelCalls: number;
+  /** usage 帧逐帧加起来的四样（一帧都没有就没有）：没有 end 帧时拿它当这一轮已经花掉的。 */
+  callUsage?: GrokUsage;
   end?: GrokEnd;
   frames: number;
   nonJsonLines: number;
@@ -194,6 +198,7 @@ export class GrokStreamReader {
       case 'usage':
         effect.activity = true;
         this.#s.modelCalls++;
+        this.#addCallUsage(rec(frame.usage));
         break;
       case 'end':
         this.#end(frame, effect);
@@ -316,6 +321,16 @@ export class GrokStreamReader {
     this.#emit(effect, 'plan', plan);
   }
 
+  #addCallUsage(usage: Record<string, unknown> | undefined): void {
+    const one = numbers(usage, USAGE_FIELDS);
+    if (Object.keys(one).length === 0) return;
+    const sum: GrokUsage = { ...this.#s.callUsage };
+    for (const key of Object.keys(one) as (keyof GrokUsage)[]) {
+      sum[key] = (sum[key] ?? 0) + (one[key] ?? 0);
+    }
+    this.#s.callUsage = sum;
+  }
+
   #end(frame: Record<string, unknown>, effect: LineEffect): void {
     effect.activity = true;
     const usage = rec(frame.usage);
@@ -324,17 +339,7 @@ export class GrokStreamReader {
       ...optional('sessionId', str(frame.sessionId)),
       ...optional('numTurns', num(frame.num_turns)),
       ...optional('costUsd', num(frame.total_cost_usd)),
-      ...(usage
-        ? {
-            usage: numbers(usage, {
-              inputTokens: 'input_tokens',
-              outputTokens: 'output_tokens',
-              cacheReadTokens: 'cache_read_input_tokens',
-              cacheWriteTokens: 'cache_creation_input_tokens',
-              reasoningTokens: 'reasoning_tokens',
-            }),
-          }
-        : {}),
+      ...(usage ? { usage: numbers(usage, USAGE_FIELDS) } : {}),
       models: Object.keys(rec(frame.modelUsage) ?? {}),
     };
     // 终帧没有回答正文（回答已经作为助手的话记过），结论只有停止原因
@@ -342,6 +347,15 @@ export class GrokStreamReader {
     this.#tx(effect, 'result', stop ? `结束：${stop}` : '结束', { ok: stop === 'end_turn' });
   }
 }
+
+/** usage / end 帧里四样 token（加推理）的原名。 */
+const USAGE_FIELDS = {
+  inputTokens: 'input_tokens',
+  outputTokens: 'output_tokens',
+  cacheReadTokens: 'cache_read_input_tokens',
+  cacheWriteTokens: 'cache_creation_input_tokens',
+  reasoningTokens: 'reasoning_tokens',
+} as const;
 
 /** 会话过程记录里工具输入摘要先取多长（调用方写库前再按上限截）。 */
 const TRANSCRIPT_SUMMARY_MAX = 2000;
