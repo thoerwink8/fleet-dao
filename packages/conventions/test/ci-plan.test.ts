@@ -958,6 +958,8 @@ describe('ci.yml 和这里对得上', () => {
     expect(lint).toContain('steps.checks.outputs.tsc');
     expect(lint).toContain('steps.checks.outputs.doc_pointers');
     expect(lint).toContain('steps.checks.outputs.agents_test');
+    expect(lint).toContain('steps.checks.outputs.deps');
+    expect(lint).toContain('steps.checks.outputs.release_smoke');
     expect(lint).not.toMatch(/steps\.\w+\.conclusion/);
     // 判红的那步要真的非零退出（只 echo 不算红）。
     expect(lint).toMatch(/::error::lint 里有检查不对/);
@@ -1017,7 +1019,7 @@ describe('ci.yml 和这里对得上', () => {
 
     it('每一样的分组标题带上它自己跑了几秒（三样并行，墙钟 = 最慢那样，不记看不出该省哪个）', () => {
       const { r } = go({ BIOME_WANT: 'true', TSC: 'all' }, []);
-      for (const name of ['biome', 'tsc', 'doc_pointers', 'agents_test'])
+      for (const name of ['biome', 'tsc', 'doc_pointers', 'agents_test', 'deps', 'release_smoke'])
         expect(r.stdout, name).toMatch(new RegExp(`::group::${name}（退出码 0，\\d+ 秒）`));
     });
 
@@ -1028,6 +1030,8 @@ describe('ci.yml 和这里对得上', () => {
         tsc: 'success',
         doc_pointers: 'success',
         agents_test: 'success',
+        deps: 'success',
+        release_smoke: 'success',
       });
       expect(calls).toContain('exec tsc -b packages/agent-eval packages/core');
       expect(calls).toContain('exec biome check .');
@@ -1040,6 +1044,8 @@ describe('ci.yml 和这里对得上', () => {
         tsc: 'success',
         doc_pointers: 'success',
         agents_test: 'success',
+        deps: 'success',
+        release_smoke: 'success',
       });
       expect(calls).toContain('exec tsc -b');
       expect(calls).toContain('doc-pointers.test.ts');
@@ -1053,6 +1059,8 @@ describe('ci.yml 和这里对得上', () => {
         tsc: 'success',
         doc_pointers: 'failure',
         agents_test: 'success',
+        deps: 'success',
+        release_smoke: 'success',
       });
     });
 
@@ -1063,6 +1071,8 @@ describe('ci.yml 和这里对得上', () => {
         tsc: 'success',
         doc_pointers: 'success',
         agents_test: 'failure',
+        deps: 'success',
+        release_smoke: 'success',
       });
     });
 
@@ -1073,7 +1083,23 @@ describe('ci.yml 和这里对得上', () => {
         tsc: 'failure',
         doc_pointers: 'failure',
         agents_test: 'failure',
+        deps: 'success',
+        release_smoke: 'success',
       });
+    });
+
+    it('【故意造出的失败】未声明依赖、照法国装的冒烟各自红：只它们写 failure，别的照 success', () => {
+      const { outputs, calls } = go({ BIOME_WANT: 'true', TSC: 'all' }, ['deps:check', 'release:smoke']);
+      expect(outputs).toEqual({
+        biome: 'success',
+        tsc: 'success',
+        doc_pointers: 'success',
+        agents_test: 'success',
+        deps: 'failure',
+        release_smoke: 'failure',
+      });
+      expect(calls).toContain('run deps:check');
+      expect(calls).toContain('run release:smoke');
     });
 
     it('开关说不跑（只改了 .md）：biome、tsc 写 skipped、没被叫，doc_pointers、agents_test 照跑', () => {
@@ -1083,6 +1109,8 @@ describe('ci.yml 和这里对得上', () => {
         tsc: 'skipped',
         doc_pointers: 'success',
         agents_test: 'success',
+        deps: 'success',
+        release_smoke: 'success',
       });
       expect(calls).not.toContain('biome');
       expect(calls).not.toContain('tsc');
@@ -1169,6 +1197,8 @@ describe('ci.yml 和这里对得上', () => {
       TSC: 'success',
       DOC_POINTERS: 'success',
       AGENTS_TEST: 'success',
+      DEPS: 'success',
+      RELEASE_SMOKE: 'success',
       BIOME_WANT: 'true',
       TSC_WANT: 'all',
       HYGIENE: 'success',
@@ -1183,6 +1213,19 @@ describe('ci.yml 和这里对得上', () => {
 
     it('该跑的都 success：退出 0', () => {
       expect(run().status).toBe(0);
+    });
+
+    it('【故意造出的失败】deps、release_smoke 红了或被跳过（每次都得跑）：红，点名那一样', () => {
+      for (const [k, name] of [
+        ['DEPS', 'deps'],
+        ['RELEASE_SMOKE', 'release_smoke'],
+      ] as const) {
+        for (const v of ['failure', 'skipped']) {
+          const r = run({ [k]: v });
+          expect(r.status, `${k}=${v}`).toBe(1);
+          expect(r.stdout, `${k}=${v}`).toContain(`${name}（${v}，本该 success）`);
+        }
+      }
     });
 
     it('【故意造出的失败】biome 红了、tsc 照样 success：job 红，只点名 biome（tsc 没被它吃掉）', () => {
