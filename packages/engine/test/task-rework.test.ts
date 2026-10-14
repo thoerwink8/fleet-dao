@@ -107,8 +107,9 @@ describe('返工续会话（决定 0093）', { timeout: 60_000 }, () => {
     });
     const { tasks, calls } = scripted({
       resume: RESUME_ALWAYS,
-      verify: (_i, n) =>
-        n === 1
+      // 按头判：CI 红的两轮里和 CI 同时起的验收会被丢掉，不能按第几次调用排答案
+      verify: (i) =>
+        i.headSha === fakeHead(103)
           ? { pass: false, problems: ['没做到验收条：页面上看不到「验收中」'], round: 1 }
           : { pass: true, problems: [], round: 2 },
     });

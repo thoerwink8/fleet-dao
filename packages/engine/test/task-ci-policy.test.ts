@@ -107,7 +107,8 @@ describe('任务工作流 · 按仓的 CI 模式', { timeout: 60_000 }, () => {
         const h = await start(q, input());
         const s = await statusUntil(h, parked, '没配检查，停下');
         expect(s.lastProblem).toContain(NO_CHECKS);
-        expect(calls.verify).toEqual([]);
+        // 和等 CI 同时起的那一次验收（决定 0093）可能已经调了，但结果没被认
+        expect(calls.verify.length).toBeLessThanOrEqual(1);
         expect(calls.merge).toBe(0);
         mode = 'off';
         return h.result() as Promise<TaskRun>;
@@ -116,7 +117,7 @@ describe('任务工作流 · 按仓的 CI 模式', { timeout: 60_000 }, () => {
     );
     expect(run.outcome).toBe('merged');
     expect(world.count('waitCi')).toBe(1);
-    expect(calls.verify).toEqual([]);
+    expect(calls.verify.length).toBeLessThanOrEqual(1);
     expect(calls.arm).toBe(0);
     expect(calls.merge).toBe(1);
   });
@@ -152,6 +153,8 @@ describe('任务工作流 · 按仓的 CI 模式', { timeout: 60_000 }, () => {
       world,
       async (q) => {
         const h = await start(q, input());
+        // 自动重派、自动重查之前要隔一会儿（决定 0093）：只查状态时测试服务端不跳时间，这里把时间拨过去
+        await env.sleep('10 minutes');
         const s = await statusUntil(h, parked, 'CI 没查成，停下');
         expect(s.lastProblem).toBe('CI 的结果没查成');
         expect(s.lastProblem ?? '').not.toContain(NO_CHECKS);
@@ -161,7 +164,8 @@ describe('任务工作流 · 按仓的 CI 模式', { timeout: 60_000 }, () => {
       { tasks },
     );
     expect(run.outcome).toBe('merged');
-    expect(calls.verify).toEqual([]);
+    // 和等 CI 同时起的那一次验收（决定 0093）可能已经调了，但结果没被认：最多那一次，验收轮数没加
+    expect(calls.verify.length).toBeLessThanOrEqual(1);
     expect(calls.merge).toBe(1);
   });
 
@@ -175,6 +179,8 @@ describe('任务工作流 · 按仓的 CI 模式', { timeout: 60_000 }, () => {
       world,
       async (q) => {
         const h = await start(q, input());
+        // 自动重派、自动重查之前要隔一会儿（决定 0093）：只查状态时测试服务端不跳时间，这里把时间拨过去
+        await env.sleep('10 minutes');
         const s = await statusUntil(h, parked, 'CI 没查成，停下');
         expect(s.lastProblem).toBe('CI 的结果没查成');
         expect(s.lastProblem ?? '').not.toContain(NO_CHECKS);

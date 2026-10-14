@@ -23,6 +23,11 @@
 // 动手或验收轮数用尽后再点「继续」（patched('continue-resets-rounds')，#1404）：两轮计数都从 0 再计，并重读单子正文，
 // 下一次验收用新正文。同一次继续里上限仍在。这样继续累计超过 3 次就不再清零，停下交给指挥官。老历史没有这个标记，
 // 仍只把用尽的那一个计数清掉。
+// 停下之前先自动处理一次（决定 0093）：这张单头一回轮数用尽不停下（patched('auto-continue-rounds')，task-runtime.ts 的
+// exhaustRounds 回 auto）：轮数清零、重读单子，下一轮动手避开最近的模型（rt.avoidModel），直接再动手不先重走 CI；之后用尽照旧停下，
+// 自动那一次算进 MAX_ROUND_RESETS。推的时候空交付（EMPTY_DELIVERY）这张单里先再派一轮（patched('auto-before-park')）。
+// 冷验收和等 CI 同时起（patched('verify-parallel-ci')，deliver 的 startVerify / joinVerify）：CI 不绿就不认验收的结果（不取消，
+// 让活动自己跑完；不加轮数）；CI 绿了再等验收、认了才算一轮；两样都过才挂自动合并。
 // 停下前 PR 已开、头已记录，点「继续」先走 deliver（等 CI、验收、挂自动合并），不先起动手会话（patched('continue-redelivers-open-pr')，#1582）。
 // 动手一轮会话跑完但没有提交（#1408，patched('avoid-empty-commit-route')）：下一轮选路避开这条路由；连着第二轮仍没提交，
 // 再避开这个模型。避开只在这张单里。没有别的候选就照旧用原来的路由，lastProblem 写「没有别的路由可换」，不死等。
@@ -83,9 +88,11 @@ import { TaskRuntime } from './task-runtime.ts';
 import { writeSession } from './task-session.ts';
 import {
   Abandoned,
+  AutoEscape,
   ConflictHandoff,
   conflictFilesForHandoff,
   conflictHandoffLine,
+  EMPTY_DELIVERY_CODE,
   emptyCommitFeedback,
   freshSessionFeedback,
   noteEmptyCommit,
@@ -97,7 +104,13 @@ import {
   taskPrDid,
 } from './task-support.ts';
 import { syncMainlineBeforeImplement } from './task-sync.ts';
-import { coldVerifyPr } from './task-verify.ts';
+import { coldVerifyPr, verifyAlongsideCi } from './task-verify.ts';
+
+/** 和等 CI 同时起的那一次冷验收：结果（不抛）和起的时候的头。 */
+interface EarlyVerify {
+  result: ReturnType<typeof verifyAlongsideCi>;
+  head: string | null;
+}
 
 class TaskFlow {
   private readonly rt: TaskRuntime;
@@ -109,6 +122,8 @@ class TaskFlow {
   private conflictInTree = false;
   /** 冲突返工轮引擎自己并干净、没派模型的次数（决定 0093）：到 MAX_MAIN_SYNCS 就交给会话，不无限转。 */
   private conflictSelfSyncs = 0;
+  /** 推分支撞上空交付、已经自动重派过一次动手（决定 0093）：再撞上就停下等人。 */
+  private emptyDeliveryRedone = false;
 
   constructor(input: TaskWorkflowInput, acts: EngineActivities, limits: Limits) {
     this.rt = new TaskRuntime(input, acts, limits);
@@ -146,9 +161,15 @@ class TaskFlow {
           mergeChecksRed ? 'decision' : 'stuck',
         );
         if (mode === 'legacy') rt.round = 0;
+        // 自动续的那一次（决定 0093）：没停下等人，意见还在手上，直接换路由再动手，不先重走 CI 和验收
         // 停下前 PR 已开、头已记录：代码多半已经完整（停下常是 CI 台的基础设施问题）。点「继续」先看这个 PR 现在的 CI 和验收，
         // 不再起一轮没东西可交的动手会话。老历史没有这个标记，照旧先起会话。
-        if (rt.prNumber !== null && rt.head !== null && patched('continue-redelivers-open-pr')) {
+        if (
+          mode !== 'auto' &&
+          rt.prNumber !== null &&
+          rt.head !== null &&
+          patched('continue-redelivers-open-pr')
+        ) {
           const redelivered = await this.deliver(brief);
           if (redelivered !== 'rework') return this.finish(redelivered.commit);
           continue;
@@ -178,7 +199,7 @@ class TaskFlow {
         if (ci.kind === 'merged') return { commit: ci.mergeCommit };
         if (ci.kind === 'rework') return 'rework';
 
-        const verdict = await coldVerifyPr(rt, brief);
+        const verdict = await this.verifyOnce(brief);
         if (verdict === 'rework') return 'rework';
         if (verdict === 'head_moved') {
           rt.verifyRound = 0; // 头换了，验收对新的头重新数轮
@@ -207,6 +228,10 @@ class TaskFlow {
         return direct;
       }
 
+      // 冷验收和等 CI 同时起（决定 0093）：CI 不绿就不认验收那一边（活动让它自己跑完，不取消、不加轮数）；CI 绿了再等验收的结果
+      // 验收轮数已经到顶（要先自动续或停下等人）的那一回不并行：用尽的处理不该和 CI 搅在一起
+      const early =
+        rt.verifyRound < MAX_VERIFY_ROUNDS && patched('verify-parallel-ci') ? this.startVerify(brief) : null;
       const ci = await waitForCiPolicy(rt);
       if (ci.kind === 'merged') return { commit: ci.mergeCommit };
       if (ci.kind === 'rework') return 'rework';
@@ -227,7 +252,7 @@ class TaskFlow {
         return direct;
       }
 
-      const verdict = await coldVerifyPr(rt, brief);
+      const verdict = early ? await this.joinVerify(early, brief) : await this.verifyOnce(brief);
       if (verdict === 'rework') {
         this.verifyRework = true;
         return 'rework';
@@ -248,6 +273,31 @@ class TaskFlow {
       }
       rt.verifyRound = 0; // 头换了，验收对新的头重新数轮
     }
+  }
+
+  /** 和等 CI 同时起的冷验收（决定 0093）：只调一次活动、不动状态；记下起的时候的头，CI 收场后据此认不认。 */
+  private startVerify(brief: TaskBrief): EarlyVerify {
+    const head = this.rt.head;
+    return { result: verifyAlongsideCi(this.rt, brief), head };
+  }
+
+  /**
+   * CI 绿了，认验收那一边的结果。头在等 CI 时被引擎并主线换掉了：验的是旧头，不认，对新头串行再验一次（CI 那一边最后等绿的就是新头）。
+   * 认了的结果交给串行验收当第一轮用：别人换了头、做不出来、这会儿验不了，都和串行时一样停下或等（不再白调一次活动）。认了才算一轮。
+   */
+  private async joinVerify(early: EarlyVerify, brief: TaskBrief): Promise<'pass' | 'rework' | 'head_moved'> {
+    const got = await early.result;
+    if (!got.ok) {
+      if (got.error instanceof Abandoned || isCancellation(got.error)) throw got.error;
+      return this.verifyOnce(brief);
+    }
+    if (this.rt.head !== early.head) return this.verifyOnce(brief);
+    return coldVerifyPr(this.rt, brief, got.res);
+  }
+
+  /** 串行验一次（头被换了当场停下等人，没过当场记返工意见）。 */
+  private verifyOnce(brief: TaskBrief): Promise<'pass' | 'rework' | 'head_moved'> {
+    return coldVerifyPr(this.rt, brief);
   }
 
   /** 不强制 CI：查改标准路径（碰到照旧停下等人），然后引擎直接合并。冲突交回动手会话。 */
@@ -398,18 +448,31 @@ class TaskFlow {
     if (patched('avoid-empty-commit-route')) rt.commitMisses = 0;
     let pushed: Awaited<ReturnType<typeof rt.acts.pushBranch>>;
     try {
-      pushed = await rt.step('pushBranch', () =>
-        rt.acts.pushBranch({
-          taskId: rt.input.taskId,
-          repo: rt.input.repo,
-          worktreePath: wt.path,
-          branch: rt.branch,
-          head: delivery.head,
-        }),
+      pushed = await rt.step(
+        'pushBranch',
+        () =>
+          rt.acts.pushBranch({
+            taskId: rt.input.taskId,
+            repo: rt.input.repo,
+            worktreePath: wt.path,
+            branch: rt.branch,
+            head: delivery.head,
+          }),
+        // 空交付先自动重派一次动手会话（决定 0093），这张单里只一次；再撞上照旧停下
+        this.emptyDeliveryRedone ? [] : [EMPTY_DELIVERY_CODE],
       );
     } catch (error) {
       if (error instanceof ConflictHandoff) {
         return this.conflictStillThere(wt, error.files, error.pending ? null : error.instruction);
+      }
+      if (error instanceof AutoEscape) {
+        this.emptyDeliveryRedone = true;
+        rt.feedback = [
+          `上一轮推的时候发现没有新的提交（${error.detail}）。改完之后要用 git commit 提交，不提交等于没做。`,
+        ];
+        rt.status.lastProblem = '推的时候没有新提交';
+        await rt.note(`第 ${rt.round} 轮：推的时候没有新提交（空交付），自动再派一轮动手，不停下等人`);
+        return false;
       }
       throw error;
     }

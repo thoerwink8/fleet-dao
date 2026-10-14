@@ -19,6 +19,8 @@
 // - 跑成的这一段记进 rt.lastSession（纯状态）：返工轮由 task.ts 决定续不续它（决定 0093，patched('rework-resume')），续法同上。
 // - 单任务 token 预算（决定 0093，patched('task-token-budget')）：每次起会话之前查这张单花掉的 token，超了停下等人（rt.park），
 //   点「继续」再给一份。开工时解析的上限里没有这一项（老历史）就不查；查不成照旧起会话，不挡干活。
+// - 停下之前先自动处理一次（决定 0093，patched('auto-redispatch-session')）：失败分流判停下、码是被引擎在时限上叫停（aborted）、
+//   总时长到顶、起不来（AUTO_REDISPATCH_CODES）的，这一段里先避开这个模型换一条路由重派一次，进度里写一行；再判停下才停。
 
 import { isCancellation, log, patched } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -37,6 +39,7 @@ import { failureOf, iso } from './kit.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import {
   Abandoned,
+  AUTO_REDISPATCH_CODES,
   type Avoid,
   afterDispatchProbe,
   bump,
@@ -75,6 +78,8 @@ export async function writeSession(
   let interrupted: string | undefined;
   // 上一次渠道运行中失败、该换渠道（#1118）：交给下一次选路标成不可用并记顺到谁；选路问过一次就清掉
   let failedChannel: FailedChannel | undefined;
+  // 这一段已经自动换路由重派过一次（决定 0093）：再判停下就真停下
+  let redispatched = false;
   // 动手前判这张单是不是界面活（#1264）：界面活按 ui 用途选路并带 uiWork，GPT 不派；判不出按界面活处理。
   // 判法是纯代码、不起活动；老历史（没有这个标记）重放照旧按 execute 选。
   const ui: UiJudgement | undefined = patched('ui-work-implement')
@@ -225,6 +230,24 @@ export async function writeSession(
         previousMessage = undefined;
       }
     } else {
+      // 被引擎在时限上叫停、总时长到顶、起不来（决定 0093）：先自动换一条路由（避开这个模型）重派一次，进度里写一行，不停下等人。
+      // 这一段里只自动一次；再撞上照旧停下。只有人能修的码不在名单里。老历史没有这个标记，照旧停下。
+      if (
+        !redispatched &&
+        AUTO_REDISPATCH_CODES.includes(failure.code.toLowerCase()) &&
+        patched('auto-redispatch-session')
+      ) {
+        redispatched = true;
+        stick = undefined;
+        // 避让记在这张单上（没提交的避让那一处）：没有别的候选时选路照旧派原来那条，不死等
+        rt.avoidModel(route);
+        counters = ZERO;
+        previousMessage = undefined;
+        await rt.note(
+          `第 ${rt.round} 轮：${route.modelId} ${next.reason}（${failure.code}），自动换一条路由重派一次，不停下等人`,
+        );
+        continue;
+      }
       await rt.park(next.humanFix ? `${next.reason}；要人：${next.humanFix}` : next.reason, failure.message);
       counters = ZERO;
       avoid = NO_AVOID;
