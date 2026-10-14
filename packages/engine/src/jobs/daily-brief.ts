@@ -9,6 +9,7 @@
 // - 某一块读不到：那一块写「没查成：原因」，照样发，这一轮记 partial；提醒写不进库、#1055 评论没发成：记 failed 再抛（看门狗、巡检按
 //   @fleet-dao/db 的 dailyBriefProblem 报「今天的简报没送到」；GitHub Actions 的 daily-brief-guard 08:45 再独立查一次 #1055）。
 // - 公开仓：#1055 的评论里不写驾驶舱的地址（私有值），只写「驾驶舱里看」；单子、PR 写 GitHub 链接。飞书那条后端会接上驾驶舱链接。
+// - 零点到 08:30 之间起来、定时器补的是昨天那一格：不发、记 unscanned（发了就占了今天的键，08:30 那一轮只能原地更新、不再推）。
 // - 同一天再跑（重启补跑、手动触发）：定时那条键不变，提醒原地更新、不再推第二次，#1055 同一个键只发一条；手动触发（fleet-api daily-brief）
 //   用另一个键和另一个标题，不冒充当天定时那一条（看门狗、看守只认定时那一条）。
 import {
@@ -16,6 +17,7 @@ import {
   type BriefPull,
   type BriefStoppedTask,
   beijingDay,
+  DAILY_BRIEF_AT_MINUTES,
   DAILY_BRIEF_JOB_ID,
   dailyBriefKey,
   type ExecutorLineStat,
@@ -361,6 +363,17 @@ export async function runDailyBriefJob(
   const manual = opts.manual === true;
   const title = manual ? manualBriefTitle(day) : briefTitle(day);
   const key = manual ? `${dailyBriefKey(day)}:manual-${now.toISOString()}` : dailyBriefKey(day);
+  // 定时器起来时会补最近一格：零点到 08:30 之间起来，补的是昨天 08:30 那一格，这时发出去就占了今天的键，
+  // 08:30 那一轮只能原地更新、不再推（2026-10-15 04:38 发版重启就这样提前发了一条）。昨天那条错过了不补，等今天 08:30。
+  if (!manual && now.getTime() < beijingDay(now).start.getTime() + DAILY_BRIEF_AT_MINUTES * 60_000) {
+    const skipped: ScheduleResult = {
+      outcome: 'unscanned',
+      why: `还没到今天（${day}）08:30：这一轮是起来时补的昨天那一格，不补发，等今天 08:30 那一轮`,
+    };
+    await deps.runs.finish(runId, skipped, deps.now());
+    deps.log('info', '每日简报：没到 08:30，不补昨天那一格', { runId, day });
+    return skipped;
+  }
   let result: ScheduleResult;
   let sections: BriefSection[] = [];
   try {
