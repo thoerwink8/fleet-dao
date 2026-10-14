@@ -1,5 +1,5 @@
 // pnpm test:changed：改了哪些文件（git 每一步没成都报错，不当成没改动）、跑哪些测试（和 CI 按改动跑同一套判法）、
-// 要全跑时本机跑不跑、不跑时给出的清单（CI 每次都跑的那几份一份不少）。
+// 要全跑时本机跑不跑、本机清单带哪些（两份指针检查每次都带；整个 agents/test/ 只在它受影响、或判不出谁读改动的文档时带，决定 0093）。
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -16,12 +16,15 @@ import {
 import { docNeedles, docReaders } from '../src/doc-readers.ts';
 import { fsRepo, type RepoView } from '../src/repo.ts';
 import {
+  AGENTS_CI_NOTE,
   BASE,
   changedFiles,
   DOC_POINTERS_TEST,
   ENGINE_SESSION_MARKER,
   type GitRun,
+  LOCAL_ALWAYS_TESTS,
   REFUSED_FULL_RUN,
+  SKILL_POINTERS_TEST,
   selectTests,
   TestChangedError,
   testChanged,
@@ -218,21 +221,38 @@ describe('跑哪些测试：和 CI 按改动跑同一套判法', () => {
     return s.kind === 'all' ? 'all' : s.paths;
   };
 
-  it('只改文档（没有受影响的包），没给「谁读文档」的判法：照 CI 每个 PR 都跑的整份，不全跑、不算失败', () => {
+  it('只改文档（没有受影响的包），没给「谁读文档」的判法：带上 CI 每个 PR 都跑的整份，不全跑、不算失败', () => {
     const s = selectTests(
       ['docs/decisions/0002-fusion.md', 'specs/164-会话内存与交活测试/方案.md', 'README.md'],
       GRAPH,
     );
-    expect(s).toMatchObject({ kind: 'some', paths: [...ALWAYS_TESTS] });
-    expect(vitestArgs(s)).toEqual(['run', ...ALWAYS_TESTS]);
+    const whole = [...new Set([...LOCAL_ALWAYS_TESTS, ...ALWAYS_TESTS])];
+    expect(s).toMatchObject({ kind: 'some', paths: whole });
+    expect(vitestArgs(s)).toEqual(['run', ...whole]);
   });
 
-  it('文档指针检查是 CI 每次都跑的一份（只改文档时本机仍带它）', () => {
+  it('本机每次都带的两份指针检查：文档指针检查、技能指针检查，都在 CI 每次都跑的整份里', () => {
+    expect(LOCAL_ALWAYS_TESTS).toEqual([DOC_POINTERS_TEST, SKILL_POINTERS_TEST]);
     expect(ALWAYS_TESTS).toContain(DOC_POINTERS_TEST);
+    expect(ALWAYS_TESTS.some((p) => SKILL_POINTERS_TEST.startsWith(p))).toBe(true);
   });
 
-  it('什么都没改：只跑文档检查（不像 CI 那样把空改动升成全跑：本机没改动是正常的）', () => {
-    expect(selectTests([], GRAPH)).toMatchObject({ kind: 'some', paths: [...ALWAYS_TESTS] });
+  it('什么都没改：只跑两份指针检查（不像 CI 那样把空改动升成全跑：本机没改动是正常的）', () => {
+    expect(selectTests([], GRAPH)).toMatchObject({ kind: 'some', paths: [...LOCAL_ALWAYS_TESTS] });
+  });
+
+  it('改一个包（决定 0093）：不拖上整个 agents/test/，CI 另外还跑里写着它', () => {
+    const s = selectTests(['packages/cli/src/help.ts'], GRAPH);
+    expect(s).toMatchObject({ kind: 'some', paths: ['packages/cli/', ...LOCAL_ALWAYS_TESTS] });
+    expect(s.ciOnly).toContain(AGENTS_CI_NOTE);
+  });
+
+  it('改到 agents/（技能、通用段）：planCi 判 agents 受影响，整个 agents/ 照带，不再说 CI 另外跑', () => {
+    for (const f of ['agents/skills/discuss/SKILL.md', 'AGENTS.md']) {
+      const s = selectTests([f], GRAPH);
+      expect(s.kind === 'some' && s.paths, f).toContain('agents/');
+      expect(s.ciOnly, f).not.toContain(AGENTS_CI_NOTE);
+    }
   });
 
   it('改了引擎的工作流代码：跑引擎的全部测试（vitest --changed 顺着 import 找不到 Temporal 按路径打包的工作流）', () => {
@@ -266,8 +286,12 @@ describe('跑哪些测试：和 CI 按改动跑同一套判法', () => {
       '驾驶舱前端打包',
       '驾驶舱 e2e（pnpm --filter @fleet-dao/web e2e，要真 Postgres，见 packages/web/e2e/README.md）',
       '装机测试（deploy/test/run.sh）',
+      AGENTS_CI_NOTE,
     ]);
-    expect(selectTests(['docs/ops.md'], GRAPH).ciOnly).toEqual(['装机测试（deploy/test/run.sh --ops）']);
+    expect(selectTests(['docs/ops.md'], GRAPH).ciOnly).toEqual([
+      '装机测试（deploy/test/run.sh --ops）',
+      AGENTS_CI_NOTE,
+    ]);
   });
 
   it('基准就是 origin/main（引擎钉在会话树里的也是它）', () => {
@@ -301,7 +325,7 @@ describe('只改文档：只跑读这些文档的测试，不拖上 agents/test/
     const files = filesOf(s.paths);
     expect(files.length).toBeLessThan(10);
     expect(files.length).toBeLessThan(filesOf(ALWAYS_TESTS).length);
-    expect(s.reasons.join('\n')).toContain('只改文档');
+    expect(s.reasons.join('\n')).toContain('改到了文档');
     expect(s.ciOnly.join('\n')).toContain('agents/test/');
     expect(vitestArgs(s)).toEqual(['run', ...s.paths]);
   });
@@ -311,15 +335,15 @@ describe('只改文档：只跑读这些文档的测试，不拖上 agents/test/
     expect(sel([ARCHIVE_PAGE], realReaders).paths).toContain('agents/test/progress-structure.test.ts');
   });
 
-  it('没有测试读的文档（比如目标）：只剩文档指针检查，不拿空清单冒充没事', () => {
-    expect(sel([`${D}/goals.md`], realReaders).paths).toEqual([DOC_POINTERS_TEST]);
+  it('没有测试读的文档（比如目标）：只剩两份指针检查，不拿空清单冒充没事', () => {
+    expect(sel([`${D}/goals.md`], realReaders).paths).toEqual([...LOCAL_ALWAYS_TESTS]);
   });
 
   // 金丝雀：这几份文档确实被这几个测试读着。选择器漏了其中一条，改那份文档的 PR 就绕过了钉着它的测试。
   const CANARIES: [string, string][] = [
     [PROGRESS, 'agents/test/progress-structure.test.ts'],
     [ARCHIVE_PAGE, 'agents/test/progress-structure.test.ts'],
-    [DESIGN, 'agents/test/skills.test.ts'],
+    [DESIGN, 'agents/test/rules/project-subagents.rules.test.ts'],
   ];
   const missedCanaries = (readers: Parameters<typeof selectTests>[2]) =>
     CANARIES.filter(([doc, test]) => !sel([doc], readers).paths.includes(test)).map(
@@ -337,17 +361,22 @@ describe('只改文档：只跑读这些文档的测试，不拖上 agents/test/
   it('【故意造出的失败】测试源码读不出（没给判法、判法报一句为什么）：退回 CI 每次都跑的整份，不当成没有读它的测试', () => {
     for (const readers of [undefined, () => '读不到测试文件 x']) {
       const s = sel([PROGRESS], readers);
-      expect(s.paths).toEqual([...ALWAYS_TESTS]);
+      expect(s.paths).toEqual([...new Set([...LOCAL_ALWAYS_TESTS, ...ALWAYS_TESTS])]);
     }
     expect(sel([PROGRESS], () => '读不到测试文件 x').reasons.join('\n')).toContain('退回 CI 每次都跑的整份');
   });
 
-  it('文档和代码一起改：不缩，照原来的判法（改到的包 + CI 每次都跑的整份）', () => {
-    const s = sel([PROGRESS, 'packages/cli/src/help.ts'], () => {
-      throw new Error('带代码改动时不该问谁读文档');
+  it('文档和代码一起改：改到的包 + 两份指针检查 + 读这份文档的测试，只问文档那几份谁读', () => {
+    const asked: string[][] = [];
+    const s = sel([PROGRESS, 'packages/cli/src/help.ts'], (docs) => {
+      asked.push([...docs]);
+      return realReaders(docs);
     });
+    expect(asked).toEqual([[PROGRESS]]);
     expect(s.paths).toContain('packages/cli/');
-    for (const p of ALWAYS_TESTS) expect(s.paths).toContain(p);
+    for (const p of LOCAL_ALWAYS_TESTS) expect(s.paths).toContain(p);
+    expect(s.paths).toContain('agents/test/progress-structure.test.ts');
+    expect(s.paths).not.toContain('agents/test/');
   });
 
   it('改了读 docs/ops.md 的包（有 deploy 测试）、AGENTS.md：不算只改文档，照原来的判法', () => {
@@ -355,8 +384,8 @@ describe('只改文档：只跑读这些文档的测试，不拖上 agents/test/
       const s = sel([f], () => {
         throw new Error('不该问谁读文档');
       });
-      for (const p of ALWAYS_TESTS) expect(s.paths, f).toContain(p);
-      expect(s.paths.length, f).toBeGreaterThan(ALWAYS_TESTS.length);
+      for (const p of LOCAL_ALWAYS_TESTS) expect(s.paths, f).toContain(p);
+      expect(s.paths.length, f).toBeGreaterThan(LOCAL_ALWAYS_TESTS.length);
     }
   });
 
@@ -368,7 +397,7 @@ describe('只改文档：只跑读这些文档的测试，不拖上 agents/test/
     expect(r.vitestCalls[0]).not.toContain('agents/test/');
     const broken = run([PROGRESS], { docReaders: () => '列不出测试文件：x' });
     expect(broken.code).toBe(0);
-    expect(broken.vitestCalls[0]).toEqual(['run', ...ALWAYS_TESTS]);
+    expect(broken.vitestCalls[0]).toEqual(['run', ...new Set([...LOCAL_ALWAYS_TESTS, ...ALWAYS_TESTS])]);
   });
 
   describe('谁读这份文档（doc-readers.ts）', () => {
@@ -538,7 +567,7 @@ describe('要全跑时本机不跑：写明原因、全量交给 CI，不再教�
   });
 });
 
-describe('CI 每次都跑的测试：test:changed 给出的清单一定包含（#740）', () => {
+describe('CI 每次都跑的测试：ci.yml 和 ALWAYS_TESTS 对得上；本机清单只带两份指针检查和受影响的（决定 0093 改了 #740）', () => {
   const YML = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
   /**
    * ci.yml 里不管改了什么都跑的测试：每次都跑的 job（ci-plan.ts 的 ALWAYS_JOBS）里，`vitest run` 后面全是写死路径的那几处。
@@ -589,12 +618,12 @@ describe('CI 每次都跑的测试：test:changed 给出的清单一定包含（
   });
 
   // 每种走法各一个：没改动、只改文档、改一个包、改 skill（只跑选中的）；shared、锁文件、CI 工作流、deploy/、夹具、
-  // 认不出的路径、shared 和别的包一起改、依赖图读不出（拒跑：一个测试都不跑，CI 每次都跑的那几份由 CI 自己跑）
-  const CASES: { changed: string[]; graph?: string; code: number }[] = [
-    { changed: [], code: 0 },
-    { changed: ['docs/design.md'], code: 0 },
-    { changed: ['packages/cli/src/help.ts'], code: 0 },
-    { changed: ['agents/skills/discuss/SKILL.md'], code: 0 },
+  // 认不出的路径、shared 和别的包一起改、依赖图读不出（拒跑：一个测试都不跑，CI 全跑）。agents 一栏：本机清单带不带整个 agents/test/。
+  const CASES: { changed: string[]; graph?: string; code: number; agents?: boolean }[] = [
+    { changed: [], code: 0, agents: false },
+    { changed: ['docs/design.md'], code: 0, agents: false },
+    { changed: ['packages/cli/src/help.ts'], code: 0, agents: false },
+    { changed: ['agents/skills/discuss/SKILL.md'], code: 0, agents: true },
     { changed: ['packages/shared/src/domain.ts'], code: REFUSED_FULL_RUN },
     { changed: ['pnpm-lock.yaml'], code: REFUSED_FULL_RUN },
     { changed: ['.github/workflows/ci.yml'], code: REFUSED_FULL_RUN },
@@ -608,30 +637,35 @@ describe('CI 每次都跑的测试：test:changed 给出的清单一定包含（
       code: REFUSED_FULL_RUN,
     },
   ];
+  const readers = (docs: readonly string[]) => docReaders(fsRepo(ROOT), docs);
 
-  it('跑的时候，给出的清单都跑得到 CI 每次都跑的那几份；拒跑的一个测试都不跑（CI 自己跑那几份）', () => {
+  it('跑的时候：两份指针检查每次都带；整个 agents/test/ 只在 agents 受影响时带；拒跑的一个测试都不跑（CI 全跑）', () => {
     for (const c of CASES) {
-      const r = run(c.changed, c.graph === undefined ? {} : { graph: c.graph });
+      const r = run(c.changed, { ...(c.graph === undefined ? {} : { graph: c.graph }), docReaders: readers });
       const label = `${c.changed.join(' ') || '（没改动）'}${c.graph === undefined ? '' : `（${c.graph}）`}`;
       expect(r.code, label).toBe(c.code);
       if (c.code === REFUSED_FULL_RUN) {
         expect(r.vitestCalls, label).toEqual([]);
         continue;
       }
-      expect(listOf(r).length, label).toBeGreaterThan(0);
-      expect(uncovered(listOf(r)), label).toEqual([]);
+      const list = listOf(r);
+      for (const p of LOCAL_ALWAYS_TESTS) expect(list, label).toContain(p);
+      expect(uncovered(list).length === 0, label).toBe(c.agents);
+      // 没带整个 agents/test/ 时，CI 多跑的只是 agents/test/ 里的
+      for (const f of uncovered(list)) expect(f, label).toMatch(/^agents\/test\//);
     }
   });
 
-  it('【故意造出的失败】从清单里摘掉 CI 每次都跑的任一份：报出来的正好是那一份的测试文件，不是空、也不是别的', () => {
+  it('【故意造出的失败】从改一个包的清单里摘掉任一份指针检查：多出来的漏跑正好是那一份，不是空、也不是别的', () => {
     const list = listOf(run(['packages/cli/src/help.ts']));
-    expect(uncovered(list)).toEqual([]);
-    for (const drop of CI_ALWAYS) {
+    const before = new Set(uncovered(list));
+    for (const drop of LOCAL_ALWAYS_TESTS) {
       const cut = list.filter((p) => p !== drop);
       expect(cut, `${drop} 不在清单里：这条摘不掉东西，等于没查`).toHaveLength(list.length - 1);
-      const missed = uncovered(cut);
-      expect(missed.length, drop).toBeGreaterThan(0);
-      expect(missed, drop).toEqual(filesOf([drop]));
+      expect(
+        uncovered(cut).filter((f) => !before.has(f)),
+        drop,
+      ).toEqual(filesOf([drop]));
     }
   });
 });
