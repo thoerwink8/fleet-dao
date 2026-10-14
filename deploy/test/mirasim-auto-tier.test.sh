@@ -73,7 +73,8 @@ put_file() { # 目标 属主:组 权限 内容
   printf '%s\n' "$content" >"$dest"
   changed "写 $dest"
 }
-# 自动档里的另外三步：只记顺序
+# 自动档里的另外几步：只记顺序。liveness 是 setup_mirasim_session 的最后一步，这里不测它装没装上。
+setup_mirasim_liveness() { CALLS+=(setup_mirasim_liveness); }
 setup_slice() { CALLS+=(setup_slice); }
 retire_old_units() { CALLS+=(retire_old_units); }
 setup_auto_release() { CALLS+=(setup_auto_release); }
@@ -202,6 +203,44 @@ echo 0 >"$TMP/curl-n"
 fresh
 check_mirasim_session_unit fleet-mirasim-fake fleet-mirasim-session.service 54321 >/dev/null
 check "【故意造出的失败】一直被拒：试满 3 次后判红" "${#REDS[@]} $(<"$TMP/curl-n")" "1 3"
+unset -f curl
+
+echo "== 6. /api/health 超时：再试几次；自动档试满记待配，整套读回试满仍判红"
+has "探活不走代理" "$(declare -f check_mirasim_session_unit)" "--noproxy '\\*'"
+SERVER_INSTALLED=1
+MIRASIM_HEALTH_TIMEOUT_TRIES=3
+setup_mirasim_session >/dev/null
+echo 0 >"$TMP/curl-n"
+curl() {
+  local n
+  n=$(<"$TMP/curl-n")
+  echo $((n + 1)) >"$TMP/curl-n"
+  if ((n < 2)); then
+    echo 'curl: (28) Operation timed out' >&2
+    return 28
+  fi
+  echo '{"ok":true}'
+}
+fresh
+check_mirasim_session_unit fleet-mirasim-fake fleet-mirasim-session.service 54321 >/dev/null
+check "前两次超时、第三次回 ok：判绿" "${#REDS[@]} ${#PENDING[@]} $(<"$TMP/curl-n")" "0 0 3"
+
+echo 0 >"$TMP/curl-n"
+curl() {
+  local n
+  n=$(<"$TMP/curl-n")
+  echo $((n + 1)) >"$TMP/curl-n"
+  echo 'curl: (28) Operation timed out' >&2
+  return 28
+}
+fresh
+readback_mirasim_session_unit >/dev/null
+check "自动档试满 3 次仍超时：待配、没有红" "${#REDS[@]} ${#PENDING[@]} $(<"$TMP/curl-n")" "0 1 3"
+has "待配写明 curl 退出 28" "${PENDING[*]}" "curl 退出 28"
+fresh
+echo 0 >"$TMP/curl-n"
+check_mirasim_session_unit fleet-mirasim-fake fleet-mirasim-session.service 54321 >/dev/null
+check "【故意造出的失败】整套读回不传 pending：试满仍判红" "${#REDS[@]} ${#PENDING[@]}" "1 0"
 unset -f curl
 
 if ((fail)); then
