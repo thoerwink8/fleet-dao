@@ -832,6 +832,23 @@ const scrubHost = (text, host) =>
     .join('（名字已隐去）')
     .slice(0, 180);
 
+/** 和 france-lib.mjs 的 LOGIN_KEY_NAMES 同一份：fleet_login，其次创始人的 id_ed25519、id_rsa。不含 grok_bot。 */
+const FRANCE_LOGIN_KEY_NAMES = ['fleet_login', 'id_ed25519', 'id_rsa'];
+
+function franceLoginIdentityArgs(home) {
+  const found = [];
+  for (const name of FRANCE_LOGIN_KEY_NAMES) {
+    const file = join(home, '.ssh', name);
+    try {
+      if (existsSync(file) && statSync(file).isFile()) found.push(file);
+    } catch {
+      // 读不到就当没有这把
+    }
+  }
+  if (found.length === 0) return [];
+  return ['-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none', ...found.flatMap((file) => ['-i', file])];
+}
+
 /**
  * 读法国库里的 engine.poolHolds。同步、只读。没配登法国的 ssh 回 { ok: true, skipped: true }（不出声）。
  * env 不传就不看进程环境。成功和失败都按 QUIET_MS 记在 ~/.fleet-dao/pool-holds-seen.json，免得每条消息都 ssh。
@@ -888,6 +905,8 @@ export function readFrancePoolHolds({ home, env, spawn = spawnSync, now = Date.n
       'ServerAliveInterval=10',
       '-o',
       'ServerAliveCountMax=3',
+      // 和 france-lib.mjs 的 LOGIN_KEY_NAMES 同一份。法国 MaxAuthTries 是 3，只提交这几把，不走 agent。
+      ...franceLoginIdentityArgs(home),
       host.host,
       remote,
     ],

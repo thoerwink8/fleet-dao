@@ -124,7 +124,12 @@ interface FranceLib {
     home: string;
     readText: (file: string) => string;
   }): { ok: true; host: string } | Failure;
-  sshArgs(host: string): string[];
+  LOGIN_KEY_NAMES: string[];
+  loginIdentityFiles(home: string, exists?: (file: string) => boolean): string[];
+  sshArgs(
+    host: string,
+    opts?: { home?: string; exists?: (file: string) => boolean; identityFiles?: string[] },
+  ): string[];
   runRemote(opts: {
     command: string;
     args: string[];
@@ -889,10 +894,27 @@ describe('登法国的 ssh 名字：从本机配置读，不进仓', () => {
   });
 
   it('ssh 的参数：不问口令、开压缩、限连接时长，名字放在选项后面，远端只跑固定的一条', () => {
-    const args = lib.sshArgs('fr');
+    const args = lib.sshArgs('fr', { exists: () => false });
     expect(args).toContain('BatchMode=yes');
     expect(args).toContain('Compression=yes');
     expect(args.some((a) => a.startsWith('ConnectTimeout='))).toBe(true);
+    expect(args).not.toContain('IdentitiesOnly=yes');
+    expect(args.slice(-2)).toEqual(['fr', 'node --input-type=module - --collect']);
+  });
+
+  it('有登录钥匙时只提交那几把，不走 agent（法国 MaxAuthTries 是 3）', () => {
+    const home = tempDir();
+    const fleet = join(home, '.ssh', 'fleet_login');
+    const rsa = join(home, '.ssh', 'id_rsa');
+    const args = lib.sshArgs('fr', {
+      identityFiles: lib.loginIdentityFiles(home, (file) => file === fleet || file === rsa),
+    });
+    expect(lib.LOGIN_KEY_NAMES).toEqual(['fleet_login', 'id_ed25519', 'id_rsa']);
+    expect(args).toContain('IdentitiesOnly=yes');
+    expect(args).toContain('IdentityAgent=none');
+    expect(args).not.toContain('grok_bot');
+    const ids = args.filter((_, i) => args[i - 1] === '-i');
+    expect(ids).toEqual([fleet, rsa]);
     expect(args.slice(-2)).toEqual(['fr', 'node --input-type=module - --collect']);
   });
 });

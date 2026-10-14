@@ -717,7 +717,7 @@ bash /srv/fleet-dao/deploy/release.sh --rollback   # 退回上一版
 bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、自动发布的读数、服务、健康检查
 ```
 
-法国发版和退回（`--check` 不改）把 `/etc/ssh/authorized_keys/<会话用户>` 里已经有的公钥补进 `/root/.ssh/authorized_keys`：指纹对得上的不重复补，原来的行一个字不删、不改。不碰 `authorized_keys2`，也不把监督机的 `grok_bot` 写进去（那把不在会话口子里）。`.ssh` 收成 `700`、`authorized_keys` 收成 `600`，以 root 跑时属主改成 `root:root`，免得 sshd 的 StrictModes 整份不认。口子没有、读不了、写不了都不挡发版。钥匙只来自那份 root 放的会话口子（`france.sh` 从 pilot 抄来的快照），会话用户自己写不了。测试 `deploy/test/root-ssh-login.test.sh`。
+法国发版和退回（`--check` 不改）把 `/etc/ssh/authorized_keys/<会话用户>` 里已经有的公钥补进 `/root/.ssh/authorized_keys`：指纹对得上的不重复补，原来的行一个字不删、不改。不碰 `authorized_keys2`，也不把监督机的 `grok_bot` 写进去（那把不在会话口子里）。`.ssh` 收成 `700`、`authorized_keys` 收成 `600`，以 root 跑时属主改成 `root:root`，免得 sshd 的 StrictModes 整份不认。同一趟写 `sshd_config.d/52-fleet-dao-root-login.conf`（`Match User root`，认家里的两份再加会话口子）：抄不进 `authorized_keys`、或 StrictModes 把那份丢掉时，root 仍直接认会话口子。`sshd -t` 不过就撤掉这份、不重载。口子没有、读不了、写不了都不挡发版。钥匙只来自那份 root 放的会话口子（`france.sh` 从 pilot 抄来的快照），会话用户自己写不了。法国 `MaxAuthTries` 是 3，指挥官这边的 ssh（`france-lib.mjs`、`intents.ts`、开会话钩子）只提交 `~/.ssh/fleet_login`、`id_ed25519`、`id_rsa` 里这台实际有的文件，并关掉 agent；一把都没有才交给 `~/.ssh/config`。测试 `deploy/test/root-ssh-login.test.sh`。
 
 `--check` 和人手动敲的 `bash /srv/fleet-dao/deploy/release.sh` 跑的是部署检出 `/srv/fleet-dao/deploy/release.sh`，不是在用那一版目录（`/srv/fleet-dao-releases/current`）里的那份。检出是独立的 git 工作树，往往还停在上一次快进的提交，也就是当时的在用版本（#1294，2026-10-08 发 72a33cb5 时若直接跑检出里那份，就是在用版 baa3d01a 的脚本，目录还从手放的旧位置装，装不进这一版的模型）。
 

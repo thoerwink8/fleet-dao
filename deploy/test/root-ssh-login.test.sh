@@ -314,23 +314,25 @@ check "默认家目录" "$(root_ssh_login_home)" "/root"
 
 REL=$HERE/../release.sh
 check "只调用一次" "$(grep -c 'ensure_root_login_keys' -- "$REL" || true)" "1"
+check "sshd 那段只调用一次" "$(grep -c 'ensure_root_login_sshd' -- "$REL" || true)" "1"
 # 按字面匹配 release.sh 里的 $mode，不能让 shell 展开，也不能把 [[ 当成正则。
 # shellcheck disable=SC2016
 check_at=$(grep -nF 'if [[ "$mode" == check ]]; then' -- "$REL" | tail -1 | cut -d: -f1)
 call_at=$(grep -n 'ensure_root_login_keys || true' -- "$REL" | tail -1 | cut -d: -f1)
-unset_at=$(grep -n 'unset ROOT_SSH_LOGIN_SRC ROOT_SSH_HOME' -- "$REL" | tail -1 | cut -d: -f1)
-if [[ "$call_at" -gt "$check_at" && "$unset_at" -gt "$check_at" && "$unset_at" -lt "$call_at" ]]; then
-  printf '  ✓ 调用在 --check 之后，且先清掉路径覆盖\n'
+sshd_at=$(grep -n 'ensure_root_login_sshd || true' -- "$REL" | tail -1 | cut -d: -f1)
+unset_at=$(grep -n 'unset ROOT_SSH_LOGIN_SRC ROOT_SSH_HOME ROOT_SSH_LOGIN_DROPIN' -- "$REL" | tail -1 | cut -d: -f1)
+if [[ "$call_at" -gt "$check_at" && "$unset_at" -gt "$check_at" && "$unset_at" -lt "$call_at" && "$sshd_at" -gt "$call_at" ]]; then
+  printf '  ✓ 调用在 --check 之后，且先清掉路径覆盖；sshd 那段在补钥匙之后\n'
 else
-  printf '  ✗ 调用位置不对：check=%s unset=%s call=%s\n' "$check_at" "$unset_at" "$call_at"
+  printf '  ✗ 调用位置不对：check=%s unset=%s call=%s sshd=%s\n' "$check_at" "$unset_at" "$call_at" "$sshd_at"
   fail=1
 fi
 do_check_body=$(awk 'BEGIN{p=0} /^do_check\(\)/{p=1} p{print} p && /^}$/{exit}' "$REL")
-if grep -q 'ensure_root_login_keys' <<<"$do_check_body"; then
+if grep -qE 'ensure_root_login_keys|ensure_root_login_sshd' <<<"$do_check_body"; then
   printf '  ✗ do_check 里也调用了\n'
   fail=1
 else
-  printf '  ✓ do_check 不碰钥匙\n'
+  printf '  ✓ do_check 不碰钥匙、不改 sshd\n'
 fi
 # shellcheck disable=SC2016
 if grep -qF 'source "$DEPLOY_DIR/lib/root-ssh-login.sh"' -- "$REL"; then
@@ -338,6 +340,115 @@ if grep -qF 'source "$DEPLOY_DIR/lib/root-ssh-login.sh"' -- "$REL"; then
 else
   printf '  ✗ release.sh 没有 source 补钥匙\n'
   fail=1
+fi
+
+echo "== 10. root 的 Match：带上会话口子，sshd -t 不过就撤，不漏到会话用户"
+d=$(mktemp -d "$TMP/sshd.XXXXXX")
+dropin=$d/52-fleet-dao-root-login.conf
+mark=$d/reloaded
+keys_path=/etc/ssh/authorized_keys/fleet-agent-carpool
+out=$(
+  ROOT_SSH_LOGIN_SRC=$keys_path \
+    ROOT_SSH_LOGIN_DROPIN=$dropin \
+    ROOT_SSH_LOGIN_SSHD_T='true' \
+    ROOT_SSH_LOGIN_RELOAD="printf 'reloaded\n' > $(printf %q "$mark")" \
+    ensure_root_login_sshd
+)
+rc=$?
+check "退出码" "$rc" "0"
+has "已重载" "$out" "已重载"
+check "普通文件" "$( [[ -f $dropin && ! -L $dropin ]] && echo yes )" "yes"
+check "含会话口子" "$(grep -cF -- "$keys_path" "$dropin" || true)" "1"
+check "只 Match root" "$(grep -c '^Match User root$' -- "$dropin" || true)" "1"
+check "仍认家里的两份" "$(grep -cF '.ssh/authorized_keys .ssh/authorized_keys2' -- "$dropin" || true)" "1"
+reloads=$(wc -l <"$mark" | tr -d ' ')
+check "重载了一次" "$reloads" "1"
+out=$(
+  ROOT_SSH_LOGIN_SRC=$keys_path \
+    ROOT_SSH_LOGIN_DROPIN=$dropin \
+    ROOT_SSH_LOGIN_SSHD_T='true' \
+    ROOT_SSH_LOGIN_RELOAD="printf 'reloaded\n' >> $(printf %q "$mark")" \
+    ensure_root_login_sshd
+)
+has "没改" "$out" "没改"
+reloads=$(wc -l <"$mark" | tr -d ' ')
+check "内容没变不再重载" "$reloads" "1"
+
+printf 'old-line\n' >"$dropin"
+out=$(
+  ROOT_SSH_LOGIN_SRC=$keys_path \
+    ROOT_SSH_LOGIN_DROPIN=$dropin \
+    ROOT_SSH_LOGIN_SSHD_T='echo bad-option >&2; exit 1' \
+    ROOT_SSH_LOGIN_RELOAD="printf 'reloaded\n' >> $(printf %q "$mark")" \
+    ensure_root_login_sshd
+)
+has "sshd -t 不过" "$out" "sshd -t 不过"
+check "还原旧内容" "$(cat -- "$dropin")" "old-line"
+reloads=$(wc -l <"$mark" | tr -d ' ')
+check "没重载" "$reloads" "1"
+rm -f -- "$dropin"
+out=$(
+  ROOT_SSH_LOGIN_SRC=$keys_path \
+    ROOT_SSH_LOGIN_DROPIN=$dropin \
+    ROOT_SSH_LOGIN_SSHD_T='echo bad-option >&2; exit 1' \
+    ROOT_SSH_LOGIN_RELOAD="printf 'reloaded\n' >> $(printf %q "$mark")" \
+    ensure_root_login_sshd
+)
+check "头一次写、验不过：文件撤掉" "$( [[ -e $dropin ]] && echo 在 || echo 没了 )" "没了"
+
+out=$(
+  ROOT_SSH_LOGIN_SRC='/tmp/not a path' \
+    ROOT_SSH_LOGIN_DROPIN=$dropin \
+    ROOT_SSH_LOGIN_SSHD_T='true' \
+    ROOT_SSH_LOGIN_RELOAD='true' \
+    ensure_root_login_sshd
+)
+has "路径不能写进配置" "$out" "不能写进"
+check "坏路径没写出文件" "$( [[ -e $dropin ]] && echo 在 || echo 没了 )" "没了"
+
+ln -s "$mark" "$dropin"
+out=$(
+  ROOT_SSH_LOGIN_SRC=$keys_path \
+    ROOT_SSH_LOGIN_DROPIN=$dropin \
+    ROOT_SSH_LOGIN_SSHD_T='true' \
+    ROOT_SSH_LOGIN_RELOAD='true' \
+    ensure_root_login_sshd
+)
+has "符号链接不动" "$out" "不是普通文件"
+check "符号链接还在" "$( [[ -L $dropin ]] && echo yes )" "yes"
+rm -f -- "$dropin"
+
+if ! command -v sshd >/dev/null; then
+  echo "  - 这台没有 sshd，Match 是否生效没核对"
+else
+  hk=$(mktemp -d "$d/host.XXXXXX")
+  ssh-keygen -q -t ed25519 -N '' -f "$hk/host"
+  mkdir -p "$d/conf.d"
+  cat >"$d/sshd_config" <<EOF
+Include $d/conf.d/*.conf
+HostKey $hk/host
+EOF
+  cat >"$d/conf.d/51-session.conf" <<'EOF'
+Match User fleet-agent-carpool
+	AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+EOF
+  ROOT_SSH_LOGIN_SRC=$keys_path \
+    ROOT_SSH_LOGIN_DROPIN=$d/conf.d/52-fleet-dao-root-login.conf \
+    ROOT_SSH_LOGIN_SSHD_T='true' \
+    ROOT_SSH_LOGIN_RELOAD='true' \
+    ensure_root_login_sshd >/dev/null
+  root_cfg=$(sshd -T -f "$d/sshd_config" -C 'user=root,host=localhost,addr=127.0.0.1' 2>"$d/sshd.err") || root_cfg=""
+  sess_cfg=$(sshd -T -f "$d/sshd_config" -C 'user=fleet-agent-carpool,host=localhost,addr=127.0.0.1' 2>>"$d/sshd.err") || sess_cfg=""
+  root_ak=$(awk '$1 == "authorizedkeysfile" { $1 = ""; sub(/^ /, ""); print; exit }' <<<"$root_cfg")
+  sess_ak=$(awk '$1 == "authorizedkeysfile" { $1 = ""; sub(/^ /, ""); print; exit }' <<<"$sess_cfg")
+  check "root 认家里的钥匙和会话口子" "$root_ak" ".ssh/authorized_keys .ssh/authorized_keys2 $keys_path"
+  check "会话用户仍只认自己的口子" "$sess_ak" "/etc/ssh/authorized_keys/%u"
+  if [[ ! -s "$d/sshd.err" ]]; then
+    printf '  ✓ sshd -T 没报错\n'
+  else
+    printf '  ✗ sshd -T 报了：%s\n' "$(head -c 200 "$d/sshd.err")"
+    fail=1
+  fi
 fi
 
 if ((fail)); then

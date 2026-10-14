@@ -26,7 +26,8 @@ source "$DEPLOY_DIR/lib/common.sh"
 # lib/session-proxy.sh 只管读期望（一律读 deploy/france/desired-config.json）。
 # shellcheck source=lib/session-proxy.sh
 source "$DEPLOY_DIR/lib/session-proxy.sh"
-# #2138：发版、退回（root）把会话口子里已有的公钥补进 /root/.ssh/authorized_keys。缺了、写不了都不挡发版。
+# #2138：发版、退回（root）把会话口子里已有的公钥补进 /root/.ssh/authorized_keys，
+# 并让 sshd 的 Match User root 直接认同一份口子。缺了、写不了、sshd -t 不过都不挡发版。
 # shellcheck source=lib/root-ssh-login.sh
 source "$DEPLOY_DIR/lib/root-ssh-login.sh"
 
@@ -2203,8 +2204,9 @@ main() {
   fi
   # --check 上面 finish 已经退出。再挡一层：只读不改钥匙。测试用的路径覆盖不带进真发版。
   if [[ "$mode" != check ]]; then
-    unset ROOT_SSH_LOGIN_SRC ROOT_SSH_HOME
+    unset ROOT_SSH_LOGIN_SRC ROOT_SSH_HOME ROOT_SSH_LOGIN_DROPIN ROOT_SSH_LOGIN_SSHD_T ROOT_SSH_LOGIN_RELOAD
     ensure_root_login_keys || true
+    ensure_root_login_sshd || true
   fi
   ensure_dir "$RELEASES" root:root 755
   take_lock

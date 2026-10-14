@@ -12,7 +12,7 @@
 //   其次 ~/.fleet-dao/france-ssh 第一行）；那份是装到各机器上纯 node 跑的，这里不能引用，两份改一份要看一眼另一份。
 // - 法国上命令参数只由这里拼，意图号只认正整数，不把用户输入原样塞进远程 shell。
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { IntentCliFailure, IntentCliListOutput, IntentCliShowOutput } from '@fleet-dao/shared';
@@ -136,8 +136,25 @@ export function remoteCommand(cmd: IntentsCommand): string {
   return `bash ${REMOTE_FLEET_API} ${tail}`;
 }
 
-export function sshArgs(host: string, remote: string): string[] {
-  return [
+/** 和 france-lib.mjs 的 LOGIN_KEY_NAMES 同一份：监督机 fleet_login，其次创始人默认钥匙。不含 grok_bot。 */
+export const LOGIN_KEY_NAMES = ['fleet_login', 'id_ed25519', 'id_rsa'] as const;
+
+function loginIdentityFiles(home: string): string[] {
+  const found: string[] = [];
+  for (const name of LOGIN_KEY_NAMES) {
+    const file = join(home, '.ssh', name);
+    try {
+      if (existsSync(file) && statSync(file).isFile()) found.push(file);
+    } catch {
+      // 读不到就当没有这把
+    }
+  }
+  return found;
+}
+
+export function sshArgs(host: string, remote: string, home = homedir()): string[] {
+  const files = loginIdentityFiles(home);
+  const args = [
     '-o',
     'BatchMode=yes',
     '-o',
@@ -148,9 +165,14 @@ export function sshArgs(host: string, remote: string): string[] {
     'ServerAliveInterval=10',
     '-o',
     'ServerAliveCountMax=3',
-    host,
-    remote,
   ];
+  // 法国 MaxAuthTries 是 3：只提交这几把，不让 agent 里别的钥匙把对的那把挤掉。一把都没有就交给 ssh 配置。
+  if (files.length > 0) {
+    args.push('-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none');
+    for (const file of files) args.push('-i', file);
+  }
+  args.push(host, remote);
+  return args;
 }
 
 /** ssh 跑完的样子：code 是 ssh 的退出码（255 是 ssh 自己连不上；别的是远程命令的）；起不来、超时抛 IntentsError。 */
