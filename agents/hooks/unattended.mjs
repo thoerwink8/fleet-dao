@@ -354,7 +354,7 @@ export function main(argv, io) {
         note: '',
       });
       io.out(
-        `无人值守已开，到 ${fmt(expiresAt)}。活交给 Agent 子代理（写代码的 subagent_type: "general-purpose"，最多 3 个，留 1 个名额给监控；三个角色见决定 0087），不脱离会话；有子代理、后台命令、监视在跑时这一轮可以结束，完成通知会叫醒你；什么都没在跑时想结束会被挡回来（连着 ${MAX_STREAK} 次放行）；做完 done、要他拍板 needs-you、他说停就 off。`,
+        `无人值守已开，到 ${fmt(expiresAt)}。活交给 Agent 子代理（写代码的 subagent_type: "general-purpose"，不设固定个数：派新工人前看空闲内存和 CPU（空闲内存 < 4G 或 1 分钟负载 > 核数×0.8 就先等一个收口），同时在跑的工人不改同一批文件（撞了就排队或交给同一个工人连着做），监控不占名额，见决定 0094；三个角色见决定 0087），不脱离会话；有子代理、后台命令、监视在跑时这一轮可以结束，完成通知会叫醒你；什么都没在跑时想结束会被挡回来（连着 ${MAX_STREAK} 次放行）；做完 done、要他拍板 needs-you、他说停就 off。`,
       );
       return 0;
     }
