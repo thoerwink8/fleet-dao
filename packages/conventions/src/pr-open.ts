@@ -12,12 +12,15 @@
 //   这一步没成只提醒、不改退出码）。
 // - 同一张单不开第二个 PR（决定 0096）：「需求」栏 Closes 的单，已经有别的开着的 PR 在做（Closes 它，或分支是 fleet/<单号>-、
 //   local/<单号>-，认法是 pr-claims.ts 的 otherPrOnIssue，引擎开 PR 前用同一份）就不开，退出码 1；PR 列表读不到退出码 2。
+// - 分支认单（决定 0096 落地）：当前分支是 local/<单号>-、fleet/<单号>- 就已经对应一张单：需求栏没挂单自动补 Closes #单号
+//   （照常核那张单存在、是单不是 PR、还开着）；带 --no-issue 拒开；需求栏挂的单里没有分支这张单拒开（防挂错单、两条线统计对不上）。
 // 退出码：0 开成了（挂上了，或照规矩不挂、写明为什么）；1 用法不对、需求栏没挂单或单不存在（什么也没做）；2 没做成：
 // 清单读不到、单没查成、gh 没跑成、输出认不出、改了哪些文件没查成、自动合并没挂成（PR 可能已经开了，照实写明开了哪个、卡在哪一步）。
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import { issueOfBranch } from './issue-branch.ts';
 import { type Gh, judgePaths, listOf, loadPathLists, prFiles, reasonOf } from './pr-arm.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
 import { founderQuote, issueColumnRefs, withIssueColumn } from './pr-columns.ts';
@@ -49,6 +52,7 @@ export const PR_OPEN_USAGE = `用法：pnpm pr:open --title <标题> [--body-fil
                           并挂自动合并（等价于 --founder-approved 加手写那一段）；也能配 --body-file，这两段追加到正文末尾
   需求栏要能读到 Closes #号 / Refs #号：读不到、单不存在就不开；挂了单的 PR 顺手挂上那张单的里程碑。
   --no-issue 在 --body-file 下也能用；需求栏已经挂了单就不能再带
+  分支是 local/<单号>-、fleet/<单号>-：需求栏没挂单就自动补 Closes #<单号>；不能带 --no-issue，需求栏挂的单要含这张单
   --founder-approved  改标准、创始人已经同意（自己写正文时用）：正文里要有一行 **创始人原话**：「<原话>」（<时间>）
   --no-automerge      只开 PR、不挂自动合并`;
 
@@ -60,6 +64,17 @@ export function pickGitCwd(initCwd: string | undefined, root: string): string {
   if (!initCwd) return root;
   const rel = relative(resolve(root), resolve(initCwd));
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)) ? initCwd : root;
+}
+
+/**
+ * 当前分支对应的单（local/<单号>-、fleet/<单号>-）：认不出是普通分支回 null；分支名没读成（git 报错）抛错，不当成普通分支。
+ */
+export function branchIssue(git: Gh): { branch: string; issue: number } | null {
+  const r = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (r.code !== 0) throw new Error(`当前分支没读成（${reasonOf(r)}）`);
+  const branch = r.stdout.trim();
+  const ref = issueOfBranch(branch);
+  return ref ? { branch, issue: ref.issue } : null;
 }
 
 export interface OpenDeps {
@@ -128,14 +143,30 @@ export function prOpen(argv: string[], deps: OpenDeps): number {
   }
 
   // 需求栏必挂单：Closes / Refs 读得到，或者带 --no-issue 写明理由；两样都没有就什么也不做
+  // 分支是 local/<单号>-、fleet/<单号>-：分支已经对应一张单，--no-issue 不收，需求栏没挂就自动补 Closes，挂了的要含这张
   const linked = issueColumnRefs(body);
-  const issueNumbers = [...linked.closes, ...linked.refs];
+  let issueNumbers = [...linked.closes, ...linked.refs];
+  let closes = linked.closes;
   let sendBody = bodyFile;
   let tmpBody: string | undefined;
+  let branch: ReturnType<typeof branchIssue>;
+  try {
+    branch = branchIssue(deps.git);
+  } catch (e) {
+    err(`${e instanceof Error ? e.message : String(e)}：没开 PR。`);
+    return 2;
+  }
+  let autoIssue: number | undefined;
   if (typeof values['no-issue'] === 'string') {
     const reason = values['no-issue'].trim();
     if (!reason) {
       err('--no-issue 后面要写为什么不挂单（一句话，会原样写进「需求」栏）：什么也没做。');
+      return 1;
+    }
+    if (branch) {
+      err(
+        `当前分支 ${branch.branch} 已经对应单 #${branch.issue}，不能带 --no-issue：去掉它（需求栏没挂单会自动补 Closes #${branch.issue}）。什么也没做。`,
+      );
       return 1;
     }
     if (issueNumbers.length > 0) {
@@ -147,11 +178,24 @@ export function prOpen(argv: string[], deps: OpenDeps): number {
     tmpBody = join(mkdtempSync(join(tmpdir(), 'pr-open-')), 'body.md');
     writeFileSync(tmpBody, withIssueColumn(body, `无：${reason}`));
     sendBody = tmpBody;
+  } else if (issueNumbers.length === 0 && branch) {
+    autoIssue = branch.issue;
+    issueNumbers = [branch.issue];
+    closes = [branch.issue];
+    tmpBody = join(mkdtempSync(join(tmpdir(), 'pr-open-')), 'body.md');
+    writeFileSync(tmpBody, withIssueColumn(body, `Closes #${branch.issue}`));
+    sendBody = tmpBody;
+    out(`分支 ${branch.branch} 对应单 #${branch.issue}，需求栏没挂单，自动补 Closes #${branch.issue}。`);
   } else if (issueNumbers.length === 0) {
     err(
       '正文「需求」栏里读不到 Closes #号 / Refs #号：每个 PR 都要挂单，里程碑页才看得出进展（#1052）。\n' +
         '  这个 PR 做完就关单 → 需求栏写「Closes #号」；母单的分片、关不了它 → 写「Refs #号」；\n' +
         '  确实没有单 → 加 --no-issue "<为什么不挂单>"。没开 PR，什么也没做。',
+    );
+    return 1;
+  } else if (branch && !issueNumbers.includes(branch.issue)) {
+    err(
+      `当前分支 ${branch.branch} 对应单 #${branch.issue}，可「需求」栏挂的是 #${issueNumbers.join('、#')}：单号对不上。要么需求栏改成（或加上）#${branch.issue}，要么换到对的分支。没开 PR，什么也没做。`,
     );
     return 1;
   }
@@ -164,7 +208,8 @@ export function prOpen(argv: string[], deps: OpenDeps): number {
       base: typeof values.base === 'string' ? values.base : undefined,
       noAutomerge: values['no-automerge'] === true,
       issueNumbers,
-      closes: linked.closes,
+      closes,
+      autoIssue,
     });
   } finally {
     if (tmpBody) rmSync(join(tmpBody, '..'), { recursive: true, force: true });
@@ -174,6 +219,7 @@ export function prOpen(argv: string[], deps: OpenDeps): number {
 /** 查到的单：号、是不是 PR、挂的里程碑名（没挂是 undefined）。 */
 interface IssueInfo {
   isPr: boolean;
+  open: boolean;
   milestone: string | undefined;
 }
 
@@ -183,7 +229,7 @@ function lookupIssue(gh: Gh, n: number): IssueInfo | 'missing' {
     'api',
     `repos/{owner}/{repo}/issues/${n}`,
     '--jq',
-    '[(.pull_request != null), .milestone.title] | @json',
+    '[(.pull_request != null), .milestone.title, .state] | @json',
   ]);
   if (r.code !== 0) {
     if (/HTTP 404|Not Found/i.test(`${r.stderr}${r.stdout}`)) return 'missing';
@@ -195,9 +241,14 @@ function lookupIssue(gh: Gh, n: number): IssueInfo | 'missing' {
   } catch {
     raw = undefined;
   }
-  if (!Array.isArray(raw) || typeof raw[0] !== 'boolean' || (raw[1] !== null && typeof raw[1] !== 'string'))
+  if (
+    !Array.isArray(raw) ||
+    typeof raw[0] !== 'boolean' ||
+    (raw[1] !== null && typeof raw[1] !== 'string') ||
+    typeof raw[2] !== 'string'
+  )
     throw new Error(`没查成 #${n} 在不在：gh 回的认不出（${r.stdout.trim().slice(0, 120)}）`);
-  return { isPr: raw[0], milestone: raw[1] || undefined };
+  return { isPr: raw[0], milestone: raw[1] || undefined, open: raw[2] === 'open' };
 }
 
 interface OpenPlan {
@@ -212,6 +263,8 @@ interface OpenPlan {
   issueNumbers: number[];
   /** 其中 Closes 的那些（这个 PR 做完就关的单）：开之前查有没有别的 PR 在做。 */
   closes: number[];
+  /** 分支对应的单、需求栏是自动补的：这张单必须还开着（手写挂的不查，老规矩）。 */
+  autoIssue: number | undefined;
 }
 
 /** 开着的 PR 里有没有别的在做 closes 里的单。有回不开的原因和退出码；没有回 null。 */
@@ -291,6 +344,12 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
     if (info.isPr) {
       err(
         `#${n} 是个 PR、不是单：这是 PR，请用 --no-issue 并写理由（--no-issue "<为什么不挂单>"），或改成真的单号。没开 PR。`,
+      );
+      return 1;
+    }
+    if (plan.autoIssue === n && !info.open) {
+      err(
+        `分支对应的单 #${n} 已经关了，不能自动挂：没开 PR。换一张开着的单（需求栏写 Closes #号），或重新 pnpm work claim 一张新单。`,
       );
       return 1;
     }

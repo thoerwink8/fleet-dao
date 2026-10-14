@@ -8,7 +8,7 @@
 
 - 创始人的引导和决定当场 `pnpm progress directive` 记下，接手先 `pnpm progress read`；认领、办完、进度流水的全套见 `docs/directives/README.md`。
 - 计划以 GitHub 为准，`pnpm plan` 现读。创始人开的单进当前版本；AI 发现的不急的开小单进未排期，告诉他排第几。
-- 需求写在单上，四节：场景、原话、已知的模块、怎么算做完；用 `pnpm issue:new` 开（参数见它报错里的用法，本机做的加 `--local`）。一个队列（GitHub 单）、一本账、两种执行者，默认开单给法国，开完顺手戳法国立刻接；只有讨论中的、急修、要本机资源的、改标准的四类才贴 `--local` 留本机（决定 0096）。本机做活一律先开单（`pnpm issue:new --local`，开完自动领）或 `pnpm work claim <号>`，分支用 `local/<单号>-<短名>`（引擎用 `fleet/<单号>-`），做完 `pnpm work done <号>`。要写方案才写，放 `specs/<编号>-<短名>/`，不改已有的。
+- 需求写在单上，四节：场景、原话、已知的模块、怎么算做完；用 `pnpm issue:new` 开（参数见它报错里的用法，本机做的加 `--local`）。一个队列（GitHub 单）、一本账、两种执行者，默认开单给法国，开完顺手戳法国立刻接；只有讨论中的、急修、要本机资源的、改标准的四类才贴 `--local` 留本机（决定 0096）。本机做活一律先开单（`pnpm issue:new --local`，开完自动领）或 `pnpm work claim <号>`，分支用 `local/<单号>-<短名>`（引擎用 `fleet/<单号>-`），PR 合并、单关掉后租约自动收，不用手动（没做成或放手才 `pnpm work done <号> --failed|--release`）；`pnpm pr:open` 在 `local/<单号>-`、`fleet/<单号>-` 分支上需求栏没挂单就自动补 `Closes #<单号>`，且不收 `--no-issue`、挂的单和分支单号对不上也拒开。要写方案才写，放 `specs/<编号>-<短名>/`，不改已有的。
 - 引擎自己挑单、自己关单，不直写主线；单要写成什么样它才接，见 `packages/engine/AGENTS.md`。
 
 ## PR
