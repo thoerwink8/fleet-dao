@@ -1,12 +1,12 @@
 // 法国只读巡查（patrol-lib.mjs，决定 0034，#1372）：监控的主体是脚本，读不成一律 BROKEN、不当 OK；基线只由脚本写。
 // ssh 全是假的（fetchRaw 换掉）；基线文件换成内存里的一份。故意造的失败：空输出、截断、库查询报错、采集时间过旧、
 // 认不出的行、ssh 名字没配，都必须判 BROKEN；坏样本必须判 ALERT。
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChildOk } from './child.ts';
 
 const SCRIPTS = fileURLToPath(new URL('../skills/commander/scripts/', import.meta.url));
 
@@ -417,7 +417,7 @@ describe('巡查脚本：发版文件原样传回来（回归：sh 的 echo 会�
     const lines = lib.REMOTE_SCRIPT.split('\n').filter((l) => /^if \[ -r \S+\/\.(train|auto)\//.test(l));
     expect(lines).toHaveLength(2);
     const script = lines.map((l) => l.replaceAll('/srv/fleet-dao-releases', rel)).join('\n');
-    return execFileSync('sh', ['-c', script], { encoding: 'utf8' })
+    return runChildOk('sh', ['-c', script])
       .split('\n')
       .filter((l) => l !== '');
   }
