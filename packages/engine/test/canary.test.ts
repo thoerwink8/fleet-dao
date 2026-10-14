@@ -92,7 +92,11 @@ function state(over: Partial<CanaryState> = {}): CanaryState {
 
 function facts(over: Partial<CanaryDbFacts> = {}): CanaryDbFacts {
   return {
-    repo: { id: 'repo-1', autoDispatchSince: new Date(T0.getTime() - 24 * 60 * 60_000) },
+    repo: {
+      id: 'repo-1',
+      autoDispatchSince: new Date(T0.getTime() - 24 * 60 * 60_000),
+      ciPolicy: 'force',
+    },
     task: null,
     runs: NO_RUNS,
     timings: 0,
@@ -189,7 +193,7 @@ describe('走到哪一步、断没断（canaryNext）', () => {
   it('【故意造出的失败】巡检仓的「让 AI 接活」关着：不用等期限，当场断在「收单」', () => {
     const off = canaryNext(
       state(),
-      obs(2, { db: facts({ repo: { id: 'repo-1', autoDispatchSince: null } }) }),
+      obs(2, { db: facts({ repo: { id: 'repo-1', autoDispatchSince: null, ciPolicy: 'force' } }) }),
     );
     expect(off).toMatchObject({ kind: 'broken', stage: 'intake' });
     expect(whyOf(off)).toContain('「让 AI 接活」开关关着');
@@ -198,7 +202,9 @@ describe('走到哪一步、断没断（canaryNext）', () => {
   it('开关是开单之后才打开的不再算断（拉单不看开单时间，#1336）：照常等收单', () => {
     const late = canaryNext(
       state(),
-      obs(2, { db: facts({ repo: { id: 'repo-1', autoDispatchSince: new Date(at(1)) } }) }),
+      obs(2, {
+        db: facts({ repo: { id: 'repo-1', autoDispatchSince: new Date(at(1)), ciPolicy: 'force' } }),
+      }),
     );
     expect(late.kind).not.toBe('broken');
   });
@@ -395,6 +401,53 @@ describe('走到哪一步、断没断（canaryNext）', () => {
     expect(whyOf(unrecorded)).toContain('opus-5.5（没写原因');
     const open = { ...finished(60), db: facts({ ...finished(60).db, runs: { ...LEDGER, ended: 2 } }) };
     expect(canaryNext(s, { ...open, at: at(80) })).toMatchObject({ kind: 'broken', stage: 'ledger' });
+  });
+
+  it('不强制 CI：验收 0 笔、动手记了用量，记账算走完；强制 CI 或用量没记上仍断（#2082）', () => {
+    const s = state({ stage: 'ledger', stageSince: at(60) });
+    const repo = {
+      id: 'repo-1',
+      autoDispatchSince: new Date(T0.getTime() - 24 * 60 * 60_000),
+      ciPolicy: 'off' as const,
+    };
+    const skipped = {
+      ...finished(60),
+      db: facts({
+        ...finished(60).db,
+        repo,
+        runs: { total: 1, ended: 1, manual: 1, verify: 0, withUsage: 1, missingUsage: [] },
+      }),
+    };
+    // 动手那一笔记上了用量、每步耗时在：记账走完，接着看驾驶舱（这一回里能走完）
+    const d = canaryNext(s, { ...skipped, at: at(61) });
+    expect(d.kind).toBe('pass');
+    // 同一形状、策略仍是强制：到期限断在记账
+    const forced = {
+      ...skipped,
+      db: facts({
+        ...skipped.db,
+        repo: { ...repo, ciPolicy: 'force' },
+      }),
+    };
+    expect(canaryNext(s, { ...forced, at: at(80) })).toMatchObject({ kind: 'broken', stage: 'ledger' });
+    const noUsage = {
+      ...skipped,
+      db: facts({
+        ...skipped.db,
+        runs: {
+          total: 1,
+          ended: 1,
+          manual: 1,
+          verify: 0,
+          withUsage: 0,
+          missingUsage: [{ model: 'grok-4.7', note: null }],
+        },
+      }),
+    };
+    const unrecorded = canaryNext(s, { ...noUsage, at: at(80) });
+    expect(unrecorded).toMatchObject({ kind: 'broken', stage: 'ledger' });
+    expect(whyOf(unrecorded)).toContain('没有验收那一笔不算缺账');
+    expect(whyOf(unrecorded)).toContain('grok-4.7（没写原因');
   });
 
   it('【故意造出的失败】驾驶舱读到的 PR 还没合、挂的不是这张单、镜像里没有：到期限断在「驾驶舱显示」，写清读到了什么', () => {

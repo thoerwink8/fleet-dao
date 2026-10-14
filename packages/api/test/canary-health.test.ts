@@ -144,6 +144,39 @@ describe('canary 项怎么判', () => {
     expect(got).not.toMatchObject({ ok: 'pending' });
   });
 
+  it('记账断结论早于部署时刻则待定，部署早于结论则仍报 canary_broken（#1808）', () => {
+    const endedAt = new Date('2026-10-14T00:40:00.000Z');
+    const now = new Date('2026-10-14T01:10:00.000Z');
+    const finished = row({
+      verdict: 'broken',
+      stage: 'ledger',
+      issueNumber: 107,
+      startedAt: new Date('2026-10-14T00:26:00.000Z'),
+      endedAt,
+      why: '超过期限还没走完',
+    });
+    // 公开文案只带到结论时刻。部署早于这条结论时仍是 canary_broken。
+    expect(
+      canaryHealth({ finished, running: null }, now, undefined, new Date('2026-10-14T00:15:00.000Z')),
+    ).toMatchObject({
+      ok: false,
+      code: 'canary_broken',
+      message: '最近一轮（10-14 08:40 有结论）断在「记账」',
+    });
+    // 部署时刻晚于这条结论：待定，不当 canary_broken，也不让 /healthz 因这一项变 503
+    const afterRelease = canaryHealth(
+      { finished, running: null },
+      now,
+      undefined,
+      new Date('2026-10-14T01:00:00.000Z'),
+    );
+    expect(afterRelease).toEqual({
+      ok: 'pending',
+      note: '这条结论早于当前部署（10-14 09:00），等新一轮（发版后最多 12 小时）',
+    });
+    expect(afterRelease).not.toMatchObject({ code: 'canary_broken' });
+  });
+
   it('结论晚于部署、断在收单（#1808）：照旧报 canary_broken', () => {
     const deployedAt = ago(180);
     const finished = row({
@@ -309,8 +342,37 @@ describe('canary 项怎么判', () => {
         undefined,
         new Date(NOW.getTime() - CANARY_PENDING_MAX_MS - 60_000),
       ),
+      // 记账断结论：部署早于结论仍报红；部署晚于结论改待定（#1808）
+      canaryHealth(
+        {
+          finished: row({
+            verdict: 'broken',
+            stage: 'ledger',
+            endedAt: new Date('2026-10-14T00:40:00.000Z'),
+            why: 'x',
+          }),
+          running: null,
+        },
+        new Date('2026-10-14T01:10:00.000Z'),
+        undefined,
+        new Date('2026-10-14T00:15:00.000Z'),
+      ),
+      canaryHealth(
+        {
+          finished: row({
+            verdict: 'broken',
+            stage: 'ledger',
+            endedAt: new Date('2026-10-14T00:40:00.000Z'),
+            why: 'x',
+          }),
+          running: null,
+        },
+        new Date('2026-10-14T01:10:00.000Z'),
+        undefined,
+        new Date('2026-10-14T01:00:00.000Z'),
+      ),
     ].map((h) => (h.ok === false ? h.message : h.note));
-    expect(said).toHaveLength(13);
+    expect(said).toHaveLength(15);
     for (const text of said) expect(scan.scanText('canary', text, scan.BUILTIN_TERMS), text).toEqual([]);
   });
 });
