@@ -229,47 +229,52 @@ function fakeGh(dir: string, runs: { databaseId: number; event?: string }[]): No
   return { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ''}`, GH_CALLS: calls };
 }
 
-describe('入口不给 --run：只取 PR 触发的运行（假 gh，不连 GitHub）', { timeout: 0 }, () => {
-  const bin = fileURLToPath(new URL('../src/bin/ci-timings.ts', import.meta.url));
+// Windows 上 spawnSync('gh') 只找 gh.exe，造的假 gh 是 node 脚本、找不到，会调到真的 gh 去连 GitHub；只在 POSIX 上跑（CI 是 Linux）
+describe.skipIf(process.platform === 'win32')(
+  '入口不给 --run：只取 PR 触发的运行（假 gh，不连 GitHub）',
+  { timeout: 0 },
+  () => {
+    const bin = fileURLToPath(new URL('../src/bin/ci-timings.ts', import.meta.url));
 
-  function go(runs: { databaseId: number; event?: string }[]) {
-    const dir = mkdtempSync(join(tmpdir(), 'ci-timings-gh-'));
-    const env = fakeGh(dir, runs);
-    const out = join(dir, 'timings.json');
-    const r = runChild(process.execPath, [bin, '--out', out], { env });
-    const calls = readFileSync(env.GH_CALLS ?? '', 'utf8')
-      .trim()
-      .split('\n')
-      .filter((l) => l.length > 0)
-      .map((l) => JSON.parse(l) as string[]);
-    return { r, out, calls };
-  }
+    function go(runs: { databaseId: number; event?: string }[]) {
+      const dir = mkdtempSync(join(tmpdir(), 'ci-timings-gh-'));
+      const env = fakeGh(dir, runs);
+      const out = join(dir, 'timings.json');
+      const r = runChild(process.execPath, [bin, '--out', out], { env });
+      const calls = readFileSync(env.GH_CALLS ?? '', 'utf8')
+        .trim()
+        .split('\n')
+        .filter((l) => l.length > 0)
+        .map((l) => JSON.parse(l) as string[]);
+      return { r, out, calls };
+    }
 
-  it('【故意造出失败的】运行列表混进 push：退出 2、报没查成，不拿这批运行刷表', () => {
-    // 名单里有能刷的 PR 运行。混进 push 仍要整批停下：滤掉 push、只用旁边的 PR 刷，这条就绿不了。
-    const { r, out } = go([
-      { databaseId: 11, event: 'pull_request' },
-      { databaseId: 13, event: 'push' },
-    ]);
-    expect(r.status, r.stderr).toBe(2);
-    expect(r.stderr).toMatch(/没查成.*13.*不是 PR/);
-    expect(existsSync(out)).toBe(false);
-  });
+    it('【故意造出失败的】运行列表混进 push：退出 2、报没查成，不拿这批运行刷表', () => {
+      // 名单里有能刷的 PR 运行。混进 push 仍要整批停下：滤掉 push、只用旁边的 PR 刷，这条就绿不了。
+      const { r, out } = go([
+        { databaseId: 11, event: 'pull_request' },
+        { databaseId: 13, event: 'push' },
+      ]);
+      expect(r.status, r.stderr).toBe(2);
+      expect(r.stderr).toMatch(/没查成.*13.*不是 PR/);
+      expect(existsSync(out)).toBe(false);
+    });
 
-  it('只有 PR 运行：取运行列表带 event=pull_request，照常刷表', () => {
-    const { r, out, calls } = go([
-      { databaseId: 11, event: 'pull_request' },
-      { databaseId: 12, event: 'pull_request' },
-    ]);
-    expect(r.status, r.stderr).toBe(0);
-    const list = calls.find((a) => a[0] === 'run' && a[1] === 'list');
-    if (list === undefined) throw new Error(`没有 gh run list：${JSON.stringify(calls)}`);
-    expect(list[list.indexOf('--event') + 1]).toBe('pull_request');
-    const t = parseTimings(readFileSync(out, 'utf8'));
-    if (typeof t === 'string') throw new Error(t);
-    expect(t.files[SELF]).toBe(100);
-    expect(t.source).toContain('ci.yml run 11');
-    expect(t.source).toContain('ci.yml run 12');
-    expect(t.source).toContain('共 2 轮取中位数');
-  });
-});
+    it('只有 PR 运行：取运行列表带 event=pull_request，照常刷表', () => {
+      const { r, out, calls } = go([
+        { databaseId: 11, event: 'pull_request' },
+        { databaseId: 12, event: 'pull_request' },
+      ]);
+      expect(r.status, r.stderr).toBe(0);
+      const list = calls.find((a) => a[0] === 'run' && a[1] === 'list');
+      if (list === undefined) throw new Error(`没有 gh run list：${JSON.stringify(calls)}`);
+      expect(list[list.indexOf('--event') + 1]).toBe('pull_request');
+      const t = parseTimings(readFileSync(out, 'utf8'));
+      if (typeof t === 'string') throw new Error(t);
+      expect(t.files[SELF]).toBe(100);
+      expect(t.source).toContain('ci.yml run 11');
+      expect(t.source).toContain('ci.yml run 12');
+      expect(t.source).toContain('共 2 轮取中位数');
+    });
+  },
+);

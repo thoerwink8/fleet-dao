@@ -11,7 +11,8 @@
 // - CI 不绿、没有要发的、已有发版在走或请求还没被接、接活单元没装：卡住。
 
 import { readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+// 读的是法国机器上的路径（/srv、/var/lib），本机 Windows 上跑测试也得拼成正斜杠
+import { join } from 'node:path/posix';
 import {
   describeEngineMaster,
   type EngineMasterState,
