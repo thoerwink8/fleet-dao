@@ -2,7 +2,7 @@
 // routing/filter.ts）、切号（engine 的 jobs/org-decision.ts）、驾驶舱额度页（api 的 reserve-view.ts）、设置页读同一份，口径一个。
 //
 // 配置只存在库里的设置键 engine.quotaReserve（形状见 web-api.ts 的 QuotaReserveSettingSchema）：{池编号: {窗口: 比例 | null}}。
-// 代码里不留任何具体数值的默认（创始人 2026-10-05：「独享留量线 5 小时窗 80%、周窗 70%，这个不应该写死，应该是驾驶舱可以配置的」）：
+// 代码里不留任何具体数值的默认（「独享留量线 5 小时窗 80%、周窗 70%，这个不应该写死，应该是驾驶舱可以配置的」）：
 // 起始值写在种子文件 packages/db/quota-reserve.default.json，由装载器只补缺装进库（和路由骨架 routing.default.json 同一条链路），
 // 之后全由驾驶舱设置页改。库里这个池没有线 = 明确「不限」（驾驶舱写「未配置」），不是悄悄套默认。
 //

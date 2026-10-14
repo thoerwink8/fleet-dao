@@ -10,7 +10,7 @@ export const SESSION_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as cons
 export type SessionEffort = (typeof SESSION_EFFORTS)[number];
 
 /**
- * 没配用这一档。创始人 2026-09-28 傍晚拍（specs/169-Fusion形态/需求.md「各家模型干活的会话思考档位默认 high」）：
+ * 没配用这一档。（specs/169-Fusion形态/需求.md「各家模型干活的会话思考档位默认 high」）：
  * 总是显式传，不靠各家命令行自己的默认（Grok 自己默认 xhigh）。
  */
 export const DEFAULT_SESSION_EFFORT: SessionEffort = 'high';

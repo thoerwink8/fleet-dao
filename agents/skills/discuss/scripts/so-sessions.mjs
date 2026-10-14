@@ -369,7 +369,7 @@ function runClaude({ prompt, workdir, timeoutMin, log }) {
   });
 }
 
-// 断链修复（本机 2026-09-28 两次实测，和 ask.mjs 同一个坑）：原来题面写进工作目录里的临时文件（Windows 命令行
+// 断链修复（本机两次实测，和 ask.mjs 同一个坑）：原来题面写进工作目录里的临时文件（Windows 命令行
 // 长度有限），让它读文件照做——指望 cursorAgentEnv() 摘掉 Git Bash 留下的环境变量就能让它的钩子猜成本机原生壳。
 // 实测不够：只要父进程链里有 Git Bash，钩子照样把读文件的工具调用拦掉（见 ask.mjs 头几行的论证）。改成不给位置
 // 参数、题面从 stdin 喂给它，模型不用调任何工具就能看到题面（cursorAgentEnv() 留着一起用，多一层保险，不影响）。
@@ -547,7 +547,7 @@ const REAL_IO = {
 /**
  * 等一个会话答完。「连续 stallMin 分钟没有任何新输出」就判这家没查成（抛 Stalled，withFallback 当场换下一家）：
  * 进展 = 阶段、正文长度、工具调用数、updatedAt 任何一样变了。原来这里写死 10 分钟，#1056 当天 deepseek、grok 起了会话就卡在
- * streaming，一家 8 分钟还没换（创始人 2026-10-05 嫌慢，改成默认 4 分钟、可用 --stall-min 调）。
+ * streaming，一家 8 分钟还没换（嫌慢，改成默认 4 分钟、可用 --stall-min 调）。
  * @param {{ profile: Profile, url: string, sessionKey: string, since: number, timeoutMin: number, pollMs: number, log: Log, before: number | null, secs: () => string, stallMin?: number, io?: PollIo }} opts
  * @returns {Promise<SessionResult>}
  */
@@ -610,7 +610,7 @@ export async function pollSession({
     throw new NotChecked(`要的是 ${profile.model}，快照报实际跑的是 ${view.model}`);
   }
   const uuid = sessionKey.split(':').slice(1).join(':');
-  // 账本比快照的 done 晚一两秒落盘（2026-09-25 实测）：没读到起针后的成功行就等一等再读，最多 10 秒
+  // 账本比快照的 done 晚一两秒落盘（实测）：没读到起针后的成功行就等一等再读，最多 10 秒
   let ledger = readLedger(uuid);
   for (
     let i = 0;
@@ -654,7 +654,7 @@ async function stop(url, sessionKey) {
 
 /**
  * 把会话连它的目录和账本一起删掉（Mirasim 的 deleteSession）。会话每次都是一次性的：跑完就删，
- * 不留在会话列表里等人来清（创始人 2026-10-03：「在 mirasim 起一个会话，我根本不想看见它，并且我希望随时能清理掉」）。
+ * 不留在会话列表里等人来清（「在 mirasim 起一个会话，我根本不想看见它，并且我希望随时能清理掉」）。
  * 删之前账本要先读完（traffic/<uuid> 跟会话一起没）。删不掉不当成失败——结论已经拿到了，只如实说一句。
  * @param {string} url
  * @param {string} sessionKey

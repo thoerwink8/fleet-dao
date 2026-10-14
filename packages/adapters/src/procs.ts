@@ -114,7 +114,7 @@ export function signalProcs(pids: Iterable<number>, sig: NodeJS.Signals): void {
 export const SCOPE_HELPER = '/usr/local/sbin/fleet-agent-scope';
 
 /**
- * 会话专用用户：法国只有这一个（reclaude 一个账户最多挂 4 台设备、一个家目录算一台，创始人 2026-09-26）。名字是历史
+ * 会话专用用户：法国只有这一个（reclaude 一个账户最多挂 4 台设备、一个家目录算一台）。名字是历史
  * 沿用，不改名免得重新登录。它同一时刻只挂一个组织（平时拼车），两个 Claude 池都跑在它下面（design 第九节）。
  */
 export const SESSION_USERS = ['fleet-agent-carpool'] as const;

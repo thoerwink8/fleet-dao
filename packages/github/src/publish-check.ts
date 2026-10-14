@@ -2,7 +2,7 @@
 // 都不经 git 推送，推前扫描（push.ts）和 git 钩子都拦不到，写上去就公开了。和推前扫描同一套规则、白名单：查出真密钥
 // HYGIENE_BLOCKED（不可重试：得改内容），扫不成 HYGIENE_UNSCANNED——都不写。报错只带位置（文件或「PR 标题」这类
 // 名字、行、规则名），不带值。
-// 只管 fleet-dao 这一个仓（创始人 2026-10-01 10:50 前后拍）：往别的仓写东西不套这套规则，按那个仓自己的标准来
+// 只管 fleet-dao 这一个仓：往别的仓写东西不套这套规则，按那个仓自己的标准来
 // （hygiene-scope.ts）；认不出是哪个仓时明确报错，不默认放过去。
 import { ALLOWLIST, formatFinding, scanFiles } from '@fleet-dao/hygiene';
 import type { RepoRef } from './client.ts';

@@ -1,5 +1,5 @@
 // git pre-push 钩子里的第二段：卫生检查过后跑本机的预检——这次改动要在 CI 上跑的类型检查和格式检查，在这里先跑一遍
-// （判法见 prepare-push.ts，和 CI 同一份）。创始人 2026-10-03：一个 PR 慢，多半是「CI 红了、改、重推」那几轮。
+// （判法见 prepare-push.ts，和 CI 同一份）。一个 PR 慢，多半是「CI 红了、改、重推」那几轮。
 // 用法：node packages/conventions/src/bin/prepare-push.ts（在仓根跑；.githooks/pre-push 调它）。
 // 退出码：0 过了；1 查出来没过；2 没查成（不推）。
 import { spawnSync } from 'node:child_process';

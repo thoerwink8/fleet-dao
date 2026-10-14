@@ -345,7 +345,7 @@ async function assemble(): Promise<{
     routingEfforts: pgRoutingEfforts(db, now),
     // 路由两层的先后和开关（母单 #1089）：驾驶舱「路由」页改的就是选路读的那两张表的 position、enabled
     routingOrder: pgRoutingOrder(db, now),
-    // 按单指定模型（驾驶舱改版 2026-10-07）：引擎给这张单的一段选路时现读的就是这张表，改了下一次选路照新的
+    // 按单指定模型：引擎给这张单的一段选路时现读的就是这张表，改了下一次选路照新的
     taskRoutePins: pgTaskRoutePins(db, now),
     // 任务详情每段的会话内容（#1640）：读引擎按条记下的 run_transcript
     runTranscript: pgRunTranscript(db),

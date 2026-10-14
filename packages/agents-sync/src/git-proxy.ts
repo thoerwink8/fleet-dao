@@ -1,6 +1,6 @@
 // GitHub 的 git 走本机备用代理：~/.fleet-dao/fallback-proxy（每台自己配，不进仓、不是密钥；第一行 http:// 或 socks5:// 的 host:port）
 // 在，就把 http.https://github.com/.proxy 设成它；不在就不设、照实报「没配」，不报成一致。
-// 为什么（片 B 第 9 条，2026-10-13）：Claude Code 会话进程环境里的 HTTPS_PROXY 是 reclaude 写进用户级 settings env 的
+// 为什么（片 B 第 9 条）：Claude Code 会话进程环境里的 HTTPS_PROXY 是 reclaude 写进用户级 settings env 的
 // 56879，改它会被写回；非 Claude Code 的流量穿过它约 90 秒后设备被解绑（docs/reference/adapters.md CC-10）。本机实测：github 走
 // 127.0.0.1:7890 ok 1.0s，走 56879 失败 10.5s，直连失败 21.8s。git 的 http.<url>.proxy 比环境变量优先，这一条设上，
 // 各会话里的 git 连 GitHub 就不再穿 reclaude；Bash 里的 gh/curl/npm 由开会话钩子往 $CLAUDE_ENV_FILE 写代理变量（agents/hooks/proxy-env.mjs）。

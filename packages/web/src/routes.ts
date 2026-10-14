@@ -31,7 +31,7 @@ export default [
     route('resources', 'routes/resources.tsx'),
     // 旧地址：模型目录做在路由页里，打开转到 /routing?tab=models。
     route('models', 'routes/models.tsx'),
-    // 还没做的页：不进侧栏（驾驶舱改版 2026-10-07），地址留着、打开写明「还没做」。只剩账单、战绩、判断题记录。
+    // 还没做的页：不进侧栏，地址留着、打开写明「还没做」。只剩账单、战绩、判断题记录。
     route('billing', 'routes/soon.tsx', { id: 'soon-billing' }),
     route('record', 'routes/soon.tsx', { id: 'soon-record' }),
     route('judge', 'routes/soon.tsx', { id: 'soon-judge' }),

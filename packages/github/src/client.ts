@@ -535,7 +535,7 @@ function isWrite(req: GhRequest): boolean {
 
 /**
  * 超出 JS 安全整数（2^53）的整数按原文留成字符串。GitHub 的 webhook 投递编号 2026 年已是 19 位，普通 JSON.parse 会悄悄
- * 改掉尾数（…928 → …000），拿去重投全是 404（法国 2026-09-26 实测）。要用这类编号的地方自己认字符串；别的数字照旧。
+ * 改掉尾数（…928 → …000），拿去重投全是 404（法国实测）。要用这类编号的地方自己认字符串；别的数字照旧。
  * 靠 reviver 的第三个参数拿原文（Node 22 起有）；拿不到就原样返回数字，由认编号的地方拒掉。
  */
 function keepUnsafeIntegers(_key: string, value: unknown, context?: { source?: unknown }): unknown {

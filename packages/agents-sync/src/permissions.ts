@@ -3,7 +3,7 @@
 // allow、deny、additionalDirectories 按并集合并：仓里有、机器上没有的补上，机器上自己加的不删；只有 retired 里写明的才摘。
 // autoMode 的两个数组同样按并集合并，但仓里的源数组必须带 "$defaults"：Claude Code 文档里那段 Danger 写明，少一个 "$defaults" 就把那一类的
 // 内置规则整段换掉（force push、curl | bash、生产发布、往外发数据这些都不再拦），所以源文件不带就拒收——不是逐条补上、也不当没看见。
-// defaultMode 平常归本脚本管、每次覆盖；**机器上自己设成 bypassPermissions 的例外**（创始人 2026-10-01）：保留机器上的、只报一行，不当漂移。
+// defaultMode 平常归本脚本管、每次覆盖；**机器上自己设成 bypassPermissions 的例外**：保留机器上的、只报一行，不当漂移。
 // 仓里的源文件写 bypassPermissions 仍然拒收：仓里那一份会装到无人值守的机器上，放行它等于把「不用问」推给每一台别人盯不到的机器。
 // 设置文件读不懂（不是 JSON、整份不是对象、permissions 不是对象、autoMode 不是对象/数组不是数组）就不动，报没做成——不当成空的重写。
 // 仓里的源文件读不到、不合规矩（含 bypassPermissions、autoMode 少了 "$defaults"）也报没查成、没做成，不拿空的顶上。
@@ -94,7 +94,7 @@ const ENV_KEYS: ReadonlyMap<string, (value: string) => string | null> = new Map(
  */
 const FORBIDDEN_MODES = ['bypassPermissions'];
 
-/** 机器上自己设的、本脚本不改也不当漂移的模式：创始人 2026-10-01「我一般都是开启 bypass 模式的……不希望拦」 */
+/** 机器上自己设的、本脚本不改也不当漂移的模式：「我一般都是开启 bypass 模式的……不希望拦」 */
 const KEEP_AS_IS = ['bypassPermissions'];
 
 /** 少了它，Claude Code 会把那一类的内置规则整段换掉；文档 Danger 那段点名的是软拦和防外传的规则 */
@@ -332,7 +332,7 @@ export function judge(root: unknown, spec: ListSpec): Diff {
 export function merged(root: Obj, spec: ListSpec): Obj {
   const next = structuredClone(root);
   const perm: Obj = isObj(next.permissions) ? next.permissions : {};
-  // 机器上自己设成 bypassPermissions：保留机器上的那个值，仓里写的是 auto 也不覆盖（创始人 2026-10-01）
+  // 机器上自己设成 bypassPermissions：保留机器上的那个值，仓里写的是 auto 也不覆盖
   if (spec.defaultMode !== undefined && !KEEP_AS_IS.includes(perm.defaultMode as string))
     perm.defaultMode = spec.defaultMode;
   for (const name of LISTS) {

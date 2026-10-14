@@ -1,6 +1,6 @@
 // 桥接：以 Mirasim 服务自己的用户身份跑（引擎经 fleet-agent-scope 起它），连它自己家里的回环 ws（法国防火墙只放行
 // 这个用户和 root 连那个口，见 docs/ops.md 第五节「会话用户的口只许它自己连」，#35；引擎自己的进程（fleet 用户）连不上，
-// 2026-09-28 实测断链）。帧经 stdin/stdout 按行 JSON 转给引擎（bridge-connect.ts）：stdin 一行一个要发给 Mirasim 的帧，
+// 实测断链）。帧经 stdin/stdout 按行 JSON 转给引擎（bridge-connect.ts）：stdin 一行一个要发给 Mirasim 的帧，
 // stdout 一行要么是一个 Mirasim 的帧、要么是一条本文件自己的控制行（下面「协议」）。
 //
 // 只用 node 自带的模块（装在会话用户读得到的检出/发布目录里，跑它的时候不保证 node_modules 在——不能指望 workspace

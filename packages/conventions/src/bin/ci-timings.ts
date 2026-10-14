@@ -149,7 +149,7 @@ try {
 const old = parseTimings(oldText);
 if (typeof old === 'string') console.warn(`旧表认不出（${old}），这次只用新量的`);
 // 量到的文件一个都不在仓里：样例过时了、或仓被删空。这时候 mergeTimings 会把它们全当「仓里已没有」丢掉，
-// 结果是一张空表——写下去装箱全按估算，还不报错（2026-10-05 出过一次：样例路径指向 #987 删掉的文件，
+// 结果是一张空表——写下去装箱全按估算，还不报错（出过一次：样例路径指向 #987 删掉的文件，
 // 主线因此红了半天）。空表不是「这次没什么可量」，是没量成，明确失败、一个字不写。
 if (measured.size > 0 && [...measured.keys()].every((f) => !existing.includes(f)))
   fail(

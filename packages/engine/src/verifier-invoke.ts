@@ -7,7 +7,7 @@
 // 三条硬约束（specs/555-验收/需求.md）：
 // 1. **喂三样**：diff + 单子的「要什么」+「怎么算做完」。diff 不由本模块自己拼 `git diff`——**注入**进来
 //    （FetchDiff / FetchSpec），调用方（组装层）自己决定从哪读（GitHub、git 工作树、fake）。
-// 2. **换家族**：docs/decisions/0006-discussion-model-order.md 钉的顺序 gpt → grok → claude → deepseek → kimi（2026-10-05 起）；
+// 2. **换家族**：docs/decisions/0006-discussion-model-order.md 钉的顺序 gpt → grok → claude → deepseek → kimi；
 //    modelFamiliesAvoid（写过这张单的所有族）要全部跳过。别家都挑不出 → 两家都验 → 只派得出一家就「同族兜底验」
 //    （#1731：用挑出来的那一家起一次全新的冷会话，结论照常算）→ 一家都派不出就回等待。不许拿默认模型顶上、不许假装 pass。
 // 3. **只有三种能挡**：没做到验收条 / 有证据弄坏原有功能 / 安全或丢数据（specs/555 第 3 条）。

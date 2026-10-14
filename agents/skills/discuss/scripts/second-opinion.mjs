@@ -111,7 +111,7 @@ function critiquePrompt(material) {
 
 /**
  * --text 整轮预算（秒）：没给 --budget-sec 就看 --timeout-min（默认 15 分钟）。原来 --text 单独把
- * 等待压成 0.5 分钟、预算 30 秒，gpt 一次要几分钟就被整轮掐掉（创始人 2026-10-05）。
+ * 等待压成 0.5 分钟、预算 30 秒，gpt 一次要几分钟就被整轮掐掉。
  * @param {Pick<Options, 'timeoutMin' | 'budgetSec'>} o
  */
 export function discussionBudgetSec(o) {

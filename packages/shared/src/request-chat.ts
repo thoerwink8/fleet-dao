@@ -246,7 +246,7 @@ const FIELD_SET: ReadonlySet<string> = new Set(REQUEST_DRAFT_FIELDS);
 
 /**
  * 文字栏（除了「怎么算做完」都是一段文字）收到字符串数组时，拼成每行「- 」开头的一段：
- * 模型列「已知的模块」「不做什么」很自然地写成数组，法国 2026-10-14 点验时两轮都因此整栏被拒（#2047）。别的形状照旧按约定验。
+ * 模型列「已知的模块」「不做什么」很自然地写成数组，法国点验时两轮都因此整栏被拒（#2047）。别的形状照旧按约定验。
  */
 function listAsText(field: RequestDraftField, value: unknown): unknown {
   if (field === 'done' || !Array.isArray(value)) return value;

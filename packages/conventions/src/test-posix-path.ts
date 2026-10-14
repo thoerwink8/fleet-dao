@@ -1,5 +1,5 @@
 // Windows 上从 PowerShell / cmd 跑测试时，PATH 里没有 Git 带的 sh、bash 等类 Unix 工具（sh 找不到，bash 找到的是 WSL 的启动器），
-// 起 `sh -c`、`bash 脚本`、`find` 的测试整片红（spawn sh ENOENT）；从 Git Bash 里跑 PATH 里就有，同一批测试全绿（2026-10-05 实测：
+// 起 `sh -c`、`bash 脚本`、`find` 的测试整片红（spawn sh ENOENT）；从 Git Bash 里跑 PATH 里就有，同一批测试全绿（实测：
 // engine/test/real 下 user-git、github-ports、hosts、sessions*，conventions/ci-plan，agents/test/pre-push）。
 // vitest.config.ts 用这里在 Windows 上把 Git 的 usr\bin 排到 PATH 最前面（和 Git Bash 里的顺序一致，测试就是在那个环境里写的）。
 // 改这里之前必须知道：只管 win32；Git 的 usr\bin 排在最前，是因为 Windows 自带的 find、sort 等同名程序会抢在它前面，
