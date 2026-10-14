@@ -59,11 +59,27 @@ function spawnWorker(o: MigrationOptions): number {
     const line = args.map(windowsArg).join(' ');
     // 不序列化环境变量；子进程继承用户环境，PID 经文件返回避免孙进程继承输出管道。
     const script = `$migrationProcess = Start-Process -FilePath ${psString(process.execPath)} -ArgumentList ${psString(line)} -WindowStyle Hidden -PassThru -RedirectStandardOutput ${psString(join(root, 'worker.log'))} -RedirectStandardError ${psString(join(root, 'worker.err'))}; Set-Content -LiteralPath ${psString(result)} -Value ([string]$migrationProcess.Id) -Encoding ASCII`;
-    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-      windowsHide: true,
-      stdio: 'ignore',
-      timeout: 10_000,
-    });
+    // GitHub 的 Windows 机器上 powershell.exe 冷启动偶尔卡过 10 秒（mirasim-launcher 在主线上红过 5 次，都停在这一步）：
+    // 第一次 6 秒没回就重来一次（热了很快）；超时那一次若其实已写出进程编号，直接用，不重复起。
+    let lastError: unknown;
+    for (const timeout of [6_000, 10_000]) {
+      try {
+        execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+          windowsHide: true,
+          stdio: 'ignore',
+          timeout,
+        });
+        lastError = undefined;
+        break;
+      } catch (e) {
+        lastError = e;
+        if (existsSync(result)) {
+          lastError = undefined;
+          break;
+        }
+      }
+    }
+    if (lastError) throw lastError;
     const pid = Number(readFileSync(result, 'utf8').trim());
     if (!Number.isInteger(pid) || pid < 1) throw new Error('后台迁移未返回确认的进程编号');
     return pid;
