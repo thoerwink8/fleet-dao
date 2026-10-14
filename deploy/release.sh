@@ -2,8 +2,7 @@
 # shellcheck source-path=SCRIPTDIR
 # 发布（在法国以 root 跑）：把主线上的一个提交装成一版 → 跑数据库迁移、装目录、装路由两层 → 照这一版的期望写本机配置（#323：只写期望变了的
 # 公开键）→ 切过去、按本机配置起应用服务
-# （release.env 的 FLEET_HK_PARTS 明写了 web，才把驾驶舱静态文件经隧道发到香港根地址；香港上老的目录发布时删掉，
-# 读回核对它回 404，#1223）→ 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。幂等：同一个提交跑第二遍什么都不变。
+# （release.env 的 FLEET_HK_PARTS 明写了 web，才把驾驶舱静态文件经隧道发到香港根地址）→ 健康检查；不过就自动退回上一版并报错（库的迁移比上一版新时不退）。幂等：同一个提交跑第二遍什么都不变。
 # 发布和退回自己交给 systemd 跑（临时服务），终端断了照样跑完；日志在 /srv/fleet-dao-releases/.logs/。
 #   bash deploy/release.sh [<提交号>]            发布这个提交（不给就发主线最新）；只认主线上的提交
 #   bash deploy/release.sh --rollback            退回上一版（上一个在用过、没被判过不健康、目录还在的版本）
@@ -54,6 +53,7 @@ CATALOG_FILE=deploy/catalog.json # 相对这一版的目录
 NODE=/usr/bin/node    # 法国的 node（france.sh 的前提里查过 22 以上）；只有测试会换成别处的
 SETTLE_SECONDS=10     # 服务起来后再看这么久：这段时间里退出过、重启过，就是没起稳
 ENGINE_POLL_WAIT=90   # 引擎工人起来后要先打包工作流，才去任务队列取活
+API_UP_WAIT=${API_UP_WAIT:-30} # 后端重启后等它答话最多这么久（秒，平常 3 秒左右）；只有测试会改
 AUTO_STATE=$RELEASES/.auto/state.json         # 自动发布每一轮的读数（deploy/france/auto-release 写，--check 列出来）
 NOW_MODE=0 # --now：不给在跑的会话宽限
 # 切版本前排空引擎（packages/engine/src/drain.ts、drain-control.ts）。改宽限要和引擎的 RELEASE_GRACE_MS、fleet-engine.service 的
@@ -131,10 +131,8 @@ FLEET_DOMAIN=""
 HK_PARTS_DEFAULT=""
 FLEET_HK_PARTS=$HK_PARTS_DEFAULT
 # 已删的演示版（#1223，创始人 2026-10-07）：老的 release.env 里可能还留着已删的键，读到了就忽略（load_release_env 记成 1），
-# 不能因为它们卡住发布；香港上老的目录由 retire_hk_dir 删掉。凡提到老名字的行都带 #1223，deploy/test/no-demo.test.sh 核对
+# 不能因为它们卡住发布。凡提到老名字的行都带 #1223，deploy/test/no-demo.test.sh 核对
 LEGACY_KEYS=0 # #1223
-HK_RETIRED_PATH=/demo/ # 要从香港站点上删掉的老目录（#1223）
-HK_RETIRED_RECORD=$RELEASES/.demo-published # 老的发布记录（#1223），删目录成功后一并删
 SHA=""
 ON_MAIN=1
 WEB_KIND=""
@@ -1214,9 +1212,12 @@ running_release() { # 单元
 # - 带、机器上没有（头一次上 socket 激活）：服务自己正占着端口，得先停掉才腾得出来装；装上 socket 单元、
 #   enable --now，端口这时候起归 systemd 攥着；调用方（activate）看 SOCKET_FORCE_RESTART 知道这一轮要重启服务——
 #   服务这时候还没起（刚被停掉），要靠后面重启逻辑把它起来，起来时从 systemd 接手 fd，不再自己 bind。
-# - 带、机器上已经有在跑：不碰 socket 单元——改 socket 的监听地址是人工操作（会牵扯改 api.env、release.sh 的
-#   COCKPIT 常量、docs/ops.md 端口表，一起改一起发），不是发布脚本自动做的事；只照常重启服务，这正是
-#   要的效果：重启时连接排在内核队列里，不会被拒。
+# - 带、机器上已经有：照这一版的换（socket 单元是这一版的一部分，机器上留着上一版的监听地址，新后端会认出多一个 fd
+#   退出）。和这一版一字不差就不碰，只照常重启服务——重启时连接排在内核队列里，不会被拒。只差注释：写上、daemon-reload，
+#   不重启 socket。监听那几行（去掉注释、空行以后的正文）变了：停服务、写上、daemon-reload、restart socket（端口换成
+#   这一版写的那几个）、读回 socket 真在听这几个地址，再由调用方看 SOCKET_FORCE_RESTART 把服务起来；这几秒会拒连，
+#   只在监听地址真变了的那一次。哪一步不成就把旧文件放回去、重启 socket、起旧服务（restore_socket_unit），版本不动。
+#   改监听地址仍要几处一起改（api.env、release.sh 的 COCKPIT 常量、docs/ops.md 端口表），一起发。
 # - 不带（退回到没有它的老版本）、机器上有：撤掉 socket 单元（disable --now、删文件、daemon-reload），回到服务
 #   自己绑端口——不撤的话老代码不会去读 systemd 传来的 fd，端口反而没人监听。
 # 装不上（停不掉旧服务、daemon-reload 失败、enable 失败）在切 current 之前就返回：版本不动。
@@ -1245,11 +1246,94 @@ restore_pre_socket_listen() { # 单元名 这次停过服务没有(0/1)
   red "头一次装 $u.socket 没装上，停下的 $u.service 也起不回来：端口没人听。systemctl start $u.service；journalctl -u $u.service -n 50"
 }
 
+# socket 单元里真正起作用的那几行：去掉注释、空行和行首行尾空白。只差注释的两版不用重启 socket
+socket_body() { # 文件
+  sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e '/^[#;]/d' -- "$1"
+}
+
+# socket 单元正在听的地址，一行一个（systemctl show 的 Listen：「地址 (Stream)」，几个之间空格隔开）
+socket_listens() { # 单元名
+  systemctl show -p Listen --value "$1.socket" 2>/dev/null | grep -oE '[^ ]+ \(Stream\)' | sed 's/ (Stream)$//' | sort
+}
+
+# 读回：socket 单元正在听的就是文件里写的 ListenStream（不多不少）
+socket_listens_match() { # 单元名
+  local u=$1 want have
+  want=$(grep -E '^[[:space:]]*ListenStream=' -- "$FLEET_SYSTEMD_DIR/$u.socket" | sed -E 's/^[[:space:]]*ListenStream=//; s/[[:space:]]*$//' | sort)
+  have=$(socket_listens "$u")
+  if [[ -n "$want" && "$want" == "$have" ]]; then return 0; fi
+  red "$u.socket 在听的（$(tr '\n' ' ' <<<"$have")）和单元文件写的（$(tr '\n' ' ' <<<"$want")）对不上：journalctl -u $u.socket -n 50"
+  return 1
+}
+
+# 换 socket 单元没换成：把旧文件放回去、重启 socket、起旧服务。起不来另记一笔红；返回 0，原来的失败已经记过红
+restore_socket_unit() { # 单元名 旧文件的副本 这次停过服务没有(0/1)
+  local u=$1 saved=$2 stopped=$3
+  local socket_file=$FLEET_SYSTEMD_DIR/$u.socket
+  if ! cp -p -- "$saved" "$socket_file" || ! systemctl daemon-reload || ! systemctl restart "$u.socket"; then
+    red "换 $u.socket 没换成，放回旧的也没成：systemctl status $u.socket；journalctl -u $u.socket -n 50"
+  fi
+  rm -f -- "$saved"
+  if [[ "$stopped" != 1 ]]; then return 0; fi
+  if systemctl start "$u.service" && [[ "$(systemctl is-active "$u.service" 2>/dev/null)" == active ]]; then
+    changed "换 $u.socket 没换成：放回旧的，把停下的 $u.service 拉回来"
+    return 0
+  fi
+  red "换 $u.socket 没换成，停下的 $u.service 也起不回来：systemctl start $u.service；journalctl -u $u.service -n 50"
+}
+
+# 机器上已有 socket 单元、和这一版的不一样：照这一版换（见上面「带、机器上已经有」）
+replace_socket_unit() { # 单元名 这一版的目录
+  local u=$1 dir=$2
+  local socket_file=$FLEET_SYSTEMD_DIR/$u.socket new=$dir/.units/$u.socket saved stopped=0
+  if cmp -s -- "$socket_file" <(printf '%s\n' "$(<"$new")"); then return 0; fi
+  if [[ "$(socket_body "$socket_file")" == "$(socket_body "$new")" ]]; then
+    put_file "$socket_file" root:root 644 "$(<"$new")"
+    if ! systemctl daemon-reload; then
+      red "systemctl daemon-reload 失败（换 $u.socket 的注释之后）"
+      return 1
+    fi
+    return 0
+  fi
+  saved=$(mktemp "$FLEET_SYSTEMD_DIR/.$u.socket.old.XXXXXX")
+  cp -p -- "$socket_file" "$saved"
+  if [[ "$(systemctl is-active "$u.service" 2>/dev/null)" == active ]]; then
+    if ! systemctl stop "$u.service"; then
+      rm -f -- "$saved"
+      red "换 $u.socket 之前，停不掉正接着它的 $u.service"
+      return 1
+    fi
+    stopped=1
+  fi
+  put_file "$socket_file" root:root 644 "$(<"$new")"
+  if ! systemctl daemon-reload; then
+    red "systemctl daemon-reload 失败（换 $u.socket 之后）"
+    restore_socket_unit "$u" "$saved" "$stopped"
+    return 1
+  fi
+  if ! systemctl restart "$u.socket"; then
+    red "换上这一版的 $u.socket 起不来：journalctl -u $u.socket -n 50 看现场"
+    restore_socket_unit "$u" "$saved" "$stopped"
+    return 1
+  fi
+  if ! socket_listens_match "$u"; then
+    restore_socket_unit "$u" "$saved" "$stopped"
+    return 1
+  fi
+  rm -f -- "$saved"
+  changed "照这一版换了 $u.socket（监听地址变了：重启了 socket，$u 跟着重启）"
+  SOCKET_FORCE_RESTART=1
+}
+
 sync_socket_unit() { # 单元名 这一版的目录
   local u=$1 dir=$2
   local socket_file=$FLEET_SYSTEMD_DIR/$u.socket has_now=0 stopped=0
   SOCKET_FORCE_RESTART=0
   if [[ -e "$socket_file" ]]; then has_now=1; fi
+  if [[ -f "$dir/.units/$u.socket" && "$has_now" == 1 ]]; then
+    replace_socket_unit "$u" "$dir"
+    return
+  fi
   if [[ -f "$dir/.units/$u.socket" && "$has_now" == 0 ]]; then
     if [[ "$(systemctl is-active "$u.service" 2>/dev/null)" == active ]]; then
       if ! systemctl stop "$u.service"; then
@@ -1374,19 +1458,17 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
     fi
     if ! ensure_unit_running "$u.service" "$restart"; then return 1; fi
   done
+  # 后端起不来就别往下走（发香港、健康检查要好几分钟），马上交给调用方退回：端口在 socket 手里排队，起不来期间 /healthz 连得上却挂着（#2186）
+  if has_service fleet-api; then api_wait_up || return 1; fi
   if has_part web; then sync_web "$sha" || return 1; fi
-  if hk_static_ours; then retire_hk_dir || return 1; fi
   # 升级单元跟着版本走。启用失败不挡这次发版（函数自己记一行，不记红）。
   install_cli_upgrade_units "$dir"
 }
 
-# 香港的静态文件归发布管（发 web，或老配置里还有已删的那一样、要把它的目录清掉，#1223）：要试通上传的路、要核对老目录没了
-hk_static_ours() { has_part web || ((LEGACY_KEYS)); }
-
 # 切版本之前先试通要往香港发的那几样：不通就别切——切了健康检查必不过，新旧两版会一起被记成不健康
 hk_reachable() {
   local bad=0
-  if hk_static_ours; then web_reachable || bad=1; fi
+  if has_part web; then web_reachable || bad=1; fi
   return "$bad"
 }
 
@@ -1417,8 +1499,7 @@ web_reachable() {
 }
 
 # 这一版的静态文件往香港哪几处发，一行一处：「本机源 香港路径 rsync 参数…」（sync_web 照着发，测试直接核对它）。
-# - web：驾驶舱静态文件（连健康页、版本标记 release.json）整套发到根地址，根上不是这一版的删掉（香港上老的目录也在内，
-#   #1223 之前它被排除在外，现在不再排除；retire_hk_dir 再单独核对一遍）。
+# - web：驾驶舱静态文件（连健康页、版本标记 release.json）整套发到根地址，根上不是这一版的删掉。
 web_plan() { # 提交号
   local dir=$RELEASES/$1
   if has_part web; then
@@ -1452,50 +1533,6 @@ sync_web() { # 提交号
   fi
 }
 
-# 香港站点上某一页经隧道回的状态码（证书照常按域名校验）；连不上打印 000
-hk_page_code() { # 站内路径
-  local code
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" \
-    "https://$FLEET_DOMAIN$1") || code=000
-  printf '%s' "$code"
-}
-
-# 删掉香港上已发的老目录（演示版已删，创始人 2026-10-07，#1223）。一次性、幂等：经上传的路删那一个目录（空的目录往上同步、
-# 只许删落在那一个目录里的东西，别的一个字不碰；目录本来就不在，rsync 什么都不报、也算过），再读回它回不回 404——不是 404、
-# 读不出来都判红，不当成没事。不看「现在回什么」再决定删不删：香港站点配置换新之后它一直回 404，目录却可能还躺在盘上。
-# 根地址那一处 rsync（web_plan）本来就会把它带走，这里再单独删一遍、核对一遍；web 不归发布管的老配置也照样清。
-# 清完把法国上老的发布记录也删掉（删不掉判红）
-retire_hk_dir() {
-  local code empty out rc=0
-  empty=$(mktemp -d)
-  out=$(hk_rsync -r -O --itemize-changes --delete --include="$HK_RETIRED_PATH***" --exclude='*' \
-    -e "$(web_upload_ssh "$UPLOAD_KEY" "$HK_KNOWN_HOSTS")" -- "$empty/" "root@$HK_TUNNEL:/" 2>&1) || rc=$?
-  rmdir -- "$empty"
-  if ((rc != 0)); then
-    red "删香港上老的 $HK_RETIRED_PATH 目录没成（rsync 退出码 $rc，#1223）：$(tail -3 <<<"$out" | tr '\n' ' ')"
-    return 1
-  fi
-  code=$(hk_page_code "$HK_RETIRED_PATH")
-  if [[ "$code" == 000 ]]; then
-    red "读不出香港 https://$FLEET_DOMAIN$HK_RETIRED_PATH 回什么（连不上，#1223）：老目录删没删掉没核对成"
-    return 1
-  fi
-  if [[ "$code" != 404 ]]; then
-    red "香港 https://$FLEET_DOMAIN$HK_RETIRED_PATH 删完回的是「$code」，不是 404（#1223）：老目录没删干净，或香港站点配置还在回落到首页"
-    return 1
-  fi
-  if [[ -n "$out" ]]; then
-    head -20 <<<"$out" | sed 's/^/    /'
-    changed "香港上老的 $HK_RETIRED_PATH 目录删掉了，读回是 404（#1223）"
-  else
-    ok "香港上没有 $HK_RETIRED_PATH（读回 404，#1223）"
-  fi
-  if ! rm -f -- "$HK_RETIRED_RECORD"; then
-    red "老的发布记录 $HK_RETIRED_RECORD 删不掉（#1223）"
-    return 1
-  fi
-}
-
 # ── 健康检查 ──
 
 # 健康报告（packages/api 的 health.ts）：{ ok, checks: { 名: { ok, code?, message? } } }。
@@ -1522,6 +1559,22 @@ api_healthz() {
   local out
   out=$(curl -sS --max-time 10 -w '\n%{http_code}' "http://$COCKPIT/healthz" 2>&1) || return 1
   printf '%s\t%s' "${out##*$'\n'}" "${out%$'\n'*}"
+}
+
+# 切版本、重启后端以后，等它在驾驶舱接口上答话（回什么状态码都算，逐项好坏留给健康检查）。平常几秒就答；
+# 到 API_UP_WAIT 秒还不答（起不来、反复崩）判红返回 1，调用方马上退回。不等的话要走完发香港、健康检查好几分钟才退，
+# 这几分钟端口在 socket 手里排队、没进程 accept，/healthz 连得上却挂着（#2186）
+api_wait_up() {
+  local start=$SECONDS
+  while ((SECONDS - start < API_UP_WAIT)); do
+    if curl -s -o /dev/null --max-time 5 "http://$COCKPIT/healthz"; then
+      ok "fleet-api 在驾驶舱接口上答话了（重启后 $((SECONDS - start)) 秒）"
+      return 0
+    fi
+    sleep 1
+  done
+  red "fleet-api 重启后 ${API_UP_WAIT} 秒还没在驾驶舱接口 http://$COCKPIT/healthz 上答话（起不来或反复崩，累计重启 $(unit_prop fleet-api.service NRestarts) 次）：journalctl -u fleet-api -n 50"
+  return 1
 }
 
 # 切之前后端的健康报告：切之后逐项对比，之前好的变坏了才算这一版的错。
@@ -1662,10 +1715,10 @@ check_engine() {
 }
 
 # 香港在发的对不对：经隧道连香港的 nginx（证书照常按域名校验）。发了 web 的，读 release.json 与健康页——
-# release.json 香港只给经隧道来的，别处来的是 404；老目录（#1223）读回是不是 404（check_retired_dir）。
+# release.json 香港只给经隧道来的，别处来的是 404。
 # 没配 web 的不查根地址（根地址上是什么由人定）
 check_web() { # 提交号
-  local body commit code bad=0
+  local body commit code
   if has_part web; then
     if ! body=$(curl -sS -f --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN/release.json" 2>&1); then
       red "从香港取不到 https://$FLEET_DOMAIN/release.json：$(tail -1 <<<"$body")"
@@ -1683,19 +1736,6 @@ check_web() { # 提交号
     fi
     ok "香港在发 ${1:0:12} 这版：首页与健康页 https://$FLEET_DOMAIN/health/ 都在"
   fi
-  if hk_static_ours; then check_retired_dir || bad=1; fi
-  return "$bad"
-}
-
-# 老目录（#1223）香港上读回要是 404：不是 404 判红（发布时删过一遍了，这时还在说明被谁又发回去了，或站点配置回落到首页）
-check_retired_dir() {
-  local code
-  code=$(hk_page_code "$HK_RETIRED_PATH")
-  if [[ "$code" != 404 ]]; then
-    red "香港 https://$FLEET_DOMAIN$HK_RETIRED_PATH 回的是「$code」，不是 404（#1223）"
-    return 1
-  fi
-  ok "香港上老的 $HK_RETIRED_PATH 读回是 404（#1223）"
 }
 
 # 本机一个文件的 sha256（64 位十六进制）。读不了返回 1，不拿空的去比
@@ -1744,7 +1784,7 @@ health_gate() { # 提交号 切之前后端的逐项结果
   fi
   if has_service fleet-api; then check_api "$before" || bad=1; fi
   if has_service fleet-engine; then check_engine || bad=1; fi
-  if hk_static_ours; then check_web "$sha" || bad=1; fi
+  if has_part web; then check_web "$sha" || bad=1; fi
   check_chain
   return "$bad"
 }

@@ -86,8 +86,6 @@ import { startWatchdogWatch, WATCHDOG_NOT_HERE, watchdogHealthCheck } from './wa
 
 const log = jsonLogger();
 
-const RETIRED_AGENT_LISTEN = { host: '127.0.0.1', port: 8788 };
-
 /**
  * PR、CI 事件写镜像：@fleet-dao/github 的事件去处，要两个机器人的凭据（只在这里、启动时读一次）。读不到时后端照样起，
  * PR、CI 事件如实失败，健康检查的 github_events 报红（credentialsMissing）；补上凭据要重启后端。
@@ -357,6 +355,7 @@ async function assemble(): Promise<{
       claim: (i) => claimLocalTask(db, i),
       renew: (i) => renewLocalTask(db, i),
       finish: (i) => finishLocalTask(db, i),
+      workflows: temporal.control,
     }),
     // 任务详情每段的会话内容（#1640）：读引擎按条记下的 run_transcript
     runTranscript: pgRunTranscript(db),
@@ -443,9 +442,8 @@ let stopping = false;
 const isStopping = () => stopping;
 
 /**
- * systemd 传了监听套接字（要 deploy 侧装 fleet-api.socket 单元，见 listen.ts 开头的注释——这个 PR 里还没接，留了
- * 后续单）就用它们；没传就照旧自己 bind（本机开发、测试，或还没装 socket 单元的生产，目前一直是这一支）。地址、
- * fd 对不上号是明确的配置错误，不当成别的故障悄悄兜底，退出让 systemd 按 Restart=always 重试、也让人看得到原因。
+ * systemd 传了监听套接字（生产装的 fleet-api.socket 单元，见 listen.ts 开头的注释）就用它；没传就照旧自己 bind（本机开发、
+ * 测试）。地址、fd 对不上号是明确的配置错误，不当成别的故障悄悄兜底，退出让 systemd 按 Restart=always 重试、也让人看得到原因。
  */
 async function listen() {
   try {
@@ -455,14 +453,6 @@ async function listen() {
         at: config.cockpitListen,
         fetch: closeConnectionWhenStopping(cockpit.fetch, isStopping),
         keepAliveMs: COCKPIT_KEEP_ALIVE_MS,
-      },
-      // 已撤的 fleet 命令口（127.0.0.1:8788）：机器上老的 fleet-api.socket 单元发布时不会自动换，仍会把这个端口的 fd 传进来；
-      // 认得它、回 410，不当成「多一个」退出。人工撤掉 socket 单元里那一行以后，这一项连同 RETIRED_AGENT_LISTEN 一起删。
-      {
-        name: '已撤的 fleet 命令接口',
-        at: RETIRED_AGENT_LISTEN,
-        fetch: () => new Response('fleet 命令接口已撤', { status: 410 }),
-        optional: true,
       },
     ]);
   } catch (err) {
@@ -484,7 +474,7 @@ log.info('驾驶舱后端已起', {
   nodeReport: config.nodeReport ? config.nodeReport.url.origin : false,
 });
 
-/** 退出时给在途的普通请求多久做完（做完了幂等回执才记得上，插头重试不会重做）；到点了收掉剩下的（SSE 这类）。 */
+/** 退出时给在途的普通请求多久做完（做完了幂等回执才记得上，插头重试不会重做）；到点了收掉剩下的。SSE 一开始就收，不等它。 */
 const DRAIN_MS = 10_000;
 
 async function shutdown(signal: string) {
@@ -496,6 +486,7 @@ async function shutdown(signal: string) {
   await gracefulShutdown({
     servers,
     drainMs: DRAIN_MS,
+    endStreams: () => relay.endAll(),
     close,
     onCloseError: (err) => log.error('退出时关连接出错', { error: String(err) }),
   });

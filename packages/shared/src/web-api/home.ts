@@ -1,7 +1,7 @@
 // 驾驶舱接口约定（web-api）：新主页（/）：一屏三块 + 持续状态条。
 // 入口是 ../web-api.ts（只有 export *），拆分说明见 specs/901-项目瘦身与提速/重构方案.md 第 2 节；内容是从原来一个文件里原样搬来的。
 import { z } from 'zod';
-import { TaskStateSchema } from './enums.ts';
+import { TaskExecutorSchema, TaskStateSchema } from './enums.ts';
 import { Id, Time } from './internal.ts';
 
 // —— 新主页（/）：一屏三块 + 持续状态条（#589）——
@@ -76,6 +76,12 @@ export const HomeRunningSchema = z.object({
       tone: z.enum(['ok', 'wait', 'trouble']),
     })
     .optional(),
+  /** 谁在做：engine = 法国引擎，local = 本机领的（决定 0096，tasks.executor）。老后端、老环境推来的快照没有这个键，当引擎。 */
+  executor: TaskExecutorSchema.optional(),
+  /** 本机领的单：领它的环境编号（通行证认出的，如 founder-pc；tasks.claimed_by）。引擎的单没有这个键。 */
+  claimedBy: z.string().optional(),
+  /** 本机领的单：租约到期的时刻（tasks.lease_until）；到点没续就退回法国队列。引擎的单没有这个键。 */
+  leaseUntil: Time.optional(),
   /** 站内路径：任务详情。 */
   link: z.string(),
   /** 库里的任务编号：首页看板上「继续 / 叫停」这类快捷操作要它（POST /api/tasks/:taskId/actions）。老环境推来的快照里没有，没有就不画操作。 */

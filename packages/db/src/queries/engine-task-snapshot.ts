@@ -1,6 +1,6 @@
 // 任务快照：一个事务里更新任务行、作废快照里没有的子任务、按 id upsert 子任务、整体替换依赖。
 import type { SubtaskState, TaskState } from '@fleet-dao/shared';
-import { and, eq, inArray, isNull, notInArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne, notInArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { subtaskDeps, subtasks, tasks } from '../schema/index.ts';
 
@@ -36,6 +36,9 @@ export interface TaskSnapshotInput {
  * 快照里的逐个按 id upsert（清掉 superseded_at）；快照里子任务的依赖整体替换。任务行不在返回 'task_not_found'
  * （不建任务行：快照里没有标题、原话这些必填列）。
  *
+ * 本机接手了的任务（executor = local，决定 0096）不写：本机 claim 叫停引擎任务后，工作流收尾还会写一次 stopped 快照，
+ * 不拦就把本机在做的行改回 stopped。行在但归本机回 'held_by_local'，调用方当没事（挂起提醒照撤）。
+ *
  * 注意：子任务按 id 逐条 upsert，不是一条多行语句——如果快照把两个仍在役的子任务互换 index（不经过标作废），
  * 处理顺序在前的那条会撞部分唯一索引。目前唯一会撞索引的场景（旧子任务标作废、新子任务复用它的 index）
  * 天然没这问题：作废写在所有 upsert 之前，新记录落地时旧 index 早就让出来了。
@@ -43,7 +46,7 @@ export interface TaskSnapshotInput {
 export async function saveTaskSnapshot(
   db: Db,
   input: TaskSnapshotInput,
-): Promise<'saved' | 'task_not_found'> {
+): Promise<'saved' | 'task_not_found' | 'held_by_local'> {
   return db.transaction(async (tx) => {
     const updated = await tx
       .update(tasks)
@@ -56,9 +59,12 @@ export async function saveTaskSnapshot(
         lastProblem: input.lastProblem,
         updatedAt: new Date(),
       })
-      .where(eq(tasks.id, input.taskId))
+      .where(and(eq(tasks.id, input.taskId), ne(tasks.executor, 'local')))
       .returning({ id: tasks.id });
-    if (updated.length === 0) return 'task_not_found';
+    if (updated.length === 0) {
+      const [held] = await tx.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, input.taskId));
+      return held ? 'held_by_local' : 'task_not_found';
+    }
 
     const keepIds = input.subtasks.map((s) => s.id);
     await tx

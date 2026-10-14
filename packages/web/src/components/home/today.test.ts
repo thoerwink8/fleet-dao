@@ -1,6 +1,8 @@
 // 主页三块的挑法和写法（决定 0093）：要你拍的只放人闸和看门狗的卡；在跑的混排引擎和本机；上线了的按合并时刻算一版带了哪些 PR。
 import { describe, expect, test } from 'vitest';
 import type { LocalSessions, Notification } from '../../api/types';
+import { formatClock } from '../../lib/format';
+import { statusTextOf } from './running-card';
 import { askItems, askLine, engineRow, localRows, prOfTitle, shippedRows, sortRunRows } from './today';
 import type { HomeDone, HomeRunning } from './types';
 
@@ -148,16 +150,61 @@ describe('在跑的', () => {
     expect(v.rows[0]?.progress).toBe('起了 40 分钟 · 最后在调 Edit');
   });
 
-  test('【故意造出的失败】本机没上报：写一行没上报，不当成本机没在做事；没接上照实说', () => {
+  test('【故意造出的失败】本机没上报：不占在跑的行，单列出来说清，不当成本机没在做事；没接上照实说', () => {
     const v = localRows(
       { asOf: ago(0), nodes: [{ id: 'pc', freshness: 'never', sessions: [], problems: [] }] },
       T0,
     );
-    expect(v.kind === 'rows' && v.rows.map((r) => [r.stuck, r.tone])).toEqual([['没上报', 'stall']]);
+    expect(v.kind === 'rows' && v.rows).toEqual([]);
+    expect(v.kind === 'rows' && v.silent.map((n) => [n.id, n.never])).toEqual([['pc', true]]);
     expect(localRows({ asOf: ago(0), notWired: '没配钥匙', nodes: [] }, T0)).toEqual({
       kind: 'notWired',
       why: '没配钥匙',
     });
+  });
+});
+
+describe('在跑的：本机领的单（决定 0096）', () => {
+  const local = (over: Partial<HomeRunning> = {}) =>
+    running({
+      issueNumber: 2226,
+      title: '本机领的活',
+      segment: null,
+      worker: undefined,
+      executor: 'local',
+      claimedBy: 'founder-pc',
+      leaseUntil: new Date(T0 + 90 * 60_000).toISOString(),
+      ...over,
+    });
+  const link = { href: '/tasks/t-1', external: false };
+
+  test('写成「本机 · 哪台 · 租约到几点」，不冒充法国引擎，也不写还没记在哪一段', () => {
+    const row = engineRow(local(), T0, link, (id) => (id === 'founder-pc' ? '创始人的电脑' : undefined));
+    expect(row.who).toBe(
+      `本机 · 创始人的电脑 · 租约到 ${formatClock(new Date(T0 + 90 * 60_000).toISOString())}`,
+    );
+    expect(row.who).not.toContain('法国引擎');
+    expect(row.progress).toContain('本机在做');
+    expect(row.progress).not.toContain('还没记在哪一段');
+    expect([row.tone, row.stuck]).toEqual(['run', '没卡']);
+    expect(statusTextOf(local())).toBe('本机在做');
+  });
+
+  test('机器名没对上写环境编号；通行证没记领取人写没记是哪台', () => {
+    expect(engineRow(local(), T0, link).who).toMatch(/^本机 · founder-pc · /);
+    expect(engineRow(local({ claimedBy: undefined }), T0, link).who).toMatch(/^本机 · 没记是哪台 · /);
+  });
+
+  test('租约过了点还没退回：标黄租约过期；没给到期时刻照实说', () => {
+    const late = engineRow(local({ leaseUntil: new Date(T0 - 60_000).toISOString() }), T0, link);
+    expect([late.tone, late.stuck]).toEqual(['stall', '租约过期']);
+    expect(late.who).toContain('租约已过期');
+    expect(engineRow(local({ leaseUntil: undefined }), T0, link).who).toContain('租约到期时刻没给');
+  });
+
+  test('引擎的单（没有 executor 的老快照也是）照旧写法国引擎', () => {
+    expect(engineRow(running({ executor: 'engine' }), T0, link).who).toBe('法国引擎 · Opus 5.5');
+    expect(engineRow(running({}), T0, link).who).toBe('法国引擎 · Opus 5.5');
   });
 });
 

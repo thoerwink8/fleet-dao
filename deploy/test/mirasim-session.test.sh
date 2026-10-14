@@ -12,7 +12,8 @@
 #   4. 服务端本体在、单元在跑、/api/health 回 ok:true：判绿——用 systemd-run 起一个真的 transient 单元、配一个假
 #      server.cjs（node 起的最小 http 服务）验证这条真走得通，不是只测「本该红」的那几条
 #   5. 健康检查脚本 deploy/lib/mirasim-liveness.sh（#1676）：curl、systemctl、logger 换成桩，不要 root、不要 systemd：
-#      ①健康清零不重启 ②连续失败 2 次不重启、第 3 次重启且清零 ③健康检查超时算失败 ④单元没装退出 0、不重启；
+#      ①健康清零不重启 ②连续失败 2 次不重启、第 3 次重启且清零 ③健康检查超时算失败
+#      ③b 有会话在跑且超时：只记不重启 ④单元没装退出 0、不重启；
 #      另钉：单元没在跑不重启、令牌不是恰好一份不重启、重启失败退出 1 且计数保留、定时器和单元文件的样子
 # 第 0、5 步不要 root；1～4 步要 root（建临时用户、用 systemd-run 起 transient 单元）、要这台机器有 systemd 和 node，
 # 不满足就在跑完第 5 步之后以 2 退出。
@@ -97,6 +98,7 @@ live() { # 退出码放 LIVE_RC，调用记录放 $LT/log（每次清空）
   PATH="$LT/bin:$PATH" STUB_LOG="$LT/log" \
     MIRASIM_LIVENESS_UNIT=fleet-mirasim-session.service MIRASIM_LIVENESS_UNIT_FILE="$LT/unit.service" \
     MIRASIM_LIVENESS_RUN_DIR="$LT/run" MIRASIM_LIVENESS_COUNT_FILE="$LT/count" \
+    MIRASIM_LIVENESS_SESSIONS_DIR="$LT/sessions" \
     bash "$LIVE" fleet-mirasim-fake >"$LT/out" 2>&1 || LIVE_RC=$?
 }
 restarts() { grep -c '^systemctl restart ' "$LT/log" || true; }
@@ -108,7 +110,7 @@ STUB_CURL=ok live
 check "退出 0" "$LIVE_RC" "0"
 check "计数清零（文件没了）" "$(count_now)" "无"
 check "没重启" "$(restarts)" "0"
-has "请求的是令牌里的端口的 /api/health，带 --max-time 10" "$(<"$LT/log")" 'curl .*--max-time 10 http://127\.0\.0\.1:54321/api/health'
+has "请求的是令牌里的端口的 /api/health，带 --max-time 70" "$(<"$LT/log")" 'curl .*--max-time 70 http://127\.0\.0\.1:54321/api/health'
 printf '2\n' >"$LT/count"
 STUB_CURL=spaced live
 check "回 {\"ok\" : true}（带空格）也算健康" "$(count_now) $(restarts)" "无 0"
@@ -138,6 +140,31 @@ STUB_CURL=timeout live
 STUB_CURL=timeout live
 check "连续超时 3 次：重启、清零" "$(count_now) $(restarts)" "无 1"
 has "journal 里带超时的退出码 28" "$(<"$LT/log")" 'curl 退出 28'
+
+echo "-- ③b 有会话在跑且健康检查超时：只记不重启，不调 systemctl restart，计数不动"
+mkdir -p "$LT/sessions/claude/s1" "$LT/sessions/grok/g1"
+printf '%s\n' '{"runState":"completed"}' >"$LT/sessions/grok/g1/record.json"
+printf '%s\n' '{"runState":"running","sessionId":"s1"}' >"$LT/sessions/claude/s1/record.json"
+printf '2\n' >"$LT/count"
+STUB_CURL=timeout live
+check "running：退出 0、没重启、计数还是 2" "$LIVE_RC $(restarts) $(count_now)" "0 0 2"
+has "journal 写了只记不重启" "$(<"$LT/log")" 'logger -t fleet-mirasim-liveness -- .*只记不重启'
+check "这轮没去请求重启" "$(grep -c '^systemctl restart ' "$LT/log" || true)" "0"
+printf '%s\n' '{"runState":"queued"}' >"$LT/sessions/claude/s1/record.json"
+STUB_CURL=timeout live
+check "queued 同样只记不重启" "$LIVE_RC $(restarts) $(count_now)" "0 0 2"
+printf '%s\n' '{"runState":"completed"}' >"$LT/sessions/claude/s1/record.json"
+STUB_CURL=timeout live
+check "会话都结束了：超时照旧记失败并重启、计数清零" "$LIVE_RC $(count_now) $(restarts)" "0 无 1"
+
+echo "-- ③c 有会话但连接被拒：服务真不干活，满 3 次仍重启"
+printf '%s\n' '{"runState":"running"}' >"$LT/sessions/claude/s1/record.json"
+rm -f -- "$LT/count"
+STUB_CURL=refused live
+STUB_CURL=refused live
+STUB_CURL=refused live
+check "连接被拒满 3 次仍重启" "$(count_now) $(restarts)" "无 1"
+rm -rf -- "$LT/sessions"
 
 echo "-- ④单元没装：退出 0、不调 systemctl restart（连 is-active 都不问）"
 printf '2\n' >"$LT/count"

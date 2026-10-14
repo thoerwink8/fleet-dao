@@ -7,8 +7,8 @@
 # 回 502，是没有它的时候、重启那几秒会出的老问题。
 # 监听要和 fleet-api.service 的 api.env（FLEET_COCKPIT_LISTEN）写同一个地址——装了这个单元，后端就不自己 bind 端口了，
 # 改地址要两边一起改（deploy/france/desired-config.json 也是同一份，deploy/release.sh 的 COCKPIT 常量同样要跟着改）。
-# 老机器上已装的 socket 单元发布时不会自动换（见 release.sh），可能还带着已撤的 127.0.0.1:8788 那一行：后端认得它、回 410，
-# 不当成多出来的 fd 退出（packages/api/src/main.ts 的 RETIRED_AGENT_LISTEN）；人工撤掉那一行以后，再把后端那一项删掉。
+# 机器上装着的和要发的这一版不一样，发布照这一版换（release.sh 的 sync_socket_unit：监听地址变了就重启 socket、读回在听的地址）；
+# 后端只认这里写的地址，多传一个 fd 当配置错误退出。
 [Unit]
 Description=fleet-dao 驾驶舱后端的监听套接字（驾驶舱接口）
 Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md

@@ -16,14 +16,14 @@ const FIXTURE = join(HERE, 'fixtures', 'listen-fixture.ts');
 describe('matchListenTargets：几个已经听上的地址按 host:port 和配置对号', () => {
   const targets = [
     { name: 'cockpit', at: { host: '10.99.0.2', port: 8787 } },
-    { name: 'agent', at: { host: '127.0.0.1', port: 8788 } },
+    { name: 'other', at: { host: '127.0.0.1', port: 8790 } },
   ];
 
   it('先听上谁不管，按地址对号：返回每个地址对应 targets 的下标', () => {
     expect(
       matchListenTargets(
         [
-          { host: '127.0.0.1', port: 8788 },
+          { host: '127.0.0.1', port: 8790 },
           { host: '10.99.0.2', port: 8787 },
         ],
         targets,
@@ -40,7 +40,7 @@ describe('matchListenTargets：几个已经听上的地址按 host:port 和配�
         ],
         targets,
       ),
-    ).toThrow(/0\.0\.0\.0:9999.*cockpit 10\.99\.0\.2:8787.*agent 127\.0\.0\.1:8788/);
+    ).toThrow(/0\.0\.0\.0:9999.*cockpit 10\.99\.0\.2:8787.*other 127\.0\.0\.1:8790/);
   });
 
   it('同一个地址来了不止一个：报错写清是哪个地址、哪项配置只要一个', () => {
@@ -55,23 +55,9 @@ describe('matchListenTargets：几个已经听上的地址按 host:port 和配�
     ).toThrow(/10\.99\.0\.2:8787（配置里的 cockpit 只要一个）/);
   });
 
-  it('可有可无的目标（已撤的口）：传了就对上号，没传不算缺', () => {
-    const withRetired = [targets[0], { ...targets[1], optional: true }] as typeof targets;
-    expect(
-      matchListenTargets(
-        [
-          { host: '127.0.0.1', port: 8788 },
-          { host: '10.99.0.2', port: 8787 },
-        ],
-        withRetired,
-      ),
-    ).toEqual([1, 0]);
-    expect(matchListenTargets([{ host: '10.99.0.2', port: 8787 }], withRetired)).toEqual([0]);
-  });
-
   it('缺一个：报错写清缺了哪个（名字和地址）', () => {
     expect(() => matchListenTargets([{ host: '10.99.0.2', port: 8787 }], targets)).toThrow(
-      /没传监听套接字给：agent 127\.0\.0\.1:8788/,
+      /没传监听套接字给：other 127\.0\.0\.1:8790/,
     );
   });
 });
@@ -101,6 +87,22 @@ describe('startListeners：LISTEN_PID / LISTEN_FDS 读不出，明确拒绝、�
     await expect(
       startListeners(targets, { LISTEN_PID: String(process.pid), LISTEN_FDS: '2' }),
     ).rejects.toThrow(/传了 2 个监听套接字，配置要 1 个（x）/);
+  });
+
+  it('【故意造出的失败】机器上的 socket 单元还带着已撤的地址（多传一个 fd）：拒绝，不悄悄接着跑', async () => {
+    // 后端不再认已撤的 fleet 命令接口（127.0.0.1:8788）：发布脚本照这一版的模板换 socket 单元，多出来的 fd 是配置错误
+    await expect(
+      startListeners(
+        [
+          {
+            name: '驾驶舱接口',
+            at: { host: '10.99.0.2', port: 8787 },
+            fetch: () => new Response('x'),
+          },
+        ],
+        { LISTEN_PID: String(process.pid), LISTEN_FDS: '2' },
+      ),
+    ).rejects.toThrow(/传了 2 个监听套接字，配置要 1 个（驾驶舱接口）/);
   });
 
   it('没有 LISTEN_PID：不是 socket activation，照旧自己 bind（本机开发、测试）', async () => {

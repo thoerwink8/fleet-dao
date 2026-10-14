@@ -16,6 +16,7 @@ import {
   lstatSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -973,6 +974,49 @@ export function renderEnv(want, file, source) {
   return `${lines.join('\n')}\n`;
 }
 
+// ── 删私有表里的一项（#2236） ──
+// 有的私有值是一张 JSON 表（api.env 的 FLEET_NODE_KEYS：环境编号 → 通行证的哈希），对账只认整行的指纹，删其中一项（撤一个
+// 环境）没法照期望写。这里只删那一项：键名、条目名由人给，值不进输出；写之前照 systemd 读回核对只有这一行变了。
+
+/** 表里条目的名字：和 FLEET_NODE_KEYS 的环境编号同一个规矩（packages/api/src/config.ts）。 */
+const ENTRY_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+/** 不带引号写回去也照 systemd 读得一字不差的值：没有空白、反斜杠、引号开头、注释符。 */
+const BARE_VALUE = /^[^\s\\'"#;][^\s\\]*$/;
+
+/**
+ * 算删掉 JSON 表里一项以后的原文，不碰磁盘。text 是线上那份环境文件的原文；返回 { found, value, text, left }：
+ * found 是表里原来有没有这一项（没有就 text 原样、value 是原来的值）；value 是删完的值（给算指纹用，别打印）；
+ * left 是还剩几项。这个键没有、写了几行、不是 JSON 对象、改完读回不对：抛 ConfigError（不带值）。
+ */
+export function planDropEntry(text, file, name, entry) {
+  if (!KEY_NAME.test(name)) throw new ConfigError(`键名 ${name} 不合法`);
+  if (!ENTRY_NAME.test(entry))
+    throw new ConfigError(`条目名 ${entry} 不合法（小写字母开头，只许小写字母、数字、短横线）`);
+  const hits = parseEnv(text).entries.filter((e) => e.key === name);
+  if (hits.length === 0) throw new ConfigError(`${file} 里没有生效的 ${name}`);
+  if (hits.length > 1) throw new ConfigError(`${file} 里 ${name} 写了 ${hits.length} 行：先删成一行`);
+  const hit = hits[0];
+  let table;
+  try {
+    table = JSON.parse(hit.value);
+  } catch {
+    throw new ConfigError(`${file} 的 ${name} 不是 JSON（值不打印）`);
+  }
+  if (!isObj(table)) throw new ConfigError(`${file} 的 ${name} 不是一个 JSON 对象（值不打印）`);
+  if (!Object.hasOwn(table, entry)) {
+    return { found: false, value: hit.value, text, left: Object.keys(table).length };
+  }
+  const { [entry]: _dropped, ...rest } = table;
+  const value = JSON.stringify(rest);
+  let line;
+  if (BARE_VALUE.test(value)) line = `${name}=${value}`;
+  else if (!value.includes("'") && !/[\n\r]/.test(value)) line = `${name}='${value}'`;
+  else throw new ConfigError(`${file} 的 ${name} 删完写不回一行（值里有单引号或换行）`);
+  const after = text.slice(0, hit.start) + line + text.slice(hit.end);
+  checkRewrite(file, text, after, new Map([[name, [value]]]));
+  return { found: true, value, text: after, left: Object.keys(rest).length };
+}
+
 // ── 命令行（法国，root） ──
 
 const USAGE = `用法（法国，root；值一律不打印）：
@@ -991,6 +1035,11 @@ const USAGE = `用法（法国，root；值一律不打印）：
       期望和上次写的不一样的键，人手改的不改回（期望里 selfHeal 开了才改回）。--plan 只把写成什么样放进那个目录、线上不动；
       --expect 那个目录里核过的和重新算的不一样就不写。一行一条：ok / changed / note / red 开头。
       退出码：0 写好了（或不用写、这一版没有期望）；1 没写成（一个字没写，或写过的已改回原样）；64 参数不对。
+  node config.mjs drop-entry <文件> <键> <条目> [--dry-run] [--etc <目录>] [--key <钥匙文件>]
+      这个键的值是一张 JSON 表（比如 api.env 的 FLEET_NODE_KEYS）：只删表里叫这个名字的一项，别的键、别的项一个字不动；
+      写之前照 systemd 读回核对，属主和权限照原文件。打印删没删、还剩几项、删完的值的指纹（换进期望的 private），值不打印。
+      --dry-run 只算、不写。表里本来就没有这一项：什么都不写，退出码 0（可重复跑）。要重启读这份文件的服务才生效。
+      退出码：0 删了（或本来就没有、或 --dry-run）；2 没做成（读不到、认不出，一个字没写）；64 参数不对。
   node config.mjs render engine.env|api.env|release.env [--desired <期望文件>]
       照期望打印一份新的环境文件（france.sh 建新机器时用）：公开的写值，私有的只留空位，每一项带说明。
       不给 --desired 就用仓里的 deploy/france/desired-config.json。`;
@@ -1014,6 +1063,7 @@ function cliArgs(argv) {
       if (!v) throw new ConfigError(`${a} 后面要跟路径`);
       o[a.slice(2)] = v;
     } else if (a === '--stdin' || a === '--all') o[a.slice(2)] = true;
+    else if (a === '--dry-run') o.dryRun = true;
     else if (a.startsWith('--')) throw new ConfigError(`不认识的参数 ${a}`);
     else o._.push(a);
   }
@@ -1091,6 +1141,34 @@ export async function cli(
       io.out(`ok 自动改回（selfHeal）：${r.selfHeal ? '开' : '关（只报警，不改回）'}`);
       return r.result === 'ok' ? 0 : r.result === 'drift' ? 1 : 2;
     }
+    if (cmd === 'drop-entry' && rest.length === 3) {
+      const [file, name, entry] = rest;
+      if (!APPLY_FILES.includes(file))
+        throw new ConfigError(`不认识的文件 ${file}（只改 ${APPLY_FILES.join('、')}）`);
+      const path = `${o.etc ?? ETC_DIR}/${file}`;
+      const got = readText(path);
+      if ('error' in got) throw new ConfigError(got.error);
+      const key = loadKey(o.key);
+      const plan = planDropEntry(got.text, file, name, entry);
+      const fp = fingerprintOf(key, file, name, plan.value);
+      if (!plan.found) {
+        io.out(`ok ${file} 的 ${name} 里本来就没有 ${entry}（${plan.left} 项，没写；值不打印）`);
+      } else if (o.dryRun) {
+        io.out(`note 只算没写：${file} 的 ${name} 删掉 ${entry} 以后剩 ${plan.left} 项（值不打印）`);
+      } else {
+        writeAtomic(path, plan.text, lstatSync(path));
+        const back = readText(path);
+        if ('error' in back || back.text !== plan.text)
+          throw new ConfigError(
+            `${path} 写完读回来不是刚写的（${'error' in back ? back.error : '内容不同'}）`,
+          );
+        io.out(
+          `changed ${file} 的 ${name} 删掉了 ${entry}，剩 ${plan.left} 项（值不打印；重启读它的服务才生效）`,
+        );
+      }
+      io.out(`ok 指纹（${file} ${name}，换进期望的 private）：${fp}`);
+      return 0;
+    }
     if (cmd === 'key-id' && rest.length === 0) {
       io.out(keyIdOf(loadKey(o.key)));
       return 0;
@@ -1139,7 +1217,18 @@ export async function cli(
 }
 
 // 被 import 时不跑：只有直接 node config.mjs … 才是命令行
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// 经符号链接（/srv/fleet-dao-releases/current/…）跑时 argv[1] 是链接路径、import.meta.url 是解开后的真路径：两边都解开再比，
+// 不然命令行一声不吭地退出 0，看着像跑过了
+const invokedDirectly = (() => {
+  try {
+    return (
+      !!process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+})();
+if (invokedDirectly) {
   cli(process.argv.slice(2)).then(
     (code) => {
       process.exitCode = code;

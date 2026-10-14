@@ -412,6 +412,47 @@ describe('resume 切号停下的（org_switch，#59）和发布排空', () => {
   });
 });
 
+describe('Mirasim 服务重启把正在跑的会话杀掉（#2186）', () => {
+  const MESSAGE =
+    '会话结束，没有终帧：读状态的连接建不起来：/home/u/.mirasim/run 下没有 local-<端口>.token：这个会话用户还没单独起一份 Mirasim 服务';
+  const evidence = session({ code: 'no_result', message: MESSAGE });
+
+  it('认成可重试的续跑，不落到认不出', () => {
+    const v = classifyFailure(evidence);
+    expect(v).toMatchObject({
+      action: 'retry',
+      rule: 'MR1',
+      delaySeconds: 0,
+      counter: null,
+      resumeSame: true,
+      routeOutcome: 'neutral',
+      alert: false,
+    });
+    expect(v.reason).toContain('马上接着干');
+  });
+
+  it('原文和上一次一字不差：照样续，不因「认不出」挂起', () => {
+    const again = classifyFailure({
+      ...evidence,
+      attempts: { retries: 1 },
+      previousMessage: MESSAGE,
+    });
+    expect(again).toMatchObject({ action: 'retry', rule: 'MR1', counter: null, alert: false });
+    const { trail } = drive(evidence, undefined, 5);
+    expect(trail).toEqual(['retry', 'retry', 'retry', 'retry', 'retry']);
+  });
+
+  it('服务从没起来（没有「读状态的连接建不起来」）：不按这次被杀来续', () => {
+    const never = classifyFailure(
+      session({
+        message:
+          '没起来：/home/u/.mirasim/run 下没有 local-<端口>.token：这个会话用户还没单独起一份 Mirasim 服务',
+      }),
+    );
+    expect(never.rule).not.toBe('MR1');
+  });
+});
+
 describe('证据里的时刻读坏了', () => {
   it('分流照样给出动作（它不能跟着失败），但原因里写明哪项没读成、按默认时长走', () => {
     const quota = { source: 'session:execute', routeId: 'route-a', message: 'weekly limit reached' };

@@ -77,6 +77,8 @@ export interface SweepPart {
   found: number;
   /** 没查成的，一条一句：照实写进这一轮的 why，这一轮不记 ok。 */
   unchecked: string[];
+  /** 只是交代一声、不算没查成的话（比如跳过了几个已有提醒的仓）：写进这一轮的 why，结局不因此降级。 */
+  notes?: string[];
 }
 
 export type ReconcileLog = (

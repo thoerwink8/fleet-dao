@@ -96,7 +96,7 @@ export function toScheduleResult(r: GitHubReconcileResult): ScheduleResult {
     case 'ok':
       // reconcileGitHub 只在查成了每个受管的仓时回 ok；万一 scanned 是 0，按「一个都没查」记，不冒充查过
       return r.scanned > 0
-        ? { outcome: 'ok', scanned: r.scanned, found: r.found }
+        ? { outcome: 'ok', scanned: r.scanned, found: r.found, ...(r.why ? { why: r.why } : {}) }
         : { outcome: 'unscanned', why: r.why ?? '说是查完了，却一个仓都没查' };
     case 'partial':
       return { outcome: 'partial', why: r.why ?? '有的仓没查完', scanned: r.scanned, found: r.found };

@@ -5,7 +5,7 @@
 #   老目录、老配置键），新写的代码里不许再冒出一个 demo；
 # - deploy/france/fleet-demo-scopes.{sh,service,path,timer}、deploy/test/demo-scopes.test.sh 不在仓里；
 # - deploy/france/desired-config.json 里没有演示版的键；
-# - france.sh 真有「停掉并删掉老单元、读回核对它们不在」那两步。
+# - france.sh 真有「停掉并删掉老单元、读回核对它们不在」那两步；同一步还删已退役的令牌文件（RETIRED_FILES，#2226）。
 # 【故意造出的失败】查法本身也要查得出：往一份副本里种一行没带 #1223 的 demo、种一个老名字的文件，查法必须报出来；
 # 种的是带 #1223 的那种，查法必须放过——查法坏了（什么都查不出）这里就红，不会悄悄过。
 # 用法：bash deploy/test/no-demo.test.sh（不用 root）。退出码：0 通过，1 不通过。
@@ -54,7 +54,7 @@ echo "== 发布脚本、装机脚本：提到 demo 的行都带 #1223"
 for f in release.sh france.sh lib/common.sh lib/snapshot.sh hk.sh; do
   check "deploy/$f：没有没带 #1223 的 demo" "$(untagged_demo_lines "$DEPLOY/$f")" ""
 done
-check "release.sh 在读到的行里确实还有老名字（清香港老目录用），没读空" "$(grep -c -i demo "$DEPLOY/release.sh" | awk '{ print ($1 > 0) ? "有" : "没有" }')" 有
+check "release.sh 在读到的行里确实还有老名字（认老配置键用），没读空" "$(grep -c -i demo "$DEPLOY/release.sh" | awk '{ print ($1 > 0) ? "有" : "没有" }')" 有
 check "france.sh 在读到的行里确实还有老单元名（清老机器用），没读空" "$(grep -c -i demo "$DEPLOY/france.sh" | awk '{ print ($1 > 0) ? "有" : "没有" }')" 有
 
 echo "== 仓里不再有推可见范围的单元、脚本和它的测试"
@@ -90,6 +90,10 @@ ok() { LOG+=("ok $1"); }
 RETIRED_UNITS=(fleet-demo-scopes.path fleet-demo-scopes.timer fleet-demo-scopes.service)
 RETIRED_UNIT_DIR=$TMP/units
 RETIRED_BIN=$TMP/sbin/fleet-demo-scopes
+RETIRED_FILES=() # 演示版这几段不摆令牌文件，最后一段另测（#2226）
+RETIRED_DATA_DIR=$TMP/no-data-dir # 这几段不摆数据目录，最后一段另测（#2236）
+RETIRED_BACKUP_DIR=$TMP/no-backups
+RETIRED_DATA_TAR=retired-showcase-data
 STATE=$TMP/state # 每个单元一个文件，里面写 active / inactive
 RELOADS=0
 STUCK=0 # 1 = 停不掉
@@ -154,6 +158,90 @@ rm -f -- "$RETIRED_UNIT_DIR/fleet-demo-scopes.service"
 echo inactive >"$STATE/fleet-demo-scopes.service"
 retire_old_units
 check "只剩一部分（另一个单元早就没了）：剩下的照清，没有红" "$(left):${#REDS[@]}" ":0"
+
+echo "== 已退役的令牌文件（#2226）：france.sh 的清单里有那三个，装机删掉、再跑不动，删不掉、还在判红"
+for f in agent-token.env gateway-token.env gateway-deploy.key; do
+  check "$f 在 RETIRED_FILES 里" "$(grep -c "^RETIRED_FILES=.*/$f" "$DEPLOY/france.sh")" 1
+done
+install_old
+mkdir -p "$TMP/etc"
+# shellcheck disable=SC2034 # 摘出来的函数读它
+RETIRED_FILES=("$TMP/etc/agent-token.env" "$TMP/etc/gateway-token.env" "$TMP/etc/gateway-deploy.key")
+: >"$TMP/etc/agent-token.env"
+: >"$TMP/etc/gateway-deploy.key"
+retire_old_units
+check "两份在、一份早没了：在的删掉，记两笔（加三个单元、一个脚本共六笔），没有红" \
+  "$(ls -A "$TMP/etc"):${#LOG[@]}:${#REDS[@]}" ":6:0"
+REDS=()
+LOG=()
+readback_retired_units
+check "读回：令牌文件都不在了，通过" "${#REDS[@]}:$(printf '%s\n' "${LOG[@]}" | grep -c '令牌文件都不在了')" "0:1"
+LOG=()
+retire_old_units
+check "再来一遍：幂等，什么都不动" "${#LOG[@]}:${#REDS[@]}" "0:0"
+mkdir -p "$TMP/etc/gateway-token.env"
+: >"$TMP/etc/gateway-token.env/x"
+retire_old_units
+check "【故意造出的失败】删不掉（是个非空目录）：判红，不当成删了" "$(printf '%s\n' "${REDS[@]}" | grep -c 'gateway-token.env 删不掉')" 1
+REDS=()
+readback_retired_units
+check "【故意造出的失败】读回：还在的判红" "$(printf '%s\n' "${REDS[@]}" | grep -c '令牌文件.*gateway-token.env 还在')" 1
+
+echo "== 演示版的数据目录（#2236）：先打包（root 600、旁边一份 .sha256）再删；再跑不动；打包不成不删；还在、备份对不上判红"
+check "france.sh 的数据目录就是 /var/lib/fleet-dao/demo" "$(grep -c '^RETIRED_DATA_DIR=/var/lib/fleet-dao/demo ' "$DEPLOY/france.sh")" 1
+check "france.sh 的备份目录是 /var/backups/fleet-dao" "$(grep -c '^RETIRED_BACKUP_DIR=/var/backups/fleet-dao$' "$DEPLOY/france.sh")" 1
+# shellcheck disable=SC2034 # 摘出来的函数读它
+RETIRED_FILES=()
+RETIRED_DATA_DIR=$TMP/lib/fleet-dao/showcase
+RETIRED_BACKUP_DIR=$TMP/backups/fleet-dao
+# shellcheck disable=SC2034 # 摘出来的函数读它
+RETIRED_DATA_TAR=retired-showcase-data
+INSTALL_FAILS=0
+install() { # 只有建备份目录用到它；-o root 不用 root 跑不了
+  if ((INSTALL_FAILS)); then return 1; fi
+  mkdir -p -- "${@: -1}"
+}
+put_data() {
+  rm -rf -- "${TMP:?}/lib" "${TMP:?}/backups"
+  mkdir -p -- "$RETIRED_DATA_DIR/scopes" "$RETIRED_DATA_DIR/links" "$RETIRED_DATA_DIR/.tmp"
+  printf '{"modules":[]}\n' >"$RETIRED_DATA_DIR/scopes/default.json"
+}
+backups() { find "$RETIRED_BACKUP_DIR" -maxdepth 1 -name "$RETIRED_DATA_TAR-*.tar.gz" 2>/dev/null; }
+install_old
+put_data
+retire_old_units
+tarball=$(backups)
+check "有数据目录：打了一个包，没有红" "$(grep -c . <<<"$tarball"):${#REDS[@]}" "1:0"
+check "数据目录删了" "$([[ -e $RETIRED_DATA_DIR ]] && echo 还在 || echo 删了)" 删了
+check "包里有原来的文件" "$(tar -xzOf "$tarball" showcase/scopes/default.json)" '{"modules":[]}'
+check ".sha256 记的就是这个包的 sha256" \
+  "$(cut -d' ' -f1 <"$tarball.sha256")" "$(sha256sum <"$tarball" | cut -d' ' -f1)"
+check ".sha256 能拿 sha256sum -c 核" "$(cd -- "$RETIRED_BACKUP_DIR" && sha256sum --status -c -- "${tarball##*/}.sha256" && echo 对 || echo 不对)" 对
+check "改动里写了备份路径和完整 sha256" \
+  "$(printf '%s\n' "${LOG[@]}" | grep -cF "$tarball（root 600，sha256 $(sha256sum <"$tarball" | cut -d' ' -f1)")" 1
+REDS=()
+LOG=()
+readback_retired_units
+check "读回：数据目录不在、备份和 sha256 对得上，通过" \
+  "${#REDS[@]}:$(printf '%s\n' "${LOG[@]}" | grep -c '演示版的数据目录不在了')" "0:1"
+REDS=()
+LOG=()
+retire_old_units
+check "再来一遍：幂等，不再打包、什么都不动" "${#LOG[@]}:${#REDS[@]}:$(backups | grep -c .)" "0:0:1"
+printf 'x' >>"$tarball"
+REDS=()
+readback_retired_units
+check "【故意造出的失败】备份被改过：读回判红" "$(printf '%s\n' "${REDS[@]}" | grep -c '和它的 .sha256 对不上')" 1
+put_data
+INSTALL_FAILS=1
+LOG=()
+retire_old_units
+check "【故意造出的失败】打包不成（备份目录建不了）：判红、数据目录不删、不留半个包" \
+  "$(printf '%s\n' "${REDS[@]}" | grep -c '没成（#2236）：没删'):$([[ -d $RETIRED_DATA_DIR/scopes ]] && echo 还在 || echo 删了):$(backups | grep -c .)" "1:还在:0"
+INSTALL_FAILS=0
+REDS=()
+readback_retired_units
+check "【故意造出的失败】读回：数据目录还在判红" "$(printf '%s\n' "${REDS[@]}" | grep -c '数据目录.*还在')" 1
 
 if ((fail)); then
   echo "no-demo：不通过"

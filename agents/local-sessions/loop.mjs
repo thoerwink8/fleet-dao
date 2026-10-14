@@ -7,7 +7,7 @@
 // - 只认一个实例：锁文件 ~/.fleet-dao/local-sessions/loop.pid，里面的进程还活着就退出、不起第二个。
 // - 一次没推成不退出（网断了下一轮再试）；push.mjs 起不来、超时也只是这一轮没推成。
 // - 退出时只删自己写的那把锁。
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -47,6 +47,28 @@ export function acquireLock({ lock, pid, alive = isAlive }) {
   if (old !== null && old !== pid && alive(old)) return false;
   writeFileSync(lock, String(pid));
   return true;
+}
+
+/**
+ * 循环死了没人拉起的补救（创始人电脑睡眠 / 重启 / 被杀后，启动文件夹的 vbs 只在登录时跑一次，锁文件还留着，看板一直写「上次收到的已经过期」）：
+ * 心跳钩子每次触发顺手看一眼——锁文件在、里面的进程已不在，就隐藏着起一个新的循环（它自己抢锁，起重了也只留一个）。
+ * 锁文件不在（从没装自启、或循环干净退出过）不管：计划任务那一路没有循环，干净退出的是人让它停的。
+ * @param {{ home: string, alive?: (pid: number) => boolean, start: () => void }} o
+ * @returns {'no-lock' | 'alive' | 'started'}
+ */
+export function reviveLoop({ home, alive = isAlive, start }) {
+  const lock = loopPidPath(home);
+  if (!existsSync(lock)) return 'no-lock';
+  const pid = readLoopPid(lock);
+  if (pid !== null && alive(pid)) return 'alive';
+  start();
+  return 'started';
+}
+
+/** 真起一个脱离当前进程的隐藏循环。 */
+export function startLoopDetached() {
+  const loop = join(dirname(fileURLToPath(import.meta.url)), 'loop.mjs');
+  spawn(process.execPath, [loop], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
 }
 
 function main() {

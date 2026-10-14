@@ -19,8 +19,22 @@ export type LocalClaimResult =
   | { ok: true; taskId: string; state: TaskState; executor: TaskExecutor; leaseUntil: Date | null }
   | { ok: false; code: LocalClaimRefusal; why: string };
 
-/** 引擎手上的单：在跑、停下等人、排着要起。本机不抢。 */
+/** 引擎手上的单：在跑、停下等人、排着要起。本机不抢（停下等人的除外，见 isParked：本机 claim 一步接手）。 */
 const ENGINE_HOLDS: readonly TaskState[] = ['queued', 'running', 'stalled'];
+
+/** 引擎已经停下等人：stalled，或 running 但工作流停在 parked 那一步。只有这两种本机 claim 能接手。 */
+const isParked = (row: { state: TaskState; phase: string | null }) =>
+  row.state === 'stalled' || (row.state === 'running' && row.phase === 'parked');
+
+/** 接手时回调的那一口：后端替本机把引擎的任务工作流叫停（发 taskAbandon，note「本机接手」）。不成就带原因，整个领单回滚。 */
+export type TakeOverEngine = (task: {
+  taskId: string;
+  issueNumber: number;
+  state: TaskState;
+  doing: string | null;
+}) => Promise<{ ok: true } | { ok: false; why: string }>;
+
+export const TAKEOVER_NOTE = '本机接手';
 
 async function repoIdOf(db: Pick<Db, 'select'>, slug: string): Promise<string | null> {
   const [owner, name] = slug.split('/');
@@ -39,30 +53,65 @@ const unknownRepo = (slug: string): LocalClaimResult => ({
 });
 
 /**
- * 本机领一张单：没有任务行就建一行（running、local、带租约）；引擎手上的（排队、在跑、停下等人）不让领；
+ * 本机领一张单：没有任务行就建一行（running、local、带租约）；引擎手上排队、在跑的不让领，回原因写明现在在干什么；
+ * 引擎已经停下等人的（stalled，或 running 而 phase = parked）一步接手：同一事务里先锁行、叫引擎放弃这个任务（takeOver，
+ * 没给就不接手、照旧拒）、再改 executor = local、记租约和操作记录（reason「本机接手」）；
  * 本机已领着的当续租；引擎做完、失败、叫停的改成本机在做。
  */
 export async function claimLocalTask(
   db: Db,
-  input: { repo: string; issueNumber: number; title: string; nodeId: string; now: Date },
+  input: {
+    repo: string;
+    issueNumber: number;
+    title: string;
+    nodeId: string;
+    now: Date;
+    takeOver?: TakeOverEngine | undefined;
+  },
 ): Promise<LocalClaimResult> {
   const leaseUntil = new Date(input.now.getTime() + LOCAL_LEASE_MS);
   return db.transaction(async (tx) => {
     const repoId = await repoIdOf(tx, input.repo);
     if (!repoId) return unknownRepo(input.repo);
     const [row] = await tx
-      .select({ id: tasks.id, state: tasks.state, executor: tasks.executor })
+      .select({
+        id: tasks.id,
+        state: tasks.state,
+        executor: tasks.executor,
+        phase: tasks.phase,
+        doing: tasks.doing,
+      })
       .from(tasks)
       .where(and(eq(tasks.repoId, repoId), eq(tasks.issueNumber, input.issueNumber)))
       .for('update');
+    let tookOver = false;
     if (row && row.executor !== 'local' && ENGINE_HOLDS.includes(row.state)) {
-      return {
-        ok: false,
-        code: 'engine_has_it',
-        why: `法国引擎手上有这张单（状态 ${row.state}），本机不接；要本机做先在驾驶舱叫停它`,
-      } as const;
+      if (!(isParked(row) && input.takeOver)) {
+        const what = row.doing ? `现在在干：${row.doing}` : '没有进度说明';
+        return {
+          ok: false,
+          code: 'engine_has_it',
+          why: `法国引擎手上有这张单（状态 ${row.state}${row.phase ? `，阶段 ${row.phase}` : ''}，${what}），本机不接；停下等人的才能 claim 一步接手，在跑的要本机做先在驾驶舱叫停它`,
+        } as const;
+      }
+      const stopped = await input.takeOver({
+        taskId: row.id,
+        issueNumber: input.issueNumber,
+        state: row.state,
+        doing: row.doing,
+      });
+      if (!stopped.ok) {
+        return {
+          ok: false,
+          code: 'engine_has_it',
+          why: `法国引擎停着这张单（状态 ${row.state}），但叫停它没成，本机没接：${stopped.why}`,
+        } as const;
+      }
+      tookOver = true;
     }
-    const before = row ? { state: row.state, executor: row.executor } : null;
+    const before = row
+      ? { state: row.state, executor: row.executor, ...(tookOver ? { phase: row.phase } : {}) }
+      : null;
     let taskId: string;
     if (row) {
       await tx
@@ -72,8 +121,9 @@ export async function claimLocalTask(
           executor: 'local',
           leaseUntil,
           claimedBy: input.nodeId,
+          phase: null,
           lastProblem: null,
-          doing: '本机在做',
+          doing: tookOver ? '本机接手，引擎任务已叫停' : '本机在做',
           updatedAt: input.now,
         })
         .where(eq(tasks.id, row.id));
@@ -107,6 +157,7 @@ export async function claimLocalTask(
       target: `task:${taskId}`,
       before,
       after: { state: 'running', executor: 'local', leaseUntil: leaseUntil.toISOString() },
+      ...(tookOver ? { reason: TAKEOVER_NOTE } : {}),
       via: 'agent',
     });
     return { ok: true, taskId, state: 'running', executor: 'local', leaseUntil } as const;

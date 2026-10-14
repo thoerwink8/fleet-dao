@@ -33,6 +33,34 @@ export const githubAppAlertKey = (item: Pick<SelfCheckItem, 'role' | 'repo'>) =>
 
 export const githubAppMissingAlertKey = (repo: string) => `${GITHUB_APP_MISSING_ALERT_PREFIX}${repo}`;
 
+/** 一小时里最多往 why 里写几个仓名（够人看一眼，不刷屏）。 */
+const SKIP_NAMES_MAX = 3;
+
+/**
+ * 已知「机器人没装到这个仓」的仓：库里有这个仓开着的 github-app-missing 提醒。那条提醒只有安装核对明确判为没装
+ * （SelfCheckItem.notInstalled）才会报，装好了会自己撤；所以对账/轮询可以放心跳过它们、不记没跑全。
+ * 只认这一种：凭据读不到、GitHub 回错都不在里面，照旧记没查成。列提醒读不出来就抛——调用方当「没有已知没装的仓」，一个都不跳。
+ */
+export async function reposKnownNotInstalled(
+  repos: readonly { owner: string; name: string }[],
+  byKey: (dedupeKey: string) => Promise<{ resolvedAt: Date | null } | null>,
+): Promise<Set<string>> {
+  const skipped = new Set<string>();
+  for (const r of repos) {
+    const slug = `${r.owner}/${r.name}`;
+    const alert = await byKey(githubAppMissingAlertKey(slug));
+    if (alert && alert.resolvedAt === null) skipped.add(slug);
+  }
+  return skipped;
+}
+
+/** 写进 why 的一句：跳过了几个没装机器人的仓。 */
+export function skippedReposNote(slugs: readonly string[]): string {
+  const shown = slugs.slice(0, SKIP_NAMES_MAX).join('、');
+  const more = slugs.length > SKIP_NAMES_MAX ? ' 等' : '';
+  return `跳过 ${slugs.length} 个没装机器人的仓（已有提醒）：${shown}${more}`;
+}
+
 /** 「没装到这个仓」那条要你拍的：说明白先去 GitHub 装、直达链接写进正文，点开去设置页（那里也有链接）。 */
 export function githubAppMissingAlert(
   repo: string,

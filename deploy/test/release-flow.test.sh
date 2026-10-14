@@ -62,6 +62,9 @@ migrate() {
 # 真的 api_report_before 留一份：「切之前读不到健康报告」那一段用真代码，别的段换成桩
 eval "real_$(declare -f api_report_before)"
 api_report_before() { :; }
+# 后端重启后等它答话（#2186）：各段的后端是假的，换成桩；真代码在「后端重启后起不来」那一段测
+eval "real_$(declare -f api_wait_up)"
+api_wait_up() { :; }
 SYNCED=0 # 往香港发过几次静态文件
 PROBED=0   # 试通过几次往香港传静态文件的路
 WEB_DOWN=0 # 1 = 往香港传静态文件的路试不通
@@ -73,10 +76,6 @@ web_reachable() {
     return 1
   fi
 }
-# 删香港上老目录（retire_hk_dir，#1223）和读回（check_retired_dir）换成桩，只数调了几次；真代码在 web-publish.test.sh 里测
-RETIRED_RUNS=0
-retire_hk_dir() { RETIRED_RUNS=$((RETIRED_RUNS + 1)); }
-check_retired_dir() { :; }
 health_gate() {
   if [[ "${GATE[$1]:-ok}" == ok ]]; then return 0; fi
   red "桩：${1:0:12} 健康检查不过"
@@ -382,6 +381,57 @@ eval "$has_service_saved"
 unset -f systemctl
 api_report_before() { :; }
 
+echo "== 后端重启后起不来（#2186：新版缺依赖反复崩）：切完马上等它答话，到点不答就判红交回，不先去发香港、跑健康检查"
+# curl 换成桩：前 CURL_FAILS 次连不上，之后答话；次数记在文件上（api_wait_up 里不是子 shell，但 activate 的调用链里不保证）
+: >"$TMP/curl-n"
+CURL_FAILS=2
+# shellcheck disable=SC2317,SC2329 # 由 release.sh 里的 api_wait_up 间接调用
+curl() {
+  printf 'x\n' >>"$TMP/curl-n"
+  (($(wc -l <"$TMP/curl-n") > CURL_FAILS))
+}
+# shellcheck disable=SC2317,SC2329 # 由 activate 间接调用
+api_wait_up() { real_api_wait_up; }
+API_UP_WAIT=10
+real_api_wait_up >/dev/null
+check "前两次连不上、第三次答话：等到了（试了 3 次）" "$?:$(wc -l <"$TMP/curl-n" | tr -d ' ')" "0:3"
+: >"$TMP/curl-n"
+CURL_FAILS=1000
+API_UP_WAIT=2
+reset
+real_api_wait_up >/dev/null
+check "【故意造出的失败】一直不答：到点判红，返回 1" "$?:${#REDS[@]}" "1:1"
+check "红里写明起不来、看哪份日志" "$(printf '%s\n' "${REDS[@]}" | grep -c '还没在驾驶舱接口.*journalctl -u fleet-api')" 1
+# 接进切版本那一步：后端启用着、起不来，就不往香港发、activate 直接返回 1（do_release 接着自动退回）
+saved_services=$FLEET_SERVICES
+saved_hk=$FLEET_HK_PARTS
+ensure_unit_running_saved=$(declare -f ensure_unit_running)
+running_release_saved=$(declare -f running_release)
+ensure_unit_running() { :; }
+running_release() { :; }
+FLEET_SERVICES="fleet-api"
+FLEET_HK_PARTS="web"
+SYNCED=0
+reset
+activate "$C" release >/dev/null
+check "后端起不来：activate 返回 1、静态文件没发" "$?:$SYNCED" "1:0"
+: >"$TMP/curl-n"
+CURL_FAILS=0
+reset
+activate "$C" release >/dev/null
+check "后端答话：activate 照常往下走、发了静态文件" "$?:$SYNCED:${#REDS[@]}" "0:1:0"
+FLEET_SERVICES=""
+reset
+activate "$C" release >/dev/null
+check "本机没启用后端：不等它" "$?:$(wc -l <"$TMP/curl-n" | tr -d ' ')" "0:1"
+unset -f curl
+eval "$ensure_unit_running_saved"
+eval "$running_release_saved"
+FLEET_SERVICES=$saved_services
+FLEET_HK_PARTS=$saved_hk
+API_UP_WAIT=30
+api_wait_up() { :; }
+
 rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
 GATE=()
 MIG=()
@@ -406,11 +456,11 @@ do_release "$E" >/dev/null
 check "在用 E" "$(current_sha)" "$E"
 check "静态文件一次都没发" "$SYNCED" 0
 check "传静态文件的路一次都没试" "$PROBED" 0
-check "什么都不发：香港上老的目录也不碰（#1223）" "$RETIRED_RUNS" 0
 FLEET_HK_PARTS="web"
 reset
 do_release "$A" >/dev/null
-check "明写了 web：先试通、再发静态文件、再核对删掉老目录" "$PROBED:$SYNCED:$RETIRED_RUNS" "1:1:1"
+check "明写了 web：先试通、再发静态文件" "$PROBED:$SYNCED" "1:1"
+check "删香港老目录那一步已经撤了（#2186：#1223 早做完，香港上 /demo/ 已不在；那一步的 rsync 超时曾把整次发版打红）"   "$(declare -F retire_hk_dir check_retired_dir hk_static_ours | wc -l)" 0
 FLEET_HK_PARTS=""
 SYNCED=0
 reset
@@ -1324,7 +1374,15 @@ systemctl() {
     esac
   done
   case "$cmd" in
-  show) return 0 ;;
+  show)
+    # socket 正在听的地址：照单元文件里写的报（SC_LISTEN_STALE=1 时报换之前的那几个：restart 了却没换上）
+    if [[ "$*" == *"-p Listen"* && -n "$unit" && -f "$FLEET_SYSTEMD_DIR/$unit" ]]; then
+      local from=$FLEET_SYSTEMD_DIR/$unit
+      if [[ "${SC_LISTEN_STALE:-0}" == 1 ]]; then from=$TMP/listen-stale; fi
+      sed -n 's/^ListenStream=\(.*\)$/\1 (Stream)/p' -- "$from"
+    fi
+    return 0
+    ;;
   daemon-reload)
     # 第一次装 socket 之后的 daemon-reload 失败：后面恢复时的那次要能成功
     if ((${SC_RELOAD_FAILS:-0} > 0)); then
@@ -1352,6 +1410,11 @@ systemctl() {
   start | restart)
     # enable-now,start：socket 起不来之后，把旧服务拉回来也失败
     if [[ ",$SC_FAIL," == *",start,"* && "$unit" == fleet-api.service ]]; then return 1; fi
+    # restart-socket：换上新 socket 单元以后 restart 失败（放回旧的那次 restart 要能成）
+    if [[ "$cmd" == restart && "$unit" == fleet-api.socket ]] && ((${SC_SOCKET_RESTART_FAILS:-0} > 0)); then
+      SC_SOCKET_RESTART_FAILS=$((SC_SOCKET_RESTART_FAILS - 1))
+      return 1
+    fi
     if [[ -n "$unit" ]]; then SC_ACTIVE[$unit]=active; fi
     ;;
   enable)
@@ -1372,6 +1435,8 @@ reset_sc() {
   : >"$SC"
   SC_FAIL=""
   SC_RELOAD_FAILS=0
+  SC_SOCKET_RESTART_FAILS=0
+  SC_LISTEN_STALE=0
   SC_ACTIVE=()
 }
 SVC_OLD='[Unit]
@@ -1387,6 +1452,15 @@ After=fleet-api.socket
 ExecStart=/bin/sleep infinity
 '
 SOCK_BODY='[Socket]
+ListenStream=10.99.0.2:8787
+FreeBind=yes
+Service=fleet-api.service
+[Install]
+WantedBy=sockets.target
+'
+# 老机器上装着的：还带着已撤的 fleet 命令接口（127.0.0.1:8788）那一行
+SOCK_OLD='# 旧注释
+[Socket]
 ListenStream=10.99.0.2:8787
 ListenStream=127.0.0.1:8788
 FreeBind=yes
@@ -1429,16 +1503,80 @@ check "头一次装：socket 先于服务起来" "$((sock_n > stop_n && start_n 
 check "头一次装：socket 单元写上了驾驶舱那个地址" \
   "$(grep -c '^ListenStream=10.99.0.2:8787$' "$FLEET_SYSTEMD_DIR/fleet-api.socket")" 1
 
-printf '%s' 'KEEP-SOCKET' >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
+printf '%s' "$SOCK_BODY" >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
 printf '%s' "$SVC_OLD" >"$FLEET_SYSTEMD_DIR/fleet-api.service"
 prep_ver "$B" "$SVC_NEW" "$SOCK_BODY"
 reset_sc
 SC_ACTIVE[fleet-api.service]=active
 reset
 activate "$B" release >/dev/null 2>&1
-check "已有 socket：systemctl 一次都没碰它" "$(grep -c 'fleet-api.socket' "$SC" || true)" 0
-check "已有 socket：文件一个字没改" "$(cat -- "$FLEET_SYSTEMD_DIR/fleet-api.socket")" KEEP-SOCKET
+check "已有 socket、和这一版一字不差：systemctl 一次都没碰它" "$(grep -c 'fleet-api.socket' "$SC" || true)" 0
+check "已有 socket、和这一版一字不差：文件没动" "$(cat -- "$FLEET_SYSTEMD_DIR/fleet-api.socket")" "$(printf '%s' "$SOCK_BODY")"
 check "已有 socket：服务照常重启" "$(($(sc_n "restart fleet-api.service") > 0))" 1
+
+# 只差注释：写上这一版的、daemon-reload，不重启 socket、不停服务
+printf '# 老注释\n%s' "$SOCK_BODY" >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
+prep_ver "$B" "$SVC_NEW" "$SOCK_BODY"
+reset_sc
+SC_ACTIVE[fleet-api.service]=active
+SC_ACTIVE[fleet-api.socket]=active
+reset
+activate "$B" release >/dev/null 2>&1
+check "已有 socket、只差注释：换成这一版的" "$(cat -- "$FLEET_SYSTEMD_DIR/fleet-api.socket")" "$(printf '%s' "$SOCK_BODY")"
+check "已有 socket、只差注释：没重启 socket" "$(sc_n "restart fleet-api.socket")" 0
+check "已有 socket、只差注释：没停服务" "$(sc_n "stop fleet-api.service")" 0
+check "已有 socket、只差注释：没有红" "${#REDS[@]}" 0
+
+# 监听变了（老机器上还带着已撤的 127.0.0.1:8788）：停服务 → 写上 → daemon-reload → restart socket → 读回在听的地址 → 起服务
+printf '%s' "$SOCK_OLD" >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
+prep_ver "$B" "$SVC_NEW" "$SOCK_BODY"
+reset_sc
+SC_ACTIVE[fleet-api.service]=active
+SC_ACTIVE[fleet-api.socket]=active
+reset
+activate "$B" release >/dev/null 2>&1
+stop_n=$(sc_n "stop fleet-api.service")
+reload_n=$(sc_n "daemon-reload")
+sock_n=$(sc_n "restart fleet-api.socket")
+show_n=$(sc_n "show -p Listen --value fleet-api.socket")
+start_n=$(grep -nxE -- '(re)?start fleet-api.service' "$SC" | head -1 | cut -d: -f1)
+check "监听变了：换成这一版的 socket（没有 8788 了）" "$(grep -c '^ListenStream=127.0.0.1:8788$' "$FLEET_SYSTEMD_DIR/fleet-api.socket" || true):$(grep -c '^ListenStream=10.99.0.2:8787$' "$FLEET_SYSTEMD_DIR/fleet-api.socket")" 0:1
+check "监听变了：先停服务、再 daemon-reload、再 restart socket" "$((stop_n > 0 && reload_n > stop_n && sock_n > reload_n))" 1
+check "监听变了：restart 之后读回 socket 在听的地址" "$((show_n > sock_n))" 1
+check "监听变了：读回之后才把服务起来" "$((${start_n:-0} > show_n))" 1
+check "监听变了：服务回到 active" "${SC_ACTIVE[fleet-api.service]}" active
+check "监听变了：没有红、没留下旧文件的副本" "${#REDS[@]}:$(find "$FLEET_SYSTEMD_DIR" -name '.fleet-api.socket.old.*' | wc -l)" 0:0
+
+# 换上的 socket restart 不起来：放回旧的、重启 socket、拉回停下的服务；报红，不切版本
+prep_ver "$C" "$SVC_NEW" "$SOCK_BODY"
+printf '%s' "$SOCK_OLD" >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
+reset_sc
+SC_SOCKET_RESTART_FAILS=1
+SC_ACTIVE[fleet-api.service]=active
+SC_ACTIVE[fleet-api.socket]=active
+reset
+before_cur=$(readlink -- "$RELEASES/current" 2>/dev/null || true)
+activate "$C" release >/dev/null 2>&1
+check "socket restart 不起来：activate 返回失败" "$?" 1
+check "socket restart 不起来：报红" "$(reds_with '换上这一版的 fleet-api.socket 起不来')" 1
+check "socket restart 不起来：旧文件放回去了" "$(cat -- "$FLEET_SYSTEMD_DIR/fleet-api.socket")" "$(printf '%s' "$SOCK_OLD")"
+check "socket restart 不起来：停下的服务拉回来了" "${SC_ACTIVE[fleet-api.service]}" active
+check "socket restart 不起来：没切版本" "$(readlink -- "$RELEASES/current" 2>/dev/null || true)" "$before_cur"
+check "socket restart 不起来：没留下旧文件的副本" "$(find "$FLEET_SYSTEMD_DIR" -name '.fleet-api.socket.old.*' | wc -l)" 0
+
+# restart 了却没听上这一版写的地址（读回对不上）：同样放回旧的
+printf '%s' "$SOCK_OLD" >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
+printf '%s' "$SOCK_OLD" >"$TMP/listen-stale"
+reset_sc
+SC_LISTEN_STALE=1
+SC_ACTIVE[fleet-api.service]=active
+SC_ACTIVE[fleet-api.socket]=active
+reset
+activate "$C" release >/dev/null 2>&1
+check "读回对不上：activate 返回失败" "$?" 1
+check "读回对不上：报红、写清在听的和文件写的" "$(reds_with '在听的（10.99.0.2:8787 127.0.0.1:8788 ）和单元文件写的（10.99.0.2:8787 ）对不上')" 1
+check "读回对不上：旧文件放回去了" "$(cat -- "$FLEET_SYSTEMD_DIR/fleet-api.socket")" "$(printf '%s' "$SOCK_OLD")"
+check "读回对不上：停下的服务拉回来了" "${SC_ACTIVE[fleet-api.service]}" active
 
 printf '%s' 'SOCKET-ON-DISK' >"$FLEET_SYSTEMD_DIR/fleet-api.socket"
 printf '%s' "$SVC_NEW" >"$FLEET_SYSTEMD_DIR/fleet-api.service"

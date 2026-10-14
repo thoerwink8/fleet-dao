@@ -1,7 +1,13 @@
 // 对账补漏的真装配：后端的 Store（同一个库）、GitHubIntake（同一道门、同一本投递账）、@fleet-dao/github 的真轮询，
 // 记账用 @fleet-dao/db 的 schedule_runs。
 
-import { type Db, finishScheduleRun, resolveAlertWithReason, startScheduleRun } from '@fleet-dao/db';
+import {
+  alertByKey,
+  type Db,
+  finishScheduleRun,
+  resolveAlertWithReason,
+  startScheduleRun,
+} from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import {
@@ -13,6 +19,7 @@ import {
   reconcilerOptions,
 } from '@fleet-dao/store';
 import type { Client } from '@temporalio/client';
+import { reposKnownNotInstalled } from '../jobs/github-app-check.ts';
 import type { GitHubReconcileJobDeps } from '../jobs/github-reconcile.ts';
 import { sweepIssueGroom } from '../jobs/issue-groom.ts';
 import { type GroomGitHub, type IssueGroomWiring, issueGroomJob } from './issue-groom.ts';
@@ -97,7 +104,18 @@ export function githubReconcileJob(
             });
           }
         }
-        return reconcileGitHub({ store, intake, reconciler, log, now }, options);
+        return reconcileGitHub(
+          {
+            store,
+            intake,
+            reconciler,
+            log,
+            now,
+            knownNotInstalled: async () =>
+              reposKnownNotInstalled(await store.listRepos(), (key) => alertByKey(w.db, key)),
+          },
+          options,
+        );
       },
       issueGroom: () => sweepIssueGroom(groom),
       ...(w.issueGroomDue ? { issueGroomDue: w.issueGroomDue } : {}),

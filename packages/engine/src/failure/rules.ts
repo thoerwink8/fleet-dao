@@ -167,6 +167,20 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
     hint: '新引擎起来按编号续同一个会话',
   },
+  // 看门狗在会话还在跑、健康检查超时（服务单线程能堵几十秒）时重启了 fleet-mirasim-session：令牌文件被换掉，
+  // 会话被杀（claude exited 143）。引擎去列 .mirasim/run 没有令牌，原文落成「没有终帧：读状态的连接建不起来：
+  // …没有 local-<端口>.token」。这是我们自己把会话杀掉的，不是路由坏了：马上续跑，不进路由失败率，
+  // 原文再一样也不挂起（#2186 两次动手撞同一句，第二次被「认不出」挂起）。
+  // 只认「读状态的连接建不起来」这句：服务从来没起来时是「没起来：…没有令牌」，那是没配好，不在这里无限续。
+  {
+    id: 'MR1',
+    title: 'Mirasim 服务重启把会话杀掉了',
+    kind: 'resume',
+    text: /读状态的连接建不起来：[^\n]*没有 local-<端口>\.token/,
+    retryBaseSeconds: 0,
+    routeOutcome: 'neutral',
+    hint: '服务起来后续跑同一个会话',
+  },
   // 这台机器的 reclaude 登录被撤销（reclaude 文档「设备被自动撤销」：同号多机同时高频用会触发风控，自动撤销设备，
   // 请求拿到 401 device_revoked；修法只有人在那台机器上、以那个用户重跑 reclaude login）。不是额度用满、也不是封号：
   // 等清零都没用，这个池在这台机器上整池暂停，手上的会话挂起；重新登录后人点「继续」，续同一个会话。

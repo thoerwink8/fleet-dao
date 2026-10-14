@@ -3,10 +3,8 @@
 # shellcheck disable=SC2034 # FLEET_HK_PARTS、FLEET_DOMAIN 这些是给 source 进来的 release.sh 里的函数读的
 # shellcheck disable=SC2016 # 单引号里的 $uri、$args 是 nginx 配置里的字面量，本来就不该展开
 # deploy/release.sh 往香港发静态文件的那一段（release.env 的 FLEET_HK_PARTS 选）：web 把驾驶舱整套发到根地址、
-# 根上不是这一版的一律删（香港上老的 /demo/ 目录也在内，不再排除）。
-# 香港上老的 /demo/ 目录（演示版已删，创始人 2026-10-07，#1223）：发布时经上传的路删掉（一次性、幂等、目录不在也算过），
-# 读回它回 404 才算过；读不出来、删不掉、删完不是 404 都判红。香港站点配置（deploy/hk/nginx-*.conf）里 /demo 一律 404。
-# rsync、curl 换成桩（curl 按一个假香港的目录答、rsync 照参数在假香港上删目录），其余是 release.sh 里的真代码。
+# 根上不是这一版的一律删。香港站点配置（deploy/hk/nginx-*.conf）里 /demo 一律 404（#1223）。
+# rsync、curl 换成桩（curl 按一个假香港的目录答），其余是 release.sh 里的真代码。
 # 用法：bash deploy/test/web-publish.test.sh。退出码：0 通过，1 不通过，2 有没跑成的。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -40,9 +38,7 @@ reset() {
 }
 config() { # FLEET_HK_PARTS：人手动发布（和 --check）的样子
   FLEET_HK_PARTS=$1
-  LEGACY_KEYS=0
 }
-said_line() { grep -cF -- "$1" "$TMP/out"; } # 上一次存进 $TMP/out 的输出里有几行带这段话
 reds_with_text() { printf '%s\n' "${REDS[@]}" | grep -cF -- "$1"; } # 红里有几条带这段话
 # 每一处发到哪（香港路径），按顺序
 dests() { web_plan "$1" | awk '{ print $2 }' | tr '\n' ' '; }
@@ -75,16 +71,6 @@ check "往香港发哪几样照实说" "$(parts_said)" "web"
 config ""
 check "什么都不发也照实说" "$(parts_said)" "（都不发）"
 
-echo "== 香港上的静态文件归不归发布管：发 web、或老配置里还留着已删的键（要清老目录）"
-config ""
-check "什么都不发、没有老键：不归" "$(hk_static_ours && echo 归 || echo 不归)" 不归
-config web
-check "发 web：归" "$(hk_static_ours && echo 归 || echo 不归)" 归
-config ""
-LEGACY_KEYS=1
-check "什么都不发、但有老键：归（要清老目录）" "$(hk_static_ours && echo 归 || echo 不归)" 归
-LEGACY_KEYS=0
-
 echo "== sync_web 照着发：源、参数一样；发不出去报红"
 ONE_AT_A_TIME=0
 HKD=$TMP/hk # 假香港的目录
@@ -104,18 +90,6 @@ rsync() {
     echo "rsync: connection unexpectedly closed" >&2
     return 12
   fi
-  # 删老目录那一趟（retire_hk_dir）：照参数在假香港上只删那一个目录，删掉了什么打印出来
-  if [[ " $* " == *" --delete "* && " $* " == *" --include=/demo/*** "* ]]; then
-    if ((${RSYNC_RETIRE_FAIL:-0})); then
-      echo "rsync: [receiver] delete_file: unlink failed" >&2
-      return 23
-    fi
-    if [[ -d "$HKD/demo" ]]; then
-      find "$HKD/demo" -mindepth 1 | sed "s#^$HKD/#*deleting   #"
-      rm -rf -- "$HKD/demo"
-    fi
-    return 0
-  fi
   echo ">f+++++++++ changed"
 }
 config web
@@ -126,7 +100,6 @@ check "web：发了一处" "$(grep -c . "$TMP/rsync.log")" 1
 check "web：发到根上" "$(grep -c 'root@10.99.0.1:/$' "$TMP/rsync.log")" 1
 check "web：只带 --delete-after --delay-updates，不排除任何目录" \
   "$(grep -c -- '--delete-after --delay-updates -e .* -- .*/web/ root@10.99.0.1:/$' "$TMP/rsync.log"):$(grep -c -- '--exclude' "$TMP/rsync.log")" "1:0"
-check "web：不记什么发布记录" "$([[ -e "$HK_RETIRED_RECORD" ]] && echo 有 || echo 没有)" 没有
 check "web：记了一笔改动" "${#CHANGES[@]}" 1
 reset
 : >"$TMP/rsync.log"
@@ -167,11 +140,6 @@ reset
 sync_web "$A" >/dev/null
 check "发静态文件也排队：轮不到就报红，一次都没推" \
   "${#REDS[@]} $(printf '%s\n' "${REDS[@]}" | grep -c '还没轮到') $(grep -c . "$TMP/rsync.log")" "1 1 0"
-reset
-RSYNC_RETIRE_FAIL=0
-retire_hk_dir >/dev/null
-check "删老目录也排队：轮不到就报红，一次都没推" \
-  "${#REDS[@]} $(printf '%s\n' "${REDS[@]}" | grep -c '删香港上老的') $(grep -c . "$TMP/rsync.log")" "1 1 0"
 HK_RSYNC_WAIT=120
 exec 8>&-
 reset
@@ -179,14 +147,13 @@ web_reachable >/dev/null
 check "锁放开了：试通香港照常过" "${#REDS[@]} $(grep -c . "$TMP/rsync.log")" "0 1"
 ONE_AT_A_TIME=0
 
-echo "== 香港上老的 /demo/ 目录：删一遍、读回 404 才算过；本来就没有也算过；读不出来、删不掉、删完不是 404 都判红"
+echo "== 健康检查：根地址的版本标记、健康页对（发版不再删、不再读回香港上老的 /demo/：#1223 早做完、目录已不在，#2186）"
+check "删老目录、读回老目录那几步已撤" "$(declare -F retire_hk_dir check_retired_dir hk_static_ours | wc -l)" 0
 if [[ -z "$NODE" ]]; then
   echo "  … 没跑成：这台没有 node（版本标记要用它读）"
   skipped=1
 else
-  # 假香港：一个目录，curl 按 nginx 的回落规则答。NGINX=old 是没重跑 hk.sh 之前的样子（老目录还按文件给），
-  # new 是 /demo 一律 404，none 是站点里一点演示版的痕迹都没有（/demo/ 回落到首页、回 200：核对要把它报出来）
-  NGINX=old
+  # 假香港：一个目录，curl 按 nginx 的回落规则答
   FAKE_DOWN=0 # 1 = 连不上香港
   serve() { # 站内路径 → 打印要给的文件；没有返回 1
     local p=${1%%\?*}
@@ -194,18 +161,6 @@ else
     if [[ "$p" == /release.json ]]; then
       if [[ -f "$HKD/release.json" ]]; then
         echo "$HKD/release.json"
-        return 0
-      fi
-      return 1
-    fi
-    if [[ "$p" =~ ^/demo(/|$) && "$NGINX" != none ]]; then
-      if [[ "$NGINX" == new ]]; then return 1; fi
-      if [[ "$p" == */ && -f "$HKD${p}index.html" ]]; then
-        echo "$HKD${p}index.html"
-        return 0
-      fi
-      if [[ -f "$HKD$p" ]]; then
-        echo "$HKD$p"
         return 0
       fi
       return 1
@@ -248,102 +203,35 @@ else
     if [[ -n "$out" ]]; then cp -- "$file" "$out"; else cat -- "$file"; fi
     if [[ -n "$fmt" ]]; then printf '200'; fi
   }
-  hk_with_old_demo() { # 提交号：把假香港摆成「演示版还在、根上是这一版」的样子
+  hk_at() { # 提交号：把假香港摆成「根上是这一版」的样子
     rm -rf -- "$HKD"
-    mkdir -p "$HKD/health" "$HKD/demo/scopes" "$HKD/demo/assets"
+    mkdir -p "$HKD/health"
     cp -- "$RELEASES/$1/web/release.json" "$HKD/release.json"
     cp -- "$RELEASES/$1/web/health/index.html" "$HKD/health/index.html"
-    printf '<html>驾驶舱 %s</html>\n' "${1:0:1}" >"$HKD/index.html"
-    printf '<html>老的演示版</html>\n' >"$HKD/demo/index.html"
-    printf '{}\n' >"$HKD/demo/scopes/a.json"
-    printf 'd' >"$HKD/demo/assets/d.js"
-    printf 'commit=x\n' >"$HK_RETIRED_RECORD"
+    printf '<html>驾驶舱 %s</html>
+' "${1:0:1}" >"$HKD/index.html"
   }
-  retire() { # 重来一轮：清日志、清红，退出码留给调用方
-    : >"$TMP/rsync.log"
-    reset
-    retire_hk_dir >"$TMP/out"
-  }
-  config web
-  RSYNC_RETIRE_FAIL=0
-
-  NGINX=old
-  hk_with_old_demo "$A"
-  retire
-  rc=$?
-  check "老的站点配置、目录还在：删一遍、读回 404，通过、没有红" "$rc:${#REDS[@]}" "0:0"
-  check "目录真没了（连 scopes/ 一起）" "$([[ -e "$HKD/demo" ]] && echo 在 || echo 没了)" 没了
-  check "记了一笔改动，说读回是 404" "${#CHANGES[@]}:$(said_line '老的 /demo/ 目录删掉了，读回是 404')" "1:1"
-  check "删的是那一个目录：--delete 只落在 include 里、其余一律 exclude" \
-    "$(grep -c -- '--delete' "$TMP/rsync.log"):$(grep -c -e '--include=/demo/\*\*\*' "$TMP/rsync.log"):$(grep -c -e "--exclude=\*" "$TMP/rsync.log")" "1:1:1"
-  check "根上的东西一个没动" "$(find "$HKD" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" "health index.html release.json "
-  check "法国上老的发布记录也删掉了" "$([[ -e "$HK_RETIRED_RECORD" ]] && echo 在 || echo 没了)" 没了
-
-  retire
-  rc=$?
-  check "再来一轮（目录已经不在）：幂等，通过、没有红，说一声没有" "$rc:${#REDS[@]}:${#CHANGES[@]}:$(said_line '香港上没有 /demo/')" "0:0:0:1"
-
-  NGINX=new
-  hk_with_old_demo "$A"
-  retire
-  rc=$?
-  check "站点配置已换新（/demo 一直回 404）、目录却还躺在盘上：照样删掉" \
-    "$rc:${#REDS[@]}:$([[ -e "$HKD/demo" ]] && echo 在 || echo 没了)" "0:0:没了"
-
-  NGINX=none
-  hk_with_old_demo "$A"
-  retire
-  rc=$?
-  check "站点里没有 /demo 那一段、回落到首页回 200：删完读回不是 404，判红" "$rc:$(reds_with_text '不是 404')" "1:1"
-
-  NGINX=new
-  FAKE_DOWN=1
-  hk_with_old_demo "$A"
-  retire
-  rc=$?
-  FAKE_DOWN=0
-  check "读不出来（连不上香港）：判红，不当成没事" "$rc:$(reds_with_text '读不出香港')" "1:1"
-
-  RSYNC_RETIRE_FAIL=1
-  hk_with_old_demo "$A"
-  retire
-  rc=$?
-  RSYNC_RETIRE_FAIL=0
-  check "删的时候 rsync 失败：判红、不读回、记录不删" \
-    "$rc:$(reds_with_text '删香港上老的'):$([[ -e "$HK_RETIRED_RECORD" ]] && echo 在 || echo 没了)" "1:1:在"
-  rm -f -- "$HK_RETIRED_RECORD"
-
-  echo "== 健康检查：根地址的版本标记、健康页对；老目录读回 404"
-  NGINX=new
-  hk_with_old_demo "$A"
-  rm -rf -- "$HKD/demo"
+  hk_at "$A"
   config web
   reset
   check_web "$A" >/dev/null
-  check "web：版本标记、健康页、老目录 404 都对：通过、没有红" "$?:${#REDS[@]}" "0:0"
-  NGINX=none
-  reset
-  check_web "$A" >/dev/null
-  check "老目录读回不是 404（被谁发回去了，或站点配置回落到首页）：不过" "$?:$(reds_with_text '不是 404')" "1:1"
-  NGINX=new
-  hk_with_old_demo "$B"
+  check "web：版本标记、健康页都对：通过、没有红" "$?:${#REDS[@]}" "0:0"
+  hk_at "$B"
   reset
   check_web "$A" >/dev/null
   check "web：版本标记还是别的版本：不过" "$?" 1
-  hk_with_old_demo "$A"
+  hk_at "$A"
   rm -f -- "$HKD/release.json"
   reset
   check_web "$A" >/dev/null
   check "web：香港对版本标记回 404（比如站点放行的不是法国的隧道地址）：不过" "$?" 1
   check "红里说的是取不到，不当成「在发一个空版本」" "$(reds_with_text '从香港取不到')" 1
   config ""
-  LEGACY_KEYS=1
-  hk_with_old_demo "$A"
+  hk_at "$A"
   rm -f -- "$HKD/release.json"
   reset
   check_web "$A" >/dev/null
-  check "什么都不发、但有老键：不查根地址的版本标记，只查老目录读回 404" "$?:${#REDS[@]}" "0:0"
-  rm -f -- "$HK_RETIRED_RECORD"
+  check "什么都不发：不查根地址的版本标记" "$?:${#REDS[@]}" "0:0"
 fi
 
 echo "== 香港的站点配置：/demo 一律 404、不回落到首页；演示版那一段（占位、scopes）没有了"
