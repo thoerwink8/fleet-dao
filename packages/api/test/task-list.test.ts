@@ -70,6 +70,27 @@ describe('GET /api/tasks', () => {
     });
   });
 
+  it('谁在做：本机领的单带 executor=local、领取的环境和租约到期时刻；引擎的单不带领取人和租约', async () => {
+    const { get } = await open([
+      task(30, {
+        state: 'running',
+        executor: 'local',
+        claimedBy: 'founder-pc',
+        leaseUntil: '2026-10-14T15:52:00.000Z',
+      }),
+      task(31, { state: 'queued', executor: 'engine' }),
+    ]);
+    const list = await body(await get());
+    const row = (n: number) => list.items.find((i) => i.issueNumber === n);
+    expect(row(30)).toMatchObject({
+      executor: 'local',
+      claimedBy: 'founder-pc',
+      leaseUntil: '2026-10-14T15:52:00.000Z',
+    });
+    expect(row(31)).toMatchObject({ executor: 'engine' });
+    expect(row(31)).not.toHaveProperty('claimedBy');
+  });
+
   it('按状态筛：在跑、排队、等人（暂停和停滞算进去）、做完、失败、叫停各自只出自己那组', async () => {
     const { get } = await open();
     const ids = async (status: string) =>

@@ -14,6 +14,7 @@ import {
   SegmentOutcomeSchema,
   SegmentTierSchema,
   StageKindSchema,
+  TaskExecutorSchema,
   TaskStateSchema,
 } from './enums.ts';
 import { Id, type Same, Time } from './internal.ts';
@@ -32,6 +33,12 @@ export const TaskSchema = z.object({
   specDir: z.string().optional(),
   /** 被人暂停了（#820 片 3）：引擎写的「已暂停：被谁暂停、为什么」；没暂停没有这个键。暂停的单 state 仍是 running。 */
   paused: z.string().optional(),
+  /** 谁在做：engine = 法国引擎，local = 本机领的（决定 0096，tasks.executor）。老后端、老环境推来的快照没有这个键，当引擎。 */
+  executor: TaskExecutorSchema.optional(),
+  /** 本机领的单：领它的环境编号（通行证认出的，如 founder-pc；tasks.claimed_by）。引擎的单没有这个键。 */
+  claimedBy: z.string().optional(),
+  /** 本机领的单：租约到期的时刻（tasks.lease_until）；到点没续就退回法国队列。引擎的单没有这个键。 */
+  leaseUntil: Time.optional(),
   createdAt: Time,
 });
 

@@ -153,8 +153,19 @@ describe('库里的行 → 领域对象', () => {
       state: 'queued',
       priority: 10,
       acceptance: [],
+      executor: 'engine',
       createdAt: ago(MIN).toISOString(),
     });
+    // 本机领的单（决定 0096）带领取的环境和租约到期时刻；引擎的单不带，退回法国后 claimed_by 清空也不带
+    const lease = ago(-90 * MIN);
+    expect(toTask({ ...task, executor: 'local', claimedBy: 'founder-pc', leaseUntil: lease })).toMatchObject({
+      executor: 'local',
+      claimedBy: 'founder-pc',
+      leaseUntil: lease.toISOString(),
+    });
+    expect(
+      toTask({ ...task, executor: 'engine', claimedBy: 'founder-pc', leaseUntil: lease }),
+    ).not.toHaveProperty('claimedBy');
     // 引擎暂停这张单（#820 片 3）写 phase='paused'：领域对象带 paused（取 doing 那句）；别的 phase 不带；doing 空了也认暂停
     expect(toTask({ ...task, phase: 'paused', doing: '已暂停：被 frank 暂停' }).paused).toBe(
       '已暂停：被 frank 暂停',

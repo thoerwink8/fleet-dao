@@ -9,7 +9,15 @@ import { NO_OPTIONS_TEXT } from '@fleet-dao/shared';
 import type { LocalSessions, LocalSessionView, Notification, ReleasedCommits } from '../../api/types';
 import { formatDuration } from '../../lib/format';
 import type { LayoutTone } from '../layout/tone';
-import { SEGMENT_LABEL, statusTextOf, toneOf, waitLineOf } from './running-card';
+import {
+  isLocalTask,
+  leaseTextOf,
+  localWhoOf,
+  SEGMENT_LABEL,
+  statusTextOf,
+  toneOf,
+  waitLineOf,
+} from './running-card';
 import type { HomeDone, HomeRunning } from './types';
 
 // —— 要你拍的 ——
@@ -86,8 +94,18 @@ const STEP: Record<NonNullable<HomeRunning['segment']>, string> = {
   merge: '合并',
 };
 
-/** 法国引擎的一张单写成一行。 */
-export function engineRow(item: HomeRunning, now: number, link: { href: string; external: boolean }): RunRow {
+/**
+ * 一张单写成一行：引擎的写「法国引擎 · 模型」；本机领的（tasks.executor = local，决定 0096）写「本机 · 哪台 · 租约到几点」，
+ * 没有三段流水是常态，不写「还没记在哪一段」；租约过了点还没退回的标黄「租约过期」。
+ * machineOf 把领单的环境编号换成机器名（本机会话上报里有）。
+ */
+export function engineRow(
+  item: HomeRunning,
+  now: number,
+  link: { href: string; external: boolean },
+  machineOf?: (nodeId: string) => string | undefined,
+): RunRow {
+  if (isLocalTask(item)) return localTaskRow(item, now, link, machineOf);
   const { tone } = toneOf(item);
   const status = statusTextOf(item);
   const step = item.segment ? STEP[item.segment] : null;
@@ -125,8 +143,42 @@ export function engineRow(item: HomeRunning, now: number, link: { href: string; 
   };
 }
 
+function localTaskRow(
+  item: HomeRunning,
+  now: number,
+  link: { href: string; external: boolean },
+  machineOf: ((nodeId: string) => string | undefined) | undefined,
+): RunRow {
+  const base = toneOf(item);
+  const expired = item.leaseUntil !== undefined && Date.parse(item.leaseUntil) < now;
+  const tone = expired && base.tone === 'run' ? 'stall' : base.tone;
+  const since = item.taskSince
+    ? ` · 共 ${formatDuration(Math.max(0, now - Date.parse(item.taskSince)))}`
+    : '';
+  return {
+    key: `engine:${item.repo}#${item.issueNumber}`,
+    what: `#${item.issueNumber} ${item.title}`,
+    who: `${localWhoOf(item, machineOf)} · ${leaseTextOf(item, now)}`,
+    progress: `${statusTextOf(item)}${since}`,
+    tone,
+    stuck: expired ? '租约过期' : tone === 'run' ? '没卡' : tone === 'human' ? '等你' : waitLineOf(item),
+    ...(item.lastEvent && tone === 'fail' ? { why: item.lastEvent.text } : {}),
+    href: link.href,
+    external: link.external,
+    source: 'engine',
+  };
+}
+
+/** 本机会话上报没推上来的环境：不占「在跑的」的行（那是在做的事），列表下面用一行说清。 */
+export interface SilentNode {
+  id: string;
+  machine: string;
+  never: boolean;
+  why: string;
+}
+
 export type LocalRows =
-  | { kind: 'rows'; rows: RunRow[] }
+  | { kind: 'rows'; rows: RunRow[]; silent: SilentNode[] }
   /** 法国没配本机的通行证：不收本机会话。 */
   | { kind: 'notWired'; why: string };
 
@@ -134,26 +186,23 @@ const isLive = (s: LocalSessionView) => s.state !== 'stopped';
 
 /**
  * 本机会话写成行：每台在上报的机器，主会话（不是子代理）还没停的一行一件；同一个工作树、分支上在跑的子代理并进那一行。
- * 没上报的机器一行写「没上报」（不当成本机没在做事）。
+ * 没上报的机器不占行（silent 里列出，页面用一行说清；不当成本机没在做事）。本机领的单是 tasks 里 executor = local 的单，在引擎那一批里，不在这里。
  */
 export function localRows(data: LocalSessions, now: number): LocalRows {
   if (data.notWired) return { kind: 'notWired', why: data.notWired };
   const rows: RunRow[] = [];
+  const silent: SilentNode[] = [];
   for (const node of data.nodes) {
     const machine = node.machine ?? node.id;
     if (node.freshness !== 'fresh') {
-      rows.push({
-        key: `local:${node.id}:silent`,
-        what: `本机 ${machine}`,
-        who: '本机',
-        progress: node.freshness === 'never' ? '一次都没收到' : '上次收到的已经过期',
-        tone: 'stall',
-        stuck: '没上报',
+      silent.push({
+        id: node.id,
+        machine,
+        never: node.freshness === 'never',
         why:
           node.freshness === 'never'
-            ? '配了通行证，但一次都没收到（本机还没装，或计划任务推不出去）'
-            : '本机该每 2 分钟推一次：可能关机了、断网了，或计划任务停了。在做什么看不到，不当成没在做',
-        source: 'local',
+            ? '配了通行证，但一次都没收到（本机还没装，或推送停了；也可能是早就不用的环境）'
+            : '本机该每 2 分钟推一次：可能关机了、断网了，或推送停了',
       });
       continue;
     }
@@ -184,7 +233,7 @@ export function localRows(data: LocalSessions, now: number): LocalRows {
       });
     }
   }
-  return { kind: 'rows', rows };
+  return { kind: 'rows', rows, silent };
 }
 
 /** 卡着的、等你的排前面：失败 > 等你 > 黄 > 灰 > 在跑。 */
