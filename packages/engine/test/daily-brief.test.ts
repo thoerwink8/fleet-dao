@@ -175,6 +175,19 @@ describe('runDailyBriefJob', () => {
     expect(d.compares.every((c) => c.startsWith('a...'))).toBe(true);
   });
 
+  it('零点到 08:30 之间起来补昨天那一格：不发、不评论，记 unscanned；手动触发照发', async () => {
+    const early = new Date('2026-10-14T20:38:00Z'); // 北京 10-15 04:38，发版重启后定时器补的
+    const d = makeDeps({ now: () => early });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('unscanned');
+    expect(d.published).toEqual([]);
+    expect(d.comments).toEqual([]);
+    expect(d.finished).toEqual([r]);
+    const m = makeDeps({ now: () => early });
+    expect((await runDailyBriefJob(m.deps, { manual: true })).outcome).toBe('ok');
+    expect(m.published).toHaveLength(1);
+  });
+
   it('手动触发：另一个键、另一个标题，不冒充当天定时那一条', async () => {
     const d = makeDeps();
     await runDailyBriefJob(d.deps, { manual: true });
