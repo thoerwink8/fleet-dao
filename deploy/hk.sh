@@ -66,6 +66,11 @@ RETIRED_KEEP=(/srv/fleet-dao-gateway /usr/local/sbin/fleet-gateway-deploy) # 删
 RETIRED_DROP=(/etc/fleet-dao/feishu.env '/etc/fleet-dao/feishu.env.bak-*' /etc/fleet-dao/gateway-token.env
   /opt/fleet-dao/node '/opt/fleet-dao/node-v*')
 RETIRED_BACKUP_DIR=/var/backups/fleet-dao
+# 别家 self-proxy 的程序目录（#2235）：它的 self-proxy-userinfo.timer 每 15 分钟以 root 跑里面的 hk/userinfo.sh，
+# 可它每次部署都是从创始人的 Mac 上 tar 解包，属主是 Mac 的 uid 501 / 组 staff。香港没有这个 uid，眼下没人改得了，
+# 但谁拿到 uid 501 或 staff 组就能让 root 执行任意代码。装机把整棵树收成 root:root、组和其他人不可写（只动属主和写权限，
+# 内容不碰）；self-proxy 重新部署会再变回去，所以读回也查，变回去判红、重跑 hk.sh 收回
+SELF_PROXY_SRC=/opt/self-proxy/src
 
 FLEET_DOMAIN=""
 FLEET_ACME_EMAIL=""
@@ -160,6 +165,37 @@ retired_drop_present() {
       if [[ -e "$f" || -L "$f" ]]; then printf '%s\n' "$f"; fi
     done
   done
+}
+
+# SELF_PROXY_SRC 下属主不是 root、组不是 root、或组/其他人可写的：一行一个，目录不在或都干净就什么都不打印
+self_proxy_src_loose() {
+  [[ -d "$SELF_PROXY_SRC" ]] || return 0
+  find "$SELF_PROXY_SRC" -xdev \( ! -user root -o ! -group root -o -perm /022 \) ! -type l
+}
+
+# 把 self-proxy 程序目录收成 root:root、组和其他人不可写（#2235）。已经干净就什么都不动（幂等）
+fix_self_proxy_src_owner() {
+  local n
+  n=$(self_proxy_src_loose | wc -l)
+  if ((n == 0)); then
+    ok "$SELF_PROXY_SRC 没有（或已经）全属 root:root、组和其他人不可写"
+    return 0
+  fi
+  chown -R -h root:root -- "$SELF_PROXY_SRC"
+  chmod -R go-w -- "$SELF_PROXY_SRC"
+  changed "$SELF_PROXY_SRC 下 $n 处属主或写权限不对，已收成 root:root、组和其他人不可写（#2235）"
+}
+
+# 读回：同上，还有不合格的判红（多半是 self-proxy 重新部署又解包成了 Mac 的 uid）
+readback_self_proxy_src() {
+  local n first
+  n=$(self_proxy_src_loose | wc -l)
+  if ((n == 0)); then
+    ok "$SELF_PROXY_SRC 全属 root:root、组和其他人不可写"
+  else
+    first=$(self_proxy_src_loose | sed -n 1p)
+    red "$SELF_PROXY_SRC 下 $n 处属主不是 root 或别人可写（例 $first）：root 会执行里面的脚本（#2235），重跑 hk.sh 收回"
+  fi
 }
 
 # 清掉已退役的飞书网关（#2226）。停不掉、打包不成、删不掉都判红，打包不成的不删
@@ -522,6 +558,7 @@ readback() {
   readback_cert
   readback_web_upload
   readback_retired_gateway
+  readback_self_proxy_src
   readback_release
 }
 
@@ -735,6 +772,7 @@ main() {
     setup_wireguard
     setup_web_upload
     retire_gateway
+    fix_self_proxy_src_owner
     setup_fail2ban
     setup_site
     setup_tls

@@ -253,6 +253,7 @@ deploy/france/fleet-temporal.service → fleet-dao Temporal 服务端（Postgres
 |---|---|---|
 | `/etc/fleet-dao/hk.env` | root:fleet 640 | 域名、证书联系邮箱、法国的 WireGuard 公钥、法国的上传静态文件公钥。老文件里留着的 `FLEET_DEMO_PATH`（#1223）、`FLEET_GATEWAY_DEPLOY_PUBLIC_KEY`（飞书网关）是已删的键，`hk.sh` 认得、忽略 |
 | `/etc/fail2ban/jail.d/fleet-dao-sshd.local` | root:root 644 | 香港 fail2ban 的 sshd jail（#1784，仓里 `deploy/hk/fail2ban-sshd.jail`）：由 hk.sh 管（`fail2ban-client -t` 过了才 reload，没装 fail2ban 只记待配），放过隧道网段 `10.99.0.0/24`——法国在隧道里几次失败登录不会被封，发版链不会被卡死；读回查 `ignoreip` 含它，没有判红。原来手放的 `jail.d/sshd.local` 由 hk.sh 挪成 `sshd.local.bak-<日期>`，不删。法国那份（`deploy/france/fail2ban-sshd.jail`）同样带这段 `ignoreip` |
+| `/opt/self-proxy/src` | root:root，组和其他人不可写 | 别家 self-proxy 的程序目录（#2235，内容不归本仓管）：它的 `self-proxy-userinfo.timer` 每 15 分钟以 root 跑里面的 `hk/userinfo.sh`，可它每次部署都是从创始人的 Mac 上 tar 解包、属主是 Mac 的 uid 501 / 组 staff。`hk.sh` 只收属主和写权限（`chown -R root:root`、`chmod -R go-w`，不碰内容），读回查全树；self-proxy 重新部署又会变回去，`--check` 读回判红，重跑 `hk.sh` 收回 |
 | `/srv/fleet-dao` | root:root 755 | 装机脚本所在的检出 |
 | `/srv/fleet-dao-web` | root:root 755 | 静态文件，归 root：别的进程被打穿也改不了页面。由法国传来：`release.json` 写着根上的驾驶舱是哪一版（只给经隧道来的读），`/health/` 是健康页（第九节「发静态文件」）；`/demo/` 已删（#1223），目录已不在，站点一律回 404。装机脚本只在没有 `index.html` 时放占位页，不盖已发布的 |
 | `/root/.ssh/authorized_keys2` | root:root 600 | 整份归 fleet-dao：法国上传钥匙一行，限死成只许从 `10.99.0.2` 来、不给终端、只能跑 `rrsync -wo -munge /srv/fleet-dao-web`。root 原有的 `authorized_keys` 一行不碰 |
