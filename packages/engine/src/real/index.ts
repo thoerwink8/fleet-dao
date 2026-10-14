@@ -73,7 +73,12 @@ import {
   grokLaunchCommand,
   hostDrivers,
 } from './hosts.ts';
-import { type HourlyReconcileWiring, hourlyReconcileJob, worktreeCleanupJob } from './hourly-reconcile.ts';
+import {
+  closedIssueEventsJob,
+  type HourlyReconcileWiring,
+  hourlyReconcileJob,
+  worktreeCleanupJob,
+} from './hourly-reconcile.ts';
 import { intakeJob } from './intake.ts';
 import { intakeChatJob } from './intake-chat.ts';
 import { issueGroomIdlePolicyFromEnv } from './issue-groom.ts';
@@ -822,6 +827,7 @@ export function realPortsFromEnv(
     hourlyReconcile: hourlyReconcileJob(reconcileWiring),
     // 一键清理没用的工作树（#1993）：和每小时对账同一份装配、同一个判据
     worktreeCleanup: worktreeCleanupJob(reconcileWiring),
+    closedIssueEvents: closedIssueEventsJob(reconcileWiring),
     // 全流程巡检（#223）：巡检仓写在引擎配置 FLEET_CANARY_REPO（没配这一轮记没跑成，看门狗报）；开单、写需求文档、挂版本都是「引擎」机器人
     canary: canaryJob({ db, gh, repo: env.FLEET_CANARY_REPO }),
     // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤

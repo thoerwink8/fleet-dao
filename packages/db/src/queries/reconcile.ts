@@ -3,7 +3,7 @@
 // 终态的单不在第一份清单里：做完、叫停、没做完都不再要求有一条在跑的工作流。
 // 主页「开着」数的也是这些非终态行。单早已关闭、工作流不在跑的遗留行，对账列出来再改成叫停。
 import { type CiPolicy, ciPolicyOf, type RunOutcome, type TaskState } from '@fleet-dao/shared';
-import { and, asc, desc, eq, gte, inArray, notInArray, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, notInArray, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { TERMINAL_TASK_STATES } from '../schema/enums.ts';
 import {
@@ -111,6 +111,73 @@ export async function stopTaskRows(db: Db, taskIds: readonly string[], reason: s
     .where(and(inArray(tasks.id, [...taskIds]), notInArray(tasks.state, [...TERMINAL_TASK_STATES])))
     .returning({ id: tasks.id });
   return updated.length;
+}
+
+/** 收进来的一条 issues.closed 投递（后端门口放进来、处理完的）。 */
+export interface ClosedIssueDelivery {
+  deliveryId: string;
+  /** owner/name，原样取自事件。 */
+  repo: string | null;
+  payload: unknown;
+  receivedAt: Date;
+}
+
+/**
+ * since 之后收进来、引擎还没按它撤过任务（note 为空）的 issues.closed 投递，先收的在前，最多 limit 条。
+ * 引擎每几秒捞一次（jobs/closed-issue-events.ts）；处理完用 noteClosedIssueDelivery 记上，下一次就不再捞到。
+ */
+export async function pendingClosedIssueDeliveries(
+  db: Db,
+  since: Date,
+  limit = 50,
+): Promise<ClosedIssueDelivery[]> {
+  return pendingClosedIssueQuery(db, since, limit);
+}
+
+/**
+ * pendingClosedIssueDeliveries 那条查询本身（测试拿它 EXPLAIN）。where 和部分索引 github_events_closed_issue_pending_idx
+ * 的条件一一对上，改一边要改另一边，不然每几秒一次的捞会退回整表顺序扫。
+ */
+export function pendingClosedIssueQuery(db: Db, since: Date, limit: number) {
+  return db
+    .select({
+      deliveryId: githubEvents.deliveryId,
+      repo: githubEvents.repo,
+      payload: githubEvents.payload,
+      receivedAt: githubEvents.receivedAt,
+    })
+    .from(githubEvents)
+    .where(
+      and(
+        eq(githubEvents.event, 'issues'),
+        eq(githubEvents.action, 'closed'),
+        eq(githubEvents.status, 'accepted'),
+        isNull(githubEvents.note),
+        gte(githubEvents.receivedAt, since),
+      ),
+    )
+    .orderBy(asc(githubEvents.receivedAt), asc(githubEvents.deliveryId))
+    .limit(limit);
+}
+
+/**
+ * 记下引擎按这条 issues.closed 做了什么（写进 note，给人查，也是「处理过了」的记号）。只记还没记过、已放进来的那一条：
+ * 已经记过、不在库里、不是 accepted 都回 false，不改。
+ */
+export async function noteClosedIssueDelivery(db: Db, deliveryId: string, note: string): Promise<boolean> {
+  const rows = await db
+    .update(githubEvents)
+    .set({ note })
+    .where(
+      and(
+        eq(githubEvents.deliveryId, deliveryId),
+        eq(githubEvents.event, 'issues'),
+        eq(githubEvents.status, 'accepted'),
+        isNull(githubEvents.note),
+      ),
+    )
+    .returning({ id: githubEvents.deliveryId });
+  return rows.length > 0;
 }
 
 export interface IssueDeliveryRef {

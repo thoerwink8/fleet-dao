@@ -37,6 +37,13 @@ const PullPayload = z.object({
   }),
 });
 const ReviewPayload = PullPayload.extend({ review: z.object({ user: GhUser.nullable() }) });
+const IssuePayload = z.object({ issue: z.object({ number: z.number(), user: GhUser }) });
+
+/**
+ * issue 事件只收「关了」：引擎按它马上撤掉这张单停着等人的任务（engine 的 jobs/closed-issue-events.ts），开单、改单不收
+ * （单子由引擎自己拉，#632）。作者照白名单认 issue.user：白名单外的人开的单引擎不接，没有任务可撤。
+ */
+const ISSUE_ACTIONS = new Set(['closed']);
 
 /** 从 fork 来的 PR 不进引擎（head 仓被删时 repo 为 null，也按 fork 算）。 */
 function fromFork(pr: z.infer<typeof PullPayload>['pull_request']): boolean {
@@ -125,6 +132,11 @@ export function screenGithubEvent(
         const p = ReviewPayload.safeParse(payload);
         if (!p.success) return null;
         return fromFork(p.data.pull_request) ? ('fork' as const) : p.data.review.user;
+      }
+      case 'issues': {
+        if (!action || !ISSUE_ACTIONS.has(action)) return undefined;
+        const p = IssuePayload.safeParse(payload);
+        return p.success ? p.data.issue.user : null;
       }
       default:
         return undefined;

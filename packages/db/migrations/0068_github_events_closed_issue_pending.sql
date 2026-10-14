@@ -1,0 +1,1 @@
+CREATE INDEX "github_events_closed_issue_pending_idx" ON "github_events" USING btree ("received_at","delivery_id") WHERE "github_events"."event" = 'issues' and "github_events"."action" = 'closed' and "github_events"."status" = 'accepted' and "github_events"."note" is null;

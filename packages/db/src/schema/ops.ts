@@ -232,6 +232,13 @@ export const githubEvents = pgTable(
     index('github_events_unfinished_idx')
       .on(t.attempts, t.receivedAt)
       .where(sql`${t.status} in ('processing', 'failed', 'waiting')`),
+    // 引擎每几秒捞还没处理的「单关了」（queries/reconcile.ts 的 pendingClosedIssueDeliveries）：条件和那条查询的 where 一字对上，
+    // 处理完写了 note 就出索引，索引只剩没处理的几条，不扫整张投递账。
+    index('github_events_closed_issue_pending_idx')
+      .on(t.receivedAt, t.deliveryId)
+      .where(
+        sql`${t.event} = 'issues' and ${t.action} = 'closed' and ${t.status} = 'accepted' and ${t.note} is null`,
+      ),
   ],
 );
 

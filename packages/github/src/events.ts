@@ -23,7 +23,7 @@ export interface IngestedEvent {
   payload: unknown;
 }
 
-/** 叫醒哪条工作流由引擎决定：按 PR 号或分支找子任务，按头找合并队列。issue、评论的事件不收了（#556）。 */
+/** 叫醒哪条工作流由引擎决定：按 PR 号或分支找子任务，按头找合并队列。评论事件不收；issue 只收「关了」，由引擎从投递账捞（#556）。 */
 export interface WakeEvent {
   repo: string;
   event: string;
