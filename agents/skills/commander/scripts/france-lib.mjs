@@ -11,8 +11,9 @@
 // - 定时任务新不新鲜照 packages/db 的 scheduleHealth（看门狗 #203、驾驶舱定时任务页同一条线）。
 // - 页面上的字都过 scrubText（邮箱、IP、令牌、长串抹掉）；ssh 的名字不上页面（可能写的是 IP）。
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
 
@@ -352,12 +353,52 @@ function checkHost(host, from) {
 }
 
 /**
+ * 法国 sshd 的 MaxAuthTries 是 3。agent 里钥匙一多，还没轮到被授权的那把就被断开，客户端只看见公钥被拒。
+ * 只提交这几把里这台实际有的文件，并关掉 agent：监督机的 fleet_login 优先，没有就用创始人的默认钥匙
+ * （这两把在会话口子里，发版让 root 认）。不包含 grok_bot：那把不在会话口子里，不提成 root。
+ * 一把都没有就不加 -i，交给 ~/.ssh/config（可能因此仍被拒，错误信息里写明）。
+ */
+export const LOGIN_KEY_NAMES = ['fleet_login', 'id_ed25519', 'id_rsa'];
+
+/**
+ * @param {string} home
+ * @param {(file: string) => boolean} [exists]
+ * @returns {string[]}
+ */
+export function loginIdentityFiles(home, exists = existsSync) {
+  /** @type {string[]} */
+  const found = [];
+  for (const name of LOGIN_KEY_NAMES) {
+    const file = join(home, '.ssh', name);
+    if (exists(file)) found.push(file);
+  }
+  return found;
+}
+
+/** @param {string} file */
+function isKeyFile(file) {
+  try {
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * ssh 的参数：不问口令（没钥匙就直接失败）、连 10 秒连不上就算。开压缩：本机到法国的线路慢（09-27 实测约 5KB/秒），
  * 回来的 JSON 压完小一大截，一次读从十几秒降到七秒上下（其中握手四秒多）。
+ * 有登录钥匙时 IdentitiesOnly，避免 MaxAuthTries 把对的那把挤掉。
  * @param {string} host
+ * @param {{ home?: string, exists?: (file: string) => boolean, identityFiles?: string[] }} [opts]
  */
-export function sshArgs(host) {
-  return [
+export function sshArgs(host, opts = {}) {
+  const files =
+    opts.identityFiles ??
+    loginIdentityFiles(
+      opts.home ?? homedir(),
+      opts.exists ?? ((file) => existsSync(file) && isKeyFile(file)),
+    );
+  const args = [
     '-o',
     'BatchMode=yes',
     '-o',
@@ -368,9 +409,13 @@ export function sshArgs(host) {
     'ServerAliveInterval=10',
     '-o',
     'ServerAliveCountMax=3',
-    host,
-    REMOTE_COMMAND,
   ];
+  if (files.length > 0) {
+    args.push('-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none');
+    for (const file of files) args.push('-i', file);
+  }
+  args.push(host, REMOTE_COMMAND);
+  return args;
 }
 
 /**
@@ -389,15 +434,15 @@ const tail = (text, n = 2) =>
 
 /**
  * ssh 退出 255 时给人看的原因。两种断法要分开（#2134）：
- * 公钥被拒＝22 口通、这台拿出的钥匙法国不认（监督机缺 ~/.ssh/fleet_login，或没配 Host fleet-fr-wg）；
+ * 公钥被拒＝22 口通、这台拿出的钥匙法国不认（监督机缺 ~/.ssh/fleet_login，本机也没有 id_ed25519/id_rsa，或没配 Host fleet-fr-wg）；
  * Connection refused＝22 口没在听，或这台到 22 的连接被复位（#1775 那种封禁）。
  * @param {string} stderr
  */
 export function sshFailureWhy(stderr) {
   const last = tail(stderr);
   const said = last ? `ssh 原话：${last}` : '';
-  if (/Permission denied \(publickey\)/i.test(String(stderr ?? ''))) {
-    return `ssh 到了法国但公钥被拒：这台没有被法国授权的钥匙。监督机要有 ~/.ssh/fleet_login，ssh 配置里有 Host fleet-fr-wg（IdentityFile 指它，IdentitiesOnly yes）；本机把这个 Host 名写进 ~/.fleet-dao/france-ssh。${said}`.trim();
+  if (/Permission denied \(publickey\)|Too many authentication failures/i.test(String(stderr ?? ''))) {
+    return `ssh 到了法国但公钥被拒：这台拿出的钥匙法国不认。监督机要有 ~/.ssh/fleet_login，或本机有 ~/.ssh/id_ed25519、~/.ssh/id_rsa（这两把在法国会话口子里，发版让 root 认）。ssh 只提交存在的这几把（IdentitiesOnly，不走 agent），因为法国 MaxAuthTries 是 3。Host 名 fleet-fr-wg 写进 ~/.fleet-dao/france-ssh。${said}`.trim();
   }
   if (/Connection refused/i.test(String(stderr ?? ''))) {
     return `ssh 连法国被拒绝：22 口没在听，或这台到 22 的连接被复位。${said}`.trim();

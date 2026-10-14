@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # #2138：监督机没有 ~/.ssh/fleet_login，经跳板拿别的钥匙登法国 root 会被公钥拒绝。
 # 创始人登这台的公钥已经在 /etc/ssh/authorized_keys/<会话用户>（france.sh 从 pilot 抄来，root:root 644，会话用户写不了）。
-# 发版（root）把这些公钥补进 /root/.ssh/authorized_keys：没有才补，已有的行一个字不改、不删。
+# 发版（root）做两件，都不挡发版（调用方不看退出码，这里也总是返回 0）：
+#   1. 把这些公钥补进 /root/.ssh/authorized_keys：没有才补，已有的行一个字不改、不删。
+#   2. 写 sshd 的 Match User root（52-fleet-dao-root-login.conf），让 root 同时直接认那份会话口子。
+#      抄进 authorized_keys 没写成、或 StrictModes 把那份丢掉时，root 仍认会话口子里的同一把。
 # 不碰 authorized_keys2（发布钥匙），不把监督机的 grok_bot 提成 root（那把不在会话口子里）。
 # 同时把 .ssh 收成 700、authorized_keys 收成 600，属主在 root 下跑时改成 root:root，否则 sshd StrictModes 整份不认。
-# 值不进日志，只打补了几把和指纹。缺文件、写不了都不挡发版（调用方不看退出码，这里也总是返回 0）。
-# 测试把 ROOT_SSH_LOGIN_SRC、ROOT_SSH_HOME 指到临时目录。真发版会先 unset 这两个，避免环境把路径指走。
+# 值不进日志，只打补了几把和指纹。sshd -t 不过就撤掉刚写的 drop-in，不重载。
+# 测试把 ROOT_SSH_LOGIN_SRC、ROOT_SSH_HOME、ROOT_SSH_LOGIN_DROPIN 指到临时目录。
+# 真发版会先 unset 这几个和 ROOT_SSH_LOGIN_SSHD_T、ROOT_SSH_LOGIN_RELOAD，避免环境把路径指走。
 
 root_ssh_login_src() {
   if [[ -n "${ROOT_SSH_LOGIN_SRC:-}" ]]; then
@@ -187,5 +191,120 @@ ensure_root_login_keys() {
   new_fps="${add_fps[*]}"
   printf '  ✓ root 登录：从会话口子补进 %d 把公钥（%s），原有的行没删\n' "$added" "$new_fps"
   root_ssh_login_modes_line "$ssh" "$ak"
+  return 0
+}
+
+# drop-in 默认放这里。52 排在 51（会话用户的 Match）后面；各自在自己的文件里结束，不漏到别的用户。
+root_ssh_login_dropin() {
+  if [[ -n "${ROOT_SSH_LOGIN_DROPIN:-}" ]]; then
+    printf '%s' "$ROOT_SSH_LOGIN_DROPIN"
+    return 0
+  fi
+  printf '/etc/ssh/sshd_config.d/52-fleet-dao-root-login.conf'
+}
+
+# 路径只许绝对路径、由这些字符组成，且没有 ..。不合规矩的不能写进 sshd 配置。
+root_ssh_login_path_ok() { # 路径
+  [[ "$1" =~ ^/[A-Za-z0-9._/-]+$ ]] || return 1
+  [[ "$1" != *..* ]] || return 1
+}
+
+# Match User root 的那一份。钥匙文件路径由调用方保证过 root_ssh_login_path_ok。
+root_ssh_login_dropin_text() { # 钥匙文件
+  printf '%s\n' \
+    '# deploy/lib/root-ssh-login.sh 写的（发版、退回）。别在机器上手改：下次发版按这份重写。' \
+    '# root 同时认自己家里的 authorized_keys、authorized_keys2，和会话口子里的公钥。' \
+    '# 会话口子 root:root 644，会话用户写不了。不改口令登录。Match 到本文件末尾为止，不漏到别的用户。' \
+    'Match User root' \
+    "	AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2 $1"
+}
+
+root_ssh_login_sshd_check() {
+  if [[ -n "${ROOT_SSH_LOGIN_SSHD_T:-}" ]]; then
+    bash -c "$ROOT_SSH_LOGIN_SSHD_T"
+    return
+  fi
+  sshd -t
+}
+
+root_ssh_login_sshd_reload() {
+  if [[ -n "${ROOT_SSH_LOGIN_RELOAD:-}" ]]; then
+    bash -c "$ROOT_SSH_LOGIN_RELOAD"
+    return
+  fi
+  systemctl reload ssh.service
+}
+
+# 让 root 直接认会话口子。文件没变不重载。sshd -t 不过就还原，不重载。写不了、验不了都不挡发版。
+ensure_root_login_sshd() {
+  local keys dropin dir text old="" have_old=0 tmp err
+  # 补钥匙的测试把家目录指走、不设 drop-in：别去动这台机器的 sshd。
+  if [[ -n "${ROOT_SSH_LOGIN_HOME:-}" && -z "${ROOT_SSH_LOGIN_DROPIN:-}" ]]; then
+    return 0
+  fi
+  keys=$(root_ssh_login_src)
+  dropin=$(root_ssh_login_dropin)
+  if ! root_ssh_login_path_ok "$keys"; then
+    printf '  - root 登录：会话口子路径不能写进 sshd 配置，没改 sshd\n'
+    return 0
+  fi
+  if ! root_ssh_login_path_ok "$dropin"; then
+    printf '  - root 登录：drop-in 路径不合规矩，没改 sshd\n'
+    return 0
+  fi
+  dir=${dropin%/*}
+  if [[ ! -d "$dir" || -L "$dir" ]]; then
+    printf '  - root 登录：%s 不是目录，没改 sshd\n' "$dir"
+    return 0
+  fi
+  if [[ -L "$dropin" || (-e "$dropin" && ! -f "$dropin") ]]; then
+    printf '  - root 登录：%s 不是普通文件，没改 sshd\n' "$dropin"
+    return 0
+  fi
+  text=$(root_ssh_login_dropin_text "$keys")
+  if [[ -f "$dropin" && ! -r "$dropin" ]]; then
+    printf '  - root 登录：读不了 %s，没改 sshd\n' "$dropin"
+    return 0
+  fi
+  if [[ -f "$dropin" ]]; then
+    old=$(<"$dropin") || old=""
+    have_old=1
+  fi
+  if ((have_old)) && [[ "$old" == "$text" ]]; then
+    printf '  ✓ root 登录：sshd 已让 root 认会话口子，没改\n'
+    return 0
+  fi
+  tmp=$(mktemp "$dir/.52-fleet-dao-root-login.XXXXXX") || {
+    printf '  - root 登录：在 %s 里建不了临时文件，没改 sshd\n' "$dir"
+    return 0
+  }
+  if ! printf '%s\n' "$text" >"$tmp"; then
+    rm -f -- "$tmp"
+    printf '  - root 登录：写不进临时文件，没改 sshd\n'
+    return 0
+  fi
+  chmod 644 -- "$tmp" || true
+  if ((EUID == 0)); then
+    chown root:root -- "$tmp" || true
+  fi
+  if ! mv -f -- "$tmp" "$dropin"; then
+    rm -f -- "$tmp"
+    printf '  - root 登录：换不上 %s，没改 sshd\n' "$dropin"
+    return 0
+  fi
+  if ! err=$(root_ssh_login_sshd_check 2>&1); then
+    if ((have_old)); then
+      printf '%s\n' "$old" >"$dropin" || true
+    else
+      rm -f -- "$dropin"
+    fi
+    printf '  - root 登录：加上 drop-in 之后 sshd -t 不过，已撤掉，没重载：%s\n' "${err:0:200}"
+    return 0
+  fi
+  if ! err=$(root_ssh_login_sshd_reload 2>&1); then
+    printf '  - root 登录：sshd -t 过了，但重载没成（文件已放好，下次 ssh 重启生效）：%s\n' "${err:0:200}"
+    return 0
+  fi
+  printf '  ✓ root 登录：sshd 让 root 同时认会话口子，已重载\n'
   return 0
 }

@@ -2408,6 +2408,28 @@ describe('整池暂停到期（#954）', SLOW, () => {
     expect(second).toBe(0);
   });
 
+  it('有创始人默认钥匙时 ssh 只提交那一把，不走 agent', () => {
+    const home = temp('holds-key');
+    mkdirSync(join(home, '.fleet-dao'), { recursive: true });
+    mkdirSync(join(home, '.ssh'), { recursive: true });
+    writeFileSync(join(home, '.fleet-dao', 'france-ssh'), 'france-box\n');
+    writeFileSync(join(home, '.ssh', 'id_rsa'), 'not-a-real-key');
+    let args: string[] = [];
+    hook.readFrancePoolHolds({
+      home,
+      now: 1,
+      spawn: (_cmd, got) => {
+        args = got;
+        return { status: 0, stdout: '', stderr: '' };
+      },
+    });
+    expect(args).toContain('IdentitiesOnly=yes');
+    expect(args).toContain('IdentityAgent=none');
+    expect(args).toContain(join(home, '.ssh', 'id_rsa'));
+    expect(args.join('\n')).not.toContain('grok_bot');
+    expect(args.slice(-2)[0]).toBe('france-box');
+  });
+
   it('开会话见到到期的会提示；工人不查、不出这句', () => {
     const w = world();
     const value = { 'claude-solo': hold({ reviewBy: '2026-10-01' }) };

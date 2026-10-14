@@ -18,7 +18,7 @@
 # 发布构建在沙箱里跑、读不到密钥目录和本机库 socket，沙箱建不成就不发、不退回用 fleet 直接构建（build-isolation，#79）、
 # node 的编译缓存目录归 root、别人放不进（node-cache）、会话用户在本机开的口只许它自己和 root 连（session-ports，#35）、
 # 法国 sshd 抗扫描和 fail2ban 的 sshd jail（sshd-hardening，#1348：sshd -t 不过撤掉文件不重载、有效配置被盖掉判红、fail2ban 没装只记待配）、
-# 发版把会话口子里已有的公钥补进 root 的 authorized_keys（root-ssh-login，#2138：没有才补、原行不删、不碰 authorized_keys2、口子没有不挡发版）、
+# 发版把会话口子里已有的公钥补进 root 的 authorized_keys，并让 sshd 的 Match User root 直接认同一份（root-ssh-login，#2138：没有才补、原行不删、不碰 authorized_keys2、sshd -t 不过就撤、口子没有不挡发版）、
 # 香港防火墙基线（hk-firewall：ufw 没开、命令失败或认不出、默认不是拒绝、多开的对公网端口都判红；只有出站 ALLOW OUT 不算已放行；第二遍不改 ufw；别家 8443 不动）、
 # france.sh 读回看板收件口挡不挡得住假通行证（node-report-gate：401 才算通过，503 没配钥匙记待配，200/400 判红）、
 # docs/ops.md 端口表和脚本对得上、docs/ops.md 里放文件的命令收到空的或半截的不换（place-file）、--ops 真跑了这两块（ops-only）、
