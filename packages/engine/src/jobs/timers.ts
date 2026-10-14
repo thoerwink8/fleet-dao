@@ -28,21 +28,11 @@ export interface TimerJob {
    */
   overdueMinutes: number;
   /**
-   * 起来时补记没收尾的 schedule_runs 用的一轮工作上限（分钟）：开始得比这还早还没结束的，补记成没跑成。
-   * 不给就用 overdueMinutes。巡检的 schedule_run 盖住整段工作流，要给工作流时限，不是起工作流那一下的 15 分钟。
-   */
-  abandonAfterMinutes?: number;
-  /**
-   * 引擎总开关关着时这个任务这一轮不跑（#1086）：拉单、巡检这类会拉单、派活、起干活会话的任务标它；探针、读额度、看门狗、
+   * 引擎总开关关着时这个任务这一轮不跑（#1086）：拉单这类会拉单、派活、起干活会话的任务标它；探针、读额度、看门狗、
    * 对账这些看家检查不标，关着照跑（关着也要能看到渠道通不通）。闸在这里统一判，不在各任务里各加 if。
    */
   needsMaster?: boolean;
   run(): Promise<unknown>;
-  /**
-   * 总开关关着、这一轮被跳过之后任务自己要做的收尾（#1141，巡检用它收前面断轮留下的单：补记没收尾的几轮、关单、关 PR、
-   * 撤断了的报警）；抛了只记日志，不挡定时。
-   */
-  onMasterSkip?: () => Promise<void>;
 }
 
 export interface TimerHost {
@@ -89,11 +79,6 @@ export function latestSlot(job: Pick<TimerJob, 'everyMinutes' | 'offsetMinutes'>
   return Math.floor((t - offset) / every) * every + offset;
 }
 
-/** 这个任务起来时补记没收尾记录用的上限：给了 abandonAfterMinutes 用它，否则用一轮工作上限 overdueMinutes。 */
-export function abandonAfterMinutes(job: Pick<TimerJob, 'overdueMinutes' | 'abandonAfterMinutes'>): number {
-  return job.abandonAfterMinutes ?? job.overdueMinutes;
-}
-
 export interface InterruptedScheduleCloseInput {
   jobs: readonly { id: string; startedBefore: Date }[];
   at: Date;
@@ -117,7 +102,7 @@ export async function startEngineTimers(
     const ids = await closeInterrupted({
       jobs: jobs.map((job) => ({
         id: job.id,
-        startedBefore: new Date(at.getTime() - abandonAfterMinutes(job) * MINUTE_MS),
+        startedBefore: new Date(at.getTime() - job.overdueMinutes * MINUTE_MS),
       })),
       at,
       why: INTERRUPTED_SCHEDULE_WHY,
@@ -155,7 +140,7 @@ export function startTimers(jobs: readonly TimerJob[], host: TimerHost): EngineT
         job.overdueMinutes * MINUTE_MS,
       );
       try {
-        // 引擎总开关（#1086）：拉单、巡检这类要总开关开着才跑；关着（含读不到、认不出）这一轮不跑，记一笔 partial 说明原因
+        // 引擎总开关（#1086）：拉单这类要总开关开着才跑；关着（含读不到、认不出）这一轮不跑，记一笔 partial 说明原因
         if (job.needsMaster && host.master && !(await host.master.refresh())) {
           const why = `引擎总开关关着，这一轮不跑：${masterOffNote(host.master.state())}`;
           host.log('info', `定时任务 ${job.id}：${why}`);
@@ -165,14 +150,6 @@ export function startTimers(jobs: readonly TimerJob[], host: TimerHost): EngineT
             host.log(
               'error',
               `定时任务 ${job.id}：总开关关着跳过这一轮，但没记进 schedule_runs：${error instanceof Error ? error.message : String(error)}`,
-            );
-          }
-          try {
-            await job.onMasterSkip?.();
-          } catch (error) {
-            host.log(
-              'error',
-              `定时任务 ${job.id}：总开关关着跳过这一轮，跳过时的收尾没做成：${error instanceof Error ? error.message : String(error)}`,
             );
           }
           return;

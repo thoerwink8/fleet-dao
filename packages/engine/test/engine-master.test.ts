@@ -1,5 +1,5 @@
 // 引擎总开关的闸（#1086，engine-master.ts）：缓存怎么读、读不到按关；和「闸门测试」——总开关关着、把定时任务各跑一轮，
-// 起模型会话的次数是 0、看家检查（探针等）至少各跑一次；开着时同样一轮，拉单、巡检跑了，对照证明这条测试抓得到「关着还在拉单」。
+// 起模型会话的次数是 0、看家检查（探针等）至少各跑一次；开着时同样一轮，拉单跑了，对照证明这条测试抓得到「关着还在拉单」。
 // 用假的钟和假的 setTimeout（和 timers.test.ts 同一套），不真等、不碰库、不起会话。
 import { describe, expect, it } from 'vitest';
 import type { EngineJobs } from '../src/activities.ts';
@@ -167,8 +167,6 @@ function counters() {
     carpool: 0,
     hourly: 0,
     watchdog: 0,
-    canaryStarts: 0,
-    canarySweeps: 0,
   };
 }
 
@@ -183,7 +181,6 @@ describe('闸门测试：总开关关着，跑一轮所有定时任务', () => {
       quotaRead: never,
       carpoolWatch: never,
       hourlyReconcile: never,
-      canary: never,
       watchdog: never,
       intake: never,
       judgeSelfCheck: never,
@@ -218,37 +215,22 @@ describe('闸门测试：总开关关着，跑一轮所有定时任务', () => {
       watchdog: async () => {
         count.watchdog += 1;
       },
-      // 拉单一轮会起任务、起模型会话；巡检会起一条巡检工作流（里面再开单、等拉单派活）
+      // 拉单一轮会起任务、起模型会话
       intake: async () => {
         count.sessions += 1;
       },
-      canary: async () => {
-        count.canaryStarts += 1;
-      },
     };
-    return real.map((j) => ({
-      ...j,
-      run: stand[j.id] ?? (async () => {}),
-      // 巡检的 onMasterSkip（#1141）会去调 jobs.canary 装依赖收留单；这里换成计数的替身（jobs.canary 是 never）
-      ...(j.id === 'canary'
-        ? {
-            onMasterSkip: async () => {
-              count.canarySweeps += 1;
-            },
-          }
-        : {}),
-    }));
+    return real.map((j) => ({ ...j, run: stand[j.id] ?? (async () => {}) }));
   }
 
-  it('关着：拉单、巡检不跑（起会话 0 次），探针和别的看家检查至少各跑一次；被跳过的两个各记一条原因', async () => {
+  it('关着：拉单不跑（起会话 0 次），探针和别的看家检查至少各跑一次；被跳过的拉单记一条原因', async () => {
     const count = counters();
     const r = rig(fixedEngineMaster(false));
     const timers = startTimers(registered(count), r.host);
-    // 拨过 6 个半小时：巡检（6 小时一格）、每小时对账、15 分钟一格的探针和对账、5 分钟一格的拉单和看门狗都至少到点一回
+    // 拨过 6 个半小时：每小时对账、15 分钟一格的探针和对账、5 分钟一格的拉单和看门狗都至少到点一回
     await r.advanceTo(T0 + 6 * 60 * MIN + 30 * MIN);
     await timers.stop(0);
     expect(count.sessions).toBe(0);
-    expect(count.canaryStarts).toBe(0);
     expect(count.probes).toBeGreaterThanOrEqual(1);
     expect(count.reconcile).toBeGreaterThanOrEqual(1);
     expect(count.quota).toBeGreaterThanOrEqual(1);
@@ -256,31 +238,27 @@ describe('闸门测试：总开关关着，跑一轮所有定时任务', () => {
     expect(count.hourly).toBeGreaterThanOrEqual(1);
     expect(count.watchdog).toBeGreaterThanOrEqual(1);
     const skippedJobs = new Set(r.skipped.map((s) => s.jobId));
-    expect([...skippedJobs].sort()).toEqual(['canary', 'intake']);
+    expect([...skippedJobs].sort()).toEqual(['intake']);
     for (const s of r.skipped) expect(s.why).toContain('总开关');
-    // 总开关关着跳过的轮次也收前面断轮留下的单（#1141）
-    expect(count.canarySweeps).toBeGreaterThanOrEqual(1);
   });
 
-  it('对照：开着同样一轮，拉单、巡检都跑了（证明上面那条抓得到「关着还在拉单」）', async () => {
+  it('对照：开着同样一轮，拉单跑了（证明上面那条抓得到「关着还在拉单」）', async () => {
     const count = counters();
     const r = rig(fixedEngineMaster(true));
     const timers = startTimers(registered(count), r.host);
     await r.advanceTo(T0 + 6 * 60 * MIN + 30 * MIN);
     await timers.stop(0);
     expect(count.sessions).toBeGreaterThanOrEqual(1);
-    expect(count.canaryStarts).toBeGreaterThanOrEqual(1);
     expect(count.probes).toBeGreaterThanOrEqual(1);
-    expect(count.canarySweeps).toBe(0);
     expect(r.skipped).toEqual([]);
   });
 
-  it('关着时只有拉单、巡检标了 needsMaster：看家检查一个都不标（标多了关着就看不见渠道通不通）', () => {
+  it('关着时只有拉单标了 needsMaster：看家检查一个都不标（标多了关着就看不见渠道通不通）', () => {
     const flagged = engineTimerJobs({ jobs: fakeEngineJobs(), client, taskQueue: 'fleet' })
       .filter((j) => j.needsMaster)
       .map((j) => j.id)
       .sort();
-    expect(flagged).toEqual(['canary', 'intake']);
+    expect(flagged).toEqual(['intake']);
   });
 
   it('【故意造出的失败】总开关读不到（闸按关算）：拉单照样不跑；记「跳过」没记上也只记日志，不停掉定时', async () => {

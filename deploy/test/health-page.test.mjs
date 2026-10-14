@@ -25,32 +25,32 @@ test('三项都明说在线、HTTP 200：全绿', () => {
 test('「未接」的项：不算不在线，整体照样绿，写明未接和单号', () => {
   const checks = {
     ...allOk,
-    canary: { ok: true, status: 'not_wired', message: '这台机器不跑全流程巡检（#223）' },
+    watchdog: { ok: true, status: 'not_wired', message: '这台机器不跑看门狗（#203）' },
   };
   const v = judge({ status: 200, body: report(true, checks) });
   assert.equal(v.ok, true);
   assert.equal(v.summary, '全部在线（1 项还没接上）');
-  const row = byKey(v).canary;
-  assert.equal(row.label, '全流程巡检');
+  const row = byKey(v).watchdog;
+  assert.equal(row.label, '看门狗');
   assert.equal(row.ok, true);
   assert.equal(row.notWired, true);
-  assert.equal(row.reason, '未接：这台机器不跑全流程巡检（#223）');
+  assert.equal(row.reason, '未接：这台机器不跑看门狗（#203）');
   // 「未接」样子不完整（缺原因、原因是空的、status 认不出）：不算绿
   for (const bad of [
     { ok: true, status: 'not_wired' },
     { ok: true, status: 'not_wired', message: ' ' },
     { ok: true, status: 'someday', message: '还没做' },
   ]) {
-    const u = judge({ status: 200, body: report(true, { ...allOk, canary: bad }) });
+    const u = judge({ status: 200, body: report(true, { ...allOk, watchdog: bad }) });
     assert.equal(u.ok, false, JSON.stringify(bad));
-    assert.equal(byKey(u).canary.ok, false);
-    assert.equal(byKey(u).canary.reason, '这一项的格式认不出');
+    assert.equal(byKey(u).watchdog.ok, false);
+    assert.equal(byKey(u).watchdog.reason, '这一项的格式认不出');
   }
   // 接上以后出错：照样红
-  const broken = { ...allOk, canary: { ok: false, code: 'unreachable', message: '连不上' } };
+  const broken = { ...allOk, watchdog: { ok: false, code: 'unreachable', message: '连不上' } };
   const w = judge({ status: 503, body: report(false, broken) });
   assert.equal(w.ok, false);
-  assert.equal(byKey(w).canary.ok, false);
+  assert.equal(byKey(w).watchdog.ok, false);
 });
 
 test('判断题（judge）：显示成「判断题」；没配是「未接」不算坏，调用没成照实报红', () => {
@@ -129,28 +129,16 @@ test('GitHub 机器人权限（github_app）：显示成「GitHub 机器人权�
   assert.equal(byKey(w).github_app.reason, 'GitHub 机器人的权限有要人看的问题（github_app）');
 });
 
-test('全流程巡检（canary）：显示成「全流程巡检」；通过写明几点、用了多久，断了照实报红、写明断在哪一步', () => {
-  const pass = { ok: true, message: '最近一轮 09-27 20:26 通过（用时 43 分钟）' };
-  const v = judge({ status: 200, body: report(true, { ...allOk, canary: pass }) });
-  assert.equal(v.ok, true);
-  assert.equal(byKey(v).canary.label, '全流程巡检');
-  assert.equal(byKey(v).canary.reason, '在线：最近一轮 09-27 20:26 通过（用时 43 分钟）');
-  const broken = { ok: false, code: 'canary_broken', message: '最近一轮（09-27 20:31 有结论）断在「派活」' };
-  const w = judge({ status: 503, body: report(false, { ...allOk, canary: broken }) });
-  assert.equal(w.ok, false);
-  assert.equal(byKey(w).canary.reason, '最近一轮（09-27 20:31 有结论）断在「派活」（canary_broken）');
-});
-
 test('待定（#1909）：结论早于当前部署这种「不是坏、现在也说不了好」的一项成全页不红，单独写「待定」', () => {
   const pending = {
     ok: true,
     status: 'pending',
     message: '这条结论早于当前部署（10-11 22:08），等新一轮（发版后最多 12 小时）',
   };
-  const v = judge({ status: 200, body: report(true, { ...allOk, canary: pending }) });
+  const v = judge({ status: 200, body: report(true, { ...allOk, watchdog: pending }) });
   assert.equal(v.ok, true);
   assert.equal(v.summary, '全部在线（1 项待定）');
-  const row = byKey(v).canary;
+  const row = byKey(v).watchdog;
   assert.equal(row.ok, true);
   assert.equal(row.pending, true);
   assert.equal(row.notWired, undefined);
@@ -158,17 +146,21 @@ test('待定（#1909）：结论早于当前部署这种「不是坏、现在也
   // 「待定」和「未接」一起时都数出来
   const both = judge({
     status: 200,
-    body: report(true, { ...allOk, canary: pending, judge: { ok: true, status: 'not_wired', message: 'x' } }),
+    body: report(true, {
+      ...allOk,
+      watchdog: pending,
+      judge: { ok: true, status: 'not_wired', message: 'x' },
+    }),
   });
   assert.equal(both.summary, '全部在线（1 项待定，1 项还没接上）');
   // 待定缺原因：样子不完整，认不出、报红（不冒充待定）
   const bad = judge({
     status: 503,
-    body: report(false, { ...allOk, canary: { ok: true, status: 'pending' } }),
+    body: report(false, { ...allOk, watchdog: { ok: true, status: 'pending' } }),
   });
   assert.equal(bad.ok, false);
-  assert.equal(byKey(bad).canary.ok, false);
-  assert.equal(byKey(bad).canary.reason, '这一项的格式认不出');
+  assert.equal(byKey(bad).watchdog.ok, false);
+  assert.equal(byKey(bad).watchdog.reason, '这一项的格式认不出');
 });
 
 test('看门狗（watchdog）：显示成「看门狗」；跑完一轮写明几点、查了几个，停了照实报红、写明上次几点跑完', () => {

@@ -410,10 +410,9 @@ export const scheduleRuns = pgTable(
 );
 
 /**
- * 全流程巡检（#223）一轮一行：巡检在巡检仓开一张固定的小单，看它从收单一路走到合并、关单、记账、驾驶舱显示
- * （步骤见 enums.ts 的 CANARY_STAGES；换成三段任务工作流之前的老几轮记的是老步骤 RETIRED_CANARY_STAGES）。
- * 结论三种（CANARY_VERDICTS），还在跑时 verdict、ended_at 为空、stage 是走到哪一步。
- * 这一轮本身跑没跑成记在 schedule_runs（没跑成是 failed，看门狗照登记表报）；链断在哪记在这里，巡检自己报「卡住报警」。
+ * 全流程巡检（#223）一轮一行。巡检随决定 0093 删了，换成看门狗的「主线 N 小时没合 PR」报警：这张表停写、没有代码再读，
+ * 表和历史行留着（删表属删数据，要人拍）。列的含义照旧：步骤见 enums.ts 的 CANARY_STAGES、老步骤 RETIRED_CANARY_STAGES，
+ * 结论见 CANARY_VERDICTS。
  */
 export const canaryRuns = pgTable(
   'canary_runs',

@@ -40,7 +40,6 @@ import type { EngineJobs, EngineTasks } from '../activities.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import { createEngineMasterGate, type EngineMasterGate } from '../engine-master.ts';
-import { foreignCanarySlugs } from '../jobs/canary-scope.ts';
 import { probeAssignedRoute } from '../jobs/dispatch-probe.ts';
 import { probeOrgNow } from '../jobs/route-probe.ts';
 import { routeProbeLock } from '../jobs/route-probe-now.ts';
@@ -49,8 +48,6 @@ import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
 import { type EnginePorts, PortError } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
 import { configFromEnv } from '../worker.ts';
-import { canaryJob } from './canary.ts';
-import { DECLARED_CANARY_DEPLOY_DIR, readDeclaredCanaryRepos } from './canary-repos.ts';
 import { carpoolApiReader } from './carpool-api.ts';
 import { carpoolRegistry } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
@@ -828,22 +825,11 @@ export function realPortsFromEnv(
     // 一键清理没用的工作树（#1993）：和每小时对账同一份装配、同一个判据
     worktreeCleanup: worktreeCleanupJob(reconcileWiring),
     closedIssueEvents: closedIssueEventsJob(reconcileWiring),
-    // 全流程巡检（#223）：巡检仓写在引擎配置 FLEET_CANARY_REPO（没配这一轮记没跑成，看门狗报）；开单、写需求文档、挂版本都是「引擎」机器人
-    canary: canaryJob({ db, gh, repo: env.FLEET_CANARY_REPO }),
-    // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤
+    // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤；
+    // 另看各项目主线多久没合 PR（决定 0093，jobs/merge-stall.ts），有待做的单还 N 小时没合就报，合了或没活了自己撤
     watchdog: watchdogJob({ db }),
     // 拉单（#632）：每 5 分钟读开着「让 AI 接活」的仓里该做的单、起任务工作流；开关全关时是正常的空闲。
-    // 别的环境的巡检仓不收（#1136）：名单从这一版 deploy/*/desired-config.json 来，对不上自己的 FLEET_CANARY_REPO 的不拉。
-    intake: intakeJob({
-      db,
-      gh,
-      canaryRepo: env.FLEET_CANARY_REPO ?? null,
-      foreignCanaries: async () => {
-        const declared = readDeclaredCanaryRepos(DECLARED_CANARY_DEPLOY_DIR);
-        if ('error' in declared) throw new Error(declared.error);
-        return foreignCanarySlugs(env.FLEET_CANARY_REPO, declared.slugs);
-      },
-    }),
+    intake: intakeJob({ db, gh }),
     // 判断题自检（#1365）：最近一次调用失败超过 30 分钟，发一道不占额度的固定题。不看总开关。
     judgeSelfCheck: judgeSelfCheckJob({ db, env }),
     // 每周刷新 CI 测试耗时表（#921）：读本仓 ci.yml 日志、重写表、开 PR。不看总开关。

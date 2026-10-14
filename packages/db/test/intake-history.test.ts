@@ -4,13 +4,16 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   firstTaskCreatedSince,
   INTAKE_BREAKER_SETTING,
+  INTAKE_WAITING_SETTING,
   readIntakeBreaker,
+  readIntakeWaiting,
   recentEndedTasks,
   TASK_ADOPT_AUDIT_ACTION,
   taskAdoptsSince,
   taskFailureCount,
   tasksCreatedSince,
   writeIntakeBreaker,
+  writeIntakeWaiting,
 } from '../src/queries/intake-history.ts';
 import { auditLog, settings, stateChanges } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
@@ -60,22 +63,6 @@ describe('一小时内起了几条', () => {
     await addTask(t.db, repo.id, { createdAt: ago(MIN) });
     expect(await tasksCreatedSince(t.db, ago(HOUR))).toBe(2);
   });
-
-  it('巡检仓里标题是巡检单的任务行不计入；别的仓同标题、巡检仓里的普通单都算', async () => {
-    const canary = await addRepo(t.db, 'fleet-dao-canary');
-    const other = await addRepo(t.db, 'demo');
-    const title = '巡检第 4 轮：往巡检记录追加一行';
-    await addTask(t.db, canary.id, { createdAt: ago(MIN), title });
-    await addTask(t.db, canary.id, { createdAt: ago(MIN), title: '普通单' });
-    await addTask(t.db, other.id, { createdAt: ago(MIN), title });
-    const exclude = {
-      owner: 'ACME',
-      name: 'fleet-dao-canary',
-      titlePosix: '^巡检第 [0-9]+ 轮：往巡检记录追加一行$',
-    };
-    expect(await tasksCreatedSince(t.db, ago(HOUR), exclude)).toBe(2);
-    expect(await tasksCreatedSince(t.db, ago(HOUR))).toBe(3);
-  });
 });
 
 describe('一小时内接手了几条老行', () => {
@@ -104,25 +91,6 @@ describe('一小时内接手了几条老行', () => {
     await adopt(failed.id, ago(MIN), { ok: false, error: '没写上' });
     await adopt(fresh.id, ago(MIN));
     expect(await taskAdoptsSince(t.db, ago(HOUR))).toBe(1);
-  });
-
-  it('巡检仓里标题是巡检单的接手不计入；别的仓同标题、巡检仓里的普通单都算', async () => {
-    const canary = await addRepo(t.db, 'fleet-dao-canary');
-    const other = await addRepo(t.db, 'demo');
-    const title = '巡检第 4 轮：往巡检记录追加一行';
-    const skipped = await addTask(t.db, canary.id, { createdAt: ago(2 * HOUR), title });
-    const plain = await addTask(t.db, canary.id, { createdAt: ago(2 * HOUR), title: '普通单' });
-    const elsewhere = await addTask(t.db, other.id, { createdAt: ago(2 * HOUR), title });
-    await adopt(skipped.id, ago(MIN));
-    await adopt(plain.id, ago(MIN));
-    await adopt(elsewhere.id, ago(MIN));
-    const exclude = {
-      owner: 'ACME',
-      name: 'fleet-dao-canary',
-      titlePosix: '^巡检第 [0-9]+ 轮：往巡检记录追加一行$',
-    };
-    expect(await taskAdoptsSince(t.db, ago(HOUR), exclude)).toBe(2);
-    expect(await taskAdoptsSince(t.db, ago(HOUR))).toBe(3);
   });
 });
 
@@ -178,5 +146,25 @@ describe('熔断状态（设置表）', () => {
   it('【故意造出的失败】这一行的形状认不出：抛错，不当成正常', async () => {
     await t.db.insert(settings).values({ key: INTAKE_BREAKER_SETTING, value: { state: 'half', at: 'x' } });
     await expect(readIntakeBreaker(t.db)).rejects.toThrow(/认不出/);
+  });
+});
+
+describe('每个仓等空位的单数（设置表 engine.intakeWaiting，决定 0093）', () => {
+  it('没写过是 null；写了读回；再写整份换掉', async () => {
+    expect(await readIntakeWaiting(t.db)).toBeNull();
+    await writeIntakeWaiting(t.db, { at: ago(HOUR), byRepo: { a: 2, b: 0 }, by: 'engine:intake' });
+    expect(await readIntakeWaiting(t.db)).toEqual({ at: ago(HOUR), byRepo: { a: 2, b: 0 } });
+    await writeIntakeWaiting(t.db, { at: NOW, byRepo: { b: 1 }, by: 'engine:intake' });
+    expect(await readIntakeWaiting(t.db)).toEqual({ at: NOW, byRepo: { b: 1 } });
+  });
+
+  it('【故意造出的失败】张数不是非负整数、时刻认不出：抛错，不当成「没有待做的单」', async () => {
+    await t.db
+      .insert(settings)
+      .values({ key: INTAKE_WAITING_SETTING, value: { at: NOW.toISOString(), byRepo: { a: -1 } } });
+    await expect(readIntakeWaiting(t.db)).rejects.toThrow(/认不出/);
+    await t.db.delete(settings);
+    await t.db.insert(settings).values({ key: INTAKE_WAITING_SETTING, value: { at: 'x', byRepo: {} } });
+    await expect(readIntakeWaiting(t.db)).rejects.toThrow(/认不出/);
   });
 });

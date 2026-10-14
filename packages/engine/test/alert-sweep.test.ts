@@ -10,6 +10,7 @@ import {
   type AlertSweepDeps,
   alertRepoFromText,
   FILE_LABELS,
+  RETIRED_CANARY_WHY,
   sweepAlerts,
 } from '../src/jobs/alert-sweep.ts';
 import { beijingDayStart } from '../src/jobs/reconcile-common.ts';
@@ -259,14 +260,14 @@ describe('卡住报警立案', () => {
       createdAt: new Date(NOW.getTime() - 23 * HOUR),
     });
     const decision = row({ id: 'd', dedupeKey: 'ask:acme/widgets:human', level: 'decision' });
-    const canary = row({ id: 'c', dedupeKey: 'canary:acme/widgets:broken' });
+    const stall = row({ id: 'c', dedupeKey: 'watchdog:merge:acme/widgets:after-3' });
     const missing = row({ id: 'm', dedupeKey: 'wf:failure:acme/widgets:missing' });
     const reconcile = row({
       id: 'r',
       dedupeKey: 'reconcile:pr:acme/widgets#9',
       title: '机器人开的 PR 没经合并队列合',
     });
-    const h = harness([silenced, fixing, waiting, fresh, decision, canary, missing, reconcile], {
+    const h = harness([silenced, fixing, waiting, fresh, decision, stall, missing, reconcile], {
       handling: async () =>
         new Map([
           stage('s', 'silenced'),
@@ -284,9 +285,23 @@ describe('卡住报警立案', () => {
     expect(h.opened[0]?.body).toContain('无（AI 发现：提醒 reconcile:pr:acme/widgets#9 第 1 天没人处理）');
     expect(h.opened[0]?.labels).toEqual(['缺陷']);
     expect(reconcile.body.startsWith('已立案：#')).toBe(true);
-    for (const kept of [silenced, fixing, waiting, fresh, decision, canary, missing]) {
+    for (const kept of [silenced, fixing, waiting, fresh, decision, stall, missing]) {
       expect(kept.body, kept.dedupeKey).not.toContain('已立案：');
     }
+  });
+
+  it('已删的全流程巡检留下的 canary:*：见到就撤、写明改由看门狗报，不立案（决定 0093）', async () => {
+    const broken = row({ id: 'b', dedupeKey: 'canary:broken' });
+    const leftover = row({ id: 'l', dedupeKey: 'canary:leftover-pr:acme/widgets#7' });
+    const h = harness([broken, leftover]);
+    const part = await h.run();
+    expect(part.unchecked).toEqual([]);
+    expect(h.opened).toEqual([]);
+    for (const r of [broken, leftover]) {
+      expect(r.resolvedAt, r.dedupeKey).not.toBeNull();
+      expect(r.body.startsWith(`已撤：${RETIRED_CANARY_WHY}`)).toBe(true);
+    }
+    expect(RETIRED_CANARY_WHY).toContain('watchdog:merge:');
   });
 
   it('一次最多 2 张，老的先开；一个仓今天满 4 张就跳过，别的仓还能开', async () => {

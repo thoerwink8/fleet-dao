@@ -10,24 +10,9 @@ import { TASK_WORKFLOW_TYPE } from '@fleet-dao/shared/workflow-ids';
 export const WORKFLOW_TYPES = {
   /** P0 验收（deploy/hello.sh）：跑一次就知道引擎工人在接活。 */
   hello: 'helloWorkflow',
-  /** 全流程巡检（#223）：引擎的定时器每 6 小时起一条（jobs/canary-start.ts），开一张巡检单一路看到有结论，见 jobs/canary.ts。 */
-  canary: 'canaryWorkflow',
   /** 任务（#632）：拉单（jobs/intake.ts）起的，一张单一条，编号 taskWorkflowId（shared/workflow-ids.ts），见 task-contract.ts。 */
   task: TASK_WORKFLOW_TYPE,
 } as const;
-
-/** 全流程巡检一轮的输入：巡检哪个仓、几点开单，都由活动按引擎配置和当时的时刻定（工作流里不取时刻）。 */
-export interface CanaryInput {
-  schemaVersion: 1;
-}
-
-/** 巡检开单以后每隔多久看一回（秒）。工作流和活动共用这一个数。 */
-export const CANARY_POLL_SECONDS = 120;
-/**
- * 连着这么多回没查成，这一轮算巡检自己没跑成：活动里读不到库、问不了 Temporal 的，由活动记成没跑成；活动本身连着失败
- * （工人丢了、记结论没成）的，工作流停下，这一轮在库里停在「在跑」，登记表上过期、看门狗照样看得见。
- */
-export const CANARY_CHECK_FAILURE_LIMIT = 10;
 
 /** 看门狗一轮的结局：和记进 schedule_runs 的同一份。scanned = 看了几个定时任务（不算它自己），found = 几个没跑成或不新鲜。 */
 export interface WatchdogRun {

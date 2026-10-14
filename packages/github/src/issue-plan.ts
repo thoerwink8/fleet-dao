@@ -87,7 +87,7 @@ export interface IssuePlan {
   subIssues: number;
 }
 
-/** 只查仓里还开着的里程碑（巡检开单前找巡检仓的当前版本，引擎 jobs/canary.ts）。 */
+/** 只查仓里还开着的里程碑。 */
 export const OPEN_MILESTONES_QUERY = `query OpenMilestones($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     milestones(states: [OPEN], first: 100) { totalCount nodes { number title } }

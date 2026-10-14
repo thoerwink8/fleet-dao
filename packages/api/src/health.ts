@@ -133,9 +133,6 @@ export function serviceHealthChecks(parts: {
   sessionOrg: () => Promise<void>;
   /** GitHub 两个机器人的权限（github-app-health.ts）：引擎每小时对账自检报的缺权限、没查成的提醒还开着就报红。 */
   githubApp: () => Promise<void>;
-  /** 全流程巡检（canary-health.ts，#223）：最近一轮的结论和时间；不在正式环境报「未接」。 */
-  // biome-ignore lint/suspicious/noConfusingVoidType: 同上，没说明的检查是 async () => {}
-  canary: { check(): Promise<void | string>; readonly notWired?: string };
   /** 看门狗（watchdog-health.ts，#203）：它自己最近一轮几点跑完、有没有过期；不在正式环境报「未接」。 */
   // biome-ignore lint/suspicious/noConfusingVoidType: 同上，没说明的检查是 async () => {}
   watchdog: { check(): Promise<void | string>; readonly notWired?: string };
@@ -165,8 +162,6 @@ export function serviceHealthChecks(parts: {
     // 机器人权限被人在 GitHub 上改了、新权限在安装处没点接受会自己变红（和这一版好不好无关），好了引擎下一轮撤提醒、跟着回绿：
     // 发版脚本同样只标待处理、不退回
     { name: 'github_app', check: parts.githubApp },
-    // 巡检断了、没跑成会跟着巡检的结论自己变红（和这一版好不好无关）：发版脚本同样只标待处理、不退回
-    { name: 'canary', check: () => parts.canary.check(), ...notWired(parts.canary.notWired) },
     // 看门狗停了、没跑成会跟着引擎自己变红（和这一版好不好无关）：发版脚本同样只标待处理、不退回
     { name: 'watchdog', check: () => parts.watchdog.check(), ...notWired(parts.watchdog.notWired) },
     // 推不成跟着网络、对方自己变红（和这一版好不好无关）：要接上别的环境之前，发版脚本的 DRIFTING_HEALTH_ITEMS 要加上它

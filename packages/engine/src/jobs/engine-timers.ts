@@ -2,18 +2,10 @@
 // 每周刷新耗时表和判断题自检的格子在 jobs/schedules.ts（单子点名登记在那里），这里只把它们装进来。
 // 调度本身在 jobs/timers.ts。任务编号 = 登记表（real/jobs.ts 的 ENGINE_JOBS）上的编号。原来 8 个的格子是 Temporal Schedule 的
 // interval + offset，没改；耗时表是新的，周一 06:00（北京时间）。#1078 起不再建 Temporal Schedule，进程内定时器按这些格子跑。
-// 引擎总开关（#1086）关着时只有标了 needsMaster 的两个不跑（拉单、巡检）。看家检查关着照跑。每周刷新耗时表也不标：它不拉单、
+// 引擎总开关（#1086）关着时只有标了 needsMaster 的拉单不跑（全流程巡检随决定 0093 删了）。看家检查关着照跑。每周刷新耗时表也不标：它不拉单、
 // 不起会话，而总开关每次发版都会关，标了就几乎刷不上。
 import type { Client } from '@temporalio/client';
 import type { EngineJobs } from '../activities.ts';
-import {
-  CANARY_EVERY_HOURS,
-  CANARY_JOB,
-  CANARY_OFFSET_MINUTES,
-  CANARY_RUN_TIMEOUT_MINUTES,
-  sweepCanaryLeftovers,
-} from './canary.ts';
-import { startCanaryWorkflow } from './canary-start.ts';
 import { CARPOOL_WATCH_EVERY_MINUTES, CARPOOL_WATCH_JOB, runCarpoolWatchJob } from './carpool-watch.ts';
 import { runCiTimingsJob } from './ci-timings.ts';
 import {
@@ -84,7 +76,7 @@ function need<K extends keyof EngineJobs>(jobs: EngineJobs, name: K): NonNullabl
 
 /**
  * 引擎要有的定时任务。每一轮现装依赖（和原来每个活动一次一装一样：要 Temporal 客户端的几个拿这里给的）。
- * 补跑窗口都是「一格」：停机一阵再起来只补最近一轮，每轮都是看当时的库和 GitHub，补旧的没意义；巡检例外，错过的那一轮一小时内补上。
+ * 补跑窗口都是「一格」：停机一阵再起来只补最近一轮，每轮都是看当时的库和 GitHub，补旧的没意义。
  */
 export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue: string }): TimerJob[] {
   const { jobs, client, taskQueue } = o;
@@ -101,8 +93,6 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
   const cliVersions = need(jobs, 'cliVersions');
   const cliUpgrade = need(jobs, 'cliUpgrade');
   const requestSweep = need(jobs, 'requestSweep');
-  // 巡检的活动在工作流里跑，依赖不在这里装；但没装齐要在起的时候就发现，别等到工作流里的活动才报
-  need(jobs, 'canary');
   return [
     {
       id: GITHUB_RECONCILE_JOB.id,
@@ -146,26 +136,6 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       catchupMinutes: HOURLY_RECONCILE_EVERY_MINUTES,
       overdueMinutes: OVERDUE_MINUTES,
       run: () => runHourlyReconcileJob(hourlyReconcile(client, taskQueue)),
-    },
-    {
-      // 全流程巡检（#223）：这里只起工作流（jobs/canary-start.ts）；已经有一轮在跑就跳过这一轮
-      id: CANARY_JOB.id,
-      everyMinutes: CANARY_EVERY_HOURS * 60,
-      offsetMinutes: CANARY_OFFSET_MINUTES,
-      catchupMinutes: 60,
-      overdueMinutes: OVERDUE_MINUTES,
-      // schedule_run 从开单一直开到工作流收尾，不是「起工作流」那一下。过了工作流时限才算被腰斩，免得重启把还在跑的巡检补成没跑成
-      abandonAfterMinutes: CANARY_RUN_TIMEOUT_MINUTES,
-      // 巡检开一张单、等引擎拉单起任务：总开关关着时拉单不拉，开了单也永远等不到被派，所以关着时这一轮不跑（#1086）
-      needsMaster: true,
-      run: async () => {
-        await startCanaryWorkflow(client, taskQueue);
-      },
-      // 总开关关着跳过的轮次也把前面断轮留下的单、PR 和报警收掉（#1141）：不然这些只在巡检真跑一轮时收，
-      // 关着期间主页一直挂着旧巡检卡、报警一直红。收不掉的记日志、不抛（timers.ts 兼住），下一轮跳过时接着收
-      onMasterSkip: async () => {
-        await sweepCanaryLeftovers(need(jobs, 'canary')(client));
-      },
     },
     {
       // 看门狗（#203）：按登记表看各定时任务新不新鲜

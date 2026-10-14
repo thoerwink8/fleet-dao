@@ -113,7 +113,7 @@ export const PROGRESS_KINDS = valuesOf<ProgressKind>()([
 export const TERMINAL_TASK_STATES = ['done', 'stopped', 'failed'] as const satisfies readonly TaskState[];
 
 /**
- * 全流程巡检（#223）一轮的结论：pass 通过；broken 断在哪一步；not_run 巡检自己没跑成（没配、仓读不到、开不了单）。
+ * 全流程巡检（#223，决定 0093 删了；canary_runs 表停写、留着历史行）一轮的结论：pass 通过；broken 断在哪一步；not_run 巡检自己没跑成（没配、仓读不到、开不了单）。
  * 「没跑成」和「跑了没问题」分开写，不许混。skipped（#1050）：巡检仓的「让 AI 接活」关着，这一轮开都没开（开了也不会被拉）：
  * 不是通过、不是断了、也不是巡检自己没跑成——不开单、不推卡住报警、不扫描，原因必须写。
  */
@@ -146,30 +146,6 @@ export const RETIRED_CANARY_STAGES = ['dispatch', 'plan', 'execute'] as const;
 export type RetiredCanaryStage = (typeof RETIRED_CANARY_STAGES)[number];
 /** canary_runs 的 stage、steps 里读得到的：现在的几步，加上老的几轮记下的老步骤。 */
 export type RecordedCanaryStage = CanaryStage | RetiredCanaryStage;
-
-/** 巡检每一步给人看的名字（报警、健康页、演练命令都用这一份）；老步骤也在，库里老的几轮读出来照样是人话。 */
-export const CANARY_STAGE_NAMES: Readonly<Record<RecordedCanaryStage, string>> = {
-  open: '开单',
-  intake: '收单',
-  implement: '动手',
-  pr: '开 PR、过 CI',
-  verify: '验收',
-  merge: '合并',
-  close: '关单',
-  ledger: '记账',
-  board: '驾驶舱显示',
-  dispatch: '派活',
-  plan: '规划',
-  execute: '执行',
-};
-
-/** 巡检一轮最长多久（分钟）：到了还没走完，断在当时那一步。 */
-export const CANARY_MAX_MINUTES = 300;
-/**
- * 一轮的工作流最长活多久（分钟，Temporal 的 workflowRunTimeout）：比一轮的上限多给 30 分钟收尾。过了这么久还没有结论的一轮，
- * 工作流一定已经没了（被终止、工人丢了、看一回连着失败）：健康页不再说它「在跑」，下一轮开始时补记成没跑成。
- */
-export const CANARY_RUN_TIMEOUT_MINUTES = CANARY_MAX_MINUTES + 30;
 
 export const stageKind = pgEnum('stage_kind', STAGE_KINDS);
 export const taskState = pgEnum('task_state', TASK_STATES);
