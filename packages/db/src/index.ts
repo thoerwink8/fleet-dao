@@ -14,6 +14,7 @@ export * from './queries/channel-models.ts';
 export * from './queries/cli-versions.ts';
 export * from './queries/engine.ts';
 export * from './queries/engine-master.ts';
+export * from './queries/executor-line-stats.ts';
 export * from './queries/groom.ts';
 export * from './queries/healthz-watch.ts';
 export * from './queries/history.ts';
