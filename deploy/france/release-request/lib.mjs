@@ -20,8 +20,8 @@
 // - 发后体检（#2026）：第 0 步记发版前异常基线（开着的卡住报警、/healthz 不好的项）、第 2 步记总开关和各仓接活开关；第 6 步核目标在用、/healthz、
 //   没有和这次发版有关的新异常（RELEASE_ALERT_PREFIXES；重启打断的几类 15 分钟内重试；无关的只列出不拦）、再跑一遍预检（已是最新）；
 //   第 7 步核引擎总开关和各仓接活开关和发版前一致（被人动过的照实报不一致，不替人改回）。
-//   结论写进 release-train.json 的 check 和 last-request.json；开始、成功、卡住、失败各推飞书一条（engine.env 的 FLEET_FEISHU_WEBHOOK，
-//   和引擎推主线红同一个群机器人）。
+//   结论写进 release-train.json 的 check 和 last-request.json；开始、成功、卡住、失败各记一条提醒进通知中心（notifications，键 release:…）：
+//   卡住、失败是「要你拍」，由驾驶舱后端用飞书应用机器人立刻推进团队群（packages/api/src/feishu-push.ts）；开始、成功等只是 daily 级，不推，留给每日简报读。
 // - 请求的种类（#2027，请求文件的 kind，没写就是 release 发布，老后端照常）：retry 从停在第 3 步「等收尾」的那一趟接着走（老版本留下的）、
 //   restore 从没成在第 7 步「恢复」的那一趟把引擎总开关开回（只认我们关过的：发版前开着、pausedMaster 不是 false）、abort 撤掉暂停（等价 release-train abort：
 //   我们关过的、还没动手发版就开回暂停前的样子，已动手发过版保持关）；不认识的 kind 拒绝并写原因，不当成发布。各种都落 last-request.json（kind、by）。
@@ -946,16 +946,32 @@ export function releaseMessage(kind, state) {
   return `${text}。${buttonHint(state, kind)}。`.replace(/\s+/g, ' ').slice(0, 900);
 }
 
-/** 推一条飞书；推不出去只记下来（stderr、进度里的 pushes），不拦发版、不当成推过。 */
+/** 哪几种要人看：进「要你拍」，后端马上推飞书；其余（开始、成功、重试、恢复、撤暂停）只是 daily，进每日简报，不推。 */
+export const RELEASE_ALERT_KINDS = ['check', 'blocked', 'failed'];
+/** 发版提醒的键前缀（简报按它认「发版」这一类）。 */
+export const RELEASE_NOTE_PREFIX = 'release:';
+
+/** 这一条提醒怎么记：级别、键（同一趟同一种只一行；不同趟时刻不同）、标题（第一句）。 */
+export function releaseNote(kind, state, text, now) {
+  const sha = String(state.target?.value ?? '').slice(0, 12);
+  return {
+    kind,
+    level: RELEASE_ALERT_KINDS.includes(kind) ? 'decision' : 'daily',
+    key: `${RELEASE_NOTE_PREFIX}${kind}:${sha}:${Math.floor(now.getTime() / 1000)}`,
+    title: text.split('。')[0].slice(0, 200),
+  };
+}
+
+/** 记一条发版提醒；记不进去只记下来（stderr、进度里的 pushes），不拦发版、不当成记过。 */
 async function push(io, state, kind, persist = true) {
   const text = releaseMessage(kind, state);
   try {
-    await io.notify(text);
+    await io.notify(text, releaseNote(kind, state, text, io.now()));
     state.pushes.push({ kind, ok: true });
   } catch (e) {
     const why = e instanceof Error ? e.message : String(e);
     state.pushes.push({ kind, ok: false, why });
-    io.err(`飞书没推成（${kind}）：${why}`);
+    io.err(`发版提醒没记下（${kind}）：${why}`);
   }
   if (persist) io.writeState(state);
 }
@@ -994,7 +1010,7 @@ function writeOutcome(io, state, req, outcome) {
  *   发后体检（#2026）：currentRelease() → Promise<{ ok, sha } | { ok: false, why }>（current 链接）、
  *   healthz() → Promise<{ status, body, error? }>（后端 /healthz）、mainHead(sha) → Promise<{ ok, sha, behind } | { ok: false, why }>
  *   （取最新主线，主线头和它比 sha 多几个提交）、repoSwitches() → Promise<{ ok, repos: { 仓: since|null } } | { ok: false, why }>，
- *   notify(text) → Promise<void>（推飞书，推不出去就抛）,
+ *   notify(text, note) → Promise<void>（记一条提醒进通知中心，note = releaseNote 的返回；记不进去就抛）,
  * }。返回退出码。
  */
 export async function runRequest(io) {
