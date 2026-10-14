@@ -24,10 +24,11 @@
 // 下一次验收用新正文。同一次继续里上限仍在。这样继续累计超过 3 次就不再清零，停下交给指挥官。老历史没有这个标记，
 // 仍只把用尽的那一个计数清掉。
 // 停下之前先自动处理一次（决定 0093）：这张单头一回轮数用尽不停下（patched('auto-continue-rounds')，task-runtime.ts 的
-// exhaustRounds 回 auto）：轮数清零、重读单子，下一轮动手避开最近的模型（rt.avoidModel），直接再动手不先重走 CI；之后用尽照旧停下，
+// exhaustRounds 回 auto）：轮数清零、重读单子，下一轮动手避开最近的模型和它那一族（rt.avoidModel；别的族派不出退回只避开模型），直接再动手不先重走 CI；之后用尽照旧停下，
 // 自动那一次算进 MAX_ROUND_RESETS。推的时候空交付（EMPTY_DELIVERY）这张单里先再派一轮（patched('auto-before-park')）。
-// 冷验收和等 CI 同时起（patched('verify-parallel-ci')，deliver 的 startVerify / joinVerify）：CI 不绿就不认验收的结果（不取消，
-// 让活动自己跑完；不加轮数）；CI 绿了再等验收、认了才算一轮；两样都过才挂自动合并。
+// 冷验收和等 CI 同时起（patched('verify-parallel-ci')，deliver 的 startVerify / joinVerify）：CI 不绿就不认验收的结果（不加轮数），
+// 并取消那一次验收（patched('verify-cancel-on-ci-red')，dropVerify：省一次验收会话的 token；老历史照旧让它自己跑完）；
+// CI 绿了再等验收、认了才算一轮；两样都过才挂自动合并。
 // 停下前 PR 已开、头已记录，点「继续」先走 deliver（等 CI、验收、挂自动合并），不先起动手会话（patched('continue-redelivers-open-pr')，#1582）。
 // 动手一轮会话跑完但没有提交（#1408，patched('avoid-empty-commit-route')）：下一轮选路避开这条路由；连着第二轮仍没提交，
 // 再避开这个模型。避开只在这张单里。没有别的候选就照旧用原来的路由，lastProblem 写「没有别的路由可换」，不死等。
@@ -108,7 +109,7 @@ import { coldVerifyPr, verifyAlongsideCi } from './task-verify.ts';
 
 /** 和等 CI 同时起的那一次冷验收：结果（不抛）和起的时候的头。 */
 interface EarlyVerify {
-  result: ReturnType<typeof verifyAlongsideCi>;
+  run: ReturnType<typeof verifyAlongsideCi>;
   head: string | null;
 }
 
@@ -228,11 +229,12 @@ class TaskFlow {
         return direct;
       }
 
-      // 冷验收和等 CI 同时起（决定 0093）：CI 不绿就不认验收那一边（活动让它自己跑完，不取消、不加轮数）；CI 绿了再等验收的结果
+      // 冷验收和等 CI 同时起（决定 0093）：CI 不绿就不认验收那一边（取消它、不加轮数）；CI 绿了再等验收的结果
       // 验收轮数已经到顶（要先自动续或停下等人）的那一回不并行：用尽的处理不该和 CI 搅在一起
       const early =
         rt.verifyRound < MAX_VERIFY_ROUNDS && patched('verify-parallel-ci') ? this.startVerify(brief) : null;
       const ci = await waitForCiPolicy(rt);
+      if (ci.kind !== 'green') this.dropVerify(early);
       if (ci.kind === 'merged') return { commit: ci.mergeCommit };
       if (ci.kind === 'rework') return 'rework';
       if (ci.kind === 'skip') {
@@ -246,6 +248,7 @@ class TaskFlow {
       const again = await readRepoCiPolicy(rt);
       this.ciMode = again;
       if (again === 'off') {
+        this.dropVerify(early);
         const direct = await this.mergeNowAndFinish(rt);
         if (direct === 'rework') return 'rework';
         if (direct === 'head_moved') continue;
@@ -278,7 +281,15 @@ class TaskFlow {
   /** 和等 CI 同时起的冷验收（决定 0093）：只调一次活动、不动状态；记下起的时候的头，CI 收场后据此认不认。 */
   private startVerify(brief: TaskBrief): EarlyVerify {
     const head = this.rt.head;
-    return { result: verifyAlongsideCi(this.rt, brief), head };
+    return { run: verifyAlongsideCi(this.rt, brief), head };
+  }
+
+  /**
+   * CI 不绿（红了、冲突、已合、仓切成不强制）：旁边那一次验收的结果反正不认，取消它，省一次验收会话的 token（决定 0093）。
+   * 已经跑完的再取消不发命令（见 AlongsideVerify.cancel）。老历史没有这个标记：照旧让它自己跑完。
+   */
+  private dropVerify(early: EarlyVerify | null): void {
+    if (early && patched('verify-cancel-on-ci-red')) early.run.cancel();
   }
 
   /**
@@ -286,7 +297,7 @@ class TaskFlow {
    * 认了的结果交给串行验收当第一轮用：别人换了头、做不出来、这会儿验不了，都和串行时一样停下或等（不再白调一次活动）。认了才算一轮。
    */
   private async joinVerify(early: EarlyVerify, brief: TaskBrief): Promise<'pass' | 'rework' | 'head_moved'> {
-    const got = await early.result;
+    const got = await early.run.result;
     if (!got.ok) {
       if (got.error instanceof Abandoned || isCancellation(got.error)) throw got.error;
       return this.verifyOnce(brief);

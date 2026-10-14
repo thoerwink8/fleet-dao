@@ -95,6 +95,61 @@ describe('轮数头一回用尽：自动换路由续一次（决定 0093）', { 
     expect(calls.segment.at(-1)?.route.modelId).toBe('m1');
   });
 
+  it('换路由按族避开：同族还有别的模型也不派，派到别的族；选路带上 avoidFamilies', async () => {
+    const world = createFakeWorld({
+      routes: [
+        { routeId: 'r1', poolId: 'p1', modelId: 'm1', family: 'claude', hostId: 'claude-code' },
+        // 目录记成 unclassified、作者族认得出是 claude 的同族模型：排在别的族前面也不派
+        {
+          routeId: 'r4',
+          poolId: 'p4',
+          modelId: 'm3',
+          family: 'unclassified',
+          authorFamily: 'claude',
+          hostId: 'claude-code',
+        },
+        { routeId: 'r3', poolId: 'p3', modelId: 'm2', family: 'kimi', hostId: 'api-shell' },
+      ],
+      ci: (_i, n) => (n <= MAX_IMPLEMENT_ROUNDS ? RED : undefined),
+    });
+    const { tasks, calls } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment.at(-1)?.route.modelId).toBe('m2');
+    const picks = world.callsOf('pickRoute').map((c) => c.input);
+    expect(picks.slice(0, MAX_IMPLEMENT_ROUNDS).every((p) => p.avoidFamilies === undefined)).toBe(true);
+    expect(picks.at(-1)).toMatchObject({ avoidModelIds: ['m1'], avoidFamilies: ['claude'] });
+  });
+
+  it('没有别的族可用：退回只避开模型（同族换一个模型），不派回原来那条', async () => {
+    const world = createFakeWorld({
+      routes: [
+        { routeId: 'r1', poolId: 'p1', modelId: 'm1', family: 'claude', hostId: 'claude-code' },
+        { routeId: 'r4', poolId: 'p4', modelId: 'm3', family: 'claude', hostId: 'claude-code' },
+      ],
+      ci: (_i, n) => (n <= MAX_IMPLEMENT_ROUNDS ? RED : undefined),
+    });
+    const { tasks, calls } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment.at(-1)?.route.modelId).toBe('m3');
+    const picks = world.callsOf('pickRoute').map((c) => c.input);
+    // 先整族避开派不出，再只避开模型选一次
+    expect(picks.at(-2)).toMatchObject({ avoidModelIds: ['m1'], avoidFamilies: ['claude'] });
+    expect(picks.at(-1)?.avoidModelIds).toEqual(['m1']);
+    expect(picks.at(-1)?.avoidFamilies).toBeUndefined();
+  });
+
   it('【故意造出的失败】自动续之后又用尽：这回停下等人（只自动一次）', async () => {
     const world = createFakeWorld({ ci: (_i, n) => (n <= 2 * MAX_IMPLEMENT_ROUNDS ? RED : undefined) });
     const { tasks, calls } = scripted();
@@ -340,6 +395,69 @@ describe('冷验收和等 CI 同时起（决定 0093）', { timeout: 90_000 }, (
     expect(fb).toContain('FAIL a.test.ts');
     expect(fb).not.toContain('不该出现在返工意见里');
     expect(calls.verify.at(-1)?.round).toBe(1);
+  });
+
+  it('CI 先红了：旁边还在跑的验收当场取消（省一次验收会话），下一轮照常验、照常合', async () => {
+    const world = createFakeWorld({ holdPorts: ['waitCi'], ci: (_i, n) => (n === 1 ? RED : undefined) });
+    let cancelled = 0;
+    const { tasks, calls } = scripted({
+      verify: async (_i, n, signal) => {
+        if (n > 1) return { pass: true, problems: [], round: 1 };
+        // 第 1 次一直跑，直到被取消
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve()));
+        cancelled += 1;
+        throw new Error('验收被取消了');
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await waitUntil(() => calls.verify.length === 1, '验收在 CI 出结果之前就起了');
+        world.releasePort('waitCi');
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    expect(cancelled).toBe(1);
+    expect(calls.verify).toHaveLength(2);
+    expect(calls.verify.at(-1)?.round).toBe(1);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('验收已经跑完了 CI 才红：再取消不出错（跑完的活动不发取消），照常返工', async () => {
+    const world = createFakeWorld({ holdPorts: ['waitCi'], ci: (_i, n) => (n === 1 ? RED : undefined) });
+    const { tasks, calls } = scripted({
+      verify: (_i, n) =>
+        n === 1
+          ? { pass: false, problems: ['不该出现在返工意见里'], round: 1 }
+          : { pass: true, problems: [], round: 1 },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await waitUntil(() => calls.verify.length === 1, '验收先跑完');
+        // 等验收的结果真交回工作流（活动收场）再放 CI：这时再取消就是「已跑完再取消」
+        await waitUntil(async () => {
+          const events = (await h.fetchHistory()).events ?? [];
+          const scheduled = events
+            .filter((e) => e.activityTaskScheduledEventAttributes?.activityType?.name === 'coldVerify')
+            .map((e) => String(e.eventId));
+          return events.some((e) =>
+            scheduled.includes(String(e.activityTaskCompletedEventAttributes?.scheduledEventId)),
+          );
+        }, '验收的结果交回了工作流');
+        world.releasePort('waitCi');
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    expect(calls.segment[1]?.feedback.join('\n')).not.toContain('不该出现在返工意见里');
   });
 
   it('CI 绿、验收没过：照常返工，验收意见进下一轮', async () => {

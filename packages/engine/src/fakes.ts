@@ -133,7 +133,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
             !input.avoidRouteIds.includes(r.routeId) &&
             !input.avoidPoolIds.includes(r.poolId) &&
             !input.avoidModelIds.includes(r.modelId) &&
-            !families.has(r.family.toLowerCase()) &&
+            !families.has((r.authorFamily ?? r.family).toLowerCase()) &&
             (!models || models.includes(r.modelId)),
         )
         .sort((a, b) => (models ? models.indexOf(a.modelId) - models.indexOf(b.modelId) : 0));

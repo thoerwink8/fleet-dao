@@ -49,6 +49,7 @@ import {
   EMPTY_DISPATCH_PROBE,
   mergeAvoid,
   NO_AVOID,
+  NO_OTHER_FAMILY,
   NO_OTHER_ROUTE,
   PausedInterrupt,
   RESUME_STARTED_SLACK_MS,
@@ -57,6 +58,7 @@ import {
   tokenBudgetStop,
   widen,
   withDispatchProbeNote,
+  withoutFamilies,
   ZERO,
 } from './task-support.ts';
 
@@ -329,6 +331,8 @@ async function pickRoute(
   let stickTo = stick;
   let prefer: string | undefined;
   let droppedDry = false;
+  // 没提交的避让里整族避开的那一层已经去掉（别的族一条都派不出，决定 0093）：只避开模型再选
+  let droppedFamilies = false;
   let holdForProbe = false;
   let lastStopDetail = '';
   // 这一轮已经记下「全都探不通」。再选到能派的，把上次停下的原因清掉，别留在任务状态里。
@@ -361,6 +365,7 @@ async function pickRoute(
     stickTo = undefined;
     prefer = undefined;
     droppedDry = false;
+    droppedFamilies = false;
     rt.fellBackToMissRoute = false;
     await rt.pauseForRoute('slot', lastStopDetail, ROUTE_RETRY_SECONDS, wakeMark);
   };
@@ -416,7 +421,7 @@ async function pickRoute(
     const mark = rt.routeWakeMark();
     // 原路重试（stick）和「没有别的路由」的再选一次，都不再叠没提交的避让：否则刚派回去的那条又被滤掉。
     const useDry = avoidEmpty && !droppedDry && !stickTo && prefer === undefined;
-    const dry = useDry ? rt.commitAvoid : NO_AVOID;
+    const dry = useDry ? (droppedFamilies ? withoutFamilies(rt.commitAvoid) : rt.commitAvoid) : NO_AVOID;
     const merged = useDry ? mergeAvoid(avoid, dry) : avoid;
     const avoidRouteIds = [...merged.routeIds];
     for (const id of probeAvoid) if (!avoidRouteIds.includes(id)) avoidRouteIds.push(id);
@@ -431,6 +436,8 @@ async function pickRoute(
         avoidRouteIds,
         avoidPoolIds: merged.poolIds,
         avoidModelIds: merged.modelIds,
+        // 整族避开（决定 0093）：只有自动换路由加过族才带，老历史里没有，选路参数和原来一样
+        ...(merged.families && merged.families.length > 0 ? { avoidFamilies: merged.families } : {}),
         ...(stickTo ? { stickRouteId: stickTo } : {}),
         ...(prefer ? { preferRouteId: prefer } : {}),
         ...(failedChannel ? { failedChannel } : {}),
@@ -441,6 +448,12 @@ async function pickRoute(
       const miss = rt.commitMissRoute;
       const missUsable = miss !== null && !probeAvoid.includes(miss.routeId) ? miss : null;
       if (got.waitFor === 'none') {
+        // 整族避开之后别的族一条都派不出：先退回只避开模型再选一次（同族换个模型），还不行再照旧派原来那条
+        if (useDry && (dry.families?.length ?? 0) > 0) {
+          droppedFamilies = true;
+          rt.status.lastProblem = NO_OTHER_FAMILY;
+          continue;
+        }
         const blocked = dry.routeIds.length + dry.poolIds.length + dry.modelIds.length > 0;
         if (useDry && blocked && missUsable) {
           droppedDry = true;

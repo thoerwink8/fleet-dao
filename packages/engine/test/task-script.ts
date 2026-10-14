@@ -59,7 +59,12 @@ export interface Script {
     beat: () => void,
   ) => Promise<RunSegmentResult>;
   delivery: (n: number, input: ReadDeliveryInput) => DeliveryRead;
-  verify: (input: ColdVerifyInput, n: number) => ColdVerifyResult;
+  /** signal：活动被取消（和 CI 同时起、CI 先红了，决定 0093）时会触发；要等它的脚本自己 await。 */
+  verify: (
+    input: ColdVerifyInput,
+    n: number,
+    signal: AbortSignal,
+  ) => ColdVerifyResult | Promise<ColdVerifyResult>;
   guarded: (n: number) => GuardedPaths;
   arm: (n: number, input: ArmAutoMergeInput) => ArmAutoMergeResult;
   merged: (n: number) => MergeWait;
@@ -159,10 +164,16 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
       calls.delivery += 1;
       return script.delivery(calls.delivery, input);
     },
-    async coldVerify(input) {
+    async coldVerify(input, ctx) {
       calls.order.push('verify');
       calls.verify.push(input);
-      return script.verify(input, calls.verify.length);
+      // 心跳：取消要靠心跳送进来
+      const beat = setInterval(() => ctx.heartbeat(), 20);
+      try {
+        return await script.verify(input, calls.verify.length, ctx.signal);
+      } finally {
+        clearInterval(beat);
+      }
     },
     async checkGuarded() {
       calls.order.push('guarded');

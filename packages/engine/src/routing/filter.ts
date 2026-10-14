@@ -320,8 +320,8 @@ export function routerPicksModel(route: Pick<RouteFacts, 'upstreamModel' | 'upst
 }
 
 function avoidReason(route: RouteFacts, ctx: FilterContext): string | null {
-  const family = familyKey(route.family);
-  if (ctx.avoid.families.has(family)) {
+  const family = familyKey(route.authorFamily ?? route.family);
+  if (ctx.avoid.families.has(family) || ctx.avoid.families.has(familyKey(route.family))) {
     return `这一步只派别家：${route.modelName} 是 ${route.family} 族，写这张单的就有这一族`;
   }
   // 只派别家要认得出是哪一家：渠道自己挑模型的，挑中的可能正是写这张单的那家

@@ -115,6 +115,11 @@ export interface Avoid {
   routeIds: string[];
   poolIds: string[];
   modelIds: string[];
+  /**
+   * 整族避开的作者族（决定 0093，换路由按族避开：同族换个模型多半重蹈覆辙）。只有自动处理时换路由（rt.avoidModel）会加；
+   * 别的族一条都派不出时选路退回只避开模型（task-session.ts 的 pickRoute）。老历史里没有。
+   */
+  families?: string[];
 }
 export const NO_AVOID: Avoid = { routeIds: [], poolIds: [], modelIds: [] };
 
@@ -204,13 +209,26 @@ function unionIds(left: readonly string[], right: readonly string[]): string[] {
   return out;
 }
 
-/** 两份避让并成一份。顺序保持先左后右，同一编号不重复。 */
+/** 两份避让并成一份。顺序保持先左后右，同一编号不重复。两边都没有族的避让就不带 families（选路参数和老历史一样）。 */
 export function mergeAvoid(left: Avoid, right: Avoid): Avoid {
+  const families = unionIds(left.families ?? [], right.families ?? []);
   return {
     routeIds: unionIds(left.routeIds, right.routeIds),
     poolIds: unionIds(left.poolIds, right.poolIds),
     modelIds: unionIds(left.modelIds, right.modelIds),
+    ...(families.length > 0 ? { families } : {}),
   };
+}
+
+/** 这条路由算哪一族（换路由按族避开用）：选路给的作者族，老历史里没有照 family；认不出（unclassified、空）回 null，不整族避开。 */
+export function avoidableFamily(route: RouteChoice): string | null {
+  const family = (route.authorFamily ?? route.family).trim().toLowerCase();
+  return family === '' || family === 'unclassified' ? null : family;
+}
+
+/** 整族避开的那一层去掉（别的族一条都派不出时退回只避开模型）。 */
+export function withoutFamilies(avoid: Avoid): Avoid {
+  return { routeIds: avoid.routeIds, poolIds: avoid.poolIds, modelIds: avoid.modelIds };
 }
 
 /**
@@ -226,6 +244,9 @@ export function noteEmptyCommit(
   const withRoute = widen(avoid, route, 'route');
   return { avoid: next >= 2 ? widen(withRoute, route, 'model') : withRoute, streak: next };
 }
+
+/** 整族避开之后别的族一条都派不出：退回只避开模型。写进 lastProblem，驾驶舱看得见。 */
+export const NO_OTHER_FAMILY = '没有别的模型族可换，只避开模型';
 
 /** 避让之后一条别的路由都没有：不死等，照旧派原来的。写进 lastProblem，驾驶舱看得见。 */
 export const NO_OTHER_ROUTE = '没有别的路由可换';
