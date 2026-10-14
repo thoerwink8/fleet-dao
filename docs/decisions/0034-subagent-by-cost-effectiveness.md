@@ -5,6 +5,7 @@
 - 现状（2026-10-13 回写）：已被 0035、0087 替代；设置里子代理默认模型只许 Opus 或 Sonnet 仍由 `agents/test/rules/subagent-model.rules.test.ts` 钉着。
 - 现状（2026-10-14 回写）：第 6 条「设置里写子代理默认模型、同步到每台机器」被 0092 部分取代（`0092-no-subagent-model-env-on-launcher-desktops.md`）：装了 mirasim-reclaude 启动器的桌面机不写、已有的删掉，那里的子代理默认模型由 Mirasim 设置管；别的机器照旧。
 - 现状：部分被 0035 取代（`0035-haiku55-by-checkable-output.md`）：第 1 条 Haiku 那一档的判据改成「产出能被脚本或一条命令核对」；第 3 条「Haiku 一次没证据就升」改成「脚本核对不过就升」；第 4 条派 Haiku 写 `model: "haiku"` 改成 `subagent_type: "haiku55"`（别名 `haiku` 在本机指向 Haiku 4.5）。第 4 条派 Sonnet、Opus 写 `model` 别名的做法又被 0087 替代（`0087-three-subagent-roles.md`：三档落成三个角色 `Explore`、`general-purpose`、`Plan`，写类型、不传 `model`，升档才传）。其余各条照旧。
+- 现状（2026-10-15 回写）：第 8 条「并发上限仍是 4、干活的最多 3 个」被 0094 替代（不设固定个数，按本机负载和范围不重叠判）。
 - 状态：采纳。通用段那句、指挥官技能、巡查脚本、同步工具的文案、钉住规矩的测试同一个 PR 改（改标准；创始人在对话里已授权，就是下面这段原话），#1372
 - 关联：`agents/shared-rules.md`「我的机器与模型」「无人值守」、`agents/skills/commander/SKILL.md`「派活」、`agents/skills/commander/references/子代理选模型.md`、`agents/skills/commander/scripts/patrol.mjs`、`agents/config/claude-permissions.json`、`packages/agents-sync/src/permissions.ts`、`agents/test/rules/subagent-model.rules.test.ts`、`agents/test/rules/fable-scope.rules.test.ts`
 - 取代：决定 0017 第 2 条里的「子代理只用 Opus 或 Sonnet」（来自创始人 2026-10-04 的口头规矩「Subagent 永远只用 Opus 或者 Sonnet，永远不用 Fiber」）和 2026-10-05「派活我推荐 sonnet5.5>opus5.5」的一刀切用法；同一条里的「子代理永不用 Fable」保留不动。0024、0030 里「起 Sonnet 子代理（`model: "sonnet"`）」改成按本决定选档
@@ -40,7 +41,7 @@
 5. **Haiku 的结论动手前抽查**：指挥官据它动手之前，自己用一条命令核一遍；对不上就作废、升 Sonnet 重做。
 6. **默认值不变**：设置里的子代理默认模型（`CLAUDE_CODE_SUBAGENT_MODEL`）仍是 `claude-sonnet-5-5`，**默认值只许 Opus 或 Sonnet**。Haiku 只在派活时逐个显式选，不当忘了写模型时的兜底——兜底落到 Haiku，写代码的活就悄悄跑在小模型上了。同步工具照旧拒收 Haiku 当默认值，报错文案改指本决定。
 7. **子代理、工人永不用 Fable**（0017 第 2 条的这一半保留）。本机工人（`worker.mjs`）是写代码的整段活，只许 Opus、Sonnet，默认改成完整 id `claude-sonnet-5-5`。
-8. **并发上限仍是 4**，Haiku 也占名额；无人值守时给监控留 1 个，干活的最多 3 个。
+8. ~~并发上限仍是 4，Haiku 也占名额；无人值守时给监控留 1 个，干活的最多 3 个。~~ 已被 0094 替代。
 9. **无人值守的监控以脚本为主**：
    - 主体是 `agents/skills/commander/scripts/patrol.mjs`：一次 ssh 只读收齐法国盘面，每项一行带计数和采集时间；基线只由脚本写（`_tmp/patrol-baseline.json`），比出 `DELTA`；不变量（服务不 active、磁盘超 85%、可用内存少于 1G、单卡住或停下超过 30 分钟、定时任务最近一次不 ok、新开的通知、引擎总开关关着、在用版本读不到）由脚本判，最后一行 `VERDICT: OK`、`VERDICT: ALERT <条数>` 或 `VERDICT: BROKEN`。
    - 沉默告警：ssh 连不上、输出是空的、少了哪一块、库查询报错、采集时间和本机差超过 15 分钟，一律 `BROKEN`，不当 `OK`。
