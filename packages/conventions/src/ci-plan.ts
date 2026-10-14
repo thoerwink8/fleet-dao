@@ -151,6 +151,7 @@ export type Rule =
     };
 
 const exact = (p: string) => (f: string) => f === p;
+const PKG_AGENTS_DOC = /^packages\/[^/]+\/AGENTS\.md$/;
 const under = (p: string) => (f: string) => f.startsWith(p);
 
 /**
@@ -379,6 +380,9 @@ export const DEPLOY_NARROW_RULE: Rule = {
 
 /** 包外路径的去处，按顺序取第一条。包内的（packages/<包>/…）不在这里，按依赖图算。 */
 export const PATH_RULES: readonly Rule[] = [
+  // 各包自己的说明（packages/<包>/AGENTS.md）只有文档指针检查读（doc-pointers.test.ts，每个 PR 都跑），没有哪个包的测试读它：
+  // 当纯文档，不测那个包（（排在 packages/shared 那条全跑之前）原先落进「包内文件」，会连它和依赖它的包一起测）。
+  { match: (f) => PKG_AGENTS_DOC.test(f), units: [], why: '包说明（文档指针检查读它，每个 PR 都跑）' },
   ...ROOT_CONFIG_FILES.map((p) => ({ match: exact(p), full: '根配置，所有包都受影响' })),
   { match: under('.github/workflows/'), full: 'CI 工作流本身' },
   { match: under('packages/shared/'), full: '几乎所有包都依赖 shared' },

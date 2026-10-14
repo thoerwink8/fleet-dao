@@ -310,7 +310,7 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、顺手挂里程碑', ()
     const w = world([], BODY, [ok('[true,null]')]);
     expect(w.run()).toBe(1);
     expect(w.calls).toEqual([]);
-    expect(w.text()).toContain('是个 PR');
+    expect(w.text()).toContain('这是 PR，请用 --no-issue 并写理由');
   });
 
   it('【故意造出的失败】查单没查成（网络）或回的认不出：退出码 2，不开 PR，不当成「不存在」', () => {
