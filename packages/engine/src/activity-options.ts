@@ -30,6 +30,10 @@ import {
   type RunSegmentInput,
   type RunSegmentResult,
   SEGMENT_MINUTES,
+  type SelfCheckInput,
+  type SelfCheckResult,
+  type TaskSpendInput,
+  type TaskSpendResult,
   type WaitMergedInput,
 } from './task-contract.ts';
 
@@ -60,6 +64,10 @@ export type EngineActivities = PortActivities & {
   mergeNow(input: MergeNowInput): Promise<MergeNowResult>;
   /** 判这一段能不能续上一段的会话（决定 0088）：续不上回 new 加原因，不抛。 */
   planSegmentResume(input: PlanSegmentResumeInput): Promise<PlanSegmentResumeResult>;
+  /** 动手会话收场后在会话的树里跑测试和 tsc（决定 0093）：没跑成回 skipped，不抛。 */
+  selfCheck(input: SelfCheckInput): Promise<SelfCheckResult>;
+  /** 这张单到现在花掉多少 token（单任务预算，决定 0093）。 */
+  taskSpend(input: TaskSpendInput): Promise<TaskSpendResult>;
   /** 派单前对选定的这一条路由探一次（#1409）。没装探针报 JOB_NOT_CONFIGURED，不当成探通。 */
   probeAssignedRoute(input: ProbeAssignedInput): Promise<ProbeAssignedResult>;
   /** 派前探测不通、这轮不用这条路由：放掉选路预占的名额。没装放名额报 JOB_NOT_CONFIGURED，不装作放过。 */
@@ -106,6 +114,8 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   readCiPolicy: 'quick',
   mergeNow: 'git',
   planSegmentResume: 'quick',
+  selfCheck: 'setup',
+  taskSpend: 'quick',
 };
 
 /** quick 一档（含排进合并队列、撤出）一次尝试的限时。合并队列的空闲收工时长不能比它短（limits.ts 的下限）。 */

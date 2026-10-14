@@ -50,7 +50,19 @@ export interface Limits {
   mergeQueueBatch: number;
   /** 合并队列空闲多久就收工（有新条目时会被重新拉起）。 */
   mergeQueueIdleMinutes: number;
+  /**
+   * 一张单动手和验收会话合计最多花多少 token（四样相加），超了停下等人（决定 0093）；0 = 不设。
+   * 老历史开工时解析出来的上限里没有这一项：工作流见不到它就不查。
+   */
+  taskTokenBudget: number;
 }
+
+/**
+ * 单任务 token 预算的默认值（决定 0093）：法国库 2026-10-14 查近 14 天 254 张单（1008 次动手和验收会话），每张单四样 token
+ * 相加的 p95 是 36,357,792，取整到 37,000,000。超了停下等人；点「继续」再给一份同样多的。
+ * 查法：_tmp/rethink/resume-q1.sql（runs 按 task_id 汇总 input+output+cache_read+cache_write）。
+ */
+export const DEFAULT_TASK_TOKEN_BUDGET = 37_000_000;
 
 /** 法国 VPS 能分给会话的内存（MiB）：机器约 11.7G，给内核和系统留约 0.7G。 */
 export const FRANCE_USABLE_MB = 11 * 1024;
@@ -135,6 +147,7 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   mergeWaitMinutes: 360,
   mergeQueueBatch: 50,
   mergeQueueIdleMinutes: 60,
+  taskTokenBudget: DEFAULT_TASK_TOKEN_BUDGET,
 });
 
 /**

@@ -2,7 +2,14 @@
 import { randomUUID } from 'node:crypto';
 import { eq, isNull } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { closeOpenRuns, getRun, latestRunOfTask, runsOfTask, startRun } from '../src/queries/runs.ts';
+import {
+  closeOpenRuns,
+  getRun,
+  latestRunOfTask,
+  runsOfTask,
+  startRun,
+  taskTokenSpend,
+} from '../src/queries/runs.ts';
 import { runs } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addRoute, addTask, ago, catalog, expectViolation, MIN, NOW } from './helpers.ts';
@@ -479,5 +486,28 @@ describe('runsOfTask：一张单的三段流水（任务详情读）', () => {
     await run({ segment: 'verify', model: 'gpt-5.6', issueNumber: 78 });
     await run({ segment: 'verify', model: 'gpt-5.6' });
     expect(await runsOfTask(t.db, { id: task.id, issueNumber: 77, workflowId: WF })).toEqual([]);
+  });
+});
+
+describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
+  it('这张单动手和验收的四样 token 相加；别的单、别的段不算；用量全空的行不算钱、数出来', async () => {
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id, { issueNumber: 77 });
+    const other = await addTask(t.db, repo.id, { issueNumber: 78 });
+    const row = (over: Partial<typeof runs.$inferInsert>) =>
+      t.db.insert(runs).values({ segment: 'manual', model: 'opus-5.5', startedAt: ago(10 * MIN), ...over });
+    await row({
+      taskId: task.id,
+      inputTokens: 10,
+      outputTokens: 20,
+      cacheReadTokens: 1000,
+      cacheWriteTokens: 5,
+    });
+    await row({ taskId: task.id, segment: 'verify', inputTokens: 1, outputTokens: 2 });
+    await row({ taskId: task.id });
+    await row({ taskId: task.id, segment: 'scope', inputTokens: 999_999 });
+    await row({ taskId: other.id, inputTokens: 999_999 });
+    expect(await taskTokenSpend(t.db, task.id)).toEqual({ tokens: 1038, runs: 3, unmetered: 1 });
+    expect(await taskTokenSpend(t.db, randomUUID())).toEqual({ tokens: 0, runs: 0, unmetered: 0 });
   });
 });

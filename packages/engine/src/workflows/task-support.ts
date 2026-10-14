@@ -3,7 +3,13 @@
 
 import type { AvoidScope, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { RouteChoice } from '../ports.ts';
-import type { AbandonCommand, PauseCommand, RepinCommand } from '../task-contract.ts';
+import {
+  type AbandonCommand,
+  type PauseCommand,
+  type RepinCommand,
+  SELF_CHECK_DIGEST_MAX,
+  type SelfCheckResult,
+} from '../task-contract.ts';
 
 /** 放弃：从各处抛到最外层收尾。 */
 export class Abandoned extends Error {
@@ -46,6 +52,62 @@ export interface ResumeFrom {
 
 /** 找被取消那一段的起跑时刻往前放宽多少（毫秒）：工作流的时刻和活动写库的时刻都在法国这台机器上，留几秒余量。 */
 export const RESUME_STARTED_SLACK_MS = 5_000;
+
+/** 上一次跑成的动手会话（决定 0093 返工续会话）：返工轮续它；resumed 是它自己是不是续起来的（数连着续了几轮）。 */
+export interface LastSession {
+  runId: string;
+  worktreePath: string;
+  resumed: boolean;
+}
+
+/** 连着这么多轮续会话还没过，下一轮清空开新会话（决定 0093）。 */
+export const RESUME_STREAK_LIMIT = 2;
+/** 清空重来时每条返工意见最多留多少字：新会话要的是精炼过的失败摘要，不是上一轮的整份日志。 */
+export const FRESH_FEEDBACK_LINE_MAX = 1500;
+
+/** 连着续了两轮还没过：下一轮开新会话，返工意见精炼成这样（第一行写明为什么是新会话）。 */
+export function freshSessionFeedback(feedback: readonly string[]): string[] {
+  const lines = feedback.map((line) =>
+    line.length > FRESH_FEEDBACK_LINE_MAX ? `${line.slice(0, FRESH_FEEDBACK_LINE_MAX)}…（后面省略）` : line,
+  );
+  return [
+    `前 ${RESUME_STREAK_LIMIT} 轮续着同一个会话改都没过，这一轮开新会话从头看：树里是上几轮的提交，下面是还没解决的问题。`,
+    ...lines,
+  ];
+}
+
+/** 自测红了续进会话的那一句（第一行），后面跟精炼输出。 */
+export const SELF_CHECK_RED_LINE = '引擎在你交活之后跑了测试和类型检查，没过。改到它过再提交：';
+
+/** 自测的精炼输出合成一段（喂回会话、交给冷验收都用这一份）：每条命令一节，限 SELF_CHECK_DIGEST_MAX 字。 */
+export function selfCheckText(result: SelfCheckResult): string {
+  const parts = result.steps.map((s) => {
+    const mark =
+      s.outcome === 'pass' ? '过了' : s.outcome === 'fail' ? `没过（退出码 ${s.exitCode}）` : '没跑';
+    return `$ ${s.command}：${mark}\n${s.digest}`;
+  });
+  if (result.state === 'skipped' && parts.length === 0) parts.push(`没跑成：${result.reason}`);
+  const text = parts.join('\n\n');
+  return text.length > SELF_CHECK_DIGEST_MAX ? `${text.slice(0, SELF_CHECK_DIGEST_MAX - 1)}…` : text;
+}
+
+/** 单任务 token 预算超了停下时写给人的话（决定 0093）。 */
+export function tokenBudgetStop(
+  spent: { tokens: number; unmetered: number },
+  budget: number,
+  grants: number,
+): { title: string; detail: string } {
+  const m = (n: number) => `${(n / 1_000_000).toFixed(1)}M`;
+  const allowed = budget * grants;
+  const unmetered = spent.unmetered > 0 ? `（另有 ${spent.unmetered} 次会话用量还没补上，实际只多不少）` : '';
+  return {
+    title: `这张单花掉的 token 超了预算（${m(spent.tokens)} / ${m(allowed)}）`,
+    detail:
+      `动手和验收会话合计花掉 ${spent.tokens} token${unmetered}，超过 ${allowed}（单任务预算 ${budget}` +
+      `${grants > 1 ? ` × 已给 ${grants} 份` : ''}）。预算按近 14 天每张单花费的 p95 定（决定 0093）。` +
+      '点「继续」再给一份同样多的接着干；不要了点「放弃」。',
+  };
+}
 
 export const ZERO: LadderCounters = { retries: 0, reworks: 0, routeSwaps: 0, modelSwaps: 0 };
 

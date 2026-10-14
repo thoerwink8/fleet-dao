@@ -47,6 +47,7 @@ import {
   type Avoid,
   bump,
   ConflictHandoff,
+  type LastSession,
   NO_AVOID,
   PausedInterrupt,
   RepinInterrupt,
@@ -121,6 +122,14 @@ export class TaskRuntime {
    * 只在 patched('segment-resume') 之后才会被写上，老历史一直是 null。
    */
   resumeFrom: ResumeFrom | null = null;
+  /** 上一次跑成的动手会话（决定 0093）：返工轮续它（task.ts 的 implement，patched('rework-resume')）。 */
+  lastSession: LastSession | null = null;
+  /** 连着几次跑成的动手会话是续起来的：到 RESUME_STREAK_LIMIT 下一轮开新会话。 */
+  resumeStreak = 0;
+  /** 最近一次自测（决定 0093）的精炼输出：交给冷验收当材料（ColdVerifyInput.testOutput）。没跑过、头换了就是 null。 */
+  selfCheckOutput: { head: string; text: string } | null = null;
+  /** 单任务 token 预算给了几份（决定 0093）：超了停下，点「继续」再给。 */
+  budgetGrants = 1;
   round = 0;
   verifyRound = 0;
   /** 因轮数用尽点过几次「继续」（清零的次数；超过 MAX_ROUND_RESETS 就不再清）。 */
@@ -372,6 +381,9 @@ export class TaskRuntime {
     }
     this.round = 0;
     this.verifyRound = 0;
+    // 单子可能改了：重读之后开新会话，不续带着旧交代的那个
+    this.lastSession = null;
+    this.resumeStreak = 0;
     await this.reloadBrief();
     return 'reset';
   }

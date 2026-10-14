@@ -374,6 +374,52 @@ export type ProbeAssignedResult =
 
 /** 派前探测不通、这轮不用这条路由：放掉选路时预占的名额（#1409）。没进起会话，不能占着池。 */
 /**
+ * 动手会话收场后引擎自己跑一遍测试和类型检查（决定 0093）：仓的测试命令（repos.test_command）和 tsc，在会话的树里、以会话用户跑。
+ * 有时限，没跑成不挡原流程。
+ */
+export interface SelfCheckInput {
+  schemaVersion: 1;
+  taskId: string;
+  repo: Repo;
+  worktreePath: string;
+}
+
+/** 一条命令的结果：精炼过的输出（失败的行和末尾一段，不是整份日志）。 */
+export interface SelfCheckStep {
+  command: string;
+  outcome: 'pass' | 'fail' | 'skipped';
+  /** 退出码；超时、起不来是 null。 */
+  exitCode: number | null;
+  /** 精炼过的输出（SELF_CHECK_DIGEST_MAX 以内）；跳过的写为什么跳过。 */
+  digest: string;
+}
+
+/**
+ * green：跑了的都过了（可能有跳过的）。red：至少一条没过。skipped：一条都没跑成（没装依赖、树不在、没有命令……），reason 写为什么。
+ * 不抛：没跑成也回 skipped，原流程照旧推 PR 交给 CI。
+ */
+export type SelfCheckResult =
+  | { state: 'green' | 'red'; steps: SelfCheckStep[] }
+  | { state: 'skipped'; reason: string; steps: SelfCheckStep[] };
+
+/** 精炼输出最多多少字：喂回会话、交给冷验收都用这一份。 */
+export const SELF_CHECK_DIGEST_MAX = 4000;
+
+/** 这张单到现在花掉多少 token（四样相加，动手和验收都算）。读不到的行不算进去，数出有几行没读到。 */
+export interface TaskSpendInput {
+  schemaVersion: 1;
+  taskId: string;
+}
+
+/** 单任务 token 预算的默认值见 limits.ts 的 DEFAULT_TASK_TOKEN_BUDGET。 */
+export interface TaskSpendResult {
+  tokens: number;
+  runs: number;
+  /** 用量还空着的行数（中转会话的用量稍后才补）：花掉的只多不少。 */
+  unmetered: number;
+}
+
+/**
  * 判这一段能不能续上一段的会话（决定 0088 第 3 条）。上一段用 runId 指名（跑完了的那一次）或 startedAfter（被取消的那一次，
  * 工作流拿不到编号：找这之后起的最近一次动手）。routeId 是这一次选定的路由。
  */
