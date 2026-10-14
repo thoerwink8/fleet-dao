@@ -470,7 +470,7 @@ log.info('驾驶舱后端已起', {
   devLogin: config.devLogin ? DEV_USER_ID : false,
   // 往哪个看板推快照（只写对方的域名，不写通行证）
   nodeReport: config.nodeReport ? config.nodeReport.url.origin : false,
-  // 给 packages/cli 联调用的令牌：只在内存样例数据下给，对应样例里正在跑的那次会话；密钥是本次启动临时生成的。
+  // 给 fleet 命令联调用的令牌：只在内存样例数据下给，对应样例里正在跑的那次会话；密钥是本次启动临时生成的。
   ...(config.env === 'development' && config.databaseUrl === null
     ? {
         devFleetToken: signAgentToken(config.agentTokenSecret, {

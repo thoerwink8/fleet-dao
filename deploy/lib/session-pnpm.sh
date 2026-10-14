@@ -127,16 +127,14 @@ ensure_session_pnpm() { # 版本 sha512 下载地址 装到哪（目录） 入�
   fi
 }
 
-# 引擎给会话的 PATH（packages/engine 起会话时拼的，docs/ops.md 第五节）：
-#   fleet 命令的目录（engine.env 的 FLEET_CLI_BIN；没写就是引擎这一版代码里的 packages/cli/bin，worker.ts 的
-#   DEFAULT_CLI_BIN_DIR，按 worker.ts 自己的真实位置算）+ 引擎进程自己的 PATH（fleet-engine.service 没设，就是 systemd 给
-#   服务的默认 PATH）。两段中间用 : 接，空的那段不要（packages/adapters 的 buildSessionEnv 的 pathPrepend）。
+# 引擎给会话的 PATH（packages/engine 起会话时拼的，docs/ops.md 第五节）：就是引擎进程自己的 PATH（fleet-engine.service 没设，
+# 就是 systemd 给服务的默认 PATH），没有额外前缀。
 # 起会话时它改名 FLEET_SESSION_PATH 交给 fleet-agent-scope，帮手脚本再在最后接上会话用户家里的 ~/.local/bin。
-# 从在跑的引擎进程里读（只取 PATH、FLEET_CLI_BIN 两项，别的不碰、不打印），读到的就是引擎真在用的，不是照着代码推的。
-# 读成了返回 0、放进 SESSION_PATH；主进程号不对、进程没了、启动命令认不出返回 1，原因进 SESSION_PATH_WHY。
+# 从在跑的引擎进程里读（只取 PATH 一项，别的不碰、不打印），读到的就是引擎真在用的，不是照着代码推的。
+# 读成了返回 0、放进 SESSION_PATH；主进程号不对、进程没了返回 1，原因进 SESSION_PATH_WHY。
 engine_session_path() { # 引擎主进程号
-  local pid=$1 e path="" cli="" arg main="" code
-  local -a envs=() argv=()
+  local pid=$1 e path=""
+  local -a envs=()
   SESSION_PATH=""
   SESSION_PATH_WHY=""
   if [[ ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
@@ -150,36 +148,10 @@ engine_session_path() { # 引擎主进程号
   for e in "${envs[@]}"; do
     case $e in
     PATH=*) path=${e#PATH=} ;;
-    FLEET_CLI_BIN=*) cli=${e#FLEET_CLI_BIN=} ;;
     esac
   done
   envs=()
-  # 引擎读 FLEET_CLI_BIN 时去掉了两头的空白（configFromEnv），这里一样
-  cli="${cli#"${cli%%[![:space:]]*}"}"
-  cli="${cli%"${cli##*[![:space:]]}"}"
-  if [[ -z "$cli" ]]; then
-    if ! mapfile -d '' -t argv 2>/dev/null <"$SESSION_PROC/$pid/cmdline"; then
-      SESSION_PATH_WHY="读不到引擎进程（$pid）的启动命令"
-      return 1
-    fi
-    for arg in "${argv[@]:1}"; do
-      if [[ "$arg" == /*/packages/engine/src/main.ts ]]; then
-        main=$arg
-        break
-      fi
-    done
-    if [[ -z "$main" ]]; then
-      SESSION_PATH_WHY="认不出引擎的启动命令（里面没有 …/packages/engine/src/main.ts）：「$(printf '%s ' "${argv[@]}" | cut -c1-160)」"
-      return 1
-    fi
-    # node 按入口的真实路径算模块的位置（发布目录的 current 是链接）
-    if ! code=$(readlink -e -- "$main") || [[ "$code" != /*/packages/engine/src/main.ts ]]; then
-      SESSION_PATH_WHY="引擎的入口 $main 解不出真实路径（读到「${code:-空}」）"
-      return 1
-    fi
-    cli=${code%/packages/engine/src/main.ts}/packages/cli/bin
-  fi
-  SESSION_PATH=$cli${path:+:$path}
+  SESSION_PATH=$path
 }
 
 # 以某个身份跑一次 pnpm --version，看找到的是哪个文件、报的哪一版。<pnpm> 写 pnpm 就按那个身份的 PATH 找，写绝对路径

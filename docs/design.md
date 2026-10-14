@@ -95,7 +95,6 @@ flowchart LR
 fleet-dao/
   packages/engine     引擎：Temporal 工作流与每一步的实现
   packages/adapters   渠道插头：Claude Code、codex、cursor-agent、Grok 命令行、接口外壳
-  packages/cli        fleet 命令（给 AI 会话用，人和测试也能用）
   packages/api        驾驶舱后端
   packages/web        驾驶舱前端：看板 + 后台管理
   packages/feishu     飞书网关（只发手机通知）

@@ -20,9 +20,6 @@
       "path": "packages/adapters"
     },
     {
-      "path": "packages/cli"
-    },
-    {
       "path": "packages/store"
     },
     {
