@@ -12,6 +12,7 @@ import {
   mirasimRunSummary,
   runMirasim,
   stopMirasimSession,
+  WATCH_CONNECT_BUDGET_MS,
 } from '../src/mirasim/run.ts';
 import { MirasimSession } from '../src/mirasim/session.ts';
 import { mirasimConnector } from '../src/mirasim/wire.ts';
@@ -862,6 +863,87 @@ describe('Mirasim 账本', () => {
     };
     const unreadable = await readMirasimLedger('fake-root', `dsh:${uuid}`, undefined, badFile);
     expect(unreadable).toEqual({ state: 'unknown', detail: '读不了账本文件 index-a.ndjson：EACCES' });
+  });
+});
+
+describe('订阅连不上时退避，盖住一次服务重启', () => {
+  const TOKEN_GONE =
+    '/home/u/.mirasim/run 下没有 local-<端口>.token：这个会话用户还没单独起一份 Mirasim 服务';
+
+  async function withClock<T>(
+    run: (clock: { advance(ms: number): void; paused(): number }) => Promise<T>,
+  ): Promise<T> {
+    const real = Date.now;
+    let clock = 1_700_000_000_000;
+    let paused = 0;
+    Date.now = () => clock;
+    try {
+      return await run({
+        advance(ms) {
+          clock += ms;
+          paused += ms;
+        },
+        paused: () => paused,
+      });
+    } finally {
+      Date.now = real;
+    }
+  }
+
+  it('令牌文件缺 30 秒后出现：退避重连成功，收到终帧', async () => {
+    expect(WATCH_CONNECT_BUDGET_MS).toBeGreaterThanOrEqual(60_000);
+    const server = new FakeMirasim({
+      reply: accepted(kimi),
+      stream: [
+        {
+          type: 'snapshot',
+          sessionKey: kimi.sessionKey,
+          seq: 1,
+          snapshot: { phase: 'done', model: 'kimi-code/k3', taskId: kimi.taskId },
+        },
+      ],
+    });
+    await withClock(async (clock) => {
+      const started = Date.now();
+      let opens = 0;
+      const report = await runMirasim(spec(), {
+        pause: async (ms) => {
+          clock.advance(ms);
+        },
+        connect: async () => {
+          opens += 1;
+          // 控制连接先成功；订阅时令牌被换掉，30 秒后才写回来
+          if (opens > 1 && Date.now() - started < 30_000) throw new Error(TOKEN_GONE);
+          return server.connect();
+        },
+      });
+      expect(report.terminal).toEqual({ isError: false, detail: 'done' });
+      expect(report.watchError).toBeUndefined();
+      expect(opens).toBeGreaterThan(2);
+      expect(clock.paused()).toBeGreaterThanOrEqual(30_000);
+      expect(clock.paused()).toBeLessThan(WATCH_CONNECT_BUDGET_MS);
+    });
+  });
+
+  it('令牌一直不回来：至少等满 60 秒才放弃【故意造出的失败】', async () => {
+    const server = new FakeMirasim({ reply: accepted(kimi) });
+    await withClock(async (clock) => {
+      let opens = 0;
+      const report = await runMirasim(spec(), {
+        pause: async (ms) => {
+          clock.advance(ms);
+        },
+        connect: async () => {
+          opens += 1;
+          if (opens > 1) throw new Error(TOKEN_GONE);
+          return server.connect();
+        },
+      });
+      expect(report.terminal).toBeUndefined();
+      expect(report.watchError).toContain('读状态的连接建不起来');
+      expect(report.watchError).toContain('没有 local-<端口>.token');
+      expect(clock.paused()).toBeGreaterThanOrEqual(WATCH_CONNECT_BUDGET_MS);
+    });
   });
 });
 
