@@ -2,6 +2,8 @@
 // 放在拉单里而不是另起定时任务：退回的单本来就是给拉单接的；总开关关着时拉单不跑，那时退回也没人接，等开了再收不迟。
 //
 // 一条到期的租约怎么收：
+// 单关了、PR 合了，租约没到期也当轮收成做完（early）：本机不用再手动 pnpm work done；合并的 PR 镜像还没到（晚几分钟是常态）就留给下一轮。
+//
 //   单已经关了 → 有合并的 PR 挂着记做完（本机做完忘了报），没有记 stopped（还是本机的账）；
 //   还活着（本机会话心跳里有会话在 local/<单号>- 分支上、不到租约时长前还动过；或这张单有开着的 PR）→ 租约顺延；
 //   都没有 → 摘「本机做」、在单上留一句话、行改成 stopped + engine（拉单按「stopped 且没有任何一代」接手，和接手老行同一条路）。
@@ -59,6 +61,8 @@ export interface LocalLeaseRepo {
 export interface LocalLeaseDeps {
   /** 这个仓里本机在做、租约已过的行。读不到照抛。 */
   expired(repo: LocalLeaseRepo, now: Date): Promise<ExpiredLease[]>;
+  /** 这个仓里本机在做、租约还没到期的行：单关了且 PR 合了就提前收。缺省不提前收。读不到照抛。 */
+  unexpired?(repo: LocalLeaseRepo, now: Date): Promise<ExpiredLease[]>;
   /** 本机会话心跳里还在 local/<单号>- 分支上活着的单号。读不到照抛：不当成都死了。 */
   liveIssues(repo: LocalLeaseRepo, now: Date): Promise<Set<number>>;
   /** 这张单有没有合并了的 PR 挂着（PR 镜像里「需求」栏挂着它，或分支是这张单的固定前缀）；有回 PR 号。 */
@@ -71,6 +75,8 @@ export interface LocalLeaseDeps {
     how: 'returned' | 'done' | 'closed';
     why: string;
     now: Date;
+    /** 租约没到期就收（单关了、PR 合了）。 */
+    early?: boolean;
   }): Promise<number>;
   /** 摘「本机做」（没贴着不算错）。 */
   unmarkLocal(input: { repo: LocalLeaseRepo; issueNumber: number }): Promise<void>;
@@ -107,6 +113,21 @@ export async function sweepLocalLeases(
 ): Promise<LeaseSweepResult> {
   const slug = `${repo.owner}/${repo.name}`;
   const out: LeaseSweepResult = { extended: 0, returned: 0, closed: 0, unchecked: [] };
+  if (deps.unexpired) {
+    try {
+      for (const lease of await deps.unexpired(repo, ctx.now)) {
+        if (ctx.open.has(lease.issueNumber)) continue;
+        const merged = await deps.mergedPr(repo, lease.issueNumber);
+        if (merged === null) continue;
+        const why = `单已关、PR #${merged} 已合：本机租约没到期也收，记做完`;
+        if ((await deps.settle({ taskId: lease.taskId, how: 'done', why, now: ctx.now, early: true })) > 0) {
+          out.closed += 1;
+        }
+      }
+    } catch (err) {
+      out.unchecked.push(`${slug}：本机没到期的租约提前收没做成（${errMessage(err)}）`);
+    }
+  }
   let expired: ExpiredLease[];
   try {
     expired = await deps.expired(repo, ctx.now);

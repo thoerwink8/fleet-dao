@@ -622,6 +622,18 @@ export function hourlyReconcileJob(
               body: x.body,
               link: x.link,
             });
+            // 主线转绿：开着的主线红都撤掉（自愈了）。飞书推送只推开满 60 分钟还没撤的主线红（packages/db 的 feishu-push.ts），
+            // 不撤的话转绿以后它照样会被推出去
+            if (x.dedupeKey.startsWith(MAIN_RECOVERED_KEY_PREFIX)) {
+              for (const red of await openAlertsByPrefix(w.db, MAIN_RED_KEY_PREFIX)) {
+                await resolveAlertWithReason(w.db, {
+                  dedupeKey: red.dedupeKey,
+                  by: 'engine:main-red-push',
+                  why: '主线转绿了',
+                  at: now(),
+                });
+              }
+            }
           },
           rememberVerdict: async (x) => {
             await upsertAlert(w.db, {

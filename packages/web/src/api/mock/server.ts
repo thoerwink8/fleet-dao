@@ -919,7 +919,14 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     scopes: 'read:org repo',
     connectedAt: new Date(now() - 86_400_000).toISOString(),
   };
-  const mockImportRepos = () => [
+  /** 已在驾驶舱的仓：githubId → 驾驶舱里的仓编号。种子里 9003 已导入；导入、移出会改它，列表才跟着变。 */
+  const mockImported = new Map<number, string>([[9003, st.repos[0]?.id ?? 'r-orbit']]);
+  const mockImportRepos = () =>
+    mockImportRepoSeed().map((r) => {
+      const reposId = mockImported.get(r.githubId);
+      return reposId ? { ...r, inCockpit: true, reposId } : { ...r, inCockpit: false };
+    });
+  const mockImportRepoSeed = () => [
     {
       githubId: 9001,
       owner: 'thoerwink8',
@@ -969,7 +976,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       engineInstalled: false,
       fullyInstalled: false,
       inCockpit: true,
-      reposId: st.repos[0]?.id ?? 'r-orbit',
       canInstall: true,
     },
     {
@@ -2190,6 +2196,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           r.name.toLowerCase() === repo.name.toLowerCase(),
       );
       if (existing) {
+        mockImported.set(repo.githubId, existing.id);
         return ImportRepoResponse.parse({
           repoId: existing.id,
           owner: existing.owner,
@@ -2206,6 +2213,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         testCommand: 'pnpm check',
       };
       st.repos.push(created);
+      mockImported.set(repo.githubId, created.id);
       audit({
         actor: meActor(),
         action: REPO_IMPORT_ADD,
@@ -2227,6 +2235,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       const repo = st.repos.find((r) => r.id === repoId);
       if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
       st.repos.splice(st.repos.indexOf(repo), 1);
+      for (const [githubId, id] of mockImported) if (id === repoId) mockImported.delete(githubId);
       audit({
         actor: meActor(),
         action: REPO_IMPORT_REMOVE,

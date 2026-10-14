@@ -54,6 +54,7 @@ import {
   isTaskParkAlertKey,
   TASK_DONE_PARK_ACTOR,
   TASK_DONE_PARK_WHY,
+  TASK_RESUMED_PARK_WHY,
   TASK_STOPPED_PARK_WHY,
 } from '../park-alerts.ts';
 import { type EnginePorts, type PickRouteResult, PortError, type RouteChoice } from '../ports.ts';
@@ -328,13 +329,22 @@ async function resolveDoneTaskParkAlerts(
  * 叫停当场就撤，不等每小时对账的提醒清扫（#1643）；没有这一代的编号（活动测试不经 Temporal）就什么都不撤。
  */
 async function resolveStoppedTaskParkAlerts(db: Db, workflowId: string | undefined): Promise<void> {
+  await resolveGenerationParkAlerts(db, workflowId, TASK_STOPPED_PARK_WHY);
+}
+
+/**
+ * 这一代（ctx.workflowId）报的 task:…:park: 提醒都撤掉，原因写 why。没有这一代的编号（活动测试不经 Temporal）就什么都不撤。
+ * 挂起解除、接着干了也走这里（#2212）：以前要等每小时对账那一轮才撤，开满 60 分钟才撤的挂起里有一批其实早就接着干了，
+ * 白推了飞书。
+ */
+async function resolveGenerationParkAlerts(
+  db: Db,
+  workflowId: string | undefined,
+  why: string,
+): Promise<void> {
   if (!workflowId?.startsWith('task:')) return;
   for (const row of await openAlertsByPrefix(db, `${workflowId}:park:`)) {
-    await resolveAlertWithReason(db, {
-      dedupeKey: row.dedupeKey,
-      by: TASK_DONE_PARK_ACTOR,
-      why: TASK_STOPPED_PARK_WHY,
-    });
+    await resolveAlertWithReason(db, { dedupeKey: row.dedupeKey, by: TASK_DONE_PARK_ACTOR, why });
   }
 }
 
@@ -923,9 +933,12 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           retryable: false,
         });
       }
-      // 做完撤这张单所有的挂起提醒；叫停只撤这一代报的（别的代还开着）。撤失败照抛，活动重试；快照已经写下。
+      // 做完撤这张单所有的挂起提醒；叫停只撤这一代报的（别的代还开着）；回到在干（不是停下等人那一步）撤这一代报的：
+      // 工作流一次只停在一处，写 running 时这一代的挂起都已经过去了。撤失败照抛，活动重试；快照已经写下。
       if (input.state === 'done') await resolveDoneTaskParkAlerts(db, input.taskId, ctx.workflowId);
       else if (input.state === 'stopped') await resolveStoppedTaskParkAlerts(db, ctx.workflowId);
+      else if (input.state === 'running' && input.phase !== 'parked')
+        await resolveGenerationParkAlerts(db, ctx.workflowId, TASK_RESUMED_PARK_WHY);
     },
   };
 }

@@ -7,6 +7,7 @@ import {
   LogOut,
   Monitor,
   Moon,
+  MoreHorizontal,
   Search,
   ServerCog,
   Settings,
@@ -33,6 +34,7 @@ import { pendingCount } from '../../lib/notice-count';
 import { noticeLevelMeta } from '../../lib/status';
 import { type ModePref, PALETTES } from '../../lib/theme';
 import { cn } from '../../lib/utils';
+import { usePhone } from '../../lib/viewport';
 import { EngineMasterBadge } from '../engine-master';
 import { StatusDot } from '../layout/status-badge';
 import { useTheme } from '../theme-provider';
@@ -55,6 +57,25 @@ import { TopbarSlot } from './topbar-slot';
 export function Topbar({ onSearch }: { onSearch(): void }) {
   // 选了远程环境：提醒铃铛是本台（法国）的数据，不顶着远程环境的名字露出来
   const { nodeId } = useNodeSelection();
+  const phone = usePhone();
+  if (phone) {
+    // 手机（<768）顶栏只留最要紧的：仓名（挤不下就截断）、总开关点、铃铛、账号；搜索、环境切换、实时状态收进一个「更多」菜单。
+    // 原来整排放不下（390 宽内容 438 宽，右缘铃铛被截、头像在屏外，320 宽更糟）。
+    return (
+      <header
+        data-topbar="phone"
+        className="flex h-topbar shrink-0 items-center gap-1 overflow-hidden border-b bg-panel px-2"
+      >
+        <div className="flex min-w-0 flex-1 items-center">
+          <RepoSwitcher />
+        </div>
+        <EngineMasterBadge />
+        <MoreMenu onSearch={onSearch} />
+        {nodeId === null ? <NotificationBell /> : null}
+        <UserMenu />
+      </header>
+    );
+  }
   return (
     <header className="flex h-topbar shrink-0 items-center gap-2 border-b bg-panel px-3 md:px-4">
       <RepoSwitcher />
@@ -90,17 +111,11 @@ export function Topbar({ onSearch }: { onSearch(): void }) {
   );
 }
 
-/**
- * 顶栏环境切换器（看板多机；替掉原来没用的「切换仓」、合并原来的环境名徽标 #820 片 1）：常驻「现在看的是哪一台」，
- * 点开列出本台和每个远程环境（本机 WSL）、各自上报于几分钟前或失联多久，选哪个就把它记在网址参数 ?node=（留在当前这一页）。
- * 本台的名字跟着 /me 带回（后端的 FLEET_MACHINE_NAME），读不到就照实写「认不出」，不猜成某一台；远程环境的列表读不成就在
- * 下拉里写原因，不当成「没有远程环境」。
- */
-function EnvSwitcher() {
+/** 环境切换器和手机「更多」菜单共用的读法：现在看的是哪一台、它新不新鲜、本台有没有问题。 */
+function useEnvView() {
   const { data: me } = useMe();
   const nodes = useNodes();
   const { nodeId, select } = useNodeSelection();
-  const navigate = useNavigate();
   const now = useNow();
   if (!me) return null;
   const { env } = me;
@@ -109,6 +124,119 @@ function EnvSwitcher() {
   const label = nodeId === null ? env.name : (selected?.name ?? nodeId);
   const state = nodeId === null ? 'fresh' : freshnessNow(selected ?? {}, now);
   const problem = nodeId === null && env.problem !== undefined;
+  return { env, remote, nodeId, select, now, nodesError: nodes.error, label, state, problem };
+}
+
+/** 环境下拉里的列表本体（本台、各远程环境、打开法国页、本台的问题）；电脑的环境切换器和手机的「更多」菜单都用它。 */
+function EnvMenuItems() {
+  const view = useEnvView();
+  const navigate = useNavigate();
+  if (!view) return null;
+  const { env, remote, nodeId, select, now, nodesError, problem } = view;
+  return (
+    <>
+      <DropdownMenuLabel className="text-meta text-muted-foreground">
+        切换环境（看板按环境显示）
+      </DropdownMenuLabel>
+      <DropdownMenuItem data-node-item="local" onSelect={() => select(null)}>
+        <span className="num min-w-0 flex-1 truncate">{env.name}</span>
+        <span className="text-meta text-muted-foreground">这台</span>
+        {nodeId === null ? <Check className="size-4" /> : null}
+      </DropdownMenuItem>
+      {nodesError ? (
+        <DropdownMenuItem disabled className="text-meta text-ink-fail">
+          远程环境没读成：{errorText(nodesError)}
+        </DropdownMenuItem>
+      ) : null}
+      {remote.map((n) => {
+        const f = freshnessNow(n, now);
+        return (
+          <DropdownMenuItem
+            key={n.id}
+            data-node-item={n.id}
+            data-node-state={f}
+            onSelect={() => select(n.id)}
+            className={f === 'fresh' ? undefined : 'text-muted-foreground'}
+          >
+            <span className="num min-w-0 flex-1 truncate">{n.name}</span>
+            <span className={cn('text-meta', f === 'fresh' ? 'text-muted-foreground' : 'text-ink-stall')}>
+              {nodeAgeText(n, now)}
+            </span>
+            {n.id === nodeId ? <Check className="size-4" /> : null}
+          </DropdownMenuItem>
+        );
+      })}
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onSelect={() => navigate(withNode('/france', nodeId))}>
+        <ServerCog />
+        打开法国页
+      </DropdownMenuItem>
+      {problem ? (
+        <DropdownMenuItem disabled className="text-meta text-ink-stall">
+          {env.problem}
+        </DropdownMenuItem>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * 手机顶栏的「更多」：搜索、环境切换、实时状态三样收在这里。
+ * 实时断了或环境失联/有问题时，按钮角上亮一个等待色点，不用点开也知道该看一眼。
+ */
+function MoreMenu({ onSearch }: { onSearch(): void }) {
+  const { status } = useLiveState();
+  const env = useEnvView();
+  const liveOk = status === 'open';
+  const attention = !liveOk || (env !== null && (env.problem || env.state !== 'fresh'));
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          size="icon"
+          variant="ghost"
+          className="relative size-10 shrink-0"
+          aria-label={attention ? '搜索、环境、实时（有状态要看一眼）' : '搜索、环境、实时'}
+          data-topbar-more={attention ? 'attention' : 'ok'}
+        >
+          <MoreHorizontal />
+          {attention ? (
+            <span aria-hidden className="absolute top-1.5 right-1.5 size-2 rounded-full bg-st-stall" />
+          ) : null}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-72">
+        <DropdownMenuItem onSelect={onSearch}>
+          <Search />
+          搜任务、页面、操作
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <EnvMenuItems />
+        <DropdownMenuSeparator />
+        <DropdownMenuItem disabled data-live={status} className={liveOk ? undefined : 'text-ink-stall'}>
+          <span
+            className={cn(
+              'size-1.5 rounded-full',
+              liveOk ? 'bg-st-done' : status === 'down' ? 'bg-st-fail' : 'bg-st-stall',
+            )}
+          />
+          {liveOk ? '实时：连着' : status === 'down' ? '实时：推送断了，正在重连' : '实时：连接中'}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * 顶栏环境切换器（看板多机；替掉原来没用的「切换仓」、合并原来的环境名徽标 #820 片 1）：常驻「现在看的是哪一台」，
+ * 点开列出本台和每个远程环境（本机 WSL）、各自上报于几分钟前或失联多久，选哪个就把它记在网址参数 ?node=（留在当前这一页）。
+ * 本台的名字跟着 /me 带回（后端的 FLEET_MACHINE_NAME），读不到就照实写「认不出」，不猜成某一台；远程环境的列表读不成就在
+ * 下拉里写原因，不当成「没有远程环境」。
+ */
+function EnvSwitcher() {
+  const view = useEnvView();
+  if (!view) return null;
+  const { nodeId, label, state, problem } = view;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -137,47 +265,7 @@ function EnvSwitcher() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-72">
-        <DropdownMenuLabel className="text-meta text-muted-foreground">
-          切换环境（看板按环境显示）
-        </DropdownMenuLabel>
-        <DropdownMenuItem data-node-item="local" onSelect={() => select(null)}>
-          <span className="num min-w-0 flex-1 truncate">{env.name}</span>
-          <span className="text-meta text-muted-foreground">这台</span>
-          {nodeId === null ? <Check className="size-4" /> : null}
-        </DropdownMenuItem>
-        {nodes.error ? (
-          <DropdownMenuItem disabled className="text-meta text-ink-fail">
-            远程环境没读成：{errorText(nodes.error)}
-          </DropdownMenuItem>
-        ) : null}
-        {remote.map((n) => {
-          const f = freshnessNow(n, now);
-          return (
-            <DropdownMenuItem
-              key={n.id}
-              data-node-item={n.id}
-              data-node-state={f}
-              onSelect={() => select(n.id)}
-              className={f === 'fresh' ? undefined : 'text-muted-foreground'}
-            >
-              <span className="num min-w-0 flex-1 truncate">{n.name}</span>
-              <span className={cn('text-meta', f === 'fresh' ? 'text-muted-foreground' : 'text-ink-stall')}>
-                {nodeAgeText(n, now)}
-              </span>
-              {n.id === nodeId ? <Check className="size-4" /> : null}
-            </DropdownMenuItem>
-          );
-        })}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => navigate(withNode('/france', nodeId))}>
-          <ServerCog />
-          打开法国页
-        </DropdownMenuItem>
-        {problem ? (
-          <DropdownMenuItem disabled className="text-meta text-ink-stall">
-            {env.problem}
-          </DropdownMenuItem>
-        ) : null}
+        <EnvMenuItems />
       </DropdownMenuContent>
     </DropdownMenu>
   );

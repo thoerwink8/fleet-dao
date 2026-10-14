@@ -78,6 +78,9 @@ const GROOM_POINTER =
 /** usage-backfill-once（#1948，一次性回填没有会话号的老用量）同样：本体在引擎包，由 bin/fleet-api 转过去。 */
 const USAGE_BACKFILL_ONCE_POINTER =
   '用法：fleet-api usage-backfill-once [--apply]（#1946 之前没有会话号的老 run，按分支名和起止对上 Mirasim 用量账本，只补空字段；默认只读，--apply 才写。本体在引擎包，经 packages/api/bin/fleet-api 转过去，完整说明跑 fleet-api usage-backfill-once --help）';
+/** daily-brief（决定 0096，手动跑一次每日简报）同样：本体在引擎包（packages/engine/src/bin/daily-brief.ts），由 bin/fleet-api 转过去。 */
+const DAILY_BRIEF_POINTER =
+  '用法：fleet-api daily-brief [--as-today]（手动跑一次每日简报：推飞书团队群、在 #1055 发评论；默认标成手动触发，不顶替今天 08:30 那一条，--as-today 补发今天定时那一条。本体在引擎包，经 packages/api/bin/fleet-api 转过去）';
 const SESSION_MINT_USAGE =
   '用法：fleet-api session-mint <飞书名或用户 id> --reason "<为什么>" [--ttl <分钟，默认 60，最多 120>]（发一枚短命的驾驶舱会话 Cookie 给 AI 点验用：打印两行，Cookie 名和值；先写操作记录，不含 Cookie 值）';
 const NODE_KEY_USAGE =
@@ -827,6 +830,7 @@ const USAGES: Record<string, string> = {
   'dispatch-issue': DISPATCH_ISSUE_POINTER,
   groom: GROOM_POINTER,
   'usage-backfill-once': USAGE_BACKFILL_ONCE_POINTER,
+  'daily-brief': DAILY_BRIEF_POINTER,
   engine: ENGINE_USAGE,
   'node-key': NODE_KEY_USAGE,
   'session-mint': SESSION_MINT_USAGE,
@@ -932,6 +936,12 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
   if (command === 'usage-backfill-once') {
     throw new CliError(
       'usage-backfill-once 要经 packages/api/bin/fleet-api 跑（它转给引擎包的 packages/engine/src/bin/usage-backfill-once.ts）',
+      2,
+    );
+  }
+  if (command === 'daily-brief') {
+    throw new CliError(
+      'daily-brief 要经 packages/api/bin/fleet-api 跑（它转给引擎包的 packages/engine/src/bin/daily-brief.ts）',
       2,
     );
   }

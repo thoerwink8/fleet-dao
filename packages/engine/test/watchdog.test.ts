@@ -639,8 +639,9 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
     },
   };
 
-  const wd = (): WatchdogDeps =>
-    watchdogJob({
+  // 这一组只看发版和健康页：发布目录在（像法国）时看门狗还会看「今天的每日简报送到没」，那一条在 daily-brief.test.ts 测，这里摘掉
+  const wd = (): WatchdogDeps => {
+    const { brief: _brief, ...rest } = watchdogJob({
       db: t.db,
       now: () => clock,
       log: (level, text) => logs.push(`${level}:${text}`),
@@ -648,6 +649,8 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
       healthzUrl: 'http://127.0.0.1:1/healthz',
       fetchImpl: fetchHealth,
     })();
+    return rest;
+  };
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'watchdog-release-'));

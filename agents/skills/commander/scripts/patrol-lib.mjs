@@ -7,10 +7,13 @@
 // - 读不成一律 BROKEN，不当 OK：ssh 连不上、输出是空的、少了哪一块、有认不出的行、库查询报错、采集时间和本机差超过
 //   STALE_MINUTES 分钟。
 // - 发版和健康页也读（2026-10-14 法国发版失败，巡检还报 OK 近一小时）：/healthz 非 200、最近一次发版是 unhealthy / auto-rollback、发版进度记录停在
-//   done / aborted 以外、自动发布状态里写着「要人看」，一律 BROKEN（列出红的检查）；在用版本落后主线超过 LIMITS.lagCommits 个提交
+//   done / aborted / running 以外（running 是发版进行中，含 release.sh 退出码 2 后的发后体检）、自动发布状态里写着「要人看」
+//   （闸门那句「上一趟是 running」、列车已经 done / aborted 之后的过期话不算），一律 BROKEN（列出红的检查）；在用版本落后主线超过 LIMITS.lagCommits 个提交
 //   且最老的那个落下超过 LIMITS.lagMinutes 分钟是 ALERT；这几块读不到、认不出也是 BROKEN。
 // - 飞书推送通不通（push 那一块）：判法照 packages/db/src/queries/feishu-push.ts 的 feishuPushProblem 写（这份脚本在仓外跑、
 //   引不了那边的代码，改那边要一起改这里的 SQL）。推送渠道自己坏了靠推送报不出来，这里每次巡查都看一次，不只靠「新通知」。
+// - 今天的每日简报送到没（brief 那一块）：判法照 packages/db/src/queries/daily-brief.ts 的 dailyBriefProblem 写（09:00 以后没跑、没做成、
+//   没建、没推到飞书都是 ALERT），同样改那边要一起改这里。
 // - 基线只由这份脚本写（模型不写）：OK、ALERT 都把这一次的读数写成新基线，BROKEN 不写（不拿坏读数盖掉好基线）。
 // - 最后一行永远是 `VERDICT: OK`、`VERDICT: ALERT <条数>` 或 `VERDICT: BROKEN`；退出码 0、1、2 与之对应。
 import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
@@ -28,9 +31,14 @@ import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
  * @typedef {{ status: 'none' | 'on' | 'off', why: string, staleMinutes: number, undelivered: number, lastOkMinutes: number }} PushFact
  */
 /**
+ * 每日简报：day 是北京日期；minutes 是离今天 08:30（北京时间）过了几分钟（没到是负数）；outcome 是今天最近一轮的结局
+ * （none 一轮都没起、running 还在跑）；made 今天那一行建了没有；delivered 推到飞书没有；attempts 试了几次；why 没做成的原因。
+ * @typedef {{ day: string, minutes: number, outcome: string, made: boolean, delivered: boolean, attempts: number, why: string }} BriefFact
+ */
+/**
  * 一次巡查读到的。at 是法国的采集时间（ISO）。
  * healthz、history、trainStatus、autoNote、lag 是发版和健康页（老基线里没有这几项，只有判当前读数用到）。
- * @typedef {{ at: string, release: string, healthz: HealthzFact, history: HistoryFact[], trainStatus: string, autoNote: string, lag: LagFact, services: Record<string, string>, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notesOpen: number, notes: NoteFact[], push: PushFact }} Facts
+ * @typedef {{ at: string, release: string, healthz: HealthzFact, history: HistoryFact[], trainStatus: string, autoNote: string, lag: LagFact, services: Record<string, string>, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notesOpen: number, notes: NoteFact[], push: PushFact, brief: BriefFact }} Facts
  */
 /** @typedef {'OK' | 'ALERT' | 'BROKEN'} Verdict */
 /** @typedef {{ verdict: Verdict, facts: Facts | null, alerts: string[], delta: string[], broken: string | null, notes: string[] }} Report */
@@ -51,6 +59,8 @@ export const LIMITS = {
   lagMinutes: 60,
   /** 该推的到点超过这么多分钟没送到、这段时间里一条都没送成：飞书推送不通（同 feishu-push.ts 的 FEISHU_PUSH_STALE_MS） */
   pushStaleMinutes: 60,
+  /** 今天的每日简报到 08:30 以后过这么多分钟还没送到才报（同 daily-brief.ts 的 DAILY_BRIEF_GRACE_MINUTES） */
+  briefGraceMinutes: 30,
 };
 /** 发布历史最近一条是这些事件：这一版没发成，或退回了。 */
 export const BAD_RELEASE_EVENTS = ['unhealthy', 'auto-rollback'];
@@ -61,7 +71,7 @@ const RELEASES = '/srv/fleet-dao-releases';
 /** 要 active 的服务。 */
 export const SERVICES = ['fleet-api', 'fleet-engine'];
 /** 库查询那几块：每块跑完打 ok|<块>，报错打 ERR|<块>|<原因>。 */
-export const DB_BLOCKS = ['master', 'tasks', 'jobs', 'notecount', 'notes', 'push'];
+export const DB_BLOCKS = ['master', 'tasks', 'jobs', 'notecount', 'notes', 'push', 'brief'];
 /** 远端命令：脚本从标准输入喂。 */
 export const PATROL_REMOTE_COMMAND = 'sh -s';
 /** 基线默认放在仓根 _tmp/（指挥官在主检出里跑）。 */
@@ -70,11 +80,20 @@ export const BASELINE_SCHEMA = 1;
 
 const NO_NEWLINE = "E'\\n'";
 /**
- * 「该推」的 SQL（同 feishu-push.ts 的 pushableSince）：没处理、24 小时内建的；要你拍、键 feishu: 开头（主线结论记账行除外）马上推，
- * 卡住报警开着 10 分钟才推。值是从什么时候起该推，不该推是 null。
+ * 「该推」的 SQL（同 feishu-push.ts 的 pushableSince）：没处理、24 小时内建的；要你拍、每日简报（feishu:brief:）、推送测试（feishu:test:）马上推；
+ * 卡住报警（再提醒 remind:、路由疑似降智 probe-iq: 除外）开满 120 分钟、主线红（feishu:main-red:）开满 60 分钟没撤才推；
+ * 主线已恢复只在它之前 24 小时内真推出去过主线红才推；
+ * 其余不推。值是从什么时候起该推，不该推是 null。
  */
-const PUSHABLE_SINCE =
-  "case when n.dedupe_key = 'feishu:main-ci-verdict' then null when n.level = 'decision' or starts_with(n.dedupe_key, 'feishu:') then n.created_at when n.level = 'alert' then n.created_at + interval '10 minutes' else null end";
+const PUSHABLE_SINCE = [
+  'case',
+  "when starts_with(n.dedupe_key, 'feishu:brief:') or starts_with(n.dedupe_key, 'feishu:test:') then n.created_at",
+  "when n.level = 'decision' then n.created_at",
+  "when starts_with(n.dedupe_key, 'feishu:main-red:') then n.created_at + interval '60 minutes'",
+  "when starts_with(n.dedupe_key, 'feishu:main-recovered:') then case when exists (select 1 from notifications red join notification_deliveries rd on rd.notification_id = red.id and rd.channel = 'feishu' and rd.delivered_at is not null where starts_with(red.dedupe_key, 'feishu:main-red:') and red.created_at < n.created_at and red.created_at >= n.created_at - interval '24 hours') then n.created_at else null end",
+  "when n.level = 'alert' and not starts_with(n.dedupe_key, 'remind:') and not starts_with(n.dedupe_key, 'probe-iq:') then n.created_at + interval '120 minutes'",
+  'else null end',
+].join(' ');
 /** 推送那一块：一行 push|状态|没配的原因|最老一条到点几分钟|该推没送到几条|最近一次送到几分钟前。 */
 const PUSH_SQL = [
   "select 'push',",
@@ -87,6 +106,18 @@ const PUSH_SQL = [
   "left join notification_deliveries d on d.notification_id = n.id and d.channel = 'feishu' and d.target = 'team'",
   "where n.resolved_at is null and n.created_at >= now() - interval '24 hours' and d.delivered_at is null) s",
   'where s.since is not null and s.since <= now()',
+].join(' ');
+/** 北京时间今天零点（timestamptz）。 */
+const BJ_TODAY = "((now() at time zone 'Asia/Shanghai')::date::timestamp at time zone 'Asia/Shanghai')";
+/** 简报那一块：一行 brief|北京日期|离 08:30 几分钟|今天最近一轮结局|建了没有|送到没有|试了几次|没做成的原因。 */
+const BRIEF_SQL = [
+  "select 'brief', (now() at time zone 'Asia/Shanghai')::date,",
+  `floor(extract(epoch from now() - (${BJ_TODAY} + interval '8 hours 30 minutes')) / 60)::int,`,
+  `coalesce((select coalesce(r.outcome::text, 'running') from schedule_runs r where r.job = 'daily-brief' and r.started_at >= ${BJ_TODAY} order by r.started_at desc, r.id desc limit 1), 'none'),`,
+  'case when b.id is null then 0 else 1 end, case when d.delivered_at is null then 0 else 1 end, coalesce(d.attempts, 0),',
+  `replace(replace(left(coalesce((select r.why from schedule_runs r where r.job = 'daily-brief' and r.started_at >= ${BJ_TODAY} order by r.started_at desc, r.id desc limit 1), ''), 200), '|', '/'), ${NO_NEWLINE}, ' ')`,
+  "from (select 1) one left join notifications b on b.dedupe_key = 'feishu:brief:' || ((now() at time zone 'Asia/Shanghai')::date)::text",
+  "left join notification_deliveries d on d.notification_id = b.id and d.channel = 'feishu' and d.target = 'team'",
 ].join(' ');
 /**
  * 在法国上跑的那段 sh。每行一项，用「|」分隔；最后一行是 end（没有 end 就是被截断了）。
@@ -124,6 +155,7 @@ export const REMOTE_SCRIPT = [
   `q notecount "select 'notes', count(*) from notifications where resolved_at is null and dedupe_key not like 'remind:%'"`,
   `q notes "select 'note', left(dedupe_key, 80), replace(left(title, 100), ${NO_NEWLINE}, ' ') from notifications where resolved_at is null and dedupe_key not like 'remind:%' order by id desc limit 50"`,
   `q push "${PUSH_SQL}"`,
+  `q brief "${BRIEF_SQL}"`,
   'echo end',
   '',
 ].join('\n');
@@ -210,7 +242,7 @@ export function parseRaw(text) {
   const notes = [];
   /** @type {Set<string>} */
   const blocksOk = new Set();
-  /** @type {{ at?: string, release?: string, diskPct?: number, memMb?: number, load?: number, master?: string, notesOpen?: number, healthz?: HealthzFact, cur?: string, train?: string, state?: string, push?: PushFact }} */
+  /** @type {{ at?: string, release?: string, diskPct?: number, memMb?: number, load?: number, master?: string, notesOpen?: number, healthz?: HealthzFact, cur?: string, train?: string, state?: string, push?: PushFact, brief?: BriefFact }} */
   const one = {};
   /** @type {HistoryFact[]} */
   const history = [];
@@ -271,6 +303,24 @@ export function parseRaw(text) {
         undelivered: Number(p[4]),
         lastOkMinutes: Number(p[5]),
       };
+    else if (
+      kind === 'brief' &&
+      p.length >= 8 &&
+      /^\d{4}-\d{2}-\d{2}$/.test(p[1] ?? '') &&
+      /^-?\d+$/.test(p[2] ?? '') &&
+      ['0', '1'].includes(p[4] ?? '') &&
+      ['0', '1'].includes(p[5] ?? '') &&
+      isInt(p[6] ?? '')
+    )
+      one.brief = {
+        day: p[1] ?? '',
+        minutes: Number(p[2]),
+        outcome: p[3] ?? '',
+        made: p[4] === '1',
+        delivered: p[5] === '1',
+        attempts: Number(p[6]),
+        why: scrubText(p.slice(7).join('|')),
+      };
     else if (kind === 'note' && p.length >= 3)
       notes.push({ key: scrubText(p[1] ?? ''), title: scrubText(p.slice(2).join('|')) });
     else return { ok: false, why: `认不出这一行：${shown(line)}` };
@@ -290,6 +340,7 @@ export function parseRaw(text) {
     'train',
     'state',
     'push',
+    'brief',
   ])
     if (!(k in one)) missing.push(k);
   if (histMissing || history.length === 0) missing.push('发布历史 .history（读不到或是空的）');
@@ -318,6 +369,15 @@ export function parseRaw(text) {
       notesOpen: one.notesOpen ?? 0,
       notes,
       push: one.push ?? { status: 'none', why: '', staleMinutes: -1, undelivered: 0, lastOkMinutes: -1 },
+      brief: one.brief ?? {
+        day: '',
+        minutes: -1,
+        outcome: 'none',
+        made: false,
+        delivered: false,
+        attempts: 0,
+        why: '',
+      },
     },
   };
 }
@@ -336,6 +396,22 @@ export function pushProblem(p) {
   if (p.lastOkMinutes >= 0 && p.lastOkMinutes < LIMITS.pushStaleMinutes) return null;
   const last = p.lastOkMinutes < 0 ? '从没送到过' : `最近一次送到是 ${p.lastOkMinutes} 分钟前`;
   return `飞书推送不通：${p.undelivered} 条该推的没送到，最老的到点 ${p.staleMinutes} 分钟了，${last}`;
+}
+
+/**
+ * 今天的每日简报没送到（同 daily-brief.ts 的 dailyBriefProblem）：08:30 过了 30 分钟以后，今天一轮都没起、没做成、那一行没建、没推到飞书。
+ * 回一句话，好着或还没到点回 null。
+ * @param {BriefFact} b
+ */
+export function briefProblem(b) {
+  if (b.minutes < LIMITS.briefGraceMinutes) return null;
+  if (b.outcome === 'none')
+    return `今天（${b.day}）08:30 的每日简报没跑：定时任务 daily-brief 今天一轮都没起`;
+  if (b.outcome === 'running') return null;
+  if (b.outcome === 'failed') return `今天（${b.day}）的每日简报没做成：${b.why || '没写原因'}`;
+  if (!b.made) return `今天（${b.day}）的每日简报没建出来`;
+  if (!b.delivered) return `今天（${b.day}）的每日简报没推到飞书：试了 ${b.attempts} 次`;
+  return null;
 }
 
 /** @param {TaskFact} t */
@@ -413,6 +489,8 @@ export function invariants(f, base) {
     out.push(`定时任务 ${j.job} 最近一次是 ${j.outcome}（${j.minutes} 分钟前）：${j.why}`);
   const push = pushProblem(f.push);
   if (push) out.push(push);
+  const brief = briefProblem(f.brief);
+  if (brief) out.push(brief);
   if (base) {
     const old = new Set(base.notes.map((n) => n.key));
     for (const n of f.notes) if (!old.has(n.key)) out.push(`新通知 ${n.key}：${n.title}`);
@@ -508,6 +586,7 @@ export function render(r) {
     `发版 最近一次 ${last ? historyWord(last) : '（没有）'}，进度记录 ${f.trainStatus || '无'}，落后主线 ${f.lag.known ? f.lag.behind : '?'} 个提交 ${at}`,
     `通知 开着 ${f.notesOpen} 条 ${at}`,
     `飞书推送 ${pushProblem(f.push) ? '不通' : '通着'}（该推没送到 ${f.push.undelivered} 条，最近一次送到${f.push.lastOkMinutes < 0 ? '：从没有' : ` ${f.push.lastOkMinutes} 分钟前`}） ${at}`,
+    `每日简报 ${f.brief.day} ${f.brief.minutes < LIMITS.briefGraceMinutes ? '还没到点' : briefProblem(f.brief) ? '没送到' : '送到了'} ${at}`,
     ...r.notes,
     `DELTA ${r.delta.length}`,
     ...r.delta.map((d) => `  ${d}`),
@@ -613,7 +692,7 @@ export async function fetchFrance({ home, env, readText, timeoutMs = 55_000, spa
 
 /**
  * 造一份法国回来的样子（自检和测试用）。默认是一切正常；over 改哪项就坏哪项。
- * @param {{ at: Date, disk?: number, mem?: number, engine?: string, master?: string, tasks?: string[], jobs?: string[], notes?: string[], push?: string, noEnd?: boolean, err?: string, healthz?: number, healthRed?: string[], hist?: string[], noHist?: boolean, train?: string, trainRaw?: string, noState?: boolean, autoNote?: string, behind?: number, behindMinutes?: number }} o
+ * @param {{ at: Date, disk?: number, mem?: number, engine?: string, master?: string, tasks?: string[], jobs?: string[], notes?: string[], push?: string, brief?: string, noEnd?: boolean, err?: string, healthz?: number, healthRed?: string[], hist?: string[], noHist?: boolean, train?: string, trainRaw?: string, noState?: boolean, autoNote?: string, behind?: number, behindMinutes?: number }} o
  */
 export function sampleRaw(o) {
   const notes = o.notes ?? ['note|deploy-lag|发布落后'];
@@ -661,6 +740,8 @@ export function sampleRaw(o) {
     o.err ?? 'ok|notes',
     o.push ?? 'push|on||-1|0|30',
     'ok|push',
+    o.brief ?? 'brief|2026-10-09|120|ok|1|1|1|',
+    'ok|brief',
     ...(o.noEnd ? [] : ['end']),
   ];
   return `${lines.join('\n')}\n`;

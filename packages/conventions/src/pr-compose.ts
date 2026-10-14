@@ -19,7 +19,7 @@ import { DIRECTIVES_DIR, PENDING, parseDirective } from './directives.ts';
 import { type Gh as IssueGh, issueNew } from './issue-new.ts';
 import { type Gh, loadPathLists } from './pr-arm.ts';
 import { founderQuoteLine, GATE_LINE, ISSUE_COLUMN } from './pr-columns.ts';
-import { type OpenDeps, PR_OPEN_USAGE, prOpen } from './pr-open.ts';
+import { branchIssue, type OpenDeps, PR_OPEN_USAGE, prOpen } from './pr-open.ts';
 
 export interface CliDeps extends OpenDeps {
   /** 跑 git（在敲命令的目录里）：读分支上的提交说明。 */
@@ -247,7 +247,21 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
   }
   const noIssue = typeof values['no-issue'] === 'string';
   const sources = [closes.length + refs.length > 0, newIssue !== undefined, noIssue].filter(Boolean).length;
-  if (sources === 0) {
+  // 分支是 local/<单号>-、fleet/<单号>-：分支已经对应一张单，什么都不给就由 prOpen 自动补 Closes #单号；再开一张新单对不上
+  let onIssueBranch: ReturnType<typeof branchIssue>;
+  try {
+    onIssueBranch = branchIssue(deps.git);
+  } catch (e) {
+    err(`${e instanceof Error ? e.message : String(e)}：没开 PR。`);
+    return 2;
+  }
+  if (onIssueBranch && newIssue !== undefined) {
+    err(
+      `当前分支 ${onIssueBranch.branch} 已经对应单 #${onIssueBranch.issue}，不能再 --new-issue 开一张新单：去掉它（需求栏会自动补 Closes #${onIssueBranch.issue}）。什么也没做。`,
+    );
+    return 1;
+  }
+  if (sources === 0 && !onIssueBranch) {
     err(
       '没给 --body-file、也没说需求栏挂哪张单：每个 PR 都要挂单，里程碑页才看得出进展（#1052）。\n' +
         '  这个 PR 做完就关单 → --closes <号>；母单的分片、关不了它 → --refs <号>；这个 PR 就是一张新单 → --new-issue "<标题>" --kind … --milestone …；\n' +

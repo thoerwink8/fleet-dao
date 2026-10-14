@@ -57,6 +57,7 @@ import { ciTimingsJob } from './ci-timings.ts';
 import { cliUpgradeJob } from './cli-upgrade.ts';
 import { cliVersionsJob } from './cli-versions.ts';
 import { productionCpuUsage } from './cpu-usage.ts';
+import { dailyBriefJob } from './daily-brief.ts';
 import { drainNotifier } from './drain-alerts.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
 import { gitNetworkEnv } from './git-env.ts';
@@ -847,6 +848,8 @@ export function realPortsFromEnv(
     cliVersions: cliVersionsJob({ db }),
     // 需求整理（#2049）：删了满 30 天的需求连消息硬删并写操作记录，已结案的按规矩自动归档。不看总开关。
     requestSweep: requestSweepJob({ db }),
+    // 每日简报（决定 0096）：读发布历史、库、GitHub，写一行提醒（后端推飞书）、用引擎机器人在 #1055 发评论。不看总开关。
+    dailyBrief: dailyBriefJob({ db, gh }),
     // 命令行工具升级（#1971）：空闲时排空、写请求。引擎没有 root，不在这里装。不看总开关。
     cliUpgrade: cliUpgradeJob({
       db,

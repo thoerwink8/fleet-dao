@@ -459,6 +459,54 @@ describe('对账与补漏', () => {
     });
   });
 
+  it('「引擎」自己开、自己合的 PR（定时任务的数据 PR）：不报没有合并记录，只补账（#2175）', async () => {
+    const { gh, fake, ledger } = setup();
+    const own = fake.addPull({
+      user: fake.bots.engine,
+      head: { ref: 'ci-timings/2026-10-14', sha: A },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:00:00Z',
+      merge_commit_sha: sha('c'),
+      merged_by: fake.bots.engine,
+    });
+    // 干活的机器人开的、同样由「引擎」合、没有合并记录：照报
+    const task = fake.addPull({
+      head: { ref: 'task/3', sha: B },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:30:00Z',
+      merge_commit_sha: sha('d'),
+      merged_by: fake.bots.engine,
+    });
+    for (const [number, ref, head] of [
+      [own.number, 'ci-timings/2026-10-14', A],
+      [task.number, 'task/3', B],
+    ] as const) {
+      await ledger.upsertPullRequest({
+        repoId: REPO_ID,
+        number,
+        state: 'merged',
+        headRef: ref,
+        headSha: head,
+        updatedAt: new Date('2026-09-25T11:30:00Z'),
+      });
+    }
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId })
+      .auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
+    expect(report.outcome).toBe('ok');
+    expect(report.findings.map((f) => `${f.number} ${f.kind}`).sort()).toEqual(
+      [
+        `${own.number} backfill_merge_record`,
+        `${task.number} no_merge_record`,
+        `${task.number} backfill_merge_record`,
+      ].sort(),
+    );
+    expect((await ledger.idempotency.peek(mergeKey(repo, own.number, A)))?.completedAt).toBeTruthy();
+  });
+
   it('人开的 PR：镜像没记的照样补上；不报合并人、也不报没有合并记录', async () => {
     const { gh, fake, ledger } = setup();
     const byHuman = fake.addPull({

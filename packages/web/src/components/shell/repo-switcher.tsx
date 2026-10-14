@@ -34,16 +34,20 @@ export function RepoSwitcher() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="h-10 shrink-0 gap-1.5 px-2 text-body md:h-8" aria-label="切换项目">
+        <Button
+          variant="ghost"
+          className="h-10 min-w-0 shrink gap-1.5 px-2 text-body md:h-8"
+          aria-label="切换项目"
+        >
           <span className="num hidden text-muted-foreground lg:inline">{repo?.owner}/</span>
           {repo ? (
-            <span className="num max-w-40 truncate font-semibold">{repo.name}</span>
+            <span className="num min-w-0 max-w-40 truncate font-semibold">{repo.name}</span>
           ) : reposError ? (
             <span className="text-ink-fail">仓列表没读成</span>
           ) : (
             <span className="num font-semibold">…</span>
           )}
-          <ChevronsUpDown className="size-3.5 text-muted-foreground" />
+          <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-72">

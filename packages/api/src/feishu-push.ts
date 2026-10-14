@@ -10,6 +10,7 @@
 // - 凭据不进日志、不进错误原文；飞书回的错只记 code 和 msg。
 import {
   type Db,
+  FEISHU_BRIEF_KEY_PREFIX,
   type FeishuPushItem,
   type FeishuPushStatus,
   pendingFeishuPushes,
@@ -150,9 +151,7 @@ export function createFeishuBot(options: {
       throw new FeishuSendError('机器人所在的群翻了 20 页还没翻完');
     },
     async send(input) {
-      const rows: { tag: string; text: string; href?: string }[][] = input.lines.map((text) => [
-        { tag: 'text', text },
-      ]);
+      const rows = input.lines.map(postRow);
       if (input.link) rows.push([{ tag: 'a', text: '打开驾驶舱看', href: input.link }]);
       const body = await call('/im/v1/messages?receive_id_type=chat_id', {
         method: 'POST',
@@ -177,21 +176,40 @@ export function createFeishuBot(options: {
 
 const LEVEL_WORDS = { decision: '要你拍', alert: '卡住了', daily: '通知' } as const;
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+/** 正文最多几行：一般提醒 12 行；每日简报（四块、每块十来条）放到 120 行。 */
+const MAX_LINES = 12;
+const MAX_BRIEF_LINES = 120;
+const LINK_IN_TEXT = /https:\/\/[^\s，。；、）)]+/;
 
-/** 一条提醒推出去的样子：标题带上是哪一类，正文最多 12 行、每行 300 字，驾驶舱链接接在最后。 */
+/** 富文本的一行：行里的 https 链接做成可点的（a），其余是文字。 */
+export function postRow(line: string): { tag: string; text: string; href?: string }[] {
+  const out: { tag: string; text: string; href?: string }[] = [];
+  let rest = line;
+  for (let m = LINK_IN_TEXT.exec(rest); m !== null; m = LINK_IN_TEXT.exec(rest)) {
+    if (m.index > 0) out.push({ tag: 'text', text: rest.slice(0, m.index) });
+    out.push({ tag: 'a', text: m[0], href: m[0] });
+    rest = rest.slice(m.index + m[0].length);
+  }
+  if (rest !== '' || out.length === 0) out.push({ tag: 'text', text: rest });
+  return out;
+}
+
+/** 一条提醒推出去的样子：标题带上是哪一类（每日简报的标题本身写明了，不再加），正文按行截、每行 300 字，驾驶舱链接接在最后。 */
 export function pushMessage(
   item: FeishuPushItem,
   publicUrl: URL,
 ): { title: string; lines: string[]; link: string | null } {
+  const brief = item.dedupeKey.startsWith(FEISHU_BRIEF_KEY_PREFIX);
   const lines = item.body
     .split('\n')
     .map((l) => l.trimEnd())
     .filter((l) => l.trim() !== '')
-    .slice(0, 12)
+    .slice(0, brief ? MAX_BRIEF_LINES : MAX_LINES)
     .map((l) => clip(l, 300));
   const path = item.link?.startsWith('/') ? item.link : '/';
+  const title = item.title.trim() || '（没写标题）';
   return {
-    title: clip(`【${LEVEL_WORDS[item.level]}】${item.title.trim() || '（没写标题）'}`, 120),
+    title: clip(brief ? title : `【${LEVEL_WORDS[item.level]}】${title}`, 120),
     lines,
     link: new URL(path, publicUrl).toString(),
   };

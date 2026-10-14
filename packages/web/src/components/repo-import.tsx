@@ -226,8 +226,9 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
       <ListRow
         tall
         summary={
-          <>
-            <div className="flex min-w-0 flex-1 flex-col justify-center">
+          // 窄屏（390）放不下「仓名 + 两个按钮」：仓名占满一行，按钮折到下一行靠右，谁都不出屏、不被挤成零宽（#2211）
+          <div className="flex min-w-0 flex-1 items-center gap-2 max-md:flex-wrap max-md:py-1">
+            <div className="flex min-w-0 flex-1 flex-col justify-center max-md:basis-full">
               <span className="flex min-w-0 items-center gap-1">
                 <span className="num truncate text-body font-medium" title={repo.fullName}>
                   {repo.fullName}
@@ -237,6 +238,8 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
               </span>
               <span data-row-meta className="truncate text-meta text-muted-foreground">
                 {repo.ownerType === 'Organization' ? '组织 · 要组织先批准这个 App' : '个人'}
+                {/* 窄屏上「已在驾驶舱」那枚徽章让位给名字（见下），状态改写进这一行；宽屏照旧用徽章 */}
+                {repo.inCockpit ? <span className="md:hidden">{' · 已在驾驶舱'}</span> : null}
                 {repo.installBlockedWhy ? ` · ${repo.installBlockedWhy}` : ''}
               </span>
             </div>
@@ -252,7 +255,12 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
                 label={repo.fullyInstalled ? 'App 已装' : 'App 没装全'}
               />
             </span>
-            {repo.inCockpit ? <StatusBadge tone="done" label="已在驾驶舱" /> : null}
+            {repo.inCockpit ? (
+              // 窄屏行里它和两个按钮抢宽度，把仓名挤成零宽（390 宽实测）：只留给读屏，状态在第二行小字里
+              <span className="shrink-0 max-md:sr-only">
+                <StatusBadge tone="done" label="已在驾驶舱" />
+              </span>
+            ) : null}
             {/* 已导入但机器人没装全：标「未接入」，下面一条横幅说清去哪装 */}
             {repo.inCockpit && !repo.fullyInstalled ? (
               // 窄屏行里放不下：只留给读屏，下面的横幅照样看得见
@@ -262,7 +270,7 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
             ) : null}
 
             {/* 动作：没装全给「一键授权」（整页跳 GitHub），没在驾驶舱给「加进驾驶舱」，在驾驶舱给「移出」。 */}
-            <div className="flex shrink-0 items-center gap-1.5">
+            <div className="flex shrink-0 items-center gap-1.5 max-md:ml-auto">
               {!repo.fullyInstalled && repo.canInstall ? (
                 <Button size="sm" variant="outline" asChild>
                   <a href={`/api/github/authorize?githubId=${repo.githubId}`}>一键授权</a>
@@ -319,7 +327,7 @@ function ImportRow({ repo }: { repo: ImportableRepo }) {
                 </Button>
               )}
             </div>
-          </>
+          </div>
         }
       />
 

@@ -257,6 +257,24 @@ test.describe('主页：深色主题和手机宽度', () => {
       return el ? el.scrollWidth - el.clientWidth : -1;
     });
     expect(main, '正文区不横向溢出').toBeLessThanOrEqual(0);
+    // 顶栏：外壳 overflow-hidden，整页 scrollWidth 看不出顶栏被挤出屏外，要逐个量按钮；铃铛、账号在 390/360/320 宽都得完整在屏幕里（#2215）
+    for (const width of [390, 360, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      const header = await page.evaluate(() => {
+        const vw = window.innerWidth;
+        const bar = document.querySelector('header');
+        const out = [...document.querySelectorAll('header button, header a')]
+          .map((el) => ({ name: el.getAttribute('aria-label') ?? '', r: el.getBoundingClientRect() }))
+          .filter(({ r }) => r.width > 0 && (r.left < -0.5 || r.right > vw + 0.5))
+          .map(({ name }) => name);
+        return { out, sw: bar ? bar.scrollWidth - bar.clientWidth : -1 };
+      });
+      expect(header.out, `${width} 宽顶栏没有按钮在屏外`).toEqual([]);
+      expect(header.sw, `${width} 宽顶栏内容不比顶栏宽`).toBeLessThanOrEqual(0);
+      await expect(page.getByRole('button', { name: /^提醒/ })).toBeVisible();
+      await expect(page.getByRole('button', { name: '我的账号' })).toBeVisible();
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
     await shot(page, '02-主页-手机');
     // 点开横条：底部抽屉里有要你拍的和做完的
     await openDrawer(page);

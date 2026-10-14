@@ -16,7 +16,7 @@ const bad = (stderr: string, code = 1): RunResult => ({ code, stdout: '', stderr
 const files = (...names: string[]) =>
   ok(`${names.map((n) => JSON.stringify([n, 'modified', null, '@@ x'])).join('\n')}\n`);
 const CREATED = ok('https://github.com/o/r/pull/42\n');
-const ISSUE_7 = ok('[false,null]');
+const ISSUE_7 = ok('[false,null,"open"]');
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -32,6 +32,8 @@ interface Opts {
   lookups?: RunResult[];
   /** issue-new 那边的 gh 回话（issue create 一次）。 */
   issueReplies?: GhResult[];
+  /** 当前分支，默认 feat/x。 */
+  branch?: string;
 }
 
 function world(o: Opts = {}) {
@@ -64,7 +66,7 @@ function world(o: Opts = {}) {
   };
   const git: Gh = (args) => {
     if (args[0] === 'push') return ok(); // pr-open 开 PR 前的 git push：本文件不关心，pr-open.test.ts 管
-    if (args[0] === 'rev-parse') return ok('feat/x\n'); // 同上：开之前读当前分支
+    if (args[0] === 'rev-parse') return ok(`${o.branch ?? 'feat/x'}\n`); // 同上：开之前读当前分支
     gitCalls.push(args);
     return o.log ?? ok('加个东西\n');
   };
@@ -137,7 +139,7 @@ describe('pnpm pr:open 自己生成正文', () => {
   it('--new-issue：先开单（类别、里程碑用参数给，正文四节齐全）再 Closes 它，PR 挂上那张单的里程碑', async () => {
     const w = world({
       replies: [CREATED, ok(), files('a.ts'), ok()],
-      lookups: [ok('[false,"v4 统一与验收"]')],
+      lookups: [ok('[false,"v4 统一与验收","open"]')],
       issueReplies: [{ code: 0, stdout: 'https://github.com/o/r/issues/55\n', stderr: '' }],
     });
     expect(
@@ -165,7 +167,7 @@ describe('pnpm pr:open 自己生成正文', () => {
   it('【故意造出的失败】--new-issue 不加 --local 也在同一次 gh issue create 里贴「本机做」；把自动贴标去掉这条就红', async () => {
     const w = world({
       replies: [CREATED, ok(), files('a.ts'), ok()],
-      lookups: [ok('[false,"v4 统一与验收"]')],
+      lookups: [ok('[false,"v4 统一与验收","open"]')],
       issueReplies: [{ code: 0, stdout: 'https://github.com/o/r/issues/55\n', stderr: '' }],
     });
     expect(await w.run('--new-issue', '删掉没人用的残留', '--kind', '杂项', '--milestone', '未排期')).toBe(0);
@@ -376,5 +378,30 @@ describe('pnpm pr:open 生成正文：闸门（失败要真失败）', () => {
     });
     expect(code).toBe(1);
     expect(w.text()).toContain('--title');
+  });
+});
+
+describe('pnpm pr:open 生成正文：分支认单', () => {
+  it('分支是 local/<单号>- 而什么都没给：自动补 Closes #单号', async () => {
+    const w = world({ branch: 'local/7-x', replies: [CREATED, files('a.ts'), ok()] });
+    expect(await w.run()).toBe(0);
+    expect(w.bodies[0]).toContain('Closes #7');
+  });
+
+  it('【故意造出的失败】分支认单后 --no-issue、--new-issue 都拒开，什么也没开', async () => {
+    const a = world({ branch: 'local/7-x' });
+    expect(await a.run('--no-issue', '懒')).toBe(1);
+    expect(a.text()).toContain('已经对应单 #7');
+    const b = world({ branch: 'fleet/7-x' });
+    expect(await b.run('--new-issue', '新单', '--kind', '需求', '--milestone', '未排期')).toBe(1);
+    expect(b.text()).toContain('已经对应单 #7');
+    expect(b.issueCalls).toEqual([]);
+    expect(b.calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】--closes 的单和分支单号对不上：拒开', async () => {
+    const w = world({ branch: 'local/9-x' });
+    expect(await w.run('--closes', '7')).toBe(1);
+    expect(w.text()).toContain('单号对不上');
   });
 });
