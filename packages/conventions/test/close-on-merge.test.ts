@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { closeOnMerge, whyLeave } from '../src/close-on-merge.ts';
 import { CloseUnchecked } from '../src/issue-close.ts';
 import type { GhResult } from '../src/issue-new.ts';
+import { PROGRESS_ISSUE } from '../src/progress.ts';
 
 const REPO_URL = 'https://api.github.com/repos/o/r';
 const ok = (data: unknown): GhResult => ({ code: 0, stdout: JSON.stringify(data), stderr: '' });
@@ -169,6 +170,29 @@ describe('合并时收口：有意留着的不碰（每条一个故意造出来�
 
   it('这个号是 PR 不是单：不碰', async () => {
     await untouched({ issues: { 30: { state: 'open', labels: [], pull: true } } }, '是 PR');
+  });
+});
+
+describe('合并时收口：置顶进度单不碰（#2045 误关 #1055）', () => {
+  it('正文是 #2045 那种「Refs #1055」：不关、不去读它', async () => {
+    const { w, gh } = world({
+      pull: mergedPull(column(`Refs #${PROGRESS_ISSUE}`, '', '人闸：改标准')),
+      issues: { [PROGRESS_ISSUE]: { state: 'open', labels: [{ name: '杂项' }] } },
+    });
+    const r = await closeOnMerge(500, { gh });
+    expect(r.outcomes).toEqual([
+      { number: PROGRESS_ISSUE, outcome: 'kept', why: expect.stringContaining('置顶的进度单') },
+    ]);
+    expect(closedCalls(w)).toEqual([]);
+    expect(w.issues[PROGRESS_ISSUE]?.state).toBe('open');
+  });
+  it('写 Closes 也不替它关', async () => {
+    const { w, gh } = world({
+      pull: mergedPull(column(`Closes #${PROGRESS_ISSUE}`)),
+      issues: { [PROGRESS_ISSUE]: { state: 'open', labels: [] } },
+    });
+    await closeOnMerge(500, { gh });
+    expect(closedCalls(w)).toEqual([]);
   });
 });
 
