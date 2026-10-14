@@ -34,13 +34,20 @@ export function bareDoc(file: string): string {
   return file.startsWith('docs/design/') ? 'docs/design.md' : file;
 }
 
-/** 这次要查的文件：上面固定的几份，加上 docs/design/ 下按名字排的 .md。目录不存在就只有固定的几份。 */
+/**
+ * 这次要查的文件：上面固定的几份，加上 docs/design/ 下按名字排的 .md，再加上各包自己的 AGENTS.md
+ * （仓根 AGENTS.md 只当目录，细则下沉到包里；包里的说明和代码脱节、路径指空了一样没人发现）。目录不存在就不加。
+ */
 export function docFiles(repo: RepoView): string[] {
   const extra = (repo.list('docs/design') ?? [])
     .filter((name) => name.endsWith('.md'))
     .sort()
     .map((name) => `docs/design/${name}`);
-  return [...DOCS, ...extra];
+  const pkgs = (repo.list('packages') ?? [])
+    .sort()
+    .map((name) => `packages/${name}/AGENTS.md`)
+    .filter((file) => repo.exists(file));
+  return [...DOCS, ...extra, ...pkgs];
 }
 
 export type PointerKind = 'link' | 'path' | 'section' | 'subsection' | 'quote' | 'item' | 'title';

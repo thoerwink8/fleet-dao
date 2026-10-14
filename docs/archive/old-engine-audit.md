@@ -1,8 +1,10 @@
-# 引擎手册（Temporal 与编排）
+# 旧引擎审计手册（Temporal 与编排，归档）
 
-> **实现 `packages/engine`（需求 / 子任务 / 合并队列工作流、活动、定时任务、Temporal 部署）之前读。** 对应设计 §四「Temporal」、§五「一个任务怎么走完全程」、§六「颗粒度与合并」「断链怎么被发现」、§十三「高可用」、§十六「Temporal 工作流」「约 30 个 systemd 定时器」两行、§十七 第 2 条。
+> **归档**：写的是旧系统 windsurf-dao `packages/fleet` 的审计（2026-09-25），不是现在的 `packages/engine`；原在 `docs/reference/engine.md`，因和现行包同名易被当成现行说明，2026-10-14 挪到这里。现行引擎的说明看 `packages/engine/AGENTS.md`。条目编号（engine A1–H 等）仍可能被代码和其他手册引用，照旧有效。
+
+> 原注：**实现 `packages/engine`（需求 / 子任务 / 合并队列工作流、活动、定时任务、Temporal 部署）之前读。** 对应设计 §四「Temporal」、§五「一个任务怎么走完全程」、§六「颗粒度与合并」「断链怎么被发现」、§十三「高可用」、§十六「Temporal 工作流」「约 30 个 systemd 定时器」两行、§十七 第 2 条。
 > 讲清旧引擎（windsurf-dao `packages/fleet`）长什么样、生产读数、哪些判断值得照搬、版本升级与重放踩过的坑、新引擎的实现建议；坑逐条写成测试用例。
-> 来源：旧系统审计切片 s3（2026-09-25）。审计对象：windsurf-dao `packages/fleet`（HEAD `b1ebd88d`）及其周边编排脚本、法国 VPS 上在跑的 Temporal（只读）。ai-gateway-stack 与本切片无交集（`git grep -i temporal` 零命中）。全仓记法见 [README](README.md)。
+> 来源：旧系统审计切片 s3（2026-09-25）。审计对象：windsurf-dao `packages/fleet`（HEAD `b1ebd88d`）及其周边编排脚本、法国 VPS 上在跑的 Temporal（只读）。ai-gateway-stack 与本切片无交集（`git grep -i temporal` 零命中）。全仓记法见 [README](../reference/README.md)。
 
 **出处写法**：`路径:行` 指 windsurf-dao 仓内文件；`windsurf-dao#N` 指旧仓 issue/PR；`windsurf-dao@<提交号>` 指旧仓提交；「VPS 读回」是只读命令的输出摘录；「判例 X」是旧维护者的判例记忆（不公开，只为追溯）。
 **占位**：主机名写 `<VPS>`，GitHub 属主写 `<owner>`，服务用户写 `<svc>`，回环地址写 `<回环>`。

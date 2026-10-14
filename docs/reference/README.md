@@ -2,7 +2,7 @@
 
 > 旧仓审计快照，路径已失效，条目编号（CC-10、Q2 等）仍被代码引用。
 
-这里的九份手册，提炼自重写 fleet-dao 之前对旧系统（windsurf-dao、ai-gateway-stack、两台 VPS）做的九个审计切片（2026-09-24/25）：旧系统里各部件实际怎么工作、真实的数字和常数、各渠道的真实接口形状、「坑 → 新系统的测试用例」、旧系统里该丢掉的。它们不决定新系统长什么样（那是[设计文档](../design.md)和[实施计划](../plan.md)的事），只给实现的人当参考和测试清单。
+这里的九份手册（引擎那份和现行 `packages/engine` 同名易混，已挪进 `docs/archive/`），提炼自重写 fleet-dao 之前对旧系统（windsurf-dao、ai-gateway-stack、两台 VPS）做的九个审计切片（2026-09-24/25）：旧系统里各部件实际怎么工作、真实的数字和常数、各渠道的真实接口形状、「坑 → 新系统的测试用例」、旧系统里该丢掉的。它们不决定新系统长什么样（那是[设计文档](../design.md)和[实施计划](../plan.md)的事），只给实现的人当参考和测试清单。
 
 ## 实现哪一块之前读哪份
 
@@ -10,7 +10,7 @@
 |---|---|---|
 | [adapters.md](adapters.md) | 渠道插头（`packages/adapters`）：Claude Code（经 reclaude）、codex、cursor-agent、Grok 命令行、pi、dsh、Kimi Code、Mirasim ws、ACP——怎么无头起、能读到什么、怎么判真开工 / 真完成、会怎么坏 | 120 条（CC / CX / CU / GK / PI / DS / KM / MS / ACP / GEN） |
 | [quota.md](quota.md) | 额度读取与额度账、模型扫描与探活、调度台的选路与并发上限 | 59 条（Q / D / R / C） |
-| [engine.md](engine.md) | 引擎（`packages/engine`）：Temporal 工作流与活动、超时与心跳、信号与更新、合并队列、定时任务、版本演进、Temporal 部署 | 57 条（A–H） |
+| [old-engine-audit.md](../archive/old-engine-audit.md)（已归档，写的是旧引擎；现行引擎看 `packages/engine/AGENTS.md`） | 引擎（`packages/engine`）：Temporal 工作流与活动、超时与心跳、信号与更新、合并队列、定时任务、版本演进、Temporal 部署 | 57 条（A–H） |
 | [errors.md](errors.md) | 错误分类与处置（「下一步该做什么」动作表）、卡住判定、路由熔断、会话资源隔离与准入；含 49 条真实报错样本夹具 | 53 条（第 8 节） |
 | [github.md](github.md) | GitHub：两个机器人与发令牌、写入的幂等与回读、PR 与合并队列、事件接收、白名单作者、互动限制续期、issue 进度段原地更新 | 42 条（A–G） |
 | [feishu.md](feishu.md) | 飞书（`packages/feishu`）：接口与硬限制、确认卡、三类推送与关注、置顶盘面卡、菜单、回复即追问、端到端自测 | 29 条（T） |
