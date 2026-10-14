@@ -89,7 +89,7 @@ func writeFrame(w io.Writer, f frame) error {
 func applyRouteSettings(mode string, args []string, env []string) ([]string, []string, []string, string, error) {
 	if mode == "local" || mode == "default" {
 		if mode == "default" {
-			loopback, credential, err := gatewayFacts(args)
+			loopback, credential, err := gatewayFacts(args, env)
 			if err != nil {
 				return nil, nil, nil, "", err
 			}
@@ -108,7 +108,7 @@ func applyRouteSettings(mode string, args []string, env []string) ([]string, []s
 		return out, env, temps, "none", nil
 	}
 	if mode != "gateway" {
-		if err := verifyGatewaySettings(args); err != nil {
+		if err := verifyGatewaySettings(args, env); err != nil {
 			return nil, nil, nil, "", err
 		}
 	}
@@ -117,10 +117,7 @@ func applyRouteSettings(mode string, args []string, env []string) ([]string, []s
 
 // gatewayPresence 只为日志判断参数或环境里有没有回环网关；读不到按没有记，不影响启动。
 func gatewayPresence(args []string, env []string) string {
-	if loopback, _, err := gatewayFacts(args); err == nil && loopback {
-		return "kept"
-	}
-	if _, changed := stripEnv(env); changed {
+	if loopback, _, err := gatewayFacts(args, env); err == nil && loopback {
 		return "kept"
 	}
 	return "none"
@@ -315,7 +312,7 @@ func supervise(cfg configuration) error {
 			}
 			// 已经跑过的会话切 cloud 而活着的参数里没有平台网关：不杀会话，把这一条用户消息
 			// 以报错结果退回给 Mirasim，进程和当前额度原样保留（首次启动仍按原规矩硬失败）。
-			if started && sel.mode == "cloud" && verifyGatewaySettings(cfg.args) != nil {
+			if started && sel.mode == "cloud" && verifyGatewaySettings(cfg.args, cfg.env) != nil {
 				logLine("event=refuse-switch route=cloud sid=" + sel.sessionID + " reason=no-gateway-in-live-args")
 				queue = queue[1:]
 				refusal := frame{}

@@ -16,7 +16,7 @@ Windows 和 macOS 的接入由本仓 `packages/mirasim-reclaude` 维护。旧 `r
 
 ## 1. 原理：为什么需要会话启动器
 
-Mirasim 用 `--settings <文件或 JSON>` 把本地网关地址和认证字段交给 Claude。旧封装只在启动时剥掉自有会话的注入，复用进程时没有重新选路，切回平台后仍可能使用自有额度。
+Mirasim 把本地网关地址和认证字段交给 Claude：有的版本写进 `--settings <文件或 JSON>` 的 env 块，0.0.498 起放进进程环境变量。启动器两处都看：会话没单独选路由（跟随全局档位）时，有回环网关加令牌就是平台、原样保留，没有就走自有。旧封装只在启动时剥掉自有会话的注入，复用进程时没有重新选路，切回平台后仍可能使用自有额度。
 
 新版保存原始 args/env；明确自有才在安全副本中剥掉 Mirasim 回环网关的 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_API_KEY`。切回平台从原始参数恢复，重新完成 SDK 初始化与控制状态恢复；已经执行的用户消息和工具结果不重放。用户级 reclaude 配置保持由 reclaude 管理，不假定它一直是某一种代理或认证形态。
 
