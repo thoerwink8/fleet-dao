@@ -388,6 +388,24 @@ const tail = (text, n = 2) =>
   );
 
 /**
+ * ssh 退出 255 时给人看的原因。两种断法要分开（#2134）：
+ * 公钥被拒＝22 口通、这台拿出的钥匙法国不认（监督机缺 ~/.ssh/fleet_login，或没配 Host fleet-fr-wg）；
+ * Connection refused＝22 口没在听，或这台到 22 的连接被复位（#1775 那种封禁）。
+ * @param {string} stderr
+ */
+export function sshFailureWhy(stderr) {
+  const last = tail(stderr);
+  const said = last ? `ssh 原话：${last}` : '';
+  if (/Permission denied \(publickey\)/i.test(String(stderr ?? ''))) {
+    return `ssh 到了法国但公钥被拒：这台没有被法国授权的钥匙。监督机要有 ~/.ssh/fleet_login，ssh 配置里有 Host fleet-fr-wg（IdentityFile 指它，IdentitiesOnly yes）；本机把这个 Host 名写进 ~/.fleet-dao/france-ssh。${said}`.trim();
+  }
+  if (/Connection refused/i.test(String(stderr ?? ''))) {
+    return `ssh 连法国被拒绝：22 口没在听，或这台到 22 的连接被复位。${said}`.trim();
+  }
+  return `ssh 连不上法国：${last || '没说为什么'}`;
+}
+
+/**
  * 起 ssh、把查询脚本从标准输入喂过去、收回标准输出。回 { ok: true, stdout } 或 { ok: false, kind, why }：
  * ssh-failed（起不了 ssh、ssh 自己报错，退出码 255）、timeout、query-failed（法国上的脚本没跑成）、bad-json（太大）。
  * @param {{ command: string, args: string[], script: string, timeoutMs?: number, maxBytes?: number, spawnImpl?: SpawnPiped }} opts
@@ -465,7 +483,7 @@ export function runRemote({
         return finish({
           ok: false,
           kind: 'ssh-failed',
-          why: `ssh 连不上法国：${tail(stderr) || '没说为什么'}`,
+          why: sshFailureWhy(stderr),
         });
       if (code !== 0)
         return finish({
