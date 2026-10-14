@@ -349,10 +349,14 @@ export async function auditMergedPrs(
           // 合并队列合的每一张都在幂等账里留了合并记录（C21）。没留的：多半是绕开了合并队列（#431 那种——账号
           // 手动合的、合并前那几道核对可能没走），账上要补上：receipt 里写明实际合并人，让账反映事实。提醒照报，
           // 创始人兼断一次要不要走合并队列；补账完下一轮 no_merge_record 不再起。
+          // 「引擎」自己开、自己合的（引擎的定时任务开的数据 PR，比如每周刷新 CI 耗时表：挂 GitHub 自动合并，必过检查照样挡）
+          // 本来就不走任务的合并队列，不报 no_merge_record，只补账（#2175、#1230：每周一条误报，#1230 还被立了案白起一次会话）。
+          // 干活的机器人开的（任务 PR）照报。
+          const ownJobPr = deps.bots.is('engine', item.user) && deps.bots.is('engine', pr.merged_by ?? null);
           const key = mergeKey(repo, item.number, pr.head.sha);
           const existing = await ledger.idempotency.peek(key);
           if (!existing?.completedAt) {
-            note(item.number, 'no_merge_record', '合并了，但账上没有合并队列的合并记录');
+            if (!ownJobPr) note(item.number, 'no_merge_record', '合并了，但账上没有合并队列的合并记录');
             if (pr.merged_at) {
               try {
                 const receipt: MergeReceipt = {
