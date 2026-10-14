@@ -81,6 +81,25 @@ describe('/api/home（内存版）', () => {
     expect(home.running[0]?.waitingSince).toBeUndefined();
   });
 
+  it('本机领的单（决定 0096）：在跑的带 executor=local、领取的环境和租约到期时刻；没记 executor 的单（内存版、老数据）和引擎的单都不带领取人和租约', async () => {
+    const h = harness();
+    const before = HomeResponseSchema.parse(await (await getHome(h)).json());
+    expect(before.running[0]).not.toHaveProperty('executor');
+    expect(before.running[0]).not.toHaveProperty('claimedBy');
+    expect(before.running[0]).not.toHaveProperty('leaseUntil');
+    const task = h.store.data.tasks.find((t) => t.id === IDS.task12);
+    if (!task) throw new Error('样例数据里没有任务');
+    task.executor = 'local';
+    task.claimedBy = 'founder-pc';
+    task.leaseUntil = '2026-10-14T15:52:00.000Z';
+    const home = HomeResponseSchema.parse(await (await getHome(h)).json());
+    expect(home.running[0]).toMatchObject({
+      executor: 'local',
+      claimedBy: 'founder-pc',
+      leaseUntil: '2026-10-14T15:52:00.000Z',
+    });
+  });
+
   it('引擎停下等人的单（#1967、#1971 停了 8 小时卡上写「在合并队列」「还没验」）：写 parked 加引擎记的原因，从停下那一刻算', async () => {
     const h = harness();
     const task = h.store.data.tasks.find((t) => t.id === IDS.task12);

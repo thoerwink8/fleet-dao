@@ -14,7 +14,15 @@ import { inkClass, softClass, solidClass } from '../../layout/tone';
 import { ACTIONS, type ActionTarget, useTargetActions } from '../../task-actions';
 import { Kbd } from '../../ui/kbd';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../ui/tooltip';
-import { CardLink, needsFounder, parkedForHuman, statusTextOf, waitLineOf } from '../running-card';
+import {
+  CardLink,
+  isLocalTask,
+  needsFounder,
+  parkedForHuman,
+  statusTextOf,
+  waitLineOf,
+  workerTextOf,
+} from '../running-card';
 import type { HomeFlowStage, HomeRunning } from '../types';
 import {
   farCardFontPx,
@@ -382,8 +390,13 @@ function WorkerLine({ item }: { item: HomeRunning }) {
   return (
     <div className="flex min-w-0 items-center gap-x-1.5 text-canvas text-muted-foreground">
       <Bot className="size-3 shrink-0" aria-hidden />
-      <span className={cn('max-w-1/2 shrink-0 truncate', item.worker ? 'text-foreground' : undefined)}>
-        {item.worker ?? '没有进程在跑'}
+      <span
+        className={cn(
+          'max-w-1/2 shrink-0 truncate',
+          item.worker || isLocalTask(item) ? 'text-foreground' : undefined,
+        )}
+      >
+        {workerTextOf(item)}
       </span>
       {item.stageSince ? (
         <span className="num shrink-0 whitespace-nowrap">

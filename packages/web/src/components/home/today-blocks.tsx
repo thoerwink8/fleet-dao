@@ -338,13 +338,24 @@ function RunList({ rows, extra }: { rows: RunRow[]; extra?: ReactNode }) {
 export function RunBlock({ running }: { running: HomeRunning[] }) {
   const now = useNow();
   const local = useLocalSessions();
-  const engine = running.map((r) => engineRow(r, now, { href: r.link, external: false }));
+  const nodes = local.data?.nodes ?? [];
+  const machineOf = (id: string) => nodes.find((n) => n.id === id)?.machine ?? undefined;
+  const engine = running.map((r) => engineRow(r, now, { href: r.link, external: false }, machineOf));
   const lr = local.data ? localRows(local.data, now) : null;
   const rows = [...engine, ...(lr?.kind === 'rows' ? lr.rows : [])];
   const extra = local.error ? (
     <div className="border-t p-4">
       <LoadError what="本机会话" error={local.error} onRetry={() => void local.refetch()} />
     </div>
+  ) : lr?.kind === 'rows' && lr.silent.length > 0 ? (
+    <p
+      className="border-t px-4 py-2 text-meta text-muted-foreground"
+      data-run-local="silent"
+      title={lr.silent.map((s) => `${s.machine}：${s.why}`).join('；')}
+    >
+      本机会话没上报（在做什么看不到，不当成没在做）：
+      {lr.silent.map((s) => `${s.machine}${s.never ? '一次都没收到' : '上次收到的已过期'}`).join('；')}
+    </p>
   ) : lr?.kind === 'notWired' ? (
     <p className="border-t px-4 py-2 text-meta text-muted-foreground" data-run-local="notWired">
       本机会话没接上：{lr.why}
