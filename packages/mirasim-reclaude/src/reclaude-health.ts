@@ -223,7 +223,12 @@ export async function updateCheck(env: HealthEnv): Promise<UpdateRecord> {
     if (hasNew) {
       let idle: boolean | undefined;
       try {
-        idle = env.idle ? env.idle() : runningSessions(env.home) === 0;
+        if (env.idle) idle = env.idle();
+        else {
+          const sessions = runningSessions(env.home);
+          // 有会话记录没查成：判不了，不当空闲。
+          idle = sessions.running > 0 ? false : sessions.unknown.length ? undefined : true;
+        }
       } catch {
         idle = undefined; // 会话记录读不了或状态不认识：判不了就不装
       }

@@ -60,6 +60,16 @@ func settingsDocument(in []byte) (map[string]any, map[string]any, error) {
 }
 
 func stripSettings(in []byte) (out []byte, changed bool, err error) {
+	return stripSettingsWhen(in, false)
+}
+
+// stripSettingsKeys 不再看 settings 自己的 BASE_URL：要不要剥由 gatewayFacts 合并进程环境和 settings 后判定，
+// 判定要剥就把注入键全剥（地址和令牌可能分处两地，只剥一处会把 Mirasim 令牌留给 reclaude）。
+func stripSettingsKeys(in []byte) (out []byte, changed bool, err error) {
+	return stripSettingsWhen(in, true)
+}
+
+func stripSettingsWhen(in []byte, all bool) (out []byte, changed bool, err error) {
 	doc, env, err := settingsDocument(in)
 	if err != nil {
 		return in, false, err
@@ -67,12 +77,20 @@ func stripSettings(in []byte) (out []byte, changed bool, err error) {
 	if env == nil {
 		return in, false, nil
 	}
-	base, _ := env["ANTHROPIC_BASE_URL"].(string)
-	if !isLoopbackURL(base) {
-		return in, false, nil
+	if !all {
+		base, _ := env["ANTHROPIC_BASE_URL"].(string)
+		if !isLoopbackURL(base) {
+			return in, false, nil
+		}
 	}
 	for _, k := range injectedKeys {
-		delete(env, k)
+		if _, ok := env[k]; ok {
+			delete(env, k)
+			changed = true
+		}
+	}
+	if !changed {
+		return in, false, nil
 	}
 	out, err = json.Marshal(doc)
 	if err != nil {
@@ -83,17 +101,16 @@ func stripSettings(in []byte) (out []byte, changed bool, err error) {
 
 // stripEnv 按同一判据清进程 env（Windows 上变量名不分大小写）。
 func stripEnv(environ []string) (out []string, changed bool) {
-	get := func(name string) string {
-		for _, kv := range environ {
-			if i := strings.IndexByte(kv, '='); i > 0 && strings.EqualFold(kv[:i], name) {
-				return kv[i+1:]
-			}
+	for _, kv := range environ {
+		if i := strings.IndexByte(kv, '='); i > 0 && strings.EqualFold(kv[:i], "ANTHROPIC_BASE_URL") && isLoopbackURL(kv[i+1:]) {
+			return stripEnvKeys(environ)
 		}
-		return ""
 	}
-	if !isLoopbackURL(get("ANTHROPIC_BASE_URL")) {
-		return environ, false
-	}
+	return environ, false
+}
+
+// stripEnvKeys 无条件剥掉注入键，判定见 stripSettingsKeys。
+func stripEnvKeys(environ []string) (out []string, changed bool) {
 	for _, kv := range environ {
 		i := strings.IndexByte(kv, '=')
 		drop := false
@@ -104,9 +121,14 @@ func stripEnv(environ []string) (out []string, changed bool) {
 				}
 			}
 		}
-		if !drop {
+		if drop {
+			changed = true
+		} else {
 			out = append(out, kv)
 		}
+	}
+	if !changed {
+		return environ, false
 	}
 	return out, true
 }

@@ -45,6 +45,7 @@ type managedChild struct {
 	temps      []string
 	generation int
 	mode       string
+	keep       bool
 	exitCode   int
 	startedAt  time.Time
 	sawOutput  bool
@@ -81,38 +82,85 @@ func writeFrame(w io.Writer, f frame) error {
 	return nil
 }
 
+// routeKeepsGateway 判这次是保留 Mirasim 注入（走平台）还是剥掉（走自有）。
 // 未标路由时，只有回环地址加上平台令牌才保留注入。
 // 只写了本机代理、没有令牌，是捕获地址，不是平台身份，按自有剥掉。
-// 明确的 cloud 缺令牌仍拒绝，不回落到自有。
+// 明确的 cloud 缺令牌仍拒绝，不回落到自有。gateway（非 Claude 模型或没有会话）原样交出。
+func routeKeepsGateway(mode string, args []string, env []string) (bool, error) {
+	switch mode {
+	case "local":
+		return false, nil
+	case "gateway":
+		return true, nil
+	case "cloud":
+		if err := verifyGatewaySettings(args, env); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	loopback, credential, err := gatewayFacts(args, env)
+	if err != nil {
+		return false, err
+	}
+	return loopback && credential, nil
+}
+
 // gateway 是日志用的一个词，供对账判断这次实际走哪份额度：
 // kept＝保留了 Mirasim 回环网关（走平台），stripped＝剥掉了（走自有），none＝参数和环境里本来就没有回环网关。
+// 要不要剥按进程环境和 --settings 合并后实际生效的值判断，判定要剥就两处都剥：
+// 地址和令牌分处两地时只剥一处，会把 Mirasim 令牌留给 reclaude。
 func applyRouteSettings(mode string, args []string, env []string) ([]string, []string, []string, string, error) {
-	if mode == "local" || mode == "default" {
-		if mode == "default" {
-			loopback, credential, err := gatewayFacts(args, env)
-			if err != nil {
-				return nil, nil, nil, "", err
-			}
-			if loopback && credential {
-				return args, env, nil, "kept", nil
-			}
-		}
-		out, temps, argsChanged, err := rewriteArgs(args)
+	keep, err := routeKeepsGateway(mode, args, env)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	if keep {
+		return args, env, nil, gatewayPresence(args, env), nil
+	}
+	loopback, _, err := gatewayFacts(args, env)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	if !loopback {
+		return args, env, nil, "none", nil
+	}
+	out, temps, _, err := rewriteArgs(args)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	env, _ = stripEnvKeys(env)
+	return out, env, temps, "stripped", nil
+}
+
+// 注入与索引矛盾（索引说自有，Mirasim 却注入了带令牌的回环网关）时隔多久重读索引、读几次。
+// Mirasim 的「这一回合由空间/远程作者付」只在它内存里（gatewayTurns），落盘的 turnPayers 是调用发生后才记的账，
+// 启动器在回合开始前读不到，所以这里只做重读：索引刚改、还没落盘时能跟上；仍矛盾按索引执行并记 route-conflict。
+var conflictRetryDelay = 300 * time.Millisecond
+
+const conflictRetries = 3
+
+// resolveRoute 读当前会话路由。first＝这个进程第一次选路：注入只反映 Mirasim 拉起这个进程那一刻的决定，
+// 之后用户再切路由，注入就是旧快照，不再拿它和索引比。
+func resolveRoute(r *routeResolver, native string, args, env []string, first bool) (selection, error) {
+	sel, err := r.resolve(native)
+	if err != nil || !first || sel.mode != "local" {
+		return sel, err
+	}
+	if loopback, credential, e := gatewayFacts(args, env); e != nil || !loopback || !credential {
+		return sel, nil
+	}
+	for i := 0; i < conflictRetries; i++ {
+		time.Sleep(conflictRetryDelay)
+		next, err := r.resolve(native)
 		if err != nil {
-			return nil, nil, nil, "", err
+			return next, err
 		}
-		env, envChanged := stripEnv(env)
-		if argsChanged || envChanged {
-			return out, env, temps, "stripped", nil
-		}
-		return out, env, temps, "none", nil
-	}
-	if mode != "gateway" {
-		if err := verifyGatewaySettings(args, env); err != nil {
-			return nil, nil, nil, "", err
+		if next.mode != "local" {
+			return next, nil
 		}
 	}
-	return args, env, nil, gatewayPresence(args, env), nil
+	logLine("event=route-conflict route=local injected=gateway sid=" + sel.sessionID)
+	return sel, nil
 }
 
 // gatewayPresence 只为日志判断参数或环境里有没有回环网关；读不到按没有记，不影响启动。
@@ -150,7 +198,7 @@ func startManaged(cfg configuration, args []string, sel selection, generation in
 		}
 		return nil, fmt.Errorf("启动监管执行体失败")
 	}
-	child := &managedChild{cmd: c, in: &controlWriter{pipe: in}, done: make(chan struct{}), temps: temps, generation: generation, mode: sel.mode, startedAt: time.Now()}
+	child := &managedChild{cmd: c, in: &controlWriter{pipe: in}, done: make(chan struct{}), temps: temps, generation: generation, mode: sel.mode, keep: gateway == "kept", startedAt: time.Now()}
 	go func() {
 		scanFrames(out, generation, "output", events)
 		err := c.Wait()
@@ -213,12 +261,14 @@ func supervise(cfg configuration) error {
 	turnFirst := false
 	background := map[string]bool{}
 	model := flagValue(cfg.args, "--model")
+	// 没带会话参数（如 Mirasim 的用量探测）就没有用户可选的路由：跟 Mirasim 的注入走，和 runOnce 一致。
+	hasSession := native != ""
 	selectRoute := func() (selection, error) {
-		if !isClaudeModel(model) {
+		if !isClaudeModel(model) || !hasSession {
 			return selection{mode: "gateway"}, nil
 		}
 		at := time.Now()
-		sel, err := resolver.resolve(native)
+		sel, err := resolveRoute(&resolver, native, cfg.args, cfg.env, !started)
 		logLine("event=route-resolved route=" + sel.mode + " ms=" + elapsedMs(at))
 		return sel, err
 	}
@@ -337,7 +387,13 @@ func supervise(cfg configuration) error {
 					queueReplay()
 				}
 			}
-			if child.mode != sel.mode {
+			// 比实际结果（保留还是剥掉网关），不比路由字符串：default(保留)↔cloud、default(剥/无)↔local 一样就不重启。
+			keep, err := routeKeepsGateway(sel.mode, cfg.args, cfg.env)
+			if err != nil {
+				return err
+			}
+			// 和 launch 行的 gateway 词同一口径：保留了且确实有回环网关才算 kept。
+			if keep = keep && gatewayPresence(cfg.args, cfg.env) == "kept"; child.keep != keep {
 				stopManaged(child)
 				if err = start(sel, true); err != nil {
 					return err
@@ -375,7 +431,11 @@ func supervise(cfg configuration) error {
 		}
 		select {
 		case <-sigs:
-			return fmt.Errorf("会话收到停止信号，已停止执行体")
+			// Mirasim 正常回收空闲进程就是发停止信号：优雅停掉执行体，正常退出，不记成会话失败。
+			stopManaged(child)
+			child = nil
+			logLine("event=stopped sid=" + native)
+			return nil
 		case <-timeout:
 			return fmt.Errorf("恢复 SDK 初始化超时，未发送下一回合")
 		case e := <-events:
@@ -528,7 +588,7 @@ func runOnce(cfg configuration) int {
 	if isClaudeModel(flagValue(args, "--model")) && sessionArgument(args) != "" {
 		r := routeResolver{home: cfg.mirasimHome, cwd: cfg.cwd}
 		var err error
-		sel, err = r.resolve(sessionArgument(args))
+		sel, err = resolveRoute(&r, sessionArgument(args), args, cfg.env, true)
 		if err != nil {
 			return fail("route_unreadable", err)
 		}

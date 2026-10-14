@@ -235,8 +235,13 @@ func startApp(t *testing.T, f fixture, extraEnv ...string) *app {
 
 func startAppSettings(t *testing.T, f fixture, settings string, extraEnv ...string) *app {
 	t.Helper()
+	return startAppArgs(t, f, []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "claude-sonnet-5", "--session-id", f.sid, "--settings", settings}, extraEnv...)
+}
+
+func startAppArgs(t *testing.T, f fixture, args []string, extraEnv ...string) *app {
+	t.Helper()
 	self, _ := os.Executable()
-	c := exec.Command(testLauncher, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "claude-sonnet-5", "--session-id", f.sid, "--settings", settings)
+	c := exec.Command(testLauncher, args...)
 	c.Dir = f.cwd
 	c.Env = append(os.Environ(), "HOME="+f.home, "USERPROFILE="+f.home, "LOCALAPPDATA="+filepath.Join(f.home, "cache"), "RECLAUDE_MIRASIM_TARGET="+self, "MIRASIM_LAUNCHER_TEST_CHILD=1", "ANTHROPIC_BASE_URL=http://127.0.0.1:12345/synthetic", "ANTHROPIC_AUTH_TOKEN=synthetic-only")
 	c.Env = append(c.Env, extraEnv...)
