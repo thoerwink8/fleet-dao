@@ -1669,6 +1669,14 @@ describe('驾驶舱 e2e（#930；决定 0029：只点改动页；决定 0093：�
     expect(String(run?.run)).not.toContain('${{');
     expect(String(run?.run)).toContain('"$E2E_SPECS" = all');
     expect(String(run?.run)).toContain('pnpm --filter @fleet-dao/web e2e $E2E_SPECS');
+    // 全套切 2 台、只点改动页 1 台（决定 0093）；分片经环境变量给，空分片照绿
+    expect(String((e2e as { strategy?: { matrix?: { shard?: unknown } } })?.strategy?.matrix?.shard)).toBe(
+      "${{ fromJSON(needs.changes.outputs.e2e == 'all' && '[1,2]' || '[1]') }}",
+    );
+    expect((run?.env as Record<string, string> | undefined)?.SHARD).toBe(
+      '${{ matrix.shard }}/${{ strategy.job-total }}',
+    );
+    expect(String(run?.run).match(/--shard="\$SHARD" --pass-with-no-tests/g)).toHaveLength(2);
     // 汇总 job 等它
     expect(doc.jobs.check?.needs).toContain('e2e');
     // 它的名字在 PLANNED_JOBS 里（汇总核对）
