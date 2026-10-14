@@ -72,7 +72,7 @@ export interface CiPlan {
    * 注意它和 full 不同步：全跑（deploy/ 脚本、根配置这类升的全跑）不一定开 e2e，见 planCi。
    */
   e2e: E2eSpecs;
-  /** deploy/test/run.sh：all 全套；ops 只跑读 docs/ops.md 的两块（`run.sh --ops`：端口表、place-file）；none 不跑。 */
+  /** deploy/test/run.sh：all 全套；ops 只跑读 docs/ops.md 的那块（`run.sh --ops`：端口表）；none 不跑。 */
   deploy: DeployMode;
   /**
    * 只改了 deploy/（PR）时测试不全跑，只跑读 deploy/ 的测试文件（deploy-readers.ts 从代码里算，决定 0093）：assignTests 看到它就把这些文件
@@ -96,7 +96,7 @@ export type DeployMode = (typeof DEPLOY_MODES)[number];
  */
 export const DEPLOY_SHARDS = 3;
 
-/** deploy 那一 job 的矩阵：all 切成 DEPLOY_SHARDS 台、ops 一台（只跑读 docs/ops.md 的两块）、none 空。 */
+/** deploy 那一 job 的矩阵：all 切成 DEPLOY_SHARDS 台、ops 一台（只跑读 docs/ops.md 的端口表那块）、none 空。 */
 export interface DeployLeg {
   label: string;
   /** run.sh 的参数。 */
@@ -388,12 +388,12 @@ export const PATH_RULES: readonly Rule[] = [
   { match: under('packages/shared/'), full: '几乎所有包都依赖 shared' },
   { match: (f) => FIXTURE_PATH.test(f), full: '测试夹具，别的包的测试也读' },
   DEPLOY_FULL_RULE,
-  // deploy/test 里读 docs/ops.md 的只有端口表那段和 place-file.test.sh：只改文档跑这两块（run.sh --ops），不拖上全套
+  // deploy/test 里读 docs/ops.md 的只有端口表那段：只改文档只跑这一块（run.sh --ops），不拖上全套
   {
     match: exact('docs/ops.md'),
     units: ['conventions', 'db'],
     deploy: 'ops',
-    why: 'deploy/test 核对端口表、放文件的命令，db 的测试读它；conventions 的 ops-tables 测试拿真仓核对五张生成表',
+    why: 'deploy/test 核对端口表，db 的测试读它；conventions 的 ops-tables 测试拿真仓核对五张生成表',
   },
   // 决定 0087 的钉子测试 agents/test/rules/subagent-model.rules.test.ts 读 docs/decisions/0087-…md 核对要点都在：
   // 只改这份决定文档也要测 agents。0035 原先也读，0087 取代了那一半，不再读。

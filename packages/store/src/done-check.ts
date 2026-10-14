@@ -12,9 +12,15 @@
 //    认不出的那一次也算最后一次）。Fusion 还在跑时这条不能拔。
 //
 // 以最后一次为准。带 PR 编号同时顺带核它的分支和状态（没被关、是本会话的分支）。
-import type { DoneRequest, StageKind } from '@fleet-dao/shared';
-import type { z } from 'zod';
+import type { StageKind } from '@fleet-dao/shared';
 import type { PullRequestRecord, TestRunRecord } from './ports.ts';
+
+/** 交活请求的样子（原 fleet 命令接口的 DoneRequest，接口已删，核实逻辑留给库里还有的会话记录）。 */
+export interface DoneRequest {
+  summary: string;
+  prNumber?: number | undefined;
+  testsPassed: boolean;
+}
 
 /** 写码类的阶段：交活核对要这次会话跑过测试命令的证据，没有测试命令就不起。 */
 const CODE_STAGES: ReadonlySet<StageKind> = new Set<StageKind>(['execute', 'ui']);
@@ -80,7 +86,7 @@ export function checkDone(input: {
    * 带了 PR 编号这条不再参与判定（测试由 CI 跑，不在这里）。
    */
   testCommand?: string | undefined;
-  request: z.output<typeof DoneRequest>;
+  request: DoneRequest;
   /** request.prNumber 对应的镜像记录；没带 PR 编号或库里没有都是 null。 */
   pr: PullRequestRecord | null;
   tests: TestRunRecord[];

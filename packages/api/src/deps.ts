@@ -9,7 +9,6 @@ import type { PreflightReaders } from './france-preflight.ts';
 import type { FranceReleasePort } from './france-release.ts';
 import type { GitHubUserPort } from './github-user.ts';
 import type { HostResourceSampler } from './host-resources.ts';
-import type { IntentStore } from './intent-store.ts';
 import type { ModelRosterPort } from './model-roster.ts';
 import type { OrgSwitchPort } from './org-switch-view.ts';
 import type { ScryptParams } from './password.ts';
@@ -69,15 +68,7 @@ export interface Deps {
    * 编号在 config.edgeWatchId；没配时路由不调用它。
    */
   recordExternalWatchRound?: (() => Promise<void>) | undefined;
-  /**
-   * 意图表的存取（#553 第 4 条，intent-store.ts）：网关的进群记录、飞书用量经它写。没给的话网关的两条接口一律 503
-   * 「没接上」，不回 200 冒充存下了。
-   */
-  intents?: IntentStore | undefined;
-  /**
-   * 驾驶舱提醒（#795）：白名单外的人进群、飞书用量到八成。没给时记录照样存，另记一条错误，不回 5xx
-   * （再送会把同一条证据再写一遍）。生产的两套装配都给。
-   */
+  /** 驾驶舱提醒（#795）。生产的两套装配都给。 */
   alerts?: CockpitAlerts | undefined;
   /**
    * 提醒谁在处理、修到哪（design 15.3，alert-work.ts）：驾驶舱提醒列表现算用。没给（开发、内存版）的提醒列表照样出，

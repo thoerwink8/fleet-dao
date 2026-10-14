@@ -15,7 +15,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { pgRoutingLayers } from '../src/routing-layers.ts';
 import { pgRoutingOrder, type RoutingOrderPort } from '../src/routing-order.ts';
-import { errorCode, harness, pgHarness, T0, viaGateway, write } from './harness.ts';
+import { errorCode, harness, pgHarness, T0, viaBearer, write } from './harness.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -163,10 +163,10 @@ describe('驾驶舱改路由先后：用途下的模型', () => {
     expect(anon.status).toBe(401);
     const gateway = await current.cockpit.request(
       '/api/routing/purposes/execute/models/opus-5.5',
-      viaGateway('PUT', 'ou_dev_founder_a', { direction: 'down', expected: MODELS }),
+      viaBearer('PUT', { direction: 'down', expected: MODELS }),
     );
-    expect(gateway.status).toBe(403);
-    expect(await errorCode(gateway)).toBe('gateway_route_not_allowed');
+    expect(gateway.status).toBe(401);
+    expect(await errorCode(gateway)).toBe('bearer_not_allowed');
     expect(await dbModelOrder()).toEqual(MODELS);
     expect(await audits()).toEqual([]);
   });
@@ -384,10 +384,10 @@ describe('驾驶舱改路由先后：模型下的渠道和开关', () => {
     expect(anon.status).toBe(401);
     const gateway = await current.cockpit.request(
       '/api/routing/models/opus-5.5/routes/rt-claude-opus',
-      viaGateway('PUT', 'ou_dev_founder_a', { op: 'enable', enabled: false, expected: true }),
+      viaBearer('PUT', { op: 'enable', enabled: false, expected: true }),
     );
-    expect(gateway.status).toBe(403);
-    expect(await errorCode(gateway)).toBe('gateway_route_not_allowed');
+    expect(gateway.status).toBe(401);
+    expect(await errorCode(gateway)).toBe('bearer_not_allowed');
 
     const missingMove = await putRoute(current, s, 'opus-5.5/routes/nope', {
       op: 'move',
@@ -787,10 +787,10 @@ describe('用途里加模型、移出、改档位（#1356）', () => {
     expect(anon.status).toBe(401);
     const gateway = await current.cockpit.request(
       '/api/routing/purposes/verify/models',
-      viaGateway('POST', 'ou_dev_founder_a', { modelId: 'opus-5.5', version: 1 }),
+      viaBearer('POST', { modelId: 'opus-5.5', version: 1 }),
     );
-    expect(gateway.status).toBe(403);
-    expect(await errorCode(gateway)).toBe('gateway_route_not_allowed');
+    expect(gateway.status).toBe(401);
+    expect(await errorCode(gateway)).toBe('bearer_not_allowed');
 
     expect(
       (await t.db.select().from(routingPurposeModels).where(eq(routingPurposeModels.purpose, 'verify'))).map(

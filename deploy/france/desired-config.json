@@ -18,10 +18,6 @@
       },
       "TEMPORAL_NAMESPACE": "fleet",
       "FLEET_TASK_QUEUE": "fleet",
-      "FLEET_AGENT_API_URL": {
-        "value": "http://127.0.0.1:8788",
-        "说明": "AI 会话里的 fleet 命令连的后端地址（驾驶舱后端的 fleet 命令接口）"
-      },
       "DATABASE_URL": {
         "value": "postgres:///fleet",
         "说明": "本机库（同 api.env：unix socket + peer 认证，主机由 PGHOST 给）"
@@ -78,10 +74,6 @@
       "FLEET_COCKPIT_LISTEN": {
         "value": "10.99.0.2:8787",
         "说明": "驾驶舱接口只听隧道地址：香港经 WireGuard 转进来，公网上没有这个端口"
-      },
-      "FLEET_AGENT_LISTEN": {
-        "value": "127.0.0.1:8788",
-        "说明": "fleet 命令接口只听本机回环：AI 会话在同一台机器上调"
       },
       "DATABASE_URL": {
         "value": "postgres:///fleet",

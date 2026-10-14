@@ -9,7 +9,6 @@ import type {
   CiPolicy,
   DecisionAnswer,
   DecisionOption,
-  HistoryResponse,
   LocalSessionsReport,
   Model,
   NodeReport,
@@ -245,7 +244,13 @@ export interface TestRunRecord {
   unknownBecause?: string | undefined;
 }
 
-export type HistoryItem = z.infer<typeof HistoryResponse>['items'][number];
+export interface HistoryItem {
+  taskId: string;
+  title: string;
+  specDir?: string | undefined;
+  resultSummary?: string | undefined;
+  mergedAt?: string | undefined;
+}
 
 /**
  * 幂等键的状态：
