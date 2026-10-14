@@ -28,6 +28,7 @@ import { createDrainControl, type DrainControl, ownReleaseSha } from './drain-co
 import { startDrainStatusFile } from './drain-file.ts';
 import type { EngineMasterGate } from './engine-master.ts';
 import { createFakeWorld } from './fakes.ts';
+import { type ClosedIssueEventPoller, startClosedIssueEvents } from './jobs/closed-issue-events.ts';
 import { engineTimerJobs } from './jobs/engine-timers.ts';
 import { type GroomPoller, startGroomRequests } from './jobs/groom.ts';
 import { type IntakeChatPoller, startIntakeChat } from './jobs/intake-chat.ts';
@@ -322,6 +323,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let groomPoller: GroomPoller | undefined;
   let intakeChatPoller: IntakeChatPoller | undefined;
   let worktreePoller: WorktreeCleanupPoller | undefined;
+  let closedIssuePoller: ClosedIssueEventPoller | undefined;
   try {
     // 引擎总开关（#1086）：接活之前先读一次（读不到按关），之后每 5 秒刷新；选路、一次性会话登记读缓存，定时器入口每轮现读
     if (master) {
@@ -403,6 +405,13 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
         worktreePoller = startWorktreeCleanupRequests(() => make(c, config.taskQueue));
         console.info('工作树清理的接手已起');
       }
+      // 单一关就撤停着等人的任务（#2103）：每几秒捞一次投递账上的 issues.closed（总开关关着也撤：放弃不起新会话）
+      if (jobs.closedIssueEvents) {
+        const make = jobs.closedIssueEvents;
+        const c = client;
+        closedIssuePoller = startClosedIssueEvents(() => make(c, config.taskQueue));
+        console.info('单关了就撤任务的接手已起');
+      }
     }
     shutdown = installGracefulShutdown({
       worker,
@@ -427,6 +436,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     groomPoller?.stop();
     intakeChatPoller?.stop();
     worktreePoller?.stop();
+    closedIssuePoller?.stop();
     await status?.flush();
     status?.stop();
     await clientConnection?.close();

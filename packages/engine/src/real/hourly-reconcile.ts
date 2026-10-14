@@ -21,8 +21,10 @@ import {
   listOpenAlerts,
   listOpenTaskRows,
   mergedPrLedgers,
+  noteClosedIssueDelivery,
   openAlertsByPrefix,
   openSessionTrees,
+  pendingClosedIssueDeliveries,
   prHeadsOfBranch,
   pullMergedAt,
   quotaTable,
@@ -48,6 +50,7 @@ import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
 import { alertRepoFromText } from '../jobs/alert-sweep.ts';
 import type { AutoMergeGitHub } from '../jobs/auto-merge-check.ts';
+import type { ClosedIssueEventDeps } from '../jobs/closed-issue-events.ts';
 import { CLOSED_ISSUE_ABANDON_BY } from '../jobs/closed-issue-tasks.ts';
 import type { GitHubAppCheckDeps } from '../jobs/github-app-check.ts';
 import type { HourlyReconcileJobDeps } from '../jobs/hourly-reconcile.ts';
@@ -312,7 +315,8 @@ function temporalClosedIssueTasks(
       const handle = client.workflow.getHandle(workflowId);
       return taskViewOf(await handle.query(taskStatusQuery), workflowId).parked;
     },
-    resolveParkAlerts: (workflowId, why) => resolveClosedIssueParkAlerts(db, workflowId, why, { at: now() }),
+    resolveParkAlerts: (workflowId, why, by) =>
+      resolveClosedIssueParkAlerts(db, workflowId, why, { at: now(), ...(by ? { by } : {}) }),
     openTaskRows: () => listOpenTaskRows(db),
     stopRows: (taskIds, reason) => stopTaskRows(db, taskIds, reason),
     async issueState(repo, issueNumber) {
@@ -661,6 +665,23 @@ export function worktreeCleanupJob(
       recordDone: (i) => recordWorktreeCleanupDone(w.db, i),
       saveInventory: (inv) => saveWorktreeInventory(w.db, inv),
       openAlerts: async () => (await listOpenAlerts(w.db, { limit: 500 })).alerts,
+      now: deps.now,
+      log: deps.log,
+    };
+  };
+}
+
+/** 单一关就撤停着等人的任务（jobs/closed-issue-events.ts，#2103）：撤的那一套和每小时对账同一份装配（closedIssueTasks）。 */
+export function closedIssueEventsJob(
+  w: HourlyReconcileWiring,
+): (client: Client, taskQueue: string) => ClosedIssueEventDeps {
+  const hourly = hourlyReconcileJob(w);
+  return (client, taskQueue) => {
+    const deps = hourly(client, taskQueue);
+    return {
+      pending: (since) => pendingClosedIssueDeliveries(w.db, since),
+      markHandled: (deliveryId, note) => noteClosedIssueDelivery(w.db, deliveryId, note),
+      tasks: () => deps,
       now: deps.now,
       log: deps.log,
     };

@@ -3,6 +3,7 @@
 // 起因：#1182 被 PR 关掉了还挂着；#1795 关单后停下等人的任务没人会再拍，巡查和提醒一直挂着。
 // 只有停下等人的才撤：还在跑（不是 parked）的不走这一支——人刚关单时会话可能还在交活。
 // 读不到单的状态记「没查成」，不撤、不当成单还开着也不当成已关；工作流已经结束的收不到信号，不算问题。
+// 收到 GitHub 的 issues.closed 时也走这一个函数（jobs/closed-issue-events.ts），只看那一张单，单关了马上撤；这一轮当兜底。
 
 import { LOCAL_LABEL, MOTHER_LABEL } from '@fleet-dao/conventions';
 import type { OpenTaskRow } from '@fleet-dao/db';
@@ -27,8 +28,8 @@ export interface ClosedIssueTaskDeps {
     runningTaskWorkflowIds(): Promise<string[]>;
     /** 这个任务工作流是不是停着等人（phase = parked）。查不到照抛，不当成没挂着。 */
     isParked(workflowId: string): Promise<boolean>;
-    /** 撤掉这个工作流还开着的挂起提醒（task:…:park:N）；why 进正文「已撤：」和操作记录。回实际新撤了几条。 */
-    resolveParkAlerts(workflowId: string, why: string): Promise<number>;
+    /** 撤掉这个工作流还开着的挂起提醒（task:…:park:N）；why 进正文「已撤：」和操作记录，by 记是谁撤的（不给是每小时对账）。回实际新撤了几条。 */
+    resolveParkAlerts(workflowId: string, why: string, by?: string): Promise<number>;
     /** 库里还没到终态的任务行。旧的测试装配可以不提供，真装配必须提供。 */
     openTaskRows?(): Promise<OpenTaskRow[]>;
     /** 把仍未到终态的任务行改成 stopped，返回实际改了几条。 */
@@ -44,8 +45,30 @@ export interface ClosedIssueTaskDeps {
   log: ReconcileLog;
 }
 
-export async function abandonClosedIssueTasks(deps: ClosedIssueTaskDeps): Promise<SweepPart> {
+/** 只撤某一张单、换个署名时给（收到单关了的事件那一路）；不给就是每小时对账那一轮：看所有在跑的任务。 */
+export interface AbandonClosedIssueScope {
+  /** 只看这张单的任务工作流（各代都算）；仓名不分大小写。 */
+  only?: { repo: RepoRef; issueNumber: number };
+  /** 放弃信号、撤提醒记的「谁」；不给是 CLOSED_ISSUE_ABANDON_BY。 */
+  by?: string;
+  /** 日志开头那几个字，分清是哪一路撤的；不给是「每小时对账」。 */
+  label?: string;
+}
+
+const sameIssue = (
+  ref: { repo: RepoRef; issueNumber: number },
+  only: { repo: RepoRef; issueNumber: number },
+): boolean =>
+  ref.issueNumber === only.issueNumber &&
+  `${ref.repo.owner}/${ref.repo.name}`.toLowerCase() === `${only.repo.owner}/${only.repo.name}`.toLowerCase();
+
+export async function abandonClosedIssueTasks(
+  deps: ClosedIssueTaskDeps,
+  scope: AbandonClosedIssueScope = {},
+): Promise<SweepPart> {
   const part: SweepPart = { scanned: 0, found: 0, unchecked: [] };
+  const by = scope.by ?? CLOSED_ISSUE_ABANDON_BY;
+  const label = scope.label ?? '每小时对账';
   const port = deps.closedIssueTasks;
   let ids: string[];
   try {
@@ -54,8 +77,9 @@ export async function abandonClosedIssueTasks(deps: ClosedIssueTaskDeps): Promis
     return { ...part, failed: `列在跑的任务工作流没成，单关了没关的这一轮没查：${errMessage(err)}` };
   }
   for (const id of ids) {
-    part.scanned += 1;
     const ref = parseTaskWorkflowId(id);
+    if (scope.only && (!ref || !sameIssue(ref, scope.only))) continue;
+    part.scanned += 1;
     if (!ref) {
       part.unchecked.push(`任务工作流编号 ${id} 认不出是哪张单，没查`);
       continue;
@@ -80,17 +104,14 @@ export async function abandonClosedIssueTasks(deps: ClosedIssueTaskDeps): Promis
     }
     if (state !== 'closed') continue;
     try {
-      const sent = await port.abandon(id, {
-        by: CLOSED_ISSUE_ABANDON_BY,
-        reason: CLOSED_ISSUE_ABANDON_REASON,
-      });
+      const sent = await port.abandon(id, { by, reason: CLOSED_ISSUE_ABANDON_REASON });
       if (sent !== 'sent') continue;
       part.found += 1;
-      deps.log('info', '每小时对账：单已关且停下等人，给任务发了放弃信号', { workflowId: id });
+      deps.log('info', `${label}：单已关且停下等人，给任务发了放弃信号`, { workflowId: id });
       try {
-        const resolved = await port.resolveParkAlerts(id, CLOSED_ISSUE_ABANDON_REASON);
+        const resolved = await port.resolveParkAlerts(id, CLOSED_ISSUE_ABANDON_REASON, by);
         if (resolved > 0) {
-          deps.log('info', '每小时对账：单已关，撤掉停下等人的提醒', {
+          deps.log('info', `${label}：单已关，撤掉停下等人的提醒`, {
             workflowId: id,
             resolved,
           });

@@ -802,7 +802,9 @@ export interface IngestedEvent {
 
 /**
  * 放进来的每条事件都先交给它：写 PR 镜像、CI 汇总（生产是 @fleet-dao/github 的 eventSink）。
- * issue 不在这里变成任务：引擎拉单（@fleet-dao/engine 的 jobs/intake.ts）自己去 GitHub 读。抛错 = 没处理成，这条投递记成出错。
+ * issue 不在这里变成任务：引擎拉单（@fleet-dao/engine 的 jobs/intake.ts）自己去 GitHub 读。放进来的 issues.closed 这里不做事，
+ * 投递账（github_events）上那一行由引擎每几秒捞一次，撤这张单停着等人的任务（jobs/closed-issue-events.ts）。
+ * 抛错 = 没处理成，这条投递记成出错。
  */
 export interface GitHubEventSink {
   accept(event: IngestedEvent): Promise<void>;

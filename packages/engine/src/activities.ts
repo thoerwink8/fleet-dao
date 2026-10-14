@@ -15,6 +15,7 @@ import type { CarpoolWatchDeps } from './jobs/carpool-watch.ts';
 import type { CiTimingsJobDeps } from './jobs/ci-timings.ts';
 import type { CliUpgradeJobDeps } from './jobs/cli-upgrade.ts';
 import type { CliVersionsJobDeps } from './jobs/cli-versions.ts';
+import type { ClosedIssueEventDeps } from './jobs/closed-issue-events.ts';
 import { probeAssignedRoute } from './jobs/dispatch-probe.ts';
 import type { GitHubReconcileJobDeps } from './jobs/github-reconcile.ts';
 import type { GroomRunDeps } from './jobs/groom.ts';
@@ -224,6 +225,8 @@ export interface EngineJobs {
   hourlyReconcile?: (client: Client, taskQueue: string) => HourlyReconcileJobDeps;
   /** 一键清理没用的工作树（jobs/worktree-cleanup.ts，#1993）：每几秒看一眼有没人点，接手跑一轮和每小时对账同一份判据的清扫。不给就不看。 */
   worktreeCleanup?: (client: Client, taskQueue: string) => WorktreeCleanupDeps;
+  /** 单一关就撤停着等人的任务（jobs/closed-issue-events.ts，#2103）：每几秒捞一次投递账上没处理的 issues.closed，走每小时对账同一个撤法。不给就不看。 */
+  closedIssueEvents?: (client: Client, taskQueue: string) => ClosedIssueEventDeps;
   /** 全流程巡检（#223）：在巡检仓开单、看它一路走完（叫停前几轮留下的单、查工作流用这次活动的 Temporal 客户端）。 */
   canary?: (client: Client) => CanaryDeps;
   /** 看门狗（#203）：按登记表看各定时任务新不新鲜、推撤提醒（只读写库）。 */

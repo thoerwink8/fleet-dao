@@ -40,7 +40,7 @@ const prOpened = (user: object, sender: object = user) => ({
   repository: REPO,
 });
 
-/** issue 事件：现在门口不收（单子由引擎每 5 分钟自己拉），只用来验「不处理」。 */
+/** issue 事件：开单、改单门口不收（单子由引擎每 5 分钟自己拉）；只收「关了」，引擎按它撤停着等人的任务（#2103）。 */
 const issueEvent = (user: object, sender: object = user) => ({
   action: 'opened',
   issue: {
@@ -233,7 +233,7 @@ describe('GitHub 事件白名单与去重', () => {
     expect(h.accepted).toHaveLength(1);
   });
 
-  it('issue、评论的事件不收：记成「不处理的事件」，不落工作（单子由引擎每 5 分钟自己拉，#632）', async () => {
+  it('开单、评论的事件不收：记成「不处理的事件」，不落工作（单子由引擎每 5 分钟自己拉，#632）', async () => {
     const h = harness();
     const res = await deliver(h, 'issues', issueEvent(founderA), { delivery: 'issue-1' });
     expect(await res.json()).toMatchObject({ verdict: 'ignored', reason: 'event_not_handled' });
@@ -253,6 +253,32 @@ describe('GitHub 事件白名单与去重', () => {
       reason: 'event_not_handled',
     });
     expect(h.accepted).toEqual([]);
+  });
+
+  it('单关了（issues.closed）：白名单作者的单收进来、交给后面；外人开的单不收；同一投递编号再来只处理一次（#2103）', async () => {
+    const h = harness();
+    const closedBy = (user: object, sender: object = user) => ({
+      ...issueEvent(user, sender),
+      action: 'closed',
+      issue: { ...issueEvent(user).issue, state: 'closed' },
+    });
+    // 谁关的不看（GitHub 上能关单的就那几个人），看单是谁开的：引擎只接白名单作者的单
+    const res = await deliver(h, 'issues', closedBy(founderA, stranger), { delivery: 'closed-1' });
+    expect(await res.json()).toMatchObject({ verdict: 'accepted', wake: true });
+    expect(await h.store.getDelivery('closed-1')).toMatchObject({ status: 'accepted', event: 'issues' });
+    expect(h.accepted).toMatchObject([{ event: 'issues', action: 'closed', repo: 'example/canary' }]);
+
+    const again = await deliver(h, 'issues', closedBy(founderA, stranger), { delivery: 'closed-1' });
+    expect(await again.json()).toMatchObject({ verdict: 'duplicate' });
+    expect(h.accepted).toHaveLength(1);
+
+    expect(
+      await (await deliver(h, 'issues', closedBy(stranger), { delivery: 'closed-2' })).json(),
+    ).toMatchObject({ verdict: 'ignored', reason: 'author_not_whitelisted' });
+    expect(
+      await (await deliver(h, 'issues', { ...closedBy(founderA), action: 'reopened' })).json(),
+    ).toMatchObject({ verdict: 'ignored', reason: 'event_not_handled' });
+    expect(h.accepted).toHaveLength(1);
   });
 
   it('同一个投递编号来两次：只处理一次', async () => {
