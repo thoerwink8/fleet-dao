@@ -11,6 +11,8 @@ import {
   writeIntakeWaiting,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   judgeMergeStall,
@@ -102,7 +104,15 @@ describe('看门狗一轮里的「多久没合 PR」（真库）', () => {
   });
 
   function deps(over: Partial<WatchdogDeps> = {}): WatchdogDeps {
-    return { ...watchdogJob({ db: t.db, now: () => clock, log: () => {} })(), ...over };
+    return {
+      ...watchdogJob({
+        db: t.db,
+        now: () => clock,
+        log: () => {},
+        releasesDir: join(tmpdir(), 'watchdog-no-releases'),
+      })(),
+      ...over,
+    };
   }
 
   async function repo(name: string, since: Date | null) {

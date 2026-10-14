@@ -91,6 +91,8 @@ function deps(over: Partial<WatchdogDeps> = {}): WatchdogDeps {
     db: t.db,
     now: () => clock,
     log: (level, text) => logs.push(`${level}:${text}`),
+    // 法国发布目录在的机器上，真目录会让「发版要人看 / 每日简报」掺进这一组；那两条各有自己的测试
+    releasesDir: join(tmpdir(), 'watchdog-no-releases'),
   })();
   return { ...real, ...over };
 }
