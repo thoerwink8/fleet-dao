@@ -22,16 +22,11 @@ export interface CheckResult {
 
 export const FIX_HINT =
   '公开仓不放私钥、令牌、密码这类真密钥，也不放密钥文件（.gitignore 挡着的那几类，git add -f 也不行）。' +
-  '临时产物（_tmp/、.playwright-cli/、e2e/shots/ 下的截图和日志）只放本机，不进仓：git rm -r --cached <路径>。' +
+  '临时产物（_tmp/、.playwright-cli/ 下的截图和日志）只放本机，不进仓：git rm -r --cached <路径>。' +
   '真该放行的，加进 packages/hygiene/src/allowlist.ts 并写明理由。';
 
 /** 临时产物目录：.gitignore 里都挡着，被 git add -f 或早先误提交进仓的一律红（决定 0093，撤 _tmp 误提交）。 */
-export const TEMP_DIRS = [
-  '_tmp/',
-  '.playwright-cli/',
-  '.playwright-mcp/',
-  'packages/web/e2e/shots/',
-] as const;
+export const TEMP_DIRS = ['_tmp/', '.playwright-cli/', '.playwright-mcp/'] as const;
 
 /** 清单里落在临时目录下的文件（相对仓根）。 */
 export function trackedTempFiles(files: readonly string[]): string[] {
