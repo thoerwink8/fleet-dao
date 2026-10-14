@@ -12,7 +12,12 @@
 import type { RunRow } from '@fleet-dao/db';
 import { abortableSleep, errMessage } from '@fleet-dao/shared/util';
 import { type PortContext, PortError } from '../ports.ts';
-import type { PlanSegmentResumeInput, PlanSegmentResumeResult } from '../task-contract.ts';
+import type {
+  PlanSegmentResumeInput,
+  PlanSegmentResumeResult,
+  SegmentSettledInput,
+  SegmentSettledResult,
+} from '../task-contract.ts';
 import { resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
 
 /** 上一段还没收场时最多等多久（毫秒）、多久看一次。要在活动 quick 档 30 秒以内。 */
@@ -114,5 +119,38 @@ export function createPlanSegmentResume(deps: PlanSegmentResumeDeps) {
       { runId: row.id, endedAt: row.endedAt, sessionId: row.sessionId, side: previousSide },
       nextSide,
     );
+  };
+}
+
+/**
+ * 上一段收场了没有（segmentSettled，决定 0093）：重试、重派之前问一次，没收场就不起第二段（同一张单不并发两段）。
+ * 和判续会话同一个等法：没收场最多等 settleMs；库里没有那一段 = 没起来，算收场。库读不了原样抛，不当成收场了。
+ */
+export function createSegmentSettled(
+  deps: Pick<PlanSegmentResumeDeps, 'latestManualRun' | 'settleMs' | 'pollMs' | 'sleep'>,
+) {
+  const settleMs = deps.settleMs ?? RESUME_SETTLE_MS;
+  const pollMs = deps.pollMs ?? RESUME_POLL_MS;
+  const sleep = deps.sleep ?? abortableSleep;
+  return async (input: SegmentSettledInput, ctx: PortContext): Promise<SegmentSettledResult> => {
+    const after = new Date(input?.startedAfter ?? '');
+    if (input?.schemaVersion !== 1 || !input.taskId || Number.isNaN(after.getTime())) {
+      throw new PortError('INVALID_INPUT', '查上一段收场没有：要有 taskId 和认得出的 startedAfter', {
+        retryable: false,
+      });
+    }
+    const started = Date.now();
+    let row = await deps.latestManualRun(input.taskId, after);
+    while (row && row.endedAt === null && Date.now() - started < settleMs) {
+      ctx.heartbeat();
+      await sleep(pollMs, ctx.signal);
+      row = await deps.latestManualRun(input.taskId, after);
+    }
+    if (!row || row.endedAt !== null) return { settled: true };
+    return {
+      settled: false,
+      runId: row.id,
+      detail: `上一段会话（${row.id}）等了 ${Math.round(settleMs / 1000)} 秒还没收场`,
+    };
   };
 }

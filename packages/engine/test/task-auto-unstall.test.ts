@@ -504,3 +504,74 @@ describe('冷验收和等 CI 同时起（决定 0093）', { timeout: 90_000 }, (
     expect(world.alerts).toEqual([]);
   });
 });
+
+describe('有界耐心和不并发两段（决定 0093，借 magpie gateway-routing）', { timeout: 90_000 }, () => {
+  const busy = {
+    ok: false as const,
+    runId: null,
+    outcome: 'failed',
+    evidence: { code: 'overloaded', message: 'overloaded_error: at capacity', quotaExhausted: false },
+  };
+
+  it('繁忙把重试次数用完：先歇一会儿重新选路再起，不停下；歇掉的从会话时限里扣', async () => {
+    const world = createFakeWorld();
+    // 前 3 次繁忙（原路重试 2 次后判停下），第 4 次（耐心再起）跑成
+    const { tasks, calls } = scripted({ segment: async (_i, n) => (n <= 3 ? busy : OK_SEGMENT) });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(4);
+    expect(calls.segment[3]?.timeoutMinutes).toBe(59);
+    // 每次再起之前都问过上一段收场没有
+    expect(calls.settled.length).toBeGreaterThanOrEqual(3);
+    expect(world.states.some((s) => s.doing.includes('耐心等 15 秒再选路'))).toBe(true);
+    expect(world.alerts.filter((a) => a.level !== 'info')).toEqual([]);
+  });
+
+  it('【故意造出的失败】一直繁忙：耐心预算用完照旧停下等人，原因写明已等多久', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({ segment: async () => busy });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await env.sleep('20 minutes');
+        const s = await statusUntil(h, parked, '耐心用完，停下');
+        expect(s.lastProblem).toContain('耐心等待用完');
+        await h.terminate();
+      },
+      { tasks },
+    );
+    // 原路 3 次 + 耐心再起 2 次（15、30 秒），第 3 次再歇会超 60 秒
+    expect(calls.segment).toHaveLength(5);
+  });
+
+  it('【故意造出的失败】上一段还没收场：不起第二段，停下写明原因', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async () => busy,
+      settled: () => ({
+        settled: false,
+        runId: 'run-live',
+        detail: '上一段会话（run-live）等了 20 秒还没收场',
+      }),
+    });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '上一段没收场，停下');
+        expect(s.lastProblem).toContain('上一段会话还没收场，不起第二段');
+        await h.terminate();
+      },
+      { tasks },
+    );
+    expect(calls.segment).toHaveLength(1);
+  });
+});

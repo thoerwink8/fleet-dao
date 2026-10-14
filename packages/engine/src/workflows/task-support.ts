@@ -309,6 +309,54 @@ export const AUTO_REDISPATCH_CODES: readonly string[] = [
   'startup_timeout',
 ];
 
+/**
+ * 有界耐心（决定 0093，借 magpie gateway-routing 的 Patience）：动手会话撞上上游临时故障（失败分流规则表上标了 blip 的：
+ * 限流、繁忙、容量满……）、次数用完要停下时，先不停：歇一会儿重新选一次路由（不粘原路由）再起，直到预算用完才照旧停下。
+ * 预算从第一次「该停下」起按墙钟算（含中间重跑的会话），默认 60 秒、最多 240 秒；歇的时长从会话时限里扣（计入会话总时限）。
+ */
+export const ROUTE_PATIENCE_SECONDS = 60;
+export const ROUTE_PATIENCE_MAX_SECONDS = 240;
+/** 每次歇多久：15 秒起翻倍，封顶 30 秒（magpie 的 retryPause 翻倍到 replanLongest）。 */
+export const ROUTE_PATIENCE_PAUSE_SECONDS = 15;
+export const ROUTE_PATIENCE_PAUSE_MAX_SECONDS = 30;
+
+export type PatienceStep = { kind: 'pause'; seconds: number } | { kind: 'out'; reason: string };
+
+/**
+ * 这一次歇不歇（纯函数）：预算按 [0, ROUTE_PATIENCE_MAX_SECONDS] 夹住，认不出的按默认；歇完会超预算就不歇，写明已等多久。
+ * sinceSeconds 认不出（不是有限非负数）不当成 0：直接用完，照旧停下。
+ */
+export function patienceStep(input: {
+  sinceSeconds: number;
+  round: number;
+  budgetSeconds?: number;
+}): PatienceStep {
+  const raw = input.budgetSeconds;
+  const budget =
+    typeof raw === 'number' && Number.isFinite(raw) && raw >= 0
+      ? Math.min(raw, ROUTE_PATIENCE_MAX_SECONDS)
+      : ROUTE_PATIENCE_SECONDS;
+  const since = input.sinceSeconds;
+  if (!(Number.isFinite(since) && since >= 0)) {
+    return { kind: 'out', reason: '耐心等待算不出已等多久，照旧停下' };
+  }
+  const round = Number.isInteger(input.round) && input.round > 0 ? input.round : 0;
+  const seconds = Math.min(ROUTE_PATIENCE_PAUSE_SECONDS * 2 ** round, ROUTE_PATIENCE_PAUSE_MAX_SECONDS);
+  if (since + seconds > budget) {
+    return {
+      kind: 'out',
+      reason: `耐心等待用完（已等 ${Math.round(since)} 秒，预算 ${budget} 秒），照旧停下`,
+    };
+  }
+  return { kind: 'pause', seconds };
+}
+
+/** 这一段的会话时限（分钟）：耐心等待歇掉的从里面扣（决定 0093），至少留 1 分钟。 */
+export function segmentMinutesAfterPatience(base: number, waitedSeconds: number): number {
+  if (!(Number.isFinite(waitedSeconds) && waitedSeconds > 0)) return base;
+  return Math.max(1, base - Math.ceil(waitedSeconds / 60));
+}
+
 /** 推分支报空交付（起会话前的头之后没有新提交）：自动回去重派一次动手会话，不停下等人（决定 0093）。 */
 export const EMPTY_DELIVERY_CODE = 'empty_delivery';
 

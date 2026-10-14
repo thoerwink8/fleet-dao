@@ -30,6 +30,8 @@ import {
   type RunSegmentInput,
   type RunSegmentResult,
   SEGMENT_MINUTES,
+  type SegmentSettledInput,
+  type SegmentSettledResult,
   type SelfCheckInput,
   type SelfCheckResult,
   type TaskSpendInput,
@@ -64,6 +66,8 @@ export type EngineActivities = PortActivities & {
   mergeNow(input: MergeNowInput): Promise<MergeNowResult>;
   /** 判这一段能不能续上一段的会话（决定 0088）：续不上回 new 加原因，不抛。 */
   planSegmentResume(input: PlanSegmentResumeInput): Promise<PlanSegmentResumeResult>;
+  /** 上一段收场了没有（决定 0093）：重试、重派前问，没收场不起第二段。库读不了抛。 */
+  segmentSettled(input: SegmentSettledInput): Promise<SegmentSettledResult>;
   /** 动手会话收场后在会话的树里跑测试和 tsc（决定 0093）：没跑成回 skipped，不抛。 */
   selfCheck(input: SelfCheckInput): Promise<SelfCheckResult>;
   /** 这张单到现在花掉多少 token（单任务预算，决定 0093）。 */
@@ -113,6 +117,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   readCiPolicy: 'quick',
   mergeNow: 'git',
   planSegmentResume: 'quick',
+  segmentSettled: 'quick',
   selfCheck: 'setup',
   taskSpend: 'quick',
 };

@@ -57,10 +57,14 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
     expect([...actions].sort()).toEqual(['park', 'retry']);
   });
 
-  it('retry 临时的（网络、上游出错、进程被杀……）：原路重试两次，退避 15、30 秒，再来就停下报警', () => {
+  it('retry 临时的（网络、上游出错、进程被杀……）：绑路由的原路重试两次，1 分钟起翻倍（决定 0093），再来就停下报警', () => {
     const { trail, verdicts, last } = drive(NETWORK);
     expect(trail).toEqual(['retry', 'retry', 'park']);
-    expect(verdicts.slice(0, 2).map((v) => v.delaySeconds)).toEqual([15, 30]);
+    expect(verdicts.slice(0, 2).map((v) => v.delaySeconds)).toEqual([60, 120]);
+    expect(verdicts[0]?.cooldown).toEqual({ tier: 'other', by: 'backoff' });
+    // 不绑路由的（开 PR、推分支）仍从 15 秒起
+    const off = drive({ source: 'openPr', message: 'socket hang up' });
+    expect(off.verdicts.slice(0, 2).map((v) => v.delaySeconds)).toEqual([15, 30]);
     expect(last?.alert).toBe(true);
     expect(last?.reason).toContain('已重试 2 次');
   });
@@ -87,7 +91,9 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
   it('上限调大调小都封得住，退避翻倍且封顶', () => {
     const { trail, verdicts } = drive(UNKNOWN, { retryAttempts: 6, retryMaxSeconds: 100 });
     expect(trail).toEqual(['retry', 'retry', 'retry', 'retry', 'retry', 'retry', 'park']);
-    expect(verdicts.map((v) => v.delaySeconds)).toEqual([15, 30, 60, 100, 100, 100, 0]);
+    expect(verdicts.map((v) => v.delaySeconds)).toEqual([60, 100, 100, 100, 100, 100, 0]);
+    const slow = drive(UNKNOWN, { retryAttempts: 6, routeRetryBaseSeconds: 15, retryMaxSeconds: 100 });
+    expect(slow.verdicts.map((v) => v.delaySeconds)).toEqual([15, 30, 60, 100, 100, 100, 0]);
     expect(drive(UNKNOWN, { retryAttempts: 0 }).trail).toEqual(['park']);
   });
 
@@ -607,5 +613,48 @@ describe('策略参数', () => {
     ];
     for (const [policy, message] of bad) expect(() => classifyFailure(UNKNOWN, policy)).toThrow(message);
     expect(classifyFailure(UNKNOWN, { retryAttempts: 0 }).action).toBe('park');
+  });
+});
+
+describe('分档冷却（决定 0093，借 magpie gateway-routing：额度歇到清零、限流按 Retry-After、其他 1 分钟起翻倍）', () => {
+  const quota = (extra: Partial<FailureEvidence> = {}) =>
+    session({ code: 'quota_exhausted', message: 'usage limit reached', ...extra });
+
+  it('额度用完、读到清零时刻：歇到那个时刻，写明按读数', () => {
+    const v = classifyFailure(quota({ resetsAt: '2026-09-25T00:40:00.000Z' }));
+    expect(v).toMatchObject({ action: 'retry', delaySeconds: 2400, wait: 'quota' });
+    expect(v.cooldown).toEqual({ tier: 'quota', by: 'resets' });
+    expect(v.reason).toContain('按读到的清零时刻');
+  });
+
+  it('额度用完、清零时刻没读到：按现有估计（15 分钟起），写明是估计', () => {
+    const v = classifyFailure(quota());
+    expect(v).toMatchObject({ action: 'retry', delaySeconds: 900 });
+    expect(v.cooldown).toEqual({ tier: 'quota', by: 'estimate' });
+    expect(v.reason).toContain('清零时刻没读到，按估计');
+  });
+
+  it('清零时刻已经过了（旧读数）：不当成马上就好、等 0 秒原路再撞，按估计并写明', () => {
+    const v = classifyFailure(quota({ resetsAt: '2026-09-24T23:00:00.000Z' }));
+    expect(v.delaySeconds).toBe(900);
+    expect(v.cooldown).toEqual({ tier: 'quota', by: 'estimate' });
+    expect(v.reason).toContain('resetsAt 已经过了');
+  });
+
+  it('限流给了 Retry-After：按对方给的时间；没给：1 分钟起翻倍', () => {
+    const given = classifyFailure(
+      session({ httpStatus: 429, message: 'Too Many Requests. Retry-After: 42' }),
+    );
+    expect(given).toMatchObject({ action: 'retry', delaySeconds: 42, wait: 'upstream' });
+    expect(given.cooldown).toEqual({ tier: 'rate', by: 'retry-after' });
+    expect(given.reason).toContain('按上游给的时间');
+    const { verdicts } = drive(session({ httpStatus: 429, message: 'Too Many Requests' }));
+    expect(verdicts.slice(0, 2).map((v) => v.delaySeconds)).toEqual([60, 120]);
+    expect(verdicts[0]?.cooldown).toEqual({ tier: 'rate', by: 'backoff' });
+  });
+
+  it('停下、返工不带冷却档', () => {
+    expect(drive(NETWORK).last?.cooldown).toBeUndefined();
+    expect(classifyFailure(BANNED).cooldown).toBeUndefined();
   });
 });

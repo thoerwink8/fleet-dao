@@ -103,7 +103,7 @@ import {
   wakeAfterProbeRound,
 } from './route-wake.ts';
 import { realChannelAttempts, realReservations, realRuns } from './runs-writer.ts';
-import { createPlanSegmentResume } from './segment-resume.ts';
+import { createPlanSegmentResume, createSegmentSettled } from './segment-resume.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { createSelfCheck } from './self-check.ts';
 import { SESSION_ORG_TIMEOUT_MS, type SessionOrgReader, sessionOrgReader } from './session-org.ts';
@@ -937,6 +937,10 @@ export function realPortsFromEnv(
     planSegmentResume: createPlanSegmentResume({
       spawner: segmentSpawner,
       getRun: (runId) => getRun(db, runId),
+      latestManualRun: (taskId, startedAfter) =>
+        latestRunOfTask(db, { taskId, segment: 'manual', startedAfter }),
+    }),
+    segmentSettled: createSegmentSettled({
       latestManualRun: (taskId, startedAfter) =>
         latestRunOfTask(db, { taskId, segment: 'manual', startedAfter }),
     }),
