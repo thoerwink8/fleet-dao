@@ -205,6 +205,42 @@ describe('用量补记：经 Mirasim 起的会话按中转计量补齐', () => {
     expect(await getRun(t.db, id)).toMatchObject({ inputTokens: null, usageNote: null });
   });
 
+  it('读不成的退避着读，读满次数定案不再补：数仍留空，不写成 0，也不再每 5 分钟白读一次', async () => {
+    const { id } = await mirasimRun();
+    let reads = 0;
+    const lines = call(1, { noRelayRecord: true });
+    const at = (min: number) => new Date(ENDED.getTime() + min * 60_000);
+    const tick = async (min: number) => {
+      const j = job(() => {
+        reads += 1;
+        return lines;
+      }, at(min));
+      await j.run();
+      return j;
+    };
+    await tick(6);
+    expect((await getRun(t.db, id))?.usageNote).toContain('第 1 次');
+    expect(reads).toBe(1);
+    // 退避里（10 分钟）：这一轮不碰，不读账本，不记 partial
+    const quiet = await tick(11);
+    expect(reads).toBe(1);
+    expect(quiet.finished.at(-1)).toEqual({ outcome: 'ok', scanned: 1, found: 0 });
+    // 满了第 1 档（10 分钟）、第 2 档（20 分钟）……每次读完记下第几次
+    let now = 6;
+    for (const [i, waitMin] of [10, 20, 40, 80, 160].entries()) {
+      now += waitMin;
+      await tick(now);
+      expect(reads).toBe(i + 2);
+    }
+    const row = await getRun(t.db, id);
+    expect(row?.usageNote).toMatch(/^用量不再补：查了 6 次都读不成/);
+    expect(row).toMatchObject({ inputTokens: null, cacheReadTokens: null, cacheWriteTokens: null });
+    // 定案之后不再是候选
+    const done = await tick(now + 1000);
+    expect(reads).toBe(6);
+    expect(done.finished.at(-1)).toEqual({ outcome: 'ok', scanned: 1, found: 0 });
+  });
+
   it('登记的编号是 usage-backfill', () => {
     expect(USAGE_BACKFILL_JOB.id).toBe('usage-backfill');
   });

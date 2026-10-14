@@ -1,13 +1,23 @@
 // 拼车额度盯读的真接线（#194）：账本读真库（real/org-ledger.ts）、会话用户挂的组织用和选路、切号同一个读法、读接口用 real/carpool-api.ts、
 // 判切号交给 real/org-switch.ts 的 orgSwitchRound.now（同一把单飞锁），提醒走 upsertAlert / resolveAlertByKey，结局记进 schedule_runs。
 import type { SessionUser } from '@fleet-dao/adapters';
-import { type Db, finishScheduleRun, resolveAlertByKey, startScheduleRun, upsertAlert } from '@fleet-dao/db';
+import {
+  carpoolPoolCaps,
+  type Db,
+  finishScheduleRun,
+  registerScheduledJobs,
+  resolveAlertByKey,
+  startScheduleRun,
+  unregisterScheduledJobs,
+  upsertAlert,
+} from '@fleet-dao/db';
 import type { CarpoolApiRead } from '../jobs/carpool-outage.ts';
-import type { CarpoolWatchDeps } from '../jobs/carpool-watch.ts';
+import { CARPOOL_WATCH_JOB, type CarpoolWatchDeps } from '../jobs/carpool-watch.ts';
 import { OrgLedgerError } from '../jobs/org-ledger.ts';
 import type { OrgSwitchRound } from '../jobs/org-switch.ts';
 import { loadLedger } from './org-ledger.ts';
 import { ORG_LEDGER_ALERT } from './org-switch.ts';
+import { loadHeldPools } from './pool-holds.ts';
 import type { SessionOrgReader } from './session-org.ts';
 
 export interface CarpoolWatchWiring {
@@ -28,7 +38,23 @@ export function carpoolWatchJob(w: CarpoolWatchWiring): () => CarpoolWatchDeps {
   const now = w.now ?? (() => new Date());
   const log: CarpoolWatchDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
+  // 登记行现在是不是已摘（进程内记着，起来时不知道 = null，第一轮就写一次对的）
+  let parked: boolean | null = null;
   return () => ({
+    // 整池暂停：库里所有拼车池都被暂停（开关或 pool-hold: 提醒）才算；一个拼车池都没有不算（让盯读自己报「找不到」）
+    pause: {
+      heldReason: async () => {
+        const [caps, held] = await Promise.all([carpoolPoolCaps(w.db), loadHeldPools(w.db, now())]);
+        if (caps.length === 0 || !caps.every((c) => held.all.has(c.poolId))) return null;
+        return `拼车池 ${caps.map((c) => c.poolId).join('、')} 整池暂停着`;
+      },
+      park: async (on) => {
+        if (parked === on) return;
+        if (on) await unregisterScheduledJobs(w.db, [CARPOOL_WATCH_JOB.id]);
+        else await registerScheduledJobs(w.db, [CARPOOL_WATCH_JOB]);
+        parked = on;
+      },
+    },
     // 账本认不出：和切号那边同一条提醒（session-org:ledger），盯读这一轮起不来也要让人看见，不只记一条没跑成的记录；读得出了自己撤
     loadLedger: async () => {
       try {

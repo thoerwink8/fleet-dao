@@ -471,7 +471,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 
 ### 命令行工具版本（#1969）
 
-驾驶舱法国页有一块「命令行工具」：会话用户 `fleet-agent-carpool` 和 `pilot` 各自的 Claude Code、Codex、Grok、Cursor Agent、reclaude、Mirasim 服务端，以及 root 全局 npm 里的 Kimi（`@moonshot-ai/kimi-code`）、DeepSeek dsh（`@deepseek-ai/dsh`）、pi（`@earendil-works/pi-coding-agent`）。每一行是在用版本、官方最新版、状态（最新、落后几个版本、落后但数不出几个、读不到、没查成）和上次检查时间。
+驾驶舱法国页有一块「命令行工具」：会话用户 `fleet-agent-carpool` 的 Claude Code、Codex、Grok、Cursor Agent、reclaude、Mirasim 服务端，`pilot` 的 Claude Code、Codex、reclaude（pilot 从没装过另外三样，名单在 `packages/shared/src/cli-versions.ts` 的 `cliUserToolsOf`，以后在 pilot 上装了新工具来那里加一行），以及 root 全局 npm 里的 Kimi（`@moonshot-ai/kimi-code`）、DeepSeek dsh（`@deepseek-ai/dsh`）、pi（`@earendil-works/pi-coding-agent`）。每一行是在用版本、官方最新版、状态（最新、落后几个版本、落后但数不出几个、读不到、没查成）和上次检查时间。
 
 引擎定时任务 `cli-versions`（每小时的 11 分，`packages/engine/src/jobs/cli-versions.ts`）读一遍。在用版本以那个用户的身份经 `sudo -n fleet-agent-scope probe` 跑写死的 `--version`。pilot 只在 probe 的白名单里，`run`、`adopt`、`org-use` 仍只认 `fleet-agent-carpool`。Mirasim 没有 `--version`，读 `~/.mirasim-remote/current` 指向的 `servers/<版本>` 目录名。全局 npm 以 root 跑 `npm ls -g --depth=0 --json`。读不到把原因记下来，不写成 0 或 ok。
 

@@ -12,6 +12,7 @@ import {
   CLI_SESSION_USERS,
   CLI_USER_TOOLS,
   type CliToolId,
+  cliUserToolsOf,
   parseInstalledOutput,
   parseNpmGlobal,
 } from '@fleet-dao/shared';
@@ -122,7 +123,7 @@ async function round(deps: CliVersionsJobDeps): Promise<ScheduleResult> {
   };
 
   for (const user of CLI_SESSION_USERS) {
-    for (const tool of CLI_USER_TOOLS) {
+    for (const tool of cliUserToolsOf(user)) {
       let installed: { installedVersion: string | null; installedError: string | null };
       try {
         installed = installedFrom(tool.id, await deps.probeUser(user, tool.id));
@@ -184,7 +185,8 @@ async function round(deps: CliVersionsJobDeps): Promise<ScheduleResult> {
     });
   }
 
-  const scanned = CLI_SESSION_USERS.length * CLI_USER_TOOLS.length + CLI_NPM_TOOLS.length;
+  const scanned =
+    CLI_SESSION_USERS.reduce((n, user) => n + cliUserToolsOf(user).length, 0) + CLI_NPM_TOOLS.length;
   if (problems.length > 0) {
     const shown = problems.slice(0, 8).join('；');
     return {

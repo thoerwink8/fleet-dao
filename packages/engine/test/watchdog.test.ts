@@ -508,3 +508,70 @@ describe('看门狗一轮的结局', () => {
     expect((err as Error).message).toContain('库连不上');
   });
 });
+
+describe('同一个任务连着没跑全（partial 算跑成，所以单靠新鲜度看不见）', () => {
+  const partial = (why: string): ScheduleResult => ({ outcome: 'partial', why, scanned: 3, found: 1 });
+  const reds = () => openAlerts().then((all) => all.filter((a) => a.dedupeKey.startsWith('watchdog:red:')));
+
+  it('【故意造出的失败】从没跑全过、连着 4 次 partial 跨过 2 小时：报一张卡（写从几点起、最近一次的原因），点进定时任务页；再看一轮没变不改卡', async () => {
+    await register({ id: 'cli-versions', name: '命令行工具版本', expectEveryMinutes: 100_000 });
+    for (const m of [-200, -140, -80, -20])
+      await run('cli-versions', m, partial('3 处没读成：pilot 的 Grok 没读成'));
+    expect(await runWatchdogJob(deps())).toMatchObject({ outcome: 'ok', found: 1 });
+    const [a] = await reds();
+    expect(a).toMatchObject({
+      dedupeKey: 'watchdog:red:cli-versions:no-ok',
+      level: 'alert',
+      title: '定时任务「命令行工具版本」连着只跑了一部分',
+      link: '/schedules',
+    });
+    expect(a?.body).toContain('每一次都没有跑全');
+    expect(a?.body).toContain('3 处没读成：pilot 的 Grok 没读成');
+    const before = a?.updatedAt;
+    clock = at(5);
+    await runWatchdogJob(deps());
+    expect((await reds())[0]?.updatedAt).toEqual(before);
+  });
+
+  it('不够报的不报：只有 2 次、或 3 次但没跨过 2 小时、或中间有一次跑全了', async () => {
+    await register(
+      { id: 'two', expectEveryMinutes: 100_000 },
+      { id: 'short', expectEveryMinutes: 100_000 },
+      { id: 'broken-by-ok', expectEveryMinutes: 100_000 },
+    );
+    for (const m of [-300, -10]) await run('two', m, partial('x'));
+    for (const m of [-30, -20, -10]) await run('short', m, partial('x'));
+    await run('broken-by-ok', -300, partial('x'));
+    await run('broken-by-ok', -200, partial('x'));
+    await run('broken-by-ok', -100, { outcome: 'ok', scanned: 1, found: 0 });
+    await run('broken-by-ok', -10, partial('x'));
+    await runWatchdogJob(deps());
+    expect(await reds()).toEqual([]);
+  });
+
+  it('跑全一次就自己撤，写明为什么；之后又红是新的一段、新的一张卡', async () => {
+    await register({ id: 'j', name: '某任务', expectEveryMinutes: 100_000 });
+    for (const m of [-200, -140, -80]) await run('j', m, partial('读不到'));
+    await runWatchdogJob(deps());
+    expect(await reds()).toHaveLength(1);
+    const okId = await run('j', 1, { outcome: 'ok', scanned: 1, found: 0 });
+    clock = at(5);
+    await runWatchdogJob(deps());
+    expect(await reds()).toEqual([]);
+    const gone = await alertOf('watchdog:red:j:no-ok');
+    expect(gone?.resolvedBy).toBe('engine:watchdog');
+    expect(gone?.body).toContain('跑全了一次');
+    for (const m of [6, 70, 130]) await run('j', m, partial('又读不到'));
+    clock = at(140);
+    await runWatchdogJob(deps());
+    expect((await reds()).map((a) => a.dedupeKey)).toEqual([`watchdog:red:j:after-${okId}`]);
+  });
+
+  it('最近一次没跑成（failed）的任务，看门狗已经按「没跑成」报了，这一项不再报第二张', async () => {
+    await register({ id: 'f', name: '会失败的', expectEveryMinutes: 100_000 });
+    for (const m of [-200, -140, -80, -20]) await run('f', m, { outcome: 'failed', why: '库断了' });
+    await runWatchdogJob(deps());
+    expect(await reds()).toEqual([]);
+    expect((await openAlerts()).map((a) => a.dedupeKey.split(':')[1])).toEqual(['job']);
+  });
+});

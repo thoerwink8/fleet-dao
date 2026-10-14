@@ -374,6 +374,26 @@ function deferredDetail(pace: Pace, now: Date): string {
   return `${TIER_NAMES[pace.tier]}档，探通了隔 ${every} 分钟再真探；下次约 ${wait} 分钟后`;
 }
 
+/**
+ * 没真探的结论（按量、没下架的路由里没阶段在用、整池暂停、插头没接……）和库里上一次一模一样时，定时这一轮不再重写，
+ * 隔这么久才把「看过的时刻」刷一次。过去每一轮把 270 多条不在用的路由各写一遍（路由行、历史一条、清旧历史、渠道近态），
+ * 一天 2.6 万条内容完全相同的历史，一轮平白多花十来秒。结论变了（原因、状态、组织）当场写，不等这个间隔。
+ */
+export const ROUTE_PROBE_UNCHANGED_REFRESH_MS = 24 * 60 * 60_000;
+
+/** 这条没真探的结论是不是和库里的一样、又还没到该刷「看过的时刻」的时候（是就这一轮不写）。 */
+export function isUnchangedSkip(c: Conclusion, now: Date): boolean {
+  const prev = c.target.previous;
+  if (!prev) return false;
+  if (c.state !== 'skipped' && c.state !== 'not_wired') return false;
+  // 真探过的（带耗时或原文）一定写
+  if (c.durationMs !== null || c.requestText !== null || c.responseText !== null) return false;
+  if (prev.state !== c.state || prev.detail !== c.detail || prev.org !== c.org) return false;
+  if (c.failStreak !== c.target.failStreak) return false;
+  const age = now.getTime() - prev.at.getTime();
+  return Number.isFinite(age) && age >= 0 && age < ROUTE_PROBE_UNCHANGED_REFRESH_MS;
+}
+
 export type ScheduledProbePlan = ProbePlan | { deferred: string };
 
 /**
@@ -785,6 +805,12 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
       unsettled.push(c);
       if (c.target.alive) online.push(c.target.routeId);
       else offline += 1;
+      continue;
+    }
+    if (isUnchangedSkip(c, c.at)) {
+      // 和库里一样的「不探」：不重写，照库里的样子算看过、不在线
+      deferred += 1;
+      offline += 1;
       continue;
     }
     let saved: 'saved' | 'route_not_found';

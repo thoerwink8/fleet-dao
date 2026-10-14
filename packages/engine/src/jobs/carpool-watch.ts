@@ -7,6 +7,9 @@
 // 改这里之前必须知道：
 // - 读不到、认不出明确失败（读数记成 ok:false 带原因，进账本），不当成「没事」：连着两次没读成报警（#76 同一个规矩），Key 失效、回包认不出
 //   当场报；读成了自己撤。
+// - 拼车池整池暂停着（人拍的开关 engine.poolHolds，或 pool-hold: 提醒顶着）时整个不跑：选路不派它、切号不往它切，盯它没有意义，
+//   每分钟白起一轮、白写两条记录（过去池停用 14 天 0 个会话，这个任务照跑 2 万次）。停着的时候把登记行摘掉（和别的暂时不该跑的任务
+//   一个办法：看门狗和定时任务页都不当它停了），撤了暂停下一分钟登记回来、接着盯；暂停状态读不到不当成暂停，照常盯。入口 runCarpoolWatchUnlessPaused。
 // - 什么都不用判的时候（挂着拼车、没有恢复条件、没到点读）整轮不碰切号，不白起 reclaude org list。
 
 import {
@@ -197,6 +200,15 @@ export interface CarpoolWatchDeps {
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
   policy?: WatchPolicy;
+  /** 整池暂停时不跑（见文件头）。不给 = 总是跑（只测别的部分的单测）。 */
+  pause?: CarpoolWatchPause;
+}
+
+export interface CarpoolWatchPause {
+  /** 拼车池现在是不是整池暂停：是回原因，不是回 null。读不了照抛（调用方当「没暂停」照常盯）。 */
+  heldReason(): Promise<string | null>;
+  /** 停着时摘掉登记行、恢复时登记回来。同一个状态重复叫不重复写（调用方自己记着上一次）。 */
+  park(parked: boolean): Promise<void>;
 }
 
 export const carpoolApiAlertKey = () => 'carpool-api';
@@ -289,4 +301,25 @@ export async function runCarpoolWatchJob(deps: CarpoolWatchDeps): Promise<Carpoo
   }
   if (r.outcome === 'partial') deps.log('warn', '拼车盯读这一轮读接口没成', { runId, why: r.why });
   return run;
+}
+
+/**
+ * 定时器的入口：拼车池整池暂停着就不跑（不起一轮、不写 schedule_runs、不读接口），登记行摘掉；否则照常 runCarpoolWatchJob。
+ * 暂停状态读不到、摘登记行写不进：记 warn、当没暂停照常盯——宁可多读一次也不把该盯的盯漏了。
+ */
+export async function runCarpoolWatchUnlessPaused(
+  deps: CarpoolWatchDeps,
+): Promise<CarpoolWatchRun | { paused: true; why: string }> {
+  if (deps.pause) {
+    let why: string | null = null;
+    try {
+      why = await deps.pause.heldReason();
+      await deps.pause.park(why !== null);
+    } catch (err) {
+      why = null;
+      deps.log('warn', '拼车盯读：读不到拼车池是不是暂停着，照常盯', { error: errMessage(err) });
+    }
+    if (why !== null) return { paused: true, why };
+  }
+  return runCarpoolWatchJob(deps);
 }
