@@ -2,7 +2,8 @@
 // 本机的行不进引擎的名额、熔断、失败次数、遗留行对账、「在做几张」。
 import { LOCAL_LEASE_MS } from '@fleet-dao/shared';
 import { and, eq } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { saveTaskSnapshot } from '../src/queries/engine-task-snapshot.ts';
 import {
   firstTaskCreatedSince,
   recentEndedTasks,
@@ -17,6 +18,8 @@ import {
   mergedPrForIssue,
   renewLocalTask,
   settleExpiredLocalClaim,
+  TAKEOVER_NOTE,
+  type TakeOverEngine,
   unexpiredLocalClaims,
 } from '../src/queries/local-claims.ts';
 import { mergeStallFacts } from '../src/queries/merge-stall.ts';
@@ -106,6 +109,103 @@ describe('claimLocalTask：本机领单', () => {
       now: NOW,
     });
     expect(r).toMatchObject({ ok: false, code: 'unknown_repo' });
+  });
+});
+
+describe('claimLocalTask：接手引擎已停下的单（stalled / running + parked）', () => {
+  const claim = (n: number, takeOver?: TakeOverEngine, now = NOW) =>
+    claimLocalTask(t.db, { repo: 'acme/app', issueNumber: n, title: 'x', nodeId: NODE, now, takeOver });
+
+  it('停下的（stalled，或 running + parked）：一步接手，先叫停引擎，改 local、记租约和操作记录（reason 本机接手）', async () => {
+    const repo = await addRepo(t.db, 'app');
+    await addTask(t.db, repo.id, { issueNumber: 1, state: 'stalled', phase: 'parked', doing: '停着等人' });
+    await addTask(t.db, repo.id, { issueNumber: 2, state: 'running', phase: 'parked', doing: '停着等人' });
+    const called: number[] = [];
+    const takeOver: TakeOverEngine = async (task) => {
+      called.push(task.issueNumber);
+      return { ok: true };
+    };
+    for (const n of [1, 2]) {
+      expect(await claim(n, takeOver)).toMatchObject({ ok: true, state: 'running', executor: 'local' });
+      const got = await row(repo.id, n);
+      expect(got).toMatchObject({ state: 'running', executor: 'local', claimedBy: NODE, phase: null });
+      expect(got?.leaseUntil?.getTime()).toBe(NOW.getTime() + LOCAL_LEASE_MS);
+    }
+    expect(called).toEqual([1, 2]);
+    const audits = await t.db.select().from(auditLog).where(eq(auditLog.action, 'task.local.claim'));
+    expect(audits).toHaveLength(2);
+    expect(audits[0]).toMatchObject({ reason: TAKEOVER_NOTE, before: { executor: 'engine' } });
+  });
+
+  it('【故意造出的失败】引擎还在跑（running、没停）和排队的：照旧拒，原因写明现在在干什么，不叫停、行不动', async () => {
+    const repo = await addRepo(t.db, 'app');
+    await addTask(t.db, repo.id, {
+      issueNumber: 1,
+      state: 'running',
+      phase: 'session',
+      doing: '会话在写代码',
+    });
+    await addTask(t.db, repo.id, { issueNumber: 2, state: 'queued' });
+    const takeOver = vi.fn<TakeOverEngine>(async () => ({ ok: true }));
+    const r = await claim(1, takeOver);
+    expect(r).toMatchObject({ ok: false, code: 'engine_has_it' });
+    expect(r.ok ? '' : r.why).toContain('会话在写代码');
+    expect(await claim(2, takeOver)).toMatchObject({ ok: false, code: 'engine_has_it' });
+    expect(takeOver).not.toHaveBeenCalled();
+    expect(await row(repo.id, 1)).toMatchObject({ state: 'running', executor: 'engine', phase: 'session' });
+  });
+
+  it('【故意造出的失败】叫停没成：整个领单不成、行原样（还是引擎的）、不记操作记录', async () => {
+    const repo = await addRepo(t.db, 'app');
+    await addTask(t.db, repo.id, { issueNumber: 1, state: 'stalled', phase: 'parked' });
+    const r = await claim(1, async () => ({ ok: false, why: '工作流服务暂时连不上' }));
+    expect(r).toMatchObject({ ok: false, code: 'engine_has_it' });
+    expect(r.ok ? '' : r.why).toContain('工作流服务暂时连不上');
+    expect(await row(repo.id, 1)).toMatchObject({ state: 'stalled', executor: 'engine' });
+    expect(await t.db.select().from(auditLog)).toHaveLength(0);
+  });
+
+  it('接手后引擎不再拉这张单：收尾的 stopped 快照写不回去，遗留行对账不列；租约到期照常退回法国', async () => {
+    const repo = await addRepo(t.db, 'app');
+    const task = await addTask(t.db, repo.id, { issueNumber: 1, state: 'stalled', phase: 'parked' });
+    await claim(1, async () => ({ ok: true }));
+    // 引擎工作流收到 taskAbandon 后收尾，写 stopped 快照：不能把本机的行改回去
+    const snap = await saveTaskSnapshot(t.db, {
+      taskId: task.id,
+      state: 'stopped',
+      phase: 'abandoned',
+      doing: '被 node:founder-pc 放弃：本机接手',
+      lastProblem: '本机接手',
+      subtasks: [],
+    });
+    expect(snap).toBe('held_by_local');
+    expect(await row(repo.id, 1)).toMatchObject({ state: 'running', executor: 'local', claimedBy: NODE });
+    expect((await listOpenTaskRows(t.db)).map((r) => r.issueNumber)).not.toContain(1);
+    const [expired] = await expiredLocalClaims(t.db, repo.id, later(LOCAL_LEASE_MS + HOUR));
+    expect(expired?.issueNumber).toBe(1);
+    await settleExpiredLocalClaim(t.db, {
+      taskId: task.id,
+      how: 'returned',
+      why: '到期',
+      now: later(LOCAL_LEASE_MS + HOUR),
+    });
+    expect(await row(repo.id, 1)).toMatchObject({ state: 'stopped', executor: 'engine' });
+  });
+
+  it('接手后单关、PR 合了：提前收成 done，照常', async () => {
+    const repo = await addRepo(t.db, 'app');
+    const task = await addTask(t.db, repo.id, { issueNumber: 1, state: 'stalled', phase: 'parked' });
+    await claim(1, async () => ({ ok: true }));
+    expect(
+      await settleExpiredLocalClaim(t.db, {
+        taskId: task.id,
+        how: 'done',
+        why: 'PR 合了',
+        now: NOW,
+        early: true,
+      }),
+    ).toBe(1);
+    expect(await row(repo.id, 1)).toMatchObject({ state: 'done', executor: 'local' });
   });
 });
 

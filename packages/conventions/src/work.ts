@@ -2,7 +2,7 @@
 // 法国拉单看见就不接；本机会话死了，租约到期法国收回、退回法国队列。判法和租约在 shared 的 local-claims.ts。
 //
 // claim：先查这张单有没有开着的 PR（「需求」栏挂着、或分支是 fleet/<单号>-、local/<单号>-）→ 有就停下不领；再经 /api/nodes/claims 登记
-//        （引擎手上有它就回 409，停下不领）→ 贴「本机做」→ 打出要用的分支名 local/<单号>-<短名>。
+//        （引擎停下等人的 stalled / parked 后端一步接手，叫停它再登记；引擎还在跑、排队的回 409，停下不领）→ 贴「本机做」→ 打出要用的分支名 local/<单号>-<短名>。
 // renew：续租（会话在 local/<单号>- 分支上动着、或开着 PR 挂着这张单，法国自己会顺延，不用手动续；跑超过 2 小时的长测试前续一下）。
 // done：做完（PR 合了）记 done；--failed "原因" 记没做成（还是本机的账，法国不自动接）；--release "原因" 放手，退回法国队列。
 //
@@ -193,8 +193,12 @@ async function send(
     return { ok: true, leaseUntil: r.leaseUntil };
   }
   const why = (json as { error?: { message?: unknown } })?.error?.message;
+  const hint =
+    res.status === 409 && body.action === 'claim'
+      ? '\n（引擎已经停下等人的单 claim 会自己接手；这张是引擎还在跑或排着的，等它停下再领，或在驾驶舱叫停它；不要不登记就开 PR）'
+      : '';
   throw new Error(
-    `没登记上：法国回 ${res.status}：${typeof why === 'string' ? why : res.text.slice(0, 200)}`,
+    `没登记上：法国回 ${res.status}：${typeof why === 'string' ? why : res.text.slice(0, 200)}${hint}`,
   );
 }
 
