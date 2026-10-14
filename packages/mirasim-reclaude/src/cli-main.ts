@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { automaticMigration, workerFile } from './auto.ts';
+import { checkExitCode, launchOverrides, overrideLines } from './launches.ts';
 import { atomicJson, migrate } from './migrate.ts';
 
 const args = process.argv.slice(2);
@@ -82,6 +83,22 @@ try {
           updatedAt: new Date().toISOString(),
         });
       process.exitCode = result.state === 'waiting' ? 75 : 0;
+      if (args.includes('--check')) {
+        // 单会话启动命令覆盖盖过全局命令：覆盖成裸 claude 的会话绕过 reclaude，全局装好了也算没接好。
+        let bare = 0;
+        try {
+          const shown = overrideLines(launchOverrides(home));
+          shown.lines.forEach((line, i) => {
+            console.log(shown.red[i] && process.stdout.isTTY ? `\u001b[31m${line}\u001b[0m` : line);
+          });
+          bare = shown.bare;
+        } catch (error) {
+          console.error(`会话单独启动命令没查成：${error instanceof Error ? error.message : '未知错误'}`);
+          process.exitCode = 1;
+          break;
+        }
+        process.exitCode = checkExitCode(result.state, bare);
+      }
       break;
     }
   }

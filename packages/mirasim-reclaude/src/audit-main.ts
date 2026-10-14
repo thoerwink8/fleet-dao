@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { AuditUnreadable, audit, launchLogPath, localTime } from './audit.ts';
+import { launchOverrides, overrideLines } from './launches.ts';
 import { type LaunchStatus, readLaunchStatus } from './migrate.ts';
 
 const args = process.argv.slice(2);
@@ -47,7 +48,23 @@ try {
     const status = readLaunchStatus(home);
     if (!status) throw new AuditUnreadable('Mirasim 设置读不到：~/.mirasim/setting.json');
     const headline = `启动命令：${STATUS_TEXT[status.status]}`;
-    console.log(status.status === 'drift' ? red(headline) : headline);
+    // 标红的都算进退出码：顶行、会话覆盖、会话对账任何一处红了就退 1。
+    let redCount = 0;
+    if (status.status === 'drift') {
+      redCount++;
+      console.log(red(headline));
+    } else console.log(headline);
+    let overrides: ReturnType<typeof launchOverrides>;
+    try {
+      overrides = launchOverrides(home);
+    } catch (error) {
+      throw new AuditUnreadable(error instanceof Error ? error.message : 'Mirasim 路由索引读不到');
+    }
+    const shown = overrideLines(overrides);
+    shown.lines.forEach((line, i) => {
+      console.log(shown.red[i] ? red(line) : line);
+    });
+    redCount += shown.bare;
     const logFile = launchLogPath(home, process.platform, process.env);
     const report = audit(home, logFile, days, now);
     console.log(
@@ -67,9 +84,16 @@ try {
         console.log(red(`${line}\n          ${s.flags.join('；')}`));
       } else console.log(line);
     }
-    if (report.untimedTurns) console.log(`另有 ${report.untimedTurns} 个回合没有开始时间，没放进对账`);
     console.log(flagged ? red(`标红 ${flagged} 条会话`) : '没有标红');
-    process.exitCode = flagged ? 1 : 0;
+    redCount += flagged;
+    // 有标红退 1（确定的问题优先报）；没标红但有回合放不进对账＝没查全，退 2，不拿 0 冒充没事。
+    if (redCount) process.exitCode = 1;
+    else if (report.untimedTurns) {
+      console.error(`对账没查成：另有 ${report.untimedTurns} 个回合没有开始时间，没放进对账`);
+      process.exitCode = 2;
+    } else process.exitCode = 0;
+    if (redCount && report.untimedTurns)
+      console.log(`另有 ${report.untimedTurns} 个回合没有开始时间，没放进对账（没查全）`);
   }
 } catch (error) {
   // 读不到、格式不认识、参数错都算没查成：不拿空结果当没事。

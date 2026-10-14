@@ -12,7 +12,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { startWsServer, tempDir } from '@fleet-dao/adapters/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { DRIFT_NOTICE, type MigrationOptions, migrate } from '../src/migrate.ts';
+import { DRIFT_NOTICE, type MigrationOptions, migrate, runningSessions } from '../src/migrate.ts';
 import { runChildOk } from './child.ts';
 
 const mini =
@@ -267,15 +267,31 @@ describe('旧接入迁移与回读', { timeout: 20_000 }, () => {
     }
   });
 
-  it('会话记录损坏，不能拿空列表冒充空闲', async () => {
+  it('会话记录损坏，不能拿空列表冒充空闲：记为没查成、按判不了空闲等着，不改命令', async () => {
     const m = await machine();
     try {
       writeFileSync(m.record, '{broken');
-      await expect(migrate(m.config)).rejects.toThrow(/会话|空闲/);
+      const result = await migrate(m.config);
+      expect(result.state).toBe('waiting');
+      expect(result.detail).toMatch(/没查成/);
       expect(m.frames.some((f) => f.type === 'setAgentLaunch')).toBe(false);
     } finally {
       await m.close();
     }
+  });
+
+  it('单个会话记录坏了不整个抛：数得清的照数，坏的记为没查成', () => {
+    const home = tempDir();
+    const dir = join(home, '.mirasim', 'sessions', 'claude');
+    const put = (sid: string, text: string) => {
+      mkdirSync(join(dir, sid), { recursive: true });
+      writeFileSync(join(dir, sid, 'record.json'), text);
+    };
+    put('a', JSON.stringify({ runState: 'running' }));
+    put('b', JSON.stringify({ runState: 'completed' }));
+    put('c', '{broken');
+    put('d', JSON.stringify({ runState: 'from-the-future' }));
+    expect(runningSessions(home)).toEqual({ running: 1, unknown: ['c', 'd'] });
   });
 
   it('新程序架构或源码版本不对：不替换旧命令', async () => {

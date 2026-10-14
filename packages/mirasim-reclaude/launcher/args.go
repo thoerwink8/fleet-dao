@@ -74,6 +74,8 @@ func verifyGatewaySettings(args []string, environ []string) error {
 // 启动器自己编不出来，所以「当场切平台」做不到。必须明说原因和办法，不能让会话悄悄死掉或悄悄仍走自有。
 const platformSwitchRefusal = "这个会话的进程是以自有额度启动的，启动参数里没有平台网关，当场切不到平台额度，这条消息没有发出，仍在用自有额度。办法：在 Mirasim 里确认该会话已选「平台」，然后重新发送这条消息；还不行就新开一个会话，或重启这个会话的进程。"
 
+// rewriteArgs 把各个 --settings 里的注入键剥掉（文件写进临时副本，不动 Mirasim 的原文件）。
+// 只在 gatewayFacts 判定合并后生效的是回环网关时调用。
 func rewriteArgs(in []string) (out []string, temps []string, changed bool, err error) {
 	out = append([]string(nil), in...)
 	defer func() {
@@ -107,7 +109,7 @@ func rewriteArgs(in []string) (out []string, temps []string, changed bool, err e
 				return nil, temps, false, fmt.Errorf("settings 文件读失败，未启动执行体")
 			}
 		}
-		data, did, e := stripSettings(raw)
+		data, did, e := stripSettingsKeys(raw)
 		if e != nil {
 			return nil, temps, false, fmt.Errorf("settings JSON 格式错误，未启动执行体")
 		}
