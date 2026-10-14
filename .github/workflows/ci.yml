@@ -2,7 +2,8 @@ name: ci
 # 按改动跑、并行跑（design 第五节「CI 按改动跑」）：changes 算出这次改了什么、哪几个 job 要跑（packages/conventions/src/ci-plan.ts），
 # 各 job 看它给的开关；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」。
 # 主线推送只跑「上一次主线真绿的头…这次的头」这段累计改动该跑的（基准查不到就全跑）。不做「取消前一轮」：发布闸认的是「这个提交自己那次绿」，取消了它就断。
-# 同树复用：这次提交的树和某次绿的 PR 检查测的是同一棵、基准树也一样，test、web、e2e、deploy 就不重测（同树同结果；对不上一律全跑并留 ::warning::）。
+# 同树复用：这次提交的树和某次绿的 PR 检查测的是同一棵、基准树也一样，test、web、deploy 就不重测（同树同结果；对不上一律全跑并留 ::warning::）。
+# e2e 不在 PR 闸（决定 0093）：PR 上不跑，主线推送这一轮照区间跑映射到的 spec，不复用；发版只认主线头 CI 全绿，所以 e2e 是发版闸。
 #
 # 改这里之前必须知道：
 # - 必过检查（规则集「主线保护」）只认 check 这一个 job 名，别改名；它 needs 全部 job、if: always()，少 needs 一个就等于不拦那个。
@@ -450,9 +451,9 @@ jobs:
       - run: pnpm --filter ./packages/web run build
 
   # 驾驶舱用户视角 e2e（#930）：真 Postgres 16 + 真后端（packages/api/src/main.ts，线上同一个入口）+ 真前端 + Chromium，站在创始人角度逐页走（packages/web/e2e）。
-  # 决定 0029（#1186）：PR 只点改动页。changes 的 e2e 输出是 spec 清单（ci-plan.ts 的 e2eSpecsFor）；`all`（每夜、主线推送，或改了夹具、本文件）才跑全套，空串这个 PR 不跑。
-  # 红了挡合并：check 的 needs 里有它，ciVerdict 核「本该跑 → success」。
-  # 它要几分钟、占一个并发槽，所以不让每个 PR 都多一个长 job。
+  # 决定 0093：不在 PR 闸、在发版闸。PR 上 changes 的 e2e 输出一律空串（ci-plan.ts 的 deferE2eToMain），这个 job 跳过；
+  # 主线推送那一轮按「上次真绿的头…这次」的累计改动算 spec 清单（e2eSpecsFor，决定 0029），`all`（每夜、查不到基准，或改了夹具、本文件）跑全套。
+  # 红了这一轮 check 红：主线头 CI 不绿就不发版（法国的自动发版只认主线头 ci.yml 这一轮 conclusion=success）。
   # 本机（Windows + 本机 Chrome + Windows 版 PG）和这里（Linux + Chromium + 容器 PG）的差别：浏览器走 E2E_BROWSER_CHANNEL=chromium，管理连接串指向容器；库名、端口、顺序和本机一样。
   e2e:
     needs: changes

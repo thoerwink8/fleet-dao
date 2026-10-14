@@ -22,6 +22,7 @@ import {
   assignTests,
   type CiPlan,
   ciVerdict,
+  deferE2eToMain,
   dependentsClosure,
   E2E_PAGE_MAP,
   E2E_SPEC_DIR,
@@ -1327,7 +1328,7 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
   });
 });
 
-describe('驾驶舱 e2e（#930；决定 0029、#1186：PR 只点改动页，全量留给每夜）：输出是 spec 清单，红了汇总就红', () => {
+describe('驾驶舱 e2e（#930；决定 0029：只点改动页；决定 0093：不在 PR 闸、主线推送那一轮跑）：输出是 spec 清单，红了汇总就红', () => {
   const needs = (p: CiPlan, over: Record<string, unknown> = {}) => ({
     changes: { result: 'success', outputs: planOutputs(p) },
     lint: { result: 'success', outputs: {} },
@@ -1499,20 +1500,57 @@ describe('驾驶舱 e2e（#930；决定 0029、#1186：PR 只点改动页，全�
     ]);
   });
 
-  it('同树复用（主线推送）：e2e 跟 test、web、deploy 一起不再重测；复用了却还开着 e2e 的 plan 认不出', () => {
+  it('同树复用（主线推送）：test、web、deploy 不再重测，e2e 照区间跑（PR 上没跑过 e2e，没有可复用的）', () => {
     const full = assigned(planCi({ event: 'push', changed: [], graph: graph() }));
     expect(full.e2e).toBe('all');
     const reuse = { run: 11, pr: 7, tree: 'a'.repeat(40), baseTree: 'b'.repeat(40) };
     const reused = applyReuse(full, reuse);
-    expect(reused.e2e).toEqual([]);
-    expect(ciVerdict(needs(reused), 'push').ok).toBe(true);
-    // 复用的 plan 里 e2e 还有清单：汇总不信
-    const lying = { ...reused, e2e: 'all' as const };
-    const v = ciVerdict(needs(lying, { e2e: { result: 'success' } }), 'push');
+    expect(reused.e2e).toBe('all');
+    const ok = ciVerdict(needs(reused), 'push');
+    expect(ok.ok, ok.lines.join('\n')).toBe(true);
+    expect(ok.lines.join('\n')).toContain('✓ e2e：success');
+    // 【故意造出的失败】复用了，e2e 却没跑（被跳过、红了）：汇总红
+    for (const result of ['skipped', 'failure']) {
+      const v = ciVerdict(needs(reused, { e2e: { result } }), 'push');
+      expect(v.ok, result).toBe(false);
+      expect(v.lines.join('\n')).toContain(`✗ e2e：${result}，本该 success`);
+    }
+    // 区间里只有页面改动：复用之后照样点那一页
+    const page = assigned(pr('packages/web/src/routes/login.tsx'));
+    expect(applyReuse(page, reuse).e2e).toEqual([`${SPECS}01-login.e2e.ts`]);
+    // 复用的 plan 里还有 test、web、deploy 要测：汇总不信
+    const lying = { ...reused, web: true };
+    const v = ciVerdict(needs(lying, { web: { result: 'success' } }), 'push');
     expect(v.ok).toBe(false);
     expect(v.lines.join('\n')).toContain('还有要测的');
-    const lying2 = { ...reused, e2e: [`${SPECS}01-login.e2e.ts`] };
-    expect(ciVerdict(needs(lying2, { e2e: { result: 'success' } }), 'push').ok).toBe(false);
+  });
+
+  it('e2e 不在 PR 闸（决定 0093）：PR 上 deferE2eToMain 把清单清空、写进理由；PR 的 plan 里还有清单汇总就红', () => {
+    for (const changed of [['packages/web/src/routes/login.tsx'], ['packages/web/e2e/support/stack.ts']]) {
+      const p = assigned(pr(...changed));
+      expect(e2eRuns(p.e2e), '这条查的场景不成立了').toBe(true);
+      const d = deferE2eToMain(p);
+      expect(d.e2e).toEqual([]);
+      expect(planOutputs(d).e2e).toBe('');
+      expect(d.reasons.join('\n')).toContain('e2e 不在 PR 闸');
+      const ok = ciVerdict(needs(d), 'pull_request');
+      expect(ok.ok, ok.lines.join('\n')).toBe(true);
+      expect(ok.lines.join('\n')).toContain('✓ e2e：skipped');
+      // 【故意造出的失败】PR 这一轮的 plan 里 e2e 还有清单（算计划那步漏了挪）：汇总红，即使 e2e 跑绿了
+      const leaked = ciVerdict(needs(p), 'pull_request');
+      expect(leaked.ok).toBe(false);
+      expect(leaked.lines.join('\n')).toContain('e2e 不在 PR 闸');
+      // 同一份清单在主线推送上照常要跑
+      expect(ciVerdict(needs(p), 'push').ok).toBe(true);
+    }
+    // 本来就不跑的：原样返回，不多写理由
+    const none = assigned(pr('packages/api/src/cockpit.ts'));
+    expect(deferE2eToMain(none)).toBe(none);
+  });
+
+  it('changes 的入口在 PR 事件上调 deferE2eToMain（清单只在主线推送那一轮用）', () => {
+    const bin = readFileSync(join(ROOT, 'packages/conventions/src/bin/ci-plan.ts'), 'utf8');
+    expect(bin).toMatch(/if \(event === 'pull_request'\) plan = deferE2eToMain\(plan\);/);
   });
 
   /**

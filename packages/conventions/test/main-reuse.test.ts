@@ -262,7 +262,7 @@ describe('applyReuse + 汇总（check）：复用后 test、web、deploy 本该�
     ...over,
   });
 
-  it('applyReuse：test、web、deploy 清空、写明复用了谁；biome、tsc 的开关不动；不复用时一个字没变', () => {
+  it('applyReuse：test、web、deploy 清空、写明复用了谁；e2e 照区间跑（PR 上不跑 e2e，决定 0093）；biome、tsc 的开关不动；不复用时一个字没变', () => {
     const full = planFor('.github/workflows/ci.yml');
     expect(full.full).toBe(true);
     const r = applyReuse(full, reuse);
@@ -271,7 +271,7 @@ describe('applyReuse + 汇总（check）：复用后 test、web、deploy 本该�
       tests: [],
       testUnits: [],
       web: false,
-      e2e: [],
+      e2e: 'all',
       deploy: 'none',
       biome: true,
       reused: reuse,
@@ -280,7 +280,7 @@ describe('applyReuse + 汇总（check）：复用后 test、web、deploy 本该�
     expect(planOutputs(r)).toMatchObject({
       tests: '[]',
       web: 'false',
-      e2e: '',
+      e2e: 'all',
       deploy: 'none',
       deploy_matrix: '[]',
       reused: '11',
