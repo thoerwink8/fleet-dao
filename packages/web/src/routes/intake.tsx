@@ -6,7 +6,7 @@
 // C 片（#2061）的指挥官流式回话、选项、建议改、模型芯片、「让指挥官接着问」、让别家挑错。
 // dev:mock 下 ?demo=discuss|pending|closed 打开版面草图（假数据，对照用）；真后端不认这个参数。
 import { MessageSquarePlus } from 'lucide-react';
-import { lazy, Suspense, useCallback } from 'react';
+import { lazy, Suspense, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { useMe, useRequestDetail } from '../api/client';
@@ -67,11 +67,14 @@ function IntakePage() {
   const fromRaw = seqOf(params.get('from'));
   const from = typeof fromRaw === 'number' && !phone ? fromRaw : null;
 
+  // 按当前网址合并：react-router 交给 setParams 回调的是建回调那次渲染的参数，防抖、异步回来的晚一步调用会拿旧网址把别的改动盖掉
+  const latest = useRef(params);
+  latest.current = params;
   const patch = useCallback(
     (next: Record<string, string | null>) => {
       setParams(
-        (prev) => {
-          const p = new URLSearchParams(prev);
+        () => {
+          const p = new URLSearchParams(latest.current);
           for (const [k, v] of Object.entries(next)) {
             if (v === null || v === '') p.delete(k);
             else p.set(k, v);

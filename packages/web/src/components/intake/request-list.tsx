@@ -81,7 +81,10 @@ function useDebounced(value: string, onCommit: (v: string) => void, ms = 300) {
 export function RequestList(p: ListProps) {
   const list = useRequestList({ view: p.view, filter: p.view === 'active' ? p.filter : 'all', q: p.q });
   const [text, setText] = useState(p.q);
-  useDebounced(text, (v) => p.onQ(v.trim()));
+  // 搜索词没变不提交：开发模式下 effect 跑两遍，空提交一次会把刚点开的那条（网址里的 r）冲掉
+  useDebounced(text, (v) => {
+    if (v.trim() !== p.q) p.onQ(v.trim());
+  });
   const [picking, setPicking] = useState(false);
   const [picked, setPicked] = useState<number[]>([]);
   const [blocked, setBlocked] = useState<Map<number, string>>(new Map());
