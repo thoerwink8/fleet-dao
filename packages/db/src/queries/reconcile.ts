@@ -131,6 +131,14 @@ export async function pendingClosedIssueDeliveries(
   since: Date,
   limit = 50,
 ): Promise<ClosedIssueDelivery[]> {
+  return pendingClosedIssueQuery(db, since, limit);
+}
+
+/**
+ * pendingClosedIssueDeliveries 那条查询本身（测试拿它 EXPLAIN）。where 和部分索引 github_events_closed_issue_pending_idx
+ * 的条件一一对上，改一边要改另一边，不然每几秒一次的捞会退回整表顺序扫。
+ */
+export function pendingClosedIssueQuery(db: Db, since: Date, limit: number) {
   return db
     .select({
       deliveryId: githubEvents.deliveryId,

@@ -477,6 +477,13 @@
       "when": 1791925765061,
       "tag": "0067_intake_chat",
       "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1791959812173,
+      "tag": "0068_github_events_closed_issue_pending",
+      "breakpoints": true
     }
   ]
 }

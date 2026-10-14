@@ -1,7 +1,11 @@
 // 引擎捞「单关了」的投递、处理完记上（queries/reconcile.ts 的 pendingClosedIssueDeliveries / noteClosedIssueDelivery，#2103）。
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { noteClosedIssueDelivery, pendingClosedIssueDeliveries } from '../src/queries/reconcile.ts';
+import {
+  noteClosedIssueDelivery,
+  pendingClosedIssueDeliveries,
+  pendingClosedIssueQuery,
+} from '../src/queries/reconcile.ts';
 import { githubEvents } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 
@@ -59,5 +63,26 @@ describe('单关了的投递', () => {
     expect((await pendingClosedIssueDeliveries(t.db, minutesAgo(60))).map((r) => r.deliveryId)).toEqual([
       'late',
     ]);
+  });
+
+  it('引擎那条捞的查询用得上部分索引 github_events_closed_issue_pending_idx（条件对不上规划器就只能整表扫）', async () => {
+    await delivery('a');
+    const q = pendingClosedIssueQuery(t.db, minutesAgo(60), 50).toSQL();
+    // 参数原样代进去再 EXPLAIN：关掉顺序扫，规划器只要认得这个部分索引就会用它
+    const literal = (v: unknown) =>
+      typeof v === 'number'
+        ? String(v)
+        : `'${(v instanceof Date ? v.toISOString() : String(v)).replace(/'/g, "''")}'`;
+    const text = q.sql.replace(/\$(\d+)/g, (_m, i: string) => literal(q.params[Number(i) - 1]));
+    const plan = await t.db.transaction(async (tx) => {
+      await tx.execute(sql`set local enable_seqscan = off`);
+      return tx.execute(sql.raw(`explain ${text}`));
+    });
+    const rows = (Array.isArray(plan) ? plan : (plan as { rows: unknown[] }).rows) as Record<
+      string,
+      string
+    >[];
+    const planText = rows.map((r) => Object.values(r).join(' ')).join('\n');
+    expect(planText).toContain('github_events_closed_issue_pending_idx');
   });
 });
