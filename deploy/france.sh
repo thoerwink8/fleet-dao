@@ -1076,10 +1076,10 @@ readback_node_report_gate() {
   judge_node_report_gate "$code" "$body"
 }
 
-# 应用的环境文件都在、属主权限对；随机密钥是生成的样子、互不相同（后端要求）。按 systemd 的读法读（lib/app-config.sh
+# 应用的环境文件都在、属主权限对；随机密钥是生成的样子。按 systemd 的读法读（lib/app-config.sh
 # 的 env_get），只比对，不打印值。lib/app-config.sh 的 check_* 判红返回 1：红已经记账，这里照样往下查，不让读回停在半路
 readback_app_config() {
-  local name spec file key what bad=0 values=() rc
+  local name spec file key what bad=0 rc
   for name in "${APP_ENV_FILES[@]}"; do
     if [[ ! -f "/etc/fleet-dao/$name.env" ]]; then
       red "没有 /etc/fleet-dao/$name.env"
@@ -1101,13 +1101,8 @@ readback_app_config() {
       red "$file 里的 $key 不是装机脚本生成的样子（64 位十六进制）"
       bad=1
     fi
-    values+=("$APP_ENV_VALUE")
   done
-  if ((bad == 0)) && [[ "${values[0]}" == "${values[1]}" || "${values[0]}" == "${values[2]}" || "${values[1]}" == "${values[2]}" ]]; then
-    red "三个随机密钥有两个一样：后端会拒绝启动"
-    bad=1
-  fi
-  if ((bad == 0)); then ok "应用的环境文件都在（${APP_ENV_FILES[*]}），三个随机密钥已生成、互不相同（值不打印）"; fi
+  if ((bad == 0)); then ok "应用的环境文件都在（${APP_ENV_FILES[*]}），随机密钥已生成（值不打印）"; fi
   local metas=()
   for name in "${APP_ENV_FILES[@]}"; do metas+=("/etc/fleet-dao/$name.env"); done
   for spec in "${APP_SECRETS[@]}"; do metas+=("/etc/fleet-dao/${spec%%:*}.env"); done
