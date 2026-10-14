@@ -338,7 +338,7 @@ describe('巡查脚本：发版事故和健康页（2026-10-14 法国发版失�
     expect(judge({ train: 'failed' }).verdict).toBe('BROKEN');
     expect(judge({ train: 'deploying' }).verdict).toBe('BROKEN');
     for (const t of ['done', 'aborted', '-'])
-      expect(judge({ train: t === '-' ? undefined : t }).verdict, t).toBe('OK');
+      expect(judge(t === '-' ? {} : { train: t }).verdict, t).toBe('OK');
   });
 
   it('自动发布处于「要人看」（只有它这一条，别的都正常）：BROKEN', () => {
