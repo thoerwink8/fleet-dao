@@ -54,7 +54,7 @@ echo "== 发布脚本、装机脚本：提到 demo 的行都带 #1223"
 for f in release.sh france.sh lib/common.sh lib/snapshot.sh hk.sh; do
   check "deploy/$f：没有没带 #1223 的 demo" "$(untagged_demo_lines "$DEPLOY/$f")" ""
 done
-check "release.sh 在读到的行里确实还有老名字（清香港老目录用），没读空" "$(grep -c -i demo "$DEPLOY/release.sh" | awk '{ print ($1 > 0) ? "有" : "没有" }')" 有
+check "release.sh 在读到的行里确实还有老名字（认老配置键用），没读空" "$(grep -c -i demo "$DEPLOY/release.sh" | awk '{ print ($1 > 0) ? "有" : "没有" }')" 有
 check "france.sh 在读到的行里确实还有老单元名（清老机器用），没读空" "$(grep -c -i demo "$DEPLOY/france.sh" | awk '{ print ($1 > 0) ? "有" : "没有" }')" 有
 
 echo "== 仓里不再有推可见范围的单元、脚本和它的测试"
