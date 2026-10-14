@@ -174,10 +174,9 @@ PG_UNIT=postgresql@$PG_MAJOR-main.service
 # 发布时照期望写（只写期望变了的键，人手改的不改回），本脚本只管属主权限
 RELEASES_DIR=/srv/fleet-dao-releases
 APP_ENV_FILES=(engine api release) # /etc/fleet-dao/<名>.env ← 期望（deploy/france/desired-config.json）
-# 随机密钥（文件:键:用途），首次生成后不再动。gateway-token.env：后端的飞书网关通行证，网关已删，后端还认着它（待清）
-APP_SECRETS=("agent-token:FLEET_AGENT_TOKEN_SECRET:签 fleet 通行证（引擎签、后端验）"
-  "session-secret:FLEET_SESSION_SECRET:驾驶舱登录的 Cookie"
-  "gateway-token:FLEET_FEISHU_GATEWAY_TOKEN:飞书网关的通行证（香港放同一份）")
+# 随机密钥（文件:键:用途），首次生成后不再动。以前装过的 agent-token.env（fleet 命令的令牌密钥）、gateway-token.env（飞书网关通行证）
+# 随两个接口一起撤了：服务单元不再读它们，机器上已有的文件不删（要不要清由人定）
+APP_SECRETS=("session-secret:FLEET_SESSION_SECRET:驾驶舱登录的 Cookie")
 # 「引擎」GitHub App 的凭据（手放）：api.env 的 FLEET_GITHUB_WEBHOOK_SECRET 照它的 webhook_secret 填（lib/app-config.sh）
 ENGINE_APP_JSON=/etc/fleet-dao/github/gh-app-fleet-dao-engine.json
 # 卫生检查已知敏感值名单机制整个删掉了（创始人 2026-09-28 傍晚拍，specs/169-Fusion形态/需求.md）：早先版本放过的

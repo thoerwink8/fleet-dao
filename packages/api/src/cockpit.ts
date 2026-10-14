@@ -92,7 +92,7 @@ import { ROUTING_EFFORTS_NOT_HERE, type RoutingEffortsPort, routingEffortsView }
 import { ROUTING_LAYERS_NOT_HERE, type RoutingLayersPort, routingLayersView } from './routing-layers.ts';
 import { registerRoutingOrderRoutes } from './routing-order.ts';
 import { registerRunTranscriptRoutes } from './run-transcript.ts';
-import { type CockpitEnv, checkGatewayTaskAction, requireSession } from './session.ts';
+import { type CockpitEnv, requireSession } from './session.ts';
 import { readEnvSnapshot, readHomeSnapshot, type SnapshotDeps } from './snapshots.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
 import { taskListView } from './task-list.ts';
@@ -522,7 +522,6 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   app.post(WebRoutes.taskAction.path, async (c) => {
     const taskId = c.req.param('taskId');
     const body = await readJson(c, TaskActionRequest);
-    checkGatewayTaskAction(c, body.action);
     const task = await store.getTask(taskId);
     if (!task) throw new ApiError(404, 'task_not_found', '没有这个任务');
     if (body.action === 'redo') {

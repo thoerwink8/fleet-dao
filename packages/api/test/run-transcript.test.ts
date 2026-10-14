@@ -6,7 +6,7 @@ import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/tes
 import { RunTranscriptResponse } from '@fleet-dao/shared';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { pgRunTranscript, RUN_TRANSCRIPT_NOT_HERE, type RunTranscriptPort } from '../src/run-transcript.ts';
-import { errorCode, harness, IDS, pgHarness, T0, viaGateway } from './harness.ts';
+import { errorCode, harness, IDS, pgHarness, T0, viaBearer } from './harness.ts';
 
 const RUN = 'e1000000-0000-4000-8000-000000000001';
 const RUNNING = 'e1000000-0000-4000-8000-000000000002';
@@ -44,13 +44,13 @@ function withRuns(h: ReturnType<typeof harness>) {
 const body = async (res: Response) => RunTranscriptResponse.parse(await res.json());
 
 describe('会话内容接口：权限', () => {
-  it('没登录 401；飞书网关通行证 403（它只管查任务和叫停）；创始人登录 200', async () => {
+  it('没登录 401；带 Authorization 令牌也 401；创始人登录 200', async () => {
     const h = harness({ runTranscript: fakePort({ [RUN]: [{ seq: 0, kind: 'prompt', text: 'p' }] }) });
     withRuns(h);
     expect((await h.cockpit.request(url(IDS.task12, RUN))).status).toBe(401);
-    const gw = await h.cockpit.request(url(IDS.task12, RUN), viaGateway('GET', 'ou_dev_founder_a'));
-    expect(gw.status).toBe(403);
-    expect(await errorCode(gw)).toBe('gateway_route_not_allowed');
+    const gw = await h.cockpit.request(url(IDS.task12, RUN), viaBearer('GET'));
+    expect(gw.status).toBe(401);
+    expect(await errorCode(gw)).toBe('bearer_not_allowed');
     const s = await h.login();
     expect((await h.cockpit.request(url(IDS.task12, RUN), { headers: { cookie: s.cookie } })).status).toBe(
       200,

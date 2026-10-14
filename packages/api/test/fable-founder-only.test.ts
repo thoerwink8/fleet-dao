@@ -11,7 +11,7 @@ import { guardFounderOnly, operatorOf } from '../src/founder-only.ts';
 import { ApiError, errorHandler } from '../src/http.ts';
 import { pgRoutingOrder, registerRoutingOrderRoutes } from '../src/routing-order.ts';
 import type { CockpitEnv } from '../src/session.ts';
-import { errorCode, pgHarness, T0, viaGateway, write } from './harness.ts';
+import { errorCode, pgHarness, T0, viaBearer, write } from './harness.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -98,20 +98,20 @@ describe('创始人本人在驾驶舱：能打开 Fable，进操作记录', () =
 });
 
 describe('第一道门：真应用里，机器通行证和令牌碰不到开关', () => {
-  it('【故意造出的失败】机器通行证（飞书网关）调开关接口打开 Fable：必须被拒，库里还是关着，不记操作记录', async () => {
+  it('【故意造出的失败】带 Authorization 令牌调开关接口打开 Fable：必须被拒，库里还是关着，不记操作记录', async () => {
     current = await pgHarness(t, ports());
     await fableCatalogClosed();
     const route = await current.cockpit.request(
       '/api/routing/models/fable-5.1/routes/rt-mirasim-fable',
-      viaGateway('PUT', 'ou_dev_founder_a', OPEN_ROUTE),
+      viaBearer('PUT', OPEN_ROUTE),
     );
-    expect(route.status).toBe(403);
-    expect(await errorCode(route)).toBe('gateway_route_not_allowed');
+    expect(route.status).toBe(401);
+    expect(await errorCode(route)).toBe('bearer_not_allowed');
     const model = await current.cockpit.request(
       '/api/routing/models/fable-5.1',
-      viaGateway('PUT', 'ou_dev_founder_a', OPEN_MODEL),
+      viaBearer('PUT', OPEN_MODEL),
     );
-    expect(model.status).toBe(403);
+    expect(model.status).toBe(401);
     expect(await fableEnabled()).toBe(false);
     expect(await enableAudits()).toEqual([]);
   });
@@ -119,7 +119,7 @@ describe('第一道门：真应用里，机器通行证和令牌碰不到开关'
   it('【故意造出的失败】fleet 令牌（fleet-api / 引擎用的）、没登录：拒，库里不动', async () => {
     current = await pgHarness(t, ports());
     await fableCatalogClosed();
-    const token = current.agentToken();
+    const token = 'fat1.retired-token';
     const viaToken = await current.cockpit.request('/api/routing/models/fable-5.1', {
       method: 'PUT',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },

@@ -21,17 +21,17 @@
 # 发版把会话口子里已有的公钥补进 root 的 authorized_keys，并让 sshd 的 Match User root 直接认同一份（root-ssh-login，#2138：没有才补、原行不删、不碰 authorized_keys2、sshd -t 不过就撤、口子没有不挡发版）、
 # 香港防火墙基线（hk-firewall：ufw 没开、命令失败或认不出、默认不是拒绝、多开的对公网端口都判红；只有出站 ALLOW OUT 不算已放行；第二遍不改 ufw；别家 8443 不动）、
 # france.sh 读回看板收件口挡不挡得住假通行证（node-report-gate：401 才算通过，503 没配钥匙记待配，200/400 判红）、
-# docs/ops.md 端口表和脚本对得上、docs/ops.md 里放文件的命令收到空的或半截的不换（place-file）、--ops 真跑了这两块（ops-only）、
+# docs/ops.md 端口表和脚本对得上、--ops 真跑了端口表那块（ops-only）、
 # france.sh 读不到 Temporal 表结构的版本号（连不上库）判红、不建不升（temporal-schema），
 # 分台名单没漏没重（shards）。
 # 用法：sudo bash deploy/test/run.sh（违规样本那项要 root）。退出码：0 通过，1 有不通过，2 有没跑成的。
 #   bash deploy/test/run.sh --shard 2/3：只跑第 2 台那几项。CI 把全套切成 3 台并行跑（ci-plan.ts 的 DEPLOY_SHARDS），不带 --shard
 #     就是三台依次全跑（本机、装机时用）。每一项跑完打一行「⏱ 名字 N 秒」，重新分台就照这个数。
-#   bash deploy/test/run.sh --ops：只跑读 docs/ops.md 的两块（端口表、place-file），CI 只改了 ops.md 时用（ci-plan.ts 的 deploy=ops）。
+#   bash deploy/test/run.sh --ops：只跑读 docs/ops.md 的那块（端口表），CI 只改了 ops.md 时用（ci-plan.ts 的 deploy=ops）。
 #   bash deploy/test/run.sh --check-shards：只核分台名单（每个测试文件恰好排进一台），不跑测试。
 # 改这里之前必须知道：
-# - deploy/test 里新加读 docs/ops.md 的检查，要同时进 --ops 那条路（ops_checks），否则只改 ops.md 的 PR 测不到它；
-#   ops-only.test.sh 核对 --ops 真跑了这两块、改坏 ops.md 会红。
+# - deploy/test 里新加读 docs/ops.md 的检查，要同时进 --ops 那条路（下面 only_ops 那段），否则只改 ops.md 的 PR 测不到它；
+#   ops-only.test.sh 核对 --ops 真跑了端口表、改坏 ops.md 会红。
 # - deploy/test 里新加一个 *.test.sh（或 *.test.mjs），要写进下面 SHARDS 的某一台（node 的写进 NODE_TESTS）：每次跑（每一台）都先核
 #   「每个测试文件恰好排进一台」，漏了、排了两台、排了不存在的都红，不会悄悄不跑（shards.test.sh 故意造这几种错核对）。
 #   台数改了，ci-plan.ts 的 DEPLOY_SHARDS 跟着改（packages/conventions/test/ci-plan.test.ts 核对两边一样）。
@@ -57,7 +57,7 @@ SKIP_WHY=""
 SHARDS=(
   'login-user session-user listen root-exec-check ops-only ports shards session-proxy session-ports release-proxy node-report-gate service-home release-boot sshd-hardening hk-firewall'
   'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use agent-scope-probe temporal-schema root-ssh-login'
-  'lint session-pnpm no-demo backup place-file auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish build-isolation'
+  'lint session-pnpm no-demo backup auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish build-isolation'
 )
 NODE_TESTS=(health-page reclaude-old-account-clean auto-release config release-request static-child)
 SPECIAL_UNITS=(lint backup node-tests ports)
@@ -280,11 +280,10 @@ if ((check_shards_only)); then
   finish "分台名单核对通过"
 fi
 
-# --ops 只跑读 ops.md 的两块：也走 run_unit，和全套一样打耗时行（口径一致，重新分台时看得出每项多少钱）。
+# --ops 只跑读 ops.md 的那块（端口表）：也走 run_unit，和全套一样打耗时行（口径一致，重新分台时看得出每项多少钱）。
 if ((only_ops)); then
   run_unit ports
-  run_unit place-file
-  finish "deploy/ 里读 docs/ops.md 的两块（端口表、place-file）通过"
+  finish "deploy/ 里读 docs/ops.md 的那块（端口表）通过"
 fi
 
 units=()

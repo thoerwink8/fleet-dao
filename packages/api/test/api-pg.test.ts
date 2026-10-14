@@ -18,15 +18,7 @@ import { NODE_REPORT_NOT_WIRED, nodeReportPart } from '../src/node-reporter.ts';
 import { sessionOrgHealthCheck } from '../src/session-org-health.ts';
 import { notConnectedTemporal } from '../src/temporal.ts';
 import { WATCHDOG_NOT_HERE } from '../src/watchdog-health.ts';
-import {
-  agentRequest,
-  DEV_RUN_ID,
-  deliverGithub,
-  type HarnessOptions,
-  IDS,
-  pgHarness,
-  T0,
-} from './harness.ts';
+import { DEV_RUN_ID, deliverGithub, type HarnessOptions, IDS, pgHarness, T0 } from './harness.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -69,29 +61,6 @@ describe('接口跑在真库上', () => {
     expect(detail.usage.total.cost.subscription).toEqual({ runs: 1, usd: 0, missing: 1 });
     // 登录本身也落了库里的操作记录。
     expect(await t.db.select().from(auditLog).where(eq(auditLog.action, 'login'))).toHaveLength(1);
-  });
-
-  it('fleet 命令带同一个幂等键重试：库里只有一条进度，不发信号', async () => {
-    const h = await start();
-    // 幂等键去重在真库（不只是内存版）上也成立；fleet 命令只写库、不发信号（#901）。
-    const blocked = () =>
-      h.agent.request(
-        '/agent/v1/blocked',
-        agentRequest(
-          h.agentToken(),
-          'POST',
-          { reason: '真库上的一句', needs: 'access' },
-          { 'idempotency-key': 'pg-key-1' },
-        ),
-      );
-    expect((await blocked()).status).toBe(200);
-    expect((await blocked()).status).toBe(200);
-    const rows = await t.db
-      .select()
-      .from(progressEvents)
-      .where(and(eq(progressEvents.runId, DEV_RUN_ID), eq(progressEvents.kind, 'blocked')));
-    expect(rows.filter((r) => (r.payload as { reason?: string }).reason === '真库上的一句')).toHaveLength(1);
-    expect(h.signals).toHaveLength(0);
   });
 
   it('GitHub 事件进来（真库）：PR 事件原文落库、写镜像；同一投递再来不重复；issue 的事件记成不处理、不建任务', async () => {

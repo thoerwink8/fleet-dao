@@ -17,10 +17,7 @@ export interface Config {
   publicUrl: URL;
   /** 驾驶舱接口监听：生产上是法国机器的 WireGuard 地址，只有香港经加密通道访问。 */
   cockpitListen: Listen;
-  /** fleet 命令接口监听：只许本机回环地址，外面够不着。 */
-  agentListen: Listen;
   sessionSecret: string;
-  agentTokenSecret: string;
   /** 没配时 GitHub 事件入口返回 503（只允许在开发环境缺）。 */
   githubWebhookSecret: string | null;
   /**
@@ -30,11 +27,6 @@ export interface Config {
   feishu: { appId: string; appSecret: string } | null;
   /** Postgres 连接串（DATABASE_URL）。生产必须有；开发环境没有就用内存里的样例数据。 */
   databaseUrl: string | null;
-  /**
-   * 飞书网关的通行证：香港的飞书网关经隧道调驾驶舱接口时带 `Authorization: Bearer <它>`，
-   * 并用 X-Fleet-Acting-Feishu 说明代表哪位创始人。没配就不认网关请求。
-   */
-  feishuGatewayToken: string | null;
   /** 开发环境免登开关：必须 FLEET_ENV=development、FLEET_DEV_LOGIN=1，而且驾驶舱接口只听本机回环地址。 */
   devLogin: boolean;
   /** https 才给 Cookie 加 Secure 和 __Host- 前缀。 */
@@ -61,8 +53,7 @@ export interface Config {
    */
   machineName: string | null;
   /**
-   * FLEET_FEISHU_LOGIN=off：这台不接飞书（没有飞书网关）。这时飞书网关的通行证即使在环境文件里也不认
-   * （feishuGatewayToken 记成 null）。
+   * FLEET_FEISHU_LOGIN=off：这台不接飞书登录，登录只剩账密。
    */
   feishuOff: boolean;
   /**
@@ -164,16 +155,8 @@ export function loadConfig(env: Env): Config {
     env.FLEET_COCKPIT_LISTEN ?? (dev ? '127.0.0.1:8787' : undefined),
     problems,
   );
-  const agentListen = parseListen('FLEET_AGENT_LISTEN', env.FLEET_AGENT_LISTEN ?? '127.0.0.1:8788', problems);
-  if (agentListen && !LOOPBACK.has(agentListen.host)) {
-    problems.push('FLEET_AGENT_LISTEN 只许监听本机回环地址（127.0.0.1 / ::1）：fleet 命令接口不对外');
-  }
 
   const sessionSecret = secret('FLEET_SESSION_SECRET', env, dev, problems);
-  const agentTokenSecret = secret('FLEET_AGENT_TOKEN_SECRET', env, dev, problems);
-  if (sessionSecret && sessionSecret === agentTokenSecret) {
-    problems.push('FLEET_SESSION_SECRET 和 FLEET_AGENT_TOKEN_SECRET 不能相同');
-  }
 
   const githubWebhookSecret = env.FLEET_GITHUB_WEBHOOK_SECRET || null;
   if (!githubWebhookSecret && !dev) problems.push('缺 FLEET_GITHUB_WEBHOOK_SECRET');
@@ -199,18 +182,6 @@ export function loadConfig(env: Env): Config {
   const databaseUrl = env.DATABASE_URL || null;
   if (!databaseUrl && !dev) problems.push('缺 DATABASE_URL（Postgres 连接串）');
 
-  // 通行证照旧核（写坏了照样拒启动）；只是这台明说不接飞书（off）时不认它：装机照样会生成一份，但没有网关来用
-  const gatewayTokenEnv = env.FLEET_FEISHU_GATEWAY_TOKEN || null;
-  if (gatewayTokenEnv !== null) {
-    if (gatewayTokenEnv.length < MIN_SECRET_LENGTH) {
-      problems.push(`FLEET_FEISHU_GATEWAY_TOKEN 太短：至少 ${MIN_SECRET_LENGTH} 个字符`);
-    }
-    if (gatewayTokenEnv === sessionSecret || gatewayTokenEnv === agentTokenSecret) {
-      problems.push('FLEET_FEISHU_GATEWAY_TOKEN 不能和别的密钥相同');
-    }
-  }
-  const feishuGatewayToken = feishuOff ? null : gatewayTokenEnv;
-
   const devLoginRequested = env.FLEET_DEV_LOGIN === '1';
   if (devLoginRequested && !dev) problems.push('FLEET_DEV_LOGIN=1 只允许和 FLEET_ENV=development 一起用');
   // 香港把 /auth 转发到公网：驾驶舱接口一旦监听在非回环地址上，免登就等于对公网开门。
@@ -222,39 +193,20 @@ export function loadConfig(env: Env): Config {
 
   const { temporalAddress, temporalNamespace, fleetTaskQueue } = temporalSettings(env);
 
-  const nodeReport = nodeReportTarget(
-    env,
-    fleetEnv,
-    [sessionSecret, agentTokenSecret, gatewayTokenEnv],
-    problems,
-  );
-  const nodeKeys = nodeKeysFrom(
-    env,
-    [sessionSecret, agentTokenSecret, gatewayTokenEnv, nodeReport?.token ?? null],
-    problems,
-  );
+  const nodeReport = nodeReportTarget(env, fleetEnv, [sessionSecret], problems);
+  const nodeKeys = nodeKeysFrom(env, [sessionSecret, nodeReport?.token ?? null], problems);
 
-  if (
-    problems.length > 0 ||
-    !publicUrl ||
-    !cockpitListen ||
-    !agentListen ||
-    !sessionSecret ||
-    !agentTokenSecret
-  ) {
+  if (problems.length > 0 || !publicUrl || !cockpitListen || !sessionSecret) {
     throw new ConfigError(problems);
   }
   return {
     env: fleetEnv,
     publicUrl,
     cockpitListen,
-    agentListen,
     sessionSecret,
-    agentTokenSecret,
     githubWebhookSecret,
     feishu,
     databaseUrl,
-    feishuGatewayToken,
     devLogin: devLoginRequested && dev,
     cookieSecure: publicUrl.protocol === 'https:',
     quotaStaleAfterMs: QUOTA_STALE_AFTER_MS,

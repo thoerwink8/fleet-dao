@@ -21,7 +21,7 @@ import {
   PUBLIC_ORIGIN,
   setCookies,
   TEST_SCRYPT_PARAMS,
-  viaGateway,
+  viaBearer,
   write,
 } from './harness.ts';
 
@@ -456,9 +456,9 @@ describe('设置页：看、设、改账密', () => {
     for (const method of ['GET', 'PUT'] as const) {
       const res = await h.cockpit.request(
         '/api/me/credentials',
-        viaGateway(method, 'ou_dev_founder_a', method === 'PUT' ? { newPassword: PASSWORD } : undefined),
+        viaBearer(method, method === 'PUT' ? { newPassword: PASSWORD } : undefined),
       );
-      expect(res.status, method).toBe(403);
+      expect(res.status, method).toBe(401);
     }
     expect(h.store.data.credentials.get(DEV_USER_ID)).toBeUndefined();
   });

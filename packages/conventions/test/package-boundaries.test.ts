@@ -346,7 +346,6 @@ describe('包边界：零安装区不引包名，跨包相对路径有名有姓'
     );
     expect(() => parseAllowed('{"bare": 3, "cross": []}', 'x.json')).toThrow('bare 不是数组');
     expect(() => parseAllowed('不是 json', 'x.json')).toThrow();
-    expect(ALLOWED_BARE.length).toBeGreaterThan(0);
     expect(ALLOWED_CROSS.length).toBeGreaterThan(0);
   });
 

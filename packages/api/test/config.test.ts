@@ -8,7 +8,6 @@ const PROD = {
   FLEET_PUBLIC_URL: 'https://cockpit.example.test',
   FLEET_COCKPIT_LISTEN: 'wg-france:8787',
   FLEET_SESSION_SECRET: 's'.repeat(40),
-  FLEET_AGENT_TOKEN_SECRET: 'a'.repeat(40),
   FLEET_GITHUB_WEBHOOK_SECRET: 'w'.repeat(20),
   FEISHU_APP_ID: 'cli_x',
   FEISHU_APP_SECRET: 'y',
@@ -33,9 +32,7 @@ describe('配置', () => {
       cookieSecure: true,
       devLogin: false,
       cockpitListen: { host: 'wg-france', port: 8787 },
-      agentListen: { host: '127.0.0.1', port: 8788 },
       databaseUrl: 'postgres://fleet@localhost/fleet',
-      feishuGatewayToken: null,
       temporalAddress: '127.0.0.1:7243',
       temporalNamespace: 'fleet',
       fleetTaskQueue: 'fleet',
@@ -120,7 +117,6 @@ describe('配置', () => {
       'FLEET_PUBLIC_URL',
       'FLEET_COCKPIT_LISTEN',
       'FLEET_SESSION_SECRET',
-      'FLEET_AGENT_TOKEN_SECRET',
       'FLEET_GITHUB_WEBHOOK_SECRET',
       'FEISHU_APP_ID',
       'DATABASE_URL',
@@ -149,32 +145,15 @@ describe('配置', () => {
     );
   });
 
-  it('fleet 接口监听非本机地址、两把密钥相同、密钥太短、生产用 http：都拒绝启动', () => {
-    expect(problems({ ...PROD, FLEET_AGENT_LISTEN: '0.0.0.0:8788' }).join()).toContain('FLEET_AGENT_LISTEN');
-    expect(problems({ ...PROD, FLEET_AGENT_TOKEN_SECRET: PROD.FLEET_SESSION_SECRET }).join()).toContain(
-      '不能相同',
-    );
+  it('密钥太短、生产用 http：都拒绝启动', () => {
     expect(problems({ ...PROD, FLEET_SESSION_SECRET: 'short' }).join()).toContain('太短');
     expect(problems({ ...PROD, FLEET_PUBLIC_URL: 'http://cockpit.example.test' }).join()).toContain('https');
     expect(problems({ ...PROD, FLEET_ENV: 'staging' }).join()).toContain('FLEET_ENV');
   });
 
-  it('飞书网关通行证：太短、和别的密钥相同都拒绝启动', () => {
-    expect(problems({ ...PROD, FLEET_FEISHU_GATEWAY_TOKEN: 'short' }).join()).toContain(
-      'FLEET_FEISHU_GATEWAY_TOKEN 太短',
-    );
-    expect(problems({ ...PROD, FLEET_FEISHU_GATEWAY_TOKEN: PROD.FLEET_SESSION_SECRET }).join()).toContain(
-      '不能和别的密钥相同',
-    );
-    expect(loadConfig({ ...PROD, FLEET_FEISHU_GATEWAY_TOKEN: 'g'.repeat(40) }).feishuGatewayToken).toBe(
-      'g'.repeat(40),
-    );
-  });
-
   it('开发环境：缺的密钥临时生成，飞书、GitHub、数据库可以不配，免登要显式打开', () => {
     const dev = loadConfig({ FLEET_ENV: 'development' });
     expect(dev.sessionSecret.length).toBeGreaterThanOrEqual(32);
-    expect(dev.sessionSecret).not.toBe(dev.agentTokenSecret);
     expect(dev).toMatchObject({
       feishu: null,
       githubWebhookSecret: null,
@@ -213,18 +192,9 @@ describe('接不接飞书登录（FLEET_FEISHU_LOGIN：不接飞书的要明说 
     ).toBeNull();
   });
 
-  it('【故意造出的失败】#803 明说 off、环境文件里却留着网关通行证：不认它（null）、feishuOff 为 true；不写 off 的照旧认', () => {
-    const token = 'g'.repeat(40);
-    const off = loadConfig({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: 'off', FLEET_FEISHU_GATEWAY_TOKEN: token });
-    expect(off.feishuOff).toBe(true);
-    expect(off.feishuGatewayToken).toBeNull();
-    const on = loadConfig({ ...PROD, FLEET_FEISHU_GATEWAY_TOKEN: token });
-    expect(on.feishuOff).toBe(false);
-    expect(on.feishuGatewayToken).toBe(token);
-    // 通行证写坏了，off 也不放过
-    expect(
-      problems({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: 'off', FLEET_FEISHU_GATEWAY_TOKEN: 'short' }).join(),
-    ).toContain('FLEET_FEISHU_GATEWAY_TOKEN 太短');
+  it('明说 off：feishuOff 为 true；不写 off 的是 false', () => {
+    expect(loadConfig({ ...NO_FEISHU, FLEET_FEISHU_LOGIN: 'off' }).feishuOff).toBe(true);
+    expect(loadConfig(PROD).feishuOff).toBe(false);
   });
 
   it('【故意造出的失败】off 了又配了飞书（哪怕只配一半）：拒启动，接不接说不清', () => {
@@ -342,7 +312,6 @@ describe('收别的环境的快照（FLEET_NODE_KEYS）', () => {
       [JSON.stringify({ local: 12 }), '不能填明文'],
       [JSON.stringify({ a: HASH_A, b: HASH_A }), '用了同一把通行证'],
       [JSON.stringify({ local: sha(PROD.FLEET_SESSION_SECRET) }), '不能和别的密钥相同'],
-      [JSON.stringify({ local: sha(PROD.FLEET_AGENT_TOKEN_SECRET) }), '不能和别的密钥相同'],
     ];
     for (const [value, says] of bad) {
       const found = problems({ ...PROD, FLEET_NODE_KEYS: value }).join('\n');
@@ -351,15 +320,7 @@ describe('收别的环境的快照（FLEET_NODE_KEYS）', () => {
     }
   });
 
-  it('和飞书网关的通行证、本台往外推的通行证相同也拒', () => {
-    const gateway = 'g'.repeat(40);
-    expect(
-      problems({
-        ...PROD,
-        FLEET_FEISHU_GATEWAY_TOKEN: gateway,
-        FLEET_NODE_KEYS: JSON.stringify({ local: sha(gateway) }),
-      }).join(),
-    ).toContain('不能和别的密钥相同');
+  it('和本台往外推的通行证相同也拒', () => {
     const push = 'p'.repeat(40);
     expect(
       problems({

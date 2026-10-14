@@ -15,14 +15,12 @@ import {
 } from '@fleet-dao/store';
 import { seedPg } from '@fleet-dao/store/testing';
 import type { Hono } from 'hono';
-import { signAgentToken } from '../src/agent-token.ts';
 import { buildApps } from '../src/app.ts';
 import { type ChangeHub, createChangeHub, type PgChangeFeed, startPgChangeFeed } from '../src/changes.ts';
 import type { Config } from '../src/config.ts';
 import type { Deps } from '../src/deps.ts';
 import { FeishuRejectedError } from '../src/feishu.ts';
 import { memoryCockpitAlerts, pgCockpitAlerts } from '../src/feishu-alerts.ts';
-import { createMemoryIntentStore } from '../src/intent-store.ts';
 import type { ScryptParams } from '../src/password.ts';
 import type {
   ChangeFeed,
@@ -48,20 +46,16 @@ export const V1 = { number: 8, title: 'v1 Fusion 接活' };
 export const V2 = { number: 9, title: 'v2 引擎打磨' };
 
 export const PUBLIC_ORIGIN = 'https://cockpit.example.test';
-export const GATEWAY_PASS = 'gateway-pass-for-tests-0123456789abcdef';
 
 export function testConfig(overrides: Partial<Config> = {}): Config {
   return {
     env: 'test',
     publicUrl: new URL(PUBLIC_ORIGIN),
     cockpitListen: { host: '127.0.0.1', port: 0 },
-    agentListen: { host: '127.0.0.1', port: 0 },
     sessionSecret: 'session-secret-for-tests-0123456789abcdef',
-    agentTokenSecret: 'agent-secret-for-tests-0123456789abcdef',
     githubWebhookSecret: WEBHOOK_SECRET,
     feishu: { appId: 'cli_test_app', appSecret: 'feishu-secret-for-tests' },
     databaseUrl: null,
-    feishuGatewayToken: GATEWAY_PASS,
     devLogin: false,
     cookieSecure: true,
     quotaStaleAfterMs: 30 * 60_000,
@@ -101,7 +95,6 @@ export const STRANGER_CODE = 'code-stranger';
 
 export interface Harness<S extends Store = Store> {
   cockpit: Hono;
-  agent: Hono;
   relay: SseRelay;
   /** 装配好的全部依赖（自己另起 GitHubIntake、对账时用）。 */
   deps: Deps;
@@ -116,9 +109,6 @@ export interface Harness<S extends Store = Store> {
   clock: { now: Date };
   /** 走真登录（飞书客户端内免登接口）拿会话 Cookie 与 CSRF 令牌。 */
   login(code?: string): Promise<{ cookie: string; csrf: string }>;
-  agentToken(
-    input?: Partial<{ taskId: string; subtaskId: string; runId: string; ttlSeconds: number }>,
-  ): string;
 }
 
 export interface HarnessOptions {
@@ -128,8 +118,6 @@ export interface HarnessOptions {
   feishu?: 'fake' | null;
   github?: (event: IngestedEvent) => Promise<void>;
   health?: HealthCheck[];
-  /** 意图存储（#553）；不给就是一份跟着测试时钟走的内存版，null 是没接上。 */
-  intents?: Deps['intents'] | null;
   /** 驾驶舱提醒（#795）。不给时内存版写进 store.data.notifications，库版写进 notifications 表。 */
   alerts?: Deps['alerts'];
   /** 提醒谁在处理（design 15.3）；不给就是没接上（内存版、开发环境一样）。 */
@@ -202,7 +190,6 @@ function wire<S extends Store>(
     log,
     now,
     health: options.health ?? [],
-    ...(options.intents === null ? {} : { intents: options.intents ?? createMemoryIntentStore({ now }) }),
     ...(options.alerts ? { alerts: options.alerts } : {}),
     ...(options.alertWork ? { alertWork: options.alertWork } : {}),
     ...(options.routingLayers ? { routingLayers: options.routingLayers } : {}),
@@ -237,11 +224,10 @@ function wire<S extends Store>(
     },
     ...(options.scryptParams === null ? {} : { scryptParams: options.scryptParams ?? TEST_SCRYPT_PARAMS }),
   };
-  const { cockpit, agent, relay } = buildApps(deps);
+  const { cockpit, relay } = buildApps(deps);
 
   return {
     cockpit,
-    agent,
     relay,
     deps,
     config,
@@ -261,15 +247,6 @@ function wire<S extends Store>(
       if (res.status !== 200) throw new Error(`登录失败：${res.status} ${await res.text()}`);
       const body = (await res.json()) as { csrfToken: string };
       return { cookie: cookieHeader(res), csrf: body.csrfToken };
-    },
-    agentToken(input = {}) {
-      return signAgentToken(config.agentTokenSecret, {
-        taskId: input.taskId ?? IDS.task12,
-        subtaskId: input.subtaskId ?? IDS.sub12a,
-        runId: input.runId ?? DEV_RUN_ID,
-        ttlSeconds: input.ttlSeconds ?? 3600,
-        now: now(),
-      });
     },
   };
 }
@@ -406,33 +383,11 @@ export function write(
   };
 }
 
-/** 飞书网关的请求：网关通行证 + 代表哪位创始人；不带 Cookie、不带 CSRF。 */
-export function viaGateway(
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH',
-  actingOpenId: string,
-  body?: unknown,
-  pass = GATEWAY_PASS,
-): RequestInit {
+/** 带 Authorization 令牌的请求（早先的飞书网关通行证、fleet 令牌的写法）：驾驶舱接口一律 401，不认。 */
+export function viaBearer(method: 'GET' | 'POST' | 'PUT' | 'PATCH', body?: unknown): RequestInit {
   return {
     method,
-    headers: {
-      authorization: `Bearer ${pass}`,
-      'x-fleet-acting-feishu': actingOpenId,
-      'content-type': 'application/json',
-    },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  };
-}
-
-export function agentRequest(
-  token: string,
-  method: 'GET' | 'POST' = 'GET',
-  body?: unknown,
-  extraHeaders: Record<string, string> = {},
-): RequestInit {
-  return {
-    method,
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...extraHeaders },
+    headers: { authorization: 'Bearer retired-token-0123456789abcdef', 'content-type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   };
 }

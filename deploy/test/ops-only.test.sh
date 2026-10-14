@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# run.sh --ops（CI 里只改了 docs/ops.md 时跑的那条路，ci-plan.ts 的 deploy=ops）：真跑了读 ops.md 的两块（端口表、place-file），
+# run.sh --ops（CI 里只改了 docs/ops.md 时跑的那条路，ci-plan.ts 的 deploy=ops）：真跑了读 ops.md 的那块（端口表），
 # 不是空跑冒充通过。把 deploy/ 和 docs/ops.md 拷进临时目录，在拷贝上改 ops.md 再跑 --ops：
-# 原样的过、端口表删掉一个端口的红、ports 区块删掉的红、端口号只在区块外的红、放文件那一行删掉的红（没跑成）、参数认不出的退出 2；并且 --ops 不跑全套（没有语法那项）。
+# 原样的过、端口表删掉一个端口的红、ports 区块删掉的红、端口号只在区块外的红、参数认不出的退出 2；并且 --ops 不跑全套（没有语法那项）。
 # 用法：bash deploy/test/ops-only.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -37,18 +37,11 @@ if [[ -z "$PORT" ]] || ! grep -qw -- "$PORT" "$OPS"; then
   echo "ops-only：没跑成"
   exit 2
 fi
-PLACE_LINE="ssh <法国> 'cat /etc/fleet-dao/gateway-token.env' | ssh <香港> '"
-if [[ "$(grep -cF -- "$PLACE_LINE" "$OPS")" != 1 ]]; then
-  echo "  … 没跑成：docs/ops.md 里放网关通行证那一行不是恰好一行"
-  echo "ops-only：没跑成"
-  exit 2
-fi
 
-echo "== 原样的 ops.md：过，两块都跑了，没跑全套"
+echo "== 原样的 ops.md：过，端口表跑了，没跑全套"
 run_ops "$OPS"
 check "退出码" "$RC" 0
 check "端口表那块跑了" "$(has '端口表：')" 1
-check "place-file 跑了且通过" "$(has 'place-file：通过')" 1
 check "没跑全套（没有语法那项）" "$(has '语法：查了')" 0
 if ((RC != 0)); then cat -- "$OUT"; fi
 
@@ -74,13 +67,6 @@ check "拷贝里区块外有它" "$(sed '/<!-- fleet:ports:start -->/,/<!-- flee
 run_ops "$TMP/ops-port-outside.md"
 check "退出码" "$RC" 1
 check "说了缺哪个端口" "$(grep -c "端口表里没有.* $PORT\b" "$OUT" | tr -d ' ')" 1
-
-echo "== 放网关通行证那一行删掉：红（place-file 没跑成）"
-grep -vF -- "$PLACE_LINE" "$OPS" >"$TMP/ops-no-place.md"
-run_ops "$TMP/ops-no-place.md"
-check "退出码" "$RC" 2
-check "place-file 报没跑成" "$(has 'place-file：没跑成')" 1
-check "注解点名是这一项，公开检查页不用下日志也能看见" "$(has '::error::deploy 项 place-file 退出码 2')" 1
 
 echo "== 参数认不出：退出 2，不当成全套或 --ops"
 run_ops "$OPS" --opz
