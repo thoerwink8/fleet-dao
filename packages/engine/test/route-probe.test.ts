@@ -430,6 +430,53 @@ describe('一轮里带着切号（#157：探之前判、该切就切，探完核
   });
 });
 
+describe('没真探的结论和库里一样时不重写', () => {
+  /** 先跑一轮拿到这条「不探」写下的原文，再把它当成库里上一次的结论。 */
+  async function previousOf(
+    t: ProbeTarget,
+    ageMs: number,
+    over: Partial<NonNullable<ProbeTarget['previous']>> = {},
+  ) {
+    const first = harness([t], answered);
+    await runRouteProbeJob(first.deps);
+    const w = first.saved[0];
+    if (!w) throw new Error('第一轮没写');
+    return {
+      state: w.state as 'skipped' | 'not_wired',
+      at: new Date(NOW.getTime() - ageMs),
+      detail: w.detail,
+      org: null,
+      ...over,
+    };
+  }
+
+  it('上一次也是这句不探、不到一天：这一轮不写路由行也不加历史，照库里算看过、不在线', async () => {
+    const previous = await previousOf(mirasim, 3_600_000);
+    const h = harness([{ ...mirasim, previous }], answered);
+    const run = await runRouteProbeJob(h.deps);
+    expect(h.saved).toEqual([]);
+    expect(run).toMatchObject({ outcome: 'ok', scanned: 1, found: 1, online: [] });
+  });
+
+  it('隔了一天以上：刷一次看过的时刻；原因变了：当场写', async () => {
+    const stale = await previousOf(mirasim, 25 * 3_600_000);
+    const refreshed = harness([{ ...mirasim, previous: stale }], answered);
+    await runRouteProbeJob(refreshed.deps);
+    expect(refreshed.saved.map((s) => s.routeId)).toEqual([mirasim.routeId]);
+
+    const fresh = await previousOf(mirasim, 60_000, { detail: '以前的另一句原因' });
+    const changed = harness([{ ...mirasim, previous: fresh }], answered);
+    await runRouteProbeJob(changed.deps);
+    expect(changed.saved.map((s) => s.routeId)).toEqual([mirasim.routeId]);
+  });
+
+  it('真探了的永远写（上一次没真探过的路由，这一轮探通了就写 ok）', async () => {
+    const h = harness([carpool], answered);
+    await runRouteProbeJob(h.deps);
+    expect(h.saved.map((x) => [x.routeId, x.state])).toEqual([[carpool.routeId, 'ok']]);
+  });
+});
+
 describe('一轮（runRouteProbeJob，不起 Temporal）', () => {
   it('探通的写 ok（在线），没探的写原因（不在线）；scanned、found 和写下的对得上', async () => {
     const h = harness([carpool, solo, mirasim], answered);

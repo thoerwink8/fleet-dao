@@ -13,6 +13,7 @@ import {
   readBackoff,
   readSchedule,
   runCarpoolWatchJob,
+  runCarpoolWatchUnlessPaused,
   trailingFailures,
 } from '../src/jobs/carpool-watch.ts';
 import { emptyLedger, type OrgLedger, OrgLedgerError } from '../src/jobs/org-ledger.ts';
@@ -244,5 +245,48 @@ describe('跑一轮', () => {
     await expect(runCarpoolWatchJob(h.deps)).rejects.toBeInstanceOf(CarpoolWatchFailedError);
     expect(h.calls).toEqual([]);
     expect(JSON.stringify(h.runs.finish)).toContain('failed');
+  });
+});
+
+describe('拼车池整池暂停时不跑', () => {
+  it('暂停着：不起一轮（不写 schedule_runs）、不读接口、不叫切号，登记行摘掉', async () => {
+    const parks: boolean[] = [];
+    const h = harness({
+      pause: {
+        heldReason: async () => '拼车池 claude-carpool 整池暂停着',
+        park: async (on) => void parks.push(on),
+      },
+      read: async () => {
+        throw new Error('暂停着不该读接口');
+      },
+    });
+    const r = await runCarpoolWatchUnlessPaused(h.deps);
+    expect(r).toEqual({ paused: true, why: '拼车池 claude-carpool 整池暂停着' });
+    expect(h.runs.start).toEqual([]);
+    expect(h.calls).toEqual([]);
+    expect(parks).toEqual([true]);
+  });
+
+  it('撤了暂停：登记回来、照常跑一轮', async () => {
+    const parks: boolean[] = [];
+    const h = harness({ pause: { heldReason: async () => null, park: async (on) => void parks.push(on) } });
+    const r = await runCarpoolWatchUnlessPaused(h.deps);
+    expect(r).toMatchObject({ outcome: 'ok' });
+    expect(parks).toEqual([false]);
+    expect(h.runs.start).toEqual(['carpool-watch']);
+  });
+
+  it('【故意造出的失败】读不到是不是暂停：不当成暂停，照常盯，记一条 warn', async () => {
+    const h = harness({
+      pause: {
+        heldReason: async () => {
+          throw new Error('库断了');
+        },
+        park: async () => undefined,
+      },
+    });
+    const r = await runCarpoolWatchUnlessPaused(h.deps);
+    expect(r).toMatchObject({ outcome: 'ok' });
+    expect(h.logs.some((m) => m.includes('照常盯'))).toBe(true);
   });
 });

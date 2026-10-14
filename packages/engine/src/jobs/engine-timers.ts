@@ -6,7 +6,11 @@
 // 不起会话，而总开关每次发版都会关，标了就几乎刷不上。
 import type { Client } from '@temporalio/client';
 import type { EngineJobs } from '../activities.ts';
-import { CARPOOL_WATCH_EVERY_MINUTES, CARPOOL_WATCH_JOB, runCarpoolWatchJob } from './carpool-watch.ts';
+import {
+  CARPOOL_WATCH_EVERY_MINUTES,
+  CARPOOL_WATCH_JOB,
+  runCarpoolWatchUnlessPaused,
+} from './carpool-watch.ts';
 import { runCiTimingsJob } from './ci-timings.ts';
 import {
   CLI_UPGRADE_EVERY_MINUTES,
@@ -121,12 +125,12 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       run: () => runQuotaReadJob(quotaRead()),
     },
     {
-      // 拼车额度盯读（#194，给切号用）：每分钟一轮，自己按情况定这一分钟真不真读开放接口
+      // 拼车额度盯读（#194，给切号用）：每分钟一轮，自己按情况定这一分钟真不真读开放接口；拼车池整池暂停时整个不跑
       id: CARPOOL_WATCH_JOB.id,
       everyMinutes: CARPOOL_WATCH_EVERY_MINUTES,
       catchupMinutes: CARPOOL_WATCH_EVERY_MINUTES,
       overdueMinutes: OVERDUE_MINUTES,
-      run: () => runCarpoolWatchJob(carpoolWatch()),
+      run: () => runCarpoolWatchUnlessPaused(carpoolWatch()),
     },
     {
       // 每小时对账（工作树残留、两处核对、提醒按条件撤和再推、GitHub 机器人权限自检）

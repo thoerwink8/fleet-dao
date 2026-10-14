@@ -18,6 +18,7 @@ import {
   quotaTable,
   resolveAlertWithReason,
   scheduleHealth,
+  scheduleRedStreaks,
   startScheduleRun,
   upsertAlert,
 } from '@fleet-dao/db';
@@ -66,6 +67,7 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
       finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
     },
     mergeStall: () => mergeStallFacts(w.db),
+    redStreaks: (at) => scheduleRedStreaks(w.db, at),
     quota: {
       quotaPools: (at) => quotaTable(w.db, { now: at }),
       // 配置写明不读的池（现在是 jev：没有日账）。读不到配置要抛，不许当成「都要读」。

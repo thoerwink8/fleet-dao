@@ -270,6 +270,12 @@ const usageIncomplete = or(
   isNull(runs.cacheWriteTokens),
 );
 
+/**
+ * 「用量补记」查了几次都读不成、定案不再补的那一笔，usage_note 以它开头。runsAwaitingMeter 不再收这样的行：账本里就是没有，
+ * 无限重试只会天天白跑、天天记一条 partial。数仍留空（不写 0），原因留在 usage_note 里给任务详情、巡检看。
+ */
+export const USAGE_GAVE_UP_PREFIX = '用量不再补：';
+
 /** 等「用量补记」补的一笔：经 Mirasim 起、记了会话号、结束了、四样 token 有缺的。 */
 export interface MeterPendingRun {
   id: string;
@@ -279,6 +285,8 @@ export interface MeterPendingRun {
   startedAt: Date;
   endedAt: Date;
   usageNote: string | null;
+  /** 这一行上次动是什么时候：读不成的每次都改写 usage_note（带第几次），所以它就是上次补记的时刻，退避看它。 */
+  updatedAt: Date;
 }
 
 /**
@@ -299,6 +307,7 @@ export async function runsAwaitingMeter(
       startedAt: runs.startedAt,
       endedAt: runs.endedAt,
       usageNote: runs.usageNote,
+      updatedAt: runs.updatedAt,
     })
     .from(runs)
     .innerJoin(routes, eq(routes.id, runs.routeId))
@@ -309,6 +318,7 @@ export async function runsAwaitingMeter(
         isNotNull(runs.endedAt),
         gte(runs.endedAt, input.endedAfter),
         usageIncomplete,
+        or(isNull(runs.usageNote), sql`${runs.usageNote} not like ${`${USAGE_GAVE_UP_PREFIX}%`}`),
       ),
     )
     .orderBy(asc(runs.endedAt), asc(runs.id))
