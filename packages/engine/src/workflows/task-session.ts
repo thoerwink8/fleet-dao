@@ -26,6 +26,8 @@
 //   问不成（库一时不通）只记日志，照今天的做法接着走。
 // - 停下之前先自动处理一次（决定 0093，patched('auto-redispatch-session')）：失败分流判停下、码是被引擎在时限上叫停（aborted）、
 //   总时长到顶、起不来（AUTO_REDISPATCH_CODES）的，这一段里先避开这个模型换一条路由重派一次，进度里写一行；再判停下才停。
+//   总时长到顶（WT1）第一次仍原路续同一个会话。同一条路由上第二次不再原路续：换路由时把树上的进度写进提示词
+//   （patched('wall-clock-carry-progress')，#2244），让下一轮接着做，不从头重来。老历史没有这个标记，只换路由、不改提示词。
 
 import { isCancellation, log, patched } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -63,6 +65,7 @@ import {
   type ResumeFrom,
   segmentMinutesAfterPatience,
   tokenBudgetStop,
+  wallClockSwitchLine,
   widen,
   withDispatchProbeNote,
   withoutFamilies,
@@ -294,8 +297,19 @@ export async function writeSession(
         rt.avoidModel(route);
         counters = ZERO;
         previousMessage = undefined;
+        // 同一条路由第二次总时长到顶：不再原路续。提示词带上树上的进度，下一轮换模型接着做。
+        // 第一次到顶走不到这里（WT1 还在原路重试）。老历史没有这个标记：只换路由，提示词和进度那一行照旧。
+        const carryProgress =
+          failure.code.toLowerCase() === 'wall_clock_timeout' && patched('wall-clock-carry-progress');
+        if (carryProgress) {
+          const line = wallClockSwitchLine(route.modelId);
+          interrupted = line;
+          if (!rt.feedback.includes(line)) rt.feedback = [...rt.feedback, line];
+        }
         await rt.note(
-          `第 ${rt.round} 轮：${route.modelId} ${next.reason}（${failure.code}），自动换一条路由重派一次，不停下等人`,
+          carryProgress
+            ? `第 ${rt.round} 轮：${route.modelId} 同一条路由第二次总时长到顶，换一条路由带上进度续一次，不停下等人`
+            : `第 ${rt.round} 轮：${route.modelId} ${next.reason}（${failure.code}），自动换一条路由重派一次，不停下等人`,
         );
         continue;
       }

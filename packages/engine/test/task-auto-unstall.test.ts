@@ -17,7 +17,7 @@ import {
   type TaskWorkflowInput,
   taskStatusQuery,
 } from '../src/task-contract.ts';
-import { CI_UNKNOWN_RECHECKS } from '../src/workflows/task-support.ts';
+import { CI_UNKNOWN_RECHECKS, wallClockSwitchLine } from '../src/workflows/task-support.ts';
 import { freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.ts';
 import { OK_SEGMENT, scripted } from './task-script.ts';
 
@@ -50,6 +50,13 @@ const statusUntil = (h: WorkflowHandle, check: (s: TaskStatus) => boolean, what:
   pollQuery(() => h.query(taskStatusQuery), check, what);
 const parked = (s: TaskStatus) => s.waiting?.kind === 'human';
 const RED = { state: 'red' as const, failedChecks: ['test (engine)'], digest: 'FAIL a.test.ts' };
+
+const WALL_CLOCK = {
+  ok: false as const,
+  runId: null,
+  outcome: 'timeout',
+  evidence: { code: 'wall_clock_timeout', message: '总时长到顶，已强杀', quotaExhausted: false },
+};
 
 describe('轮数头一回用尽：自动换路由续一次（决定 0093）', { timeout: 90_000 }, () => {
   it('动手 3 轮 CI 都红：不停下，第 4 轮避开最近动手的模型、带着 CI 意见直接再动手（不先重走 CI），进度写一行', async () => {
@@ -191,6 +198,60 @@ describe('轮数头一回用尽：自动换路由续一次（决定 0093）', { 
 });
 
 describe('动手会话没跑成：先换路由重派一次（决定 0093）', { timeout: 90_000 }, () => {
+  it('第一次总时长到顶：仍原路续同一个会话（同一条路由），不换模型', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) => (n === 1 ? WALL_CLOCK : OK_SEGMENT),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(2);
+    const [first, second] = calls.segment;
+    expect(second?.route.routeId).toBe(first?.route.routeId);
+    expect(second?.route.modelId).toBe(first?.route.modelId);
+    expect(second?.resumeSessionId).toBeUndefined();
+    expect(second?.interrupted).toBeUndefined();
+    const picks = world.callsOf('pickRoute').map((c) => c.input);
+    expect(picks[1]).toMatchObject({
+      stickRouteId: first?.route.routeId,
+      avoidModelIds: [],
+    });
+    expect(world.states.some((s) => s.doing.includes('第二次总时长到顶'))).toBe(false);
+  });
+
+  it('同一条路由第二次总时长到顶：第三次 runSegment 换模型，带上树上的进度，不再原路续', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) => (n <= 2 ? WALL_CLOCK : OK_SEGMENT),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(3);
+    const [first, second, third] = calls.segment;
+    expect(second?.route.modelId).toBe(first?.route.modelId);
+    expect(second?.route.routeId).toBe(first?.route.routeId);
+    expect(third?.route.modelId).not.toBe(first?.route.modelId);
+    const progress = wallClockSwitchLine(first?.route.modelId ?? '');
+    expect(third?.interrupted).toBe(progress);
+    expect(third?.feedback.join('\n')).toContain(progress);
+    expect(third?.resumeSessionId).toBeUndefined();
+    const picks = world.callsOf('pickRoute').map((c) => c.input);
+    expect(picks[2]).toMatchObject({ avoidModelIds: [first?.route.modelId] });
+    expect(picks[2]?.stickRouteId).toBeUndefined();
+    expect(world.states.some((s) => s.doing.includes('带上进度续一次'))).toBe(true);
+    expect(world.alerts.filter((a) => a.level !== 'info')).toEqual([]);
+  });
+
   it('被引擎在时限上叫停（aborted）两次判停下：先避开这个模型重派一次，不报警', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
