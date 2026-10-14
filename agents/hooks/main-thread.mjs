@@ -14,6 +14,7 @@ import { closeSync, fstatSync, openSync, readFileSync, readSync } from 'node:fs'
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { hookTimer } from './hook-timing.mjs';
 
 /** 拒的理由里最多带引导的前多少个字 */
 export const DIRECTIVE_SHOWN_CHARS = 200;
@@ -309,14 +310,28 @@ function isMain() {
 
 if (isMain()) {
   if (process.env.FLEET_HEADLESS === '1') process.exit(0);
+  // 各阶段耗时记进 ~/.fleet-dao/logs/hook-timing.jsonl（hook-timing.mjs），查超时用
+  const timer = hookTimer('main-thread.mjs');
   /** @type {Verdict} */
   let v;
+  /** @type {unknown} */
+  let tool;
   try {
-    v = check(readFileSync(0, 'utf8'));
+    const raw = readFileSync(0, 'utf8');
+    timer.mark('read');
+    try {
+      tool = prop(JSON.parse(raw), 'tool_name');
+    } catch {
+      // 认不出由 check 处理
+    }
+    v = check(raw);
   } catch (e) {
     v = { notice: `引导检查没查成：钩子自己出错了（${why(e)}）` };
   }
+  timer.mark('decide');
   const out = hookOutput(v);
   if (out) process.stdout.write(`${out}\n`);
+  timer.mark('write');
+  timer.done({ tool, code: 0 });
   process.exit(0);
 }

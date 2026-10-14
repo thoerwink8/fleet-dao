@@ -118,7 +118,7 @@ function scan(hooks: Obj): { owned: Found[]; others: number } {
     for (const group of groups) {
       if (!isObj(group) || !Array.isArray(group.hooks)) continue;
       for (const handler of group.hooks) {
-        const mine = isObj(handler) ? ownedScript(handler.command) : null;
+        const mine = isObj(handler) ? ownedHandler(handler) : null;
         if (mine && isObj(handler)) owned.push({ event, matcher: group.matcher, handler, ...mine });
         else others++;
       }
@@ -186,10 +186,17 @@ function judge(root: unknown, t: HookTarget, home: string, platform: Platform): 
     if (mine.length > 1) out.problems.push(`${spec.script} 登记了 ${mine.length} 次（${specName(spec)}）`);
     const f = mine[0] as Found;
     const wrong: string[] = [];
+    const want = handlerFor(t, spec, home, platform);
     if (f.handler.type !== 'command') wrong.push('type 不是 command');
-    if (f.handler.command !== commandIn(t, home, platform, spec.script)) wrong.push('命令和本机该有的不一样');
+    if (f.handler.command !== want.command) wrong.push('命令和本机该有的不一样');
     if (f.handler.timeout !== spec.timeout)
       wrong.push(`timeout 是 ${String(f.handler.timeout)}，应是 ${spec.timeout}`);
+    if (JSON.stringify(f.handler.args) !== JSON.stringify(want.args))
+      wrong.push(
+        `args 是 ${JSON.stringify(f.handler.args ?? null)}，应是 ${JSON.stringify(want.args ?? null)}`,
+      );
+    if (f.handler.onFailure !== want.onFailure)
+      wrong.push(`onFailure 是 ${String(f.handler.onFailure)}，应是 ${String(want.onFailure)}`);
     if (wrong.length) out.problems.push(`${spec.script}（${specName(spec)}）：${wrong.join('、')}`);
   }
   const known = new Set(t.hooks.map((h) => h.script));
@@ -483,7 +490,7 @@ function merged(root: Obj, t: HookTarget, home: string, platform: Platform): Obj
     const box: Obj = isObj(old) && old.enabled === false ? { enabled: false } : {};
     for (const spec of t.hooks) {
       const list = Array.isArray(box[spec.event]) ? (box[spec.event] as unknown[]) : [];
-      list.push(group(spec, commandIn(t, home, platform, spec.script)));
+      list.push(group(t, spec, home, platform));
       box[spec.event] = list;
     }
     next[name] = box;
@@ -493,7 +500,7 @@ function merged(root: Obj, t: HookTarget, home: string, platform: Platform): Obj
   stripOwned(hooks);
   for (const spec of t.hooks) {
     const list = Array.isArray(hooks[spec.event]) ? (hooks[spec.event] as unknown[]) : [];
-    list.push(group(spec, commandIn(t, home, platform, spec.script)));
+    list.push(group(t, spec, home, platform));
     hooks[spec.event] = list;
   }
   next.hooks = hooks;
@@ -508,7 +515,7 @@ function stripOwned(hooks: Obj): void {
     const kept = groups.filter((g) => {
       if (!isObj(g) || !Array.isArray(g.hooks)) return true;
       const handlers: unknown[] = g.hooks;
-      const left = handlers.filter((h) => !(isObj(h) && ownedScript(h.command)));
+      const left = handlers.filter((h) => !(isObj(h) && ownedHandler(h)));
       if (left.length === handlers.length) return true;
       g.hooks = left;
       removed = true;
@@ -519,10 +526,36 @@ function stripOwned(hooks: Obj): void {
   }
 }
 
-function group(spec: HookSpec, command: string): Obj {
+/**
+ * 登记的那一条。claude 写法（targets.ts 的 HOOK_TARGETS 上面「超时即拦」）：
+ * - spec.exec：exec 形式 command: node、args: [脚本绝对路径]，Claude Code 直接起 node，不经 Git Bash、不经启动器；
+ * - 否则命令是启动器 exe 时 args: []（exec 形式、不经 Git Bash，Grok 认空 args）；
+ * - spec 要超时即拦时 onFailure。
+ * 别家写法不加键。
+ */
+export function handlerFor(t: HookTarget, spec: HookSpec, home: string, platform: Platform): Obj {
+  const command = commandIn(t, home, platform, spec.script);
+  const h: Obj = { type: 'command', command, timeout: spec.timeout };
+  if (t.format !== 'claude') return h;
+  if (spec.exec) {
+    h.command = 'node';
+    h.args = [join(home, placeOn(HOOKS_DIR, platform), spec.script).replaceAll('\\', '/')];
+  } else if (command.endsWith('.exe')) h.args = [];
+  if (spec.onFailure) h.onFailure = spec.onFailure;
+  return h;
+}
+
+/** 这一条是不是本脚本管的：看 command，exec 形式的再看 args */
+function ownedHandler(h: Obj): ReturnType<typeof ownedScript> {
+  const byCommand = ownedScript(h.command);
+  if (byCommand) return byCommand;
+  return Array.isArray(h.args) ? ownedScript(h.args.map(String).join(' ')) : null;
+}
+
+function group(t: HookTarget, spec: HookSpec, home: string, platform: Platform): Obj {
   return {
     ...(spec.matcher === undefined ? {} : { matcher: spec.matcher }),
-    hooks: [{ type: 'command', command, timeout: spec.timeout }],
+    hooks: [handlerFor(t, spec, home, platform)],
   };
 }
 

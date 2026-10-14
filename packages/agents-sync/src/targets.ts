@@ -144,6 +144,16 @@ export interface HookSpec {
   matcher?: string;
   script: string;
   timeout: number;
+  /**
+   * 'block'：钩子超时、起不来、崩了时拦下这次调用（Claude Code ≥ 2.1.295 的 onFailure，默认是放行）。
+   * 只写进 claude 写法；别家没有这个开关（Kimi Code 多一个键整份配置读不起来），不写。
+   */
+  onFailure?: 'block';
+  /**
+   * claude 写法登记成 exec 形式：command: node、args: [脚本绝对路径]，Claude Code 直接起 node（不经 Git Bash、不经启动器）。
+   * Grok 见到非空 args 整条跳过，所以它（和 Devin）靠另一组用自家工具名的 matcher 跑启动器那条。
+   */
+  exec?: true;
 }
 
 /**
@@ -196,16 +206,23 @@ export interface HookTarget {
  * 调工具前那条还挂在读文件、搜内容的 Read、Grep 上：会话用它们把密钥文件读进对话的也拦（用命令读漏过一回，
  * 只拦命令等于没拦）。Glob 只列路径、和 ls 一样放行，不挂。借道的几家怎么对上：Claude Code 的 matcher 只含字母和 | 时
  * 按工具名逐个全等比（code.claude.com/docs/en/hooks「Matcher patterns」）；Grok 把 Bash、Read、Grep 换成它的
- * run_terminal_command、read_file、grep 再匹配（~/.grok/docs/user-guide/10-hooks.md「Tool Name Aliases」）；Cursor 把 Bash
- * 换成 Shell，Read、Grep 照原名（cursor.com/docs/reference/third-party-hooks「Tool Name Mapping」）。Devin 不换名字，
- * matcher 是不锚定的正则、对它自己的小写工具名（docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks「Tool names you can
- * match」）：第一组它一个都匹配不上，所以另登记锚定的一组 ^(exec|read|grep)$（不锚定的 read 会连 notebook_read、
- * read_subagent、mcp_read_resource 一起匹配上，脚本认不得那些名字就会把它们全拦下；这组在 Claude Code、Cursor 里匹配不到
- * 任何工具，在 Grok 里只多匹配一次它的 grep）。脚本认得的名字：agents/hooks/pretool.mjs 的 SHELL_TOOLS、READ_TOOLS。
+ * run_terminal_command、read_file、grep 再匹配（~/.grok/docs/user-guide/10-hooks.md「Tool Name Aliases」），但第一组是 exec 形式、
+ * 带非空 args，Grok 整条跳过，它靠第二组；Cursor 把 Bash 换成 Shell，Read、Grep 照原名（cursor.com/docs/reference/third-party-hooks
+ * 「Tool Name Mapping」，认不认 args 没核过）。Devin 不换名字，matcher 是不锚定的正则、对它自己的小写工具名
+ * （docs.devin.ai/cli/extensibility/hooks/lifecycle-hooks「Tool names you can match」）：第一组它一个都匹配不上，所以另登记锚定的
+ * 第二组 ^(exec|read|grep|run_terminal_command|read_file)$（不锚定的 read 会连 notebook_read、read_subagent、mcp_read_resource
+ * 一起匹配上，脚本认不得那些名字就会把它们全拦下；后两个是 Grok 的名字。这组在 Claude Code、Cursor 里匹配不到任何工具）。脚本认得的名字：agents/hooks/pretool.mjs 的 SHELL_TOOLS、READ_TOOLS。
  * 第一组还挂了 Agent、Task、Monitor、Workflow：不是要判它们。决定 0026 删掉了「起后台活自动开无人值守」，
  * pretool.mjs 见到这几个名字记完就放行（decide 不认识它们的名字，不放行会被拦）。
  * mcp__mirasim__deliver_artifact、PushNotification 同理：decide 不认识这两个名字，不放行会被拦，所以登记上、见到就放行（pretool.mjs 的 DELIVERY_TOOLS，两边一起改）。决定 0027 起不再为它们记账。引擎经 --settings 自带的那条（adapters 的 PRETOOL_MATCHER）不加：引擎会话不靠这条放行。
  * Stop 事件借道的几家支不支持没一一核过：不支持就是从来不触发，装了也无害。
+ * 调工具前那条超时即拦、并且快（决定 0093 B1）：Claude Code 默认钩子超时就放行，等于安全检查空过（7 天 133 次，每次 7–40 秒）。
+ * 根子是起进程的那两层：shell 形式在 Windows 上一律先起 Git Bash，再起 .NET 的启动器 quiet-*.exe，机器忙时这两层各自能卡十几秒；
+ * node 本身满载时也在 250ms 内（_tmp/audit2/devloop/hookbench.mjs）。所以 Claude 那组登记成 exec 形式直接起 node（exec），
+ * 写 onFailure: 'block'，超时、起不来都拦下；不做「连续超时自动放行」（code.claude.com/docs/en/hooks「Exec form and shell form」
+ * 「Block the action when a hook fails」，要 Claude Code ≥ 2.1.295）。Grok 见到非空 args 整条跳过（~/.grok/docs/user-guide/10-hooks.md
+ * 「Unsupported Handler Fields」，空 args、onFailure 照常加载），所以第二组除了 Devin 的名字再加 Grok 自己的 run_terminal_command、
+ * read_file（grep 两家同名），命令仍是启动器那个裸路径、写 args: []；Claude Code 没有这几个名字的工具，不会跑两遍。
  *
  * 各家自己的钩子（#232；拦命令、开会话同步两条，别的不装）。调工具前那条各家跑自己的入口 pretool-<家>.mjs：
  * 先把那家的输入翻成 Claude 的写法，再交给 pretool.mjs 同一份判断（agents/hooks/vendor-pretool.mjs）。
@@ -252,8 +269,16 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
           'Bash|PowerShell|Read|Grep|Agent|Task|Monitor|Workflow|mcp__mirasim__deliver_artifact|PushNotification',
         script: 'pretool.mjs',
         timeout: 10,
+        onFailure: 'block',
+        exec: true,
       },
-      { event: 'PreToolUse', matcher: '^(exec|read|grep)$', script: 'pretool.mjs', timeout: 10 },
+      {
+        event: 'PreToolUse',
+        matcher: '^(exec|read|grep|run_terminal_command|read_file)$',
+        script: 'pretool.mjs',
+        timeout: 10,
+        onFailure: 'block',
+      },
     ],
   },
   {

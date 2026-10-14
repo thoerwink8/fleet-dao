@@ -21,7 +21,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/agents/hooks/main-thread.mjs\"",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/agents/hooks/main-thread.mjs"],
             "timeout": 10
           }
         ]
