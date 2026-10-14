@@ -5,6 +5,7 @@ coverage/
 *.local
 .DS_Store
 .playwright-mcp/
+.playwright-cli/
 # 本机工具和临时文件：临时目录、Claude Code 的工作树、Mirasim 的本机定时任务、codegraph 的本机索引（每个仓 codegraph init 建，不进仓）
 _tmp/
 .claude/worktrees/
