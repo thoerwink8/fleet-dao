@@ -56,6 +56,8 @@
 
 选端口的规矩：Temporal 一律「官方默认 +10」（当初为了和旧系统的 7233/8233 错开；旧系统已清退，端口不再改）；都在 32768 以下——32768 起是临时端口段，程序运行中随手要的端口会落在里面，同段里挑端口迟早撞上。
 
+监督探 `<法国IP>` 的公网口时：22 通是 sshd；443 通是别家 self-proxy，不代表驾驶舱活着。80、8787、7233 从公网超时是预期，不要判红，也不要为此去开公网。8787 只绑 `10.99.0.2`（`fleet-api.socket`），ufw 只在 `wg-fleet` 上给 `10.99.0.1` 放行，公网方向被默认拒绝丢掉——外面看是超时，机器上连这个公网地址则是没人听、立刻被拒。7233 是清退前的旧 Temporal 口，现在前端在 `127.0.0.1:7243`。80 在香港，不在法国。没有隧道时，healthz 旁证走 `https://<驾驶舱域名>/healthz`（香港 nginx 经隧道转，第二节）。有隧道时直接 `http://10.99.0.2:8787/healthz`。公网 `http://<法国IP>:8787/healthz` 回得来才是开口子，要当异常。SSH 登不上另计，不在这条里改防火墙或钥匙。
+
 香港：
 
 对公网的端口白名单和第一节「公网入站」是同一份。本仓管的在 `deploy/hk.sh` 顶部「约定」的 `HK_FW_OURS`（22/tcp、80/tcp、443/tcp、4500/udp），别家登记的在 `HK_FW_FOREIGN`（8443/tcp，不归本仓管）。改白名单改那里，并同步本节和第一节「公网入站」。
@@ -531,7 +533,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 
 外部看门狗（#292，design 第六节第 5 层、第十三节）：Cloudflare 定时 Worker 每 5 分钟从外面查香港和法国，挂了推飞书。代码在 `packages/edge`，不跑在法国或香港上。这一片只把判法和 Worker 进仓，不部署。部署要创始人在 Cloudflare 上授权一次（免费、不绑卡）。
 
-判法在 `packages/edge/src/judge.ts`。香港：公网驾驶舱首页回得来（任何 HTTP 状态码都算 nginx 活着），连不上算挂。法国：公网 `/healthz` 回 200，或回 503 但回得来（后端活着、某一项不好，交给健康页和引擎自己报），连不上、502、504 算挂，别的状态码也按挂报。香港连不上时只报香港，不连带报法国。同一次挂着每小时最多再推一次。恢复推「恢复了，挂了多久」。读不到上一轮状态照挂处理并且推一条，不静默。真域名、飞书 webhook、请求头 `x-fleet-watch` 的值只从 Worker 的 secret 读（`packages/edge/wrangler.toml` 里只有占位）。读不到密钥这一轮记没查成、写日志，不当成没挂。
+判法在 `packages/edge/src/judge.ts`。香港：公网驾驶舱首页回得来（任何 HTTP 状态码都算 nginx 活着），连不上算挂。法国：公网 `/healthz` 指 `https://<驾驶舱域名>/healthz`（香港 nginx 经隧道转），不是 `http://<法国IP>:8787/healthz`，也不是隧道地址。回 200，或回 503 但回得来（后端活着、某一项不好，交给健康页和引擎自己报），连不上、502、504 算挂，别的状态码也按挂报。香港连不上时只报香港，不连带报法国。同一次挂着每小时最多再推一次。恢复推「恢复了，挂了多久」。读不到上一轮状态照挂处理并且推一条，不静默。真域名、飞书 webhook、请求头 `x-fleet-watch` 的值只从 Worker 的 secret 读（`packages/edge/wrangler.toml` 里只有占位）。读不到密钥这一轮记没查成、写日志，不当成没挂。`FLEET_EDGE_FR_URL` 不是 `https://<驾驶舱域名>/healthz` 这种（http、带了 8787、写成 IP、路径不是 `/healthz`）也记没查成、不探测、不报法国挂了：法国公网 8787 超时是第二节的预期，配错地址不能当成法国挂了（`packages/edge/src/worker.ts`）。
 
 每次探测带请求头 `x-fleet-watch`，值是 secret `FLEET_EDGE_WATCH_ID`（送出去之前去掉首尾空白）。法国 `fleet-api` 的 `/healthz` 见到这个头和 `/etc/fleet-dao/api.env` 里的 `FLEET_EDGE_WATCH_ID` 是同一串，就给 `external-watchdog` 记一轮成功（`packages/api/src/external-watch.ts`）。对不上、没带头：不记，响应跟平时一样。记不上（登记行还没有、库写失败）只写日志，不把 `/healthz` 打成 500，免得这一轮被判成法国挂了。
 
@@ -542,7 +544,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 1. 建 KV：`npx wrangler kv namespace create EDGE_STATE`。把返回的 id 换进 `packages/edge/wrangler.toml` 里的占位 `<kv-namespace-id>`。只换这个 id，别把域名和密钥写进这个文件。
 2. 放密钥，都用 secret，不进仓。下面每条都在仓根执行，配置指到 `packages/edge/wrangler.toml`：
    - `npx wrangler secret put FLEET_EDGE_HK_URL --config packages/edge/wrangler.toml`，值是 `https://<驾驶舱域名>/`
-   - `npx wrangler secret put FLEET_EDGE_FR_URL --config packages/edge/wrangler.toml`，值是 `https://<驾驶舱域名>/healthz`
+   - `npx wrangler secret put FLEET_EDGE_FR_URL --config packages/edge/wrangler.toml`，值是 `https://<驾驶舱域名>/healthz`（不要写成法国公网 IP、隧道地址或 `:8787`；写错了 Worker 记没查成，不报法国挂了）
    - `npx wrangler secret put FLEET_FEISHU_WEBHOOK --config packages/edge/wrangler.toml`，值是飞书群机器人的 webhook
    - `npx wrangler secret put FLEET_EDGE_WATCH_ID --config packages/edge/wrangler.toml`，值自己生成一串，不进仓
 3. 部署命令：`npx wrangler deploy --config packages/edge/wrangler.toml`

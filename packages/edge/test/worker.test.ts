@@ -1,6 +1,12 @@
 // Worker 怎么读环境、怎么探测、密钥缺失怎么失败（#292 第 1 片）。判法本身在 judge.test.ts。
 import { describe, expect, it } from 'vitest';
-import worker, { type EdgeEnv, type EdgeStateStore, runRound, STATE_KEY } from '../src/worker.ts';
+import worker, {
+  type EdgeEnv,
+  type EdgeStateStore,
+  franceHealthUrlProblem,
+  runRound,
+  STATE_KEY,
+} from '../src/worker.ts';
 
 const T0 = Date.parse('2026-10-10T12:00:00+08:00');
 const HOOK = 'https://open.feishu.cn/open-apis/bot/v2/hook/fake-hook-token-for-logs';
@@ -87,6 +93,32 @@ describe('runRound', () => {
     expect(logged).toContain('FLEET_EDGE_WATCH_ID');
     expect(logged).not.toContain(HOOK);
     expect(net.calls).toEqual([]);
+  });
+
+  it('法国地址指到公网 8787 或 IP：没查成，不探测，不当成法国挂了', async () => {
+    expect(franceHealthUrlProblem(FR)).toBeNull();
+    for (const bad of [
+      'http://13.140.184.255:8787/healthz',
+      'http://10.99.0.2:8787/healthz',
+      'https://13.140.184.255/healthz',
+      'https://hk.example:8787/healthz',
+      'https://hk.example/',
+    ]) {
+      const lines: string[] = [];
+      const net = scripted(() => 200);
+      await expect(
+        runRound({
+          env: env({ FLEET_EDGE_FR_URL: bad }),
+          now: T0,
+          fetchImpl: net.fetchImpl,
+          log: (line) => lines.push(line),
+        }),
+      ).rejects.toThrow(/没查成/);
+      const logged = lines.join('\n');
+      expect(logged, bad).toContain('不当成没挂');
+      expect(logged, bad).toContain('8787');
+      expect(net.calls, bad).toEqual([]);
+    }
   });
 
   it('飞书地址不认：日志不带那串地址，不把这一轮当成没挂', async () => {
