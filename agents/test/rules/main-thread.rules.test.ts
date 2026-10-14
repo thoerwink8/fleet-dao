@@ -3,6 +3,8 @@
 //    附在下一次工具结果后面送进主对话。本机 178 条送到的引导里，AI 第一反应直接再调工具 107 条、先写话 45 条、本轮随即结束 26 条，
 //    创始人觉得「石沉大海」。所以最后一条引导之后主对话还没写过一段非空文字，就拒这次工具调用，理由里带上引导的前 200 字。
 // 原来的第 2 条「前台派子代理就拒」由决定 0089（规则减法，创始人 2026-10-13 17:54）删掉：两天 0 次命中，规矩留在文字里。
+// 决定 0093（创始人 2026-10-14 16:30「我都同意……」）：等文字落盘时最多读 4 次、每次隔 400 毫秒（落盘实测比工具调用晚近 1 秒）；
+// SendMessage 这类本身就是回话、转话的工具直接放行（拒的理由里就叫它这么做，再拦等于叫它照做又不让做）。
 // 子代理里的调用（输入带 agent_id）不管。transcript 读不了：放行，但用 systemMessage 明说没查成，不当成没有引导。
 // 创始人 2026-10-10 13:02 选定（「都按你的推荐来。」）。
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -194,6 +196,40 @@ describe('引导先回', () => {
       sleep: () => appendFileSync(t, `${JSON.stringify(row.text('m2', '收到。'))}\n`),
     });
     expect(v).toEqual({});
+  });
+
+  it('文字落盘得晚：连着读几次才读到的也放行（一次 400 毫秒不够）', () => {
+    const t = transcript([...turnStart(), row.directive('先别动数据库')]);
+    let reads = 0;
+    const v = lib.check(input(t), {
+      settleMs: 1,
+      mirasim: NO_MIRASIM,
+      sleep: () => {
+        reads += 1;
+        if (reads === 3)
+          appendFileSync(
+            t,
+            `${JSON.stringify(row.text('m2', '收到。'))}
+`,
+          );
+      },
+    });
+    expect(reads).toBeGreaterThanOrEqual(3);
+    expect(v).toEqual({});
+  });
+
+  it('转话、送达类工具（SendMessage、deliver_artifact、PushNotification）：本身就是回话，直接放行，不看文字', () => {
+    const t = transcript([...turnStart(), row.directive('先别动数据库')]);
+    for (const tool of ['SendMessage', 'mcp__mirasim__deliver_artifact', 'PushNotification']) {
+      const v = lib.check(
+        input(t, {}, tool, tool === 'SendMessage' ? { to: 'worker', message: '创始人的话' } : {}),
+        {
+          settleMs: 0,
+          mirasim: NO_MIRASIM,
+        },
+      );
+      expect(v, tool).toEqual({});
+    }
   });
 
   it('【故意造出的失败】只想不说、只写空白、子代理（isSidechain）写的话、接口报错的假回复：都不算回了，照拦', () => {

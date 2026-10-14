@@ -1,6 +1,7 @@
 // Stop 钩子。登记在 fleet-dao 仓的 .claude/settings.json（项目级），不装进用户级设置。
 // Grok、Devin 借道读的是用户级那份，这份它们碰不到。
-// 只有无人值守才 decision:block：这个会话自己跑过 `unattended.mjs on` 才输出（理由里说清有进展记进度）；
+// 只有无人值守才 decision:block：这个会话自己跑过 `unattended.mjs on`、而且输入的 background_tasks、session_crons 里
+// 什么都没在跑才输出（还有子代理、后台命令、监视、定时唤醒在跑就放行：它们收口时会把会话叫回来）；
 // 起子代理、后台活不自动开；放行条件和防死循环的上限见 unattended.mjs。人在场时这一轮收不收，由规矩说，不由这个钩子拦。
 // 引擎的无头会话（FLEET_HEADLESS=1）直接退出。
 // 退出码恒为 0：Stop 上 exit 2 也是「不许停」。
@@ -8,7 +9,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cleanId, decideStop, isMachineSession, stateDir } from './unattended.mjs';
+import { cleanId, decideStop, isMachineSession, pendingOf, stateDir } from './unattended.mjs';
 
 function isMain() {
   const entry = process.argv[1];
@@ -32,7 +33,7 @@ if (isMain()) {
     const sessionId = cleanId(input?.session_id) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
     if (sessionId && !isMachineSession({ env: process.env })) {
       const dir = stateDir();
-      const un = decideStop({ dir, sessionId });
+      const un = decideStop({ dir, sessionId, pending: pendingOf(input) });
       if (un.block) {
         process.stdout.write(`${JSON.stringify({ decision: 'block', reason: un.reason })}\n`);
         process.exit(0);

@@ -3,7 +3,10 @@
 // 1. 没开无人值守时（没人在这个会话里跑过 `unattended.mjs on`）不拦、不接着聊（仓根临时文件的提醒已删）——不管仓根干不干净、输入好不好，
 //    退出码恒为 0，输出里不许有 decision（会拦下 Stop）、不许有 hookSpecificOutput（additionalContext 会让对话接着走）。
 // 2. 决定 0028（创始人 2026-10-07 约 02:27 推翻 0026 的「这一轮结束、收尾不拦」）：只有这个会话自己跑了 `on` 才挡；
-//    起子代理、监视、后台命令不自动开；off、done / needs-you、满 12 小时、空转到上限都放行。
+//    起子代理、监视、后台命令不自动开；off、done / needs-you、满 12 小时、总次数到上限都放行。
+// 3. 决定 0093（创始人 2026-10-14 16:30「我都同意……」）：还有东西在跑（Stop 输入的 background_tasks、session_crons
+//    不空）就放行，它们的完成通知会叫醒会话；什么都没在跑才挡，连着挡 3 次放行一次并记进状态文件（无人值守仍开着）。
+//    中间调没调工具不再算数（一个会话 sleep 轮询着被挡了 247 次）。
 // 命令行外壳：真 spawn 这个文件，喂 stdin，看退出码和 stdout——测的是钩子实际接到 Claude Code 输入时的样子，不是内部函数。
 // 这份文件每条都要起真的 node 子进程（本机实测一条 0.4 秒上下；满载并行跑时更慢），默认 5 秒的超时会误红（#718：13 个子进程 6057ms）。
 // 子进程一律经 ../child.ts 的 runChild 起：每个子进程自带上限，卡死由它杀掉并抛出；用例不设 vitest 的超时（#264）。
@@ -145,9 +148,7 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
       JSON.stringify({
         state: 'on',
         expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-        idle: 0,
         totalBlocks: 0,
-        toolSinceBlock: true,
         ...extra,
       }),
     );
@@ -246,18 +247,51 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     expect(existsSync(stateFile(dir))).toBe(false);
   });
 
-  it('放行三（防死循环）：连着 3 次没调工具就放行并转暂停、写明原因（没有什么可盯的）；前两次仍挡', () => {
+  it('放行三（防死循环）：什么都没在跑、连着挡了 3 次，第 4 次放行一次、写明原因、记进状态文件；无人值守仍开着，下一次又从头挡', () => {
     const dir = temp('state');
     const env = isolatedEnv(dir, SID);
-    seed(dir, { idle: 0, totalBlocks: 1, toolSinceBlock: false });
-    expect(blocked(stop(env).stdout)).toBe(true); // 第 1 次空转
-    expect(blocked(stop(env).stdout)).toBe(true); // 第 2 次
-    expect(readS(dir).idle).toBe(2);
-    const r = stop(env); // 第 3 次
+    seed(dir, { totalBlocks: 1 });
+    const none = { background_tasks: [], session_crons: [] };
+    for (let i = 1; i <= 3; i++) expect(blocked(stop(env, none).stdout)).toBe(true);
+    expect(readS(dir).streak).toBe(3);
+    const r = stop(env, none);
     expect(blocked(r.stdout)).toBe(false);
-    expect(r.stdout).toContain('自动暂停');
-    expect(r.stdout).toContain('3 次');
-    expect(cli(['status'], env).stdout).toContain('paused');
+    expect(r.stdout).toContain('连着挡了 3 次');
+    const s = readS(dir);
+    expect(s.state).toBe('on');
+    expect(s.streak).toBe(0);
+    expect(s.streakReleases).toBe(1);
+    expect(typeof s.lastStreakReleaseAt).toBe('string');
+    expect(blocked(stop(env, none).stdout)).toBe(true);
+  });
+
+  it('放行四：还有东西在跑（background_tasks 有子代理、后台命令、监视，或 session_crons 有定时唤醒）——放行、不说话、连着挡的计数清零', () => {
+    const dir = temp('state');
+    const env = isolatedEnv(dir, SID);
+    seed(dir, { totalBlocks: 5, streak: 2 });
+    const task = { id: 'b1', type: 'subagent', status: 'running', description: '写代码' };
+    const r = stop(env, { background_tasks: [task], session_crons: [] });
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe('');
+    expect(readS(dir).streak).toBe(0);
+    expect(readS(dir).totalBlocks).toBe(5);
+    const shell = { id: 'b2', type: 'shell', status: 'running', command: 'pnpm test' };
+    expect(blocked(stop(env, { background_tasks: [shell] }).stdout)).toBe(false);
+    expect(
+      blocked(
+        stop(env, { background_tasks: [], session_crons: [{ id: 'c1', cron: '*/10 * * * *' }] }).stdout,
+      ),
+    ).toBe(false);
+    expect(readS(dir).state).toBe('on');
+  });
+
+  it('输入里没有 background_tasks（别家、旧版 Claude Code）：判不出，按什么都没在跑算，照挡；不是数组的也一样', () => {
+    const dir = temp('state');
+    const env = isolatedEnv(dir, SID);
+    seed(dir, {});
+    expect(blocked(stop(env).stdout)).toBe(true);
+    expect(blocked(stop(env, { background_tasks: 'x', session_crons: 3 }).stdout)).toBe(true);
+    expect(readS(dir).streak).toBe(2);
   });
 
   it('放行五：挡了 200 次到总上限——放行', () => {
@@ -268,17 +302,16 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     expect(r.stdout).toContain('200 次');
   });
 
-  it('两次挡之间调过工具（PreToolUse 记了一笔）：不算空转，空转计数清零，继续挡', () => {
+  it('两次挡之间调过工具不算数：PreToolUse 不再记「调了工具」，连着挡的计数照涨（sleep、查一次 PR 不算在干活）', () => {
     const dir = temp('state');
     const env = isolatedEnv(dir, SID);
-    // 已经到了「再空转一次就放行」的边缘；调一个工具就把它救回来
-    seed(dir, { idle: 2, totalBlocks: 3, toolSinceBlock: false });
+    seed(dir, { totalBlocks: 3, streak: 2 });
     expect(pretool(env, 'Bash', { command: 'echo hi' }).status).toBe(0);
-    expect(readS(dir).toolSinceBlock).toBe(true);
+    expect(readS(dir).toolSinceBlock).toBeUndefined();
     expect(blocked(stop(env).stdout)).toBe(true);
     const s = readS(dir);
     expect(s.state).toBe('on');
-    expect(s.idle).toBe(0);
+    expect(s.streak).toBe(3);
     expect(s.totalBlocks).toBe(4);
   });
 
@@ -368,7 +401,7 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     });
   });
 
-  it('开会话钩子读得到：开着给一句话（不要结束、等子代理的完成通知）、暂停给一句话、没开什么都不给', () => {
+  it('开会话钩子读得到：开着给一句话（有东西在跑可以结束、等完成通知；什么都没在跑不要空着收尾）、暂停给一句话、没开什么都不给', () => {
     const dir = temp('state');
     const env = isolatedEnv(dir, SID);
     // 经子进程调 sessionLines：.mjs 没有类型声明，不在 TS 里直接 import
@@ -381,7 +414,7 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     expect(lines()).toEqual([]);
     cli(['on'], env);
     expect(lines().join('')).toContain('无人值守开着');
-    expect(lines().join('')).toContain('不要结束');
+    expect(lines().join('')).toContain('不要空着收尾');
     expect(lines().join('')).toContain('完成通知');
     cli(['needs-you', '要花钱'], env);
     expect(lines().join('')).toContain('暂停着（要花钱）');
