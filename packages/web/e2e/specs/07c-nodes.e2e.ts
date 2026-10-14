@@ -99,7 +99,10 @@ test.describe('看板多机', () => {
   test('失联：浏览器的钟快进 10 分钟，横幅写「失联 10 分钟」、说不是现在的，顶栏标「失联」，下拉里那一项变灰', async ({
     page,
     shot,
+    problems,
   }) => {
+    // 钟一快进，轮询一下子到期好几回，新一轮请求把还在路上的上一轮环境列表取消掉：被取消的不是失败
+    problems.allow('/api/nodes net::ERR_ABORTED');
     await page.clock.install({ time: new Date() });
     await page.goto('/?node=wsl');
     const banner = page.locator('[data-snapshot-banner]');
