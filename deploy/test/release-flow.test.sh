@@ -62,6 +62,9 @@ migrate() {
 # 真的 api_report_before 留一份：「切之前读不到健康报告」那一段用真代码，别的段换成桩
 eval "real_$(declare -f api_report_before)"
 api_report_before() { :; }
+# 后端重启后等它答话（#2186）：各段的后端是假的，换成桩；真代码在「后端重启后起不来」那一段测
+eval "real_$(declare -f api_wait_up)"
+api_wait_up() { :; }
 SYNCED=0 # 往香港发过几次静态文件
 PROBED=0   # 试通过几次往香港传静态文件的路
 WEB_DOWN=0 # 1 = 往香港传静态文件的路试不通
@@ -73,10 +76,6 @@ web_reachable() {
     return 1
   fi
 }
-# 删香港上老目录（retire_hk_dir，#1223）和读回（check_retired_dir）换成桩，只数调了几次；真代码在 web-publish.test.sh 里测
-RETIRED_RUNS=0
-retire_hk_dir() { RETIRED_RUNS=$((RETIRED_RUNS + 1)); }
-check_retired_dir() { :; }
 health_gate() {
   if [[ "${GATE[$1]:-ok}" == ok ]]; then return 0; fi
   red "桩：${1:0:12} 健康检查不过"
@@ -382,6 +381,57 @@ eval "$has_service_saved"
 unset -f systemctl
 api_report_before() { :; }
 
+echo "== 后端重启后起不来（#2186：新版缺依赖反复崩）：切完马上等它答话，到点不答就判红交回，不先去发香港、跑健康检查"
+# curl 换成桩：前 CURL_FAILS 次连不上，之后答话；次数记在文件上（api_wait_up 里不是子 shell，但 activate 的调用链里不保证）
+: >"$TMP/curl-n"
+CURL_FAILS=2
+# shellcheck disable=SC2317,SC2329 # 由 release.sh 里的 api_wait_up 间接调用
+curl() {
+  printf 'x\n' >>"$TMP/curl-n"
+  (($(wc -l <"$TMP/curl-n") > CURL_FAILS))
+}
+# shellcheck disable=SC2317,SC2329 # 由 activate 间接调用
+api_wait_up() { real_api_wait_up; }
+API_UP_WAIT=10
+real_api_wait_up >/dev/null
+check "前两次连不上、第三次答话：等到了（试了 3 次）" "$?:$(wc -l <"$TMP/curl-n" | tr -d ' ')" "0:3"
+: >"$TMP/curl-n"
+CURL_FAILS=1000
+API_UP_WAIT=2
+reset
+real_api_wait_up >/dev/null
+check "【故意造出的失败】一直不答：到点判红，返回 1" "$?:${#REDS[@]}" "1:1"
+check "红里写明起不来、看哪份日志" "$(printf '%s\n' "${REDS[@]}" | grep -c '还没在驾驶舱接口.*journalctl -u fleet-api')" 1
+# 接进切版本那一步：后端启用着、起不来，就不往香港发、activate 直接返回 1（do_release 接着自动退回）
+saved_services=$FLEET_SERVICES
+saved_hk=$FLEET_HK_PARTS
+ensure_unit_running_saved=$(declare -f ensure_unit_running)
+running_release_saved=$(declare -f running_release)
+ensure_unit_running() { :; }
+running_release() { :; }
+FLEET_SERVICES="fleet-api"
+FLEET_HK_PARTS="web"
+SYNCED=0
+reset
+activate "$C" release >/dev/null
+check "后端起不来：activate 返回 1、静态文件没发" "$?:$SYNCED" "1:0"
+: >"$TMP/curl-n"
+CURL_FAILS=0
+reset
+activate "$C" release >/dev/null
+check "后端答话：activate 照常往下走、发了静态文件" "$?:$SYNCED:${#REDS[@]}" "0:1:0"
+FLEET_SERVICES=""
+reset
+activate "$C" release >/dev/null
+check "本机没启用后端：不等它" "$?:$(wc -l <"$TMP/curl-n" | tr -d ' ')" "0:1"
+unset -f curl
+eval "$ensure_unit_running_saved"
+eval "$running_release_saved"
+FLEET_SERVICES=$saved_services
+FLEET_HK_PARTS=$saved_hk
+API_UP_WAIT=30
+api_wait_up() { :; }
+
 rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
 GATE=()
 MIG=()
@@ -406,11 +456,11 @@ do_release "$E" >/dev/null
 check "在用 E" "$(current_sha)" "$E"
 check "静态文件一次都没发" "$SYNCED" 0
 check "传静态文件的路一次都没试" "$PROBED" 0
-check "什么都不发：香港上老的目录也不碰（#1223）" "$RETIRED_RUNS" 0
 FLEET_HK_PARTS="web"
 reset
 do_release "$A" >/dev/null
-check "明写了 web：先试通、再发静态文件、再核对删掉老目录" "$PROBED:$SYNCED:$RETIRED_RUNS" "1:1:1"
+check "明写了 web：先试通、再发静态文件" "$PROBED:$SYNCED" "1:1"
+check "删香港老目录那一步已经撤了（#2186：#1223 早做完，香港上 /demo/ 已不在；那一步的 rsync 超时曾把整次发版打红）"   "$(declare -F retire_hk_dir check_retired_dir hk_static_ours | wc -l)" 0
 FLEET_HK_PARTS=""
 SYNCED=0
 reset

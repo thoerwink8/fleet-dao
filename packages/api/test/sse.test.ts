@@ -40,6 +40,27 @@ describe('实时推送（SSE）', () => {
     expect(h.relay.connections()).toBe(0);
   });
 
+  it('停机收场（endAll，#2186）：开着的 SSE 流读到结尾、连接数归零；之后再连上来的也立刻收', async () => {
+    const h = harness();
+    const { cookie } = await h.login();
+    const { reader } = await open(h, cookie);
+    await readUntil(reader, 'event: ready');
+    expect(h.relay.connections()).toBe(1);
+
+    h.relay.endAll();
+    // 流要真结束（done），不是只退订：不结束的话 server.close 等不到这条连接，排空照样等满上限
+    let ended = false;
+    for (let i = 0; i < 50 && !ended; i++) ended = (await reader.read()).done;
+    expect(ended).toBe(true);
+    expect(h.relay.connections()).toBe(0);
+
+    const late = await open(h, cookie);
+    let lateEnded = false;
+    for (let i = 0; i < 50 && !lateEnded; i++) lateEnded = (await late.reader.read()).done;
+    expect(lateEnded).toBe(true);
+    expect(h.relay.connections()).toBe(0);
+  });
+
   it('浏览器断线重连（带 Last-Event-ID）：补发断开期间的变化，按顺序、不重复，不再发 ready', async () => {
     const h = harness();
     const { cookie } = await h.login();
