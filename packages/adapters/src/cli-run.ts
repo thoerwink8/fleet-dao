@@ -79,10 +79,18 @@ export interface CliRunPlan<E extends LineEffect> {
   drainTranscript?(): TranscriptEntry[];
 }
 
-/** 起会话前的公共检查：测试里不许起真执行体、提示词不空、工作目录在。 */
-export async function assertRunnable(command: readonly string[], prompt: string, cwd: string): Promise<void> {
+/**
+ * 起会话前的公共检查：测试里不许起真执行体、提示词不空、工作目录在。接回（io.attach）不起进程、不喂提示词，提示词不查——
+ * 引擎接回时不重拼提示词，给的是空的（#2238：10-15 07:44 法国第一次接回就被「提示词是空的」拒了，会话在 scope 里接着跑、没人收）。
+ */
+export async function assertRunnable(
+  command: readonly string[],
+  prompt: string,
+  cwd: string,
+  io?: DetachedIo,
+): Promise<void> {
   assertNotRealAgentInTests(command);
-  if (!prompt.trim()) throw new Error('提示词是空的');
+  if (!io?.attach && !prompt.trim()) throw new Error('提示词是空的');
   const dir = await stat(cwd).catch(() => undefined);
   if (!dir?.isDirectory()) throw new Error(`工作目录不存在：${cwd}`);
 }
