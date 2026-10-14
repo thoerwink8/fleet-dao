@@ -353,7 +353,17 @@ describe('键：盖住测试的全部输入，不相干的不变', () => {
       read: (rel) => repo.read(rel),
     });
     if (typeof r === 'string') throw new Error(r);
-    const keys = r.plan.tests.map((t) => computeKey({ fs, graph: real, box: t.files, env: ENV }).key);
+    // 每一台都要把 packages/ 整棵树过一遍：读盘按路径记下来，同一个文件只从盘上读一次（八台各读一遍，负载下超过 5 秒）。
+    // 哈希照每台各算，判的还是「真仓上每一台都算得出、各不相同」。
+    const once = <T>(read: (rel: string) => T) => {
+      const seen = new Map<string, T>();
+      return (rel: string): T => {
+        if (!seen.has(rel)) seen.set(rel, read(rel));
+        return seen.get(rel) as T;
+      };
+    };
+    const cached: HashFs = { bytes: once((rel) => fs.bytes(rel)), list: once((rel) => fs.list(rel)) };
+    const keys = r.plan.tests.map((t) => computeKey({ fs: cached, graph: real, box: t.files, env: ENV }).key);
     expect(keys.length).toBeGreaterThan(1);
     expect(new Set(keys).size, '每一台的键不一样（分到的文件不同）').toBe(keys.length);
   });
