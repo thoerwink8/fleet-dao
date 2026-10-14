@@ -9,17 +9,9 @@
 // runChildOk：退出码不是 0 就抛（带上 stderr），成功返回去掉首尾空白的标准输出。
 import { spawnSync } from 'node:child_process';
 
-/**
- * Windows 上 node 跑 .ts 入口、用 process.exit 退出时，偶发崩成 0xC0000409（stderr 一行 libuv 的
- * Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)，nodejs/node#56645）：剥类型用的 wasm 还在后台分层编译，
- * 退出时往已经关掉的句柄发消息，退出码丢了（本机并行跑测试时 flow-stats 那条「退出 2」就这么红过，压测一百五十次崩十几次）。
- * 测试起的 node 关掉这层分层编译（--no-wasm-dynamic-tiering，压测零次），退出码才可信；别的系统、别的命令原样。
- */
-export function withNodeFlags(command: string, args: readonly string[]): readonly string[] {
-  return process.platform === 'win32' && command === process.execPath
-    ? ['--no-wasm-dynamic-tiering', ...args]
-    : args;
-}
+// 不给 node 加 --no-wasm-dynamic-tiering（决定 0093）：Windows 上 .ts 入口用 process.exit 退出偶发崩成 3221226505
+// （nodejs/node#56645）。本包测试起的是 agents/hooks、agents/local-sessions、skills 里的 .mjs（不剥类型，本来就不碰那条路），
+// 去掉参数后 21 种起法各并行 150 次零崩。
 
 /** 一个子进程最多跑多久。只防卡死、不量快慢：正常起一个 node 或 sh 不到一秒，满载的机器上也就几秒。 */
 export const CHILD_LIMIT_MS = 60_000;
@@ -44,7 +36,7 @@ export interface ChildResult {
 
 export function runChild(command: string, args: readonly string[], options: ChildOptions = {}): ChildResult {
   const { limitMs = CHILD_LIMIT_MS, ...rest } = options;
-  const r = spawnSync(command, withNodeFlags(command, args), {
+  const r = spawnSync(command, args, {
     ...rest,
     encoding: 'utf8',
     timeout: limitMs,
