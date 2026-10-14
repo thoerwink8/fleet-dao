@@ -161,10 +161,10 @@ describe('接进计划：PR 只改 deploy/ 窄，主线推送、本机预检不�
   });
 
   it('同时改了别的包：那个包的单元照测，加上读 deploy/ 的', () => {
-    const a = assigned(pr(true, 'deploy/lib/common.sh', 'packages/cli/src/help.ts'));
-    expect(a.testUnits).toEqual(['cli']);
+    const a = assigned(pr(true, 'deploy/lib/common.sh', 'packages/agent-eval/src/cli.ts'));
+    expect(a.testUnits).toEqual(['agent-eval']);
     const files = filesOf(a);
-    expect(files.some((f) => f.startsWith('packages/cli/'))).toBe(true);
+    expect(files.some((f) => f.startsWith('packages/agent-eval/'))).toBe(true);
     expect(files).toContain('packages/conventions/test/ci-cache.test.ts');
   });
 
@@ -244,7 +244,7 @@ describe('窄跑的 PR 不留树声明：合并后主线不复用它，自己全
 
   it('planOutputs 的 narrowed：窄跑的计划是 true，别的是空串', () => {
     expect(planOutputs(assigned(pr(true, 'deploy/lib/common.sh'))).narrowed).toBe('true');
-    expect(planOutputs(assigned(pr(true, 'packages/cli/src/help.ts'))).narrowed).toBe('');
+    expect(planOutputs(assigned(pr(true, 'packages/agent-eval/src/cli.ts'))).narrowed).toBe('');
     expect(planOutputs(pr(false, 'deploy/lib/common.sh')).narrowed).toBe('');
   });
 

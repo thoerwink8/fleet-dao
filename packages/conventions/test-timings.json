@@ -149,7 +149,6 @@
     "packages/api/test/fleet-api-wrapper.test.ts": 5,
     "packages/api/test/france-preflight.test.ts": 26,
     "packages/api/test/france-release.test.ts": 140,
-    "packages/api/test/gateway-seen.test.ts": 78,
     "packages/api/test/gateway.test.ts": 142,
     "packages/api/test/github-app-health.test.ts": 1770,
     "packages/api/test/github-token.test.ts": 11,
