@@ -18,6 +18,7 @@ import {
   createColdVerify,
   type DiffFile,
   fillMissingPatches,
+  handoffBody,
   MAX_FILE_DIFF_LINES,
   mirrorFileDiff,
   renderDiff,
@@ -145,6 +146,8 @@ function rig(
     pullFilesError?: Error;
     setStatusError?: (posted: Posted[]) => Error | undefined;
     pickRouteError?: Error;
+    /** 给了就接上留言口（「不归我验」转人用）；comments 记下每次留的言。 */
+    commentIssue?: (input: { issueNumber: number; key: string; body: string }) => Promise<void>;
     deps?: Partial<ColdVerifyActivityDeps>;
   } = {},
 ) {
@@ -189,6 +192,14 @@ function rig(
       if (opts.pullFilesError) throw opts.pullFilesError;
       return opts.files ?? FILES;
     },
+    ...(opts.commentIssue
+      ? {
+          async commentIssue(i: { issueNumber: number; key: string; body: string }) {
+            await opts.commentIssue?.(i);
+            return { commentId: 1, url: 'https://example.test/c/1', created: true };
+          },
+        }
+      : {}),
   } as unknown as ColdVerifyActivityDeps['gh'];
   // 不写选路剧本＝gpt 有路由（作者是 claude 时 0006 顺序里的第一家）；要造「一条都没有」写 picks: {}
   const picks: PickScript = opts.picks ?? { gpt: okRoute('gpt') };
@@ -439,7 +450,8 @@ describe('【故意造出的失败】做不出来：回 unavailable（工作流�
     });
     const got = await r.run(r.input(), ctx());
     expect(got.unavailable).toContain('data/huge.json');
-    expect(got.unavailable).toContain('diff GitHub 没给');
+    expect(got.unavailable).toContain('GitHub 没给这个文件的 diff');
+    expect(got.unavailable).toContain('一个都看不到');
   });
 
   it('PR 已经关了：unavailable；还没读到头，状态贴不了（不假装贴过）', async () => {
@@ -968,18 +980,43 @@ describe('renderDiff：喂给会话的 diff', () => {
     );
   });
 
-  it('【故意造出的失败】没有 patch 又说不清改了多少行（changes 读不到）：当看不全，抛，不当二进制', () => {
-    expect(() => renderDiff([{ filename: 'x.bin', status: 'modified' }])).toThrow('diff GitHub 没给');
+  it('【故意造出的失败】没有 patch 又说不清改了多少行（changes 读不到）、又是唯一的文件：当看不全，抛，不当二进制', () => {
+    expect(() => renderDiff([{ filename: 'x.bin', status: 'modified' }])).toThrow('一个都看不到');
   });
 
-  it('【故意造出的失败】总长超过上限：抛，写明已经看了几个文件', () => {
+  it('没有 patch 的文件和看得到的文件在一起：它跳过并写明原因，别的照给（决定 0093）', () => {
+    const out = renderDiff([
+      { filename: 'x.bin', status: 'modified' },
+      { filename: 'a.ts', status: 'modified', patch: '@@ -1 +1 @@\n-1\n+2', changes: 2 },
+    ]);
+    expect(out.diffText).toContain('diff --git a/x.bin b/x.bin');
+    expect(out.diffText).toContain('（跳过：GitHub 没给这个文件的 diff');
+    expect(out.diffText).toContain('不归我验');
+    expect(out.diffText).toContain('+2');
+    expect(out.skipped).toHaveLength(1);
+    expect(out.skipped[0]).toContain('x.bin');
+  });
+
+  it('总长超过上限：放不下的文件跳过并写明，放得下的照给，不截断', () => {
     const files: DiffFile[] = [1, 2, 3].map((i) => ({
       filename: `f${i}.ts`,
       status: 'modified',
-      patch: 'y'.repeat(400),
+      patch: `${i}`.repeat(400),
       changes: 400,
     }));
-    expect(() => renderDiff(files, 1_000)).toThrow(/diff 太大.*3\/3/);
+    const out = renderDiff(files, 1_000);
+    expect(out.diffText).toContain('1'.repeat(400));
+    expect(out.diffText).toContain('2'.repeat(400));
+    expect(out.diffText).not.toContain('3'.repeat(400));
+    expect(out.skipped).toEqual([expect.stringContaining('f3.ts：diff 太大，放不下这个文件')]);
+    expect(out.changedFiles).toEqual(['f1.ts', 'f2.ts', 'f3.ts']);
+  });
+
+  it('【故意造出的失败】总长超过上限、一个文件都放不下：抛，不当通过', () => {
+    const files: DiffFile[] = [
+      { filename: 'f.ts', status: 'modified', patch: 'y'.repeat(4_000), changes: 400 },
+    ];
+    expect(() => renderDiff(files, 1_000)).toThrow('一个都看不到');
   });
 });
 
@@ -1123,7 +1160,7 @@ describe('大文件 GitHub 不给 patch：用 git 补读、超上限给摘要、
     expect(out.changedFiles).toEqual([SNAPSHOT]);
   });
 
-  it('【故意造出的失败】GitHub 没给、git 补读也读不到：unavailable，点名文件和哪一步没成；不起会话、状态 failure，不当通过', async () => {
+  it('GitHub 没给、git 补读也读不到：这个文件跳过，提示词里点名文件和哪一步没成，别的文件照常验（决定 0093）', async () => {
     const r = rig({
       files: [...FILES, HUGE],
       deps: {
@@ -1133,9 +1170,26 @@ describe('大文件 GitHub 不给 patch：用 git 补读、超上限给摘要、
       },
     });
     const got = await r.run(r.input(), ctx());
+    expect(got.unavailable).toBeUndefined();
+    expect(got.pass).toBe(true);
+    expect(r.specs).toHaveLength(1);
+    const prompt = r.specs[0]?.prompt ?? '';
+    expect(prompt).toContain('（跳过：GitHub 没给这个文件的 diff');
+    expect(prompt).toContain('git 补读也失败了（镜像里没有基线提交）');
+  });
+
+  it('【故意造出的失败】GitHub 没给、git 补读也读不到，又没有别的文件看得到：unavailable，不起会话、状态 failure，不当通过', async () => {
+    const r = rig({
+      files: [HUGE],
+      deps: {
+        fileDiff: async () => {
+          throw new Error('镜像里没有基线提交');
+        },
+      },
+    });
+    const got = await r.run(r.input(), ctx());
     expect(got.pass).toBe(false);
     expect(got.unavailable).toContain('data/huge.json');
-    expect(got.unavailable).toContain('diff GitHub 没给');
     expect(got.unavailable).toContain('git 补读也失败');
     expect(got.unavailable).toContain('镜像里没有基线提交');
     expect(r.specs).toHaveLength(0);
@@ -1480,5 +1534,88 @@ describe('没路由时的重试间隔递增、状态不重复写（#2007）', { 
     t += VERIFY_BACKOFF_FORGET_MS + 1000;
     const third = await r.run(r.input(), ctx());
     expect(third.retry?.afterSeconds).toBe(30);
+  });
+});
+
+describe('材料带 PR 正文和测试输出；「不归我验」留言到单上转人、不算没过（决定 0093）', {
+  timeout: 30_000,
+}, () => {
+  const OUT_OF_SCOPE = [
+    '## 问题',
+    '',
+    '## 不归我验',
+    '- 第 1 条：要驾驶舱页面截图，diff 里看不出状态栏真显示了',
+    '',
+    '## 建议',
+    '- 状态栏颜色可以再淡一点',
+    '',
+    'verdict: pass',
+  ].join('\n');
+
+  it('PR 正文和测试输出进了提示词', async () => {
+    const r = rig({ pull: { body: '加了状态栏，截图在评论里。' } });
+    await r.run(r.input({ testOutput: 'Tests  12 passed (12)' }), ctx());
+    const prompt = r.specs[0]?.prompt ?? '';
+    expect(prompt).toContain('## PR 正文');
+    expect(prompt).toContain('加了状态栏，截图在评论里。');
+    expect(prompt).toContain('## 引擎跑过的测试输出');
+    expect(prompt).toContain('Tests  12 passed (12)');
+  });
+
+  it('「不归我验」：结论 pass、状态 success，outOfScope 带出，并留言到单上（幂等键带 PR 号和头）', async () => {
+    const comments: { issueNumber: number; key: string; body: string }[] = [];
+    const r = rig({
+      driverRun: async () => report(OUT_OF_SCOPE),
+      commentIssue: async (i) => {
+        comments.push(i);
+      },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(true);
+    expect(got.problems).toEqual([]);
+    expect(got.unavailable).toBeUndefined();
+    expect(got.outOfScope).toEqual(['第 1 条：要驾驶舱页面截图，diff 里看不出状态栏真显示了']);
+    expect(got.notes).toContain('已留言到单 #12');
+    expect(r.posted.at(-1)?.state).toBe('success');
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.issueNumber).toBe(12);
+    expect(comments[0]?.key).toBe(`cold-verify-out-of-scope:42:${HEAD}`);
+    expect(comments[0]?.body).toContain('要驾驶舱页面截图');
+    expect(comments[0]?.body).toContain('状态栏颜色可以再淡一点');
+  });
+
+  it('留言失败：结论不改（照样 pass），notes 写明没留成', async () => {
+    const r = rig({
+      driverRun: async () => report(OUT_OF_SCOPE),
+      commentIssue: async () => {
+        throw new Error('GitHub 503');
+      },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(true);
+    expect(got.outOfScope).toHaveLength(1);
+    expect(got.notes).toContain('没留成言');
+    expect(got.notes).toContain('GitHub 503');
+  });
+
+  it('没有「不归我验」：不留言', async () => {
+    let called = 0;
+    const r = rig({
+      commentIssue: async () => {
+        called += 1;
+      },
+    });
+    const got = await r.run(r.input(), ctx());
+    expect(got.pass).toBe(true);
+    expect(got.outOfScope).toBeUndefined();
+    expect(called).toBe(0);
+  });
+
+  it('handoffBody：点名 PR、头、每一条', () => {
+    const body = handoffBody({ prNumber: 7, headSha: 'f'.repeat(40) }, ['第 2 条：要线上数据']);
+    expect(body).toContain('PR #7');
+    expect(body).toContain('fffffff');
+    expect(body).toContain('- 第 2 条：要线上数据');
+    expect(body).not.toContain('建议');
   });
 });

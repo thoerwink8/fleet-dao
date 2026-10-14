@@ -61,6 +61,8 @@ export interface ColdVerifySpec {
   what: string;
   howToFinish: string[];
   specDir?: string;
+  /** 引擎在会话收场后自己跑过的测试输出（有才给）：原样放进验收材料（决定 0093）。 */
+  testOutput?: string;
 }
 
 /**
@@ -68,8 +70,8 @@ export interface ColdVerifySpec {
  * 在这一层是禁止的——那正是「拿不到当没问题」。
  */
 export interface ColdVerifySources {
-  /** PR 此刻的头（状态贴它）、diff 的基线、分支名。 */
-  pr(prNumber: number): Promise<{ head: string; baseSha: string; branch: string }>;
+  /** PR 此刻的头（状态贴它）、diff 的基线、分支名；body 是 PR 正文（给了就放进验收材料，决定 0093）。 */
+  pr(prNumber: number): Promise<{ head: string; baseSha: string; branch: string; body?: string }>;
   /** diff 原文 + 改了哪些文件。 */
   diff(args: { prNumber: number; baseSha: string }): Promise<{ diffText: string; changedFiles: string[] }>;
   /** 单子：是哪张、「要什么 / 怎么算做完」。 */
@@ -154,7 +156,7 @@ export async function runColdVerifyForPr(
   };
 
   // 1. 取 PR（头、基线、分支）。读不到 = 没验成，照样贴（贴不上就算了：连头都没有）。
-  let pr: { head: string; baseSha: string; branch: string };
+  let pr: { head: string; baseSha: string; branch: string; body?: string };
   try {
     pr = await deps.sources.pr(prNumber);
   } catch (err) {
@@ -227,6 +229,10 @@ export async function runColdVerifyForPr(
     ...(otherAuthors.length > 0 ? { otherAuthorFamilies: otherAuthors } : {}),
     round,
     ...(requireTwoFamilies ? { requireTwoFamilies: true } : {}),
+    ...(pr.body !== undefined && pr.body.trim() !== '' ? { prBody: pr.body } : {}),
+    ...(spec.testOutput !== undefined && spec.testOutput.trim() !== ''
+      ? { testOutput: spec.testOutput }
+      : {}),
   };
   const invokeDeps: ColdVerifyInvokeDeps = {
     oneShot: deps.oneShot,
