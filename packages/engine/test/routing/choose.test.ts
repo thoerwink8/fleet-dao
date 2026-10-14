@@ -230,6 +230,15 @@ describe('派不出（要报警，附每条被挡的原因）', () => {
     );
   });
 
+  it('动手阶段整族避开派不出：话说的是换一族，不是「只派别家」', () => {
+    const r = chooseRoute(input([route('a')], { stage: 'execute', avoid: { families: ['claude'] } }));
+    expect(r.kind).toBe('none');
+    if (r.kind === 'none') {
+      expect(r.reason).toContain('换路由要换一族');
+      expect(r.reason).not.toContain('只派别家');
+    }
+  });
+
   it('别家在等空位：等它，不回派不出', () => {
     const kimi = route('k', { family: 'kimi', blockers: ['no-slot'], inFlight: 5 });
     const r = chooseRoute(input([route('a'), kimi], { stage: 'verify', avoid: { families: ['claude'] } }));

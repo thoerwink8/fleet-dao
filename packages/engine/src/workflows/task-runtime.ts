@@ -56,6 +56,7 @@ import {
   type ResumeFrom,
   stripUndefined,
   widen,
+  withFamily,
   ZERO,
 } from './task-support.ts';
 
@@ -450,11 +451,8 @@ export class TaskRuntime {
   avoidModel(route: RouteChoice): void {
     this.commitAvoid = widen(this.commitAvoid, route, 'model');
     const family = avoidableFamily(route);
-    if (family !== null && patched('avoid-model-family')) {
-      const families = this.commitAvoid.families ?? [];
-      if (!families.includes(family))
-        this.commitAvoid = { ...this.commitAvoid, families: [...families, family] };
-    }
+    if (family !== null && patched('avoid-model-family'))
+      this.commitAvoid = withFamily(this.commitAvoid, family);
     this.commitMissRoute = route;
   }
 
