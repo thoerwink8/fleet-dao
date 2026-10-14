@@ -62,6 +62,9 @@ migrate() {
 # 真的 api_report_before 留一份：「切之前读不到健康报告」那一段用真代码，别的段换成桩
 eval "real_$(declare -f api_report_before)"
 api_report_before() { :; }
+# 后端重启后等它答话（#2186）：各段的后端是假的，换成桩；真代码在「后端重启后起不来」那一段测
+eval "real_$(declare -f api_wait_up)"
+api_wait_up() { :; }
 SYNCED=0 # 往香港发过几次静态文件
 PROBED=0   # 试通过几次往香港传静态文件的路
 WEB_DOWN=0 # 1 = 往香港传静态文件的路试不通
@@ -386,6 +389,7 @@ curl() {
   printf 'x\n' >>"$TMP/curl-n"
   (($(wc -l <"$TMP/curl-n") > CURL_FAILS))
 }
+eval "$(declare -f real_api_wait_up | sed '1s/real_api_wait_up/api_wait_up/')"
 API_UP_WAIT=10
 api_wait_up >/dev/null
 check "前两次连不上、第三次答话：等到了（试了 3 次）" "$?:$(wc -l <"$TMP/curl-n" | tr -d ' ')" "0:3"
@@ -424,6 +428,7 @@ eval "$running_release_saved"
 FLEET_SERVICES=$saved_services
 FLEET_HK_PARTS=$saved_hk
 API_UP_WAIT=30
+api_wait_up() { :; }
 
 rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
 GATE=()
