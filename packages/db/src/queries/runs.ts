@@ -7,7 +7,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { errMessage } from '@fleet-dao/shared/util';
-import { and, asc, eq, gte, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { type RunRouteOutcome, type RunTier, routes, runs } from '../schema/index.ts';
 
@@ -144,6 +144,29 @@ export async function finishRun(
 /** 查一段。不给 id 就查不到。 */
 export async function getRun(db: Db, id: string): Promise<RunRow | null> {
   const [row] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
+  return row ?? null;
+}
+
+/**
+ * 一张单某一段最近起的那一次（续会话找上一段的会话号用）：只认 task_id 对得上的；给了 startedAfter 只看那之后起的。
+ * 同一时刻起的按建行先后、编号排，结果确定。没有返回 null。
+ */
+export async function latestRunOfTask(
+  db: Db,
+  input: { taskId: string; segment: 'scope' | 'manual' | 'verify'; startedAfter?: Date },
+): Promise<RunRow | null> {
+  const [row] = await db
+    .select()
+    .from(runs)
+    .where(
+      and(
+        eq(runs.taskId, input.taskId),
+        eq(runs.segment, input.segment),
+        ...(input.startedAfter ? [gte(runs.startedAt, input.startedAfter)] : []),
+      ),
+    )
+    .orderBy(desc(runs.startedAt), desc(runs.createdAt), desc(runs.id))
+    .limit(1);
   return row ?? null;
 }
 

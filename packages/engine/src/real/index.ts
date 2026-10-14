@@ -22,6 +22,8 @@ import {
   createDb,
   type Db,
   finishScheduleRun,
+  getRun,
+  latestRunOfTask,
   listIntakeRepos,
   readEngineMasterRow,
   recordRouteProbeDone,
@@ -105,6 +107,7 @@ import {
   wakeAfterProbeRound,
 } from './route-wake.ts';
 import { realChannelAttempts, realReservations, realRuns } from './runs-writer.ts';
+import { createPlanSegmentResume } from './segment-resume.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { SESSION_ORG_TIMEOUT_MS, type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
@@ -959,6 +962,12 @@ export function realPortsFromEnv(
       sessions: oneShots,
       subagentGuard,
       log: taskLog,
+    }),
+    planSegmentResume: createPlanSegmentResume({
+      spawner: segmentSpawner,
+      getRun: (runId) => getRun(db, runId),
+      latestManualRun: (taskId, startedAfter) =>
+        latestRunOfTask(db, { taskId, segment: 'manual', startedAfter }),
     }),
     coldVerify: createColdVerify({
       gh,

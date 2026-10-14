@@ -11,6 +11,8 @@ export interface FakeSpawnCall {
   argv: string[];
   cwd: string;
   stdin: string;
+  /** 交给 Spawner 的续会话号；开新会话没有。 */
+  resumeSessionId?: string;
 }
 
 /** fake spawner：调一次把 scripted 结果原样交回；同时记下 argv/stdin。 */
@@ -22,7 +24,12 @@ export function fakeSpawner(
 } {
   const calls: FakeSpawnCall[] = [];
   const spawner: OneShotSpawner = async (cmd) => {
-    const call: FakeSpawnCall = { argv: cmd.argv, cwd: cmd.cwd, stdin: cmd.stdin };
+    const call: FakeSpawnCall = {
+      argv: cmd.argv,
+      cwd: cmd.cwd,
+      stdin: cmd.stdin,
+      ...(cmd.resumeSessionId ? { resumeSessionId: cmd.resumeSessionId } : {}),
+    };
     calls.push(call);
     if (typeof scripted === 'function') return scripted(call);
     return scripted;

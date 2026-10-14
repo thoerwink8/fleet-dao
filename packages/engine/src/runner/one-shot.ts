@@ -1,7 +1,8 @@
 // 起一次无头会话的真实进程——起、看守、收 stdout、记退出码、到点 kill。
 //
 // 关键约束（specs/509-需求梳理/流程重做方案.md；本切片强制）：
-// 1. **不许续会话**：不接 resume / fork / session 接手参数。传进来直接抛。
+// 1. **续会话按入参**：给了 resumeSessionId 就交给 Spawner 续那个会话（--resume 一类，决定 0088），不给开新会话。
+//    续不续、续哪个由调用方（任务工作流经 planSegmentResume）定；这里不判，只原样交下去。没有 fork。
 // 2. **不许超时**：默认 60 分钟，到点 SIGKILL（先 SIGTERM 给 5 秒收尾），outcome='timeout'。
 // 3. **不跑测试**：新起的进程不接 lastSessionTest 之类的依赖；测试移到 PR 上由 554-2 那一片做。
 // 4. **不保留 .fleet-out/ 进度事件**：那是 Fusion 会话 io 的形状；本切片只认 stdout / stderr / exit code 三样。
@@ -82,7 +83,7 @@ export interface OneShotInput {
   cwd: string;
   /** 超时（分钟），默认 DEFAULT_TIMEOUT_MINUTES。 */
   timeoutMinutes?: number;
-  /** 不许给：resume / session 接手。给了当场抛。 */
+  /** 续哪个会话（决定 0088）：给了交给 Spawner 续它，不给开新会话。空串当没给。 */
   resumeSessionId?: string;
   /**
    * 路由编号：生产 Spawner（real/segment-spawner.ts）据此在库里查执行方式、会话用户、上游模型串；
@@ -188,8 +189,8 @@ export interface SpawnCommand {
   /** 这一次的时限（毫秒）：Spawner 自己的看守要比它晚到，让这里的 signal 先触发。 */
   timeoutMs: number;
   /**
-   * 续哪个会话（--resume）：只有指挥官会话（real/intake-chat.ts，#2061）直接调 Spawner 时给；runOneShot 从不给
-   * （上面第 1 条：三段一次性会话不续）。不给 = 开新会话。
+   * 续哪个会话（--resume）：runOneShot 照入参的 resumeSessionId 给（动手段续上一段，决定 0088）；指挥官会话
+   * （real/intake-chat.ts，#2061）直接调 Spawner 时也给。不给 = 开新会话。
    */
   resumeSessionId?: string;
   /** 会话过程每一条（指挥官会话流式推给页面用）：按流里的先后给，抛了只记日志、不影响会话。 */
@@ -227,13 +228,7 @@ export class OneShotError extends Error {
    * NO_SLOT：开跑时池的名额满了（选路时预占的名额过期了、或没预占，#757），会话没起、一行没写；过一会儿重新选路就行。
    * BAD_RUN_INPUT：记到谁名下的字段对不上 runs 的约束，会话没起、一行没写；是调用方的毛病，重试没用。
    */
-  readonly code:
-    | 'RESUME_FORBIDDEN'
-    | 'ADMISSION_BLOCKED'
-    | 'SPAWN_FAILED'
-    | 'RUN_START_FAILED'
-    | 'NO_SLOT'
-    | 'BAD_RUN_INPUT';
+  readonly code: 'ADMISSION_BLOCKED' | 'SPAWN_FAILED' | 'RUN_START_FAILED' | 'NO_SLOT' | 'BAD_RUN_INPUT';
   constructor(code: OneShotError['code'], message: string) {
     super(message);
     this.name = 'OneShotError';
@@ -243,12 +238,6 @@ export class OneShotError extends Error {
 
 /** 起一次无头会话。返回一次性结果；成败判定在 verdict.ts。 */
 export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promise<OneShotResult> {
-  if (input.resumeSessionId !== undefined && input.resumeSessionId !== '') {
-    throw new OneShotError(
-      'RESUME_FORBIDDEN',
-      'one-shot 不许续会话（#554）：拿到 resumeSessionId，把这条从上游改掉再来。',
-    );
-  }
   const runId = input.runId ?? randomUUID();
   const startedAt = (deps.now ?? (() => new Date()))().toISOString();
   // 先照 runs 的约束对一遍再干别的：对不上的写进库会被拒，拖到开跑那一行才发现就成了 RUN_START_FAILED（被当成库一时不通、
@@ -347,6 +336,7 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
       signal: deps.stop ? AbortSignal.any([ac.signal, deps.stop]) : ac.signal,
       input: { ...input, runId },
       timeoutMs,
+      ...(input.resumeSessionId?.trim() ? { resumeSessionId: input.resumeSessionId.trim() } : {}),
     });
   } catch (err) {
     clearTimeout(killTimer);

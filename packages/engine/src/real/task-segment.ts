@@ -18,6 +18,8 @@
 // - 选路时预占的池的名额（input.route.reservationId，#757）：开跑那一行写进去时 runs 那边换掉；没开跑就收场的（路由用不了、
 //   建树失败、内存一直放不下、被叫停、切号停下）收场时在这里放掉，不让池一直显得满。放不掉只记日志：预占最多占
 //   RESERVATION_TTL_MS，到点自己不算。开跑时名额已经没了（预占过期、空位给了别的单）抛 SEGMENT_NO_SLOT，可以重试：重新选路就行。
+// - 续会话（input.resumeSessionId，决定 0088）：工作流判定能续才给，这里原样交给 one-shot 续那个号，提示词只出被打断的原因
+//   和返工意见（renderResumePrompt）。续起来没跑成照常回 ok:false，工作流下一次退回开新会话。
 // - one-shot 的落盘目录（brief.txt、stdout.txt……）24 小时后由这里顺手清；清不掉只记日志。
 
 import { randomUUID } from 'node:crypto';
@@ -255,6 +257,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       feedback: input.feedback,
       ...(input.interrupted ? { interrupted: input.interrupted } : {}),
       ...(subagentHint ? { subagentHint } : {}),
+      ...(input.resumeSessionId ? { resumed: true } : {}),
     });
     // 4. 起会话。叫停（ctx.signal）接进会话的看守；切号叫停（ticket）交给 one-shot，结局记 org_switch。
     const stopSignal = ctx.signal;
@@ -284,6 +287,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
               routeId: input.route.routeId,
               effort: input.tier.effort,
               ...(input.route.reservationId ? { reservationId: input.route.reservationId } : {}),
+              ...(input.resumeSessionId ? { resumeSessionId: input.resumeSessionId } : {}),
             },
             {
               spawn: (cmd) => {

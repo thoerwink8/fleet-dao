@@ -12,7 +12,7 @@ import type { EngineTasks } from '../src/activities.ts';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld, FAKE_ROUTES, fakeHead } from '../src/fakes.ts';
 import type { RouteProbeJobDeps } from '../src/jobs/route-probe.ts';
-import type { PickRouteInput, RouteChoice } from '../src/ports.ts';
+import { type PickRouteInput, PortError, type RouteChoice } from '../src/ports.ts';
 import { localExec } from '../src/real/exec.ts';
 import { createTaskActivities, type TaskActivitiesDeps } from '../src/real/task-activities.ts';
 import {
@@ -32,7 +32,7 @@ import {
   taskStatusQuery,
 } from '../src/task-contract.ts';
 import { freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.ts';
-import { goodBrief, OK_SEGMENT, scripted } from './task-script.ts';
+import { goodBrief, OK_SEGMENT, type Script, scripted } from './task-script.ts';
 
 const currentEnv = useEnv();
 let env: TestWorkflowEnvironment;
@@ -1452,6 +1452,77 @@ describe('任务工作流 · 单任务暂停与继续（#820 片 3）', { timeou
     expect(second?.interrupted).toBe('被人暂停（frank）：跑偏了');
     expect(world.count('createWorktree')).toBe(1);
     expect(world.alerts).toEqual([]);
+  });
+
+  /** hard 暂停一次、继续，返回两次会话的入参和判续会话的入参（决定 0088）。 */
+  async function pauseAndContinue(resume: Script['resume']) {
+    const world = createFakeWorld();
+    const { gate, segment } = gated();
+    const { tasks, calls } = scripted({ segment: (_i, n, signal) => segment(n, signal), resume });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await waitUntil(() => calls.segment.length > 0, '会话在跑');
+        await h.signal(taskPauseSignal, { by: 'frank', reason: '发版', mode: 'hard' });
+        await statusUntil(h, paused, '停进已暂停');
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(gate.aborted).toBe(true);
+    return { run, world, calls };
+  }
+
+  it('hard 暂停后继续：按会话号续上原会话，提示词只补被打断的原因，进度写「续上一段的会话」', async () => {
+    const { run, world, calls } = await pauseAndContinue(() => ({
+      kind: 'resume',
+      sessionId: 'sess-9',
+      runId: 'run-0002',
+    }));
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment).toHaveLength(2);
+    const [first, second] = calls.segment;
+    expect(first?.resumeSessionId).toBeUndefined();
+    expect(second).toMatchObject({ resumeSessionId: 'sess-9', interrupted: '被人暂停（frank）：发版' });
+    expect(second?.worktreePath).toBe(first?.worktreePath);
+    // 只判了一次：拿这一次选的路由、按被取消那一段的起跑时刻找
+    expect(calls.resume).toHaveLength(1);
+    expect(calls.resume[0]).toMatchObject({ taskId: first?.taskId, routeId: second?.route.routeId });
+    expect(calls.resume[0]?.previous).toHaveProperty('startedAfter');
+    expect(world.states.some((s) => s.doing.includes('续上一段的会话'))).toBe(true);
+  });
+
+  it('续不上（上一段没记下会话号）：退回原分支原树开新会话带 interrupted，进度写明为什么没续上', async () => {
+    const { run, world, calls } = await pauseAndContinue(() => ({
+      kind: 'new',
+      reason: '上一段没记下会话号',
+    }));
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    const second = calls.segment[1];
+    expect(second?.resumeSessionId).toBeUndefined();
+    expect(second?.interrupted).toBe('被人暂停（frank）：发版');
+    expect(world.states.some((s) => s.doing.includes('没续上会话（上一段没记下会话号），开新会话'))).toBe(
+      true,
+    );
+  });
+
+  it('换了执行方式续不上、判续会话没查成：都退回新会话，不停下等人', async () => {
+    const swapped = await pauseAndContinue(() => ({
+      kind: 'new',
+      reason: '换了执行方式（claude-code → cursor-agent）',
+    }));
+    expect(swapped.calls.segment[1]?.resumeSessionId).toBeUndefined();
+    expect(swapped.world.states.some((s) => s.doing.includes('换了执行方式'))).toBe(true);
+    const broken = await pauseAndContinue(() => {
+      throw new PortError('DB_DOWN', '库一时不通', { retryable: false });
+    });
+    expect(broken.run).toMatchObject({ outcome: 'merged' });
+    expect(broken.calls.segment[1]?.resumeSessionId).toBeUndefined();
+    expect(broken.world.states.some((s) => s.doing.includes('续会话没查成'))).toBe(true);
+    expect(broken.world.alerts).toEqual([]);
   });
 
   it('暂停了别的单照常：一张停着，另一张走完', async () => {
