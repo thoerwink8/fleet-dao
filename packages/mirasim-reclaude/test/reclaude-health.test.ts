@@ -122,7 +122,7 @@ describe.skipIf(process.platform === 'win32')('reclaude 健康维护（假 recla
   it('测速超时：明确报没查成，不写记录', async () => {
     const f = fake();
     f.set('config gateway test', GATEWAY, 5);
-    const r = await gatewayTest({ ...f.env, timeouts: { gateway: 200 } });
+    const r = await gatewayTest({ ...f.env, timeouts: { gateway: 2_000 } }); // 同下「更新检查超时」：留够新建脚本的启动时间
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/没查成.*超时/);
     expect(existsSync(gatewayLog(f.home))).toBe(false);
@@ -190,7 +190,9 @@ describe.skipIf(process.platform === 'win32')('reclaude 健康维护（假 recla
   it('更新检查超时：记没查成', async () => {
     const f = fake();
     f.set('update --check', '当前版本: v1.4.1\n最新版本: v1.5.0\n', 5);
-    const r = await updateCheck({ ...f.env, timeouts: { other: 200 }, idle: () => true });
+    // 超时要远大于起一个新建脚本的时间：macOS 首次执行新文件有安全扫描，实测 200–400ms，
+    // 200ms 时脚本还没写调用记录就被杀了。假脚本睡 5 秒，2 秒超时仍一定超时。
+    const r = await updateCheck({ ...f.env, timeouts: { other: 2_000 }, idle: () => true });
     expect(r.status).toBe('failed');
     expect(r.error).toMatch(/没查成.*超时/);
     expect(f.calls()).toEqual(['update --check']);
