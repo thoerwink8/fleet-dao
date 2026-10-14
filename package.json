@@ -40,7 +40,8 @@
     "local-sessions:install": "node agents/local-sessions/install.mjs install",
     "local-sessions:uninstall": "node agents/local-sessions/install.mjs uninstall",
     "local-sessions:status": "node agents/local-sessions/install.mjs status",
-    "agent-eval": "node packages/agent-eval/src/bin/agent-eval.ts"
+    "agent-eval": "node packages/agent-eval/src/bin/agent-eval.ts",
+    "pg:local": "node packages/db/src/bin/local-pg.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",

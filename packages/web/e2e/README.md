@@ -20,7 +20,9 @@ E2E_PG_ADMIN_URL=postgres://postgres:<密码>@127.0.0.1:5432/postgres pnpm --fil
 
 反复调用例：`pnpm --filter @fleet-dao/web e2e:serve` 起一套环境留着（库 `fleet_e2e_serve`，写 `_tmp/e2e/stack.json`），另一个终端 `E2E_REUSE=1 pnpm --filter @fleet-dao/web e2e`。改库的用例只能跑一次（它们动的是同一份库），要重跑就重启 `e2e:serve`（每次重建库）。
 
-本机没有 Postgres 的办法：WSL 里装的 Postgres 16 也行；或者用 npm 的 `@embedded-postgres/windows-x64`（Windows 版 PG 二进制，不用装、不用管理员，`initdb` + `postgres.exe -p 55432` 起一份，装在仓外）。
+本机没有 Postgres 的办法：WSL 里装的 Postgres 16 也行；或者用 npm 的 `@embedded-postgres/windows-x64`（Windows 版 PG 二进制，不用装、不用管理员，装在仓外，默认 `D:/Tools/pg-e2e`：`npm i @embedded-postgres/windows-x64`，再 `initdb -D data -U postgres -A trust -E UTF8` 一次）。
+
+起它用 `pnpm pg:local start`（`status` 看在不在跑、`stop` 停；`FLEET_LOCAL_PG_DIR`、`FLEET_LOCAL_PG_PORT` 改位置和端口，默认端口 55432），起好打出 `E2E_PG_ADMIN_URL=postgres://postgres@127.0.0.1:55432/postgres`。它经 WMI 起 `pg_ctl`，库不在 Claude Code 会话的进程组里，会话重启不再把库一起杀掉（直接在会话里起 `postgres.exe` 会）。`E2E_PG_ADMIN_URL` 指着本机、端口连不上时 e2e 起栈前就停下，提示这条命令（`support/stack.ts`）。判法在 `packages/db/src/local-pg.ts`。
 
 ## 在 CI 里怎么跑（#930）
 

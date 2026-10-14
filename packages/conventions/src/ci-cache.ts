@@ -192,7 +192,10 @@ export const UNIVERSAL_PACKAGES: readonly string[] = ['shared'];
  */
 export function sourceClosure(graph: PackageGraph, units: readonly string[]): string[] {
   const start = new Set([...units, ...UNIVERSAL_PACKAGES]);
-  for (const u of units) for (const r of TEST_READS[u] ?? []) start.add(r);
+  // TEST_READS 里带 / 的是单个文件：键里算上它所在的整个包（多算不少算）
+  for (const u of units) {
+    for (const r of TEST_READS[u] ?? []) start.add(/^packages\/([^/]+)\//.exec(r)?.[1] ?? r);
+  }
   const packages = [
     ...downwardClosure(
       graph,

@@ -10,6 +10,7 @@
 //   就是这些「谁的测试读谁」的清单；test/ci-plan.test.ts 扫所有测试文件里指向包外的路径，漏记一条就红。
 // - 这里判「少跑」等于放行没测过的改动，改它要连测试一起看。
 import { type Reuse, reuseOf } from './main-reuse.ts';
+import { crossPackageTargets, packageOffSurface } from './package-surface.ts';
 import type { RepoView } from './repo.ts';
 import {
   type Packed,
@@ -27,6 +28,12 @@ export const AGENTS_UNIT = 'agents';
 export interface PackageGraph {
   /** 包目录名 → 它依赖的仓内包目录名（package.json 里的 @fleet-dao/*）。 */
   deps: Record<string, string[]>;
+  /**
+   * 包目录名 → 包里现有、却不在它的面上的文件（package-surface.ts：面 = exports、bin 顺着包内相对引用走得到的文件）。
+   * 改到这些文件只测这个包自己，不连带依赖它的包（sortChanges）。没这个键、面认不出 = 空：整个包都算面。
+   * 只列现有的文件：删掉的、新加还没被引用的以外，认不出的一律算在面上（多测不少测）。
+   */
+  offSurface?: Record<string, string[]>;
 }
 
 /** e2e 要跑的 spec：'all' 全套；数组是只跑这几个（仓内相对路径）；空数组不跑。见 CiPlan.e2e。 */
@@ -114,14 +121,16 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'feishu', 'web'] as const;
  * db/test/claim-ledger-gone.test.ts 读 core 的 alert-work.ts；
  * agents/test/worker.test.ts 读 db 的路由骨架 routing.default.json（本机启动器照它定思考档位，#470）；
  * agents/test/rules/prompt-log.rules.test.ts 读 agents-sync 的 targets.ts（钩子登记表，钉住 UserPromptSubmit 那条）；
- * agents/test/rules/project-subagents.rules.test.ts 读 conventions 的 standard-paths.json（钉住标准路径清单盖着 agents/subagents/）。
+ * agents/test/rules/project-subagents.rules.test.ts 读 conventions 的 standard-paths.json（钉住标准路径清单盖着 agents/subagents/）：
+ *   只记这一个文件——记成整个 conventions，改 conventions 的任何一行都要连 agents 的测试一起跑（本机一百多秒）。
+ * 值里带 / 的是仓内文件（以 / 结尾是目录），只有改到它才测读它的单元；不带 / 的是包，包的源码一改就测。
  * shared 的单价测试不再读路由骨架：没登记的模型按未知单价算（#1355），不要求每个目录模型都写进价表。
  */
 export const TEST_READS: Record<string, string[]> = {
   api: ['web'],
   feishu: ['web'],
   db: ['adapters', 'core'],
-  [AGENTS_UNIT]: ['db', 'agents-sync', 'conventions'],
+  [AGENTS_UNIT]: ['db', 'agents-sync', 'packages/conventions/standard-paths.json'],
 };
 
 export type Rule =
@@ -451,7 +460,10 @@ export function readGraph(repo: RepoView): PackageGraph | string {
     }
     deps[dir] = [...names].sort();
   }
-  return { deps };
+  const offSurface: Record<string, string[]> = {};
+  const cross = crossPackageTargets(repo, [...raw.keys()]);
+  for (const [dir, p] of raw) offSurface[dir] = packageOffSurface(repo, dir, p, cross);
+  return { deps, offSurface };
 }
 
 /** 单元的目录（带 / 结尾，免得 api 匹配到 api-x）：本机 test:changed 交给 vitest 当过滤条件。 */
@@ -502,10 +514,16 @@ export interface PlanInput {
   specExists?: (rel: string) => boolean;
 }
 
-/** 测试读这些包的文件、package.json 里却没依赖它们的单元（TEST_READS；不往下传）。 */
-function testReaders(pkgs: ReadonlySet<string>): string[] {
+/** TEST_READS 的一项读的是这份改动里的东西：包名对 pkgs，带 / 的是文件（以 / 结尾是目录）对改动的文件。 */
+function readHit(r: string, pkgs: ReadonlySet<string>, changed: readonly string[]): boolean {
+  if (!r.includes('/')) return pkgs.has(r);
+  return changed.some((f) => f === r || (r.endsWith('/') && f.startsWith(r)));
+}
+
+/** 测试读这些包（或这几个文件）、package.json 里却没依赖它们的单元（TEST_READS；不往下传）。 */
+function testReaders(pkgs: ReadonlySet<string>, changed: readonly string[]): string[] {
   return Object.entries(TEST_READS)
-    .filter(([, reads]) => reads.some((r) => pkgs.has(r)))
+    .filter(([, reads]) => reads.some((r) => readHit(r, pkgs, changed)))
     .map(([reader]) => reader);
 }
 
@@ -515,8 +533,10 @@ interface Sorted {
   fullWhy: string[];
   /** 升全跑的文件落在的包：shared、测试夹具所在的包、不在依赖图里的包目录。 */
   hubs: Set<string>;
-  /** 改到了源码的包：它们和依赖它们的都要测。 */
+  /** 改到了面（PackageGraph.surface）上的文件的包：它们和依赖它们的都要测。 */
   units: Set<string>;
+  /** 只改到面以外的文件（入口脚本、包内模块、测试）的包：只测它自己（和测试读它的，TEST_READS），依赖它的包用不到这些文件。 */
+  own: Set<string>;
   /** 测试读了改到的包外文件的单元：只测它们自己（依赖它们的包不读那个文件）。 */
   readers: Set<string>;
   reasons: string[];
@@ -526,15 +546,23 @@ interface Sorted {
   unknown: boolean;
 }
 
+/** 这个文件在不在包的面上：只有 offSurface 里点了名的（现有、走不到）才不在；手搭的图、认不出的一律算在面上。 */
+function onSurface(graph: PackageGraph | string, pkg: string, f: string): boolean {
+  if (typeof graph === 'string') return true;
+  return !(graph.offSurface?.[pkg]?.includes(f) ?? false);
+}
+
 function sortChanges(
   changed: readonly string[],
   inGraph: (pkg: string) => boolean,
   rules: readonly Rule[],
+  surface: (pkg: string, f: string) => boolean = () => true,
 ): Sorted {
   const s: Sorted = {
     fullWhy: [],
     hubs: new Set(),
     units: new Set(),
+    own: new Set(),
     readers: new Set(),
     reasons: [],
     deploy: 'none',
@@ -555,7 +583,8 @@ function sortChanges(
       continue;
     }
     if (pkg !== undefined && inGraph(pkg)) {
-      s.units.add(pkg);
+      if (surface(pkg, f)) s.units.add(pkg);
+      else s.own.add(pkg);
       continue;
     }
     s.fullWhy.push(`${f}：${pkg !== undefined ? `packages/${pkg} 不在依赖图里` : '认不出的路径'}，全跑`);
@@ -570,15 +599,25 @@ export function planCi({ event, changed, graph, rules = PATH_RULES, specExists }
   if (typeof graph === 'string') return fullPlan([`包依赖图读不出（${graph}）：全跑`]);
   if (changed.length === 0) return fullPlan(['改动列表是空的：认不出这次改了什么，全跑']);
 
-  const s = sortChanges(changed, (pkg) => Object.hasOwn(graph.deps, pkg), rules);
+  const s = sortChanges(
+    changed,
+    (pkg) => Object.hasOwn(graph.deps, pkg),
+    rules,
+    (pkg, f) => onSurface(graph, pkg, f),
+  );
   // e2e 单独判：全跑的原因（deploy/、根配置这类）不一定碰 e2e 认的路径；认不出的路径则全套（不确定就跑）
   const e2e: E2eSpecs = s.unknown ? 'all' : e2eSpecsFor(changed, specExists);
   if (s.fullWhy.length > 0) return fullPlan(s.fullWhy, e2e);
 
   const closure = dependentsClosure(graph, s.units);
+  const own = [...s.own].filter((u) => !closure.has(u));
+  const touched = new Set([...closure, ...own]);
   const reasons = [...s.reasons];
   if (closure.size > 0) reasons.push(`改到源码的包和依赖它们的：${[...closure].sort().join('、')}`);
-  const all = [...new Set([...closure, ...s.readers, ...testReaders(closure)])].sort();
+  if (own.length > 0) {
+    reasons.push(`只改到包的面以外（入口脚本、包内模块、测试），只测它自己：${own.sort().join('、')}`);
+  }
+  const all = [...new Set([...touched, ...s.readers, ...testReaders(touched, changed)])].sort();
 
   const biome = changed.some((f) => !f.endsWith('.md'));
   return {
@@ -588,9 +627,9 @@ export function planCi({ event, changed, graph, rules = PATH_RULES, specExists }
     tsc: biome ? all.map(unitProject) : [],
     testUnits: all,
     tests: [],
-    web: closure.has('web'),
+    web: touched.has('web'),
     e2e,
-    deploy: DEPLOY_READS_PACKAGES.some((p) => closure.has(p)) ? 'all' : s.deploy,
+    deploy: DEPLOY_READS_PACKAGES.some((p) => touched.has(p)) ? 'all' : s.deploy,
   };
 }
 
@@ -619,16 +658,23 @@ export function fallbackUnits(
   if (typeof graph === 'string') {
     const s = sortChanges(changed, () => true, rules);
     return {
-      units: [...new Set([...s.units, ...s.readers, ...s.hubs])].sort(),
+      units: [...new Set([...s.units, ...s.own, ...s.readers, ...s.hubs])].sort(),
       hubs: [...s.hubs].sort(),
       dependents: `包依赖图读不出（${graph}），依赖改到的包的算不出来`,
     };
   }
-  const s = sortChanges(changed, (pkg) => Object.hasOwn(graph.deps, pkg), rules);
-  const closure = dependentsClosure(graph, s.units);
-  const units = new Set([...closure, ...s.readers, ...testReaders(closure), ...s.hubs]);
+  const s = sortChanges(
+    changed,
+    (pkg) => Object.hasOwn(graph.deps, pkg),
+    rules,
+    (pkg, f) => onSurface(graph, pkg, f),
+  );
+  const touched = new Set([...dependentsClosure(graph, s.units), ...s.own]);
+  const units = new Set([...touched, ...s.readers, ...testReaders(touched, changed), ...s.hubs]);
   const users = dependentsClosure(graph, s.hubs);
-  const dependents = [...new Set([...users, ...testReaders(users)])].filter((u) => !units.has(u)).sort();
+  const dependents = [...new Set([...users, ...testReaders(users, changed)])]
+    .filter((u) => !units.has(u))
+    .sort();
   return { units: [...units].sort(), hubs: [...s.hubs].sort(), dependents };
 }
 
