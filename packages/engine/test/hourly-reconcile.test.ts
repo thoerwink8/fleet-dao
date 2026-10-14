@@ -297,6 +297,96 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
     expect(run.why).toContain('acme/widgets：列合并的 PR 失败：403');
   });
 
+  describe('已知没装机器人的仓（有开着的 github-app-missing 提醒）', () => {
+    const missingKey = 'github-app-missing:acme/new';
+    const openAlert = { resolvedAt: null } as never;
+    const okAudit = {
+      outcome: 'ok' as const,
+      scanned: 1,
+      found: 0,
+      fixed: 0,
+      problems: [],
+      findings: [],
+    };
+    const repoList = async () => [
+      { owner: 'acme', name: 'widgets' },
+      { owner: 'acme', name: 'new' },
+    ];
+    /** 没装的仓读什么都 404；装好了的仓读得成。 */
+    const harnessWith = (alertFor: (key: string) => unknown) => {
+      const audited: string[] = [];
+      const listed: string[] = [];
+      const h = harness({
+        repos: repoList,
+        apps: { repos: repoList, selfCheck: async () => [] },
+        auditMergedPrs: async (slug) => {
+          audited.push(slug);
+          if (slug === 'acme/new') throw new Error('「引擎」机器人没装到 acme/new');
+          return okAudit;
+        },
+        gh: {
+          ...harness().deps.gh,
+          listPrs: async (repo) => {
+            listed.push(`${repo.owner}/${repo.name}`);
+            if (repo.name === 'new') throw new Error('「引擎」机器人没装到 acme/new');
+            return [];
+          },
+        },
+        alerts: { ...harness().deps.alerts, byKey: async (key) => alertFor(key) as never },
+      });
+      return { h, audited, listed };
+    };
+
+    it('跳过它：两处读 PR 的核对都不碰，这一轮 ok，why 写跳过了几个', async () => {
+      const { h, audited, listed } = harnessWith((key) => (key === missingKey ? openAlert : null));
+      const run = await runHourlyReconcileJob(h.deps);
+      expect(audited).toEqual(['acme/widgets']);
+      expect(listed).toEqual(['acme/widgets']);
+      expect(run.outcome).toBe('ok');
+      expect(run.why).toBe('跳过 1 个没装机器人的仓（已有提醒）：acme/new');
+    });
+
+    it('没有开着的提醒（没有、或已处理）：不跳，读不成照旧 partial', async () => {
+      for (const alertFor of [
+        () => null,
+        (key: string) => (key === missingKey ? { resolvedAt: new Date() } : null),
+      ]) {
+        const { h, audited } = harnessWith(alertFor);
+        const run = await runHourlyReconcileJob(h.deps);
+        expect(audited).toEqual(['acme/widgets', 'acme/new']);
+        expect(run.outcome).toBe('partial');
+        expect(run.why).toContain('acme/new 审合并的 PR 没做成');
+        expect(run.why).not.toContain('跳过');
+      }
+    });
+
+    it('别的仓真读不成：照旧 partial，跳过那句也写上', async () => {
+      const h = harness({
+        repos: repoList,
+        apps: { repos: repoList, selfCheck: async () => [] },
+        auditMergedPrs: async () => {
+          throw new Error('403');
+        },
+        alerts: { ...harness().deps.alerts, byKey: async (key) => (key === missingKey ? openAlert : null) },
+      });
+      const run = await runHourlyReconcileJob(h.deps);
+      expect(run.outcome).toBe('partial');
+      expect(run.why).toContain('acme/widgets 审合并的 PR 没做成：403');
+      expect(run.why).not.toContain('acme/new 审合并');
+      expect(run.why).toContain('跳过 1 个没装机器人的仓（已有提醒）：acme/new');
+    });
+
+    it('读提醒读不出来：一个都不跳，读不成照旧 partial', async () => {
+      const { h, audited } = harnessWith(() => {
+        throw new Error('库连不上');
+      });
+      const run = await runHourlyReconcileJob(h.deps);
+      expect(audited).toContain('acme/new');
+      expect(run.outcome).toBe('partial');
+      expect(h.logs.some((l) => l.includes('一个都不跳'))).toBe(true);
+    });
+  });
+
   it('【故意造出的失败】整池暂停到期的飞书没推成：这一轮是 partial，不记成 ok', async () => {
     const h = harness({
       poolHoldPush: async () => ({

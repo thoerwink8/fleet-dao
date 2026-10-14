@@ -23,7 +23,12 @@ import {
   type ClosedIssueTaskDeps,
   settleIdleClosedIssueRows,
 } from './closed-issue-tasks.ts';
-import { checkGitHubApps, type GitHubAppCheckDeps } from './github-app-check.ts';
+import {
+  checkGitHubApps,
+  type GitHubAppCheckDeps,
+  reposKnownNotInstalled,
+  skippedReposNote,
+} from './github-app-check.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 import {
   checkLedgers,
@@ -94,7 +99,13 @@ export function combineParts(parts: readonly SweepPart[]): ScheduleResult {
   const scanned = parts.reduce((n, p) => n + p.scanned, 0);
   const found = parts.reduce((n, p) => n + p.found, 0);
   const notes = [...failed, ...unchecked];
-  const why = clip(`${notes.length > 1 ? `${notes.length} 处没查成：` : ''}${notes.join('；')}`, WHY_MAX);
+  const info = parts.flatMap((p) => p.notes ?? []);
+  const why = clip(
+    [`${notes.length > 1 ? `${notes.length} 处没查成：` : ''}${notes.join('；')}`, ...info]
+      .filter(Boolean)
+      .join('；'),
+    WHY_MAX,
+  );
   if (failed.length > 0 && (failed.length === parts.length || scanned === 0)) {
     return { outcome: 'failed', why, scanned, found };
   }
@@ -105,11 +116,29 @@ export function combineParts(parts: readonly SweepPart[]): ScheduleResult {
       why: '工作树的根下什么都没有，没有要审的合并 PR，没有没处理的提醒，也没有受管的仓',
     };
   }
-  return { outcome: 'ok', scanned, found };
+  return info.length > 0 ? { outcome: 'ok', scanned, found, why } : { outcome: 'ok', scanned, found };
 }
 
 async function listOpen(deps: HourlyReconcileJobDeps): Promise<{ alerts: AlertRow[]; truncated: boolean }> {
   return deps.alerts.listOpen(OPEN_ALERT_LIMIT);
+}
+
+/** 只跳过「明确没装」这一种：列仓或读提醒出错，一个都不跳（照旧去读、读不成照旧记没查成）。 */
+async function knownNotInstalled(deps: HourlyReconcileJobDeps): Promise<{ slugs: Set<string> }> {
+  try {
+    const repos = await deps.apps.repos();
+    return { slugs: await reposKnownNotInstalled(repos, (key) => deps.alerts.byKey(key)) };
+  } catch (err) {
+    deps.log('warn', '每小时对账：查不出哪些仓已知没装机器人，这一轮一个都不跳', { error: errMessage(err) });
+    return { slugs: new Set() };
+  }
+}
+
+function skipRepos<T extends { owner: string; name: string }>(
+  repos: () => Promise<T[]>,
+  skip: ReadonlySet<string>,
+): () => Promise<T[]> {
+  return async () => (await repos()).filter((r) => !skip.has(`${r.owner}/${r.name}`));
 }
 
 async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
@@ -132,10 +161,19 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   }
   // 核对在提醒之前：这一轮新报的还不满 24 小时，提醒那部分不会再推它们
   const retired = await retireWorkflowAlerts(deps);
-  const merged = await checkMergedPrs(deps);
+  // 已知没装机器人的仓（有开着的 github-app-missing 提醒）：读不了是意料之中，两处读 PR 的核对跳过，why 里交代一句
+  const skip = await knownNotInstalled(deps);
+  const skipping = { ...deps, repos: skipRepos(deps.repos, skip.slugs) };
+  const skipPart: SweepPart = {
+    scanned: 0,
+    found: 0,
+    unchecked: [],
+    ...(skip.slugs.size > 0 ? { notes: [skippedReposNote([...skip.slugs])] } : {}),
+  };
+  const merged = await checkMergedPrs(skipping);
   const ledgers = await checkLedgers(deps);
   const historical = await retireHistoricalFactAlerts(deps);
-  const autoMerges = await checkAutoMerges(deps);
+  const autoMerges = await checkAutoMerges(skipping);
   // 单已关且停下等人的撤掉（#1816）：当场发放弃并撤挂起提醒；放在提醒清扫之前
   const closedTasks = await abandonClosedIssueTasks(deps);
   // 单已关、没有工作流的遗留行也收掉（#1622）：和上面的任务工作流对账合并统计
@@ -188,6 +226,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     apps,
     poolHoldPart,
     mainRedPart,
+    skipPart,
   ]);
 }
 
