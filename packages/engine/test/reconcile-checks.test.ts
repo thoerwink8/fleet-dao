@@ -2,19 +2,16 @@
 // 「开着的单都有着落」那一处随 Fusion 删了（#556），这里只测它留下的旧提醒怎么撤（retireWorkflowAlerts）。
 // 人开的 PR 不报合并人这一条在 github 包的测试里（这里只认对账结果里 findings 的种类）。
 import { randomUUID } from 'node:crypto';
-import type { AlertRow, MergedPrLedger, QuotaTablePool } from '@fleet-dao/db';
+import type { AlertRow, MergedPrLedger } from '@fleet-dao/db';
 import type { MergedPrAuditReport, MergedPrFinding } from '@fleet-dao/github';
 import { describe, expect, it } from 'vitest';
 import {
   checkLedgers,
   checkMergedPrs,
-  checkQuotaFreshness,
   LEDGER_GRACE_MS,
   ledgerAlertKey,
   MERGED_PR_LOOKBACK_MS,
   prAlertKey,
-  QUOTA_ALERT_PREFIX,
-  quotaAlertKey,
   type ReconcileCheckDeps,
   retireHistoricalFactAlerts,
   retireWorkflowAlerts,
@@ -62,8 +59,6 @@ function world(
     listOpen?: ReconcileCheckDeps['alerts']['listOpen'];
     reposFn?: ReconcileCheckDeps['repos'];
     ledgers?: ReconcileCheckDeps['ledgers'];
-    quotaPools?: ReconcileCheckDeps['quotaPools'];
-    quotaNotRead?: ReconcileCheckDeps['quotaNotRead'];
     prMergedAt?: ReconcileCheckDeps['prMergedAt'];
   } = {},
 ): World {
@@ -75,9 +70,7 @@ function world(
   const deps: ReconcileCheckDeps = {
     repos: over.reposFn ?? (async () => over.repos ?? []),
     auditMergedPrs: over.audit ?? (async () => audit([])),
-    quotaPools: over.quotaPools ?? (async () => []),
     ...(over.prMergedAt ? { prMergedAt: over.prMergedAt } : {}),
-    ...(over.quotaNotRead ? { quotaNotRead: over.quotaNotRead } : {}),
     async ledgers(input) {
       ledgerCalls.push(input);
       return over.ledgers ? over.ledgers(input) : [];
@@ -485,20 +478,6 @@ describe('合了的 PR 对上的单记了账', () => {
   });
 });
 
-function quotaPool(over: Partial<QuotaTablePool> = {}): QuotaTablePool {
-  return {
-    poolId: 'p1',
-    channelName: '渠道一',
-    channelEnabled: true,
-    routeCount: 2,
-    expiresAt: null,
-    lastReadOkAt: new Date(NOW.getTime() - 5 * 60_000),
-    dataAt: new Date(NOW.getTime() - 5 * 60_000),
-    readOverdue: false,
-    ...over,
-  } as QuotaTablePool;
-}
-
 describe('历史事实类提醒合并超过 7 天自动收（#1645）', () => {
   const daysAgo = (d: number) => new Date(NOW.getTime() - d * 24 * 60 * 60_000);
   const aged = (key: string) => openAlert(key, { createdAt: daysAgo(30) });
@@ -577,115 +556,5 @@ describe('历史事实类提醒合并超过 7 天自动收（#1645）', () => {
     // 交给历史事实那一步撤
     await retireHistoricalFactAlerts(w.deps);
     expect(old.resolvedAt).not.toBeNull();
-  });
-});
-
-describe('额度读数新不新鲜（checkQuotaFreshness，#76）', () => {
-  it('都读新了：不报，扫了几个池照实记', async () => {
-    const w = world({ quotaPools: async () => [quotaPool(), quotaPool({ poolId: 'p2' })] });
-    const part = await checkQuotaFreshness(w.deps);
-    expect(part).toMatchObject({ scanned: 2, found: 0, unchecked: [] });
-    expect(w.raised).toEqual([]);
-  });
-
-  it('过期的池：报警写明哪个池、上次读成是什么时候；从没读成过也报', async () => {
-    const w = world({
-      quotaPools: async () => [
-        quotaPool({ readOverdue: true, lastReadOkAt: new Date(NOW.getTime() - 50 * 60_000) }),
-        quotaPool({ poolId: 'p2', readOverdue: true, lastReadOkAt: null, dataAt: null }),
-      ],
-    });
-    const part = await checkQuotaFreshness(w.deps);
-    expect(part.found).toBe(2);
-    expect(w.raised.map((r) => r.dedupeKey)).toEqual([quotaAlertKey('p1'), quotaAlertKey('p2')]);
-    expect(w.raised[0]?.body).toContain('50 分钟前');
-    expect(w.raised[1]?.body).toContain('从没读成过');
-  });
-
-  it('渠道关了、没有路由在用、池过期了的不查也不报', async () => {
-    const w = world({
-      quotaPools: async () => [
-        quotaPool({ channelEnabled: false, readOverdue: true }),
-        quotaPool({ poolId: 'p3', routeCount: 0, readOverdue: true }),
-        quotaPool({ poolId: 'p2', expiresAt: new Date(NOW.getTime() - 1000), readOverdue: true }),
-      ],
-    });
-    const part = await checkQuotaFreshness(w.deps);
-    expect(part).toMatchObject({ scanned: 0, found: 0 });
-    expect(w.raised).toEqual([]);
-  });
-
-  it('读新了：撤掉旧提醒；别的前缀的提醒不碰', async () => {
-    const old = openAlert(quotaAlertKey('p1'));
-    const other = openAlert('reconcile:ledger:a/b#1');
-    const w = world({ open: [old, other], quotaPools: async () => [quotaPool()] });
-    await checkQuotaFreshness(w.deps);
-    expect(w.resolved.map((r) => r.dedupeKey)).toEqual([quotaAlertKey('p1')]);
-    expect(other.resolvedAt).toBeNull();
-    expect(QUOTA_ALERT_PREFIX).toBe('reconcile:quota:');
-  });
-
-  it('额度配置写明不读的池：不报读数过期，开着的旧提醒撤掉', async () => {
-    const old = openAlert(quotaAlertKey('jev'));
-    const w = world({
-      open: [old],
-      quotaPools: async () => [
-        quotaPool({ poolId: 'jev', readOverdue: true, lastReadOkAt: null, dataAt: null }),
-        quotaPool({ poolId: 'p1', readOverdue: true, lastReadOkAt: new Date(NOW.getTime() - 50 * 60_000) }),
-      ],
-      quotaNotRead: async () => ['jev'],
-    });
-    const part = await checkQuotaFreshness(w.deps);
-    expect(part.scanned).toBe(1);
-    expect(w.raised.map((r) => r.dedupeKey)).toEqual([quotaAlertKey('p1')]);
-    expect(w.resolved).toEqual([
-      {
-        dedupeKey: quotaAlertKey('jev'),
-        why: '额度配置写明不读这个池（没有这种数据），不再报读数过期',
-      },
-    ]);
-  });
-
-  it('【故意造出的失败】不读名单读不出来：这一轮不查也不撤，旧提醒留着', async () => {
-    const old = openAlert(quotaAlertKey('jev'));
-    const w = world({
-      open: [old],
-      quotaPools: async () => [quotaPool({ poolId: 'jev', readOverdue: true, lastReadOkAt: null })],
-      quotaNotRead: async () => {
-        throw new Error('额度配置读不到');
-      },
-    });
-    const part = await checkQuotaFreshness(w.deps);
-    expect(part.failed).toBe('读额度配置里不读的池没成，这一轮不查也不撤：额度配置读不到');
-    expect(w.raised).toEqual([]);
-    expect(w.resolved).toEqual([]);
-    expect(old.resolvedAt).toBeNull();
-  });
-
-  it('【故意造出的失败】读额度表抛错：记 failed，不当成都新鲜，旧提醒不撤', async () => {
-    const old = openAlert(quotaAlertKey('p1'));
-    const w = world({
-      open: [old],
-      quotaPools: async () => {
-        throw new Error('库连不上');
-      },
-    });
-    const part = await checkQuotaFreshness(w.deps);
-    expect(part.failed).toBe('读额度表没成，额度读数新不新鲜这一轮没查：库连不上');
-    expect(w.resolved).toEqual([]);
-    expect(old.resolvedAt).toBeNull();
-  });
-
-  it('【故意造出的失败】列提醒抛错：照样查、照样报，记没查成，旧提醒不撤', async () => {
-    const w = world({
-      quotaPools: async () => [quotaPool({ readOverdue: true })],
-      listOpen: async () => {
-        throw new Error('提醒表读不了');
-      },
-    });
-    const part = await checkQuotaFreshness(w.deps);
-    expect(part.unchecked).toEqual(['列没处理的提醒没成，额度读数的旧提醒这一轮不撤：提醒表读不了']);
-    expect(part.found).toBe(1);
-    expect(w.resolved).toEqual([]);
   });
 });

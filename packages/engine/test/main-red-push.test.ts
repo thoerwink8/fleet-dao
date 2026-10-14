@@ -608,7 +608,6 @@ function reconcileHarness(mainRedPush: () => Promise<SweepPart>): {
       problems: [],
       findings: [],
     }),
-    quotaPools: async () => [],
     ledgers: async () => [],
     apps: { repos: async () => [], selfCheck: async () => [] },
     gh: {

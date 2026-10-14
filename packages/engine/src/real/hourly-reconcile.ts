@@ -6,7 +6,6 @@
 // @fleet-dao/github 的 selfCheck（受管的仓从库里的 repos 表列）；提醒的读写、操作记录、结局记账是同一个库。
 import { lstat, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { loadQuotaConfig } from '@fleet-dao/adapters/quota';
 import {
   alertByKey,
   countAlertFilings,
@@ -27,7 +26,6 @@ import {
   pendingClosedIssueDeliveries,
   prHeadsOfBranch,
   pullMergedAt,
-  quotaTable,
   readPoolHoldsSetting,
   recordAlertFiling,
   recordWorktreeCleanupDone,
@@ -521,9 +519,6 @@ export function hourlyReconcileJob(
       taskState: (taskId) => taskStateOf(w.db, taskId),
       repos: managedRepos,
       auditMergedPrs: (repo, since) => w.gh.auditMergedPrs(repo, since),
-      quotaPools: (now) => quotaTable(w.db, { now }),
-      // 配置写明不读的池（现在是 jev：没有日账）。读不到配置要抛，不许当成「都要读」。
-      quotaNotRead: async () => (await loadQuotaConfig()).notRead?.map((p) => p.poolId) ?? [],
       ledgers: (input) => mergedPrLedgers(w.db, input),
       async approval(id) {
         const a = await getApproval(w.db, id);
