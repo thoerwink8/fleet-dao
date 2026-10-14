@@ -96,14 +96,14 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
     expect(nextAction({ failure: failure('什么鬼'), limits, routeBound: true }).classifiedAs).toBe('unknown');
   });
 
-  it('认不出的从重试爬起：重试两次，次数用完就挂起并报警（没有换路由、换模型这一级）', () => {
+  it('认不出的从重试爬起：绑路由的重试两次（1 分钟起翻倍，决定 0093），次数用完就挂起并报警（没有换路由、换模型这一级）', () => {
     const steps = [
       nextAction({ failure: failure('WEIRD'), limits, routeBound: true }),
       nextAction({ failure: failure('WEIRD'), counters: { retries: 1 }, limits, routeBound: true }),
       nextAction({ failure: failure('WEIRD'), counters: { retries: 2 }, limits, routeBound: true }),
     ];
     expect(steps.map((s) => s.action)).toEqual(['retry', 'retry', 'park']);
-    expect(steps.map((s) => s.delaySeconds)).toEqual([15, 30, 0]);
+    expect(steps.map((s) => s.delaySeconds)).toEqual([60, 120, 0]);
     expect(steps.map((s) => s.counter)).toEqual(['retries', 'retries', null]);
     expect(steps.map((s) => s.classifiedAs)).toEqual(['unknown', 'unknown', 'unknown']);
     expect(steps[2]?.alert).toBe(true);
