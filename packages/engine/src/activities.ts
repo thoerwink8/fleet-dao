@@ -54,6 +54,10 @@ import type {
   ReleaseReservationResult,
   RunSegmentInput,
   RunSegmentResult,
+  SelfCheckInput,
+  SelfCheckResult,
+  TaskSpendInput,
+  TaskSpendResult,
   WaitMergedInput,
 } from './task-contract.ts';
 
@@ -257,6 +261,10 @@ export interface EngineTasks {
   mergeNow?: (input: MergeNowInput, ctx: PortContext) => Promise<MergeNowResult>;
   /** 判这一段能不能续上一段的会话（决定 0088）。续不上回原因，不抛。 */
   planSegmentResume?: (input: PlanSegmentResumeInput, ctx: PortContext) => Promise<PlanSegmentResumeResult>;
+  /** 动手会话收场后在会话的树里跑测试和 tsc（决定 0093）。没跑成回 skipped，不抛。 */
+  selfCheck?: (input: SelfCheckInput, ctx: PortContext) => Promise<SelfCheckResult>;
+  /** 这张单到现在花掉多少 token（单任务预算，决定 0093）。 */
+  taskSpend?: (input: TaskSpendInput, ctx: PortContext) => Promise<TaskSpendResult>;
 }
 
 /** 任务工作流的活动名全集（写成 Record 让编译器保证一个不漏）。 */
@@ -271,6 +279,8 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   readCiPolicy: true,
   mergeNow: true,
   planSegmentResume: true,
+  selfCheck: true,
+  taskSpend: true,
 };
 export const TASK_ACTIVITY_NAMES = Object.keys(TASK_ACTIVITY_KEYS) as (keyof EngineTasks)[];
 

@@ -32,6 +32,7 @@ import {
   routeProbeAuditRows,
   scheduleHealth,
   startScheduleRun,
+  taskTokenSpend,
 } from '@fleet-dao/db';
 import { createGitHub } from '@fleet-dao/github';
 import { intakeChatLimitsFrom } from '@fleet-dao/shared';
@@ -106,6 +107,7 @@ import {
 import { realChannelAttempts, realReservations, realRuns } from './runs-writer.ts';
 import { createPlanSegmentResume } from './segment-resume.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
+import { createSelfCheck } from './self-check.ts';
 import { SESSION_ORG_TIMEOUT_MS, type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
 import { lazyOnSuccess, prepareSubagents, readSubagentGuard, subagentsOnce } from './subagents-file.ts';
@@ -955,6 +957,13 @@ export function realPortsFromEnv(
       latestManualRun: (taskId, startedAfter) =>
         latestRunOfTask(db, { taskId, segment: 'manual', startedAfter }),
     }),
+    selfCheck: createSelfCheck({ trees, exec, log: taskLog }),
+    taskSpend: async (input) => {
+      if (input?.schemaVersion !== 1 || !input.taskId) {
+        throw new PortError('INVALID_INPUT', '查这张单花掉的 token：要有 taskId', { retryable: false });
+      }
+      return taskTokenSpend(db, input.taskId);
+    },
     coldVerify: createColdVerify({
       gh,
       // 文件接口不给 patch 的大文件，用引擎镜像里的 git 补读（#1308）

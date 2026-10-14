@@ -20,6 +20,9 @@ import type {
   ReadDeliveryInput,
   RunSegmentInput,
   RunSegmentResult,
+  SelfCheckInput,
+  SelfCheckResult,
+  TaskSpendResult,
 } from '../src/task-contract.ts';
 
 export const BODY = [
@@ -65,6 +68,10 @@ export interface Script {
   mergeNow: (n: number, input: MergeNowInput) => MergeNowResult;
   /** 判续会话（决定 0088）。默认续不上：老用例照旧开新会话。抛了＝活动没查成。 */
   resume: (input: PlanSegmentResumeInput, n: number) => PlanSegmentResumeResult;
+  /** 动手会话收场后的自测（决定 0093）。默认没跑（skipped）：老用例照旧推。抛了＝活动没跑成。 */
+  selfCheck: (input: SelfCheckInput, n: number) => SelfCheckResult;
+  /** 这张单花掉多少 token（单任务预算）。默认 0。 */
+  spend: (n: number) => TaskSpendResult;
 }
 
 export interface Calls {
@@ -85,6 +92,10 @@ export interface Calls {
   merge: number;
   /** 判续会话收到的入参。不进 order。 */
   resume: PlanSegmentResumeInput[];
+  /** 自测收到的入参。不进 order。 */
+  selfCheck: SelfCheckInput[];
+  /** 查花费的次数。不进 order。 */
+  spend: number;
 }
 
 export const OK_SEGMENT: RunSegmentResult = { ok: true, runId: 'run-1', answer: '已提交' };
@@ -104,6 +115,8 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     ciPolicy: 0,
     merge: 0,
     resume: [],
+    selfCheck: [],
+    spend: 0,
   };
   const script: Script = {
     brief: () => ({ ok: true, brief: goodBrief() }),
@@ -120,6 +133,8 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     ciPolicy: () => ({ mode: 'force' }),
     mergeNow: () => ({ merged: true, mergeCommit: 'abc1234567890' }),
     resume: () => ({ kind: 'new', reason: '测试默认不续' }),
+    selfCheck: () => ({ state: 'skipped', reason: '测试默认不跑', steps: [] }),
+    spend: () => ({ tokens: 0, runs: 0, unmetered: 0 }),
     ...over,
   };
   const tasks: EngineTasks = {
@@ -176,6 +191,14 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     async planSegmentResume(input) {
       calls.resume.push(input);
       return script.resume(input, calls.resume.length);
+    },
+    async selfCheck(input) {
+      calls.selfCheck.push(input);
+      return script.selfCheck(input, calls.selfCheck.length);
+    },
+    async taskSpend() {
+      calls.spend += 1;
+      return script.spend(calls.spend);
     },
   };
   return { tasks, calls };

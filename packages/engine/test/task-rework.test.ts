@@ -1,0 +1,350 @@
+// 返工少花 token（决定 0093）：返工续上一轮的会话、连着续两轮没过开新会话；冲突引擎先自己并；会话收场后引擎自己跑测试和 tsc，
+// 红了续进会话再改一次，输出交给冷验收；单任务 token 预算超了停下等人。真 Temporal 测试服务端 + 假端口 + 脚本化的任务活动。
+
+import { randomUUID } from 'node:crypto';
+import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
+import type { WorkflowHandle } from '@temporalio/client';
+import type { TestWorkflowEnvironment } from '@temporalio/testing';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { WORKFLOW_TYPES } from '../src/contract.ts';
+import { createFakeWorld, fakeHead } from '../src/fakes.ts';
+import { DEFAULT_TASK_TOKEN_BUDGET } from '../src/limits.ts';
+import { PortError } from '../src/ports.ts';
+import {
+  type SelfCheckResult,
+  type TaskRun,
+  type TaskStatus,
+  type TaskWorkflowInput,
+  taskContinueSignal,
+  taskStatusQuery,
+} from '../src/task-contract.ts';
+import { SELF_CHECK_RED_LINE } from '../src/workflows/task-support.ts';
+import { freshRepo, pollQuery, useEnv, withWorker } from './helpers.ts';
+import { scripted } from './task-script.ts';
+
+const currentEnv = useEnv();
+let env: TestWorkflowEnvironment;
+beforeEach(() => {
+  env = currentEnv();
+});
+
+function input(over: Partial<TaskWorkflowInput> = {}): TaskWorkflowInput {
+  return {
+    schemaVersion: 1,
+    taskId: randomUUID(),
+    repo: freshRepo(),
+    issueNumber: 12,
+    title: '给驾驶舱加状态',
+    ...over,
+  };
+}
+
+async function start(q: string, i: TaskWorkflowInput): Promise<WorkflowHandle> {
+  return env.client.workflow.start(WORKFLOW_TYPES.task, {
+    taskQueue: q,
+    workflowId: taskWorkflowId(i.repo, i.issueNumber),
+    args: [i],
+  });
+}
+
+const statusOf = (h: WorkflowHandle): Promise<TaskStatus> => h.query(taskStatusQuery);
+const parked = (s: TaskStatus) => s.waiting?.kind === 'human';
+
+const RESUME_ALWAYS = () => ({ kind: 'resume' as const, sessionId: 'sess-1', runId: 'run-1' });
+
+describe('返工续会话（决定 0093）', { timeout: 60_000 }, () => {
+  it('CI 红了：下一轮续上一轮跑成的会话，判续会话指名上一段的执行编号，提示词只补返工意见', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) =>
+        n === 1 ? { state: 'red', failedChecks: ['test (engine)'], digest: 'FAIL task.test.ts' } : undefined,
+    });
+    const { tasks, calls } = scripted({ resume: RESUME_ALWAYS });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    expect(calls.segment).toHaveLength(2);
+    expect(calls.segment[0]?.resumeSessionId).toBeUndefined();
+    expect(calls.segment[1]?.resumeSessionId).toBe('sess-1');
+    expect(calls.segment[1]?.worktreePath).toBe(calls.segment[0]?.worktreePath);
+    expect(calls.segment[1]?.feedback.join('\n')).toContain('FAIL task.test.ts');
+    expect(calls.resume).toHaveLength(1);
+    expect(calls.resume[0]?.previous).toEqual({ runId: 'run-1' });
+    expect(world.states.some((s) => s.doing.includes('续上一段的会话'))).toBe(true);
+  });
+
+  it('续不上（换了执行方式）：照旧开新会话带全份交代，进度写明为什么', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) =>
+        n === 1 ? { state: 'red', failedChecks: ['test (engine)'], digest: 'FAIL x' } : undefined,
+    });
+    const { tasks, calls } = scripted({
+      resume: () => ({ kind: 'new', reason: '换了执行方式（claude-code → cursor-agent）' }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    expect(calls.segment[1]?.resumeSessionId).toBeUndefined();
+    expect(world.states.some((s) => s.doing.includes('没续上会话（换了执行方式'))).toBe(true);
+  });
+
+  it('连着续了两轮还没过：下一轮开新会话，返工意见第一行写明为什么清空重来', async () => {
+    // 第 1、2 轮 CI 红；第 3 轮 CI 绿、验收没过（验收返工另给一轮，#1967）；第 4 轮前已经连着续了两轮
+    const world = createFakeWorld({
+      ci: (_i, n) =>
+        n <= 2 ? { state: 'red', failedChecks: ['test (engine)'], digest: `FAIL 第 ${n} 次` } : undefined,
+    });
+    const { tasks, calls } = scripted({
+      resume: RESUME_ALWAYS,
+      verify: (_i, n) =>
+        n === 1
+          ? { pass: false, problems: ['没做到验收条：页面上看不到「验收中」'], round: 1 }
+          : { pass: true, problems: [], round: 2 },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment.map((s) => s.resumeSessionId)).toEqual([undefined, 'sess-1', 'sess-1', undefined]);
+    // 只判了两次：第 4 轮没问续不续
+    expect(calls.resume).toHaveLength(2);
+    const fresh = calls.segment[3]?.feedback ?? [];
+    expect(fresh[0]).toContain('开新会话');
+    expect(fresh.join('\n')).toContain('没做到验收条');
+  });
+});
+
+describe('冲突引擎先自己并（决定 0093）', { timeout: 60_000 }, () => {
+  it('等合并冲突、交回动手；动手前并最新主线并干净了：不派模型，直接对新头重跑 CI 和验收，不算一轮', async () => {
+    const world = createFakeWorld({
+      // 第 1 次（等合并时）并出冲突；第 2 次（动手前）主线动过、git 自动合并干净
+      sync: (_i, n) =>
+        n === 1
+          ? { state: 'conflict', conflictFiles: ['a.ts'] }
+          : n === 2
+            ? { head: fakeHead(800) }
+            : undefined,
+    });
+    const { tasks, calls } = scripted({
+      merged: (n) => (n === 1 ? { state: 'conflict', detail: 'PR #1 和主线冲突' } : { state: 'merged' }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1, head: fakeHead(800) });
+    expect(calls.segment).toHaveLength(1);
+    expect(calls.verify.map((v) => v.headSha)).toEqual([fakeHead(101), fakeHead(800)]);
+    expect(world.states.some((s) => s.doing.includes('引擎自己并掉了'))).toBe(true);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('不强制 CI 的仓直接合并撞上冲突：引擎先并主线，并干净就再合，不派模型', async () => {
+    const world = createFakeWorld({ sync: (_i, n) => (n === 1 ? { head: fakeHead(810) } : undefined) });
+    const { tasks, calls } = scripted({
+      ciPolicy: () => ({ mode: 'off' }),
+      mergeNow: (n) =>
+        n === 1
+          ? { merged: false, reason: 'conflict', detail: 'PR #100 和主线冲突' }
+          : { merged: true, mergeCommit: 'abc1234567890' },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment).toHaveLength(1);
+    expect(calls.merge).toBe(2);
+  });
+
+  it('并不干净：照旧交给会话解（冲突文件名进返工意见）', async () => {
+    const world = createFakeWorld({
+      sync: (_i, n) => (n <= 2 ? { state: 'conflict', conflictFiles: ['a.ts'] } : undefined),
+    });
+    const { tasks, calls } = scripted({
+      merged: (n) => (n === 1 ? { state: 'conflict', detail: 'PR #1 和主线冲突' } : { state: 'merged' }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(2);
+    expect(calls.segment[1]?.feedback.join('\n')).toContain('和最新主线有冲突，要解决：a.ts');
+  });
+});
+
+const RED: SelfCheckResult = {
+  state: 'red',
+  steps: [
+    { command: 'pnpm test:changed', outcome: 'fail', exitCode: 1, digest: 'FAIL test/a.test.ts > 少了一行' },
+    { command: 'node_modules/.bin/tsc -b --pretty false', outcome: 'pass', exitCode: 0, digest: '' },
+  ],
+};
+const GREEN: SelfCheckResult = {
+  state: 'green',
+  steps: [{ command: 'pnpm test:changed', outcome: 'pass', exitCode: 0, digest: 'Tests  3 passed (3)' }],
+};
+
+describe('会话收场后引擎自测（决定 0093）', { timeout: 60_000 }, () => {
+  it('红了：精炼输出续进同一个会话再改一次，再测一次就推；最后一次的输出交给冷验收', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      resume: RESUME_ALWAYS,
+      selfCheck: (_i, n) => (n === 1 ? RED : GREEN),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment).toHaveLength(2);
+    expect(calls.segment[1]?.resumeSessionId).toBe('sess-1');
+    const fb = calls.segment[1]?.feedback.join('\n') ?? '';
+    expect(fb).toContain(SELF_CHECK_RED_LINE);
+    expect(fb).toContain('FAIL test/a.test.ts > 少了一行');
+    expect(calls.selfCheck).toHaveLength(2);
+    expect(calls.selfCheck[0]).toMatchObject({ worktreePath: calls.segment[0]?.worktreePath });
+    expect(world.count('pushBranch')).toBe(1); // 改完才推，只推一次
+    expect(calls.verify[0]?.testOutput).toContain('Tests  3 passed');
+    // 推之前测，不是推之后
+    expect(calls.order.slice(0, 4)).toEqual(['brief', 'segment', 'delivery', 'segment']);
+  });
+
+  it('改了还红：不再续，照旧推交给 CI；验收拿到的是红的那份输出', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({ resume: RESUME_ALWAYS, selfCheck: () => RED });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment).toHaveLength(2);
+    expect(calls.selfCheck).toHaveLength(2);
+    expect(calls.verify[0]?.testOutput).toContain('没过（退出码 1）');
+  });
+
+  it('【故意造出的失败】自测活动没装（抛错）：不挡原流程，照旧推，验收不带测试输出', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted();
+    delete (tasks as { selfCheck?: unknown }).selfCheck;
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment).toHaveLength(1);
+    expect(calls.verify[0]?.testOutput).toBeUndefined();
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('绿了：不续会话，输出交给验收；头换了（等合并时并了主线）的验收不带旧输出', async () => {
+    const world = createFakeWorld({
+      sync: (_i, n) => (n === 1 ? { state: 'clean', head: fakeHead(555) } : undefined),
+    });
+    const { tasks, calls } = scripted({
+      selfCheck: () => GREEN,
+      merged: (n) => (n === 1 ? { state: 'conflict', detail: 'PR #1 和主线冲突' } : { state: 'merged' }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(1);
+    expect(calls.verify.map((v) => v.headSha)).toEqual([fakeHead(101), fakeHead(555)]);
+    expect(calls.verify[0]?.testOutput).toContain('过了');
+    expect(calls.verify[1]?.testOutput).toBeUndefined();
+  });
+});
+
+describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
+  it('花掉的超了预算：起会话之前停下等人，写明花了多少、预算多少；点「继续」再给一份接着干', async () => {
+    const world = createFakeWorld();
+    const over = DEFAULT_TASK_TOKEN_BUDGET + 1_000_000;
+    const { tasks, calls } = scripted({ spend: () => ({ tokens: over, runs: 9, unmetered: 1 }) });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await pollQuery(() => statusOf(h), parked, '超了预算停下');
+        expect(s.lastProblem).toContain('超了预算');
+        expect(calls.segment).toHaveLength(0); // 没起会话
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(1);
+    expect(world.alerts).toHaveLength(1);
+    expect(world.alerts[0]?.detail).toContain(String(over));
+    expect(world.alerts[0]?.detail).toContain('p95');
+    expect(world.alerts[0]?.detail).toContain('1 次会话用量还没补上');
+  });
+
+  it('没超：不停下；查花费没查成也照旧起会话', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      spend: () => {
+        throw new PortError('DB_DOWN', '库一时不通', { retryable: false });
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(1);
+    expect(world.alerts).toEqual([]);
+  });
+});

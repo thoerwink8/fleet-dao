@@ -171,6 +171,29 @@ export async function latestRunOfTask(
 }
 
 /**
+ * 一张单到现在花掉的 token（单任务预算用，决定 0093）：task_id 对得上的动手、验收两段，输入、输出、缓存读、缓存写四样相加。
+ * 四样都还空着的行（中转会话的用量稍后才补）不算进去，数出有几行：花掉的只多不少，调用方写明。
+ */
+export async function taskTokenSpend(
+  db: Db,
+  taskId: string,
+): Promise<{ tokens: number; runs: number; unmetered: number }> {
+  const [row] = await db
+    .select({
+      tokens: sql<string>`coalesce(sum(coalesce(${runs.inputTokens}, 0) + coalesce(${runs.outputTokens}, 0) + coalesce(${runs.cacheReadTokens}, 0) + coalesce(${runs.cacheWriteTokens}, 0)), 0)`,
+      runs: sql<string>`count(*)`,
+      unmetered: sql<string>`count(*) filter (where ${runs.inputTokens} is null and ${runs.outputTokens} is null and ${runs.cacheReadTokens} is null and ${runs.cacheWriteTokens} is null)`,
+    })
+    .from(runs)
+    .where(and(eq(runs.taskId, taskId), or(eq(runs.segment, 'manual'), eq(runs.segment, 'verify'))));
+  return {
+    tokens: Number(row?.tokens ?? 0),
+    runs: Number(row?.runs ?? 0),
+    unmetered: Number(row?.unmetered ?? 0),
+  };
+}
+
+/**
  * 一张单的三段流水（任务详情读）：task_id 对得上的，加上 task_id 没记、单号和工作流编号都对得上的老行（兜底，调用方要标明）。
  * 单号在几个仓里会重：兜底必须靠工作流编号（带着仓名）认；工作流编号也没记的行分不出是哪个仓的，不收——
  * 宁可少一行，也不把别的仓同号的单的会话混进这张单。

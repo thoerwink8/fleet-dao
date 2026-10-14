@@ -50,6 +50,14 @@
 //   会话删掉标记并 git add、没提交时，这一轮可能只读到占位：文件名用上一轮反馈里的，不把占位当成文件名。
 //   老历史没有这个标记，照旧在 step 里重试。
 // - 「放弃」「叫停」都要把正在跑的长活动取消掉（runSegment、coldVerify、waitCi、waitMerged 都心跳，收得到取消）。
+// - 返工续会话（决定 0093，patched('rework-resume')）：CI 红、验收没过、冲突、没提交……下一轮动手续上一轮跑成的那个会话
+//   （同一棵树；同一路由的执行方式、池、会话用户由 planSegmentResume 判），提示词只补返工意见。连着 RESUME_STREAK_LIMIT 轮续着改
+//   还没过，下一轮开新会话，返工意见精炼过（freshSessionFeedback）。轮数用尽点「继续」重读单子后也开新会话。
+// - 冲突引擎先自己并（决定 0093，patched('conflict-self-sync')）：上一轮因「和主线有冲突」返工、树里没留冲突标记时，
+//   动手前并最新主线并干净了（git 自动合并）就直接推上去重跑 CI，不派模型、不算一轮；并不干净才交给会话解。
+// - 自测（决定 0093，patched('self-check')）：会话交活、交付核对过了，推之前引擎在会话的树里跑仓的测试命令和 tsc（selfCheck）。
+//   红了把精炼输出续进同一个会话再改一次，再测一次就推（不论红绿，交给 CI）；没跑成照旧推。最近一次的输出交给冷验收
+//   （ColdVerifyInput.testOutput，只给和验收的头对得上的那一份）。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { CancellationScope, isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
@@ -60,7 +68,9 @@ import type { TaskBrief } from '../runner/task-brief.ts';
 import type { TierDecision } from '../runner/tier.ts';
 import {
   type AbandonCommand,
+  type DeliveryRead,
   MAX_IMPLEMENT_ROUNDS,
+  MAX_MAIN_SYNCS,
   MAX_VERIFY_ROUNDS,
   type TaskRun,
   type TaskWorkflowInput,
@@ -77,9 +87,13 @@ import {
   conflictFilesForHandoff,
   conflictHandoffLine,
   emptyCommitFeedback,
+  freshSessionFeedback,
   noteEmptyCommit,
+  RESUME_STREAK_LIMIT,
+  SELF_CHECK_RED_LINE,
   SKIP_CI_PR_VERIFIED,
   SKIP_CI_SELF_VERIFY,
+  selfCheckText,
   taskPrDid,
 } from './task-support.ts';
 import { syncMainlineBeforeImplement } from './task-sync.ts';
@@ -91,6 +105,10 @@ class TaskFlow {
   private ciMode: 'force' | 'off' = 'force';
   /** 刚从冷验收没过回来返工（下一轮动手开头读一次就清掉）：验收没到上限时这一轮动手不受动手轮数上限（#1967）。 */
   private verifyRework = false;
+  /** 上一轮的冲突留在了树里（冲突标记交给会话解）：这时并主线不算引擎自己解掉了。 */
+  private conflictInTree = false;
+  /** 冲突返工轮引擎自己并干净、没派模型的次数（决定 0093）：到 MAX_MAIN_SYNCS 就交给会话，不无限转。 */
+  private conflictSelfSyncs = 0;
 
   constructor(input: TaskWorkflowInput, acts: EngineActivities, limits: Limits) {
     this.rt = new TaskRuntime(input, acts, limits);
@@ -308,18 +326,48 @@ class TaskFlow {
     }
     rt.set('implement', `动手第 ${rt.round} 轮`);
     const wt = await this.ensureWorktree();
-    await syncMainlineBeforeImplement(rt);
+    // 上一轮因为和主线冲突返工、冲突没留在树里：先看引擎自己并不并得干净
+    const conflictRework = rt.status.lastProblem === '和主线有冲突' && !this.conflictInTree;
+    this.conflictInTree = false;
+    const synced = await syncMainlineBeforeImplement(rt);
+    if (
+      conflictRework &&
+      synced === 'merged' &&
+      this.conflictSelfSyncs < MAX_MAIN_SYNCS &&
+      patched('conflict-self-sync')
+    ) {
+      // 并干净了、已经推上去（syncMainline 并完就推）：不派模型，直接重跑 CI；这一轮不算动手的轮数
+      this.conflictSelfSyncs += 1;
+      rt.round -= 1;
+      rt.feedback = [];
+      rt.status.lastProblem = null;
+      await rt.advance(
+        'implement',
+        `和主线的冲突引擎自己并掉了（git 自动合并），不派模型，PR #${rt.prNumber} 重跑 CI`,
+      );
+      return true;
+    }
+    this.planReworkResume();
     await writeSession(rt, brief, tier, wt);
 
-    const delivery = await rt.step('readDelivery', () =>
-      rt.acts.readDelivery({
-        schemaVersion: 1,
-        taskId: rt.input.taskId,
-        repo: rt.input.repo,
-        worktreePath: wt.path,
-        baseSha: rt.since,
-      }),
-    );
+    let delivery = await this.readDelivery(wt);
+    // 自测：交付核对过了再跑（没提交、有冲突的照旧返工，不白跑测试）
+    if (this.deliveredClean(delivery) && patched('self-check')) {
+      const first = await this.selfCheck(wt, delivery.head);
+      const last = rt.lastSession;
+      if (first === 'red' && last) {
+        // 红了：精炼输出续进刚收场的那个会话再改一次。这一次不算返工的一轮，也不算连着续的次数
+        const streak = rt.resumeStreak;
+        rt.feedback = [`${SELF_CHECK_RED_LINE}\n${rt.selfCheckOutput?.text ?? ''}`];
+        rt.resumeFrom = { previous: { runId: last.runId }, worktreePath: last.worktreePath };
+        await rt.advance('implement', `第 ${rt.round} 轮：自测没过，续进会话再改一次`);
+        await writeSession(rt, brief, tier, wt);
+        rt.resumeStreak = streak;
+        delivery = await this.readDelivery(wt);
+        // 改完再测一次只为把输出交给验收：不论红绿都推，交给 CI
+        if (this.deliveredClean(delivery)) await this.selfCheck(wt, delivery.head);
+      }
+    }
     // 老历史里读交付的结果没有 leftover、conflicts：当作没有
     const conflicts = delivery.conflicts ?? [];
     if (conflicts.length > 0) return this.conflictStillThere(wt, conflicts);
@@ -366,6 +414,9 @@ class TaskFlow {
       throw error;
     }
     rt.head = pushed.head;
+    // 自测测的是会话交的这个头；推的时候并了主线，头换成推上去的那个，输出照样交给验收
+    if (rt.selfCheckOutput?.head === delivery.head)
+      rt.selfCheckOutput = { ...rt.selfCheckOutput, head: pushed.head };
     rt.since = delivery.head;
     rt.changedFiles = pushed.changedFiles ?? delivery.changedFiles;
     if (rt.prNumber === null) {
@@ -405,6 +456,7 @@ class TaskFlow {
   ): Promise<boolean> {
     const rt = this.rt;
     // 合并还没开始：文件名在原反馈里，不改写成占位。标记删了没提交：这一轮可能只剩占位，沿用上一轮的文件名。
+    this.conflictInTree = true;
     const names = blocked != null ? files : conflictFilesForHandoff(files, rt.feedback);
     const line = conflictHandoffLine(names, rt.feedback, blocked);
     if (rt.feedback.includes(line)) {
@@ -416,6 +468,70 @@ class TaskFlow {
     rt.feedback = [line];
     rt.status.lastProblem = '和主线有冲突';
     return false;
+  }
+
+  private async readDelivery(wt: Worktree): Promise<DeliveryRead> {
+    const rt = this.rt;
+    return rt.step('readDelivery', () =>
+      rt.acts.readDelivery({
+        schemaVersion: 1,
+        taskId: rt.input.taskId,
+        repo: rt.input.repo,
+        worktreePath: wt.path,
+        baseSha: rt.since,
+      }),
+    );
+  }
+
+  /** 交付核对过得去：有新提交、树里没剩没提交的、没有冲突标记。 */
+  private deliveredClean(delivery: DeliveryRead): boolean {
+    return (
+      delivery.commits > 0 &&
+      (delivery.leftover ?? []).length === 0 &&
+      (delivery.conflicts ?? []).length === 0
+    );
+  }
+
+  /**
+   * 返工轮续上一轮跑成的会话（决定 0093）：只定续谁，能不能续由 writeSession 问 planSegmentResume。
+   * 连着 RESUME_STREAK_LIMIT 轮续着改还没过：这一轮开新会话，返工意见精炼过。上一段被暂停、已经记了要续的，不覆盖。
+   */
+  private planReworkResume(): void {
+    const rt = this.rt;
+    const last = rt.lastSession;
+    if (!last || rt.resumeFrom !== null || !patched('rework-resume')) return;
+    if (rt.resumeStreak >= RESUME_STREAK_LIMIT) {
+      rt.resumeStreak = 0;
+      rt.feedback = freshSessionFeedback(rt.feedback);
+      return;
+    }
+    rt.resumeFrom = { previous: { runId: last.runId }, worktreePath: last.worktreePath };
+  }
+
+  /**
+   * 引擎自己跑一遍测试和 tsc（决定 0093）。不抛、不停下：活动没跑成当没跑。输出记在 rt.selfCheckOutput（绑着这个头），交给冷验收。
+   * 回 red / green / skipped。
+   */
+  private async selfCheck(wt: Worktree, head: string): Promise<'red' | 'green' | 'skipped'> {
+    const rt = this.rt;
+    await rt.advance('implement', `第 ${rt.round} 轮：引擎跑测试和类型检查`);
+    try {
+      const result = await rt.cancellable(() =>
+        rt.acts.selfCheck({
+          schemaVersion: 1,
+          taskId: rt.input.taskId,
+          repo: rt.input.repo,
+          worktreePath: wt.path,
+        }),
+      );
+      rt.selfCheckOutput = { head, text: selfCheckText(result) };
+      return result.state;
+    } catch (error) {
+      if (error instanceof Abandoned || isCancellation(error)) throw error;
+      log.warn('自测没跑成，照旧推', { error: String(error) });
+      rt.selfCheckOutput = null;
+      return 'skipped';
+    }
   }
 
   private async ensureWorktree(): Promise<Worktree> {

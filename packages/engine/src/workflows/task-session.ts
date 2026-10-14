@@ -16,8 +16,11 @@
 //   继续后选好路由先问 planSegmentResume（找那一段在 runs 里记的会话号，比执行方式、账号池、会话用户）；同一棵树、能续就带
 //   resumeSessionId 起，提示词只补被打断的原因。续不上（没会话号、换了执行方式或会话用户或树、没查成）照原来开新会话带
 //   interrupted，原因写进任务进度。判一次就清掉：续起来没跑成的，下一次开新会话。切号、「现在就换」停下的这次不续。
+// - 跑成的这一段记进 rt.lastSession（纯状态）：返工轮由 task.ts 决定续不续它（决定 0093，patched('rework-resume')），续法同上。
+// - 单任务 token 预算（决定 0093，patched('task-token-budget')）：每次起会话之前查这张单花掉的 token，超了停下等人（rt.park），
+//   点「继续」再给一份。开工时解析的上限里没有这一项（老历史）就不查；查不成照旧起会话，不挡干活。
 
-import { isCancellation, patched } from '@temporalio/workflow';
+import { isCancellation, log, patched } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import type { TierDecision } from '../runner/tier.ts';
@@ -48,6 +51,7 @@ import {
   RESUME_STARTED_SLACK_MS,
   RepinInterrupt,
   type ResumeFrom,
+  tokenBudgetStop,
   widen,
   withDispatchProbeNote,
   ZERO,
@@ -80,6 +84,7 @@ export async function writeSession(
   if (unrecognized) rt.set('implement', `动手第 ${rt.round} 轮${unrecognized}`);
   for (;;) {
     await rt.checkpoint(); // 被人暂停了就停在这儿，不起新会话（#820 片 3）
+    await holdForBudget(rt);
     const picked = await pickRoute(rt, avoid, stick, failedChannel, ui?.uiWork === true);
     failedChannel = undefined;
     const route = picked.route;
@@ -139,6 +144,9 @@ export async function writeSession(
       );
       if (res.ok) {
         rt.lastImplementRoute = route;
+        const resumed = resumeSessionId !== undefined;
+        rt.lastSession = { runId: res.runId, worktreePath: wt.path, resumed };
+        rt.resumeStreak = resumed ? rt.resumeStreak + 1 : 0;
         return;
       }
       evidence = res.evidence;
@@ -224,6 +232,29 @@ export async function writeSession(
       previousMessage = undefined;
     }
   }
+}
+
+/**
+ * 单任务 token 预算（决定 0093）：这张单花掉的超了已给的份数就停下等人，点「继续」再给到够用。
+ * 开工时解析的上限里没有这一项（老历史）或是 0 就不查；查不成只记日志，照旧起会话。放弃、叫停照常往外抛。
+ */
+async function holdForBudget(rt: TaskRuntime): Promise<void> {
+  const budget: unknown = rt.limits.taskTokenBudget;
+  if (typeof budget !== 'number' || budget <= 0) return;
+  if (!patched('task-token-budget')) return;
+  let spent: { tokens: number; unmetered: number };
+  try {
+    spent = await rt.cancellable(() => rt.acts.taskSpend({ schemaVersion: 1, taskId: rt.input.taskId }));
+  } catch (error) {
+    if (error instanceof Abandoned || isCancellation(error)) throw error;
+    log.warn('查这张单花掉的 token 没查成，照旧起会话', { error: failureOf(error, 'taskSpend').message });
+    return;
+  }
+  if (spent.tokens <= budget * rt.budgetGrants) return;
+  const stop = tokenBudgetStop(spent, budget, rt.budgetGrants);
+  await rt.park(stop.title, stop.detail);
+  // 人看过、点了「继续」：再给到比花掉的多一份
+  rt.budgetGrants = Math.floor(spent.tokens / budget) + 1;
 }
 
 /**

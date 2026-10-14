@@ -1,6 +1,7 @@
 // 任务工作流的冷验收一段。
 //
 // 改这里之前必须知道：挂自动合并一定在冷验收通过之后（合并闸认通过的 cold-verify）；头换了回 head_moved，由调用方对新的头重走。
+// 引擎自测（决定 0093）的精炼输出只在测的就是要验的这个头时带上（testOutput）；老历史里没有自测，不带，入参和原来一样。
 
 import type { TaskBrief } from '../runner/task-brief.ts';
 import { MAX_VERIFY_ROUNDS } from '../task-contract.ts';
@@ -35,6 +36,7 @@ export async function coldVerifyPr(
     await rt.advance('verify', `验收第 ${rt.verifyRound} 轮`);
     const prNumber: number = rt.prNumber;
     const headSha: string = rt.head;
+    const tested = rt.selfCheckOutput?.head === headSha ? rt.selfCheckOutput.text : undefined;
     const mark = rt.routeWakeMark(); // 叫醒的记号在验之前取，理由见 task-session.ts 的 pickRoute
     const res = await rt.step('coldVerify', () =>
       rt.cancellable(() =>
@@ -51,6 +53,7 @@ export async function coldVerifyPr(
           howToFinish: current.acceptance,
           authorFamilies: [...rt.families],
           round: rt.verifyRound === 1 ? 1 : 2,
+          ...(tested ? { testOutput: tested } : {}),
         }),
       ),
     );
