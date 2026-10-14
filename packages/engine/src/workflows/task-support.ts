@@ -226,6 +226,12 @@ export function avoidableFamily(route: RouteChoice): string | null {
   return family === '' || family === 'unclassified' ? null : family;
 }
 
+/** 避让里加上整族避开这一族（已有就不重复）。 */
+export function withFamily(avoid: Avoid, family: string): Avoid {
+  const families = avoid.families ?? [];
+  return families.includes(family) ? avoid : { ...avoid, families: [...families, family] };
+}
+
 /** 整族避开的那一层去掉（别的族一条都派不出时退回只避开模型）。 */
 export function withoutFamilies(avoid: Avoid): Avoid {
   return { routeIds: avoid.routeIds, poolIds: avoid.poolIds, modelIds: avoid.modelIds };
@@ -251,9 +257,16 @@ export const NO_OTHER_FAMILY = '没有别的模型族可换，只避开模型';
 /** 避让之后一条别的路由都没有：不死等，照旧派原来的。写进 lastProblem，驾驶舱看得见。 */
 export const NO_OTHER_ROUTE = '没有别的路由可换';
 
-/** 返工意见：上一轮用的哪条路由，这一轮避开它。连着第二轮起写明也避开模型。 */
-export function emptyCommitFeedback(route: RouteChoice, avoidModel: boolean, leftover: string): string {
-  const model = avoidModel ? `，也避开模型 ${route.modelId}` : '';
+/** 返工意见：上一轮用的哪条路由，这一轮避开它。连着第二轮起写明也避开模型（认得出族的连这一族）。 */
+export function emptyCommitFeedback(
+  route: RouteChoice,
+  avoidModel: boolean,
+  leftover: string,
+  family: string | null = null,
+): string {
+  const model = avoidModel
+    ? `，也避开模型 ${route.modelId}${family ? `和它那一族（${family}，别的族派不出才同族换模型）` : ''}`
+    : '';
   return `上一轮用的是路由 ${route.routeId}（模型 ${route.modelId}）。这一轮避开它${model}。上一轮会话跑完了，但没有产生新的提交。改完之后要用 git commit 提交，不提交等于没做。${leftover}`;
 }
 

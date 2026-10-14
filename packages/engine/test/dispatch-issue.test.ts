@@ -1,5 +1,5 @@
 // 点名派单（jobs/dispatch-issue.ts，#1337）：过准入的被派并留操作记录；每一道没过的都打印原因、退出码非 0、不起工作流；
-// --force 只放行就绪度那几道，硬闸（作者白名单、母单子单、本机做、已有 PR、碰 workflows、已派过、工作流没查成）怎么都不放行；
+// --force 只放行就绪度那几道，硬闸（作者白名单、母单子单、本机做、已有 PR、碰 workflows、碰改标准的路径、已派过、工作流没查成）怎么都不放行；
 // 总开关关着拒绝；已派过的不重复派。没有工作流的排队或已叫停老行接手再派。故意造出失败的一条（查 Temporal 失败按不确定拒绝）放最后。
 
 import type { TaskState } from '@fleet-dao/shared';
@@ -100,6 +100,8 @@ interface Over {
   failed?: number;
   startResult?: 'started' | 'already_exists';
   auditFails?: boolean;
+  /** 读改标准的路径清单时抛这个。 */
+  standardPathsError?: Error;
 }
 
 function world(over: Over = {}): World {
@@ -128,6 +130,13 @@ function world(over: Over = {}): World {
       return { ok: true, lives: [] };
     },
     openPrClaims: async () => over.claims ?? new Map(),
+    ...(over.standardPathsError
+      ? {
+          standardPaths: async () => {
+            throw over.standardPathsError;
+          },
+        }
+      : {}),
     readSpecDoc: async () => null,
     failedAttempts: async () => over.failed ?? 0,
     start: async (input) => {
@@ -338,6 +347,10 @@ describe('硬闸：--force 怎么都不放行', () => {
       reason: 'touches_workflows',
       over: { issue: issue({ body: body('- `.github/workflows/ci.yml`：改流水线') }) },
     },
+    {
+      reason: 'touches_standard',
+      over: { issue: issue({ body: body('- `agents/shared-rules.md`：通用段') }) },
+    },
     { reason: 'already_dispatched', over: { dispatched: true } },
     {
       reason: 'brief_incomplete',
@@ -547,6 +560,14 @@ describe('故意造出失败：force 也过不了作者白名单', () => {
     const w = world({ issue: issue({ author: { login: 'stranger', id: 99, type: 'User' } }) });
     const r = await dispatchIssue(w.deps, FORCE);
     expect(r.outcome).toBe('refused');
+    expect(w.started).toHaveLength(0);
+  });
+});
+
+describe('故意造出失败：改标准的清单读不到', () => {
+  it('不派、不当成没碰标准路径', async () => {
+    const w = world({ standardPathsError: new Error('清单认不出') });
+    await expect(dispatchIssue(w.deps, ARGS)).rejects.toThrow('清单认不出');
     expect(w.started).toHaveLength(0);
   });
 });

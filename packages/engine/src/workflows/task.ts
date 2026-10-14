@@ -31,7 +31,7 @@
 // CI 绿了再等验收、认了才算一轮；两样都过才挂自动合并。
 // 停下前 PR 已开、头已记录，点「继续」先走 deliver（等 CI、验收、挂自动合并），不先起动手会话（patched('continue-redelivers-open-pr')，#1582）。
 // 动手一轮会话跑完但没有提交（#1408，patched('avoid-empty-commit-route')）：下一轮选路避开这条路由；连着第二轮仍没提交，
-// 再避开这个模型。避开只在这张单里。没有别的候选就照旧用原来的路由，lastProblem 写「没有别的路由可换」，不死等。
+// 再避开这个模型（认得出族的连这一族，patched('empty-commit-avoid-family')，别的族派不出退回只避开模型）。避开只在这张单里。没有别的候选就照旧用原来的路由，lastProblem 写「没有别的路由可换」，不死等。
 // 轮数用尽后点「继续」把避开清掉（和上面的轮数清零同一处）。老历史没有这个标记，下一轮仍不避开。
 //
 // 改这里之前必须知道：
@@ -90,6 +90,7 @@ import { writeSession } from './task-session.ts';
 import {
   Abandoned,
   AutoEscape,
+  avoidableFamily,
   ConflictHandoff,
   conflictFilesForHandoff,
   conflictHandoffLine,
@@ -103,6 +104,7 @@ import {
   SKIP_CI_SELF_VERIFY,
   selfCheckText,
   taskPrDid,
+  withFamily,
 } from './task-support.ts';
 import { syncMainlineBeforeImplement } from './task-sync.ts';
 import { coldVerifyPr, verifyAlongsideCi } from './task-verify.ts';
@@ -441,9 +443,14 @@ class TaskFlow {
       if (delivery.commits === 0 && missed && patched('avoid-empty-commit-route')) {
         const noted = noteEmptyCommit(rt.commitAvoid, missed, rt.commitMisses);
         rt.commitAvoid = noted.avoid;
+        // 连着第二轮没提交、避开模型时连它那一族一起避开（决定 0093，patched('empty-commit-avoid-family')；别的族派不出退回只避开模型）。
+        // 老历史没有这个标记，只避开模型
+        const family = noted.streak >= 2 ? avoidableFamily(missed) : null;
+        const byFamily = family !== null && patched('empty-commit-avoid-family');
+        if (byFamily && family !== null) rt.commitAvoid = withFamily(rt.commitAvoid, family);
         rt.commitMisses = noted.streak;
         rt.commitMissRoute = missed;
-        rt.feedback = [emptyCommitFeedback(missed, noted.streak >= 2, left)];
+        rt.feedback = [emptyCommitFeedback(missed, noted.streak >= 2, left, byFamily ? family : null)];
       } else {
         if (delivery.commits !== 0 && patched('avoid-empty-commit-route')) rt.commitMisses = 0;
         rt.feedback = [

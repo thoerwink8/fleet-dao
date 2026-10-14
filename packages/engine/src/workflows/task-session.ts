@@ -101,7 +101,13 @@ export async function writeSession(
       const note = `${NO_OTHER_ROUTE}，这一轮仍用路由 ${route.routeId}。`;
       if (!rt.feedback.some((line) => line.includes(NO_OTHER_ROUTE))) rt.feedback = [...rt.feedback, note];
     }
-    rt.families.add(route.family);
+    // 交给冷验收的作者族按作者族记（决定 0093，patched('author-family-of-route')）：目录记成 unclassified、按模型 id 认得出的
+    // （`cursor:gpt-…`）记成那一族，验收换族才换得对。选路没给作者族（老历史、假端口）照 family；老历史没有这个标记，照旧记 family
+    rt.families.add(
+      route.authorFamily !== undefined && patched('author-family-of-route')
+        ? route.authorFamily
+        : route.family,
+    );
     rt.attemptSeq += 1;
     // 续会话（决定 0088）：上一段留了要续的记号才问；判一次就清掉
     let resumeSessionId: string | undefined;
