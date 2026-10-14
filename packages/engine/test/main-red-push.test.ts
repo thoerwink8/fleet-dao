@@ -15,14 +15,12 @@ import {
   verdictFromBody,
 } from '../src/jobs/main-red-push.ts';
 import type { SweepPart } from '../src/jobs/reconcile-common.ts';
-import { FEISHU_WEBHOOK_ENV, feishuWebhookSender } from '../src/real/feishu-webhook.ts';
 import { MAIN_CI_RUNS_PAGE, mainCiRuns } from '../src/real/main-ci-runs.ts';
 
 const SHA = 'a'.repeat(40);
 const SHA2 = 'b'.repeat(40);
 const URL = 'https://github.com/thoerwink8/fleet-dao/actions/runs/99';
 const URL2 = 'https://github.com/thoerwink8/fleet-dao/actions/runs/100';
-const HOOK = 'https://open.feishu.cn/open-apis/bot/v2/hook/fake-hook-token-for-logs';
 const NOW = new Date('2026-10-10T01:41:00.000Z');
 
 const run = (over: Partial<MainPushRun> = {}): MainPushRun => ({
@@ -292,32 +290,22 @@ describe('pushMainRed', () => {
     expect(w.sent).toEqual([]);
   });
 
-  it('没配、code 非 0：没查成，不记已推，下一轮还能再推', async () => {
+  it('交不出去：没查成，不记已推，下一轮还能再推', async () => {
     const missing = world();
-    const unconfigured = feishuWebhookSender({
-      env: {},
-      fetchImpl: async () => {
-        throw new Error('不该请求');
-      },
-      sleep: async () => {},
+    const part = await missing.push([run()], async () => {
+      throw new Error('推送没配');
     });
-    const part = await missing.push([run()], unconfigured);
     expect(part.found).toBe(0);
     expect(part.unchecked.join('\n')).toContain('没查成');
     expect(part.unchecked.join('\n')).toContain('没配');
     expect(missing.marked).toEqual([]);
 
     let codes = 0;
-    const nonzero = feishuWebhookSender({
-      env: { [FEISHU_WEBHOOK_ENV]: HOOK },
-      fetchImpl: async () => {
-        codes += 1;
-        return new Response(JSON.stringify({ code: 19021 }), { status: 200 });
-      },
-      sleep: async () => {},
+    const bad = await missing.push([run()], async () => {
+      codes += 1;
+      throw new Error('交不出去');
     });
-    const bad = await missing.push([run()], nonzero);
-    expect(codes).toBe(3);
+    expect(codes).toBe(1);
     expect(bad.found).toBe(0);
     expect(bad.unchecked.join('\n')).toContain('没查成');
     expect(missing.marked).toEqual([]);
@@ -646,18 +634,14 @@ function reconcileHarness(mainRedPush: () => Promise<SweepPart>): {
 }
 
 describe('对账里的主线红', () => {
-  it('【故意造出的失败】webhook 回 5xx 三次：发了 3 次、没记已推、对账结果里有没查成', async () => {
+  it('【故意造出的失败】交给推送没成：没记已推、对账结果里有没查成', async () => {
     let n = 0;
     const marked: string[] = [];
     let remembered = 0;
-    const send = feishuWebhookSender({
-      env: { [FEISHU_WEBHOOK_ENV]: HOOK },
-      fetchImpl: async () => {
-        n += 1;
-        return new Response('upstream down', { status: 500 });
-      },
-      sleep: async () => {},
-    });
+    const send = async () => {
+      n += 1;
+      throw new Error('交不出去');
+    };
     const h = reconcileHarness(() =>
       pushMainRed({
         listPushRuns: async () => [run()],
@@ -673,7 +657,7 @@ describe('对账里的主线红', () => {
       }),
     );
     const result = await runHourlyReconcileJob(h.deps);
-    expect(n).toBe(3);
+    expect(n).toBe(1);
     expect(marked).toEqual([]);
     expect(remembered).toBe(0);
     expect(result.outcome).not.toBe('ok');

@@ -302,9 +302,7 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
       poolHoldPush: async () => ({
         scanned: 1,
         found: 0,
-        unchecked: [
-          '整池暂停到期，飞书没推成：飞书推送没配：引擎环境里没有 FLEET_FEISHU_WEBHOOK，这条推不出去',
-        ],
+        unchecked: ['整池暂停到期，飞书没推成：推送没配，交不出去'],
       }),
     });
     const run = await runHourlyReconcileJob(h.deps);

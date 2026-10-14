@@ -1,6 +1,7 @@
 // 主线 ci.yml 变红：每小时对账往飞书推一条（#766）。同一个提交只推一次。
 // 转绿推一句「已恢复」，也按提交去重。cancelled、进行中、以及 failure/success 以外的已结束结论不改变上一次结论。
-// 没配 webhook、推不出去、运行列表读不到、记不下「推过」：进这一轮的没查成，不当成推过（推不出去时不记已推）。
+// 记下的那一行提醒（键 feishu:main-red:…、feishu:main-recovered:…）由驾驶舱后端推进飞书团队群（packages/api 的 feishu-push.ts）。
+// 交不出去、运行列表读不到、记不下「推过」：进这一轮的没查成，不当成推过（交不出去时不记已推）。
 // 上一次结论单独记在 feishu:main-ci-verdict（正文 red / green）。推送键谁建立得晚不能当结论：
 // 同一个提交再次变红时去重键还在，不再推，但结论必须改回红，否则接下来别的提交转绿会漏掉「已恢复」。
 // 推不出去、记不下推送时不改这一行，下一轮照旧再推。还没有这一行时，退回红 / 已恢复谁建立得晚（旧数据）。
@@ -20,8 +21,8 @@ export const MAIN_RECOVERED_KEY_PREFIX = 'feishu:main-recovered:';
 /** 当前结论。正文是 red 或 green；和「这个提交推过没有」不是同一行。 */
 export const MAIN_CI_VERDICT_KEY = 'feishu:main-ci-verdict';
 
-export const MAIN_RED_PUSH_TITLE = '主线红了，已推飞书';
-export const MAIN_RECOVERED_PUSH_TITLE = '主线已恢复，已推飞书';
+export const MAIN_RED_PUSH_TITLE = '主线红了';
+export const MAIN_RECOVERED_PUSH_TITLE = '主线已恢复';
 
 export function mainCiVerdictTitle(verdict: MainCiVerdict): string {
   return verdict === 'red' ? '主线当前是红的' : '主线当前是绿的';
@@ -54,7 +55,7 @@ export interface MainRedPushDeps {
    * 否则上一次结论停在上一次推出去的颜色。写不进照抛。
    */
   rememberVerdict: (input: { verdict: MainCiVerdict; link: string }) => Promise<void>;
-  /** 没配、推不出去照抛。抛出的话里不带 webhook 地址。 */
+  /** 交给推送（真实现只是交出去，推由后端照 markSent 那一行做）；交不出去照抛。 */
   send: (text: string) => Promise<void>;
 }
 

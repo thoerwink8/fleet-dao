@@ -9,6 +9,8 @@
 // - 发版和健康页也读（2026-10-14 法国发版失败，巡检还报 OK 近一小时）：/healthz 非 200、最近一次发版是 unhealthy / auto-rollback、发版进度记录停在
 //   done / aborted 以外、自动发布状态里写着「要人看」，一律 BROKEN（列出红的检查）；在用版本落后主线超过 LIMITS.lagCommits 个提交
 //   且最老的那个落下超过 LIMITS.lagMinutes 分钟是 ALERT；这几块读不到、认不出也是 BROKEN。
+// - 飞书推送通不通（push 那一块）：判法照 packages/db/src/queries/feishu-push.ts 的 feishuPushProblem 写（这份脚本在仓外跑、
+//   引不了那边的代码，改那边要一起改这里的 SQL）。推送渠道自己坏了靠推送报不出来，这里每次巡查都看一次，不只靠「新通知」。
 // - 基线只由这份脚本写（模型不写）：OK、ALERT 都把这一次的读数写成新基线，BROKEN 不写（不拿坏读数盖掉好基线）。
 // - 最后一行永远是 `VERDICT: OK`、`VERDICT: ALERT <条数>` 或 `VERDICT: BROKEN`；退出码 0、1、2 与之对应。
 import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
@@ -21,9 +23,14 @@ import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
 /** @typedef {{ at: string, sha: string, event: string }} HistoryFact 发布历史（.history）的一条 */
 /** @typedef {{ known: boolean, behind: number, minutes: number }} LagFact 在用版本落后主线几个提交、最老的落下几分钟（known=false：在用的不在主线最近的提交里） */
 /**
+ * 飞书推送：status 是后端记的推送状态（none 没记过、on 配好了、off 没配）；why 是没配的原因；staleMinutes 是该推还没送到的最老一条
+ * 到点了多少分钟（没有是 -1）；undelivered 该推没送到几条；lastOkMinutes 最近一次送到是多少分钟前（从没送到过是 -1）。
+ * @typedef {{ status: 'none' | 'on' | 'off', why: string, staleMinutes: number, undelivered: number, lastOkMinutes: number }} PushFact
+ */
+/**
  * 一次巡查读到的。at 是法国的采集时间（ISO）。
  * healthz、history、trainStatus、autoNote、lag 是发版和健康页（老基线里没有这几项，只有判当前读数用到）。
- * @typedef {{ at: string, release: string, healthz: HealthzFact, history: HistoryFact[], trainStatus: string, autoNote: string, lag: LagFact, services: Record<string, string>, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notesOpen: number, notes: NoteFact[] }} Facts
+ * @typedef {{ at: string, release: string, healthz: HealthzFact, history: HistoryFact[], trainStatus: string, autoNote: string, lag: LagFact, services: Record<string, string>, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notesOpen: number, notes: NoteFact[], push: PushFact }} Facts
  */
 /** @typedef {'OK' | 'ALERT' | 'BROKEN'} Verdict */
 /** @typedef {{ verdict: Verdict, facts: Facts | null, alerts: string[], delta: string[], broken: string | null, notes: string[] }} Report */
@@ -42,6 +49,8 @@ export const LIMITS = {
   lagCommits: 5,
   /** ……而且最老的那个没发的提交落下超过这么多分钟，才报（刚合进去的几个不算落后）。 */
   lagMinutes: 60,
+  /** 该推的到点超过这么多分钟没送到、这段时间里一条都没送成：飞书推送不通（同 feishu-push.ts 的 FEISHU_PUSH_STALE_MS） */
+  pushStaleMinutes: 60,
 };
 /** 发布历史最近一条是这些事件：这一版没发成，或退回了。 */
 export const BAD_RELEASE_EVENTS = ['unhealthy', 'auto-rollback'];
@@ -52,7 +61,7 @@ const RELEASES = '/srv/fleet-dao-releases';
 /** 要 active 的服务。 */
 export const SERVICES = ['fleet-api', 'fleet-engine'];
 /** 库查询那几块：每块跑完打 ok|<块>，报错打 ERR|<块>|<原因>。 */
-export const DB_BLOCKS = ['master', 'tasks', 'jobs', 'notecount', 'notes'];
+export const DB_BLOCKS = ['master', 'tasks', 'jobs', 'notecount', 'notes', 'push'];
 /** 远端命令：脚本从标准输入喂。 */
 export const PATROL_REMOTE_COMMAND = 'sh -s';
 /** 基线默认放在仓根 _tmp/（指挥官在主检出里跑）。 */
@@ -60,6 +69,25 @@ export const DEFAULT_BASELINE = '_tmp/patrol-baseline.json';
 export const BASELINE_SCHEMA = 1;
 
 const NO_NEWLINE = "E'\\n'";
+/**
+ * 「该推」的 SQL（同 feishu-push.ts 的 pushableSince）：没处理、24 小时内建的；要你拍、键 feishu: 开头（主线结论记账行除外）马上推，
+ * 卡住报警开着 10 分钟才推。值是从什么时候起该推，不该推是 null。
+ */
+const PUSHABLE_SINCE =
+  "case when n.dedupe_key = 'feishu:main-ci-verdict' then null when n.level = 'decision' or starts_with(n.dedupe_key, 'feishu:') then n.created_at when n.level = 'alert' then n.created_at + interval '10 minutes' else null end";
+/** 推送那一块：一行 push|状态|没配的原因|最老一条到点几分钟|该推没送到几条|最近一次送到几分钟前。 */
+const PUSH_SQL = [
+  "select 'push',",
+  "coalesce((select case when (value->>'configured')::boolean then 'on' else 'off' end from settings where key = 'feishu.push'), 'none'),",
+  `replace(replace(coalesce((select value->>'why' from settings where key = 'feishu.push'), ''), '|', '/'), ${NO_NEWLINE}, ' '),`,
+  'coalesce(floor(extract(epoch from now() - min(s.since)) / 60)::int, -1),',
+  'count(s.since),',
+  "coalesce((select floor(extract(epoch from now() - max(d.delivered_at)) / 60)::int from notification_deliveries d where d.channel = 'feishu' and d.delivered_at is not null), -1)",
+  `from (select ${PUSHABLE_SINCE} as since from notifications n`,
+  "left join notification_deliveries d on d.notification_id = n.id and d.channel = 'feishu' and d.target = 'team'",
+  "where n.resolved_at is null and n.created_at >= now() - interval '24 hours' and d.delivered_at is null) s",
+  'where s.since is not null and s.since <= now()',
+].join(' ');
 /**
  * 在法国上跑的那段 sh。每行一项，用「|」分隔；最后一行是 end（没有 end 就是被截断了）。
  * 只读：systemctl is-active、df、free、/proc/loadavg、只读事务里的 select。
@@ -95,6 +123,7 @@ export const REMOTE_SCRIPT = [
   `q jobs "select 'job', r.job, r.outcome, floor(extract(epoch from now() - coalesce(r.ended_at, r.started_at)) / 60)::int, replace(left(coalesce(r.why, ''), 100), ${NO_NEWLINE}, ' ') from schedule_runs r join scheduled_jobs j on j.id = r.job and j.removed_at is null where r.id in (select max(id) from schedule_runs where outcome is not null group by job) and r.outcome not in ('ok', 'partial') order by r.job"`,
   `q notecount "select 'notes', count(*) from notifications where resolved_at is null and dedupe_key not like 'remind:%'"`,
   `q notes "select 'note', left(dedupe_key, 80), replace(left(title, 100), ${NO_NEWLINE}, ' ') from notifications where resolved_at is null and dedupe_key not like 'remind:%' order by id desc limit 50"`,
+  `q push "${PUSH_SQL}"`,
   'echo end',
   '',
 ].join('\n');
@@ -181,7 +210,7 @@ export function parseRaw(text) {
   const notes = [];
   /** @type {Set<string>} */
   const blocksOk = new Set();
-  /** @type {{ at?: string, release?: string, diskPct?: number, memMb?: number, load?: number, master?: string, notesOpen?: number, healthz?: HealthzFact, cur?: string, train?: string, state?: string }} */
+  /** @type {{ at?: string, release?: string, diskPct?: number, memMb?: number, load?: number, master?: string, notesOpen?: number, healthz?: HealthzFact, cur?: string, train?: string, state?: string, push?: PushFact }} */
   const one = {};
   /** @type {HistoryFact[]} */
   const history = [];
@@ -227,6 +256,21 @@ export function parseRaw(text) {
         minutes: Number(p[3]),
         why: scrubText(p.slice(4).join('|')),
       });
+    else if (
+      kind === 'push' &&
+      p.length === 6 &&
+      ['none', 'on', 'off'].includes(p[1] ?? '') &&
+      isInt(p[3] ?? '') &&
+      isInt(p[4] ?? '') &&
+      isInt(p[5] ?? '')
+    )
+      one.push = {
+        status: /** @type {PushFact['status']} */ (p[1]),
+        why: scrubText(p[2] ?? ''),
+        staleMinutes: Number(p[3]),
+        undelivered: Number(p[4]),
+        lastOkMinutes: Number(p[5]),
+      };
     else if (kind === 'note' && p.length >= 3)
       notes.push({ key: scrubText(p[1] ?? ''), title: scrubText(p.slice(2).join('|')) });
     else return { ok: false, why: `认不出这一行：${shown(line)}` };
@@ -245,6 +289,7 @@ export function parseRaw(text) {
     'cur',
     'train',
     'state',
+    'push',
   ])
     if (!(k in one)) missing.push(k);
   if (histMissing || history.length === 0) missing.push('发布历史 .history（读不到或是空的）');
@@ -272,8 +317,25 @@ export function parseRaw(text) {
       jobs,
       notesOpen: one.notesOpen ?? 0,
       notes,
+      push: one.push ?? { status: 'none', why: '', staleMinutes: -1, undelivered: 0, lastOkMinutes: -1 },
     },
   };
+}
+
+/**
+ * 飞书推送不通（同 feishu-push.ts 的 feishuPushProblem）：后端记了没配；或该推的到点超过 60 分钟没送到、最近 60 分钟一条都没送成。
+ * 比那边多一条：后端从没记过推送状态也报（巡查只看法国这一台正式环境；引擎的看门狗各环境都跑，开发环境不推，那边不报这条）。
+ * 回一句话，通着回 null。
+ * @param {PushFact} p
+ */
+export function pushProblem(p) {
+  if (p.status === 'off') return `飞书推送没配：${p.why || '后端没说缺什么'}`;
+  // 法国是正式环境，后端起来就记推送状态；一直没有这一行 = 后端没在推（2026-10-05 推送整条被删就是这个样子，断了 9 天）
+  if (p.status === 'none') return '飞书推送没在跑：后端从没记过推送状态（设置 feishu.push 没有）';
+  if (p.staleMinutes < LIMITS.pushStaleMinutes) return null;
+  if (p.lastOkMinutes >= 0 && p.lastOkMinutes < LIMITS.pushStaleMinutes) return null;
+  const last = p.lastOkMinutes < 0 ? '从没送到过' : `最近一次送到是 ${p.lastOkMinutes} 分钟前`;
+  return `飞书推送不通：${p.undelivered} 条该推的没送到，最老的到点 ${p.staleMinutes} 分钟了，${last}`;
 }
 
 /** @param {TaskFact} t */
@@ -327,6 +389,8 @@ export function invariants(f, base) {
     out.push(`单 ${taskWord(t)} 已 ${t.minutes} 分钟没动（超过 ${LIMITS.stuckMinutes}）：${t.doing}`);
   for (const j of f.jobs)
     out.push(`定时任务 ${j.job} 最近一次是 ${j.outcome}（${j.minutes} 分钟前）：${j.why}`);
+  const push = pushProblem(f.push);
+  if (push) out.push(push);
   if (base) {
     const old = new Set(base.notes.map((n) => n.key));
     for (const n of f.notes) if (!old.has(n.key)) out.push(`新通知 ${n.key}：${n.title}`);
@@ -421,6 +485,7 @@ export function render(r) {
     `健康页 /healthz ${f.healthz.code === 200 ? '200' : `${f.healthz.code === 0 ? '连不上' : f.healthz.code}（红的：${f.healthz.red.join('、') || '没列出'}）`} ${at}`,
     `发版 最近一次 ${last ? historyWord(last) : '（没有）'}，进度记录 ${f.trainStatus || '无'}，落后主线 ${f.lag.known ? f.lag.behind : '?'} 个提交 ${at}`,
     `通知 开着 ${f.notesOpen} 条 ${at}`,
+    `飞书推送 ${pushProblem(f.push) ? '不通' : '通着'}（该推没送到 ${f.push.undelivered} 条，最近一次送到${f.push.lastOkMinutes < 0 ? '：从没有' : ` ${f.push.lastOkMinutes} 分钟前`}） ${at}`,
     ...r.notes,
     `DELTA ${r.delta.length}`,
     ...r.delta.map((d) => `  ${d}`),
@@ -526,7 +591,7 @@ export async function fetchFrance({ home, env, readText, timeoutMs = 55_000, spa
 
 /**
  * 造一份法国回来的样子（自检和测试用）。默认是一切正常；over 改哪项就坏哪项。
- * @param {{ at: Date, disk?: number, mem?: number, engine?: string, master?: string, tasks?: string[], jobs?: string[], notes?: string[], noEnd?: boolean, err?: string, healthz?: number, healthRed?: string[], hist?: string[], noHist?: boolean, train?: string, trainRaw?: string, noState?: boolean, autoNote?: string, behind?: number, behindMinutes?: number }} o
+ * @param {{ at: Date, disk?: number, mem?: number, engine?: string, master?: string, tasks?: string[], jobs?: string[], notes?: string[], push?: string, noEnd?: boolean, err?: string, healthz?: number, healthRed?: string[], hist?: string[], noHist?: boolean, train?: string, trainRaw?: string, noState?: boolean, autoNote?: string, behind?: number, behindMinutes?: number }} o
  */
 export function sampleRaw(o) {
   const notes = o.notes ?? ['note|deploy-lag|发布落后'];
@@ -572,6 +637,8 @@ export function sampleRaw(o) {
     'ok|notecount',
     ...notes,
     o.err ?? 'ok|notes',
+    o.push ?? 'push|on||-1|0|30',
+    'ok|push',
     ...(o.noEnd ? [] : ['end']),
   ];
   return `${lines.join('\n')}\n`;
@@ -588,7 +655,7 @@ export function selftest(now) {
   const cases = [
     ['一切正常', { ok: true, stdout: sampleRaw({ at: now }) }, 'OK', 0],
     [
-      '已知坏样本（引擎服务挂了、磁盘满、内存紧、总开关关、单卡住 45 分钟、定时任务失败、新通知）',
+      '已知坏样本（引擎服务挂了、磁盘满、内存紧、总开关关、单卡住 45 分钟、定时任务失败、飞书推送不通、新通知）',
       {
         ok: true,
         stdout: sampleRaw({
@@ -600,10 +667,11 @@ export function selftest(now) {
           tasks: ['task|12|fleet-dao|stalled||45|等路由'],
           jobs: ['job|probe|failed|7|探针连不上'],
           notes: ['note|deploy-lag|发布落后', 'note|task-stuck:12|单卡住了'],
+          push: 'push|on||95|3|12960',
         }),
       },
       'ALERT',
-      7,
+      8,
     ],
     [
       '2026-10-14 法国那次：/healthz 503、最近一次发版 unhealthy→auto-rollback→unhealthy、自动发布说要人看、落后 19 个提交',
