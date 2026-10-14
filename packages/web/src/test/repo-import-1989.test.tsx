@@ -45,7 +45,9 @@ describe('设置页导入仓库（#1989）', () => {
     const row = screen.getByText('adfx-studio/daihuo-workbench').closest('li') as HTMLElement;
     expect(within(row).getByText('未接入')).toBeTruthy();
     // 横幅在行后面（同一个列表容器里），按文字找
-    const notice = screen.getByRole('alert');
+    const notice = screen
+      .getByText('先去 GitHub 把两个机器人装到这个仓')
+      .closest('[role="status"]') as HTMLElement;
     expect(within(notice).getByText('先去 GitHub 把两个机器人装到这个仓')).toBeTruthy();
     // 这个仓只缺「引擎」：只给引擎的安装页，不给已装的「干活的」
     const hrefs = within(notice)

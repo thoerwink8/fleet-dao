@@ -19,6 +19,7 @@ export function Notice({
   action,
   children,
   className,
+  role,
 }: {
   tone?: NoticeTone;
   title?: ReactNode;
@@ -26,11 +27,13 @@ export function Notice({
   action?: ReactNode;
   children?: ReactNode;
   className?: string;
+  /** 默认 fail/stall 用 alert、其余 status；页面上本来就常驻、不该打断读屏的提醒（比如设置里某个仓的待办）显式给 status。 */
+  role?: 'alert' | 'status';
 }) {
   const { tone: skin, icon: Icon } = SKIN[tone];
   return (
     <div
-      role={tone === 'fail' || tone === 'stall' ? 'alert' : 'status'}
+      role={role ?? (tone === 'fail' || tone === 'stall' ? 'alert' : 'status')}
       data-tone={tone}
       className={cn(
         'flex flex-wrap items-center justify-between gap-2 rounded-lg border px-stack py-2 text-body',

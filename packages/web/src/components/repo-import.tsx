@@ -378,7 +378,7 @@ function NotInstalledNotice({ repo }: { repo: ImportableRepo }) {
         ? '「干活的」机器人'
         : '「引擎」机器人';
   return (
-    <Notice tone="stall" title={APPS_NOT_INSTALLED_HINT} className="mt-1">
+    <Notice tone="stall" role="status" title={APPS_NOT_INSTALLED_HINT} className="mt-1">
       <p>
         {repo.fullName} 已在驾驶舱，但{who}还没装到这个仓，AI 派不了活、合不了并。装好后点「重新读取」。
       </p>
