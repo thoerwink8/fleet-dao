@@ -918,6 +918,31 @@ describe('经 ssh 跑查询：连不上、超时、脚本没跑成都分得开�
     expect(r.ok ? '' : r.why).not.toContain('203.0.113.9');
   });
 
+  it('【故意造出的失败】公钥被拒：仍是 ssh-failed，写明缺 fleet_login，IP 抹掉', async () => {
+    const file = fakeSsh(
+      tempDir(),
+      "process.stderr.write('root@203.0.113.9: Permission denied (publickey).\\n'); process.exit(255);",
+    );
+    const r = await lib.runRemote({ command: process.execPath, args: [file], script: 'x' });
+    expect(r).toMatchObject({ ok: false, kind: 'ssh-failed' });
+    expect(r.ok ? '' : r.why).toContain('公钥被拒');
+    expect(r.ok ? '' : r.why).toContain('fleet_login');
+    expect(r.ok ? '' : r.why).toContain('fleet-fr-wg');
+    expect(r.ok ? '' : r.why).not.toContain('203.0.113.9');
+  });
+
+  it('【故意造出的失败】22 口拒绝连接：写明没在听或被复位，不说成公钥', async () => {
+    const file = fakeSsh(
+      tempDir(),
+      "process.stderr.write('ssh: connect to host 203.0.113.9 port 22: Connection refused\\n'); process.exit(255);",
+    );
+    const r = await lib.runRemote({ command: process.execPath, args: [file], script: 'x' });
+    expect(r).toMatchObject({ ok: false, kind: 'ssh-failed' });
+    expect(r.ok ? '' : r.why).toContain('被拒绝');
+    expect(r.ok ? '' : r.why).not.toContain('公钥被拒');
+    expect(r.ok ? '' : r.why).not.toContain('203.0.113.9');
+  });
+
   it('本机没有 ssh 命令：ssh-failed，叫装 OpenSSH', async () => {
     const r = await lib.runRemote({ command: join(tempDir(), 'no-such-ssh'), args: [], script: 'x' });
     expect(r).toMatchObject({ ok: false, kind: 'ssh-failed' });
