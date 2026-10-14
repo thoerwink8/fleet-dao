@@ -207,6 +207,13 @@ describe('草稿补丁：只改那九栏，人改过的转「建议改」，别�
     expect(got.rejected).toEqual([{ field: 'want', why: '值是空的' }]);
   });
 
+  it('类别只认需求、缺陷、杂项（法国点验里模型写过「文档」，拍板时开单才失败）', () => {
+    const got = splitCommanderPatch({ kind: '文档', size: '小' }, []);
+    expect(got.apply).toEqual({ size: '小' });
+    expect(got.rejected).toEqual([{ field: 'kind', why: '类别只能是需求、缺陷、杂项' }]);
+    expect(splitCommanderPatch({ kind: '杂项' }, []).apply).toEqual({ kind: '杂项' });
+  });
+
   it('值不合规矩（怎么算做完不是一串、标题超长）拒掉', () => {
     const got = splitCommanderPatch({ done: '一句话', title: 'x'.repeat(101) }, []);
     expect(got.apply).toEqual({});
