@@ -1,4 +1,5 @@
-// 健康检查：/healthz 逐项探依赖（库、实时推送、Temporal……），任何一项不好就整体 503，如实报红。
+// 健康检查：/healthz 逐项探依赖（库、实时推送、Temporal……），任何一项不好就整体 503，如实报红；
+// 只有「警告」（PublicHealthWarning：要人去配、不是依赖坏了）不拖垮整体。
 // 对外只说「哪一项、好不好、一句不含内部细节的原因」；错误原文（可能带内部地址）只进日志。
 import { errMessage } from '@fleet-dao/shared/util';
 import type { Context } from 'hono';
@@ -21,6 +22,19 @@ export class PublicHealthError extends Error {
   }
 }
 
+/**
+ * 「警告」：这一项有要人看的配置问题，但不是依赖坏了（比如某个仓还没装 GitHub 机器人）。报 ok:true + status:'warning'，
+ * 不拖垮整体 /healthz（仍回 200，发版健康检查、巡检、健康页总灯都不因它判失败），原因照实带出来。
+ * 只给「人看了去配就行」的事用；权限不对、依赖连不上这类真故障仍抛 PublicHealthError，整体 503。
+ * 对外的话同样只写中性的一句。
+ */
+export class PublicHealthWarning extends PublicHealthError {
+  constructor(code: string, message: string, detail?: string) {
+    super(code, message, detail);
+    this.name = 'PublicHealthWarning';
+  }
+}
+
 /** 单项探活的上限：一项卡住不能把整个健康检查拖死。 */
 const CHECK_TIMEOUT_MS = 3_000;
 
@@ -32,6 +46,8 @@ export type HealthReport = {
     /** 好，另带一句说明（比如飞书网关几秒前来过）：检查返回了一句话。和「未接」靠有没有 status 分开。 */
     | { ok: true; message: string }
     | { ok: true; status: 'not_wired'; message: string }
+    /** 好但有要人看的配置问题（PublicHealthWarning）：整体仍 200，页面标成警告。 */
+    | { ok: true; status: 'warning'; code: string; message: string }
     | { ok: false; code: string; message: string }
   >;
 };
@@ -67,6 +83,9 @@ export async function runHealthChecks(
           error: errMessage(err),
           ...(err instanceof PublicHealthError && err.detail ? { detail: err.detail } : {}),
         });
+        if (err instanceof PublicHealthWarning) {
+          return [name, { ok: true, status: 'warning', code: err.code, message: err.message }] as const;
+        }
         return [
           name,
           err instanceof PublicHealthError

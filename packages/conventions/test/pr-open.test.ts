@@ -25,7 +25,7 @@ afterEach(() => {
 
 /** 默认正文的需求栏挂了 #7（#1052：不挂单不开 PR）；查单那次 gh 回「不是 PR、没挂里程碑」。 */
 const BODY = '**做了什么**：x\n\n**需求**：\nCloses #7\n';
-const ISSUE_7 = ok('[false,null]');
+const ISSUE_7 = ok('[false,null,"open"]');
 
 /**
  * replies 是开 PR 之后各次 gh 的回话；查单（gh api …/issues/<号>）的回话在 lookups 里，默认一次 ISSUE_7，
@@ -38,6 +38,8 @@ function world(
   pushReply: RunResult = ok(),
   /** 开之前列开着的 PR（同一张单有没有别人在做，决定 0096）的回话；不记进 calls。 */
   openPulls: RunResult = ok('[]'),
+  /** 当前分支：local/<单号>-、fleet/<单号>- 就是分支认单。 */
+  branch = 'feat/x',
 ) {
   const cwd = mkdtempSync(join(tmpdir(), 'pr-open-'));
   dirs.push(cwd);
@@ -47,7 +49,7 @@ function world(
   const gitCalls: string[][] = [];
   const listed: string[][] = [];
   const git: Gh = (args) => {
-    if (args[0] === 'rev-parse') return ok('feat/x\n');
+    if (args[0] === 'rev-parse') return ok(`${branch}\n`);
     gitCalls.push(args);
     order.push(`git ${args[0]}`);
     return pushReply;
@@ -316,7 +318,7 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、顺手挂里程碑', ()
   });
 
   it('【故意造出的失败】需求栏写的号是个 PR、不是单：退出码 1，不开 PR', () => {
-    const w = world([], BODY, [ok('[true,null]')]);
+    const w = world([], BODY, [ok('[true,null,"open"]')]);
     expect(w.run()).toBe(1);
     expect(w.calls).toEqual([]);
     expect(w.text()).toContain('这是 PR，请用 --no-issue 并写理由');
@@ -337,8 +339,8 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、顺手挂里程碑', ()
 
   it('只写 Refs（母单分片）也认；Closes 的排前面，里程碑跟着它走', () => {
     const w = world([CREATED, ok(), files('a.ts'), ok()], '**需求**：Refs #3\nCloses #9\n', [
-      ok('[false,"v4 统一与验收"]'),
-      ok('[false,"v3"]'),
+      ok('[false,"v4 统一与验收","open"]'),
+      ok('[false,"v3","open"]'),
     ]);
     expect(w.run()).toBe(0);
     expect(w.asked.map((a) => a[1])).toEqual([
@@ -353,7 +355,7 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、顺手挂里程碑', ()
   });
 
   it('单挂了里程碑：PR 开出来就挂上同一个（在查文件、挂自动合并之前）；没挂的不挂、打一行说', () => {
-    const w = world([CREATED, ok(), files('a.ts'), ok()], BODY, [ok('[false,"v4 统一与验收"]')]);
+    const w = world([CREATED, ok(), files('a.ts'), ok()], BODY, [ok('[false,"v4 统一与验收","open"]')]);
     expect(w.run()).toBe(0);
     expect(verbs(w.calls)).toEqual(['pr create', 'pr edit', 'api --paginate', 'pr merge']);
     expect(w.calls[1]).toEqual(['pr', 'edit', '42', '--milestone', 'v4 统一与验收']);
@@ -367,7 +369,7 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、顺手挂里程碑', ()
 
   it('【故意造出的失败】挂里程碑没成：打一行说没挂成，不算失败（照样挂自动合并、退出码 0）', () => {
     const w = world([CREATED, bad('milestone not found'), files('a.ts'), ok()], BODY, [
-      ok('[false,"v4 统一与验收"]'),
+      ok('[false,"v4 统一与验收","open"]'),
     ]);
     expect(w.run()).toBe(0);
     expect(w.text()).toContain('没挂上里程碑「v4 统一与验收」');
@@ -607,5 +609,70 @@ describe('pnpm pr:open：同一张单不开第二个 PR（决定 0096）', () =>
     );
     expect(w.run()).toBe(0);
     expect(w.listed).toEqual([]);
+  });
+});
+
+describe('pnpm pr:open：分支认单（local/<单号>-、fleet/<单号>-）', () => {
+  const NO_COLUMN = '**做了什么**：x\n\n**需求**：\n';
+
+  it('需求栏没挂单：自动补 Closes #单号，核单后照常开、挂自动合并', () => {
+    const w = world([CREATED, files('a.ts'), ok()], NO_COLUMN, [ISSUE_7], ok(), ok('[]'), 'local/7-x');
+    expect(w.run()).toBe(0);
+    expect(w.bodies[0]).toContain('Closes #7');
+    expect(w.asked[0]?.[1]).toContain('/issues/7');
+    expect(w.text()).toContain('自动补 Closes #7');
+    expect(verbs(w.calls)).toContain('pr merge');
+  });
+
+  it('fleet/<单号>- 一样认', () => {
+    const w = world([CREATED, files('a.ts'), ok()], NO_COLUMN, [ISSUE_7], ok(), ok('[]'), 'fleet/7-x');
+    expect(w.run()).toBe(0);
+    expect(w.bodies[0]).toContain('Closes #7');
+  });
+
+  it('【故意造出的失败】带 --no-issue：拒开，说清分支已对应单 #n，不查单也不开', () => {
+    const w = world([], BODY, [], ok(), ok('[]'), 'local/7-x');
+    expect(w.run('--no-issue', '懒得挂')).toBe(1);
+    expect(w.text()).toContain('已经对应单 #7');
+    expect(w.calls).toEqual([]);
+    expect(w.asked).toEqual([]);
+  });
+
+  it('【故意造出的失败】需求栏挂的单里没有分支这张：拒开', () => {
+    const w = world([], BODY, [], ok(), ok('[]'), 'local/9-x');
+    expect(w.run()).toBe(1);
+    expect(w.text()).toContain('单号对不上');
+    expect(w.calls).toEqual([]);
+  });
+
+  it('需求栏挂了分支这张（外加别的 Refs）：照常开', () => {
+    const body = '**做了什么**：x\n\n**需求**：\nCloses #7\nRefs #3（分片、关不了它）\n';
+    const w = world([CREATED, files('a.ts'), ok()], body, [ISSUE_7, ISSUE_7], ok(), ok('[]'), 'local/7-x');
+    expect(w.run()).toBe(0);
+  });
+
+  it('【故意造出的失败】分支这张单已经关了：自动挂不得，不开 PR', () => {
+    const w = world([], NO_COLUMN, [ok('[false,null,"closed"]')], ok(), ok('[]'), 'local/7-x');
+    expect(w.run()).toBe(1);
+    expect(w.text()).toContain('已经关了');
+    expect(w.calls).toEqual([]);
+  });
+
+  it('【故意造出的失败】分支这个号是个 PR、不是单：不开 PR', () => {
+    const w = world([], NO_COLUMN, [ok('[true,null,"open"]')], ok(), ok('[]'), 'local/7-x');
+    expect(w.run()).toBe(1);
+    expect(w.text()).toContain('是个 PR');
+  });
+
+  it('【故意造出的失败】分支这个号不存在：不开 PR', () => {
+    const w = world([], NO_COLUMN, [bad('gh: Not Found (HTTP 404)')], ok(), ok('[]'), 'local/7-x');
+    expect(w.run()).toBe(1);
+    expect(w.text()).toContain('不存在');
+  });
+
+  it('普通分支：行为不变，--no-issue 照旧能用', () => {
+    const w = world([CREATED, files('a.ts'), ok()], NO_COLUMN, []);
+    expect(w.run('--no-issue', '确实没有单')).toBe(0);
+    expect(w.bodies[0]).toContain('无：确实没有单');
   });
 });

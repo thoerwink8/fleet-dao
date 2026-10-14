@@ -53,6 +53,33 @@ test('「未接」的项：不算不在线，整体照样绿，写明未接和�
   assert.equal(byKey(w).watchdog.ok, false);
 });
 
+test('「警告」的项（某个仓没装机器人）：不算不在线，整体照样绿，但显示成警告、总结里数出来；格式不全不算绿', () => {
+  const warn = {
+    ok: true,
+    status: 'warning',
+    code: 'github_app_not_installed',
+    message: '有仓还没装好 GitHub 机器人（待处理）',
+  };
+  const v = judge({ status: 200, body: report(true, { ...allOk, github_app: warn }) });
+  assert.equal(v.ok, true);
+  assert.equal(v.summary, '全部在线（1 项警告要人看）');
+  const row = byKey(v).github_app;
+  assert.equal(row.ok, true);
+  assert.equal(row.warning, true);
+  assert.equal(row.reason, '警告：有仓还没装好 GitHub 机器人（待处理）');
+  // 没有原因的警告：认不出，不算绿
+  const u = judge({
+    status: 200,
+    body: report(true, { ...allOk, github_app: { ok: true, status: 'warning' } }),
+  });
+  assert.equal(u.ok, false);
+  // 真故障（权限不对）照样红
+  const bad = { ok: false, code: 'github_app', message: 'GitHub 机器人的权限有要人看的问题' };
+  const w = judge({ status: 503, body: report(false, { ...allOk, github_app: bad }) });
+  assert.equal(w.ok, false);
+  assert.equal(byKey(w).github_app.warning, undefined);
+});
+
 test('判断题（judge）：显示成「判断题」；没配是「未接」不算坏，调用没成照实报红', () => {
   const notWired = { ok: true, status: 'not_wired', message: '这台机器没配判断题' };
   const v = judge({ status: 200, body: report(true, { ...allOk, judge: notWired }) });

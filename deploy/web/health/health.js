@@ -1,9 +1,9 @@
 // 健康页的取数与判定（浏览器里的页面和 deploy/test/health-page.test.mjs 用的是这同一份）。
 // 规矩：只有后端明说 ok 的项才算在线；连不上、超时、回的不是健康报告、缺项、结论和逐项对不上，一律报红，并说出是哪一种。
 // /healthz 的样子（packages/api 的 health.ts）：{ ok, checks: { <项>: { ok: true } | { ok: true, message }
-// | { ok: true, status: 'not_wired', message } | { ok: false, code, message } } }。
+// | { ok: true, status: 'not_wired', message } | { ok: true, status: 'warning', code, message } | { ok: false, code, message } } }。
 // 好的项可以带一句说明（看门狗几秒前跑过），写在「在线」后面；「未接」是功能还没做，不算不在线，照样显示出来（写明未接和原因）；
-// 全好回 200，有一项不好回 503。香港 nginx 把 /healthz 经隧道转给法国的驾驶舱后端（deploy/hk/nginx-https.conf）。
+// 「警告」是要人去配的事（比如某个仓还没装 GitHub 机器人），不算不在线、不让总灯变红，但照样显示、总结里数出来；全好回 200，有一项不好回 503。香港 nginx 把 /healthz 经隧道转给法国的驾驶舱后端（deploy/hk/nginx-https.conf）。
 
 /** P0 验收要看到的三项：法国的数据库、Temporal、引擎工人。后端没报的项照样列出来、报红。 */
 export const REQUIRED = [
@@ -82,7 +82,12 @@ export function judge(fetched) {
   }
   if (bad > 0) return { ok: false, summary: `${bad} 项不在线`, rows };
   const notWired = rows.filter((r) => r.notWired).length;
-  return { ok: true, summary: notWired > 0 ? `全部在线（${notWired} 项还没接上）` : '全部在线', rows };
+  const warned = rows.filter((r) => r.warning).length;
+  const notes = [
+    ...(notWired > 0 ? [`${notWired} 项还没接上`] : []),
+    ...(warned > 0 ? [`${warned} 项警告要人看`] : []),
+  ];
+  return { ok: true, summary: notes.length > 0 ? `全部在线（${notes.join('，')}）` : '全部在线', rows };
 }
 
 function describeStatus(status) {
@@ -116,6 +121,9 @@ function row(key, label, check) {
   }
   // 「未接」必须样子完整（status 就是 not_wired、带一句原因）：带了 status 却认不出、缺原因，都不算绿
   if (check.ok === true && 'status' in check) {
+    if (check.status === 'warning' && typeof check.message === 'string' && check.message.trim()) {
+      return { key, label, ok: true, warning: true, reason: `警告：${check.message}` };
+    }
     if (check.status !== 'not_wired' || typeof check.message !== 'string' || !check.message.trim()) {
       return { key, label, ok: false, reason: '这一项的格式认不出' };
     }

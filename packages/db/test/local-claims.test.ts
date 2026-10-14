@@ -17,6 +17,7 @@ import {
   mergedPrForIssue,
   renewLocalTask,
   settleExpiredLocalClaim,
+  unexpiredLocalClaims,
 } from '../src/queries/local-claims.ts';
 import { mergeStallFacts } from '../src/queries/merge-stall.ts';
 import { listOpenTaskRows } from '../src/queries/reconcile.ts';
@@ -222,6 +223,29 @@ describe('到期收回', () => {
       await settleExpiredLocalClaim(t.db, { taskId: e.taskId, how: 'done', why: 'PR 合了', now: NOW }),
     ).toBe(1);
     expect(await row(repo.id, 3)).toMatchObject({ state: 'done', executor: 'local' });
+  });
+
+  it('没到期的租约：unexpiredLocalClaims 列出；early 收成 done 不看租约时刻，不带 early 不动', async () => {
+    const repo = await addRepo(t.db, 'app');
+    await claimLocalTask(t.db, { repo: 'acme/app', issueNumber: 5, title: 'x', nodeId: NODE, now: NOW });
+    const [u] = await unexpiredLocalClaims(t.db, repo.id, NOW);
+    expect(u?.issueNumber).toBe(5);
+    if (!u) throw new Error('没列出来');
+    expect(await expiredLocalClaims(t.db, repo.id, NOW)).toEqual([]);
+    expect(await settleExpiredLocalClaim(t.db, { taskId: u.taskId, how: 'done', why: 'x', now: NOW })).toBe(
+      0,
+    );
+    expect(
+      await settleExpiredLocalClaim(t.db, {
+        taskId: u.taskId,
+        how: 'done',
+        why: 'PR 合了',
+        now: NOW,
+        early: true,
+      }),
+    ).toBe(1);
+    expect(await row(repo.id, 5)).toMatchObject({ state: 'done', executor: 'local', leaseUntil: null });
+    expect(await unexpiredLocalClaims(t.db, repo.id, NOW)).toEqual([]);
   });
 
   it('mergedPrForIssue：需求栏挂着、或固定前缀分支的合并 PR；开着的不算', async () => {

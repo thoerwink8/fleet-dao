@@ -49,6 +49,7 @@ import {
 import { recordExternalWatchRound } from './external-watch.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { memoryCockpitAlerts, pgCockpitAlerts } from './feishu-alerts.ts';
+import { feishuBotFromConfig, startFeishuPush } from './feishu-push.ts';
 import { productionPreflightReaders } from './france-preflight.ts';
 import { liveFranceReleasePort } from './france-release.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
@@ -295,6 +296,18 @@ async function assemble(): Promise<{
   const stopReleaseWaitWatch = production ? startReleaseWaitWatch({ db, now, log }) : () => {};
   // 看门狗（#203）自己停了它自己报不了：后端每 5 分钟按登记表上它那一行看一次，停了推一条「看门狗停了」，好了自己撤
   const stopWatchdogWatch = production ? startWatchdogWatch({ db, now, log }) : () => {};
+  // 提醒推飞书（决定 0090）：每 30 秒把该推的发进团队群，结局记进送达记录；没配记「没配」，看门狗报。只在正式环境推
+  const pushBot = feishuBotFromConfig(config);
+  const stopFeishuPush = production
+    ? startFeishuPush({
+        db,
+        bot: pushBot.bot,
+        notConfiguredWhy: pushBot.why,
+        publicUrl: config.publicUrl,
+        now,
+        log,
+      })
+    : () => {};
   // 提需求开出的单子的进度（#2060）：每分钟从 GitHub 和引擎任务表读，写进需求、对话里追加进度卡，引擎的提问发到单上。
   // 凭据没读到就不起（那时开单也是 503）；「已上线」要读发布目录，只在正式环境有。
   const stopRequestProgressWatch = github.requestIssues
@@ -399,6 +412,7 @@ async function assemble(): Promise<{
       stopDeployLagWatch();
       stopReleaseWaitWatch();
       stopWatchdogWatch();
+      stopFeishuPush();
       stopRequestProgressWatch();
       await feed.stop();
       await temporal.close();

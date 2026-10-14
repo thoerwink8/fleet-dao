@@ -28,6 +28,13 @@ export interface AlertRow {
  */
 export const GITHUB_APP_ALERT_PREFIX = 'github-app:';
 
+/**
+ * 同一轮自检里「某个机器人没装到某个仓」（创始人刚导入新仓、还没去 GitHub 装）单独走这个前缀
+ * （github-app-missing:<机器人>:<仓>，要人拍的）：它是要人去配的事，健康检查只报警告、不让整个 /healthz 503。
+ * 故意不以 GITHUB_APP_ALERT_PREFIX 开头（那个前缀带冒号，这个在 app 后面是横线），两类各查各的，真权限故障不会被降级。
+ */
+export const GITHUB_APP_MISSING_ALERT_PREFIX = 'github-app-missing:';
+
 const columns = {
   id: notifications.id,
   dedupeKey: notifications.dedupeKey,

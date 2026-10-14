@@ -57,6 +57,18 @@ describe('fleet-api dispatch-issue（后端这一头）', () => {
     expect(wrapper).toContain('packages/engine/src/bin/usage-backfill-once.ts');
   });
 
+  it('daily-brief（决定 0096）同样：--help 里列得出来；没经 bin/fleet-api 直接跑退出码 2；bin/fleet-api 把它转给引擎包', async () => {
+    const help = capture();
+    expect(await main(['--help'], help.deps)).toBe(0);
+    expect(help.out.join('\n')).toContain('fleet-api daily-brief [--as-today]');
+    const direct = capture();
+    expect(await main(['daily-brief'], direct.deps)).toBe(2);
+    expect(direct.err.join('\n')).toContain('packages/engine/src/bin/daily-brief.ts');
+    const wrapper = readFileSync(fileURLToPath(new URL('../bin/fleet-api', import.meta.url)), 'utf8');
+    expect(wrapper).toMatch(/"\$\{1:-\}" == "daily-brief"/);
+    expect(wrapper).toContain('packages/engine/src/bin/daily-brief.ts');
+  });
+
   it('bin/fleet-api 把 dispatch-issue 转给引擎包的入口，别的命令仍走后端自己的', () => {
     const wrapper = readFileSync(fileURLToPath(new URL('../bin/fleet-api', import.meta.url)), 'utf8');
     expect(wrapper).toMatch(/"\$\{1:-\}" == "dispatch-issue"/);

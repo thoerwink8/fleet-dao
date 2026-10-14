@@ -33,6 +33,7 @@ import {
   taskFailureCount,
   taskStateByIssue,
   tasksCreatedSince,
+  unexpiredLocalClaims,
   upsertAlert,
   writeIntakeBreaker,
   writeIntakeWaiting,
@@ -104,6 +105,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
       // 本机领单的租约（决定 0096）：到期的行、心跳（本机会话推来的 node_sessions）、PR 镜像都从库里读，摘标签用「引擎」机器人
       localLeases: {
         expired: (repo, at) => expiredLocalClaims(w.db, repo.id, at),
+        unexpired: (repo, at) => unexpiredLocalClaims(w.db, repo.id, at),
         async liveIssues(repo, at) {
           return liveLocalIssues(await store.listNodeSessions(), `${repo.owner}/${repo.name}`, at);
         },

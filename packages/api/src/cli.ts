@@ -21,6 +21,7 @@
 //   会话里的登录方式记 cli-mint，版本号取此人当前的 sessionVersion（「退出所有设备」能作废它）。只在服务器上跑，不加网络入口。
 //   alert …（design 15.3「谁在处理」）：开着的提醒谁在处理、修到哪；静默。写法和退出码见 alert-cli.ts。
 //   task continue|abandon|redo <owner/仓名> <单号> --note "<为什么>"（#1402）：续、放弃、重做一张单。见 task-cli.ts。
+//   feishu-push status|test（决定 0090）：提醒推飞书通不通；test 建一条测试提醒、等后端推出去、读回送达记录。见 feishu-push-cli.ts。
 //   release pause|continue（#2038）：release.sh 切版本前给手上有会话的任务发 hard 暂停、切完只继续这一批。见 release-pause.ts。
 // 每条命令带 --help（或 -h）只打印用法。
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
@@ -35,6 +36,12 @@ import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
 import { type Config, loadConfig } from './config.ts';
 import { describeEngineMaster, readEngineMaster, setEngineMaster } from './engine-switch.ts';
+import {
+  FEISHU_PUSH_USAGE,
+  FeishuPushCliError,
+  parseFeishuPushArgs,
+  runFeishuPush,
+} from './feishu-push-cli.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
 import type { AuditRecord, AutoDispatchChange, IntakeRepo, Store, User } from './ports.ts';
 import { RELEASE_USAGE, runReleaseCommand } from './release-pause.ts';
@@ -71,6 +78,9 @@ const GROOM_POINTER =
 /** usage-backfill-once（#1948，一次性回填没有会话号的老用量）同样：本体在引擎包，由 bin/fleet-api 转过去。 */
 const USAGE_BACKFILL_ONCE_POINTER =
   '用法：fleet-api usage-backfill-once [--apply]（#1946 之前没有会话号的老 run，按分支名和起止对上 Mirasim 用量账本，只补空字段；默认只读，--apply 才写。本体在引擎包，经 packages/api/bin/fleet-api 转过去，完整说明跑 fleet-api usage-backfill-once --help）';
+/** daily-brief（决定 0096，手动跑一次每日简报）同样：本体在引擎包（packages/engine/src/bin/daily-brief.ts），由 bin/fleet-api 转过去。 */
+const DAILY_BRIEF_POINTER =
+  '用法：fleet-api daily-brief [--as-today]（手动跑一次每日简报：推飞书团队群、在 #1055 发评论；默认标成手动触发，不顶替今天 08:30 那一条，--as-today 补发今天定时那一条。本体在引擎包，经 packages/api/bin/fleet-api 转过去）';
 const SESSION_MINT_USAGE =
   '用法：fleet-api session-mint <飞书名或用户 id> --reason "<为什么>" [--ttl <分钟，默认 60，最多 120>]（发一枚短命的驾驶舱会话 Cookie 给 AI 点验用：打印两行，Cookie 名和值；先写操作记录，不含 Cookie 值）';
 const NODE_KEY_USAGE =
@@ -820,12 +830,14 @@ const USAGES: Record<string, string> = {
   'dispatch-issue': DISPATCH_ISSUE_POINTER,
   groom: GROOM_POINTER,
   'usage-backfill-once': USAGE_BACKFILL_ONCE_POINTER,
+  'daily-brief': DAILY_BRIEF_POINTER,
   engine: ENGINE_USAGE,
   'node-key': NODE_KEY_USAGE,
   'session-mint': SESSION_MINT_USAGE,
   alert: ALERT_USAGE,
   task: TASK_USAGE,
   release: RELEASE_USAGE,
+  'feishu-push': FEISHU_PUSH_USAGE,
 };
 
 const isHelp = (arg: string | undefined) => arg === '--help' || arg === '-h';
@@ -927,11 +939,46 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
       2,
     );
   }
+  if (command === 'daily-brief') {
+    throw new CliError(
+      'daily-brief 要经 packages/api/bin/fleet-api 跑（它转给引擎包的 packages/engine/src/bin/daily-brief.ts）',
+      2,
+    );
+  }
   if (command === 'alert') return runAlertCommand(rest, deps);
   if (command === 'task') return runTaskCommand(rest, deps);
   if (command === 'release') return runReleaseCli(rest, deps);
+  if (command === 'feishu-push') return runFeishuPushCommand(rest, deps);
   deps.err(Object.values(USAGES).join('\n'));
   return 2;
+}
+
+/** feishu-push：参数先认完再连库；连不上库、库出错退出码 1。 */
+async function runFeishuPushCommand(rest: readonly string[], deps: CliDeps): Promise<number> {
+  let cmd: ReturnType<typeof parseFeishuPushArgs>;
+  try {
+    cmd = parseFeishuPushArgs(rest);
+  } catch (err) {
+    if (err instanceof FeishuPushCliError) {
+      deps.err(err.message);
+      return err.exitCode;
+    }
+    throw err;
+  }
+  const { createDb } = await import('@fleet-dao/db');
+  const { db, close } = createDb({ url: databaseUrl(deps.env) });
+  try {
+    const result = await runFeishuPush(cmd, {
+      db,
+      now: deps.now,
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      operator: operatorName(deps.env),
+    });
+    (result.code === 0 ? deps.out : deps.err)(result.text);
+    return result.code;
+  } finally {
+    await close();
+  }
 }
 
 /** 用到才连：参数不对（退出码 2）的不连库。给出一个替身，第一次调方法时才打开真的（方法一律当成异步的）。 */

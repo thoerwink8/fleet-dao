@@ -27,6 +27,8 @@ interface SampleOpts {
   tasks?: string[];
   jobs?: string[];
   notes?: string[];
+  push?: string;
+  brief?: string;
   noEnd?: boolean;
   err?: string;
   healthz?: number;
@@ -146,6 +148,60 @@ describe('巡查脚本：判法', () => {
       base: null,
     });
     expect(long.alerts).toHaveLength(1);
+  });
+
+  it('飞书推送：没配马上 ALERT；该推的到点超过 60 分钟、60 分钟里没送成过才 ALERT；有送成的、还不到点的不报', () => {
+    const judge = (push: string) =>
+      lib.judge({ raw: ok(lib.sampleRaw({ at: NOW, push })), now: NOW, base: null });
+    const off = judge('push|off|飞书机器人在 2 个群里|-1|0|-1');
+    expect(off.verdict).toBe('ALERT');
+    expect(off.alerts).toEqual(['飞书推送没配：飞书机器人在 2 个群里']);
+    const dead = judge('push|on||95|3|12960');
+    expect(dead.alerts[0]).toContain('飞书推送不通：3 条该推的没送到');
+    expect(dead.alerts[0]).toContain('最近一次送到是 12960 分钟前');
+    // 2026-10-05 那种：推送整条没了，后端从没记过状态——哪怕眼下没有该推的也报
+    expect(judge('push|none||-1|0|13835').alerts).toEqual([
+      '飞书推送没在跑：后端从没记过推送状态（设置 feishu.push 没有）',
+    ]);
+    expect(judge('push|on||95|3|20').verdict).toBe('OK');
+    expect(judge('push|on||30|1|-1').verdict).toBe('OK');
+    expect(lib.render(dead).join('\n')).toContain('飞书推送 不通');
+  });
+
+  it('每日简报：08:30 过了 30 分钟还没送到才 ALERT（没跑、没做成、没推到飞书各一句）；没到点、还在跑、送到了不报', () => {
+    const judge = (brief: string) =>
+      lib.judge({ raw: ok(lib.sampleRaw({ at: NOW, brief })), now: NOW, base: null });
+    expect(judge('brief|2026-10-09|-30|none|0|0|0|').verdict).toBe('OK');
+    expect(judge('brief|2026-10-09|29|none|0|0|0|').verdict).toBe('OK');
+    expect(judge('brief|2026-10-09|31|none|0|0|0|').alerts).toEqual([
+      '今天（2026-10-09）08:30 的每日简报没跑：定时任务 daily-brief 今天一轮都没起',
+    ]);
+    expect(judge('brief|2026-10-09|40|failed|0|0|0|#1055 评论没发成：403').alerts).toEqual([
+      '今天（2026-10-09）的每日简报没做成：#1055 评论没发成：403',
+    ]);
+    expect(judge('brief|2026-10-09|40|ok|1|0|3|').alerts).toEqual([
+      '今天（2026-10-09）的每日简报没推到飞书：试了 3 次',
+    ]);
+    expect(judge('brief|2026-10-09|40|running|0|0|0|').verdict).toBe('OK');
+    const fine = judge('brief|2026-10-09|40|ok|1|1|1|');
+    expect(fine.verdict).toBe('OK');
+    expect(lib.render(fine).join('\n')).toContain('每日简报 2026-10-09 送到了');
+  });
+
+  it('【故意造出的失败】简报那一块认不出、少了：BROKEN，不当送到了', () => {
+    const bad = lib.sampleRaw({ at: NOW, brief: 'brief|昨天|40|ok|1|1|1|' });
+    expect(lib.judge({ raw: ok(bad), now: NOW, base: null }).verdict).toBe('BROKEN');
+    const missing = lib.sampleRaw({ at: NOW }).replace('ok|brief\n', '');
+    expect(lib.judge({ raw: ok(missing), now: NOW, base: null }).verdict).toBe('BROKEN');
+  });
+
+  it('【故意造出的失败】推送那一块认不出、库查询报错：BROKEN，不当推送通着', () => {
+    const bad = lib.sampleRaw({ at: NOW, push: 'push|maybe||1|1|1' });
+    expect(lib.judge({ raw: ok(bad), now: NOW, base: null }).verdict).toBe('BROKEN');
+    const err = lib
+      .sampleRaw({ at: NOW })
+      .replace('ok|push\n', 'ERR|push|relation "settings" does not exist\n');
+    expect(lib.judge({ raw: ok(err), now: NOW, base: null }).verdict).toBe('BROKEN');
   });
 
   it('【故意造出的失败】空输出：BROKEN，不当 OK', () => {

@@ -42,6 +42,7 @@ import {
   GroomNowResponse,
   type GroomRequestView,
   GroomStatusResponse,
+  githubInstallLinks,
   groomQuota,
   HARD_BANS,
   HomeResponseSchema,
@@ -918,7 +919,14 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     scopes: 'read:org repo',
     connectedAt: new Date(now() - 86_400_000).toISOString(),
   };
-  const mockImportRepos = () => [
+  /** 已在驾驶舱的仓：githubId → 驾驶舱里的仓编号。种子里 9003 已导入；导入、移出会改它，列表才跟着变。 */
+  const mockImported = new Map<number, string>([[9003, st.repos[0]?.id ?? 'r-orbit']]);
+  const mockImportRepos = () =>
+    mockImportRepoSeed().map((r) => {
+      const reposId = mockImported.get(r.githubId);
+      return reposId ? { ...r, inCockpit: true, reposId } : { ...r, inCockpit: false };
+    });
+  const mockImportRepoSeed = () => [
     {
       githubId: 9001,
       owner: 'thoerwink8',
@@ -968,7 +976,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       engineInstalled: false,
       fullyInstalled: false,
       inCockpit: true,
-      reposId: st.repos[0]?.id ?? 'r-orbit',
       canInstall: true,
     },
     {
@@ -2162,6 +2169,24 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     async importRepo(raw) {
       await wait();
+      // 机器人装没装：照清单里的标记如实回（没装全就是「未接入」，仍然导入）
+      const installFields = (r: {
+        owner: string;
+        ownerType: 'User' | 'Organization';
+        agentInstalled: boolean;
+        engineInstalled: boolean;
+      }) => {
+        const missing = (['agent', 'engine'] as const).filter((k) => !r[`${k}Installed`]);
+        return {
+          appsInstalled: missing.length === 0,
+          agentInstalled: r.agentInstalled,
+          engineInstalled: r.engineInstalled,
+          installLinks:
+            missing.length === 0
+              ? []
+              : githubInstallLinks({ owner: r.owner, ownerType: r.ownerType, missing }),
+        };
+      };
       const body = ImportRepoRequest.parse(raw);
       const repo = mockImportRepos().find((r) => r.githubId === body.githubId);
       if (!repo) throw new ApiError(404, 'repo_not_visible', '这个仓不在你 GitHub 账号能看到的范围里');
@@ -2171,11 +2196,13 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           r.name.toLowerCase() === repo.name.toLowerCase(),
       );
       if (existing) {
+        mockImported.set(repo.githubId, existing.id);
         return ImportRepoResponse.parse({
           repoId: existing.id,
           owner: existing.owner,
           name: existing.name,
           created: false,
+          ...installFields(repo),
         });
       }
       const created = {
@@ -2186,6 +2213,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         testCommand: 'pnpm check',
       };
       st.repos.push(created);
+      mockImported.set(repo.githubId, created.id);
       audit({
         actor: meActor(),
         action: REPO_IMPORT_ADD,
@@ -2199,6 +2227,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         owner: created.owner,
         name: created.name,
         created: true,
+        ...installFields(repo),
       });
     },
     async removeRepo(repoId) {
@@ -2206,6 +2235,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       const repo = st.repos.find((r) => r.id === repoId);
       if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
       st.repos.splice(st.repos.indexOf(repo), 1);
+      for (const [githubId, id] of mockImported) if (id === repoId) mockImported.delete(githubId);
       audit({
         actor: meActor(),
         action: REPO_IMPORT_REMOVE,
