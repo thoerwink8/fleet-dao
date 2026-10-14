@@ -24,6 +24,7 @@ import {
   gateVerdict,
   HUMAN_TIER_PATHS,
   MARKER_CLEAR_ACTION,
+  NO_SKILLS_USERS,
   PAUSE_FILE,
   PAUSED_ALERT_KEY,
   PAUSED_STALE_MS,
@@ -717,6 +718,14 @@ test('规矩同步给的人和 france.sh 的 AGENT_RULES_USERS 一样', () => {
   assert.match(france, /^AGENT_RULES_USERS=\("\$\{SESSION_USERS\[@\]\}" "\$PILOT_USER"\)$/m);
   assert.match(france, /^SESSION_USERS=\("\$SESSION_USER"\)$/m);
   assert.deepEqual(RULES_USERS, [sessionUser, pilot]);
+  // 不装 skill 的是会话用户（france.sh 的 agent_rules_sync 按 SESSION_USERS 判，决定 0093）
+  assert.deepEqual(NO_SKILLS_USERS, [sessionUser]);
+  assert.match(france, /agent_rules_sync --apply "\$u"/);
+  assert.match(france, /agent_rules_sync --check "\$u"/);
+  assert.match(
+    france,
+    /for s in "\$\{SESSION_USERS\[@\]\}"; do\n[^\n]*\n\s+agents_sync "\$1" "\$2" --no-skills/,
+  );
 });
 
 // 装机分两档（docs/ops.md 第九节「装机层」）：人工档（lib/human-tier.sh 里的函数，碰防火墙、sudoers、建用户）改了要人重跑、

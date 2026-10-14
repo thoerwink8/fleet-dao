@@ -104,3 +104,20 @@ describe('动手会话的提示词', () => {
     expect(text).toContain('ERR xxxx');
   });
 });
+
+describe('首轮预载和通用技能（决定 0093）', () => {
+  it('新会话：「已给你的文件」紧跟交代、在「怎么干」之前；规矩里写明别去读家目录的通用技能', () => {
+    const text = render({ preload: [{ path: 'a.ts', kind: 'text', content: 'export const a = 1;\n' }] });
+    expect(text.indexOf('## 已给你的文件（别再读）')).toBeGreaterThan(text.indexOf('# 任务：给驾驶舱加状态'));
+    expect(text.indexOf('## 已给你的文件（别再读）')).toBeLessThan(text.indexOf('## 怎么干'));
+    expect(text).toContain('export const a = 1;');
+    expect(text).toContain('~/.agents/skills、~/.claude/skills 下的 SKILL.md）这次用不上，别去读');
+  });
+
+  it('没预载到文件：不出这一节；续会话不出这一节', () => {
+    expect(render()).not.toContain('已给你的文件');
+    expect(render({ resumed: true, preload: [{ path: 'a.ts', kind: 'text', content: 'x' }] })).not.toContain(
+      '已给你的文件',
+    );
+  });
+});

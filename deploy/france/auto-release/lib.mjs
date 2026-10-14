@@ -43,6 +43,11 @@ export const CI_NO_RUN_MS = 30 * 60_000;
 /** 规矩同步给谁：和 deploy/france.sh 的 AGENT_RULES_USERS 同一份（会话用户、创始人的登录用户）。 */
 export const RULES_USERS = ['fleet-agent-carpool', 'pilot'];
 /**
+ * 其中同步时带 --no-skills 的（家里不装 skill）：会话用户，引擎的一次性会话跑在他家里，会话照单子干活，通用 skill 各家 CLI
+ * 一启动就去读（决定 0093）。和 deploy/france.sh 的 agent_rules_sync（按 SESSION_USERS 判）同一份，测试核对。
+ */
+export const NO_SKILLS_USERS = ['fleet-agent-carpool'];
+/**
  * 装机脚本（france.sh）的「人工档」：碰防火墙、sudoers、建用户的那几个文件。主线上这些改了、france.sh 整套还没重跑，
  * 才是装机层落后（要人以 root 重跑，不自动）。其余的（自动发布脚本副本、systemd 单元、fleet-agents.slice、清老单元）
  * 是「自动档」：发完版后由 tierStep 以 root 跑 `france.sh --auto-tier` 顺带装上，改了不算落后。

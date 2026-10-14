@@ -26,6 +26,7 @@ import {
   CI_WORKFLOW,
   HUMAN_TIER_PATHS,
   MAIN_HISTORY,
+  NO_SKILLS_USERS,
   PAUSE_FILE,
   parseEngineStatus,
   RELEASES,
@@ -305,9 +306,14 @@ values ('ops'::actor_kind, 'ops:auto-release', :'action', :'target', :'before'::
     return { code: r.code, out: `${r.stdout}\n${r.stderr}` };
   },
   async syncRules(user) {
-    const r = run(NODE, [`${CHECKOUT}/packages/agents-sync/bin/agents-sync`, '--apply', '--user', user], {
-      timeoutMs: 300_000,
-    });
+    const flags = NO_SKILLS_USERS.includes(user) ? ['--no-skills'] : [];
+    const r = run(
+      NODE,
+      [`${CHECKOUT}/packages/agents-sync/bin/agents-sync`, '--apply', '--user', user, ...flags],
+      {
+        timeoutMs: 300_000,
+      },
+    );
     return { code: r.code, out: `${r.stdout}\n${r.stderr}` };
   },
   async alert({ key, title, body }) {

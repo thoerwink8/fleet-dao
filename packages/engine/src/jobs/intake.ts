@@ -11,7 +11,9 @@
 //   有一代在跑或已结束算派过。问不清抛错，不当成没派过）→ 历史失败不超过 2 次 → 正文没写 .github/workflows/ 路径（#1194：引擎的令牌推不了改工作流的提交，写了的贴一次「本机做」、
 //   留一句话）→「已知的模块」「怎么算做完」没写改标准的路径（packages/conventions/standard-paths.json 列的，决定 0093：引擎的 PR 正文没有
 //   创始人原话，合并闸会永远判红；写了的同样贴一次「本机做」、留一句话）→ 没被开着的 PR 的「需求」栏挂着（#1197：已经有人在做，同样贴一次「本机做」）→ 交代齐不齐（四节齐，「怎么算做完」至少一条；
-//   缺则留一次言，不拉）→ 改动规模不是最重档（单子列的路径超过 50 个）。
+//   缺则留一次言，不拉）→「怎么算做完」没有要 diff 外证据的条目（截图、线上、现场、审计、看日志、飞书收到……，判据是 conventions 的
+//   offDiffItems，和 pnpm issue:new、驾驶舱开单同一份，决定 0093：不是用 issue:new 开的单也在这里挡住；有就留一次言、不拉）→
+//   改动规模不是最重档（单子列的路径超过 50 个）。
 // 整理待办（#1338，临时指挥官，jobs/groom.ts）：开单时间早于「让 AI 接活」打开那一刻的老单，只有贴了「整理过」（整理会话判为仍成立）或
 // 「交给引擎」才进候选（指挥官：#1342 发到法国后引擎第一轮拉了两张前提已过期的老单）；开关之后新开的单照旧不需要。
 // 贴了「待补」（整理会话判过期）或「要人拍」的任何单都不进候选。每个仓走完以后，有从没整理过的老单，或有空位却一条都没起、待办里还有
@@ -41,6 +43,7 @@
 
 import { createHash } from 'node:crypto';
 import {
+  describeOffDiff,
   ENGINE_LABEL,
   GROOM_PENDING_LABEL,
   GROOMED_LABEL,
@@ -49,6 +52,9 @@ import {
   LOCAL_LABEL,
   loadStandardPaths,
   matchesStandardPath,
+  OFF_DIFF_REWRITE,
+  type OffDiffItem,
+  offDiffItems,
   parseMd,
   type StandardPath,
   sectionText,
@@ -169,6 +175,7 @@ export type IntakeSkipReason =
   | 'touches_workflows'
   | 'touches_standard'
   | 'brief_incomplete'
+  | 'acceptance_off_diff'
   | 'too_large'
   | 'pull_request'
   | 'closed'
@@ -674,6 +681,28 @@ async function admitIssue(
     return null;
   }
 
+  // 验收条要 diff 外证据（截图、线上、现场、审计……）：引擎做不出、冷验收验不过，不拉，留一次言（决定 0093）
+  const offDiff = offDiffItems(brief.brief.acceptance);
+  if (offDiff.length > 0) {
+    const posted = await deps.comment({
+      repo,
+      issueNumber: issue.number,
+      key: offDiffKey(offDiff),
+      body: offDiffComment(offDiff),
+    });
+    if (posted.created) {
+      t.commented += 1;
+      deps.log('info', `拉单：${slug}#${issue.number} 的「怎么算做完」要 diff 外证据，已在单子上留言`, {
+        words: offDiff.flatMap((h) => h.words),
+      });
+    }
+    skip(t, slug, issue.number, {
+      reason: 'acceptance_off_diff',
+      why: `「怎么算做完」要 diff 外证据：${offDiff.flatMap((h) => h.words).join('、')}`,
+    });
+    return null;
+  }
+
   // 规模：单子列的路径超过 50 个算最重档（tier.ts），改动面太大，引擎不拉
   const moduleCount = listedModuleCount(brief.brief);
   if (moduleCount > TIER_HEAVYWEIGHT_FILE_THRESHOLD) {
@@ -857,6 +886,25 @@ async function startOne(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, t: Tal
   }
 }
 
+/** 「怎么算做完」要 diff 外证据、引擎不拉时留在单子上的话。 */
+export function offDiffComment(hits: readonly OffDiffItem[]): string {
+  return [
+    '引擎想拉起这张单，可「怎么算做完」里有条目要 diff 外的证据，引擎做不出来，冷验收也验不过，先没派：',
+    '',
+    describeOffDiff(hits),
+    '',
+    OFF_DIFF_REWRITE,
+    '',
+    `改好后约 ${INTAKE_EVERY_MINUTES} 分钟内引擎会自动再看一遍；同样的条目只留这一条话，改了才会再留。要本机做就贴「${LOCAL_LABEL}」。`,
+  ].join('\n');
+}
+
+/** 留言的幂等键：由命中的条目算出来，同样的条目同一个键。 */
+export function offDiffKey(hits: readonly OffDiffItem[]): string {
+  const digest = createHash('sha256').update(describeOffDiff(hits)).digest('hex').slice(0, 12);
+  return `intake-off-diff:${digest}`;
+}
+
 /** 该不该叫一次临时指挥官整理待办（#1338）。只判触发条件，6 小时间隔、每日次数、锁、总开关由 requestGroom 判。 */
 async function groomRepo(
   deps: IntakeDeps,
@@ -874,6 +922,7 @@ async function groomRepo(
     started: startedHere,
     backlog:
       delta('brief_incomplete') +
+      delta('acceptance_off_diff') +
       delta('too_large') +
       delta('too_many_failures') +
       (admitted.length - startedHere),
