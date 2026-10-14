@@ -54,7 +54,7 @@ describe('beijingDay', () => {
 describe('pullsByMergeSha', () => {
   it('按合并提交对上 PR；开单时刻取 PR 关的单里最早登记的那张，对不上单是 null', async () => {
     const r = await addRepo(t.db, 'fleet-dao');
-    await addTask(t.db, r.id, { issueNumber: 7, createdAt: ago(5 * HOUR) });
+    await addTask(t.db, r.id, { issueNumber: 7, title: '单七', createdAt: ago(5 * HOUR) });
     await addTask(t.db, r.id, { issueNumber: 8, createdAt: ago(9 * HOUR) });
     const base = {
       repoId: r.id,
@@ -70,8 +70,17 @@ describe('pullsByMergeSha', () => {
     ]);
     const got = await pullsByMergeSha(t.db, r.id, [sha('1'), sha('2'), sha('9')]);
     expect(got.sort((a, b) => a.number - b.number)).toEqual([
-      { number: 101, title: '修 A', mergeSha: sha('1'), issueOpenedAt: ago(9 * HOUR) },
-      { number: 102, title: '修 B', mergeSha: sha('2'), issueOpenedAt: null },
+      {
+        number: 101,
+        title: '修 A',
+        mergeSha: sha('1'),
+        issueOpenedAt: ago(9 * HOUR),
+        issues: [
+          { number: 7, title: '单七' },
+          { number: 8, title: expect.any(String) },
+        ],
+      },
+      { number: 102, title: '修 B', mergeSha: sha('2'), issueOpenedAt: null, issues: [] },
     ]);
     expect(await pullsByMergeSha(t.db, r.id, [])).toEqual([]);
     expect(await repoByName(t.db, 'fleet-dao')).toMatchObject({ id: r.id, owner: 'acme', name: 'fleet-dao' });

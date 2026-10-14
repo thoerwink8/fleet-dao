@@ -6,6 +6,7 @@
 // - 上线以发布历史（发布目录的 .history：时间 提交号 事件 [unmerged]）为准：release、rollback、auto-rollback 是切过去，unhealthy、recovered 不换在用版本，
 //   unmerged 的不算（不在主线上）。昨天零点在用的 → 今天零点在用的之间的提交就是昨天上线的（GitHub compare，最多列最近 100 个）；
 //   每个提交第一次上线的时刻取昨天第一个包含它的版本切过去的时刻。
+//   「昨天上线了什么」按 PR 关的单归并成每单一行、没挂单的合成一行计数，整节不超过 SHIPPED_MAX_LINES 行（一天几十个 PR 也一屏读完），见 shippedByIssue。
 // - 某一块读不到：那一块写「没查成：原因」，照样发，这一轮记 partial；提醒写不进库、#1055 评论没发成：记 failed 再抛（看门狗、巡检按
 //   @fleet-dao/db 的 dailyBriefProblem 报「今天的简报没送到」；GitHub Actions 的 daily-brief-guard 08:45 再独立查一次 #1055）。
 // - 公开仓：#1055 的评论里不写驾驶舱的地址（私有值），只写「驾驶舱里看」；单子、PR 写 GitHub 链接。飞书那条后端会接上驾驶舱链接。
@@ -43,8 +44,10 @@ export const DAILY_BRIEF_JOB = {
 export const BRIEF_ISSUE = 1055;
 /** 简报那一行提醒点进去看的驾驶舱页面。 */
 export const BRIEF_LINK = '/notifications';
-/** 每块最多列几条（多的写「另 N 条」）。 */
-const LIST_MAX = { shipped: 30, decisions: 15, alerts: 10, stopped: 10 } as const;
+/** 「昨天上线了什么」整节最多几行（含头一行和收尾链接），一屏读完。 */
+const SHIPPED_MAX_LINES = 10;
+/** 其余几块每块最多列几条（多的写「另 N 条」）。 */
+const LIST_MAX = { decisions: 15, alerts: 10, stopped: 10 } as const;
 
 /** 定时那一条的标题（看守 .github/workflows/daily-brief-guard.yml 按这几个字认 #1055 上今天的简报）。 */
 export const briefTitle = (day: string): string => `【每日简报】${day}`;
@@ -99,6 +102,8 @@ export interface DailyBriefDeps {
   selfRepo(): Promise<{ owner: string; name: string; id: string }>;
   compare(repo: { owner: string; name: string }, base: string, head: string): Promise<CompareResult>;
   pulls(repoId: string, shas: readonly string[]): Promise<BriefPull[]>;
+  /** 库里没登记标题的单（不是引擎拉的、本机登记漏的）现去 GitHub 读标题。读不到照抛（简报里写「标题没查成」）。 */
+  issueTitle(repo: { owner: string; name: string }, number: number): Promise<string>;
   decisions(): Promise<BriefNote[]>;
   alerts(): Promise<BriefNote[]>;
   stopped(from: Date, to: Date): Promise<BriefStoppedTask[]>;
@@ -206,26 +211,101 @@ async function shippedSection(
     for (const commit of c.recent) if (!firstLive.has(commit.sha)) firstLive.set(commit.sha, s.at);
   }
   const commits = net.recent;
-  const pulls = await deps.pulls(
-    repo.id,
-    commits.map((c) => c.sha),
-  );
+  // PR↔单的关联读不到：这一节照样发（提交数、compare 链接），写明没查成，不拿空冒充「没有单」
+  let pulls: BriefPull[] = [];
+  let unread: string | undefined;
+  try {
+    pulls = await deps.pulls(
+      repo.id,
+      commits.map((c) => c.sha),
+    );
+  } catch (err) {
+    unread = `读 PR 和单的关联：${errMessage(err)}`;
+  }
   const bySha = new Map(pulls.map((p) => [p.mergeSha, p]));
-  const lines = [
-    `${head}，比前天末在用的 ${base.sha.slice(0, 7)} 多 ${net.aheadBy} 个提交${net.aheadBy > commits.length ? `（下面只列最近 ${commits.length} 个）` : ''}：`,
-  ];
   const leadMinutes: number[] = [];
-  for (const [i, c] of commits.entries()) {
+  for (const c of commits) {
     const p = bySha.get(c.sha);
     const live = firstLive.get(c.sha) ?? end.at;
     if (p?.issueOpenedAt) leadMinutes.push((live.getTime() - p.issueOpenedAt.getTime()) / 60_000);
-    if (i < LIST_MAX.shipped) lines.push(`· ${c.sha.slice(0, 7)} ${clip(c.title, 90)}`);
   }
-  lines.push(...more(commits.length, LIST_MAX.shipped));
-  lines.push(
-    `全部：https://github.com/${repo.owner}/${repo.name}/compare/${base.sha.slice(0, 12)}...${end.sha.slice(0, 12)}`,
-  );
+  const compare = `https://github.com/${repo.owner}/${repo.name}/compare/${base.sha.slice(0, 12)}...${end.sha.slice(0, 12)}`;
+  const lines = [
+    `${head}，比前天末在用的 ${base.sha.slice(0, 7)} 多 ${net.aheadBy} 个提交${net.aheadBy > commits.length ? `（只看最近 ${commits.length} 个）` : ''}：`,
+  ];
+  if (unread !== undefined) {
+    lines.push(`没查成：${unread}，没法按单归并；提交清单看 compare：${compare}`);
+    return { section: { heading, lines, unread }, leadMinutes: null };
+  }
+  lines.push(...(await shippedByIssue(commits, bySha, repo, compare, (n) => deps.issueTitle(repo, n))));
   return { section: { heading, lines }, leadMinutes };
+}
+
+/** 创始人引导、决定相关的单排在前面（标题里带这几个词）。 */
+const FOUNDER_RE = /创始人|引导|决定s*d{3,4}|directive/i;
+
+/**
+ * 昨天上线的提交按「关掉的单」归并：每单一行（标题、合了几个 PR、单链接），没挂单的 PR 合成一行计数。
+ * 行数（含这一段的收尾链接）不超过 SHIPPED_MAX_LINES，超出的单按「创始人引导/决定相关、PR 多、单号大」的顺序留前面，其余折进「另 N 张单」+ compare 链接。
+ */
+export async function shippedByIssue(
+  commits: readonly { sha: string; title: string }[],
+  bySha: ReadonlyMap<string, BriefPull>,
+  repo: { owner: string; name: string },
+  compare: string,
+  issueTitle: (number: number) => Promise<string>,
+): Promise<string[]> {
+  const prs = new Map<number, BriefPull>();
+  let noPr = 0;
+  for (const c of commits) {
+    const p = bySha.get(c.sha);
+    if (p) prs.set(p.number, p);
+    else noPr++;
+  }
+  const byIssue = new Map<number, { title: string | null; prs: BriefPull[] }>();
+  let noIssue = 0;
+  for (const p of prs.values()) {
+    // 置顶进度单 #1055 不是需求单：PR 只是提到它，不按它归并
+    const issues = p.issues.filter((i) => i.number !== BRIEF_ISSUE);
+    if (issues.length === 0) noIssue++;
+    for (const i of issues) {
+      const e = byIssue.get(i.number) ?? { title: i.title, prs: [] };
+      e.title ??= i.title;
+      e.prs.push(p);
+      byIssue.set(i.number, e);
+    }
+  }
+  const founder = (e: { title: string | null; prs: BriefPull[] }) =>
+    FOUNDER_RE.test(`${e.title ?? ''} ${e.prs.map((p) => p.title ?? '').join(' ')}`);
+  const ranked = [...byIssue.entries()].sort(
+    ([an, a], [bn, b]) => Number(founder(b)) - Number(founder(a)) || b.prs.length - a.prs.length || bn - an,
+  );
+  const loose: string[] = [];
+  if (noIssue > 0) loose.push(`没挂单的 PR ${noIssue} 个`);
+  if (noPr > 0) loose.push(`${noPr} 个提交没对上 PR 记录`);
+  const looseLine = loose.length > 0 ? [`· ${loose.join('，')}`] : [];
+  // 头一行已占 1 行，收尾的一行（全部链接，可带「另 N 张单」）占 1 行
+  const room = SHIPPED_MAX_LINES - 2 - looseLine.length;
+  const shown = ranked.length > room ? ranked.slice(0, room) : ranked;
+  const out: string[] = [];
+  for (const [n, e] of shown) {
+    let title = e.title;
+    if (title === null) {
+      try {
+        title = await issueTitle(n);
+      } catch {
+        title = null;
+      }
+    }
+    const label = title === null ? '（标题没查成）' : clip(title, 60);
+    out.push(
+      `· #${n} ${label}（${e.prs.length} 个 PR）— ${issueUrl({ repo: `${repo.owner}/${repo.name}`, number: n })}`,
+    );
+  }
+  out.push(...looseLine);
+  const rest = ranked.length - shown.length;
+  out.push(`${rest > 0 ? `另 ${rest} 张单没列；` : ''}全部：${compare}`);
+  return out;
 }
 
 function noteLine(n: BriefNote, now: Date): string {

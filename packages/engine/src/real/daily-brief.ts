@@ -22,7 +22,7 @@ export const SELF_REPO_NAME = 'fleet-dao';
 
 export function dailyBriefJob(w: {
   db: Db;
-  gh: Pick<GitHub, 'releaseFacts' | 'commentIssue'>;
+  gh: Pick<GitHub, 'releaseFacts' | 'commentIssue' | 'readIssue'>;
   releasesDir?: string;
   now?: () => Date;
   log?: DailyBriefDeps['log'];
@@ -47,6 +47,7 @@ export function dailyBriefJob(w: {
     },
     compare: (repo, base, head) => w.gh.releaseFacts.compare(repo, base, head),
     pulls: (repoId, shas) => pullsByMergeSha(w.db, repoId, shas),
+    issueTitle: async (repo, issueNumber) => (await w.gh.readIssue({ repo, issueNumber })).title,
     decisions: () => openBriefNotes(w.db, 'decision'),
     alerts: () => openBriefNotes(w.db, 'alert'),
     stopped: (from, to) => stoppedTasksBetween(w.db, from, to),

@@ -12,6 +12,7 @@ import {
   liveSwitches,
   median,
   runDailyBriefJob,
+  shippedByIssue,
 } from '../src/jobs/daily-brief.ts';
 import { briefAlertKey, watchDailyBrief } from '../src/jobs/watchdog-brief.ts';
 
@@ -51,9 +52,21 @@ function makeDeps(over: Partial<DailyBriefDeps> = {}) {
   const compares: string[] = [];
   const pulls: BriefPull[] = [
     // b：开单 10-14 01:00Z，10-14 02:00Z 上线 → 60 分钟；c：开单 08:00Z、09:00Z 上线（之后回退、d 再带上）→ 60 分钟
-    { number: 201, title: 'b', mergeSha: sha('b'), issueOpenedAt: at('2026-10-14T01:00:00Z') },
-    { number: 202, title: 'c', mergeSha: sha('c'), issueOpenedAt: at('2026-10-14T08:00:00Z') },
-    { number: 203, title: 'd', mergeSha: sha('d'), issueOpenedAt: null },
+    {
+      number: 201,
+      title: 'b',
+      mergeSha: sha('b'),
+      issueOpenedAt: at('2026-10-14T01:00:00Z'),
+      issues: [{ number: 31, title: '单 31 的标题' }],
+    },
+    {
+      number: 202,
+      title: 'c',
+      mergeSha: sha('c'),
+      issueOpenedAt: at('2026-10-14T08:00:00Z'),
+      issues: [{ number: 31, title: '单 31 的标题' }],
+    },
+    { number: 203, title: 'd', mergeSha: sha('d'), issueOpenedAt: null, issues: [] },
   ];
   const decision: BriefNote = {
     id: 'n1',
@@ -85,6 +98,7 @@ function makeDeps(over: Partial<DailyBriefDeps> = {}) {
       return compareFake(base, head);
     },
     pulls: async () => pulls,
+    issueTitle: async (_repo, n) => `GitHub 上单 ${n} 的标题`,
     decisions: async () => [decision],
     alerts: async () => [],
     stopped: async () => [
@@ -148,8 +162,10 @@ describe('runDailyBriefJob', () => {
     const body = p?.body ?? '';
     expect(body).toContain('在用版本 ddddddd');
     expect(body).toContain('多 3 个提交');
-    expect(body).toContain('· ddddddd 提交 d 的标题 (#d)');
-    expect(body).toContain('· bbbbbbb 提交 b 的标题 (#b)');
+    // 按单归并：单 31 一行（2 个 PR），没挂单的 PR 合成一行
+    expect(body).toContain('· #31 单 31 的标题（2 个 PR）— https://github.com/acme/fleet-dao/issues/31');
+    expect(body).toContain('· 没挂单的 PR 1 个');
+    expect(body).not.toContain('提交 d 的标题');
     expect(body).not.toContain('eeeeeee');
     expect(body).toContain('二、要你拍的（1 条）');
     expect(body).toContain(
@@ -168,9 +184,9 @@ describe('runDailyBriefJob', () => {
     expect(d.comments[0]?.issueNumber).toBe(BRIEF_ISSUE);
     expect(d.comments[0]?.key).toBe('daily-brief:2026-10-15');
     expect(d.comments[0]?.body).toContain('### 【每日简报】2026-10-15');
-    expect(d.comments[0]?.body).toContain('- ddddddd 提交 d 的标题 (#d)');
-    expect(d.comments[0]?.body).toContain('\n- ccccccc 提交 c 的标题 (#c)\n- bbbbbbb');
-    expect(d.comments[0]?.body).toContain('(#b)\n\n全部：');
+    expect(d.comments[0]?.body).toContain(
+      `- #31 单 31 的标题（2 个 PR）— https://github.com/acme/fleet-dao/issues/31${String.fromCharCode(10)}- 没挂单的 PR 1 个${String.fromCharCode(10)}${String.fromCharCode(10)}全部：`,
+    );
     expect(d.comments[0]?.body).not.toMatch(/https:\/\/(?!github\.com\/)/);
     expect(d.compares.every((c) => c.startsWith('a...'))).toBe(true);
   });
@@ -240,6 +256,97 @@ describe('runDailyBriefJob', () => {
     });
     await expect(runDailyBriefJob(d.deps)).rejects.toBeInstanceOf(DailyBriefFailedError);
     expect(d.comments).toEqual([]);
+  });
+});
+
+describe('昨天上线了什么：按单归并、整节一屏', () => {
+  const repo = { owner: 'acme', name: 'fleet-dao' };
+  const CMP = 'https://github.com/acme/fleet-dao/compare/aaa...bbb';
+  const pr = (number: number, issues: BriefPull['issues'], title = `PR ${number}`): BriefPull => ({
+    number,
+    title,
+    mergeSha: `m${number}`,
+    issueOpenedAt: null,
+    issues,
+  });
+  const run = (
+    prs: BriefPull[],
+    extraCommits = 0,
+    title: (n: number) => Promise<string> = async (n) => `GitHub 单 ${n}`,
+  ) => {
+    const commits = [
+      ...prs.map((p) => ({ sha: p.mergeSha, title: p.title ?? '' })),
+      ...Array.from({ length: extraCommits }, (_, i) => ({ sha: `x${i}`, title: '直推' })),
+    ];
+    return shippedByIssue(commits, new Map(prs.map((p) => [p.mergeSha, p])), repo, CMP, title);
+  };
+
+  it('一天几十个 PR：整节（加头一行）不超过 10 行，超出的单折成「另 N 张单」+ compare 链接', async () => {
+    const prs: BriefPull[] = [];
+    for (let i = 1; i <= 40; i++) prs.push(pr(i, [{ number: 100 + i, title: `单 ${100 + i}` }]));
+    for (let i = 41; i <= 55; i++) prs.push(pr(i, []));
+    const lines = await run(prs);
+    expect(lines.length + 1).toBeLessThanOrEqual(10);
+    expect(lines).toContain('· 没挂单的 PR 15 个');
+    expect(lines.at(-1)).toBe(`另 ${40 - (lines.length - 2)} 张单没列；全部：${CMP}`);
+    expect(lines.filter((l) => l.startsWith('· #'))).toHaveLength(lines.length - 2);
+  });
+
+  it('排序：创始人引导/决定相关的在前，其次 PR 多的', async () => {
+    const prs = [
+      pr(1, [{ number: 11, title: '普通修复' }]),
+      ...[2, 3, 4].map((n) => pr(n, [{ number: 12, title: '另一个大改' }])),
+      pr(5, [{ number: 13, title: '落创始人引导：简报' }]),
+      ...[6, 7, 8, 9, 10, 11, 12, 13].map((n) => pr(n, [{ number: 20 + n, title: `填充 ${n}` }])),
+    ];
+    const lines = await run(prs);
+    expect(lines[0]).toContain('#13');
+    expect(lines[1]).toContain('#12');
+    expect(lines[1]).toContain('（3 个 PR）');
+  });
+
+  it('一个 PR 关多张单各算一行；库里没标题的现读 GitHub；没对上 PR 的提交单独计数', async () => {
+    const lines = await run(
+      [
+        pr(1, [
+          { number: 5, title: null },
+          { number: 6, title: '六' },
+        ]),
+      ],
+      2,
+    );
+    expect(lines).toContain('· #5 GitHub 单 5（1 个 PR）— https://github.com/acme/fleet-dao/issues/5');
+    expect(lines).toContain('· #6 六（1 个 PR）— https://github.com/acme/fleet-dao/issues/6');
+    expect(lines).toContain('· 2 个提交没对上 PR 记录');
+    expect(lines.at(-1)).toBe(`全部：${CMP}`);
+  });
+
+  it('【故意造出的失败】库里和 GitHub 都读不到单标题：写「标题没查成」；置顶进度单 #1055 不当成一张单归并', async () => {
+    const lines = await run(
+      [pr(1, [{ number: 5, title: null }]), pr(2, [{ number: BRIEF_ISSUE, title: '进度' }]), pr(3, [])],
+      0,
+      async () => {
+        throw new Error('GitHub 回了 502');
+      },
+    );
+    expect(lines).toContain('· #5 （标题没查成）（1 个 PR）— https://github.com/acme/fleet-dao/issues/5');
+    expect(lines.some((l) => l.includes(`#${BRIEF_ISSUE}`))).toBe(false);
+    expect(lines).toContain('· 没挂单的 PR 2 个');
+  });
+
+  it('【故意造出的失败】读不到 PR↔单关联：写明没查成、给 compare 链接、记 partial，不写成「没有挂单」', async () => {
+    const d = makeDeps({
+      pulls: async () => {
+        throw new Error('connection refused');
+      },
+    });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('partial');
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('没查成：读 PR 和单的关联：connection refused，没法按单归并');
+    expect(body).toContain('compare/aaaaaaaaaaaa...dddddddddddd');
+    expect(body).not.toContain('没挂单的 PR');
+    expect(body).toContain('开单→上线中位：没查成');
   });
 });
 

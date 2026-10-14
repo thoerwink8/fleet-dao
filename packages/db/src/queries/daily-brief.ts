@@ -35,6 +35,8 @@ export interface BriefPull {
   mergeSha: string;
   /** PR 关的单里最早登记的那张的 tasks.created_at；对不上单是 null。 */
   issueOpenedAt: Date | null;
+  /** PR 正文 Closes 的单（pull_requests.issue_refs）；title 是库里登记的单标题，库里没有这张单是 null。没挂单是空数组。 */
+  issues: { number: number; title: string | null }[];
 }
 
 /** 这些合并提交对应的 PR（同一个仓）。没对上的提交不在结果里。 */
@@ -45,6 +47,7 @@ export async function pullsByMergeSha(db: Db, repoId: string, shas: readonly str
       number: pullRequests.number,
       title: pullRequests.title,
       mergeSha: pullRequests.mergeSha,
+      issueRefs: pullRequests.issueRefs,
       issueOpenedAt: sql<Date | null>`(select min(t.created_at) from tasks t
         where t.repo_id = ${pullRequests.repoId} and t.issue_number = any(${pullRequests.issueRefs}))`.mapWith(
         pullRequests.mergedAt,
@@ -52,9 +55,26 @@ export async function pullsByMergeSha(db: Db, repoId: string, shas: readonly str
     })
     .from(pullRequests)
     .where(and(eq(pullRequests.repoId, repoId), inArray(pullRequests.mergeSha, [...shas])));
+  const refs = [...new Set(rows.flatMap((r) => r.issueRefs))];
+  const titles = new Map<number, string>();
+  if (refs.length > 0) {
+    const ts = await db
+      .select({ number: tasks.issueNumber, title: tasks.title })
+      .from(tasks)
+      .where(and(eq(tasks.repoId, repoId), inArray(tasks.issueNumber, refs)));
+    for (const t of ts) titles.set(t.number, t.title);
+  }
   return rows
     .filter((r): r is typeof r & { mergeSha: string } => r.mergeSha !== null)
-    .map((r) => ({ number: r.number, title: r.title, mergeSha: r.mergeSha, issueOpenedAt: r.issueOpenedAt }));
+    .map((r) => ({
+      number: r.number,
+      title: r.title,
+      mergeSha: r.mergeSha,
+      issueOpenedAt: r.issueOpenedAt,
+      issues: [...r.issueRefs]
+        .sort((a, b) => a - b)
+        .map((n) => ({ number: n, title: titles.get(n) ?? null })),
+    }));
 }
 
 /** 按名字找受管的仓（fleet-dao 自己）；没有是 null。 */
