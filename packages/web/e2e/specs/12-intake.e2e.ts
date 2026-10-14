@@ -23,6 +23,13 @@ test.describe('提需求', () => {
     stack,
   }) => {
     await page.goto('/intake');
+    // 窄于 1536 的屏上列表默认收成一条窄栏（只有头像），先展开再看标题
+    const list = page.locator('[aria-label="需求列表"]');
+    await expect(list).toBeVisible();
+    if ((await list.getAttribute('data-collapsed')) !== null) {
+      await page.getByRole('button', { name: '展开需求列表' }).click();
+      await expect(list).not.toHaveAttribute('data-collapsed');
+    }
     await expect(listRow(page, '任务列表按仓筛')).toBeVisible();
     await expect(listRow(page, '设置页密钥一次填好')).toBeVisible();
     await expect(listRow(page, '额度页按账号池折叠')).toBeVisible();
@@ -116,11 +123,9 @@ test.describe('提需求', () => {
     await page.goto('/intake?view=deleted');
     await expect(listRow(page, title)).toBeVisible();
     await shot(page, '12-提需求-最近删除');
-    // 刚 goto 完、页面还没接上点击时点到的会丢（CI 上见过一次，#2085）：没打开就再点
-    await expect(async () => {
-      await listRow(page, title).click();
-      await expect(stream(page).getByText('这条需求已经删了')).toBeVisible({ timeout: 2000 });
-    }).toPass({ timeout: 15_000 });
+    await listRow(page, title).click();
+    await expect(page).toHaveURL(new RegExp(`[?&]r=${seq}(&|$)`));
+    await expect(stream(page).getByText('这条需求已经删了')).toBeVisible();
     await page.getByRole('button', { name: '恢复' }).first().click();
     await expect(page.getByText(`需求 ${seq} 已恢复`).first()).toBeVisible();
     const back = (await api.get(`/api/requests/${seq}`)) as Detail;
