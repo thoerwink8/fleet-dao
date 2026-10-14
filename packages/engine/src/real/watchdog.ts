@@ -1,5 +1,5 @@
 // 看门狗的真装配（#203）：登记表和跑记录、提醒、这一轮的结局都是同一个库（@fleet-dao/db）；新不新鲜的判法就是驾驶舱
-// 「定时任务」页读的那份 scheduleHealth，这里不另写。提醒写进 notifications，飞书照现有的推送发（网关从后端取「待推送」）。
+// 「定时任务」页读的那份 scheduleHealth，这里不另写。提醒写进 notifications，驾驶舱后端照推送规则推飞书（packages/api 的 feishu-push.ts）。
 // 看门狗本来就该管 ENGINE_JOBS 以外的登记（备份脚本这类外部注册的），不能按「是不是在 ENGINE_JOBS 里」筛——那样会把
 // 这些正常任务也当成「不该看」而漏管。只按名字剔除明确退役了的那几个（jobs/retired-schedules.ts 的共用名单，引擎起来时
 // 删 Temporal 上的 Schedule 用的也是它，见 real/retire-schedules.ts）：退役的任务不会再有新的跑记录，不剔除就会被
@@ -7,6 +7,7 @@
 // scheduled_jobs 里摘掉（real/jobs.ts），这里的筛选是引擎还没来得及起新版本时的兑底。
 // 「主线 N 小时没合 PR」（决定 0093）读同一个库的 mergeStallFacts（PR 镜像、任务、拉单记下的等空位单数）。
 // 「在用的账号池额度读数不超过 30 分钟」（决定 0093 从每小时对账搬来）读同一个库的 quotaTable，加额度配置（deploy/quota.json）里写明不读的池。
+// 「提醒真的推到飞书了」读同一个库的 feishuPushFacts（后端写的推送状态、送达记录）。
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadQuotaConfig } from '@fleet-dao/adapters/quota';
@@ -14,6 +15,7 @@ import {
   alertByKey,
   clearHealthzBadSince,
   type Db,
+  feishuPushFacts,
   finishScheduleRun,
   latestAlertByPrefix,
   mergeStallFacts,
@@ -131,7 +133,7 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
       async raise(x) {
         await upsertAlert(w.db, {
           dedupeKey: x.dedupeKey,
-          level: 'alert',
+          level: x.level ?? 'alert',
           taskId: null,
           title: x.title,
           body: x.body,
@@ -162,6 +164,8 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
         clear: () => clearHealthzBadSince(w.db),
       },
     },
+    // 「提醒真的推到飞书了」：后端记的推送状态和送达记录，同一个库
+    push: { facts: (at) => feishuPushFacts(w.db, at) },
     now,
     log,
   });

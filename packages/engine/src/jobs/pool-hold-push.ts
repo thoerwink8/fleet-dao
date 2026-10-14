@@ -1,11 +1,12 @@
 // 整池暂停到了复查日期：每小时对账往飞书推一条（#954）。同一天、同一份正文只推一次。
-// 没配 webhook、推不出去、记不下「推过」：进这一轮的没查成，不当成推过（推不出去时不记已推）。
+// 记下的那一行提醒（键 feishu:pool-hold-overdue:<日期>）由驾驶舱后端推进飞书团队群（packages/api 的 feishu-push.ts，一条推一次）；
+// 交不出去、记不下「推过」：进这一轮的没查成，不当成推过（交不出去时不记已推）。
 // 认不出的条目不写进正文，同时记没查成：不当成「没有到期的」。
 import { beijingDateOf, overduePoolHoldPushText, resolvePoolHolds } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { SweepPart } from './reconcile-common.ts';
 
-export const POOL_HOLD_PUSH_TITLE = '整池暂停到了复查日期，已推飞书';
+export const POOL_HOLD_PUSH_TITLE = '整池暂停到了复查日期';
 export const POOL_HOLD_PUSH_LINK = '/quota';
 
 /** 一天一条。正文对得上才算推过；过了北京时间的今天，键换一天，该再推再推。 */
@@ -18,7 +19,7 @@ export interface PoolHoldPushDeps {
   /** 这个键上一次记下的正文；没有回 null。读不了照抛。 */
   sentBody: (dedupeKey: string) => Promise<string | null>;
   markSent: (input: { dedupeKey: string; title: string; body: string; link: string }) => Promise<void>;
-  /** 没配、推不出去照抛。抛出的话里不带 webhook 地址。 */
+  /** 交给推送（真实现只是交出去，推由后端照 markSent 那一行做）；交不出去照抛。 */
   send: (text: string) => Promise<void>;
 }
 
