@@ -63,8 +63,8 @@ check "没有 deploy/test/demo-scopes.test.sh" "$([[ -e "$HERE/demo-scopes.test.
 
 echo "== 法国的期望配置里没有演示版的键"
 check "desired-config.json 不再有 demo（FLEET_DEMO_DIR、FLEET_HK_PARTS 里的 demo）" "$(grep -c -i demo "$DEPLOY/france/desired-config.json")" 0
-check "FLEET_HK_PARTS 的值只有 gateway、web" \
-  "$(grep -A1 '"FLEET_HK_PARTS"' "$DEPLOY/france/desired-config.json" | grep -o '"value": "[^"]*"')" '"value": "gateway web"'
+check "FLEET_HK_PARTS 的值只有 web" \
+  "$(grep -A1 '"FLEET_HK_PARTS"' "$DEPLOY/france/desired-config.json" | grep -o '"value": "[^"]*"')" '"value": "web"'
 
 echo "== france.sh 真有清老单元、读回核对它们不在"
 check "retire_old_units 在整套装机里调了、在自动档里也调了" "$(grep -c '^ *retire_old_units$' "$DEPLOY/france.sh")" 2

@@ -62,7 +62,7 @@ export interface Config {
   machineName: string | null;
   /**
    * FLEET_FEISHU_LOGIN=off：这台不接飞书（没有飞书网关）。这时飞书网关的通行证即使在环境文件里也不认
-   * （feishuGatewayToken 记成 null），健康页的 feishu_gateway 报「未接」而不是一直等一个永远不会来的网关（#803）。
+   * （feishuGatewayToken 记成 null）。
    */
   feishuOff: boolean;
   /**

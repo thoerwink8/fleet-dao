@@ -10,7 +10,6 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { probeDb } from '../src/db-probe.ts';
 import { EXTERNAL_WATCH_NOT_WIRED } from '../src/external-watch.ts';
-import { createGatewaySeen } from '../src/gateway-seen.ts';
 import { githubAppMissing } from '../src/github.ts';
 import { githubAppHealthCheck } from '../src/github-app-health.ts';
 import { serviceHealthChecks } from '../src/health.ts';
@@ -158,8 +157,6 @@ describe('接口跑在真库上', () => {
         }),
         // 和 main.ts 在非正式环境的装配一样：没有发布目录、没有自动发布
         deployLag: { check: async () => {}, notWired: DEPLOY_LAG_NOT_HERE },
-        // 网关刚接上还没来过：没查成，照实报红（gateway-seen.test.ts 另测来过、太久没来）
-        feishuGateway: createGatewaySeen(() => new Date(T0)),
         // 库里真查：没有切号的提醒就是好的（session-org-health.test.ts 另测开着报红）
         sessionOrg: sessionOrgHealthCheck(t.db),
         // 库里真查：没有机器人权限的提醒就是好的（github-app-health.test.ts 另测开着报红）
@@ -186,11 +183,6 @@ describe('接口跑在真库上', () => {
         },
         judge: { ok: true, status: 'not_wired', message: JUDGE_NOT_WIRED },
         deploy_lag: { ok: true, status: 'not_wired', message: DEPLOY_LAG_NOT_HERE },
-        feishu_gateway: {
-          ok: false,
-          code: 'unchecked',
-          message: '没查成：后端起来才 0 秒，用量上报还没来过',
-        },
         session_org: { ok: true },
         github_app: { ok: true },
         watchdog: { ok: true, status: 'not_wired', message: WATCHDOG_NOT_HERE },

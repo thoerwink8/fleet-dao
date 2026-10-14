@@ -102,9 +102,9 @@ snapshot_ours() {
   echo "## files"
   # pilot 的 ~/.local/bin 不取内容指纹：reclaude 归 pilot 自己 reclaude update，记指纹会因它升级而每次报「变了」；
   # 只记在不在、归谁（在下面 ## pilot-reclaude）
-  snapshot_file_list /etc/fleet-dao /opt/fleet-dao /srv/fleet-dao-web /srv/fleet-dao-gateway /var/www/fleet-dao-acme \
+  snapshot_file_list /etc/fleet-dao /opt/fleet-dao /srv/fleet-dao-web /var/www/fleet-dao-acme \
     /etc/wireguard /etc/postgresql/16/main /etc/apt/sources.list.d /etc/apt/keyrings \
-    /usr/local/bin/fleet-temporal /usr/local/bin/pnpm /usr/local/sbin/fleet-agent-scope /usr/local/sbin/fleet-gateway-deploy \
+    /usr/local/bin/fleet-temporal /usr/local/bin/pnpm /usr/local/sbin/fleet-agent-scope \
     /usr/local/lib/fleet-dao \
     /etc/sudoers.d/fleet-dao /etc/tmpfiles.d/fleet-dao-node-compile-cache.conf /home/fleet/.local/bin \
     /home/fleet-agent-carpool/.local/bin \
@@ -135,7 +135,7 @@ snapshot_ours() {
   echo "## units"
   systemctl show -p Id,UnitFileState,ActiveState,SubState,MainPID,NRestarts,ExecMainStartTimestampMonotonic,Restart \
     fleet-temporal.service fleet-agents.slice fleet-firewall.service postgresql@16-main.service wg-quick@wg-fleet.service \
-    fleet-engine.service fleet-api.service fleet-feishu.service nginx.service 2>/dev/null | awk 'BEGIN { RS = ""; FS = "\n"; OFS = " " } { $1 = $1; print }'
+    fleet-engine.service fleet-api.service nginx.service 2>/dev/null | awk 'BEGIN { RS = ""; FS = "\n"; OFS = " " } { $1 = $1; print }'
   echo "## postgres"
   # 先 cd /：runuser 不换当前目录，postgres 进不了 /root 会多打一行警告，混进快照
   if command -v psql >/dev/null 2>&1 && id postgres >/dev/null 2>&1; then

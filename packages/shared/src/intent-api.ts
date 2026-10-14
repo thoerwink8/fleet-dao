@@ -1,5 +1,5 @@
 // 飞书收缩后（#2047 提需求 F1，方案第八节）只剩登录和手机上的单向通知；群聊、私聊不再生成意图。两份约定：
-// 1. 网关（packages/feishu，香港）⇄ 后端（packages/api，法国）的两条接口 IntentRoutes：进群记录、飞书接口用量
+// 1. 网关（香港的旧进程，代码已从仓里删掉）⇄ 后端（packages/api，法国）的两条接口 IntentRoutes：进群记录、飞书接口用量
 //    （#795，方案 5.4、5.6）。走法和 feishu-api.ts 一样：经隧道调 /api，带网关通行证。
 // 2. 指挥官读写已有意图的样子：法国上 `fleet-api intent … --json` 打的就是 IntentCli* 这几种，本机 `pnpm intents` 按它解析。
 //    指挥官不经 HTTP 读写（方案 5.2：不新发长期令牌、不碰 session.ts、不多开口子），走已有的 ssh。

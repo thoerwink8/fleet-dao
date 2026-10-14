@@ -20,16 +20,10 @@
       "path": "packages/adapters"
     },
     {
-      "path": "packages/cli"
-    },
-    {
       "path": "packages/store"
     },
     {
       "path": "packages/api"
-    },
-    {
-      "path": "packages/feishu"
     },
     {
       "path": "packages/hygiene"

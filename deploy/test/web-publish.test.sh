@@ -3,7 +3,7 @@
 # shellcheck disable=SC2034 # FLEET_HK_PARTS、FLEET_DOMAIN 这些是给 source 进来的 release.sh 里的函数读的
 # shellcheck disable=SC2016 # 单引号里的 $uri、$args 是 nginx 配置里的字面量，本来就不该展开
 # deploy/release.sh 往香港发静态文件的那一段（release.env 的 FLEET_HK_PARTS 选）：web 把驾驶舱整套发到根地址、
-# 根上不是这一版的一律删（香港上老的 /demo/ 目录也在内，不再排除）；gateway 不发静态文件。
+# 根上不是这一版的一律删（香港上老的 /demo/ 目录也在内，不再排除）。
 # 香港上老的 /demo/ 目录（演示版已删，创始人 2026-10-07，#1223）：发布时经上传的路删掉（一次性、幂等、目录不在也算过），
 # 读回它回 404 才算过；读不出来、删不掉、删完不是 404 都判红。香港站点配置（deploy/hk/nginx-*.conf）里 /demo 一律 404。
 # rsync、curl 换成桩（curl 按一个假香港的目录答、rsync 照参数在假香港上删目录），其余是 release.sh 里的真代码。
@@ -58,31 +58,31 @@ for s in "$A" "$B"; do
   printf 'commit=%s\nweb=桩\n' "$s" >"$RELEASES/$s/.fleet-release"
 done
 
-echo "== 往香港发哪几样：认得的只有 web 和 gateway；老机器上留着的 demo 不再是认得的一样"
-check "认得的一样：web、gateway" "${HK_PARTS[*]}" "web gateway"
+echo "== 往香港发哪几样：认得的只有 web；老机器上留着的 demo 不再是认得的一样"
+check "认得的一样：web" "${HK_PARTS[*]}" "web"
 check "demo 不是认得的一样" "$([[ " ${HK_PARTS[*]} " == *" demo "* ]] && echo 是 || echo 不是)" 不是
 
-echo "== 发到哪：gateway 不发静态文件；web 整套发根地址，不再排除老目录"
-config gateway
-check "只发网关（默认）：静态文件一处都不发" "$(dests "$A")" ""
+echo "== 发到哪：什么都不发就一处都不发；web 整套发根地址，不再排除老目录"
+config ""
+check "什么都不发（默认）：静态文件一处都不发" "$(dests "$A")" ""
 config web
 check "web：只发根地址" "$(dests "$A")" "/ "
 check "根地址那一处不再排除任何目录（老目录要被带走）" "$(web_plan "$A" | grep -c -- '--exclude')" 0
 check "根地址那一处发的是 web/，先落临时名、旧的最后删" \
   "$(web_plan "$A")" "$RELEASES/$A/web/ / --delete-after --delay-updates"
-config "web gateway"
-check "web + gateway：一样只发根地址" "$(dests "$A")" "/ "
-config "gateway web"
-check "往香港发哪几样照实说（没有只核对的那一样）" "$(parts_said)" "gateway web"
+config web
+check "往香港发哪几样照实说" "$(parts_said)" "web"
+config ""
+check "什么都不发也照实说" "$(parts_said)" "（都不发）"
 
 echo "== 香港上的静态文件归不归发布管：发 web、或老配置里还留着已删的键（要清老目录）"
-config gateway
-check "只发网关、没有老键：不归" "$(hk_static_ours && echo 归 || echo 不归)" 不归
+config ""
+check "什么都不发、没有老键：不归" "$(hk_static_ours && echo 归 || echo 不归)" 不归
 config web
 check "发 web：归" "$(hk_static_ours && echo 归 || echo 不归)" 归
-config gateway
+config ""
 LEGACY_KEYS=1
-check "只发网关、但有老键：归（要清老目录）" "$(hk_static_ours && echo 归 || echo 不归)" 归
+check "什么都不发、但有老键：归（要清老目录）" "$(hk_static_ours && echo 归 || echo 不归)" 归
 LEGACY_KEYS=0
 
 echo "== sync_web 照着发：源、参数一样；发不出去报红"
@@ -336,13 +336,13 @@ else
   check_web "$A" >/dev/null
   check "web：香港对版本标记回 404（比如站点放行的不是法国的隧道地址）：不过" "$?" 1
   check "红里说的是取不到，不当成「在发一个空版本」" "$(reds_with_text '从香港取不到')" 1
-  config gateway
+  config ""
   LEGACY_KEYS=1
   hk_with_old_demo "$A"
   rm -f -- "$HKD/release.json"
   reset
   check_web "$A" >/dev/null
-  check "只发网关、但有老键：不查根地址的版本标记，只查老目录读回 404" "$?:${#REDS[@]}" "0:0"
+  check "什么都不发、但有老键：不查根地址的版本标记，只查老目录读回 404" "$?:${#REDS[@]}" "0:0"
   rm -f -- "$HK_RETIRED_RECORD"
 fi
 

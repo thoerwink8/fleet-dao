@@ -128,8 +128,6 @@ export interface HarnessOptions {
   feishu?: 'fake' | null;
   github?: (event: IngestedEvent) => Promise<void>;
   health?: HealthCheck[];
-  /** 飞书网关来没来过的记录（/healthz 的 feishu_gateway）；不给就不记。 */
-  gatewaySeen?: Deps['gatewaySeen'];
   /** 意图存储（#553）；不给就是一份跟着测试时钟走的内存版，null 是没接上。 */
   intents?: Deps['intents'] | null;
   /** 驾驶舱提醒（#795）。不给时内存版写进 store.data.notifications，库版写进 notifications 表。 */
@@ -204,7 +202,6 @@ function wire<S extends Store>(
     log,
     now,
     health: options.health ?? [],
-    ...(options.gatewaySeen ? { gatewaySeen: options.gatewaySeen } : {}),
     ...(options.intents === null ? {} : { intents: options.intents ?? createMemoryIntentStore({ now }) }),
     ...(options.alerts ? { alerts: options.alerts } : {}),
     ...(options.alertWork ? { alertWork: options.alertWork } : {}),

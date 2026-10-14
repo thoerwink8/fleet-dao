@@ -7,7 +7,6 @@ import type { DecisionCommenter } from './decision-handoff.ts';
 import type { CockpitAlerts } from './feishu-alerts.ts';
 import type { PreflightReaders } from './france-preflight.ts';
 import type { FranceReleasePort } from './france-release.ts';
-import type { GatewaySeen } from './gateway-seen.ts';
 import type { GitHubUserPort } from './github-user.ts';
 import type { HostResourceSampler } from './host-resources.ts';
 import type { IntentStore } from './intent-store.ts';
@@ -70,8 +69,6 @@ export interface Deps {
    * 编号在 config.edgeWatchId；没配时路由不调用它。
    */
   recordExternalWatchRound?: (() => Promise<void>) | undefined;
-  /** 飞书网关来没来过：飞书接口的门口验过通行证就记一笔，/healthz 的 feishu_gateway 读它。没给就不记（开发、多数测试）。 */
-  gatewaySeen?: GatewaySeen | undefined;
   /**
    * 意图表的存取（#553 第 4 条，intent-store.ts）：网关的进群记录、飞书用量经它写。没给的话网关的两条接口一律 503
    * 「没接上」，不回 200 冒充存下了。

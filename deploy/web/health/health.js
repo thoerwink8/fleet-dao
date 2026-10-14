@@ -2,7 +2,7 @@
 // 规矩：只有后端明说 ok 的项才算在线；连不上、超时、回的不是健康报告、缺项、结论和逐项对不上，一律报红，并说出是哪一种。
 // /healthz 的样子（packages/api 的 health.ts）：{ ok, checks: { <项>: { ok: true } | { ok: true, message }
 // | { ok: true, status: 'not_wired', message } | { ok: false, code, message } } }。
-// 好的项可以带一句说明（飞书网关几秒前来过），写在「在线」后面；「未接」是功能还没做，不算不在线，照样显示出来（写明未接和原因）；
+// 好的项可以带一句说明（看门狗几秒前跑过），写在「在线」后面；「未接」是功能还没做，不算不在线，照样显示出来（写明未接和原因）；
 // 全好回 200，有一项不好回 503。香港 nginx 把 /healthz 经隧道转给法国的驾驶舱后端（deploy/hk/nginx-https.conf）。
 
 /** P0 验收要看到的三项：法国的数据库、Temporal、引擎工人。后端没报的项照样列出来、报红。 */
@@ -18,7 +18,6 @@ const EXTRA_LABELS = {
   github_events: 'GitHub 事件',
   judge: '判断题',
   deploy_lag: '跟上主线',
-  feishu_gateway: '飞书网关',
   session_org: '会话账号切换',
   github_app: 'GitHub 机器人权限',
   watchdog: '看门狗',

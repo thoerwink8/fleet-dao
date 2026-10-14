@@ -1,4 +1,4 @@
-// 飞书网关（packages/feishu，跑在香港）⇄ 驾驶舱后端（packages/api）共用的几样：路由的写法（FeishuRoute，IntentRoutes 按它写）、
+// 飞书网关（跑在香港的旧进程，代码已从仓里删掉）⇄ 驾驶舱后端（packages/api）共用的几样：路由的写法（FeishuRoute，IntentRoutes 按它写）、
 // 代表谁（FeishuActing），和网关通行证能进的驾驶舱接口（FEISHU_GATEWAY_WEB_ROUTES）。
 // 走法：经隧道调后端的 /api（路径都在 WEB_API_PREFIX 之下），一律带 `Authorization: Bearer <网关通行证>`。
 // 网关现在只调 IntentRoutes（intent-api.ts）。旧的 FeishuRoutes 九条（随手记草稿、查进度、关注、盘面、待推送、回执、卡片登记）

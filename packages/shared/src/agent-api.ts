@@ -1,4 +1,4 @@
-// fleet 命令（跑在 AI 会话里）⇄ 驾驶舱后端 的接口约定。命令这边（packages/cli）和后端那边（packages/api）都按这份实现。
+// fleet 命令（跑在 AI 会话里）⇄ 驾驶舱后端 的接口约定。后端这边（packages/api）按这份实现；命令行那边（原 packages/cli）已删，引擎也不再给会话发令牌，这一整条接口是待清的死代码。
 // 认证：请求头 `Authorization: Bearer <FLEET_TOKEN>`；令牌只对一个任务的一次会话有效，过期即失效，不能合并、不能改调度台。
 // 出错时返回体是 `{ error: { code, message, details? } }`（同 web-api.ts 的 ApiErrorBody），message 是给 AI 看的白话：
 //   401 令牌无效、过期或这次会话已结束（重试没用）；400 请求不合约定；

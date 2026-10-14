@@ -1,9 +1,9 @@
 // 网关的两条接口（shared 的 IntentRoutes）：进群记录、飞书接口用量（#795，方案 5.4、5.6），挂在 /api 下。
 // 飞书收缩后（#2047 提需求 F1）不再收群聊、私聊的话：收原话、收撤回、补漏游标、取意图卡、卡的回执、拒收记录这几条已经删了，
 // 网关带通行证来也没有地方写意图库。意图表和已有数据还在，指挥官经 ssh 跑 `fleet-api intent …`（intent-cli.ts）读写。
-// 和驾驶舱那套接口同一个门：只认网关通行证（checkGatewayPass）。门口验过通行证记一笔「网关来过」（/healthz 的 feishu_gateway）。
+// 和驾驶舱那套接口同一个门：只认网关通行证（checkGatewayPass）。
 // 改这里之前必须知道：
-// - 用量上报是网关的心跳：网关每分钟报一次，/healthz 的 feishu_gateway 据此判网关在不在（gateway-seen.ts）。
+// - 用量上报：网关（香港，已从仓里删掉，机器上的旧进程还在报）每分钟报一次；停了网关、删了这两条接口之后这里随之收掉。
 // - 日志不记原文，只记数量。
 
 import {
@@ -40,7 +40,6 @@ export function intentRoutes(deps: Deps): Hono {
         throw new ApiError(401, 'gateway_pass_missing', '飞书接口只给飞书网关用：要带网关通行证');
       }
       checkGatewayPass(deps.config, authorization);
-      deps.gatewaySeen?.saw(route);
       await next();
     };
 
