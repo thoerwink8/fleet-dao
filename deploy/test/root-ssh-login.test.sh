@@ -6,9 +6,9 @@
 #   2. 再跑一遍：不重复，输出「没新补」，字节不变
 #   3. 目标里已有另一把、还有一行带选项的：原字节还在，新钥匙另起一行
 #   4. 目标文件不以换行结尾：补上去不粘到上一行；已有换行时不多插空行
-#   5. 口子没有、是符号链接、读不了：不建目标
+#   5. 口子没有、是符号链接：不建目标。权限 000：普通用户读不了就不建；root（CI 用 sudo 跑）无视权限位，照样补
 #   6. 口子里认不出的行跳过；注释不同、指纹相同的不重复补
-#   7. 目标 644 收成 600；读不了的目标一个字节不动
+#   7. 目标 644 收成 600。目标 000：普通用户读不了就不动；root 读得了就补上并收成 600
 #   8. .ssh 或 authorized_keys 是符号链接：不跟着写
 #   9. release.sh 只在 --check 之后、mode 不是 check 时调用，并清掉测试用的路径覆盖
 # 用法：bash deploy/test/root-ssh-login.test.sh。退出码：0 通过，1 不通过，2 没跑成。
@@ -179,12 +179,18 @@ home=$(mktemp -d "$TMP/home.XXXXXX")
 printf '%s\n' "$pub_a" >"$home/src"
 chmod 000 -- "$home/src"
 out=$(run "$home/src" "$home")
-has "读不了口子" "$out" "没有会话口子"
-if [[ ! -e "$home/.ssh" ]]; then
-  printf '  ✓ 读不了的口子没建 .ssh\n'
+# root 读得了 mode 000（CI 的 deploy 检查是 sudo）。普通用户读不了，不能把这种口子当成有钥匙。
+if ((EUID == 0)); then
+  has "root 读得了 000 的口子" "$out" "补进 1 把"
+  check "root 把 000 的口子补上" "$(grep -cE '^(ssh-|ecdsa-sha2-|sk-)' -- "$home/.ssh/authorized_keys" || true)" "1"
 else
-  printf '  ✗ 读不了的口子却建了 .ssh\n'
-  fail=1
+  has "读不了口子" "$out" "没有会话口子"
+  if [[ ! -e "$home/.ssh" ]]; then
+    printf '  ✓ 读不了的口子没建 .ssh\n'
+  else
+    printf '  ✗ 读不了的口子却建了 .ssh\n'
+    fail=1
+  fi
 fi
 chmod 600 -- "$home/src" || true
 
@@ -239,11 +245,18 @@ chmod 000 -- "$home/.ssh/authorized_keys"
 printf '%s\n' "$pub_a" >"$src"
 out=$(run "$src" "$home")
 rc=$?
-check "读不了也返回 0" "$rc" "0"
-has "读不了" "$out" "读不了"
-check "权限没改" "$(stat -c '%a' -- "$home/.ssh/authorized_keys")" "0"
-chmod 600 -- "$home/.ssh/authorized_keys"
-same "读不了的目标字节不动" "$home/.ssh/authorized_keys" "$TMP/before-unreadable"
+check "000 的目标也返回 0" "$rc" "0"
+if ((EUID == 0)); then
+  has "root 读得了 000 的目标" "$out" "$(fp_of "$pub_a")"
+  printf '%s\n%s\n' "$pub_d" "$pub_a" >"$TMP/expect-root-000"
+  same "root 把 000 的目标补上一行" "$home/.ssh/authorized_keys" "$TMP/expect-root-000"
+  check "root 把 000 收成 600" "$(stat -c '%a' -- "$home/.ssh/authorized_keys")" "600"
+else
+  has "读不了" "$out" "读不了"
+  check "权限没改" "$(stat -c '%a' -- "$home/.ssh/authorized_keys")" "0"
+  chmod 600 -- "$home/.ssh/authorized_keys"
+  same "读不了的目标字节不动" "$home/.ssh/authorized_keys" "$TMP/before-unreadable"
+fi
 
 home=$(mktemp -d "$TMP/home.XXXXXX")
 src=$home/src
