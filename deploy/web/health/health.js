@@ -3,7 +3,7 @@
 // /healthz 的样子（packages/api 的 health.ts）：{ ok, checks: { <项>: { ok: true } | { ok: true, message }
 // | { ok: true, status: 'not_wired', message } | { ok: true, status: 'pending', message } | { ok: false, code, message } } }。
 // 好的项可以带一句说明（飞书网关几秒前来过），写在「在线」后面；「未接」是功能还没做，不算不在线，照样显示出来（写明未接和原因）；
-// 「待定」是现在说不了好但也不是坏（好比全流程巡检的结论早于当前部署，#1909），不算不在线、也不算全好，单独写「待定」；
+// 「待定」是现在说不了好但也不是坏（好比某一项的结论早于当前部署，#1909），不算不在线、也不算全好，单独写「待定」；
 // 全好回 200，有一项不好回 503。香港 nginx 把 /healthz 经隧道转给法国的驾驶舱后端（deploy/hk/nginx-https.conf）。
 
 /** P0 验收要看到的三项：法国的数据库、Temporal、引擎工人。后端没报的项照样列出来、报红。 */
@@ -22,7 +22,6 @@ const EXTRA_LABELS = {
   feishu_gateway: '飞书网关',
   session_org: '会话账号切换',
   github_app: 'GitHub 机器人权限',
-  canary: '全流程巡检',
   watchdog: '看门狗',
 };
 
@@ -126,7 +125,7 @@ function row(key, label, check) {
   // 「未接」必须样子完整（status 就是 not_wired、带一句原因）：带了 status 却认不出、缺原因，都不算绿
   if (check.ok === true && 'status' in check) {
     if (check.status === 'pending') {
-      // 待定（#1909）：不是坏，但现在说不了「好」（好比全流程巡检的结论早于当前部署）。不算在线、不算不在线，
+      // 待定（#1909）：不是坏，但现在说不了「好」（好比某一项的结论早于当前部署）。不算在线、不算不在线，
       // 单独写成「待定」——不当「格式认不出」报红，否则发版后这个正常窗口会被画成断链。
       const note = typeof check.message === 'string' ? check.message.trim() : '';
       // 待定必须带一句原因：带了 pending 却没说为什么，样子不完整，认不出、报红（不冒充「待定」把坏的说成没事）

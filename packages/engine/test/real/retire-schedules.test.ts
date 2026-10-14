@@ -133,16 +133,19 @@ describe('退役的定时任务删不掉时要能被人看见（real/retire-sche
   );
 
   it(
-    '默认名单：摘出 Temporal 的 8 个定时任务（#1072）也一起删；删不掉的提醒写明是「改成了进程内定时器、会和它重复跑一轮」',
+    '默认名单：摘出 Temporal 的 7 个定时任务（#1072）、删掉的巡检（决定 0093）也一起删；删不掉的提醒写明是「改成了进程内定时器、会和它重复跑一轮」',
     async () => {
       const { log, calls } = logSpy();
       await retireEngineSchedules(fakeClient(new Error('14 UNAVAILABLE: 连不上')), t.db, log);
       expect(calls).toHaveLength(9);
-      const moved = await alertByKey(t.db, `${RETIRED_SCHEDULE_ALERT_PREFIX}canary`);
+      const moved = await alertByKey(t.db, `${RETIRED_SCHEDULE_ALERT_PREFIX}intake`);
       expect(moved?.body).toContain('#1072 把它改成了引擎进程内的定时器');
       expect(moved?.body).toContain('重复跑一轮');
-      // alert-dispatch 的措辞没变
+      // alert-dispatch 的措辞没变；巡检写的是决定 0093
       expect((await alertByKey(t.db, DEDUPE_KEY))?.body).toContain('#445 把它的代码删掉了');
+      expect((await alertByKey(t.db, `${RETIRED_SCHEDULE_ALERT_PREFIX}canary`))?.body).toContain(
+        '决定 0093 把它的代码删掉了',
+      );
     },
     TEST_DB_TIMEOUT_MS,
   );

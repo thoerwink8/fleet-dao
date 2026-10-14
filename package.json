@@ -33,7 +33,6 @@
     "plan": "node packages/conventions/src/bin/plan.ts",
     "github:audit": "node packages/conventions/src/bin/github-audit.ts",
     "branch:hygiene": "node packages/conventions/src/bin/branch-hygiene.ts",
-    "drill": "node packages/engine/src/bin/drill.ts",
     "release:onekey": "node agents/skills/commander/scripts/release-onekey.mjs",
     "pr:open": "node packages/conventions/src/bin/pr-open.ts",
     "repo:check": "node agents/hooks/repo-contract.mjs check",

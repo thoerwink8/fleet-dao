@@ -33,7 +33,6 @@ import {
 } from '@fleet-dao/store';
 import { signAgentToken } from './agent-token.ts';
 import { buildApps } from './app.ts';
-import { CANARY_NOT_HERE, canaryHealthCheck } from './canary-health.ts';
 import { pgCarpoolReconcile } from './carpool-reconcile-view.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
 import { pgCliTools } from './cli-versions.ts';
@@ -49,7 +48,6 @@ import {
   measureFootprint,
   realFootprintFs,
 } from './disk-footprint.ts';
-import { readEngineMaster } from './engine-switch.ts';
 import { recordExternalWatchRound } from './external-watch.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { memoryCockpitAlerts, pgCockpitAlerts } from './feishu-alerts.ts';
@@ -384,11 +382,6 @@ async function assemble(): Promise<{
       sessionOrg: sessionOrgHealthCheck(db),
       // 引擎每小时对账自检两个机器人的权限、缺了写的提醒：同样只有这台库上跑着的引擎会写
       githubApp: githubAppHealthCheck(db),
-      // 全流程巡检（#223）：引擎每 6 小时在巡检仓跑一轮、结论写进库；只在正式环境接。
-      // 总开关关着时巡检整个不跑（#1086）：健康项认得、报跳过不红（#1141），这里给它总开关的现读
-      canary: production
-        ? { check: canaryHealthCheck(db, () => readEngineMaster(store), now) }
-        : { check: async () => {}, notWired: CANARY_NOT_HERE },
       // 看门狗（#203）：引擎每 5 分钟跑一轮、记在登记表上；只在正式环境接
       watchdog: production
         ? { check: watchdogHealthCheck(db, now) }

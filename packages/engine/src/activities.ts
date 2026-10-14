@@ -4,13 +4,6 @@ import { Context } from '@temporalio/activity';
 import type { Client } from '@temporalio/client';
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common';
 import type { EngineActivities } from './activity-options.ts';
-import {
-  type CanaryDeps,
-  CanaryNotRecordedError,
-  type CanaryState,
-  checkCanaryRound,
-  openCanaryRound,
-} from './jobs/canary.ts';
 import type { CarpoolWatchDeps } from './jobs/carpool-watch.ts';
 import type { CiTimingsJobDeps } from './jobs/ci-timings.ts';
 import type { CliUpgradeJobDeps } from './jobs/cli-upgrade.ts';
@@ -198,8 +191,7 @@ function timed(name: string, handler: Handler, record: EnginePorts['recordTiming
 
 /**
  * 定时任务要的东西（真端口才有：库、GitHub）。给的是工厂：拉起工作流、查工作流要用引擎的 Temporal 客户端（jobs/engine-timers.ts
- * 每一轮现装）。不给（假端口）就不起定时器；真端口缺了哪个，起的时候就明说起不来。只有全流程巡检的依赖还是工作流里的活动用的
- * （canaryOpen / canaryCheck）：不给，那两个活动明确报 JOB_NOT_CONFIGURED。
+ * 每一轮现装）。不给（假端口）就不起定时器；真端口缺了哪个，起的时候就明说起不来。
  */
 export interface EngineJobs {
   /** taskQueue：这个工人取活的任务队列，补回来的单的工作流（Fusion）起在这里。 */
@@ -229,8 +221,6 @@ export interface EngineJobs {
   worktreeCleanup?: (client: Client, taskQueue: string) => WorktreeCleanupDeps;
   /** 单一关就撤停着等人的任务（jobs/closed-issue-events.ts，#2103）：每几秒捞一次投递账上没处理的 issues.closed，走每小时对账同一个撤法。不给就不看。 */
   closedIssueEvents?: (client: Client, taskQueue: string) => ClosedIssueEventDeps;
-  /** 全流程巡检（#223）：在巡检仓开单、看它一路走完（叫停前几轮留下的单、查工作流用这次活动的 Temporal 客户端）。 */
-  canary?: (client: Client) => CanaryDeps;
   /** 看门狗（#203）：按登记表看各定时任务新不新鲜、推撤提醒（只读写库）。 */
   watchdog?: () => WatchdogDeps;
   /** 拉单（#632）：读开着开关的仓里该做的单、起任务工作流（起工作流、数在跑的用这次活动的 Temporal 客户端；taskQueue 同上）。 */
@@ -283,31 +273,6 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   planSegmentResume: true,
 };
 export const TASK_ACTIVITY_NAMES = Object.keys(TASK_ACTIVITY_KEYS) as (keyof EngineTasks)[];
-
-/** 巡检没装（假端口，或真端口没接上库和 GitHub）：明确报 JOB_NOT_CONFIGURED，不装作巡检过。 */
-function canaryDeps(jobs: EngineJobs): CanaryDeps {
-  const make = jobs.canary;
-  if (!make) {
-    throw new PortError(
-      'JOB_NOT_CONFIGURED',
-      '这个引擎工人没装全流程巡检（假端口，或真端口没接上库和 GitHub）：不装作巡检过',
-      { retryable: false },
-    );
-  }
-  return make(Context.current().client);
-}
-
-/** 引擎自己的活动：全流程巡检开单。没跑成的已经记进库、回结论；记开始就没成报 CANARY_NOT_RECORDED（不重试）。 */
-async function canaryOpen(jobs: EngineJobs): Promise<unknown> {
-  try {
-    return await openCanaryRound(canaryDeps(jobs));
-  } catch (error) {
-    if (error instanceof CanaryNotRecordedError) {
-      throw new PortError('CANARY_NOT_RECORDED', error.message, { retryable: false });
-    }
-    throw error;
-  }
-}
 
 function parseProbeAssigned(input: unknown): ProbeAssignedInput {
   const raw = input as Partial<ProbeAssignedInput> | null;
@@ -363,15 +328,6 @@ async function runReleaseReservation(jobs: EngineJobs, input: unknown): Promise<
   return { released: true };
 }
 
-/** 引擎自己的活动：全流程巡检看一回、判、记。 */
-async function canaryCheck(jobs: EngineJobs, input: unknown): Promise<unknown> {
-  const state = (input as { state?: CanaryState } | null)?.state;
-  if (state?.schemaVersion !== 1) {
-    throw new PortError('INVALID_INPUT', '全流程巡检看一回：输入里没有认得出的状态', { retryable: false });
-  }
-  return checkCanaryRound(canaryDeps(jobs), state);
-}
-
 export function createActivities(
   ports: EnginePorts,
   jobs: EngineJobs = {},
@@ -394,8 +350,6 @@ export function createActivities(
       out[name] = timed(name, port, record);
     }
   }
-  out.canaryOpen = timed('canaryOpen', () => canaryOpen(jobs), record);
-  out.canaryCheck = timed('canaryCheck', (input) => canaryCheck(jobs, input), record);
   out.probeAssignedRoute = timed('probeAssignedRoute', (input) => runProbeAssigned(jobs, input), record);
   out.releaseReservation = timed('releaseReservation', (input) => runReleaseReservation(jobs, input), record);
   for (const name of TASK_ACTIVITY_NAMES) {

@@ -7,7 +7,6 @@
 // 外部看门狗（#292）只在进程环境配了非空的 FLEET_EDGE_WATCH_ID 时登记；没配或是空的就把库里已有的这一行摘掉，
 // 避免 Worker 还没部署就按「登记了还没跑过」误报。
 import { type Db, registerScheduledJobs, unregisterScheduledJobs } from '@fleet-dao/db';
-import { CANARY_JOB } from '../jobs/canary.ts';
 import { CARPOOL_WATCH_JOB } from '../jobs/carpool-watch.ts';
 import { CI_TIMINGS_JOB } from '../jobs/ci-timings.ts';
 import { CLI_UPGRADE_JOB } from '../jobs/cli-upgrade.ts';
@@ -30,7 +29,6 @@ export const ENGINE_JOBS = [
   QUOTA_READ_JOB,
   CARPOOL_WATCH_JOB,
   HOURLY_RECONCILE_JOB,
-  CANARY_JOB,
   WATCHDOG_JOB,
   INTAKE_JOB,
   JUDGE_SELF_CHECK_JOB,

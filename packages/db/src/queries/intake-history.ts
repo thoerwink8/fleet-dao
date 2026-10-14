@@ -4,7 +4,7 @@
 import type { TaskState } from '@fleet-dao/shared';
 import { and, asc, count, desc, eq, gt, gte, inArray, lt, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { auditLog, repos, settings, stateChanges, tasks } from '../schema/index.ts';
+import { auditLog, settings, stateChanges, tasks } from '../schema/index.ts';
 
 /** 接手没有任务工作流的老任务行时写的操作记录（engine real/intake.ts 用同一个名字）。 */
 export const TASK_ADOPT_AUDIT_ACTION = 'task.adopt';
@@ -26,77 +26,27 @@ export async function taskFailureCount(db: Db, repoId: string, issueNumber: numb
   return row?.n ?? 0;
 }
 
-/**
- * 从计数里划掉的任务：这个仓里、标题对上 titlePosix（Postgres ~）的不算。
- * 拉单用它把巡检单剔出每小时名额（#1364）。不给就一条不剔。
- */
-export interface HourlyCountExclude {
-  owner: string;
-  name: string;
-  titlePosix: string;
-}
-
-/** 从 since 起建出来的任务行有几条（滚动一小时限速数「已起的」）。exclude 给了，那个仓里对得上标题的不算。 */
-export async function tasksCreatedSince(
-  db: Db,
-  since: Date,
-  exclude?: HourlyCountExclude | null,
-): Promise<number> {
-  const created = gte(tasks.createdAt, since);
-  if (!exclude) {
-    const [row] = await db.select({ n: count() }).from(tasks).where(created);
-    return row?.n ?? 0;
-  }
-  const owner = exclude.owner.toLowerCase();
-  const name = exclude.name.toLowerCase();
-  const [row] = await db
-    .select({ n: count() })
-    .from(tasks)
-    .innerJoin(repos, eq(tasks.repoId, repos.id))
-    .where(
-      and(
-        created,
-        sql`not (lower(${repos.owner}) = ${owner} and lower(${repos.name}) = ${name} and ${tasks.title} ~ ${exclude.titlePosix})`,
-      ),
-    );
+/** 从 since 起建出来的任务行有几条（滚动一小时限速数「已起的」）。 */
+export async function tasksCreatedSince(db: Db, since: Date): Promise<number> {
+  const [row] = await db.select({ n: count() }).from(tasks).where(gte(tasks.createdAt, since));
   return row?.n ?? 0;
 }
 
 /**
  * 从 since 起接手成功的老任务行有几条（操作记录 task.adopt 且 ok）。
  * 建出时刻已经不早于 since 的不重复数：那些行 tasksCreatedSince 已经算过。
- * exclude 和 tasksCreatedSince 同一条巡检单口径。
  */
-export async function taskAdoptsSince(
-  db: Db,
-  since: Date,
-  exclude?: HourlyCountExclude | null,
-): Promise<number> {
-  const base = and(
-    eq(auditLog.action, TASK_ADOPT_AUDIT_ACTION),
-    eq(auditLog.ok, true),
-    gte(auditLog.at, since),
-    lt(tasks.createdAt, since),
-  );
-  if (!exclude) {
-    const [row] = await db
-      .select({ n: count() })
-      .from(auditLog)
-      .innerJoin(tasks, sql`${auditLog.target} = 'task:' || ${tasks.id}::text`)
-      .where(base);
-    return row?.n ?? 0;
-  }
-  const owner = exclude.owner.toLowerCase();
-  const name = exclude.name.toLowerCase();
+export async function taskAdoptsSince(db: Db, since: Date): Promise<number> {
   const [row] = await db
     .select({ n: count() })
     .from(auditLog)
     .innerJoin(tasks, sql`${auditLog.target} = 'task:' || ${tasks.id}::text`)
-    .innerJoin(repos, eq(tasks.repoId, repos.id))
     .where(
       and(
-        base,
-        sql`not (lower(${repos.owner}) = ${owner} and lower(${repos.name}) = ${name} and ${tasks.title} ~ ${exclude.titlePosix})`,
+        eq(auditLog.action, TASK_ADOPT_AUDIT_ACTION),
+        eq(auditLog.ok, true),
+        gte(auditLog.at, since),
+        lt(tasks.createdAt, since),
       ),
     );
   return row?.n ?? 0;
@@ -183,6 +133,53 @@ export async function writeIntakeBreaker(
   await db
     .insert(settings)
     .values({ key: INTAKE_BREAKER_SETTING, value, updatedBy: input.by })
+    .onConflictDoUpdate({
+      target: settings.key,
+      set: { value, updatedBy: input.by, version: sql`${settings.version} + 1` },
+    });
+}
+
+// —— 拉单这一轮每个仓等空位的单数：设置表里 engine.intakeWaiting 那一行（决定 0093）——
+
+export const INTAKE_WAITING_SETTING = 'engine.intakeWaiting';
+
+/**
+ * 拉单最近一轮记下的：每个开着开关、单子读成了的仓里「过了准入、只因没空位没起」的单几张（仓编号 → 张数），和那一轮的时刻。
+ * 看门狗的「主线 N 小时没合 PR」报警读它。没这一行 = 拉单还没记过。
+ */
+export type IntakeWaitingRow = { at: Date; byRepo: Record<string, number> } | null;
+
+/** 读。这一行认不出（形状不对）照抛，不当成「没有待做的单」。 */
+export async function readIntakeWaiting(db: Db): Promise<IntakeWaitingRow> {
+  const [row] = await db.select().from(settings).where(eq(settings.key, INTAKE_WAITING_SETTING));
+  if (!row) return null;
+  const v = row.value as { at?: unknown; byRepo?: unknown } | null;
+  const at = typeof v?.at === 'string' ? new Date(v.at) : null;
+  const byRepo = v?.byRepo;
+  const ok =
+    at !== null &&
+    !Number.isNaN(at.getTime()) &&
+    typeof byRepo === 'object' &&
+    byRepo !== null &&
+    !Array.isArray(byRepo) &&
+    Object.values(byRepo).every((n) => Number.isInteger(n) && (n as number) >= 0);
+  if (!ok) {
+    throw new Error(
+      `设置 ${INTAKE_WAITING_SETTING} 的值认不出（要 {at: 时间, byRepo: {仓编号: 张数}}）：${JSON.stringify(row.value)}`,
+    );
+  }
+  return { at, byRepo: byRepo as Record<string, number> };
+}
+
+/** 写（有就换、没有就建，版本加 1）。 */
+export async function writeIntakeWaiting(
+  db: Db,
+  input: { at: Date; byRepo: Record<string, number>; by: string },
+): Promise<void> {
+  const value = { at: input.at.toISOString(), byRepo: input.byRepo };
+  await db
+    .insert(settings)
+    .values({ key: INTAKE_WAITING_SETTING, value, updatedBy: input.by })
     .onConflictDoUpdate({
       target: settings.key,
       set: { value, updatedBy: input.by, version: sql`${settings.version} + 1` },

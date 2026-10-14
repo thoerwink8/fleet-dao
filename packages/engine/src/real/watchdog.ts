@@ -5,11 +5,13 @@
 // 删 Temporal 上的 Schedule 用的也是它，见 real/retire-schedules.ts）：退役的任务不会再有新的跑记录，不剔除就会被
 // 永远判成「停了」——它不会再跑，也没人能去处理，只会白占一条卡住报警。#1140 起引擎起来时还会把它们的登记行从
 // scheduled_jobs 里摘掉（real/jobs.ts），这里的筛选是引擎还没来得及起新版本时的兑底。
+// 「主线 N 小时没合 PR」（决定 0093）读同一个库的 mergeStallFacts（PR 镜像、任务、拉单记下的等空位单数）。
 import {
   alertByKey,
   type Db,
   finishScheduleRun,
   latestAlertByPrefix,
+  mergeStallFacts,
   openAlertsByPrefix,
   resolveAlertWithReason,
   scheduleHealth,
@@ -58,6 +60,7 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
       start: (job, at) => startScheduleRun(w.db, job, at),
       finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
     },
+    mergeStall: () => mergeStallFacts(w.db),
     now,
     log,
   });

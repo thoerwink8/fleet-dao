@@ -2,12 +2,12 @@ import { readFileSync } from 'node:fs';
 import { createDb, type Db } from '@fleet-dao/db';
 import { silentLogger, sqlState, withStatementTimeout } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
-import { CANARY_NOT_HERE } from '../src/canary-health.ts';
 import { probeDb } from '../src/db-probe.ts';
 import { EXTERNAL_WATCH_NOT_WIRED } from '../src/external-watch.ts';
 import { PublicHealthError, runHealthChecks, serviceHealthChecks } from '../src/health.ts';
 import type { Logger } from '../src/ports.ts';
 import { ENGINE_OFF, notConnectedTemporal } from '../src/temporal.ts';
+import { WATCHDOG_NOT_HERE } from '../src/watchdog-health.ts';
 import { errorCode, harness, IDS, write } from './harness.ts';
 
 describe('健康检查', () => {
@@ -63,22 +63,23 @@ describe('健康检查', () => {
       feishuGateway: { check: async () => {} },
       sessionOrg: async () => {},
       githubApp: async () => {},
-      canary: { check: async () => {} },
       watchdog: { check: async () => {} },
       nodeReport: { check: async () => {} },
       ...extra,
     });
 
   it('还没接上的功能报「未接」：整体照样 200，这一项看得到「未接」和单号', async () => {
-    const h = harness({ health: services({ canary: { check: async () => {}, notWired: CANARY_NOT_HERE } }) });
+    const h = harness({
+      health: services({ watchdog: { check: async () => {}, notWired: WATCHDOG_NOT_HERE } }),
+    });
     const res = await h.cockpit.request('/healthz');
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ok: boolean; checks: Record<string, unknown> };
     expect(body.ok).toBe(true);
-    expect(body.checks.canary).toEqual({
+    expect(body.checks.watchdog).toEqual({
       ok: true,
       status: 'not_wired',
-      message: CANARY_NOT_HERE,
+      message: WATCHDOG_NOT_HERE,
     });
   });
 
@@ -181,8 +182,6 @@ describe('健康检查', () => {
     expect(listed).toContain('feishu_gateway');
     // 切号的提醒（额度、登录出事）跟着上游自己变红，引擎每 15 分钟判一次；少了它，发版会被它退回
     expect(listed).toContain('session_org');
-    // 全流程巡检断了、没跑成跟着巡检的结论自己变红（6 小时一轮）；少了它，发版会被它退回
-    expect(listed).toContain('canary');
     // 机器人权限被人改了、新权限没点接受跟着 GitHub 那边自己变红（引擎每小时自检一次）；少了它，发版会被它退回
     expect(listed).toContain('github_app');
     // 看门狗停了、没跑成跟着引擎自己变红（每 5 分钟一轮；第一次带上它的那版发上去时它还没跑过）；少了它，发版会被它退回
@@ -197,7 +196,6 @@ describe('健康检查', () => {
       feishuGateway: { check: async () => {} },
       sessionOrg: async () => {},
       githubApp: async () => {},
-      canary: { check: async () => {} },
       watchdog: { check: async () => {} },
       nodeReport: { check: async () => {} },
     }).map((c) => c.name);

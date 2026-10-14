@@ -14,7 +14,7 @@
 //    同一份模板拼，再用 requiredSectionProblems 核过；不贴「要人拍」。单号写回这条提醒的正文开头。同一键只一张；那张关了
 //    而提醒还在，隔 7 天才再开。每次对账最多 2 张，每个仓每天最多 4 张。GitHub 写不进记没立成、不回写单号，下一轮再试。
 //    reconcile:* 虽在「自己会撤」的前缀里（过期兜底不碰它们），条件没了的核对那一步已经撤了，还开着的是断链，要立案。
-//    其余自己会撤的（canary、备份、切号……）不立案。认不出仓的不猜、不开。谁在处理读不到：不立案（跟再推相反，开单宁可不开）。
+//    其余自己会撤的（备份、切号……）不立案。认不出仓的不猜、不开。谁在处理读不到：不立案（跟再推相反，开单宁可不开）。
 //    历史事实类不立案（#1420）：键以 reconcile:pr:、reconcile:ledger: 开头且对应 PR 已合并超过 7 天。事实已经发生、改不了，
 //    对账只在合并时判一次，条件永远还在，开单没有可做的事（#1418、#1419 因此白起了会话）。合并未满 7 天、别的类别照旧。
 //    读不到合并时刻不跳过，记没查成。立案前再自检：单的「怎么算做完」只有「提醒的条件不再成立」一条、且类别不在自己会撤的
@@ -29,6 +29,7 @@
 //   engine:task-workflow）；那一下没撤成、或发版前已经做完的，下一轮对账补撤。叫停、仍挂着不因为这条撤。
 //   「「<阶段>」没有能用的路由」挂着时路由恢复了，正文开头写一句「路由已经恢复…点继续」（不撤：任务还挂着等人点继续）。
 // - <工作流>:history 事件数到线：工作流结束了就撤。
+// - canary:*（已删的全流程巡检留下的，决定 0093）：见到就撤。
 // - req:<…>:failed 需求没做完：需求的状态不再是 failed（重开了、又跑了、做完了、人叫停了）就撤。
 // - mq:<仓>:decide 合并队列判断出错：队列正常收工了（COMPLETED）或工作流已经不在了就撤；还在跑时判不了。
 // - approval:<批准> 要人批：批了、拒了，或者在等它的工作流（子任务的；Fusion 的是需求工作流）不在跑了、不在等这一次了就撤。
@@ -39,8 +40,9 @@
 // - 自己会撤的，这里不管：pool-hold:<池>（探针、会话跑通就撤；人拍的暂停不在这里，在设置 engine.poolHolds，只有人撤，#746）、
 //   session-org:*（引擎切号那一块：切成了、探通了、读到恢复时刻、组织读数定下来了、整池暂停的设置读得出了就撤，
 //   real/org-switch.ts；整池暂停到了复查日期的 session-org:pool-hold-overdue 也在这里：人撤了或续了期才撤）、flow-config:<仓>（GitHub 对账）、deploy-lag:（后端健康检查）、
-//   auto-release:（自动发布）、备份脚本的几种（fleet-backup）、canary:broken（全流程巡检下一轮通过）、canary:leftover-pr（巡检收上一轮留下的单时没关掉它开的 PR，之后一轮把 PR 关掉了就撤，#336）、
-//   watchdog:job:<任务>:…（看门狗 jobs/watchdog.ts：任务按期跑成了就撤）、
+//   auto-release:（自动发布）、备份脚本的几种（fleet-backup）、
+//   watchdog:job:<任务>:…（看门狗 jobs/watchdog.ts：任务按期跑成了就撤）、watchdog:merge:<仓>:…
+//   （看门狗的「主线 N 小时没合 PR」，jobs/merge-stall.ts：合了或没有待做的单了就撤）、
 //   watchdog-down:…（后端看着看门狗，packages/api 的 watchdog-health.ts：看门狗又按期跑完一轮就撤）、
 //   github-app:<机器人>:<仓>（机器人权限自检 jobs/github-app-check.ts：权限够了就撤）、reconcile:workflow:<任务>（开着的单
 //   没有着落）、reconcile:ledger:<仓>#<号>（合了的 PR 记账不全）——后两个由两处核对自己撤（jobs/reconcile-checks.ts）。
@@ -117,7 +119,6 @@ export const SELF_RESOLVING_PREFIXES: readonly string[] = [
   'deploy-lag:',
   'auto-release:',
   'backup',
-  'canary:',
   'watchdog:',
   'watchdog-down:',
   'github-app:',
@@ -131,6 +132,9 @@ export const SELF_RESOLVING_PREFIXES: readonly string[] = [
   'cursor-pending:',
   'mirasim-pending:',
 ];
+/** 全流程巡检留下的提醒（canary:*）撤的时候写的为什么。 */
+export const RETIRED_CANARY_WHY =
+  '全流程巡检已经删了（决定 0093），这条不会再有人撤；主线多久没合 PR 改由看门狗报（watchdog:merge:）';
 /** 「「<阶段>」没有能用的路由」挂着时，路由恢复了写在正文开头的那一句以它开头（再恢复、再没了按它认出来换掉）。 */
 export const ROUTE_BACK_PREFIX = '路由已经恢复';
 
@@ -248,6 +252,14 @@ export function withRouteNote(body: string, note: string | null): string {
 }
 
 export const RULES: readonly Rule[] = [
+  {
+    // 全流程巡检随决定 0093 删了：它留下的 canary:broken、canary:leftover-pr 再没有人会撤，见到就撤
+    name: '巡检已删',
+    pattern: /^canary:/,
+    async judge() {
+      return { resolve: RETIRED_CANARY_WHY };
+    },
+  },
   {
     name: '挂起',
     pattern: /^((?:task|req|sub):.+):park:\d+$/,

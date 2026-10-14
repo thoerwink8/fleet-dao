@@ -16,7 +16,6 @@ import { createTestDb, TEST_DB_TIMEOUT_MS } from '@fleet-dao/db/testing';
 import { FLEET_CHANGES_CHANNEL, IntentRoutes } from '@fleet-dao/shared';
 import { DEPLOY_LAG_NOT_HERE, silentLogger } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
-import { CANARY_NOT_HERE, canaryHealthCheck } from '../src/canary-health.ts';
 import { startPgChangeFeed } from '../src/changes.ts';
 import { probeDb } from '../src/db-probe.ts';
 import { deployLagCheck } from '../src/deploy-lag-check.ts';
@@ -199,11 +198,6 @@ async function publicFailures(log: Logger) {
       body: '去 GitHub 的 App 设置里改，再到装它的地方点接受新权限',
     });
     await run('github-app', true, githubAppHealthCheck(judgeDb.db));
-    // 全流程巡检：六处 new PublicHealthError（断了、没跑成、太久、早于部署等太久、没收尾、没跑完过），这里造一种；每一种说法都在 canary-health.test.ts 用同一份名单扫。
-    // 待定那几种（结论早于部署、跳过、总开关关着，#1909）不再走这条路（抛 PublicHealthPending、整体不算红），它们的说法也在 canary-health.test.ts 扫。
-    await run('canary', true, async () => {
-      await canaryHealthCheck(judgeDb.db, async () => ({ on: true }))();
-    });
     // 看门狗：只有一处 new PublicHealthError（说法有几种），这里造一种（还没登记）；每一种说法都在 watchdog-health.test.ts 用同一份名单扫
     await run('watchdog', true, async () => {
       await watchdogHealthCheck(judgeDb.db)();
@@ -316,7 +310,6 @@ describe('公开的健康报告', () => {
           feishuGateway,
           sessionOrg: async () => {},
           githubApp: async () => {},
-          canary: { check: async () => {}, notWired: CANARY_NOT_HERE },
           watchdog: { check: async () => {}, notWired: WATCHDOG_NOT_HERE },
           nodeReport: nodeReportPart(null),
         }),

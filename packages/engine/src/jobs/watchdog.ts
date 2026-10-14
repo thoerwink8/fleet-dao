@@ -12,12 +12,21 @@
 // - 标题正文不带「多久了」这种每轮都变的话：只写上次跑成的时刻、最近一次的原因，没变就不改卡（飞书免费版每月 1 万次接口调用）。
 // - 任务自己报「没跑成」的（键以 <编号>:run 开头，备份脚本就这么报）：它为最近这次没跑成报过（那条在这次开始之后建的或改过，
 //   人处理没处理都算），看门狗不为同一件事再报一条，自己那条撤掉写明看哪条；「停了」照报（停了它自己报不了）。
+// - 同一轮还看「主线 N 小时没合 PR」（决定 0093，删了全流程巡检换这一条）：判法在 jobs/merge-stall.ts，键 watchdog:merge:…，
+//   只读库（PR 镜像、任务、拉单记下的等空位单数），报、撤和上面同一套。
 
-import type { JobHealth, ScheduleResult } from '@fleet-dao/db';
+import type { JobHealth, MergeStallFacts, ScheduleResult } from '@fleet-dao/db';
 import { WATCHDOG_JOB_ID } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { WatchdogRun } from '../contract.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
+import {
+  judgeMergeStalls,
+  MERGE_STALL_ALERT_PREFIX,
+  MERGE_STALL_LINK,
+  mergeStallRetireWhy,
+  repoOfMergeStallKey,
+} from './merge-stall.ts';
 import { clip, stamp } from './reconcile-common.ts';
 
 /** 登记进 scheduled_jobs 的那一行。 */
@@ -67,6 +76,11 @@ export interface WatchdogDeps {
   health(now: Date): Promise<JobHealth[]>;
   alerts: WatchdogAlerts;
   runs: ScheduleRunLog;
+  /**
+   * 「主线 N 小时没合 PR」要的事实（@fleet-dao/db 的 mergeStallFacts）。读不到照抛：这一轮记没查成，开着的不撤。
+   * 不给（只测定时任务那部分的单测）就不看这一条。
+   */
+  mergeStall?: () => Promise<MergeStallFacts>;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
@@ -215,14 +229,14 @@ type Wanted = Extract<JobVerdict, { kind: 'alert' }>;
  */
 async function raiseOnce(
   alerts: WatchdogAlerts,
-  input: { dedupeKey: string; title: string; body: string },
+  input: { dedupeKey: string; title: string; body: string; link?: string },
 ): Promise<'raised' | 'same' | 'handled'> {
   const existing = await alerts.byKey(input.dedupeKey);
   if (existing?.resolvedAt && existing.resolvedBy !== WATCHDOG_ACTOR) return 'handled';
   if (existing && !existing.resolvedAt && existing.title === input.title && existing.body === input.body) {
     return 'same';
   }
-  await alerts.raise({ ...input, link: WATCHDOG_LINK });
+  await alerts.raise({ ...input, link: input.link ?? WATCHDOG_LINK });
   return 'raised';
 }
 
@@ -312,12 +326,52 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
     if (done.ok) deps.log('info', '看门狗：撤了一条', { dedupeKey: a.dedupeKey, why });
   }
 
+  const merges = deps.mergeStall ? await mergeStallRound(s, deps.mergeStall, now) : { scanned: 0, found: 0 };
+  found += merges.found;
+  const scanned = others.length + merges.scanned;
+
   if (s.problems.length > 0) {
     const why = `${s.problems.length > 1 ? `${s.problems.length} 处没做成：` : ''}${s.problems.join('；')}`;
-    return { outcome: 'failed', why: clip(why, WATCHDOG_WHY_MAX), scanned: others.length, found };
+    return { outcome: 'failed', why: clip(why, WATCHDOG_WHY_MAX), scanned, found };
   }
-  if (others.length === 0) return { outcome: 'unscanned', why: '登记表上除了看门狗自己没有别的定时任务' };
-  return { outcome: 'ok', scanned: others.length, found };
+  if (scanned === 0) return { outcome: 'unscanned', why: '登记表上除了看门狗自己没有别的定时任务' };
+  return { outcome: 'ok', scanned, found };
+}
+
+/** 「主线 N 小时没合 PR」这一部分：报该报的、撤不用再报的。读不到事实记没查成，开着的一条都不撤。 */
+async function mergeStallRound(
+  s: RoundState,
+  read: () => Promise<MergeStallFacts>,
+  now: Date,
+): Promise<{ scanned: number; found: number }> {
+  const facts = await attempt(s, '读不到各仓最近一次合并、在做的单（主线多久没合 PR 这一轮没查成）', read);
+  if (!facts.ok) return { scanned: 0, found: 0 };
+  const verdicts = judgeMergeStalls(facts.value, now);
+  const wanted = new Set<string>();
+  let found = 0;
+  for (const v of verdicts.values()) {
+    if (v.kind !== 'alert') continue;
+    found += 1;
+    wanted.add(v.key);
+    const got = await attempt(s, `「${v.repo}」多久没合 PR 的提醒没写进去`, () =>
+      raiseOnce(s.deps.alerts, { dedupeKey: v.key, title: v.title, body: v.body, link: MERGE_STALL_LINK }),
+    );
+    if (got.ok && got.value === 'raised')
+      s.deps.log('warn', '看门狗：推了一条', { dedupeKey: v.key, title: v.title });
+  }
+  const open = await attempt(s, '列不了「多久没合 PR」开着的提醒（恢复了的这一轮撤不了）', () =>
+    s.deps.alerts.openByPrefix(MERGE_STALL_ALERT_PREFIX),
+  );
+  for (const a of open.ok ? open.value : []) {
+    if (wanted.has(a.dedupeKey)) continue;
+    const repo = repoOfMergeStallKey(a.dedupeKey);
+    const why = mergeStallRetireWhy(repo, verdicts.get(repo));
+    const done = await attempt(s, `提醒 ${a.dedupeKey} 没撤掉`, () =>
+      s.deps.alerts.resolve({ dedupeKey: a.dedupeKey, why }),
+    );
+    if (done.ok) s.deps.log('info', '看门狗：撤了一条', { dedupeKey: a.dedupeKey, why });
+  }
+  return { scanned: facts.value.repos.length, found };
 }
 
 /**
