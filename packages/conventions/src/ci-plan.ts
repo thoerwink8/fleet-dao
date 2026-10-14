@@ -30,10 +30,11 @@ export interface PackageGraph {
   deps: Record<string, string[]>;
   /**
    * 包目录名 → 包里现有、却不在它的面上的文件（package-surface.ts：面 = exports、bin 顺着包内相对引用走得到的文件）。
-   * 改到这些文件只测这个包自己，不连带依赖它的包（sortChanges）。没这个键、面认不出 = 空：整个包都算面。
+   * 改到这些文件只测这个包自己，不连带依赖它的包（sortChanges）。不给、面认不出 = 空：整个包都算面。
    * 只列现有的文件：删掉的、新加还没被引用的以外，认不出的一律算在面上（多测不少测）。
+   * 是函数、第一次问到才算（要扫全仓的源码，两百毫秒上下）：只算依赖图的地方（ci-cache 的键、全跑）不付这份钱。
    */
-  offSurface?: Record<string, string[]>;
+  offSurface?: (pkg: string) => readonly string[];
 }
 
 /** e2e 要跑的 spec：'all' 全套；数组是只跑这几个（仓内相对路径）；空数组不跑。见 CiPlan.e2e。 */
@@ -460,9 +461,19 @@ export function readGraph(repo: RepoView): PackageGraph | string {
     }
     deps[dir] = [...names].sort();
   }
-  const offSurface: Record<string, string[]> = {};
-  const cross = crossPackageTargets(repo, [...raw.keys()]);
-  for (const [dir, p] of raw) offSurface[dir] = packageOffSurface(repo, dir, p, cross);
+  let cross: Set<string> | undefined;
+  const memo = new Map<string, readonly string[]>();
+  const offSurface = (dir: string): readonly string[] => {
+    const p = raw.get(dir);
+    if (p === undefined) return [];
+    let off = memo.get(dir);
+    if (off === undefined) {
+      cross ??= crossPackageTargets(repo, [...raw.keys()]);
+      off = packageOffSurface(repo, dir, p, cross);
+      memo.set(dir, off);
+    }
+    return off;
+  };
   return { deps, offSurface };
 }
 
@@ -549,7 +560,7 @@ interface Sorted {
 /** 这个文件在不在包的面上：只有 offSurface 里点了名的（现有、走不到）才不在；手搭的图、认不出的一律算在面上。 */
 function onSurface(graph: PackageGraph | string, pkg: string, f: string): boolean {
   if (typeof graph === 'string') return true;
-  return !(graph.offSurface?.[pkg]?.includes(f) ?? false);
+  return !(graph.offSurface?.(pkg).includes(f) ?? false);
 }
 
 function sortChanges(
