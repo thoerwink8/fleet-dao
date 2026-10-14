@@ -1,6 +1,6 @@
 // 引擎拉单挑单要从库里读的历史（#1336）：这张单失败过几次、滚动一小时内起了几条、最近结束的几条任务成没成、熔断的状态。
 // 失败和结束都以 state_changes 为准（触发器写的，应用写不漏）：任务行本身只有当前状态，重做过的单看不出失败过几次。
-// 读不到照抛，不拿 0 或「没有」顶。
+// 读不到照抛，不拿 0 或「没有」顶。只数引擎的任务行（executor = engine）：本机领的单（决定 0096）不占引擎的名额、不算引擎的成败。
 import type { TaskState } from '@fleet-dao/shared';
 import { and, asc, count, desc, eq, gt, gte, inArray, lt, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
@@ -19,6 +19,7 @@ export async function taskFailureCount(db: Db, repoId: string, issueNumber: numb
       and(
         eq(tasks.repoId, repoId),
         eq(tasks.issueNumber, issueNumber),
+        eq(tasks.executor, 'engine'),
         eq(stateChanges.entity, 'task'),
         eq(stateChanges.toState, 'failed'),
       ),
@@ -28,7 +29,10 @@ export async function taskFailureCount(db: Db, repoId: string, issueNumber: numb
 
 /** 从 since 起建出来的任务行有几条（滚动一小时限速数「已起的」）。 */
 export async function tasksCreatedSince(db: Db, since: Date): Promise<number> {
-  const [row] = await db.select({ n: count() }).from(tasks).where(gte(tasks.createdAt, since));
+  const [row] = await db
+    .select({ n: count() })
+    .from(tasks)
+    .where(and(gte(tasks.createdAt, since), eq(tasks.executor, 'engine')));
   return row?.n ?? 0;
 }
 
@@ -69,9 +73,11 @@ export async function recentEndedTasks(
   const rows = await db
     .select({ taskId: stateChanges.taskId, state: stateChanges.toState, endedAt: stateChanges.at })
     .from(stateChanges)
+    .innerJoin(tasks, eq(tasks.id, stateChanges.taskId))
     .where(
       and(
         eq(stateChanges.entity, 'task'),
+        eq(tasks.executor, 'engine'),
         inArray(stateChanges.toState, ['done', 'failed']),
         input.after ? gt(stateChanges.at, input.after) : undefined,
       ),
@@ -93,7 +99,7 @@ export async function firstTaskCreatedSince(
   const [row] = await db
     .select({ id: tasks.id, state: tasks.state, createdAt: tasks.createdAt })
     .from(tasks)
-    .where(gte(tasks.createdAt, since))
+    .where(and(gte(tasks.createdAt, since), eq(tasks.executor, 'engine')))
     .orderBy(asc(tasks.createdAt))
     .limit(1);
   return row ?? null;

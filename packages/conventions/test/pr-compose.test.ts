@@ -53,6 +53,8 @@ function world(o: Opts = {}) {
       if (!l) throw new Error(`用例没给查单的回话：${args.join(' ')}`);
       return l;
     }
+    // 开之前列开着的 PR（同一张单有没有别人在做，决定 0096）：本文件不关心，pr-open.test.ts 管
+    if (args[0] === 'pr' && args[1] === 'list') return ok('[]');
     calls.push(args);
     const file = args[args.indexOf('--body-file') + 1];
     if (args[1] === 'create' && file) bodies.push(readFileSync(file, 'utf8'));
@@ -62,6 +64,7 @@ function world(o: Opts = {}) {
   };
   const git: Gh = (args) => {
     if (args[0] === 'push') return ok(); // pr-open 开 PR 前的 git push：本文件不关心，pr-open.test.ts 管
+    if (args[0] === 'rev-parse') return ok('feat/x\n'); // 同上：开之前读当前分支
     gitCalls.push(args);
     return o.log ?? ok('加个东西\n');
   };

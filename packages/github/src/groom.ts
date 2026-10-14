@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import { enc, type GitHubClient, type RepoRef, repoSlug, unexpected } from './client.ts';
 import type { ActivityContext, Bots } from './deps.ts';
-import { GitHubError } from './errors.ts';
+import { GitHubError, isGitHubError } from './errors.ts';
 
 const UserRef = z.object({ login: z.string(), id: z.number(), type: z.string() }).nullable();
 const MilestoneField = z
@@ -211,6 +211,29 @@ export async function addIssueLabel(
     throw unexpected(`给 ${repoSlug(repo)}#${issueNumber} 加标签「${label}」`, res.data);
   }
   return parsed.data.map((l) => l.name);
+}
+
+/**
+ * 从一张单上摘一个标签（决定 0096：本机领单租约到期，摘「本机做」退回法国队列）。单上本来就没有这个标签（GitHub 回 404）不算错：
+ * 摘标签是幂等的，收租约那一步重来时不会因为上一次已经摘掉而失败。
+ */
+export async function removeIssueLabel(
+  deps: WriteDeps,
+  input: { repo: RepoRef; issueNumber: number; label: string },
+  ctx: ActivityContext = {},
+): Promise<void> {
+  const { repo, issueNumber, label } = input;
+  try {
+    await deps.client.request<unknown>({
+      method: 'DELETE',
+      path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues/${issueNumber}/labels/${enc(label)}`,
+      auth: { as: 'engine', repo },
+      signal: ctx.signal,
+    });
+  } catch (err) {
+    if (isGitHubError(err, 'NOT_FOUND')) return;
+    throw err;
+  }
 }
 
 const MilestonePatchResponse = z.object({ milestone: MilestoneField }).passthrough();

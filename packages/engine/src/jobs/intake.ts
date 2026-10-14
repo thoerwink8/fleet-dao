@@ -48,7 +48,6 @@ import {
   GROOM_PENDING_LABEL,
   GROOMED_LABEL,
   HUMAN_DECISION_LABEL,
-  issueColumnRefs,
   LOCAL_LABEL,
   loadStandardPaths,
   matchesStandardPath,
@@ -101,6 +100,7 @@ import {
   serialOf,
   sortCandidates,
 } from './intake-pick.ts';
+import { type LocalLeaseDeps, sweepLocalLeases } from './local-leases.ts';
 import { clip } from './reconcile-common.ts';
 
 /** 登记进 scheduled_jobs 的那一行：一次都没跑过也列得出来（看门狗按登记表查）。 */
@@ -287,20 +287,8 @@ export function screenPlan(plan: IntakePlan): IntakeSkip | null {
   return localSkip(plan.labels) ?? groomHoldSkip(plan.labels);
 }
 
-/**
- * 开着的 PR 的「需求」栏（Closes / Refs #号，同仓的）挂着哪些单：单号 → 挂着它的 PR 号（同一张单有几个 PR 挂，取号最小的）。
- * 认法是 conventions 的 issueColumnRefs（pr-open 拒开没挂单的 PR 用的同一份）。
- */
-export function prClaimedIssues(pulls: readonly { number: number; body: string }[]): Map<number, number> {
-  const claimed = new Map<number, number>();
-  for (const pr of [...pulls].sort((a, b) => a.number - b.number)) {
-    const { closes, refs } = issueColumnRefs(pr.body);
-    for (const n of [...closes, ...refs]) {
-      if (!claimed.has(n)) claimed.set(n, pr.number);
-    }
-  }
-  return claimed;
-}
+// 开着的 PR 挂着哪些单、开 PR 前有没有别的 PR 挂着同一张单：认法在 conventions 的 pr-claims.ts（本机 pr:open、work claim 用同一份）
+export { otherPrOnIssue, prClaimedIssues } from '@fleet-dao/conventions';
 
 /** 单子已有 PR 在做、引擎不拉时留在单子上的话。 */
 export function prClaimedComment(prNumber: number): string {
@@ -488,6 +476,8 @@ export interface IntakeDeps {
    * 报警读它（jobs/merge-stall.ts）。写不进照抛：这一轮记没查成。不给（测试）就不记。
    */
   recordWaiting?(input: { at: Date; byRepo: Record<string, number> }): Promise<void>;
+  /** 本机领单的租约（决定 0096，local-leases.ts）：每个仓准入之前先收到期的。不给（测试）就不收。 */
+  localLeases?: LocalLeaseDeps;
   runs: ScheduleRunLog;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
@@ -838,6 +828,17 @@ async function prepareRepo(
     claims ??= deps.openPrClaims(repo);
     return claims;
   };
+  // 本机领单到期的租约先收（决定 0096）：退回的单下一轮按「stopped 且没有任何一代」接手
+  if (deps.localLeases) {
+    const swept = await sweepLocalLeases(deps.localLeases, repo, {
+      open: new Map(listed.issues.map((i) => [i.number, i.labels] as const)),
+      prClaims,
+      comment: (c) => deps.comment({ repo, ...c }),
+      now: deps.now(),
+      log: deps.log,
+    });
+    t.unchecked.push(...swept.unchecked);
+  }
   // 版本里的先后和当前版本：排序用。先后认不出的版本，它的单算「没排进去」，原因只记日志（先后的对错归每天的 GitHub 对账管）
   const withOrder = listed.openMilestones.filter((m) => milestoneNeedsOrder(m, listed.issues));
   const { book, problems } = readOrderBook(

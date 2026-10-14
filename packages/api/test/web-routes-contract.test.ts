@@ -35,9 +35,11 @@ describe('契约 ↔ 后端注册的路由', () => {
     // 飞书网关走各自的模块和约定（feishu-routes.ts、intent-routes.ts），不属于驾驶舱前端的契约；
     // 别的环境推快照的写口（POST /api/nodes/report，node-report.ts）只认专用通行证、浏览器不调，也不在 WebRoutes 里
     // 本机推会话的写口（POST /api/nodes/sessions，#1991）同理；同一路径的 GET 是看板读的，在契约里。
+    // 本机领单（POST /api/nodes/claims，决定 0096）同理：只认通行证，pnpm work 调，浏览器不调。
     const own = (r: Entry) =>
       !/^\/api\/(feishu|intents?|drafts?|nodes\/report)(\/|$)/.test(r.path) &&
-      !(r.method === 'POST' && r.path === '/api/nodes/sessions');
+      !(r.method === 'POST' && r.path === '/api/nodes/sessions') &&
+      !(r.method === 'POST' && r.path === '/api/nodes/claims');
     const extra = registered
       .filter(
         (r) => (r.path.startsWith(`${WEB_API_PREFIX}/`) || r.path.startsWith(`${AUTH_PREFIX}/`)) && own(r),

@@ -36,6 +36,8 @@ function world(
   body = BODY,
   lookups: RunResult[] = [ISSUE_7],
   pushReply: RunResult = ok(),
+  /** 开之前列开着的 PR（同一张单有没有别人在做，决定 0096）的回话；不记进 calls。 */
+  openPulls: RunResult = ok('[]'),
 ) {
   const cwd = mkdtempSync(join(tmpdir(), 'pr-open-'));
   dirs.push(cwd);
@@ -43,7 +45,9 @@ function world(
   /** git 和 gh 的先后：推分支必须在 gh pr create 之前。 */
   const order: string[] = [];
   const gitCalls: string[][] = [];
+  const listed: string[][] = [];
   const git: Gh = (args) => {
+    if (args[0] === 'rev-parse') return ok('feat/x\n');
     gitCalls.push(args);
     order.push(`git ${args[0]}`);
     return pushReply;
@@ -60,6 +64,10 @@ function world(
       const l = looks.shift();
       if (!l) throw new Error(`用例没给第 ${asked.length} 次查单的回话：${args.join(' ')}`);
       return l;
+    }
+    if (args[0] === 'pr' && args[1] === 'list') {
+      listed.push(args);
+      return openPulls;
     }
     calls.push(args);
     order.push(`gh ${args.slice(0, 2).join(' ')}`);
@@ -84,6 +92,7 @@ function world(
     gitCalls,
     calls,
     asked,
+    listed,
     bodies,
     out,
     err,
@@ -540,5 +549,63 @@ describe('idlePrs：我开的、全绿、没挂自动合并、没碰改标准的
     ];
     const got = idlePrs(() => replies.shift() ?? bad('多调了'), LISTS, { ciPolicy: 'off' });
     expect(got).toEqual([{ number: 1, title: 'PR 1' }]);
+  });
+});
+
+describe('pnpm pr:open：同一张单不开第二个 PR（决定 0096）', () => {
+  const pulls = (...p: { number: number; body?: string; headRefName: string }[]) =>
+    ok(JSON.stringify(p.map((x) => ({ body: '', ...x }))));
+
+  it('【故意造出的失败】别的开着的 PR 的需求栏 Closes 同一张单：不推、不开，退出码 1，写明是哪个 PR', () => {
+    const w = world(
+      [],
+      BODY,
+      [ISSUE_7],
+      ok(),
+      pulls({ number: 99, body: '**需求**：\nCloses #7\n', headRefName: 'other' }),
+    );
+    expect(w.run()).toBe(1);
+    expect(w.calls).toEqual([]);
+    expect(w.gitCalls).toEqual([]);
+    expect(w.text()).toContain('#99');
+  });
+
+  it('【故意造出的失败】别的 PR 在这张单的固定前缀分支上（local/7-…、fleet/7-…）：同样不开', () => {
+    for (const ref of ['local/7-fix', 'fleet/7-tabcdef12']) {
+      const w = world([], BODY, [ISSUE_7], ok(), pulls({ number: 50, headRefName: ref }));
+      expect(w.run()).toBe(1);
+      expect(w.calls).toEqual([]);
+    }
+  });
+
+  it('自己这条分支已经开过的 PR 不算（重跑幂等）；别的 PR 只 Refs 这张单（母单分片）也不算', () => {
+    const w = world(
+      [CREATED, files('packages/api/src/home.ts'), ok()],
+      BODY,
+      [ISSUE_7],
+      ok(),
+      pulls(
+        { number: 41, body: '**需求**：\nCloses #7\n', headRefName: 'feat/x' },
+        { number: 40, body: '**需求**：\nRefs #7\n', headRefName: 'slice' },
+      ),
+    );
+    expect(w.run()).toBe(0);
+    expect(verbs(w.calls)).toEqual(['pr create', 'api --paginate', 'pr merge']);
+  });
+
+  it('【故意造出的失败】开着的 PR 没列成：判不了，不开，退出码 2（不当成没有）', () => {
+    const w = world([], BODY, [ISSUE_7], ok(), bad('HTTP 502'));
+    expect(w.run()).toBe(2);
+    expect(w.calls).toEqual([]);
+    expect(w.text()).toContain('没列成');
+  });
+
+  it('只 Refs 的 PR（不关单）不查', () => {
+    const w = world(
+      [CREATED, files('packages/api/src/home.ts'), ok()],
+      '**做了什么**：x\n\n**需求**：\nRefs #7\n',
+    );
+    expect(w.run()).toBe(0);
+    expect(w.listed).toEqual([]);
   });
 });
