@@ -106,7 +106,9 @@ const mirrorIn = (home: string) => join(home, '.fleet-dao', 'origin-main');
 
 const made: string[] = [];
 afterEach(() => {
-  for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true });
+  // 钩子在后台起的同步进程可能还在往临时仓里写，删目录碰上 ENOTEMPTY 就隔一会儿再删（CI 上见过）
+  for (const dir of made.splice(0))
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 function temp(name: string): string {
   const dir = mkdtempSync(join(tmpdir(), `session-start-${name}-`));
