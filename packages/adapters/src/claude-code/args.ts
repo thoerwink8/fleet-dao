@@ -67,7 +67,7 @@ const shellQuote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 
 /**
  * 经 --settings 带上的那份设置：引擎起 Claude 带 --setting-sources project，用户级 settings.json 里登记的钩子它不读，
- * 命令行给的设置是单独一层（不受 --setting-sources 管：法国 2026-09-27 以 2.1.282 实测，test/e2e/claude-guard-e2e.ts）。
+ * 命令行给的设置是单独一层（不受 --setting-sources 管：法国以 2.1.282 实测，test/e2e/claude-guard-e2e.ts）。
  * 钩子退出码 2 = 拦下；别的非 0（脚本崩了、node 起不来）Claude 当「钩子出错」照样放行，没人看着的会话里等于没装：
  * 这里一律改成 2、说清没跑成（按拦处理）。脚本不在由 runClaudeCode 起会话之前查，查不到不起。
  */

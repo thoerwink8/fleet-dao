@@ -32,7 +32,7 @@ export function parseRunLog(text: string): Map<string, number> {
 
 /**
  * 几轮日志各自认出来的耗时，一个文件取中位数（偶数个取偏高的那个，宁可高估不低估）：单轮里某个文件会因机器抖动慢一倍
- * （2026-10-04 实测 watchdog.test.ts 同一个文件两轮 5.3 秒和 11.7 秒），装箱只该信稳定的那部分。只在一部分轮里出现的文件，
+ * （实测 watchdog.test.ts 同一个文件两轮 5.3 秒和 11.7 秒），装箱只该信稳定的那部分。只在一部分轮里出现的文件，
  * 按出现的那几轮取（全跑的 PR 才带全部文件，按改动跑的轮次只带一部分）。至少要有一轮，没有就返回 undefined（入口退出 2）。
  */
 export function medianOfRuns(runs: readonly ReadonlyMap<string, number>[]): Map<string, number> | undefined {

@@ -11,7 +11,7 @@
 //   这一轮的 token（含缓存读写），没有花费、没有实际模型（init 里的 model 是界面名，docs/reference/adapters.md CU-08）。
 //   认证、额度、网络的报错只在 stderr（退出 1、没有 JSON）：原话放进 rawError，失败信息里带上，失败分流靠它认。
 //   Cursor 的池不绑会话用户（库里约束会话用户和 reclaude 组织类型同有同无），跑在法国唯一的会话用户下。认证用 API 密钥
-//   （创始人 2026-09-27 拍：浏览器登录在没有桌面的服务器上存不下，docs/ops.md 第五节）：密钥是会话用户家里的一个文件，
+//   （浏览器登录在没有桌面的服务器上存不下，docs/ops.md 第五节）：密钥是会话用户家里的一个文件，
 //   引擎进不去它的家（750），帮手脚本也不放 FLEET_* 以外的变量（adapters 的 scopeLaunch）——所以由会话用户自己在起
 //   cursor-agent 的那一步读它、放进环境（cursorLaunchCommand 的前一段）。值只在 cursor-agent 的环境里：不上命令行、
 //   不进日志、进度、失败信息和库。
@@ -37,7 +37,7 @@
 //   不是真号的临时号（MIRASIM_PENDING_PREFIX），真号经 onAccepted → onSessionId 报上来。没有 fork（换了账号池一律接力）。
 //   令牌文件、账本都在这份服务的用户家里（~/.mirasim/run/local-<端口>.token、~/.mirasim/traffic），引擎自己的进程进不去
 //   那个家（750），连回环口也连不上——法国防火墙只放行这个用户和 root 连它开的口（ops 第五节「会话用户的口只许它自己
-//   连」，#35，2026-09-28 实测断链）：读账本（mirasimLedgerFs）经 exec 帮手以那个会话用户读，连接（mirasimConnect）经
+//   连」，#35，实测断链）：读账本（mirasimLedgerFs）经 exec 帮手以那个会话用户读，连接（mirasimConnect）经
 //   一个同样以那个会话用户身份跑的桥接进程（adapters 的 bridge.ts + bridge-connect.ts），帧经它的 stdin/stdout 转，
 //   引擎自己的进程不直连端口、不直接读令牌文件（real/index.ts 的 mirasimDepsFor）。
 //   协议没有「探针模式」这种权限旗标（不像 Claude 的 dontAsk、cursor 的 --force、grok 的 --always-approve）：探针能不能
@@ -109,7 +109,7 @@ export function isWiredHost(hostId: string): hostId is WiredHost {
   return (WIRED_HOSTS as readonly string[]).includes(hostId);
 }
 
-/** 没配思考档位时用这一档（high，创始人 2026-09-28 傍晚拍）；叫法、各家认哪些档都在 shared 的 effort.ts。 */
+/** 没配思考档位时用这一档（high）；叫法、各家认哪些档都在 shared 的 effort.ts。 */
 export { DEFAULT_SESSION_EFFORT };
 
 /**
@@ -731,7 +731,7 @@ function grokDriver(
 /**
  * grok 的报告整理成同一个形状。会话号：终帧回的那个；没有终帧（半路被停、断了）但见到了报错以外的帧，就是我们给它的那个
  * （它开会话之后才出帧：头一帧是 available_commands，法国真跑记录）；一帧都没有、只有 error 帧（没登录、起不来、型号不认，
- * 法国实跑 2026-09-27）就是没开成会话，不给——交回工作流的是空串，下次开新会话，不拿一个没建成的号去 -r（它报 not found）。
+ * 法国实跑）就是没开成会话，不给——交回工作流的是空串，下次开新会话，不拿一个没建成的号去 -r（它报 not found）。
  */
 export function grokReport(report: GrokRunReport): HostReport {
   const s = report.stream;

@@ -5,7 +5,7 @@
 //   linkAlertWork 没有调用方，也删了；以后要挂跟进单再加写法。
 // - 静默的到期一律按库的 now() 算（ends_at = now() + 分钟数），不拿各机器的钟；最长 7 天由表约束钉死。
 // - 读不到就抛（连不上库、语句出错），不回空：外壳把它当「没查成」，不当「没人在修」。
-// - 认领账（issue_claims）2026-10-03 起整张删掉（#556，创始人回「选 1」）：这里不再读它、也没有 ClaimRow 了。
+// - 认领账（issue_claims）整张删掉（#556，创始人回「选 1」）：这里不再读它、也没有 ClaimRow 了。
 import { and, asc, eq, getTableColumns, gt, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import {

@@ -94,7 +94,7 @@ export async function issueClose(argv: readonly string[], deps: IssueCloseDeps):
         ? done.comment
         : `关成 ${reason}。${noteBlock(args.note)}（pnpm issue:close --reason 关的，「完成」之外的关法走这里。）`;
   // gh 命令行的 --reason 只认带空格的「not planned」（REST 读回来的 state_reason 才是 not_planned）：
-  // 原来把 not_planned 原样交给 gh，gh 报 invalid argument，--reason not_planned 和 --superseded-by 一直关不了单（2026-10-06 撞到）
+  // 原来把 not_planned 原样交给 gh，gh 报 invalid argument，--reason not_planned 和 --superseded-by 一直关不了单（撞到）
   const ghReason = reason === 'not_planned' ? 'not planned' : reason;
   const closed = await gh(['issue', 'close', String(n), '--reason', ghReason, '--comment', comment]);
   if (closed.code !== 0) {

@@ -76,7 +76,7 @@ export type DeployMode = (typeof DEPLOY_MODES)[number];
 /**
  * deploy/ 的全套切成几台并行跑（deploy/test/run.sh --shard i/n）。数字要和 run.sh 里 SHARDS 的项数一样
  * （test/ci-plan.test.ts 读 run.sh 核对）：那份文件是单一事实，这里只是把它写进 CI 的矩阵。
- * 2026-10-03 实测：全套 300 秒上下，login-user 一项就 94 秒，按它搭三台各 100 秒上下（run.sh 里 SHARDS 的注释写着怎么搭）。
+ * 实测：全套 300 秒上下，login-user 一项就 94 秒，按它搭三台各 100 秒上下（run.sh 里 SHARDS 的注释写着怎么搭）。
  */
 export const DEPLOY_SHARDS = 3;
 
@@ -133,7 +133,7 @@ const under = (p: string) => (f: string) => f.startsWith(p);
 /**
  * 哪些改动要跑驾驶舱 e2e（#930）。
  *
- * **2026-10-05 收窄**（创始人「现在全套 e2e 流程太长了，要 300+ 秒，我不认可每个 pr 都要这种流程」，
+ * ** 收窄**（创始人「现在全套 e2e 流程太长了，要 300+ 秒，我不认可每个 pr 都要这种流程」，
  * 按五步法的「删」）：原来碰 `web`/`api`/`db`/`shared` **或**根配置（package.json、锁文件、workspace）
  * 就开。实测这台 job 364 秒（全仓最长的一块，其余全在 90 秒内），而最近 40 个合并 PR 里碰 `web` 的只有
  * 6 个、`api` 3 个、`db` 2 个、`shared` 2 个——**拿 17% 的场景罚了 100% 的 PR**。
@@ -148,7 +148,7 @@ const under = (p: string) => (f: string) => f.startsWith(p);
  * 别的包（core、engine、github……）一如既往不开：每多开一档就是多一个几分钟的 job 占并发槽
  * （免费档全账号同时 20 个，见 specs/901-项目瘦身与提速/CI耗时实测.md 第 6 条）。
  *
- * **要补的那条证据：量不出来，样本是 0**（2026-10-05，#1002 合并后复查的第 2 条）。
+ * **要补的那条证据：量不出来，样本是 0**（#1002 合并后复查的第 2 条）。
  * 方案 `specs/995-断链统一/方案.md:71` 要求先量「只改 db/shared 的 PR，e2e 抓到过单测漏掉的错没有」。
  * 实测：e2e 进 CI 是 2026-10-04 20:26（#985），收窄是 2026-10-05 02:48（#1002），中间六小时里跑过 e2e 的
  * 只有 #985（它自己，改的就是 ci.yml）和 #991（发布，只改 CHANGELOG）——**没有一个只改 db/shared 的 PR**。
@@ -157,7 +157,7 @@ const under = (p: string) => (f: string) => f.startsWith(p);
  * `e2e` 与 `test` 两项状态。
  */
 /**
- * **2026-10-07 再拆开（决定 0029，#1186）**：PR 只点改动页，全量回归留给每夜（非 PR 事件在 planCi 里一律 'all'）。
+ * ** 再拆开（决定 0029，#1186）**：PR 只点改动页，全量回归留给每夜（非 PR 事件在 planCi 里一律 'all'）。
  * 上面那段说的「web、api 一碰就整套」不再是现状：现在按改到的文件算出要跑哪几个 spec（e2eSpecsFor）。
  *
  * 判法，逐个改动文件：
@@ -167,7 +167,7 @@ const under = (p: string) => (f: string) => f.startsWith(p);
  * - 只那几个 spec：E2E_PAGE_MAP 里的页面私有文件；改到的 spec 文件自己（文件名合规且还在）。
  * - 不跑：`packages/api` 的其余改动（只改后端、靠每夜全量兜底，单上第 1 条）、web 里的测试文件和 .md、
  *   映射表里写明「没有 spec 盖着」的页面（法国总览、占位页）。
- * 别的包、根配置、文档：和 2026-10-05 收窄后一样不触发（认不出的路径另由 planCi 的 unknown 升成全套）。
+ * 别的包、根配置、文档：和收窄后一样不触发（认不出的路径另由 planCi 的 unknown 升成全套）。
  */
 export const E2E_SPEC_DIR = 'packages/web/e2e/specs/';
 const spec = (stem: string) => `${E2E_SPEC_DIR}${stem}.e2e.ts`;
@@ -701,7 +701,7 @@ export function planOutputs(plan: CiPlan): Record<string, string> {
  *   outcome 判红，所以「biome 先红 → tsc 被跳过、类型错没人看见」（#566）不会重演——红了的是 job，不是被跳过的步。
  *   哪一步该跑、哪一步该跳也由那最后一步现核（开关在 changes 的输出里），不靠 job 级的 if。
  * - `test`、`web`、`e2e`、`deploy`：按改动开关，该跑的必须绿、该跳的必须是跳过（e2e 红、取消、被误跳过都不过，#930）。
- * hygiene 现在在 lint 里面，只报不挡（红了不算进 lint 的结论，创始人 2026-09-28 傍晚拍），不在这两份名单里。
+ * hygiene 现在在 lint 里面，只报不挡（红了不算进 lint 的结论），不在这两份名单里。
  */
 export const PLANNED_JOBS = ['test', 'web', 'e2e', 'deploy'] as const;
 /**

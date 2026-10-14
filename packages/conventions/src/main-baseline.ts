@@ -1,4 +1,4 @@
-// 主线那一轮的基准（#574 之后的 CI 提速，创始人 2026-10-03「主线不跑全量」）：
+// 主线那一轮的基准（#574 之后的 CI 提速，「主线不跑全量」）：
 // 主线不是每次都全跑，而是跑「上一次真绿的头 … 这次的头」这段累计改动，交给现成的 ci-plan 判该跑什么。
 // 被后面推送取消掉的轮次不算基准，所以它带进来的改动会被后一轮的区间吃掉，覆盖不会丢。
 //
@@ -8,7 +8,7 @@
 // - 状态不自己存：GitHub 的运行记录就是唯一事实（和 deploy/france/auto-release/lib.mjs 的 ciVerdict 读同一份）。
 //   自己再存一份（库、git 引用、文件）就会漂移。
 // - 查询里的 `status=success` 是合法的：GitHub 的 status 参数除了 queued/in_progress/completed，也收 success、failure、
-//   cancelled 这些结论值（2026-10-03 对本仓真接口实测：total_count 433，头一条就是主线上 conclusion=success 的 ci.yml 运行）。
+//   cancelled 这些结论值（对本仓真接口实测：total_count 433，头一条就是主线上 conclusion=success 的 ci.yml 运行）。
 //   不要改成 completed 再过滤——那样会把近 50 条都占满失败和取消的轮次、找不到绿的。本地仍再核一遍 conclusion。
 // - 只往回看这么多轮；一轮都没有（新仓、刚换工作流名）返回 null，由调用方退回全跑。
 import type { GhApi } from './gh-api.ts';

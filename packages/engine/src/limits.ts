@@ -54,14 +54,14 @@ export interface Limits {
 
 /** 法国 VPS 能分给会话的内存（MiB）：机器约 11.7G，给内核和系统留约 0.7G。 */
 export const FRANCE_USABLE_MB = 11 * 1024;
-/** 平台常驻的四个服务合计（MiB，2026-09-26 实测）：引擎 0.27G、后端 0.09G、Temporal 0.12G、库 0.13G。 */
+/** 平台常驻的四个服务合计（MiB，实测）：引擎 0.27G、后端 0.09G、Temporal 0.12G、库 0.13G。 */
 export const FRANCE_RESIDENT_MB = 600;
 /**
  * fleet-agents.slice（所有会话共用的父节点）的内存总上限 = 能分给会话的 - 平台常驻服务 = 11264 - 600 = 10664 MiB。
  * cgroup v2 的常见做法是把「总量」管在父节点，子节点（各会话的 scope）只管自己那份、彼此间允许借用空闲内存
  * （kernel 文档 memory.high / memory.max 一节：https://docs.kernel.org/admin-guide/cgroup-v2.html；k8s 的
  * requests/limits 同理）：多个会话同时冲高时，内核按这道父节点总闸压着回收，不会有单个会话在整机明明有空闲内存时
- * 先被自己那道窄墙卡死——法国 2026-09-28 06:35–06:45 实测：某次审查会话（cursor-agent）在自己的 scope 里同时跑
+ * 先被自己那道窄墙卡死——法国实测：某次审查会话（cursor-agent）在自己的 scope 里同时跑
  * `pnpm test:changed` 和 `pnpm exec tsc -b`：tsc 一个进程约 1.9G、vitest 几个 worker、cursor-agent 本身合计约
  * 3.5G，超过旧的单会话软上限 3298M，内核压着这个 cgroup 回收，进程卡在 D 状态（wchan mem_cgroup_handle_over_high）、
  * 1 分钟负载 12，但 vmstat 看 CPU 七到九成空闲、整机 MemAvailable 还有 6.8G——和 #160 同一个坑，第二次踩。

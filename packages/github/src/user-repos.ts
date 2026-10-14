@@ -1,6 +1,6 @@
 // 用户身份那一套（#1989）：换 OAuth 用户令牌、列「我 GitHub 上能看到的仓」、把 App 安装加仓/减仓。
 //
-// 为什么必须走用户令牌（官方文档 + 2026-10-13 实测）：列「某个 App 安装能看到哪些仓」（GET /user/installations/{id}/repositories）
+// 为什么必须走用户令牌（官方文档 + 实测）：列「某个 App 安装能看到哪些仓」（GET /user/installations/{id}/repositories）
 // 和「把一个仓加进/移出某个安装」（PUT/DELETE 同一个地址）这三条，GitHub 只认**本人的** OAuth 用户令牌；
 // App 机器人令牌调不了（403）。所以这一层不能用 client.ts 那套 App JWT / 安装令牌。
 //

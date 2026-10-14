@@ -285,7 +285,7 @@ function within<T>(ms: number, what: string, work: Promise<T>): Promise<T> {
 /**
  * 飞书错误码 → 下一步怎么办。只收有出处的：230031 超 14 天不能改卡、230020 限频（docs/reference/feishu.md 第四节）、
  * 200861 卡片里有 JSON 2.0 不支持的组件（同上，windsurf-dao#1052）；230027 缺必要的权限、230002 机器人不在群里
- * （「获取会话历史消息」接口的错误码表，2026-10-04 查）、99991672 应用没开这项权限（服务端通用错误码）；其余归 unknown，
+ * （「获取会话历史消息」接口的错误码表，查）、99991672 应用没开这项权限（服务端通用错误码）；其余归 unknown，
  * 原码写进日志。
  */
 function kindOf(code: number | undefined, status: number | undefined): FeishuErrorKind {

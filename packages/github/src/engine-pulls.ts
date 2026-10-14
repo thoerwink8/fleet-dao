@@ -96,7 +96,7 @@ const ClaimPullSchema = PullSchema.extend({ auto_merge: z.unknown().optional() }
 /**
  * 列窗口里合并 PR 的翻页安全网（每页 100）。
  * 10 页盖不住 30 天窗口：本仓 closed PR 超过 1000，第 10 页末条仍在窗口内，
- * pages() 会整次抛「没翻完」，整理待办就读不到分片关系（法国 2026-10-09）。
+ * pages() 会整次抛「没翻完」，整理待办就读不到分片关系（法国）。
  * 100 页 = 一万条。真超过仍抛「没查全」，调用方按没读到处理。
  */
 const MERGED_PULL_MAX_PAGES = 100;

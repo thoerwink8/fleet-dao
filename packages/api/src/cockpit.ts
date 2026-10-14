@@ -348,7 +348,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     }
   }
 
-  // 给一张单的一段指定模型、或清掉（驾驶舱改版 2026-10-07）：直接写库，和操作记录同一事务；引擎下一次给这一段选路就照它，
+  // 给一张单的一段指定模型、或清掉：直接写库，和操作记录同一事务；引擎下一次给这一段选路就照它，
   // 在跑的这一轮不打断。单子结束了、模型目录里没有、路由不是这个模型的都拒，库里一行不动。
   app.put(WebRoutes.updateTaskRoutePin.path, async (c) => {
     const taskId = c.req.param('taskId');

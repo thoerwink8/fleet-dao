@@ -123,7 +123,7 @@ export interface Deps {
    */
   routingOrder?: RoutingOrderPort | undefined;
   /**
-   * 按单指定模型（驾驶舱改版 2026-10-07，task-route-pins.ts）：单子页读、改每段用哪个模型，引擎选路现读同一张表。没给（开发、
+   * 按单指定模型（task-route-pins.ts）：单子页读、改每段用哪个模型，引擎选路现读同一张表。没给（开发、
    * 内存版没有那张表）的任务详情写 unavailable、改接口回 503，不拿空列表冒充「没指定」。
    */
   taskRoutePins?: TaskRoutePinsPort | undefined;

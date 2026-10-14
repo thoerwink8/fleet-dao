@@ -8,7 +8,7 @@ import { UngradableError } from '../types.ts';
 const PREAMBLE =
   '这是能力演练题，不是真任务：不开 PR、不开单、不改任何文件。答案写在最终回答里，按题里要求的格式。\n\n';
 
-/** scout 两道题固定的快照提交（origin/main，2026-10-09）。 */
+/** scout 两道题固定的快照提交（origin/main）。 */
 export const SCOUT_COMMIT = '1c125c51faee829dfdda48f881c8ec89ff115c97';
 
 // —— scout ——

@@ -480,7 +480,7 @@ export const SetPurposeModelEffortRequest = z.object({
   reason: OrderReason,
 });
 
-// —— 立即探测（驾驶舱改版，创始人 2026-10-07「渠道状态无法探测」）——
+// —— 立即探测（「渠道状态无法探测」）——
 // 点一下「立即探测」= 记一条操作记录（routing.probe.request）；引擎每几秒看一眼操作记录，接手时记 routing.probe.start，
 // 探完记 routing.probe.done（带每条路由的结论）。状态不另存：读的时候从这三种记录现算（shared 的 route-probe-now.ts）。
 

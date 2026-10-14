@@ -1,6 +1,6 @@
 // 引擎这头怎么用桥接（bridge.ts）连会话用户自己的 Mirasim：经 fleet-agent-scope 起一个短命的桥接进程（以那个会话用户的
 // 身份，独立 scope），帧经它的 stdin/stdout 按行 JSON 转；不再由引擎自己的进程直连回环口（法国防火墙只放行会话用户和
-// root 连那个口，2026-09-28 实测断链，#345 后续）。每次 MirasimConnect 被调用（run.ts 的控制连接、订阅连接、补发 stop
+// root 连那个口，实测断链，#345 后续）。每次 MirasimConnect 被调用（run.ts 的控制连接、订阅连接、补发 stop
 // 都各自调）都起一个新的桥接进程，和直连那份 mirasimConnector 每次 connect() 都开一条新 ws 是同一个调用节奏。
 import { type ChildProcess, spawn as nodeSpawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';

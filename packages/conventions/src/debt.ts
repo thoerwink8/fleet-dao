@@ -37,7 +37,7 @@ export const DEFERRAL_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
- * 查哪些文档：仓根的 AGENTS.md、README.md，通用段原件 agents/shared-rules.md（原来在 AGENTS.md 里一起查，2026-10-05 挪出来），
+ * 查哪些文档：仓根的 AGENTS.md、README.md，通用段原件 agents/shared-rules.md（原来在 AGENTS.md 里一起查，挪出来），
  * docs/ 下（除了 docs/reference/、docs/decisions/、docs/archive/）所有的 .md；
  * specs/ 是历史记录，不查。docs/archive/ 是 docs/PROGRESS.md 搬走的历史节（#901），写的是当时的「下一步」「待办」，原样保留、不改字。
  */

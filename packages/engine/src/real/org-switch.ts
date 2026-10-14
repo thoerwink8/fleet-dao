@@ -3,7 +3,7 @@
 // - now：被拒当场（拼车会话、探针交来被拒的证据）和定时读接口那一轮（real/carpool-watch.ts），不等路由探针，切完当场探一次；
 // - before / after：路由探针每一轮探之前判、探完核对，当兜底（和以前一样）。
 // 判之前先拿账本（落库：恢复条件、切回记录、最近几次接口读数）、现读会话用户挂的组织、现读一次接口（最近 30 秒内读过的不重读）；
-// 逐个账号看状态，可用 ≥ 2 才切（创始人 2026-10-04 约 22:30 的要求）；判完先把新账本存下，再动手。
+// 逐个账号看状态，可用 ≥ 2 才切（创始人的要求）；判完先把新账本存下，再动手。
 // 该切：先让选路停下（读组织回 pending，选路过 30 秒再选），等一会儿（选路刚派出去、还没登记的会话要有时间登记）；接了停会话的两样
 // （#59）就把手上跑在 Claude 池上的会话停下，等它们都收场：三段的一次性会话（oneShots）交回 org_switch，任务工作流切完在原分支上重跑
 // 这一段；Fusion 的会话（sessions）交回 org_switch，切完续同一个会话、换了池 fork 续上。哪一种没接，那一种在跑就停不下：手上有就不切、
@@ -73,7 +73,7 @@ export const ORG_STUCK_ALERT = `${SESSION_ORG_ALERT_PREFIX}stuck`;
  * SESSION_ORG_SETTLE_MS 都是新的（认它了）、或者引擎切了号，撤。
  */
 export const ORG_DRIFT_ALERT = `${SESSION_ORG_ALERT_PREFIX}drift`;
-/** 渠道状态不对（#194，创始人 2026-10-04 约 22:30）：可用账号 0 个（渠道不可用）、只剩 1 个且不是挂着的、读不到账号状态超过 15 分钟。 */
+/** 渠道状态不对（#194）：可用账号 0 个（渠道不可用）、只剩 1 个且不是挂着的、读不到账号状态超过 15 分钟。 */
 export const ORG_CHANNEL_ALERT = `${SESSION_ORG_ALERT_PREFIX}channel`;
 /** 过了预计恢复时刻很久还挂在独享上（方案 4.4）。 */
 export const ORG_OVERDUE_ALERT = `${SESSION_ORG_ALERT_PREFIX}overdue`;

@@ -8,7 +8,7 @@
 // 只信任本脚本登记的那几条，别的钩子一条不碰。人在 /hooks 里关掉的（enabled = false）不替人打开，报出来。
 // 哈希的算法照 codex-rs/hooks/src/engine/discovery.rs 的 hook_hash 和 codex-rs/config/src/fingerprint.rs 的 version_for_toml：
 // { event_name, matcher?, hooks: [{ type, command, timeout, async }] } 的键按字母排好，紧凑 JSON 的 sha256。
-// 2026-10-09 用本机 codex 0.162 的 app-server hooks/list 核过两条（有 matcher 的、没 matcher 的），算得和它报的 currentHash 一样。
+// 用本机 codex 0.162 的 app-server hooks/list 核过两条（有 matcher 的、没 matcher 的），算得和它报的 currentHash 一样。
 // config.toml 只逐行认这几样：表头、键值、多行字符串和跨行数组（跳过）。认不准的（数组表、内联表、用点号写在别处的）就不动，
 // 报出来，不猜。新记的信任写在文件末尾一块托管块里（两行注释圈起来），块外的只改本脚本那几条的 trusted_hash 一行。
 import { createHash } from 'node:crypto';
@@ -72,7 +72,7 @@ export function codexHookHash(
 
 /**
  * 键里那段 hooks.json 路径。Codex 把它规整成真实路径：Windows 上 8.3 短名（ADMINI~1）展开成长名、链接解开
- * （2026-10-09 本机核过：家目录给短名时 Codex 报的键是长名）。本脚本跟着规整；文件、目录都还没有就原样用。
+ * （本机核过：家目录给短名时 Codex 报的键是长名）。本脚本跟着规整；文件、目录都还没有就原样用。
  */
 export function codexSourcePath(abs: string): string {
   try {

@@ -1,4 +1,4 @@
-// 渠道状态页的「立即探测」（驾驶舱改版，创始人 2026-10-07「渠道状态无法探测」）。
+// 渠道状态页的「立即探测」（「渠道状态无法探测」）。
 // 点一下 = 记一条操作记录（routing.probe.request，target routing:probe）；法国引擎每几秒看一眼操作记录，接手、探、回结论
 // （engine/src/jobs/route-probe-now.ts）。一次立即探测现在走到哪不另存，读的时候从操作记录现算（shared 的 foldRouteProbeRequests，
 // 引擎找没人接的也用它）。

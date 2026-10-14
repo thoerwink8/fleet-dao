@@ -3,7 +3,7 @@
 // （@fleet-dao/core 的 alert-work.ts）。读写在 queries/alert-work.ts。
 // 改这里之前必须知道：
 // - alert_work 只记「没挂任务」或「挂了别的单」的：有 task_id 又没另挂的，跟进单就是那个任务的单，这里没有行。
-//   原来「提醒派单」自动开小单写 source='engine'、`alert claim --issue` 手动换单写 source='claim'，2026-09-28
+//   原来「提醒派单」自动开小单写 source='engine'、`alert claim --issue` 手动换单写 source='claim'，
 //   起这两条写路都删了（#445，噪音比防住的事故还多）：这张表和历史行都留着给驾驶舱读，只是不会再有新行写进来。
 // - 静默的到期由库的 now() 定（建的时候 ends_at = now() + 分钟数），最长 7 天由约束钉死：忘了撤也不会一直压着。
 import { sql } from 'drizzle-orm';

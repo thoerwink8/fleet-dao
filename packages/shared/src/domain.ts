@@ -181,7 +181,7 @@ export interface Pool {
 
 /**
  * 会话只许跑在这个系统用户下（装机脚本建的，docs/ops.md）；库里有同样的检查约束（db 的 RUN_AS_USERS）。
- * 法国只留一个会话用户：reclaude 一个账户最多挂 4 台设备、一个家目录算一台（创始人 2026-09-26）。名字是历史沿用，
+ * 法国只留一个会话用户：reclaude 一个账户最多挂 4 台设备、一个家目录算一台。名字是历史沿用，
  * 不改名免得重新登录；原先的 fleet-agent-dedicated 已停用、已删。
  */
 export type RunAsUser = 'fleet-agent-carpool';

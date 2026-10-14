@@ -90,7 +90,7 @@ export const RULES_TARGETS: readonly RulesTarget[] = [
  *   所以 ~/.pi/agent/skills 不另放：两处各一份拷贝，pi 会逐个报「name collision」。
  *   Devin 不扫 ~/.claude/skills（它借 Claude 的只有项目里的 .claude/skills），Grok 两处都扫、同名去重。
  * - ~/.gemini/config/skills：Antigravity 命令行的全局 skill。官方网页写的是 ~/.gemini/antigravity-cli/skills，
- *   agy 1.2.11 程序里却只认 ~/.gemini/config/skills（和桌面版共用的全局配置目录，2026-09-25 本机核过）。
+ *   agy 1.2.11 程序里却只认 ~/.gemini/config/skills（和桌面版共用的全局配置目录，本机核过）。
  */
 export const SKILL_TARGETS: readonly SkillTarget[] = [
   {
@@ -118,9 +118,9 @@ export interface SubagentTarget {
 /**
  * 用户级子代理定义装到哪、装哪几份。Claude Code 的用户级子代理在 ~/.claude/agents/<名>.md（code.claude.com/docs/en/sub-agents
  * 的 User-level 一档：这台上所有项目里都能用）。
- * - 三个角色（决定 0087，创始人 2026-10-12「Sonnet 是工人、Haiku 是斥候、Opus 是设计」）：名字就是 Claude Code 内置的
+ * - 三个角色（决定 0087，「Sonnet 是工人、Haiku 是斥候、Opus 是设计」）：名字就是 Claude Code 内置的
  *   Explore（斥候，claude-haiku-5-5）、general-purpose（工人，claude-sonnet-5-5）、Plan（设计，claude-opus-5-5），同名文件压住内置的
- *   （2026-10-12 本机 2.1.296 实测三个都生效）。型号写完整 id：经 Mirasim 网关起的会话里别名 haiku、sonnet、opus 指向 4.5、4.6、4.7。
+ *   （本机 2.1.296 实测三个都生效）。型号写完整 id：经 Mirasim 网关起的会话里别名 haiku、sonnet、opus 指向 4.5、4.6、4.7。
  * - 这三份归仓里管：机器上同名的（Mirasim 设置页「覆盖…」写的、手写的）内容不同就先整份备份再换成仓里的、报出来；要改只改仓里，
  *   不在 Mirasim 智能体页面里编辑或开关它们。
  * - 原件只有一份：agents/subagents/ 下这三份，引擎也从这里转成 --agents（packages/adapters/src/claude-code/subagents.ts）。
@@ -168,7 +168,7 @@ export interface HookTarget {
   /**
    * Windows 上命令也写 node 加引号，不用不带控制台的启动器：这家在 Windows 上用 PowerShell 跑钩子命令。
    * PowerShell 起不带控制台的程序不等它退出，$LASTEXITCODE 拿不到退出码 2，拦下就变成放行
-   * （2026-10-09 本机试过：同一个启动器 cmd /C 下退出码 2，PowerShell 下 0）。
+   * （本机试过：同一个启动器 cmd /C 下退出码 2，PowerShell 下 0）。
    */
   nodeOnWindows?: true;
   /** agy 写法里本脚本那一项的名字（顶层的键） */
@@ -193,7 +193,7 @@ export interface HookTarget {
  * 输入是 camelCase、终端工具叫 run_terminal_command，开会话钩子的输出不进上下文）；Devin CLI 默认 read_config_from.claude
  * （docs.devin.ai/cli/extensibility/hooks/overview，终端工具叫 exec）。Cursor 的命令行默认也读（cursor.com/docs/reference/third-party-hooks，
  * Bash 对应它的 Shell），它不在本脚本分发的各家里。脚本按这几种输入都认得（agents/hooks/pretool.mjs 的 SHELL_TOOLS）。
- * 调工具前那条还挂在读文件、搜内容的 Read、Grep 上：会话用它们把密钥文件读进对话的也拦（2026-09-27 用命令读漏过一回，
+ * 调工具前那条还挂在读文件、搜内容的 Read、Grep 上：会话用它们把密钥文件读进对话的也拦（用命令读漏过一回，
  * 只拦命令等于没拦）。Glob 只列路径、和 ls 一样放行，不挂。借道的几家怎么对上：Claude Code 的 matcher 只含字母和 | 时
  * 按工具名逐个全等比（code.claude.com/docs/en/hooks「Matcher patterns」）；Grok 把 Bash、Read、Grep 换成它的
  * run_terminal_command、read_file、grep 再匹配（~/.grok/docs/user-guide/10-hooks.md「Tool Name Aliases」）；Cursor 把 Bash
@@ -316,10 +316,10 @@ export const PERMISSIONS_TARGET: { settings: Place; readers: readonly AgentId[] 
 };
 
 /**
- * 其他几家的权限（2026-09-30 逐家核过文档、能装的在本机实测；写法各不相同，都不读 Claude 的 permissions，Grok 除外）：
+ * 其他几家的权限（逐家核过文档、能装的在本机实测；写法各不相同，都不读 Claude 的 permissions，Grok 除外）：
  * - Kimi Code：~/.kimi-code/config.toml 的顶层 default_permission_mode（manual / yolo / auto）和 [[permission.rules]]
  *   （decision、pattern，先匹配的生效，所以拒绝排在放行前面；moonshotai.github.io/kimi-code/en/configuration/config-files.md）。
- *   同步用 auto（不打断、自动判断）：创始人 2026-09-30 要最宽松，他有时在图形界面里起 CLI、没法切模式也没人点确认；
+ *   同步用 auto（不打断、自动判断）：要最宽松，他有时在图形界面里起 CLI、没法切模式也没人点确认；
  *   yolo 是「日常自动、危险的仍问」，会在没人点的界面里卡住。
  * - Codex：~/.codex/rules/default.rules 里的 prefix_rule(pattern=["git"], decision="allow" | "forbidden")，只按命令前缀、
  *   不支持通配符，几条同时命中取最严的；本机用 codex execpolicy check 核过写法（learn.chatgpt.com/docs/agent-configuration/rules）。
@@ -355,7 +355,7 @@ export const PERMISSION_GAPS: Partial<Record<AgentId, string>> = {
 
 /**
  * 装了、但没装钩子的各家，逐家报一行为什么（不假装装了）。有自己钩子的四家（Codex、Gemini CLI、Antigravity、Kimi Code）
- * #232 都接上了，在上面的 HOOK_TARGETS；剩下这两家没有配置式的钩子接口（2026-09-26 查的各家文档和本机装的版本）：
+ * #232 都接上了，在上面的 HOOK_TARGETS；剩下这两家没有配置式的钩子接口（查的各家文档和本机装的版本）：
  * - pi：没有配置式钩子，要写成 TypeScript 扩展（pi-coding-agent docs/extensions.md）。
  * - dsh：没有自带的全局钩子，只有要手动挂的桥接插件（deepseek-harness packages/hooks）。
  */

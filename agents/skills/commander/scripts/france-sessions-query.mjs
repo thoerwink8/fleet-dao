@@ -31,7 +31,7 @@ export const PSQL = [
  * 一条 select：没收尾的会话数，和最久的几个是谁的（单、环节、什么时候排的队），给「拖后腿」的名单用。
  * 两处都数（#1995，口径同 france-query.mjs 的 runs 和引擎排空 drain.ts 的登记）：session_runs（老 Fusion 会话，9 月 29 日以后没新行）
  * 和 runs（v3 三段一次性会话：动手 manual、验收 verify，引擎现在只往这张表写）。只数前者，预检永远读到 0，
- * 发版时 release.sh 的排空还在等 execute 会话（2026-10-13）。runs 没有排队时刻，queued_at 用 started_at；阶段写 segment:<段>。
+ * 发版时 release.sh 的排空还在等 execute 会话。runs 没有排队时刻，queued_at 用 started_at；阶段写 segment:<段>。
  */
 export const SQL = `select jsonb_build_object(
   'running', (select count(*) from session_runs where ended_at is null) + (select count(*) from runs where ended_at is null),
