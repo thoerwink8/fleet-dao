@@ -1,6 +1,7 @@
 // 提需求开单的正文（#2060）：原话由系统按时间逐字拼、AI 归纳另起一段、末尾写提出人拍板人和驾驶舱链接、
 // 四节检查和 `pnpm issue:new` 是同一个函数、「要不要人拍」决定标签。纯函数，不碰数据库和 GitHub。
-import { checkIssueBody, HUMAN_DECISION_LABEL } from '@fleet-dao/conventions';
+import { checkIssueBody, HUMAN_DECISION_LABEL, KIND_LABELS } from '@fleet-dao/conventions';
+import { REQUEST_KINDS } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
   checkOpening,
@@ -149,6 +150,12 @@ describe('checkOpening：四节检查调的是 issue:new 同一个函数', () =>
     const r = checkOpening(big);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.why).toMatch(/超过 GitHub 一张单正文的上限/);
+  });
+});
+
+describe('草稿的类别和开单的类别标签是同一份', () => {
+  it('REQUEST_KINDS 和 KIND_LABELS 一字不差（草稿里能写的类别都开得出单）', () => {
+    expect([...REQUEST_KINDS]).toEqual([...KIND_LABELS]);
   });
 });
 

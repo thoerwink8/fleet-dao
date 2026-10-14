@@ -11,6 +11,7 @@ import {
   REQUEST_ACTIONS,
   REQUEST_ARCHIVE_AFTER_SETTLED_DAYS,
   REQUEST_IDLE_DAYS,
+  REQUEST_KINDS,
   REQUEST_PURGE_AFTER_DAYS,
   type RequestAction,
   type RequestActions,
@@ -76,6 +77,10 @@ export function draftMissing(draft: RequestDraft): string[] {
   if (!draft.scene?.trim()) missing.push('场景');
   if (!draft.modules?.trim()) missing.push('已知的模块');
   if (!draft.done || draft.done.length === 0) missing.push('怎么算做完');
+  // 类别写了认不出的值（指挥官写过「文档」）：拍板时开单才失败，提前在这里拦下，说清只能写哪几个
+  const kind = draft.kind?.trim();
+  if (kind && !(REQUEST_KINDS as readonly string[]).includes(kind))
+    missing.push(`类别（只能是${REQUEST_KINDS.join('、')}）`);
   return missing;
 }
 
