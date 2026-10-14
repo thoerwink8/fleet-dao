@@ -26,3 +26,6 @@ packageExtensions:
     peerDependenciesMeta:
       '@types/react':
         optional: true
+# 模块目录布局变了（例如升 pnpm 前建的工作树第一次遇上全局虚拟仓）时 pnpm 要清掉 node_modules 重装；默认先问人，
+# 没有终端就直接报 ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY（报错信息里点名了这个键）。node_modules 随时能重装，不问。
+confirmModulesPurge: false
