@@ -45,8 +45,14 @@ const tail = (text, n = 3) =>
     .join(' ')
     .slice(0, 400);
 
-function run(cmd, args, { timeoutMs = 120_000 } = {}) {
-  const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: timeoutMs, cwd: '/', maxBuffer: 16 << 20 });
+function run(cmd, args, { timeoutMs = 120_000, input } = {}) {
+  const r = spawnSync(cmd, args, {
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    cwd: '/',
+    maxBuffer: 16 << 20,
+    ...(input === undefined ? {} : { input }),
+  });
   return {
     status: r.status,
     stdout: r.stdout ?? '',
@@ -91,25 +97,6 @@ function engineStateDir() {
   return ENGINE_STATE_DEFAULT;
 }
 
-/** engine.env 里一个键的值（root 读得到：/etc/fleet-dao 归 root:fleet 640）；没有、读不了回 ''。 */
-function engineEnv(key) {
-  try {
-    let v = '';
-    for (const line of readFileSync(ENGINE_ENV, 'utf8').split('\n')) {
-      if (line.startsWith(`${key}=`)) v = line.slice(key.length + 1).trim();
-    }
-    return v.replace(/^(['"])(.*)\1$/, '$2');
-  } catch {
-    return '';
-  }
-}
-
-/** 飞书群机器人地址只收这两种前缀（同 packages/engine/src/real/feishu-webhook.ts 的 feishuWebhookUrl）。 */
-const FEISHU_PREFIXES = [
-  'https://open.feishu.cn/open-apis/bot/v2/hook/',
-  'https://open.larksuite.com/open-apis/bot/v2/hook/',
-];
-
 /**
  * 驾驶舱接口的地址：读 release.sh 里的 COCKPIT 常量（docs/ops.md 端口表：改监听地址要几处一起改，这里不另抄一份）。
  * 读不到抛，体检那一项记读不到。
@@ -145,6 +132,32 @@ function sqlRead(text) {
     ],
     { timeoutMs: 30_000 },
   );
+}
+
+/** 以 fleet 写库 fleet；值用 -v 传、SQL 里写 :'名字'，经 stdin 喂给 psql（-c 不展开变量）。写不进抛。 */
+function sqlWrite(text, vars) {
+  const args = [
+    '-u',
+    'fleet',
+    '--',
+    'env',
+    'PGHOST=/var/run/postgresql',
+    'PGUSER=fleet',
+    'PGCONNECT_TIMEOUT=10',
+    'psql',
+    '-X',
+    '-q',
+    '-tA',
+    '-v',
+    'ON_ERROR_STOP=1',
+    '-d',
+    'fleet',
+  ];
+  for (const [k, v] of Object.entries(vars)) args.push('-v', `${k}=${v}`);
+  args.push('-f', '-');
+  const r = run('runuser', args, { input: text, timeoutMs: 30_000 });
+  if (r.error || r.status !== 0)
+    throw new Error(`写库没成（psql 退出码 ${r.status}）：${tail(r.error ?? r.stderr)}`);
 }
 
 /** 落盘：先写临时文件再换名（TRAIN_DIR 归 root，fleet 碰不到，写它不会被符号链接带去别处）。 */
@@ -328,38 +341,25 @@ export const realIo = {
       return { ok: false, why: `读库没成（psql 退出码 ${r.status}）：${tail(r.error ?? r.stderr)}` };
     return parseRepoSwitches(r.stdout);
   },
-  /** 推一条飞书：和引擎推主线红同一个群机器人（engine.env 的 FLEET_FEISHU_WEBHOOK），推 3 次都不成就抛，话里不带地址。 */
-  async notify(text) {
-    const url = engineEnv('FLEET_FEISHU_WEBHOOK');
-    if (url === '') throw new Error(`飞书推送没配：${ENGINE_ENV} 里没有 FLEET_FEISHU_WEBHOOK`);
-    const prefix = FEISHU_PREFIXES.find((p) => url.startsWith(p));
-    if (!prefix || url.length <= prefix.length || /\s/.test(url))
-      throw new Error('飞书推送的地址不认（只收飞书、Lark 群机器人 webhook）');
-    let last = '没推成';
-    for (let i = 1; i <= 3; i++) {
-      try {
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ msg_type: 'text', content: { text } }),
-          signal: AbortSignal.timeout(8_000),
-        });
-        const raw = await res.text();
-        let code;
-        try {
-          const o = JSON.parse(raw);
-          code = o.code ?? o.StatusCode;
-        } catch {
-          code = undefined;
-        }
-        if (res.ok && code === 0) return;
-        last = `飞书回了 HTTP ${res.status}，code=${String(code)}`;
-      } catch (e) {
-        last = (e instanceof Error ? e.message : String(e)).split(url).join('（地址已隐去）');
-      }
-      if (i < 3) await delay(200);
+  /**
+   * 发版提醒：写一行 notifications（同引擎的 feishu 提醒、auto-release 的报警一条通路）。decision 级由驾驶舱后端立刻推飞书，
+   * daily 级只进每日简报。发成功时把之前开着的 release: 要你拍收掉。值一律走 psql -v。
+   */
+  async notify(text, note) {
+    sqlWrite(
+      `insert into notifications (level, dedupe_key, title, body, link)
+values (:'level'::notification_level, :'key', :'title', :'body', '/france')
+on conflict (dedupe_key) do update
+  set title = excluded.title, body = excluded.body, updated_at = now();`,
+      { level: note.level, key: note.key, title: note.title, body: text },
+    );
+    if (note.kind === 'done') {
+      sqlWrite(
+        `update notifications set resolved_at = now(), resolved_by = 'release-request', updated_at = now()
+where starts_with(dedupe_key, 'release:') and level = 'decision' and resolved_at is null;`,
+        {},
+      );
     }
-    throw new Error(`飞书推了 3 次都没成：${last}`);
   },
 };
 

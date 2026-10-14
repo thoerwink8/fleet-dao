@@ -33,6 +33,7 @@ import {
   REQUEST_DIR,
   REQUEST_FILE,
   releaseMessage,
+  releaseNote,
   repoSwitchDiff,
   runRequest,
   STATE_FILE,
@@ -87,6 +88,7 @@ function fakeIo(over = {}, opts = {}) {
     checkouts: [],
     sleeps: 0,
     pushes: [],
+    notes: [],
     alertReads: 0,
     drains: 0,
   };
@@ -158,8 +160,9 @@ function fakeIo(over = {}, opts = {}) {
       ok: true,
       repos: { 'thoerwink8/fleet-dao': SINCE, 'thoerwink8/other': null },
     }),
-    notify: async (text) => {
+    notify: async (text, note) => {
       log.pushes.push(text);
+      log.notes.push(note);
     },
     limits: { pollMs: 1000, sessionsMs: 5000, deployMs: 3000, verifyMs: 4000 },
     ...over,
@@ -700,6 +703,7 @@ test('【故意造出的失败】发版后新出现一条和这次发版有关�
   assert.equal(engineOns(log).length, 0, '这一趟没关过总开关，不碰');
   assert.equal(log.states.at(-1).status, 'done');
   assert.match(log.pushes.at(-1), /【发版卡住】.*发后体检没通过：没有新异常/);
+  assert.equal(log.notes.at(-1).level, 'decision', '体检没过进「要你拍」');
   assert.match(log.pushes.at(-1), /aaaaaaaaaaaa/);
   assert.equal(log.lasts.at(-1).check.ok, false);
 });
@@ -829,6 +833,7 @@ test('【故意造出的失败】发版前异常基线读不到：第 0 步没�
   assert.equal(engineOffs(log).length, 0);
   assert.deepEqual(log.release, []);
   assert.match(log.pushes.at(-1), /【发版失败】aaaaaaaaaaaa 第 0 步「预检」没成/);
+  assert.equal(log.notes.at(-1).level, 'decision', '失败进「要你拍」');
   assert.match(log.pushes.at(-1), /版本还没发/);
   assert.equal(log.lasts.at(-1).outcome, 'failed');
 });
@@ -937,6 +942,29 @@ test('飞书：开始、成功各推一条，一句话里有目标提交、结�
   );
 });
 
+test('发版提醒分级：开始、成功只进 daily（简报读，不推）；卡住、失败进「要你拍」（decision，后端立刻推）；键以 release: 开头、每趟每种不重名', async () => {
+  const { io, log } = fakeIo();
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.deepEqual(
+    log.notes.map((n) => [n.kind, n.level]),
+    [
+      ['start', 'daily'],
+      ['done', 'daily'],
+    ],
+  );
+  assert.ok(log.notes.every((n) => /^release:[a-z]+:aaaaaaaaaaaa:\d+$/.test(n.key)));
+  assert.equal(new Set(log.notes.map((n) => n.key)).size, log.notes.length);
+  assert.match(log.notes[0].title, /^【发版开始】法国开始发 aaaaaaaaaaaa/);
+  assert.doesNotMatch(log.notes[0].title, /。/);
+  const st = { target: { value: SHA } };
+  for (const kind of ['check', 'blocked', 'failed']) {
+    assert.equal(releaseNote(kind, st, '【x】y。z', new Date(0)).level, 'decision', kind);
+  }
+  for (const kind of ['start', 'done', 'retry', 'restore', 'aborted']) {
+    assert.equal(releaseNote(kind, st, '【x】y。z', new Date(0)).level, 'daily', kind);
+  }
+});
+
 test('飞书：老版本停在等收尾的「卡住」带要点的「重试」；老现场开回没成推「失败」叫点「恢复引擎开关」；新版本没关过的不叫点它', () => {
   const stuck = releaseMessage('blocked', {
     target: { value: SHA },
@@ -968,7 +996,7 @@ test('飞书：老现场开回没成（真走一趟）推「失败」叫点「�
 test('【故意造出的失败】飞书推不出去：照样发版、做完，进度里记「没推成」和原因，不当成推过', async () => {
   const { io, log } = fakeIo({
     notify: async () => {
-      throw new Error('飞书推送没配：/etc/fleet-dao/engine.env 里没有 FLEET_FEISHU_WEBHOOK');
+      throw new Error('写库没成（psql 退出码 2）：没配');
     },
   });
   assert.equal(await runRequest(io), EXIT.done);
@@ -976,7 +1004,7 @@ test('【故意造出的失败】飞书推不出去：照样发版、做完，�
   const pushes = log.states.at(-1).pushes;
   assert.equal(pushes.length, 2);
   assert.ok(pushes.every((p) => p.ok === false && /没配/.test(p.why)));
-  assert.ok(log.err.some((l) => l.includes('飞书没推成')));
+  assert.ok(log.err.some((l) => l.includes('发版提醒没记下')));
 });
 
 test('parseAlerts / parseHealthz / parseRepoSwitches：认不出的一律回读不到，不当成没事', () => {
@@ -1512,4 +1540,14 @@ test('接活脚本不碰符号链接目录之外的东西：state、last、marke
   assert.ok(LAST_FILE.startsWith(`${TRAIN_DIR}/`));
   assert.ok(RELEASE_SH.startsWith('/srv/fleet-dao/'));
   assert.match(FLEET_API, /fleet-api$/);
+});
+
+test('发版提醒走通知中心：接活脚本和 lib 不再读 engine.env 的飞书 webhook，真实 notify 写 notifications（值走 psql -v）', () => {
+  const script = read('france/release-request/fleet-release-request.mjs');
+  const lib = read('france/release-request/lib.mjs');
+  assert.doesNotMatch(script + lib, /FEISHU_WEBHOOK/);
+  assert.doesNotMatch(script, /open\.feishu\.cn|FEISHU_PREFIXES/);
+  assert.match(script, /insert into notifications \(level, dedupe_key, title, body, link\)/);
+  assert.match(script, /:'level'::notification_level, :'key', :'title', :'body'/);
+  assert.match(script, /resolved_by = 'release-request'/);
 });
