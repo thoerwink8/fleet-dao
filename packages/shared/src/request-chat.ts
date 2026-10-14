@@ -9,6 +9,7 @@
 import { z } from 'zod';
 import {
   REQUEST_DRAFT_FIELDS,
+  REQUEST_KINDS,
   REQUEST_QUESTION_MAX_OPTIONS,
   REQUEST_QUESTION_MIN_OPTIONS,
   type RequestDraftField,
@@ -272,6 +273,15 @@ export function splitCommanderPatch(
     }
     const f = field as RequestDraftField;
     const checked = RequestDraftSchema.shape[f].safeParse(listAsText(f, value));
+    if (
+      f === 'kind' &&
+      checked.success &&
+      typeof checked.data === 'string' &&
+      !(REQUEST_KINDS as readonly string[]).includes(checked.data)
+    ) {
+      out.rejected.push({ field, why: `类别只能是${REQUEST_KINDS.join('、')}` });
+      continue;
+    }
     if (!checked.success || checked.data === undefined) {
       out.rejected.push({ field, why: checked.success ? '值是空的' : zodWhy(checked.error) });
       continue;

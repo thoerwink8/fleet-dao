@@ -231,5 +231,9 @@ describe('自动归档、搁置、硬删的判据', () => {
   it('草稿缺的栏', () => {
     expect(draftMissing({ title: '标题' })).toEqual(['场景', '已知的模块', '怎么算做完']);
     expect(draftMissing({ title: '标题', scene: '场景', modules: 'api', done: ['一条'] })).toEqual([]);
+    // 类别写了认不出的值算缺：拍板前就拦下，不等开单时才失败
+    const full = { title: '标题', scene: '场景', modules: 'api', done: ['一条'] };
+    expect(draftMissing({ ...full, kind: '文档' })).toEqual(['类别（只能是需求、缺陷、杂项）']);
+    expect(draftMissing({ ...full, kind: '缺陷' })).toEqual([]);
   });
 });
