@@ -75,7 +75,6 @@ function harness(over: Partial<HourlyReconcileJobDeps> = {}): Harness {
       problems: [],
       findings: [],
     }),
-    quotaPools: async () => [],
     ledgers: async () => [],
     apps: { repos: async () => [], selfCheck: async () => [] },
     gh: {
@@ -273,10 +272,9 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
       outcome: 'partial',
       scanned: 1,
       why:
-        '5 处没查成：列没处理的提醒没成，工作流核对留下的旧提醒这一轮不撤：库连不上；' +
+        '4 处没查成：列没处理的提醒没成，工作流核对留下的旧提醒这一轮不撤：库连不上；' +
         '列没处理的提醒没成，合并超过 7 天的历史提醒这一轮不收：库连不上；列没处理的提醒没成：库连不上；' +
-        '列没处理的提醒没成，记账核对的旧提醒这一轮不复查、不撤：库连不上；' +
-        '列没处理的提醒没成，额度读数的旧提醒这一轮不撤：库连不上',
+        '列没处理的提醒没成，记账核对的旧提醒这一轮不复查、不撤：库连不上',
     });
     expect(h.logs.some((l) => l.startsWith('warn:每小时对账：列没处理的提醒没成'))).toBe(true);
   });

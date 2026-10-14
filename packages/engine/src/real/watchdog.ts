@@ -6,6 +6,8 @@
 // 永远判成「停了」——它不会再跑，也没人能去处理，只会白占一条卡住报警。#1140 起引擎起来时还会把它们的登记行从
 // scheduled_jobs 里摘掉（real/jobs.ts），这里的筛选是引擎还没来得及起新版本时的兑底。
 // 「主线 N 小时没合 PR」（决定 0093）读同一个库的 mergeStallFacts（PR 镜像、任务、拉单记下的等空位单数）。
+// 「在用的账号池额度读数不超过 30 分钟」（决定 0093 从每小时对账搬来）读同一个库的 quotaTable，加额度配置（deploy/quota.json）里写明不读的池。
+import { loadQuotaConfig } from '@fleet-dao/adapters/quota';
 import {
   alertByKey,
   type Db,
@@ -13,6 +15,7 @@ import {
   latestAlertByPrefix,
   mergeStallFacts,
   openAlertsByPrefix,
+  quotaTable,
   resolveAlertWithReason,
   scheduleHealth,
   startScheduleRun,
@@ -23,6 +26,8 @@ import { WATCHDOG_ACTOR, type WatchdogDeps } from '../jobs/watchdog.ts';
 
 export interface WatchdogWiring {
   db: Db;
+  /** 额度配置里写明不读的池；不给就读 deploy/quota.json（loadQuotaConfig）。读不到要抛，不许回空列表。 */
+  quotaNotRead?: () => Promise<readonly string[]>;
   now?: () => Date;
   log?: WatchdogDeps['log'];
 }
@@ -61,6 +66,12 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
       finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
     },
     mergeStall: () => mergeStallFacts(w.db),
+    quota: {
+      quotaPools: (at) => quotaTable(w.db, { now: at }),
+      // 配置写明不读的池（现在是 jev：没有日账）。读不到配置要抛，不许当成「都要读」。
+      quotaNotRead:
+        w.quotaNotRead ?? (async () => (await loadQuotaConfig()).notRead?.map((p) => p.poolId) ?? []),
+    },
     now,
     log,
   });

@@ -14,6 +14,8 @@
 //   人处理没处理都算），看门狗不为同一件事再报一条，自己那条撤掉写明看哪条；「停了」照报（停了它自己报不了）。
 // - 同一轮还看「主线 N 小时没合 PR」（决定 0093，删了全流程巡检换这一条）：判法在 jobs/merge-stall.ts，键 watchdog:merge:…，
 //   只读库（PR 镜像、任务、拉单记下的等空位单数），报、撤和上面同一套。
+// - 同一轮还看「在用的账号池额度读数不超过 30 分钟」（决定 0093 从每小时对账搬来，对账只管和 GitHub 对账）：jobs/watchdog-quota.ts，
+//   键还是 reconcile:quota:<池>，只读库。
 
 import type { JobHealth, MergeStallFacts, ScheduleResult } from '@fleet-dao/db';
 import { WATCHDOG_JOB_ID } from '@fleet-dao/db';
@@ -28,6 +30,7 @@ import {
   repoOfMergeStallKey,
 } from './merge-stall.ts';
 import { clip, stamp } from './reconcile-common.ts';
+import { type QuotaWatchDeps, watchQuotaFreshness } from './watchdog-quota.ts';
 
 /** 登记进 scheduled_jobs 的那一行。 */
 export const WATCHDOG_JOB = {
@@ -81,6 +84,11 @@ export interface WatchdogDeps {
    * 不给（只测定时任务那部分的单测）就不看这一条。
    */
   mergeStall?: () => Promise<MergeStallFacts>;
+  /**
+   * 「在用的账号池额度读数不超过 30 分钟」要的读（jobs/watchdog-quota.ts，决定 0093 从每小时对账搬来）。读不到照抛：这一轮记没查成，
+   * 开着的不撤。不给（只测别的部分的单测）就不看这一条。
+   */
+  quota?: Pick<QuotaWatchDeps, 'quotaPools' | 'quotaNotRead'>;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
@@ -330,7 +338,14 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
     ? await mergeStallRound(s, deps.mergeStall, now)
     : { scanned: 0, found: 0, repos: null };
   found += merges.found;
-  const scanned = others.length + merges.scanned;
+  let quotaScanned = 0;
+  if (deps.quota) {
+    const q = await watchQuotaFreshness({ ...deps.quota, alerts: deps.alerts, log: deps.log }, now);
+    s.problems.push(...q.problems);
+    found += q.found;
+    quotaScanned = q.scanned;
+  }
+  const scanned = others.length + merges.scanned + quotaScanned;
 
   if (s.problems.length > 0) {
     const why = `${s.problems.length > 1 ? `${s.problems.length} 处没做成：` : ''}${s.problems.join('；')}`;

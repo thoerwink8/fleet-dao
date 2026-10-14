@@ -28,7 +28,6 @@ import type { ScheduleRunLog } from './github-reconcile.ts';
 import {
   checkLedgers,
   checkMergedPrs,
-  checkQuotaFreshness,
   type ReconcileCheckDeps,
   retireHistoricalFactAlerts,
   retireWorkflowAlerts,
@@ -136,7 +135,6 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   const merged = await checkMergedPrs(deps);
   const ledgers = await checkLedgers(deps);
   const historical = await retireHistoricalFactAlerts(deps);
-  const quota = await checkQuotaFreshness(deps);
   const autoMerges = await checkAutoMerges(deps);
   // 单已关且停下等人的撤掉（#1816）：当场发放弃并撤挂起提醒；放在提醒清扫之前
   const closedTasks = await abandonClosedIssueTasks(deps);
@@ -183,7 +181,6 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     merged,
     ledgers,
     historical,
-    quota,
     autoMerges,
     closedTasks,
     idleClosedRows,
