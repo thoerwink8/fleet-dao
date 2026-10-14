@@ -26,6 +26,9 @@ source "$DEPLOY_DIR/lib/common.sh"
 # lib/session-proxy.sh 只管读期望（一律读 deploy/france/desired-config.json）。
 # shellcheck source=lib/session-proxy.sh
 source "$DEPLOY_DIR/lib/session-proxy.sh"
+# #2138：发版、退回（root）把会话口子里已有的公钥补进 /root/.ssh/authorized_keys。缺了、写不了都不挡发版。
+# shellcheck source=lib/root-ssh-login.sh
+source "$DEPLOY_DIR/lib/root-ssh-login.sh"
 
 REPO_URL=https://github.com/thoerwink8/fleet-dao.git
 RELEASES=${FLEET_RELEASES_DIR:-/srv/fleet-dao-releases} # 只有 deploy/test/release-flow.test.sh 会改它
@@ -2197,6 +2200,11 @@ main() {
   if [[ "$mode" == check ]]; then
     do_check
     finish
+  fi
+  # --check 上面 finish 已经退出。再挡一层：只读不改钥匙。测试用的路径覆盖不带进真发版。
+  if [[ "$mode" != check ]]; then
+    unset ROOT_SSH_LOGIN_SRC ROOT_SSH_HOME
+    ensure_root_login_keys || true
   fi
   ensure_dir "$RELEASES" root:root 755
   take_lock

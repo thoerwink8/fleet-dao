@@ -717,6 +717,8 @@ bash /srv/fleet-dao/deploy/release.sh --rollback   # 退回上一版
 bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、自动发布的读数、服务、健康检查
 ```
 
+法国发版和退回（`--check` 不改）把 `/etc/ssh/authorized_keys/<会话用户>` 里已经有的公钥补进 `/root/.ssh/authorized_keys`：指纹对得上的不重复补，原来的行一个字不删、不改。不碰 `authorized_keys2`，也不把监督机的 `grok_bot` 写进去（那把不在会话口子里）。`.ssh` 收成 `700`、`authorized_keys` 收成 `600`，以 root 跑时属主改成 `root:root`，免得 sshd 的 StrictModes 整份不认。口子没有、读不了、写不了都不挡发版。钥匙只来自那份 root 放的会话口子（`france.sh` 从 pilot 抄来的快照），会话用户自己写不了。测试 `deploy/test/root-ssh-login.test.sh`。
+
 `--check` 和人手动敲的 `bash /srv/fleet-dao/deploy/release.sh` 跑的是部署检出 `/srv/fleet-dao/deploy/release.sh`，不是在用那一版目录（`/srv/fleet-dao-releases/current`）里的那份。检出是独立的 git 工作树，往往还停在上一次快进的提交，也就是当时的在用版本（#1294，2026-10-08 发 72a33cb5 时若直接跑检出里那份，就是在用版 baa3d01a 的脚本，目录还从手放的旧位置装，装不进这一版的模型）。
 
 发版车不跑检出里那份。`release-train.mjs` 第 4 步 ssh 的命令是技能里的 `agents/skills/commander/scripts/release-boot.sh`（开会话钩子把技能同步到本机，不靠法国检出更新、也不等这一版先发过）：它把目标提交收进裸仓 `/srv/fleet-dao-releases/.repo.git`，把那一版的 `deploy/` 解到按提交号命名的私有目录 `/srv/fleet-dao-releases/.boot/<完整提交号>`（先解到临时目录、查过再整个挪进来，挪进来以后没人改它；两天前的旧目录顺手清掉），再 exec 它自带的 `release.sh`，参数原样带过去（完整提交号在最前，`--now`、`--unmerged` 照传）。改了 `release.sh` 的这一次发版就用那一版自己的脚本，检出还是旧的也一样。两次发版同时来（A、B 不同提交）各解各的目录，A 一定跑 A 版；两个发布谁先谁后，仍由被 exec 的那份 `release.sh` 拿发布锁（`.lock`）排，历史、排空、读回也都在那份里，这里不另做一套。那一版没有 `deploy/release.sh`、是符号链接、对象读不出、包解不开、提交取不到，命令退出 1，不改跑检出里这份。`--check` 和 `--rollback` 仍跑检出里的 `release.sh`。驾驶舱按钮发之前先把检出快进到目标提交（装在机器上的接活脚本原有的一步），所以它跑检出里的就是那一版。
