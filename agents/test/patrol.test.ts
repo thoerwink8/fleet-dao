@@ -464,6 +464,31 @@ describe('巡查脚本：发版事故和健康页（2026-10-14 法国发版失�
       expect(judge({ hist: LAST, trainRaw: train('running', null) }).verdict).toBe('BROKEN');
     });
 
+    it('【故意造出的失败】这一趟落地了（done、current 就是目标），末行「健康检查没过」说的是它：OK；current 不是目标、或退回了：BROKEN（#2207）', () => {
+      // sampleRaw 的 current 是 CUR
+      const done = JSON.stringify({
+        schema: 1,
+        status: 'done',
+        phase: 8,
+        target: { kind: 'sha', value: CUR },
+      });
+      const r = judge({ hist: [...LAST, `2026-10-14T23:05:30Z ${CUR} unhealthy`], trainRaw: done });
+      expect(r.verdict).toBe('OK');
+      expect(r.broken).toBeNull();
+      const other = JSON.stringify({
+        schema: 1,
+        status: 'done',
+        phase: 8,
+        target: { kind: 'sha', value: NEW },
+      });
+      const r2 = judge({ hist: [...LAST, `2026-10-14T23:05:30Z ${NEW} unhealthy`], trainRaw: other });
+      expect(r2.verdict).toBe('BROKEN');
+      expect(r2.broken).toContain('最近一次发版是 unhealthy');
+      const r3 = judge({ hist: [...LAST, `2026-10-14T23:05:31Z ${CUR} auto-rollback`], trainRaw: done });
+      expect(r3.verdict).toBe('BROKEN');
+      expect(r3.broken).toContain('最近一次发版是 auto-rollback');
+    });
+
     it('阈值从发版接活脚本各步上限推出来（和引擎看门狗 TRAIN_STUCK_MS 同一条线：不小于各步加起来、最多多 5 分钟余量）', async () => {
       // 引擎那份（packages/engine/src/jobs/release-watch.ts）不在这一组的依赖里，两边各自钉在同一份上限上：
       // packages/engine/test/watchdog.test.ts 对 TRAIN_STUCK_MS 做同样的核对
