@@ -2,7 +2,7 @@
 // 真 Temporal 测试服务端上的工作流。需求里的每一种都故意造一次：停了（stale）、连着失败（failing）、从没跑过（never）、
 // 恢复了自动撤（写清为什么）、读不到登记表算没查成、推送没写进去记没跑成下一轮重推。看门狗自己停了由后端现算，
 // 在 packages/api 的 watchdog-health.test.ts。
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -21,6 +21,7 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
+  judgeReleaseAttention,
   lastHistoryEntry,
   parseHealthzResponse,
   releaseAttentionReasons,
@@ -787,6 +788,51 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
     await runWatchdogJob(wd());
     expect((await allAlerts()).every((a) => !a.dedupeKey.startsWith('watchdog:red:'))).toBe(true);
   });
+
+  it('release.sh 退出码 2（没红、有待配）但列车体检通过：不新建、也不留下 watchdog:release:<sha>:release', async () => {
+    const sha = SHA;
+    const key = `watchdog:release:${sha.slice(0, 12)}:release`;
+    const gateRunning = '现在不发：上一趟发版是「running」状态，要人看，不自动再发';
+    const train = (status: string, phase: number) =>
+      writeFileSync(
+        join(dir, '.train', 'release-train.json'),
+        JSON.stringify({ status, phase, target: { kind: 'sha', value: sha, sha } }),
+      );
+    history(`2026-10-15T03:49:00Z ${sha} release`);
+    symlinkSync(sha, join(dir, 'current'));
+
+    // 发版已经记上 release、current 已切过去，列车还在做发后体检（进度 running）。闸门因此写「要人看」。
+    // 这不是没发成，自动发版也没停：不报。
+    train('running', 6);
+    writeFileSync(join(dir, '.auto', 'state.json'), JSON.stringify({ auto: { note: gateRunning } }));
+    expect(await runWatchdogJob(wd())).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(await openKeys()).toEqual([]);
+
+    // 体检那一步曾经没过，留下过一张 :<sha>:release。后来体检通过、列车 done，闸门那句还没改掉。
+    train('failed', 6);
+    writeFileSync(
+      join(dir, '.auto', 'state.json'),
+      JSON.stringify({ auto: { note: '现在不发：上一趟发版是「failed」状态，要人看，不自动再发' } }),
+    );
+    clock = at(5);
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([key]);
+    expect((await alertOf(key))?.title).toBe('发版要人看：新版没发成或退回了，自动发版停着');
+
+    train('done', 8);
+    writeFileSync(join(dir, '.auto', 'state.json'), JSON.stringify({ auto: { note: gateRunning } }));
+    clock = at(10);
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([]);
+    expect((await alertOf(key))?.body).toContain('已撤：发版现在不用人看了');
+
+    // 下一趟自动发版又在走（进度回到 running），历史末行仍是上一趟成功的 release：旧卡不回来，也不说自动发版停着。
+    train('running', 4);
+    clock = at(15);
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([]);
+    expect((await alertOf(key))?.resolvedAt).toBeTruthy();
+  });
 });
 
 describe('发版和健康页的判法（纯函数）', () => {
@@ -815,7 +861,7 @@ describe('发版和健康页的判法（纯函数）', () => {
     });
   });
 
-  it('进度记录 done、aborted 不算要人看，其他状态算；自动发布没说「要人看」不算', () => {
+  it('进度记录 done、aborted、running 不算要人看，failed 这类才算；自动发布没说「要人看」不算', () => {
     const f = (trainStatus: string | null, autoNote: string | null = null) => ({
       last: null,
       trainStatus,
@@ -823,7 +869,38 @@ describe('发版和健康页的判法（纯函数）', () => {
     });
     expect(releaseAttentionReasons(f('done'))).toEqual([]);
     expect(releaseAttentionReasons(f('aborted'))).toEqual([]);
+    expect(releaseAttentionReasons(f('running'))).toEqual([]);
     expect(releaseAttentionReasons(f(null, '主线头 CI 不是绿的，等绿'))).toEqual([]);
     expect(releaseAttentionReasons(f('deploying'))).toHaveLength(1);
+    expect(releaseAttentionReasons(f('failed'))).toHaveLength(1);
+  });
+
+  it('列车 done 且 current 已是目标：过期的「running，要人看」不留 :<sha>:release；还在跑时也不写「自动发版停着」', () => {
+    const sha = '54ac77e8db7a'.padEnd(40, 'a');
+    const at = '2026-10-15T03:49:00Z';
+    const gate = '现在不发：上一趟发版是「running」状态，要人看，不自动再发';
+    const base = {
+      last: { at, sha, event: 'release' },
+      trainTarget: sha,
+      currentSha: sha,
+      autoNote: gate,
+    };
+    expect(releaseAttentionReasons({ ...base, trainStatus: 'running' })).toEqual([]);
+    expect(judgeReleaseAttention({ ...base, trainStatus: 'running' })).toEqual({ kind: 'fine' });
+    expect(releaseAttentionReasons({ ...base, trainStatus: 'done' })).toEqual([]);
+    expect(judgeReleaseAttention({ ...base, trainStatus: 'done' })).toEqual({ kind: 'fine' });
+
+    const other = judgeReleaseAttention({
+      ...base,
+      trainStatus: 'done',
+      autoNote: '库变了，要人看',
+    });
+    expect(other.kind).toBe('alert');
+    if (other.kind === 'alert') {
+      expect(other.key).toBe(`watchdog:release:${sha.slice(0, 12)}:note`);
+      expect(other.title).not.toContain('自动发版停着');
+      expect(other.body).not.toContain('不会再发');
+      expect(other.body).toContain('自动发版还在走');
+    }
   });
 });

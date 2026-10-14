@@ -8,7 +8,7 @@
 // 「主线 N 小时没合 PR」（决定 0093）读同一个库的 mergeStallFacts（PR 镜像、任务、拉单记下的等空位单数）。
 // 「在用的账号池额度读数不超过 30 分钟」（决定 0093 从每小时对账搬来）读同一个库的 quotaTable，加额度配置（deploy/quota.json）里写明不读的池。
 // 「提醒真的推到飞书了」读同一个库的 feishuPushFacts（后端写的推送状态、送达记录）。
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, readlink, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadQuotaConfig } from '@fleet-dao/adapters/quota';
 import {
@@ -85,10 +85,15 @@ export async function readReleaseFacts(dir: string): Promise<ReleaseFacts | null
   if (history === null) throw new Error(`${dir}/.history 不在，但目录在：发布历史读不到`);
   const train = await readOptional(join(dir, '.train', 'release-train.json'));
   let trainStatus: string | null = null;
+  let trainTarget: string | null = null;
   if (train !== null) {
-    const v = JSON.parse(train) as { status?: unknown } | null;
+    const v = JSON.parse(train) as {
+      status?: unknown;
+      target?: { sha?: unknown; value?: unknown } | null;
+    } | null;
     if (typeof v?.status !== 'string') throw new Error('发版进度记录认不出（没有 status）');
     trainStatus = v.status;
+    trainTarget = trainTargetOf(v.target);
   }
   const state = await readOptional(join(dir, '.auto', 'state.json'));
   let autoNote: string | null = null;
@@ -96,7 +101,38 @@ export async function readReleaseFacts(dir: string): Promise<ReleaseFacts | null
     const v = JSON.parse(state) as { auto?: { note?: unknown } | null } | null;
     autoNote = typeof v?.auto?.note === 'string' ? v.auto.note : null;
   }
-  return { last: lastHistoryEntry(history), trainStatus, autoNote };
+  return {
+    last: lastHistoryEntry(history),
+    trainStatus,
+    trainTarget,
+    currentSha: await readCurrentSha(dir),
+    autoNote,
+  };
+}
+
+/** 进度记录里的目标提交。sha 优先（发版那一步记下的全长），否则 value。认不出是 null，不当成读失败。 */
+function trainTargetOf(target: { sha?: unknown; value?: unknown } | null | undefined): string | null {
+  if (!target || typeof target !== 'object') return null;
+  for (const c of [target.sha, target.value]) {
+    if (typeof c === 'string' && /^[0-9a-f]{7,40}$/i.test(c)) return c.toLowerCase();
+  }
+  return null;
+}
+
+/** current 是指向提交目录的符号链接。不在、不是链接、链的不是提交号，都是 null。 */
+async function readCurrentSha(dir: string): Promise<string | null> {
+  try {
+    const link = await readlink(join(dir, 'current'));
+    const base =
+      link
+        .split('/')
+        .filter((s) => s !== '')
+        .pop() ?? '';
+    return /^[0-9a-f]{40}$/i.test(base) ? base.toLowerCase() : null;
+  } catch (e) {
+    if (errno(e) === 'ENOENT' || errno(e) === 'EINVAL') return null;
+    throw e;
+  }
 }
 
 /** 问 /healthz：200 才算好；连不上、超时是 { ok: false, status: null }，不抛。 */

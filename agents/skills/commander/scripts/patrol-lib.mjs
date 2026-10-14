@@ -346,9 +346,25 @@ const taskWord = (t) => `#${t.n}（${t.repo}）${t.state}${t.phase ? `/${t.phase
 /** 发布历史里的一条，给人看。 */
 const historyWord = (/** @type {HistoryFact} */ h) => `${h.event}（${h.sha.slice(0, 8)} ${h.at}）`;
 
+/** 自动发版闸因「进度还不是 done/aborted」写下的那句。running 或列车已经收尾之后是过期的。 */
+const GATE_NOTE = /上一趟发版是「([^」]+)」状态，要人看/;
+
+/**
+ * @param {string} note
+ * @param {string} trainStatus
+ */
+function staleReleaseGateNote(note, trainStatus) {
+  const m = GATE_NOTE.exec(note);
+  if (!m) return false;
+  if (m[1] === 'running') return true;
+  if (trainStatus === 'done' || trainStatus === 'aborted') return true;
+  return trainStatus !== '' && m[1] !== trainStatus;
+}
+
 /**
  * 判 BROKEN 的几条（出事了，不是「要留意」）：健康页不是 200（列出红的检查）、最近一次发版是 unhealthy / auto-rollback、
- * 发版进度记录停在 done / aborted 以外、自动发布处于「要人看」。命中一条记一行；没有回空。
+ * 发版进度记录停在 done / aborted / running 以外（running 是发版进行中）、自动发布处于「要人看」（闸门那句过期的不算）。
+ * 命中一条记一行；没有回空。
  * @param {Facts} f
  */
 export function brokenReasons(f) {
@@ -360,9 +376,15 @@ export function brokenReasons(f) {
   }
   const last = f.history.at(-1);
   if (last && BAD_RELEASE_EVENTS.includes(last.event)) out.push(`最近一次发版是 ${historyWord(last)}`);
-  if (f.trainStatus !== '' && f.trainStatus !== 'done' && f.trainStatus !== 'aborted')
+  if (
+    f.trainStatus !== '' &&
+    f.trainStatus !== 'done' &&
+    f.trainStatus !== 'aborted' &&
+    f.trainStatus !== 'running'
+  )
     out.push(`发版进度记录停在「${f.trainStatus}」`);
-  if (f.autoNote.includes('要人看')) out.push(`自动发布处于「要人看」：${f.autoNote}`);
+  if (f.autoNote.includes('要人看') && !staleReleaseGateNote(f.autoNote, f.trainStatus))
+    out.push(`自动发布处于「要人看」：${f.autoNote}`);
   return out;
 }
 

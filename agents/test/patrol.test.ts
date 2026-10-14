@@ -363,11 +363,21 @@ describe('巡查脚本：发版事故和健康页（2026-10-14 法国发版失�
     }
   });
 
-  it('发版进度记录停在 failed 等 done、aborted 以外的状态：BROKEN；done、aborted、没有这份文件：不是', () => {
+  it('发版进度记录停在 failed 等：BROKEN；done、aborted、running（发版进行中）、没有这份文件：不是', () => {
     expect(judge({ train: 'failed' }).verdict).toBe('BROKEN');
     expect(judge({ train: 'deploying' }).verdict).toBe('BROKEN');
-    for (const t of ['done', 'aborted', '-'])
+    for (const t of ['done', 'aborted', 'running', '-'])
       expect(judge(t === '-' ? {} : { train: t }).verdict, t).toBe('OK');
+  });
+
+  it('列车已收尾或还在 running：闸门那句「上一趟要人看」是过期的，不判 BROKEN', () => {
+    const note = '现在不发：上一趟发版是「running」状态，要人看，不自动再发';
+    expect(judge({ train: 'done', autoNote: note }).verdict).toBe('OK');
+    expect(judge({ train: 'running', autoNote: note }).verdict).toBe('OK');
+    expect(
+      judge({ train: 'failed', autoNote: '现在不发：上一趟发版是「failed」状态，要人看，不自动再发' })
+        .verdict,
+    ).toBe('BROKEN');
   });
 
   it('自动发布处于「要人看」（只有它这一条，别的都正常）：BROKEN', () => {
