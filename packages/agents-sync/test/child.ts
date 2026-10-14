@@ -9,6 +9,18 @@
 // 各包的测试自成一体，改这份时看一眼那几份（收成一份见 #264）。
 import { spawnSync } from 'node:child_process';
 
+/**
+ * Windows 上 node 跑 .ts 入口、用 process.exit 退出时，偶发崩成 0xC0000409（stderr 一行 libuv 的
+ * Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)，nodejs/node#56645）：剥类型用的 wasm 还在后台分层编译，
+ * 退出时往已经关掉的句柄发消息，退出码丢了（本机并行跑测试时 flow-stats 那条「退出 2」就这么红过，压测一百五十次崩十几次）。
+ * 测试起的 node 关掉这层分层编译（--no-wasm-dynamic-tiering，压测零次），退出码才可信；别的系统、别的命令原样。
+ */
+export function withNodeFlags(command: string, args: readonly string[]): readonly string[] {
+  return process.platform === 'win32' && command === process.execPath
+    ? ['--no-wasm-dynamic-tiering', ...args]
+    : args;
+}
+
 /** 一个子进程最多跑多久。只防卡死、不量快慢：正常起一个 git 几十毫秒，满载的机器上也就几秒。 */
 export const CHILD_LIMIT_MS = 60_000;
 
@@ -32,7 +44,12 @@ export interface ChildResult {
 
 export function runChild(command: string, args: readonly string[], options: ChildOptions = {}): ChildResult {
   const { limitMs = CHILD_LIMIT_MS, ...rest } = options;
-  const r = spawnSync(command, args, { ...rest, encoding: 'utf8', timeout: limitMs, killSignal: 'SIGKILL' });
+  const r = spawnSync(command, withNodeFlags(command, args), {
+    ...rest,
+    encoding: 'utf8',
+    timeout: limitMs,
+    killSignal: 'SIGKILL',
+  });
   // status 不是 null：子进程真退出过、拿到了退出码。子进程不读标准输入就退出时，父进程写 input 写到一半会碰上管道
   // 已经关了（Linux 上 EPIPE、Windows 上 EOF），r.error 照样会被设上——这只是写的时序问题，不算「没跑完」。
   // 真没跑完（起不来、超时、被信号杀）才会 status 是 null。
