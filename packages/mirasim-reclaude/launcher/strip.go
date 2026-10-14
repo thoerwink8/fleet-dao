@@ -10,7 +10,7 @@ import (
 )
 
 // Mirasim 把平台网关 ANTHROPIC_BASE_URL=http://127.0.0.1:<端口>/<会话令牌> 交给 claude，
-// 有的版本写进 `--settings` 的 env 块（0.0.354 起），有的放进进程 env（0.0.498 起），两处都要看、都要剥。
+// 注入平台网关时写进 `--settings` 的 env 块（0.0.354 起），也可能经进程 env 传，两处都要看、都要剥。
 // reclaude 只清进程 env，清不到 settings ⇒ claude 把请求交给 Mirasim 本地网关，
 // 网关再以 Mirasim.exe 身份转发，reclaude 服务端判 non_cc_client 拒掉（还会上报，有设备解绑风险）。
 // 剥掉这三个键，claude 就回落到 ~/.claude/settings.json 的 reclaude 代理 + OAuth 占位令牌。

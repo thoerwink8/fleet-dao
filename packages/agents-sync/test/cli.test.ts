@@ -101,6 +101,23 @@ describe('退出码', () => {
     expect(run(['--check', '--home', home, '--repo', repo]).code).toBe(0);
   });
 
+  // 决定 0092：真实操作系统（deps.os）要一路传到权限那一步，Mac 在 platform 里也归 linux，只看 platform 判不出桌面机
+  it('Mac 上 Mirasim 装了 mirasim-reclaude 启动器：写完不带子代理默认模型，报告说明为什么，退出 0', {
+    timeout: 15_000,
+  }, () => {
+    const home = tempDir('home');
+    put(
+      home,
+      '.mirasim/setting.json',
+      JSON.stringify({ agentLaunch: { claude: { command: '/opt/mirasim-reclaude' } } }),
+    );
+    const r = run(['--apply', '--home', home, '--repo', makeRepo({})], { os: 'darwin' });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('env.CLAUDE_CODE_SUBAGENT_MODEL 不写（决定 0092）');
+    const settings = JSON.parse(get(home, '.claude/settings.json')) as { env?: Record<string, string> };
+    expect(settings.env?.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined();
+  });
+
   it('【故意造出的失败】仓里的 agents/shared-rules.md 没有通用段标记：没查成，退出 2，一个字不写', () => {
     const home = tempDir('home');
     const repo = makeRepo({}, '# 没有标记的 shared-rules.md\n');

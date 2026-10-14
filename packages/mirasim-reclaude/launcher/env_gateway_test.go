@@ -11,7 +11,7 @@ import (
 // 夹具默认往进程环境里放平台网关；要模拟「Mirasim 这次没给网关」就把这两个键清空（后写的覆盖前面的）。
 var noEnvGateway = []string{"ANTHROPIC_BASE_URL=", "ANTHROPIC_AUTH_TOKEN="}
 
-// Mirasim 0.0.498 起只在进程环境里给平台网关，--settings 不带 env。
+// 平台网关也可能只经进程环境传、--settings 不带 env（启动器两处都认，防别的版本这么传）。
 // 会话没单独选路由（跟随全局档位）时，环境里有网关就是平台，必须原样保留，不能剥成自有。
 func TestDefaultRouteKeepsGatewayGivenOnlyInEnv(t *testing.T) {
 	f := newFixture(t, "")

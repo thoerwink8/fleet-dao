@@ -12,7 +12,7 @@ func workspaceIndexName(workspace string) string {
 }
 
 // gatewayFacts 按 claude 实际生效的顺序判网关：先取进程环境，再由 --settings 的 env 覆盖。
-// Mirasim 0.0.498 起把平台网关放进进程环境、--settings 里不再带 env，只看参数会把平台会话误判成没有网关。
+// 平台网关也可能经进程环境传、--settings 里不带 env；只看参数会把这种平台会话误判成没有网关。
 func gatewayFacts(args []string, environ []string) (loopback bool, credential bool, err error) {
 	env := map[string]any{}
 	for _, kv := range environ {

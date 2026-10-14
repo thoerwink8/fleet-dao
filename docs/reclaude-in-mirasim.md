@@ -16,11 +16,13 @@ Windows 和 macOS 的接入由本仓 `packages/mirasim-reclaude` 维护。旧 `r
 
 ## 1. 原理：为什么需要会话启动器
 
-Mirasim 把本地网关地址和认证字段交给 Claude：有的版本写进 `--settings <文件或 JSON>` 的 env 块，0.0.498 起放进进程环境变量。启动器两处都看：会话没单独选路由（跟随全局档位）时，有回环网关加令牌就是平台、原样保留，没有就走自有。旧封装只在启动时剥掉自有会话的注入，复用进程时没有重新选路，切回平台后仍可能使用自有额度。
+Mirasim 给会话注入平台网关时，把本地网关地址和认证字段写进 `--settings <文件或 JSON>` 的 env 块；启动器也认进程环境里的网关，以防别的版本这么传。启动器两处都看：会话没单独选路由（跟随全局档位）时，有回环网关加令牌就是平台、原样保留，没有就走自有。旧封装只在启动时剥掉自有会话的注入，复用进程时没有重新选路，切回平台后仍可能使用自有额度。
 
 新版保存原始 args/env；明确自有才在安全副本中剥掉 Mirasim 回环网关的 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_API_KEY`。切回平台从原始参数恢复，重新完成 SDK 初始化与控制状态恢复；已经执行的用户消息和工具结果不重放。用户级 reclaude 配置保持由 reclaude 管理，不假定它一直是某一种代理或认证形态。
 
 Claude 两种来源都经 reclaude 拉起。有效索引没有该会话 override 时保留 Mirasim 默认网关；索引缺失和坏 JSON 不能被当成「没有 override」。
+
+Mirasim 自己也会决定给不给网关（读 0.0.498 的 `server.cjs` 查到）：`~/.claude/settings.json` 的 env 里有任一改模型的键（`CLAUDE_CODE_SUBAGENT_MODEL`、`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`、`ANTHROPIC_SMALL_FAST_MODEL`），又有 reclaude 写的指向回环的 `HTTPS_PROXY` 加 `NODE_EXTRA_CA_CERTS`，又设了 claude 启动命令，它就判 claude 被拦截（`via=intercept`），不给跟随全局的会话注入平台网关；启动器拿不到网关只能走自有，界面显示「平台」实际花自有额度。所以装了启动器的机器上同步工具不写子代理默认模型键、已有的删掉，子代理默认模型改在 Mirasim 设置里管（[决定 0092](decisions/0092-no-subagent-model-env-on-launcher-desktops.md)）。
 
 ## 2. 做法：三种桌面产物
 
@@ -99,6 +101,7 @@ Mirasim 额度可能走错了，根据文档排查
 | `--check` 退出 75「装的是旧版启动器」 | 新版没装上 | `pnpm mirasim:migrate` |
 | audit 标红 (c) 有回合但启动器没有拉起记录 | 启动器被绕过；通常和上面「被改回裸 claude」同时出现 | 同「被改回裸 claude」那一行 |
 | audit 标红 (b) 启动器选了自有，账本里却有平台中继账 | 剥网关没生效，自有会话扣了平台额度 | 先 `pnpm mirasim:migrate` 装到当前版本再看；仍红就把 audit 那几行和 `launch.log` 里对应会话的 `event=launch`/`event=reject` 行贴到单上，不在机器上手改 |
+| 额度来源显示平台（跟随全局），audit 里 launch 行 `route=default gateway=none`、账本无 relay | `~/.claude/settings.json` 的 env 里有改模型的键（`CLAUDE_CODE_SUBAGENT_MODEL`、`ANTHROPIC_DEFAULT_*_MODEL`、`ANTHROPIC_SMALL_FAST_MODEL`），Mirasim 判 claude 被拦截、不注入平台网关（见第 1 节） | `pnpm agents:sync`（新版同步会删 `CLAUDE_CODE_SUBAGENT_MODEL`）；别的改模型的键同步不碰，手动从 env 里删掉；重开会话生效 |
 | audit 标红 (a) 启动器选了平台，回合里却没有平台中继账 | 平台会话没走平台（或回合根本没发出请求） | 看那条会话在 Mirasim 里是不是报错的回合；不是就同 (b) 贴单 |
 | 退出 2「没查成」 | 日志、路由索引、会话或账本读不到或有坏行 | 按报出的文件修读权限或等写完再跑；没查成不等于没事 |
 | `mirasim:health` 线路不健康、daemon 没起 | reclaude 自己的问题，额度来源没错 | `pnpm mirasim:health --run`；网络坏了看下面 |

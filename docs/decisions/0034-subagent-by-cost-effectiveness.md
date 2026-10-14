@@ -3,6 +3,7 @@
 - 日期：2026-10-09 00:09（北京时间）
 - 谁拍的：创始人授权、指挥官拍板（原话在下面：「你设计一下……并且全程你拍板」）。方案让别家挑过错（deepseek 4 条异议，已吸收，见「挑错之后改了什么」）。
 - 现状（2026-10-13 回写）：已被 0035、0087 替代；设置里子代理默认模型只许 Opus 或 Sonnet 仍由 `agents/test/rules/subagent-model.rules.test.ts` 钉着。
+- 现状（2026-10-14 回写）：第 6 条「设置里写子代理默认模型、同步到每台机器」被 0092 部分取代（`0092-no-subagent-model-env-on-launcher-desktops.md`）：装了 mirasim-reclaude 启动器的桌面机不写、已有的删掉，那里的子代理默认模型由 Mirasim 设置管；别的机器照旧。
 - 现状：部分被 0035 取代（`0035-haiku55-by-checkable-output.md`）：第 1 条 Haiku 那一档的判据改成「产出能被脚本或一条命令核对」；第 3 条「Haiku 一次没证据就升」改成「脚本核对不过就升」；第 4 条派 Haiku 写 `model: "haiku"` 改成 `subagent_type: "haiku55"`（别名 `haiku` 在本机指向 Haiku 4.5）。第 4 条派 Sonnet、Opus 写 `model` 别名的做法又被 0087 替代（`0087-three-subagent-roles.md`：三档落成三个角色 `Explore`、`general-purpose`、`Plan`，写类型、不传 `model`，升档才传）。其余各条照旧。
 - 状态：采纳。通用段那句、指挥官技能、巡查脚本、同步工具的文案、钉住规矩的测试同一个 PR 改（改标准；创始人在对话里已授权，就是下面这段原话），#1372
 - 关联：`agents/shared-rules.md`「我的机器与模型」「无人值守」、`agents/skills/commander/SKILL.md`「派活」、`agents/skills/commander/references/子代理选模型.md`、`agents/skills/commander/scripts/patrol.mjs`、`agents/config/claude-permissions.json`、`packages/agents-sync/src/permissions.ts`、`agents/test/rules/subagent-model.rules.test.ts`、`agents/test/rules/fable-scope.rules.test.ts`
