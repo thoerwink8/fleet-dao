@@ -334,7 +334,7 @@ class Checker {
     this.note('title', file, line, `${here}「${quote.text}」一节`);
     const doc = this.doc(here);
     if (!doc) this.problem(file, line, `读不到 ${here}`);
-    else if (!this.hasTitle(doc, quote.text, false))
+    else if (!this.hasTitle(doc, quote.text, false) && this.looksLikeTitle(doc, quote.text))
       this.problem(file, line, `${here} 里没有叫「${quote.text}」的一节`);
     return quote.end + 2;
   }
@@ -445,6 +445,16 @@ class Checker {
     const { start, end } = sectionRange(doc, h);
     const row = new RegExp(`^\\s*(?:\\|\\s*${n}\\s*\\||${n}[.、]\\s)`);
     return doc.lines.slice(start, end).some((l) => row.test(l));
+  }
+
+  /**
+   * 「「X」一节」只在 X 像这份文档的标题时才查。X 里带括号注释（「已给你的文件（别再读）」，说的是提示词里的一节、
+   * 不是文档标题）时，括号前的部分得是这份文档某个标题的开头，才当成指着标题写；光秃秃的 X 照查。
+   */
+  private looksLikeTitle(doc: MdDoc, title: string): boolean {
+    if (!/[（(]/.test(title)) return true;
+    const head = norm(title.replace(/[（(].*$/, ''));
+    return !head || doc.headings.some((h) => headingKeys(h).some((k) => k.startsWith(head)));
   }
 
   /** 标题（带不带编号、末尾括号都行）；allowBold 时加粗的字也算。 */
