@@ -17,7 +17,7 @@
 //   france-lib.mjs 的 autoReleaseProblem）；改字段几边一起改，那边的测试拿这里造的状态核对。
 // - RULES_USERS 要和 deploy/france.sh 的 AGENT_RULES_USERS 一样；HUMAN_TIER_PATHS 要盖住人工档（deploy/lib/human-tier.sh）读的仓里文件（测试都核对）。
 // - 驾驶舱按钮的接活脚本（deploy/france/release-request/lib.mjs）import 这里的 ciVerdict 判 CI：它是对外的发布闸，改判法要两边的测试一起看。
-// - 读不到、认不出的一律记成「没查成」，不拿空、0 当没事（AGENTS.md「底线」）。
+// - 读不到、认不出的一律记成「没查成」，不拿空、0 当没事（agents/shared-rules.md「底线」）。
 import { DESIRED_FILE, judgeConfig } from './config.mjs';
 
 export const STATE_SCHEMA = 1;

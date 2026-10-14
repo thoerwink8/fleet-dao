@@ -2,7 +2,14 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { checkDocPointers, DOCS, docFiles, formatProblem, type PointerKind } from '../src/doc-pointers.ts';
+import {
+  checkDocPointers,
+  DOCS,
+  docFiles,
+  formatProblem,
+  type PointerKind,
+  WORKFLOW_DOC,
+} from '../src/doc-pointers.ts';
 import { fsRepo, type RepoView } from '../src/repo.ts';
 import { memRepo } from './helpers.ts';
 
@@ -383,7 +390,7 @@ describe('全仓的文档（main 上现有的，加上本 PR 改的）', () => {
       .map((name) => `packages/${name}/AGENTS.md`)
       .filter((file) => existsSync(join(ROOT, file)));
     expect(pkgAgents).toContain('packages/engine/AGENTS.md');
-    expect(report.files).toEqual([...DOCS, ...modules, ...pkgAgents]);
+    expect(report.files).toEqual([...DOCS, WORKFLOW_DOC, ...modules, ...pkgAgents]);
     expect(report.files.filter((f) => f.startsWith('specs/') || f.startsWith('docs/decisions/'))).toEqual([]);
   });
 
@@ -419,8 +426,9 @@ describe('文档指针：docs/design/ 下的模块文件也在要查的名单里
       ...BASE,
       'packages/y/AGENTS.md': '入口 `packages/y/src/gone.ts`。\n',
       'packages/a/AGENTS.md': '入口 `packages/x/src/a.ts`。\n',
+      [WORKFLOW_DOC]: '装机见 `deploy/france.sh`。\n',
     });
-    expect(docFiles(repo)).toEqual([...DOCS, 'packages/a/AGENTS.md', 'packages/y/AGENTS.md']);
+    expect(docFiles(repo)).toEqual([...DOCS, WORKFLOW_DOC, 'packages/a/AGENTS.md', 'packages/y/AGENTS.md']);
     expect(checkDocPointers(repo).problems.map(formatProblem)).toEqual([
       'packages/y/AGENTS.md:1  packages/y/src/gone.ts 在仓里没有',
     ]);

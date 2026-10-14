@@ -25,6 +25,9 @@ import type { RepoView } from './repo.ts';
  */
 export const DOCS = ['docs/design.md', 'docs/ops.md', 'README.md', 'AGENTS.md'] as const;
 
+/** 仓根 AGENTS.md 只当目录，本仓协作的细则在这一份；和各包的 AGENTS.md 一样，在就查。 */
+export const WORKFLOW_DOC = 'docs/workflow.md';
+
 /**
  * docs/design/<模块>.md 是从 docs/design.md 拆出来的一片（#139）：正文整段搬过去，一个字没改。
  * 里面光写的「第 X 节」「X.Y」「「…」一节」指的是 design 那份，不是这份（它自己没有编号的节）；
@@ -47,7 +50,9 @@ export function docFiles(repo: RepoView): string[] {
     .sort()
     .map((name) => `packages/${name}/AGENTS.md`)
     .filter((file) => repo.exists(file));
-  return [...DOCS, ...extra, ...pkgs];
+  // 仓根 AGENTS.md 指过去的协作细则（进度和单、PR、改标准）：在就查
+  const workflow = repo.exists(WORKFLOW_DOC) ? [WORKFLOW_DOC] : [];
+  return [...DOCS, ...workflow, ...extra, ...pkgs];
 }
 
 export type PointerKind = 'link' | 'path' | 'section' | 'subsection' | 'quote' | 'item' | 'title';
