@@ -97,6 +97,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | /etc/fleet-dao | root:fleet | 750 | deploy/hk.sh |
 | /etc/fleet-dao | root:fleet | 750 | deploy/lib/human-tier.sh |
 | /etc/fleet-dao/github | root:fleet | 750 | deploy/lib/human-tier.sh |
+| /etc/ssh/authorized_keys | root:root | 755 | deploy/lib/human-tier.sh |
 | /etc/systemd/system/postgresql@16-main.service.d | root:root | 755 | deploy/france.sh |
 | /etc/wireguard | root:root | 700 | deploy/france.sh |
 | /etc/wireguard | root:root | 700 | deploy/hk.sh |
@@ -150,6 +151,23 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | fleet-feishu.service | 香港 | fleet-dao 飞书网关 |
 
 <!-- fleet:units:end -->
+
+下面这张表由 deploy/ 脚本生成，别手改（只列私有值的名字，不含值和指纹；来源 `deploy/france/desired-config.json`）：
+
+<!-- fleet:secrets:start -->
+
+| 文件 | 键名 |
+|---|---|
+| api.env | FEISHU_APP_ID |
+| api.env | FEISHU_APP_SECRET |
+| api.env | FLEET_GITHUB_WEBHOOK_SECRET |
+| api.env | FLEET_NODE_KEYS |
+| api.env | FLEET_PUBLIC_URL |
+| france.env | FLEET_WG_HK_ENDPOINT |
+| france.env | FLEET_WG_HK_PUBLIC_KEY |
+| release.env | FLEET_DOMAIN |
+
+<!-- fleet:secrets:end -->
 
 <!--
 renderUnitsBlock 实际输出（跑 packages/conventions/src/ops-tables.ts 的 renderUnitsBlock，与上方 fleet:units 区块逐字相同；冷验收对照用，不是手改表）：
