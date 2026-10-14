@@ -232,7 +232,7 @@ export interface EngineJobs {
   intake?: (client: Client, taskQueue: string) => IntakeDeps;
   /** 判断题自检（#1365）：最近一次调用失败超过 30 分钟，发一道不占额度的固定题，结果写进判断记录。不拉单。 */
   judgeSelfCheck?: () => JudgeSelfCheckJobDeps;
-  /** 每周刷新 CI 测试耗时表（#921）：读 ci.yml 日志、重写表、开 PR。不拉单。 */
+  /** 每天刷新 CI 测试耗时表（#921）：读 ci.yml 日志、重写表、开 PR。不拉单。 */
   ciTimings?: () => CiTimingsJobDeps;
   /** 用量补记（#1935）：经 Mirasim 起的会话，按中转计量把 runs 的输入、缓存、花费补齐，没齐写原因。不拉单。 */
   usageBackfill?: () => UsageBackfillJobDeps;

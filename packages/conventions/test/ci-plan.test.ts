@@ -1332,7 +1332,12 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
     const loads = p.tests.map((b) => b.estMs);
     const total = loads.reduce((a, b) => a + b, 0);
     // LPT：最重的台不超过「平均 + 最重那个文件」（装箱问题的常识上界）
-    expect(Math.max(...loads)).toBeLessThanOrEqual(total / loads.length + 27_285);
+    const heaviest = Math.max(
+      ...p.tests
+        .flatMap((b) => b.files)
+        .map((f) => (typeof TIMINGS === 'string' ? 0 : (TIMINGS.files[f] ?? 0))),
+    );
+    expect(Math.max(...loads)).toBeLessThanOrEqual(total / loads.length + heaviest);
     for (const b of p.tests) expect(b.files.every((f) => f.startsWith('packages/engine/'))).toBe(true);
   });
 

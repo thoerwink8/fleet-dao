@@ -49,12 +49,12 @@ export function medianOfRuns(runs: readonly ReadonlyMap<string, number>[]): Map<
 
 /** 耗时表文件头上那句说明（renderTimings 写进去；test/test-timings.test.ts 核对仓里那份就是它写出来的样子）。 */
 export const TIMINGS_NOTE =
-  'CI 测试按耗时装箱用的耗时表（packages/conventions/src/test-split.ts）：测试文件 → vitest 报的毫秒数（4 核运行机上并行跑时量的，几轮 CI 日志取中位数）。只影响分得匀不匀，不影响跑不跑：表里没有的按中位数估。用 pnpm ci:timings（可重复给 --run）从 CI 日志刷新，别手改。';
+  'CI 测试按耗时装箱用的耗时表（packages/conventions/src/test-split.ts）：测试文件 → vitest 报的毫秒数（4 核运行机上并行跑时量的，几轮 CI 日志取中位数）。只影响分得匀不匀，不影响跑不跑：表里没有的按所在包的均值估。用 pnpm ci:timings（可重复给 --run）从 CI 日志刷新，别手改。';
 
 /**
  * 不指定运行时怎么挑：最近的、PR 触发的、绿的 ci.yml 里，最多往回翻这么多次，取头几轮真跑了测试的。
  * 一轮至少这么多台成功的 `test (` 才算（按改动跑的小 PR 只有一两台，量到的文件太少）。
- * `pnpm ci:timings` 和引擎每周刷新用同一组数字、同一个事件，别各写各的。
+ * `pnpm ci:timings` 和引擎每天刷新用同一组数字、同一个事件，别各写各的。
  */
 export const TIMINGS_AUTO_RUNS = 5;
 export const TIMINGS_AUTO_SCAN = 40;

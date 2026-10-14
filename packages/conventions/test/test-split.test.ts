@@ -9,6 +9,7 @@ import { fsRepo } from '../src/repo.ts';
 import {
   boxCount,
   FALLBACK_FILE_MS,
+  guessMs,
   isTestFile,
   listTestFiles,
   MAX_BOXES,
@@ -181,18 +182,24 @@ describe('耗时表：只影响分得匀不匀，绝不影响跑不跑', () => {
     expect(r.boxes[0]?.estMs).toBeGreaterThanOrEqual(FALLBACK_FILE_MS);
   });
 
-  it('表里没有的文件按中位数估（新加的测试文件不会没台，也不会被当成 0 秒塞进某一台）', () => {
-    const files = ['a.test.ts', 'b.test.ts', 'c.test.ts', 'new.test.ts'];
+  it('表里没有的文件按所在包的均值估，包里没量过的按全表均值（不按中位数：新文件不会没台，也不会被当成 0 秒）', () => {
+    const files = [
+      'packages/api/test/a.test.ts',
+      'packages/api/test/b.test.ts',
+      'packages/api/test/new.test.ts',
+      'packages/web/test/new.test.ts',
+    ];
     const r = packTests({
       files,
       universe: files,
-      // c 和 new 都不在表里：按 a、b 的中位数（1000）估
-      timings: timings({ 'a.test.ts': 1000, 'b.test.ts': 1000, 'c.test.ts': 5000 }),
+      // api 里量过 a、b（1000 与 3000，均值 2000，中位数会是 3000）；web 里一个都没量过，按全表均值（2000）
+      timings: timings({ 'packages/api/test/a.test.ts': 1000, 'packages/api/test/b.test.ts': 3000 }),
       temporal: new Set(),
     });
     if (typeof r === 'string') throw new Error(r);
-    expect(r.notes.join()).toContain('耗时表里没有的 1 个文件');
-    expect(r.notes.join()).toContain('中位数 1000 毫秒');
+    expect(r.notes.join()).toContain('耗时表里没有的 2 个文件');
+    expect(r.notes.join()).toContain('按所在包的均值估');
+    expect(r.boxes.reduce((t, b) => t + b.estMs, 0)).toBe(1000 + 3000 + 2000 + 2000);
     expect(r.boxes.flatMap((b) => b.files).sort()).toEqual([...files].sort());
   });
 
@@ -358,8 +365,8 @@ describe('在真仓上装箱（全跑那一轮）', () => {
     const all = r.boxes.flatMap((b) => b.files);
     expect(all.length).toBe(FILES.length);
     expect([...all].sort()).toEqual([...FILES].sort());
-    // 耗时表是上一轮量出来的，这一轮新加的文件不在上面（按中位数估）——那正是「表过期只是不匀、不影响跑不跑」
-    expect(r.notes.filter((n) => !n.includes('按中位数'))).toEqual([]);
+    // 耗时表是上一轮量出来的，这一轮新加的文件不在上面（按所在包的均值估）——那正是「表过期只是不匀、不影响跑不跑」
+    expect(r.notes.filter((n) => !n.includes('按所在包的均值'))).toEqual([]);
   });
 
   it('每一台的估计耗时（对比现在的 --shard 分片：89/35/137 · 141 · 87/72/125 秒）', () => {
@@ -371,12 +378,10 @@ describe('在真仓上装箱（全跑那一轮）', () => {
     });
     if (typeof r === 'string') throw new Error(r);
     const seconds = r.boxes.map((b) => Math.round(b.estMs / 1000));
-    // 8 台的合计 = 全部文件的估计耗时合计：表里有的照表，表里没有的（耗时表量过之后新加的测试文件）按表的中位数估，
+    // 8 台的合计 = 全部文件的估计耗时合计：表里有的照表，表里没有的（耗时表量过之后新加的测试文件）按所在包的均值估（guessMs），
     // 和装箱同一个估法。不拿整张表的合计比：表一过期（加了测试文件、删了旧的）两边就差几秒，这条就红（#700 写的
     // 那种比法，主线上新加了测试文件之后改到 conventions 的 PR 全跑时都红在这）。最重的台和最轻的差不过 2 倍（LPT 的效果）。
-    const table = Object.values(REAL_TIMINGS.files).sort((a, b) => a - b);
-    const median = table[Math.floor((table.length - 1) / 2)] ?? 0;
-    const expected = FILES.reduce((t, f) => t + (REAL_TIMINGS.files[f] ?? median), 0);
+    const expected = FILES.reduce((t, f) => t + (REAL_TIMINGS.files[f] ?? guessMs(f, REAL_TIMINGS)), 0);
     expect(r.boxes.reduce((t, b) => t + b.estMs, 0)).toBe(expected);
     expect(Math.max(...seconds)).toBeLessThanOrEqual(Math.min(...seconds) * 2);
   });
