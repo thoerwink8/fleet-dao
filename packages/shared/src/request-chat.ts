@@ -244,6 +244,18 @@ export interface CommanderPatchSplit {
 const FIELD_SET: ReadonlySet<string> = new Set(REQUEST_DRAFT_FIELDS);
 
 /**
+ * 文字栏（除了「怎么算做完」都是一段文字）收到字符串数组时，拼成每行「- 」开头的一段：
+ * 模型列「已知的模块」「不做什么」很自然地写成数组，法国 2026-10-14 点验时两轮都因此整栏被拒（#2047）。别的形状照旧按约定验。
+ */
+function listAsText(field: RequestDraftField, value: unknown): unknown {
+  if (field === 'done' || !Array.isArray(value)) return value;
+  if (!value.every((x): x is string => typeof x === 'string')) return value;
+  const items = value.map((x) => x.trim()).filter((x) => x.length > 0);
+  if (items.length === 0) return undefined;
+  return items.length === 1 ? items[0] : items.map((x) => `- ${x}`).join('\n');
+}
+
+/**
  * 分指挥官的草稿补丁：只认 REQUEST_DRAFT_FIELDS 那几栏（原话、状态、拍板人这些都不在里面）；值按草稿的约定验；
  * 人改过的栏一律不改，转成「建议改」。
  */
@@ -259,7 +271,7 @@ export function splitCommanderPatch(
       continue;
     }
     const f = field as RequestDraftField;
-    const checked = RequestDraftSchema.shape[f].safeParse(value);
+    const checked = RequestDraftSchema.shape[f].safeParse(listAsText(f, value));
     if (!checked.success || checked.data === undefined) {
       out.rejected.push({ field, why: checked.success ? '值是空的' : zodWhy(checked.error) });
       continue;

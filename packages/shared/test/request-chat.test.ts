@@ -198,6 +198,15 @@ describe('草稿补丁：只改那九栏，人改过的转「建议改」，别�
     for (const r of got.rejected) expect(r.why).toBe('不在指挥官能改的栏里');
   });
 
+  it('文字栏写成字符串数组（法国 2026-10-14 点验里模型这么写过）：拼成每行「- 」开头的一段；只有一条就原样', () => {
+    const got = splitCommanderPatch(
+      { modules: ['README.md', '.github/workflows/ci.yml'], notDo: ['不改代码'], want: [] },
+      [],
+    );
+    expect(got.apply).toEqual({ modules: '- README.md\n- .github/workflows/ci.yml', notDo: '不改代码' });
+    expect(got.rejected).toEqual([{ field: 'want', why: '值是空的' }]);
+  });
+
   it('值不合规矩（怎么算做完不是一串、标题超长）拒掉', () => {
     const got = splitCommanderPatch({ done: '一句话', title: 'x'.repeat(101) }, []);
     expect(got.apply).toEqual({});

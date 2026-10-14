@@ -150,6 +150,8 @@ const OUTPUT_RULES = [
   '```',
   `- question：一次只问一个，选项 ${REQUEST_QUESTION_MIN_OPTIONS}～${REQUEST_QUESTION_MAX_OPTIONS} 个；页面另加「我自己说」，你不用写。`,
   '- patch 只能有这些键：title、kind、scene、modules、want、done（字符串数组，每条是一条看得见的验收）、notDo、size、needsHuman（碰发布、花钱、删数据、改标准时写为什么要人拍）。',
+  '- 除了 done，别的键的值都是一段字符串；要列几条就写成一段多行文字（每行「- 」开头），别写成数组。',
+  '- 回话里说「改了哪几栏」只说 patch 里真有的栏。',
   '- 原话由系统按时间拼，你碰不到、也不要往草稿里写原话。',
 ].join('\n');
 

@@ -304,6 +304,20 @@ export async function finishCommanderReply(db: Db, input: FinishReplyInput): Pro
           reason: '指挥官的草稿补丁里有它不能改的栏或不合规矩的值，服务端拒掉',
           via: 'engine',
         });
+        // 对话里也写一行：指挥官的回话可能说「补上了」，没改上的要让人看得见，不只记在操作记录里
+        const words = split.rejected.map((x) =>
+          x.field in REQUEST_DRAFT_FIELD_WORDS
+            ? `「${REQUEST_DRAFT_FIELD_WORDS[x.field as keyof typeof REQUEST_DRAFT_FIELD_WORDS]}」`
+            : `「${x.field}」`,
+        );
+        await tx.insert(requestMessages).values({
+          requestId: r.id,
+          kind: 'system',
+          body: clip(
+            `指挥官改单子有 ${words.length} 栏没改上：${words.join('、')}（格式不合规矩，单子里还是原样）`,
+          ),
+          createdAt: input.now,
+        });
       }
       Object.assign(out, {
         written: true,

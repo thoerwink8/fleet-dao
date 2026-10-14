@@ -123,6 +123,9 @@ describe('写回话：草稿补丁只改那九栏，人改过的转「建议改�
 
     const audits = await t.db.select().from(auditLog);
     expect(audits.map((a) => a.action)).toEqual(['request.commander_patch_rejected']);
+    // 没改上的栏在对话里也写一行，不只记在操作记录里
+    const system = msgs.filter((m) => m.kind === 'system').map((m) => m.body);
+    expect(system).toEqual(['指挥官改单子有 1 栏没改上：「status」（格式不合规矩，单子里还是原样）']);
 
     const [chat] = await t.db.select().from(requestChats);
     expect(chat).toMatchObject({
