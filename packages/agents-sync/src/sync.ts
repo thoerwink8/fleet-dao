@@ -53,6 +53,11 @@ export interface Ctx {
   home: string;
   platform: Platform;
   installed: ReadonlySet<AgentId>;
+  /**
+   * 真实的操作系统（process.platform）：platform 只分 win32 和 linux 两套路径，Mac 也归 linux。
+   * 要分清「桌面机还是 Linux 服务器」的地方看这个（决定 0092 的「装了启动器的桌面机」）；不给就按 Linux 处理。
+   */
+  os?: NodeJS.Platform;
 }
 
 export const code = (err: unknown): string => (err as NodeJS.ErrnoException).code ?? String(err);

@@ -14,6 +14,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { type MirasimWire, openWire } from '../../adapters/src/mirasim/wire.ts';
 import { prepareBinary, runtimeSourceHash } from './build.ts';
 import { takeLock } from './lock.ts';
+import { isManagedLaunch } from './managed-launch.ts';
 
 export interface PreparedBinary {
   destination: string;
@@ -110,12 +111,7 @@ function launchOf(data: Json): Launch {
   };
 }
 
-export function isManagedLaunch(command: string): boolean {
-  const name = basename(command.replaceAll('\\', '/')).toLowerCase();
-  return ['reclaude-mirasim', 'reclaude-mirasim.exe', 'mirasim-reclaude', 'mirasim-reclaude.exe'].includes(
-    name,
-  );
-}
+export { isManagedLaunch };
 
 function compatible(command: string): boolean {
   return (

@@ -82,6 +82,8 @@ export interface PasswdEntry {
 
 export interface Deps {
   platform: Platform;
+  /** 真实的操作系统（process.platform），见 Ctx.os；不给就按 Linux 处理 */
+  os?: NodeJS.Platform;
   env: Readonly<Record<string, string | undefined>>;
   stdout: (text: string) => void;
   stderr: (text: string) => void;
@@ -307,6 +309,7 @@ export function runCli(argv: readonly string[], deps: Deps): number {
         home,
         platform: deps.platform,
         installed: installedAgents({ env: deps.env, platform: deps.platform, home }),
+        ...(deps.os === undefined ? {} : { os: deps.os }),
       };
       const permsOff = args.user === undefined ? undefined : PERMISSIONS_OFF_FOR_USER;
       const mcpOff = args.user === undefined ? undefined : MCP_OFF_FOR_USER;

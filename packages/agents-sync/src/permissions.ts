@@ -10,10 +10,13 @@
 // 「源文件里写 bypass 拒收」和「机器上自己设的 bypass 保留」是两件事：前者是把「不用问」推给所有机器，后者是这台自己选的做法。
 // 它的 env 只认 ENV_KEYS 登记的键（现在只有子代理默认模型 CLAUDE_CODE_SUBAGENT_MODEL，决定 0034）：写进同一份设置的 env，
 // 仓里的值每次覆盖（同 defaultMode），机器上 env 里别的变量一个不碰；源文件少写、多写不认得的键、值不合规矩都拒收。
+// 例外（决定 0092）：装了 mirasim-reclaude 启动器的桌面机不写这个键、已有的删掉——Mirasim 见到 settings.json 的 env 里有改模型的键、
+// 又有 reclaude 写的回环代理，就判 claude 走拦截，不给跟随全局的会话注入平台网关，那些会话显示「平台」却花自有额度。
 // 合并那套（judge、merged、checkJson、applyJson）不只给 Claude 用：Devin 的 config.json 也是 permissions.allow/deny 三个数组，
 // 见 permissions-vendors.ts，翻译成它的写法后走同一套；Devin 那边没有 autoMode、env 这两层（不写就整段不管）。
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { isManagedLaunch } from '../../mirasim-reclaude/src/managed-launch.ts';
 import type { Backups } from './backup.ts';
 import { readSettings } from './hooks.ts';
 import { type Line, line } from './report.ts';
@@ -51,6 +54,8 @@ export interface ListSpec {
   autoMode?: AutoModeSpec;
   /** 设置文件 env 里归本脚本管的几项（键 → 值）；不写就整段不管 env（Devin 那份没有这一层） */
   env?: Record<string, string>;
+  /** env 里这台不该有、见到就删的键（决定 0092：装了启动器的桌面机上的子代理默认模型）；只在写了 env 时生效 */
+  dropEnv?: string[];
 }
 
 /** 仓里 agents/config/claude-permissions.json 认出来的样子：env 必须有（ENV_KEYS 里的键一个不能少） */
@@ -87,6 +92,71 @@ const ENV_KEYS: ReadonlyMap<string, (value: string) => string | null> = new Map(
         : `env.${SUBAGENT_MODEL} 是「${value}」：子代理默认模型只许 Opus 或 Sonnet（决定 0034；派活时可显式用 Haiku 5.5，但它不当默认），只认 opus、sonnet 或 claude-opus-…、claude-sonnet-… 这样的 id，拒收`,
   ],
 ]);
+
+/**
+ * 装了 mirasim-reclaude 启动器的桌面机上 env 不许有子代理默认模型键的原因（决定 0092）。Mirasim（0.0.498 读过 server.cjs）判 claude 走不走拦截：
+ * ~/.claude/settings.json 的 env 里有任一改模型的键（CLAUDE_CODE_SUBAGENT_MODEL、ANTHROPIC_DEFAULT_*_MODEL、ANTHROPIC_SMALL_FAST_MODEL），
+ * 又有指向回环的 HTTPS_PROXY 加 NODE_EXTRA_CA_CERTS（reclaude 写的），又设了启动命令，就判 via=intercept，
+ * 不给跟随全局的会话注入平台网关——界面显示「平台」，实际经 reclaude 花自有额度。别的改模型的键不是本脚本写的，不碰。
+ */
+const DROP_WHY =
+  '这台装了 mirasim-reclaude 启动器，Mirasim 见到这个键会判 claude 走拦截、不给跟随全局的会话注入平台网关（显示平台、实际花自有额度），所以这类机器不写它、已有的删掉；子代理默认模型改在 Mirasim 设置里管（决定 0092）';
+
+/** 这台是不是「装了 mirasim-reclaude 启动器的桌面机」；note 是查不成时要带进报告的一句 */
+export interface LauncherDesktop {
+  on: boolean;
+  note?: string;
+}
+
+/**
+ * 判据（决定 0092）：不是 Linux，且 ~/.mirasim/setting.json 的 agentLaunch.claude.command 的文件名是新旧两代启动器之一
+ * （isManagedLaunch，和迁移器同一个判据，借 mirasim-reclaude 那一个只用 node: 内置的文件）。
+ * 没有这个文件、没设启动命令：不是这类机器，不说什么。读不了、不是 JSON、启动命令不是字符串：按不是这类机器处理（照写），
+ * 报告里说没查成——不报错、不中断同步，也不当成「查过了、没装」。
+ */
+export function launcherDesktop(ctx: Ctx): LauncherDesktop {
+  if (ctx.os === undefined || ctx.os === 'linux') return { on: false };
+  const shown = '~/.mirasim/setting.json';
+  const unsure = (why: string): LauncherDesktop => ({
+    on: false,
+    note: `没查成这台装没装 mirasim-reclaude 启动器（${shown}：${why}），按没装处理、照写 env.${SUBAGENT_MODEL}`,
+  });
+  let text: string;
+  try {
+    text = readFileSync(join(ctx.home, '.mirasim', 'setting.json'), 'utf8');
+  } catch (err) {
+    if (code(err) === 'ENOENT') return { on: false };
+    return unsure(`读不了，${code(err)}`);
+  }
+  let root: unknown;
+  try {
+    root = JSON.parse(text.replace(/^\uFEFF/, ''));
+  } catch (err) {
+    return unsure(`不是合法的 JSON，${(err as Error).message}`);
+  }
+  if (!isObj(root)) return unsure('整份不是一个 JSON 对象');
+  const launch = isObj(root.agentLaunch) && isObj(root.agentLaunch.claude) ? root.agentLaunch.claude : {};
+  const command = launch.command;
+  if (command === undefined) return { on: false };
+  if (typeof command !== 'string') return unsure('agentLaunch.claude.command 不是字符串');
+  return { on: isManagedLaunch(command) };
+}
+
+/** 按这台的情况调整要写的东西：装了启动器的桌面机不写、并删掉子代理默认模型键 */
+function forMachine(spec: PermSpec, desk: LauncherDesktop): PermSpec {
+  if (!desk.on) return spec;
+  const env = { ...spec.env };
+  delete env[SUBAGENT_MODEL];
+  return { ...spec, env, dropEnv: [SUBAGENT_MODEL] };
+}
+
+/** 报告那一行补的话：这类机器说一句不写的原因，没查成说一句没查成 */
+function withDeskNote(lines: Line[], desk: LauncherDesktop): Line[] {
+  const note = desk.on
+    ? `这台装了 mirasim-reclaude 启动器，env.${SUBAGENT_MODEL} 不写（决定 0092）`
+    : desk.note;
+  return note === undefined ? lines : lines.map((l) => ({ ...l, text: `${l.text}；${note}` }));
+}
 
 /**
  * 仓里的源文件里不许写的模式：一台机器上的会话全放开检查，不能靠仓里一份文件推给所有机器。
@@ -268,7 +338,7 @@ function judgeAuto(have: unknown, spec: AutoModeSpec, out: Diff): void {
  * 机器上 env 那一层和源文件对不上的地方：仓里写的那几项每次覆盖（同 defaultMode），env 里别的变量不归本脚本管、一个不碰、也不计数。
  * 机器上的值不一样（哪怕也是 Opus 或 Sonnet）算漂移、改回仓里的：子代理默认模型是全队一个规矩，要改先改仓里。
  */
-function judgeEnv(have: unknown, spec: Record<string, string>, out: Diff): void {
+function judgeEnv(have: unknown, spec: Record<string, string>, drop: readonly string[], out: Diff): void {
   if (have !== undefined && !isObj(have)) {
     out.stuck.push('env 不是对象');
     return;
@@ -278,6 +348,10 @@ function judgeEnv(have: unknown, spec: Record<string, string>, out: Diff): void 
     if (env[key] === undefined) out.missing.push(`env.${key}（该是 ${want}）`);
     else if (env[key] !== want) out.drift.push(`env.${key} 是 ${JSON.stringify(env[key])}，该是 ${want}`);
   }
+  // 不论值是什么都算：Mirasim 只看有没有这个键，任何值都会让它误判
+  for (const key of drop)
+    if (env[key] !== undefined)
+      out.drift.push(`env.${key} 还在（是 ${JSON.stringify(env[key])}）：${DROP_WHY}`);
 }
 
 /** 逐项对：root 是整份设置文件 */
@@ -324,7 +398,7 @@ export function judge(root: unknown, spec: ListSpec): Diff {
     out.others += list.filter((x) => !want.includes(x as string) && !gone.includes(x as string)).length;
   }
   if (spec.autoMode !== undefined) judgeAuto(root.autoMode, spec.autoMode, out);
-  if (spec.env !== undefined) judgeEnv(root.env, spec.env, out);
+  if (spec.env !== undefined) judgeEnv(root.env, spec.env, spec.dropEnv ?? [], out);
   return out;
 }
 
@@ -359,7 +433,9 @@ export function merged(root: Obj, spec: ListSpec): Obj {
     // env 里别的变量（代理、各家自己的开关）一个不碰，只写仓里那几项
     const env: Obj = isObj(next.env) ? next.env : {};
     for (const [key, value] of Object.entries(spec.env)) env[key] = value;
-    next.env = env;
+    for (const key of spec.dropEnv ?? []) delete env[key];
+    // 没有要写的、机器上原本也没有 env：不凭空建一个空的
+    if (isObj(next.env) || Object.keys(env).length > 0) next.env = env;
   }
   return next;
 }
@@ -369,7 +445,7 @@ const bypassNote = (d: Diff): string => (d.bypass ? '；这台自己设成 bypas
 
 /** 一致时报出 env 里那几项的值（子代理默认模型是哪个，看报告就知道） */
 const envNote = (spec: ListSpec): string =>
-  spec.env === undefined
+  spec.env === undefined || Object.keys(spec.env).length === 0
     ? ''
     : `，${Object.entries(spec.env)
         .map(([key, value]) => `env.${key} 是 ${value}`)
@@ -411,6 +487,11 @@ export function applyJson(ctx: Ctx, place: Place, key: string, spec: ListSpec, b
     if (before.missing.length === 0 && before.drift.length === 0)
       return [line('ok', key, `已经一致，机器上自己加的 ${before.others} 条没动${bypassNote(before)}`)];
     const next = merged(root as Obj, spec);
+    // 要删的键报一句人话：删了哪个、原值是什么（为什么写在上面那条漂移里）
+    const env = isObj((root as Obj).env) ? ((root as Obj).env as Obj) : {};
+    const dropped = (spec.env === undefined ? [] : (spec.dropEnv ?? []))
+      .filter((k) => env[k] !== undefined)
+      .map((k) => `删了 env.${k}`);
     const eol = read.kind === 'ok' && read.text.includes('\r\n') ? '\r\n' : '\n';
     const text = `${JSON.stringify(next, null, 2)}\n`.replaceAll('\n', eol);
     const saved = read.kind === 'ok' ? backups.saveFile(abs, rel.replaceAll('\\', '/')) : undefined;
@@ -419,6 +500,7 @@ export function applyJson(ctx: Ctx, place: Place, key: string, spec: ListSpec, b
     const parts = [
       read.kind === 'none' ? '新建' : '改了',
       [...before.missing, ...before.drift].join('；'),
+      ...dropped,
       `机器上自己加的 ${before.others} 条没动`,
       ...(before.bypass ? ['这台自己设成 bypassPermissions，保留、没改'] : []),
       ...(saved ? [`原文件备份在 ${saved}`] : []),
@@ -450,11 +532,15 @@ export function checkPermissions(ctx: Ctx, src: Sources, skip?: PermSkip): Line[
   const spec = permissionSource(ctx, src);
   if (!spec.ok)
     return [line('unknown', key, `没查成——仓里的 agents/config/claude-permissions.json：${spec.why}`)];
-  return checkJson(
-    relOf(ctx, PERMISSIONS_TARGET.settings).abs,
-    key,
-    spec.value,
-    '权限（defaultMode、allow、deny、autoMode）和子代理默认模型（env）没装',
+  const desk = launcherDesktop(ctx);
+  return withDeskNote(
+    checkJson(
+      relOf(ctx, PERMISSIONS_TARGET.settings).abs,
+      key,
+      forMachine(spec.value, desk),
+      '权限（defaultMode、allow、deny、autoMode）和子代理默认模型（env）没装',
+    ),
+    desk,
   );
 }
 
@@ -465,5 +551,9 @@ export function applyPermissions(ctx: Ctx, src: Sources, backups: Backups, skip?
   const spec = permissionSource(ctx, src);
   if (!spec.ok)
     return [line('failed', key, `没做成——仓里的 agents/config/claude-permissions.json：${spec.why}`)];
-  return applyJson(ctx, PERMISSIONS_TARGET.settings, key, spec.value, backups);
+  const desk = launcherDesktop(ctx);
+  return withDeskNote(
+    applyJson(ctx, PERMISSIONS_TARGET.settings, key, forMachine(spec.value, desk), backups),
+    desk,
+  );
 }

@@ -325,6 +325,141 @@ describe('放宽：把旧的拒绝撤了、同一条改放行（retiredDeny）',
   });
 });
 
+// 决定 0092：Mirasim 见到 ~/.claude/settings.json 的 env 里有改模型的键（含子代理默认模型），又有 reclaude 的回环代理、又设了启动命令，
+// 就判 claude 走拦截、不给跟随全局的会话注入平台网关。装了 mirasim-reclaude 启动器的桌面机上不写这个键、已有的删掉，别的机器照旧。
+describe('装了 mirasim-reclaude 启动器的桌面机（决定 0092）', () => {
+  /** reclaude 写的那几项：删子代理默认模型时它们一个不能动 */
+  const RECLAUDE_ENV = { HTTPS_PROXY: 'http://127.0.0.1:8899', NODE_EXTRA_CA_CERTS: '/x/ca.pem' };
+
+  /** os 是真实的操作系统；setting 是 ~/.mirasim/setting.json 的原文，null 是没有这个文件 */
+  function desk(os: NodeJS.Platform, setting: string | null) {
+    const home = tempDir('home');
+    if (setting !== null) put(home, '.mirasim/setting.json', setting);
+    const src = sources(makeRepo({}));
+    const ctx = { ...ctxFor(home, ['claude']), os };
+    return {
+      home,
+      apply: () => applyPermissions(ctx, src, new Backups(home, PLATFORM, NOW)),
+      check: () => checkPermissions(ctx, src),
+      settings: () => getJson(home, '.claude/settings.json') as Record<string, unknown>,
+    };
+  }
+  const launch = (command: unknown) => JSON.stringify({ agentLaunch: { claude: { command, args: '' } } });
+
+  it('Mac、启动命令是 mirasim-reclaude：不写子代理默认模型，权限照写，报告说明为什么', () => {
+    const m = desk('darwin', launch('/Users/x/.fleet-dao/mirasim-reclaude/releases/abc/mirasim-reclaude'));
+    expectKind(m.apply(), KEY, 'changed');
+    const s = m.settings();
+    expect(s.env).toBeUndefined();
+    expect((s.permissions as Perm).defaultMode).toBe('auto');
+    const check = m.check();
+    expectKind(check, KEY, 'ok');
+    expect(textOf(check)).toContain(
+      '这台装了 mirasim-reclaude 启动器，env.CLAUDE_CODE_SUBAGENT_MODEL 不写（决定 0092）',
+    );
+  });
+
+  it('【故意造出的失败】这类机器上键已经写进去了：--check 报漂移，写的时候删掉（不论值是什么），说清删了什么、为什么，env 里别的一个不动', () => {
+    for (const [os, command, value] of [
+      ['darwin', '/opt/mirasim-reclaude', 'claude-opus-5-5'],
+      ['win32', 'C:\\Users\\x\\mirasim-reclaude.exe', 'claude-sonnet-5-5'],
+      ['darwin', '/Applications/reclaude-mirasim', 'haiku'],
+      ['win32', 'D:\\RECLAUDE-MIRASIM.EXE', 'whatever-the-user-wrote'],
+    ] as const) {
+      const m = desk(os, launch(command));
+      put(
+        m.home,
+        '.claude/settings.json',
+        JSON.stringify({ env: { ...RECLAUDE_ENV, CLAUDE_CODE_SUBAGENT_MODEL: value }, model: 'opus' }),
+      );
+      m.apply(); // 先把权限那几项补齐，下面只看 env 这一项
+      put(
+        m.home,
+        '.claude/settings.json',
+        JSON.stringify({ ...m.settings(), env: { ...RECLAUDE_ENV, CLAUDE_CODE_SUBAGENT_MODEL: value } }),
+      );
+      const check = m.check();
+      expectKind(check, KEY, 'drift');
+      expect(textOf(check), command).toContain(
+        `env.CLAUDE_CODE_SUBAGENT_MODEL 还在（是 ${JSON.stringify(value)}）`,
+      );
+      expect(textOf(check)).toContain('不给跟随全局的会话注入平台网关');
+      const applied = m.apply();
+      expectKind(applied, KEY, 'changed');
+      expect(textOf(applied)).toContain('删了 env.CLAUDE_CODE_SUBAGENT_MODEL');
+      expect(m.settings().env, command).toEqual(RECLAUDE_ENV);
+      expect(m.settings().model).toBe('opus');
+      expectKind(m.check(), KEY, 'ok');
+    }
+  });
+
+  it('别的改模型的键不是本脚本写的：不碰（只删子代理默认模型这一个）', () => {
+    const m = desk('darwin', launch('/opt/mirasim-reclaude'));
+    put(
+      m.home,
+      '.claude/settings.json',
+      JSON.stringify({ env: { ANTHROPIC_DEFAULT_OPUS_MODEL: 'x', CLAUDE_CODE_SUBAGENT_MODEL: 'opus' } }),
+    );
+    m.apply();
+    expect(m.settings().env).toEqual({ ANTHROPIC_DEFAULT_OPUS_MODEL: 'x' });
+  });
+
+  it('普通机器照写：Mac 没装 Mirasim、Mirasim 的启动命令是裸 claude 或别人的启动器、没设启动命令、Linux 上哪怕设了启动器', () => {
+    for (const [os, setting] of [
+      ['darwin', null],
+      ['darwin', launch('claude')],
+      ['win32', launch('C:\\tools\\my-claude-wrapper.exe')],
+      ['win32', JSON.stringify({ agentLaunch: {} })],
+      ['linux', launch('/opt/mirasim-reclaude')],
+    ] as const) {
+      const m = desk(os, setting);
+      put(m.home, '.claude/settings.json', JSON.stringify({ env: RECLAUDE_ENV }));
+      const applied = m.apply();
+      expectKind(applied, KEY, 'changed');
+      expect(textOf(applied)).not.toContain('mirasim-reclaude 启动器');
+      expect(m.settings().env, `${os} ${setting}`).toEqual({
+        ...RECLAUDE_ENV,
+        CLAUDE_CODE_SUBAGENT_MODEL: 'claude-opus-5-5',
+      });
+      expectKind(m.check(), KEY, 'ok');
+    }
+  });
+
+  it('不知道真实操作系统（ctx 没给 os）：按 Linux 处理、照写', () => {
+    const home = tempDir('home');
+    put(home, '.mirasim/setting.json', launch('/opt/mirasim-reclaude'));
+    const ctx = ctxFor(home, ['claude']);
+    expectKind(
+      applyPermissions(ctx, sources(makeRepo({})), new Backups(home, PLATFORM, NOW)),
+      KEY,
+      'changed',
+    );
+    expect((getJson(home, '.claude/settings.json') as { env: unknown }).env).toEqual({
+      CLAUDE_CODE_SUBAGENT_MODEL: 'claude-opus-5-5',
+    });
+  });
+
+  for (const [name, setting, why] of [
+    ['不是 JSON', '{ agentLaunch: ', '不是合法的 JSON'],
+    ['整份不是对象', '[1]', '整份不是一个 JSON 对象'],
+    ['启动命令不是字符串', launch(42), 'agentLaunch.claude.command 不是字符串'],
+  ] as const) {
+    it(`~/.mirasim/setting.json ${name}：按普通机器照写，报告里说没查成，不报错、不中断`, () => {
+      const m = desk('darwin', setting);
+      const applied = m.apply();
+      expectKind(applied, KEY, 'changed');
+      expect(textOf(applied)).toContain('没查成这台装没装 mirasim-reclaude 启动器');
+      expect(textOf(applied)).toContain(why);
+      expect(textOf(applied)).toContain('按没装处理');
+      expect(m.settings().env).toEqual({ CLAUDE_CODE_SUBAGENT_MODEL: 'claude-opus-5-5' });
+      const check = m.check();
+      expectKind(check, KEY, 'ok');
+      expect(textOf(check)).toContain('没查成这台装没装 mirasim-reclaude 启动器');
+      expect(exitCode(check)).toBe(0);
+    });
+  }
+});
+
 describe('不写', () => {
   it('没装 Claude Code：跳过，不建文件', () => {
     const m = machine(['codex']);
