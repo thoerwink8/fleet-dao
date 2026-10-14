@@ -3,9 +3,10 @@
 // 改动 = 和 origin/main 分叉以来提交了的 + 暂存的 + 没暂存的 + 没跟踪的：会话交活前测的是自己手上的这棵树。
 // 跑哪些测试和 CI 按改动跑同一套判法（ci-plan.ts 的 planCi：改到的包和依赖它们的包、测试读的包外文件；根配置、shared、夹具、
 // deploy/ 这类改到就全跑）；要全跑、本机又不全跑时先跑的那份也从同一份判法算（ci-plan.ts 的 fallbackUnits），这里不另写
-// 「改动落在哪」。两种都带上 CI 每个 PR 都跑的那几份（ci-plan.ts 的 ALWAYS_TESTS），拒跑时也不例外（#740）；
-// 唯一的例外是整份改动都是文档（docs/、specs/、README.md）：agents/test/ 整个目录一百秒上下，读文档的只有个位数，
-// 所以只带文档指针检查和「源码里写着这些文档路径」的测试（doc-readers.ts），判不出谁读时退回整份。
+// 「改动落在哪」。本机不带 CI 每个 PR 都跑的整个 agents/test/（ci-plan.ts 的 ALWAYS_TESTS，一百秒上下；决定 0093 改了 #740 的
+// 「本机每次都带上」）：agents/ 只在 planCi 判它受影响时带（改到 agents/、或它的测试读的包外文件，ci-plan.test.ts 扫测试源码兜着），
+// 另外每次带两份指针检查（LOCAL_ALWAYS_TESTS），改到文档时再带「源码里写着这些文档路径」的测试（doc-readers.ts），判不出谁读时
+// 退回整个 agents/test/。CI 照旧每个 PR 全跑 agents/test/：本机绿、CI 的 docs 步红是可能的，红了回来修。
 // 改这里之前必须知道：原先定的是直接跑 vitest --changed origin/main，实现时发现两个洞，所以改成按包选——
 // ① 基准分支读不到时 vitest 不报错：它调 git 用的 tinyexec 不抛非零退出码，git diff 失败就当「没提交过改动」，只测没提交的，
 //   照样退出 0（本机实测：给个不存在的分支名，它只跑了没提交的那一个测试文件）；
@@ -13,6 +14,7 @@
 //   文档、迁移、夹具也不在 import 里——改了引擎的工作流代码，它一个工作流测试都不跑。按包选（有 ci-plan.test.ts 扫测试源码兜着
 //   「测试读包外文件」的清单）没有这个洞，代价是比按文件多跑一些。
 import {
+  AGENTS_UNIT,
   ALWAYS_TESTS,
   e2eOutput,
   type Fallback,
@@ -81,7 +83,7 @@ export function changedFiles(git: GitRun, base = BASE): string[] {
 
 /** 要全跑、本机又不全跑时先跑的：fallbackUnits 算出的单元落成交给 vitest 的过滤，hubs、dependents 原样带着给人看。 */
 export interface LocalRun extends Fallback {
-  /** 交给 vitest run 的过滤：units 的目录，加上 CI 每次都跑的 ALWAYS_TESTS。 */
+  /** 交给 vitest run 的过滤：units 的目录，加上本机每次都带的 LOCAL_ALWAYS_TESTS 和读到改动文档的测试。 */
   paths: string[];
 }
 
@@ -97,60 +99,65 @@ export type TestSelection =
   | (SelectionCommon & { kind: 'some'; paths: string[] })
   | (SelectionCommon & { kind: 'all'; local: LocalRun });
 
-/**
- * 交给 vitest 的过滤：单元的目录，再加 CI 每次都跑的 ALWAYS_TESTS。
- * 本机不按耗时装箱（CI 是「单元 → 测试文件 → 装台」，bin/ci-plan.ts）：不是 4 核运行机，几台并行跑反而把机器拖满。
- * vitest 的过滤是子串、一个文件只跑一次，所以 agents/ 和 agents/test/ 都在也不重跑；没有测试的包（shared）混在里面也不报错。
- */
-function vitestPaths(units: readonly string[]): string[] {
-  return [...new Set([...units.map(unitPath), ...ALWAYS_TESTS])];
-}
-
-/** 文档里的指针检查：只改文档时本机也跑它（它读全部文档，CI 每个 PR 都跑）。必须是 ALWAYS_TESTS 里的一份（test-changed.test.ts 核对）。 */
+/** 文档里的指针检查：本机每次都带（它读全部文档，CI 每个 PR 都跑）。必须是 ALWAYS_TESTS 盖得住的一份（test-changed.test.ts 核对）。 */
 export const DOC_POINTERS_TEST = 'packages/conventions/test/doc-pointers.test.ts';
+
+/** 技能说明里的指针检查：指向仓里任何路径，哪个包挪了、改名了都可能弄断它，所以本机也每次都带（几秒）。在 agents/test/ 里。 */
+export const SKILL_POINTERS_TEST = 'agents/test/skills.test.ts';
+
+/** 本机不管改了什么都带的：两份指针检查。整个 agents/test/ 只在 CI 每次都跑（ALWAYS_TESTS）。 */
+export const LOCAL_ALWAYS_TESTS: readonly string[] = Object.freeze([DOC_POINTERS_TEST, SKILL_POINTERS_TEST]);
+
+/**
+ * 交给 vitest 的过滤：单元的目录，加本机每次都带的两份，加读到改动文档的测试（extra）。
+ * 本机不按耗时装箱（CI 是「单元 → 测试文件 → 装台」，bin/ci-plan.ts）：不是 4 核运行机，几台并行跑反而把机器拖满。
+ * vitest 的过滤是子串、一个文件只跑一次，所以 agents/ 和 agents/test/skills.test.ts 都在也不重跑；没有测试的包（shared）混在里面也不报错。
+ */
+function vitestPaths(units: readonly string[], extra: readonly string[]): string[] {
+  return [...new Set([...units.map(unitPath), ...LOCAL_ALWAYS_TESTS, ...extra])];
+}
 
 /** 读了这些文档的测试文件；读不出时是一句为什么（doc-readers.ts 的 docReaders）。 */
 export type DocReaders = (docs: readonly string[]) => string[] | string;
 
-/** 这份改动全是文档（PATH_RULES 里「不测任何包、不跑装机测试」的那几条：docs/、specs/、README.md、开单表单）。 */
-function onlyDocs(changed: readonly string[]): boolean {
-  return changed.every((f) => {
-    const rule = PATH_RULES.find((r) => r.match(f));
-    return rule !== undefined && 'units' in rule && rule.units.length === 0 && rule.deploy === undefined;
-  });
+/** 这个文件是文档（PATH_RULES 里「不测任何包、不跑装机测试」的那几条：docs/、specs/、README.md、开单表单）。 */
+function isDoc(f: string): boolean {
+  const rule = PATH_RULES.find((r) => r.match(f));
+  return rule !== undefined && 'units' in rule && rule.units.length === 0 && rule.deploy === undefined;
 }
 
 /**
- * 只改文档时跑哪些：doc-pointers 加读了这些文档的测试，不带 agents/test/ 整个目录。判法不认的（没传 docReaders、读不出）
- * 退回 CI 每次都跑的整份——多跑，不少跑。
+ * 改到的文档谁读：读到它们的测试文件（不含每次都带的两份）。判法不认的（没传 docReaders、读不出）退回整个 agents/test/
+ * （CI 每次都跑的那份）——多跑，不少跑。
  */
-function docOnlySelection(changed: readonly string[], docReaders: DocReaders | undefined): TestSelection {
-  const readers = docReaders?.(changed);
+function docReaderTests(
+  docs: readonly string[],
+  docReaders: DocReaders | undefined,
+): { paths: string[]; reason?: string } {
+  if (docs.length === 0) return { paths: [] };
+  const readers = docReaders?.(docs);
   if (readers === undefined || typeof readers === 'string') {
     return {
-      kind: 'some',
       paths: [...ALWAYS_TESTS],
-      reasons: [
+      reason:
         readers === undefined
-          ? '只改文档：照 CI 每次都跑的整份（没给「谁读这些文档」的判法）'
-          : `只改文档，但没算出谁读它们（${readers}）：退回 CI 每次都跑的整份`,
-      ],
-      ciOnly: [],
+          ? '改到了文档：没给「谁读这些文档」的判法，照 CI 每次都跑的整份带上 agents/test/'
+          : `改到了文档，但没算出谁读它们（${readers}）：退回 CI 每次都跑的整份，带上 agents/test/`,
     };
   }
   return {
-    kind: 'some',
-    paths: [...new Set([DOC_POINTERS_TEST, ...readers])],
-    reasons: [
-      `只改文档：跑文档指针检查，加源码里写着这些文档路径的 ${readers.length} 个测试文件${readers.length > 0 ? `（${readers.join('、')}）` : ''}`,
-    ],
-    ciOnly: ['agents/test/ 的其余测试（CI 的 docs 步每个 PR 都跑整个目录，和这些文档无关）'],
+    paths: readers,
+    reason: `改到了文档：带上源码里写着这些文档路径的 ${readers.length} 个测试文件${readers.length > 0 ? `（${readers.join('、')}）` : ''}`,
   };
 }
 
+/** 没带整个 agents/test/ 时写进「CI 另外还跑」的那条。 */
+export const AGENTS_CI_NOTE =
+  'agents/test/ 的其余测试（CI 的 docs 步每个 PR 都跑整个目录；本机只带读到改动的）';
+
 /**
  * 跑哪些测试：和 CI 按改动跑同一套判法。依赖图读不出（graph 是一句为什么）照 CI 全跑，不少跑。
- * 只改文档时（docReaders 给了）只跑读这些文档的测试，见 docOnlySelection。
+ * 本机清单 = 改到的单元（要全跑时是 fallbackUnits）+ 两份指针检查 + 读到改动文档的测试（docReaderTests）。
  */
 export function selectTests(
   changed: readonly string[],
@@ -160,9 +167,9 @@ export function selectTests(
   if (changed.length === 0) {
     return {
       kind: 'some',
-      paths: [...ALWAYS_TESTS],
-      reasons: ['和 origin/main 比没有改动：只跑 CI 每次都跑的文档检查'],
-      ciOnly: [],
+      paths: [...LOCAL_ALWAYS_TESTS],
+      reasons: ['和 origin/main 比没有改动：只跑两份指针检查'],
+      ciOnly: [AGENTS_CI_NOTE],
     };
   }
   const plan = planCi({ event: 'pull_request', changed, graph });
@@ -180,18 +187,14 @@ export function selectTests(
       ? []
       : [`装机测试（deploy/test/run.sh${plan.deploy === 'ops' ? ' --ops' : ''}）`]),
   ];
-  if (!plan.full && plan.testUnits.length === 0 && onlyDocs(changed)) {
-    const docs = docOnlySelection(changed, docReaders);
-    return { ...docs, reasons: [...plan.reasons, ...docs.reasons], ciOnly: [...ciOnly, ...docs.ciOnly] };
-  }
-  if (!plan.full) return { kind: 'some', paths: vitestPaths(plan.testUnits), reasons: plan.reasons, ciOnly };
-  const fallback = fallbackUnits(changed, graph);
-  return {
-    kind: 'all',
-    local: { ...fallback, paths: vitestPaths(fallback.units) },
-    reasons: plan.reasons,
-    ciOnly,
-  };
+  const docs = docReaderTests(changed.filter(isDoc), docReaders);
+  const reasons = [...plan.reasons, ...(docs.reason === undefined ? [] : [docs.reason])];
+  const units = plan.full ? fallbackUnits(changed, graph) : undefined;
+  const paths = vitestPaths(units?.units ?? plan.testUnits, docs.paths);
+  const agentsAll = paths.includes(unitPath(AGENTS_UNIT)) || paths.includes('agents/test/');
+  const withAgents = agentsAll ? ciOnly : [...ciOnly, AGENTS_CI_NOTE];
+  if (units === undefined) return { kind: 'some', paths, reasons, ciOnly: withAgents };
+  return { kind: 'all', local: { ...units, paths }, reasons, ciOnly: withAgents };
 }
 
 /** 交给 vitest 的参数（不含 vitest 本身）。 */
@@ -271,7 +274,7 @@ export interface TestChangedDeps {
   env: Readonly<Record<string, string | undefined>>;
   git: GitRun;
   graph: () => PackageGraph | string;
-  /** 只改文档时谁读这些文档（不给就照 CI 每次都跑的整份）。 */
+  /** 改到的文档谁读（不给就照 CI 每次都跑的整份带上 agents/test/）。 */
   docReaders?: DocReaders | undefined;
   /** 跑 vitest（参数不含 vitest 本身）：回退出码；被信号杀掉 status 是 null；起不来 error 有值。 */
   vitest: (args: string[]) => { status: number | null; signal?: string | null; error?: Error | undefined };

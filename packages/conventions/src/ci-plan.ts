@@ -791,7 +791,8 @@ export const ALWAYS_JOBS = ['changes', 'lint'] as const;
 
 /**
  * CI 不管改了什么都跑的测试：lint job 里 docs 那一步（.github/workflows/ci.yml 写死同一份；test/test-changed.test.ts 现读
- * ci.yml，两边多一份少一份都红）。本机 test:changed 给出的清单不管选中什么、拒不拒跑都带上它们（#740：拒跑时漏过）。
+ * ci.yml，两边多一份少一份都红）。本机 test:changed 不整份带（决定 0093 改了 #740）：只带两份指针检查和读到改动的，
+ * 见 test-changed.ts 的 LOCAL_ALWAYS_TESTS。
  */
 export const ALWAYS_TESTS: readonly string[] = Object.freeze([
   'packages/conventions/test/doc-pointers.test.ts',
