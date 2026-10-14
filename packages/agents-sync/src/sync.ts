@@ -41,6 +41,11 @@ export interface Sources {
   skills: Map<string, Tree>;
   /** skills 里哪几个是第三方的（报告里标出来） */
   vendor: ReadonlySet<string>;
+  /**
+   * 这个家不装 skill 的原因（--no-skills：引擎一次性会话的用户，决定 0093）。给了的话 skills 是空的，清单里记着的照撤，
+   * 什么都不剩时那一行报这个原因，不报「仓里没有 skill」。
+   */
+  skillsOff?: string;
   /** agents/hooks/ 下的脚本；读不到时是为什么（只影响钩子这一段，规矩和 skill 照写） */
   hooks: { ok: true; tree: Tree } | { ok: false; why: string };
   /** agents/config/claude-permissions.json 的原文；读不到时是为什么（只影响权限那一段，别的照写）。认内容在 permissions.ts */
@@ -384,7 +389,8 @@ function nothingToDo(src: Sources, m: Manifest): boolean {
   return repoEmpty && Object.values(m.skills).every((names) => names.length === 0);
 }
 
-function noSkillsLine(): Line {
+function noSkillsLine(src: Sources): Line {
+  if (src.skillsOff !== undefined) return line('skip', 'agents/skills', src.skillsOff);
   return line(
     'skip',
     'agents/skills',
@@ -402,7 +408,7 @@ export function checkSkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
       ),
     ];
   }
-  if (nothingToDo(src, manifest.value)) return [noSkillsLine()];
+  if (nothingToDo(src, manifest.value)) return [noSkillsLine(src)];
   const out: Line[] = [];
   const owner = expectedOwner(ctx);
   const want = src.skills;
@@ -489,7 +495,7 @@ export function applySkills(ctx: Ctx, src: Sources, manifest: ManifestRead): Lin
       ),
     ];
   }
-  if (nothingToDo(src, manifest.value)) return [noSkillsLine()];
+  if (nothingToDo(src, manifest.value)) return [noSkillsLine(src)];
   const file = manifestPath(ctx.home, ctx.platform);
   // 子代理那一项原样带着：这里只改 skill，写回清单时不能把它丢了
   const m: Manifest = { ...manifest.value, skills: { ...manifest.value.skills } };

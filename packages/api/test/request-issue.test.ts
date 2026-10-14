@@ -127,6 +127,12 @@ describe('checkOpening：四节检查调的是 issue:new 同一个函数', () =>
     if (!r.ok) expect(r.why).toContain('涉及面一律不写');
   });
 
+  it('【故意造出的失败】「怎么算做完」要截图（diff 外证据）：驾驶舱开的单交给引擎，拒开（决定 0093）', () => {
+    const r = checkOpening(base({ draft: { ...base().draft, done: ['导出按钮带 390 宽截图'] } }));
+    expect(r).toMatchObject({ ok: false });
+    if (!r.ok) expect(r.why).toMatch(/diff 外的证据[\s\S]*认出：截图[\s\S]*单没开/);
+  });
+
   it('「要不要人拍」有内容：多贴「要人拍」；空白不贴', () => {
     const yes = checkOpening(base({ draft: { ...base().draft, needsHuman: '要改标准路径' } }));
     expect(yes).toMatchObject({ ok: true, labels: ['需求', HUMAN_DECISION_LABEL] });

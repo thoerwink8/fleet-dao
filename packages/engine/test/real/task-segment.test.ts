@@ -332,6 +332,39 @@ describe('备树', { timeout: 60_000 }, () => {
     expect(spec.prompt).not.toContain('# 任务：给驾驶舱加状态');
   });
 
+  it('首轮预载（决定 0093）：「已知的模块」列的文件以会话用户从树里读出来放进提示词；不在的照实写；续会话不再给', async () => {
+    const r = rig({
+      driverRun: async (spec) => {
+        commitInTree(spec);
+        return report();
+      },
+    });
+    const brief = {
+      ...goodBrief(),
+      touches: ['`a.ts`：要改的常量', '`src/new-file.ts`', '`packages/web/src/pages/`'],
+    };
+    expect((await r.run(r.input({ brief }), ctx())).ok).toBe(true);
+    const prompt = r.specs[0]?.prompt ?? '';
+    expect(prompt).toContain('## 已给你的文件（别再读）');
+    // Windows 的检出可能是 CRLF：只认内容，不认换行符
+    expect(prompt).toMatch(/### `a\.ts`\n```\nexport const a = 1;\r?\n```/);
+    expect(prompt).toContain('`src/new-file.ts`：工作树里没有这个文件');
+    expect(prompt).not.toContain('### `packages/web/src/pages/`');
+    expect(prompt.indexOf('## 已给你的文件')).toBeLessThan(prompt.indexOf('## 怎么干'));
+
+    const resumed = rig({
+      driverRun: async (spec) => {
+        commitInTree(spec);
+        return report();
+      },
+    });
+    await resumed.run(
+      resumed.input({ brief, resumeSessionId: 'aaaaaaaa-1111-4222-8333-444444444444' }),
+      ctx(),
+    );
+    expect(resumed.specs[0]?.prompt).not.toContain('已给你的文件');
+  });
+
   it('【故意造出的失败】起点不是完整提交号 / 路由用不了：抛 PortError（不重试），不建树、不起会话、不记 runs', async () => {
     const bad = rig();
     await expect(bad.run(bad.input({ baseSha: 'abc' }), ctx())).rejects.toMatchObject({

@@ -9,8 +9,11 @@
 // - 上一次被切号、暂停停下的（#59、#820）多一节：树里留着它的提交和改动，告诉新会话接着干。
 // - 续上一段的会话（resumed，决定 0088）：会话里已经有整张单和前面的过程，提示词只补被打断的原因和返工意见，不重述交代
 //   （重述等于让它把整张单再读一遍，返工轮的缓存读和首轮一样多）。
+// - 新开的会话（不是续的）带「已给你的文件」一节（preload.ts，决定 0093）：单子「已知的模块」列的文件原文，引擎起会话前读好放进来，
+//   省掉会话自己熟悉仓库那一大段；续的会话里早有了，不再给。
 
 import { type ManualBrief, renderBrief } from './brief.ts';
+import { type PreloadRead, renderPreload } from './preload.ts';
 
 /** 一条返工意见最多放多少字：日志的头比尾有用（先红的那条是根因）。 */
 export const FEEDBACK_ITEM_MAX = 6000;
@@ -24,6 +27,8 @@ export interface SegmentPromptInput {
   interrupted?: string;
   /** 续的是上一段的会话：只出被打断的原因和返工意见（renderResumePrompt）。 */
   resumed?: boolean;
+  /** 引擎起会话前读好的「已知的模块」里的文件（preload.ts）；续会话不出这一节。 */
+  preload?: readonly PreloadRead[];
   /** 已废（子代理提示整条链路已删）：只为 task-segment.ts 还在传它而留，不读；等 #1972 合并后随那处一起删。 */
   subagentHint?: boolean;
 }
@@ -68,6 +73,7 @@ export function renderSegmentPrompt(input: SegmentPromptInput): string {
   const { brief, specDir, feedback } = input;
   const out = [
     renderBrief(brief),
+    ...renderPreload(input.preload ?? []),
     '',
     '## 怎么干（一次性会话）',
     '没有人在旁边，也没有地方可以提问：照上面的需求和验收条自己判断，拿不准的地方取最保守的理解，把取舍写进最后一条回复。',
@@ -78,6 +84,7 @@ export function renderSegmentPrompt(input: SegmentPromptInput): string {
     '- AGENTS.md 里开 PR、进度单、开单的约定这次不适用，引擎替你做。',
     ...(specDir === undefined ? [] : [`- 需求文档 \`${specDir}/需求.md\` 已经在主线上，不要改它。`]),
     '- 不要新建需求文档、结果文档：需求在单子里，做成了什么写在 PR 正文里（引擎开 PR）。',
+    '- 家目录里装的通用技能（~/.agents/skills、~/.claude/skills 下的 SKILL.md）这次用不上，别去读：要做的、怎么算做完都在上面。',
     '- 最后一条回复逐条一行回验收条，再加一行欠什么。',
   ];
   const interrupted = input.interrupted?.trim();

@@ -6,7 +6,7 @@
 # sshd 抗扫描的 drop-in 与 fail2ban 的 sshd jail（#1348；fail2ban 没装只记待配）、AI 会话资源池 fleet-agents.slice 与起会话的脚本、
 # fleet 用户的 pnpm（corepack）、AI 会话用的 pnpm（归 root，钉版本、核 sha512）、WireGuard 客户端（主动连香港，法国不开任何入站端口）、
 # 应用的本机配置与随机密钥、往香港传驾驶舱静态文件的钥匙、清掉老机器上已删的演示版单元（#1223）、
-# 会话用户和 pilot 家里各家 AI 的全局说明与方法类 skill、他们各自的 ddgs（用钉住版本的 uv 装）、
+# 会话用户和 pilot 家里各家 AI 的全局说明（skill 只装给 pilot，会话用户不装）、他们各自的 ddgs（用钉住版本的 uv 装）、
 # 会话用户的 cursor-agent（官方安装脚本，以会话用户自己的身份装在他家里，只在没有时装；它的 API 密钥由创始人放，这里只读回
 # 在不在、属主、权限，不读值，见 lib/cursor-key.sh）、
 # 会话用户的 grok 命令行（官方安装脚本，以会话用户自己的身份装在他家里，只在没有时装；登录由创始人以他的身份做一次，这里只读回
@@ -153,7 +153,7 @@ SESSION_USERS=("$SESSION_USER")
 PILOT_USER=pilot
 PILOT_HOME=/home/pilot
 WRITER_IDENTITIES=(fleet "${SESSION_USERS[@]}" "$PILOT_USER")
-# 各家 AI 的全局说明（agents/shared-rules.md 的通用段）和方法类 skill（agents/skills/）写进这几个用户家里：
+# 各家 AI 的全局说明（agents/shared-rules.md 的通用段）和方法类 skill（agents/skills/）写进这几个用户家里（会话用户不装 skill，agent_rules_sync）：
 # 同步脚本以各用户自己的身份写（文件归他们），只动标记圈起来的那一块和它清单里记着的 skill（docs/ops.md 第五节）
 AGENT_RULES_USERS=("${SESSION_USERS[@]}" "$PILOT_USER")
 AGENTS_SYNC=$DEPLOY_DIR/../packages/agents-sync/bin/agents-sync
@@ -883,6 +883,19 @@ record_applied() {
 }
 
 # agents_sync（跑同步脚本、把逐行结论记进账）在 lib/agents-sync.sh
+# 会话用户（引擎一次性会话跑在他家里）不装 skill：会话照单子干活，家里的通用 skill 各家 CLI 一启动就去读（决定 0093）。
+# 和自动发布的 NO_SKILLS_USERS（auto-release/lib.mjs）同一份，测试核对。
+agent_rules_sync() { # 模式 用户
+  local s
+  for s in "${SESSION_USERS[@]}"; do
+    if [[ "$2" == "$s" ]]; then
+      agents_sync "$1" "$2" --no-skills
+      return 0
+    fi
+  done
+  agents_sync "$1" "$2"
+}
+
 setup_agent_rules() {
   step "各家 AI 的全局说明与方法类 skill（${AGENT_RULES_USERS[*]}；agents/shared-rules.md 的通用段、agents/skills/）"
   local u
@@ -891,7 +904,7 @@ setup_agent_rules() {
       pending "$u 这个用户还没有，全局说明没写（建了再跑一遍）"
       continue
     fi
-    agents_sync --apply "$u"
+    agent_rules_sync --apply "$u"
   done
 }
 
@@ -919,7 +932,7 @@ readback_agent_rules() {
       pending "$u 这个用户还没有，全局说明没查"
       continue
     fi
-    agents_sync --check "$u"
+    agent_rules_sync --check "$u"
     check_ddgs "$u" "$DDGS_VERSION" "${DDGS_DEPS[@]}"
   done
 }

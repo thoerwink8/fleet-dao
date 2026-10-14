@@ -976,3 +976,38 @@ describe('开单脚本：怎么算做完里提 PR 正文就拦（冷验收看不
     expect(calls.some((c) => c[0] === 'issue' && c[1] === 'create')).toBe(true);
   });
 });
+
+describe('开单脚本：怎么算做完里要 diff 外证据的，交给引擎的单拒开、本机做的单照开（决定 0093）', () => {
+  const body = BODY.replace(
+    '- 测试：过期的验证码被拒。',
+    '- 测试：过期的验证码被拒。\n- 界面改动带 1366、390 两张截图。',
+  );
+
+  it('【故意造出的失败】交给引擎的单写「截图」：拒开，gh 一次也不调，报出那一条和认出的词', async () => {
+    const { calls, run } = setup({ body });
+    await expect(run(...base)).rejects.toThrow(
+      /要 diff 外的证据[\s\S]*界面改动带 1366、390 两张截图。（认出：截图）[\s\S]*--local[\s\S]*单没开/,
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it('本机做的单（--local）照开，结果里带着命中的条目给入口提示改写', async () => {
+    const { run } = setup({ body });
+    const r = await run(...base, '--local');
+    expect(r).toMatchObject({ number: 36, local: true });
+    expect(r.offDiff).toEqual([{ item: '- 界面改动带 1366、390 两张截图。', words: ['截图'] }]);
+  });
+
+  it('没命中：结果里不带 offDiff', async () => {
+    const { run } = setup();
+    expect((await run(...base)).offDiff).toBeUndefined();
+  });
+
+  it('checkIssueBody（驾驶舱开单也调它）：不给 local 就拒，给了就过', () => {
+    expect(checkIssueBody(body)).toMatchObject({ ok: false, field: '怎么算做完' });
+    expect(checkIssueBody(body, { local: true })).toMatchObject({
+      ok: true,
+      offDiffHits: [{ words: ['截图'] }],
+    });
+  });
+});

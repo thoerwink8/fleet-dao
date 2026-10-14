@@ -7,9 +7,10 @@
 # 调用方先设 AGENTS_SYNC_CMD：怎么起同步脚本（france.sh 设成 /usr/bin/node 加 bin/agents-sync，测试换成假的）。
 # france.sh 和 deploy/test/agents-sync-account.test.sh 共用；要先 source common.sh。
 
-agents_sync() { # 模式 用户
+# 第三个起的参数原样传给同步脚本（会话用户带 --no-skills：引擎一次性会话的家里不装 skill，决定 0093）。
+agents_sync() { # 模式 用户 [别的参数…]
   local mode=$1 u=$2 out rc=0 line said=0 seen=0
-  out=$("${AGENTS_SYNC_CMD[@]}" "$mode" --user "$u" 2>&1) || rc=$?
+  out=$("${AGENTS_SYNC_CMD[@]}" "$mode" --user "$u" "${@:3}" 2>&1) || rc=$?
   while IFS= read -r line; do
     case $line in
     '  ↻ '*)
