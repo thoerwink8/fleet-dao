@@ -1,5 +1,5 @@
 // 现在的计划：pnpm plan，从 GitHub 现读版本、先后、母单和子单，打印出来（#654 起；之前叫版本快照 pnpm plan:snapshot，#138）。
-// 计划以 GitHub 为准（创始人 2026-09-26 晚拍，#169 第 5 件）：版本＝里程碑，版本里的先后写在里程碑说明的 <!-- fleet:order --> 标记
+// 计划以 GitHub 为准（#169 第 5 件）：版本＝里程碑，版本里的先后写在里程碑说明的 <!-- fleet:order --> 标记
 // 之间，母单、子单用 GitHub 自带的子议题。以前每个版本开始和结束时把它们抄进 docs/plan.md：抄出来的那份随时过时、还得有人记得重生成，
 // 一个事实两个家（docs/decisions/0015-github-one-home.md），所以只留这个现读的入口；GitHub 对账（github-audit.ts）也用 readPlan 核对先后。
 // 改这里之前必须知道：

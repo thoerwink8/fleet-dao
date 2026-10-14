@@ -9,13 +9,13 @@ import { NotInstalled } from './tools.mjs';
 /** @typedef {{ agent?: string | undefined, authorFamily?: string | string[] | undefined, excludeFamily?: string | undefined, ui?: boolean | undefined }} ProfileOptions */
 
 // 讨论的厂商族顺序。作者族由调用方显式传入；不能从环境变量或当前进程名猜。
-// 创始人 2026-10-05：「太慢了，我建议优先 gpt6luna，不行就 grok」——gpt 第一、grok 第二，其余排后面只当兜底
+// 「太慢了，我建议优先 gpt6luna，不行就 grok」——gpt 第一、grok 第二，其余排后面只当兜底
 // （当天 #1056 的一轮 25 分钟：deepseek、grok 起了会话卡在 streaming、没人换，最后 kimi 才出结论）。
 /** @type {string[]} */
 export const FAMILY_ORDER = ['gpt', 'grok', 'claude', 'deepseek', 'kimi'];
 /** @type {Record<ProfileName, Profile>} */
 export const PROFILES = {
-  // Mirasim 2026-09-30 的真实 modelRosterCache：codex/gpt-6-luna。
+  // Mirasim 的真实 modelRosterCache：codex/gpt-6-luna。
   code: { family: 'gpt', agent: 'codex', model: 'gpt-6-luna', route: 'cloud' },
   // Claude 必须经 reclaude；不要直接起 claude。model 留空，由 reclaude 的 JSON 输出报告实际模型。
   claude: { family: 'claude', agent: 'reclaude', model: null, route: 'local' },
@@ -42,9 +42,9 @@ const PROFILE_BY_FAMILY = {
   kimi: PROFILES.kimi,
 };
 
-// 连不上就换下一家（创始人 2026-09-25：一个渠道不生效，讨论的对方就换）。
+// 连不上就换下一家（一个渠道不生效，讨论的对方就换）。
 // 族顺序由 FAMILY_ORDER + PROFILE_BY_FAMILY 唯一决定；审出结论后不因不喜欢结论换人。
-// 「模型满载」也算连不上（2026-09-26：codex 快照报 done 带 incomplete「Selected model is at capacity」，没换人直接判没查成）。
+// 「模型满载」也算连不上（codex 快照报 done 带 incomplete「Selected model is at capacity」，没换人直接判没查成）。
 export const UNAVAILABLE =
   /\b(502|503|529)\b|no upstream available|Service Unavailable|overloaded|at capacity|try a different model/i;
 /** @param {string} name */

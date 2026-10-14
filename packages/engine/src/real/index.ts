@@ -580,7 +580,7 @@ export interface MirasimBridgeConfig {
  * 会话用户自己的 Mirasim 服务：账本目录、读账本用的（as-user）文件访问经 exec 以那个会话用户读（引擎自己的进程，
  * fleet 用户，进不去他的家，750，design 第十四节）；连接（connect）经桥接（bridge.ts）以那个会话用户的身份跑，不再由
  * 引擎的进程直连回环口——法国防火墙只放行会话用户和 root 连那个口（docs/ops.md 第五节「会话用户的口只许它自己连」，
- * #35），2026-09-28 实测引擎（fleet 用户）连不上，是这条路由派不出去的断链（#345 后续）。discoverMirasimEndpoint
+ * #35），实测引擎（fleet 用户）连不上，是这条路由派不出去的断链（#345 后续）。discoverMirasimEndpoint
  * 现找端口（exec 以会话用户 ls，不走网络，不碰防火墙）；令牌桥接自己以会话用户的身份现读，不经引擎传值。
  */
 export function mirasimDepsFor(

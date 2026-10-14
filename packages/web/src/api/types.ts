@@ -203,7 +203,7 @@ export type RoutingLayerRoute = z.infer<typeof RoutingLayerRouteSchema>;
 export type LivenessVerdict = z.infer<typeof LivenessVerdictSchema>;
 export type LivenessFact = z.infer<typeof LivenessFactSchema>;
 
-/** 渠道状态页的立即探测（驾驶舱改版 2026-10-07）：最近点过的、引擎接没接、每条的结论。 */
+/** 渠道状态页的立即探测：最近点过的、引擎接没接、每条的结论。 */
 export type RouteProbeStatus = z.infer<typeof RouteProbeStatusResponse>;
 /** 探针真历史（#1139）：每个渠道近 60 次，或没查成。 */
 export type RouteProbeHistory = z.infer<typeof RouteProbeHistoryResponse>;
@@ -220,7 +220,7 @@ export type EffortModel = z.infer<typeof EffortModelSchema>;
 export type RouteEffort = z.infer<typeof RouteEffortSchema>;
 export type UpdateRouteEffortBody = z.input<typeof UpdateRouteEffortRequest>;
 export type UpdatedRouteEffort = z.infer<typeof UpdateRouteEffortResponse>;
-/** 单子页给一段指定模型（驾驶舱改版 2026-10-07）。 */
+/** 单子页给一段指定模型。 */
 export type UpdateTaskRoutePinBody = z.input<typeof UpdateTaskRoutePinRequest>;
 export type TaskRoutePin = z.infer<typeof UpdateTaskRoutePinResponse>;
 

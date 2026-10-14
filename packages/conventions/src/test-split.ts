@@ -191,16 +191,16 @@ export function parseTimings(text: string | undefined): Timings | string {
 // ---- 装箱
 
 /**
- * 每台的目标：测试耗时合计 50 秒。依据（2026-10-03 主线全量一轮）：一台 GitHub 运行机 4 核，vitest 并行跑，「各文件耗时合计 / 墙钟」
+ * 每台的目标：测试耗时合计 50 秒。依据（主线全量一轮）：一台 GitHub 运行机 4 核，vitest 并行跑，「各文件耗时合计 / 墙钟」
  * 实测 1.9–2，所以 50 秒合计 ≈ 25 秒墙钟，加每台约 20 秒固定开销（检出、装依赖），一台 45 秒上下。
  */
 export const TARGET_BOX_MS = 50_000;
 /**
  * 最多几台。GitHub 免费档全账号同时只能跑 20 个 job：一个 PR 除测试外还有 changes、lint、web、deploy（最多 3）、check，
- * 主线那一轮和 PR 撞上时（2026-10-03 实测 PR 第一个 job 排队 38 秒）测试台越多越挤。先定 8，量过再调。
+ * 主线那一轮和 PR 撞上时（实测 PR 第一个 job 排队 38 秒）测试台越多越挤。先定 8，量过再调。
  */
 export const MAX_BOXES = 8;
-/** 耗时表读不出时每个文件按多少毫秒估：2026-10-03 那一轮 359 个文件合计 687 秒，平均 1.9 秒。 */
+/** 耗时表读不出时每个文件按多少毫秒估：那一轮 359 个文件合计 687 秒，平均 1.9 秒。 */
 export const FALLBACK_FILE_MS = 2_000;
 
 export interface TestBox {

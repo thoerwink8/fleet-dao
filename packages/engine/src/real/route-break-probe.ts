@@ -1,7 +1,7 @@
 // 真干活在路由上断了，当场给那条路由排一次立即探测（#1636；#1809 钩挪到收场记账）。
 // 和驾驶舱「立即探测」同一条路：写一条 routing.probe.request（引擎的 jobs/route-probe-now.ts 几秒内接手，忽略节奏）。
 // 改这里之前必须知道：
-// - 触发点是 runs-writer.record 判 routeOutcome=fail 且带 routeId，不是选路换渠道（failedChannel 2026-10-06 起不再设）。
+// - 触发点是 runs-writer.record 判 routeOutcome=fail 且带 routeId，不是选路换渠道（failedChannel 不再设）。
 // - 同一条路由 ROUTE_BREAK_PROBE_DEDUPE_MS 内已经有一次在排队、在探、刚探完（不管人点的还是自动的）就不再排：
 //   一批任务同时在一条路由上断，只探一次。判法读现有的请求记录，不另建表。
 // - 排不成（读写库抛）只记日志，不抛：它不能挡收场记账。调用方不用再包 try。

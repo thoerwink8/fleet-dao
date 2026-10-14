@@ -1,6 +1,6 @@
 // 引擎总开关的闸（#1086，设置 engine.master；形状和读法在 @fleet-dao/shared 的 engine-switch.ts）。
-// 关着 = 不拉单、不派活、不起任何「干活」的模型会话；探针、路由探针、读额度、看门狗、对账这些看家检查照跑（创始人 2026-10-05
-// 约 22:40：关着也要能看到渠道通不通）。开着 = 引擎接活，再由按项目的「让 AI 接活」（repos.auto_dispatch_since）细分哪些项目派。
+// 关着 = 不拉单、不派活、不起任何「干活」的模型会话；探针、路由探针、读额度、看门狗、对账这些看家检查照跑
+// （关着也要能看到渠道通不通）。开着 = 引擎接活，再由按项目的「让 AI 接活」（repos.auto_dispatch_since）细分哪些项目派。
 // 改这里之前必须知道：
 // - 闸只有三个入口读它，不在每个任务里各加一个 if：定时器入口（jobs/timers.ts，标了 needsMaster 的任务：拉单、巡检）、
 //   选路（real/store-ports.ts 的 pickRoute：任务工作流要起会话先选路）、一次性会话登记（real/one-shot-sessions.ts 的 enter：

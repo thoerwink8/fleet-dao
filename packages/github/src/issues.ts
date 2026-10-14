@@ -642,7 +642,7 @@ export async function openIssue(
       // 页数自己数、够了就返回 null（等效 break，让 pages() 的生成器正常收尾），不把 3 传给 pages() 的
       // maxPages——那是它自己的翻页安全网（次数很大，兜底真正翻不到头的情况），跟这里「只看最近 300 张」
       // 的业务决定是两回事：传 3 会让它把「第 4 页还有数据」也当成「没翻完」抛 TOO_MANY_PAGES，
-      // 单子一过 300 张开单就全部失败（法国生产 2026-09-27 踩过）。
+      // 单子一过 300 张开单就全部失败（法国生产踩过）。
       let pageCount = 0;
       for await (const page of deps.client.pages({
         method: 'GET',

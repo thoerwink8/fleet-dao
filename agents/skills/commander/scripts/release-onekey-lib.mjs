@@ -170,7 +170,7 @@ async function buildSummary(io, target) {
 async function readMainCi(io) {
   const r = io.run('gh', [
     'api',
-    // 按名字过滤：提交上检查多到一页装不下时，不过滤会把 check 挤出第一页（2026-10-13，同发版车那处）
+    // 按名字过滤：提交上检查多到一页装不下时，不过滤会把 check 挤出第一页（同发版车那处）
     'repos/{owner}/{repo}/commits/main/check-runs?check_name=check&per_page=100',
     '--jq',
     '{total: .total_count, runs: [.check_runs[] | select(.name=="check") | {status,conclusion}]}',

@@ -160,7 +160,7 @@ export const SegmentRunSchema = z.object({
 /** 编译期闸：和 segment-runs.ts 读出来的形状一字不差。 */
 export const SEGMENT_RUN_MATCHES_READING: Same<z.infer<typeof SegmentRunSchema>, SegmentRunView> = true;
 
-// —— 按单指定模型（驾驶舱改版 2026-10-07：「每个任务能点进去随意切换模型」）——
+// —— 按单指定模型（「每个任务能点进去随意切换模型」）——
 // 存在库里（task_route_pins），引擎每次给这张单的这一段选路时现读（engine 的 real/store-ports.ts）：在跑的这一轮不打断，
 // 下一次选路（下一轮、重试、验收开始）就按它；指定的模型派不出时引擎停下等人、写明原因，不悄悄换别的。
 

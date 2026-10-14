@@ -1,4 +1,4 @@
-// 发版前先暂停手头的活（#618，创始人 2026-10-05 约 21:00：「每次发版本时，尽量在感觉要发版本的时候，就先把手头的活暂停。等手头的工作都暂停完，
+// 发版前先暂停手头的活（#618，「每次发版本时，尽量在感觉要发版本的时候，就先把手头的活暂停。等手头的工作都暂停完，
 // 就可以开始发版本。之后按照最优的顺序，把当前的任务清单依次执行下去。」）。release-train.mjs 是外壳（真的 ssh/gh/git/pnpm/睡眠），
 // 全部逻辑在这份 release-train-lib.mjs（io 全部注入）。node release-train.mjs 不带参数看用法。
 // 改这里之前必须知道：
@@ -18,7 +18,7 @@
 // - 第 4 步发版不跑法国检出里的 release.sh（那份经常还是上一版）。ssh 的是 releaseBootCommand：
 //   把同目录 release-boot.sh 送过去，解开目标提交的 deploy/ 再 exec 那一版（#1294）。没有或读不出就拒，不退回检出里那份。
 //   --check 仍跑检出里那份。
-// - 第 4 步不靠一条前台 ssh 撑完整个发布（#1995，2026-10-13 连着两次 ssh 被重置、发布其实跑完了却报「没成」）：
+// - 第 4 步不靠一条前台 ssh 撑完整个发布（#1995，连着两次 ssh 被重置、发布其实跑完了却报「没成」）：
 //   releaseLaunchCommand（release-launch.sh）让法国用 systemd 临时服务 fleet-train-release-<前12位> 跑 release-boot.sh，
 //   日志末行 fleet-dao-release-exit=<n> 是发布结果；本机每 pollMs 把同一条幂等命令再发一遍读现状（started/attached/finished/lost/busy），
 //   ssh 断了只重连，总时限 releaseMs，到点才判没成。同一目标重跑 start：服务还在跑就接着看，不起第二个、不报锁冲突。
@@ -237,7 +237,7 @@ const france = (io, command, timeoutMs = 60_000) => io.ssh(command, { timeoutMs 
 
 /**
  * fleet-api engine status → { ok: true, on } 或 { ok: false, why }。
- * 法国在用的版本还没有 `engine` 子命令（总开关 #1086 之后才有；2026-10-06 第一次发版就撞上：在用 390eca1f，fleet-api 打用法、退出非 0）：
+ * 法国在用的版本还没有 `engine` 子命令（总开关 #1086 之后才有；第一次发版就撞上：在用 390eca1f，fleet-api 打用法、退出非 0）：
  * 没有总开关就没有什么要暂停的，当「关着」读（legacy: true），第 2 步记跳过，发完新版本就有了。只认「打了用法」这一种；连不上库之类照旧算读不到。
  */
 async function engineStatus(io) {
@@ -268,7 +268,7 @@ async function dispatchSet(io, repo, reason) {
 /**
  * 要发的那个提交的汇总检查（ci.yml 的 check job，必过检查的汇总）：green / red / pending，读不到 unknown。
  * 看要发的提交，不看主线头：主线上自动合并一个接一个进来时，主线头的 CI 每次都被新合并取消重跑，
- * 「主线头 CI 空下来」永远等不到（2026-10-07 夜等了 21 分钟卡住）；发出去的就是这个提交，它自己绿了就够。
+ * 「主线头 CI 空下来」永远等不到（等了 21 分钟卡住）；发出去的就是这个提交，它自己绿了就够。
  * 标签目标在解析出提交之前拿不到号，退回看主线头。
  */
 function ciRef(state) {
@@ -276,7 +276,7 @@ function ciRef(state) {
 }
 
 /**
- * 后备读法（check-runs 接口读不出时用；2026-10-07 夜它连着回 HTTP 500 一个多小时，发版车整个被卡住）：
+ * 后备读法（check-runs 接口读不出时用；它连着回 HTTP 500 一个多小时，发版车整个被卡住）：
  * 看这个提交的 ci 工作流运行。ci 工作流里就含汇总检查（check），它的结论就是汇总的结论。
  * 只对点名的提交用（主线头没有提交号，不走这条）；读不到照旧回 unknown，不拿空顶。
  */
@@ -325,7 +325,7 @@ async function mainCi(io, ref = 'main') {
 
 /**
  * 按名字过滤取汇总检查（check_name=check）并按 total_count 翻页取全：
- * 提交上检查多到一页装不下时（2026-10-13 一个提交 210 条，merge-gate 刷屏），不过滤会把 check 挤出第一页，读成 0 条。
+ * 提交上检查多到一页装不下时（一个提交 210 条，merge-gate 刷屏），不过滤会把 check 挤出第一页，读成 0 条。
  * 任何一页读不出都回 unknown，不拿已读到的半截当结论。
  */
 async function readCheckRuns(io, ref) {

@@ -73,7 +73,7 @@ export interface RouteFacts {
   /**
    * Claude 订阅池对应的 reclaude 组织类型（pools.org_kind）。会话用户同一时刻只挂一个组织，只有和它挂着的一样的池
    * 能派（ChooseRouteInput.liveOrg）；拼车用满引擎切号（#157），不再有「拼车号是备池、只接轻活」那一套（两个会话用户
-   * 同时跑时的主池、备池规则 2026-09-27 随 #59 删掉）。不是 Claude 订阅池的不填。
+   * 同时跑时的主池、备池规则随 #59 删掉）。不是 Claude 订阅池的不填。
    */
   orgKind?: OrgKind | null;
   modelId: string;
@@ -166,7 +166,7 @@ export interface OrgPlanView {
    */
   drain?: OrgKind | null;
   /**
-   * 渠道不可用（#194，创始人 2026-10-04 约 22:30：可用账号 0 个「渠道不可用」）：带组织类型的池一个都不派，写明原因；
+   * 渠道不可用（#194，可用账号 0 个「渠道不可用」）：带组织类型的池一个都不派，写明原因；
    * 有账号恢复后自己消失。不给 = 渠道没问题。
    */
   channelDown?: string | null;

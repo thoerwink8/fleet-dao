@@ -10,7 +10,7 @@ import type { FeishuAuth, FeishuIdentity } from './ports.ts';
 export const FEISHU_AUTHORIZE_URL = 'https://accounts.feishu.cn/open-apis/authen/v1/authorize';
 export const FEISHU_TOKEN_URL = 'https://accounts.feishu.cn/oauth/v3/token';
 // 带 PKCE 的浏览器登录只能用 v2 令牌端点换：飞书授权页文档写明「使用 PKCE 时暂时搭配 v2 换取 Token，后续支持最新端点」，
-// 拿 v3 换会报 20049「PKCE code challenge failed」（2026-09-26 线上实测）。v2 只收 JSON 请求体。
+// 拿 v3 换会报 20049「PKCE code challenge failed」（线上实测）。v2 只收 JSON 请求体。
 export const FEISHU_TOKEN_URL_PKCE = 'https://open.feishu.cn/open-apis/authen/v2/oauth/token';
 export const FEISHU_USER_INFO_URL = 'https://open.feishu.cn/open-apis/authen/v1/user_info';
 

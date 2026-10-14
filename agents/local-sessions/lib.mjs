@@ -1,12 +1,12 @@
 // 本机会话心跳（#1991，母单 #1990）：钩子写心跳、定时任务把心跳推给法国，两边共用的这一份。
-// 创始人 2026-10-13：「我本机其实在做的任务……只要是在做的，有没有办法感知到？」
+// 「我本机其实在做的任务……只要是在做的，有没有办法感知到？」
 //
 // 怎么跑：
 // - heartbeat.mjs 挂在 Claude Code 的 SessionStart / Stop / SubagentStop / SessionEnd 上（async，不让会话等），每次触发把这个会话
 //   （子代理单算一个）的心跳写进 ~/.fleet-dao/local-sessions/sessions/<编号>.json。不常驻、不联网、出什么错都 exit 0。
 // - push.mjs 由 Windows 计划任务每 2 分钟跑一次：把心跳凑成一份，POST 到法国的 /api/nodes/sessions（通行证和看板多机同一套），
 //   结果（成没成、为什么）写进 ~/.fleet-dao/local-sessions/last-push.json。凑的时候读各会话记录的修改时间当「最后一次动」、
-//   从记录尾巴读最后在调的工具名（以前靠每次调工具都跑一次心跳，2026-10-13 摘掉）：看板误差不超过推送间隔 2 分钟。
+//   从记录尾巴读最后在调的工具名（以前靠每次调工具都跑一次心跳，摘掉）：看板误差不超过推送间隔 2 分钟。
 // - install.mjs 一条命令装、一条命令卸（pnpm local-sessions:install / local-sessions:uninstall）。
 //
 // 改这里之前必须知道（隐私边界，法国那边的 schema 是 strict，多一个字段就整份拒收）：

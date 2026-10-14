@@ -4,10 +4,10 @@
 //
 //   node ask.mjs --text 题面.md --round <0|1|2…> [--models gpt[,kimi,glm,grok]] [--limit 30] [--out 目录]
 //   --round 0 是各自独立答；1 起是挑错，题面必须带【推演】段（walkthrough.mjs），缺了不发、退出码 2。
-//   不给 --models 只问 GPT（创始人 2026-09-26：「和 gpt 讨论就够了」）。结论落在 ~/.local/share/second-opinion/runs/。
+//   不给 --models 只问 GPT（「和 gpt 讨论就够了」）。结论落在 ~/.local/share/second-opinion/runs/。
 //
 // 退出码：0 至少一家答上；2 一家都没答上、参数不对，或这台机器缺 cursor-agent。
-// 并发上限：同一时刻最多 MAX_PAR 个 cursor-agent（design 第九节起步值 3；2026-09-26 五家齐跑 + 工人把进程数顶满、宿主崩过）。
+// 并发上限：同一时刻最多 MAX_PAR 个 cursor-agent（design 第九节起步值 3；五家齐跑 + 工人把进程数顶满、宿主崩过）。
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -40,7 +40,7 @@ function args(argv) {
   return o;
 }
 
-// 断链修复（本机 2026-09-28 两次实测）：第一版让 cursor-agent 读工作目录里的题面文件，指望 cursorAgentEnv() 摘掉
+// 断链修复（本机两次实测）：第一版让 cursor-agent 读工作目录里的题面文件，指望 cursorAgentEnv() 摘掉
 // Git Bash 留下的 SHELL/MSYSTEM/TERM 就能让它的钩子猜成本机原生壳。实测发现不够：只要父进程链里有 Git Bash，
 // 就算连 SHELL/MSYSTEM/TERM/SHLVL/_/EXEPATH/PWD/HOME 全摘、直接起 node.exe、甚至经 powershell.exe 起，Cursor
 // 的钩子照样按 bash 跑它那段 PowerShell 转发脚本、把读文件的工具调用拦掉——从纯 PowerShell 会话起才正常。真正

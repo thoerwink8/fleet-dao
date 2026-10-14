@@ -183,7 +183,7 @@ export const RULES: readonly FailureRule[] = [
     humanFix: '在{machine}上以{user}重跑 reclaude login，按登录流程在浏览器里批准；然后在驾驶舱点「继续」',
     resumeAfterPark: true,
   },
-  // 封号：原文还写着「请稍后重试」，照做只会在同一个池里反复撞（2026-09-22 独享号被封，reclaude 实测）。
+  // 封号：原文还写着「请稍后重试」，照做只会在同一个池里反复撞（独享号被封，reclaude 实测）。
   {
     id: 'AU1',
     title: '账号被封',
@@ -223,7 +223,7 @@ export const RULES: readonly FailureRule[] = [
     blip: true,
     routeOutcome: 'fail',
   },
-  // 时间窗额度用满（5 小时、周、月）。design 第一节「会话断了接着干」（2026-09-25 拍）：挂起到清零时刻，续上同一个会话，
+  // 时间窗额度用满（5 小时、周、月）。design 第一节「会话断了接着干」：挂起到清零时刻，续上同一个会话，
   // 不开新的；要等太久（超过 waitMaxSeconds，例如周限）才换到别的池（换用户的接续由会话端口定：fork 续或接力任务书）。
   // Claude 订阅池（拼车、独享共用一个会话用户）不原地睡到清零：这个池用满了引擎会切号（#157），睡着的活就一直等到
   // 清零、白放着切过去的那个组织。所以马上回去选路：没切就等这条路由，切了号这条路由派不了，照常选到切过去的那个池接着干
@@ -258,7 +258,7 @@ export const RULES: readonly FailureRule[] = [
     text: /仅支持 Claude Code 客户端/,
     routeOutcome: 'fail',
   },
-  // cursor-agent 的认证没过：-p 模式下 stderr 几行、退出 1、没有任何 JSON。法国用 API 密钥认证（创始人 2026-09-27 拍：
+  // cursor-agent 的认证没过：-p 模式下 stderr 几行、退出 1、没有任何 JSON。法国用 API 密钥认证（
   // 浏览器登录在没有桌面的服务器上存不下），原话取自发行包 2026.09.23、2026.09.26：密钥换令牌被拒（无效、被撤、过期）是
   // 「⚠ Warning: The provided API key is invalid.」（插头去掉了它自带的终端颜色），拉模型清单时被拒是「Authentication
   // failed: your Cursor credentials or API key are invalid or expired.」，常驻的 worker 是「Your authentication is
@@ -294,7 +294,7 @@ export const RULES: readonly FailureRule[] = [
     resumeAfterPark: true,
   },
   // grok（SuperGrok 订阅的 Grok Build 命令行，#266）没登录或登录续不上：无头模式一样凭据都没有是「Not signed in. To authenticate
-  // without a browser, run: grok login --device-code …」（error 帧和 stderr 各一遍、退出 1，法国实跑 2026-09-27；源码
+  // without a browser, run: grok login --device-code …」（error 帧和 stderr 各一遍、退出 1，法国实跑；源码
   // crates/codegen/xai-grok-pager/src/headless.rs 的 auth_required_message）；登录过期、续不上是「Token expired. Run `grok login`
   // to re-authenticate.」「Authentication rejected by server. Run `grok login` …」「Your session has expired. Run `grok login` to
   // sign in again.」「Authentication could not be refreshed. Run `grok login` …」「Auth recovery exhausted; re-authentication
@@ -332,7 +332,7 @@ export const RULES: readonly FailureRule[] = [
       'auth',
     ],
     // 只认说「要重新登录」的整句：原文里随便一个带 /login 的网址不能让整个池停下。
-    // reclaude 没有有效登录时不报错退出，而是开始设备授权、打出授权链接后一直等，直到起不来被强杀（法国实测 2026-09-26）：
+    // reclaude 没有有效登录时不报错退出，而是开始设备授权、打出授权链接后一直等，直到起不来被强杀（法国实测）：
     // 它 stderr 里那句「no valid login detected」就是登录失效，不能按「会话起不来」原路重起。
     text: /not logged in|please run \/login|no valid login detected|重新登录|完成登录|token (?:has )?expired|invalid (?:x-)?api[ _-]?key|authentication (?:failed|required)|unauthori[sz]ed|unauthenticated/i,
     statuses: [401],
@@ -359,7 +359,7 @@ export const RULES: readonly FailureRule[] = [
   // 常常只是这一条路由的目录里没有它，别的路由上的同一个模型照样能用，所以不整池暂停；
   // 这条路由的失败记进熔断，由熔断去下线它。
   // grok 点名的型号它不认：「Couldn't set model '<名字>': Invalid params: "unknown model id". Run 'grok models' to see available
-  // models.」（error 帧和 stderr 各一遍、退出 1，法国实跑 2026-09-27，grok 1.0.41）。
+  // models.」（error 帧和 stderr 各一遍、退出 1，法国实跑，grok 1.0.41）。
   {
     id: 'MD1',
     title: '模型不存在或已下架',
@@ -381,7 +381,7 @@ export const RULES: readonly FailureRule[] = [
   // 就退出（插头固定带 --trust，撞上就是起法坏了；插头把那一句从整段里捞出来，最后一行是「Pass --trust, --yolo, or -f if you
   // trust this directory」）；带了 --trust 却写不下信任记录是「Error: Failed to trust workspace at <目录>」。
   // grok 从 /dev/stdin 读提示词要真管道：插头前面垫了一个 cat，没垫上（或者 stdin 不是管道也不是终端）时打开 stdin 报
-  // 「No such device or address (os error 6)」（ENXIO，法国实跑 2026-09-27），是起法坏了，不是没登录。
+  // 「No such device or address (os error 6)」（ENXIO，法国实跑），是起法坏了，不是没登录。
   {
     id: 'CF1',
     title: '执行方式或路由配置不对',
@@ -527,7 +527,7 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
     stepsOnly: true,
   },
-  // 2026-08-17 GitHub 部分中断时出现过；过几分钟再试，还不行再挂起（也可能真是权限不够）。
+  // GitHub 部分中断时出现过；过几分钟再试，还不行再挂起（也可能真是权限不够）。
   {
     id: 'GH2',
     title: 'GitHub 暂时不让访问',
@@ -619,7 +619,7 @@ export const RULES: readonly FailureRule[] = [
   // 内存超限被内核杀掉：只认有证据的——会话端口查过 cgroup 的按内存杀进程记录交回的 oom_killed（real/kill-evidence.ts），
   // 或者原文里写着内核的 OOM 字样。从检查点重起一次；再来就是资源或任务本身的问题，交帅位。
   // 改这里之前必须知道：原来这条把所有 137、143、SIGKILL、SIGTERM 都算进来、提示写死「多半是内存超限」，把「我们自己的发布
-  // 把它叫停了」盖住了（2026-09-27 19:28:51、20:46:26 两次都是发布重启引擎）。没证据的信号杀掉归 KL4，不猜。
+  // 把它叫停了」盖住了（出过的两次都是发布重启引擎）。没证据的信号杀掉归 KL4，不猜。
   {
     id: 'KL2',
     title: '内存超限被内核杀掉',

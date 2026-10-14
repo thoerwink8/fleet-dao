@@ -70,7 +70,7 @@ export type AutoGroomWhy = 'ungroomed_old' | 'idle';
 
 /**
  * 拉单一轮的结尾要不要叫一次整理（只判触发条件；6 小时间隔、每日次数、锁、总开关由 requestGroom 判）：
- * - 有从没整理过的老单：叫（它们不整理就进不了候选，不必等空闲，指挥官 2026-10-08 补）；
+ * - 有从没整理过的老单：叫（它们不整理就进不了候选，不必等空闲，指挥官补）；
  * - 否则有空位、这一轮在这个仓一条都没起、待办候选还有：叫。
  */
 export function autoGroomWhy(f: AutoGroomFacts): AutoGroomWhy | null {
