@@ -482,7 +482,7 @@ async function releaseWatchRound(
       s.deps.log('warn', '看门狗：推了一条', { dedupeKey: v.key, title: v.title });
   };
 
-  const rel = judgeReleaseAttention(facts.value);
+  const rel = judgeReleaseAttention(facts.value, now);
   const wantedRelease = new Set<string>();
   if (rel.kind === 'alert') {
     found += 1;
