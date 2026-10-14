@@ -4,6 +4,8 @@
 // 公网看得到 /healthz：对外只说哪一步、几点，不带仓名、单号和断的原因原文（原因只进日志，细节在卡住报警里）。
 // 引擎总开关关着时（#1086）巡检的定时任务整个不跑（jobs/timers.ts 的 needsMaster 闸）、连跳过的轮次都不写 canary_runs，
 // 这一项认得出「总开关关着＝跳过」：照实说跳过、回待定、不拿断了的旧结论报 canary_broken、也不当通过（#1141 / #1808）。
+// 发版那一趟会先暂停总开关、发完再开回（决定 0032）。暂停的那几分钟如果只写「总开关关着」，监督会当成新的断链重复开单
+// （#1859、#2084）。读得到发版进度时：进行中写明「按这一趟暂停，发完开回」；发前开着、这一趟已经该开回却还关着，改报红。
 // 最近一轮结论早于当前部署（引擎进程起来的时刻）时同样回待定，写明等新一轮——发版装上修复后不再拿修复前的断结论报红（#1808）。
 // 最近一轮是「跳过」也回待定、不当通过（发版期间跳过曾被误判成修好，#1773 / #1808）。
 // 待定不当红、也不让 /healthz 变 503（#1909）：它照样抛，但抛的是 PublicHealthPending（health.ts）——健康页画成「待定」
@@ -13,6 +15,8 @@
 // 不在正式环境（FLEET_ENV=production，法国是）的（开发、测试）报「未接」。这一项跟着巡检的结论自己变红，发版脚本只标待处理、不退回
 // （deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）。
 
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
   CANARY_RUN_TIMEOUT_MINUTES,
   CANARY_STAGE_NAMES,
@@ -21,6 +25,7 @@ import {
   latestCanaryRuns,
 } from '@fleet-dao/db';
 import type { EngineMasterState } from '@fleet-dao/shared';
+import { parseTrainState, TRAIN_DIR } from './france-release.ts';
 import { PublicHealthError, PublicHealthPending } from './health.ts';
 
 /** 不在正式环境：这一项报「未接」（公网看得到）。 */
@@ -54,11 +59,123 @@ function masterOffWords(state: MasterOff): string {
   return '引擎总开关关着';
 }
 
+/**
+ * 总开关关着时，发版进度能解释的那一种（#2084）。
+ * 对外的句子不带进度文件里的原因原文：那里面有命令名，公网健康页不收。
+ */
+export type MasterRelease =
+  | { kind: 'pausing'; phase: string; stuck: boolean; restoring: boolean }
+  /** 发版中途撤了、而且已经动手发过：按规矩保持暂停，等人开回。 */
+  | { kind: 'held'; phase: string }
+  /** 发前开着，这一趟已经该开回却还关着。 */
+  | { kind: 'not_restored'; phase: string; why: string | null }
+  /** 进度文件读不到或认不出：分不清是不是发版暂停，不能把它说成没事。 */
+  | { kind: 'unread' };
+
+type TrainOk = Extract<ReturnType<typeof parseTrainState>, { ok: true }>;
+
+function atMs(v: string | null | undefined): number | null {
+  if (!v) return null;
+  const n = Date.parse(v);
+  return Number.isNaN(n) ? null : n;
+}
+
+/**
+ * 发版进度能不能解释「总开关现在关着」。
+ * 解释不了（没在发、发前本来就关、关的时刻晚于这一趟结束）回 null，调用方照旧说「总开关关着」。
+ * masterAt 是设置行的更新时刻：只有「人关的」才有。晚于这一趟结束，就是发完之后又被关上，不算这一趟没开回。
+ */
+export function masterReleaseOf(train: TrainOk | null, masterAt: string | undefined): MasterRelease | null {
+  if (!train) return null;
+  if (train.beforeMaster !== true || train.phaseIndex === null) return null;
+  const idx = train.phaseIndex;
+  const phase = train.phase;
+  const inPause = idx >= 2 && idx < 7;
+  const restoring = idx === 7;
+  if (train.status === 'running' || train.status === 'blocked') {
+    if (inPause || restoring) {
+      return { kind: 'pausing', phase, stuck: train.status === 'blocked', restoring };
+    }
+    // 第 8 步是派清单：恢复那一步已经走过。走到这儿还关着，就是没开回。
+    if (idx >= 8) return { kind: 'not_restored', phase, why: train.why };
+    return null;
+  }
+  const off = atMs(masterAt);
+  const done = atMs(train.updatedAt);
+  const leftByThisTrip = off !== null && done !== null && off <= done;
+  if (train.status === 'aborted') {
+    // 已经动手发过（第 4 步起）再撤：不把总开关开回，这是定的，不是没恢复成。
+    if (idx >= 4) return leftByThisTrip || off === null ? { kind: 'held', phase } : null;
+    return leftByThisTrip ? { kind: 'not_restored', phase, why: train.why } : null;
+  }
+  if (train.status === 'failed') {
+    if (idx >= 2 && (leftByThisTrip || off === null)) return { kind: 'not_restored', phase, why: train.why };
+    return null;
+  }
+  // done：发完应已开回。关的时刻不晚于这一趟结束，才是没开回；再晚就是发完之后另有人关的。
+  if (train.status === 'done') {
+    return leftByThisTrip ? { kind: 'not_restored', phase, why: train.why } : null;
+  }
+  return null;
+}
+
+/** 法国上发版进度那一份；没有这个文件回 null。别的读失败照抛，调用方说「读不到」，不当成没在发。 */
+export async function readReleaseTrainJson(dir: string = TRAIN_DIR): Promise<string | null> {
+  try {
+    return await readFile(join(dir, 'release-train.json'), 'utf8');
+  } catch (err) {
+    if ((err as { code?: string }).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
 export type CanaryHealth =
   | { ok: true; note: string }
   /** 待定：不当通过、也不报 canary_broken（结论早于部署、跳过、总开关关着）。 */
   | { ok: 'pending'; note: string }
   | { ok: false; code: string; message: string; detail: string | undefined };
+
+function lastRound(latest: { finished: CanaryRunRow | null }): string {
+  const { finished } = latest;
+  return finished?.endedAt && finished.verdict
+    ? `；最近一轮有结论的是 ${stamp(finished.endedAt)}「${CANARY_STAGE_NAMES[finished.stage] ?? finished.stage}」`
+    : '';
+}
+
+/** 总开关关着、又能用发版进度解释时，对外那一句（#2084）。解释不了的不进这里。 */
+function masterReleaseHealth(
+  latest: { finished: CanaryRunRow | null },
+  masterOff: MasterOff,
+  release: MasterRelease,
+): CanaryHealth {
+  const last = lastRound(latest);
+  if (release.kind === 'unread') {
+    return {
+      ok: 'pending',
+      note: `跳过：${masterOffWords(masterOff)}（发版进度读不到，分不清是不是发版暂停），巡检没跑、没验${last}`,
+    };
+  }
+  if (release.kind === 'pausing') {
+    const head = release.restoring
+      ? `发版正在把总开关开回（${release.phase}）`
+      : release.stuck
+        ? `发版卡在${release.phase}，总开关按这一趟暂停，接着走完会开回`
+        : `发版进行中（${release.phase}），总开关按这一趟暂停，发完开回`;
+    return { ok: 'pending', note: `跳过：${head}；巡检没跑、没验${last}` };
+  }
+  if (release.kind === 'held') {
+    return {
+      ok: 'pending',
+      note: `跳过：发版中途撤了（${release.phase}），总开关按规矩保持暂停，等人开回；巡检没跑、没验${last}`,
+    };
+  }
+  return {
+    ok: false,
+    code: 'master_not_restored',
+    message: `总开关没按发版前开回（${release.phase}），巡检因此没跑`,
+    detail: release.why ?? undefined,
+  };
+}
 
 /**
  * 纯判断：最近一轮有结论的、正在跑的那一轮 → 好不好、对外说什么。
@@ -75,16 +192,18 @@ export function canaryHealth(
    * 不传＝不做「早于部署」判断（旧调用方、测试）。
    */
   deployedAt?: Date,
+  /**
+   * 发版进度对「现在关着」的解释（#2084）。不传＝不看发版（旧调用方、测试）。
+   * 开着时忽略：发版解释只用于关着的那一支。
+   */
+  release?: MasterRelease | null,
 ): CanaryHealth {
   // 总开关关着：巡检的定时任务整个不跑、跳过的轮次不写 canary_runs，翻到的「最近一轮」可能是很久以前的断结论——
   // 不拿它报 canary_broken（#1050 的口径：关着是创始人定的状态，故意不跑不算断），照实说跳过和原因、回待定（#1808：不当通过）。
+  // 发版暂停的那几分钟另说（#2084）：写明发完开回，不把这句写成没头没尾的「总开关关着」。
   if (masterOff && !masterOff.on) {
-    const { finished } = latest;
-    const last =
-      finished?.endedAt && finished.verdict
-        ? `；最近一轮有结论的是 ${stamp(finished.endedAt)}「${CANARY_STAGE_NAMES[finished.stage] ?? finished.stage}」`
-        : '';
-    return { ok: 'pending', note: `跳过：${masterOffWords(masterOff)}，巡检没跑、没验${last}` };
+    if (release) return masterReleaseHealth(latest, masterOff, release);
+    return { ok: 'pending', note: `跳过：${masterOffWords(masterOff)}，巡检没跑、没验${lastRound(latest)}` };
   }
   const { finished } = latest;
   const running =
@@ -173,9 +292,10 @@ export function canaryHealth(
 /**
  * 健康检查：现读库里最近的两轮和引擎总开关（#1141，设置表读不到照抛——报「没查成」，不当成关着、更不当成没问题）；
  * 读不到照抛（报「连不上」，不当成没问题）。好的时候带一句说明。
- * 待定（结论早于部署、跳过、总开关关着）抛 canary_pending（#1808），而且抛的是 PublicHealthPending（#1909）：
+ * 待定（结论早于部署、跳过、总开关关着、发版暂停中）抛 canary_pending（#1808），而且抛的是 PublicHealthPending（#1909）：
  * 不当通过、也不报 canary_broken，更不让 /healthz 变 503——健康页画成「待定」等着，不当断链。
- * 只有「发版后等太久还等不到新一轮结论」（canary_pending_too_long）这类真卡住照旧抛 PublicHealthError 报红。
+ * 只有「发版后等太久还等不到新一轮结论」（canary_pending_too_long）、以及「发前开着、发完没开回」
+ * （master_not_restored，#2084）这类真卡住照旧抛 PublicHealthError 报红。
  */
 export function canaryHealthCheck(
   db: Db,
@@ -186,11 +306,31 @@ export function canaryHealthCheck(
    * 测试要验「结论晚于部署」时传入更早的时刻。
    */
   deployedAt?: Date,
+  /**
+   * 发版进度文件的原文（#2084）。不传＝不看发版，关着仍只说「总开关关着」。
+   * 正式环境要传：不传的话，发版暂停的那几分钟和真没开回长得一样。
+   * 没有这个文件回 null；读失败照抛，这里收成「读不到」，不让整项变成笼统的「连不上」。
+   */
+  readTrain?: () => Promise<string | null>,
 ): () => Promise<string> {
   const boot = deployedAt ?? now();
   return async () => {
     const [latest, master] = await Promise.all([latestCanaryRuns(db), readMaster()]);
-    const got = canaryHealth(latest, now(), master.on ? undefined : master, boot);
+    let release: MasterRelease | null = null;
+    if (!master.on && readTrain) {
+      try {
+        const json = await readTrain();
+        if (json !== null) {
+          const parsed = parseTrainState(json);
+          release = parsed.ok
+            ? masterReleaseOf(parsed, master.why === 'set' ? master.at : undefined)
+            : { kind: 'unread' };
+        }
+      } catch {
+        release = { kind: 'unread' };
+      }
+    }
+    const got = canaryHealth(latest, now(), master.on ? undefined : master, boot, release);
     if (got.ok === true) return got.note;
     if (got.ok === 'pending') throw new PublicHealthPending(got.note);
     throw new PublicHealthError(got.code, got.message, got.detail);

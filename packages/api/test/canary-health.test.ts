@@ -17,7 +17,10 @@ import {
   CANARY_STALE_MS,
   canaryHealth,
   canaryHealthCheck,
+  type MasterRelease,
+  masterReleaseOf,
 } from '../src/canary-health.ts';
+import { parseTrainState } from '../src/france-release.ts';
 import { PublicHealthError, PublicHealthPending, runHealthChecks } from '../src/health.ts';
 
 // 路径放进变量：api 的 tsconfig 不收 web 包的文件，照 deploy-lag.test.ts 的写法运行时再载
@@ -260,6 +263,127 @@ describe('canary 项怎么判', () => {
     });
   });
 
+  /** 发版进度的最小一份。phase 是步号：2 暂停、3 等收尾、4 起算已经动手发、7 恢复、8 派清单。 */
+  function train(over: Record<string, unknown> = {}) {
+    const parsed = parseTrainState(
+      JSON.stringify({
+        status: 'running',
+        phase: 3,
+        before: { master: true },
+        updatedAt: '2026-10-14T01:33:55.944Z',
+        ...over,
+      }),
+    );
+    if (!parsed.ok) throw new Error(parsed.why);
+    return parsed;
+  }
+
+  const pausing = (over: Partial<Extract<MasterRelease, { kind: 'pausing' }>> = {}): MasterRelease => ({
+    kind: 'pausing',
+    phase: '第 3 步「等收尾」',
+    stuck: false,
+    restoring: false,
+    ...over,
+  });
+
+  it('发版暂停总开关（#2084）：写明发完开回，不写成没头没尾的「总开关关着」；开着时不看这份解释', () => {
+    const broken = row({ verdict: 'broken', stage: 'ledger', why: '断在「记账」' });
+    const paused = canaryHealth(
+      { finished: broken, running: null },
+      NOW,
+      masterOff('set'),
+      undefined,
+      pausing(),
+    );
+    expect(paused).toEqual({
+      ok: 'pending',
+      note: '跳过：发版进行中（第 3 步「等收尾」），总开关按这一趟暂停，发完开回；巡检没跑、没验；最近一轮有结论的是 09-27 20:13「记账」',
+    });
+    expect(paused.ok === 'pending' ? paused.note : '').not.toContain('引擎总开关关着');
+    expect(
+      canaryHealth(
+        { finished: broken, running: null },
+        NOW,
+        masterOff('set'),
+        undefined,
+        pausing({ stuck: true }),
+      ),
+    ).toMatchObject({
+      ok: 'pending',
+      note: expect.stringContaining('发版卡在第 3 步「等收尾」，总开关按这一趟暂停，接着走完会开回'),
+    });
+    expect(
+      canaryHealth(
+        { finished: broken, running: null },
+        NOW,
+        masterOff('set'),
+        undefined,
+        pausing({ restoring: true, phase: '第 7 步「恢复」' }),
+      ),
+    ).toMatchObject({
+      ok: 'pending',
+      note: expect.stringContaining('发版正在把总开关开回（第 7 步「恢复」）'),
+    });
+    // 开着：发版解释不参与，照旧按这一轮的结论
+    expect(
+      canaryHealth({ finished: broken, running: null }, NOW, undefined, undefined, pausing()),
+    ).toMatchObject({
+      ok: false,
+      code: 'canary_broken',
+    });
+  });
+
+  it('发前开着、该开回却还关着（#2084）：报红，原因原文只进 detail，不进公网那句', () => {
+    const got = canaryHealth(
+      { finished: row({ verdict: 'broken', stage: 'ledger' }), running: null },
+      NOW,
+      masterOff('set'),
+      undefined,
+      {
+        kind: 'not_restored',
+        phase: '第 7 步「恢复」',
+        why: 'fleet-api engine on 没成',
+      },
+    );
+    expect(got).toEqual({
+      ok: false,
+      code: 'master_not_restored',
+      message: '总开关没按发版前开回（第 7 步「恢复」），巡检因此没跑',
+      detail: 'fleet-api engine on 没成',
+    });
+    expect(got.ok === false ? got.message : '').not.toContain('fleet');
+  });
+
+  it('发版进度怎么对上「现在关着」（#2084）：进行中是暂停；做完了还是这次关上的才算没开回；发完之后另关的不算', () => {
+    expect(masterReleaseOf(train(), '2026-10-14T01:18:35.790Z')).toEqual({
+      kind: 'pausing',
+      phase: '第 3 步「等收尾」',
+      stuck: false,
+      restoring: false,
+    });
+    expect(masterReleaseOf(train({ status: 'blocked' }), undefined)?.kind).toBe('pausing');
+    expect(masterReleaseOf(train({ status: 'blocked' }), undefined)).toMatchObject({ stuck: true });
+    expect(masterReleaseOf(train({ phase: 7 }), undefined)).toMatchObject({ restoring: true });
+    expect(masterReleaseOf(train({ phase: 1 }), undefined)).toBeNull();
+    expect(masterReleaseOf(train({ before: { master: false } }), undefined)).toBeNull();
+    expect(masterReleaseOf(train({ status: 'running', phase: 8 }), undefined)?.kind).toBe('not_restored');
+    expect(masterReleaseOf(train({ status: 'done', phase: 8 }), '2026-10-14T01:18:35.790Z')?.kind).toBe(
+      'not_restored',
+    );
+    // 关的时刻晚于这一趟结束：发完之后另有人关的，不说成没开回
+    expect(masterReleaseOf(train({ status: 'done', phase: 8 }), '2026-10-14T02:00:00.000Z')).toBeNull();
+    expect(masterReleaseOf(train({ status: 'aborted', phase: 5 }), '2026-10-14T01:18:35.790Z')?.kind).toBe(
+      'held',
+    );
+    expect(masterReleaseOf(train({ status: 'aborted', phase: 2 }), '2026-10-14T01:18:35.790Z')?.kind).toBe(
+      'not_restored',
+    );
+    expect(masterReleaseOf(train({ status: 'failed', phase: 7, why: '开不回去' }), undefined)).toMatchObject({
+      kind: 'not_restored',
+      why: '开不回去',
+    });
+  });
+
   it('每一种对外的说法都拿公开页禁用词名单扫一遍：没有内部名', async () => {
     const scan = (await import(/* @vite-ignore */ SCAN)) as {
       BUILTIN_TERMS: readonly string[];
@@ -289,6 +413,25 @@ describe('canary 项怎么判', () => {
       ),
       canaryHealth({ finished: null, running: null }, NOW, masterOff('set')),
       canaryHealth(
+        { finished: row({ stage: 'ledger' }), running: null },
+        NOW,
+        masterOff('set'),
+        undefined,
+        pausing(),
+      ),
+      canaryHealth({ finished: row({ stage: 'ledger' }), running: null }, NOW, masterOff('set'), undefined, {
+        kind: 'held',
+        phase: '第 5 步「等部署」',
+      }),
+      canaryHealth({ finished: row({ stage: 'ledger' }), running: null }, NOW, masterOff('set'), undefined, {
+        kind: 'unread',
+      }),
+      canaryHealth({ finished: row({ stage: 'ledger' }), running: null }, NOW, masterOff('set'), undefined, {
+        kind: 'not_restored',
+        phase: '第 7 步「恢复」',
+        why: '不进公网',
+      }),
+      canaryHealth(
         { finished: row({ verdict: 'broken', stage: 'intake', endedAt: ago(120), why: 'x' }), running: null },
         NOW,
         undefined,
@@ -310,7 +453,7 @@ describe('canary 项怎么判', () => {
         new Date(NOW.getTime() - CANARY_PENDING_MAX_MS - 60_000),
       ),
     ].map((h) => (h.ok === false ? h.message : h.note));
-    expect(said).toHaveLength(13);
+    expect(said).toHaveLength(17);
     for (const text of said) expect(scan.scanText('canary', text, scan.BUILTIN_TERMS), text).toEqual([]);
   });
 });
@@ -461,5 +604,128 @@ describe('canary 项读库（真库）', () => {
     );
     expect(report.ok).toBe(false);
     expect(report.checks.canary).toMatchObject({ ok: false, code: 'canary_pending_too_long' });
+  });
+
+  it('发版进行中不把总开关暂停写成断链；该开回没开回才让这一项红，原因原文不进公网（#2084）', async () => {
+    await resetTestDb(t);
+    await registerScheduledJobs(t.db, [
+      { id: 'canary', name: '全流程巡检', schedule: '每 6 小时', expectEveryMinutes: 780 },
+    ]);
+    const broken = await startCanaryRun(t.db, {
+      scheduleRunId: await startScheduleRun(t.db, 'canary', ago(120)),
+      repo: 'acme/fleet-canary',
+      at: ago(120),
+    });
+    await finishCanaryRun(t.db, broken, {
+      verdict: 'broken',
+      stage: 'ledger',
+      why: '断在「记账」',
+      steps: [],
+      at: ago(90),
+    });
+    const boot = ago(24 * 60);
+    const masterSet = async (): Promise<EngineMasterState> => ({
+      on: false,
+      why: 'set',
+      at: '2026-10-14T01:18:35.790Z',
+    });
+    const pausingJson = JSON.stringify({
+      status: 'running',
+      phase: 3,
+      before: { master: true },
+      updatedAt: '2026-10-14T01:20:00.000Z',
+    });
+    const pending = await canaryHealthCheck(
+      t.db,
+      masterSet,
+      () => NOW,
+      boot,
+      async () => pausingJson,
+    )().then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(pending).toBeInstanceOf(PublicHealthPending);
+    expect(pending).toMatchObject({
+      message: expect.stringContaining('发版进行中（第 3 步「等收尾」），总开关按这一趟暂停，发完开回'),
+    });
+    expect(String((pending as { message?: string }).message)).not.toContain('引擎总开关关着');
+
+    const stuckJson = JSON.stringify({
+      status: 'done',
+      phase: 8,
+      before: { master: true },
+      updatedAt: '2026-10-14T01:33:55.944Z',
+      why: 'fleet-api engine on 没成',
+    });
+    const err = await canaryHealthCheck(
+      t.db,
+      masterSet,
+      () => NOW,
+      boot,
+      async () => stuckJson,
+    )().then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(PublicHealthError);
+    expect(err).toMatchObject({
+      code: 'master_not_restored',
+      message: '总开关没按发版前开回（第 8 步「派清单」），巡检因此没跑',
+      detail: 'fleet-api engine on 没成',
+    });
+    const report = await runHealthChecks(
+      [
+        {
+          name: 'canary',
+          check: canaryHealthCheck(
+            t.db,
+            masterSet,
+            () => NOW,
+            boot,
+            async () => stuckJson,
+          ),
+        },
+      ],
+      silentLogger,
+    );
+    expect(report.ok).toBe(false);
+    expect(JSON.stringify(report)).not.toContain('fleet');
+
+    const unread = await canaryHealthCheck(
+      t.db,
+      masterSet,
+      () => NOW,
+      boot,
+      async () => {
+        throw new Error('EACCES: permission denied, open /srv/fleet-dao-releases/.train/release-train.json');
+      },
+    )().then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(unread).toBeInstanceOf(PublicHealthPending);
+    expect(String((unread as { message?: string }).message)).toContain('发版进度读不到');
+    expect(String((unread as { message?: string }).message)).not.toContain('fleet');
+    expect(String((unread as { message?: string }).message)).not.toContain('/srv');
+
+    // 发完之后才关的：仍是原来的「总开关关着」，不算这一趟没开回
+    const later = async (): Promise<EngineMasterState> => ({
+      on: false,
+      why: 'set',
+      at: '2026-10-14T02:10:00.000Z',
+    });
+    const laterErr = await canaryHealthCheck(
+      t.db,
+      later,
+      () => NOW,
+      boot,
+      async () => stuckJson,
+    )().then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(laterErr).toBeInstanceOf(PublicHealthPending);
+    expect(String((laterErr as { message?: string }).message)).toContain('引擎总开关关着');
   });
 });

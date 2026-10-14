@@ -199,8 +199,9 @@ async function publicFailures(log: Logger) {
       body: '去 GitHub 的 App 设置里改，再到装它的地方点接受新权限',
     });
     await run('github-app', true, githubAppHealthCheck(judgeDb.db));
-    // 全流程巡检：六处 new PublicHealthError（断了、没跑成、太久、早于部署等太久、没收尾、没跑完过），这里造一种；每一种说法都在 canary-health.test.ts 用同一份名单扫。
-    // 待定那几种（结论早于部署、跳过、总开关关着，#1909）不再走这条路（抛 PublicHealthPending、整体不算红），它们的说法也在 canary-health.test.ts 扫。
+    // 全流程巡检：断了、没跑成、太久、早于部署等太久、没收尾、没跑完过，外加发前开着却没开回（master_not_restored，#2084）。
+    // 这里造一种；每一种说法都在 canary-health.test.ts 用同一份名单扫。
+    // 待定那几种（结论早于部署、跳过、总开关关着、发版暂停中，#1909 / #2084）抛 PublicHealthPending、整体不算红，说法也在那边扫。
     await run('canary', true, async () => {
       await canaryHealthCheck(judgeDb.db, async () => ({ on: true }))();
     });
