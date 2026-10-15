@@ -96,7 +96,7 @@ describe('规则表和夹具对得上', () => {
   it('规则编号不重复，每条规则都归在五种打断原因之一', () => {
     const ids = recognitionIds(RULES);
     expect(new Set(ids).size).toBe(ids.length);
-    expect(RULES).toHaveLength(53);
+    expect(RULES).toHaveLength(52);
     const kinds = ['resume', 'wait', 'retry', 'rework', 'stop'];
     expect(RULES.filter((r) => !kinds.includes(r.kind)).map((r) => r.id)).toEqual([]);
     // 五种都有规则撑着：少了一种就是处置表里有一行从没被用过

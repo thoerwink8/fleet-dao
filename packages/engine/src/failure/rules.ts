@@ -1,5 +1,5 @@
 // 规则表：认出来的失败 → 属于哪一种打断原因（kind），每一种怎么办写在 classify.ts 的 POLICY 表里（#1072 瘦身：一条一条各写一套
-// 梯子、避开范围、记账方式删了，处置只看 kind；这里只管「认」）。现在 53 条：kind、routeOutcome、hold、codes 和重试/等待
+// 梯子、避开范围、记账方式删了，处置只看 kind；这里只管「认」）。现在 52 条：kind、routeOutcome、hold、codes 和重试/等待
 // 那些数都一样、只有原文正则不同的，收成一条里的多条 texts（命中仍报原来的编号）。codes 不同的不并。每条认法至少有一条样本夹具
 // （test/failure/fixtures/failure-samples.json），夹具说明出处；只有合成样本的规则在夹具测试里点名列出。
 //
@@ -388,12 +388,21 @@ export const RULES: readonly FailureRule[] = [
   },
   // 原文写了处方：它说换个模型。分流不再自己换模型（#1072）：停下报警，由人改路由里的模型；满的是这条路上的这个模型，
   // 别的路由上的同一个模型不一定满，这条路由的失败记进熔断。
+  // PM2（无头会话没人批权限：原文自己说了别重试，是这条路由的起法不对）并入这里：都是停下报警、记这条路由的失败，只差原文。
   {
     id: 'MD2',
     title: '上游让换个模型',
     kind: 'stop',
-    text: /try a different model/i,
     routeOutcome: 'fail',
+    texts: [
+      { text: /try a different model/i },
+      {
+        reportAs: 'PM2',
+        title: '会话里的操作要人批，没人批',
+        text: /Permission for this tool use was denied|no approval surface/i,
+        transcript: /Permission for this tool use was denied|no approval surface/i,
+      },
+    ],
   },
   // 模型不存在或已下架：停下报警，好把对应路由下线（旧系统巡检判了下架的路线还在派，windsurf-dao#1840）。
   // 常常只是这一条路由的目录里没有它，别的路由上的同一个模型照样能用，所以不整池暂停；
@@ -471,15 +480,6 @@ export const RULES: readonly FailureRule[] = [
     codes: ['hygiene_unscanned'],
     codeFieldOnly: true,
     routeOutcome: 'neutral',
-  },
-  // 无头会话没人批权限：同一会话里会一直被拒（原文自己说了别重试），是这条路由的起法不对。
-  {
-    id: 'PM2',
-    title: '会话里的操作要人批，没人批',
-    kind: 'stop',
-    text: /Permission for this tool use was denied|no approval surface/i,
-    transcript: /Permission for this tool use was denied|no approval surface/i,
-    routeOutcome: 'fail',
   },
   // 活动超时、工人重启丢了活动：从检查点重跑，不交人（旧系统落成 UNKNOWN → 没查成 → 等人，fleet 任务 #1608 g1）。
   {
