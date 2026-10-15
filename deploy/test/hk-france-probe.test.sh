@@ -3,7 +3,8 @@
 # shellcheck disable=SC2317 # cleanup 由 trap 调用，shellcheck 看成走不到
 # 香港探法国（deploy/hk/france-probe.sh）：连续 2 次失败不推，第 3 次推「法国失联自」，
 # 再失败不重复推，恢复推一次；没配 webhook 只写状态、退出 0，不把地址打进日志。
-# 读回：探活定时器刚启动、NextElapseUSecRealtime 为空仍算在排班；没在跑仍红。
+# 读回：探活定时器 NextElapseUSecRealtime 为空、单调钟已有下次时间仍算在排班；没在跑仍红。
+# 第三种兜底只认 OnUnitActiveSec 且刚启动。没有它、下次和上次都空，不算在排班。
 # 不碰真机器：状态、推送地址、时刻都换到临时目录；探测和 POST 换成钩子。
 # 用法：bash deploy/test/hk-france-probe.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
@@ -260,16 +261,16 @@ EOF
   NG_PID=""
 fi
 
-echo "== hk.sh 读回探活定时器：刚启动、NextElapseUSecRealtime 为空不算没排班"
+echo "== hk.sh 读回探活定时器：Realtime 为空时看单调钟；第三种兜底只认 OnUnitActiveSec"
 extract_fn() { awk -v name="$1" '$0 ~ "^" name "\\(\\) \\{$" { on = 1 } on { print } on && /^}$/ { exit }' "$HK"; }
 FUNCS=$(
   extract_fn timer_prop_set
   extract_fn timer_unit_text
-  extract_fn timer_unit_has_first_fire
+  extract_fn timer_unit_just_started_on_unit_active
   extract_fn timer_is_scheduled
   extract_fn readback_timer_scheduled
 )
-check "摘到排班判断的五个函数" "$(grep -c -E '^(timer_prop_set|timer_unit_text|timer_unit_has_first_fire|timer_is_scheduled|readback_timer_scheduled)\(\) \{' <<<"$FUNCS")" 5
+check "摘到排班判断的五个函数" "$(grep -c -E '^(timer_prop_set|timer_unit_text|timer_unit_just_started_on_unit_active|timer_is_scheduled|readback_timer_scheduled)\(\) \{' <<<"$FUNCS")" 5
 # shellcheck disable=SC2016 # 单引号里就是 hk.sh 的那一行，PROBE_TIMER 要留在原文里
 has "探活读回走这条判断" "$(<"$HK")" 'readback_timer_scheduled "$PROBE_TIMER" "法国关机时香港不会自己发现"'
 
@@ -335,7 +336,15 @@ probe_line() { readback_timer_scheduled fleet-hk-france-probe.timer "$WHY"; }
 
 rb_reset
 probe_line
-check "刚启动、Realtime 为空：读回 ok，不是没排班" "$(rb_text)" "ok fleet-hk-france-probe.timer 在排班（刚启动，下次触发时间还没填上）"
+check "探活单元没有 OnUnitActiveSec，下次和上次都空：红" "$(rb_text)" "red fleet-hk-france-probe.timer 没在排班：$WHY"
+
+for spec in OnBootSec OnActiveSec OnStartupSec; do
+  rb_reset
+  MOCK_CAT="[Timer]
+${spec}=1min"
+  probe_line
+  check "只有 ${spec}、下次和上次都空：红" "$(rb_text)" "red fleet-hk-france-probe.timer 没在排班：$WHY"
+done
 
 rb_reset
 MOCK_ACTIVE=inactive

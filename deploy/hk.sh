@@ -648,21 +648,21 @@ timer_unit_text() {
   printf '%s\n' "$text"
 }
 
-# 不靠服务先跑过一轮也能响起的间隔：OnUnitActiveSec，以及同一类的 OnBootSec / OnActiveSec / OnStartupSec。
-# 探活单元写的是 OnBootSec + OnUnitInactiveSec，没有 OnUnitActiveSec。只认 OnUnitInactiveSec 会把
-# 「服务一次都没停过、永远不响」的定时器放行（systemd 要等它停过才开始算）。
-timer_unit_has_first_fire() {
+# 第三种兜底只认 OnUnitActiveSec。走到这里时下次时间和 LastTriggerUSec 都是空的，也就是刚启动、还没触发过。
+# 不认 OnBootSec / OnActiveSec / OnStartupSec / OnUnitInactiveSec：没有 OnUnitActiveSec、下次和上次都空，不算在排班。
+timer_unit_just_started_on_unit_active() {
   local line
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
-    [[ "$line" =~ ^[[:space:]]*On(UnitActive|Boot|Active|Startup)Sec[[:space:]]*= ]] && return 0
+    [[ "$line" =~ ^[[:space:]]*OnUnitActiveSec[[:space:]]*= ]] && return 0
   done <<<"$(timer_unit_text "$1")"
   return 1
 }
 
-# 在排班：enabled 且 active，并且「下次触发时间非空」或「已有 LastTriggerUSec」或「有首轮间隔且刚启动」三者之一。
+# 在排班：enabled 且 active，并且「下次触发时间非空」或「已有 LastTriggerUSec」或「有 OnUnitActiveSec 且刚启动」三者之一。
 # 下次时间：日历定时器在 NextElapseUSecRealtime；只按开机/激活间隔排的，Realtime 一直是空的，时间在
-# NextElapseUSecMonotonic。只看 Realtime，探活从装上起就永远是红，不只是刚启动那一次。
+# NextElapseUSecMonotonic。只看 Realtime，探活从装上起就永远是红。探活单元是 OnBootSec + OnUnitInactiveSec，
+# 刚启动时单调钟已经有下次时间，走第一条，不靠第三种兜底。
 # 刚启动：一次都没触发过（LastTriggerUSec 还没有），下次时间也还没填上。oneshot 正在跑时下次时间会被清掉，
 # 但 LastTriggerUSec 已经有了，走第二条。
 timer_is_scheduled() {
@@ -672,7 +672,7 @@ timer_is_scheduled() {
   timer_prop_set "$(unit_prop "$unit" NextElapseUSecRealtime)" && return 0
   timer_prop_set "$(unit_prop "$unit" NextElapseUSecMonotonic)" && return 0
   timer_prop_set "$(unit_prop "$unit" LastTriggerUSec)" && return 0
-  timer_unit_has_first_fire "$unit"
+  timer_unit_just_started_on_unit_active "$unit"
 }
 
 # 读回一条。没排上时红字用调用方给的原因（读回不 return 1，免得装机停在半截）。
