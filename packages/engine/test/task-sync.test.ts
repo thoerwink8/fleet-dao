@@ -1,6 +1,7 @@
 // 每一轮动手前并最新主线（#1246，workflows/task-sync.ts）：真 Temporal 测试服务端 + 假端口（注入假的并主线端口）+ 脚本化的任务活动。
 // 落后时第 2 轮前并上；已是最新不并；并出冲突文件进返工意见；读不到记没查成照旧往下走（故意造出失败的一条）；
 // 第 1 轮不并、没推过不并、验收前不并。老历史重放在 replay.test.ts 的 task-reworked 夹具。
+// 等 CI 遇冲突去并主线、树里有没推的提交又并不上（WORKTREE_DIVERGED）：停下等人，原因里写明工作树和提交号。
 
 import { randomUUID } from 'node:crypto';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
@@ -9,9 +10,16 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld, type FakeScript, fakeHead } from '../src/fakes.ts';
-import type { TaskRun, TaskWorkflowInput } from '../src/task-contract.ts';
+import { PortError } from '../src/ports.ts';
+import {
+  type TaskRun,
+  type TaskStatus,
+  type TaskWorkflowInput,
+  taskContinueSignal,
+  taskStatusQuery,
+} from '../src/task-contract.ts';
 import { SYNC_UNREAD } from '../src/workflows/task-sync.ts';
-import { freshRepo, useEnv, withWorker } from './helpers.ts';
+import { freshRepo, pollQuery, useEnv, withWorker } from './helpers.ts';
 import { OK_SEGMENT, scripted } from './task-script.ts';
 
 const currentEnv = useEnv();
@@ -190,5 +198,39 @@ describe('动手前并最新主线（#1246）', { timeout: 60_000 }, () => {
     // 第 2 轮没提交：不推，意见写明没有新提交；只有第 1、3 轮推了分支
     expect(world.count('pushBranch')).toBe(2);
     expect(calls.segment[2]?.feedback.join('\n')).toContain('没有产生新的提交');
+  });
+
+  it('等 CI 遇冲突去并主线、树里有没推的提交又并不上：停下等人，看板原因写明工作树和提交号；点继续再并一次就往下走', async () => {
+    const tree = '/var/lib/fleet-work/acme_widgets/12-t01';
+    const diverged = `工作树 ${tree} 在 fcafa93 之后还有没推的提交（${'1f0f022d'.padEnd(40, '0')}），快进不到并好的 37cc634，也并不上：要人看`;
+    const world = createFakeWorld({
+      ci: (_i, n) => (n === 1 ? { state: 'conflict' } : undefined),
+      syncFail: (_i, n) =>
+        n === 1 ? new PortError('WORKTREE_DIVERGED', diverged, { retryable: false }) : undefined,
+    });
+    const { tasks } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await pollQuery(
+          (): Promise<TaskStatus> => h.query(taskStatusQuery),
+          (st) => st.waiting?.kind === 'human',
+          '并不上，停下等人',
+        );
+        // 看板「停下等人」读 lastProblem：报错原文整句进去，不是只剩规则标题
+        expect(s.lastProblem).toBe(diverged);
+        expect(s.lastProblem).toContain(tree);
+        expect(s.lastProblem).toContain('1f0f022d');
+        expect(world.count('syncMainline')).toBe(1); // 不原地重试
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(world.count('syncMainline')).toBe(2);
+    expect(world.alerts[0]).toMatchObject({ level: 'stuck', title: diverged, detail: diverged });
   });
 });
