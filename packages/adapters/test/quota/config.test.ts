@@ -153,6 +153,17 @@ describe('配置校验：一次列全，不撞到第一个就停', () => {
     ).toEqual(['notRead[0].poolId jev 已经在 pools 里，不能又写不读']);
   });
 
+  it('mirasim 的握手、等帧时限可配，不是正整数就报', () => {
+    const base = { poolId: 'm', channelId: 'c', reader: 'mirasim-relay' };
+    expect(problems({ pools: [{ ...base, openTimeoutMs: 8_000, relayWaitMs: 15_000 }] })).toEqual([]);
+    expect(problems({ pools: [{ ...base, relayWaitMs: 0 }] })).toEqual([
+      'pools[0].relayWaitMs 要是正整数（毫秒）',
+    ]);
+    expect(problems({ pools: [{ ...base, openTimeoutMs: 1.5 }] })).toEqual([
+      'pools[0].openTimeoutMs 要是正整数（毫秒）',
+    ]);
+  });
+
   it('_ 开头的键当注释放行；空的 pools 不行', () => {
     expect(
       problems({ _说明: 'x', pools: [{ _说明: 'y', poolId: 'm', channelId: 'c', reader: 'mirasim-relay' }] }),

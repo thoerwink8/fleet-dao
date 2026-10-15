@@ -1,4 +1,8 @@
 // 一轮读完所有账号池：各读取器并发、各自有超时；每个池一定有一条结果——读不成的带明确原因，绝不静默丢掉。
+// mirasim-relay 超时在本轮里再试一次（换一条连接、重新掐一份同样的时限）。法国机高负载时桥接经常刚好跨过
+// 整体时限（deploy/quota.json 的 timeoutMs，生产 30 秒），下一跳就能连上；试两次仍失败按这一次的原因交回。
+// 原因三句分开：读取器写「桥接连不上」「连上了等不到 relay 帧」，这一层到点写「整体 N 秒用完」，不再笼统写「N 秒内没读完」。
+// 换掉读取器的测试不重试，免得把故意卡住的用例拖长。
 import {
   QUOTA_IO_KEYS,
   type QuotaDeps,
@@ -10,7 +14,7 @@ import { readClaudeUsage } from './readers/claude.ts';
 import { readCursorDashboard } from './readers/cursor.ts';
 import { readEstimate } from './readers/estimate.ts';
 import { readGrokBilling } from './readers/grok.ts';
-import { readMirasimRelay } from './readers/mirasim.ts';
+import { mirasimOverallBudgetMessage, readMirasimRelay } from './readers/mirasim.ts';
 import { readReclaudeCarpool } from './readers/reclaude.ts';
 import type {
   PoolConfig,
@@ -103,7 +107,41 @@ function vetWindows(poolId: string, windows: readonly QuotaReading[], notes: str
   return out;
 }
 
+function timeoutMessage(reader: ReaderType, timeoutMs: number): string {
+  const span = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} 秒` : `${timeoutMs} 毫秒`;
+  // mirasim 的整体预算到点单独一句，跟读取器里的「桥接连不上」「连上了等不到 relay 帧」分开。
+  if (reader === 'mirasim-relay') return mirasimOverallBudgetMessage(timeoutMs);
+  return `${span}内没读完`;
+}
+
+/** 内置的 mirasim-relay 读超时才重试。换上假读取器的测试、别的读取器、连不上 / 上游拒绝都不重试。 */
+function retryMirasimTimeout(pool: PoolConfig, deps: QuotaDeps, result: PoolQuotaResult): boolean {
+  return (
+    pool.reader === 'mirasim-relay' &&
+    deps.readers?.[pool.reader] === undefined &&
+    !result.ok &&
+    result.error.code === 'timeout'
+  );
+}
+
 async function readPool(
+  pool: PoolConfig,
+  config: QuotaConfig,
+  deps: QuotaDeps,
+  shared: Map<string, Promise<unknown>>,
+): Promise<PoolQuotaResult> {
+  const t0 = Date.now();
+  let result = await readPoolAttempt(pool, config, deps, shared);
+  if (retryMirasimTimeout(pool, deps, result)) {
+    result = await readPoolAttempt(pool, config, deps, shared);
+    if (result.ok) {
+      result = { ...result, notes: [...result.notes, '上一次超时，本轮重试一次读成'] };
+    }
+  }
+  return { ...result, durationMs: Date.now() - t0 };
+}
+
+async function readPoolAttempt(
   pool: PoolConfig,
   config: QuotaConfig,
   deps: QuotaDeps,
@@ -153,12 +191,14 @@ async function readPool(
   const refresh = user?.refreshCursorLogin;
   if (refresh) ctx.refreshLogin = () => refresh(controller.signal);
 
+  // 定时器先于读取器的中断回调把标志立上。两边谁先拒绝，只要预算到了，mirasim 的原因都写成「整体 N 秒用完」。
+  let budgetExhausted = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
+      budgetExhausted = true;
       controller.abort();
-      const span = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} 秒` : `${timeoutMs} 毫秒`;
-      reject(new QuotaReadError('timeout', `${span}内没读完`));
+      reject(new QuotaReadError('timeout', timeoutMessage(pool.reader, timeoutMs)));
     }, timeoutMs);
   });
   try {
@@ -170,7 +210,11 @@ async function readPool(
     if (out.scopeModels) result.scopeModels = out.scopeModels;
     return result;
   } catch (e) {
-    return { ...base, ok: false, durationMs: Date.now() - t0, notes: [], error: toQuotaError(e) };
+    const error =
+      pool.reader === 'mirasim-relay' && budgetExhausted
+        ? { code: 'timeout' as const, message: mirasimOverallBudgetMessage(timeoutMs) }
+        : toQuotaError(e);
+    return { ...base, ok: false, durationMs: Date.now() - t0, notes: [], error };
   } finally {
     clearTimeout(timer);
     controller.abort();

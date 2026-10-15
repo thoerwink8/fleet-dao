@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
+import type { MirasimWire } from '../../src/mirasim/wire.ts';
+import type { QuotaDeps } from '../../src/quota/context.ts';
 import {
   QuotaReadError,
   readAllQuotas,
   readingsFromRelayFrame,
   windowsForModel,
 } from '../../src/quota/index.ts';
+import { mirasimTimeoutKind } from '../../src/quota/readers/mirasim.ts';
 import { blockNetwork, FakeSocket, fakeDeps, fakeFiles, fixtureJson } from './helpers.ts';
 
 blockNetwork();
@@ -255,7 +258,7 @@ describe('Mirasim 中转读取器：回环 WebSocket', () => {
     expect(JSON.stringify(report)).not.toContain('secret-token-value');
   });
 
-  it('服务端一直不回 relay 帧：到点报 timeout，不挂住', async () => {
+  it('服务端一直不回 relay 帧：到点报 timeout，不挂住，原因是整体时限用完', async () => {
     const report = await readAllQuotas(
       { pools: [{ ...pool, timeoutMs: 50 }] },
       fakeDeps({
@@ -265,5 +268,152 @@ describe('Mirasim 中转读取器：回环 WebSocket', () => {
     );
     const r = report.results[0];
     expect(!r?.ok && r?.error.code).toBe('timeout');
+    expect(!r?.ok && r?.error.message).toBe('整体 50 毫秒用完');
+    expect(!r?.ok && mirasimTimeoutKind(r?.error.message ?? '')).toBe('budget');
+  });
+});
+
+/** 等帧时限内一直没有帧：next 睡满调用方给的时间再回 timeout，跟真连接一样，不空转。 */
+function frameNeverComes(): MirasimWire {
+  return {
+    send() {},
+    next: (timeoutMs) =>
+      new Promise((resolve) => {
+        setTimeout(() => resolve('timeout'), timeoutMs);
+      }),
+    close() {},
+  };
+}
+
+function frameNow(frame: unknown): MirasimWire {
+  const queue = [frame];
+  return {
+    send() {},
+    async next() {
+      const item = queue.shift();
+      return item === undefined ? 'timeout' : (item as Record<string, unknown>);
+    },
+    close() {},
+  };
+}
+
+/** 桥接挂着不连上；过一会儿自己拒绝，避免测试结束后留下没人接的拒绝。 */
+function bridgeHangs(): Promise<MirasimWire> {
+  return new Promise((_resolve, reject) => {
+    setTimeout(() => reject(new Error('测试收掉挂着的桥接')), 2_000);
+  });
+}
+
+function bridgeDeps(connectMirasim: () => Promise<MirasimWire>): QuotaDeps {
+  return fakeDeps({
+    asUser: {
+      readers: ['mirasim-relay'],
+      readFile: async () => {
+        throw new Error('不该读令牌文件');
+      },
+      homeDir: '/home/session',
+      connectMirasim,
+    },
+  });
+}
+
+const TIMEOUT_KINDS = ['bridge', 'frame', 'budget'] as const;
+
+describe('Mirasim 中转：经桥接读，超时本轮重试一次，失败原因分三种', () => {
+  const bridgePool = {
+    poolId: 'mirasim-relay',
+    channelId: 'mirasim',
+    reader: 'mirasim-relay' as const,
+    port: 4316,
+    timeoutMs: 5_000,
+    relayWaitMs: 40,
+  };
+
+  it('relay 帧第一次迟到超时、第二次正常：本轮读成', async () => {
+    let connects = 0;
+    const report = await readAllQuotas(
+      { pools: [bridgePool] },
+      bridgeDeps(async () => {
+        connects += 1;
+        return connects === 1 ? frameNeverComes() : frameNow(frame0924());
+      }),
+    );
+    expect(connects).toBe(2);
+    const r = report.results[0];
+    expect(r?.ok).toBe(true);
+    expect(r?.ok && r.windows.length).toBe(4);
+    expect(r?.ok && r.notes.join()).toContain('本轮重试一次读成');
+  });
+
+  it('relay 帧一直超时：只重试一次，原因落在三种之一（连上了等不到帧）', async () => {
+    let connects = 0;
+    const report = await readAllQuotas(
+      { pools: [bridgePool] },
+      bridgeDeps(async () => {
+        connects += 1;
+        return frameNeverComes();
+      }),
+    );
+    expect(connects).toBe(2);
+    const r = report.results[0];
+    expect(r?.ok).toBe(false);
+    if (!r || r.ok) return;
+    expect(r.error.code).toBe('timeout');
+    expect(r.error.message).not.toContain('内没读完');
+    const kind = mirasimTimeoutKind(r.error.message);
+    expect(TIMEOUT_KINDS).toContain(kind);
+    expect(kind).toBe('frame');
+    expect(r.error.message).toBe('连上了等不到 relay 帧');
+  });
+
+  it('桥接一直连不上、整体时限用完：本轮再试一次仍失败，原因是整体时限用完', async () => {
+    let connects = 0;
+    const report = await readAllQuotas(
+      { pools: [{ ...bridgePool, timeoutMs: 40 }] },
+      bridgeDeps(() => {
+        connects += 1;
+        return bridgeHangs();
+      }),
+    );
+    expect(connects).toBe(2);
+    const r = report.results[0];
+    expect(r?.ok).toBe(false);
+    if (!r || r.ok) return;
+    expect(r.error.message).not.toContain('内没读完');
+    expect(mirasimTimeoutKind(r.error.message)).toBe('budget');
+    expect(r.error.message).toBe('整体 40 毫秒用完');
+  });
+
+  it('整体时限第一次用完、第二次拿到帧：本轮读成', async () => {
+    let connects = 0;
+    const report = await readAllQuotas(
+      { pools: [{ ...bridgePool, timeoutMs: 40, relayWaitMs: 20 }] },
+      bridgeDeps(() => {
+        connects += 1;
+        return connects === 1 ? bridgeHangs() : Promise.resolve(frameNow(frame0924()));
+      }),
+    );
+    expect(connects).toBe(2);
+    const r = report.results[0];
+    expect(r?.ok).toBe(true);
+    expect(r?.ok && r.notes.join()).toContain('本轮重试一次读成');
+  });
+
+  it('桥接直接拒绝：不重试，原因是桥接连不上', async () => {
+    let connects = 0;
+    const report = await readAllQuotas(
+      { pools: [bridgePool] },
+      bridgeDeps(async () => {
+        connects += 1;
+        throw new Error('桥接没起来：退出码 1');
+      }),
+    );
+    expect(connects).toBe(1);
+    const r = report.results[0];
+    expect(r?.ok).toBe(false);
+    if (!r || r.ok) return;
+    expect(r.error.code).toBe('unreachable');
+    expect(r.error.message).toContain('桥接没起来');
+    expect(mirasimTimeoutKind(r.error.message)).toBe('bridge');
   });
 });
