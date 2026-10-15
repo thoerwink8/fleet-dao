@@ -56,6 +56,9 @@
 //   上一轮没解就在反馈里补一句；反馈和上一轮一字不差才挂起，提醒里写冲突文件和工作树路径。
 //   会话删掉标记并 git add、没提交时，这一轮可能只读到占位：文件名用上一轮反馈里的，不把占位当成文件名。
 //   老历史没有这个标记，照旧在 step 里重试。
+// - 推分支被卫生检查拦下（HYGIENE_BLOCKED，patched('hygiene-blocked-handoff')）：不在 push 这一步里原地重推。
+//   命中处（文件:行 规则，不带命中原文）作为返工意见退回下一轮动手会话。同一处连续被拦（会话改过、命中处仍一字不差）才停下等人。
+//   老历史没有这个标记，照旧在 step 里重推，第二次原文一字不差就挂起。
 // - 「放弃」「叫停」都要把正在跑的长活动取消掉（runSegment、coldVerify、waitCi、waitMerged 都心跳，收得到取消）。
 // - 返工续会话（决定 0093，patched('rework-resume')）：CI 红、验收没过、冲突、没提交……下一轮动手续上一轮跑成的那个会话
 //   （同一棵树；同一路由的执行方式、池、会话用户由 planSegmentResume 判），提示词只补返工意见。连着 RESUME_STREAK_LIMIT 轮续着改
@@ -99,6 +102,10 @@ import {
   EMPTY_DELIVERY_CODE,
   emptyCommitFeedback,
   freshSessionFeedback,
+  HygieneHandoff,
+  hygieneFeedbackLine,
+  hygieneSpotKey,
+  hygieneSpots,
   noteEmptyCommit,
   RESUME_STREAK_LIMIT,
   SELF_CHECK_RED_LINE,
@@ -129,6 +136,8 @@ class TaskFlow {
   private conflictSelfSyncs = 0;
   /** 推分支撞上空交付、已经自动重派过一次动手（决定 0093）：再撞上就停下等人。 */
   private emptyDeliveryRedone = false;
+  /** 上一回推分支被卫生检查拦下的命中处（排好序）。同一处再拦才停下；推上去了就清掉。 */
+  private lastHygieneSpots: string | null = null;
 
   constructor(input: TaskWorkflowInput, acts: EngineActivities, limits: Limits) {
     this.rt = new TaskRuntime(input, acts, limits);
@@ -482,6 +491,7 @@ class TaskFlow {
         this.emptyDeliveryRedone ? [] : [EMPTY_DELIVERY_CODE],
       );
     } catch (error) {
+      if (error instanceof HygieneHandoff) return this.hygieneHandback(error.detail);
       if (error instanceof ConflictHandoff) {
         return this.conflictStillThere(wt, error.files, error.pending ? null : error.instruction);
       }
@@ -496,6 +506,7 @@ class TaskFlow {
       }
       throw error;
     }
+    this.lastHygieneSpots = null;
     rt.head = pushed.head;
     // 自测测的是会话交的这个头；推的时候并了主线，头换成推上去的那个，输出照样交给验收
     if (rt.selfCheckOutput?.head === delivery.head)
@@ -531,6 +542,25 @@ class TaskFlow {
     await rt.advance('implement', `第 ${rt.round} 轮推上去了，PR #${rt.prNumber}`);
     rt.feedback = [];
     return true;
+  }
+
+  /**
+   * 卫生检查拦下了这次推送：命中处退回下一轮动手会话。同一处（排好序后一字不差）再拦才停下等人。
+   * 命中处换了就再退一轮，不算连续同一处。
+   */
+  private async hygieneHandback(detail: string): Promise<boolean> {
+    const rt = this.rt;
+    const spots = hygieneSpots(detail);
+    const key = hygieneSpotKey(spots);
+    const line = hygieneFeedbackLine(spots);
+    if (this.lastHygieneSpots !== null && key === this.lastHygieneSpots) {
+      await rt.park(`卫生检查拦下了同一处，会话改过仍一字不差。${line}`, line);
+      return false;
+    }
+    this.lastHygieneSpots = key;
+    rt.feedback = [line];
+    rt.status.lastProblem = '卫生检查拦下了新增内容';
+    return false;
   }
 
   /**
