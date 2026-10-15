@@ -263,7 +263,10 @@ run_unit() { # 项目名
   SKIP_WHY=""
   case "$unit" in
   lint) unit_lint ;;
-  backup) run_script "$DEPLOY/backup/test/backup.test.sh" ;;
+  backup)
+    run_script "$DEPLOY/backup/test/backup.test.sh"
+    run_script "$DEPLOY/backup/test/hk-backup-mirror.test.sh"
+    ;;
   node-tests) unit_node_tests ;;
   ports) check_ports ;;
   # 构建隔离真沙箱要 root：单独 sudo 跑（CI 免密）；建不成红字失败，不跳过

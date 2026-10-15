@@ -1,0 +1,27 @@
+# 香港自己看最新快照旧不旧。deploy/hk.sh 装到 /etc/systemd/system/；改这份、再跑一遍 hk.sh，别在机器上手改。
+[Unit]
+Description=fleet-dao 香港检查备份最新快照是否超过 26 小时
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/lib/fleet-dao/backup/hk-snapshot-freshness.sh
+# 超过 26 小时、或读不到，退出 1，systemctl --failed 看得到。下一小时的定时器照样再起，这里不重试
+TimeoutStartSec=2min
+Nice=10
+UMask=0077
+WorkingDirectory=/
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/fleet-hk
