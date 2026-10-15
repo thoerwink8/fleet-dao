@@ -1,0 +1,13 @@
+{"type":"available_commands","tools":["run_terminal_command","read_file","search_replace","list_dir","grep","kill_command_or_subagent","todo_write","get_command_or_subagent_output","spawn_subagent","scheduler_create","scheduler_delete","scheduler_list","monitor","search_tool","use_tool","workflow","enter_plan_mode","exit_plan_mode","send_feedback","web_search","web_fetch","image_gen","image_edit","image_to_video","reference_to_video","write"],"commands":["compact","always-approve","context","hooks-trust","hooks-list","hooks-add","hooks-remove","hooks-untrust","session-info","feedback","deep-research","workflow","goal","loop","import-memory","user:docs","chrome-browser","user:deep-research","morning","computer-use","built-in-browser","setup-writing-style","google-workspace","build-with-ai","code-review","create-skill","create-workflow","design","execute-plan","game-assets","bundled:imagine","implement","learn","long-running-background-tasks","pr-babysit","resume-claude","resume-codex","resume-cursor","review","skill-design-principles","statusline","threejs-frame-conventions","learn-traces"]}
+{"type": "text", "data": "已"}
+{"type": "text", "data": "提"}
+{"type": "text", "data": "交"}
+{"type": "text", "data": "，"}
+{"type": "text", "data": "测"}
+{"type": "text", "data": "试"}
+{"type": "text", "data": "都"}
+{"type": "text", "data": "过"}
+{"type": "text", "data": "了"}
+{"type": "text", "data": "。"}
+{"type": "usage", "usage": {"input_tokens": 597607, "output_tokens": 84723, "cache_read_input_tokens": 12450688, "cache_creation_input_tokens": 0}}
+{"type": "end", "stopReason": "end_turn", "sessionId": "973fa0d0-f0bc-4016-96a2-f318fa7a331c", "usage": {"input_tokens": 597607, "cache_read_input_tokens": 12450688, "cache_creation_input_tokens": 0, "output_tokens": 84723}, "num_turns": 246, "modelUsage": {"grok-4.7-build": {"inputTokens": 597607, "outputTokens": 84723, "cacheReadInputTokens": 12450688, "cacheCreationInputTokens": 0}}}
