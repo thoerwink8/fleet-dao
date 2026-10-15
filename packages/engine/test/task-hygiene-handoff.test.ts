@@ -23,7 +23,8 @@ beforeEach(() => {
 });
 
 const FILE = 'packages/adapters/test/quota/grok.test.ts';
-const SPOTS = [`${FILE}:147 token`, `${FILE}:148 token`];
+// 元组：下标是 string。开了 noUncheckedIndexedAccess 时 string[] 的下标是 string | undefined，stringContaining 不收。
+const SPOTS: [string, string] = [`${FILE}:147 token`, `${FILE}:148 token`];
 const MESSAGE = `卫生检查拦下了要公开的内容：${SPOTS.join('；')}`;
 /** 只放在 details 里。反馈和停下的原因里都不能出现它。 */
 const SECRET = 'matched-original-text';
