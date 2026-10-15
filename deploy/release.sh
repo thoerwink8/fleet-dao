@@ -9,9 +9,11 @@
 #   bash deploy/release.sh --check               只读：在用哪版、有哪几版、服务与健康检查，不改任何东西
 #   bash deploy/release.sh <提交号> --unmerged   发还没合进主线的提交（只用来合并前在真机上验；历史里会标出来）
 #   发布、退回加 --now：不给停不下来的会话宽限，马上停下（按编号续上）；急修、急退用
-# 要换引擎的版本时（#2038、决定 0093）：构建期间引擎照常干活。构建完才写排空请求（$DRAIN_REQUEST，引擎不起新会话），
-# 给引擎手上有会话的任务发 hard 暂停（暂停人「发版」，名单落 $PAUSE_FILE），等会话收掉（停不下来的最多再做 DRAIN_GRACE 秒，
-# 到点由引擎按切号那一套停下、按编号续上）就停引擎，再迁移、切版本；新引擎起来后只对名单里这一批发「继续」（续上原会话见 #2037）。
+# 要换引擎的版本时（#2038、决定 0093）：构建期间引擎照常干活。构建完、切版本之前比运行内容（lib/runtime-same.mjs）：
+# 没变就不写排空请求、不暂停任务、不重启 fleet-engine（fleet-api 各自比，没变也不重启）。变了、或读不出，才写排空请求
+# （$DRAIN_REQUEST，引擎不起新会话），给引擎手上有会话的任务发 hard 暂停（暂停人「发版」，名单落 $PAUSE_FILE），等会话收掉
+# （停不下来的最多再做 DRAIN_GRACE 秒，到点由引擎按切号那一套停下、按编号续上）就停引擎，再迁移、切版本；新引擎起来后只对名单里
+# 这一批发「继续」（续上原会话见 #2037）。
 # 发版不碰引擎总开关和各仓「让 AI 接活」开关：停接新活只在切版本这一段，由排空请求管，脚本退了请求就撤。
 # 每一版在 /srv/fleet-dao-releases/<提交号>，current 指着在用的那版；留最近 5 版。目录、单元、本机配置、怎么看、
 # 怎么退：docs/ops.md 第九节。退出码同装机脚本：0 全绿，1 有红（含「没过健康检查、已退回」），2 没红但有待配。
@@ -74,6 +76,14 @@ DRAIN_WROTE=0    # 这次写了排空请求、还没撤
 DRAIN_UNTIL=0    # 请求里的截止（秒）
 ENGINE_DRAINS=0  # 在跑的引擎会排空（认了 drain.json）
 ENGINE_STOPPED=0 # 这次把引擎停下了、还没起回来：没走到切版本就失败，收尾时照原样起回来
+# 运行内容没变就不重启（lib/runtime-same.mjs）。prepare_runtime_skips 在切版本前填上；activate 用完即清。
+declare -A SKIP_RESTART=()
+RUNTIME_SAME_JS=$DEPLOY_DIR/lib/runtime-same.mjs
+DRAIN_FALLBACK_GRACE=$DRAIN_GRACE # maybe_drain_engine 这次的宽限、发不发暂停：activate 判过不用重启、到时候又要重启时照它排空
+DRAIN_FALLBACK_PAUSE=1
+ENV_PLAN_SHA="" # 已经为哪个提交算过「照期望写会不会改环境文件」
+ENV_PLAN_DIR=""
+ENV_PLAN_STATE="" # empty：没有期望，不会写；ok：算成了；bad：没算成，不当成没变
 # 照期望写本机配置（#323，docs/ops.md 第九节「配置进仓对账」）：切版本之前照这一版的期望写 engine.env、api.env、release.env 里
 # 公开的值，只写这一版的期望和上次写的不一样的键（上次写的记在 CONFIG_STATE），人手改的不改回（期望里 selfHeal 开了才改回）。
 # 怎么算、怎么写、写完读回都在 config.mjs（和自动发布对账同一份读法）；这里先让它算、用本脚本读 release.env 的办法核一遍，再写。
@@ -469,7 +479,9 @@ drain_request() { # 要切到的提交号 宽限（秒）
   else
     pending "在跑的引擎不会排空：${st#no }。这次切版本照旧重启引擎，在跑的会话会断、新引擎起来按编号续上"
   fi
-  if [[ "${FUNCNAME[1]:-}" == do_rollback ]]; then by=rollback; fi
+  # maybe_drain_engine 隔在中间，只看直接调用者会把退回记成 manual。整条调用链里有 do_rollback 才记 rollback
+  # （发布、自动退回仍是 manual，和以前直接调用时一样）。
+  if [[ " ${FUNCNAME[*]} " == *" do_rollback "* ]]; then by=rollback; fi
   now=$(date -u +%s)
   DRAIN_UNTIL=$((now + grace))
   tmp=$DRAIN_REQUEST.tmp
@@ -1188,16 +1200,52 @@ apply_config() { # 提交号 事件（release / rollback / auto-rollback）
 
 # ── 切版本 ──
 
-# 单元读的环境文件在它这次起来之后改过没有（改了 engine.env、api.env 要重启才生效）
+# systemd 把一个单元的环境文件打在一行：「路径 (ignore_errors=yes|no)」，好几份用空格隔开。
+# 可选文件在单元里写成 -路径，show 出来一般已经换成 ignore_errors=yes；还带着前导 - 的也认。
+# 打出每个路径一行。systemctl 没跑成返回 1（调用方不当成「没有文件」）。
+unit_env_paths() { # 单元
+  local raw tok path
+  raw=$(systemctl show -p EnvironmentFiles --value "$1" 2>/dev/null) || return 1
+  [[ -n "${raw//[[:space:]]/}" ]] || return 0
+  # shellcheck disable=SC2086 # 一行里空格隔开的就是一份一份的「路径 (ignore_errors=…)」
+  for tok in $raw; do
+    case "$tok" in
+    '(ignore_errors='*) continue ;;
+    -/*) path=${tok#-} ;;
+    /*) path=$tok ;;
+    *) return 1 ;; # 认不出的一段：不当成「没有这份文件」（跳过重启会漏掉它）
+    esac
+    printf '%s\n' "$path"
+  done
+}
+
+# 单元读的环境文件在它这次起来之后改过没有（改了 engine.env、api.env 要重启才生效）。
+# 启动时间读不出：返回 1（这一问答不了）。调用方若把它当成「要不要重启」的唯一依据，答不了就不因此重启；
+# 跳过重启那条路不靠这个，靠 env_stable_since_start（答不了就不当成没变）。
 env_changed_since_start() { # 单元
   local start f
   start=$(systemctl show -p ExecMainStartTimestamp --timestamp=unix --value "$1" 2>/dev/null) || start=""
   start=${start#@}
   if [[ ! "$start" =~ ^[0-9]+$ ]]; then return 1; fi
-  while read -r f _; do
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
     if [[ -f "$f" ]] && (($(stat -c %Y -- "$f") > start)); then return 0; fi
-  done < <(systemctl show -p EnvironmentFiles --value "$1" 2>/dev/null)
+  done < <(unit_env_paths "$1" || true)
   return 1
+}
+
+# 启动时间读得到，而且这个单元读的每份环境文件都不比它新。读不到启动时间、列不出环境文件：返回 1，不当成没变。
+env_stable_since_start() { # 单元
+  local start f
+  start=$(systemctl show -p ExecMainStartTimestamp --timestamp=unix --value "$1" 2>/dev/null) || return 1
+  start=${start#@}
+  if [[ ! "$start" =~ ^[0-9]+$ ]]; then return 1; fi
+  if ! unit_env_paths "$1" >/dev/null; then return 1; fi
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    if [[ -f "$f" ]] && (($(stat -c %Y -- "$f") > start)); then return 1; fi
+  done < <(unit_env_paths "$1")
+  return 0
 }
 
 # 服务的主进程跑的是哪一版：它的当前目录。单元的 WorkingDirectory 是 current，起进程那一刻解成 <提交号> 目录，
@@ -1398,12 +1446,140 @@ socket_listening() { # 服务名（不带后缀）
   return 1
 }
 
-# 切到这一版：current 指过去；本机启用的服务装上这一版的单元、起来——主进程不在这一版的目录里（包括上次切完
-# current、还没重启完就被打断）、或单元、环境文件变了，就重启；没启用的停掉撤掉；静态文件发到香港。
+# 比两版目录里这个服务运行时会加载的内容。打一行 same、changed，或 unknown 加原因。
+# 脚本不在、node 没跑成、打出来的不是这三样：当 unknown（调用方照常重启）。原因里不带「认不出」——那是排空进度的用词。
+runtime_tree_verdict() { # 单元 旧目录 新目录
+  local out rc=0
+  if [[ ! -f "$RUNTIME_SAME_JS" ]]; then
+    printf 'unknown 没有 runtime-same.mjs'
+    return 0
+  fi
+  out=$("$NODE" "$RUNTIME_SAME_JS" "$1" "$2" "$3" 2>/dev/null) || rc=$?
+  out=${out%%$'\n'*}
+  if ((rc != 0)) || [[ "$out" != same && "$out" != changed && "$out" != unknown* ]]; then
+    printf 'unknown 比较没跑成'
+    return 0
+  fi
+  printf '%s' "$out"
+}
+
+# 机器上装着的单元和这一版的 .units 一字不差（有 socket 就连 socket 一起）。差一个字节就不算没变：
+# 装上去会把服务重启，不能先把「不用停」定下来。
+installed_unit_matches() { # 单元 这一版的目录
+  local u=$1 dir=$2
+  local inst=$FLEET_SYSTEMD_DIR/$u.service new=$dir/.units/$u.service
+  local isock=$FLEET_SYSTEMD_DIR/$u.socket nsock=$dir/.units/$u.socket
+  if [[ ! -f "$inst" || ! -f "$new" ]]; then return 1; fi
+  if ! cmp -s -- "$inst" "$new"; then return 1; fi
+  if [[ ! -e "$isock" && ! -e "$nsock" ]]; then return 0; fi
+  if [[ ! -f "$isock" || ! -f "$nsock" ]]; then return 1; fi
+  cmp -s -- "$isock" "$nsock"
+}
+
+# 照这一版的期望会把 engine.env、api.env、release.env 写成什么样。只算、不写线上。
+# 没有期望：什么都不会写。算不成（期望认不出、线上文件读不到）：不当成没变。同一个提交只算一次。
+# 不走 config_cli：那一份会把 ok、red 记进这次发布的账。
+env_plan() { # 提交号
+  local sha=$1
+  if [[ "$ENV_PLAN_SHA" == "$sha" && -n "$ENV_PLAN_STATE" ]]; then
+    [[ "$ENV_PLAN_STATE" != bad ]]
+    return
+  fi
+  if [[ -n "$ENV_PLAN_DIR" && -d "$ENV_PLAN_DIR" ]]; then rm -rf -- "$ENV_PLAN_DIR"; fi
+  ENV_PLAN_DIR=""
+  ENV_PLAN_SHA=$sha
+  if [[ ! -e "$RELEASES/$sha/deploy/france/desired-config.json" ]]; then
+    ENV_PLAN_STATE=empty
+    return 0
+  fi
+  ENV_PLAN_DIR=$RELEASES/.env-plan
+  rm -rf -- "$ENV_PLAN_DIR"
+  mkdir -p -- "$ENV_PLAN_DIR"
+  if ! "$NODE" "$CONFIG_CLI" apply --releases "$RELEASES" --commit "$sha" --how release \
+    --etc "$CONFIG_ETC" --state "$CONFIG_STATE" --plan "$ENV_PLAN_DIR" >/dev/null 2>&1; then
+    ENV_PLAN_STATE=bad
+    return 1
+  fi
+  ENV_PLAN_STATE=ok
+}
+
+# 这一版的单元读的那几份环境文件，照期望写完还和现在一字不差。
+# session-secret.env 不归期望写，不比。别的文件名也不比（期望写不到）。
+env_apply_stable() { # 提交号 单元
+  local sha=$1 u=$2 line path name unitf
+  unitf=$RELEASES/$sha/.units/$u.service
+  env_plan "$sha" || return 1
+  if [[ "$ENV_PLAN_STATE" == empty ]]; then return 0; fi
+  if [[ "$ENV_PLAN_STATE" != ok || ! -f "$unitf" ]]; then return 1; fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*EnvironmentFile= ]] || continue
+    path=${line#*=}
+    path=${path#"${path%%[![:space:]]*}"}
+    path=${path%"${path##*[![:space:]]}"}
+    if [[ "$path" == -* ]]; then path=${path#-}; fi
+    name=${path##*/}
+    case "$name" in
+    engine.env | api.env | release.env)
+      if [[ ! -f "$ENV_PLAN_DIR/$name" ]]; then return 1; fi
+      if ! cmp -s -- "$path" "$ENV_PLAN_DIR/$name"; then return 1; fi
+      ;;
+    esac
+  done <"$unitf"
+}
+
+# 切版本之前填 SKIP_RESTART：这个服务在跑、跑的是别的一版、运行内容一样、单元和环境也不会变，才填 1。
+# 主进程不在某一版目录里、内容变了、单元或环境会变、启动时间或环境文件读不出：不填（照常重启）。读不出打一行。
+prepare_runtime_skips() { # 要切到的提交号
+  local sha=$1 u running verdict base pin dir
+  dir=$RELEASES/$sha
+  SKIP_RESTART=()
+  for u in fleet-engine fleet-api; do
+    if ! has_service "$u"; then continue; fi
+    if [[ "$(systemctl is-active "$u.service" 2>/dev/null)" != active ]]; then continue; fi
+    running=$(running_release "$u.service")
+    if [[ "$running" == "$dir" ]]; then continue; fi
+    base=${running%/*}
+    pin=${running##*/}
+    if [[ "$base" != "$RELEASES" ]] || ! is_sha "$pin" || [[ ! -d "$running" || -L "$running" ]]; then
+      echo "  · $u 的主进程不在某一版目录里，照常重启"
+      continue
+    fi
+    verdict=$(runtime_tree_verdict "$u" "$running" "$dir")
+    if [[ "$verdict" == same ]] && installed_unit_matches "$u" "$dir" && env_apply_stable "$sha" "$u" &&
+      env_stable_since_start "$u.service"; then
+      SKIP_RESTART["$u"]=1
+    elif [[ "$verdict" == unknown* ]]; then
+      echo "  · $u 的运行内容读不出（${verdict#unknown }），照常重启"
+    elif [[ "$verdict" == same ]]; then
+      echo "  · $u 的运行内容没变，但单元或环境对不上，照常重启"
+    fi
+  done
+}
+
+# 运行内容变了、或读不出，才排空、暂停、停引擎。没变就什么都不做（SKIP_RESTART[fleet-engine]=1）。
+# 第三个参数 0：不发暂停（自动退回原来就不发，宽限 0，马上停）。
+maybe_drain_engine() { # 提交号 宽限秒 [发暂停 1/0]
+  local sha=$1 grace=$2 pause=${3:-1}
+  DRAIN_FALLBACK_GRACE=$grace DRAIN_FALLBACK_PAUSE=$pause
+  prepare_runtime_skips "$sha"
+  if ((${SKIP_RESTART[fleet-engine]:-0} == 0)); then
+    drain_request "$sha" "$grace"
+    if ((pause)); then pause_tasks "$sha"; fi
+    drain_engine || return 1
+  fi
+}
+
+# 切到这一版：current 指过去；本机启用的服务装上这一版的单元、起来。主进程不在这一版的目录里（包括上次切完
+# current、还没重启完就被打断）、或单元、环境文件变了，就重启——除非 prepare_runtime_skips 判过这个服务的运行内容没变
+# （那时候只换 current，不暂停、不重启）。没启用的停掉撤掉；静态文件发到香港。
 # 哪一步不成就记红、返回 1，退不退由调用方定。socket 单元先同步：装不上就不切 current。
 activate() { # 提交号 事件（release / rollback / auto-rollback）
-  local sha=$1 how=$2 dir=$RELEASES/$1 u reload=0 restart unit_file running
-  local -A fresh=() socket_force=()
+  local sha=$1 how=$2 dir=$RELEASES/$1 u reload=0 restart unit_file running cu
+  local -A fresh=() socket_force=() skip=()
+  for cu in fleet-engine fleet-api; do
+    skip[$cu]=${SKIP_RESTART[$cu]:-0}
+  done
+  SKIP_RESTART=()
   for u in "${APP_UNITS[@]}"; do
     if has_service "$u"; then
       if [[ ! -f "$dir/.units/$u.service" ]]; then
@@ -1452,9 +1628,23 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
       restart=1
     fi
     running=$(running_release "$u.service")
+    if [[ -n "$running" && "$running" != "$dir" && "$restart" == 0 && "${skip[$u]:-0}" == 1 ]] &&
+      [[ "$(systemctl is-active "$u.service" 2>/dev/null)" == active ]]; then
+      if [[ "$u" == fleet-engine ]]; then ok "引擎运行内容没变，没重启"; else ok "后端运行内容没变，没重启"; fi
+      if ! ensure_unit_running "$u.service" 0; then return 1; fi
+      continue
+    fi
     if [[ -n "$running" && "$running" != "$dir" ]]; then
       echo "  · $u 的主进程还在跑 ${running##*/}（不是这一版），要重启"
       restart=1
+    fi
+    # 判过不用重启、这会儿单元或环境却要重启，引擎还在跑：照 maybe_drain_engine 这次的宽限、发不发暂停先排空再停，
+    # 免得会话被直接杀掉（自动退回照旧不给宽限、不发暂停）
+    if ((restart)) && [[ "$u" == fleet-engine && "${skip[$u]:-0}" == 1 ]] && ((DRAIN_WROTE == 0)) &&
+      [[ "$(systemctl is-active fleet-engine.service 2>/dev/null)" == active ]]; then
+      drain_request "$sha" "$DRAIN_FALLBACK_GRACE"
+      if ((DRAIN_FALLBACK_PAUSE)); then pause_tasks "$sha"; fi
+      drain_engine || return 1
     fi
     if ! ensure_unit_running "$u.service" "$restart"; then return 1; fi
   done
@@ -1618,17 +1808,29 @@ settle_services() {
   return "$bad"
 }
 
-# 起着的服务跑的真是这一版：主进程的当前目录就是这一版的目录（不是 current 指过去了、进程还是旧的）
+# 起着的服务跑的真是这一版：主进程的当前目录就是这一版的目录（不是 current 指过去了、进程还是旧的）。
+# fleet-engine、fleet-api 例外：目录还是旧的，但这版运行内容和它正在跑的那一版一样（没重启），也算。
+# 别的单元不放宽——发布脚本的自检用临时单元验「目录对不上就要红」。
 check_running_release() { # 提交号
-  local u running bad=0
+  local u running bad=0 verdict base pin
   for u in $FLEET_SERVICES; do
     running=$(running_release "$u.service")
     if [[ "$running" == "$RELEASES/$1" ]]; then
       ok "$u 的主进程跑的是这一版（${1:0:12}）"
-    else
-      red "$u 的主进程跑的不是这一版：在「${running:-没在跑}」"
-      bad=1
+      continue
     fi
+    base=${running%/*}
+    pin=${running##*/}
+    if [[ "$u" == fleet-engine || "$u" == fleet-api ]] && [[ "$base" == "$RELEASES" ]] && is_sha "$pin" &&
+      [[ -d "$running" ]]; then
+      verdict=$(runtime_tree_verdict "$u" "$running" "$RELEASES/$1")
+      if [[ "$verdict" == same ]]; then
+        ok "$u 的主进程还在 ${pin:0:12}，运行内容和这一版一样"
+        continue
+      fi
+    fi
+    red "$u 的主进程跑的不是这一版：在「${running:-没在跑}」"
+    bad=1
   done
   return "$bad"
 }
@@ -1807,6 +2009,20 @@ prune() {
     if ! is_sha "$s" || [[ ! -d "$RELEASES/$s" ]] || [[ " ${kept[*]} " == *" $s "* ]]; then continue; fi
     if ((${#kept[@]} < KEEP)) || [[ "$s" == "$cur" || "$s" == "$prev" ]]; then kept+=("$s"); fi
   done
+  # 没重启的进程还开着旧目录。连着几版只改文档会把 KEEP 用完，不能把进程正在用的目录清掉。
+  local u running pin
+  for u in fleet-engine fleet-api; do
+    if ! has_service "$u"; then continue; fi
+    if [[ "$(systemctl is-active "$u.service" 2>/dev/null)" != active ]]; then continue; fi
+    running=$(running_release "$u.service")
+    pin=${running##*/}
+    if [[ "${running%/*}" == "$RELEASES" ]] && is_sha "$pin" && [[ -d "$RELEASES/$pin" && ! -L "$RELEASES/$pin" ]]; then
+      if [[ " ${kept[*]} " != *" $pin "* ]]; then
+        kept+=("$pin")
+        ok "留着 ${pin:0:12}：$u 的进程还在用这个目录"
+      fi
+    fi
+  done
   for d in "$RELEASES"/*; do
     s=${d##*/}
     if ! is_sha "$s" || [[ -L "$d" || ! -d "$d" ]]; then continue; fi
@@ -1827,7 +2043,7 @@ prune() {
 # 这次给在跑的会话多少宽限（秒）：--now 不给
 drain_grace() { if ((NOW_MODE)); then echo 0; else echo "$DRAIN_GRACE"; fi; }
 
-# 发版窗口升级命令行工具（#1971）：引擎已经停、会话已经排空，这里换二进制。
+# 发版窗口升级命令行工具（#1971）：引擎已经停、会话已经排空，这里换二进制。引擎运行内容没变、没停的那一版不换，留给空闲升级。
 # 没做成不挡这次发版（不记红，避免整次发布因此退出 1）：每个工具自己退回或记下，等人看 state.json。
 # 这一版没有入口（测试桩、比这次更老的提交）就跳过。
 upgrade_cli_tools() { # 提交号
@@ -1836,6 +2052,10 @@ upgrade_cli_tools() { # 提交号
   local config=$RELEASES/$sha/deploy/france/desired-config.json
   if [[ ! -f "$script" ]]; then
     echo "  · 这一版没有命令行工具升级入口，跳过"
+    return 0
+  fi
+  if ((${SKIP_RESTART[fleet-engine]:-0})); then
+    echo "  · 引擎运行内容没变、没停：这轮不在发版窗口换命令行工具，留给空闲升级（引擎每 30 分钟看一次，fleet-cli-upgrade.path）"
     return 0
   fi
   if [[ "$(systemctl is-active fleet-engine.service 2>/dev/null || true)" == active ]]; then
@@ -1907,10 +2127,8 @@ do_release() { # 要发的提交（空 = 主线最新）
   # 直接发一个老提交也一样把关：库里的迁移比它带的多就不切（drizzle 碰到比代码新的迁移记录什么也不做、也不报错，
   # 光靠迁移那一步拦不住）。放在迁移之前：老版本的迁移程序连库都不碰
   schema_allows "$SHA" 切到 || return 1
-  # 迁移之前停引擎：先不起新会话，给手上有会话的任务发 hard 暂停，等会话收掉再停（旧引擎不能对着新的库结构）
-  drain_request "$SHA" "$(drain_grace)"
-  pause_tasks "$SHA"
-  drain_engine || return 1
+  # 迁移之前：运行内容变了才停引擎（旧引擎不能对着新的库结构）。没变就不暂停、不停。
+  maybe_drain_engine "$SHA" "$(drain_grace)" || return 1
   upgrade_cli_tools "$SHA"
   migrate "$SHA"
   load_catalog "$SHA" || return 1
@@ -1946,9 +2164,8 @@ do_release() { # 要发的提交（空 = 主线最新）
       red "${SHA:0:12} 没过健康检查，也没自动退回（库的迁移比上一版新，见上）：停在 ${SHA:0:12}，要人来看"
     elif
       # 新版不健康：它刚起来那几分钟起的会话不给宽限，马上停下（按编号续上），尽快退回；配置照上一版的期望写回去。
-      # 这两步没成就还没切回去：上一版没被试过，不记它不健康，也不说退回了
-      drain_request "$cur" 0
-      ! drain_engine || ! apply_config "$cur" auto-rollback
+      # 运行内容没变就不停。这两步没成就还没切回去：上一版没被试过，不记它不健康，也不说退回了
+      ! maybe_drain_engine "$cur" 0 0 || ! apply_config "$cur" auto-rollback
     then
       red "${SHA:0:12} 没过健康检查，也没退回 ${cur:0:12}（退回之前停引擎、照它的期望写配置没成，见上）：停在 ${SHA:0:12}，要人来看"
     elif activate "$cur" auto-rollback && health_gate "$cur" ""; then
@@ -1974,9 +2191,7 @@ do_rollback() {
   step "退回 ${prev:0:12}（在用：$(short "$cur" 没有)）"
   schema_allows "$prev" || return 1
   hk_reachable || return 1
-  drain_request "$prev" "$(drain_grace)"
-  pause_tasks "$prev"
-  drain_engine || return 1
+  maybe_drain_engine "$prev" "$(drain_grace)" || return 1
   apply_config "$prev" rollback || return 1
   if activate "$prev" rollback && health_gate "$prev" ""; then
     ok "已退回 ${prev:0:12}"

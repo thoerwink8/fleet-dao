@@ -472,7 +472,7 @@ describe('发版窗口的位置', () => {
   it('等收尾之后、切版本之前才升级', () => {
     const sh = readFileSync(new URL('../../../deploy/release.sh', import.meta.url), 'utf8');
     const body = /do_release\(\) \{[\s\S]*?\n\}/.exec(sh)?.[0] ?? '';
-    const drain = body.indexOf('drain_engine || return 1');
+    const drain = body.indexOf('maybe_drain_engine "$SHA"');
     const up = body.indexOf('upgrade_cli_tools');
     const migrate = body.indexOf('migrate "$SHA"');
     const activate = body.indexOf('activate "$SHA"');
@@ -484,5 +484,7 @@ describe('发版窗口的位置', () => {
     expect(fn).toContain('wanted.json');
     expect(fn).toContain('--release-window');
     expect(fn).not.toContain('red ');
+    // 引擎运行内容没变、没停（deploy/lib/runtime-same.mjs）：不在发版窗口换，留给空闲升级
+    expect(fn).toContain('SKIP_RESTART[fleet-engine]');
   });
 });
