@@ -7,7 +7,8 @@
 // - 入口：fleet-engine = packages/engine/src/main.ts，fleet-api = packages/api/src/main.ts。
 //   顺着静态 import / export from（含 type）、字面量 import()、require()、require.resolve()、
 //   createRequire().resolve() 走。node: 内建不算。别的裸说明符不跟进去，整份 pnpm-lock.yaml 盖住它们。
-//   @fleet-dao/* 按各包 package.json 的 exports 解（条件 import、default、node、require；带 * 的通配解不开就是 unknown）。
+//   @fleet-dao/* 按各包 package.json 的 exports 解：import 和 require 两种引用方式各按 Node 的条件表解一遍，
+//   两边解到的文件都算（同一个包两组入口都写了时，只认一组会把另一组改动的漏掉；带 * 的通配解不开就是 unknown）。
 // - 字面量 new URL('相对路径', import.meta.url)：文件算进去，是源码再接着走；目录里每个文件都算
 //   （跳过 node_modules、.git），但不把目录里没被 import 的源码再当入口解析。指到版本目录本身、或跑出去，是 unknown。
 //   第二个参数不是 import.meta.url 的 new URL（拼 http 地址那种）不算。参数不是字面量的 import()、require()、
@@ -491,30 +492,42 @@ function loadNames(root) {
   return map;
 }
 
-function unwrapExport(target, where) {
-  if (typeof target === 'string') {
-    if (target.includes('*')) fail(`${where} 的导出是通配，解不开`);
-    return target;
-  }
+// Node 解 exports 条件表：按对象里键的顺序、第一个「键在这个加载方式认的集合里」的就是它（default 永远算认得，
+// 所以写在 default 后面的键到头来用不上——和 Node 一样，不替包的作者改顺序）。
+// ESM 的 import（静态 import / export … from / import()）走 import 那一组，require() / require.resolve /
+// createRequire().resolve 走 require 那一组：同一个包里两组入口都写了时，实际加载哪一个看调用方用哪种方式引，
+// 只按一组解会把另一组改动的漏掉（见 resolveExport，宁多算不漏算——两边都算，解不开就 unknown、照常重启）。
+// node / node-addons / default 两组都认（它们和引用方式无关）；只写 import 的包换 require 引就加载不到，反之亦然。
+const IMPORT_CONDITIONS = new Set(['import', 'node', 'node-addons', 'default']);
+const REQUIRE_CONDITIONS = new Set(['require', 'module-sync', 'node', 'node-addons', 'default']);
+
+// 一个 exports 子项下、按某种加载方式会加载到的文件（相对包目录）。条件表按 Node 的规矩挑一个；
+// 数组取第一个解得开的；通配、认不出的键、类型不对、空数组都算解不开，返回 null（调用方按 unknown 算，照常重启）。
+function pickExport(target, kind, depth = 0) {
+  if (depth > 20) return null;
+  if (typeof target === 'string') return target.includes('*') ? null : [target];
   if (Array.isArray(target)) {
     for (const item of target) {
-      try {
-        return unwrapExport(item, where);
-      } catch {
-        // 下一项
-      }
+      const got = pickExport(item, kind, depth + 1);
+      if (got) return got;
     }
-    fail(`${where} 的导出解不开`);
+    return null;
   }
-  if (target && typeof target === 'object') {
-    for (const key of ['import', 'default', 'node', 'require']) {
-      if (key in target) return unwrapExport(target[key], where);
-    }
-    fail(`${where} 的导出没有 import、default、node、require`);
+  if (!target || typeof target !== 'object') return null;
+  // 子路径表（键以 . 开头）在这一层挑不出东西——它要的是子路径，不是一个加载方式
+  if (Object.keys(target).some((k) => k.startsWith('.'))) return null;
+  const allowed = kind === 'import' ? IMPORT_CONDITIONS : REQUIRE_CONDITIONS;
+  for (const key of Object.keys(target)) {
+    if (!allowed.has(key)) continue;
+    const got = pickExport(target[key], kind, depth + 1);
+    if (got) return got;
   }
-  fail(`${where} 的导出解不开`);
+  return null;
 }
 
+// 一个 @fleet-dao/* 说明符会加载到的文件，可能不止一个：同一个子项里 import 和 require 各有一个入口时，
+// 两种引用方式都算上（宁多算不漏算——只认一个，另一个入口改了会漏判成 same，白白不重启）。
+// 两种方式都解不开（认不出、通配、对不上文件）：unknown，调用方照常重启。
 function resolveExport(pkgDir, sub) {
   const pkgPath = join(pkgDir, 'package.json');
   let pkg;
@@ -525,14 +538,23 @@ function resolveExport(pkgDir, sub) {
   }
   const exp = pkg.exports;
   const where = `${pkg.name ?? pkgDir} ${sub}`;
+  let entry;
   if (typeof exp === 'string') {
     if (sub !== '.') fail(`${where} 没有这项导出`);
-    return join(pkgDir, unwrapExport(exp, where));
+    entry = exp;
+  } else {
+    if (!exp || typeof exp !== 'object' || Array.isArray(exp)) fail(`${where} 的 exports 读不出`);
+    if (Object.keys(exp).some((k) => k.includes('*')) && !(sub in exp)) fail(`${where} 的导出是通配，解不开`);
+    if (!(sub in exp)) fail(`${where} 没有这项导出`);
+    entry = exp[sub];
   }
-  if (!exp || typeof exp !== 'object' || Array.isArray(exp)) fail(`${where} 的 exports 读不出`);
-  if (Object.keys(exp).some((k) => k.includes('*')) && !(sub in exp)) fail(`${where} 的导出是通配，解不开`);
-  if (!(sub in exp)) fail(`${where} 没有这项导出`);
-  return join(pkgDir, unwrapExport(exp[sub], where));
+  const targets = [];
+  for (const kind of ['import', 'require']) {
+    const got = pickExport(entry, kind);
+    if (got) targets.push(...got);
+  }
+  if (targets.length === 0) fail(`${where} 的导出解不开`);
+  return [...new Set(targets)].map((t) => join(pkgDir, t));
 }
 
 function relSafe(abs) {
@@ -733,9 +755,11 @@ function fingerprint(rawRoot, unitName) {
     const pkgDir = names.get(name);
     if (!pkgDir) fail(`工作区里没有 ${name}`);
     addHash(join(pkgDir, 'package.json'));
-    const target = resolveExport(pkgDir, sub);
-    if (!existsSync(target)) fail(`${name} 的导出 ${sub} 对不上文件`);
-    consider(target);
+    const targets = resolveExport(pkgDir, sub);
+    for (const target of targets) {
+      if (!existsSync(target)) fail(`${name} 的导出 ${sub} 对不上文件`);
+      consider(target);
+    }
   }
 
   function onUrl(fromFile, spec) {

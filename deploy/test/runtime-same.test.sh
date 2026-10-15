@@ -49,12 +49,15 @@ unit_text=$'[Service]\nExecStart=/usr/bin/node\n'
 seed_tree() { # 目录
   local d=$1
   rm -rf -- "$d"
-  mkdir -p "$d/packages/engine/src" "$d/packages/api/src" "$d/.units" "$d/docs"
+  mkdir -p "$d/packages/engine/src" "$d/packages/api/src" "$d/.units" "$d/docs" "$d/packages/x/src"
   printf '%s\n' '{"name":"fleet-dao","private":true}' >"$d/package.json"
   printf '%s\n' 'lock: 1' >"$d/pnpm-lock.yaml"
   printf '%s\n' 'packages:' '  - packages/*' >"$d/pnpm-workspace.yaml"
   printf '%s\n' '{"name":"@fleet-dao/engine","type":"module"}' >"$d/packages/engine/package.json"
   printf '%s\n' '{"name":"@fleet-dao/api","type":"module"}' >"$d/packages/api/package.json"
+  printf '%s\n' '{"name":"@fleet-dao/x","type":"module","exports":{".":{"import":"./src/esm.ts","require":"./src/cjs.cjs"}}}' >"$d/packages/x/package.json"
+  printf '%s\n' 'export const esm = 1;' >"$d/packages/x/src/esm.ts"
+  printf '%s\n' 'module.exports.cjs = 1;' >"$d/packages/x/src/cjs.cjs"
   printf '%s\n' 'export const engine = 1;' >"$d/packages/engine/src/main.ts"
   printf '%s\n' 'export const api = 1;' >"$d/packages/api/src/main.ts"
   printf '%s\n' '文档' >"$d/docs/note.md"
@@ -91,6 +94,36 @@ saved_js=$RUNTIME_SAME_JS
 RUNTIME_SAME_JS=$TMP/bad.mjs
 check "比较脚本打出来的不是 same/changed/unknown：当 unknown" "$(runtime_tree_verdict fleet-engine "$A" "$B")" "unknown 比较没跑成"
 RUNTIME_SAME_JS=$saved_js
+
+echo "== 判法：引用方式（import / require 两组入口都算）"
+# 引擎里引了 @fleet-dao/x，那个包 import、require 各有一个入口：改哪一个都得算 changed，只认一组会漏成 same
+seed_tree "$A"
+seed_tree "$B"
+printf '%s\n' "import x from '@fleet-dao/x';" 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' "import x from '@fleet-dao/x';" 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+check "两组入口、两边都没改：引擎 same" "$(verdict fleet-engine "$A" "$B")" same
+printf '%s\n' 'module.exports.cjs = 2;' >"$B/packages/x/src/cjs.cjs"
+check "只改了 require 那个入口：引擎 changed（不能漏成 same）" "$(verdict fleet-engine "$A" "$B")" changed
+printf '%s\n' 'module.exports.cjs = 1;' >"$B/packages/x/src/cjs.cjs"
+printf '%s\n' 'export const esm = 2;' >"$B/packages/x/src/esm.ts"
+check "只改了 import 那个入口：引擎 changed" "$(verdict fleet-engine "$A" "$B")" changed
+printf '%s\n' 'export const esm = 1;' >"$B/packages/x/src/esm.ts"
+check "改回原样：引擎 same" "$(verdict fleet-engine "$A" "$B")" same
+check "两组入口：后端没引它，仍然 same" "$(verdict fleet-api "$A" "$B")" same
+# 只有 default 一项时，import 和 require 都加载它（Node 两组都认 default）——改了也得算 changed
+printf '%s\n' '{"name":"@fleet-dao/x","type":"module","exports":{".":{"default":"./src/esm.ts"}}}' >"$A/packages/x/package.json"
+printf '%s\n' '{"name":"@fleet-dao/x","type":"module","exports":{".":{"default":"./src/esm.ts"}}}' >"$B/packages/x/package.json"
+printf '%s\n' 'export const esm = 2;' >"$B/packages/x/src/esm.ts"
+check "只有 default 一项、改了它：引擎 changed" "$(verdict fleet-engine "$A" "$B")" changed
+# 认不出的条件表（两组都不认）：unknown，调用方照常重启
+printf '%s\n' '{"name":"@fleet-dao/x","type":"module","exports":{".":{"browser":"./src/esm.ts"}}}' >"$A/packages/x/package.json"
+printf '%s\n' '{"name":"@fleet-dao/x","type":"module","exports":{".":{"browser":"./src/esm.ts"}}}' >"$B/packages/x/package.json"
+check "导出只有认不出的条件：引擎 unknown（照常重启）" "$(verdict fleet-engine "$A" "$B" | awk '{print $1}')" unknown
+printf '%s\n' '{"name":"@fleet-dao/x","type":"module","exports":{".":{"import":"./src/esm.ts","require":"./src/cjs.cjs"}}}' >"$A/packages/x/package.json"
+printf '%s\n' '{"name":"@fleet-dao/x","type":"module","exports":{".":{"import":"./src/esm.ts","require":"./src/cjs.cjs"}}}' >"$B/packages/x/package.json"
+printf '%s\n' 'export const esm = 1;' >"$B/packages/x/src/esm.ts"
+printf '%s\n' 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
 
 echo "== 判法：真仓（引擎真会加载的那棵树）"
 REAL_A=$TMP/real-a
@@ -365,6 +398,12 @@ check "第三份环境文件比启动新：env_changed_since_start 认得出" "$
 SHOW_ENV_FILES="$ENV_OLD (ignore_errors=no)"
 if env_stable_since_start fleet-api.service; then stable=稳; else stable=不稳; fi
 check "环境文件都比启动旧：当成没变" "$stable" 稳
+SHOW_ENV_FILES="$TMP/env-gone.env (ignore_errors=yes)"
+if env_stable_since_start fleet-api.service; then stable=稳; else stable=不稳; fi
+check "单元列的环境文件已经不在了（可选文件被删掉）：不当成没变" "$stable" 不稳
+if env_changed_since_start fleet-api.service; then changed_env=变了; else changed_env=没变; fi
+check "环境文件不在了：env_changed_since_start 认得出" "$changed_env" 变了
+SHOW_ENV_FILES=""
 SHOW_TS=""
 if env_stable_since_start fleet-api.service; then stable=稳; else stable=不稳; fi
 check "启动时间是空的：不当成没变" "$stable" 不稳

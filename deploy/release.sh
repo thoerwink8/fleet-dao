@@ -1219,23 +1219,11 @@ unit_env_paths() { # 单元
   done
 }
 
-# 单元读的环境文件在它这次起来之后改过没有（改了 engine.env、api.env 要重启才生效）。
-# 启动时间读不出：返回 1（这一问答不了）。调用方若把它当成「要不要重启」的唯一依据，答不了就不因此重启；
-# 跳过重启那条路不靠这个，靠 env_stable_since_start（答不了就不当成没变）。
-env_changed_since_start() { # 单元
-  local start f
-  start=$(systemctl show -p ExecMainStartTimestamp --timestamp=unix --value "$1" 2>/dev/null) || start=""
-  start=${start#@}
-  if [[ ! "$start" =~ ^[0-9]+$ ]]; then return 1; fi
-  while IFS= read -r f; do
-    [[ -n "$f" ]] || continue
-    if [[ -f "$f" ]] && (($(stat -c %Y -- "$f") > start)); then return 0; fi
-  done < <(unit_env_paths "$1" || true)
-  return 1
-}
-
-# 启动时间读得到，而且这个单元读的每份环境文件都不比它新。读不到启动时间、列不出环境文件：返回 1，不当成没变。
-env_stable_since_start() { # 单元
+# 单元读的每份环境文件，哪几份「不能当成没动过」：不存在（或不是普通文件）、比这次启动新。一份一行，没有就不打。
+# 不存在的也算：单元里写成可选（`-` 前缀）的那几份，服务起来之后被删掉时进程还用着里面的值，不能当成没变
+# （宁多算不漏算——多重启一次只是打断一回，漏判会让进程一直用着已经没了的那份配置）。
+# 启动时间读不出、环境文件列表认不出：返回 1（这一问答不了，调用方不当成没变）。
+env_files_drift() { # 单元
   local start f
   start=$(systemctl show -p ExecMainStartTimestamp --timestamp=unix --value "$1" 2>/dev/null) || return 1
   start=${start#@}
@@ -1243,9 +1231,29 @@ env_stable_since_start() { # 单元
   if ! unit_env_paths "$1" >/dev/null; then return 1; fi
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
-    if [[ -f "$f" ]] && (($(stat -c %Y -- "$f") > start)); then return 1; fi
+    if [[ ! -f "$f" ]]; then
+      printf '%s\n' "$f"
+      continue
+    fi
+    if (($(stat -c %Y -- "$f") > start)); then printf '%s\n' "$f"; fi
   done < <(unit_env_paths "$1")
   return 0
+}
+
+# 单元读的环境文件在它这次起来之后改过、或没了没有（改了 engine.env、api.env 要重启才生效）。
+# 启动时间读不出、得不到答案：返回 1（这一问答不了）。调用方若把它当成「要不要重启」的唯一依据，答不了就不因此重启；
+# 跳过重启那条路不靠这个，靠 env_stable_since_start（答不了就不当成没变）。
+env_changed_since_start() { # 单元
+  local drift
+  drift=$(env_files_drift "$1") || return 1
+  [[ -n "$drift" ]]
+}
+
+# 启动时间读得到，而且这个单元读的每份环境文件都在、都不比它新。读不到启动时间、列不出环境文件：返回 1，不当成没变。
+env_stable_since_start() { # 单元
+  local drift
+  drift=$(env_files_drift "$1") || return 1
+  [[ -z "$drift" ]]
 }
 
 # 服务的主进程跑的是哪一版：它的当前目录。单元的 WorkingDirectory 是 current，起进程那一刻解成 <提交号> 目录，
