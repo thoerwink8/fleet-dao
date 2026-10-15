@@ -4,7 +4,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildSessionEnv, type RateLimitReading, type RunFacts, type SessionUser } from '@fleet-dao/adapters';
@@ -24,6 +24,8 @@ import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } fro
 import type { MemoryPeakDeps } from '../../src/real/memory-peak.ts';
 import {
   hostSegmentSpawner,
+  MIRASIM_CPU_UNREAD,
+  MIRASIM_MEMORY_UNREAD,
   outcomeOfReport,
   SEGMENT_WALL_MARGIN_MS,
 } from '../../src/real/segment-spawner.ts';
@@ -331,6 +333,69 @@ describe('hostSegmentSpawner · CPU 秒数（#1980）', () => {
     const r = await h.run();
     expect(h.recorded[0]).not.toHaveProperty('cpuSeconds');
     expect(r.facts).not.toHaveProperty('cpuWhy');
+  });
+});
+
+describe('hostSegmentSpawner · Mirasim 不采本机 scope', () => {
+  const FAKE_PEAK = (readText: MemoryPeakDeps['readText']): MemoryPeakDeps => ({
+    readText,
+    cgroupRoot: '/sys/fs/cgroup',
+    slicePath: 'fleet.slice/fleet-agents.slice',
+    intervalMs: 5,
+  });
+  const FAKE_CPU = (readText: CpuUsageDeps['readText']): CpuUsageDeps => ({
+    readText,
+    cgroupRoot: '/sys/fs/cgroup',
+    slicePath: 'fleet.slice/fleet-agents.slice',
+    intervalMs: 5,
+  });
+
+  it('起会话时不读 fleet-agent-<runId>.scope，也不读桥接的 mirasim-<随机>.scope；事实里写明记不到，不说没有 cgroup', async () => {
+    const paths: string[] = [];
+    const read = async (path: string) => {
+      paths.push(path);
+      return '999';
+    };
+    const h = harness({
+      route: route({ hostId: 'mirasim' }),
+      memoryPeak: FAKE_PEAK(read),
+      cpuUsage: FAKE_CPU(read),
+      driverRun: async () => report({ hostId: 'mirasim' }),
+    });
+    const r = await h.run();
+    expect(r.outcome).toBe('done');
+    // 采样路径跟实际起的 scope 对不上：桥接起的是 fleet-agent-mirasim-<随机>.scope，而且只是桥接进程。
+    // 不采，不把桥接的数写成这一段的用量。
+    expect(paths).toEqual([]);
+    expect(h.calls[0]?.spec.cgroup.id).toBe(RUN_ID);
+    expect(h.recorded[0]).not.toHaveProperty('memoryPeakMb');
+    expect(h.recorded[0]).not.toHaveProperty('cpuSeconds');
+    expect(r.facts).not.toHaveProperty('memoryPeakMb');
+    expect(r.facts).not.toHaveProperty('cpuSeconds');
+    expect(r.facts?.memoryPeakWhy).toBe(MIRASIM_MEMORY_UNREAD);
+    expect(r.facts?.cpuWhy).toBe(MIRASIM_CPU_UNREAD);
+    expect(r.facts?.memoryPeakWhy).not.toContain('没有 cgroup');
+    expect(r.facts?.memoryPeakWhy).not.toContain('scope 没建出来');
+    expect(r.facts?.cpuWhy).not.toContain('没有 cgroup');
+    expect(r.facts?.cpuWhy).not.toContain('scope 没建出来');
+    const logs = h.logs.join('\n');
+    expect(logs).toContain('会话内存峰值没读到');
+    expect(logs).toContain('会话 CPU 没读到');
+    expect(logs).toContain(MIRASIM_MEMORY_UNREAD);
+    expect(logs).toContain(MIRASIM_CPU_UNREAD);
+    expect(logs).not.toContain('没有 cgroup');
+    expect(logs).not.toContain('scope 没建出来');
+    expect(logs).not.toContain(`fleet-agent-${RUN_ID}.scope`);
+    const meta = JSON.parse(await readFile(join(tmp, RUN_ID, 'result.json'), 'utf8')) as {
+      memoryPeakWhy?: string;
+      cpuWhy?: string;
+      memoryPeakMb?: number;
+      cpuSeconds?: number;
+    };
+    expect(meta.memoryPeakWhy).toBe(MIRASIM_MEMORY_UNREAD);
+    expect(meta.cpuWhy).toBe(MIRASIM_CPU_UNREAD);
+    expect(meta.memoryPeakMb).toBeUndefined();
+    expect(meta.cpuSeconds).toBeUndefined();
   });
 });
 

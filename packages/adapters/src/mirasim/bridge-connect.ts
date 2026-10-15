@@ -27,7 +27,11 @@ export interface BridgeConnectorOptions {
   helper?: string;
   /** 调帮手的前缀，默认 ['/usr/bin/sudo', '-n']；测试给 [] 直接起假帮手。 */
   sudo?: readonly string[];
-  /** 每次连都要不同的 scope 编号（同一时刻不许重复）；测试用，默认现生成一个。 */
+  /**
+   * 每次连都要不同的 scope 编号（同一时刻不许重复）；测试用，默认现生成 mirasim-<随机>。
+   * 故意不是会话的 runId：一次会话有多条连接，各起一个短命 scope，里面只有桥接进程。
+   * 引擎不拿这个 scope 当会话的 CPU/内存（segment-spawner 对 Mirasim 不采样）。
+   */
   scopeId?: () => string;
   /** 测试换成假的 spawn。 */
   spawn?: typeof nodeSpawn;
