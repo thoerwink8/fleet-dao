@@ -330,7 +330,7 @@ function describeShare(share: CpuShare, cpus: number): string {
 
 /**
  * 测试开几个进程，至少 1 个：
- * - CI：只按内存算（不超过 vitest 默认的「核数 - 1」），不分核、不问负载；
+ * - CI（CI=true 且没有 FLEET_RUN_ID）：只按内存算（不超过 vitest 默认的「核数 - 1」），不分核、不问负载；
  * - 引擎的会话（带 FLEET_RUN_ID，同 test-changed.ts 的 ENGINE_SESSION_MARKER）：内存放得下的、同一池子里分到的核、vitest 默认，
  *   三者取小，每次都打一句说明；
  * - 本机人手跑（含法国引擎交活前的自测）：再按核数和整机负载降一档。
@@ -349,7 +349,10 @@ export function testWorkers(env: TestRunEnv = realTestRunEnv()): TestWorkers {
   const limit: MemoryLimit = linux ? memoryLimitOf(env) : { kind: 'none' };
   const byMemory = limit.kind === 'limited' ? workersThatFit(limit.mib) : byDefault;
   const memNote = limit.kind === 'limited' && byMemory < byDefault ? describeMemory(limit) : undefined;
-  if (isCi(env.env)) {
+  // 先认引擎的会话再认 CI：会话里的写码 CLI 给它起的命令设 CI=1（法国实测 grok 的 run_terminal_command，vitest 主进程里是
+  // CI=true），先认 CI 会话就走成「不分核」；真 CI 里没有 FLEET_RUN_ID。
+  const engine = Boolean(env.env.FLEET_RUN_ID?.trim());
+  if (!engine && isCi(env.env)) {
     if (limit.kind === 'none') return { maxWorkers: undefined };
     const maxWorkers = Math.min(byDefault, byMemory);
     if (maxWorkers >= byDefault) return { maxWorkers };
@@ -357,7 +360,7 @@ export function testWorkers(env: TestRunEnv = realTestRunEnv()): TestWorkers {
   }
   const share = linux ? cpuShareOf(env) : undefined;
   const byCpu = share?.cores ?? byDefault;
-  if (env.env.FLEET_RUN_ID?.trim()) {
+  if (engine) {
     if (limit.kind === 'none' && share === undefined) return { maxWorkers: undefined };
     const maxWorkers = Math.min(byDefault, byMemory, byCpu);
     const why = [
