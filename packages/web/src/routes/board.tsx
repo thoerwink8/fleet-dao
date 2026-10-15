@@ -13,6 +13,7 @@ import { HealthStrip } from '../components/home/health-strip';
 import { HomeDrawer } from '../components/home/home-drawer';
 import { MachineMeter } from '../components/home/machine-meter';
 import { MissingEnv } from '../components/home/missing-env';
+import { repoSlug, visibleForProject } from '../components/home/project-view';
 import { RunningBoard } from '../components/home/running-board';
 import type { HomeData } from '../components/home/types';
 import { EmptyState } from '../components/layout/empty-state';
@@ -20,6 +21,7 @@ import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { RemoteViewProvider, SnapshotBanner, useSelectedNodeName } from '../components/node-notice';
 import { NotBuilt } from '../components/not-built';
 import { RefreshBar } from '../components/refresh-bar';
+import { useRepo } from '../components/repo-context';
 import { InTopbar } from '../components/shell/topbar-slot';
 import { TIME } from '../lib/format';
 import { useSelectedNodeId } from '../lib/node';
@@ -44,17 +46,18 @@ function HomeBody({
   phone: boolean;
   afterStrip?: ReactNode;
 }) {
+  // 顶栏当前项目。画布和两个抽屉只留这一仓；没挂仓的决定（整机的事）留下。
+  // 健康条、机器资源、池里的会话数不从这里过，仍是整台机器的。
+  const { repo } = useRepo();
+  const slug = repo ? repoSlug(repo) : undefined;
+  const decisions = visibleForProject(data.decisions, slug);
+  const done = visibleForProject(data.done, slug);
+  const running = visibleForProject(data.running, slug);
   return (
-    <HomeDrawer
-      decisions={data.decisions}
-      done={data.done}
-      remote={remote}
-      phone={phone}
-      afterStrip={afterStrip}
-    >
-      {data.running.length ? (
+    <HomeDrawer decisions={decisions} done={done} remote={remote} phone={phone} afterStrip={afterStrip}>
+      {running.length ? (
         <RunningBoard
-          running={data.running}
+          running={running}
           flow={data.flow}
           health={data.health}
           slots={data.slots}

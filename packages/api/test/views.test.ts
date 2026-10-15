@@ -7,7 +7,7 @@ import {
   type SessionRun,
 } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import type { SegmentRunRecord } from '../src/ports.ts';
+import type { NotificationRecord, SegmentRunRecord } from '../src/ports.ts';
 import {
   findBan,
   homeDecisions,
@@ -112,9 +112,50 @@ describe('库里配的禁令', () => {
 });
 
 describe('主页「要你拍的」', () => {
+  const note = (over: Partial<NotificationRecord> & Pick<NotificationRecord, 'id'>): NotificationRecord => ({
+    level: 'decision',
+    title: over.title ?? over.id,
+    body: '',
+    createdAt: '2026-10-15T00:00:00.000Z',
+    deliveries: [],
+    ...over,
+  });
+
   it('只有通知：没有任何一条叫追问', () => {
-    const decisions = homeDecisions({ notifications: [], taskOf: () => undefined });
+    const decisions = homeDecisions({
+      notifications: [],
+      taskOf: () => undefined,
+      repoOf: () => undefined,
+    });
     expect(decisions).toEqual([]);
+  });
+
+  it('挂着的单能对上仓就写 owner/name；不挂单、仓不在库里是 null', () => {
+    const decisions = homeDecisions({
+      notifications: [
+        note({ id: 'n-task', title: '等你批这一仓', taskId: 't-1', createdAt: '2026-10-15T01:00:00.000Z' }),
+        note({ id: 'n-machine', title: '引擎没连上', createdAt: '2026-10-15T02:00:00.000Z' }),
+        note({
+          id: 'n-lost',
+          title: '仓已经不在库里',
+          taskId: 't-gone',
+          createdAt: '2026-10-15T03:00:00.000Z',
+        }),
+        note({ id: 'n-alert', level: 'alert', title: '不是要你拍的' }),
+      ],
+      taskOf: (id) =>
+        id === 't-1'
+          ? { issueNumber: 12, title: '登录', repoId: 'r-orbit' }
+          : id === 't-gone'
+            ? { issueNumber: 9, title: '丢了', repoId: 'r-missing' }
+            : undefined,
+      repoOf: (id) => (id === 'r-orbit' ? { owner: 'acme', name: 'orbit' } : undefined),
+    });
+    expect(decisions.map((d) => ({ id: d.id, repo: d.repo }))).toEqual([
+      { id: 'n-lost', repo: null },
+      { id: 'n-machine', repo: null },
+      { id: 'n-task', repo: 'acme/orbit' },
+    ]);
   });
 });
 
