@@ -1,0 +1,14 @@
+# 每分钟探一次法国 healthz（经隧道）。上一轮跑完再等 1 分钟，不叠着跑。
+# deploy/hk.sh 装。停它：systemctl disable --now fleet-hk-france-probe.timer（健康页就不再更新「法国失联自 …」）。
+[Unit]
+Description=每分钟探一次法国 healthz（经隧道）
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+AccuracySec=15s
+Persistent=true
+Unit=fleet-hk-france-probe.service
+
+[Install]
+WantedBy=timers.target

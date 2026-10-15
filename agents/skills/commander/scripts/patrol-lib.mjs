@@ -15,6 +15,8 @@
 // - 今天的每日简报送到没（brief 那一块）：判法照 packages/db/src/queries/daily-brief.ts 的 dailyBriefProblem 写（09:00 以后没跑、没做成、
 //   没建、没推到飞书都是 ALERT），同样改那边要一起改这里。
 // - 基线只由这份脚本写（模型不写）：OK、ALERT 都把这一次的读数写成新基线，BROKEN 不写（不拿坏读数盖掉好基线）。
+// - 读不到法国（ssh 没读成、输出空、解析失败、采集时间和本机差太多，facts 是空的）：VERDICT 前多一行显眼中文，
+//   写明读不到的原因，并指向香港状态页（上面有「法国失联自 xx:xx」）。法国答了、只是盘面不对（healthz 503、发版 unhealthy）不加这一行。
 // - 最后一行永远是 `VERDICT: OK`、`VERDICT: ALERT <条数>` 或 `VERDICT: BROKEN`；退出码 0、1、2 与之对应。
 import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
 
@@ -640,13 +642,22 @@ export function judge({ raw, now, base }) {
   };
 }
 
+/** 读不到法国时插在 VERDICT 前的那一行。reason 用判出来的 broken。 */
+export function franceUnreadLine(reason) {
+  return `！！！读不到法国：${reason}。法国上的看门狗、飞书推送、备份巡检和自动发布这时一起哑，不会有人来推。看香港状态页 https://<驾驶舱域名>/health/ ，有「法国失联自 xx:xx」就是隧道那头从那一刻起连不上。`;
+}
+
 /**
  * 打出来的样子：每项一行，带计数和采集时间；最后一行是 VERDICT。
+ * 读不到法国（facts 是空的）时，VERDICT 前多一行显眼中文。
  * @param {Report} r
  * @returns {string[]}
  */
 export function render(r) {
-  if (!r.facts) return ['PATROL 法国 没读成', `BROKEN ${r.broken ?? '没说为什么'}`, 'VERDICT: BROKEN'];
+  if (!r.facts) {
+    const why = r.broken ?? '没说为什么';
+    return ['PATROL 法国 没读成', `BROKEN ${why}`, franceUnreadLine(why), 'VERDICT: BROKEN'];
+  }
   const f = r.facts;
   const last = f.history.at(-1);
   const at = `@${f.at}`;

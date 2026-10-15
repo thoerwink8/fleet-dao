@@ -2,7 +2,14 @@
 // 跑法：node --test deploy/test/health-page.test.mjs（deploy/test/run.sh 会跑）。
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fetchHealth, judge, REQUIRED } from '../web/health/health.js';
+import {
+  applyFranceLink,
+  fetchFranceLink,
+  fetchHealth,
+  franceLinkLine,
+  judge,
+  REQUIRED,
+} from '../web/health/health.js';
 
 const report = (ok, checks) => JSON.stringify({ ok, checks });
 const allOk = { database: { ok: true }, temporal: { ok: true }, engine: { ok: true } };
@@ -306,6 +313,64 @@ test('取数：网络错误、超时、读正文时断了，都变成 error，�
     },
   }));
   assert.deepEqual(cut, { error: '连接被重置' });
+});
+
+test('法国失联：页顶写「法国失联自 HH:MM」，总灯改红，行首多一条法国隧道', () => {
+  const link = franceLinkLine({ down: true, downSinceText: '10:38', downSince: '1' });
+  assert.equal(link?.reason, '法国失联自 10:38');
+  assert.equal(link?.label, '法国隧道');
+  assert.equal(link?.ok, false);
+  const health = judge({ status: 200, body: report(true, allOk) });
+  const v = applyFranceLink(health, link);
+  assert.equal(v.ok, false);
+  assert.equal(v.summary.startsWith('法国失联自 10:38。'), true);
+  assert.equal(v.summary, '法国失联自 10:38。全部在线');
+  assert.equal(v.rows[0]?.label, '法国隧道');
+  assert.equal(v.rows[0]?.reason, '法国失联自 10:38');
+  assert.equal(v.rows[1]?.key, 'database');
+});
+
+test('法国失联的时刻：downSinceText 优先；没有就用 epoch 或 ISO，按北京时间', () => {
+  const epoch = Date.parse('2026-10-15T02:38:00Z') / 1000;
+  assert.equal(franceLinkLine({ down: true, downSince: String(epoch) })?.reason, '法国失联自 10:38');
+  assert.equal(franceLinkLine({ down: true, downSince: epoch })?.reason, '法国失联自 10:38');
+  assert.equal(franceLinkLine({ down: true, downSince: '2026-10-15T02:38:00Z' })?.reason, '法国失联自 10:38');
+});
+
+test('还没失联、时刻认不出、文件没有：不改「全部在线」', () => {
+  const health = judge({ status: 200, body: report(true, allOk) });
+  for (const data of [
+    null,
+    { down: false, downSinceText: '10:38' },
+    { down: 'true', downSinceText: '10:38' },
+    { down: true, downSinceText: 'abc' },
+    { down: true, downSince: '' },
+    { down: true },
+  ]) {
+    assert.equal(franceLinkLine(data), null, JSON.stringify(data));
+    const v = applyFranceLink(health, franceLinkLine(data));
+    assert.equal(v.ok, true, JSON.stringify(data));
+    assert.equal(v.summary, '全部在线');
+    assert.equal(v.rows.some((r) => r.label === '法国隧道'), false);
+  }
+});
+
+test('探活状态取数：404、坏 JSON、网络失败都是 null，不抛', async () => {
+  const missing = await fetchFranceLink(async () => ({ ok: false, status: 404, text: async () => '' }));
+  assert.equal(missing, null);
+  const bad = await fetchFranceLink(async () => ({ ok: true, status: 200, text: async () => 'not-json' }));
+  assert.equal(bad, null);
+  const down = await fetchFranceLink(async () => {
+    throw new TypeError('Failed to fetch');
+  });
+  assert.equal(down, null);
+  let seen;
+  const got = await fetchFranceLink(async (url, init) => {
+    seen = { url, cache: init.cache };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ down: true, downSinceText: '10:38' }) };
+  });
+  assert.deepEqual(seen, { url: '/health/france-link.json', cache: 'no-store' });
+  assert.equal(got?.reason, '法国失联自 10:38');
 });
 
 test('取数：拿到回应就原样交给判定，状态码和正文都带上', async () => {

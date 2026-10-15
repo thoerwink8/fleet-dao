@@ -2,7 +2,7 @@
 # shellcheck source-path=SCRIPTDIR
 # 香港机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：系统用户 fleet 与 /etc/fleet-dao、
 # 防火墙基线（ufw 已经开着才收口：默认拒绝入站，只放白名单）、WireGuard 服务端、nginx 上 fleet-dao 这一个站点（驾驶舱静态文件 + Let's Encrypt 证书与自动续期；/api、/auth、
-# /github/webhook、/healthz 经隧道转法国）、法国发布脚本用的一把钥匙（只许经隧道来，只能往 /srv/fleet-dao-web
+# /github/webhook、/healthz 经隧道转法国）、每分钟经隧道探法国 /healthz 的定时器（连续 3 次失败才算失联）、法国发布脚本用的一把钥匙（只许经隧道来，只能往 /srv/fleet-dao-web
 # 写静态文件）。别家的站点和服务一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/hk.sh           装：缺的补上，已有的不动
 #   bash deploy/hk.sh --check   只读回和自检，不改任何东西
@@ -44,6 +44,13 @@ HK_F2B_IGNORE=10.99.0.0/24
 # 法国驾驶舱后端（packages/api 的 FLEET_COCKPIT_LISTEN）：/api、/auth、/github/webhook、/healthz 经隧道转到这里。
 # 站点里它是 upstream fleet_dao_api 唯一的 server，连接留着复用（nginx-https.conf 开头）
 API_UPSTREAM=$WG_PEER_ADDR:8787
+# 香港本机探法国：每分钟打隧道上的 /healthz，连续 3 次失败才算失联。状态不放进静态目录（发版会 --delete）。
+# 推送地址在另一份文件里，没配只写状态。改路径要同步 france-probe.sh 的默认值和两份 nginx 模板。
+PROBE_BIN=/usr/local/lib/fleet-dao/france-probe.sh
+PROBE_STATE_DIR=/var/lib/fleet-hk-france-probe
+PROBE_ENV=/etc/fleet-dao/hk-probe.env
+PROBE_SERVICE=fleet-hk-france-probe.service
+PROBE_TIMER=fleet-hk-france-probe.timer
 ENV_FILE=/etc/fleet-dao/hk.env
 ENV_KEYS=(FLEET_DOMAIN FLEET_ACME_EMAIL FLEET_WG_FRANCE_PUBLIC_KEY FLEET_WEB_UPLOAD_PUBLIC_KEY
   FLEET_GATEWAY_DEPLOY_PUBLIC_KEY FLEET_DEMO_PATH) # 两个已删的键（飞书网关、演示版#1223）：老的 hk.env 里可能还有，认下来、忽略
@@ -547,6 +554,107 @@ readback_fail2ban() {
   fi
 }
 
+# 探法国：脚本、定时器、状态目录。推送没配只记待配，不判红（没配就只写状态）。
+setup_france_probe() {
+  step "探法国 healthz（每分钟经隧道，连续 3 次失败才算失联）"
+  ensure_pkgs curl
+  ensure_dir /usr/local/lib/fleet-dao root:root 755
+  ensure_dir "$PROBE_STATE_DIR" root:root 755
+  if [[ -e "$PROBE_ENV" ]]; then
+    fix_meta "$PROBE_ENV" root:root 600
+  else
+    put_file "$PROBE_ENV" root:root 600 "$(<"$DEPLOY_DIR/hk/hk-probe.env.example")"
+  fi
+  put_file "$PROBE_BIN" root:root 755 "$(<"$DEPLOY_DIR/hk/france-probe.sh")"
+  local reload=0 timer_wrote=0
+  put_file "/etc/systemd/system/$PROBE_SERVICE" root:root 644 "$(<"$DEPLOY_DIR/hk/$PROBE_SERVICE")"
+  reload=$((reload || WROTE))
+  put_file "/etc/systemd/system/$PROBE_TIMER" root:root 644 "$(<"$DEPLOY_DIR/hk/$PROBE_TIMER")"
+  timer_wrote=$WROTE
+  reload=$((reload || WROTE))
+  if ((reload)); then
+    if ! systemctl daemon-reload; then
+      red "systemctl daemon-reload 失败（法国探活）"
+      return 1
+    fi
+  fi
+  if [[ "$(systemctl is-enabled "$PROBE_TIMER" 2>/dev/null)" != enabled ]]; then
+    if ! systemctl enable --quiet "$PROBE_TIMER"; then
+      red "$PROBE_TIMER 启用失败"
+      return 1
+    fi
+    changed "启用 $PROBE_TIMER"
+  fi
+  if [[ "$(systemctl is-active "$PROBE_TIMER" 2>/dev/null)" != active ]]; then
+    if ! systemctl start "$PROBE_TIMER"; then
+      red "$PROBE_TIMER 起不来：systemctl status $PROBE_TIMER"
+      return 1
+    fi
+    changed "启动 $PROBE_TIMER"
+  elif ((timer_wrote)); then
+    if ! systemctl restart "$PROBE_TIMER"; then
+      red "$PROBE_TIMER 重启失败：systemctl status $PROBE_TIMER"
+      return 1
+    fi
+    changed "重启 $PROBE_TIMER（单元变了）"
+  fi
+  ok "法国探活已排班（每分钟打 http://${WG_PEER_ADDR}:8787/healthz，连续 3 次失败才算失联）"
+}
+
+# 等号后面的值：去首尾空白，再剥掉一对双引号（和 france-probe.sh 同一套读法）
+probe_env_value() {
+  local val=$1
+  val=${val#"${val%%[![:space:]]*}"}
+  val=${val%"${val##*[![:space:]]}"}
+  if [[ "$val" =~ ^\"(.*)\"$ ]]; then val=${BASH_REMATCH[1]}; fi
+  val=${val#"${val%%[![:space:]]*}"}
+  val=${val%"${val##*[![:space:]]}"}
+  printf '%s' "$val"
+}
+
+# 推送配没配只看键在不在、等号后面有没有字，不把地址打出来（里面是凭据）
+probe_webhook_set() {
+  [[ -r "$PROBE_ENV" ]] || return 1
+  local line val
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    [[ "$line" =~ ^FLEET_HK_PROBE_WEBHOOK=(.*)$ ]] || continue
+    val=$(probe_env_value "${BASH_REMATCH[1]}")
+    [[ -n "$val" ]] && return 0
+    return 1
+  done <"$PROBE_ENV"
+  return 1
+}
+
+readback_france_probe() {
+  if [[ -x "$PROBE_BIN" ]]; then
+    ok "法国探活脚本在 $PROBE_BIN"
+  else
+    red "没有法国探活脚本 $PROBE_BIN：重跑 hk.sh"
+  fi
+  if [[ -d "$PROBE_STATE_DIR" && "$(stat -c '%U:%G %a' -- "$PROBE_STATE_DIR" 2>/dev/null)" == "root:root 755" ]]; then
+    ok "法国探活状态目录 $PROBE_STATE_DIR（root:root 755，nginx 读得了）"
+  else
+    red "法国探活状态目录不对（$PROBE_STATE_DIR 应为 root:root 755）：重跑 hk.sh"
+  fi
+  if [[ -f "$SITE_AVAILABLE" ]] && grep -qF 'location = /health/france-link.json' -- "$SITE_AVAILABLE" &&
+    grep -qF "alias $PROBE_STATE_DIR/status.json;" -- "$SITE_AVAILABLE"; then
+    ok "健康页能读本机探活状态（/health/france-link.json）"
+  else
+    red "站点没把 /health/france-link.json 指到 $PROBE_STATE_DIR/status.json：重跑 hk.sh"
+  fi
+  if [[ "$(systemctl is-enabled "$PROBE_TIMER" 2>/dev/null)" == enabled && "$(systemctl is-active "$PROBE_TIMER" 2>/dev/null)" == active && -n "$(unit_prop "$PROBE_TIMER" NextElapseUSecRealtime)" ]]; then
+    ok "$PROBE_TIMER 在排班（下次 $(systemctl show -p NextElapseUSecRealtime --value "$PROBE_TIMER")）"
+  else
+    red "$PROBE_TIMER 没在排班：法国关机时香港不会自己发现"
+  fi
+  if probe_webhook_set; then
+    ok "法国探活配了推送（地址不在这里打印）"
+  else
+    pending "法国探活没配推送（$PROBE_ENV 的 FLEET_HK_PROBE_WEBHOOK）：只写状态文件和日志，健康页仍显示失联"
+  fi
+}
+
 readback() {
   step "读回"
   readback_fail2ban
@@ -555,6 +663,7 @@ readback() {
   readback_wireguard
   readback_site
   readback_upstream
+  readback_france_probe
   readback_cert
   readback_web_upload
   readback_retired_gateway
@@ -778,6 +887,7 @@ main() {
     setup_tls
     # 证书刚签下来：站点从只开 80 换成 80 + 443
     if ((TLS_ISSUED)); then setup_site; fi
+    setup_france_probe
   else
     load_config
   fi
