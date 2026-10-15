@@ -1,5 +1,7 @@
 # 运维手册：两台机器的地基与应用发布
 
+法国失联（判断关机还是断网、Contabo 上重启、重启后核对）照 [outage-france.md](outage-france.md)。健康页上的「法国失联自 xx:xx」由香港探活写入（「香港探法国」一节），法国关机时这一页和可选的推送仍在。
+
 装法在 `deploy/`，这里讲怎么用、怎么看、怎么退。机器的公网 IP 和驾驶舱域名不进仓，下文写作 `<法国IP>`、`<香港IP>`、`<驾驶舱域名>`；域名的真值只在机器配置里（香港 `hk.env`、法国 `release.env` 的 `FLEET_DOMAIN`）。
 旧系统（windsurf-dao、ai-gateway-stack 那一套）已于 2026-09-25 从两台机器上全部清退：单元、用户、目录、数据都删了。它留下的坑与由来见 [reference/deploy.md](reference/deploy.md)（文中的 P01、P02 等编号出自那里；那份记的是清退前的现场）。
 两层：`deploy/france.sh`、`deploy/hk.sh` 装机器（第一到第八节）；`deploy/release.sh` 发布应用（第九节），并往香港传驾驶舱静态文件。备份与换机恢复另有一个装机脚本 `deploy/backup/install.sh`（「备份与恢复」一节）。本机 WSL 演练台已于 2026-10-06 撤掉（决定 0022，`docs/decisions/0022-retire-local-wsl.md`）。
@@ -9,7 +11,7 @@
 | | 法国 | 香港 |
 |---|---|---|
 | 系统 | Ubuntu 24.04，6 核 12G | Ubuntu 22.04，2 核 2G |
-| 跑什么 | Temporal、PostgreSQL、引擎工人、驾驶舱后端、AI 会话 | nginx（驾驶舱静态文件、证书、往法国转接口）、WireGuard 服务端 |
+| 跑什么 | Temporal、PostgreSQL、引擎工人、驾驶舱后端、AI 会话 | nginx（驾驶舱静态文件、证书、往法国转接口）、WireGuard 服务端、经隧道探法国 healthz |
 | 公网入站（ufw） | 只放 22/tcp；另在隧道网卡上给香港开 8787 | 本仓只放 22/tcp、80/tcp、443/tcp（nginx）、4500/udp（WireGuard）；另登记别家的 8443/tcp（self-proxy，不归本仓管）。白名单在 `deploy/hk.sh` 顶部「约定」（`HK_FW_OURS`、`HK_FW_FOREIGN`） |
 | 装机脚本 | `deploy/france.sh` | `deploy/hk.sh` |
 | 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
@@ -56,6 +58,8 @@
 选端口的规矩：Temporal 一律「官方默认 +10」（当初为了和旧系统的 7233/8233 错开；旧系统已清退，端口不再改）；都在 32768 以下——32768 起是临时端口段，程序运行中随手要的端口会落在里面，同段里挑端口迟早撞上。
 
 监督探 `<法国IP>` 的公网口时：22 通是 sshd；443 通是别家 self-proxy，不代表驾驶舱活着。80、8787、7233 从公网超时是预期，不要判红，也不要为此去开公网。8787 只绑 `10.99.0.2`（`fleet-api.socket`），ufw 只在 `wg-fleet` 上给 `10.99.0.1` 放行，公网方向被默认拒绝丢掉——外面看是超时，机器上连这个公网地址则是没人听、立刻被拒。7233 是清退前的旧 Temporal 口，现在前端在 `127.0.0.1:7243`。80 在香港，不在法国。没有隧道时，healthz 旁证走 `https://<驾驶舱域名>/healthz`（香港 nginx 经隧道转，第二节）。有隧道时直接 `http://10.99.0.2:8787/healthz`。公网 `http://<法国IP>:8787/healthz` 回得来才是开口子，要当异常。SSH 登不上另计，不在这条里改防火墙或钥匙。
+
+公网和隧道一起没了（`<法国IP>` 的 ICMP、22、443 都超时，同时香港上对端握手不再更新、`10.99.0.2` 的 ICMP、22、8787 都超时，香港自己的 SSH 仍正常、`wg-fleet` 仍是 UP）时，客机操作系统多半不在跑。这和公钥被拒（对端还在、只是握手失败）、公网 8787 超时（只绑隧道，预期）、TCP 通但 HTTP 不答，都不是同一件事：先别改 WireGuard 钥匙，也别为 8787 开公网。机器重新开起来之后，用 `last -x` 或 `utmpdump /var/log/wtmp` 看关机记录。有一条 `shutdown` 紧挨着下一次 `reboot`，就是客机干净关过机，中间那段外面两边都不可达；`/var/crash` 是空的就先别写成内核 panic。当天无人值守升级装过新内核、但 `Unattended-Upgrade::Automatic-Reboot` 仍是注释掉的 false 时，新内核只说明这次开机选了它，不说明是谁下的关机。关机是谁发起的在 journal 里（`journalctl -b -1 -u systemd-logind`），会话用户读不到。
 
 香港：
 
@@ -111,12 +115,17 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | /srv/fleet-dao-releases/.train | root:root | 755 | deploy/lib/human-tier.sh |
 | /srv/fleet-dao-web | root:root | 755 | deploy/hk.sh |
 | /usr/local/lib/fleet-dao | root:root | 755 | deploy/france.sh |
+| /usr/local/lib/fleet-dao | root:root | 755 | deploy/hk.sh |
 | /usr/local/lib/fleet-dao | root:root | 755 | deploy/lib/human-tier.sh |
 | /usr/local/lib/fleet-dao/auto-release | root:root | 755 | deploy/france.sh |
+| /usr/local/lib/fleet-dao/backup | root:root | 755 | deploy/hk.sh |
 | /usr/local/lib/fleet-dao/release-request | root:root | 755 | deploy/lib/human-tier.sh |
+| /var/backups/fleet-dao/restic-copies | root:root | 700 | deploy/hk.sh |
 | /var/lib/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-dao/engine | fleet:fleet | 750 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-dao/release-request | fleet:fleet | 750 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-hk | root:root | 755 | deploy/hk.sh |
+| /var/lib/fleet-hk-france-probe | root:root | 755 | deploy/hk.sh |
 | /var/lib/fleet-sessions | fleet:fleet | 711 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-work | root:root | 755 | deploy/lib/human-tier.sh |
 | /var/log/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |
@@ -145,6 +154,12 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | fleet-release-request.path | 法国 | fleet-dao 驾驶舱的发布请求一到就接活 |
 | fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
 | fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
+| fleet-backup-copy.service | 香港 | fleet-dao 香港每天复制备份仓库（备份用户碰不到，留 14 天） |
+| fleet-backup-copy.timer | 香港 | 每天 09:10（北京时间）把香港上的备份仓库复制一份，留 14 天 |
+| fleet-backup-freshness.service | 香港 | fleet-dao 香港检查备份最新快照是否超过 26 小时 |
+| fleet-backup-freshness.timer | 香港 | 每小时 25 分看备份最新快照是否超过 26 小时 |
+| fleet-hk-france-probe.service | 香港 | fleet-dao 香港经隧道探法国 healthz（连续 3 次失败才算失联） |
+| fleet-hk-france-probe.timer | 香港 | 每分钟探一次法国 healthz（经隧道） |
 
 <!-- fleet:units:end -->
 
@@ -185,6 +200,12 @@ renderUnitsBlock 实际输出（跑 packages/conventions/src/ops-tables.ts 的 r
 | fleet-release-request.path | 法国 | fleet-dao 驾驶舱的发布请求一到就接活 |
 | fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
 | fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
+| fleet-backup-copy.service | 香港 | fleet-dao 香港每天复制备份仓库（备份用户碰不到，留 14 天） |
+| fleet-backup-copy.timer | 香港 | 每天 09:10（北京时间）把香港上的备份仓库复制一份，留 14 天 |
+| fleet-backup-freshness.service | 香港 | fleet-dao 香港检查备份最新快照是否超过 26 小时 |
+| fleet-backup-freshness.timer | 香港 | 每小时 25 分看备份最新快照是否超过 26 小时 |
+| fleet-hk-france-probe.service | 香港 | fleet-dao 香港经隧道探法国 healthz（连续 3 次失败才算失联） |
+| fleet-hk-france-probe.timer | 香港 | 每分钟探一次法国 healthz（经隧道） |
 
 来源 Description=（法国 deploy/france、香港 deploy/hk，按文件名排）：
 deploy/france/fleet-agents.slice → fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给）
@@ -202,6 +223,12 @@ deploy/france/fleet-mirasim-session.service → 会话用户 @@SESSION_USER@@ �
 deploy/france/fleet-release-request.path → fleet-dao 驾驶舱的发布请求一到就接活
 deploy/france/fleet-release-request.service → fleet-dao 接驾驶舱的发布请求
 deploy/france/fleet-temporal.service → fleet-dao Temporal 服务端（Postgres 持久化）
+deploy/hk/fleet-backup-copy.service → fleet-dao 香港每天复制备份仓库（备份用户碰不到，留 14 天）
+deploy/hk/fleet-backup-copy.timer → 每天 09:10（北京时间）把香港上的备份仓库复制一份，留 14 天
+deploy/hk/fleet-backup-freshness.service → fleet-dao 香港检查备份最新快照是否超过 26 小时
+deploy/hk/fleet-backup-freshness.timer → 每小时 25 分看备份最新快照是否超过 26 小时
+deploy/hk/fleet-hk-france-probe.service → fleet-dao 香港经隧道探法国 healthz（连续 3 次失败才算失联）
+deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经隧道）
 -->
 
 | 用户 | 在哪 | 干什么 |
@@ -252,6 +279,10 @@ deploy/france/fleet-temporal.service → fleet-dao Temporal 服务端（Postgres
 | 路径 | 属主 权限 | 放什么 |
 |---|---|---|
 | `/etc/fleet-dao/hk.env` | root:fleet 640 | 域名、证书联系邮箱、法国的 WireGuard 公钥、法国的上传静态文件公钥。老文件里留着的 `FLEET_DEMO_PATH`（#1223）、`FLEET_GATEWAY_DEPLOY_PUBLIC_KEY`（飞书网关）是已删的键，`hk.sh` 认得、忽略 |
+| `/etc/fleet-dao/hk-probe.env` | root:root 600 | 香港探法国的推送地址，只有 `FLEET_HK_PROBE_WEBHOOK`。样例 `deploy/hk/hk-probe.env.example`。没配或留空：探活照常，只写状态和日志，不报错。地址不进仓；文件已经在，重跑 `deploy/hk.sh` 不覆盖 |
+| `/var/lib/fleet-hk-france-probe` | root:root 755 | 探活状态 `status.json`（644，nginx 读得了）。不放进 `/srv/fleet-dao-web`：发版 rsync `--delete` 会删掉。站点用 `/health/france-link.json` 指到它 |
+| `/usr/local/lib/fleet-dao/france-probe.sh` | root:root 755 | 探活脚本，`deploy/hk.sh` 从 `deploy/hk/france-probe.sh` 拷过来 |
+| `/etc/systemd/system/fleet-hk-france-probe.service`、`fleet-hk-france-probe.timer` | root 644 | 每分钟跑一次（oneshot，跑完就退出；只 enable timer） |
 | `/etc/fail2ban/jail.d/fleet-dao-sshd.local` | root:root 644 | 香港 fail2ban 的 sshd jail（#1784，仓里 `deploy/hk/fail2ban-sshd.jail`）：由 hk.sh 管（`fail2ban-client -t` 过了才 reload，没装 fail2ban 只记待配），放过隧道网段 `10.99.0.0/24`——法国在隧道里几次失败登录不会被封，发版链不会被卡死；读回查 `ignoreip` 含它，没有判红。原来手放的 `jail.d/sshd.local` 由 hk.sh 挪成 `sshd.local.bak-<日期>`，不删。法国那份（`deploy/france/fail2ban-sshd.jail`）同样带这段 `ignoreip` |
 | `/opt/self-proxy/src` | root:root，组和其他人不可写 | 别家 self-proxy 的程序目录（#2235，内容不归本仓管）：它的 `self-proxy-userinfo.timer` 每 15 分钟以 root 跑里面的 `hk/userinfo.sh`，可它每次部署都是从创始人的 Mac 上 tar 解包、属主是 Mac 的 uid 501 / 组 staff。`hk.sh` 只收属主和写权限（`chown -R root:root`、`chmod -R go-w`，不碰内容），读回查全树；self-proxy 重新部署又会变回去，`--check` 读回判红，重跑 `hk.sh` 收回 |
 | `/srv/fleet-dao` | root:root 755 | 装机脚本所在的检出 |
@@ -261,6 +292,9 @@ deploy/france/fleet-temporal.service → fleet-dao Temporal 服务端（Postgres
 | `/etc/nginx/sites-available/fleet-dao`（`sites-enabled` 里有链接） | root 644 | fleet-dao 的站点。同一个 nginx 上另有 MiraQuota 的站点 `ai-gateway`（不归 fleet-dao 管，装机不碰） |
 | `/etc/letsencrypt/live/<驾驶舱域名>` | certbot 管 | 证书；`certbot.timer` 续期，续完重载 nginx |
 | `/etc/wireguard/wg-fleet.conf`、`wg-fleet.key` | root 600 | 隧道配置与私钥 |
+| `/var/backups/fleet-dao/restic-copies` | root:root 700 | 备份仓库的第二份：root 每天复制一份，按日期一个目录，留 14 天。备份用户碰不到（第十一节） |
+| `/var/lib/fleet-hk` | root:root 755 | 香港自己的状态。`status.json`（root:root 644）写备份新鲜度 `backup.snapshot` 和复制成没成 `backup.copy`。格式在 `deploy/backup/hk-status.sh`，法国失联探活后合的也写这一份 |
+| `/usr/local/lib/fleet-dao/backup` | root:root 755 | 香港的复制和新鲜度脚本（`hk-repo-copy.sh`、`hk-snapshot-freshness.sh`、`hk-status.sh`），由 `hk.sh` 放。法国同名目录另放每晚备份的任务脚本，由 `install.sh france` 放 |
 
 库（法国）：PostgreSQL 16 装的是 Ubuntu 自带的源（吃得到自动安全更新）。`fleet` 库属 fleet 角色，本机 socket + peer 认证（系统用户 fleet 就是库角色 fleet），不设口令；`temporal`、`temporal_visibility` 属 temporal 角色，走 127.0.0.1:5432 + 口令（`/etc/fleet-dao/temporal.env`）。Temporal 命名空间 `fleet`，已结束的工作流保留 30 天。
 
@@ -367,7 +401,12 @@ sudo -n /usr/local/sbin/fleet-agent-scope remove /var/lib/fleet-work/<owner>_<na
 - 安全垫分两层：父节点 `fleet-agents.slice` 兜「总量不超」，单会话的上限只管「一次放得下最坏情形」，不再严格三等分（cgroup v2 的常见做法：kernel 文档 memory.high/memory.max 一节，k8s requests/limits 同理）。
   - 父节点总上限 =（能分给会话的 11G − 平台常驻服务约 0.6G）≈ 10664M（`packages/engine/src/limits.ts` 的 `SLICE_MEMORY_MAX_MB`），软上限低 512M（`SLICE_MEMORY_HIGH_MB`，10152M）；数值写在 `deploy/france/fleet-agents.slice`，两处对不上 `packages/engine/test/slice-unit.test.ts` 会红。
   - 单会话 scope 的上限是引擎的默认值（`sessionMemoryHighMb`、`sessionMemoryMaxMb`，驾驶舱设置里能改）：硬上限取 tsc -b 全仓约 1.9G + 测试 2–3 个进程约 2.5–3.2G + 代理本身约 0.3–1G 这种最坏组合，取整到 6144M（约总量的一半，比旧的三等分值 3554M 宽松得多，仍明显小于父节点总上限）；软上限只比它低 256M（5888M），超了软上限、又没有 swap 可换，内核就压着回收、会话半死不活，夹缝留窄。原来的软 1.5G、硬 2G 连 1 个测试进程加 Claude Code 都放不下（#160 卡在那里十几分钟）；后来的软 3298M、硬 3554M 又连「tsc -b + 测试 + 代理」这种会话内部的组合都放不下（法国 2026-09-28 06:35–06:45 实测：单会话被自己那道窄墙卡死，整机却还有 6.8G 空闲）。现在同时跑测试的会话数没有单独限着——多个会话同时冲高时由父节点的总上限兜住，不再靠单会话早早卡死自己；账号池的并发（目录配置里的 maxConcurrency）多了终究要看父节点扛不扛得住。
-- 会话里跑测试开几个进程，由仓根的 `vitest.config.ts` 按本进程所在 cgroup 的上限算（`packages/conventions/src/test-run.ts`：每个进程按 900M、给主进程和 Claude Code 留 1300M）：新的 5888M 软上限放得下 5 个（一般机器 vitest 默认的「核数 − 1」就到头了，不再被内存上限额外砍）；没有上限的 CI 照 vitest 默认，本机人手跑的（不在 CI、环境里没有 `FLEET_RUN_ID`）再按核数和整机负载降一档（默认的一半，不超过空着的核数 − 1）；读不到、认不出上限直接报错，要硬跑就给 `VITEST_MAX_WORKERS=<进程数>`。
+- 会话里跑测试开几个进程，由仓根的 `vitest.config.ts` 按「真正能用」的算（`packages/conventions/src/test-run.ts`：每个进程按 900M、给主进程和 Claude Code 留 1300M）：
+  - 内存：自己 scope 的上限（5888M 软上限放得下 5 个）和池子 `fleet-agents.slice` 的上限减掉别的会话已用的（池子的 `memory.current` − 自己 scope 的），取小。几个会话同时跑测试时后起的少开：别人已用 5G 时剩 5152M 开 4 个，已用 8.5G 时开 1 个。
+  - 核：引擎的会话（环境里有 `FLEET_RUN_ID`）隔 300 毫秒读两次池子里各兄弟 scope 的 `cpu.stat`，平均用了半个核以上的算「在跑」，6 核按在跑的会话数（含自己）平分、至少 1 个：3 个在跑各开 2 个。只数忙的不数个数：会话多半时间在等模型、池子里还有中转桥这些常驻小 scope。
+  - 池子的 `memory.current`、兄弟的 `cpu.stat` 读不到就照只看上限、不分核，不报错。每次都打一句「测试开 N 个进程（默认 5 个；内存能用…；…里 k 个会话在跑…）」，法国读回看它。
+  - 有 `FLEET_RUN_ID` 就按引擎的会话算，不看 `CI`：会话里的写码 CLI 给命令设 `CI=1`（grok 实测）。没有上限的 CI 照 vitest 默认、不分核；本机人手跑的（不在 CI、没有 `FLEET_RUN_ID`，法国引擎交活前的自测也走这条）再按核数和整机负载降一档（默认的一半，不超过空着的核数 − 1），也和池子里分到的核取小。读不到、认不出自己的上限直接报错，要硬跑就给 `VITEST_MAX_WORKERS=<进程数>`。
+  - 复测：几个会话同时跑测试时 `free -m` 的 available 不低于 1G，各会话打出的「测试开 N 个进程」和上面算的一致。
 
 会话的 PATH 与 pnpm（#164 在法国复测时查出：引擎给会话的 PATH 和会话用户的登录 shell 里都没有 pnpm，会话跑不了 `pnpm test:changed`，交活核对又只认命令开头就是它，绕成 `corepack pnpm …` 不算）：
 
@@ -544,14 +583,15 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 引擎每 5 分钟（每小时 4、9、14……分，定时任务 `watchdog`）按 `scheduled_jobs` 登记表逐个看定时任务（引擎的、备份的都算）新不新鲜，判法和驾驶舱「定时任务」页同一份（`@fleet-dao/db` 的 `scheduleHealth`）。要人知道的推一条卡住报警（提醒中心，飞书照现有的推送发），点进去是「定时任务」页：
   - 最近一次没跑成：「定时任务「<名字>」没跑成」，正文写原因和上次跑成的时刻。任务自己为这次没跑成报过的（键以 `<编号>:run` 开头，备份脚本就这么报），不再报第二条。
   - 过了期望间隔没跑成过：「……停了：超过 <期望间隔>没跑」（期望间隔里一次都没开跑）、「……超过 <期望间隔>没跑成」（还在跑，但一直没跑成，比如一直一个都没扫到）、「……从没跑过」「……从没跑成过」（从登记时算起过了期望间隔）。刚登记、还没轮到第一次的不报。
+  - 拼车池整池暂停（库里每个拼车池都被 `engine.poolHolds` 或 `pool-hold:` 顶着）时 `carpool-watch` 不要求新鲜：登记行还在也不报「停了」，已经开着的 `watchdog:job:carpool-watch:…` 这一轮撤掉（正文写暂停原因）。暂停读不到不当成暂停，照常盯。撤了暂停、超过期望间隔还没跑，照常报。引擎起来时这个任务也不重新登记（`packages/engine/src/real/jobs.ts`），免得启动把摘掉的行写回来。
   - 一段一条（键 `watchdog:job:<任务>:after-<上次跑成那一行的编号>`，从没跑成过是 `no-success`）：同一段里人点了「处理」就不再打开；按期跑成了自己撤（正文开头「已撤：为什么」，处理人 `engine:watchdog`，操作记录 `notification.resolve`）；之后再出事是新的一张卡。超过 24 小时没人处理的，每小时对账照常再推。
   - 读不到登记表、跑记录：这一轮记没跑成（`schedule_runs` 里 `failed`、`why` 写原因），开着的报警一条都不撤；不另推「看门狗没查成」（#1072 删了：和下面后端看着看门狗的「看门狗没跑成」是同一件事）；下一轮读到了就照常。推、撤没写进去：这一轮记没跑成，下一轮照库里的样子重推。
   - 账号池额度读数过期（决定 0093 从每小时对账搬来，`packages/engine/src/jobs/watchdog-quota.ts`）：`reconcile:quota:<池>`「账号池额度读数过期」——渠道开着、有路由、没过期的池，库里最近读成超过 30 分钟（或从没读成、上游数冻住），点进去是额度页：先看「定时任务」页 `quota-read` 那一行有没有在跑、`why` 写的这个池为什么没读成，再看有没有同池的 `quota-read:<池>` 提醒；读新了下一轮（5 分钟内）自己撤，处理人 `engine:watchdog`。正文只写上次读成的时刻、不写「几分钟前」，读数没变不改卡。`deploy/quota.json` 的 `notRead` 里的池不查。读不到额度表：看门狗这一轮记没跑成，开着的不撤。
   - 发版要人看、健康页非 200（2026-10-14 法国 17:03Z 发版失败：后端起不来、自动退回后健康检查也没过、`/healthz` 503、主线落后 19 个提交，近一小时无人知道；`packages/engine/src/jobs/release-watch.ts`，只在有 `/srv/fleet-dao-releases` 的法国看，开发机整块跳过）：
-    - 「发版要人看」（点进 `/france`）：`.history` 最近一条是 `unhealthy` 或 `auto-rollback`（键 `watchdog:release:<那个提交前 12 位>:<事件>`）；或 `.train/release-train.json` 收了尾却没成（status 是 `failed` / `blocked` 这类），或 status 是 `running` 而 `startedAt`（没有用 `updatedAt`）已过 70 分钟（键 `watchdog:release:train:<这一趟 target.value 前 12 位>:<status>`，标题写这一趟的提交，不挂在上一版身上）；或 `.auto/state.json` 的 `auto.note` 含「要人看」（就是自动发版每 5 分钟说「上一趟 failed，要人看」的那句）。`running` 没过 70 分钟是一趟正常发版在走（一趟 7–10 分钟），不报，那段时间和刚收尾成了时自动发布说的「上一趟是 running，要人看」也不报。70 分钟的依据：`deploy/france/release-request/lib.mjs` 的 `LIMITS`（release.sh 30 + 等部署 3 + 检查 5 + 发后体检重试 15 + 其余八步各 2 = 69 分钟），哪步到上限脚本自己写成没成；老格式进度记录没有时间的 `running` 判不了多久，照旧报。这一趟已经落地（进度 `done`、`current` 就是 `target.value`，接活脚本的发后体检过了）时，`.history` 末行那句说的是这个提交的 `unhealthy` 不再报（release.sh 没退回、停在这一版，之后体检过了；`auto-rollback` 末行照报）。标题只在自动发版真停着时写「自动发版停着」：自动发布的闸只看进度记录、不看 `.history`，只有进度收了尾却没成、卡住，或它自己说了「要人看」才停（#2207）。指挥官巡查（`patrol-lib.mjs`）同一判法同一个数。之后一次发版成功（最近一条变成 `release` / `recovered`）、进度记录收尾，自己撤。
+    - 「发版要人看」（点进 `/france`）：`.history` 最近一条是 `unhealthy` 或 `auto-rollback`（键 `watchdog:release:<那个提交前 12 位>:<事件>`）；或 `.train/release-train.json` 收了尾却没成（status 是 `failed` / `blocked` 这类），或 status 是 `running` 而 `startedAt`（没有用 `updatedAt`）已过 70 分钟（键 `watchdog:release:train:<这一趟 target.value 前 12 位>:<status>`，标题写这一趟的提交，不挂在上一版身上）；或 `.auto/state.json` 的 `auto.note` 含「要人看」（就是自动发版每 5 分钟说「上一趟 failed，要人看」的那句）。`running` 没过 70 分钟是一趟正常发版在走（一趟 7–10 分钟），不报。闸在 running 时写「有一趟发版在跑（目标提交前 12 位），等它收尾」，不含「要人看」；`auto.note` 里真写了「要人看」（收了尾没成）才报。70 分钟的依据：`deploy/france/release-request/lib.mjs` 的 `LIMITS`（release.sh 30 + 等部署 3 + 检查 5 + 发后体检重试 15 + 其余八步各 2 = 69 分钟），哪步到上限脚本自己写成没成；老格式进度记录没有时间的 `running` 判不了多久，照旧报。这一趟已经落地（进度 `done`、`current` 就是 `target.value`，接活脚本的发后体检过了）时，`.history` 末行那句说的是这个提交的 `unhealthy` 不再报（release.sh 没退回、停在这一版，之后体检过了；`auto-rollback` 末行照报）。标题只在自动发版真停着时写「自动发版停着」：自动发布的闸只看进度记录、不看 `.history`，只有进度收了尾却没成、卡住，或它自己说了「要人看」才停（#2207）。指挥官巡查（`patrol-lib.mjs`）同一判法同一个数。之后一次发版成功（最近一条变成 `release` / `recovered`）、进度记录收尾，自己撤。
     - 「健康页非 200」（键 `watchdog:healthz:since-<第一次不健康的毫秒>`）：引擎自己去问 `http://10.99.0.2:8787/healthz`（`real/watchdog.ts` 的 `DEFAULT_HEALTHZ_URL`，同 `release.sh` 的 `COCKPIT`），非 200、连不上、超时都算；第一次不健康的时刻记在设置表 `engine.healthzBadSince`（引擎重启不丢），持续超过 10 分钟才报，正文列红的检查；回 200 清掉记录、撤卡。后端起不来时后端自己的 `deploy_lag` 报警和驾驶舱都不在，这一条是引擎（另一个服务）从外面看。
     - 读不到发布历史、进度记录或状态文件不是 JSON：这一轮记没跑成，开着的不撤。查看：`runuser -u fleet -- psql -d fleet -c "select value from settings where key = 'engine.healthzBadSince'"`。
-    - 指挥官本机的 `node ~/.claude/skills/commander/scripts/patrol.mjs` 同样读这几样（`/healthz` 非 200、最近一次发版 unhealthy / auto-rollback、进度记录没收尾、自动发布「要人看」都判 BROKEN 并列出红的检查，落后主线超过 5 个提交且最老的超过 60 分钟判 ALERT，读不到也是 BROKEN），判法在 `agents/skills/commander/scripts/patrol-lib.mjs`。
+    - 指挥官本机的 `node ~/.claude/skills/commander/scripts/patrol.mjs` 同样读这几样（`/healthz` 非 200、最近一次发版 unhealthy / auto-rollback、进度记录没收尾、自动发布「要人看」都判 BROKEN 并列出红的检查，落后主线超过 5 个提交且最老的超过 60 分钟判 ALERT，读不到也是 BROKEN），判法在 `agents/skills/commander/scripts/patrol-lib.mjs`。读不到法国（ssh 没连上、输出空、认不出、采集时间和本机差太多）时，除了退出码 2，还在 `VERDICT` 前打一行「读不到法国」，写明原因，并指向香港健康页（「香港探法国」一节）。法国答了、只是盘面不对，不加这一行。
   - 今天的每日简报没送到（`packages/engine/src/jobs/watchdog-brief.ts`，判法 `@fleet-dao/db` 的 `dailyBriefProblem`）：09:00（北京时间）以后，今天 `daily-brief` 一轮都没起、没做成（#1055 评论没发成也算）、那一行提醒没建、没推到飞书，报 `watchdog:brief:<北京日期>`「今天的每日简报没送到」（卡住报警）；送到了自己撤，过了一天昨天那条撤掉；同一天人点了「处理」不再打开。
   - 提醒推飞书不通（`packages/engine/src/jobs/watchdog-push.ts`，判法 `@fleet-dao/db` 的 `feishuPushProblem`）：`watchdog:push:feishu`「飞书推送不通：手机上收不到提醒」，进「要你拍」（推送自己坏了，卡住报警也推不出去）。不通 = 后端记了「没配」（设置 `feishu.push`），或有该推的到点超过 1 小时没送到、而且最近 1 小时一条都没送成。正文写怎么查（`fleet-api feishu-push status`）、怎么真发一条验（`… feishu-push test`）。推通了下一轮（5 分钟内）自己撤；同一段里人点了「处理」不再打开。读不到状态、送达记录：这一轮记没跑成，开着的不撤。
   - 一轮下来一个都没扫到（`unscanned`）：`why` 写清两样——定时任务登记表上有几个任务、哪些仓开着「让 AI 接活」（一个仓都没开就写「没有哪个仓开着『让 AI 接活』，没有仓可看」），这样看得出是哪个仓空着，不只剩一句「没东西可看」。
@@ -565,6 +605,8 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 ### 外部看门狗
 
 外部看门狗（#292，design 第六节第 5 层、第十三节）：Cloudflare 定时 Worker 每 5 分钟从外面查香港和法国，挂了推飞书。代码在 `packages/edge`，不跑在法国或香港上。这一片只把判法和 Worker 进仓，不部署。部署要创始人在 Cloudflare 上授权一次（免费、不绑卡）。
+
+它还没部署，法国关机时不会响。香港本机已经在探的是「香港探法国」一节，不经过 Cloudflare。
 
 判法在 `packages/edge/src/judge.ts`。香港：公网驾驶舱首页回得来（任何 HTTP 状态码都算 nginx 活着），连不上算挂。法国：公网 `/healthz` 指 `https://<驾驶舱域名>/healthz`（香港 nginx 经隧道转），不是 `http://<法国IP>:8787/healthz`，也不是隧道地址。回 200，或回 503 但回得来（后端活着、某一项不好，交给健康页和引擎自己报），连不上、502、504 算挂，别的状态码也按挂报。香港连不上时只报香港，不连带报法国。同一次挂着每小时最多再推一次。恢复推「恢复了，挂了多久」。读不到上一轮状态照挂处理并且推一条，不静默。真域名、飞书 webhook、请求头 `x-fleet-watch` 的值只从 Worker 的 secret 读（`packages/edge/wrangler.toml` 里只有占位）。读不到密钥这一轮记没查成、写日志，不当成没挂。`FLEET_EDGE_FR_URL` 不是 `https://<驾驶舱域名>/healthz` 这种（http、带了 8787、写成 IP、路径不是 `/healthz`）也记没查成、不探测、不报法国挂了：法国公网 8787 超时是第二节的预期，配错地址不能当成法国挂了（`packages/edge/src/worker.ts`）。
 
@@ -589,6 +631,28 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 整个停掉：`npx wrangler delete --config packages/edge/wrangler.toml`（删掉这个 Worker，定时不再跑）。
 - 只停定时、先留着 Worker：Cloudflare 控制台打开 Workers & Pages 里这个 Worker 的 Triggers，删掉那条 cron。用配置文件管的话，把 `packages/edge/wrangler.toml` 的 crons 改成空数组，再执行上面的部署命令。空数组会清掉已部署的 cron；配置里不写 triggers，原来的 cron 还在。
 - 法国如果已经配了 `FLEET_EDGE_WATCH_ID`：从 `engine.env` 和 `api.env` 里删掉这个键，重启 `fleet-engine` 和 `fleet-api`。引擎那边没配或是空的，登记行会被摘掉（`packages/engine/src/real/jobs.ts`），避免「登记了还没跑过」误报。
+
+### 香港探法国
+
+法国上的看门狗、飞书应用机器人、备份巡检、自动发布都在法国。法国关机时它们一起哑，香港仍在。香港自己每分钟经隧道打 `http://10.99.0.2:8787/healthz`（`fleet-hk-france-probe.timer` 拉起 `fleet-hk-france-probe.service`，跑 `/usr/local/lib/fleet-dao/france-probe.sh`，仓里的原稿是 `deploy/hk/france-probe.sh`）。不经过 Cloudflare，也不经过法国上的任何定时任务。`deploy/hk.sh` 装上这两份单元并排班。
+
+200 和 503 算通：后端答了。503 是某一项不好，健康页和法国自己的看门狗会说。连不上、超时、别的状态码算一次失败。连续 3 次失败才算失联；中间有一次通了就重新数。失联时刻用这一串失败的第一次（北京时间 `HH:MM`），不是第三次。失联推一次，恢复推一次，失联期间不再重复推。
+
+状态写 `/var/lib/fleet-hk-france-probe/status.json`。驾驶舱健康页 `https://<驾驶舱域名>/health/` 另外读 `/health/france-link.json`（两份 nginx 模板都用 alias 指到这份文件，不在静态目录里）。失联时页顶写「法国失联自 xx:xx」，总灯改红，并多一行「法国隧道」。文件还没有、不是 JSON、或 `down` 不是 true：健康页不当成全站红，只显示 `/healthz` 自己的结果。
+
+推送只看香港本机 `/etc/fleet-dao/hk-probe.env` 的 `FLEET_HK_PROBE_WEBHOOK`（飞书群机器人那种地址）。`deploy/hk.sh` 第一次跑、文件还不在时，照 `deploy/hk/hk-probe.env.example` 建一份（root:root 600），之后不覆盖。没配、留空、读不到、地址不是 http(s)、POST 失败：只写状态和日志，这一轮仍退出 0，定时器不会因此停。地址不要写进仓，日志里也不打。飞书群机器人认的正文是 `{"msg_type":"text","content":{"text":"…"}}`。
+
+样例（和 `deploy/hk/hk-probe.env.example` 同一份）：
+
+```
+# 香港探法国的推送。deploy/hk.sh 第一次跑时，若本机还没有 /etc/fleet-dao/hk-probe.env，就照这份建一份（root:root 600）。
+# 之后只改机器上的那份，不进 git，重跑 hk.sh 也不会覆盖。
+# FLEET_HK_PROBE_WEBHOOK：收 JSON 的地址（飞书群机器人 webhook 就是这种）。留空 = 不推，只写状态文件和日志，探活照常、不报错。
+# 飞书群机器人认的正文是 {"msg_type":"text","content":{"text":"…"}}，探活脚本就按这个发。地址不要写进仓。
+FLEET_HK_PROBE_WEBHOOK=
+```
+
+看：`systemctl status fleet-hk-france-probe.timer`、`journalctl -u fleet-hk-france-probe.service -n 20`、健康页。停：`systemctl disable --now fleet-hk-france-probe.timer`（健康页不再更新失联时刻）。法国在、只是某一项红：这里不推，看健康页和法国看门狗。失联之后要分清关机、断网还是隧道断了、要不要在 Contabo 重启，照 [outage-france.md](outage-france.md)。
 
 拉单（#632，替掉 webhook 接活加认领；`packages/engine/src/jobs/intake.ts`、`real/intake.ts`）：
 - 引擎每 5 分钟（每小时 3、8、13……分，定时任务 `intake`）自己到 GitHub 读该做的单，自己挑（创始人 2026-10-08「让ai自己挑挺好的」「按推荐」，#1336；规则全文见 design 第九节「开着的项目，引擎自己挑单」）：对每个「让 AI 接活」打开的项目（`repos.auto_dispatch_since` 不空，现在只当开关用），读开着的单，**准入**——作者在白名单里、不是母单子单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准，原因里写明）、还没派过、历史失败不超过 2 次、正文没写工作流路径、没有开着的 PR 挂着、交代齐（`readTaskBrief`；缺则留一次言）、「怎么算做完」没有要 diff 外证据的条目（截图、线上、现场、审计、看日志、飞书收到……，和 `pnpm issue:new` 同一份判据；有就留一次言写明哪几条、怎么改，不拉）、规模不是最重档（「已知的模块」列了超过 50 个路径）；没贴「待补」「要人拍」（整理会话贴的，贴着一律不拉）；未排期的单、别的版本的单和其余单一样进候选，不看里程碑；开单早于「让 AI 接活」打开那一刻的老单要贴了「整理过」（临时指挥官的整理会话判为仍成立后贴）或「交给引擎」才进候选，开关之后新开的单不需要（#1338；#1342 发到法国后引擎第一轮拉了两张前提已过期的老单）。每个仓走完以后，有从没整理过的老单、或有空位却一条都没起且待办还有候选，就叫一次临时指挥官整理待办（下面「叫临时指挥官整理待办」）。过了准入的**排序**（版本先后列表序号 → 挂当前版本 → 规模小 → 同规模里贴了「交给引擎」的 → 失败少 → 开单早），再按空位从前往后**起**：同时在跑的任务工作流 ≤ 6、一轮最多 5 条、**每小时最多 20 条**（滚动一小时，数任务行建出时刻）、熔断没停拉；起之前才现读一遍这张单（开着、不是 PR、母单子单和「本机做」再核一遍）。起的建任务行、起任务工作流（编号 `task:<owner>/<name>#<号>`，`REJECT_DUPLICATE`：同一张单任何时候最多一条，做完、停下的不会自己重来，要人在驾驶舱点「继续」）。交代不全的在单子上留一条言写清缺什么（同一处缺法只留一次）。拉单本身不动单子。#282（驾驶舱「交给 fleet」按钮）被「交给引擎」取代（2026-10-08）：按钮不做，`fleet-api handover` 已删，没有这条命令。
@@ -730,10 +794,10 @@ rm /root/.ssh/authorized_keys2
 - PostgreSQL 用 16：Temporal 官方测过的最高大版本是 16（16.6）；装 Ubuntu 自带源里的，跟着系统的自动安全更新走。
 - 香港 WireGuard 用 UDP 4500 是因为上游只放行少数 UDP 端口；换端口前先从法国实测新端口到不到得了香港网卡。
 - 香港站点配置里，转发给法国的 `location` 不要自己写 `proxy_set_header`：写了一条，server 那一层的就全部不继承，清 `Authorization`、`X-Fleet-Acting-Feishu` 的两条也跟着失效（法国 france.sh 的读回会查出来）。
-- 香港到法国的连接留着复用（`deploy/hk/nginx-https.conf` 的 `upstream fleet_dao_api`）：香港到法国一趟往返约 0.2 秒，每个请求都新建连接就多付这一趟（2026-09-26 实测单个 `/api/me` 0.40 → 0.20 秒）。空闲连接由香港先关：nginx 的 `keepalive_timeout`（5 分钟）必须比法国后端的空闲超时（`packages/api/src/keep-alive.ts`，6 分钟）短，反过来后端刚关的连接 nginx 还拿去发，POST 会偶尔 502（`packages/api/test/keep-alive.test.ts` 读 nginx 配置核对两边）。所以改这两个值时先发法国后端、再重跑香港。转给法国的普通请求 1 分钟没回音回 504（连接是复用的，隧道断着时不设短了要干等 TCP 自己放弃）；实时推送 `/api/events` 单列一段，读超时 1 小时。香港是 nginx 1.18，`keepalive_time` 这类 1.19.10 才有的指令用不了。
+- 香港到法国的连接留着复用（`deploy/hk/nginx-https.conf` 的 `upstream fleet_dao_api`）：香港到法国一趟往返约 0.2 秒，每个请求都新建连接就多付这一趟（2026-09-26 实测单个 `/api/me` 0.40 → 0.20 秒）。空闲连接由香港先关：nginx 的 `keepalive_timeout`（5 分钟）必须比法国后端的空闲超时（`packages/api/src/keep-alive.ts`，6 分钟）短，反过来后端刚关的连接 nginx 还拿去发，POST 会偶尔 502（`packages/api/test/keep-alive.test.ts` 读 nginx 配置核对两边）。所以改这两个值时先发法国后端、再重跑香港。转给法国的普通请求 1 分钟没回音回 504（连接是复用的，隧道断着时不设短了要干等 TCP 自己放弃）；实时推送 `/api/events` 单列一段，读超时 1 小时。nginx 自己造的 502、503、504 对 `/api`、`/auth`（含 `/api/events`）回一段固定 JSON（「驾驶舱后端暂时没应，它所在的机器可能在重启或关机」），不回网页；不拦截后端自己回的 503。`/healthz` 仍原样回 502/504，健康页靠这个标红。香港是 nginx 1.18，`keepalive_time` 这类 1.19.10 才有的指令用不了。
 - 数据库迁移只进不退：发布时先迁移再切版本，退回上一版不撤迁移。新迁移要写成旧代码照样能跑（先加列、下一版再删旧的）。做不到的，退回时发布脚本会拦：库里跑过的迁移比要退到的那一版带的多，就不退（第九节）。
 - 应用单元（`deploy/france/fleet-*.service`，以及 `fleet-api.socket`）跟着版本走：改单元就是发一版，退回时单元也跟着退。引擎单元不能开 `NoNewPrivileges` 和挂载隔离（第五节、单元里的注释）。改 `fleet-api.socket` 的监听地址要 `api.env`、`release.sh` 的 `COCKPIT` 常量、socket 单元三处一起改（第二节端口表）。
-- 还没验过的：重启机器（单元开机自起、nft 表在服务之前载入）——这一轮没重启过机器。旧系统的单元文件已经删光，开机不会再复活。
+- 重启机器的步骤、判断和核对见 [outage-france.md](outage-france.md)。2026-10-15 是第一次真实重启（10:38 干净关机，11:40 开机；当时控制台仍显示 Running）。单元开机自起、nft 表在服务之前载入。旧系统的单元文件已经删光，开机不会再复活。
 
 ## 九、发布应用（deploy/release.sh）
 
@@ -957,7 +1021,7 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 
 ### 自动发布
 
-`fleet-auto-release`（决定 0075）。**2026-10-13 起读数之外还会自动请求发版**（决定 `docs/decisions/0088-release-pause-resume-session.md` 第 1 条、#2039；此前 2026-10-07 到 10-13 只读不发，决定 0032 第 1、2、5 条、#1258）：发版本身仍只有一趟流程——驾驶舱「发布到法国」按钮（发版车同一趟流程，见下一节）；这个单元**不自己调 `release.sh`**，也不看 `v<N>` 版本标记，满足条件时只写一份和按钮一样的请求文件（`/var/lib/fleet-dao/release-request/request.json`，`by` 写「自动发版 决定0088」），由接活单元核请求、走发版。条件（`releaseStep`，每一轮判一次，哪条不满足就把原因写进状态的 `auto.note`、`release.sh --check` 的读数里看得到）：法国在用的落后主线头；头那次 `ci.yml` push 全绿（`ci.yml` 的汇总检查 `check` 要等全部 job，含主线推送才跑的 E2E：E2E 没绿整次运行就不是绿；红了就等下一个绿的头，不回头发旧的；`deploy/test/auto-release.test.mjs` 读 `.github/workflows` 钉住这个口径）；闸全过（接活单元装了、上一份请求已被接走、没有暂停标记、发布锁没被占、`release-train.json` 的 `status` 是 `done` 或 `aborted`——卡住、没成的要人处理，不自动再发）；任何一项读不到、认不出都不发；同一个头 30 分钟内不重复请求（接活单元读走请求到写进度之间的空档）。**不再要求两次发版隔 60 分钟**（决定 0093，取代 0088 第 1 条的「至少隔 1 小时、攒成一次」：攒批让合并后等发版中位 91 分钟、p90 420 分钟，占从合并到上线墙钟的 58%；现在每个绿的头都发，发版本身只停几分钟）。请求没写成（目录写不进、被占着）报 `auto-release:request`，写成了自己撤。驾驶舱按钮不经过这里。第一次发布（法国还没发布过）仍走按钮。以前（2026-10-02 到 10-07）它按版本标记找要发的版本，没有标记就不发，那一整套（挑标记、标记那一版的 CI 闸、人按住 24 小时、没成隔 30 分钟重试、等引擎空闲、发布四步的记录）都删了；由来和旧写法见本节末尾和 git 历史。
+`fleet-auto-release`（决定 0075）。**2026-10-13 起读数之外还会自动请求发版**（决定 `docs/decisions/0088-release-pause-resume-session.md` 第 1 条、#2039；此前 2026-10-07 到 10-13 只读不发，决定 0032 第 1、2、5 条、#1258）：发版本身仍只有一趟流程——驾驶舱「发布到法国」按钮（发版车同一趟流程，见下一节）；这个单元**不自己调 `release.sh`**，也不看 `v<N>` 版本标记，满足条件时只写一份和按钮一样的请求文件（`/var/lib/fleet-dao/release-request/request.json`，`by` 写「自动发版 决定0088」），由接活单元核请求、走发版。条件（`releaseStep`，每一轮判一次，哪条不满足就把原因写进状态的 `auto.note`、`release.sh --check` 的读数里看得到）：法国在用的落后主线头；头那次 `ci.yml` push 全绿（`ci.yml` 的汇总检查 `check` 要等全部 job，含主线推送才跑的 E2E：E2E 没绿整次运行就不是绿；红了就等下一个绿的头，不回头发旧的；`deploy/test/auto-release.test.mjs` 读 `.github/workflows` 钉住这个口径）；闸全过（接活单元装了、上一份请求已被接走、没有暂停标记、发布锁没被占、`release-train.json` 的 `status` 是 `done` 或 `aborted`——`running` 写「有一趟发版在跑（目标提交前 12 位），等它收尾」，不含「要人看」；收了尾没成（failed、blocked）的要人看，不自动再发）；任何一项读不到、认不出都不发；同一个头 30 分钟内不重复请求（接活单元读走请求到写进度之间的空档）。**不再要求两次发版隔 60 分钟**（决定 0093，取代 0088 第 1 条的「至少隔 1 小时、攒成一次」：攒批让合并后等发版中位 91 分钟、p90 420 分钟，占从合并到上线墙钟的 58%；现在每个绿的头都发，发版本身只停几分钟）。请求没写成（目录写不进、被占着）报 `auto-release:request`，写成了自己撤。驾驶舱按钮不经过这里。第一次发布（法国还没发布过）仍走按钮。以前（2026-10-02 到 10-07）它按版本标记找要发的版本，没有标记就不发，那一整套（挑标记、标记那一版的 CI 闸、人按住 24 小时、没成隔 30 分钟重试、等引擎空闲、发布四步的记录）都删了；由来和旧写法见本节末尾和 git 历史。
 
 - 怎么跑起来：`fleet-auto-release.timer` 每 5 分钟（上一轮跑完再等 5 分钟，不叠着跑）以 root 拉起一轮 `/usr/local/lib/fleet-dao/auto-release/fleet-auto-release.mjs`。一轮最多 30 分钟（`TimeoutStartSec`；最长的是装机自动档 10 分钟和规矩同步每个用户 5 分钟）。
 - 每一轮读什么、写什么：读主线头和最近 300 个提交（`git fetch` 只取 `main`、不取 tag）；主线头自己那次 `ci.yml` push 的结论（一轮最多问一次 GitHub，不带凭据一个钟头 60 次；这个头已经读到全绿就不再问；限流、连不上、回的认不出记 `unknown` 和原因，不当成绿）；法国在用的提交（`current` 链接）；落后几个（在用的在主线最近提交里排第几，和驾驶舱「落后主线 N 个提交」同一个口径）；装机层装到哪、配置对账。写进 `/srv/fleet-dao-releases/.auto/state.json`（`schema: 1`；字段 `main`、`ci`、`current`、`last`、`rules`、`tier`、`system`、`config`、`alerts`……）。以前的 `marker`、`markerError`、`attempt`、`hold`、`waitingSince`、`sequence` 没有了；后端（`packages/store/src/deploy-lag.ts`）和指挥官的法国页（`agents/skills/commander/scripts/france-lib.mjs`）读到老状态里多出来的这几样也认，不报错。**没有任何 `v<N>` tag 的仓上读数照常**（以前会因为没有标记写成「不发」；测试 `deploy/test/auto-release.test.mjs` 第一条是故意造的失败）。
@@ -1057,7 +1121,7 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 
 ## 十一、备份与恢复
 
-装：`deploy/backup/install.sh`，独立于 `france.sh`、`hk.sh`。先法国（打印备份钥匙的公钥）→ 公钥填进香港 `/etc/fleet-dao/backup.env` 的 `FLEET_BACKUP_FRANCE_PUBLIC_KEY`、跑 `install.sh hk` → 法国再跑一遍（建仓库、首跑）。`--check` 只读回。
+装：`deploy/backup/install.sh`，独立于 `france.sh`、`hk.sh`。先法国（打印备份钥匙的公钥）→ 公钥填进香港 `/etc/fleet-dao/backup.env` 的 `FLEET_BACKUP_FRANCE_PUBLIC_KEY`、跑 `install.sh hk` → 法国再跑一遍（建仓库、首跑）。`--check` 只读回。香港上再留一份、以及最新快照超没超 26 小时，不在 `install.sh` 里，由 `hk.sh` 装。
 
 | 定时器（法国，以 fleet 跑） | 什么时候（北京时间） | 做什么 |
 |---|---|---|
@@ -1065,13 +1129,20 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 | `fleet-backup-drill.timer` | 每周日 05:40 | 最近一份从香港取回，逐个恢复进临时库 `fleet_drill_restore`，核对每张表的行数和各时间列的最新值，删掉临时库；再跑 `restic check` |
 | `fleet-backup-watch.timer` | 每小时 17 分 | 两台的磁盘用量（线在法国 `/etc/fleet-dao/backup.env`）。备份多久没开跑不在这里查：引擎的看门狗按登记表看（备份的三个都在），一件事只一张卡（#339）；以前这里推过的 `backup.stale:*` 两条每轮顺手撤 |
 
-- 每跑一次在 `schedule_runs` 记一行，驾驶舱「定时任务」页看；没做成、查出问题都在 `notifications` 发报警，好了自动解除。判活看上次跑成的时刻（`install.sh france --check`），不看定时器下次什么时候响。
+| 定时器（香港，以 root 跑） | 什么时候（北京时间） | 做什么 |
+|---|---|---|
+| `fleet-backup-copy.timer` | 每天 09:10 | 把 `/srv/fleet-dao-backup/restic` 复制到 `/var/backups/fleet-dao/restic-copies/<当天>/`，留 14 天（含当天）。09:10 错开每晚备份（04:10，最多跑到约 07:10）和周日演练（05:40，最多到约 08:40） |
+| `fleet-backup-freshness.timer` | 每小时 25 分 | 看仓库 `snapshots/` 里最新一份普通文件的修改时间，超过 26 小时就写 `/var/lib/fleet-hk/status.json`。和法国巡检（17 分）、复制（09:10）错开 |
+
+- 每跑一次在 `schedule_runs` 记一行，驾驶舱「定时任务」页看；没做成、查出问题都在 `notifications` 发报警，好了自动解除。判活看上次跑成的时刻（`install.sh france --check`），不看定时器下次什么时候响。法国的看门狗只在法国活着时才叫得应；香港这两件不进 `schedule_runs`，法国停了也照样跑。
 - 法国：`/etc/fleet-dao/backup/`（仓库口令 `restic.pass`、连香港的钥匙、钉住的香港主机钥匙，root:fleet 640）、`/opt/fleet-dao/restic`（钉版本）、`/usr/local/lib/fleet-dao/backup/`（任务脚本，归 root）、`/var/lib/fleet-dao/backup/`（暂存，跑完清空）；库角色 `fleet_drill`（不能登录、只能建库，演练的临时库归它，恢复不用超级用户）。
-- 香港：用户 `fleet-backup`（shell nologin），sshd 把它关在 `/srv/fleet-dao-backup` 的 chroot 里、只给 sftp（`/etc/ssh/sshd_config.d/60-fleet-dao-backup.conf`，只管这一个用户），钥匙还限死成只许从 10.99.0.2 来；仓库 `/srv/fleet-dao-backup/restic`，只有密文。
+- 香港：用户 `fleet-backup`（shell nologin），sshd 把它关在 `/srv/fleet-dao-backup` 的 chroot 里、只给 sftp（`/etc/ssh/sshd_config.d/60-fleet-dao-backup.conf`，只管这一个用户），钥匙还限死成只许从 10.99.0.2 来；仓库 `/srv/fleet-dao-backup/restic`，只有密文。第二份在 `/var/backups/fleet-dao/restic-copies`，这个用户碰不到。
 - **仓库口令要抄一份到创始人的密码管理器**：法国没了，香港的密文只有它解得开。口令一旦建了仓库就不能换。
 - 手动跑一次：`systemctl start fleet-backup.service`（演练、巡检同理）；看快照：`sudo -u fleet /usr/local/lib/fleet-dao/backup/fleet-backup.sh restic snapshots`。每晚备份和演练的单元「3 小时里最多起 3 次」（给失败重试封顶），手动起的也算：撞上时 systemctl 报 `start-limit-hit`，先 `systemctl reset-failed fleet-backup.service` 再起。
 - 断网、被杀的那一轮会在香港仓库里留下锁；每晚备份和演练开跑前先 `restic unlock`（只清失效的，还在跑的那边清不到），不用手动管。
-- 已知风险：法国被攻破的话，攻击者拿着备份钥匙能删光香港的备份。每晚要按保留规则删过期的，这把钥匙就得有删的权限；改成「只追加」得把删过期挪到一处有口令的第三地，而香港按设计只存密文。补法（还没做）：香港 root 每天把仓库复制一份到备份用户碰不到的地方、留 14 天。
+- 已知风险：法国被攻破的话，攻击者拿着备份钥匙能删光香港仓库里的那一份。每晚要按保留规则删过期的，这把钥匙就得有删的权限；改成「只追加」得把删过期挪到一处有口令的第三地，而香港按设计只存密文。异地再存一份要花钱，这张单不做。
+- 补法（已做）：香港 root 每天 09:10（北京时间）把仓库复制到 `/var/backups/fleet-dao/restic-copies/<日期>/`，目录 root:root 700，备份用户碰不到。留 14 天（含当天），更早的自动删；复制没做成不删旧的。`locks/` 里还有锁文件就这一轮不复制（备份或演练可能还在写；正常时法国 04:10 会先清掉失效的锁）。不变的文件和上一份共用 inode（省磁盘），新的和变了的是 root 自己的 inode，不链回仓库里那一份——钥匙改得了仓库，改不到已经复制出去的内容。脚本 `deploy/backup/hk-repo-copy.sh`，由 `hk.sh` 装上 `fleet-backup-copy.timer`。
+- 备份停了：香港每小时 25 分自己看 `snapshots/` 里最新一份普通文件的修改时间，超过 26 小时就在 `/var/lib/fleet-hk/status.json` 写 `backup.snapshot` 一段（`ok=0`）。不连法国、不用仓库口令。25 小时 59 分不报，正好 26 小时不报，再晚一分钟就报。格式以 `deploy/backup/hk-status.sh` 为准（`v=1`，每个检查四行 `check` / `ok` / `at` / `summary`；法国失联探活后合的跟着写同一份文件，建议用 `france.reach`）。钥匙能 `touch` 改修改时间、假装还在备份；防删靠上面那份 root 副本，防「备份停了而且法国看门狗也停了」靠这份检查。`systemctl --failed` 能看见 `fleet-backup-freshness.service`。复制成没成另写 `backup.copy`：盘满时快照仍可能是新鲜的。
 
 ### 换机恢复（法国整台没了）
 
@@ -1103,7 +1174,7 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 8. 再跑一遍 `install.sh france`：恢复出来的库里带着旧机的运行记录，这回每晚备份的定时器才会开。
 9. 手动补一份新备份：`systemctl start fleet-backup.service`。恢复出来的运行记录里，上次备份成功停在出事前，不补这一份，`--check` 会按过期把每晚备份判红。然后起服务，`install.sh france --check` 全绿。
 
-停用：`systemctl disable --now fleet-backup.timer fleet-backup-drill.timer fleet-backup-watch.timer`。香港上的备份和 `fleet-backup` 用户、法国的口令属于数据，删之前先问人。
+停用：法国 `systemctl disable --now fleet-backup.timer fleet-backup-drill.timer fleet-backup-watch.timer`；香港 `systemctl disable --now fleet-backup-copy.timer fleet-backup-freshness.timer`。香港上的备份、已经复制的 14 天、`fleet-backup` 用户、法国的口令属于数据，删之前先问人。
 
 ## 十二、香港飞书网关（已删）
 

@@ -1,5 +1,6 @@
 // 引擎端口 → packages/github：推分支（会话用户打的 bundle）、开 PR（正文给结构，renderPrBody 生成；PR 不抄单子的类别标签、
-// 里程碑，#654）、等 CI、并主线（并完把会话的树快进到新头）、关单，以及建树（记下主线的头；树等起会话时由会话
+// 里程碑，#654）、等 CI、并主线（并完把会话的树快进到新头；树在旧头之后还有没推的提交就在本地把远端并进来再推，
+// 并不上才停下留言）、关单，以及建树（记下主线的头；树等起会话时由会话
 // 自己建，见 sessions.ts）、收树（先存档没提交的改动）。
 // GitHubError 一律换成 PortError：码和「能不能重试」原样带过 Temporal 边界，失败分流按码判。
 
@@ -16,6 +17,7 @@ import {
   type PortContext,
   PortError,
   type PrBody,
+  type SyncMainlineInput,
   type WaitCiInput,
   type Worktree,
 } from '../ports.ts';
@@ -24,6 +26,7 @@ import { bundleFromMirror, mapped } from './mirror.ts';
 import {
   bundleSince,
   changedFilesAgainst,
+  commitShasBetween,
   fastForward,
   fastForwardToCommit,
   fetchBundle,
@@ -33,6 +36,7 @@ import {
   isAncestor,
   isMergeChainOnto,
   mergeInto,
+  pinIncoming,
   pinMainline,
   type UserTree,
   uncommittedPatch,
@@ -59,6 +63,7 @@ export type EngineGitHub = Pick<
   | 'closeIssue'
   | 'commitIdentity'
   | 'syncMainline'
+  | 'commentPull'
   | 'fetchMainline'
   | 'fetchBranchHead'
   | 'readFileDiff'
@@ -169,6 +174,166 @@ export function ciResultOf(r: Awaited<ReturnType<EngineGitHub['waitCi']>>): CiRe
     case 'unknown':
       return { state: 'unknown', head: r.head, failedChecks: [], detail: `CI 没查成：${r.detail}` };
   }
+}
+
+const SHA40 = /^[0-9a-f]{40}$/;
+
+/** 报错一行里最多列这么多个短提交号；PR 评论里列全号，再多就截断。 */
+const DIVERGED_SHA_IN_LINE = 8;
+const DIVERGED_SHA_IN_COMMENT = 20;
+
+interface RemoteMerge {
+  head: string;
+  previousHead: string;
+  mainline: string;
+}
+
+function shortSha(sha: string): string {
+  return sha.slice(0, 7);
+}
+
+function divergedLine(path: string, base: string, remoteHead: string, shas: readonly string[]): string {
+  // 看板只显示这一句：少的时候写全号，多了再缩成短号，免得一行装不下。
+  const full = shas.length <= 3;
+  const shown = (full ? shas : shas.slice(0, DIVERGED_SHA_IN_LINE)).map((sha) =>
+    full ? sha : shortSha(sha),
+  );
+  const list =
+    shown.length === 0
+      ? '列不出具体提交'
+      : shas.length > shown.length
+        ? `${shown.join('、')} 等 ${shas.length} 个`
+        : shown.join('、');
+  return `工作树 ${path} 在 ${shortSha(base)} 之后还有没推的提交（${list}），快进不到并好的 ${shortSha(remoteHead)}，也并不上：要人看`;
+}
+
+/**
+ * 并不上时在 PR 上留一条：哪棵工作树、哪几个提交没推。留言没写上不掩盖原来的失败，把原因接在报错后面。
+ * 没有 PR 号就只靠报错（看板读 lastProblem）。
+ */
+async function noteWorktreeDiverged(
+  gh: EngineGitHub,
+  t: UserTree,
+  input: SyncMainlineInput,
+  remote: RemoteMerge,
+  ctx: PortContext,
+): Promise<string> {
+  let current = '';
+  try {
+    current = await headOf(t);
+  } catch (error) {
+    if (ctx.signal.aborted) throw error;
+  }
+  let shas: string[] = [];
+  if (SHA40.test(remote.previousHead) && SHA40.test(current)) {
+    try {
+      shas = await commitShasBetween(t, remote.previousHead, current);
+    } catch (error) {
+      if (ctx.signal.aborted) throw error;
+    }
+  }
+  let message = divergedLine(t.dir, remote.previousHead, remote.head, shas);
+  const prNumber = input.prNumber;
+  if (prNumber === undefined) return message;
+  const stamp = shas.slice(0, 5).map(shortSha).join('.') || 'none';
+  const key = `worktree-diverged:${input.branch}:${shortSha(remote.previousHead)}:${shortSha(remote.head)}:${stamp}`;
+  const listed = shas.slice(0, DIVERGED_SHA_IN_COMMENT);
+  const body = [
+    `工作树 \`${t.dir}\` 在 ${remote.previousHead} 之后还有没推的提交，快进不到远端并好的 ${remote.head}，本地也并不上。`,
+    '',
+    `分支：${input.branch}`,
+    `以为的头：${remote.previousHead}`,
+    `远端并好的头：${remote.head}`,
+    '没推的提交：',
+    listed.length > 0 ? listed.join('\n') : '（列不出）',
+    shas.length > listed.length ? `……一共 ${shas.length} 个，这里只列前 ${listed.length} 个` : '',
+    '',
+    '先把这些提交取走再清工作树，清了就没了。',
+  ]
+    .filter((line) => line !== '')
+    .join('\n');
+  try {
+    await mapped(() => gh.commentPull({ repo: input.repo, prNumber, key, body }, ctx));
+  } catch (error) {
+    if (ctx.signal.aborted) throw error;
+    message += `。PR 上的说明没写上：${errMessage(error).slice(0, 120)}`;
+  }
+  return message;
+}
+
+/** 本地并出来的头推上去。包的起点是远端那个并主线提交：它已经在镜像里，推上去是快进。 */
+async function pushReconciled(
+  gh: EngineGitHub,
+  deps: GitHubPortsDeps,
+  t: UserTree,
+  input: SyncMainlineInput,
+  head: string,
+  base: string,
+  ctx: PortContext,
+): Promise<string> {
+  const bundle = await bundleSince(t, head, base);
+  await mkdir(deps.tmpDir, { recursive: true, mode: 0o700 });
+  const bundlePath = join(deps.tmpDir, `sync-push-${randomUUID()}.bundle`);
+  try {
+    await writeFile(bundlePath, bundle, { mode: 0o600 });
+    const pushed = await mapped(() =>
+      gh.pushBranch({ repo: input.repo, bundlePath, branch: input.branch, head, signal: ctx.signal }, ctx),
+    );
+    return pushed.head;
+  } finally {
+    await rm(bundlePath, { force: true });
+  }
+}
+
+/**
+ * 快进不了：工作树在 previousHead 之后还有没推的提交，远端已经是并了主线的新头。
+ * 两边都从 previousHead 长出来就在本地把远端并进来（--no-ff，本地那个提交的号不变，留在第一父上）再推。
+ * 内容冲突交回会话（和并主线冲突同一条路）。历史对不上就在 PR 上留言并抛 WORKTREE_DIVERGED。
+ */
+async function reconcileUnpushed(
+  gh: EngineGitHub,
+  deps: GitHubPortsDeps,
+  t: UserTree,
+  input: SyncMainlineInput,
+  remote: RemoteMerge,
+  ctx: PortContext,
+): Promise<SyncResult> {
+  const current = await headOf(t);
+  const base = remote.previousHead;
+  const localAhead =
+    current !== base &&
+    SHA40.test(current) &&
+    SHA40.test(base) &&
+    (await hasCommit(t, base)) &&
+    (await isAncestor(t, base, current));
+  const remoteHasBase =
+    SHA40.test(remote.head) &&
+    SHA40.test(base) &&
+    (await hasCommit(t, remote.head)) &&
+    (await isAncestor(t, base, remote.head));
+  if (!localAhead || !remoteHasBase) {
+    const message = await noteWorktreeDiverged(gh, t, input, remote, ctx);
+    throw new PortError('WORKTREE_DIVERGED', message, {
+      retryable: false,
+      details: { worktree: t.dir, base, remoteHead: remote.head },
+    });
+  }
+  const merged = await mergeInto(t, remote.head);
+  if ('conflict' in merged) {
+    // head 是远端分支此刻的头（PR 上已经是它）。工作树停在本地那个提交上，冲突标记留着，交给会话解。
+    const conflict: SyncResult = { state: 'conflict', head: remote.head, conflictFiles: merged.conflict };
+    try {
+      await pinMainline(t, input.repo.defaultBranch, remote.mainline);
+    } catch (error) {
+      if (ctx.signal.aborted) throw error;
+      conflict.mainlineStale = errMessage(error).slice(0, 200);
+    }
+    return conflict;
+  }
+  const pushed = await pushReconciled(gh, deps, t, input, merged.merged, remote.head, ctx);
+  await pinIncoming(t, merged.merged);
+  await pinMainline(t, input.repo.defaultBranch, remote.mainline);
+  return { state: 'clean', head: pushed, conflictFiles: [] };
 }
 
 export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
@@ -513,6 +678,15 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         ),
       );
       if (r.state === 'head_moved') {
+        // 本地并上再推已经成功、回执丢了再进来：远端头就是工作树的头。github 包只把「第一父是以为的头」认成自己上次并的，
+        // 本地提交夹在中间时认不出，这里补上。
+        if (input.worktreePath && SHA40.test(r.head)) {
+          const user = await ownerOrFail(input.worktreePath);
+          const t = treeAs(input.worktreePath, user, `sync-${input.subtaskId ?? input.taskId}`, ctx);
+          if ((await hasCommit(t, r.head)) && (await headOf(t)) === r.head) {
+            return { state: 'clean', head: r.head, conflictFiles: [] };
+          }
+        }
         throw new PortError(
           'HEAD_MOVED',
           `分支 ${input.branch} 的头是 ${r.head.slice(0, 7)}，不是以为的 ${r.expectedHead.slice(0, 7)}：有别人推过，要人看`,
@@ -559,10 +733,13 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         );
         const ff = await fastForward(t, bytes, ref, r.head);
         if (ff === 'diverged') {
-          throw new PortError(
-            'WORKTREE_DIVERGED',
-            `工作树在 ${r.previousHead.slice(0, 7)} 之后还有没推的提交，快进不到并好的 ${r.head.slice(0, 7)}：要人看`,
-            { retryable: false },
+          return reconcileUnpushed(
+            gh,
+            deps,
+            t,
+            input,
+            { head: r.head, previousHead: r.previousHead, mainline: r.mainline },
+            ctx,
           );
         }
         // 并进来的主线跟着新头进了树：重钉，接着返工时 pnpm test:changed 只算分支自己的改动

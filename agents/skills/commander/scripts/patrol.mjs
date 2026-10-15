@@ -1,5 +1,6 @@
 // 法国只读巡查，命令行（决定 0034，#1372）：node patrol.mjs [--baseline <文件>] | --selftest
 // 判法全在 patrol-lib.mjs；这里只接 ssh、本机时钟和基线文件。最后一行是 VERDICT，退出码 0 OK、1 ALERT、2 BROKEN。
+// 读不到法国时，VERDICT 前多一行显眼中文：原因，以及该看香港状态页（法国上的看门狗这时一起哑）。
 // 用 exitCode 不用 process.exit：输出接到管道上时，exit 可能把没写完的截掉。
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';

@@ -182,7 +182,7 @@ describe('PR 正文里的详情页路由清单', () => {
       expect(has !== none, line).toBe(true);
       (has ? buggy : clean).push(routeOf(line));
     }
-    expect(buggy).toEqual(['/?node=<编号>', '/tasks/:taskId', '/env']);
+    expect(buggy).toEqual(['/?node=<编号>', '/tasks/:taskId']);
     expect(clean).toContain('/nodes/:id');
     expect(DETAIL_PAGE_PR_BODY).toContain('**需求**：#1221');
     expect(DETAIL_PAGE_PR_BODY).not.toMatch(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#/i);

@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { brand } from '#brand';
 import { ApiError, errorText, useLiveSync, useMe, useNotifications } from '../api/client';
 import { loginPath } from '../api/index';
+import { GatewayHealthLink } from '../components/gateway-health-link';
 import { LogoMark } from '../components/logo';
 import { isRemotePage, OnlyLocalNotice } from '../components/node-notice';
 import { RepoProvider } from '../components/repo-context';
@@ -58,6 +59,7 @@ function AuthGate({ children }: { children: ReactNode }) {
     <Screen>
       <p className="text-foreground">{unauthenticated ? '要先登录，正在跳到登录页…' : '没能确认登录'}</p>
       {unauthenticated ? null : <p>{errorText(me.error)}</p>}
+      {unauthenticated ? null : <GatewayHealthLink error={me.error} />}
       <div className="flex gap-2">
         {unauthenticated ? null : (
           <Button size="sm" variant="outline" onClick={() => void me.refetch()}>

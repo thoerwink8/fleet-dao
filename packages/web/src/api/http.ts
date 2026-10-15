@@ -48,11 +48,21 @@ type Query = Record<string, string | number | undefined>;
 /** 发版预检要现读 GitHub，前端留够时间，避免还在读就被这里掐掉。 */
 export const REQUEST_TIMEOUT_MS = 90_000;
 
-const NETWORK_MESSAGE = '连不上驾驶舱后端。检查一下网络，过一会儿再试。';
+/**
+ * 香港门口没把请求送到法国，或浏览器根本没连上。和 deploy/hk/nginx-https.conf 里
+ * error_page 的 JSON 是同一句：登录页、外壳靠这句（和 code gateway / network）链到 /health/。
+ * 超时不在这一类：那是这一页自己等到了上限，不是门口回的 502/504。
+ */
+export const GATEWAY_MESSAGE = '驾驶舱后端暂时没应，它所在的机器可能在重启或关机';
 const SHAPE_MESSAGE = '驾驶舱读到的数据和这一页对不上。刷新再试；还这样就把「详情」里的原文留着。';
 
 function timeoutMessage(): string {
   return `等了 ${REQUEST_TIMEOUT_MS / 1000} 秒还没回应，这一下已经停下。过一会儿再试。`;
+}
+
+/** nginx 自己造的门口错误。后端自己回的 503 带着 ApiErrorBody，不走这里。 */
+function gatewayStatus(status: number): boolean {
+  return status === 502 || status === 503 || status === 504;
 }
 
 function shapeRaw(issues: readonly { path: PropertyKey[]; message: string }[]): string {
@@ -176,7 +186,7 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     } catch (err) {
       // 到点 abort 之后，fetch 怎么拒绝都算超时（有的环境不叫 AbortError）。
       if (ctrl.signal.aborted) throw new ApiError(0, 'timeout', timeoutMessage(), null, errMessage(err));
-      throw new ApiError(0, 'network', NETWORK_MESSAGE, null, errMessage(err));
+      throw new ApiError(0, 'network', GATEWAY_MESSAGE, null, errMessage(err));
     } finally {
       clearTimeout(timer);
       if (rotation === pending) rotation = undefined;
@@ -184,6 +194,8 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
     if (!res.ok) {
       const raw: unknown = await res.json().catch(() => undefined);
       const parsed = ApiErrorBody.safeParse(raw);
+      // 带 code 的 JSON（含后端自己的 503：引擎没接上、库没读成）原样用它的人话。
+      // 502/503/504 却不是这段 JSON（nginx 的网页、空身体）才收成门口那一句，不说「后端返回 504」。
       const err = parsed.success
         ? new ApiError(
             res.status,
@@ -191,7 +203,9 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
             parsed.data.error.message,
             parsed.data.error.details,
           )
-        : new ApiError(res.status, `http_${res.status}`, `后端返回 ${res.status}`);
+        : gatewayStatus(res.status)
+          ? new ApiError(res.status, 'gateway', GATEWAY_MESSAGE)
+          : new ApiError(res.status, `http_${res.status}`, `后端返回 ${res.status}`);
       // 401 + 这两个 code 是「会话好好的，只是密码输错了」（登录页的账密、设置页的当前密码）：不是登录过期，
       // 不能触发跳登录页——否则设置页输错当前密码会整页跳走，错误提示根本看不到。
       const oldCookieTail = changingAtStart || passwordChanges > 0 || epochAtStart !== sessionEpoch;

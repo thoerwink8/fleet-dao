@@ -2,7 +2,6 @@
 // 判切号交给 real/org-switch.ts 的 orgSwitchRound.now（同一把单飞锁），提醒走 upsertAlert / resolveAlertByKey，结局记进 schedule_runs。
 import type { SessionUser } from '@fleet-dao/adapters';
 import {
-  carpoolPoolCaps,
   type Db,
   finishScheduleRun,
   registerScheduledJobs,
@@ -17,7 +16,7 @@ import { OrgLedgerError } from '../jobs/org-ledger.ts';
 import type { OrgSwitchRound } from '../jobs/org-switch.ts';
 import { loadLedger } from './org-ledger.ts';
 import { ORG_LEDGER_ALERT } from './org-switch.ts';
-import { loadHeldPools } from './pool-holds.ts';
+import { carpoolPoolsHeldReason } from './pool-holds.ts';
 import type { SessionOrgReader } from './session-org.ts';
 
 export interface CarpoolWatchWiring {
@@ -38,16 +37,14 @@ export function carpoolWatchJob(w: CarpoolWatchWiring): () => CarpoolWatchDeps {
   const now = w.now ?? (() => new Date());
   const log: CarpoolWatchDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
-  // 登记行现在是不是已摘（进程内记着，起来时不知道 = null，第一轮就写一次对的）
+  // 登记行现在是不是已摘（进程内记着，起来时不知道 = null，第一轮就写一次对的）。
+  // 引擎起来时若池还暂停着，registerEngineJobs 不会把这一行登记回来（那会清掉 removed_at，而这里记着已摘就不再写）。
   let parked: boolean | null = null;
   return () => ({
-    // 整池暂停：库里所有拼车池都被暂停（开关或 pool-hold: 提醒）才算；一个拼车池都没有不算（让盯读自己报「找不到」）
+    // 整池暂停：库里所有拼车池都被暂停（开关或 pool-hold: 提醒）才算；一个拼车池都没有不算（让盯读自己报「找不到」）。
+    // 和看门狗、引擎起来时的登记同一句（pool-holds.ts 的 carpoolPoolsHeldReason）。
     pause: {
-      heldReason: async () => {
-        const [caps, held] = await Promise.all([carpoolPoolCaps(w.db), loadHeldPools(w.db, now())]);
-        if (caps.length === 0 || !caps.every((c) => held.all.has(c.poolId))) return null;
-        return `拼车池 ${caps.map((c) => c.poolId).join('、')} 整池暂停着`;
-      },
+      heldReason: () => carpoolPoolsHeldReason(w.db, now()),
       park: async (on) => {
         if (parked === on) return;
         if (on) await unregisterScheduledJobs(w.db, [CARPOOL_WATCH_JOB.id]);

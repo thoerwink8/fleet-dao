@@ -23,6 +23,7 @@
 # 香港防火墙基线（hk-firewall：ufw 没开、命令失败或认不出、默认不是拒绝、多开的对公网端口都判红；只有出站 ALLOW OUT 不算已放行；第二遍不改 ufw；别家 8443 不动）、
 # 香港 self-proxy 程序目录收成 root:root、别人不可写，变回去读回判红（hk-self-proxy-owner，#2235）、
 # 香港上已退役的飞书网关清干净（hk-retired-gateway，#2226：单元停删、目录先打包再删、令牌文件直接删、打包不成不删、留着判红）、
+# 香港每分钟经隧道探法国 healthz（hk-france-probe：连续 2 次失败不推、第 3 次推、恢复推一次、没配 webhook 只写状态且退出 0）、
 # france.sh 读回看板收件口挡不挡得住假通行证（node-report-gate：401 才算通过，503 没配钥匙记待配，200/400 判红）、
 # docs/ops.md 端口表和脚本对得上、--ops 真跑了端口表那块（ops-only）、
 # france.sh 读不到 Temporal 表结构的版本号（连不上库）判红、不建不升（temporal-schema），
@@ -58,7 +59,7 @@ SKIP_WHY=""
 # 第三台拖后腿，把 session-ports、web-publish、release-flow 挪去第一台，grok、public-site、agent-scope-org-use 挪去第二台，
 # 估三台各 80–100 秒。第二轮实测三台 101 / 84 / 95 秒，再把 release-flow、web-publish 从第一台挪去第三台。挪完看下一轮 CI 的「⏱」行，不匀了再挪。每一项的秒数都看日志里的「⏱」行。
 SHARDS=(
-  'login-user session-user listen root-exec-check ops-only ports shards session-proxy session-ports release-proxy runtime-same node-report-gate service-home release-boot sshd-hardening hk-firewall hk-retired-gateway hk-self-proxy-owner'
+  'login-user session-user listen root-exec-check ops-only ports shards session-proxy session-ports release-proxy runtime-same node-report-gate service-home release-boot sshd-hardening hk-firewall hk-retired-gateway hk-self-proxy-owner hk-france-probe'
   'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use agent-scope-probe temporal-schema root-ssh-login'
   'lint session-pnpm no-demo backup auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish build-isolation'
 )
@@ -264,7 +265,10 @@ run_unit() { # 项目名
   SKIP_WHY=""
   case "$unit" in
   lint) unit_lint ;;
-  backup) run_script "$DEPLOY/backup/test/backup.test.sh" ;;
+  backup)
+    run_script "$DEPLOY/backup/test/backup.test.sh"
+    run_script "$DEPLOY/backup/test/hk-backup-mirror.test.sh"
+    ;;
   node-tests) unit_node_tests ;;
   ports) check_ports ;;
   # 构建隔离真沙箱要 root：单独 sudo 跑（CI 免密）；建不成红字失败，不跳过

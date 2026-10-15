@@ -1,0 +1,11 @@
+# deploy/hk.sh 装的。时区写在 OnCalendar 里，不靠机器时区。
+# 09:10：每晚备份 04:10 最多跑到约 07:10，周日演练 05:40 最多到约 08:40，错开这两段。
+[Unit]
+Description=每天 09:10（北京时间）把香港上的备份仓库复制一份，留 14 天
+
+[Timer]
+OnCalendar=*-*-* 09:10:00 Asia/Shanghai
+Persistent=true
+
+[Install]
+WantedBy=timers.target

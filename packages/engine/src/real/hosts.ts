@@ -17,7 +17,8 @@
 //   不进日志、进度、失败信息和库。
 //   cursor-agent 装在会话用户家里、不在 PATH 上，升级会删掉旧版本目录：每次起都由会话用户自己按 current → 最新版本目录现找
 //   （cursorLaunchCommand 的后一段，CU-03）。
-// - grok（SuperGrok 订阅的 Grok Build 命令行，#266）：会话号由我们定（-s <UUID>，续会话 -r），终帧回同一个号和实际模型
+// - grok（SuperGrok 订阅的 Grok Build 命令行，#266）：会话号由我们定（-s <UUID>，续会话 -r 同一个号、不换号；会话记录按
+//   --cwd 存在会话用户家里 ~/.grok/sessions/<编码后的工作树路径>/<号>/，所以续会话要同一棵树），终帧回同一个号和实际模型
 //   （grok-4.7-build 这种带渠道后缀的名字，插头认得）。但号是我们定的不等于会话建成了：没登录、起不来、点的型号不认时它在
 //   开会话之前就退出，拿这个号 -r 只会报「not found」——所以开新会话时这个号先不算数，见到它真开了会话（终帧，或报错以外的
 //   任何一帧）才交回工作流（grokReport），没开成就交空串、下次开新会话。没有我们用得上的 fork：换了账号池一律接力。终帧里
@@ -35,15 +36,16 @@
 //   都算「中转没查成」（relayUnknown，进 facts，DL3 挂起报警），不当成会话真交了活。
 //   会话号不是我们起的：server 的 accepted 帧回 sessionKey（<agent>:<uuid>），事先给不出，和 cursor 一样先回一个一眼看得出
 //   不是真号的临时号（MIRASIM_PENDING_PREFIX），真号经 onAccepted → onSessionId 报上来。没有 fork（换了账号池一律接力）。
-//   令牌文件、账本都在这份服务的用户家里（~/.mirasim/run/local-<端口>.token、~/.mirasim/traffic），引擎自己的进程进不去
-//   那个家（750），连回环口也连不上——法国防火墙只放行这个用户和 root 连它开的口（ops 第五节「会话用户的口只许它自己
-//   连」，#35，实测断链）：读账本（mirasimLedgerFs）经 exec 帮手以那个会话用户读，连接（mirasimConnect）经
+//   令牌文件、账本、会话档案都在这份服务的用户家里（~/.mirasim/run/local-<端口>.token、~/.mirasim/traffic、
+//   ~/.mirasim/sessions），引擎自己的进程进不去那个家（750），连回环口也连不上——法国防火墙只放行这个用户和 root
+//   连它开的口（ops 第五节「会话用户的口只许它自己连」，#35，实测断链）：读账本（mirasimLedgerFs）和没等到应答时
+//   对账用的会话档案（mirasimSessionsFs，MS-18）经 exec 帮手以那个会话用户读，连接（mirasimConnect）经
 //   一个同样以那个会话用户身份跑的桥接进程（adapters 的 bridge.ts + bridge-connect.ts），帧经它的 stdin/stdout 转，
 //   引擎自己的进程不直连端口、不直接读令牌文件（real/index.ts 的 mirasimDepsFor）。
 //   协议没有「探针模式」这种权限旗标（不像 Claude 的 dontAsk、cursor 的 --force、grok 的 --always-approve）：探针能不能
 //   不跑工具全靠 探针提示词（probePrompt）那句「不要调用任何工具」，服务端那边会不会听不是我们控制得了的——这是协议本身的限制，
 //   不是漏接了什么。
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import {
   type AgentRunOptions,
   assertSessionEffort,
@@ -78,6 +80,7 @@ import {
   SESSION_USERS,
   type SessionEffort,
   type SessionEnvInput,
+  type SessionsFs,
   type SessionUser,
   type SpawnInfo,
   type TranscriptEntry,
@@ -176,6 +179,20 @@ export function applySessionEffort(
   }
   if (support.kind === 'none') throw new Error(`${who}${support.why}`);
   return { model: spec.model, pass: assertSessionEffort(effort, support.allowed, who) };
+}
+
+/**
+ * 由我们定会话号的执行方式（Claude 的 --session-id、grok 的 -s）开新会话用的号：按执行编号算（sha256 取 16 字节，摆成 v4 的样子，
+ * 两家都只认 UUID 形状）。不用随机数：脱开跑的会话被新引擎接回时（session-handoff.ts）会再算一次，拿到的得是当初命令行上那个
+ * ——随机数会换号，grok 终帧回的真号对不上就判「续会话没续上」，被杀时记下一个不存在的号，下一段 -r 它报 not found（#2259）。
+ * 执行编号一次一个，同一个编号只起一个新会话，不会撞号。
+ */
+export function sessionUuidOf(runId: string): string {
+  const b = createHash('sha256').update(`fleet-dao/session/${runId}`).digest().subarray(0, 16);
+  b[6] = ((b[6] as number) & 0x0f) | 0x40;
+  b[8] = ((b[8] as number) & 0x3f) | 0x80;
+  const h = b.toString('hex');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
 /** 「Claude Code、Cursor Agent、Grok 命令行、Mirasim」：没接上的报错、探针的原因里用。 */
@@ -296,6 +313,8 @@ export interface HostDriver {
   /**
    * 开新会话、fork 时用的会话号。known = 起来就算数，结局照它交回工作流（Claude）；不是的要等执行体报上来才算：cursor 给的
    * 是临时号、真号 init 帧里给；grok 的号是我们给的（-s），但登录不上、起不来时它根本没建这个会话，看它开没开成（grokReport）。
+   * 号由我们定的（Claude、grok）按执行编号算出来（sessionUuidOf），同一个编号永远同一个号：发版换引擎后接回脱开跑的会话
+   * 要再调一次它，拿到的必须是当初写上命令行的那个，不然核对会话号、被杀时记下的号全对不上（#2259）。
    */
   newSessionId(runId: string): { id: string; known: boolean };
   run(spec: HostRunSpec, hooks: HostRunHooks): Promise<HostReport>;
@@ -328,6 +347,10 @@ export interface HostDriverDeps {
   mirasimLedgerDir(user: SessionUser): string;
   /** 读账本用：引擎自己的进程进不去会话用户的家（750），经这个以他的身份读（real/index.ts 的生产装配）。 */
   mirasimLedgerFs(user: SessionUser): LedgerFs;
+  /** 这个会话用户的 Mirasim 会话档案（他家里的 ~/.mirasim/sessions）：没等到 accepted 时按工作目录和起针时间对账（MS-18）。 */
+  mirasimSessionsDir(user: SessionUser): string;
+  /** 读会话档案用：和账本一样，经这个以会话用户的身份读。 */
+  mirasimSessionsFs(user: SessionUser): SessionsFs;
   /**
    * 会话出网经的代理（引擎配置 FLEET_SESSION_PROXY；法国直连、不给，#731）：cursor-agent、grok
    * 的会话带上（它们和会话里跑的命令都认 http(s)_proxy）。Claude 不带：reclaude 自己管上游和代理，会话经它的本地口出去
@@ -365,6 +388,8 @@ export function hostDrivers(deps: HostDriverDeps): Record<WiredHost, HostDriver>
       deps.mirasimConnect,
       deps.mirasimLedgerDir,
       deps.mirasimLedgerFs,
+      deps.mirasimSessionsDir,
+      deps.mirasimSessionsFs,
       deps.run?.mirasim ?? runMirasim,
     ),
   };
@@ -424,7 +449,7 @@ function claudeDriver(
     hostId: 'claude-code',
     userFrom: 'pool',
     canFork: true,
-    newSessionId: () => ({ id: randomUUID(), known: true }),
+    newSessionId: (runId) => ({ id: sessionUuidOf(runId), known: true }),
     async run(spec, hooks) {
       const effort = applySessionEffort('claude-code', spec);
       // 子代理定义（#1641）：只给干活的会话；生成不成就起不来、写清原因，不悄悄不带（路由探针不派子代理，不用它）
@@ -733,7 +758,7 @@ function grokDriver(
     userFrom: 'sole',
     canFork: false,
     // 号是我们定的（-s），但它真开了会话才算数（grokReport）：没登录、起不来时拿它 -r 只会报 not found
-    newSessionId: () => ({ id: randomUUID(), known: false }),
+    newSessionId: (runId) => ({ id: sessionUuidOf(runId), known: false }),
     async run(spec, hooks) {
       if (spec.session.mode === 'fork') {
         throw new Error('grok 不 fork：换了账号池要开新会话带接力任务书');
@@ -832,6 +857,8 @@ function mirasimDriver(
   connect: (user: SessionUser) => MirasimConnect,
   ledgerDir: (user: SessionUser) => string,
   ledgerFs: (user: SessionUser) => LedgerFs,
+  sessionsDir: (user: SessionUser) => string,
+  sessionsFs: (user: SessionUser) => SessionsFs,
   run: NonNullable<HostRunners['mirasim']>,
 ): HostDriver {
   return {
@@ -866,6 +893,8 @@ function mirasimDriver(
           connect: connect(spec.user),
           ledgerDir: ledgerDir(spec.user),
           ledgerFs: ledgerFs(spec.user),
+          sessionsDir: sessionsDir(spec.user),
+          sessionsFs: sessionsFs(spec.user),
           ...(hooks.signal ? { signal: hooks.signal } : {}),
           ...(hooks.now ? { now: hooks.now } : {}),
           ...(hooks.onEvent ? { onEvent: hooks.onEvent } : {}),
