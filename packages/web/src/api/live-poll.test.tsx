@@ -7,6 +7,7 @@ import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { DoneCard } from '../components/home/done-card';
 import {
+  ApiError,
   ApiProvider,
   DOWN_POLL_MS,
   type FleetApi,
@@ -162,6 +163,60 @@ describe('其余读页 60 秒兜底', () => {
     const mid = base();
     await advance(DOWN_POLL_MS);
     expect(base()).toEqual(mid.map((n) => n + 1));
+  });
+});
+
+const HOME_OK = { decisions: [], running: [], done: [], health: {}, flow: [] };
+
+describe('网关错误时轮询退避', () => {
+  test('连续 504：间隔 20 秒、40 秒，到 60 秒封顶；一次 200 回到 10 秒', async () => {
+    api.home.mockRejectedValue(new ApiError(504, 'http_504', '后端返回 504'));
+    mountHome();
+    await advance(0);
+    act(() => setStatus('down'));
+    await advance(0);
+
+    for (const gap of [20_000, 40_000, 60_000, 60_000]) {
+      const n = api.home.mock.calls.length;
+      await advance(gap - 1);
+      expect(api.home.mock.calls.length).toBe(n);
+      await advance(1);
+      expect(api.home.mock.calls.length).toBe(n + 1);
+    }
+
+    api.home.mockResolvedValue(HOME_OK);
+    const failed = api.home.mock.calls.length;
+    await advance(60_000);
+    expect(api.home.mock.calls.length).toBe(failed + 1);
+
+    const ok = api.home.mock.calls.length;
+    await advance(DOWN_POLL_MS - 1);
+    expect(api.home.mock.calls.length).toBe(ok);
+    await advance(1);
+    expect(api.home.mock.calls.length).toBe(ok + 1);
+  });
+
+  test('401 和业务错误仍每 10 秒一次', async () => {
+    api.home.mockRejectedValue(new ApiError(401, 'unauthenticated', '要先登录'));
+    mountHome();
+    await advance(0);
+    act(() => setStatus('down'));
+    await advance(0);
+
+    for (let i = 0; i < 3; i++) {
+      const n = api.home.mock.calls.length;
+      await advance(DOWN_POLL_MS - 1);
+      expect(api.home.mock.calls.length).toBe(n);
+      await advance(1);
+      expect(api.home.mock.calls.length).toBe(n + 1);
+    }
+
+    api.home.mockRejectedValue(new ApiError(409, 'conflict', '刚被别人改过'));
+    const n = api.home.mock.calls.length;
+    await advance(DOWN_POLL_MS - 1);
+    expect(api.home.mock.calls.length).toBe(n);
+    await advance(1);
+    expect(api.home.mock.calls.length).toBe(n + 1);
   });
 });
 
