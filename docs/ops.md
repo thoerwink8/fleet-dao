@@ -1,6 +1,6 @@
 # 运维手册：两台机器的地基与应用发布
 
-法国失联（判断关机还是断网、Contabo 上重启、重启后核对）照 [outage-france.md](outage-france.md)。
+法国失联（判断关机还是断网、Contabo 上重启、重启后核对）照 [outage-france.md](outage-france.md)。健康页上的「法国失联自 xx:xx」由香港探活写入（「香港探法国」一节），法国关机时这一页和可选的推送仍在。
 
 装法在 `deploy/`，这里讲怎么用、怎么看、怎么退。机器的公网 IP 和驾驶舱域名不进仓，下文写作 `<法国IP>`、`<香港IP>`、`<驾驶舱域名>`；域名的真值只在机器配置里（香港 `hk.env`、法国 `release.env` 的 `FLEET_DOMAIN`）。
 旧系统（windsurf-dao、ai-gateway-stack 那一套）已于 2026-09-25 从两台机器上全部清退：单元、用户、目录、数据都删了。它留下的坑与由来见 [reference/deploy.md](reference/deploy.md)（文中的 P01、P02 等编号出自那里；那份记的是清退前的现场）。
@@ -606,6 +606,8 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 
 外部看门狗（#292，design 第六节第 5 层、第十三节）：Cloudflare 定时 Worker 每 5 分钟从外面查香港和法国，挂了推飞书。代码在 `packages/edge`，不跑在法国或香港上。这一片只把判法和 Worker 进仓，不部署。部署要创始人在 Cloudflare 上授权一次（免费、不绑卡）。
 
+它还没部署，法国关机时不会响。香港本机已经在探的是「香港探法国」一节，不经过 Cloudflare。
+
 判法在 `packages/edge/src/judge.ts`。香港：公网驾驶舱首页回得来（任何 HTTP 状态码都算 nginx 活着），连不上算挂。法国：公网 `/healthz` 指 `https://<驾驶舱域名>/healthz`（香港 nginx 经隧道转），不是 `http://<法国IP>:8787/healthz`，也不是隧道地址。回 200，或回 503 但回得来（后端活着、某一项不好，交给健康页和引擎自己报），连不上、502、504 算挂，别的状态码也按挂报。香港连不上时只报香港，不连带报法国。同一次挂着每小时最多再推一次。恢复推「恢复了，挂了多久」。读不到上一轮状态照挂处理并且推一条，不静默。真域名、飞书 webhook、请求头 `x-fleet-watch` 的值只从 Worker 的 secret 读（`packages/edge/wrangler.toml` 里只有占位）。读不到密钥这一轮记没查成、写日志，不当成没挂。`FLEET_EDGE_FR_URL` 不是 `https://<驾驶舱域名>/healthz` 这种（http、带了 8787、写成 IP、路径不是 `/healthz`）也记没查成、不探测、不报法国挂了：法国公网 8787 超时是第二节的预期，配错地址不能当成法国挂了（`packages/edge/src/worker.ts`）。
 
 每次探测带请求头 `x-fleet-watch`，值是 secret `FLEET_EDGE_WATCH_ID`（送出去之前去掉首尾空白）。法国 `fleet-api` 的 `/healthz` 见到这个头和 `/etc/fleet-dao/api.env` 里的 `FLEET_EDGE_WATCH_ID` 是同一串，就给 `external-watchdog` 记一轮成功（`packages/api/src/external-watch.ts`）。对不上、没带头：不记，响应跟平时一样。记不上（登记行还没有、库写失败）只写日志，不把 `/healthz` 打成 500，免得这一轮被判成法国挂了。
@@ -650,7 +652,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 FLEET_HK_PROBE_WEBHOOK=
 ```
 
-看：`systemctl status fleet-hk-france-probe.timer`、`journalctl -u fleet-hk-france-probe.service -n 20`、健康页。停：`systemctl disable --now fleet-hk-france-probe.timer`（健康页不再更新失联时刻）。法国在、只是某一项红：这里不推，看健康页和法国看门狗。
+看：`systemctl status fleet-hk-france-probe.timer`、`journalctl -u fleet-hk-france-probe.service -n 20`、健康页。停：`systemctl disable --now fleet-hk-france-probe.timer`（健康页不再更新失联时刻）。法国在、只是某一项红：这里不推，看健康页和法国看门狗。失联之后要分清关机、断网还是隧道断了、要不要在 Contabo 重启，照 [outage-france.md](outage-france.md)。
 
 拉单（#632，替掉 webhook 接活加认领；`packages/engine/src/jobs/intake.ts`、`real/intake.ts`）：
 - 引擎每 5 分钟（每小时 3、8、13……分，定时任务 `intake`）自己到 GitHub 读该做的单，自己挑（创始人 2026-10-08「让ai自己挑挺好的」「按推荐」，#1336；规则全文见 design 第九节「开着的项目，引擎自己挑单」）：对每个「让 AI 接活」打开的项目（`repos.auto_dispatch_since` 不空，现在只当开关用），读开着的单，**准入**——作者在白名单里、不是母单子单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准，原因里写明）、还没派过、历史失败不超过 2 次、正文没写工作流路径、没有开着的 PR 挂着、交代齐（`readTaskBrief`；缺则留一次言）、「怎么算做完」没有要 diff 外证据的条目（截图、线上、现场、审计、看日志、飞书收到……，和 `pnpm issue:new` 同一份判据；有就留一次言写明哪几条、怎么改，不拉）、规模不是最重档（「已知的模块」列了超过 50 个路径）；没贴「待补」「要人拍」（整理会话贴的，贴着一律不拉）；未排期的单、别的版本的单和其余单一样进候选，不看里程碑；开单早于「让 AI 接活」打开那一刻的老单要贴了「整理过」（临时指挥官的整理会话判为仍成立后贴）或「交给引擎」才进候选，开关之后新开的单不需要（#1338；#1342 发到法国后引擎第一轮拉了两张前提已过期的老单）。每个仓走完以后，有从没整理过的老单、或有空位却一条都没起且待办还有候选，就叫一次临时指挥官整理待办（下面「叫临时指挥官整理待办」）。过了准入的**排序**（版本先后列表序号 → 挂当前版本 → 规模小 → 同规模里贴了「交给引擎」的 → 失败少 → 开单早），再按空位从前往后**起**：同时在跑的任务工作流 ≤ 6、一轮最多 5 条、**每小时最多 20 条**（滚动一小时，数任务行建出时刻）、熔断没停拉；起之前才现读一遍这张单（开着、不是 PR、母单子单和「本机做」再核一遍）。起的建任务行、起任务工作流（编号 `task:<owner>/<name>#<号>`，`REJECT_DUPLICATE`：同一张单任何时候最多一条，做完、停下的不会自己重来，要人在驾驶舱点「继续」）。交代不全的在单子上留一条言写清缺什么（同一处缺法只留一次）。拉单本身不动单子。#282（驾驶舱「交给 fleet」按钮）被「交给引擎」取代（2026-10-08）：按钮不做，`fleet-api handover` 已删，没有这条命令。

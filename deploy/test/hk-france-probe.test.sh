@@ -186,7 +186,8 @@ else
     "$NG/body" "$NG/proxy" "$NG/fastcgi" "$NG/uwsgi" "$NG/scgi"
   # CI 上 sudo 起 nginx，干活的进程不是 root。mktemp 是 700，不放开它就 403，测不成「文件没有是 404」。
   chmod 755 "$TMP" "$TMP/state" "$NG" "$NG/body" "$NG/proxy" "$NG/fastcgi" "$NG/uwsgi" "$NG/scgi"
-  PORT=$(node -e 'const s=require("net").createServer(); s.listen(0,"127.0.0.1",()=>{console.log(s.address().port); s.close()});')
+  # stdout.write：console.log 在 FORCE_COLOR 下会给数字上色，端口串进 listen 后 nginx 认不出
+  PORT=$(node -e 'const s=require("net").createServer(); s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port)); s.close()});')
   render "$HERE/../hk/nginx-http.conf" SERVER_NAME=localhost WEB_ROOT="$TMP/web" ACME_ROOT="$TMP/acme" TUNNEL_PEER=10.99.0.2
   check "http 模板占位都换掉了" "${#REDS[@]}" 0
   site=$RENDERED
