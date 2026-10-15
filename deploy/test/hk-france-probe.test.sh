@@ -3,6 +3,7 @@
 # shellcheck disable=SC2317 # cleanup 由 trap 调用，shellcheck 看成走不到
 # 香港探法国（deploy/hk/france-probe.sh）：连续 2 次失败不推，第 3 次推「法国失联自」，
 # 再失败不重复推，恢复推一次；没配 webhook 只写状态、退出 0，不把地址打进日志。
+# 读回：探活定时器刚启动、NextElapseUSecRealtime 为空仍算在排班；没在跑仍红。
 # 不碰真机器：状态、推送地址、时刻都换到临时目录；探测和 POST 换成钩子。
 # 用法：bash deploy/test/hk-france-probe.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
@@ -258,6 +259,117 @@ EOF
   wait "$NG_PID" 2>/dev/null || true
   NG_PID=""
 fi
+
+echo "== hk.sh 读回探活定时器：刚启动、NextElapseUSecRealtime 为空不算没排班"
+extract_fn() { awk -v name="$1" '$0 ~ "^" name "\\(\\) \\{$" { on = 1 } on { print } on && /^}$/ { exit }' "$HK"; }
+FUNCS=$(
+  extract_fn timer_prop_set
+  extract_fn timer_unit_text
+  extract_fn timer_unit_has_first_fire
+  extract_fn timer_is_scheduled
+  extract_fn readback_timer_scheduled
+)
+check "摘到排班判断的五个函数" "$(grep -c -E '^(timer_prop_set|timer_unit_text|timer_unit_has_first_fire|timer_is_scheduled|readback_timer_scheduled)\(\) \{' <<<"$FUNCS")" 5
+# shellcheck disable=SC2016 # 单引号里就是 hk.sh 的那一行，PROBE_TIMER 要留在原文里
+has "探活读回走这条判断" "$(<"$HK")" 'readback_timer_scheduled "$PROBE_TIMER" "法国关机时香港不会自己发现"'
+
+RB=()
+ok() { RB+=("ok $*"); }
+red() { RB+=("red $*"); }
+unit_prop() { systemctl show -p "$2" --value "$1" 2>/dev/null; }
+# shellcheck disable=SC2317 # 摘出来的函数才调到
+systemctl() {
+  local cmd=$1 prop="" arg unit
+  case "$cmd" in
+  is-enabled) printf '%s\n' "$MOCK_ENABLED" ;;
+  is-active) printf '%s\n' "$MOCK_ACTIVE" ;;
+  show)
+    shift
+    while (($#)); do
+      arg=$1
+      shift
+      case "$arg" in
+      -p)
+        prop=$1
+        shift
+        ;;
+      --value) ;;
+      *) ;;
+      esac
+    done
+    case "$prop" in
+    NextElapseUSecRealtime) printf '%s\n' "$MOCK_NEXT_RT" ;;
+    NextElapseUSecMonotonic) printf '%s\n' "$MOCK_NEXT_MONO" ;;
+    LastTriggerUSec) printf '%s\n' "$MOCK_LAST" ;;
+    *) ;;
+    esac
+    ;;
+  cat)
+    unit=${2:-}
+    if [[ "${MOCK_CAT+x}" == x ]]; then
+      printf '%s\n' "$MOCK_CAT"
+    elif [[ -f "$HERE/../hk/$unit" ]]; then
+      printf '%s\n' "$(<"$HERE/../hk/$unit")"
+    fi
+    ;;
+  *) ;;
+  esac
+}
+# shellcheck disable=SC1090 # 从 hk.sh 摘出来的函数
+source <(printf '%s\n' "$FUNCS")
+
+rb_reset() {
+  MOCK_ENABLED=enabled
+  MOCK_ACTIVE=active
+  MOCK_NEXT_RT=
+  MOCK_NEXT_MONO=
+  MOCK_LAST=
+  unset MOCK_CAT
+  RB=()
+}
+rb_text() {
+  if ((${#RB[@]})); then printf '%s\n' "${RB[@]}"; fi
+}
+WHY="法国关机时香港不会自己发现"
+probe_line() { readback_timer_scheduled fleet-hk-france-probe.timer "$WHY"; }
+
+rb_reset
+probe_line
+check "刚启动、Realtime 为空：读回 ok，不是没排班" "$(rb_text)" "ok fleet-hk-france-probe.timer 在排班（刚启动，下次触发时间还没填上）"
+
+rb_reset
+MOCK_ACTIVE=inactive
+MOCK_NEXT_RT="Thu 2026-10-15 19:21:00 CST"
+probe_line
+check "定时器 inactive：仍然红" "$(rb_text)" "red fleet-hk-france-probe.timer 没在排班：$WHY"
+
+rb_reset
+MOCK_ENABLED=disabled
+probe_line
+check "没启用：仍然红" "$(rb_text)" "red fleet-hk-france-probe.timer 没在排班：$WHY"
+
+rb_reset
+MOCK_CAT=$'[Timer]\nOnUnitActiveSec=1min\n'
+probe_line
+check "只有 OnUnitActiveSec、刚启动：ok" "$(rb_text)" "ok fleet-hk-france-probe.timer 在排班（刚启动，下次触发时间还没填上）"
+
+rb_reset
+MOCK_CAT=$'[Timer]\nOnUnitInactiveSec=1min\n'
+probe_line
+check "只有 OnUnitInactiveSec、一次都没跑过：仍红" "$(rb_text)" "red fleet-hk-france-probe.timer 没在排班：$WHY"
+
+rb_reset
+MOCK_NEXT_MONO="1min 5s"
+MOCK_LAST="Thu 2026-10-15 19:17:42 CST"
+probe_line
+check "单调钟有下次时间、Realtime 仍空：ok，不把单调钟读数当成墙钟" "$(rb_text)" "ok fleet-hk-france-probe.timer 在排班（已排上下次）"
+
+rb_reset
+MOCK_CAT=$'[Timer]\nOnCalendar=daily\n'
+MOCK_NEXT_MONO=infinity
+MOCK_LAST="Thu 2026-10-15 19:17:42 CST"
+probe_line
+check "已经触发过、下次时间被清掉：仍算在排班" "$(rb_text)" "ok fleet-hk-france-probe.timer 在排班（已触发过，下次时间还没填上）"
 
 if ((fail)); then
   echo "不通过"

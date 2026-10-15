@@ -632,6 +632,69 @@ probe_webhook_set() {
   return 1
 }
 
+# systemd 把「没有」印成空、0、n/a 或 infinity。这四种都不算有下次时间或上次触发。
+timer_prop_set() {
+  local v="$1"
+  [[ -n "$v" && "$v" != "0" && "$v" != "n/a" && "$v" != "infinity" ]]
+}
+
+# 单元正文。cat 读到的是正在用的那份（含 drop-in）；cat 不成再看装上去的文件。
+timer_unit_text() {
+  local unit=$1 text=""
+  text=$(systemctl cat "$unit" 2>/dev/null) || true
+  if [[ -z "$text" && -f /etc/systemd/system/$unit ]]; then
+    text=$(<"/etc/systemd/system/$unit")
+  fi
+  printf '%s\n' "$text"
+}
+
+# 不靠服务先跑过一轮也能响起的间隔：OnUnitActiveSec，以及同一类的 OnBootSec / OnActiveSec / OnStartupSec。
+# 探活单元写的是 OnBootSec + OnUnitInactiveSec，没有 OnUnitActiveSec。只认 OnUnitInactiveSec 会把
+# 「服务一次都没停过、永远不响」的定时器放行（systemd 要等它停过才开始算）。
+timer_unit_has_first_fire() {
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[[:space:]]*On(UnitActive|Boot|Active|Startup)Sec[[:space:]]*= ]] && return 0
+  done <<<"$(timer_unit_text "$1")"
+  return 1
+}
+
+# 在排班：enabled 且 active，并且「下次触发时间非空」或「已有 LastTriggerUSec」或「有首轮间隔且刚启动」三者之一。
+# 下次时间：日历定时器在 NextElapseUSecRealtime；只按开机/激活间隔排的，Realtime 一直是空的，时间在
+# NextElapseUSecMonotonic。只看 Realtime，探活从装上起就永远是红，不只是刚启动那一次。
+# 刚启动：一次都没触发过（LastTriggerUSec 还没有），下次时间也还没填上。oneshot 正在跑时下次时间会被清掉，
+# 但 LastTriggerUSec 已经有了，走第二条。
+timer_is_scheduled() {
+  local unit=$1
+  [[ "$(systemctl is-enabled "$unit" 2>/dev/null)" == enabled ]] || return 1
+  [[ "$(systemctl is-active "$unit" 2>/dev/null)" == active ]] || return 1
+  timer_prop_set "$(unit_prop "$unit" NextElapseUSecRealtime)" && return 0
+  timer_prop_set "$(unit_prop "$unit" NextElapseUSecMonotonic)" && return 0
+  timer_prop_set "$(unit_prop "$unit" LastTriggerUSec)" && return 0
+  timer_unit_has_first_fire "$unit"
+}
+
+# 读回一条。没排上时红字用调用方给的原因（读回不 return 1，免得装机停在半截）。
+readback_timer_scheduled() {
+  local unit=$1 why=$2 next
+  if ! timer_is_scheduled "$unit"; then
+    red "$unit 没在排班：$why"
+    return 0
+  fi
+  # Realtime 是墙钟，可以直接给人看。Monotonic 印出来的是开机后的单调钟读数，不是「还要多久」，不能当成下次时刻。
+  next=$(unit_prop "$unit" NextElapseUSecRealtime)
+  if timer_prop_set "$next"; then
+    ok "$unit 在排班（下次 $next）"
+  elif timer_prop_set "$(unit_prop "$unit" NextElapseUSecMonotonic)"; then
+    ok "$unit 在排班（已排上下次）"
+  elif timer_prop_set "$(unit_prop "$unit" LastTriggerUSec)"; then
+    ok "$unit 在排班（已触发过，下次时间还没填上）"
+  else
+    ok "$unit 在排班（刚启动，下次触发时间还没填上）"
+  fi
+}
+
 readback_france_probe() {
   if [[ -x "$PROBE_BIN" ]]; then
     ok "法国探活脚本在 $PROBE_BIN"
@@ -649,11 +712,7 @@ readback_france_probe() {
   else
     red "站点没把 /health/france-link.json 指到 $PROBE_STATE_DIR/status.json：重跑 hk.sh"
   fi
-  if [[ "$(systemctl is-enabled "$PROBE_TIMER" 2>/dev/null)" == enabled && "$(systemctl is-active "$PROBE_TIMER" 2>/dev/null)" == active && -n "$(unit_prop "$PROBE_TIMER" NextElapseUSecRealtime)" ]]; then
-    ok "$PROBE_TIMER 在排班（下次 $(systemctl show -p NextElapseUSecRealtime --value "$PROBE_TIMER")）"
-  else
-    red "$PROBE_TIMER 没在排班：法国关机时香港不会自己发现"
-  fi
+  readback_timer_scheduled "$PROBE_TIMER" "法国关机时香港不会自己发现"
   if probe_webhook_set; then
     ok "法国探活配了推送（地址不在这里打印）"
   else
