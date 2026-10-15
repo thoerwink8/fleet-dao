@@ -11,6 +11,7 @@ import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import {
   cleanTestCommands,
   cut,
+  FAILURE_MAX,
   num,
   numbers,
   optional,
@@ -20,6 +21,7 @@ import {
   SAY_MAX,
   searchSummary,
   str,
+  TOOL_SUMMARY_MAX,
   TRANSCRIPT_SUMMARY_MAX,
   testRun,
   toolSummaryText,
@@ -326,7 +328,7 @@ export class ClaudeStreamReader {
           'error',
           cut(
             `权限被拒：${str(frame.tool_name) ?? '?'}${str(frame.decision_reason) ? `（${str(frame.decision_reason)}）` : ''}`,
-            500,
+            FAILURE_MAX,
           ),
           { tool: str(frame.tool_name) },
         );
@@ -427,7 +429,7 @@ export class ClaudeStreamReader {
         action: TOOL_ACTIONS[name] ?? 'other',
         summary: toolSummary(name, input, this.#cwd),
         ok,
-        ...optional('error', ok ? undefined : cut(resultText(block.content), 500)),
+        ...optional('error', ok ? undefined : cut(resultText(block.content), FAILURE_MAX)),
         ...(pending?.subagent ? { subagent: true } : {}),
       } satisfies ToolPayload);
       this.#tx(effect, 'tool_result', resultText(block.content), {
@@ -576,7 +578,7 @@ export function versionAtLeast(version: string, min: string): boolean | undefine
 function callText(name: string, input: Record<string, unknown>, cwd: string): string {
   if (name === 'Agent' || name === 'Task') {
     const first = (str(input.prompt) ?? str(input.description) ?? '').trim().split('\n')[0] ?? '';
-    return `派了 ${str(input.subagent_type) ?? '子代理'}：${cut(first, 200)}`;
+    return `派了 ${str(input.subagent_type) ?? '子代理'}：${cut(first, TOOL_SUMMARY_MAX)}`;
   }
   return toolSummary(name, input, cwd, TRANSCRIPT_SUMMARY_MAX);
 }

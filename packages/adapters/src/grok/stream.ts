@@ -14,7 +14,7 @@ import {
   cleanTestCommands,
   commandFailure,
   cut,
-  FAILURE_MAX,
+  failureText,
   NO_OUTPUT,
   num,
   numbers,
@@ -80,7 +80,7 @@ export interface GrokStreamSummary {
   /** error 帧的原文。 */
   errors: string[];
   /**
-   * 最后一段回答（最后一次 say 的全文，截到 2000 字）：终帧里没有回答正文，探针靠它看是不是只回了 OK。
+   * 最后一段回答（最后一次 say 的全文，截断长度同 SAY_MAX）：终帧里没有回答正文，探针靠它看是不是只回了 OK。
    * 一句话都没说就没有。
    */
   answer?: string;
@@ -296,7 +296,7 @@ export class GrokStreamReader {
       action: KIND_ACTIONS[tool.kind] ?? 'other',
       summary: toolSummary(tool, this.#cwd),
       ok,
-      ...optional('error', ok ? undefined : failureText(status, output, frame.content)),
+      ...optional('error', ok ? undefined : toolFailure(status, output, frame.content)),
     } satisfies ToolPayload);
     this.#tx(effect, 'tool_result', resultTextOf(status, output, frame.content, ok), { tool: tool.name, ok });
     if (ok && EDIT_KINDS.has(tool.kind)) {
@@ -377,18 +377,21 @@ function toolSummary(tool: PendingTool, cwd: string, max?: number): string {
   return toolSummaryText(text, max);
 }
 
-/** 工具结果给人看的正文：失败照 failureText；成功的取命令的输出或工具回的文字，都没有就写（无输出）。 */
+/** 工具回的文字在 content[].content.text；没有文字的块丢掉。 */
+function contentTexts(content: unknown): string[] {
+  if (!Array.isArray(content)) return [];
+  return content.map((c) => str(rec(rec(c)?.content)?.text)).filter((t): t is string => Boolean(t));
+}
+
+/** 工具结果给人看的正文：失败照 toolFailure；成功的取命令的输出或工具回的文字，都没有就写（无输出）。 */
 function resultTextOf(
   status: string,
   output: Record<string, unknown>,
   content: unknown,
   ok: boolean,
 ): string {
-  if (!ok) return failureText(status, output, content);
-  const texts = Array.isArray(content)
-    ? content.map((c) => str(rec(rec(c)?.content)?.text)).filter((t): t is string => Boolean(t))
-    : [];
-  return texts.join('\n') || str(output.output_for_prompt)?.trim() || NO_OUTPUT;
+  if (!ok) return toolFailure(status, output, content);
+  return contentTexts(content).join('\n') || str(output.output_for_prompt)?.trim() || NO_OUTPUT;
 }
 
 function editedPaths(tool: PendingTool, output: Record<string, unknown>, content: unknown): string[] {
@@ -410,7 +413,8 @@ function editedPaths(tool: PendingTool, output: Record<string, unknown>, content
   return [...paths];
 }
 
-function failureText(status: string, output: Record<string, unknown>, content: unknown): string {
+/** 从 grok 的 rawOutput 里掏失败原因。Bash 给超时、信号或退出码，再加上命令自己说的话。 */
+function toolFailure(status: string, output: Record<string, unknown>, content: unknown): string {
   if (str(output.type) === 'Bash') {
     const why =
       output.timed_out === true
@@ -421,8 +425,5 @@ function failureText(status: string, output: Record<string, unknown>, content: u
     const said = str(output.output_for_prompt)?.trim();
     return commandFailure(why, said);
   }
-  const texts = Array.isArray(content)
-    ? content.map((c) => str(rec(rec(c)?.content)?.text)).filter((t): t is string => Boolean(t))
-    : [];
-  return cut([status, ...texts].join('：'), FAILURE_MAX);
+  return failureText(status, contentTexts(content).join('：') || undefined);
 }

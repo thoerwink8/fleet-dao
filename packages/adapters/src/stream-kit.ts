@@ -76,9 +76,17 @@ export function todosSummary(todos: unknown): string {
   return `待办 ${Array.isArray(todos) ? todos.length : 0} 条`;
 }
 
-/** 命令失败的原因：「原因：命令自己说的话」，没说话就只有原因；按 FAILURE_MAX 截。 */
+/**
+ * 失败原因：「标签：说明」，没有说明就只有标签；按 FAILURE_MAX 截。空串不算有说明。
+ * 标签、说明从帧里怎么掏，各家不一样，留在各家的读取器里。
+ */
+export function failureText(label: string, detail?: string): string {
+  return cut(detail ? `${label}：${detail}` : label, FAILURE_MAX);
+}
+
+/** 命令失败：原因是退出码、超时或信号，说明是命令自己说的话。 */
 export function commandFailure(why: string, said: string | undefined): string {
-  return cut(said ? `${why}：${said}` : why, FAILURE_MAX);
+  return failureText(why, said);
 }
 
 /** 工具结果的 content（字符串，或带 text 的块数组）拼成正文；别的形状返回空串。 */

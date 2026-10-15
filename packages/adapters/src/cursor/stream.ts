@@ -12,7 +12,7 @@ import {
   cleanTestCommands,
   commandFailure,
   cut,
-  FAILURE_MAX,
+  failureText,
   NO_OUTPUT,
   num,
   numbers,
@@ -270,7 +270,7 @@ export class CursorStreamReader {
       action,
       summary,
       ok,
-      ...optional('error', ok ? undefined : failureText(result, success)),
+      ...optional('error', ok ? undefined : toolFailure(result, success)),
     } satisfies ToolPayload);
     this.#tx(effect, 'tool_result', resultTextOf(result, success, ok), { tool: name, ok });
     if (ok && kind?.edits) {
@@ -372,13 +372,13 @@ function toolSummary(key: string, args: Record<string, unknown>, cwd: string, ma
   return toolSummaryText(text, max);
 }
 
-/** 工具结果给人看的正文：失败照 failureText；成功的取命令的输出、读到的内容或工具自己的话，都没有就只说成功。 */
+/** 工具结果给人看的正文：失败照 toolFailure；成功的取命令的输出、读到的内容或工具自己的话，都没有就（无输出）。 */
 function resultTextOf(
   result: Record<string, unknown>,
   success: Record<string, unknown> | undefined,
   ok: boolean,
 ): string {
-  if (!ok) return failureText(result, success);
+  if (!ok) return toolFailure(result, success);
   const out =
     str(success?.stdout)?.trim() ??
     str(success?.content) ??
@@ -388,13 +388,13 @@ function resultTextOf(
   return out ?? NO_OUTPUT;
 }
 
-function failureText(result: Record<string, unknown>, success: Record<string, unknown> | undefined): string {
+/** 从 cursor 的 result 里掏失败原因。命令跑了但退出码不是 0：给退出码和 stderr。 */
+function toolFailure(result: Record<string, unknown>, success: Record<string, unknown> | undefined): string {
   if (success) {
-    // 命令跑了但退出码不是 0：给退出码和 stderr
     const stderr = str(success.stderr)?.trim();
     return commandFailure(`退出码 ${num(success.exitCode) ?? '?'}`, stderr);
   }
   const [kind, detail] = Object.entries(result)[0] ?? ['没有结果', undefined];
   const message = str(rec(detail)?.message) ?? str(rec(detail)?.error) ?? str(detail);
-  return cut(message ? `${kind}：${message}` : kind, FAILURE_MAX);
+  return failureText(kind, message);
 }
