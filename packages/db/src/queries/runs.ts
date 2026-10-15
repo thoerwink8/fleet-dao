@@ -110,6 +110,29 @@ export async function startRun(db: Db, row: RunInsert, now: Date = new Date()): 
   return { id: r.id };
 }
 
+/**
+ * 过程记录挂在 runs 上（外键）。提需求、临时指挥官不走 runOneShot，本来不写这一行，第一条 prompt 就被外键挡掉、
+ * 之后每次重试都带着它整批失败。写过程记录之前补一行锚点：没有 route_id（不占池的名额）、没有 task（不是三段派单）。
+ * 已经有这一行（三段会话开跑时写过）就什么都不改，避免把开跑那一行冲掉。返回是不是这次补上的。
+ */
+export async function ensureRunForTranscript(
+  db: Db,
+  row: { id: string; segment: RunInsert['segment']; model: string; startedAt?: Date },
+): Promise<boolean> {
+  const startedAt = row.startedAt ?? new Date();
+  const inserted = await db
+    .insert(runs)
+    .values({
+      id: row.id,
+      segment: row.segment,
+      model: row.model,
+      startedAt,
+    })
+    .onConflictDoNothing({ target: runs.id })
+    .returning({ id: runs.id });
+  return inserted.length > 0;
+}
+
 /** 结束。幂等：重复结束不再记。 */
 export async function finishRun(
   db: Db,
