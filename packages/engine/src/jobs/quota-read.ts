@@ -3,7 +3,10 @@
 // 改这里之前必须知道：
 // - 读失败的池什么都不写：最近读成时刻不动、旧读数留着（「没读成」不能写成「额度是 0」或「没事」）。
 // - 报警不另存状态，读时现算：这个池这一轮没读成，且库里「最近读成」比两轮之前还早（或从没读成过）→ 连着两轮没读成，报；
-//   这一轮读成了就撤。凭据读不到、登录失效、配置写错这几种要人动手的，当场报，不等第二轮。
+//   这一轮读成了就撤。凭据读不到、登录真失效、配置写错这几种要人动手的，当场报，不等第二轮。
+//   Grok 访问令牌过期但登录文件里还有 refresh_token（auth_refreshable）不在这一类：CLI 下次运行会自己续，
+//   报警不写「不会自己好」。续期由引擎在读数过期前跑一次 grok models（refreshGrokLogin），不在看门狗上加宽限
+//   ——宽限只少报「没按期跑成」，读数仍旧，选路继续把这个池按「额度没读成」排后面。
 // - 「这台机器当前挂的不是这个组织」（not_current）不算失败：Claude 额度只能读当前挂着的那个组织，读取器不切号，
 //   另一个池本来就读不到。照旧留着旧读数、不报警，但这一轮记 partial 写明哪几个池没读，不记成全读到了。
 // - 配置读不到、认不出：这一轮整个没跑成，当场报（key 单独一个），不拿上一次的配置顶。
@@ -11,7 +14,12 @@
 // - 读到的窗口里被读取器丢过的（notes 里写着「没收」）不算读全：只写收到的窗口，不标别的窗口过期、不算一次读成。
 // - 渠道模型名册（#1302）是可选的一步：到了间隔才读，读失败只记在名册自己的表里。它抛了、没读成，都不改这一轮额度的结局，也不另报额度提醒。
 
-import type { PoolQuotaResult, QuotaConfig, QuotaReport } from '@fleet-dao/adapters/quota';
+import {
+  GROK_TOKEN_SELF_HEAL_MINUTES,
+  type PoolQuotaResult,
+  type QuotaConfig,
+  type QuotaReport,
+} from '@fleet-dao/adapters/quota';
 import type { PoolQuotaSnapshot, ScheduleResult } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { QuotaReadRun } from '../contract.ts';
@@ -34,7 +42,10 @@ export const QUOTA_READ_OFFSET_MINUTES = 4;
  */
 export const QUOTA_REPEAT_FAIL_MS = 20 * 60_000;
 
-/** 当场报、不等第二轮的错：要人动手（补凭据、重新登录、改配置、查为什么花了钱），不会自己好。 */
+/**
+ * 当场报、不等第二轮的错：要人动手（补凭据、重新登录、改配置、查为什么花了钱），不会自己好。
+ * auth_refreshable 不在这里：访问令牌过期但 refresh_token 还在，grok 下次运行会自己续。
+ */
 const IMMEDIATE_CODES = new Set(['no_credentials', 'auth', 'config', 'read_cost', 'bad_response']);
 
 export const configAlertKey = () => 'quota-read:config';
@@ -183,6 +194,9 @@ async function round(deps: QuotaReadJobDeps): Promise<Round> {
     const last = before.get(r.poolId) ?? null;
     const repeated = last === null || now.getTime() - last.getTime() > QUOTA_REPEAT_FAIL_MS;
     const immediate = IMMEDIATE_CODES.has(r.error.code);
+    // 还能由 CLI 续的：不写「不会自己好」。多久没好再找人和看门狗的 30 分钟是同一条线。
+    const selfHealing = r.error.code === 'auth_refreshable';
+    const since = last ? `上次读成是 ${last.toISOString()}。` : '库里从没读成过这个池。';
     problems.push(`${r.poolId} 没读成（${r.error.code}）：${r.error.message}`);
     if (immediate || repeated) {
       toAlert += 1;
@@ -192,9 +206,11 @@ async function round(deps: QuotaReadJobDeps): Promise<Round> {
         body: `${r.poolId}（${r.reader}）这一轮没读成：${r.error.code}——${r.error.message}。${
           immediate
             ? '这种要人动手（补凭据、重新登录、改配置），不会自己好。'
-            : last
-              ? `上次读成是 ${last.toISOString()}，连着两轮没读成了。`
-              : '库里从没读成过这个池。'
+            : selfHealing
+              ? `${since}这种会在 grok 下次运行后自己好；超过 ${GROK_TOKEN_SELF_HEAL_MINUTES} 分钟还没好再找人。`
+              : last
+                ? `上次读成是 ${last.toISOString()}，连着两轮没读成了。`
+                : '库里从没读成过这个池。'
         }旧读数留着、没改；读不到的池选路按「额度没读成」排在后面。`,
       });
     }

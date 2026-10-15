@@ -1,6 +1,13 @@
 // 定时读额度（#76）：不连库、不连上游，全用假的依赖。规矩见 jobs/quota-read.ts 头注释。
-import type { PoolQuotaResult, QuotaConfig, QuotaReading, QuotaReport } from '@fleet-dao/adapters/quota';
+import {
+  GROK_TOKEN_SELF_HEAL_MINUTES,
+  type PoolQuotaResult,
+  type QuotaConfig,
+  type QuotaReading,
+  type QuotaReport,
+} from '@fleet-dao/adapters/quota';
 import type { PoolQuotaSnapshot, ScheduleResult } from '@fleet-dao/db';
+import { QUOTA_STALE_AFTER_MS } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import {
   isCompleteRead,
@@ -155,7 +162,46 @@ describe('定时读额度', () => {
       await runQuotaReadJob(w.deps);
       expect(w.raised, code).toHaveLength(1);
       expect(w.raised[0]?.body).toContain('要人动手');
+      expect(w.raised[0]?.body).toContain('不会自己好');
     }
+  });
+
+  it('访问令牌过期但还有 refresh_token：不进当场报，连着两轮才报，正文不说不会自己好', async () => {
+    expect(GROK_TOKEN_SELF_HEAL_MINUTES * 60_000).toBe(QUOTA_STALE_AFTER_MS);
+    const msg = '等 grok 下次运行会自己续；超过 30 分钟还没读成再找人';
+    const recent = world([failed('grok', 'auth_refreshable', msg)], { lastOk: { grok: minutesAgo(15) } });
+    await runQuotaReadJob(recent.deps);
+    expect(recent.raised).toEqual([]);
+
+    const w = world([failed('grok', 'auth_refreshable', msg)], {
+      lastOk: { grok: new Date(NOW.getTime() - QUOTA_REPEAT_FAIL_MS - 60_000) },
+    });
+    await runQuotaReadJob(w.deps);
+    expect(w.raised).toHaveLength(1);
+    expect(w.raised[0]?.body).not.toContain('不会自己好');
+    expect(w.raised[0]?.body).toContain('会在 grok 下次运行后自己好');
+    expect(w.raised[0]?.body).toContain(`${GROK_TOKEN_SELF_HEAL_MINUTES} 分钟`);
+    expect(w.raised[0]?.body).toContain('auth_refreshable');
+  });
+
+  it('凭据真失效（没有可续的 refresh_token）：仍按要人动手报，并写不会自己好', async () => {
+    const w = world(
+      [
+        failed(
+          'grok',
+          'auth',
+          'Grok 的登录凭据失效（访问令牌已过期，登录文件里没有 refresh_token）：要在这台机器上重新 grok login',
+        ),
+      ],
+      {
+        lastOk: { grok: minutesAgo(15) },
+      },
+    );
+    await runQuotaReadJob(w.deps);
+    expect(w.raised).toHaveLength(1);
+    expect(w.raised[0]?.body).toContain('要人动手');
+    expect(w.raised[0]?.body).toContain('不会自己好');
+    expect(w.raised[0]?.body).toContain('auth——');
   });
 
   it('「当前没挂着这个组织」不报警，也不写库，但这一轮记 partial 写明是哪几个池', async () => {

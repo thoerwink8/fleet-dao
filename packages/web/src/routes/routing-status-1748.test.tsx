@@ -33,10 +33,11 @@ describe('渠道状态页（#1748）', () => {
   test('Grok 令牌过期：渠道卡、渠道详情、路由行都写原因和要人做什么', async () => {
     open('ch-grok');
     await waitFor(() => byAttr('data-route', 'r-grok'));
-    expect(byAttr('data-channel', 'ch-grok').textContent).toContain('额度读不到，要人处理');
+    expect(byAttr('data-channel', 'ch-grok').textContent).toContain('额度读不到，等 grok 下次运行自己续');
     const box = document.querySelector('[data-pool-problems]');
     expect(box?.textContent).toContain('登录令牌已过期');
-    expect(box?.textContent).toContain('要人做：在引擎所在的机器（法国）以会话用户重新 grok login');
+    expect(box?.textContent).toContain('先等 grok 下次运行自己续');
+    expect(box?.textContent).not.toContain('不会自己好');
     expect(
       byAttr('data-route', 'r-grok').querySelector('[data-pool-problem="unreadable"]')?.textContent,
     ).toContain('grok login');
