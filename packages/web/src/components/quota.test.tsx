@@ -217,7 +217,7 @@ describe('读数过期、凭据过期（#1748）', () => {
   test('Grok 令牌过期：额度页写原因和要人做什么，旧的 98% 不进「快用完」', async () => {
     renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
     await screen.findByText('读数过期或没查成');
-    const heading = screen.getByText('快用完');
+    expect(screen.getByText('快用完')).toBeTruthy();
     const full = openSummary('快用完');
     expect(full.textContent).not.toContain('supergrok');
     expect(full.textContent).not.toContain('Grok');
@@ -225,7 +225,8 @@ describe('读数过期、凭据过期（#1748）', () => {
     const line = staleBox.querySelector('[data-pool-problem="unreadable"]');
     expect(line?.textContent).toContain('额度读不到');
     expect(line?.textContent).toContain('登录令牌已过期');
-    expect(line?.textContent).toContain('要人做：在引擎所在的机器（法国）以会话用户重新 grok login');
+    expect(line?.textContent).toContain('先等 grok 下次运行自己续');
+    expect(line?.textContent).not.toContain('不会自己好');
     // 同一个池只出现一次：不再逐个列它的过期窗口
     expect(staleBox.querySelectorAll('[data-pool="supergrok"]')).toHaveLength(1);
     expect(staleBox.querySelectorAll('li')).toHaveLength(

@@ -33,8 +33,13 @@ export type QuotaErrorCode =
   | 'config'
   /** 凭据文件读不到、或里面没有令牌。 */
   | 'no_credentials'
-  /** 上游说没登录、令牌过期或被拒（401/403）。要人重新登录。 */
+  /** 上游说没登录、令牌被拒（401/403），或登录文件里已经没有可续的 refresh_token。要人重新登录。 */
   | 'auth'
+  /**
+   * 访问令牌过期，登录文件里还有 refresh_token。CLI 下次运行会自己续；读取器不碰 refresh_token
+   * （续期会轮换它，CLI 手里那份就作废）。不是要人马上重新登录。
+   */
+  | 'auth_refreshable'
   /** 连不上上游或本机服务。 */
   | 'unreachable'
   /** 上游明确报错（5xx、错误帧、接口说自己没拿到数）。 */
@@ -167,7 +172,10 @@ export interface CursorDashboardConfig extends PoolConfigBase {
 
 export interface GrokBillingConfig extends PoolConfigBase {
   reader: 'grok-billing';
-  /** 默认 ~/.grok/auth.json。 */
+  /**
+   * 默认 ~/.grok/auth.json。访问令牌过期且还有 refresh_token 时，由引擎跑一次 grok models 让 CLI 自己续
+   * （ReaderContext.refreshLogin）；读取器不碰 refresh_token。
+   */
   authFile?: string;
   baseUrl?: string;
   clientVersion?: string;

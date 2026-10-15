@@ -184,10 +184,21 @@ function ChannelRow({
   // 已关、未被用途使用、下架：灰着，不是坏了
   const quiet = c.kind === 'off' || c.kind === 'unused' || c.kind === 'retired';
   const unreadable = problems.some((p) => p.kind === 'unreadable');
+  // 访问令牌过期但 CLI 还能续：先等它自己好，别跟「要人重新登录」说成一件事。
+  const waitingCli =
+    unreadable && problems.every((p) => p.kind !== 'unreadable' || p.code === 'auth_refreshable');
+  const quotaLine =
+    problems.length === 0
+      ? undefined
+      : !unreadable
+        ? '额度读数过期'
+        : waitingCli
+          ? '额度读不到，等 grok 下次运行自己续'
+          : '额度读不到，要人处理';
   const summary = [
     countsText(c.counts),
     c.probedAt ? `${formatAgo(c.probedAt, now)}探的` : quiet ? undefined : '探针还没看过',
-    problems.length > 0 ? (unreadable ? '额度读不到，要人处理' : '额度读数过期') : undefined,
+    quotaLine,
   ].filter((x): x is string => x !== undefined);
   return (
     <ListRow

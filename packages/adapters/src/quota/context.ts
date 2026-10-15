@@ -104,6 +104,11 @@ export interface QuotaDeps extends QuotaIo {
      * CLI 自己刷新令牌并重写登录文件。跑不起来、非 0 退出、超时都要抛错（带原因），不许吞成没事。
      */
     refreshCursorLogin?: (signal: AbortSignal) => Promise<void>;
+    /**
+     * Grok 访问令牌过期、登录文件里还有 refresh_token 时，在读数过期前让 CLI 自己续：以会话用户跑一次 `grok models`
+     * （只列模型就退出）。读取器不碰 refresh_token。跑不起来、非 0 退出、超时都要抛错（带原因），不许吞成没事。
+     */
+    refreshGrokLogin?: (signal: AbortSignal) => Promise<void>;
   };
 }
 
@@ -125,8 +130,8 @@ export interface ReaderContext extends QuotaIo {
   /** 经桥接以会话用户的身份连这个池的 Mirasim 服务（QuotaDeps.asUser.connectMirasim）；没给就读取器自己读令牌、自己开 WebSocket。 */
   connectMirasim?: () => Promise<MirasimWire>;
   /**
-   * 刷新这个池的登录（QuotaDeps.asUser.refreshCursorLogin，已绑上本次读取的 signal）；没给就是这条路没有刷新手段。
-   * 失败要抛错。读取器同一轮最多调一次（经 shared）：令牌被拒和登录文件不在共用这一次。
+   * 刷新这个池的登录（Cursor 用 refreshCursorLogin，Grok 用 refreshGrokLogin；已绑上本次读取的 signal）。
+   * 没给就是这条路没有刷新手段。失败要抛错。读取器同一轮最多调一次（经 shared）。
    */
   refreshLogin?: () => Promise<void>;
   /** 同一轮里多个池共用一次上游调用（例如两个 Claude 组织只跑一次 /usage、一次 org list）。 */
