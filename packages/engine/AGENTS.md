@@ -26,8 +26,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 ## 失败分流
 
-- 规则表在 `src/failure/rules.ts`，现在 46 条。处置只看五种 kind（resume、wait、retry、rework、stop，怎么办在 `src/failure/classify.ts` 的表里）；规则只负责认。三轮先后不改：强码、已知原文、状态码 / 退出码 / 信号 / 症状码。
-- kind、`routeOutcome`、`hold` 和重试、等待那些数都一样，只是渠道措辞或强码不同：写成这一条的 `texts`，命中仍报原来的编号。这几样有一样不同，就另写一条，不要并。
+- 规则表在 `src/failure/rules.ts`，现在 53 条。处置只看五种 kind（resume、wait、retry、rework、stop，怎么办在 `src/failure/classify.ts` 的表里）；规则只负责认。三轮先后不改：强码、已知原文、状态码 / 退出码 / 信号 / 症状码。
+- kind、`routeOutcome`、`hold`、`codes` 和重试、等待那些数都一样，只有原文正则不同：写成这一条的 `texts`，命中仍报原来的编号。这几样有一样不同，就另写一条，不要并。
 - 改认法先在 `test/failure/fixtures/failure-samples.json` 加样本，期望分类照已经定下来的写，再改规则。`npx vitest run packages/engine/test/failure/samples.test.ts`。
 
 ## 改它时要连带改
