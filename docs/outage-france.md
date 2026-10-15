@@ -39,7 +39,7 @@ curl -sS --noproxy '*' -m 5 -w '\nHTTP %{http_code}\n' http://10.99.0.2:8787/hea
 
 1. 浏览器打开 https://my.contabo.com 登录（打不开再用 https://new.contabo.com）。
 2. 左边 Servers & Hosting → VPS（法国是 VPS，不是 VDS）。旧版左边是 VPS control。
-3. 法国那一行 Quick Action 里点重启图标（旧版是 Restart 列的蓝按钮）。页面写 Running 也不可信。不要点重装系统。
+3. 先勾选法国对应的实例，点上方「Restart selected instance(s)」，在弹出的确认框里确认。页面写 Running 也不可信。不要点重装系统。
 4. 确认框核对机器名，IP 对上 ssh 配置里的 `<法国IP>` 再确认。
 5. 等大约两分钟，回到上一节把三条再跑一遍。22 通了再往下。
 
