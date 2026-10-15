@@ -872,6 +872,7 @@ function mirasimDriver(
       }
       const effort = applySessionEffort('mirasim', spec);
       const agent = mirasimAgentFor(effort.model, spec.executor);
+      // spec.cgroup 这里不用：不在本机起 fleet-agent-<runId>.scope。用量不采，原因在 segment-spawner。
       const report = await run(
         {
           runId: spec.runId,

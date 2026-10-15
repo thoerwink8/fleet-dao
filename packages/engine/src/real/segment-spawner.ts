@@ -18,6 +18,9 @@
 //   spawn_failed；不落到某个默认执行体上。
 // - 中转路由（Mirasim）的账本没读成时 judgeRun 判 relay_unknown：活可能已经交了，要对账、不能重跑会话——reason 原样带在
 //   facts 里，调用方（任务工作流）见到它停下报人，不走自动重试。
+// - Mirasim 不采本机 scope 的 CPU/内存。模型会话在 Mirasim 服务里；本机只有每次连接各起的短命桥接
+//   （fleet-agent-mirasim-<随机>.scope，不是 fleet-agent-<runId>.scope），里面只有桥接进程。那个用量不是这一段的，
+//   不写数。会话事实里写明记不到（MIRASIM_MEMORY_UNREAD / MIRASIM_CPU_UNREAD），不说成「没有 cgroup」。
 // - 总时长比 one-shot 的时限早一分钟到（驱动自己的 wallClock），驱动先收场、报 wall_clock_timeout；one-shot 的时限信号
 //   晚一点到，是兜底（驱动卡死了）。
 // - 会话的临时目录（TMPDIR）：起之前交给会话用户，收场后删；删不掉只记日志（占盘，下次引擎起来的清理会收），不改结局。
@@ -60,6 +63,16 @@ export const SEGMENT_WALL_MARGIN_MS = 60_000;
 /** 驱动自己的总时长至少给这么久，免得时限很短（测试）时算出个负数。 */
 const MIN_WALL_MS = 10_000;
 
+/**
+ * Mirasim 不采本机 scope：模型会话在 Mirasim 服务里，本机每次连接各起一个短命桥接
+ * （fleet-agent-mirasim-<随机>.scope），里面只有桥接进程，不是这一段的用量。
+ * 写进会话事实和日志。两句都带着同一句原因，免得日志还说成「这台没有 cgroup」。
+ */
+export const MIRASIM_MEMORY_UNREAD =
+  'Mirasim 路不经本机 scope，资源用量记不到：内存峰值不采（模型会话在 Mirasim 服务里，本机只有短命桥接）';
+export const MIRASIM_CPU_UNREAD =
+  'Mirasim 路不经本机 scope，资源用量记不到：CPU 秒数不采（模型会话在 Mirasim 服务里，本机只有短命桥接）';
+
 export interface SegmentSpawnerDeps {
   /** 路由编号 → 执行方式、池、会话用户、上游模型串。不给就用库里的（routeLaunchFacts）。 */
   routeFacts?: (routeId: string) => Promise<RouteLaunchFacts | null>;
@@ -78,12 +91,13 @@ export interface SegmentSpawnerDeps {
   onCarpoolRejection?: (rejection: CarpoolRejection) => void;
   /**
    * 会话 scope 的内存峰值怎么读（real/memory-peak.ts 的 productionMemoryPeak）：给了就采、写进 runs.memory_peak_mb（#948）；
-   * 不给（测试、没有 cgroup 的开发机）就不采，那一列留空。
+   * 不给（测试、没有 cgroup 的开发机）就不采，那一列留空。Mirasim 给了也不采，事实里写 MIRASIM_MEMORY_UNREAD。
    */
   memoryPeak?: MemoryPeakDeps;
   /**
    * 会话 scope 的 CPU 秒数怎么读（real/cpu-usage.ts 的 productionCpuUsage）：给了就采、收场时把 cpu.stat 的
    * usage_usec 折成秒写进 runs.cpu_seconds（#1980）。读不到留空，不写 0。不给（测试、没有 cgroup 的开发机）就不采。
+   * Mirasim 给了也不采，事实里写 MIRASIM_CPU_UNREAD。
    */
   cpuUsage?: CpuUsageDeps;
   /**
@@ -245,6 +259,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       env: { base: deps.baseEnv, fleetApi: '', fleetToken: '', pathPrepend: [], tmpDir },
       limits: { wallClockMs: Math.max(MIN_WALL_MS, cmd.timeoutMs - SEGMENT_WALL_MARGIN_MS) },
       testCommands: [],
+      // 命令行那几家用这个 id 起 fleet-agent-<runId>.scope。Mirasim 的驱动不用它，也不按它采样。
       cgroup: {
         id: runId,
         user,
@@ -284,19 +299,35 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       : undefined;
     // 接回时提示词那一条（编号 0）上一个引擎记过了：占住编号，后面重读出来的条目编号和原来一样，库里按编号跳过重复的
     recorder?.prompt(attach ? '' : cmd.stdin);
-    const peak = deps.memoryPeak ? sampleMemoryPeak(deps.memoryPeak, runId) : undefined;
+    // Mirasim 的模型会话不在 fleet-agent-<runId>.scope 里（那个目录根本不会建）。本机 scope 是桥接自己起的
+    // fleet-agent-mirasim-<随机>.scope，一次会话还不止一个，读到的也只是桥接。不拿它填用量。
+    const sampleLocalScope = driver.hostId !== 'mirasim';
+    const peak =
+      sampleLocalScope && deps.memoryPeak ? sampleMemoryPeak(deps.memoryPeak, runId) : undefined;
     let peakResult: MemoryPeakResult | undefined;
     const finishPeak = async (): Promise<MemoryPeakResult | undefined> => {
-      if (!peak || peakResult) return peakResult;
+      if (peakResult) return peakResult;
+      if (!sampleLocalScope) {
+        peakResult = { why: MIRASIM_MEMORY_UNREAD };
+        log('会话内存峰值没读到', { runId, why: peakResult.why });
+        return peakResult;
+      }
+      if (!peak) return undefined;
       peakResult = await peak.stop();
       if (peakResult.why !== undefined) log('会话内存峰值没读到', { runId, why: peakResult.why });
       return peakResult;
     };
     // CPU 秒数（#1980）：和内存峰值同一段时间采这个 scope 的 cpu.stat；收场那一读在 stop() 里。scope 一收场 cgroup 就没了。
-    const cpu = deps.cpuUsage ? sampleCpuUsage(deps.cpuUsage, runId) : undefined;
+    const cpu = sampleLocalScope && deps.cpuUsage ? sampleCpuUsage(deps.cpuUsage, runId) : undefined;
     let cpuResult: CpuUsageResult | undefined;
     const finishCpu = async (): Promise<CpuUsageResult | undefined> => {
-      if (!cpu || cpuResult) return cpuResult;
+      if (cpuResult) return cpuResult;
+      if (!sampleLocalScope) {
+        cpuResult = { why: MIRASIM_CPU_UNREAD };
+        log('会话 CPU 没读到', { runId, why: cpuResult.why });
+        return cpuResult;
+      }
+      if (!cpu) return undefined;
       cpuResult = await cpu.stop();
       if (cpuResult.why !== undefined) log('会话 CPU 没读到', { runId, why: cpuResult.why });
       return cpuResult;
