@@ -227,7 +227,8 @@ EOF
   printf '%s\n' '{"schema":1,"down":true,"downSince":"'"$FIRST"'","downSinceText":"10:38","consecutiveFailures":3,"lastCheckAt":"2026-10-15T02:40:00Z","lastError":"连不上"}' >"$STATE"
   chmod 644 -- "$STATE"
   body=$(curl -s --max-time 2 "http://127.0.0.1:$PORT/health/france-link.json" || true)
-  head=$(curl -s -D - -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/health/france-link.json" | tr -d '\r' || true)
+  # 头名不分大小写，nginx 回的是 X-Robots-Tag：整份转小写再比
+  head=$(curl -s -D - -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/health/france-link.json" | tr -d '\r' | tr '[:upper:]' '[:lower:]' || true)
   check "状态文件在：200" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$PORT/health/france-link.json" || true)" 200
   has "回应带 noindex" "$head" "x-robots-tag: noindex, nofollow"
   shown=$(
