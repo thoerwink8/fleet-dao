@@ -19,7 +19,6 @@ import {
   num,
   numbers,
   optional,
-  parseFrame,
   planFromTodos,
   progressEvent,
   rec,
@@ -28,6 +27,7 @@ import {
   searchSummary,
   str,
   TRANSCRIPT_SUMMARY_MAX,
+  takeFrame,
   testRun,
   todosSummary,
   toolSummaryText,
@@ -173,15 +173,8 @@ export class GrokStreamReader {
 
   read(raw: string): LineEffect {
     const effect: LineEffect = { events: [], transcript: [], activity: false };
-    const line = raw.trim();
-    if (!line) return effect;
-    const frame = parseFrame(line);
-    if (!frame) {
-      this.#s.nonJsonLines++;
-      this.#s.nonJsonSample ??= cut(line, 200);
-      return effect;
-    }
-    this.#s.frames++;
+    const frame = takeFrame(raw, this.#s);
+    if (!frame) return effect;
     const type = str(frame.type) ?? '(无 type)';
     if (type === 'text') {
       effect.activity = true;

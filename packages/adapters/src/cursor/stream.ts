@@ -9,6 +9,7 @@
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import type { LineEffect } from '../cli-run.ts';
 import {
+  BACKGROUND_RUN,
   cleanTestCommands,
   commandFailure,
   cut,
@@ -17,7 +18,6 @@ import {
   num,
   numbers,
   optional,
-  parseFrame,
   planFromTodos,
   progressEvent,
   rec,
@@ -26,6 +26,7 @@ import {
   searchSummary,
   str,
   TRANSCRIPT_SUMMARY_MAX,
+  takeFrame,
   testRun,
   todosSummary,
   toolSummaryText,
@@ -158,15 +159,8 @@ export class CursorStreamReader {
 
   read(raw: string): CursorLineEffect {
     const effect: CursorLineEffect = { events: [], transcript: [], activity: false };
-    const line = raw.trim();
-    if (!line) return effect;
-    const frame = parseFrame(line);
-    if (!frame) {
-      this.#s.nonJsonLines++;
-      this.#s.nonJsonSample ??= cut(line, 200);
-      return effect;
-    }
-    this.#s.frames++;
+    const frame = takeFrame(raw, this.#s);
+    if (!frame) return effect;
     const type = str(frame.type) ?? '(无 type)';
     switch (type) {
       case 'system':
@@ -296,12 +290,7 @@ export class CursorStreamReader {
     }
     const command = key === 'shellToolCall' ? str(args.command) : undefined;
     const run = command
-      ? testRun(
-          command,
-          ok,
-          this.#testCommands,
-          args.isBackground === true ? '放到后台跑，命令返回时测试还没跑完' : undefined,
-        )
+      ? testRun(command, ok, this.#testCommands, args.isBackground === true ? BACKGROUND_RUN : undefined)
       : undefined;
     if (run) {
       this.#s.testRuns.push(run);

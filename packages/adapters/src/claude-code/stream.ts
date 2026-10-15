@@ -9,12 +9,14 @@
 // - 2.1.281 给 opus-5-5 的工具表里没有步骤清单工具（haiku 有 TaskCreate 一类），步骤只能靠 fleet plan 主动报。
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import {
+  BACKGROUND_RUN,
   cleanTestCommands,
   cut,
   FAILURE_MAX,
   num,
   numbers,
   optional,
+  progressEvent,
   rec,
   relPath,
   resultText,
@@ -23,6 +25,7 @@ import {
   str,
   TOOL_SUMMARY_MAX,
   TRANSCRIPT_SUMMARY_MAX,
+  takeFrame,
   testRun,
   toolSummaryText,
   transcriptEntry,
@@ -230,21 +233,8 @@ export class ClaudeStreamReader {
 
   read(raw: string): ClaudeLineEffect {
     const effect: ClaudeLineEffect = { events: [], transcript: [], activity: false };
-    const line = raw.trim();
-    if (!line) return effect;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      parsed = undefined;
-    }
-    const frame = rec(parsed);
-    if (!frame) {
-      this.#s.nonJsonLines++;
-      this.#s.nonJsonSample ??= cut(line, 200);
-      return effect;
-    }
-    this.#s.frames++;
+    const frame = takeFrame(raw, this.#s);
+    if (!frame) return effect;
     const type = str(frame.type) ?? '(无 type)';
     switch (type) {
       case 'system':
@@ -269,7 +259,7 @@ export class ClaudeStreamReader {
   }
 
   #emit(effect: ClaudeLineEffect, kind: ProgressKind, payload: unknown): void {
-    effect.events.push({ runId: this.#runId, at: this.#now().toISOString(), kind, payload });
+    effect.events.push(progressEvent(this.#runId, this.#now(), kind, payload));
   }
 
   #tx(
@@ -459,7 +449,7 @@ export class ClaudeStreamReader {
             ok,
             this.#testCommands,
             input.run_in_background === true
-              ? '放到后台跑，命令返回时测试还没跑完'
+              ? BACKGROUND_RUN
               : rec(structured)?.interrupted === true
                 ? '命令被打断'
                 : undefined,

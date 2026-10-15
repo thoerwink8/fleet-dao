@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BACKGROUND_RUN,
   commandFailure,
+  exitStatusUntrusted,
   FAILURE_MAX,
   failureText,
   NO_OUTPUT,
@@ -8,6 +10,7 @@ import {
   searchSummary,
   TOOL_SUMMARY_MAX,
   TRANSCRIPT_SUMMARY_MAX,
+  takeFrame,
   todosSummary,
   toolSummaryText,
 } from '../src/stream-kit.ts';
@@ -65,5 +68,26 @@ describe('stream-kit 工具摘要与失败原因', () => {
 
   it('NO_OUTPUT 是「（无输出）」', () => {
     expect(NO_OUTPUT).toBe('（无输出）');
+  });
+
+  it('BACKGROUND_RUN：后台跑的测试记结果未知，命令末尾带 & 也是这个原因', () => {
+    expect(BACKGROUND_RUN).toBe('放到后台跑，命令返回时测试还没跑完');
+    expect(exitStatusUntrusted('pnpm check &')).toBe(BACKGROUND_RUN);
+  });
+});
+
+describe('stream-kit takeFrame', () => {
+  it('空行不计数；非 JSON 对象计 nonJsonLines、只留第一条样子（截到 200）；帧计 frames', () => {
+    const counts: { frames: number; nonJsonLines: number; nonJsonSample?: string } = {
+      frames: 0,
+      nonJsonLines: 0,
+    };
+    expect(takeFrame('   ', counts)).toBeUndefined();
+    expect(counts).toEqual({ frames: 0, nonJsonLines: 0 });
+    expect(takeFrame(`  ${'x'.repeat(250)}  `, counts)).toBeUndefined();
+    expect(takeFrame('[1,2]', counts)).toBeUndefined();
+    expect(counts).toEqual({ frames: 0, nonJsonLines: 2, nonJsonSample: `${'x'.repeat(200)}…` });
+    expect(takeFrame(' {"type":"x"} ', counts)).toEqual({ type: 'x' });
+    expect(counts.frames).toBe(1);
   });
 });

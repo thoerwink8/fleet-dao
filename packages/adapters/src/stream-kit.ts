@@ -60,6 +60,8 @@ export const SAY_MAX = 2000;
 export const FAILURE_MAX = 500;
 /** 工具成功但没有任何输出时给人看的正文。 */
 export const NO_OUTPUT = '（无输出）';
+/** 测试命令放到后台跑时的「结果未知」原因。 */
+export const BACKGROUND_RUN = '放到后台跑，命令返回时测试还没跑完';
 
 /** 工具输入摘要的收尾：读不到就是空串，再按 max 截。 */
 export function toolSummaryText(text: string | undefined, max = TOOL_SUMMARY_MAX): string {
@@ -103,6 +105,29 @@ export function parseFrame(line: string): Record<string, unknown> | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** 各家读取器摘要里都有的帧计数。 */
+export interface FrameCounts {
+  frames: number;
+  nonJsonLines: number;
+  nonJsonSample?: string;
+}
+
+/**
+ * 读一行、记账：空行返回 undefined 不计数；不是 JSON 对象的计一条 nonJsonLines、留第一条的样子；是帧就 frames 加一。
+ */
+export function takeFrame(raw: string, counts: FrameCounts): Record<string, unknown> | undefined {
+  const line = raw.trim();
+  if (!line) return undefined;
+  const frame = parseFrame(line);
+  if (!frame) {
+    counts.nonJsonLines++;
+    counts.nonJsonSample ??= cut(line, 200);
+    return undefined;
+  }
+  counts.frames++;
+  return frame;
 }
 
 export function progressEvent(runId: string, at: Date, kind: ProgressKind, payload: unknown): ProgressEvent {
@@ -225,7 +250,7 @@ export function exitStatusUntrusted(command: string): string | undefined {
   if (bare.includes('||')) return '带 ||，失败会被吞掉';
   if (bare.includes(';')) return '带 ;，退出码是最后一条命令的';
   if (/(^|[^|])\|(?!\|)/.test(bare) && !pipefail) return '带管道又没开 pipefail，退出码是管道最后一段的';
-  if (/(^|[^&<>])&(?![&>])/.test(bare)) return '放到后台跑，命令返回时测试还没跑完';
+  if (/(^|[^&<>])&(?![&>])/.test(bare)) return BACKGROUND_RUN;
   return undefined;
 }
 
