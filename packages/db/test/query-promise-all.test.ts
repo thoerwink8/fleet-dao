@@ -337,6 +337,15 @@ function collectBindings(code: string): Map<string, Binding[]> {
     list.push(binding);
     map.set(name, list);
   }
+  // `pending.push(q)` 往数组里塞查询，也算 pending 的值。
+  for (const m of code.matchAll(/(?:^|[^.\w$])([A-Za-z_$][\w$]*)\s*\.\s*(?:push|unshift)\s*\(/g)) {
+    const name = m[1];
+    if (!name) continue;
+    const args = readBalanced(code, (m.index ?? 0) + m[0].length - 1, '(', ')');
+    const list = map.get(name) ?? [];
+    list.push({ kind: 'value', body: args.body, awaited: /\bawait\b/.test(args.body) });
+    map.set(name, list);
+  }
   return map;
 }
 
@@ -350,7 +359,10 @@ function referencedNames(code: string): string[] {
   return names;
 }
 
-/** 参数本身，或它调用的本地函数（再进一层）会发查询，或它拿着还没 await 的查询。 */
+/**
+ * 参数本身，或它调用的本地函数（再进一层）会发查询，或它拿着还没 await 的查询。
+ * 没 await 的变量接着往里追（`const pending = [q]`、`pending.push(q)` 里的 q），await 过的是查完的行，不追。
+ */
 function wrapsQuery(file: string, arg: string): boolean {
   if (DB_MARKER.test(arg)) return true;
   const binds = collectBindings(file);
@@ -363,10 +375,7 @@ function wrapsQuery(file: string, arg: string): boolean {
     const list = binds.get(item.name);
     if (!list) continue;
     for (const binding of list) {
-      if (binding.kind === 'value') {
-        if (!binding.awaited && DB_MARKER.test(binding.body)) return true;
-        continue;
-      }
+      if (binding.kind === 'value' && binding.awaited) continue;
       if (DB_MARKER.test(binding.body)) return true;
       if (item.depth < 2) {
         for (const name of referencedNames(binding.body)) queue.push({ name, depth: item.depth + 1 });
@@ -453,6 +462,57 @@ describe('queries 里不许 Promise.all 包库查询', () => {
       '}',
     ].join('\n');
     expect(promiseAllQueryHits('sample.ts', code)).toHaveLength(1);
+  });
+
+  it('查询先放进变量数组再交给 Promise.all，要拦', () => {
+    const code = [
+      'export async function load(db: Db) {',
+      '  const q = db.select().from(t);',
+      '  const pending = [q];',
+      '  await Promise.all(pending);',
+      '}',
+    ].join('\n');
+    const hits = promiseAllQueryHits('sample.ts', code);
+    expect(hits.map((h) => h.line)).toEqual([4]);
+    expect(hits[0]?.message).toContain('allSettledOrThrow');
+  });
+
+  it('查询 push 进数组再交给 Promise.all，要拦', () => {
+    const code = [
+      'export async function load(db: Db, ids: string[]) {',
+      '  const pending: Promise<unknown>[] = [];',
+      '  for (const id of ids) pending.push(db.select().from(t).where(id));',
+      '  await Promise.all(pending);',
+      '}',
+    ].join('\n');
+    expect(promiseAllQueryHits('sample.ts', code).map((h) => h.line)).toEqual([4]);
+  });
+
+  it('数组里放的是 map 出来的查询函数调用，要拦', () => {
+    const code = [
+      'function loadOne(db: Db, id: string) {',
+      '  return db.select().from(t).where(id);',
+      '}',
+      'export async function load(db: Db, ids: string[]) {',
+      '  const pending = ids.map((id) => loadOne(db, id));',
+      '  return Promise.all(pending);',
+      '}',
+    ].join('\n');
+    expect(promiseAllQueryHits('sample.ts', code)).toHaveLength(1);
+  });
+
+  it('数组里是 await 完的行再做纯计算，不拦', () => {
+    const code = [
+      'function hash(s: string) {',
+      '  return s.length;',
+      '}',
+      'export async function go(db: Db) {',
+      '  const rows = await db.select().from(t);',
+      '  const pending = rows.map((row) => hash(row.id));',
+      '  return Promise.all(pending);',
+      '}',
+    ].join('\n');
+    expect(promiseAllQueryHits('sample.ts', code)).toEqual([]);
   });
 
   it('返回类型写成对象类型的本地查询函数也要拦', () => {
