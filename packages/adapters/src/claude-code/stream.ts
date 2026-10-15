@@ -14,6 +14,7 @@ import {
   cut,
   ERROR_MAX,
   FAILURE_MAX,
+  firstString,
   num,
   numbers,
   optional,
@@ -609,7 +610,7 @@ function toolSummary(name: string, input: Record<string, unknown>, cwd: string, 
       text = pick('description') ?? pick('subagent_type');
       break;
     default:
-      text = Object.values(input).find((v): v is string => typeof v === 'string');
+      text = firstString(input);
   }
   return toolSummaryText(text, max);
 }

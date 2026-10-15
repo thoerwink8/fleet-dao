@@ -70,6 +70,14 @@ export function toolSummaryText(text: string | undefined, max = TOOL_SUMMARY_MAX
   return cut(text ?? '', max);
 }
 
+/**
+ * 认不出的工具没有专用字段时，取对象里第一个字符串。空串也算（和 str 不同：空串是读到了）；
+ * 数字和嵌套对象跳过。三家兜底同一套，改一处即可。
+ */
+export function firstString(record: Record<string, unknown>): string | undefined {
+  return Object.values(record).find((v): v is string => typeof v === 'string');
+}
+
 /** 搜索类工具的摘要：「模式 @ 相对路径」，缺哪样省哪样。 */
 export function searchSummary(pattern: string | undefined, where: string | undefined, cwd: string): string {
   return [pattern, where ? relPath(where, cwd) : undefined].filter((x) => x).join(' @ ');

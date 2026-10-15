@@ -16,6 +16,7 @@ import {
   cut,
   ERROR_MAX,
   failureText,
+  firstString,
   NO_OUTPUT,
   num,
   numbers,
@@ -368,7 +369,7 @@ function toolSummary(tool: PendingTool, cwd: string, max?: number): string {
   else if (tool.kind === 'plan') text = todosSummary(tool.input.todos);
   else if (tool.kind === 'search') text = searchSummary(pick('pattern') ?? pick('query'), path, cwd);
   else if (path) text = relPath(path, cwd);
-  else text = Object.values(tool.input).find((v): v is string => typeof v === 'string');
+  else text = firstString(tool.input);
   return toolSummaryText(text, max);
 }
 

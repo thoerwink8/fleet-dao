@@ -5,6 +5,7 @@ import {
   exitStatusUntrusted,
   FAILURE_MAX,
   failureText,
+  firstString,
   NO_OUTPUT,
   resultText,
   searchSummary,
@@ -29,6 +30,13 @@ describe('stream-kit 工具摘要与失败原因', () => {
     expect(toolSummaryText('a'.repeat(TRANSCRIPT_SUMMARY_MAX + 1), TRANSCRIPT_SUMMARY_MAX)).toBe(
       `${'a'.repeat(TRANSCRIPT_SUMMARY_MAX)}…`,
     );
+  });
+
+  it('firstString：认不出的工具取第一个字符串，空串算读到了，数字和嵌套对象跳过', () => {
+    expect(firstString({ n: 1, empty: '', later: 'x' })).toBe('');
+    expect(firstString({ n: 1, nested: { a: 'x' }, text: 'y' })).toBe('y');
+    expect(firstString({ n: 1 })).toBeUndefined();
+    expect(firstString({})).toBeUndefined();
   });
 
   it('searchSummary：模式 @ 相对路径，缺哪样省哪样', () => {

@@ -14,6 +14,7 @@ import {
   commandFailure,
   cut,
   failureText,
+  firstString,
   NO_OUTPUT,
   num,
   numbers,
@@ -357,7 +358,7 @@ function toolSummary(key: string, args: Record<string, unknown>, cwd: string, ma
         pick('query') ??
         pick('url') ??
         pick('toolName') ??
-        Object.values(args).find((v): v is string => typeof v === 'string');
+        firstString(args);
   }
   return toolSummaryText(text, max);
 }
