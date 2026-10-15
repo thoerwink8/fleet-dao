@@ -7,9 +7,18 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyFailure,
   type FailureEvidence,
+  type FailureRule,
   type FailureVerdict,
   RULES,
 } from '../../src/failure/index.ts';
+
+/** 规则自己的编号，加上并进来、命中时仍报的编号。 */
+function recognitionIds(rules: readonly FailureRule[]): string[] {
+  return rules.flatMap((rule) => [
+    rule.id,
+    ...(rule.texts?.flatMap((item) => (item.reportAs ? [item.reportAs] : [])) ?? []),
+  ]);
+}
 
 interface Sample {
   id: string;
@@ -76,7 +85,7 @@ describe('规则表和夹具对得上', () => {
   it('每条规则至少有一条样本；只有合成样本撑着的规则点名在这里', () => {
     const byRule = new Map<string, Sample[]>();
     for (const s of FIXTURE.samples) byRule.set(s.expect.rule, [...(byRule.get(s.expect.rule) ?? []), s]);
-    const ruleIds = RULES.map((r) => r.id);
+    const ruleIds = recognitionIds(RULES);
     expect(ruleIds.filter((id) => !byRule.has(id))).toEqual([]);
     expect(ruleIds.filter((id) => byRule.get(id)?.every((s) => s.provenance === 'synthetic'))).toEqual([]);
     // 夹具里期望的规则都真实存在（FB = 认不出走兜底梯）。
@@ -85,8 +94,9 @@ describe('规则表和夹具对得上', () => {
   });
 
   it('规则编号不重复，每条规则都归在五种打断原因之一', () => {
-    const ids = RULES.map((r) => r.id);
+    const ids = recognitionIds(RULES);
     expect(new Set(ids).size).toBe(ids.length);
+    expect(RULES).toHaveLength(46);
     const kinds = ['resume', 'wait', 'retry', 'rework', 'stop'];
     expect(RULES.filter((r) => !kinds.includes(r.kind)).map((r) => r.id)).toEqual([]);
     // 五种都有规则撑着：少了一种就是处置表里有一行从没被用过

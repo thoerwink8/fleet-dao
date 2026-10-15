@@ -110,8 +110,8 @@ export function classifyFailure(
   if (hit) {
     plan = {
       kind: hit.rule.kind,
-      rule: hit.rule.id,
-      title: hit.rule.title,
+      rule: hit.id,
+      title: hit.title,
       via: hit.via,
       hit: excerpt(hit.hit),
       maxRetries: hit.rule.maxRetries ?? Number.POSITIVE_INFINITY,
@@ -121,8 +121,8 @@ export function classifyFailure(
       hold: hit.rule.hold === true,
       routeOutcome: hit.rule.routeOutcome,
       unknown: false,
-      hint: hit.rule.hint,
-      humanFix: hit.rule.humanFix,
+      hint: hit.hint,
+      humanFix: hit.humanFix,
       resumeAfterPark: hit.rule.resumeAfterPark,
       notes: [],
     };

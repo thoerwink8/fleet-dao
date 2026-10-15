@@ -1,8 +1,9 @@
 // 规则表：认出来的失败 → 属于哪一种打断原因（kind），每一种怎么办写在 classify.ts 的 POLICY 表里（#1072 瘦身：一条一条各写一套
-// 梯子、避开范围、记账方式删了，处置只看 kind；这里只管「认」）。每条规则至少有一条样本夹具
+// 梯子、避开范围、记账方式删了，处置只看 kind；这里只管「认」）。现在 46 条：kind、routeOutcome、hold 和重试/等待
+// 那些数都一样、只是渠道措辞或强码不同的，收成一条里的多条 texts（命中仍报原来的编号）。每条认法至少有一条样本夹具
 // （test/failure/fixtures/failure-samples.json），夹具说明出处；只有合成样本的规则在夹具测试里点名列出。
 //
-// 认的顺序是三轮，每轮内按表里的先后：
+// 认的顺序是三轮，每轮内按表里的先后（一条里的多条 texts 也按写的先后，不打乱）：
 //   1. 强码：原因码（account_banned、quota_exhausted、TIMEOUT_HEARTBEAT……），含原文里嵌着的 JSON 码——命中即终判；
 //      标了 codeFieldOnly 的规则只认证据的 code 字段，原文里捞出来的不算；
 //   2. 已知原文：上游错误原文（和少数写明读过程记录的规则）；
@@ -23,6 +24,30 @@ import type { Scan } from './scan.ts';
  */
 export type Kind = 'resume' | 'wait' | 'retry' | 'rework' | 'stop';
 
+/** 同一条处置里的一种认法。命中后编号和白话名用这里的，处置仍用外面那条规则。 */
+export interface RuleText {
+  /** 命中时判定报的编号。不写就用规则自己的 id。 */
+  reportAs?: string;
+  /** 命中时的白话名。不写就用规则自己的 title。 */
+  title?: string;
+  /** 强码（第 1 轮）。小写。 */
+  codes?: readonly string[];
+  /** 已知原文（第 2 轮）。不带 g 标志。 */
+  text?: RegExp;
+  /** 过程记录里的已知句子（第 2 轮）。 */
+  transcript?: RegExp;
+  /** 第 3 轮。 */
+  statuses?: readonly number[];
+  exitCodes?: readonly number[];
+  signals?: readonly string[];
+  /** 症状或结局码（第 3 轮）。小写。 */
+  weakCodes?: readonly string[];
+  /** 原路再试时怎么试（接在原因后面）。 */
+  hint?: string;
+  /** 写给人看的一句修法。 */
+  humanFix?: string;
+}
+
 export interface FailureRule {
   id: string;
   /** 白话名，进原因和驾驶舱。 */
@@ -35,8 +60,13 @@ export interface FailureRule {
    * 源码片段里（fleet-dao 自己的测试就满是），原文里有它不说明这一步是这么失败的。
    */
   codeFieldOnly?: true;
-  /** 已知原文（第 2 轮）。不带 g 标志。 */
+  /** 已知原文（第 2 轮）。不带 g 标志。一条认法时用这个；同一条处置有多种认法时用 texts，不要两个一起写。 */
   text?: RegExp;
+  /**
+   * 同一条处置下的多种认法（渠道措辞、强码）。三轮仍按写在这里的先后认，命中后判定报 reportAs（不写就用规则 id）
+   * 和这里的白话名。不带 g 标志。
+   */
+  texts?: readonly RuleText[];
   /** 过程记录里的已知句子（第 2 轮）；只收很具体的句子，助手正文里常有错误字样。 */
   transcript?: RegExp;
   /** 第 3 轮。 */
@@ -107,18 +137,22 @@ export const RULES: readonly FailureRule[] = [
     id: 'ST2',
     title: '起会话没查成，可能已经在跑',
     kind: 'stop',
-    codes: ['launch_unknown'],
-    codeFieldOnly: true,
-    text: /^起会话没查成：没收到 prompt 的应答帧/,
-    routeOutcome: 'neutral',
-  },
-  {
-    id: 'DL3',
-    title: '中转有没有真干活没查成',
-    kind: 'stop',
-    codes: ['relay_unknown'],
     codeFieldOnly: true,
     routeOutcome: 'neutral',
+    // 两条都是「没查成」：只挂起、不记路由失败。强码各认各的，原文只 ST2 有。
+    texts: [
+      {
+        title: '起会话没查成，可能已经在跑',
+        codes: ['launch_unknown'],
+        text: /^起会话没查成：没收到 prompt 的应答帧/,
+      },
+      // DL3 并入 ST2。
+      {
+        reportAs: 'DL3',
+        title: '中转有没有真干活没查成',
+        codes: ['relay_unknown'],
+      },
+    ],
   },
   // 我们自己停的不算失败，也不进路由的失败率（旧系统 236 条 interrupted 里 231 条是自己停的）。
   {
@@ -137,35 +171,31 @@ export const RULES: readonly FailureRule[] = [
     id: 'OS1',
     title: '切号：先停下，切过去接着干',
     kind: 'resume',
-    codes: ['org_switch'],
     codeFieldOnly: true,
     retryBaseSeconds: 0,
     routeOutcome: 'neutral',
-    hint: '切完在原分支上接着干（一次性会话重跑这一段，Fusion 的会话换了池 fork 续上）',
-  },
-  // 发布前排空（drain.ts）：引擎要发新版本、在停，这次没起会话。是我们自己要停的：不算失败、不记账，马上回去选路——
-  // 选路在排空时回「过一会儿再选」，新引擎起来、或者发布没成撤了请求，就接着派。码只认端口交来的结构化码。
-  {
-    id: 'ES1',
-    title: '引擎在为发布排空，这次没起会话',
-    kind: 'resume',
-    codes: ['engine_stopping'],
-    codeFieldOnly: true,
-    retryBaseSeconds: 0,
-    routeOutcome: 'neutral',
-    hint: '新引擎起来接着派',
-  },
-  // 发布前排空到了宽限的截止（drain.ts，RELEASE_GRACE_MS），还在跑的会话按切号那一套停下；或者引擎收到停机信号的那一刻会话被信号杀掉
-  // （kill-evidence.ts 对上了时刻）。是我们自己要停的：不算失败、不进路由失败率、不记账，新引擎起来按编号续同一个会话。
-  {
-    id: 'KL3',
-    title: '要发新版本，先停下、新引擎起来接着干',
-    kind: 'resume',
-    codes: ['engine_stop'],
-    codeFieldOnly: true,
-    retryBaseSeconds: 0,
-    routeOutcome: 'neutral',
-    hint: '新引擎起来按编号续同一个会话',
+    // 三件都是我们自己要停的：不算失败、不记账，马上接着干。码只认插头、端口交来的结构化码。ES1、KL3 并入 OS1。
+    texts: [
+      {
+        title: '切号：先停下，切过去接着干',
+        codes: ['org_switch'],
+        hint: '切完在原分支上接着干（一次性会话重跑这一段，Fusion 的会话换了池 fork 续上）',
+      },
+      // 发布前排空（drain.ts）：引擎要发新版本、在停，这次没起会话。选路在排空时回「过一会儿再选」。
+      {
+        reportAs: 'ES1',
+        title: '引擎在为发布排空，这次没起会话',
+        codes: ['engine_stopping'],
+        hint: '新引擎起来接着派',
+      },
+      // 排空到了宽限的截止，还在跑的会话按切号那一套停下；或者停机信号那一刻会话被信号杀掉（时刻对得上）。
+      {
+        reportAs: 'KL3',
+        title: '要发新版本，先停下、新引擎起来接着干',
+        codes: ['engine_stop'],
+        hint: '新引擎起来按编号续同一个会话',
+      },
+    ],
   },
   // 看门狗在会话还在跑、健康检查超时（服务单线程能堵几十秒）时重启了 fleet-mirasim-session：令牌文件被换掉，
   // 会话被杀（claude exited 143）。引擎去列 .mirasim/run 没有令牌，原文落成「没有终帧：读状态的连接建不起来：
@@ -299,46 +329,34 @@ export const RULES: readonly FailureRule[] = [
     title: 'Cursor 登录失效',
     kind: 'stop',
     hold: true,
-    text: /run '(?:cursor-)?agent login'|Authentication required to use Cursor Agent|Backend rejected authentication|provided API key is invalid|API key are invalid or expired|Your authentication is invalid/i,
     routeOutcome: 'neutral',
-    humanFix:
-      '去 Cursor 后台（cursor.com/dashboard/api）重新生成一把 API 密钥，照 docs/ops.md 第五节「会话用户的 Cursor 密钥」那条命令放进{machine}（{user}家里的 ~/.cursor/fleet-api-key），旧的那把在后台撤掉；然后在驾驶舱点「继续」',
     resumeAfterPark: true,
-  },
-  // 引擎起 Cursor 会话、探针之前，会话用户家里的 API 密钥文件没放好（不在、空的、不是它的、权限不是 600、是符号链接、
-  // 里面不只一行密钥）：起 cursor-agent 的那段 sh 不往下起，报「Cursor 密钥没放好：<哪里不对>。文件是 <路径>，…」、
-  // 退出 78（real/hosts.ts 的 CURSOR_KEY_SCRIPT）。认的时候连「哪里不对」一起摘（到句号为止），进「要人拍」的提醒。
-  // 这台机器上 Cursor 的池全都起不来，重试、换这个池的路由都没用：整池暂停，照原因放好再继续；是机器没配好，不算路由的账。
-  {
-    id: 'AU6',
-    title: 'Cursor 密钥没放好',
-    kind: 'stop',
-    hold: true,
-    text: /Cursor 密钥没放好：[^。⏎\n]*/,
-    routeOutcome: 'neutral',
-    humanFix:
-      '照原因把{machine}上{user}的 Cursor 密钥放好（docs/ops.md 第五节「会话用户的 Cursor 密钥」：~/.cursor/fleet-api-key 属它自己、600、只有一行密钥、不带换行，重放用那一节的命令）；然后在驾驶舱点「继续」',
-    resumeAfterPark: true,
-  },
-  // grok（SuperGrok 订阅的 Grok Build 命令行，#266）没登录或登录续不上：无头模式一样凭据都没有是「Not signed in. To authenticate
-  // without a browser, run: grok login --device-code …」（error 帧和 stderr 各一遍、退出 1，法国实跑；源码
-  // crates/codegen/xai-grok-pager/src/headless.rs 的 auth_required_message）；登录过期、续不上是「Token expired. Run `grok login`
-  // to re-authenticate.」「Authentication rejected by server. Run `grok login` …」「Your session has expired. Run `grok login` to
-  // sign in again.」「Authentication could not be refreshed. Run `grok login` …」「Auth recovery exhausted; re-authentication
-  // required.」「Not logged in. Run `grok login`.」（xai-org/grok-build f0e3be1 的 crates/codegen/xai-grok-login/src/error.rs）。
-  // 修法是确定的：在那台机器上以会话用户跑 grok login --device-code、在任意设备的浏览器里确认。排在 AU2 前面：AU2 的
-  // 「token expired」「not logged in」也认得几句，但它没写修法。续期时一时连不上是「auth refresh failed: …」，不带 grok login，
-  // 不在这里认（不是要人重登）。没真管道时读 /dev/stdin 报的「No such device or address (os error 6)」不是没登录（起法坏了，归 CF1）。
-  {
-    id: 'AU7',
-    title: 'Grok 登录失效',
-    kind: 'stop',
-    hold: true,
-    text: /Not signed in\. |Run `grok login`|grok login --device-code|Auth recovery exhausted/i,
-    routeOutcome: 'neutral',
-    humanFix:
-      '在{machine}上以{user}跑 grok login --device-code（docs/ops.md 第五节「会话用户的 grok」），在任意设备的浏览器里打开它给的链接、确认那串码；然后在驾驶舱点「继续」',
-    resumeAfterPark: true,
+    // 三家登录都是整池暂停、人修好点「继续」续同一个会话。AU2 的原文也罩得住几句，但没写修法，所以排在 AU2 前面。
+    // AU6、AU7 并入 AU5。
+    texts: [
+      {
+        title: 'Cursor 登录失效',
+        text: /run '(?:cursor-)?agent login'|Authentication required to use Cursor Agent|Backend rejected authentication|provided API key is invalid|API key are invalid or expired|Your authentication is invalid/i,
+        humanFix:
+          '去 Cursor 后台（cursor.com/dashboard/api）重新生成一把 API 密钥，照 docs/ops.md 第五节「会话用户的 Cursor 密钥」那条命令放进{machine}（{user}家里的 ~/.cursor/fleet-api-key），旧的那把在后台撤掉；然后在驾驶舱点「继续」',
+      },
+      // 密钥文件没放好（不在、空的、不是它的、权限不是 600、是符号链接、里面不只一行）：退出 78。连「哪里不对」一起摘到句号。
+      {
+        reportAs: 'AU6',
+        title: 'Cursor 密钥没放好',
+        text: /Cursor 密钥没放好：[^。⏎\n]*/,
+        humanFix:
+          '照原因把{machine}上{user}的 Cursor 密钥放好（docs/ops.md 第五节「会话用户的 Cursor 密钥」：~/.cursor/fleet-api-key 属它自己、600、只有一行密钥、不带换行，重放用那一节的命令）；然后在驾驶舱点「继续」',
+      },
+      // grok 没登录或登录续不上。续期一时连不上（auth refresh failed，不带 grok login）不在这里认。
+      {
+        reportAs: 'AU7',
+        title: 'Grok 登录失效',
+        text: /Not signed in\. |Run `grok login`|grok login --device-code|Auth recovery exhausted/i,
+        humanFix:
+          '在{machine}上以{user}跑 grok login --device-code（docs/ops.md 第五节「会话用户的 grok」），在任意设备的浏览器里打开它给的链接、确认那串码；然后在驾驶舱点「继续」',
+      },
+    ],
   },
   // 登录失效要人重新登录（设备被撤销单独归 DV1，Cursor 的归 AU5、AU6，Grok 的归 AU7）。
   {
@@ -379,29 +397,27 @@ export const RULES: readonly FailureRule[] = [
     id: 'MD2',
     title: '上游让换个模型',
     kind: 'stop',
-    text: /try a different model/i,
     routeOutcome: 'fail',
-  },
-  // 模型不存在或已下架：停下报警，好把对应路由下线（旧系统巡检判了下架的路线还在派，windsurf-dao#1840）。
-  // 常常只是这一条路由的目录里没有它，别的路由上的同一个模型照样能用，所以不整池暂停；
-  // 这条路由的失败记进熔断，由熔断去下线它。
-  // grok 点名的型号它不认：「Couldn't set model '<名字>': Invalid params: "unknown model id". Run 'grok models' to see available
-  // models.」（error 帧和 stderr 各一遍、退出 1，法国实跑，grok 1.0.41）。
-  {
-    id: 'MD1',
-    title: '模型不存在或已下架',
-    kind: 'stop',
-    codes: ['model_not_found', 'model_unavailable', 'model_retired', 'unrecognized_model'],
-    text: /issue with the selected model|may not exist or you may not have access|absent from the ACP model catalog|model catalog has no match|cannot use this model|model[_ ]not[_ ]found|unknown model id|Couldn't set model '/i,
-    routeOutcome: 'fail',
-  },
-  // 点名的模型和实际回话的不一样：是这条路由的别名配错了（静默的）：停下报警，由人改这条路由。
-  {
-    id: 'MD3',
-    title: '回话的模型不是点名的那个',
-    kind: 'stop',
-    codes: ['model_mismatch'],
-    routeOutcome: 'fail',
+    // 模型这条路由用不了：停下报警，不整池暂停，失败记进熔断。MD1、MD3 并入 MD2。换模型的原文排在「模型不存在」前面。
+    texts: [
+      {
+        title: '上游让换个模型',
+        text: /try a different model/i,
+      },
+      // 不存在或已下架（含 grok「unknown model id」）。常常只是这一条路由的目录里没有它。
+      {
+        reportAs: 'MD1',
+        title: '模型不存在或已下架',
+        codes: ['model_not_found', 'model_unavailable', 'model_retired', 'unrecognized_model'],
+        text: /issue with the selected model|may not exist or you may not have access|absent from the ACP model catalog|model catalog has no match|cannot use this model|model[_ ]not[_ ]found|unknown model id|Couldn't set model '/i,
+      },
+      // 点名的模型和实际回话的不一样：别名配错了（静默的）。
+      {
+        reportAs: 'MD3',
+        title: '回话的模型不是点名的那个',
+        codes: ['model_mismatch'],
+      },
+    ],
   },
   // 这条路由在这台机上起不来：版本太旧、工作区信任、参数错、模型名重名、二进制不在……重试不会变，所有任务都会撞。
   // 工作区信任：cursor-agent -p 在没信任过的目录里、没带 --trust / --force 时，stderr 打一段「⚠ Workspace Trust Required」
@@ -674,32 +690,33 @@ export const RULES: readonly FailureRule[] = [
     id: 'BZ1',
     title: '路由繁忙',
     kind: 'wait',
-    codes: [
-      'overloaded',
-      'overloaded_error',
-      'route_refused',
-      'route_busy',
-      'capacity',
-      'cloud_unavailable',
-      'server_overloaded',
+    defaultWaitSeconds: 60,
+    blip: true,
+    routeOutcome: 'fail',
+    // 繁忙和没写处方的限流都是等上游一会儿（设计第十二节「限流、繁忙」同一行）。RL3 并入 BZ1。按分钟的归 RL1，不在这里。
+    texts: [
+      {
+        title: '路由繁忙',
+        codes: [
+          'overloaded',
+          'overloaded_error',
+          'route_refused',
+          'route_busy',
+          'capacity',
+          'cloud_unavailable',
+          'server_overloaded',
+        ],
+        text: /overloaded|容量已满|at capacity|high demand|繁忙|满载/i,
+        statuses: [529],
+      },
+      {
+        reportAs: 'RL3',
+        title: '限流',
+        codes: ['rate_limited', 'rate_limit_error', 'rate_limit_exceeded', 'too_many_requests'],
+        text: /rate[ _-]?limit|too many requests|temporarily limiting requests|限流/i,
+        statuses: [429],
+      },
     ],
-    text: /overloaded|容量已满|at capacity|high demand|繁忙|满载/i,
-    statuses: [529],
-    defaultWaitSeconds: 60,
-    blip: true,
-    routeOutcome: 'fail',
-  },
-  // 没写处方的限流：上游给了时间就等那么久，没给按默认起翻倍，次数用完停下报警。
-  {
-    id: 'RL3',
-    title: '限流',
-    kind: 'wait',
-    codes: ['rate_limited', 'rate_limit_error', 'rate_limit_exceeded', 'too_many_requests'],
-    text: /rate[ _-]?limit|too many requests|temporarily limiting requests|限流/i,
-    statuses: [429],
-    defaultWaitSeconds: 60,
-    blip: true,
-    routeOutcome: 'fail',
   },
   // 长流半路被掐：续跑同一个会话；不进路由失败率的分母（旧系统据此把一条当天真干出活的路线判死，#1386）。
   {
@@ -718,34 +735,37 @@ export const RULES: readonly FailureRule[] = [
     id: 'UP1',
     title: '上游出错',
     kind: 'retry',
-    codes: ['internal_server_error', 'service_unavailable', 'bad_gateway', 'gateway_timeout'],
-    text: /internal error|internal server error|server error|bad gateway|service unavailable|gateway timeout/i,
-    statuses: [500, 502, 503, 504],
-    weakCodes: ['transient'],
     blip: true,
     routeOutcome: 'fail',
-  },
-  {
-    id: 'NT1',
-    title: '网络不通',
-    kind: 'retry',
-    codes: [
-      'econnreset',
-      'econnrefused',
-      'econnaborted',
-      'etimedout',
-      'epipe',
-      'eai_again',
-      'enotfound',
-      'ehostunreach',
-      'enetunreach',
-      'transport_closed',
-      'cloud_unreachable',
-      'network',
+    // 上游 5xx 和网络不通都是临时的，验收撞上就等。NT1 并入 UP1。不因为 403 停账号池（403 内部错误仍是上游的事）。
+    texts: [
+      {
+        title: '上游出错',
+        codes: ['internal_server_error', 'service_unavailable', 'bad_gateway', 'gateway_timeout'],
+        text: /internal error|internal server error|server error|bad gateway|service unavailable|gateway timeout/i,
+        statuses: [500, 502, 503, 504],
+        weakCodes: ['transient'],
+      },
+      {
+        reportAs: 'NT1',
+        title: '网络不通',
+        codes: [
+          'econnreset',
+          'econnrefused',
+          'econnaborted',
+          'etimedout',
+          'epipe',
+          'eai_again',
+          'enotfound',
+          'ehostunreach',
+          'enetunreach',
+          'transport_closed',
+          'cloud_unreachable',
+          'network',
+        ],
+        text: /\bE(?:CONNRESET|CONNREFUSED|CONNABORTED|TIMEDOUT|PIPE|AI_AGAIN|NOTFOUND|HOSTUNREACH|NETUNREACH)\b|socket hang up|fetch failed|connection (?:error|reset|refused|closed)|network error|tcp connect error|deadline has elapsed|error sending request|Reconnecting\.\.\.|waiting for network|Failed to reach|连不上|域名解析|建立连接失败|连接被重置/i,
+      },
     ],
-    text: /\bE(?:CONNRESET|CONNREFUSED|CONNABORTED|TIMEDOUT|PIPE|AI_AGAIN|NOTFOUND|HOSTUNREACH|NETUNREACH)\b|socket hang up|fetch failed|connection (?:error|reset|refused|closed)|network error|tcp connect error|deadline has elapsed|error sending request|Reconnecting\.\.\.|waiting for network|Failed to reach|连不上|域名解析|建立连接失败|连接被重置/i,
-    blip: true,
-    routeOutcome: 'fail',
   },
   {
     id: 'NT2',
@@ -779,36 +799,112 @@ export interface RuleHit {
   via: 'signal' | 'text' | 'generic';
   /** 命中的那一小段（码、原文片段、状态码）。 */
   hit: string;
+  /** 报出去的规则编号（texts 里写了 reportAs 就用它）。 */
+  id: string;
+  /** 报出去的白话名。 */
+  title: string;
+  hint?: string | undefined;
+  humanFix?: string | undefined;
+}
+
+interface Recognizer {
+  id: string;
+  title: string;
+  codes?: readonly string[] | undefined;
+  text?: RegExp | undefined;
+  transcript?: RegExp | undefined;
+  statuses?: readonly number[] | undefined;
+  exitCodes?: readonly number[] | undefined;
+  signals?: readonly string[] | undefined;
+  weakCodes?: readonly string[] | undefined;
+  hint?: string | undefined;
+  humanFix?: string | undefined;
+}
+
+/** 一条规则的认法，按写的先后。没写 texts 时就是规则自己那一套。 */
+function recognizers(rule: FailureRule): readonly Recognizer[] {
+  if (rule.texts && rule.texts.length > 0) {
+    return rule.texts.map((item) => ({
+      id: item.reportAs ?? rule.id,
+      title: item.title ?? rule.title,
+      codes: item.codes,
+      text: item.text,
+      transcript: item.transcript,
+      statuses: item.statuses,
+      exitCodes: item.exitCodes,
+      signals: item.signals,
+      weakCodes: item.weakCodes,
+      hint: item.hint,
+      humanFix: item.humanFix,
+    }));
+  }
+  return [
+    {
+      id: rule.id,
+      title: rule.title,
+      codes: rule.codes,
+      text: rule.text,
+      transcript: rule.transcript,
+      statuses: rule.statuses,
+      exitCodes: rule.exitCodes,
+      signals: rule.signals,
+      weakCodes: rule.weakCodes,
+      hint: rule.hint,
+      humanFix: rule.humanFix,
+    },
+  ];
+}
+
+function hitOf(rule: FailureRule, rec: Recognizer, via: RuleHit['via'], hit: string): RuleHit {
+  return {
+    rule,
+    via,
+    hit,
+    id: rec.id,
+    title: rec.title,
+    ...(rec.hint !== undefined ? { hint: rec.hint } : {}),
+    ...(rec.humanFix !== undefined ? { humanFix: rec.humanFix } : {}),
+  };
 }
 
 /** 三轮认：强码 → 已知原文 → 状态码 / 退出码 / 信号 / 症状码。认不出返回 undefined。 */
 export function matchRule(scan: Scan, all: readonly FailureRule[] = RULES): RuleHit | undefined {
   const rules = scan.session ? all.filter((r) => !r.stepsOnly) : all;
   for (const rule of rules) {
-    const code = rule.codes?.find((c) => (rule.codeFieldOnly ? scan.code === c : scan.codes.has(c)));
-    if (code) return { rule, via: 'signal', hit: code };
+    for (const rec of recognizers(rule)) {
+      const code = rec.codes?.find((c) => (rule.codeFieldOnly ? scan.code === c : scan.codes.has(c)));
+      if (code) return hitOf(rule, rec, 'signal', code);
+    }
   }
   for (const rule of rules) {
-    const text = rule.text?.exec(scan.text)?.[0] ?? rule.transcript?.exec(scan.tail)?.[0];
-    if (text) return { rule, via: 'text', hit: text };
+    for (const rec of recognizers(rule)) {
+      const text = rec.text?.exec(scan.text)?.[0] ?? rec.transcript?.exec(scan.tail)?.[0];
+      if (text) return hitOf(rule, rec, 'text', text);
+    }
   }
   for (const rule of rules) {
-    if (scan.status !== undefined && rule.statuses?.includes(scan.status)) {
-      return { rule, via: 'generic', hit: `HTTP ${scan.status}` };
+    for (const rec of recognizers(rule)) {
+      if (scan.status !== undefined && rec.statuses?.includes(scan.status)) {
+        return hitOf(rule, rec, 'generic', `HTTP ${scan.status}`);
+      }
+      if (scan.exitCode !== undefined && rec.exitCodes?.includes(scan.exitCode)) {
+        return hitOf(rule, rec, 'generic', `退出码 ${scan.exitCode}`);
+      }
+      if (scan.signal && rec.signals?.includes(scan.signal)) {
+        return hitOf(rule, rec, 'generic', `信号 ${scan.signal}`);
+      }
+      const weak = rec.weakCodes?.find((c) => scan.codes.has(c));
+      if (weak) return hitOf(rule, rec, 'generic', weak);
     }
-    if (scan.exitCode !== undefined && rule.exitCodes?.includes(scan.exitCode)) {
-      return { rule, via: 'generic', hit: `退出码 ${scan.exitCode}` };
-    }
-    if (scan.signal && rule.signals?.includes(scan.signal)) {
-      return { rule, via: 'generic', hit: `信号 ${scan.signal}` };
-    }
-    const weak = rule.weakCodes?.find((c) => scan.codes.has(c));
-    if (weak) return { rule, via: 'generic', hit: weak };
   }
   return undefined;
 }
 
 /** 这条规则是不是上游临时故障（验收撞上就等一会儿再验）。认不出、没这条规则，都不是。 */
 export function isUpstreamBlip(ruleId: string): boolean {
-  return RULES.some((rule) => rule.id === ruleId && rule.blip === true);
+  return RULES.some(
+    (rule) =>
+      rule.blip === true &&
+      (rule.id === ruleId || rule.texts?.some((item) => item.reportAs === ruleId) === true),
+  );
 }
