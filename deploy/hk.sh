@@ -3,7 +3,8 @@
 # 香港机器装机（以 root 跑；幂等：跑第二遍什么都不变）。装的是：系统用户 fleet 与 /etc/fleet-dao、
 # 防火墙基线（ufw 已经开着才收口：默认拒绝入站，只放白名单）、WireGuard 服务端、nginx 上 fleet-dao 这一个站点（驾驶舱静态文件 + Let's Encrypt 证书与自动续期；/api、/auth、
 # /github/webhook、/healthz 经隧道转法国）、法国发布脚本用的一把钥匙（只许经隧道来，只能往 /srv/fleet-dao-web
-# 写静态文件）。别家的站点和服务一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
+# 写静态文件）、备份仓库的第二份（root 每天复制、留 14 天）和最新快照超没超 26 小时。别家的站点和服务一概不动。
+# 端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/hk.sh           装：缺的补上，已有的不动
 #   bash deploy/hk.sh --check   只读回和自检，不改任何东西
 set -Eeuo pipefail
@@ -66,6 +67,11 @@ RETIRED_KEEP=(/srv/fleet-dao-gateway /usr/local/sbin/fleet-gateway-deploy) # 删
 RETIRED_DROP=(/etc/fleet-dao/feishu.env '/etc/fleet-dao/feishu.env.bak-*' /etc/fleet-dao/gateway-token.env
   /opt/fleet-dao/node '/opt/fleet-dao/node-v*')
 RETIRED_BACKUP_DIR=/var/backups/fleet-dao
+# 备份的第二份和「最新快照超没超 26 小时」。仓库仍由 deploy/backup/install.sh 交给 fleet-backup；这里只让 root 再留一份，并自己写状态。
+# 状态文件的格式在 deploy/backup/hk-status.sh。ensure_dir 用字面路径：目录表从这一行读，不认变量。
+HK_BACKUP_LIB=/usr/local/lib/fleet-dao/backup
+HK_BACKUP_MIRROR_UNITS=(fleet-backup-copy.service fleet-backup-copy.timer fleet-backup-freshness.service fleet-backup-freshness.timer)
+HK_BACKUP_MIRROR_TIMERS=(fleet-backup-copy.timer fleet-backup-freshness.timer)
 # 别家 self-proxy 的程序目录（#2235）：它的 self-proxy-userinfo.timer 每 15 分钟以 root 跑里面的 hk/userinfo.sh，
 # 可它每次部署都是从创始人的 Mac 上 tar 解包，属主是 Mac 的 uid 501 / 组 staff。香港没有这个 uid，眼下没人改得了，
 # 但谁拿到 uid 501 或 staff 组就能让 root 执行任意代码。装机把整棵树收成 root:root、组和其他人不可写（只动属主和写权限，
@@ -547,9 +553,102 @@ readback_fail2ban() {
   fi
 }
 
+setup_backup_mirror() {
+  step "备份第二份（root 每天复制、留 14 天）和最新快照检查"
+  local u t reload=0
+  ensure_pkgs rsync
+  ensure_dir /var/backups/fleet-dao/restic-copies root:root 700
+  ensure_dir /var/lib/fleet-hk root:root 755
+  ensure_dir /usr/local/lib/fleet-dao/backup root:root 755
+  put_file "$HK_BACKUP_LIB/hk-status.sh" root:root 644 "$(<"$DEPLOY_DIR/backup/hk-status.sh")"
+  put_file "$HK_BACKUP_LIB/hk-repo-copy.sh" root:root 755 "$(<"$DEPLOY_DIR/backup/hk-repo-copy.sh")"
+  put_file "$HK_BACKUP_LIB/hk-snapshot-freshness.sh" root:root 755 "$(<"$DEPLOY_DIR/backup/hk-snapshot-freshness.sh")"
+  for u in "${HK_BACKUP_MIRROR_UNITS[@]}"; do
+    put_file "/etc/systemd/system/$u" root:root 644 "$(<"$DEPLOY_DIR/hk/$u")"
+    reload=$((reload || WROTE))
+  done
+  if ((reload)); then systemctl daemon-reload; fi
+  for t in "${HK_BACKUP_MIRROR_TIMERS[@]}"; do
+    if [[ "$(systemctl is-enabled "$t" 2>/dev/null)" != enabled ]]; then
+      systemctl enable --quiet "$t"
+      changed "启用 $t"
+    fi
+    # 单元文件变了要重新排班；定时器没在等也要拉起来。oneshot 服务本身不在这里起：装机不该当场复制一整份仓库
+    if ((reload)) || [[ "$(systemctl is-active "$t" 2>/dev/null)" != active ]]; then
+      if ! systemctl restart "$t"; then
+        red "$t 起不来：journalctl -u $t -n 30 看现场"
+        return 1
+      fi
+      changed "启动 $t"
+    fi
+  done
+}
+
+readback_owned_dir() { # 路径 属主:组 权限。只红，不 return 1（读回不能把装机停在半截）
+  local path=$1 own=$2 mode=$3 have
+  if [[ -L "$path" || ! -d "$path" ]]; then
+    red "$path 不是目录"
+    return 0
+  fi
+  have=$(stat -c '%U:%G %a' -- "$path" 2>/dev/null || true)
+  if [[ "$have" != "$own $mode" ]]; then
+    red "$path 是 ${have:-读不到}，要 $own $mode"
+    return 0
+  fi
+  ok "$path（$own $mode）"
+}
+
+readback_file_match() { # 装上的 属主:组 权限 仓里的
+  local dest=$1 own=$2 mode=$3 src=$4 have
+  if [[ -L "$dest" || ! -f "$dest" ]]; then
+    red "$dest 不是普通文件"
+    return 0
+  fi
+  have=$(stat -c '%U:%G %a' -- "$dest" 2>/dev/null || true)
+  if [[ "$have" != "$own $mode" ]]; then
+    red "$dest 是 ${have:-读不到}，要 $own $mode"
+    return 0
+  fi
+  if ! cmp -s -- "$dest" "$src"; then
+    red "$dest 和仓里的不一样"
+    return 0
+  fi
+  ok "$dest 和仓里一致"
+}
+
+readback_backup_mirror() {
+  local t
+  if ! command -v rsync >/dev/null; then
+    red "没有 rsync：备份复制做不成"
+  fi
+  readback_owned_dir /var/backups/fleet-dao/restic-copies root:root 700
+  readback_owned_dir /var/lib/fleet-hk root:root 755
+  readback_owned_dir /usr/local/lib/fleet-dao/backup root:root 755
+  readback_file_match "$HK_BACKUP_LIB/hk-status.sh" root:root 644 "$DEPLOY_DIR/backup/hk-status.sh"
+  readback_file_match "$HK_BACKUP_LIB/hk-repo-copy.sh" root:root 755 "$DEPLOY_DIR/backup/hk-repo-copy.sh"
+  readback_file_match "$HK_BACKUP_LIB/hk-snapshot-freshness.sh" root:root 755 "$DEPLOY_DIR/backup/hk-snapshot-freshness.sh"
+  for t in "${HK_BACKUP_MIRROR_UNITS[@]}"; do
+    readback_file_match "/etc/systemd/system/$t" root:root 644 "$DEPLOY_DIR/hk/$t"
+  done
+  for t in "${HK_BACKUP_MIRROR_TIMERS[@]}"; do
+    if [[ "$(systemctl is-enabled "$t" 2>/dev/null)" != enabled ]]; then
+      red "$t 没启用"
+    elif [[ "$(systemctl is-active "$t" 2>/dev/null)" != active ]]; then
+      red "$t 没在排班"
+    else
+      ok "$t 在排班"
+    fi
+  done
+  # 仓库还没有不算没装：install.sh hk 可能还没跑。定时器先挂上，复制那一轮会自己记下没做成
+  if [[ -L /srv/fleet-dao-backup/restic || ! -d /srv/fleet-dao-backup/restic ]]; then
+    pending "备份仓库还没有（/srv/fleet-dao-backup/restic，先跑 install.sh hk）：复制和新鲜度要等它出现"
+  fi
+}
+
 readback() {
   step "读回"
   readback_fail2ban
+  readback_backup_mirror
   readback_secrets_dir
   readback_firewall
   readback_wireguard
@@ -774,6 +873,7 @@ main() {
     retire_gateway
     fix_self_proxy_src_owner
     setup_fail2ban
+    setup_backup_mirror
     setup_site
     setup_tls
     # 证书刚签下来：站点从只开 80 换成 80 + 443
