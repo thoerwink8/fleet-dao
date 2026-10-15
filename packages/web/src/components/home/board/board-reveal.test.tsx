@@ -120,3 +120,38 @@ test('选中的卡片被详情面板盖住：调用平移；没盖住：不调',
   expect(vp.x).toBeLessThan(0);
   expect(vp.zoom).toBe(1);
 });
+
+test('换成另一仓的单：再把整张图收进视野，上一仓的单不留', async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const flowOne = [
+    { segment: 'scope' as const, inFlight: 0, samples: 0 },
+    { segment: 'manual' as const, inFlight: 1, samples: 0 },
+    { segment: 'verify' as const, inFlight: 0, samples: 0 },
+  ];
+  const shell = (items: HomeRunning[]) => (
+    <MemoryRouter initialEntries={['/board']}>
+      <QueryClientProvider client={qc}>
+        <ApiProvider api={createMockApi({ live: false })}>
+          <ThemeProvider>
+            <TooltipProvider>
+              <TaskActionsProvider>
+                <div style={{ width: 1000, height: 700 }}>
+                  <BoardCanvas running={items} flow={flowOne} />
+                </div>
+              </TaskActionsProvider>
+            </TooltipProvider>
+          </ThemeProvider>
+        </ApiProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  const view = render(shell([{ ...base, issueNumber: 1, title: '甲仓的单', repo: 'acme/orbit' }]));
+  await screen.findByText('甲仓的单');
+  await waitFor(() => expect(setViewport).toHaveBeenCalled());
+  setViewport.mockClear();
+
+  view.rerender(shell([{ ...base, issueNumber: 3, title: '乙仓的单', repo: 'acme/website' }]));
+  await screen.findByText('乙仓的单');
+  expect(screen.queryByText('甲仓的单')).toBeNull();
+  await waitFor(() => expect(setViewport).toHaveBeenCalled());
+});

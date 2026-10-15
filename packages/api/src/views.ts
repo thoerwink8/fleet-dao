@@ -393,16 +393,18 @@ type HomeHealth = z.input<typeof HomeHealthSchema>;
 
 /**
  * 「要你拍的」：decision 级未处理通知（approvals 未决在写下那一刻就同步开了这么一条，不另查 approvals 表，
- * 免得一件事显示两回），按时刻新到旧。
+ * 免得一件事显示两回），按时刻新到旧。repo 从挂着的单反查；反查不到是 null，看板把它当整机的事留下。
  */
 export function homeDecisions(input: {
   notifications: NotificationRecord[];
-  taskOf: (taskId: string) => { issueNumber: number; title: string } | undefined;
+  taskOf: (taskId: string) => { issueNumber: number; title: string; repoId: string } | undefined;
+  repoOf: (repoId: string) => { owner: string; name: string } | undefined;
 }): HomeDecision[] {
   const items: HomeDecision[] = [];
   for (const n of input.notifications) {
     if (n.level !== 'decision') continue;
     const task = n.taskId ? input.taskOf(n.taskId) : undefined;
+    const repo = task ? input.repoOf(task.repoId) : undefined;
     items.push({
       kind: n.dedupeKey?.startsWith('approval:') ? 'approval' : 'notification',
       id: n.id,
@@ -410,6 +412,7 @@ export function homeDecisions(input: {
       ...(task ? { context: `#${task.issueNumber} ${task.title}` } : {}),
       since: n.createdAt,
       link: n.link ?? (n.taskId ? `/tasks/${n.taskId}` : '/notifications'),
+      repo: repo ? `${repo.owner}/${repo.name}` : null,
     });
   }
   return items.sort((a, b) => b.since.localeCompare(a.since));
@@ -645,6 +648,7 @@ export function buildHome(input: {
     decisions: homeDecisions({
       notifications: input.notifications,
       taskOf: (taskId) => taskById.get(taskId),
+      repoOf: (repoId) => repoById.get(repoId),
     }),
     running,
     flow: flowStages(allViews, running),

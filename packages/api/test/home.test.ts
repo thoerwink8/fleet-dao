@@ -27,6 +27,7 @@ describe('/api/home（内存版）', () => {
     expect(kinds).not.toContain('ask');
     const approval = home.decisions.find((d) => d.kind === 'approval');
     expect(approval?.title).toContain('等你批');
+    expect(approval?.repo).toBe('example/canary');
     // approval 通知只算一回（不另查 approvals 表重复列）。
     expect(home.decisions.filter((d) => d.kind === 'approval')).toHaveLength(1);
 

@@ -11,7 +11,7 @@
 // 下拉底部两行是常驻入口：加仓 / 管理项目跳到设置页「仓库」那一节（加仓要连本人的 GitHub 授权、
 // 删仓要确认没挂着活，都是重操作，不在下拉里直接做）。
 import { Check, ChevronsUpDown, FolderPlus, Settings2, TriangleAlert } from 'lucide-react';
-import { useNavigate } from 'react-router';
+import { useLocation, useNavigate } from 'react-router';
 import { errorText, useAllBoards } from '../../api/client';
 import { taskTone } from '../../lib/status';
 import { StatusDot } from '../layout/status-badge';
@@ -29,6 +29,7 @@ import {
 export function RepoSwitcher() {
   const { repo, repos, setRepoId, error: reposError } = useRepo();
   const navigate = useNavigate();
+  const location = useLocation();
   const goManage = () => navigate('/settings#repos');
 
   return (
@@ -69,7 +70,8 @@ export function RepoSwitcher() {
           currentId={repo?.id}
           onPick={(id) => {
             setRepoId(id);
-            navigate('/');
+            // 人正在看板上切项目：留在这一页，画布和抽屉按新项目重画。别的页仍回主页。
+            if (location.pathname !== '/board') navigate('/');
           }}
         />
         <DropdownMenuSeparator />

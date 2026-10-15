@@ -19,6 +19,11 @@ export const HomeDecisionSchema = z.object({
   since: Time,
   /** 站内路径：通知详情 / 任务详情。 */
   link: z.string(),
+  /**
+   * owner/name。挂在某张单上、这张单的仓在库里，才是那一仓。
+   * 不挂单，或仓不在库里，是 null（整机的事，看板不藏）。老环境推来的快照没有这个键，同样当整机的事。
+   */
+  repo: z.string().nullable().optional(),
 });
 
 /** 一样读数没读到：原因原样写给人看（文件不在、内容认不出、这台不是 Linux……），页面写「没读到」，不拿 0 顶。 */

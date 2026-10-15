@@ -34,3 +34,8 @@ export function useRepo(): RepoApi {
   if (!ctx) throw new Error('缺少 RepoProvider');
   return ctx;
 }
+
+/** 外壳没包时是 null（页面单独挂、测试直接渲染）。调用方当还没选出项目。 */
+export function useRepoIfAny(): RepoApi | null {
+  return useContext(Ctx);
+}

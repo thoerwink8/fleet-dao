@@ -1,6 +1,6 @@
 import { FolderGit2, Moon, Palette, Sun } from 'lucide-react';
 import { useEffect } from 'react';
-import { useNavigate } from 'react-router';
+import { useLocation, useNavigate } from 'react-router';
 import { PALETTES } from '../../lib/theme';
 import { useRepo } from '../repo-context';
 import { useTheme } from '../theme-provider';
@@ -18,6 +18,7 @@ import { NAV } from './nav';
 /** ⌘K：跳页面、切仓、切主题。 */
 export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChange(o: boolean): void }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const { repos, setRepoId } = useRepo();
   const theme = useTheme();
 
@@ -69,7 +70,7 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
                   onSelect={() =>
                     run(() => {
                       setRepoId(r.id);
-                      navigate('/');
+                      if (location.pathname !== '/board') navigate('/');
                     })
                   }
                 >
