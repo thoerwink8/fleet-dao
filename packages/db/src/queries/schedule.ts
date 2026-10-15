@@ -50,6 +50,25 @@ export async function unregisterScheduledJobs(
     .where(inArray(scheduledJobs.id, [...ids]));
 }
 
+/**
+ * 这个定时任务最近一次跑成（outcome = ok，不含 partial）的结束时刻。
+ * 对账用它当回看起点：没查全的那一轮不能把窗口往前推，否则没扫到的仓在这段里的事件就补不回来。
+ * 一次都没跑成回 null，不回时刻 0。读库失败照抛，由调用方按「没有记录」退。
+ */
+export async function lastSuccessfulScheduleRunEndedAt(db: Db, job: string): Promise<Date | null> {
+  const [row] = await db
+    .select({ endedAt: scheduleRuns.endedAt })
+    .from(scheduleRuns)
+    .where(and(eq(scheduleRuns.job, job), eq(scheduleRuns.outcome, 'ok')))
+    .orderBy(desc(scheduleRuns.endedAt), desc(scheduleRuns.id))
+    .limit(1);
+  const endedAt = row?.endedAt ?? null;
+  if (endedAt === null) return null;
+  const ms = endedAt.getTime();
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  return endedAt;
+}
+
 export async function startScheduleRun(db: Db, job: string, startedAt: Date = new Date()): Promise<number> {
   const [row] = await db.insert(scheduleRuns).values({ job, startedAt }).returning({ id: scheduleRuns.id });
   if (!row) throw new Error(`没记上定时任务 ${job} 的开始`);
