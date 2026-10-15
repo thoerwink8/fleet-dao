@@ -550,11 +550,20 @@ export function afterDispatchProbe(
   return { round: next, action: 'pick' };
 }
 
-/** 返工意见和动手状态里的那一句。chosen 有值是派出去了；没有就是停下，每条带上原因。 */
+/**
+ * 动手状态里的那一句。chosen 有值是派出去了；没有就是停下，每条带上原因。
+ * 换了路、或停下时，同一句也进返工意见。探通且没换路（isDispatchProbePassOnly）不进：那是状态，不是要改的。
+ */
 export function dispatchProbeLine(fails: readonly DispatchProbeFail[], chosen: string | null): string {
   if (chosen && fails.length === 0) return `派前探测：${chosen} 通`;
   if (chosen) return `派前探测：${fails.map((item) => item.label).join('、')} 不通，换到 ${chosen}`;
   return `派前探测：${fails.map((item) => `${item.label} 不通（${item.detail}）`).join('；')}`;
+}
+
+/** 探通且没换路：`派前探测：grok-4.7 通`。换路、探不通、候选被挡住都不算。 */
+export function isDispatchProbePassOnly(line: string): boolean {
+  const text = line.trim();
+  return text.startsWith('派前探测：') && text.endsWith(' 通') && !text.includes('不通');
 }
 
 /** 一条都没当场探到就停下：原因用选路给出的每条候选，不留空的「派前探测：」。 */

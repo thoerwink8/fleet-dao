@@ -431,10 +431,15 @@ export type SelfCheckResult =
 /** 精炼输出最多多少字：喂回会话、交给冷验收都用这一份。 */
 export const SELF_CHECK_DIGEST_MAX = 4000;
 
-/** 这张单到现在花掉多少 token（四样相加，动手和验收都算）。读不到的行不算进去，数出有几行没读到。 */
+/**
+ * 这张单到现在花掉多少 token（四样相加，动手和验收都算）。读不到的行不算进去，数出有几行没读到。
+ * since 只算这一刻之后起的会话（当前这一代的开工时刻）。不给就整张单都算——老历史重放不带这个字段。
+ */
 export interface TaskSpendInput {
   schemaVersion: 1;
   taskId: string;
+  /** ISO 时刻。当前这一代的起算时间；不给就整张单累计。 */
+  since?: string;
 }
 
 /** 单任务 token 预算的默认值见 limits.ts 的 DEFAULT_TASK_TOKEN_BUDGET。 */

@@ -1027,7 +1027,16 @@ export function realPortsFromEnv(
       if (input?.schemaVersion !== 1 || !input.taskId) {
         throw new PortError('INVALID_INPUT', '查这张单花掉的 token：要有 taskId', { retryable: false });
       }
-      return taskTokenSpend(db, input.taskId);
+      let since: Date | undefined;
+      if (input.since !== undefined) {
+        since = new Date(input.since);
+        if (Number.isNaN(since.getTime())) {
+          throw new PortError('INVALID_INPUT', '查这张单花掉的 token：起算时间不是时刻', {
+            retryable: false,
+          });
+        }
+      }
+      return taskTokenSpend(db, input.taskId, since === undefined ? undefined : { since });
     },
     coldVerify: createColdVerify({
       gh,

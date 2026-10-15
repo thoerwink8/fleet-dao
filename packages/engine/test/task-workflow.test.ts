@@ -82,7 +82,7 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
       taskId: i.taskId,
       route: { routeId: 'r1' },
       tier: { tier: 'medium' },
-      feedback: ['派前探测：m1 通'],
+      feedback: [],
     });
     expect(calls.verify[0]).toMatchObject({ prNumber: run.prNumber, round: 1, authorFamilies: ['claude'] });
     expect(calls.arm).toBe(1);
@@ -123,7 +123,8 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
     );
     expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
     expect(calls.segment).toHaveLength(2);
-    expect(calls.segment[0]?.feedback).toEqual(['派前探测：m1 通']);
+    expect(calls.segment[0]?.feedback).toEqual([]);
+    expect(world.states.some((s) => s.doing.includes('派前探测：m1 通'))).toBe(true);
     expect(calls.segment[1]?.feedback.join('\n')).toContain('test (engine)');
     expect(calls.segment[1]?.feedback.join('\n')).toContain('FAIL task.test.ts');
     expect(world.count('openPr')).toBe(1);

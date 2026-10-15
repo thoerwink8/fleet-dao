@@ -6,12 +6,14 @@
 //   退出状态和工作树里的提交。规矩里的每一条都对应引擎后面做的一步：只读提交（所以没提交的改动不算）、自己推分支开 PR（所以不许推、
 //   不许切分支）。需求在单子里、结果在 PR 里（#654）：不要求会话写 需求.md、结果.md。
 // - 返工意见原样带进来（CI 失败日志、验收问题表、没提交）：按条编号，每条超长截断（日志动辄几万字）；一条也没有就不出这一节。
+//   派前探测探通且没换路（「派前探测：某模型 通」）是状态，不是要改的，不进这一节（在途单的意见里可能还留着这句）。换路、探不通的仍带上。
 // - 上一次被切号、暂停停下的（#59、#820）多一节：树里留着它的提交和改动，告诉新会话接着干。
 // - 续上一段的会话（resumed，决定 0088）：会话里已经有整张单和前面的过程，提示词只补被打断的原因和返工意见，不重述交代
 //   （重述等于让它把整张单再读一遍，返工轮的缓存读和首轮一样多）。
 // - 新开的会话（不是续的）带「已给你的文件」一节（preload.ts，决定 0093）：单子「已知的模块」列的文件原文，引擎起会话前读好放进来，
 //   省掉会话自己熟悉仓库那一大段；续的会话里早有了，不再给。
 
+import { isDispatchProbePassOnly } from '../workflows/task-support.ts';
 import { type ManualBrief, renderBrief } from './brief.ts';
 import { type PreloadRead, renderPreload } from './preload.ts';
 
@@ -41,7 +43,7 @@ function clip(text: string): string {
 }
 
 function feedbackSection(feedback: readonly string[], title: string): string[] {
-  const items = feedback.map((f) => f.trim()).filter(Boolean);
+  const items = feedback.map((f) => f.trim()).filter((f) => f && !isDispatchProbePassOnly(f));
   if (items.length === 0) return [];
   return ['', title, ...items.map((f, i) => `${i + 1}. ${clip(f)}`)];
 }
