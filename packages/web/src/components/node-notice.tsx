@@ -11,9 +11,8 @@ import { Button } from './ui/button';
 
 /**
  * 选了远程环境时还能看的页：主页（那个环境的快照）、法国页（各台并排）和资源页（那个环境快照里的资源读数，#1986）。
- * /env 是法国页的旧地址，要留在这里：选了远程时外壳才会把这一页渲染出来，重定向才走得成。
  */
-export const REMOTE_PAGES: readonly string[] = ['/', '/board', '/france', '/env', '/resources'];
+export const REMOTE_PAGES: readonly string[] = ['/', '/board', '/france', '/resources'];
 
 export const isRemotePage = (pathname: string): boolean => REMOTE_PAGES.includes(pathname);
 

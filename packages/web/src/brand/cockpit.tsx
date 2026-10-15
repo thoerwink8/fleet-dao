@@ -33,7 +33,6 @@ export const brand: Brand = {
   terms: {
     relay: 'Mirasim',
     judgeQuiz: 'Jev 判断题',
-    judgeNav: 'Jev 判断',
     marshal: 'AI 指挥官',
     marshalShort: '指挥官',
     carpool: '拼车',

@@ -39,7 +39,7 @@ describe('路由表', () => {
     expect(kids.filter((c) => c.path === '*')).toHaveLength(1);
   });
 
-  test('要登录才能看的页都在：主页、任务、额度、定时任务、通知、操作记录、设置、路由、思考档位、环境、法国、更新日志', () => {
+  test('要登录才能看的页都在：主页、任务、额度、定时任务、通知、操作记录、设置、路由、法国、更新日志', () => {
     const pages = insideShell(table);
     for (const p of [
       '/',
@@ -51,8 +51,6 @@ describe('路由表', () => {
       '/audit',
       '/settings',
       '/routing',
-      '/efforts',
-      '/env',
       '/france',
       '/changelog',
     ]) {
