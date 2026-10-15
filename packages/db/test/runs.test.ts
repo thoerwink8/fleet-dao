@@ -527,7 +527,13 @@ describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
     const task = await addTask(t.db, repo.id, { issueNumber: 2254 });
     const cutoff = new Date('2026-10-16T02:00:00Z');
     const row = (over: Partial<typeof runs.$inferInsert>) =>
-      t.db.insert(runs).values({ segment: 'manual', model: 'grok-4.7', taskId: task.id, ...over });
+      t.db.insert(runs).values({
+        segment: 'manual',
+        model: 'grok-4.7',
+        taskId: task.id,
+        startedAt: ago(10 * MIN),
+        ...over,
+      });
     await row({
       startedAt: new Date('2026-10-16T00:30:00Z'),
       inputTokens: 83_500_000,
