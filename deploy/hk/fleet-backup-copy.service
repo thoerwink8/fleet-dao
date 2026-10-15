@@ -1,0 +1,28 @@
+# 香港每天把备份仓库再复制一份。deploy/hk.sh 装到 /etc/systemd/system/；改这份、再跑一遍 hk.sh，别在机器上手改。
+[Unit]
+Description=fleet-dao 香港每天复制备份仓库（备份用户碰不到，留 14 天）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/lib/fleet-dao/backup/hk-repo-copy.sh
+# 没做成等明天的定时器，不在这一轮里重试：失败时旧的 14 天还在
+TimeoutStartSec=2h
+Nice=10
+UMask=0077
+WorkingDirectory=/
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# 整盘只读，只放开要写的两处。仓库在 /srv 上，只读就够，不必再写 ReadOnlyPaths（目录还没有时有的 systemd 起不来）
+ReadWritePaths=/var/backups/fleet-dao/restic-copies /var/lib/fleet-hk
