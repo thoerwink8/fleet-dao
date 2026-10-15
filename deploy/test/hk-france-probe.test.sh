@@ -20,6 +20,7 @@ cleanup() {
 trap cleanup EXIT
 
 fail=0
+skipped=0
 check() { # 说明 实际 期望
   if [[ "$2" == "$3" ]]; then
     printf '  ✓ %s\n' "$1"
@@ -174,7 +175,9 @@ done
 
 echo "== 装了 nginx 时，健康页读得到「法国失联自 10:38」"
 if ! command -v nginx >/dev/null || ! command -v curl >/dev/null; then
-  echo "  … 这台没有 nginx 或 curl，没真起站点；页面判定由 health-page.test.mjs 盖住"
+  # 不当通过：CI 那台有 nginx，这一段本机跳过时真红过一次没人看见（回应头按小写比，nginx 回的是 X-Robots-Tag）
+  echo "  … 没跑成：这台没有 nginx 或 curl，没真起站点（页面判定另由 health-page.test.mjs 盖住）"
+  skipped=1
 else
   # shellcheck source=../lib/common.sh
   source "$HERE/../lib/common.sh"
@@ -258,6 +261,10 @@ fi
 if ((fail)); then
   echo "不通过"
   exit 1
+fi
+if ((skipped)); then
+  echo "hk-france-probe：其余通过，有没跑成的"
+  exit 2
 fi
 echo "通过"
 exit 0
