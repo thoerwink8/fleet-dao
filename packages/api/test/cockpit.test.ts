@@ -391,6 +391,24 @@ describe('发给工作流的信号', () => {
     expect(h.store.data.audit.length).toBe(before);
   });
 
+  it('继续次数用满：409 continue_exhausted，不发信号', async () => {
+    const h = harness();
+    const s = await h.login();
+    const task = h.store.data.tasks.find((x) => x.id === IDS.task12);
+    if (!task) throw new Error('样例数据里要有 task12');
+    task.state = 'stalled';
+    task.stalled = { why: '已继续 3 次仍没过，交指挥官', since: '2026-10-15T12:00:00.000Z' };
+    const res = await h.cockpit.request(
+      `/api/tasks/${IDS.task12}/actions`,
+      write('POST', s, { action: 'resume' }),
+    );
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('continue_exhausted');
+    expect(body.error.message).toBe('继续次数已用满（3 次），继续无效；要重开用 redo');
+    expect(h.signals).toHaveLength(0);
+  });
+
   it('【故意造出的失败】已经暂停着的单再点暂停：409 already_paused，不重复发信号；继续照常发', async () => {
     const h = harness();
     const s = await h.login();

@@ -5,7 +5,7 @@
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildView, franceFetcher, STAGE_NAMES } from './france-lib.mjs';
+import { buildView, dailySummaryLine, franceFetcher, STAGE_NAMES } from './france-lib.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'france-query.mjs');
 const USAGE = `用法：node france.mjs [--json]
@@ -31,6 +31,8 @@ function text(view, tookMs) {
     lines.push(`${a.level === 'note' ? '· 留意：' : '⚠ '}${a.what}`);
     if (a.level !== 'note') lines.push(`    去看：${a.where}`);
   }
+  const dailyLine = dailySummaryLine(view.health.notifications);
+  if (dailyLine) lines.push(dailyLine);
   if (view.tasks.ok) {
     lines.push(`在跑的单 ${view.tasks.active.length} 张、排队的 ${view.tasks.queued.length} 张：`);
     for (const t of view.tasks.active) {

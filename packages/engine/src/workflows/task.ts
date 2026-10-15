@@ -21,7 +21,8 @@
 // - PR 被关了、PR 的头被别人改了。
 // 「继续」之后从头再试这一步；「放弃」收尾退出（工作树存档后删，PR 和单子不动，由人处理）。
 // 动手或验收轮数用尽后再点「继续」（patched('continue-resets-rounds')，#1404）：两轮计数都从 0 再计，并重读单子正文，
-// 下一次验收用新正文。同一次继续里上限仍在。这样继续累计超过 3 次就不再清零，停下交给指挥官。老历史没有这个标记，
+// 下一次验收用新正文。同一次继续里上限仍在。这样继续累计超过 3 次就不再清零，停下交给指挥官；
+// 再点「继续」由命令行和驾驶舱拒绝（不在工作流里吞掉信号）。老历史没有这个标记，
 // 仍只把用尽的那一个计数清掉。
 // 停下之前先自动处理一次（决定 0093）：这张单头一回轮数用尽不停下（patched('auto-continue-rounds')，task-runtime.ts 的
 // exhaustRounds 回 auto）：轮数清零、重读单子，下一轮动手避开最近的模型和它那一族（rt.avoidModel；别的族派不出退回只避开模型），直接再动手不先重走 CI；之后用尽照旧停下，
@@ -66,6 +67,7 @@
 //   （ColdVerifyInput.testOutput，只给和验收的头对得上的那一份）。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
+import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { CancellationScope, isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { EngineActivities } from '../activity-options.ts';
 import type { Limits } from '../limits.ts';
@@ -501,6 +503,10 @@ class TaskFlow {
     rt.since = delivery.head;
     rt.changedFiles = pushed.changedFiles ?? delivery.changedFiles;
     if (rt.prNumber === null) {
+      // 代数只在新历史里传给开 PR：重做的新一代才能关掉自己上一代留下的 PR。老历史重放不传，活动入参对得上。
+      const generation = patched('redo-supersede-pr')
+        ? parseTaskWorkflowId(workflowInfo().workflowId)?.generation
+        : undefined;
       const pr = await rt.step('openPr', () =>
         rt.acts.openPr({
           taskId: rt.input.taskId,
@@ -517,6 +523,7 @@ class TaskFlow {
                 : 'CI 和冷验收的结果看这个 PR 的检查（验收通过才挂自动合并）',
             ],
           },
+          ...(generation === undefined ? {} : { generation }),
         }),
       );
       rt.prNumber = pr.prNumber;

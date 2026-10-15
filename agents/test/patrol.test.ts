@@ -16,7 +16,7 @@ interface Report {
   alerts: string[];
   delta: string[];
   broken: string | null;
-  facts: { at: string; notes: { key: string }[] } | null;
+  facts: { at: string; dailyOpen?: number; notes: { key: string }[] } | null;
 }
 interface SampleOpts {
   at: Date;
@@ -113,19 +113,26 @@ describe('巡查脚本：判法', () => {
     expect(lib.render(r).at(-1)).toBe('VERDICT: ALERT 7');
   });
 
-  it('新通知只有 decision、alert 算 ALERT；daily（发版成功、日报）只进变化', () => {
+  it('日报级不进留意、不进变化，只单独一行报数量；decision 仍算新通知', () => {
     const base = baseOf(good());
     const raw = lib.sampleRaw({
       at: NOW,
       notes: [
         'note|alert|deploy-lag|发布落后',
         'note|daily|release:done:abc|【发版成功】法国已在用 abc',
+        'note|daily|release:start:abc|【发版开始】',
         'note|decision|github-app-missing:o/r|o/r：先去 GitHub 把两个机器人装到这个仓',
       ],
     });
     const r = lib.judge({ raw: ok(raw), now: NOW, base });
+    expect(r.facts?.dailyOpen).toBe(2);
+    expect(r.facts?.notes.map((n) => n.key)).toEqual(['deploy-lag', 'github-app-missing:o/r']);
     expect(r.alerts).toEqual(['新通知 github-app-missing:o/r：o/r：先去 GitHub 把两个机器人装到这个仓']);
-    expect(r.delta).toContain('+ 通知 release:done:abc：【发版成功】法国已在用 abc');
+    expect(r.delta.join('\n')).not.toContain('release:');
+    expect(r.alerts.join('\n')).not.toContain('发版');
+    const text = lib.render(r).join('\n');
+    expect(text).toContain(`日报 2 条 @${NOW.toISOString()}`);
+    expect(text).not.toContain('【发版成功】');
     expect(lib.render(r).at(-1)).toBe('VERDICT: ALERT 1');
   });
 

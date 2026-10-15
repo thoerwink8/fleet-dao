@@ -64,7 +64,7 @@ import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
  *   db: Section<{ now: string, readOnly: string }>,
  *   tasks: Section<{ rows: TaskRow[] }>,
  *   runs: Section<{ rows: RunRow[] }>,
- *   notifications: Section<{ count: number, rows: NotificationRow[] }>,
+ *   notifications: Section<{ count: number, daily?: number, rows: NotificationRow[] }>,
  *   jobs: Section<{ rows: JobRow[] }>,
  *   routes: Section<{ rows: RouteRow[] }>,
  *   orgAudit: Section<{ rows: OrgAuditRow[] }>,
@@ -99,7 +99,7 @@ export const KIND_ROUTE_STALE = 'route-stale';
 export const KIND_TASK_PARK = 'task-park';
 
 /**
- * 「没处理的提醒」这类异常（法国库 notifications 表）的 where：buildView 给每条提醒和「还有 N 条提醒没处理」都用它，
+ * 「没处理的提醒」这类异常（法国库 notifications 里还开着的 alert、decision）的 where：buildView 给每条提醒和「还有 N 条提醒没处理」都用它，
  * 发版车（release-train-lib.mjs）拿它把提醒项和健康项分开（不靠 what 的文案）。提醒的 key 是它的 dedupe_key。
  */
 export const WHERE_NOTIFICATIONS = '驾驶舱「提醒」或飞书；法国库 notifications 表 resolved_at 为空的';
@@ -792,9 +792,16 @@ function checkSection(name, s) {
     case 'db':
       problem = isIso(s.now) && typeof s.readOnly === 'string' ? null : 'now、readOnly 认不出';
       break;
-    case 'notifications':
-      problem = Number.isInteger(s.count) ? rowsProblem(s.rows, ROW_SPECS.notifications) : 'count 不是整数';
+    case 'notifications': {
+      const dailyOk = s.daily === undefined || Number.isInteger(s.daily);
+      problem =
+        Number.isInteger(s.count) && dailyOk
+          ? rowsProblem(s.rows, ROW_SPECS.notifications)
+          : !Number.isInteger(s.count)
+            ? 'count 不是整数'
+            : 'daily 不是整数';
       break;
+    }
     case 'services':
       problem = rowsProblem(s.units, { unit: 'str', state: 'str' }, 'units');
       break;
@@ -1319,6 +1326,33 @@ function releaseFacts(current, auto, at) {
 }
 
 /**
+ * 没处理的提醒里要人看的那一部分（alert、decision）。
+ * 查询脚本把 daily 分开数（整数）；老快照没有这个字段时，用 rows 里的日报条数从 count 里减掉。
+ * @param {{ count: number, daily?: number, rows: NotificationRow[] }} s
+ * @returns {{ count: number, daily: number, rows: NotificationRow[] }}
+ */
+function notificationFacts(s) {
+  const rows = Array.isArray(s.rows) ? s.rows : [];
+  const dailyInRows = rows.filter((x) => x.level === 'daily').length;
+  const reported = typeof s.daily === 'number' && Number.isInteger(s.daily) ? s.daily : null;
+  return {
+    count: reported === null ? Math.max(0, s.count - dailyInRows) : s.count,
+    daily: reported ?? dailyInRows,
+    rows: rows.filter((x) => x.level !== 'daily'),
+  };
+}
+
+/**
+ * 日报级单独一行。没读到提醒这一块回 null（不当成 0 条）。
+ * @param {{ ok?: boolean, daily?: number } | null | undefined} notifications
+ */
+export function dailySummaryLine(notifications) {
+  if (notifications?.ok !== true) return null;
+  const n = Number.isInteger(notifications.daily) ? notifications.daily : 0;
+  return `日报 ${n} 条`;
+}
+
+/**
  * 一份快照整理成页面要的样子：断链排查（最要紧的在前）、每张单一行（点开是每次会话）、近 24 小时按环节和模型的汇总、
  * 引擎健康。每一块都带 ok；没读到的带 why，不拿空的顶。
  * @param {Snapshot} snapshot
@@ -1378,26 +1412,22 @@ export function buildView(snapshot) {
   const release = releaseFacts(S.current, S.autoRelease, at);
   issues.push(...release.issues);
 
-  // 提醒：一条一行，最多 5 条
-  if (S.notifications.ok && S.notifications.count > 0) {
-    for (const x of S.notifications.rows.slice(0, 5)) {
+  // 提醒：只要你拍和卡住报警，一条一行，最多 5 条。日报不逐条列（数量在 daily 上，命令行另打一行）。
+  const noteFacts = S.notifications.ok ? notificationFacts(S.notifications) : null;
+  if (noteFacts && noteFacts.count > 0) {
+    for (const x of noteFacts.rows.slice(0, 5)) {
       const task = x.n && !x.title.includes(`#${x.n}`) ? `#${x.n} ` : '';
       // 挂在任务上的提醒以 dedupe_key 为准（task: 开头）；读不到 key 才按标题认
       const park = x.dedupe_key ? x.dedupe_key.startsWith('task:') : PARK_TITLE.test(x.title);
-      (x.level === 'daily' ? note : bad)(
+      bad(
         `没处理的提醒：${task}${x.title}（${agoText(x.created_at, at)}）`,
         WHERE.notifications,
         park ? KIND_TASK_PARK : undefined,
         x.dedupe_key || `notification:${stripTimeWords(x.title)}`,
       );
     }
-    if (S.notifications.count > 5)
-      bad(
-        `还有 ${S.notifications.count - 5} 条提醒没处理`,
-        WHERE.notifications,
-        undefined,
-        'notifications:more',
-      );
+    if (noteFacts.count > 5)
+      bad(`还有 ${noteFacts.count - 5} 条提醒没处理`, WHERE.notifications, undefined, 'notifications:more');
   }
 
   // 定时任务
@@ -1654,9 +1684,9 @@ export function buildView(snapshot) {
       repos: repos ? { ok: true, rows: repos } : { ok: false, why: whyOf('repos') },
       jobs: jobs ? { ok: true, rows: jobs } : { ok: false, why: whyOf('jobs') },
       routes: routes ? { ok: true, rows: routes } : { ok: false, why: whyOf('routes') },
-      notifications: S.notifications.ok
-        ? { ok: true, count: S.notifications.count, rows: S.notifications.rows }
-        : { ok: false, why: S.notifications.why },
+      notifications: noteFacts
+        ? { ok: true, count: noteFacts.count, daily: noteFacts.daily, rows: noteFacts.rows }
+        : { ok: false, why: S.notifications.ok ? '提醒没整理出来' : S.notifications.why },
       db: S.db.ok ? { ok: true, readOnly: S.db.readOnly } : { ok: false, why: S.db.why },
     },
     units: UNITS,

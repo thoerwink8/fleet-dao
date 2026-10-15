@@ -507,6 +507,75 @@ describe('对账与补漏', () => {
     expect((await ledger.idempotency.peek(mergeKey(repo, own.number, A)))?.completedAt).toBeTruthy();
   });
 
+  it('耗时表不报没经合并队列；人手合的、fleet/ 上引擎自己合但没经队列的照报', async () => {
+    const { gh, fake, ledger } = setup();
+    const C = sha('e');
+    const timings = fake.addPull({
+      user: fake.bots.engine,
+      head: { ref: 'ci-timings/2026-10-14', sha: A },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:00:00Z',
+      merge_commit_sha: sha('c'),
+      merged_by: fake.bots.engine,
+    });
+    // 分支虽是 ci-timings/，合并的是人：仍报没经合并队列
+    const byHand = fake.addPull({
+      user: fake.bots.engine,
+      head: { ref: 'ci-timings/handed', sha: B },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:10:00Z',
+      merge_commit_sha: sha('d'),
+      merged_by: fake.human,
+    });
+    const fleet = fake.addPull({
+      user: fake.bots.engine,
+      head: { ref: 'fleet/13-abcd1234', sha: C },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:20:00Z',
+      merge_commit_sha: sha('f'),
+      merged_by: fake.bots.engine,
+    });
+    for (const [number, ref, head] of [
+      [timings.number, 'ci-timings/2026-10-14', A],
+      [byHand.number, 'ci-timings/handed', B],
+      [fleet.number, 'fleet/13-abcd1234', C],
+    ] as const) {
+      await ledger.upsertPullRequest({
+        repoId: REPO_ID,
+        number,
+        state: 'merged',
+        headRef: ref,
+        headSha: head,
+        updatedAt: new Date('2026-09-25T11:30:00Z'),
+      });
+    }
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId })
+      .auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
+    expect(report.outcome).toBe('ok');
+    expect(report.engineCiTimingsPrs).toEqual([timings.number]);
+    expect(report.findings.map((f) => `${f.number} ${f.kind}`).sort()).toEqual(
+      [
+        `${timings.number} backfill_merge_record`,
+        `${byHand.number} not_merged_by_engine`,
+        `${byHand.number} no_merge_record`,
+        `${byHand.number} backfill_merge_record`,
+        `${fleet.number} no_merge_record`,
+        `${fleet.number} backfill_merge_record`,
+      ].sort(),
+    );
+    const fleetGap = report.findings.find((f) => f.number === fleet.number && f.kind === 'no_merge_record');
+    expect(fleetGap).toMatchObject({
+      headRef: 'fleet/13-abcd1234',
+      openedByEngine: true,
+      mergedByEngine: true,
+    });
+  });
+
   it('人开的 PR：镜像没记的照样补上；不报合并人、也不报没有合并记录', async () => {
     const { gh, fake, ledger } = setup();
     const byHuman = fake.addPull({

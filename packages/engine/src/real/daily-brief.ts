@@ -9,6 +9,7 @@ import {
   openBriefNotes,
   pullsByMergeSha,
   repoByName,
+  resolveAlertWithReason,
   startScheduleRun,
   stoppedTasksBetween,
   upsertAlert,
@@ -50,6 +51,7 @@ export function dailyBriefJob(w: {
     issueTitle: async (repo, issueNumber) => (await w.gh.readIssue({ repo, issueNumber })).title,
     decisions: () => openBriefNotes(w.db, 'decision'),
     alerts: () => openBriefNotes(w.db, 'alert'),
+    dailies: () => openBriefNotes(w.db, 'daily'),
     stopped: (from, to) => stoppedTasksBetween(w.db, from, to),
     lineStats: (at) => executorLineStats(w.db, at),
     async publish(x) {
@@ -59,6 +61,7 @@ export function dailyBriefJob(w: {
       const r = await w.gh.commentIssue(x);
       return { url: r.url };
     },
+    resolveDaily: (input) => resolveAlertWithReason(w.db, input),
     runs: {
       start: (job, at) => startScheduleRun(w.db, job, at),
       finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),

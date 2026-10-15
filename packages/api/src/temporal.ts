@@ -8,10 +8,11 @@
 // Temporal 没起来时后端照样能起，真正发信号或查健康才会报错。测试一律用假客户端（TemporalClientLike /
 // EnginePollerSource 的最小形状），不碰真网络；connectTemporal 本身没有自动化测试覆盖（要连真 Temporal）。
 
-import { TASK_WORKFLOW_TYPE, taskWorkflowId } from '@fleet-dao/shared';
+import { TASK_SIGNAL_NAMES, TASK_WORKFLOW_TYPE, taskWorkflowId } from '@fleet-dao/shared';
 import {
   generationLife,
   readTaskGenerations,
+  redoCanStop,
   redoTask,
   type SeenLife,
   signalTaskWorkflowId,
@@ -276,7 +277,48 @@ async function seenLife(client: Client, workflowId: string): Promise<SeenLife> {
   }
 }
 
-/** 真 Temporal 上的重做：顺着代数 describe，只在都终止时用新编号起下一代（REJECT_DUPLICATE，不盖旧执行）。 */
+/** 问任务工作流停在哪。问不到、看不清当还在跑：重做不去叫停一台看不清的。已经结束的当 parked，后面的叫停会发现它不在了。 */
+async function redoPosture(client: Client, workflowId: string): Promise<'parked' | 'running'> {
+  try {
+    const status = await client.connection.withDeadline(Date.now() + DEFAULT_SIGNAL_TIMEOUT_MS, () =>
+      client.workflow.getHandle(workflowId).query('taskStatus'),
+    );
+    return redoCanStop((status as { phase?: unknown }).phase) ? 'parked' : 'running';
+  } catch (err) {
+    if (isGone(err)) return 'parked';
+    return 'running';
+  }
+}
+
+/**
+ * 停在等人的上一代：发放弃，等到工作流终止。没停下来就抛错，重做不另起。
+ * 收树正常要几秒到几十秒（git 档一次最多 5 分钟）。这里等 60 秒，留在驾驶舱请求的 90 秒限时里；
+ * 没停完再点一次会看到 phase=abandoned，接着等，不会当成还在跑拒绝。
+ */
+const ABANDON_WAIT_MS = 60_000;
+
+async function abandonParkedWorkflow(client: Client, workflowId: string): Promise<void> {
+  const handle = client.workflow.getHandle(workflowId);
+  try {
+    await client.connection.withDeadline(Date.now() + DEFAULT_SIGNAL_TIMEOUT_MS, () =>
+      handle.signal(TASK_SIGNAL_NAMES.abandon, {
+        by: 'redo',
+        reason: '重做前先叫停停住的上一代',
+      }),
+    );
+  } catch (err) {
+    if (!isGone(err)) throw err;
+  }
+  const deadline = Date.now() + ABANDON_WAIT_MS;
+  while (Date.now() < deadline) {
+    const life = await seenLife(client, workflowId);
+    if (life !== 'running') return;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(`叫停 ${workflowId} 后还没停，没有另起`);
+}
+
+/** 真 Temporal 上的重做：顺着代数 describe。都终止，或还在跑但只是停在 parked / 正在收尾放弃（先叫停再等到终止），才用新编号起下一代（REJECT_DUPLICATE，不盖旧执行）。真在跑拒绝。 */
 export function createTemporalTaskRedo(client: Client, taskQueue: string): TaskRedoPort {
   return {
     async redo(input) {
@@ -294,6 +336,8 @@ export function createTemporalTaskRedo(client: Client, taskQueue: string): TaskR
       const generations = read.generations;
       return redoTask({
         list: async () => generations,
+        posture: (workflowId) => redoPosture(client, workflowId),
+        abandonParked: (workflowId) => abandonParkedWorkflow(client, workflowId),
         start: async (workflowId) => {
           try {
             await client.connection.withDeadline(Date.now() + DEFAULT_SIGNAL_TIMEOUT_MS, () =>

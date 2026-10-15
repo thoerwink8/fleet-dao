@@ -145,6 +145,7 @@ interface FranceLib {
   ): { ok: boolean; org?: string; name?: string; why?: string; at?: string };
   jobStatus(job: unknown, at: string): string;
   buildView(data: { at: string; sections: Record<string, RawSection> }): View;
+  dailySummaryLine(notifications: unknown): string | null;
   franceFetcher(opts: {
     home: string;
     env: Record<string, string | undefined>;
@@ -1309,7 +1310,7 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
     expect(whats(broken, 'unread').join('')).toContain('supersededBy');
   });
 
-  it('没处理的提醒：一条一行，日报只是留意，多于 5 条另起一行说还有几条', () => {
+  it('没处理的提醒只列 alert 和 decision；日报不进留意，数量单独给', () => {
     const v = viewOf((s) => {
       const note = (i: number, level: string) => ({
         level,
@@ -1323,23 +1324,64 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
       });
       s.notifications = {
         ok: true,
-        count: 7,
+        count: 6,
+        daily: 78,
         rows: [
           note(0, 'alert'),
-          note(1, 'daily'),
           note(2, 'decision'),
           note(3, 'alert'),
           note(4, 'alert'),
           note(5, 'alert'),
+          note(6, 'alert'),
         ],
       };
     });
     has(v, 'bad', '没处理的提醒：#12 的提问另开单没成（10 分钟前）');
     expect(whats(v).some((w) => w.includes('#12 #12'))).toBe(false);
-    has(v, 'note', '提醒 1');
     has(v, 'bad', '提醒 2');
-    has(v, 'bad', '还有 2 条提醒没处理');
-    expect(whats(v).some((w) => w.includes('提醒 5'))).toBe(false);
+    has(v, 'bad', '还有 1 条提醒没处理');
+    expect(whats(v, 'note').some((w) => w.includes('提醒') || w.includes('日报'))).toBe(false);
+    expect(whats(v).some((w) => w.includes('提醒 6'))).toBe(false);
+    expect(v.health.notifications).toMatchObject({ ok: true, count: 6, daily: 78 });
+    expect(lib.dailySummaryLine(v.health.notifications)).toBe('日报 78 条');
+    expect(lib.dailySummaryLine({ ok: false, why: '没读到' })).toBeNull();
+    expect(readFileSync(join(SCRIPTS, 'france.mjs'), 'utf8')).toContain('dailySummaryLine');
+  });
+
+  it('老快照没有 daily 字段：rows 里的日报不进留意，并从条数里减掉', () => {
+    const v = viewOf((s) => {
+      s.notifications = {
+        ok: true,
+        count: 2,
+        rows: [
+          {
+            level: 'daily',
+            dedupe_key: 'release:done:abc:1',
+            title: '发版成功',
+            body: '',
+            link: null,
+            created_at: ago(10),
+            updated_at: null,
+            n: null,
+          },
+          {
+            level: 'alert',
+            dedupe_key: 'k',
+            title: '卡住了',
+            body: '',
+            link: null,
+            created_at: ago(11),
+            updated_at: null,
+            n: null,
+          },
+        ],
+      };
+    });
+    expect(whats(v, 'note')).toEqual([]);
+    expect(whats(v).join('\n')).not.toContain('发版成功');
+    has(v, 'bad', '卡住了');
+    expect(v.health.notifications).toMatchObject({ ok: true, count: 1, daily: 1 });
+    expect(lib.dailySummaryLine(v.health.notifications)).toBe('日报 1 条');
   });
 
   it('单子停下的三类异常带 kind task-park 和稳定的 key；其余照旧（#1740）', () => {

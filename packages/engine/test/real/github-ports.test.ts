@@ -69,7 +69,14 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
     }),
     openPr: record('openPr', () => ({ number: 101, url: 'https://github.com/acme/widgets/pull/101' })),
     // 开 PR 前列开着的 PR（同一张单有没有别人在做，决定 0096）：默认一个都没有；用例给 over.claims 换成要的列表
-    claims: { openPulls: record('claims', () => []) },
+    claims: {
+      openPulls: record('claims', () => []),
+      closePull: async (_repo: unknown, number: number) => {
+        const list = calls.closePull ?? [];
+        list.push(number);
+        calls.closePull = list;
+      },
+    },
     waitCi: record('waitCi', (input: { head: string }) => ({ state: 'green', head: input.head })),
     fetchBranchHead: record('fetchBranchHead', () => ({ head: m.head })),
     syncMainline: record('syncMainline', (input: { head: string }) => ({
@@ -753,6 +760,67 @@ describe('开 PR、CI、合并', () => {
         .catch((e: unknown) => e);
       expect(err).toMatchObject({ code: 'ISSUE_CLAIMED', retryable: false });
       expect(String((err as Error).message)).toContain(`#${other.number}`);
+      expect(calls.openPr).toBeUndefined();
+    }
+  });
+
+  it('重做的新一代：上一代任务分支上开着的 PR 关掉并留言，再开新的', async () => {
+    const previous = 'fleet/12-t01234567';
+    const current = 'fleet/12-taabbccdd';
+    const { ports, calls } = setup({
+      claims: () => [{ number: 77, body: '**需求**：\nCloses #12\n', headRef: previous }],
+    });
+    await ports.openPr(
+      {
+        taskId: 't1',
+        repo,
+        branch: current,
+        head: m.head,
+        title: '登录',
+        body,
+        generation: 2,
+      },
+      ctx,
+    );
+    expect(calls.commentPull).toEqual([
+      expect.objectContaining({
+        prNumber: 77,
+        key: 'redo-supersede:2',
+        body: '被第 2 代重做取代',
+      }),
+    ]);
+    expect(calls.closePull).toEqual([77]);
+    expect(calls.openPr).toHaveLength(1);
+  });
+
+  it('别人开着的 PR 不关，仍是 ISSUE_CLAIMED；和上一代的 PR 混在一起时上一代的也不关', async () => {
+    const previous = 'fleet/12-t01234567';
+    const current = 'fleet/12-taabbccdd';
+    for (const others of [
+      [{ number: 88, body: '', headRef: 'local/12-login' }],
+      [
+        { number: 77, body: '', headRef: previous },
+        { number: 89, body: '**需求**：\nCloses #12\n', headRef: 'feat/x' },
+      ],
+    ]) {
+      const { ports, calls } = setup({ claims: () => others });
+      const err = await ports
+        .openPr(
+          {
+            taskId: 't1',
+            repo,
+            branch: current,
+            head: m.head,
+            title: '登录',
+            body,
+            generation: 2,
+          },
+          ctx,
+        )
+        .catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: 'ISSUE_CLAIMED', retryable: false });
+      expect(calls.closePull ?? []).toEqual([]);
+      expect(calls.commentPull ?? []).toEqual([]);
       expect(calls.openPr).toBeUndefined();
     }
   });

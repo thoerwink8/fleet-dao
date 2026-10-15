@@ -1,11 +1,13 @@
 // 被撤的任务可以重做（jobs/redo.ts）：同一张单另起一代，编号 task:<仓>#<号>:r2。
-// 旧代必须已经终止；还在跑就拒绝。重做不许改旧代的记录（故意造出覆盖，这条就红）。
+// 旧代已经终止才能另起。还在跑但只是停在 parked：先叫停再另起。真在跑仍拒绝。
+// 没给叫停口子时，任何还在跑的都拒绝。重做不许改旧代的记录（故意造出覆盖，这条就红）。
 import { parseTaskWorkflowId, taskWorkflowId } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
   generationLife,
   MAX_TASK_GENERATION,
   readTaskGenerations,
+  redoCanStop,
   redoTask,
   runningTaskWorkflowId,
   signalTaskWorkflowId,
@@ -50,6 +52,16 @@ function world(rows: Row[]) {
   };
 }
 
+describe('重做认不认这一代可以叫停', () => {
+  it('停着等人、已经在收尾放弃可以等完再重做；真在干活、被人暂停不行', () => {
+    expect(redoCanStop('parked')).toBe(true);
+    expect(redoCanStop('abandoned')).toBe(true);
+    expect(redoCanStop('implement')).toBe(false);
+    expect(redoCanStop('paused')).toBe(false);
+    expect(redoCanStop(undefined)).toBe(false);
+  });
+});
+
 describe('撤掉以后可以重做', () => {
   it('旧代已经终止：另起 :r2，旧记录原样留着', async () => {
     const old = { note: '第一代留下来的' };
@@ -62,6 +74,53 @@ describe('撤掉以后可以重做', () => {
     expect(w.store.get(id1)?.record).toEqual({ note: '第一代留下来的' });
     expect(w.store.get('task:acme/demo#12:r2')?.record).not.toBe(old);
     expect(w.store.get('task:acme/demo#12:r2')?.life).toBe('running');
+  });
+
+  it('上一代停在 parked：先叫停再另起，一步做成，旧记录留着', async () => {
+    const old = { note: '停着等人' };
+    const w = world([{ workflowId: id1, generation: 1, life: 'running', record: old }]);
+    const stopped: string[] = [];
+    const outcome = await redoTask({
+      ...w,
+      async posture(workflowId) {
+        expect(workflowId).toBe(id1);
+        return 'parked';
+      },
+      async abandonParked(workflowId) {
+        stopped.push(workflowId);
+        const row = w.store.get(workflowId);
+        if (row) row.life = 'terminated';
+      },
+    });
+    expect(outcome).toEqual({ ok: true, workflowId: 'task:acme/demo#12:r2', generation: 2 });
+    expect(stopped).toEqual([id1]);
+    expect(w.started).toEqual(['task:acme/demo#12:r2']);
+    expect(w.store.get(id1)?.life).toBe('terminated');
+    expect(w.store.get(id1)?.record).toBe(old);
+    expect(w.store.get('task:acme/demo#12:r2')?.life).toBe('running');
+  });
+
+  it('上一代真在跑：仍拒绝，提示先叫停，不叫停、不另起', async () => {
+    const old = { note: '还在跑' };
+    const w = world([{ workflowId: id1, generation: 1, life: 'running', record: old }]);
+    const asked: string[] = [];
+    let abandoned = 0;
+    const outcome = await redoTask({
+      ...w,
+      async posture(workflowId) {
+        asked.push(workflowId);
+        return 'running';
+      },
+      async abandonParked() {
+        abandoned += 1;
+      },
+    });
+    expect(outcome).toEqual({ ok: false, why: `上一代还在跑（${id1}），先叫停再重做` });
+    expect(asked).toEqual([id1]);
+    expect(abandoned).toBe(0);
+    expect(w.started).toEqual([]);
+    expect(w.store.get(id1)?.life).toBe('running');
+    expect(w.store.get(id1)?.record).toBe(old);
   });
 
   it('旧任务还在跑：拒绝，说明先叫停，不另起、不碰记录', async () => {

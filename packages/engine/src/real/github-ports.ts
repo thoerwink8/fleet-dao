@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
-import { GATE_CONTEXT, otherPrOnIssue } from '@fleet-dao/conventions';
+import { GATE_CONTEXT, issueOfBranch, pullsOnIssue } from '@fleet-dao/conventions';
 import type { GitHub, PrBodyInput } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { CiResult, SyncResult } from '../decisions/types.ts';
@@ -21,6 +21,7 @@ import {
   type WaitCiInput,
   type Worktree,
 } from '../ports.ts';
+import { isTaskBranch } from '../task-branch.ts';
 import type { UserExec } from './exec.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
 import {
@@ -111,6 +112,35 @@ type GitHubPorts = Pick<
   EnginePorts,
   'createWorktree' | 'removeWorktree' | 'pushBranch' | 'openPr' | 'waitCi' | 'syncMainline' | 'closeIssue'
 >;
+
+/** 重做的新一代取代上一代留下的 PR：先留一句评论，再关掉。评论按代幂等，重试不会写第二遍。 */
+async function closeSuperseded(
+  gh: EngineGitHub,
+  repo: { owner: string; name: string },
+  prNumber: number,
+  generation: number,
+  ctx: PortContext,
+): Promise<void> {
+  await mapped(() =>
+    gh.commentPull(
+      {
+        repo,
+        prNumber,
+        key: `redo-supersede:${generation}`,
+        body: `被第 ${generation} 代重做取代`,
+      },
+      ctx,
+    ),
+  );
+  await mapped(() => gh.claims.closePull(repo, prNumber));
+}
+
+/** 这张开着的 PR 是不是这张单自己上一代任务工作流留下的（分支 fleet/<单号>-t<8 位>）。别人的分支、本机 local/ 不是。 */
+function ownPreviousPull(headRef: string | undefined, issue: number): boolean {
+  if (!headRef || !isTaskBranch(headRef)) return false;
+  const parsed = issueOfBranch(headRef);
+  return parsed?.executor === 'engine' && parsed.issue === issue;
+}
 
 function prBody(body: PrBody): PrBodyInput {
   return {
@@ -614,19 +644,37 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     },
 
     async openPr(input, ctx) {
-      // 开之前查同一张单有没有别人开着的 PR（本机的 local/<单号>-、或「需求」栏挂着它，决定 0096）：有就不开，停下等人看
+      // 开之前查同一张单有没有别人开着的 PR（本机的 local/<单号>-、或「需求」栏挂着它，决定 0096）：有就不开，停下等人看。
+      // 重做的新一代（generation ≥ 2）如果挡着的全是自己上一代的任务分支，先关掉并留一句「被第 N 代重做取代」，再开。
+      // 有一张不是自己上一代的，一台都不关，照旧 ISSUE_CLAIMED。
       const issue = input.body.requirement;
       if (issue !== undefined) {
         const pulls = await mapped(() =>
           gh.claims.openPulls({ owner: input.repo.owner, name: input.repo.name }),
         );
-        const other = otherPrOnIssue(pulls, issue, input.branch);
-        if (other !== null) {
-          throw new PortError(
-            'ISSUE_CLAIMED',
-            `#${issue} 已经有开着的 PR #${other} 在做（本机或别的分支），不再开第二个；看 #${other} 合不合，合了这张单就收，不合关掉它再点继续`,
-            { retryable: false, details: { otherPr: other } },
-          );
+        const hits = pullsOnIssue(pulls, issue, input.branch);
+        if (hits.length > 0) {
+          const generation = input.generation;
+          const ours = hits.filter((pull) => ownPreviousPull(pull.headRef, issue));
+          const foreign = hits.filter((pull) => !ownPreviousPull(pull.headRef, issue));
+          if (
+            generation !== undefined &&
+            Number.isInteger(generation) &&
+            generation >= 2 &&
+            foreign.length === 0 &&
+            ours.length > 0
+          ) {
+            for (const pull of [...ours].sort((a, b) => a.number - b.number)) {
+              await closeSuperseded(gh, input.repo, pull.number, generation, ctx);
+            }
+          } else {
+            const other = Math.min(...hits.map((pull) => pull.number));
+            throw new PortError(
+              'ISSUE_CLAIMED',
+              `#${issue} 已经有开着的 PR #${other} 在做（本机或别的分支），不再开第二个；看 #${other} 合不合，合了这张单就收，不合关掉它再点继续`,
+              { retryable: false, details: { otherPr: other } },
+            );
+          }
         }
       }
       const r = await mapped(() =>
