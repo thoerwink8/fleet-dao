@@ -28,7 +28,14 @@
 import { judgeRun, type RateLimitReading, type SessionUser, type TranscriptEntry } from '@fleet-dao/adapters';
 import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import type { Db, RouteLaunchFacts } from '@fleet-dao/db';
-import { appendRunTranscript, routeLaunchFacts, savePoolQuota, type TranscriptRow } from '@fleet-dao/db';
+import {
+  appendRunTranscript,
+  ensureRunForTranscript,
+  finishRun,
+  routeLaunchFacts,
+  savePoolQuota,
+  type TranscriptRow,
+} from '@fleet-dao/db';
 import { routeEffortProblem } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { CarpoolRejection } from '../jobs/carpool-outage.ts';
@@ -54,7 +61,7 @@ import {
   removeIo,
   type SessionHandoff,
 } from './session-handoff.ts';
-import { TranscriptRecorder } from './transcript-recorder.ts';
+import { dbWriteFailure, TranscriptRecorder } from './transcript-recorder.ts';
 import type { WorkTrees } from './worktrees.ts';
 
 /** 总时长比 one-shot 的时限早多久到（毫秒）：驱动先收场，one-shot 的时限信号是兜底。 */
@@ -284,11 +291,25 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       purpose: 'work',
     };
     // 内存峰值（#948）：会话跑着时采它 scope 的 memory.peak，收场后交结果；scope 一收场 cgroup 就没了，只能边跑边读
-    // 会话过程记录（#1640）：提示词记第一条，插头交来的接着记；runOneShot 写的开跑那一行在前（外键），收场前等写完
+    // 会话过程记录（#1640）：提示词记第一条，插头交来的接着记；收场前等写完。
+    // 外键要求 runs 里先有这一行。三段会话由 runOneShot 先写开跑那一行（有了就不改）。
+    // 提需求、临时指挥官不走 runOneShot：补一行没有 route_id 的锚点（不占池的名额），收场再补结局。
     const db = deps.db;
     const write =
       deps.transcriptWrite ??
       (db ? (id: string, rows: TranscriptRow[]) => appendRunTranscript(db, id, rows) : undefined);
+    let transcriptAnchor = false;
+    if (write && db && deps.transcriptWrite === undefined) {
+      try {
+        transcriptAnchor = await ensureRunForTranscript(db, {
+          id: runId,
+          segment: input.segment,
+          model: input.modelId,
+        });
+      } catch (err) {
+        log('会话过程记录的锚点行没写上（过程记录可能整批写不进）', { runId, ...dbWriteFailure(err) });
+      }
+    }
     const recorder = write
       ? new TranscriptRecorder({
           runId,
@@ -297,6 +318,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
           ...(deps.transcriptFlushMs === undefined ? {} : { flushEveryMs: deps.transcriptFlushMs }),
         })
       : undefined;
+    let anchorOutcome: 'done' | 'failed' | 'killed' | undefined;
     // 接回时提示词那一条（编号 0）上一个引擎记过了：占住编号，后面重读出来的条目编号和原来一样，库里按编号跳过重复的
     recorder?.prompt(attach ? '' : cmd.stdin);
     // Mirasim 的模型会话不在 fleet-agent-<runId>.scope 里（那个目录根本不会建）。本机 scope 是桥接自己起的
@@ -451,10 +473,26 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
           log('拼车被拒的证据没交给切号', { runId, error: errMessage(err) });
         }
       }
+      anchorOutcome = outcome.killed ? 'killed' : outcome.exitCode === 0 ? 'done' : 'failed';
       return outcome;
     } finally {
       leaveHandoff?.();
       await recorder?.close();
+      // 只收自己补的那一行。三段会话的开跑行留给 runOneShot 收场，带着用量；脱开引擎跑的还没结束，留着。
+      if (transcriptAnchor && !detached && db) {
+        const settled = anchorOutcome ?? 'failed';
+        try {
+          await finishRun(db, {
+            runId,
+            outcome: settled,
+            ...(settled === 'done'
+              ? {}
+              : { failureReason: settled === 'killed' ? '会话被叫停或超时' : '会话没成功收场' }),
+          });
+        } catch (err) {
+          log('会话过程记录的锚点行没收到场', { runId, ...dbWriteFailure(err) });
+        }
+      }
       await finishPeak().catch(() => undefined);
       await finishCpu().catch(() => undefined);
       // 放手了：临时目录、收发目录都留给接回的那个引擎

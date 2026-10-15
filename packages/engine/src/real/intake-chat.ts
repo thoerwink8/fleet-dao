@@ -9,7 +9,8 @@
 // - 多轮：会话活着（检出还在、路由没换）就 --resume 续同一个会话，只喂新消息；路由换了、检出没了就删掉旧检出、按存档重起。
 //   选了模型的需求只派那个模型（PickRouteInput.models），续会话时黏在原路由上（stickRouteId）。
 // - 别家挑错：一次性会话，避开指挥官那一族，自己的检出用完就删，不碰指挥官的会话。
-// - 不进 runs 表（runs 的 segment 只认三段，和 groom 一样）；失败一律交回原因，不抛。
+// - 模型和用量不走 runOneShot 的记账（和 groom 一样，不占池的名额）。过程记录要外键，Spawner 补一行没有 route_id 的锚点。
+//   失败一律交回原因，不抛。
 
 import { randomUUID } from 'node:crypto';
 import {

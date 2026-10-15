@@ -160,6 +160,53 @@ describe('攒批', () => {
 });
 
 describe('写库失败不影响会话', () => {
+  it('【故意造出的失败】写抛错：日志带 pg 错误码、约束名、detail，不带整段 prompt', async () => {
+    const marker = 'PROMPT_MARKER_不要进日志';
+    const logs: { message: string; fields: Record<string, unknown> }[] = [];
+    const cause = Object.assign(
+      new Error(
+        'insert or update on table "run_transcript" violates foreign key constraint "run_transcript_run_id_runs_id_fk"',
+      ),
+      {
+        code: '23503',
+        constraint_name: 'run_transcript_run_id_runs_id_fk',
+        detail: 'Key (run_id)=(4f231e8e-0000-4000-8000-000000000001) is not present in table "runs".',
+      },
+    );
+    const r = new TranscriptRecorder({
+      runId: 'run-1',
+      write: async () => {
+        throw new Error(
+          `Failed query: insert into "run_transcript" ("text") values ($1)\nparams: ${marker}`,
+          {
+            cause,
+          },
+        );
+      },
+      log: (message, fields) => void logs.push({ message, fields: fields ?? {} }),
+      batchSize: 1,
+      flushEveryMs: 60_000,
+    });
+    r.prompt(marker);
+    await r.close();
+    const wrote = logs.filter((l) => l.message.includes('写不进库'));
+    expect(wrote).toHaveLength(1);
+    expect(wrote[0]?.fields).toMatchObject({
+      code: '23503',
+      constraint: 'run_transcript_run_id_runs_id_fk',
+      detail: 'Key (run_id)=(4f231e8e-0000-4000-8000-000000000001) is not present in table "runs".',
+    });
+    const blob = JSON.stringify(logs);
+    expect(blob).not.toContain(marker);
+    expect(blob).not.toContain('Failed query:');
+    const dropped = logs.find((l) => l.message.includes('收场时仍没写进库'));
+    expect(dropped?.fields).toMatchObject({
+      code: '23503',
+      constraint: 'run_transcript_run_id_runs_id_fk',
+      detail: 'Key (run_id)=(4f231e8e-0000-4000-8000-000000000001) is not present in table "runs".',
+    });
+  });
+
   it('【故意造出的失败】写抛错：record / prompt / close 都不抛，只记一次日志', async () => {
     const logs: string[] = [];
     const r = new TranscriptRecorder({
