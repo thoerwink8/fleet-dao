@@ -208,12 +208,14 @@ check "别家登记只有 8443/tcp" "${HK_FW_FOREIGN[*]-}" "8443/tcp"
 block=$(awk 'BEGIN { p = 0 } /^# ── 约定/{ p = 1 } /^FLEET_DOMAIN=/{ exit } p' "$HK")
 has "约定注释写了不归本仓管" "$block" "不归本仓管"
 has "约定注释指向 ops.md 端口表" "$block" "ops.md"
-row13=$(sed -n '13p' "$OPS")
+# 按「公网入站（ufw）」这一行认，不钉行号：文首加一段，原来的第 13 行就指到别的格子上。
+inbound=$(grep -F '| 公网入站（ufw） |' "$OPS")
+check "公网入站表只有这一行" "$(grep -cF '| 公网入站（ufw） |' "$OPS" || true)" 1
 for p in 22/tcp 80/tcp 443/tcp 4500/udp 8443/tcp; do
-  has "公网入站行有 $p" "$row13" "$p"
+  has "公网入站行有 $p" "$inbound" "$p"
 done
-has "公网入站行写明白名单在 deploy/hk.sh" "$row13" "deploy/hk.sh"
-has "公网入站行写明在约定里改" "$row13" "约定"
+has "公网入站行写明白名单在 deploy/hk.sh" "$inbound" "deploy/hk.sh"
+has "公网入站行写明在约定里改" "$inbound" "约定"
 ops_text=$(<"$OPS")
 has "香港端口表写了改 HK_FW_OURS" "$ops_text" "HK_FW_OURS"
 has "香港端口表写了改 HK_FW_FOREIGN" "$ops_text" "HK_FW_FOREIGN"
