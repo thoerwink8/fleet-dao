@@ -2,12 +2,13 @@
 // 用假驱动（不起真执行体、不碰 sudo / systemd）：驱动报告怎么整理成 one-shot 的结局、路由和会话用户读不到时明确失败、
 // 临时目录起前交给会话用户、收场后删（驱动抛错也删）、用量花费进 runs。每条失败路径故意造一次。
 
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildSessionEnv, type RateLimitReading, type RunFacts, type SessionUser } from '@fleet-dao/adapters';
 import type { Db, RouteLaunchFacts, TranscriptRow } from '@fleet-dao/db';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CarpoolRejection } from '../../src/jobs/carpool-outage.ts';
 import type { CpuUsageDeps } from '../../src/real/cpu-usage.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
@@ -17,8 +18,9 @@ import {
   outcomeOfReport,
   SEGMENT_WALL_MARGIN_MS,
 } from '../../src/real/segment-spawner.ts';
+import { DETACHED_MARK, type SessionHandoff, sessionHandoff } from '../../src/real/session-handoff.ts';
 import type { RunRecord } from '../../src/runner/not-wired.ts';
-import { OneShotError, type OneShotInput, runOneShot } from '../../src/runner/one-shot.ts';
+import { OneShotDetached, OneShotError, type OneShotInput, runOneShot } from '../../src/runner/one-shot.ts';
 
 const USER = 'fleet-agent-carpool' as SessionUser;
 const RUN_ID = 'run-0001-aaaa';
@@ -102,6 +104,8 @@ function harness(
     cpuUsage?: CpuUsageDeps;
     /** 会话过程记录（#1640）写到哪；不给就不记。 */
     transcriptWrite?: (runId: string, rows: TranscriptRow[]) => Promise<void>;
+    /** 动手会话脱开引擎跑（#2238）。 */
+    handoff?: SessionHandoff;
   } = {},
 ): Harness {
   const calls: Harness['calls'] = [];
@@ -150,6 +154,7 @@ function harness(
     ...(opts.cpuUsage ? { cpuUsage: opts.cpuUsage } : {}),
     ...(opts.transcriptWrite ? { transcriptWrite: opts.transcriptWrite, transcriptFlushMs: 5 } : {}),
     ...(opts.onCarpoolRejection ? { onCarpoolRejection: opts.onCarpoolRejection } : {}),
+    ...(opts.handoff ? { handoff: opts.handoff } : {}),
     log: (message, fields) => void logs.push(`${message} ${JSON.stringify(fields ?? {})}`),
   });
   const run: Harness['run'] = (input = {}, timeoutMinutes = 60) =>
@@ -169,7 +174,9 @@ function harness(
       {
         spawn,
         runs: {
-          async start() {},
+          async start() {
+            order.push('start');
+          },
           async record(r) {
             recorded.push(r);
           },
@@ -464,7 +471,7 @@ describe('hostSegmentSpawner · 成功', () => {
   it('临时目录：起驱动前交给会话用户，收场后删', async () => {
     const h = harness();
     await h.run();
-    expect(h.order).toEqual(['adopt', 'run', 'remove']);
+    expect(h.order).toEqual(['start', 'adopt', 'run', 'remove']);
     expect(h.adopted).toEqual([{ dir: `/var/lib/fleet-work/_tmp/${RUN_ID}`, user: USER }]);
     expect(h.removed).toEqual([`/var/lib/fleet-work/_tmp/${RUN_ID}`]);
   });
@@ -592,7 +599,7 @@ describe('hostSegmentSpawner · 经 runOneShot 的结局', () => {
       },
     });
     await expect(h.run()).rejects.toThrow(OneShotError);
-    expect(h.order).toEqual(['adopt', 'run', 'remove']);
+    expect(h.order).toEqual(['start', 'adopt', 'run', 'remove']);
   });
 });
 
@@ -869,5 +876,91 @@ describe('hostSegmentSpawner · 会话过程记录（#1640）', () => {
     const r = await h.run();
     expect(r.outcome).toBe('done');
     expect(h.calls[0]?.hooks.onTranscript).toBeUndefined();
+  });
+});
+
+describe('hostSegmentSpawner · 脱开引擎跑、引擎重启后接回（#2238：发版不再停在跑的动手会话）', () => {
+  /** 驱动跑着、直到被放手（io.release）或被叫停：放手以后这次调用永远不落定（和 detached.ts 一样）。 */
+  const untilReleasedOrStopped = (spec: HostRunSpec, hooks: HostRunHooks): Promise<HostReport> =>
+    new Promise((resolve) => {
+      // 真驱动起会话前建好收发目录（detached.ts 的 prepareIo）
+      if (hooks.io && !hooks.io.attach) mkdirSync(hooks.io.dir, { recursive: true });
+      const stopped = () =>
+        resolve(report({ facts: okFacts({ exitCode: null, killed: 'aborted' }), answer: '' }));
+      // 进来前就叫停了（接回时时限早过了：0 毫秒的计时器可能先于驱动响）：当场收，不然这个假驱动一直等
+      if (hooks.signal?.aborted) stopped();
+      hooks.signal?.addEventListener('abort', stopped);
+      void spec;
+    });
+
+  it('动手段（给了 detach）跑在命令行那几家上：收发目录交给驱动、放手信号接上；正常收场连收发目录一起删', async () => {
+    const handoff = sessionHandoff(join(tmp, 'io'));
+    const h = harness({ handoff });
+    const got = await h.run({ detach: {} });
+    expect(got.outcome).toBe('done');
+    const io = h.calls[0]?.hooks.io;
+    expect(io).toMatchObject({ dir: join(tmp, 'io', RUN_ID) });
+    expect(io?.release).toBe(handoff.signal);
+    expect(io).not.toHaveProperty('attach');
+    expect(existsSync(join(tmp, 'io', RUN_ID))).toBe(false);
+    expect(h.removed).toEqual([`/var/lib/fleet-work/_tmp/${RUN_ID}`]);
+  });
+
+  it('没给 detach（验收、整理、指挥官会话）、Mirasim 上的动手段：照旧走管道，不交收发目录', async () => {
+    const handoff = sessionHandoff(join(tmp, 'io'));
+    const plain = harness({ handoff });
+    await plain.run();
+    expect(plain.calls[0]?.hooks).not.toHaveProperty('io');
+    const relay = harness({ handoff, route: route({ hostId: 'mirasim' }) });
+    await relay.run({ detach: {} });
+    expect(relay.calls[0]?.hooks).not.toHaveProperty('io');
+  });
+
+  it('引擎要走了（停机信号）：会话不停，写上放手标记、临时目录和收发目录都留着，one-shot 抛 OneShotDetached，runs 那一行不收', async () => {
+    const handoff = sessionHandoff(join(tmp, 'io'));
+    const h = harness({ handoff, driverRun: untilReleasedOrStopped });
+    const running = h.run({ detach: {} });
+    await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+    expect(handoff.leave('收到 SIGTERM')).toEqual([RUN_ID]);
+    const err = await running.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(OneShotDetached);
+    expect(err).toMatchObject({ runId: RUN_ID, startedAt: expect.any(String) });
+    // 会话没被叫停：驱动的信号没响
+    expect(h.calls[0]?.hooks.signal?.aborted).toBe(false);
+    expect(existsSync(join(tmp, 'io', RUN_ID, DETACHED_MARK))).toBe(true);
+    expect(h.removed).toEqual([]);
+    expect(h.recorded).toEqual([]);
+  });
+
+  it('接回：不交接临时目录、不开跑，删掉放手标记、驱动按 attach 从文件读回；结局照原来的起点记到同一行', async () => {
+    const handoff = sessionHandoff(join(tmp, 'io'));
+    const dir = join(tmp, 'io', RUN_ID);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, DETACHED_MARK), 'x');
+    const h = harness({ handoff });
+    const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const got = await h.run({ detach: { attach: { startedAt } } });
+    expect(got).toMatchObject({ outcome: 'done', startedAt });
+    expect(h.calls[0]?.hooks.io).toMatchObject({ dir, attach: true });
+    expect(h.order).toEqual(['run', 'remove']);
+    expect(h.adopted).toEqual([]);
+    expect(h.recorded).toEqual([expect.objectContaining({ runId: RUN_ID, outcome: 'done', startedAt })]);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it('【故意造出的失败】接回的会话早过了原来的时限：one-shot 当场按超时收它，不再给一整份时限', async () => {
+    const handoff = sessionHandoff(join(tmp, 'io'));
+    const h = harness({ handoff, driverRun: untilReleasedOrStopped });
+    const startedAt = new Date(Date.now() - 61 * 60_000).toISOString();
+    const got = await h.run({ detach: { attach: { startedAt } } }, 60);
+    expect(got.outcome).toBe('timeout');
+  });
+
+  it('【故意造出的失败】要接回、可这个引擎没装收发目录（或路由换成了 Mirasim）：明确报起不来，不当成起了新会话', async () => {
+    const h = harness();
+    await expect(h.run({ detach: { attach: { startedAt: new Date().toISOString() } } })).rejects.toThrow(
+      /接回会话 .* 没接成：这个引擎没装收发目录/,
+    );
+    expect(h.calls).toEqual([]);
   });
 });

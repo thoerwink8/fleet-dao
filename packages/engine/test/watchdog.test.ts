@@ -2,7 +2,7 @@
 // 真 Temporal 测试服务端上的工作流。需求里的每一种都故意造一次：停了（stale）、连着失败（failing）、从没跑过（never）、
 // 恢复了自动撤（写清为什么）、读不到登记表算没查成、推送没写进去记没跑成下一轮重推。看门狗自己停了由后端现算，
 // 在 packages/api 的 watchdog-health.test.ts。
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -717,6 +717,55 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
     expect((await alertOf(rel?.dedupeKey ?? ''))?.body).toContain('已撤：发版现在不用人看了');
   });
 
+  it('【故意造出的失败】release.sh 没退回、末行记「健康检查没过」，接活脚本发后体检过了（进度 done、current 就是目标）：不报，旧卡撤掉；current 不是目标照报（#2207）', async () => {
+    const PREV = 'df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e';
+    const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
+    history(
+      `2026-10-14T22:49:55Z ${PREV} release`,
+      `2026-10-14T23:04:53Z ${NEW} release`,
+      `2026-10-14T23:05:30Z ${NEW} unhealthy`,
+    );
+    writeFileSync(
+      join(dir, '.train', 'release-train.json'),
+      JSON.stringify({
+        schema: 1,
+        status: 'done',
+        phase: 8,
+        startedAt: at(-10).toISOString(),
+        target: { kind: 'sha', value: NEW },
+      }),
+    );
+    writeFileSync(
+      join(dir, '.auto', 'state.json'),
+      JSON.stringify({ auto: { note: '在用的就是主线头，没有要发的' } }),
+    );
+    // 旧版看门狗当时开的那条
+    await upsertAlert(t.db, {
+      dedupeKey: `watchdog:release:${NEW.slice(0, 12)}:unhealthy`,
+      level: 'alert',
+      taskId: null,
+      title: '发版要人看：新版没发成或退回了，自动发版停着',
+      body: '发布历史最近一条是「健康检查没过」',
+    });
+    symlinkSync(NEW, join(dir, 'current'));
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([]);
+    expect((await alertOf(`watchdog:release:${NEW.slice(0, 12)}:unhealthy`))?.body).toContain(
+      '已撤：发版现在不用人看了',
+    );
+
+    // current 还是上一版（没切过去 / 退回了）：照报；自动发版没停（进度 done），标题不说「停着」
+    rmSync(join(dir, 'current'));
+    symlinkSync(PREV, join(dir, 'current'));
+    clock = at(1);
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([`watchdog:release:${NEW.slice(0, 12)}:unhealthy`]);
+    const card = (await openAlerts())[0];
+    expect(card?.title).toBe('发版要人看：新版没发成或退回了');
+    expect(card?.body).toContain('自动发版没停');
+    expect(card?.body).not.toContain('不会再发');
+  });
+
   it('重放 2026-10-14 22:58Z：一趟正常自动发版在走（真格式进度记录 running）不报，挂在上一版身上的误报撤掉；超过阈值才报、键写正在发的；发完撤', async () => {
     const PREV = 'df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e';
     const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
@@ -937,6 +986,37 @@ describe('发版和健康页的判法（纯函数）', () => {
         key: 'watchdog:release:train:2f5dc42f4636:failed',
         title: '发版要人看：2f5dc42f4636 这一趟停在「failed」，自动发版停着',
       });
+    });
+
+    it('这一趟落地了（done、current 就是目标），末行「健康检查没过」说的是它：不报；说的是别的提交、或 current 不是目标：报（#2207）', () => {
+      const landed = {
+        last: lastHistoryEntry(`2026-10-14T23:05:30Z ${NEW} unhealthy`),
+        trainStatus: 'done',
+        trainSince: START.toISOString(),
+        trainSha: NEW,
+        currentSha: NEW,
+        autoNote: null,
+      };
+      expect(judgeReleaseAttention(landed, after(10))).toEqual({ kind: 'fine' });
+      expect(judgeReleaseAttention({ ...landed, currentSha: null }, after(10))).toMatchObject({
+        kind: 'alert',
+      });
+      expect(
+        judgeReleaseAttention(
+          { ...landed, currentSha: 'df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e' },
+          after(10),
+        ),
+      ).toMatchObject({ kind: 'alert', key: 'watchdog:release:2f5dc42f4636:unhealthy' });
+      // 退回了：末行是 auto-rollback（上一版），照报
+      expect(
+        judgeReleaseAttention(
+          { ...landed, last: lastHistoryEntry(`2026-10-14T23:05:31Z ${NEW} auto-rollback`) },
+          after(10),
+        ),
+      ).toMatchObject({ kind: 'alert' });
+      // 进度没成（failed）：照报，而且自动发版真停着
+      const v = judgeReleaseAttention({ ...landed, trainStatus: 'failed' }, after(10));
+      expect(v).toMatchObject({ kind: 'alert', title: '发版要人看：新版没发成或退回了，自动发版停着' });
     });
 
     it('阈值不小于发版接活脚本各步上限加起来（到上限它自己写成没成；没到的一律当正常在走）', async () => {

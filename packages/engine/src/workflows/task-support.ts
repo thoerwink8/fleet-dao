@@ -299,7 +299,8 @@ export class AutoEscape extends Error {
 
 /**
  * 动手会话没跑成、失败分流判停下等人时，先自动换一条路由（避开这个模型）重派一次的码（决定 0093，task-session.ts）：
- * 被引擎在时限上叫停（aborted）、总时长到顶、起不来。只有人能修的（没权限、卫生检查、登录失效……）不在里面。
+ * 被引擎在时限上叫停（aborted）、总时长到顶、起不来、中转这一路额度用完或欠费（失败分流 QT3：换一路就能干，充值归人另办）。
+ * 只有人能修的（没权限、卫生检查、登录失效……）不在里面。只加老历史里不会出现的码：已经记下的判断重放时走的分支不变。
  */
 export const AUTO_REDISPATCH_CODES: readonly string[] = [
   'aborted',
@@ -307,6 +308,7 @@ export const AUTO_REDISPATCH_CODES: readonly string[] = [
   'spawn_failed',
   'spawn_timeout',
   'startup_timeout',
+  'relay_quota_exhausted',
 ];
 
 /**

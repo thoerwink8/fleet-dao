@@ -50,7 +50,7 @@ export async function runCursorAgent(
   spec: CursorRunSpec,
   options: CursorRunOptions,
 ): Promise<CursorRunReport> {
-  await assertRunnable(options.command, spec.prompt, spec.cwd);
+  await assertRunnable(options.command, spec.prompt, spec.cwd, options.io);
   const args = buildCursorArgs({
     model: spec.model,
     session: spec.session,

@@ -280,6 +280,38 @@ describe('动手会话没跑成：先换路由重派一次（决定 0093）', { 
     expect(world.states.some((s) => s.doing.includes('自动换一条路由重派一次'))).toBe(true);
   });
 
+  it('中转这一路额度用完或欠费（QT3，#2249）：不挂起，当场避开这个模型换一条路由重派', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) =>
+        n === 1
+          ? {
+              ok: false,
+              runId: null,
+              outcome: 'failed',
+              evidence: {
+                code: 'relay_quota_exhausted',
+                message:
+                  '中转这一路额度用完或欠费，回答就是上游的通知：Your quota is exhausted. API key status: exceeded USDT balance: -2.160991 USDT',
+                quotaExhausted: false,
+              },
+            }
+          : OK_SEGMENT,
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(2);
+    expect(calls.segment[0]?.route.modelId).toBe('m1');
+    expect(calls.segment[1]?.route.modelId).toBe('m2');
+    expect(world.states.some((s) => s.doing.includes('relay_quota_exhausted'))).toBe(true);
+    expect(world.alerts.filter((a) => a.level !== 'info')).toEqual([]);
+  });
+
   it('【故意造出的失败】换了路由还是起不来：再判停下就真停下等人', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({

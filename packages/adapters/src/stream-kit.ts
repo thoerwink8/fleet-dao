@@ -189,9 +189,27 @@ export function exitStatusUntrusted(command: string): string | undefined {
  */
 export function looksLikeQuotaExhausted(text: string | undefined): boolean {
   if (!text) return false;
-  return /\b402\b|payment required|out of credits|run out of|insufficient (balance|credits|quota)|usage limit|quota (exceeded|exhausted)|exceeded your (current )?quota|weekly limit|need a [\w ]*subscription|额度(已)?用(完|尽|满)/i.test(
+  return /\b402\b|payment required|out of credits|run out of|insufficient[ _](?:account )?(balance|credits|quota)|usage limit|quota (?:is |has been )?(exceeded|exhausted)|exceeded your (current )?quota|weekly limit|need a [\w ]*subscription|额度(已)?用(完|尽|满)|余额不足/i.test(
     text,
   );
+}
+
+/**
+ * 中转的上游额度用完、欠费时，有的中转不报错，而是把通知当成模型的回答回来（快照 phase=done、error 为空；
+ * #2249：「Your quota is exhausted. API key status: exceeded … USDT balance: -2.16 USDT」）。
+ * 只认整段回答就是这么一条通知：去掉首尾空白后以通知开头、整段不长。回答里只是提到这些词（测试输出、
+ * 改额度相关代码时的正文）不算——和规则表 codeFieldOnly 一个道理，原文里有这个词不说明是这么失败的。
+ */
+const RELAY_QUOTA_NOTICE =
+  /^(?:error:\s*)?(?:your (?:api )?quota (?:is|has been) (?:exhausted|exceeded)|insufficient[ _](?:account[ _])?(?:balance|credits?|quota|funds)|(?:your )?(?:account )?balance is (?:insufficient|not enough)|api key status: exceeded|(?:账户|账号)?余额不足|(?:账户|账号)?已欠费)/i;
+/** 通知都是一两句话加几行账户信息；比这长的是正经回答。 */
+const RELAY_NOTICE_MAX_CHARS = 600;
+
+/** 整段回答是中转的额度用完 / 欠费通知时返回通知原文（压成一行），否则 undefined。 */
+export function relayQuotaNotice(answer: string | undefined): string | undefined {
+  const text = answer?.trim();
+  if (!text || text.length > RELAY_NOTICE_MAX_CHARS || !RELAY_QUOTA_NOTICE.test(text)) return undefined;
+  return text.replace(/\s*\n\s*/g, ' ');
 }
 
 /** stderr 的最后几行（去掉空行），给「没有终帧」时当原因看。 */

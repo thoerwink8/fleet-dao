@@ -41,6 +41,8 @@ export interface FakeMirasimOptions {
   version?: string;
   /** 对 prompt 帧的应答（可以是按序回的几帧）；返回 undefined = 不应答（模拟没等到 accepted）。 */
   reply?: (prompt: MirasimFrame) => MirasimFrame | MirasimFrame[] | undefined;
+  /** 隔多久才回 prompt 的应答（模拟服务单线程被别的会话堵住，几十秒才读到这一帧）。 */
+  replyDelayMs?: number;
   /** 第一次 subscribe 之后推的帧。 */
   stream?: MirasimFrame[];
   /** 收到 stop 之后往订阅连接推的帧。 */
@@ -88,7 +90,11 @@ export class FakeMirasim {
         break;
       case 'prompt': {
         const reply = this.options.reply?.(frame);
-        for (const f of Array.isArray(reply) ? reply : reply ? [reply] : []) wire.push(f);
+        const push = () => {
+          for (const f of Array.isArray(reply) ? reply : reply ? [reply] : []) wire.push(f);
+        };
+        if (this.options.replyDelayMs) setTimeout(push, this.options.replyDelayMs);
+        else push();
         break;
       }
       case 'subscribe':

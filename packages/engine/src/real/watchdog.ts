@@ -8,7 +8,7 @@
 // 「主线 N 小时没合 PR」（决定 0093）读同一个库的 mergeStallFacts（PR 镜像、任务、拉单记下的等空位单数）。
 // 「在用的账号池额度读数不超过 30 分钟」（决定 0093 从每小时对账搬来）读同一个库的 quotaTable，加额度配置（deploy/quota.json）里写明不读的池。
 // 「提醒真的推到飞书了」读同一个库的 feishuPushFacts（后端写的推送状态、送达记录）。
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, readlink, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadQuotaConfig } from '@fleet-dao/adapters/quota';
 import {
@@ -109,7 +109,30 @@ export async function readReleaseFacts(dir: string): Promise<ReleaseFacts | null
     const v = JSON.parse(state) as { auto?: { note?: unknown } | null } | null;
     autoNote = typeof v?.auto?.note === 'string' ? v.auto.note : null;
   }
-  return { last: lastHistoryEntry(history), trainStatus, trainSince, trainSha, autoNote };
+  return {
+    last: lastHistoryEntry(history),
+    trainStatus,
+    trainSince,
+    trainSha,
+    currentSha: await readCurrentSha(dir),
+    autoNote,
+  };
+}
+
+/**
+ * 法国 current 指向的提交：它是链到 <发布目录>/<40 位提交号> 的符号链接（deploy/release.sh 的 activate）。
+ * 不在、不是链接是 null（判「这一趟落地了没」时当没落地，照报）；链的不是提交号也是 null；别的错照抛。
+ */
+async function readCurrentSha(dir: string): Promise<string | null> {
+  let link: string;
+  try {
+    link = await readlink(join(dir, 'current'));
+  } catch (e) {
+    if (errno(e) === 'ENOENT' || errno(e) === 'EINVAL') return null;
+    throw e;
+  }
+  const base = link.replace(/[/]+$/, '').split(/[/]/).pop() ?? '';
+  return /^[0-9a-f]{40}$/i.test(base) ? base.toLowerCase() : null;
 }
 
 /** 发布目录在不在（在 = 这台是法国）。不在是 false，别的错照抛。 */

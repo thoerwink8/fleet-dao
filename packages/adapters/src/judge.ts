@@ -1,5 +1,5 @@
-// 判一次会话的结果。顺序即优先级：进程没起来 → 起没起来没查成 → 被我们杀掉 → 跑完才看出的不一致 → 额度用满
-// → 没有终帧 → 终帧报错 → 退出码 → 中转没查成 → 交付。各家插头把自己的记录整理成 RunFacts，判法只有这一份。
+// 判一次会话的结果。顺序即优先级：进程没起来 → 起没起来没查成 → 被我们杀掉 → 跑完才看出的不一致 → 中转回了额度通知
+// → 额度用满 → 没有终帧 → 终帧报错 → 退出码 → 中转没查成 → 交付。各家插头把自己的记录整理成 RunFacts，判法只有这一份。
 import type { RunOutcome } from '@fleet-dao/shared';
 import type { DeliveryCheck } from './delivery.ts';
 import type { KillReason, RunUsage } from './types.ts';
@@ -27,6 +27,11 @@ export interface RunFacts {
   terminal?: { isError: boolean; detail: string };
   /** 过程记录里出现过「账号池额度已用满」。 */
   quotaExhausted: boolean;
+  /**
+   * 走中转时，整段回答就是中转的额度用完 / 欠费通知（stream-kit 的 relayQuotaNotice）：会话「正常结束」，活一点没干。
+   * 不是执行体的错，也不是等一会儿就好的时间窗：这一路要换（充值前回的都是这句）。值是通知原文。
+   */
+  relayQuota?: string;
   /** 执行体最后说的话（stderr 末几行、报错原文）：没有终帧时拿它当原因，不写死一个占位词。 */
   lastWords?: string;
   /**
@@ -51,6 +56,7 @@ export type VerdictReason =
   | 'spawn_failed'
   | 'launch_unknown' // 起没起来没查成：先对账，别重派
   | 'quota_exhausted'
+  | 'relay_quota_exhausted' // 中转把额度用完 / 欠费的通知当回答回来：换一路，不挂起、不当成没交付
   | 'no_result'
   | 'agent_error'
   | 'exit_nonzero'
@@ -101,6 +107,12 @@ export function judgeRun(facts: RunFacts, delivery?: DeliveryCheck): RunVerdict 
   if (facts.mismatch) {
     const { kind, expected, observed } = facts.mismatch;
     return failed(`${kind}_mismatch`, `${MISMATCH_TEXT[kind]}：点名 ${expected}，实际 ${observed}`);
+  }
+  if (facts.relayQuota) {
+    return failed(
+      'relay_quota_exhausted',
+      `中转这一路额度用完或欠费，回答就是上游的通知：${facts.relayQuota}`,
+    );
   }
   if (facts.quotaExhausted && (!facts.terminal || facts.terminal.isError)) {
     return failed('quota_exhausted', '账号池额度已用满，换池或等清零');
