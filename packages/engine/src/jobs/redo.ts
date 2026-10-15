@@ -12,6 +12,7 @@ export {
   generationLife,
   MAX_TASK_GENERATION,
   readTaskGenerations,
+  redoCanStop,
   redoTask,
   runningTaskWorkflowId,
   signalTaskWorkflowId,

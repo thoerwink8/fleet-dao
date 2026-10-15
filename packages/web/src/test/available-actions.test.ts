@@ -3,7 +3,7 @@
 // 已暂停不画「暂停」；在跑且没暂停不画「继续」。置灰的不进这份列表。
 import { describe, expect, test } from 'vitest';
 import type { BoardSubtask } from '../api/types';
-import { type ActionTarget, availableActions } from '../components/task-actions';
+import { type ActionTarget, availableActions, taskActionButtons } from '../components/task-actions';
 
 const base: ActionTarget = { taskId: 't1', issueNumber: 12, title: '给驾驶舱加状态', state: 'running' };
 // 只有 availableActions 会读的字段，够用就行
@@ -43,6 +43,23 @@ describe('availableActions：只画引擎真有人听的动作', () => {
       'resume',
       'stop',
       'redo',
+    ]);
+  });
+
+  test('继续次数用满：继续不能点，菜单和快捷键不提供', () => {
+    const target: ActionTarget = {
+      ...base,
+      state: 'stalled',
+      parkedWhy: '已继续 3 次仍没过，交指挥官',
+    };
+    expect(availableActions(target)).toEqual(['stop', 'redo']);
+    expect(taskActionButtons(target)).toEqual([
+      {
+        action: 'resume',
+        disabledReason: '继续次数已用满（3 次），继续无效；要重开用 redo',
+      },
+      { action: 'stop' },
+      { action: 'redo' },
     ]);
   });
 

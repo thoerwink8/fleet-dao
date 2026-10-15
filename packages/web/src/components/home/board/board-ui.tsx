@@ -141,6 +141,7 @@ export function targetOfItem(item: HomeRunning, remote: boolean): ActionTarget |
     title: item.title,
     state: item.state ?? 'running',
     ...(item.paused === undefined ? {} : { paused: item.paused }),
+    ...(item.parked === undefined ? {} : { parkedWhy: item.parked }),
   };
 }
 
