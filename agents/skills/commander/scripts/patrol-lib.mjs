@@ -8,7 +8,8 @@
 //   STALE_MINUTES 分钟。
 // - 发版和健康页也读（2026-10-14 法国发版失败，巡检还报 OK 近一小时）：/healthz 非 200、最近一次发版是 unhealthy / auto-rollback、发版进度记录停在
 //   failed / blocked 这类收了尾却没成的状态或 running 超过 LIMITS.trainStuckMinutes（trainReason）、自动发布状态里写着「要人看」，一律 BROKEN（列出红的检查）；
-//   running 没超时是一趟正常发版在走（自动发版每 5 分钟一班），不报。闸在 running 时写「有一趟发版在跑，等它收尾」，不含「要人看」；在用版本落后主线超过 LIMITS.lagCommits 个提交
+//   running 没超时是一趟正常发版在走（自动发版每 5 分钟一班），不报。这段里 fleet-engine、fleet-api 读到 inactive 或 activating 是切版本重启，不算 ALERT，
+//   输出一行「发版切版本中，服务暂不 active（正常）」；超时、进度不是 running、别的状态、其余服务照旧算。闸在 running 时写「有一趟发版在跑，等它收尾」，不含「要人看」；在用版本落后主线超过 LIMITS.lagCommits 个提交
 //   且最老的那个落下超过 LIMITS.lagMinutes 分钟是 ALERT；这几块读不到、认不出也是 BROKEN。
 // - 飞书推送通不通（push 那一块）：判法照 packages/db/src/queries/feishu-push.ts 的 feishuPushProblem 写（这份脚本在仓外跑、
 //   引不了那边的代码，改那边要一起改这里的 SQL）。推送渠道自己坏了靠推送报不出来，这里每次巡查都看一次，不只靠「新通知」。
@@ -542,8 +543,26 @@ export function brokenReasons(f) {
   return out;
 }
 
+/** 切版本会重启的两台。其余服务不在这张宽限里。 */
+const CUTOVER_UNITS = new Set(['fleet-api', 'fleet-engine']);
+/** systemctl 停、起过程中的过渡态。failed 等别的状态照旧算挂了。 */
+const CUTOVER_STATES = new Set(['inactive', 'activating']);
+/** 宽限命中时打出来的那一行（不算 ALERT）。 */
+const CUTOVER_LINE = '发版切版本中，服务暂不 active（正常）';
+
+/**
+ * 进度记录 running 且没超过 LIMITS.trainStuckMinutes，这台又正处在切版本重启。
+ * 只有 fleet-api、fleet-engine 的 inactive / activating；超时、进度不是 running、别的状态都不算。
+ * @param {Facts} f
+ * @param {string} unit
+ */
+function cutoverGrace(f, unit) {
+  return trainKind(f) === 'running' && CUTOVER_UNITS.has(unit) && CUTOVER_STATES.has(f.services[unit] ?? '');
+}
+
 /**
  * 不变量：命中一条记一行。新通知要有基线才判（没有基线的第一次只记基线）。日报级不进这里，数量在日报那一行。
+ * 发版切版本那几十秒（cutoverGrace）里，fleet-api、fleet-engine 的 inactive / activating 跳过，render 另写一行说明。
  * @param {Facts} f
  * @param {Facts | null} base
  */
@@ -551,7 +570,8 @@ export function invariants(f, base) {
   /** @type {string[]} */
   const out = [];
   for (const u of SERVICES)
-    if (f.services[u] !== 'active') out.push(`服务 ${u} 是 ${f.services[u] || '（空）'}`);
+    if (f.services[u] !== 'active' && !cutoverGrace(f, u))
+      out.push(`服务 ${u} 是 ${f.services[u] || '（空）'}`);
   if (!f.lag.known) out.push(`在用的版本不在主线最近 ${f.lag.behind} 个提交里（落后太多，或不是主线上的）`);
   else if (f.lag.behind > LIMITS.lagCommits && f.lag.minutes > LIMITS.lagMinutes)
     out.push(
@@ -672,6 +692,7 @@ export function render(r) {
   const lines = [
     `PATROL 法国 采集于 ${f.at} 版本 ${f.release || '（没读到）'}`,
     `服务 ${active}/${SERVICES.length} active ${at}`,
+    ...(SERVICES.some((u) => cutoverGrace(f, u)) ? [CUTOVER_LINE] : []),
     `资源 磁盘 ${f.diskPct}% 可用内存 ${f.memMb}M 负载 ${f.load} ${at}`,
     `总开关 ${f.master === 'true' ? '开着' : `关着（${f.master}）`} ${at}`,
     `单 ${f.tasks.length} 张没做完，卡住或停下超过 ${LIMITS.stuckMinutes} 分钟的 ${f.tasks.filter(isStuck).length} 张 ${at}`,
@@ -788,7 +809,7 @@ export async function fetchFrance({ home, env, readText, timeoutMs = 55_000, spa
 
 /**
  * 造一份法国回来的样子（自检和测试用）。默认是一切正常；over 改哪项就坏哪项。
- * @param {{ at: Date, disk?: number, mem?: number, engine?: string, master?: string, tasks?: string[], jobs?: string[], notes?: string[], push?: string, brief?: string, noEnd?: boolean, err?: string, healthz?: number, healthRed?: string[], hist?: string[], noHist?: boolean, train?: string, trainRaw?: string, noState?: boolean, autoNote?: string, behind?: number, behindMinutes?: number }} o
+ * @param {{ at: Date, disk?: number, mem?: number, api?: string, engine?: string, master?: string, tasks?: string[], jobs?: string[], notes?: string[], push?: string, brief?: string, noEnd?: boolean, err?: string, healthz?: number, healthRed?: string[], hist?: string[], noHist?: boolean, train?: string, trainRaw?: string, noState?: boolean, autoNote?: string, behind?: number, behindMinutes?: number }} o
  */
 export function sampleRaw(o) {
   const notes = o.notes ?? ['note|alert|deploy-lag|发布落后'];
@@ -821,7 +842,7 @@ export function sampleRaw(o) {
     ...(o.noHist ? ['hist|-|-|-'] : hist.map((h) => `hist|${h.trim().split(/ +/).slice(0, 3).join('|')}`)),
     `train|${o.trainRaw ?? (o.train ? JSON.stringify({ status: o.train }) : '-')}`,
     `state|${o.noState ? '-' : state}`,
-    'svc|fleet-api|active',
+    `svc|fleet-api|${o.api ?? 'active'}`,
     `svc|fleet-engine|${o.engine ?? 'active'}`,
     `disk|${o.disk ?? 40}`,
     `mem|${o.mem ?? 3000}`,

@@ -22,6 +22,7 @@ interface SampleOpts {
   at: Date;
   disk?: number;
   mem?: number;
+  api?: string;
   engine?: string;
   master?: string;
   tasks?: string[];
@@ -461,6 +462,7 @@ describe('巡查脚本：发版事故和健康页（2026-10-14 法国发版失�
   describe('进度记录 running：正常在走不判 BROKEN，超过 LIMITS.trainStuckMinutes 才算（2026-10-14 22:58Z 每趟自动发版都判 BROKEN）', () => {
     const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
     const RUNNING_NOTE = '现在不发：有一趟发版在跑（2f5dc42f4636），等它收尾';
+    const CUTOVER = '发版切版本中，服务暂不 active（正常）';
     const LAST = [`2026-10-14T22:49:55Z ${CUR} release`];
     // 法国打回来的是去掉空白的原 JSON（REMOTE_SCRIPT 里 tr -d '[:space:]'）
     const train = (status: string, startedMinAgo: number | null) =>
@@ -495,6 +497,83 @@ describe('巡查脚本：发版事故和健康页（2026-10-14 法国发版失�
 
     it('done 不判（自动发布写的是在跑，不含「要人看」）', () => {
       expect(judge({ hist: LAST, trainRaw: train('done', 300), autoNote: RUNNING_NOTE }).verdict).toBe('OK');
+    });
+
+    it('running 没超时且引擎 inactive：判 OK，并写明发版切版本中', () => {
+      const within = (extra: Partial<SampleOpts>) =>
+        judge({ hist: LAST, trainRaw: train('running', 5), autoNote: RUNNING_NOTE, ...extra });
+      const engine = within({ engine: 'inactive' });
+      expect(engine.verdict).toBe('OK');
+      expect(engine.alerts).toEqual([]);
+      expect(engine.broken).toBeNull();
+      expect(lib.render(engine)).toContain(CUTOVER);
+      expect(lib.render(engine).at(-1)).toBe('VERDICT: OK');
+      // 正好卡在线上（超过才算超时）仍是正常切版本
+      const edge = judge({ hist: LAST, trainRaw: train('running', 70), engine: 'inactive' });
+      expect(edge.verdict).toBe('OK');
+      expect(lib.render(edge)).toContain(CUTOVER);
+      // activating 同样是过渡态；fleet-api 同一张宽限；两台一起也只写一行
+      expect(within({ engine: 'activating' }).verdict).toBe('OK');
+      expect(lib.render(within({ api: 'inactive' })).filter((l) => l === CUTOVER)).toEqual([CUTOVER]);
+      const both = within({ api: 'activating', engine: 'inactive' });
+      expect(both.verdict).toBe('OK');
+      expect(both.alerts).toEqual([]);
+      expect(lib.render(both).filter((l) => l === CUTOVER)).toHaveLength(1);
+      // failed、deactivating 不在宽限里。一台在宽限、另一台不是：只放过在宽限的，说明那一行还在
+      const failed = within({ engine: 'failed' });
+      expect(failed.verdict).toBe('ALERT');
+      expect(failed.alerts).toEqual(['服务 fleet-engine 是 failed']);
+      expect(lib.render(failed)).not.toContain(CUTOVER);
+      expect(within({ engine: 'deactivating' }).alerts).toEqual(['服务 fleet-engine 是 deactivating']);
+      const mixed = within({ api: 'inactive', engine: 'failed' });
+      expect(mixed.alerts).toEqual(['服务 fleet-engine 是 failed']);
+      expect(lib.render(mixed)).toContain(CUTOVER);
+      // 别的不变量照旧算，不跟服务一起被放过
+      const disk = within({ engine: 'inactive', disk: 91 });
+      expect(disk.verdict).toBe('ALERT');
+      expect(disk.alerts).toEqual(['磁盘 91% 超过 85%']);
+      expect(lib.render(disk)).toContain(CUTOVER);
+    });
+
+    it('running 超时且引擎 inactive：服务照旧判 ALERT', () => {
+      const r = judge({
+        hist: LAST,
+        trainRaw: train('running', 71),
+        autoNote: RUNNING_NOTE,
+        engine: 'inactive',
+      });
+      expect(r.alerts).toEqual(['服务 fleet-engine 是 inactive']);
+      // 进度超时本身仍是 BROKEN，盖过这条 ALERT；宽限那一行不写
+      expect(r.verdict).toBe('BROKEN');
+      expect(r.broken).toContain('超过 70 分钟没收尾');
+      expect(lib.render(r)).not.toContain(CUTOVER);
+      const api = judge({ hist: LAST, trainRaw: train('running', 71), api: 'activating' });
+      expect(api.verdict).toBe('BROKEN');
+      expect(api.alerts).toEqual(['服务 fleet-api 是 activating']);
+      expect(lib.render(api)).not.toContain(CUTOVER);
+      // 老格式 running 没有起止时间，判不了是不是还在正常走，不给宽限
+      const old = judge({ hist: LAST, train: 'running', engine: 'inactive' });
+      expect(old.verdict).toBe('BROKEN');
+      expect(old.alerts).toEqual(['服务 fleet-engine 是 inactive']);
+      expect(lib.render(old)).not.toContain(CUTOVER);
+    });
+
+    it('done 且引擎 inactive：服务照旧判 ALERT', () => {
+      const done = judge({ hist: LAST, trainRaw: train('done', 5), engine: 'inactive' });
+      expect(done.verdict).toBe('ALERT');
+      expect(done.alerts).toEqual(['服务 fleet-engine 是 inactive']);
+      expect(lib.render(done)).not.toContain(CUTOVER);
+      expect(lib.render(done).at(-1)).toBe('VERDICT: ALERT 1');
+      // failed、没有进度记录同样不宽限（进度不是 running）
+      const failed = judge({ train: 'failed', engine: 'inactive' });
+      expect(failed.verdict).toBe('BROKEN');
+      expect(failed.alerts).toEqual(['服务 fleet-engine 是 inactive']);
+      expect(lib.render(failed)).not.toContain(CUTOVER);
+      const none = judge({ engine: 'inactive' });
+      expect(none.verdict).toBe('ALERT');
+      expect(none.alerts).toEqual(['服务 fleet-engine 是 inactive']);
+      expect(lib.render(none)).not.toContain(CUTOVER);
+      expect(judge({ train: 'done', api: 'inactive' }).alerts).toEqual(['服务 fleet-api 是 inactive']);
     });
 
     it('旧格式（只有 status）的 running：判不了多久，照旧 BROKEN，写明老格式', () => {
