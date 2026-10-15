@@ -1,7 +1,6 @@
 // @vitest-environment happy-dom
-// #556 delete-soon-members：成员占位已删，路由、导航、占位文案三处都不再见 /members；
-// 其他没做的页（账单、战绩、判断题记录）地址保留、但驾驶舱改版（2026-10-07）起不进导航。
-// /models 不再占位，转到路由页的模型目录。
+// #556 delete-soon-members：成员占位已删，路由、导航、占位文案三处都不再见 /members。
+// 账单占位不进导航。战绩、判断题记录和三个旧地址跳转已撤。
 
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -21,18 +20,22 @@ describe('#556 delete-soon-members：成员占位已从驾驶舱撤下', () => {
     }
   });
 
-  test('路由表里不再注册 members；/models 转到路由页，占位文案只剩账单、战绩、判断题记录', async () => {
+  test('路由表里不再注册 members；占位只剩账单，战绩、判断题记录和三个旧地址都不在', async () => {
     const routesTs = await readFile(path.join(WEB_ROOT, 'src/routes.ts'), 'utf8');
     expect(routesTs).not.toMatch(/route\('members'/);
-    expect(routesTs).not.toMatch(/route\('models', 'routes\/soon\.tsx'/);
-    expect(routesTs).toMatch(/route\('models', 'routes\/models\.tsx'/);
+    expect(routesTs).not.toMatch(/route\('models'/);
+    expect(routesTs).not.toMatch(/route\('record'/);
+    expect(routesTs).not.toMatch(/route\('judge'/);
+    expect(routesTs).not.toMatch(/route\('efforts'/);
+    expect(routesTs).not.toMatch(/route\('env'/);
+    expect(routesTs).toMatch(/route\('billing', 'routes\/soon\.tsx'/);
 
     const soonTsx = await readFile(path.join(WEB_ROOT, 'src/routes/soon.tsx'), 'utf8');
     expect(soonTsx).not.toMatch(/\/members/);
     expect(soonTsx).not.toMatch(/成员与权限/);
     expect(soonTsx).not.toMatch(/\/models/);
+    expect(soonTsx).not.toMatch(/\/record/);
+    expect(soonTsx).not.toMatch(/\/judge/);
     expect(soonTsx).toMatch(/\/billing/);
-    expect(soonTsx).toMatch(/\/record/);
-    expect(soonTsx).toMatch(/\/judge/);
   });
 });

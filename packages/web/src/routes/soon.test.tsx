@@ -1,10 +1,9 @@
 // @vitest-environment happy-dom
-// 占位页（账单、战绩、判断题记录）和别的页用同一套标题区：标题在左上，计划要点和返回入口在标题下面。
+// 占位页（账单）和别的页用同一套标题区：标题在左上，计划要点和返回入口在标题下面。
 // 根节点不再整页垂直居中（#1534）。
 import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, describe, expect, test } from 'vitest';
-import { brand } from '#brand';
 import { Page } from '../components/layout/page';
 import Soon from './soon';
 
@@ -18,22 +17,6 @@ const PAGES = [
     bullet: '订阅月费按月摊到任务，算出每完成一个任务花多少',
     link: '现在先看额度',
     href: '/quota',
-  },
-  {
-    path: '/record',
-    title: '战绩',
-    what: '每条路由在每类活上干得怎么样。',
-    bullet: '成功率、平均耗时、返工轮数，按阶段类型分开算',
-    link: '现在先看渠道状态',
-    href: '/routing/status',
-  },
-  {
-    path: '/judge',
-    title: brand.terms.judgeNav,
-    what: `${brand.terms.judgeQuiz}的记录：每道题的答案、把握度和准确率。`,
-    bullet: '先只记不拦，攒满 50 条且准确率过线才真拦',
-    link: '现在先看定时任务',
-    href: '/schedules',
   },
 ] as const;
 
