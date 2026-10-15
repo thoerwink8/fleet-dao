@@ -271,13 +271,13 @@ describe.each(WRITES)('写请求 $name', (w) => {
     expect(err).toMatchObject({ status: 500, code: 'http_500', message: '后端返回 500' });
   });
 
-  test('【故意造出的失败】断网：报「连不上驾驶舱后端」，不当成功', async () => {
+  test('【故意造出的失败】断网：和门口 504 同一句人话，不当成功', async () => {
     const { fn } = fakeFetch(() => {
       throw new TypeError('Failed to fetch');
     });
     const err = await w.call(createHttpApi({ fetch: fn })).catch((e: unknown) => e);
     expect(err).toMatchObject({ status: 0, code: 'network' });
-    expect((err as Error).message).toContain('连不上驾驶舱后端');
+    expect((err as Error).message).toContain('它所在的机器可能在重启或关机');
   });
 });
 
