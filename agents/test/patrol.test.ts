@@ -233,6 +233,38 @@ describe('巡查脚本：判法', () => {
     }
   });
 
+  it('读不到法国：VERDICT 前多一行显眼中文，写明原因，并指向香港状态页', async () => {
+    const raw: Raw = { ok: false, kind: 'ssh-failed', why: '连不上' };
+    const judged = lib.judge({ raw, now: NOW, base: null });
+    const lines = lib.render(judged);
+    expect(lines.at(-1)).toBe('VERDICT: BROKEN');
+    const note = lines.find((l) => l.includes('读不到法国'));
+    expect(note).toContain('！！！读不到法国：');
+    expect(note).toContain('连不上');
+    expect(note).toContain('https://<驾驶舱域名>/health/');
+    expect(note).toContain('法国失联');
+    const ran = await patrol(raw, null);
+    expect(ran.code).toBe(2);
+    expect(ran.lines.at(-1)).toBe('VERDICT: BROKEN');
+    expect(ran.lines.some((l) => l.includes('读不到法国') && l.includes('连不上'))).toBe(true);
+    const empty = lib.judge({ raw: ok(''), now: NOW, base: null });
+    const emptyLines = lib.render(empty);
+    expect(emptyLines.at(-1)).toBe('VERDICT: BROKEN');
+    expect(emptyLines.some((l) => l.startsWith('！！！读不到法国：') && l.includes(empty.broken ?? ''))).toBe(
+      true,
+    );
+  });
+
+  it('法国答了就不加「读不到法国」（全好，以及 healthz 503 这种有盘面的 BROKEN）', () => {
+    const okLines = lib.render(lib.judge({ raw: ok(good()), now: NOW, base: null }));
+    expect(okLines.at(-1)).toBe('VERDICT: OK');
+    expect(okLines.some((l) => l.includes('读不到法国'))).toBe(false);
+    const bad = lib.sampleRaw({ at: NOW, healthz: 503, healthRed: ['database'] });
+    const lines = lib.render(lib.judge({ raw: ok(bad), now: NOW, base: null }));
+    expect(lines.at(-1)).toBe('VERDICT: BROKEN');
+    expect(lines.some((l) => l.includes('读不到法国'))).toBe(false);
+  });
+
   it('【故意造出的失败】截断（没有 end）、库查询报错、少一块、认不出的行、ssh 没读成：都是 BROKEN', () => {
     const cases: Raw[] = [
       ok(lib.sampleRaw({ at: NOW, noEnd: true })),

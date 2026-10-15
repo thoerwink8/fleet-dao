@@ -2,6 +2,8 @@
 
 半夜法国没了，照这页做。人在自己电脑上，香港用 `ssh hk-jump`。公网 IP 只在本机 ssh 配置里，这页写作 `<法国IP>`。控制台显示 Running 不可信。别改 WireGuard 钥匙，也别为 8787 开公网。
 
+香港每分钟经隧道探 `http://10.99.0.2:8787/healthz`，连续 3 次失败才算失联。先打开 `https://<驾驶舱域名>/health/`：页顶「法国失联自 xx:xx」就是从那一刻起连不上。手机上有没有推送，看香港 `/etc/fleet-dao/hk-probe.env` 的 `FLEET_HK_PROBE_WEBHOOK` 配了没有；没配就只有这一页和 `journalctl -u fleet-hk-france-probe.service`。装法和怎么停写在 ops「香港探法国」一节。下面三条用来分清关机、断网、隧道断了，再决定要不要重启。
+
 ## 先从香港判断
 
 `ssh hk-jump` 登上香港，以 root 跑下面三条。三条一起看，不要单凭一条去重启。
