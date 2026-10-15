@@ -465,11 +465,7 @@ export async function resetTestDb(t: TestDb): Promise<void> {
       .join(' union all '),
   );
   if (filled.rows.length > 0) {
-    // 按表名排序再排他锁。openPoolRuns 读在跑会话也按表名锁 pool_reservations、pools、routes、runs、session_runs。
-    // 以前 truncate 跟着 pg_tables 的顺序，和查询 FROM 顺序（先 session_runs 后 pools）相反：查询占着 session_runs
-    // 再等 pools，清表占着 pools 再等 session_runs，真库上偶发 deadlock detected（quota.test.ts 把 runs 改名后的并行读）。
-    const names = filled.rows.map((r) => r.name).sort();
-    await t.client.exec(`truncate ${names.join(', ')} cascade`);
+    await t.client.exec(`truncate ${filled.rows.map((r) => r.name).join(', ')} cascade`);
   }
   await t.client.query(
     "select setval(format('%I.%I', schemaname, sequencename), start_value, false) from pg_sequences where schemaname = 'public'",

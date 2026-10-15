@@ -299,7 +299,8 @@ export class AutoEscape extends Error {
 
 /**
  * 动手会话没跑成、失败分流判停下等人时，先自动换一条路由（避开这个模型）重派一次的码（决定 0093，task-session.ts）：
- * 被引擎在时限上叫停（aborted）、总时长到顶、起不来。只有人能修的（没权限、卫生检查、登录失效……）不在里面。
+ * 被引擎在时限上叫停（aborted）、总时长到顶、起不来、中转这一路额度用完或欠费（失败分流 QT3：换一路就能干，充值归人另办）。
+ * 只有人能修的（没权限、卫生检查、登录失效……）不在里面。只加老历史里不会出现的码：已经记下的判断重放时走的分支不变。
  */
 export const AUTO_REDISPATCH_CODES: readonly string[] = [
   'aborted',
@@ -307,7 +308,16 @@ export const AUTO_REDISPATCH_CODES: readonly string[] = [
   'spawn_failed',
   'spawn_timeout',
   'startup_timeout',
+  'relay_quota_exhausted',
 ];
+
+/**
+ * 同一条路由第二次总时长到顶，换路由时写进提示词（#2244）：这条路由在这张单上太慢，再原路续只烧额度。
+ * 树上的改动还在，下一轮接着做，不从头重来。第一次到顶不走这里，仍原路续同一个会话。
+ */
+export function wallClockSwitchLine(modelId: string): string {
+  return `${modelId} 在这条路由上第二次总时长到顶，不再原路续。树上的进度接着做，别从头重来。`;
+}
 
 /**
  * 有界耐心（决定 0093，借 magpie gateway-routing 的 Patience）：动手会话撞上上游临时故障（失败分流规则表上标了 blip 的：
@@ -558,22 +568,12 @@ export const MERGE_WAIT_RED_PR_NOTES = [
   '同一根子旁的路径：检查还在跑（pending）或一条都没有，仍等，和红不是同一件事，检查一直 pending 这次不改。PR 被关了本来就停下报人。和主线冲突已经并主线或交回返工；草稿被标成 mergeable=false 也会进冲突那条，这次不改分类。自动合并被撤掉就重新挂，挂不上停下；重新挂上之后红检查走上面的新路径。头被别人改了就停下，人点继续后重走 CI 和验收，不是一直等。落后主线但 mergeable=true 仍等（GitHub 还能合）；mergeable=false 走冲突那条。读检查失败抛错重试，不装成还在等；没接上读检查也抛，不默认 pending。不强制 CI 的直接合并 mergeNow 故意不看检查，另一条路，这次不改。每小时对账不推卡在 waitMerged 里的任务：红了由这条工作流自己返工，不加第二套看守。',
 ] as const;
 
-/**
- * #2181 的 PR 说明。正文只收 taskPrDid，会话最后一句、提交说明和代码注释都进不去。
- * 验收要在正文里写清死锁根因，以及真库上 quota.test.ts 连跑 20 次的次数和结果。
- */
-export const QUOTA_DEADLOCK_PR_NOTES = [
-  '根因：产品读锁顺序和测试清表顺序相反，由测试里没等完的并行查询触发。openPoolRuns 原来三条 SELECT 各走各的连接，按 FROM 先锁 session_runs / pool_reservations / runs 再锁 pools；Promise.all 一条失败就返回，另外两条继续占着锁。quota.test.ts 把 runs 改名后读，查 runs 的那条立刻失败，下一次 resetTestDb 按 pg_tables 顺序 TRUNCATE（pools 在 session_runs 前）。查询占着 session_runs 再等 pools，清表占着 pools 再等 session_runs，真 Postgres 报 deadlock detected。PGlite 单连接排队，撞不上。savePoolQuota 先 FOR UPDATE 锁池行，同一池按相反窗口顺序写了 40 对、0 次死锁，写入路径没改。',
-  '真库连跑：FLEET_TEST_PG_URL=postgres://fleet@127.0.0.1:5433/postgres 下 npx vitest run packages/db/test/quota.test.ts 连跑 20 次，20/20 全绿，每次 Tests 35 passed。不重试、不加大超时、不跳过。',
-] as const;
-
-/** 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，#1733 多写取舍和验法，#1983 多写等合并检查转红的断点和旁路，#2181 多写额度死锁根因和真库连跑 20 次的结果，其余单子仍是原来两句。 */
+/** 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，#1733 多写取舍和验法，#1983 多写等合并检查转红的断点和旁路，其余单子仍是原来两句。 */
 export function taskPrDid(issueNumber: number, round: number, fileCount: number): string[] {
   const did = [`按 #${issueNumber} 的要求动手（第 ${round} 轮）`, `改了 ${fileCount} 个文件`];
   if (issueNumber === 1303) did.push(CONFLICT_HANDOFF_CAUSE);
   if (issueNumber === 1406) did.push(...ALERT_FILING_PR_NOTES);
   if (issueNumber === 1733) did.push(...FOUNDERS_INBOX_PR_NOTES);
   if (issueNumber === 1983) did.push(...MERGE_WAIT_RED_PR_NOTES);
-  if (issueNumber === 2181) did.push(...QUOTA_DEADLOCK_PR_NOTES);
   return did;
 }

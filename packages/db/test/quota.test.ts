@@ -387,34 +387,23 @@ describe('额度写入与额度表', () => {
     }
   });
 
-  // 根因：openPoolRuns（inFlightByPool / quotaTable 都走它）原来用三条并行查询，各按 FROM 顺序锁表
-  // （先 session_runs / pool_reservations，后才 pools）。resetTestDb 按 pg_tables 的顺序 TRUNCATE，pools 排在
-  // session_runs 前面。上面那条把 runs 改名后，查 runs 的那条立刻失败，Promise.all 就此返回，另外两条还占着锁，
-  // 下一条用例的清表撞上来，两边锁顺序相反，真 Postgres 报 deadlock detected。PGlite 只有一条连接，排队执行，撞不上。
-  // savePoolQuota 先 FOR UPDATE 锁住池那一行，同一池两笔窗口顺序相反的写入会排队，不是这条死锁。
-  // 这里把交叉等锁造死：先独占 routes，让读停在锁到一半的地方，再按清表去锁同一批表。修之前会死锁，修后两边都按表名排序加锁。
-  // PGlite 构不出两笔事务交叉等锁，这条只在真库跑。
+  // #2181 根因复现：openPoolRuns（inFlightByPool / quotaTable 都走它）三条查询并行，以前用 Promise.all，查 runs 的那条一失败
+  // 就返回，另外两条还在别的连接上跑。查询按 FROM 顺序锁表（session_runs 再 routes 再 pools），resetTestDb 的 TRUNCATE 按
+  // pg_tables 的顺序先排他锁 pools 再等 session_runs。上面那条把 runs 挪开后，残留查询和下一条用例的清表交叉等锁，真
+  // Postgres 偶发 deadlock detected。这里把偶发造成必然：先独占 routes，让残留查询停在「占着 session_runs、等 routes」，
+  // 等读报完错再照清表的顺序 TRUNCATE，然后放开 routes。修之前读立刻报错、清表死锁；修后读要等三条都落地才报错，清表时没人占锁。
+  // PGlite 只有一条连接，构不出两笔交叉等锁，这条只在真库跑。
   it.skipIf(!realTestPgUrl())(
-    '读在跑数和清表按表名同一顺序加锁：一边停在 routes 上，另一边来清表，也不会死锁',
+    'runs 读不了时，在跑数要等三条查询都落地才报错：接着清表不会和残留查询交叉等锁、死锁',
     async () => {
       await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
       const repo = await addRepo(t.db);
       const task = await addTask(t.db, repo.id);
       await addRun(t.db, { taskId: task.id, routeId: 'a-opus', startedAt: ago(MIN) });
 
-      let resolveRelease: () => void = () => {};
+      let release: () => void = () => {};
       const released = new Promise<void>((r) => {
-        resolveRelease = r;
-      });
-      let releasedOnce = false;
-      const release = () => {
-        if (releasedOnce) return;
-        releasedOnce = true;
-        resolveRelease();
-      };
-      const blocker = t.db.transaction(async (tx) => {
-        await tx.execute(sql`lock table routes in access exclusive mode`);
-        await released;
+        release = r;
       });
       const messagesOf = (e: unknown) => {
         const messages: string[] = [];
@@ -436,9 +425,18 @@ describe('额度写入与额度表', () => {
           await new Promise((r) => setTimeout(r, 20));
         }
       };
+      const settle = (p: Promise<unknown>) =>
+        p.then(
+          () => ({ ok: true as const, e: null }),
+          (e: unknown) => ({ ok: false as const, e }),
+        );
 
-      let read: Promise<{ ok: true } | { ok: false; e: unknown }> = Promise.resolve({ ok: true });
-      let reset: Promise<{ ok: true } | { ok: false; e: unknown }> = Promise.resolve({ ok: true });
+      await t.client.exec('alter table runs rename to runs_unreadable');
+      const blocker = t.db.transaction(async (tx) => {
+        await tx.execute(sql`lock table routes in access exclusive mode`);
+        await released;
+      });
+      let releaseLater: ReturnType<typeof setTimeout> | undefined;
       try {
         await until(async () => {
           const { rows } = await t.client.query<{ n: number }>(
@@ -448,25 +446,25 @@ describe('额度写入与额度表', () => {
           );
           return (rows[0]?.n ?? 0) > 0;
         }, 'routes 上的排他锁');
-        read = inFlightByPool(t.db).then(
-          () => ({ ok: true as const }),
-          (e: unknown) => ({ ok: false as const, e }),
-        );
-        await until(async () => (await lockWaits()) >= 1, '读在跑数停在锁上');
-        // 清表按「pools 在 session_runs 前」锁（pg_tables 的顺序就是这样）。exists 那条会把所有表先共享锁一遍，
-        // 也被 routes 挡住，到不了 TRUNCATE；这里直接 TRUNCATE，锁的就是清表真正排他的那一下。
-        reset = t.client.exec('truncate pools, session_runs, routes cascade').then(
-          () => ({ ok: true as const }),
-          (e: unknown) => ({ ok: false as const, e }),
-        );
-        await until(async () => (await lockWaits()) >= 2, '清表也停在锁上');
-        release();
-        const [readR, resetR] = await Promise.all([read, reset, blocker]);
-        expect(readR.ok, readR.ok ? '' : messagesOf(readR.e)).toBe(true);
+        const read = settle(inFlightByPool(t.db));
+        await until(async () => (await lockWaits()) >= 1, '在跑数的查询停在 routes 的锁上');
+        // 稍后放开 routes：修之前读已经报完错，这时清表正等着锁；修后读一直等到这里才落地。
+        releaseLater = setTimeout(release, 300);
+
+        const readR = await read;
+        expect(readR.ok, '把 runs 挪开了，在跑数却照常回了结果').toBe(false);
+        expect(messagesOf(readR.e)).toContain('relation "runs" does not exist');
+        const leftWaiting = await lockWaits();
+
+        // 下一条用例的 resetTestDb：按 pg_tables 的顺序，pools 在 session_runs 前面。
+        const resetR = await settle(t.client.exec('truncate pools, session_runs, routes cascade'));
         expect(resetR.ok, resetR.ok ? '' : messagesOf(resetR.e)).toBe(true);
+        expect(leftWaiting, '在跑数报错返回时，还有它的查询挂在锁上').toBe(0);
       } finally {
+        clearTimeout(releaseLater);
         release();
-        await Promise.allSettled([read, reset, blocker]);
+        await Promise.allSettled([blocker]);
+        await t.client.exec('alter table runs_unreadable rename to runs');
       }
     },
   );

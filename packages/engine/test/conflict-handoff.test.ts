@@ -7,7 +7,6 @@ import {
   CONFLICT_HANDOFF_CAUSE,
   conflictFilesForHandoff,
   FOUNDERS_INBOX_PR_NOTES,
-  QUOTA_DEADLOCK_PR_NOTES,
   taskPrDid,
 } from '../src/workflows/task-support.ts';
 
@@ -108,22 +107,6 @@ describe('PR 正文里的根因', () => {
     ]) {
       expect(body).toContain(line);
     }
-    expect(taskPrDid(12, 1, 1)).toEqual(['按 #12 的要求动手（第 1 轮）', '改了 1 个文件']);
-  });
-
-  it('#2181 的正文写上死锁根因和真库连跑 20 次全绿，别的单子不带', () => {
-    const body = renderPrBody({
-      requirement: 2181,
-      did: taskPrDid(2181, 2, 3),
-      verified: ['相关测试'],
-    });
-    expect(body).not.toContain('另有');
-    for (const line of QUOTA_DEADLOCK_PR_NOTES) expect(body).toContain(line);
-    expect(body).toContain('deadlock detected');
-    expect(body).toContain('Promise.all');
-    expect(body).toContain('20/20 全绿');
-    expect(body).toContain('每次 Tests 35 passed');
-    expect(body).toContain('npx vitest run packages/db/test/quota.test.ts');
     expect(taskPrDid(12, 1, 1)).toEqual(['按 #12 的要求动手（第 1 轮）', '改了 1 个文件']);
   });
 });
