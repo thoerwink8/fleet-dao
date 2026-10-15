@@ -5,6 +5,7 @@ import {
   alertByKey,
   type Db,
   finishScheduleRun,
+  lastSuccessfulScheduleRunEndedAt,
   resolveAlertWithReason,
   startScheduleRun,
 } from '@fleet-dao/db';
@@ -20,7 +21,7 @@ import {
 } from '@fleet-dao/store';
 import type { Client } from '@temporalio/client';
 import { reposKnownNotInstalled } from '../jobs/github-app-check.ts';
-import type { GitHubReconcileJobDeps } from '../jobs/github-reconcile.ts';
+import { GITHUB_RECONCILE_JOB, type GitHubReconcileJobDeps } from '../jobs/github-reconcile.ts';
 import { sweepIssueGroom } from '../jobs/issue-groom.ts';
 import { type GroomGitHub, type IssueGroomWiring, issueGroomJob } from './issue-groom.ts';
 
@@ -123,6 +124,8 @@ export function githubReconcileJob(
         start: (job, at) => startScheduleRun(w.db, job, at),
         finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
       },
+      // 回看起点读 schedule_runs 里上一次 ok 的结束时刻；读不到由这一轮按没有记录处理，不在这里把失败当成时刻 0。
+      lastSuccessAt: () => lastSuccessfulScheduleRunEndedAt(w.db, GITHUB_RECONCILE_JOB.id),
       now,
       log: (level, message, fields) => log[level](message, fields),
     };

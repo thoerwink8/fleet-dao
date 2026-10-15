@@ -6,6 +6,7 @@ import {
 } from '../src/queries/idempotency.ts';
 import {
   finishScheduleRun,
+  lastSuccessfulScheduleRunEndedAt,
   registerScheduledJobs,
   scheduleHealth,
   startScheduleRun,
@@ -13,7 +14,7 @@ import {
 } from '../src/queries/schedule.ts';
 import { scheduledJobs } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { ago, MIN, NOW } from './helpers.ts';
+import { ago, HOUR, MIN, NOW } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -222,6 +223,44 @@ describe('定时任务：没跑成 ≠ 没问题', () => {
       expect(row?.removedAt).toBeNull();
       expect((await scheduleHealth(t.db, NOW)).map((h) => h.job.id)).toEqual(['alert-dispatch']);
     });
+  });
+});
+
+describe('上一次跑成的时刻（对账回看起点，记在 schedule_runs，不另建表）', () => {
+  const job = {
+    id: 'github-reconcile',
+    name: 'GitHub 对账补漏',
+    schedule: '每 15 分钟',
+    expectEveryMinutes: 45,
+  };
+
+  it('没有跑成过回 null，不回时刻 0', async () => {
+    await registerScheduledJobs(t.db, [job]);
+    expect(await lastSuccessfulScheduleRunEndedAt(t.db, job.id)).toBeNull();
+  });
+
+  it('只认本任务 outcome = ok 的结束时刻；更近的 partial、failed 和还在跑的都不算', async () => {
+    await registerScheduledJobs(t.db, [job, { ...job, id: 'watchdog', name: '看门狗' }]);
+    const older = ago(10 * HOUR);
+    const olderId = await startScheduleRun(t.db, job.id, ago(10 * HOUR + MIN));
+    await finishScheduleRun(t.db, olderId, { outcome: 'ok', scanned: 1, found: 0 }, older);
+    const latest = ago(5 * HOUR);
+    const latestId = await startScheduleRun(t.db, job.id, ago(5 * HOUR + MIN));
+    await finishScheduleRun(t.db, latestId, { outcome: 'ok', scanned: 2, found: 1 }, latest);
+    const partialId = await startScheduleRun(t.db, job.id, ago(30 * MIN));
+    await finishScheduleRun(
+      t.db,
+      partialId,
+      { outcome: 'partial', why: '有的仓没查完', scanned: 1, found: 0 },
+      ago(29 * MIN),
+    );
+    const failedId = await startScheduleRun(t.db, job.id, ago(10 * MIN));
+    await finishScheduleRun(t.db, failedId, { outcome: 'failed', why: '没跑成' }, ago(9 * MIN));
+    await startScheduleRun(t.db, job.id, ago(MIN));
+    const otherId = await startScheduleRun(t.db, 'watchdog', ago(HOUR));
+    await finishScheduleRun(t.db, otherId, { outcome: 'ok', scanned: 1, found: 0 }, ago(HOUR));
+    expect((await lastSuccessfulScheduleRunEndedAt(t.db, job.id))?.getTime()).toBe(latest.getTime());
+    expect(await lastSuccessfulScheduleRunEndedAt(t.db, '从没跑成')).toBeNull();
   });
 });
 
