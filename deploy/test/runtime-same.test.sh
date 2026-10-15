@@ -17,8 +17,17 @@ source "$HERE/../release.sh"
 set +e
 mkdir -p "$RELEASES"
 
-if [[ ! -x "$NODE" && ! -f "$NODE" ]]; then
-  echo "runtime-same：没跑成：没有 $NODE"
+# release.sh 的 NODE 是法国的 /usr/bin/node。CI 的 deploy job 不装 pnpm 也不建 fleet 账号，node 只由 setup-node
+# 放进工具链缓存（sudo 又会换掉 PATH），所以照 auto-release-state 那套挑一个能用的；挑不到就是没跑成，不当通过。
+NODE=""
+for n in "$(command -v node 2>/dev/null || true)" /opt/hostedtoolcache/node/*/x64/bin/node /usr/bin/node /usr/local/bin/node; do
+  if [[ -x "$n" ]]; then
+    NODE=$n
+    break
+  fi
+done
+if [[ -z "$NODE" ]]; then
+  echo "runtime-same：没跑成：这台找不到 node"
   exit 2
 fi
 
