@@ -157,8 +157,10 @@ check "注释里的假说明符不当成引用：引擎 same" "$(verdict fleet-e
 printf '%s\n' 'export const esm = 5;' >"$B/packages/x/src/esm.ts"
 check "注释后面的真说明符仍算：引擎 changed" "$(verdict fleet-engine "$A" "$B")" changed
 # 跳过注释之后说明符不是静态字面量：unknown，调用方照常重启
-printf '%s\n' 'export { x } from /* 注释 */ `@fleet-dao/${name}`;' 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
-printf '%s\n' 'export { x } from /* 注释 */ `@fleet-dao/${name}`;' 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+# shellcheck disable=SC2016 # 单引号里是给 node 的 JS，模板字符串不归 shell 展开
+nonstatic='export { x } from /* 注释 */ `@fleet-dao/${name}`;'
+printf '%s\n' "$nonstatic" 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' "$nonstatic" 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
 check "from 后注释再加非静态说明符：引擎 unknown（照常重启）" "$(verdict fleet-engine "$A" "$B" | awk '{print $1}')" unknown
 # from 当普通标识符：注释后面不是说明符，不当成引用，也不因此 unknown
 printf '%s\n' 'const from = 1;' 'from /* 注释 */ ;' 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
