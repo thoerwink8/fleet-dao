@@ -67,7 +67,7 @@ describe('任务工作流 · 按仓的 CI 模式', { timeout: 60_000 }, () => {
     expect(calls.arm).toBe(0);
     expect(calls.merge).toBe(1);
     expect(calls.order).toEqual(['brief', 'segment', 'delivery', 'guarded']);
-    expect(calls.segment[0]?.feedback).toEqual([SKIP, '派前探测：m1 通']);
+    expect(calls.segment[0]?.feedback).toEqual([SKIP]);
   });
 
   it('不强制 CI 碰到改标准路径：照样停下等人，不直接合并', async () => {

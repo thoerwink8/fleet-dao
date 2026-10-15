@@ -201,10 +201,12 @@ export async function latestRunOfTask(
  * 四样都还空着的行（被引擎叫停、超时杀，或中转会话的用量稍后才补）算不出确数：按这张单已经记到用量的几行的每分钟速率（合并了
  * 两样都记到的会话，没记到的算 0），乘它们跑过的分钟数，估个下限（estimated），数出有几行（unmetered）。预算判断把 estimated
  * 一起算进去（只多不少），页面上写明是估的。
+ * since：只算这一刻之后起的会话（含这一刻）。重做的新一代用自己的开工时刻，不背上一代。不给就整张单都算，和原来一样。
  */
 export async function taskTokenSpend(
   db: Db,
   taskId: string,
+  opts?: { since?: Date },
 ): Promise<{ tokens: number; runs: number; unmetered: number; estimated: number }> {
   const perRun = sql`coalesce(${runs.inputTokens}, 0) + coalesce(${runs.outputTokens}, 0) + coalesce(${runs.cacheReadTokens}, 0) + coalesce(${runs.cacheWriteTokens}, 0)`;
   const blank = sql`${runs.inputTokens} is null and ${runs.outputTokens} is null and ${runs.cacheReadTokens} is null and ${runs.cacheWriteTokens} is null`;
@@ -218,7 +220,14 @@ export async function taskTokenSpend(
       blankSeconds: sql<string>`coalesce(sum(case when ${blank} then ${seconds} else 0 end), 0)`,
     })
     .from(runs)
-    .where(and(eq(runs.taskId, taskId), or(eq(runs.segment, 'manual'), eq(runs.segment, 'verify'))));
+    .where(
+      and(
+        eq(runs.taskId, taskId),
+        or(eq(runs.segment, 'manual'), eq(runs.segment, 'verify')),
+        // 含起算这一刻：这一代自己的会话不会早于开工，上一代的都在这之前
+        ...(opts?.since ? [gte(runs.startedAt, opts.since)] : []),
+      ),
+    );
   const tokens = Number(row?.tokens ?? 0);
   const measuredSeconds = Number(row?.measuredSeconds ?? 0);
   const blankSeconds = Number(row?.blankSeconds ?? 0);

@@ -83,6 +83,26 @@ describe('动手会话的提示词', () => {
     expect(text.trimEnd().endsWith('再加一行欠什么。')).toBe(true);
   });
 
+  it('派前探测探通且没换路不进返工意见；换路、探不通的仍按条带上', () => {
+    const onlyPass = render({ feedback: ['派前探测：grok-4.7 通'] });
+    expect(onlyPass).not.toContain('派前探测');
+    expect(onlyPass).not.toContain('返工意见');
+    const resumed = renderResumePrompt({ feedback: ['派前探测：grok-4.7 通'] });
+    expect(resumed).not.toContain('派前探测');
+    expect(resumed).not.toContain('这一轮要改的');
+    const mixed = render({
+      feedback: ['派前探测：grok-4.7 通', '没提交：M .claude/settings.json'],
+    });
+    expect(mixed).not.toContain('grok-4.7');
+    expect(mixed).toContain('1. 没提交：M .claude/settings.json');
+    expect(mixed).not.toContain('2. ');
+    const switched = renderResumePrompt({
+      feedback: ['派前探测：glm-5.3-flash 不通，换到 grok-4.7', '派前探测：glm 不通（网络不通）'],
+    });
+    expect(switched).toContain('1. 派前探测：glm-5.3-flash 不通，换到 grok-4.7');
+    expect(switched).toContain('2. 派前探测：glm 不通（网络不通）');
+  });
+
   it('返工意见按条编号带进来；一条没有就不出这一节（不留空标题）', () => {
     const none = render({ feedback: [] });
     expect(none).not.toContain('返工意见');

@@ -19,6 +19,9 @@
 // - 跑成的这一段记进 rt.lastSession（纯状态）：返工轮由 task.ts 决定续不续它（决定 0093，patched('rework-resume')），续法同上。
 // - 单任务 token 预算（决定 0093，patched('task-token-budget')）：每次起会话之前查这张单花掉的 token，超了停下等人（rt.park），
 //   点「继续」再给一份。开工时解析的上限里没有这一项（老历史）就不查；查不成照旧起会话，不挡干活。
+//   只算当前这一代（patched('task-budget-this-generation')）：起算时间是这一代工作流的开工时刻，上一代烧掉的不算进去。
+//   重做是另起一代，不该一开工就背着旧账被判超预算。点「继续」多给的份数按这一代已经花掉的算。
+//   老历史没有这个标记，仍按整张单累计，活动入参不带起算时间。
 // - 分档冷却和有界耐心（决定 0093，patched('route-patience')，借 magpie gateway-routing）：失败分流按错种给歇多久
 //   （额度歇到清零、限流按 Retry-After、其他 1 分钟起翻倍）；上游临时故障判停下时先不停，歇一会儿重新选路再起，
 //   从第一次该停下起最多 ROUTE_PATIENCE_SECONDS（默认 60 秒，上限 240 秒），歇掉的从这一段的会话时限里扣；用完照旧停下并写明。
@@ -31,7 +34,7 @@
 //   同一条路由上第二次不再原路续：换路由时把树上的进度写进提示词
 //   （patched('wall-clock-carry-progress')），让下一轮接着做，不从头重来。老历史没有这个标记，只换路由、不改提示词。
 
-import { isCancellation, log, patched } from '@temporalio/workflow';
+import { isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import type { TierDecision } from '../runner/tier.ts';
@@ -58,6 +61,7 @@ import {
   dispatchProbeLine,
   dispatchProbeStopText,
   EMPTY_DISPATCH_PROBE,
+  isDispatchProbePassOnly,
   mergeAvoid,
   NO_AVOID,
   NO_OTHER_FAMILY,
@@ -113,7 +117,15 @@ export async function writeSession(
     const picked = await pickRoute(rt, avoid, stick, failedChannel, ui?.uiWork === true);
     failedChannel = undefined;
     const route = picked.route;
-    if (picked.probeNote) rt.feedback = withDispatchProbeNote(rt.feedback, picked.probeNote);
+    if (picked.probeNote) {
+      // 探通且没换路不进返工意见：下一轮提示词把意见里每一条都当成必改。动手状态那一行仍写这句。
+      // 老历史没有这个标记：重放时意见里照旧留着「通」，活动入参不变。只在探通没换路时记标记。
+      const dropPass =
+        isDispatchProbePassOnly(picked.probeNote) && patched('dispatch-probe-pass-not-feedback');
+      rt.feedback = dropPass
+        ? rt.feedback.filter((item) => !item.startsWith('派前探测：'))
+        : withDispatchProbeNote(rt.feedback, picked.probeNote);
+    }
     if (rt.fellBackToMissRoute) {
       rt.fellBackToMissRoute = false;
       const note = `${NO_OTHER_ROUTE}，这一轮仍用路由 ${route.routeId}。`;
@@ -373,14 +385,25 @@ async function settledBeforeRestart(rt: TaskRuntime, attemptAt: number): Promise
 /**
  * 单任务 token 预算（决定 0093）：这张单花掉的超了已给的份数就停下等人，点「继续」再给到够用。
  * 开工时解析的上限里没有这一项（老历史）或是 0 就不查；查不成只记日志，照旧起会话。放弃、叫停照常往外抛。
+ * 当前这一代（patched('task-budget-this-generation')）只算这一代工作流开工之后的会话：重做另起的一代不背上一代。
+ * 老历史没有这个标记，重放时不带起算时间，活动入参和原来一样。
  */
 async function holdForBudget(rt: TaskRuntime): Promise<void> {
   const budget: unknown = rt.limits.taskTokenBudget;
   if (typeof budget !== 'number' || budget <= 0) return;
   if (!patched('task-token-budget')) return;
+  // 写在查花费之前、估用量那个标记之前：老历史重放时这一支为假，不多一个字段，后面的标记顺序也对得上。
+  const thisGeneration = patched('task-budget-this-generation');
   let spent: { tokens: number; unmetered: number; estimated?: number };
   try {
-    spent = await rt.cancellable(() => rt.acts.taskSpend({ schemaVersion: 1, taskId: rt.input.taskId }));
+    spent = await rt.cancellable(() =>
+      rt.acts.taskSpend({
+        schemaVersion: 1,
+        taskId: rt.input.taskId,
+        // 起算时间是这一代的开工时刻（Temporal 记的，重放不变）。上一代的会话都在这之前。
+        ...(thisGeneration ? { since: iso(workflowInfo().startTime.getTime()) } : {}),
+      }),
+    );
   } catch (error) {
     if (error instanceof Abandoned || isCancellation(error)) throw error;
     log.warn('查这张单花掉的 token 没查成，照旧起会话', { error: failureOf(error, 'taskSpend').message });
