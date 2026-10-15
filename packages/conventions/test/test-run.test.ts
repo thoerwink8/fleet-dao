@@ -411,6 +411,16 @@ describe('测试开几个进程：按本进程所在 cgroup 的内存上限算',
       expect(w.note).toContain('6 个会话在跑');
     });
 
+    it('引擎的会话里写码 CLI 设了 CI=1（法国 grok 实测，vitest 里是 CI=true）：照样按会话分核，不当成 CI', () => {
+      for (const ci of ['1', 'true']) {
+        const { env } = siblings(pool(3000, 200), { 'fleet-agent-2.scope': 2, 'fleet-agent-3.scope': 2 });
+        env.env = { CI: ci, FLEET_RUN_ID: 'r1' };
+        const w = testWorkers(env);
+        expect(w.maxWorkers).toBe(2);
+        expect(w.note).toContain('3 个会话在跑');
+      }
+    });
+
     it('CI 里不分核、不读池子的兄弟', () => {
       const { env, sleeps } = siblings(pool(200, 200), { 'fleet-agent-2.scope': 6 });
       env.env = { CI: 'true' };
