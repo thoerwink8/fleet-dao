@@ -577,6 +577,15 @@ export class TaskRuntime {
             instruction: pending ? null : failure.message,
           });
         }
+        // 工作树有没推的提交、本地又并不上：停下时把报错原文写进原因（里面有工作树路径和提交号）。
+        // 看板「停下等人」读 lastProblem；失败分流的标题只有规则名，装不下这些。
+        // 老历史没有这个标记，照旧交给失败分流（原因是规则标题那一句）。
+        if (failure.code.toLowerCase() === 'worktree_diverged' && patched('worktree-diverged-note')) {
+          await this.park(failure.message, failure.message);
+          counters = ZERO;
+          previousMessage = undefined;
+          continue;
+        }
         const next = await this.classify(failure, counters, false, { previousMessage });
         previousMessage = failure.message;
         this.status.lastProblem = next.reason;
