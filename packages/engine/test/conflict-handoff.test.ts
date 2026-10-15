@@ -119,11 +119,15 @@ describe('PR 正文里的根因', () => {
     });
     expect(body).not.toContain('另有');
     for (const line of ALLSETTLED_PR_NOTES) expect(body).toContain(line);
-    expect(body).toContain('改的 7 处（这个 PR）');
+    expect(body).toContain('改的 12 处（全列）');
     expect(body).toContain('carpool-spend.ts carpoolWindowSpend');
     expect(body).toContain('channel-models.ts channelModelDiff');
-    expect(body).toContain('随 #2181 的 PR 进主线的 4 处');
     expect(body).toContain('pool-runs.ts openPoolRuns');
+    expect(body).toContain('pool-runs.ts endedPoolRuns');
+    expect(body).toContain('pool-runs.ts poolRunUsage');
+    expect(body).toContain('schedule.ts scheduleHealth');
+    expect(body).toContain('schedule.ts scheduleRedStreaks');
+    expect(body).toContain('all-settled.ts 是本 PR 新加的');
     expect(body).toContain('不用改的');
     expect(body).toContain('db.transaction()');
     expect(taskPrDid(12, 1, 1)).toEqual(['按 #12 的要求动手（第 1 轮）', '改了 1 个文件']);

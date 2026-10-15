@@ -570,14 +570,14 @@ export const MERGE_WAIT_RED_PR_NOTES = [
 
 /**
  * #2261 的 PR 说明。正文只收 taskPrDid，会话最后一句和代码注释都进不去：验收条要的「改了哪几处、留着的为什么不用改」
- * 得写进这里，不然 PR 正文里没有这份清单。列的是 #2181 同类（也含根因那次）——db 包 src 里所有并行查询都改成
- * allSettledOrThrow 都落定再返回，四处随 #2181 的 PR 进主线、七处是这个 PR 改的；剩下的不用改的另写一条。
+ * 得写进这里，不然 PR 正文里没有这份清单。逐处列全 db/src 的排查结果（改了 12 处、不用改的几类），
+ * 数得出来的都对得上 PR 的 diff，别人不用翻代码就能确认排查覆盖了整个 packages/db/src。
  */
 export const ALLSETTLED_PR_NOTES = [
-  '排查范围：packages/db/src 里每一个装着库查询的 Promise.all（含别名、数组变量、Promise.resolve([]) 占位）逐个过；只有会提前返回、留下还在跑的查询占着连接和锁的才改。改后 db/src 里再没有 Promise.all 包库查询（allSettledOrThrow 自己内部的 Promise.allSettled 不算，它本来就等全部落定）。',
-  '改的 7 处（这个 PR）：carpool-spend.ts carpoolWindowSpend、daily-brief.ts dailyBriefStatus、engine-route-facts.ts routeFactsForPurpose、feishu-push.ts feishuPushFacts、probe.ts routeProbeTargets、session-org.ts sessionOrgFacts、channel-models.ts channelModelDiff——都是并行取出互不依赖的几段数据后拼一个对象，一条失败以前立刻返回，其余还在别的连接上跑。',
-  '随 #2181 的 PR 进主线的 4 处（根因那次）：pool-runs.ts openPoolRuns、endedPoolRuns、poolRunUsage，各自两条查询并行；schedule.ts scheduleHealth 里的三条（latest、latestSuccess、latestFinished）。它们和上面 7 处一样都改成 allSettledOrThrow；公共小工具 all-settled.ts 也是 #2181 加在 pool-runs.ts、这个 PR 没动它，直接复用。',
-  '不用改的：db/src 其余 Promise.all 都没有——routing-effort、routing-apply、requests、local-claims 这些是 db.transaction()（单条连接上一个串行流程，不是并行几段查询）；queries 之外的 Promise.all 不装库查询；session-org.ts、channel-models.ts 里 `? Promise.resolve([])` 的占位是并发数组的一项，已经在 allSettledOrThrow 里。db/test 里的 Promise.all（pool-runs、routing-order、ops 几条）是测试为了并发起多笔写、故意快的，测试里撞锁不是要修的场景，不动。',
+  '排查范围：packages/db/src 里装着库查询的 Promise.all 逐个过（含本地查询函数调用、先存进变量的查询、`? Promise.resolve([])` 占位这些不是字面写在参数里的写法）；判法只看一条——会不会「一条先失败就返回、其余查询还在别的连接上跑着占锁」。改完 db/src 里除了 all-settled.ts 自己内部的 Promise.allSettled（它本来就等全部落定），再没有 Promise.all。',
+  '改的 12 处（全列）：carpool-spend.ts carpoolWindowSpend、daily-brief.ts dailyBriefStatus、engine-route-facts.ts routeFactsForPurpose、feishu-push.ts feishuPushFacts、probe.ts routeProbeTargets、session-org.ts sessionOrgFacts、channel-models.ts channelModelDiff、pool-runs.ts openPoolRuns、pool-runs.ts endedPoolRuns、pool-runs.ts poolRunUsage、schedule.ts scheduleHealth、schedule.ts scheduleRedStreaks。改动都是原地把 `Promise.all(` 换成 `allSettledOrThrow(`（pool-runs.ts openPoolRuns 的主线版本来就是 allSettledOrThrow，只是从池内私有函数改成从 all-settled.ts 引入），查询和取数逻辑没动。',
+  'all-settled.ts 是本 PR 新加的：主线上的 allSettledOrThrow 原本是 pool-runs.ts 里的私有函数（#2181 那次加的、只供 openPoolRuns 用），这里提成公共模块并导出，pool-runs.ts 改成从它引入；主线里还停在 Promise.all 的 pool-runs.ts 另外两处、schedule.ts 两处，也是这个 PR 改的（#2181 只动了 openPoolRuns 那一处，其余同类没跟着改）。',
+  '不用改的：db/src 其余 Promise.all 一条都没有——routing-effort、routing-apply、requests、local-claims 用的是 db.transaction()（一条连接上的串行流程，不是并行几段查询）；session-org.ts、channel-models.ts 里的 `? Promise.resolve([])` 是并发数组里的一项，已经在 allSettledOrThrow 里；queries 之外的 db/src 没有 Promise.all 装库查询。db/test 里的 Promise.all（pool-runs、routing-order、ops 几条）是测试故意并发起多笔写、要撞锁的场景，不动。',
   '验法：npx vitest run packages/db/test/all-settled.test.ts packages/db/test/query-promise-all.test.ts（可控假查询钉「一条先失败时等其余都落定才抛」；卫生检查扫 queries 新写的 Promise.all 包库查询）；真库死锁复现在 packages/db/test/quota.test.ts 的 it.skipIf(!realTestPgUrl())，本机没设 FLEET_TEST_PG_URL 时跳过、CI 的 pg 台跑。',
 ] as const;
 
