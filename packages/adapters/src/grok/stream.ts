@@ -14,6 +14,7 @@ import {
   cleanTestCommands,
   commandFailure,
   cut,
+  ERROR_MAX,
   failureText,
   NO_OUTPUT,
   num,
@@ -28,6 +29,7 @@ import {
   str,
   TRANSCRIPT_SUMMARY_MAX,
   takeFrame,
+  tally,
   testRun,
   todosSummary,
   toolSummaryText,
@@ -205,7 +207,7 @@ export class GrokStreamReader {
         this.#end(frame, effect);
         break;
       case 'error': {
-        const message = cut(str(frame.message) ?? JSON.stringify(frame), 1000);
+        const message = cut(str(frame.message) ?? JSON.stringify(frame), ERROR_MAX);
         this.#s.errors.push(message);
         this.#tx(effect, 'error', message);
         break;
@@ -217,7 +219,7 @@ export class GrokStreamReader {
       case 'available_commands':
         break;
       default:
-        this.#s.unknownFrames[type] = (this.#s.unknownFrames[type] ?? 0) + 1;
+        tally(this.#s.unknownFrames, type);
     }
     return effect;
   }

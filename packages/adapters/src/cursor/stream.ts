@@ -27,6 +27,7 @@ import {
   str,
   TRANSCRIPT_SUMMARY_MAX,
   takeFrame,
+  tally,
   testRun,
   todosSummary,
   toolSummaryText,
@@ -190,7 +191,7 @@ export class CursorStreamReader {
         this.#result(frame, effect);
         break;
       default:
-        this.#s.unknownFrames[type] = (this.#s.unknownFrames[type] ?? 0) + 1;
+        tally(this.#s.unknownFrames, type);
     }
     return effect;
   }
@@ -229,7 +230,7 @@ export class CursorStreamReader {
     const args = rec(body.args) ?? {};
     const id = str(frame.call_id) ?? str(call.toolCallId) ?? '';
     const kind = TOOL_KINDS[key];
-    if (!kind) this.#s.unknownTools[key] = (this.#s.unknownTools[key] ?? 0) + 1;
+    if (!kind) tally(this.#s.unknownTools, key);
     const name = key.replace(/ToolCall$/, '');
     const action = kind?.action ?? 'other';
     const summary = toolSummary(key, args, this.#cwd);

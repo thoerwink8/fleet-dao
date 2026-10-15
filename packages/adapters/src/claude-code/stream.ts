@@ -12,6 +12,7 @@ import {
   BACKGROUND_RUN,
   cleanTestCommands,
   cut,
+  ERROR_MAX,
   FAILURE_MAX,
   num,
   numbers,
@@ -26,6 +27,7 @@ import {
   TOOL_SUMMARY_MAX,
   TRANSCRIPT_SUMMARY_MAX,
   takeFrame,
+  tally,
   testRun,
   toolSummaryText,
   transcriptEntry,
@@ -253,7 +255,7 @@ export class ClaudeStreamReader {
         this.#rateLimit(frame, effect);
         break;
       default:
-        this.#s.unknownFrames[type] = (this.#s.unknownFrames[type] ?? 0) + 1;
+        tally(this.#s.unknownFrames, type);
     }
     return effect;
   }
@@ -333,7 +335,7 @@ export class ClaudeStreamReader {
     const blocks = Array.isArray(message.content) ? message.content : [];
     if (frame.is_api_error_message === true || str(frame.error)) {
       const text = blocks.map((b) => str(rec(b)?.text) ?? '').join('');
-      this.#s.apiError = { ...optional('code', str(frame.error)), text: cut(text, 1000) };
+      this.#s.apiError = { ...optional('code', str(frame.error)), text: cut(text, ERROR_MAX) };
       this.#tx(effect, 'error', [str(frame.error), text].filter((x) => x).join('：') || '接口报错');
       return;
     }

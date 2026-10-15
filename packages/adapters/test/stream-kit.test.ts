@@ -11,6 +11,7 @@ import {
   TOOL_SUMMARY_MAX,
   TRANSCRIPT_SUMMARY_MAX,
   takeFrame,
+  tally,
   todosSummary,
   toolSummaryText,
 } from '../src/stream-kit.ts';
@@ -89,5 +90,15 @@ describe('stream-kit takeFrame', () => {
     expect(counts).toEqual({ frames: 0, nonJsonLines: 2, nonJsonSample: `${'x'.repeat(200)}…` });
     expect(takeFrame(' {"type":"x"} ', counts)).toEqual({ type: 'x' });
     expect(counts.frames).toBe(1);
+  });
+});
+
+describe('stream-kit tally', () => {
+  it('没见过的键从 1 起，见过的加一，别的键不动', () => {
+    const counts: Record<string, number> = { a: 2 };
+    tally(counts, 'b');
+    tally(counts, 'a');
+    tally(counts, 'b');
+    expect(counts).toEqual({ a: 3, b: 2 });
   });
 });

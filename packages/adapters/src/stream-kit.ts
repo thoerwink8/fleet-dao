@@ -58,6 +58,8 @@ export const TRANSCRIPT_SUMMARY_MAX = 2000;
 export const SAY_MAX = 2000;
 /** 工具失败原因取多长。 */
 export const FAILURE_MAX = 500;
+/** 接口、会话报错原文取多长。 */
+export const ERROR_MAX = 1000;
 /** 工具成功但没有任何输出时给人看的正文。 */
 export const NO_OUTPUT = '（无输出）';
 /** 测试命令放到后台跑时的「结果未知」原因。 */
@@ -96,6 +98,11 @@ export function resultText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) return content.map((c) => str(rec(c)?.text) ?? '').join('');
   return '';
+}
+
+/** 认不出的帧、工具种类按键计数。 */
+export function tally(counts: Record<string, number>, key: string): void {
+  counts[key] = (counts[key] ?? 0) + 1;
 }
 
 /** 一行 JSON；不是 JSON 对象就返回 undefined。 */
