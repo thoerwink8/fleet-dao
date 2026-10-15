@@ -602,6 +602,10 @@ export function mirasimDepsFor(
   connect(user: SessionUser): MirasimConnect;
   ledgerDir(user: SessionUser): string;
   ledgerFs(user: SessionUser): LedgerFs;
+  /** 这个会话用户的会话档案（~/.mirasim/sessions）：没等到 accepted 时按工作目录和起针时间对账（MS-18）。 */
+  sessionsDir(user: SessionUser): string;
+  /** 以他的身份读会话档案。 */
+  sessionsFs(user: SessionUser): LedgerFs;
   /** 这个会话用户的 Mirasim 用量账本目录（~/.mirasim/insights，中转计量回填在这里，#1935）。 */
   meterDir(user: SessionUser): string;
   /** 以他的身份读用量账本：ls、grep -F 都经 exec。 */
@@ -624,6 +628,11 @@ export function mirasimDepsFor(
     },
     ledgerDir: (user) => `${homeOf(user)}/.mirasim/traffic`,
     ledgerFs: (user) => ({
+      readdir: (dir) => lsAsUser(exec, user, dir),
+      readFile: (path) => catAsUser(exec, user, path),
+    }),
+    sessionsDir: (user) => `${homeOf(user)}/.mirasim/sessions`,
+    sessionsFs: (user) => ({
       readdir: (dir) => lsAsUser(exec, user, dir),
       readFile: (path) => catAsUser(exec, user, path),
     }),
@@ -755,6 +764,8 @@ export function realPortsFromEnv(
     mirasimConnect: mirasim.connect,
     mirasimLedgerDir: mirasim.ledgerDir,
     mirasimLedgerFs: mirasim.ledgerFs,
+    mirasimSessionsDir: mirasim.sessionsDir,
+    mirasimSessionsFs: mirasim.sessionsFs,
     sessionOrg,
     // 探针那一轮里切的号：这一轮探完核对之后也叫醒（当场触发的那条路在上面 probeNow 里叫过了，两条路不重叠）
     orgSwitch: wakeAfterProbeRound(orgSwitch, routeWake),
@@ -889,6 +900,8 @@ export function realPortsFromEnv(
       mirasimConnect: mirasim.connect,
       mirasimLedgerDir: mirasim.ledgerDir,
       mirasimLedgerFs: mirasim.ledgerFs,
+      mirasimSessionsDir: mirasim.sessionsDir,
+      mirasimSessionsFs: mirasim.sessionsFs,
       sessionProxy: config.sessionProxy,
       agentsFile: async () => (await subagents()).file,
     }),

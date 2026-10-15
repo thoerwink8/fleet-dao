@@ -35,9 +35,10 @@
 //   都算「中转没查成」（relayUnknown，进 facts，DL3 挂起报警），不当成会话真交了活。
 //   会话号不是我们起的：server 的 accepted 帧回 sessionKey（<agent>:<uuid>），事先给不出，和 cursor 一样先回一个一眼看得出
 //   不是真号的临时号（MIRASIM_PENDING_PREFIX），真号经 onAccepted → onSessionId 报上来。没有 fork（换了账号池一律接力）。
-//   令牌文件、账本都在这份服务的用户家里（~/.mirasim/run/local-<端口>.token、~/.mirasim/traffic），引擎自己的进程进不去
-//   那个家（750），连回环口也连不上——法国防火墙只放行这个用户和 root 连它开的口（ops 第五节「会话用户的口只许它自己
-//   连」，#35，实测断链）：读账本（mirasimLedgerFs）经 exec 帮手以那个会话用户读，连接（mirasimConnect）经
+//   令牌文件、账本、会话档案都在这份服务的用户家里（~/.mirasim/run/local-<端口>.token、~/.mirasim/traffic、
+//   ~/.mirasim/sessions），引擎自己的进程进不去那个家（750），连回环口也连不上——法国防火墙只放行这个用户和 root
+//   连它开的口（ops 第五节「会话用户的口只许它自己连」，#35，实测断链）：读账本（mirasimLedgerFs）和没等到应答时
+//   对账用的会话档案（mirasimSessionsFs，MS-18）经 exec 帮手以那个会话用户读，连接（mirasimConnect）经
 //   一个同样以那个会话用户身份跑的桥接进程（adapters 的 bridge.ts + bridge-connect.ts），帧经它的 stdin/stdout 转，
 //   引擎自己的进程不直连端口、不直接读令牌文件（real/index.ts 的 mirasimDepsFor）。
 //   协议没有「探针模式」这种权限旗标（不像 Claude 的 dontAsk、cursor 的 --force、grok 的 --always-approve）：探针能不能
@@ -78,6 +79,7 @@ import {
   SESSION_USERS,
   type SessionEffort,
   type SessionEnvInput,
+  type SessionsFs,
   type SessionUser,
   type SpawnInfo,
   type TranscriptEntry,
@@ -328,6 +330,10 @@ export interface HostDriverDeps {
   mirasimLedgerDir(user: SessionUser): string;
   /** 读账本用：引擎自己的进程进不去会话用户的家（750），经这个以他的身份读（real/index.ts 的生产装配）。 */
   mirasimLedgerFs(user: SessionUser): LedgerFs;
+  /** 这个会话用户的 Mirasim 会话档案（他家里的 ~/.mirasim/sessions）：没等到 accepted 时按工作目录和起针时间对账（MS-18）。 */
+  mirasimSessionsDir(user: SessionUser): string;
+  /** 读会话档案用：和账本一样，经这个以会话用户的身份读。 */
+  mirasimSessionsFs(user: SessionUser): SessionsFs;
   /**
    * 会话出网经的代理（引擎配置 FLEET_SESSION_PROXY；法国直连、不给，#731）：cursor-agent、grok
    * 的会话带上（它们和会话里跑的命令都认 http(s)_proxy）。Claude 不带：reclaude 自己管上游和代理，会话经它的本地口出去
@@ -365,6 +371,8 @@ export function hostDrivers(deps: HostDriverDeps): Record<WiredHost, HostDriver>
       deps.mirasimConnect,
       deps.mirasimLedgerDir,
       deps.mirasimLedgerFs,
+      deps.mirasimSessionsDir,
+      deps.mirasimSessionsFs,
       deps.run?.mirasim ?? runMirasim,
     ),
   };
@@ -832,6 +840,8 @@ function mirasimDriver(
   connect: (user: SessionUser) => MirasimConnect,
   ledgerDir: (user: SessionUser) => string,
   ledgerFs: (user: SessionUser) => LedgerFs,
+  sessionsDir: (user: SessionUser) => string,
+  sessionsFs: (user: SessionUser) => SessionsFs,
   run: NonNullable<HostRunners['mirasim']>,
 ): HostDriver {
   return {
@@ -866,6 +876,8 @@ function mirasimDriver(
           connect: connect(spec.user),
           ledgerDir: ledgerDir(spec.user),
           ledgerFs: ledgerFs(spec.user),
+          sessionsDir: sessionsDir(spec.user),
+          sessionsFs: sessionsFs(spec.user),
           ...(hooks.signal ? { signal: hooks.signal } : {}),
           ...(hooks.now ? { now: hooks.now } : {}),
           ...(hooks.onEvent ? { onEvent: hooks.onEvent } : {}),

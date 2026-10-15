@@ -1195,13 +1195,16 @@ describe('Mirasim 的驱动（#345）', () => {
     expect(fake.count()).toBe(0);
   });
 
-  it('连接、账本目录、读账本都以这次会话的用户去拿（mirasimConnect / mirasimLedgerDir / mirasimLedgerFs 三个依赖都被调用）', async () => {
+  it('连接、账本、会话档案都以这次会话的用户去拿', async () => {
     const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
     await driver.run(mirasimSpec({ user: 'fleet-agent-carpool' }), {});
     expect(fake.options[0]?.ledgerDir).toBe('/fake/fleet-agent-carpool/.mirasim/traffic');
+    expect(fake.options[0]?.sessionsDir).toBe('/fake/fleet-agent-carpool/.mirasim/sessions');
     expect(typeof fake.options[0]?.connect).toBe('function');
     expect(typeof fake.options[0]?.ledgerFs?.readdir).toBe('function');
     expect(typeof fake.options[0]?.ledgerFs?.readFile).toBe('function');
+    expect(typeof fake.options[0]?.sessionsFs?.readdir).toBe('function');
+    expect(typeof fake.options[0]?.sessionsFs?.readFile).toBe('function');
   });
 
   it('没接 accepted（服务端没接这一针）：onSessionId 不会被调用', async () => {

@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { judgeRun } from '../src/judge.ts';
 import { ledgerRouting, readMirasimLedger } from '../src/mirasim/ledger.ts';
 import {
+  type MirasimRunOptions,
   type MirasimRunReport,
   type MirasimRunSpec,
   mirasimRunFacts,
@@ -604,6 +605,169 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     });
     expect(report.launchUnknown).toBe(true);
     expect(Date.now() - t0).toBeGreaterThanOrEqual(1_400);
+  });
+
+  // 对账把 15 秒落盘余量（和一条都没有时的整段时间窗）拨快：pause 推进 clock，不真睡。
+  // 发起连接在 prompt 后掐掉，走「连接提前断」这条，不必真等 startupMs。startupMs 留 5 秒：
+  // 接上之后还要读完终帧，太短会在终帧之前被 startup_timeout 杀掉。
+  const QUICK = { ...FAST, startupMs: 5_000 };
+  const kimiId = kimi.sessionKey.split(':')[1] as string;
+  const otherId = '11111111-1111-4111-8111-111111111111';
+  const oldId = '22222222-2222-4222-8222-222222222222';
+
+  function fastClock(behindMs = 0) {
+    let t = Date.now() - behindMs;
+    return {
+      clock: () => t,
+      pause: async (ms: number) => {
+        t += ms;
+      },
+    };
+  }
+
+  function writeSession(root: string, id: string, record: Record<string, unknown>, agent = 'kimi') {
+    const dir = join(root, agent, id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'record.json'), JSON.stringify(record));
+  }
+
+  function missed(extra: Partial<MirasimRunSpec> = {}, stream = kimi.stream) {
+    const cwd = tempDir();
+    const sessions = tempDir();
+    const server = new FakeMirasim({ reply: () => undefined, dropAfterPrompt: true, stream });
+    // 起会话预算在对账前已经用完（钟比 startupMs 还早）：接上之后不该被 startup_timeout 停掉。
+    const time = fastClock(QUICK.startupMs + 1_000);
+    const run = (opts: Partial<MirasimRunOptions> = {}) =>
+      runMirasim(spec({ cwd, limits: QUICK, ...extra }), {
+        ...opts,
+        connect: server.connect,
+        sessionsDir: sessions,
+        clock: time.clock,
+        pause: time.pause,
+      });
+    return { cwd, sessions, server, run };
+  }
+
+  it('没等到 accepted，档案里恰好一条对得上：接上它，按那条会话判结局，不重发 prompt（MS-18）', async () => {
+    const { cwd, sessions, server, run } = missed();
+    const born = new Date().toISOString();
+    writeSession(sessions, kimiId, { workdir: cwd, createdAt: born, taskId: kimi.taskId });
+    // 同一目录、出生时刻在窗外的旧会话，和别的目录、时刻在窗里的会话，都不算
+    writeSession(sessions, oldId, {
+      workdir: cwd,
+      createdAt: new Date(Date.now() - 3_600_000).toISOString(),
+    });
+    writeSession(sessions, otherId, { workdir: join(cwd, 'elsewhere'), createdAt: born });
+    writeSession(sessions, 'not-a-uuid', { workdir: cwd, createdAt: born });
+    const acceptedKeys: string[] = [];
+    const report = await run({
+      ledgerDir: okLedger(kimi.sessionKey),
+      onAccepted: (info) => {
+        acceptedKeys.push(info.sessionKey);
+      },
+    });
+    expect(server.framesOf('prompt')).toHaveLength(1);
+    expect(server.framesOf('subscribe').length).toBeGreaterThan(0);
+    expect(acceptedKeys).toEqual([kimi.sessionKey]);
+    expect(report.launchUnknown).toBeUndefined();
+    expect(report.killed).toBeUndefined();
+    expect(server.framesOf('stop')).toHaveLength(0);
+    expect(report.sessionKey).toBe(kimi.sessionKey);
+    expect(report.taskId).toBe(kimi.taskId);
+    expect(report.terminal).toEqual({ isError: false, detail: 'done' });
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('answered');
+  });
+
+  it('没等到 accepted，档案里恰好一条、记录没有 taskId、终态是失败：按那条会话判失败', async () => {
+    const { cwd, sessions, server, run } = missed({}, [
+      {
+        type: 'snapshot',
+        sessionKey: kimi.sessionKey,
+        seq: 0,
+        snapshot: { phase: 'done', error: '上游断了', model: 'kimi-code/k3' },
+      },
+    ]);
+    // 档案键是 workdir、createdAt（不带 taskId，和会话档案的字段名单一致）
+    writeSession(sessions, kimiId, { workdir: cwd, createdAt: new Date().toISOString() });
+    const report = await run();
+    expect(server.framesOf('prompt')).toHaveLength(1);
+    expect(server.framesOf('stop')).toHaveLength(0);
+    expect(report.launchUnknown).toBeUndefined();
+    expect(report.killed).toBeUndefined();
+    expect(report.sessionKey).toBe(kimi.sessionKey);
+    expect(report.taskId).toBeUndefined();
+    expect(judgeRun(mirasimRunSummary(report).facts)).toMatchObject({
+      outcome: 'failed',
+      reason: 'agent_error',
+    });
+  });
+
+  it('没等到 accepted，时间窗里对上两条：照旧没查成，不订阅、不重发', async () => {
+    const { cwd, sessions, server, run } = missed();
+    const born = new Date().toISOString();
+    writeSession(sessions, kimiId, { workdir: cwd, createdAt: born, taskId: kimi.taskId });
+    writeSession(sessions, otherId, { workdir: `${cwd}/`, createdAt: born });
+    const report = await run();
+    expect(server.framesOf('prompt')).toHaveLength(1);
+    expect(server.framesOf('subscribe')).toHaveLength(0);
+    expect(report.launchUnknown).toBe(true);
+    expect(report.launchError).toContain('别重发');
+    expect(report.launchError).toContain('对过账对上了 2 条');
+    expect(report.launchError).toContain(kimi.sessionKey);
+    expect(report.launchError).toContain(`kimi:${otherId}`);
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('launch_unknown');
+  });
+
+  it('没等到 accepted，时间窗里一条都没有：照旧没查成', async () => {
+    const { cwd, sessions, server, run } = missed();
+    const born = new Date().toISOString();
+    writeSession(sessions, oldId, {
+      workdir: cwd,
+      createdAt: new Date(Date.now() - 3_600_000).toISOString(),
+    });
+    writeSession(sessions, otherId, { workspacePath: join(cwd, 'elsewhere'), createdAt: born });
+    const report = await run();
+    expect(server.framesOf('prompt')).toHaveLength(1);
+    expect(server.framesOf('subscribe')).toHaveLength(0);
+    expect(report.launchUnknown).toBe(true);
+    expect(report.launchError).toContain('别重发');
+    expect(report.launchError).toContain('没有会话');
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('launch_unknown');
+  });
+
+  it('没等到 accepted，会话记录读不了：照旧没查成，不当成没起', async () => {
+    const broken = missed();
+    writeSession(broken.sessions, kimiId, { workdir: broken.cwd, createdAt: new Date().toISOString() });
+    writeFileSync(join(broken.sessions, 'kimi', kimiId, 'record.json'), '{');
+    const badJson = await broken.run();
+    expect(badJson.launchUnknown).toBe(true);
+    expect(badJson.launchError).toContain('别重发');
+    expect(badJson.launchError).toContain('会话记录读不了');
+    expect(badJson.launchError).toContain('不当成没起');
+    expect(badJson.launchError).not.toContain('没有会话');
+    expect(judgeRun(mirasimRunSummary(badJson).facts).reason).toBe('launch_unknown');
+    expect(broken.server.framesOf('prompt')).toHaveLength(1);
+    expect(broken.server.framesOf('subscribe')).toHaveLength(0);
+
+    const denied = missed();
+    const refused = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    const unreadable = await denied.run({
+      sessionsFs: {
+        readdir: async () => {
+          throw refused;
+        },
+        readFile: async () => {
+          throw refused;
+        },
+      },
+    });
+    expect(unreadable.launchUnknown).toBe(true);
+    expect(unreadable.launchError).toContain('会话记录读不了');
+    expect(unreadable.launchError).toContain('EACCES');
+    expect(unreadable.launchError).toContain('不当成没起');
+    expect(unreadable.launchError).not.toContain('没有会话');
+    expect(judgeRun(mirasimRunSummary(unreadable).facts).reason).toBe('launch_unknown');
+    expect(judgeRun(mirasimRunSummary(unreadable).facts).reason).not.toBe('spawn_failed');
   });
 
   it('一直排队：起不来超时，停掉', async () => {

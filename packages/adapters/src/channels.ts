@@ -48,6 +48,7 @@ export {
   nodeMeterFs,
   readMirasimMeter,
 } from './mirasim/meter.ts';
+export type { SessionsFs } from './mirasim/records.ts';
 export {
   DEFAULT_MIRASIM_LIMITS,
   type MirasimAccepted,
