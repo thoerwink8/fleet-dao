@@ -73,6 +73,7 @@ import {
   type OrgPlanView,
   type RouteFacts,
   type RouteRecord,
+  type RouteWaitKind,
   RoutingInputError,
   type RoutingPolicy,
   routeLabel,
@@ -98,11 +99,19 @@ export const WIRED_HOSTS: readonly HostId[] = WIRED_HOST_IDS;
 /** 战绩和熔断看最近几天的会话结局。 */
 export const RECORD_DAYS = 7;
 /**
- * 选路要等时，最多隔这么久再选一次（等额度清零可能要几天：中途人点名换路由、额度提前清零要看得见）。
- * 2 分钟（原来 10 分钟，#194）：现在是兜底——切号切完探通会当场发 taskRouteWake 信号叫醒等路由的活（real/route-wake.ts，方案 4.3），
- * 信号丢了、没发出去也最多再等这么久就重选；选路只是查库，隔 2 分钟再选一次很便宜。
+ * 等空位、熔断到点、等切号、等探针：有明确时刻也最多隔这么久再选。这些随时可能提前好，2 分钟是兜底
+ * （原来 10 分钟，#194）。切号切完探通会当场发 taskRouteWake（real/route-wake.ts），信号到了不等满。
+ * 等额度且清零时刻明确不走这里，见 QUOTA_ROUTE_WAIT_CAP_SECONDS。
  */
 export const MAX_ROUTE_WAIT_SECONDS = 120;
+/**
+ * 等额度（waitFor quota）且清零时刻明确：按 until 睡，不超过这个上限。
+ * 上限兜住人点名换路由、额度提前清零、叫醒信号丢了——最多再隔这么久重选一次；taskRouteWake 仍能当场叫醒，长睡不会错过切号。
+ * 4 小时：一张单等额度 24 小时（清零不早于 24 小时后）约 6 轮 × 约 9 条事件 ≈ 54 条（约 2 条/小时）。
+ * 现在每 120 秒一轮、约 270 条/小时、24 小时约 6480 条。这个增速离 Temporal 约 1 万条历史警告线还差很远
+ * （要连着等额度一百多天才靠近），等路由循环不上 continueAsNew。等空位、熔断仍用 MAX_ROUTE_WAIT_SECONDS。
+ */
+export const QUOTA_ROUTE_WAIT_CAP_SECONDS = 4 * 60 * 60;
 /** 选路读会话用户挂的组织最多等多久：选路这一步（quick 一档）一次尝试只有 30 秒，还要查库。 */
 export const ORG_READ_WAIT_MS = 15_000;
 /** 组织还没读出来时隔多久再选：平时一读 0.3 秒，慢的是 reclaude 首跑同步配置（上百秒），读在后台接着跑。 */
@@ -113,6 +122,24 @@ export const MEMORY_ADMISSION_RETRY_SECONDS = 30;
 export const RESERVE_RACE_ROUNDS = 3;
 /** 连着几次都在预占那一下被抢先：隔多久再选（别的单刚派出去，池马上就看得见满没满，不用等一整个选路间隔）。 */
 export const RESERVE_RACE_RETRY_SECONDS = 5;
+
+/**
+ * 这一轮等路由该睡几秒。等额度且 until 认得出：按到清零的秒数，封顶 QUOTA_ROUTE_WAIT_CAP_SECONDS。
+ * 等空位、熔断、切号、探针：有时刻也封顶 MAX_ROUTE_WAIT_SECONDS（随时可能提前好）。
+ * until 空或认不出：不给秒数，工作流用 ROUTE_RETRY_SECONDS 短间隔轮询。
+ */
+export function routeRetryAfterSeconds(
+  waitFor: RouteWaitKind,
+  untilIso: string | null,
+  nowMs: number,
+): number | undefined {
+  if (untilIso === null) return undefined;
+  const until = Date.parse(untilIso);
+  if (!Number.isFinite(until)) return undefined;
+  const seconds = Math.max(1, Math.ceil((until - nowMs) / 1000));
+  const cap = waitFor === 'quota' ? QUOTA_ROUTE_WAIT_CAP_SECONDS : MAX_ROUTE_WAIT_SECONDS;
+  return Math.min(cap, seconds);
+}
 
 /** 预占那一下池被别的单同时占满了（读事实到预占之间）：这一次的结论不作数，按新事实重选。 */
 class SlotTaken extends Error {
@@ -717,13 +744,10 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           r: Extract<ChooseRouteResult, { kind: 'wait' }>,
           extra: string[],
         ): PickRouteResult => {
-          const until = r.until ? Date.parse(r.until) : Number.NaN;
-          const retryAfterSeconds = Number.isFinite(until)
-            ? Math.min(MAX_ROUTE_WAIT_SECONDS, Math.max(1, Math.ceil((until - now.getTime()) / 1000)))
-            : undefined;
+          // 等额度且有清零时刻：按 until 长睡（封顶见 routeRetryAfterSeconds）。等熔断到点仍是「等空位」一类，短间隔。
+          const retryAfterSeconds = routeRetryAfterSeconds(r.waitFor, r.until, now.getTime());
           return {
             ok: false,
-            // 等熔断到点也是「等空位」一类：随时可能好，按间隔再选。
             waitFor: r.waitFor === 'quota' ? 'quota' : 'slot',
             detail: [r.reason, ...extra].join('；'),
             ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),

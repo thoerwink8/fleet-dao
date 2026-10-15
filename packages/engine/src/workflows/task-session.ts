@@ -610,7 +610,9 @@ async function pickRoute(
         await stopForProbe('', mark);
         continue;
       }
-      // 睡到下一次选路，但路由那边变了（切号切完、切过去的池探通了）会被叫醒当场再选；信号丢了照样按这个时长醒。
+      // 睡到下一次选路。等额度且选路给了清零时刻：秒数按那个时刻（上限几小时），不是每 120 秒醒一次。
+      // 等空位、熔断仍是短间隔。路由变了（切号切完、切过去的池探通了）会被叫醒当场再选；信号丢了照样按这个时长醒。
+      // 步序没变（秒数是选路活动的结果）：老历史重放不用新的 patched 标记。
       // 多张单同时停在这里时，测试不要 await result()（会 unlockTimeSkipping，见 #1764）。
       await rt.pauseForRoute(got.waitFor, got.detail, got.retryAfterSeconds ?? ROUTE_RETRY_SECONDS, mark);
       continue;
