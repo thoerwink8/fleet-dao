@@ -6,6 +6,7 @@ import {
   FeishuAccessRequest,
   MeResponse,
   PasswordLoginRequest,
+  safeNext,
 } from '@fleet-dao/shared';
 import { type Context, Hono } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
@@ -58,15 +59,6 @@ export function meBody(
     csrfToken: session ? csrfTokenFor(config, session.sid) : '',
     env: envNameOf(config),
   };
-}
-
-/** 登录后跳回的地址只许是站内路径，防被拿来当跳板（开放重定向）。 */
-export function safeNext(next: string | undefined): string {
-  if (!next || next.length > 1000) return '/';
-  if (!next.startsWith('/') || next.startsWith('//') || next.includes('\\')) return '/';
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: 就是要拦控制字符
-  if (/[\u0000-\u001f\u007f]/.test(next)) return '/';
-  return next;
 }
 
 export function authRoutes(deps: Deps): Hono<CockpitEnv> {
