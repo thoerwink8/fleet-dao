@@ -4,6 +4,7 @@
 // - 轮询：按 updated_at 拉 PR，逐条交给后端的同一道门（白名单、去重），漏收的事件这样补回来。issue 和评论不收了：单子由引擎自己拉（#632）。
 // - 核对：合并的 PR 都记在镜像里。我们两个机器人开的 PR 还要是「引擎」机器人合的、
 //   账上有合并队列的合并记录（C21/C22）。人开的不查这两项：帅位本机开、GitHub 自动合并，没有合并队列这一步。
+//   例外：分支以 ci-timings/ 开头、开和合都是引擎机器人的耗时表 PR（isEngineCiTimingsPr）不走任务合并队列，不报没有合并记录。
 // 每一项都分清「查了、0 个问题」和「这次没查成」：读不到 GitHub 就报 unscanned，不报 ok；做了一半报 partial，全没做成报 failed。
 import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
@@ -67,11 +68,23 @@ export interface MergedPrFinding {
   kind: 'mirror_fixed' | 'not_merged_by_engine' | 'no_merge_record' | 'backfill_merge_record' | 'unchecked';
   /** 给人看的一句，也原样进 problems。 */
   text: string;
+  /**
+   * 头分支、开的是不是引擎机器人、合的是不是引擎机器人。
+   * 对账拿这三样认耗时表（isEngineCiTimingsPr）。不带就按普通的绕队列报。
+   */
+  headRef?: string;
+  openedByEngine?: boolean;
+  mergedByEngine?: boolean;
 }
 
 /** 合了的 PR 对账的结果：problems 是 findings 的 text 按顺序排下来。 */
 export interface MergedPrAuditReport extends AuditReport {
   findings: MergedPrFinding[];
+  /**
+   * 这一轮看到的引擎自己的耗时表 PR 号（isEngineCiTimingsPr）。
+   * 没有「没经合并队列」那条发现，调用方仍要按这个把已经开着的 reconcile:pr 撤掉。
+   */
+  engineCiTimingsPrs?: number[];
 }
 
 export interface ReconcilerOptions {
@@ -258,9 +271,25 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
 }
 
 /**
+ * 刷新 CI 测试耗时表的 PR 不走任务的合并队列。
+ * 定时任务从默认分支拉 `ci-timings/日期`，引擎机器人自己开 PR、自己挂 GitHub 自动合并。
+ * 没有对应的单，进不了只收 `fleet/` 任务分支的合并队列（合前还要核对不落后主线、CI 全绿、人闸）。
+ * 账上没有合并记录是这条路径的常态，不是绕过队列。
+ * 分支不是 `ci-timings/` 开头，或开、合不是引擎机器人，仍算绕过。
+ */
+export function isEngineCiTimingsPr(pr: {
+  headRef: string;
+  openedByEngine: boolean;
+  mergedByEngine: boolean;
+}): boolean {
+  return pr.headRef.startsWith('ci-timings/') && pr.openedByEngine && pr.mergedByEngine;
+}
+
+/**
  * 一段时间里合了的 PR：镜像没记成已合并的都补上（人开的、机器人开的一样，补镜像是安全的）。
  * 合并人必须是「引擎」、账上必须有合并队列的合并记录：只查我们两个机器人开的 PR。人开的没有合并队列这一步，
  * 查了会把帅位本机开的、GitHub 自动合并的每一张都报出来。
+ * 引擎自己的耗时表 PR（isEngineCiTimingsPr）不报没有合并记录，只补账。
  */
 export async function auditMergedPrs(
   deps: Deps,
@@ -284,8 +313,13 @@ export async function auditMergedPrs(
     };
   }
   const findings: MergedPrFinding[] = [];
-  const note = (number: number, kind: MergedPrFinding['kind'], text: string) =>
-    findings.push({ number, kind, text: `#${number} ${text}` });
+  const engineCiTimingsPrs: number[] = [];
+  const note = (
+    number: number,
+    kind: MergedPrFinding['kind'],
+    text: string,
+    extra?: Pick<MergedPrFinding, 'headRef' | 'openedByEngine' | 'mergedByEngine'>,
+  ) => findings.push({ number, kind, text: `#${number} ${text}`, ...extra });
   let scanned = 0;
   const report = (): Omit<MergedPrAuditReport, 'outcome' | 'why'> => ({
     scanned,
@@ -293,6 +327,7 @@ export async function auditMergedPrs(
     fixed: findings.filter((f) => f.kind === 'mirror_fixed').length,
     problems: findings.map((f) => f.text),
     findings,
+    engineCiTimingsPrs,
   });
   try {
     outer: for await (const page of client.pages({
@@ -335,28 +370,34 @@ export async function auditMergedPrs(
               `合并了但镜像里${mirror ? `记的是 ${mirror.state}` : '没有'}（已补）`,
             );
           }
-          const openedByUs = deps.bots.is('engine', item.user) || deps.bots.is('agent', item.user);
+          const openedByEngine = deps.bots.is('engine', item.user);
+          const openedByUs = openedByEngine || deps.bots.is('agent', item.user);
           if (!openedByUs) continue;
           // 合并人只有单张读才有
           const pr = await readPull(deps, repo, item.number, 'engine');
-          if (!deps.bots.is('engine', pr.merged_by ?? null)) {
+          const mergedByEngine = deps.bots.is('engine', pr.merged_by ?? null);
+          const headRef = pr.head.ref;
+          const who = { headRef, openedByEngine, mergedByEngine };
+          // 耗时表这条自己合的，记下来给上面撤旧提醒；有没有合并记录都记，回看窗口里开着的误报才撤得掉。
+          if (isEngineCiTimingsPr(who)) engineCiTimingsPrs.push(item.number);
+          if (!mergedByEngine) {
             note(
               item.number,
               'not_merged_by_engine',
               `不是「引擎」机器人合的（合并人 ${pr.merged_by?.login ?? '读不到'}）`,
+              who,
             );
           }
           // 合并队列合的每一张都在幂等账里留了合并记录（C21）。没留的：多半是绕开了合并队列（#431 那种——账号
           // 手动合的、合并前那几道核对可能没走），账上要补上：receipt 里写明实际合并人，让账反映事实。提醒照报，
           // 创始人兼断一次要不要走合并队列；补账完下一轮 no_merge_record 不再起。
-          // 「引擎」自己开、自己合的（引擎的定时任务开的数据 PR，比如每周刷新 CI 耗时表：挂 GitHub 自动合并，必过检查照样挡）
-          // 本来就不走任务的合并队列，不报 no_merge_record，只补账（#2175、#1230：每周一条误报，#1230 还被立了案白起一次会话）。
-          // 干活的机器人开的（任务 PR）照报。
-          const ownJobPr = deps.bots.is('engine', item.user) && deps.bots.is('engine', pr.merged_by ?? null);
+          // 耗时表（isEngineCiTimingsPr）不报这一条，只补账。别的引擎 PR（包括 fleet/ 任务分支）照报。
           const key = mergeKey(repo, item.number, pr.head.sha);
           const existing = await ledger.idempotency.peek(key);
           if (!existing?.completedAt) {
-            if (!ownJobPr) note(item.number, 'no_merge_record', '合并了，但账上没有合并队列的合并记录');
+            if (!isEngineCiTimingsPr(who)) {
+              note(item.number, 'no_merge_record', '合并了，但账上没有合并队列的合并记录', who);
+            }
             if (pr.merged_at) {
               try {
                 const receipt: MergeReceipt = {

@@ -6,7 +6,12 @@
 // 状态只在 Temporal 一份，不靠这一处查；它留下的旧提醒由 retireWorkflowAlerts 撤掉。
 
 import type { LedgerSession, MergedPrLedger } from '@fleet-dao/db';
-import type { MergedPrAuditReport, MergedPrFinding, RepoRef } from '@fleet-dao/github';
+import {
+  isEngineCiTimingsPr,
+  type MergedPrAuditReport,
+  type MergedPrFinding,
+  type RepoRef,
+} from '@fleet-dao/github';
 import type { TaskState } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertSweepDeps } from './alert-sweep.ts';
@@ -33,9 +38,17 @@ export const LEDGER_ALERT_PREFIX = 'reconcile:ledger:';
 /**
  * 我们机器人开的 PR 合并人不是「引擎」、或账上没有合并队列的合并记录——合并前那几道核对（不落后主线、CI 全绿、人闸）
  * 可能没走。后面是 <owner>/<name>#<PR 号>。条件就是「发生过」，只报一次、不自动撤，要人在驾驶舱点「处理」。
+ * 例外：引擎自己的耗时表 PR（isEngineCiTimingsPr）本来就不走队列，不报；已经开着的下一轮撤掉。
  * （#445 删过、#440 又办回来：合并队列其实已开，删掉的判断「没开」不准。）
  */
 export const PR_ALERT_PREFIX = 'reconcile:pr:';
+/** 撤耗时表误报时写的原因（处理人是对账，RECONCILE_ACTOR）。 */
+export const CI_TIMINGS_SKIP_WHY = '引擎自己的耗时表 PR，不走合并队列';
+/**
+ * 已经开着、下一轮可能已经出了 26 小时回看的误报：对账按键撤，不靠再看见那张 PR。
+ * #2175 是引擎机器人自己开、自己合的耗时表。
+ */
+const KNOWN_CI_TIMINGS_FALSE_ALARMS = ['reconcile:pr:thoerwink8/fleet-dao#2175'] as const;
 /** PR 合了以后关单那一步（写关单评论、收会话、记做完）要走一会儿：合并这么久之内的不查记账。 */
 export const LEDGER_GRACE_MS = 30 * 60_000;
 /** 每小时一轮，往回看 26 小时：漏一轮也补得回最近一天里合的。 */
@@ -111,23 +124,59 @@ async function resolveOne(deps: ReconcileCheckDeps, part: SweepPart, dedupeKey: 
   }
 }
 
-/** 按 PR 归拢要报的两种（合并人不是「引擎」、没有合并记录）。 */
-function prProblems(findings: readonly MergedPrFinding[]): Map<number, string[]> {
-  const byPr = new Map<number, string[]>();
+function findingIsEngineCiTimings(f: MergedPrFinding): boolean {
+  return isEngineCiTimingsPr({
+    headRef: f.headRef ?? '',
+    openedByEngine: f.openedByEngine === true,
+    mergedByEngine: f.mergedByEngine === true,
+  });
+}
+
+/**
+ * 按 PR 归拢要报的两种（合并人不是「引擎」、没有合并记录）。
+ * 耗时表（isEngineCiTimingsPr）不归进要报的，号记在 timings 里，调用方撤掉已经开着的。
+ */
+function prProblems(findings: readonly MergedPrFinding[]): {
+  problems: Map<number, string[]>;
+  timings: number[];
+} {
+  const problems = new Map<number, string[]>();
+  const timings = new Set<number>();
   for (const f of findings) {
     if (f.kind !== 'not_merged_by_engine' && f.kind !== 'no_merge_record') continue;
-    byPr.set(f.number, [...(byPr.get(f.number) ?? []), f.text]);
+    if (findingIsEngineCiTimings(f)) {
+      timings.add(f.number);
+      continue;
+    }
+    problems.set(f.number, [...(problems.get(f.number) ?? []), f.text]);
   }
-  return byPr;
+  return { problems, timings: [...timings] };
+}
+
+/** 开着才撤。读不到记没查成，不当成已经撤了。 */
+async function retireOpenCiTimingsAlert(deps: ReconcileCheckDeps, part: SweepPart, dedupeKey: string) {
+  let row: Awaited<ReturnType<ReconcileCheckDeps['alerts']['byKey']>>;
+  try {
+    row = await deps.alerts.byKey(dedupeKey);
+  } catch (err) {
+    part.unchecked.push(`提醒 ${dedupeKey} 没读成，这一轮不撤：${errMessage(err)}`);
+    return;
+  }
+  if (!row || row.resolvedAt !== null) return;
+  await resolveOne(deps, part, dedupeKey, CI_TIMINGS_SKIP_WHY);
 }
 
 /**
  * 每个受管的仓，最近 26 小时合了的 PR：镜像补上算发现（记账那一部分靠镜像认合了的 PR，放在它前面跑）。我们机器人开的
  * PR 合并人不是「引擎」、或没有合并队列的合并记录按 PR 报一条（#431 就是这么漏的：合并前那几道核对——不落后主线、CI
  * 全绿、人闸——可能没走）。条件就是「发生过」，只报一次、不自动撤，要人在驾驶舱点「处理」。
+ * 引擎自己的耗时表 PR 不报；这一轮看见的、以及已经开着的 #2175，撤掉。
  */
 export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();
+  for (const dedupeKey of KNOWN_CI_TIMINGS_FALSE_ALARMS) {
+    await retireOpenCiTimingsAlert(deps, part, dedupeKey);
+  }
   let repos: RepoRef[];
   try {
     repos = await deps.repos();
@@ -161,7 +210,12 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
       const detail = failed.length > 0 ? failed.join('；') : (report.why ?? '有的没查成');
       part.unchecked.push(`${slug} 合并的 PR 没查全：${detail}`);
     }
-    for (const [number, lines] of prProblems(report.findings)) {
+    const planned = prProblems(report.findings);
+    const timingsNumbers = new Set([...(report.engineCiTimingsPrs ?? []), ...planned.timings]);
+    for (const number of timingsNumbers) {
+      await retireOpenCiTimingsAlert(deps, part, prAlertKey(repo.owner, repo.name, number));
+    }
+    for (const [number, lines] of planned.problems) {
       const dedupeKey = prAlertKey(repo.owner, repo.name, number);
       try {
         const { created } = await deps.alerts.insertOnce({

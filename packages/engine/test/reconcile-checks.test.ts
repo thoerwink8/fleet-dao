@@ -1,11 +1,12 @@
 // 对账的核对（jobs/reconcile-checks.ts）：对上了不报、对不上报并写明哪条 PR 缺什么、条件没了撤、读不到不记 ok 且旧提醒不撤。
 // 「开着的单都有着落」那一处随 Fusion 删了（#556），这里只测它留下的旧提醒怎么撤（retireWorkflowAlerts）。
-// 人开的 PR 不报合并人这一条在 github 包的测试里（这里只认对账结果里 findings 的种类）。
+// 人开的 PR 不报合并人这一条在 github 包的测试里。耗时表例外看 findings 上的分支、开和合是不是引擎机器人。
 import { randomUUID } from 'node:crypto';
 import type { AlertRow, MergedPrLedger } from '@fleet-dao/db';
 import type { MergedPrAuditReport, MergedPrFinding } from '@fleet-dao/github';
 import { describe, expect, it } from 'vitest';
 import {
+  CI_TIMINGS_SKIP_WHY,
   checkLedgers,
   checkMergedPrs,
   LEDGER_GRACE_MS,
@@ -17,6 +18,7 @@ import {
   retireWorkflowAlerts,
   WORKFLOW_ALERT_PREFIX,
 } from '../src/jobs/reconcile-checks.ts';
+import { RECONCILE_ACTOR } from '../src/jobs/reconcile-common.ts';
 
 const NOW = new Date('2026-09-26T09:41:00.000Z');
 const TASK = '11111111-1111-4111-8111-111111111111';
@@ -265,6 +267,78 @@ describe('合了的 PR：镜像、合并人、合并记录', () => {
     expect(w.inserted).toHaveLength(2);
     expect(w.inserted[1]?.dedupeKey).toBe('reconcile:pr:acme/widgets#7');
     expect(w.inserted[1]?.created).toBe(false);
+  });
+
+  it('ci-timings/ 的引擎 PR 不报；人手合的报；fleet/ 没经队列的机器人 PR 报；开着的旧 alert 撤掉', async () => {
+    const old = openAlert('reconcile:pr:thoerwink8/fleet-dao#2175', {
+      title: '机器人开的 PR 没经合并队列合：thoerwink8/fleet-dao#2175',
+    });
+    const seenAgain = openAlert('reconcile:pr:acme/widgets#11', {
+      title: '机器人开的 PR 没经合并队列合：acme/widgets#11',
+    });
+    const w = world({
+      open: [old, seenAgain],
+      repos: [{ owner: 'acme', name: 'widgets' }],
+      audit: async () =>
+        audit(
+          [
+            {
+              number: 11,
+              kind: 'no_merge_record',
+              text: '#11 合并了，但账上没有合并队列的合并记录',
+              headRef: 'ci-timings/2026-10-14',
+              openedByEngine: true,
+              mergedByEngine: true,
+            },
+            {
+              // 分支虽是 ci-timings/，合并的是人：仍报
+              number: 12,
+              kind: 'not_merged_by_engine',
+              text: '#12 不是「引擎」机器人合的（合并人 founder）',
+              headRef: 'ci-timings/handed',
+              openedByEngine: true,
+              mergedByEngine: false,
+            },
+            {
+              number: 12,
+              kind: 'no_merge_record',
+              text: '#12 合并了，但账上没有合并队列的合并记录',
+              headRef: 'ci-timings/handed',
+              openedByEngine: true,
+              mergedByEngine: false,
+            },
+            {
+              number: 13,
+              kind: 'no_merge_record',
+              text: '#13 合并了，但账上没有合并队列的合并记录',
+              headRef: 'fleet/13-abcd1234',
+              openedByEngine: true,
+              mergedByEngine: true,
+            },
+          ],
+          { engineCiTimingsPrs: [11] },
+        ),
+    });
+    await checkMergedPrs(w.deps);
+    expect(w.inserted.map((i) => i.dedupeKey).sort()).toEqual(
+      ['reconcile:pr:acme/widgets#12', 'reconcile:pr:acme/widgets#13'].sort(),
+    );
+    expect(w.inserted.some((i) => i.dedupeKey.endsWith('#11'))).toBe(false);
+    const hand = w.inserted.find((i) => i.dedupeKey.endsWith('#12'));
+    const fleet = w.inserted.find((i) => i.dedupeKey.endsWith('#13'));
+    expect(hand?.title).toBe('机器人开的 PR 没经合并队列合：acme/widgets#12');
+    expect(hand?.body).toContain('合并人 founder');
+    expect(fleet?.title).toBe('机器人开的 PR 没经合并队列合：acme/widgets#13');
+    expect(fleet?.body).toContain('没有合并队列的合并记录');
+    expect(w.resolved).toEqual([
+      { dedupeKey: 'reconcile:pr:thoerwink8/fleet-dao#2175', why: CI_TIMINGS_SKIP_WHY },
+      { dedupeKey: 'reconcile:pr:acme/widgets#11', why: CI_TIMINGS_SKIP_WHY },
+    ]);
+    expect(CI_TIMINGS_SKIP_WHY).toBe('引擎自己的耗时表 PR，不走合并队列');
+    expect(old.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(seenAgain.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(old.resolvedAt).not.toBeNull();
+    expect(old.body.startsWith(`已撤：${CI_TIMINGS_SKIP_WHY}`)).toBe(true);
   });
 
   it('【故意造出的失败】机器人开的 PR 合并人对、账上有合并记录：不报', async () => {
