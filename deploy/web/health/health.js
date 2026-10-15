@@ -24,7 +24,10 @@ const EXTRA_LABELS = {
 };
 
 export const HEALTH_URL = '/healthz';
+/** 香港本机探法国的结果。文件没有、不是 JSON、或还没失联：不当成全站红。 */
+export const FRANCE_LINK_URL = '/health/france-link.json';
 export const TIMEOUT_MS = 8000;
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 /**
  * 取一次健康报告。网络层的失败（连不上、超时、读正文时断了）都变成 { error }，不抛。
@@ -88,6 +91,76 @@ export function judge(fetched) {
     ...(warned > 0 ? [`${warned} 项警告要人看`] : []),
   ];
   return { ok: true, summary: notes.length > 0 ? `全部在线（${notes.join('，')}）` : '全部在线', rows };
+}
+
+/**
+ * 读香港本机的探活状态。404、坏 JSON、网络失败都返回 null，不抛：这一路坏了不能把健康页整页打红。
+ * @param {typeof fetch} fetchImpl
+ * @param {number} timeoutMs
+ * @returns {Promise<{ key: string, label: string, ok: false, reason: string } | null>}
+ */
+export async function fetchFranceLink(fetchImpl = fetch, timeoutMs = TIMEOUT_MS) {
+  try {
+    const res = await fetchImpl(FRANCE_LINK_URL, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    return franceLinkLine(JSON.parse(await res.text()));
+  } catch {
+    return null;
+  }
+}
+
+/** 北京时间的 HH:MM。认不出返回 null。 */
+function shanghaiHHMM(ms) {
+  if (!Number.isFinite(ms)) return null;
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Shanghai',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(ms));
+  const hh = parts.find((p) => p.type === 'hour')?.value;
+  const mm = parts.find((p) => p.type === 'minute')?.value;
+  const text = hh && mm ? `${hh}:${mm}` : '';
+  return HHMM.test(text) ? text : null;
+}
+
+/**
+ * 状态文件里 down 不是 true、或时刻认不出：返回 null（页面不改）。
+ * 时刻优先用 downSinceText（HH:MM）；否则 downSince 可以是 epoch 秒、epoch 毫秒，或 ISO 时间。
+ * @param {unknown} data
+ * @returns {{ key: string, label: string, ok: false, reason: string } | null}
+ */
+export function franceLinkLine(data) {
+  if (!isObject(data) || data.down !== true) return null;
+  let hhmm = null;
+  if (typeof data.downSinceText === 'string' && HHMM.test(data.downSinceText)) hhmm = data.downSinceText;
+  else if (typeof data.downSince === 'number' && data.downSince > 0) {
+    hhmm = shanghaiHHMM(data.downSince > 1e12 ? data.downSince : data.downSince * 1000);
+  } else if (typeof data.downSince === 'string' && data.downSince.trim()) {
+    const raw = data.downSince.trim();
+    if (/^[1-9][0-9]*$/.test(raw)) {
+      const n = Number(raw);
+      hhmm = shanghaiHHMM(n > 1e12 ? n : n * 1000);
+    } else {
+      hhmm = shanghaiHHMM(Date.parse(raw));
+    }
+  }
+  if (!hhmm) return null;
+  return { key: 'france_link', label: '法国隧道', ok: false, reason: `法国失联自 ${hhmm}` };
+}
+
+/**
+ * 失联时总灯改红，总结前面加上「法国失联自 HH:MM。」，行首多一条「法国隧道」。
+ * link 是 null 时原样返回（/healthz 自己的红绿不动）。
+ * @param {{ ok: boolean, summary: string, rows: { key: string, label: string, ok: boolean, reason: string }[] }} verdict
+ * @param {{ key: string, label: string, ok: false, reason: string } | null} link
+ */
+export function applyFranceLink(verdict, link) {
+  if (!link) return verdict;
+  return { ok: false, summary: `${link.reason}。${verdict.summary}`, rows: [link, ...verdict.rows] };
 }
 
 function describeStatus(status) {

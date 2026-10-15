@@ -1580,6 +1580,19 @@
         "message": "Tests 1 failed\n  - judges relay_quota_exhausted: Your quota is exhausted. API key status: exceeded"
       },
       "expect": { "action": "retry", "rule": "TS1", "routeOutcome": "neutral", "counter": "reworks" }
+    },
+    {
+      "id": "X111",
+      "provenance": "observed",
+      "origin": "2026-10-15 #2261、#2278：会话刚提交还没推，引擎已在远端把主线并进 PR 分支；远端头不含本地这段历史、本地也并不上，任务停下等人看",
+      "evidence": {
+        "source": "syncMainline",
+        "routeBound": false,
+        "code": "WORKTREE_DIVERGED",
+        "retryable": false,
+        "message": "工作树 /var/lib/fleet-work/thoerwink8_fleet-dao/2261-t01a13d6c 在 fcafa93 之后还有没推的提交（1f0f022），快进不到并好的 37cc634，也并不上：要人看"
+      },
+      "expect": { "action": "park", "rule": "MC4", "alert": true, "routeOutcome": "neutral" }
     }
   ],
   "skipped": [
