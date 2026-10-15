@@ -21,7 +21,7 @@ import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { RemoteViewProvider, SnapshotBanner, useSelectedNodeName } from '../components/node-notice';
 import { NotBuilt } from '../components/not-built';
 import { RefreshBar } from '../components/refresh-bar';
-import { useRepo } from '../components/repo-context';
+import { useRepoIfAny } from '../components/repo-context';
 import { InTopbar } from '../components/shell/topbar-slot';
 import { TIME } from '../lib/format';
 import { useSelectedNodeId } from '../lib/node';
@@ -47,8 +47,9 @@ function HomeBody({
   afterStrip?: ReactNode;
 }) {
   // 顶栏当前项目。画布和两个抽屉只留这一仓；没挂仓的决定（整机的事）留下。
+  // 外壳没包 RepoProvider（页面单独挂、测试直接渲染）时还没选出项目，先不筛。
   // 健康条、机器资源、池里的会话数不从这里过，仍是整台机器的。
-  const { repo } = useRepo();
+  const repo = useRepoIfAny()?.repo;
   const slug = repo ? repoSlug(repo) : undefined;
   const decisions = visibleForProject(data.decisions, slug);
   const done = visibleForProject(data.done, slug);
