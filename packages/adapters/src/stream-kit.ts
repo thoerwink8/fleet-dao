@@ -50,6 +50,44 @@ export function relPath(path: string, cwd: string): string {
   return base && full.startsWith(`${base}/`) ? full.slice(base.length + 1) : full;
 }
 
+/** 进度事件里工具输入摘要的长度。 */
+export const TOOL_SUMMARY_MAX = 200;
+/** 会话过程记录里工具输入摘要先取多长（调用方写库前再按上限截）。 */
+export const TRANSCRIPT_SUMMARY_MAX = 2000;
+/** 助手的话（say 事件）取多长。 */
+export const SAY_MAX = 2000;
+/** 工具失败原因取多长。 */
+export const FAILURE_MAX = 500;
+/** 工具成功但没有任何输出时给人看的正文。 */
+export const NO_OUTPUT = '（无输出）';
+
+/** 工具输入摘要的收尾：读不到就是空串，再按 max 截。 */
+export function toolSummaryText(text: string | undefined, max = TOOL_SUMMARY_MAX): string {
+  return cut(text ?? '', max);
+}
+
+/** 搜索类工具的摘要：「模式 @ 相对路径」，缺哪样省哪样。 */
+export function searchSummary(pattern: string | undefined, where: string | undefined, cwd: string): string {
+  return [pattern, where ? relPath(where, cwd) : undefined].filter((x) => x).join(' @ ');
+}
+
+/** 待办清单工具的摘要。 */
+export function todosSummary(todos: unknown): string {
+  return `待办 ${Array.isArray(todos) ? todos.length : 0} 条`;
+}
+
+/** 命令失败的原因：「原因：命令自己说的话」，没说话就只有原因；按 FAILURE_MAX 截。 */
+export function commandFailure(why: string, said: string | undefined): string {
+  return cut(said ? `${why}：${said}` : why, FAILURE_MAX);
+}
+
+/** 工具结果的 content（字符串，或带 text 的块数组）拼成正文；别的形状返回空串。 */
+export function resultText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.map((c) => str(rec(c)?.text) ?? '').join('');
+  return '';
+}
+
 /** 一行 JSON；不是 JSON 对象就返回 undefined。 */
 export function parseFrame(line: string): Record<string, unknown> | undefined {
   try {

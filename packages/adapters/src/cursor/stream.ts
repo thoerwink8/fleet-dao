@@ -10,7 +10,10 @@ import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import type { LineEffect } from '../cli-run.ts';
 import {
   cleanTestCommands,
+  commandFailure,
   cut,
+  FAILURE_MAX,
+  NO_OUTPUT,
   num,
   numbers,
   optional,
@@ -19,8 +22,13 @@ import {
   progressEvent,
   rec,
   relPath,
+  SAY_MAX,
+  searchSummary,
   str,
+  TRANSCRIPT_SUMMARY_MAX,
   testRun,
+  todosSummary,
+  toolSummaryText,
   transcriptEntry,
 } from '../stream-kit.ts';
 import type {
@@ -214,7 +222,7 @@ export class CursorStreamReader {
       const text = str(rec(block)?.text)?.trim();
       if (rec(block)?.type !== 'text' || !text) continue;
       this.#s.startedWork = true;
-      this.#emit(effect, 'say', { text: cut(text, 2000), source: 'stream' } satisfies SayPayload);
+      this.#emit(effect, 'say', { text: cut(text, SAY_MAX), source: 'stream' } satisfies SayPayload);
       this.#tx(effect, 'assistant', text);
     }
   }
@@ -333,10 +341,7 @@ export class CursorStreamReader {
   }
 }
 
-/** 会话过程记录里工具输入摘要先取多长（调用方写库前再按上限截）。 */
-const TRANSCRIPT_SUMMARY_MAX = 2000;
-
-function toolSummary(key: string, args: Record<string, unknown>, cwd: string, max = 200): string {
+function toolSummary(key: string, args: Record<string, unknown>, cwd: string, max?: number): string {
   const pick = (k: string) => str(args[k]);
   let text: string | undefined;
   switch (key) {
@@ -349,12 +354,11 @@ function toolSummary(key: string, args: Record<string, unknown>, cwd: string, ma
       text = pick('command');
       break;
     case 'grepToolCall': {
-      const where = pick('path');
-      text = [pick('pattern'), where ? relPath(where, cwd) : undefined].filter((x) => x).join(' @ ');
+      text = searchSummary(pick('pattern'), pick('path'), cwd);
       break;
     }
     case 'updateTodosToolCall':
-      text = `待办 ${Array.isArray(args.todos) ? args.todos.length : 0} 条`;
+      text = todosSummary(args.todos);
       break;
     default:
       text =
@@ -365,7 +369,7 @@ function toolSummary(key: string, args: Record<string, unknown>, cwd: string, ma
         pick('toolName') ??
         Object.values(args).find((v): v is string => typeof v === 'string');
   }
-  return cut(text ?? '', max);
+  return toolSummaryText(text, max);
 }
 
 /** 工具结果给人看的正文：失败照 failureText；成功的取命令的输出、读到的内容或工具自己的话，都没有就只说成功。 */
@@ -381,16 +385,16 @@ function resultTextOf(
     str(success?.message) ??
     str(success?.diffString) ??
     str(success?.interleavedOutput)?.trim();
-  return out ?? '（无输出）';
+  return out ?? NO_OUTPUT;
 }
 
 function failureText(result: Record<string, unknown>, success: Record<string, unknown> | undefined): string {
   if (success) {
     // 命令跑了但退出码不是 0：给退出码和 stderr
     const stderr = str(success.stderr)?.trim();
-    return cut(`退出码 ${num(success.exitCode) ?? '?'}${stderr ? `：${stderr}` : ''}`, 500);
+    return commandFailure(`退出码 ${num(success.exitCode) ?? '?'}`, stderr);
   }
   const [kind, detail] = Object.entries(result)[0] ?? ['没有结果', undefined];
   const message = str(rec(detail)?.message) ?? str(rec(detail)?.error) ?? str(detail);
-  return cut(message ? `${kind}：${message}` : kind, 500);
+  return cut(message ? `${kind}：${message}` : kind, FAILURE_MAX);
 }

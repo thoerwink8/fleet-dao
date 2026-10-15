@@ -12,7 +12,10 @@ import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import type { LineEffect } from '../cli-run.ts';
 import {
   cleanTestCommands,
+  commandFailure,
   cut,
+  FAILURE_MAX,
+  NO_OUTPUT,
   num,
   numbers,
   optional,
@@ -21,8 +24,13 @@ import {
   progressEvent,
   rec,
   relPath,
+  SAY_MAX,
+  searchSummary,
   str,
+  TRANSCRIPT_SUMMARY_MAX,
   testRun,
+  todosSummary,
+  toolSummaryText,
   transcriptEntry,
 } from '../stream-kit.ts';
 import type {
@@ -239,7 +247,7 @@ export class GrokStreamReader {
     this.#text = '';
     if (!text) return;
     this.#s.startedWork = true;
-    this.#s.answer = cut(text, 2000);
+    this.#s.answer = cut(text, SAY_MAX);
     this.#emit(effect, 'say', { text: this.#s.answer, source: 'stream' } satisfies SayPayload);
     this.#tx(effect, 'assistant', text);
   }
@@ -357,23 +365,16 @@ const USAGE_FIELDS = {
   reasoningTokens: 'reasoning_tokens',
 } as const;
 
-/** 会话过程记录里工具输入摘要先取多长（调用方写库前再按上限截）。 */
-const TRANSCRIPT_SUMMARY_MAX = 2000;
-
-function toolSummary(tool: PendingTool, cwd: string, max = 200): string {
+function toolSummary(tool: PendingTool, cwd: string, max?: number): string {
   const pick = (k: string) => str(tool.input[k]);
   const path = pick('file_path') ?? pick('target_file') ?? pick('target_directory') ?? pick('path');
   let text: string | undefined;
   if (tool.kind === 'execute') text = pick('command');
-  else if (tool.kind === 'plan')
-    text = `待办 ${Array.isArray(tool.input.todos) ? tool.input.todos.length : 0} 条`;
-  else if (tool.kind === 'search')
-    text = [pick('pattern') ?? pick('query'), path ? relPath(path, cwd) : undefined]
-      .filter((x) => x)
-      .join(' @ ');
+  else if (tool.kind === 'plan') text = todosSummary(tool.input.todos);
+  else if (tool.kind === 'search') text = searchSummary(pick('pattern') ?? pick('query'), path, cwd);
   else if (path) text = relPath(path, cwd);
   else text = Object.values(tool.input).find((v): v is string => typeof v === 'string');
-  return cut(text ?? '', max);
+  return toolSummaryText(text, max);
 }
 
 /** 工具结果给人看的正文：失败照 failureText；成功的取命令的输出或工具回的文字，都没有就写（无输出）。 */
@@ -387,7 +388,7 @@ function resultTextOf(
   const texts = Array.isArray(content)
     ? content.map((c) => str(rec(rec(c)?.content)?.text)).filter((t): t is string => Boolean(t))
     : [];
-  return texts.join('\n') || str(output.output_for_prompt)?.trim() || '（无输出）';
+  return texts.join('\n') || str(output.output_for_prompt)?.trim() || NO_OUTPUT;
 }
 
 function editedPaths(tool: PendingTool, output: Record<string, unknown>, content: unknown): string[] {
@@ -418,10 +419,10 @@ function failureText(status: string, output: Record<string, unknown>, content: u
           ? `信号 ${String(output.signal)}`
           : `退出码 ${num(output.exit_code) ?? '?'}`;
     const said = str(output.output_for_prompt)?.trim();
-    return cut(said ? `${why}：${said}` : why, 500);
+    return commandFailure(why, said);
   }
   const texts = Array.isArray(content)
     ? content.map((c) => str(rec(rec(c)?.content)?.text)).filter((t): t is string => Boolean(t))
     : [];
-  return cut([status, ...texts].join('：'), 500);
+  return cut([status, ...texts].join('：'), FAILURE_MAX);
 }
