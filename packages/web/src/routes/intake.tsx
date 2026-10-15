@@ -4,9 +4,8 @@
 // 地址：?r=<需求号> 打开一条，?r=new 提新的（&from=<号> 接着那条提）；?view=archived|deleted、?filter=todo|all|mine、?q= 搜。
 // 接的是 A 片（#2049）的列表、详情、动作接口，B 片（#2060）的开单回显、进度卡、引擎提问回答，
 // C 片（#2061）的指挥官流式回话、选项、建议改、模型芯片、「让指挥官接着问」、让别家挑错。
-// dev:mock 下 ?demo=discuss|pending|closed 打开版面草图（假数据，对照用）；真后端不认这个参数。
 import { MessageSquarePlus } from 'lucide-react';
-import { lazy, Suspense, useCallback, useRef } from 'react';
+import { useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { useMe, useRequestDetail } from '../api/client';
@@ -21,8 +20,6 @@ import { useLocalState, useMediaQuery } from '../lib/hooks';
 import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
 
-const IntakeDemo = lazy(() => import('../components/intake/demo/page'));
-
 function viewOf(v: string | null): RequestView {
   return v === 'archived' || v === 'deleted' ? v : 'active';
 }
@@ -35,18 +32,6 @@ function seqOf(v: string | null): number | 'new' | null {
 }
 
 export default function Intake() {
-  const [params] = useSearchParams();
-  if (params.has('demo') && import.meta.env.MODE === 'mock') {
-    return (
-      <Suspense fallback={null}>
-        <IntakeDemo />
-      </Suspense>
-    );
-  }
-  return <IntakePage />;
-}
-
-function IntakePage() {
   const [params, setParams] = useSearchParams();
   const phone = usePhone();
   const wide = useMediaQuery('(min-width: 1536px)');
