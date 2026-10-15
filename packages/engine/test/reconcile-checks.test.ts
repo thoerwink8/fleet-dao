@@ -119,6 +119,7 @@ function world(
           body: input.body,
           link: input.link ?? null,
           createdAt: NOW,
+          raisedAt: NOW,
           updatedAt: NOW,
           resolvedAt: null,
           resolvedBy: null,
@@ -139,6 +140,7 @@ function world(
           body: input.body,
           link: input.link,
           createdAt: NOW,
+          raisedAt: NOW,
           updatedAt: NOW,
           resolvedAt: null,
           resolvedBy: null,
@@ -163,6 +165,7 @@ function world(
 }
 
 function openAlert(dedupeKey: string, over: Partial<AlertRow> = {}): AlertRow {
+  const createdAt = over.createdAt ?? NOW;
   return {
     id: randomUUID(),
     dedupeKey,
@@ -171,11 +174,12 @@ function openAlert(dedupeKey: string, over: Partial<AlertRow> = {}): AlertRow {
     title: dedupeKey,
     body: '原来的正文',
     link: null,
-    createdAt: NOW,
-    updatedAt: NOW,
+    updatedAt: createdAt,
     resolvedAt: null,
     resolvedBy: null,
     ...over,
+    createdAt,
+    raisedAt: over.raisedAt ?? createdAt,
   };
 }
 

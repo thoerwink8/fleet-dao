@@ -23,6 +23,8 @@ export function decisionOptionsFor(
 /**
  * 报警：同一件事（dedupe_key）只有一条，再报原地更新标题、正文、选项、updated_at（显式写），已处理的重新打开（resolved_at/by、
  * 上一次拍的答案清空：重开就是又要人拍一次）。
+ * raised_at 是这一次挂起的起点：还开着再报留着原来的（条件没断，24 小时接着算）；从已处理重开才拨到这次。
+ * created_at 始终是第一次报的时刻，不拿它当「挂了多久」。
  */
 export async function upsertAlert(
   db: Db,
@@ -49,6 +51,7 @@ export async function upsertAlert(
       body: input.body,
       link: input.link ?? null,
       decisionOptions,
+      raisedAt: now,
     })
     .onConflictDoUpdate({
       target: notifications.dedupeKey,
@@ -63,6 +66,9 @@ export async function upsertAlert(
         resolvedAt: null,
         resolvedBy: null,
         answer: null,
+        // 重开才拨这一次的起点。还开着时再报：resolved_at 仍是空，留着原来的 raised_at。
+        // SET 各项按更新前的行算，这里看见的 resolved_at 是重开前的，不会被上面那句清掉的赋值盖住。
+        raisedAt: sql`case when ${notifications.resolvedAt} is not null then excluded.raised_at else ${notifications.raisedAt} end`,
       },
     })
     // xmax = 0 只在这一行是刚插入（不是走 on conflict 更新）时成立，是判断「插成还是原地更新」的标准写法。
