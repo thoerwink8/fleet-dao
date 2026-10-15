@@ -76,7 +76,7 @@ dsh 执行体认 `deepseek-flash`（`deepseek-v4-flash` 是别名）。旧档停
 - **MS-15** `stop` 之后大约 3 秒才翻终态。
 - **MS-16** 没有 error 帧不等于送到了。连接断了也没有回帧。没看到终态就是没查成。
 - **MS-17** 续跑是同一条 prompt 帧带上已有的 `sessionKey`。`continue` 和 `continueFrom` 不起作用。
-- **MS-18** prompt 发出去没收到 accepted：按工作目录和起针时间去 `~/.mirasim/sessions` 对账，不许重发。
+- **MS-18** prompt 发出去没收到 accepted：插头自己按工作目录和起针时间窗对 `~/.mirasim/sessions/<agent>/<id>/record.json`，不许重发。窗下沿是起针减 5 秒，上沿是起针加 `startupMs` 再加 15 秒（法国 #2181 落盘比收手晚 4 秒，翻面大约 3 秒；服务被堵的几十秒已经算在 `startupMs` 里）。列档案先按 `record.json` 修改时间丢掉窗下沿之前没再写过的，修改时间只是预筛；进不进窗只认 `createdAt`。从看见唯一一条起过了这 15 秒还是只有它（或已经到了上沿）就接上，按那条会话的终帧判结局，起会话预算从接上再算。两条或以上、一条都没有、目录列不了或记录认不出：`launch_unknown`（读不了不当成没起、不重派）。
 - **MS-19** 给 claude 注入 `ANTHROPIC_BASE_URL`、给 codex 注入代理，或借用 reclaude 出网，会架空上游或解绑设备。
 - **MS-20** 服务端的 env 在启动时定死。改了用户级 env 或 PATH，不重启就不生效。
 - **MS-21** 有在途回合时改 `agentLaunch` 会把在途回合杀掉。
@@ -89,5 +89,5 @@ dsh 执行体认 `deepseek-flash`（`deepseek-v4-flash` 是别名）。旧档停
 - **MS-28** 中转不许反代，只能用它的客户端。
 - **MS-29** 回读的模型名只多一个末尾方括号标记（例如 `[1m]`）仍是同一个模型。只剥这个标记，不放宽到前缀相同。
 - **MS-30** 2026-10-01 那份实测名单里有若干 claude / codex 档和 `kimi-code/k3`，没有 haiku。`deepseek-flash` 那次中继回了 `no upstream available`。名单会过期，以服务端 modelRoster 为准。
-- **MS-31** 等 accepted 的上限是起会话的总预算 `startupMs`（从起针算），不是一问一答的 `replyMs`。
+- **MS-31** 等 accepted 的上限是起会话的总预算 `startupMs`（从起针算），不是一问一答的 `replyMs`。预算用完或连接提前断了、仍没等到应答：插头自己按 MS-18 对账，对上唯一一条就接上，不挂起等人。
 - **MS-32** 中转额度用完或欠费时，通知会被当成回答：`phase=done`、`error` 为空、账本仍是 2xx。整段回答就是这条通知才判 `relay_quota_exhausted`。回答里只是提到这些词不算。

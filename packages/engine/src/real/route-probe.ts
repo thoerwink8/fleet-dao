@@ -15,6 +15,7 @@ import {
   type LedgerFs,
   type MirasimConnect,
   type RateLimitReading,
+  type SessionsFs,
   type SessionUser,
   type SwitchSessionOrgResult,
 } from '@fleet-dao/adapters';
@@ -460,10 +461,13 @@ export interface RouteProbeWiring {
   claudeCommand(user: SessionUser): string[];
   cursorCommand(user: SessionUser): string[];
   grokCommand(user: SessionUser): string[];
-  /** 会话用户自己的 Mirasim 服务：连接工厂、账本目录、读账本用的文件访问（real/index.ts 的 mirasimDepsFor 生产装配）。 */
+  /** 会话用户自己的 Mirasim 服务：连接工厂、账本、会话档案（real/index.ts 的 mirasimDepsFor 生产装配）。 */
   mirasimConnect(user: SessionUser): MirasimConnect;
   mirasimLedgerDir(user: SessionUser): string;
   mirasimLedgerFs(user: SessionUser): LedgerFs;
+  /** 没等到 accepted 时对账用的会话档案目录和读法（MS-18）。 */
+  mirasimSessionsDir(user: SessionUser): string;
+  mirasimSessionsFs(user: SessionUser): SessionsFs;
   /**
    * 会话用户此刻挂的组织（real/session-org.ts）：和选路、切号共用一个，Claude 订阅池只探挂着的那个；这会儿定不下来就这一轮
    * 不探 Claude 池。
@@ -577,6 +581,8 @@ export function routeProbeJob(w: RouteProbeWiring): () => RouteProbeJobDeps {
     mirasimConnect: w.mirasimConnect,
     mirasimLedgerDir: w.mirasimLedgerDir,
     mirasimLedgerFs: w.mirasimLedgerFs,
+    mirasimSessionsDir: w.mirasimSessionsDir,
+    mirasimSessionsFs: w.mirasimSessionsFs,
     sessionProxy: w.sessionProxy,
     ...(w.run ? { run: w.run } : {}),
   });

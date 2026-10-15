@@ -829,6 +829,8 @@ export function fakeMirasimDeps(): {
   mirasimConnect(user: SessionUser): MirasimConnect;
   mirasimLedgerDir(user: SessionUser): string;
   mirasimLedgerFs(user: SessionUser): LedgerFs;
+  mirasimSessionsDir(user: SessionUser): string;
+  mirasimSessionsFs(user: SessionUser): LedgerFs;
 } {
   return {
     mirasimConnect: (user) => async () => {
@@ -841,6 +843,15 @@ export function fakeMirasimDeps(): {
       },
       readFile: async () => {
         throw new Error(`假的：这条用例不该真读 Mirasim 账本文件（${user}）`);
+      },
+    }),
+    mirasimSessionsDir: (user) => `/fake/${user}/.mirasim/sessions`,
+    mirasimSessionsFs: (user) => ({
+      readdir: async () => {
+        throw new Error(`假的：这条用例不该真列 Mirasim 会话档案（${user}）`);
+      },
+      readFile: async () => {
+        throw new Error(`假的：这条用例不该真读 Mirasim 会话档案（${user}）`);
       },
     }),
   };

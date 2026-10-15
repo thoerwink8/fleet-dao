@@ -1007,8 +1007,9 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
       model: 'deepseek-flash',
       session: { mode: 'new' },
     });
-    // 连接、账本都是以唯一的会话用户读的（mirasimDepsFor 的生产装配；这里是假的，只核对传的是哪个会话用户）
+    // 连接、账本、会话档案都是以唯一的会话用户读的（mirasimDepsFor 的生产装配；这里是假的，只核对传的是哪个会话用户）
     expect(s.mirasim.options[0]?.ledgerDir).toBe('/fake/fleet-agent-carpool/.mirasim/traffic');
+    expect(s.mirasim.options[0]?.sessionsDir).toBe('/fake/fleet-agent-carpool/.mirasim/sessions');
   });
 
   it('探通了：之后定时那几轮（15 分钟、60 分钟、一天）都不再真探、不重写，结论照旧（还在线），派之前由派前探测再探', async () => {
