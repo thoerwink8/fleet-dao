@@ -93,6 +93,8 @@ function deps(over: Partial<WatchdogDeps> = {}): WatchdogDeps {
     db: t.db,
     now: () => clock,
     log: (level, text) => logs.push(`${level}:${text}`),
+    // 这一组只看登记表上的任务。默认目录是法国的发布目录，目录在的话每日简报和发版也会计进 scanned。
+    releasesDir: '/nowhere/fleet-dao-releases',
   })();
   return { ...real, ...over };
 }

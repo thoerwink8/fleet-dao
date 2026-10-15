@@ -102,7 +102,16 @@ describe('看门狗一轮里的「多久没合 PR」（真库）', () => {
   });
 
   function deps(over: Partial<WatchdogDeps> = {}): WatchdogDeps {
-    return { ...watchdogJob({ db: t.db, now: () => clock, log: () => {} })(), ...over };
+    return {
+      ...watchdogJob({
+        db: t.db,
+        now: () => clock,
+        log: () => {},
+        // 这一组只看「多久没合 PR」。默认目录是法国的发布目录，目录在的话每日简报和发版也会计进 scanned。
+        releasesDir: '/nowhere/fleet-dao-releases',
+      })(),
+      ...over,
+    };
   }
 
   async function repo(name: string, since: Date | null) {
