@@ -9,6 +9,7 @@
 # 只写这些地方——法国：/opt/fleet-dao/restic、/etc/fleet-dao/backup{,.env}、/usr/local/lib/fleet-dao/backup、/var/lib/fleet-dao/backup、
 # /etc/systemd/system/fleet-backup*、库角色 fleet_drill、scheduled_jobs 里的三行；香港：用户 fleet-backup、/srv/fleet-dao-backup、
 # /etc/fleet-dao/backup.env、/etc/ssh/sshd_config.d/60-fleet-dao-backup.conf（只管这一个用户的 Match 段）。别的一概不碰。
+# 香港 root 每天再复制一份、以及最新快照超没超 26 小时，不在这里装：deploy/hk.sh 装。这里仍只把密文交给 fleet-backup。
 # 测试 source 本文件只要函数（deploy/backup/test/backup.test.sh 拿替身跑接线），不跑：set、陷阱、读参数都在文件末尾的 main 里。
 
 BACKUP_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
