@@ -1,6 +1,6 @@
 // 没等到 accepted 时，按工作目录和起针时间去 ~/.mirasim/sessions/<agent>/<id>/record.json 对账（MS-18）。
 // 对上唯一一条就把它的会话号交回去，调用方按正常会话订阅，不重发 prompt。多条、没有、读不了都交回「没查成」。
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { rec, str } from '../stream-kit.ts';
@@ -8,13 +8,39 @@ import type { LedgerFs } from './ledger.ts';
 
 /**
  * 读会话档案怎么做：默认直接读本机文件。档案在会话用户家里、引擎进不去时换成这个（和账本同一份 as-user 读法）。
- * readdir 找不到目录要抛 code 为 ENOENT 的错，否则「还没有这个执行体的会话」和「列不了」分不开。
+ * readdir / recentSessionIds 找不到目录要抛 code 为 ENOENT 的错，否则「还没有这个执行体的会话」和「列不了」分不开。
  */
-export type SessionsFs = LedgerFs;
+export interface SessionsFs extends LedgerFs {
+  /**
+   * 这个执行体目录下，record.json 的修改时间不早于 sinceMs 的会话目录名。
+   * 法国一个执行体下有几百条历史，逐份去读要几十秒，对账会拖过时间窗。不给就退回列全部再逐个读。
+   * 实现要宁可多给（早一两秒也算），不许把窗里的漏掉：进不进窗仍由 createdAt 定。目录不在抛 ENOENT。
+   */
+  recentSessionIds?(agentDir: string, sinceMs: number): Promise<string[]>;
+}
+
+/** 修改时间比窗下沿再早这么多也拿来读。find 的 -newermt 是严格新于，卡在同一秒上的不能漏。 */
+const MTIME_CUSHION_MS = 1_000;
 
 const nodeSessionsFs: SessionsFs = {
   readdir: (dir) => readdir(dir),
   readFile: (path) => readFile(path, 'utf8'),
+  recentSessionIds: async (dir, sinceMs) => {
+    const names = await readdir(dir);
+    const cutoff = sinceMs - MTIME_CUSHION_MS;
+    const ids: string[] = [];
+    for (const name of names) {
+      if (!SESSION_UUID.test(name)) continue;
+      try {
+        const info = await stat(join(dir, name, 'record.json'));
+        if (info.mtimeMs >= cutoff) ids.push(name);
+      } catch (err) {
+        if (errno(err) === 'ENOENT') continue;
+        throw err;
+      }
+    }
+    return ids;
+  },
 };
 
 /**
@@ -68,7 +94,8 @@ interface Hit {
  * 只认 record.json 的 createdAt（会话出生）。runStartedAt 会在旧会话被下一轮刷新，拿它来对就会接到别人正在跑的那条上。
  * 没到上沿就看到恰好一条先按住：再等落盘余量，余量里冒出第二条就挂起。余量走完还是一条才接上——#2181 的记录比收手晚 4 秒，
  * 提前接上会在第二条还没写出来时认错。一条都没有就一直看到上沿（连接提前断了，服务可能还堵着，会话马上写出来）。
- * 到了上沿还是一条也接上，不再空等。列不了、某条档案认不出：马上交「读不了」，不当成没有（半截 JSON 也是；Linux 上正常是写完再改名）。
+ * 到了上沿还是一条也接上，不再空等。列不了、某条档案认不出：马上交「读不了」，不当成没有。
+ * 半截 JSON（先截断再写）就地再读一次，再认不出才算读不了。
  */
 export async function reconcileLaunchSession(options: ReconcileLaunchOptions): Promise<LaunchMatch> {
   const fs = options.sessionsFs ?? nodeSessionsFs;
@@ -141,7 +168,8 @@ async function scanSessions(
 ): Promise<Scan> {
   let names: string[];
   try {
-    names = await fs.readdir(folder);
+    // 有预筛就只用它：退回再列全部会把几百条历史又读一遍。
+    names = fs.recentSessionIds ? await fs.recentSessionIds(folder, start) : await fs.readdir(folder);
   } catch (err) {
     if (errno(err) === 'ENOENT') return { kind: 'ok', hits: [] };
     return { kind: 'unreadable', detail: `列不了 ${folder}：${errno(err) ?? (err as Error).message}` };
@@ -151,16 +179,10 @@ async function scanSessions(
     if (!SESSION_UUID.test(name)) continue;
     if (skipped.has(name)) continue;
     const file = join(folder, name, 'record.json');
-    let text: string;
-    try {
-      text = await fs.readFile(file);
-    } catch (err) {
-      if (errno(err) === 'ENOENT') continue;
-      return { kind: 'unreadable', detail: `读不了 ${file}：${errno(err) ?? (err as Error).message}` };
-    }
-    const parsed = parseRecord(text);
-    if (parsed.kind === 'bad') return { kind: 'unreadable', detail: `${file} 认不出` };
-    const placed = place(parsed.record, cwd, start, end);
+    const loaded = await loadRecord(fs, file);
+    if (loaded.kind === 'enoent') continue;
+    if (loaded.kind === 'bad') return { kind: 'unreadable', detail: loaded.detail };
+    const placed = place(loaded.record, cwd, start, end);
     if (placed === 'skip') {
       skipped.add(name);
       continue;
@@ -173,6 +195,33 @@ async function scanSessions(
     });
   }
   return { kind: 'ok', hits };
+}
+
+/**
+ * 读一份档案。ENOENT 是还没写出来，交给下一圈。别的错和认不出的 JSON 就地再读一次：
+ * 写的人先截断再写时，第一次会读到半截，立刻再读通常已经是完整的。再不行才算读不了。
+ */
+async function loadRecord(
+  fs: SessionsFs,
+  file: string,
+): Promise<
+  { kind: 'enoent' } | { kind: 'bad'; detail: string } | { kind: 'ok'; record: Record<string, unknown> }
+> {
+  let detail = `${file} 认不出`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let text: string;
+    try {
+      text = await fs.readFile(file);
+    } catch (err) {
+      if (errno(err) === 'ENOENT') return { kind: 'enoent' };
+      detail = `读不了 ${file}：${errno(err) ?? (err as Error).message}`;
+      continue;
+    }
+    const parsed = parseRecord(text);
+    if (parsed.kind === 'ok') return parsed;
+    detail = `${file} 认不出`;
+  }
+  return { kind: 'bad', detail };
 }
 
 function parseRecord(text: string): { kind: 'ok'; record: Record<string, unknown> } | { kind: 'bad' } {

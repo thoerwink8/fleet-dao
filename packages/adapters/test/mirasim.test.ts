@@ -1,5 +1,5 @@
 // Mirasim 插头：状态合并（真跑夹具）、起会话 / 订阅 / 叫停 / 判定（假服务端回放夹具）、账本、连接。
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ProgressEvent } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
@@ -768,6 +768,110 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     expect(unreadable.launchError).not.toContain('没有会话');
     expect(judgeRun(mirasimRunSummary(unreadable).facts).reason).toBe('launch_unknown');
     expect(judgeRun(mirasimRunSummary(unreadable).facts).reason).not.toBe('spawn_failed');
+
+    // 生产走 recentSessionIds（一次找出窗内改过的）。它读不了同样是没查成，不当成没起，也不退回去列全部。
+    const filtered = missed();
+    const filterErr = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    let listedAll = false;
+    const viaFilter = await filtered.run({
+      sessionsFs: {
+        readdir: async () => {
+          listedAll = true;
+          return [];
+        },
+        readFile: async () => '',
+        recentSessionIds: async () => {
+          throw filterErr;
+        },
+      },
+    });
+    expect(listedAll).toBe(false);
+    expect(viaFilter.launchUnknown).toBe(true);
+    expect(viaFilter.launchError).toContain('会话记录读不了');
+    expect(viaFilter.launchError).toContain('EACCES');
+    expect(viaFilter.launchError).not.toContain('没有会话');
+    expect(judgeRun(mirasimRunSummary(viaFilter).facts).reason).toBe('launch_unknown');
+  });
+
+  it('对账只读预筛交回来的档案：没交的那条即使工作目录和时刻都对上也不读，交回来的唯一一条接上', async () => {
+    const { cwd, sessions, server, run } = missed();
+    const born = new Date().toISOString();
+    writeSession(sessions, kimiId, { workdir: cwd, createdAt: born, taskId: kimi.taskId });
+    // 这条若被读到就是第二条，对账会挂起。预筛不交它，就不该读到。
+    writeSession(sessions, otherId, { workdir: cwd, createdAt: born });
+    const read: string[] = [];
+    const report = await run({
+      ledgerDir: okLedger(kimi.sessionKey),
+      sessionsFs: {
+        readdir: async () => {
+          throw new Error('不该把历史档案全列出来');
+        },
+        readFile: async (path) => {
+          read.push(path);
+          return readFileSync(path, 'utf8');
+        },
+        recentSessionIds: async () => [kimiId],
+      },
+    });
+    expect(read.length).toBeGreaterThan(0);
+    expect(read.every((path) => path.includes(kimiId))).toBe(true);
+    expect(server.framesOf('prompt')).toHaveLength(1);
+    expect(report.launchUnknown).toBeUndefined();
+    expect(report.sessionKey).toBe(kimi.sessionKey);
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('answered');
+  });
+
+  it('先看见一条、落盘余量里又冒出第二条：不接，照旧没查成', async () => {
+    const { cwd, sessions, server, run } = missed();
+    const born = new Date().toISOString();
+    writeSession(sessions, kimiId, { workdir: cwd, createdAt: born, taskId: kimi.taskId });
+    writeSession(sessions, otherId, { workdir: cwd, createdAt: born });
+    let scans = 0;
+    const report = await run({
+      sessionsFs: {
+        readdir: async () => {
+          throw new Error('不该把历史档案全列出来');
+        },
+        readFile: async (path) => readFileSync(path, 'utf8'),
+        recentSessionIds: async () => {
+          scans += 1;
+          return scans === 1 ? [kimiId] : [kimiId, otherId];
+        },
+      },
+    });
+    expect(scans).toBeGreaterThan(1);
+    expect(server.framesOf('prompt')).toHaveLength(1);
+    expect(server.framesOf('subscribe')).toHaveLength(0);
+    expect(report.launchUnknown).toBe(true);
+    expect(report.launchError).toContain('对过账对上了 2 条');
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('launch_unknown');
+  });
+
+  it('档案正写到一半：同一轮里再读一次认出来了就接上，不把半截当成读不了', async () => {
+    const { cwd, sessions, server, run } = missed();
+    writeSession(sessions, kimiId, {
+      workdir: cwd,
+      createdAt: new Date().toISOString(),
+      taskId: kimi.taskId,
+    });
+    const reads = new Map<string, number>();
+    const report = await run({
+      ledgerDir: okLedger(kimi.sessionKey),
+      sessionsFs: {
+        readdir: async () => [kimiId],
+        recentSessionIds: async () => [kimiId],
+        readFile: async (path) => {
+          const n = (reads.get(path) ?? 0) + 1;
+          reads.set(path, n);
+          if (n === 1) return '{';
+          return readFileSync(path, 'utf8');
+        },
+      },
+    });
+    expect(server.framesOf('prompt')).toHaveLength(1);
+    expect(report.launchUnknown).toBeUndefined();
+    expect(report.sessionKey).toBe(kimi.sessionKey);
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('answered');
   });
 
   it('一直排队：起不来超时，停掉', async () => {

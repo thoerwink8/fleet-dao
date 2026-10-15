@@ -2,7 +2,12 @@
 import { SESSION_USERS } from '@fleet-dao/adapters';
 import { describe, expect, it } from 'vitest';
 import type { UserCommand, UserCommandResult } from '../../src/real/exec.ts';
-import { DEFAULT_MIRASIM_HOME, grepAsUser, mirasimDepsFor } from '../../src/real/index.ts';
+import {
+  DEFAULT_MIRASIM_HOME,
+  grepAsUser,
+  mirasimDepsFor,
+  recentMirasimSessionIds,
+} from '../../src/real/index.ts';
 
 const [USER] = SESSION_USERS;
 const base = { stdout: Buffer.alloc(0), stderr: '', timedOut: false, aborted: false };
@@ -61,5 +66,59 @@ describe('mirasimDepsFor 的用量账本', () => {
       [USER, '/bin/ls'],
       [USER, '/bin/grep'],
     ]);
+  });
+});
+
+describe('recentMirasimSessionIds', () => {
+  const dir = `/home/${USER}/.mirasim/sessions/kimi`;
+  const idA = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const idB = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
+  it('以会话用户跑一次 find，按修改时间预筛，目录名取路径最后一段', async () => {
+    const sinceMs = 1_700_000_000_000;
+    const { exec, commands } = fakeExec(() => ({
+      ...base,
+      code: 0,
+      stdout: Buffer.from(`${dir}/${idA}\n${dir}/${idB}\n`),
+    }));
+    expect(await recentMirasimSessionIds(exec, USER, dir, sinceMs)).toEqual([idA, idB]);
+    expect(commands[0]).toMatchObject({
+      user: USER,
+      argv: [
+        '/usr/bin/find',
+        dir,
+        '-mindepth',
+        '2',
+        '-maxdepth',
+        '2',
+        '-name',
+        'record.json',
+        '-newermt',
+        `@${Math.floor(sinceMs / 1000) - 1}`,
+        '-printf',
+        '%h\n',
+      ],
+    });
+    const deps = mirasimDepsFor(exec, DEFAULT_MIRASIM_HOME, { command: ['node', 'bridge.js'] });
+    expect(typeof deps.sessionsFs(USER).recentSessionIds).toBe('function');
+  });
+
+  it('目录不在抛 ENOENT；权限不够或超时照抛，不回空名单冒充没有', async () => {
+    const missing = fakeExec(() => ({
+      ...base,
+      code: 1,
+      stderr: `find: ‘${dir}’: No such file or directory`,
+    }));
+    await expect(recentMirasimSessionIds(missing.exec, USER, dir, 0)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    const denied = fakeExec(() => ({
+      ...base,
+      code: 1,
+      stderr: `find: ‘${dir}’: Permission denied`,
+    }));
+    await expect(recentMirasimSessionIds(denied.exec, USER, dir, 0)).rejects.toThrow('Permission denied');
+    const slow = fakeExec(() => ({ ...base, code: null, timedOut: true }));
+    await expect(recentMirasimSessionIds(slow.exec, USER, dir, 0)).rejects.toThrow('超时');
   });
 });
