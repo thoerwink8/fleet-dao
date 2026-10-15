@@ -298,7 +298,8 @@ check "定时：每小时 25 分" 1 "$(grep -c 'OnCalendar=\*-\*-\* \*:25:00 Asi
 check "hk.sh：副本目录" 1 "$(grep -c 'ensure_dir /var/backups/fleet-dao/restic-copies root:root 700' "$ROOT/deploy/hk.sh")"
 check "hk.sh：状态目录" 1 "$(grep -c 'ensure_dir /var/lib/fleet-hk root:root 755' "$ROOT/deploy/hk.sh")"
 check "hk.sh：脚本目录" 1 "$(grep -c 'ensure_dir /usr/local/lib/fleet-dao/backup root:root 755' "$ROOT/deploy/hk.sh")"
-check "hk.sh：启用定时器" 1 "$(grep -c 'systemctl enable --quiet "$t"' "$ROOT/deploy/hk.sh")"
+# 字面匹配备份循环里的 "$t"。单引号里写 $t 会被 shellcheck 判没展开，deploy 第三台的 lint 就红
+check "hk.sh：启用定时器" 1 "$(grep -cF "systemctl enable --quiet \"\$t\"" "$ROOT/deploy/hk.sh")"
 check "hk.sh：装了复制定时器" 2 "$(grep -c 'fleet-backup-copy.timer' "$ROOT/deploy/hk.sh")"
 check "hk.sh：装了检查定时器" 2 "$(grep -c 'fleet-backup-freshness.timer' "$ROOT/deploy/hk.sh")"
 
