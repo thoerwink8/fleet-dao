@@ -3,7 +3,8 @@
 //
 // 改这里之前必须知道：
 // - 写不进只记日志，绝不让会话失败：record / prompt 永不抛；写库失败的那批留在缓冲里下一次再写（最多 3000 条，不会无限涨），
-//   收场还写不进就丢掉并记一笔。会话的结局、用量、花费照旧由 runOneShot 记，不看这里。
+//   收场还写不进就丢掉并记一笔。日志写数据库给的错误码、约束名、detail，不把 drizzle 的「Failed query」和整段提示词打出来
+//   （那一层在 cause 外面，message 里是整句 SQL 和参数）。会话的结局、用量、花费照旧由 runOneShot 记，不看这里。
 // - 先打码再截断：先截断的话，一把密钥被拦腰截成半截就认不出来了。打码用 hygiene 的规则（redactSecrets），不另抄一份正则；
 //   命中的整段换成「[已打码：<规则名>]」，meta.redacted 记打了几处。
 // - 上限在 shared 的 TRANSCRIPT_LIMITS：每条按种类截断（截了文本末尾加标记，meta.truncated 为 true、meta.originalChars 是原来的字数）；
@@ -74,6 +75,60 @@ export function sanitizeTranscriptText(
   return Object.keys(meta).length > 0 ? { text, meta } : { text };
 }
 
+const FAILED_QUERY = 'Failed query:';
+
+/**
+ * 写库失败时能进日志的那几项。drizzle 把驱动的错包成「Failed query: … params: …」（整段提示词在参数里），
+ * 真原因在 cause 上：postgres.js 的 code / constraint_name / detail。只取这几项和驱动自己的那句，不取外层 SQL。
+ */
+export function dbWriteFailure(err: unknown): {
+  code?: string;
+  constraint?: string;
+  detail?: string;
+  error: string;
+} {
+  let code: string | undefined;
+  let constraint: string | undefined;
+  let detail: string | undefined;
+  let driverMessage: string | undefined;
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  for (
+    let depth = 0;
+    depth < 8 && current !== null && typeof current === 'object' && !seen.has(current);
+    depth++
+  ) {
+    seen.add(current);
+    const o = current as {
+      code?: unknown;
+      constraint?: unknown;
+      constraint_name?: unknown;
+      detail?: unknown;
+      message?: unknown;
+      cause?: unknown;
+    };
+    if (code === undefined && typeof o.code === 'string' && o.code !== '') code = o.code;
+    const named =
+      typeof o.constraint_name === 'string' && o.constraint_name !== ''
+        ? o.constraint_name
+        : typeof o.constraint === 'string' && o.constraint !== ''
+          ? o.constraint
+          : undefined;
+    if (constraint === undefined && named !== undefined) constraint = named;
+    if (detail === undefined && typeof o.detail === 'string' && o.detail !== '') detail = o.detail;
+    if (typeof o.message === 'string' && o.message !== '' && !o.message.startsWith(FAILED_QUERY)) {
+      driverMessage = o.message;
+    }
+    current = o.cause;
+  }
+  return {
+    ...(code === undefined ? {} : { code }),
+    ...(constraint === undefined ? {} : { constraint }),
+    ...(detail === undefined ? {} : { detail }),
+    error: driverMessage ?? '没说原因',
+  };
+}
+
 export class TranscriptRecorder {
   readonly #deps: TranscriptRecorderDeps;
   readonly #log: NonNullable<TranscriptRecorderDeps['log']>;
@@ -87,6 +142,7 @@ export class TranscriptRecorder {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #inFlight: Promise<void> = Promise.resolve();
   #failedOnce = false;
+  #failFields: ReturnType<typeof dbWriteFailure> | undefined;
   #closed = false;
 
   constructor(deps: TranscriptRecorderDeps) {
@@ -165,13 +221,15 @@ export class TranscriptRecorder {
     try {
       await this.#deps.write(this.#deps.runId, batch);
     } catch (err) {
-      // 留着，下一次一起再写（最多 maxEntries 条，不会无限涨）；只在第一次失败时记日志，免得每个节拍刷一行
+      // 留着，下一次一起再写（最多 maxEntries 条，不会无限涨）；只在第一次失败时记日志，免得每个节拍刷一行。
+      // 记的是数据库的错误码、约束名、detail，不记 drizzle 外层那句带整段提示词的 SQL。
       this.#pending = [...batch, ...this.#pending];
+      this.#failFields = dbWriteFailure(err);
       if (!this.#failedOnce) {
         this.#failedOnce = true;
         this.#log('会话过程记录写不进库（会话照常跑，下个节拍再试）', {
           runId: this.#deps.runId,
-          error: errMessage(err),
+          ...this.#failFields,
         });
       }
     }
@@ -206,6 +264,7 @@ export class TranscriptRecorder {
         this.#log('会话过程记录收场时仍没写进库，丢弃', {
           runId: this.#deps.runId,
           lost: this.#pending.length,
+          ...(this.#failFields ?? {}),
         });
         this.#pending = [];
       }
