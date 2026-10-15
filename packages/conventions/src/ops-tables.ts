@@ -833,7 +833,7 @@ const UNIT_SOURCES = [
     dir: 'deploy/france',
     suffixes: ['.service', '.socket', '.timer', '.path', '.slice'],
   },
-  { machine: '香港', dir: 'deploy/hk', suffixes: ['.service'] },
+  { machine: '香港', dir: 'deploy/hk', suffixes: ['.service', '.timer'] },
 ] as const;
 
 const DESCRIPTION_LINE = /^[ \t]*Description=(.*)$/;

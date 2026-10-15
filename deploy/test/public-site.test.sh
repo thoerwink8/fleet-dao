@@ -713,6 +713,7 @@ EOF
     TLS=(-k --resolve "cockpit.example.test:$P2:127.0.0.1")
     HTTPS=https://cockpit.example.test:$P2
     for pc in "/ 200" "/index.html 200" "/tasks/deep-link 200" "/release.json 404" "/health/ 200" "/health/nope 404" \
+      "/health/france-link.json 404" \
       "/robots.txt 200" "/demo 404" "/demo/ 404" "/demo/index.html 404" "/demo/tasks/x 404" "/demo/scopes/a.json 404" \
       "/demo/scopes/nope.json 404" "/healthz 502" "/api/x 502" "/auth/x 502" "/github/webhook 502" \
       "/assets/app-0a1b2c3d.js 200" "/assets/nope-00000000.js 404"; do
@@ -754,7 +755,8 @@ EOF
     done
     ONLY=(--resolve "cockpit.example.test:$P3:127.0.0.1")
     HTTP=http://cockpit.example.test:$P3
-    for pc in "/ 200" "/tasks/deep-link 200" "/release.json 404" "/health/ 200" "/robots.txt 200" "/demo 404" \
+    for pc in "/ 200" "/tasks/deep-link 200" "/release.json 404" "/health/ 200" "/health/france-link.json 404" \
+      "/robots.txt 200" "/demo 404" \
       "/demo/ 404" "/demo/tasks/x 404" "/demo/scopes/a.json 404" "/demo/scopes/nope.json 404" \
       "/.well-known/acme-challenge/probe 200"; do
       check "只开 80 的模板 ${pc% *}（隧道外来的）：${pc#* }，带 noindex" "$(probe "${ONLY[@]}" "$HTTP${pc% *}")" "${pc#* } 1"
