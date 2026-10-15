@@ -48,13 +48,16 @@
 //   只靠 24 小时再推。canary:*（全流程巡检，决定 0093）、no-verifier:*（开 PR 前验证留一家）库里还开着的，
 //   由迁移 0072 标成已撤（原因「功能已删」），这里不再判。同一条迁移把当时还开着的 retired-schedule:* 也标成已撤；
 //   这种键仍由引擎起来时删退役定时任务的那一步自己报、自己撤（real/retire-schedules.ts），不在
-//   SELF_RESOLVING_PREFIXES 里：超过 3 天没再报就按过期兜底撤，下次没删成会重新打开。
+//   SELF_RESOLVING_PREFIXES 里。它是日报级：从建立起开着超过 48 小时由下面日报那一条收（不是 3 天过期；最近又报过也收），下次没删成会重新打开。
 // - 判不了、还没接的，24 小时再推一次，开着 3 天没人动就按「过期」撤（过期兜底，下一条）：<工作流>:failure:<规则>（封号、换池接着干这类通报，
 //   条件就是「发生过」，要人知道）。
 // - 过期兜底（EXPIRE_AFTER_MS）：上面所有的判法、工作树那一部分、别处自己会撤的（SELF_RESOLVING_PREFIXES）都不管的提醒——没有谁
 //   能判它还在不在——最近一次被报（updated_at；条件还在的报警者每次再报都会刷新它）过了 3 天，就标「已撤：过期」（写 resolved_at、
 //   谁撤的和原因，记录不删）。要人拍的（level = decision）不在此列：那是等人定的事，不是等条件过去的提醒。真的还在的，
 //   报警者下一次再报会重新打开（upsert 把已处理的重新打开）。新加一种自己会撤的提醒，前缀加进 SELF_RESOLVING_PREFIXES。
+//   日报级（level = daily）不走这条：循环前按建立时刻算，开着超过 48 小时就收（jobs/daily-notes.ts，「已撤：超过 48 小时自动收」），
+//   也不走规则和 24 小时再提醒。每日简报把它们写进去并发出后会更早收（处理人 engine:daily-brief）。
+//   简报自己那一行（feishu:brief:）要留给飞书推，不按「已收进简报」收，满 48 小时才由这里收。要你拍（decision）仍不自动收。
 
 import { doneSection, parseMd, requiredSectionProblems } from '@fleet-dao/conventions';
 import { type AlertStage, criteriaOf, HANDLED_STAGES, isEscalationKey } from '@fleet-dao/core';
@@ -64,6 +67,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { TASK_DONE_PARK_WHY } from '../park-alerts.ts';
 import { duration, STAGE_NAMES } from '../routing/names.ts';
 import type { AllOpenCheck } from '../routing/types.ts';
+import { settleDailyNotes } from './daily-notes.ts';
 import { plainText } from './groom-plan.ts';
 import {
   type AlertStore,
@@ -807,9 +811,22 @@ export async function sweepAlerts(
     historical: new Map(),
   };
   if (truncated) c.part.unchecked.push(`没处理的提醒太多，这一轮只看了前 ${open.length} 条`);
+  const settled = await settleDailyNotes((input) => deps.alerts.resolve(input), open, { now: deps.now() });
+  const resolvedKeys = new Set(settled.resolved);
+  const dropKeys = new Set([...settled.resolved, ...settled.already]);
+  for (const alert of open) {
+    if (!dropKeys.has(alert.dedupeKey)) continue;
+    c.stillOpen.delete(alert.id);
+    if (!resolvedKeys.has(alert.dedupeKey)) continue;
+    c.part.found += 1;
+    deps.log('info', '每小时对账：日报超过 48 小时，收掉了', { dedupeKey: alert.dedupeKey });
+  }
+  for (const why of settled.failed) c.part.unchecked.push(why);
   // 1. 条件没了的撤掉；还在的留着（路由恢复了的改一句正文）
   for (const alert of open) {
     if (alert.dedupeKey.startsWith(REMIND_PREFIX) || handledByTrees(alert.dedupeKey)) continue;
+    // 日报级只由上面 48 小时那一条收，不走规则、再提醒和 3 天过期。
+    if (alert.level === 'daily') continue;
     let judged = false;
     for (const rule of RULES) {
       const m = rule.pattern.exec(alert.dedupeKey);

@@ -14,6 +14,7 @@
 //   引不了那边的代码，改那边要一起改这里的 SQL）。推送渠道自己坏了靠推送报不出来，这里每次巡查都看一次，不只靠「新通知」。
 // - 今天的每日简报送到没（brief 那一块）：判法照 packages/db/src/queries/daily-brief.ts 的 dailyBriefProblem 写（09:00 以后没跑、没做成、
 //   没建、没推到飞书都是 ALERT），同样改那边要一起改这里。
+// - 没处理的提醒只数要你拍（decision）和卡住报警（alert）。日报级（发版开始、发版成功）单独一行报数量，不逐条进变化、不进 ALERT。
 // - 基线只由这份脚本写（模型不写）：OK、ALERT 都把这一次的读数写成新基线，BROKEN 不写（不拿坏读数盖掉好基线）。
 // - 读不到法国（ssh 没读成、输出空、解析失败、采集时间和本机差太多，facts 是空的）：VERDICT 前多一行显眼中文，
 //   写明读不到的原因，并指向香港状态页（上面有「法国失联自 xx:xx」）。法国答了、只是盘面不对（healthz 503、发版 unhealthy）不加这一行。
@@ -42,7 +43,7 @@ import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
  * healthz、history、trainStatus、trainSince、trainSha、autoNote、lag 是发版和健康页（老基线里没有这几项，只有判当前读数用到）。
  * trainSince 是这一趟的起点（进度记录的 startedAt，没有用 updatedAt；老格式都没有是 ''），trainSha 是这一趟发的提交（target.value，没有是 ''）；
  * currentSha 是法国 current 指向的完整提交号（读不到是 ''）。
- * @typedef {{ at: string, release: string, healthz: HealthzFact, history: HistoryFact[], trainStatus: string, trainSince?: string, trainSha?: string, currentSha?: string, autoNote: string, lag: LagFact, services: Record<string, string>, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notesOpen: number, notes: NoteFact[], push: PushFact, brief: BriefFact }} Facts
+ * @typedef {{ at: string, release: string, healthz: HealthzFact, history: HistoryFact[], trainStatus: string, trainSince?: string, trainSha?: string, currentSha?: string, autoNote: string, lag: LagFact, services: Record<string, string>, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notesOpen: number, dailyOpen: number, notes: NoteFact[], push: PushFact, brief: BriefFact }} Facts
  */
 /** @typedef {'OK' | 'ALERT' | 'BROKEN'} Verdict */
 /** @typedef {{ verdict: Verdict, facts: Facts | null, alerts: string[], delta: string[], broken: string | null, notes: string[] }} Report */
@@ -84,7 +85,7 @@ export const SERVICES = ['fleet-api', 'fleet-engine'];
 /** notifications.level 的取值（packages/db/src/schema/enums.ts notificationLevel）。 */
 const NOTE_LEVELS = new Set(['decision', 'alert', 'daily']);
 
-export const DB_BLOCKS = ['master', 'tasks', 'jobs', 'notecount', 'notes', 'push', 'brief'];
+export const DB_BLOCKS = ['master', 'tasks', 'jobs', 'notecount', 'notes', 'dailycount', 'push', 'brief'];
 /** 远端命令：脚本从标准输入喂。 */
 export const PATROL_REMOTE_COMMAND = 'sh -s';
 /** 基线默认放在仓根 _tmp/（指挥官在主检出里跑）。 */
@@ -165,8 +166,9 @@ export const REMOTE_SCRIPT = [
   `q master "select 'master', coalesce((select value::text from settings where key = 'engine.master'), 'none')"`,
   `q tasks "select 'task', t.issue_number, r.name, t.state, coalesce(t.phase, ''), floor(extract(epoch from now() - coalesce(t.updated_at, t.created_at)) / 60)::int, replace(left(coalesce(t.doing, ''), 80), ${NO_NEWLINE}, ' ') from tasks t join repos r on r.id = t.repo_id where t.state not in ('done', 'stopped', 'failed', 'queued') order by t.issue_number"`,
   `q jobs "select 'job', r.job, r.outcome, floor(extract(epoch from now() - coalesce(r.ended_at, r.started_at)) / 60)::int, replace(left(coalesce(r.why, ''), 100), ${NO_NEWLINE}, ' ') from schedule_runs r join scheduled_jobs j on j.id = r.job and j.removed_at is null where r.id in (select max(id) from schedule_runs where outcome is not null group by job) and r.outcome not in ('ok', 'partial') order by r.job"`,
-  `q notecount "select 'notes', count(*) from notifications where resolved_at is null and dedupe_key not like 'remind:%'"`,
-  `q notes "select 'note', level, left(dedupe_key, 80), replace(left(title, 100), ${NO_NEWLINE}, ' ') from notifications where resolved_at is null and dedupe_key not like 'remind:%' order by id desc limit 50"`,
+  `q notecount "select 'notes', count(*) from notifications where resolved_at is null and dedupe_key not like 'remind:%' and level in ('decision', 'alert')"`,
+  `q notes "select 'note', level, left(dedupe_key, 80), replace(left(title, 100), ${NO_NEWLINE}, ' ') from notifications where resolved_at is null and dedupe_key not like 'remind:%' and level in ('decision', 'alert') order by id desc limit 50"`,
+  `q dailycount "select 'daily', count(*) from notifications where resolved_at is null and dedupe_key not like 'remind:%' and level = 'daily'"`,
   `q push "${PUSH_SQL}"`,
   `q brief "${BRIEF_SQL}"`,
   'echo end',
@@ -275,7 +277,7 @@ export function parseRaw(text) {
   const notes = [];
   /** @type {Set<string>} */
   const blocksOk = new Set();
-  /** @type {{ at?: string, release?: string, diskPct?: number, memMb?: number, load?: number, master?: string, notesOpen?: number, healthz?: HealthzFact, cur?: string, train?: string, state?: string, push?: PushFact, brief?: BriefFact }} */
+  /** @type {{ at?: string, release?: string, diskPct?: number, memMb?: number, load?: number, master?: string, notesOpen?: number, dailyOpen?: number, healthz?: HealthzFact, cur?: string, train?: string, state?: string, push?: PushFact, brief?: BriefFact }} */
   const one = {};
   /** @type {HistoryFact[]} */
   const history = [];
@@ -305,7 +307,10 @@ export function parseRaw(text) {
     else if (kind === 'state' && line.includes('|')) one.state = rest;
     else if (kind === 'master' && p.length === 2) one.master = p[1] ?? '';
     else if (kind === 'notes' && p.length === 2 && isInt(p[1] ?? '')) one.notesOpen = Number(p[1]);
-    else if (kind === 'task' && p.length >= 7 && isInt(p[1] ?? '') && isInt(p[5] ?? ''))
+    else if (kind === 'daily' && p.length === 2 && isInt(p[1] ?? '')) one.dailyOpen = Number(p[1]);
+    else if (kind === 'note' && (p[1] ?? '') === 'daily') {
+      // 老输出还逐条打日报：不进留意、不当认不出。数量以 daily| 那一行为准。
+    } else if (kind === 'task' && p.length >= 7 && isInt(p[1] ?? '') && isInt(p[5] ?? ''))
       tasks.push({
         n: Number(p[1]),
         repo: p[2] ?? '',
@@ -368,6 +373,7 @@ export function parseRaw(text) {
     'load',
     'master',
     'notesOpen',
+    'dailyOpen',
     'healthz',
     'cur',
     'train',
@@ -403,6 +409,7 @@ export function parseRaw(text) {
       tasks,
       jobs,
       notesOpen: one.notesOpen ?? 0,
+      dailyOpen: one.dailyOpen ?? 0,
       notes,
       push: one.push ?? { status: 'none', why: '', staleMinutes: -1, undelivered: 0, lastOkMinutes: -1 },
       brief: one.brief ?? {
@@ -536,7 +543,7 @@ export function brokenReasons(f) {
 }
 
 /**
- * 不变量：命中一条记一行。新通知要有基线才判（没有基线的第一次只记基线），daily 级的只进变化不算命中。
+ * 不变量：命中一条记一行。新通知要有基线才判（没有基线的第一次只记基线）。日报级不进这里，数量在日报那一行。
  * @param {Facts} f
  * @param {Facts | null} base
  */
@@ -564,7 +571,7 @@ export function invariants(f, base) {
   if (brief) out.push(brief);
   if (base) {
     const old = new Set(base.notes.map((n) => n.key));
-    // daily（发版开始/成功、日报、新模型入目录）只进变化，不叫醒人：自动发版一晚十来班，算 ALERT 会把要人看的淹掉
+    // 日报不进 ALERT（数量单独一行）。老基线里 level 不是 daily 的照旧算新通知。
     for (const n of f.notes)
       if (!old.has(n.key) && n.level !== 'daily') out.push(`新通知 ${n.key}：${n.title}`);
   }
@@ -601,10 +608,12 @@ export function delta(f, base) {
     else if (o.outcome !== j.outcome) out.push(`~ 定时任务 ${j.job} ${o.outcome} → ${j.outcome}`);
   }
   for (const o of base.jobs) if (!newJobs.has(o.job)) out.push(`- 定时任务 ${o.job}（恢复了）`);
-  const oldNotes = new Set(base.notes.map((n) => n.key));
-  const newNotes = new Set(f.notes.map((n) => n.key));
-  for (const n of f.notes) if (!oldNotes.has(n.key)) out.push(`+ 通知 ${n.key}：${n.title}`);
-  for (const n of base.notes) if (!newNotes.has(n.key)) out.push(`- 通知 ${n.key}`);
+  // 日报不逐条进变化（每轮都会多几条发版通知）。老基线里已经记成 daily 的，消失了也不报。
+  const watch = (/** @type {NoteFact[]} */ notes) => notes.filter((n) => n.level !== 'daily');
+  const oldNotes = new Set(watch(base.notes).map((n) => n.key));
+  const newNotes = new Set(watch(f.notes).map((n) => n.key));
+  for (const n of watch(f.notes)) if (!oldNotes.has(n.key)) out.push(`+ 通知 ${n.key}：${n.title}`);
+  for (const n of watch(base.notes)) if (!newNotes.has(n.key)) out.push(`- 通知 ${n.key}`);
   return out;
 }
 
@@ -670,6 +679,7 @@ export function render(r) {
     `健康页 /healthz ${f.healthz.code === 200 ? '200' : `${f.healthz.code === 0 ? '连不上' : f.healthz.code}（红的：${f.healthz.red.join('、') || '没列出'}）`} ${at}`,
     `发版 最近一次 ${last ? historyWord(last) : '（没有）'}，进度记录 ${f.trainStatus || '无'}${f.trainSha ? `（${f.trainSha.slice(0, 12)}）` : ''}，落后主线 ${f.lag.known ? f.lag.behind : '?'} 个提交 ${at}`,
     `通知 开着 ${f.notesOpen} 条 ${at}`,
+    `日报 ${f.dailyOpen} 条 ${at}`,
     `飞书推送 ${pushProblem(f.push) ? '不通' : '通着'}（该推没送到 ${f.push.undelivered} 条，最近一次送到${f.push.lastOkMinutes < 0 ? '：从没有' : ` ${f.push.lastOkMinutes} 分钟前`}） ${at}`,
     `每日简报 ${f.brief.day} ${f.brief.minutes < LIMITS.briefGraceMinutes ? '还没到点' : briefProblem(f.brief) ? '没送到' : '送到了'} ${at}`,
     ...r.notes,
@@ -706,6 +716,7 @@ export function readBaseline(text) {
       typeof f.services !== 'object'
     )
       return { ok: false, why: '基线文件认不出（tasks、jobs、notes、services 少了一样）' };
+    if (typeof f.dailyOpen !== 'number') f.dailyOpen = 0;
     return { ok: true, facts: /** @type {Facts} */ (f) };
   } catch (e) {
     return { ok: false, why: `基线文件不是 JSON（${e instanceof Error ? e.message : String(e)}）` };
@@ -781,6 +792,8 @@ export async function fetchFrance({ home, env, readText, timeoutMs = 55_000, spa
  */
 export function sampleRaw(o) {
   const notes = o.notes ?? ['note|alert|deploy-lag|发布落后'];
+  const dailyLines = notes.filter((n) => n.startsWith('note|daily|'));
+  const actionable = notes.filter((n) => !n.startsWith('note|daily|'));
   const cur = `abcd1234${'0'.repeat(32)}`;
   const sha = (/** @type {number} */ i) => `${String(i).padStart(8, '0')}${'f'.repeat(32)}`;
   const behind = o.behind ?? 0;
@@ -819,9 +832,11 @@ export function sampleRaw(o) {
     'ok|tasks',
     ...(o.jobs ?? []),
     'ok|jobs',
-    `notes|${notes.length}`,
+    `notes|${actionable.length}`,
     'ok|notecount',
-    ...notes,
+    ...actionable,
+    `daily|${dailyLines.length}`,
+    'ok|dailycount',
     o.err ?? 'ok|notes',
     o.push ?? 'push|on||-1|0|30',
     'ok|push',

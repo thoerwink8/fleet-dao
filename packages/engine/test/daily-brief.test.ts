@@ -50,6 +50,7 @@ function makeDeps(over: Partial<DailyBriefDeps> = {}) {
   const comments: { issueNumber: number; key: string; body: string }[] = [];
   const finished: ScheduleResult[] = [];
   const compares: string[] = [];
+  const resolvedDaily: { dedupeKey: string; by: string; why: string }[] = [];
   const pulls: BriefPull[] = [
     // b：开单 10-14 01:00Z，10-14 02:00Z 上线 → 60 分钟；c：开单 08:00Z、09:00Z 上线（之后回退、d 再带上）→ 60 分钟
     {
@@ -101,6 +102,7 @@ function makeDeps(over: Partial<DailyBriefDeps> = {}) {
     issueTitle: async (_repo, n) => `GitHub 上单 ${n} 的标题`,
     decisions: async () => [decision],
     alerts: async () => [],
+    dailies: async () => [],
     stopped: async () => [
       {
         repo: 'acme/fleet-dao',
@@ -118,6 +120,10 @@ function makeDeps(over: Partial<DailyBriefDeps> = {}) {
       comments.push(x);
       return { url: 'https://github.com/acme/fleet-dao/issues/1055#c1' };
     },
+    resolveDaily: async (x) => {
+      resolvedDaily.push(x);
+      return 'ok';
+    },
     runs: {
       start: async () => 5,
       finish: async (_id, result) => {
@@ -128,7 +134,7 @@ function makeDeps(over: Partial<DailyBriefDeps> = {}) {
     log: () => {},
     ...over,
   };
-  return { deps, published, comments, finished, compares };
+  return { deps, published, comments, finished, compares, resolvedDaily };
 }
 
 describe('发布历史', () => {
@@ -256,6 +262,103 @@ describe('runDailyBriefJob', () => {
     });
     await expect(runDailyBriefJob(d.deps)).rejects.toBeInstanceOf(DailyBriefFailedError);
     expect(d.comments).toEqual([]);
+  });
+
+  it('日报写进简报并发出后才收；简报自己那一行不收；没发成不收；没收成记 partial', async () => {
+    const daily = (dedupeKey: string, title: string): BriefNote => ({
+      id: dedupeKey,
+      dedupeKey,
+      title,
+      link: '/france',
+      createdAt: at('2026-10-14T12:00:00Z'),
+      issue: null,
+    });
+    const rows = [
+      daily('release:done:abcdef123456:1', '发版成功 abcdef123456'),
+      daily('feishu:brief:2026-10-14', '昨天的简报'),
+    ];
+    const d = makeDeps({ dailies: async () => rows });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('ok');
+    expect(r).toMatchObject({ found: 1 });
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('五、日报（1 条）');
+    expect(body).toContain('发版成功 abcdef123456');
+    expect(body).not.toContain('昨天的简报');
+    expect(d.resolvedDaily).toEqual([
+      {
+        dedupeKey: 'release:done:abcdef123456:1',
+        by: 'engine:daily-brief',
+        why: '已收进 2026-10-15 简报',
+      },
+    ]);
+
+    const commented = makeDeps({
+      dailies: async () => rows,
+      comment: async () => {
+        throw new Error('GitHub 回了 403');
+      },
+    });
+    await expect(runDailyBriefJob(commented.deps)).rejects.toBeInstanceOf(DailyBriefFailedError);
+    expect(commented.resolvedDaily).toEqual([]);
+
+    const published = makeDeps({
+      dailies: async () => rows,
+      publish: async () => {
+        throw new Error('connection refused');
+      },
+    });
+    await expect(runDailyBriefJob(published.deps)).rejects.toBeInstanceOf(DailyBriefFailedError);
+    expect(published.resolvedDaily).toEqual([]);
+
+    const broken = makeDeps({
+      dailies: async () => rows,
+      resolveDaily: async () => {
+        throw new Error('库断了');
+      },
+    });
+    const partial = await runDailyBriefJob(broken.deps);
+    expect(partial.outcome).toBe('partial');
+    expect(partial.why).toContain('库断了');
+    expect(broken.published).toHaveLength(1);
+    expect(broken.comments).toHaveLength(1);
+
+    const unread = makeDeps({
+      dailies: async () => {
+        throw new Error('读不到日报');
+      },
+    });
+    const missed = await runDailyBriefJob(unread.deps);
+    expect(missed.outcome).toBe('partial');
+    expect(unread.published[0]?.body).toContain('五、日报');
+    expect(unread.published[0]?.body).toContain('没查成：读日报：读不到日报');
+    expect(unread.resolvedDaily).toEqual([]);
+  });
+
+  it('日报超过 15 条时只把正文里逐条写到的标已收进，第 16 条留着', async () => {
+    const daily = (n: number): BriefNote => ({
+      id: `d${n}`,
+      dedupeKey: `release:done:${n.toString(16).padStart(12, '0')}:1`,
+      title: `日报第 ${n} 条`,
+      link: '/france',
+      createdAt: at('2026-10-14T12:00:00Z'),
+      issue: null,
+    });
+    const rows = Array.from({ length: 16 }, (_, i) => daily(i + 1));
+    const d = makeDeps({ dailies: async () => rows });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('ok');
+    expect(r).toMatchObject({ found: 15 });
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('五、日报（16 条）');
+    expect(body).toContain('日报第 1 条');
+    expect(body).toContain('日报第 15 条');
+    expect(body).toContain('……另 1 条');
+    expect(body).not.toContain('日报第 16 条');
+    expect(d.resolvedDaily.map((x) => x.dedupeKey)).toEqual(rows.slice(0, 15).map((x) => x.dedupeKey));
+    expect(
+      d.resolvedDaily.every((x) => x.by === 'engine:daily-brief' && x.why === '已收进 2026-10-15 简报'),
+    ).toBe(true);
   });
 });
 

@@ -343,7 +343,7 @@ export const realIo = {
   },
   /**
    * 发版提醒：写一行 notifications（同引擎的 feishu 提醒、auto-release 的报警一条通路）。decision 级由驾驶舱后端立刻推飞书，
-   * daily 级只进每日简报。发成功时把之前开着的 release: 要你拍收掉。值一律走 psql -v。
+   * daily 级只进每日简报。发成功时把之前开着的 release: 要你拍收掉，同一提交的发版开始（daily）一并收掉。值一律走 psql -v。
    */
   async notify(text, note) {
     sqlWrite(
@@ -353,13 +353,34 @@ on conflict (dedupe_key) do update
   set title = excluded.title, body = excluded.body, updated_at = now();`,
       { level: note.level, key: note.key, title: note.title, body: text },
     );
-    if (note.kind === 'done') {
+    if (note.kind !== 'done') return;
+    // 键是 release:done:<12 位>:<秒>。认不出提交就只收要你拍，跟以前一样（不拿空前缀把别的开始通知收掉）。
+    const sha = /^release:done:([0-9a-f]{12}):/.exec(note.key)?.[1];
+    if (!sha) {
       sqlWrite(
         `update notifications set resolved_at = now(), resolved_by = 'release-request', updated_at = now()
 where starts_with(dedupe_key, 'release:') and level = 'decision' and resolved_at is null;`,
         {},
       );
+      return;
     }
+    sqlWrite(
+      `update notifications set
+  resolved_at = now(),
+  resolved_by = 'release-request',
+  updated_at = now(),
+  body = case
+    when level = 'daily'
+      then '已撤：同一提交已发版成功' || case when body = '' then '' else E'\\n\\n' || body end
+    else body
+  end
+where resolved_at is null
+  and (
+    (starts_with(dedupe_key, 'release:') and level = 'decision')
+    or (starts_with(dedupe_key, :'prefix') and level = 'daily')
+  );`,
+      { prefix: `release:start:${sha}:` },
+    );
   },
 };
 
