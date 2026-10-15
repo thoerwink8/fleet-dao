@@ -948,7 +948,7 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
     );
   });
 
-  it('选路报的「做完没人能验」：这张单还在跑就留着（选路自己撤）；做完、叫停、没做完了才撤，写明为什么', async () => {
+  it('已删的 no-verifier：对账不再撤，叫停了也留着（库里还开着的由迁移 0072 标成已撤）', async () => {
     probeDir();
     const { task } = await work('running');
     const key = `no-verifier:${task.id}`;
@@ -957,9 +957,9 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
     expect((await alertByKey(t.db, key))?.resolvedAt).toBeNull();
     await sql("update tasks set state = 'stopped' where id = $1", [task.id]);
     await runHourlyReconcileJob(deps());
-    expect((await alertByKey(t.db, key))?.body).toMatch(
-      /^已撤：需求现在是「人叫停了」，走不到开 PR 前验证那一步了/,
-    );
+    const kept = await alertByKey(t.db, key);
+    expect(kept?.resolvedAt).toBeNull();
+    expect(kept?.body).toBe('原来的正文');
   });
 
   it('Fusion 发的要人批（没有子任务）：等它的是需求工作流；还在等这一次就留着，工作流不在了就撤', async () => {
