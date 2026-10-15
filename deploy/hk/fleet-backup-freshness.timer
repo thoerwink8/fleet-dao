@@ -1,0 +1,10 @@
+# deploy/hk.sh 装的。和法国的磁盘巡检（每小时 17 分）、复制（每天 09:10）错开。
+[Unit]
+Description=每小时 25 分看备份最新快照是否超过 26 小时
+
+[Timer]
+OnCalendar=*-*-* *:25:00 Asia/Shanghai
+Persistent=true
+
+[Install]
+WantedBy=timers.target
