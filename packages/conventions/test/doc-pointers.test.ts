@@ -403,7 +403,7 @@ describe('全仓的文档（main 上现有的，加上本 PR 改的）', () => {
     expect(empty).toEqual([]);
   });
 
-  it(`都指得到（${report.files.length} 份文档，${report.pointers.length} 条指针，${report.problems.length} 处指不到）`, () => {
+  it('都指得到', () => {
     expect(report.problems.map(formatProblem)).toEqual([]);
   });
 });

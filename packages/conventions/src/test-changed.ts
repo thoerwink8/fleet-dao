@@ -102,20 +102,6 @@ export type TestSelection =
 /** 文档里的指针检查：本机每次都带（它读全部文档，CI 每个 PR 都跑）。必须是 ALWAYS_TESTS 盖得住的一份（test-changed.test.ts 核对）。 */
 export const DOC_POINTERS_TEST = 'packages/conventions/test/doc-pointers.test.ts';
 
-/**
- * 整份过了之后再真跑的这一次。引擎自测只把命令输出的末尾交给冷验收，整份里这一份的文件名在开头，末尾看不到。
- * 只跑「都指得到」那一条（测试名里带「处指不到」和当场数出来的份数、条数）。verbose 打出这一行，
- * 藏起跳过的，整段才短得进自测留给冷验收的末尾。
- */
-export const DOC_POINTERS_TAIL_ARGS = [
-  'run',
-  DOC_POINTERS_TEST,
-  '--reporter=verbose',
-  '--hideSkippedTests',
-  '-t',
-  '处指不到',
-] as const;
-
 /** 技能说明里的指针检查：指向仓里任何路径，哪个包挪了、改名了都可能弄断它，所以本机也每次都带（几秒）。在 agents/test/ 里。 */
 export const SKILL_POINTERS_TEST = 'agents/test/skills.test.ts';
 
@@ -324,14 +310,7 @@ export function testChanged(deps: TestChangedDeps): number {
   }
   if (decision.note) deps.out(decision.note);
   deps.out(decision.args.length === 1 ? '跑：全部测试' : `跑：${decision.args.slice(1).join(' ')}`);
-  const status = finishVitest(deps, decision.args);
-  // 整份里这一份在开头就跑完。冷验收只看末尾，所以过了再真跑一遍，把 vitest 打出来的那一行留在最后。
-  if (status !== 0 || !ranDocPointers(decision.args)) return status;
-  return finishVitest(deps, DOC_POINTERS_TAIL_ARGS);
-}
-
-function finishVitest(deps: TestChangedDeps, args: readonly string[]): number {
-  const r = deps.vitest([...args]);
+  const r = deps.vitest(decision.args);
   if (r.error) {
     deps.err(`test:changed 没跑成：vitest 起不来（${r.error.message}）`);
     return 2;
@@ -341,9 +320,4 @@ function finishVitest(deps: TestChangedDeps, args: readonly string[]): number {
     return 1;
   }
   return r.status;
-}
-
-/** `vitest run` 不带过滤是全套，里面有文档指针检查；带了过滤则要清单里真有这个文件。 */
-function ranDocPointers(args: readonly string[]): boolean {
-  return (args.length === 1 && args[0] === 'run') || args.includes(DOC_POINTERS_TEST);
 }
