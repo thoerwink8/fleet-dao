@@ -328,6 +328,17 @@ export function errorText(e: unknown): string {
   return String(e);
 }
 
+/**
+ * 门口没把请求送到法国，或浏览器根本没连上。登录页和外壳多给一个 /health/ 链接。
+ * 502/504 几乎都是门口（超时、隧道断）。503 后端自己也用来表示「这一项没接上」，那种带着自己的 code，不算。
+ * code gateway 是 nginx 固定 JSON，或 http.ts 把不是 JSON 的 502/503/504 收成的那一类。
+ */
+export function isGatewayError(e: unknown): boolean {
+  if (!(e instanceof ApiError)) return false;
+  if (e.code === 'gateway' || e.code === 'network') return true;
+  return e.status === 502 || e.status === 504;
+}
+
 const ApiContext = createContext<FleetApi | null>(null);
 
 export function ApiProvider({ api, children }: { api: FleetApi; children: ReactNode }) {

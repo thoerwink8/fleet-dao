@@ -1,7 +1,7 @@
 import { CSRF_HEADER } from '@fleet-dao/shared';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ApiError, type LiveStatus } from './client';
-import { createHttpApi, SSE_HIDDEN_RELEASE_MS, sseRetryDelay } from './http';
+import { createHttpApi, GATEWAY_MESSAGE, SSE_HIDDEN_RELEASE_MS, sseRetryDelay } from './http';
 import type { LiveEvent } from './types';
 
 const ME = {
@@ -88,6 +88,49 @@ describe('接真后端：请求', () => {
     expect(err).toBeInstanceOf(ApiError);
     expect(err).toMatchObject({ status: 401, code: 'unauthenticated', message: '先登录' });
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+
+  test('【故意造出的失败】504 不是 JSON：和断网同一句人话，不说「后端返回 504」', async () => {
+    const fetch = async () => new Response('<html>504 Gateway Time-out</html>', { status: 504 });
+    const api = createHttpApi({ fetch });
+    const err = await api.me().catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 504, code: 'gateway', message: GATEWAY_MESSAGE });
+    expect(GATEWAY_MESSAGE).toContain('它所在的机器可能在重启或关机');
+  });
+
+  test('502、503 不是 JSON，以及断网：和 504 同一句', async () => {
+    for (const status of [502, 503]) {
+      const fetch = async () => new Response('<html>bad gateway</html>', { status });
+      const err = await createHttpApi({ fetch })
+        .me()
+        .catch((e: unknown) => e);
+      expect(err).toMatchObject({ status, code: 'gateway', message: GATEWAY_MESSAGE });
+    }
+    const fetch = async () => {
+      throw new TypeError('Failed to fetch');
+    };
+    const err = await createHttpApi({ fetch })
+      .me()
+      .catch((e: unknown) => e);
+    expect(err).toMatchObject({ status: 0, code: 'network', message: GATEWAY_MESSAGE });
+  });
+
+  test('不是 JSON 的 500 仍说「后端返回 500」；带 code 的 503 用后端自己的话', async () => {
+    const html = async () => new Response('<html>oops</html>', { status: 500 });
+    await expect(createHttpApi({ fetch: html }).me()).rejects.toMatchObject({
+      status: 500,
+      code: 'http_500',
+      message: '后端返回 500',
+    });
+    const json = async () =>
+      new Response(JSON.stringify({ error: { code: 'engine_down', message: '引擎没连上' } }), {
+        status: 503,
+      });
+    await expect(createHttpApi({ fetch: json }).me()).rejects.toMatchObject({
+      status: 503,
+      code: 'engine_down',
+      message: '引擎没连上',
+    });
   });
 
   test('返回不符合 web-api.ts：不将就着用，报 bad_response_shape', async () => {
