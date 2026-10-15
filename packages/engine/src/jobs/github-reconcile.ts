@@ -20,8 +20,19 @@ export const GITHUB_RECONCILE_JOB = {
 } as const;
 
 export const GITHUB_RECONCILE_EVERY_MINUTES = 15;
-/** 每轮往回看多久：比间隔长得多，漏了一两轮（引擎重启、Temporal 停了一会儿）也捞得回来；重叠的部分由去重账认出。 */
+/**
+ * 没有「上一次成功跑完」的记录时，往回看多久。有记录时从那次跑完的时刻起看，不用这条。
+ * 比间隔长，漏了一两轮也还在窗口里；重叠的部分由去重账认出。
+ */
 export const GITHUB_RECONCILE_LOOKBACK_MS = 2 * 60 * 60_000;
+/**
+ * 回看最早到多久以前。再早的投递 GitHub 已经不留，重投也补不回来：官方文档写明 webhook 投递只留最近 3 天，
+ * 这 3 天里才能查看和请求重投（https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/viewing-webhook-deliveries
+ * 「from the past 3 days」；保留期改成 3 天见
+ * https://github.blog/changelog/2023-10-17-webhook-delivery-logs-will-only-be-retained-for-3-days/ ，
+ * GitHub Enterprise Server 仍是 7 天，这里按 github.com）。超过这条就截到上限，日志写明超出上限、可能有漏。
+ */
+export const GITHUB_RECONCILE_LOOKBACK_CAP_MS = 3 * 24 * 60 * 60_000;
 
 /** schedule_runs 的读写（真实现是 @fleet-dao/db 的 startScheduleRun / finishScheduleRun / closeInterruptedScheduleRuns）。 */
 export interface ScheduleRunLog {
@@ -42,8 +53,52 @@ export interface GitHubReconcileJobDeps {
   /** 这一轮跑不跑单子打标挂版本；不给就是 issueGroomDue（每小时一次）。测试换掉它，免得按真钟跑出不一样的结果。 */
   issueGroomDue?: ((at: Date) => boolean) | undefined;
   runs: ScheduleRunLog;
+  /**
+   * 上一次这一轮跑成的时刻：schedule_runs 里本任务 outcome = ok 的 ended_at（不认 partial，没查全的那一轮不能把窗口往前推）。
+   * 没有记录回 null。读库失败要抛，这一轮按没有记录退回 2 小时，不把读不到当成时刻 0。不给这个入口同样按没有记录。
+   */
+  lastSuccessAt?: () => Promise<Date | null>;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
+}
+
+/** 这一轮往回看到哪。null、无效时刻、在这一轮之后、时刻 0 都退回 2 小时；早于上限的截到上限。 */
+export function githubReconcileSince(
+  now: Date,
+  lastSuccessAt: Date | null,
+): { since: Date; capped: boolean } {
+  const fallback = new Date(now.getTime() - GITHUB_RECONCILE_LOOKBACK_MS);
+  const earliest = new Date(now.getTime() - GITHUB_RECONCILE_LOOKBACK_CAP_MS);
+  const ms = lastSuccessAt?.getTime();
+  if (ms === undefined || !Number.isFinite(ms) || ms <= 0 || ms > now.getTime()) {
+    return { since: fallback, capped: false };
+  }
+  if (ms < earliest.getTime()) return { since: earliest, capped: true };
+  return { since: new Date(ms), capped: false };
+}
+
+/**
+ * 读上一次成功。抛错、空、时刻 0、无效时刻都当成没有记录（回 null），并在真读失败或时刻不能用时写日志。
+ * 不给入口就是没有记录，不写日志（测试和第一次跑都是这样）。
+ */
+async function readLastSuccessAt(deps: GitHubReconcileJobDeps, now: Date): Promise<Date | null> {
+  if (!deps.lastSuccessAt) return null;
+  let raw: Date | null;
+  try {
+    raw = (await deps.lastSuccessAt()) ?? null;
+  } catch (err) {
+    deps.log('warn', '读不到上一次 GitHub 对账成功的时刻，按没有记录处理', { error: errMessage(err) });
+    return null;
+  }
+  const ms = raw?.getTime();
+  if (raw === null) return null;
+  if (ms === undefined || !Number.isFinite(ms) || ms <= 0 || ms > now.getTime()) {
+    deps.log('warn', '上一次 GitHub 对账成功的时刻不能用，按没有记录处理', {
+      lastSuccessAt: ms !== undefined && Number.isFinite(ms) ? new Date(ms).toISOString() : String(raw),
+    });
+    return null;
+  }
+  return raw;
 }
 
 /** 这一轮没跑成（对账本身抛错）：结局已经记进 schedule_runs，活动照样报失败，Temporal 里也看得见。 */
@@ -115,8 +170,22 @@ export async function runGitHubReconcileJob(deps: GitHubReconcileJobDeps): Promi
   const startedAt = deps.now();
   const runId = await deps.runs.start(GITHUB_RECONCILE_JOB.id, startedAt);
   let result: ScheduleResult;
+  let since = new Date(startedAt.getTime() - GITHUB_RECONCILE_LOOKBACK_MS);
   try {
-    const since = new Date(startedAt.getTime() - GITHUB_RECONCILE_LOOKBACK_MS);
+    const lastSuccessAt = await readLastSuccessAt(deps, startedAt);
+    const lookback = githubReconcileSince(startedAt, lastSuccessAt);
+    since = lookback.since;
+    if (lookback.capped && lastSuccessAt) {
+      deps.log(
+        'warn',
+        `GitHub 对账补漏回看超出上限，可能有漏：上一次成功是 ${lastSuccessAt.toISOString()}，只回看到 ${since.toISOString()}`,
+        {
+          lastSuccessAt: lastSuccessAt.toISOString(),
+          since: since.toISOString(),
+          capMs: GITHUB_RECONCILE_LOOKBACK_CAP_MS,
+        },
+      );
+    }
     const reconciled = await deps.reconcile({ since });
     // 单子打标挂版本每小时一次（#448）；没跑成不挡对账本身：这一轮记成没查全，下个整点再来（贴标签、挂里程碑都是幂等的）
     let groom: IssueGroomResult | { failed: string } | null = null;
@@ -139,7 +208,14 @@ export async function runGitHubReconcileJob(deps: GitHubReconcileJobDeps): Promi
     found: result.outcome === 'unscanned' ? 0 : (result.found ?? 0),
     ...('why' in result ? { why: result.why } : {}),
   };
-  const fields = { runId, outcome: run.outcome, scanned: run.scanned, found: run.found, why: run.why };
+  const fields = {
+    runId,
+    outcome: run.outcome,
+    scanned: run.scanned,
+    found: run.found,
+    why: run.why,
+    since: since.toISOString(),
+  };
   if (run.outcome === 'failed') {
     deps.log('error', 'GitHub 对账补漏这一轮没跑成', fields);
     throw new GitHubReconcileFailedError(runId, run.why ?? '对账没跑成');

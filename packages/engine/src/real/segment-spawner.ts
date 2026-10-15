@@ -261,7 +261,8 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       // 两个来源原样交给驱动，合成哪一档只在 hosts.ts 的 sessionEffortFor：路由配的是上限，分档只往下压
       ...(route.effort !== null ? { effort: route.effort } : {}),
       ...(input.effort !== undefined ? { tierEffort: input.effort } : {}),
-      // 给了会话号就续它（动手段续上一段、指挥官会话），不给开新的
+      // 给了会话号就续它（动手段续上一段、指挥官会话），不给开新的。接回时新会话的号照执行编号算回当初命令行上那个
+      // （hosts.ts 的 sessionUuidOf），核对会话号、记账才对得上
       session: cmd.resumeSessionId
         ? { mode: 'resume', id: cmd.resumeSessionId }
         : { mode: 'new', id: driver.newSessionId(runId).id },

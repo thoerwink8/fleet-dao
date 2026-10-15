@@ -113,12 +113,12 @@ test.describe('其余页面', () => {
     await shot(page, '07-渠道状态');
   });
 
-  test('思考档位：每个模型的每条路都列出来，来自库里的路由两层（并进路由页的页签，/efforts 转过去）', async ({
+  test('思考档位：每个模型的每条路都列出来，来自库里的路由两层（并进路由页的页签）', async ({
     page,
     shot,
   }) => {
-    // 思考档位并进路由页（#1914 第 5 轮）：旧地址不留死链，转到「思考档位」页签
-    await page.goto('/efforts');
+    // 思考档位在路由页的「思考档位」页签（#1914 第 5 轮）
+    await page.goto('/routing?tab=efforts');
     await expect(page).toHaveURL(/\/routing\?tab=efforts$/);
     await expect(page.getByRole('heading', { level: 1, name: '路由', exact: true })).toBeVisible();
     await expect(page.getByRole('tab', { name: '思考档位' })).toHaveAttribute('aria-selected', 'true');
@@ -178,7 +178,7 @@ test.describe('其余页面', () => {
     await expect(page.getByRole('link', { name: /主页/ }).first()).toBeVisible();
   });
 
-  test('没做的页不占侧栏：账单仍写「还没做」；/models 转到路由页的模型目录', async ({ page }) => {
+  test('没做的页不占侧栏：账单仍写「还没做」；模型目录在路由页', async ({ page }) => {
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: '主导航' });
     await expect(nav.getByRole('link', { name: '主页' })).toBeVisible();
@@ -186,7 +186,7 @@ test.describe('其余页面', () => {
     for (const label of ['模型目录', '账单', '战绩', 'Jev 判断', '思考档位']) {
       await expect(nav.getByRole('link', { name: label })).toHaveCount(0);
     }
-    await page.goto('/models');
+    await page.goto('/routing?tab=models');
     await expect(page).toHaveURL(/\/routing\?tab=models$/);
     await expect(page.getByRole('heading', { level: 1, name: '路由', exact: true })).toBeVisible();
     await expect(page.getByRole('tab', { name: '模型目录' })).toHaveAttribute('aria-selected', 'true');

@@ -56,7 +56,15 @@ describe('登录闸：没确认登录，页面不露出来', () => {
     expect(screen.queryByText(/正在跳到登录页/)).toBeNull();
     expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
     expect(screen.getByRole('link', { name: '去登录页' })).toBeTruthy();
+    expect(screen.queryByRole('link', { name: /状态页/ })).toBeNull();
     expect(screen.queryByText('页面内容')).toBeNull();
+  });
+
+  test('后端自己回的 503：写它的原因，不链到状态页', async () => {
+    app(() => Promise.reject(new ApiError(503, 'engine_down', '探不了：引擎没连上')));
+    expect(await screen.findByText('探不了：引擎没连上')).toBeTruthy();
+    expect(screen.getByText('没能确认登录')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: /状态页/ })).toBeNull();
   });
 
   test('【故意造出的失败】后端挂了（502）：同样写没能确认，点重试再问一次；这回好了，页面才露出来', async () => {
@@ -66,6 +74,7 @@ describe('登录闸：没确认登录，页面不露出来', () => {
       .mockResolvedValue(ME);
     const { subscribe } = app(me);
     expect(await screen.findByText('网关没连上后端')).toBeTruthy();
+    expect(screen.getByRole('link', { name: /状态页/ }).getAttribute('href')).toBe('/health/');
     expect(screen.queryByText('页面内容')).toBeNull();
     expect(subscribe).not.toHaveBeenCalled();
 
@@ -82,6 +91,7 @@ describe('登录闸：没确认登录，页面不露出来', () => {
     );
     app(me);
     expect(await screen.findByText(/连不上驾驶舱后端/)).toBeTruthy();
+    expect(screen.getByRole('link', { name: /状态页/ }).getAttribute('href')).toBe('/health/');
     fireEvent.click(screen.getByRole('button', { name: '重试' }));
     await waitFor(() => expect(me).toHaveBeenCalledTimes(2));
     expect(await screen.findByText('没能确认登录')).toBeTruthy();

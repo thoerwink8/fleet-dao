@@ -569,6 +569,18 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
     hint: '看原因里远端此刻的头，人工核实要不要把它当成分支的新头接着走',
   },
+  // 并主线时工作树在旧头之后还有没推的提交，远端那个并主线提交又含不了它们、本地也并不上（历史被改写，或列不出来）。
+  // 能并的在 github-ports.ts 里已经并过再推了，到这条规则说明那条路走不通。原路重试没用。
+  // 只认端口交来的码：原文里出现「没推的提交」不说明这一步就是这个失败。
+  {
+    id: 'MC4',
+    title: '工作树有没推的提交，并主线并不上',
+    kind: 'stop',
+    codes: ['worktree_diverged'],
+    codeFieldOnly: true,
+    routeOutcome: 'neutral',
+    hint: '看报错里的工作树和没推的提交，先取走再清树',
+  },
   {
     id: 'TS1',
     title: '测试没过',
@@ -650,7 +662,10 @@ export const RULES: readonly FailureRule[] = [
     maxRetries: 1,
     routeOutcome: 'fail',
   },
-  // 总时长到顶：接着上次的进度续一轮；再到顶多半是子任务太大，交帅位去拆。
+  // 总时长到顶：第一次接着上次的进度、原路续同一个会话（maxRetries 1；工作流拿这一次的执行编号问 planSegmentResume，
+  // 带上会话号再起）。同一张单、同一条路由上第二次不再原路续：
+  // 失败分流判停下后，工作流避开这个模型换一条路由，带上树上的进度续一次（task-session.ts，#2244）。
+  // 这条路由在这张单上只是慢、会话还在出字，再原路续白烧额度；换过去的那条再在第二次到顶，交帅位去拆。
   {
     id: 'WT1',
     title: '会话总时长到顶',

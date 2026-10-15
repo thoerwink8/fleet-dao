@@ -216,6 +216,33 @@ export async function headOfIncoming(t: UserTree): Promise<string> {
   return headOfRef(t, 'refs/fleet/incoming');
 }
 
+/**
+ * 把 refs/fleet/incoming 钉到这个提交。并主线时工作树里还有没推的提交、在本地并上远端再推之后，下一回打 bundle 拿它当起点
+ * （和快进那条路一样：快进完 incoming 就是新头）。提交必须已经在树里。
+ */
+export async function pinIncoming(t: UserTree, sha: string): Promise<void> {
+  assertSha(sha, '取进来的头');
+  if (!(await hasCommit(t, sha))) {
+    throw new PortError('GIT_FAILED', `要把 refs/fleet/incoming 钉到 ${sha.slice(0, 7)}，树里没有这个提交`, {
+      retryable: true,
+    });
+  }
+  await git(t, ['update-ref', 'refs/fleet/incoming', sha], `把 incoming 钉到 ${sha.slice(0, 7)}`);
+}
+
+/**
+ * base 之后到 head 的提交（不含 base、含 head），从旧到新。两边是同一个、或有一边不在这棵树里，回空列表，不抛。
+ * 用来在并不上时说清哪几个没推的提交还在树上。
+ */
+export async function commitShasBetween(t: UserTree, base: string, head: string): Promise<string[]> {
+  assertSha(base, '起点');
+  assertSha(head, '头');
+  if (base === head) return [];
+  if (!(await hasCommit(t, base)) || !(await hasCommit(t, head))) return [];
+  const listed = lines(await git(t, ['rev-list', '--reverse', `${base}..${head}`], '列这段提交'));
+  return listed.filter((sha) => SHA.test(sha));
+}
+
 /** 工作树里所有没提交的改动（含新文件，不含忽略的）。 */
 export async function worktreeChanges(t: UserTree): Promise<string[]> {
   return lines(await git(t, ['status', '--porcelain'], '看工作树里有没有没提交的改动'));

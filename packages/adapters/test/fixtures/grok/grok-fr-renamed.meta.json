@@ -1,0 +1,24 @@
+{
+  "name": "grok-fr-renamed",
+  "source": "法国 2026-10-15 #2251 第三段（runs f821ae56）：grok 1.0.41，起会话时命令行 -s 973fa0d0-…，发版放手、新引擎接回时引擎另起了一个号 d8e193d1-… 去核对。第一帧是法国收发目录 out 的原样第一行；终帧的 sessionId、stopReason、四样用量照 runs 那一行和 ~/.grok/sessions 下的会话记录；中间几帧是去掉正文的占位（原文是工作树里的代码，不入库）。",
+  "cmd": [
+    "grok",
+    "--prompt-file",
+    "/dev/stdin",
+    "--output-format",
+    "streaming-json",
+    "--always-approve",
+    "--no-plan",
+    "-m",
+    "grok-4.7",
+    "--cwd",
+    "/var/lib/fleet-work/thoerwink8_fleet-dao/2251-t01a13cec",
+    "-s",
+    "973fa0d0-f0bc-4016-96a2-f318fa7a331c",
+    "--reasoning-effort",
+    "high"
+  ],
+  "cwd": "/var/lib/fleet-work/thoerwink8_fleet-dao/2251-t01a13cec",
+  "exitCode": 0,
+  "signal": null
+}

@@ -4,12 +4,14 @@
 // 没跑成、没查成、认不出，都要记成明确的结局（failed / unscanned / partial），不记成 ok。
 import { generateKeyPairSync } from 'node:crypto';
 import {
+  finishScheduleRun,
   notifications,
   pullRequests,
   repos,
   resolveAlertWithReason,
   scheduleHealth,
   scheduleRuns,
+  startScheduleRun,
   upsertAlert,
   users,
 } from '@fleet-dao/db';
@@ -22,6 +24,7 @@ import type { EngineJobs } from '../src/activities.ts';
 import type { GitHubReconcileRun } from '../src/contract.ts';
 import {
   GITHUB_RECONCILE_JOB,
+  GITHUB_RECONCILE_LOOKBACK_CAP_MS,
   GITHUB_RECONCILE_LOOKBACK_MS,
   GitHubReconcileFailedError,
   type GitHubReconcileJobDeps,
@@ -207,6 +210,33 @@ describe('对账补漏跑一轮（真库，不起 Temporal）', { timeout: 60_00
     expect((await healthOf())?.status).toBe('ok');
   });
 
+  it('真装配从 schedule_runs 读上一次 ok 的结束时刻当回看起点，更近的 partial 不把窗口往前推', async () => {
+    const w = await wiring({ pulls: [] });
+    const ended = new Date(Date.now() - 5 * 60 * 60_000);
+    const okId = await startScheduleRun(t.db, GITHUB_RECONCILE_JOB.id, new Date(ended.getTime() - 60_000));
+    await finishScheduleRun(t.db, okId, { outcome: 'ok', scanned: 1, found: 0 }, ended);
+    const partialAt = new Date(Date.now() - 10 * 60_000);
+    const partialId = await startScheduleRun(
+      t.db,
+      GITHUB_RECONCILE_JOB.id,
+      new Date(partialAt.getTime() - 60_000),
+    );
+    await finishScheduleRun(
+      t.db,
+      partialId,
+      { outcome: 'partial', why: '有的仓没查完', scanned: 1, found: 0 },
+      partialAt,
+    );
+    let since: Date | undefined;
+    const made = w.job(client, 'fleet');
+    made.reconcile = async (o) => {
+      since = o.since;
+      return { outcome: 'ok', scanned: 1, found: 0, steps: [] };
+    };
+    await runGitHubReconcileJob(made);
+    expect(since?.getTime()).toBe(ended.getTime());
+  });
+
   it('读不到 GitHub：这一轮记成 unscanned（不是 ok），定时任务页标「没扫到」，不补任何镜像', async () => {
     const w = await wiring({ pulls: [pull(41, -20)], down: 500 });
     const run = await runOnce({ githubReconcile: w.job });
@@ -348,6 +378,54 @@ describe('对账补漏一轮的记账（不起 Temporal）', () => {
     expect(await runGitHubReconcileJob(d)).toEqual({ runId: 7, outcome: 'ok', scanned: 2, found: 1 });
     expect(since?.getTime()).toBe(NOW.getTime() - GITHUB_RECONCILE_LOOKBACK_MS);
     expect(finished).toEqual([{ id: 7, result: { outcome: 'ok', scanned: 2, found: 1 } }]);
+  });
+
+  const HOUR = 60 * 60_000;
+  async function sinceFrom(lastSuccessAt: () => Promise<Date | null>) {
+    let since: Date | undefined;
+    const { d, logs } = deps(async (o) => {
+      since = o.since;
+      return { outcome: 'ok', scanned: 1, found: 0, steps: [] };
+    });
+    d.lastSuccessAt = lastSuccessAt;
+    await runGitHubReconcileJob(d);
+    return { since, logs };
+  }
+
+  it('上一次成功在 5 小时前：回看起点就是那一刻', async () => {
+    const at = new Date(NOW.getTime() - 5 * HOUR);
+    const { since, logs } = await sinceFrom(async () => at);
+    expect(since?.getTime()).toBe(at.getTime());
+    expect(logs.join('\n')).not.toContain('超出上限，可能有漏');
+  });
+
+  it('上一次成功在 4 天前：起点截到 3 天，并写明超出上限、可能有漏', async () => {
+    const at = new Date(NOW.getTime() - 4 * 24 * HOUR);
+    const { since, logs } = await sinceFrom(async () => at);
+    expect(since?.getTime()).toBe(NOW.getTime() - GITHUB_RECONCILE_LOOKBACK_CAP_MS);
+    expect(since?.getTime()).not.toBe(at.getTime());
+    expect(logs.join('\n')).toContain('超出上限，可能有漏');
+  });
+
+  it('没有上一次成功的记录：回看起点退回 2 小时', async () => {
+    const { since, logs } = await sinceFrom(async () => null);
+    expect(since?.getTime()).toBe(NOW.getTime() - GITHUB_RECONCILE_LOOKBACK_MS);
+    expect(logs.join('\n')).not.toContain('超出上限，可能有漏');
+  });
+
+  it('读不到上一次成功，或读到时刻 0：按没有记录退回 2 小时，不从 1970 看起', async () => {
+    const thrown = await sinceFrom(async () => {
+      throw new Error('schedule_runs 读超时');
+    });
+    expect(thrown.since?.getTime()).toBe(NOW.getTime() - GITHUB_RECONCILE_LOOKBACK_MS);
+    expect(thrown.since?.getTime()).not.toBe(0);
+    expect(thrown.logs.join('\n')).toContain('按没有记录处理');
+
+    const epoch = await sinceFrom(async () => new Date(0));
+    expect(epoch.since?.getTime()).toBe(NOW.getTime() - GITHUB_RECONCILE_LOOKBACK_MS);
+    expect(epoch.since?.getTime()).not.toBe(0);
+    expect(epoch.logs.join('\n')).toContain('按没有记录处理');
+    expect(epoch.logs.join('\n')).not.toContain('超出上限，可能有漏');
   });
 
   it('说是 ok 却一个仓都没查：记成 unscanned，不冒充查过', () => {
