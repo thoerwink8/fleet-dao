@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { AuthConfigResponse, MeResponse } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import { safeNext } from '../src/auth.ts';
 import {
   cookieHeader,
   DEV_USER_ID,
@@ -126,20 +125,6 @@ describe('飞书浏览器登录（授权码 + PKCE）', () => {
   it('飞书登录没配置时返回 503', async () => {
     const h = harness({ feishu: null, config: { feishu: null } });
     expect((await h.cockpit.request('/auth/feishu/login')).status).toBe(503);
-  });
-
-  it('登录后跳回的地址只许站内路径', () => {
-    expect(safeNext('/tasks/1?x=2')).toBe('/tasks/1?x=2');
-    for (const bad of [
-      '//evil.example',
-      'https://evil.example',
-      '/\\evil.example',
-      'evil',
-      '/a\nb',
-      undefined,
-    ]) {
-      expect(safeNext(bad)).toBe('/');
-    }
   });
 });
 

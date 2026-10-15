@@ -45,6 +45,13 @@ export const FeishuAccessRequest = z.object({ code: z.string().min(1).max(1024) 
 export const DevLoginRequest = z.object({ userId: Id });
 
 /**
+ * 账密字段的长度上限。登录请求、改凭据、前端输入框的 maxLength 共用这一份。密码按字符计。
+ */
+export const USERNAME_MAX = 200;
+export const PASSWORD_MAX = 1024;
+export const PASSWORD_MIN_LENGTH = 10;
+
+/**
  * 账密登录（#120）：成功 204 + 和飞书登录同一种会话 Cookie（再 GET /api/me 取 CSRF 令牌）。
  * 失败都是统一的错误体（ApiErrorBody）：
  * - 401 code=bad_credentials：没这个人、没设过密码、密码错、不在白名单，一律这一句，不区分；
@@ -52,11 +59,9 @@ export const DevLoginRequest = z.object({ userId: Id });
  * 字段只限长度，格式不合（比如用户名写错了格式）也按 401 答，不提示。
  */
 export const PasswordLoginRequest = z.object({
-  username: z.string().min(1).max(200),
-  password: z.string().min(1).max(1024),
+  username: z.string().min(1).max(USERNAME_MAX),
+  password: z.string().min(1).max(PASSWORD_MAX),
 });
-
-export const PASSWORD_MIN_LENGTH = 10;
 
 /**
  * 设置页看账密登录的状态。canSetWithoutCurrent：还没设过密码、且这次会话是 10 分钟内飞书登录的——
@@ -81,7 +86,22 @@ export const CredentialsResponse = z.object({
  * - 429 locked（details.until）。
  */
 export const UpdateCredentialsRequest = z.object({
-  username: z.string().max(200).optional(),
-  newPassword: z.string().max(1024).optional(),
-  currentPassword: z.string().max(1024).optional(),
+  username: z.string().max(USERNAME_MAX).optional(),
+  newPassword: z.string().max(PASSWORD_MAX).optional(),
+  currentPassword: z.string().max(PASSWORD_MAX).optional(),
 });
+
+/**
+ * 登录后跳回的地址只许是站内路径，防被拿来当跳板（开放重定向）。
+ * 空、外站、协议相对（//）、反斜杠、控制字符、超过 1000 字，一律回首页。
+ * 也不回登录页自己（`/login`、`/login?…`），免得跳回去循环。
+ * 前端的查询可能是 null，后端的查询可能是 undefined，两种都当没给。
+ */
+export function safeNext(next: string | null | undefined): string {
+  if (!next || next.length > 1000) return '/';
+  if (!next.startsWith('/') || next.startsWith('//') || next.includes('\\')) return '/';
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: 就是要拒掉控制字符。
+  if (/[\u0000-\u001f\u007f]/.test(next)) return '/';
+  if (next === '/login' || next.startsWith('/login?')) return '/';
+  return next;
+}
