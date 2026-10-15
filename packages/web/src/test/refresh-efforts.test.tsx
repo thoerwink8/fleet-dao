@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// 思考档位（路由页「思考档位」页签，原 /efforts 页）刷新：点「刷新」再读一遍档位；读失败仍显示 LoadError（故意造出的失败放最后）。
+// 思考档位（路由页「思考档位」页签）刷新：点「刷新」再读一遍档位；读失败仍显示 LoadError（故意造出的失败放最后）。
 import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { ApiError } from '../api/client';

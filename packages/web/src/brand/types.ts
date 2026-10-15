@@ -19,8 +19,6 @@ export interface Brand {
     relay: string;
     /** 判断题小模型出的题：「××判断题」。 */
     judgeQuiz: string;
-    /** 侧栏上判断题记录页的名字。 */
-    judgeNav: string;
     /** 定时起来诊断卡住的任务、调调度台的那个 AI 会话。 */
     marshal: string;
     /** 同上，句子里的短说法：「已交××诊断」。 */
