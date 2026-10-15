@@ -96,6 +96,7 @@ function TaskActionBar({ d }: { d: TaskDetail }) {
         title: d.task.title,
         state: d.task.state,
         paused: d.task.paused,
+        ...(d.task.stalled === undefined ? {} : { parkedWhy: d.task.stalled.why }),
       }}
     />
   );

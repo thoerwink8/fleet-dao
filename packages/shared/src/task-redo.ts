@@ -1,7 +1,9 @@
 // 被撤的任务重做：同一张单另起一代，编号 task:<仓>#<号>:r2。
 // 判断放这里，驾驶舱后端和引擎引同一份。驾驶舱后端不依赖引擎包：
 // 依赖引擎的包在引擎一改时就要重测，而改引擎只该测引擎自己（conventions 的 ci-plan）。
-// 旧的那一代已经终止、记录留着；还在跑就拒绝。接活扫描不走这里（撤掉的单不会自己重来）。
+// 旧的那一代已经终止、记录留着。还在跑但只是停在 parked：调用方先叫停，等它终止再另起。
+// 真在跑就拒绝，不叫停。没给叫停口子时，任何还在跑的都拒绝（和以前一样）。
+// 接活扫描不走这里（撤掉的单不会自己重来）。
 // 不碰工作流代码：编号是起的时候从外面传的，不用 patched()。
 import { parseTaskWorkflowId, taskWorkflowId, type WorkflowRepoRef } from './workflow-ids.ts';
 
@@ -37,6 +39,17 @@ export interface RedoDeps {
    * 用一个新编号起工作流。编号已经有执行（开着或已结束）必须回 already_exists，并且不许换掉那一条的记录。
    */
   start(workflowId: string): Promise<'started' | 'already_exists'>;
+  /**
+   * 这一代的工作流还在 Temporal 里。停在等人（phase=parked）或已经在收尾放弃（phase=abandoned）回 parked；
+   * 真在干活、被人暂停、或看不清，回 running。只问，不叫停。
+   * 和 abandonParked 一起给；缺一个就当没有，任何还在跑的都拒绝。
+   */
+  posture?(workflowId: string): Promise<'parked' | 'running'>;
+  /**
+   * 把停着等人的那一代叫停，并等到工作流终止。没停下来就抛错，调用方不另起。
+   * 只在 posture 对所有还在跑的都回了 parked 之后才调。
+   */
+  abandonParked?(workflowId: string): Promise<void>;
 }
 
 export type RedoOutcome = { ok: true; workflowId: string; generation: number } | { ok: false; why: string };
@@ -105,25 +118,57 @@ export async function signalTaskWorkflowId(
   return highestClosed ?? taskWorkflowId(repo, issueNumber, 1);
 }
 
-/** 给同一张单起下一代。任何一代还在跑都拒绝；不起新的就不调用 start。 */
+function stillRunning(workflowId: string): RedoOutcome {
+  return { ok: false, why: `上一代还在跑（${workflowId}），先叫停再重做` };
+}
+
+/**
+ * 这一代可以先叫停再重做：停着等人（parked），或已经在收尾放弃（abandoned，工作树还在收）。
+ * 真在干活（动手、等 CI、被人暂停）不是，重做照旧拒绝。
+ */
+export function redoCanStop(phase: unknown): boolean {
+  return phase === 'parked' || phase === 'abandoned';
+}
+
+/**
+ * 给同一张单起下一代。真在跑的一代拒绝，不起新的就不调用 start。
+ * 还在跑但只是停在 parked，或已经在收尾放弃：先全部问清，再叫停，等终止后才另起。中间有一代问不清或真在跑，一台都不叫停。
+ */
 export async function redoTask(deps: RedoDeps): Promise<RedoOutcome> {
-  const listed = [...(await deps.list())];
+  const listed = (await deps.list()).map((row) => ({ ...row }));
   if (listed.length === 0) return { ok: false, why: '没有上一代任务可重做' };
 
-  const running = listed.find((row) => row.life === 'running');
-  if (running) return { ok: false, why: `上一代还在跑（${running.workflowId}），先叫停再重做` };
+  const running = listed.filter((row) => row.life === 'running');
+  const posture = deps.posture;
+  const abandonParked = deps.abandonParked;
+  const canStop = posture !== undefined && abandonParked !== undefined;
+  // 没给叫停口子时，和以前一样：任何还在跑的当场拒绝，不去问后面的代数缺不缺。
+  const firstRunning = running[0];
+  if (firstRunning && !canStop) return stillRunning(firstRunning.workflowId);
 
   const sample = listed[0];
   if (!sample) return { ok: false, why: '没有上一代任务可重做' };
   const parsed = parseTaskWorkflowId(sample.workflowId);
   if (!parsed) return { ok: false, why: '没有上一代任务可重做' };
 
+  const parked: GenerationView[] = [];
+  for (const row of running) {
+    if (!posture) return stillRunning(row.workflowId);
+    if ((await posture(row.workflowId)) !== 'parked') return stillRunning(row.workflowId);
+    parked.push(row);
+  }
+
   const byGeneration = new Map(listed.map((row) => [row.generation, row]));
   const max = listed.reduce((acc, row) => Math.max(acc, row.generation), 0);
   for (let generation = 1; generation <= max; generation++) {
     const row = byGeneration.get(generation);
     if (!row) return { ok: false, why: `查不到第 ${generation} 代是不是还在跑，没有另起` };
-    if (row.life === 'running') return { ok: false, why: `上一代还在跑（${row.workflowId}），先叫停再重做` };
+  }
+
+  for (const row of parked) {
+    if (!abandonParked) return stillRunning(row.workflowId);
+    await abandonParked(row.workflowId);
+    row.life = 'terminated';
   }
 
   const next = max + 1;

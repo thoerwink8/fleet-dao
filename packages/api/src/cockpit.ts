@@ -9,6 +9,7 @@ import {
   AuditResponse,
   acceptPoolHoldsWrite,
   BoardResponse,
+  continueExhausted,
   DEFAULT_SESSION_EFFORT,
   EnvResponseSchema,
   HARD_BANS,
@@ -481,7 +482,10 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     }
   }
 
-  /** 重做不叫停、不改叫停的语义：只在已叫停或挂起时另起一代。做完、失败仍拒绝。库里的状态留给新工作流自己写，这里不改回排队。 */
+  /**
+   * 只在已叫停或挂起时另起一代。做完、失败仍拒绝。库里的状态留给新工作流自己写，这里不改回排队。
+   * 挂起且上一代还停在 parked：重做入口自己先叫停再另起。真在跑由入口拒绝，原因原样回驾驶舱。
+   */
   async function redoAndAudit(c: Context<CockpitEnv>, task: Task): Promise<void> {
     if (task.state !== 'stopped' && task.state !== 'stalled') {
       throw new ApiError(409, 'redo_not_allowed', `这张单现在是${task.state}，只有已叫停或挂起的才能重做`);
@@ -538,9 +542,12 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const by = c.get('user').id;
     let signal: TaskSignal;
     switch (body.action) {
-      case 'resume':
+      case 'resume': {
+        const exhausted = continueExhausted(task.stalled?.why);
+        if (exhausted) throw new ApiError(409, 'continue_exhausted', exhausted);
         signal = { name: TASK_SIGNAL_NAMES.continue, by };
         break;
+      }
       case 'stop':
         signal = { name: TASK_SIGNAL_NAMES.abandon, by, reason: body.reason ?? DEFAULT_STOP_REASON };
         break;

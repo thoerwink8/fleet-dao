@@ -54,6 +54,25 @@ describe('任务页操作按钮按状态', () => {
     }
   });
 
+  test('继续次数用满：继续置灰，文案写明要重开用 redo', () => {
+    renderApp(
+      <ActionButtons
+        target={{
+          ...base,
+          state: 'stalled',
+          parkedWhy: '已继续 3 次仍没过，交指挥官',
+        }}
+      />,
+    );
+    const button = screen.getByRole('button', {
+      name: '继续次数已用满（3 次），继续无效；要重开用 redo',
+    });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(button.getAttribute('title')).toBe('继续次数已用满（3 次），继续无效；要重开用 redo');
+    expect(screen.getByRole('button', { name: '叫停' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '重做' })).toBeTruthy();
+  });
+
   test('合并中：不画暂停；没暂停只给叫停，已经暂停给继续和叫停', () => {
     const open = renderApp(<ActionButtons target={{ ...base, state: 'merging' }} />);
     expect(labels()).toEqual(['叫停']);

@@ -24,22 +24,32 @@ export function prClaimedIssues(pulls: readonly OpenPullRef[]): Map<number, numb
 }
 
 /**
- * 开 PR 前的围栏：除了 except 这个分支自己的 PR，还有没有别的开着的 PR 在做这张单（「需求」栏 Closes 它，或分支是它的固定前缀）。
- * Refs 不算：母单的几个分片 PR 各自 Refs 母单是常态，不是重复做。有回号最小的那个，没有回 null。
- * 租约过期了旧会话照样能推，两条线开 PR 前都按它查一遍，不重复开。
+ * 除了 except 这个分支自己的 PR，开着的、在做这张单的 PR（「需求」栏 Closes 它，或分支是它的固定前缀）。
+ * Refs 不算：母单的几个分片 PR 各自 Refs 母单是常态，不是重复做。
+ */
+export function pullsOnIssue(
+  pulls: readonly OpenPullRef[],
+  issue: number,
+  except: string | null,
+): OpenPullRef[] {
+  return pulls
+    .filter((p) => except === null || p.headRef !== except)
+    .filter(
+      (p) =>
+        issueColumnRefs(p.body).closes.includes(issue) ||
+        (p.headRef !== undefined && p.headRef !== '' && issueOfBranch(p.headRef)?.issue === issue),
+    );
+}
+
+/**
+ * 开 PR 前的围栏：除了 except 这个分支自己的 PR，还有没有别的开着的 PR 在做这张单。
+ * 有回号最小的那个，没有回 null。租约过期了旧会话照样能推，两条线开 PR 前都按它查一遍，不重复开。
  */
 export function otherPrOnIssue(
   pulls: readonly OpenPullRef[],
   issue: number,
   except: string | null,
 ): number | null {
-  const hits = pulls
-    .filter((p) => except === null || p.headRef !== except)
-    .filter(
-      (p) =>
-        issueColumnRefs(p.body).closes.includes(issue) ||
-        (p.headRef && issueOfBranch(p.headRef)?.issue === issue),
-    )
-    .map((p) => p.number);
+  const hits = pullsOnIssue(pulls, issue, except).map((p) => p.number);
   return hits.length > 0 ? Math.min(...hits) : null;
 }

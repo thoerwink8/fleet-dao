@@ -175,7 +175,7 @@ export {
   readPlan,
   renderPlan,
 } from './plan-view.ts';
-export { type OpenPullRef, otherPrOnIssue, prClaimedIssues } from './pr-claims.ts';
+export { type OpenPullRef, otherPrOnIssue, prClaimedIssues, pullsOnIssue } from './pr-claims.ts';
 export {
   ISSUE_COLUMN,
   issueColumnRefs,

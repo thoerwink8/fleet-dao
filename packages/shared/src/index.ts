@@ -5,6 +5,7 @@ export * from './changelog.ts';
 export * from './checks-red.ts';
 export * from './ci-policy.ts';
 export * from './cli-versions.ts';
+export * from './continue-exhausted.ts';
 export type * from './domain.ts';
 export * from './effort.ts';
 export * from './flow-purposes.ts';
