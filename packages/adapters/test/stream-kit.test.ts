@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   BACKGROUND_RUN,
@@ -16,6 +18,19 @@ import {
   todosSummary,
   toolSummaryText,
 } from '../src/stream-kit.ts';
+
+const SRC = join(import.meta.dirname, '..', 'src');
+
+/** adapters 源码里的 .ts（不含 node_modules）。 */
+function srcFiles(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules') continue;
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) srcFiles(path, out);
+    else if (entry.isFile() && entry.name.endsWith('.ts')) out.push(path);
+  }
+  return out;
+}
 
 describe('stream-kit 工具摘要与失败原因', () => {
   it('toolSummaryText：读不到是空串，默认截到 200，刚好到上限不补省略号，可指定更长的上限', () => {
@@ -108,5 +123,21 @@ describe('stream-kit tally', () => {
     tally(counts, 'a');
     tally(counts, 'b');
     expect(counts).toEqual({ a: 3, b: 2 });
+  });
+});
+
+describe('截断常量只定义一次', () => {
+  it('TRANSCRIPT_SUMMARY_MAX 的赋值只在 stream-kit.ts，三个渠道的 stream.ts 只导入', () => {
+    const hits = srcFiles(SRC)
+      .filter((file) => readFileSync(file, 'utf8').includes('TRANSCRIPT_SUMMARY_MAX ='))
+      .map((file) => relative(SRC, file).split(sep).join('/'))
+      .sort();
+    expect(hits).toEqual(['stream-kit.ts']);
+    const streams = ['claude-code/stream.ts', 'cursor/stream.ts', 'grok/stream.ts'];
+    for (const stream of streams) {
+      const text = readFileSync(join(SRC, stream), 'utf8');
+      expect(text, stream).toContain('TRANSCRIPT_SUMMARY_MAX');
+      expect(text, stream).not.toContain('TRANSCRIPT_SUMMARY_MAX =');
+    }
   });
 });
