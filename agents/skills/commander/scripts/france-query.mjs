@@ -137,12 +137,13 @@ export const SQL = {
     limit 3000) x`,
 
   notifications: `select jsonb_build_object(
-    'count', (select count(*) from notifications where resolved_at is null),
+    'count', (select count(*) from notifications where resolved_at is null and level in ('alert', 'decision')),
+    'daily', (select count(*) from notifications where resolved_at is null and level = 'daily'),
     'rows', coalesce((select jsonb_agg(x order by x.created_at desc) from (
       select nt.level, left(nt.dedupe_key, 120) as dedupe_key, left(nt.title, 300) as title, left(nt.body, 600) as body,
              nt.link, nt.created_at, nt.updated_at, t.issue_number as n
       from notifications nt left join tasks t on t.id = nt.task_id
-      where nt.resolved_at is null
+      where nt.resolved_at is null and nt.level in ('alert', 'decision')
       order by nt.created_at desc
       limit 30) x), '[]'::jsonb))`,
 
@@ -279,7 +280,7 @@ export function parsePsql(stdout, names) {
 const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
 /**
  * @param {unknown} v
- * @returns {v is { rows: unknown[], count?: unknown }}
+ * @returns {v is { rows: unknown[], count?: unknown, daily?: unknown }}
  */
 const hasRows = (v) => isObj(v) && Array.isArray(v.rows);
 
@@ -317,7 +318,14 @@ export function dbSections(io) {
     db: shaped('db', isObj, (v) => ({ now: v.now, readOnly: v.readOnly })),
     tasks: shaped('tasks', Array.isArray, (v) => ({ rows: v })),
     runs: shaped('runs', Array.isArray, (v) => ({ rows: v })),
-    notifications: shaped('notifications', hasRows, (v) => ({ count: v.count, rows: v.rows })),
+    notifications: shaped('notifications', hasRows, (v) => {
+      const daily = Number(v.daily);
+      return {
+        count: v.count,
+        ...(Number.isInteger(daily) ? { daily } : {}),
+        rows: v.rows,
+      };
+    }),
     jobs: shaped('jobs', Array.isArray, (v) => ({ rows: v })),
     routes: shaped('routes', Array.isArray, (v) => ({ rows: v })),
     orgAudit: shaped('orgAudit', Array.isArray, (v) => ({ rows: v })),

@@ -101,8 +101,8 @@ export interface BriefNote {
   issue: { repo: string; number: number } | null;
 }
 
-/** 开着的要你拍（decision）或卡住报警（alert，再提醒 remind: 不算），老的在前。 */
-export async function openBriefNotes(db: Db, level: 'decision' | 'alert'): Promise<BriefNote[]> {
+/** 开着的要你拍（decision）、卡住报警（alert，再提醒 remind: 不算）或日报（daily），老的在前。 */
+export async function openBriefNotes(db: Db, level: 'decision' | 'alert' | 'daily'): Promise<BriefNote[]> {
   const rows = await db
     .select({
       id: notifications.id,

@@ -1,6 +1,9 @@
 // 每日简报（决定 0096：放法国引擎定时任务；创始人规矩：只为四类事和 AI 判定要他的事即时打扰他，其余每天早上看一条）。
-// 每天 08:30（北京时间）一轮：昨天上线了什么（版本 + 一句话）、要你拍的（带链接）、失败了要你看的、关键指标（开单→上线中位、一轮做成率），
-// 写成一行提醒（键 feishu:brief:<北京日期>，驾驶舱后端马上推飞书团队群），同时用引擎机器人在置顶进度单 #1055 发一条评论（GitHub 会通知创始人）。
+// 每天 08:30（北京时间）一轮：昨天上线了什么（版本 + 一句话）、要你拍的（带链接）、失败了要你看的、关键指标（开单→上线中位、一轮做成率）、
+// 开着的日报（发版开始、发版成功这类），写成一行提醒（键 feishu:brief:<北京日期>，驾驶舱后端马上推飞书团队群），
+// 同时用引擎机器人在置顶进度单 #1055 发一条评论（GitHub 会通知创始人）。
+// 日报写进简报、飞书和 #1055 都发出去之后，把收进去的那几条标已处理（处理人 engine:daily-brief，正文「已撤：已收进 <日期> 简报」）。
+// 简报自己那一行（feishu:brief:）不收：飞书要它还开着才推。没发成就不收。收的时候失败记 partial，不把已经发出的简报打成失败。
 // 改这里之前必须知道：
 // - 不拉单、不起会话：不标 needsMaster（总开关每次发版都会关，标了简报常常发不出去）。
 // - 上线以发布历史（发布目录的 .history：时间 提交号 事件 [unmerged]）为准：release、rollback、auto-rollback 是切过去，unhealthy、recovered 不换在用版本，
@@ -22,9 +25,11 @@ import {
   DAILY_BRIEF_JOB_ID,
   dailyBriefKey,
   type ExecutorLineStat,
+  FEISHU_BRIEF_KEY_PREFIX,
   type ScheduleResult,
 } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
+import { settleDailyNotes } from './daily-notes.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
 import { clip, stamp } from './reconcile-common.ts';
 
@@ -47,7 +52,7 @@ export const BRIEF_LINK = '/notifications';
 /** 「昨天上线了什么」整节最多几行（含头一行和收尾链接），一屏读完。 */
 const SHIPPED_MAX_LINES = 10;
 /** 其余几块每块最多列几条（多的写「另 N 条」）。 */
-const LIST_MAX = { decisions: 15, alerts: 10, stopped: 10 } as const;
+const LIST_MAX = { decisions: 15, alerts: 10, stopped: 10, dailies: 15 } as const;
 
 /** 定时那一条的标题（看守 .github/workflows/daily-brief-guard.yml 按这几个字认 #1055 上今天的简报）。 */
 export const briefTitle = (day: string): string => `【每日简报】${day}`;
@@ -106,6 +111,8 @@ export interface DailyBriefDeps {
   issueTitle(repo: { owner: string; name: string }, number: number): Promise<string>;
   decisions(): Promise<BriefNote[]>;
   alerts(): Promise<BriefNote[]>;
+  /** 开着的日报（daily）。读不到照抛。简报自己那一行也在里面，收集时把它剔掉。 */
+  dailies(): Promise<BriefNote[]>;
   stopped(from: Date, to: Date): Promise<BriefStoppedTask[]>;
   /** pnpm line:stats 同一条查询（@fleet-dao/db 的 executorLineStats）。 */
   lineStats(now: Date): Promise<ExecutorLineStat[]>;
@@ -120,6 +127,12 @@ export interface DailyBriefDeps {
   }): Promise<{
     url: string;
   }>;
+  /** 把收进简报的日报标已处理。没做成照抛（这一轮记 partial，不把已经发出的简报打成失败）。 */
+  resolveDaily(input: {
+    dedupeKey: string;
+    by: string;
+    why: string;
+  }): Promise<'ok' | 'already_resolved' | 'not_found'>;
   runs: ScheduleRunLog;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
@@ -354,6 +367,18 @@ function failuresSection(
   return { heading, lines };
 }
 
+function dailiesSection(notes: readonly BriefNote[], now: Date): BriefSection {
+  const heading = `五、日报（${notes.length} 条）`;
+  if (notes.length === 0) return { heading, lines: ['没有新的日报。'] };
+  return {
+    heading,
+    lines: [
+      ...notes.slice(0, LIST_MAX.dailies).map((n) => noteLine(n, now)),
+      ...more(notes.length, LIST_MAX.dailies),
+    ],
+  };
+}
+
 function metricsSection(
   leadMinutes: readonly number[] | null,
   stats: readonly ExecutorLineStat[] | string,
@@ -384,8 +409,18 @@ function metricsSection(
   return { heading, lines };
 }
 
-/** 收齐四块。某一块读不到写进那一块、不抛。 */
-export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<BriefSection[]> {
+/** 收齐的简报，外加发出去之后要标已处理的日报键。 */
+export interface CollectedBrief {
+  sections: BriefSection[];
+  /**
+   * 写进这一期、发出去之后要标已处理的日报键。读日报失败是 null：发出去也不收，免得把没写进简报的收掉。
+   * 简报自己那一行（feishu:brief:）不在里面。
+   */
+  includedDaily: { day: string; keys: string[] } | null;
+}
+
+/** 收齐五块。某一块读不到写进那一块、不抛。 */
+export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<CollectedBrief> {
   const today = beijingDay(now).start;
   const yesterday = new Date(today.getTime() - 24 * 3_600_000);
   const guard = async <T>(what: string, f: () => Promise<T>): Promise<T | string> => {
@@ -400,19 +435,34 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Bri
   const alerts = await guard('读卡住报警', () => deps.alerts());
   const stopped = await guard('读昨天停下的单', () => deps.stopped(yesterday, today));
   const stats = await guard('读交付指标', () => deps.lineStats(now));
+  const dailyRead = await guard('读日报', () => deps.dailies());
   const unread = (heading: string, why: string): BriefSection => ({
     heading,
     lines: [`没查成：${why}`],
     unread: why,
   });
-  return [
-    typeof shipped === 'string' ? unread('一、昨天上线了什么', shipped) : shipped.section,
-    typeof decisions === 'string' ? unread('二、要你拍的', decisions) : decisionsSection(decisions, now),
-    typeof alerts === 'string' || typeof stopped === 'string'
-      ? unread('三、失败了要你看的', [alerts, stopped].filter((x) => typeof x === 'string').join('；'))
-      : failuresSection(alerts, stopped, now),
-    metricsSection(typeof shipped === 'string' ? null : shipped.leadMinutes, stats),
-  ];
+  let dailySection: BriefSection;
+  let includedDaily: CollectedBrief['includedDaily'];
+  if (typeof dailyRead === 'string') {
+    dailySection = unread('五、日报', dailyRead);
+    includedDaily = null;
+  } else {
+    const notes = dailyRead.filter((n) => !n.dedupeKey.startsWith(FEISHU_BRIEF_KEY_PREFIX));
+    dailySection = dailiesSection(notes, now);
+    includedDaily = { day: beijingDay(now).day, keys: notes.map((n) => n.dedupeKey) };
+  }
+  return {
+    sections: [
+      typeof shipped === 'string' ? unread('一、昨天上线了什么', shipped) : shipped.section,
+      typeof decisions === 'string' ? unread('二、要你拍的', decisions) : decisionsSection(decisions, now),
+      typeof alerts === 'string' || typeof stopped === 'string'
+        ? unread('三、失败了要你看的', [alerts, stopped].filter((x) => typeof x === 'string').join('；'))
+        : failuresSection(alerts, stopped, now),
+      metricsSection(typeof shipped === 'string' ? null : shipped.leadMinutes, stats),
+      dailySection,
+    ],
+    includedDaily,
+  };
 }
 
 /** 飞书那条的正文：每行一句（后端把带链接的行做成可点的）。 */
@@ -457,7 +507,8 @@ export async function runDailyBriefJob(
   let result: ScheduleResult;
   let sections: BriefSection[] = [];
   try {
-    sections = await collectBrief(deps, now);
+    const collected = await collectBrief(deps, now);
+    sections = collected.sections;
     const repo = await deps.selfRepo();
     await deps.publish({ dedupeKey: key, title, body: briefPlain(sections), link: BRIEF_LINK });
     const footer = `<sub>引擎定时任务 ${DAILY_BRIEF_JOB.id} 发（${stamp(now)}，北京时间）；飞书团队群同时推了一条。只为四类事和 AI 判定要你拍的事即时推，其余都在这里。</sub>`;
@@ -467,19 +518,49 @@ export async function runDailyBriefJob(
       key: manual ? `daily-brief:${day}:manual-${now.toISOString()}` : `daily-brief:${day}`,
       body: briefMarkdown(title, sections, footer),
     });
+    let found = 0;
+    let settleNote = '';
+    if (collected.includedDaily && collected.includedDaily.keys.length > 0) {
+      try {
+        const settled = await settleDailyNotes(
+          (input) => deps.resolveDaily(input),
+          collected.includedDaily.keys.map((dedupeKey) => ({
+            dedupeKey,
+            level: 'daily' as const,
+            updatedAt: now,
+          })),
+          {
+            now,
+            includedDay: collected.includedDaily.day,
+            includedKeys: new Set(collected.includedDaily.keys),
+          },
+        );
+        found = settled.resolved.length;
+        if (settled.failed.length > 0) settleNote = `收日报没全成：${settled.failed.join('；')}`;
+      } catch (err) {
+        settleNote = `收日报没做成：${errMessage(err)}`;
+      }
+    }
     const unread = sections.filter((s) => s.unread).map((s) => `${s.heading}：${s.unread}`);
+    const problems: string[] = [];
+    if (unread.length > 0) problems.push(`有 ${unread.length} 块没查成：${unread.join('；')}`);
+    if (settleNote) problems.push(settleNote);
     result =
-      unread.length > 0
+      problems.length > 0
         ? {
             outcome: 'partial',
-            why: clip(`简报发了，有 ${unread.length} 块没查成：${unread.join('；')}`, 1500),
+            why: clip(`简报发了，${problems.join('；')}`, 1500),
             scanned: sections.length,
+            ...(found > 0 ? { found } : {}),
           }
         : {
             outcome: 'ok',
             scanned: sections.length,
-            found: 0,
-            why: `简报 ${day} 发了（${manual ? '手动触发' : '定时'}）`,
+            found,
+            why:
+              found > 0
+                ? `简报 ${day} 发了（${manual ? '手动触发' : '定时'}），收了 ${found} 条日报`
+                : `简报 ${day} 发了（${manual ? '手动触发' : '定时'}）`,
           };
   } catch (err) {
     result = { outcome: 'failed', why: clip(`每日简报没发成：${errMessage(err)}`, 1500) };

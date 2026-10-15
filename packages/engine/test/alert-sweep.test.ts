@@ -12,7 +12,7 @@ import {
   FILE_LABELS,
   sweepAlerts,
 } from '../src/jobs/alert-sweep.ts';
-import { beijingDayStart } from '../src/jobs/reconcile-common.ts';
+import { beijingDayStart, RECONCILE_ACTOR } from '../src/jobs/reconcile-common.ts';
 
 const HOUR = 60 * 60_000;
 const DAY = 24 * HOUR;
@@ -466,5 +466,54 @@ describe('卡住报警立案', () => {
     expect(part.unchecked).toEqual([
       '提醒 reconcile:pr:acme/widgets#9 的 PR 合并时刻没查成，不跳过：GitHub 502',
     ]);
+  });
+});
+
+describe('日报超过 48 小时由这一轮收掉', () => {
+  it('超过 48 小时的 daily 收掉；刚好 48 小时、更近的日报、开着的 alert 和 decision 都不收', async () => {
+    const old = row({
+      dedupeKey: 'release:start:abcdef123456:1',
+      level: 'daily',
+      title: '发版开始',
+      createdAt: new Date(NOW.getTime() - 3 * DAY),
+      updatedAt: new Date(NOW.getTime() - 3 * DAY),
+    });
+    const fresh = row({
+      dedupeKey: 'release:done:abcdef123456:2',
+      level: 'daily',
+      title: '发版成功',
+      createdAt: new Date(NOW.getTime() - 47 * HOUR),
+      updatedAt: new Date(NOW.getTime() - 47 * HOUR),
+    });
+    const exact = row({
+      dedupeKey: 'release:start:bbbbbbbbbbbb:3',
+      level: 'daily',
+      title: '刚好 48 小时',
+      createdAt: new Date(NOW.getTime() - 48 * HOUR),
+      updatedAt: new Date(NOW.getTime() - 48 * HOUR),
+    });
+    const freshAlert = row({
+      dedupeKey: 'wf:failure:still-open',
+      level: 'alert',
+      createdAt: new Date(NOW.getTime() - 2 * HOUR),
+      updatedAt: new Date(NOW.getTime() - 2 * HOUR),
+    });
+    const decision = row({
+      dedupeKey: 'someone:asks-human',
+      level: 'decision',
+      title: '等你拍',
+      createdAt: new Date(NOW.getTime() - 4 * DAY),
+      updatedAt: new Date(NOW.getTime() - 4 * DAY),
+    });
+    const h = harness([old, fresh, exact, freshAlert, decision]);
+    const part = await h.run();
+    expect(part.unchecked).toEqual([]);
+    expect(part.found).toBe(1);
+    expect(old.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(old.body.startsWith('已撤：超过 48 小时自动收')).toBe(true);
+    expect(fresh.resolvedAt).toBeNull();
+    expect(exact.resolvedAt).toBeNull();
+    expect(freshAlert.resolvedAt).toBeNull();
+    expect(decision.resolvedAt).toBeNull();
   });
 });

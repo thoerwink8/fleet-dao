@@ -1550,4 +1550,6 @@ test('发版提醒走通知中心：接活脚本和 lib 不再读 engine.env 的
   assert.match(script, /insert into notifications \(level, dedupe_key, title, body, link\)/);
   assert.match(script, /:'level'::notification_level, :'key', :'title', :'body'/);
   assert.match(script, /resolved_by = 'release-request'/);
+  assert.match(script, /release:start:/);
+  assert.match(script, /已撤：同一提交已发版成功/);
 });

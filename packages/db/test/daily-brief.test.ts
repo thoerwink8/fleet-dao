@@ -96,11 +96,17 @@ describe('openBriefNotes / stoppedTasksBetween', () => {
     await note('decide-done', 'decision', { resolvedAt: ago(MIN) });
     await note('task:x:park:1', 'alert');
     await note('remind:x:2026-10-14', 'alert');
+    await note('release:done:abc:1', 'daily');
+    await note('feishu:brief:2026-10-15', 'daily');
     const decisions = await openBriefNotes(t.db, 'decision');
     expect(decisions.map((n) => [n.dedupeKey, n.issue])).toEqual([
       ['decide', { repo: 'acme/fleet-dao', number: 42 }],
     ]);
     expect((await openBriefNotes(t.db, 'alert')).map((n) => n.dedupeKey)).toEqual(['task:x:park:1']);
+    expect((await openBriefNotes(t.db, 'daily')).map((n) => n.dedupeKey).sort()).toEqual([
+      'feishu:brief:2026-10-15',
+      'release:done:abc:1',
+    ]);
   });
 
   it('窗口里转成 failed / stalled、现在还是这个状态的才算', async () => {
