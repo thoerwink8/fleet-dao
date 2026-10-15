@@ -12,6 +12,7 @@
 # 要换引擎的版本时（#2038、决定 0093）：构建期间引擎照常干活。构建完才写排空请求（$DRAIN_REQUEST，引擎不起新会话），
 # 给引擎手上有会话的任务发 hard 暂停（暂停人「发版」，名单落 $PAUSE_FILE），等会话收掉（停不下来的最多再做 DRAIN_GRACE 秒，
 # 到点由引擎按切号那一套停下、按编号续上）就停引擎，再迁移、切版本；新引擎起来后只对名单里这一批发「继续」（续上原会话见 #2037）。
+# 相对在用版本只改了文档或测试（runtime_unchanged）时不暂停、不重启。
 # 发版不碰引擎总开关和各仓「让 AI 接活」开关：停接新活只在切版本这一段，由排空请求管，脚本退了请求就撤。
 # 每一版在 /srv/fleet-dao-releases/<提交号>，current 指着在用的那版；留最近 5 版。目录、单元、本机配置、怎么看、
 # 怎么退：docs/ops.md 第九节。退出码同装机脚本：0 全绿，1 有红（含「没过健康检查、已退回」），2 没红但有待配。
@@ -74,6 +75,7 @@ DRAIN_WROTE=0    # 这次写了排空请求、还没撤
 DRAIN_UNTIL=0    # 请求里的截止（秒）
 ENGINE_DRAINS=0  # 在跑的引擎会排空（认了 drain.json）
 ENGINE_STOPPED=0 # 这次把引擎停下了、还没起回来：没走到切版本就失败，收尾时照原样起回来
+RUNTIME_UNCHANGED=0 # 这一版相对在用版本只改了文档或测试：不暂停、不重启 fleet-engine / fleet-api
 # 照期望写本机配置（#323，docs/ops.md 第九节「配置进仓对账」）：切版本之前照这一版的期望写 engine.env、api.env、release.env 里
 # 公开的值，只写这一版的期望和上次写的不一样的键（上次写的记在 CONFIG_STATE），人手改的不改回（期望里 selfHeal 开了才改回）。
 # 怎么算、怎么写、写完读回都在 config.mjs（和自动发布对账同一份读法）；这里先让它算、用本脚本读 release.env 的办法核一遍，再写。
@@ -1452,7 +1454,9 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
       restart=1
     fi
     running=$(running_release "$u.service")
-    if [[ -n "$running" && "$running" != "$dir" ]]; then
+    if ((RUNTIME_UNCHANGED)) && [[ "$u" == fleet-engine || "$u" == fleet-api ]]; then
+      restart=0
+    elif [[ -n "$running" && "$running" != "$dir" ]]; then
       echo "  · $u 的主进程还在跑 ${running##*/}（不是这一版），要重启"
       restart=1
     fi
@@ -1897,6 +1901,24 @@ install_cli_upgrade_units() { # 这一版的目录
 
 # ── 三种用法 ──
 
+# 改动是否全落在绝不进引擎运行的路径里。用路径白名单，不解析 import：解析永远补不完（注释、转义都能绕开），
+# 路径判断宁多重启、不漏重启。对不上、清单读不出、在用版本取不到、和在用是同一个提交，都返回 1（照旧暂停重启）。
+# 白名单：docs/**、specs/**、**/*.md、packages/*/test/**、agents/test/**、deploy/test/**。--no-renames：源码挪进 docs/ 时旧路径还在。
+runtime_unchanged() { # 在用提交 目标提交。0 = 全在白名单里
+  local cur=$1 sha=$2 path list
+  [[ -n "$cur" && "$cur" != "$sha" ]] || return 1
+  list=$(git -C "$CACHE" diff --name-only --no-renames "$cur" "$sha" 2>/dev/null) || return 1
+  while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    case "$path" in
+      *.md | docs/* | specs/* | agents/test/* | deploy/test/*) continue ;;
+    esac
+    if [[ "$path" =~ ^packages/[^/]+/test/ ]]; then continue; fi
+    return 1
+  done <<<"$list"
+  return 0
+}
+
 do_release() { # 要发的提交（空 = 主线最新）
   local cur before=""
   fetch_code "$1"
@@ -1907,11 +1929,17 @@ do_release() { # 要发的提交（空 = 主线最新）
   # 直接发一个老提交也一样把关：库里的迁移比它带的多就不切（drizzle 碰到比代码新的迁移记录什么也不做、也不报错，
   # 光靠迁移那一步拦不住）。放在迁移之前：老版本的迁移程序连库都不碰
   schema_allows "$SHA" 切到 || return 1
-  # 迁移之前停引擎：先不起新会话，给手上有会话的任务发 hard 暂停，等会话收掉再停（旧引擎不能对着新的库结构）
-  drain_request "$SHA" "$(drain_grace)"
-  pause_tasks "$SHA"
-  drain_engine || return 1
-  upgrade_cli_tools "$SHA"
+  # 只改了文档或测试就不停引擎；其余照旧暂停、排空再停（旧引擎不能对着新的库结构）。
+  RUNTIME_UNCHANGED=0
+  if runtime_unchanged "$cur" "$SHA"; then
+    RUNTIME_UNCHANGED=1
+    ok "只改了文档或测试，引擎运行内容没变，没重启"
+  else
+    drain_request "$SHA" "$(drain_grace)"
+    pause_tasks "$SHA"
+    drain_engine || return 1
+    upgrade_cli_tools "$SHA"
+  fi
   migrate "$SHA"
   load_catalog "$SHA" || return 1
   load_routing "$SHA" || return 1
@@ -1942,6 +1970,7 @@ do_release() { # 要发的提交（空 = 主线最新）
   else
     mark_unhealthy "$SHA"
     step "自动退回上一版 ${cur:0:12}"
+    RUNTIME_UNCHANGED=0 # 退回要照旧停、照旧起，不沿用这次「没重启」
     if ! schema_allows "$cur"; then
       red "${SHA:0:12} 没过健康检查，也没自动退回（库的迁移比上一版新，见上）：停在 ${SHA:0:12}，要人来看"
     elif
@@ -1965,6 +1994,7 @@ do_release() { # 要发的提交（空 = 主线最新）
 
 do_rollback() {
   local cur prev
+  RUNTIME_UNCHANGED=0
   cur=$(current_sha)
   prev=$(previous_sha)
   if [[ -z "$prev" ]]; then
