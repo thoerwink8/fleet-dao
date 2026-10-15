@@ -31,11 +31,17 @@ describe('judgeRun', () => {
     });
   });
 
-  it('优先级：进程没起来 > 起没起来没查成 > 我们杀的 > 额度用满 > 没终帧 > 终帧报错 > 退出码 > 中转没查成 > 交付', () => {
+  it('优先级：进程没起来 > 起没起来没查成 > 我们杀的 > 中转回了额度通知 > 额度用满 > 没终帧 > 终帧报错 > 退出码 > 中转没查成 > 交付', () => {
+    const notice = 'Your quota is exhausted.';
     const cases: [RunFacts, string][] = [
       [{ ...clean, spawnError: 'ENOENT', launchUnknown: '没等到应答', killed: 'aborted' }, 'spawn_failed'],
       [{ ...clean, launchUnknown: '没等到应答', killed: 'aborted' }, 'launch_unknown'],
       [{ ...clean, killed: 'wall_clock_timeout', quotaExhausted: true }, 'wall_clock_timeout'],
+      [{ ...clean, killed: 'wall_clock_timeout', relayQuota: notice }, 'wall_clock_timeout'],
+      [
+        { ...clean, relayQuota: notice, quotaExhausted: true, relayUnknown: '账本没读成' },
+        'relay_quota_exhausted',
+      ],
       [{ exitCode: 1, signal: null, quotaExhausted: true }, 'quota_exhausted'],
       [{ exitCode: 0, signal: null, quotaExhausted: false, relayUnknown: '账本没读成' }, 'no_result'],
       [{ ...clean, exitCode: 1, terminal: { isError: true, detail: 'api_error · HTTP 404' } }, 'agent_error'],

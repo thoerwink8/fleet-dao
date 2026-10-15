@@ -1547,6 +1547,39 @@
         "counter": null,
         "delaySeconds": 0
       }
+    },
+    {
+      "id": "X108",
+      "provenance": "production",
+      "origin": "法国 2026-10-14 23:05Z #2181（runs 585bd4d5，mirasim-relay:glm-5.3-flash:mirasim）：Mirasim 会话 8585fb47 跑完，回答整段是中转上游的欠费通知（record.json 的 preview 原话）。插头 relayQuotaNotice 认出、交 relay_quota_exhausted；当时插头还没这一步、又早收了 accepted，落成了 launch_unknown 挂起（#2249）",
+      "evidence": {
+        "hostId": "mirasim",
+        "code": "relay_quota_exhausted",
+        "message": "中转这一路额度用完或欠费，回答就是上游的通知：Your quota is exhausted. API key status: exceeded Name: VIP.aaa USDT balance: -2.160991 USDT USDT spent: 254.110991 USDT exp_date: 2026-11-06T02:02:17.427Z"
+      },
+      "expect": { "action": "park", "rule": "QT3", "alert": true, "routeOutcome": "neutral", "counter": null }
+    },
+    {
+      "id": "X109",
+      "provenance": "format",
+      "origin": "同 X108，中转常见的余额不足写法（insufficient balance、余额不足）：码一样，判法一样",
+      "evidence": {
+        "hostId": "mirasim",
+        "code": "relay_quota_exhausted",
+        "message": "中转这一路额度用完或欠费，回答就是上游的通知：余额不足，请充值后再试"
+      },
+      "expect": { "action": "park", "rule": "QT3", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X110",
+      "provenance": "format",
+      "origin": "QT3 的码只认插头交来的 code 字段：测试没过的原文里印着同一条通知（改额度相关代码时测试输出常有这些词），照旧是返工，不判成中转欠费",
+      "evidence": {
+        "hostId": "mirasim",
+        "code": "tests_failed",
+        "message": "Tests 1 failed\n  - judges relay_quota_exhausted: Your quota is exhausted. API key status: exceeded"
+      },
+      "expect": { "action": "retry", "rule": "TS1", "routeOutcome": "neutral", "counter": "reworks" }
     }
   ],
   "skipped": [
