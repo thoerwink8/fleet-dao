@@ -36,7 +36,7 @@
 | `packages/mirasim-reclaude` | Mirasim 的回合选路启动器（Go 写的，在 `launcher/`）和安全迁移入口（`pnpm mirasim:migrate`：旧接入空闲后才更新，可检查、可回滚，不重启整个 Mirasim） |
 | `agents/` | 给各家 AI 装的东西的原件：技能（`skills/`）、钩子（`hooks/`）、权限配置（`config/`），和钉住规矩的测试（`test/rules/`）；由 agents-sync 装出去 |
 | `deploy/` | 装机、发版、健康页，和它们的检查 |
-| `docs/` | 目标、设计、决定、运维、进度；`docs/reference/` 是旧系统的坑 |
+| `docs/` | 目标、设计、决定、运维、进度；`docs/reference/` 是旧审计里还被引用的短索引 |
 | `specs/` | 方案文档（要写才写）和历史的需求、结果；需求在 GitHub 的单子里（#654） |
 
 ## 密钥和本机配置在哪
@@ -71,7 +71,7 @@
 | [docs/ops.md](docs/ops.md) | 两台机器怎么装、怎么发版、怎么看、怎么退 | 跟着 `deploy/` 一起改 |
 | [docs/decisions/](docs/decisions/README.md) | 拍板记录：一个决定一个文件，只增不改；每份头部写状态（生效、被哪份替代、失效），索引在 `docs/decisions/README.md` | 创始人拍板的那一轮，同时改索引 |
 | [docs/PROGRESS.md](docs/PROGRESS.md) | 生效中的临时调整（创始人引导在 docs/directives/、进度流水在置顶单 #1055，`pnpm progress read`） | 有新的临时调整时 |
-| [docs/reference/](docs/reference/README.md) | 旧系统的坑和接线细节 | 做某一块之前先读对应那份 |
+| [docs/reference/](docs/reference/README.md) | 代码还在引用的旧审计条目（短索引） | 引用对不上条目时改索引 |
 | [docs/reclaude.md](docs/reclaude.md) | reclaude 的门口：文档、清理脚本、以及「〈编号〉账号被封了，根据文档清理痕迹」这句提示词 | 入口或提示词变了 |
 | [docs/reclaude-in-mirasim.md](docs/reclaude-in-mirasim.md) | Windows/Mac 的 Mirasim 自有/平台切换、旧安装自动迁移、检查/撤回，以及 Linux 与 Fleet 的分工。从 [docs/reclaude.md](docs/reclaude.md) 进 | 装法或启动器变了 |
 | [docs/reclaude-self-check.md](docs/reclaude-self-check.md) | 上机前自检和被封号的细则。从 [docs/reclaude.md](docs/reclaude.md) 进 | 清法与判据变了 |

@@ -1,7 +1,8 @@
 # fleet-dao 需求目标
 
 > 2026-09-29 由指挥官（原帅位）整合：146 张单（`gh issue list --state all`，#28–#489）、134 份 `specs/*/需求.md`、决定记录 `docs/decisions/`、`specs/169-Fusion形态/需求.md` 里创始人的逐条拍板，和 09-28 晚到 09-29 凌晨的对话。
-> 这份只写「要干成什么、为什么、守哪些规矩」；「怎么做」在 `docs/design.md`（按本文重做中）。新流程按 `specs/509-需求梳理/流程重做方案.md` 和 `docs/decisions/0010-three-segment-flow.md` 执行；`docs/decisions/0003-fusion-flow.md`（Fusion）已被替代。
+> 状态：现行。规矩以本文第五节和 `docs/decisions/` 为准；做法在 `docs/design.md`。各节「现状」列是 2026-09-29 的快照。
+> 这份只写「要干成什么、为什么、守哪些规矩」。新流程按 `specs/509-需求梳理/流程重做方案.md` 和 `docs/decisions/0010-three-segment-flow.md` 执行；`docs/decisions/0003-fusion-flow.md`（Fusion）已被替代。
 
 ## 一、一句话
 
