@@ -5,7 +5,7 @@
 // - 飞书客户端里：tt.requestAccess 拿 code，POST /auth/feishu/access（页面要先加载飞书 JSSDK 才有 tt）。
 // - 开发环境：POST /auth/dev-login 免登（后端开了 devLogin 才显示）。
 
-import { AUTH_PREFIX, AuthRoutes } from '@fleet-dao/shared';
+import { AUTH_PREFIX, AuthRoutes, safeNext } from '@fleet-dao/shared';
 import { useQueryClient } from '@tanstack/react-query';
 import { LoaderCircle, LogIn } from 'lucide-react';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
@@ -25,16 +25,6 @@ import { loginErrorText, PASSWORD_MAX, USERNAME_MAX } from '../lib/credentials';
 
 export function meta() {
   return [{ title: brand.title('登录') }];
-}
-
-/** 和后端 auth.ts 的 safeNext 同一条规矩：只接受站内路径，别的一律回首页；也不回登录页自己。 */
-export function safeNext(next: string | null): string {
-  if (!next || next.length > 1000) return '/';
-  if (!next.startsWith('/') || next.startsWith('//') || next.includes('\\')) return '/';
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: 就是要拒掉控制字符。
-  if (/[\u0000-\u001f\u007f]/.test(next)) return '/';
-  if (next === '/login' || next.startsWith('/login?')) return '/';
-  return next;
 }
 
 interface FeishuTT {

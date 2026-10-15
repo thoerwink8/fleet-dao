@@ -1,14 +1,13 @@
 import { ArrowRight, Construction } from 'lucide-react';
 import { Link, useLocation } from 'react-router';
-import { brand } from '#brand';
 import { EmptyState } from '../components/layout/empty-state';
 import { Page } from '../components/layout/page';
 import { Section } from '../components/layout/section';
 import { Button } from '../components/ui/button';
 
 /**
- * 还没做的页（账单、战绩、判断题记录）：地址留着，打开写明「还没做」、以后会有什么、现在去哪看相关的。
- * 驾驶舱改版起它们不再占侧栏：没做的页挂在导航里，点进去是空的，只会让人白跑一趟。
+ * 还没做的页（账单）：地址留着，打开写明「还没做」、以后会有什么、现在去哪看相关的。
+ * 驾驶舱改版起它不再占侧栏：没做的页挂在导航里，点进去是空的，只会让人白跑一趟。
  */
 const PLANS: Record<
   string,
@@ -24,26 +23,6 @@ const PLANS: Record<
     ],
     // 原来还有一条「订阅月费」指向 /settings#fees：设置页没有这一节，点了落空，删掉
     related: [{ to: '/quota', label: '额度' }],
-  },
-  '/record': {
-    title: '战绩',
-    what: '每条路由在每类活上干得怎么样。',
-    bullets: [
-      '成功率、平均耗时、返工轮数，按阶段类型分开算',
-      '战绩明显差的路由调度会往后放；样本少时不动',
-      '约 10% 的任务试探派给非首选路由，攒战绩',
-    ],
-    related: [{ to: '/routing/status', label: '渠道状态' }],
-  },
-  '/judge': {
-    title: brand.terms.judgeNav,
-    what: `${brand.terms.judgeQuiz}的记录：每道题的答案、把握度和准确率。`,
-    bullets: [
-      '先只记不拦，攒满 50 条且准确率过线才真拦',
-      '能拦不能放：不能批准合并、不能动账号、不能删东西',
-      '巡检里放固定考题，准确率掉了自动退回只记不拦',
-    ],
-    related: [{ to: '/schedules', label: '定时任务' }],
   },
 };
 

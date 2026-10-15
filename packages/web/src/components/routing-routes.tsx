@@ -437,7 +437,7 @@ export function RouteItem({
             </Fact>
             <Fact label="禁令与开关" fact={r.ban} />
           </div>
-          {/* 思考档位按「模型 × 路由」配，就在这条路由上改（#1914 第 5 轮，原 /efforts 页并进来）。展开了才读、才画 */}
+          {/* 思考档位按「模型 × 路由」配，就在这条路由上改（#1914 第 5 轮）。展开了才读、才画 */}
           {open ? (
             <div className="mt-3 border-t pt-3">
               <RouteEffortField
