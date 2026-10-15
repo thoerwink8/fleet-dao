@@ -6,7 +6,9 @@
 // 算进去的（宁多算不漏算；下面任何一步读不出、对不上、路径跑出版本目录，都是 unknown，调用方照常重启）：
 // - 入口：fleet-engine = packages/engine/src/main.ts，fleet-api = packages/api/src/main.ts。
 //   顺着静态 import / export from（含 type）、字面量 import()、require()、require.resolve()、
-//   createRequire().resolve() 走。node: 内建不算。别的裸说明符不跟进去，整份 pnpm-lock.yaml 盖住它们。
+//   createRequire().resolve() 走。关键字和说明符（以及 . 、resolve、( )）之间的空白、行注释、块注释都跳过，
+//   说明符照算：export { x } from /* 注释 */ '@fleet-dao/x' 这种不能当成没引用。跳过之后说明符不是静态字面量，
+//   就是 unknown。node: 内建不算。别的裸说明符不跟进去，整份 pnpm-lock.yaml 盖住它们。
 //   @fleet-dao/* 按各包 package.json 的 exports 解：import 和 require 两种引用方式各按 Node 的条件表解一遍，
 //   两边解到的文件都算（同一个包两组入口都写了时，只认一组会把另一组改动的漏掉；带 * 的通配解不开就是 unknown）。
 // - 字面量 new URL('相对路径', import.meta.url)：文件算进去，是源码再接着走；目录里每个文件都算
@@ -68,7 +70,7 @@ function relOf(root, abs) {
   return rel.split(sep).join('/');
 }
 
-/** 扫一份源码里的静态引用。注释和字符串里的字不算。 */
+/** 扫一份源码里的静态引用。注释和字符串里的字不算；关键字和说明符之间的注释照样跳过，说明符仍算。 */
 function scanSource(text) {
   const specs = [];
   const urls = [];
@@ -107,6 +109,28 @@ function scanSource(text) {
     at += 2;
     while (at < n && !(text[at] === '*' && text[at + 1] === '/')) at += 1;
     return Math.min(at + 2, n);
+  }
+
+  // 关键字和说明符之间可以夹空白、行注释、块注释（from /* 注释 */ '@fleet-dao/x'）。只跳空白会把说明符漏掉，
+  // 又不报 unknown，两版这行没变、只改了被引用的源码时会判成 same。
+  function skipGap(at) {
+    while (at < n) {
+      const ws = skipWs(at);
+      if (ws !== at) {
+        at = ws;
+        continue;
+      }
+      if (text[at] === '/' && text[at + 1] === '/') {
+        at = skipLine(at);
+        continue;
+      }
+      if (text[at] === '/' && text[at + 1] === '*') {
+        at = skipBlock(at);
+        continue;
+      }
+      return at;
+    }
+    return at;
   }
 
   function skipRegex(at) {
@@ -279,11 +303,50 @@ function scanSource(text) {
     return { args: null, end: at };
   }
 
+  // 参数原文里的空白和注释。import(/* 注释 */ '@fleet-dao/x') 的说明符仍算；剥不干净就不是纯字面量。
+  function skipRawGap(raw, at) {
+    while (at < raw.length) {
+      if (/\s/.test(raw[at])) {
+        at += 1;
+        continue;
+      }
+      if (raw[at] === '/' && raw[at + 1] === '/') {
+        while (at < raw.length && raw[at] !== '\n') at += 1;
+        continue;
+      }
+      if (raw[at] === '/' && raw[at + 1] === '*') {
+        at += 2;
+        while (at < raw.length && !(raw[at] === '*' && raw[at + 1] === '/')) at += 1;
+        at = Math.min(at + 2, raw.length);
+        continue;
+      }
+      return at;
+    }
+    return at;
+  }
+
   function readLiteralFrom(raw) {
-    const lit = readLiteralAt(raw, 0);
+    const start = skipRawGap(raw, 0);
+    const lit = readLiteralAt(raw, start);
     if (!lit.ok) return null;
-    if (lit.end !== raw.length && raw.slice(lit.end).trim() !== '') return null;
+    if (skipRawGap(raw, lit.end) !== raw.length) return null;
     return lit.value;
+  }
+
+  // 去掉空白和注释后的参数原文。new URL 的第二个参数要认 import.meta.url，中间夹注释也认。
+  function rawCode(raw) {
+    let out = '';
+    let at = 0;
+    while (at < raw.length) {
+      const next = skipRawGap(raw, at);
+      if (next !== at) {
+        at = next;
+        continue;
+      }
+      out += raw[at];
+      at += 1;
+    }
+    return out;
   }
 
   function readLiteralAt(raw, at) {
@@ -327,12 +390,24 @@ function scanSource(text) {
       computed = computed || 'new URL 的参数没有收口';
       return parsed.end;
     }
-    if (parsed.args.length >= 2 && parsed.args[1].replace(/\s+/g, '') === 'import.meta.url') {
+    if (parsed.args.length >= 2 && rawCode(parsed.args[1]) === 'import.meta.url') {
       const value = readLiteralFrom(parsed.args[0]);
       if (value === null) computed = computed || 'new URL 的路径不是字面量';
       else urls.push(value);
     }
     return parsed.end;
+  }
+
+  // `.resolve(` / `?.resolve(`。点、名字、括号之间的空白和注释都认；对不上返回 -1（调用方不当成这次调用）。
+  function resolveCallParen(at) {
+    let dot = at;
+    if (text[at] === '?' && text[at + 1] === '.') dot = at + 1;
+    else if (text[at] !== '.') return -1;
+    const nameAt = skipGap(dot + 1);
+    if (!text.startsWith('resolve', nameAt) || isIdent(text[nameAt + 7] ?? '')) return -1;
+    const paren = skipGap(nameAt + 7);
+    if (text[paren] !== '(') return -1;
+    return paren;
   }
 
   while (i < n) {
@@ -399,7 +474,7 @@ function scanSource(text) {
       while (j < n && isIdent(text[j])) j += 1;
       const word = text.slice(i, j);
       if (word === 'from') {
-        const k = skipWs(j);
+        const k = skipGap(j);
         if (text[k] === "'" || text[k] === '"' || text[k] === '`') {
           const lit = readLiteral(k);
           if (!lit.ok) computed = computed || 'from 后面不是静态字面量';
@@ -408,7 +483,7 @@ function scanSource(text) {
           continue;
         }
       } else if (word === 'import') {
-        const k = skipWs(j);
+        const k = skipGap(j);
         if (text[k] === '(') {
           i = noteSpecCall(k, 'import() 的参数不是字面量');
           continue;
@@ -421,36 +496,32 @@ function scanSource(text) {
           continue;
         }
       } else if (word === 'require') {
-        const k = skipWs(j);
-        if (text.startsWith('.resolve', k)) {
-          const p = skipWs(k + '.resolve'.length);
-          if (text[p] === '(') {
-            i = noteSpecCall(p, 'require.resolve 的参数不是字面量');
-            continue;
-          }
-        } else if (text[k] === '(') {
+        const k = skipGap(j);
+        const resolved = resolveCallParen(k);
+        if (resolved >= 0) {
+          i = noteSpecCall(resolved, 'require.resolve 的参数不是字面量');
+          continue;
+        }
+        if (text[k] === '(') {
           i = noteSpecCall(k, 'require() 的参数不是字面量');
           continue;
         }
       } else if (word === 'createRequire') {
-        const k = skipWs(j);
+        const k = skipGap(j);
         if (text[k] === '(') {
           const after = parseArgs(k);
-          const r = skipWs(after.end);
-          if (text.startsWith('.resolve', r)) {
-            const p = skipWs(r + '.resolve'.length);
-            if (text[p] === '(') {
-              i = noteSpecCall(p, 'createRequire().resolve 的参数不是字面量');
-              continue;
-            }
+          const resolved = resolveCallParen(skipGap(after.end));
+          if (resolved >= 0) {
+            i = noteSpecCall(resolved, 'createRequire().resolve 的参数不是字面量');
+            continue;
           }
           i = after.end;
           continue;
         }
       } else if (word === 'new') {
-        const k = skipWs(j);
+        const k = skipGap(j);
         if (text.startsWith('URL', k) && !isIdent(text[k + 3] ?? '')) {
-          const p = skipWs(k + 3);
+          const p = skipGap(k + 3);
           if (text[p] === '(') {
             i = noteUrlCall(p);
             continue;

@@ -125,6 +125,94 @@ printf '%s\n' 'export const esm = 1;' >"$B/packages/x/src/esm.ts"
 printf '%s\n' 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
 printf '%s\n' 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
 
+echo "== 判法：from 和说明符之间的注释也算引用"
+# export { x } from /* 注释 */ '@fleet-dao/x' 两版这行一样。漏掉这个引用时，只改被导出的源码会判成 same。
+seed_tree "$A"
+seed_tree "$B"
+printf '%s\n' "export { x } from /* 注释 */ '@fleet-dao/x';" 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' "export { x } from /* 注释 */ '@fleet-dao/x';" 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+check "from 后块注释、两边都没改：引擎 same" "$(verdict fleet-engine "$A" "$B")" same
+printf '%s\n' '只改了文档' >"$B/docs/note.md"
+check "from 后块注释、只改 docs/*.md：引擎 same" "$(verdict fleet-engine "$A" "$B")" same
+printf '%s\n' '文档' >"$B/docs/note.md"
+printf '%s\n' 'export const esm = 2;' >"$B/packages/x/src/esm.ts"
+check "from 后块注释、只改被导出的源码：引擎 changed（不能漏成 same）" "$(verdict fleet-engine "$A" "$B")" changed
+printf '%s\n' 'export const esm = 1;' >"$B/packages/x/src/esm.ts"
+printf '%s\n' 'module.exports.cjs = 2;' >"$B/packages/x/src/cjs.cjs"
+check "from 后块注释、只改 require 入口：引擎 changed" "$(verdict fleet-engine "$A" "$B")" changed
+printf '%s\n' 'module.exports.cjs = 1;' >"$B/packages/x/src/cjs.cjs"
+printf '%s\n' 'export { x } from // 行注释' "  '@fleet-dao/x';" 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' 'export { x } from // 行注释' "  '@fleet-dao/x';" 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+printf '%s\n' 'export const esm = 3;' >"$B/packages/x/src/esm.ts"
+check "from 后行注释、只改被导出的源码：引擎 changed" "$(verdict fleet-engine "$A" "$B")" changed
+printf '%s\n' "export { x } from /* a */ /* b */ '@fleet-dao/x';" 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' "export { x } from /* a */ /* b */ '@fleet-dao/x';" 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+printf '%s\n' 'export const esm = 4;' >"$B/packages/x/src/esm.ts"
+check "from 后连续块注释、只改被导出的源码：引擎 changed" "$(verdict fleet-engine "$A" "$B")" changed
+# 注释正文里的假说明符不算引用；注释后面的真说明符算
+printf '%s\n' "export { x } from /* '@fleet-dao/missing' */ '@fleet-dao/x';" 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' "export { x } from /* '@fleet-dao/missing' */ '@fleet-dao/x';" 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+printf '%s\n' 'export const esm = 1;' >"$B/packages/x/src/esm.ts"
+check "注释里的假说明符不当成引用：引擎 same" "$(verdict fleet-engine "$A" "$B")" same
+printf '%s\n' 'export const esm = 5;' >"$B/packages/x/src/esm.ts"
+check "注释后面的真说明符仍算：引擎 changed" "$(verdict fleet-engine "$A" "$B")" changed
+# 跳过注释之后说明符不是静态字面量：unknown，调用方照常重启
+printf '%s\n' 'export { x } from /* 注释 */ `@fleet-dao/${name}`;' 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' 'export { x } from /* 注释 */ `@fleet-dao/${name}`;' 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+check "from 后注释再加非静态说明符：引擎 unknown（照常重启）" "$(verdict fleet-engine "$A" "$B" | awk '{print $1}')" unknown
+# from 当普通标识符：注释后面不是说明符，不当成引用，也不因此 unknown
+printf '%s\n' 'const from = 1;' 'from /* 注释 */ ;' 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' 'const from = 1;' 'from /* 注释 */ ;' 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+check "from 是标识符、注释后不是说明符：引擎 same" "$(verdict fleet-engine "$A" "$B")" same
+printf '%s\n' 'const from = /* 注释 */ "@fleet-dao/x";' 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' 'const from = /* 注释 */ "@fleet-dao/x";' 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+printf '%s\n' 'export const esm = 6;' >"$B/packages/x/src/esm.ts"
+check "赋值里的注释和字符串不是 import：引擎 same" "$(verdict fleet-engine "$A" "$B")" same
+printf '%s\n' "import /* 注释 */ ('@fleet-dao/x');" 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' "import /* 注释 */ ('@fleet-dao/x');" 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+printf '%s\n' 'export const esm = 7;' >"$B/packages/x/src/esm.ts"
+check "import() 和括号之间有注释、只改被导出的源码：引擎 changed" "$(verdict fleet-engine "$A" "$B")" changed
+printf '%s\n' "import(/* 注释 */ '@fleet-dao/x');" 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' "import(/* 注释 */ '@fleet-dao/x');" 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+printf '%s\n' 'export const esm = 8;' >"$B/packages/x/src/esm.ts"
+check "import() 括号里注释后再写说明符、只改被导出的源码：引擎 changed" "$(verdict fleet-engine "$A" "$B")" changed
+printf '%s\n' "const x = require /* 注释 */ ('@fleet-dao/x');" 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' "const x = require /* 注释 */ ('@fleet-dao/x');" 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+printf '%s\n' 'export const esm = 1;' >"$B/packages/x/src/esm.ts"
+printf '%s\n' 'module.exports.cjs = 9;' >"$B/packages/x/src/cjs.cjs"
+check "require() 和括号之间有注释、只改 require 入口：引擎 changed" "$(verdict fleet-engine "$A" "$B")" changed
+printf '%s\n' "const x = require /* 注释 */ . /* 注释 */ resolve /* 注释 */ ('@fleet-dao/x');" 'export const engine = 1;' \
+  >"$A/packages/engine/src/main.ts"
+printf '%s\n' "const x = require /* 注释 */ . /* 注释 */ resolve /* 注释 */ ('@fleet-dao/x');" 'export const engine = 1;' \
+  >"$B/packages/engine/src/main.ts"
+printf '%s\n' 'module.exports.cjs = 10;' >"$B/packages/x/src/cjs.cjs"
+check "require.resolve 各段之间有注释、只改 require 入口：引擎 changed" "$(verdict fleet-engine "$A" "$B")" changed
+printf '%s\n' "import { createRequire } from 'node:module';" \
+  "const x = createRequire /* 注释 */ (import.meta.url) /* 注释 */ .resolve /* 注释 */ ('@fleet-dao/x');" \
+  'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' "import { createRequire } from 'node:module';" \
+  "const x = createRequire /* 注释 */ (import.meta.url) /* 注释 */ .resolve /* 注释 */ ('@fleet-dao/x');" \
+  'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+printf '%s\n' 'module.exports.cjs = 11;' >"$B/packages/x/src/cjs.cjs"
+check "createRequire().resolve 各段之间有注释、只改 require 入口：引擎 changed" "$(verdict fleet-engine "$A" "$B")" changed
+# new URL 的路径在包里、不在引擎 src 下：注释隔开时也得算进运行内容。两组入口都先改回一样，免得 cjs 的差异混进来。
+printf '%s\n' "import x from '@fleet-dao/x';" 'export const engine = 1;' >"$A/packages/engine/src/main.ts"
+printf '%s\n' "import x from '@fleet-dao/x';" 'export const engine = 1;' >"$B/packages/engine/src/main.ts"
+printf '%s\n' 'module.exports.cjs = 1;' >"$A/packages/x/src/cjs.cjs"
+printf '%s\n' 'module.exports.cjs = 1;' >"$B/packages/x/src/cjs.cjs"
+printf '%s\n' 'export const esm = 1;' "const u = new /* 注释 */ URL(/* 注释 */ './data.json', /* 注释 */ import.meta.url);" \
+  >"$A/packages/x/src/esm.ts"
+printf '%s\n' 'export const esm = 1;' "const u = new /* 注释 */ URL(/* 注释 */ './data.json', /* 注释 */ import.meta.url);" \
+  >"$B/packages/x/src/esm.ts"
+printf '%s\n' 'v1' >"$A/packages/x/src/data.json"
+printf '%s\n' 'v1' >"$B/packages/x/src/data.json"
+check "new URL 各段之间有注释、数据文件一样：引擎 same" "$(verdict fleet-engine "$A" "$B")" same
+printf '%s\n' 'v2' >"$B/packages/x/src/data.json"
+check "new URL 各段之间有注释、只改数据文件：引擎 changed" "$(verdict fleet-engine "$A" "$B")" changed
+printf '%s\n' 'export const esm = 1;' >"$A/packages/x/src/esm.ts"
+printf '%s\n' 'export const esm = 1;' >"$B/packages/x/src/esm.ts"
+rm -f -- "$A/packages/x/src/data.json" "$B/packages/x/src/data.json"
+
 echo "== 判法：真仓（引擎真会加载的那棵树）"
 REAL_A=$TMP/real-a
 REAL_B=$TMP/real-b
@@ -252,6 +340,7 @@ NOLY=$(printf 'e%.0s' {1..40})
 NOSCRIPT=$(printf 'f%.0s' {1..40})
 NOTIME=$(printf '1%.0s' {1..40})
 NOUNIT=$(printf '2%.0s' {1..40})
+XSRC=$(printf '3%.0s' {1..40})
 
 seed_release() { # 提交号
   local d=$RELEASES/$1
@@ -303,6 +392,9 @@ release_to() { # 提交号
 }
 
 seed_release "$OLD"
+# 在用的那一版就带「from 和说明符之间有注释」。只改文档时两版这行一样，仍然不该重启。
+printf '%s\n' "export { x } from /* 注释 */ '@fleet-dao/x';" 'export const engine = 1;' \
+  >"$RELEASES/$OLD/packages/engine/src/main.ts"
 cp "$RELEASES/$OLD/.units/fleet-engine.service" "$FLEET_SYSTEMD_DIR/fleet-engine.service"
 cp "$RELEASES/$OLD/.units/fleet-api.service" "$FLEET_SYSTEMD_DIR/fleet-api.service"
 
@@ -330,6 +422,18 @@ check "没有红" "${#REDS[@]}" 0
 check "引擎停过再起来" "$(calls_of '^stop fleet-engine\.service$'):$(calls_of '^(start|restart) fleet-engine\.service$')" "1:1"
 check "后端没重启" "$(calls_of '^(stop|start|restart) fleet-api\.service$')" 0
 check "给手上有会话的任务发了暂停" "$(grep -c 'release pause' "$API_CALLS" || true)" 1
+check "没有说引擎没重启" "$(said '引擎运行内容没变，没重启')" 0
+check "日志写明后端没重启" "$(said '后端运行内容没变，没重启')" 1
+
+clone_release "$OLD" "$XSRC"
+printf '%s\n' 'export const esm = 2;' >"$RELEASES/$XSRC/packages/x/src/esm.ts"
+echo "== 发版：from 后有注释，只改被引用包的源码，引擎照常暂停并重启"
+release_to "$XSRC"
+check "切到改了被引用包的那一版" "$(current_sha)" "$XSRC"
+check "没有红" "${#REDS[@]}" 0
+check "引擎停过再起来" "$(calls_of '^stop fleet-engine\.service$'):$(calls_of '^(start|restart) fleet-engine\.service$')" "1:1"
+check "给手上有会话的任务发了暂停" "$(grep -c 'release pause' "$API_CALLS" || true)" 1
+check "后端没重启" "$(calls_of '^(stop|start|restart) fleet-api\.service$')" 0
 check "没有说引擎没重启" "$(said '引擎运行内容没变，没重启')" 0
 check "日志写明后端没重启" "$(said '后端运行内容没变，没重启')" 1
 
