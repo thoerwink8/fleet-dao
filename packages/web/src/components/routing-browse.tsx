@@ -736,7 +736,7 @@ function UnassignedRouteRow({
             {meta}
           </span>
         </span>
-        {/* 没配进用途的路由也能先配档位（#1914 第 5 轮，原 /efforts 页并进来） */}
+        {/* 没配进用途的路由也能先配档位（#1914 第 5 轮） */}
         <RouteEffortInline modelId={modelId} modelName={modelName} routeId={r.id} routeName={name} />
       </RowFrame>
     </li>

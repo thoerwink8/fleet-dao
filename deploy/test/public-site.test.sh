@@ -463,6 +463,57 @@ check "一处 proxy_pass 都没有（只开 80 的模板）：说认不出，不
   "$(site_keepalive_gaps "$TMP/ka-bad.conf" | grep -c '一处 proxy_pass 都没有')" 1
 check "文件读不到：说读不到，不说齐了" "$(site_keepalive_gaps "$TMP/nowhere.conf")" "读不到站点配置 $TMP/nowhere.conf"
 
+# /api、/auth 的 502/503/504：nginx 自己造的门口错误回固定 JSON。三个码都要在，身体是同一段合法 JSON。
+# 不打开 proxy_intercept_errors，/healthz 也不挂 error_page：后端自己的 503、健康页要的 502/504 原样走。
+gateway_json() { # 配置文件。打印 ok，或一句为什么不行（不退出，交给 check 比）
+  "$NODE" -e '
+    const fs = require("node:fs");
+    const s = fs.readFileSync(process.argv[1], "utf8");
+    const q = String.fromCharCode(39);
+    function block(mark) {
+      const i = s.indexOf(mark);
+      if (i < 0) return "";
+      const j = s.indexOf("\n    }\n", i);
+      return j < 0 ? "" : s.slice(i, j);
+    }
+    const want = ["502", "503", "504"];
+    const bad = [];
+    for (const mark of ["location ~ ^/(api|auth)(/|$) {", "location = /api/events {"]) {
+      const b = block(mark);
+      if (!b) bad.push("找不到 " + mark);
+      for (const code of want) {
+        if (!new RegExp("error_page\\s+" + code + "\\b").test(b)) bad.push(mark + " 缺 " + code);
+      }
+      if (/proxy_intercept_errors/.test(b)) bad.push(mark + " 拦截了后端自己的错误");
+    }
+    const hz = block("location = /healthz {");
+    if (!hz) bad.push("找不到 /healthz");
+    else if (/error_page/.test(hz)) bad.push("/healthz 不该换身体");
+    const re = new RegExp("return\\s+(502|503|504)\\s+" + q + "([^" + q + "]*)" + q, "g");
+    const bodies = [];
+    let m;
+    while ((m = re.exec(s))) bodies.push(m[2]);
+    if (bodies.length !== 3) bad.push("固定 JSON 应有 3 段，实际 " + bodies.length);
+    let parsed = [];
+    try { parsed = bodies.map((t) => JSON.parse(t)); }
+    catch (e) { bad.push("不是合法 JSON：" + e.message); }
+    const msg = "驾驶舱后端暂时没应，它所在的机器可能在重启或关机";
+    if (parsed.some((j) => !j || !j.error || j.error.code !== "gateway" || j.error.message !== msg)) {
+      bad.push("code 或人话不对");
+    }
+    if (new Set(bodies).size > 1) bad.push("三段 JSON 不一致");
+    console.log(bad.length ? bad.join("；") : "ok");
+  ' "$1"
+}
+
+echo "== /api、/auth 的 502/503/504 回固定 JSON（法国关机或隧道断时，页面说人话）"
+if [[ -z "$NODE" ]]; then
+  echo "  … 没跑成：这台没有 node"
+  skipped=1
+else
+  check "error_page 三个码都在，返回体是合法 JSON" "$(gateway_json "$REPO/deploy/hk/nginx-https.conf")" "ok"
+fi
+
 echo "== 访问日志带上 \$host（两份模板）：log_format 含 \$host，每个 server 的 access_log 引用它，路径仍是 /var/log/nginx/access.log"
 for tpl in nginx-http.conf nginx-https.conf; do
   reset
@@ -662,10 +713,24 @@ EOF
     TLS=(-k --resolve "cockpit.example.test:$P2:127.0.0.1")
     HTTPS=https://cockpit.example.test:$P2
     for pc in "/ 200" "/index.html 200" "/tasks/deep-link 200" "/release.json 404" "/health/ 200" "/health/nope 404" \
+      "/health/france-link.json 404" \
       "/robots.txt 200" "/demo 404" "/demo/ 404" "/demo/index.html 404" "/demo/tasks/x 404" "/demo/scopes/a.json 404" \
       "/demo/scopes/nope.json 404" "/healthz 502" "/api/x 502" "/auth/x 502" "/github/webhook 502" \
       "/assets/app-0a1b2c3d.js 200" "/assets/nope-00000000.js 404"; do
       check "https ${pc% *}（隧道外来的）：${pc#* }，带 noindex" "$(probe "${TLS[@]}" "$HTTPS${pc% *}")" "${pc#* } 1"
+    done
+    # 上游 127.0.0.1:1 没人听，nginx 自己造 502。状态码仍是 502（上面那圈已对过），身体换成固定 JSON。
+    gateway_body() { # 路径
+      "$NODE" -e '
+        let j;
+        try { j = JSON.parse(process.argv[1]); }
+        catch (e) { console.log("not-json"); process.exit(0); }
+        const msg = j && j.error && j.error.message || "";
+        console.log(j && j.error && j.error.code === "gateway" && msg.indexOf("它所在的机器可能在重启或关机") >= 0 ? "ok" : "fields");
+      ' "$(curl -sk --max-time 5 "${TLS[@]}" "$HTTPS$1")"
+    }
+    for path in /api/x /auth/x; do
+      check "https $path 上游没应：身体是固定 JSON" "$(gateway_body "$path")" "ok"
     done
     # #1746：带哈希的前端文件存一年不再回来问；文本类按浏览器要的压缩
     asset_head=$(curl -s -o /dev/null -D - -H 'Accept-Encoding: gzip' "${TLS[@]}" "$HTTPS/assets/app-0a1b2c3d.js" | tr -d '\r')
@@ -690,7 +755,8 @@ EOF
     done
     ONLY=(--resolve "cockpit.example.test:$P3:127.0.0.1")
     HTTP=http://cockpit.example.test:$P3
-    for pc in "/ 200" "/tasks/deep-link 200" "/release.json 404" "/health/ 200" "/robots.txt 200" "/demo 404" \
+    for pc in "/ 200" "/tasks/deep-link 200" "/release.json 404" "/health/ 200" "/health/france-link.json 404" \
+      "/robots.txt 200" "/demo 404" \
       "/demo/ 404" "/demo/tasks/x 404" "/demo/scopes/a.json 404" "/demo/scopes/nope.json 404" \
       "/.well-known/acme-challenge/probe 200"; do
       check "只开 80 的模板 ${pc% *}（隧道外来的）：${pc#* }，带 noindex" "$(probe "${ONLY[@]}" "$HTTP${pc% *}")" "${pc#* } 1"
