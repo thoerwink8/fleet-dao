@@ -434,9 +434,10 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
         expect(world.alerts[0]?.detail).toContain(String(DEFAULT_TASK_TOKEN_BUDGET + 1_000_000));
         expect(world.alerts[0]?.detail).not.toContain(String(PREVIOUS_GENERATION_TOKENS));
         await h.signal(taskContinueSignal, { by: 'frank' });
+        // lastProblem 在报警之前就写上。只看它会读到上一回的提醒；等再次停下来，报警已经记上。
         const second = await pollQuery(
           () => statusOf(h),
-          (s) => s.lastProblem?.includes('80.0M') === true,
+          (s) => parked(s) && s.lastProblem?.includes('80.0M / 74.0M') === true,
           '按这一代已给 2 份仍超了再停下',
         );
         expect(second.lastProblem).toContain('80.0M / 74.0M');

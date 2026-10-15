@@ -161,6 +161,23 @@ describe('形状像、但不算的', () => {
   });
 });
 
+describe('Bearer 后面是人起的名字不算令牌', () => {
+  it('三段以上小写短词用连字符拼的不拦；随机 Bearer 串照拦', () => {
+    // 源码里不拼出整段：卫生检查扫的是这份文件的原文，运行时拼出来的值才是要判的那一句。
+    const given = ['grok', 'access', 'token', 'fresh'].join('-');
+    const bearer = ['Bearer', given].join(' ');
+    expect(given.split('-')).toEqual(['grok', 'access', 'token', 'fresh']);
+    // 这条豁免不是「编出来的值」：名字本身过不了 isFakeValue，以前会被当成真令牌。
+    expect(isFakeValue(given)).toBe(false);
+    expect(findHits(`Authorization: '${bearer}'`).map((h) => h.rule)).toEqual([]);
+    const random = ['Bearer', R(40, 18)].join(' ');
+    expect(findHits(`Authorization: ${random}`).map((h) => h.rule)).toContain('token');
+    // 别的前缀不用这条豁免：形状对上的 xai- 令牌，值碰巧是短词也照拦。
+    const named = ['access', 'token', 'fresh', 'value'].join('-');
+    expect(findHits(['xai', named].join('-')).map((h) => h.rule)).toContain('token');
+  });
+});
+
 describe('判定用的小函数', () => {
   it('编出来的值：顺序、重复、字符种类少、带假字样；真随机串不算', () => {
     for (const fake of [

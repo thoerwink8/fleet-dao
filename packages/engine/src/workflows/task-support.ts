@@ -374,6 +374,19 @@ export const EMPTY_DELIVERY_CODE = 'empty_delivery';
 export const CI_UNKNOWN_RECHECKS = 2;
 export const CI_UNKNOWN_RECHECK_SECONDS = 120;
 
+/**
+ * 推分支被卫生检查拦下，交回会话去改（不在 push 这一步里原地重推）。
+ * detail 是端口整理过的那一句（文件:行 规则，不带命中原文）。
+ */
+export class HygieneHandoff extends Error {
+  readonly detail: string;
+  constructor(detail: string) {
+    super('卫生检查拦下了要公开的内容');
+    this.name = 'HygieneHandoff';
+    this.detail = detail;
+  }
+}
+
 /** 推分支并主线撞上冲突，交回会话去解（不在 push 这一步里原地重试）。 */
 export class ConflictHandoff extends Error {
   readonly files: readonly string[];
@@ -476,6 +489,34 @@ export const CONFLICT_HANDOFF_CAUSE = [
   '工作流把 MERGE_CONFLICT 当成 pushBranch 原地重试，这句反馈没进会话提示词。',
   '下一轮原文一字不差就被挂起。',
 ].join('');
+
+const HYGIENE_SPOTS_PREFIX = '卫生检查拦下了要公开的内容：';
+
+/**
+ * 端口那一句里的命中处（文件:行 规则，分号隔开）。没整理成这句时整句当命中处，不另附别的原文。
+ */
+export function hygieneSpots(message: string): string {
+  const text = message.trim();
+  const at = text.indexOf(HYGIENE_SPOTS_PREFIX);
+  const spots = (at === -1 ? text : text.slice(at + HYGIENE_SPOTS_PREFIX.length)).trim();
+  return spots.replace(/[。．].*$/u, '').trim();
+}
+
+/** 同一处：命中处拆开、排序后再比，次序不同仍算同一处。 */
+export function hygieneSpotKey(spots: string): string {
+  return spots
+    .split('；')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .sort()
+    .join('；');
+}
+
+/** 退回动手会话的那一句。只有命中处，没有命中的原文。 */
+export function hygieneFeedbackLine(spots: string): string {
+  const where = spots || '（没读到命中处）';
+  return `${HYGIENE_SPOTS_PREFIX}${where}。把这些从提交里拿掉再交`;
+}
 
 /** 一轮选路里最多当场探几条（#1409）。超过就停下，不再往下探。 */
 export const DISPATCH_PROBE_LIMIT = 3;

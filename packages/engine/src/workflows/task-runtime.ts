@@ -49,6 +49,7 @@ import {
   avoidableFamily,
   bump,
   ConflictHandoff,
+  HygieneHandoff,
   type LastSession,
   NO_AVOID,
   PausedInterrupt,
@@ -585,6 +586,15 @@ export class TaskRuntime {
           counters = ZERO;
           previousMessage = undefined;
           continue;
+        }
+        // 卫生检查拦下推分支：不在这一步里原地重推。第二次原文必一字不差，会直接挂起，会话看不到命中处。
+        // 老历史没有这个标记，照旧交给失败分流（马上重推，再一字不差就挂起）。
+        if (
+          source === 'pushBranch' &&
+          failure.code.toLowerCase() === 'hygiene_blocked' &&
+          patched('hygiene-blocked-handoff')
+        ) {
+          throw new HygieneHandoff(failure.message);
         }
         const next = await this.classify(failure, counters, false, { previousMessage });
         previousMessage = failure.message;
