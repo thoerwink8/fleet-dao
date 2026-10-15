@@ -43,7 +43,7 @@ const COMMON_KEYS = ['poolId', 'channelId', 'name', 'reader', 'timeoutMs'];
 const READER_KEYS: Record<ReaderType, string[]> = {
   'claude-usage': ['command', 'orgKind', 'cwd', 'env'],
   'reclaude-carpool': ['keyFile', 'baseUrl'],
-  'mirasim-relay': ['port', 'tokenFile'],
+  'mirasim-relay': ['port', 'tokenFile', 'openTimeoutMs', 'relayWaitMs'],
   'cursor-dashboard': ['authFile', 'baseUrl'],
   'grok-billing': ['authFile', 'baseUrl', 'clientVersion'],
   estimate: ['windows', 'usage'],
@@ -151,6 +151,10 @@ function checkPool(p: unknown, i: number, problems: string[]): void {
         problems.push(`${where}.port 要是 1–65535`);
       if (p.tokenFile !== undefined && !isNonEmptyString(p.tokenFile))
         problems.push(`${where}.tokenFile 要是非空字符串`);
+      if (p.openTimeoutMs !== undefined && !isPositiveInt(p.openTimeoutMs))
+        problems.push(`${where}.openTimeoutMs 要是正整数（毫秒）`);
+      if (p.relayWaitMs !== undefined && !isPositiveInt(p.relayWaitMs))
+        problems.push(`${where}.relayWaitMs 要是正整数（毫秒）`);
       break;
     case 'cursor-dashboard':
       if (p.authFile !== undefined && !isNonEmptyString(p.authFile))

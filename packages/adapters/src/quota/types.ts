@@ -146,6 +146,16 @@ export interface MirasimRelayConfig extends PoolConfigBase {
   port?: number;
   /** 回环令牌文件，默认 ~/.mirasim/run/local-<port>.token。 */
   tokenFile?: string;
+  /**
+   * 直连回环时的握手时限（毫秒）。不写用读取器里的 OPEN_TIMEOUT_MS（8 秒：本机回环，够判断服务没在听）。
+   * 引擎走桥接，不看这项。
+   */
+  openTimeoutMs?: number;
+  /**
+   * 连上之后等 relay 帧的时限（毫秒）。不写用读取器里的 RELAY_WAIT_MS（15 秒：盖住负载抖动，不等单线程被堵住的那几十秒）。
+   * 到点由读这一轮的那一层换一条连接再试一次。
+   */
+  relayWaitMs?: number;
 }
 
 export interface CursorDashboardConfig extends PoolConfigBase {
