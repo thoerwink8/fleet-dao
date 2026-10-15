@@ -11,10 +11,10 @@
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import type { LineEffect } from '../cli-run.ts';
 import {
-  EMPTY_TOOL_RESULT,
-  TRANSCRIPT_SUMMARY_MAX,
   cleanTestCommands,
+  toolSummary as clipToolSummary,
   cut,
+  EMPTY_TOOL_RESULT,
   exitCodeText,
   failureText,
   firstStringField,
@@ -29,9 +29,9 @@ import {
   resultText,
   searchSummary,
   str,
+  TRANSCRIPT_SUMMARY_MAX,
   testRun,
   todoSummary,
-  toolSummary as clipToolSummary,
   transcriptEntry,
 } from '../stream-kit.ts';
 import type {

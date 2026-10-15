@@ -9,9 +9,8 @@
 // - 2.1.281 给 opus-5-5 的工具表里没有步骤清单工具（haiku 有 TaskCreate 一类），步骤只能靠 fleet plan 主动报。
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import {
-  TOOL_SUMMARY_MAX,
-  TRANSCRIPT_SUMMARY_MAX,
   cleanTestCommands,
+  toolSummary as clipToolSummary,
   cut,
   failureText,
   firstStringField,
@@ -23,8 +22,9 @@ import {
   resultText,
   searchSummary,
   str,
+  TOOL_SUMMARY_MAX,
+  TRANSCRIPT_SUMMARY_MAX,
   testRun,
-  toolSummary as clipToolSummary,
   transcriptEntry,
 } from '../stream-kit.ts';
 import type {

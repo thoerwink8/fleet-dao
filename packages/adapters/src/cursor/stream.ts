@@ -9,10 +9,10 @@
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import type { LineEffect } from '../cli-run.ts';
 import {
-  EMPTY_TOOL_RESULT,
-  TRANSCRIPT_SUMMARY_MAX,
   cleanTestCommands,
+  toolSummary as clipToolSummary,
   cut,
+  EMPTY_TOOL_RESULT,
   exitCodeText,
   failureText,
   firstStringField,
@@ -27,9 +27,9 @@ import {
   resultText,
   searchSummary,
   str,
+  TRANSCRIPT_SUMMARY_MAX,
   testRun,
   todoSummary,
-  toolSummary as clipToolSummary,
   transcriptEntry,
 } from '../stream-kit.ts';
 import type {
@@ -396,7 +396,10 @@ function resultTextOf(
 }
 
 /** 失败原因按这一家的字段拼好，截断交给 failureText。 */
-function failureDetail(result: Record<string, unknown>, success: Record<string, unknown> | undefined): string {
+function failureDetail(
+  result: Record<string, unknown>,
+  success: Record<string, unknown> | undefined,
+): string {
   if (success) {
     // 命令跑了但退出码不是 0：给退出码和 stderr
     const stderr = str(success.stderr)?.trim();
