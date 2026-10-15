@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  BUSY_SIBLING_CORES,
+  CPU_SAMPLE_MS,
+  cpuShareOf,
   localWorkers,
   measureBusy,
   memoryLimitOf,
@@ -31,6 +34,8 @@ function linux(
     env: { CI: 'true' },
     cpus: 6,
     busy: () => 0,
+    list: () => undefined,
+    sleep: () => {},
     read(path) {
       reads.push(path);
       const code = fail[path];
@@ -200,7 +205,7 @@ describe('测试开几个进程：按本进程所在 cgroup 的内存上限算',
       expect(w.note).toContain('16 核');
       expect(w.note).toContain('75%');
       expect(w.note).toContain('默认 15 个');
-      expect(w.note).toContain('CI、引擎的会话不降');
+      expect(w.note).toContain('CI 不降');
       expect(reads).toEqual([]);
     });
 
@@ -220,12 +225,13 @@ describe('测试开几个进程：按本进程所在 cgroup 的内存上限算',
       expect(roomy.maxWorkers).toBe(localWorkers(6, 0));
     });
 
-    it('引擎的会话（环境里有 FLEET_RUN_ID）：不降，照旧只按内存上限（交活前自测限 8 分钟，降了容易超时记没跑）', () => {
+    it('引擎的会话（环境里有 FLEET_RUN_ID）：不降一档、不问整机负载，按内存算，每次都打一句「测试开 N 个进程」', () => {
       const asked: string[] = [];
       const busy = () => (asked.push('busy'), 1);
-      expect(testWorkers(local({ env: { FLEET_RUN_ID: 'r1' }, busy }, session(64 * 1024)).env)).toEqual({
-        maxWorkers: 5,
-      });
+      const roomy = testWorkers(local({ env: { FLEET_RUN_ID: 'r1' }, busy }, session(64 * 1024)).env);
+      expect(roomy.maxWorkers).toBe(5);
+      expect(roomy.note).toContain('测试开 5 个进程（默认 5 个');
+      expect(roomy.note).toContain('同一池子里的会话读不到，核数不分');
       expect(
         testWorkers(local({ env: { FLEET_RUN_ID: 'r1' }, busy }, session(1536, 2048)).env).maxWorkers,
       ).toBe(1);
@@ -251,6 +257,168 @@ describe('测试开几个进程：按本进程所在 cgroup 的内存上限算',
     });
   });
 
+  describe('同一个池子（fleet-agents.slice）里几个会话一起跑：按池子剩多少内存、在跑的会话数分核', () => {
+    const POOL = '/sys/fs/cgroup/fleet.slice/fleet-agents.slice';
+    const engine = { FLEET_RUN_ID: 'r1' };
+
+    /** 法国的样子：scope 软 5888M、硬 6144M，池子软 10152M、硬 10664M；poolUsed、selfUsed 是两层的 memory.current（MiB）。 */
+    function pool(
+      poolUsed: number | undefined,
+      selfUsed: number | undefined,
+      extra: Record<string, string> = {},
+    ) {
+      return session(5888, 6144, {
+        [`${POOL}/memory.high`]: `${10152 * MIB}\n`,
+        [`${POOL}/memory.max`]: `${10664 * MIB}\n`,
+        ...(poolUsed === undefined ? {} : { [`${POOL}/memory.current`]: `${poolUsed * MIB}\n` }),
+        ...(selfUsed === undefined
+          ? {}
+          : { [`/sys/fs/cgroup${SCOPE}/memory.current`]: `${selfUsed * MIB}\n` }),
+        ...extra,
+      });
+    }
+
+    /** 兄弟 scope：名字 → 采样那 300 毫秒里平均用了几个核（cpu.stat 的 usage_usec 前后两次之差）。 */
+    function siblings(files: Record<string, string>, cores: Record<string, number>) {
+      // 每等一次，各兄弟的累计用量涨「核数 × 采样毫秒」：同一个假环境问几次都对
+      const sleeps: number[] = [];
+      const usage = (name: string) =>
+        `usage_usec ${1_000_000 + sleeps.length * Math.round((cores[name] ?? 0) * CPU_SAMPLE_MS * 1000)}\nuser_usec 1\n`;
+      const { env, reads } = linux(files, {
+        env: engine,
+        list: (dir) =>
+          dir === POOL
+            ? ['cgroup.procs', 'memory.high', 'fleet-agent-1.scope', ...Object.keys(cores)]
+            : undefined,
+        sleep: (ms) => {
+          sleeps.push(ms);
+        },
+      });
+      const read = env.read;
+      env.read = (path) => {
+        const m = path.match(/^\/sys\/fs\/cgroup\/fleet\.slice\/fleet-agents\.slice\/([^/]+)\/cpu\.stat$/);
+        if (m?.[1] && m[1] in cores) return usage(m[1]);
+        return read(path);
+      };
+      return { env, reads, sleeps };
+    }
+
+    it('池子剩得少（法国那次：别的会话已用 3.8G + 2.9G + 1.8G）：按池子上限减别人已用的算，降到 1 个，说明里写清', () => {
+      const { env } = linux(pool(8500 + 300, 300), { env: engine });
+      expect(memoryLimitOf(env)).toEqual({
+        kind: 'limited',
+        mib: 10152 - 8500,
+        source: `${POOL}/memory.high`,
+        limitMib: 10152,
+        othersMib: 8500,
+      });
+      const w = testWorkers(env);
+      expect(w.maxWorkers).toBe(1);
+      expect(w.note).toContain('测试开 1 个进程');
+      expect(w.note).toContain('同层别的会话已用 8500 MiB');
+      expect(w.note).toContain('连一个都不够');
+    });
+
+    it('池子剩一半：放得下几个开几个（剩 10152 − 5000 = 5152，(5152 − 1300) ÷ 900 = 4 个）；池子空着照 scope 自己的上限开 5 个', () => {
+      expect(testWorkers(linux(pool(5000 + 200, 200), { env: engine }).env).maxWorkers).toBe(4);
+      expect(testWorkers(linux(pool(200, 200), { env: engine }).env).maxWorkers).toBe(5);
+      // 别人已用的超过了池子的上限：能用的记 0、照样开 1 个，不出负数
+      expect(memoryLimitOf(linux(pool(12_000, 100)).env)).toMatchObject({ mib: 0, othersMib: 11_900 });
+      expect(testWorkers(linux(pool(12_000, 100), { env: engine }).env).maxWorkers).toBe(1);
+    });
+
+    it('【故意造出的失败】池子或自己那层的 memory.current 读不到（不在、没权限、认不出）：照原来只按上限算，不报错', () => {
+      for (const files of [
+        pool(undefined, 300),
+        pool(9000, undefined),
+        pool(9000, 300, { [`${POOL}/memory.current`]: 'abc\n' }),
+      ]) {
+        const { env } = linux(files, { env: engine });
+        expect(memoryLimitOf(env)).toEqual({
+          kind: 'limited',
+          mib: 5888,
+          source: `/sys/fs/cgroup${SCOPE}/memory.high`,
+        });
+        expect(testWorkers(env).maxWorkers).toBe(5);
+      }
+      const { env } = linux(pool(9000, 300), { env: engine }, { [`${POOL}/memory.current`]: 'EACCES' });
+      expect(testWorkers(env).maxWorkers).toBe(5);
+    });
+
+    it('6 核、池子里另有 2 个会话在跑测试（各用 2 个核）、1 个在等模型、中转桥闲着：3 个会话分，每个 2 个', () => {
+      const { env, sleeps } = siblings(pool(3000, 200), {
+        'fleet-agent-2.scope': 2,
+        'fleet-agent-3.scope': 2,
+        'fleet-agent-4.scope': 0.05,
+        'fleet-agent-mirasim-5.scope': 0,
+      });
+      expect(cpuShareOf(env)).toEqual({ active: 3, cores: 2, parent: POOL });
+      const w = testWorkers(env);
+      expect(w.maxWorkers).toBe(2);
+      expect(w.note).toContain('测试开 2 个进程');
+      expect(w.note).toContain(`${POOL} 里 3 个会话在跑（含这个），6 核每个分 2 个`);
+      expect(sleeps.every((ms) => ms === CPU_SAMPLE_MS)).toBe(true);
+    });
+
+    it('在跑的会话比核还多：每个 1 个；刚过门槛（半个核）算在跑，不到不算', () => {
+      const many = Object.fromEntries(Array.from({ length: 7 }, (_, i) => [`fleet-agent-${i + 2}.scope`, 1]));
+      expect(cpuShareOf(siblings(pool(200, 200), many).env)).toMatchObject({ active: 8, cores: 1 });
+      expect(testWorkers(siblings(pool(200, 200), many).env).maxWorkers).toBe(1);
+      expect(
+        cpuShareOf(
+          siblings(pool(200, 200), { 'a.scope': BUSY_SIBLING_CORES, 'b.scope': BUSY_SIBLING_CORES - 0.01 })
+            .env,
+        ),
+      ).toMatchObject({ active: 2, cores: 3 });
+    });
+
+    it('只有自己在跑（兄弟都闲着）：不分核，照内存和默认开 5 个', () => {
+      const { env } = siblings(pool(200, 200), { 'fleet-agent-2.scope': 0, 'fleet-agent-3.scope': 0.1 });
+      expect(cpuShareOf(env)).toEqual({ active: 1, cores: 6, parent: POOL });
+      expect(testWorkers(env).maxWorkers).toBe(5);
+    });
+
+    it('【故意造出的失败】池子列不出、兄弟的 cpu.stat 读着出错：照原来不分核，不报错', () => {
+      const { env } = linux(pool(200, 200), { env: engine, list: () => undefined });
+      expect(cpuShareOf(env)).toBeUndefined();
+      expect(testWorkers(env).maxWorkers).toBe(5);
+      const throwing = linux(pool(200, 200), {
+        env: engine,
+        list: () => {
+          throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+        },
+      });
+      expect(cpuShareOf(throwing.env)).toBeUndefined();
+      expect(testWorkers(throwing.env).maxWorkers).toBe(5);
+      const badStat = linux(
+        pool(200, 200),
+        { env: engine, list: () => ['fleet-agent-2.scope'] },
+        {
+          [`${POOL}/fleet-agent-2.scope/cpu.stat`]: 'EACCES',
+        },
+      );
+      expect(cpuShareOf(badStat.env)).toEqual({ active: 1, cores: 6, parent: POOL });
+    });
+
+    it('本机那条（法国引擎交活前的自测不带 FLEET_RUN_ID）也看池子：降一档的和分到的核取小', () => {
+      const { env } = siblings(
+        pool(200, 200),
+        Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`s${i}.scope`, 1])),
+      );
+      env.env = {};
+      const w = testWorkers(env);
+      expect(w.maxWorkers).toBe(1);
+      expect(w.note).toContain('6 个会话在跑');
+    });
+
+    it('CI 里不分核、不读池子的兄弟', () => {
+      const { env, sleeps } = siblings(pool(200, 200), { 'fleet-agent-2.scope': 6 });
+      env.env = { CI: 'true' };
+      expect(testWorkers(env)).toEqual({ maxWorkers: 5 });
+      expect(sleeps).toEqual([]);
+    });
+  });
+
   describe('真读文件', () => {
     let dir: string | undefined;
     afterEach(() => {
@@ -263,6 +431,8 @@ describe('测试开几个进程：按本进程所在 cgroup 的内存上限算',
       const env = realTestRunEnv();
       expect(env.read(join(dir, 'no-such-file'))).toBeUndefined();
       expect(() => env.read(dir as string)).toThrow();
+      expect(env.list(join(dir, 'no-such-dir'))).toBeUndefined();
+      expect(env.list(dir)).toEqual([]);
     });
   });
 });
