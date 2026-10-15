@@ -116,10 +116,13 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | /usr/local/lib/fleet-dao | root:root | 755 | deploy/hk.sh |
 | /usr/local/lib/fleet-dao | root:root | 755 | deploy/lib/human-tier.sh |
 | /usr/local/lib/fleet-dao/auto-release | root:root | 755 | deploy/france.sh |
+| /usr/local/lib/fleet-dao/backup | root:root | 755 | deploy/hk.sh |
 | /usr/local/lib/fleet-dao/release-request | root:root | 755 | deploy/lib/human-tier.sh |
+| /var/backups/fleet-dao/restic-copies | root:root | 700 | deploy/hk.sh |
 | /var/lib/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-dao/engine | fleet:fleet | 750 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-dao/release-request | fleet:fleet | 750 | deploy/lib/human-tier.sh |
+| /var/lib/fleet-hk | root:root | 755 | deploy/hk.sh |
 | /var/lib/fleet-hk-france-probe | root:root | 755 | deploy/hk.sh |
 | /var/lib/fleet-sessions | fleet:fleet | 711 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-work | root:root | 755 | deploy/lib/human-tier.sh |
@@ -149,6 +152,10 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | fleet-release-request.path | 法国 | fleet-dao 驾驶舱的发布请求一到就接活 |
 | fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
 | fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
+| fleet-backup-copy.service | 香港 | fleet-dao 香港每天复制备份仓库（备份用户碰不到，留 14 天） |
+| fleet-backup-copy.timer | 香港 | 每天 09:10（北京时间）把香港上的备份仓库复制一份，留 14 天 |
+| fleet-backup-freshness.service | 香港 | fleet-dao 香港检查备份最新快照是否超过 26 小时 |
+| fleet-backup-freshness.timer | 香港 | 每小时 25 分看备份最新快照是否超过 26 小时 |
 | fleet-hk-france-probe.service | 香港 | fleet-dao 香港经隧道探法国 healthz（连续 3 次失败才算失联） |
 | fleet-hk-france-probe.timer | 香港 | 每分钟探一次法国 healthz（经隧道） |
 
@@ -191,6 +198,10 @@ renderUnitsBlock 实际输出（跑 packages/conventions/src/ops-tables.ts 的 r
 | fleet-release-request.path | 法国 | fleet-dao 驾驶舱的发布请求一到就接活 |
 | fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
 | fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
+| fleet-backup-copy.service | 香港 | fleet-dao 香港每天复制备份仓库（备份用户碰不到，留 14 天） |
+| fleet-backup-copy.timer | 香港 | 每天 09:10（北京时间）把香港上的备份仓库复制一份，留 14 天 |
+| fleet-backup-freshness.service | 香港 | fleet-dao 香港检查备份最新快照是否超过 26 小时 |
+| fleet-backup-freshness.timer | 香港 | 每小时 25 分看备份最新快照是否超过 26 小时 |
 | fleet-hk-france-probe.service | 香港 | fleet-dao 香港经隧道探法国 healthz（连续 3 次失败才算失联） |
 | fleet-hk-france-probe.timer | 香港 | 每分钟探一次法国 healthz（经隧道） |
 
@@ -204,14 +215,18 @@ deploy/france/fleet-cli-upgrade.path → fleet-dao 命令行工具的升级请�
 deploy/france/fleet-cli-upgrade.service → fleet-dao 升级命令行工具
 deploy/france/fleet-engine.service → fleet-dao 引擎工人（Temporal worker）
 deploy/france/fleet-firewall.service → fleet-dao 的 nft 表：Temporal、库、驾驶舱后端只许 root 和 fleet 连，会话用户的口只许它自己连
-deploy/hk/fleet-hk-france-probe.service → fleet-dao 香港经隧道探法国 healthz（连续 3 次失败才算失联）
-deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经隧道）
 deploy/france/fleet-mirasim-liveness.service → 会话用户 @@SESSION_USER@@ 的 Mirasim 服务健康检查（连续失败自动重启；有会话在跑且检查超时时只记不重启）
 deploy/france/fleet-mirasim-liveness.timer → 会话用户 Mirasim 服务每 2 分钟一次健康检查
 deploy/france/fleet-mirasim-session.service → 会话用户 @@SESSION_USER@@ 的 Mirasim 服务（本地模式常驻）
 deploy/france/fleet-release-request.path → fleet-dao 驾驶舱的发布请求一到就接活
 deploy/france/fleet-release-request.service → fleet-dao 接驾驶舱的发布请求
 deploy/france/fleet-temporal.service → fleet-dao Temporal 服务端（Postgres 持久化）
+deploy/hk/fleet-backup-copy.service → fleet-dao 香港每天复制备份仓库（备份用户碰不到，留 14 天）
+deploy/hk/fleet-backup-copy.timer → 每天 09:10（北京时间）把香港上的备份仓库复制一份，留 14 天
+deploy/hk/fleet-backup-freshness.service → fleet-dao 香港检查备份最新快照是否超过 26 小时
+deploy/hk/fleet-backup-freshness.timer → 每小时 25 分看备份最新快照是否超过 26 小时
+deploy/hk/fleet-hk-france-probe.service → fleet-dao 香港经隧道探法国 healthz（连续 3 次失败才算失联）
+deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经隧道）
 -->
 
 | 用户 | 在哪 | 干什么 |
@@ -275,6 +290,9 @@ deploy/france/fleet-temporal.service → fleet-dao Temporal 服务端（Postgres
 | `/etc/nginx/sites-available/fleet-dao`（`sites-enabled` 里有链接） | root 644 | fleet-dao 的站点。同一个 nginx 上另有 MiraQuota 的站点 `ai-gateway`（不归 fleet-dao 管，装机不碰） |
 | `/etc/letsencrypt/live/<驾驶舱域名>` | certbot 管 | 证书；`certbot.timer` 续期，续完重载 nginx |
 | `/etc/wireguard/wg-fleet.conf`、`wg-fleet.key` | root 600 | 隧道配置与私钥 |
+| `/var/backups/fleet-dao/restic-copies` | root:root 700 | 备份仓库的第二份：root 每天复制一份，按日期一个目录，留 14 天。备份用户碰不到（第十一节） |
+| `/var/lib/fleet-hk` | root:root 755 | 香港自己的状态。`status.json`（root:root 644）写备份新鲜度 `backup.snapshot` 和复制成没成 `backup.copy`。格式在 `deploy/backup/hk-status.sh`，法国失联探活后合的也写这一份 |
+| `/usr/local/lib/fleet-dao/backup` | root:root 755 | 香港的复制和新鲜度脚本（`hk-repo-copy.sh`、`hk-snapshot-freshness.sh`、`hk-status.sh`），由 `hk.sh` 放。法国同名目录另放每晚备份的任务脚本，由 `install.sh france` 放 |
 
 库（法国）：PostgreSQL 16 装的是 Ubuntu 自带的源（吃得到自动安全更新）。`fleet` 库属 fleet 角色，本机 socket + peer 认证（系统用户 fleet 就是库角色 fleet），不设口令；`temporal`、`temporal_visibility` 属 temporal 角色，走 127.0.0.1:5432 + 口令（`/etc/fleet-dao/temporal.env`）。Temporal 命名空间 `fleet`，已结束的工作流保留 30 天。
 
@@ -1099,7 +1117,7 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 
 ## 十一、备份与恢复
 
-装：`deploy/backup/install.sh`，独立于 `france.sh`、`hk.sh`。先法国（打印备份钥匙的公钥）→ 公钥填进香港 `/etc/fleet-dao/backup.env` 的 `FLEET_BACKUP_FRANCE_PUBLIC_KEY`、跑 `install.sh hk` → 法国再跑一遍（建仓库、首跑）。`--check` 只读回。
+装：`deploy/backup/install.sh`，独立于 `france.sh`、`hk.sh`。先法国（打印备份钥匙的公钥）→ 公钥填进香港 `/etc/fleet-dao/backup.env` 的 `FLEET_BACKUP_FRANCE_PUBLIC_KEY`、跑 `install.sh hk` → 法国再跑一遍（建仓库、首跑）。`--check` 只读回。香港上再留一份、以及最新快照超没超 26 小时，不在 `install.sh` 里，由 `hk.sh` 装。
 
 | 定时器（法国，以 fleet 跑） | 什么时候（北京时间） | 做什么 |
 |---|---|---|
@@ -1107,13 +1125,20 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 | `fleet-backup-drill.timer` | 每周日 05:40 | 最近一份从香港取回，逐个恢复进临时库 `fleet_drill_restore`，核对每张表的行数和各时间列的最新值，删掉临时库；再跑 `restic check` |
 | `fleet-backup-watch.timer` | 每小时 17 分 | 两台的磁盘用量（线在法国 `/etc/fleet-dao/backup.env`）。备份多久没开跑不在这里查：引擎的看门狗按登记表看（备份的三个都在），一件事只一张卡（#339）；以前这里推过的 `backup.stale:*` 两条每轮顺手撤 |
 
-- 每跑一次在 `schedule_runs` 记一行，驾驶舱「定时任务」页看；没做成、查出问题都在 `notifications` 发报警，好了自动解除。判活看上次跑成的时刻（`install.sh france --check`），不看定时器下次什么时候响。
+| 定时器（香港，以 root 跑） | 什么时候（北京时间） | 做什么 |
+|---|---|---|
+| `fleet-backup-copy.timer` | 每天 09:10 | 把 `/srv/fleet-dao-backup/restic` 复制到 `/var/backups/fleet-dao/restic-copies/<当天>/`，留 14 天（含当天）。09:10 错开每晚备份（04:10，最多跑到约 07:10）和周日演练（05:40，最多到约 08:40） |
+| `fleet-backup-freshness.timer` | 每小时 25 分 | 看仓库 `snapshots/` 里最新一份普通文件的修改时间，超过 26 小时就写 `/var/lib/fleet-hk/status.json`。和法国巡检（17 分）、复制（09:10）错开 |
+
+- 每跑一次在 `schedule_runs` 记一行，驾驶舱「定时任务」页看；没做成、查出问题都在 `notifications` 发报警，好了自动解除。判活看上次跑成的时刻（`install.sh france --check`），不看定时器下次什么时候响。法国的看门狗只在法国活着时才叫得应；香港这两件不进 `schedule_runs`，法国停了也照样跑。
 - 法国：`/etc/fleet-dao/backup/`（仓库口令 `restic.pass`、连香港的钥匙、钉住的香港主机钥匙，root:fleet 640）、`/opt/fleet-dao/restic`（钉版本）、`/usr/local/lib/fleet-dao/backup/`（任务脚本，归 root）、`/var/lib/fleet-dao/backup/`（暂存，跑完清空）；库角色 `fleet_drill`（不能登录、只能建库，演练的临时库归它，恢复不用超级用户）。
-- 香港：用户 `fleet-backup`（shell nologin），sshd 把它关在 `/srv/fleet-dao-backup` 的 chroot 里、只给 sftp（`/etc/ssh/sshd_config.d/60-fleet-dao-backup.conf`，只管这一个用户），钥匙还限死成只许从 10.99.0.2 来；仓库 `/srv/fleet-dao-backup/restic`，只有密文。
+- 香港：用户 `fleet-backup`（shell nologin），sshd 把它关在 `/srv/fleet-dao-backup` 的 chroot 里、只给 sftp（`/etc/ssh/sshd_config.d/60-fleet-dao-backup.conf`，只管这一个用户），钥匙还限死成只许从 10.99.0.2 来；仓库 `/srv/fleet-dao-backup/restic`，只有密文。第二份在 `/var/backups/fleet-dao/restic-copies`，这个用户碰不到。
 - **仓库口令要抄一份到创始人的密码管理器**：法国没了，香港的密文只有它解得开。口令一旦建了仓库就不能换。
 - 手动跑一次：`systemctl start fleet-backup.service`（演练、巡检同理）；看快照：`sudo -u fleet /usr/local/lib/fleet-dao/backup/fleet-backup.sh restic snapshots`。每晚备份和演练的单元「3 小时里最多起 3 次」（给失败重试封顶），手动起的也算：撞上时 systemctl 报 `start-limit-hit`，先 `systemctl reset-failed fleet-backup.service` 再起。
 - 断网、被杀的那一轮会在香港仓库里留下锁；每晚备份和演练开跑前先 `restic unlock`（只清失效的，还在跑的那边清不到），不用手动管。
-- 已知风险：法国被攻破的话，攻击者拿着备份钥匙能删光香港的备份。每晚要按保留规则删过期的，这把钥匙就得有删的权限；改成「只追加」得把删过期挪到一处有口令的第三地，而香港按设计只存密文。补法（还没做）：香港 root 每天把仓库复制一份到备份用户碰不到的地方、留 14 天。
+- 已知风险：法国被攻破的话，攻击者拿着备份钥匙能删光香港仓库里的那一份。每晚要按保留规则删过期的，这把钥匙就得有删的权限；改成「只追加」得把删过期挪到一处有口令的第三地，而香港按设计只存密文。异地再存一份要花钱，这张单不做。
+- 补法（已做）：香港 root 每天 09:10（北京时间）把仓库复制到 `/var/backups/fleet-dao/restic-copies/<日期>/`，目录 root:root 700，备份用户碰不到。留 14 天（含当天），更早的自动删；复制没做成不删旧的。`locks/` 里还有锁文件就这一轮不复制（备份或演练可能还在写；正常时法国 04:10 会先清掉失效的锁）。不变的文件和上一份共用 inode（省磁盘），新的和变了的是 root 自己的 inode，不链回仓库里那一份——钥匙改得了仓库，改不到已经复制出去的内容。脚本 `deploy/backup/hk-repo-copy.sh`，由 `hk.sh` 装上 `fleet-backup-copy.timer`。
+- 备份停了：香港每小时 25 分自己看 `snapshots/` 里最新一份普通文件的修改时间，超过 26 小时就在 `/var/lib/fleet-hk/status.json` 写 `backup.snapshot` 一段（`ok=0`）。不连法国、不用仓库口令。25 小时 59 分不报，正好 26 小时不报，再晚一分钟就报。格式以 `deploy/backup/hk-status.sh` 为准（`v=1`，每个检查四行 `check` / `ok` / `at` / `summary`；法国失联探活后合的跟着写同一份文件，建议用 `france.reach`）。钥匙能 `touch` 改修改时间、假装还在备份；防删靠上面那份 root 副本，防「备份停了而且法国看门狗也停了」靠这份检查。`systemctl --failed` 能看见 `fleet-backup-freshness.service`。复制成没成另写 `backup.copy`：盘满时快照仍可能是新鲜的。
 
 ### 换机恢复（法国整台没了）
 
@@ -1145,7 +1170,7 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 8. 再跑一遍 `install.sh france`：恢复出来的库里带着旧机的运行记录，这回每晚备份的定时器才会开。
 9. 手动补一份新备份：`systemctl start fleet-backup.service`。恢复出来的运行记录里，上次备份成功停在出事前，不补这一份，`--check` 会按过期把每晚备份判红。然后起服务，`install.sh france --check` 全绿。
 
-停用：`systemctl disable --now fleet-backup.timer fleet-backup-drill.timer fleet-backup-watch.timer`。香港上的备份和 `fleet-backup` 用户、法国的口令属于数据，删之前先问人。
+停用：法国 `systemctl disable --now fleet-backup.timer fleet-backup-drill.timer fleet-backup-watch.timer`；香港 `systemctl disable --now fleet-backup-copy.timer fleet-backup-freshness.timer`。香港上的备份、已经复制的 14 天、`fleet-backup` 用户、法国的口令属于数据，删之前先问人。
 
 ## 十二、香港飞书网关（已删）
 
