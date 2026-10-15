@@ -4,11 +4,11 @@
 import { REALTIME_TABLES, type RealtimeTable, type ReleaseRecoverKind } from '@fleet-dao/shared';
 import {
   type QueryClient,
-  useInfiniteQuery,
+  useInfiniteQuery as useInfiniteQueryRaw,
   useMutation,
-  useQueries,
-  useQuery,
+  useQueries as useQueriesRaw,
   useQueryClient,
+  useQuery as useQueryRaw,
 } from '@tanstack/react-query';
 import {
   createContext,
@@ -22,6 +22,7 @@ import {
 } from 'react';
 import { brand } from '#brand';
 import type { HomeData, HomeState } from '../components/home/types';
+import { retryUnlessGateway, wrapRefetchInterval } from './poll-backoff';
 import type {
   AddPurposeModelBody,
   AnswerNotificationBody,
@@ -112,6 +113,32 @@ import type {
   WorktreeCleanupBody,
   Worktrees,
 } from './types';
+
+// 所有读查询共用这一层：调用处仍写原来的间隔。网关错误才把下一次拉长，成功立刻回到那个数。
+// `as never` 只为保住 useQuery 的重载；运行时就是原选项，把 refetchInterval 换成退避函数。
+function withGatewayPoll<O extends { refetchInterval?: unknown }>(options: O): O {
+  const interval = options.refetchInterval;
+  if (interval == null || interval === false) return options;
+  return { ...options, refetchInterval: wrapRefetchInterval(interval) } as O;
+}
+
+const useQuery = ((options: object, queryClient?: QueryClient) =>
+  useQueryRaw(withGatewayPoll(options) as never, queryClient)) as typeof useQueryRaw;
+
+const useInfiniteQuery = ((options: object, queryClient?: QueryClient) =>
+  useInfiniteQueryRaw(withGatewayPoll(options) as never, queryClient)) as typeof useInfiniteQueryRaw;
+
+const useQueries = ((
+  options: { queries: ReadonlyArray<{ refetchInterval?: unknown }> },
+  queryClient?: QueryClient,
+) =>
+  useQueriesRaw(
+    {
+      ...options,
+      queries: options.queries.map((query) => withGatewayPoll(query)),
+    } as never,
+    queryClient,
+  )) as typeof useQueriesRaw;
 
 export type LiveStatus = 'connecting' | 'open' | 'down';
 
@@ -328,6 +355,17 @@ export function errorText(e: unknown): string {
   return String(e);
 }
 
+/**
+ * 门口没把请求送到法国，或浏览器根本没连上。登录页和外壳多给一个 /health/ 链接。
+ * 502/504 几乎都是门口（超时、隧道断）。503 后端自己也用来表示「这一项没接上」，那种带着自己的 code，不算。
+ * code gateway 是 nginx 固定 JSON，或 http.ts 把不是 JSON 的 502/503/504 收成的那一类。
+ */
+export function isGatewayError(e: unknown): boolean {
+  if (!(e instanceof ApiError)) return false;
+  if (e.code === 'gateway' || e.code === 'network') return true;
+  return e.status === 502 || e.status === 504;
+}
+
 const ApiContext = createContext<FleetApi | null>(null);
 
 export function ApiProvider({ api, children }: { api: FleetApi; children: ReactNode }) {
@@ -391,7 +429,7 @@ export const DOWN_POLL_MS = 10_000;
 /**
  * 推送为主、轮询兜底：推送只覆盖部分表，也可能被网关缓冲、悄悄断开。可见时按 openMs 重拉；推送不是 open 就 10 秒；
  * 页面在后台不拉，切回窗口重拉一次（根上全局关了窗口焦点重拉，这里按查询单开）。
- * 间隔取自推送状态的值而不是函数，状态一变观察者当场换定时器，不用等上一个 openMs 走完。
+ * 这里给出的是平时的间隔，随推送状态变的数。网关错误把间隔拉长在 withGatewayPoll：解析出来的毫秒数一变，定时器当场换。
  */
 export function useLivePoll(openMs: number) {
   const { status } = useLiveState();
@@ -527,13 +565,13 @@ export function isNotFound(err: unknown): boolean {
 }
 
 /**
- * 按编号读一份详情（一张单、一个远程环境）：404 不重试，重试也不会有。别的失败照全局默认重试一次
- * （root.tsx 的 retry: 1；failureCount 从 0 起，只有第一次失败时才再试）。
+ * 按编号读一份详情（一张单、一个远程环境）：404 不重试，重试也不会有。网关错误也不紧接着再试，
+ * 轮询间隔会自己拉长（retryUnlessGateway）。其余失败照全局默认再试一次（failureCount 从 0 起，只有第一次失败才再试）。
  * 页面还要记住上一次的失败（lib/shown-error.ts）：没读到过数据的查询一被实时推送叫去重读，React Query 会把
  * error 清空、退回 pending，不记住就从「没有这个……」跳回加载骨架。
  */
 function retryUnlessMissing(failures: number, err: unknown): boolean {
-  return !isNotFound(err) && failures < 1;
+  return !isNotFound(err) && retryUnlessGateway(failures, err);
 }
 
 /** 一张单的详情。404 不重试、页面记住失败，见 retryUnlessMissing。 */
@@ -1524,7 +1562,7 @@ export function useUpdateCredentials() {
  * 名单里加了表而这里没写，tsc 当场报错。认不出的表一律全量重拉——宁可多拉一次，也不把「漏收」当成「没变化」。
  * 不在名单里的表（定时任务、路由、模型……）没有推送，对应页面靠定时重拉。
  * 主页（keys.home）一份读取聚齐了需求、通知、在跑的会话、三段流水、额度和渠道：这几张表哪张变了都要作废它。
- * 漏写一张或推送断了，由 useHome 的兜底轮询（useLivePoll，30 秒 / 断了 10 秒）和切回窗口重拉顶上。
+ * 漏写一张或推送断了，由 useHome 的兜底轮询（useLivePoll，30 秒 / 断了 10 秒；网关错误再拉长到最多 60 秒）和切回窗口重拉顶上。
  */
 const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   tasks: [['board'], ['task'], ['task-list'], keys.home],
