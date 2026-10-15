@@ -65,6 +65,49 @@ describe('upsertAlert', () => {
     expect(rows[0]).toMatchObject({ title: '还卡着', body: '第二版说法' });
   });
 
+  it('还开着再报不拨这一次挂起；从已处理重开才拨，created_at 仍是第一次', async () => {
+    const { id } = await upsertAlert(t.db, {
+      dedupeKey: 'quota-read:grok',
+      level: 'alert',
+      taskId: null,
+      title: '额度读不到：grok',
+      body: '第一回',
+    });
+    const [created] = await t.db.select().from(notifications).where(eq(notifications.id, id));
+    if (!created) throw new Error('没写上');
+    await upsertAlert(t.db, {
+      dedupeKey: 'quota-read:grok',
+      level: 'alert',
+      taskId: null,
+      title: '额度读不到：grok',
+      body: '还开着，又报了一次',
+    });
+    const [again] = await t.db.select().from(notifications).where(eq(notifications.id, id));
+    expect(again?.createdAt).toEqual(created.createdAt);
+    expect(again?.raisedAt).toEqual(created.raisedAt);
+
+    const resolvedAt = new Date(Date.now() - 60_000);
+    expect(
+      await resolveAlertByKey(t.db, {
+        dedupeKey: 'quota-read:grok',
+        by: 'engine:quota-read',
+        at: resolvedAt,
+      }),
+    ).toBe('ok');
+    await upsertAlert(t.db, {
+      dedupeKey: 'quota-read:grok',
+      level: 'alert',
+      taskId: null,
+      title: '额度读不到：grok',
+      body: '撤过又重开',
+    });
+    const [reopened] = await t.db.select().from(notifications).where(eq(notifications.id, id));
+    expect(reopened?.createdAt).toEqual(created.createdAt);
+    expect(reopened?.resolvedAt).toBeNull();
+    expect(reopened?.resolvedBy).toBeNull();
+    expect(reopened?.raisedAt.getTime()).toBeGreaterThan(resolvedAt.getTime());
+  });
+
   it('已处理的重新打开', async () => {
     const { id } = await upsertAlert(t.db, {
       dedupeKey: 'gate:1',

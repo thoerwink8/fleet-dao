@@ -57,6 +57,7 @@ const alertColumns = {
   body: notifications.body,
   link: notifications.link,
   createdAt: notifications.createdAt,
+  raisedAt: notifications.raisedAt,
   updatedAt: notifications.updatedAt,
   resolvedAt: notifications.resolvedAt,
   resolvedBy: notifications.resolvedBy,
