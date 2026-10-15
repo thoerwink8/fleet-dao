@@ -492,6 +492,13 @@ describe('日报超过 48 小时由这一轮收掉', () => {
       createdAt: new Date(NOW.getTime() - 48 * HOUR),
       updatedAt: new Date(NOW.getTime() - 48 * HOUR),
     });
+    const touched = row({
+      dedupeKey: 'release:done:ccccddddcccc:9',
+      level: 'daily',
+      title: '三天前建立、刚才又更新',
+      createdAt: new Date(NOW.getTime() - 3 * DAY),
+      updatedAt: NOW,
+    });
     const freshAlert = row({
       dedupeKey: 'wf:failure:still-open',
       level: 'alert',
@@ -505,12 +512,14 @@ describe('日报超过 48 小时由这一轮收掉', () => {
       createdAt: new Date(NOW.getTime() - 4 * DAY),
       updatedAt: new Date(NOW.getTime() - 4 * DAY),
     });
-    const h = harness([old, fresh, exact, freshAlert, decision]);
+    const h = harness([old, fresh, exact, touched, freshAlert, decision]);
     const part = await h.run();
     expect(part.unchecked).toEqual([]);
-    expect(part.found).toBe(1);
+    expect(part.found).toBe(2);
     expect(old.resolvedBy).toBe(RECONCILE_ACTOR);
     expect(old.body.startsWith('已撤：超过 48 小时自动收')).toBe(true);
+    expect(touched.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(touched.body.startsWith('已撤：超过 48 小时自动收')).toBe(true);
     expect(fresh.resolvedAt).toBeNull();
     expect(exact.resolvedAt).toBeNull();
     expect(freshAlert.resolvedAt).toBeNull();

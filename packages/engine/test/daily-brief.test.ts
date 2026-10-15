@@ -334,6 +334,32 @@ describe('runDailyBriefJob', () => {
     expect(unread.published[0]?.body).toContain('没查成：读日报：读不到日报');
     expect(unread.resolvedDaily).toEqual([]);
   });
+
+  it('日报超过 15 条时只把正文里逐条写到的标已收进，第 16 条留着', async () => {
+    const daily = (n: number): BriefNote => ({
+      id: `d${n}`,
+      dedupeKey: `release:done:${n.toString(16).padStart(12, '0')}:1`,
+      title: `日报第 ${n} 条`,
+      link: '/france',
+      createdAt: at('2026-10-14T12:00:00Z'),
+      issue: null,
+    });
+    const rows = Array.from({ length: 16 }, (_, i) => daily(i + 1));
+    const d = makeDeps({ dailies: async () => rows });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('ok');
+    expect(r).toMatchObject({ found: 15 });
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('五、日报（16 条）');
+    expect(body).toContain('日报第 1 条');
+    expect(body).toContain('日报第 15 条');
+    expect(body).toContain('……另 1 条');
+    expect(body).not.toContain('日报第 16 条');
+    expect(d.resolvedDaily.map((x) => x.dedupeKey)).toEqual(rows.slice(0, 15).map((x) => x.dedupeKey));
+    expect(
+      d.resolvedDaily.every((x) => x.by === 'engine:daily-brief' && x.why === '已收进 2026-10-15 简报'),
+    ).toBe(true);
+  });
 });
 
 describe('昨天上线了什么：按单归并、整节一屏', () => {

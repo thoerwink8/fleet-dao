@@ -20,13 +20,14 @@ describe('settleDailyNotes', () => {
         return input.dedupeKey === 'gone' ? 'already_resolved' : 'ok';
       },
       [
-        { dedupeKey: 'release:start:exact:1', level: 'daily', updatedAt: exact },
-        { dedupeKey: 'feishu:brief:2026-10-15', level: 'daily', updatedAt: NOW },
-        { dedupeKey: 'feishu:brief:2026-10-12', level: 'daily', updatedAt: old },
-        { dedupeKey: 'bad', level: 'daily', updatedAt: old },
-        { dedupeKey: 'gone', level: 'daily', updatedAt: old },
-        { dedupeKey: 'release:done:good:1', level: 'daily', updatedAt: old },
-        { dedupeKey: 'task:stuck', level: 'alert', updatedAt: old },
+        { dedupeKey: 'release:start:exact:1', level: 'daily', createdAt: exact },
+        { dedupeKey: 'feishu:brief:2026-10-15', level: 'daily', createdAt: NOW },
+        { dedupeKey: 'feishu:brief:2026-10-12', level: 'daily', createdAt: old },
+        { dedupeKey: 'bad', level: 'daily', createdAt: old },
+        { dedupeKey: 'gone', level: 'daily', createdAt: old },
+        { dedupeKey: 'release:done:good:1', level: 'daily', createdAt: old },
+        { dedupeKey: 'release:start:nodate:1', level: 'daily' },
+        { dedupeKey: 'task:stuck', level: 'alert', createdAt: old },
       ],
       {
         now: NOW,
@@ -74,7 +75,7 @@ describe('一轮里同时收「已收进简报」和「超过 48 小时」', () 
         title: '发版开始',
         body: '开始正文',
         createdAt: old,
-        updatedAt: old,
+        updatedAt: NOW,
       },
       {
         dedupeKey: alertKey,
@@ -98,7 +99,7 @@ describe('一轮里同时收「已收进简报」和「超过 48 小时」', () 
       return {
         dedupeKey,
         level: daily ? 'daily' : dedupeKey === alertKey ? 'alert' : 'decision',
-        updatedAt: dedupeKey === startKey || dedupeKey === decisionKey ? old : NOW,
+        createdAt: dedupeKey === startKey || dedupeKey === decisionKey ? old : NOW,
       };
     });
     const settled = await settleDailyNotes((input) => resolveAlertWithReason(t.db, input), open, {

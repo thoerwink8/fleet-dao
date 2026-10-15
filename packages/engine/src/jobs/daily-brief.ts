@@ -2,7 +2,8 @@
 // 每天 08:30（北京时间）一轮：昨天上线了什么（版本 + 一句话）、要你拍的（带链接）、失败了要你看的、关键指标（开单→上线中位、一轮做成率）、
 // 开着的日报（发版开始、发版成功这类），写成一行提醒（键 feishu:brief:<北京日期>，驾驶舱后端马上推飞书团队群），
 // 同时用引擎机器人在置顶进度单 #1055 发一条评论（GitHub 会通知创始人）。
-// 日报写进简报、飞书和 #1055 都发出去之后，把收进去的那几条标已处理（处理人 engine:daily-brief，正文「已撤：已收进 <日期> 简报」）。
+// 日报在正文里逐条写到、飞书和 #1055 都发出去之后，把这几条标已处理（处理人 engine:daily-brief，正文「已撤：已收进 <日期> 简报」）。
+// 一节最多列 15 条，多出来的只写「另 N 条」，那几条没有收进正文，不标已处理。
 // 简报自己那一行（feishu:brief:）不收：飞书要它还开着才推。没发成就不收。收的时候失败记 partial，不把已经发出的简报打成失败。
 // 改这里之前必须知道：
 // - 不拉单、不起会话：不标 needsMaster（总开关每次发版都会关，标了简报常常发不出去）。
@@ -367,15 +368,17 @@ function failuresSection(
   return { heading, lines };
 }
 
+/** 正文里逐条写到的日报（最多 LIST_MAX.dailies 条）。只被「另 N 条」点到的不算收进。 */
+function listedDailies(notes: readonly BriefNote[]): BriefNote[] {
+  return notes.slice(0, LIST_MAX.dailies);
+}
+
 function dailiesSection(notes: readonly BriefNote[], now: Date): BriefSection {
   const heading = `五、日报（${notes.length} 条）`;
   if (notes.length === 0) return { heading, lines: ['没有新的日报。'] };
   return {
     heading,
-    lines: [
-      ...notes.slice(0, LIST_MAX.dailies).map((n) => noteLine(n, now)),
-      ...more(notes.length, LIST_MAX.dailies),
-    ],
+    lines: [...listedDailies(notes).map((n) => noteLine(n, now)), ...more(notes.length, LIST_MAX.dailies)],
   };
 }
 
@@ -413,8 +416,8 @@ function metricsSection(
 export interface CollectedBrief {
   sections: BriefSection[];
   /**
-   * 写进这一期、发出去之后要标已处理的日报键。读日报失败是 null：发出去也不收，免得把没写进简报的收掉。
-   * 简报自己那一行（feishu:brief:）不在里面。
+   * 正文里逐条写到、发出去之后要标已处理的日报键（最多 15 条）。只写了「另 N 条」的不在里面。
+   * 读日报失败是 null：发出去也不收，免得把没写进简报的收掉。简报自己那一行（feishu:brief:）不在里面。
    */
   includedDaily: { day: string; keys: string[] } | null;
 }
@@ -449,7 +452,7 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Col
   } else {
     const notes = dailyRead.filter((n) => !n.dedupeKey.startsWith(FEISHU_BRIEF_KEY_PREFIX));
     dailySection = dailiesSection(notes, now);
-    includedDaily = { day: beijingDay(now).day, keys: notes.map((n) => n.dedupeKey) };
+    includedDaily = { day: beijingDay(now).day, keys: listedDailies(notes).map((n) => n.dedupeKey) };
   }
   return {
     sections: [
@@ -527,7 +530,6 @@ export async function runDailyBriefJob(
           collected.includedDaily.keys.map((dedupeKey) => ({
             dedupeKey,
             level: 'daily' as const,
-            updatedAt: now,
           })),
           {
             now,
