@@ -864,3 +864,153 @@ describe('createDb', () => {
     expectTypeOf<TestDb['db']>().toExtend<Db>();
   });
 });
+
+describe('0072：已删功能留下的开着的提醒标成已撤', () => {
+  const tag = '0072_resolve_retired_alert_keys';
+  const target = ordered.findIndex((e) => e.tag === tag);
+
+  const snapshot = async (pg: PGlite) => {
+    const notes = await pg.query<{
+      id: string;
+      dedupe_key: string;
+      level: string;
+      title: string;
+      body: string;
+      link: string | null;
+      created_at: string;
+      updated_at: string;
+      resolved_at: string | null;
+      resolved_by: string | null;
+    }>(
+      `select id, dedupe_key, level, title, body, link,
+              to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at,
+              to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as updated_at,
+              to_char(resolved_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as resolved_at,
+              resolved_by
+         from notifications order by dedupe_key`,
+    );
+    const audit = await pg.query<{
+      actor_kind: string;
+      actor_id: string;
+      action: string;
+      target: string;
+      reason: string | null;
+      via: string;
+    }>(`select actor_kind, actor_id, action, target, reason, via from audit_log order by target, action`);
+    return { notes: notes.rows, audit: audit.rows };
+  };
+
+  it(
+    '三种前缀里还开着的标成已撤、写明功能已删，不删行；别的键和已经撤的不动；再跑一遍无副作用',
+    async () => {
+      expect(target).toBe(ordered.length - 1);
+      const sqlText = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+      expect(sqlText.toLowerCase()).not.toContain('delete');
+      const pg = await migratedBefore(target);
+      try {
+        await pg.exec(`
+          insert into notifications (level, dedupe_key, title, body, link, created_at, updated_at) values
+            ('alert', 'canary:broken', '巡检断了', '断在执行', 'https://example/canary', '2026-09-01T00:00:00Z', '2026-09-01T01:00:00Z'),
+            ('alert', 'canary:', '只有前缀', '', null, '2026-09-01T00:00:00Z', '2026-09-01T01:00:00Z'),
+            ('alert', 'canary:leftover-pr:acme/widgets#7', '没合的巡检 PR', '留下的', null, '2026-09-02T00:00:00Z', '2026-09-02T00:00:00Z'),
+            ('alert', 'no-verifier:aaaaaaaa-1111-4222-8333-444444444444', '没人能验', '原来的正文', null, '2026-09-03T00:00:00Z', '2026-09-03T00:00:00Z'),
+            ('daily', 'retired-schedule:nightly', '删不掉', 'Temporal 报错', null, '2026-09-04T00:00:00Z', '2026-09-04T00:00:00Z'),
+            ('alert', 'canary:old', '已经撤过', '原来的正文', null, '2026-08-01T00:00:00Z', '2026-08-02T00:00:00Z'),
+            ('alert', 'watchdog:merge:acme/widgets:after-1', '主线没合', '还在', null, '2026-09-05T00:00:00Z', '2026-09-05T00:00:00Z'),
+            ('alert', 'not-canary:broken', '不是巡检', '别动', null, '2026-09-06T00:00:00Z', '2026-09-06T00:00:00Z'),
+            ('alert', 'no-verifier-without-colon', '没有冒号', '别动', null, '2026-09-07T00:00:00Z', '2026-09-07T00:00:00Z'),
+            ('alert', 'Canary:broken', '大小写不同', '别动', null, '2026-09-08T00:00:00Z', '2026-09-08T00:00:00Z');
+          update notifications
+             set resolved_at = '2026-08-03T00:00:00Z', resolved_by = 'someone'
+           where dedupe_key = 'canary:old';
+        `);
+        const idsBefore = (
+          await pg.query<{ id: string }>(`select id from notifications order by dedupe_key`)
+        ).rows.map((r) => r.id);
+        expect(idsBefore).toHaveLength(10);
+
+        await runMigration(pg, tag);
+
+        const once = await snapshot(pg);
+        const byKey = new Map(once.notes.map((r) => [r.dedupe_key, r]));
+        const closedKeys = [
+          'canary:broken',
+          'canary:',
+          'canary:leftover-pr:acme/widgets#7',
+          'no-verifier:aaaaaaaa-1111-4222-8333-444444444444',
+          'retired-schedule:nightly',
+        ];
+        const updatedBefore: Record<string, string> = {
+          'canary:broken': '2026-09-01T01:00:00Z',
+          'canary:': '2026-09-01T01:00:00Z',
+          'canary:leftover-pr:acme/widgets#7': '2026-09-02T00:00:00Z',
+          'no-verifier:aaaaaaaa-1111-4222-8333-444444444444': '2026-09-03T00:00:00Z',
+          'retired-schedule:nightly': '2026-09-04T00:00:00Z',
+        };
+        for (const key of closedKeys) {
+          const row = byKey.get(key);
+          expect(row?.resolved_by, key).toBe('migration:0072');
+          expect(row?.resolved_at, key).not.toBeNull();
+          expect(row?.updated_at, key).not.toBe(updatedBefore[key]);
+        }
+        expect(byKey.get('canary:broken')).toMatchObject({
+          title: '巡检断了',
+          body: '已撤：功能已删\n\n断在执行',
+          link: 'https://example/canary',
+          level: 'alert',
+          created_at: '2026-09-01T00:00:00Z',
+        });
+        expect(byKey.get('canary:')?.body).toBe('已撤：功能已删');
+        expect(byKey.get('canary:leftover-pr:acme/widgets#7')?.body).toBe('已撤：功能已删\n\n留下的');
+        expect(byKey.get('no-verifier:aaaaaaaa-1111-4222-8333-444444444444')?.body).toBe(
+          '已撤：功能已删\n\n原来的正文',
+        );
+        expect(byKey.get('retired-schedule:nightly')).toMatchObject({
+          level: 'daily',
+          title: '删不掉',
+          body: '已撤：功能已删\n\nTemporal 报错',
+        });
+        expect(byKey.get('canary:old')).toMatchObject({
+          title: '已经撤过',
+          body: '原来的正文',
+          resolved_at: '2026-08-03T00:00:00Z',
+          resolved_by: 'someone',
+          updated_at: '2026-08-02T00:00:00Z',
+          created_at: '2026-08-01T00:00:00Z',
+        });
+        for (const key of [
+          'watchdog:merge:acme/widgets:after-1',
+          'not-canary:broken',
+          'no-verifier-without-colon',
+          'Canary:broken',
+        ]) {
+          expect(byKey.get(key)?.resolved_at, key).toBeNull();
+          expect(byKey.get(key)?.resolved_by, key).toBeNull();
+          expect(byKey.get(key)?.body, key).not.toContain('功能已删');
+        }
+        expect(byKey.get('watchdog:merge:acme/widgets:after-1')?.body).toBe('还在');
+        expect(once.notes.map((r) => r.id)).toEqual(idsBefore);
+        expect(once.audit).toHaveLength(closedKeys.length);
+        expect(once.audit).toEqual(
+          expect.arrayContaining(
+            closedKeys.map((key) => ({
+              actor_kind: 'engine',
+              actor_id: 'migration:0072',
+              action: 'notification.resolve',
+              target: `notification:${byKey.get(key)?.id}`,
+              reason: '功能已删',
+              via: 'engine',
+            })),
+          ),
+        );
+
+        await runMigration(pg, tag);
+        const twice = await snapshot(pg);
+        expect(twice).toEqual(once);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
