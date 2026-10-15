@@ -470,12 +470,18 @@ export function quotaAsUser(
   proxy?: string,
   /** 给了就让 Cursor 额度读取在登录令牌被拒或登录文件不在（ENOENT）时刷新一次（`cursor-agent status`，不放 API 密钥）；不给就没有刷新手段。 */
   cursorVersionsDir?: string,
+  /**
+   * 给了就让 Grok 额度读取在访问令牌过期、登录文件里还有 refresh_token 时，以会话用户跑一次 `grok models` 让 CLI 自己续。
+   * 不给就没有续期手段，读取器报 auth_refreshable，不碰 refresh_token。
+   */
+  grokBin?: string,
 ): NonNullable<QuotaReadWiring['asUser']> {
   const runCommand = runCommandAsUser(exec, user, proxy);
+  const homeDir = home.replaceAll('{user}', user);
   return {
     readers: QUOTA_USER_READERS,
     readFile: (path) => catAsUser(exec, user, path, 'quota-cat'),
-    homeDir: home.replaceAll('{user}', user),
+    homeDir,
     runCommand,
     workDir: () => quotaCwdAsUser(exec, user, home),
     ...(mirasim ? { connectMirasim: mirasim.connect(user) } : {}),
@@ -485,11 +491,23 @@ export function quotaAsUser(
             refreshCursorLogin(runCommand, cursorVersionsDir.replaceAll('{user}', user), signal),
         }
       : {}),
+    ...(grokBin
+      ? {
+          refreshGrokLogin: (signal: AbortSignal) =>
+            refreshGrokLogin(runCommand, grokBin.replaceAll('{user}', user), homeDir, signal),
+        }
+      : {}),
   };
 }
 
 /** 刷新 Cursor 登录令牌的命令最长跑多久：比读取器整体的 60 秒短，这样超时由这里报成「刷新命令超时」，不是读取器的笼统超时。 */
 export const CURSOR_REFRESH_TIMEOUT_MS = 40_000;
+
+/**
+ * 让 grok CLI 自己续访问令牌的命令最长跑多久。比 grok 读取器的 60 秒短，超时由这里写明，不是笼统的「没读完」。
+ * 取舍见 refreshGrokLogin：在读数过期（看门狗 30 分钟）前跑，而不是给看门狗加宽限。
+ */
+export const GROK_REFRESH_TIMEOUT_MS = 20_000;
 
 /**
  * 以会话用户的身份跑一次 `cursor-agent status`（环境里没有 API 密钥）：cursor-agent 发现登录令牌过期、或登录文件刚被会话起停删掉，会自己刷新并重写登录文件。
@@ -506,6 +524,43 @@ export async function refreshCursorLogin(
   try {
     const r = await run(cursorBareCommand(versionsDir, ['status']), {
       cwd: '/',
+      env: {},
+      signal: AbortSignal.any([signal, own.signal]),
+    });
+    if (r.spawnError) throw new Error(`起不来：${r.spawnError}`);
+    if (r.killed) {
+      throw new Error(
+        own.signal.aborted ? `超过 ${Math.round(timeoutMs / 1000)} 秒没跑完，被叫停` : '被叫停',
+      );
+    }
+    if (r.code !== 0) {
+      const said = (r.stderr.trim() || r.stdout.trim()).split('\n').slice(0, 3).join(' / ').slice(0, 300);
+      throw new Error(`退出码 ${r.code}${said ? `：${said}` : ''}`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 以会话用户跑一次 `grok models`（只列模型就退出，不起会话、不花额度），让 CLI 自己续访问令牌并重写 auth.json。
+ * 读取器不碰 refresh_token：自己续会轮换它，CLI 手里那份就作废。
+ * 取舍：不改看门狗的 30 分钟。宽限只少报「没按期跑成」，读数仍旧，选路继续把主力 grok 按「额度没读成」排后面。
+ * 所以在那条线之前（这一轮额度读取发现访问令牌过期时）由这里续。关了自动升级，免得列模型时半路换二进制。
+ * 起不来、超时、非 0 退出都抛错并带原因；成功只代表命令跑完了，令牌换没换由读取器重读后再试来验。
+ */
+export async function refreshGrokLogin(
+  run: RunCommand,
+  bin: string,
+  cwd: string,
+  signal: AbortSignal,
+  timeoutMs = GROK_REFRESH_TIMEOUT_MS,
+): Promise<void> {
+  const own = new AbortController();
+  const timer = setTimeout(() => own.abort(), timeoutMs);
+  try {
+    const r = await run(['/usr/bin/env', 'GROK_DISABLE_AUTOUPDATER=1', ...grokLaunchCommand(bin), 'models'], {
+      cwd,
       env: {},
       signal: AbortSignal.any([signal, own.signal]),
     });
@@ -835,6 +890,7 @@ export function realPortsFromEnv(
     mirasim,
     config.sessionProxy,
     config.cursorVersionsDir,
+    config.grokBin,
   );
   // 每小时对账和一键清理工作树共用的装配（#1993）：同一个工作树管家、同一个会话用户执行器、同一份判据
   const reconcileWiring: HourlyReconcileWiring = {

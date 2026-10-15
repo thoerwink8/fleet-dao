@@ -37,6 +37,9 @@ export function actionOf(code: string | undefined, reason: string): string {
     : /cursor-agent login/.test(reason)
       ? 'cursor-agent login'
       : null;
+  if (code === 'auth_refreshable') {
+    return '先等 grok 下次运行自己续登录令牌；超过 30 分钟还没读成，再在引擎所在的机器（法国）以会话用户重新 grok login';
+  }
   if (code === 'auth' || code === 'no_credentials') {
     if (/grok/i.test(reason)) return '在引擎所在的机器（法国）以会话用户重新 grok login';
     if (login) return `在引擎所在的机器（法国）以会话用户重新 ${login}`;

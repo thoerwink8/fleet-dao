@@ -47,11 +47,11 @@ describe('Grok Build 账单（VPS 真机回包）', () => {
 describe('Grok 读取器', () => {
   const pool = { poolId: 'grok', channelId: 'xai', reader: 'grok-billing' as const };
   const authPath = '/home/tester/.grok/auth.json';
-  const authFile = (expiresAt: string) =>
+  const authFile = (expiresAt: string, withRefresh = true) =>
     JSON.stringify({
       'https://auth.x.ai::client': {
         key: 'grok-access-token',
-        refresh_token: 'grok-refresh-token',
+        ...(withRefresh ? { refresh_token: 'grok-refresh-token' } : {}),
         expires_at: expiresAt,
         auth_mode: 'oidc',
       },
@@ -89,11 +89,91 @@ describe('Grok 读取器', () => {
     }
   });
 
-  it('令牌过期：报 auth，不自己续期，一次请求都不发', async () => {
+  it('访问令牌过期但还有 refresh_token：报 auth_refreshable，不发请求，不说不会自己好', async () => {
     const { result, calls } = await run(happy, authFile(new Date(FIXED_NOW.getTime() - 1000).toISOString()));
-    expect(!result.ok && result.error.code).toBe('auth');
+    expect(!result.ok && result.error.code).toBe('auth_refreshable');
     expect(!result.ok && result.error.message).toContain('不自己续期');
+    expect(!result.ok && result.error.message).toContain('会自己续');
+    expect(!result.ok && result.error.message).toContain('30 分钟');
+    expect(!result.ok && result.error.message).not.toContain('不会自己好');
     expect(calls).toHaveLength(0);
+    expect(JSON.stringify(result)).not.toContain('grok-refresh-token');
+  });
+
+  it('访问令牌过期且没有 refresh_token：报 auth，要重新 grok login，一次请求都不发', async () => {
+    const { result, calls } = await run(
+      happy,
+      authFile(new Date(FIXED_NOW.getTime() - 1000).toISOString(), false),
+    );
+    expect(!result.ok && result.error.code).toBe('auth');
+    expect(!result.ok && result.error.message).toContain('grok login');
+    expect(!result.ok && result.error.message).toContain('没有 refresh_token');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('过期且有 refresh_token，引擎接了续期：续一次后用新令牌读成', async () => {
+    const past = new Date(FIXED_NOW.getTime() - 1000).toISOString();
+    const future = new Date(FIXED_NOW.getTime() + 3_600_000).toISOString();
+    let body = authFile(past).replace('grok-access-token', 'stale-access-token');
+    const readFile = async () => body;
+    let n = 0;
+    const f = fakeFetch(happy);
+    const report = await readAllQuotas(
+      { pools: [pool] },
+      fakeDeps({
+        fetch: f.fetch,
+        asUser: {
+          readers: ['grok-billing'],
+          readFile,
+          homeDir: '/home/tester',
+          refreshGrokLogin: async () => {
+            n += 1;
+            body = JSON.stringify({
+              'https://auth.x.ai::client': {
+                key: 'fresh-access-token',
+                refresh_token: 'grok-refresh-token',
+                expires_at: future,
+              },
+            });
+          },
+        },
+      }),
+    );
+    const result = report.results[0] as PoolQuotaResult;
+    expect(result.ok).toBe(true);
+    expect(n).toBe(1);
+    expect(f.calls.map((c) => ((c.init?.headers ?? {}) as Record<string, string>).Authorization)).toEqual([
+      'Bearer fresh-access-token',
+      'Bearer fresh-access-token',
+    ]);
+    const text = JSON.stringify(report);
+    expect(text).not.toContain('stale-access-token');
+    expect(text).not.toContain('grok-refresh-token');
+    expect(text).not.toContain('fresh-access-token');
+  });
+
+  it('续期命令说要重新登录：报 auth，不当成还会自己好', async () => {
+    const past = authFile(new Date(FIXED_NOW.getTime() - 1000).toISOString());
+    const f = fakeFetch(happy);
+    const report = await readAllQuotas(
+      { pools: [pool] },
+      fakeDeps({
+        fetch: f.fetch,
+        asUser: {
+          readers: ['grok-billing'],
+          readFile: async () => past,
+          homeDir: '/home/tester',
+          refreshGrokLogin: async () => {
+            throw new Error('Token expired. Run `grok login` to re-authenticate.');
+          },
+        },
+      }),
+    );
+    const result = report.results[0] as PoolQuotaResult;
+    expect(!result.ok && result.error.code).toBe('auth');
+    expect(!result.ok && result.error.message).toContain('grok login');
+    expect(!result.ok && result.error.message).not.toContain('不会自己好');
+    expect(f.calls).toHaveLength(0);
   });
 
   it('订阅档位读不到只记说明；账单 401 才算要重新登录', async () => {

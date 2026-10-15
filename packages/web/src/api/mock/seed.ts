@@ -1249,7 +1249,7 @@ export function createSeed(now: number): MockState {
       id: 'n-9',
       level: 'alert',
       title: '额度读不到：supergrok',
-      body: 'supergrok（grok-billing）这一轮没读成：auth——Grok 的登录令牌已过期：读取器不自己续期（会把 CLI 手里的 refresh_token 轮换掉），等 grok 下次运行自己续，或手动跑一次 grok。这种要人动手（补凭据、重新登录、改配置），不会自己好。旧读数留着、没改；读不到的池选路按「额度没读成」排在后面。',
+      body: 'supergrok（grok-billing）这一轮没读成：auth_refreshable——Grok 的登录令牌已过期，登录文件里还有 refresh_token：读取器不自己续期（会把 CLI 手里的 refresh_token 轮换掉），等 grok 下次运行会自己续；超过 30 分钟还没读成再找人。上次读成是 2026-10-15T17:04:00.000Z。这种会在 grok 下次运行后自己好；超过 30 分钟还没好再找人。旧读数留着、没改；读不到的池选路按「额度没读成」排在后面。',
       link: '/quota',
       dedupeKey: 'quota-read:supergrok',
       createdAt: at(-46),

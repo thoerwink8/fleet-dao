@@ -45,12 +45,13 @@
       "authFile": "/home/fleet-agent-carpool/.config/cursor/auth.json"
     },
     {
-      "_说明": "Grok 订阅（#1195）。同样以会话用户的身份读登录文件（grok login 落下的，grok 自己续期）。令牌过期读取器不自己续，报「要让 grok 自己续一下」。",
+      "_说明": "Grok 订阅（#1195）。以会话用户的身份读登录文件（grok login 落下的）。访问令牌过期、文件里还有 refresh_token 时，这一轮以会话用户跑一次 grok models（只列模型就退出）让 CLI 自己续再重读；读取器不碰 refresh_token。没有 refresh_token、或 CLI 说要重新登录，才报要人 grok login。超时盖住这一次命令加账单请求。",
       "poolId": "grok",
       "channelId": "xai",
       "name": "Grok 订阅（Grok Build）",
       "reader": "grok-billing",
-      "authFile": "/home/fleet-agent-carpool/.grok/auth.json"
+      "authFile": "/home/fleet-agent-carpool/.grok/auth.json",
+      "timeoutMs": 60000
     }
   ]
 }

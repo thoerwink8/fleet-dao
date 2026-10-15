@@ -52,6 +52,16 @@ describe('poolProblemsOf', () => {
 });
 
 describe('actionOf', () => {
+  test('访问令牌还能由 CLI 续：先等，超过 30 分钟再登录', () => {
+    const body =
+      'grok（grok-billing）这一轮没读成：auth_refreshable——Grok 的登录令牌已过期，登录文件里还有 refresh_token，等 grok 下次运行会自己续。上次读成是 2026-10-15T17:04:00.000Z。这种会在 grok 下次运行后自己好。';
+    const p = poolProblemsOf([note({ dedupeKey: 'quota-read:grok', body })]).get('grok');
+    expect(p?.code).toBe('auth_refreshable');
+    expect(p?.action).toContain('先等 grok 下次运行自己续');
+    expect(p?.action).not.toContain('不会自己好');
+    expect(problemLine(p as NonNullable<typeof p>)).not.toContain('不会自己好');
+  });
+
   test('按错误码说要人做什么', () => {
     expect(actionOf('config', '')).toContain('额度配置');
     expect(actionOf('auth', '要在这台机器上重新 cursor-agent login')).toContain('cursor-agent login');
