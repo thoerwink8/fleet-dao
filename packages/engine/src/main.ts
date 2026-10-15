@@ -10,3 +10,6 @@ try {
   console.error(error instanceof Error ? error.message : error);
   process.exitCode = 1;
 }
+// 收尾都做完了（runEngineWorker 的 finally：定时器、连接、状态文件）：照退，不等还挂着的句柄——被强停的活动留下的子进程管道、
+// 没清的计时器会让进程一直不退，systemd 等到 TimeoutStopSec 才 SIGKILL（#2238）
+process.exit(process.exitCode ?? 0);

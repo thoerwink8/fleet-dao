@@ -8,7 +8,10 @@
 // - 发布排空（drain.ts，#957）也认这份登记：登记时 track 进在途清单、leave 时 settle（leave 在调用方的 finally 里，成功、失败、
 //   超时、被叫停都走）；不然排空看不见它们，手上有一段在动手就提前放行、到点也停不到它。到截止由 drainStop 不分池停下，
 //   这一段交回 org_switch（工作流 OS1：不算失败、不记账，在原分支上重跑）；已经在排空时再登记的，信号一开始就是响的、不起会话。
-// - 只管这个工人进程里起的：一次性会话不脱开引擎跑，上一轮工人留下的 runs 行起来时已经收掉了（sessions.ts 的 reapOrphanSessions）。
+// - 脱开引擎跑的动手会话（#2238，session-handoff.ts）：交给驱动之前调 detachable()，从发布排空的在途清单里撤掉、到截止也不停它
+//   （引擎走的时候放手，下一个引擎接回）；切号照样停它。接回那一次登记时带 attach：排空、总开关关着都不预先叫停（会话早就在跑，
+//   不是起新会话）。
+// - 别的会话只管这个工人进程里起的：上一轮工人留下的 runs 行起来时已经收掉了（orphan-reap.ts）；脱开跑、等人接回的除外。
 
 import { type EngineDrain, stoppingNote } from '../drain.ts';
 import { type EngineMasterGate, masterOffNote } from '../engine-master.ts';
@@ -24,11 +27,13 @@ export interface OneShotTicket {
   running(): void;
   /** 收场（成没成都要调，调几次都行）：发布排空的在途清单同时撤掉。 */
   leave(): void;
+  /** 这一段脱开引擎跑了（#2238）：发布排空不再等它、到截止不再停它（引擎走时放手）。切号照样停。 */
+  detachable(): void;
 }
 
 export interface OneShotSessions extends OrgSwitchSessions {
   /** 定了路由就登记：这一段跑在哪个账号池上、是哪一阶段（stage）哪张单（taskId）的；发布排空的在途清单也记这一条。 */
-  enter(entry: { poolId: string; stage: string; taskId: string }): OneShotTicket;
+  enter(entry: { poolId: string; stage: string; taskId: string; attach?: boolean }): OneShotTicket;
   /** 发布排空到截止（或收到停机信号）：不分池，没叫停过的全停下，交回这一次叫停的；这一段交回 org_switch，新引擎起来重跑。 */
   drainStop(why: string): string[];
 }
@@ -41,6 +46,7 @@ interface Entry {
   phase: 'starting' | 'running';
   ac: AbortController;
   runId: string | undefined;
+  detachable: boolean;
 }
 
 export interface OneShotSessionsOptions {
@@ -67,7 +73,7 @@ export function oneShotSessions(options: OneShotSessionsOptions = {}): OneShotSe
   const track = (id: string, e: Entry) =>
     drain?.track({ runId: id, stage: e.stage, taskId: e.taskId, phase: e.phase, since: e.since });
   return {
-    enter({ poolId, stage, taskId }) {
+    enter({ poolId, stage, taskId, attach }) {
       seq += 1;
       const key = seq;
       const entry: Entry = {
@@ -78,16 +84,18 @@ export function oneShotSessions(options: OneShotSessionsOptions = {}): OneShotSe
         phase: 'starting',
         ac: new AbortController(),
         runId: undefined,
+        detachable: attach === true,
       };
       entries.set(key, entry);
       // 起会话的闸（和 session-launch.ts 的 startSession 同一个意思）：已经在排空，这一段不起——信号一开始就是响的，
       // runOneShot 当场回 org_switch（一行 runs 记账、没起进程），工作流回去选路、选路回「过一会儿再选」，新引擎起来再派
-      const stopping = drain?.stopping();
+      // 接回的（attach）不是起新会话，不拦；也不进在途清单（排空不等它）
+      const stopping = attach ? null : drain?.stopping();
       if (stopping) entry.ac.abort(new Error(`${stoppingNote(stopping)}；这一段没起会话`));
       // 引擎总开关关着（#1086）：同一种拒法，这一段不起会话
-      else if (master && !master.isOn())
+      else if (!attach && master && !master.isOn())
         entry.ac.abort(new Error(`${masterOffNote(master.state())}；这一段没起会话`));
-      track(idOf(key, entry), entry);
+      if (!entry.detachable) track(idOf(key, entry), entry);
       return {
         signal: entry.ac.signal,
         attempt(runId) {
@@ -96,13 +104,18 @@ export function oneShotSessions(options: OneShotSessionsOptions = {}): OneShotSe
           entry.runId = runId;
           if (before !== runId) {
             drain?.settle(before);
-            track(runId, entry);
+            if (!entry.detachable) track(runId, entry);
           }
         },
         running() {
           if (!entries.has(key)) return;
           entry.phase = 'running';
-          track(idOf(key, entry), entry);
+          if (!entry.detachable) track(idOf(key, entry), entry);
+        },
+        detachable() {
+          if (!entries.has(key)) return;
+          entry.detachable = true;
+          drain?.settle(idOf(key, entry));
         },
         leave() {
           const e = entries.get(key);
@@ -124,7 +137,8 @@ export function oneShotSessions(options: OneShotSessionsOptions = {}): OneShotSe
     drainStop(why) {
       const stopped: string[] = [];
       for (const [key, e] of entries) {
-        if (e.ac.signal.aborted) continue;
+        // 脱开跑的不停：引擎走的时候放手，下一个引擎接回（#2238）
+        if (e.ac.signal.aborted || e.detachable) continue;
         e.ac.abort(new Error(`发布排空：${why}，这一段停下，新引擎起来重跑`));
         stopped.push(idOf(key, e));
       }

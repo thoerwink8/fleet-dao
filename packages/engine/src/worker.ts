@@ -102,6 +102,9 @@ export interface CreateEngineWorkerOptions {
   log?: (message: string) => void;
 }
 
+/** 在途活动过了宽限还不交回，再等多久就强停工人（秒）。 */
+export const SHUTDOWN_FORCE_EXTRA_SECONDS = 30;
+
 export async function createEngineWorker(options: CreateEngineWorkerOptions): Promise<Worker> {
   const { config } = options;
   if (options.reapOrphanSessions) {
@@ -120,6 +123,9 @@ export async function createEngineWorker(options: CreateEngineWorkerOptions): Pr
       decide: options.decide ?? createDecide(options.triage ? { triage: options.triage } : {}),
     },
     shutdownGraceTime: `${config.shutdownGraceSeconds} seconds`,
+    // 兜底（#2238）：在途活动过了宽限、被取消了还不交回，最多再等 SHUTDOWN_FORCE_EXTRA_SECONDS 就不等了，进程照常收尾退出——
+    // 不然工人一直卡在 DRAINING、定时器照跑，systemd 到 TimeoutStopSec（6 分钟）才 SIGKILL，每趟发版白等 6 分钟还强杀在跑的东西
+    shutdownForceTime: `${config.shutdownGraceSeconds + SHUTDOWN_FORCE_EXTRA_SECONDS} seconds`,
     maxConcurrentActivityTaskExecutions: config.maxConcurrentActivities,
     ...(options.maxCachedWorkflows === undefined ? {} : { maxCachedWorkflows: options.maxCachedWorkflows }),
   });
@@ -147,6 +153,11 @@ export interface GracefulShutdownOptions {
   drain: EngineDrain;
   /** 到截止、被强停时停下还在跑的会话（real/one-shot-sessions.ts 的 drainStop；假端口没有会话，给空的）。 */
   stopSessions(why: string): string[];
+  /**
+   * 一收到停机信号就放手脱开引擎跑的动手会话（#2238，real/session-handoff.ts）：它们不停、不等，下一个引擎接回；返回放手了哪几个。
+   * 不给 = 没有这种会话（假端口）。
+   */
+  releaseSessions?(why: string): string[];
   log: (message: string) => void;
   /** 停机信号来时给在跑的会话的宽限；不给就是 RELEASE_GRACE_MS。发布请求的截止更早就按它的。 */
   graceMs?: number;
@@ -169,7 +180,8 @@ const DRAIN_END_WORDS: Readonly<Record<DrainEnd, string>> = {
 };
 
 /**
- * 接停机信号（Temporal 自己的那一套在 runEngineWorker 里关掉了）：第一次 SIGTERM 进排空（drain.ts）——不起新会话，在跑的
+ * 接停机信号（Temporal 自己的那一套在 runEngineWorker 里关掉了）：第一次 SIGTERM 进排空（drain.ts）——不起新会话，脱开引擎跑的
+ * 动手会话当场放手（不停，下一个引擎接回，#2238），别的在跑的
  * 最多再做一段宽限（发布请求的截止更早就按它），到点停下（交回 engine_stop，新引擎起来按编号续上），交回了再让工人停下；
  * 再来一次 SIGTERM 或 SIGINT：马上停下会话、让工人停下（工人停下时给在途活动 shutdownGraceSeconds 交回）。
  * done 在交代了工人停下之后落定，带上怎么结束的。
@@ -204,6 +216,8 @@ export function installGracefulShutdown(o: GracefulShutdownOptions): {
       until: new Date(t).toISOString(),
       why: `收到 ${signal}`,
     });
+    const released = o.releaseSessions?.(`收到 ${signal}`) ?? [];
+    if (released.length > 0) o.log(`脱开跑的动手会话放手、不停（下一个引擎接回）：${released.join('、')}`);
     const stopped = o.stopSessions(`收到 ${signal}，马上停`);
     o.log(
       `收到 ${signal}：不等了，马上停${stopped.length > 0 ? `（停下 ${stopped.length} 个会话，新引擎起来按编号续上：${stopped.join('、')}）` : ''}`,
@@ -224,6 +238,10 @@ export function installGracefulShutdown(o: GracefulShutdownOptions): {
       until: deadlineFrom(t, o.graceMs ?? RELEASE_GRACE_MS),
       why: '收到 SIGTERM（systemd 在停引擎：发布切版本、重启或关机）',
     });
+    const released = o.releaseSessions?.('收到 SIGTERM') ?? [];
+    if (released.length > 0) {
+      o.log(`收到 SIGTERM：脱开跑的动手会话放手、不停（下一个引擎接回）：${released.join('、')}`);
+    }
     const c = o.drain.stopping();
     const inFlight = o.drain.inFlight();
     o.log(
@@ -291,6 +309,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
   let statusFile: string | undefined;
   let control: DrainControl | undefined;
   let stopSessions: (why: string) => string[] = () => [];
+  let releaseSessions: ((why: string) => string[]) | undefined;
   if (mode === 'real') {
     const { realPortsFromEnv } = await import('./real/index.ts');
     const real = realPortsFromEnv(env, { drain, ownSha: ownReleaseSha() });
@@ -308,6 +327,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
     statusFile = join(real.stateDir, 'drain.json');
     control = createDrainControl({ ...real.drainControl, drain, log: (message) => console.info(message) });
     stopSessions = real.drainControl.stopSessions;
+    releaseSessions = real.releaseSessions;
   } else {
     ports = createFakeWorld().ports;
   }
@@ -417,6 +437,7 @@ export async function runEngineWorker(env: Record<string, string | undefined> = 
       worker,
       drain,
       stopSessions,
+      ...(releaseSessions ? { releaseSessions } : {}),
       log: (message) => console.info(message),
     });
     console.info(

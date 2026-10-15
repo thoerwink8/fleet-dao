@@ -2,28 +2,35 @@
 // 真 Temporal 测试服务端上的工作流。需求里的每一种都故意造一次：停了（stale）、连着失败（failing）、从没跑过（never）、
 // 恢复了自动撤（写清为什么）、读不到登记表算没查成、推送没写进去记没跑成下一轮重推。看门狗自己停了由后端现算，
 // 在 packages/api 的 watchdog-health.test.ts。
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   auditLog,
+  channels,
   finishScheduleRun,
   MASTER_OFF_SKIP_WHY,
   notifications,
+  pools,
   registerScheduledJobs,
   repos,
   resolveAlertWithReason,
   type ScheduleResult,
   scheduleRuns,
+  settings,
   startScheduleRun,
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { CARPOOL_WATCH_JOB } from '../src/jobs/carpool-watch.ts';
 import {
+  judgeReleaseAttention,
   lastHistoryEntry,
   parseHealthzResponse,
   releaseAttentionReasons,
+  TRAIN_STUCK_MS,
 } from '../src/jobs/release-watch.ts';
 import {
   jobIdOfKey,
@@ -90,6 +97,8 @@ function deps(over: Partial<WatchdogDeps> = {}): WatchdogDeps {
     db: t.db,
     now: () => clock,
     log: (level, text) => logs.push(`${level}:${text}`),
+    // 这组测定时任务新鲜度。发版和每日简报认发布目录：法国这台目录在，不指开会把宿主机的发版卷进断言。
+    releasesDir: join(tmpdir(), 'fleet-watchdog-no-releases'),
   })();
   return { ...real, ...over };
 }
@@ -460,6 +469,92 @@ describe('看门狗一轮（真库）', () => {
     expect(await allAlerts()).toEqual([]);
   });
 
+  it('拼车池整池暂停：carpool-watch 登记行还在也不报「停了」，开着的撤掉；还有拼车池没停则照常报；撤了暂停、超时没跑再报', async () => {
+    const hold = {
+      reason: '324 个账号被封，整池停用',
+      decidedBy: '创始人 2026-10-08',
+      revokeWhen: '换上新账号并登记新组织编号后撤',
+      reviewBy: '2026-11-07',
+    };
+    await t.db.insert(channels).values({
+      id: 'claude-subscription',
+      name: 'Claude 订阅',
+      billing: 'subscription',
+    });
+    await t.db.insert(pools).values([
+      {
+        id: 'claude-carpool',
+        channelId: 'claude-subscription',
+        maxConcurrency: 4,
+        runAsUser: 'fleet-agent-carpool',
+        orgKind: 'carpool',
+      },
+      {
+        id: 'claude-carpool-b',
+        channelId: 'claude-subscription',
+        maxConcurrency: 1,
+        runAsUser: 'fleet-agent-carpool',
+        orgKind: 'carpool',
+      },
+    ]);
+    await register({
+      id: CARPOOL_WATCH_JOB.id,
+      name: CARPOOL_WATCH_JOB.name,
+      schedule: CARPOOL_WATCH_JOB.schedule,
+      expectEveryMinutes: CARPOOL_WATCH_JOB.expectEveryMinutes,
+    });
+    const ok = await run(CARPOOL_WATCH_JOB.id, -30, { outcome: 'ok', scanned: 1, found: 0 });
+    const key = `watchdog:job:${CARPOOL_WATCH_JOB.id}:after-${ok}`;
+    // 只停了一个拼车池：还有一个没停，盯读该照常跑，超时没跑照报
+    await t.db.insert(settings).values({
+      key: 'engine.poolHolds',
+      value: { 'claude-carpool': hold },
+      updatedBy: '创始人',
+    });
+    expect(await runWatchdogJob(deps())).toMatchObject({ outcome: 'ok', found: 1 });
+    expect((await openAlerts()).map((a) => a.dedupeKey)).toEqual([key]);
+
+    // 每个拼车池都停着：不报，已经开着的撤掉（登记行还在）
+    await t.db.delete(settings);
+    await t.db.insert(settings).values({
+      key: 'engine.poolHolds',
+      value: { 'claude-carpool': hold, 'claude-carpool-b': hold },
+      updatedBy: '创始人',
+    });
+    expect(await runWatchdogJob(deps())).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(await openAlerts()).toEqual([]);
+    expect(firstLine((await alertOf(key))?.body)).toContain('已撤：');
+    expect((await alertOf(key))?.body).toContain('整池暂停着');
+
+    // 撤了暂停，仍超时没跑：照常要求新鲜
+    await t.db.delete(settings);
+    expect(await runWatchdogJob(deps())).toMatchObject({ outcome: 'ok', found: 1 });
+    expect((await openAlerts()).map((a) => [a.dedupeKey, a.title])).toEqual([
+      [key, '定时任务「拼车额度盯读（切号用）」停了：超过 10 分钟没跑'],
+    ]);
+  });
+
+  it('【故意造出的失败】读不到哪些任务是有意停的：不当成暂停，照常报停了，这一轮记没查成', async () => {
+    await register({
+      id: CARPOOL_WATCH_JOB.id,
+      name: CARPOOL_WATCH_JOB.name,
+      expectEveryMinutes: CARPOOL_WATCH_JOB.expectEveryMinutes,
+    });
+    await run(CARPOOL_WATCH_JOB.id, -30, { outcome: 'ok', scanned: 1, found: 0 });
+    await expect(
+      runWatchdogJob(
+        deps({
+          pausedJobs: async () => {
+            throw new Error('库断了');
+          },
+        }),
+      ),
+    ).rejects.toThrow(/有意停/);
+    expect((await openAlerts()).map((a) => a.title)).toEqual([
+      '定时任务「拼车额度盯读（切号用）」停了：超过 10 分钟没跑',
+    ]);
+  });
+
   it('【故意造出的失败】退役的任务（alert-dispatch，#445「提醒派单」整层删掉）：登记表上还在、早停了也不报——它不会再跑，报了也没人能处理；没登记在 ENGINE_JOBS 里的别的任务（这里的 route-probe）照样正常管，不因为筛退役任务被连带漏管', async () => {
     await register({ id: 'alert-dispatch' }, { id: 'route-probe' });
     await run('alert-dispatch', -120, { outcome: 'ok', scanned: 1, found: 0 });
@@ -714,6 +809,106 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
     expect((await alertOf(rel?.dedupeKey ?? ''))?.body).toContain('已撤：发版现在不用人看了');
   });
 
+  it('【故意造出的失败】release.sh 没退回、末行记「健康检查没过」，接活脚本发后体检过了（进度 done、current 就是目标）：不报，旧卡撤掉；current 不是目标照报（#2207）', async () => {
+    const PREV = 'df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e';
+    const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
+    history(
+      `2026-10-14T22:49:55Z ${PREV} release`,
+      `2026-10-14T23:04:53Z ${NEW} release`,
+      `2026-10-14T23:05:30Z ${NEW} unhealthy`,
+    );
+    writeFileSync(
+      join(dir, '.train', 'release-train.json'),
+      JSON.stringify({
+        schema: 1,
+        status: 'done',
+        phase: 8,
+        startedAt: at(-10).toISOString(),
+        target: { kind: 'sha', value: NEW },
+      }),
+    );
+    writeFileSync(
+      join(dir, '.auto', 'state.json'),
+      JSON.stringify({ auto: { note: '在用的就是主线头，没有要发的' } }),
+    );
+    // 旧版看门狗当时开的那条
+    await upsertAlert(t.db, {
+      dedupeKey: `watchdog:release:${NEW.slice(0, 12)}:unhealthy`,
+      level: 'alert',
+      taskId: null,
+      title: '发版要人看：新版没发成或退回了，自动发版停着',
+      body: '发布历史最近一条是「健康检查没过」',
+    });
+    symlinkSync(NEW, join(dir, 'current'));
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([]);
+    expect((await alertOf(`watchdog:release:${NEW.slice(0, 12)}:unhealthy`))?.body).toContain(
+      '已撤：发版现在不用人看了',
+    );
+
+    // current 还是上一版（没切过去 / 退回了）：照报；自动发版没停（进度 done），标题不说「停着」
+    rmSync(join(dir, 'current'));
+    symlinkSync(PREV, join(dir, 'current'));
+    clock = at(1);
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([`watchdog:release:${NEW.slice(0, 12)}:unhealthy`]);
+    const card = (await openAlerts())[0];
+    expect(card?.title).toBe('发版要人看：新版没发成或退回了');
+    expect(card?.body).toContain('自动发版没停');
+    expect(card?.body).not.toContain('不会再发');
+  });
+
+  it('重放 2026-10-14 22:58Z：一趟正常自动发版在走（真格式进度记录 running）不报，挂在上一版身上的误报撤掉；超过阈值才报、键写正在发的；发完撤', async () => {
+    const PREV = 'df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e';
+    const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
+    history(`2026-10-14T22:49:55Z ${PREV} release`);
+    const train = (status: string) =>
+      writeFileSync(
+        join(dir, '.train', 'release-train.json'),
+        JSON.stringify({
+          schema: 1,
+          status,
+          phase: 4,
+          startedAt: at(-5).toISOString(),
+          updatedAt: at(-5).toISOString(),
+          target: { kind: 'sha', value: NEW },
+          waiting: 'release.sh 2f5dc42f4636 在跑（最多 30 分钟）',
+        }),
+      );
+    train('running');
+    writeFileSync(
+      join(dir, '.auto', 'state.json'),
+      JSON.stringify({ auto: { note: '现在不发：上一趟发版是「running」状态，要人看，不自动再发' } }),
+    );
+    // 旧版看门狗开的那条误报（键挂在上一版身上）
+    await upsertAlert(t.db, {
+      dedupeKey: 'watchdog:release:df3692b292a7:release',
+      level: 'alert',
+      taskId: null,
+      title: '发版要人看：新版没发成或退回了，自动发版停着',
+      body: '发版进度记录停在「running」',
+    });
+
+    // 进行中 5 分钟：不报，那条误报撤掉
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([]);
+    expect((await alertOf('watchdog:release:df3692b292a7:release'))?.body).toContain(
+      '已撤：发版现在不用人看了',
+    );
+
+    // 过了阈值还 running：报，键是正在发的这一趟
+    clock = at(TRAIN_STUCK_MS / MIN - 4);
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual(['watchdog:release:train:2f5dc42f4636:running']);
+
+    // 发完（历史多一条 release、进度 done）：自己撤
+    history(`2026-10-14T22:49:55Z ${PREV} release`, `2026-10-14T23:04:53Z ${NEW} release`);
+    train('done');
+    clock = at(TRAIN_STUCK_MS / MIN);
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([]);
+  });
+
   it('非 200 没满 10 分钟就恢复：从不报，也清掉记的时刻（下次重新数）', async () => {
     history(`2026-10-14T17:03:00Z ${SHA} release`);
     health = RED_503;
@@ -824,9 +1019,107 @@ describe('发版和健康页的判法（纯函数）', () => {
       trainStatus,
       autoNote,
     });
-    expect(releaseAttentionReasons(f('done'))).toEqual([]);
-    expect(releaseAttentionReasons(f('aborted'))).toEqual([]);
-    expect(releaseAttentionReasons(f(null, '主线头 CI 不是绿的，等绿'))).toEqual([]);
-    expect(releaseAttentionReasons(f('deploying'))).toHaveLength(1);
+    expect(releaseAttentionReasons(f('done'), T0)).toEqual([]);
+    expect(releaseAttentionReasons(f('aborted'), T0)).toEqual([]);
+    expect(releaseAttentionReasons(f(null, '主线头 CI 不是绿的，等绿'), T0)).toEqual([]);
+    expect(releaseAttentionReasons(f('deploying'), T0)).toHaveLength(1);
+    expect(releaseAttentionReasons(f('failed'), T0)).toHaveLength(1);
+  });
+
+  describe('进度记录 running：正常在走不报，超过 TRAIN_STUCK_MS 才算卡住（2026-10-14 22:58Z 每趟自动发版都误报）', () => {
+    const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
+    const LAST = `2026-10-14T22:49:55Z df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e release`;
+    const START = new Date('2026-10-14T22:57:55.841Z');
+    const running = (over: Record<string, unknown> = {}) => ({
+      last: lastHistoryEntry(LAST),
+      trainStatus: 'running',
+      trainSince: START.toISOString(),
+      trainSha: NEW,
+      autoNote: '现在不发：上一趟发版是「running」状态，要人看，不自动再发',
+      ...over,
+    });
+    const after = (min: number) => new Date(START.getTime() + min * MIN);
+
+    it('进行中 5 分钟：不报，自动发布因为它说的「要人看」也不报', () => {
+      expect(releaseAttentionReasons(running(), after(5))).toEqual([]);
+      expect(judgeReleaseAttention(running(), after(1))).toEqual({ kind: 'fine' });
+      expect(judgeReleaseAttention(running(), after(TRAIN_STUCK_MS / MIN))).toEqual({ kind: 'fine' });
+    });
+
+    it('【故意造出的失败】超过阈值：报，键和正文写正在发的提交，不挂在上一版（df3692b2）身上', () => {
+      const v = judgeReleaseAttention(running(), after(TRAIN_STUCK_MS / MIN + 1));
+      expect(v).toMatchObject({ kind: 'alert', key: 'watchdog:release:train:2f5dc42f4636:running' });
+      if (v.kind !== 'alert') throw new Error('应当报');
+      expect(v.key).not.toContain('df3692b292a7');
+      expect(v.title).toBe('发版卡住：2f5dc42f4636 这一趟超过 70 分钟没收尾，自动发版停着');
+      expect(v.body).toContain('正在发 2f5dc42f4636 的这一趟从 10-15 06:57 起停在「running」');
+      // 卡住时自动发布那句「要人看」照写
+      expect(v.body).toContain('自动发布说：现在不发');
+    });
+
+    it('done 不报（上一版、这一版都不报）', () => {
+      expect(judgeReleaseAttention(running({ trainStatus: 'done' }), after(500))).toEqual({ kind: 'fine' });
+    });
+
+    it('旧格式（只有 status，没有起点时间）：running 判不了多久，照旧报，写明老格式', () => {
+      const v = judgeReleaseAttention(
+        { last: lastHistoryEntry(LAST), trainStatus: 'running', autoNote: null },
+        after(1),
+      );
+      expect(v).toMatchObject({ kind: 'alert', key: 'watchdog:release:train:unknown:running' });
+      if (v.kind !== 'alert') throw new Error('应当报');
+      expect(v.body).toContain('没有起止时间（老格式）');
+    });
+
+    it('收了尾却没成（failed）：立刻报，键认这一趟的提交', () => {
+      const v = judgeReleaseAttention(running({ trainStatus: 'failed' }), after(3));
+      expect(v).toMatchObject({
+        kind: 'alert',
+        key: 'watchdog:release:train:2f5dc42f4636:failed',
+        title: '发版要人看：2f5dc42f4636 这一趟停在「failed」，自动发版停着',
+      });
+    });
+
+    it('这一趟落地了（done、current 就是目标），末行「健康检查没过」说的是它：不报；说的是别的提交、或 current 不是目标：报（#2207）', () => {
+      const landed = {
+        last: lastHistoryEntry(`2026-10-14T23:05:30Z ${NEW} unhealthy`),
+        trainStatus: 'done',
+        trainSince: START.toISOString(),
+        trainSha: NEW,
+        currentSha: NEW,
+        autoNote: null,
+      };
+      expect(judgeReleaseAttention(landed, after(10))).toEqual({ kind: 'fine' });
+      expect(judgeReleaseAttention({ ...landed, currentSha: null }, after(10))).toMatchObject({
+        kind: 'alert',
+      });
+      expect(
+        judgeReleaseAttention(
+          { ...landed, currentSha: 'df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e' },
+          after(10),
+        ),
+      ).toMatchObject({ kind: 'alert', key: 'watchdog:release:2f5dc42f4636:unhealthy' });
+      // 退回了：末行是 auto-rollback（上一版），照报
+      expect(
+        judgeReleaseAttention(
+          { ...landed, last: lastHistoryEntry(`2026-10-14T23:05:31Z ${NEW} auto-rollback`) },
+          after(10),
+        ),
+      ).toMatchObject({ kind: 'alert' });
+      // 进度没成（failed）：照报，而且自动发版真停着
+      const v = judgeReleaseAttention({ ...landed, trainStatus: 'failed' }, after(10));
+      expect(v).toMatchObject({ kind: 'alert', title: '发版要人看：新版没发成或退回了，自动发版停着' });
+    });
+
+    it('阈值不小于发版接活脚本各步上限加起来（到上限它自己写成没成；没到的一律当正常在走）', async () => {
+      // 发版接活脚本是 deploy/ 下的 .mjs（不在引擎的类型检查里），按文件地址引
+      const { LIMITS: L } = (await import(
+        pathToFileURL(join(import.meta.dirname, '../../../deploy/france/release-request/lib.mjs')).href
+      )) as { LIMITS: Record<'releaseMs' | 'deployMs' | 'checkMs' | 'verifyMs' | 'stepMs', number> };
+      const worst = L.releaseMs + L.deployMs + L.checkMs + L.verifyMs + 8 * L.stepMs;
+      expect(TRAIN_STUCK_MS).toBeGreaterThanOrEqual(worst);
+      // 最多多 5 分钟余量：巡查（agents/test/patrol.test.ts）对 LIMITS.trainStuckMinutes 做同样的核对，两边落在同一条线上
+      expect(TRAIN_STUCK_MS).toBeLessThanOrEqual(worst + 5 * 60_000);
+    });
   });
 });

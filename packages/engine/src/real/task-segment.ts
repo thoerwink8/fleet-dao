@@ -23,6 +23,9 @@
 // - 新开的会话（不续的）起之前，把单子「已知的模块」列的文件以会话用户从工作树读出来放进提示词（runner/preload.ts，决定 0093）。
 //   读一个失败只记进那一节（「引擎没读到」），不挡会话；被叫停照抛。
 // - one-shot 的落盘目录（brief.txt、stdout.txt……）24 小时后由这里顺手清；清不掉只记日志。
+// - 脱开引擎跑（#2238，session-handoff.ts）：每一段都交 detach 给 one-shot，执行方式支持的（命令行那几家）走收发目录。引擎要走时
+//   会话不停，这一段交回 SEGMENT_DETACHED（带 runs 编号和起的时刻），不记这次尝试、不放 runs 那一行。工作流带上 attach 再调：
+//   不建树、不拼提示词、不起会话，从收发目录接回等它收场；这时引擎又在走（发版连着发），当场再交回 SEGMENT_DETACHED。
 
 import { randomUUID } from 'node:crypto';
 import { readdir, rm, stat } from 'node:fs/promises';
@@ -33,11 +36,23 @@ import type { EngineTasks } from '../activities.ts';
 import { type PortContext, PortError } from '../ports.ts';
 import { segmentEvidence } from '../runner/evidence.ts';
 import type { RunsWriter } from '../runner/not-wired.ts';
-import { OneShotError, type OneShotResult, runOneShot, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
+import {
+  OneShotDetached,
+  OneShotError,
+  type OneShotResult,
+  runOneShot,
+  SESSION_ARTIFACT_TTL_MS,
+} from '../runner/one-shot.ts';
 import { type PreloadRead, preloadFromBytes, preloadPaths } from '../runner/preload.ts';
 import { renderSegmentPrompt } from '../runner/segment-prompt.ts';
 import { manualBriefOf } from '../runner/task-brief.ts';
-import { type RunSegmentInput, type RunSegmentResult, SEGMENT_STAGE } from '../task-contract.ts';
+import {
+  type RunSegmentInput,
+  type RunSegmentResult,
+  SEGMENT_DETACHED,
+  SEGMENT_STAGE,
+  type SegmentAttach,
+} from '../task-contract.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
 import type { ChannelAttempts, SegmentReservations } from './runs-writer.ts';
@@ -122,6 +137,21 @@ export async function sweepRunDirs(
   return removed;
 }
 
+/** 会话脱开引擎接着跑（#2238）：交回编号和起的时刻，工作流带上它再调一次接回。码是 engine_stop，认不出 detached 的路照 KL3 续上。 */
+function detachedResult(attach: SegmentAttach): RunSegmentResult {
+  return {
+    ok: false,
+    runId: attach.runId,
+    outcome: SEGMENT_DETACHED,
+    evidence: {
+      code: 'engine_stop',
+      message: '引擎要走了（发版切版本、重启）：动手会话没停，脱开引擎接着跑，下一个引擎接回',
+      quotaExhausted: false,
+    },
+    detached: { runId: attach.runId, startedAt: attach.startedAt },
+  };
+}
+
 export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks['runSegment']> {
   const now = deps.now ?? (() => new Date());
   const newRunId = deps.newRunId ?? randomUUID;
@@ -184,14 +214,19 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       } catch (error) {
         throw new PortError('SEGMENT_ROUTE_UNUSABLE', errMessage(error), { retryable: false });
       }
+      // 接回时引擎又在走（发版连着发）：不碰它，当场再交回，等下一个引擎
+      if (input.attach && deps.spawner.handoff?.signal.aborted) return detachedResult(input.attach);
       // 定了路由就登记（#59）：从这里到收场（建树、等内存、起会话），切号都看得见这一段、停得下它
       const ticket = deps.sessions?.enter({
         poolId: routeInfo.route.poolId,
         stage: SEGMENT_STAGE.manual,
         taskId: input.taskId,
+        ...(input.attach ? { attach: true } : {}),
       });
       try {
-        return await run(input, ctx, routeInfo, ticket);
+        return input.attach
+          ? await session(input, ctx, routeInfo, ticket, input.attach.runId, '', input.attach)
+          : await run(input, ctx, routeInfo, ticket);
       } finally {
         ticket?.leave();
       }
@@ -209,7 +244,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
     const treeRunId = newRunId();
     // 每一次起会话的编号（runs 主键）都先交给登记再干等的事（建树、等内存）：这时被切号停下，操作记录 stopped 里写的就是
     // 随后记成 org_switch 的那一行，查得到
-    let runId = newRunId();
+    const runId = newRunId();
     ticket?.attempt(runId);
     // 2. 树（切号叫停不打断建树：建完了下面起会话那一步当场回 org_switch）
     await prepareSegmentTree(
@@ -284,6 +319,21 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       ...(input.resumeSessionId ? { resumed: true } : {}),
       ...(preload.length > 0 ? { preload } : {}),
     });
+    return session(input, ctx, routeInfo, ticket, runId, prompt);
+  }
+
+  /** 起会话（或接回）、等它收场、把结局整理成工作流要的形状。 */
+  async function session(
+    input: RunSegmentInput,
+    ctx: PortContext,
+    routeInfo: Awaited<ReturnType<typeof resolveSegmentRoute>>,
+    ticket: OneShotTicket | undefined,
+    firstRunId: string,
+    prompt: string,
+    attach?: SegmentAttach,
+  ): Promise<RunSegmentResult> {
+    let runId = firstRunId;
+    ticket?.attempt(runId);
     // 4. 起会话。叫停（ctx.signal）接进会话的看守；切号叫停（ticket）交给 one-shot，结局记 org_switch。
     const stopSignal = ctx.signal;
     const beat = setInterval(() => ctx.heartbeat(), heartbeatEveryMs);
@@ -313,11 +363,18 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
               effort: input.tier.effort,
               ...(input.route.reservationId ? { reservationId: input.route.reservationId } : {}),
               ...(input.resumeSessionId ? { resumeSessionId: input.resumeSessionId } : {}),
+              detach: attach ? { attach: { startedAt: attach.startedAt } } : {},
             },
             {
               spawn: (cmd) => {
                 ticket?.running();
-                return spawner({ ...cmd, signal: AbortSignal.any([cmd.signal, stopSignal]) });
+                return spawner({
+                  ...cmd,
+                  signal: AbortSignal.any([cmd.signal, stopSignal]),
+                  ...(cmd.detach
+                    ? { detach: { ...cmd.detach, detachable: () => ticket?.detachable() } }
+                    : {}),
+                });
               },
               ...(deps.memoryAdmission ? { memoryAdmission: deps.memoryAdmission } : {}),
               tmpDir: deps.runsDir,
@@ -327,6 +384,9 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
             },
           );
         } catch (error) {
+          // 引擎要走了、会话脱开接着跑：不是这一次尝试的结局，不记尝试
+          if (error instanceof OneShotDetached)
+            return detachedResult({ runId: error.runId, startedAt: error.startedAt });
           if (stopSignal.aborted) throw stopSignal.reason ?? error;
           if (error instanceof OneShotError && error.code === 'RUN_START_FAILED') {
             // 库一时写不进：会话没起，过一会儿再来就行

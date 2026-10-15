@@ -7,7 +7,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { errMessage } from '@fleet-dao/shared/util';
-import { and, asc, desc, eq, gte, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { type RunRouteOutcome, type RunTier, routes, runs } from '../schema/index.ts';
 
@@ -237,12 +237,18 @@ export async function runsOfTask(
 }
 
 /**
- * 把还没结束的行都收成 killed、写明为什么，交回收掉的编号。只给引擎起来、接活之前用（#157）：一次性会话不脱开引擎进程跑，
- * 上一轮引擎一退它们就断了（起来时的收尾收掉了它们的 scope），库里那几行不收，切号就一直以为它们在跑、一直等。
+ * 把还没结束的行都收成 killed、写明为什么，交回收掉的编号。给引擎起来、接活之前用（#157）：上一轮引擎起的会话它一退就断了
+ * （起来时的收尾收掉了它们的 scope），库里那几行不收，切号就一直以为它们在跑、一直等。脱开引擎跑、等人接回的那几个
+ * （#2238）放进 except 不收；过了时限还没人接的再用 only 单收那几行。
  * 收的时刻早于开跑时刻（时钟回拨）就按开跑时刻收，不撞 runs_ended_after_start。是引擎退了断的，不算路由的账（neutral）。
  */
-export async function closeOpenRuns(db: Db, input: { endedAt: Date; reason: string }): Promise<string[]> {
+export async function closeOpenRuns(
+  db: Db,
+  input: { endedAt: Date; reason: string; except?: readonly string[]; only?: readonly string[] },
+): Promise<string[]> {
   if (!input.reason.trim()) throw new RunInputError('收掉没结束的 runs 要写为什么');
+  if (input.only !== undefined && input.only.length === 0) return [];
+  const except = input.except ?? [];
   try {
     const rows = await db
       .update(runs)
@@ -253,7 +259,13 @@ export async function closeOpenRuns(db: Db, input: { endedAt: Date; reason: stri
         failureReason: input.reason,
         updatedAt: input.endedAt,
       })
-      .where(isNull(runs.endedAt))
+      .where(
+        and(
+          isNull(runs.endedAt),
+          input.only === undefined ? undefined : inArray(runs.id, [...input.only]),
+          except.length === 0 ? undefined : notInArray(runs.id, [...except]),
+        ),
+      )
       .returning({ id: runs.id });
     return rows.map((r) => r.id);
   } catch (error) {

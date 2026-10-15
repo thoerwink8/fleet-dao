@@ -1,8 +1,8 @@
 // 以会话用户的身份跑命令：生产走 sudo fleet-agent-scope（这里用假帮手核对命令行、字节进出），没跑成的讲清楚。
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { describeFailure, localExec, scopeExec } from '../../src/real/exec.ts';
 
 let dir: string;
@@ -106,6 +106,48 @@ describe('以会话用户的身份跑命令', { timeout: 30_000 }, () => {
     });
     expect(t.timedOut).toBe(true);
     expect(describeFailure('等', t)).toBe('等：超时被停');
+  });
+
+  it('【故意造出的失败】超时、被叫停：sudo 杀了而 scope 里那一侧还活着、攥着管道——经帮手收掉 scope，最多再等一小会儿就交回，不让活动一直不落定（#2238：引擎停机卡在 DRAINING 6 分钟）', async () => {
+    const stuck = join(dir, 'stuck-scope.mjs');
+    const log = join(dir, 'stop.log');
+    const pidFile = join(dir, 'grandchild.pid');
+    // 假帮手：run 时起一个孙进程继承标准输出（像 scope 里以会话用户跑的那一侧，sudo 被杀它不死），自己也一直等；stop 记一笔
+    writeFileSync(
+      stuck,
+      `import { spawn } from 'node:child_process';
+import { appendFileSync, writeFileSync } from 'node:fs';
+const [action, id] = process.argv.slice(2);
+if (action === 'stop') { appendFileSync(${JSON.stringify(log)}, 'stop ' + id + '\\n'); process.exit(0); }
+const g = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: ['ignore', 'inherit', 'inherit'] });
+writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));
+setTimeout(() => {}, 30000);`,
+    );
+    const exec = scopeExec({ helper: stuck, sudo: [process.execPath], killSettleMs: 300 });
+    const ac = new AbortController();
+    const started = Date.now();
+    setTimeout(() => ac.abort(), 300);
+    const r = await exec({
+      user: 'fleet-agent-carpool',
+      cwd: '/var/lib/fleet-work/acme-widgets/12-a',
+      argv: ['/bin/sh', '-c', 'pnpm test:changed'],
+      timeoutMs: 20_000,
+      signal: ac.signal,
+      scopeId: 'selfcheck-test-1',
+    });
+    try {
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(r).toMatchObject({ code: null, aborted: true });
+      // Windows 上孙进程继承不到管道的写端，sudo 一死 close 就来了；生产（Linux）上它攥着管道，只能靠等满 killSettleMs 交回
+      if (process.platform !== 'win32') expect(r.stderr).toContain('管道还没关');
+      await vi.waitFor(() => expect(readFileSync(log, 'utf8')).toContain('stop selfcheck-test-1'));
+    } finally {
+      try {
+        process.kill(Number(readFileSync(pidFile, 'utf8')));
+      } catch {
+        // 已经没了
+      }
+    }
   });
 
   it('生产配置下不许用本机执行器（那等于以引擎的身份在会话的树里跑）', () => {

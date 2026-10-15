@@ -8,7 +8,9 @@
 // 「主线 N 小时没合 PR」（决定 0093）读同一个库的 mergeStallFacts（PR 镜像、任务、拉单记下的等空位单数）。
 // 「在用的账号池额度读数不超过 30 分钟」（决定 0093 从每小时对账搬来）读同一个库的 quotaTable，加额度配置（deploy/quota.json）里写明不读的池。
 // 「提醒真的推到飞书了」读同一个库的 feishuPushFacts（后端写的推送状态、送达记录）。
-import { readFile, stat } from 'node:fs/promises';
+// 拼车池整池暂停时 carpool-watch 不要求新鲜（和盯读、引擎起来时的登记同一句，pool-holds.ts 的 carpoolPoolsHeldReason）：
+// 摘登记行挡不住启动时 registerEngineJobs 把它写回来，单看登记行会误报「停了」。暂停读不到照抛，看门狗这一轮不当成暂停。
+import { readFile, readlink, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadQuotaConfig } from '@fleet-dao/adapters/quota';
 import {
@@ -31,6 +33,7 @@ import {
   writeHealthzBadSince,
 } from '@fleet-dao/db';
 import { RELEASES_DIR } from '@fleet-dao/store';
+import { CARPOOL_WATCH_JOB } from '../jobs/carpool-watch.ts';
 import {
   type HealthzProbe,
   lastHistoryEntry,
@@ -39,6 +42,7 @@ import {
 } from '../jobs/release-watch.ts';
 import { RETIRED_SCHEDULE_IDS } from '../jobs/retired-schedules.ts';
 import { WATCHDOG_ACTOR, type WatchdogDeps } from '../jobs/watchdog.ts';
+import { carpoolPoolsHeldReason } from './pool-holds.ts';
 
 export interface WatchdogWiring {
   db: Db;
@@ -86,10 +90,22 @@ export async function readReleaseFacts(dir: string): Promise<ReleaseFacts | null
   if (history === null) throw new Error(`${dir}/.history 不在，但目录在：发布历史读不到`);
   const train = await readOptional(join(dir, '.train', 'release-train.json'));
   let trainStatus: string | null = null;
+  let trainSince: string | null = null;
+  let trainSha: string | null = null;
   if (train !== null) {
-    const v = JSON.parse(train) as { status?: unknown } | null;
+    // 写的是 deploy/france/release-request/lib.mjs（newState + writeState：startedAt、每次写盘刷 updatedAt、target.value）；
+    // 老格式只有 status，起点时间、提交号缺着是 null（判法照旧当要人看，见 jobs/release-watch.ts 的 trainVerdict）
+    const v = JSON.parse(train) as {
+      status?: unknown;
+      startedAt?: unknown;
+      updatedAt?: unknown;
+      target?: { value?: unknown } | null;
+    } | null;
     if (typeof v?.status !== 'string') throw new Error('发版进度记录认不出（没有 status）');
     trainStatus = v.status;
+    const since = typeof v.startedAt === 'string' ? v.startedAt : v.updatedAt;
+    trainSince = typeof since === 'string' ? since : null;
+    trainSha = typeof v.target?.value === 'string' ? v.target.value : null;
   }
   const state = await readOptional(join(dir, '.auto', 'state.json'));
   let autoNote: string | null = null;
@@ -97,7 +113,30 @@ export async function readReleaseFacts(dir: string): Promise<ReleaseFacts | null
     const v = JSON.parse(state) as { auto?: { note?: unknown } | null } | null;
     autoNote = typeof v?.auto?.note === 'string' ? v.auto.note : null;
   }
-  return { last: lastHistoryEntry(history), trainStatus, autoNote };
+  return {
+    last: lastHistoryEntry(history),
+    trainStatus,
+    trainSince,
+    trainSha,
+    currentSha: await readCurrentSha(dir),
+    autoNote,
+  };
+}
+
+/**
+ * 法国 current 指向的提交：它是链到 <发布目录>/<40 位提交号> 的符号链接（deploy/release.sh 的 activate）。
+ * 不在、不是链接是 null（判「这一趟落地了没」时当没落地，照报）；链的不是提交号也是 null；别的错照抛。
+ */
+async function readCurrentSha(dir: string): Promise<string | null> {
+  let link: string;
+  try {
+    link = await readlink(join(dir, 'current'));
+  } catch (e) {
+    if (errno(e) === 'ENOENT' || errno(e) === 'EINVAL') return null;
+    throw e;
+  }
+  const base = link.replace(/[/]+$/, '').split(/[/]/).pop() ?? '';
+  return /^[0-9a-f]{40}$/i.test(base) ? base.toLowerCase() : null;
 }
 
 /** 发布目录在不在（在 = 这台是法国）。不在是 false，别的错照抛。 */
@@ -182,6 +221,11 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
     brief: {
       status: (day, since) => dailyBriefStatus(w.db, day, since),
       here: () => releasesDirExists(w.releasesDir ?? RELEASES_DIR),
+    },
+    // 拼车池整池暂停：carpool-watch 登记行还在也不报「停了」，开着的撤掉。读不到照抛（不当成没暂停）。
+    pausedJobs: async () => {
+      const why = await carpoolPoolsHeldReason(w.db, now());
+      return why ? new Map([[CARPOOL_WATCH_JOB.id, why]]) : new Map();
     },
     now,
     log,

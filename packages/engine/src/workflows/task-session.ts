@@ -26,6 +26,10 @@
 //   问不成（库一时不通）只记日志，照今天的做法接着走。
 // - 停下之前先自动处理一次（决定 0093，patched('auto-redispatch-session')）：失败分流判停下、码是被引擎在时限上叫停（aborted）、
 //   总时长到顶、起不来（AUTO_REDISPATCH_CODES）的，这一段里先避开这个模型换一条路由重派一次，进度里写一行；再判停下才停。
+//   总时长到顶（WT1）第一次仍原路续同一个会话：这一次有执行编号就记下，下一轮问 planSegmentResume，带上会话号再起
+//   （patched('wall-clock-resume-session')，#2244）。没有编号、或老历史没有这个标记，只钉原路由、开新会话。
+//   同一条路由上第二次不再原路续：换路由时把树上的进度写进提示词
+//   （patched('wall-clock-carry-progress')），让下一轮接着做，不从头重来。老历史没有这个标记，只换路由、不改提示词。
 
 import { isCancellation, log, patched } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -34,6 +38,8 @@ import type { TierDecision } from '../runner/tier.ts';
 import {
   ORG_SWITCH_CODE,
   ROUTE_RETRY_SECONDS,
+  type RunSegmentInput,
+  SEGMENT_DETACHED,
   SEGMENT_MINUTES,
   SEGMENT_STAGE,
   type SegmentEvidence,
@@ -63,6 +69,7 @@ import {
   type ResumeFrom,
   segmentMinutesAfterPatience,
   tokenBudgetStop,
+  wallClockSwitchLine,
   widen,
   withDispatchProbeNote,
   withoutFamilies,
@@ -141,34 +148,42 @@ export async function writeSession(
     // 这一段的起跑时刻：被暂停取消时拿不到执行编号，续会话凭它去库里找这一段
     const attemptAt = Date.now();
     let evidence: SegmentEvidence | null = null;
+    // 没跑成时的执行编号：总时长到顶第一次拿它去续同一个会话。没起成就没有
+    let failedRunId: string | null = null;
     let infra: unknown = null;
     try {
+      const segmentInput: RunSegmentInput = {
+        schemaVersion: 1,
+        taskId: rt.input.taskId,
+        repo: rt.input.repo,
+        issueNumber: rt.input.issueNumber,
+        route,
+        worktreePath: wt.path,
+        branch: rt.branch,
+        baseSha: rt.since,
+        brief,
+        tier,
+        feedback: rt.feedback,
+        timeoutMinutes:
+          patienceWaited > 0 ? segmentMinutesAfterPatience(SEGMENT_MINUTES, patienceWaited) : SEGMENT_MINUTES,
+        ...(interrupted ? { interrupted } : {}),
+        ...(resumeSessionId ? { resumeSessionId } : {}),
+        // 只记账（runs.pr_number，#216）：第一轮会话交付之后才开 PR，这时还没有
+        ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
+      };
       // pausable：hard 暂停（#820 片 3）能把这一段取消掉；取消后回到循环头，停在检查点等「继续」，继续了在原树原分支上重跑
-      const res = await rt.cancellable(
-        () =>
-          rt.acts.runSegment({
-            schemaVersion: 1,
-            taskId: rt.input.taskId,
-            repo: rt.input.repo,
-            issueNumber: rt.input.issueNumber,
-            route,
-            worktreePath: wt.path,
-            branch: rt.branch,
-            baseSha: rt.since,
-            brief,
-            tier,
-            feedback: rt.feedback,
-            timeoutMinutes:
-              patienceWaited > 0
-                ? segmentMinutesAfterPatience(SEGMENT_MINUTES, patienceWaited)
-                : SEGMENT_MINUTES,
-            ...(interrupted ? { interrupted } : {}),
-            ...(resumeSessionId ? { resumeSessionId } : {}),
-            // 只记账（runs.pr_number，#216）：第一轮会话交付之后才开 PR，这时还没有
-            ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
-          }),
-        { pausable: true },
-      );
+      let res = await rt.cancellable(() => rt.acts.runSegment(segmentInput), { pausable: true });
+      // 引擎换版本、重启时会话没停、脱开接着跑（#2238）：隔一会儿带上 attach 接回，等它收场——不算失败、不换路由、不重起。
+      // 老引擎还在排空时接回会当场再交回 detached，所以隔一会儿再接。老历史没有这个标记（也不会有 detached）
+      while (!res.ok && res.outcome === SEGMENT_DETACHED && res.detached && patched('segment-reattach')) {
+        const attach = res.detached;
+        await rt.pause(
+          'retry',
+          '引擎在换版本：动手会话脱开引擎接着跑，等新引擎接回',
+          SEGMENT_REATTACH_SECONDS,
+        );
+        res = await rt.cancellable(() => rt.acts.runSegment({ ...segmentInput, attach }), { pausable: true });
+      }
       if (res.ok) {
         rt.lastImplementRoute = route;
         const resumed = resumeSessionId !== undefined;
@@ -177,6 +192,7 @@ export async function writeSession(
         return;
       }
       evidence = res.evidence;
+      failedRunId = res.runId;
     } catch (error) {
       if (error instanceof Abandoned || isCancellation(error)) throw error;
       if (error instanceof PausedInterrupt) {
@@ -237,6 +253,11 @@ export async function writeSession(
     if (next.action === 'retry') {
       // 原路再试：还是这条路由（额度要等的，等到清零再来，不算墙钟）
       stick = route.routeId;
+      // 总时长到顶第一次：原路续同一个会话（#2244）。有执行编号才问续不续；会话没起成就没有编号，照旧开新会话。
+      // 老历史没有这个标记：重放时为假，只钉原路由，不多一次 planSegmentResume。
+      if (failure.code.toLowerCase() === 'wall_clock_timeout' && patched('wall-clock-resume-session')) {
+        if (failedRunId) rt.resumeFrom = { previous: { runId: failedRunId }, worktreePath: wt.path };
+      }
       if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
       await rt.pause(next.wait === 'quota' ? 'quota' : 'retry', next.reason, next.delaySeconds);
     } else if (next.action === 'swapRoute' || next.action === 'swapModel') {
@@ -294,8 +315,19 @@ export async function writeSession(
         rt.avoidModel(route);
         counters = ZERO;
         previousMessage = undefined;
+        // 同一条路由第二次总时长到顶：不再原路续。提示词带上树上的进度，下一轮换模型接着做。
+        // 第一次到顶走不到这里（WT1 还在原路重试）。老历史没有这个标记：只换路由，提示词和进度那一行照旧。
+        const carryProgress =
+          failure.code.toLowerCase() === 'wall_clock_timeout' && patched('wall-clock-carry-progress');
+        if (carryProgress) {
+          const line = wallClockSwitchLine(route.modelId);
+          interrupted = line;
+          if (!rt.feedback.includes(line)) rt.feedback = [...rt.feedback, line];
+        }
         await rt.note(
-          `第 ${rt.round} 轮：${route.modelId} ${next.reason}（${failure.code}），自动换一条路由重派一次，不停下等人`,
+          carryProgress
+            ? `第 ${rt.round} 轮：${route.modelId} 同一条路由第二次总时长到顶，换一条路由带上进度续一次，不停下等人`
+            : `第 ${rt.round} 轮：${route.modelId} ${next.reason}（${failure.code}），自动换一条路由重派一次，不停下等人`,
         );
         continue;
       }
@@ -307,6 +339,9 @@ export async function writeSession(
     }
   }
 }
+
+/** 动手会话脱开引擎跑着、引擎在换版本（#2238）：隔多久去接回一次（老引擎还在排空时接回会再交回 detached）。 */
+export const SEGMENT_REATTACH_SECONDS = 20;
 
 /**
  * 重试、重派之前确认上一段真停了（决定 0093）：没收场就停下等人、写明原因，回 false（调用方回循环头，人点继续后再选再起）；

@@ -80,7 +80,7 @@ export async function runClaudeCode(
   spec: ClaudeCodeRunSpec,
   options: ClaudeCodeRunOptions,
 ): Promise<ClaudeCodeRunReport> {
-  await assertRunnable(options.command, spec.prompt, spec.cwd);
+  await assertRunnable(options.command, spec.prompt, spec.cwd, options.io);
   await assertPretool(spec.pretoolScript ?? PRETOOL_SCRIPT);
   const args = buildClaudeArgs(spec);
   const bashTimeout = spec.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;

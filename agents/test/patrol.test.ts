@@ -419,6 +419,92 @@ describe('巡查脚本：发版事故和健康页（2026-10-14 法国发版失�
       expect(judge(t === '-' ? {} : { train: t }).verdict, t).toBe('OK');
   });
 
+  describe('进度记录 running：正常在走不判 BROKEN，超过 LIMITS.trainStuckMinutes 才算（2026-10-14 22:58Z 每趟自动发版都判 BROKEN）', () => {
+    const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
+    const RUNNING_NOTE = '现在不发：上一趟发版是「running」状态，要人看，不自动再发';
+    const LAST = [`2026-10-14T22:49:55Z ${CUR} release`];
+    // 法国打回来的是去掉空白的原 JSON（REMOTE_SCRIPT 里 tr -d '[:space:]'）
+    const train = (status: string, startedMinAgo: number | null) =>
+      JSON.stringify({
+        schema: 1,
+        status,
+        phase: 4,
+        ...(startedMinAgo === null
+          ? {}
+          : {
+              startedAt: new Date(NOW.getTime() - startedMinAgo * 60_000).toISOString(),
+              updatedAt: new Date(NOW.getTime() - startedMinAgo * 60_000).toISOString(),
+            }),
+        target: { kind: 'sha', value: NEW },
+      });
+
+    it('进行中 5 分钟：OK，自动发布因为它说的「要人看」也不算', () => {
+      const r = judge({ hist: LAST, trainRaw: train('running', 5), autoNote: RUNNING_NOTE });
+      expect(r.verdict).toBe('OK');
+      expect(r.broken).toBeNull();
+    });
+
+    it('【故意造出的失败】超过阈值：BROKEN，写正在发的提交，不写上一版', () => {
+      const r = judge({ hist: LAST, trainRaw: train('running', 71), autoNote: RUNNING_NOTE });
+      expect(r.verdict).toBe('BROKEN');
+      expect(r.broken).toContain('正在发 2f5dc42f4636 的这一趟');
+      expect(r.broken).toContain('超过 70 分钟没收尾');
+      expect(r.broken).toContain('自动发布处于「要人看」');
+      expect(judge({ hist: LAST, trainRaw: train('running', 70) }).verdict).toBe('OK');
+    });
+
+    it('done 不判（刚收尾、自动发布还是上一班的旧话也不判）', () => {
+      expect(judge({ hist: LAST, trainRaw: train('done', 300), autoNote: RUNNING_NOTE }).verdict).toBe('OK');
+    });
+
+    it('旧格式（只有 status）的 running：判不了多久，照旧 BROKEN，写明老格式', () => {
+      const r = judge({ hist: LAST, train: 'running' });
+      expect(r.verdict).toBe('BROKEN');
+      expect(r.broken).toContain('没有起止时间（老格式）');
+      expect(judge({ hist: LAST, trainRaw: train('running', null) }).verdict).toBe('BROKEN');
+    });
+
+    it('【故意造出的失败】这一趟落地了（done、current 就是目标），末行「健康检查没过」说的是它：OK；current 不是目标、或退回了：BROKEN（#2207）', () => {
+      // sampleRaw 的 current 是 CUR
+      const done = JSON.stringify({
+        schema: 1,
+        status: 'done',
+        phase: 8,
+        target: { kind: 'sha', value: CUR },
+      });
+      const r = judge({ hist: [...LAST, `2026-10-14T23:05:30Z ${CUR} unhealthy`], trainRaw: done });
+      expect(r.verdict).toBe('OK');
+      expect(r.broken).toBeNull();
+      const other = JSON.stringify({
+        schema: 1,
+        status: 'done',
+        phase: 8,
+        target: { kind: 'sha', value: NEW },
+      });
+      const r2 = judge({ hist: [...LAST, `2026-10-14T23:05:30Z ${NEW} unhealthy`], trainRaw: other });
+      expect(r2.verdict).toBe('BROKEN');
+      expect(r2.broken).toContain('最近一次发版是 unhealthy');
+      const r3 = judge({ hist: [...LAST, `2026-10-14T23:05:31Z ${CUR} auto-rollback`], trainRaw: done });
+      expect(r3.verdict).toBe('BROKEN');
+      expect(r3.broken).toContain('最近一次发版是 auto-rollback');
+    });
+
+    it('阈值从发版接活脚本各步上限推出来（和引擎看门狗 TRAIN_STUCK_MS 同一条线：不小于各步加起来、最多多 5 分钟余量）', async () => {
+      // 引擎那份（packages/engine/src/jobs/release-watch.ts）不在这一组的依赖里，两边各自钉在同一份上限上：
+      // packages/engine/test/watchdog.test.ts 对 TRAIN_STUCK_MS 做同样的核对
+      const { LIMITS: L } = (await import(
+        pathToFileURL(fileURLToPath(new URL('../../deploy/france/release-request/lib.mjs', import.meta.url)))
+          .href
+      )) as { LIMITS: Record<'releaseMs' | 'deployMs' | 'checkMs' | 'verifyMs' | 'stepMs', number> };
+      const { LIMITS } = (await import(pathToFileURL(join(SCRIPTS, 'patrol-lib.mjs')).href)) as {
+        LIMITS: { trainStuckMinutes: number };
+      };
+      const worst = L.releaseMs + L.deployMs + L.checkMs + L.verifyMs + 8 * L.stepMs;
+      expect(LIMITS.trainStuckMinutes * 60_000).toBeGreaterThanOrEqual(worst);
+      expect(LIMITS.trainStuckMinutes * 60_000).toBeLessThanOrEqual(worst + 5 * 60_000);
+    });
+  });
+
   it('自动发布处于「要人看」（只有它这一条，别的都正常）：BROKEN', () => {
     const r = judge({ autoNote: '现在不发：上一趟发版是「failed」状态，要人看，不自动再发' });
     expect(r.verdict).toBe('BROKEN');

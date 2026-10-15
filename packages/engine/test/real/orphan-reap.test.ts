@@ -15,8 +15,14 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { ORPHAN_RUN_REASON, orphanReaper, RETIRED_IO_ROOT_ALERT_KEY } from '../../src/real/orphan-reap.ts';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  ORPHAN_RUN_REASON,
+  orphanReaper,
+  RETIRED_IO_ROOT_ALERT_KEY,
+  UNCLAIMED_RUN_REASON,
+} from '../../src/real/orphan-reap.ts';
+import { DETACHED_MARK, HANDOFF_TTL_MS } from '../../src/real/session-handoff.ts';
 import { addTask, fakeScopeHelper, fakeTrees, NOW, world } from './fixtures.ts';
 
 let t: TestDb;
@@ -170,5 +176,113 @@ describe('会话临时目录：工人起来时清掉上一轮留下的；删不�
     expect(await reap()).toBe(0);
     const unlisted = logs.find((l) => l.message.includes('没清成：列不出来'));
     expect(unlisted?.fields?.error).toContain('列不出会话临时目录');
+  });
+});
+
+describe('脱开引擎跑、等人接回的动手会话（#2238）', () => {
+  /** 一格收发目录：detachedAt 给了就写放手标记。 */
+  function ioCell(ioRoot: string, runId: string, detachedAt?: Date): string {
+    const dir = join(ioRoot, runId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'out'), '{"type":"system"}\n');
+    if (detachedAt) writeFileSync(join(dir, DETACHED_MARK), `${detachedAt.toISOString()}\n`);
+    return dir;
+  }
+
+  function handoffSetup() {
+    const trees = fakeTrees(join(root, 'work'));
+    const scope = fakeScopeHelper(root);
+    const logs: Logged[] = [];
+    const ioRoot = join(root, 'io');
+    const delayed: { fn: () => void; ms: number }[] = [];
+    let clock = NOW;
+    const reap = orphanReaper({
+      db: t.db,
+      trees: trees.trees,
+      helper: scope.helper,
+      sudo: scope.sudo,
+      ioRoot,
+      later: (fn, ms) => void delayed.push({ fn, ms }),
+      now: () => clock,
+      log: (message, fields) => logs.push({ message, fields }),
+    });
+    return { reap, trees, scope, logs, ioRoot, delayed, setNow: (d: Date) => (clock = d) };
+  }
+
+  const open = (id: string) =>
+    startRun(t.db, { id, segment: 'manual', model: 'grok-4.7', routeId: 'carpool', startedAt: NOW });
+
+  it('上一个引擎刚放手的：scope 不收、临时目录不删、runs 那一行不收、收发目录留着；同一轮别的照孤儿收', async () => {
+    const { reap, trees, scope, ioRoot, delayed } = handoffSetup();
+    const kept = randomUUID();
+    const orphan = randomUUID();
+    process.env.FAKE_SCOPE_LIST = `${kept} active\n${orphan} active\n`;
+    await open(kept);
+    await open(orphan);
+    const keptIo = ioCell(ioRoot, kept, new Date(NOW.getTime() - 60_000));
+    const doneIo = ioCell(ioRoot, randomUUID());
+    for (const id of [kept, orphan]) mkdirSync(tmpOf(trees, id), { recursive: true });
+
+    expect(await reap()).toBe(1);
+    const stopped = scope.calls().filter((c) => c.action === 'stop');
+    expect(stopped.map((c) => c.args[0])).toEqual([orphan]);
+    expect(existsSync(tmpOf(trees, kept))).toBe(true);
+    expect(existsSync(tmpOf(trees, orphan))).toBe(false);
+    expect(await getRun(t.db, kept)).toMatchObject({ endedAt: null, outcome: null });
+    expect(await getRun(t.db, orphan)).toMatchObject({ outcome: 'killed', failureReason: ORPHAN_RUN_REASON });
+    // 没有放手标记的收发目录（收过场、被叫停的）删掉；等人接回的留着
+    expect(existsSync(keptIo)).toBe(true);
+    expect(existsSync(doneIo)).toBe(false);
+    // 过了时限还没人接回的，起来以后再清一次
+    expect(delayed.map((d) => d.ms)).toEqual([HANDOFF_TTL_MS]);
+  });
+
+  it('【故意造出的失败】放手以后过了时限没人接回：延迟清扫把 scope、收发目录、临时目录、runs 那一行照孤儿收掉；已经接回的（标记删了）不碰', async () => {
+    const { reap, trees, scope, ioRoot, delayed, setNow } = handoffSetup();
+    const lost = randomUUID();
+    const claimed = randomUUID();
+    process.env.FAKE_SCOPE_LIST = `${lost} active\n${claimed} active\n`;
+    for (const id of [lost, claimed]) {
+      await open(id);
+      ioCell(ioRoot, id, NOW);
+      mkdirSync(tmpOf(trees, id), { recursive: true });
+    }
+    expect(await reap()).toBe(0);
+    // claimed 这时被工作流接回了：Spawner 删了标记
+    rmSync(join(ioRoot, claimed, DETACHED_MARK));
+    setNow(new Date(NOW.getTime() + HANDOFF_TTL_MS));
+    for (const d of delayed) d.fn();
+    await vi.waitFor(async () => expect((await getRun(t.db, lost))?.outcome).toBe('killed'));
+    expect(await getRun(t.db, lost)).toMatchObject({ failureReason: UNCLAIMED_RUN_REASON });
+    expect(await getRun(t.db, claimed)).toMatchObject({ endedAt: null });
+    expect(
+      scope
+        .calls()
+        .filter((c) => c.action === 'stop')
+        .map((c) => c.args[0]),
+    ).toEqual([lost]);
+    expect(existsSync(join(ioRoot, lost))).toBe(false);
+    expect(existsSync(tmpOf(trees, lost))).toBe(false);
+    expect(existsSync(join(ioRoot, claimed))).toBe(true);
+    expect(existsSync(tmpOf(trees, claimed))).toBe(true);
+  });
+
+  it('【故意造出的失败】标记早就过了时限（引擎停了很久才起来）：起来那一下就照孤儿收，不等', async () => {
+    const { reap, scope, ioRoot, delayed } = handoffSetup();
+    const stale = randomUUID();
+    process.env.FAKE_SCOPE_LIST = `${stale} active
+`;
+    await open(stale);
+    ioCell(ioRoot, stale, new Date(NOW.getTime() - HANDOFF_TTL_MS - 1));
+    expect(await reap()).toBe(1);
+    expect(
+      scope
+        .calls()
+        .filter((c) => c.action === 'stop')
+        .map((c) => c.args[0]),
+    ).toEqual([stale]);
+    expect(await getRun(t.db, stale)).toMatchObject({ outcome: 'killed', failureReason: ORPHAN_RUN_REASON });
+    expect(existsSync(join(ioRoot, stale))).toBe(false);
+    expect(delayed).toEqual([]);
   });
 });
