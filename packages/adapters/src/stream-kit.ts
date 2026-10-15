@@ -1,5 +1,5 @@
-// 各家过程记录解析共用的小工具：取字段、截断、相对路径、步骤清单、认测试、认额度用满。
-// 只放「每家都一样」的判法；某一家特有的形状留在那一家的读取器里。
+// 各家过程记录解析共用的小工具：取字段、截断、相对路径、步骤清单、认测试、认额度用满、
+// 工具摘要和结果正文的截断。只放「每家都一样」的判法；某一家特有的字段映射留在那一家的读取器里。
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import type { PlanPayload, PlanStep, TestPayload, TranscriptEntry } from './types.ts';
 
@@ -84,6 +84,89 @@ export function transcriptEntry(
     ...optional('ok', extra.ok),
     ...optional('meta', extra.meta),
   };
+}
+
+/** 会话过程记录里工具输入摘要先取多长（调用方写库前再按上限截）。 */
+export const TRANSCRIPT_SUMMARY_MAX = 2000;
+
+/** 进度事件里工具摘要的默认上限。会话记录用 TRANSCRIPT_SUMMARY_MAX，更长。 */
+export const TOOL_SUMMARY_MAX = 200;
+
+/** 失败说明（进度事件的 error、失败的工具结果）写进去之前的上限。 */
+export const FAILURE_TEXT_MAX = 500;
+
+/** 工具成功了，但命令输出和工具回的文字都没有（cursor、grok 一样）。 */
+export const EMPTY_TOOL_RESULT = '（无输出）';
+
+/**
+ * 工具输入摘要的公共截断。各渠道先按自己的字段映射挑出一段文本，截断只走这里：
+ * 没挑到给空串，超长截断并加省略号。不传 max 时用 TOOL_SUMMARY_MAX。
+ */
+export function toolSummary(text: string | undefined, max = TOOL_SUMMARY_MAX): string {
+  return cut(text ?? '', max);
+}
+
+/**
+ * 工具结果的正文。字符串原样交回（含空串）。内容块数组按 pick 抽出 text 再拼起来，
+ * 默认认块自己的 text、空块留成空串、中间不加分隔（claude 的内容块）。
+ * 套了两层的渠道传自己的 pick，并用 sep / dropEmpty 决定怎么拼（grok：块内 content.text，空块不占一行）。
+ * 不是字符串也不是数组就给空串。成功却没有正文要不要写成（无输出），各渠道自己定。
+ */
+export function resultText(
+  content: unknown,
+  options?: {
+    pick?: (block: unknown) => string | undefined;
+    sep?: string;
+    dropEmpty?: boolean;
+  },
+): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const pick = options?.pick ?? ((block: unknown) => str(rec(block)?.text));
+  const parts: string[] = [];
+  for (const block of content) {
+    const text = pick(block) ?? '';
+    if (options?.dropEmpty && !text) continue;
+    parts.push(text);
+  }
+  return parts.join(options?.sep ?? '');
+}
+
+/**
+ * 失败说明的公共截断。各渠道把退出码、信号、报错字段拼成一段再交到这里。
+ * 不改字、不去空白：拼的时候怎么取字段是各家的事。
+ */
+export function failureText(text: string, max = FAILURE_TEXT_MAX): string {
+  return cut(text, max);
+}
+
+/** 命令没成功时失败说明的开头：读不到退出码写问号，不写成 0。 */
+export function exitCodeText(code: number | undefined): string {
+  return `退出码 ${code ?? '?'}`;
+}
+
+/**
+ * 搜索类工具的摘要：图案，有路径再接「 @ 相对路径」（树内相对、树外原样）。
+ * 图案和路径都没有就 undefined，调用方再兜底。
+ */
+export function searchSummary(
+  pattern: string | undefined,
+  where: string | undefined,
+  cwd: string,
+): string | undefined {
+  const path = where ? relPath(where, cwd) : undefined;
+  const text = [pattern, path].filter((part) => part).join(' @ ');
+  return text || undefined;
+}
+
+/** 认不出的工具：输入里第一个字符串字段当摘要。空串也算，调用方原样截断。 */
+export function firstStringField(input: Record<string, unknown>): string | undefined {
+  return Object.values(input).find((value): value is string => typeof value === 'string');
+}
+
+/** 待办清单在工具摘要里怎么写。不是数组按 0 条。 */
+export function todoSummary(todos: unknown): string {
+  return `待办 ${Array.isArray(todos) ? todos.length : 0} 条`;
 }
 
 const PLAN_LIMIT = 30;
