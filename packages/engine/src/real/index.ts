@@ -802,7 +802,7 @@ export function realPortsFromEnv(
     oneShots,
     machine: config.machine,
     readApi: readCarpoolApi,
-    // 切完探通，当场叫醒等路由的任务工作流重新选一次（#194 方案 4.3，不等 MAX_ROUTE_WAIT_SECONDS），见 real/route-wake.ts
+    // 切完探通，当场叫醒等路由的任务工作流重新选一次（#194 方案 4.3，不等这一轮睡满），见 real/route-wake.ts
     probeNow: wakeAfterProbeNow((to) => probeOrgNow(routeProbe(), to), routeWake),
   });
   const routeProbe = routeProbeJob({

@@ -25,7 +25,13 @@ import type { PickRouteInput } from '../../src/ports.ts';
 import type { UserExec } from '../../src/real/exec.ts';
 import { poolHoldAfterProbe } from '../../src/real/route-probe.ts';
 import { type SessionOrgReader, sessionOrgReader } from '../../src/real/session-org.ts';
-import { createStorePorts, ORG_READ_RETRY_SECONDS, poolHoldKey } from '../../src/real/store-ports.ts';
+import {
+  createStorePorts,
+  MAX_ROUTE_WAIT_SECONDS,
+  ORG_READ_RETRY_SECONDS,
+  poolHoldKey,
+  QUOTA_ROUTE_WAIT_CAP_SECONDS,
+} from '../../src/real/store-ports.ts';
 import {
   addCursorRoute,
   addGrokRoute,
@@ -1655,5 +1661,66 @@ describe('选路：动手按模型战绩（PLAN 3f，决定 0093）', () => {
     } finally {
       await t.client.exec('alter table tasks_unreadable rename to tasks');
     }
+  });
+});
+
+describe('等额度按清零时刻睡（#2329）', () => {
+  const hour = 60 * 60 * 1000;
+
+  /** 两条 Claude 路由的 5 小时窗、周窗都用满。resetsAt 空 = 清零时刻不知道。 */
+  async function exhaust(resetsAt: string | null): Promise<void> {
+    const readAt = NOW.toISOString();
+    for (const poolId of ['claude-solo', 'claude-carpool']) {
+      const window = (kind: '5h' | '7d', label: string) => ({
+        poolId,
+        window: kind,
+        label,
+        unit: 'percent' as const,
+        utilization: 1,
+        reading: 'measured' as const,
+        readAt,
+        source: 'test',
+        ...(resetsAt === null ? {} : { resetsAt }),
+      });
+      await savePoolQuota(
+        t.db,
+        {
+          poolId,
+          readAt,
+          complete: true,
+          windows: [window('5h', 'five_hour'), window('7d', 'seven_day')],
+        },
+        { now: NOW },
+      );
+    }
+  }
+
+  it('until 在 28 小时后：按上限睡，不再压成 120 秒', async () => {
+    await world(t.db);
+    await exhaust(new Date(NOW.getTime() + 28 * hour).toISOString());
+    const r = await pick({ stage: 'execute' });
+    expect(QUOTA_ROUTE_WAIT_CAP_SECONDS).toBeGreaterThan(MAX_ROUTE_WAIT_SECONDS);
+    expect(r).toMatchObject({
+      ok: false,
+      waitFor: 'quota',
+      retryAfterSeconds: QUOTA_ROUTE_WAIT_CAP_SECONDS,
+    });
+    expect(!r.ok && r.detail).toContain('清零');
+  });
+
+  it('until 在上限之内（45 分钟）：按 until 睡，不拉到上限、也不压成 120 秒', async () => {
+    await world(t.db);
+    await exhaust(new Date(NOW.getTime() + 45 * MIN).toISOString());
+    const r = await pick({ stage: 'execute' });
+    expect(r).toMatchObject({ ok: false, waitFor: 'quota', retryAfterSeconds: 45 * 60 });
+  });
+
+  it('清零时刻不知道：不给秒数，交给工作流按短间隔轮询', async () => {
+    await world(t.db);
+    await exhaust(null);
+    const r = await pick({ stage: 'execute' });
+    expect(r.ok).toBe(false);
+    if (r.ok || r.waitFor !== 'quota') throw new Error(`expected quota wait, got ${JSON.stringify(r)}`);
+    expect(r.retryAfterSeconds).toBeUndefined();
   });
 });
