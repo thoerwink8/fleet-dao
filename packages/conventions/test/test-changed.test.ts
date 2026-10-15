@@ -19,6 +19,7 @@ import {
   AGENTS_CI_NOTE,
   BASE,
   changedFiles,
+  DOC_POINTERS_TAIL_ARGS,
   DOC_POINTERS_TEST,
   ENGINE_SESSION_MARKER,
   type GitRun,
@@ -238,19 +239,16 @@ describe('跑哪些测试：和 CI 按改动跑同一套判法', () => {
     expect(selectTests([], GRAPH)).toMatchObject({ kind: 'some', paths: [...LOCAL_ALWAYS_TESTS] });
   });
 
-  it('跑过之后把文档指针检查的结果打在最后一行：自测只留输出末尾，开头的文件名留不住', () => {
+  it('整份过了再真跑一遍文档指针里「都指得到」那一条：冷验收只留输出末尾，开头的文件名留不住', () => {
     const passed = run(['docs/ops.md'], { docReaders: () => [] });
     expect(passed.code).toBe(0);
     expect(passed.vitestCalls[0]).toContain(DOC_POINTERS_TEST);
-    expect(passed.out.at(-1)).toBe(
-      `文档指针检查通过：${DOC_POINTERS_TEST} 在这次里跑了，vitest 退出码 0（全仓活文档的路径和章节都指得到）`,
-    );
+    expect(passed.vitestCalls[1]).toEqual([...DOC_POINTERS_TAIL_ARGS]);
     const failed = run(['docs/ops.md'], { docReaders: () => [], vitest: () => ({ status: 1 }) });
     expect(failed.code).toBe(1);
-    expect(failed.out.join('\n')).not.toContain('文档指针检查通过');
-    const all = run(['pnpm-lock.yaml'], { argv: ['--all'] });
-    expect(all.vitestCalls[0]).toEqual(['run']);
-    expect(all.out.at(-1)).toContain('文档指针检查通过');
+    expect(failed.vitestCalls).toHaveLength(1);
+    const all = run(['pnpm-lock.yaml'], { argv: ['--all'], vitest: () => ({ status: 1 }) });
+    expect(all.vitestCalls).toEqual([['run']]);
   });
 
   it('改一个包（决定 0093）：不拖上整个 agents/test/，CI 另外还跑里写着它', () => {
@@ -404,8 +402,9 @@ describe('只改文档：只跑读这些文档的测试，不拖上 agents/test/
   it('整段流程：只改进度文档跑的是缩小后的清单、退出码 0；列不出测试文件时照整份跑（不是 0 个、也不是 3）', () => {
     const r = run([PROGRESS], { docReaders: realReaders });
     expect(r.code).toBe(0);
-    expect(r.vitestCalls).toHaveLength(1);
+    expect(r.vitestCalls).toHaveLength(2);
     expect(r.vitestCalls[0]).toContain(DOC_POINTERS_TEST);
+    expect(r.vitestCalls[1]).toEqual([...DOC_POINTERS_TAIL_ARGS]);
     expect(r.vitestCalls[0]).not.toContain('agents/test/');
     const broken = run([PROGRESS], { docReaders: () => '列不出测试文件：x' });
     expect(broken.code).toBe(0);
@@ -534,7 +533,10 @@ describe('要全跑时本机不跑：写明原因、全量交给 CI，不再教�
   });
 
   it('在 CI 里（CI=true）照旧全跑；CI 写成 false、0、空的不算在 CI 里', () => {
-    expect(run(['pnpm-lock.yaml'], { env: { CI: 'true' } }).vitestCalls).toEqual([['run']]);
+    expect(run(['pnpm-lock.yaml'], { env: { CI: 'true' } }).vitestCalls).toEqual([
+      ['run'],
+      [...DOC_POINTERS_TAIL_ARGS],
+    ]);
     for (const CI of ['false', '0', '']) {
       expect(run(['pnpm-lock.yaml'], { env: { CI } }).code, CI).toBe(REFUSED_FULL_RUN);
     }
@@ -543,7 +545,7 @@ describe('要全跑时本机不跑：写明原因、全量交给 CI，不再教�
   it('引擎起的会话（环境里有会话标记）照旧全跑：拒跑的话交活永远过不了；会话在有内存上限的 scope 里', () => {
     expect(ENGINE_SESSION_MARKER).toBe('FLEET_RUN_ID');
     const r = run(['packages/shared/src/domain.ts'], { env: { [ENGINE_SESSION_MARKER]: 'run-1' } });
-    expect(r.vitestCalls).toEqual([['run']]);
+    expect(r.vitestCalls).toEqual([['run'], [...DOC_POINTERS_TAIL_ARGS]]);
     expect(r.code).toBe(0);
     expect(r.out.join('\n')).toContain('引擎起的会话：照旧全跑');
     // 标记是空的不算
@@ -557,7 +559,10 @@ describe('要全跑时本机不跑：写明原因、全量交给 CI，不再教�
     expect(some.code).toBe(0);
     expect(some.vitestCalls[0]?.[0]).toBe('run');
     expect(some.vitestCalls[0]).toContain('packages/api/');
-    expect(run(['packages/api/src/cli.ts'], { argv: ['--all'] }).vitestCalls).toEqual([['run']]);
+    expect(run(['packages/api/src/cli.ts'], { argv: ['--all'] }).vitestCalls).toEqual([
+      ['run'],
+      [...DOC_POINTERS_TAIL_ARGS],
+    ]);
   });
 
   it('给了 --all 以外的参数：退出码 2，一个测试都不跑，写明只收 --all', () => {
@@ -614,8 +619,8 @@ describe('CI 每次都跑的测试：ci.yml 和 ALWAYS_TESTS 对得上；本机�
     const got = new Set(filesOf(list));
     return filesOf(CI_ALWAYS).filter((f) => !got.has(f));
   };
-  /** test:changed 给出的清单：跑了的是交给 vitest 的过滤；拒跑的什么都不跑、也不再打清单（全量交给 CI，#1066），所以是空的。 */
-  const listOf = (r: ReturnType<typeof run>) => r.vitestCalls.flatMap((args) => args.slice(1));
+  /** test:changed 给出的清单：第一遍交给 vitest 的过滤。过了之后再跑的那一遍文档指针不在这份清单里。拒跑的是空的。 */
+  const listOf = (r: ReturnType<typeof run>) => (r.vitestCalls[0] ?? []).slice(1);
 
   it('从 ci.yml 读得出来，正好就是 ALWAYS_TESTS（多一份、少一份都红），每一份都跑得到真测试文件', () => {
     expect(CI_ALWAYS.length, 'ci.yml 里一处每次都跑的测试都没读到：这里查的东西不在了').toBeGreaterThan(0);
