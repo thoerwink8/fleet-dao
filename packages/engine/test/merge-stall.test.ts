@@ -1,6 +1,8 @@
 // 看门狗的「主线 N 小时没合 PR」（决定 0093，jobs/merge-stall.ts）：判法的纯函数，加真库上看门狗一轮的报、撤（real/watchdog.ts）。
 // 需求里的每一种都故意造一次：超过 N 小时没合、有待做的单 → 报一条；没活干 → 不报；合了 → 撤并写为什么；
 // 开关关了 → 撤；人处理过的同一段不再打开；正文不带每轮变的数、没变不改卡；读不到事实 → 这一轮没跑成、开着的不撤。
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   notifications,
   pullRequests,
@@ -102,7 +104,16 @@ describe('看门狗一轮里的「多久没合 PR」（真库）', () => {
   });
 
   function deps(over: Partial<WatchdogDeps> = {}): WatchdogDeps {
-    return { ...watchdogJob({ db: t.db, now: () => clock, log: () => {} })(), ...over };
+    return {
+      ...watchdogJob({
+        db: t.db,
+        now: () => clock,
+        log: () => {},
+        // 这组测「多久没合 PR」。发版和每日简报认发布目录：法国这台目录在，不指开会把宿主机的发版卷进断言。
+        releasesDir: join(tmpdir(), 'fleet-watchdog-no-releases'),
+      })(),
+      ...over,
+    };
   }
 
   async function repo(name: string, since: Date | null) {

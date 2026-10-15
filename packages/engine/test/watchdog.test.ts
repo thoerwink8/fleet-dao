@@ -8,19 +8,23 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   auditLog,
+  channels,
   finishScheduleRun,
   MASTER_OFF_SKIP_WHY,
   notifications,
+  pools,
   registerScheduledJobs,
   repos,
   resolveAlertWithReason,
   type ScheduleResult,
   scheduleRuns,
+  settings,
   startScheduleRun,
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { CARPOOL_WATCH_JOB } from '../src/jobs/carpool-watch.ts';
 import {
   judgeReleaseAttention,
   lastHistoryEntry,
@@ -93,6 +97,8 @@ function deps(over: Partial<WatchdogDeps> = {}): WatchdogDeps {
     db: t.db,
     now: () => clock,
     log: (level, text) => logs.push(`${level}:${text}`),
+    // 这组测定时任务新鲜度。发版和每日简报认发布目录：法国这台目录在，不指开会把宿主机的发版卷进断言。
+    releasesDir: join(tmpdir(), 'fleet-watchdog-no-releases'),
   })();
   return { ...real, ...over };
 }
@@ -461,6 +467,92 @@ describe('看门狗一轮（真库）', () => {
     ).rejects.toThrow();
     expect(looked).toBe(false);
     expect(await allAlerts()).toEqual([]);
+  });
+
+  it('拼车池整池暂停：carpool-watch 登记行还在也不报「停了」，开着的撤掉；还有拼车池没停则照常报；撤了暂停、超时没跑再报', async () => {
+    const hold = {
+      reason: '324 个账号被封，整池停用',
+      decidedBy: '创始人 2026-10-08',
+      revokeWhen: '换上新账号并登记新组织编号后撤',
+      reviewBy: '2026-11-07',
+    };
+    await t.db.insert(channels).values({
+      id: 'claude-subscription',
+      name: 'Claude 订阅',
+      billing: 'subscription',
+    });
+    await t.db.insert(pools).values([
+      {
+        id: 'claude-carpool',
+        channelId: 'claude-subscription',
+        maxConcurrency: 4,
+        runAsUser: 'fleet-agent-carpool',
+        orgKind: 'carpool',
+      },
+      {
+        id: 'claude-carpool-b',
+        channelId: 'claude-subscription',
+        maxConcurrency: 1,
+        runAsUser: 'fleet-agent-carpool',
+        orgKind: 'carpool',
+      },
+    ]);
+    await register({
+      id: CARPOOL_WATCH_JOB.id,
+      name: CARPOOL_WATCH_JOB.name,
+      schedule: CARPOOL_WATCH_JOB.schedule,
+      expectEveryMinutes: CARPOOL_WATCH_JOB.expectEveryMinutes,
+    });
+    const ok = await run(CARPOOL_WATCH_JOB.id, -30, { outcome: 'ok', scanned: 1, found: 0 });
+    const key = `watchdog:job:${CARPOOL_WATCH_JOB.id}:after-${ok}`;
+    // 只停了一个拼车池：还有一个没停，盯读该照常跑，超时没跑照报
+    await t.db.insert(settings).values({
+      key: 'engine.poolHolds',
+      value: { 'claude-carpool': hold },
+      updatedBy: '创始人',
+    });
+    expect(await runWatchdogJob(deps())).toMatchObject({ outcome: 'ok', found: 1 });
+    expect((await openAlerts()).map((a) => a.dedupeKey)).toEqual([key]);
+
+    // 每个拼车池都停着：不报，已经开着的撤掉（登记行还在）
+    await t.db.delete(settings);
+    await t.db.insert(settings).values({
+      key: 'engine.poolHolds',
+      value: { 'claude-carpool': hold, 'claude-carpool-b': hold },
+      updatedBy: '创始人',
+    });
+    expect(await runWatchdogJob(deps())).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(await openAlerts()).toEqual([]);
+    expect(firstLine((await alertOf(key))?.body)).toContain('已撤：');
+    expect((await alertOf(key))?.body).toContain('整池暂停着');
+
+    // 撤了暂停，仍超时没跑：照常要求新鲜
+    await t.db.delete(settings);
+    expect(await runWatchdogJob(deps())).toMatchObject({ outcome: 'ok', found: 1 });
+    expect((await openAlerts()).map((a) => [a.dedupeKey, a.title])).toEqual([
+      [key, '定时任务「拼车额度盯读（切号用）」停了：超过 10 分钟没跑'],
+    ]);
+  });
+
+  it('【故意造出的失败】读不到哪些任务是有意停的：不当成暂停，照常报停了，这一轮记没查成', async () => {
+    await register({
+      id: CARPOOL_WATCH_JOB.id,
+      name: CARPOOL_WATCH_JOB.name,
+      expectEveryMinutes: CARPOOL_WATCH_JOB.expectEveryMinutes,
+    });
+    await run(CARPOOL_WATCH_JOB.id, -30, { outcome: 'ok', scanned: 1, found: 0 });
+    await expect(
+      runWatchdogJob(
+        deps({
+          pausedJobs: async () => {
+            throw new Error('库断了');
+          },
+        }),
+      ),
+    ).rejects.toThrow(/有意停/);
+    expect((await openAlerts()).map((a) => a.title)).toEqual([
+      '定时任务「拼车额度盯读（切号用）」停了：超过 10 分钟没跑',
+    ]);
   });
 
   it('【故意造出的失败】退役的任务（alert-dispatch，#445「提醒派单」整层删掉）：登记表上还在、早停了也不报——它不会再跑，报了也没人能处理；没登记在 ENGINE_JOBS 里的别的任务（这里的 route-probe）照样正常管，不因为筛退役任务被连带漏管', async () => {

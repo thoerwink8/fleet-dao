@@ -7,6 +7,7 @@
 // 外部看门狗（#292）只在进程环境配了非空的 FLEET_EDGE_WATCH_ID 时登记；没配或是空的就把库里已有的这一行摘掉，
 // 避免 Worker 还没部署就按「登记了还没跑过」误报。
 import { type Db, registerScheduledJobs, unregisterScheduledJobs } from '@fleet-dao/db';
+import { errMessage } from '@fleet-dao/shared/util';
 import { CARPOOL_WATCH_JOB } from '../jobs/carpool-watch.ts';
 import { CI_TIMINGS_JOB } from '../jobs/ci-timings.ts';
 import { CLI_UPGRADE_JOB } from '../jobs/cli-upgrade.ts';
@@ -23,6 +24,7 @@ import { RETIRED_SCHEDULE_IDS } from '../jobs/retired-schedules.ts';
 import { ROUTE_PROBE_JOB } from '../jobs/route-probe.ts';
 import { USAGE_BACKFILL_JOB } from '../jobs/usage-backfill.ts';
 import { WATCHDOG_JOB } from '../jobs/watchdog.ts';
+import { carpoolPoolsHeldReason } from './pool-holds.ts';
 
 export const ENGINE_JOBS = [
   GITHUB_RECONCILE_JOB,
@@ -54,7 +56,17 @@ export async function registerEngineJobs(
   db: Db,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): Promise<void> {
-  await registerScheduledJobs(db, [...ENGINE_JOBS]);
+  // 拼车池整池暂停时不把 carpool-watch 登记回来：registerScheduledJobs 会把 removed_at 清掉，而盯读进程记着
+  // 「已经摘过」就不再写，看门狗按还在的登记行报「停了」。读不到暂停不当成暂停，照常登记（宁可多盯）。
+  let carpoolPaused = false;
+  try {
+    carpoolPaused = (await carpoolPoolsHeldReason(db, new Date())) !== null;
+  } catch (error) {
+    console.warn(`登记定时任务：读不到拼车池是不是暂停，carpool-watch 照常登记（${errMessage(error)}）`);
+  }
+  const jobs = carpoolPaused ? ENGINE_JOBS.filter((job) => job.id !== CARPOOL_WATCH_JOB.id) : ENGINE_JOBS;
+  await registerScheduledJobs(db, [...jobs]);
+  if (carpoolPaused) await unregisterScheduledJobs(db, [CARPOOL_WATCH_JOB.id]);
   // Worker 还没部署时（FLEET_EDGE_WATCH_ID 没配或是空的）不能登记：看门狗会按「登记了超过期望间隔还没跑过」立刻误报。
   // 这种时候把库里已有的这一行摘掉，不留旧行。别的外部登记（备份脚本这类）不在这份清单上，不动。
   if (edgeWatchConfigured(env)) await registerScheduledJobs(db, [EXTERNAL_WATCHDOG_JOB]);
