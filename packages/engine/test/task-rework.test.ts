@@ -39,12 +39,31 @@ function input(over: Partial<TaskWorkflowInput> = {}): TaskWorkflowInput {
   };
 }
 
-async function start(q: string, i: TaskWorkflowInput): Promise<WorkflowHandle> {
+async function start(q: string, i: TaskWorkflowInput, generation = 1): Promise<WorkflowHandle> {
   return env.client.workflow.start(WORKFLOW_TYPES.task, {
     taskQueue: q,
-    workflowId: taskWorkflowId(i.repo, i.issueNumber),
+    workflowId: taskWorkflowId(i.repo, i.issueNumber, generation),
     args: [i],
   });
+}
+
+/** 上一代的会话落在这个时刻，早于任何一代测试工作流的开工。 */
+const PREVIOUS_GENERATION_AT = Date.parse('2020-01-01T00:00:00.000Z');
+const PREVIOUS_GENERATION_TOKENS = 83_500_000;
+
+/**
+ * 照 taskTokenSpend 的口径：给了起算时间就只算这之后的（上一代的 83.5M 在开工之前，不算）。
+ * 没给起算时间就整张单都算，用来抓住「工作流忘了传 since」。
+ */
+function spendSince(input: { since?: string } | undefined, ownTokens: number) {
+  const since = input?.since === undefined ? Number.NEGATIVE_INFINITY : Date.parse(input.since);
+  const previous = PREVIOUS_GENERATION_AT >= since ? PREVIOUS_GENERATION_TOKENS : 0;
+  return {
+    tokens: previous + ownTokens,
+    runs: previous + ownTokens > 0 ? 1 : 0,
+    unmetered: 0,
+    estimated: 0,
+  };
 }
 
 const statusOf = (h: WorkflowHandle): Promise<TaskStatus> => h.query(taskStatusQuery);
@@ -361,6 +380,72 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
     expect(alert).toContain('3 次会话用量还没补上');
     expect(alert).toContain('估出来的下限'); // 说清哪部分是估的，不当成量到的
     expect(alert).toContain(`另 ${estimated} 是`);
+  });
+
+  it('重做的第 2 代：上一代已花 83.5M，开工时累计是 0，正常起会话，不停下', async () => {
+    const world = createFakeWorld();
+    const seen: number[] = [];
+    const { tasks, calls } = scripted({
+      spend: (_n, input) => {
+        const spent = spendSince(input, 0);
+        seen.push(spent.tokens);
+        return spent;
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input(), 2)).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(seen[0]).toBe(0);
+    expect(calls.spendInputs[0]?.since).toBeTruthy();
+    expect(Date.parse(calls.spendInputs[0]?.since ?? '')).toBeGreaterThan(PREVIOUS_GENERATION_AT);
+    expect(calls.segment).toHaveLength(1);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('第 2 代自己花超过 37M：仍然停下等人；点「继续」按这一代已花的再给一份，不是按上一代', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) =>
+        n === 1 ? { state: 'red', failedChecks: ['test (engine)'], digest: 'FAIL task.test.ts' } : undefined,
+    });
+    // 第一次查是这一代的 38M（上一代 83.5M 在开工之前）。点继续之后份数按 38M 给到 2 份（74M）。
+    // 下一轮动手前抬到 80M：超 2 份就再停下。若份数按上一代一起算，2 份不够、会给到 4 份，80M 就停不下。
+    let own = DEFAULT_TASK_TOKEN_BUDGET + 1_000_000;
+    const { tasks, calls } = scripted({
+      spend: (_n, input) => {
+        const spent = spendSince(input, own);
+        own = 80_000_000;
+        return spent;
+      },
+    });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input(), 2);
+        const first = await pollQuery(() => statusOf(h), parked, '这一代超了预算停下');
+        expect(first.lastProblem).toContain('38.0M / 37.0M');
+        expect(first.lastProblem).not.toContain('83.5M');
+        expect(calls.segment).toHaveLength(0);
+        expect(calls.spendInputs[0]?.since).toBeTruthy();
+        expect(world.alerts[0]?.detail).toContain(String(DEFAULT_TASK_TOKEN_BUDGET + 1_000_000));
+        expect(world.alerts[0]?.detail).not.toContain(String(PREVIOUS_GENERATION_TOKENS));
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        const second = await pollQuery(
+          () => statusOf(h),
+          (s) => s.lastProblem?.includes('80.0M') === true,
+          '按这一代已给 2 份仍超了再停下',
+        );
+        expect(second.lastProblem).toContain('80.0M / 74.0M');
+        expect(world.alerts.at(-1)?.detail).toContain('已给 2 份');
+        expect(calls.segment).toHaveLength(1);
+        return 'parked';
+      },
+      { tasks },
+    );
   });
 
   it('没超：不停下；查花费没查成也照旧起会话', async () => {

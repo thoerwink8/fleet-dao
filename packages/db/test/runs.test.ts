@@ -522,6 +522,35 @@ describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
     });
   });
 
+  it('给了起算时间就只算这之后：上一代的 83.5M 不算，这一代自己超过 37M 仍算进去；不给起算时间仍是整张单', async () => {
+    const repo = await addRepo(t.db);
+    const task = await addTask(t.db, repo.id, { issueNumber: 2254 });
+    const cutoff = new Date('2026-10-16T02:00:00Z');
+    const row = (over: Partial<typeof runs.$inferInsert>) =>
+      t.db.insert(runs).values({ segment: 'manual', model: 'grok-4.7', taskId: task.id, ...over });
+    await row({
+      startedAt: new Date('2026-10-16T00:30:00Z'),
+      inputTokens: 83_500_000,
+    });
+    expect(await taskTokenSpend(t.db, task.id, { since: cutoff })).toEqual({
+      tokens: 0,
+      runs: 0,
+      unmetered: 0,
+      estimated: 0,
+    });
+    expect((await taskTokenSpend(t.db, task.id)).tokens).toBe(83_500_000);
+    await row({
+      startedAt: new Date('2026-10-16T03:00:00Z'),
+      inputTokens: 38_000_000,
+    });
+    expect(await taskTokenSpend(t.db, task.id, { since: cutoff })).toEqual({
+      tokens: 38_000_000,
+      runs: 1,
+      unmetered: 0,
+      estimated: 0,
+    });
+  });
+
   it('一行用量都没记到（全被叫停）：没有速率可估，估出来是 0，只数出有几行没读到', async () => {
     const repo = await addRepo(t.db);
     const task = await addTask(t.db, repo.id, { issueNumber: 79 });

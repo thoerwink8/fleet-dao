@@ -24,6 +24,7 @@ import type {
   SegmentSettledResult,
   SelfCheckInput,
   SelfCheckResult,
+  TaskSpendInput,
   TaskSpendResult,
 } from '../src/task-contract.ts';
 
@@ -77,8 +78,8 @@ export interface Script {
   resume: (input: PlanSegmentResumeInput, n: number) => PlanSegmentResumeResult;
   /** 动手会话收场后的自测（决定 0093）。默认没跑（skipped）：老用例照旧推。抛了＝活动没跑成。 */
   selfCheck: (input: SelfCheckInput, n: number) => SelfCheckResult;
-  /** 这张单花掉多少 token（单任务预算）。默认 0。 */
-  spend: (n: number) => TaskSpendResult;
+  /** 这张单花掉多少 token（单任务预算）。默认 0。input 是活动入参（带不带起算时间由工作流定）。 */
+  spend: (n: number, input: TaskSpendInput) => TaskSpendResult;
   /** 上一段收场了没有（决定 0093）；默认收场了。 */
   settled: (input: SegmentSettledInput, n: number) => SegmentSettledResult;
 }
@@ -105,6 +106,8 @@ export interface Calls {
   selfCheck: SelfCheckInput[];
   /** 查花费的次数。不进 order。 */
   spend: number;
+  /** 查花费收到的入参（起算时间在不在里面）。不进 order。 */
+  spendInputs: TaskSpendInput[];
   settled: SegmentSettledInput[];
 }
 
@@ -127,6 +130,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     resume: [],
     selfCheck: [],
     spend: 0,
+    spendInputs: [],
     settled: [],
   };
   const script: Script = {
@@ -218,9 +222,10 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
       calls.settled.push(input);
       return script.settled(input, calls.settled.length);
     },
-    async taskSpend() {
+    async taskSpend(input) {
       calls.spend += 1;
-      return script.spend(calls.spend);
+      calls.spendInputs.push(input);
+      return script.spend(calls.spend, input);
     },
   };
   return { tasks, calls };
