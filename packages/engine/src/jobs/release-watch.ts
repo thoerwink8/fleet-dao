@@ -2,7 +2,7 @@
 // 近一小时没人知道；巡检和看门狗都没报）：
 // 1. 「发版要人看」：发布历史（.history）最近一条是 unhealthy / auto-rollback（这一版没发成，或退回了也没好），或发版进度记录（.train）
 //    停在 failed / blocked 这类收了尾却没成的状态、或 running 超过 TRAIN_STUCK_MS 还没收尾（卡住），或自动发布的状态里写着「要人看」。
-//    running 没超时是正常的一趟发版在走（自动发版每 5 分钟一班，一趟 7–10 分钟），不报；那段时间自动发布说的「要人看」也是因为它，不报。
+//    running 没超时是正常的一趟发版在走（自动发版每 5 分钟一班，一趟 7–10 分钟），不报。闸在 running 时写「有一趟发版在跑，等它收尾」，不含「要人看」。
 //    进度记录那条的键和正文认「这一趟发的是哪个提交」（target.value），不挂在发布历史最后一条（上一版）身上。
 //    这一趟已经落地（进度 done、法国 current 就是目标提交，trainLanded）时，发布历史末行那句「这个提交健康检查没过」是被发后体检盖过去的旧话：
 //    release.sh 没退回、停在这一版（退出码 2 一类），接活脚本之后的体检过了，不报（#2207）。
@@ -142,23 +142,10 @@ export function releaseAttentionReasons(f: ReleaseFacts, now: Date): string[] {
         ? `正在发 ${sha} 的这一趟从 ${stamp(train.since)} 起停在「running」，超过 ${TRAIN_STUCK_MS / 60_000} 分钟没收尾（发版接活脚本各步上限加起来 69 分钟，到点会自己写成没成；还是 running 多半是驱动没了）`
         : `发版进度记录停在「running」（这一趟发的是 ${sha}），记录里没有起止时间（老格式），判不了是不是还在正常走`,
     );
-  if (noteCounts(f, train)) out.push(`自动发布说：${clip(f.autoNote ?? '', 200)}`);
+  // 正文里写了「要人看」才算。闸在 running 时写的是「有一趟发版在跑，等它收尾」。
+  if (f.autoNote?.includes('要人看')) out.push(`自动发布说：${clip(f.autoNote, 200)}`);
   return out;
 }
-
-/** 自动发布那句「要人看」算不算（不算的见 trainNote）。 */
-function noteCounts(f: ReleaseFacts, train: TrainVerdict): boolean {
-  if (!f.autoNote?.includes('要人看')) return false;
-  const trainOnly =
-    trainNote(f.autoNote) && (train.kind === 'running' || (train.kind === 'none' && f.trainStatus !== null));
-  return !trainOnly;
-}
-
-/**
- * 自动发布这句「要人看」是不是只因为进度记录的状态（deploy/france/auto-release/lib.mjs 的 gateVerdict：「上一趟发版是「X」状态，要人看」）。
- * 是的话进度记录这边自己判：一趟正常在走（running 没超时）时它说的就是这一趟；刚收尾成了（done / aborted）时它还是上一班（每 5 分钟一班）写的旧话。这两种不报；进度记录不在却这么说对不上，照报。
- */
-const trainNote = (note: string) => note.includes('上一趟发版是「');
 
 export type ReleaseAttentionVerdict =
   | { kind: 'fine' }
@@ -170,7 +157,8 @@ export function judgeReleaseAttention(f: ReleaseFacts, now: Date): ReleaseAttent
   const badLast = badHistoryTail(f);
   const train = trainVerdict(f, now);
   // 自动发版真停着：闸只看进度记录（收了尾却没成、卡住都不发），或它自己说了「要人看」
-  const autoStopped = train.kind === 'stuck' || train.kind === 'stopped' || noteCounts(f, train);
+  const autoStopped =
+    train.kind === 'stuck' || train.kind === 'stopped' || Boolean(f.autoNote?.includes('要人看'));
   const sha = shortSha(f.trainSha);
   // 键：发布历史最近一条坏了认「那个提交的什么事件」；不然是进度记录的事，认「这一趟发的提交 + 状态」（不挂在上一版身上）；
   // 只剩自动发布说要人看认 note

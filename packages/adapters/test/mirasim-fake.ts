@@ -43,6 +43,8 @@ export interface FakeMirasimOptions {
   reply?: (prompt: MirasimFrame) => MirasimFrame | MirasimFrame[] | undefined;
   /** 隔多久才回 prompt 的应答（模拟服务单线程被别的会话堵住，几十秒才读到这一帧）。 */
   replyDelayMs?: number;
+  /** prompt 一发出去就把这条连接掐掉（模拟没等到应答、连接提前断）。 */
+  dropAfterPrompt?: boolean;
   /** 第一次 subscribe 之后推的帧。 */
   stream?: MirasimFrame[];
   /** 收到 stop 之后往订阅连接推的帧。 */
@@ -95,6 +97,7 @@ export class FakeMirasim {
         };
         if (this.options.replyDelayMs) setTimeout(push, this.options.replyDelayMs);
         else push();
+        if (this.options.dropAfterPrompt) wire.close();
         break;
       }
       case 'subscribe':

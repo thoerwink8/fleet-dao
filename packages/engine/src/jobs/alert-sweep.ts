@@ -30,13 +30,10 @@
 //   挂起解除、接着干了：工作流写 running 快照当时就撤这一代的（real/store-ports.ts，#2212），这里的「不挂着了」只是兜底。
 //   「「<阶段>」没有能用的路由」挂着时路由恢复了，正文开头写一句「路由已经恢复…点继续」（不撤：任务还挂着等人点继续）。
 // - <工作流>:history 事件数到线：工作流结束了就撤。
-// - canary:*（已删的全流程巡检留下的，决定 0093）：见到就撤。
 // - req:<…>:failed 需求没做完：需求的状态不再是 failed（重开了、又跑了、做完了、人叫停了）就撤。
 // - approval:<批准> 要人批：批了、拒了，或者在等它的工作流（子任务的；Fusion 的是需求工作流）不在跑了、不在等这一次了就撤。
 // - routing:all-open:<阶段> 某阶段的路由全都熔断了：这个阶段有不在熔断的候选路由了就撤（只读判法，和选路同一套；
 //   读不了记没查成，不撤）。
-// - no-verifier:<任务> 这张单做完没人能验（已删的「给开 PR 前验证留一家」留下的老键）：选路不再报、也不再撤；
-//   这张单做完、叫停、没做完了就在这里撤。
 // - 自己会撤的，这里不管：pool-hold:<池>（探针、会话跑通就撤；人拍的暂停不在这里，在设置 engine.poolHolds，只有人撤，#746）、
 //   session-org:*（引擎切号那一块：切成了、探通了、读到恢复时刻、组织读数定下来了、整池暂停的设置读得出了就撤，
 //   real/org-switch.ts；整池暂停到了复查日期的 session-org:pool-hold-overdue 也在这里：人撤了或续了期才撤）、flow-config:<仓>（GitHub 对账）、deploy-lag:（后端健康检查）、
@@ -48,7 +45,10 @@
 //   没有着落）、reconcile:ledger:<仓>#<号>（合了的 PR 记账不全）——后两个由两处核对自己撤（jobs/reconcile-checks.ts）。
 //   历史上 unclaimed:<提醒>:…、stuck:<提醒>:…（已删的「提醒派单」推出来的）、ask-issue:<提问>、ask-answer:<提问>
 //   （已删的对账给提问另开单推出来的，#530）如果还开着，不再有代码去撤它们，落进下面「判不了、还没接的」那一档，
-//   只靠 24 小时再推。
+//   只靠 24 小时再推。canary:*（全流程巡检，决定 0093）、no-verifier:*（开 PR 前验证留一家）库里还开着的，
+//   由迁移 0072 标成已撤（原因「功能已删」），这里不再判。同一条迁移把当时还开着的 retired-schedule:* 也标成已撤；
+//   这种键仍由引擎起来时删退役定时任务的那一步自己报、自己撤（real/retire-schedules.ts），不在
+//   SELF_RESOLVING_PREFIXES 里：超过 3 天没再报就按过期兜底撤，下次没删成会重新打开。
 // - 判不了、还没接的，24 小时再推一次，开着 3 天没人动就按「过期」撤（过期兜底，下一条）：<工作流>:failure:<规则>（封号、换池接着干这类通报，
 //   条件就是「发生过」，要人知道）。
 // - 过期兜底（EXPIRE_AFTER_MS）：上面所有的判法、工作树那一部分、别处自己会撤的（SELF_RESOLVING_PREFIXES）都不管的提醒——没有谁
@@ -128,13 +128,9 @@ export const SELF_RESOLVING_PREFIXES: readonly string[] = [
   'carpool-cap:',
   'engine-drain',
   'engine-session-io',
-  'retired-schedule:',
   'cursor-pending:',
   'mirasim-pending:',
 ];
-/** 全流程巡检留下的提醒（canary:*）撤的时候写的为什么。 */
-export const RETIRED_CANARY_WHY =
-  '全流程巡检已经删了（决定 0093），这条不会再有人撤；主线多久没合 PR 改由看门狗报（watchdog:merge:）';
 /** 「「<阶段>」没有能用的路由」挂着时，路由恢复了写在正文开头的那一句以它开头（再恢复、再没了按它认出来换掉）。 */
 export const ROUTE_BACK_PREFIX = '路由已经恢复';
 
@@ -253,14 +249,6 @@ export function withRouteNote(body: string, note: string | null): string {
 
 export const RULES: readonly Rule[] = [
   {
-    // 全流程巡检随决定 0093 删了：它留下的 canary:broken、canary:leftover-pr 再没有人会撤，见到就撤
-    name: '巡检已删',
-    pattern: /^canary:/,
-    async judge() {
-      return { resolve: RETIRED_CANARY_WHY };
-    },
-  },
-  {
     name: '挂起',
     pattern: /^((?:task|req|sub):.+):park:\d+$/,
     async judge(deps, alert, m) {
@@ -332,17 +320,6 @@ export const RULES: readonly Rule[] = [
       return {
         resolve: `任务已经不在等这次批准了（${view.approval ? '它在等的是另一次' : '现在没在等批准'}）`,
       };
-    },
-  },
-  {
-    // 已删的「给开 PR 前验证留一家」留下的 no-verifier:<任务>：选路不再报这条、也不再撤；
-    // 这张单不在跑了（做完、叫停、没做完）在这里撤
-    name: '做完没人能验',
-    pattern: /^no-verifier:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/,
-    async judge(deps, _alert, m) {
-      const state = await deps.taskState(m[1] as string);
-      if (state !== 'done' && state !== 'stopped' && state !== 'failed') return { keep: true };
-      return { resolve: `需求现在是「${TASK_STATE_WORDS[state]}」，走不到开 PR 前验证那一步了` };
     },
   },
   {

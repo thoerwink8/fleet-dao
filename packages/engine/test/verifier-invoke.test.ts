@@ -1446,3 +1446,45 @@ describe('invokeVerifier：材料带 PR 正文和测试输出，只判验收条�
     expect(out.session?.routeId).toBe('route-claude-solo');
   });
 });
+
+/** 提示词里钉死的那一条：测试/检查通过类验收条归合并闸的 CI，冷验收不因输出里没出现它拒。 */
+const CI_OWNS_PASS_RULE =
+  '「怎么算做完」里只要求「某某测试/检查/构建/类型检查通过」的条目，一律由合并闸的 CI 保证，你不核对、不因测试输出里没出现它判不过；只有测试输出里明确出现失败时才作为问题写出。';
+
+describe('invokeVerifier：测试/检查通过类验收条归 CI，不因测试输出里没出现它拒', () => {
+  const run = async (input: Partial<VerifierInvokeInput>) => {
+    const { oneShot, commands } = fakeOneShot({
+      exitCode: 0,
+      stdout: MODEL_STDOUT_PASS,
+      stderr: '',
+      killed: false,
+    });
+    await invokeVerifier({ ...BASE_INPUT, ...input }, DEPS(oneShot));
+    return commands[0]?.stdin ?? '';
+  };
+
+  it('验收条「adapters 全部测试通过」、测试输出里没有 adapters：提示词含归 CI 的规则，且「找不到就不放行」只管 diff', async () => {
+    const prompt = await run({
+      howToFinish: ['adapters 全部测试通过'],
+      testOutput: 'pnpm test:changed\nTest Files  1 passed (1)\n',
+    });
+    expect(prompt).toContain('1. adapters 全部测试通过');
+    const outputSection = prompt.split('## 引擎跑过的测试输出')[1]?.split('## diff')[0] ?? '';
+    expect(outputSection).not.toContain('adapters');
+    expect(prompt).toContain(CI_OWNS_PASS_RULE);
+    expect(prompt).toContain('这一句只管 diff 能看见的内容');
+    expect(prompt).toContain('不包括只要求测试、检查、构建或类型检查通过的条目');
+    expect(prompt).not.toContain('本该在 diff、测试输出里看得见却找不到');
+    expect(prompt).toContain('输出里写「没跑」「跳过」、或没有这一条的输出，不算失败，不写进问题。');
+  });
+
+  it('测试输出明确写了失败：提示词仍要求把失败写成问题', async () => {
+    const prompt = await run({
+      howToFinish: ['adapters 全部测试通过'],
+      testOutput: 'FAIL packages/adapters/test/x.test.ts\n Test Files  1 failed (1)\n',
+    });
+    expect(prompt).toContain('FAIL packages/adapters/test/x.test.ts');
+    expect(prompt).toContain('只有测试输出里明确出现失败时才作为问题写出');
+    expect(prompt).toContain('只有测试输出里明确出现失败才写');
+  });
+});

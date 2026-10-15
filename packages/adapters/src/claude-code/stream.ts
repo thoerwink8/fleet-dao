@@ -10,13 +10,20 @@
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import {
   cleanTestCommands,
+  toolSummary as clipToolSummary,
   cut,
+  failureText,
+  firstStringField,
   num,
   numbers,
   optional,
   rec,
   relPath,
+  resultText,
+  searchSummary,
   str,
+  TOOL_SUMMARY_MAX,
+  TRANSCRIPT_SUMMARY_MAX,
   testRun,
   transcriptEntry,
 } from '../stream-kit.ts';
@@ -319,9 +326,8 @@ export class ClaudeStreamReader {
         this.#tx(
           effect,
           'error',
-          cut(
+          failureText(
             `权限被拒：${str(frame.tool_name) ?? '?'}${str(frame.decision_reason) ? `（${str(frame.decision_reason)}）` : ''}`,
-            500,
           ),
           { tool: str(frame.tool_name) },
         );
@@ -422,7 +428,7 @@ export class ClaudeStreamReader {
         action: TOOL_ACTIONS[name] ?? 'other',
         summary: toolSummary(name, input, this.#cwd),
         ok,
-        ...optional('error', ok ? undefined : cut(resultText(block.content), 500)),
+        ...optional('error', ok ? undefined : failureText(resultText(block.content))),
         ...(pending?.subagent ? { subagent: true } : {}),
       } satisfies ToolPayload);
       this.#tx(effect, 'tool_result', resultText(block.content), {
@@ -571,15 +577,13 @@ export function versionAtLeast(version: string, min: string): boolean | undefine
 function callText(name: string, input: Record<string, unknown>, cwd: string): string {
   if (name === 'Agent' || name === 'Task') {
     const first = (str(input.prompt) ?? str(input.description) ?? '').trim().split('\n')[0] ?? '';
-    return `派了 ${str(input.subagent_type) ?? '子代理'}：${cut(first, 200)}`;
+    return `派了 ${str(input.subagent_type) ?? '子代理'}：${cut(first, TOOL_SUMMARY_MAX)}`;
   }
   return toolSummary(name, input, cwd, TRANSCRIPT_SUMMARY_MAX);
 }
 
-/** 会话过程记录里工具输入摘要先取多长（调用方写库前再按上限截）。 */
-const TRANSCRIPT_SUMMARY_MAX = 2000;
-
-function toolSummary(name: string, input: Record<string, unknown>, cwd: string, max = 200): string {
+/** 这一家的字段映射；截断走 stream-kit 的 toolSummary。 */
+function toolSummary(name: string, input: Record<string, unknown>, cwd: string, max?: number): string {
   const pick = (key: string) => str(input[key]);
   let text: string | undefined;
   switch (name) {
@@ -595,11 +599,9 @@ function toolSummary(name: string, input: Record<string, unknown>, cwd: string, 
     case 'Bash':
       text = pick('command');
       break;
-    case 'Grep': {
-      const where = pick('path');
-      text = [pick('pattern'), where ? relPath(where, cwd) : undefined].filter((x) => x).join(' @ ');
+    case 'Grep':
+      text = searchSummary(pick('pattern'), pick('path'), cwd);
       break;
-    }
     case 'Glob':
       text = pick('pattern');
       break;
@@ -614,15 +616,9 @@ function toolSummary(name: string, input: Record<string, unknown>, cwd: string, 
       text = pick('description') ?? pick('subagent_type');
       break;
     default:
-      text = Object.values(input).find((v): v is string => typeof v === 'string');
+      text = firstStringField(input);
   }
-  return cut(text ?? '', max);
-}
-
-function resultText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) return content.map((c) => str(rec(c)?.text) ?? '').join('');
-  return '';
+  return clipToolSummary(text, max);
 }
 
 function epochSeconds(value: unknown): string | undefined {

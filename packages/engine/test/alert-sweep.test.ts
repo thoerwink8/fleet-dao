@@ -10,7 +10,6 @@ import {
   type AlertSweepDeps,
   alertRepoFromText,
   FILE_LABELS,
-  RETIRED_CANARY_WHY,
   sweepAlerts,
 } from '../src/jobs/alert-sweep.ts';
 import { beijingDayStart } from '../src/jobs/reconcile-common.ts';
@@ -288,20 +287,6 @@ describe('卡住报警立案', () => {
     for (const kept of [silenced, fixing, waiting, fresh, decision, stall, missing]) {
       expect(kept.body, kept.dedupeKey).not.toContain('已立案：');
     }
-  });
-
-  it('已删的全流程巡检留下的 canary:*：见到就撤、写明改由看门狗报，不立案（决定 0093）', async () => {
-    const broken = row({ id: 'b', dedupeKey: 'canary:broken' });
-    const leftover = row({ id: 'l', dedupeKey: 'canary:leftover-pr:acme/widgets#7' });
-    const h = harness([broken, leftover]);
-    const part = await h.run();
-    expect(part.unchecked).toEqual([]);
-    expect(h.opened).toEqual([]);
-    for (const r of [broken, leftover]) {
-      expect(r.resolvedAt, r.dedupeKey).not.toBeNull();
-      expect(r.body.startsWith(`已撤：${RETIRED_CANARY_WHY}`)).toBe(true);
-    }
-    expect(RETIRED_CANARY_WHY).toContain('watchdog:merge:');
   });
 
   it('一次最多 2 张，老的先开；一个仓今天满 4 张就跳过，别的仓还能开', async () => {

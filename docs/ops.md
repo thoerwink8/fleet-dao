@@ -1,6 +1,6 @@
 # 运维手册：两台机器的地基与应用发布
 
-法国失联（判断关机还是断网、Contabo 上重启、重启后核对）照 [outage-france.md](outage-france.md)。
+法国失联（判断关机还是断网、Contabo 上重启、重启后核对）照 [outage-france.md](outage-france.md)。健康页上的「法国失联自 xx:xx」由香港探活写入（「香港探法国」一节），法国关机时这一页和可选的推送仍在。
 
 装法在 `deploy/`，这里讲怎么用、怎么看、怎么退。机器的公网 IP 和驾驶舱域名不进仓，下文写作 `<法国IP>`、`<香港IP>`、`<驾驶舱域名>`；域名的真值只在机器配置里（香港 `hk.env`、法国 `release.env` 的 `FLEET_DOMAIN`）。
 旧系统（windsurf-dao、ai-gateway-stack 那一套）已于 2026-09-25 从两台机器上全部清退：单元、用户、目录、数据都删了。它留下的坑与由来见 [reference/deploy.md](reference/deploy.md)（文中的 P01、P02 等编号出自那里；那份记的是清退前的现场）。
@@ -11,7 +11,7 @@
 | | 法国 | 香港 |
 |---|---|---|
 | 系统 | Ubuntu 24.04，6 核 12G | Ubuntu 22.04，2 核 2G |
-| 跑什么 | Temporal、PostgreSQL、引擎工人、驾驶舱后端、AI 会话 | nginx（驾驶舱静态文件、证书、往法国转接口）、WireGuard 服务端 |
+| 跑什么 | Temporal、PostgreSQL、引擎工人、驾驶舱后端、AI 会话 | nginx（驾驶舱静态文件、证书、往法国转接口）、WireGuard 服务端、经隧道探法国 healthz |
 | 公网入站（ufw） | 只放 22/tcp；另在隧道网卡上给香港开 8787 | 本仓只放 22/tcp、80/tcp、443/tcp（nginx）、4500/udp（WireGuard）；另登记别家的 8443/tcp（self-proxy，不归本仓管）。白名单在 `deploy/hk.sh` 顶部「约定」（`HK_FW_OURS`、`HK_FW_FOREIGN`） |
 | 装机脚本 | `deploy/france.sh` | `deploy/hk.sh` |
 | 不归 fleet-dao 管的 | MiraQuota 的 `miraquota-sync`（等 miraquota-win#3 发版后停） | MiraQuota 的 `miraquota-hub`（127.0.0.1:4331）和同一个 nginx 上的站点 `ai-gateway`（只剩 `https://<香港IP>.sslip.io/mq/`），同样等 miraquota-win#3 发版后停；装机不碰 |
@@ -115,6 +115,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | /srv/fleet-dao-releases/.train | root:root | 755 | deploy/lib/human-tier.sh |
 | /srv/fleet-dao-web | root:root | 755 | deploy/hk.sh |
 | /usr/local/lib/fleet-dao | root:root | 755 | deploy/france.sh |
+| /usr/local/lib/fleet-dao | root:root | 755 | deploy/hk.sh |
 | /usr/local/lib/fleet-dao | root:root | 755 | deploy/lib/human-tier.sh |
 | /usr/local/lib/fleet-dao/auto-release | root:root | 755 | deploy/france.sh |
 | /usr/local/lib/fleet-dao/backup | root:root | 755 | deploy/hk.sh |
@@ -124,6 +125,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | /var/lib/fleet-dao/engine | fleet:fleet | 750 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-dao/release-request | fleet:fleet | 750 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-hk | root:root | 755 | deploy/hk.sh |
+| /var/lib/fleet-hk-france-probe | root:root | 755 | deploy/hk.sh |
 | /var/lib/fleet-sessions | fleet:fleet | 711 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-work | root:root | 755 | deploy/lib/human-tier.sh |
 | /var/log/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |
@@ -153,7 +155,11 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
 | fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
 | fleet-backup-copy.service | 香港 | fleet-dao 香港每天复制备份仓库（备份用户碰不到，留 14 天） |
+| fleet-backup-copy.timer | 香港 | 每天 09:10（北京时间）把香港上的备份仓库复制一份，留 14 天 |
 | fleet-backup-freshness.service | 香港 | fleet-dao 香港检查备份最新快照是否超过 26 小时 |
+| fleet-backup-freshness.timer | 香港 | 每小时 25 分看备份最新快照是否超过 26 小时 |
+| fleet-hk-france-probe.service | 香港 | fleet-dao 香港经隧道探法国 healthz（连续 3 次失败才算失联） |
+| fleet-hk-france-probe.timer | 香港 | 每分钟探一次法国 healthz（经隧道） |
 
 <!-- fleet:units:end -->
 
@@ -195,7 +201,11 @@ renderUnitsBlock 实际输出（跑 packages/conventions/src/ops-tables.ts 的 r
 | fleet-release-request.service | 法国 | fleet-dao 接驾驶舱的发布请求 |
 | fleet-temporal.service | 法国 | fleet-dao Temporal 服务端（Postgres 持久化） |
 | fleet-backup-copy.service | 香港 | fleet-dao 香港每天复制备份仓库（备份用户碰不到，留 14 天） |
+| fleet-backup-copy.timer | 香港 | 每天 09:10（北京时间）把香港上的备份仓库复制一份，留 14 天 |
 | fleet-backup-freshness.service | 香港 | fleet-dao 香港检查备份最新快照是否超过 26 小时 |
+| fleet-backup-freshness.timer | 香港 | 每小时 25 分看备份最新快照是否超过 26 小时 |
+| fleet-hk-france-probe.service | 香港 | fleet-dao 香港经隧道探法国 healthz（连续 3 次失败才算失联） |
+| fleet-hk-france-probe.timer | 香港 | 每分钟探一次法国 healthz（经隧道） |
 
 来源 Description=（法国 deploy/france、香港 deploy/hk，按文件名排）：
 deploy/france/fleet-agents.slice → fleet-dao AI 会话资源池（总量上限，单会话各自的上限由引擎起会话时给）
@@ -217,6 +227,8 @@ deploy/hk/fleet-backup-copy.service → fleet-dao 香港每天复制备份仓库
 deploy/hk/fleet-backup-copy.timer → 每天 09:10（北京时间）把香港上的备份仓库复制一份，留 14 天
 deploy/hk/fleet-backup-freshness.service → fleet-dao 香港检查备份最新快照是否超过 26 小时
 deploy/hk/fleet-backup-freshness.timer → 每小时 25 分看备份最新快照是否超过 26 小时
+deploy/hk/fleet-hk-france-probe.service → fleet-dao 香港经隧道探法国 healthz（连续 3 次失败才算失联）
+deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经隧道）
 -->
 
 | 用户 | 在哪 | 干什么 |
@@ -267,6 +279,10 @@ deploy/hk/fleet-backup-freshness.timer → 每小时 25 分看备份最新快照
 | 路径 | 属主 权限 | 放什么 |
 |---|---|---|
 | `/etc/fleet-dao/hk.env` | root:fleet 640 | 域名、证书联系邮箱、法国的 WireGuard 公钥、法国的上传静态文件公钥。老文件里留着的 `FLEET_DEMO_PATH`（#1223）、`FLEET_GATEWAY_DEPLOY_PUBLIC_KEY`（飞书网关）是已删的键，`hk.sh` 认得、忽略 |
+| `/etc/fleet-dao/hk-probe.env` | root:root 600 | 香港探法国的推送地址，只有 `FLEET_HK_PROBE_WEBHOOK`。样例 `deploy/hk/hk-probe.env.example`。没配或留空：探活照常，只写状态和日志，不报错。地址不进仓；文件已经在，重跑 `deploy/hk.sh` 不覆盖 |
+| `/var/lib/fleet-hk-france-probe` | root:root 755 | 探活状态 `status.json`（644，nginx 读得了）。不放进 `/srv/fleet-dao-web`：发版 rsync `--delete` 会删掉。站点用 `/health/france-link.json` 指到它 |
+| `/usr/local/lib/fleet-dao/france-probe.sh` | root:root 755 | 探活脚本，`deploy/hk.sh` 从 `deploy/hk/france-probe.sh` 拷过来 |
+| `/etc/systemd/system/fleet-hk-france-probe.service`、`fleet-hk-france-probe.timer` | root 644 | 每分钟跑一次（oneshot，跑完就退出；只 enable timer） |
 | `/etc/fail2ban/jail.d/fleet-dao-sshd.local` | root:root 644 | 香港 fail2ban 的 sshd jail（#1784，仓里 `deploy/hk/fail2ban-sshd.jail`）：由 hk.sh 管（`fail2ban-client -t` 过了才 reload，没装 fail2ban 只记待配），放过隧道网段 `10.99.0.0/24`——法国在隧道里几次失败登录不会被封，发版链不会被卡死；读回查 `ignoreip` 含它，没有判红。原来手放的 `jail.d/sshd.local` 由 hk.sh 挪成 `sshd.local.bak-<日期>`，不删。法国那份（`deploy/france/fail2ban-sshd.jail`）同样带这段 `ignoreip` |
 | `/opt/self-proxy/src` | root:root，组和其他人不可写 | 别家 self-proxy 的程序目录（#2235，内容不归本仓管）：它的 `self-proxy-userinfo.timer` 每 15 分钟以 root 跑里面的 `hk/userinfo.sh`，可它每次部署都是从创始人的 Mac 上 tar 解包、属主是 Mac 的 uid 501 / 组 staff。`hk.sh` 只收属主和写权限（`chown -R root:root`、`chmod -R go-w`，不碰内容），读回查全树；self-proxy 重新部署又会变回去，`--check` 读回判红，重跑 `hk.sh` 收回 |
 | `/srv/fleet-dao` | root:root 755 | 装机脚本所在的检出 |
@@ -528,7 +544,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 工作树：`/var/lib/fleet-work/<owner>_<name>/` 下每一棵（子任务的树 `<需求号>-<子任务>`、检出副本 `<需求号>.<阶段>[.<子任务>]`），这张需求的工作流和它的子任务工作流都不在跑了、树里也没有没结束的会话（`session_runs` 里 `ended_at` 为空的），才算残留；有没结束的会话却没有在跑的工作流，记「没查成」写明是哪个会话（多半是被强行终止的工作流留下的，#247）。残留的以会话用户的身份看里面还剩什么：什么都不剩就经 `fleet-agent-scope remove` 删掉，子任务报的「工作树没收掉」跟着撤；能重新生成的编译和工具缓存（`*.tsbuildinfo`、`node_modules/`、`dist/`、`.turbo/`、`.vite/`、`coverage/`）和 `.fleet-out/`（会话交给引擎的结论文件）不算剩着，是不是 git 仓都一样，只剩这些的照空树删（名单在 `packages/engine/src/real/user-git.ts` 的 `DISPOSABLE`）；还剩没推的提交、没提交的改动、stash、名单以外的文件的不删，报一条「要人拍」（`worktree:<owner>_<name>/<树>`），正文写着哪棵树、剩什么（文件列前 10 个、写明一共几个）、怎么删、怎么留。检出副本里引擎检出过的提交也不算剩着。树里有目录读不了的记「没查成」、不删。`_route-probe/`、`_tmp/` 不碰。一轮最多看 80 棵，多的下一轮再看。
 - 收到「要人拍」的树：先看里面，`sudo -u fleet-agent-carpool git -C <路径> status`、`sudo -u fleet-agent-carpool git -C <路径> log --oneline -5`；提醒里写着「这一层不是 git 仓」的，看 `sudo -u fleet-agent-carpool find <路径> ! -type d`。要删：以 root 跑 `/usr/local/sbin/fleet-agent-scope remove <路径>`，下一轮看它不在了就撤掉那条；要留：驾驶舱点「处理」，之后这棵树不再提醒，里面的东西推走或清掉以后下一轮会自己删。
 - 工作树清单和一键清理（#1993）：每一轮清完把每棵还留着的树记成一份清单存进库（`worktree_inventory`，只留最近一份）：哪个仓、哪张需求、状态（任务在用、会话在用、有改动、留着、没查成、这轮没轮到）和原因、最近一次会话的时刻、以会话用户 `du -sk` 量的大小，加每个仓镜像（`/var/lib/fleet-dao/github/mirrors/<owner>/<仓>.git`）的大小。量不了的写原因，不写 0。驾驶舱资源页的仓库那一块读它（docs/design/驾驶舱界面.md 的资源页）。页面上的「清理没用的工作树」只记一条操作记录 `worktrees.cleanup.request`；引擎每 5 秒看一眼，接手记 `worktrees.cleanup.start`，跑一轮和上面**同一份判据**的清扫（同一个函数 `sweepWorktrees`，不另写宽松的），记 `worktrees.cleanup.done`（删了哪些、拒了哪些和原因），再存一份新清单。有没提交、没推的改动，或正被任务、会话用着的一律拒删。15 分钟没人接手作废；接手 30 分钟没回结果当没做成、可以再点；同一时刻只做一次（再点回 409）。后端读不了会话用户的树（700），所以清单和清理都只在引擎里做。
-- 提醒：条件没了的撤掉（正文开头「已撤：为什么」，处理人 `engine:hourly-reconcile`，操作记录 `notification.resolve`）；卡住报警超过 24 小时没人处理，每天最多再推一条「还没处理：<原标题>」（`remind:<原提醒编号>:<北京日期>`），同一条再开一张未排期的缺陷单（每次最多 2 张、每个仓每天最多 4 张，单号写回正文开头「已立案：#号」；同一键一张，关了隔 7 天才再开）。自己会撤的不开；`reconcile:*` 条件没了由对账撤掉，还开着的立案。哪种提醒谁撤，清单在 `packages/engine/src/jobs/alert-sweep.ts` 开头。例外（#1420）：键以 `reconcile:pr:`、`reconcile:ledger:` 开头、对应 PR 已合并超过 7 天的，不立案，也不再每天重推（沿用静默：驾驶舱留原来那一条，不发飞书卡）。说的是已经发生、改不了的历史事实。合并未满 7 天的仍立案；合并时刻读不到的不跳过，记没查成。`watchdog:merge:*` 自己会撤，不立案；已删的巡检留下的 `canary:*` 见到就撤。
+- 提醒：条件没了的撤掉（正文开头「已撤：为什么」，处理人 `engine:hourly-reconcile`，操作记录 `notification.resolve`）；卡住报警超过 24 小时没人处理，每天最多再推一条「还没处理：<原标题>」（`remind:<原提醒编号>:<北京日期>`），同一条再开一张未排期的缺陷单（每次最多 2 张、每个仓每天最多 4 张，单号写回正文开头「已立案：#号」；同一键一张，关了隔 7 天才再开）。自己会撤的不开；`reconcile:*` 条件没了由对账撤掉，还开着的立案。哪种提醒谁撤，清单在 `packages/engine/src/jobs/alert-sweep.ts` 开头。例外（#1420）：键以 `reconcile:pr:`、`reconcile:ledger:` 开头、对应 PR 已合并超过 7 天的，不立案，也不再每天重推（沿用静默：驾驶舱留原来那一条，不发飞书卡）。说的是已经发生、改不了的历史事实。合并未满 7 天的仍立案；合并时刻读不到的不跳过，记没查成。`watchdog:merge:*` 自己会撤，不立案；已删的巡检留下的 `canary:*`、以及 `no-verifier:*`，由迁移 0072 一次性标成已撤（功能已删），对账不再认这些键。
 - 两处核对（怎么判见 design 第六节「断链怎么被发现」第 4 条）：`reconcile:workflow:<任务>`「开着的单没有着落」——看正文写的卡在哪：在做的单工作流断了，要人判是在驾驶舱重开还是叫停；排队的单补拉没成，照正文的原因处理（门口没收：作者不在白名单、外人改了单子；读不了挂在哪个版本；拉起来了又不在跑……），好了下一轮自己撤。`reconcile:ledger:<仓>#<号>`「合了的 PR 记账不全」——正文写着哪张单缺什么（会话没结局、跑成了的会话用量记成 0、单没记成做完），不自动补，补齐了下一轮自己撤。`reconcile:pr:<仓>#<号>`「机器人开的 PR 没经合并队列合」——合并人不是「引擎」、或账上没有合并队列的合并记录（#431 那种绕过合并队列手动合掉的）：合并前那几道核对（不落后主线、CI 全绿、人闸）可能没走，对账照回执把这一次落进幂等账（receipt.mergedBy 写实际合并人）；提醒不自动撤。超过 24 小时还没人处理的，对账给它立案（#1406）；已合并超过 7 天的 reconcile:pr、reconcile:ledger 不立案、也不再每天重推（#1420）。条件已经没了的（workflow、ledger 那种）在立案前就撤掉，不会立案。（2026-09-28 #445 以「仓里没开合并队列」为由删过，#440 又办回来：队列其实开着。）（额度读数过期 `reconcile:quota:<池>` 不归对账管了，决定 0093 搬去看门狗，见下面「看门狗」。）
   - 这两处报了什么：`runuser -u fleet -- psql -d fleet -c "select updated_at, dedupe_key, left(title, 60) from notifications where resolved_at is null and dedupe_key like 'reconcile:%' order by updated_at desc"`
 - 机器人权限：每个受管的仓（`repos` 表）上，「干活的」「引擎」两个机器人的安装实际拿到的权限和 `packages/github/src/github.ts` 的 `REQUIRED_PERMISSIONS` 比，缺的、「干活的」多了 `issues:write`、没查成的（凭据读不到、GitHub 回的认不出）各报一条「要人看」（`github-app:<机器人>:<仓>`，正文写缺什么、去哪改），健康页「GitHub 机器人权限」一项（`github_app`）跟着红；在 GitHub 的 App 设置里改好、再到装它的地方（Settings → Applications → Installed GitHub Apps → Configure）点接受新权限，下一轮自己撤、跟着回绿。没装到的（GitHub 对这个仓的安装回 404，多半是刚在驾驶舱导入新仓）单独一类：不算权限故障，每个仓报一条「要你拍的」（`github-app-missing:<仓>`，标题「先去 GitHub 把两个机器人装到这个仓」，正文带两个 App 的安装页和 GitHub 安装设置页直达链接），健康页这一项只降成警告（见 ops 健康检查一节的「警告」条），不让 `/healthz` 503；装好了下一轮自己撤。开着这条提醒的仓是「已知没装」：每小时对账读 PR 的两处核对和 GitHub 对账补漏的轮询都跳过它，不记没跑全，`schedule_runs.why` 写一句「跳过 N 个没装机器人的仓（已有提醒）」，看门狗的「连着只跑了一部分」也就不再为它报；只认这一种，凭据读不到、GitHub 回错照旧记没查全。到 App 的公开页（`https://github.com/apps/<App 名>`）点 Install，选 Only select repositories、只勾这个仓；两个 App 都设成了公开（Advanced → Make public），因为受管的仓分在创始人账号和组织下，私有的 App 只能装在建它的账号下，装别处的页面直接 404。没查成的这一轮记没查全。
@@ -560,7 +576,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 看门狗（下面「看门狗」，每 5 分钟一轮）同一轮看每个开着「让 AI 接活」的仓：从最近一次合并（没合过从开关打开那一刻）算起超过 4 小时没合任何 PR，而且引擎手上有单在做（分诊、写方案、在干、在合并）或有过了准入只因没空位没起的单，就推一条卡住报警 `watchdog:merge:<owner/name>:<after-<PR号>|since-<毫秒>>`，点进去是任务页。合了一个、没有待做的单了、开关关了，下一轮自己撤、正文开头写为什么；同一段人点了「处理」不再打开。
 - 等空位的单数：拉单每轮记进设置表 `engine.intakeWaiting`（`select value from settings where key = 'engine.intakeWaiting'`）。
 - 读不到合并记录、任务、这一行：看门狗这一轮记没跑成，开着的那条不撤。
-- 删掉的巡检留下的：`canary_runs` 表停写、留着历史行（删表属删数据，要人拍）；还开着的 `canary:*` 提醒由每小时对账撤；巡检仓 `thoerwink8/fleet-dao-canary` 不再用，开关已关（2026-10-14 在法国关掉，操作记录 1798）；发版前还在跑的 `canary` 工作流最多 5.5 小时自己超时，等不及就 `fleet-temporal workflow terminate --workflow-id canary`。
+- 删掉的巡检留下的：`canary_runs` 表停写、留着历史行（删表属删数据，要人拍）；还开着的 `canary:*` 提醒由迁移 0072 标成已撤（功能已删）；巡检仓 `thoerwink8/fleet-dao-canary` 不再用，开关已关（2026-10-14 在法国关掉，操作记录 1798）；发版前还在跑的 `canary` 工作流最多 5.5 小时自己超时，等不及就 `fleet-temporal workflow terminate --workflow-id canary`。
 
 看门狗（#203，design 第六节「断链怎么被发现」第 5 层）：
 
@@ -572,10 +588,10 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
   - 读不到登记表、跑记录：这一轮记没跑成（`schedule_runs` 里 `failed`、`why` 写原因），开着的报警一条都不撤；不另推「看门狗没查成」（#1072 删了：和下面后端看着看门狗的「看门狗没跑成」是同一件事）；下一轮读到了就照常。推、撤没写进去：这一轮记没跑成，下一轮照库里的样子重推。
   - 账号池额度读数过期（决定 0093 从每小时对账搬来，`packages/engine/src/jobs/watchdog-quota.ts`）：`reconcile:quota:<池>`「账号池额度读数过期」——渠道开着、有路由、没过期的池，库里最近读成超过 30 分钟（或从没读成、上游数冻住），点进去是额度页：先看「定时任务」页 `quota-read` 那一行有没有在跑、`why` 写的这个池为什么没读成，再看有没有同池的 `quota-read:<池>` 提醒；读新了下一轮（5 分钟内）自己撤，处理人 `engine:watchdog`。正文只写上次读成的时刻、不写「几分钟前」，读数没变不改卡。`deploy/quota.json` 的 `notRead` 里的池不查。读不到额度表：看门狗这一轮记没跑成，开着的不撤。
   - 发版要人看、健康页非 200（2026-10-14 法国 17:03Z 发版失败：后端起不来、自动退回后健康检查也没过、`/healthz` 503、主线落后 19 个提交，近一小时无人知道；`packages/engine/src/jobs/release-watch.ts`，只在有 `/srv/fleet-dao-releases` 的法国看，开发机整块跳过）：
-    - 「发版要人看」（点进 `/france`）：`.history` 最近一条是 `unhealthy` 或 `auto-rollback`（键 `watchdog:release:<那个提交前 12 位>:<事件>`）；或 `.train/release-train.json` 收了尾却没成（status 是 `failed` / `blocked` 这类），或 status 是 `running` 而 `startedAt`（没有用 `updatedAt`）已过 70 分钟（键 `watchdog:release:train:<这一趟 target.value 前 12 位>:<status>`，标题写这一趟的提交，不挂在上一版身上）；或 `.auto/state.json` 的 `auto.note` 含「要人看」（就是自动发版每 5 分钟说「上一趟 failed，要人看」的那句）。`running` 没过 70 分钟是一趟正常发版在走（一趟 7–10 分钟），不报，那段时间和刚收尾成了时自动发布说的「上一趟是 running，要人看」也不报。70 分钟的依据：`deploy/france/release-request/lib.mjs` 的 `LIMITS`（release.sh 30 + 等部署 3 + 检查 5 + 发后体检重试 15 + 其余八步各 2 = 69 分钟），哪步到上限脚本自己写成没成；老格式进度记录没有时间的 `running` 判不了多久，照旧报。这一趟已经落地（进度 `done`、`current` 就是 `target.value`，接活脚本的发后体检过了）时，`.history` 末行那句说的是这个提交的 `unhealthy` 不再报（release.sh 没退回、停在这一版，之后体检过了；`auto-rollback` 末行照报）。标题只在自动发版真停着时写「自动发版停着」：自动发布的闸只看进度记录、不看 `.history`，只有进度收了尾却没成、卡住，或它自己说了「要人看」才停（#2207）。指挥官巡查（`patrol-lib.mjs`）同一判法同一个数。之后一次发版成功（最近一条变成 `release` / `recovered`）、进度记录收尾，自己撤。
+    - 「发版要人看」（点进 `/france`）：`.history` 最近一条是 `unhealthy` 或 `auto-rollback`（键 `watchdog:release:<那个提交前 12 位>:<事件>`）；或 `.train/release-train.json` 收了尾却没成（status 是 `failed` / `blocked` 这类），或 status 是 `running` 而 `startedAt`（没有用 `updatedAt`）已过 70 分钟（键 `watchdog:release:train:<这一趟 target.value 前 12 位>:<status>`，标题写这一趟的提交，不挂在上一版身上）；或 `.auto/state.json` 的 `auto.note` 含「要人看」（就是自动发版每 5 分钟说「上一趟 failed，要人看」的那句）。`running` 没过 70 分钟是一趟正常发版在走（一趟 7–10 分钟），不报。闸在 running 时写「有一趟发版在跑（目标提交前 12 位），等它收尾」，不含「要人看」；`auto.note` 里真写了「要人看」（收了尾没成）才报。70 分钟的依据：`deploy/france/release-request/lib.mjs` 的 `LIMITS`（release.sh 30 + 等部署 3 + 检查 5 + 发后体检重试 15 + 其余八步各 2 = 69 分钟），哪步到上限脚本自己写成没成；老格式进度记录没有时间的 `running` 判不了多久，照旧报。这一趟已经落地（进度 `done`、`current` 就是 `target.value`，接活脚本的发后体检过了）时，`.history` 末行那句说的是这个提交的 `unhealthy` 不再报（release.sh 没退回、停在这一版，之后体检过了；`auto-rollback` 末行照报）。标题只在自动发版真停着时写「自动发版停着」：自动发布的闸只看进度记录、不看 `.history`，只有进度收了尾却没成、卡住，或它自己说了「要人看」才停（#2207）。指挥官巡查（`patrol-lib.mjs`）同一判法同一个数。之后一次发版成功（最近一条变成 `release` / `recovered`）、进度记录收尾，自己撤。
     - 「健康页非 200」（键 `watchdog:healthz:since-<第一次不健康的毫秒>`）：引擎自己去问 `http://10.99.0.2:8787/healthz`（`real/watchdog.ts` 的 `DEFAULT_HEALTHZ_URL`，同 `release.sh` 的 `COCKPIT`），非 200、连不上、超时都算；第一次不健康的时刻记在设置表 `engine.healthzBadSince`（引擎重启不丢），持续超过 10 分钟才报，正文列红的检查；回 200 清掉记录、撤卡。后端起不来时后端自己的 `deploy_lag` 报警和驾驶舱都不在，这一条是引擎（另一个服务）从外面看。
     - 读不到发布历史、进度记录或状态文件不是 JSON：这一轮记没跑成，开着的不撤。查看：`runuser -u fleet -- psql -d fleet -c "select value from settings where key = 'engine.healthzBadSince'"`。
-    - 指挥官本机的 `node ~/.claude/skills/commander/scripts/patrol.mjs` 同样读这几样（`/healthz` 非 200、最近一次发版 unhealthy / auto-rollback、进度记录没收尾、自动发布「要人看」都判 BROKEN 并列出红的检查，落后主线超过 5 个提交且最老的超过 60 分钟判 ALERT，读不到也是 BROKEN），判法在 `agents/skills/commander/scripts/patrol-lib.mjs`。
+    - 指挥官本机的 `node ~/.claude/skills/commander/scripts/patrol.mjs` 同样读这几样（`/healthz` 非 200、最近一次发版 unhealthy / auto-rollback、进度记录没收尾、自动发布「要人看」都判 BROKEN 并列出红的检查，落后主线超过 5 个提交且最老的超过 60 分钟判 ALERT，读不到也是 BROKEN），判法在 `agents/skills/commander/scripts/patrol-lib.mjs`。读不到法国（ssh 没连上、输出空、认不出、采集时间和本机差太多）时，除了退出码 2，还在 `VERDICT` 前打一行「读不到法国」，写明原因，并指向香港健康页（「香港探法国」一节）。法国答了、只是盘面不对，不加这一行。
   - 今天的每日简报没送到（`packages/engine/src/jobs/watchdog-brief.ts`，判法 `@fleet-dao/db` 的 `dailyBriefProblem`）：09:00（北京时间）以后，今天 `daily-brief` 一轮都没起、没做成（#1055 评论没发成也算）、那一行提醒没建、没推到飞书，报 `watchdog:brief:<北京日期>`「今天的每日简报没送到」（卡住报警）；送到了自己撤，过了一天昨天那条撤掉；同一天人点了「处理」不再打开。
   - 提醒推飞书不通（`packages/engine/src/jobs/watchdog-push.ts`，判法 `@fleet-dao/db` 的 `feishuPushProblem`）：`watchdog:push:feishu`「飞书推送不通：手机上收不到提醒」，进「要你拍」（推送自己坏了，卡住报警也推不出去）。不通 = 后端记了「没配」（设置 `feishu.push`），或有该推的到点超过 1 小时没送到、而且最近 1 小时一条都没送成。正文写怎么查（`fleet-api feishu-push status`）、怎么真发一条验（`… feishu-push test`）。推通了下一轮（5 分钟内）自己撤；同一段里人点了「处理」不再打开。读不到状态、送达记录：这一轮记没跑成，开着的不撤。
   - 一轮下来一个都没扫到（`unscanned`）：`why` 写清两样——定时任务登记表上有几个任务、哪些仓开着「让 AI 接活」（一个仓都没开就写「没有哪个仓开着『让 AI 接活』，没有仓可看」），这样看得出是哪个仓空着，不只剩一句「没东西可看」。
@@ -589,6 +605,8 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 ### 外部看门狗
 
 外部看门狗（#292，design 第六节第 5 层、第十三节）：Cloudflare 定时 Worker 每 5 分钟从外面查香港和法国，挂了推飞书。代码在 `packages/edge`，不跑在法国或香港上。这一片只把判法和 Worker 进仓，不部署。部署要创始人在 Cloudflare 上授权一次（免费、不绑卡）。
+
+它还没部署，法国关机时不会响。香港本机已经在探的是「香港探法国」一节，不经过 Cloudflare。
 
 判法在 `packages/edge/src/judge.ts`。香港：公网驾驶舱首页回得来（任何 HTTP 状态码都算 nginx 活着），连不上算挂。法国：公网 `/healthz` 指 `https://<驾驶舱域名>/healthz`（香港 nginx 经隧道转），不是 `http://<法国IP>:8787/healthz`，也不是隧道地址。回 200，或回 503 但回得来（后端活着、某一项不好，交给健康页和引擎自己报），连不上、502、504 算挂，别的状态码也按挂报。香港连不上时只报香港，不连带报法国。同一次挂着每小时最多再推一次。恢复推「恢复了，挂了多久」。读不到上一轮状态照挂处理并且推一条，不静默。真域名、飞书 webhook、请求头 `x-fleet-watch` 的值只从 Worker 的 secret 读（`packages/edge/wrangler.toml` 里只有占位）。读不到密钥这一轮记没查成、写日志，不当成没挂。`FLEET_EDGE_FR_URL` 不是 `https://<驾驶舱域名>/healthz` 这种（http、带了 8787、写成 IP、路径不是 `/healthz`）也记没查成、不探测、不报法国挂了：法国公网 8787 超时是第二节的预期，配错地址不能当成法国挂了（`packages/edge/src/worker.ts`）。
 
@@ -614,6 +632,28 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 只停定时、先留着 Worker：Cloudflare 控制台打开 Workers & Pages 里这个 Worker 的 Triggers，删掉那条 cron。用配置文件管的话，把 `packages/edge/wrangler.toml` 的 crons 改成空数组，再执行上面的部署命令。空数组会清掉已部署的 cron；配置里不写 triggers，原来的 cron 还在。
 - 法国如果已经配了 `FLEET_EDGE_WATCH_ID`：从 `engine.env` 和 `api.env` 里删掉这个键，重启 `fleet-engine` 和 `fleet-api`。引擎那边没配或是空的，登记行会被摘掉（`packages/engine/src/real/jobs.ts`），避免「登记了还没跑过」误报。
 
+### 香港探法国
+
+法国上的看门狗、飞书应用机器人、备份巡检、自动发布都在法国。法国关机时它们一起哑，香港仍在。香港自己每分钟经隧道打 `http://10.99.0.2:8787/healthz`（`fleet-hk-france-probe.timer` 拉起 `fleet-hk-france-probe.service`，跑 `/usr/local/lib/fleet-dao/france-probe.sh`，仓里的原稿是 `deploy/hk/france-probe.sh`）。不经过 Cloudflare，也不经过法国上的任何定时任务。`deploy/hk.sh` 装上这两份单元并排班。
+
+200 和 503 算通：后端答了。503 是某一项不好，健康页和法国自己的看门狗会说。连不上、超时、别的状态码算一次失败。连续 3 次失败才算失联；中间有一次通了就重新数。失联时刻用这一串失败的第一次（北京时间 `HH:MM`），不是第三次。失联推一次，恢复推一次，失联期间不再重复推。
+
+状态写 `/var/lib/fleet-hk-france-probe/status.json`。驾驶舱健康页 `https://<驾驶舱域名>/health/` 另外读 `/health/france-link.json`（两份 nginx 模板都用 alias 指到这份文件，不在静态目录里）。失联时页顶写「法国失联自 xx:xx」，总灯改红，并多一行「法国隧道」。文件还没有、不是 JSON、或 `down` 不是 true：健康页不当成全站红，只显示 `/healthz` 自己的结果。
+
+推送只看香港本机 `/etc/fleet-dao/hk-probe.env` 的 `FLEET_HK_PROBE_WEBHOOK`（飞书群机器人那种地址）。`deploy/hk.sh` 第一次跑、文件还不在时，照 `deploy/hk/hk-probe.env.example` 建一份（root:root 600），之后不覆盖。没配、留空、读不到、地址不是 http(s)、POST 失败：只写状态和日志，这一轮仍退出 0，定时器不会因此停。地址不要写进仓，日志里也不打。飞书群机器人认的正文是 `{"msg_type":"text","content":{"text":"…"}}`。
+
+样例（和 `deploy/hk/hk-probe.env.example` 同一份）：
+
+```
+# 香港探法国的推送。deploy/hk.sh 第一次跑时，若本机还没有 /etc/fleet-dao/hk-probe.env，就照这份建一份（root:root 600）。
+# 之后只改机器上的那份，不进 git，重跑 hk.sh 也不会覆盖。
+# FLEET_HK_PROBE_WEBHOOK：收 JSON 的地址（飞书群机器人 webhook 就是这种）。留空 = 不推，只写状态文件和日志，探活照常、不报错。
+# 飞书群机器人认的正文是 {"msg_type":"text","content":{"text":"…"}}，探活脚本就按这个发。地址不要写进仓。
+FLEET_HK_PROBE_WEBHOOK=
+```
+
+看：`systemctl status fleet-hk-france-probe.timer`、`journalctl -u fleet-hk-france-probe.service -n 20`、健康页。停：`systemctl disable --now fleet-hk-france-probe.timer`（健康页不再更新失联时刻）。法国在、只是某一项红：这里不推，看健康页和法国看门狗。失联之后要分清关机、断网还是隧道断了、要不要在 Contabo 重启，照 [outage-france.md](outage-france.md)。
+
 拉单（#632，替掉 webhook 接活加认领；`packages/engine/src/jobs/intake.ts`、`real/intake.ts`）：
 - 引擎每 5 分钟（每小时 3、8、13……分，定时任务 `intake`）自己到 GitHub 读该做的单，自己挑（创始人 2026-10-08「让ai自己挑挺好的」「按推荐」，#1336；规则全文见 design 第九节「开着的项目，引擎自己挑单」）：对每个「让 AI 接活」打开的项目（`repos.auto_dispatch_since` 不空，现在只当开关用），读开着的单，**准入**——作者在白名单里、不是母单子单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准，原因里写明）、还没派过、历史失败不超过 2 次、正文没写工作流路径、没有开着的 PR 挂着、交代齐（`readTaskBrief`；缺则留一次言）、「怎么算做完」没有要 diff 外证据的条目（截图、线上、现场、审计、看日志、飞书收到……，和 `pnpm issue:new` 同一份判据；有就留一次言写明哪几条、怎么改，不拉）、规模不是最重档（「已知的模块」列了超过 50 个路径）；没贴「待补」「要人拍」（整理会话贴的，贴着一律不拉）；未排期的单、别的版本的单和其余单一样进候选，不看里程碑；开单早于「让 AI 接活」打开那一刻的老单要贴了「整理过」（临时指挥官的整理会话判为仍成立后贴）或「交给引擎」才进候选，开关之后新开的单不需要（#1338；#1342 发到法国后引擎第一轮拉了两张前提已过期的老单）。每个仓走完以后，有从没整理过的老单、或有空位却一条都没起且待办还有候选，就叫一次临时指挥官整理待办（下面「叫临时指挥官整理待办」）。过了准入的**排序**（版本先后列表序号 → 挂当前版本 → 规模小 → 同规模里贴了「交给引擎」的 → 失败少 → 开单早），再按空位从前往后**起**：同时在跑的任务工作流 ≤ 6、一轮最多 5 条、**每小时最多 20 条**（滚动一小时，数任务行建出时刻）、熔断没停拉；起之前才现读一遍这张单（开着、不是 PR、母单子单和「本机做」再核一遍）。起的建任务行、起任务工作流（编号 `task:<owner>/<name>#<号>`，`REJECT_DUPLICATE`：同一张单任何时候最多一条，做完、停下的不会自己重来，要人在驾驶舱点「继续」）。交代不全的在单子上留一条言写清缺什么（同一处缺法只留一次）。拉单本身不动单子。#282（驾驶舱「交给 fleet」按钮）被「交给引擎」取代（2026-10-08）：按钮不做，`fleet-api handover` 已删，没有这条命令。
 - 开关全关是正常的空闲：这一轮记 ok、不读 GitHub。在跑的任务数、白名单、开着的单、最近一小时已起的条数、熔断状态任何一样读不到：这一轮记没跑成（`schedule_runs` 里 `failed` 或 `partial`，看门狗照登记表报），不拿 0 或「没有」顶。
@@ -634,7 +674,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 - 名单唯一的出处是 `packages/engine/src/jobs/retired-schedules.ts` 的 `RETIRED_SCHEDULES`（每条 `{ id, retiredBy, moved? }`，`retiredBy` 写哪个 PR 把这个定时任务的代码删掉的；`moved: true` 是任务还在、只是改由进程内定时器跑，那 8 条就是）。两处认它，不各写一份：看门狗（`packages/engine/src/real/watchdog.ts`）把退役的（不含 `moved` 的）从「新不新鲜」的判断里剔除；引擎起来、进程内定时器起之前，先按这份名单把 Temporal 上还在的 Schedule 删掉（`packages/engine/src/jobs/retired-schedules.ts` 的 `deleteRetiredSchedules` 算结局，真装配在 `packages/engine/src/real/retire-schedules.ts` 的 `retireEngineSchedules`，接线在 `worker.ts`）。
 - 退役一个定时任务：把它的代码删掉时，在 `RETIRED_SCHEDULES` 里加一条（`retiredBy` 写这个 PR 号），不用再手动去法国暂停或删 Schedule——下一次引擎起来（发新版本、重启）自动删。`moved` 的那 8 条等法国和本机的引擎都起过一次新版本、Temporal 上删干净之后，可以从名单里去掉。
 - 定时任务现在怎么跑（#1072）：引擎进程里的定时器（`packages/engine/src/jobs/timers.ts`、登记在 `jobs/engine-timers.ts`），格子和原来的 Schedule 一样（每 N 分钟、错开 M 分钟，从 epoch 算起）；上一轮没完就跳过这一轮；引擎起来时，最近一格的钟点在补跑窗口里（一格，巡检一小时）、且那之后没起过一轮才补一轮，再久就等下一格；一轮超过 15 分钟还没回只记一条 error 日志（`journalctl -u fleet-engine` 里搜「还没回」），不放开「不叠着跑」——它回来之前下一格都跳过，看门狗照登记表报，要人看看卡在哪（卡死了重启引擎）；一轮失败不停定时。**单实例假设**：法国只有一个引擎进程（一个 systemd 单元，发布是先停旧的再起新的），「不叠着跑」只在进程内保证；将来要起第二个引擎进程时，每一轮开头要先抢一把 Postgres 咨询锁（`pg_try_advisory_lock`），抢不到就跳过这一轮——现在不做。没有「暂停/恢复定时任务」这回事了：发版后不用再手动恢复。
-- 三种结局：Temporal 上还在——删掉，`journalctl -u fleet-engine` 记一行「退役的定时任务已删：<id>」，之前报过的「删不掉」提醒自动撤；本来就不在——什么都不做（不记日志、不碰库，这是常态）；删的时候出了别的错（连不上、没权限）——不当成删掉了，记一行 error 日志，进 `notifications`（`retired-schedule:<id>`，daily 级，日报能看到，不是要当场拍的事），正文带着原始错误；好了下一次自动撤。
+- 三种结局：Temporal 上还在——删掉，`journalctl -u fleet-engine` 记一行「退役的定时任务已删：<id>」，之前报过的「删不掉」提醒自动撤；本来就不在——什么都不做（不记日志、不碰库，这是常态）；删的时候出了别的错（连不上、没权限）——不当成删掉了，记一行 error 日志，进 `notifications`（`retired-schedule:<id>`，daily 级，日报能看到，不是要当场拍的事），正文带着原始错误；好了下一次自动撤。超过 3 天没再报，每小时对账按过期撤；引擎下次起来还是删不掉会重新打开。迁移 0072 把当时还开着的标成已撤（功能已删）。
 - 手动查：库里 `runuser -u fleet -- psql -d fleet -c "select dedupe_key, title, resolved_at from notifications where dedupe_key like 'retired-schedule:%' order by created_at desc"`；手动删（不想等下一次重启）：`fleet-temporal schedule delete --schedule-id <id>`。
 
 会话用户的口只许它自己连（#35，2026-09-27 堵上；为什么这么挡、比过哪几种做法见 `specs/35-代理口鉴权/方案.md`）：
@@ -981,7 +1021,7 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 
 ### 自动发布
 
-`fleet-auto-release`（决定 0075）。**2026-10-13 起读数之外还会自动请求发版**（决定 `docs/decisions/0088-release-pause-resume-session.md` 第 1 条、#2039；此前 2026-10-07 到 10-13 只读不发，决定 0032 第 1、2、5 条、#1258）：发版本身仍只有一趟流程——驾驶舱「发布到法国」按钮（发版车同一趟流程，见下一节）；这个单元**不自己调 `release.sh`**，也不看 `v<N>` 版本标记，满足条件时只写一份和按钮一样的请求文件（`/var/lib/fleet-dao/release-request/request.json`，`by` 写「自动发版 决定0088」），由接活单元核请求、走发版。条件（`releaseStep`，每一轮判一次，哪条不满足就把原因写进状态的 `auto.note`、`release.sh --check` 的读数里看得到）：法国在用的落后主线头；头那次 `ci.yml` push 全绿（`ci.yml` 的汇总检查 `check` 要等全部 job，含主线推送才跑的 E2E：E2E 没绿整次运行就不是绿；红了就等下一个绿的头，不回头发旧的；`deploy/test/auto-release.test.mjs` 读 `.github/workflows` 钉住这个口径）；闸全过（接活单元装了、上一份请求已被接走、没有暂停标记、发布锁没被占、`release-train.json` 的 `status` 是 `done` 或 `aborted`——卡住、没成的要人处理，不自动再发）；任何一项读不到、认不出都不发；同一个头 30 分钟内不重复请求（接活单元读走请求到写进度之间的空档）。**不再要求两次发版隔 60 分钟**（决定 0093，取代 0088 第 1 条的「至少隔 1 小时、攒成一次」：攒批让合并后等发版中位 91 分钟、p90 420 分钟，占从合并到上线墙钟的 58%；现在每个绿的头都发，发版本身只停几分钟）。请求没写成（目录写不进、被占着）报 `auto-release:request`，写成了自己撤。驾驶舱按钮不经过这里。第一次发布（法国还没发布过）仍走按钮。以前（2026-10-02 到 10-07）它按版本标记找要发的版本，没有标记就不发，那一整套（挑标记、标记那一版的 CI 闸、人按住 24 小时、没成隔 30 分钟重试、等引擎空闲、发布四步的记录）都删了；由来和旧写法见本节末尾和 git 历史。
+`fleet-auto-release`（决定 0075）。**2026-10-13 起读数之外还会自动请求发版**（决定 `docs/decisions/0088-release-pause-resume-session.md` 第 1 条、#2039；此前 2026-10-07 到 10-13 只读不发，决定 0032 第 1、2、5 条、#1258）：发版本身仍只有一趟流程——驾驶舱「发布到法国」按钮（发版车同一趟流程，见下一节）；这个单元**不自己调 `release.sh`**，也不看 `v<N>` 版本标记，满足条件时只写一份和按钮一样的请求文件（`/var/lib/fleet-dao/release-request/request.json`，`by` 写「自动发版 决定0088」），由接活单元核请求、走发版。条件（`releaseStep`，每一轮判一次，哪条不满足就把原因写进状态的 `auto.note`、`release.sh --check` 的读数里看得到）：法国在用的落后主线头；头那次 `ci.yml` push 全绿（`ci.yml` 的汇总检查 `check` 要等全部 job，含主线推送才跑的 E2E：E2E 没绿整次运行就不是绿；红了就等下一个绿的头，不回头发旧的；`deploy/test/auto-release.test.mjs` 读 `.github/workflows` 钉住这个口径）；闸全过（接活单元装了、上一份请求已被接走、没有暂停标记、发布锁没被占、`release-train.json` 的 `status` 是 `done` 或 `aborted`——`running` 写「有一趟发版在跑（目标提交前 12 位），等它收尾」，不含「要人看」；收了尾没成（failed、blocked）的要人看，不自动再发）；任何一项读不到、认不出都不发；同一个头 30 分钟内不重复请求（接活单元读走请求到写进度之间的空档）。**不再要求两次发版隔 60 分钟**（决定 0093，取代 0088 第 1 条的「至少隔 1 小时、攒成一次」：攒批让合并后等发版中位 91 分钟、p90 420 分钟，占从合并到上线墙钟的 58%；现在每个绿的头都发，发版本身只停几分钟）。请求没写成（目录写不进、被占着）报 `auto-release:request`，写成了自己撤。驾驶舱按钮不经过这里。第一次发布（法国还没发布过）仍走按钮。以前（2026-10-02 到 10-07）它按版本标记找要发的版本，没有标记就不发，那一整套（挑标记、标记那一版的 CI 闸、人按住 24 小时、没成隔 30 分钟重试、等引擎空闲、发布四步的记录）都删了；由来和旧写法见本节末尾和 git 历史。
 
 - 怎么跑起来：`fleet-auto-release.timer` 每 5 分钟（上一轮跑完再等 5 分钟，不叠着跑）以 root 拉起一轮 `/usr/local/lib/fleet-dao/auto-release/fleet-auto-release.mjs`。一轮最多 30 分钟（`TimeoutStartSec`；最长的是装机自动档 10 分钟和规矩同步每个用户 5 分钟）。
 - 每一轮读什么、写什么：读主线头和最近 300 个提交（`git fetch` 只取 `main`、不取 tag）；主线头自己那次 `ci.yml` push 的结论（一轮最多问一次 GitHub，不带凭据一个钟头 60 次；这个头已经读到全绿就不再问；限流、连不上、回的认不出记 `unknown` 和原因，不当成绿）；法国在用的提交（`current` 链接）；落后几个（在用的在主线最近提交里排第几，和驾驶舱「落后主线 N 个提交」同一个口径）；装机层装到哪、配置对账。写进 `/srv/fleet-dao-releases/.auto/state.json`（`schema: 1`；字段 `main`、`ci`、`current`、`last`、`rules`、`tier`、`system`、`config`、`alerts`……）。以前的 `marker`、`markerError`、`attempt`、`hold`、`waitingSince`、`sequence` 没有了；后端（`packages/store/src/deploy-lag.ts`）和指挥官的法国页（`agents/skills/commander/scripts/france-lib.mjs`）读到老状态里多出来的这几样也认，不报错。**没有任何 `v<N>` tag 的仓上读数照常**（以前会因为没有标记写成「不发」；测试 `deploy/test/auto-release.test.mjs` 第一条是故意造的失败）。

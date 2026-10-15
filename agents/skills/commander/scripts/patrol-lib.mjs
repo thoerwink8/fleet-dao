@@ -8,13 +8,15 @@
 //   STALE_MINUTES 分钟。
 // - 发版和健康页也读（2026-10-14 法国发版失败，巡检还报 OK 近一小时）：/healthz 非 200、最近一次发版是 unhealthy / auto-rollback、发版进度记录停在
 //   failed / blocked 这类收了尾却没成的状态或 running 超过 LIMITS.trainStuckMinutes（trainReason）、自动发布状态里写着「要人看」，一律 BROKEN（列出红的检查）；
-//   running 没超时是一趟正常发版在走（自动发版每 5 分钟一班），它和那段时间自动发布说的「要人看」都不算；在用版本落后主线超过 LIMITS.lagCommits 个提交
+//   running 没超时是一趟正常发版在走（自动发版每 5 分钟一班），不报。闸在 running 时写「有一趟发版在跑，等它收尾」，不含「要人看」；在用版本落后主线超过 LIMITS.lagCommits 个提交
 //   且最老的那个落下超过 LIMITS.lagMinutes 分钟是 ALERT；这几块读不到、认不出也是 BROKEN。
 // - 飞书推送通不通（push 那一块）：判法照 packages/db/src/queries/feishu-push.ts 的 feishuPushProblem 写（这份脚本在仓外跑、
 //   引不了那边的代码，改那边要一起改这里的 SQL）。推送渠道自己坏了靠推送报不出来，这里每次巡查都看一次，不只靠「新通知」。
 // - 今天的每日简报送到没（brief 那一块）：判法照 packages/db/src/queries/daily-brief.ts 的 dailyBriefProblem 写（09:00 以后没跑、没做成、
 //   没建、没推到飞书都是 ALERT），同样改那边要一起改这里。
 // - 基线只由这份脚本写（模型不写）：OK、ALERT 都把这一次的读数写成新基线，BROKEN 不写（不拿坏读数盖掉好基线）。
+// - 读不到法国（ssh 没读成、输出空、解析失败、采集时间和本机差太多，facts 是空的）：VERDICT 前多一行显眼中文，
+//   写明读不到的原因，并指向香港状态页（上面有「法国失联自 xx:xx」）。法国答了、只是盘面不对（healthz 503、发版 unhealthy）不加这一行。
 // - 最后一行永远是 `VERDICT: OK`、`VERDICT: ALERT <条数>` 或 `VERDICT: BROKEN`；退出码 0、1、2 与之对应。
 import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
 
@@ -510,7 +512,7 @@ export function trainLanded(f) {
 
 /**
  * 判 BROKEN 的几条（出事了，不是「要留意」）：健康页不是 200（列出红的检查）、最近一次发版是 unhealthy / auto-rollback、
- * 发版进度记录收了尾却没成或 running 超时（trainReason）、自动发布处于「要人看」（一趟正常在走时不算：那是因为它）。命中一条记一行；没有回空。
+ * 发版进度记录收了尾却没成或 running 超时（trainReason）、自动发布的话里写着「要人看」。命中一条记一行；没有回空。
  * @param {Facts} f
  */
 export function brokenReasons(f) {
@@ -528,13 +530,8 @@ export function brokenReasons(f) {
     out.push(`最近一次发版是 ${historyWord(last)}`);
   const train = trainReason(f);
   if (train) out.push(train);
-  // 自动发布这句「要人看」只因为进度记录的状态（「上一趟发版是「X」状态」）时，进度记录这边自己判：正常在走、刚收尾成了（旧话）都不算；进度记录不在却这么说对不上，照报。
-  // 同 packages/engine/src/jobs/release-watch.ts 的 trainNote
-  const kind = trainKind(f);
-  const trainOnly =
-    f.autoNote.includes('上一趟发版是「') &&
-    (kind === 'running' || (kind === 'none' && f.trainStatus !== ''));
-  if (f.autoNote.includes('要人看') && !trainOnly) out.push(`自动发布处于「要人看」：${f.autoNote}`);
+  // 正文里写了「要人看」才算。闸在 running 时写的是「有一趟发版在跑，等它收尾」。
+  if (f.autoNote.includes('要人看')) out.push(`自动发布处于「要人看」：${f.autoNote}`);
   return out;
 }
 
@@ -641,12 +638,24 @@ export function judge({ raw, now, base }) {
 }
 
 /**
+ * 读不到法国时插在 VERDICT 前的那一行。reason 用判出来的 broken。
+ * @param {string} reason
+ */
+export function franceUnreadLine(reason) {
+  return `！！！读不到法国：${reason}。法国上的看门狗、飞书推送、备份巡检和自动发布这时一起哑，不会有人来推。看香港状态页 https://<驾驶舱域名>/health/ ，有「法国失联自 xx:xx」就是隧道那头从那一刻起连不上。`;
+}
+
+/**
  * 打出来的样子：每项一行，带计数和采集时间；最后一行是 VERDICT。
+ * 读不到法国（facts 是空的）时，VERDICT 前多一行显眼中文。
  * @param {Report} r
  * @returns {string[]}
  */
 export function render(r) {
-  if (!r.facts) return ['PATROL 法国 没读成', `BROKEN ${r.broken ?? '没说为什么'}`, 'VERDICT: BROKEN'];
+  if (!r.facts) {
+    const why = r.broken ?? '没说为什么';
+    return ['PATROL 法国 没读成', `BROKEN ${why}`, franceUnreadLine(why), 'VERDICT: BROKEN'];
+  }
   const f = r.facts;
   const last = f.history.at(-1);
   const at = `@${f.at}`;

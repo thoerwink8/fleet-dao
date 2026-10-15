@@ -96,7 +96,8 @@ export const RULES: readonly FailureRule[] = [
   },
   // 下面两条是插头「没查成」（packages/adapters/src/judge.ts）：launch_unknown = prompt 发出去了、没等到本次的应答，
   // 会话可能已经在跑；relay_unknown = 会话说做完了、中转账本没读成，上游有没有真干活核实不了，活可能已经交了。
-  // 原路重试都是再起一个会话：同一件活跑两遍、扣两次额度、同一棵树里两个会话。所以只挂起报警，等对账；
+  // 插头先按工作目录和起针时间对过账（MS-18），对上唯一一条就自己接上了；交到这里的是对不上（没有、多条、档案读不了）。
+  // 原路重试都是再起一个会话：同一件活跑两遍、扣两次额度、同一棵树里两个会话。所以只挂起报警，等人看过再对；
   // 是我们没查成，不是路由坏了，不记路由的失败。强码一轮按表的先后认，这两条只排在 EN2（同样只挂起）后面：
   // 原话里常夹着等应答时收到的别的报错（at capacity、overloaded_error、account_banned……），排在繁忙、封号这些规则
   // 后面就会被抢走。反过来，这两个词只认插头交来的 code 字段：测试输出里有这两个词（CI 红时常见）不能把返工判成挂起。
@@ -567,6 +568,18 @@ export const RULES: readonly FailureRule[] = [
     codes: ['diverged'],
     routeOutcome: 'neutral',
     hint: '看原因里远端此刻的头，人工核实要不要把它当成分支的新头接着走',
+  },
+  // 并主线时工作树在旧头之后还有没推的提交，远端那个并主线提交又含不了它们、本地也并不上（历史被改写，或列不出来）。
+  // 能并的在 github-ports.ts 里已经并过再推了，到这条规则说明那条路走不通。原路重试没用。
+  // 只认端口交来的码：原文里出现「没推的提交」不说明这一步就是这个失败。
+  {
+    id: 'MC4',
+    title: '工作树有没推的提交，并主线并不上',
+    kind: 'stop',
+    codes: ['worktree_diverged'],
+    codeFieldOnly: true,
+    routeOutcome: 'neutral',
+    hint: '看报错里的工作树和没推的提交，先取走再清树',
   },
   {
     id: 'TS1',

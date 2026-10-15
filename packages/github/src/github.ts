@@ -70,6 +70,7 @@ import {
   type CommentIssueResult,
   closeIssue,
   commentIssue,
+  commentPull as commentOnPull,
   listClosedIssues,
   type OpenIssueInput,
   type OpenIssueResult,
@@ -200,6 +201,11 @@ export interface GitHub {
   openIssue(input: OpenIssueInput, ctx?: ActivityContext): Promise<OpenIssueResult>;
   /** 在一张 issue 上留一条评论（幂等，按 key 认），不关单、不改进度段：把回答写到提问那张单上。 */
   commentIssue(input: CommentIssueInput, ctx?: ActivityContext): Promise<CommentIssueResult>;
+  /** 在一个 PR 上留一条评论（幂等，按 key 认）。号不是 PR 的抛错，不往 issue 上写。 */
+  commentPull(
+    input: { repo: RepoRef; prNumber: number; key: string; body: string },
+    ctx?: ActivityContext,
+  ): Promise<CommentIssueResult>;
   /** 在一张单正文末尾追加一段，原文不动（幂等，按 key 认）：临时指挥官补老单。 */
   appendIssueBody(input: AppendIssueBodyInput, ctx?: ActivityContext): Promise<AppendIssueBodyResult>;
   /** 从 since 起关掉的单（不含 PR），开新单前查重用。读不到、翻不完抛错。 */
@@ -418,6 +424,12 @@ export function createGitHub(options: GitHubOptions): GitHub {
     closeIssue: (input, ctx) => closeIssue(deps, input, ctx),
     openIssue: (input, ctx) => openIssue(deps, input, ctx),
     commentIssue: (input, ctx) => commentIssue(deps, input, ctx),
+    commentPull: (input, ctx) =>
+      commentOnPull(
+        deps,
+        { repo: input.repo, issueNumber: input.prNumber, key: input.key, body: input.body },
+        ctx,
+      ),
     appendIssueBody: (input, ctx) => appendIssueBody(deps, input, ctx),
     listClosedIssues: (input) => listClosedIssues(deps, input),
     renewInteractionLimit: (input, ctx) => renewInteractionLimit(deps, input, ctx),

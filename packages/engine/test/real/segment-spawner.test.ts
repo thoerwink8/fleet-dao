@@ -2,13 +2,22 @@
 // 用假驱动（不起真执行体、不碰 sudo / systemd）：驱动报告怎么整理成 one-shot 的结局、路由和会话用户读不到时明确失败、
 // 临时目录起前交给会话用户、收场后删（驱动抛错也删）、用量花费进 runs。每条失败路径故意造一次。
 
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildSessionEnv, type RateLimitReading, type RunFacts, type SessionUser } from '@fleet-dao/adapters';
-import type { Db, RouteLaunchFacts, TranscriptRow } from '@fleet-dao/db';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  type Db,
+  getRun,
+  type RouteLaunchFacts,
+  readRunTranscript,
+  startRun,
+  type TranscriptRow,
+} from '@fleet-dao/db';
+import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CarpoolRejection } from '../../src/jobs/carpool-outage.ts';
 import type { CpuUsageDeps } from '../../src/real/cpu-usage.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
@@ -876,6 +885,97 @@ describe('hostSegmentSpawner · 会话过程记录（#1640）', () => {
     const r = await h.run();
     expect(r.outcome).toBe('done');
     expect(h.calls[0]?.hooks.onTranscript).toBeUndefined();
+  });
+});
+
+describe('提需求 / 临时指挥官：不经 runOneShot 起会话，过程记录也能落库', () => {
+  let t: TestDb;
+  beforeAll(async () => {
+    t = await createTestDb();
+  }, TEST_DB_TIMEOUT_MS);
+  afterAll(() => t.close());
+  beforeEach(async () => {
+    await resetTestDb(t);
+  });
+
+  it('库里还没有 runs 行：提示词从 seq 0 起写进 run_transcript；锚点没有 route_id，收场就结束，不占池', async () => {
+    const runId = randomUUID();
+    const spawn = harness({
+      db: t.db,
+      driverRun: async (_spec, hooks) => {
+        hooks.onTranscript?.(
+          { at: '2026-10-15T09:50:00.000Z', kind: 'assistant', text: '我先看代码' },
+          { seq: 0, replay: false },
+        );
+        return report();
+      },
+    }).spawn;
+    await spawn({
+      argv: [],
+      cwd: '/w',
+      stdin: '提需求：把导出改成按当前筛选',
+      signal: new AbortController().signal,
+      timeoutMs: 60_000,
+      input: {
+        runId,
+        segment: 'scope',
+        modelId: 'claude-opus-5-5',
+        routeId: 'r1',
+        prompt: '提需求：把导出改成按当前筛选',
+        cwd: '/w',
+      },
+    });
+    const page = await readRunTranscript(t.db, runId, { limit: 20 });
+    expect(page.entries.map((e) => [e.seq, e.kind, e.text])).toEqual([
+      [0, 'prompt', '提需求：把导出改成按当前筛选'],
+      [1, 'assistant', '我先看代码'],
+    ]);
+    const row = await getRun(t.db, runId);
+    expect(row).toMatchObject({
+      segment: 'scope',
+      model: 'claude-opus-5-5',
+      routeId: null,
+      taskId: null,
+      outcome: 'done',
+    });
+    expect(row?.endedAt).toBeInstanceOf(Date);
+  });
+
+  it('三段会话已经有开跑行：不改那一行、也不替它收场，过程记录照样落在原来的编号上', async () => {
+    const runId = randomUUID();
+    await startRun(t.db, {
+      id: runId,
+      segment: 'manual',
+      model: 'original-model',
+      branch: 'keep-me',
+      startedAt: new Date('2026-10-15T09:00:00.000Z'),
+    });
+    const spawn = harness({ db: t.db }).spawn;
+    await spawn({
+      argv: [],
+      cwd: '/w',
+      stdin: '动手的提示词',
+      signal: new AbortController().signal,
+      timeoutMs: 60_000,
+      input: {
+        runId,
+        segment: 'manual',
+        modelId: 'other-model',
+        routeId: 'r1',
+        prompt: '动手的提示词',
+        cwd: '/w',
+      },
+    });
+    const row = await getRun(t.db, runId);
+    expect(row).toMatchObject({
+      model: 'original-model',
+      branch: 'keep-me',
+      segment: 'manual',
+      endedAt: null,
+      outcome: null,
+    });
+    const page = await readRunTranscript(t.db, runId, { limit: 10 });
+    expect(page.entries.map((e) => [e.seq, e.kind, e.text])).toEqual([[0, 'prompt', '动手的提示词']]);
   });
 });
 
