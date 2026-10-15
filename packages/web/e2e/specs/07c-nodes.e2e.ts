@@ -166,7 +166,7 @@ test.describe('看板多机', () => {
     page,
     shot,
   }) => {
-    await page.goto('/env');
+    await page.goto('/france');
     await expect(page).toHaveURL(/\/france$/);
     const cols = page.locator('[data-env-column]');
     await expect(cols).toHaveCount(3);

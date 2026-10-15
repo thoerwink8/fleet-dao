@@ -11,7 +11,6 @@ import { createMockApi } from '../api/mock/server';
 import type { NodeDetail, Nodes } from '../api/types';
 import { ThemeProvider } from '../components/theme-provider';
 import { TooltipProvider } from '../components/ui/tooltip';
-import EnvRedirect from '../routes/env';
 import France from '../routes/france';
 import HomePage from '../routes/home';
 import Shell from '../routes/shell';
@@ -80,7 +79,6 @@ async function mount(api: FleetApi, route: string) {
                 <Route element={<Shell />}>
                   <Route index element={<HomePage />} />
                   <Route path="france" element={<France />} />
-                  <Route path="env" element={<EnvRedirect />} />
                   <Route path="quota" element={<p>额度页本体</p>} />
                   <Route path="settings" element={<p>设置页本体</p>} />
                 </Route>
@@ -133,13 +131,6 @@ describe('顶栏环境切换器', () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(where()).toBe('/france');
-  });
-
-  test('旧地址 /env 转到法国页，?node= 留着，不换成「只看得到本台」', async () => {
-    await mount(apiFor('fresh'), '/env?node=wsl');
-    await waitFor(() => expect(where()).toBe('/france?node=wsl'));
-    expect(screen.queryByText(/这一页只看得到/)).toBeNull();
-    expect(await screen.findByRole('heading', { name: /本机 WSL/ })).toBeTruthy();
   });
 
   test('读不到远程环境列表：下拉里写原因，不当成「没有远程环境」；本台照常能看', async () => {

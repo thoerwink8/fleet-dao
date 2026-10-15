@@ -1,15 +1,12 @@
 // 账密登录和设置页「账密」一节的白话：后端给什么错、页面怎么说。
 // 规矩出处：shared/web-api/auth.ts 里 PasswordLoginRequest、UpdateCredentialsRequest 的注释（错误码、details.field、锁多久）。
 // 登录错误一律不透露「这个账号在不在」：后端对没这个人、没设过密码、密码错都回同一句 bad_credentials，这里也只说那一句。
-import { PASSWORD_MIN_LENGTH } from '@fleet-dao/shared';
 import { z } from 'zod';
 import { ApiError, errorText } from '../api/client';
 import { formatClock, formatIn } from './format';
 
-/** 登录请求字段的长度上限（和 shared 的 PasswordLoginRequest 同一个数；输入框的 maxLength 也用它们）。 */
-export const USERNAME_MAX = 200;
-export const PASSWORD_MAX = 1024;
-export { PASSWORD_MIN_LENGTH };
+/** 输入框的 maxLength 和最短长度：数只在 shared 定义一次，页面从这里拿。 */
+export { PASSWORD_MAX, PASSWORD_MIN_LENGTH, USERNAME_MAX } from '@fleet-dao/shared';
 
 const Locked = z.object({ until: z.iso.datetime({ offset: true }) });
 

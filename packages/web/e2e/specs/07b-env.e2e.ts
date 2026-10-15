@@ -21,13 +21,9 @@ type Env = {
 test.describe('法国页', () => {
   test.beforeEach(async ({ login }) => login());
 
-  test('这一台一页看全：旧地址转到法国页，侧栏只有法国，本台六格和后端 /api/env 对得上', async ({
-    page,
-    api,
-    shot,
-  }) => {
+  test('这一台一页看全：侧栏只有法国，本台六格和后端 /api/env 对得上', async ({ page, api, shot }) => {
     const env = (await api.get('/api/env')) as Env;
-    await page.goto('/env');
+    await page.goto('/france');
     await expect(page).toHaveURL(/\/france$/);
     await expect(page.locator('aside').getByRole('link', { name: '法国', exact: true })).toBeVisible();
     await expect(page.locator('aside').getByRole('link', { name: '环境', exact: true })).toHaveCount(0);
