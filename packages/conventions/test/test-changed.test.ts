@@ -238,6 +238,21 @@ describe('跑哪些测试：和 CI 按改动跑同一套判法', () => {
     expect(selectTests([], GRAPH)).toMatchObject({ kind: 'some', paths: [...LOCAL_ALWAYS_TESTS] });
   });
 
+  it('跑过之后把文档指针检查的结果打在最后一行：自测只留输出末尾，开头的文件名留不住', () => {
+    const passed = run(['docs/ops.md'], { docReaders: () => [] });
+    expect(passed.code).toBe(0);
+    expect(passed.vitestCalls[0]).toContain(DOC_POINTERS_TEST);
+    expect(passed.out.at(-1)).toBe(
+      `文档指针检查通过：${DOC_POINTERS_TEST} 在这次里跑了，vitest 退出码 0（全仓活文档的路径和章节都指得到）`,
+    );
+    const failed = run(['docs/ops.md'], { docReaders: () => [], vitest: () => ({ status: 1 }) });
+    expect(failed.code).toBe(1);
+    expect(failed.out.join('\n')).not.toContain('文档指针检查通过');
+    const all = run(['pnpm-lock.yaml'], { argv: ['--all'] });
+    expect(all.vitestCalls[0]).toEqual(['run']);
+    expect(all.out.at(-1)).toContain('文档指针检查通过');
+  });
+
   it('改一个包（决定 0093）：不拖上整个 agents/test/，CI 另外还跑里写着它', () => {
     const s = selectTests(['packages/agent-eval/src/cli.ts'], GRAPH);
     expect(s).toMatchObject({ kind: 'some', paths: ['packages/agent-eval/', ...LOCAL_ALWAYS_TESTS] });

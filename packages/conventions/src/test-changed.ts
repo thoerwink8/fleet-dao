@@ -319,5 +319,16 @@ export function testChanged(deps: TestChangedDeps): number {
     deps.err(`vitest 被信号 ${r.signal ?? '（不知道哪个）'} 杀掉了：测试没跑完，不算通过`);
     return 1;
   }
+  // 引擎自测只把命令输出的末尾交给冷验收。这份检查跑得快，文件名落在开头，末尾只剩汇总时看不出它过没过。
+  if (r.status === 0 && ranDocPointers(decision.args)) {
+    deps.out(
+      `文档指针检查通过：${DOC_POINTERS_TEST} 在这次里跑了，vitest 退出码 0（全仓活文档的路径和章节都指得到）`,
+    );
+  }
   return r.status;
+}
+
+/** `vitest run` 不带过滤是全套，里面有文档指针检查；带了过滤则要清单里真有这个文件。 */
+function ranDocPointers(args: readonly string[]): boolean {
+  return (args.length === 1 && args[0] === 'run') || args.includes(DOC_POINTERS_TEST);
 }
