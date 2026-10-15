@@ -568,6 +568,18 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'neutral',
     hint: '看原因里远端此刻的头，人工核实要不要把它当成分支的新头接着走',
   },
+  // 并主线时工作树在旧头之后还有没推的提交，远端那个并主线提交又含不了它们、本地也并不上（历史被改写，或列不出来）。
+  // 能并的在 github-ports.ts 里已经并过再推了，到这条规则说明那条路走不通。原路重试没用。
+  // 只认端口交来的码：原文里出现「没推的提交」不说明这一步就是这个失败。
+  {
+    id: 'MC4',
+    title: '工作树有没推的提交，并主线并不上',
+    kind: 'stop',
+    codes: ['worktree_diverged'],
+    codeFieldOnly: true,
+    routeOutcome: 'neutral',
+    hint: '看报错里的工作树和没推的提交，先取走再清树',
+  },
   {
     id: 'TS1',
     title: '测试没过',
