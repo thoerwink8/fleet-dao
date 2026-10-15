@@ -324,8 +324,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
     // Mirasim 的模型会话不在 fleet-agent-<runId>.scope 里（那个目录根本不会建）。本机 scope 是桥接自己起的
     // fleet-agent-mirasim-<随机>.scope，一次会话还不止一个，读到的也只是桥接。不拿它填用量。
     const sampleLocalScope = driver.hostId !== 'mirasim';
-    const peak =
-      sampleLocalScope && deps.memoryPeak ? sampleMemoryPeak(deps.memoryPeak, runId) : undefined;
+    const peak = sampleLocalScope && deps.memoryPeak ? sampleMemoryPeak(deps.memoryPeak, runId) : undefined;
     let peakResult: MemoryPeakResult | undefined;
     const finishPeak = async (): Promise<MemoryPeakResult | undefined> => {
       if (peakResult) return peakResult;
