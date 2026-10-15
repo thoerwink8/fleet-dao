@@ -8,6 +8,7 @@ import { type ReactNode, useEffect, useState } from 'react';
 import { Links, Meta, Outlet, Scripts, ScrollRestoration, useRouteError } from 'react-router';
 import { ApiProvider } from './api/client';
 import { getApi } from './api/index';
+import { retryUnlessGateway } from './api/poll-backoff';
 import { FAVICON, LogoMark } from './components/logo';
 import { RouteErrorPage } from './components/route-error';
 import { ThemeProvider, useTheme } from './components/theme-provider';
@@ -75,7 +76,9 @@ export default function App() {
   const [queryClient] = useState(
     () =>
       new QueryClient({
-        defaultOptions: { queries: { staleTime: 5_000, refetchOnWindowFocus: false, retry: 1 } },
+        defaultOptions: {
+          queries: { staleTime: 5_000, refetchOnWindowFocus: false, retry: retryUnlessGateway },
+        },
       }),
   );
   return (

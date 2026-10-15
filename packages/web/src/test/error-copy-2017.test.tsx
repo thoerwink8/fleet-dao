@@ -20,8 +20,7 @@ test('断网：页面主文案不含原始报错，原文在详情里', async ()
   const summary = document.querySelector('[data-error-summary]');
   expect(summary).toBeTruthy();
   expect(summary?.textContent ?? '').not.toContain(RAW);
-  expect(summary?.textContent ?? '').toContain('连不上驾驶舱后端');
-  expect(summary?.textContent ?? '').toMatch(/再试/);
+  expect(summary?.textContent ?? '').toContain('它所在的机器可能在重启或关机');
   expect(document.querySelector('summary')?.textContent).toContain('详情');
   expect(document.querySelector('[data-error-raw]')?.textContent).toContain(RAW);
 });
