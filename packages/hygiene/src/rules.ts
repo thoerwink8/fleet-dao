@@ -99,19 +99,24 @@ function looksLikePath(v: string): boolean {
     .every((seg) => /^[a-z0-9_.-]+$/.test(seg) || /^[A-Z0-9_.-]+$/.test(seg) || seg.length <= 4);
 }
 
+/**
+ * 人起的名字：三段以上的小写短词用 - _ . 连起来（e2e-not-a-token、cache_read_input_tokens）。
+ * 每一段最多 10 个字符、最多 1 个数字。真随机串几乎不会正好分成这种短词。
+ */
+function looksLikeGivenName(value: string): boolean {
+  const words = value.split(/[-_.]/);
+  return (
+    words.length >= 3 && words.every((w) => /^[a-z0-9]{0,10}$/.test(w) && (w.match(/\d/g) ?? []).length <= 1)
+  );
+}
+
 function looksLikeRealSecret(raw: string): boolean {
   const v = raw.replace(/^["'`]|["'`]$/g, '');
   if (v.length < 12) return false;
   if (/^[$%{<\\]|^[a-z][a-z0-9+.-]*:\/\//i.test(v) || looksLikePath(v)) return false;
   // 代码：模板插值、调用、括号、成员访问（process.env.X）。
   if (/\$\{|[(){}[\]<>,;]/.test(v) || /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(v)) return false;
-  // 人起的名字：三段以上的小写短词用 - _ . 连起来（e2e-not-a-token、cache_read_input_tokens）。
-  const words = v.split(/[-_.]/);
-  if (
-    words.length >= 3 &&
-    words.every((w) => /^[a-z0-9]{0,10}$/.test(w) && (w.match(/\d/g) ?? []).length <= 1)
-  )
-    return false;
+  if (looksLikeGivenName(v)) return false;
   const mixed = /[a-z]/.test(v) && /[A-Z]/.test(v) && /[^A-Za-z0-9_.-]/.test(v);
   // 纯字母的随机串：大小写各占四分之一以上（驼峰写法的名字大写少得多）。
   const upper = (v.match(/[A-Z]/g) ?? []).length;
@@ -173,13 +178,18 @@ export const RULES: readonly Rule[] = [
   },
   {
     // 各家有固定前缀的令牌；Telegram 机器人令牌（编号:AA…）；Authorization 里的 Bearer 不透明令牌。
+    // Bearer 后面是人起的名字（looksLikeGivenName，和键名赋值那条同一条豁免）不算令牌。别的前缀不用这条。
     // GitHub 新换的安装令牌是 ghs_<应用号>_<JWT>（应用号后面还有下划线、JWT 里有点），前一种写法认不出它：
     // 第二段专门认这个形状（应用号 + JWT 至少两段），别放宽第一段，免得代码里的 ghs_xxx_yyy 标识符都被当成令牌。
     id: 'token',
     label: '令牌',
     pattern:
       /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|ghs_\d{1,12}_[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]{6,}){1,2}|github_pat_[A-Za-z0-9_]{22,}|sk-ant-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,}|xapp-\d-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|tvly-[A-Za-z0-9_-]{20,}|rck_[A-Za-z0-9_-]{20,}|\d{6,10}:AA[0-9A-Za-z_-]{30,}|Bearer\s+[A-Za-z0-9._~+/-]{20,}=*)/g,
-    harmless: (token) => isFakeValue(token.replace(TOKEN_PREFIX, '')),
+    harmless: (token) => {
+      const value = token.replace(TOKEN_PREFIX, '');
+      if (isFakeValue(value)) return true;
+      return /^Bearer\s/.test(token) && looksLikeGivenName(value);
+    },
   },
   {
     id: 'jwt',
