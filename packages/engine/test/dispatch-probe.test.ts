@@ -12,6 +12,7 @@ import {
   dispatchProbeLine,
   dispatchProbeStopText,
   EMPTY_DISPATCH_PROBE,
+  isDispatchProbePassOnly,
   withDispatchProbeNote,
 } from '../src/workflows/task-support.ts';
 
@@ -195,6 +196,11 @@ describe('派前探测', () => {
     expect(
       withDispatchProbeNote(['上一轮没提交', '派前探测：旧的 通'], dispatchProbeLine([], 'deepseek-flash')),
     ).toEqual(['上一轮没提交', '派前探测：deepseek-flash 通']);
+    expect(isDispatchProbePassOnly('派前探测：grok-4.7 通')).toBe(true);
+    expect(isDispatchProbePassOnly('  派前探测：deepseek-flash 通  ')).toBe(true);
+    expect(isDispatchProbePassOnly('派前探测：glm-5.3-flash 不通，换到 deepseek-flash')).toBe(false);
+    expect(isDispatchProbePassOnly('派前探测：glm 不通（网络不通）')).toBe(false);
+    expect(isDispatchProbePassOnly('派前探测：候选都被挡住（额度）')).toBe(false);
   });
 
   it('三条都探不通：停下，并写出每条结果；没真探的不占这 3 条', () => {

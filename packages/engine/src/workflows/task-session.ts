@@ -61,6 +61,7 @@ import {
   dispatchProbeLine,
   dispatchProbeStopText,
   EMPTY_DISPATCH_PROBE,
+  isDispatchProbePassOnly,
   mergeAvoid,
   NO_AVOID,
   NO_OTHER_FAMILY,
@@ -116,7 +117,15 @@ export async function writeSession(
     const picked = await pickRoute(rt, avoid, stick, failedChannel, ui?.uiWork === true);
     failedChannel = undefined;
     const route = picked.route;
-    if (picked.probeNote) rt.feedback = withDispatchProbeNote(rt.feedback, picked.probeNote);
+    if (picked.probeNote) {
+      // 探通且没换路不进返工意见：下一轮提示词把意见里每一条都当成必改。动手状态那一行仍写这句。
+      // 老历史没有这个标记：重放时意见里照旧留着「通」，活动入参不变。只在探通没换路时记标记。
+      const dropPass =
+        isDispatchProbePassOnly(picked.probeNote) && patched('dispatch-probe-pass-not-feedback');
+      rt.feedback = dropPass
+        ? rt.feedback.filter((item) => !item.startsWith('派前探测：'))
+        : withDispatchProbeNote(rt.feedback, picked.probeNote);
+    }
     if (rt.fellBackToMissRoute) {
       rt.fellBackToMissRoute = false;
       const note = `${NO_OTHER_ROUTE}，这一轮仍用路由 ${route.routeId}。`;
