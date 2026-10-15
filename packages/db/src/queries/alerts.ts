@@ -16,6 +16,8 @@ export interface AlertRow {
   body: string;
   link: string | null;
   createdAt: Date;
+  /** 这一次挂起的起点。重开才更新；还开着再报不动。见 notifications.raised_at。 */
+  raisedAt: Date;
   updatedAt: Date;
   resolvedAt: Date | null;
   /** 谁处理掉的：人是用户编号，系统写自己的名字（engine:…、auto-release、fleet-backup……）。 */
@@ -44,6 +46,7 @@ const columns = {
   body: notifications.body,
   link: notifications.link,
   createdAt: notifications.createdAt,
+  raisedAt: notifications.raisedAt,
   updatedAt: notifications.updatedAt,
   resolvedAt: notifications.resolvedAt,
   resolvedBy: notifications.resolvedBy,

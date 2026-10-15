@@ -94,6 +94,12 @@ export const notifications = pgTable(
     /** 点提醒直达的驾驶舱页面。 */
     link: text('link'),
     createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+    /**
+     * 这一次挂起从什么时候开始。第一次报和 created_at 同一时刻；已处理的再报（重开）拨到这一次；
+     * 还开着时再报不拨（条件还在，不能把「超过 24 小时」的钟拨回去）。
+     * 每小时对账按它算没人处理了多久，不按第一次的 created_at。
+     */
+    raisedAt: timestamp('raised_at', tz).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', tz)
       .notNull()
       .defaultNow()

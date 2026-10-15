@@ -903,7 +903,7 @@ describe('0072：已删功能留下的开着的提醒标成已撤', () => {
   it(
     '三种前缀里还开着的标成已撤、写明功能已删，不删行；别的键和已经撤的不动；再跑一遍无副作用',
     async () => {
-      expect(target).toBe(ordered.length - 1);
+      expect(target).toBeGreaterThanOrEqual(0);
       const sqlText = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
       expect(sqlText.toLowerCase()).not.toContain('delete');
       const pg = await migratedBefore(target);
@@ -1013,4 +1013,30 @@ describe('0072：已删功能留下的开着的提醒标成已撤', () => {
     },
     TEST_DB_TIMEOUT_MS,
   );
+});
+
+describe('0073：提醒这一次挂起的时刻回填成建立时刻', () => {
+  const tag = '0073_notification_raised_at';
+
+  it('已有行的 raised_at 等于 created_at，不写成迁移时刻', async () => {
+    const target = ordered.findIndex((e) => e.tag === tag);
+    expect(target).toBeGreaterThanOrEqual(0);
+    const pg = await migratedBefore(target);
+    try {
+      await pg.exec(`
+        insert into notifications (level, dedupe_key, title, created_at, updated_at)
+        values ('alert', 'quota-read:grok', '额度读不到', '2026-10-14T00:00:00Z', '2026-10-15T17:19:00Z')
+      `);
+      await runMigration(pg, tag);
+      const rows = await pg.query<{ created_at: string; raised_at: string }>(`
+        select to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at,
+               to_char(raised_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as raised_at
+          from notifications
+         where dedupe_key = 'quota-read:grok'
+      `);
+      expect(rows.rows).toEqual([{ created_at: '2026-10-14T00:00:00Z', raised_at: '2026-10-14T00:00:00Z' }]);
+    } finally {
+      await pg.close();
+    }
+  });
 });

@@ -32,6 +32,7 @@ const openAlert = (dedupeKey: string): AlertRow => ({
   body: '旧的',
   link: null,
   createdAt: new Date('2026-09-27T10:00:00.000Z'),
+  raisedAt: new Date('2026-09-27T10:00:00.000Z'),
   updatedAt: new Date('2026-09-27T10:00:00.000Z'),
   resolvedAt: null,
   resolvedBy: null,

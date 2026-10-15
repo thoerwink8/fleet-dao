@@ -12,7 +12,7 @@ import {
   FILE_LABELS,
   sweepAlerts,
 } from '../src/jobs/alert-sweep.ts';
-import { beijingDayStart, RECONCILE_ACTOR } from '../src/jobs/reconcile-common.ts';
+import { beijingDate, beijingDayStart, RECONCILE_ACTOR } from '../src/jobs/reconcile-common.ts';
 
 const HOUR = 60 * 60_000;
 const DAY = 24 * HOUR;
@@ -29,6 +29,7 @@ const row = (over: Partial<AlertRow> & Pick<AlertRow, 'dedupeKey'>): AlertRow =>
     body: over.body ?? '原来的正文',
     link: over.link ?? null,
     createdAt,
+    raisedAt: over.raisedAt ?? createdAt,
     updatedAt: over.updatedAt ?? createdAt,
     resolvedAt: over.resolvedAt ?? null,
     resolvedBy: over.resolvedBy ?? null,
@@ -524,5 +525,38 @@ describe('日报超过 48 小时由这一轮收掉', () => {
     expect(exact.resolvedAt).toBeNull();
     expect(freshAlert.resolvedAt).toBeNull();
     expect(decision.resolvedAt).toBeNull();
+  });
+
+  it('createdAt 在 30 小时前、10 分钟前刚重开的不再推、不立案；同一条这一次挂满 25 小时照推、照立案', async () => {
+    const key = 'wf:failure:acme/widgets:reopen';
+    const reopened = row({
+      id: 'reopen',
+      dedupeKey: key,
+      title: '额度读不到：grok',
+      createdAt: new Date(NOW.getTime() - 30 * HOUR),
+      raisedAt: new Date(NOW.getTime() - 10 * 60_000),
+      updatedAt: new Date(NOW.getTime() - 10 * 60_000),
+    });
+    const held = harness([reopened]);
+    const heldPart = await held.run();
+    expect(heldPart.unchecked).toEqual([]);
+    expect(heldPart.found).toBe(0);
+    expect(held.inserted).toEqual([]);
+    expect(held.opened).toEqual([]);
+
+    const hung = row({
+      id: 'hung',
+      dedupeKey: key,
+      title: '额度读不到：grok',
+      createdAt: new Date(NOW.getTime() - 30 * HOUR),
+      raisedAt: new Date(NOW.getTime() - 25 * HOUR),
+      updatedAt: new Date(NOW.getTime() - 25 * HOUR),
+    });
+    const pushed = harness([hung]);
+    const pushedPart = await pushed.run();
+    expect(pushedPart.unchecked).toEqual([]);
+    expect(pushed.inserted.map((i) => i.dedupeKey)).toEqual([`remind:hung:${beijingDate(NOW)}`]);
+    expect(pushed.opened.map((o) => o.key)).toEqual([`alert-file:${key}`]);
+    expect(pushed.opened[0]?.body).toContain('第 1 天没人处理');
   });
 });

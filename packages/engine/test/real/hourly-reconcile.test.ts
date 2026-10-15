@@ -14,6 +14,7 @@ import {
   notifications,
   pullRequests,
   repos,
+  resolveAlertByKey,
   scheduleRuns,
   sessionRuns,
   subtasks,
@@ -262,10 +263,10 @@ async function freshenQuota() {
   await sql('update quota_windows set read_at = now()');
 }
 
-/** 把一条提醒的建立、更新时刻挪到 at（造「很久以前报的」）。 */
+/** 把一条提醒的建立、这一次挂起、更新时刻挪到 at（造「很久以前报的、一直挂着」）。updatedAt 单独给时只挪最近一次再报。 */
 async function backdate(dedupeKey: string, at: Date, updatedAt = at) {
   await sql(
-    'update notifications set created_at = $1::timestamptz, updated_at = $2::timestamptz where dedupe_key = $3',
+    'update notifications set created_at = $1::timestamptz, raised_at = $1::timestamptz, updated_at = $2::timestamptz where dedupe_key = $3',
     [at.toISOString(), updatedAt.toISOString(), dedupeKey],
   );
 }
@@ -1017,6 +1018,7 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
       body: '原来的正文',
       link: null,
       createdAt: new Date('2026-09-26T01:00:00.000Z'),
+      raisedAt: new Date('2026-09-26T01:00:00.000Z'),
       updatedAt: new Date('2026-09-26T01:00:00.000Z'),
       resolvedAt: null,
       resolvedBy: null,
@@ -1220,6 +1222,54 @@ describe('没人处理的卡住报警：超过 24 小时再推一次，一天最
     await runHourlyReconcileJob(deps({ now: () => tomorrow }));
     expect((await remindersOf(id)).map((r) => r.dedupeKey).sort()).toEqual(
       [`remind:${id}:${beijingDate(now)}`, `remind:${id}:${beijingDate(tomorrow)}`].sort(),
+    );
+  });
+
+  it('createdAt 在 30 小时前、10 分钟前刚从已处理重开的不推；同一条这一次挂满 25 小时照推', async () => {
+    probeDir();
+    const now = new Date();
+    const createdAt = new Date(now.getTime() - 30 * HOUR);
+    const { id } = await alert('quota-read:grok', { title: '额度读不到：grok' });
+    await backdate('quota-read:grok', createdAt);
+    expect(
+      await resolveAlertByKey(t.db, {
+        dedupeKey: 'quota-read:grok',
+        by: 'engine:quota-read',
+        at: new Date(now.getTime() - 20 * HOUR),
+      }),
+    ).toBe('ok');
+    const beforeReopen = new Date();
+    await alert('quota-read:grok', { title: '额度读不到：grok' });
+    const reopened = await alertByKey(t.db, 'quota-read:grok');
+    expect(reopened?.resolvedAt).toBeNull();
+    expect(reopened?.createdAt.toISOString()).toBe(createdAt.toISOString());
+    expect(reopened?.raisedAt.getTime()).toBeGreaterThanOrEqual(beforeReopen.getTime() - 1000);
+
+    const tenMinAgo = new Date(now.getTime() - 10 * 60_000);
+    await sql(
+      'update notifications set raised_at = $1::timestamptz, updated_at = $1::timestamptz where dedupe_key = $2',
+      [tenMinAgo.toISOString(), 'quota-read:grok'],
+    );
+    const held = await runHourlyReconcileJob(deps({ now: () => now }));
+    expect(held).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(await remindersOf(id)).toEqual([]);
+
+    const hungFor = new Date(now.getTime() - 25 * HOUR);
+    await sql(
+      'update notifications set raised_at = $1::timestamptz, updated_at = $1::timestamptz where dedupe_key = $2',
+      [hungFor.toISOString(), 'quota-read:grok'],
+    );
+    const pushed = await runHourlyReconcileJob(deps({ now: () => now }));
+    expect(pushed).toMatchObject({ outcome: 'ok', found: 1 });
+    const [reminder] = await remindersOf(id);
+    expect(reminder).toMatchObject({
+      dedupeKey: `remind:${id}:${beijingDate(now)}`,
+      title: '还没处理：额度读不到：grok',
+      resolvedAt: null,
+    });
+    expect(reminder?.body).toContain('到现在 25 小时 没人处理');
+    expect((await alertByKey(t.db, 'quota-read:grok'))?.createdAt.toISOString()).toBe(
+      createdAt.toISOString(),
     );
   });
 
