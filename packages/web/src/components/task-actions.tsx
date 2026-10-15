@@ -7,6 +7,7 @@
 // 没有「换模型」：任务工作流没有中途换路由，后端对 reroute 固定回 409 action_not_supported
 // （api/src/cockpit.ts）。要换这张单用的模型，在任务页「用哪个模型」里指定（task-model-pins.tsx）。
 // 没有「回答追问」：v3 没有 AI 追问这一环（#928）。
+import { continueExhausted } from '@fleet-dao/shared';
 import type { LucideIcon } from 'lucide-react';
 import { CircleStop, Pause, Play, RotateCcw } from 'lucide-react';
 import { createContext, type ReactNode, useCallback, useContext, useMemo, useState } from 'react';
@@ -38,6 +39,11 @@ export interface ActionTarget {
   sub?: BoardSubtask | undefined;
   /** 被人暂停着（引擎写的那句「已暂停：…」，#820 片 3）：这时不画「暂停」，只给「继续」「叫停」。 */
   paused?: string | undefined;
+  /**
+   * 停下等人的原因（state=stalled 时引擎写的 lastProblem）。
+   * 是「已继续 N 次仍没过」时「继续」置灰，文案改成要重开用 redo。
+   */
+  parkedWhy?: string | undefined;
 }
 
 export function targetOf(t: BoardTask, sub?: BoardSubtask): ActionTarget {
@@ -74,6 +80,12 @@ export interface TaskActionButton {
   disabledReason?: string;
 }
 
+/** 继续次数用满：按钮还在，但点不了，文案就是拒绝的那一句。别的停住原因仍给能点的「继续」。 */
+function resumeOffer(target: ActionTarget): TaskActionButton {
+  const exhausted = continueExhausted(target.parkedWhy);
+  return exhausted ? { action: 'resume', disabledReason: exhausted } : { action: 'resume' };
+}
+
 /**
  * 按状态决定画出哪些操作：只画引擎的任务工作流真有人听的（暂停、继续、叫停、重做）。
  * 暂停、叫停、继续、重做对整个需求生效，只放在需求上。
@@ -89,11 +101,11 @@ export function taskActionButtons(target: ActionTarget): TaskActionButton[] {
   if (target.state === 'stopped') return [{ action: 'redo' }];
   if (isTaskFinished(target)) return [];
   const list: TaskActionButton[] = [];
-  if (target.state === 'stalled') list.push({ action: 'resume' });
+  if (target.state === 'stalled') list.push(resumeOffer(target));
   else if (target.state === 'merging') {
-    if (target.paused !== undefined) list.push({ action: 'resume' });
+    if (target.paused !== undefined) list.push(resumeOffer(target));
   } else if (target.paused === undefined) list.push({ action: 'pause' });
-  else list.push({ action: 'resume' });
+  else list.push(resumeOffer(target));
   list.push({ action: 'stop' });
   if (target.state === 'stalled') list.push({ action: 'redo' });
   return list;
@@ -316,7 +328,7 @@ export function ActionButtons({ target, className }: { target: ActionTarget; cla
             }}
           >
             <Icon />
-            {def.label}
+            {action === 'resume' && disabledReason ? disabledReason : def.label}
           </Button>
         );
         // 置灰按钮自己不收悬停（disabled 关掉了指针），原因写在包着它的这一层上，鼠标停上去才看得到。

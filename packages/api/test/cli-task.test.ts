@@ -114,6 +114,20 @@ describe('fleet-api task', () => {
     expect(h.store.data.audit[0]?.reason).toContain('root');
   });
 
+  it('continue：继续次数用满时不发信号，退出码不是 0，说明要重开用 redo', async () => {
+    const h = setup();
+    const task = task12(h.store);
+    task.state = 'stalled';
+    task.stalled = { why: '已继续 3 次仍没过，交指挥官', since: T0.toISOString() };
+    const code = await h.run(['continue', 'example/canary', '12', '--note', '再继续一次']);
+    expect(code).not.toBe(0);
+    expect(h.err.join('\n')).toContain('继续次数已用满（3 次），继续无效；要重开用 redo');
+    expect(h.err.join('\n')).toContain('已用满');
+    expect(h.out.join('\n')).not.toMatch(/已继续|已放弃|已重做/);
+    expect(h.sent).toEqual([]);
+    expect(taskAudits(h.store)[0]).toMatchObject({ action: 'task.continue', ok: false });
+  });
+
   it('abandon：发给 taskAbandon，原因是 --note，写一条操作记录', async () => {
     const h = setup();
     const code = await h.run(['abandon', 'example/canary', '12', '--note', '这张不做了']);

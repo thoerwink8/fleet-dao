@@ -1,10 +1,12 @@
 // fleet-api task continue|abandon|redo（#1402）：任务停下后，指挥官在命令行续、放弃、重做，不用再靠仓外脚本直接打 Temporal。
 // 继续、放弃发的信号名和驾驶舱按钮一样（shared/task-signals.ts：taskContinue、taskAbandon）。
 // 重做不自己另起工作流，走 temporal.ts 现成的 taskRedo.redo；只在已叫停或挂起时允许，其余拒绝并说原因。
+// 挂起且上一代还停在 parked：重做入口自己先叫停再另起。真在跑仍由入口拒绝。
+// 继续次数用满（停住原因是「已继续 N 次仍没过」）时不发信号，退出码 1，写明要重开用 redo。
 // 每条都写一条操作记录（谁、哪张单、note、结果）。找不到任务工作流时退出码 1，不把成功话交出去。
 // 退出码：0 做成了；1 没做成（被拒、找不到、没查成）；2 参数不对（不连库）。
 
-import { TASK_SIGNAL_NAMES, type TaskState, taskWorkflowId } from '@fleet-dao/shared';
+import { continueExhausted, TASK_SIGNAL_NAMES, type TaskState, taskWorkflowId } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { TaskRedoPort } from './deps.ts';
 import type { Store, TaskSignal, WorkflowControl } from './ports.ts';
@@ -202,6 +204,10 @@ async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise
   const word = args.action === 'continue' ? '继续' : '放弃';
   if (isFinished(task.state)) {
     return refuse(ref, `任务已经结束（${task.state}），不能再${word}`, task.id);
+  }
+  if (args.action === 'continue') {
+    const exhausted = continueExhausted(task.stalled?.why);
+    if (exhausted) return refuse(ref, exhausted, task.id);
   }
 
   let workflowId: string;

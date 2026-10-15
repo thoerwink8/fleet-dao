@@ -207,6 +207,11 @@ export interface OpenPrInput extends Scope {
   head: string;
   title: string;
   body: PrBody;
+  /**
+   * 这一代是第几代（工作流编号上的 :rN；第一代是 1）。重做的新一代（≥ 2）开 PR 时，
+   * 同一张单上自己上一代留下的任务分支 PR 关掉再开。没传（老历史）或是第一代：有别的 PR 照旧挡回。
+   */
+  generation?: number;
 }
 
 export interface PullRequestRef {
