@@ -22,6 +22,8 @@ import {
 export interface FakeScript {
   ci: (input: WaitCiInput, n: number) => Partial<CiResult> | undefined;
   sync: (input: SyncMainlineInput, n: number) => Partial<SyncResult> | undefined;
+  /** 并主线：给了就抛它（树里有没推的提交、本地又并不上……）；n = 第几次并（从 1 开始，和 sync 同一个数）。 */
+  syncFail: (input: SyncMainlineInput, n: number) => PortError | undefined;
   /** 推分支：给了就抛它（假的卫生检查拦下、没扫成……）；n = 第几次推（从 1 开始）。 */
   push: (input: PushBranchInput, n: number) => PortError | undefined;
   /**
@@ -195,11 +197,14 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       return { state: 'green', head: input.head, failedChecks: [], ...script.ci?.(input, next('waitCi')) };
     },
     async syncMainline(input) {
+      const n = next('syncMainline');
+      const refused = script.syncFail?.(input, n);
+      if (refused) throw refused;
       return {
         state: 'clean',
         head: input.head,
         conflictFiles: [],
-        ...script.sync?.(input, next('syncMainline')),
+        ...script.sync?.(input, n),
       };
     },
     async saveTaskState(input) {

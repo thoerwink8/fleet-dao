@@ -82,6 +82,11 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
     mergePr: record('mergePr', () => ({ merged: true, mergeCommit: 'c'.repeat(40) })),
     updateIssueProgress: record('updateIssueProgress', () => ({ updated: true })),
     closeIssue: record('closeIssue', () => ({ closed: true })),
+    commentPull: record('commentPull', () => ({
+      commentId: 1,
+      url: 'https://github.com/acme/widgets/pull/101#issuecomment-1',
+      created: true,
+    })),
     writeSpecDoc: record('writeSpecDoc', (input: { path: string }) => ({
       path: input.path,
       commit: 'd'.repeat(40),
@@ -946,7 +951,74 @@ describe('并主线', () => {
     expect(git(dir, 'for-each-ref', 'refs/remotes/origin/main')).toBe(before);
   });
 
-  it('树在旧头之后还有没推的提交：快进不了，明确报 WORKTREE_DIVERGED（要人看），不硬并', async () => {
+  it('工作树比远端多一个提交、远端同时多一个并主线提交：本地并上再推，本地那个提交还在', async () => {
+    writeFileSync(join(m.dir, 'b.ts'), 'export const b = 2;\n');
+    git(m.dir, 'add', '.');
+    git(m.dir, 'commit', '-q', '-m', 'merge main');
+    const merged = git(m.dir, 'rev-parse', 'HEAD');
+    const s = setup({
+      syncMainline: () => ({
+        state: 'clean',
+        head: merged,
+        merged: true,
+        previousHead: m.head,
+        mainline: merged,
+      }),
+      pushBranch: (input: { bundlePath: string; head: string }) => {
+        git(m.dir, 'fetch', '--no-tags', input.bundlePath, 'refs/fleet/outgoing:refs/fleet/reconciled');
+        return { head: input.head, pushed: true };
+      },
+    });
+    const dir = await seededTree(s.trees);
+    const local = commitIn(dir, 'local.ts');
+    const got = await s.ports.syncMainline(
+      { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head, worktreePath: dir },
+      ctx,
+    );
+    const head = git(dir, 'rev-parse', 'HEAD');
+    expect(got).toEqual({ state: 'clean', head, conflictFiles: [] });
+    expect(head).toBe(git(m.dir, 'rev-parse', 'refs/fleet/reconciled'));
+    expect(git(dir, 'rev-parse', 'HEAD^1')).toBe(local);
+    expect(git(dir, 'rev-parse', 'HEAD^2')).toBe(merged);
+    git(dir, 'merge-base', '--is-ancestor', local, 'HEAD');
+    expect(s.calls.commentPull).toBeUndefined();
+    expect(git(dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(merged);
+    expect(git(dir, 'rev-parse', 'refs/fleet/incoming')).toBe(head);
+  });
+
+  it('两边改了同一处：交回冲突，不推、不留言，本地那个提交还是头', async () => {
+    writeFileSync(join(m.dir, 'README.md'), '# demo\nremote\n');
+    git(m.dir, 'add', '.');
+    git(m.dir, 'commit', '-q', '-m', 'merge main');
+    const merged = git(m.dir, 'rev-parse', 'HEAD');
+    const s = setup({
+      syncMainline: () => ({
+        state: 'clean',
+        head: merged,
+        merged: true,
+        previousHead: m.head,
+        mainline: merged,
+      }),
+    });
+    const dir = await seededTree(s.trees);
+    writeFileSync(join(dir, 'README.md'), '# demo\nlocal\n');
+    git(dir, 'add', 'README.md');
+    git(dir, 'commit', '-q', '-m', 'local readme');
+    const local = git(dir, 'rev-parse', 'HEAD');
+    const got = await s.ports.syncMainline(
+      { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head, worktreePath: dir },
+      ctx,
+    );
+    expect(got.state).toBe('conflict');
+    expect(got.conflictFiles).toContain('README.md');
+    expect(got.head).toBe(merged);
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(local);
+    expect(git(dir, 'rev-parse', 'MERGE_HEAD')).toBe(merged);
+    expect(s.calls.pushBranch).toBeUndefined();
+    expect(s.calls.commentPull).toBeUndefined();
+  });
+
+  it('本地历史和旧头接不上：并不上，报 WORKTREE_DIVERGED，PR 上写明工作树和没推的提交', async () => {
     writeFileSync(join(m.dir, 'b.ts'), 'export const b = 2;\n');
     git(m.dir, 'add', '.');
     git(m.dir, 'commit', '-q', '-m', 'merge main');
@@ -961,12 +1033,36 @@ describe('并主线', () => {
       }),
     });
     const dir = await seededTree(s.trees);
-    commitIn(dir, 'local.ts');
-    await expect(
-      s.ports.syncMainline(
+    const tree = git(dir, 'write-tree');
+    const alien = git(dir, 'commit-tree', tree, '-m', 'rewritten');
+    git(dir, 'reset', '--hard', alien);
+    const err = await s.ports
+      .syncMainline(
         { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head, worktreePath: dir },
         ctx,
-      ),
-    ).rejects.toMatchObject({ code: 'WORKTREE_DIVERGED' });
+      )
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({ code: 'WORKTREE_DIVERGED', retryable: false });
+    expect((err as PortError).message).toContain(dir);
+    expect((err as PortError).message).toContain(alien.slice(0, 7));
+    const comment = s.calls.commentPull?.[0] as { prNumber: number; body: string };
+    expect(comment.prNumber).toBe(101);
+    expect(comment.body).toContain(dir);
+    expect(comment.body).toContain(alien);
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(alien);
+    expect(s.calls.pushBranch).toBeUndefined();
+  });
+
+  it('回执丢了再进来、远端头已经是工作树的头：当这次并成了，不再报头被别人推过', async () => {
+    const s = setup({
+      syncMainline: () => ({ state: 'head_moved', head: m.head, expectedHead: 'a'.repeat(40) }),
+    });
+    const dir = await seededTree(s.trees);
+    const got = await s.ports.syncMainline(
+      { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: 'a'.repeat(40), worktreePath: dir },
+      ctx,
+    );
+    expect(got).toEqual({ state: 'clean', head: m.head, conflictFiles: [] });
   });
 });

@@ -8,7 +8,7 @@ import { ApiError, type FleetApi } from '../api/client';
 import { createMockApi } from '../api/mock/server';
 import type { AuthConfig, Me } from '../api/types';
 import { renderApp } from '../test/harness';
-import LoginPage, { safeNext } from './login';
+import LoginPage from './login';
 
 afterEach(() => {
   cleanup();
@@ -49,33 +49,6 @@ function App() {
     </Routes>
   );
 }
-
-describe('safeNext：登录后回哪里，只认站内路径', () => {
-  test.each([
-    ['/tasks/t-1', '/tasks/t-1'],
-    ['/audit?target=t-9', '/audit?target=t-9'],
-    ['/settings#notify', '/settings#notify'],
-  ])('站内路径 %s 原样放行', (input, out) => {
-    expect(safeNext(input)).toBe(out);
-  });
-
-  test.each([
-    ['没给', null],
-    ['空串', ''],
-    ['外站完整地址', 'https://evil.example/steal'],
-    ['不带协议的外站（//）', '//evil.example/steal'],
-    ['反斜杠绕过（/\\）', '/\\evil.example'],
-    ['不是以 / 开头', 'tasks/t-1'],
-    ['javascript 伪协议', 'javascript:alert(1)'],
-    ['带换行的控制字符', '/ok\r\nSet-Cookie: x=1'],
-    ['带空字符', '/ok\u0000'],
-    ['登录页自己（回去就循环）', '/login'],
-    ['登录页自己（带查询）', '/login?next=%2F'],
-    ['太长', `/${'a'.repeat(1000)}`],
-  ])('【故意造出的失败】%s：一律回首页', (_name, input) => {
-    expect(safeNext(input)).toBe('/');
-  });
-});
 
 describe('登录页：已登录、没登录', () => {
   test('已经登录：直接送回 next，不停在登录页', async () => {
@@ -130,6 +103,7 @@ describe('登录页：已登录、没登录', () => {
       .mockResolvedValue({ devLogin: false, passwordLogin: true });
     renderApp(<App />, { api: loggedOut({}, { authConfig }), route: '/login' });
     expect((await screen.findByText(/连不上.*后端：网关没连上后端/)).textContent).toContain('网关没连上后端');
+    expect(screen.getByRole('link', { name: /状态页/ }).getAttribute('href')).toBe('/health/');
     expect(screen.queryByText(/登录没有配好/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '重试' }));
     expect(await screen.findByLabelText('用户名')).toBeTruthy();
@@ -180,6 +154,7 @@ describe('开发环境免登', () => {
     type('u-stranger');
     submit();
     expect((await screen.findByRole('alert')).textContent).toBe('这个编号不在白名单里');
+    expect(screen.queryByRole('link', { name: /状态页/ })).toBeNull();
     expect(screen.queryByTestId('landed')).toBeNull();
     await waitFor(() =>
       expect(screen.getByRole('button', { name: '免登' })).toHaveProperty('disabled', false),
@@ -196,6 +171,7 @@ describe('开发环境免登', () => {
     type('u-founder');
     submit();
     expect((await screen.findByRole('alert')).textContent).toContain('连不上驾驶舱后端');
+    expect(screen.getByRole('link', { name: /状态页/ }).getAttribute('href')).toBe('/health/');
     expect(screen.queryByTestId('landed')).toBeNull();
   });
 });
@@ -342,6 +318,20 @@ describe('账密登录', () => {
     const text = (await screen.findByRole('alert')).textContent ?? '';
     expect(text).toContain('后端出错了（500）');
     expect(text).toContain('读不到登录信息');
+    expect(screen.queryByRole('link', { name: /状态页/ })).toBeNull();
+  });
+
+  test('【故意造出的失败】504 网关：人话里写机器可能在重启或关机，并链到状态页', async () => {
+    const passwordLogin = vi.fn(() =>
+      Promise.reject(new ApiError(504, 'gateway', '驾驶舱后端暂时没应，它所在的机器可能在重启或关机')),
+    );
+    await open({ passwordLogin });
+    fill('founder', 'whatever-1234');
+    fireEvent.submit(form());
+    const text = (await screen.findByRole('alert')).textContent ?? '';
+    expect(text).toContain('它所在的机器可能在重启或关机');
+    expect(screen.getByRole('link', { name: /状态页/ }).getAttribute('href')).toBe('/health/');
+    expect(text).not.toContain('用户名或密码不对');
   });
 
   test('「显示密码」按钮：点一下明文、再点藏回去', async () => {

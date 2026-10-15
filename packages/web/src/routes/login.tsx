@@ -5,7 +5,7 @@
 // - 飞书客户端里：tt.requestAccess 拿 code，POST /auth/feishu/access（页面要先加载飞书 JSSDK 才有 tt）。
 // - 开发环境：POST /auth/dev-login 免登（后端开了 devLogin 才显示）。
 
-import { AUTH_PREFIX, AuthRoutes } from '@fleet-dao/shared';
+import { AUTH_PREFIX, AuthRoutes, safeNext } from '@fleet-dao/shared';
 import { useQueryClient } from '@tanstack/react-query';
 import { LoaderCircle, LogIn } from 'lucide-react';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
@@ -13,6 +13,7 @@ import { Navigate, useNavigate, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { ApiError, errorText, keys, useApi, useAuthConfig, useMe } from '../api/client';
 import type { Me } from '../api/types';
+import { GatewayHealthLink } from '../components/gateway-health-link';
 import { Notice } from '../components/layout/notice';
 import { Section } from '../components/layout/section';
 import { LogoMark } from '../components/logo';
@@ -24,16 +25,6 @@ import { loginErrorText, PASSWORD_MAX, USERNAME_MAX } from '../lib/credentials';
 
 export function meta() {
   return [{ title: brand.title('登录') }];
-}
-
-/** 和后端 auth.ts 的 safeNext 同一条规矩：只接受站内路径，别的一律回首页；也不回登录页自己。 */
-export function safeNext(next: string | null): string {
-  if (!next || next.length > 1000) return '/';
-  if (!next.startsWith('/') || next.startsWith('//') || next.includes('\\')) return '/';
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: 就是要拒掉控制字符。
-  if (/[\u0000-\u001f\u007f]/.test(next)) return '/';
-  if (next === '/login' || next.startsWith('/login?')) return '/';
-  return next;
 }
 
 interface FeishuTT {
@@ -59,7 +50,8 @@ export default function LoginPage() {
   const me = useMe();
   const config = useAuthConfig();
   const [busy, setBusy] = useState<'feishu' | 'dev' | 'password' | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ text: string; cause: unknown } | null>(null);
+  const report = (cause: unknown, text: string) => setError({ text, cause });
   const [userId, setUserId] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -86,12 +78,12 @@ export default function LoginPage() {
       success: ({ code }) => {
         api.feishuAccess(code).then(done, (e: unknown) => {
           setBusy(null);
-          setError(errorText(e));
+          report(e, errorText(e));
         });
       },
       fail: () => {
         setBusy(null);
-        setError('飞书没给授权，可以点下面的按钮重新登录');
+        report(null, '飞书没给授权，可以点下面的按钮重新登录');
       },
     });
   });
@@ -117,7 +109,7 @@ export default function LoginPage() {
     e.preventDefault();
     if (busy !== null) return;
     if (!username.trim() || !password) {
-      setError('请填写用户名和密码。');
+      report(null, '请填写用户名和密码。');
       (username.trim() ? passwordRef : usernameRef).current?.focus();
       return;
     }
@@ -126,7 +118,7 @@ export default function LoginPage() {
     try {
       done(await api.passwordLogin(username.trim(), password));
     } catch (err) {
-      setError(loginErrorText(err));
+      report(err, loginErrorText(err));
       setBusy(null);
       // 密码错了：清掉密码栏、光标回到密码栏重输；用户名留着
       if (err instanceof ApiError && err.code === 'bad_credentials') {
@@ -144,14 +136,15 @@ export default function LoginPage() {
     try {
       done(await api.devLogin(userId.trim()));
     } catch (err) {
-      setError(errorText(err));
+      report(err, errorText(err));
       setBusy(null);
     }
   };
 
   const errorBox = error ? (
     <Notice tone="fail" className="mt-3">
-      {error}
+      {error.text}
+      <GatewayHealthLink error={error.cause} />
     </Notice>
   ) : null;
 
@@ -182,6 +175,7 @@ export default function LoginPage() {
                   <p className="text-body text-ink-fail">
                     连不上{brand.product}后端：{errorText(config.error)}
                   </p>
+                  <GatewayHealthLink error={config.error} />
                   <Button type="button" variant="outline" size="sm" onClick={() => void config.refetch()}>
                     重试
                   </Button>
