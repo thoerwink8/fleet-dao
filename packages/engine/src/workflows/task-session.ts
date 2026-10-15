@@ -26,8 +26,10 @@
 //   问不成（库一时不通）只记日志，照今天的做法接着走。
 // - 停下之前先自动处理一次（决定 0093，patched('auto-redispatch-session')）：失败分流判停下、码是被引擎在时限上叫停（aborted）、
 //   总时长到顶、起不来（AUTO_REDISPATCH_CODES）的，这一段里先避开这个模型换一条路由重派一次，进度里写一行；再判停下才停。
-//   总时长到顶（WT1）第一次仍原路续同一个会话。同一条路由上第二次不再原路续：换路由时把树上的进度写进提示词
-//   （patched('wall-clock-carry-progress')，#2244），让下一轮接着做，不从头重来。老历史没有这个标记，只换路由、不改提示词。
+//   总时长到顶（WT1）第一次仍原路续同一个会话：这一次有执行编号就记下，下一轮问 planSegmentResume，带上会话号再起
+//   （patched('wall-clock-resume-session')，#2244）。没有编号、或老历史没有这个标记，只钉原路由、开新会话。
+//   同一条路由上第二次不再原路续：换路由时把树上的进度写进提示词
+//   （patched('wall-clock-carry-progress')），让下一轮接着做，不从头重来。老历史没有这个标记，只换路由、不改提示词。
 
 import { isCancellation, log, patched } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -146,6 +148,8 @@ export async function writeSession(
     // 这一段的起跑时刻：被暂停取消时拿不到执行编号，续会话凭它去库里找这一段
     const attemptAt = Date.now();
     let evidence: SegmentEvidence | null = null;
+    // 没跑成时的执行编号：总时长到顶第一次拿它去续同一个会话。没起成就没有
+    let failedRunId: string | null = null;
     let infra: unknown = null;
     try {
       const segmentInput: RunSegmentInput = {
@@ -188,6 +192,7 @@ export async function writeSession(
         return;
       }
       evidence = res.evidence;
+      failedRunId = res.runId;
     } catch (error) {
       if (error instanceof Abandoned || isCancellation(error)) throw error;
       if (error instanceof PausedInterrupt) {
@@ -248,6 +253,11 @@ export async function writeSession(
     if (next.action === 'retry') {
       // 原路再试：还是这条路由（额度要等的，等到清零再来，不算墙钟）
       stick = route.routeId;
+      // 总时长到顶第一次：原路续同一个会话（#2244）。有执行编号才问续不续；会话没起成就没有编号，照旧开新会话。
+      // 老历史没有这个标记：重放时为假，只钉原路由，不多一次 planSegmentResume。
+      if (failure.code.toLowerCase() === 'wall_clock_timeout' && patched('wall-clock-resume-session')) {
+        if (failedRunId) rt.resumeFrom = { previous: { runId: failedRunId }, worktreePath: wt.path };
+      }
       if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
       await rt.pause(next.wait === 'quota' ? 'quota' : 'retry', next.reason, next.delaySeconds);
     } else if (next.action === 'swapRoute' || next.action === 'swapModel') {
