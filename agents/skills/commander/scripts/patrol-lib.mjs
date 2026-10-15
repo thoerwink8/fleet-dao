@@ -642,7 +642,10 @@ export function judge({ raw, now, base }) {
   };
 }
 
-/** 读不到法国时插在 VERDICT 前的那一行。reason 用判出来的 broken。 */
+/**
+ * 读不到法国时插在 VERDICT 前的那一行。reason 用判出来的 broken。
+ * @param {string} reason
+ */
 export function franceUnreadLine(reason) {
   return `！！！读不到法国：${reason}。法国上的看门狗、飞书推送、备份巡检和自动发布这时一起哑，不会有人来推。看香港状态页 https://<驾驶舱域名>/health/ ，有「法国失联自 xx:xx」就是隧道那头从那一刻起连不上。`;
 }
