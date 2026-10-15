@@ -12,6 +12,7 @@ import {
   type MirasimConnect,
   parseSessionProxy,
   SESSION_USERS,
+  type SessionsFs,
   type SessionUser,
   sessionProxyEnv,
   switchSessionOrg,
@@ -523,6 +524,54 @@ export async function refreshCursorLogin(
   }
 }
 
+/**
+ * 这个执行体目录下，record.json 修改时间不早于 sinceMs 的会话目录名（MS-18 的预筛）。
+ * 一次 find，不逐份 cat：法国一个执行体下有几百条历史，逐份去读要几十秒，对账会拖过时间窗。
+ * find 的 -newermt 是「严格新于」，阈值再早 1 秒，卡在同一秒上的不漏；进不进窗仍由档案里的 createdAt 定。
+ * 目录不在抛 code 为 ENOENT 的错（和 ls 一样）。有别的错（权限、超时）照抛，调用方当成读不了，不当成没有。
+ */
+export async function recentMirasimSessionIds(
+  exec: UserExec,
+  user: SessionUser,
+  dir: string,
+  sinceMs: number,
+): Promise<string[]> {
+  const sec = Math.floor(sinceMs / 1000) - 1;
+  const r = await execAs(
+    exec,
+    user,
+    [
+      '/usr/bin/find',
+      dir,
+      '-mindepth',
+      '2',
+      '-maxdepth',
+      '2',
+      '-name',
+      'record.json',
+      '-newermt',
+      `@${sec}`,
+      '-printf',
+      '%h\n',
+    ],
+    'mirasim-sessions-find',
+    20_000,
+  );
+  if (r.code !== 0) {
+    const err = new Error(describeFailure(`列 ${dir} 里最近的会话`, r)) as NodeJS.ErrnoException;
+    if (r.stdout.length === 0 && /No such file or directory/.test(r.stderr)) err.code = 'ENOENT';
+    throw err;
+  }
+  const ids: string[] = [];
+  for (const line of r.stdout.toString('utf8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const slash = trimmed.lastIndexOf('/');
+    ids.push(slash >= 0 ? trimmed.slice(slash + 1) : trimmed);
+  }
+  return ids;
+}
+
 /** 经 exec 以那个会话用户列一个目录：LedgerFs 的 readdir 要的形状（没有这个目录时抛 code 为 ENOENT 的错，和 node:fs 一样）。 */
 async function lsAsUser(exec: UserExec, user: SessionUser, dir: string): Promise<string[]> {
   const r = await execAs(exec, user, ['/bin/ls', '-1', '--', dir], 'mirasim-ls');
@@ -602,6 +651,10 @@ export function mirasimDepsFor(
   connect(user: SessionUser): MirasimConnect;
   ledgerDir(user: SessionUser): string;
   ledgerFs(user: SessionUser): LedgerFs;
+  /** 这个会话用户的会话档案（~/.mirasim/sessions）：没等到 accepted 时按工作目录和起针时间对账（MS-18）。 */
+  sessionsDir(user: SessionUser): string;
+  /** 以他的身份读会话档案。recentSessionIds 一次找出窗内改过的，不逐份 cat 历史。 */
+  sessionsFs(user: SessionUser): SessionsFs;
   /** 这个会话用户的 Mirasim 用量账本目录（~/.mirasim/insights，中转计量回填在这里，#1935）。 */
   meterDir(user: SessionUser): string;
   /** 以他的身份读用量账本：ls、grep -F 都经 exec。 */
@@ -626,6 +679,12 @@ export function mirasimDepsFor(
     ledgerFs: (user) => ({
       readdir: (dir) => lsAsUser(exec, user, dir),
       readFile: (path) => catAsUser(exec, user, path),
+    }),
+    sessionsDir: (user) => `${homeOf(user)}/.mirasim/sessions`,
+    sessionsFs: (user) => ({
+      readdir: (dir) => lsAsUser(exec, user, dir),
+      readFile: (path) => catAsUser(exec, user, path),
+      recentSessionIds: (dir, sinceMs) => recentMirasimSessionIds(exec, user, dir, sinceMs),
     }),
     meterDir: (user) => `${homeOf(user)}/.mirasim/insights`,
     meterFs: (user) => ({
@@ -755,6 +814,8 @@ export function realPortsFromEnv(
     mirasimConnect: mirasim.connect,
     mirasimLedgerDir: mirasim.ledgerDir,
     mirasimLedgerFs: mirasim.ledgerFs,
+    mirasimSessionsDir: mirasim.sessionsDir,
+    mirasimSessionsFs: mirasim.sessionsFs,
     sessionOrg,
     // 探针那一轮里切的号：这一轮探完核对之后也叫醒（当场触发的那条路在上面 probeNow 里叫过了，两条路不重叠）
     orgSwitch: wakeAfterProbeRound(orgSwitch, routeWake),
@@ -889,6 +950,8 @@ export function realPortsFromEnv(
       mirasimConnect: mirasim.connect,
       mirasimLedgerDir: mirasim.ledgerDir,
       mirasimLedgerFs: mirasim.ledgerFs,
+      mirasimSessionsDir: mirasim.sessionsDir,
+      mirasimSessionsFs: mirasim.sessionsFs,
       sessionProxy: config.sessionProxy,
       agentsFile: async () => (await subagents()).file,
     }),

@@ -18,6 +18,7 @@ import {
   ledgerRouting,
   readMirasimLedger,
 } from './ledger.ts';
+import { reconcileLaunchSession, type SessionsFs } from './records.ts';
 import { MirasimSession } from './session.ts';
 import type { MirasimConnect, MirasimFrame, MirasimWire } from './wire.ts';
 
@@ -100,12 +101,16 @@ export interface MirasimRunOptions {
    * （快照已经被 MirasimSession 去重过）。
    */
   onTranscript?: (entry: TranscriptEntry, meta: LineMeta) => unknown;
-  /** 服务端接下了：引擎记下 sessionKey，重启后用 stopMirasimSession 收掉它。 */
+  /** 服务端接下了：引擎记下 sessionKey，重启后用 stopMirasimSession 收掉它。对账接回时也报一次（没收到 accepted 帧）。 */
   onAccepted?: (info: MirasimAccepted) => unknown;
   signal?: AbortSignal;
   now?: () => Date;
   /**
-   * 订阅连不上时的退避等待。不给就真等（WATCH_CONNECT_BUDGET_MS）。测试用它把时钟拨快，不睡满 60 秒。
+   * 毫秒钟。不给用 Date.now。没等到 accepted 时对账要等到时间窗上沿（MS-18）：测试用它和 pause 一起把这段拨快。
+   */
+  clock?: () => number;
+  /**
+   * 订阅连不上时的退避等待，对账两次翻档案之间也用它。不给就真等。测试用它把时钟拨快，不睡满。
    */
   pause?: (ms: number) => Promise<void>;
   /**
@@ -118,6 +123,13 @@ export interface MirasimRunOptions {
    * 换成这个——例如经 fleet-agent-scope 以那个会话用户的身份读（real/index.ts 的生产装配）。
    */
   ledgerFs?: LedgerFs;
+  /**
+   * 会话档案目录（Mirasim 服务那个用户家里的 ~/.mirasim/sessions）。没等到 accepted 时按工作目录和起针时间窗在这里对账
+   * （MS-18）。不给就对不了，照旧报「没查成」——引擎进不去那个家时必须给，并配上 sessionsFs。
+   */
+  sessionsDir?: string;
+  /** 档案怎么读。不给就直接读本机文件系统。生产经 fleet-agent-scope 以会话用户的身份读（和 ledgerFs 同一条路）。 */
+  sessionsFs?: SessionsFs;
 }
 
 export interface MirasimRunReport {
@@ -133,7 +145,10 @@ export interface MirasimRunReport {
   taskId?: string;
   /** 没起来：连不上、服务端没有这个执行体、服务端拒了这一针。launchUnknown 时是「没查成」的原因。 */
   launchError?: string;
-  /** prompt 发出去了、没等到带本次 clientRef 的应答：可能已经在跑（MS-18：不许重发，去对账）。 */
+  /**
+   * prompt 发出去了、没等到带本次 clientRef 的应答，并且按工作目录和起针时间对账没有对上唯一一条
+   * （没有、多条、档案读不了，或没给档案目录）。可能已经在跑（MS-18：不许重发）。
+   */
   launchUnknown?: boolean;
   killed?: { reason: KillReason; at: string };
   /** 叫停之后有没有看到它翻终态（MS-16：没看到就是「没查成」，不是停好了）。 */
@@ -201,6 +216,13 @@ function modelMatches(expected: string, observed: string): boolean {
   return strip(expected) === strip(observed);
 }
 
+/** 没等到应答、又没对上唯一一条。没去对账（没给档案目录）时的那句要和以前一字不差。 */
+function launchMissMessage(stray: string | undefined, looked: string | undefined): string {
+  const strayBit = stray ? `（收到过一条认不出是冲这一针来的报错：${stray}）` : '';
+  const tail = looked ?? '按工作目录和起针时间去 ~/.mirasim/sessions 对账';
+  return `起会话没查成：prompt 发出去了，没等到应答${strayBit}。它可能已经在跑——别重发（会烧两次额度），${tail}`;
+}
+
 export async function runMirasim(
   spec: MirasimRunSpec,
   options: MirasimRunOptions,
@@ -220,8 +242,12 @@ export async function runMirasim(
   if (!dir?.isDirectory()) throw new Error(`工作目录不存在：${spec.cwd}`);
 
   const now = options.now ?? (() => new Date());
+  const clock = options.clock ?? Date.now;
   const limits: MirasimLimits = { ...DEFAULT_MIRASIM_LIMITS, ...spec.limits };
-  const t0 = Date.now();
+  const t0 = clock();
+  // 等应答和「排队等到第一帧」共用 startupMs，从起针算。对账接上时改成接上的时刻：
+  // 等应答已经把预算用完，接到的会话（多半在跑或跑完了）不该因此被 startup_timeout 停掉。
+  let startupAt = t0;
   const startedAt = now().toISOString();
   const gate = new CallbackGate();
   const session = new MirasimSession({
@@ -318,6 +344,7 @@ export async function runMirasim(
   // 几十秒才读到这一帧（MS-08；#2249 那次 prompt 帧发出 16 秒后服务才读到、34 秒才起会话，按 30 秒收就报了没查成，
   // 会话其实起了、跑完了）。起不来的照旧由下面的 startup_timeout 管。
   const acceptMs = Math.max(limits.replyMs, limits.startupMs - (Date.now() - t0));
+  const pause = options.pause ?? sleep;
   let stray: string | undefined;
   const reply = await waitFor(
     control,
@@ -330,24 +357,45 @@ export async function runMirasim(
     },
     acceptMs,
   );
+  // 没等到应答：先按工作目录 + 起针时间窗对账（MS-18）。对上唯一一条就接上，不重发 prompt。
+  // 没给档案目录、对上多条、一条都没有、档案读不了，才照旧报没查成。
+  let sessionKey: string;
+  let taskId: string | undefined;
   if (reply === 'timeout' || reply === 'closed') {
-    report.launchUnknown = true;
-    report.launchError = `起会话没查成：prompt 发出去了，没等到应答${
-      stray ? `（收到过一条认不出是冲这一针来的报错：${stray}）` : ''
-    }。它可能已经在跑——别重发（会烧两次额度），按工作目录和起针时间去 ~/.mirasim/sessions 对账`;
-    return done();
-  }
-  if (reply.type === 'error') {
+    const found = options.sessionsDir
+      ? await reconcileLaunchSession({
+          sessionsDir: options.sessionsDir,
+          agent: spec.agent,
+          cwd: spec.cwd,
+          t0,
+          startupMs: limits.startupMs,
+          ...(options.sessionsFs ? { sessionsFs: options.sessionsFs } : {}),
+          clock,
+          pause,
+          ...(options.signal ? { signal: options.signal } : {}),
+        })
+      : undefined;
+    if (found?.kind !== 'unique') {
+      report.launchUnknown = true;
+      report.launchError = launchMissMessage(stray, found?.detail);
+      return done();
+    }
+    sessionKey = found.sessionKey;
+    taskId = found.taskId;
+    startupAt = Date.now();
+  } else if (reply.type === 'error') {
     report.launchError = `服务端拒了这一针：${str(reply.message) ?? JSON.stringify(reply)}`;
     return done();
-  }
-  const sessionKey = str(reply.sessionKey);
-  if (!sessionKey?.startsWith(`${spec.agent}:`)) {
-    report.launchError = `应答里的 sessionKey 认不出：${JSON.stringify(reply.sessionKey)}`;
-    return done();
+  } else {
+    const key = str(reply.sessionKey);
+    if (!key?.startsWith(`${spec.agent}:`)) {
+      report.launchError = `应答里的 sessionKey 认不出：${JSON.stringify(reply.sessionKey)}`;
+      return done();
+    }
+    sessionKey = key;
+    taskId = str(reply.taskId);
   }
   report.sessionKey = sessionKey;
-  const taskId = str(reply.taskId);
   if (taskId) report.taskId = taskId;
   const accepted: MirasimAccepted = {
     sessionKey,
@@ -384,7 +432,6 @@ export async function runMirasim(
 
   // 4. 另开一条连接订阅（推送不保证送到发起连接，MS-03）。
   // 连不上（服务正在重启、令牌文件还没写回来）按退避再试，总时长盖住一次重启，不是连试 3 次就放弃。
-  const pause = options.pause ?? sleep;
   const openSub = async (): Promise<MirasimWire | undefined> => {
     const deadline = Date.now() + WATCH_CONNECT_BUDGET_MS;
     let wait = 500;
@@ -413,10 +460,11 @@ export async function runMirasim(
   let lastProgress = Date.now();
   while (sub) {
     const elapsed = Date.now() - t0;
+    const sinceStartup = Date.now() - startupAt;
     if (options.signal?.aborted) kill('aborted');
     if (!report.killed) {
       const phase = session.state.phase;
-      if ((!session.current || !phase || QUEUED.has(phase)) && elapsed > limits.startupMs) {
+      if ((!session.current || !phase || QUEUED.has(phase)) && sinceStartup > limits.startupMs) {
         kill('startup_timeout');
       } else if (elapsed > limits.wallClockMs) kill('wall_clock_timeout');
       else if (
