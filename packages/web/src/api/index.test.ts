@@ -85,7 +85,7 @@ describe('getApi：401 才跳登录页', () => {
     expect(assign).not.toHaveBeenCalled();
   });
 
-  test('【故意造出的失败】断网：报「连不上驾驶舱后端」，不跳登录页', async () => {
+  test('【故意造出的失败】断网：和门口同一句人话，不跳登录页', async () => {
     const assign = vi.fn();
     vi.stubGlobal('location', { pathname: '/', search: '', assign });
     vi.stubGlobal(
@@ -98,7 +98,7 @@ describe('getApi：401 才跳登录页', () => {
     await expect(getApi().me()).rejects.toMatchObject({
       status: 0,
       code: 'network',
-      message: expect.stringContaining('连不上驾驶舱后端'),
+      message: expect.stringContaining('它所在的机器可能在重启或关机'),
     });
     expect(assign).not.toHaveBeenCalled();
   });
