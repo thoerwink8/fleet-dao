@@ -60,7 +60,7 @@ SKIP_WHY=""
 SHARDS=(
   'login-user session-user listen root-exec-check ops-only ports shards session-proxy session-ports release-proxy node-report-gate service-home release-boot sshd-hardening hk-firewall hk-retired-gateway hk-self-proxy-owner hk-france-probe'
   'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use agent-scope-probe temporal-schema root-ssh-login'
-  'lint session-pnpm no-demo backup auto-release-state agents-sync agents-sync-account node-tests release-flow web-publish build-isolation'
+  'lint session-pnpm no-demo backup auto-release-state agents-sync agents-sync-account node-tests release-flow runtime-unchanged web-publish build-isolation'
 )
 NODE_TESTS=(health-page reclaude-old-account-clean auto-release config release-request static-child)
 SPECIAL_UNITS=(lint backup node-tests ports)
