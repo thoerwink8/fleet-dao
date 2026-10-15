@@ -11,8 +11,13 @@
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import type { LineEffect } from '../cli-run.ts';
 import {
+  EMPTY_TOOL_RESULT,
+  TRANSCRIPT_SUMMARY_MAX,
   cleanTestCommands,
   cut,
+  exitCodeText,
+  failureText,
+  firstStringField,
   num,
   numbers,
   optional,
@@ -21,8 +26,12 @@ import {
   progressEvent,
   rec,
   relPath,
+  resultText,
+  searchSummary,
   str,
   testRun,
+  todoSummary,
+  toolSummary as clipToolSummary,
   transcriptEntry,
 } from '../stream-kit.ts';
 import type {
@@ -288,7 +297,7 @@ export class GrokStreamReader {
       action: KIND_ACTIONS[tool.kind] ?? 'other',
       summary: toolSummary(tool, this.#cwd),
       ok,
-      ...optional('error', ok ? undefined : failureText(status, output, frame.content)),
+      ...optional('error', ok ? undefined : failureDetail(status, output, frame.content)),
     } satisfies ToolPayload);
     this.#tx(effect, 'tool_result', resultTextOf(status, output, frame.content, ok), { tool: tool.name, ok });
     if (ok && EDIT_KINDS.has(tool.kind)) {
@@ -357,37 +366,38 @@ const USAGE_FIELDS = {
   reasoningTokens: 'reasoning_tokens',
 } as const;
 
-/** 会话过程记录里工具输入摘要先取多长（调用方写库前再按上限截）。 */
-const TRANSCRIPT_SUMMARY_MAX = 2000;
-
-function toolSummary(tool: PendingTool, cwd: string, max = 200): string {
+/** 这一家的字段映射；截断走 stream-kit 的 toolSummary。 */
+function toolSummary(tool: PendingTool, cwd: string, max?: number): string {
   const pick = (k: string) => str(tool.input[k]);
   const path = pick('file_path') ?? pick('target_file') ?? pick('target_directory') ?? pick('path');
   let text: string | undefined;
   if (tool.kind === 'execute') text = pick('command');
-  else if (tool.kind === 'plan')
-    text = `待办 ${Array.isArray(tool.input.todos) ? tool.input.todos.length : 0} 条`;
-  else if (tool.kind === 'search')
-    text = [pick('pattern') ?? pick('query'), path ? relPath(path, cwd) : undefined]
-      .filter((x) => x)
-      .join(' @ ');
+  else if (tool.kind === 'plan') text = todoSummary(tool.input.todos);
+  else if (tool.kind === 'search') text = searchSummary(pick('pattern') ?? pick('query'), path, cwd);
   else if (path) text = relPath(path, cwd);
-  else text = Object.values(tool.input).find((v): v is string => typeof v === 'string');
-  return cut(text ?? '', max);
+  else text = firstStringField(tool.input);
+  return clipToolSummary(text, max);
 }
 
-/** 工具结果给人看的正文：失败照 failureText；成功的取命令的输出或工具回的文字，都没有就写（无输出）。 */
+/** grok 的内容块是 { content: { text } }。不是数组当没有；空块不占一行。sep 由成功（换行）和失败（冒号）各自定。 */
+function grokBlockText(content: unknown, sep: string): string {
+  if (!Array.isArray(content)) return '';
+  return resultText(content, {
+    pick: (block) => str(rec(rec(block)?.content)?.text),
+    sep,
+    dropEmpty: true,
+  });
+}
+
+/** 工具结果给人看的正文：失败照 failureDetail；成功取命令输出或工具回的文字，都没有就写（无输出）。 */
 function resultTextOf(
   status: string,
   output: Record<string, unknown>,
   content: unknown,
   ok: boolean,
 ): string {
-  if (!ok) return failureText(status, output, content);
-  const texts = Array.isArray(content)
-    ? content.map((c) => str(rec(rec(c)?.content)?.text)).filter((t): t is string => Boolean(t))
-    : [];
-  return texts.join('\n') || str(output.output_for_prompt)?.trim() || '（无输出）';
+  if (!ok) return failureDetail(status, output, content);
+  return grokBlockText(content, '\n') || str(output.output_for_prompt)?.trim() || EMPTY_TOOL_RESULT;
 }
 
 function editedPaths(tool: PendingTool, output: Record<string, unknown>, content: unknown): string[] {
@@ -409,19 +419,18 @@ function editedPaths(tool: PendingTool, output: Record<string, unknown>, content
   return [...paths];
 }
 
-function failureText(status: string, output: Record<string, unknown>, content: unknown): string {
+/** 失败原因按这一家的字段拼好，截断交给 failureText。 */
+function failureDetail(status: string, output: Record<string, unknown>, content: unknown): string {
   if (str(output.type) === 'Bash') {
     const why =
       output.timed_out === true
         ? '超时'
         : output.signal
           ? `信号 ${String(output.signal)}`
-          : `退出码 ${num(output.exit_code) ?? '?'}`;
+          : exitCodeText(num(output.exit_code));
     const said = str(output.output_for_prompt)?.trim();
-    return cut(said ? `${why}：${said}` : why, 500);
+    return failureText(said ? `${why}：${said}` : why);
   }
-  const texts = Array.isArray(content)
-    ? content.map((c) => str(rec(rec(c)?.content)?.text)).filter((t): t is string => Boolean(t))
-    : [];
-  return cut([status, ...texts].join('：'), 500);
+  const body = grokBlockText(content, '：');
+  return failureText(body ? `${status}：${body}` : status);
 }

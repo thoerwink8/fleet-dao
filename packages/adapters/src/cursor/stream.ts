@@ -9,8 +9,13 @@
 import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
 import type { LineEffect } from '../cli-run.ts';
 import {
+  EMPTY_TOOL_RESULT,
+  TRANSCRIPT_SUMMARY_MAX,
   cleanTestCommands,
   cut,
+  exitCodeText,
+  failureText,
+  firstStringField,
   num,
   numbers,
   optional,
@@ -19,8 +24,12 @@ import {
   progressEvent,
   rec,
   relPath,
+  resultText,
+  searchSummary,
   str,
   testRun,
+  todoSummary,
+  toolSummary as clipToolSummary,
   transcriptEntry,
 } from '../stream-kit.ts';
 import type {
@@ -262,7 +271,7 @@ export class CursorStreamReader {
       action,
       summary,
       ok,
-      ...optional('error', ok ? undefined : failureText(result, success)),
+      ...optional('error', ok ? undefined : failureDetail(result, success)),
     } satisfies ToolPayload);
     this.#tx(effect, 'tool_result', resultTextOf(result, success, ok), { tool: name, ok });
     if (ok && kind?.edits) {
@@ -333,10 +342,8 @@ export class CursorStreamReader {
   }
 }
 
-/** 会话过程记录里工具输入摘要先取多长（调用方写库前再按上限截）。 */
-const TRANSCRIPT_SUMMARY_MAX = 2000;
-
-function toolSummary(key: string, args: Record<string, unknown>, cwd: string, max = 200): string {
+/** 这一家的字段映射；截断走 stream-kit 的 toolSummary。 */
+function toolSummary(key: string, args: Record<string, unknown>, cwd: string, max?: number): string {
   const pick = (k: string) => str(args[k]);
   let text: string | undefined;
   switch (key) {
@@ -348,13 +355,11 @@ function toolSummary(key: string, args: Record<string, unknown>, cwd: string, ma
     case 'shellToolCall':
       text = pick('command');
       break;
-    case 'grepToolCall': {
-      const where = pick('path');
-      text = [pick('pattern'), where ? relPath(where, cwd) : undefined].filter((x) => x).join(' @ ');
+    case 'grepToolCall':
+      text = searchSummary(pick('pattern'), pick('path'), cwd);
       break;
-    }
     case 'updateTodosToolCall':
-      text = `待办 ${Array.isArray(args.todos) ? args.todos.length : 0} 条`;
+      text = todoSummary(args.todos);
       break;
     default:
       text =
@@ -363,34 +368,42 @@ function toolSummary(key: string, args: Record<string, unknown>, cwd: string, ma
         pick('query') ??
         pick('url') ??
         pick('toolName') ??
-        Object.values(args).find((v): v is string => typeof v === 'string');
+        firstStringField(args);
   }
-  return cut(text ?? '', max);
+  return clipToolSummary(text, max);
 }
 
-/** 工具结果给人看的正文：失败照 failureText；成功的取命令的输出、读到的内容或工具自己的话，都没有就只说成功。 */
+/** 读到的内容是字符串就走公共 resultText；空串当没有，接着看下一个字段（和 str 一样）。 */
+function resultContent(content: unknown): string | undefined {
+  if (typeof content !== 'string') return undefined;
+  return resultText(content) || undefined;
+}
+
+/** 工具结果给人看的正文：失败照 failureDetail；成功取命令输出、读到的内容或工具自己的话，都没有就写（无输出）。 */
 function resultTextOf(
   result: Record<string, unknown>,
   success: Record<string, unknown> | undefined,
   ok: boolean,
 ): string {
-  if (!ok) return failureText(result, success);
+  if (!ok) return failureDetail(result, success);
   const out =
     str(success?.stdout)?.trim() ??
-    str(success?.content) ??
+    resultContent(success?.content) ??
     str(success?.message) ??
     str(success?.diffString) ??
     str(success?.interleavedOutput)?.trim();
-  return out ?? '（无输出）';
+  return out ?? EMPTY_TOOL_RESULT;
 }
 
-function failureText(result: Record<string, unknown>, success: Record<string, unknown> | undefined): string {
+/** 失败原因按这一家的字段拼好，截断交给 failureText。 */
+function failureDetail(result: Record<string, unknown>, success: Record<string, unknown> | undefined): string {
   if (success) {
     // 命令跑了但退出码不是 0：给退出码和 stderr
     const stderr = str(success.stderr)?.trim();
-    return cut(`退出码 ${num(success.exitCode) ?? '?'}${stderr ? `：${stderr}` : ''}`, 500);
+    const code = exitCodeText(num(success.exitCode));
+    return failureText(stderr ? `${code}：${stderr}` : code);
   }
   const [kind, detail] = Object.entries(result)[0] ?? ['没有结果', undefined];
   const message = str(rec(detail)?.message) ?? str(rec(detail)?.error) ?? str(detail);
-  return cut(message ? `${kind}：${message}` : kind, 500);
+  return failureText(message ? `${kind}：${message}` : kind);
 }
