@@ -421,7 +421,7 @@ describe('巡查脚本：发版事故和健康页（2026-10-14 法国发版失�
 
   describe('进度记录 running：正常在走不判 BROKEN，超过 LIMITS.trainStuckMinutes 才算（2026-10-14 22:58Z 每趟自动发版都判 BROKEN）', () => {
     const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
-    const RUNNING_NOTE = '现在不发：上一趟发版是「running」状态，要人看，不自动再发';
+    const RUNNING_NOTE = '现在不发：有一趟发版在跑（2f5dc42f4636），等它收尾';
     const LAST = [`2026-10-14T22:49:55Z ${CUR} release`];
     // 法国打回来的是去掉空白的原 JSON（REMOTE_SCRIPT 里 tr -d '[:space:]'）
     const train = (status: string, startedMinAgo: number | null) =>
@@ -438,7 +438,8 @@ describe('巡查脚本：发版事故和健康页（2026-10-14 法国发版失�
         target: { kind: 'sha', value: NEW },
       });
 
-    it('进行中 5 分钟：OK，自动发布因为它说的「要人看」也不算', () => {
+    it('进行中 5 分钟：OK；自动发布写的是在跑，不含「要人看」', () => {
+      expect(RUNNING_NOTE).not.toContain('要人看');
       const r = judge({ hist: LAST, trainRaw: train('running', 5), autoNote: RUNNING_NOTE });
       expect(r.verdict).toBe('OK');
       expect(r.broken).toBeNull();
@@ -449,11 +450,11 @@ describe('巡查脚本：发版事故和健康页（2026-10-14 法国发版失�
       expect(r.verdict).toBe('BROKEN');
       expect(r.broken).toContain('正在发 2f5dc42f4636 的这一趟');
       expect(r.broken).toContain('超过 70 分钟没收尾');
-      expect(r.broken).toContain('自动发布处于「要人看」');
+      expect(r.broken).not.toContain('自动发布处于「要人看」');
       expect(judge({ hist: LAST, trainRaw: train('running', 70) }).verdict).toBe('OK');
     });
 
-    it('done 不判（刚收尾、自动发布还是上一班的旧话也不判）', () => {
+    it('done 不判（自动发布写的是在跑，不含「要人看」）', () => {
       expect(judge({ hist: LAST, trainRaw: train('done', 300), autoNote: RUNNING_NOTE }).verdict).toBe('OK');
     });
 

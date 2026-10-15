@@ -1,6 +1,9 @@
 // 看门狗的「主线 N 小时没合 PR」（决定 0093，jobs/merge-stall.ts）：判法的纯函数，加真库上看门狗一轮的报、撤（real/watchdog.ts）。
 // 需求里的每一种都故意造一次：超过 N 小时没合、有待做的单 → 报一条；没活干 → 不报；合了 → 撤并写为什么；
 // 开关关了 → 撤；人处理过的同一段不再打开；正文不带每轮变的数、没变不改卡；读不到事实 → 这一轮没跑成、开着的不撤。
+import { rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   notifications,
   pullRequests,
@@ -90,6 +93,8 @@ describe('judgeMergeStall（纯函数）', () => {
 describe('看门狗一轮里的「多久没合 PR」（真库）', () => {
   let t: TestDb;
   let clock = T0;
+  /** 不看法国发布目录：目录在时简报和发版会卷进来，扫到的条数对不上。那两条另有用例。 */
+  const NO_RELEASES = join(tmpdir(), 'merge-stall-test-no-releases');
 
   beforeAll(async () => {
     t = await createTestDb();
@@ -97,12 +102,16 @@ describe('看门狗一轮里的「多久没合 PR」（真库）', () => {
   afterAll(() => t.close());
   beforeEach(async () => {
     await resetTestDb(t);
+    rmSync(NO_RELEASES, { recursive: true, force: true });
     clock = T0;
     await registerScheduledJobs(t.db, [{ ...WATCHDOG_JOB, registeredAt: at(-24 * 30) }]);
   });
 
   function deps(over: Partial<WatchdogDeps> = {}): WatchdogDeps {
-    return { ...watchdogJob({ db: t.db, now: () => clock, log: () => {} })(), ...over };
+    return {
+      ...watchdogJob({ db: t.db, now: () => clock, log: () => {}, releasesDir: NO_RELEASES })(),
+      ...over,
+    };
   }
 
   async function repo(name: string, since: Date | null) {

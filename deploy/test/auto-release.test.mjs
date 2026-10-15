@@ -1028,7 +1028,15 @@ test('【故意造出的失败】发版闸：接活单元没装、上一份请�
     [{ requestPending: true }, /还没被接走/],
     [{ marker: true }, /暂停标记/],
     [{ lockBusy: true }, /发布锁被占着/],
-    [{ trainText: JSON.stringify({ status: 'running' }) }, /「running」状态/],
+    [
+      {
+        trainText: JSON.stringify({
+          status: 'running',
+          target: { kind: 'sha', value: '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d' },
+        }),
+      },
+      /有一趟发版在跑（2f5dc42f4636），等它收尾/,
+    ],
     [{ trainText: JSON.stringify({ status: 'blocked' }) }, /「blocked」状态/],
     [{ trainText: JSON.stringify({ status: 'failed' }) }, /「failed」状态/],
     [{ trainText: 'not json' }, /认不出/],
@@ -1080,6 +1088,27 @@ test('gateVerdict 单测：全过回 null；done/aborted 的进度不挡；事�
   assert.equal(gateVerdict({ ...GOOD_GATE, trainText: JSON.stringify({ status: 'done' }) }), null);
   assert.match(gateVerdict(undefined), /没读到/);
   assert.match(gateVerdict(null), /没读到/);
+});
+
+test('gateVerdict：进度是 running（一趟正常在走）不含「要人看」，写明在跑的提交、等它收尾', () => {
+  const sha = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
+  const note = gateVerdict({
+    ...GOOD_GATE,
+    trainText: JSON.stringify({ status: 'running', target: { kind: 'sha', value: sha } }),
+  });
+  assert.equal(note, '有一趟发版在跑（2f5dc42f4636），等它收尾');
+  assert.doesNotMatch(note, /要人看/);
+  const bare = gateVerdict({ ...GOOD_GATE, trainText: JSON.stringify({ status: 'running' }) });
+  assert.match(bare, /有一趟发版在跑（（没有）），等它收尾/);
+  assert.doesNotMatch(bare, /要人看/);
+});
+
+test('gateVerdict：进度收了尾没成（failed、blocked）仍含「要人看」', () => {
+  for (const status of ['failed', 'blocked']) {
+    const note = gateVerdict({ ...GOOD_GATE, trainText: JSON.stringify({ status }) });
+    assert.match(note, /要人看/);
+    assert.match(note, new RegExp(`「${status}」状态`));
+  }
 });
 
 // ── 发版驱动死在中途的残局（#2038、决定 0093）：暂停名单没人发「继续」、老版驱动关了总开关没开回 ──

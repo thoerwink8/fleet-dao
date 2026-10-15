@@ -48,6 +48,8 @@ const LONG_AGO = at(-30 * 24 * 60);
 let t: TestDb;
 let clock = T0;
 let logs: string[] = [];
+/** 新鲜度这几组不看法国发布目录：目录在时简报和发版会卷进来，那两条另有用例。 */
+const NO_RELEASES = join(tmpdir(), 'watchdog-test-no-releases');
 
 beforeAll(async () => {
   t = await createTestDb();
@@ -55,6 +57,7 @@ beforeAll(async () => {
 afterAll(() => t.close());
 beforeEach(async () => {
   await resetTestDb(t);
+  rmSync(NO_RELEASES, { recursive: true, force: true });
   clock = T0;
   logs = [];
 });
@@ -93,6 +96,7 @@ function deps(over: Partial<WatchdogDeps> = {}): WatchdogDeps {
     db: t.db,
     now: () => clock,
     log: (level, text) => logs.push(`${level}:${text}`),
+    releasesDir: NO_RELEASES,
   })();
   return { ...real, ...over };
 }
@@ -786,7 +790,7 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
     train('running');
     writeFileSync(
       join(dir, '.auto', 'state.json'),
-      JSON.stringify({ auto: { note: '现在不发：上一趟发版是「running」状态，要人看，不自动再发' } }),
+      JSON.stringify({ auto: { note: '现在不发：有一趟发版在跑（2f5dc42f4636），等它收尾' } }),
     );
     // 旧版看门狗开的那条误报（键挂在上一版身上）
     await upsertAlert(t.db, {
@@ -943,12 +947,13 @@ describe('发版和健康页的判法（纯函数）', () => {
       trainStatus: 'running',
       trainSince: START.toISOString(),
       trainSha: NEW,
-      autoNote: '现在不发：上一趟发版是「running」状态，要人看，不自动再发',
+      autoNote: '现在不发：有一趟发版在跑（2f5dc42f4636），等它收尾',
       ...over,
     });
     const after = (min: number) => new Date(START.getTime() + min * MIN);
 
-    it('进行中 5 分钟：不报，自动发布因为它说的「要人看」也不报', () => {
+    it('进行中 5 分钟：不报；自动发布写的是在跑，不含「要人看」', () => {
+      expect(running().autoNote).not.toContain('要人看');
       expect(releaseAttentionReasons(running(), after(5))).toEqual([]);
       expect(judgeReleaseAttention(running(), after(1))).toEqual({ kind: 'fine' });
       expect(judgeReleaseAttention(running(), after(TRAIN_STUCK_MS / MIN))).toEqual({ kind: 'fine' });
@@ -961,8 +966,8 @@ describe('发版和健康页的判法（纯函数）', () => {
       expect(v.key).not.toContain('df3692b292a7');
       expect(v.title).toBe('发版卡住：2f5dc42f4636 这一趟超过 70 分钟没收尾，自动发版停着');
       expect(v.body).toContain('正在发 2f5dc42f4636 的这一趟从 10-15 06:57 起停在「running」');
-      // 卡住时自动发布那句「要人看」照写
-      expect(v.body).toContain('自动发布说：现在不发');
+      // 进行中的话不含「要人看」，不另写一条自动发布
+      expect(v.body).not.toContain('自动发布说');
     });
 
     it('done 不报（上一版、这一版都不报）', () => {
