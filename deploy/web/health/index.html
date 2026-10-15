@@ -38,7 +38,7 @@
 </main>
 <script type="module">
   // 绝对路径：从 /health（不带斜杠）打开时，相对路径会解析到 /health.js
-  import { fetchHealth, judge } from '/health/health.js';
+  import { applyFranceLink, fetchFranceLink, fetchHealth, judge } from '/health/health.js';
 
   const REFRESH_MS = 15000;
   const banner = document.getElementById('banner');
@@ -72,7 +72,8 @@
     if (busy) return;
     busy = true;
     try {
-      render(judge(await fetchHealth()), new Date());
+      const [health, link] = await Promise.all([fetchHealth(), fetchFranceLink()]);
+      render(applyFranceLink(judge(health), link), new Date());
     } finally {
       busy = false;
     }

@@ -1,0 +1,28 @@
+# 香港经隧道探一次法国 /healthz。由 fleet-hk-france-probe.timer 每分钟拉起，跑完就退出。
+# deploy/hk.sh 装到 /etc/systemd/system/。改这份、再跑一遍 hk.sh，别在机器上手改。
+# 没配推送也要退出 0：脚本自己保证（只写状态和日志）。
+[Unit]
+Description=fleet-dao 香港经隧道探法国 healthz（连续 3 次失败才算失联）
+Documentation=https://github.com/thoerwink8/fleet-dao/blob/main/docs/ops.md
+Wants=network-online.target
+After=network-online.target wg-quick@wg-fleet.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/fleet-dao/france-probe.sh
+Environment=LANG=C.UTF-8
+TimeoutStartSec=30s
+Nice=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+UMask=0022
+ReadWritePaths=/var/lib/fleet-hk-france-probe
