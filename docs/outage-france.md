@@ -1,6 +1,6 @@
 # 法国失联速查
 
-半夜法国没了，照这页做。人在自己电脑上，香港用 `ssh hk-jump`。法国公网 IP 只在本机 ssh 配置里，下面写作 `<法国IP>`，不要写进这页或别的文件。控制台显示 Running 不代表开着。
+半夜法国没了，照这页做。人在自己电脑上，香港用 `ssh hk-jump`。法国公网 IP 只在本机 ssh 配置里，下面写作 `<法国IP>`。控制台显示 Running 不代表开着。
 
 ## 先从香港判断
 
@@ -27,6 +27,7 @@ curl -sS --noproxy '*' -m 5 -w '\nHTTP %{http_code}\n' http://10.99.0.2:8787/hea
 三条一起看：
 
 - 握手超过 180 秒或从未握手，22 退出码 124（等满超时），healthz 连不上：客机多半没在跑。去下一节在 Contabo 重启。
+- 握手超过 180 秒或从未握手，但 22 通：机器开着，是隧道断了。用 ssh 配置登法国看 `wg-quick@wg-fleet`，不要在 Contabo 重启。
 - 握手在 180 秒内，22 通，healthz 是 HTTP 200 或 503：机器开着。503 是后端在、有一项不好。ssh 上法国按「重启后核对」看哪一项，机器不用重启。
 - 握手在 180 秒内、22 立刻被拒（退出码 1）：机器在，sshd 没听。机器不用重启。
 - 香港自己登不上，或香港上 `systemctl is-active wg-quick@wg-fleet` 不是 `active`：先看香港。法国不用重启。
@@ -62,4 +63,4 @@ curl -sS --noproxy '*' -m 5 -w '\nHTTP %{http_code}\n' http://10.99.0.2:8787/hea
 
 ## 回来后看被打断的
 
-仓里的进度和没处理的引导：`pnpm progress read`。法国上还开着的工作流：`fleet-temporal workflow list`，看 Running 的那些。引擎起来后续上，不要手工重开。
+自己的检出里看进度和没处理的引导：`pnpm progress read`。法国上还开着的工作流：`fleet-temporal workflow list --query 'ExecutionStatus="Running"'`。引擎起来后续上，不要手工重开。
