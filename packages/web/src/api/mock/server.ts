@@ -2350,6 +2350,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           .filter((n) => !n.resolvedAt && n.level === 'decision')
           .map((n) => {
             const task = n.taskId ? st.tasks.find((t) => t.task.id === n.taskId) : undefined;
+            const named = task ? st.repos.find((x) => x.id === task.task.repoId) : undefined;
             const approval = /等你(批|点头)/.test(n.title);
             return {
               kind: approval ? ('approval' as const) : ('notification' as const),
@@ -2358,6 +2359,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
               ...(task ? { context: `#${task.task.issueNumber} ${task.task.title}` } : {}),
               since: n.createdAt,
               link: n.link ?? '/notifications',
+              // 和真后端 homeDecisions 一样：挂得上仓写 owner/name，否则 null（整机的事）
+              repo: named ? `${named.owner}/${named.name}` : null,
             };
           }),
       ].sort((a, b) => b.since.localeCompare(a.since));

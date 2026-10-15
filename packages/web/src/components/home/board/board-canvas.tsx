@@ -294,8 +294,10 @@ function Canvas({ running, flow, health, slots, resources }: BoardCanvasProps) {
   // 这时不能拿它去收视野：量出来的是上一版稀疏的位置，收完又不再收，画面就偏了（#1899）
   const [laidOutKey, setLaidOutKey] = useState('');
   const structureKey = graph.structureKey;
-  // 换了列数（画布宽高比变了）也重新收一次视野：排法变了，原来的视角对不上
-  const viewKey = `${stuck}:${needsYou}:${graph.columns.right}x${graph.columns.left}`;
+  // 换了项目、换了过滤、换了列数，都重新收一次视野。同一项目里新来一张单不收，免得拽着用户的视角。
+  const rootData = graph.nodes.find((n) => n.id === ROOT_ID)?.data;
+  const projectKey = rootData?.kind === 'root' ? rootData.repos.join('|') : '';
+  const viewKey = `${projectKey}:${stuck}:${needsYou}:${graph.columns.right}x${graph.columns.left}`;
   const fitted = useRef('');
 
   // 只有节点集合变了才重新排版；状态变化（颜色、文字）不动位置。
