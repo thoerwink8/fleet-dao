@@ -32,7 +32,12 @@ function framesFor(dir: string, sessionId: string): string {
   const file = join(dir, `frames-${sessionId}.ndjson`);
   writeFileSync(
     file,
-    `${lines.map((l) => (l.includes('"type":"end"') ? l.replace(/"sessionId":"[^"]+"/, `"sessionId":"${sessionId}"`) : l)).join('\n')}\n`,
+    `${lines
+      .map((l) => {
+        const frame = JSON.parse(l) as Record<string, unknown>;
+        return frame.type === 'end' ? JSON.stringify({ ...frame, sessionId }) : l;
+      })
+      .join('\n')}\n`,
   );
   return file;
 }
