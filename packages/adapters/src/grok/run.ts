@@ -47,7 +47,7 @@ export const GROK_UNATTENDED_ENV: Readonly<Record<string, string>> = {
 };
 
 export async function runGrok(spec: GrokRunSpec, options: AgentRunOptions): Promise<GrokRunReport> {
-  await assertRunnable(options.command, spec.prompt, spec.cwd);
+  await assertRunnable(options.command, spec.prompt, spec.cwd, options.io);
   const args = buildGrokArgs({
     model: spec.model,
     session: spec.session,

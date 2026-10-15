@@ -22,6 +22,8 @@
 //   键 watchdog:release:…、watchdog:healthz:…，读法国的发布目录和 /healthz（real/watchdog.ts）；和上面「连着没跑全」互不相干。
 // - 同一轮还看「提醒真的推到飞书了」（jobs/watchdog-push.ts）：推送渠道自己坏了靠推送报不出来，键 watchdog:push:feishu、进「要你拍」。
 // - 也看「今天的每日简报送到了」（jobs/watchdog-brief.ts）：09:00 以后没送到报 watchdog:brief:<北京日期>（卡住报警），送到了自己撤。
+// - 拼车池整池暂停时 carpool-watch 不要求新鲜（deps.pausedJobs，真装配读和盯读同一句暂停）：登记行还在也不报「停了」，
+//   开着的这条撤掉。摘登记行会被引擎启动时的重新登记清掉，单靠登记行会误报；暂停读不到不当成暂停，照常盯。
 
 import type { JobHealth, MergeStallFacts, RedStreak, ScheduleResult } from '@fleet-dao/db';
 import { WATCHDOG_JOB_ID } from '@fleet-dao/db';
@@ -137,6 +139,12 @@ export interface WatchdogDeps {
    * 「今天的每日简报送到了」要的读（jobs/watchdog-brief.ts）。读不到照抛：这一轮记没查成，开着的不撤。不给（只测别的部分的单测）就不看这一条。
    */
   brief?: Pick<BriefWatchDeps, 'status' | 'here'>;
+  /**
+   * 有意不要求按期跑的定时任务（任务编号 → 为什么）。登记行还在也不报「停了 / 没跑成」，开着的这条撤掉。
+   * 拼车池整池暂停时 carpool-watch 在这里（real/watchdog.ts）：摘登记行挡不住引擎启动把它登记回来。
+   * 读不到照抛：这一轮记没查成，不当成没有暂停（该盯的不放过）。不给 = 没有有意停的（只测别的部分）。
+   */
+  pausedJobs?: () => Promise<ReadonlyMap<string, string>>;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
@@ -296,6 +304,11 @@ async function raiseOnce(
   return 'raised';
 }
 
+/** 有意不跑：撤开着的「停了」时写的原因，也是这一轮判成没事的原因。 */
+function pausedJobWhy(name: string, why: string): string {
+  return `「${name}」有意不跑：${why}。不要求它按期跑，暂停撤了再盯`;
+}
+
 /** 为什么撤一条看门狗的提醒（它这一轮不在要报的里面）。 */
 function retireWhy(jobId: string, verdict: JobVerdict | undefined, ownTitle: string | undefined): string {
   if (!verdict) return `「${jobId}」不在定时任务登记表上了（不再要求它按期跑）`;
@@ -340,8 +353,23 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
   const s: RoundState = { deps, problems: [] };
   const others = health.filter((h) => h.job.id !== WATCHDOG_JOB.id);
 
+  // 有意不跑的（拼车池整池暂停时的 carpool-watch）：登记行还在也不报。读不到不当成暂停，照常盯，这一轮记没查成。
+  const pausedJobs = new Map<string, string>();
+  if (deps.pausedJobs) {
+    const read = deps.pausedJobs;
+    const got = await attempt(s, '读不到哪些定时任务是有意停的（这一轮不放过，照常盯）', () => read());
+    if (got.ok) {
+      for (const [id, why] of got.value) pausedJobs.set(id, why);
+    }
+  }
+
   // 每个任务判一遍：要人知道的报（一段一条）；任务自己为这次没跑成报过的不报第二条
-  const verdicts = others.map((h) => judgeJob(h, now));
+  const verdicts = others.map((h) => {
+    const pauseWhy = pausedJobs.get(h.job.id);
+    if (pauseWhy !== undefined)
+      return { kind: 'fine' as const, job: h.job, why: pausedJobWhy(h.job.name, pauseWhy) };
+    return judgeJob(h, now);
+  });
   const wanted = new Map<string, Wanted>();
   const ownTitles = new Map<string, string>();
   let found = 0;
@@ -375,7 +403,11 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
   for (const a of open.ok ? open.value : []) {
     if (wanted.has(a.dedupeKey)) continue;
     const jobId = jobIdOfKey(a.dedupeKey);
-    const why = retireWhy(jobId, byJob.get(jobId), ownTitles.get(jobId));
+    const pauseWhy = pausedJobs.get(jobId);
+    const why =
+      pauseWhy !== undefined
+        ? pausedJobWhy(byJob.get(jobId)?.job.name ?? jobId, pauseWhy)
+        : retireWhy(jobId, byJob.get(jobId), ownTitles.get(jobId));
     const done = await attempt(s, `提醒 ${a.dedupeKey} 没撤掉`, () =>
       deps.alerts.resolve({ dedupeKey: a.dedupeKey, why }),
     );

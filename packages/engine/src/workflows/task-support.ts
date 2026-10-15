@@ -299,7 +299,8 @@ export class AutoEscape extends Error {
 
 /**
  * 动手会话没跑成、失败分流判停下等人时，先自动换一条路由（避开这个模型）重派一次的码（决定 0093，task-session.ts）：
- * 被引擎在时限上叫停（aborted）、总时长到顶、起不来。只有人能修的（没权限、卫生检查、登录失效……）不在里面。
+ * 被引擎在时限上叫停（aborted）、总时长到顶、起不来、中转这一路额度用完或欠费（失败分流 QT3：换一路就能干，充值归人另办）。
+ * 只有人能修的（没权限、卫生检查、登录失效……）不在里面。只加老历史里不会出现的码：已经记下的判断重放时走的分支不变。
  */
 export const AUTO_REDISPATCH_CODES: readonly string[] = [
   'aborted',
@@ -307,7 +308,16 @@ export const AUTO_REDISPATCH_CODES: readonly string[] = [
   'spawn_failed',
   'spawn_timeout',
   'startup_timeout',
+  'relay_quota_exhausted',
 ];
+
+/**
+ * 同一条路由第二次总时长到顶，换路由时写进提示词（#2244）：这条路由在这张单上太慢，再原路续只烧额度。
+ * 树上的改动还在，下一轮接着做，不从头重来。第一次到顶不走这里，仍原路续同一个会话。
+ */
+export function wallClockSwitchLine(modelId: string): string {
+  return `${modelId} 在这条路由上第二次总时长到顶，不再原路续。树上的进度接着做，别从头重来。`;
+}
 
 /**
  * 有界耐心（决定 0093，借 magpie gateway-routing 的 Patience）：动手会话撞上上游临时故障（失败分流规则表上标了 blip 的：

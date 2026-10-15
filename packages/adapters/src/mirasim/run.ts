@@ -9,7 +9,7 @@ import type { ProgressEvent } from '@fleet-dao/shared';
 import { CallbackGate, type LineMeta } from '../cli-run.ts';
 import { assertSessionEffort, SESSION_EFFORTS } from '../effort.ts';
 import type { RunFacts, RunSummary } from '../judge.ts';
-import { looksLikeQuotaExhausted, num, rec, str } from '../stream-kit.ts';
+import { looksLikeQuotaExhausted, num, rec, relayQuotaNotice, str } from '../stream-kit.ts';
 import type { KillReason, TranscriptEntry } from '../types.ts';
 import {
   type LedgerFs,
@@ -25,7 +25,7 @@ export type MirasimRoute = 'local' | 'cloud' | 'auto';
 export type MirasimSessionRef = { mode: 'new' } | { mode: 'resume'; key: string };
 
 export interface MirasimLimits {
-  /** 发出 prompt 到会话进入 streaming 的上限。 */
+  /** 起针到会话进入 streaming 的上限；等 accepted 也在这份预算里（服务被堵时几十秒才读到 prompt 帧）。 */
   startupMs: number;
   wallClockMs: number;
   /** 进度指纹多久不变判停滞（有工具在跑不算）。360 秒的依据见 GEN-05。 */
@@ -34,7 +34,7 @@ export interface MirasimLimits {
   stopConfirmMs: number;
   /** 多久没收到推送就重订阅一次（推送不保证送到，重订阅拿整份快照）。 */
   resubscribeMs: number;
-  /** 等 state / accepted 应答多久。 */
+  /** 等 state 应答多久；等 accepted 至少这么久（上限见 startupMs）。 */
   replyMs: number;
   /** 会话结束后等账本追上多久：上游调用那一行要在调用结束后一两秒才写进去（VPS 实跑）。 */
   ledgerWaitMs: number;
@@ -314,6 +314,10 @@ export async function runMirasim(
   });
   // 被拒只认带本次 clientRef 的 error 帧。认不出是冲这一针来的报错不当成「被拒」：被拒的会重派，
   // 而会话可能已经起了，重派就扣两次额度。记下原话接着等 accepted，等不到按「没查成」收。
+  // 等 accepted 的上限是起会话的总预算（startupMs，从起针算），不是一问一答的 replyMs：服务单线程，被别的会话堵住时
+  // 几十秒才读到这一帧（MS-08；#2249 那次 prompt 帧发出 16 秒后服务才读到、34 秒才起会话，按 30 秒收就报了没查成，
+  // 会话其实起了、跑完了）。起不来的照旧由下面的 startup_timeout 管。
+  const acceptMs = Math.max(limits.replyMs, limits.startupMs - (Date.now() - t0));
   let stray: string | undefined;
   const reply = await waitFor(
     control,
@@ -324,7 +328,7 @@ export async function runMirasim(
       stray ??= str(f.message) ?? JSON.stringify(f);
       return false;
     },
-    limits.replyMs,
+    acceptMs,
   );
   if (reply === 'timeout' || reply === 'closed') {
     report.launchUnknown = true;
@@ -575,6 +579,11 @@ export function mirasimRunFacts(report: MirasimRunReport): RunFacts {
       }
     }
   }
+  // 中转把额度用完 / 欠费的通知当成回答回来（phase=done、error 为空，账本里照样是 2xx）：整段回答就是那条通知才算
+  const relayQuota =
+    report.terminal && !report.terminal.isError && report.route !== 'local'
+      ? relayQuotaNotice(report.session.state.text)
+      : undefined;
   const error = report.session.state.error;
   const words = report.watchError ?? error;
   const launch = report.launchError;
@@ -590,6 +599,7 @@ export function mirasimRunFacts(report: MirasimRunReport): RunFacts {
     ...(report.killed ? { killed: report.killed.reason } : {}),
     ...(terminal ? { terminal } : {}),
     quotaExhausted: looksLikeQuotaExhausted(error),
+    ...(relayQuota ? { relayQuota } : {}),
     ...(words ? { lastWords: words } : {}),
     ...(relayUnknown ? { relayUnknown } : {}),
   };

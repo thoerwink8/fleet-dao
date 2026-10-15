@@ -17,7 +17,7 @@ import {
   type TaskWorkflowInput,
   taskStatusQuery,
 } from '../src/task-contract.ts';
-import { CI_UNKNOWN_RECHECKS } from '../src/workflows/task-support.ts';
+import { CI_UNKNOWN_RECHECKS, wallClockSwitchLine } from '../src/workflows/task-support.ts';
 import { freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.ts';
 import { OK_SEGMENT, scripted } from './task-script.ts';
 
@@ -50,6 +50,28 @@ const statusUntil = (h: WorkflowHandle, check: (s: TaskStatus) => boolean, what:
   pollQuery(() => h.query(taskStatusQuery), check, what);
 const parked = (s: TaskStatus) => s.waiting?.kind === 'human';
 const RED = { state: 'red' as const, failedChecks: ['test (engine)'], digest: 'FAIL a.test.ts' };
+
+const WALL_CLOCK = {
+  ok: false as const,
+  runId: null,
+  outcome: 'timeout',
+  evidence: { code: 'wall_clock_timeout', message: '总时长到顶，已强杀', quotaExhausted: false },
+};
+
+/** 第一次总时长到顶留下的执行编号和会话号：第二次 runSegment 必须续这个会话。 */
+const WALL_RUN = 'run-wall-1';
+const WALL_SESSION = 'sess-wall-1';
+
+function wallTimedOut(runId: string) {
+  return { ...WALL_CLOCK, runId };
+}
+
+/** 只续第一次到顶那一次；别的编号（第二次到顶、换路由）不开这个会话。 */
+function resumeWallSession(input: { previous: { runId: string } | { startedAfter: string } }) {
+  return 'runId' in input.previous && input.previous.runId === WALL_RUN
+    ? { kind: 'resume' as const, sessionId: WALL_SESSION, runId: WALL_RUN }
+    : { kind: 'new' as const, reason: '不是第一次总时长到顶留下的会话' };
+}
 
 describe('轮数头一回用尽：自动换路由续一次（决定 0093）', { timeout: 90_000 }, () => {
   it('动手 3 轮 CI 都红：不停下，第 4 轮避开最近动手的模型、带着 CI 意见直接再动手（不先重走 CI），进度写一行', async () => {
@@ -191,6 +213,70 @@ describe('轮数头一回用尽：自动换路由续一次（决定 0093）', { 
 });
 
 describe('动手会话没跑成：先换路由重派一次（决定 0093）', { timeout: 90_000 }, () => {
+  it('第一次总时长到顶：仍原路续同一个会话（同一条路由），不换模型', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) => (n === 1 ? wallTimedOut(WALL_RUN) : OK_SEGMENT),
+      resume: resumeWallSession,
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(2);
+    const [first, second] = calls.segment;
+    expect(first?.resumeSessionId).toBeUndefined();
+    expect(second?.route.routeId).toBe(first?.route.routeId);
+    expect(second?.route.modelId).toBe(first?.route.modelId);
+    // 超时那一次有执行编号，第二次续它记下的会话号，不是开新会话
+    expect(calls.resume.map((r) => r.previous)).toEqual([{ runId: WALL_RUN }]);
+    expect(second?.resumeSessionId).toBe(WALL_SESSION);
+    expect(second?.interrupted).toBeUndefined();
+    const picks = world.callsOf('pickRoute').map((c) => c.input);
+    expect(picks[1]).toMatchObject({
+      stickRouteId: first?.route.routeId,
+      avoidModelIds: [],
+    });
+    expect(world.states.some((s) => s.doing.includes('续上一段的会话'))).toBe(true);
+    expect(world.states.some((s) => s.doing.includes('第二次总时长到顶'))).toBe(false);
+  });
+
+  it('同一条路由第二次总时长到顶：第三次 runSegment 换模型，带上树上的进度，不再原路续', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) =>
+        n === 1 ? wallTimedOut(WALL_RUN) : n === 2 ? wallTimedOut('run-wall-2') : OK_SEGMENT,
+      resume: resumeWallSession,
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(3);
+    const [first, second, third] = calls.segment;
+    expect(second?.route.modelId).toBe(first?.route.modelId);
+    expect(second?.route.routeId).toBe(first?.route.routeId);
+    expect(second?.resumeSessionId).toBe(WALL_SESSION);
+    expect(third?.route.modelId).not.toBe(first?.route.modelId);
+    const progress = wallClockSwitchLine(first?.route.modelId ?? '');
+    expect(third?.interrupted).toBe(progress);
+    expect(third?.feedback.join('\n')).toContain(progress);
+    expect(third?.resumeSessionId).toBeUndefined();
+    // 只问了第一次到顶那一次；第二次到顶换路由，不再拿这个会话号去续
+    expect(calls.resume.map((r) => r.previous)).toEqual([{ runId: WALL_RUN }]);
+    const picks = world.callsOf('pickRoute').map((c) => c.input);
+    expect(picks[2]).toMatchObject({ avoidModelIds: [first?.route.modelId] });
+    expect(picks[2]?.stickRouteId).toBeUndefined();
+    expect(world.states.some((s) => s.doing.includes('带上进度续一次'))).toBe(true);
+    expect(world.alerts.filter((a) => a.level !== 'info')).toEqual([]);
+  });
+
   it('被引擎在时限上叫停（aborted）两次判停下：先避开这个模型重派一次，不报警', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
@@ -217,6 +303,38 @@ describe('动手会话没跑成：先换路由重派一次（决定 0093）', { 
     expect(calls.segment[2]?.route.modelId).toBe('m2');
     expect(world.alerts.filter((a) => a.level !== 'info')).toEqual([]);
     expect(world.states.some((s) => s.doing.includes('自动换一条路由重派一次'))).toBe(true);
+  });
+
+  it('中转这一路额度用完或欠费（QT3，#2249）：不挂起，当场避开这个模型换一条路由重派', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) =>
+        n === 1
+          ? {
+              ok: false,
+              runId: null,
+              outcome: 'failed',
+              evidence: {
+                code: 'relay_quota_exhausted',
+                message:
+                  '中转这一路额度用完或欠费，回答就是上游的通知：Your quota is exhausted. API key status: exceeded USDT balance: -2.160991 USDT',
+                quotaExhausted: false,
+              },
+            }
+          : OK_SEGMENT,
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(2);
+    expect(calls.segment[0]?.route.modelId).toBe('m1');
+    expect(calls.segment[1]?.route.modelId).toBe('m2');
+    expect(world.states.some((s) => s.doing.includes('relay_quota_exhausted'))).toBe(true);
+    expect(world.alerts.filter((a) => a.level !== 'info')).toEqual([]);
   });
 
   it('【故意造出的失败】换了路由还是起不来：再判停下就真停下等人', async () => {

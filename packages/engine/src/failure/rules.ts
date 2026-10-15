@@ -207,6 +207,19 @@ export const RULES: readonly FailureRule[] = [
     text: /当前绑定账号暂不可用|account[_ ]banned/i,
     routeOutcome: 'neutral',
   },
+  // 中转（Mirasim）把上游额度用完、欠费的通知当成回答回来：会话「正常结束」，回答整段就是那条通知（插头 relayQuotaNotice 认，
+  // #2249：「Your quota is exhausted. API key status: exceeded … USDT balance: -2.16 USDT」）。欠的是中转后面这一路上游
+  // 的账（同一个中转池的别的模型照样能用，那次同池的 sonnet 半小时前还交了活），不是时间窗：等清零没用，要充值，所以不按 QT1 原路等，
+  // 也不整池暂停。动手会话撞上先自动换一条路由重派（task-support.ts 的 AUTO_REDISPATCH_CODES），不挂起；路由探针撞上判这条
+  // 路由不通，充值后探通自己恢复。码只认插头交来的 code 字段：回答、测试输出里出现这些词不算。
+  {
+    id: 'QT3',
+    title: '中转这一路额度用完或欠费',
+    kind: 'stop',
+    codes: ['relay_quota_exhausted'],
+    codeFieldOnly: true,
+    routeOutcome: 'neutral',
+  },
   // 余额、欠费、订阅权益：只有花钱才回得来，归人闸。不许自动切到按量计费的路由——那是选路的事。
   {
     id: 'QT2',
@@ -636,7 +649,10 @@ export const RULES: readonly FailureRule[] = [
     maxRetries: 1,
     routeOutcome: 'fail',
   },
-  // 总时长到顶：接着上次的进度续一轮；再到顶多半是子任务太大，交帅位去拆。
+  // 总时长到顶：第一次接着上次的进度、原路续同一个会话（maxRetries 1；工作流拿这一次的执行编号问 planSegmentResume，
+  // 带上会话号再起）。同一张单、同一条路由上第二次不再原路续：
+  // 失败分流判停下后，工作流避开这个模型换一条路由，带上树上的进度续一次（task-session.ts，#2244）。
+  // 这条路由在这张单上只是慢、会话还在出字，再原路续白烧额度；换过去的那条再在第二次到顶，交帅位去拆。
   {
     id: 'WT1',
     title: '会话总时长到顶',

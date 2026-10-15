@@ -109,7 +109,13 @@ describe('看门狗一轮里的「多久没合 PR」（真库）', () => {
 
   function deps(over: Partial<WatchdogDeps> = {}): WatchdogDeps {
     return {
-      ...watchdogJob({ db: t.db, now: () => clock, log: () => {}, releasesDir: NO_RELEASES })(),
+      ...watchdogJob({
+        db: t.db,
+        now: () => clock,
+        log: () => {},
+        // 这组测「多久没合 PR」。发版和每日简报认发布目录：法国这台目录在，不指开会把宿主机的发版卷进断言。
+        releasesDir: NO_RELEASES,
+      })(),
       ...over,
     };
   }
