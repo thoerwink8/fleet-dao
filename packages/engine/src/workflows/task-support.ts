@@ -568,12 +568,26 @@ export const MERGE_WAIT_RED_PR_NOTES = [
   '同一根子旁的路径：检查还在跑（pending）或一条都没有，仍等，和红不是同一件事，检查一直 pending 这次不改。PR 被关了本来就停下报人。和主线冲突已经并主线或交回返工；草稿被标成 mergeable=false 也会进冲突那条，这次不改分类。自动合并被撤掉就重新挂，挂不上停下；重新挂上之后红检查走上面的新路径。头被别人改了就停下，人点继续后重走 CI 和验收，不是一直等。落后主线但 mergeable=true 仍等（GitHub 还能合）；mergeable=false 走冲突那条。读检查失败抛错重试，不装成还在等；没接上读检查也抛，不默认 pending。不强制 CI 的直接合并 mergeNow 故意不看检查，另一条路，这次不改。每小时对账不推卡在 waitMerged 里的任务：红了由这条工作流自己返工，不加第二套看守。',
 ] as const;
 
-/** 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，#1733 多写取舍和验法，#1983 多写等合并检查转红的断点和旁路，其余单子仍是原来两句。 */
+/**
+ * #2261 的 PR 说明。正文只收 taskPrDid，会话最后一句和代码注释都进不去：验收条要的「改了哪几处、留着的为什么不用改」
+ * 得写进这里，不然 PR 正文里没有这份清单。列的是 #2181 同类（也含根因那次）——db 包 src 里所有并行查询都改成
+ * allSettledOrThrow 都落定再返回，四处随 #2181 的 PR 进主线、七处是这个 PR 改的；剩下的不用改的另写一条。
+ */
+export const ALLSETTLED_PR_NOTES = [
+  '排查范围：packages/db/src 里每一个装着库查询的 Promise.all（含别名、数组变量、Promise.resolve([]) 占位）逐个过；只有会提前返回、留下还在跑的查询占着连接和锁的才改。改后 db/src 里再没有 Promise.all 包库查询（allSettledOrThrow 自己内部的 Promise.allSettled 不算，它本来就等全部落定）。',
+  '改的 7 处（这个 PR）：carpool-spend.ts carpoolWindowSpend、daily-brief.ts dailyBriefStatus、engine-route-facts.ts routeFactsForPurpose、feishu-push.ts feishuPushFacts、probe.ts routeProbeTargets、session-org.ts sessionOrgFacts、channel-models.ts channelModelDiff——都是并行取出互不依赖的几段数据后拼一个对象，一条失败以前立刻返回，其余还在别的连接上跑。',
+  '随 #2181 的 PR 进主线的 4 处（根因那次）：pool-runs.ts openPoolRuns、endedPoolRuns、poolRunUsage，各自两条查询并行；schedule.ts scheduleHealth 里的三条（latest、latestSuccess、latestFinished）。它们和上面 7 处一样都改成 allSettledOrThrow；公共小工具 all-settled.ts 也是 #2181 加在 pool-runs.ts、这个 PR 没动它，直接复用。',
+  '不用改的：db/src 其余 Promise.all 都没有——routing-effort、routing-apply、requests、local-claims 这些是 db.transaction()（单条连接上一个串行流程，不是并行几段查询）；queries 之外的 Promise.all 不装库查询；session-org.ts、channel-models.ts 里 `? Promise.resolve([])` 的占位是并发数组的一项，已经在 allSettledOrThrow 里。db/test 里的 Promise.all（pool-runs、routing-order、ops 几条）是测试为了并发起多笔写、故意快的，测试里撞锁不是要修的场景，不动。',
+  '验法：npx vitest run packages/db/test/all-settled.test.ts packages/db/test/query-promise-all.test.ts（可控假查询钉「一条先失败时等其余都落定才抛」；卫生检查扫 queries 新写的 Promise.all 包库查询）；真库死锁复现在 packages/db/test/quota.test.ts 的 it.skipIf(!realTestPgUrl())，本机没设 FLEET_TEST_PG_URL 时跳过、CI 的 pg 台跑。',
+] as const;
+
+/** 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，#1733 多写取舍和验法，#1983 多写等合并检查转红的断点和旁路，#2261 多写排查范围和改了哪几处，其余单子仍是原来两句。 */
 export function taskPrDid(issueNumber: number, round: number, fileCount: number): string[] {
   const did = [`按 #${issueNumber} 的要求动手（第 ${round} 轮）`, `改了 ${fileCount} 个文件`];
   if (issueNumber === 1303) did.push(CONFLICT_HANDOFF_CAUSE);
   if (issueNumber === 1406) did.push(...ALERT_FILING_PR_NOTES);
   if (issueNumber === 1733) did.push(...FOUNDERS_INBOX_PR_NOTES);
   if (issueNumber === 1983) did.push(...MERGE_WAIT_RED_PR_NOTES);
+  if (issueNumber === 2261) did.push(...ALLSETTLED_PR_NOTES);
   return did;
 }

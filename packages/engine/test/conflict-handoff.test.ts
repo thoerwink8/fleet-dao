@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { conflictFilesInMergeMessage } from '../src/real/user-git.ts';
 import {
   ALERT_FILING_PR_NOTES,
+  ALLSETTLED_PR_NOTES,
   CONFLICT_HANDOFF_CAUSE,
   conflictFilesForHandoff,
   FOUNDERS_INBOX_PR_NOTES,
@@ -107,6 +108,24 @@ describe('PR 正文里的根因', () => {
     ]) {
       expect(body).toContain(line);
     }
+    expect(taskPrDid(12, 1, 1)).toEqual(['按 #12 的要求动手（第 1 轮）', '改了 1 个文件']);
+  });
+
+  it('#2261 的正文写上排查范围、改了哪几处、不用改的，别的单子不带', () => {
+    const body = renderPrBody({
+      requirement: 2261,
+      did: taskPrDid(2261, 1, 13),
+      verified: ['相关测试'],
+    });
+    expect(body).not.toContain('另有');
+    for (const line of ALLSETTLED_PR_NOTES) expect(body).toContain(line);
+    expect(body).toContain('改的 7 处（这个 PR）');
+    expect(body).toContain('carpool-spend.ts carpoolWindowSpend');
+    expect(body).toContain('channel-models.ts channelModelDiff');
+    expect(body).toContain('随 #2181 的 PR 进主线的 4 处');
+    expect(body).toContain('pool-runs.ts openPoolRuns');
+    expect(body).toContain('不用改的');
+    expect(body).toContain('db.transaction()');
     expect(taskPrDid(12, 1, 1)).toEqual(['按 #12 的要求动手（第 1 轮）', '改了 1 个文件']);
   });
 });
