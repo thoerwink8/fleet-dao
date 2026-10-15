@@ -6,6 +6,7 @@ import { and, asc, desc, eq, gte, inArray, isNull, like, lt, max, not, or } from
 import type { Db } from '../client.ts';
 import { SCHEDULE_OUTCOMES } from '../schema/enums.ts';
 import { scheduledJobs, scheduleRuns } from '../schema/index.ts';
+import { allSettledOrThrow } from './all-settled.ts';
 
 type RunRow = typeof scheduleRuns.$inferSelect;
 type JobRow = typeof scheduledJobs.$inferSelect;
@@ -211,7 +212,7 @@ export async function scheduleHealth(db: Db, now: Date = new Date()): Promise<Jo
         desc(only ? scheduleRuns.endedAt : scheduleRuns.startedAt),
         desc(scheduleRuns.id),
       );
-  const [latest, latestSuccess, latestFinished] = await Promise.all([
+  const [latest, latestSuccess, latestFinished] = await allSettledOrThrow([
     latestPer(),
     latestPer(['ok', 'partial']),
     // 还在跑的那次没有结局，看最近一次的结局要看已结束的。
@@ -272,7 +273,7 @@ const RED_STREAK_LOOKBACK_MS = 14 * 24 * 60 * 60_000;
  */
 export async function scheduleRedStreaks(db: Db, now: Date = new Date()): Promise<RedStreak[]> {
   const since = new Date(now.getTime() - RED_STREAK_LOOKBACK_MS);
-  const [breaks, reds] = await Promise.all([
+  const [breaks, reds] = await allSettledOrThrow([
     db
       .select({ job: scheduleRuns.job, id: max(scheduleRuns.id) })
       .from(scheduleRuns)

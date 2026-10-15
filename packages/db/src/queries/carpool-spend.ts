@@ -5,6 +5,7 @@
 import { and, eq, gte, isNotNull, lte } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { pools, quotaWindows, routes, runs, sessionRuns } from '../schema/index.ts';
+import { allSettledOrThrow } from './all-settled.ts';
 
 /**
  * 引擎核「登记的拼车并发上限」和库里拼车池对不上时推的提醒（engine 的 real/carpool-cap.ts 写、对上了自己撤）：开着就是引擎
@@ -49,7 +50,7 @@ export async function carpoolWindowSpend(
 ): Promise<CarpoolWindowSpend> {
   // 给了 poolId 只算这个池（对账时窗口读数属于哪个池就只算哪个池的花费，不拿一个池的读数对所有拼车池的花费）
   const onPool = (col: typeof pools.id) => (q.poolId === undefined ? [] : [eq(col, q.poolId)]);
-  const [sessions, oneShots] = await Promise.all([
+  const [sessions, oneShots] = await allSettledOrThrow([
     db
       .select({ costUsd: sessionRuns.costUsd, outcome: sessionRuns.outcome })
       .from(sessionRuns)

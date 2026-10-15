@@ -16,6 +16,7 @@ import {
   stateChanges,
   tasks,
 } from '../schema/index.ts';
+import { allSettledOrThrow } from './all-settled.ts';
 import {
   FEISHU_BRIEF_KEY_PREFIX,
   FEISHU_PUSH_CHANNEL,
@@ -194,7 +195,7 @@ export interface DailyBriefStatus {
 }
 
 export async function dailyBriefStatus(db: Db, day: string, since: Date): Promise<DailyBriefStatus> {
-  const [[note], [run]] = await Promise.all([
+  const [[note], [run]] = await allSettledOrThrow([
     db
       .select({
         id: notifications.id,

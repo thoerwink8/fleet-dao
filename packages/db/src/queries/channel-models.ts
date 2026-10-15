@@ -5,6 +5,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, channelModelReads, channelSeenModels, channels, routes } from '../schema/index.ts';
+import { allSettledOrThrow } from './all-settled.ts';
 import { discoverChannelModels } from './catalog-discover.ts';
 
 /** 一天四次左右：额度任务每 15 分钟醒一次，名册没到这个间隔就跳过。四个渠道一起读。 */
@@ -301,7 +302,7 @@ export async function channelModelDiff(db: Db): Promise<ModelRosterDiff> {
   const ids = MODEL_ROSTER_CHANNELS.map((c) => c.channelId);
   const autoIds = autoModelRosterChannels().map((c) => c.channelId);
   const manualIds = ids.filter((id) => isManualRosterChannel(id));
-  const [nameRows, readRows, seenRows, manualRows, routeRows] = await Promise.all([
+  const [nameRows, readRows, seenRows, manualRows, routeRows] = await allSettledOrThrow([
     db.select({ id: channels.id, name: channels.name }).from(channels).where(inArray(channels.id, ids)),
     db.select().from(channelModelReads).where(inArray(channelModelReads.channelId, autoIds)),
     autoIds.length === 0

@@ -12,6 +12,7 @@ import { and, asc, eq, inArray, isNotNull } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { routesInUse } from '../routing-layers.ts';
 import { auditLog, models, pools, quotaWindows, routes } from '../schema/index.ts';
+import { allSettledOrThrow } from './all-settled.ts';
 import { type OpenPoolRun, openPoolRuns } from './pool-runs.ts';
 import { type WindowState, windowFull, windowState } from './quota.ts';
 
@@ -67,7 +68,7 @@ export async function openOrgRuns(db: Db, now?: Date): Promise<OpenPoolRun[]> {
 export async function sessionOrgFacts(db: Db, options: { now: Date }): Promise<SessionOrgFacts> {
   const orgPools = await db.select().from(pools).where(isNotNull(pools.orgKind)).orderBy(asc(pools.id));
   const poolIds = orgPools.map((p) => p.id);
-  const [windowRows, used, open] = await Promise.all([
+  const [windowRows, used, open] = await allSettledOrThrow([
     poolIds.length === 0
       ? Promise.resolve([])
       : db

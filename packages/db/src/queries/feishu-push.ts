@@ -19,6 +19,7 @@
 import { and, eq, gte, isNotNull, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { notificationDeliveries, notifications, settings } from '../schema/index.ts';
+import { allSettledOrThrow } from './all-settled.ts';
 
 export const FEISHU_PUSH_CHANNEL = 'feishu';
 export const FEISHU_PUSH_TARGET = 'team';
@@ -267,7 +268,7 @@ export interface FeishuPushFacts {
 export async function feishuPushFacts(db: Db, now: Date): Promise<FeishuPushFacts> {
   const since = new Date(now.getTime() - FEISHU_PUSH_WINDOW_MS);
   const staleBefore = new Date(now.getTime() - FEISHU_PUSH_STALE_MS);
-  const [status, waiting, [last]] = await Promise.all([
+  const [status, waiting, [last]] = await allSettledOrThrow([
     readFeishuPushStatus(db),
     db
       .select({

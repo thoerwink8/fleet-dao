@@ -25,6 +25,7 @@ import {
   runs,
   sessionRuns,
 } from '../schema/index.ts';
+import { allSettledOrThrow } from './all-settled.ts';
 import { type RunInsert, startRun } from './runs.ts';
 
 /** 账号池上还没结束的一次会话。 */
@@ -53,25 +54,13 @@ export interface OpenPoolRun {
   stage: StageKind | null;
 }
 
-/** 等全部落地再返回；有失败的，抛第一条的错。和 Promise.all 的区别：不会提前返回、把还在跑的查询留在连接上。 */
-async function allSettledOrThrow<const T extends readonly unknown[]>(
-  promises: T,
-): Promise<{ -readonly [K in keyof T]: Awaited<T[K]> }> {
-  const settled = await Promise.allSettled(promises);
-  const failed = settled.find((s) => s.status === 'rejected');
-  if (failed?.status === 'rejected') throw failed.reason;
-  return settled.map((s) => (s as PromiseFulfilledResult<unknown>).value) as {
-    -readonly [K in keyof T]: Awaited<T[K]>;
-  };
-}
-
 /**
  * 还没结束（ended_at 为空）的会话，加上还没过期（expires_at 晚于 now）的预占，按选定的时刻排；orgPoolsOnly 只要带组织类型的池
  * （Claude 订阅：拼车、独享）上的。now 只用来判预占过没过期，默认现在。
  * runs 里 route_id 为空的行不算：连不到路由就不知道它占的是哪个池的名额，算到哪个池都是猜。这种是 #157 加 route_id 之前的
  * 老行、不经选路起的会话；选路派出去的一次性会话开跑那一行都带 route_id（engine 的 runner/one-shot.ts）。
  *
- * 三条查询并行，但三条都落地才返回（allSettled），有一条失败再报它的错（#2181）。以前用 Promise.all：一条失败就立刻返回，
+ * 三条查询并行，但三条都落地才返回（allSettledOrThrow），有一条失败再报它的错（#2181）。以前用 Promise.all：一条失败就立刻返回，
  * 另外两条还在别的连接上跑、占着表锁。quota.test.ts 故意把 runs 挪开时，查 runs 的那条立刻失败，测试接着进下一条用例，
  * resetTestDb 的 TRUNCATE 先排他锁 pools 再等 session_runs，残留的查询占着 session_runs 再等 pools，真 Postgres 报
  * deadlock detected（PGlite 只有一条连接，排队执行，撞不上）。函数返回时不再留下还在跑的查询，调用方等到的就是全部结束。
@@ -376,7 +365,7 @@ export type EndedPoolRun = {
 
 /** since 之后结束的会话（两种都要，按结束先后排）。runs 里没写路由的行连不到路由，不算谁的账。 */
 export async function endedPoolRuns(db: Db, since: Date): Promise<EndedPoolRun[]> {
-  const [sessions, oneShots] = await Promise.all([
+  const [sessions, oneShots] = await allSettledOrThrow([
     db
       .select({
         runId: sessionRuns.id,
@@ -449,7 +438,7 @@ export async function poolRunUsage(
   db: Db,
   q: { poolId: string; since: Date; until: Date },
 ): Promise<PoolRunUsage[]> {
-  const [sessions, oneShots] = await Promise.all([
+  const [sessions, oneShots] = await allSettledOrThrow([
     db
       .select({
         startedAt: sessionRuns.startedAt,
