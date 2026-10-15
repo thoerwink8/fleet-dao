@@ -351,7 +351,10 @@ test('还没失联、时刻认不出、文件没有：不改「全部在线」',
     const v = applyFranceLink(health, franceLinkLine(data));
     assert.equal(v.ok, true, JSON.stringify(data));
     assert.equal(v.summary, '全部在线');
-    assert.equal(v.rows.some((r) => r.label === '法国隧道'), false);
+    assert.equal(
+      v.rows.some((r) => r.label === '法国隧道'),
+      false,
+    );
   }
 });
 
@@ -367,7 +370,11 @@ test('探活状态取数：404、坏 JSON、网络失败都是 null，不抛', a
   let seen;
   const got = await fetchFranceLink(async (url, init) => {
     seen = { url, cache: init.cache };
-    return { ok: true, status: 200, text: async () => JSON.stringify({ down: true, downSinceText: '10:38' }) };
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ down: true, downSinceText: '10:38' }),
+    };
   });
   assert.deepEqual(seen, { url: '/health/france-link.json', cache: 'no-store' });
   assert.equal(got?.reason, '法国失联自 10:38');

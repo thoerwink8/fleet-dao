@@ -101,7 +101,10 @@ export function judge(fetched) {
  */
 export async function fetchFranceLink(fetchImpl = fetch, timeoutMs = TIMEOUT_MS) {
   try {
-    const res = await fetchImpl(FRANCE_LINK_URL, { cache: 'no-store', signal: AbortSignal.timeout(timeoutMs) });
+    const res = await fetchImpl(FRANCE_LINK_URL, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
     if (!res.ok) return null;
     return franceLinkLine(JSON.parse(await res.text()));
   } catch {

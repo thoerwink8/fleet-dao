@@ -179,7 +179,10 @@ else
   # shellcheck source=../lib/common.sh
   source "$HERE/../lib/common.sh"
   NG=$TMP/nginx
-  mkdir -p "$NG" "$TMP/web" "$TMP/acme"
+  mkdir -p "$NG" "$TMP/web" "$TMP/acme" "$TMP/state" \
+    "$NG/body" "$NG/proxy" "$NG/fastcgi" "$NG/uwsgi" "$NG/scgi"
+  # CI 上 sudo 起 nginx，干活的进程不是 root。mktemp 是 700，不放开它就 403，测不成「文件没有是 404」。
+  chmod 755 "$TMP" "$TMP/state" "$NG" "$NG/body" "$NG/proxy" "$NG/fastcgi" "$NG/uwsgi" "$NG/scgi"
   PORT=$(node -e 'const s=require("net").createServer(); s.listen(0,"127.0.0.1",()=>{console.log(s.address().port); s.close()});')
   render "$HERE/../hk/nginx-http.conf" SERVER_NAME=localhost WEB_ROOT="$TMP/web" ACME_ROOT="$TMP/acme" TUNNEL_PEER=10.99.0.2
   check "http 模板占位都换掉了" "${#REDS[@]}" 0
@@ -203,7 +206,11 @@ http {
 }
 EOF
   rm -f -- "$STATE"
-  nginx -p "$NG/" -c "$NG/nginx.conf" -g 'daemon off;' >"$NG/stdout" 2>&1 &
+  if ! nginx -t -p "$NG/" -c "$NG/nginx.conf" >"$NG/stdout" 2>&1; then
+    echo "  nginx -t 没过："
+    tail -20 "$NG/stdout" | sed 's/^/    /'
+  fi
+  nginx -p "$NG/" -c "$NG/nginx.conf" -g 'daemon off;' >>"$NG/stdout" 2>&1 &
   NG_PID=$!
   code=""
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
