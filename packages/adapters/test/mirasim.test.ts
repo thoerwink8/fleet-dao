@@ -152,6 +152,61 @@ describe('Mirasim 会话状态（真跑夹具）', () => {
     expect(busyFacts.quotaExhausted).toBe(false);
     expect(judgeRun(busyFacts).reason).not.toBe('quota_exhausted');
   });
+
+  // 中转把欠费通知当成回答回来：phase=done、error 为空、账本里是 2xx（#2249，法国 2026-10-14 23:05Z 会话 8585fb47 的原话）
+  const answered = (text: string): MirasimRunReport => {
+    const s = new MirasimSession({ runId: 'r-relay', cwd: '/w' });
+    s.applySnapshot(1, { phase: 'done', text, error: null });
+    const terminal = s.terminal();
+    if (!terminal) throw new Error('测试没搭好：done 应该已经是终态');
+    return {
+      runId: 'r-relay',
+      agent: 'claude',
+      route: 'cloud',
+      resumed: false,
+      sessionKey: 'claude:8585fb47-3058-4065-a11b-d5a4d6fa4d6d',
+      session: s.summary(),
+      terminal,
+      ledger: { state: 'read', rows: [{ status: 200, viaRelay: true }], unparsed: 0 },
+      foreignFrames: 0,
+      resubscribes: 0,
+      reconnects: 0,
+      startedAt: '2026-10-14T23:05:11.000Z',
+      endedAt: '2026-10-14T23:07:19.000Z',
+      wallMs: 128_000,
+    };
+  };
+  const NOTICE =
+    'Your quota is exhausted.\n\nAPI key status: exceeded\nName: VIP.aaa\nUSDT balance: -2.160991 USDT\nUSDT spent: 254.110991 USDT\nexp_date: 2026-11-06T02:02:17.427Z';
+
+  it('回答整段是中转的额度 / 欠费通知：判 relay_quota_exhausted，原话进原因，不当成正常结束（#2249）', () => {
+    const verdict = judgeRun(mirasimRunFacts(answered(NOTICE)));
+    expect(verdict).toMatchObject({ outcome: 'failed', reason: 'relay_quota_exhausted' });
+    expect(verdict.detail).toContain('Your quota is exhausted. API key status: exceeded');
+    expect(verdict.detail).toContain('USDT balance: -2.160991 USDT');
+    // 中转常见的余额不足写法
+    for (const text of [
+      'Insufficient balance. Please recharge your account.',
+      'Error: insufficient_balance',
+      '余额不足，请充值后再试',
+      '账户已欠费，请充值',
+    ]) {
+      expect(judgeRun(mirasimRunFacts(answered(text))).reason, text).toBe('relay_quota_exhausted');
+    }
+  });
+
+  it('回答里只是提到额度、余额这些词（正经干活的正文、测试输出）：照常结束，不判中转欠费', () => {
+    for (const text of [
+      // 法国真会话的回答开头（冷验收审额度页的 PR）
+      '## 问题 没有问题。逐条对照如下： 1. 开关：`quota.tsx` 的 `Matrix` 每个池那一行都放了 `PoolSwitch`。',
+      '修好了 quota.test.ts 的 deadlock。测试输出里那句 Your quota is exhausted 是夹具里的原文，不是这次会话撞上的。',
+      `${NOTICE}\n\n${'以上是夹具原文；我按它补了三条测试、改了判法。'.repeat(30)}`,
+    ]) {
+      const facts = mirasimRunFacts(answered(text));
+      expect(facts.relayQuota, text).toBeUndefined();
+      expect(judgeRun(facts).reason, text).toBe('answered');
+    }
+  });
 });
 
 describe('Mirasim 起会话到判定（假服务端）', () => {
@@ -500,7 +555,9 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
   });
 
   it('prompt 发出去没等到应答：标「没查成」，不当成确定没起、不判成重派的那一类（MS-18）', async () => {
-    const report = await runMirasim(spec(), { connect: new FakeMirasim({ reply: () => undefined }).connect });
+    const report = await runMirasim(spec({ limits: { ...FAST, startupMs: 600 } }), {
+      connect: new FakeMirasim({ reply: () => undefined }).connect,
+    });
     expect(report.launchUnknown).toBe(true);
     expect(report.launchError).toContain('别重发');
     expect(judgeRun(mirasimRunSummary(report).facts)).toMatchObject({
@@ -511,7 +568,7 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
 
   it('不带本次 clientRef 的 error 帧不算被拒：记下原话接着等，等到 accepted 照常跑，等不到按没查成收', async () => {
     const stray = { type: 'error', message: 'Selected model is at capacity' };
-    const unknown = await runMirasim(spec(), {
+    const unknown = await runMirasim(spec({ limits: { ...FAST, startupMs: 600 } }), {
       connect: new FakeMirasim({
         reply: (p) => [stray, { type: 'error', clientRef: `${String(p.clientRef)}-x`, message: '别人的' }],
       }).connect,
@@ -526,6 +583,27 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     expect(later.launchError).toBeUndefined();
     expect(later.sessionKey).toBe(kimi.sessionKey);
     expect(judgeRun(mirasimRunSummary(later).facts).reason).toBe('answered');
+  });
+
+  it('服务被堵、accepted 晚于 replyMs 才到：在起会话的预算里接着等，接上照常跑，不报没查成（#2249）', async () => {
+    // replyMs 500：旧代码 500 毫秒收了、报 launch_unknown；起会话的预算 3 秒，accepted 1.2 秒才到
+    const report = await runMirasim(spec({ limits: { ...FAST, startupMs: 3_000 } }), {
+      connect: new FakeMirasim({ reply: accepted(kimi), replyDelayMs: 1_200, stream: kimi.stream }).connect,
+      ledgerDir: okLedger(kimi.sessionKey),
+    });
+    expect(report.launchUnknown).toBeUndefined();
+    expect(report.launchError).toBeUndefined();
+    expect(report.sessionKey).toBe(kimi.sessionKey);
+    expect(judgeRun(mirasimRunSummary(report).facts).reason).toBe('answered');
+  });
+
+  it('accepted 一直不来：等满起会话的预算才按没查成收，不提前收（#2249）', async () => {
+    const t0 = Date.now();
+    const report = await runMirasim(spec({ limits: { ...FAST, startupMs: 1_500 } }), {
+      connect: new FakeMirasim({ reply: () => undefined }).connect,
+    });
+    expect(report.launchUnknown).toBe(true);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(1_400);
   });
 
   it('一直排队：起不来超时，停掉', async () => {
