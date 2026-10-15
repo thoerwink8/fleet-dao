@@ -57,6 +57,8 @@
 
 监督探 `<法国IP>` 的公网口时：22 通是 sshd；443 通是别家 self-proxy，不代表驾驶舱活着。80、8787、7233 从公网超时是预期，不要判红，也不要为此去开公网。8787 只绑 `10.99.0.2`（`fleet-api.socket`），ufw 只在 `wg-fleet` 上给 `10.99.0.1` 放行，公网方向被默认拒绝丢掉——外面看是超时，机器上连这个公网地址则是没人听、立刻被拒。7233 是清退前的旧 Temporal 口，现在前端在 `127.0.0.1:7243`。80 在香港，不在法国。没有隧道时，healthz 旁证走 `https://<驾驶舱域名>/healthz`（香港 nginx 经隧道转，第二节）。有隧道时直接 `http://10.99.0.2:8787/healthz`。公网 `http://<法国IP>:8787/healthz` 回得来才是开口子，要当异常。SSH 登不上另计，不在这条里改防火墙或钥匙。
 
+公网和隧道一起没了（`<法国IP>` 的 ICMP、22、443 都超时，同时香港上对端握手不再更新、`10.99.0.2` 的 ICMP、22、8787 都超时，香港自己的 SSH 仍正常、`wg-fleet` 仍是 UP）时，客机操作系统多半不在跑。这和公钥被拒（对端还在、只是握手失败）、公网 8787 超时（只绑隧道，预期）、TCP 通但 HTTP 不答，都不是同一件事：先别改 WireGuard 钥匙，也别为 8787 开公网。机器重新开起来之后，用 `last -x` 或 `utmpdump /var/log/wtmp` 看关机记录。有一条 `shutdown` 紧挨着下一次 `reboot`，就是客机干净关过机，中间那段外面两边都不可达；`/var/crash` 是空的就先别写成内核 panic。当天无人值守升级装过新内核、但 `Unattended-Upgrade::Automatic-Reboot` 仍是注释掉的 false 时，新内核只说明这次开机选了它，不说明是谁下的关机。关机是谁发起的在 journal 里（`journalctl -b -1 -u systemd-logind`），会话用户读不到。
+
 香港：
 
 对公网的端口白名单和第一节「公网入站」是同一份。本仓管的在 `deploy/hk.sh` 顶部「约定」的 `HK_FW_OURS`（22/tcp、80/tcp、443/tcp、4500/udp），别家登记的在 `HK_FW_FOREIGN`（8443/tcp，不归本仓管）。改白名单改那里，并同步本节和第一节「公网入站」。
@@ -736,7 +738,7 @@ rm /root/.ssh/authorized_keys2
 - PostgreSQL 用 16：Temporal 官方测过的最高大版本是 16（16.6）；装 Ubuntu 自带源里的，跟着系统的自动安全更新走。
 - 香港 WireGuard 用 UDP 4500 是因为上游只放行少数 UDP 端口；换端口前先从法国实测新端口到不到得了香港网卡。
 - 香港站点配置里，转发给法国的 `location` 不要自己写 `proxy_set_header`：写了一条，server 那一层的就全部不继承，清 `Authorization`、`X-Fleet-Acting-Feishu` 的两条也跟着失效（法国 france.sh 的读回会查出来）。
-- 香港到法国的连接留着复用（`deploy/hk/nginx-https.conf` 的 `upstream fleet_dao_api`）：香港到法国一趟往返约 0.2 秒，每个请求都新建连接就多付这一趟（2026-09-26 实测单个 `/api/me` 0.40 → 0.20 秒）。空闲连接由香港先关：nginx 的 `keepalive_timeout`（5 分钟）必须比法国后端的空闲超时（`packages/api/src/keep-alive.ts`，6 分钟）短，反过来后端刚关的连接 nginx 还拿去发，POST 会偶尔 502（`packages/api/test/keep-alive.test.ts` 读 nginx 配置核对两边）。所以改这两个值时先发法国后端、再重跑香港。转给法国的普通请求 1 分钟没回音回 504（连接是复用的，隧道断着时不设短了要干等 TCP 自己放弃）；实时推送 `/api/events` 单列一段，读超时 1 小时。香港是 nginx 1.18，`keepalive_time` 这类 1.19.10 才有的指令用不了。
+- 香港到法国的连接留着复用（`deploy/hk/nginx-https.conf` 的 `upstream fleet_dao_api`）：香港到法国一趟往返约 0.2 秒，每个请求都新建连接就多付这一趟（2026-09-26 实测单个 `/api/me` 0.40 → 0.20 秒）。空闲连接由香港先关：nginx 的 `keepalive_timeout`（5 分钟）必须比法国后端的空闲超时（`packages/api/src/keep-alive.ts`，6 分钟）短，反过来后端刚关的连接 nginx 还拿去发，POST 会偶尔 502（`packages/api/test/keep-alive.test.ts` 读 nginx 配置核对两边）。所以改这两个值时先发法国后端、再重跑香港。转给法国的普通请求 1 分钟没回音回 504（连接是复用的，隧道断着时不设短了要干等 TCP 自己放弃）；实时推送 `/api/events` 单列一段，读超时 1 小时。nginx 自己造的 502、503、504 对 `/api`、`/auth`（含 `/api/events`）回一段固定 JSON（「驾驶舱后端暂时没应，它所在的机器可能在重启或关机」），不回网页；不拦截后端自己回的 503。`/healthz` 仍原样回 502/504，健康页靠这个标红。香港是 nginx 1.18，`keepalive_time` 这类 1.19.10 才有的指令用不了。
 - 数据库迁移只进不退：发布时先迁移再切版本，退回上一版不撤迁移。新迁移要写成旧代码照样能跑（先加列、下一版再删旧的）。做不到的，退回时发布脚本会拦：库里跑过的迁移比要退到的那一版带的多，就不退（第九节）。
 - 应用单元（`deploy/france/fleet-*.service`，以及 `fleet-api.socket`）跟着版本走：改单元就是发一版，退回时单元也跟着退。引擎单元不能开 `NoNewPrivileges` 和挂载隔离（第五节、单元里的注释）。改 `fleet-api.socket` 的监听地址要 `api.env`、`release.sh` 的 `COCKPIT` 常量、socket 单元三处一起改（第二节端口表）。
 - 还没验过的：重启机器（单元开机自起、nft 表在服务之前载入）——这一轮没重启过机器。旧系统的单元文件已经删光，开机不会再复活。

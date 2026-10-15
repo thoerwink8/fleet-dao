@@ -1,5 +1,7 @@
 // Grok 命令行插头：无头起一个会话（提示词经 --prompt-file /dev/stdin 走 stdin，前面垫一根真管道），过程记录转成进度事件，结束时交出报告。
-// 会话号和实际模型只在最后一行 end 里：跑的中途核对不了，跑完核对，不符照样判失败。
+// 会话号和实际模型只在最后一行 end 里：跑的中途核对不了，跑完核对。模型不符判失败；会话号只在续会话（-r）时核对——
+// -r 认不出那个号它当场退出、报 not found（几秒内），续上了终帧回的就是同一个号（法国真跑：同一个号续过四轮）。
+// 开新会话（-s）时号是我们起的名字，终帧回的不一样也不算「续会话没续上」：活已经在树上，照它报的真号记，不把一整段作废。
 import { type AgentRunOptions, assertRunnable, runCliAgent } from '../cli-run.ts';
 import { buildSessionEnv, type SessionEnvInput } from '../env.ts';
 import type { RunFacts, RunSummary } from '../judge.ts';
@@ -107,7 +109,7 @@ export function grokRunFacts(report: GrokRunReport): RunFacts {
   const words = lastLines([...s.errors.filter((e) => !stderr.includes(e)), stderr].join('\n'));
   const observedModel = end?.models[0];
   const mismatch =
-    end?.sessionId && end.sessionId !== report.session.id
+    report.session.mode === 'resume' && end?.sessionId && end.sessionId !== report.session.id
       ? { kind: 'session' as const, expected: report.session.id, observed: end.sessionId }
       : observedModel && !grokModelMatches(report.requestedModel, observedModel)
         ? { kind: 'model' as const, expected: report.requestedModel, observed: observedModel }

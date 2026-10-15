@@ -348,6 +348,37 @@ describe('grok 起停', () => {
     });
   });
 
+  it('开新会话（-s）终帧回的号和核对用的不一样（法国 #2251 第三段：接回时引擎另起了号去核对）：不判续会话没续上，照终帧的真号记', async () => {
+    const report = await runGrok(
+      spec(tempDir(), { session: { mode: 'new', id: 'd8e193d1-9a24-4b22-b3b2-36f7cf39e827' } }),
+      { command: fakeAgent({ replay: fixturePath('grok', 'grok-fr-renamed') }) },
+    );
+    const summary = grokRunSummary(report);
+    expect(summary.sessionId).toBe('973fa0d0-f0bc-4016-96a2-f318fa7a331c');
+    expect(summary.facts).not.toHaveProperty('mismatch');
+    expect(summary.usage).toMatchObject({
+      inputTokens: 597607,
+      outputTokens: 84723,
+      cacheReadTokens: 12450688,
+    });
+    expect(judgeRun(summary.facts)).toMatchObject({ outcome: 'ok', reason: 'answered' });
+  });
+
+  it('-r 一个本地没有的号（法国 #2251 第二段原话）：几秒内退出 1、一帧都没有，判没结果、原话带上', async () => {
+    const said = readFileSync(
+      fixturePath('grok', 'grok-fr-resume-not-found').replace(/\.ndjson$/, '.stderr'),
+      'utf8',
+    );
+    const report = await runGrok(
+      spec(tempDir(), { session: { mode: 'resume', id: 'dfa2c284-93dc-4ee2-ba97-0a08564fad3d' } }),
+      { command: fakeAgent({ stderr: said.trimEnd(), exitCode: 1 }) },
+    );
+    expect(report.stream.frames).toBe(0);
+    const facts = grokRunSummary(report).facts;
+    expect(facts.lastWords).toContain('not found locally');
+    expect(judgeRun(facts)).toMatchObject({ outcome: 'failed', reason: 'no_result' });
+  });
+
   it('点名 4.6、实际回 4.7：判模型不符', async () => {
     const report = await runGrok(spec(tempDir(), { model: 'grok-4.6' }), {
       command: fakeAgent({ replay: fixturePath('grok', 'grok-edit-commit') }),
