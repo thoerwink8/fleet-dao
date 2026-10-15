@@ -505,6 +505,13 @@
       "when": 1792014591854,
       "tag": "0071_drop_feishu_intent_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1792047330988,
+      "tag": "0072_resolve_retired_alert_keys",
+      "breakpoints": true
     }
   ]
 }
