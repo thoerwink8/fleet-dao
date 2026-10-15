@@ -453,7 +453,8 @@ export function gateVerdict(facts) {
     // 正常在走：等它收尾，不叫人看。收了尾没成（failed、blocked……）才要人看。done / aborted 不挡。
     if (t.status === 'running') {
       const raw = t.target && typeof t.target === 'object' ? t.target.value : '';
-      return `有一趟发版在跑（${short(typeof raw === 'string' ? raw : '')}），等它收尾`;
+      const sha = typeof raw === 'string' && raw ? short(raw) : '进度记录没写提交';
+      return `有一趟发版在跑（${sha}），等它收尾`;
     }
     if (t.status !== 'done' && t.status !== 'aborted') {
       return `上一趟发版是「${t.status}」状态，要人看，不自动再发`;

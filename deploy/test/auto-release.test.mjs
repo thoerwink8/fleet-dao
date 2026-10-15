@@ -1099,7 +1099,7 @@ test('gateVerdict：进度是 running（一趟正常在走）不含「要人看�
   assert.equal(note, '有一趟发版在跑（2f5dc42f4636），等它收尾');
   assert.doesNotMatch(note, /要人看/);
   const bare = gateVerdict({ ...GOOD_GATE, trainText: JSON.stringify({ status: 'running' }) });
-  assert.match(bare, /有一趟发版在跑（（没有）），等它收尾/);
+  assert.equal(bare, '有一趟发版在跑（进度记录没写提交），等它收尾');
   assert.doesNotMatch(bare, /要人看/);
 });
 
