@@ -1504,3 +1504,97 @@ describe('0084：「要你拍」库层强制带选项和原因（#2729）', () =
     TEST_DB_TIMEOUT_MS,
   );
 });
+
+describe('0085：通知记下是哪个仓的事（#2759）', () => {
+  const tag = '0085_notification_repo';
+
+  it(
+    '从单和去重键回填仓；键对不上的留空；填过的不覆盖；再跑更新还是那样',
+    async () => {
+      const target = ordered.findIndex((e) => e.tag === tag);
+      expect(target).toBeGreaterThanOrEqual(0);
+      const pg = await migratedBefore(target);
+      try {
+        await pg.exec(`
+          insert into repos (owner, name, test_command) values
+            ('acme', 'orbit', 'pnpm test'),
+            ('acme', 'fluxwatch', 'pnpm test');
+        `);
+        const repos = new Map(
+          (await pg.query<{ name: string; id: string }>(`select name, id from repos`)).rows.map((r) => [
+            r.name,
+            r.id,
+          ]),
+        );
+        const orbit = repos.get('orbit');
+        const flux = repos.get('fluxwatch');
+        expect(orbit).toBeTruthy();
+        expect(flux).toBeTruthy();
+        await pg.exec(`
+          insert into tasks (repo_id, issue_number, title, raw_request, requested_by, priority) values
+            ('${orbit}', 15, '通知再提醒', '原文', 'founder', 1);
+        `);
+        const taskId = (await pg.query<{ id: string }>(`select id from tasks`)).rows[0]?.id;
+        expect(taskId).toBeTruthy();
+        // 单在 orbit 上、键却写成 fluxwatch：单优先。close-sweep 的仓名必须整段对上（orbit-canary 不是 orbit）。
+        await pg.exec(`
+          insert into notifications (level, dedupe_key, title, task_id) values
+            ('alert', 'by-task', '挂在单上', '${taskId}'),
+            ('alert', 'close-sweep:acme/fluxwatch:leftover', '单优先于键', '${taskId}'),
+            ('alert', 'github-app:acme/fluxwatch', '装机器人', null),
+            ('alert', 'close-sweep:acme/orbit:stale', '关单扫尾', null),
+            ('alert', 'close-sweep:acme/orbit-canary:x', '名字只是前缀不算', null),
+            ('alert', 'watchdog:merge:acme/orbit:after-1', '没合 PR', null),
+            ('alert', 'quota-read:pool-a', '额度', null),
+            ('alert', 'github-app:missing/nope', '仓不在库里', null);
+        `);
+        await runMigration(pg, tag);
+        const repoOf = async () =>
+          new Map(
+            (
+              await pg.query<{ dedupe_key: string; repo_id: string | null }>(
+                `select dedupe_key, repo_id from notifications`,
+              )
+            ).rows.map((r) => [r.dedupe_key, r.repo_id]),
+          );
+        const once = await repoOf();
+        expect(once.get('by-task')).toBe(orbit);
+        expect(once.get('close-sweep:acme/fluxwatch:leftover')).toBe(orbit);
+        expect(once.get('github-app:acme/fluxwatch')).toBe(flux);
+        expect(once.get('close-sweep:acme/orbit:stale')).toBe(orbit);
+        expect(once.get('close-sweep:acme/orbit-canary:x')).toBeNull();
+        expect(once.get('watchdog:merge:acme/orbit:after-1')).toBeNull();
+        expect(once.get('quota-read:pool-a')).toBeNull();
+        expect(once.get('github-app:missing/nope')).toBeNull();
+
+        const index = await pg.query(`select 1 from pg_indexes where indexname = 'notifications_repo_idx'`);
+        expect(index.rows).toHaveLength(1);
+
+        // 填过的不改；空着的再填上
+        await pg.exec(`
+          update notifications set repo_id = '${flux}' where dedupe_key = 'by-task';
+          update notifications set repo_id = null where dedupe_key = 'github-app:acme/fluxwatch';
+        `);
+        const text = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+        for (const statement of text.split('--> statement-breakpoint')) {
+          // 外键子句里有 ON UPDATE，注释里也有这个词；只重跑以 UPDATE 开头的那两句。
+          const code = statement.replace(/--[^\n]*/g, '').trim();
+          if (/^update\b/i.test(code)) await pg.exec(statement);
+        }
+        const twice = await repoOf();
+        expect(twice.get('by-task')).toBe(flux);
+        expect(twice.get('github-app:acme/fluxwatch')).toBe(flux);
+        expect(twice.get('watchdog:merge:acme/orbit:after-1')).toBeNull();
+
+        await expect(
+          pg.exec(
+            `update notifications set repo_id = '00000000-0000-4000-8000-000000000000' where dedupe_key = 'by-task'`,
+          ),
+        ).rejects.toThrow(/notifications_repo_id_repos_id_fk/);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});

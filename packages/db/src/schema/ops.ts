@@ -32,7 +32,7 @@ import {
   scheduleOutcome,
   userRole,
 } from './enums.ts';
-import { tasks } from './work.ts';
+import { repos, tasks } from './work.ts';
 
 const tz = { withTimezone: true, mode: 'date' } as const;
 
@@ -90,6 +90,11 @@ export const notifications = pgTable(
     level: notificationLevel('level').notNull(),
     dedupeKey: text('dedupe_key').notNull().unique(),
     taskId: uuid('task_id').references(() => tasks.id),
+    /**
+     * 哪个项目（仓）的事：首页按项目出卡靠它。挂单的取那张单的仓；键里带 owner/name 的（github-app:<仓>、close-sweep:<仓>:…）取那个仓；
+     * 都对不上是空（整机的事，不藏）。迁移 0085 按这两条回填老行。
+     */
+    repoId: uuid('repo_id').references(() => repos.id),
     title: text('title').notNull(),
     body: text('body').notNull().default(''),
     /** 点提醒直达的驾驶舱页面。 */
@@ -127,6 +132,7 @@ export const notifications = pgTable(
     ),
     check('notifications_reason_only_decision', sql`${t.decisionReason} is null or ${t.level} = 'decision'`),
     index('notifications_task_idx').on(t.taskId),
+    index('notifications_repo_idx').on(t.repoId),
     index('notifications_open_idx').on(t.createdAt).where(sql`${t.resolvedAt} is null`),
   ],
 );

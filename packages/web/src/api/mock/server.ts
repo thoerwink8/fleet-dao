@@ -144,7 +144,7 @@ import {
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
 import { ApiError, type FleetApi } from '../client';
-import type { AuditEntry, LiveEvent, Worktrees } from '../types';
+import type { AuditEntry, LiveEvent, Notification, Worktrees } from '../types';
 import type { MLog, MockState, MSubtask, MTask } from './model';
 import { createMockRequests, MOCK_PARTNER, type MockRequestsOptions, mockRequestsAs } from './requests';
 import { createSeed, fakeAction, fakeUsage } from './seed';
@@ -311,6 +311,83 @@ function mockEngine() {
     default:
       return { state: 'on' as const };
   }
+}
+
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** 假数据里每个仓当前的里程碑。没排的写 none，不拿 0/0 冒充。 */
+const MOCK_MILESTONES: Record<
+  string,
+  { state: 'none' } | { state: 'ok'; title: string; done: number; total: number }
+> = {
+  'acme/orbit': { state: 'ok', title: '登录和订单', done: 4, total: 9 },
+  'acme/website': { state: 'ok', title: '首页改版', done: 1, total: 3 },
+  'acme/orbit-canary': { state: 'ok', title: '巡检', done: 1, total: 1 },
+  'acme/fluxwatch': { state: 'none' },
+};
+
+/**
+ * 本期估算。默认读不到（有会话没报花费，算不全）：页面写「没记」。
+ * ?mockSpend=12.4 演示读到了的样子。认不出的值仍当没记。
+ */
+function mockPeriodSpend(): { state: 'ok'; usd: number } | { state: 'unread'; why: string } {
+  const v = typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('mockSpend');
+  if (v && v !== 'unread') {
+    const usd = Number(v);
+    if (Number.isFinite(usd) && usd >= 0) return { state: 'ok', usd };
+  }
+  return { state: 'unread', why: '有会话没报花费，本期估算算不全' };
+}
+
+/** 这条要你拍的还算没拍：没处理，且不是已经做成了的。 */
+function decisionStillOpen(n: Notification): boolean {
+  if (n.resolvedAt || n.level !== 'decision') return false;
+  return !(n.answer && n.answer.execution?.ok !== false);
+}
+
+/**
+ * 通知归哪个仓：和迁移 0085 同一条规矩。挂了单的取那张单的仓；
+ * 键是 github-app:<owner/name> 或 close-sweep:<owner/name>:… 的取那个仓。对不上是 null。
+ */
+function notificationRepoId(
+  n: Notification,
+  tasks: readonly MTask[],
+  repos: readonly { id: string; owner: string; name: string }[],
+): string | null {
+  if (n.taskId) {
+    const task = tasks.find((t) => t.task.id === n.taskId);
+    if (task) return task.task.repoId;
+  }
+  const key = n.dedupeKey;
+  if (!key) return null;
+  for (const repo of repos) {
+    const slug = `${repo.owner}/${repo.name}`;
+    if (key === `github-app:${slug}` || key.startsWith(`close-sweep:${slug}:`)) return repo.id;
+  }
+  return null;
+}
+
+/** 合并到发版这条线：有开着的看门狗就卡在那一步，没有就是在走。 */
+function mockPipeline(
+  notifications: readonly Notification[],
+): { state: 'moving' } | { state: 'stuck'; step: string; who: string | null; since: string | null } {
+  const open = notifications
+    .filter((n) => !n.resolvedAt && n.dedupeKey?.startsWith('watchdog:'))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const dog = open[0];
+  if (!dog) return { state: 'moving' };
+  const step = dog.dedupeKey?.includes(':merge:') ? '合并' : '发版';
+  const handling = dog.handling;
+  const fixing =
+    handling?.who && handling.stage !== 'unclaimed' && handling.stage !== 'waiting_founder'
+      ? handling
+      : undefined;
+  return {
+    state: 'stuck',
+    step,
+    who: fixing?.who ?? null,
+    since: fixing ? fixing.since : null,
+  };
 }
 
 /** 地址上写了 ?mockRoutes=many 就多造一批没用途在用的路由。 */
@@ -2511,9 +2588,29 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         ...p,
         repo: repoName(st.tasks[0]?.task.repoId ?? ''),
       }));
-      const done = [...taskDone, ...localDone]
-        .sort((a, b) => b.mergedAt.localeCompare(a.mergedAt))
-        .slice(0, 10);
+      const merged = [...taskDone, ...localDone];
+      const done = merged.sort((a, b) => b.mergedAt.localeCompare(a.mergedAt)).slice(0, 10);
+      const weekAgo = new Date(now() - WEEK_MS).toISOString();
+      const shippedByRepo = new Map<string, number>();
+      for (const item of merged) {
+        if (item.mergedAt < weekAgo) continue;
+        shippedByRepo.set(item.repo, (shippedByRepo.get(item.repo) ?? 0) + 1);
+      }
+      const projects = st.repos.map((repo) => {
+        const slug = `${repo.owner}/${repo.name}`;
+        const mine = st.tasks.filter((t) => t.task.repoId === repo.id);
+        return {
+          id: repo.id,
+          repo: slug,
+          shippedThisWeek: shippedByRepo.get(slug) ?? 0,
+          running: mine.filter((t) => t.task.state === 'running').length,
+          stuck: mine.filter((t) => t.task.state === 'stalled' || t.task.state === 'failed').length,
+          decisions: st.notifications.filter(
+            (n) => decisionStillOpen(n) && notificationRepoId(n, st.tasks, st.repos) === repo.id,
+          ).length,
+          milestone: MOCK_MILESTONES[slug] ?? { state: 'unread' as const, why: '这个仓的里程碑没记' },
+        };
+      });
       const quotaPools = st.pools.map((p) => {
         const ws = st.quota.filter((w) => w.poolId === p.id);
         return { pool: p, windows: ws };
@@ -2556,6 +2653,9 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         done,
         health: { quota: quotaState, routes: routesState, engine: mockEngine() },
         flow,
+        projects,
+        pipeline: mockPipeline(st.notifications),
+        spend: { estimated: mockPeriodSpend() },
         slots: {
           running: st.pools.reduce((n, p) => n + poolRunning(p.id), 0),
           reserved: st.pools.reduce((n, p) => n + poolReserved(p.id), 0),

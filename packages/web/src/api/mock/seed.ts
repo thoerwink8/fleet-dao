@@ -1577,6 +1577,8 @@ export function createSeed(now: number): MockState {
         testCommand: 'pnpm test',
       },
       { id: 'r-site', owner: 'acme', name: 'website', defaultBranch: 'main', testCommand: 'pnpm test' },
+      // 新导入、机器人还没装（通知 n-11）。首页要给库里每一个仓一张卡，这是第四个。
+      { id: 'r-flux', owner: 'acme', name: 'fluxwatch', defaultBranch: 'main', testCommand: 'pnpm test' },
     ],
     channels: [
       { id: 'ch-claude', name: 'Claude 订阅', billing: 'subscription', enabled: true },
