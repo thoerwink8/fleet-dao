@@ -517,10 +517,11 @@ jobs:
         if: always()
         run: node packages/conventions/src/bin/e2e-flaky.ts summary _tmp/e2e/results.json >> "$GITHUB_STEP_SUMMARY"
       # 总是留：跑过页面的截图（support/fixtures.ts 的 shot 夹具存的）是界面 PR 的截图证据，红了还有报告和各进程日志。都在仓根 _tmp/e2e/（公开仓：只有 e2e 自己造的假数据）
+      # 名字带第几次运行（run_attempt）：主线红了 ci-rerun.yml 会重跑失败的 job，同一个运行号下名字撞了第二次就传不上去（#2747）
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: e2e-${{ github.run_id }}-${{ matrix.shard }}
+          name: e2e-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
           path: _tmp/e2e/
           retention-days: 7
           if-no-files-found: warn
