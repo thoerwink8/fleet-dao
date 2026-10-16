@@ -85,7 +85,7 @@ describe('sweepRequests：硬删', () => {
     const live = await addRequest(t.db, f);
 
     const result = await sweepRequests(t.db, NOW);
-    expect(result).toEqual({ scanned: 3, purged: [old.seq], archived: [] });
+    expect(result).toEqual({ scanned: 3, purged: [old.seq], archived: [], idleClosed: [] });
 
     const left = await t.db.select({ id: requests.id }).from(requests);
     expect(left.map((r) => r.id).sort()).toEqual([fresh.id, live.id].sort());
@@ -125,7 +125,7 @@ describe('sweepRequests：硬删', () => {
 });
 
 describe('sweepRequests：自动归档', () => {
-  it('已结案·不做马上归档；已结案·做，单子上线满 3 天归档、不满不归；讨论中不归档', async () => {
+  it('已结案·不做马上归档；已结案·做，单子上线满 3 天归档、不满不归；不满 3 天的讨论中不归档', async () => {
     const f = await fixture(t.db);
     const closed = { closedAt: ago(DAY), deciderId: f.founder.id };
     const drop = await addRequest(t.db, f, { status: 'closed_drop', closeReason: '不做了', ...closed });
@@ -140,10 +140,11 @@ describe('sweepRequests：自动归档', () => {
       issueRefs: [{ repo: 'o/r', number: 13, state: 'closed', stateAt: ago(2 * DAY).toISOString() }],
     });
     const noIssue = await addRequest(t.db, f, { status: 'closed_do', ...closed });
-    await addRequest(t.db, f, { lastActivityAt: ago(40 * DAY) });
+    await addRequest(t.db, f, { lastActivityAt: ago(2 * DAY) });
 
     const result = await sweepRequests(t.db, NOW);
     expect(result.archived.sort()).toEqual([drop.seq, shipped.seq].sort());
+    expect(result.idleClosed).toEqual([]);
     expect(result.purged).toEqual([]);
     const rows = await t.db.select({ seq: requests.seq, archivedAt: requests.archivedAt }).from(requests);
     const archived = rows.filter((r) => r.archivedAt !== null).map((r) => r.seq);
@@ -158,7 +159,62 @@ describe('sweepRequests：自动归档', () => {
   });
 
   it('表里一条都没有：scanned 是 0，不抛', async () => {
-    expect(await sweepRequests(t.db, NOW)).toEqual({ scanned: 0, purged: [], archived: [] });
+    expect(await sweepRequests(t.db, NOW)).toEqual({ scanned: 0, purged: [], archived: [], idleClosed: [] });
+  });
+});
+
+describe('sweepRequests：讨论中闲置满 3 天收口', () => {
+  it('满 3 天转成收口，写上闲置几天、最后一句是谁说的，并归档；差 1 毫秒、删了的、待拍板的不动', async () => {
+    const f = await fixture(t.db);
+    const stale = await addRequest(t.db, f, { lastActivityAt: ago(3 * DAY) });
+    const almost = await addRequest(t.db, f, { lastActivityAt: ago(3 * DAY - 1) });
+    const gone = await addRequest(t.db, f, { lastActivityAt: ago(10 * DAY), deletedAt: ago(DAY) });
+    const pending = await addRequest(t.db, f, {
+      status: 'pending_decision',
+      deciderId: f.founder.id,
+      lastActivityAt: ago(10 * DAY),
+    });
+    const commander = await addRequest(t.db, f, { lastActivityAt: ago(5 * DAY) });
+    await t.db.insert(requestMessages).values({
+      requestId: commander.id,
+      kind: 'commander',
+      body: '你要哪种？',
+      createdAt: ago(4 * DAY),
+    });
+    const silent = await addRequest(t.db, f, { lastActivityAt: ago(4 * DAY) });
+    await t.db.delete(requestMessages).where(eq(requestMessages.requestId, silent.id));
+
+    const result = await sweepRequests(t.db, NOW);
+    expect(result.idleClosed?.sort()).toEqual([stale.seq, commander.seq, silent.seq].sort());
+    expect(result.archived.sort()).toEqual([stale.seq, commander.seq, silent.seq].sort());
+    expect(result.purged).toEqual([]);
+
+    const rows = await t.db.select().from(requests);
+    const bySeq = new Map(rows.map((r) => [r.seq, r]));
+    expect(bySeq.get(stale.seq)).toMatchObject({
+      status: 'closed_drop',
+      closeReason: '闲置 3 天没动静，自动收口；最后一句是创始人说的',
+    });
+    expect(bySeq.get(stale.seq)?.archivedAt).toEqual(NOW);
+    expect(bySeq.get(stale.seq)?.closedAt).toEqual(NOW);
+    expect(bySeq.get(commander.seq)?.closeReason).toBe('闲置 5 天没动静，自动收口；最后一句是指挥官说的');
+    expect(bySeq.get(silent.seq)?.closeReason).toBe('闲置 4 天没动静，自动收口；还没有人说过话');
+    expect(bySeq.get(almost.seq)?.status).toBe('discussing');
+    expect(bySeq.get(gone.seq)?.status).toBe('discussing');
+    expect(bySeq.get(pending.seq)?.status).toBe('pending_decision');
+
+    const sys = await t.db.select().from(requestMessages).where(eq(requestMessages.requestId, stale.id));
+    expect(sys.filter((m) => m.kind === 'system').map((m) => m.body)).toEqual([
+      '闲置 3 天没动静，自动收口；最后一句是创始人说的',
+    ]);
+    const audits = await t.db.select().from(auditLog);
+    expect(audits.map((a) => a.action).sort()).toEqual([
+      'request.idle_close',
+      'request.idle_close',
+      'request.idle_close',
+    ]);
+
+    expect((await sweepRequests(t.db, NOW)).idleClosed).toEqual([]);
   });
 });
 
