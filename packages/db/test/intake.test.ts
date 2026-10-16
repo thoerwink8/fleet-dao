@@ -25,6 +25,10 @@ describe('受管的仓（listIntakeRepos）', () => {
     const a = await addRepo(t.db, 'aaa');
     const opened = ago(DAY);
     await t.db.update(repos).set({ autoDispatchSince: opened }).where(eq(repos.id, b.id));
+    await t.db
+      .update(repos)
+      .set({ profile: { language: 'go', toolchain: ['go'], testCommand: 'go test ./...' } })
+      .where(eq(repos.id, b.id));
     const rows = await listIntakeRepos(t.db);
     expect(rows.map((r) => r.name)).toEqual(['aaa', 'bbb']);
     expect(rows[0]).toMatchObject({
@@ -32,11 +36,23 @@ describe('受管的仓（listIntakeRepos）', () => {
       owner: 'acme',
       defaultBranch: 'main',
       testCommand: 'pnpm check',
+      profile: {
+        language: 'unknown',
+        toolchain: [],
+        testCommand: 'pnpm check',
+        moduleRoots: [],
+        mergeSignals: [],
+        standardPathsFile: 'packages/conventions/standard-paths.json',
+        weight: 1,
+      },
       autoDispatchSince: null,
       ciPolicy: 'force',
     });
     expect(rows[1]?.autoDispatchSince?.toISOString()).toBe(opened.toISOString());
-    expect(rows[1]?.ciPolicy).toBe('force');
+    expect(rows[1]).toMatchObject({
+      profile: { language: 'go', toolchain: ['go'], testCommand: 'go test ./...' },
+      ciPolicy: 'force',
+    });
   });
 
   it('切成不强制之后读回来是 off；没改过的仍是强制', async () => {

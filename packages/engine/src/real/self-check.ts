@@ -17,6 +17,7 @@ import { mkdir, readdir, readFile, rename, rmdir, stat, unlink, writeFile } from
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
+import type { RepoWithProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { type PortContext, PortError } from '../ports.ts';
 import {
@@ -485,21 +486,25 @@ export function createSelfCheck(deps: SelfCheckDeps) {
           }
         }
       };
-      // 没装依赖就什么都跑不起来：整个跳过，不算红
-      const probe = await sh('probe', 'test -d node_modules && echo yes || echo no', 30_000);
-      if (probe.code !== 0) {
-        return {
-          state: 'skipped',
-          reason: `看不了树里装没装依赖：${digestOutput(probe.stdout.toString('utf8') || probe.stderr, 300)}`,
-          steps: [],
-        };
-      }
-      if (probe.stdout.toString('utf8').trim() !== 'yes') {
-        return { state: 'skipped', reason: '树里没装依赖（没有 node_modules），交给 CI', steps: [] };
+      const profile = (input.repo as RepoWithProfile).profile;
+      const needsNodeModules = profile === undefined || profile.toolchain.includes('node');
+      if (needsNodeModules) {
+        // Node 仓没装依赖就什么都跑不起来：整个跳过，不算红；非 Node 仓不看 node_modules。
+        const probe = await sh('probe', 'test -d node_modules && echo yes || echo no', 30_000);
+        if (probe.code !== 0) {
+          return {
+            state: 'skipped',
+            reason: `看不了树里装没装依赖：${digestOutput(probe.stdout.toString('utf8') || probe.stderr, 300)}`,
+            steps: [],
+          };
+        }
+        if (probe.stdout.toString('utf8').trim() !== 'yes') {
+          return { state: 'skipped', reason: '树里没装依赖（没有 node_modules），交给 CI', steps: [] };
+        }
       }
 
       const steps: SelfCheckStep[] = [];
-      const testCommand = input.repo.testCommand?.trim() ?? '';
+      const testCommand = (profile?.testCommand ?? input.repo.testCommand)?.trim() ?? '';
       if (testCommand === '') {
         steps.push(notRun('（测试命令）', '这个仓没配测试命令（repos.test_command）'));
       } else {

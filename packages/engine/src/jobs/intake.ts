@@ -75,6 +75,7 @@ import {
 } from '@fleet-dao/core';
 import type { ScheduleResult } from '@fleet-dao/db';
 import { humanPart } from '@fleet-dao/github';
+import type { RepoWithProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { GithubWhitelist } from '@fleet-dao/store';
 import { isTrusted } from '@fleet-dao/store';
@@ -138,7 +139,7 @@ export { MAX_ISSUE_FAILURES, MAX_STARTS_PER_HOUR } from './intake-pick.ts';
 /** why 最长多少字：没查成的一条一句，太多了截断（总数照写）。 */
 export const INTAKE_WHY_MAX = 1500;
 
-export interface IntakeRepo {
+export interface IntakeRepo extends RepoWithProfile {
   id: string;
   owner: string;
   name: string;
@@ -189,7 +190,8 @@ export type IntakeSkipReason =
   | 'at_capacity'
   | 'hourly_cap'
   | 'breaker_open'
-  | 'already_exists';
+  | 'already_exists'
+  | 'toolchain_unready';
 
 /** 这几种是「没查成」不是「不该派」：记进 unchecked，这一轮不记 ok。 */
 const UNREADABLE: ReadonlySet<IntakeSkipReason> = new Set(['created_at_unreadable']);
@@ -435,6 +437,8 @@ export function incompleteKey(problems: readonly BriefProblem[]): string {
 export interface IntakeDeps {
   /** 受管的仓（开关关着的也列出来：全关是正常的空闲，不是没扫到东西）。读不到照抛：这一轮记没跑成。 */
   repos(): Promise<IntakeRepo[]>;
+  /** 查法国这台机器是否有仓档案要求的工具；返回缺的工具名，不返回表示齐全。 */
+  toolchainReady?(repo: IntakeRepo): Promise<readonly string[]>;
   /** 作者白名单。读不到照抛：不当成「没有可信的人」。 */
   whitelist(): Promise<GithubWhitelist>;
   /** 这个仓开着的单加仓里还开着的里程碑（带说明原文，排序读版本里的先后）。读不到照抛。 */
@@ -524,6 +528,7 @@ interface Tally {
   started: number;
   commented: number;
   skipped: Map<IntakeSkipReason, number>;
+  unready: string[];
   unchecked: string[];
   /** 开着开关的仓里，列单子就失败了的有几个（全都失败＝这一轮没跑成）。 */
   reposFailed: number;
@@ -835,6 +840,24 @@ async function prepareRepo(
   const slug = `${repo.owner}/${repo.name}`;
   if (repo.autoDispatchSince === null) return null;
   t.reposOn += 1;
+  if (deps.toolchainReady) {
+    let missing: readonly string[];
+    try {
+      missing = await deps.toolchainReady(repo);
+    } catch (err) {
+      t.reposFailed += 1;
+      t.unchecked.push(`${slug}：仓档案工具链没查成：${errMessage(err)}`);
+      return null;
+    }
+    if (missing.length > 0) {
+      t.skipped.set('toolchain_unready', (t.skipped.get('toolchain_unready') ?? 0) + 1);
+      t.unready.push(`${slug}：没就绪，缺工具链：${missing.join('、')}`);
+      deps.log('info', `拉单：${slug} 没就绪，不拉单（缺工具链：${missing.join('、')}）`, {
+        missingToolchain: missing,
+      });
+      return null;
+    }
+  }
   const skippedBefore = new Map(t.skipped);
   let listed: Awaited<ReturnType<IntakeDeps['openIssues']>>;
   try {
@@ -996,7 +1019,8 @@ function milestoneNeedsOrder(m: MilestoneRef, issues: readonly IntakeIssue[]): b
 
 function summarize(t: Tally): string {
   const skipped = [...t.skipped].map(([reason, n]) => `${reason}×${n}`).join('、') || '无';
-  return `起了 ${t.started} 条，留言 ${t.commented} 条；开头在干活 ${t.workingAtStart} 条、停下等人 ${t.stalled} 条（不占名额）；没派的：${skipped}`;
+  const unready = t.unready.length > 0 ? `；没就绪：${t.unready.join('；')}` : '';
+  return `起了 ${t.started} 条，留言 ${t.commented} 条；开头在干活 ${t.workingAtStart} 条、停下等人 ${t.stalled} 条（不占名额）；没派的：${skipped}${unready}`;
 }
 
 async function round(deps: IntakeDeps): Promise<ScheduleResult> {
@@ -1012,6 +1036,7 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     started: 0,
     commented: 0,
     skipped: new Map(),
+    unready: [],
     unchecked: [],
     reposFailed: 0,
     reposOn: 0,

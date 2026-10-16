@@ -12,7 +12,9 @@
 // - 在跑的任务数查 Temporal 的可见性（WorkflowType 加 ExecutionStatus），读不到就让这一轮记没跑成：不拿 0 顶。
 // - 白名单、成员名单每一轮读一次（拉单工厂每轮造一份新的），不跨轮缓存：停用一个人，下一轮就不再认他开的单。
 
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { promisify } from 'node:util';
 import { LOCAL_LABEL } from '@fleet-dao/conventions';
 import {
   type Db,
@@ -39,6 +41,7 @@ import {
   writeIntakeWaiting,
 } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
+import type { RepoWithProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { actorFor, createPgStore, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
@@ -52,6 +55,29 @@ import { liveLocalIssues } from '../jobs/local-leases.ts';
 import { generationLife, readTaskGenerations } from '../jobs/redo.ts';
 import type { TaskWorkflowInput } from '../task-contract.ts';
 import { groomRequestDeps } from './groom-request.ts';
+
+const execFileAsync = promisify(execFile);
+const TOOLCHAIN_PATH = '/usr/local/bin:/usr/bin:/bin';
+
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function missingToolchain(repo: RepoWithProfile): Promise<readonly string[]> {
+  const tools = repo.profile?.toolchain ?? [];
+  if (tools.length === 0) return [];
+  const script = `for tool in ${tools.map(shQuote).join(' ')}; do command -v "$tool" >/dev/null 2>&1 || printf '%s\\n' "$tool"; done`;
+  try {
+    const { stdout } = await execFileAsync('/bin/sh', ['-c', script], {
+      env: { ...process.env, PATH: TOOLCHAIN_PATH },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    return stdout.trim() === '' ? [] : stdout.trim().split(/\s+/);
+  } catch (error) {
+    throw new Error(`检查工具链起不来：${errMessage(error)}`);
+  }
+}
 
 /** 拉单要用到的这几下（不要整个 GitHub）。 */
 export type IntakeGitHub = Pick<
@@ -68,6 +94,8 @@ export interface IntakeWiring {
   startTimeoutMs?: number;
   /** 测试用：换掉「合并闸认冷验收了没有」（jobs/intake.ts 的 MERGE_GATE_REQUIRES_COLD_VERIFY）。 */
   gateLive?: boolean;
+  /** 测试用：替换法国本机的工具链探测。 */
+  toolchainReady?: IntakeDeps['toolchainReady'];
 }
 
 const DEFAULT_START_TIMEOUT_MS = 15_000;
@@ -97,10 +125,12 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           owner: r.owner,
           name: r.name,
           defaultBranch: r.defaultBranch,
+          profile: r.profile,
           testCommand: r.testCommand,
           autoDispatchSince: r.autoDispatchSince ? r.autoDispatchSince.toISOString() : null,
         }));
       },
+      toolchainReady: w.toolchainReady ?? missingToolchain,
       recordWaiting: ({ at, byRepo }) => writeIntakeWaiting(w.db, { at, byRepo, by: BREAKER_ACTOR }),
       // 本机领单的租约（决定 0096）：到期的行、心跳（本机会话推来的 node_sessions）、PR 镜像都从库里读，摘标签用「引擎」机器人
       localLeases: {

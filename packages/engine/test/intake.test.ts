@@ -412,6 +412,37 @@ describe('runIntakeJob · 合并闸还没认冷验收', () => {
 });
 
 describe('runIntakeJob · 一轮', () => {
+  it('仓档案工具链缺失：判没就绪、不读单也不拉单，原因写明缺哪个', async () => {
+    const h = harness({
+      async repos() {
+        return [
+          {
+            ...REPO,
+            profile: {
+              language: 'go',
+              toolchain: ['go'],
+              testCommand: 'go test ./...',
+              moduleRoots: [],
+              mergeSignals: [],
+              standardPathsFile: 'packages/conventions/standard-paths.json',
+              weight: 1,
+            },
+          },
+        ];
+      },
+      async toolchainReady() {
+        return ['go'];
+      },
+    });
+    const run = await runIntakeJob(h.deps);
+    expect(run).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(h.started).toEqual([]);
+    expect(h.planReads).toEqual([]);
+    expect(h.logs.some((l) => l.text.includes('缺工具链：go'))).toBe(true);
+    expect(run.why).toContain('toolchain_unready×1');
+    expect(run.why).toContain('缺工具链：go');
+  });
+
   it('开关打开以前开的老单（没贴「整理过」「交给引擎」）→ 不拉，原因是 not_groomed', async () => {
     const h = harness({}, { issues: [issue({ createdAt: OLD })] });
     const run = await runIntakeJob(h.deps);
