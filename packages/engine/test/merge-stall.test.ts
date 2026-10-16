@@ -10,6 +10,7 @@ import {
   registerScheduledJobs,
   repos,
   resolveAlertWithReason,
+  runs,
   tasks,
   writeIntakeWaiting,
 } from '@fleet-dao/db';
@@ -143,14 +144,29 @@ describe('看门狗一轮里的「多久没合 PR」（真库）', () => {
 
   let issue = 1;
   async function task(repoId: string, state: typeof tasks.$inferInsert.state) {
-    await t.db.insert(tasks).values({
-      repoId,
-      issueNumber: issue++,
-      title: '给登录页加验证码',
-      rawRequest: '登录页加一个手机验证码',
-      requestedBy: 'founder-a',
-      priority: 10,
-      state,
+    const [row] = await t.db
+      .insert(tasks)
+      .values({
+        repoId,
+        issueNumber: issue++,
+        title: '给登录页加验证码',
+        rawRequest: '登录页加一个手机验证码',
+        requestedBy: 'founder-a',
+        priority: 10,
+        state,
+      })
+      .returning();
+    if (!row) throw new Error('任务没写进去');
+    return row;
+  }
+
+  /** 在做要有开着的会话。没有的话看门狗另报「在干活但没有开着的会话」（#2392），这一轮的 found 就不只是没合 PR。 */
+  async function openRun(taskId: string) {
+    await t.db.insert(runs).values({
+      segment: 'manual',
+      model: 'm1',
+      taskId,
+      startedAt: at(-1),
     });
   }
 
@@ -160,9 +176,10 @@ describe('看门狗一轮里的「多久没合 PR」（真库）', () => {
   it('【故意造出的失败】有单在做、5 小时没合：报一条卡住报警（点进去任务页）；下一轮没变不改卡；合了一个就撤、写为什么', async () => {
     const r = await repo('app', at(-48));
     await merged(r.id, 41, at(-5));
-    await task(r.id, 'running');
+    await openRun((await task(r.id, 'running')).id);
 
-    expect(await runWatchdogJob(deps())).toMatchObject({ outcome: 'ok', scanned: 1, found: 1 });
+    // scanned 多 1：看门狗同时扫了这张在干活的单。它有开着的会话，不另报。
+    expect(await runWatchdogJob(deps())).toMatchObject({ outcome: 'ok', scanned: 2, found: 1 });
     const [a] = await merges();
     expect(a).toMatchObject({
       dedupeKey: 'watchdog:merge:acme/app:after-41',
