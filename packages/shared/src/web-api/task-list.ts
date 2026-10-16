@@ -1,6 +1,7 @@
 // 驾驶舱接口约定（web-api）：任务列表（GET /api/tasks，#1639）。
 // 入口是 ../web-api.ts（只有 export *）。状态怎么分组见 ../task-list.ts。
 import { z } from 'zod';
+import { FLOW_MODES } from '../flow-mode.ts';
 import { TASK_LIST_GROUPS } from '../task-list.ts';
 import type { ListedTaskCost } from '../usage.ts';
 import { PageQuery } from './common.ts';
@@ -59,6 +60,11 @@ export const TaskListRowSchema = z.object({
   claimedBy: z.string().optional(),
   /** 本机领的单：租约到期的时刻（tasks.lease_until）；到点没续就退回法国队列。引擎的单没有这个键。 */
   leaseUntil: Time.optional(),
+  /**
+   * 这张单实际走的流程（tasks.flow_mode，#2828）：three 三段、full 全程。
+   * 还没分组的老单没有这个键。页面不补、不猜。
+   */
+  flowMode: z.enum(FLOW_MODES).optional(),
   /** 筛选分到哪一组。 */
   group: TaskListGroupSchema,
   /** 现在在哪一段（对题、动手、验收、验收还没起、合并）；三段流水推不出的是 null。 */

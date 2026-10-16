@@ -8,6 +8,7 @@ import { useNow } from '../../../lib/hooks';
 import { SEGMENT_UNMETERED, segmentHint } from '../../../lib/segments';
 import type { Tone } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
+import { FlowModeTag } from '../../flow-mode-tag';
 import { Section } from '../../layout/section';
 import { StatusBadge, StatusDot } from '../../layout/status-badge';
 import { inkClass, softClass, solidClass } from '../../layout/tone';
@@ -266,12 +267,15 @@ export function FarTicket({
   id,
   title,
   usage,
+  flowMode,
 }: {
   tone: Tone;
   id: string;
   title: string;
   /** 内存、CPU 的短写（#1973）：标题下面一行，和单号同一个字号、灰字。 */
   usage?: { text: string; title: string } | undefined;
+  /** 这张单走全程还是三段。没有就不画。 */
+  flowMode?: HomeRunning['flowMode'];
 }) {
   return (
     <div className={cn('flex h-full flex-col justify-center gap-1 overflow-hidden px-3', softClass[tone])}>
@@ -282,6 +286,7 @@ export function FarTicket({
       >
         {id}
       </div>
+      <FlowModeTag mode={flowMode} />
       <div
         className="line-clamp-2 min-h-0 leading-tight font-semibold break-words text-foreground"
         style={{ fontSize: FAR_TITLE_FONT }}
@@ -495,11 +500,13 @@ export const TicketNode = memo(function TicketNode({ id, data }: Props) {
           id={`#${item.issueNumber}`}
           title={item.title}
           usage={{ text: usageShort(data.usage), title: usageTitle(data.usage) }}
+          flowMode={item.flowMode}
         />
       ) : (
         <div className="flex h-full flex-col overflow-hidden py-3 pr-3 pl-4">
           <div className="flex shrink-0 items-center gap-x-2">
             <span className="num text-meta font-semibold text-muted-foreground">#{item.issueNumber}</span>
+            <FlowModeTag mode={item.flowMode} />
             <StatusBadge tone={tone} label={statusTextOf(item)} />
             {founder ? <StatusBadge tone="human" label="等你" variant="dot" /> : null}
             <CardLink
