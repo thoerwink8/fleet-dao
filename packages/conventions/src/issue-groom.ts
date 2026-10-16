@@ -81,7 +81,7 @@ export type MilestoneDecision =
   | { action: 'unknown'; why: string };
 
 /**
- * source 由调用方定（docs/workflow.md「进度和单」：人开的单进当前版本＝下文③，AI、机器人发现的进未排期＝下文④）：'bot' 是我们自己的机器人开的（引擎对账、提醒），照④进未排期；
+ * source 由调用方定（docs/workflow.md「进度和单」：人开的单进当前版本＝下文③，AI、机器人发现的进未排期＝下文④）：'bot' 是机器人账号开的（我们的引擎对账、提醒，和 github-actions[bot] 这类定时报警），照④进未排期；
  * 其余（人类账号，含创始人本人——本机 gh 登的也是他、公开仓万一有外人开单也在这一类）照③进当前版本。
  *
  * triaged：这一轮开始时单上已经有类别标签。改这里之前必须知道：「未排期」在仓里就是「没挂里程碑」（issue:new 的

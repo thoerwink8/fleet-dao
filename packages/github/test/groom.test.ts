@@ -139,6 +139,13 @@ describe('readGroomFacts：开着的单加全部里程碑', () => {
     expect(got.issues[0]).toMatchObject({ authorId: 9, authorType: 'Bot' });
   });
 
+  it('【故意造出的失败】别家机器人（github-actions[bot] 开的报警单）也算机器人：authorIsBot 为 true，进未排期', async () => {
+    const actions = { login: 'github-actions[bot]', id: 41898282, type: 'Bot' };
+    const { client } = fakeClient({ milestones: [], issues: [issueRow({ user: actions })] });
+    const got = await readGroomFacts({ client, bots }, { repo });
+    expect(got.issues[0]).toMatchObject({ author: 'github-actions[bot]', authorIsBot: true });
+  });
+
   it('账号删了（user 是 null）：作者三项都是 null，不编一个', async () => {
     const { client } = fakeClient({ milestones: [], issues: [issueRow({ user: null })] });
     const got = await readGroomFacts({ client, bots }, { repo });

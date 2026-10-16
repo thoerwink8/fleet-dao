@@ -35,7 +35,7 @@ export interface GroomIssue {
   /** 开单人的 GitHub 数字编号和类型（User、Bot…）：拉单按作者白名单认人用（白名单有数字编号的只按编号认）；账号删了是 null。 */
   authorId: number | null;
   authorType: string | null;
-  /** 开单人是不是我们自己的机器人（「干活的」「引擎」两个之一）：milestonePlan 判「机器人开的」用它。 */
+  /** 开单人是不是机器人（GitHub 账号类型是 Bot，或是我们的「干活的」「引擎」之一）：milestonePlan 判「机器人开的」用它。 */
   authorIsBot: boolean;
   createdAt: string;
   updatedAt: string;
@@ -116,7 +116,8 @@ export async function readGroomFacts(
       author: i.user?.login ?? null,
       authorId: i.user?.id ?? null,
       authorType: i.user?.type ?? null,
-      authorIsBot: deps.bots.is('engine', i.user) || deps.bots.is('agent', i.user),
+      // 机器人开的都算（我们自己的两个加 GitHub 标 Bot 的，比如 github-actions[bot] 开的报警单）：AI 发现的进未排期
+      authorIsBot: i.user?.type === 'Bot' || deps.bots.is('engine', i.user) || deps.bots.is('agent', i.user),
       createdAt: i.created_at,
       updatedAt: i.updated_at,
       labels: i.labels.map((l) => l.name),
