@@ -128,7 +128,6 @@ export function tokenBudgetStop(
       outputTokens?: number;
       cacheReadTokens?: number;
       cacheWriteTokens?: number;
-      cacheReadWeight?: number;
     };
   } = { measured: spent.tokens, estimated: 0 },
 ): { title: string; detail: string } {
@@ -141,16 +140,17 @@ export function tokenBudgetStop(
       : '';
   const raw = split.raw;
   const rawText = raw
-    ? `新输入 ${raw.inputTokens ?? 0}、输出 ${raw.outputTokens ?? 0}、缓存写 ${raw.cacheWriteTokens ?? 0}、缓存读 ${raw.cacheReadTokens ?? 0}，` +
-      `折算后 ${split.measured}（缓存读乘 ${raw.cacheReadWeight ?? 0.1}，其余乘 1）`
+    ? `（原始四样：新输入 ${raw.inputTokens ?? 0}、输出 ${raw.outputTokens ?? 0}、缓存写 ${raw.cacheWriteTokens ?? 0}、缓存读 ${raw.cacheReadTokens ?? 0}）`
     : '';
   const spentText = raw
-    ? `动手和验收会话合计：${rawText}${split.estimated > 0 ? `；加上估的下限，折算合计 ${spent.tokens}` : ''}${splitText}${unmetered}`
+    ? `动手和验收会话合计输入当量 ${split.measured}${rawText}${split.estimated > 0 ? `；加上估的下限，当量合计 ${spent.tokens}` : ''}${splitText}${unmetered}`
     : `动手和验收会话合计花掉 ${spent.tokens} token${splitText}${unmetered}`;
   return {
-    title: `这张单花掉的 token 超了预算（${raw ? '折算后 ' : ''}${m(spent.tokens)} / ${m(allowed)}）`,
+    title: raw
+      ? `这张单花掉的额度超了预算（输入当量 ${m(spent.tokens)} / ${m(allowed)}）`
+      : `这张单花掉的 token 超了预算（${m(spent.tokens)} / ${m(allowed)}）`,
     detail:
-      `${spentText}，超过 ${allowed}（单任务预算 ${budget}` +
+      `${spentText}，超过上限 ${allowed}（单任务预算 ${budget}` +
       `${grants > 1 ? ` × 已给 ${grants} 份` : ''}）。预算按近 14 天每张单花费的 p95 定（决定 0093）。` +
       '点「继续」再给一份同样多的接着干；不要了点「放弃」。',
   };

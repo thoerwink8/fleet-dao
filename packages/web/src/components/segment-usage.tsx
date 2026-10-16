@@ -1,7 +1,7 @@
 // 任务页的三段（对题 / 动手 / 验收）那几块：合计四格、按段每段再按模型的表、每一笔的明细（#216）。
 // 数都是后端算好的（usage.bySegment、segmentRuns，算法在 shared 的 usage.ts、segment-runs.ts），这里只管怎么说：
 // 读到的照数写；读到一部分照数写、写明几次没读到；全没读到写「没读到」，不写 0；每一笔没读到的原因原样列出来。
-import { budgetTokensOf, type SegmentKind, USAGE_BOARD_UNREAD, type UsageTotals } from '@fleet-dao/shared';
+import { type SegmentKind, USAGE_BOARD_UNREAD, type UsageTotals } from '@fleet-dao/shared';
 import { ChevronDown } from 'lucide-react';
 import { Fragment, type ReactNode, useState } from 'react';
 import type { Repo, TaskDetail } from '../api/types';
@@ -24,7 +24,7 @@ import {
   unreadItemLabel,
 } from '../lib/segments';
 import { isTaskFinished } from '../lib/status';
-import { costParts, EQUIVALENT_RULE, type Reading, reading } from '../lib/usage';
+import { budgetUsedText, costParts, EQUIVALENT_RULE, type Reading, reading } from '../lib/usage';
 import { cn } from '../lib/utils';
 import { usePhone } from '../lib/viewport';
 import { Code } from './layout/code';
@@ -118,26 +118,28 @@ function Figure({
   label,
   value,
   hint,
+  title,
   tone,
 }: {
   label: string;
   value: ReactNode;
   hint?: ReactNode;
+  /** 悬停看的细账（折法）。 */
+  title?: string;
   tone?: 'stall' | undefined;
 }) {
   return (
     <div
       data-tone={tone}
       data-figure
+      title={title}
       className="min-w-0 xl:border-l xl:pl-4 xl:first:border-l-0 xl:first:pl-0"
     >
       <div className="text-meta text-muted-foreground">{label}</div>
       <div className={cn('num mt-1 text-heading', tone && 'text-ink-stall')}>{value}</div>
       {hint ? (
-        <div
-          className="mt-0.5 truncate text-meta text-muted-foreground"
-          title={typeof hint === 'string' ? hint : undefined}
-        >
+        // 小字放不下就换行，不用省略号截断（#2859：一截断，「预算用了多少、哪几次没读到」就看不全）
+        <div data-figure-hint className="mt-0.5 break-words text-meta text-muted-foreground">
           {hint}
         </div>
       ) : null}
@@ -193,24 +195,7 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
     );
   }
 
-  // 折算 token：每单 token 预算按它比（缓存读乘 0.1，其余乘 1，#2830）；原始四样放悬停和下面的段表里。和输入当量同一个读数条件（四样都读到）
-  if (equivalent.kind === 'missing') {
-    collapsed.push('折算 token 没读到');
-  } else {
-    cards.push(
-      <Figure
-        key="budget"
-        label="折算 token"
-        value={equivalent.kind === 'none' ? '—' : formatCount(budgetTokensOf(t))}
-        hint={
-          equivalent.kind === 'none'
-            ? notYet
-            : `缓存读乘 0.1${equivalent.kind === 'partial' ? ` · 另有 ${equivalent.missing} 次没读到` : ''} · 原始：输入 ${formatCount(t.inputTokens)} 输出 ${formatCount(t.outputTokens)} 缓存读 ${formatCount(t.cacheReadTokens)} 缓存写 ${formatCount(t.cacheWriteTokens)}`
-        }
-      />,
-    );
-  }
-
+  // 输入当量：额度和每单 token 预算都按它比（#2859），预算用量写在小字里；折法放悬停，原始四样在下面的段表里
   if (equivalent.kind === 'missing') {
     collapsed.push('输入当量没读到');
   } else {
@@ -219,9 +204,13 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
         key="equivalent"
         label="输入当量"
         value={equivalent.kind === 'none' ? '—' : formatCount(equivalent.value)}
+        title={`按${EQUIVALENT_RULE}折`}
         hint={
-          missingNote(equivalent, ' token ') ??
-          (equivalent.kind === 'none' ? notYet : `按${EQUIVALENT_RULE}折`)
+          equivalent.kind === 'none'
+            ? notYet
+            : [budgetUsedText(equivalent.value), missingNote(equivalent, ' token ')]
+                .filter(Boolean)
+                .join(' · ')
         }
       />,
     );
@@ -233,13 +222,11 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
 
   // 有几张大格排几栏；四格手机就是 2×2（#1802，一行一张页面太长），电脑宽屏四列并排；三格手机一列
   const cols =
-    cards.length >= 5
-      ? 'grid-cols-2 gap-4 xl:grid-cols-5'
-      : cards.length === 4
-        ? 'grid-cols-2 gap-4 xl:grid-cols-4'
-        : cards.length === 3
-          ? 'grid-cols-1 gap-3 sm:grid-cols-3'
-          : 'grid-cols-2 gap-3';
+    cards.length === 4
+      ? 'grid-cols-2 gap-4 xl:grid-cols-4'
+      : cards.length === 3
+        ? 'grid-cols-1 gap-3 sm:grid-cols-3'
+        : 'grid-cols-2 gap-3';
 
   const wallText = formatDuration(wallMs(d, now));
   const segmentCount = new Set(d.segmentRuns.map((r) => r.segment).filter(Boolean)).size;

@@ -2,7 +2,7 @@
 // usage，一次会话用 lib/usage 的 runUsage 现算）；还在跑的会话只把排队、干活时长算到现在加上去，用量要等它结束才有。
 // 读到的照数写；有没读到的标「不全」、写明几次；全没读到写「没读到」，不写 0（说法在 lib/usage.ts）。
 // 尺寸：全部用规范的字号档（说明、花费明细、分开看、额度提示 text-meta；正文 text-body；大数字 text-display）；花费行 grid-cols-usage（标签 3.5rem、剩余）。
-import { budgetTokensOf, type UsageTotals } from '@fleet-dao/shared';
+import type { UsageTotals } from '@fleet-dao/shared';
 import { type ReactNode, useState } from 'react';
 import type { Run, TaskDetail } from '../api/types';
 import { stageLabel } from '../lib/catalog';
@@ -318,20 +318,14 @@ export function UsagePanel({ d, now }: { d: TaskDetail; now: number }) {
         ) : null}
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-body">
           <Total
-            label="折算 token"
-            r={reading(budgetTokensOf(t), t.missingEquivalent, t.runs)}
-            empty={noRuns}
-            note={t.runs ? '每单预算按它比：缓存读乘 0.1，其余乘 1。原始四样在下面' : undefined}
-            big
-            className="col-span-2"
-          >
-            {formatCount(budgetTokensOf(t))}
-          </Total>
-          <Total
             label="输入当量"
             r={reading(t.inputEquivalent, t.missingEquivalent, t.runs)}
             empty={noRuns}
-            note={t.runs ? `额度按它比：各家 token 按${EQUIVALENT_RULE} 折算` : undefined}
+            note={
+              t.runs
+                ? `额度和每单预算都按它比：各家 token 按${EQUIVALENT_RULE} 折算。原始四样在下面`
+                : undefined
+            }
             className="col-span-2"
           >
             {formatCount(t.inputEquivalent)}

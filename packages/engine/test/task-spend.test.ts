@@ -1,7 +1,7 @@
-// 单任务预算的折算（#2830）：taskSpend 活动把库里的四样原始 token 折成「折算 token」（缓存读乘 0.1，其余乘 1）。
-// 折算只在活动里算；工作流判超没超读结果里的折算数，老结果没有这个字段就读原来的 tokens。
+// 单任务预算按输入当量算（#2859）：taskSpend 活动把库里的四样原始 token 用 shared 的 inputEquivalentOf 折成输入当量。
+// 当量只在活动里算；工作流判超没超读结果里的 inputEquivalent，老结果没有这个字段就读原来的数。
 import { describe, expect, it } from 'vitest';
-import { CACHE_READ_TOKEN_WEIGHT, DEFAULT_TASK_TOKEN_BUDGET } from '../src/limits.ts';
+import { DEFAULT_TASK_TOKEN_BUDGET } from '../src/limits.ts';
 import { toTaskSpendResult } from '../src/task-spend.ts';
 
 const M = 1_000_000;
@@ -19,8 +19,8 @@ const row = (over: Partial<Parameters<typeof toTaskSpendResult>[0]> = {}) => ({
 });
 
 describe('toTaskSpendResult', () => {
-  it('缓存读权重是 0.1；原始四样和合计原样带上，折算数只给缓存读打一折', () => {
-    expect(CACHE_READ_TOKEN_WEIGHT).toBe(0.1);
+  it('预算上限 700 万（输入当量的 p95），原始四样和合计原样带上，当量按输入 1、缓存写 1.25、缓存读 0.1、输出 5', () => {
+    expect(DEFAULT_TASK_TOKEN_BUDGET).toBe(7_000_000);
     const r = toTaskSpendResult(
       row({
         tokens: 1000 + 500 + 30_000 + 2000,
@@ -36,41 +36,38 @@ describe('toTaskSpendResult', () => {
       outputTokens: 500,
       cacheReadTokens: 30_000,
       cacheWriteTokens: 2000,
-      weighted: 6500,
-      cacheReadWeight: 0.1,
+      inputEquivalent: 1000 + 2500 + 3000 + 2500,
     });
+    expect(r).not.toHaveProperty('weighted');
+    expect(r).not.toHaveProperty('cacheReadWeight');
   });
 
-  it('缓存读占大头（#2763 的形状：37.8M 里 36.8M 是缓存读）：折算后不超 37M 预算', () => {
-    const r = toTaskSpendResult(
-      row({
-        tokens: 37_800_000,
-        inputTokens: 600_000,
-        outputTokens: 100_000,
-        cacheReadTokens: 36_800_000,
-        cacheWriteTokens: 300_000,
-      }),
-    );
-    expect(r.tokens).toBeGreaterThan(DEFAULT_TASK_TOKEN_BUDGET);
-    expect(r.weighted).toBe(600_000 + 100_000 + 300_000 + 3_680_000);
-    expect(r.weighted ?? Number.POSITIVE_INFINITY).toBeLessThan(DEFAULT_TASK_TOKEN_BUDGET);
+  it('输入当量 650 万不停、750 万停', () => {
+    const under = toTaskSpendResult(row({ tokens: 6_500_000, inputTokens: 6_500_000 }));
+    const over = toTaskSpendResult(row({ tokens: 7_500_000, inputTokens: 7_500_000 }));
+    expect(under.inputEquivalent ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(DEFAULT_TASK_TOKEN_BUDGET);
+    expect(over.inputEquivalent ?? 0).toBeGreaterThan(DEFAULT_TASK_TOKEN_BUDGET);
   });
 
-  it('新输入占大头：折算后照旧超预算', () => {
-    const r = toTaskSpendResult(
-      row({ tokens: 38 * M, inputTokens: 36 * M, outputTokens: M, cacheReadTokens: M }),
-    );
-    expect(r.weighted ?? 0).toBeGreaterThan(DEFAULT_TASK_TOKEN_BUDGET);
+  it('输出贵：输出占大头的单当量比原始合计大', () => {
+    const r = toTaskSpendResult(row({ tokens: 2 * M, outputTokens: 2 * M }));
+    expect(r.inputEquivalent).toBe(10 * M);
   });
 
-  it('估出来的下限按同一比例折：缓存读占大头的单，估的部分也跟着打折', () => {
+  it('估出来的下限按同一比例折', () => {
     const r = toTaskSpendResult(
       row({ tokens: 10_000, estimated: 5000, inputTokens: 0, cacheReadTokens: 10_000, unmetered: 1 }),
     );
-    expect(r).toMatchObject({ weighted: 1000, weightedEstimated: 500, estimated: 5000 });
+    expect(r).toMatchObject({ inputEquivalent: 1000, inputEquivalentEstimated: 500, estimated: 5000 });
   });
 
-  it('什么都没花：折算是 0，估的也是 0，不除零', () => {
-    expect(toTaskSpendResult(row())).toMatchObject({ weighted: 0, weightedEstimated: 0 });
+  it('什么都没花：当量是 0，估的也是 0，不除零', () => {
+    expect(toTaskSpendResult(row())).toMatchObject({ inputEquivalent: 0, inputEquivalentEstimated: 0 });
+  });
+
+  it('某一样读不到（折不成）：不给 inputEquivalent，不拿 0 顶，工作流退回原来的数', () => {
+    const r = toTaskSpendResult(row({ tokens: 100, inputTokens: Number.NaN }));
+    expect(r.inputEquivalent).toBeUndefined();
+    expect(r.inputEquivalentEstimated).toBeUndefined();
   });
 });

@@ -288,7 +288,7 @@ export async function taskTokenSpend(
   runs: number;
   unmetered: number;
   estimated: number;
-  /** 原始四样分开给（缺的按 0 加）：折算在引擎的 taskSpend 活动里做（#2830），库只交原始的。 */
+  /** 原始四样分开给（缺的按 0 加）：折成输入当量在引擎的 taskSpend 活动里做（#2859），库只交原始的。 */
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;

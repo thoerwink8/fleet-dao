@@ -448,7 +448,7 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
     expect(world.alerts[0]?.detail).toContain('1 次会话用量还没补上');
   });
 
-  it('原始合计超了、折算后没超（缓存读占大头，#2830）：不停，照旧起会话', async () => {
+  it('原始合计超了、输入当量没超（缓存读占大头，#2859）：不停，照旧起会话', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
       spend: () => ({
@@ -460,9 +460,8 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
         outputTokens: 100_000,
         cacheReadTokens: 36_800_000,
         cacheWriteTokens: 300_000,
-        weighted: 4_680_000,
-        weightedEstimated: 0,
-        cacheReadWeight: 0.1,
+        inputEquivalent: 6_500_000,
+        inputEquivalentEstimated: 0,
       }),
     });
     const run = await withWorker(
@@ -478,7 +477,30 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
     expect(world.alerts).toHaveLength(0);
   });
 
-  it('新输入占大头、折算后照旧超（#2830）：停下，原因里分开写新输入、缓存读、折算后', async () => {
+  it('#2830 记下的老结果（只有 weighted）：照读 weighted，不退回原始合计，在途单重放判法不变', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      spend: () => ({
+        tokens: 37_800_000,
+        runs: 9,
+        unmetered: 0,
+        estimated: 0,
+        weighted: 4_680_000,
+        weightedEstimated: 0,
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(1);
+    expect(world.alerts).toHaveLength(0);
+  });
+
+  it('输入当量超了（#2859）：停下，原因里写输入当量用了多少、上限多少，四样原始数另列', async () => {
     const world = createFakeWorld();
     const { tasks } = scripted({
       spend: () => ({
@@ -490,9 +512,8 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
         outputTokens: 1_000_000,
         cacheReadTokens: 1_000_000,
         cacheWriteTokens: 0,
-        weighted: 39_100_000,
-        weightedEstimated: 0,
-        cacheReadWeight: 0.1,
+        inputEquivalent: 7_500_000,
+        inputEquivalentEstimated: 0,
       }),
     });
     await withWorker(
@@ -500,7 +521,7 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
       world,
       async (q) => {
         const h = await start(q, input());
-        const s = await pollQuery(() => statusOf(h), parked, '折算后超了预算停下');
+        const s = await pollQuery(() => statusOf(h), parked, '输入当量超了预算停下');
         expect(s.lastProblem).toContain('超了预算');
         await h.signal(taskContinueSignal, { by: 'frank' });
         return h.result() as Promise<TaskRun>;
@@ -510,8 +531,10 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
     const detail = world.alerts[0]?.detail ?? '';
     expect(detail).toContain('新输入 38000000');
     expect(detail).toContain('缓存读 1000000');
-    expect(detail).toContain('折算后 39100000');
-    expect(world.alerts[0]?.title).toContain('39.1M');
+    expect(detail).toContain('输入当量 7500000');
+    expect(detail).toContain('上限 7000000');
+    expect(detail).not.toContain('折算');
+    expect(world.alerts[0]?.title).toContain('输入当量 7.5M / 7.0M');
   });
 
   it('量到的不多、被叫停那几行估出来的把预算顶超了：照样停下，写明哪部分是估的', async () => {
@@ -570,18 +593,18 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
     expect(world.alerts).toEqual([]);
   });
 
-  it('第 2 代自己花超过 37M：仍然停下等人；点「继续」按这一代已花的再给一份，不是按上一代', async () => {
+  it('第 2 代自己花超过 7M：仍然停下等人；点「继续」按这一代已花的再给一份，不是按上一代', async () => {
     const world = createFakeWorld({
       ci: (_i, n) =>
         n === 1 ? { state: 'red', failedChecks: ['test (engine)'], digest: 'FAIL task.test.ts' } : undefined,
     });
-    // 第一次查是这一代的 38M（上一代 83.5M 在开工之前）。点继续之后份数按 38M 给到 2 份（74M）。
-    // 下一轮动手前抬到 80M：超 2 份就再停下。若份数按上一代一起算，2 份不够、会给到 4 份，80M 就停不下。
+    // 第一次查是这一代的 8M（上一代 83.5M 在开工之前）。点继续之后份数按 8M 给到 2 份（14M）。
+    // 下一轮动手前抬到 15M：超 2 份就再停下。若份数按上一代一起算，2 份不够、会给到 13 份，15M 就停不下。
     let own = DEFAULT_TASK_TOKEN_BUDGET + 1_000_000;
     const { tasks, calls } = scripted({
       spend: (_n, input) => {
         const spent = spendSince(input, own);
-        own = 80_000_000;
+        own = 15_000_000;
         return spent;
       },
     });
@@ -591,7 +614,7 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
       async (q) => {
         const h = await start(q, input(), 2);
         const first = await pollQuery(() => statusOf(h), parked, '这一代超了预算停下');
-        expect(first.lastProblem).toContain('38.0M / 37.0M');
+        expect(first.lastProblem).toContain('8.0M / 7.0M');
         expect(first.lastProblem).not.toContain('83.5M');
         expect(calls.segment).toHaveLength(0);
         expect(calls.spendInputs[0]?.since).toBeTruthy();
@@ -601,10 +624,10 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
         // lastProblem 在报警之前就写上。只看它会读到上一回的提醒；等再次停下来，报警已经记上。
         const second = await pollQuery(
           () => statusOf(h),
-          (s) => parked(s) && s.lastProblem?.includes('80.0M / 74.0M') === true,
+          (s) => parked(s) && s.lastProblem?.includes('15.0M / 14.0M') === true,
           '按这一代已给 2 份仍超了再停下',
         );
-        expect(second.lastProblem).toContain('80.0M / 74.0M');
+        expect(second.lastProblem).toContain('15.0M / 14.0M');
         expect(world.alerts.at(-1)?.detail).toContain('已给 2 份');
         expect(calls.segment).toHaveLength(1);
         return 'parked';
