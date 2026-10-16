@@ -462,6 +462,22 @@ describe('runsOfTask：一张单的三段流水（任务详情读）', () => {
     expect(await runsOfTask(t.db, { id: task.id, issueNumber: 77, workflowId: WF })).toEqual([]);
   });
 
+  it('重做的下一代（:r2）task_id 没记的也收；挂起键、别的仓、多出来的后缀不收', async () => {
+    const { task, run } = await setup();
+    const redo = await run({
+      segment: 'verify',
+      model: 'opus-5.5',
+      issueNumber: 77,
+      workflowId: `${WF}:r2`,
+    });
+    await run({ segment: 'manual', model: 'opus-5.5', issueNumber: 77, workflowId: `${WF}:park:x` });
+    await run({ segment: 'manual', model: 'opus-5.5', issueNumber: 77, workflowId: `${WF}:r2:extra` });
+    await run({ segment: 'manual', model: 'opus-5.5', issueNumber: 77, workflowId: `${WF}:r02` });
+    await run({ segment: 'manual', model: 'opus-5.5', issueNumber: 77, workflowId: 'task:acme/other#77:r2' });
+    const rows = await runsOfTask(t.db, { id: task.id, issueNumber: 77, workflowId: WF });
+    expect(rows.map((r) => r.id)).toEqual([redo]);
+  });
+
   it('兜底的行记了工作流编号、却不是这张单的（别的仓同号）：不收；记的就是这张单的照收', async () => {
     const { task, run } = await setup();
     await run({ segment: 'manual', model: 'opus-5.5', issueNumber: 77, workflowId: 'task:acme/other#77' });

@@ -1,12 +1,14 @@
 // 会话用量的汇总：按模型、按阶段、整张合计，折成输入当量。每条「读不到」的路径都故意造一次：缺哪一样就记一次没读到，
 // 不当成 0 加进合计。
 import { describe, expect, it } from 'vitest';
+import { runBelongsToTask } from '../src/issue-workflows.ts';
 import { readSegmentRun, type SegmentRunFacts } from '../src/segment-runs.ts';
 import {
   INPUT_EQUIVALENT_WEIGHTS,
   inputEquivalentOf,
   type RunUsageFacts,
   summarizeUsage,
+  taskListCost,
 } from '../src/usage.ts';
 import { TaskUsageSchema } from '../src/web-api.ts';
 
@@ -115,6 +117,7 @@ describe('一张单按模型、按阶段、整张合计', () => {
       runMs: 600_000,
       missingTime: 0,
       noQueue: 0,
+      unreadSegments: 0,
     });
     // 后端按同一份定义校验返回：算出来的必须过得了
     expect(TaskUsageSchema.parse(u)).toEqual(u);
@@ -426,7 +429,14 @@ describe('三段按段、每段再按模型（runs 表的流水）', () => {
 
   it('还在跑的一段只记 running：用量等它结束，不进合计、也不算没读到', () => {
     const u = summarizeUsage([], [seg({ endedAt: undefined, outcome: undefined, costUsd: undefined })]);
-    expect(u.bySegment[0]).toMatchObject({ runs: 0, running: 1, missingCost: 0, missingTime: 0, noQueue: 0 });
+    expect(u.bySegment[0]).toMatchObject({
+      runs: 0,
+      running: 1,
+      missingCost: 0,
+      missingTime: 0,
+      noQueue: 0,
+      unreadSegments: 0,
+    });
   });
 
   it('进程没起来的一段：记 notStarted，用量照记没读到', () => {
@@ -444,6 +454,205 @@ describe('三段按段、每段再按模型（runs 表的流水）', () => {
         }),
       ],
     );
-    expect(u.total).toMatchObject({ runs: 1, notStarted: 1, missingTokens: 1, missingCost: 1, runMs: 0 });
+    expect(u.total).toMatchObject({
+      runs: 1,
+      notStarted: 1,
+      missingTokens: 1,
+      missingCost: 1,
+      runMs: 0,
+      unreadSegments: 1,
+    });
+  });
+});
+
+/** grok-4.7 官方价：输入 2、输出 6、缓存读 0.5、缓存写 2（美元 / 百万 token）。这组 token 折出来是 1.8。 */
+const GROK_TOKENS = {
+  inputTokens: 500_000,
+  outputTokens: 100_000,
+  cacheReadTokens: 200_000,
+  cacheWriteTokens: 50_000,
+};
+
+describe('一张单的各代花费', () => {
+  const task = { id: 't', issueNumber: 12, workflowId: 'task:acme/web#12' };
+
+  function linked(
+    over: Partial<SegmentRunFacts> & {
+      id: string;
+      segment: string;
+      taskId?: string | null;
+      issueNumber?: number | null;
+      workflowId?: string | null;
+    },
+  ) {
+    return {
+      model: 'grok-4.7',
+      modelName: 'Grok 4.7',
+      billing: 'subscription' as const,
+      startedAt: at(0),
+      endedAt: at(10),
+      outcome: 'done',
+      matchedBy: 'task' as const,
+      taskId: 't' as string | null,
+      issueNumber: 12 as number | null,
+      workflowId: 'task:acme/web#12' as string | null,
+      ...GROK_TOKENS,
+      ...over,
+    };
+  }
+
+  it('grok-4.7 有 token 没报 cost_usd：按 API 价折出估计；缺价模型标没有单价，不是 0', () => {
+    const grok = readSegmentRun(linked({ id: 'g', segment: 'manual', tier: 'fast' }), { taskFinished: true });
+    expect(grok.estimate).toEqual({ kind: 'estimated', usd: 1.8 });
+    const cursor = readSegmentRun(
+      linked({
+        id: 'c',
+        segment: 'manual',
+        tier: 'fast',
+        model: 'cursor-auto',
+        modelName: 'Cursor Auto',
+      }),
+      { taskFinished: true },
+    );
+    expect(cursor.estimate?.kind).toBe('noPrice');
+    expect(cursor.estimate && 'usd' in cursor.estimate).toBe(false);
+    expect(JSON.stringify(cursor.estimate)).not.toContain('"usd":0');
+    expect(cursor.estimate?.kind === 'noPrice' && cursor.estimate.why).toContain('没有按 token 的单价');
+  });
+
+  it('两代加验收：合计等于各段之和；没读到 token 的另计，不拿 0 顶', () => {
+    const rows = [
+      linked({ id: 'g1-scope', segment: 'scope' }),
+      linked({
+        id: 'g1-manual',
+        segment: 'manual',
+        tier: 'fast',
+        model: 'opus-5.5',
+        modelName: 'Opus 5.5',
+        costUsd: 0.5,
+        inputTokens: 10,
+        outputTokens: 10,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      }),
+      linked({
+        id: 'g2-verify',
+        segment: 'verify',
+        taskId: null,
+        matchedBy: 'issueNumber',
+        workflowId: 'task:acme/web#12:r2',
+      }),
+      linked({
+        id: 'g2-redo',
+        segment: 'manual',
+        tier: 'medium',
+        taskId: 't',
+        model: 'cursor-auto',
+        modelName: 'Cursor Auto',
+        workflowId: 'task:acme/web#12:r2',
+      }),
+      linked({
+        id: 'g2-blank',
+        segment: 'scope',
+        taskId: null,
+        matchedBy: 'issueNumber',
+        workflowId: 'task:acme/web#12:r2',
+        startedAt: at(20),
+        endedAt: at(21),
+        inputTokens: undefined,
+        outputTokens: undefined,
+        cacheReadTokens: undefined,
+        cacheWriteTokens: undefined,
+      }),
+      // 下面几笔不属于这张单
+      linked({ id: 'other-task', segment: 'manual', tier: 'fast', taskId: 't2' }),
+      linked({
+        id: 'other-issue',
+        segment: 'verify',
+        taskId: null,
+        issueNumber: 99,
+        workflowId: 'task:acme/web#99',
+      }),
+      linked({
+        id: 'park',
+        segment: 'manual',
+        tier: 'fast',
+        taskId: null,
+        workflowId: 'task:acme/web#12:park:1',
+      }),
+    ];
+    const kept = rows.filter((r) => runBelongsToTask(r, task) !== undefined);
+    expect(kept.map((r) => r.id).sort()).toEqual(
+      ['g1-manual', 'g1-scope', 'g2-blank', 'g2-redo', 'g2-verify'].sort(),
+    );
+    const views = kept.map((r) => readSegmentRun(r, { taskFinished: true }));
+    const u = summarizeUsage([], views);
+    expect(views.find((v) => v.id === 'g2-verify')?.segment).toBe('verify');
+    expect(u.total.costUsd).toBeCloseTo(
+      views.reduce((n, v) => n + (v.costUsd ?? 0), 0),
+      6,
+    );
+    expect(u.total.estimate.usd).toBeCloseTo(
+      views.reduce((n, v) => n + (v.estimate?.kind === 'estimated' ? v.estimate.usd : 0), 0),
+      6,
+    );
+    expect(u.total.costUsd).toBeCloseTo(
+      u.bySegment.reduce((n, s) => n + s.costUsd, 0),
+      6,
+    );
+    expect(u.total.estimate.usd).toBeCloseTo(
+      u.bySegment.reduce((n, s) => n + s.estimate.usd, 0),
+      6,
+    );
+    expect(u.total.costUsd).toBeCloseTo(0.5, 6);
+    expect(u.total.estimate.usd).toBeCloseTo(3.6, 6);
+    expect(u.total.estimate).toMatchObject({ runs: 2, noPrice: 1, noTokens: 1 });
+    expect(u.total.unreadSegments).toBe(1);
+    expect(u.bySegment.find((s) => s.segment === 'verify')?.estimate.usd).toBeCloseTo(1.8, 6);
+
+    const listed = taskListCost(u.total, views.filter((v) => !v.running).length);
+    expect(listed.actual).toBeCloseTo(0.5, 6);
+    expect(listed.usd).toBe(listed.actual);
+    expect(listed.estimated).toBeCloseTo(3.6, 6);
+    expect(listed.segments).toBe(5);
+    expect(listed.unreadSegments).toBe(1);
+    expect(listed.noPrice).toBe(1);
+    expect(listed.note).toContain('按 API 价折算');
+    expect(listed.note).toContain('没有单价');
+    expect(listed.note).toContain('另有 1 段读不到用量');
+    expect(listed.note).toContain('偏低');
+  });
+
+  it('一段都没报实付：估计有数，实付是 null，不当成 0', () => {
+    const views = [readSegmentRun(linked({ id: 'g', segment: 'scope' }), { taskFinished: true })];
+    const listed = taskListCost(summarizeUsage([], views).total, 1);
+    expect(listed.actual).toBeNull();
+    expect(listed.usd).toBeNull();
+    expect(listed.estimated).toBeCloseTo(1.8, 6);
+    expect(listed.note).toContain('按 API 价折算');
+    expect(listed.note).not.toContain('$0');
+  });
+
+  it('缺价模型：估计是 null，标没有单价，不写成 0', () => {
+    const views = [
+      readSegmentRun(
+        linked({ id: 'c', segment: 'manual', tier: 'fast', model: 'cursor-auto', modelName: 'Cursor Auto' }),
+        { taskFinished: true },
+      ),
+    ];
+    const listed = taskListCost(summarizeUsage([], views).total, 1);
+    expect(listed.estimated).toBeNull();
+    expect(listed.actual).toBeNull();
+    expect(listed.noPrice).toBe(1);
+    expect(listed.note).toContain('没有单价');
+    expect(JSON.stringify(listed)).not.toContain('"estimated":0');
+  });
+
+  it('老流程的会话不计入读不到用量的段数', () => {
+    const u = summarizeUsage([
+      without(run(), 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'costUsd'),
+    ]);
+    expect(u.total.unreadSegments).toBe(0);
+    expect(u.total.missingTokens).toBe(1);
   });
 });

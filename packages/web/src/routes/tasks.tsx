@@ -59,23 +59,52 @@ const DETAIL = (
     <ul className="list-disc space-y-1 pl-4">
       <li>状态、仓、搜索都写在地址栏里，刷新、返回、复制链接都保得住。搜索：单号精确，标题包含。</li>
       <li>一行：标题；灰字是仓和单号、在哪一段、用的模型、PR；右边是状态、花费、最后有动静的时间。</li>
-      <li>花费后面写「偏低」的：有会话没报花费，悬停看几笔。整列都读不到时不画花费这一列。</li>
+      <li>
+        花费分实付和按 API 价折算的估计。订阅渠道没报花费时显示估计，不当成
+        0；目录里没有单价的写「没有单价」，不写
+        0。实付后面写「偏低」的：还有没算进来的。悬停看段数和读不到用量。整列都算不出时不画这一列。
+      </li>
       <li>悬停时间看开单、更新的具体时刻。</li>
       <li>点一行进详情，详情页左上「任务列表」回来时筛选还在。往下滚到底自动读下一页。</li>
     </ul>
   </div>
 );
 
+/** 实付：新接口给 actual；没这个键的老响应退回 usd。 */
+function paidOf(cost: TaskListRow['cost']): number | null {
+  return cost.actual === undefined ? cost.usd : cost.actual;
+}
+
+/** 这一行有没有能画出来的花费（实付、估计、或「没有单价」）。只剩读不到用量的不单独占一列。 */
+function costVisible(cost: TaskListRow['cost']): boolean {
+  return paidOf(cost) !== null || (cost.estimated ?? null) !== null || (cost.noPrice ?? 0) > 0;
+}
+
 function Cost({ cost }: { cost: TaskListRow['cost'] }) {
+  const paid = paidOf(cost);
+  const estimated = cost.estimated ?? null;
+  const segments = cost.segments ?? 0;
+  const seg = segments > 0 ? <span data-segments>{` · ${segments} 段`}</span> : null;
   // 读不到留空：仍挂悬停说明，不写「没读到」（叫停、已结束的单同样；#1751）
-  if (cost.usd === null) {
+  if (paid === null && estimated === null && (cost.noPrice ?? 0) === 0) {
     // 标准档位占位，留给悬停说明一块可指区域；不用任意值（lint-design R0 / #182）
     return <span className="inline-block size-4" title={cost.note} data-cost-empty />;
   }
+  if (paid === null && estimated === null) {
+    return (
+      <span className="num text-ink-stall" title={cost.note} data-cost-noprice>
+        没有单价
+        {seg}
+      </span>
+    );
+  }
   return (
     <span className="num" title={cost.note}>
-      {formatUsd(cost.usd)}
-      {cost.note ? <span className="whitespace-nowrap text-ink-stall"> 偏低</span> : null}
+      {paid !== null ? formatUsd(paid) : <span>{`估算 ${formatUsd(estimated ?? 0)}`}</span>}
+      {paid !== null && cost.note?.includes('偏低') ? (
+        <span className="whitespace-nowrap text-ink-stall"> 偏低</span>
+      ) : null}
+      {seg}
     </span>
   );
 }
@@ -200,7 +229,12 @@ function Row({
             <StatusBadge tone={status.tone} label={status.label} />
           </span>
           {showCost ? (
-            <span className="w-24 shrink-0 text-right text-body max-md:hidden" data-cost-col>
+            <span
+              className="w-40 shrink-0 whitespace-nowrap text-right text-body max-md:hidden"
+              data-cost-col
+              title={['花费', row.cost.note].filter(Boolean).join('；')}
+            >
+              <span className="sr-only">花费</span>
               <Cost cost={row.cost} />
             </span>
           ) : null}
@@ -319,8 +353,8 @@ export default function TasksPage() {
       for (const row of page.items) if (!seen.has(row.taskId)) seen.set(row.taskId, row);
     return [...seen.values()];
   }, [list.data]);
-  // 已读到的行花费全读不到：整列不画（#1902）
-  const showCost = rows.some((r) => r.cost.usd !== null);
+  // 已读到的行实付、估计、单价都没有：整列不画（#1902）。只有「读不到用量」的不单独把列撑出来。
+  const showCost = rows.some((r) => costVisible(r.cost));
   const counts = list.data?.pages[0]?.counts;
   const sentinel = useLoadMoreOnScroll(
     Boolean(list.hasNextPage) && !list.isFetchingNextPage && !list.isFetchNextPageError,
