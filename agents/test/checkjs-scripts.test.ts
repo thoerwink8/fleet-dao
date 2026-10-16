@@ -27,6 +27,7 @@ const CHECKED = [
   'hooks/main-thread.mjs',
   'hooks/hook-timing.mjs',
   'hooks/inbox-tick.mjs',
+  'hooks/inbox-watch.mjs',
   'hooks/steer-shown.mjs',
   'hooks/fresh-main.mjs',
   'hooks/git-run.mjs',
