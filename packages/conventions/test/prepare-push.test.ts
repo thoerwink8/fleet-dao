@@ -177,11 +177,12 @@ describe('推送前预检', () => {
   });
 });
 
-describe('只推图片的推送（截图分支）', () => {
+describe('按这次推的 ref 放行（只推图片、只删分支）', () => {
   const ZERO = '0'.repeat(40);
   const SHA = 'a'.repeat(40);
   const OLD = 'b'.repeat(40);
   const line = (remote = ZERO, local = SHA) => `refs/heads/shots/1 ${local} refs/heads/shots/1 ${remote}\n`;
+  const deleting = (name: string) => `refs/heads/${name} ${ZERO} refs/heads/${name} ${OLD}\n`;
   type G = { status: number | null; stdout: string; stderr: string; error?: Error };
   const ok = (stdout: string): G => ({ status: 0, stdout, stderr: '' });
   const bad: G = { status: 128, stdout: '', stderr: 'fatal' };
@@ -193,6 +194,8 @@ describe('只推图片的推送（截图分支）', () => {
       changed: () => ['packages/conventions/src/plan.ts'],
       pushed: () =>
         pushedFiles(stdin, (args) => {
+          // 删分支的 sha 是一串 0。实现去问 git 这个 sha，就是没把删的那几行丢掉。
+          if (args.some((a) => /^0+$/.test(a))) return bad;
           if (args[0] === 'merge-base') return answers.mergeBase ?? bad;
           if (args[0] === 'ls-tree') return answers.lsTree ?? bad;
           if (args[0] === 'diff') return answers.diff ?? bad;
@@ -251,8 +254,35 @@ describe('只推图片的推送（截图分支）', () => {
     expect(push(line(), { mergeBase: bad }).ran.length).toBe(2);
   });
 
-  it('只删分支：走老路', () => {
-    const r = push(line(OLD, ZERO), { diff: ok('a.png\0') });
+  it('只删一个分支：放行，不跑检查', () => {
+    const r = push(deleting('gone'), {});
+    expect(r.code).toBe(0);
+    expect(r.ran).toEqual([]);
+    expect(r.lines.join('\n')).toContain('只删分支，没有新内容，跳过格式和类型检查');
+  });
+
+  it('只删两个分支：放行', () => {
+    const r = push(`${deleting('gone')}${deleting('also-gone')}`, {});
+    expect(r.code).toBe(0);
+    expect(r.ran).toEqual([]);
+    expect(r.lines.join('\n')).toContain('只删分支，没有新内容，跳过格式和类型检查');
+  });
+
+  it('删一个、再推一个带 .ts 的：走老路', () => {
+    const r = push(`${deleting('gone')}${line(OLD)}`, { diff: ok('a.png\0src/x.ts\0') });
+    expect(r.ran.map((x) => x.cmd)).toEqual(['biome', 'tsc']);
+    expect(r.lines.join('\n')).not.toContain('只删分支');
+  });
+
+  it('删一个、再推一个只有图片的：放行', () => {
+    const r = push(`${deleting('gone')}${line(OLD)}`, { diff: ok('a.png\0b.jpg\0') });
+    expect(r.code).toBe(0);
+    expect(r.ran).toEqual([]);
+    expect(r.lines.join('\n')).toContain('只推了图片，跳过格式和类型检查');
+  });
+
+  it('夹着解析不了的行、又只有删分支：拿不准，走老路', () => {
+    const r = push(`不是 ref 行\n${deleting('gone')}`, {});
     expect(r.ran.map((x) => x.cmd)).toEqual(['biome', 'tsc']);
   });
 
