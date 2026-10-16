@@ -2,6 +2,8 @@
 # shellcheck source-path=SCRIPTDIR
 # shellcheck disable=SC2034 # CACHE、SHA、ON_MAIN 是给 source 进来的 release.sh 读的
 # 发版前按路径白名单判：改动全在文档或测试里就不暂停、不重启。不需要 root。
+# 看门狗那段要 Node 22 的类型擦除。release.sh 把 NODE 钉在 /usr/bin/node（法国那台有）；
+# CI 用 sudo 跑，镜像上的 node 在 /usr/local/bin，/usr/bin/node 没有。找不到就退出 2，不当通过。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TMP=$(mktemp -d)
@@ -10,6 +12,20 @@ export FLEET_RELEASES_DIR=$TMP/releases
 # shellcheck source=../release.sh
 source "$HERE/../release.sh"
 set +e # release.sh 开了 -e；这里自己判每一步
+# sudo 会把 PATH 收成安全路径，setup-node 加进去的那份不在上面。和别的 deploy 测试一样，把这几个地方都看一遍。
+NODE=""
+for n in "$(command -v node 2>/dev/null || true)" /usr/local/bin/node /opt/hostedtoolcache/node/*/x64/bin/node /usr/bin/node; do
+  [[ -x "$n" ]] || continue
+  major=$("$n" -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)
+  if [[ "$major" =~ ^[0-9]+$ ]] && ((major >= 22)); then
+    NODE=$n
+    break
+  fi
+done
+if [[ -z "$NODE" ]]; then
+  echo "runtime-unchanged：没跑成：找不到 Node 22（看门狗那段要类型擦除）"
+  exit 2
+fi
 fail=0
 check() { # 说明 实际 期望
   if [[ "$2" == "$3" ]]; then printf '  ✓ %s\n' "$1"
