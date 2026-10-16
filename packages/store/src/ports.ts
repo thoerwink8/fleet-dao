@@ -684,44 +684,6 @@ export interface IntakeStore {
   ): Promise<'removed' | 'has_tasks' | 'not_found'>;
 }
 
-/** 用户令牌是哪个 App 换来的。一边一份：GitHub 只让这份令牌看见签发它的那个 App。 */
-export type GitHubAppRole = 'agent' | 'engine';
-
-/** 各人自己的 GitHub 授权（#1989）。令牌密文进、密文出：明文只在 api 层过一下。 */
-export interface GitHubTokenStore {
-  /** 这个人存着的某一边 App 的授权；没授权过回 null。 */
-  getGitHubToken(userId: string, role: GitHubAppRole): Promise<GitHubTokenRecord | null>;
-  /** 这个人存着的两边（没有的那边不在里面）。 */
-  listGitHubTokens(userId: string): Promise<GitHubTokenRecord[]>;
-  /** 授权回来换到令牌：一个人每个 App 一行，再授权覆盖那一行。 */
-  putGitHubToken(input: PutGitHubTokenInput): Promise<void>;
-  /** 授权被 GitHub 撤了（401）、或人自己断开。不给 role 就两边都删。本来就没有也当成功。 */
-  deleteGitHubToken(userId: string, role?: GitHubAppRole): Promise<void>;
-}
-
-/** 库里 github_tokens 的一行（密文原样带出，解密在 api 层）。 */
-export interface GitHubTokenRecord {
-  userId: string;
-  githubId: number;
-  login: string;
-  role: GitHubAppRole;
-  /** 密文（v1.<iv>.<tag>.<密文>）；解密失败由 api 层如实报，不在这里判死。 */
-  accessTokenCipher: string;
-  scopes: string;
-  expiresAt: string | null;
-  updatedAt: string;
-}
-
-export interface PutGitHubTokenInput {
-  userId: string;
-  githubId: number;
-  login: string;
-  role: GitHubAppRole;
-  accessTokenCipher: string;
-  scopes: string;
-  expiresAt: string | null;
-}
-
 /** 别的环境推来的快照（node_reports 表一行），不带快照本体：列环境用。 */
 export interface NodeReportSummary {
   /** 收的一方按对上的通行证认定，不取载荷自报的名字。 */
@@ -776,7 +738,6 @@ export type Store = UserStore &
   AgentStore &
   GitHubStore &
   IntakeStore &
-  GitHubTokenStore &
   NodeStore;
 
 /** 翻页游标看不懂：接口回 400（http.ts），不装成空页。判法在 ids.ts 的 parseCursor。 */
