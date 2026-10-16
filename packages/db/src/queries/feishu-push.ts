@@ -3,14 +3,13 @@
 // 2026-10-05 #1022 删旧飞书流程时把「推送 outbox → 网关发卡 → 回执写送达记录」整条删了、没有接替，推送断了 9 天没人发现；
 // 这里是接替，看门狗（引擎 jobs/watchdog-push.ts）和指挥官巡检按同一份判据看它通不通。
 // 改这里之前必须知道：
-// - 推送分级（创始人规矩：只为四类人闸和 AI 判定要他的事打扰他，AI 自己能修的不打扰）。该推的（pushable）：没处理、24 小时内建的，而且是
-//   ① 要你拍（decision，四类人闸和 AI 明确判定要他的都是这一级）：马上推；
-//   ② 每日简报（键 feishu:brief: 开头，引擎每天 08:30 一条）、推送测试（feishu:test:，fleet-api feishu-push test 建的）：马上推；
-//   ③ 卡住报警（alert，再提醒 remind:、路由疑似降智 probe-iq: 除外）：开满 FEISHU_PUSH_ESCALATE_MS（120 分钟）还没撤（没自愈）才推；
-//     主线红（feishu:main-red:）：开满 FEISHU_MAIN_RED_ESCALATE_MS（60 分钟）还没撤才推；
-//   ④ 主线已恢复（feishu:main-recovered:）：只有它之前 24 小时内有一条主线红真推出去了才推（告诉他不用管了），否则不推。
-//   其余（再提醒 remind:、路由疑似降智 probe-iq:（引擎已按不在线处理、下一轮探针自己复探）、日报 daily、整池暂停到期
-//   feishu:pool-hold-overdue:、主线结论记账行 feishu:main-ci-verdict）不推，进每日简报。
+// - 推送分级是白名单（创始人规矩：只为要人动手的事打扰他）。该推的（pushable）：没处理、24 小时内建的，而且键或级别在这份名单里：
+//   ① 要你拍（decision）、每日简报（feishu:brief:）、推送测试（feishu:test:）：马上推；
+//   ② 主线红（feishu:main-red:）：开满 FEISHU_MAIN_RED_ESCALATE_MS（60 分钟）还没撤才推；
+//   ③ 任务挂起（task:…:park:）、deploy-lag:、auto-release:、watchdog:healthz:、watchdog:release:、github-app:、reconcile:pr:：
+//     开满 FEISHU_PUSH_ESCALATE_MS（120 分钟）还没撤才推。
+//   其余一律不推（含 watchdog:job:、watchdog:red:、quota-read:、reconcile:quota:、再提醒 remind:、主线已恢复、日报）。
+//   以前是「alert 默认推，再一条条列例外」，每出一类新报警就多一次误推。
 // - 一条只推一次：送到了不再推（重开的报警不重推）。没送成的按 2、4、8、16 分钟退避再试，试满 5 次不再试（留着没送到，看门狗报）。
 //   开满多久按 created_at 算：同一个键撤了又重开，created_at 不变，重开那一刻若已过线、之前又没推过，会马上推（反复冒出来不算自愈）。
 // - 看门狗判「推送不通」用 feishuPushFacts：有该推的过了 1 小时还没送到，而且这 1 小时里一条都没送成；或者后端记下的推送状态是「没配」。
@@ -50,12 +49,25 @@ export const FEISHU_BRIEF_KEY_PREFIX = 'feishu:brief:';
 export const FEISHU_TEST_KEY_PREFIX = 'feishu:test:';
 /** 主线红（引擎 jobs/main-red-push.ts）：开满 FEISHU_MAIN_RED_ESCALATE_MS 没撤才推；主线转绿时引擎把开着的都撤掉。 */
 export const FEISHU_MAIN_RED_KEY_PREFIX = 'feishu:main-red:';
-/** 主线已恢复：之前真推出去过主线红才推。 */
-export const FEISHU_MAIN_RECOVERED_KEY_PREFIX = 'feishu:main-recovered:';
-/** 再提醒（每小时对账给开着没人管的提醒再冒一条）：不推，进每日简报。 */
+/** 再提醒的键前缀。不再生成（迁移 0074 把开着的标已撤）；简报读卡住报警时仍排除，免得迁移前混进去。 */
 export const REMIND_KEY_PREFIX = 'remind:';
-/** 路由疑似降智（引擎 real/route-probe.ts 的 iqAlertKey）：报的时候这条路由已按不在线处理、下一轮探针自己复探，没人要做什么，不推。 */
-export const PROBE_IQ_KEY_PREFIX = 'probe-iq:';
+/**
+ * 开满 120 分钟才推的键前缀。任务挂起不在这列：键是 task:<仓>#<号>:park:<n>，用 feishuTaskParkKey 认。
+ * 和下面 SQL 的 starts_with 是同一份名单。
+ */
+export const FEISHU_ESCALATE_KEY_PREFIXES = [
+  'deploy-lag:',
+  'auto-release:',
+  'watchdog:healthz:',
+  'watchdog:release:',
+  'github-app:',
+  'reconcile:pr:',
+] as const;
+
+/** 任务挂起（要人点继续）：task:…:park:。旧的 req:/sub: 挂起不在白名单里。 */
+export function feishuTaskParkKey(dedupeKey: string): boolean {
+  return dedupeKey.startsWith('task:') && dedupeKey.includes(':park:');
+}
 /** 后端记推送状态的设置行。 */
 export const FEISHU_PUSH_SETTING = 'feishu.push';
 
@@ -65,26 +77,19 @@ export function feishuPushBackoffMs(attempts: number): number {
 }
 
 /**
- * 这条提醒从什么时候起该推了（不该推回 null）。纯函数，查询里的 SQL 和它一个判法。
- * redPushedBefore：主线已恢复那一条之前 24 小时内有没有一条主线红真推出去了（只有主线已恢复要看）。
+ * 这条提醒从什么时候起该推了（不该推回 null）。纯函数，查询里的 SQL 和它一个判法（白名单）。
  */
 export function feishuPushableSince(n: {
   level: 'decision' | 'alert' | 'daily';
   dedupeKey: string;
   createdAt: Date;
-  redPushedBefore?: boolean;
 }): Date | null {
   const after = (ms: number) => new Date(n.createdAt.getTime() + ms);
   if (n.dedupeKey.startsWith(FEISHU_BRIEF_KEY_PREFIX) || n.dedupeKey.startsWith(FEISHU_TEST_KEY_PREFIX))
     return n.createdAt;
   if (n.level === 'decision') return n.createdAt;
   if (n.dedupeKey.startsWith(FEISHU_MAIN_RED_KEY_PREFIX)) return after(FEISHU_MAIN_RED_ESCALATE_MS);
-  if (n.dedupeKey.startsWith(FEISHU_MAIN_RECOVERED_KEY_PREFIX)) return n.redPushedBefore ? n.createdAt : null;
-  if (
-    n.level === 'alert' &&
-    !n.dedupeKey.startsWith(REMIND_KEY_PREFIX) &&
-    !n.dedupeKey.startsWith(PROBE_IQ_KEY_PREFIX)
-  )
+  if (feishuTaskParkKey(n.dedupeKey) || FEISHU_ESCALATE_KEY_PREFIXES.some((p) => n.dedupeKey.startsWith(p)))
     return after(FEISHU_PUSH_ESCALATE_MS);
   return null;
 }
@@ -92,18 +97,16 @@ export function feishuPushableSince(n: {
 const escalateInterval = `${FEISHU_PUSH_ESCALATE_MS / 1000} seconds`;
 const mainRedInterval = `${FEISHU_MAIN_RED_ESCALATE_MS / 1000} seconds`;
 
-/** SQL 版的「从什么时候起该推」（不该推是 null），和 feishuPushableSince 一个判法。 */
+/** SQL 版的「从什么时候起该推」（不该推是 null），和 feishuPushableSince 一个判法。前缀名单就是 FEISHU_ESCALATE_KEY_PREFIXES。 */
+const escalateKeySql = sql.join(
+  FEISHU_ESCALATE_KEY_PREFIXES.map((p) => sql`starts_with(${notifications.dedupeKey}, ${p})`),
+  sql` or `,
+);
 const pushableSince = sql<Date | null>`case
   when starts_with(${notifications.dedupeKey}, ${FEISHU_BRIEF_KEY_PREFIX}) or starts_with(${notifications.dedupeKey}, ${FEISHU_TEST_KEY_PREFIX}) then ${notifications.createdAt}
   when ${notifications.level} = 'decision' then ${notifications.createdAt}
   when starts_with(${notifications.dedupeKey}, ${FEISHU_MAIN_RED_KEY_PREFIX}) then ${notifications.createdAt} + ${mainRedInterval}::interval
-  when starts_with(${notifications.dedupeKey}, ${FEISHU_MAIN_RECOVERED_KEY_PREFIX}) then case when exists (
-    select 1 from notifications red
-    join notification_deliveries rd on rd.notification_id = red.id and rd.channel = ${FEISHU_PUSH_CHANNEL} and rd.delivered_at is not null
-    where starts_with(red.dedupe_key, ${FEISHU_MAIN_RED_KEY_PREFIX})
-      and red.created_at < ${notifications.createdAt} and red.created_at >= ${notifications.createdAt} - interval '24 hours'
-  ) then ${notifications.createdAt} else null end
-  when ${notifications.level} = 'alert' and not starts_with(${notifications.dedupeKey}, ${REMIND_KEY_PREFIX}) and not starts_with(${notifications.dedupeKey}, ${PROBE_IQ_KEY_PREFIX}) then ${notifications.createdAt} + ${escalateInterval}::interval
+  when (starts_with(${notifications.dedupeKey}, 'task:') and ${notifications.dedupeKey} like '%:park:%') or ${escalateKeySql} then ${notifications.createdAt} + ${escalateInterval}::interval
   else null end`;
 
 export interface FeishuPushItem {

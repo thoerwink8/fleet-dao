@@ -12,7 +12,7 @@ import {
   FILE_LABELS,
   sweepAlerts,
 } from '../src/jobs/alert-sweep.ts';
-import { beijingDate, beijingDayStart, RECONCILE_ACTOR } from '../src/jobs/reconcile-common.ts';
+import { beijingDayStart } from '../src/jobs/reconcile-common.ts';
 
 const HOUR = 60 * 60_000;
 const DAY = 24 * HOUR;
@@ -406,7 +406,7 @@ describe('卡住报警立案', () => {
     expect(exact.body.startsWith('已立案：#')).toBe(true);
     expect(h.opened.every((o) => o.body.includes('- 这条提醒的条件不再成立（对账撤掉它）'))).toBe(true);
     expect(h.opened.every((o) => !o.body.includes('diff 里看得到'))).toBe(true);
-    expect(h.inserted).toHaveLength(2);
+    expect(h.inserted).toEqual([]);
   });
 
   it('不是 reconcile 的提醒照常立案，也不去问 PR 的合并时刻', async () => {
@@ -470,35 +470,21 @@ describe('卡住报警立案', () => {
   });
 });
 
-describe('日报超过 48 小时由这一轮收掉', () => {
-  it('超过 48 小时的 daily 收掉；刚好 48 小时、更近的日报、开着的 alert 和 decision 都不收', async () => {
+describe('日报不再由对账收掉', () => {
+  it('开着的 daily 留着，不管建了多久；刚报的 alert 和 decision 也不收', async () => {
     const old = row({
-      dedupeKey: 'release:start:abcdef123456:1',
+      dedupeKey: 'groom:done:old',
       level: 'daily',
-      title: '发版开始',
+      title: '这一轮打了标',
       createdAt: new Date(NOW.getTime() - 3 * DAY),
       updatedAt: new Date(NOW.getTime() - 3 * DAY),
     });
-    const fresh = row({
-      dedupeKey: 'release:done:abcdef123456:2',
+    const brief = row({
+      dedupeKey: 'feishu:brief:2026-10-08',
       level: 'daily',
-      title: '发版成功',
-      createdAt: new Date(NOW.getTime() - 47 * HOUR),
-      updatedAt: new Date(NOW.getTime() - 47 * HOUR),
-    });
-    const exact = row({
-      dedupeKey: 'release:start:bbbbbbbbbbbb:3',
-      level: 'daily',
-      title: '刚好 48 小时',
-      createdAt: new Date(NOW.getTime() - 48 * HOUR),
-      updatedAt: new Date(NOW.getTime() - 48 * HOUR),
-    });
-    const touched = row({
-      dedupeKey: 'release:done:ccccddddcccc:9',
-      level: 'daily',
-      title: '三天前建立、刚才又更新',
+      title: '简报',
       createdAt: new Date(NOW.getTime() - 3 * DAY),
-      updatedAt: NOW,
+      updatedAt: new Date(NOW.getTime() - 3 * DAY),
     });
     const freshAlert = row({
       dedupeKey: 'wf:failure:still-open',
@@ -513,21 +499,18 @@ describe('日报超过 48 小时由这一轮收掉', () => {
       createdAt: new Date(NOW.getTime() - 4 * DAY),
       updatedAt: new Date(NOW.getTime() - 4 * DAY),
     });
-    const h = harness([old, fresh, exact, touched, freshAlert, decision]);
+    const h = harness([old, brief, freshAlert, decision]);
     const part = await h.run();
     expect(part.unchecked).toEqual([]);
-    expect(part.found).toBe(2);
-    expect(old.resolvedBy).toBe(RECONCILE_ACTOR);
-    expect(old.body.startsWith('已撤：超过 48 小时自动收')).toBe(true);
-    expect(touched.resolvedBy).toBe(RECONCILE_ACTOR);
-    expect(touched.body.startsWith('已撤：超过 48 小时自动收')).toBe(true);
-    expect(fresh.resolvedAt).toBeNull();
-    expect(exact.resolvedAt).toBeNull();
-    expect(freshAlert.resolvedAt).toBeNull();
-    expect(decision.resolvedAt).toBeNull();
+    expect(part.found).toBe(0);
+    expect(h.inserted).toEqual([]);
+    for (const a of [old, brief, freshAlert, decision]) {
+      expect(a.resolvedAt, a.dedupeKey).toBeNull();
+      expect(a.body.startsWith('已撤：'), a.dedupeKey).toBe(false);
+    }
   });
 
-  it('createdAt 在 30 小时前、10 分钟前刚重开的不再推、不立案；同一条这一次挂满 25 小时照推、照立案', async () => {
+  it('createdAt 在 30 小时前、10 分钟前刚重开的不立案；同一条这一次挂满 25 小时照立案，不写再提醒', async () => {
     const key = 'wf:failure:acme/widgets:reopen';
     const reopened = row({
       id: 'reopen',
@@ -555,7 +538,7 @@ describe('日报超过 48 小时由这一轮收掉', () => {
     const pushed = harness([hung]);
     const pushedPart = await pushed.run();
     expect(pushedPart.unchecked).toEqual([]);
-    expect(pushed.inserted.map((i) => i.dedupeKey)).toEqual([`remind:hung:${beijingDate(NOW)}`]);
+    expect(pushed.inserted).toEqual([]);
     expect(pushed.opened.map((o) => o.key)).toEqual([`alert-file:${key}`]);
     expect(pushed.opened[0]?.body).toContain('第 1 天没人处理');
   });

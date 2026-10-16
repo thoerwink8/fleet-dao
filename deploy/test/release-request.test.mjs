@@ -89,6 +89,7 @@ function fakeIo(over = {}, opts = {}) {
     sleeps: 0,
     pushes: [],
     notes: [],
+    settled: 0,
     alertReads: 0,
     drains: 0,
   };
@@ -163,6 +164,9 @@ function fakeIo(over = {}, opts = {}) {
     notify: async (text, note) => {
       log.pushes.push(text);
       log.notes.push(note);
+    },
+    settleDone: async () => {
+      log.settled += 1;
     },
     limits: { pollMs: 1000, sessionsMs: 5000, deployMs: 3000, verifyMs: 4000 },
     ...over,
@@ -702,9 +706,13 @@ test('【故意造出的失败】发版后新出现一条和这次发版有关�
   assert.equal(log.sleeps, 0, '不是重启打断的那几类：不重试');
   assert.equal(engineOns(log).length, 0, '这一趟没关过总开关，不碰');
   assert.equal(log.states.at(-1).status, 'done');
+  assert.equal(log.notes.length, 1, '只有体检没过这一条进通知');
+  assert.equal(log.notes[0].kind, 'check');
   assert.match(log.pushes.at(-1), /【发版卡住】.*发后体检没通过：没有新异常/);
   assert.equal(log.notes.at(-1).level, 'decision', '体检没过进「要你拍」');
+  assert.match(log.notes[0].key, /^release:check:aaaaaaaaaaaa:\d+$/);
   assert.match(log.pushes.at(-1), /aaaaaaaaaaaa/);
+  assert.equal(log.settled, 0, '体检没过不收要你拍');
   assert.equal(log.lasts.at(-1).check.ok, false);
 });
 
@@ -832,6 +840,8 @@ test('【故意造出的失败】发版前异常基线读不到：第 0 步没�
   assert.match(last.why, /发版前异常基线读不到/);
   assert.equal(engineOffs(log).length, 0);
   assert.deepEqual(log.release, []);
+  assert.equal(log.notes.length, 1, '失败只写这一条通知，开始不写');
+  assert.equal(log.notes[0].kind, 'failed');
   assert.match(log.pushes.at(-1), /【发版失败】aaaaaaaaaaaa 第 0 步「预检」没成/);
   assert.equal(log.notes.at(-1).level, 'decision', '失败进「要你拍」');
   assert.match(log.pushes.at(-1), /版本还没发/);
@@ -924,44 +934,27 @@ test('九步时间线：每一步开始的时间都记在 steps 里，第 3 步�
   assert.equal(final.waiting, null, '做完了不在等什么');
 });
 
-test('飞书：开始、成功各推一条，一句话里有目标提交、结果、要不要点按钮', async () => {
+test('开始、成功只写进度，不写通知；成功时收掉之前开着的要你拍', async () => {
   const { io, log } = fakeIo();
   assert.equal(await runRequest(io), EXIT.done);
-  assert.equal(log.pushes.length, 2);
-  assert.match(log.pushes[0], /^【发版开始】法国开始发 aaaaaaaaaaaa（创始人 在驾驶舱点的）。不用点什么/);
-  assert.match(
-    log.pushes[1],
-    /^【发版成功】法国已在用 aaaaaaaaaaaa，发后体检通过，引擎总开关和各仓接活开关和发版前一致。不用点什么。$/,
-  );
-  assert.deepEqual(
-    log.states.at(-1).pushes.map((p) => [p.kind, p.ok]),
-    [
-      ['start', true],
-      ['done', true],
-    ],
-  );
+  assert.deepEqual(log.notes, []);
+  assert.deepEqual(log.pushes, []);
+  assert.deepEqual(log.states.at(-1).pushes, []);
+  assert.equal(log.states.at(-1).status, 'done');
+  assert.equal(log.settled, 1);
 });
 
-test('发版提醒分级：开始、成功只进 daily（简报读，不推）；卡住、失败进「要你拍」（decision，后端立刻推）；键以 release: 开头、每趟每种不重名', async () => {
-  const { io, log } = fakeIo();
-  assert.equal(await runRequest(io), EXIT.done);
-  assert.deepEqual(
-    log.notes.map((n) => [n.kind, n.level]),
-    [
-      ['start', 'daily'],
-      ['done', 'daily'],
-    ],
-  );
-  assert.ok(log.notes.every((n) => /^release:[a-z]+:aaaaaaaaaaaa:\d+$/.test(n.key)));
-  assert.equal(new Set(log.notes.map((n) => n.key)).size, log.notes.length);
-  assert.match(log.notes[0].title, /^【发版开始】法国开始发 aaaaaaaaaaaa/);
-  assert.doesNotMatch(log.notes[0].title, /。/);
-  const st = { target: { value: SHA } };
+test('发版提醒：只有 check、blocked、failed 写通知（decision）；开始、成功、重试、恢复、撤暂停回 null', () => {
+  const st = { target: { value: SHA }, phase: 4, why: '停了' };
+  const now = new Date(0);
   for (const kind of ['check', 'blocked', 'failed']) {
-    assert.equal(releaseNote(kind, st, '【x】y。z', new Date(0)).level, 'decision', kind);
+    const note = releaseNote(kind, st, '【x】y。z', now);
+    assert.equal(note.level, 'decision', kind);
+    assert.equal(note.key, `release:${kind}:aaaaaaaaaaaa:0`);
+    assert.equal(note.title, '【x】y');
   }
   for (const kind of ['start', 'done', 'retry', 'restore', 'aborted']) {
-    assert.equal(releaseNote(kind, st, '【x】y。z', new Date(0)).level, 'daily', kind);
+    assert.equal(releaseNote(kind, st, '【x】y。z', now), null, kind);
   }
 });
 
@@ -993,17 +986,22 @@ test('飞书：老现场开回没成（真走一趟）推「失败」叫点「�
   assert.equal(restore.log.lasts.at(-1).outcome, 'failed');
 });
 
-test('【故意造出的失败】飞书推不出去：照样发版、做完，进度里记「没推成」和原因，不当成推过', async () => {
-  const { io, log } = fakeIo({
-    notify: async () => {
-      throw new Error('写库没成（psql 退出码 2）：没配');
+test('【故意造出的失败】要人看的发版提醒写不进通知：照样发完，进度里记「没记下」和原因，不当成记过', async () => {
+  const { io, log } = fakeIo(
+    {
+      notify: async () => {
+        throw new Error('写库没成（psql 退出码 2）：没配');
+      },
     },
-  });
-  assert.equal(await runRequest(io), EXIT.done);
+    { alerts: (n) => (n === 0 ? [] : [{ key: 'auto-release:fleet-dao:failed', title: '自动发布挂了' }]) },
+  );
+  assert.equal(await runRequest(io), EXIT.blocked);
   assert.deepEqual(log.release, [SHA]);
   const pushes = log.states.at(-1).pushes;
-  assert.equal(pushes.length, 2);
-  assert.ok(pushes.every((p) => p.ok === false && /没配/.test(p.why)));
+  assert.equal(pushes.length, 1);
+  assert.equal(pushes[0].kind, 'check');
+  assert.equal(pushes[0].ok, false);
+  assert.match(pushes[0].why, /没配/);
   assert.ok(log.err.some((l) => l.includes('发版提醒没记下')));
 });
 
@@ -1141,7 +1139,8 @@ test('重试：停在「卡住（等收尾）」的那一趟，会话收完了�
   assert.ok(last.before.master === true && engineOns(log).length === 1, '发版前开着的开回');
   assert.equal(log.lasts.find((l) => l.outcome === 'accepted').kind, 'retry');
   assert.equal(log.lasts.at(-1).kind, 'retry');
-  assert.ok(log.pushes.some((t) => t.startsWith('【发版重试】')));
+  assert.deepEqual(log.notes, [], '重试、成功都不写通知');
+  assert.equal(log.settled, 1, '做完了仍收掉开着的要你拍');
 });
 
 test('重试：引擎手上还有会话——第 3 步不再等它（不读 drain），照样从第 3 步接着发完', async () => {
@@ -1219,7 +1218,7 @@ test('恢复引擎开关：发版已发出、恢复那一步没成（总开关�
   assert.ok(last.check.items.some((x) => x.name === '引擎总开关和发版前一致' && x.ok));
   assert.deepEqual(last.resumes, [{ kind: 'restore', by: '创始人', at: REQ_AT }]);
   assert.equal(log.lasts.at(-1).kind, 'restore');
-  assert.ok(log.pushes.some((t) => t.startsWith('【恢复引擎开关】')));
+  assert.deepEqual(log.notes, [], '恢复引擎开关不写通知');
 });
 
 test('【故意造出的失败】恢复引擎开关时 engine on 还是失败：再记一次没成，退出码 2，不当成成功', async () => {
@@ -1265,7 +1264,8 @@ test('撤掉暂停：只剩暂停标记、没有进度记录——只清标记�
   assert.equal(log.states.length, 0, '没写进度记录');
   assert.equal(log.lasts.at(-1).outcome, 'aborted');
   assert.equal(log.lasts.at(-1).kind, 'abort');
-  assert.ok(log.pushes.some((t) => t.startsWith('【撤掉暂停】')));
+  assert.deepEqual(log.notes, [], '撤掉暂停不写通知');
+  assert.deepEqual(log.pushes, []);
 });
 
 test('撤掉暂停：卡住在等收尾（还没动手发版、发版前开着）——清标记、把引擎总开关开回暂停前的样子，状态记 aborted', async () => {
@@ -1550,6 +1550,7 @@ test('发版提醒走通知中心：接活脚本和 lib 不再读 engine.env 的
   assert.match(script, /insert into notifications \(level, dedupe_key, title, body, link\)/);
   assert.match(script, /:'level'::notification_level, :'key', :'title', :'body'/);
   assert.match(script, /resolved_by = 'release-request'/);
-  assert.match(script, /release:start:/);
-  assert.match(script, /已撤：同一提交已发版成功/);
+  assert.match(script, /starts_with\(dedupe_key, 'release:'\) and level = 'decision'/);
+  assert.doesNotMatch(script, /release:start:/);
+  assert.doesNotMatch(script, /已撤：同一提交已发版成功/);
 });

@@ -1,6 +1,6 @@
 // 引擎起来时把退役的 Temporal 定时任务（jobs/retired-schedules.ts 的共用名单）删掉的真装配。这一步不经 Temporal 活动、
 // 直接拿 db（和 session-io.ts 的 reportIoRoot 同一个道理）：删成了、本来就没有都不算问题，只有删不掉要能被人看
-// 见——经 upsertAlert 写库，日报能捞到（不是当场要人拍的事，没必要推卡片）；好了自动撤，不用人去点「处理」。
+// 见——经 upsertAlert 写库（日报级，不是当场要人拍的事，不推飞书）；好了自动撤，不用人去点「处理」。简报不再单列这一级。
 // 删的这一步本身从不抛出（jobs/retired-schedules.ts 的 deleteRetiredSchedules 已经保证），不当成挡引擎接活的理由。
 import { type Db, resolveAlertWithReason, upsertAlert } from '@fleet-dao/db';
 import type { Client } from '@temporalio/client';

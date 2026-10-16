@@ -4,7 +4,7 @@ import type { AlertRow } from '@fleet-dao/db';
 import type { DecisionOption, StageKind } from '@fleet-dao/shared';
 import { STAGE_NAMES } from '../routing/names.ts';
 
-/** 撤提醒、写再提醒时记的「谁」（notifications.resolved_by、操作记录的 actor_id）。 */
+/** 撤提醒时记的「谁」（notifications.resolved_by、操作记录的 actor_id）。 */
 export const RECONCILE_ACTOR = 'engine:hourly-reconcile';
 
 /** 是不是一个阶段的名字（目录名、报警标题里读出来的）：和选路给人看的阶段名同一张表。 */
@@ -91,7 +91,7 @@ export const clip = (text: string, max: number) => (text.length > max ? `${text.
 
 const BEIJING_OFFSET_MS = 8 * 60 * 60_000;
 
-/** 北京时间的日子，例如 2026-09-26（再提醒一天一条、立案一天几张按它分）。 */
+/** 北京时间的日子，例如 2026-09-26（立案一天几张按它分）。 */
 export function beijingDate(at: Date): string {
   return new Date(at.getTime() + BEIJING_OFFSET_MS).toISOString().slice(0, 10);
 }

@@ -1,7 +1,7 @@
 // 每小时对账的真装配：内存库上跑真迁移（提醒、需求、PR 头、结局记账都是真查询）、临时目录里的真 git 树（以本机执行器顶替
 // 会话用户）、假的工作树管家（属主记在表里）、假的 Temporal（工作流在不在跑、挂没挂着由用例定）。
 // 残留的干净树删掉、提醒跟着撤；有没推的东西不删、改报要人拍；读不到目录、查不了 Temporal、删不掉、git 没跑成都记没查成；
-// 条件还在的提醒不撤；卡住报警超过 24 小时再推一次、同一天不重复。每条失败路径都故意造一次。
+// 条件还在的提醒不撤；卡住报警超过 24 小时立案，不再写再提醒。每条失败路径都故意造一次。
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,7 +28,6 @@ import { type AlertSweepDeps, type RouteCheck, sweepAlerts } from '../../src/job
 import { HOURLY_RECONCILE_JOB, runHourlyReconcileJob } from '../../src/jobs/hourly-reconcile.ts';
 import { MERGED_PR_LOOKBACK_MS } from '../../src/jobs/reconcile-checks.ts';
 import {
-  beijingDate,
   RECONCILE_ACTOR,
   type WorkflowReader,
   type WorkflowState,
@@ -1184,11 +1183,11 @@ describe('提醒：条件没了就撤、还在就留着', { timeout: 60_000 }, (
   });
 });
 
-describe('没人处理的卡住报警：超过 24 小时再推一次，一天最多一次', { timeout: 60_000 }, () => {
+describe('卡住报警不再写再提醒', { timeout: 60_000 }, () => {
   const remindersOf = async (id: string) =>
     (await t.db.select().from(notifications)).filter((n) => n.dedupeKey.startsWith(`remind:${id}:`));
 
-  it('超过 24 小时：写一条「还没处理」（新卡、新弹窗）；同一天再跑不重复；第二天再来一条；不到 24 小时的不推', async () => {
+  it('超过 24 小时不再写再提醒，原来那条留着；不到 24 小时的也不写', async () => {
     probeDir();
     const { task } = await work();
     const { id } = await alert('backup.stale:nightly', {
@@ -1200,110 +1199,57 @@ describe('没人处理的卡住报警：超过 24 小时再推一次，一天最
     await backdate('backup.stale:nightly', new Date(now.getTime() - 25 * HOUR));
 
     const first = await runHourlyReconcileJob(deps({ now: () => now }));
-    expect(first).toMatchObject({ outcome: 'ok', found: 1 });
-    const [r1] = await remindersOf(id);
-    expect(r1).toMatchObject({
-      dedupeKey: `remind:${id}:${beijingDate(now)}`,
-      level: 'alert',
-      taskId: task.id,
-      title: '还没处理：夜间备份超过 26 小时没开跑',
-      resolvedAt: null,
-    });
-    expect(r1?.body).toContain('到现在 25 小时 没人处理');
-    expect(r1?.body).toContain('原来的正文');
-
-    expect(await runHourlyReconcileJob(deps({ now: () => now }))).toMatchObject({ found: 0 });
-    expect(await remindersOf(id)).toHaveLength(1);
-    // 不到 24 小时的不推
+    expect(first).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(await remindersOf(id)).toEqual([]);
+    expect(await alertByKey(t.db, 'backup.stale:nightly')).toMatchObject({ resolvedAt: null });
     const fresh = await alertByKey(t.db, 'fresh:1');
+    expect(fresh?.resolvedAt).toBeNull();
     expect(await remindersOf(fresh?.id ?? 'none')).toEqual([]);
-
-    const tomorrow = new Date(now.getTime() + 25 * HOUR);
-    await runHourlyReconcileJob(deps({ now: () => tomorrow }));
-    expect((await remindersOf(id)).map((r) => r.dedupeKey).sort()).toEqual(
-      [`remind:${id}:${beijingDate(now)}`, `remind:${id}:${beijingDate(tomorrow)}`].sort(),
-    );
   });
 
-  it('createdAt 在 30 小时前、10 分钟前刚从已处理重开的不推；同一条这一次挂满 25 小时照推', async () => {
+  it('quota-read 挂了 25 小时也不写再提醒', async () => {
     probeDir();
     const now = new Date();
-    const createdAt = new Date(now.getTime() - 30 * HOUR);
     const { id } = await alert('quota-read:grok', { title: '额度读不到：grok' });
-    await backdate('quota-read:grok', createdAt);
-    expect(
-      await resolveAlertByKey(t.db, {
-        dedupeKey: 'quota-read:grok',
-        by: 'engine:quota-read',
-        at: new Date(now.getTime() - 20 * HOUR),
-      }),
-    ).toBe('ok');
-    const beforeReopen = new Date();
-    await alert('quota-read:grok', { title: '额度读不到：grok' });
-    const reopened = await alertByKey(t.db, 'quota-read:grok');
-    expect(reopened?.resolvedAt).toBeNull();
-    expect(reopened?.createdAt.toISOString()).toBe(createdAt.toISOString());
-    expect(reopened?.raisedAt.getTime()).toBeGreaterThanOrEqual(beforeReopen.getTime() - 1000);
-
-    const tenMinAgo = new Date(now.getTime() - 10 * 60_000);
-    await sql(
-      'update notifications set raised_at = $1::timestamptz, updated_at = $1::timestamptz where dedupe_key = $2',
-      [tenMinAgo.toISOString(), 'quota-read:grok'],
-    );
-    const held = await runHourlyReconcileJob(deps({ now: () => now }));
-    expect(held).toMatchObject({ outcome: 'ok', found: 0 });
+    await backdate('quota-read:grok', new Date(now.getTime() - 25 * HOUR));
+    const run = await runHourlyReconcileJob(deps({ now: () => now }));
+    expect(run.outcome).toBe('ok');
     expect(await remindersOf(id)).toEqual([]);
-
-    const hungFor = new Date(now.getTime() - 25 * HOUR);
-    await sql(
-      'update notifications set raised_at = $1::timestamptz, updated_at = $1::timestamptz where dedupe_key = $2',
-      [hungFor.toISOString(), 'quota-read:grok'],
-    );
-    const pushed = await runHourlyReconcileJob(deps({ now: () => now }));
-    expect(pushed).toMatchObject({ outcome: 'ok', found: 1 });
-    const [reminder] = await remindersOf(id);
-    expect(reminder).toMatchObject({
-      dedupeKey: `remind:${id}:${beijingDate(now)}`,
-      title: '还没处理：额度读不到：grok',
-      resolvedAt: null,
-    });
-    expect(reminder?.body).toContain('到现在 25 小时 没人处理');
-    expect((await alertByKey(t.db, 'quota-read:grok'))?.createdAt.toISOString()).toBe(
-      createdAt.toISOString(),
-    );
+    expect(await alertByKey(t.db, 'quota-read:grok')).toMatchObject({ resolvedAt: null });
   });
 
-  it('要人拍的不在这里再推（它们有自己的提醒规矩）', async () => {
+  it('要人拍的不写再提醒', async () => {
     probeDir();
     const { id } = await alert('pool-hold:claude-carpool', { level: 'decision' });
     await backdate('pool-hold:claude-carpool', new Date(Date.now() - 30 * HOUR));
     await runHourlyReconcileJob(deps());
     expect(await remindersOf(id)).toEqual([]);
+    expect(await alertByKey(t.db, 'pool-hold:claude-carpool')).toMatchObject({ resolvedAt: null });
   });
 
-  it('人在再提醒上点了处理：原来那条跟着撤（处理人记那个人）；原来那条处理了：再提醒跟着撤', async () => {
+  it('原来那条还开着，已有的再提醒留着；原来那条处理了，再提醒跟着撤；人点了再提醒不再连带撤原来那条', async () => {
     probeDir();
-    const a = await alert('routing:all-open:execute', { title: '「execute」阶段的路由全都熔断了' });
-    const b = await alert('reconcile:pr:acme/widgets#9');
-    const long = new Date(Date.now() - 30 * HOUR);
-    await backdate('routing:all-open:execute', long);
-    await backdate('reconcile:pr:acme/widgets#9', long);
+    const origin = await alert('wf:failure:no-repo', { title: '发生过' });
+    const childKey = `remind:${origin.id}:2026-10-15`;
+    await alert(childKey, { title: '还没处理：发生过' });
     const allOpen = { stageAllOpen: async () => ({ allOpen: true as const }) };
     await runHourlyReconcileJob(deps(allOpen));
-    const [ra] = await remindersOf(a.id);
-    const [rb] = await remindersOf(b.id);
-    if (!ra || !rb) throw new Error('该有再提醒');
+    expect(await alertByKey(t.db, 'wf:failure:no-repo')).toMatchObject({ resolvedAt: null });
+    expect(await alertByKey(t.db, childKey)).toMatchObject({ resolvedAt: null });
 
-    await resolvedByHuman({ id: ra.id }, 'founder-a');
-    await resolvedByHuman({ id: b.id }, 'founder-b');
+    await resolvedByHuman({ id: (await alertByKey(t.db, childKey))?.id ?? '' }, 'founder-a');
     await runHourlyReconcileJob(deps(allOpen));
-    expect(await alertByKey(t.db, 'routing:all-open:execute')).toMatchObject({
-      resolvedBy: 'founder-a',
-      body: expect.stringMatching(/^已撤：人在再提醒上点了处理/),
-    });
-    expect((await alertByKey(t.db, rb.dedupeKey))?.body).toMatch(/^已撤：原来那条已经处理了/);
-    const audits = await t.db.select().from(auditLog);
-    expect(audits.every((x) => x.actorId === RECONCILE_ACTOR)).toBe(true);
+    expect(await alertByKey(t.db, 'wf:failure:no-repo')).toMatchObject({ resolvedAt: null });
+
+    expect(
+      await resolveAlertByKey(t.db, {
+        dedupeKey: 'wf:failure:no-repo',
+        by: 'founder-b',
+      }),
+    ).toBe('ok');
+    await alert(childKey, { title: '还没处理：发生过' });
+    await runHourlyReconcileJob(deps(allOpen));
+    expect((await alertByKey(t.db, childKey))?.body).toMatch(/^已撤：原来那条已经处理了/);
   });
 });
 

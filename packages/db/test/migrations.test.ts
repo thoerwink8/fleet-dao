@@ -1040,3 +1040,139 @@ describe('0073：提醒这一次挂起的时刻回填成建立时刻', () => {
     }
   });
 });
+
+describe('0074：开着的发版开始、成功和再提醒标成已撤', () => {
+  const tag = '0074_resolve_release_notes_and_reminders';
+  const target = ordered.findIndex((e) => e.tag === tag);
+  const why = '发版开始、成功和再提醒不再进通知表';
+
+  const snapshot = async (pg: PGlite) => {
+    const notes = await pg.query<{
+      id: string;
+      dedupe_key: string;
+      level: string;
+      title: string;
+      body: string;
+      created_at: string;
+      updated_at: string;
+      resolved_at: string | null;
+      resolved_by: string | null;
+    }>(
+      `select id, dedupe_key, level, title, body,
+              to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as created_at,
+              to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as updated_at,
+              to_char(resolved_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as resolved_at,
+              resolved_by
+         from notifications order by dedupe_key`,
+    );
+    const audit = await pg.query<{
+      actor_kind: string;
+      actor_id: string;
+      action: string;
+      target: string;
+      reason: string | null;
+      via: string;
+    }>(`select actor_kind, actor_id, action, target, reason, via from audit_log order by target, action`);
+    return { notes: notes.rows, audit: audit.rows };
+  };
+
+  it(
+    'release:start:、release:done:、remind: 还开着的标成已撤，不删行；要人看的发版提醒和已经撤的不动；再跑一遍无副作用',
+    async () => {
+      expect(target).toBeGreaterThanOrEqual(0);
+      const sqlText = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+      expect(sqlText.toLowerCase()).not.toContain('delete');
+      const pg = await migratedBefore(target);
+      try {
+        await pg.exec(`
+          insert into notifications (level, dedupe_key, title, body, created_at, updated_at) values
+            ('daily', 'release:start:aaaaaaaaaaaa:1', '发版开始', '开始了', '2026-10-01T00:00:00Z', '2026-10-01T01:00:00Z'),
+            ('daily', 'release:done:bbbbbbbbbbbb:2', '发版成功', '', '2026-10-02T00:00:00Z', '2026-10-02T00:00:00Z'),
+            ('daily', 'remind:11111111-1111-4111-8111-111111111111:2026-10-14', '还没处理', '原来的正文', '2026-10-14T00:00:00Z', '2026-10-14T00:00:00Z'),
+            ('alert', 'remind:', '只有前缀', '子条', '2026-10-03T00:00:00Z', '2026-10-03T00:00:00Z'),
+            ('decision', 'release:check:cccccccccccc:3', '体检没过', '还要看', '2026-10-04T00:00:00Z', '2026-10-04T00:00:00Z'),
+            ('decision', 'release:blocked:dddddddddddd:4', '卡住', '停在半路', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z'),
+            ('decision', 'release:failed:eeeeeeeeeeee:5', '失败', '没发出去', '2026-10-06T00:00:00Z', '2026-10-06T00:00:00Z'),
+            ('daily', 'release:start:ffffffffffff:6', '已经撤过', '原来的正文', '2026-09-01T00:00:00Z', '2026-09-02T00:00:00Z'),
+            ('daily', 'release:start', '没有冒号', '别动', '2026-10-07T00:00:00Z', '2026-10-07T00:00:00Z'),
+            ('daily', 'release:started:abc', '多了 ed', '别动', '2026-10-08T00:00:00Z', '2026-10-08T00:00:00Z'),
+            ('daily', 'Release:start:abc:1', '大小写不同', '别动', '2026-10-09T00:00:00Z', '2026-10-09T00:00:00Z'),
+            ('alert', 'not-remind:x', '不是再提醒', '别动', '2026-10-10T00:00:00Z', '2026-10-10T00:00:00Z');
+          update notifications
+             set resolved_at = '2026-09-03T00:00:00Z', resolved_by = 'someone'
+           where dedupe_key = 'release:start:ffffffffffff:6';
+        `);
+        const idsBefore = (
+          await pg.query<{ id: string }>(`select id from notifications order by dedupe_key`)
+        ).rows.map((r) => r.id);
+        expect(idsBefore).toHaveLength(12);
+
+        await runMigration(pg, tag);
+
+        const once = await snapshot(pg);
+        const byKey = new Map(once.notes.map((r) => [r.dedupe_key, r]));
+        const closedKeys = [
+          'release:start:aaaaaaaaaaaa:1',
+          'release:done:bbbbbbbbbbbb:2',
+          'remind:11111111-1111-4111-8111-111111111111:2026-10-14',
+          'remind:',
+        ];
+        for (const key of closedKeys) {
+          const row = byKey.get(key);
+          expect(row?.resolved_by, key).toBe('migration:0074');
+          expect(row?.resolved_at, key).not.toBeNull();
+        }
+        expect(byKey.get('release:start:aaaaaaaaaaaa:1')).toMatchObject({
+          level: 'daily',
+          title: '发版开始',
+          body: `已撤：${why}\n\n开始了`,
+          created_at: '2026-10-01T00:00:00Z',
+        });
+        expect(byKey.get('release:done:bbbbbbbbbbbb:2')?.body).toBe(`已撤：${why}`);
+        expect(byKey.get('remind:11111111-1111-4111-8111-111111111111:2026-10-14')?.body).toBe(
+          `已撤：${why}\n\n原来的正文`,
+        );
+        expect(byKey.get('release:start:ffffffffffff:6')).toMatchObject({
+          body: '原来的正文',
+          resolved_at: '2026-09-03T00:00:00Z',
+          resolved_by: 'someone',
+          updated_at: '2026-09-02T00:00:00Z',
+        });
+        for (const key of [
+          'release:check:cccccccccccc:3',
+          'release:blocked:dddddddddddd:4',
+          'release:failed:eeeeeeeeeeee:5',
+          'release:start',
+          'release:started:abc',
+          'Release:start:abc:1',
+          'not-remind:x',
+        ]) {
+          expect(byKey.get(key)?.resolved_at, key).toBeNull();
+          expect(byKey.get(key)?.resolved_by, key).toBeNull();
+          expect(byKey.get(key)?.body, key).not.toContain('已撤：');
+        }
+        expect(once.notes.map((r) => r.id)).toEqual(idsBefore);
+        expect(once.audit).toEqual(
+          expect.arrayContaining(
+            closedKeys.map((key) => ({
+              actor_kind: 'engine',
+              actor_id: 'migration:0074',
+              action: 'notification.resolve',
+              target: `notification:${byKey.get(key)?.id}`,
+              reason: why,
+              via: 'engine',
+            })),
+          ),
+        );
+        expect(once.audit).toHaveLength(closedKeys.length);
+
+        await runMigration(pg, tag);
+        const twice = await snapshot(pg);
+        expect(twice).toEqual(once);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
