@@ -60,6 +60,7 @@ import { meBody } from './auth.ts';
 import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reconcile-view.ts';
 import { registerCiPolicyRoutes } from './ci-policy-routes.ts';
 import { registerCliToolsRoutes } from './cli-versions.ts';
+import { continueSignals } from './continue-signals.ts';
 import { registerCredentialRoutes } from './credentials.ts';
 import { handOffDecision } from './decision-handoff.ts';
 import type { Deps } from './deps.ts';
@@ -544,11 +545,16 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     }
     const by = c.get('user').id;
     let signal: TaskSignal;
+    // 「继续」再带一发路由叫醒：等选路的那一觉不看 taskContinue（#2392）。
+    let routeWake: TaskSignal | null = null;
     switch (body.action) {
       case 'resume': {
         const exhausted = continueExhausted(task.stalled?.why);
         if (exhausted) throw new ApiError(409, 'continue_exhausted', exhausted);
-        signal = { name: TASK_SIGNAL_NAMES.continue, by };
+        const [cont, wake] = continueSignals(by);
+        if (!cont || !wake) throw new ApiError(500, 'continue_signals', '继续信号没配全');
+        signal = cont;
+        routeWake = wake;
         break;
       }
       case 'stop':
@@ -572,15 +578,26 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         throw new ApiError(409, 'action_not_supported', UNSUPPORTED_ACTION_WHY[body.action]);
     }
     const { name: _name, by: _by, ...detail } = signal;
-    await signalAndAudit(taskId, signal, {
+    const auditBase = {
       actor: actorOf(c),
-      action: `task.${body.action}`,
       target: `task:${taskId}`,
-      after: detail,
       reason: 'reason' in body ? body.reason : undefined,
       via: c.get('via'),
-      ok: true,
+      ok: true as const,
+    };
+    await signalAndAudit(taskId, signal, {
+      ...auditBase,
+      action: `task.${body.action}`,
+      after: detail,
     });
+    if (routeWake) {
+      const { name: _wakeName, by: _wakeBy, ...wakeDetail } = routeWake;
+      await signalAndAudit(taskId, routeWake, {
+        ...auditBase,
+        action: 'task.routeWake',
+        after: wakeDetail,
+      });
+    }
     return reply(c, TaskActionResponse, { ok: true });
   });
 

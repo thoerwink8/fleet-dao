@@ -91,6 +91,12 @@ const routeOrder = () =>
     li.getAttribute('data-route'),
   );
 
+/** 默认只列开着的。要看关着的、或要按完整顺序调先后时先点开。 */
+const showAllRoutes = async () => {
+  const btn = await screen.findByRole('button', { name: '显示全部' });
+  if (btn.getAttribute('aria-pressed') !== 'true') fireEvent.click(btn);
+};
+
 const BEFORE = ['Opus 5.5', 'Kimi k3', 'Cursor Auto', 'Opus 5'];
 
 describe('路由页：调先后和开关', () => {
@@ -111,7 +117,8 @@ describe('路由页：调先后和开关', () => {
         .getByRole('switch', { name: 'Opus 5.5 的开关' })
         .getAttribute('aria-checked'),
     ).toBe('true');
-    // 选中的 Opus 5.5 下三条：前两条开着、中转那条关着
+    // 选中的 Opus 5.5 下三条：前两条开着、中转那条关着（关着的默认不列，点「显示全部」才出来）
+    await showAllRoutes();
     expect(within(routeItem('r-ca-opus')).getByRole('switch').getAttribute('aria-checked')).toBe('true');
     expect(within(routeItem('r-rl-opus')).getByRole('switch').getAttribute('aria-checked')).toBe('false');
   });
@@ -139,6 +146,7 @@ describe('路由页：调先后和开关', () => {
     const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     const spy = vi.spyOn(api, 'updateModelRoute');
     await opened();
+    await showAllRoutes();
     expect(routeOrder()).toEqual(['r-ca-opus', 'r-cb-opus', 'r-rl-opus']);
     await pickMove(routeItem('r-ca-opus'), '下移一位');
     await waitFor(() => expect(routeOrder()).toEqual(['r-cb-opus', 'r-ca-opus', 'r-rl-opus']));
@@ -247,6 +255,7 @@ describe('路由页：调先后和开关', () => {
     await waitFor(() => expect(modelGrip('opus-5.5').getAttribute('aria-disabled')).toBeNull());
     await pickMove(modelRow('kimi-k3'), '下移一位');
     await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(2));
+    await showAllRoutes();
     await waitFor(() => expect(routeGrip('r-ca-opus').getAttribute('aria-disabled')).toBeNull());
     await pickMove(routeItem('r-ca-opus'), '下移一位');
     await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(3));
@@ -294,6 +303,7 @@ describe('路由页：调先后和开关', () => {
     const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     const spy = vi.spyOn(api, 'updateModelRoute');
     await opened();
+    await showAllRoutes();
     expect(routeOrder()).toEqual(['r-ca-opus', 'r-cb-opus', 'r-rl-opus']);
     fireEvent.keyDown(routeGrip('r-cb-opus'), { key: 'ArrowUp' });
     expect(spy).not.toHaveBeenCalled();
@@ -310,6 +320,7 @@ describe('路由页：调先后和开关', () => {
     const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     const spy = vi.spyOn(api, 'updateModelRoute');
     await opened();
+    await showAllRoutes();
     await pickMove(routeItem('r-rl-opus'), '置顶');
     await waitFor(() => expect(routeOrder()).toEqual(['r-rl-opus', 'r-ca-opus', 'r-cb-opus']));
     expect(spy).toHaveBeenCalledExactlyOnceWith('opus-5.5', 'r-rl-opus', {
@@ -323,6 +334,7 @@ describe('路由页：调先后和开关', () => {
     const { api } = renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     const spy = vi.spyOn(api, 'updateModelRoute');
     await opened();
+    await showAllRoutes();
 
     fireEvent.click(within(routeItem('r-cb-opus')).getByRole('switch'));
     const dialog = await screen.findByRole('alertdialog');
@@ -388,6 +400,7 @@ describe('路由页：调先后和开关', () => {
           .getAttribute('aria-checked'),
       ).toBe('false'),
     );
+    await showAllRoutes();
     expect(within(routeItem('r-ca-opus')).getByRole('switch').getAttribute('aria-checked')).toBe('false');
     expect(within(routeItem('r-cb-opus')).getByRole('switch').getAttribute('aria-checked')).toBe('false');
     expect(spy).toHaveBeenCalledExactlyOnceWith('opus-5.5', {
@@ -416,6 +429,7 @@ describe('路由页：调先后和开关', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: '关闭' }));
     // 选中中转站看它的路由：渠道已关，没有开关
     fireEvent.click(await screen.findByRole('button', { name: '查看 中转站 的路由' }));
+    await showAllRoutes();
     await waitFor(() => expect(routeItem('r-rl-opus').textContent).toContain('渠道已关'));
     expect(within(routeItem('r-rl-opus')).queryByRole('switch')).toBeNull();
     expect(spy).toHaveBeenCalledExactlyOnceWith('ch-relay', { enabled: false, expected: true });

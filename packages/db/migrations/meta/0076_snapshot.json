@@ -1,5 +1,5 @@
 {
-  "id": "75f3d314-caf1-4f41-8cce-2b23113350ff",
+  "id": "c7d7692b-eb1b-4892-bca6-5a43128a01c2",
   "prevId": "24ac51a3-0f15-49b4-8ff5-568e75eec94f",
   "version": "7",
   "dialect": "postgresql",
@@ -4994,12 +4994,6 @@
         },
         "tier": {
           "name": "tier",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "route_why": {
-          "name": "route_why",
           "type": "text",
           "primaryKey": false,
           "notNull": false

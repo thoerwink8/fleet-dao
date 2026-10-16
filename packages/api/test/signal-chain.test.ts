@@ -3,7 +3,7 @@
 // task:<仓>#<号> 这一种工作流、只听 taskContinue / taskAbandon / taskRouteWake——点了「继续」「叫停」发给一个不存在的
 // 工作流，一律回 409。这里用真的 createTemporalWorkflowControl 接一个假 Temporal 客户端，记下它真正收到的
 // 工作流编号和信号名。引擎那一半（真工作流收得到这些名字）在 packages/engine/test/task-signals.test.ts，两边共用 shared/task-signals.ts。
-import { TASK_SIGNAL_NAMES } from '@fleet-dao/shared';
+import { CONTINUE_ROUTE_WAKE_REASON, TASK_SIGNAL_NAMES } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { createTemporalWorkflowControl, type TemporalClientLike } from '../src/temporal.ts';
 import { DEV_USER_ID, errorCode, harness, IDS, write } from './harness.ts';
@@ -31,7 +31,7 @@ function fakeTemporal(missing: ReadonlySet<string> = new Set()) {
 const TASK12_WORKFLOW_ID = 'task:example/canary#12';
 
 describe('驾驶舱动作发的信号，工作流编号和信号名对得上引擎', () => {
-  it('「继续」：发给 task:<仓>#<号>，信号名 taskContinue，参数是 { by }', async () => {
+  it('「继续」：先 taskContinue，再 taskRouteWake（等选路的那一觉不看继续）', async () => {
     const t = fakeTemporal();
     const h = harness({ workflows: t.control });
     const s = await h.login();
@@ -42,8 +42,14 @@ describe('驾驶舱动作发的信号，工作流编号和信号名对得上引�
     expect(res.status).toBe(200);
     expect(t.sent).toEqual([
       { workflowId: TASK12_WORKFLOW_ID, name: 'taskContinue', arg: { by: DEV_USER_ID } },
+      {
+        workflowId: TASK12_WORKFLOW_ID,
+        name: 'taskRouteWake',
+        arg: { by: DEV_USER_ID, reason: CONTINUE_ROUTE_WAKE_REASON },
+      },
     ]);
     expect(TASK_SIGNAL_NAMES.continue).toBe('taskContinue');
+    expect(TASK_SIGNAL_NAMES.routeWake).toBe('taskRouteWake');
   });
 
   it('「叫停」：taskAbandon，参数 { by, reason }；没写原因也补一句话（引擎的约定里 reason 必填）', async () => {

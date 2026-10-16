@@ -107,7 +107,8 @@ export interface TaskRun {
 }
 
 // 信号的名字和参数形状在 shared/task-signals.ts：驾驶舱后端发信号也从那里拿，两边不各拼一遍（#901）。
-// 路由叫醒（RouteWakeCommand）只有引擎进程自己发（real/route-wake.ts）。信号丢了：等空位、熔断最多再等
+// 路由叫醒（RouteWakeCommand）：切号完成由引擎发（real/route-wake.ts）；「继续」也带一发（#2392），
+// 因为等选路的那一觉不看 taskContinue。信号丢了：等空位、熔断最多再等
 // MAX_ROUTE_WAIT_SECONDS；等额度且清零时刻明确按 until 睡，不超过 QUOTA_ROUTE_WAIT_CAP_SECONDS（real/store-ports.ts）。
 export type { AbandonCommand, ContinueCommand, PauseCommand, RepinCommand, RouteWakeCommand };
 
