@@ -10,8 +10,7 @@ import {
   Hourglass,
   MessageCircleQuestion,
 } from 'lucide-react';
-import type { Me, NotificationLevel, Run, TaskState } from '../api/types';
-import { span } from './format';
+import type { Me, NotificationLevel, TaskState } from '../api/types';
 
 export type Tone = 'run' | 'wait' | 'human' | 'stall' | 'fail' | 'done' | 'stop';
 
@@ -110,20 +109,6 @@ export function taskTone(t: { state: TaskState }): Tone {
 /** 子任务的字母编号：A、B、C…… */
 export function letterOf(index: number): string {
   return String.fromCharCode(65 + (index % 26));
-}
-
-export function isRunning(run: Pick<Run, 'startedAt' | 'endedAt'>): boolean {
-  return Boolean(run.startedAt) && !run.endedAt;
-}
-
-/** 排队时长：从进队列到开干；还没开干就算到现在。 */
-export function queueMs(run: Pick<Run, 'queuedAt' | 'startedAt' | 'endedAt'>, now: number): number {
-  return span(run.queuedAt, run.startedAt ?? run.endedAt, now);
-}
-
-/** 干活时长：从开干到结束；还在干就算到现在。 */
-export function workMs(run: Pick<Run, 'startedAt' | 'endedAt'>, now: number): number {
-  return run.startedAt ? span(run.startedAt, run.endedAt, now) : 0;
 }
 
 /**

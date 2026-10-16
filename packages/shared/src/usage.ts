@@ -1,7 +1,7 @@
-// 会话用量怎么汇总（#216）：一张单按模型、按阶段（老流程的会话）、按段（三段的 runs，每段再按模型）、整张合计，
-// 四样 token 折成输入当量。后端的任务详情、网页的演示数据和会话时间线（一次会话也按它算）都调这一份，免得几处算法不一样。
+// 三段流水的用量怎么汇总（#216）：一张单按模型、按段（三段的 runs，每段再按模型）、整张合计，
+// 四样 token 折成输入当量。后端的任务详情、任务列表和网页的演示数据都调这一份，免得几处算法不一样。
 // 读不到的另记次数（missing*），不当成 0：没读到的那一项不往合计里加任何东西。
-import type { BillingKind, SegmentKind, SegmentTier, SessionRun, StageKind } from './domain.ts';
+import type { BillingKind, SegmentKind, SegmentTier } from './domain.ts';
 import type { CostEstimate } from './model-prices.ts';
 import { SEGMENT_KINDS, type SegmentRunView } from './segment-runs.ts';
 
@@ -59,36 +59,6 @@ export function inputEquivalentOf(u: TokenCounts): number | undefined {
   return Math.round(scaled / SCALE);
 }
 
-type OptionalFact =
-  | 'startedAt'
-  | 'endedAt'
-  | 'inputTokens'
-  | 'outputTokens'
-  | 'cacheReadTokens'
-  | 'cacheWriteTokens'
-  | 'costUsd';
-
-/**
- * 一次会话的用量事实（老流程一次会话，和 SessionRun 同名同义）：读不到的字段不给，给 undefined 也一样——
- * 网页拿接口返回的会话（zod 推出来的，可选字段带 undefined）直接算，不另抄一份。
- */
-export type RunUsageFacts = Pick<SessionRun, 'stage' | 'queuedAt'> & {
-  [K in OptionalFact]?: SessionRun[K] | undefined;
-} & {
-  /**
-   * 记在哪个模型名下：路由上的模型（模型目录的 id），和 Fusion 关单评论「各模型额度」一个口径；
-   * 上游实际回话的模型（actualModel）不在这里分。
-   */
-  model: string;
-  /** 给人看的模型名。 */
-  modelName: string;
-  /**
-   * 路由所在渠道的计费方式（channels.billing）：按量的花费是真花的钱；套餐内的是执行体报的「按 API 价折合」，
-   * 账单不因它多一笔。渠道在库里查不到就不给——记进「分不清」，不猜成套餐内。
-   */
-  billing?: BillingKind | undefined;
-};
-
 /** 一种计费方式下的花费。 */
 export interface CostShare {
   /** 走这种计费方式、结束了的会话数。 */
@@ -123,7 +93,7 @@ export interface UsageTotals {
   inputTokens: number;
   outputTokens: number;
   missingTokens: number;
-  /** 缓存读、缓存写两样都读到的会话才加进来；缺一样记一次 missingCache（存缓存读写之前的老会话全是没读到）。 */
+  /** 缓存读、缓存写两样都读到的会话才加进来；缺一样记一次 missingCache。 */
   cacheReadTokens: number;
   cacheWriteTokens: number;
   missingCache: number;
@@ -140,19 +110,14 @@ export interface UsageTotals {
   cost: CostByBilling;
   /**
    * 三段的流水里执行体没报花费的那几笔，按模型目录的单价估（model-prices.ts）：runs 笔估成了、合计 usd；noPrice 笔目录里
-   * 没有单价；noTokens 笔 token 没读全估不了。估出来的是「按 API 价值多少」，不是账单。老流程的会话不估（都是 0）。
+   * 没有单价；noTokens 笔 token 没读全估不了。估出来的是「按 API 价值多少」，不是账单。
    */
   estimate: CostEstimateTotals;
-  /**
-   * 排队、干活时长（毫秒），和库里 queue_ms / run_ms 同一个算法；时刻认不出或倒着的记 missingTime。
-   * 三段的一笔没有排队这回事（runs 表不记）：干活 = 结束 − 开始，排队不加，记一次 noQueue——排队合计要把它算作没读到。
-   */
-  queueMs: number;
+  /** 干活时长（毫秒）：readSegmentRun 读好的耗时；读不到的记 missingTime。三段不记排队，所以没有排队时长。 */
   runMs: number;
   missingTime: number;
-  noQueue: number;
   /**
-   * 结束了的三段里，四样 token 一个都没读到的段数。老流程的会话不计，在跑的不计（用量还没出来）。
+   * 结束了的三段里，四样 token 一个都没读到的段数。在跑的不计（用量还没出来）。
    * 页面写「另有 N 段读不到用量」。缺了一两样、其余读到了的不算在这里（那是 missingTokens / 估不了）。
    */
   unreadSegments: number;
@@ -170,10 +135,6 @@ export interface ModelUsageTotals extends UsageTotals {
   modelName: string;
 }
 
-export interface StageUsageTotals extends UsageTotals {
-  stage: StageKind;
-}
-
 /** 三段里的一段（对题 / 动手 / 验收）：合计，再按模型分。 */
 export interface SegmentUsageTotals extends UsageTotals {
   /** 段名认不出的几笔归在 null 这一组（每一笔认不出的原样在它的 unread 里）。 */
@@ -186,12 +147,10 @@ export interface SegmentUsageTotals extends UsageTotals {
 }
 
 export interface TaskUsage {
-  /** 老流程的会话和三段的 runs 加在一起：各模型额度看这里才全。 */
+  /** 三段的 runs 整张合计。 */
   total: UsageTotals;
-  /** 按第一次出现的先后：会话按排队时刻、三段按起跑时刻排好传进来，就是先用上的在前。 */
+  /** 按第一次出现的先后：三段按起跑时刻排好传进来，就是先用上的在前。 */
   byModel: ModelUsageTotals[];
-  /** 老流程的会话按阶段。 */
-  byStage: StageUsageTotals[];
   /** 三段（runs）按段：对题、动手、验收的固定先后，段名认不出的一组排最后。只列有过一笔的段。 */
   bySegment: SegmentUsageTotals[];
 }
@@ -237,10 +196,8 @@ function emptyTotals(): UsageTotals {
     missingCost: 0,
     cost: { metered: emptyShare(), subscription: emptyShare(), unknown: emptyShare() },
     estimate: { runs: 0, usd: 0, noPrice: 0, noTokens: 0 },
-    queueMs: 0,
     runMs: 0,
     missingTime: 0,
-    noQueue: 0,
     unreadSegments: 0,
   };
 }
@@ -252,41 +209,13 @@ function shareOf(cost: CostByBilling, billing: string | undefined): CostShare {
   return cost.unknown;
 }
 
-/** 排队 = (开工 ?? 结束) − 排队，干活 = 结束 − 开工（没开工就是 0）：老流程会话表（已删）的两个生成列也是这样算。 */
-function durations(run: RunUsageFacts, endedAt: string): { queueMs: number; runMs: number } | undefined {
-  const queued = Date.parse(run.queuedAt);
-  const ended = Date.parse(endedAt);
-  const started = run.startedAt === undefined ? undefined : Date.parse(run.startedAt);
-  if (!Number.isFinite(queued) || !Number.isFinite(ended)) return undefined;
-  if (started !== undefined && !Number.isFinite(started)) return undefined;
-  const queueMs = (started ?? ended) - queued;
-  const runMs = started === undefined ? 0 : ended - started;
-  return queueMs >= 0 && runMs >= 0 ? { queueMs, runMs } : undefined;
-}
-
-function add(t: UsageTotals, run: RunUsageFacts, estimate: CostEstimate | undefined): void {
-  if (run.endedAt === undefined) {
-    t.running += 1;
-    return;
-  }
-  t.runs += 1;
-  if (run.startedAt === undefined) t.notStarted += 1;
-  addReadings(t, run, estimate);
-  const spent = durations(run, run.endedAt);
-  if (spent) {
-    t.queueMs += spent.queueMs;
-    t.runMs += spent.runMs;
-  } else t.missingTime += 1;
-}
-
-/** 三段的一笔：在跑的只记 running；结束了的干活 = 读好的耗时（读不到记 missingTime），排队不记（noQueue）。 */
+/** 三段的一笔：在跑的只记 running；结束了的干活 = 读好的耗时（读不到记 missingTime）。 */
 function addSegment(t: UsageTotals, run: SegmentUsageFacts): void {
   if (run.running) {
     t.running += 1;
     return;
   }
   t.runs += 1;
-  t.noQueue += 1;
   if (tokensUnread(run)) t.unreadSegments += 1;
   if (run.outcome === 'spawn_failed' || run.outcome === 'admission_blocked') t.notStarted += 1;
   addReadings(t, run, run.estimate);
@@ -352,28 +281,10 @@ function modelOf(
 /** 段的先后：对题、动手、验收，认不出的排最后。 */
 const segmentRank = (s: SegmentKind | null) => (s === null ? SEGMENT_KINDS.length : SEGMENT_KINDS.indexOf(s));
 
-/**
- * 一张单的用量：runs 是老流程的会话（按排队时刻排好），segments 是三段读好的流水（readSegmentRun 的结果，按起跑时刻排好）。
- * 整张合计和按模型两样都算；按阶段只算会话，按段只算三段。
- */
-export function summarizeUsage(
-  runs: readonly RunUsageFacts[],
-  segments: readonly SegmentUsageFacts[] = [],
-): TaskUsage {
+/** 一张单的用量：segments 是三段读好的流水（readSegmentRun 的结果，按起跑时刻排好）。整张合计、按模型、按段（每段再按模型）。 */
+export function summarizeUsage(segments: readonly SegmentUsageFacts[]): TaskUsage {
   const total = emptyTotals();
   const byModel = new Map<string, ModelUsageTotals>();
-  const byStage = new Map<StageKind, StageUsageTotals>();
-  for (const run of runs) {
-    let stage = byStage.get(run.stage);
-    if (!stage) {
-      stage = { stage: run.stage, ...emptyTotals() };
-      byStage.set(run.stage, stage);
-    }
-    // 老流程（Fusion，已被替代）的会话不估：它记的模型是路由编号，对不上目录；只估三段的流水（readSegmentRun 里估好）
-    add(total, run, undefined);
-    add(modelOf(byModel, run), run, undefined);
-    add(stage, run, undefined);
-  }
   const bySegment = new Map<
     SegmentKind | null,
     SegmentUsageTotals & { models: Map<string, ModelUsageTotals> }
@@ -401,7 +312,6 @@ export function summarizeUsage(
   return {
     total,
     byModel: [...byModel.values()],
-    byStage: [...byStage.values()],
     bySegment: [...bySegment.values()]
       .sort((a, b) => segmentRank(a.segment) - segmentRank(b.segment))
       .map(({ models, ...seg }) => ({ ...seg, byModel: [...models.values()] })),

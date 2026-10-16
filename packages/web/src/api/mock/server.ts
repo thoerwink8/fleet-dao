@@ -1581,11 +1581,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     });
   }
 
-  function runView(r: SessionRun) {
-    const info = routeInfo(r.routeId);
-    return { ...r, modelName: info.modelName, hostId: info.hostId, billing: info.billing };
-  }
-
   // ---------- 模拟器的小动作 ----------
 
   function subStage(sv: MSubtask): StageKind {
@@ -2708,7 +2703,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     },
     /**
      * 任务列表（#1639）：和真后端同一个拼法（分组 taskListGroupOf、段和模型 taskFlow、花费 summarizeUsage），
-     * 少的是「状态变化时刻」这一项，假库没有 state_changes：最近更新 = 开单和这张单所有会话、流水时刻里最晚的。
+     * 少的是「状态变化时刻」这一项，假库没有 state_changes：最近更新 = 开单和这张单三段流水时刻里最晚的。
      */
     async tasks(query) {
       await wait();
@@ -2727,9 +2722,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         .filter((t) => query?.status === undefined || taskListGroupOf(t.task) === query.status)
         .map((tv) => {
           const finished = TERMINAL.has(tv.task.state);
-          const sessions = [...tv.runs, ...tv.subtasks.flatMap((s) => s.runs)].sort((a, b) =>
-            a.queuedAt.localeCompare(b.queuedAt),
-          );
           const views = (tv.segmentRuns ?? []).map((r) =>
             readSegmentRun(
               {
@@ -2745,23 +2737,10 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           const started = views
             .filter((v) => v.startedAt !== undefined)
             .sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''));
-          const lastSession = sessions.at(-1);
-          const usage = summarizeUsage(
-            sessions.map((r) => {
-              const info = routeInfo(r.routeId);
-              return {
-                ...r,
-                model: info.route?.modelId ?? r.routeId,
-                modelName: info.modelName,
-                billing: info.billing,
-              };
-            }),
-            views,
-          ).total;
+          const usage = summarizeUsage(views).total;
           const cost = taskListCost(usage, views.filter((v) => !v.running).length);
           const times = [
             tv.task.createdAt,
-            ...sessions.flatMap((r) => [r.queuedAt, r.startedAt, r.endedAt]),
             ...views.flatMap((v) => [v.startedAt, v.endedAt]),
           ].filter((x): x is string => x !== undefined);
           const updatedAt = times.reduce((a, b) => (b > a ? b : a));
@@ -2777,10 +2756,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
               ...(tv.task.paused === undefined ? {} : { paused: tv.task.paused }),
               group: taskListGroupOf(tv.task),
               segment: finished ? null : flow.segment,
-              model:
-                flow.worker ??
-                started.at(-1)?.modelName ??
-                (lastSession ? routeInfo(lastSession.routeId).modelName : null),
+              model: flow.worker ?? started.at(-1)?.modelName ?? null,
               createdAt: tv.task.createdAt,
               updatedAt,
               cost,
@@ -2803,7 +2779,6 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     async task(taskId) {
       await wait();
       const tv = findTask(taskId);
-      const runs = [...tv.runs, ...tv.subtasks.flatMap((s) => s.runs)];
       // 三段的流水和真后端 segmentRunViews 一个读法（shared 的 readSegmentRun）：模型名查目录、计费方式查渠道
       const finished = TERMINAL.has(tv.task.state);
       const segmentRuns = (tv.segmentRuns ?? []).map((r) =>
@@ -2821,24 +2796,10 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         task: tv.task,
         repo: repoView(tv.task.repoId),
         subtasks: tv.subtasks.map(subtaskView),
-        runs: runs.map(runView),
         segmentRuns,
         routePins: { pins: tv.routePins ?? [] },
-        // 和真后端同一个算法（shared 的 usage.ts）：按路由上的模型记，花费按渠道的计费方式分
-        usage: summarizeUsage(
-          [...runs]
-            .sort((a, b) => a.queuedAt.localeCompare(b.queuedAt))
-            .map((r) => {
-              const info = routeInfo(r.routeId);
-              return {
-                ...r,
-                model: info.route?.modelId ?? r.routeId,
-                modelName: info.modelName,
-                billing: info.billing,
-              };
-            }),
-          segmentRuns,
-        ),
+        // 和真后端同一个算法（shared 的 usage.ts）：只算三段的流水
+        usage: summarizeUsage(segmentRuns),
       });
     },
     async runTranscript(taskId, runId, query) {

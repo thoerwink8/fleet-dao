@@ -158,7 +158,7 @@ describe('三段的一笔和合计', () => {
       readSegmentRun(run({ id: 'c', model: 'kimi-k3', modelName: 'Kimi' }), ctx),
       readSegmentRun(run({ id: 'd', segment: 'verify', tier: undefined, cacheWriteTokens: undefined }), ctx),
     ];
-    const u = summarizeUsage([], views);
+    const u = summarizeUsage(views);
     expect(u.total.estimate).toEqual({ runs: 1, usd: 0.7, noPrice: 1, noTokens: 1 });
     expect(u.total.cost.metered.usd).toBe(1.5);
     const manual = u.bySegment.find((s) => s.segment === 'manual');
@@ -170,24 +170,5 @@ describe('三段的一笔和合计', () => {
       noTokens: 0,
     });
     expect(u.bySegment.find((s) => s.segment === 'verify')?.estimate.noTokens).toBe(1);
-  });
-
-  it('老流程的会话不估（记的是路由编号、对不上目录）：没报花费照旧记「没读到」', () => {
-    const u = summarizeUsage(
-      [
-        {
-          stage: 'execute',
-          queuedAt: '2026-10-07T00:59:00Z',
-          startedAt: '2026-10-07T01:00:00Z',
-          endedAt: '2026-10-07T01:10:00Z',
-          model: 'm',
-          modelName: 'M',
-          ...FULL,
-        },
-      ],
-      [],
-    );
-    expect(u.total.estimate).toEqual({ runs: 0, usd: 0, noPrice: 0, noTokens: 0 });
-    expect(u.total.missingCost).toBe(1);
   });
 });

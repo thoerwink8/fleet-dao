@@ -2,7 +2,6 @@
 
 import { poolDataTimes, quotaReadOverdue } from '@fleet-dao/db';
 import {
-  type ActivitySchema,
   type Ban,
   type BillingKind,
   type BoardResponse,
@@ -23,14 +22,11 @@ import {
   type NotificationSchema,
   type Pool,
   type PoolViewSchema,
-  type ProgressSchema,
   type Repo,
   type Route,
-  type RunSchema,
   readDecisionAction,
   readSegmentRun,
   type SegmentRunView,
-  type SessionRun,
   type StageKind,
   type Subtask,
   summarizeUsage,
@@ -45,12 +41,9 @@ import type {
   PoolOccupancyRead,
   PullRequestRecord,
   QuotaWindowRecord,
-  RunPlan,
   SegmentRunRecord,
 } from './ports.ts';
 
-type Activity = z.input<typeof ActivitySchema>;
-type Progress = z.input<typeof ProgressSchema>;
 
 export const STAGE_WORDS: Record<StageKind, string> = {
   triage: '分诊',
@@ -99,85 +92,11 @@ export function routeLookup(
 }
 
 /**
- * 老流程（Fusion）的会话：09-29 起没人写的会话表、进度表在 #2357 删了，库里没有老流程会话可读（三段的流水走 segmentRuns）。
- * 看板、任务详情、任务列表里老流程的那几块照旧收这个入参，恒为空。
+ * 任务详情、任务列表的用量汇总：segments 是三段读好的流水（segmentRunViews 的结果），算法在 shared 的 usage.ts。
+ * 老流程（Fusion）的会话表 #2357 已删，用量只有三段这一路。
  */
-export const NO_OLD_FLOW_RUNS: SessionRun[] = Object.freeze([]) as unknown as SessionRun[];
-
-export function progressOf(plan: RunPlan | undefined): Progress | undefined {
-  if (!plan || plan.steps.length === 0) return undefined;
-  return { done: plan.steps.filter((s) => s.state === 'done').length, total: plan.steps.length };
-}
-
-export function activityOf(run: SessionRun, plan: RunPlan | undefined, info: RouteInfo): Activity {
-  const queued = !run.startedAt;
-  const step = plan?.steps.find((s) => s.state === 'in_progress')?.title;
-  const doing = queued ? '排队中' : `正在${(step ?? STAGE_WORDS[run.stage]).replace(/^正在/, '')}`;
-  return {
-    runId: run.id,
-    stage: run.stage,
-    routeId: run.routeId,
-    modelName: info.modelName,
-    hostId: info.hostId,
-    queued,
-    since: run.startedAt ?? run.queuedAt,
-    step,
-    text: `${info.modelName} ${doing}`,
-  };
-}
-
-function latest(runs: SessionRun[]): SessionRun | undefined {
-  let best: SessionRun | undefined;
-  for (const r of runs) {
-    if (!best || (r.startedAt ?? r.queuedAt) > (best.startedAt ?? best.queuedAt)) best = r;
-  }
-  return best;
-}
-
-export function runView(run: SessionRun, info: RouteInfo): z.input<typeof RunSchema> {
-  return {
-    id: run.id,
-    subtaskId: run.subtaskId,
-    stage: run.stage,
-    routeId: run.routeId,
-    modelName: info.modelName,
-    hostId: info.hostId,
-    whyRoute: run.whyRoute,
-    queuedAt: run.queuedAt,
-    startedAt: run.startedAt,
-    endedAt: run.endedAt,
-    outcome: run.outcome,
-    inputTokens: run.inputTokens,
-    outputTokens: run.outputTokens,
-    cacheReadTokens: run.cacheReadTokens,
-    cacheWriteTokens: run.cacheWriteTokens,
-    costUsd: run.costUsd,
-    billing: info.billing,
-  };
-}
-
-/**
- * 任务详情的用量汇总：记在路由上的模型名下（和 Fusion 关单评论「各模型额度」一个口径），算法在 shared 的 usage.ts。
- * 花费按渠道的计费方式分按量、套餐内：route 要用带渠道表的 routeLookup，不然全记成分不清。
- * segments 是三段读好的流水（segmentRunViews 的结果）：合计、按模型里一起算，另出按段一组。
- */
-export function usageView(
-  runs: readonly SessionRun[],
-  route: (routeId: string) => RouteInfo,
-  segments: readonly SegmentRunView[] = [],
-): TaskUsage {
-  return summarizeUsage(
-    runs.map((r) => {
-      const info = route(r.routeId);
-      return {
-        ...r,
-        model: info.route?.modelId ?? r.routeId,
-        modelName: info.modelName,
-        billing: info.billing,
-      };
-    }),
-    segments,
-  );
+export function usageView(segments: readonly SegmentRunView[]): TaskUsage {
+  return summarizeUsage(segments);
 }
 
 /**
@@ -205,43 +124,27 @@ export function segmentRunViews(
 export interface BoardInput {
   tasks: Task[];
   subtasks: Subtask[];
-  /** 只放没结束的会话。 */
-  activeRuns: SessionRun[];
-  plans: Map<string, RunPlan>;
-  route: (routeId: string) => RouteInfo;
 }
 
 export function subtaskViews(taskId: string, input: BoardInput): z.input<typeof BoardSubtaskSchema>[] {
   return input.subtasks
     .filter((s) => s.taskId === taskId)
     .sort((a, b) => a.index - b.index)
-    .map((s) => {
-      const run = latest(input.activeRuns.filter((r) => r.subtaskId === s.id));
-      const plan = run ? input.plans.get(run.id) : undefined;
-      return {
-        id: s.id,
-        index: s.index,
-        title: s.title,
-        state: s.state,
-        prNumber: s.prNumber,
-        dependsOn: s.dependsOn,
-        touches: s.touches,
-        progress: progressOf(plan),
-        activity: run ? activityOf(run, plan, input.route(run.routeId)) : undefined,
-      };
-    });
-}
-
-export function taskActivity(taskId: string, input: BoardInput): Activity | undefined {
-  const run = latest(input.activeRuns.filter((r) => r.taskId === taskId && !r.subtaskId));
-  return run ? activityOf(run, input.plans.get(run.id), input.route(run.routeId)) : undefined;
+    .map((s) => ({
+      id: s.id,
+      index: s.index,
+      title: s.title,
+      state: s.state,
+      prNumber: s.prNumber,
+      dependsOn: s.dependsOn,
+      touches: s.touches,
+    }));
 }
 
 export function buildBoard(repo: Repo, input: BoardInput, now: Date): z.input<typeof BoardResponse> {
   const tasks = [...input.tasks].sort(
     (a, b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt),
   );
-  const titleOf = new Map(tasks.map((t) => [t.id, t.title]));
   const boardTasks: z.input<typeof BoardTaskSchema>[] = tasks.map((t) => {
     const subtasks = subtaskViews(t.id, input);
     return {
@@ -253,23 +156,14 @@ export function buildBoard(repo: Repo, input: BoardInput, now: Date): z.input<ty
       requestedBy: t.requestedBy,
       createdAt: t.createdAt,
       progress: { done: subtasks.filter((s) => s.state === 'merged').length, total: subtasks.length },
-      activity: taskActivity(t.id, input),
       subtasks,
     };
   });
-  const now_ = input.activeRuns
-    // 不属于任何需求的会话（帅位、考新模型）不上仓的看板。
-    .filter((r): r is SessionRun & { taskId: string } => r.taskId !== undefined && titleOf.has(r.taskId))
-    .map((r) => ({
-      ...activityOf(r, input.plans.get(r.id), input.route(r.routeId)),
-      taskId: r.taskId,
-      taskTitle: titleOf.get(r.taskId) ?? '',
-      subtaskId: r.subtaskId,
-    }));
   return {
     repo: { id: repo.id, owner: repo.owner, name: repo.name, defaultBranch: repo.defaultBranch },
     tasks: boardTasks,
-    now: now_,
+    // 「此刻」原来列老流程在跑的会话；老会话表 #2357 删了，三段的在跑看主页「在跑的」
+    now: [],
     asOf: now.toISOString(),
   };
 }
@@ -441,28 +335,19 @@ export function pendingDecisionByTask(input: {
 
 /**
  * 「在跑的」：没结束的需求（done / stopped / failed 之外）。在哪一段、谁在做、最近一次事件从三段流水推（home-flow.ts 的
- * taskFlow），「还没验」不许按字段猜成失败；一笔流水都没记的老单 segment 是 null。waitingReason：被人暂停（#820 片 3，Task.paused）→ paused，排在最前（有 decision 级通知就从它的时刻起算，没有就不给起点）；有 run 排队没开工 → queue；动手收了验收还没起 → verify_round；
+ * taskFlow），「还没验」不许按字段猜成失败；一笔流水都没记的老单 segment 是 null。waitingReason：被人暂停（#820 片 3，Task.paused）→ paused，排在最前（有 decision 级通知就从它的时刻起算，没有就不给起点）；动手收了验收还没起 → verify_round；
  * 在合并 → merge_queue；其余 nothing。额度、内存、CI 这几种等 segment 之外的信号才分得出，分不出时不猜。
  */
 export function homeRunning(input: {
   tasks: Task[];
-  activeRuns: SessionRun[];
   repoOf: (repoId: string) => { owner: string; name: string } | undefined;
   segmentRunsOf: (taskId: string) => SegmentRunView[];
   decisionOf: (taskId: string) => { title: string; since: string } | undefined;
 }): HomeRunning[] {
-  const taskIds = new Set(input.tasks.map((t) => t.id));
-  const queuedByTask = new Map<string, SessionRun>();
-  for (const r of input.activeRuns) {
-    if (r.taskId === undefined || !taskIds.has(r.taskId) || r.startedAt !== undefined) continue;
-    const prev = queuedByTask.get(r.taskId);
-    if (!prev || r.queuedAt < prev.queuedAt) queuedByTask.set(r.taskId, r);
-  }
   return [...input.tasks]
     .sort((a, b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt))
     .map((t) => {
       const repo = input.repoOf(t.repoId);
-      const queued = queuedByTask.get(t.id);
       const views = input.segmentRunsOf(t.id);
       const flow = taskFlow(t, views);
       // 这一刻在跑的那几笔（#1973）：编号就是会话 scope 的编号，看板拿它找这张单此刻占的内存、CPU
@@ -474,22 +359,18 @@ export function homeRunning(input: {
         ? 'paused'
         : t.state === 'stalled'
           ? 'parked'
-          : queued
-            ? 'queue'
-            : flow.segment === 'verify_pending'
-              ? 'verify_round'
-              : flow.segment === 'merge'
-                ? 'merge_queue'
-                : 'nothing';
+          : flow.segment === 'verify_pending'
+            ? 'verify_round'
+            : flow.segment === 'merge'
+              ? 'merge_queue'
+              : 'nothing';
       const waitingSince = t.paused
         ? undefined
         : waitingReason === 'parked'
           ? stalled?.since
-          : queued
-            ? queued.queuedAt
-            : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
-              ? flow.stageSince
-              : undefined;
+          : waitingReason === 'verify_round' || waitingReason === 'merge_queue'
+            ? flow.stageSince
+            : undefined;
       return {
         issueNumber: t.issueNumber,
         title: t.title,
@@ -608,7 +489,6 @@ export function homeHealth(input: {
 export function buildHome(input: {
   notifications: NotificationRecord[];
   tasks: Task[];
-  activeRuns: SessionRun[];
   merged: PullRequestRecord[];
   repos: Repo[];
   pools: z.input<typeof PoolViewSchema>[];
@@ -646,7 +526,6 @@ export function buildHome(input: {
   // 「要你拍的」「做完的」可能挂到不在 running 那份清单里的单（做完了的）；反查用全量。这里 tasks 由调用方给全量。
   const running = homeRunning({
     tasks: input.tasks.filter((t) => !TERMINAL_TASK_STATES.has(t.state)),
-    activeRuns: input.activeRuns,
     repoOf: (repoId) => repoById.get(repoId),
     segmentRunsOf: (taskId) => runViews.get(taskId) ?? [],
     decisionOf: (taskId) => decisionByTask.get(taskId),

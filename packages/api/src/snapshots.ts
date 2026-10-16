@@ -20,7 +20,7 @@ import {
   scheduleFact,
   versionFact,
 } from './env-view.ts';
-import { buildHome, buildPools, NO_OLD_FLOW_RUNS } from './views.ts';
+import { buildHome, buildPools } from './views.ts';
 
 type EngineHealth = z.input<typeof HomeHealthSchema>['engine'];
 
@@ -88,7 +88,6 @@ export async function readHomeSnapshot(deps: SnapshotDeps): Promise<z.input<type
   return buildHome({
     notifications: notifications.items,
     tasks,
-    activeRuns: NO_OLD_FLOW_RUNS,
     merged,
     repos,
     pools: poolViews,

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
-// 任务页（#216）：三段的单按段、按模型显示耗时、token、花费，每一笔逐个列；读不到的写「没读到」和原因，不写 0。
-// 老流程的单照旧是会话时间线加「时间与用量」。每条读不到的路径都故意造一次。
+// 任务页（#216）：单子按段、按模型显示耗时、token、花费，每一笔逐个列；读不到的写「没读到」和原因，不写 0。
+// 每条读不到的路径都故意造一次。
 import {
   readSegmentRun,
   type SegmentRunFacts,
@@ -122,16 +122,6 @@ describe('页头：面包屑代替「回任务列表」按钮（#1903）', () =>
   });
 });
 
-describe('老流程的单', () => {
-  test('没有三段的流水：照旧是会话时间线和「时间与用量」', async () => {
-    // t-12 现在也带三段流水（主页流水线图的演示数据），老流程的样例换成 t-19（只有会话）
-    open('/tasks/t-19');
-    expect(await screen.findByRole('heading', { name: '时间与用量' })).toBeTruthy();
-    expect(screen.getByRole('heading', { name: '会话时间线' })).toBeTruthy();
-    expect(screen.queryByRole('heading', { name: '三段' })).toBeNull();
-  });
-});
-
 /** 照真后端的路子拼一份任务详情：每一笔过 readSegmentRun，用量过 summarizeUsage，整个过一遍接口约定。 */
 function detailWith(facts: SegmentRunFacts[], state: TaskDetail['task']['state'] = 'running'): TaskDetail {
   const segmentRuns = facts.map((f) => readSegmentRun(f, { taskFinished: state === 'done' }));
@@ -149,9 +139,8 @@ function detailWith(facts: SegmentRunFacts[], state: TaskDetail['task']['state']
     },
     repo: { id: 'r-1', owner: 'acme', name: 'orbit', defaultBranch: 'main' },
     subtasks: [],
-    runs: [],
     segmentRuns,
-    usage: summarizeUsage([], segmentRuns),
+    usage: summarizeUsage(segmentRuns),
     routePins: { pins: [] },
   });
 }
