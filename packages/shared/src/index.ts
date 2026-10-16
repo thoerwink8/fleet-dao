@@ -22,6 +22,7 @@ export * from './probe-history.ts';
 export * from './quota.ts';
 export * from './quota-reserve.ts';
 export * from './realtime.ts';
+export * from './repo-profile.ts';
 export * from './request-chat.ts';
 export * from './request-progress.ts';
 export * from './request-rules.ts';

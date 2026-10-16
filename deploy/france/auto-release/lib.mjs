@@ -19,6 +19,7 @@
 // - RULES_USERS 要和 deploy/france.sh 的 AGENT_RULES_USERS 一样；HUMAN_TIER_PATHS 要盖住人工档（deploy/lib/human-tier.sh）读的仓里文件（测试都核对）。
 // - 驾驶舱按钮的接活脚本（deploy/france/release-request/lib.mjs）import 这里的 ciVerdict 判 CI：它是对外的发布闸，改判法要两边的测试一起看。
 // - 读不到、认不出的一律记成「没查成」，不拿空、0 当没事（agents/shared-rules.md「底线」）。
+import { createHash } from 'node:crypto';
 import { DESIRED_FILE, judgeConfig } from './config.mjs';
 
 export const STATE_SCHEMA = 1;
@@ -67,12 +68,10 @@ export const HUMAN_TIER_PATHS = [
   'deploy/lib/session-user.sh',
   'deploy/lib/login-user.sh',
   'deploy/lib/session-ports.sh',
-  // 驾驶舱「发布到法国」按钮的接活（setup_release_request）：一个由 fleet 写的文件触发 root 发版的口子，装它要人跑整套
+  // 驾驶舱「发布到法国」按钮的接活（setup_release_request）：一个由 fleet 写的文件触发 root 发版的口子，装它要人跑整套。
+  // 只有单元和目录是人工档；接活脚本（release-request/*.mjs）是自动档，发完版由 france.sh --auto-tier 换上（#2728）
   'deploy/france/fleet-release-request.service',
   'deploy/france/fleet-release-request.path',
-  'deploy/france/release-request/lib.mjs',
-  'deploy/france/release-request/session-wait.mjs',
-  'deploy/france/release-request/fleet-release-request.mjs',
   // sshd 抗扫描和 fail2ban 的 sshd jail（#1348，setup_sshd_hardening、setup_fail2ban_sshd）：改的是登录入口，配错了连 root 都登不上，要人跑整套
   'deploy/france/sshd-hardening.conf',
   'deploy/france/fail2ban-sshd.jail',
@@ -157,11 +156,60 @@ export const RETIRED_ALERT_PREFIXES = [
 ];
 /** france.sh 的退出码 2（deploy/lib/common.sh 的 finish）：没有红，但有待配或没查成。自动档这样退出算装上了。 */
 export const EXIT_PENDING = 2;
+/**
+ * 发版还没动手（第 0–3 步没成、release.sh 没起，什么都还没动）的那一趟不挡自动发版：下一轮照常再请求同一个提交。
+ * 同一个提交这样连败这么多趟才停，并开一张急修单（#2728）。计数记在发版进度记录（release-train.json 的 untouchedFails）里，
+ * 由接活单元每趟写（release-request/lib.mjs 的 runRequest、runPhases），不靠哪个进程的内存。
+ */
+export const UNTOUCHED_FAIL_LIMIT = 3;
+/** 急修单开没开成：没开成报这一条（每轮再试，开成了自己撤）。 */
+export const EMERGENCY_KEY = `${ALERT_PREFIX}emergency-issue`;
+/** 在用那一版的依赖（node_modules）发版后被动过：`auto-release:deps:<提交号>`，下一次发版（换了提交）自己撤。 */
+export const DEPS_PREFIX = `${ALERT_PREFIX}deps:`;
+/**
+ * 装在 /usr/local/lib 下、以 root 跑的脚本副本：自动档（france.sh --auto-tier）照在用那一版装。每轮拿副本和在用那一版里的原件比哈希，
+ * 不一致记进状态的 installed，后端 /healthz 的 deploy_lag 当轮就报（packages/store/src/deploy-lag.ts）。文件清单和 france.sh 的
+ * AUTO_RELEASE_FILES、RELEASE_REQUEST_FILES 一样（测试核对）。
+ */
+export const INSTALLED_COPIES = [
+  {
+    dir: '/usr/local/lib/fleet-dao/auto-release',
+    src: 'deploy/france/auto-release',
+    files: ['lib.mjs', 'fleet-auto-release.mjs', 'config.mjs'],
+  },
+  {
+    dir: '/usr/local/lib/fleet-dao/release-request',
+    src: 'deploy/france/release-request',
+    files: ['lib.mjs', 'session-wait.mjs', 'fleet-release-request.mjs'],
+  },
+];
 
 export const short = (sha) => (typeof sha === 'string' && sha ? sha.slice(0, 12) : '（没有）');
 const iso = (d) => new Date(d).toISOString();
 const why = (e) => (e instanceof Error ? e.message : String(e)).replace(/\s+/g, ' ').trim().slice(0, 400);
 const minutes = (ms) => Math.max(0, Math.round(ms / 60_000));
+
+/**
+ * 认得出的关键行：Node 的模块找不到（`Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'x' imported from …`）、
+ * 带错误码的那一行、`XxxError: …`、命令找不到。Node 崩的时候 stderr 最后几行是 `code: '…' / } / Node.js v22…`，
+ * 只取尾几行会把缺的是哪个模块丢掉（#2728）。
+ */
+const KEY_LINE =
+  /Cannot find (?:module|package)|\[ERR_[A-Z_]+\]|^(?:[A-Z][A-Za-z]*)?Error\b.*:|command not found|No such file or directory|permission denied/i;
+
+/**
+ * 失败原因：先放认得出的关键行（最多 2 行），再放尾 n 行（重复的不再放），用「 / 」连起来，最长 600 字。
+ * 发版接活、自动发布记失败原因都用它，不只取尾几行。
+ */
+export function reasonOf(text, n = 3) {
+  const lines = String(text ?? '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const last = lines.slice(-n);
+  const keys = lines.filter((l) => KEY_LINE.test(l) && !last.includes(l));
+  return [...new Set(keys)].slice(0, 2).concat(last).join(' / ').slice(0, 600);
+}
 
 /** `git log --first-parent --format='%H %cI'`：新的在前。认不出一行就抛，不拿半截当全部。 */
 export function parseMainLog(text) {
@@ -238,6 +286,14 @@ export function carryOver(prev) {
     config: null,
     /** 自动发版最近一次请求的提交和时间（带到下一轮，防同一个头 REQUEST_DEDUPE_MS 内重复请求）；note 是这一轮为什么发或没发。 */
     auto: p.auto ? { sha: p.auto.sha ?? null, at: p.auto.at ?? null, note: null } : null,
+    /** 同一个提交发版还没动手就连败 UNTOUCHED_FAIL_LIMIT 趟、开的急修单：{ sha, number, url, at } 或没开成 { sha, number: null, error, at }。 */
+    emergency: p.emergency ?? null,
+    /** 已撤过失败卡的那一趟目标（被后来的发版取代，supersededStep；同一个只撤一次）。 */
+    superseded: typeof p.superseded === 'string' ? p.superseded : null,
+    /** 在用那一版依赖的指纹（发版后第一轮记下，之后每轮核对）：{ commit, fingerprint, prunedAt, recordedAt, result, detail, checkedAt }。 */
+    deps: p.deps ?? null,
+    /** /usr/local/lib 下脚本副本和在用那一版的原件对不对得上（每轮重算）：{ commit, checkedAt, result: ok|drift|unchecked, drift, detail }。 */
+    installed: null,
     /** 单元还会发版时开的那几类报警撤过了没有（RETIRED_ALERT_PREFIXES）。 */
     retiredCleared: p.retiredCleared === true,
     // 老状态里没发出去的、已经不归这个单元管的报警（发布没成之类）不再发
@@ -265,6 +321,9 @@ export async function runOnce(io, prev) {
   if (current !== undefined) await releaseStep(io, st, now, current);
   if (current !== undefined) await tierStep(io, st, now, current);
   if (current !== undefined) await rulesStep(io, st, now, current);
+  if (current !== undefined) await supersededStep(io, st, current);
+  if (current) await installedStep(io, st, io.now(), current);
+  if (current) await depsStep(io, st, io.now(), current);
   await configStep(io, st, io.now());
   await flushAlerts(io, st);
   return st;
@@ -499,11 +558,36 @@ export function trainFailureSuperseded(train, current, mainline) {
 }
 
 /**
+ * 这一趟是不是「发版还没动手就没成」、同一个提交连着这样几趟了（#2728）：状态 failed、release.sh 没起（release.started 不为真）、
+ * 停在第 0–3 步。是的话回连败趟数（进度记录的 untouchedFails；老记录没有这个键算 1 趟），不是回 0。
+ */
+export function untouchedFails(train) {
+  if (!train || typeof train !== 'object' || train.status !== 'failed') return 0;
+  if (train.release && typeof train.release === 'object' && train.release.started === true) return 0;
+  if (!Number.isInteger(train.phase) || train.phase < 0 || train.phase > 3) return 0;
+  return Number.isInteger(train.untouchedFails) && train.untouchedFails > 0 ? train.untouchedFails : 1;
+}
+
+/** 进度记录原文 → 对象；不在、认不出回 null（gateVerdict 自己会把认不出当原因）。 */
+function parseTrain(text) {
+  if (text === null || text === undefined) return null;
+  try {
+    const t = JSON.parse(String(text));
+    return t !== null && typeof t === 'object' && typeof t.status === 'string' ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+const trainTarget = (t) => (t?.target && typeof t.target === 'object' ? t.target.value : '');
+
+/**
  * 自动发版的闸：releaseGate 读来的事实 → 回 null（可以发）或不发的原因。读不到、认不出的一律是原因，不当成可以发。
  * facts：{ missing: 缺的接活文件（数组，空 = 装了）, requestPending: 上一份请求还没被接走, marker: 有暂停标记,
  * trainText: 发版进度文件原文（不在是 null）, lockBusy: 发布锁被占着,
- * current: 法国 current 的提交号（没有是 null）, mainline: 主线提交号，从新到旧 }。
- * failed 记录：current 已等于或新于它所记 target 时不挡（trainFailureSuperseded）。
+ * current: 法国 current 的提交号（没有是 null）, mainline: 主线提交号，从新到旧, target: 这一轮要发的提交 }。
+ * failed 记录：current 已等于或新于它所记 target 时不挡（trainFailureSuperseded）；发版还没动手就没成的（untouchedFails）
+ * 不挡，下一轮照常重试——同一个提交连败 UNTOUCHED_FAIL_LIMIT 趟才挡（换了要发的提交不挡：修好的新提交要能发上来）。
  */
 export function gateVerdict(facts) {
   if (!facts || typeof facts !== 'object') return '发版闸的事实没读到';
@@ -534,7 +618,12 @@ export function gateVerdict(facts) {
       t.status !== 'aborted' &&
       !trainFailureSuperseded(t, facts.current, facts.mainline)
     ) {
-      return `上一趟发版是「${t.status}」状态，要人看，不自动再发`;
+      const n = untouchedFails(t);
+      if (n === 0) return `上一趟发版是「${t.status}」状态，要人看，不自动再发`;
+      const sameTarget = typeof facts.target !== 'string' || facts.target === trainTarget(t);
+      if (n >= UNTOUCHED_FAIL_LIMIT && sameTarget) {
+        return `${short(trainTarget(t))} 发版还没动手就连败 ${n} 趟（第 ${t.phase} 步：${why(t.why ?? '没写原因')}），不再自动发，等急修`;
+      }
     }
   }
   return null;
@@ -576,22 +665,33 @@ async function releaseStep(io, st, now, current) {
     green.index === 0
       ? ''
       : `；头 ${short(head)} 的 CI ${headCi === 'pending' ? '还在跑' : `不是绿的（${headCi}）`}，发最近绿的 ${short(target)}，比在用的新 ${idx - green.index} 个`;
-  const askedAt = st.auto?.sha === target ? Date.parse(st.auto.at ?? '') : Number.NaN;
-  if (!Number.isNaN(askedAt) && Number(now) - askedAt < REQUEST_DEDUPE_MS) {
-    return note(`刚请求过 ${short(target)}，等接活单元发${reason}`);
-  }
-  let blocked;
+  let gateFacts = null;
+  let blocked = null;
   try {
-    const gateFacts = await io.releaseGate();
-    blocked = gateVerdict({
-      ...gateFacts,
-      current,
-      mainline: Array.isArray(st.main?.commits) ? st.main.commits.map((row) => row[0]) : [],
-    });
+    gateFacts = await io.releaseGate();
   } catch (e) {
     blocked = `发版闸读不到：${why(e)}`;
   }
-  if (blocked) return note(`现在不发：${blocked}${reason}`);
+  const train = parseTrain(gateFacts?.trainText);
+  // 防重复只管「请求写了、接活单元还没写进度」那个空档：进度记录里已经有这次请求之后起的一趟（比如第 0 步没成），就不算刚请求过
+  const askedAt = st.auto?.sha === target ? Date.parse(st.auto.at ?? '') : Number.NaN;
+  const pickedUp = trainTarget(train) === target && Date.parse(String(train?.startedAt ?? '')) >= askedAt;
+  if (!Number.isNaN(askedAt) && Number(now) - askedAt < REQUEST_DEDUPE_MS && !pickedUp) {
+    return note(`刚请求过 ${short(target)}，等接活单元发${reason}`);
+  }
+  blocked ??= gateVerdict({
+    ...gateFacts,
+    current,
+    target,
+    mainline: Array.isArray(st.main?.commits) ? st.main.commits.map((row) => row[0]) : [],
+  });
+  if (blocked) {
+    const n = untouchedFails(train);
+    if (n >= UNTOUCHED_FAIL_LIMIT && trainTarget(train) === target) {
+      return note(`现在不发：${blocked}；${await emergencyStep(io, st, now, train, n)}${reason}`);
+    }
+    return note(`现在不发：${blocked}${reason}`);
+  }
   try {
     await io.requestRelease({ sha: target, at: iso(now), by: AUTO_RELEASE_BY });
   } catch (e) {
@@ -605,12 +705,89 @@ async function releaseStep(io, st, now, current) {
     return;
   }
   resolveKeyLater(st, AUTO_REQUEST_KEY);
+  // 连败停下的那个提交被挡着，能写出请求说明要发的已经换了（修好的新提交）：急修单没开成的那条报警不用再挂
+  resolveKeyLater(st, EMERGENCY_KEY);
   st.auto = {
     sha: target,
     at: iso(now),
     note: `已请求自动发版 ${short(target)}（在用 ${short(current)}，落后 ${idx} 个提交${reason}）`,
   };
   act(st, now, 'auto-release-requested', `请求发 ${short(target)}`);
+}
+
+const PHASE_NAMES = ['预检', '暂停本机', '暂停法国', '等收尾'];
+
+/**
+ * 连败停下时开的急修单（引擎能接的四节单，贴「缺陷」、进当前版本；不是要人拍的卡）。key 按提交，同一个提交只开一张
+ * （fleet-api emergency-issue 按 key 幂等）。「怎么算做完」只写 diff 里看得见的。
+ */
+export function emergencyIssue(train, n) {
+  const sha = trainTarget(train);
+  const phase = Number.isInteger(train?.phase) ? train.phase : 0;
+  const step = `第 ${phase} 步「${PHASE_NAMES[phase] ?? '?'}」`;
+  const reason = why(train?.why ?? '进度记录没写原因');
+  return {
+    key: `release-untouched:${sha}`,
+    title: `急修：法国自动发版 ${short(sha)} 在${step}连败 ${n} 趟，已停`,
+    body: [
+      '## 场景',
+      '',
+      `法国自动发版请求发 \`${sha}\`，接活单元（fleet-release-request）在${step}就没成、什么都还没动；同一个提交连着 ${n} 趟都这样，` +
+        '自动发版停下、不再请求这个提交（主线上新的提交照常发）。',
+      '',
+      `最后一趟的原因：${reason}`,
+      '',
+      '现场（只读）：`journalctl -u fleet-release-request -n 100`；进度 `/srv/fleet-dao-releases/.train/release-train.json`；' +
+        '自动发布的读数 `journalctl -u fleet-auto-release -n 30`。',
+      '',
+      '## 原话',
+      '',
+      '无（AI 发现：法国自动发布单元在同一个提交发版连败时开的急修单，#2728）。',
+      '',
+      '## 已知的模块',
+      '',
+      '- `deploy/france/release-request/lib.mjs`',
+      '- `deploy/france/release-request/fleet-release-request.mjs`',
+      '- `deploy/france/auto-release/lib.mjs`',
+      '',
+      '## 怎么算做完',
+      '',
+      `- 找到${step}没成的根因，修在必经的那一步；测试里造出同样的失败，改前红、改后绿。`,
+      '- 失败原因里写得出是哪一样没成（模块名、命令、文件），不是只有尾几行。',
+    ].join('\n'),
+  };
+}
+
+/**
+ * 同一个提交连败 UNTOUCHED_FAIL_LIMIT 趟、自动发版停下：开急修单（io.fileIssue，真的是 current 那一版的 fleet-api emergency-issue）。
+ * 开成了记进 st.emergency，不再开；没开成（fleet-api 本身坏了、GitHub 不通）报 EMERGENCY_KEY、每轮再试。回一句写进 note 的话。
+ */
+async function emergencyStep(io, st, now, train, n) {
+  const sha = trainTarget(train);
+  if (st.emergency?.sha === sha && Number.isInteger(st.emergency.number)) {
+    return `已开急修单 #${st.emergency.number}，等修好的新提交`;
+  }
+  const issue = emergencyIssue(train, n);
+  let got;
+  try {
+    if (typeof io.fileIssue !== 'function') throw new Error('这台没接上开单（io.fileIssue）');
+    got = await io.fileIssue(issue);
+    if (!got || !Number.isInteger(got.number)) throw new Error('开单的回话里没有单号');
+  } catch (e) {
+    st.emergency = { sha, number: null, error: why(e), at: iso(now) };
+    keepRaised(
+      st,
+      EMERGENCY_KEY,
+      `自动发版 ${short(sha)} 连败 ${n} 趟停了，急修单没开成`,
+      `${issue.title}。开急修单没成：${why(e)}。每轮自动再试；最后一趟的原因：${why(train?.why ?? '没写')}。`,
+    );
+    act(st, now, 'emergency-issue-failed', why(e));
+    return `急修单没开成（${why(e)}），下一轮再开`;
+  }
+  st.emergency = { sha, number: got.number, url: got.url ?? null, at: iso(now) };
+  resolveKeyLater(st, EMERGENCY_KEY);
+  act(st, now, 'emergency-issue', `开了急修单 #${got.number}`);
+  return `已开急修单 #${got.number}，等修好的新提交`;
 }
 
 /**
@@ -1071,6 +1248,140 @@ async function rulesStep(io, st, now, current) {
   );
 }
 
+const sha256 = (text) => createHash('sha256').update(String(text)).digest('hex');
+
+/** 发版接活单元记的提醒键前缀（release-request/lib.mjs 的 RELEASE_NOTE_PREFIX、releaseNote）。 */
+const RELEASE_NOTE_PREFIX = 'release:';
+
+/**
+ * 被后来的发版取代了的失败卡自动撤（#2728）：进度记录是 failed、而在用的已经等于或新于那一趟的目标（trainFailureSuperseded），
+ * 那一趟的 `release:failed:<前12位>:` 提醒就没有要处理的了（10-16 17:17 一趟 --check 网络超时判了失败，3 分钟后下一版发成功，那张卡一直开着）。
+ * 撤走 flushAlerts 的按前缀解除（resolved_by auto-release）；同一个目标只撤一次（st.superseded 记下），撤不成下一轮接着撤（resolve 队列）。
+ * io.readTrain() 回进度记录原文（不在回 null，读不了抛）；没接这个口子的跳过。读不了记一笔、不撤。
+ */
+async function supersededStep(io, st, current) {
+  if (typeof io.readTrain !== 'function' || !st.main) return;
+  let text;
+  try {
+    text = await io.readTrain();
+  } catch (e) {
+    act(st, io.now(), 'train-unreadable', `发版进度记录读不到，没核失败卡被取代没有：${why(e)}`);
+    return;
+  }
+  const t = parseTrain(text);
+  if (t?.status !== 'failed') return;
+  const sha = trainTarget(t);
+  if (!sha || st.superseded === sha) return;
+  if (
+    !trainFailureSuperseded(
+      t,
+      current,
+      st.main.commits.map((row) => row[0]),
+    )
+  )
+    return;
+  const prefix = `${RELEASE_NOTE_PREFIX}failed:${short(sha)}:`;
+  if (!st.resolve.includes(prefix)) st.resolve.push(prefix);
+  st.superseded = sha;
+}
+
+/**
+ * 脚本副本对账（#2728）：/usr/local/lib 下以 root 跑的副本（INSTALLED_COPIES）和在用那一版里的原件比哈希。不一致写进 st.installed
+ * （result: drift，列出哪几个），后端 /healthz 的 deploy_lag 当轮就报，不等 24 小时；读不到记 unchecked，不当成一致。
+ * io.readInstalled(current) 回 [{ name, installed: 原文|null（没装）, release: 原文|null }]，读不了抛。每轮重算、不带到下一轮。
+ */
+async function installedStep(io, st, now, current) {
+  if (typeof io.readInstalled !== 'function') return;
+  let files;
+  try {
+    files = await io.readInstalled(current);
+    if (!Array.isArray(files) || files.length === 0) throw new Error('读回来的文件清单是空的');
+  } catch (e) {
+    st.installed = { commit: current, checkedAt: iso(now), result: 'unchecked', drift: [], detail: why(e) };
+    return;
+  }
+  const drift = [];
+  const unread = [];
+  for (const f of files) {
+    if (typeof f?.release !== 'string') unread.push(`${f?.name ?? '?'}（在用那一版里没有原件）`);
+    else if (typeof f.installed !== 'string') drift.push(`${f.name}（没装）`);
+    else if (sha256(f.installed) !== sha256(f.release)) drift.push(f.name);
+  }
+  const result = drift.length > 0 ? 'drift' : unread.length > 0 ? 'unchecked' : 'ok';
+  st.installed = {
+    commit: current,
+    checkedAt: iso(now),
+    result,
+    drift,
+    detail:
+      result === 'ok'
+        ? ''
+        : [
+            drift.length ? `和在用的 ${short(current)} 不一样：${drift.join('、')}` : '',
+            unread.length ? `没查成：${unread.join('、')}` : '',
+          ]
+            .filter(Boolean)
+            .join('；'),
+  };
+}
+
+/** pnpm 的 node_modules/.modules.yaml 里的 prunedAt（上一次装依赖的时刻）；没有回 null。 */
+export function prunedAtOf(text) {
+  return /^\s*"?prunedAt"?\s*:\s*"?([^"\n]+?)"?\s*,?\s*$/m.exec(String(text ?? ''))?.[1] ?? null;
+}
+
+/**
+ * 依赖指纹（#2728）：在用那一版的 node_modules/.modules.yaml（pnpm 每装一次都重写，含 prunedAt）。发版后第一轮记下指纹，
+ * 之后每轮核对；变了（有人在发布目录里重装过依赖）当轮报警，正文写出前后两次的 prunedAt。换了在用的提交重新记、撤掉旧的报警。
+ * 读不到记 unchecked（不当成没变）。io.readDeps(current) 回原文，读不了抛。
+ */
+async function depsStep(io, st, now, current) {
+  if (typeof io.readDeps !== 'function') return;
+  const key = `${DEPS_PREFIX}${current}`;
+  let text;
+  try {
+    text = await io.readDeps(current);
+  } catch (e) {
+    st.deps = {
+      ...(st.deps?.commit === current
+        ? st.deps
+        : { commit: current, fingerprint: null, prunedAt: null, recordedAt: null }),
+      result: 'unchecked',
+      detail: why(e),
+      checkedAt: iso(now),
+    };
+    return;
+  }
+  const fingerprint = sha256(text);
+  const prunedAt = prunedAtOf(text);
+  if (st.deps?.commit !== current || typeof st.deps.fingerprint !== 'string') {
+    if (st.deps?.commit !== current) resolveLater(st, DEPS_PREFIX);
+    st.deps = {
+      commit: current,
+      fingerprint,
+      prunedAt,
+      recordedAt: iso(now),
+      result: 'ok',
+      detail: '',
+      checkedAt: iso(now),
+    };
+    return;
+  }
+  if (fingerprint === st.deps.fingerprint) {
+    st.deps = { ...st.deps, result: 'ok', detail: '', checkedAt: iso(now) };
+    return;
+  }
+  const detail = `在用的 ${short(current)} 的依赖发版后被重装过：记下时 prunedAt ${st.deps.prunedAt ?? '（没有）'}，现在 ${prunedAt ?? '（没有）'}`;
+  st.deps = { ...st.deps, result: 'changed', detail, checkedAt: iso(now) };
+  keepRaised(
+    st,
+    key,
+    `在用版本的依赖发版后被动过（${short(current)}）`,
+    `${detail}（${RELEASES}/${current}/node_modules/.modules.yaml，指纹 ${st.deps.fingerprint.slice(0, 12)} → ${fingerprint.slice(0, 12)}）。` +
+      '发布目录归 root、发完只读，不该有人再装；查是谁装的（journalctl、last、各会话的命令记录），下一次发版换了提交这条自己撤。',
+  );
+}
+
 /**
  * 配置那一半（#323）：拿法国 /etc/fleet-dao 下的环境文件跟在用那一版里的期望比（config.mjs 的 judgeConfig）。
  * 不一致的一项一条报警（键 auto-release:config:<文件>:<键>），改回去了下一轮自己解除；读不到、认不出记「没查成」
@@ -1186,6 +1497,14 @@ export function summary(st) {
         ? `装机脚本装到 ${short(st.system.appliedSha)}，之后相关提交 ${st.system.behind} 个`
         : '装机层没查过',
   );
+  if (st.installed && st.installed.result !== 'ok') {
+    parts.push(
+      `脚本副本${st.installed.result === 'drift' ? '和在用版本不一致' : '没查成'}：${st.installed.detail}`,
+    );
+  }
+  if (st.deps && st.deps.result !== 'ok') {
+    parts.push(`依赖指纹${st.deps.result === 'changed' ? '变了' : '没查成'}：${st.deps.detail}`);
+  }
   parts.push(configSummary(st.config));
   return parts.join('；');
 }
