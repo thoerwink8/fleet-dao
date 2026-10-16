@@ -5,11 +5,11 @@
 // 引擎无头会话（FLEET_HEADLESS=1）直接退出，不改项目设置；引擎的树（有 refs/fleet/incoming，别家执行体起的会话不带
 // FLEET_HEADLESS）也不改（#2721）。
 // 订阅文件读不成：不改项目设置，退出 0，并在 stderr 说明。退出 0 是为了不挡住开会话。
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gitRunner } from './git-run.mjs';
 import { PROCESS_HOOKS } from './plugin-catalog.mjs';
 import { writeProxyEnv } from './proxy-env.mjs';
 
@@ -201,12 +201,7 @@ export const ENGINE_TREE_REF = 'refs/fleet/incoming';
  * @param {string} cwd
  */
 export function isEngineTree(cwd) {
-  const r = spawnSync('git', ['-C', cwd, 'rev-parse', '--verify', '--quiet', `${ENGINE_TREE_REF}^{commit}`], {
-    encoding: 'utf8',
-    timeout: 10_000,
-    windowsHide: true,
-  });
-  return r.status === 0;
+  return gitRunner()(cwd, ['rev-parse', '--verify', '--quiet', `${ENGINE_TREE_REF}^{commit}`]).status === 0;
 }
 
 function isMain() {
