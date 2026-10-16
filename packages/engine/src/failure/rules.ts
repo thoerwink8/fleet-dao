@@ -413,7 +413,17 @@ export const RULES: readonly FailureRule[] = [
     text: /issue with the selected model|may not exist or you may not have access|absent from the ACP model catalog|model catalog has no match|cannot use this model|model[_ ]not[_ ]found|unknown model id|Couldn't set model '/i,
     routeOutcome: 'fail',
   },
-  // 点名的模型和实际回话的不一样：是这条路由的别名配错了（静默的）：停下报警，由人改这条路由。
+  // 点名的模型和实际回话的不一样（#2742）。归类是会话/路由身份不一致，不是三件别的事：
+  // - 不是比对串把 `[1m]` 剥错。mirasim/run.ts 的 modelMatches 已剥末尾方括号；点名 claude-sonnet-5-5、
+  //   读回 claude-opus-5-5[1m]，剥完仍是 sonnet 对 opus。
+  // - 不是 #1298。那一单是探针侧把目录里的 gpt-6-sol 换成 gpt-6-astra。
+  // - 不是 #2797。那一单是发版排空把还在跑的会话叫停（CANCELLED / engine_stop）。叫停本身不算这种失败。
+  // 能对上 #2742 的机制：续会话只比执行方式、账号池、会话用户，不比模型。发版叫停 opus 之后，同一
+  // mirasim-relay 池点名 sonnet，仍可能续上那段 opus，快照继续报 opus[1m]。中转静默换成另一个模型
+  // 也落成同一个码。两种都是这一段的身份和点名对不上，记进这条路由的失败（routeOutcome fail）。
+  // 这里仍判停下：老历史重放读到的判断就是挂起。新历史由任务工作流 patched('model-mismatch-reroute')
+  // 接住——停这一段，按点名路由开新会话重派一次；同一条再对不上就避开它。还有能派的就继续，一条都没有才挂起。
+  // 发版排空和 Mirasim 接回不在这里改。
   {
     id: 'MD3',
     title: '回话的模型不是点名的那个',

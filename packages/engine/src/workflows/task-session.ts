@@ -46,6 +46,10 @@
 //   只凭一次 HTTP 401 不暂停整池，按临时失败换一条路由；同一个池短时间里（BARE_401_WINDOW_MS）第二次 401 才暂停整池。
 //   第一次的时刻记在设置表里，别的任务再撞上同一次窗口也算第二次，不单记在这张单的内存里。
 //   避开之后一条能派的路由都没有，才挂起，原因写「能派的池都停了」。老历史没有这个标记，仍把这张单挂起。
+// - 点名和读回不是同一个模型（#2742，patched('model-mismatch-reroute')）：失败分流 MD3 仍判停下（老历史重放就是挂起）。
+//   新的不把整张单挂起。先停这一段，按点名这条路由开新会话重派一次（不续上一段：续会话不比模型，发版叫停 opus 之后
+//   同一池点名 sonnet 会续上 opus）。同一条再对不上，当成这条路由会换模，避开它再选。还有能派的就继续；
+//   选路确认一条都没有才挂起，不改去等探针，也不把刚避开的那条再派出去。老历史没有这个标记，仍在 MD3 上挂起。
 
 import { isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -135,6 +139,10 @@ export async function writeSession(
   let bare401Seq = 0;
   /** 这一次只凭 401 避开的路由：没有别的路由可换时，选路放它再试一次，好凑第二次。 */
   let bare401RouteId: string | undefined;
+  /** 点名和读回对不上、已经按点名重派过一次的路由（#2742）。同一条再对不上就避开，不在原会话上续。 */
+  const mismatchRetried = new Set<string>();
+  /** 已经因模型对不上避开了路由：选路一条都没有才挂起，不改去等探针。 */
+  let mismatchRoutesDown = false;
   // 动手前判这张单是不是界面活（#1264）：界面活按 ui 用途选路并带 uiWork，GPT 不派；判不出按界面活处理。
   // 判法是纯代码、不起活动；老历史（没有这个标记）重放照旧按 execute 选。
   const ui: UiJudgement | undefined = patched('ui-work-implement')
@@ -153,7 +161,9 @@ export async function writeSession(
       ui?.uiWork === true,
       authOn && authPoolsDown,
       authOn ? bare401RouteId : undefined,
+      mismatchRoutesDown,
     );
+    mismatchRoutesDown = false;
     bare401RouteId = undefined;
     failedChannel = undefined;
     const route = picked.route;
@@ -472,6 +482,28 @@ export async function writeSession(
         );
         continue;
       }
+      // 写在挂起之前：老历史重放时这一支为假，下一步仍是原来的 park，活动序列不变。
+      if (code === 'model_mismatch' && patched('model-mismatch-reroute')) {
+        if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
+        counters = ZERO;
+        previousMessage = undefined;
+        if (!mismatchRetried.has(route.routeId)) {
+          mismatchRetried.add(route.routeId);
+          // 钉住点名的这条，开新会话。不写 resumeFrom：续会话不比模型，会把上一段 opus 接回来。
+          stick = route.routeId;
+          const line = `第 ${rt.round} 轮：${route.modelId} 回话的模型不是点名的，停掉这一段，按点名路由重派一次（开新会话，不续上一段），不停下等人`;
+          rt.status.lastProblem = line;
+          await rt.note(line);
+          continue;
+        }
+        stick = undefined;
+        avoid = widen(avoid, route, 'route');
+        mismatchRoutesDown = true;
+        const line = `第 ${rt.round} 轮：${route.modelId} 这条路由再次读回的不是点名的模型，避开它再选；还有能派的就继续`;
+        rt.status.lastProblem = line;
+        await rt.note(line);
+        continue;
+      }
       await rt.park(next.humanFix ? `${next.reason}；要人：${next.humanFix}` : next.reason, failure.message);
       counters = ZERO;
       avoid = NO_AVOID;
@@ -608,6 +640,11 @@ async function pickRoute(
   authPoolsDown = false,
   /** 只凭一次 401 避开的路由。没有别的路由时放它再试一次，好让第二次 401 暂停整池。 */
   bare401RouteId?: string,
+  /**
+   * 点名和读回的模型对不上，能派的都避开了（#2742）。一条都没有就挂起，不改去等探针，
+   * 也不把刚证实会换模的那条再派出去。不给 = 照旧。
+   */
+  mismatchRoutesDown = false,
 ): Promise<{ route: RouteChoice; probeNote: string | null }> {
   const stage = uiWork ? UI_PURPOSE : SEGMENT_STAGE.manual;
   // 老历史重放时这一支为假：选路参数和原来一样，不多选一次。要写在派前探测那个标记之前，已有历史里的标记顺序才对得上。
@@ -761,7 +798,8 @@ async function pickRoute(
           continue;
         }
         // 点名再选仍派不出：照旧用原来的路由。派之前照样探，探不通就不拿它起会话。
-        if (droppedDry && missUsable) {
+        // 模型对不上的不走这里：那条刚证实读回的不是点名的，再派回去还会挂。
+        if (droppedDry && missUsable && !mismatchRoutesDown) {
           rt.status.lastProblem = NO_OTHER_ROUTE;
           rt.fellBackToMissRoute = true;
           const chosen = await consider(missUsable, probeOn, mark);
@@ -784,6 +822,18 @@ async function pickRoute(
         ) {
           releasedBare401 = true;
           avoid = { ...avoid, routeIds: avoid.routeIds.filter((id) => id !== bare401RouteId) };
+          continue;
+        }
+        // 模型对不上把能派的路由都避开了：挂起。探针恢复不了「读回的不是点名的」。
+        // 人点「继续」之后这一轮的避让清掉再选。不给这个标志时，下面两步和原来一样。
+        if (mismatchRoutesDown) {
+          await rt.park(
+            '没有还能派的路由：点名和读回的模型对不上',
+            `${got.detail}。这一段已停。按点名路由重派过一次仍对不上，避开这些路由之后没有还能派的。点「继续」再选一次；不要了点「放弃」。`,
+          );
+          avoid = NO_AVOID;
+          prefer = undefined;
+          droppedDry = false;
           continue;
         }
         // 还没探过、候选一开始就被挡，也走同一条停下：写出原因，沿用全熔断提醒，等探针恢复再继续。

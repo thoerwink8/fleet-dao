@@ -220,6 +220,13 @@ async function hello(wire: MirasimWire, ms: number): Promise<Record<string, unkn
  * 的比对判成 model_mismatch 当场叫停，叫停发生在发出任何上游请求之前，一次真话都没收到）。
  * 只剥末尾的方括号标记，不宽松到「前缀相同就算」——那样点 `gpt-5.6-luna` 回 `gpt-5.6-luna-preview`
  * 也会被认成对。
+ *
+ * #2742（发版把前几段 opus 叫停之后，下一轮点名 sonnet-5.5，快照读回 opus-5.5[1m]）不是这里剥错了：
+ * 剥掉末尾 `[1m]` 之后仍是 `claude-sonnet-5-5` 对 `claude-opus-5-5`，两个模型。也不是 #1298
+ * （探针侧把 gpt-6-sol 换成 gpt-6-astra），也不是 #2797 的发版叫停本身（叫停只让上一段收场）。
+ * 归类是会话/路由身份不一致：续会话只比执行方式、账号池、会话用户，不比模型，同一中转池上点名 sonnet
+ * 仍可能续上一段 opus，快照 model 还是 opus；中转若静默换成另一个模型，也在这里叫停这一段。
+ * 两种都只停这一段。怎么重派由失败分流 MD3 和任务工作流 `model-mismatch-reroute` 管，不在插头里挂整张单。
  */
 function modelMatches(expected: string, observed: string): boolean {
   const strip = (s: string) =>
