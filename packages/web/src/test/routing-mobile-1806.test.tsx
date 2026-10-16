@@ -188,6 +188,9 @@ describe('路由页：不到 1024 宽每行的操作收进「⋯」菜单', () =
     const spy = vi.spyOn(api, 'updateModelRoute');
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute', api });
     await opened();
+    // 默认只列开着的。没画出来的关着路由还在顺序里，这时不能调先后（点了不保存）。先显示全部。
+    const showAll = await screen.findByRole('button', { name: '显示全部' });
+    if (showAll.getAttribute('aria-pressed') !== 'true') fireEvent.click(showAll);
     const item = document.querySelector('[data-route="r-ca-opus"]') as HTMLElement;
     expect(within(item).getByRole('switch')).toBeTruthy();
     await waitFor(() => expect(item.querySelector('[data-row-menu]')).not.toBeNull());
