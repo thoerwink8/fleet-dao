@@ -235,11 +235,11 @@ describe('工作树对账要的查询', () => {
       worktreePath: '/w/acme_widgets/160.plan',
       startedAt: ago(20 * MIN),
       endedAt: ago(10 * MIN),
-      outcome: 'ok',
+      outcome: 'done',
     });
-    await addRun(t.db, { taskId: null, routeId: 'r1', stage: 'triage' });
+    await addRun(t.db, { taskId: null, routeId: 'r1' });
     expect(await openSessionTrees(t.db)).toEqual([
-      { runId: open.id, stage: 'execute', queuedAt: open.queuedAt, path: '/w/acme_widgets/160-a' },
+      { runId: open.id, stage: 'manual', queuedAt: open.startedAt, path: '/w/acme_widgets/160-a' },
     ]);
   });
 

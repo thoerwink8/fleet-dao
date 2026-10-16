@@ -58,7 +58,7 @@ run('真 Postgres 后端（设了 FLEET_TEST_PG_URL 才跑，CI 的 db 分片）
       try {
         // 模板克隆出来的测试库跳过种子：业务表一张都是空。读得到任务、仓、账号任一非空，说明连着生产、
         // 或克隆拿错了源库——#220「AI 会话碰不到正式库」的最小验证。
-        for (const table of ['tasks', 'repos', 'users', 'pools', 'routes', 'session_runs']) {
+        for (const table of ['tasks', 'repos', 'users', 'pools', 'routes', 'runs']) {
           const rows = await t.client.query<{ n: number }>(`select count(*)::int as n from ${table}`);
           expect(
             rows.rows[0]?.n,

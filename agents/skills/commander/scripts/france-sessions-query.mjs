@@ -1,6 +1,6 @@
 // 法国现在有几个会话在跑（#618，发版前「等收尾」那一步要的数）：在法国上跑的只读查询。本机经 ssh 把这份文件喂给法国的 node：
 //   ssh <法国> node --input-type=module - --sessions < france-sessions-query.mjs
-// 数的是库里 session_runs 和 runs 中 ended_at 为空的（引擎起了、还没收尾的会话），打一行 JSON 到标准输出。
+// 数的是库里 runs 中 ended_at 为空的（引擎起了、还没收尾的会话），打一行 JSON 到标准输出。
 // 改这里之前必须知道：
 // - 只许读。库经 psql 连，连接参数把会话设成只读（和 france-query.mjs 的 PSQL 一字不差，agents/test/release-train.test.ts 核对）。
 // - 这份文件是单独喂给 node 的，不能 import 同目录的别的文件，所以 psql 那几项在这里写一遍。
@@ -29,27 +29,20 @@ export const PSQL = [
 
 /**
  * 一条 select：没收尾的会话数，和最久的几个是谁的（单、环节、什么时候排的队），给「拖后腿」的名单用。
- * 两处都数（#1995，口径同 france-query.mjs 的 runs 和引擎排空 drain.ts 的登记）：session_runs（老 Fusion 会话，9 月 29 日以后没新行）
- * 和 runs（v3 三段一次性会话：动手 manual、验收 verify，引擎现在只往这张表写）。只数前者，预检永远读到 0，
- * 发版时 release.sh 的排空还在等 execute 会话。runs 没有排队时刻，queued_at 用 started_at；阶段写 segment:<段>。
+ * 只数 runs（v3 三段一次性会话：动手 manual、验收 verify，引擎只往这张表写；口径同 france-query.mjs 的 runs 和引擎排空
+ * drain.ts 的登记，#1995）。老 Fusion 的会话表 session_runs 9 月 29 日以后没新行，#2357 已删，不再数。
+ * runs 没有排队时刻，queued_at 用 started_at；阶段写 segment:<段>。
  */
 export const SQL = `select jsonb_build_object(
-  'running', (select count(*) from session_runs where ended_at is null) + (select count(*) from runs where ended_at is null),
+  'running', (select count(*) from runs where ended_at is null),
   'rows', coalesce((select jsonb_agg(x order by x.queued_at) from (
-    select * from (
-      select rp.owner || '/' || rp.name as repo, t.issue_number as n, s.stage::text as stage, s.queued_at, s.started_at
-      from session_runs s
-      left join tasks t on t.id = s.task_id
-      left join repos rp on rp.id = t.repo_id
-      where s.ended_at is null
-      union all
-      select rp.owner || '/' || rp.name as repo, coalesce(t.issue_number, r.issue_number) as n,
-             'segment:' || r.segment as stage, r.started_at as queued_at, r.started_at
-      from runs r
-      left join tasks t on t.id = r.task_id
-      left join repos rp on rp.id = t.repo_id
-      where r.ended_at is null) u
-    order by u.queued_at
+    select rp.owner || '/' || rp.name as repo, coalesce(t.issue_number, r.issue_number) as n,
+           'segment:' || r.segment as stage, r.started_at as queued_at, r.started_at
+    from runs r
+    left join tasks t on t.id = r.task_id
+    left join repos rp on rp.id = t.repo_id
+    where r.ended_at is null
+    order by r.started_at
     limit 20) x), '[]'::jsonb));`;
 
 /** @param {unknown} e */

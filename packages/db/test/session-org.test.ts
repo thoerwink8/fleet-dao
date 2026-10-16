@@ -179,38 +179,38 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
     expect(labels(await sessionOrgFacts(t.db, { now: NOW }), 'claude-carpool')).toEqual(['5h']);
   });
 
-  it('还没结束的会话：只数带组织类型的池上的（排着的、在跑的都算），结束了的、别的池上的不算', async () => {
+  it('还没结束的会话：只数带组织类型的池上的（runs 里开着的行），结束了的、别的池上的不算', async () => {
     const repo = await addRepo(t.db);
     const task = await addTask(t.db, repo.id);
-    const queued = await addRun(t.db, { taskId: task.id, routeId: 'car', queuedAt: ago(5 * MIN) });
-    const running = await addRun(t.db, { taskId: task.id, routeId: 'solo', startedAt: ago(10 * MIN) });
+    const carpool = await addRun(t.db, { taskId: task.id, routeId: 'car', startedAt: ago(5 * MIN) });
+    const solo = await addRun(t.db, { taskId: task.id, routeId: 'solo', startedAt: ago(10 * MIN) });
     await addRun(t.db, {
       taskId: task.id,
       routeId: 'solo',
       startedAt: ago(20 * MIN),
       endedAt: ago(MIN),
-      outcome: 'ok',
+      outcome: 'done',
     });
     await addRun(t.db, { taskId: task.id, routeId: 'relay-opus' });
-    expect(await sessionOrgFacts(t.db, { now: NOW })).toMatchObject({ busy: 2, busyOneShot: 0 });
-    // 切号前停会话时一轮轮看的就是这几个（#59）：按排队时刻排，分得清还在起的（没开工）和在跑的
+    expect(await sessionOrgFacts(t.db, { now: NOW })).toMatchObject({ busy: 2, busyOneShot: 2 });
+    // 切号前停会话时一轮轮看的就是这几个（#59）：按开跑时刻排
     expect(await openOrgRuns(t.db)).toEqual([
       {
-        runId: running.id,
+        runId: solo.id,
         poolId: 'claude-solo',
         routeId: 'solo',
-        kind: 'session',
-        queuedAt: running.queuedAt,
-        startedAt: running.startedAt,
+        kind: 'oneShot',
+        queuedAt: solo.startedAt,
+        startedAt: solo.startedAt,
         stage: 'execute',
       },
       {
-        runId: queued.id,
+        runId: carpool.id,
         poolId: 'claude-carpool',
         routeId: 'car',
-        kind: 'session',
-        queuedAt: queued.queuedAt,
-        startedAt: null,
+        kind: 'oneShot',
+        queuedAt: carpool.startedAt,
+        startedAt: carpool.startedAt,
         stage: 'execute',
       },
     ]);
@@ -219,7 +219,7 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
   it('三段的一次性会话（runs 里开跑就留的那一行，#157）也数：只数带组织类型的池上、还没结束的；连不到路由的数不着', async () => {
     const repo = await addRepo(t.db);
     const task = await addTask(t.db, repo.id);
-    const fusion = await addRun(t.db, { taskId: task.id, routeId: 'solo', startedAt: ago(30 * MIN) });
+    const earlier = await addRun(t.db, { taskId: task.id, routeId: 'solo', startedAt: ago(30 * MIN) });
     const oneShot = randomUUID();
     await startRun(t.db, {
       id: oneShot,
@@ -244,15 +244,15 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
       startedAt: ago(MIN),
     });
     await startRun(t.db, { segment: 'manual', model: 'opus-5.5', startedAt: ago(MIN) });
-    expect(await sessionOrgFacts(t.db, { now: NOW })).toMatchObject({ busy: 2, busyOneShot: 1 });
+    expect(await sessionOrgFacts(t.db, { now: NOW })).toMatchObject({ busy: 2, busyOneShot: 2 });
     expect(await openOrgRuns(t.db)).toEqual([
       {
-        runId: fusion.id,
+        runId: earlier.id,
         poolId: 'claude-solo',
         routeId: 'solo',
-        kind: 'session',
-        queuedAt: fusion.queuedAt,
-        startedAt: fusion.startedAt,
+        kind: 'oneShot',
+        queuedAt: earlier.startedAt,
+        startedAt: earlier.startedAt,
         stage: 'execute',
       },
       {
@@ -275,7 +275,7 @@ describe('sessionOrgFacts：带组织类型的池、它们的额度窗口、还�
       endedAt: NOW,
       outcome: 'failed',
     });
-    expect(await sessionOrgFacts(t.db, { now: NOW })).toMatchObject({ busy: 1, busyOneShot: 0 });
+    expect(await sessionOrgFacts(t.db, { now: NOW })).toMatchObject({ busy: 1, busyOneShot: 1 });
   });
 
   it('库里没有带组织类型的池：空的，会话照数', async () => {

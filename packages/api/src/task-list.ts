@@ -32,7 +32,7 @@ export interface TaskListInput {
   repos: readonly Repo[];
   /** 这一页所有单的三段流水（store.listSegmentRunsForTasks）。 */
   segmentRuns: readonly SegmentRunRecord[];
-  /** 这一页所有单的老流程会话（store.listRuns）。 */
+  /** 这一页所有单的老流程会话（老会话表 #2357 已删，调用方传 NO_OLD_FLOW_RUNS）。 */
   runs: readonly SessionRun[];
   routes: readonly Route[];
   models: readonly Model[];

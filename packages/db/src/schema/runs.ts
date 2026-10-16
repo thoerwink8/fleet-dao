@@ -9,16 +9,15 @@
 // - segment 是「scope | manual | verify」三择一（#554-1 的 RunRecord segment 枚举），写其他任何值都不收。
 // - outcome 是「done | timeout | killed | spawn_failed | admission_blocked | failed | org_switch」（#554-1 的枚举，
 //   org_switch 是切号先停下这一段、切完在原分支上重跑，#59），还在跑的为空；结束了（ended_at 非空）就必须有 outcome，
-//   反之亦然——和 session_runs_outcome_iff_ended 同一个做法。
+//   反之亦然。
 // - retryOf 自引用，指到不存在的行要拒收（外键）。没有代码写它；列和外键留着，删列就是删数据。
 // - 一次性会话开跑就写一行「没结束」的（ended_at、outcome 都空），收场时补完（#157）：切号数带组织类型的池上还没结束的会话、
 //   选路数池的并发（#735）都靠 route_id 连到池（db 的 queries/pool-runs.ts），没写 route_id 的行两边都看不见。
 // - tier 是派工档，叫法和取值照 packages/engine/src/runner/tier.ts 的 TierEnum（fast | medium | heavyweight），
 //   引擎测试 test/runner/tier.test.ts 钉着两边一致；只有动手段分档（决定 0010 第 3 条），对题、验收（冷调用）不分档，留空。
-// - route_outcome 是这一次算不算路由的账（ok | fail | neutral），和 session_runs.route_outcome 同一个口径，选路的熔断、战绩
-//   两张表并起来读（queries/pool-runs.ts，#758）。收场时由引擎判好写下（runner/evidence.ts）；还在跑的不许有；空的（老行、
+// - route_outcome 是这一次算不算路由的账（ok | fail | neutral），选路的熔断、战绩读它（queries/pool-runs.ts，#758）。收场时由引擎判好写下（runner/evidence.ts）；还在跑的不许有；空的（老行、
 //   Fusion 验证那一笔流水）按不算账读，不进熔断、战绩。
-// 表名就叫 runs（和 Fusion 的 sessionRuns 分开：那张老表还有读方，没删）。
+// 老流程（Fusion）的会话表 09-29 起没人写，#2357 把读它的地方改读 runs 并删了表。
 //
 // pool_reservations（#757）是一段选定路由之后、写下开跑那一行之前预占着的池的名额：一行就是「这张单的这一段已经派到这条
 // 路由上、还在建树或等内存」。怎么占、怎么交接、怎么放都在 queries/pool-runs.ts，别处不写这张表。（和账号池整池暂停的
@@ -37,6 +36,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
@@ -67,7 +67,7 @@ export type RunTier = (typeof RUN_TIERS)[number];
 
 /**
  * 这一次算不算这条路由的账（喂选路的熔断和战绩）：ok = 跑通了；fail = 失败分流判是路由的错；neutral = 不算（我们停的、
- * 没起来、内存放不下、分流判不是路由的错）。和 session_runs.route_outcome 取值、口径都一样。
+ * 没起来、内存放不下、分流判不是路由的错）。
  */
 export const RUN_ROUTE_OUTCOMES = ['ok', 'fail', 'neutral'] as const;
 export type RunRouteOutcome = (typeof RUN_ROUTE_OUTCOMES)[number];
@@ -130,6 +130,12 @@ export const runs = pgTable(
     prNumber: integer('pr_number'),
     /** 会话干活的分支。 */
     branch: text('branch'),
+    /**
+     * 会话起在哪个目录（工作树的路径，和引擎建树时拼的路径逐字一样）：每小时对账删树前看树里有没有没结束的会话（queries/worktrees.ts
+     * 的 openSessionTrees），工作树清单写「最近一次会话多久前」（queries/worktree-inventory.ts）。#2357 之前这两处读的是已删的
+     * 老会话表；加这一列之前的行为空——认不出在哪棵树，不进这两处。
+     */
+    worktreePath: text('worktree_path'),
     /** Temporal 工作流编号（Fusion 那条线或 v3 三段那条线）；跑外头实验的会话可空。 */
     workflowId: text('workflow_id'),
     /** Temporal 的 run id（同一 workflowId 换过 run 才分叉）。 */
@@ -146,7 +152,7 @@ export const runs = pgTable(
       'runs_outcome_known',
       sql`${t.outcome} is null or ${t.outcome} in ('done', 'timeout', 'killed', 'spawn_failed', 'admission_blocked', 'failed', 'org_switch')`,
     ),
-    //故事和 session_runs_outcome_iff_ended 一样：结束了就必须有结局，有结局就必须已结束。
+    // 结束了就必须有结局，有结局就必须已结束。
     check('runs_outcome_iff_ended', sql`(${t.endedAt} is null) = (${t.outcome} is null)`),
     check(
       'runs_route_outcome_known',
@@ -163,6 +169,8 @@ export const runs = pgTable(
     ),
     check('runs_memory_nonneg', sql`${t.memoryPeakMb} is null or ${t.memoryPeakMb} >= 0`),
     check('runs_cpu_seconds_positive', sql`${t.cpuSeconds} is null or ${t.cpuSeconds} > 0`),
+    // 给组合外键用：追问（asks）挂的会话必须属于同一个需求。
+    unique('runs_task_id_id_unique').on(t.taskId, t.id),
     index('runs_task_idx').on(t.taskId, t.createdAt),
     index('runs_segment_created_idx').on(t.segment, t.createdAt),
     index('runs_workflow_idx').on(t.workflowId),
@@ -183,7 +191,7 @@ export const ROUTED_SEGMENTS = ['manual', 'verify'] as const;
 export type RoutedSegment = (typeof ROUTED_SEGMENTS)[number];
 
 /**
- * 选定了路由、还没写下开跑那一行的一段预占着的池的名额（#757）。选路数池的并发时和 runs、session_runs 里开着的行一起数
+ * 选定了路由、还没写下开跑那一行的一段预占着的池的名额（#757）。选路数池的并发时和 runs 里开着的行一起数
  * （queries/pool-runs.ts 的 openPoolRuns，算进 reserved「选定了还没开工」）：不数它，一批单同时选路都看见池空着、都派过去，
  * 内存一放开一起起会话，把拼车池派超。一张单的一段同一时刻只预占一个（再选路就换掉旧的）；过了 expires_at 就不算（建树、
  * 等内存卡死了不能一直占着）。都是一时的状态：单子、路由删了跟着删，引擎重启整表清掉。
@@ -267,7 +275,7 @@ export type RunTranscriptKind = (typeof RUN_TRANSCRIPT_KINDS)[number];
  * 三段会话的过程记录（#1640）：引擎边跑边按条记（提示词、助手的话、工具调用和结果、报错、结论），驾驶舱任务详情按段读。
  * 一条一行，挂在 runs 那一行上；seq 从 0 起，(run_id, seq) 联合主键，所以引擎重启后接回、从头重读输出时重复写同一条会被
  * 挡掉（on conflict do nothing），不会写两遍。text 写进来之前已经截断、打过码（引擎侧，上限在 shared 的 TRANSCRIPT_LIMITS）。
- * 老流程 session_runs 不记。runs 行删了跟着删。
+ * 老流程不记。runs 行删了跟着删。
  */
 export const runTranscript = pgTable(
   'run_transcript',

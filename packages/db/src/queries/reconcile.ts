@@ -2,18 +2,12 @@
 // 对上的单记没记账（会话结局、用量、关单）。受管的仓按 repos 表列（listManagedRepos）。
 // 终态的单不在第一份清单里：做完、叫停、没做完都不再要求有一条在跑的工作流。
 // 主页「开着」数的也是这些非终态行。单早已关闭、工作流不在跑的遗留行，对账列出来再改成叫停。
-import { type CiPolicy, ciPolicyOf, type RunOutcome, type TaskState } from '@fleet-dao/shared';
+import { type CiPolicy, ciPolicyOf, type TaskState } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gte, inArray, isNull, notInArray, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { TERMINAL_TASK_STATES } from '../schema/enums.ts';
-import {
-  githubEvents,
-  githubEventVersions,
-  pullRequests,
-  repos,
-  sessionRuns,
-  tasks,
-} from '../schema/index.ts';
+import { githubEvents, githubEventVersions, pullRequests, repos, runs, tasks } from '../schema/index.ts';
+import type { RunOutcomeValue } from '../schema/runs.ts';
 
 /**
  * 镜像里这条 PR 的合并时刻。没有这一行、或合并时刻是空，回 null（不是读失败）。库读失败照抛。
@@ -228,10 +222,11 @@ export async function latestIssueDelivery(
 
 export interface LedgerSession {
   runId: string;
+  /** 哪一段（runs.segment：scope | manual | verify）。 */
   stage: string;
   startedAt: Date | null;
   endedAt: Date | null;
-  outcome: RunOutcome | null;
+  outcome: RunOutcomeValue | null;
   inputTokens: number | null;
   outputTokens: number | null;
 }
@@ -279,36 +274,33 @@ export async function mergedPrLedgers(
     .from(pullRequests)
     .innerJoin(repos, eq(repos.id, pullRequests.repoId))
     .innerJoin(tasks, eq(tasks.repoId, pullRequests.repoId))
-    .innerJoin(
-      sessionRuns,
-      and(eq(sessionRuns.taskId, tasks.id), eq(sessionRuns.branch, pullRequests.headRef)),
-    )
+    .innerJoin(runs, and(eq(runs.taskId, tasks.id), eq(runs.branch, pullRequests.headRef)))
     .where(and(eq(pullRequests.state, 'merged'), or(gte(pullRequests.updatedAt, input.since), ...named)))
     .orderBy(asc(repos.owner), asc(repos.name), asc(pullRequests.number));
   if (pairs.length === 0) return [];
-  const runs = await db
+  const ledgerRuns = await db
     .select({
-      taskId: sessionRuns.taskId,
-      branch: sessionRuns.branch,
-      runId: sessionRuns.id,
-      stage: sessionRuns.stage,
-      startedAt: sessionRuns.startedAt,
-      endedAt: sessionRuns.endedAt,
-      outcome: sessionRuns.outcome,
-      inputTokens: sessionRuns.inputTokens,
-      outputTokens: sessionRuns.outputTokens,
+      taskId: runs.taskId,
+      branch: runs.branch,
+      runId: runs.id,
+      stage: runs.segment,
+      startedAt: runs.startedAt,
+      endedAt: runs.endedAt,
+      outcome: runs.outcome,
+      inputTokens: runs.inputTokens,
+      outputTokens: runs.outputTokens,
     })
-    .from(sessionRuns)
+    .from(runs)
     .where(
       and(
-        inArray(sessionRuns.taskId, [...new Set(pairs.map((p) => p.taskId))]),
-        inArray(sessionRuns.branch, [...new Set(pairs.map((p) => p.headRef))]),
+        inArray(runs.taskId, [...new Set(pairs.map((p) => p.taskId))]),
+        inArray(runs.branch, [...new Set(pairs.map((p) => p.headRef))]),
       ),
     )
-    .orderBy(asc(sessionRuns.queuedAt), asc(sessionRuns.id));
+    .orderBy(asc(runs.startedAt), asc(runs.id));
   return pairs.map((p) => ({
     ...p,
-    sessions: runs
+    sessions: ledgerRuns
       .filter((r) => r.taskId === p.taskId && r.branch === p.headRef)
       .map(({ taskId: _t, branch: _b, ...r }) => r),
   }));

@@ -51,7 +51,7 @@ function world(over: Partial<WorktreeSweepDeps> = {}) {
   };
   const session: OpenSessionTree = {
     runId: '0a1b2c3d-0000-4000-8000-000000000001',
-    stage: 'execute',
+    stage: 'manual',
     queuedAt: new Date('2026-10-13T07:30:00.000Z'),
     path: `${ROOT}/acme_web/13-b`,
   };

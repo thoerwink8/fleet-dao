@@ -245,7 +245,7 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
  */
 function zeroUsage(s: LedgerSession): boolean {
   const recorded = s.inputTokens !== null || s.outputTokens !== null;
-  return s.outcome === 'ok' && recorded && (s.inputTokens ?? 0) + (s.outputTokens ?? 0) === 0;
+  return s.outcome === 'done' && recorded && (s.inputTokens ?? 0) + (s.outputTokens ?? 0) === 0;
 }
 
 /** 一条合了的 PR 对上的单缺什么；都齐是空的。 */

@@ -1,7 +1,7 @@
-// 估算类的池的用量记录接真库（PGlite，real/quota-read.ts 的 sessionUsageSource）：Fusion 的会话和三段的一次性会话都进估算，
-// 没记到花费的不拿 0 顶；runs 读不了明确报错，不拿 Fusion 那一半当全部（#758）。
+// 估算类的池的用量记录接真库（PGlite，real/quota-read.ts 的 sessionUsageSource）：runs 里的会话都进估算，
+// 没记到花费的不拿 0 顶；runs 读不了明确报错（#758）。
 import { randomUUID } from 'node:crypto';
-import { sessionRuns, startRun } from '@fleet-dao/db';
+import { startRun } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sessionUsageSource } from '../../src/real/quota-read.ts';
@@ -20,30 +20,28 @@ beforeEach(async () => {
 const ago = (minutes: number) => new Date(NOW.getTime() - minutes * MIN);
 const window = { poolId: 'claude-carpool', since: ago(60), until: NOW };
 
-/** 拼车池上一次 Fusion 的会话：花了 0.4 美元。 */
-async function fusionSession(taskId: string) {
-  const id = randomUUID();
-  await t.db.insert(sessionRuns).values({
-    id,
+/** 拼车池上更早的一次会话（动手段）：花了 0.4 美元。 */
+async function earlierSession(taskId: string) {
+  await startRun(t.db, {
+    id: randomUUID(),
+    segment: 'manual',
+    model: 'opus-5.5',
     taskId,
-    stage: 'execute',
     routeId: 'carpool',
-    whyRoute: 'x',
-    queuedAt: ago(40),
-    runAsUser: 'fleet-agent-carpool',
     startedAt: ago(40),
-    sessionId: `s-${id}`,
-    outcome: 'ok',
     endedAt: ago(35),
+    outcome: 'done',
+    routeOutcome: 'ok',
+    sessionId: `s-${randomUUID()}`,
     inputTokens: 500,
     costUsd: 0.4,
   });
 }
 
 describe('估算类的池的用量记录（sessionUsageSource 接真库）', () => {
-  it('三段的一次性会话记下的 token、花费算进用量，和 Fusion 的会话一起；没记到花费的不进记录，不拿 0 顶', async () => {
+  it('runs 里会话记下的 token、花费算进用量；没记到花费的不进记录，不拿 0 顶', async () => {
     const { task } = await addTask(t.db);
-    await fusionSession(task.id);
+    await earlierSession(task.id);
     await startRun(t.db, {
       segment: 'manual',
       model: 'opus-5.5',
@@ -102,9 +100,9 @@ describe('估算类的池的用量记录（sessionUsageSource 接真库）', () 
     ]);
   });
 
-  it('【故意造出的失败】runs 读不了（把表挪开，查它就报错）：估算明确没读成，不拿 Fusion 那一半当全部', async () => {
+  it('【故意造出的失败】runs 读不了（把表挪开，查它就报错）：估算明确没读成，不拿空当没用过', async () => {
     const { task } = await addTask(t.db);
-    await fusionSession(task.id);
+    await earlierSession(task.id);
     await t.client.exec('alter table runs rename to runs_unreadable');
     try {
       const err = await sessionUsageSource(t.db)(window).then(

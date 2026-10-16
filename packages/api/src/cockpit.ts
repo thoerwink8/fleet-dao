@@ -53,7 +53,7 @@ import {
   WebRoutes,
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { handlingOf, handlingView, type NotificationRecord } from '@fleet-dao/store';
+import { handlingOf, handlingView, type NotificationRecord, type RunPlan } from '@fleet-dao/store';
 import { type Context, Hono } from 'hono';
 import type { z } from 'zod';
 import { meBody } from './auth.ts';
@@ -104,6 +104,7 @@ import {
   buildPools,
   isTaskFinished,
   jobView,
+  NO_OLD_FLOW_RUNS,
   notificationView,
   routeLookup,
   runView,
@@ -238,18 +239,20 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个仓');
     const tasks = await store.listBoardTasks(repo.id);
     const taskIds = tasks.map((t) => t.id);
-    const [subtasks, activeRuns, routes, models] = await Promise.all([
+    const [subtasks, routes, models] = await Promise.all([
       store.listSubtasks(taskIds),
-      store.listRuns({ taskIds, active: true }),
       store.listRoutes(),
       store.listModels(),
     ]);
-    const plans = await store.getPlans(activeRuns.map((r) => r.id));
     const route = routeLookup(routes, models);
     return reply(
       c,
       BoardResponse,
-      buildBoard(repo, { tasks, subtasks, activeRuns, plans, route }, deps.now()),
+      buildBoard(
+        repo,
+        { tasks, subtasks, activeRuns: NO_OLD_FLOW_RUNS, plans: new Map(), route },
+        deps.now(),
+      ),
     );
   });
 
@@ -264,10 +267,9 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       limit: query.limit,
     });
     const taskIds = page.items.map((i) => i.task.id);
-    const [repos, segmentRuns, runs, routes, models, channels] = await Promise.all([
+    const [repos, segmentRuns, routes, models, channels] = await Promise.all([
       store.listRepos(),
       store.listSegmentRunsForTasks(taskIds, { includeIssueMatch: true }),
-      store.listRuns({ taskIds }),
       store.listRoutes(),
       store.listModels(),
       store.listChannels(),
@@ -295,7 +297,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         page,
         repos,
         segmentRuns,
-        runs,
+        runs: NO_OLD_FLOW_RUNS,
         routes,
         models,
         channels,
@@ -308,10 +310,10 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   app.get(WebRoutes.task.path, async (c) => {
     const task = await store.getTask(c.req.param('taskId'));
     if (!task) throw new ApiError(404, 'task_not_found', '没有这个任务');
-    const [repo, subtasks, runs, segmentRecords, routes, models, channels] = await Promise.all([
+    const runs = NO_OLD_FLOW_RUNS;
+    const [repo, subtasks, segmentRecords, routes, models, channels] = await Promise.all([
       store.getRepo(task.repoId),
       store.listSubtasks([task.id]),
-      store.listRuns({ taskIds: [task.id] }),
       store.listSegmentRuns(task.id),
       store.listRoutes(),
       store.listModels(),
@@ -319,7 +321,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     ]);
     if (!repo) throw new ApiError(500, 'repo_missing', `任务 ${task.id} 所在的仓不在库里`);
     const activeRuns = runs.filter((r) => !r.endedAt);
-    const plans = await store.getPlans(activeRuns.map((r) => r.id));
+    const plans = new Map<string, RunPlan>();
     // 带上渠道表：会话和用量汇总的花费要分清按量、套餐内
     const route = routeLookup(routes, models, channels);
     const segmentRuns = segmentRunViews(segmentRecords, {
