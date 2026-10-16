@@ -11,6 +11,8 @@
 // - 读账失败塞一行「对账没查成：<原因>」，不当成没有新话；同样的失败 10 分钟内不重复说；
 // - 子代理里的调用（输入带 agent_id）不管，只主线程。
 // 钩子永远不抛：出错也只塞那一行。
+// 主线程一轮收尾、后台子代理还在跑时它一次工具都不调，这里不触发：那段由收尾时起的盯账进程（inbox-watch.mjs，单 #2488）
+// 用下面的 pendingSteers 接着对账，已见名单、「没查成」说过没有都和这里共用，同一条只送一次。
 import {
   closeSync,
   fstatSync,
@@ -52,14 +54,11 @@ const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
 const stamp = (ms) => new Date(ms + 8 * 3_600_000).toISOString().slice(5, 16).replace('T', ' ');
 
 /**
- * 这个会话的记录末尾里，已经作为 queued_command 送到的引导（话的开头，已按对账的键压过）。读不了就是空（只是少一道去重，不影响塞）。
+ * 这个会话的记录末尾（原文）。读不了就是空串（只是少一道去重，不影响塞）。
  * @param {unknown} path
- * @param {(text: string) => string} keyOf
- * @returns {Set<string>}
  */
-function deliveredKeys(path, keyOf) {
-  const keys = new Set();
-  if (typeof path !== 'string' || path === '') return keys;
+function transcriptTail(path) {
+  if (typeof path !== 'string' || path === '') return '';
   let fd;
   try {
     fd = openSync(path, 'r');
@@ -67,29 +66,162 @@ function deliveredKeys(path, keyOf) {
     const len = Math.min(size, TRANSCRIPT_TAIL_BYTES);
     const buf = Buffer.alloc(len);
     readSync(fd, buf, 0, len, size - len);
-    for (const line of buf.toString('utf8').split('\n')) {
-      if (!line.includes('"queued_command"')) continue;
-      try {
-        const att = JSON.parse(line)?.attachment;
-        if (att?.type !== 'queued_command') continue;
-        const p = att.prompt;
-        const text =
-          typeof p === 'string'
-            ? p
-            : Array.isArray(p)
-              ? p.map((b) => (b?.type === 'text' ? String(b.text ?? '') : '')).join('')
-              : '';
-        if (text.trim() !== '') keys.add(keyOf(text));
-      } catch {
-        // 截断的第一行、写到一半的最后一行
-      }
-    }
+    return buf.toString('utf8');
   } catch {
     // 记录读不了：不去重，宁可多塞一条
+    return '';
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
+}
+
+/** 塞给会话的一行：发出时间 + 原文（太长截断） @param {{ at: number, text: string }} s */
+const shownLine = (s) =>
+  `［${stamp(s.at)} 北京时间发出］${s.text.length > SHOWN_CHARS ? `${s.text.slice(0, SHOWN_CHARS)}……（太长，后面省略）` : s.text}`;
+
+/**
+ * 这一条以前已经塞进过这个会话（记录里有塞的那一行的开头；记录是 JSON 行，按 JSON 转义后的样子找）。
+ * 已见名单写不进时靠它兜底：不然每次收尾起的盯账进程都会为同一条叫醒一次，没完没了。
+ * @param {string} tail
+ * @param {{ at: number, text: string }} s
+ */
+const shownBefore = (tail, s) =>
+  tail !== '' && tail.includes(JSON.stringify(shownLine(s).slice(0, 40)).slice(1, -1));
+
+/**
+ * 这个会话的记录末尾里，已经作为 queued_command 送到的引导（话的开头，已按对账的键压过）。
+ * @param {string} tail transcriptTail 读出来的
+ * @param {(text: string) => string} keyOf
+ * @returns {Set<string>}
+ */
+function deliveredKeys(tail, keyOf) {
+  const keys = new Set();
+  for (const line of tail.split('\n')) {
+    if (!line.includes('"queued_command"')) continue;
+    try {
+      const att = JSON.parse(line)?.attachment;
+      if (att?.type !== 'queued_command') continue;
+      const p = att.prompt;
+      const text =
+        typeof p === 'string'
+          ? p
+          : Array.isArray(p)
+            ? p.map((b) => (b?.type === 'text' ? String(b.text ?? '') : '')).join('')
+            : '';
+      if (text.trim() !== '') keys.add(keyOf(text));
+    } catch {
+      // 截断的第一行、写到一半的最后一行
+    }
+  }
   return keys;
+}
+
+/** 会话号的样子；认不出的不查（Grok 等借道读设置的几家是 camelCase、没有 session_id） @param {unknown} id */
+export const cleanSessionId = (id) => (typeof id === 'string' && /^[\w-]{1,128}$/.test(id) ? id : null);
+
+/**
+ * 节流和「说过哪句没查成」的状态（~/.fleet-dao/inbox-seen/tick-<会话号>.json）。没有或坏了是空对象。
+ * 盯账进程（inbox-watch.mjs）也读写它：同一句「对账没查成」两边合起来 10 分钟内只说一次。
+ * @param {string} dir inboxSeenDir
+ * @param {string} sessionId
+ * @returns {Record<string, unknown>}
+ */
+export function readTickState(dir, sessionId) {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, `tick-${sessionId}.json`), 'utf8'));
+    if (isObj(parsed)) return parsed;
+  } catch {
+    // 没有或坏了：当没读过
+  }
+  return {};
+}
+
+/**
+ * @param {string} dir
+ * @param {string} sessionId
+ * @param {Record<string, unknown>} next
+ */
+export function saveTickState(dir, sessionId, next) {
+  const stateFile = join(dir, `tick-${sessionId}.json`);
+  try {
+    mkdirSync(dir, { recursive: true });
+    const tmp = `${stateFile}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(next), 'utf8');
+    renameSync(tmp, stateFile);
+  } catch {
+    // 记不下：下次照常读（宁可多读、多说一次）
+  }
+}
+
+/**
+ * 这句「对账没查成」10 分钟内说过没有（按 readTickState 读出来的状态）
+ * @param {Record<string, unknown>} state
+ * @param {string} noticeText
+ * @param {number} now
+ */
+export const toldRecently = (state, noticeText, now) =>
+  noticeText !== '' &&
+  state.lastNotice === noticeText &&
+  Number.isFinite(Number(state.noticeAt)) &&
+  now - Number(state.noticeAt) < NOTICE_REPEAT_MS;
+
+/**
+ * 对一遍账：本血缘「发了、本会话还没见过」的话（轮中对账和盯账进程共用这一份，不各抄一份）。
+ * 新冒出来的记进已见名单（同一条只送一次）；记录里已经送到、已经塞过的也记已见、不再送。
+ * - { status: 'none' }：不是 Mirasim 起的会话（无血缘），不出声；
+ * - { status: 'checked', shown, notices }：shown 是要送的话（每条一行，带北京时间发出时间），notices 是「对账没查成：…」。
+ * 永远不抛：出错进 notices。
+ * @param {{
+ *   sessionId: string,
+ *   transcriptPath?: unknown,
+ *   home: string,
+ *   env: Record<string, string | undefined>,
+ *   now: number,
+ *   load?: () => Promise<typeof import('./founder-inbox.mjs')>,
+ * }} opts
+ * @returns {Promise<{ status: 'none' } | { status: 'checked', shown: string[], notices: string[] }>}
+ */
+export async function pendingSteers({
+  sessionId,
+  transcriptPath,
+  home,
+  env,
+  now,
+  load = () => import('./founder-inbox.mjs'),
+}) {
+  /** @type {string[]} */
+  const notices = [];
+  /** @type {string[]} */
+  const shown = [];
+  try {
+    const inbox = await load();
+    const rec = inbox.reconcileInbox({ home, now, sessionId, env });
+    if (rec.status === 'none') return { status: 'none' };
+    if (rec.status === 'unchecked') {
+      notices.push(`对账没查成：认不出本会话是哪个 Mirasim 会话（${rec.why}）`);
+    } else if (rec.readError) notices.push(`对账没查成：${rec.readError}`);
+    else if (!rec.sent.absent) {
+      for (const p of rec.sent.problems) notices.push(`对账没查成：创始人在 Mirasim 里发的话没读全：${p}`);
+      for (const p of rec.relayProblems) notices.push(`对账没查成：旧的引导记录没核成：${p}`);
+      const seen = inbox.readSeen({ home, env, lineDir: rec.line.dir });
+      if (seen.problem) notices.push(`对账没查成：已见名单没读成：${seen.problem}`);
+      const fresh = rec.lost.filter((s) => !seen.keys.has(inbox.seenKey(s)));
+      if (fresh.length > 0) {
+        const tail = transcriptTail(transcriptPath);
+        const delivered = deliveredKeys(tail, inbox.promptKey);
+        const toShow = fresh.filter((s) => !delivered.has(inbox.promptKey(s.text)) && !shownBefore(tail, s));
+        try {
+          inbox.markSeen({ home, env, lineDir: rec.line.dir, entries: fresh, now });
+        } catch (err) {
+          notices.push(`对账没查成：已见名单写不进（${why(err)}），这几条之后可能再塞一遍`);
+        }
+        for (const s of toShow) shown.push(shownLine(s));
+      }
+    }
+  } catch (err) {
+    notices.push(`对账没查成：${why(err)}`);
+  }
+  return { status: 'checked', shown, notices };
 }
 
 /**
@@ -110,81 +242,23 @@ export async function tick(
   if (!isObj(input)) return null;
   // 子代理里的调用只在子代理里带 agent_id（code.claude.com/docs/en/hooks）：不管
   if (typeof input.agent_id === 'string' && input.agent_id.trim() !== '') return null;
-  const sessionId = input.session_id;
-  // Grok 等借道读设置的几家是 camelCase、没有 session_id：认不出就不查
-  if (typeof sessionId !== 'string' || !/^[\w-]{1,128}$/.test(sessionId)) return null;
+  const sessionId = cleanSessionId(input.session_id);
+  if (sessionId === null) return null;
 
   const dir = inboxSeenDir(env, home);
-  const stateFile = join(dir, `tick-${sessionId}.json`);
-  /** @type {Record<string, unknown>} */
-  let state = {};
-  try {
-    const parsed = JSON.parse(readFileSync(stateFile, 'utf8'));
-    if (isObj(parsed)) state = parsed;
-  } catch {
-    // 没有或坏了：当没读过
-  }
+  const state = readTickState(dir, sessionId);
   const last = Number(state.checkedAt);
   if (Number.isFinite(last) && now >= last && now - last < TICK_MS) return null;
 
   /** @param {Record<string, unknown>} next */
-  const save = (next) => {
-    try {
-      mkdirSync(dir, { recursive: true });
-      const tmp = `${stateFile}.${process.pid}.tmp`;
-      writeFileSync(tmp, JSON.stringify(next), 'utf8');
-      renameSync(tmp, stateFile);
-    } catch {
-      // 记不下节流状态：这次照常读，下次也会读（宁可多读）
-    }
-  };
+  const save = (next) => saveTickState(dir, sessionId, next);
   // 先记「这次读过」再读：读账慢或半路崩了，也不会每次工具调用都重读
   save({ checkedAt: now, lastNotice: state.lastNotice, noticeAt: state.noticeAt });
 
-  /** @type {string[]} */
-  const notices = [];
-  /** @type {string[]} */
-  const shown = [];
-  try {
-    const inbox = await load();
-    const rec = inbox.reconcileInbox({ home, now, sessionId, env });
-    if (rec.status === 'unchecked') {
-      notices.push(`对账没查成：认不出本会话是哪个 Mirasim 会话（${rec.why}）`);
-    } else if (rec.status === 'ok') {
-      if (rec.readError) notices.push(`对账没查成：${rec.readError}`);
-      else if (!rec.sent.absent) {
-        for (const p of rec.sent.problems) notices.push(`对账没查成：创始人在 Mirasim 里发的话没读全：${p}`);
-        for (const p of rec.relayProblems) notices.push(`对账没查成：旧的引导记录没核成：${p}`);
-        const seen = inbox.readSeen({ home, env, lineDir: rec.line.dir });
-        if (seen.problem) notices.push(`对账没查成：已见名单没读成：${seen.problem}`);
-        const fresh = rec.lost.filter((s) => !seen.keys.has(inbox.seenKey(s)));
-        if (fresh.length > 0) {
-          const delivered = deliveredKeys(input.transcript_path, inbox.promptKey);
-          const sentAlready = fresh.filter((s) => delivered.has(inbox.promptKey(s.text)));
-          const toShow = fresh.filter((s) => !sentAlready.includes(s));
-          try {
-            inbox.markSeen({ home, env, lineDir: rec.line.dir, entries: fresh, now });
-          } catch (err) {
-            notices.push(`对账没查成：已见名单写不进（${why(err)}），这几条之后可能再塞一遍`);
-          }
-          for (const s of toShow) {
-            const cut =
-              s.text.length > SHOWN_CHARS ? `${s.text.slice(0, SHOWN_CHARS)}……（太长，后面省略）` : s.text;
-            shown.push(`［${stamp(s.at)} 北京时间发出］${cut}`);
-          }
-        }
-      }
-    }
-  } catch (err) {
-    notices.push(`对账没查成：${why(err)}`);
-  }
-
-  const noticeText = notices.join('；');
-  const repeated =
-    noticeText !== '' &&
-    state.lastNotice === noticeText &&
-    Number.isFinite(Number(state.noticeAt)) &&
-    now - Number(state.noticeAt) < NOTICE_REPEAT_MS;
+  const r = await pendingSteers({ sessionId, transcriptPath: input.transcript_path, home, env, now, load });
+  const shown = r.status === 'checked' ? r.shown : [];
+  const noticeText = r.status === 'checked' ? r.notices.join('；') : '';
+  const repeated = toldRecently(state, noticeText, now);
   if (noticeText === '') save({ checkedAt: now });
   else if (!repeated) save({ checkedAt: now, lastNotice: noticeText, noticeAt: now });
 

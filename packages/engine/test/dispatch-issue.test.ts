@@ -166,6 +166,18 @@ async function cli(w: World, argv: string[]) {
 }
 
 describe('过了准入：派，并写操作记录', () => {
+  it('作者 github-actions[bot] 过作者门；random-user 不过', async () => {
+    const bot = world({
+      issue: issue({ author: { login: 'github-actions[bot]', id: 41898282, type: 'Bot' } }),
+    });
+    expect((await dispatchIssue(bot.deps, ARGS)).outcome).toBe('started');
+
+    const stranger = world({ issue: issue({ author: { login: 'random-user', id: 4242, type: 'User' } }) });
+    const refused = await dispatchIssue(stranger.deps, ARGS);
+    expect(refused).toMatchObject({ outcome: 'refused', failures: [{ reason: 'untrusted_author' }] });
+    expect(stranger.started).toEqual([]);
+  });
+
   it('开关关着的仓里，合格的单被派出去，操作记录写明谁的哪张单、force 与否、结果', async () => {
     const w = world();
     const r = await dispatchIssue(w.deps, ARGS);

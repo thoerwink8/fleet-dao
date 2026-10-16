@@ -1,7 +1,7 @@
 // 线上读数跟不跟得上（deploy-lag.ts）：每一种「不对」和「没查成」各造一次，读的时候现算；落后主线几个提交不算毛病（发布只走驾驶舱按钮，0032）；
 // 对外的话拿公开页禁用词名单扫；状态文件拿自动发布单元（deploy/france/auto-release/lib.mjs）真跑一轮造出来的核对，两边字段对得上；
 // 报警开一条、说法不变不改、好了解除，自动发布单元当场报过的不重报。
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { notifications } from '@fleet-dao/db';
@@ -345,7 +345,8 @@ describe('读法国上的现状', () => {
       got = readDeployLagInput(d);
       expect(got.deployedAt).toBeNull();
       expect(got.state).not.toHaveProperty('error');
-      rmSync(join(d, 'current'));
+      // current 是指着目录的符号链接。rmSync 在 Node 24 会跟着链接走、把目标当目录拒掉；拆链接本身用 unlink。
+      unlinkSync(join(d, 'current'));
       symlinkSync('not-a-sha', join(d, 'current'));
       expect(readDeployLagInput(d).current).toEqual({ error: expect.stringContaining('认不出') });
     },

@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { eq, isNull } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { listRunningEngineTasks } from '../src/queries/idle-running.ts';
 import {
   closeOpenRuns,
   getRun,
@@ -12,7 +13,7 @@ import {
 } from '../src/queries/runs.ts';
 import { runs } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRepo, addRoute, addTask, ago, catalog, expectViolation, MIN, NOW } from './helpers.ts';
+import { addRepo, addRoute, addTask, ago, catalog, expectViolation, HOUR, MIN, NOW } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -585,5 +586,57 @@ describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
       unmetered: 1,
       estimated: 0,
     });
+  });
+});
+
+describe('listRunningEngineTasks：在干活的引擎任务，带开着的会话数', () => {
+  it('只列 running 且 executor=engine；开着的 runs 按 ended_at 为空来数，收过场的不算', async () => {
+    const repo = await addRepo(t.db, 'fleet-dao');
+    const idle = await addTask(t.db, repo.id, {
+      issueNumber: 2261,
+      state: 'running',
+      executor: 'engine',
+      updatedAt: ago(HOUR),
+      doing: '换一条路由带上进度续一次',
+    });
+    const busy = await addTask(t.db, repo.id, {
+      issueNumber: 2262,
+      state: 'running',
+      updatedAt: ago(MIN),
+    });
+    await addTask(t.db, repo.id, { issueNumber: 2263, state: 'running', executor: 'local' });
+    await addTask(t.db, repo.id, { issueNumber: 2264, state: 'stalled', executor: 'engine' });
+    const closed = await addTask(t.db, repo.id, { issueNumber: 2265, state: 'running' });
+    await t.db.insert(runs).values({
+      segment: 'manual',
+      model: 'deepseek-flash',
+      taskId: idle.id,
+      startedAt: ago(2 * HOUR),
+      endedAt: ago(HOUR),
+      outcome: 'done',
+    });
+    await t.db.insert(runs).values({
+      segment: 'manual',
+      model: 'deepseek-flash',
+      taskId: busy.id,
+      startedAt: ago(MIN),
+    });
+    await t.db.insert(runs).values({
+      segment: 'manual',
+      model: 'deepseek-flash',
+      taskId: closed.id,
+      startedAt: ago(2 * HOUR),
+      endedAt: ago(HOUR),
+      outcome: 'done',
+    });
+
+    const rows = await listRunningEngineTasks(t.db);
+    expect(rows.map((r) => [r.issueNumber, r.openRuns, r.owner, r.name])).toEqual([
+      [2261, 0, 'acme', 'fleet-dao'],
+      [2262, 1, 'acme', 'fleet-dao'],
+      [2265, 0, 'acme', 'fleet-dao'],
+    ]);
+    expect(rows[0]?.doing).toContain('带上进度续一次');
+    expect(rows[0]?.updatedAt).toEqual(ago(HOUR));
   });
 });

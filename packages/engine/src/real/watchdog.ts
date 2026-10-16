@@ -21,6 +21,7 @@ import {
   feishuPushFacts,
   finishScheduleRun,
   latestAlertByPrefix,
+  listRunningEngineTasks,
   mergeStallFacts,
   openAlertsByPrefix,
   quotaTable,
@@ -189,6 +190,15 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
     brief: {
       status: (day, since) => dailyBriefStatus(w.db, day, since),
       here: () => releasesDirExists(w.releasesDir ?? RELEASES_DIR),
+    },
+    // 「在干活但没有开着的会话」（#2392）：只读库。过期判据在 jobs/idle-running.ts，这里不另写一个阈值。
+    idleRunning: {
+      tasks: async () =>
+        (await listRunningEngineTasks(w.db)).map((row) => ({
+          ...row,
+          state: 'running' as const,
+          executor: 'engine' as const,
+        })),
     },
     // 拼车池整池暂停：carpool-watch 登记行还在也不报「停了」，开着的撤掉。读不到照抛（不当成没暂停）。
     pausedJobs: async () => {

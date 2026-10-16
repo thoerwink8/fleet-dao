@@ -22,6 +22,8 @@
 //   键 watchdog:release:…、watchdog:healthz:…，读法国的发布目录和 /healthz（real/watchdog.ts）；和上面「连着没跑全」互不相干。
 // - 同一轮还看「提醒真的推到飞书了」（jobs/watchdog-push.ts）：推送渠道自己坏了靠推送报不出来，键 watchdog:push:feishu、进「要你拍」。
 // - 也看「今天的每日简报送到了」（jobs/watchdog-brief.ts）：09:00 以后没送到报 watchdog:brief:<北京日期>（卡住报警），送到了自己撤。
+// - 也看「在干活但没有开着的会话」（jobs/idle-running.ts，#2392）：running、executor=engine、没有 ended_at 为空的 runs、
+//   任务行超过 20 分钟没动就报 watchdog:idle-running:<任务>，有会话了或状态变了自己撤。只报警，不替工作流收场。
 // - 拼车池整池暂停时 carpool-watch 不要求新鲜（deps.pausedJobs，真装配读和盯读同一句暂停）：登记行还在也不报「停了」，
 //   开着的这条撤掉。摘登记行会被引擎启动时的重新登记清掉，单靠登记行会误报；暂停读不到不当成暂停，照常盯。
 
@@ -31,6 +33,7 @@ import type { DecisionOption } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { WatchdogRun } from '../contract.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
+import { type IdleRunningWatchDeps, watchIdleRunning } from './idle-running.ts';
 import {
   judgeMergeStalls,
   MERGE_STALL_ALERT_PREFIX,
@@ -142,6 +145,11 @@ export interface WatchdogDeps {
    * 「今天的每日简报送到了」要的读（jobs/watchdog-brief.ts）。读不到照抛：这一轮记没查成，开着的不撤。不给（只测别的部分的单测）就不看这一条。
    */
   brief?: Pick<BriefWatchDeps, 'status' | 'here'>;
+  /**
+   * 「在干活但没有开着的会话」（jobs/idle-running.ts，#2392）。读不到照抛：这一轮记没查成，开着的不撤。
+   * 不给（只测别的部分的单测）就不看这一条。
+   */
+  idleRunning?: Pick<IdleRunningWatchDeps, 'tasks'>;
   /**
    * 有意不要求按期跑的定时任务（任务编号 → 为什么）。登记行还在也不报「停了 / 没跑成」，开着的这条撤掉。
    * 拼车池整池暂停时 carpool-watch 在这里（real/watchdog.ts）：摘登记行挡不住引擎启动把它登记回来。
@@ -457,6 +465,13 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
     found += b.found;
     briefScanned = b.scanned;
   }
+  let idleScanned = 0;
+  if (deps.idleRunning) {
+    const idle = await watchIdleRunning({ ...deps.idleRunning, alerts: deps.alerts, log: deps.log }, now);
+    s.problems.push(...idle.problems);
+    found += idle.found;
+    idleScanned = idle.scanned;
+  }
   const scanned =
     others.length +
     merges.scanned +
@@ -464,7 +479,8 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
     reds.scanned +
     releases.scanned +
     pushScanned +
-    briefScanned;
+    briefScanned +
+    idleScanned;
 
   if (s.problems.length > 0) {
     const why = `${s.problems.length > 1 ? `${s.problems.length} 处没做成：` : ''}${s.problems.join('；')}`;

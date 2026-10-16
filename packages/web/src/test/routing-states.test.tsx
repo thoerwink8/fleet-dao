@@ -40,6 +40,7 @@ describe('路由页的状态词：后端的「死」拆开，用路由八态，�
     renderApp(<RoutingPage />, { route: '/routing?purpose=execute' });
     await opened();
     expect(chipOf('r-ca-opus').textContent).toContain('在线');
+    fireEvent.click(await screen.findByRole('button', { name: '显示全部' }));
     expect(chipOf('r-rl-opus').textContent).toContain('已关');
     expect(chipOf('r-rl-opus').getAttribute('data-tone')).not.toBe('fail');
     await pickModel('Cursor Auto');

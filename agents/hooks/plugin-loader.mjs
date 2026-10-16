@@ -161,6 +161,11 @@ export function applyCatalog(settings, track, hooksDir) {
       type: 'command',
       command: commandFor(hooksDir, spec.script),
       timeout: spec.timeout,
+      // 后台钩子的几项照目录写（没有的不写，不往别的钩子里塞 false）
+      ...(spec.async === true ? { async: true } : {}),
+      ...(spec.asyncRewake === true ? { asyncRewake: true } : {}),
+      ...(spec.rewakeMessage ? { rewakeMessage: spec.rewakeMessage } : {}),
+      ...(spec.rewakeSummary ? { rewakeSummary: spec.rewakeSummary } : {}),
     });
     root.hooks[spec.event] = groups;
   }

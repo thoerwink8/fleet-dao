@@ -438,7 +438,7 @@ describe('选路', () => {
     expect(!r.ok && r.detail).toContain('路由两层的配置缺口：这个用途没有模型，派不了');
   });
 
-  it('近 7 天的会话结局喂熔断：连着失败三次，这条路由熔断，派给下一条', async () => {
+  it('近 14 天的会话结局喂熔断：连着失败三次，这条路由熔断，派给下一条', async () => {
     await world(t.db);
     const { task } = await addTask(t.db);
     for (let i = 0; i < 3; i++) {

@@ -132,6 +132,17 @@ export class TaskRuntime {
   private infraRouteModels: string[] = [];
   /** 已经升到「避开模型」的那些模型。再失败不再为它自动重派。 */
   private infraModelIds: string[] = [];
+  /**
+   * 总时长第二次到顶、已经写了「换路由续」还没派上新会话（#2392）。
+   * 只在工作流内存里，不调活动。选路若只剩等，不进 pauseForRoute 的长睡。
+   * 派上会话或人点「继续」清掉没提交的避让时清掉。
+   */
+  landSwitch = false;
+  /**
+   * 已经在长睡里的老历史被叫醒之后置上（patched('wall-clock-switch-wake')）。
+   * 下一轮再选不出就停下，不再睡第二觉。新跑的走 wall-clock-switch-lands，这一位保持假。
+   */
+  switchWake = false;
   /** 这一轮动手会话实际跑完时用的路由。没跑成的不算。 */
   lastImplementRoute: RouteChoice | null = null;
   /** 这一轮选路时避让把候选滤光了，改派了原来的路由。 */
@@ -335,6 +346,8 @@ export class TaskRuntime {
   /**
    * 等路由：睡 seconds 秒，但路由那边变了（叫醒信号，记号之后到过一次就算）当场醒、放弃了马上醒（抛 Abandoned）。
    * 返回是不是被叫醒的（日志、测试看）；醒了调用方照旧重新选一次，选不到会拿新记号再来等，不空转。
+   * 「继续」（taskContinue）不加进这个条件：在途的等待重放时谓词必须和记下来的一样。命令行和驾驶舱的「继续」
+   * 会再发一发 taskRouteWake，这一条本来就在看它（#2392，换路由续之后睡在这里、任务行冻住的那一觉）。
    * 多张单同时等这里时，测试不要对未收场的工作流 await result()：TimeSkippingWorkflowClient.result
    * 会全局 unlockTimeSkipping，另一张若仍停在本条件上等 taskRouteWake、或活动尚在工人手里，时钟一跳即判 START_TO_CLOSE（#1764）。
    */
@@ -500,6 +513,8 @@ export class TaskRuntime {
     this.fellBackToMissRoute = false;
     this.infraRouteModels = [];
     this.infraModelIds = [];
+    this.landSwitch = false;
+    this.switchWake = false;
   }
 
   /**

@@ -4,14 +4,23 @@
 //      其余照人排；5 小时窗不参与排序、只挡。pace 关着时退回老的「快清零还没用完的往前提」；
 //   ② 战绩明显差的往后放，样本少不动；③ 额度未知的排在读到了的后面。
 // （原先还有一条「备池排在主池后面」：两个会话用户同时跑时拼车号是备池，法国只留一个会话用户后作废，#59 删掉。）
-// 模型之间默认严格按用途里排的先后（#1089）。例外是动手（policy.trackScore.stages，PLAN 3f，决定 0093）：拿到了各模型的动手战绩时，
-// 打了分的模型按每单期望成本在它们自己占的位置之间重排（要明显更省才挪到人排的前面），一轮做成率明显差的挪到最后、由 choose.ts
-// 挡在动手外面（别的都派不了时兜底）；样本不够的模型留在人排的位置。有钉住的行时整段不动。
+// 模型之间默认严格按用途里排的先后（#1089）。例外是动手（policy.trackScore.stages，PLAN 3f，决定 0093、0095、0098）：
+// 拿到了这一档的第一段战绩、又开着 byTier 时，按收缩后的质量下界在它们自己占的位置之间重排（要比前一个高 qualityMargin
+// 才往前挪），分钟只在质量分打平手时才比；这一档没有行的留在人排的位置。不再把一轮做成率差的挪到最后。
+// byTier 关掉时仍按每单期望成本重排（要明显更省才挪到人排的前面），一轮做成率明显差的挪到最后、由 choose.ts 挡在动手外面
+// （别的都派不了时兜底）；样本不够的模型留在人排的位置。有钉住的行时整段不动。
 
 import { type QuotaPace, quotaPace } from '@fleet-dao/shared';
 import { duration, percent, remaining, windowName } from './names.ts';
 import type { RoutingPolicy } from './policy.ts';
-import type { ModelTrackFacts, Nudge, RouteFacts, RouteWindow, StageRouteEntry } from './types.ts';
+import type {
+  ModelTierTrackFacts,
+  ModelTrackFacts,
+  Nudge,
+  RouteFacts,
+  RouteWindow,
+  StageRouteEntry,
+} from './types.ts';
 
 /** 按消耗进度判出的一条路由：behind = 落后够多往前提，ahead = 超前够多往后放。 */
 export interface PaceHit {
@@ -121,8 +130,14 @@ export interface ModelScore {
   oneRoundRate: number;
   /** 每做成一单期望花的分钟：段数 / 做成单数 ×（每段分钟 + 每轮额外分钟）；一单没做成为 Infinity。 */
   expectedMinutes: number;
-  /** 打了分、一轮做成率低于线：不进这个用途（choose.ts 兜底时除外）。 */
+  /** 打了分、一轮做成率低于线：不进这个用途（choose.ts 兜底时除外）。按档排时一律 false。 */
   poor: boolean;
+  /** 按档排时的质量下界。没有 = 走期望成本那条（决定 0095）。 */
+  quality?: number;
+  /** 按档排时每一段第一段的分钟（minutes / firstSegs）。只在质量分打平手时用来比。 */
+  tierMinutes?: number;
+  /** 快档 / 中档 / 主力档。按档排的理由里用。 */
+  tierLabel?: string;
 }
 
 export function scoreOf(track: ModelTrackFacts, policy: RoutingPolicy): ModelScore {
@@ -137,14 +152,101 @@ export function scoreOf(track: ModelTrackFacts, policy: RoutingPolicy): ModelSco
   return { track, scored, oneRoundRate, expectedMinutes, poor: scored && oneRoundRate < ts.poorOneRoundRate };
 }
 
-/** 「近 7 天 16 单成 13、一轮成 1（6%）、均 2.4 段，每单约 95 分钟」。 */
+/** 「近 14 天 16 单成 13、一轮成 1（6%）、均 2.4 段，每单约 95 分钟」。 */
 export function trackText(s: ModelScore): string {
   const t = s.track;
   const avg = t.tasks > 0 ? (t.segments / t.tasks).toFixed(1) : '0';
   const cost = Number.isFinite(s.expectedMinutes)
     ? `每单约 ${Math.round(s.expectedMinutes)} 分钟`
     : '一单没做成';
-  return `近 7 天 ${t.tasks} 单成 ${t.done}、一轮成 ${t.oneRound}（${Math.round(s.oneRoundRate * 100)}%）、均 ${avg} 段，${cost}`;
+  return `近 14 天 ${t.tasks} 单成 ${t.done}、一轮成 ${t.oneRound}（${Math.round(s.oneRoundRate * 100)}%）、均 ${avg} 段，${cost}`;
+}
+
+const TIER_LABEL: Record<string, string> = { fast: '快档', medium: '中档', heavyweight: '主力档' };
+
+/**
+ * 收缩后的质量下界。m = (一段过 + prior × 本档平均) / (单数 + prior)，分 = m − √(m(1−m)/(单数+prior))。
+ * 本档平均由调用方按这一档全部模型的一段过之和 / 第一段之和算好。
+ */
+export function tierQuality(onePass: number, tasks: number, average: number, prior: number): number {
+  const denom = tasks + prior;
+  if (denom <= 0) return 0;
+  const m = Math.min(1, Math.max(0, (onePass + prior * average) / denom));
+  return m - Math.sqrt((m * (1 - m)) / denom);
+}
+
+/**
+ * 同一档的几行打成质量下界。本档平均是一段过之和 / 第一段之和（不是各模型做成率的简单平均）。
+ * 没有第一段的行跳过。调用方要先滤成同一档。
+ */
+export function tierScores(
+  rows: readonly ModelTierTrackFacts[],
+  policy: RoutingPolicy,
+): Map<string, ModelScore> {
+  const prior = policy.trackScore.priorTasks;
+  let totalPass = 0;
+  let total = 0;
+  for (const r of rows) {
+    totalPass += r.onePass;
+    total += r.firstSegs;
+  }
+  const average = total > 0 ? totalPass / total : 0;
+  const out = new Map<string, ModelScore>();
+  for (const r of rows) {
+    if (r.firstSegs <= 0) continue;
+    const quality = tierQuality(r.onePass, r.firstSegs, average, prior);
+    out.set(r.modelId, {
+      track: {
+        modelId: r.modelId,
+        tasks: r.firstSegs,
+        done: r.onePass,
+        oneRound: r.onePass,
+        segments: r.firstSegs,
+        segmentMinutes: r.minutes,
+      },
+      scored: true,
+      oneRoundRate: r.onePass / r.firstSegs,
+      expectedMinutes: r.minutes / r.firstSegs,
+      poor: false,
+      quality,
+      tierMinutes: r.minutes / r.firstSegs,
+      tierLabel: TIER_LABEL[r.tier] ?? r.tier,
+    });
+  }
+  return out;
+}
+
+/** 按质量下界在打了分的位置之间重排。要比前一个高 margin 才往前；分相同才让每段分钟更低的往前。不把谁挪到最后。 */
+function orderByTierQuality(
+  models: readonly string[],
+  scores: ReadonlyMap<string, ModelScore>,
+  policy: RoutingPolicy,
+): string[] {
+  const margin = policy.trackScore.qualityMargin;
+  const scored = (m: string) => scores.get(m)?.quality !== undefined && scores.get(m)?.scored === true;
+  const slots = models.flatMap((m, i) => (scored(m) ? [i] : []));
+  const sorted: string[] = [];
+  for (const m of models.filter(scored)) {
+    const s = scores.get(m);
+    const q = s?.quality ?? 0;
+    const mins = s?.tierMinutes ?? Number.POSITIVE_INFINITY;
+    let at = sorted.length;
+    while (at > 0) {
+      const prev = scores.get(sorted[at - 1] as string);
+      const pq = prev?.quality ?? 0;
+      const pm = prev?.tierMinutes ?? Number.POSITIVE_INFINITY;
+      const clearlyBetter = q > pq + margin - 1e-12;
+      const tie = Math.abs(q - pq) <= 1e-12 && mins < pm - 1e-9;
+      if (clearlyBetter || tie) at -= 1;
+      else break;
+    }
+    sorted.splice(at, 0, m);
+  }
+  const out = [...models];
+  slots.forEach((slot, i) => {
+    out[slot] = sorted[i] as string;
+  });
+  return out;
 }
 
 /**
@@ -157,6 +259,9 @@ export function modelOrder(
   scores: ReadonlyMap<string, ModelScore>,
   policy: RoutingPolicy,
 ): string[] {
+  if (policy.trackScore.byTier && [...scores.values()].some((s) => s.quality !== undefined)) {
+    return orderByTierQuality(models, scores, policy);
+  }
   const margin = policy.trackScore.promoteMargin;
   const good = (m: string) => scores.get(m)?.scored === true && scores.get(m)?.poor !== true;
   const poor = models.filter((m) => scores.get(m)?.poor === true);
@@ -264,6 +369,18 @@ export function rank(
     for (const it of items) {
       const s = byScore.get(it.route.modelId);
       if (!s) continue;
+      if (s.quality !== undefined) {
+        const from = humanModels.indexOf(it.route.modelId);
+        const to = models.indexOf(it.route.modelId);
+        const moved = to !== from ? `，按这一档排第 ${to + 1} 个模型（人排第 ${from + 1} 个）` : '';
+        const each = Math.round(s.tierMinutes ?? 0);
+        const label = s.tierLabel ?? '这一档';
+        it.nudges.push({
+          kind: 'track-score',
+          text: `动手战绩：${label} ${s.track.tasks} 单一段过 ${s.track.oneRound}（${Math.round(s.oneRoundRate * 100)}%），质量下界 ${s.quality.toFixed(2)}，每段约 ${each} 分钟${moved}`,
+        });
+        continue;
+      }
       if (s.poor) {
         it.nudges.push({
           kind: 'poor-one-round',

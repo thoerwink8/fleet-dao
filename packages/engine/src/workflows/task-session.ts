@@ -9,6 +9,8 @@
 //   滤光了候选就不再避开，点名原来的路由再选一次；还派不出就照旧用它，不死等。老历史没有这个标记，选路参数和原来一样。
 // - patched('prefer-author-families')：曾让写码返工优先本单已有作者族，现在选路只按用途顺序、不再带这个字段；
 //   调用留着只为带这个标记的老历史重放不报非确定性。
+// - patched('route-by-tier')：动手选路带上这一单的派工档（rt.status.tier），按这一档的质量下界排模型（决定 0098）。
+//   老历史没有这个标记，选路参数不带档，仍按整单战绩排。
 // - 派之前再探一次选定的那条（#1409，patched('dispatch-probe')）：不通就先放掉这次预占（patched('dispatch-probe-release')，
 //   没进起会话，不能占着池），再换下一条，每轮最多探 3 条；都探不通或都被挡就停下，不起会话。
 //   没提交避让滤光之后改派原来的那条，也先探再派。老历史没有这个标记，不探、不改选路之后的那一步。
@@ -36,6 +38,10 @@
 //   （patched('wall-clock-resume-session')，#2244）。没有编号、或老历史没有这个标记，只钉原路由、开新会话。
 //   同一条路由上第二次不再原路续：换路由时把树上的进度写进提示词
 //   （patched('wall-clock-carry-progress')），让下一轮接着做，不从头重来。老历史没有这个标记，只换路由、不改提示词。
+//   写完「换路由续」之后若选路只剩等额度或等空位：不进 pauseForRoute 长睡（patched('wall-clock-switch-lands')，#2392）。
+//   那一睡不写任务行，doing / updated_at 停在这一句，工作流仍 Running、没有新的 runs，拉单把它算进在干活。
+//   新跑的当场停下等人。已经睡在里面的老历史：这一标记重放时为假（不能插在已记下的定时器前面），
+//   叫醒之后走 patched('wall-clock-switch-wake')，下一轮再选不出就停下，不再睡第二觉。
 
 import { isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -77,7 +83,9 @@ import {
   type ResumeFrom,
   segmentMinutesAfterPatience,
   tokenBudgetStop,
+  WALL_CLOCK_SWITCH_STALL,
   wallClockSwitchLine,
+  wallClockSwitchStallDetail,
   widen,
   withDispatchProbeNote,
   withoutFamilies,
@@ -343,6 +351,8 @@ export async function writeSession(
           const line = wallClockSwitchLine(route.modelId);
           interrupted = line;
           if (!rt.feedback.includes(line)) rt.feedback = [...rt.feedback, line];
+          // 只记在内存里，不调活动：下一轮选路若只剩等，不进长睡。已经写过这行、正睡着的老历史重放时也会置上。
+          rt.landSwitch = true;
         }
         await rt.note(
           carryProgress
@@ -517,13 +527,19 @@ async function pickRoute(
     rt.fellBackToMissRoute = false;
     await rt.pauseForRoute('slot', lastStopDetail, ROUTE_RETRY_SECONDS, wakeMark);
   };
+  // 派上了会话：换路由续这一记清掉，后面正常的等额度不再被当成「续不上」。
+  const landed = (chosen: { route: RouteChoice; probeNote: string | null }) => {
+    rt.landSwitch = false;
+    rt.switchWake = false;
+    return chosen;
+  };
   // 选定的这一条：老历史不探，直接派。探通才派；探不通记下来换下一条，到了 3 条就停下。
   const consider = async (
     route: RouteChoice,
     probeOn: boolean,
     wakeMark: number,
   ): Promise<{ route: RouteChoice; probeNote: string | null } | null> => {
-    if (!probeOn) return { route, probeNote: null };
+    if (!probeOn) return landed({ route, probeNote: null });
     const probe = await rt.step('probeAssignedRoute', () =>
       rt.cancellable(() =>
         rt.acts.probeAssignedRoute({
@@ -535,7 +551,7 @@ async function pickRoute(
     );
     if (probe.kind === 'pass') {
       clearProbeStop();
-      return { route, probeNote: dispatchProbeLine(round.fails, probe.label) };
+      return landed({ route, probeNote: dispatchProbeLine(round.fails, probe.label) });
     }
     // 探不通不会进 runSegment。预占要在换下一条或停下之前放掉，不然这一段一直占着池。
     // 老历史没有这个标记：当时没放，重放不多调这一步。
@@ -575,6 +591,9 @@ async function pickRoute(
     for (const id of probeAvoid) if (!avoidRouteIds.includes(id)) avoidRouteIds.push(id);
     // 选路不再带「优先本单已有作者族」（选路只按用途顺序）。调用留着、不加字段：带这个标记的老历史重放时命令序列不变。
     patched('prefer-author-families');
+    // 紧挨在上一个标记后面：老历史重放时这里为假，选路参数不带档，后面的活动入参和原来一样。
+    const routeByTier = patched('route-by-tier');
+    const tierName = routeByTier ? rt.status.tier?.tier : undefined;
     const got: PickRouteResult = await rt.step('pickRoute', () =>
       rt.acts.pickRoute({
         taskId: rt.input.taskId,
@@ -589,6 +608,7 @@ async function pickRoute(
         ...(stickTo ? { stickRouteId: stickTo } : {}),
         ...(prefer ? { preferRouteId: prefer } : {}),
         ...(failedChannel ? { failedChannel } : {}),
+        ...(tierName ? { tier: tierName } : {}),
         reserve: { segment: 'manual' },
       }),
     );
@@ -653,11 +673,29 @@ async function pickRoute(
         rt.status.lastProblem = RELEASE_FAMILY_WAIT;
         continue;
       }
+      // #2392 钉在这里：总时长第二次到顶、rt.note 写完「换一条路由带上进度续一次」之后 continue 回到本循环。
+      // 上一段已经收场（不然走不到 note），holdForBudget 的 taskSpend 是 quick 档，撑不到十几个小时。
+      // 能冻住 tasks.doing / updated_at、又不插入 runs 的，就是下面这次 pauseForRoute：condition 睡着，
+      // waiting() 只改内存、不 mirror。等额度 retryAfterSeconds 封顶 4 小时，连睡几觉就是十几个小时；
+      // 等空位、熔断每档最多约 2 分钟，但同样不写任务行，看起来和定时器没醒一样。
+      // taskContinue 不在这个条件里（在途重放不能改谓词）；叫醒靠 taskRouteWake。
+      // 新跑的（wall-clock-switch-lands）：不睡，当场停下等人。已经睡在这一觉里的老历史重放时这一标记为假，
+      // 仍睡原来那一觉；醒了（继续附带的叫醒、或定时器）再走 wall-clock-switch-wake，下一轮选不出就停下，不睡第二觉。
+      // switchWake 为假时不调用 wake 那个标记，避免在途的这一觉把它记成永久的假。
+      if (rt.landSwitch && rt.switchWake && patched('wall-clock-switch-wake')) {
+        await rt.park(WALL_CLOCK_SWITCH_STALL, wallClockSwitchStallDetail(got.detail));
+        continue;
+      }
+      if (rt.landSwitch && !rt.switchWake && patched('wall-clock-switch-lands')) {
+        await rt.park(WALL_CLOCK_SWITCH_STALL, wallClockSwitchStallDetail(got.detail));
+        continue;
+      }
       // 睡到下一次选路。等额度且选路给了清零时刻：秒数按那个时刻（上限几小时），不是每 120 秒醒一次。
       // 等空位、熔断仍是短间隔。路由变了（切号切完、切过去的池探通了）会被叫醒当场再选；信号丢了照样按这个时长醒。
       // 步序没变（秒数是选路活动的结果）：老历史重放不用新的 patched 标记。
       // 多张单同时停在这里时，测试不要 await result()（会 unlockTimeSkipping，见 #1764）。
       await rt.pauseForRoute(got.waitFor, got.detail, got.retryAfterSeconds ?? ROUTE_RETRY_SECONDS, mark);
+      if (rt.landSwitch && patched('wall-clock-switch-wake')) rt.switchWake = true;
       continue;
     }
     const chosen = await consider(got.route, probeOn, mark);
