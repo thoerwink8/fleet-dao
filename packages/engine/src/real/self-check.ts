@@ -27,8 +27,8 @@ import {
 } from '../task-contract.ts';
 import type { UserCommandResult, UserExec } from './exec.ts';
 
-/** 测试命令最多跑多久（毫秒）。要全跑时，排队和改跑受影响包合起来也算在这一段里。 */
-export const SELF_CHECK_TEST_MS = 8 * 60_000;
+/** 测试命令最多跑多久（毫秒）。受影响包可能包含数百个工作流测试，排队和改跑合起来给 12 分钟。 */
+export const SELF_CHECK_TEST_MS = 12 * 60_000;
 /** tsc 最多跑多久（毫秒）。 */
 export const SELF_CHECK_TSC_MS = 5 * 60_000;
 /** 多久报一次心跳（活动的心跳超时是 limits.heartbeatSeconds，默认 120 秒）。 */

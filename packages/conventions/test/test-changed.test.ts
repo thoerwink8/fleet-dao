@@ -542,16 +542,17 @@ describe('要全跑时本机不跑：写明原因、全量交给 CI，不再教�
     expect(some.vitestCalls[0]).toContain('packages/api/');
     expect(some.vitestCalls[0]).not.toEqual(['run']);
 
-    // CI、引擎会话仍全跑；--all 和 --affected 一起带时 --all 赢
+    // CI 仍全跑；引擎会话里的显式 --affected 改跑受影响的包；--all 和 --affected 一起带时 --all 赢
     expect(run(['pnpm-lock.yaml'], { argv: ['--affected'], env: { CI: 'true' } }).vitestCalls).toEqual([
       ['run'],
     ]);
-    expect(
-      run(['packages/shared/src/domain.ts'], {
-        argv: ['--affected'],
-        env: { [ENGINE_SESSION_MARKER]: 'run-1' },
-      }).vitestCalls,
-    ).toEqual([['run']]);
+    const engineAffected = run(['packages/shared/src/domain.ts'], {
+      argv: ['--affected'],
+      env: { [ENGINE_SESSION_MARKER]: 'run-1' },
+    });
+    expect(engineAffected.vitestCalls[0]).toContain('packages/shared/');
+    expect(engineAffected.vitestCalls[0]).toContain(DOC_POINTERS_TEST);
+    expect(engineAffected.vitestCalls[0]).toContain(SKILL_POINTERS_TEST);
     expect(run(['pnpm-lock.yaml'], { argv: ['--all', '--affected'] }).vitestCalls).toEqual([['run']]);
   });
 
