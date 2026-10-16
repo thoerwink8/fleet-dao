@@ -5,6 +5,7 @@ import type { ProgressEvent } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { judgeRun } from '../src/judge.ts';
 import { ledgerRouting, readMirasimLedger } from '../src/mirasim/ledger.ts';
+import { METER_EARLY_MS, type MeterFs, type MeterWindow, readMirasimMeter } from '../src/mirasim/meter.ts';
 import {
   type MirasimRunOptions,
   type MirasimRunReport,
@@ -1087,6 +1088,166 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     });
     const deaf = new FakeMirasim({});
     expect((await stopMirasimSession(deaf.connect, kimi.sessionKey, 200)).confirmed).toBe(false);
+  });
+});
+
+// #2675：法国 10-14 到 10-16 用量账本对不上的 19 笔逐笔查过（只读），每类根因一份最小样例。用量账本是
+// ~/.mirasim/insights/usage-<年-月>.ndjson（有 token 数），流量记录是 ~/.mirasim/traffic/<会话 uuid>/index-*.ndjson（每次上游调用
+// 一行，有 ts、status，没有 token 数）。字段照真行，去掉了账号、设备、仓这些和用量无关的。
+describe('Mirasim 用量账本对不上的段（#2675）', () => {
+  const INSIGHTS = '/home/fleet-agent-carpool/.mirasim/insights';
+  const TRAFFIC = '/home/fleet-agent-carpool/.mirasim/traffic';
+  const UUID = 'f06c9e0e-76db-40c4-9389-02e0e8a0db90';
+  const T0 = Date.parse('2026-10-15T06:23:14.563Z');
+  const T1 = Date.parse('2026-10-15T06:24:35.967Z');
+  const W: MeterWindow = { sessionKey: `claude:${UUID}`, since: T0, until: T1 };
+  const iso = (ms: number) => new Date(ms).toISOString();
+
+  /** 用量账本一行：默认是回填好了的 2xx。 */
+  function usageRow(ts: number, over: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      v: 1,
+      id: `${UUID}:call-${ts}`,
+      ts: iso(ts),
+      sessionId: UUID,
+      agent: 'claude',
+      upstreamHost: 'relay.mirasim.ai',
+      viaRelay: true,
+      leg: 'relay',
+      model: 'claude-opus-5-5',
+      status: 200,
+      input: 2,
+      output: 462,
+      cacheRead: 1000,
+      cacheWrite: 10,
+      relayMetered: true,
+      ...over,
+    });
+  }
+  /** 流量记录一行。 */
+  function trafficRow(ts: number, status: number, path = '/v1/messages'): string {
+    return JSON.stringify({
+      ts: iso(ts),
+      status,
+      model: 'claude-opus-5-5',
+      path,
+      method: 'POST',
+      upstreamHost: 'relay.mirasim.ai',
+      viaRelay: true,
+      sessionId: UUID,
+      agent: 'claude',
+    });
+  }
+  /** 假的会话用户读法：usage 是用量账本的行，traffic 是流量目录（undefined 是没有这个目录）。 */
+  function fs(usage: string[], traffic: string[] | undefined): MeterFs {
+    const files = new Map<string, string>([[`${INSIGHTS}/usage-2026-10.ndjson`, usage.join('\n')]]);
+    if (traffic) files.set(`${TRAFFIC}/${UUID}/index-0.ndjson`, traffic.join('\n'));
+    return {
+      async readdir(dir) {
+        if (dir === INSIGHTS) return ['usage-2026-10.ndjson', 'session-usage-2026-10.ndjson'];
+        if (dir === `${TRAFFIC}/${UUID}` && traffic)
+          return ['index-0.ndjson', 'meta.local.json', 'session.json'];
+        throw Object.assign(new Error(`没有 ${dir}`), { code: 'ENOENT' });
+      },
+      async linesWith(needles, paths) {
+        return paths
+          .flatMap((p) => (files.get(p) ?? '').split('\n'))
+          .filter((l) => needles.some((n) => l.includes(n)))
+          .join('\n');
+      },
+    };
+  }
+  const read = async (usage: string[], traffic: string[] | undefined, w: MeterWindow = W) =>
+    (await readMirasimMeter(INSIGHTS, [w], fs(usage, traffic), TRAFFIC))[0];
+
+  it('同一会话续跑：调用都在前后几笔的起止里，这一笔里一次都没有，流量记录也没有 → 没有发出过模型调用（记 0）', async () => {
+    // 2fd2bb5f：上一笔 06:14:25 结束、下一笔 06:25:44 起，这一笔 06:23:14 ~ 06:24:35 被叫停，账本里这个会话的调用都在别的笔里
+    const usage = [
+      usageRow(Date.parse('2026-10-15T06:07:13.656Z')),
+      usageRow(Date.parse('2026-10-15T06:26:41.381Z')),
+    ];
+    const traffic = [
+      trafficRow(Date.parse('2026-10-15T06:07:13.656Z'), 200),
+      trafficRow(Date.parse('2026-10-15T06:26:41.381Z'), 200),
+    ];
+    const r = await read(usage, traffic);
+    expect(r).toEqual({ state: 'none', detail: expect.stringContaining('这一笔没有发出过模型调用') });
+  });
+
+  it('codex app-server initialize 超时：流量目录在、一行都没有 → 没有发出过模型调用', async () => {
+    expect((await read([], []))?.state).toBe('none');
+  });
+
+  it('桥接连 Mirasim 超时：连这个会话的流量目录都没有 → 没有发出过模型调用', async () => {
+    const r = await read([], undefined);
+    expect(r).toEqual({ state: 'none', detail: expect.stringContaining('这一笔没有发出过模型调用') });
+  });
+
+  it('上游都回了错（503、504）：发出过调用但没有计费 → 记 0，原因写明状态码', async () => {
+    // d4fb3a83：两次调用都是 503 / 504，用量账本里两行全 0、不计费
+    const a = T0 + 60_000;
+    const b = T0 + 70_000;
+    const usage = [
+      usageRow(a, { status: 503, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, relayMetered: undefined }),
+      usageRow(b, { status: 504, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, relayMetered: undefined }),
+    ];
+    const r = await read(usage, [trafficRow(a, 503), trafficRow(b, 504)]);
+    expect(r).toEqual({ state: 'none', detail: expect.stringContaining('状态码 503、504') });
+  });
+
+  it('流量记录里有 2xx、用量账本里没有这一行（Mirasim 没记进用量账本）→ 没对上，不记 0', async () => {
+    // 851d40bb / 85bb517c：流量里 18:15:39 一次 200，用量账本里这个会话一行都没有
+    const r = await read([], [trafficRow(T0 + 30_000, 200)]);
+    expect(r?.state).toBe('unknown');
+    expect(r).toMatchObject({
+      detail: expect.stringContaining('没对上：Mirasim 流量记录里这一笔有 1 次上游调用回了 2xx'),
+    });
+  });
+
+  it('只有没等到回应就断了的调用（状态码 0）→ 没对上，不记 0', async () => {
+    // 438b2cad、91fbd1a2：会话被叫停那一刻正在发的调用，状态码 0
+    const at = T0 + 40_000;
+    const r = await read(
+      [usageRow(at, { status: 0, input: 0, output: 0, relayMetered: undefined })],
+      [trafficRow(at, 0)],
+    );
+    expect(r?.state).toBe('unknown');
+    expect(r).toMatchObject({ detail: expect.stringContaining('状态码 0') });
+  });
+
+  it('账本行比这一笔起点早几秒、同一会话的，算进这一笔', async () => {
+    const r = await read([usageRow(T0 - 3_000)], [trafficRow(T0 - 3_000, 200)]);
+    expect(r).toEqual({
+      state: 'settled',
+      usage: { inputTokens: 2, outputTokens: 462, cacheReadTokens: 1000, cacheWriteTokens: 10, calls: 1 },
+    });
+    // 放宽有个头：早过 METER_EARLY_MS 的不算
+    expect((await read([usageRow(T0 - METER_EARLY_MS - 1_000)], []))?.state).toBe('none');
+  });
+
+  it('起点往前放宽不越过同一会话上一笔的终点：上一笔的调用不算两遍', async () => {
+    const prevEnd = T0 - 4_000;
+    const usage = [usageRow(prevEnd - 500), usageRow(T0 - 2_000, { output: 7 })];
+    const r = await read(usage, [], { ...W, notBefore: prevEnd });
+    expect(r).toMatchObject({ state: 'settled', usage: { outputTokens: 7, calls: 1 } });
+  });
+
+  it('没给流量目录：照旧读不成（分不出没调用还是没记上），不判成 0', async () => {
+    const r = (await readMirasimMeter(INSIGHTS, [W], fs([], undefined)))[0];
+    expect(r).toMatchObject({ state: 'unknown', noBilledCalls: true });
+  });
+
+  it('流量目录列不出（不是没有）：整轮没查成，照抛', async () => {
+    const bad: MeterFs = {
+      ...fs([], []),
+      async readdir(dir) {
+        if (dir === INSIGHTS) return ['usage-2026-10.ndjson'];
+        throw Object.assign(new Error('Permission denied'), { code: 'EACCES' });
+      },
+    };
+    await expect(readMirasimMeter(INSIGHTS, [W], bad, TRAFFIC)).rejects.toThrow(
+      '列不出 Mirasim 流量记录目录',
+    );
   });
 });
 

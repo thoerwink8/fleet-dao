@@ -329,6 +329,12 @@ const usageIncomplete = or(
  */
 export const USAGE_GAVE_UP_PREFIX = '用量不再补：';
 
+/**
+ * #2675 改了读法（用量账本里没有计费调用的再拿流量记录核）：按新读法定案不再补的，usage_note 末尾带这个记号；不带的是改读法
+ * 之前定案的老行，runsGaveUpAwaitingReread 收它们按新读法再读一次，读完带上记号，不再读第二次。
+ */
+export const USAGE_REREAD_MARK = '（按 #2675 起的读法读过）';
+
 /** 等「用量补记」补的一笔：经 Mirasim 起、记了会话号、结束了、四样 token 有缺的。 */
 export interface MeterPendingRun {
   id: string;
@@ -337,9 +343,55 @@ export interface MeterPendingRun {
   model: string;
   startedAt: Date;
   endedAt: Date;
+  /** 同一会话（续跑）在这一笔起点之前结束的上一笔的终点：读账本时起点往前放宽不越过它。没有上一笔是 null。 */
+  previousEndedAt: Date | null;
   usageNote: string | null;
   /** 这一行上次动是什么时候：读不成的每次都改写 usage_note（带第几次），所以它就是上次补记的时刻，退避看它。 */
   updatedAt: Date;
+}
+
+/** 同一会话在这一笔起点之前（含）结束的上一笔的终点（毫秒），续跑的会话才有。 */
+const previousEndedMs = sql<number | string | null>`(
+  select extract(epoch from max(prev.ended_at)) * 1000
+  from ${runs} as prev
+  where prev.session_id = ${runs.sessionId} and prev.id <> ${runs.id} and prev.ended_at <= ${runs.startedAt}
+)`;
+
+const meterPendingColumns = {
+  id: runs.id,
+  sessionId: runs.sessionId,
+  model: runs.model,
+  startedAt: runs.startedAt,
+  endedAt: runs.endedAt,
+  previousEndedMs,
+  usageNote: runs.usageNote,
+  updatedAt: runs.updatedAt,
+};
+
+function toMeterPending(
+  rows: {
+    id: string;
+    sessionId: string | null;
+    model: string;
+    startedAt: Date;
+    endedAt: Date | null;
+    previousEndedMs: number | string | null;
+    usageNote: string | null;
+    updatedAt: Date;
+  }[],
+): MeterPendingRun[] {
+  return rows.flatMap(({ previousEndedMs: prev, ...r }) =>
+    r.sessionId !== null && r.endedAt !== null
+      ? [
+          {
+            ...r,
+            sessionId: r.sessionId,
+            endedAt: r.endedAt,
+            previousEndedAt: prev === null ? null : new Date(Math.round(Number(prev))),
+          },
+        ]
+      : [],
+  );
 }
 
 /**
@@ -353,15 +405,7 @@ export async function runsAwaitingMeter(
   if (!Number.isInteger(input.limit) || input.limit <= 0)
     throw new RunInputError(`limit 要是正整数：${input.limit}`);
   const rows = await db
-    .select({
-      id: runs.id,
-      sessionId: runs.sessionId,
-      model: runs.model,
-      startedAt: runs.startedAt,
-      endedAt: runs.endedAt,
-      usageNote: runs.usageNote,
-      updatedAt: runs.updatedAt,
-    })
+    .select(meterPendingColumns)
     .from(runs)
     .innerJoin(routes, eq(routes.id, runs.routeId))
     .where(
@@ -376,9 +420,37 @@ export async function runsAwaitingMeter(
     )
     .orderBy(asc(runs.endedAt), asc(runs.id))
     .limit(input.limit);
-  return rows.flatMap((r) =>
-    r.sessionId !== null && r.endedAt !== null ? [{ ...r, sessionId: r.sessionId, endedAt: r.endedAt }] : [],
-  );
+  return toMeterPending(rows);
+}
+
+/**
+ * 改读法之前就定案不再补（usage_note 以 USAGE_GAVE_UP_PREFIX 开头）、还没按新读法重读过（不带 USAGE_REREAD_MARK）、
+ * endedAfter 以后结束、四样还有缺的那几笔，先结束的在前，最多 limit 笔（#2675）。
+ */
+export async function runsGaveUpAwaitingReread(
+  db: Db,
+  input: { endedAfter: Date; limit: number },
+): Promise<MeterPendingRun[]> {
+  if (!Number.isInteger(input.limit) || input.limit <= 0)
+    throw new RunInputError(`limit 要是正整数：${input.limit}`);
+  const rows = await db
+    .select(meterPendingColumns)
+    .from(runs)
+    .innerJoin(routes, eq(routes.id, runs.routeId))
+    .where(
+      and(
+        eq(routes.hostId, 'mirasim'),
+        isNotNull(runs.sessionId),
+        isNotNull(runs.endedAt),
+        gte(runs.endedAt, input.endedAfter),
+        usageIncomplete,
+        sql`${runs.usageNote} like ${`${USAGE_GAVE_UP_PREFIX}%`}`,
+        sql`strpos(${runs.usageNote}, ${USAGE_REREAD_MARK}) = 0`,
+      ),
+    )
+    .orderBy(asc(runs.endedAt), asc(runs.id))
+    .limit(input.limit);
+  return toMeterPending(rows);
 }
 
 /** 中转计量回填齐了的一次会话的用量（四样都读到了才有这一份；花费中转报了才有）。 */
@@ -392,11 +464,12 @@ export interface MeterUsageWrite {
 
 /**
  * 把读齐了的用量写回这一笔：四样 token 整套换成计量的数（会话结束时快照里的输出只是近似，计量才是逐次调用的账），中转报了花费才写
- * 花费，清掉原因。只改四样还有缺的行：补齐了的再来一遍什么都不做（回 false），重复跑、两轮叠着跑都不会改第二次。
+ * 花费，清掉原因（给了 note 就换成它：用量记 0 的那种要写明为什么是 0）。只改四样还有缺的行：补齐了的再来一遍什么都不做
+ * （回 false），重复跑、两轮叠着跑都不会改第二次。
  */
 export async function fillRunUsageFromMeter(
   db: Db,
-  input: { runId: string; usage: MeterUsageWrite; at: Date },
+  input: { runId: string; usage: MeterUsageWrite; at: Date; note?: string },
 ): Promise<boolean> {
   const u = input.usage;
   for (const [name, v] of Object.entries({
@@ -418,7 +491,7 @@ export async function fillRunUsageFromMeter(
       cacheReadTokens: u.cacheReadTokens,
       cacheWriteTokens: u.cacheWriteTokens,
       ...(u.costUsd !== undefined ? { costUsd: u.costUsd } : {}),
-      usageNote: null,
+      usageNote: input.note?.trim() ? input.note : null,
       updatedAt: input.at,
     })
     .where(and(eq(runs.id, input.runId), isNotNull(runs.endedAt), usageIncomplete))
