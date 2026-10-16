@@ -69,6 +69,8 @@ export interface CursorResult {
 
 export interface CursorStreamSummary {
   sessionId?: string;
+  /** 输出里没报真会话号时的原因。 */
+  sessionIdWhy?: string;
   /** init 帧里的模型界面名。 */
   initModel?: string;
   startedWork: boolean;
@@ -154,7 +156,16 @@ export class CursorStreamReader {
   }
 
   summary(): CursorStreamSummary {
-    return { ...this.#s, filesChanged: [...this.#files] };
+    const summary = { ...this.#s, filesChanged: [...this.#files] };
+    if (!summary.sessionId) {
+      summary.sessionIdWhy =
+        summary.frames === 0
+          ? summary.nonJsonLines > 0
+            ? 'Cursor 输出没有可解析的 JSON 帧，没读到 session_id'
+            : 'Cursor 没有输出帧，没读到 session_id'
+          : 'Cursor 输出帧没有 session_id';
+    }
+    return summary;
   }
 
   read(raw: string): CursorLineEffect {

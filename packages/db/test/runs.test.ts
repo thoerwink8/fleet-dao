@@ -68,6 +68,33 @@ describe('runs 表本身的约束', () => {
     expect((await getRun(t.db, id))?.sessionId).toBe('claude:real-1');
   });
 
+  it('开跑时保留续会话判定：续上的写期望会话号，改开新的写原因', async () => {
+    const resumed = randomUUID();
+    const fresh = randomUUID();
+    await startRun(t.db, {
+      id: resumed,
+      segment: 'manual',
+      model: 'opus-4.9',
+      startedAt: ago(MIN),
+      resumeSessionId: 'cursor:previous',
+    });
+    await startRun(t.db, {
+      id: fresh,
+      segment: 'manual',
+      model: 'opus-4.9',
+      startedAt: ago(MIN),
+      resumeReason: '上一段没记下会话号',
+    });
+    expect(await getRun(t.db, resumed)).toMatchObject({
+      resumeSessionId: 'cursor:previous',
+      resumeReason: null,
+    });
+    expect(await getRun(t.db, fresh)).toMatchObject({
+      resumeSessionId: null,
+      resumeReason: '上一段没记下会话号',
+    });
+  });
+
   it('会话号缺失按执行方式分开计数，没路由的归 unknown', async () => {
     await addRoute(t.db, { id: 'cursor-r', poolId: 'relay-b', modelId: 'opus-4.9', hostId: 'cursor-agent' });
     await addRoute(t.db, { id: 'grok-r', poolId: 'relay-b', modelId: 'opus-4.9', hostId: 'grok' });

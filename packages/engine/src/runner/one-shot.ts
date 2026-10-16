@@ -89,6 +89,8 @@ export interface OneShotInput {
   timeoutMinutes?: number;
   /** 续哪个会话（决定 0088）：给了交给 Spawner 续它，不给开新会话。空串当没给。 */
   resumeSessionId?: string;
+  /** 续会话判定为新会话时的原因；任务工作流通过路由理由的内部标记传入。 */
+  resumeReason?: string;
   /**
    * 路由编号：生产 Spawner（real/segment-spawner.ts）据此在库里查执行方式、会话用户、上游模型串；
    * 测试里的假 Spawner 不看。modelId 只是记账和提示用，真正起谁看这个。
@@ -173,6 +175,8 @@ export interface SpawnFacts {
    * 「用量补记」凭它按会话补读（#1935）。
    */
   sessionId?: string;
+  /** 执行体没有报真会话号时的具体原因，写进 runs.usage_note，避免空号看起来像没跑。 */
+  sessionIdWhy?: string;
   quotaExhausted?: boolean;
   /** 额度用满时上游给的清零时刻。 */
   resetsAt?: string;
@@ -529,6 +533,8 @@ async function persistArtifacts(runDir: string, result: OneShotResult): Promise<
  * 没给的不写：不拿 0、空串顶。
  */
 function runFields(input: OneShotInput, runId: string, startedAt: string): RunStart {
+  const marked = resumeMarkerOf(input.routeWhy);
+  const routeWhy = marked?.routeWhy ?? input.routeWhy;
   return {
     runId,
     segment: input.segment,
@@ -538,13 +544,36 @@ function runFields(input: OneShotInput, runId: string, startedAt: string): RunSt
     ...(input.channel !== undefined ? { channel: input.channel } : {}),
     ...(input.routeId !== undefined ? { routeId: input.routeId } : {}),
     ...(input.tier !== undefined ? { tier: input.tier } : {}),
-    ...(input.routeWhy?.trim() ? { routeWhy: input.routeWhy.trim() } : {}),
+    ...(routeWhy?.trim() ? { routeWhy: routeWhy.trim() } : {}),
+    ...(input.resumeSessionId?.trim() ? { resumeSessionId: input.resumeSessionId.trim() } : {}),
+    ...(input.resumeReason?.trim() || marked?.reason
+      ? { resumeReason: input.resumeReason?.trim() ?? marked?.reason }
+      : {}),
     ...(input.workflowId !== undefined ? { workflowId: input.workflowId } : {}),
     ...(input.prNumber !== undefined ? { prNumber: input.prNumber } : {}),
     ...(input.branch !== undefined ? { branch: input.branch } : {}),
     ...(input.cwd ? { worktreePath: input.cwd } : {}),
     startedAt,
   };
+}
+
+const RESUME_NEW_MARKER = 'fleet-resume-new:';
+
+function resumeMarkerOf(routeWhy: string | undefined): { reason: string; routeWhy?: string } | undefined {
+  if (!routeWhy?.startsWith(RESUME_NEW_MARKER)) return undefined;
+  try {
+    const parsed = JSON.parse(routeWhy.slice(RESUME_NEW_MARKER.length)) as {
+      reason?: unknown;
+      routeWhy?: unknown;
+    };
+    if (typeof parsed.reason !== 'string' || !parsed.reason.trim()) return undefined;
+    return {
+      reason: parsed.reason.trim(),
+      ...(typeof parsed.routeWhy === 'string' && parsed.routeWhy.trim() ? { routeWhy: parsed.routeWhy } : {}),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /** 记一笔 runs（占位还是真实现由装配方定）。 */
@@ -584,14 +613,19 @@ function usageFields(result: OneShotResult): Partial<RunRecord> {
         ...(facts.memoryPeakMb !== undefined ? { memoryPeakMb: facts.memoryPeakMb } : {}),
         ...(isCpuSeconds(facts.cpuSeconds) ? { cpuSeconds: facts.cpuSeconds } : {}),
         ...(facts.sessionId !== undefined ? { sessionId: facts.sessionId } : {}),
-        ...(facts.usageWhy?.trim() ? { usageNote: facts.usageWhy.trim() } : {}),
+        ...(() => {
+          const notes = [facts.usageWhy, facts.sessionIdWhy].filter((note): note is string =>
+            Boolean(note?.trim()),
+          );
+          return notes.length > 0 ? { usageNote: notes.join('；') } : {};
+        })(),
       }
     : {};
   const decision = sessionlessUsage({
     outcome: result.outcome,
     ...(result.failureReason !== undefined ? { failureReason: result.failureReason } : {}),
     hasSessionId: facts?.sessionId !== undefined,
-    hasUsageWhy: Boolean(facts?.usageWhy?.trim()),
+    hasUsageWhy: Boolean(facts?.usageWhy?.trim() || facts?.sessionIdWhy?.trim()),
     hasToken:
       u?.inputTokens !== undefined ||
       u?.outputTokens !== undefined ||

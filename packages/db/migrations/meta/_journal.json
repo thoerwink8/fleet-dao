@@ -610,6 +610,13 @@
       "when": 1792174947089,
       "tag": "0086_drop_github_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1792177823241,
+      "tag": "0087_resume_session_health",
+      "breakpoints": true
     }
   ]
 }

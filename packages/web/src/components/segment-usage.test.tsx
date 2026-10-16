@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
-import { SegmentBreakdown, SegmentStats } from './segment-usage';
+import { SegmentBreakdown, SegmentRunList, SegmentStats } from './segment-usage';
 
 /** grid-cols-segments 写在 app.css 里的那一行列宽（空白折成一行）。读不到就失败，不当成没有这条规则。 */
 function segmentColumns(): string {
@@ -44,6 +44,15 @@ describe('花费一格两行', () => {
 });
 
 describe('三段表耗时列', () => {
+  test('动手段显示没续上会话的原因', async () => {
+    const d = await createMockApi({ live: false }).task('t-12');
+    const manual = d.segmentRuns.find((run) => run.segment === 'manual');
+    if (!manual) throw new Error('t-12 没有动手段');
+    manual.resumeReason = '上一段没记下会话号';
+    render(<SegmentRunList d={d} now={Date.now()} onViewTranscript={() => {}} />);
+    expect(screen.getByText('为什么没续上：上一段没记下会话号')).toBeTruthy();
+  });
+
   test('「在跑 40 分钟」不换行；表头、段行、模型行共用固定耗时列，不用 max-content', async () => {
     const t = Date.parse('2026-10-10T12:00:00Z');
     const d = await createMockApi({ live: false, now: () => t }).task('t-12');

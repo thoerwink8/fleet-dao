@@ -900,14 +900,15 @@ describe('grok 的驱动', () => {
     expect(fake.options[0]?.command).toEqual(['/opt/fake/fleet-agent-carpool/grok']);
   });
 
-  it('开了会话、没到终帧就断了（半路被停、连不上）：会话号还是我们给它的那个（下次 -r 续得上）；一帧都没有就不给', async () => {
+  it('开了会话、没到终帧就断了（半路被停、连不上）：没有终帧就不拿预分配号冒充真号，并记明原因', async () => {
     const id = randomUUID();
     const cut = await grokWith({ replay: 'grok-edit-commit', replayLines: 30, exitCode: null }).driver.run(
       grokSpec({ session: { mode: 'new', id } }),
       {},
     );
     expect(cut.facts).not.toHaveProperty('terminal');
-    expect(cut.sessionId).toBe(id);
+    expect(cut).not.toHaveProperty('sessionId');
+    expect(cut.sessionIdWhy).toContain('没有 end 帧');
     const nothing = await grokWith({ stderr: 'Error: connection reset\n', exitCode: 1 }).driver.run(
       grokSpec({ session: { mode: 'new', id } }),
       {},

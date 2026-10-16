@@ -158,6 +158,7 @@ export function outcomeOfReport(report: HostReport): SpawnOutcome {
     ...(report.sessionId !== undefined && !/^[a-z]+-pending:/.test(report.sessionId)
       ? { sessionId: report.sessionId }
       : {}),
+    ...(report.sessionIdWhy !== undefined ? { sessionIdWhy: report.sessionIdWhy } : {}),
     quotaExhausted: report.facts.quotaExhausted,
     ...(report.resetsAt !== undefined ? { resetsAt: report.resetsAt } : {}),
     ...(report.httpStatus !== undefined ? { httpStatus: report.httpStatus } : {}),

@@ -274,6 +274,7 @@ describe('cursor 起停', () => {
     const verdict = judgeRun(cursorRunSummary(report).facts);
     expect(verdict).toMatchObject({ outcome: 'failed', reason: 'no_result' });
     expect(verdict.detail).toContain('Failed to reach the Cursor API');
+    expect(report.stream.sessionIdWhy).toContain('没有输出帧');
   });
 
   it('没信任过的目录（-p 打一段 Workspace Trust 提示就退出，退出码 1 或 0）：最后几行里没有那个词，把开头那句捞出来接上；不算跑成', async () => {

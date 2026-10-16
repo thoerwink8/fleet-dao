@@ -398,6 +398,7 @@ describe('grok 起停', () => {
     });
     expect(kinds.map((e) => e.kind)).toEqual(['say']);
     expect(judgeRun(grokRunSummary(report).facts).reason).toBe('no_result');
+    expect(grokRunSummary(report).sessionId).toBeUndefined();
   });
 
   it('没登录（法国实跑 2026-09-27：error 帧和 stderr 各打一遍、退出 1、没有终帧）：同一句只留 stderr 那一份', async () => {
@@ -416,6 +417,7 @@ describe('grok 起停', () => {
         'Alternatively, set the XAI_API_KEY environment variable or run `grok login` on a machine with a browser.',
     );
     expect(judgeRun(facts)).toMatchObject({ outcome: 'failed', reason: 'no_result' });
+    expect(grokRunSummary(report).sessionId).toBeUndefined();
   });
 
   it('error 帧里的话 stderr 里没有：照旧拼上，不丢', () => {

@@ -276,6 +276,8 @@ export interface HostReport {
    * （终帧回的，或者见到了报错以外的帧）。没读到、没开成不给。
    */
   sessionId?: string;
+  /** 执行体没有报真会话号时的原因；不拿起会话前的临时号顶上。 */
+  sessionIdWhy?: string;
   usage: HostUsage;
   /**
    * 用量没照终帧读到时（会话被叫停、超时杀，没走到终帧）：记下的是怎么来的、缺的为什么读不到。进 runs.usage_note，页面和
@@ -718,6 +720,7 @@ export function cursorReport(report: CursorRunReport): HostReport {
     hostId: 'cursor-agent',
     facts,
     ...defined('sessionId', report.stream.sessionId),
+    ...defined('sessionIdWhy', report.stream.sessionIdWhy),
     usage: {
       ...defined('inputTokens', r?.usage?.inputTokens),
       ...defined('outputTokens', r?.usage?.outputTokens),
@@ -811,11 +814,18 @@ export function grokReport(report: GrokRunReport): HostReport {
   const s = report.stream;
   const end = s.end;
   const facts = grokRunFacts(report);
-  const opened = s.frames > s.errors.length;
+  const sessionIdWhy = end?.sessionId
+    ? undefined
+    : end
+      ? 'Grok end 帧没有 sessionId'
+      : s.frames > 0 && s.frames === s.errors.length
+        ? 'Grok 只有 error 帧，没有建立会话的 sessionId'
+        : 'Grok 没有 end 帧，输出没有报告 sessionId';
   return {
     hostId: 'grok',
     facts,
-    ...defined('sessionId', end?.sessionId ?? (opened ? report.session.id : undefined)),
+    ...defined('sessionId', end?.sessionId),
+    ...defined('sessionIdWhy', sessionIdWhy),
     ...grokUsage(s),
     ...defined('actualModel', end?.models[0]),
     ...defined('answer', report.stream.answer),
