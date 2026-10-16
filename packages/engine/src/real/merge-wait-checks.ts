@@ -14,11 +14,12 @@ export interface MergeWaitCheckRead {
 function gateWaitingForColdVerify(
   checks: readonly { name: string; state: string; detail?: string | undefined }[],
 ): boolean {
-  const cold = checks.find((item) => item.name === COLD_VERIFY_CONTEXT);
   const gate = checks.find((item) => item.name === GATE_CONTEXT);
-  return (
-    cold?.state === 'pending' && gate?.state === 'failure' && gate.detail?.startsWith('等验收：') === true
-  );
+  if (gate?.state !== 'failure' || gate.detail?.startsWith('等验收：') !== true) return false;
+  const cold = checks.find((item) => item.name === COLD_VERIFY_CONTEXT);
+  // 闸的原文已经写明冷验收还在跑。cold-verify 没列进档案、这次没读到，或还是 pending，都不算红。
+  // 它已经出了别的结论（过了或没过）时不在这里挡：闸下次重算会改掉「等验收」。
+  return cold === undefined || cold.state === 'pending' || cold.state === 'missing';
 }
 
 export async function readMergeWaitChecks(

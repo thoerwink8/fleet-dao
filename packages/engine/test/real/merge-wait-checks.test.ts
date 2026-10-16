@@ -99,6 +99,54 @@ describe('等合并时读必过检查', () => {
     expect(got).toEqual({ overall: 'pending', failed: [] });
   });
 
+  it('档案没列 cold-verify、闸却写着等验收：pending，不当成红', async () => {
+    const got = await readMergeWaitChecks(
+      gh(
+        ['check'],
+        [{ name: 'check', conclusion: 'success' }],
+        [
+          {
+            context: GATE_CONTEXT,
+            state: 'failure',
+            description: '等验收：当前头 7790b55 上的 cold-verify 还在跑',
+          },
+        ],
+      ),
+      repo,
+      A,
+      [GATE_CONTEXT],
+    );
+    expect(got).toEqual({ overall: 'pending', failed: [] });
+  });
+
+  it('cold-verify 列了但这次没读到、闸写着等验收：pending，不当成红', async () => {
+    const got = await readMergeWaitChecks(
+      gh(
+        ['check'],
+        [{ name: 'check', conclusion: 'success' }],
+        [{ context: GATE_CONTEXT, state: 'failure', description: '等验收：cold-verify 还在跑' }],
+      ),
+      repo,
+      A,
+      fleetSignals,
+    );
+    expect(got).toEqual({ overall: 'pending', failed: [] });
+  });
+
+  it('等验收的同时别的必过检查红了：只把别的交回返工', async () => {
+    const got = await readMergeWaitChecks(
+      gh(
+        ['check'],
+        [{ name: 'check', conclusion: 'failure', title: '测试没过' }],
+        [{ context: GATE_CONTEXT, state: 'failure', description: '等验收：cold-verify 还在跑' }],
+      ),
+      repo,
+      A,
+      [GATE_CONTEXT],
+    );
+    expect(got).toEqual({ overall: 'red', failed: [{ name: 'check', detail: '测试没过' }] });
+  });
+
   it('cold-verify 还在跑时，merge-gate 的「等验收」也算 pending，不当成红', async () => {
     const got = await readMergeWaitChecks(
       gh(

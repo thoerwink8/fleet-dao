@@ -181,6 +181,56 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
     expect(calls.arm).toBe(1); // 第一轮没过，没挂
   });
 
+  it('第 2 轮验收入参带上轮没过的条和增量起点', async () => {
+    const world = createFakeWorld();
+    const problem = '没做到验收条：第 1 条：页面上看不到「验收中」';
+    const { tasks, calls } = scripted({
+      verify: (_i, n) =>
+        n === 1 ? { pass: false, problems: [problem], round: 1 } : { pass: true, problems: [], round: 2 },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', verifyRounds: 2 });
+    expect(calls.verify[0]).not.toHaveProperty('recheck');
+    expect(calls.verify[1]?.recheck).toEqual({
+      failedCriteria: [1],
+      sinceSha: calls.verify[0]?.headSha,
+      priorProblems: [problem],
+    });
+    expect(calls.verify[1]?.headSha).not.toBe(calls.verify[0]?.headSha);
+  });
+
+  it('第 2 轮头没变也带上轮复核材料', async () => {
+    const world = createFakeWorld();
+    const problem = '没做到验收条：第 1 条：页面上看不到「验收中」';
+    const { tasks, calls } = scripted({
+      delivery: () => ({
+        head: fakeHead(777),
+        commits: 1,
+        changedFiles: ['packages/web/src/pages/a.tsx'],
+      }),
+      verify: (_i, n) =>
+        n === 1 ? { pass: false, problems: [problem], round: 1 } : { pass: true, problems: [], round: 2 },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', verifyRounds: 2 });
+    expect(calls.verify[1]?.headSha).toBe(calls.verify[0]?.headSha);
+    expect(calls.verify[1]?.recheck).toEqual({
+      failedCriteria: [1],
+      sinceSha: calls.verify[0]?.headSha,
+      priorProblems: [problem],
+    });
+  });
+
   it('会话没跑成（模型对不上，是路由配置的事）：停下报警等人，不再自动换路由；点「继续」后再来一次', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({

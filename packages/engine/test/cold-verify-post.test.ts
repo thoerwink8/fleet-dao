@@ -35,7 +35,9 @@ const INPUT: VerifierInvokeInput = {
 };
 
 const MODEL_PASS = ['## 问题', '（没有）', '', 'verdict: pass'].join('\n');
-const MODEL_FAIL = ['## 问题', '- 没做到验收条：单子要 A、代码做了 B', '', 'verdict: fail'].join('\n');
+const MODEL_FAIL = ['## 问题', '- 没做到验收条：第 1 条：单子要 A、代码做了 B', '', 'verdict: fail'].join(
+  '\n',
+);
 
 // 一次性调用把 stdout / stderr 落在 tmpDir 下：放系统临时目录，测完删掉，别在当前目录留垃圾。
 const TMP_DIR = mkdtempSync(join(tmpdir(), 'fleet-555-2-test-'));

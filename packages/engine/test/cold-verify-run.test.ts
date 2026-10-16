@@ -138,7 +138,7 @@ describe('runColdVerifyForPr：跑通一路', () => {
     const rec = recorder();
     const failShot = fakeOneShot({
       exitCode: 0,
-      stdout: ['## 问题', '- 没做到验收条：单子要 A、代码做了 B', '', 'verdict: fail'].join('\n'),
+      stdout: ['## 问题', '- 没做到验收条：第 1 条：单子要 A、代码做了 B', '', 'verdict: fail'].join('\n'),
       stderr: '',
       killed: false,
     });
@@ -530,7 +530,7 @@ describe('runColdVerifyForPr：作者族是一张表；开跑前先贴 pending�
     const rec = recorder();
     const failShot = fakeOneShot({
       exitCode: 0,
-      stdout: ['## 问题', '- 没做到验收条：单子要 A、代码做了 B', '', 'verdict: fail'].join('\n'),
+      stdout: ['## 问题', '- 没做到验收条：第 1 条：单子要 A、代码做了 B', '', 'verdict: fail'].join('\n'),
       stderr: '',
       killed: false,
     });
