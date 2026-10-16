@@ -118,8 +118,8 @@ export interface SubagentTarget {
 /**
  * 用户级子代理定义装到哪、装哪几份。Claude Code 的用户级子代理在 ~/.claude/agents/<名>.md（code.claude.com/docs/en/sub-agents
  * 的 User-level 一档：这台上所有项目里都能用）。
- * - 三个角色（决定 0087；决定 0103 起工人也用 Opus）：名字就是 Claude Code 内置的
- *   Explore（斥候，claude-haiku-5-5）、general-purpose（工人，claude-opus-5-5）、Plan（设计，claude-opus-5-5），同名文件压住内置的
+ * - 三个角色（决定 0087，「Sonnet 是工人、Haiku 是斥候、Opus 是设计」）：名字就是 Claude Code 内置的
+ *   Explore（斥候，claude-haiku-5-5）、general-purpose（工人，claude-sonnet-5-5）、Plan（设计，claude-opus-5-5），同名文件压住内置的
  *   （本机 2.1.296 实测三个都生效）。型号写完整 id：经 Mirasim 网关起的会话里别名 haiku、sonnet、opus 指向 4.5、4.6、4.7。
  * - 这三份归仓里管：机器上同名的（Mirasim 设置页「覆盖…」写的、手写的）内容不同就先整份备份再换成仓里的、报出来；要改只改仓里，
  *   不在 Mirasim 智能体页面里编辑或开关它们。
