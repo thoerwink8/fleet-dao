@@ -1,8 +1,13 @@
 // 一轮读完所有账号池：各读取器并发、各自有超时；每个池一定有一条结果——读不成的带明确原因，绝不静默丢掉。
-// mirasim-relay 超时在本轮里再试一次（换一条连接、重新掐一份同样的时限）。法国机高负载时桥接经常刚好跨过
-// 整体时限（deploy/quota.json 的 timeoutMs，生产 30 秒），下一跳就能连上；试两次仍失败按这一次的原因交回。
+// mirasim-relay 超时在本轮里先短退避、再试一次（换一条连接、重新掐一份同样的时限）。立刻再连会落在同一次
+// 单线程堵住里（MS-08，40–58 秒）。退避默认 MIRASIM_RETRY_BACKOFF_MS；测试用 deps.retryDelayMs 调成 0。
+// 一次尝试的整体时限：池上的 timeoutMs 优先于顶层。mirasim-relay 生产单独 90 秒，对齐桥接自己的建连重试预算；
+// 顶层 30 秒会先把桥接掐掉，原因写成「整体 30 秒用完」（#2854，2026-10-16 21:34 CST）。那次不是上游额度接口慢
+// （getRelay 零次上游），也不是发版排空把读取掐死（告警在约 21:35 排空之前已写成）。跟 #2838 分开：那是动手
+// 会话的桥接超时挂整单。跟 #2307 分开：那是额度告警反复报撤。试两次仍失败按这一次的原因交回，不在这里写库。
 // 原因三句分开：读取器写「桥接连不上」「连上了等不到 relay 帧」，这一层到点写「整体 N 秒用完」，不再笼统写「N 秒内没读完」。
 // 换掉读取器的测试不重试，免得把故意卡住的用例拖长。
+import { setTimeout as sleep } from 'node:timers/promises';
 import {
   QUOTA_IO_KEYS,
   type QuotaDeps,
@@ -46,6 +51,12 @@ export const DEFAULT_TIMEOUT_MS: Record<ReaderType, number> = {
   'grok-billing': 60_000,
   estimate: 20_000,
 };
+
+/**
+ * mirasim-relay 超时后、再开一条连接之前等多久。
+ * 几秒就够让上一次被掐掉的桥接退出单线程堵住；不是再等一整轮（15 分钟）。
+ */
+export const MIRASIM_RETRY_BACKOFF_MS = 3_000;
 
 /**
  * 外部能力（进程、网络、文件、家目录、环境）必须全部注入，少一样当场抛错——
@@ -124,6 +135,12 @@ function retryMirasimTimeout(pool: PoolConfig, deps: QuotaDeps, result: PoolQuot
   );
 }
 
+/** 再试之前的短退避。没给用默认；0 或认不出就不等。 */
+function retryBackoffMs(deps: QuotaDeps): number {
+  const n = deps.retryDelayMs ?? MIRASIM_RETRY_BACKOFF_MS;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 async function readPool(
   pool: PoolConfig,
   config: QuotaConfig,
@@ -133,6 +150,8 @@ async function readPool(
   const t0 = Date.now();
   let result = await readPoolAttempt(pool, config, deps, shared);
   if (retryMirasimTimeout(pool, deps, result)) {
+    const delay = retryBackoffMs(deps);
+    if (delay > 0) await sleep(delay);
     result = await readPoolAttempt(pool, config, deps, shared);
     if (result.ok) {
       result = { ...result, notes: [...result.notes, '上一次超时，本轮重试一次读成'] };

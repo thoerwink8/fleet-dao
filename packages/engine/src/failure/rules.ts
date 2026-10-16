@@ -413,6 +413,18 @@ export const RULES: readonly FailureRule[] = [
     text: /issue with the selected model|may not exist or you may not have access|absent from the ACP model catalog|model catalog has no match|cannot use this model|model[_ ]not[_ ]found|unknown model id|Couldn't set model '/i,
     routeOutcome: 'fail',
   },
+  // 中转回 503、原文是这个模型暂时不可用（法国 2026-10-16 #2750/#2753：opus-5.5@mirasim 段已 failed，
+  // 任务行仍 running、没有开着的会话，看门狗只报 idle-running，名额一直被占着）。
+  // 不是 MD1：模型还在，只是这会儿上游不接。也不是 UP1：只凭状态码 503 的原路重试会钉在这条路由上睡，
+  // 任务行不刷新，open_runs=0 仍算在干活。这里判停下，由动手会话换一条能派的路由；没有就停下腾出名额
+  // （task-session.ts，patched('model-unavailable-redispatch')）。别的 503（没有这句）仍是 UP1。
+  {
+    id: 'MU1',
+    title: '模型暂时不可用',
+    kind: 'stop',
+    text: /model is temporarily unavailable|模型暂时不可用|模型暂不可用/i,
+    routeOutcome: 'fail',
+  },
   // 点名的模型和实际回话的不一样：是这条路由的别名配错了（静默的）：停下报警，由人改这条路由。
   {
     id: 'MD3',

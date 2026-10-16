@@ -9,6 +9,7 @@ import {
   QuotaConfigError,
   quotaConfigPath,
 } from '../../src/quota/index.ts';
+import { MIRASIM_QUOTA_ATTEMPT_MS } from '../../src/quota/readers/mirasim.ts';
 import { FIXTURES } from './helpers.ts';
 
 const REPO_QUOTA_CONFIG = join(FIXTURES, '..', '..', '..', '..', '..', 'deploy', 'quota.json');
@@ -53,6 +54,14 @@ describe('仓里的额度配置和校验同步', () => {
     const raw = JSON.parse(text) as { pools: { usage?: unknown; poolId?: string }[] };
     expect(raw.pools.map((p) => p.poolId)).not.toContain('jev');
     expect(raw.pools.every((p) => p.usage === undefined)).toBe(true);
+  });
+
+  it('mirasim-relay 的整体时限盖住桥接建连预算，顶层 30 秒不拉长别的池', async () => {
+    const config = await loadQuotaConfig(REPO_QUOTA_CONFIG);
+    const mirasim = config.pools.find((p) => p.poolId === 'mirasim-relay');
+    expect(mirasim?.timeoutMs).toBeGreaterThanOrEqual(MIRASIM_QUOTA_ATTEMPT_MS);
+    expect(config.timeoutMs).toBe(30_000);
+    expect(config.pools.find((p) => p.poolId === 'claude-carpool')?.timeoutMs).toBeUndefined();
   });
 
   it('凭据路径都是写死的绝对路径：没有占位符，会话用户的文件写它家里的路径', async () => {

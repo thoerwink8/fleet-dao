@@ -43,12 +43,12 @@ const ok = (poolId: string, notes: string[] = []): PoolQuotaResult => ({
   windows: [window(poolId)],
 });
 
-const failed = (poolId: string, code: string, text = '读不到'): PoolQuotaResult =>
+const failed = (poolId: string, code: string, text = '读不到', reader = 'claude-usage'): PoolQuotaResult =>
   ({
     ok: false,
     poolId,
     channelId: 'c',
-    reader: 'claude-usage',
+    reader,
     startedAt: NOW.toISOString(),
     durationMs: 10,
     notes: [],
@@ -137,6 +137,34 @@ describe('定时读额度', () => {
     expect(w.raised).toEqual([]);
     expect(run.outcome).toBe('partial'); // 没读成不记成 ok
     expect(run.why).toContain('p2 没读成（unreachable）');
+  });
+
+  it('mirasim 单轮 timeout：不写库、不报警，读数还在 30 分钟内，选路不把整池当没读成', async () => {
+    expect(15 * 60_000).toBeLessThan(QUOTA_STALE_AFTER_MS);
+    expect(QUOTA_REPEAT_FAIL_MS).toBeLessThan(QUOTA_STALE_AFTER_MS);
+    const w = world([failed('mirasim-relay', 'timeout', '整体 30 秒用完', 'mirasim-relay')], {
+      lastOk: { 'mirasim-relay': minutesAgo(15) },
+    });
+    const run = await runQuotaReadJob(w.deps);
+    expect(w.saved).toEqual([]);
+    expect(w.raised).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('mirasim-relay 没读成（timeout）');
+  });
+
+  it('mirasim 连着两轮 timeout：才报警，写明上次读成，这时才按额度没读成排后面', async () => {
+    const last = new Date(NOW.getTime() - QUOTA_REPEAT_FAIL_MS - 60_000);
+    const w = world([failed('mirasim-relay', 'timeout', '整体 30 秒用完', 'mirasim-relay')], {
+      lastOk: { 'mirasim-relay': last },
+    });
+    const run = await runQuotaReadJob(w.deps);
+    expect(w.saved).toEqual([]);
+    expect(w.raised).toHaveLength(1);
+    expect(w.raised[0]?.key).toBe(poolAlertKey('mirasim-relay'));
+    expect(w.raised[0]?.body).toContain('连着两轮没读成');
+    expect(w.raised[0]?.body).toContain(last.toISOString());
+    expect(w.raised[0]?.body).toContain('额度没读成');
+    expect(run).toMatchObject({ outcome: 'partial', found: 1 });
   });
 
   it('连着两轮没读成（最近读成早于两轮之前）：报警，写明上次读成时刻', async () => {

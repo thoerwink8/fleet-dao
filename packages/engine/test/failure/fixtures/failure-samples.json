@@ -1633,6 +1633,17 @@
     },
     {
       "id": "X114",
+      "provenance": "observed",
+      "origin": "法国引擎监督 2026-10-16 #2750/#2753：opus-5.5@mirasim 段以 failed 收场，原因含 API Error: 503 This model is temporarily unavailable。任务行仍 running、没有开着的会话。不是别的 503（S27 仍是 UP1）",
+      "evidence": {
+        "hostId": "mirasim",
+        "code": "agent_error",
+        "message": "API Error: 503 This model is temporarily unavailable"
+      },
+      "expect": { "action": "park", "rule": "MU1", "alert": true, "routeOutcome": "fail" }
+    },
+    {
+      "id": "X115",
       "provenance": "production",
       "origin": "2026-10-16 #2759：Mirasim opus-5.5 动手会话干满 60 分钟被 one-shot 强停。failure_reason 是「引擎叫停（时限到了：one-shot timeout）」，收场码是 wall_clock_timeout。句里的 timeout 曾让 NT2 抢走，route_outcome 记成 fail，半开试探被判又失败",
       "evidence": {
