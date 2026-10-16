@@ -7,7 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 
 export type ManualTrackRow = NonNullable<RoutingLayers['manualTracks']>[number];
 
-const HEADS = ['模型', '档', '一段过', '单数', '下界', '没做成', '平均分钟'] as const;
+const HEADS = ['模型', '派工档', '一段过', '单数', '下界', '没做成', '平均分钟'] as const;
 
 function cell(n: number): string {
   return Number.isInteger(n) ? String(n) : String(Math.round(n));
@@ -67,7 +67,7 @@ export function ManualTracks({
   return (
     <Section
       title="动手战绩"
-      description="近 14 天第一段动手，按模型和档。下界和选路用的是同一份。"
+      description="近 14 天第一段动手，按模型和派工档（单子的难易档，不是模型的强弱档）。下界和选路用的是同一份。"
       flush={data.manualTracks.length > 0}
     >
       {data.manualTracks.length === 0 ? (
