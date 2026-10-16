@@ -43,9 +43,17 @@ export const repos = pgTable(
      * 引擎开完 PR 直接合并。随时能改，工作流每次走到等 CI 之前现读，不在拉单时定死。
      */
     ciPolicy: text('ci_policy').notNull().default('force'),
+    /** GitHub 上这个仓的编号（REST 的 id）：仓改名、转主人照样认得（design 15.7 第 1 条）。老行没填是空。 */
+    githubId: bigint('github_id', { mode: 'number' }),
+    /**
+     * 仓档案（#2738）：语言和工具链、测试命令、模块根、合并要等的检查、标准清单在哪、权重。存显式写了的项，
+     * 形状和默认值见 shared 的 repo-profile.ts（读的人用 parseRepoProfile 补默认值）。经 fleet-api project set-profile 改。
+     */
+    profile: jsonb('profile').notNull().default(sql`'{}'::jsonb`),
   },
   (t) => [
     unique('repos_owner_name_unique').on(t.owner, t.name),
+    unique('repos_github_id_unique').on(t.githubId),
     check('repos_ci_policy_known', sql`${t.ciPolicy} in ('force', 'off')`),
   ],
 );
