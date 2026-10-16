@@ -75,11 +75,12 @@ describe('看板按当前项目', () => {
     expect((await screen.findAllByText('登录页加手机验证码')).length).toBeGreaterThan(0);
     expect(screen.queryAllByText('首页加定价区块')).toEqual([]);
     expect(screen.queryAllByText('主页三块')).toEqual([]);
-    expect(screen.getByRole('button', { name: '要你拍的 2 条，打开抽屉' })).toBeTruthy();
+    // orbit 的三条加一条不挂仓的整机决定（假数据 n-11：机器人没装到 acme/fluxwatch）
+    expect(screen.getByRole('button', { name: '要你拍的 4 条，打开抽屉' })).toBeTruthy();
     expect(screen.getByText('内存')).toBeTruthy();
     expect(screen.getByRole('button', { name: /引擎进程/ }).getAttribute('aria-label')).toContain('引擎进程');
 
-    fireEvent.click(screen.getByRole('button', { name: '要你拍的 2 条，打开抽屉' }));
+    fireEvent.click(screen.getByRole('button', { name: '要你拍的 4 条，打开抽屉' }));
     expect((await screen.findAllByText('等你点头：发布 v2.3')).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole('tab', { name: /做完的/ }));
     expect((await screen.findAllByText('主页改成三块：要你拍的、在跑的、上线了的')).length).toBeGreaterThan(
@@ -92,7 +93,8 @@ describe('看板按当前项目', () => {
     expect(screen.queryAllByText('主页三块')).toEqual([]);
     expect(screen.queryAllByText('等你点头：发布 v2.3')).toEqual([]);
     expect(screen.queryAllByText('主页改成三块：要你拍的、在跑的、上线了的')).toEqual([]);
-    expect(screen.getByRole('button', { name: '要你拍的 0 条，打开抽屉' })).toBeTruthy();
+    // 别的仓的不列，不挂仓的整机决定照列
+    expect(screen.getByRole('button', { name: '要你拍的 1 条，打开抽屉' })).toBeTruthy();
     expect((await screen.findAllByText('移动端导航遮住了标题')).length).toBeGreaterThan(0);
     expect(screen.getByRole('tab', { name: /做完的/ }).textContent).toContain('1');
     expect(switcher().textContent).toContain('website');
@@ -110,7 +112,7 @@ describe('看板按当前项目', () => {
     expect((await screen.findAllByText('登录页加手机验证码')).length).toBeGreaterThan(0);
     expect(screen.queryAllByText('现在没有在跑的单')).toEqual([]);
     expect(screen.queryAllByText('首页加定价区块')).toEqual([]);
-    expect(screen.getByRole('button', { name: '要你拍的 2 条，打开抽屉' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '要你拍的 4 条，打开抽屉' })).toBeTruthy();
   }, 20_000);
 
   test('刷新后仍是上次选的项目', async () => {
@@ -118,9 +120,12 @@ describe('看板按当前项目', () => {
     renderApp(<Page />, { api: createMockApi({ live: false }), route: '/board' });
     expect((await screen.findAllByText('首页加定价区块')).length).toBeGreaterThan(0);
     expect(screen.queryAllByText('登录页加手机验证码')).toEqual([]);
-    const open = screen.getByRole('button', { name: '要你拍的 0 条，打开抽屉' });
+    // 只剩不挂仓的整机决定（n-11）；orbit 的不列
+    const open = screen.getByRole('button', { name: '要你拍的 1 条，打开抽屉' });
     fireEvent.click(open);
     expect(screen.queryAllByText('等你点头：发布 v2.3')).toEqual([]);
-    expect(screen.getByText('没有要你拍的')).toBeTruthy();
+    expect(
+      (await screen.findAllByText('acme/fluxwatch：机器人还没装（还没装：「干活的」机器人）')).length,
+    ).toBeGreaterThan(0);
   });
 });

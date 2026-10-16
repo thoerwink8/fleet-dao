@@ -1267,6 +1267,73 @@ export function createSeed(now: number): MockState {
       deliveries: delivered(-15),
     },
     {
+      // 选项带动作、选完系统照着做（#2353）：机器人没装到新导入的仓。上次选了「再查一次」没查成，卡留着、写原因
+      id: 'n-11',
+      level: 'decision',
+      title: 'acme/fluxwatch：机器人还没装（还没装：「干活的」机器人）',
+      body: 'acme/fluxwatch 已经导入驾驶舱，但「干活的」机器人还没装到这个仓，要它做的事（合并、改单、贴状态……）做不成。\n先去 GitHub 装上机器人：点下面的链接，选 Only select repositories、只勾这个仓。\n装好后下一轮每小时对账自己撤。',
+      link: '/settings',
+      dedupeKey: 'github-app:acme/fluxwatch',
+      options: [
+        {
+          id: 'recheck',
+          label: '我装好了，再查一次',
+          detail: '再查 acme/fluxwatch 上两个机器人装了没有；都装上了这条才转已处理',
+          recommended: '装好再查，不用把仓移出驾驶舱',
+          action: { kind: 'recheck', what: 'github-app', repo: 'acme/fluxwatch' },
+        },
+        {
+          id: 'drop',
+          label: '这个仓先不监控',
+          detail: '把 acme/fluxwatch 移出驾驶舱的受管仓；上面还有没做完的单就移不走，这条留着并写明原因',
+          action: { kind: 'drop-repo', owner: 'acme', name: 'fluxwatch' },
+        },
+      ],
+      answer: {
+        optionId: 'recheck',
+        text: '我装好了，再查一次',
+        at: at(-4),
+        by: 'u-lan',
+        execution: { ok: false, text: '「干活的」机器人 还没装到 acme/fluxwatch', at: at(-4) },
+      },
+      createdAt: at(-30),
+      deliveries: delivered(-30),
+    },
+    {
+      // 工作树里有没推的东西：留着 / 删掉（交给引擎）/ 先看看（#2353）
+      id: 'n-12',
+      level: 'decision',
+      title: '工作树里有没推的东西，删不删要你拍：acme_orbit/11-callback',
+      body: '法国的 /var/lib/fleet-work/acme_orbit/11-callback（需求 #11 的子任务「callback」）已经没有在跑的任务在用了，但里面还有：\n- 没提交的改动 2 处：src/pay/callback.ts；src/pay/callback.test.ts\n删了就没了，所以每小时对账没删它（删数据要人拍）。',
+      dedupeKey: 'worktree:acme_orbit/11-callback',
+      link: '/tasks/t-11',
+      taskId: 't-11',
+      options: [
+        {
+          id: 'keep',
+          label: '留着',
+          detail: '这条转已处理，这棵树不再提醒；里面的东西推走或清掉以后，对账自己删',
+          recommended: '删了就找不回来，留着只占一点盘',
+          action: { kind: 'keep' },
+        },
+        {
+          id: 'remove',
+          label: '删掉',
+          detail: '下一轮每小时对账删掉这棵工作树（在法国上），里面没推的东西就没了；删成了这条才转已处理',
+          action: { kind: 'delete-worktree', path: '/var/lib/fleet-work/acme_orbit/11-callback' },
+        },
+        {
+          id: 'look',
+          label: '先看看里面',
+          detail: '这条留着；记下交给指挥官把里面没推的改动列给我看，看完再拍',
+          keepsOpen: true,
+          action: { kind: 'note-only' },
+        },
+      ],
+      createdAt: at(-50),
+      deliveries: delivered(-50),
+    },
+    {
       id: 'n-8',
       level: 'daily',
       title: '昨日日报',

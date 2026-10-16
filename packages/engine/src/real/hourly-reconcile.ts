@@ -32,6 +32,7 @@ import {
   recordWorktreeCleanupStart,
   resolveAlertWithReason,
   saveWorktreeInventory,
+  settleQueuedDecision,
   startScheduleRun,
   stopTaskRows,
   subtaskTreeRefs,
@@ -575,6 +576,7 @@ export function hourlyReconcileJob(
         },
         insertOnce: (x) => insertAlertOnce(w.db, x),
         updateOpen: (x) => updateOpenAlert(w.db, { ...x, at: now() }),
+        settleQueued: (x) => settleQueuedDecision(w.db, { ...x, auditActor: RECONCILE_ACTOR, at: now() }),
       },
       apps: {
         repos: managedRepos,

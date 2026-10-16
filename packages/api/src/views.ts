@@ -27,6 +27,7 @@ import {
   type Repo,
   type Route,
   type RunSchema,
+  readDecisionAction,
   readSegmentRun,
   type SegmentRunView,
   type SessionRun,
@@ -711,7 +712,7 @@ export function notificationView(n: NotificationRecord): z.input<typeof Notifica
     createdAt: n.createdAt,
     resolvedAt: n.resolvedAt,
     resolvedBy: n.resolvedBy,
-    ...(n.options ? { options: n.options } : {}),
+    ...(n.options ? { options: n.options.map((o) => ({ ...o, action: readDecisionAction(o) })) } : {}),
     ...(n.answer ? { answer: n.answer } : {}),
     deliveries: n.deliveries.map((d) => ({
       channel: d.channel,

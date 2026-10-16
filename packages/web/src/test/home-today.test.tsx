@@ -35,7 +35,18 @@ describe('主页三块', () => {
     renderApp(<HomePage />);
     await ready();
     const rows = [...block('ask').querySelectorAll('[data-ask-row]')] as HTMLElement[];
-    expect(rows.map((r) => r.getAttribute('data-ask-row'))).toEqual(['gate', 'gate', 'watchdog']);
+    expect(rows.map((r) => r.getAttribute('data-ask-row'))).toEqual([
+      'gate',
+      'gate',
+      'gate',
+      'gate',
+      'watchdog',
+    ]);
+    // 拍了但系统没做成的（n-11，#2353）照旧在这里，写上次没做成的原因
+    const app = rows.find((r) => r.textContent?.includes('acme/fluxwatch')) as HTMLElement;
+    expect(app.querySelector('[data-ask-failed]')?.textContent).toBe(
+      '上次选「我装好了，再查一次」没做成：「干活的」机器人 还没装到 acme/fluxwatch',
+    );
     const release = rows.find((r) => r.textContent?.includes('发布 v2.3')) as HTMLElement;
     expect(release.querySelector('[data-ask-question]')?.textContent).toContain('对外发布到生产');
     expect(release.querySelector('[data-ask-pick]')?.textContent).toContain('推荐：发布。CI 全绿');

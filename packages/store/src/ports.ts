@@ -8,6 +8,7 @@ import type {
   ChannelStateRecord,
   CiPolicy,
   DecisionAnswer,
+  DecisionExecution,
   DecisionOption,
   LocalSessionsReport,
   Model,
@@ -175,7 +176,7 @@ export interface NotificationRecord {
   dedupeKey?: string | undefined;
   /** 「要你拍」的选项（#1915）；老的、补不出选项的没有。 */
   options?: DecisionOption[] | undefined;
-  /** 拍过了：选了什么、什么时候、谁。 */
+  /** 拍过了：选了什么、什么时候、谁，照着做的结果（answer.execution）。 */
   answer?: DecisionAnswer | undefined;
 }
 
@@ -370,14 +371,24 @@ export interface OpsStore {
     audit: NewAuditEntry,
   ): Promise<'ok' | 'already_resolved' | 'not_found'>;
   /**
-   * 回答一条还开着的「要你拍」（#1915）：点选项给 optionId，自己输入给 text（二选一，路由已核过）。答案（选项的字或原文、时刻、谁）
-   * 和处理掉（resolved_at/by）、操作记录同一事务；选了带 keepsOpen 的项（或这条有这种项时自己输入）只记答案、通知照旧开着
-   * （@fleet-dao/shared 的 answerResolves），开着时可以再拍、答案换成新的。选项编号不在这条的选项里回 unknown_option，什么都不改。
+   * 回答一条还开着的「要你拍」（#1915）：点选项给 optionId，自己输入给 text（二选一，路由已核过）。只记答案和操作记录，
+   * 不转已处理——执行成功以后由 settleDecision 写结果、再决定转不转。开着时可以再拍，答案（连同上一次的执行结果）换成新的。
+   * 选项编号不在这条的选项里回 unknown_option，什么都不改。
    */
   answerNotification(
     input: { id: string; by: Actor; optionId?: string | undefined; text?: string | undefined },
     audit: NewAuditEntry,
   ): Promise<AnswerNotificationResult>;
+  /**
+   * 把执行结果写进还开着的通知的答案里（answer.execution）。resolve 为真才标已处理（执行成功、并且这一项不是 keepsOpen）。
+   * 已经处理过的、还没有答案的不改（回 already_resolved），没有这条回 not_found。不另记操作记录（回答那条已经记过）。
+   */
+  settleDecision(input: {
+    id: string;
+    execution: DecisionExecution;
+    resolve: boolean;
+    by: Actor;
+  }): Promise<'ok' | 'already_resolved' | 'not_found'>;
   appendAudit(entry: NewAuditEntry): Promise<string>;
   /** 按 (at, id) 倒序。 */
   listAudit(query: { target?: string | undefined } & PageRequest): Promise<Page<AuditRecord>>;

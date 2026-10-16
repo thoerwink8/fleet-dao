@@ -742,6 +742,8 @@ const AUTO_TIER_FILES = [
   'deploy/france/fleet-mirasim-liveness.service',
   'deploy/france/fleet-mirasim-liveness.timer',
   'deploy/lib/mirasim-liveness.sh',
+  // 流写守卫：setup_mirasim_session 在重启单元前写上，同属自动档
+  'deploy/lib/mirasim-stream-guard.cjs',
 ];
 const FULL_RUN_ONLY_FILES = [
   // source 进来的库

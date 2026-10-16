@@ -24,6 +24,7 @@ import {
   CliToolsResponseSchema,
   CredentialsResponse,
   DEFAULT_SESSION_EFFORT,
+  type DecisionAction,
   DisconnectGitHubResponse,
   describeEngineMaster,
   ENGINE_MASTER_SETTING,
@@ -44,6 +45,7 @@ import {
   GroomStatusResponse,
   githubInstallLinks,
   groomQuota,
+  HANDED_TO_COMMANDER,
   HARD_BANS,
   HomeResponseSchema,
   type HostId,
@@ -98,6 +100,7 @@ import {
   RoutingResponse,
   type RunOutcome,
   RunTranscriptResponse,
+  readDecisionAction,
   readSegmentRun,
   revocationProblem,
   routeEffortChoices,
@@ -135,6 +138,7 @@ import {
   UpdateSettingResponse,
   UpdateTaskRoutePinRequest,
   UpdateTaskRoutePinResponse,
+  WORKTREE_DELETE_QUEUED,
   windowAppliesTo,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
@@ -205,6 +209,32 @@ const STALE_MS = 30 * 60_000;
 /** 路由两层里在它的模型下一开始关着的路由（照仓里默认骨架：中转那条 Opus 关着）；每个假后端各拷一份，页面上点开关改的是拷贝。 */
 const MOCK_SWITCHED_OFF_AT_START = new Set(['r-rl-opus']);
 const TERMINAL = new Set(['done', 'stopped', 'failed']);
+
+/** 假数据没接 GitHub：交给指挥官（进度单、任务单留言）照实说没交出去。 */
+const MOCK_NOT_WIRED = { ok: false as const, why: '假数据：没接 GitHub，没交给指挥官' };
+
+/** 「要你拍」选完照着做（#2353）：假数据里每种动作的结果，话和后端 decision-actions.ts 一样。 */
+function mockExecute(action: DecisionAction): { ok: boolean; text: string; queued?: true } {
+  switch (action.kind) {
+    case 'delete-worktree':
+      return { ok: true, queued: true, text: WORKTREE_DELETE_QUEUED };
+    case 'keep':
+      return { ok: true, text: '记下留着：这条转已处理，之后不再提醒' };
+    case 'pause-pool':
+      return { ok: true, text: `账号池 ${action.poolId} 已整池暂停` };
+    case 'resume-pool':
+      return { ok: true, text: `账号池 ${action.poolId} 已放开` };
+    case 'recheck':
+      return action.what === 'github-app'
+        ? { ok: false, text: `假数据：没接 GitHub，${action.repo ?? '这个仓'} 的 GitHub App 没查成` }
+        : { ok: true, text: '已重查飞书推送，通了' };
+    case 'drop-repo':
+      return { ok: true, text: `已把 ${action.owner}/${action.name} 移出监控` };
+    case 'note-only':
+      // 假数据按交出去了走（好看清转已处理的样子），话里照实写没真留言
+      return { ok: true, text: `${HANDED_TO_COMMANDER}（假数据：没接 GitHub，没真留言）` };
+  }
+}
 
 /** 一层合起来（db 的 routing-liveness.ts layerLiveness）：有一条活就活；没有活、有不知道就不知道；全死或空就死。 */
 function layerVerdict(children: readonly ('live' | 'dead' | 'unknown')[]): 'live' | 'dead' | 'unknown' {
@@ -3549,12 +3579,19 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       if (body.optionId !== undefined && !picked)
         throw new ApiError(400, 'unknown_option', '这条通知里没有这个选项');
       const at = iso();
-      const answer = picked
-        ? { optionId: picked.id, text: picked.label, at, by: st.me.user.id }
-        : { text: body.text ?? '', at, by: st.me.user.id };
+      // 照着做（#2353，和后端 decision-actions.ts 同一套判法）：假数据没有 GitHub，重查 GitHub App 照实说没查成；
+      // 交给指挥官（自己写的、没有具体动作的）按交出去了走，卡上和 handoff 都照实写没真留言
+      const action: DecisionAction = picked ? readDecisionAction(picked) : { kind: 'note-only' };
+      const executed = mockExecute(action);
+      const answer = {
+        ...(picked ? { optionId: picked.id, text: picked.label } : { text: body.text ?? '' }),
+        at,
+        by: st.me.user.id,
+        execution: { ...executed, at },
+      };
       n.answer = answer;
-      // 选了要留着的项（keepsOpen）只记答案，通知照旧开着（和后端同一个判法）
-      if (answerResolves(n.options, body.optionId)) {
+      // 做成了、不是交给引擎的、选的不是要留着的项（keepsOpen）才转已处理（和后端同一个判法）
+      if (executed.ok && !executed.queued && answerResolves(n.options, body.optionId)) {
         n.resolvedAt = at;
         n.resolvedBy = st.me.user.id;
       }
@@ -3565,12 +3602,12 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         via: 'cockpit',
       });
       emit('notifications', id);
-      // 假数据没有 GitHub：照实说没交出去，不冒充记上了
-      const notWired = { ok: false as const, why: '假数据：没接 GitHub，没记到进度单' };
       return AnswerNotificationResponse.parse({
         ok: true,
         answer,
-        handoff: { progress: notWired, ...(n.taskId ? { task: notWired } : {}) },
+        ...(action.kind === 'note-only'
+          ? { handoff: { progress: MOCK_NOT_WIRED, ...(n.taskId ? { task: MOCK_NOT_WIRED } : {}) } }
+          : {}),
       });
     },
     async audit(query) {

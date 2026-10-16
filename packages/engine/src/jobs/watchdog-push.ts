@@ -8,6 +8,7 @@
 // - 读不到状态、送达记录：这一轮这一步记没查成（看门狗这一轮记没跑成），开着的不撤，不当成通着。
 import type { FeishuPushFacts } from '@fleet-dao/db';
 import { feishuPushProblem } from '@fleet-dao/db';
+import type { DecisionOption } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { clip } from './reconcile-common.ts';
 
@@ -33,6 +34,7 @@ export interface PushWatchDeps {
       body: string;
       link: string;
       level: 'decision';
+      options?: readonly DecisionOption[];
     }): Promise<void>;
     resolve(input: { dedupeKey: string; why: string }): Promise<'ok' | 'already_resolved' | 'not_found'>;
   };
@@ -43,6 +45,25 @@ export interface PushWatchResult {
   scanned: number;
   found: number;
   problems: string[];
+}
+
+/** 飞书推送不通的两个选项：再查一次（推荐），或者交给指挥官。 */
+export function pushWatchOptions(): DecisionOption[] {
+  return [
+    {
+      id: 'recheck',
+      label: '我修好了，再查一次',
+      detail: '再读推送状态；通了这条才转已处理',
+      recommended: '推通了就不用再找人',
+      action: { kind: 'recheck', what: 'feishu-push' },
+    },
+    {
+      id: 'handoff',
+      label: '交给指挥官去修',
+      detail: '记下交给指挥官；交出去了这条转已处理，看门狗这一段不再打开',
+      action: { kind: 'note-only' },
+    },
+  ];
 }
 
 /** 要人拍的那条长什么样（纯函数）。 */
@@ -109,7 +130,13 @@ export async function watchFeishuPush(deps: PushWatchDeps, now: Date): Promise<P
     return out;
   }
   try {
-    await deps.alerts.raise({ dedupeKey: PUSH_ALERT_KEY, ...want, link: PUSH_ALERT_LINK, level: 'decision' });
+    await deps.alerts.raise({
+      dedupeKey: PUSH_ALERT_KEY,
+      ...want,
+      link: PUSH_ALERT_LINK,
+      level: 'decision',
+      options: pushWatchOptions(),
+    });
     deps.log('warn', '看门狗：飞书推送不通', { problem });
   } catch (err) {
     out.problems.push(`飞书推送不通，报「要你拍」没报成：${errMessage(err)}`);

@@ -2,6 +2,7 @@
 // 开着就红；撤了自己回绿。对外只有一句中性的话，提醒的标题只进日志。
 import { resolveAlertByKey, SESSION_ORG_ALERT_PREFIX, upsertAlert } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { noteOnlyOptions } from '@fleet-dao/shared';
 import { silentLogger } from '@fleet-dao/store';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PublicHealthError, runHealthChecks } from '../src/health.ts';
@@ -21,6 +22,7 @@ describe('session_org', () => {
       taskId: null,
       title: '账号池整池暂停',
       body: '占位',
+      options: noteOnlyOptions(),
     });
     await expect(sessionOrgHealthCheck(t.db)()).resolves.toBeUndefined();
   });

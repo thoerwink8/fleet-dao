@@ -1,6 +1,15 @@
 import { answerResolves, NO_OPTIONS_TEXT } from '@fleet-dao/shared';
-import { ArrowUpRight, Bell, Check, ChevronDown, ExternalLink, Send, TriangleAlert } from 'lucide-react';
-import { useEffect, useId, useRef, useState } from 'react';
+import {
+  ArrowUpRight,
+  Bell,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  ExternalLink,
+  Send,
+  TriangleAlert,
+} from 'lucide-react';
+import { useEffect, useId, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { brand } from '#brand';
@@ -26,6 +35,7 @@ import { RepoLink } from '../components/repo-link';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
+import { decisionResult, decisionToast } from '../lib/decision-result';
 import { formatAgo, formatClock, formatDateTime, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { pendingCount } from '../lib/notice-count';
@@ -232,11 +242,11 @@ function DecisionHint({ n }: { n: Notification }) {
 }
 
 /**
- * 「要你拍」展开后的选项区（#1915，#1950 改成点了才展开）：一个选项一行，整行就是按钮，点一下就是拍板；
- * 行里是选项的字（推荐的那项带「推荐」标）和一句真实效果、推荐的写理由。md 起字和说明同一行、说明左对齐成一列；
- * 手机上整行占满、字在上说明在下，可点区至少 40 高。几项装在一个细框里、项间一根细线（系统设置的单选组），不一个个画框。
- * 下面是「自己写」的框加「提交」，框下一行灰字写自己写的去向。没有选项的老通知只给输入框（「没有选项，请直接回复」在收起时那一行，一直在）。
- * Esc 收起、焦点回到「看选项」。
+ * 「要你拍」的选项区（#1915；#2353 起直接摆在卡上，不再收进「看选项」、也不再有「处理了」）：选一个或写一句，系统照着做。
+ * 一个选项一行，整行就是按钮，点一下就是拍板；行里是选项的字（推荐的那项带「推荐」标，上次选过的带「上次选的」）
+ * 和一句真实效果、推荐的写理由。md 起字和说明同一行、说明左对齐成一列；手机上整行占满、字在上说明在下，可点区至少 44 高。
+ * 几项装在一个细框里、项间一根细线（系统设置的单选组），不一个个画框。下面是「自己写一句」的框加「提交」，
+ * 框下一行灰字写自己写的去向。没有选项的老通知只给输入框（「没有选项，请直接回复」在标题下那一行）。
  */
 function DecisionPicker({
   n,
@@ -245,32 +255,20 @@ function DecisionPicker({
   text,
   onText,
   onAnswer,
-  onClose,
 }: {
   n: Notification;
   id: string;
   pending: boolean;
-  /** 自己写的草稿放在行上：收起再展开还在。 */
+  /** 自己写的草稿放在行上：答了没做成、再答时还在。 */
   text: string;
   onText: (text: string) => void;
   onAnswer: (n: Notification, input: AnswerInput) => void;
-  onClose: () => void;
 }) {
   const options = n.options ?? [];
   const trimmed = text.trim();
+  const last = n.answer?.optionId;
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: Esc 收起是给键盘用户的捷径，选项和输入框本身都是原生控件。
-    <div
-      id={id}
-      className="mt-3 space-y-3 border-l-2 border-st-human-line pl-3 md:max-w-3xl md:pl-4"
-      data-testid="decision-picker"
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') {
-          e.stopPropagation();
-          onClose();
-        }
-      }}
-    >
+    <div id={id} className="mt-3 space-y-2.5 md:max-w-3xl" data-testid="decision-picker">
       {options.length > 0 ? (
         <ul className="divide-y divide-border rounded-md border" aria-label="选一个">
           {options.map((o) => (
@@ -281,16 +279,22 @@ function DecisionPicker({
                 aria-describedby={`${id}-${o.id}`}
                 disabled={pending}
                 onClick={() => onAnswer(n, { optionId: o.id })}
-                className="flex min-h-10 w-full flex-col gap-0.5 px-3 py-2 text-left outline-none first:rounded-t-md last:rounded-b-md hover:bg-accent focus-visible:ring-focus focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 max-md:min-h-11 md:flex-row md:items-baseline md:gap-4"
+                data-option={o.id}
+                className="group flex min-h-10 w-full flex-col gap-0.5 px-3 py-2 text-left outline-none first:rounded-t-md last:rounded-b-md hover:bg-st-human-soft focus-visible:ring-focus focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 max-md:min-h-11 md:flex-row md:items-baseline md:gap-4"
               >
-                <span className="flex shrink-0 items-center gap-1.5 text-body font-medium md:w-32">
+                <span className="flex shrink-0 flex-wrap items-center gap-1.5 text-body font-medium md:w-56">
                   {o.label}
                   {o.recommended ? <Tag tone="brand">推荐</Tag> : null}
+                  {last === o.id ? <Tag tone="stop">上次选的</Tag> : null}
                 </span>
                 <span id={`${id}-${o.id}`} className="min-w-0 flex-1 text-meta text-muted-foreground">
                   {o.detail}
                   {o.recommended ? <span className="text-foreground">。{o.recommended}</span> : null}
                 </span>
+                <ChevronRight
+                  className="hidden size-4 shrink-0 self-center text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 md:block"
+                  aria-hidden
+                />
               </button>
             </li>
           ))}
@@ -305,8 +309,8 @@ function DecisionPicker({
           }}
         >
           <Input
-            aria-label="自己输入"
-            placeholder={options.length > 0 ? '都不合适？自己写' : '写你的决定'}
+            aria-label="自己写一句"
+            placeholder={options.length > 0 ? '都不合适？自己写一句' : '写你的决定'}
             value={text}
             maxLength={2000}
             disabled={pending}
@@ -320,32 +324,76 @@ function DecisionPicker({
         </form>
         <p className="mt-1.5 text-meta text-muted-foreground" data-testid="custom-effect">
           {answerResolves(options, undefined)
-            ? '自己写的：记下交给指挥官，这条转已处理'
-            : '自己写的：记下交给指挥官，这条先留着'}
+            ? '自己写的：交给指挥官去办，交出去了这条转已处理'
+            : '自己写的：交给指挥官去办，这条先留着'}
         </p>
       </div>
     </div>
   );
 }
 
-/** 拍过的：选了什么、谁、什么时候。一行：对勾、「我选了：发布」、灰字时间（#1939）。 */
-function DecisionAnswerLine({ n, me, now }: { n: Notification; me: Me | undefined; now: number }) {
+const RESULT_TONE = { done: 'done', queued: 'info', failed: 'fail', pending: 'info' } as const;
+const RESULT_HEAD = { done: '照做了', queued: '交给引擎了', failed: '没做成', pending: '记下了' } as const;
+
+/**
+ * 拍过的：谁选了什么、多久前，系统照着做的结果写在下面（#2353）。做成了绿、交给引擎了蓝、没做成红（卡留着，再选一次）。
+ * 已处理的只写一行「我选了：…」加结果的话，不占色块。
+ */
+function DecisionAnswerLine({
+  n,
+  me,
+  now,
+  plain = false,
+}: {
+  n: Notification;
+  me: Me | undefined;
+  now: number;
+  /** 已处理的卡：一行灰字，不画结果框。 */
+  plain?: boolean;
+}) {
   const a = n.answer;
   if (!a) return null;
+  const res = decisionResult(a);
+  const who = `${isMine(a.by, me) ? '我' : a.by}${a.optionId === undefined ? '自己写了：' : '选了：'}`;
+  if (plain) {
+    return (
+      <p
+        className="mt-1.5 flex min-w-0 items-center gap-1.5 text-meta text-muted-foreground"
+        data-testid="decision-answer"
+        data-result={res.kind}
+        title={`${a.text} · ${formatDateTime(a.at)} · ${res.text}`}
+      >
+        <Check className="size-3.5 shrink-0 text-ink-done" aria-hidden />
+        <span className="min-w-0 truncate">
+          {who}
+          <span className="font-medium text-foreground">{a.text}</span>
+          {a.execution ? ` · ${res.text}` : ''}
+        </span>
+      </p>
+    );
+  }
   return (
-    <p
-      className="mt-2 flex min-w-0 items-center gap-1.5 text-body text-foreground"
-      data-testid="decision-answer"
-      title={`${a.text} · ${formatDateTime(a.at)}`}
+    <Notice
+      tone={RESULT_TONE[res.kind]}
+      role="status"
+      className="mt-3 md:max-w-3xl"
+      title={
+        <span data-testid="decision-answer" data-result={res.kind} className="flex min-w-0 flex-wrap gap-x-2">
+          <span>
+            {RESULT_HEAD[res.kind]} · {who}
+            {a.text}
+          </span>
+          <span className="num font-normal opacity-80" title={formatDateTime(a.at)}>
+            {formatAgo(a.at, now)}
+          </span>
+        </span>
+      }
     >
-      <Check className="size-4 shrink-0 text-ink-done" aria-hidden />
-      <span className="min-w-0 truncate">
-        {isMine(a.by, me) ? '我' : a.by}
-        {a.optionId === undefined ? '自己写了：' : '选了：'}
-        <span className="font-medium">{a.text}</span>
+      <span data-testid="decision-result" className="break-words">
+        {res.text}
+        {res.kind === 'failed' ? '。这条还开着，下面再选一次或自己写一句。' : ''}
       </span>
-      <span className="num shrink-0 text-meta text-muted-foreground">{formatAgo(a.at, now)}</span>
-    </p>
+    </Notice>
   );
 }
 
@@ -381,12 +429,12 @@ function NotificationRow({
 }: { n: Notification; now: number; me: Me | undefined } & RowActions) {
   const resolved = Boolean(n.resolvedAt);
   const level = noticeLevelMeta[n.level];
-  // 待拍的「要你拍」默认收起成两行（#1950）：标题加「等你拍板」、一行灰字（推荐哪项、或我选了什么）加时间；
-  // 正文、谁在处理、选项、自己写都在「看选项」展开后。每条自己记开没开，几条可以同时开着。
+  // 待拍的「要你拍」（#2353）：选项、自己写一句直接摆在卡上，选完系统照着做、结果写回卡上；没有「处理了」。
+  // 交给引擎在做的（删工作树）先只摆结果，点「改主意」才再摆选项。
   const deciding = !resolved && n.level === 'decision';
-  const [open, setOpen] = useState(false);
+  const queued = deciding && n.answer ? decisionResult(n.answer).kind === 'queued' : false;
+  const [repick, setRepick] = useState(false);
   const [draft, setDraft] = useState('');
-  const toggleRef = useRef<HTMLButtonElement>(null);
   const pickerId = useId();
   const meta = (
     // 灰字一行不折：时间、送没送到、谁处理的；放不下截断
@@ -400,7 +448,7 @@ function NotificationRow({
       <span className="num shrink-0" title={formatClock(n.createdAt)}>
         {formatAgo(n.createdAt, now)}
       </span>
-      <Deliveries n={n} compact={deciding && !open} />
+      <Deliveries n={n} compact={deciding} />
       {resolved && n.resolvedAt ? (
         <span className="inline-flex min-w-0 items-center gap-1" title={formatDateTime(n.resolvedAt)}>
           <Check className="size-3 shrink-0" aria-hidden />
@@ -416,12 +464,12 @@ function NotificationRow({
     <ListRow
       data-notice-row
       data-resolved={resolved || undefined}
-      data-open={deciding ? open : undefined}
+      data-deciding={deciding || undefined}
       summary={
         // 一条通知（#1939，照路由页样板）：第一行标题加一个级别标签；正文两行；谁在处理一行；
         // 最后一行灰字写时间、送没送到、谁处理的。主操作带字（#1904），
         // md 起在右上和标题同一行（不再在高卡片里垂直居中、飘在中间），手机上排在内容下面、按钮平分一行。
-        // 待拍的「要你拍」只两行，其余收进「看选项」（#1950）。
+        // 待拍的「要你拍」：标题、推荐那一句、正文，下面直接是结果和选项（#2353）。
         <div className="flex w-full min-w-0 flex-col gap-3 py-1 md:flex-row md:items-start md:gap-6">
           <div className="flex min-w-0 flex-1 gap-3">
             <StatusDot tone={level.tone} className={cn('mt-2', resolved && 'opacity-40')} />
@@ -444,67 +492,57 @@ function NotificationRow({
               </div>
               {deciding ? (
                 <>
-                  {/* 第二行：推荐哪项（或我选了什么、或没有选项）加时间、送没送到，一行不折 */}
+                  {/* 第二行：推荐哪项（或没有选项）加时间、送没送到，一行不折 */}
                   <div className="mt-1 flex min-w-0 items-center gap-x-3 overflow-hidden whitespace-nowrap">
-                    <div className="min-w-0 [&>p]:mt-0">
-                      {n.answer ? <DecisionAnswerLine n={n} me={me} now={now} /> : <DecisionHint n={n} />}
-                    </div>
+                    {/* 拍过了不写推荐（结果框顶上），这一格不占位，免得时间前面空一截 */}
+                    {n.answer && (n.options?.length ?? 0) > 0 ? null : (
+                      <div className="min-w-0 [&>p]:mt-0">
+                        <DecisionHint n={n} />
+                      </div>
+                    )}
                     {meta}
                   </div>
-                  {open ? (
-                    <>
-                      <ClampedBody text={n.body} />
-                      {n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
-                      <DecisionPicker
-                        n={n}
-                        id={pickerId}
-                        pending={answeringId === n.id}
-                        text={draft}
-                        onText={setDraft}
-                        onAnswer={onAnswer}
-                        onClose={() => {
-                          setOpen(false);
-                          toggleRef.current?.focus();
-                        }}
-                      />
-                    </>
-                  ) : null}
+                  <ClampedBody text={n.body} />
+                  {n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
+                  <DecisionAnswerLine n={n} me={me} now={now} />
+                  {queued && !repick ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="mt-2"
+                      aria-controls={pickerId}
+                      aria-expanded={false}
+                      onClick={() => setRepick(true)}
+                    >
+                      改主意
+                    </Button>
+                  ) : (
+                    <DecisionPicker
+                      n={n}
+                      id={pickerId}
+                      pending={answeringId === n.id}
+                      text={draft}
+                      onText={setDraft}
+                      onAnswer={(row, input) => {
+                        setRepick(false);
+                        onAnswer(row, input);
+                      }}
+                    />
+                  )}
                 </>
               ) : (
                 <>
                   <ClampedBody text={n.body} />
                   {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
-                  <DecisionAnswerLine n={n} me={me} now={now} />
+                  <DecisionAnswerLine n={n} me={me} now={now} plain />
                   {meta}
                 </>
               )}
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2 max-md:pl-5" data-notice-actions>
-            {deciding ? (
-              <Button
-                ref={toggleRef}
-                size="sm"
-                variant={open ? 'outline' : 'brand'}
-                aria-expanded={open}
-                aria-controls={open ? pickerId : undefined}
-                onClick={() => setOpen((v) => !v)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Escape' && open) {
-                    e.stopPropagation();
-                    setOpen(false);
-                  }
-                }}
-                className="max-md:flex-1"
-              >
-                看选项
-                <ChevronDown
-                  className={cn('transition-transform duration-200', open && 'rotate-180')}
-                  aria-hidden
-                />
-              </Button>
-            ) : null}
-            {!resolved ? (
+            {/* 要你拍的不给「处理了」：只标已处理解决不了卡上的问题（#2353），选一个或写一句才算拍了 */}
+            {!resolved && n.level !== 'decision' ? (
               <Button
                 size="sm"
                 variant="outline"
@@ -648,14 +686,9 @@ export default function Notifications() {
       { id: n.id, body: input },
       {
         onSuccess: (r) => {
-          // 答案存下了；交没交给指挥官（进度单 #1055）照实说，没交出去不弹成「都好了」
-          if (r.handoff.progress.ok) {
-            toast.success(`记下了：${r.answer.text}`, { description: '已交给指挥官（进度单 #1055）' });
-          } else {
-            toast.warning(`记下了：${r.answer.text}`, {
-              description: `没交给指挥官：${r.handoff.progress.why}`,
-            });
-          }
+          // 系统照着做的结果照实说（#2353）：没做成不弹成「都好了」，卡留着、上面写原因
+          const t = decisionToast(r);
+          toast[t.level](t.title, { description: t.description });
         },
         onError: (e) => toast.error('没记下', { description: errorText(e) }),
       },
