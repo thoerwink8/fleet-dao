@@ -1,6 +1,14 @@
 // 每日简报（jobs/daily-brief.ts，决定 0096）：发布历史怎么认上线、四块怎么写、写不进/评论没发成怎么记；看门狗「今天的简报送到没」。
 // 库那一头（对 PR、开单时刻、送达判法）在 packages/db/test/daily-brief.test.ts 用真库测。
-import type { BriefNote, BriefPull, DailyBriefStatus, ExecutorLineStat, ScheduleResult } from '@fleet-dao/db';
+import {
+  type BriefNote,
+  type BriefPull,
+  type DailyBriefStatus,
+  type ExecutorLineStat,
+  type PipelineHealth,
+  ROUND_OUTCOMES,
+  type ScheduleResult,
+} from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import {
   BRIEF_ISSUE,
@@ -43,6 +51,35 @@ function compareFake(base: string, head: string): CompareResult {
     .reverse()
     .map((s) => ({ sha: s, title: `提交 ${s.slice(0, 1)} 的标题 (#${s.slice(0, 1)})` }));
   return { status: 'ahead', aheadBy: recent.length, recent };
+}
+
+/** 北京 10-15 零点截止的这一周和再往前一周（#2762 流程健康）。 */
+const THIS_WEEK_END = at('2026-10-14T16:00:00Z');
+function healthFixture(to: Date): PipelineHealth {
+  const thisWeek = to.getTime() === THIS_WEEK_END.getTime();
+  const rounds = thisWeek ? 20 : 10;
+  const n = thisWeek
+    ? { merged: 7, verify_rejected: 5, ci_red: 8 }
+    : { merged: 2, verify_rejected: 5, ci_red: 3 };
+  return {
+    from: new Date(to.getTime() - 7 * 86_400_000),
+    to,
+    rounds,
+    outcomes: ROUND_OUTCOMES.map((outcome) => {
+      const k = (n as Record<string, number>)[outcome] ?? 0;
+      return { outcome, n: k, share: k / rounds };
+    }),
+    byTier: [
+      {
+        tier: 'heavyweight',
+        rounds: thisWeek ? 11 : 6,
+        oneRoundRate: thisWeek ? 0.18 : 0.1,
+        avgRounds: thisWeek ? 2.77 : 3.5,
+      },
+    ],
+    heavyAddedP90: thisWeek ? 7117 : 5000,
+    verifyRejectShare: 5 / rounds,
+  };
 }
 
 function makeDeps(over: Partial<DailyBriefDeps> = {}) {
@@ -111,6 +148,7 @@ function makeDeps(over: Partial<DailyBriefDeps> = {}) {
       },
     ],
     lineStats: async () => stats,
+    pipelineHealth: async (to) => healthFixture(to),
     publish: async (x) => {
       published.push(x);
     },
@@ -258,14 +296,86 @@ describe('runDailyBriefJob', () => {
     expect(d.comments).toEqual([]);
   });
 
-  it('简报只有四节，没有「日报」一节（#2368）', async () => {
+  it('简报五节（第五节是 #2762 的流程健康），没有「日报」一节（#2368）', async () => {
     const d = makeDeps();
     const r = await runDailyBriefJob(d.deps);
     expect(r.outcome).toBe('ok');
     const body = d.published[0]?.body ?? '';
     expect(body).toContain('四、关键指标');
-    expect(body).not.toContain('五、');
+    expect(body).toContain('五、流程健康');
+    expect(body).not.toContain('六、');
     expect(body).not.toContain('日报');
+  });
+});
+
+describe('流程健康（#2762）', () => {
+  it('列总轮数、各结束类占比、按档一轮做成率和平均轮数、重活新增行 p90、冷验收拒绝占比，和 7 天前比涨跌', async () => {
+    const asked: string[] = [];
+    const d = makeDeps({
+      pipelineHealth: async (to) => {
+        asked.push(to.toISOString());
+        return healthFixture(to);
+      },
+    });
+    await runDailyBriefJob(d.deps);
+    // 截至北京今天零点的这一周、再往前一周
+    expect(asked).toEqual(['2026-10-14T16:00:00.000Z', '2026-10-07T16:00:00.000Z']);
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('收场 20 轮（7 天前 10 轮，涨 10）');
+    expect(body).toContain('做成 7 轮，占 35%（7 天前 20%，涨 15 点）');
+    expect(body).toContain('CI 红 8 轮，占 40%（7 天前 30%，涨 10 点）');
+    expect(body).toContain('冷验收拒绝占比：25%（7 天前 50%，跌 25 点）');
+    expect(body).toContain(
+      '重活（11 轮）：一轮做成率 18%（7 天前 10%，涨 8 点），合并的平均 2.77 轮（7 天前 3.5 轮，跌 0.73）',
+    );
+    expect(body).toContain('重活 PR 新增行 p90：7117 行（7 天前 5000 行，涨 2117）');
+    expect(d.comments[0]?.body).toContain('五、流程健康');
+  });
+
+  it('【故意造出的失败】这一周读不到：整节写「没查成」、记 partial，不写 0', async () => {
+    const d = makeDeps({
+      pipelineHealth: async () => {
+        throw new Error('库连不上');
+      },
+    });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('partial');
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('五、流程健康');
+    expect(body).toContain('没查成：读流程健康：库连不上');
+    expect(body).not.toMatch(/收场 0 轮/);
+  });
+
+  it('【故意造出的失败】只有 7 天前那一周读不到：列这一周、写明对比没查成', async () => {
+    const d = makeDeps({
+      pipelineHealth: async (to) => {
+        if (to.getTime() !== THIS_WEEK_END.getTime()) throw new Error('超时');
+        return healthFixture(to);
+      },
+    });
+    await runDailyBriefJob(d.deps);
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('7 天前那一周没查成（读 7 天前的流程健康：超时）');
+    expect(body).toContain('收场 20 轮');
+    expect(body).not.toContain('7 天前 10 轮');
+  });
+
+  it('这一周一轮都没有：写「没有收场的轮」，不写 0%', async () => {
+    const d = makeDeps({
+      pipelineHealth: async (to) => ({
+        from: new Date(to.getTime() - 7 * 86_400_000),
+        to,
+        rounds: 0,
+        outcomes: ROUND_OUTCOMES.map((outcome) => ({ outcome, n: 0, share: null })),
+        byTier: [],
+        heavyAddedP90: null,
+        verifyRejectShare: null,
+      }),
+    });
+    await runDailyBriefJob(d.deps);
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('近 7 天没有收场的轮（7 天前 0 轮）');
+    expect(body).not.toContain('0%');
   });
 });
 
