@@ -755,6 +755,34 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
     });
   });
 
+  it('--milestone 当前（#2683）：解析成开着的那个 v<N>，开单带它的全名、照样排进先后', async () => {
+    const api = milestoneApi();
+    const { calls, run } = setup({ route: api.route });
+    const r = await run(...base.slice(0, 3), '当前', ...base.slice(4));
+    expect(r).toMatchObject({ milestone: V1_TITLE, order: { position: 3 } });
+    const create = calls.find((c) => c[1] === 'create') ?? [];
+    expect(create[create.indexOf('--milestone') + 1]).toBe(V1_TITLE);
+  });
+
+  it('【故意造出的失败】--milestone 当前，可开着的 v<N> 不是恰好一个：不开单，说清有几个', async () => {
+    const two = milestoneApi([
+      { number: 8, title: V1_TITLE, description: V1_DESC },
+      { number: 9, title: 'v2 下一版', description: V1_DESC },
+    ]);
+    const { calls, run } = setup({ route: two.route });
+    await expect(run(...base.slice(0, 3), '当前', ...base.slice(4))).rejects.toThrow(
+      '--milestone 当前：开着的 v<N> 版本该恰好一个，现在是 2 个（v1 Fusion 接活、v2 下一版），单没开。',
+    );
+    expect(created(calls)).toBe(false);
+  });
+
+  it('【故意造出的失败】写了已关（不在开着的里）的 v<N>：报错并提示用「当前」', async () => {
+    const api = milestoneApi();
+    const { calls, run } = setup({ route: api.route });
+    await expect(run(...base.slice(0, 3), 'v0', ...base.slice(4))).rejects.toThrow('写 --milestone 当前');
+    expect(created(calls)).toBe(false);
+  });
+
   it('子单（--parent）不排：子单在母单页面上排，不读、不改里程碑说明', async () => {
     const api = milestoneApi();
     const parentRoute = (args: string[]): GhResult | undefined => {

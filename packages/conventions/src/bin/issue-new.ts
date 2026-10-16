@@ -1,4 +1,4 @@
-// 开单脚本入口：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]（见 ../issue-new.ts）
+// 开单脚本入口：pnpm issue:new --kind 需求 --milestone 当前 --title "…" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]（见 ../issue-new.ts）
 // 退出码：0 开了（挂版本的母单、单独的单也排进了版本的先后）；1 没开、开没开说不准，或者开了可没挂到母单下面、没排进先后
 // （照报的话去 GitHub 找、补）。帅位座位整张删掉（#531）：开单时替帅位在库里认领那一步（claimLocal）一并删——本机不再在库里认领。
 // 本机做的单「怎么算做完」里有要 diff 外证据的条目：照开，开完打一段提示改写（交给引擎的单这种在 issueNew 里就拒开了）。

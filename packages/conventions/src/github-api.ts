@@ -42,6 +42,8 @@ export interface MilestoneDetail extends MilestoneInfo {
   description: string;
   /** 关掉的时间（ISO）；开着的是 null。 */
   closedAt: string | null;
+  /** 到期日（GitHub 的 due_on，ISO；只有日期那部分算数）；没设是 null，接口没带这个字段是 undefined（判不了，不当成没设）。 */
+  dueOn?: string | null | undefined;
 }
 
 export interface GitHubReader {
@@ -72,6 +74,8 @@ export interface PullBody {
   state: 'open' | 'closed';
   /** 合并的时间（ISO）；没合并是 null。 */
   mergedAt: string | null;
+  /** 挂的里程碑名（PR 不该挂，对账查这个）；没挂是 null，接口没带这个字段是 undefined。 */
+  milestone?: string | null | undefined;
 }
 
 /** recentPulls 读最近关掉的 PR 的页数（每页 100 张）。 */
@@ -88,6 +92,26 @@ export interface GitHubCommenter {
 export interface GitHubMilestoneWriter {
   /** 把里程碑说明整份换成 description，回改完之后 GitHub 那边的样子；改不成抛。 */
   setMilestoneDescription(milestone: number, description: string): Promise<MilestoneDetail>;
+}
+
+/** 版本收口（version-cut.ts，#2683）要多写的几样：开新版本、挪单、关版本。都回改完之后 GitHub 那边的样子；改不成抛。 */
+export interface GitHubVersionWriter extends GitHubMilestoneWriter {
+  /** 开一个里程碑；dueOn 是 ISO 时间（GitHub 只认日期那部分）。 */
+  createMilestone(input: { title: string; description: string; dueOn: string }): Promise<MilestoneDetail>;
+  /** 关掉一个里程碑。 */
+  closeMilestone(milestone: number): Promise<MilestoneDetail>;
+  /** 把一张单挂到这个里程碑上（换掉原来挂的）。 */
+  setIssueMilestone(issue: number, milestone: number): Promise<void>;
+}
+
+/** 对账红了开的那张单（#2683）：开、改正文、挂里程碑、关。 */
+export interface GitHubAlarmWriter {
+  /** 开一张单，回号。 */
+  createIssue(title: string, body: string, labels: string[]): Promise<number>;
+  updateIssueBody(n: number, body: string): Promise<void>;
+  setIssueMilestone(issue: number, milestone: number): Promise<void>;
+  /** 关成「做完了」，正文换成 body。 */
+  closeIssueCompleted(n: number, body: string): Promise<void>;
 }
 
 /** 远端的一条分支。 */
@@ -217,7 +241,7 @@ export function liveGitHub(
   repo: string,
   env: Env,
   opts: { fetchImpl?: typeof fetch; token?: () => string | undefined } = {},
-): GitHubReader & GitHubCommenter & GitHubBranches & GitHubMilestoneWriter {
+): GitHubReader & GitHubCommenter & GitHubBranches & GitHubVersionWriter & GitHubAlarmWriter {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
   let token: string | undefined | null = null;
@@ -342,6 +366,41 @@ export function liveGitHub(
       });
       if (!res.ok) throw failed(res, what);
       return toMilestoneDetail(await json(res, what));
+    },
+    async createMilestone({ title, description, dueOn }) {
+      const what = `在开里程碑「${title}」时`;
+      const res = await get(`/repos/${repo}/milestones`, {
+        method: 'POST',
+        body: JSON.stringify({ title, description, due_on: dueOn }),
+      });
+      if (res.status !== 201) throw failed(res, what);
+      return toMilestoneDetail(await json(res, what));
+    },
+    async closeMilestone(milestone) {
+      const what = `在关里程碑 ${milestone} 时`;
+      const res = await get(`/repos/${repo}/milestones/${milestone}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ state: 'closed' }),
+      });
+      if (!res.ok) throw failed(res, what);
+      return toMilestoneDetail(await json(res, what));
+    },
+    async setIssueMilestone(n, milestone) {
+      const res = await get(`/repos/${repo}/issues/${n}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ milestone }),
+      });
+      if (!res.ok) throw failed(res, `在给 #${n} 挂里程碑 ${milestone} 时`);
+      const data = await json(res, `给 #${n} 挂里程碑的回包`);
+      const got = isObject(data) && isObject(data.milestone) ? data.milestone.number : undefined;
+      if (got !== milestone) throw new Error(`给 #${n} 挂里程碑 ${milestone}，回包里挂的是 ${String(got)}`);
+    },
+    async closeIssueCompleted(n, body) {
+      const res = await get(`/repos/${repo}/issues/${n}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ state: 'closed', state_reason: 'completed', body }),
+      });
+      if (!res.ok) throw failed(res, `在关 #${n} 时`);
     },
     comments: readComments,
     async comment(n, body) {
@@ -515,7 +574,23 @@ export function toPullBody(raw: unknown, what = 'PR'): PullBody {
   if (!('merged_at' in raw) || (merged_at !== null && !isTime(merged_at)))
     throw bad(`#${number} 的 merged_at`);
   if (!isObject(head) || typeof head.ref !== 'string') throw bad(`#${number} 的 head`);
-  return { number, title, body: body ?? '', headRef: head.ref, state, mergedAt: merged_at };
+  const { milestone } = raw;
+  if (
+    milestone !== undefined &&
+    milestone !== null &&
+    !(isObject(milestone) && typeof milestone.title === 'string')
+  ) {
+    throw bad(`#${number} 的 milestone`);
+  }
+  return {
+    number,
+    title,
+    body: body ?? '',
+    headRef: head.ref,
+    state,
+    mergedAt: merged_at,
+    ...(milestone === undefined ? {} : { milestone: milestone === null ? null : String(milestone.title) }),
+  };
 }
 
 /** 接口回来的一个 PR，只取头、目标分支和状态；缺字段、认不出就抛，不猜（漏认一个开着的 PR 会把它的分支删掉）。 */
@@ -619,10 +694,14 @@ export function toMilestoneDetail(raw: unknown): MilestoneDetail {
     throw bad('description');
   }
   if (!has('closed_at') || (closed_at !== null && !isTime(closed_at))) throw bad('closed_at');
+  // due_on：明确的 null 是没设；字段不在是接口没给（收口判不了，不当成没设）
+  const dueOn = (raw as Record<string, unknown>).due_on;
+  if (has('due_on') && dueOn !== null && !isTime(dueOn)) throw bad('due_on');
   return {
     ...base,
     description: description === null ? '' : (description as string),
     closedAt: closed_at === null ? null : (closed_at as string),
+    ...(has('due_on') ? { dueOn: dueOn === null ? null : (dueOn as string) } : {}),
   };
 }
 
