@@ -26,16 +26,11 @@ export interface AlertRow {
 
 /**
  * GitHub 两个机器人的权限自检（引擎每小时对账，engine 的 jobs/github-app-check.ts）报的提醒都用这个前缀
- * （github-app:<机器人>:<仓>）；开着就让驾驶舱后端的健康检查 github_app 那一项红，权限好了引擎下一轮自己撤、跟着回绿。
+ * （github-app:<仓>，一个仓一条，正文写清是哪个机器人缺什么）都用这个前缀；开着就让驾驶舱后端的健康检查 github_app 那一项红，
+ * 权限好了引擎下一轮自己撤、跟着回绿。例外：这个仓只有「机器人没装到」（创始人刚导入新仓、还没去 GitHub 装）一种问题时，
+ * 那条是 decision 级（要人拍的），健康检查只报警告、不让整个 /healthz 503；同一个仓还有别的问题就是 alert 级、照红。
  */
 export const GITHUB_APP_ALERT_PREFIX = 'github-app:';
-
-/**
- * 同一轮自检里「某个机器人没装到某个仓」（创始人刚导入新仓、还没去 GitHub 装）单独走这个前缀
- * （github-app-missing:<机器人>:<仓>，要人拍的）：它是要人去配的事，健康检查只报警告、不让整个 /healthz 503。
- * 故意不以 GITHUB_APP_ALERT_PREFIX 开头（那个前缀带冒号，这个在 app 后面是横线），两类各查各的，真权限故障不会被降级。
- */
-export const GITHUB_APP_MISSING_ALERT_PREFIX = 'github-app-missing:';
 
 const columns = {
   id: notifications.id,

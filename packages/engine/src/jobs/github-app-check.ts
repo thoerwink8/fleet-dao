@@ -1,13 +1,15 @@
 // GitHub 两个机器人的权限自检（每小时对账的一项）：@fleet-dao/github 的 selfCheck 写了却从没跑过——权限不够时（比如 App
 // 设置里加了 statuses:write、安装处没点接受，#299 的「认领对得上」就贴不上）没有任何地方报出来。这里每轮对每个受管的仓
-// 查一次两个机器人实际拿到的权限，缺的、不该有的、没查成的各报一条「要人看」提醒（键 github-app:<机器人>:<仓>），好了下一轮
-// 自己撤；后端健康页的 github_app 项看这些提醒开没开着（同一个前缀 GITHUB_APP_ALERT_PREFIX）。
+// 查一次两个机器人实际拿到的权限，缺的、不该有的、没查成的、没装的合成每个仓一条提醒（键只有一个：github-app:<仓>，
+// 正文写清是哪个机器人缺什么），好了下一轮自己撤；后端健康页的 github_app 项看这些提醒开没开着（同一个前缀 GITHUB_APP_ALERT_PREFIX）。
 // 改这里之前必须知道：没查成（凭据读不到、GitHub 回的认不出）也报提醒、这一轮记没查全，不当成权限够。
 // 唯一的例外是「机器人没装到这个仓」（SelfCheckItem.notInstalled，多半是刚导入新仓还没去 GitHub 装）：那是要人去点一下的配置问题，
-// 不是权限故障，改成每个仓一条「要你拍的」（github-app-missing:<仓>，带 GitHub 直达链接），后端健康页只报警告、不 503；
-// 装好了下一轮自己撤。别把别的没查成也塞进这一类。
+// 不是权限故障。这个仓只有这一种问题时那条提醒是「要你拍的」（decision，带 GitHub 直达链接），后端健康页只报警告、不 503；
+// 只要还有任何别的问题就是 alert 级、健康页红。装好了下一轮自己撤。别把别的没查成也塞进这一类。
+// 以前一个仓最多三个键（github-app:agent:<仓>、github-app:engine:<仓>、github-app-missing:<仓>），同一件事飞书一分钟收到三条；
+// 开着的老键由迁移 0074 撤掉，代码里不再产生。
 
-import { GITHUB_APP_ALERT_PREFIX, GITHUB_APP_MISSING_ALERT_PREFIX } from '@fleet-dao/db';
+import { GITHUB_APP_ALERT_PREFIX } from '@fleet-dao/db';
 import type { RepoRef, SelfCheckItem } from '@fleet-dao/github';
 import { APPS_NOT_INSTALLED_HINT, githubInstallLinks } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
@@ -28,28 +30,26 @@ const ROLE_NAMES: Record<SelfCheckItem['role'], string> = {
   engine: '「引擎」机器人',
 };
 
-export const githubAppAlertKey = (item: Pick<SelfCheckItem, 'role' | 'repo'>) =>
-  `${GITHUB_APP_ALERT_PREFIX}${item.role}:${item.repo}`;
-
-export const githubAppMissingAlertKey = (repo: string) => `${GITHUB_APP_MISSING_ALERT_PREFIX}${repo}`;
+/** 一个仓一个键：github-app:<仓>。 */
+export const githubAppAlertKey = (repo: string) => `${GITHUB_APP_ALERT_PREFIX}${repo}`;
 
 /** 一小时里最多往 why 里写几个仓名（够人看一眼，不刷屏）。 */
 const SKIP_NAMES_MAX = 3;
 
 /**
- * 已知「机器人没装到这个仓」的仓：库里有这个仓开着的 github-app-missing 提醒。那条提醒只有安装核对明确判为没装
- * （SelfCheckItem.notInstalled）才会报，装好了会自己撤；所以对账/轮询可以放心跳过它们、不记没跑全。
- * 只认这一种：凭据读不到、GitHub 回错都不在里面，照旧记没查成。列提醒读不出来就抛——调用方当「没有已知没装的仓」，一个都不跳。
+ * 已知「机器人没装到这个仓」的仓：库里有这个仓开着的 github-app:<仓> 提醒，而且是 decision 级（只有安装核对明确判为没装
+ * （SelfCheckItem.notInstalled）、没有别的问题时才是这一级，装好了会自己撤）；所以对账/轮询可以放心跳过它们、不记没跑全。
+ * 只认这一种：凭据读不到、GitHub 回错、权限不对都是 alert 级，不在里面，照旧记没查成。列提醒读不出来就抛——调用方当「没有已知没装的仓」，一个都不跳。
  */
 export async function reposKnownNotInstalled(
   repos: readonly { owner: string; name: string }[],
-  byKey: (dedupeKey: string) => Promise<{ resolvedAt: Date | null } | null>,
+  byKey: (dedupeKey: string) => Promise<{ resolvedAt: Date | null; level: string } | null>,
 ): Promise<Set<string>> {
   const skipped = new Set<string>();
   for (const r of repos) {
     const slug = `${r.owner}/${r.name}`;
-    const alert = await byKey(githubAppMissingAlertKey(slug));
-    if (alert && alert.resolvedAt === null) skipped.add(slug);
+    const alert = await byKey(githubAppAlertKey(slug));
+    if (alert && alert.resolvedAt === null && alert.level === 'decision') skipped.add(slug);
   }
   return skipped;
 }
@@ -121,75 +121,68 @@ export async function checkGitHubApps(deps: GitHubAppCheckDeps): Promise<SweepPa
   }
   const unchecked: string[] = [];
   let found = 0;
-  // 没装到的单独成一类（每个仓一条），其余照旧
-  const missingByRepo = new Map<string, SelfCheckItem['role'][]>();
-  for (const item of items) {
-    if (item.notInstalled && !item.ok) {
-      missingByRepo.set(item.repo, [...(missingByRepo.get(item.repo) ?? []), item.role]);
-    }
-  }
-  for (const item of items) {
-    const key = githubAppAlertKey(item);
+  // 每个仓一条：这个仓所有机器人的问题合在一起
+  const byRepo = new Map<string, SelfCheckItem[]>();
+  for (const item of items) byRepo.set(item.repo, [...(byRepo.get(item.repo) ?? []), item]);
+  for (const [repo, repoItems] of byRepo) {
+    const key = githubAppAlertKey(repo);
     try {
-      if (item.notInstalled && !item.ok) {
-        // 以前把它当权限故障报过的老提醒撤掉，不然健康页还红
-        const old = await deps.alerts.byKey(key);
-        if (old && old.resolvedAt === null) {
-          await deps.alerts.resolve({
-            dedupeKey: key,
-            by: RECONCILE_ACTOR,
-            why: `${item.repo} 没装机器人改成每个仓一条「要你拍的」报（${githubAppMissingAlertKey(item.repo)}）`,
-          });
-        }
-        continue;
-      }
-      if (item.ok && item.extra.length === 0) {
+      const problems = repoItems.filter((i) => !(i.ok && i.extra.length === 0));
+      if (problems.length === 0) {
         const open = await deps.alerts.byKey(key);
         if (open && open.resolvedAt === null) {
           await deps.alerts.resolve({
             dedupeKey: key,
             by: RECONCILE_ACTOR,
-            why: `${ROLE_NAMES[item.role]}在 ${item.repo} 上的权限够了（每小时对账自检读回）`,
+            why: `${repo} 的两个机器人都装上了、权限够了（每小时对账自检读回）`,
           });
           found += 1;
         }
         continue;
       }
-      // item.why 开头已经写了是哪个机器人
-      if (item.why) unchecked.push(`${item.repo}：${item.why}`);
-      await deps.alerts.raise({ dedupeKey: key, level: 'alert', taskId: null, ...githubAppAlert(item) });
+      const isMissing = (i: SelfCheckItem) => Boolean(i.notInstalled) && !i.ok;
+      // item.why 开头已经写了是哪个机器人；没装的不记没查全（已经按要你拍的报出来了）
+      for (const p of problems) if (p.why && !isMissing(p)) unchecked.push(`${p.repo}：${p.why}`);
+      const raise = problems.every(isMissing)
+        ? {
+            level: 'decision' as const,
+            ...githubAppMissingAlert(
+              repo,
+              problems.map((p) => p.role),
+            ),
+          }
+        : { level: 'alert' as const, ...githubAppRepoAlert(repo, problems) };
+      await deps.alerts.raise({ dedupeKey: key, taskId: null, ...raise });
       found += 1;
     } catch (err) {
       unchecked.push(`${key} 的提醒没写成：${errMessage(err)}`);
     }
   }
-  const repoNames = new Set(items.map((i) => i.repo));
-  for (const repo of repoNames) {
-    const key = githubAppMissingAlertKey(repo);
-    const roles = missingByRepo.get(repo);
-    try {
-      if (roles) {
-        await deps.alerts.raise({
-          dedupeKey: key,
-          level: 'decision',
-          taskId: null,
-          ...githubAppMissingAlert(repo, roles),
-        });
-        found += 1;
-        continue;
-      }
-      const open = await deps.alerts.byKey(key);
-      if (open && open.resolvedAt === null) {
-        await deps.alerts.resolve({
-          dedupeKey: key,
-          by: RECONCILE_ACTOR,
-          why: `${repo} 的两个机器人都装上了（每小时对账自检读回）`,
-        });
-        found += 1;
-      }
-    } catch (err) {
-      unchecked.push(`${key} 的提醒没写成：${errMessage(err)}`);
-    }
-  }
   return { scanned: items.length, found, unchecked };
+}
+
+/** 一个仓有问题的机器人合成一条：只有一个问题时标题正文就是那个机器人的；有几个就逐个写清。 */
+export function githubAppRepoAlert(
+  repo: string,
+  problems: readonly SelfCheckItem[],
+): { title: string; body: string } {
+  const each = problems.map((p) =>
+    p.notInstalled && !p.ok
+      ? {
+          title: `${ROLE_NAMES[p.role]}还没装到 ${repo}`,
+          body: `${APPS_NOT_INSTALLED_HINT}：${githubInstallLinks({
+            owner: repo.split('/')[0] ?? repo,
+            missing: [p.role],
+          })
+            .map((l) => `${l.label}：${l.url}`)
+            .join('；')}`,
+        }
+      : githubAppAlert(p),
+  );
+  const [only] = each;
+  if (each.length === 1 && only) return only;
+  return {
+    title: `${repo}：${problems.map((p) => ROLE_NAMES[p.role]).join('、')}有问题`,
+    body: each.map((e) => `${e.title}\n${e.body}`).join('\n\n'),
+  };
 }
