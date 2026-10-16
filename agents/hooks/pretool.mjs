@@ -2223,7 +2223,8 @@ function readVerdict(tool, what, input, fallbackCwd) {
 // 创始人的插话只在两次调用间隙送到，前台等一两分钟他的话就卡着。以前拦下让模型自己加 run_in_background 重试（两周 51 次，
 // 每次多一轮），现在 Claude Code 的 Bash、PowerShell 写了 timeout 超过 60 秒又没后台跑的，钩子直接改成后台跑放行
 // （updatedInput，不带 permissionDecision：改写后的输入照常走权限确认，本机 claude -p 实测改写生效、没被自动放行）。
-// 跑完有完成通知叫醒会话。别家（Codex、Gemini、Kimi、Grok、Devin）不一定认 updatedInput，不改。
+// 跑完有完成通知叫醒会话。只改主线程：子代理（输入带 agent_id）收不到创始人的话，让它前台等就好，
+// 工人等 CI 用一条前台的 gh pr checks --watch，不被改成后台、也就不用一轮轮收轮叫醒指挥官。别家（Codex、Gemini、Kimi、Grok、Devin）不一定认 updatedInput，不改。
 
 /** 前台等待上限（毫秒）：timeout 写得比它大的改成后台跑 */
 export const FOREGROUND_MAX_MS = 60_000;
@@ -2493,7 +2494,11 @@ export function decide(raw, fallbackCwd = '', { claudeRunning = countClaudeProce
       'fleet-dao 里不用 git reset --hard：会把工作区覆盖掉，把主检出里还没提交、没验证的活一并丢掉。要回滚某个提交：先把当前进度 `git commit` 到分支或工作树，要丢弃改动先 `git diff > _tmp/xxx.patch` 留底，或提交到自己分支，再决定要不要真扔。',
     );
   }
-  const bg = claudeCode && kind !== 'shell' && longForeground(toolInput);
+  // 子代理的调用（输入带 agent_id）不改：创始人的话不会送到子代理，前台等没有卡插话的问题；
+  // 改成后台反而让工人没法前台等 CI，只能收一轮轮叫醒指挥官。
+  const inSubagent =
+    isObjectLike(input) && typeof input.agent_id === 'string' && input.agent_id.trim() !== '';
+  const bg = claudeCode && !inSubagent && kind !== 'shell' && longForeground(toolInput);
   const bgNote = bg
     ? `fleet-guard：这条要在前台等 ${Math.round(Number(prop(toolInput, 'timeout')) / 1000)} 秒（超过 ${FOREGROUND_MAX_MS / 1000} 秒），钩子已改成后台跑（run_in_background: true），跑完的完成通知会叫醒你；别 sleep 等、别轮询。`
     : '';
