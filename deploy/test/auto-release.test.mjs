@@ -17,6 +17,7 @@ import {
 import {
   AUTO_RELEASE_BY,
   AUTO_REQUEST_KEY,
+  CI_RUNS_PAGE,
   CI_WORKFLOW,
   CONFIG_PREFIX,
   CONFIG_UNCHECKED_KEY,
@@ -999,6 +1000,135 @@ test('【故意造出的失败】头的 CI 不是绿的（红、没跑完、没�
   assert.equal(m.requests.length, 1, '绿了就发');
 });
 
+// ── #2676：不只认头，发「在用之后最近一个 CI 全绿的提交」 ──
+
+const H3 = 'd'.repeat(40); // 比 H2 更新的头
+/** 主线 H3(头) H2 H1 | H0(在用)；各提交的运行记录由调用方显式给（没给的算查不到）。 */
+function lagMachine(...runs) {
+  const m = autoMachine();
+  m.main = [
+    [H3, '2026-09-27T07:50:00Z'],
+    [H2, '2026-09-27T07:40:00Z'],
+    [H1, '2026-09-27T07:30:00Z'],
+    [H0, '2026-09-27T06:00:00Z'],
+  ];
+  m.ci = runsBody(...runs);
+  return m;
+}
+
+test('【故意造出的失败】头 pending、头的前一个绿：请求发前一个，note 和读数写明发的是哪个、为什么不是头；一轮只问一次 GitHub', async () => {
+  const m = lagMachine(
+    run(H3, 'in_progress', null),
+    run(H2, 'completed', 'success'),
+    run(H1, 'completed', 'success'),
+  );
+  const st = await m.round();
+  assert.deepEqual(
+    m.requests,
+    [{ sha: H2, at: new Date(T0).toISOString(), by: AUTO_RELEASE_BY }],
+    '发最近绿的 H2，不是 H1 也不是头',
+  );
+  assert.equal(st.auto.sha, H2, '去重键是这次要发的提交');
+  assert.deepEqual(
+    m.calls.filter((c) => c === 'ci'),
+    ['ci'],
+  );
+  assert.equal(st.ciGreen.sha, H2);
+  assert.match(st.auto.note, /头 dddddddddddd 的 CI 还在跑，发最近绿的 cccccccccccc，比在用的新 2 个/);
+  assert.match(summary(st), /自动发版：已请求自动发版 cccccccccccc.*头 dddddddddddd 的 CI 还在跑/);
+  assert.equal(st.ci.sha, H3, '读数里 ci 仍是头的结论');
+  assert.equal(st.ci.verdict, 'pending');
+  // 去重：同一个要发的提交 30 分钟内不重复；头换了、要发的还是 H2，也不重复
+  m.t += 5 * MIN;
+  m.main.unshift(['e'.repeat(40), '2026-09-27T08:02:00Z']);
+  m.ci = runsBody(
+    run('e'.repeat(40), 'in_progress', null),
+    run(H3, 'in_progress', null),
+    run(H2, 'completed', 'success'),
+  );
+  const second = await m.round();
+  assert.equal(m.requests.length, 1);
+  assert.match(second.auto.note, /刚请求过 cccccccccccc/);
+});
+
+test('头红、前一个绿：请求发前一个；头绿：还是发头', async () => {
+  const red = lagMachine(run(H3, 'completed', 'failure'), run(H2, 'completed', 'success'));
+  const st = await red.round();
+  assert.equal(red.requests[0].sha, H2);
+  assert.match(st.auto.note, /头 dddddddddddd 的 CI 不是绿的（red），发最近绿的 cccccccccccc/);
+  const green = lagMachine(run(H3, 'completed', 'success'), run(H2, 'completed', 'success'));
+  const st2 = await green.round();
+  assert.equal(green.requests[0].sha, H3);
+  assert.doesNotMatch(st2.auto.note, /发最近绿的/);
+});
+
+test('在用之后到头全不绿（红、没跑完、查不到）：等，不发，note 说清；读不到运行列表也等', async () => {
+  const m = lagMachine(run(H3, 'in_progress', null), run(H2, 'completed', 'failure'));
+  m.t = Date.parse('2026-09-27T07:55:00Z'); // H1 刚合进来不久：没有运行记录算还没开跑
+  const st = await m.round();
+  assert.equal(m.requests.length, 0);
+  assert.equal(st.ciGreen, null);
+  assert.match(st.auto.note, /CI 不是绿的.*也没有 CI 全绿的，等绿/);
+  const down = lagMachine();
+  down.ci = { status: 500, body: '' };
+  await down.round();
+  assert.equal(down.requests.length, 0);
+});
+
+test('绿的那个就是在用的 / 比在用的旧：不发（只往前走）', async () => {
+  const m = lagMachine(
+    run(H3, 'in_progress', null),
+    run(H2, 'completed', 'failure'),
+    run(H1, 'completed', 'failure'),
+    run(H0, 'completed', 'success'),
+  );
+  m.t = Date.parse('2026-09-27T08:00:00Z');
+  const st = await m.round();
+  assert.equal(m.requests.length, 0, '在用的 H0 自己绿，不算候选，更不会回头发');
+  assert.equal(st.ciGreen, null);
+  assert.equal(st.current, H0);
+});
+
+test('一页运行列表之外的提交不当候选：只看在用之后最近 CI_RUNS_PAGE 个，更早的绿也不发', async () => {
+  const shas = Array.from({ length: CI_RUNS_PAGE + 5 }, (_, i) => i.toString(16).padStart(40, '0'));
+  const m = autoMachine();
+  const base = Date.parse('2026-09-27T07:50:00Z');
+  m.main = [
+    ...shas.map((s, i) => [s, new Date(base - i * 1000).toISOString()]),
+    [H0, '2026-09-27T06:00:00Z'],
+  ];
+  // 最老的 5 个（候选之外）是绿的，前 CI_RUNS_PAGE 个都在跑
+  m.ci = runsBody(
+    ...shas.slice(0, CI_RUNS_PAGE).map((s) => run(s, 'in_progress', null)),
+    ...shas.slice(CI_RUNS_PAGE).map((s) => run(s, 'completed', 'success')),
+  );
+  const st = await m.round();
+  assert.equal(m.requests.length, 0);
+  assert.match(st.auto.note, new RegExp(`最近 ${CI_RUNS_PAGE} 个提交里也没有`));
+  // 绿的落在第 CI_RUNS_PAGE 个（最后一个候选）：能发
+  const edge = autoMachine();
+  edge.main = m.main;
+  edge.ci = runsBody(
+    ...shas.slice(0, CI_RUNS_PAGE - 1).map((s) => run(s, 'in_progress', null)),
+    run(shas[CI_RUNS_PAGE - 1], 'completed', 'success'),
+  );
+  await edge.round();
+  assert.equal(edge.requests[0].sha, shas[CI_RUNS_PAGE - 1]);
+});
+
+test('老状态文件（没有 ciGreen）读进来不炸：照常算出来', async () => {
+  const m = lagMachine(run(H3, 'in_progress', null), run(H2, 'completed', 'success'));
+  m.state = {
+    schema: STATE_SCHEMA,
+    retiredCleared: true,
+    ci: null,
+    auto: { sha: H0, at: '2026-09-27T00:00:00Z' },
+  };
+  const st = await m.round();
+  assert.equal(st.ciGreen.sha, H2);
+  assert.equal(m.requests[0].sha, H2);
+});
+
 test('【故意造出的失败】没有要发的 / 不该自动发的：在用的就是主线头、法国还没发布过、在用的不在最近主线里、读不到在用的', async () => {
   const same = autoMachine();
   same.current = H1;
@@ -1111,6 +1241,67 @@ test('gateVerdict：进度收了尾没成（failed、blocked）仍含「要人�
     assert.match(note, /要人看/);
     assert.match(note, new RegExp(`「${status}」状态`));
   }
+});
+
+test('gateVerdict：current 已等于或新于失败进度记的目标时，旧 failed 不再要人看', () => {
+  const oldSha = 'b0ef012b26a1aaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const newSha = '6999045b1d66bbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const older = '1478b87a15f7cccccccccccccccccccccccccccc';
+  const trainText = JSON.stringify({
+    status: 'failed',
+    phase: 4,
+    target: { kind: 'sha', value: oldSha },
+    why: '主进程跑的不是这一版 / 已退回 1478b87a15f7',
+  });
+  assert.equal(
+    gateVerdict({ ...GOOD_GATE, current: newSha, mainline: [newSha, oldSha, older], trainText }),
+    null,
+    'current 新于失败目标：可发',
+  );
+  assert.equal(
+    gateVerdict({ ...GOOD_GATE, current: oldSha, mainline: [oldSha, older], trainText }),
+    null,
+    'current 等于失败目标：可发',
+  );
+  assert.match(
+    gateVerdict({ ...GOOD_GATE, current: older, mainline: [oldSha, older], trainText }),
+    /要人看/,
+    'current 比失败目标旧（退回了）：仍要人看',
+  );
+  assert.match(gateVerdict({ ...GOOD_GATE, trainText }), /要人看/, '比不出先后：仍要人看');
+});
+
+test('上一趟 failed 记的是更旧的提交，current 已经新于它：不写「要人看」，照常请求发主线头', async () => {
+  const older = '1'.repeat(40);
+  const m = autoMachine();
+  m.main.push([older, '2026-09-27T05:00:00Z']);
+  m.gate = {
+    ...GOOD_GATE,
+    trainText: JSON.stringify({
+      status: 'failed',
+      phase: 4,
+      target: { kind: 'sha', value: older },
+    }),
+  };
+  const st = await m.round();
+  assert.equal(m.requests.length, 1);
+  assert.equal(m.requests[0].sha, H1);
+  assert.doesNotMatch(st.auto.note, /要人看/);
+});
+
+test('failed 的目标比 current 新（退回了还没追上）：仍要人看，不自动再发', async () => {
+  const m = autoMachine();
+  m.gate = {
+    ...GOOD_GATE,
+    trainText: JSON.stringify({
+      status: 'failed',
+      phase: 4,
+      target: { kind: 'sha', value: H1 },
+    }),
+  };
+  const st = await m.round();
+  assert.equal(m.requests.length, 0);
+  assert.match(st.auto.note, /要人看/);
 });
 
 // ── 发版驱动死在中途的残局（#2038、决定 0093）：暂停名单没人发「继续」、老版驱动关了总开关没开回 ──

@@ -63,7 +63,7 @@ export interface CiPlan {
   web: boolean;
   /**
    * 驾驶舱用户视角 e2e（真 Postgres + 真后端 + 真前端 + Chromium，packages/web/e2e，#930）：一个 job、要几分钟。
-   * 决定 0093：e2e 不在 PR 闸，在发版闸——PR 上一律不跑（deferE2eToMain），合并后主线推送那一轮按「上次真绿的头…这次」
+   * 决定 0093：e2e 不在 PR 闸，在发版闸——PR 上默认不跑（deferE2eToMain；碰到 E2E_PR_RISK_PATHS 的 PR 跑全套），合并后主线推送那一轮按「上次真绿的头…这次」
    * 的累计改动跑映射到的 spec，发版只认主线头 CI 全绿，所以 e2e 红了不发。输出是「跑哪些 spec」而不是「跑不跑」（决定 0029）：
    * - `'all'`：全套 spec。每夜 schedule、主线推送查不到基准、依赖图读不出、空改动、认不出的路径、
    *   改到 e2e 夹具、playwright 配置、ci.yml、映射表本身、映射不到页面的 web 文件，都是全套（不确定就全跑）。
@@ -327,12 +327,45 @@ export function e2eSpecsFor(changed: readonly string[], specExists?: (rel: strin
 export const e2eRuns = (e: E2eSpecs): boolean => e === 'all' || e.length > 0;
 
 /**
- * e2e 出 PR 闸（决定 0093）：PR 那一轮不跑 e2e，planCi 照常算出的清单只写进理由（合并后主线那一轮会跑哪些）。
+ * PR 上也要跑 e2e 全套的风险路径（决定 0093 补充，#2674）：这些改动 e2e 备库、样例数据读的就是它们，单元测试盖不到。
+ * 以 / 结尾是目录前缀，其余是整条路径。这是唯一一份清单：ci.yml 只读 changes 的 e2e 输出，不另抄。
+ * 为什么：#2399 删 session_runs 改了表结构和样例数据的读法，PR 上单测全绿就合了，主线 e2e 备库那一步每个 worker 都失败，
+ * 主线连红两轮、自动发版停了约 3 小时。别的 PR 跑 e2e 多半白跑，所以只加回这一小块。
+ * 输出选 'all' 而不是 spec 映射：这些路径是整个备库、样例库的地基，不知道会碰到哪一页，和 E2E_FULL_PREFIXES 同一个道理。
+ */
+export const E2E_PR_RISK_PATHS: readonly string[] = [
+  'packages/db/src/schema/',
+  'packages/db/migrations/', // 迁移（单里写的 drizzle/ 目录不存在，迁移实际在这里）
+  'packages/store/src/testing/',
+  'packages/api/test/e2e/',
+  'packages/web/e2e/',
+  'deploy/catalog.json',
+];
+
+/** 这批改动里有没有碰到 PR 上也要跑 e2e 的风险路径；返回碰到的第一个文件（没有是 undefined）。 */
+export function e2eRiskHit(changed: readonly string[]): string | undefined {
+  return changed.find((f) => E2E_PR_RISK_PATHS.some((p) => (p.endsWith('/') ? f.startsWith(p) : f === p)));
+}
+
+/**
+ * e2e 出 PR 闸（决定 0093）：PR 那一轮默认不跑 e2e，planCi 照常算出的清单只写进理由（合并后主线那一轮会跑哪些）。
  * 为什么：e2e 只占 2.5% 的 job，却占 19% 的 runner 分钟，把 PR 墙钟从 2 分多拉到 7 分多；它红的多半是时序竞态。
  * 移到主线推送那一轮当发版闸（发版只认主线头 CI 全绿），坏前端照样发不出去，PR 不再陪跑。
- * 汇总 job 在 PR 事件上也核这一条：PR 的 plan 里 e2e 有清单就红（ciVerdict）。本机 test:changed 不经这里，照样提示该点哪几页。
+ * 例外（#2674）：改动碰到 E2E_PR_RISK_PATHS 就在 PR 上跑全套（和主线同一个 job、同样的分片），合并闸把它当必过项。
+ * 汇总 job 在 PR 事件上也核这一条：PR 的 plan 里 e2e 只能是空或 'all'（ciVerdict）。本机 test:changed 不经这里，照样提示该点哪几页。
  */
-export function deferE2eToMain(plan: CiPlan): CiPlan {
+export function deferE2eToMain(plan: CiPlan, changed: readonly string[] = []): CiPlan {
+  const hit = e2eRiskHit(changed);
+  if (hit !== undefined) {
+    return {
+      ...plan,
+      e2e: 'all',
+      reasons: [
+        ...plan.reasons,
+        `e2e 在 PR 上跑全套（决定 0093 补充）：${hit} 属表结构、迁移、e2e 样例数据和用例这类风险路径`,
+      ],
+    };
+  }
   if (!e2eRuns(plan.e2e)) return plan;
   const what = plan.e2e === 'all' ? '全套' : plan.e2e.join('、');
   return {
@@ -997,9 +1030,12 @@ export function ciVerdict(needs: unknown, event?: string): { ok: boolean; lines:
     bad('changes 给 e2e job 的开关（outputs.e2e）和 plan 里的 e2e 不是同一份');
   if (plan.full && (FULL_JOBS.some((j) => !expected(plan, j)) || plan.deploy !== 'all'))
     bad('plan 说全跑，却有 job 没开（或 deploy 不是全套）');
-  // e2e 不在 PR 闸（决定 0093，deferE2eToMain）：PR 的 plan 里 e2e 有清单，说明算计划那步没把它挪到主线
-  if (event === 'pull_request' && e2eRuns(plan.e2e))
-    bad('PR 的 plan 里 e2e 有清单：e2e 不在 PR 闸，只在主线推送那一轮跑（决定 0093）');
+  // e2e 不在 PR 闸（决定 0093，deferE2eToMain）：PR 的 plan 里 e2e 只能是空（挪到主线）或 'all'（碰了风险路径，#2674）；
+  // 有 spec 清单说明算计划那步没把它挪到主线。'all' 时上面的 expected 已把 e2e job 当必过项（没跑、红都不过）。
+  if (event === 'pull_request' && Array.isArray(plan.e2e) && plan.e2e.length > 0)
+    bad(
+      'PR 的 plan 里 e2e 有 spec 清单：PR 上 e2e 只能全套或不跑，spec 清单只在主线推送那一轮用（决定 0093）',
+    );
   // 同树复用（主线推送才有）：test、web、deploy 本该跳过的依据。只认主线事件、且 changes 的输出和 plan 里是同一次运行；
   // 事件没给（旧调用）、不是 push 都不认——一个 PR 的 plan 不能靠它把测试变成「本该跳过」。
   const claimedRun = n.changes?.outputs?.reused;

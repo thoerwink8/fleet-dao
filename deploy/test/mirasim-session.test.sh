@@ -364,6 +364,7 @@ has "红里带 journalctl 提示" "$(last REDS)" "$UNIT2 没在跑.*journalctl -
 echo "== 3. 服务端本体在、单元在跑、但 /api/health 连不上（起一个只听着不回应的假单元）"
 # 超时再试默认 3 次、每次等满 5 秒；这里只钉「试满仍判红」，不把这条拖成 15 秒
 MIRASIM_HEALTH_TIMEOUT_TRIES=1
+MIRASIM_HEALTH_MAX_TIME=2
 PORT3=$((20000 + RANDOM % 10000))
 systemd-run --unit="$UNIT3" --uid="$U" --gid="$U" -p Type=simple --collect --quiet -- \
   node -e 'require("node:net").createServer((c)=>c.on("data",()=>{})).listen(process.argv[1])' "$PORT3" \

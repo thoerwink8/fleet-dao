@@ -25,7 +25,6 @@
     "agents/test/progress-structure.test.ts": 115,
     "agents/test/prompt-log-machine.test.ts": 304,
     "agents/test/redact-url-token.test.ts": 7,
-    "agents/test/release-launch.test.ts": 522,
     "agents/test/release-onekey.test.ts": 387,
     "agents/test/release-train.test.ts": 1071,
     "agents/test/repo-contract.test.ts": 812,

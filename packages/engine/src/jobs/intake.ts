@@ -219,7 +219,7 @@ function localSkip(labels: readonly string[]): IntakeSkip | null {
 }
 
 /**
- * 临时指挥官整理待办贴的两个标签（#1338）：「要人拍」（涉及改标准、删数据、花钱、workflows，要人先拍板）和「待补」（判为过期或前提不成立，
+ * 临时指挥官整理待办贴的两个标签（#1338，决定 0097 把「要人拍」收成掏新钱、删了找不回又没备份）：「要人拍」和「待补」（判为过期或前提不成立，
  * 建议关闭、等人看）。贴着任何一个，不管有没有贴「交给引擎」，引擎一律不拉。
  */
 function groomHoldSkip(labels: readonly string[]): IntakeSkip | null {

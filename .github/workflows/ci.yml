@@ -5,7 +5,8 @@ name: ci
 # 同树复用：这次提交的树和某次绿的 PR 检查测的是同一棵、基准树也一样，test、web、deploy 就不重测（同树同结果；对不上一律全跑并留 ::warning::）。
 # PR 只改了 deploy/ 时不全跑（决定 0093，B8）：deploy 全套照跑，单元测试只跑读 deploy/ 的那些文件（packages/conventions/src/deploy-readers.ts 从代码里算，不是清单），
 # 不开 web 打包、不跑 tsc。主线推送、每夜、手动一律仍全跑——发版只认主线全绿，所以这里少测的有兜底。
-# e2e 不在 PR 闸（决定 0093）：PR 上不跑，主线推送这一轮照区间跑映射到的 spec，不复用；发版只认主线头 CI 全绿，所以 e2e 是发版闸。
+# e2e 不在 PR 闸（决定 0093）：PR 上默认不跑，主线推送这一轮照区间跑映射到的 spec，不复用；发版只认主线头 CI 全绿，所以 e2e 是发版闸。
+# 例外（#2674）：PR 碰到表结构、迁移、e2e 样例数据和用例这类风险路径就跑全套（路径清单只在 ci-plan.ts 的 E2E_PR_RISK_PATHS，这里只读 changes 的 e2e 输出），check 把它当必过项。
 #
 # 改这里之前必须知道：
 # - 必过检查（规则集「主线保护」）只认 check 这一个 job 名，别改名；它 needs 全部 job、if: always()，少 needs 一个就等于不拦那个。
@@ -471,7 +472,7 @@ jobs:
       - run: pnpm --filter ./packages/web run build
 
   # 驾驶舱用户视角 e2e（#930）：真 Postgres 16 + 真后端（packages/api/src/main.ts，线上同一个入口）+ 真前端 + Chromium，站在创始人角度逐页走（packages/web/e2e）。
-  # 决定 0093：不在 PR 闸、在发版闸。PR 上 changes 的 e2e 输出一律空串（ci-plan.ts 的 deferE2eToMain），这个 job 跳过；
+  # 决定 0093：不在 PR 闸、在发版闸。PR 上 changes 的 e2e 输出默认空串（ci-plan.ts 的 deferE2eToMain），这个 job 跳过；碰到风险路径的 PR 输出 all（#2674），跑全套、同样分两台；
   # 主线推送那一轮按「上次真绿的头…这次」的累计改动算 spec 清单（e2eSpecsFor，决定 0029），`all`（每夜、查不到基准，或改了夹具、本文件）跑全套。
   # 红了这一轮 check 红：主线头 CI 不绿就不发版（法国的自动发版只认主线头 ci.yml 这一轮 conclusion=success）。
   # 本机（Windows + 本机 Chrome + Windows 版 PG）和这里（Linux + Chromium + 容器 PG）的差别：浏览器走 E2E_BROWSER_CHANNEL=chromium，管理连接串指向容器；库名、端口、顺序和本机一样。

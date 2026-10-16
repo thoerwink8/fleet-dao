@@ -134,6 +134,14 @@ export interface GroomLabelEvent {
   /** 动手的是不是我们自己的机器人。 */
   bot: boolean;
   at: string;
+  /** 动手的登录名。账号删了、或旧的调用方没填，是 null / 不给。 */
+  actor?: string | null;
+}
+
+export interface IssueComment {
+  body: string;
+  /** created_at，没有就用 updated_at。 */
+  at: string;
 }
 
 const EventRow = z.object({
@@ -183,7 +191,47 @@ export async function readIssueLabelEvents(
       action: e.event,
       bot: deps.bots.is('engine', e.actor) || deps.bots.is('agent', e.actor),
       at: e.created_at,
+      actor: e.actor?.login ?? null,
     });
+  }
+  return out;
+}
+
+const CommentRow = z.object({
+  body: z.string().nullable().optional(),
+  created_at: z.string().nullable().optional(),
+  updated_at: z.string().nullable().optional(),
+});
+
+/**
+ * 一张单上的评论，按 GitHub 给的先后。时刻用 created_at，没有就用 updated_at；两个都没有算形状认不出。
+ * 读不到、翻不完抛错。空数组是这张单真的没有评论。
+ */
+export async function readIssueComments(
+  deps: ReadDeps,
+  input: { repo: RepoRef; issueNumber: number; signal?: AbortSignal | undefined },
+): Promise<IssueComment[]> {
+  const { repo, issueNumber, signal } = input;
+  const what = `${repoSlug(repo)}#${issueNumber} 的评论`;
+  const rows = await deps.client.all(
+    {
+      method: 'GET',
+      path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues/${issueNumber}/comments`,
+      auth: { as: 'engine', repo },
+      query: { per_page: 100 },
+      signal,
+    },
+    (d) => d,
+  );
+  const out: IssueComment[] = [];
+  for (const raw of rows) {
+    const p = CommentRow.safeParse(raw);
+    if (!p.success) throw unexpected(`读${what}`, raw);
+    const at = p.data.created_at ?? p.data.updated_at;
+    if (!at) {
+      throw new GitHubError('UNEXPECTED_RESPONSE', `读${what}，一条评论没带时刻`, { retryable: true });
+    }
+    out.push({ body: p.data.body ?? '', at });
   }
   return out;
 }

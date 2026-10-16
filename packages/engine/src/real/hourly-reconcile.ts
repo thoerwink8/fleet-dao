@@ -4,9 +4,12 @@
 // GitHub（auditMergedPrs，和对账补漏同一个）；工作流在不在跑、挂没挂着问这次活动的 Temporal 客户端；这个
 // 阶段派不派得出去问选路（store-ports 的 pickRoute：和任务挂起时用的同一套）；GitHub 两个机器人的权限自检问
 // @fleet-dao/github 的 selfCheck（受管的仓从库里的 repos 表列）；提醒的读写、操作记录、结局记账是同一个库。
+
 import { lstat, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { LOCAL_LABEL } from '@fleet-dao/conventions';
 import {
+  activeLocalLeaseKeys,
   alertByKey,
   countAlertFilings,
   type Db,
@@ -41,6 +44,7 @@ import {
   updateOpenAlert,
   upsertAlert,
   worktreeAuditRows,
+  writeLocalOrphans,
 } from '@fleet-dao/db';
 import { type GitHub, type RepoRef, readCi, readPull, requiredChecksFor } from '@fleet-dao/github';
 import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
@@ -62,6 +66,7 @@ import {
   storedMainCiVerdict,
 } from '../jobs/main-red-push.ts';
 import { pushOverduePoolHolds } from '../jobs/pool-hold-push.ts';
+import type { LocalLabeledIssue } from '../jobs/reconcile-checks.ts';
 import {
   beijingDayStart,
   RECONCILE_ACTOR,
@@ -231,7 +236,7 @@ export interface HourlyReconcileWiring {
   db: Db;
   /** 和对账补漏同一个：审最近合了的 PR（镜像、合并人、合并记录）；补拉经接活那道门时现读挂在哪个版本；自动合并兜底用它列 PR、读文件、挂自动合并。 */
   gh: Pick<GitHub, 'auditMergedPrs' | 'readIssueState' | 'openIssue'> &
-    Partial<Pick<GitHub, 'readGroomFacts'>> &
+    Partial<Pick<GitHub, 'readGroomFacts' | 'readIssueLabelEvents' | 'readIssueComments'>> &
     AutoMergeWiringGitHub;
   trees: WorkTrees;
   exec: UserExec;
@@ -337,6 +342,39 @@ function temporalClosedIssueTasks(
         throw err;
       }
     },
+  };
+}
+
+/**
+ * 三个 GitHub 读法都在才核「本机做」没人领。测试装配的假 GitHub 往往没有这三样，这时一个都不接，
+ * 对账那一轮跳过，不记没查成。
+ */
+function localOrphanWiring(
+  w: HourlyReconcileWiring,
+  now: () => Date,
+): Pick<HourlyReconcileJobDeps, 'localLabeled' | 'activeLeases' | 'saveLocalOrphans'> {
+  const { readGroomFacts, readIssueLabelEvents, readIssueComments } = w.gh;
+  if (!readGroomFacts || !readIssueLabelEvents || !readIssueComments) return {};
+  const gh = w.gh;
+  return {
+    async localLabeled() {
+      const out: LocalLabeledIssue[] = [];
+      for (const repo of await listManagedRepos(w.db)) {
+        const ref = { owner: repo.owner, name: repo.name };
+        const facts = await readGroomFacts.call(gh, { repo: ref });
+        for (const issue of facts.issues) {
+          if (!issue.labels.includes(LOCAL_LABEL)) continue;
+          const [events, comments] = await Promise.all([
+            readIssueLabelEvents.call(gh, { repo: ref, issueNumber: issue.number }),
+            readIssueComments.call(gh, { repo: ref, issueNumber: issue.number }),
+          ]);
+          out.push({ repo: ref, issue: issue.number, events, comments });
+        }
+      }
+      return out;
+    },
+    activeLeases: () => activeLocalLeaseKeys(w.db, now()),
+    saveLocalOrphans: (items) => writeLocalOrphans(w.db, items, RECONCILE_ACTOR),
   };
 }
 
@@ -586,6 +624,7 @@ export function hourlyReconcileJob(
         start: (job, at) => startScheduleRun(w.db, job, at),
         finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
       },
+      ...localOrphanWiring(w, now),
       poolHoldPush: () =>
         pushOverduePoolHolds({
           now,

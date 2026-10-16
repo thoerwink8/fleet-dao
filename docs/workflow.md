@@ -14,6 +14,7 @@
 ## PR
 
 - `pnpm pr:open` 开 PR，当场挂自动合并（改标准见下）；只看 CI，红了才回来修。谁开谁负责到合并。
+- CI 里 e2e 默认不在 PR 上跑，合并后主线推送那一轮跑、挡发版（决定 0093）；PR 改到表结构、迁移、e2e 样例数据和用例、`deploy/catalog.json` 时照样跑 e2e 全套，合并闸当必过项（0093 修订，#2674）。路径清单只在 `packages/conventions/src/ci-plan.ts` 的 `E2E_PR_RISK_PATHS`。
 - 关单：最后一个 PR 的「需求」栏下另起一行写 `Closes #号`；没有 PR 的用 `pnpm issue:close`。
 - 推之前本机只跑改到的测试文件（`npx vitest run <文件>`）加格式和类型检查，其余交给 CI。后端 Node 22 直接跑 TypeScript，相对导入带 `.ts`。
 - 改了哪个包的入口、命令、坑，顺手改那个包的 `AGENTS.md`。全部 pnpm 命令见 `README.md`。

@@ -3,7 +3,12 @@
 // 会话没有 GitHub 令牌：它读得到的单子全在下面的提示词里（只含作者在白名单里的开着的单），仓里的东西读主线的只读检出（工作目录）。
 // 总账的下一片也写在这里（#1405）：只有点了名的才开，一次最多 1 片。合并了的 PR 没读到要写明，不能当成没有。
 
-import { GROOM_PENDING_LABEL, GROOMED_LABEL, HUMAN_DECISION_LABEL } from '@fleet-dao/conventions';
+import {
+  GROOM_PENDING_LABEL,
+  GROOMED_LABEL,
+  HUMAN_DECISION_LABEL,
+  LOCAL_LABEL,
+} from '@fleet-dao/conventions';
 import { GROOM_MAX_AMENDS, GROOM_MAX_NEW_ISSUES, GROOM_MAX_REVIEWS } from '@fleet-dao/shared';
 import { GROOM_VERIFY_STOP_CATEGORIES } from '../workflows/task-support.ts';
 import { AMEND_HEADING, isLedgerIssue, isOpenSliceOf, mentionedSlice } from './groom-plan.ts';
@@ -161,8 +166,8 @@ function stoppedSection(tasks: readonly GroomStoppedTask[] | null): string {
     '处置是用 amend 补充（清单里的键是 amendments；只能追加，不能改原验收条）。',
     '补充里要写出 diff 里看得见的替代验收条，写在 note。',
     '原「怎么算做完」已经写了字的，引擎不会改它，done 也不会被追加进去。',
-    '补不出来的报 needsHuman。',
-    `已经有「## ${AMEND_HEADING}」的补不进去，也报 needsHuman。`,
+    '补不出来的写在 note。needsHuman 只留给要掏新钱、或删了找不回又没备份的，别的不要报。',
+    `已经有「## ${AMEND_HEADING}」的补不进去，也写在 note，不要为此报 needsHuman。`,
   ];
   let list: string;
   if (tasks === null) list = STOPPED_TASKS_UNREAD;
@@ -206,15 +211,15 @@ export function renderGroomPrompt(input: GroomPromptInput): string {
     `1. reviews：对一张单下判断，每次最多 ${GROOM_MAX_REVIEWS} 条。verdict 三选一：`,
     `   - "sound"：这张单的前提今天仍成立、范围清楚、适合交给引擎做。引擎会贴「${GROOMED_LABEL}」，老单只有贴了它才会被引擎挑。**拿不准就不要判 sound**：引擎前几天就因为拉到前提已经过期的老单白烧了一轮。`,
     `   - "expired"：前提已被后来的决定取代、事情已经做完、或要等一个还没发生的条件才成立。引擎会留言建议关闭并贴「${GROOM_PENDING_LABEL}」，**不会关单**。reason 里写清是哪条决定 / 哪个 PR / 哪段代码说明它过期了。`,
-    `   - "human"：涉及改标准的路径（agents/ 下的说明、packages/conventions/standard-paths.json 等）、删数据、花钱、对外发布，或 .github/workflows/。引擎会贴「${HUMAN_DECISION_LABEL}」，从此不拉。`,
-    `2. amendments：给缺东西的老单补写，每次最多 ${GROOM_MAX_AMENDS} 张。只补它缺的节（scene 场景 / modules 已知的模块 / done 怎么算做完，done 每条要写成 diff 里或界面上看得见的东西，不要写「跑 grep 看结果」），note 放别的补充。引擎只在原正文末尾追加「## ${AMEND_HEADING}」一节，原文和原话一个字都不会改；老单里已经写了的节不补。补完引擎会贴「${GROOMED_LABEL}」，所以只补你认为仍成立的单。`,
+    `   - "human"：只有两件要创始人拍的事——要掏新钱（新开订阅、充值、开按量计费），或删了找不回又没备份（删 GitHub 仓、删没备份的生产库数据、删创始人自己的文件）。引擎会贴「${HUMAN_DECISION_LABEL}」，从此不拉。reason 里要写明是哪件（要掏什么钱、删什么找不回）：原因和原单都没写这两件的，引擎改贴「${LOCAL_LABEL}」。改标准的路径、.github/workflows/、对外发布不要判 human：写在正文里，引擎会贴「${LOCAL_LABEL}」并留一句原因，不问创始人（决定 0097）。`,
+    `2. amendments：给缺东西的老单补写，每次最多 ${GROOM_MAX_AMENDS} 张。只补它缺的节（scene 场景 / modules 已知的模块 / done 怎么算做完，done 每条要写成 diff 里或界面上看得见的东西，不要写「跑 grep 看结果」），note 放别的补充。引擎只在原正文末尾追加「## ${AMEND_HEADING}」一节，原文和原话一个字都不会改；老单里已经写了的节不补。补完若涉及改标准、.github/workflows/ 或对外发布，引擎贴「${LOCAL_LABEL}」并留一句原因，不贴「${GROOMED_LABEL}」；否则贴「${GROOMED_LABEL}」，所以只补你认为仍成立的单。`,
     `3. newIssues：开新的独立小单，每次最多 ${GROOM_MAX_NEW_ISSUES} 张：把一张太大的单拆成几张能单独做完的小单（填 splitFrom=大单号，引擎会在大单上留言；**不要开子单**），或开你在仓里读到的、确实该做又没人记的事。总账的下一片也走这里，但只有下面「总账分片」点了名的才开。每张给 title、kind（需求 / 缺陷 / 杂项）、scene、modules（可省）、done（至少一条，写成看得见的验收条）。引擎自己拼成四节的单，「原话」一栏它写「无（AI 发现）」，你不要编创始人的原话。新单一律是未排期。开之前先看下面「开着的单」「最近关掉的」「开着的 PR」，已经有的不要再开。`,
     '',
     '## 你不能做的（写了也不会执行，还会被记成越权）',
     '关单；改里程碑或版本先后；改老单的原文、原话；推代码、开 PR；动 .github/workflows/ 和 agents/ 下的东西；对陌生人开的单做任何事（它们不在下面的列表里）。',
     '',
     '## 优先顺序',
-    '先判「老单 / 没整理过」的（它们现在进不了引擎的候选，等你判）；再补缺节的；最后才是开新单。验收停下、列在「验收停下的任务」里的，优先用 amend 补替代验收条，或报 needsHuman。判断要有依据：读了才下结论，读不到就别判。',
+    '先判「老单 / 没整理过」的（它们现在进不了引擎的候选，等你判）；再补缺节的；最后才是开新单。验收停下、列在「验收停下的任务」里的，优先用 amend 补替代验收条。needsHuman 只写要掏新钱、或删了找不回又没备份的原因。判断要有依据：读了才下结论，读不到就别判。',
     '',
     '## 回答格式',
     '最后给一段 ```json 围栏，里面是一个对象，只有这四个键（别的键会被丢掉并记成越权）：',
@@ -222,8 +227,8 @@ export function renderGroomPrompt(input: GroomPromptInput): string {
     '{',
     '  "summary": "一两句话：这次判了几张、补了几张、开了几张、有什么要人注意",',
     '  "reviews": [{ "issue": 123, "verdict": "sound", "reason": "为什么" }],',
-    '  "amendments": [{ "issue": 123, "scene": "…", "modules": "…", "done": ["…"], "note": "…", "needsHuman": "涉及删数据时写原因，否则省略" }],',
-    '  "newIssues": [{ "title": "…", "kind": "需求", "scene": "…", "modules": "…", "done": ["…"], "splitFrom": 123, "needsHuman": "涉及删数据 / 花钱时写原因，否则省略" }]',
+    '  "amendments": [{ "issue": 123, "scene": "…", "modules": "…", "done": ["…"], "note": "…", "needsHuman": "要掏新钱或删了找不回又没备份时写原因，否则省略" }],',
+    '  "newIssues": [{ "title": "…", "kind": "需求", "scene": "…", "modules": "…", "done": ["…"], "splitFrom": 123, "needsHuman": "要掏新钱或删了找不回又没备份时写原因，否则省略" }]',
     '}',
     '```',
     '没有要做的就给空列表。围栏之外的文字随便写，引擎只读围栏里的。',

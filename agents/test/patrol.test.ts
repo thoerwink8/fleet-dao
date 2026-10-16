@@ -35,6 +35,7 @@ interface SampleOpts {
   healthRed?: string[];
   attention?: string;
   attentionErr?: string;
+  localOrphans?: { repo: string; issue: number; labeledFor: string; reason: string }[];
 }
 interface PatrolLib {
   REMOTE_SCRIPT: string;
@@ -97,6 +98,23 @@ describe('巡查脚本：判法', () => {
     const lines = lib.render(r);
     expect(lines.at(-1)).toBe('VERDICT: OK');
     expect(lines.filter((l) => l.includes(`@${NOW.toISOString()}`)).length).toBeGreaterThanOrEqual(5);
+    expect(lines.some((l) => l.startsWith('本机没人领 0 张'))).toBe(true);
+  });
+
+  it('贴了「本机做」没人领：ALERT 写出单号、贴了多久和原因；没有或旧版没这栏是空的，不报', () => {
+    const one = {
+      repo: 'acme/app',
+      issue: 12,
+      labeledFor: '25 小时',
+      reason: 'fleet-engine[bot]：涉及 .github/workflows/ci.yml',
+    };
+    const hit = lib.judge({ raw: ok(lib.sampleRaw({ at: NOW, localOrphans: [one] })), now: NOW, base: null });
+    expect(hit.verdict).toBe('ALERT');
+    expect(hit.alerts).toEqual([
+      '本机没人领 #12（acme/app）贴了「本机做」25 小时：fleet-engine[bot]：涉及 .github/workflows/ci.yml',
+    ]);
+    const none = lib.judge({ raw: ok(good()), now: NOW, base: baseOf(good()) });
+    expect(none.alerts.filter((a) => a.startsWith('本机没人领'))).toEqual([]);
   });
 
   it('坏样本：每条不变量各记一行，VERDICT: ALERT <条数>', () => {

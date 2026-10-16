@@ -1,11 +1,13 @@
 // fleet-api attention --json（#2370）：引擎自己出一份「现在要人看的事」的结论，指挥官本机巡检（agents/skills/commander/scripts/patrol-lib.mjs）只读它，
 // 不再自己抄一套判法。只读，不写库、不发消息。输出一行 JSON：
-//   { ok: true, at, healthz: { code, red }, notes: [{ key, level, title, since, delivered }], feishuPushProblem, dailyBriefProblem }
+//   { ok: true, at, healthz: { code, red }, notes: [{ key, level, title, since, delivered }], feishuPushProblem, dailyBriefProblem, localOrphans }
 // 改这里之前必须知道：
 // - healthz：本机问一次驾驶舱的 /healthz（地址取 api.env 的 FLEET_COCKPIT_LISTEN）。code 0 = 连不上；red 是 ok:false 的检查名。
 // - notes：开着、而且按推送白名单该推的通知（到点了的）。白名单判法不在这里抄：用 @fleet-dao/db 的 feishuPushableSince（feishu-push.ts），
 //   「主线已恢复」要的「之前真推出去过主线红」由这里查送达记录喂给它。delivered 是飞书团队群那条送达记录有没有送到。
 // - feishuPushProblem、dailyBriefProblem：就是 @fleet-dao/db 的 feishuPushProblem、dailyBriefProblem 的结论（通着、好着是 null）。
+// - localOrphans：每小时对账写在设置表里的「贴了本机做超过 24 小时、又没有本机租约」的单。这里不另判，读到什么就是什么。
+//   还没写过这一行是空数组。写过、形状认不出照抛（退出码 1），不拿空数组顶。
 // - 读不到就报没读成（ok:false，退出码 1），不拿空列表、null 顶。参数不对退出码 2。
 import {
   beijingDay,
@@ -20,14 +22,16 @@ import {
   feishuPushableSince,
   feishuPushFacts,
   feishuPushProblem,
+  type LocalOrphan,
   notificationDeliveries,
   notifications,
+  readLocalOrphans,
 } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import { and, eq, gte, isNotNull, isNull, like } from 'drizzle-orm';
 
 export const ATTENTION_USAGE =
-  '用法：fleet-api attention --json（只读：healthz 状态码和红的项、开着且按推送白名单该推的通知、飞书推送不通的话、今天每日简报没送到的话；打一行 JSON）';
+  '用法：fleet-api attention --json（只读：healthz 状态码和红的项、开着且按推送白名单该推的通知、飞书推送不通的话、今天每日简报没送到的话、贴了「本机做」超过 24 小时还没人领的单；打一行 JSON）';
 
 export class AttentionCliError extends Error {
   readonly exitCode: number;
@@ -59,6 +63,8 @@ export interface Attention {
   notes: AttentionNote[];
   feishuPushProblem: string | null;
   dailyBriefProblem: string | null;
+  /** 对账写下的没人领的「本机做」。空数组是没有，或对账还没写过。 */
+  localOrphans: LocalOrphan[];
 }
 
 /** 问一次 /healthz：回状态码（连不上是 0）和红的检查名。 */
@@ -153,11 +159,12 @@ export async function runAttention(deps: {
 }): Promise<Attention> {
   const at = deps.now();
   const { day, start } = beijingDay(at);
-  const [healthz, notes, pushFacts, briefStatus] = await Promise.all([
+  const [healthz, notes, pushFacts, briefStatus, localOrphans] = await Promise.all([
     deps.healthz(),
     pushableOpenNotes(deps.db, at),
     feishuPushFacts(deps.db, at),
     dailyBriefStatus(deps.db, day, start),
+    readLocalOrphans(deps.db),
   ]);
   return {
     ok: true,
@@ -166,6 +173,7 @@ export async function runAttention(deps: {
     notes,
     feishuPushProblem: feishuPushProblem(pushFacts, at),
     dailyBriefProblem: dailyBriefProblem(briefStatus, at),
+    localOrphans,
   };
 }
 
