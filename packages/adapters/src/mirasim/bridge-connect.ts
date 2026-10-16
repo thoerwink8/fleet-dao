@@ -38,6 +38,11 @@ export interface BridgeConnectorOptions {
 }
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 100_000;
+/**
+ * 等桥接报 ready 等到顶的那一句（后面接「（N 秒）」）。失败分流认这一句定类（engine 的 failure/rules.ts，MB1「桥接连 Mirasim
+ * 超时」）、路由探针的 detail 也照写：和「起来之后迟迟没有第一帧」（judge.ts，会话起了没出字）、「回答认不出」不是一类，改字两头一起改。
+ */
+export const BRIDGE_CONNECT_TIMEOUT_TEXT = '桥接连 Mirasim 超时';
 /** stderr 只留末尾这么多字节，桥接起不来时报的原因不至于把整段日志吞进去。 */
 const STDERR_TAIL = 2_000;
 
@@ -120,7 +125,7 @@ export function bridgeMirasimConnector(
         void stopScope(scope).catch(() => {});
         reject(
           new Error(
-            `桥接连 Mirasim 超时（${Math.round((options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS) / 1000)} 秒）`,
+            `${BRIDGE_CONNECT_TIMEOUT_TEXT}（${Math.round((options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS) / 1000)} 秒）`,
           ),
         );
       }, options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);

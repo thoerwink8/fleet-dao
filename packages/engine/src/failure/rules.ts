@@ -664,6 +664,17 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'fail',
     hint: '续一句提醒它，续不上开新会话',
   },
+  // 经桥接连这个会话用户的 Mirasim 服务，等桥接报 ready 等到顶（adapters 的 bridge-connect.ts，BRIDGE_CONNECT_TIMEOUT_TEXT）：
+  // 连接都没建起来，会话根本没起，和下面「起了、迟迟没有第一帧」（ST1）、「答了但认不出 pong」（探针自己判）不是一类。
+  // 多半是服务单线程被堵住、或服务没在跑：原路重起一次，再不行停下报警；探针撞上判这条路由离线。
+  {
+    id: 'MB1',
+    title: '桥接连 Mirasim 超时',
+    kind: 'retry',
+    text: /桥接连 Mirasim 超时/,
+    maxRetries: 1,
+    routeOutcome: 'fail',
+  },
   // 起不来：重起一次，再不行停下报警（盲设计题有一臂就这么阵亡：codex initialize timed out）。真会话端口的进程迟迟
   // 起不来（spawn_timeout，不可重试：原地同一个 runId 重试只会报已经起过）也归这里，由工作流换新 runId 原路重起一次。
   {

@@ -674,6 +674,17 @@
       "expect": { "action": "retry", "rule": "BZ1" }
     },
     {
+      "id": "X113",
+      "provenance": "production",
+      "origin": "fleet-dao 法国 VPS 路由探针读回（2026-10-16，#2703）：mirasim-relay:sonnet-5.5 第二次探的 detail，桥接等 ready 等满 100 秒",
+      "evidence": {
+        "hostId": "mirasim",
+        "code": "spawn_failed",
+        "message": "没起来：桥接连 Mirasim 超时（100 秒）"
+      },
+      "expect": { "action": "retry", "rule": "MB1", "routeOutcome": "fail" }
+    },
+    {
       "id": "X31",
       "provenance": "format",
       "origin": "fleet-dao 插头的强杀原因 startup_timeout（packages/adapters/src/judge.ts）",
