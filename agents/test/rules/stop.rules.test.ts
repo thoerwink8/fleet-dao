@@ -420,3 +420,216 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     expect(lines().join('')).toContain('暂停着（要花钱）');
   });
 });
+
+// 单 #2731（决定 0094）：收轮前对账。10-16 15:06 旧会话说「本机现在没有工人在跑」就收了，队列里还有 4 件。
+// 人在不在场都判：本机队列有可接的活、容量够、没有子代理在跑（只有后台命令、监视器在跑也算没有）→ 挡回，理由列前三件；连挡 3 次放行一次。
+// 队列、容量读不成不挡、明说没查成；不在 fleet-dao 检出里不管。判法读数换成假的；命令行外壳那几条用假的 work.ts。
+interface Reading {
+  ok: boolean;
+  freeBytes?: number;
+  load1?: number;
+  cores?: number;
+  how?: string;
+  why?: string;
+}
+interface QueueItemLite {
+  issue: number;
+  title: string;
+  takeable: boolean;
+}
+type QueueRead = { ok: true; items: QueueItemLite[]; problems: string[] } | { ok: false; why: string };
+type Decision = { block: true; reason: string } | { block: false; notice?: string };
+interface QueueStopLib {
+  decideQueueStop(o: {
+    input: unknown;
+    dir: string;
+    sessionId: string;
+    readQueue?: (root: string) => Promise<QueueRead>;
+    readCap?: () => Promise<Reading>;
+  }): Promise<Decision>;
+  parseQueue(text: string): QueueRead | { ok: false; why: string };
+}
+const queueStop = (await import(new URL('../../hooks/queue-stop.mjs', import.meta.url).href)) as QueueStopLib;
+
+describe('规矩：收轮前对账——有可接的活、容量够、没有子代理在跑就挡回（单 #2731）', SLOW, () => {
+  const GB = 1024 ** 3;
+  const enough: Reading = { ok: true, freeBytes: 16 * GB, load1: 2, cores: 16, how: '假的' };
+  const lowMem: Reading = { ok: true, freeBytes: 3 * GB, load1: 2, cores: 16, how: '假的' };
+  const busy: Reading = { ok: true, freeBytes: 16 * GB, load1: 13, cores: 16, how: '假的' };
+  const unknown: Reading = { ok: false, why: 'CIM 没读成（PowerShell 退出码 1）' };
+  const items: QueueItemLite[] = [
+    { issue: 11, title: '一', takeable: true },
+    { issue: 12, title: '在做', takeable: false },
+    { issue: 13, title: '二', takeable: true },
+    { issue: 14, title: '三', takeable: true },
+    { issue: 15, title: '四', takeable: true },
+  ];
+  /** 一个假的 fleet-dao 检出：有 packages/conventions/src/bin/work.ts，内容是给定的脚本 */
+  function fakeRepo(script = 'process.exit(0)'): string {
+    const root = temp('repo');
+    mkdirSync(join(root, 'packages', 'conventions', 'src', 'bin'), { recursive: true });
+    writeFileSync(join(root, 'packages', 'conventions', 'src', 'bin', 'work.ts'), script);
+    return root;
+  }
+  function decide(
+    o: {
+      tasks?: unknown[];
+      crons?: unknown[];
+      queue?: QueueRead;
+      cap?: Reading;
+      dir?: string;
+      cwd?: string;
+    } = {},
+  ) {
+    const calls = { queue: 0, cap: 0 };
+    const dir = o.dir ?? temp('state');
+    const p = queueStop.decideQueueStop({
+      input: {
+        hook_event_name: 'Stop',
+        session_id: SID,
+        cwd: o.cwd ?? fakeRepo(),
+        background_tasks: o.tasks ?? [],
+        session_crons: o.crons ?? [],
+      },
+      dir,
+      sessionId: SID,
+      readQueue: async () => {
+        calls.queue++;
+        return o.queue ?? { ok: true, items, problems: [] };
+      },
+      readCap: async () => {
+        calls.cap++;
+        return o.cap ?? enough;
+      },
+    });
+    return { p, calls, dir };
+  }
+
+  it('人在场（没开无人值守）也判：有可接的活、容量够、什么都没在跑 → 挡回，理由列前三件可接的和读数', async () => {
+    const { p } = decide();
+    const r = await p;
+    expect(r.block).toBe(true);
+    const reason = r.block ? r.reason : '';
+    expect(reason).toContain('#11 一；#13 二；#14 三');
+    expect(reason).not.toContain('#15');
+    expect(reason).not.toContain('#12');
+    expect(reason).toContain('空闲内存 16.0G');
+    expect(reason).toContain('pnpm work queue');
+  });
+
+  it('只有后台命令、监视器在跑：不算有人在干活，照挡', async () => {
+    const shell = { id: 'b1', type: 'shell', status: 'running', command: 'pnpm test' };
+    const monitor = { id: 'b2', type: 'monitor', status: 'running', description: '盯 PR' };
+    expect((await decide({ tasks: [shell, monitor] }).p).block).toBe(true);
+  });
+
+  it('有子代理在跑、或有定时唤醒：放行，不读队列、不读容量', async () => {
+    const sub = { id: 'a1', type: 'subagent', status: 'running', agent_type: 'general-purpose' };
+    for (const o of [{ tasks: [sub] }, { crons: [{ id: 'c1', schedule: '*/10 * * * *' }] }]) {
+      const { p, calls } = decide(o);
+      expect(await p).toEqual({ block: false });
+      expect(calls).toEqual({ queue: 0, cap: 0 });
+    }
+  });
+
+  it('没有可接的活：放行、不说话', async () => {
+    const r = await decide({
+      queue: { ok: true, items: [{ issue: 12, title: '在做', takeable: false }], problems: [] },
+    }).p;
+    expect(r).toEqual({ block: false });
+  });
+
+  it('容量不够（空闲内存 < 4G 或负载 > 核数×0.8）：放行、不说话', async () => {
+    expect(await decide({ cap: lowMem }).p).toEqual({ block: false });
+    expect(await decide({ cap: busy }).p).toEqual({ block: false });
+  });
+
+  it('【故意造出的失败】容量没查成：不当成够，不挡，明说没查成和原因', async () => {
+    const r = await decide({ cap: unknown }).p;
+    expect(r.block).toBe(false);
+    expect(r.block ? '' : r.notice).toContain('没查成：CIM 没读成');
+  });
+
+  it('【故意造出的失败】队列没查成：不当成没活、也不挡，明说没查成', async () => {
+    const r = await decide({ queue: { ok: false, why: '队列命令退出码 1：HTTP 502' } }).p;
+    expect(r.block).toBe(false);
+    expect(r.block ? '' : r.notice).toContain('没查成本机队列：队列命令退出码 1：HTTP 502');
+  });
+
+  it('不在 fleet-dao 检出里（往上找不到 work.ts）：不管、不出声，也不读', async () => {
+    const { p, calls } = decide({ cwd: temp('elsewhere') });
+    expect(await p).toEqual({ block: false });
+    expect(calls).toEqual({ queue: 0, cap: 0 });
+  });
+
+  it('连着挡 3 次放行一次（说明是第几次），下一次又从头挡；中间有一次不该挡就清零', async () => {
+    const dir = temp('state');
+    for (let i = 1; i <= 3; i++) expect((await decide({ dir }).p).block, `第 ${i} 次`).toBe(true);
+    const fourth = await decide({ dir }).p;
+    expect(fourth.block).toBe(false);
+    expect(fourth.block ? '' : fourth.notice).toContain('连着挡了 3 次');
+    expect((await decide({ dir }).p).block).toBe(true);
+    expect((await decide({ dir, cap: lowMem }).p).block).toBe(false);
+    for (let i = 1; i <= 3; i++) expect((await decide({ dir }).p).block).toBe(true);
+  });
+
+  it('无人值守已经 done 或 needs-you（paused）：放行（它说了做完、或在等人拍）', async () => {
+    for (const state of ['done', 'paused']) {
+      const dir = temp('state');
+      writeFileSync(
+        join(dir, `${SID}.json`),
+        JSON.stringify({ state, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), totalBlocks: 0 }),
+      );
+      expect((await decide({ dir }).p).block, state).toBe(false);
+    }
+  });
+
+  it('队列输出认得出才算：不是 JSON、少字段都算没查成', () => {
+    expect(queueStop.parseQueue('{"items":[{"issue":1,"title":"x","takeable":true}],"problems":[]}').ok).toBe(
+      true,
+    );
+    expect(queueStop.parseQueue('坏的').ok).toBe(false);
+    expect(queueStop.parseQueue('{"items":[{"issue":1}],"problems":[]}').ok).toBe(false);
+    expect(queueStop.parseQueue('{"items":[]}').ok).toBe(false);
+  });
+
+  describe('命令行外壳：真起 stop.mjs，队列命令换成假的 work.ts', () => {
+    const queueJson = JSON.stringify({ items: [{ issue: 11, title: '一', takeable: true }], problems: [] });
+    it('有子代理在跑：放行，退出码 0、什么都不打印', () => {
+      const root = fakeRepo(`console.log(${JSON.stringify(queueJson)})`);
+      const sub = { id: 'a1', type: 'subagent', status: 'running' };
+      const r = run(
+        JSON.stringify({ hook_event_name: 'Stop', session_id: SID, cwd: root, background_tasks: [sub] }),
+        undefined,
+        isolatedEnv(temp('state'), SID),
+      );
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+
+    it('【故意造出的失败】队列命令自己失败：不挡，systemMessage 写明没查成和它的 stderr', () => {
+      const root = fakeRepo("console.error('gh: HTTP 502'); process.exit(1)");
+      const r = run(
+        JSON.stringify({ hook_event_name: 'Stop', session_id: SID, cwd: root, background_tasks: [] }),
+        undefined,
+        isolatedEnv(temp('state'), SID),
+      );
+      expect(r.status).toBe(0);
+      expect(blocked(r.stdout)).toBe(false);
+      expect(JSON.parse(r.stdout.trim()).systemMessage).toContain(
+        '没查成本机队列：队列命令退出码 1：gh: HTTP 502',
+      );
+    });
+
+    it('机器派的会话（工人，FLEET_WORKER=1）：不对账、不出声', () => {
+      const root = fakeRepo('process.exit(1)');
+      const r = run(
+        JSON.stringify({ hook_event_name: 'Stop', session_id: SID, cwd: root, background_tasks: [] }),
+        undefined,
+        { ...isolatedEnv(temp('state'), SID), FLEET_WORKER: '1' },
+      );
+      expect(r.status).toBe(0);
+      expect(r.stdout.trim()).toBe('');
+    });
+  });
+});

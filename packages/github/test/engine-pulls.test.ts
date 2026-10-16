@@ -198,6 +198,22 @@ describe('engine-pulls：撤自动合并、关 PR、留言', () => {
     expect(fake.pulls.get(pr.number)?.comments).toHaveLength(1);
   });
 
+  it('改 PR 正文（#2723）：按模板渲染、关单词中和成「关联」，分支和状态不动', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'fleet/12-t1', sha: sha('a') }, body: '旧的' });
+    await gh.claims.updatePullBody(repo, pr.number, {
+      requirement: 12,
+      did: ['按 #12 的要求动手（第 2 轮）', 'Closes #12 的那条做完了'],
+      verified: ['看检查'],
+    });
+    const body = fake.pulls.get(pr.number)?.body ?? '';
+    expect(body).toContain('**做了什么**：');
+    expect(body).toContain('- 按 #12 的要求动手（第 2 轮）');
+    expect(body).toContain('关联 #12 的那条做完了');
+    expect(body).not.toMatch(/Closes #12/i);
+    expect(fake.pulls.get(pr.number)?.state).toBe('open');
+  });
+
   it('【故意造出的失败】往 issue 号上留「PR 的话」：拒绝，不写到 issue 上', async () => {
     const { gh, fake } = setup();
     const issue = fake.addIssue();

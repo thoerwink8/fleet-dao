@@ -71,6 +71,7 @@ const PORT_KEYS: Readonly<Record<PortName, true>> = {
   removeWorktree: true,
   pushBranch: true,
   openPr: true,
+  updatePrBody: true,
   waitCi: true,
   syncMainline: true,
   saveTaskState: true,

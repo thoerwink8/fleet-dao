@@ -78,7 +78,7 @@ describe('自动认领和交给创始人拍', () => {
     expect(called).toBe(0);
   });
 
-  it('挂了超过 24 小时、本会话接不了的进「要你拍的」；自己的、不满 24 小时的不进', () => {
+  it('挂了超过 24 小时、本会话接不了的写成指挥官自己认领，不出现「要你拍」；自己的、不满 24 小时的不进', () => {
     const lines = hook
       .progressLines(
         run([
@@ -91,7 +91,10 @@ describe('自动认领和交给创始人拍', () => {
         { now: NOW, presence: () => ({ state: 'here', why: '' }), adopt: () => ({ ok: true }) },
       )
       .join('\n');
-    const ask = lines.split('\n').find((l) => l.startsWith('要你拍的')) ?? '';
+    expect(lines).not.toContain('要你拍');
+    const ask = lines.split('\n').find((l) => l.includes('挂了超过 24 小时')) ?? '';
+    expect(ask).toContain('指挥官自己的活，不用问创始人');
+    expect(ask).toContain('pnpm progress claim');
     expect(ask).toContain('2 条挂了超过 24 小时');
     expect(ask).toContain('老的无主');
     expect(ask).toContain('老的别人的');
@@ -99,7 +102,7 @@ describe('自动认领和交给创始人拍', () => {
     expect(ask).not.toContain('新的别人的');
   });
 
-  it('开场注入不重复：进了「要你拍的」的无主引导不在无主那行再列；每条只带前 40 字，全文指到 pnpm progress read --pending', () => {
+  it('开场注入不重复：挂久了的无主引导不在无主那行再列；每条只带前 40 字，全文指到 pnpm progress read --pending', () => {
     const long = `${'长'.repeat(40)}后面的全文不该注入`;
     const lines = hook.progressLines(
       run([`1\t${H}\t原话：${long}\t无主\t${iso(30)}`, `2\t${H}\t原话：新的无主\t无主\t${iso(1)}`]),

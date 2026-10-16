@@ -9,7 +9,7 @@
 // 命令的输出也带密钥：打印进程命令行（ps -ef、/proc/*/cmdline、Win32_Process、挑 CommandLine 那一列）时，进程的参数里
 // 常常带着口令，接上 redact-secrets.mjs 才放行（2026-10-02 lark-mcp 的 -s <secret> 就是这么漏的，创始人拍了加这条）。
 // 命令字符串拆开拼：免得跑这条测试的命令、或者有人 grep 它时，本机的护栏把自己拦下。
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -23,8 +23,26 @@ interface PretoolLib {
     opts?: { claudeRunning?: () => number },
   ): { code: number; message?: string; context?: string };
   gitStashWrites(command: string): boolean;
+  capacityVerdict(raw: string, deps?: { read?: () => CapReading }): { code: number; message: string } | null;
   SHELL_TOOLS: Record<string, string>;
   GITIGNORE_NOT_BLOCKED: Record<string, string>;
+}
+interface CapReading {
+  ok: boolean;
+  freeBytes?: number;
+  load1?: number;
+  cores?: number;
+  how?: string;
+  why?: string;
+}
+interface CapacityLib {
+  readCapacity(deps?: {
+    platform?: string;
+    cores?: number;
+    runCim?: () => { status: number | null; stdout: string; stderr: string; error?: Error };
+    readText?: (path: string) => string;
+  }): CapReading;
+  judgeCapacity(r: CapReading): { enough: boolean | null; text: string };
 }
 interface ShapeLib {
   main(argv: string[], io: { out(line: string): void; err(line: string): void }): number;
@@ -341,6 +359,224 @@ describe('命令行外壳：stdin 进、退出码出', { timeout: 0 }, () => {
     );
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('secret-shape.mjs');
+  });
+
+  it('主线程挂「循环 + sleep」的 Monitor：退出码 2，指向 wait.mjs（Monitor 不再见到就放行）', () => {
+    const r = run(
+      cc('Monitor', { command: 'while true; do gh pr view 1; sleep 30; done', timeout_ms: 1_800_000 }),
+    );
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('wait.mjs');
+  });
+
+  it('子代理里的同一条 Monitor：退出码 0', () => {
+    const r = run(
+      cc('Monitor', { command: 'while true; do gh pr view 1; sleep 30; done', timeout_ms: 1_800_000 }, 'a1'),
+    );
+    expect(r.status).toBe(0);
+  });
+});
+
+/** Claude Code 自己送来的输入（isClaudeCodeInput 认的那几个键都在）；给了 agentId 就是子代理里的调用 */
+function cc(tool: string, toolInput: Record<string, unknown>, agentId?: string): string {
+  return JSON.stringify({
+    hook_event_name: 'PreToolUse',
+    transcript_path: '/tmp/t.jsonl',
+    permission_mode: 'default',
+    tool_use_id: 'toolu_1',
+    session_id: 's1',
+    tool_name: tool,
+    tool_input: toolInput,
+    cwd: F,
+    ...(agentId === undefined ? {} : { agent_id: agentId, agent_type: 'general-purpose' }),
+  });
+}
+
+// 单 #2730：旧会话主线程手写 46 个「for/while … sleep」后台盯梢，最后一个 jq 写错、错误进了 /dev/null，空跑 90 分钟。
+// 主线程的后台命令（run_in_background、会被改成后台跑的长 timeout、Monitor）里有循环加 sleep 就拦，指向 wait.mjs；
+// 子代理、前台短命令、别家的输入照放。
+describe('主线程不手写轮询：循环 + sleep 的后台命令拦下，指向 wait.mjs', () => {
+  const jqLoop = `for i in $(seq 1 180); do s=$(gh pr view 2701 --json state --jq '"\\(.state)"' 2>/dev/null); [ "$s" = MERGED ] && break; sleep 30; done`;
+  const blocked: [string, Record<string, unknown>][] = [
+    ['Bash', { command: jqLoop, run_in_background: true }],
+    ['Bash', { command: 'until gh run view 1 --exit-status; do sleep 60; done', run_in_background: true }],
+    ['Bash', { command: 'while :; do date; sleep 5; done', timeout: 600_000 }],
+    [
+      'PowerShell',
+      { command: 'while ($true) { gh pr view 1; Start-Sleep -Seconds 30 }', run_in_background: true },
+    ],
+    ['PowerShell', { command: 'do { Start-Sleep 10 } until (Test-Path x)', run_in_background: true }],
+    ['Monitor', { command: 'while true; do gh pr checks 1; sleep 30; done', timeout_ms: 1_800_000 }],
+  ];
+  it.each(blocked)('主线程 %s %j：拦下，理由指向 wait.mjs', (tool, toolInput) => {
+    const v = lib.decide(cc(tool, toolInput));
+    expect(v.code).toBe(2);
+    expect(v.message).toContain('wait.mjs');
+    expect(v.message).toContain('不手写');
+  });
+
+  it.each(blocked)('子代理里 %s %j：照放', (tool, toolInput) => {
+    expect(lib.decide(cc(tool, toolInput, 'agent-1')).code).toBe(0);
+  });
+
+  const allowed: [string, Record<string, unknown>][] = [
+    // 前台短命令：不是后台盯梢
+    ['Bash', { command: 'for f in a b; do echo $f; done; sleep 1' }],
+    // 后台跑，但没有循环 + sleep
+    [
+      'Bash',
+      { command: 'node ~/.claude/skills/commander/scripts/wait.mjs pr 2730', run_in_background: true },
+    ],
+    ['Bash', { command: 'gh pr checks 2730 --watch --fail-fast', run_in_background: true }],
+    ['Bash', { command: 'for f in a b; do echo $f; done', run_in_background: true }],
+    ['Bash', { command: 'sleep 5 && pnpm test', run_in_background: true }],
+    // 单词边界：sleepy、for-each 这类不算
+    ['Bash', { command: 'pnpm run for-each sleepy', run_in_background: true }],
+    ['Monitor', { command: 'tail -f log | grep --line-buffered ERROR', timeout_ms: 60_000 }],
+  ];
+  it.each(allowed)('主线程 %s %j：放行', (tool, toolInput) => {
+    expect(lib.decide(cc(tool, toolInput)).code).toBe(0);
+  });
+
+  it('别家的输入（没有 Claude Code 那几个键）不管：没有这套后台命令', () => {
+    const v = lib.decide(
+      JSON.stringify({ tool_name: 'Bash', tool_input: { command: jqLoop, run_in_background: true }, cwd: F }),
+    );
+    expect(v.code).toBe(0);
+  });
+});
+
+// 单 #2731（决定 0094）：能不能派工人以前只是一段文字，自动记忆里「最多 4 个」的旧说法在 0094 之后还被注入、照着写进了报告。
+// 现在派写码工人（Agent 的 subagent_type 不是只读的那几种）前由代码判本机容量：空闲内存 < 4G 或 1 分钟负载 > 核数×0.8 拦下并附读数；
+// 读不到也拦（明说没查成，不当成够）；只读的斥候、设计不判。判法里不出现任何个数上限。
+const capacity = (await import(pathToFileURL(join(HOOKS, 'capacity.mjs')).href)) as CapacityLib;
+describe('派写码工人前判本机容量：不够、没查成都拦，附读数；不设个数上限', () => {
+  const GB = 1024 ** 3;
+  const reading = (freeGb: number, load1: number, cores = 16): CapReading => ({
+    ok: true,
+    freeBytes: freeGb * GB,
+    load1,
+    cores,
+    how: '假的',
+  });
+  const agent = (toolInput: Record<string, unknown>, agentId?: string) =>
+    cc('Agent', { description: 'x', prompt: 'y', ...toolInput }, agentId);
+
+  it.each([
+    ['空闲内存不到 4G', reading(3.5, 1), '空闲内存不够'],
+    ['1 分钟负载超过核数×0.8', reading(16, 12.9), '负载太高'],
+  ])('%s：拦下，理由带读数', (_name, r, word) => {
+    const v = lib.capacityVerdict(agent({ subagent_type: 'general-purpose' }), { read: () => r });
+    expect(v?.code).toBe(2);
+    expect(v?.message).toContain(word);
+    expect(v?.message).toContain('1 分钟负载');
+    expect(v?.message).toContain('空闲内存');
+  });
+
+  it('【故意造出的失败】读不到：拦下，明说没查成和原因，不当成够', () => {
+    const v = lib.capacityVerdict(agent({ subagent_type: 'general-purpose' }), {
+      read: () => ({ ok: false, why: 'CIM 没读成（PowerShell 退出码 1）' }),
+    });
+    expect(v?.code).toBe(2);
+    expect(v?.message).toContain('没查成：CIM 没读成');
+  });
+
+  it('容量够：放行；没写 subagent_type（默认就是写码的工人）也判', () => {
+    expect(
+      lib.capacityVerdict(agent({ subagent_type: 'general-purpose' }), { read: () => reading(8, 4) }),
+    ).toBeNull();
+    expect(lib.capacityVerdict(agent({}), { read: () => reading(2, 1) })?.code).toBe(2);
+  });
+
+  it('只读的斥候、设计不判：容量再紧也放行，也不去读', () => {
+    for (const t of ['Explore', 'Plan']) {
+      let read = 0;
+      const v = lib.capacityVerdict(agent({ subagent_type: t }), {
+        read: () => {
+          read++;
+          return reading(1, 99);
+        },
+      });
+      expect(v, t).toBeNull();
+      expect(read, t).toBe(0);
+    }
+  });
+
+  it('不是 Agent、不是 Claude Code 的输入：不判', () => {
+    const low = { read: () => reading(1, 99) };
+    expect(lib.capacityVerdict(cc('Bash', { command: 'ls' }), low)).toBeNull();
+    expect(
+      lib.capacityVerdict(
+        JSON.stringify({ tool_name: 'Agent', tool_input: { subagent_type: 'general-purpose' } }),
+        low,
+      ),
+    ).toBeNull();
+  });
+
+  it('不设个数上限：判法只拿读数，不管已经派了多少个；判法和技能里没有「最多 N 个」这种上限', () => {
+    // 同一份够用的读数，连着派 50 个都放行（判法里根本没有「在跑几个」这一项）
+    for (let i = 0; i < 50; i++) {
+      expect(
+        lib.capacityVerdict(agent({ subagent_type: 'general-purpose' }), { read: () => reading(32, 1) }),
+      ).toBeNull();
+    }
+    const cap =
+      /(?:最多|上限(?:是)?|不超过)\s*[0-9一二三四五六七八九十]+\s*个(?:工人|子代理)?|MAX_?(?:WORKERS|AGENTS|SUBAGENTS)/i;
+    for (const rel of [
+      '../../hooks/capacity.mjs',
+      '../../hooks/queue-stop.mjs',
+      '../../skills/commander/SKILL.md',
+    ]) {
+      const text = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+      expect(text.match(cap), rel).toBeNull();
+    }
+  });
+
+  it('读数：Windows 读 CIM（空闲内存 KB、CPU 忙的百分比折成负载），Linux 读 /proc；读不到、认不出、别的平台都是没查成', () => {
+    const win = capacity.readCapacity({
+      platform: 'win32',
+      cores: 16,
+      runCim: () => ({ status: 0, stdout: '8388608 50\r\n', stderr: '' }),
+    });
+    expect(win).toMatchObject({ ok: true, freeBytes: 8 * GB, load1: 8, cores: 16 });
+    expect(capacity.judgeCapacity(win).enough).toBe(true);
+    const linux = capacity.readCapacity({
+      platform: 'linux',
+      cores: 4,
+      readText: (p) =>
+        p === '/proc/meminfo' ? 'MemTotal: 1 kB\nMemAvailable:    2097152 kB\n' : '3.50 2.00 1.00 1/2 3\n',
+    });
+    expect(linux).toMatchObject({ ok: true, freeBytes: 2 * GB, load1: 3.5 });
+    expect(capacity.judgeCapacity(linux).text).toContain('空闲内存不够、负载太高');
+    for (const r of [
+      capacity.readCapacity({
+        platform: 'win32',
+        cores: 16,
+        runCim: () => ({ status: 1, stdout: '', stderr: '拒绝访问' }),
+      }),
+      capacity.readCapacity({
+        platform: 'win32',
+        cores: 16,
+        runCim: () => ({ status: 0, stdout: '乱码', stderr: '' }),
+      }),
+      capacity.readCapacity({
+        platform: 'win32',
+        cores: 16,
+        runCim: () => ({ status: null, stdout: '', stderr: '', error: new Error('ENOENT') }),
+      }),
+      capacity.readCapacity({
+        platform: 'linux',
+        cores: 4,
+        readText: () => {
+          throw new Error('EACCES');
+        },
+      }),
+      capacity.readCapacity({ platform: 'darwin', cores: 8 }),
+    ]) {
+      expect(r.ok).toBe(false);
+      expect(capacity.judgeCapacity(r).enough).toBeNull();
+      expect(capacity.judgeCapacity(r).text).toContain('没查成');
+    }
   });
 });
 

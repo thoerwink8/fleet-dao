@@ -19,6 +19,9 @@ const weekly = (used: number) => [
   win({ used, resetsAt: at(72) }),
 ];
 
+// Mirasim 的 30 天窗（法国 10-16 16:34 的读数）：还剩 598 小时、用了 67.6%，按时间该用约 17%，超前约 51%
+const MIRASIM_51 = [win({ label: '30d', window: 'other', used: 0.676, resetsAt: at(598) })];
+
 const STRENGTH: Record<string, ModelStrength> = {
   'grok-4.7': 'standard',
   'cursor-auto': 'light',
@@ -77,23 +80,85 @@ describe('重活先给强档', () => {
     expect(r.why).toContain(`重活先给强档：${r.modelId}`);
     // 档内仍按 #2403 的质量下界：opus 4 单过 2 比 sonnet 3 单过 0 高一截
     expect(ranked[0]).toBe('opus-5.5');
-    // grok 人排在它前面，没派它写的是被挪到了强档后面
-    expect(r.why).toContain('标准档排在强档后面');
+    // grok 人排在它前面：被挪到了强档后面，又够不上主力档动手的能力下限（#2725），理由写的是下限
+    const grok = r.verdicts.find((v) => v.routeId === 'grok-4.7');
+    expect(grok?.nudges.map((n) => n.text).join('\n')).toContain('标准档排在强档后面');
+    expect(r.why).toContain('够不上能力下限');
   });
 
-  it('强档的池超前时间进度 35%：强档让位，grok 在前，理由写「强档池超前 35%，让给标准档」', () => {
+  it('强档都超前 35%：不让给标准档，仍派强档，理由写「强档都超前，照派」（#2724）', () => {
     const ahead = { windows: weekly(ELAPSED + 0.35) };
     const r = dispatched(chooseRoute(heavy(routesOf({ 'opus-5.5': ahead, 'sonnet-5.5': ahead }))));
-    expect(r.modelId).toBe('grok-4.7');
-    expect(order(r)[0]).toBe('grok-4.7');
-    expect(r.why).toContain('强档池超前 35%');
-    expect(r.why).toContain('让给标准档');
+    expect(['opus-5.5', 'sonnet-5.5']).toContain(r.modelId);
+    expect(order(r).slice(0, 2).sort()).toEqual(['opus-5.5', 'sonnet-5.5']);
+    expect(order(r).slice(2)).toEqual(['grok-4.7', 'cursor-auto']);
+    expect(r.why).toContain('强档都超前，照派');
+    expect(r.why).toContain('超前 35%');
+    expect(r.why).not.toContain('让给标准档');
   });
 
-  it('只有一个强档模型超前：它让位，另一个强档照样提到最前', () => {
+  it('只有一个强档模型超前：它让给另一个强档，自己仍排在标准档前面（#2724）', () => {
     const r = dispatched(chooseRoute(heavy(routesOf({ 'opus-5.5': { windows: weekly(ELAPSED + 0.35) } }))));
     expect(r.modelId).toBe('sonnet-5.5');
-    expect(order(r).indexOf('opus-5.5')).toBeGreaterThan(order(r).indexOf('grok-4.7'));
+    expect(order(r)).toEqual(['sonnet-5.5', 'opus-5.5', 'grok-4.7', 'cursor-auto']);
+    const opus = r.verdicts.find((v) => v.routeId === 'opus-5.5');
+    expect(opus?.nudges.map((n) => n.text).join('\n')).toContain('强档池超前 35%');
+    expect(opus?.nudges.map((n) => n.text).join('\n')).toContain('让给强档 sonnet-5.5');
+  });
+
+  it('能派的路由超前 51%、同模型另一条被人关掉的路由持平：仍让位（#2724）', () => {
+    // 法国 10-16：opus 唯一能派的 Mirasim 池超前约 51%，claude-solo 那条人关掉了、只超前 2%
+    const routes = [
+      ...routesOf({ 'opus-5.5': { poolName: 'Mirasim', windows: MIRASIM_51 } }),
+      route('opus-solo', {
+        modelId: 'opus-5.5',
+        modelName: 'opus-5.5',
+        poolName: 'solo',
+        strength: 'strong',
+        windows: weekly(ELAPSED + 0.02),
+        blockers: ['switched-off'],
+      }),
+    ];
+    const base = heavy(routes);
+    const r = dispatched(
+      chooseRoute({
+        ...base,
+        order: base.order.map((e) => (e.routeId === 'opus-solo' ? { ...e, enabled: false } : e)),
+      }),
+    );
+    expect(r.modelId).toBe('sonnet-5.5');
+    const opus = r.verdicts.find((v) => v.routeId === 'opus-5.5');
+    expect(opus?.nudges.map((n) => n.kind)).toContain('strength-yield');
+    expect(opus?.nudges.map((n) => n.text).join('\n')).toContain('Mirasim');
+    expect(opus?.nudges.map((n) => n.text).join('\n')).toContain('超前 51%');
+  });
+
+  it('同上但强档只有 opus 一个：强档都超前，照派 opus，不让给标准档 grok（#2724）', () => {
+    const routes = [
+      route('grok-4.7', { modelId: 'grok-4.7', strength: 'standard', windows: weekly(ELAPSED + 0.19) }),
+      route('opus-mirasim', {
+        modelId: 'opus-5.5',
+        strength: 'strong',
+        poolName: 'Mirasim',
+        windows: MIRASIM_51,
+      }),
+      route('opus-solo', {
+        modelId: 'opus-5.5',
+        strength: 'strong',
+        windows: weekly(ELAPSED + 0.02),
+        blockers: ['switched-off'],
+      }),
+    ];
+    const base = heavy(routes, { modelTierTracks: [] });
+    const r = dispatched(
+      chooseRoute({
+        ...base,
+        order: base.order.map((e) => (e.routeId === 'opus-solo' ? { ...e, enabled: false } : e)),
+      }),
+    );
+    expect(r.routeId).toBe('opus-mirasim');
+    expect(r.why).toContain('强档都超前，照派');
+    expect(r.why).toContain('超前 51%');
   });
 
   it('超前不到 30%（25%）不让位', () => {
@@ -102,14 +167,14 @@ describe('重活先给强档', () => {
     expect(['opus-5.5', 'sonnet-5.5']).toContain(r.modelId);
   });
 
-  it('强档全被挡（一个额度用满、一个熔断）：照旧往下派 grok', () => {
+  it('强档全被挡、2 小时内好不了（一个额度用满、一个熔断 3 小时后到点）：下限降一档，往下派 grok（#2725）', () => {
     const r = dispatched(
       chooseRoute(
         heavy(
           routesOf({
             'opus-5.5': { quota: 'exhausted', blockers: ['quota-exhausted'] },
             'sonnet-5.5': {
-              breaker: { state: 'open', admit: 'none', reason: '连败 3 次', probeAt: at(1) },
+              breaker: { state: 'open', admit: 'none', reason: '连败 3 次', probeAt: at(3) },
             },
           }),
         ),
@@ -117,6 +182,21 @@ describe('重活先给强档', () => {
     );
     expect(r.modelId).toBe('grok-4.7');
     expect(order(r).slice(0, 2).sort()).toEqual(['opus-5.5', 'sonnet-5.5']);
+    expect(r.why).toContain('降一档到标准档');
+  });
+
+  it('强档一个额度用满、一个熔断 1 小时后到点：等强档，不降档（#2725）', () => {
+    const r = chooseRoute(
+      heavy(
+        routesOf({
+          'opus-5.5': { quota: 'exhausted', blockers: ['quota-exhausted'] },
+          'sonnet-5.5': {
+            breaker: { state: 'open', admit: 'none', reason: '连败 3 次', probeAt: at(1) },
+          },
+        }),
+      ),
+    );
+    expect(r.kind).toBe('wait');
   });
 
   it('强档被人关掉（开关关着）：照旧往下派 grok', () => {
@@ -148,9 +228,15 @@ describe('重活先给强档', () => {
     expect(r.verdicts.flatMap((v) => v.nudges.map((n) => n.kind))).not.toContain('strength-first');
   });
 
-  it('不在动手的用途（验收）给了档也不先给强档', () => {
+  it('不在动手的用途（验收）给了档也不先给强档；grok 是被验收的能力下限挡掉的（#2725）', () => {
     const r = dispatched(chooseRoute(heavy(routesOf(), { stage: 'verify' })));
-    expect(r.modelId).toBe('grok-4.7');
+    expect(r.modelId).toBe('sonnet-5.5');
+    expect(r.why).not.toContain('先给强档');
+    expect(r.why).toContain('够不上能力下限');
+    // 快档的验收不设下限：照人排的派 grok
+    expect(dispatched(chooseRoute(heavy(routesOf(), { stage: 'verify', tier: 'fast' }))).modelId).toBe(
+      'grok-4.7',
+    );
   });
 
   it('policy 把 strongFirstTiers 置空就关掉', () => {
