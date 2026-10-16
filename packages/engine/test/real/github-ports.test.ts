@@ -897,6 +897,30 @@ describe('CI 认了新头：工作树跟着并（#307/#389 那次真事补上的
     expect(calls.waitCi?.[0]).toMatchObject({ prNumber: 101, excludeChecks: ['merge-gate'] });
   });
 
+  it('CI 红了：github 包给的红 job 名（failedChecks）、摘要、日志尾巴原样交回，会话的返工意见靠它们（#2795）', async () => {
+    const { ports } = setup({
+      waitCi: (input: { head: string }) => ({
+        state: 'red',
+        head: input.head,
+        checks: [],
+        failedChecks: ['check', 'lint'],
+        digest: 'check：failure：红的 job：lint',
+        detail: '红的 job：lint、check\n\n【lint】failure\n日志尾巴：\nFound 6 errors.',
+      }),
+    });
+    const result = await ports.waitCi(
+      { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head },
+      ctx,
+    );
+    expect(result).toEqual({
+      state: 'red',
+      head: m.head,
+      failedChecks: ['check', 'lint'],
+      digest: 'check：failure：红的 job：lint',
+      detail: '红的 job：lint、check\n\n【lint】failure\n日志尾巴：\nFound 6 errors.',
+    });
+  });
+
   it('没给工作树（合并队列没有工作树）：只回查 CI 的结论，不碰工作树、不抓分支', async () => {
     const newHead = commitInMirror('adopted2.ts', 'export const x = 2;\n');
     const { ports, calls } = setup({
