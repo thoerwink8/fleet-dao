@@ -58,6 +58,7 @@
 - 开单：`pnpm issue:new --kind 需求 --milestone 当前 --title "一句话" --body-file 正文.md`（`当前`＝开着的那个 `v<N>` 版本，一周一版、到期自动收口，别写死 `v<N>`；未排期写 `--milestone 未排期`，母单加 `--mother`，子单加 `--parent <母单号>`），缺类别、里程碑，或正文里「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」有一节没写都不开；整份正文原样进 issue（没有 `--specs`，不再另存需求.md，#654）。
 - 关单：最后一个 PR 在「需求」栏下面另起一行写 `Closes #<号>`，合并时 GitHub 自己关。没有 PR 的收尾用 `pnpm issue:close <号>`：关成「完成」要有证据（合并了的 PR 提到它、或下面的子单都关了、或 `--note "做成了什么"`），没有就不关（退出码 1），子单还开着也不关；读不到 GitHub 报错不关（退出码 2）。见 design 第七节「关单要有证据」。
 - 欠账：`pnpm debt:check` 只看文件，查活文档里推后的话带着单号（debt.yml 在主线推送和每天跑，只报告、不挡合并，不读 GitHub；不在 PR 上跑）；加 `--live` 另读 GitHub，查挂的单号开没开着（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）。见 design 第七节「欠账不漏」。
+- 加新项目：`pnpm project add <owner/仓>` 一条命令做到底（登记、装两个 App、流程标签、仓档案、补齐 PR、全绿才开接活、冒烟单），可重复跑；`pnpm project check <owner/仓>` 只查（退出码 0 全绿、1 有没过的、2 没查成）。见 ops 第九节「加新项目」。
 - 计划：`pnpm plan` 从 GitHub 现读版本、先后、母单和子单打印出来，不写文件（#654 起仓里不存快照）；没登录、GitHub 读不到、先后标记认不出都报错、退出码 2。每天一轮 GitHub 对账（`.github/workflows/github-audit.yml`，随时也能 `pnpm github:audit`）查单子和先后有没有断，见 design 第七节「GitHub 对账」。
 - 各家 AI 的全局说明、技能和钩子：开发机上由开会话钩子自动同步（同步用的是一份只归它的检出 `~/.fleet-dao/origin-main`，永远停在 `origin/main` 上，本机自己的检出在哪个分支都不影响）；手动跑 `pnpm agents:sync`（`--check` 只读，最后报这台同步到哪个提交、落后主线几个；`--offline` 不取远端），直接查仓里的原文件用 `node packages/agents-sync/bin/agents-sync --check`；`--help` 看全部用法，法国怎么跑见 ops 第五节。
 
