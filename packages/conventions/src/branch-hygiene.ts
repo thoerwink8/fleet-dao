@@ -56,9 +56,13 @@ export type Verdict =
   | { kind: 'ask'; why: string }
   | { kind: 'unknown'; why: string };
 
-/** 存档标签：`archive/` 加上把分支名里的 `/` 换成 `-->`，再接 `-` 和头的前 7 位。例如 `fleet/292-…` → `archive/fleet-->292-…-abcdefg`。同一个头重复跑，名字不变。 */
+/**
+ * 存档标签：`archive/` 加上把分支名里的 `/` 换成 `--`，再接 `-` 和头的前 7 位。例如 `fleet/292-…` → `archive/fleet--292-…-abcdefg`。
+ * 同一个头重复跑，名字不变。分隔符不能用 Windows 文件名不认的字符（`<>:"/\|?*`）：git 把标签存成文件，
+ * 旧格式用过 `-->`，Windows 上 git fetch 建不了锁（#2708）。旧名字没有程序按名字读回，远端已改成新格式。
+ */
 export function archiveTagName(branch: string, sha: string): string {
-  return `archive/${branch.replaceAll('/', '-->')}-${sha.slice(0, 7)}`;
+  return `archive/${branch.replaceAll('/', '--')}-${sha.slice(0, 7)}`;
 }
 
 /** 巡检单上人勾的：对哪个头勾的、勾的是删还是留。 */
