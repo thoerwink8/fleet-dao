@@ -4,8 +4,9 @@
 // 和等 CI 并行跑（决定 0093，task.ts 的 deliver）走 verifyAlongsideCi：只验一次、不动工作流的状态（不加轮数、不写意见、不停下），
 // 结果交给调用方等 CI 收场后再认；CI 不绿就不认，并取消这一次验收（patched('verify-cancel-on-ci-red')，省一次验收会话的 token）。
 // 引擎自测（决定 0093）的精炼输出只在测的就是要验的这个头时带上（testOutput）；老历史里没有自测，不带，入参和原来一样。
+// 第 2 轮起只复核上轮没过的条和这一轮的增量 diff（patched('verify-recheck')）：老历史没有这个标记，冷验收入参和原来一样。
 
-import { CancellationScope } from '@temporalio/workflow';
+import { CancellationScope, patched } from '@temporalio/workflow';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import { type ColdVerifyInput, type ColdVerifyResult, MAX_VERIFY_ROUNDS } from '../task-contract.ts';
 import type { TaskRuntime } from './task-runtime.ts';
@@ -78,7 +79,8 @@ function coldVerifyInput(rt: TaskRuntime, brief: TaskBrief, round: number): Cold
   }
   const headSha = rt.head;
   const tested = rt.selfCheckOutput?.head === headSha ? rt.selfCheckOutput.text : undefined;
-  return {
+  const roundNo = round === 1 ? 1 : 2;
+  const input: ColdVerifyInput = {
     schemaVersion: 1,
     taskId: rt.input.taskId,
     repo: rt.input.repo,
@@ -90,9 +92,39 @@ function coldVerifyInput(rt: TaskRuntime, brief: TaskBrief, round: number): Cold
     what: brief.request,
     howToFinish: brief.acceptance,
     authorFamilies: [...rt.families],
-    round: round === 1 ? 1 : 2,
+    round: roundNo,
     ...(tested ? { testOutput: tested } : {}),
   };
+  // 第 1 轮从头验，丢掉上一张头上留下的复核材料。这一支不调 patched()：老历史第 1 轮的命令顺序不变。
+  if (roundNo === 1) {
+    rt.verifyRecheck = null;
+    return input;
+  }
+  const prior = rt.verifyRecheck;
+  // 老历史重放：标记不在历史里，patched() 为假，入参和原来一字不差。
+  if (!patched('verify-recheck') || prior === null || prior.head === headSha || prior.problems.length === 0) {
+    return input;
+  }
+  return {
+    ...input,
+    recheck: {
+      failedCriteria: prior.criteria,
+      sinceSha: prior.head,
+      priorProblems: prior.problems,
+    },
+  };
+}
+
+/** 从上轮问题里抽出验收条编号（「第 N 条」）。同一个号只留一次。 */
+function criterionNumbers(problems: readonly string[]): number[] {
+  const out: number[] = [];
+  for (const problem of problems) {
+    for (const match of problem.matchAll(/第\s*(\d+)\s*条/g)) {
+      const n = Number(match[1]);
+      if (n >= 1 && !out.includes(n)) out.push(n);
+    }
+  }
+  return out;
 }
 
 /** 和等 CI 同时起的那一次验收：结果（不抛）和只取消它自己的钩子。 */
@@ -137,9 +169,12 @@ export function verifyAlongsideCi(rt: TaskRuntime, brief: TaskBrief): AlongsideV
   };
 }
 
-/** 验收没过：记下原话（轮数用尽的通知要用）和返工意见。 */
+/** 验收没过：记下原话（轮数用尽的通知要用）和返工意见。头和下一条复核要用的条也记下（纯状态，不调活动）。 */
 export function noteVerifyProblems(rt: TaskRuntime, problems: string[]): void {
   rt.verifyProblems = problems;
   rt.feedback = problems.map((p) => `验收没过：${p}`);
   rt.status.lastProblem = '验收没过';
+  if (rt.head !== null) {
+    rt.verifyRecheck = { head: rt.head, criteria: criterionNumbers(problems), problems: [...problems] };
+  }
 }
