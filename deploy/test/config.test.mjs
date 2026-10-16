@@ -397,6 +397,16 @@ test('仓里的期望文件认得出，钉住的几个值和 france.sh 一样，
   assert.equal(engine.FLEET_ENGINE_PORTS, 'real');
 });
 
+test('法国期望里钉住 Go 的安装版本和入口，仓档案要求 go 时这台机器有明确的工具来源', () => {
+  const raw = JSON.parse(readFileSync(new URL(`../../${DESIRED_FILE}`, import.meta.url), 'utf8'));
+  assert.deepEqual(raw.cliTools?.tools?.go, {
+    name: 'Go',
+    via: 'tar',
+    version: '1.25.1',
+    bin: '/usr/local/bin/go',
+  });
+});
+
 /**
  * 法国期望里「引擎待命」的那一项该有的样子（创始人 2026-10-05：关闭＝进程开着但不接活）：值带 fleet-engine 和 fleet-api，
  * 说明里写清待命是什么、探针的代价、上线不用手动恢复定时任务（#1072：定时任务是引擎进程里的定时器），不再留「进程停着」的临时说法。返回哪里不对（空 = 都对）。

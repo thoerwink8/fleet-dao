@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // 设置页「导入仓库」（#1989）：列出本人 GitHub 上看得见的仓，个人/组织分开，能加进驾驶舱、能断开。
 // 走假数据（mock api），不联网。
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
 import SettingsPage from '../routes/settings';
@@ -17,8 +17,8 @@ describe('设置页导入仓库（#1989）', () => {
     expect(await screen.findByText('thoerwink8/widgets')).toBeTruthy();
     expect(screen.getByText('thoerwink8/notes')).toBeTruthy();
     expect(screen.getByText('adfx-studio/daihuo-workbench')).toBeTruthy();
-    expect(screen.getByText(/个人仓/)).toBeTruthy();
-    expect(screen.getByText(/组织的仓/)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: /个人仓/ })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: /组织的仓/ })).toBeTruthy();
   });
 
   test('点「加进驾驶舱」后这一行当场变成已导入（假后端也要刷新列表）；移出后变回去', async () => {
@@ -50,13 +50,12 @@ describe('设置页导入仓库（#1989）', () => {
     expect(meta.querySelector('[class~="md:hidden"]')?.textContent).toContain('已在驾驶舱');
   });
 
-  test('没装 App、又不在驾驶舱的仓：给「加进驾驶舱」按钮', async () => {
+  test('没装全、又不在驾驶舱的仓：给「加进驾驶舱」，不给一键授权', async () => {
     renderApp(<SettingsPage />, { api: createMockApi({ live: false }), route: '/settings' });
     await screen.findByText('thoerwink8/widgets');
     const row = screen.getByText('thoerwink8/notes').closest('li') as HTMLElement;
     expect(within(row).getByRole('button', { name: /加进驾驶舱/ })).toBeTruthy();
-    const authorize = within(row).getByRole('link', { name: '一键授权' });
-    expect(authorize.getAttribute('href')).toBe('/api/github/authorize?githubId=9002');
+    expect(within(row).queryByRole('link', { name: '一键授权' })).toBeNull();
     expect(within(row).getByText(/个人/)).toBeTruthy();
   });
 
@@ -91,33 +90,34 @@ describe('设置页导入仓库（#1989）', () => {
     expect(within(notes).queryByText('未接入')).toBeNull();
   });
 
-  test('组织仓本人没 admin：写明要组织先批准，不给「装 App」按钮', async () => {
+  test('已归档的仓：加进按钮不可用，不给一键授权', async () => {
     renderApp(<SettingsPage />, { api: createMockApi({ live: false }), route: '/settings' });
     await screen.findByText('some-org/shared-lib');
     const row = screen.getByText('some-org/shared-lib').closest('li') as HTMLElement;
     expect(within(row).queryByRole('link', { name: '一键授权' })).toBeNull();
-    expect(within(row).getAllByText(/组织管理员先批准/).length).toBeGreaterThan(0);
+    expect((within(row).getByRole('button', { name: /加进驾驶舱/ }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(within(row).getByText('已归档')).toBeTruthy();
   });
 
-  test('有「连接 GitHub」的入口（连上了也留着，方便重连）', async () => {
+  test('页面写明新项目走 pnpm project add，没有「连接 GitHub」', async () => {
     renderApp(<SettingsPage />, { api: createMockApi({ live: false }), route: '/settings' });
     await screen.findByText('导入仓库');
-    await waitFor(() => expect(screen.getAllByText(/GitHub/).length).toBeGreaterThan(0));
+    expect(await screen.findByText(/pnpm project add/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /连接 GitHub/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: '断开' })).toBeNull();
   });
 });
 
-describe('设置页导入仓库：没连 GitHub', () => {
-  test('未连接时只画一句说明加一个「连接 GitHub」按钮', async () => {
+describe('设置页导入列表没读成', () => {
+  test('reason 写在页面上，不给连接按钮', async () => {
     const api = createMockApi({ live: false });
-    // 用假的 importableRepos 覆盖：auth.connected=false
-    const original = api.importableRepos.bind(api);
-    api.importableRepos = async () => ({ auth: { connected: false }, repos: [] });
-    void original;
-    const { unmount } = render(<div />);
-    unmount();
+    api.importableRepos = async () => ({ repos: [], reason: '这台后端没接上 GitHub' });
     renderApp(<SettingsPage />, { api, route: '/settings' });
     await screen.findByText('导入仓库');
-    expect(await screen.findByRole('button', { name: /连接 GitHub/ })).toBeTruthy();
+    expect(await screen.findByText('这台后端没接上 GitHub')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /连接 GitHub/ })).toBeNull();
     expect(screen.queryByText('thoerwink8/widgets')).toBeNull();
   });
 });

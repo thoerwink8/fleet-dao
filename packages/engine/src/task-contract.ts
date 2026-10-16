@@ -3,7 +3,7 @@
 // 这里是工作流代码也会引入的文件：运行时只引 @temporalio/workflow 的 defineSignal / defineQuery，别的一律只写类型。
 // 输入进了工作流历史：以后只许加可选字段，不许改老字段的意思。
 
-import type { FlowMode, FlowSource, Repo } from '@fleet-dao/shared';
+import type { FlowMode, FlowSource, Repo, RepoWithProfile } from '@fleet-dao/shared';
 import {
   type AbandonCommand,
   type ContinueCommand,
@@ -86,7 +86,7 @@ export interface TaskWorkflowInput {
   schemaVersion: 1;
   /** 库里的 tasks.id。 */
   taskId: string;
-  repo: Repo;
+  repo: RepoWithProfile;
   issueNumber: number;
   title: string;
 }
@@ -488,7 +488,7 @@ export type ProbeAssignedResult =
 export interface SelfCheckInput {
   schemaVersion: 1;
   taskId: string;
-  repo: Repo;
+  repo: RepoWithProfile;
   worktreePath: string;
 }
 

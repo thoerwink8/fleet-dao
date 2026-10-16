@@ -34,12 +34,6 @@ const OAuthState = z.object({
   verifier: z.string().min(43),
   next: z.string(),
   exp: z.number().int(),
-  /** 一键授权要装的仓（GitHub 数字编号）。只连接、用来列仓时没有这项。 */
-  githubId: z.number().int().positive().optional(),
-  /** 这一跳在给哪个 App 换用户令牌。 */
-  role: z.enum(['agent', 'engine']).optional(),
-  /** oauth = 去授权页换令牌；setup = 人在 GitHub 安装页装完，回到 /github/setup。 */
-  step: z.enum(['oauth', 'setup']).optional(),
 });
 export type OAuthState = z.infer<typeof OAuthState>;
 
@@ -60,19 +54,13 @@ export type CockpitEnv = {
 export interface CookieNames {
   session: string;
   oauth: string;
-  /** 「连接 GitHub」那一次的暂存（#1989）：和飞书登录分开，免得两件事同时做时互相顶掉。 */
-  repoOauth: string;
 }
 
 /** https 下用 __Host- 前缀：浏览器保证它只能由本域、Secure、Path=/ 设置，子域和明文页面改不动。 */
 export function cookieNames(config: Config): CookieNames {
   return config.cookieSecure
-    ? {
-        session: '__Host-fleet_session',
-        oauth: '__Host-fleet_oauth',
-        repoOauth: '__Host-fleet_repo_oauth',
-      }
-    : { session: 'fleet_session', oauth: 'fleet_oauth', repoOauth: 'fleet_repo_oauth' };
+    ? { session: '__Host-fleet_session', oauth: '__Host-fleet_oauth' }
+    : { session: 'fleet_session', oauth: 'fleet_oauth' };
 }
 
 export function isCockpitUser(user: User | null): user is CockpitUser {
@@ -163,41 +151,6 @@ export function saveOAuthState(c: Context, config: Config, state: Omit<OAuthStat
 /** 读出并当场删掉登录暂存（一次性）。 */
 export function takeOAuthState(c: Context, config: Config, now: Date): OAuthState | null {
   const name = cookieNames(config).oauth;
-  const raw = getCookie(c, name);
-  if (!raw) return null;
-  deleteCookie(c, name, { path: '/', secure: config.cookieSecure });
-  const parsed = OAuthState.safeParse(verifyPayload(config.sessionSecret, OAUTH_PURPOSE, raw));
-  if (!parsed.success || parsed.data.exp <= nowSeconds(now)) return null;
-  return parsed.data;
-}
-
-/**
- * 「连接 GitHub」那一次的暂存（#1989）：和飞书登录同一个做法（自签 Cookie、10 分钟、一次性），
- * 但写在另一个 Cookie 上——同一个浏览器里两件事可能同时做，共用一个会被后做的顶掉。
- * 不存 code_verifier：GitHub 的网页流这一步用 client_secret，PKCE 是可选的；state 已够防串。
- */
-export function saveRepoOAuthState(
-  c: Context,
-  config: Config,
-  state: Omit<OAuthState, 'exp'>,
-  now: Date,
-): void {
-  const value = signPayload(config.sessionSecret, OAUTH_PURPOSE, {
-    ...state,
-    exp: nowSeconds(now) + OAUTH_TTL_SECONDS,
-  });
-  setCookie(c, cookieNames(config).repoOauth, value, {
-    httpOnly: true,
-    secure: config.cookieSecure,
-    sameSite: 'Lax',
-    path: '/',
-    maxAge: OAUTH_TTL_SECONDS,
-  });
-}
-
-/** 读回并当场删掉「连接 GitHub」那一次的暂存（一次性）。 */
-export function takeRepoOAuthState(c: Context, config: Config, now: Date): OAuthState | null {
-  const name = cookieNames(config).repoOauth;
   const raw = getCookie(c, name);
   if (!raw) return null;
   deleteCookie(c, name, { path: '/', secure: config.cookieSecure });
