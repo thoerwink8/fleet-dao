@@ -374,6 +374,18 @@ for (const [name, ciRuns, needle] of [
   });
 }
 
+test('请求发的不是主线头（头的 CI 还在跑、它自己的 CI 全绿）：照发，闸只看请求的那个提交（#2676 自动发版发最近绿的）', async () => {
+  const headRun = {
+    ...JSON.parse(ciBody()).workflow_runs[0],
+    head_sha: 'f'.repeat(40),
+    status: 'in_progress',
+    conclusion: null,
+  };
+  const body = JSON.stringify({ workflow_runs: [headRun, ...JSON.parse(ciBody()).workflow_runs] });
+  const { io } = fakeIo({ ciRuns: async () => ({ status: 200, body }) });
+  assert.equal(await runRequest(io), EXIT.done);
+});
+
 // —— 走到一半的失败 ——
 
 test('【故意造出的失败】读不到引擎总开关：这一步没成，不发版', async () => {
